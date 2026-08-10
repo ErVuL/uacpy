@@ -1,12 +1,11 @@
 """Seafloor sediment → geoacoustic ``BoundaryProperties``.
 
-Phase 4 of the on-demand external-data layer. Unlike bathymetry and sound
-speed, there is **no reliable global, no-auth point service** for seabed
-geoacoustics: usSEABED / dbSEABED are sparse survey compilations (US waters,
-frequently empty at an arbitrary coordinate), so a "fetch sediment at lat/lon"
-call would return nothing almost everywhere. The durable, verifiable
-contribution is therefore the *conversion*: turn a mean grain size (Wentworth
-ϕ) or a named sediment class into a model-ready bottom.
+Unlike bathymetry and sound speed, there is **no reliable global, no-auth point
+service** for seabed geoacoustics: usSEABED / dbSEABED are sparse survey
+compilations (US waters, frequently empty at an arbitrary coordinate), so a
+"fetch sediment at lat/lon" call would return nothing almost everywhere. The
+durable, verifiable contribution is therefore the *conversion*: turn a mean
+grain size (Wentworth ϕ) or a named sediment class into a model-ready bottom.
 
 For *European seas* a real lat/lon sediment service does exist — see
 :mod:`uacpy.data.seabed` (EMODnet WFS). Elsewhere, supply a grain size or

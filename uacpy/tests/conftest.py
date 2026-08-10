@@ -1,4 +1,25 @@
-"""Pytest configuration and fixtures for UACPY tests."""
+"""Pytest configuration and fixtures for UACPY tests.
+
+Three **autouse** fixtures below apply to every test in the suite whether or
+not the test names them, so a test file cannot see them from its own source:
+
+* ``_seed_numpy`` reseeds ``numpy.random`` before each test. Under
+  ``-n logical --dist=worksteal`` (the ``addopts`` in ``pyproject.toml``)
+  tests do not run in file order, so any fixture built from ``numpy.random``
+  would otherwise draw different data depending on which worker picked it up.
+* ``_release_matplotlib_figures`` closes all figures afterwards, so a test
+  that plots without closing does not leak them into the next test's
+  ``plt.gcf()`` or exhaust the figure limit over a long session.
+* ``_redirect_tempdir`` points ``tempfile.tempdir`` at the per-test
+  ``tmp_path``. Models built with ``work_dir=None`` allocate their scratch
+  directory through ``tempfile``, so this is what makes pytest reap them.
+
+Those three, and the module-private helpers, have no textual callers: pytest
+registers a fixture from its decorator, so a static "unused symbol" scan will
+flag them. They are all live — do not delete them.
+
+Fixtures used by name across the suite start at ``simple_env``.
+"""
 
 # Lock matplotlib to a non-interactive backend before any test imports it.
 # Must run before any other matplotlib import in the test session.
@@ -37,8 +58,9 @@ def pytest_collection_modifyitems(items):
       subset ``-m 'not requires_binary'`` excludes OASES tests too).
     * ``requires_network`` tests hit live external services (the ``uacpy.data``
       fetchers); auto-skip them when there is no internet so an offline
-      ``pytest`` run stays green. Run only the network tests with
-      ``-m requires_network``; exclude them with ``-m 'not requires_network'``.
+      ``pytest`` run stays green. The ``addopts`` in ``pyproject.toml`` already
+      deselect them, so this fires only for a run that asked for them back with
+      ``-m requires_network``.
     """
     offline_skip = pytest.mark.skip(reason="no network (requires_network)")
     offline = not _has_network()

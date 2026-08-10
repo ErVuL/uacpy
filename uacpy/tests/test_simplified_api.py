@@ -28,7 +28,9 @@ class TestComputeAPI:
         assert result.n_ranges == len(receiver_small.ranges)
 
     def test_compute_modes_returns_field(self, simple_env, source):
-        """Test that compute_modes returns Field object."""
+        """``compute_modes`` returns :class:`Modes`, a sibling of ``Field``
+        under ``Result`` rather than a subclass of it — the mode set is not a
+        gridded field and carries ``k``/``phi`` instead of ``data``."""
         kraken = Kraken(verbose=False)
         modes = kraken.compute_modes(env=simple_env, source=source, n_modes=10)
 
@@ -39,10 +41,10 @@ class TestComputeAPI:
     def test_multiple_models_same_api(self, simple_env, source, receiver_small):
         """Test that multiple models use same API."""
         bellhop = Bellhop(verbose=False)
-        krakenfield = Kraken(verbose=False)
+        kraken = Kraken(verbose=False)
 
         result_bellhop = bellhop.compute_tl(env=simple_env, source=source, receiver=receiver_small)
-        result_kraken = krakenfield.compute_tl(env=simple_env, source=source, receiver=receiver_small)
+        result_kraken = kraken.compute_tl(env=simple_env, source=source, receiver=receiver_small)
 
         assert isinstance(result_bellhop, Field)
         assert isinstance(result_kraken, Field)
@@ -95,13 +97,14 @@ class TestPlottingAPI:
         plt.close(fig)
 
     def test_plot_comparison(self, simple_env, source, receiver_small):
-        """Test Field.plot_comparison() static method."""
+        """``compare_models`` accepts a name → field mapping and uses the keys
+        as panel labels, so no separate ``labels=`` is needed."""
         bellhop = Bellhop(verbose=False)
-        krakenfield = Kraken(verbose=False)
+        kraken = Kraken(verbose=False)
 
         results = {
             'Bellhop': bellhop.compute_tl(env=simple_env, source=source, receiver=receiver_small),
-            'Kraken': krakenfield.compute_tl(env=simple_env, source=source, receiver=receiver_small),
+            'Kraken': kraken.compute_tl(env=simple_env, source=source, receiver=receiver_small),
         }
 
         fig, axes = plots.compare_models(results, env=simple_env)
@@ -115,7 +118,8 @@ class TestFieldMethods:
     """Tests for Field convenience methods."""
 
     def test_field_get_methods(self, simple_env, source, receiver_small):
-        """Test Field sel(...) for point and line slices."""
+        """``Field.at`` drops each pinned axis: pinning both gives a 0-d
+        scalar, pinning one leaves a vector along the axis that survives."""
         bellhop = Bellhop(verbose=False)
         result = bellhop.compute_tl(env=simple_env, source=source, receiver=receiver_small)
 
@@ -157,5 +161,7 @@ class TestRunModeAndComputeTl:
         a = bellhop.run(env=simple_env, source=source, receiver=receiver_small,
                         run_mode=RunMode.COHERENT_TL)
         b = bellhop.compute_tl(env=simple_env, source=source, receiver=receiver_small)
-        # Bellhop has non-deterministic floating-point; compare loosely.
+        # The two calls are separate binary runs over separately-written decks,
+        # so the tolerance absorbs deck round-tripping (the .env writes depths
+        # and speeds at fixed precision) rather than any modelling difference.
         assert np.allclose(a.data, b.data, rtol=1e-3, atol=1e-3)

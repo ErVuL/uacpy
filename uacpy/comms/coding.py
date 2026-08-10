@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import numpy as np
 
-# Standard rate-1/2, constraint length K=7 generator polynomials (octal 171, 133).
+# Rate-1/2 maximum-free-distance generator pair for K=7 (Proakis & Salehi
+# Table 8.3-1, after Odenwalder 1970 / Larsen 1973): d_free = 10, which meets
+# that table's upper bound, so no other K=7 rate-1/2 code does better.
 DEFAULT_POLYS = (0o171, 0o133)
 DEFAULT_K = 7
 

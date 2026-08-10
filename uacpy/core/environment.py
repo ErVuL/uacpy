@@ -12,7 +12,7 @@ import numpy as np
 from typing import TYPE_CHECKING, Union, List, Tuple, Optional
 
 from uacpy.core.exceptions import ConfigurationError
-from uacpy.core._carrier_validate import _sanitize_title
+from uacpy.core._carrier_validate import _sanitize_title, _dedupe_provenance
 from uacpy.core.bottom import (
     SedimentLayer, BoundaryProperties, SeabedColumn, Bottom,
 )
@@ -250,6 +250,9 @@ class Environment:
         # top-surface analogue of env.bathymetry; ``None`` = flat z = 0.
         self.altimetry = Altimetry.coerce(altimetry)
 
+        # Extend only, never truncate: the profile has to span the water
+        # column, but one that already reaches past the seabed is kept whole
+        # (each writer calls ``extend_to`` again with its own deep-end depth).
         if max_bathy_depth > self.ssp.depths[-1]:
             self.ssp = self.ssp.extend_to(max_bathy_depth)
 
@@ -272,14 +275,8 @@ class Environment:
         """Union of the carriers' ``data_sources`` (dedup by source id, axis
         order). The single home for ``env.data_sources``, mirrored per-carrier
         by ``Bottom``/``Surface``/``SeabedColumn``."""
-        seen, out = set(), []
-        for carrier in (self.bathymetry, self.ssp, self.bottom, self.surface,
-                        self.altimetry):
-            for r in getattr(carrier, 'data_sources', ()) or ():
-                if r.source.id not in seen:
-                    seen.add(r.source.id)
-                    out.append(r)
-        return tuple(out)
+        return _dedupe_provenance((self.bathymetry, self.ssp, self.bottom,
+                                   self.surface, self.altimetry))
 
     @staticmethod
     def _coerce_bottom(bottom) -> Bottom:

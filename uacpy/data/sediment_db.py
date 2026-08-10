@@ -1,11 +1,15 @@
 """Local seafloor-sediment samples (DECK41 + NGDC grain-size) → bottom.
 
 The offline, *public-domain*, **global** sediment backend (commercial-clean).
-``install.sh --data sediment`` downloads two NCEI point databases into the cache
-as normalized CSVs:
+It reads up to two normalized CSVs from the cache:
 
-* ``grainsize.csv`` — NGDC Seafloor Sediment Grain-Size DB (quantitative mean ϕ),
+* ``grainsize.csv`` — NGDC Seafloor Sediment Grain-Size DB (quantitative mean ϕ).
+  ``install.sh --data sediment`` downloads and normalizes this one
+  (:func:`download_sediment_db`).
 * ``deck41.csv``    — DECK41 surficial descriptions (dominant lithology text).
+  Optional, and no installer step produces it: drop it in by hand
+  (``latitude, longitude, lithology``) to widen coverage where grain-size
+  samples are sparse.
 
 A nearest-neighbour lookup (great-circle, via a unit-sphere KD-tree) returns the
 closest sample; quantitative grain-size samples are preferred over lithology
@@ -61,7 +65,8 @@ _LON_COLS = ('longitude', 'lon', 'long', 'x')
 _PHI_COLS = ('phi', 'mean_phi', 'mean', 'mean_grain_size', 'grain_size_phi')
 _LITH_COLS = ('lithology', 'dominant_lithology', 'dominant', 'description')
 
-_SAMPLES = {}   # cache_root -> (tree, phi_array)
+_SAMPLES = {}   # cache_root -> (tree, phis, sample_lats, sample_lons)
+_cache.register_cache(_SAMPLES.clear)
 
 
 def _tar_rows(tf, suffix):
@@ -109,27 +114,28 @@ def download_sediment_db(cache_dir=None, *, timeout=180.0, verbose=False):
     for r in _tar_rows(tf, 'phi.txt'):
         key = (r.get('mggid'), r.get('sample'))
         try:
-            iv = int(r['interval'] or 0)
+            interval = int(r['interval'] or 0)
             lo = max(float(r['lower_phi_limit']), lo_c)
             hi = min(float(r['upper_phi_limit']), hi_c)
-            w = float(r['weight_percent'])
+            weight = float(r['weight_percent'])
         except (KeyError, ValueError):
             continue
-        if hi < lo or w <= 0.0:
+        if hi < lo or weight <= 0.0:
             continue
         centre = 0.5 * (lo + hi)
-        if key not in best or iv < best[key][0]:
-            best[key] = [iv, 0.0, 0.0]       # surficial: keep the top interval
-        if iv == best[key][0]:
-            best[key][1] += w
-            best[key][2] += centre * w
+        if key not in best or interval < best[key][0]:
+            # Surficial sediment only: a shallower interval restarts the sum.
+            best[key] = [interval, 0.0, 0.0]
+        if interval == best[key][0]:
+            best[key][1] += weight
+            best[key][2] += centre * weight
 
     out = dest / 'grainsize.csv'
     n = 0
     with open(out, 'w', newline='') as fh:
         writer = csv.writer(fh)
         writer.writerow(['latitude', 'longitude', 'mean_phi'])
-        for key, (iv, sum_w, sum_w_phi) in best.items():
+        for key, (_interval, sum_w, sum_w_phi) in best.items():
             if key in loc and sum_w > 0.0:
                 lat, lon = loc[key]
                 writer.writerow([lat, lon, round(sum_w_phi / sum_w, 3)])
@@ -154,6 +160,17 @@ def _pick(header, candidates):
 
 
 def _unit_vectors(lat, lon):
+    """``(lat, lon)`` degrees → unit vectors on the sphere, the KD-tree's space.
+
+    The tree indexes 3-D points rather than the raw degree pair for two reasons:
+    a degree-space tree has a false seam at ±180° (and would depend on which
+    longitude convention each CSV used), and a degree of longitude is not a
+    degree of distance away from the equator. Chord length between unit vectors
+    is ``2·sin(θ/2)`` in the central angle θ, which increases monotonically over
+    ``θ ∈ [0, π]`` — so nearest-in-chord is exactly nearest-in-great-circle, and
+    the chord the query returns converts back to an arc length in
+    :func:`fetch_sediment_sample`.
+    """
     la, lo = np.radians(lat), np.radians(lon)
     return np.column_stack([np.cos(la) * np.cos(lo),
                             np.cos(la) * np.sin(lo),

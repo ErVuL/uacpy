@@ -1,6 +1,13 @@
+"""Tests for I/O functions.
+
+Two kinds of contract live here: the readers and writers under ``uacpy/io``
+checked against hand-written files, and the record layout of the decks uacpy
+emits, checked by running the vendored Acoustics-Toolbox binaries on them
+(``@pytest.mark.requires_binary``). Both pin what the Fortran reads, so the
+authority for every expectation is the vendored source, cited at the assertion.
 """
-Tests for I/O functions
-"""
+
+import re
 
 import numpy as np
 import pytest
@@ -180,7 +187,7 @@ class TestSSPReadWriteRoundtrip:
         from uacpy.io.oalib_writer import write_ssp
         from uacpy.io.oalib_reader import read_ssp_2d
 
-        r_km = np.array([0.0, 5.0, 10.0, 20.0])
+        ranges_m = np.array([0.0, 5.0, 10.0, 20.0])
         # 5 depths x 4 ranges
         c = np.array([
             [1500.0, 1502.0, 1504.0, 1505.0],
@@ -190,12 +197,15 @@ class TestSSPReadWriteRoundtrip:
             [1487.0, 1488.0, 1489.0, 1490.0],
         ])
         out = tmp_path / "rt.ssp"
-        write_ssp(out, r_km, c)
+        write_ssp(out, ranges_m, c)
         result = read_ssp_2d(out)
         assert result['n_prof'] == 4
         assert result['c_mat'].shape == (5, 4)
-        np.testing.assert_allclose(result['r_prof'], r_km, atol=1e-3)
-        # write_ssp truncates speeds to one decimal, so compare loosely.
+        # The range axis goes to disk as km at ``%.6f`` and comes back in
+        # metres, so the quantum on this axis is 1 mm.
+        np.testing.assert_allclose(result['r_prof'], ranges_m, atol=1e-3)
+        # Speeds go out at ``%8.4f``; the format quantises at 1e-4 m/s, well
+        # inside this bound.
         np.testing.assert_allclose(result['c_mat'], c, atol=0.5)
 
     def test_write_ssp_rejects_mismatched_shape(self, tmp_path):
@@ -318,8 +328,9 @@ class TestFieldFlpWriter:
     """Coverage for write_fieldflp's NRro / Rro emission."""
 
     def test_write_fieldflp_emits_at_subtab_idiom(self, tmp_path):
-        """NRro must equal NRz and the Rro line must be the AT
-        ``0.0 /`` sentinel idiom (single value + slash terminator)."""
+        """NRro must equal NRz (``KrakenField/field.f90:149-151`` ERROUTs
+        otherwise) and the Rro line must be the AT ``0.0 /`` sentinel idiom
+        (single value + slash terminator)."""
         from uacpy.io.oalib_writer import write_fieldflp
 
         out = tmp_path / "test.flp"
@@ -361,9 +372,10 @@ class TestFieldFlpWriter:
         AT's SubTab only replicates a sentinel-terminated vector when
         ``Nx >= 3`` (misc/subtabulate.f90:24). Below that the ``0.0 /``
         idiom leaves ``x(2)`` at ReadVector's -999.9 pre-fill
-        (SourceReceiverPositions.f90:219-221), and the following ``Sort``
-        moves it to Rro(1) — giving the *shallowest* receiver a -999.9 m
-        range offset, which EvaluateMod applies as ``1/sqrt(r + ro)``.
+        (misc/SourceReceiverPositions.f90:219-221), and the following ``Sort``
+        (:224) moves it to Rro(1) — giving the *shallowest* receiver a
+        -999.9 m range offset, which ``KrakenField/EvaluateMod.f90:73``
+        applies as ``1/sqrt(r + ro)``.
         """
         from uacpy.io.oalib_writer import write_fieldflp
 
@@ -384,12 +396,13 @@ class TestFieldFlpWriter:
 
 
 class TestRamsurfReaderDepthAxis:
-    """The Collins PE grid maps stored index i to depth (i-1)*dz.
+    """The Collins PE grid maps stored index ``i`` to depth ``(i-1)*dz``.
 
-    Regression for the depth off-by-one: ramsurf1.5 writes from grid index
-    ``ndz`` (its first stored sample is the z=0 surface node), rams0.5 from
-    ``1+ndz`` (it skips z=0, first sample at z=ndz*dz). Both must land on the
-    true (i-1)*dz grid.
+    The two backends start their output stride at different indices:
+    ``ramsurf/ramsurf1.5.f:437`` dumps ``do i = ndz, nzplt, ndz`` while
+    ``ramsurf/rams0.5.f:262`` dumps ``do i = 1+ndz, nzplt, ndz``, one grid
+    node deeper. ``depth_index_offset`` carries that difference, and both
+    backends must land on the same ``(i-1)*dz`` depths.
     """
 
     @staticmethod
@@ -523,17 +536,18 @@ class TestReaderCorruptFileRaises:
 
     def test_corrupt_shd_file_raises(self, tmp_path):
         from uacpy.io.oalib_reader import read_shd_bin
+        from uacpy.core.exceptions import FileFormatError
         bad = tmp_path / "garbage.shd"
         bad.write_bytes(b"\x00" * 12)            # too short for a valid header
-        with pytest.raises(Exception):           # FileFormatError or EOF-derived
+        with pytest.raises(FileFormatError, match='cannot resolve byte order'):
             read_shd_bin(str(bad))
 
 
 class TestOASRFrequencyOverride:
-    """Audit H3: an explicit ``frequencies=`` override (passed by OASR.run as
+    """An explicit ``frequencies=`` override (passed by OASR.run as
     freq_min/freq_max/n_frequencies) must win over a multi-element
-    ``source.frequencies``; previously the writer honoured the override only
-    for single-frequency sources, silently dropping it otherwise."""
+    ``source.frequencies`` — honouring it only for single-frequency sources
+    would silently drop it for every sweep."""
 
     def _freq_line(self, path):
         # The OASR deck writes "<fmin> <fmax> <nfreq> <out_inc>" right after the
@@ -555,7 +569,7 @@ class TestOASRFrequencyOverride:
                                                     sound_speed=1600.0,
                                                     density=1.8,
                                                     attenuation=0.5))
-        # Multi-element source that previously hijacked the sweep.
+        # Multi-element source: must not hijack the sweep.
         src = Source(depths=50.0, frequencies=[50.0, 100.0, 150.0])
         rcv = Receiver(depths=[50.0], ranges=[1000.0])
         out = tmp_path / "oasr.dat"
@@ -696,10 +710,10 @@ class TestRoughnessGoesToItsOwnInterface:
     """Surface and seabed roughness must come from their own carriers.
 
     AT reads the medium mesh line as NG, SSP%sigma(Medium), Depth(Medium+1)
-    (ReadEnvironmentMod.f90:81-88), so the water column's line is sigma(1) —
-    the *sea surface*. The seabed is sigma(NMedia+1), written on the bottom
-    halfspace line (:121). A model-level ``roughness=`` kwarg documented as
-    "bottom roughness" wrote sigma(1), i.e. the surface.
+    (misc/ReadEnvironmentMod.f90:81-88), so the water column's line is
+    sigma(1) — the *sea surface*. The seabed is sigma(NMedia+1), written on
+    the bottom halfspace line (:121). The two therefore cannot share one
+    model-level knob: each roughness comes from its own carrier.
     """
 
     @staticmethod
@@ -727,7 +741,7 @@ class TestRoughnessGoesToItsOwnInterface:
         assert self._mesh_sigma(tmp_path, self._env(bot=2.0)) == pytest.approx(0.0)
 
     @pytest.mark.parametrize('model_name', ['Kraken', 'Scooter', 'SPARC'])
-    def test_models_no_longer_take_a_roughness_kwarg(self, model_name):
+    def test_models_take_no_roughness_kwarg(self, model_name):
         import uacpy
         with pytest.raises(TypeError):
             getattr(uacpy, model_name)(roughness=2.0)
@@ -824,6 +838,9 @@ def test_surface_halfspace_does_not_leak_into_the_water_column():
     leaky = tl(BoundaryProperties(acoustic_type='half-space',
                                   sound_speed=1600.0, density=0.9,
                                   attenuation=1.0))
+    # 120 dB is a gate, not a tolerance: cylindrical spreading alone reaches
+    # only 10*log10(5000) = 37 dB at the far receiver, while the leak adds
+    # ~333 dB, so no ordinary modal structure can straddle it.
     assert np.nanmax(leaky) < 120.0, (
         f"TL reaches {np.nanmax(leaky):.1f} dB over 5 km in a 100 m isovelocity "
         f"guide — the surface half-space's attenuation leaked into the water")
@@ -1273,18 +1290,93 @@ class TestFlpOptionValidation:
 
 class TestShdReaderKeysAgree:
     """``read_shd_bin`` and ``read_shd_asc`` describe the same payload, so a
-    caller switching between them must not have to remap keys."""
+    caller switching between them must not have to remap keys.
 
-    def test_ascii_reader_uses_the_binary_reader_keys(self, tmp_path):
-        from uacpy.io.oalib_reader import read_shd_asc
-        p = tmp_path / 'tiny.shd.asc'
-        p.write_text(
-            "title\nrectilin\n1 1 1 1 2\n100.0 0.0\n100.0\n0.0\n50.0\n"
-            "10.0\n0.0\n1000.0\n1.0\n0.5\n2.0\n0.25\n"
-        )
-        out = read_shd_asc(p)
-        assert set(out) >= {'title', 'PlotType', 'freqVec', 'Pos', 'pressure'}
-        assert 'r' in out['Pos'] and 'z' in out['Pos']['r']
+    Both readers are exercised on the SAME field written twice: once in the
+    ASCII stream of ``Matlab/ReadWrite/read_shd_asc.m:13-38`` and once in the
+    direct-access record layout of ``misc/RWSHDFile.f90:100-114``, whose
+    ``LRecl = MAX(41, 2*Nfreq, …)`` is counted in 4-byte words.
+    """
+
+    #: One frequency, one bearing, one source, two receiver depths, two ranges.
+    TITLE = 'title'
+    PLOT_TYPE = 'rectilin'
+    FREQ0, ATTEN = 100.0, 0.0
+    FREQ_VEC = [100.0]
+    THETA = [0.0]
+    S_Z = [50.0]
+    R_Z = [10.0, 20.0]
+    R_R = [1000.0, 2000.0]
+    #: (real, imag) per (receiver depth, range). No exact zeros — both readers
+    #: map those to NaN as the "engine never wrote this cell" convention.
+    ROWS = [[1.0, 0.5, 2.0, 0.25], [3.0, -1.0, 0.75, 2.0]]
+
+    @classmethod
+    def _write_asc(cls, path):
+        tokens = [
+            len(cls.FREQ_VEC), len(cls.THETA), len(cls.S_Z), len(cls.R_Z),
+            len(cls.R_R), cls.FREQ0, cls.ATTEN,
+            *cls.FREQ_VEC, *cls.THETA, *cls.S_Z, *cls.R_Z, *cls.R_R,
+            *[v for row in cls.ROWS for v in row],
+        ]
+        path.write_text(f"{cls.TITLE}\n{cls.PLOT_TYPE}\n"
+                        + ' '.join(str(t) for t in tokens) + "\n")
+        return path
+
+    @classmethod
+    def _write_bin(cls, path):
+        """Emit the same field as a little-endian direct-access ``.shd``."""
+        n_rz, n_rr = len(cls.R_Z), len(cls.R_R)
+        recl = max(41, 2 * len(cls.FREQ_VEC), 2 * len(cls.THETA), 2, 2,
+                   len(cls.S_Z), n_rz, 2 * n_rr)          # RWSHDFile.f90:100
+        rec_bytes = 4 * recl
+        records = [
+            np.array([recl], '<i4').tobytes() + cls.TITLE.encode().ljust(80),
+            cls.PLOT_TYPE.encode().ljust(10),
+            (np.array([len(cls.FREQ_VEC), len(cls.THETA), 1, 1, len(cls.S_Z),
+                       n_rz, n_rr], '<i4').tobytes()
+             + np.array([cls.FREQ0, cls.ATTEN], '<f8').tobytes()),
+            np.array(cls.FREQ_VEC, '<f8').tobytes(),
+            np.array(cls.THETA, '<f8').tobytes(),
+            np.array([0.0], '<f8').tobytes(),                       # Sx
+            np.array([0.0], '<f8').tobytes(),                       # Sy
+            np.array(cls.S_Z, '<f4').tobytes(),      # Sz/Rz are REAL(KIND=4)
+            np.array(cls.R_Z, '<f4').tobytes(),
+            np.array(cls.R_R, '<f8').tobytes(),
+        ] + [np.array(row, '<f4').tobytes() for row in cls.ROWS]
+        path.write_bytes(b''.join(r.ljust(rec_bytes, b'\x00') for r in records))
+        return path
+
+    def test_both_readers_return_the_same_keys(self, tmp_path):
+        from uacpy.io.oalib_reader import read_shd_asc, read_shd_bin
+        asc = read_shd_asc(self._write_asc(tmp_path / 'tiny.shd.asc'))
+        bin_ = read_shd_bin(str(self._write_bin(tmp_path / 'tiny.shd')))
+        # The binary reader adds the slice label; nothing else may differ.
+        assert set(bin_) - set(asc) == {'pressure_freq'}
+        assert set(asc) - set(bin_) == set()
+        assert set(asc['Pos']) == set(bin_['Pos'])
+        assert set(asc['Pos']['r']) == set(bin_['Pos']['r']) == {'z', 'r'}
+        # The ASCII stream carries no source x/y, so its 's' is a subset.
+        assert set(asc['Pos']['s']) <= set(bin_['Pos']['s'])
+
+    def test_both_readers_return_the_same_values(self, tmp_path):
+        from uacpy.io.oalib_reader import read_shd_asc, read_shd_bin
+        asc = read_shd_asc(self._write_asc(tmp_path / 'tiny.shd.asc'))
+        bin_ = read_shd_bin(str(self._write_bin(tmp_path / 'tiny.shd')))
+        assert asc['title'] == bin_['title'] == self.TITLE
+        assert asc['PlotType'] == bin_['PlotType'].strip() == self.PLOT_TYPE
+        assert asc['freq0'] == bin_['freq0'] == self.FREQ0
+        assert asc['atten'] == bin_['atten'] == self.ATTEN
+        np.testing.assert_allclose(asc['freqVec'], bin_['freqVec'])
+        np.testing.assert_allclose(asc['Pos']['theta'], bin_['Pos']['theta'])
+        np.testing.assert_allclose(asc['Pos']['s']['z'], bin_['Pos']['s']['z'])
+        np.testing.assert_allclose(asc['Pos']['r']['z'], bin_['Pos']['r']['z'])
+        np.testing.assert_allclose(asc['Pos']['r']['r'], bin_['Pos']['r']['r'])
+        # read_shd_asc is 2-D (one bearing, one source depth); read_shd_bin
+        # keeps those axes, so index them away before comparing.
+        np.testing.assert_allclose(asc['pressure'], bin_['pressure'][0, 0],
+                                   rtol=1e-6)
+        assert bin_['pressure_freq'] == self.FREQ_VEC[0]
 
 
 class TestOASESWriterKnobsReachTheDeck:
@@ -1549,11 +1641,12 @@ def test_multi_profile_deck_shares_one_bottom_without_slivers(tmp_path):
     depth is the one :func:`plan_multi_profile_media` reports, and no profile
     carries a degenerate medium.
 
-    The shared bottom is the load-bearing half. ``EvaluateCMMod.f90:313`` stops
-    a coupled run unless each profile's mode-tabulation grid ends *exactly* on
+    The shared bottom is the load-bearing half.
+    ``KrakenField/EvaluateCMMod.f90:312-317`` stops a coupled run unless each
+    profile's mode-tabulation grid ends *exactly* on
     ``SSP%Depth( NMedia + 1 )``, so whatever builds that grid has to read the
-    bottom off the same planner the deck was written from — recomputing it
-    independently is what broke coupled modes.
+    bottom off the same planner the deck was written from; an independently
+    recomputed bottom lands off that depth and the coupled run dies.
 
     "Sliver" here means a medium below the deck's own depth resolution. Media
     interfaces are written at ``.1f``, so one quantum is the thinnest medium
@@ -1591,7 +1684,7 @@ def test_multi_profile_deck_shares_one_bottom_without_slivers(tmp_path):
         n_mesh=500, rmax_m=6000.0, c_low=0.0, c_high=2000.0,
     )
     mesh = [float(m.group(1)) for m in
-            (re.match(r'^\s*\d+\s+0\.0\s+([\d.]+)\s*,?\s*$', ln)
+            (re.match(r'^\s*\d+\s+[\d.]+\s+([\d.]+)\s*,?\s*$', ln)
              for ln in out.read_text().splitlines()) if m]
     n_media = len(mesh) // len(segments)
     blocks = [mesh[p_i * n_media:(p_i + 1) * n_media]
@@ -1881,7 +1974,12 @@ class TestTopReflectionTableStaging:
         staged = out.with_suffix('.trc')
         assert staged.exists(), (
             "TopOpt(2)='F' was written with no .trc beside the .env")
-        assert staged.read_text() == table.read_text()
+        # Staging normalises the copy (phase unwrap + duplicate-abscissa
+        # removal), so it is the values that must survive, not the bytes:
+        # ``misc/RefCoef.f90:119`` requires an unwrapped phi and ``:165``
+        # divides by the abscissa gap with no guard.
+        assert np.loadtxt(staged, skiprows=1) == pytest.approx(
+            np.loadtxt(table, skiprows=1))
 
     def test_file_surface_without_a_table_raises(self, tmp_path):
         from uacpy.core import BoundaryProperties
@@ -2012,8 +2110,9 @@ class TestBroadbandFlagHandlesScalarFrequencies:
 
 
 class TestBottomOptionLineIsSingleCharacter:
-    """``ReadEnvironmentMod.f90:121-129`` reads only BotOpt(1:1); the '~'
-    bathymetry flag is Bellhop's alone and Bellhop has its own writer."""
+    """``misc/ReadEnvironmentMod.f90:121-129`` reads BotOpt(1:8) but uses
+    only BotOpt(1:1), as ``HSBot%BC``; the '~' bathymetry flag is Bellhop's
+    alone and Bellhop has its own writer."""
 
     def test_range_dependent_bathymetry_adds_no_flag(self, tmp_path):
         from uacpy.core import BoundaryProperties
@@ -2193,6 +2292,11 @@ def _write_bellhop_deck(path, run_type, depths_m, ranges_km,
              + " ".join(f"{d:.1f}" for d in depths_m) + "\n")
     text += (f"{len(ranges_km)}\n"
              + " ".join(f"{r:.4f}" for r in ranges_km) + "\n")
+    # Tail records: RunType, NBeams, the take-off fan, then
+    # ``deltas Box%z Box%r`` (Bellhop/ReadEnvironmentBell.f90:146,154 — z in
+    # m, r in km). deltas=0 asks Bellhop to pick its own step. The box is
+    # padded past the deepest receiver and the farthest range because
+    # Bellhop/bellhop.f90:571-574 stops a ray the moment it steps outside it.
     text += (f"'{run_type}'\n501\n-45 45 /\n"
              f"0.0 {depth + 50.0:.1f} {ranges_km[-1] * 1.5:.4f}\n")
     path.write_text(text)
@@ -2479,3 +2583,357 @@ class TestShdAscIsATokenStream:
                               capture_output=True, text=True, timeout=300)
         assert 'TYPED' in proc.stdout, (
             f"expected FileFormatError, got:\n{proc.stderr[-800:]}")
+
+
+class TestInterfaceRoughnessGoesToItsOwnInterface:
+    """``SSP%sigma(M)`` is the roughness of the interface at the TOP of medium
+    ``M`` — ``ReadEnvironmentMod.f90:88`` reads it on medium ``M``'s mesh line
+    and ``kraken.f90:902`` pairs it with the media on either side. So with a
+    sediment layer the seafloor is ``sigma(2)``, on the layer's own line, and
+    the half-space's roughness stays on the BotOpt line one interface deeper.
+    """
+
+    @staticmethod
+    def _deck(tmp_path, *, surface, seafloor, halfspace):
+        from uacpy.core import Environment, Source, Receiver
+        from uacpy.core.bottom import (Bottom, BoundaryProperties,
+                                       SeabedColumn, SedimentLayer)
+        from uacpy.core.constants import BoundaryType
+        from uacpy.core.surface import Surface
+        from uacpy.io.oalib_writer import write_kraken_env_file
+        env = Environment(
+            bathymetry=100.0, ssp=1500.0,
+            surface=Surface([BoundaryProperties(acoustic_type='vacuum',
+                                                roughness=surface)]),
+            bottom=Bottom.from_column(SeabedColumn(
+                layers=[SedimentLayer(thickness=30, sound_speed=1600,
+                                      density=1.8, attenuation=0.5,
+                                      roughness=seafloor)],
+                halfspace=BoundaryProperties(
+                    acoustic_type='half-space', sound_speed=1800, density=2.0,
+                    attenuation=0.6, roughness=halfspace))))
+        out = tmp_path / 'rough.env'
+        write_kraken_env_file(
+            out, env, Source(depths=50, frequencies=100.0),
+            Receiver(depths=50, ranges=[5000.0]),
+            ssp_topopt='CVW   ', surface_type=BoundaryType.VACUUM,
+            bottom_type=BoundaryType.HALF_SPACE, frequencies=[100.0],
+            n_mesh=0, rmax_m=5000.0, c_low=0.0, c_high=2000.0)
+        return out.read_text().splitlines()
+
+    def test_each_sigma_comes_from_its_own_carrier(self, tmp_path):
+        lines = self._deck(tmp_path, surface=1.5, seafloor=2.0, halfspace=0.7)
+        mesh = [ln for ln in lines if re.match(r'^\d+\s+[\d.]+\s+[\d.]+$', ln)]
+        assert float(mesh[0].split()[1]) == pytest.approx(1.5)   # sea surface
+        assert float(mesh[1].split()[1]) == pytest.approx(2.0)   # seafloor
+        botopt = next(ln for ln in lines if ln.startswith("'A'"))
+        assert float(botopt.split()[1]) == pytest.approx(0.7)    # base of stack
+
+    def test_smooth_layer_writes_a_smooth_interface(self, tmp_path):
+        lines = self._deck(tmp_path, surface=0.0, seafloor=0.0, halfspace=0.0)
+        mesh = [ln for ln in lines if re.match(r'^\d+\s+[\d.]+\s+[\d.]+$', ln)]
+        assert all(float(ln.split()[1]) == 0.0 for ln in mesh[:2])
+
+
+class TestOasesInterfaceRoughness:
+    """OASES reads column 7 of each layer record as that interface's RMS
+    roughness (``src/oaseun31.f:54``; ``doc/oast.tex:42,48`` — the record opens
+    with "D: Depth of interface" and RG is "RMS value of interface roughness").
+    A record's RG therefore belongs to the interface at the TOP of its layer,
+    the same convention Kraken uses for ``SSP%sigma``.
+    """
+
+    @staticmethod
+    def _env(*, surface, seafloor, base):
+        from uacpy.core import Environment
+        from uacpy.core.bottom import (Bottom, BoundaryProperties,
+                                       SeabedColumn, SedimentLayer)
+        from uacpy.core.surface import Surface
+        return Environment(
+            bathymetry=100.0, ssp=1500.0,
+            surface=Surface([BoundaryProperties(acoustic_type='vacuum',
+                                                roughness=surface)]),
+            bottom=Bottom.from_column(SeabedColumn(
+                layers=[SedimentLayer(thickness=30, sound_speed=1600,
+                                      density=1.8, attenuation=0.5,
+                                      roughness=seafloor)],
+                halfspace=BoundaryProperties(
+                    acoustic_type='half-space', sound_speed=1800, density=2.0,
+                    attenuation=0.6, roughness=base))))
+
+    def test_each_record_carries_its_own_interface(self, tmp_path):
+        from uacpy.core import Source, Receiver
+        from uacpy.io.oases_writer import write_oast_input
+        out = tmp_path / 'rg.dat'
+        write_oast_input(out, self._env(surface=1.5, seafloor=2.0, base=0.7),
+                         Source(depths=50, frequencies=100.0),
+                         Receiver(depths=50, ranges=[5000.0]))
+        rows = [ln.split() for ln in out.read_text().splitlines()
+                if re.match(r'^[\d.]+(\s+[-\d.]+){7}$', ln)]
+        by_depth = {r[0]: float(r[6]) for r in rows}
+        # Record '0' is the upper half-space (layer 1); '0.00' the first water
+        # layer (layer 2). ROUGH(1) is overwritten by ROUGH(2) at
+        # oaseun31.f:377 and both manuals call RG(1) dummy (oast.tex:344,
+        # oasp.tex:365), so the sea surface can only ride on the water record.
+        assert by_depth['0'] == 0.0                       # RG(1), discarded
+        assert by_depth['0.00'] == pytest.approx(1.5)     # sea surface
+        assert by_depth['100.00'] == pytest.approx(2.0)   # seafloor
+        assert by_depth['130.00'] == pytest.approx(0.7)   # base of the stack
+
+    def test_unlayered_column_puts_halfspace_roughness_on_the_seafloor(self, tmp_path):
+        from uacpy.core import Environment, Source, Receiver
+        from uacpy.core.bottom import Bottom, BoundaryProperties
+        from uacpy.io.oases_writer import write_oast_input
+        env = Environment(bathymetry=100.0, ssp=1500.0,
+                          bottom=Bottom.from_halfspace(BoundaryProperties(
+                              acoustic_type='half-space', sound_speed=1600,
+                              density=1.5, attenuation=0.5, roughness=1.2)))
+        out = tmp_path / 'rg1.dat'
+        write_oast_input(out, env, Source(depths=50, frequencies=100.0),
+                         Receiver(depths=50, ranges=[5000.0]))
+        seabed = next(ln for ln in out.read_text().splitlines()
+                      if ln.startswith('100.00'))
+        assert float(seabed.split()[6]) == pytest.approx(1.2)
+
+
+class TestOasesSeaSurfaceRoughnessRecord:
+    """``env.surface.roughness`` must land on ROUGH(2), not ROUGH(1).
+
+    INENVI reads column 7 of every layer record into ``ROUGH(M)``
+    (``oases/src/oaseun31.f:54``) and then unconditionally overwrites
+    ``ROUGH(1)`` with ``ROUGH(2)`` the moment the read loop closes
+    (``:376-377``). ``DO 1111 M=2,NUML`` compares ``LAYTYP(M-1)`` with
+    ``LAYTYP(M)`` (``:381-383``), which fixes ROUGH(M) as the roughness of
+    the interface at the TOP of layer M; ``oasnun22.f:250`` places OASN's
+    surface-noise sheet at ``V(2,1)+V(1,2)/(30*FREQ1)+ROUGH(2)`` on the same
+    reading. Both manuals state "RG(1) is dummy" (``doc/oast.tex:344``,
+    ``doc/oasp.tex:365``). So the sea surface is the FIRST WATER LAYER's RG,
+    and anything written to the upper-half-space record is discarded.
+    """
+
+    SURFACE_RG = 1.5
+
+    @staticmethod
+    def _env(ssp):
+        from uacpy.core import Environment
+        from uacpy.core.bottom import Bottom, BoundaryProperties
+        from uacpy.core.surface import Surface
+        return Environment(
+            bathymetry=100.0, ssp=ssp,
+            surface=Surface([BoundaryProperties(
+                acoustic_type='vacuum',
+                roughness=TestOasesSeaSurfaceRoughnessRecord.SURFACE_RG)]),
+            bottom=Bottom.from_halfspace(BoundaryProperties(
+                acoustic_type='half-space', sound_speed=1700, density=1.8,
+                attenuation=0.5)))
+
+    @staticmethod
+    def _layer_records(text):
+        """The deck's NL layer records, in deck order.
+
+        The layer block opens with a bare integer NL (oaseun31.f:43) — the
+        first such record in every OASES deck — followed by NL layer records
+        (:54).
+        """
+        lines = text.splitlines()
+        i = next(i for i, ln in enumerate(lines) if ln.strip().isdigit())
+        n_layers = int(lines[i])
+        return [ln.split() for ln in lines[i + 1:i + 1 + n_layers]]
+
+    @pytest.mark.parametrize('writer_name,ssp', [
+        ('write_oast_input', 1500.0),
+        ('write_oast_input', [(0.0, 1500.0), (50.0, 1490.0), (100.0, 1510.0)]),
+        ('write_oasn_input', [(0.0, 1500.0), (50.0, 1490.0), (100.0, 1510.0)]),
+        ('write_oasp_input', [(0.0, 1500.0), (50.0, 1490.0), (100.0, 1510.0)]),
+    ])
+    def test_surface_rg_rides_on_the_first_water_record(
+            self, tmp_path, writer_name, ssp):
+        import warnings
+        from uacpy.core import Source, Receiver
+        import uacpy.io.oases_writer as W
+        out = tmp_path / f'{writer_name}.dat'
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            getattr(W, writer_name)(
+                out, self._env(ssp), Source(depths=50, frequencies=100.0),
+                Receiver(depths=[20.0, 50.0, 80.0],
+                         ranges=np.linspace(100.0, 5000.0, 10)))
+        records = self._layer_records(out.read_text())
+        assert float(records[0][6]) == 0.0, "RG(1) is the dummy INENVI clobbers"
+        assert float(records[1][6]) == pytest.approx(self.SURFACE_RG)
+        # Interfaces inside the water column are SSP sample boundaries.
+        assert all(float(r[6]) == 0.0 for r in records[2:-1])
+
+    @pytest.mark.parametrize('writer_name,extra', [
+        ('write_oast_input', 1), ('write_oasn_input', 1),
+        ('write_oasp_input', 2),
+    ])
+    def test_record_arity_is_unchanged(self, tmp_path, writer_name, extra):
+        """INENVI's reads are list-directed but positional, so column 7 has to
+        stay column 7 and the inert padding past it has to stay put."""
+        import warnings
+        from uacpy.core import Source, Receiver
+        import uacpy.io.oases_writer as W
+        out = tmp_path / f'{writer_name}_arity.dat'
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            getattr(W, writer_name)(
+                out, self._env([(0.0, 1500.0), (50.0, 1490.0), (100.0, 1510.0)]),
+                Source(depths=50, frequencies=100.0),
+                Receiver(depths=[20.0, 50.0, 80.0],
+                         ranges=np.linspace(100.0, 5000.0, 10)))
+        records = self._layer_records(out.read_text())
+        # The upper half-space record carries the manual's D CC CS AC AS RO
+        # RG IG columns whatever the deck; the water and seabed records carry
+        # this program's own trailing padding.
+        assert len(records[0]) == 8
+        assert all(len(r) == 7 + extra for r in records[1:])
+
+    def test_gradient_first_layer_is_warned_about(self, tmp_path):
+        """oaseun31.f:382-388 refuses roughness at an interface bounding a
+        LAYTYP 2 (sound-speed-gradient) layer, but its STOP is commented out at
+        :388 — so only a uacpy-side warning tells the caller."""
+        from uacpy.core import Source, Receiver
+        from uacpy.io.oases_writer import write_oast_input
+        env = self._env([(0.0, 1500.0), (50.0, 1490.0), (100.0, 1510.0)])
+        with pytest.warns(UserWarning, match='sound-speed gradient'):
+            write_oast_input(tmp_path / 'grad.dat', env,
+                             Source(depths=50, frequencies=100.0),
+                             Receiver(depths=[20.0, 50.0, 80.0],
+                                      ranges=np.linspace(100.0, 5000.0, 10)))
+
+    def test_isovelocity_column_is_not_warned_about(self, tmp_path, recwarn):
+        """An isovelocity first layer is LAYTYP 1, which the test at
+        oaseun31.f:383 passes."""
+        from uacpy.core import Source, Receiver
+        from uacpy.io.oases_writer import write_oast_input
+        write_oast_input(tmp_path / 'iso.dat', self._env(1500.0),
+                         Source(depths=50, frequencies=100.0),
+                         Receiver(depths=[20.0, 50.0, 80.0],
+                                  ranges=np.linspace(100.0, 5000.0, 10)))
+        assert not [w for w in recwarn
+                    if 'sound-speed gradient' in str(w.message)]
+
+    def test_oasr_layer_one_carries_no_surface_roughness(self, tmp_path):
+        """OASR's layer 1 IS the water half-space (``SD=V(2,1)-1.0E-3``,
+        unoasr21.f:89) — there is no sea surface in the model, and its RG is
+        the same dummy. The reflecting interface is ROUGH(2), the seabed."""
+        from uacpy.core import Environment, Source, Receiver
+        from uacpy.core.bottom import Bottom, BoundaryProperties
+        from uacpy.core.surface import Surface
+        from uacpy.io.oases_writer import write_oasr_input
+        env = Environment(
+            bathymetry=100.0, ssp=1500.0,
+            surface=Surface([BoundaryProperties(acoustic_type='vacuum',
+                                                roughness=self.SURFACE_RG)]),
+            bottom=Bottom.from_halfspace(BoundaryProperties(
+                acoustic_type='half-space', sound_speed=1700, density=1.8,
+                attenuation=0.5, roughness=0.9)))
+        out = tmp_path / 'oasr.dat'
+        write_oasr_input(out, env, Source(depths=50, frequencies=100.0),
+                         Receiver(depths=[50.0], ranges=[1000.0]))
+        records = self._layer_records(out.read_text())
+        assert float(records[0][6]) == 0.0
+        assert float(records[1][6]) == pytest.approx(0.9)   # seabed = ROUGH(2)
+
+
+class TestOasesNegativeRoughnessRejected:
+    """A negative RG changes the layer record's arity, so the writers refuse it.
+
+    ``oaseun31.f:72`` branches on ``rough(m).lt.-1e-10``, backspaces and
+    re-reads eight items with CLEN (``:75``); ``:77`` then tests
+    ``clen(m).lt.-1e-10``, which is false for the CLEN==0 these decks supply,
+    so ``:91`` takes the ``nvol=3`` branch and reads **nine** items from a
+    record carrying eight. Every subsequent READ is shifted.
+
+    ``BoundaryProperties`` and ``SedimentLayer`` reject it at construction;
+    these cases pin the writer-side guard that catches a value assigned to a
+    carrier afterwards, which no ``__post_init__`` sees.
+    """
+
+    @staticmethod
+    def _env():
+        from uacpy.core import Environment
+        from uacpy.core.bottom import (Bottom, BoundaryProperties,
+                                       SeabedColumn, SedimentLayer)
+        from uacpy.core.surface import Surface
+        return Environment(
+            bathymetry=100.0, ssp=1500.0,
+            surface=Surface([BoundaryProperties(acoustic_type='vacuum')]),
+            bottom=Bottom.from_column(SeabedColumn(
+                layers=[SedimentLayer(thickness=30, sound_speed=1600,
+                                      density=1.8, attenuation=0.5)],
+                halfspace=BoundaryProperties(
+                    acoustic_type='half-space', sound_speed=1800, density=2.0,
+                    attenuation=0.6))))
+
+    @staticmethod
+    def _write(env, tmp_path):
+        from uacpy.core import Source, Receiver
+        from uacpy.io.oases_writer import write_oast_input
+        write_oast_input(tmp_path / 'neg.dat', env,
+                         Source(depths=50, frequencies=100.0),
+                         Receiver(depths=[50.0], ranges=[5000.0]))
+
+    def test_negative_surface_roughness(self, tmp_path):
+        env = self._env()
+        env.surface.properties[0].roughness = -1.0
+        with pytest.raises(ConfigurationError, match='oaseun31.f:72-93'):
+            self._write(env, tmp_path)
+
+    def test_negative_layer_roughness(self, tmp_path):
+        env = self._env()
+        env.bottom.columns[0].layers[0].roughness = -1.0
+        with pytest.raises(ConfigurationError, match='oaseun31.f:72-93'):
+            self._write(env, tmp_path)
+
+    def test_negative_halfspace_roughness(self, tmp_path):
+        env = self._env()
+        env.bottom.columns[0].halfspace.roughness = -1.0
+        with pytest.raises(ConfigurationError, match='oaseun31.f:72-93'):
+            self._write(env, tmp_path)
+
+    def test_zero_roughness_writes_normally(self, tmp_path):
+        self._write(self._env(), tmp_path)
+        assert (tmp_path / 'neg.dat').exists()
+
+
+class TestRtsToPressureGoertzel:
+    """``method='goertzel'`` must agree with ``method='fft'`` and with the
+    analytic phasor.
+
+    The Goertzel recurrence leaves ``s1`` aliasing ``s0`` after its final
+    shift, so the closing combination has to read ``s2`` — the state one step
+    back — and advance by the single sample the recurrence lags. Reading
+    ``s1`` instead collapses the result to ``s0*(1 - exp(-i w dt))``, which is
+    wrong in magnitude *and* phase, and no cross-mode comparison catches it
+    because both modes are not exercised against each other anywhere else.
+    """
+
+    @staticmethod
+    def _tone(amp, phase, n_t=512, fs=1000.0, bin_index=8):
+        """One range column carrying an exactly-on-bin cosine."""
+        dt = 1.0 / fs
+        freq = fs * bin_index / n_t
+        t = np.arange(n_t) * dt
+        p = (amp * np.cos(2 * np.pi * freq * t + phase)).reshape(n_t, 1)
+        return {'p': p, 'dt': dt, 'ranges': np.array([1000.0]),
+                'time': t}, freq
+
+    def test_goertzel_recovers_the_analytic_phasor(self):
+        from uacpy.io.oalib_reader import rts_to_pressure
+        amp, phase = 3.0, 0.700
+        rts, freq = self._tone(amp, phase)
+        p, _ = rts_to_pressure(rts, freq, method='goertzel')
+        assert abs(p[0]) == pytest.approx(amp, rel=1e-6)
+        assert np.angle(p[0]) == pytest.approx(phase, abs=1e-6)
+
+    def test_goertzel_agrees_with_fft(self):
+        from uacpy.io.oalib_reader import rts_to_pressure
+        rts, freq = self._tone(2.5, -1.1)
+        p_g, _ = rts_to_pressure(rts, freq, method='goertzel')
+        p_f, _ = rts_to_pressure(rts, freq, method='fft')
+        # The FFT path applies a Hann window, so the two agree to the window's
+        # own leakage on an on-bin tone rather than to float precision.
+        assert abs(p_g[0]) == pytest.approx(abs(p_f[0]), rel=1e-4)
+        assert np.angle(p_g[0]) == pytest.approx(np.angle(p_f[0]), abs=1e-4)

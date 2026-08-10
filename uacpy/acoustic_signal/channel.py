@@ -53,6 +53,8 @@ def impulse_response(amplitudes, delays_s, sample_rate: float, *,
     pos = d * fs
     if n_samples is None:
         if pos.size:
+            # +1 for the 0-based index of the last occupied sample, plus one
+            # more in the fractional case for its second (i0 + 1) tap.
             n_samples = int(np.floor(pos.max()) + 2 if fractional
                             else np.round(pos.max()) + 1)
         else:
@@ -105,6 +107,9 @@ def impulse_response_from_transfer_function(H, frequencies, sample_rate: float,
         raise ConfigurationError("frequencies must be non-negative and strictly increasing")
     fs = float(sample_rate)
     if n_samples is None:
+        # Inverse of the rfft bin count: an even-length real signal of
+        # 2*(K - 1) samples has exactly K one-sided bins, so the default grid
+        # is as fine as the supplied H(f) and no finer.
         n_samples = 2 * (f.size - 1) if f.size > 1 else 2
     grid = np.fft.rfftfreq(int(n_samples), d=1.0 / fs)
     Hr = (np.interp(grid, f, Hc.real, left=0.0, right=0.0)

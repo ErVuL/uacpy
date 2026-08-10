@@ -50,16 +50,23 @@ INDEX_FILE = 'seaice_climatology.pkl'
 _BASE_URL = 'https://noaadata.apps.nsidc.org/NOAA/G02135'
 _MONTHS = ['01_Jan', '02_Feb', '03_Mar', '04_Apr', '05_May', '06_Jun',
            '07_Jul', '08_Aug', '09_Sep', '10_Oct', '11_Nov', '12_Dec']
-# Fixed NSIDC Sea Ice Polar Stereographic grids (origin x/y in m, 25 km pixels).
+# Fixed NSIDC Sea Ice Polar Stereographic grids, 25 km pixels. ``x0``/``y0`` are
+# the outer corner of cell (0, 0) in projected metres — x0 the western edge and
+# y0 the *northern* (maximum-y) edge, so rows count southward as y decreases.
+# The cached grids are 448 x 304 (N) and 332 x 316 (S); under these origins the
+# pole projects to (0, 0) and lands mid-grid, at cell (234, 154) and (174, 158).
 _GRID = {
     'N': {'epsg': 'EPSG:3411', 'x0': -3850000.0, 'y0': 5850000.0, 'px': 25000.0},
     'S': {'epsg': 'EPSG:3412', 'x0': -3950000.0, 'y0': 4350000.0, 'px': 25000.0},
 }
 _POLE_HOLE = 2510         # unobserved cap near the pole — perennial ice → 1.0
-_MAX_CONC = 1000          # values ≤ 1000 are concentration ×10; above are flags
+# Codes <= 1000 are concentration in tenths of a percent (1000 = 100 %, hence
+# the /1000 in _to_fraction); higher codes are flags, not data.
+_MAX_CONC = 1000
 _HEMI_DIR = {'N': 'north', 'S': 'south'}
 
 _MODEL = {}               # cache_root -> dict(N=(12,H,W), S=(12,H,W), tf=...)
+_cache.register_cache(_MODEL.clear)
 
 
 def _monthly_url(hemi, year, month):
@@ -153,19 +160,29 @@ def _model():
     return result
 
 
+def _rowcol(model, hemi, lat, lon):
+    """``(row, col)`` of a point in hemisphere ``hemi``, or ``None`` if outside.
+
+    ``x0``/``y0`` are the outer corner of the corner cell, so the cell containing
+    the point is floor(), not round() (which would bias it half a cell).
+    """
+    g = _GRID[hemi]
+    x, y = model['tf'][hemi].transform(normalize_lon(lon), lat)
+    col = int(np.floor((x - g['x0']) / g['px']))
+    row = int(np.floor((g['y0'] - y) / g['px']))
+    _, height, width = model[hemi].shape
+    if not (0 <= row < height and 0 <= col < width):
+        return None
+    return row, col
+
+
 def _concentration(lat, lon, month):
     m = _model()
     hemi = 'N' if lat >= 0 else 'S'
-    g = _GRID[hemi]
-    x, y = m['tf'][hemi].transform(normalize_lon(lon), lat)
-    # x0/y0 are the outer corner of the corner cell (PixelIsArea), so the cell
-    # containing the point is floor(), not round() (which would bias half a cell).
-    col = int(np.floor((x - g['x0']) / g['px']))
-    row = int(np.floor((g['y0'] - y) / g['px']))
-    grid = m[hemi][month - 1]
-    if not (0 <= row < grid.shape[0] and 0 <= col < grid.shape[1]):
+    rc = _rowcol(m, hemi, lat, lon)
+    if rc is None:
         return 0.0                              # outside the polar grid → ice-free
-    return grid[row, col]
+    return m[hemi][month - 1][rc]
 
 
 def fetch_sea_ice_concentration(point: Coordinate, *, date=None,
@@ -256,19 +273,13 @@ def sea_ice_grid(month: int, *, hemi: str = 'N') -> np.ndarray:
 def sea_ice_pixel(point: Coordinate, *, hemi: str = 'N'):
     """``(row, col)`` of a point in the NSIDC polar grid, or ``None`` if outside.
 
-    Companion to :func:`sea_ice_grid` for overlaying markers on the grid.
+    Companion to :func:`sea_ice_grid` for overlaying markers on the grid: it
+    shares its cell arithmetic with the value lookup, so a marker lands on
+    exactly the cell whose concentration
+    :func:`fetch_sea_ice_concentration` reads.
     """
     lat, lon = as_coordinate(point)
-    g = _GRID[hemi]
-    x, y = _model()['tf'][hemi].transform(normalize_lon(lon), lat)
-    # floor (not round) to match _concentration: x0/y0 are the corner of cell
-    # (0,0) (PixelIsArea), so a marker lands on the same cell whose value is read.
-    col = int(np.floor((x - g['x0']) / g['px']))
-    row = int(np.floor((g['y0'] - y) / g['px']))
-    grid = _model()[hemi][0]
-    if not (0 <= row < grid.shape[0] and 0 <= col < grid.shape[1]):
-        return None
-    return row, col
+    return _rowcol(_model(), hemi, lat, lon)
 
 
 def fetch_sea_ice_concentration_transect(start: Coordinate, end: Coordinate, *,

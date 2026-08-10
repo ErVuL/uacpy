@@ -6,7 +6,8 @@ EXAMPLE 34: JANUS Standard Beacon (NATO STANAG 4748)
 OBJECTIVE:
     Build, transmit and decode a standards-compliant JANUS baseline packet — the
     open NATO underwater interoperability protocol:
-      • assemble a 64-bit JANUS packet (Emergency, class 16) with CRC-8
+      • assemble a 64-bit JANUS packet (class 16, the NATO reference
+        implementation's own class user id) with CRC-8
       • rate-1/2 K=9 convolutional coding + depth-13 interleaving (144 symbols)
       • FH-BFSK waveform in the initial band (Fc=11520 Hz, Bw=4160 Hz, Cd=6.25 ms),
         with the 32-chip detection preamble
@@ -48,14 +49,18 @@ def main():
     rng = np.random.default_rng(0xACED)
     fs = 48000.0
 
-    # --- assemble an Emergency beacon packet (class 16, app type 0) ---
+    # --- assemble a beacon packet (class 16, app type 0) ---
+    # Class user id 16 is "NATO JANUS reference Implementation" and its app
+    # type 0 plugin carries an 8-bit Station Identifier; the 34 app-data bits
+    # below are filled arbitrarily because this example exercises the
+    # waveform, not the plugin's field layout.
     adb = np.zeros(34, dtype=int)
     adb[:16] = comms.bytes_to_bits(b"SOS")[:16]      # arbitrary 34-bit app data block
     pkt = comms.JanusPacket(class_id=16, app_type=0, app_data=adb,
                             mobility=1, tx_rx=1)
     bits = pkt.to_bits()
     print(f"\n  packet     : 64 bits  (v{janus.JANUS_VERSION}, class {pkt.class_id} "
-          f"= NATO ref impl, app type {pkt.app_type} = Emergency)")
+          f"= NATO ref impl, app type {pkt.app_type})")
     print(f"  band       : Fc={janus.FC_INITIAL/1e3:.2f} kHz, Bw={janus.BW_INITIAL/1e3:.2f} "
           f"kHz, FSw=160 Hz, Cd=6.25 ms")
 

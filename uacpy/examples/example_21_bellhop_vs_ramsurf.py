@@ -129,6 +129,10 @@ def main():
     ax_bot.axhline(0, color='k', lw=0.5)
     ax_bot.plot(ranges / 1000, tl_ram - tl_bh, 'b-', lw=1.0,
                 label='RAM − Bellhop')
+    # 8 dB is the empirical bar the cross-model test holds this pair to over
+    # 1-5 km (tests/test_cross_model_agreement.py, tolerance_db=8.0): ray and
+    # PE diverge past ~3 km as surface multipaths accumulate, while a flipped
+    # altimetry sign would push the RMSE past 25 dB.
     ax_bot.fill_between(ranges / 1000, -8, 8, color='green', alpha=0.15,
                         label='±8 dB regression band')
     ax_bot.set_xlabel('Range (km)')

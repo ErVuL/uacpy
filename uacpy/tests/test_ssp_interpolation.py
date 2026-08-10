@@ -12,7 +12,15 @@ pytestmark = pytest.mark.requires_binary
 
 
 class TestSSPInterpolationMethods:
-    """Test different SSP interpolation types."""
+    """End-to-end acceptance of each ``interp_ssp`` scheme.
+
+    Each case writes a deck with a different ``TopOpt(1)`` character and runs
+    the binary, so a scheme that produced an unwritable deck (or one AT
+    rejects) fails here. Nothing compares the fields, so these do **not**
+    show that the chosen scheme changed the interpolation — only that the
+    whole path is wired. The character mapping itself is pinned in
+    ``test_ssp_presets.py``.
+    """
 
     @pytest.fixture
     def receiver(self):
@@ -23,7 +31,8 @@ class TestSSPInterpolationMethods:
 
     @pytest.mark.requires_binary
     def test_ssp_isovelocity(self, source, receiver):
-        """Test isovelocity SSP."""
+        """An isovelocity env forces ``TopOpt(1)='C'`` whatever the model's
+        ``interp_ssp`` says, so this is the shortcut path."""
         env = Environment(
             name="iso_test",
             bathymetry=100.0,

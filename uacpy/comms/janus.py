@@ -60,6 +60,9 @@ BW_INITIAL = 4160.0         # bandwidth [Hz]
 # Convolutional code: rate 1/2, constraint length 9. The CMRE reference applies
 # the generators (g1=0o657, g2=0o435) in reversed register bit-order, i.e. the
 # output masks below (verified bit-exact against the reference trellis tables).
+# The reversed pair is also the K=9 rate-1/2 maximum-free-distance code of
+# Proakis & Salehi Table 8.3-1 (d_free = 12), an independent check on the
+# bit-order convention.
 _CONV_K = 9
 _G_HI = 0o753               # = bit-reversed g1 (0o657)
 _G_LO = 0o561               # = bit-reversed g2 (0o435)
@@ -74,13 +77,15 @@ _N_TOTAL_CHIPS = _PREAMBLE_CHIPS + _N_CODED   # 176: 32 preamble + 144 data
 WAKEUP_GAP = 0.4                   # s silence after wake-up tones (CMRE JANUS_WUT_GAP)
 DEFAULT_DOPPLER_MAX_SPEED = 5.0    # m/s search half-range (CMRE reference default)
 _DOPPLER_FIT_POINTS = 9            # CMRE DOPPLER_INT_NPOINT: quadratic peak interpolation
-_DOPPLER_C0 = 1540.0               # m/s reference speed in CMRE chips_alignment/doppler
+_DOPPLER_C0 = 1540.0               # m/s (CMRE doppler.c:108, chips_alignment.c:143)
 
-# GO-CFAR preamble detector (CMRE chips_alignment + go_cfar, batch form).
-_CHIP_OVERSAMPLING = 4             # CMRE JANUS_PREAMBLE_CHIP_OVERSAMPLING
-_CFAR_THRESHOLD = 2.5             # CMRE default detection_threshold
-_CFAR_WINDOW_CORRECTION = 0.1538   # CMRE window_correction factor
-_CFAR_CHANNEL_SPREAD = 64          # chips searched for the peak past first detection
+# GO-CFAR preamble detector (CMRE chips_alignment + go_cfar, batch form). Values
+# read from the janus-c reference: defaults.h:63, parameters.c:65, rx.c:301,
+# rx.c:407, rx.c:413.
+_CHIP_OVERSAMPLING = 4             # JANUS_PREAMBLE_CHIP_OVERSAMPLING
+_CFAR_THRESHOLD = 2.5              # params->detection_threshold
+_CFAR_WINDOW_CORRECTION = 0.1538   # window_correction leading factor
+_CFAR_CHANNEL_SPREAD = 64          # chips past first detection (x oversampling in C)
 _CFAR_MOV_AVG_TIME = 0.150         # s training-window length floor
 
 
@@ -290,6 +295,12 @@ def _tone_freq(fh_index, bit, f_low, fsw):
     return f_low + (2 * int(fh_index) + int(bit)) * fsw
 
 
+def _preamble_tones(fh, f_low, fsw):
+    """The 32 tone frequencies the preamble actually transmits, in chip order."""
+    return np.array([_tone_freq(fh[k], FH_PREAMBLE_BITS[k], f_low, fsw)
+                     for k in range(_PREAMBLE_CHIPS)])
+
+
 def janus_modulate(bits64, sample_rate=48000.0, fc=FC_INITIAL, bw=BW_INITIAL,
                    cd=None, fh_seq=None, tukey=True, wakeup=False):
     """Generate the real FH-BFSK JANUS waveform for a 64-bit packet.
@@ -297,6 +308,16 @@ def janus_modulate(bits64, sample_rate=48000.0, fc=FC_INITIAL, bw=BW_INITIAL,
     The waveform is ``[optional wake-up tones][32-chip preamble][144 data chips]``;
     each chip is a CW tone (duration ``cd``, default ``1/FSw`` = 6.25 ms in the
     initial band) at the frequency selected by the hop index and the bit value.
+
+    ``tukey`` tapers each chip with a tapered cosine over 5 % of its length
+    (2.5 % at each end), softening the edge transient a rectangular chip would
+    radiate; ``tukey=False`` emits the plain rectangular CW chip. The CMRE
+    reference tapers too, but differently — modulator.c:78-90 puts a Hamming
+    half-taper over ``lt/16`` samples (6.25 %) at each end, rising from 0.08
+    rather than from 0 — so neither setting is sample-identical to it, and the
+    two differ only over the outer few percent of each chip. ``wakeup``
+    prepends the three wake-up tones, ``cd`` overrides the chip duration and
+    ``fh_seq`` the hop sequence.
 
     Returns the real-valued passband waveform (the tones already sit in the
     acoustic band, so no separate up-conversion is needed).
@@ -327,7 +348,8 @@ def janus_modulate(bits64, sample_rate=48000.0, fc=FC_INITIAL, bw=BW_INITIAL,
 
 
 def _tukey(n, alpha):
-    """Tukey (tapered-cosine) window, ``alpha`` fraction tapered each end."""
+    """Tukey (tapered-cosine) window; ``alpha`` is the **total** tapered
+    fraction, so each end gets ``alpha/2`` of the length."""
     if alpha <= 0:
         return np.ones(n)
     w = np.ones(n)
@@ -376,8 +398,13 @@ def _chips_alignment(x, fs, f_low, fsw, fh, cd, max_speed):
     """
     chip = cd * fs
     hstep = int(round(chip / _CHIP_OVERSAMPLING))
-    tones = np.array([_tone_freq(fh[k], FH_PREAMBLE_BITS[k], f_low, fsw)
-                      for k in range(_PREAMBLE_CHIPS)])
+    tones = _preamble_tones(fh, f_low, fsw)
+    # Goertzel window length, transcribed from CMRE chips_alignment.c:143-144
+    # (``_DOPPLER_C0`` is that file's hard-coded 1540 m/s). At
+    # ``max_speed = 0`` it reduces to exactly one chip, ``cd*fs``; widening the
+    # Doppler search, or moving to a band with higher tones, shortens it below
+    # a chip so the window still fits within one Doppler-scaled chip. The floor
+    # holds it at 3/4 chip, the reference's lower bound on the DFT length.
     gf = int(np.floor(fs * (_DOPPLER_C0 * cd)
                       / ((cd * float(tones.max()) + 1) * max_speed + _DOPPLER_C0)))
     gf = max(gf, int(0.75 * chip))
@@ -385,6 +412,8 @@ def _chips_alignment(x, fs, f_low, fsw, fh, cd, max_speed):
         return None, hstep
     ref = np.hamming(gf)[:, None] * np.exp(
         -2j * np.pi * np.outer(np.arange(gf), tones) / fs)
+    # Per-column normalisation applied before the max filter and the sum, as in
+    # chips_alignment.c:276, so ``stat`` is the mean per-chip tone magnitude.
     mag = np.abs(sliding_window_view(x, gf)[::hstep] @ ref) / _PREAMBLE_CHIPS
     mag = np.maximum(mag[:-1], mag[1:])                       # 2-point max filter
     nstat = mag.shape[0] - _CHIP_OVERSAMPLING * (_PREAMBLE_CHIPS - 1)
@@ -394,6 +423,17 @@ def _chips_alignment(x, fs, f_low, fsw, fh, cd, max_speed):
             + _CHIP_OVERSAMPLING * np.arange(_PREAMBLE_CHIPS)[None, :])
     stat = mag[cols, np.arange(_PREAMBLE_CHIPS)[None, :]].sum(axis=1)
     return stat, hstep
+
+
+def _cfar_window_correction(m):
+    """Right-window self-contamination weight ``w`` for a training window of ``m`` cells.
+
+    ``rx.c:413`` passes ``0.1538 * fmin((n_chips + dmod_chip_count) / (step_length // 4), 1)``
+    to ``janus_go_cfar_new``, whose ``go_cfar.c:327`` scales it by the training-window
+    length ``hn - hg == step_length``. The weight is therefore proportional to ``m``:
+    16.0 at the initial band, not 0.1538.
+    """
+    return _CFAR_WINDOW_CORRECTION * m * min(_N_TOTAL_CHIPS / (m // 4), 1.0)
 
 
 def _go_cfar(stat, cd):
@@ -411,6 +451,7 @@ def _go_cfar(stat, cd):
     m = int(np.floor(_CHIP_OVERSAMPLING * mov_avg / cd))      # training half (cols)
     hg = _CHIP_OVERSAMPLING                                   # half guard
     hn = m + hg
+    w = _cfar_window_correction(m)
     n = stat.size
     # Reflect-pad the statistic so edge cells get a representative (not zero-biased)
     # training background, preserving CFAR's constant-false-alarm behaviour near the
@@ -419,10 +460,13 @@ def _go_cfar(stat, cd):
     spread = _CFAR_CHANNEL_SPREAD * _CHIP_OVERSAMPLING
     first = None
     for i in range(n):
+        # The +hn offsets map stat index i onto the reflect-padded csum. In stat
+        # coordinates the two training windows are [i-hn, i-hg) and [i+hg, i+hn):
+        # m cells each, held off the cell under test by the hg-wide guard.
         z = stat[i]
         left = csum[(i - hg) + hn] - csum[(i - hn) + hn]
         right = csum[(i + hn) + hn] - csum[(i + hg) + hn]
-        z_go = max(left, right - z * _CFAR_WINDOW_CORRECTION) * _CFAR_THRESHOLD / m
+        z_go = max(left, right - z * w) * _CFAR_THRESHOLD / m
         if z > z_go and z > 1e-9:
             first = i
             break
@@ -440,8 +484,7 @@ def _detect(x, fs, f_low, fsw, fh, cd, max_speed):
     if m0 is None:
         return None, stat
     coarse = m0 * hstep
-    tones = np.array([_tone_freq(fh[k], FH_PREAMBLE_BITS[k], f_low, fsw)
-                      for k in range(_PREAMBLE_CHIPS)])
+    tones = _preamble_tones(fh, f_low, fsw)
     rel = _chip_bounds(_PREAMBLE_CHIPS, cd, fs)
     best, start = -1.0, coarse
     for s in range(max(coarse - 2 * hstep, 0), coarse + 2 * hstep):

@@ -31,6 +31,14 @@ class NetcdfGrid:
     caches the grid origin/step/extent, so :meth:`row` / :meth:`col` map a
     coordinate to its nearest cell. Subclasses bind whatever data variable(s)
     they expose (GEBCO elevation, GlobSed thickness, …) via :meth:`var`.
+
+    Origin and step are read from the file's own axis variables, so the class is
+    registration-agnostic: it snaps to the nearest **stored node** whether those
+    nodes are cell centres (GEBCO 2025 starts at -89.99791667, half a 15" cell
+    inside the pole) or cell edges (GlobSed v3 starts at exactly -90.0). The
+    step is signed, so a north-up (descending-latitude) file needs no special
+    case. Uniform spacing is assumed — the step is taken from the first two
+    nodes.
     """
 
     def __init__(self, path):
@@ -66,13 +74,18 @@ class NetcdfGrid:
         return float(v)
 
     def row(self, lat):
+        """Index of the node nearest ``lat``; latitude is bounded, so a value
+        past either pole clamps to the first/last row rather than wrapping."""
         return int(np.clip(round((lat - self._lat0) / self._dlat),
                            0, self._nlat - 1))
 
     def col(self, lon):
-        # Wrap the query into this grid's OWN longitude convention so both
-        # [-180, 180) (GEBCO) and [0, 360) (some NCEI products, e.g. GlobSed)
-        # stored axes resolve correctly; out-of-range falls to the nearest edge.
+        """Index of the node nearest ``lon``, wrapped into the stored axis."""
+        # Wrap the query into this grid's OWN longitude convention so every
+        # stored origin resolves: [-180, 180) (GEBCO), [0, 360), or an offset
+        # one (GLODAP's mapped product starts at 20.5°E). After the wrap the
+        # query is inside one period of the axis, and clip only guards a grid
+        # that does not span the full 360°.
         lon = self._lon0 + ((float(lon) - self._lon0) % 360.0)
         return int(np.clip(round((lon - self._lon0) / self._dlon),
                            0, self._nlon - 1))

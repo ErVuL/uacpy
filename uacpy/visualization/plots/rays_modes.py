@@ -66,6 +66,8 @@ def _plot_rays(
         else:
             kind = 'direct'
         bounce_counts[kind] += 1
+        # color_by=None paints the whole fan one colour; the bottom-class blue
+        # doubles as that neutral colour.
         color = color_map[kind] if color_by == 'bounces' else color_map['bottom']
         ax.plot(m_to_km(r), z, color=color, alpha=alpha,
                 linewidth=linewidth, solid_capstyle='round',
@@ -76,6 +78,9 @@ def _plot_rays(
     if env is not None:
         depth_for_lim = max(depth_for_lim, float(env.depth))
     if depth_for_lim > 0:
+        # Depth increases downward, so bottom > top. The negative top leaves a
+        # sliver of headroom above z = 0 for the surface line and surface-bounce
+        # turning points, which otherwise sit exactly on the spine.
         ax.set_ylim(depth_for_lim * 1.08, -depth_for_lim * 0.04)
 
     if env is not None:
@@ -312,8 +317,8 @@ def plot_modes_heatmap(
         vabs = float(np.max(np.abs(phi))) if phi.size else 1.0
         vmin, vmax = -vabs, vabs
     idx = np.arange(start + 1, stop + 1)
-    # ``shading='nearest'`` puts each column at the integer mode index
-    # without needing a +1 edges array — matches matlab pcolor.
+    # ``shading='nearest'`` centres each column on its integer mode index,
+    # so no (n+1)-long edge array is needed.
     im = ax.pcolormesh(idx, modes.depths, phi, cmap=cmap,
                        shading='nearest', vmin=vmin, vmax=vmax)
     fig.colorbar(
@@ -434,13 +439,15 @@ def _plot_replicas(
     figsize: Tuple[float, float] = (8, 5),
     title: Optional[str] = None,
 ):
-    """Magnitude of replica response across (z, x) at fixed y=0."""
+    """Magnitude of replica response across (z, x) at the first y node."""
     if not isinstance(rep, Replicas):
         raise ConfigurationError(
             f"_plot_replicas: expected Replicas, got {type(rep).__name__}"
         )
     _owns_fig = ax is None
     fig, ax = fig_ax(ax, figsize)
+    # replicas is (n_freq, n_zr, n_xr, n_yr, n_rcv): take one frequency and one
+    # array element, and cut the candidate-source grid at its first y node.
     R = np.abs(rep.replicas[freq_idx, :, :, 0, sensor_idx])
     im = ax.pcolormesh(
         rep.replica_x, rep.replica_z, R,

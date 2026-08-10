@@ -67,6 +67,10 @@ class TestSurfaceCarrier:
 
 
 class TestAltimetryCarrier:
+    """Heights are metres about the mean surface, **positive up** — the
+    opposite sign to bathymetry depths, which are positive down. A negative
+    height is a trough, not a deeper seabed."""
+
     def test_at_eval_isel(self):
         a = Altimetry(ranges=[0.0, 10000.0], heights=[0.0, -8.0])
         assert a.eval(range=5000) == pytest.approx(-4.0)       # linear
@@ -103,7 +107,9 @@ class TestBathymetryCarrier:
 
 
 class TestSurfaceModelBehaviour:
-    """Regression locks for bugs found in manual testing of the Surface feature."""
+    """How a ``Surface`` reaches a model: it counts towards
+    ``env.is_range_dependent``, and Kraken's elastic-top rejection reads the
+    *collapsed* surface rather than the raw carrier."""
 
     def _ice(self):
         return BoundaryProperties(acoustic_type='half-space', sound_speed=3500.0,
@@ -141,6 +147,10 @@ class TestSurfaceModelBehaviour:
         Kraken()._reject_elastic_surface(Kraken()._project_environment(env))
 
     def test_compute_modes_rejects_receiver_arg(self):
+        # A mode solve has no receiver grid, so ``compute_modes`` takes none:
+        # its third positional is ``n_modes`` (``models/base.py:1471-1475``).
+        # Passing a Receiver there must name the real parameter in the error
+        # rather than fail deep inside the solver on a non-integer count.
         import uacpy
         env = uacpy.Environment(bathymetry=300.0, ssp=1500.0)
         src = uacpy.Source(depths=50.0, frequencies=120.0)
@@ -150,7 +160,8 @@ class TestSurfaceModelBehaviour:
 
 
 class TestSurfaceValidation:
-    """Locks for edge-case bugs found in manual testing (round 6)."""
+    """A mean over mixed boundary types has no meaning, so it must raise
+    rather than average a vacuum against a half-space."""
 
     def test_mixed_type_mean_collapse_clear_error(self):
         s = Surface.coerce([(0.0, BoundaryProperties(acoustic_type='vacuum')),

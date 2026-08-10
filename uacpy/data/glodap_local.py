@@ -95,9 +95,14 @@ def _extract_ph(tar_path, out):
 class _GlodapGrid(NetcdfGrid):
     """Column accessor over the GLODAP ``pH(depth, lat, lon)`` grid.
 
-    Reuses :class:`NetcdfGrid` for nearest lat/lon indexing (the mapped grid's
-    longitude axis has a shifted origin, which ``col`` already wraps), and binds
-    the depth axis plus the pH variable for whole-column reads.
+    Reuses :class:`NetcdfGrid` for nearest lat/lon indexing and binds the depth
+    axis plus the pH variable for whole-column reads.
+
+    The mapped product's axes are 1° cell centres with latitude running south-up
+    (−89.5 → 89.5) and longitude on a **shifted** origin, 20.5 → 379.5 °E — it
+    is neither ``[-180, 180)`` nor ``[0, 360)``. ``NetcdfGrid.col`` wraps a query
+    modulo 360 onto whatever origin the file declares, so no conversion is needed
+    here; the 33 levels of the depth axis run 0 → 5500 m.
     """
 
     def __init__(self, path):
@@ -119,8 +124,9 @@ class _GlodapGrid(NetcdfGrid):
         drop them so the returned column runs surface → deepest analysed level.
         """
         # np.asarray() on a netCDF4 masked array discards the mask and exposes
-        # the raw _FillValue (-999 in the mapped product), which np.isfinite
-        # then accepts as a real pH. Fill *through* the mask instead.
+        # the raw value, which for this file is the declared _FillValue of -999
+        # — a number np.isfinite then accepts as a real pH. Fill *through* the
+        # mask instead.
         col = np.ma.filled(
             np.ma.asarray(self._ph[:, self.row(lat), self.col(lon)],
                           dtype=float),

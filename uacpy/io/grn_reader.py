@@ -13,7 +13,7 @@ Convention summary
   ``k(f) = 2π·f/cVec``.
 * SPARC snapshot — the wavenumber grid is **frequency-independent** so
   ``cVec`` is mapped using the source frequency ``freq0`` from the GRN
-  header (``fieldsco.m:97-100``); ``freqVec`` actually stores the output
+  header (``fieldsco.m:100-102``); ``freqVec`` actually stores the output
   *time* vector (``sparc.f90:320``), not frequencies.
 
 We detect SPARC by the ``'SPARC'`` prefix in the title (set at
@@ -123,21 +123,34 @@ def read_grn_file(filepath: Union[str, Path]) -> Dict[str, Any]:
         # Records 5-7: theta / sx / sy — skipped
         f.seek(7 * 4 * recl, 0)
 
-        # Record 8: Source depths (float32)
+        # Records 8-10 hold Pos%Sz, Pos%Rz and Pos%Rr (RWSHDFile.f90:111-114).
+        # The depth vectors are REAL(KIND=4) and the range vector — whose slot
+        # the phase speeds occupy — is REAL(KIND=8)
+        # (SourceReceiverPositions.f90:23-25); the record-length formula counts
+        # them the same way, ``Pos%NSz, Pos%NRz, 2 * Pos%NRr`` words
+        # (RWSHDFile.f90:100).
+
+        # Record 8: Source depths
         sd = np.fromfile(f, dtype=f4, count=nsd)
 
         f.seek(8 * 4 * recl, 0)
 
-        # Record 9: Receiver depths (float32)
+        # Record 9: Receiver depths
         rd = np.fromfile(f, dtype=f4, count=nrd)
 
         f.seek(9 * 4 * recl, 0)
 
-        # Record 10: phase-speed vector (float64), Nk entries.
+        # Record 10: phase-speed vector, Nk entries
         cVec = np.fromfile(f, dtype=f8, count=nk)
 
         # Records 11+: complex Green's function, one record per
-        # (freq, source_depth, receiver_depth) tuple.
+        # (freq, source_depth, receiver_depth) tuple, receiver depth fastest —
+        # ``REC = 10 + (ifreq-1)*NSz*NRz + (iS-1)*NRz + iR`` (scooter.f90:588;
+        # SPARC's snapshot writes the same slabs with output time in the
+        # frequency slot, sparc.f90:286-287). ``irec`` is the 0-based record
+        # index used by every seek above (``irec * 4 * recl`` is the head of
+        # record ``irec + 1``), so starting at 9 and incrementing before the
+        # first seek lands the first slab on record 11.
         G = np.zeros((nfreq, nsd, nrd, nk), dtype=np.complex64)
         irec = 9
         for ifreq in range(nfreq):
@@ -193,10 +206,12 @@ def _wavenumbers_for_frequency(grn_data: Dict[str, Any], freq: float) -> np.ndar
 def _stab_attenuation(grn_data: Dict[str, Any], k: np.ndarray) -> float:
     """Stabilising attenuation to use in the integrand.
 
-    ``fieldsco.m:110-112`` overrides ``atten = Δk`` for SCOOTER (the solver
-    only writes one ``atten`` value to the header; for broadband each
-    frequency has its own ``Δk`` so we recompute). For SPARC this is 0.
-    For other titles we trust the value stored in the header.
+    ``fieldsco.m:113-115`` overrides ``atten = Δk`` for SCOOTER (the solver
+    writes one ``atten`` to the header, but sets it per frequency as
+    ``Atten = Deltak``, ``scooter.f90:129``). The override is unconditional
+    there and here, so a run that zeroed the stabilising attenuation with
+    ``TopOpt(7:7) = '0'`` (``scooter.f90:130``) still gets ``Δk`` back. For
+    SPARC this is 0. For other titles we trust the header value.
     """
     if grn_data["is_sparc"]:
         return 0.0
@@ -302,7 +317,8 @@ def _hankel_transform(
     ("This version uses the trapezoidal rule directly to do a DFT, rather
     than an FFT").
 
-    Implements the four ``fieldsco.m`` branches we expose:
+    Implements three of ``fieldsco.m``'s four source branches (its ``'H'``
+    exact-Bessel branch, ``fieldsco.m:139-144``, is not exposed):
 
     ============  ==================================================
     source_type   Geometry

@@ -12,6 +12,7 @@ from uacpy.core.exceptions import ConfigurationError
 from uacpy.core._carrier_validate import (
     _validate_acoustic_type, _require_strictly_increasing,
     _require_positive, _require_non_negative, _coerce_data_sources,
+    _dedupe_provenance,
 )
 
 
@@ -34,6 +35,9 @@ class SedimentLayer:
         Shear wave speed (m/s). Default 0.0 (fluid layer).
     shear_attenuation : float
         Shear attenuation (dB/wavelength). Default 0.0.
+    roughness : float
+        RMS roughness (m) of the interface at the *top* of this layer, so the
+        first layer's value is the seafloor. Default 0.0 (smooth).
 
     Examples
     --------
@@ -46,13 +50,15 @@ class SedimentLayer:
     attenuation: float = 0.5
     shear_speed: float = 0.0
     shear_attenuation: float = 0.0
+    roughness: float = 0.0
     name: Optional[str] = None
 
     def __post_init__(self):
         _require_positive(self.thickness, "SedimentLayer thickness", hint="m")
         _require_positive(self.sound_speed, "SedimentLayer sound_speed", hint="m/s")
         _require_positive(self.density, "SedimentLayer density", hint="g/cm^3")
-        for attr in ('attenuation', 'shear_speed', 'shear_attenuation'):
+        for attr in ('attenuation', 'shear_speed', 'shear_attenuation',
+                     'roughness'):
             _require_non_negative(getattr(self, attr), f"SedimentLayer {attr}")
 
     def __repr__(self) -> str:
@@ -205,11 +211,15 @@ class BoundaryProperties:
             else:
                 setattr(self, name, float(getattr(self, name)))
 
-        # sound_speed is non-negative (0 ok for vacuum/rigid), unlike
-        # SedimentLayer.sound_speed which must be strictly positive.
         _require_positive(self.density, "BoundaryProperties density", hint="g/cm^3")
+        # sound_speed is only required non-negative here, unlike
+        # SedimentLayer.sound_speed which must be strictly positive.
+        # roughness is an RMS magnitude and the OASES writers put it in a
+        # column whose sign is an encoding: RG < 0 makes INENVI re-read the
+        # record as nine tokens (oases/src/oaseun31.f:72-93), so a negative
+        # value shifts every later READ in the deck.
         for name in ('sound_speed', 'attenuation', 'shear_speed',
-                     'shear_attenuation'):
+                     'shear_attenuation', 'roughness'):
             _require_non_negative(getattr(self, name), f"BoundaryProperties {name}")
 
         # Explicitly passed acoustic params drive both the auto-inference
@@ -566,6 +576,9 @@ class SeabedColumn:
 
         deepest_layer_bottom = depths[-1][1] if depths else seafloor_depth
         final_depth = float(zmax) if zmax is not None else deepest_layer_bottom
+        # Give the half-space a non-zero depth extent: a ``zmax`` that does not
+        # reach past the layer stack would emit both of its breakpoints at the
+        # same depth, i.e. a step of zero thickness.
         if final_depth <= deepest_layer_bottom:
             final_depth = deepest_layer_bottom + 1.0
         for prop in properties:
@@ -630,6 +643,10 @@ class SeabedColumn:
         max_thick = (float(max_thickness) if max_thickness is not None
                      else self.total_thickness())
         if max_thick <= 0:
+            # A pure half-space has no thickness, and ``linspace(0, 0, n)``
+            # would return n identical depths. 1 m keeps the grid non-degenerate
+            # without changing the samples: with no layers every depth resolves
+            # to the half-space anyway.
             max_thick = 1.0
         sample_depths = np.linspace(0, max_thick, n_points)
         cp = np.empty(n_points)
@@ -758,13 +775,7 @@ class Bottom:
     def data_sources(self) -> tuple:
         """Aggregated provenance across all columns, de-duplicated by source id
         (harmonised with the leaf carriers and ``env.data_sources``)."""
-        seen, out = set(), []
-        for c in self.columns:
-            for r in getattr(c, 'data_sources', ()) or ():
-                if r.source.id not in seen:
-                    seen.add(r.source.id)
-                    out.append(r)
-        return tuple(out)
+        return _dedupe_provenance(self.columns)
 
     @property
     def is_range_dependent(self) -> bool:
@@ -832,8 +843,9 @@ class Bottom:
         """Half-space ``BoundaryProperties`` at ``range`` (m). ``interp=None``
         auto-resolves: **linear** when every column is a pure half-space
         (the only case where blending properties is well-defined), else
-        **nearest**. The non-blendable fields (``reflection_file``,
-        ``grain_size_phi``) come from the r = 0 column."""
+        **nearest**. A blend takes the non-blendable fields (``acoustic_type``,
+        ``reflection_file``, ``grain_size_phi``) from the r = 0 column; a
+        nearest lookup returns that column's half-space intact."""
         if interp not in (None, 'linear', 'nearest'):
             raise ConfigurationError(
                 f"Bottom.halfspace_at: interp must be 'linear', 'nearest' or "

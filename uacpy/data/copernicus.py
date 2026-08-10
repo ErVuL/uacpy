@@ -60,7 +60,7 @@ WAVE_TP_VAR = 'VTPK'                 # wave peak period (s)
 DEFAULT_BGC_DATASET_ID = 'cmems_mod_glo_bgc_my_0.25deg_P1M-m'
 BGC_PH_VAR = 'ph'                    # sea-water pH (total scale)
 # Max days the nearest available time step may sit from the requested date
-# before we treat it as out-of-coverage and raise (shared tolerance contract
+# before it counts as out-of-coverage and raises (shared tolerance contract
 # with the other dated SSP sources — cf. argo.DEFAULT_MAX_DAYS=15). Looser than
 # Argo's by design: this is daily-mean *model* output (smooth, persistent — and
 # in-coverage the nearest step is sub-day, so this is really a coverage-edge
@@ -171,13 +171,9 @@ def fetch_ssp_transect_operational(
         )
     when = parse_date(date).isoformat()
     marine = _import_copernicusmarine()
-    try:
-        ds = marine.open_dataset(dataset_id=dataset_id)
-    except Exception as exc:
-        raise DataFetchError(
-            f"Copernicus Marine open_dataset failed: {exc}",
-            remediation="Run `copernicusmarine login` and check the dataset_id.",
-        ) from exc
+    ds = _open_dataset(
+        marine, dataset_id,
+        remediation="Run `copernicusmarine login` and check the dataset_id.")
 
     lats, lons, ranges_m = geodesic_waypoints(start, end, n_points)
     speed_fn = _FORMULAS[formula]
@@ -236,14 +232,7 @@ def _ts_column(point, *, date, max_days, dataset_id, verbose):
 
     log_message('copernicus', f"opening {dataset_id} for {lat:.3f}, {lon:.3f}",
                 verbose=verbose, level='debug')
-    try:
-        ds = marine.open_dataset(dataset_id=dataset_id)
-    except Exception as exc:  # toolbox raises a variety of auth/network errors
-        raise DataFetchError(
-            f"Copernicus Marine open_dataset failed: {exc}",
-            remediation="Run `copernicusmarine login` (free account) and check "
-                        "the dataset_id and network connectivity.",
-        ) from exc
+    ds = _open_dataset(marine, dataset_id)
 
     depths, temp, sal, actual = _extract_ts(ds, lat, lon, when,
                                             max_days=max_days)
@@ -300,6 +289,10 @@ def _extract_ts(
     callers stamp into their :class:`DataProvenance`.
     """
     depth = np.asarray(ds['depth'].values, dtype=float).reshape(-1)
+    # sel(method='nearest') carries no tolerance: an out-of-range coordinate
+    # snaps silently to the axis edge (the hazard _snapped_date guards for
+    # time). A caller may give longitude in [0, 360), so it is wrapped into one
+    # convention here rather than handed to sel as supplied.
     sel = {'latitude': lat, 'longitude': normalize_lon(lon)}
     if when is not None:
         sel['time'] = when
@@ -311,6 +304,8 @@ def _extract_ts(
 
     n = min(depth.size, t.size, s.size)
     depth, t, s = depth[:n], t[:n], s[:n]
+    # Levels below the seafloor come back masked/non-finite, so the first
+    # invalid level is the seafloor cut (index 0 = the cell is on land).
     valid = np.isfinite(t) & np.isfinite(s)
     cut = valid.size if valid.all() else int(np.argmax(~valid))
     return depth[:cut], t[:cut], s[:cut], actual
@@ -336,14 +331,7 @@ def fetch_waves_operational(
     marine = _import_copernicusmarine()
     log_message('waves', f"opening {dataset_id} for {lat:.3f}, {lon:.3f}",
                 verbose=verbose, level='debug')
-    try:
-        ds = marine.open_dataset(dataset_id=dataset_id)
-    except Exception as exc:  # toolbox raises a variety of auth/network errors
-        raise DataFetchError(
-            f"Copernicus Marine open_dataset failed: {exc}",
-            remediation="Run `copernicusmarine login` (free account) and check "
-                        "the dataset_id and network connectivity.",
-        ) from exc
+    ds = _open_dataset(marine, dataset_id)
 
     sel = {'latitude': lat, 'longitude': normalize_lon(lon), 'time': when}
     hs_da = ds[WAVE_HS_VAR].sel(method='nearest', **sel)
@@ -397,14 +385,7 @@ def fetch_ph_operational(
     marine = _import_copernicusmarine()
     log_message('copernicus', f"opening {dataset_id} (pH) for {lat:.3f}, "
                 f"{lon:.3f}", verbose=verbose, level='debug')
-    try:
-        ds = marine.open_dataset(dataset_id=dataset_id)
-    except Exception as exc:  # toolbox raises a variety of auth/network errors
-        raise DataFetchError(
-            f"Copernicus Marine open_dataset failed: {exc}",
-            remediation="Run `copernicusmarine login` (free account) and check "
-                        "the dataset_id and network connectivity.",
-        ) from exc
+    ds = _open_dataset(marine, dataset_id)
 
     sel = {'latitude': lat, 'longitude': normalize_lon(lon), 'time': when}
     ph_da = ds[BGC_PH_VAR].sel(method='nearest', **sel)
@@ -434,6 +415,22 @@ def fetch_ph_operational(
         return float(ph[0])
     i = int(np.argmin(np.abs(depth - float(reference_depth))))
     return float(ph[i])
+
+
+_LOGIN_HINT = ("Run `copernicusmarine login` (free account) and check "
+               "the dataset_id and network connectivity.")
+
+
+def _open_dataset(marine, dataset_id, *, remediation=_LOGIN_HINT):
+    """Open a Copernicus Marine dataset, wrapping the toolbox's assorted
+    auth/network failure modes in one typed :class:`DataFetchError`."""
+    try:
+        return marine.open_dataset(dataset_id=dataset_id)
+    except Exception as exc:
+        raise DataFetchError(
+            f"Copernicus Marine open_dataset failed: {exc}",
+            remediation=remediation,
+        ) from exc
 
 
 def _import_copernicusmarine():

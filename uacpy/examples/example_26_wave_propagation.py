@@ -42,7 +42,7 @@ The script saves (under ``output/``):
 * ``example_26_wave_propagation.png`` — snapshot grid: all five solvers ×
   time frames.
 * ``example_26_<model>.gif`` — one animation per solver (``sparc``,
-  ``scooter``, ``ram``, ``krakenfield``, ``bellhop``).
+  ``scooter``, ``ram``, ``kraken``, ``bellhop``).
 
 ENVIRONMENT
     Pekeris guide, 50 m deep (``BATHYMETRY``), fluid half-space bottom.
@@ -75,8 +75,8 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 # grid. Constraints kept in mind:
 #   * RMax / safety-margin / interpolation-edge knobs (SPARC's
 #     ``rmax_safety_margin``, Scooter's ``rmax_multiplier``,
-#     Kraken's ``rmax_m``) are now auto-widened to 3× receiver_max
-#     in TIME_SERIES mode — no need to compute them by hand here.
+#     Kraken's ``rmax_m``) auto-widen to 3× receiver_max in
+#     TIME_SERIES mode — no need to compute them by hand here.
 #   * Range sampling: 64 bins from 2 to 200 m → 3.14 m spacing, against
 #     λ_min = 1500/350 = 4.3 m at f_max. That is ~1.4 samples per
 #     minimum wavelength, so the panels render the pulse envelope and
@@ -152,8 +152,8 @@ def _clip_to_window(field, t_max):
 
 def _shift_time(field, dt: float):
     """Return ``field`` with its time coord shifted by ``dt`` seconds
-    (no data change). Used to put the source-emission peak at t=0 for
-    IFFT-based syntheses that otherwise carry the waveform's peak
+    (no data change). This is what puts the source-emission peak at t=0 for
+    the IFFT-based syntheses, which otherwise carry the waveform's own peak
     offset (``duration/2``) into the output time axis."""
     if dt == 0.0:
         return field
@@ -202,7 +202,8 @@ def _run(name, model, env, source, receiver, waveform=None,
 
 def main():
     print("\n" + "═" * 80)
-    print("EXAMPLE 26: Animated wave propagation (SPARC vs RAM)")
+    print("EXAMPLE 26: Animated wave propagation "
+          "(SPARC / Scooter / RAM / Kraken vs Bellhop)")
     print("═" * 80)
 
     env, source = _build_env_source()

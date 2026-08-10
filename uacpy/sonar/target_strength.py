@@ -158,8 +158,9 @@ def ts_cylinder(
     ``β = kL·sinθ`` with ``θ`` the ensonification angle from broadside
     (perpendicular to the cylinder axis). Urick Table 9.1; Abraham §3.4
     eq. 3.221. Valid near broadside only — the pattern nulls at end-on
-    even though real end-caps still reflect; the null-to-null main-lobe
-    width is ``≈ λ/L`` radians.
+    even though real end-caps still reflect. The first null of
+    ``[sinβ/β]²`` is at ``β = π``, i.e. ``sinθ = λ/(2L)``, so the main
+    lobe spans ``≈ λ/L`` radians null to null.
 
     Parameters
     ----------
@@ -186,6 +187,9 @@ def ts_cylinder(
     k = 2.0 * np.pi / lam
     theta = np.deg2rad(np.asarray(angle_deg, dtype=float))
     beta = k * L * np.sin(theta)
+    # numpy's sinc is the normalized one, sinc(x) = sin(pi*x)/(pi*x), so the
+    # argument is divided by pi to recover Abraham's unnormalized [sin b / b].
+    # This also supplies the b -> 0 limit of 1 at broadside for free.
     pattern = np.sinc(beta / np.pi) ** 2 * np.cos(theta) ** 2
     sigma = a * L ** 2 / (2.0 * lam) * pattern
     with np.errstate(divide='ignore'):
@@ -201,7 +205,7 @@ def ts_plate(
     angle_deg=0.0,
     sound_speed=DEFAULT_SOUND_SPEED,
 ):
-    """Rigid rectangular plate: ``TS = 10·log10[(ab/λ)²·sinc²β·cos²θ]``.
+    """Rigid rectangular plate: ``TS = 10·log10[(wh/λ)²·sinc²β·cos²θ]``.
 
     ``β = k·w·sinθ`` with ``θ`` the angle from normal incidence,
     rotating about the plate's height axis (``w`` = the dimension in
@@ -236,6 +240,9 @@ def ts_plate(
     k = 2.0 * np.pi / lam
     theta = np.deg2rad(np.asarray(angle_deg, dtype=float))
     beta = k * w * np.sin(theta)
+    # numpy's sinc is normalized, sinc(x) = sin(pi*x)/(pi*x); dividing the
+    # argument by pi gives the unnormalized [sin b / b] of the physical-optics
+    # pattern, and its b -> 0 limit of 1 at normal incidence.
     pattern = np.sinc(beta / np.pi) ** 2 * np.cos(theta) ** 2
     sigma = (w * h / lam) ** 2 * pattern
     with np.errstate(divide='ignore'):

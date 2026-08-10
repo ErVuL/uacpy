@@ -1,11 +1,11 @@
 """EMODnet seabed-substrate fetch (European seas) → ``BoundaryProperties``.
 
-Audit follow-up to :mod:`uacpy.data.sediment`. There is no clean *global*
-no-auth point service for seabed geoacoustics — the canonical reference
-(WOSS) bundles the global **DECK41** sample database and looks it up locally.
-EMODnet Geology, however, serves harmonised seabed substrate (Folk
-classification) for **European seas** through a public OGC **WFS**, which *is*
-lat/lon-queryable. This module turns that into a model-ready bottom.
+There is no clean *global* no-auth point service for seabed geoacoustics — the
+canonical reference (WOSS) bundles the global **DECK41** sample database and
+looks it up locally. EMODnet Geology, however, serves harmonised seabed
+substrate (Folk classification) for **European seas** through a public OGC
+**WFS**, which *is* lat/lon-queryable. This module turns that into a
+model-ready bottom.
 
 Coverage is regional: outside the European-seas footprint the fetch raises
 ``DataFetchError`` and the caller should supply an explicit grain size (ϕ) or
@@ -50,9 +50,12 @@ _FOLK5_TO_BOTTOM = {
 
 def _to_web_mercator(lat: float, lon: float):
     """(lat, lon) degrees → (x, y) metres in EPSG:3857 (the EMODnet CRS)."""
-    r = 6378137.0
+    # EPSG:3857 projects WGS84 coordinates onto a *sphere* of the WGS84
+    # semi-major axis, so this single radius is the whole datum.
+    radius_m = 6378137.0
     lon = normalize_lon(lon)
-    return r * math.radians(lon), r * math.log(math.tan(math.pi / 4 + math.radians(lat) / 2))
+    return (radius_m * math.radians(lon),
+            radius_m * math.log(math.tan(math.pi / 4 + math.radians(lat) / 2)))
 
 
 def fetch_seabed_substrate(

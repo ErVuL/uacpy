@@ -5,9 +5,9 @@ ADVANCED EXAMPLE: All Models - Comprehensive Comparison
 
 OBJECTIVE:
     Compare ALL propagation models with advanced features:
-    - Bellhop (with Cerveny beams)
+    - Bellhop (default geometric Gaussian beams)
     - RAM (with range-dependent SSP and bottom)
-    - Kraken (with mode coupling)
+    - Kraken (with adiabatic modes)
     - Scooter (with volume attenuation)
     - OAST (wavenumber integration)
 SCENARIO:
@@ -78,7 +78,9 @@ def main():
         # Exponential stratification
         T_profile = T_bottom + (T_surface - T_bottom) * np.exp(-depths / 40)
 
-        # Mackenzie sound speed formula (simplified)
+        # Medwin's c(T, z) truncated to its linear terms: the T² and T³ terms
+        # and the salinity term are dropped, so this is a smooth stand-in for
+        # a frontal profile rather than a calibrated seawater equation.
         c = 1449 + 4.6 * T_profile + 0.016 * depths
 
         ssp_2d_matrix[:, i_range] = c
@@ -164,14 +166,15 @@ def main():
     except Exception as e:
         print(f"  ✗ {e}")
 
-    # Kraken with mode coupling
-    print("[3/5] Kraken (adiabatic mode coupling)...")
+    # Kraken with adiabatic modes: each mode propagates independently, so the
+    # range-dependent guide costs one mode solve per segment and no more.
+    print("[3/5] Kraken (adiabatic modes, 4 segments)...")
     try:
-        krakenfield = Kraken(verbose=False, mode_coupling='adiabatic', n_segments=4)
-        results['Kraken'] = krakenfield.run(
+        kraken = Kraken(verbose=False, mode_coupling='adiabatic', n_segments=4)
+        results['Kraken'] = kraken.run(
             env, source, receiver
         )
-        print("  ✓ Success - coupled modes with range-dependent bottom!")
+        print("  ✓ Success - adiabatic modes with range-dependent bottom!")
     except Exception as e:
         print(f"  ✗ {e}")
 

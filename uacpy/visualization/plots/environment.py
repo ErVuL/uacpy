@@ -13,7 +13,6 @@ from uacpy.visualization.style import (
     BOTTOM_LINE_STYLE_FLAT, _blend,
 )
 from uacpy.visualization.plots._common import ZORDER_SEDIMENT, _credit_attributions, _draw_credit, _draw_geometry, _draw_sea_ice, _draw_surface_boundary, _draw_altimetry, fig_ax, typed_plot_error, invert_yaxis_once
-from uacpy.core.environment import BoundaryProperties
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.io.units import km_to_m, m_to_km
 
@@ -26,6 +25,16 @@ from uacpy.io.units import km_to_m, m_to_km
 # at the soft end; harder bottoms (rock basements) simply saturate at the dark
 # end. The exact cp is always in the property card.
 _HALFSPACE_CP_LO, _HALFSPACE_CP_HI = 1450.0, 2300.0
+
+
+def _bottom_kind(bottom) -> str:
+    """Figure-title description of a ``Bottom``'s shape — the two axes a reader
+    needs to know which rendering branch produced the panel. Phrased like
+    :meth:`Bottom.__repr__`."""
+    kind = "layered" if bottom.is_layered else "half-space"
+    if bottom.is_range_dependent:
+        return f"range-dependent {kind}, {bottom.n_ranges} ranges"
+    return kind
 
 
 def _halfspace_cp(bottom) -> float | None:
@@ -70,7 +79,7 @@ def _layered_halfspace_style(hs, cmap, cs_min, cs_range) -> dict:
     return _hatched_fill(cmap(0.25 + 0.6 * norm))
 
 
-def _draw_layered_bottom(ax_bathy, bottom, r_km, z_max_layer,
+def _draw_layered_bottom(ax_bathy, column, r_km, z_max_layer,
                         _layer_cmap_and_norm):
     # Per-layer fills (earthy BOTTOM_CMAP by sound speed) + dashed inter-layer
     # edges + hatched half-space + side legend card. Same visual
@@ -78,7 +87,7 @@ def _draw_layered_bottom(ax_bathy, bottom, r_km, z_max_layer,
     cmap, cs_min, cs_max, _ = _layer_cmap_and_norm()
     cs_range = max(1e-9, cs_max - cs_min)
     z_top = z_max_layer
-    for layer in bottom.layers:
+    for layer in column.layers:
         z_bot = z_top + layer.thickness
         norm_cs = (layer.sound_speed - cs_min) / cs_range
         colour = cmap(0.25 + 0.6 * norm_cs)
@@ -91,8 +100,8 @@ def _draw_layered_bottom(ax_bathy, bottom, r_km, z_max_layer,
                          linestyle='--', alpha=0.5,
                          zorder=ZORDER_SEDIMENT + 2)
         z_top = z_bot
-    hs = bottom.halfspace
-    hs_display = z_top + max(10.0, bottom.total_thickness() * 0.3)
+    hs = column.halfspace
+    hs_display = z_top + max(10.0, column.total_thickness() * 0.3)
     ax_bathy.fill_between(
         r_km, z_top, hs_display, zorder=ZORDER_SEDIMENT,
         **_layered_halfspace_style(hs, cmap, cs_min, cs_range),
@@ -230,11 +239,11 @@ def _draw_rd_bottom(ax_bathy, bottom, r_km, seafloor, z_max_layer):
     return z_max_layer
 
 
-def _draw_halfspace_bottom(ax_bathy, bottom, r_km, seafloor, z_max_layer):
+def _draw_halfspace_bottom(ax_bathy, halfspace, r_km, seafloor, z_max_layer):
     zmax_plot = z_max_layer * 1.2
     # Single half-space shaded by its sound speed (the '///' hatch keeps the
     # half-space signature); flat tan for vacuum / rigid / file (no cp value).
-    cp = _halfspace_cp(bottom) if isinstance(bottom, BoundaryProperties) else None
+    cp = _halfspace_cp(halfspace)
     ax_bathy.fill_between(r_km, seafloor, zmax_plot,
                           zorder=ZORDER_SEDIMENT,
                           **_halfspace_fill_style(cp))
@@ -287,7 +296,7 @@ def _plot_environment(
     concentration 0–1 (uniform) or ``(ranges_km, concentration)`` (range-varying,
     e.g. from ``uacpy.data.fetch_sea_ice_concentration_transect``).
 
-    ``title`` overrides the default ``"Bottom — <type>"`` panel title.
+    ``title`` overrides the default ``"Bottom — <shape>"`` panel title.
     """
     if not isinstance(env, Environment):
         raise ConfigurationError(
@@ -385,16 +394,13 @@ def _plot_environment(
             bottom_cs_pool or water_cs_pool, bottom_cmap_truncated,
         )
 
-    def _layer_cmap_and_norm(cs_values=None):
+    def _layer_cmap_and_norm():
         """Bottom-only normalization shared by the layered / range-dependent
         seabed branches. Returns ``(base_cmap, cs_min,
         cs_max, sm)`` where ``base_cmap`` is the raw BOTTOM_CMAP — branches sample
         it at ``0.25 + 0.6 * norm`` for the truncated band, so the
         ``ScalarMappable`` has to match (truncated) for the colorbar to read."""
-        if cs_values is None:
-            return bottom_cmap_full, bot_cs_min, bot_cs_max, bottom_sm
-        cs_min, cs_max, sm = _make_sm(cs_values, bottom_cmap_truncated)
-        return bottom_cmap_full, cs_min, cs_max, sm
+        return bottom_cmap_full, bot_cs_min, bot_cs_max, bottom_sm
 
     # Water column on the bathy panel — water cmap (Blues), normalized
     # to its own cs range. The bottom rendering below covers anything
@@ -494,7 +500,7 @@ def _plot_environment(
     if sea_ice is not None:
         _draw_sea_ice(ax_bathy, sea_ice)
     ax_bathy.set_title(title if title is not None
-                       else f"Bottom — {type(env.bottom).__name__}",
+                       else f"Bottom — {_bottom_kind(bottom)}",
                        fontweight='bold', fontsize=12)
 
     if ax is None:
@@ -583,10 +589,11 @@ def _layered_property_at_depths(layered, prop, seafloor, z):
 
 def _seabed_property_grid(bottom, prop, r_km, z, seafloor_r):
     """``[len(z), len(r_km)]`` grid of ``prop`` in the seabed, NaN above the
-    range-local seafloor."""
+    range-local seafloor — the water column is left blank because NaN cells
+    render as the axes background."""
     grid = np.full((len(z), len(r_km)), np.nan)
     for j, r_node in enumerate(r_km):
-        r_m = float(r_node) * 1000.0
+        r_m = float(km_to_m(r_node))
         below = z >= seafloor_r[j]
         if not np.any(below):
             continue
@@ -628,7 +635,7 @@ def plot_bottom_properties(env, *, properties=None, title: Optional[str] = None,
 
     if env.has_range_dependent_bathymetry:
         b = env.bathymetry
-        seafloor_r = np.interp(r_km * 1000.0, b.ranges, b.depths)
+        seafloor_r = np.interp(km_to_m(r_km), b.ranges, b.depths)
     else:
         seafloor_r = np.full(r_km.shape, float(env.depth))
 
@@ -689,7 +696,7 @@ def plot_bottom_properties(env, *, properties=None, title: Optional[str] = None,
         ax_p.set_visible(False)
 
     fig.suptitle(title if title is not None
-                 else f"Seabed properties — {type(bottom).__name__}",
+                 else f"Seabed properties — {_bottom_kind(bottom)}",
                  fontweight='bold', fontsize=13)
     _draw_credit(fig, _credit_attributions(data_source, carrier=env),
                       reserve=False)

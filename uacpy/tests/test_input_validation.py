@@ -1,10 +1,13 @@
-"""Fast unit tests for the input-validation guards added for G1-G8.
+"""Input-validation guards, grouped by the G1-G8 labels used in the section
+headers below: monotonicity rejection (G1), range-coverage warnings (G3),
+per-range receiver-depth checks (G4), the RAM Collins RD-bottom path (G2),
+the range=0 SSP fallback in Bellhop's .env block (G6) and the acoustic_type
+guard (G8).
 
-These tests cover monotonicity rejection, range-coverage warnings,
-per-range receiver-depth checks, the range=0 SSP fallback in Bellhop's
-.env block, the acoustic_type guard, and the RAM Collins RD-bottom
-warning. They are kept light (no binary execution) so the full file
-runs in under a second.
+Most cases reach only ``validate_inputs`` / ``_project_environment`` / a
+writer, so they need no binary; the handful marked ``requires_binary``
+construct a model (which resolves its executable) and a few of those do run
+one. Whole file: a few seconds.
 """
 
 import warnings
@@ -219,41 +222,70 @@ def test_warn_when_receiver_overruns_ssp_ranges():
 
 # --- G2 RAM Collins RD-bottom warning --------------------------------------
 
-@pytest.mark.requires_binary  # constructs RAM (resolves its binary)
-def test_ram_collins_threads_rd_bottom():
-    """The Collins backends now emit one ``ram.in`` profile section per range
-    break, so a range-dependent bottom is *modelled* — not dropped with the
-    old 'range-0 bottom geoacoustics only' warning."""
-    rd_bot = Bottom.from_halfspaces(
-        np.array([0.0, 5_000.0]),
-        sound_speed=np.array([1700.0, 1800.0]),
-        density=np.array([1.7, 1.9]),
-        attenuation=np.array([0.5, 0.4]),
-        shear_speed=np.array([400.0, 500.0]),
+def _elastic_rd_bottom(sound_speed, density, attenuation):
+    """Two-column elastic bottom breaking at 2 km. Shear is held constant across
+    the break: rams0.5 goes unstable on a 500 m/s shear column at this grid
+    whether or not the bottom is range-dependent, which would mask the property
+    under test."""
+    return Bottom.from_halfspaces(
+        np.array([0.0, 2_000.0]),
+        sound_speed=np.array(sound_speed),
+        density=np.array(density),
+        attenuation=np.array(attenuation),
+        shear_speed=np.array([400.0, 400.0]),
         acoustic_type='half-space',
     )
-    env = Environment(bathymetry=100.0, ssp=1500.0, bottom=rd_bot)
+
+
+@pytest.mark.requires_binary  # constructs RAM (resolves its binary)
+def test_ram_collins_threads_rd_bottom(tmp_path):
+    """The Collins backends emit one ``ram.in`` profile section per range
+    break, so a range-dependent bottom is modelled rather than reduced to its
+    r=0 column. No 'range-0' warning may therefore be raised on this env."""
+    env = Environment(bathymetry=100.0, ssp=1500.0,
+                      bottom=_elastic_rd_bottom([1700.0, 1800.0], [1.7, 1.9],
+                                                [0.5, 0.4]))
     assert env.has_elastic_bottom
-    ram = RAM()
+    ram = RAM(work_dir=str(tmp_path), cleanup=False)
     assert ram.select_backend(env) == 'rams'
     src = uacpy.Source(depths=10.0, frequencies=100.0)
     rcv = uacpy.Receiver(depths=np.array([50.0]),
                          ranges=np.array([2_000.0]))
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        try:
-            ram.run(env, src, rcv, run_mode=uacpy.RunMode.COHERENT_TL)
-        except Exception:
-            pass
-    msgs = [str(w.message) for w in caught]
-    assert not any("range-0" in m for m in msgs)
+        field = ram.run(env, src, rcv, run_mode=uacpy.RunMode.COHERENT_TL)
+    p_rd = complex(np.asarray(field.data).ravel()[0])
+    assert np.isfinite(p_rd)
+    assert not any("range-0" in str(w.message) for w in caught)
+
+    # rams writes six profile blocks per section, so bathymetry plus two
+    # sections is 13 terminators. The section marker is the midpoint of the two
+    # breakpoints, inside the 2 km march, and each section carries its own
+    # compressional column.
+    deck = (tmp_path / 'rams.in').read_text().splitlines()
+    assert deck.count('-1 -1') == 1 + 6 * 2
+    cut = deck.index('1000.000000')
+    head, tail = deck[:cut], deck[cut:]
+    assert any('1700.000000' in ln for ln in head)
+    assert not any('1800.000000' in ln for ln in head)
+    assert any('1800.000000' in ln for ln in tail)
+    assert not any('1700.000000' in ln for ln in tail)
+
+    # Reducing the bottom to its r=0 column would reproduce this field exactly.
+    p_r0 = complex(np.asarray(RAM().run(
+        Environment(bathymetry=100.0, ssp=1500.0,
+                    bottom=_elastic_rd_bottom([1700.0, 1700.0], [1.7, 1.7],
+                                              [0.5, 0.5])),
+        src, rcv, run_mode=uacpy.RunMode.COHERENT_TL).data).ravel()[0])
+    assert abs(p_rd - p_r0) > 0.05 * abs(p_r0)
 
 
 def test_oalib_writer_drops_subresolution_layers():
     """A sediment layer thinner than the .env's .1f depth resolution is dropped,
     so the AT writer never emits a degenerate (top==bottom) zero-thickness
-    medium (which makes Kraken/Scooter/Bounce fail). Regression for a CRUST1
-    bare-rock column rescaled to a ~1e-5 m sliver."""
+    medium, which makes Kraken/Scooter/Bounce fail. A fetched crustal column
+    rescaled to fit a thin sediment cover can produce such a sliver, so the
+    guard has to live in the writer rather than in the caller."""
     from uacpy.io.oalib_writer import writable_layers, _MIN_LAYER_THICKNESS_M
     hs = BoundaryProperties(acoustic_type='half-space', sound_speed=1800,
                             density=2.0, attenuation=0.1)
@@ -271,6 +303,9 @@ def test_oalib_writer_drops_subresolution_layers():
 # --- G6 Bellhop .env range=0 SSP fallback ----------------------------------
 
 def test_bellhop_env_ssp_block_uses_range_zero_profile(tmp_path):
+    """The .env SSP block is the profile at r=0 even when the 2-D SSP carries
+    no r=0 column: the grid here starts at 1000 m, so r=0 is the constant
+    back-extrapolation of the first profile."""
     from uacpy.io.bellhop_writer import write_bellhop_env_file
 
     ssp = SoundSpeedProfile.from_2d(
@@ -285,6 +320,10 @@ def test_bellhop_env_ssp_block_uses_range_zero_profile(tmp_path):
     env_path = tmp_path / 'test.env'
     write_bellhop_env_file(env_path, env, src, rcv)
 
+    # AT's SSP block opens with the medium mesh line ``NMESH SIGMA ZMAX,``
+    # (trailing comma, e.g. ``2  0.0  100.0,``) and then runs one
+    # ``z c ... /`` record per depth, so the comma opens the block and the
+    # first line without a ``/`` closes it.
     block = []
     in_ssp = False
     for line in env_path.read_text().splitlines():
@@ -299,8 +338,9 @@ def test_bellhop_env_ssp_block_uses_range_zero_profile(tmp_path):
             block.append((float(parts[0]), float(parts[1])))
 
     assert len(block) >= 2
-    expected_top = float(np.interp(0.0, ssp.ranges, ssp.data[0, :]))
-    assert abs(block[0][1] - expected_top) < 1e-3
+    # Surface sound speed of the first profile (r = 1000 m), which constant
+    # back-extrapolation carries to r=0 unchanged.
+    assert block[0][1] == pytest.approx(1500.0, abs=1e-3)
 
 
 # --- Positive-path tests: independent grids should reconcile cleanly -------
@@ -457,12 +497,13 @@ def test_receiver_depth_accepted_across_models_harmonized():
 
 
 @pytest.mark.requires_binary  # constructs Scooter (resolves its binary)
-def test_scooter_collapses_rd_env_with_warning(simple_env):
-    """A model without RD support (Scooter — range-independent FFP) should
-    collapse the env and emit one warning per dropped axis; the env returned
-    by _project_environment must be range-independent regardless of input
-    shape. (Kraken now segments RD natively via field.exe, so it is no
-    longer a valid vehicle for this collapse test.)"""
+def test_scooter_collapses_rd_env_with_warning():
+    """A model without RD support collapses the env and emits one warning per
+    dropped axis; the env returned by ``_project_environment`` is
+    range-independent regardless of input shape.
+
+    Scooter is the vehicle because it is a range-independent FFP. Kraken
+    segments RD natively via field.exe, so it would not collapse here."""
     scooter = Scooter()
     ssp = SoundSpeedProfile.from_2d(
         depths=np.array([0.0, 100.0]),
@@ -480,8 +521,6 @@ def test_scooter_collapses_rd_env_with_warning(simple_env):
     text = " ".join(str(w.message) for w in caught)
     assert "range-dependent bathymetry" in text
     assert "range-dependent SSP" in text
-    # the autouse 'simple_env' fixture is referenced to satisfy pytest
-    assert simple_env.depth > 0
 
 
 @pytest.mark.requires_binary  # constructs RAM (resolves its binary)
@@ -558,7 +597,7 @@ def test_bellhop_quad_ssp_emits_unchanged_ssp_file(tmp_path):
     )
     ranges_km = list(map(float, lines[1].split()))
     # r_box = 1.2 * 2000 m = 2400 m -> guard at -1.1 * r_box = -2.64 km.
-    assert ranges_km[0] < 0.0
+    assert ranges_km[0] == pytest.approx(-2.64)
     assert ranges_km[1:] == [0.0, 1.0, 5.0]
     # Two depths -> two SSP rows; the guard column duplicates the first
     # real profile, the rest pass through verbatim.
@@ -570,8 +609,8 @@ def test_bellhop_quad_ssp_emits_unchanged_ssp_file(tmp_path):
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Unknown run() kwargs → TypeError (Python rejects them at the call site
-# since ``**kwargs`` is no longer present on any concrete ``run()``).
+# Unknown run() kwargs → TypeError (no concrete ``run()`` takes
+# ``**kwargs``, so Python rejects them at the call site).
 # ──────────────────────────────────────────────────────────────────────
 
 
@@ -653,7 +692,7 @@ def test_surface_source_warns_for_field_runs():
         Bellhop().compute_tl(env, uacpy.Source(depths=10.0, frequencies=200.0), rcv)
 
 
-# --- C4/C6 manual-audit regression locks -----------------------------------
+# --- Silent-coercion guards: extrapolation and container types -------------
 def test_get_sound_speed_warns_on_extrapolation():
     """Depths outside the (bathymetry-extended) SSP are constant-extrapolated
     with a UserWarning, not silently."""

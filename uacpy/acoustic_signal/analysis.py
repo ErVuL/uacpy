@@ -54,6 +54,16 @@ def ppsd(data, sample_rate, *, seg_duration=1.0, overlap_pct=50, ddB=1.0,
     longer axis as time; pass a list of 1-D arrays to be explicit. For a
     constant-Q (geometric-frequency) PPSD, see
     :func:`uacpy.acoustic_signal.probabilistic_constant_q`.
+
+    ``pdf`` is a probability *density* (each frequency column integrates to 1
+    over the level axis, i.e. ``nansum(col) * binwidth_db == 1``) and **empty
+    bins are NaN, not 0**, so a level never observed stays blank instead of
+    being drawn as the lowest colour. Reduce it with the ``nan``-aware
+    functions: plain ``pdf.sum()`` returns NaN.
+
+    ``mean_db`` and ``std_db`` are taken over *all* segments, so they are not
+    clipped by ``lvlmin`` / ``lvlmax`` the way the histogram is; if levels fall
+    outside that window the two stop describing the same population.
     """
     if isinstance(data, list):
         signals = data
@@ -188,6 +198,14 @@ def sel(data, sample_rate, *, fmin=8.9125, fmax=22387,
     Uses a rectangular (boxcar) window with ``noverlap=0`` and no detrending so
     the summed PSD equals the band exposure exactly (Parseval); do not change
     this — a smoothing window would corrupt the energy identity.
+
+    The default ``fmin``/``fmax`` are the base-10 band edges of the nominal
+    10 Hz — 20 kHz reporting range: ``10^0.95 = 8.9125`` Hz is the lower edge of
+    the 10 Hz band and ``10^4.35 = 22387`` Hz the upper edge of the 10^4.3 =
+    19953 Hz ("20 kHz") band. For ``band_type='octave'``/``'third_octave'``
+    they are then snapped to that base-2 grid and to Nyquist
+    (:func:`_sel_adjust_fmin_fmax`); ``'linear'`` uses them as given. ``nfft``
+    defaults to ``sample_rate``, i.e. 1 Hz wide bins.
     """
     data = require_finite_signal(data, "sel")
     if integration_time is not None:
@@ -207,19 +225,26 @@ def sel(data, sample_rate, *, fmin=8.9125, fmax=22387,
     window = _sig.windows.boxcar(nfft)
     f = np.fft.rfftfreq(nfft, d=1 / sample_rate)
     edges = np.array([b[0] for b in bands] + [bands[-1][2]])
+    # digitize is 1-based, so -1 gives the 0-based band index; bins below the
+    # first edge become -1 and bins above the last become len(bands), and
+    # neither matches any k in range(len(bands)) — they drop out of the sum.
     bin_band = np.digitize(f, edges) - 1
     band_bins = [np.where(bin_band == k)[0] for k in range(len(bands))]
     out = np.zeros(len(bands))
 
     for i in range(0, len(data), chunk_size):
         chunk = data[i: min(i + chunk_size, len(data))]
-        n_seg = max(1, -(-len(chunk) // nfft))
+        n_seg = max(1, -(-len(chunk) // nfft))   # ceil division
         pad = n_seg * nfft - len(chunk)
         if pad:
             chunk = np.pad(chunk, (0, pad))
         _f, _t, Sxx = _sig.spectrogram(
             chunk, sample_rate, window=window, noverlap=0, nfft=nfft,
             detrend=False, scaling="density")
+        # Sxx is a density (Pa^2/Hz), so a segment's band exposure is
+        # sum(Sxx)*df*T_seg with df = sample_rate/nfft and T_seg = nfft/
+        # sample_rate. Those cancel exactly, which is why the bare bin sum
+        # below is already in Pa^2*s and holds for any nfft.
         Sxx_sum = np.sum(Sxx, axis=1)
         for k, idx in enumerate(band_bins):
             out[k] += np.sum(Sxx_sum[idx])

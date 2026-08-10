@@ -86,7 +86,7 @@ class Scenario:
 
 
 def _kraken_field_tl(env, src, rcv):
-    """KrakenField.run → COHERENT_TL Field."""
+    """Kraken.run → COHERENT_TL Field; auto-routes to krakenc for elastic."""
     return Kraken(verbose=False).run(env, src, rcv, run_mode=RunMode.COHERENT_TL)
 
 
@@ -133,7 +133,7 @@ def _pekeris_fluid() -> Scenario:
     return Scenario(
         name='pekeris-fluid-50Hz-36m',
         env=env, source=src, receiver=rcv,
-        reference_label='KrakenField',
+        reference_label='Kraken',
         reference=_kraken_field_tl,
         comparisons=[
             # Mode-vs-mode and PE-vs-mode agreement is tight on Pekeris.
@@ -149,13 +149,14 @@ def _pekeris_fluid() -> Scenario:
 
 
 def _pekeris_elastic() -> Scenario:
-    """The Pekeris-elastic scenario — the canonical RAMS-vs-KrakenC validation.
+    """The Pekeris-elastic scenario — the canonical RAMS-vs-krakenc validation.
 
     Tuning rationale: ``RAM(...)`` defaults to ``np_pade=6`` and
     ``rams_theta=45`` (see uacpy/models/ram.py:_run_collins). On this
     scenario the dispatcher routes to rams0.5; with those defaults the
-    RMSE against KrakenField (which auto-routes to KrakenC for elastic)
-    is ~1.5 dB over the 1-8 km window and TL @ 5 km matches within 0.1 dB.
+    RMSE against Kraken (which auto-routes to the krakenc backend for
+    elastic) is ~1.5 dB over the 1-8 km window and TL @ 5 km matches
+    within 0.1 dB.
     """
     elastic_layered = SeabedColumn(
         layers=[SedimentLayer(
@@ -185,7 +186,7 @@ def _pekeris_elastic() -> Scenario:
         ranges=np.linspace(200.0, 8000.0, 50),
     )
 
-    # KrakenField wants the half-space form (elastic Comp selector applies
+    # Kraken wants the half-space form (elastic Comp selector applies
     # to a single halfspace). RAMS wants the layered form (the writer
     # emits the layered bottom as a Collins piecewise profile). The
     # underlying physics is the same; both bottoms describe the same
@@ -194,7 +195,7 @@ def _pekeris_elastic() -> Scenario:
         return _kraken_field_tl(env_halfspace, src, rcv)
 
     # RAMS is sensitive to (dr, dz, np_pade, theta); the values below
-    # were tuned against the KrakenC reference (RMSE ≈ 1.5 dB over
+    # were tuned against the krakenc-backend reference (RMSE ≈ 1.5 dB over
     # 1-8 km, TL@5km within 0.1 dB). The README of the upstream code
     # explicitly notes that RAMS needs hand-tuning per problem; uacpy's
     # default ``rams_theta=45`` and ``np_pade=6`` come from this scenario.
@@ -206,7 +207,7 @@ def _pekeris_elastic() -> Scenario:
     return Scenario(
         name='pekeris-elastic-50Hz-36m',
         env=env_layered, source=src, receiver=rcv,
-        reference_label='KrakenField (auto-KrakenC)',
+        reference_label='Kraken (auto-krakenc)',
         reference=reference,
         comparisons=[('RAM(rams0.5)', rams, 3.0)],
         tolerance_db=3.0,
@@ -266,7 +267,7 @@ def _altimetry_consistency() -> Scenario:
 def _pekeris_fluid_hf() -> Scenario:
     """Higher-frequency Pekeris (250 Hz). With ~20 modes the ray-mode
     agreement tightens — Bellhop, Scooter, and RAM(mpiramS) should all
-    track KrakenField within a few dB. A second test point above the
+    track Kraken within a few dB. A second test point above the
     50 Hz scenario gives the framework a frequency-dependence handle.
     """
     env = Environment(
@@ -284,7 +285,7 @@ def _pekeris_fluid_hf() -> Scenario:
     return Scenario(
         name='pekeris-fluid-250Hz-36m',
         env=env, source=src, receiver=rcv,
-        reference_label='KrakenField',
+        reference_label='Kraken',
         reference=_kraken_field_tl,
         comparisons=[
             ('Scooter', _scooter_tl, 4.0),
@@ -296,14 +297,14 @@ def _pekeris_fluid_hf() -> Scenario:
 
 
 def _pekeris_elastic_broadband_at_fc() -> Scenario:
-    """RAMS broadband validation against KrakenField broadband.
+    """RAMS broadband validation against Kraken broadband.
 
     Same Pekeris-elastic env as ``_pekeris_elastic`` but exercises the
     full BROADBAND path: ``rams0.5`` is driven in a Python frequency
     loop reading the patched ``pcomplex.bin``, yielding an engineering
     travelling-wave H(f). The agreement is checked on the TL slice at
     the centre frequency — that's where ``rams_theta`` has been tuned
-    and where KrakenField's modal sum is best resolved. Per-frequency
+    and where Kraken's modal sum is best resolved. Per-frequency
     RMSE across the full band is naturally looser (~5 dB) due to RAMS'
     theta sensitivity vs. frequency; the centre-frequency agreement is
     the meaningful regression anchor.
@@ -357,7 +358,7 @@ def _pekeris_elastic_broadband_at_fc() -> Scenario:
     return Scenario(
         name='pekeris-elastic-broadband-50Hz-fc-slice',
         env=env_layered, source=src, receiver=rcv,
-        reference_label='KrakenField broadband (fc slice)',
+        reference_label='Kraken broadband (fc slice)',
         reference=reference,
         comparisons=[('RAM(rams0.5) broadband', rams_bb, 4.0)],
         tolerance_db=4.0,

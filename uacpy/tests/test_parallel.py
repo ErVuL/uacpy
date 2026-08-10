@@ -353,8 +353,9 @@ def test_copy_onto_a_user_work_dir_does_not_inherit_cleanup(tmp_path):
 
     ``cleanup`` resolves to ``work_dir is None`` at construction, so a plain
     ``Bellhop()`` carries ``cleanup=True``. ``copy()`` rebuilds from the
-    *resolved* attributes, so re-pointing the clone at a user directory used
-    to hand it ``cleanup=True`` and delete that directory after ``run()``.
+    *resolved* attributes, so re-pointing the clone at a user directory has to
+    re-resolve ``cleanup`` too — carrying the parent's ``True`` across would
+    rmtree that directory after ``run()``.
     """
     d = tmp_path / 'user_outputs'
     d.mkdir()
@@ -391,8 +392,10 @@ def test_pool_death_before_any_job_names_the_main_guard(monkeypatch):
     """A pool that dies before any job completes must blame the __main__ guard.
 
     An unguarded module-level ``run_parallel`` in a .py script leaves
-    ``__main__`` importable, so the interactive-session check does not fire and
-    the message used to blame a segfault/OOM instead of the missing guard.
+    ``__main__`` importable, so the interactive-session check does not fire.
+    Dying before any job completes is a *startup* death, and for a script the
+    usual cause is the missing guard — not the segfault/OOM that a mid-run
+    death would indicate.
     """
     from concurrent.futures.process import BrokenProcessPool
     import uacpy.parallel as par

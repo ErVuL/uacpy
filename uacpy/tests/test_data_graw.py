@@ -122,12 +122,12 @@ def test_missing_cache_names_install_flag(tmp_path, monkeypatch):
 # ── density → bottom ────────────────────────────────────────────────────────
 
 def test_bottom_uses_measured_density(graw_cache):
-    # 1.962 g/cm³ is exactly Hamilton's fine sand row (ϕ = 2.5, ratio 1.152):
+    # 1.962 g/cm³ is exactly Hamilton's fine sand row (ϕ = 2.61, ratio 1.152):
     # the bottom carries the *measured* density and the ϕ-derived speed.
     bp = graw_local.fetch_bottom_graw((30.5, -40.5))
     assert bp.acoustic_type == 'half-space'
     assert bp.density == pytest.approx(1.962, abs=1e-3)
-    assert bp.grain_size_phi == pytest.approx(2.5, abs=0.05)
+    assert bp.grain_size_phi == pytest.approx(2.61, abs=0.05)
     assert bp.sound_speed == pytest.approx(1.152 * 1510.0, rel=0.01)
     assert bp.attenuation > 0.0
 
@@ -148,7 +148,7 @@ def test_density_clamped_to_table(tmp_path, monkeypatch):
     _cache.invalidate_grids()
     _write_graw(root, value=2.4)                       # denser than coarse sand
     bp = graw_local.fetch_bottom_graw((30.5, -40.5))
-    assert bp.grain_size_phi == pytest.approx(0.5)     # coarse-sand end member
+    assert bp.grain_size_phi == pytest.approx(0.92)    # coarse-sand end member
     assert bp.density == pytest.approx(2.4, abs=1e-3)
 
 

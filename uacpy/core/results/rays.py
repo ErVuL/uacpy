@@ -285,9 +285,11 @@ class Rays(Result):
         Ray dicts with ``r``, ``z``, ``alpha``, ``n_top_bounces``,
         ``n_bot_bounces``. **Polyline coordinates ``r`` (range) and
         ``z`` (depth) are in metres**; ``alpha`` is the launch angle
-        in degrees. The Bellhop reader
-        (:func:`uacpy.io.oalib_reader.read_ray_file`) preserves
-        Bellhop's native metre output, so downstream helpers such as
+        in degrees. Bellhop writes the polyline as ``ray2D%x`` in metres
+        (``Bellhop/WriteRay.f90:45``) behind a take-off angle already
+        converted to degrees (``Bellhop/bellhop.f90:263``), and the reader
+        (:func:`uacpy.io.oalib_reader.read_ray_file`) passes both through
+        unconverted — so downstream helpers such as
         :meth:`filter_by_miss_distance` work in metres without any
         unit detection.
     is_eigen : bool
@@ -363,10 +365,10 @@ class Rays(Result):
             'n_top_bounces' in r or 'n_bot_bounces' in r for r in self.rays
         ):
             warnings.warn(
-                "Rays.filter_by_bounces: rays carry no bounce counts "
-                "(binary .ray files don't store them) — every ray "
-                "classifies as 'direct'. Re-run with the ASCII ray "
-                "format to filter by bounces.",
+                "Rays.filter_by_bounces: rays carry no bounce counts, so "
+                "every ray classifies as 'direct'. A .ray file read through "
+                "uacpy.io.read_ray_file always supplies them; a hand-built "
+                "Rays must set 'n_top_bounces' / 'n_bot_bounces' per ray.",
                 UserWarning, stacklevel=2,
             )
         pred = _bounce_predicate(kind, top, bot)
@@ -385,10 +387,10 @@ class Rays(Result):
         """Keep rays whose launch angle ``alpha`` is within ``[min_deg, max_deg]``."""
         if self.rays and not any('alpha' in r for r in self.rays):
             warnings.warn(
-                "Rays.filter_by_launch_angle: rays carry no launch "
-                "angles (binary .ray files don't store them) — the "
-                "filter drops every ray. Re-run with the ASCII ray "
-                "format to filter by angle.",
+                "Rays.filter_by_launch_angle: rays carry no launch angles, "
+                "so the filter drops every ray. A .ray file read through "
+                "uacpy.io.read_ray_file always supplies 'alpha'; a "
+                "hand-built Rays must set it per ray.",
                 UserWarning, stacklevel=2,
             )
         def pred(ray):

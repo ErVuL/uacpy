@@ -27,12 +27,19 @@ SEA_SURFACE_SOURCES = ('waves', 'wind', 'local', 'auto')
 #: axes use: for sea state the date-specific product is the better answer.
 _WIND_BACKENDS = {'wind': ('erddap',), 'local': ('local',),
                   'auto': ('erddap', 'local')}
-#: Pierson-Moskowitz fully-developed significant wave height Hs = 0.021·U²
-#: (U at the 19.5 m reference height), the relation used by
-#: :func:`generate_sea_surface`.
-_PM_HS_COEFF = 0.021
-#: Log-profile wind scaling from the 10 m observation height to the 19.5 m
-#: Pierson-Moskowitz reference height.
+#: Pierson-Moskowitz fully-developed significant wave height Hs = 0.21·U²/g
+#: with U at the 19.5 m reference height, the relation used by
+#: :func:`generate_sea_surface`. Etter, *Underwater Acoustic Modeling and
+#: Simulation*, gives it as H(1/3) = 0.566e-2·V² for V in knots, which is
+#: 0.02139 in m/s; integrating Medwin & Clay's Pierson-Moskowitz spectrum
+#: (alpha 8.1e-3, beta 0.74) and taking Hs = 4·h_rms gives 0.02133.
+_PM_HS_COEFF = 0.0214
+#: Wind scaling from the 10 m observation height to the 19.5 m
+#: Pierson-Moskowitz reference height. A conventional factor: a neutral log
+#: profile over any plausible sea roughness gives 1.05-1.06 instead, so this is
+#: not one, and no source in the corpus derives it. Kept because it is the
+#: value in common use; treat a wave height built from a 10 m wind as
+#: approximate.
 _U10_TO_U195 = 1.026
 
 

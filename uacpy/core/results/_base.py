@@ -15,7 +15,9 @@ def _complex_to_db(data: np.ndarray) -> np.ndarray:
     """``-20·log10(|data|)`` with ``|data|`` clamped to :data:`PRESSURE_FLOOR`.
 
     Canonical TL conversion used by :attr:`Field.tl` and the metrics in
-    :mod:`uacpy.core.metrics`. Preserves shape — no squeeze.
+    :mod:`uacpy.core.metrics`. Preserves shape — no squeeze. The clamp caps
+    an exactly-zero sample (a cell no energy reached) at 600 dB rather than
+    ``+inf``, keeping the array finite for plotting and reductions.
     """
     return -20.0 * np.log10(np.maximum(np.abs(data), PRESSURE_FLOOR))
 
@@ -38,10 +40,13 @@ class PhaseReference(str, Enum):
         Used by Bellhop, Scooter, OASES OAST/OASP, Kraken, and RAM
         (mpiramS / Collins backends bake the carrier into the data).
     TIME_DOMAIN_NATIVE
-        SPARC writes ``p(t)`` directly. ``H(f)`` is the FFT of the
-        already-time-domain trace; consumers that want a time series
-        should read the time-domain :class:`Field` from
-        ``RunMode.TIME_SERIES`` instead.
+        The payload is ``p(t)``, or is the transform of one, so there is
+        no travelling-wave carrier left to interpret. Two producers tag
+        it: SPARC, whose ``H(f)`` is the FFT of an already-time-domain
+        trace — consumers wanting a time series should read the
+        ``RunMode.TIME_SERIES`` :class:`Field` rather than IFFT it back —
+        and the synthesis helpers, which stamp it on every trace they
+        build whatever convention the source ``H(f)`` carried.
     """
     TRAVELLING_WAVE = 'travelling_wave'
     TIME_DOMAIN_NATIVE = 'time_domain_native'
@@ -94,8 +99,12 @@ _DOCUMENTED_METADATA: Dict[Tuple[str, str], Tuple[type, str]] = {
         'irregular-grid (RunType(5:5)=I) field, which carries no depth axis '
         'of its own.'),
     ('Bellhop', 'c0'): (
-        float, 'Reference sound speed (m/s) used by the arrivals → H(f) '
-        'synthesis path to convert delays to phases.'
+        float, 'Sea-surface sound speed (m/s) of the first profile. One of '
+        'the candidate speeds the time-series synthesis helpers take the max '
+        'of to anchor the output window (r / c), and the speed the range-span '
+        'wrap warning measures travel time with. The arrivals → H(f) path '
+        'itself needs no reference speed — the arrival delays carry the '
+        'timing.'
     ),
     ('Bellhop', 'center_frequency'): (
         float, 'Carrier (centre) frequency fc (Hz) used to build H(f) '
@@ -395,6 +404,16 @@ class Result:
     (``source_depths``, ``frequencies``), and a free-form ``metadata``
     dict for model-specific extras. Subclasses add the shape-specific
     payload and methods.
+
+    A result carries **no carriers**: never an
+    :class:`~uacpy.core.environment.Environment`,
+    :class:`~uacpy.core.source.Source` or
+    :class:`~uacpy.core.receiver.Receiver`, and none may be added. Only the
+    scalar/array identification above crosses over, so a result stays a
+    self-contained record of what the model returned and the geometry keeps
+    a single source of truth — the carrier the caller still holds.
+    Everything that needs the geometry takes it explicitly, plotters
+    included (``plot_result(result, env=…)``).
 
     Parameters
     ----------

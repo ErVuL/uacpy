@@ -168,6 +168,8 @@ def _read_boundary_2d(
         log_message('bathy_io', f"Number of {kind} points = {n_pts}",
                     verbose=verbose)
 
+        # A long row is the 7 numbers of bdryMod.f90:200-201 — range, depth
+        # and the five geoacoustic columns; a short row is range, depth.
         n_cols = 7 if is_long else 2
         rows = []
         for _ in range(n_pts):
@@ -189,7 +191,10 @@ def _read_boundary_2d(
 
     data[0, :] = km_to_m(data[0, :])
 
-    # Extend to ±infinity by holding every row constant.
+    # Extend to ±infinity by holding every row constant. The ±1e50 sentinel is
+    # the one AT's own reader uses — "extend the bathymetry to +/- infinity in
+    # a piecewise constant fashion", Matlab/ReadWrite/readbty.m:66-71 — so a
+    # segment search over this array brackets any range without a special case.
     out = np.zeros((n_cols, n_pts + 2))
     out[:, 1:-1] = data
     out[:, 0] = data[:, 0]
@@ -326,6 +331,10 @@ def _write_boundary_2d(
     of :func:`_read_boundary_2d`. ``data`` is an ``(N, 2)`` array of
     ``(range_m, value_m)`` or any carrier exposing ``to_pairs()``; ranges are
     converted to km for the file.
+
+    ``bdryMod.f90:98`` (.ati) and ``:195`` (.bty) read the rows list-directed,
+    so the field widths do not matter; the 6 decimals do — on a km axis they
+    are what keeps a metre-domain range exact to the millimetre.
     """
     filepath = Path(filepath)
     type_str = f"{_validate_interp_type(interp_type)}S"
@@ -522,7 +531,10 @@ def write_bty_3d(filepath: Union[str, Path], X: np.ndarray, Y: np.ndarray,
     - Line 5: Y coordinates (km, space-separated)
     - Following lines: Depth matrix (ny lines, nx values per line)
 
-    NaN values in depth array are replaced with 0.0.
+    NaN values in the depth array are replaced with 0.0. Bellhop3D does not
+    repair them: ``bdry3DMod.f90:310`` only warns that "The bathymetry file
+    contains a NaN" and lets it through into ``ComputeBdryTangentNormal``,
+    where it poisons the segment tangents and normals.
 
     The coordinate system uses:
     - X: Eastings (m) - horizontal coordinate

@@ -285,6 +285,10 @@ def _assert_adapter_matches_oasn_processor(rep, *, rtol=1e-9, atol=1e-12):
     iz0, ix0 = R.shape[1] // 3, R.shape[2] // 2
     w = oasn_bank[:, iz0, ix0]
     sig = np.outer(w, w.conj())
+    # A bare rank-1 outer product is singular, so MVDR would depend entirely on
+    # its diagonal loading. The 5 %-of-mean-eigenvalue white floor makes K
+    # invertible on its own, leaving `loading` to act identically on both
+    # processors rather than being the only thing keeping the inverse finite.
     K = sig + 0.05 * (np.trace(sig).real / N) * np.eye(N)
     cov = Covariance(covariance=K[None])
 

@@ -26,7 +26,7 @@ from uacpy.core.constants import TL_MAX_DB
 
 
 class _FakeProc:
-    """A subprocess that reported success without writing anything."""
+    """Stands in for a subprocess that exits 0 and writes no output file."""
     returncode = 0
     stdout = ''
     stderr = ''
@@ -90,10 +90,13 @@ def _env(*, bottom, altimetry=None):
 
 @pytest.mark.requires_binary  # constructs RAM (resolves its binary)
 class TestCollinsDepthReference:
-    """ramgeo/ramsurf read bottom-profile depths as depth-below-seafloor
-    (``matrc`` restarts the profile index at the grid point under the local
-    seafloor; the vendored ``ramgeo.in`` confirms it), while rams0.5 indexes
-    absolutely from z=0. The segment builder must emit each convention."""
+    """ramgeo/ramsurf read bottom-profile depths as depth-below-seafloor:
+    their ``matrc`` restarts the bottom-array index at ``ii=1`` on the grid
+    point below the local seafloor (``ii=1; do i=iz+1,nz+2`` —
+    ``ramgeo1.5.f:262-269``, ``ramsurf1.5.f:249-256``). rams0.5's ``matrc``
+    indexes the same arrays absolutely (``lamb(i)`` over ``i=iz+1,ib+2``,
+    ``rams0.5.f:491-498``), so its depths run from z=0. The segment builder
+    must emit each convention."""
 
     def _segments(self, kind):
         env = _env(bottom=_fluid_layered_bottom())     # 100 m water, 15 m layer
@@ -177,8 +180,8 @@ class TestBackendSelection:
         assert ram.select_backend(env, RunMode.TIME_SERIES) == 'mpiramS'
 
     def test_ramgeo_accepts_forced_simple_bottom(self):
-        # 'simple bottom should also be accepted' — ramgeo runs on a plain
-        # half-space when forced (wrapped as a synthetic single layer).
+        # ramgeo runs on a plain half-space when forced: the writer wraps it
+        # as a synthetic single layer.
         env = _env(bottom=_fluid_bottom())
         assert RAM(verbose=False, dr=20.0, dz=2.0,
                    backend='ramgeo').select_backend(env) == 'ramgeo'
@@ -455,8 +458,11 @@ class TestCollinsBinaries:
         mpi = RAM(verbose=False, dr=20.0, dz=1.0, backend='mpiramS').run(
             env, src, rcv)
         d = np.abs(geo.tl - mpi.tl)
-        # Post depth-reference fix the two PEs agree to ~1 dB median; the
-        # tight bound guards the seafloor-relative profile convention.
+        # The bound is loose because two independent PE codes discretise a
+        # 15 m layer differently, and still discriminating because the thing
+        # under test — ramgeo reading bottom depths from the local seafloor,
+        # mpiramS from z=0 (see TestCollinsDepthReference) — misplaces the
+        # whole sub-bottom by the water depth when it is wrong.
         assert np.nanmedian(d) < 3.0
 
     def test_ramgeo_broadband_runs(self):
@@ -551,14 +557,20 @@ class TestCollinsBinaries:
 @pytest.mark.requires_binary
 @pytest.mark.slow
 class TestRamPekerisReference:
-    """Per-backend pinned-TL agreement against KrakenField on a Pekeris
-    waveguide.
+    """Per-backend pinned-TL agreement against Kraken on a Pekeris waveguide.
 
     Cross-model RMSE tests average over a window and can hide localized
     errors; this asserts agreement at specific (range, depth) sample
-    points for each of the three RAM dispatcher backends. KrakenField is
-    the reference (mode sum on Pekeris is essentially the analytical
+    points for each of the three RAM dispatcher backends. Kraken is the
+    reference (mode sum on Pekeris is essentially the analytical
     solution).
+
+    ``tol_db=4.5`` bounds a *method* difference, not numerical noise: a Padé
+    PE and an exact mode sum part company by genuine wide-angle error, which
+    grows with the water/seabed speed contrast. The same value is shared with
+    the strict xfail in :class:`TestMpiramsAutoGridIsAccurateEnough`, so it is
+    what separates a pinned grid from the auto grid — loosening it turns that
+    open defect into a silent pass.
     """
 
     _SRC_DEPTH = 36.0
@@ -836,12 +848,14 @@ class TestCollinsArrayLimits:
 
 
 def test_forcing_rams_on_a_fluid_bottom_is_rejected():
-    """rams0.5 is the elastic PE; on a fluid bottom it returns a null field.
+    """rams0.5 is the elastic PE; on a fluid bottom it returns a null field —
+    TL saturated at the ``TL_MAX_DB`` sentinel at every range, which looks like
+    an answer rather than a failure.
 
-    ``_validate_forced_backend`` already rejects ramsurf when its defining
-    feature (altimetry) is absent. rams had no symmetric rule, so forcing it
-    onto a fluid environment silently produced TL saturated at 200 dB at every
-    range instead of an error. Auto-dispatch never routes fluid to rams.
+    ``_validate_forced_backend`` therefore rejects each Collins backend when
+    its defining feature is absent: ramsurf without altimetry, rams without
+    shear. Auto-dispatch never routes fluid to rams, so only ``backend='rams'``
+    can reach the null field.
     """
     from uacpy.core.exceptions import ConfigurationError
     fluid = Environment(
@@ -889,9 +903,9 @@ class TestCollinsArrayBoundaries:
     _RCV = staticmethod(lambda: Receiver(depths=100.0, ranges=np.array([5000.0])))
 
     def test_bathymetry_at_the_boundary_raises_not_truncated_read(self):
-        """504 written points + terminator == mr fits; 505 does not. The 505
-        case previously reached the caller as a FileFormatError about a
-        truncated tl.grid — exactly what this guard exists to prevent."""
+        """504 written points + terminator == mr fits; 505 does not, and
+        must be refused here rather than surface downstream as a truncated
+        ``tl.grid``."""
         from uacpy.core.exceptions import ConfigurationError
         m = RAM(verbose=False, backend='ramgeo', timeout=600)
         tl = np.asarray(m.run(self._bathy_env(504), self._SRC(), self._RCV()).tl)
@@ -1212,8 +1226,9 @@ class TestCollinsOutputGridCoversReceivers:
                 if np.all(~np.isfinite(d[:, j]))]
 
     def test_ramgeo_coarse_dr_keeps_the_last_range(self):
-        # ndr = floor((10000/3)/1000) = 3, so the un-extended march stopped
-        # at 9999 m and the receiver at 10000 m came back NaN.
+        # ndr = floor((10000/3)/1000) = 3, so a march to rmax = 10000 m
+        # verbatim writes its last record at 9999 m and leaves the receiver
+        # at 10000 m outside the output grid.
         field = self._run('ramgeo', _fluid_bottom(), rmax=10000.0,
                           n_ranges=100, dr=3.0)
         assert self._all_nan_columns(field) == []
@@ -1245,7 +1260,7 @@ class TestCollinsOutputGridCoversReceivers:
 @pytest.mark.requires_binary
 class TestSurfaceDepthIsResolvable:
     """``rams0.5``'s ``outpt`` loops ``do 1 i=1+ndz,nzplt,ndz``, so its
-    shallowest stored sample sits at ``ndz·dz`` and a receiver at z=0 fell
+    shallowest stored sample sits at ``ndz·dz`` and a receiver at z=0 lies
     outside the interpolation grid. The surface is pressure-release in every
     Collins backend, so the z=0 node is prepended at the deep-shadow floor."""
 
@@ -1367,6 +1382,12 @@ class TestBroadbandDepthGridIsNonUniform:
     def test_uniform_assumption_would_misplace_deep_receivers(self):
         # Prove the grid really is non-uniform, so the interpolation change
         # is not a no-op: rebuild peramx's un-transform.
+        #
+        # 6371 km is the mean Earth radius; mpiramS itself uses the WGS-84
+        # equatorial 6378137 m (``mpiramS/src/param.f90:10``, ``invRe=1/Re``).
+        # The 0.1% difference shifts eps far below the millimetre-scale
+        # departures asserted here, so it does not affect the demonstration —
+        # but this is a stand-in for the un-transform, not a copy of it.
         zg = np.arange(0, 5000.0, 2.0)
         eps = zg / 6371000.0
         zg1 = zg / (1.0 + eps / 2.0 + eps ** 2 / 3.0)
@@ -1411,7 +1432,9 @@ class TestCollinsAbsorbingLayer:
         assert depths[-1] == pytest.approx(300.0)
         assert values[-1] == pytest.approx(10.0)
 
-    def test_absorbing_knobs_are_no_longer_reported_as_ignored(self):
+    def test_absorbing_knobs_are_not_reported_as_ignored(self):
+        """The Collins path honours both absorbing-layer knobs, so listing
+        them as mpiramS-only would warn the caller off a setting that works."""
         import warnings as _warnings
         names = [n for n, _ in RAM._MPIRAMS_ONLY_SETTINGS]
         assert 'absorbing_layer_width' not in names
@@ -1438,7 +1461,7 @@ def _bottom_props(model, env, work_dir, freq=100.0):
 
 class TestSedimentSpeedFollowsTheLocalSeafloor:
     """mpiramS rebuilds the sediment speed as ``csg = cwg + cs``
-    (``mpiramS/src/ram.f90:320-321``) against the water column at the *local*
+    (``mpiramS/src/ram.f90:332-333``) against the water column at the *local*
     seafloor, so the offset uacpy writes must be referenced to the same
     column."""
 
@@ -1454,7 +1477,7 @@ class TestSedimentSpeedFollowsTheLocalSeafloor:
     def _written_csg(model, env, tmp_path, freq=100.0):
         """``(range, z_ctrl, csg)`` per written sediment profile.
 
-        ``csg = cwg + cs`` (``ram.f90:320-321``) is what mpiramS rebuilds, so
+        ``csg = cwg + cs`` (``ram.f90:332-333``) is what mpiramS rebuilds, so
         it is the quantity the deck has to get right — not the raw offset.
         """
         dz = model._effective_dz()
@@ -1753,7 +1776,7 @@ class TestCollinsPlotDepthReachesTheDeepestReceiver:
 class TestMpiramsLayeredSubBottomIsNotSmeared:
     """``profl`` puts the sediment control points at ``zwork = [0, d,
     d + k·sedlayer/(nzs-3), max(zg(n), …)]`` and interpolates them linearly
-    (``mpiramS/src/ram.f90:309-325``, ``gorp`` at ``:371``). Only one control
+    (``mpiramS/src/ram.f90:321-337``, ``gorp`` at ``:360-390``). Only one control
     point lies between ``d + sedlayer`` and the domain floor, so whatever
     contrast sits between the last two points is spread over the entire
     sub-bottom. The half-space must therefore already be reached at
@@ -1816,7 +1839,8 @@ class TestMpiramsLayeredSubBottomIsNotSmeared:
         level. What remains at a fixed ``dz`` is honest discretisation of a
         5 m, high-contrast layer: the two codes place its step differently
         (``gorp`` interpolates the control points, while ``zread``'s
-        ``if(i.eq.iold)i=i+1`` bumps the discontinuity to the next node), and
+        ``if(i.eq.iold)i=i+1`` — ``ramgeo1.5.f:223`` — bumps the discontinuity
+        to the next node when two breakpoints land on one grid index), and
         that difference shrinks with the cell size rather than persisting.
         """
         env = self._layered_env()
@@ -1836,7 +1860,7 @@ class TestMpiramsLayeredSubBottomIsNotSmeared:
 class TestMpiramsAbsorbingLayerHasTheRequestedWidth:
     """``profl`` interpolates the sediment arrays linearly between control
     point ``nzs-1`` at ``seafloor + sedlayer`` and control point ``nzs`` at
-    ``zmax`` (``mpiramS/src/ram.f90:309-317,320-325``), and only the last point
+    ``zmax`` (``mpiramS/src/ram.f90:321-329,332-337``), and only the last point
     carries ``absorbing_layer_attn``. The absorbing layer is therefore the span
     ``[seafloor + sedlayer, zmax]``, so ``sedlayer`` is what sets its width.
 
@@ -1903,10 +1927,10 @@ class TestMpiramsAbsorbingLayerHasTheRequestedWidth:
 
     @pytest.mark.slow
     def test_the_two_backends_agree_once_the_absorber_matches(self, tmp_path):
-        """The deck defect showed up as physics: at ``zmax=700`` the whole
-        sub-bottom became an attenuation ramp for mpiramS but not for ramgeo,
-        which drove the two backends 3.3 dB apart on a half-space they both
-        represent exactly."""
+        """The deck geometry asserted above, seen as physics. A half-space is
+        a medium both PEs represent exactly, so once their absorbing layers
+        span the same depths there is nothing left to separate them — any
+        residual here is the absorber, not the seabed."""
         env = self._halfspace_env()
         src = Source(depths=20.0, frequencies=100.0)
         rcv = Receiver(depths=np.arange(2.0, 99.0, 4.0),
@@ -1934,7 +1958,7 @@ class TestRangeSegmentMarkersAreMidpoints:
     """``if(r.ge.rp)`` (``ramgeo1.5.f:359``, ``ramsurf1.5.f:364``,
     ``rams0.5.f:332``) switches to a section at its marker range, while
     mpiramS marches with the nearest profile (``minloc(abs(rp-rint))``,
-    ``mpiramS/src/ram.f90:206,216``) — the rule ``Bottom.at`` declares. The
+    ``mpiramS/src/ram.f90:218,228``) — the rule ``Bottom.at`` declares. The
     marker is the midpoint so the two agree."""
 
     def _env(self, breaks):
@@ -2016,9 +2040,10 @@ def test_mpirams_zmax_is_an_exact_multiple_of_deltaz(tmp_path, flat_earth):
     ``deltaz``. They coincide only for a ``zmax`` that is a multiple of
     ``deltaz``.
 
-    The depth that matters is the one ``:371`` reads, which under the default
-    ``flat_earth`` is the written column *after* ``:260-266`` rescales it —
-    so the check has to apply that map, not re-use the written value.
+    The depth that matters is the one ``peramx.f90:371`` reads
+    (``zmax = maxval(zw)``), which under the default ``flat_earth`` is the
+    written column *after* ``peramx.f90:264-266`` rescales it — so the check
+    has to apply that map, not re-use the written value.
     """
     env = _env(bottom=_fluid_bottom())
     src = Source(depths=20.0, frequencies=100.0)
@@ -2089,7 +2114,7 @@ class TestThetaMaxIncludesTheBottomSlope:
 @pytest.mark.requires_binary
 class TestSubBottomIsIndependentOfSspTabulationDepth:
     """``profl`` rebuilds the sediment speed as ``csg = cwg + cs``
-    (``mpiramS/src/ram.f90:320-321``) at every depth, so a water gradient
+    (``mpiramS/src/ram.f90:332-333``) at every depth, so a water gradient
     tabulated below the seabed would be added into the sediment unless the
     offset cancels it there. ``_sediment_offsets`` takes ``cs`` per control
     point, which cancels *any* column — so the written SSP stays true and the
@@ -2102,8 +2127,8 @@ class TestSubBottomIsIndependentOfSspTabulationDepth:
     def test_the_written_column_keeps_the_true_ssp(self, tmp_path):
         """Holding it flat below the seabed would corrupt real water on a
         slope: mpiramS picks this column by nearest neighbour
-        (``ram.f90:283-284``) while interpolating the seafloor continuously
-        (``ram.f90:303-305``)."""
+        (``ram.f90:295-296``) while interpolating the seafloor continuously
+        (``ram.f90:315-317``)."""
         env = self._env([(0.0, 1450.0), (400.0, 1550.0)])
         RAM(backend='mpiramS', verbose=False)._prepare_ssp(
             env, tmp_path, 100.0, 0.25)
@@ -2145,7 +2170,7 @@ class TestSubBottomIsIndependentOfSspTabulationDepth:
         deep = tl([(0.0, 1450.0), (400.0, 1550.0)], 'deep')
         cut = tl([(0.0, 1450.0), (100.0, 1475.0)], 'cut')
         # Not bit-identical: uacpy cancels the column with the linear
-        # interpolation it writes, while ``gorp2`` (``ram.f90:283``) splines it
+        # interpolation it writes, while ``gorp2`` (``ram.f90:296``) splines it
         # back onto the grid, so the two tabulations leave a spline-vs-linear
         # residual of order 1e-4 dB rather than exact agreement.
         assert np.nanmax(np.abs(deep - cut)) < 1e-2
@@ -2157,11 +2182,12 @@ class TestSubBottomIsIndependentOfSspTabulationDepth:
 @pytest.mark.requires_binary
 class TestMpiramsMarchStepIsRestored:
     """``ram.f90`` shrinks ``dr`` to ``rend-rnow`` to land exactly on an output
-    range. Upstream never restored it, so every later output range marched at
-    that leftover step — and uacpy writes *every* receiver range into
-    ``ranges.dat``, so cost grew with the receiver count rather than with
-    range (50 points cost 15x one over the same 10 km). Patched in
-    ``third_party/mpiramS/src/ram.f90``; see ``MODIFICATIONS.md``."""
+    range; upstream does not restore it, so every later output range marches at
+    that leftover step. uacpy writes *every* receiver range into ``ranges.dat``,
+    which makes the marched step — and hence the answer and the cost — a
+    function of how many receivers were asked for. The uacpy patch restores the
+    full step (``third_party/mpiramS/src/ram.f90``; see ``MODIFICATIONS.md``),
+    and this pins that the far-range answer is receiver-count independent."""
 
     @staticmethod
     def _env():
@@ -2216,9 +2242,10 @@ class TestMpiramsAutoGridIsAccurateEnough:
     either: upstream's own ``ram.in`` marches 50 Hz at ``dr = 500 m``, so
     large steps are legitimate for the problems RAM was built for.
 
-    This was invisible until ``third_party/mpiramS/src/ram.f90`` was patched to
-    restore the march step — the unrestored remainder step was silently
-    refining the grid and masking it.
+    The patched march step (see :class:`TestMpiramsMarchStepIsRestored`) is
+    what makes this visible: with the remainder step left unrestored the run
+    silently refines its own grid past the optimiser's ``dr``, so the coarse
+    choice never reaches the physics.
     """
 
     @pytest.mark.slow

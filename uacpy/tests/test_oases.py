@@ -47,6 +47,9 @@ class TestOasesKeepsTheFullSSP:
         z = np.linspace(0.0, 200.0, 201)
         c = 1500.0 + 30.0 * np.exp(-((z - 30.0) / 6.0) ** 2) - 0.02 * z
         peak = float(c.max())
+        # The deck carries speeds at %.2f; the [:6] slice drops the last
+        # decimal so a 1-decimal deck matches too. peak is 1529.4 m/s, four
+        # integer digits, which is what makes the slice land on the point.
         assert f"{peak:.2f}"[:6] in text or f"{peak:.1f}" in text, (
             f"the duct peak {peak:.2f} m/s never reached the deck — the SSP "
             f"was subsampled")
@@ -68,15 +71,21 @@ class TestOasesKeepsTheFullSSP:
             o = np.asarray(uacpy.OASES.for_mode(RunMode.COHERENT_TL)
                            .run(env, src, rcv).tl)
         d = np.abs(k - o)
+        # Median, not max: a modal sum and a wavenumber integral put the
+        # interference nulls of a ducted profile at slightly different ranges,
+        # so a max-norm over 15 ranges is set by null placement rather than by
+        # the profile either model was handed. The 2.0 dB bound itself is
+        # unsourced — it separates "same ocean" from "subsampled ocean", not
+        # two models' accuracy.
         assert np.nanmedian(d) < 2.0, (
             f"OASES vs Kraken median {np.nanmedian(d):.2f} dB on a 201-point "
             f"duct profile — the SSP is being subsampled before the run")
 
 
 class TestOaspRangeAxisFidelity:
-    """OASP Block VIII carries ``R0`` and ``RSPACE`` in km. Written at %.3f
-    that is 1 m resolution, so sub-metre receiver spacing rounds to zero and
-    every receiver collapses onto one range. OASP also only supports
+    """OASP Block VIII carries ``R0`` and ``RSPACE`` in km (oasp.tex:133-134),
+    so a metre-resolution %.3f would round sub-metre receiver spacing to zero
+    and collapse every receiver onto one range. OASP also only evaluates
     ``r0 + i*dr``, so a non-uniform request cannot be honoured at all."""
 
     @staticmethod
@@ -128,6 +137,10 @@ class TestOaspRangeAxisFidelity:
         parts = self._block_viii(self._write(tmp_path, ranges))
         r1_km, dr_km, nr = float(parts[4]), float(parts[5]), int(parts[6])
         last_m = (r1_km + (nr - 1) * dr_km) * 1000.0
+        # 1 m is a gate, not a budget: the writer emits R1/RSPACE at nine
+        # decimals of a km, so the realised error here is ~10 um. The %.3f km
+        # the docstring warns about would quantise RSPACE to 0.246 km and put
+        # this last range 14 m out, which is what the gate separates.
         assert last_m == pytest.approx(15000.0, abs=1.0), (
             f"last range lands at {last_m:.1f} m for a requested 15000 m")
 
@@ -182,8 +195,8 @@ class TestOasesSSPDecimationAtTheRealLimit:
 @pytest.mark.requires_binary
 def test_oast_short_range_run_returns_a_field_not_nan():
     """OAST Block VIII XLEFT/XRIGHT set the FFT output grid, not just a plot
-    window. Written at %.1f km, any run shorter than ~50 m rounded XRIGHT to
-    0.0 and the whole TL field came back NaN with no exception."""
+    window. They are in km, so at %.1f any run shorter than ~50 m would round
+    XRIGHT to 0.0 and hand back an all-NaN TL field with no exception."""
     import uacpy
     import warnings as _w
     from uacpy.models.base import RunMode
@@ -263,8 +276,15 @@ def _pekeris_env():
 
 @pytest.mark.requires_binary
 def test_oasp_run_frequencies_honours_the_lower_band_edge():
-    """``frequencies=`` sets an (fmin, fmax, N) triple; dropping fmin made
-    OASP sweep from DC and cost several times the requested bins."""
+    """``frequencies=`` sets an (fmin, fmax, N) triple; dropping fmin leaves
+    OASP sweeping from DC and costing several times the requested bins.
+
+    The band edges land on OASP's own FFT bin grid, not on the request:
+    ``LXP1 = max(2, FR1/DLFREQ + 1)`` truncates downwards and
+    ``MX = FR2/DLFREQ + 2`` rounds up (unoasp22.f:237-247), so the realised
+    band overhangs by up to one bin either side — which is what the 1 Hz of
+    slack below absorbs.
+    """
     import uacpy
     import warnings as _w
     from uacpy.models import OASP
@@ -303,7 +323,10 @@ def test_oasp_run_frequencies_warns_when_it_overrides_a_pinned_freq_min():
 @pytest.mark.requires_binary
 def test_oasp_coherent_tl_carries_the_same_phase_reference_as_broadband():
     """COHERENT_TL is one frequency slice of the same .trf array, so it
-    must not come back with the phase reference dropped."""
+    must not come back with the phase reference dropped. ``travelling_wave``
+    declares the carrier ``exp(-i k0 r)`` is still in the data, which is what
+    lets a consumer put the causal arrival at ``t = r/c0``
+    (``core/results/_base.py:37-39``); an untagged slice is not IFFT-able."""
     import uacpy
     import warnings as _w
     from uacpy.models import OASP

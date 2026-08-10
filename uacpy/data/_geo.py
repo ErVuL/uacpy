@@ -200,8 +200,14 @@ def run_representative_indices(keys) -> 'list[int]':
 def depth_to_pressure_dbar(depth_m, latitude_deg) -> np.ndarray:
     """Depth (m) → pressure (dbar), Leroy & Parthiot (1998) standard ocean.
 
-    Latitude-dependent gravity correction; accurate to ~0.1 % for the open
-    ocean, well within the sound-speed budget. ``soundspeed_*`` expect dbar.
+    JASA 103(3), 1346-1352, eqs. (8)-(11) — ``h(Z,phi) = h(Z,45)·k(Z,phi)``
+    with ``Z`` in metres and ``h`` in MPa, hence the ×100 to dbar. The authors
+    give the fit as accurate to ±500 Pa over the whole depth/latitude range.
+
+    This is the standard ocean: the per-region geopotential corrective term
+    ``delta_h_i`` of their eq. (12) / Table II is not applied, so a basin with
+    a strongly non-standard T/S profile (Mediterranean, Baltic, Black Sea)
+    carries that residual. ``soundspeed_*`` expect dbar.
     """
     z = np.asarray(depth_m, dtype=float)
     phi = np.radians(latitude_deg)

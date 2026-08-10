@@ -379,7 +379,7 @@ class TestPublicReexports:
 
     def test_signal_analysis_classes_reachable(self):
         sig = uacpy.acoustic_signal
-        # Estimators/transforms are functions now; FRF remains a class.
+        # Estimators/transforms are free functions; FRF is a class.
         for name in ('ppsd', 'psd', 'FRF', 'sel', 'fk_transform', 'spectrogram'):
             assert hasattr(sig, name), f"uacpy.acoustic_signal.{name} not reachable"
         assert 'psd' in sig.__all__
@@ -1146,8 +1146,8 @@ class TestResultStackInvariants:
 
     def test_frequency_axis_stack(self):
         """Stacking along ``frequency`` is just a coordinate-name swap.
-        Slabs may now legitimately differ on ``frequencies`` (the
-        stacking axis) while sharing ``source_depths`` and ``model``."""
+        Slabs legitimately differ on ``frequencies`` (the stacking axis)
+        while sharing ``source_depths`` and ``model``."""
         from uacpy.core.results import ResultStack
         a = self._slab(source_depth=50.0, frequencies=100.0)
         b = self._slab(source_depth=50.0, frequencies=200.0)
@@ -1155,13 +1155,14 @@ class TestResultStackInvariants:
                             coordinate_name='frequency')
         assert stack.coordinate_name == 'frequency'
         assert stack.at(frequency=200.0) is b
-        # Mis-keyed kwarg → clear TypeError.
+        # A kwarg that is not the stacking axis names an axis the stack
+        # does not have.
         with pytest.raises(ConfigurationError, match="frequency"):
             stack.at(source_depth=200.0)
 
     def test_frequency_axis_rejects_disagreeing_source_depths(self):
         """When stacking by ``frequency`` the slabs must still agree on
-        ``source_depths`` (it's no longer the varying axis)."""
+        ``source_depths`` — ``frequency`` is the varying axis, not depth."""
         from uacpy.core.results import ResultStack
         a = self._slab(source_depth=10.0, frequencies=100.0)
         b = self._slab(source_depth=99.0, frequencies=200.0)
@@ -1180,8 +1181,8 @@ class TestResultStackInvariants:
                             coordinate_name='wind_speed')
         assert stack.coordinate_name == 'wind_speed'
         assert stack.at(wind_speed=15.0) is b
-        # Disagreeing source_depth is now rejected (external coord
-        # requires both internal axes to agree).
+        # An external coordinate requires both internal axes to agree, so a
+        # disagreeing source_depth is rejected.
         c = self._slab(source_depth=99.0, frequencies=100.0)
         with pytest.raises(ConfigurationError, match="source_depths"):
             ResultStack(slabs=[a, c], coordinate=[5.0, 15.0],
@@ -1377,7 +1378,7 @@ class TestSourceGeometryAndBeamPattern:
                          beam_pattern=np.array([1.0, 2.0, 3.0]))
 
     def test_beam_pattern_non_monotonic_angles_raise(self):
-        # beampattern.f90:56-58 rejects this with ERROUT, which gfortran
+        # misc/beampattern.f90:56-57 rejects this with ERROUT, which gfortran
         # exits 0 on; catching it here is the point of validating in Python.
         pat = np.array([[0.0, 0.0], [-90.0, -20.0], [90.0, -20.0]])
         with pytest.raises(ConfigurationError):
@@ -1404,7 +1405,7 @@ class TestEnvironmentPredicatesAreProperties:
 
     As bound methods they are always truthy, so ``if env.has_layered_bottom:``
     silently takes the True branch for every environment. They sit alongside
-    ``is_range_dependent``, which was already a property.
+    ``is_range_dependent``, which is likewise a property.
     """
 
     _NAMES = (
@@ -1431,10 +1432,11 @@ class TestEnvironmentPredicatesAreProperties:
 class TestReflectionFileDedupe:
     """``dedupe_reflection_file`` is a .brc/.trc rewriter, not a .irc one.
 
-    BOUNCE writes the .irc with a title/frequency header and six
-    fixed-format columns (``bounce.f90:225-228``), read back by the same
-    fixed format at ``misc/RefCoef.f90:97-107``. Running the 3-column
-    angle dedupe over one stripped the header and four of the columns.
+    BOUNCE writes the .irc with a title/frequency header and
+    ``(5G15.7, I5)`` records (``Kraken/bounce.f90:225-228``), read back by
+    the same fixed format at ``misc/RefCoef.f90:98-107``. The 3-column
+    angle dedupe would strip the header and four of the columns, so an
+    .irc must be rejected rather than rewritten.
     """
 
     def _irc(self, tmp_path):

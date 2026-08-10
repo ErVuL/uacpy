@@ -49,6 +49,13 @@ from uacpy.visualization.plots import (  # noqa: E402
 
 
 def thorp_db_per_km(freq_hz):
+    """Thorp volume absorption, dB/km, with f in Hz.
+
+    The two small terms differ from ``uacpy.core.absorption.thorp_db_per_km``,
+    which carries the JKPS Eq. 1.34 pair (3.0e-4, 3.3e-3) rather than
+    (2.75e-4, 0.003). The gap is 4e-4 dB/km at the 2 kHz used here, i.e. under
+    0.03 dB over the whole 60 km sweep.
+    """
     f = freq_hz / 1000.0
     return (0.11 * f**2 / (1 + f**2) + 44 * f**2 / (4100 + f**2)
             + 2.75e-4 * f**2 + 0.003)
@@ -145,7 +152,9 @@ def main():
     # ── Part 2: signal-excess map over a model TL grid ───────────────────
     # The TL comes from Bellhop on a 200 m waveguide at 2 kHz. Ray theory is
     # valid here: D/λ ≈ 267, comfortably above the D/λ ≳ 100 ray-regime rule
-    # of thumb (modes take over below D/λ ≈ 30; see DOCUMENTATION.md §5). A
+    # of thumb (modes take over below D/λ ≈ 30 — Stergiopoulos, Advanced
+    # Signal Processing Handbook, §10.2.2; docs/models/bellhop.md brackets the
+    # same transition more loosely, at 5-20). A
     # mild surface duct (sound-speed maximum near 30 m) traps the near-surface
     # source energy and refracts the rest downward, so the SE map shows real
     # propagation structure — a low-loss surface channel over a weaker

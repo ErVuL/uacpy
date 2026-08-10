@@ -7,8 +7,10 @@ plane-wave bottom-loss helper:
 
 1. Side-by-side plot of three canonical SSPs — isothermal, Munk, and a
    Mackenzie-derived T(z), S(z) profile.
-2. Overlay of the fluid–fluid bottom-loss curves for the standard
-   sediment + rock presets across grazing angle.
+2. Overlay of the fluid–fluid bottom-loss curves across grazing angle for
+   the sediment and rock presets in :mod:`uacpy.core.materials` (all but
+   ``granite``, whose 5500 m/s would sit on top of basalt's 5250 m/s).
+   ``bottom_loss_curve`` ignores each preset's shear speed by construction.
 
 Output: ``output/example_25_canonical_presets.png``.
 """

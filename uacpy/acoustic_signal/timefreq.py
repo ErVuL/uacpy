@@ -107,7 +107,7 @@ def wigner_ville(data, sample_rate: float, *, analytic: bool = True,
     analytic : bool
         Use the analytic signal for real input (default), suppressing
         cross-terms with the negative spectrum. ``False`` runs the raw signal.
-        Ignored when ``x`` is already complex.
+        Ignored when ``data`` is already complex.
     freq_window : None, int, or 1-D array
         Lag-domain smoothing window ``h(tau)`` — the *pseudo*-WVD. Smooths
         along frequency and limits the lag extent (shorter window -> more
@@ -165,7 +165,13 @@ def wigner_ville(data, sample_rate: float, *, analytic: bool = True,
         if hv is not None:
             acc = acc * hv[Lh + taus]
         kernel = np.zeros(NF, dtype=complex)
+        # Lag axis in FFT order: lag 0 at index 0, negative lags wrapped to the
+        # top of the buffer, zeros in the unfilled middle (the zero-padding).
         kernel[(taus + NF) % NF] = acc
+        # acc(-tau) = conj(acc(tau)) — a symmetric smoothing window preserves
+        # that — so the transform is real and `.real` drops only rounding
+        # error, not signal. An asymmetric `freq_window` array breaks the
+        # symmetry and the discarded imaginary part is then meaningful.
         W[:, ti] = np.real(np.fft.fft(kernel))
     f = np.arange(NF) * fs / (2.0 * NF)
     t = np.arange(n) / fs
@@ -212,8 +218,12 @@ def _reconstruction_constants(wavelet, w0, order):
     a property of the wavelet alone — not of the scale set the caller analysed
     with, so a band-limited scale set still reconstructs only its own band.
 
-    Reproduces Table 2 at the tabulated orders (Morlet ``w0=6``, Paul ``m=4``,
-    DOG ``m=2``) and extends it to any admissible ``w0`` / ``order``.
+    Against T&C's Table 2 (whose caption calls those factors "empirically
+    derived"): ``psi0(0)`` agrees to every tabulated digit for Morlet ``w0=6``,
+    Paul ``m=4`` and DOG ``m=2``/``m=6``; ``C_delta`` agrees to 0.3 % for
+    Morlet and Paul but differs by ~2 % for the DOG pair (0.776/1.132/3.541/
+    1.966 tabulated against 0.778/1.133/3.616/1.929 here). Extends the table to
+    any admissible ``w0`` / ``order``.
     """
     u_max = 60.0 + w0 + 6.0 * order
     u = np.linspace(-u_max, u_max, 100001)
@@ -264,7 +274,7 @@ def cwt(data, sample_rate, frequencies=None, wavelet="morlet", *, w0=6.0,
         Wavelet order ``m``. Default 4 for ``'paul'``, 2 for ``'dog'``; ignored
         for ``'morlet'``.
     n_freqs : int
-        Number of log-spaced frequencies when ``freqs`` is None.
+        Number of log-spaced frequencies when ``frequencies`` is None.
 
     Returns
     -------
@@ -282,7 +292,7 @@ def cwt(data, sample_rate, frequencies=None, wavelet="morlet", *, w0=6.0,
     n = xr.size
     fs = float(sample_rate)
     if frequencies is None:
-        f_lo = 4.0 * fs / n
+        f_lo = 4.0 * fs / n  # lowest default frequency = 4 cycles per record
         if f_lo >= fs / 2.0:
             raise ConfigurationError(
                 f"cwt: signal too short (n={n}) for the default frequency "
@@ -302,7 +312,9 @@ def cwt(data, sample_rate, frequencies=None, wavelet="morlet", *, w0=6.0,
     W = np.empty((frequencies.size, n), dtype=complex)
     for i, s in enumerate(scales):
         psi_hat, _ = _wavelet_fourier(wavelet, s, omega, w0, order)
-        psi_hat = np.sqrt(2.0 * np.pi * s) * psi_hat  # unit-energy per scale
+        # Torrence & Compo eq. 6 normalisation sqrt(2*pi*s/dt), with dt = 1
+        # because `omega` is rad/sample: equal energy at every scale.
+        psi_hat = np.sqrt(2.0 * np.pi * s) * psi_hat
         W[i] = np.fft.ifft(Xf * np.conj(psi_hat))
     return CWTResult(frequencies, W)
 
@@ -365,6 +377,10 @@ def _apply_lifter(c, lifter):
         keep = abs(L)
         w[:keep + 1] = 1.0
         if keep:
+            # Negative quefrencies live at the top of the buffer. max(1, ...)
+            # is what makes an over-long cutoff (keep >= nf) keep everything:
+            # a bare nf - keep would go negative and w[-2:] would set two
+            # elements instead of the whole tail.
             w[max(1, nf - keep):] = 1.0
         if L < 0:
             w = 1.0 - w
@@ -390,8 +406,8 @@ def cepstrum(data, *, window=None, nfft=None, lifter=None):
         :func:`scipy.signal.get_window` spec applied before the FFT to curb
         spectral leakage. ``None`` is rectangular.
     nfft : int, optional
-        Zero-pad the FFT to ``nfft >= len(x)`` bins (finer quefrency spacing).
-        ``None`` uses ``len(x)``.
+        Zero-pad the FFT to ``nfft >= len(data)`` bins (finer quefrency
+        spacing). ``None`` uses ``len(data)``.
     lifter : None, int, or 1-D array
         Quefrency liftering — see :func:`_apply_lifter`. ``None`` returns the
         raw cepstrum; a positive int keeps low quefrencies (spectral envelope),

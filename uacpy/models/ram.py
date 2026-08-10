@@ -13,8 +13,9 @@ binaries based on the environment:
   :mod:`uacpy.io.ramsurf_writer`.
 - **ramsurf1.5** (``env.altimetry is not None``): Collins' rough-surface /
   beach-geometry PE. Same writer as rams.
-- **ramgeo** (fluid + flat surface with a flat layered bottom, narrowband):
-  Collins' RAMGeo range-dependent-geoacoustics PE.
+- **ramgeo** (fluid + flat surface with a layered bottom, narrowband):
+  Collins' RAMGeo range-dependent-geoacoustics PE — its sediment layers
+  parallel the bathymetry rather than lying flat (``ramgeo1.5.f:3-4``).
 
 Elastic bottom + altimetry raises ``UnsupportedFeatureError`` — no published
 Collins PE handles that combination; use OASES for range-independent elastic.
@@ -64,10 +65,11 @@ from uacpy.io.ramsurf_reader import read_tl_grid, read_pcomplex_grid
 
 # Collins-family PE numerics constants.
 #
-# LAMBDA_PER_DZ_FLOOR — minimum acoustic wavelengths per dz step for the
-#   Collins finite-difference march. Below this the seafloor interface is
-#   smeared between adjacent grid points and accuracy collapses (Collins
-#   1993 / Lytaev 2023 §4).
+# LAMBDA_PER_DZ_FLOOR — depth samples per acoustic wavelength that an
+#   auto-picked dz is floored to (``dz >= c_min/(16·f)``); it bounds the cost
+#   of the depth grid, which Lytaev's error model on its own does not. The
+#   value is uacpy's — no samples-per-wavelength floor is prescribed by the
+#   RAM sources, their readme, Collins 1993 or Lytaev 2023 §4.
 # RAMS_DR_LAMBDA_CAP — empirical upper stability bound on dr for rams0.5's
 #   rotated Padé elastic march, expressed as a divisor of c_min/freq.
 #   ``dr ≤ c_min / (RAMS_DR_LAMBDA_CAP·f)`` ≈ 0.2 λ per step.
@@ -339,7 +341,7 @@ class RAM(PropagationModel):
         **[mpiramS]** — ``profl`` lays them out as [sea surface, seafloor,
         ``n_sed_points-3`` interior points spanning the seabed down to the top
         of the absorbing layer, domain floor] and interpolates linearly between
-        them (``mpiramS/src/ram.f90:309-325``), so a material step is resolved
+        them (``mpiramS/src/ram.f90:321-337``), so a material step is resolved
         to ``sedlayer/(n_sed_points-3)`` where ``sedlayer`` is that span
         (:meth:`_absorber_span`). The default keeps that interval far below an
         acoustic wavelength for ordinary geometries: at 50 points a 200 m span
@@ -548,8 +550,9 @@ class RAM(PropagationModel):
         if not self._exe.exists():
             raise ExecutableNotFoundError('RAM:mpiramS', str(self._exe))
 
-        # mpiramS allocates its Padé arrays dynamically (epade.f90:30); the
-        # binding cap is Collins' ``parameter (mp=10)``.
+        # mpiramS allocates its Padé arrays dynamically (epade.f90:30) and the
+        # Collins binaries stop above ``parameter (mp=10)``. The 8 enforced
+        # below is a uacpy margin under that cap, with no recorded provenance.
         if not isinstance(np_pade, int) or not (2 <= np_pade <= 8):
             raise ConfigurationError(
                 f"np_pade must be an integer in [2, 8] (Collins mp=10 limit); "
@@ -578,7 +581,7 @@ class RAM(PropagationModel):
                                          f"got {val!r}.")
         # ``profl`` lays out the sub-bottom as [surface, seafloor, nzs-3
         # interior points, domain floor] and only builds interior points when
-        # nzs > 3 (mpiramS/src/ram.f90:309-317).
+        # nzs > 3 (mpiramS/src/ram.f90:321-329).
         if not isinstance(n_sed_points, int) or n_sed_points < 4:
             raise ConfigurationError(f"n_sed_points must be an integer >= 4; "
                                      f"got {n_sed_points!r}.")
@@ -696,7 +699,7 @@ class RAM(PropagationModel):
     def _resolve_theta_max(self, env: Environment) -> float:
         """Maximum propagation angle (degrees) bracketing the Padé spectrum.
 
-        Lytaev (2023, https://doi.org/10.3390/jmse11030496) §5.1 estimates it
+        Lytaev (2023, https://doi.org/10.3390/jmse11030496) §5.5 estimates it
         as ``θ_max = max(θ_max^src, θ_max^bottom)``, where ``θ_max^bottom`` is
         the steepest slope between bottom and water, taken from the bathymetry
         relief. ``theta_max`` on the constructor supplies the source aperture;
@@ -932,17 +935,17 @@ class RAM(PropagationModel):
         included. ``matrc.f90:43-55`` reads ``cwg`` as a water property only
         above the seafloor index, and below it ``cwg`` is merely the reference
         the sediment speed is rebuilt against (``csg = cwg + cs``,
-        ``mpiramS/src/ram.f90:320-321``) — which
+        ``mpiramS/src/ram.f90:332-333``) — which
         :meth:`_sediment_offsets` cancels per control point. Holding the column
         flat below the seabed instead would corrupt real water: mpiramS picks
-        this column by nearest neighbour (``ram.f90:283-284``) while
-        interpolating the seafloor continuously (``ram.f90:303-305``), so on a
+        this column by nearest neighbour (``ram.f90:295-296``) while
+        interpolating the seafloor continuously (``ram.f90:315-317``), so on a
         slope every range between two written columns takes a flat-start depth
         that is not its own seafloor.
 
-        The range axis is the SSP's own breaks and nothing else: with the
-        column no longer keyed to the seabed, it depends on the bathymetry
-        only through the profiles the caller declared.
+        The range axis is the SSP's own breaks and nothing else: the column
+        is not keyed to the seabed, so it depends on the bathymetry only
+        through the profiles the caller declared.
         """
         zmax_pe = self._mpirams_zmax(env, freq, dz)
         n_points = max(50, int(zmax_pe / float(dz) / 2))
@@ -983,7 +986,7 @@ class RAM(PropagationModel):
 
         One evaluator for both sides of the deck: ``_prepare_ssp`` writes
         ``ssp.dat`` from it and the sediment builders subtract it. That shared
-        definition is what makes ``csg = cwg + cs`` (``ram.f90:320-321``)
+        definition is what makes ``csg = cwg + cs`` (``ram.f90:332-333``)
         reproduce the requested absolute bottom speed — the offset is only
         correct against the very column mpiramS will read back.
 
@@ -1001,7 +1004,7 @@ class RAM(PropagationModel):
         """Absolute depths of ``profl``'s ``nzs`` sediment control points.
 
         ``zwork = [0, d, d + k·sedlayer/(nzs-3) (k = 1..nzs-3),
-        max(zg(n), zwork(nzs-1)+1e-6)]`` (``mpiramS/src/ram.f90:309-317``), so
+        max(zg(n), zwork(nzs-1)+1e-6)]`` (``mpiramS/src/ram.f90:321-329``), so
         points ``2..nzs-1`` are ``linspace(0, sedlayer, nzs-2)`` below the
         local seafloor ``d``, point 1 sits at the sea surface and point ``nzs``
         at the domain floor.
@@ -1018,7 +1021,7 @@ class RAM(PropagationModel):
         water column mpiramS reads at each control point.
 
         ``profl`` reconstructs the sediment speed as ``csg = cwg + cs``
-        (``ram.f90:320-321``) with ``cwg`` the water profile splined onto the
+        (``ram.f90:332-333``) with ``cwg`` the water profile splined onto the
         *whole* depth grid, sub-bottom included — so a single scalar offset
         only reproduces ``cp_abs`` where ``cwg`` happens to be flat. Taking the
         offset per control point makes the sub-bottom speed exact for any
@@ -1037,7 +1040,7 @@ class RAM(PropagationModel):
 
         This is what mpiramS's ``cwg`` is at the water-sediment interface.
         ``profl`` builds the sediment speed as ``csg = cwg + cs``
-        (``ram.f90:320-321``) on a depth grid anchored at the seafloor depth
+        (``ram.f90:332-333``) on a depth grid anchored at the seafloor depth
         *at that range*, so the offset that reproduces an absolute bottom
         speed ``cb`` is ``cb - cwg(z_seafloor(range))``. Referencing it to the
         deepest bathymetry point instead leaves the sediment fast wherever the
@@ -1056,8 +1059,8 @@ class RAM(PropagationModel):
         ``cs`` is referenced to the water column at control points that sit
         below the *local* seafloor (:meth:`_sediment_offsets`), so it moves
         with the bathymetry — and it moves **continuously**, because
-        ``ram.f90:303-305`` interpolates the seafloor between breakpoints while
-        ``:283-284`` selects the nearest written profile. Sampling only the
+        ``ram.f90:315-317`` interpolates the seafloor between breakpoints while
+        ``:295-296`` selects the nearest written profile. Sampling only the
         declared breaks would therefore leave every range between them
         referenced to a seafloor that is not its own.
 
@@ -1086,7 +1089,7 @@ class RAM(PropagationModel):
 
         ``profl`` interpolates the sediment arrays linearly between control
         point ``nzs-1`` at ``seafloor + sedlayer`` and control point ``nzs`` at
-        ``zmax`` (``mpiramS/src/ram.f90:309-317,320-325``), and uacpy raises
+        ``zmax`` (``mpiramS/src/ram.f90:321-329,332-337``), and uacpy raises
         only the last point to ``absorbing_layer_attn``. The absorbing layer is
         therefore exactly the span ``[seafloor + sedlayer, zmax]``, so
         ``sedlayer`` is what sets its width — it is not a free choice.
@@ -1149,11 +1152,13 @@ class RAM(PropagationModel):
 
         ``profl`` places them at ``zwork = [0, d, d + k·sedlayer/(nzs-3)
         (k = 1..nzs-3), max(zg(n), zwork(nzs-1)+1e-6)]``
-        (``mpiramS/src/ram.f90:309-317``) and interpolates the supplied arrays
-        between them linearly (``gorp``, ``ram.f90:320-325,371``). Points
-        ``2..nzs-1`` are therefore ``linspace(0, sedlayer, nzs-2)`` below the
-        local seafloor, point 1 sits at the sea surface and point ``nzs`` at
-        the domain floor.
+        (``mpiramS/src/ram.f90:321-329``) and interpolates the supplied arrays
+        between them linearly (``gorp``, ``ram.f90:332-337`` and ``:360-390``).
+        Points ``2..nzs-1`` are therefore ``linspace(0, sedlayer, nzs-2)`` below
+        the local seafloor, point 1 sits at the sea surface and point ``nzs`` at
+        the domain floor — the same depths :meth:`_control_point_depths`
+        returns, which is what lets :meth:`_sediment_offsets` subtract the
+        water column control point by control point.
 
         Point ``nzs-1`` carries the half-space, so the layer stack ends in a
         step resolved to ``sedlayer/(nzs-3)`` and every depth from there to the
@@ -1236,23 +1241,8 @@ class RAM(PropagationModel):
         self._log(f"Layered bottom: {len(col.layers)} layers, "
                   f"nzs={nzs}, sedlayer={sedlayer_lay:.1f} m")
 
-        ranges, _cwg = self._varying_seafloor_speeds(env)
-        if ranges is None:
-            cs = self._sediment_offsets(env, 0.0, cs_samp, nzs, sedlayer_lay,
-                                        zmax)
-            return sedlayer_lay, nzs, cs, rho_arr, attn_arr, 0, ''
-
-        cs_profiles = np.column_stack([
-            self._sediment_offsets(env, r, cs_samp, nzs, sedlayer_lay, zmax)
-            for r in ranges
-        ])
-        sed_filename = self._write_sediment_profiles(
-            work_dir, ranges, cs_profiles,
-            np.repeat(rho_arr[:, None], len(ranges), axis=1),
-            np.repeat(attn_arr[:, None], len(ranges), axis=1),
-        )
-        return (sedlayer_lay, nzs, cs_profiles[:, 0].copy(), rho_arr,
-                attn_arr, 1, sed_filename)
+        return self._offsets_over_seafloor_speeds(
+            env, work_dir, cs_samp, nzs, sedlayer_lay, zmax, rho_arr, attn_arr)
 
     def _bottom_rd_halfspace(self, env, work_dir, nzs, sedlayer, zmax):
         """Range-dependent *halfspace* seabed → per-range sediment .sed profiles."""
@@ -1305,6 +1295,21 @@ class RAM(PropagationModel):
         attn_arr[-1] = self.absorbing_layer_attn
         cp_abs = np.full(nzs, cb_val)
 
+        return self._offsets_over_seafloor_speeds(
+            env, work_dir, cp_abs, nzs, sedlayer, zmax, rho_arr, attn_arr)
+
+    def _offsets_over_seafloor_speeds(self, env, work_dir, cp_abs, nzs,
+                                      sedlayer, zmax, rho_arr, attn_arr):
+        """Turn one range-independent sediment column ``cp_abs`` (absolute
+        speeds at the ``nzs`` control points) into the 7-tuple
+        :meth:`_prepare_bottom_properties` returns.
+
+        The column is range-independent but its *offsets* need not be: one
+        profile per range break whenever the water speed at the seafloor moves
+        (:meth:`_varying_seafloor_speeds`), a single profile otherwise. Density
+        and attenuation are the same column at every range — only ``cs`` is
+        referenced to the local water column.
+        """
         ranges, _cwg = self._varying_seafloor_speeds(env)
         if ranges is None:
             cs = self._sediment_offsets(env, 0.0, cp_abs, nzs, sedlayer, zmax)
@@ -1698,7 +1703,10 @@ class RAM(PropagationModel):
           modal band.
         * ``rams0.5`` additionally multiplies u by ``g0 = exp(i k0 dr rot0)``
           on every range step (``rams0.5.f:848-851``), i.e. the whole
-          carrier is baked in — ~0.89 rad/m at 250 Hz.
+          carrier is baked in — ~0.89 rad/m at 250 Hz. The rotation makes
+          ``rot0`` complex (``rams0.5.f:865-888``); only ``Re(rot0)`` is a
+          phase rate — ``Im(rot0)`` is the rotation's amplitude decay per
+          step, which does not alias and must not be divided out.
 
         :func:`_interp_envelope_to_receiver_grid` divides this out before
         interpolating and restores it afterwards.
@@ -1739,6 +1747,9 @@ class RAM(PropagationModel):
             ndr = max(1, min(ndr, int(np.floor(float(near.min()) / dr))))
         ndr = max(ndr, int(np.ceil(max_range / dr / _COLLINS_MAX_OUTPUT_RANGES)))
         block = dr * ndr
+        # The epsilon absorbs the rounding of ``max_range / block`` when the
+        # two divide exactly: ceil() on a value a few ulps above the integer
+        # would buy a whole extra output block.
         n_blocks = max(1, int(np.ceil(max_range / block - 1e-9)))
         return ndr, float((n_blocks * ndr - 0.5) * dr)
 
@@ -2483,8 +2494,8 @@ class RAM(PropagationModel):
         marker is written at the midpoint between consecutive breakpoints. That
         makes the switch happen where ``Bottom.at`` / mpiramS put it: mpiramS
         marches with the profile nearest the current range
-        (``minloc(abs(rp-rint))``, ``mpiramS/src/ram.f90:206`` for the SSP and
-        ``:216`` for the sediment), and ``uacpy.core.bottom.Bottom.at`` is
+        (``minloc(abs(rp-rint))``, ``mpiramS/src/ram.f90:218`` for the SSP and
+        ``:228`` for the sediment), and ``uacpy.core.bottom.Bottom.at`` is
         documented nearest, so all four backends transition at the same range
         for the same ``Environment``.
 
@@ -2626,12 +2637,11 @@ class RAM(PropagationModel):
         cs = getattr(s, 'shear_speed', None) if s is not None else None
         if cs is None or float(cs) <= 0.0:
             return env
-        import warnings as _w
         e = env.copy()
         e.surface = self._collapse_elastic_boundary(
             e.surface, self._collapse["elastic"]
         )
-        _w.warn(
+        warnings.warn(
             "RAM: surface shear is not supported by any backend "
             "(mpiramS / rams0.5 / ramsurf1.5 all model the surface as "
             "pressure-release); collapsed surface shear "
@@ -2687,71 +2697,39 @@ class RAM(PropagationModel):
             UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
         )
 
-    def _compute_grid_lytaev(
-        self, env: 'Environment', freq: float,
-        *, max_range: float, kind: str
-    ) -> 'tuple[float, float]':
-        """Padé-error-based ``(dr, dz)`` selection following Lytaev
-        (2023, https://doi.org/10.3390/jmse11030496).
+    # Narrowest source aperture the auto-loosening below will fall back to.
+    # Collins (1993) treats 30° as the standard wide-angle PE; under 15° the
+    # operator is essentially paraxial and "wide-angle" stops meaning
+    # anything, so a caller who genuinely wants narrow-angle physics has to
+    # say so via ``theta_max=`` rather than reach it by relaxation.
+    _THETA_MAX_FLOOR = 15.0
 
-        Picks the coarsest ``(dr, dz)`` whose accumulated single-step
-        Padé error stays under ``accuracy`` over the marched range.
-        The PE reference speed ``c₀`` comes from ``_resolve_c0`` (Lytaev
-        Eq. (15) by default, the user's value when pinned).
+    def _optimize_grid_relaxing(self, *, freq, c_min, c_max, max_range,
+                                c0_pe, eps0, theta0, kind):
+        """Run the Lytaev optimizer, loosening its inputs until one converges.
 
-        The optimizer minimises Lytaev's error model alone. Four
-        constraints it does not represent are applied to its output
-        afterwards: the rams ``dr`` stability tightening, seafloor-node
-        snapping, the ``MAX_DEPTH_POINTS`` runtime cap, and the
-        shear/acoustic ``dz`` floor. The accuracy that gets logged is
-        therefore recomputed on the grid that is actually marched, which
-        can be orders of magnitude above ``accuracy`` once a floor
-        has bound.
+        A hard environment (deep ocean, high ``c_max``, wide ``θ_max``) admits
+        no grid meeting ``eps0`` under the Collins second-order Numerov, and
+        :func:`~uacpy.models._pade_optimizer.optimize_grid` signals that with a
+        ``RuntimeError``. Two nested fallbacks, tried in this order because
+        a looser error budget still describes the requested physics whereas a
+        narrower aperture no longer does:
 
-        Raises ``ConfigurationError`` if no candidate ``(dr, dz)`` pair
-        meets the accuracy budget even after auto-loosening.
+        1. ``ε`` is tripled, up to 8 times or until it passes 0.5;
+        2. only if the whole ε ladder failed, ``θ_max`` steps down through
+           20° and :data:`_THETA_MAX_FLOOR`, restarting the ε ladder each
+           time. Steps at or above ``theta0`` are skipped, so a caller who
+           already asked for a narrow aperture never has it widened.
+
+        Returns ``(result, eps_used, theta_used)`` — the optimizer payload
+        plus the inputs that produced it, so the caller can warn when they
+        differ from what was asked for. Raises :class:`ConfigurationError`
+        when even the loosest combination is infeasible.
         """
-        from uacpy.models._pade_optimizer import (
-            grid_error, optimize_grid, rams_dz_floor,
-        )
+        from uacpy.models._pade_optimizer import optimize_grid
 
-        c0_pe = self._resolve_c0(env)
-
-        # Spectrum bounds: slowest / fastest acoustic speeds in the env,
-        # widened to contain c₀ so [ξ_min, ξ_max] brackets the expansion
-        # point even when the caller pinned an out-of-range c0.
-        bounds = self._speed_bounds(env) or (c0_pe, c0_pe)
-        c_min = min(bounds[0], c0_pe)
-        c_max = max(bounds[1], c0_pe)
-
-        # Per-backend dz floor: λ_p/16 acoustic stability for Collins
-        # backends + cost cap for mpiramS; 0.55·λ_s shear-mode aliasing
-        # for rams. Override via ``dr=…``/``dz=…``.
-        if kind in ('mpiramS', 'rams', 'ramsurf', 'ramgeo'):
-            dz_floor_acoustic = c_min / (LAMBDA_PER_DZ_FLOOR * max(freq, 1.0))
-            cs_min = self._min_shear_speed(env) if kind == 'rams' else 0.0
-            dz_floor_shear = rams_dz_floor(cs_min, freq, factor=0.55)
-            dz_floor = max(dz_floor_shear, dz_floor_acoustic)
-        else:
-            cs_min = 0.0
-            dz_floor = 0.0
-
-        # Auto-loosen on infeasibility: hard environments (deep ocean,
-        # high c_max, wide θ_max) can't satisfy the user's ε with the
-        # Collins 2nd-order Numerov. Relax ε progressively up to 0.5,
-        # then drop θ_max stepwise (30°→20°→15°→10°). The optimizer
-        # still picks a *Lytaev-derived* grid; we surface every relax
-        # via a warning so the user knows their target wasn't met.
-        eps0 = self._accuracy
-        theta0 = self._resolve_theta_max(env)
-        # Floor at 15° — Collins (1993) treats 30° as the standard
-        # wide-angle PE; below 15° the operator is essentially paraxial
-        # and the term "wide-angle" stops being meaningful. Users who
-        # genuinely want narrow-angle physics should pass an explicit
-        # ``theta_max`` to the constructor.
-        theta_floor = 15.0
         eps_used, theta_used, res, last_exc = eps0, theta0, None, None
-        for theta_trial in (theta0, 20.0, theta_floor):
+        for theta_trial in (theta0, 20.0, self._THETA_MAX_FLOOR):
             if theta_trial > theta0:
                 continue
             theta_used = theta_trial
@@ -2779,10 +2757,65 @@ class RAM(PropagationModel):
         if res is None:
             raise ConfigurationError(
                 f"RAM:{kind}: no Lytaev grid feasible even at ε=0.5, "
-                f"θ_max={theta_floor:.0f}° for f={freq:.1f} Hz, "
+                f"θ_max={self._THETA_MAX_FLOOR:.0f}° for f={freq:.1f} Hz, "
                 f"x_max={max_range:.0f} m. Set ``dr``/``dz`` explicitly. "
                 f"Optimiser said: {last_exc}"
             ) from last_exc
+        return res, eps_used, theta_used
+
+    def _compute_grid_lytaev(
+        self, env: 'Environment', freq: float,
+        *, max_range: float, kind: str
+    ) -> 'tuple[float, float]':
+        """Padé-error-based ``(dr, dz)`` selection following Lytaev
+        (2023, https://doi.org/10.3390/jmse11030496).
+
+        Picks the coarsest ``(dr, dz)`` whose accumulated single-step
+        Padé error stays under ``accuracy`` over the marched range.
+        The PE reference speed ``c₀`` comes from ``_resolve_c0`` (Lytaev
+        Eq. (15) by default, the user's value when pinned).
+
+        The optimizer minimises Lytaev's error model alone. Four
+        constraints it does not represent are applied to its output
+        afterwards: the rams ``dr`` stability tightening, seafloor-node
+        snapping, the ``MAX_DEPTH_POINTS`` runtime cap, and the
+        shear/acoustic ``dz`` floor. The accuracy that gets logged is
+        therefore recomputed on the grid that is actually marched, which
+        can be orders of magnitude above ``accuracy`` once a floor
+        has bound.
+
+        Raises ``ConfigurationError`` if no candidate ``(dr, dz)`` pair
+        meets the accuracy budget even after auto-loosening.
+        """
+        from uacpy.models._pade_optimizer import grid_error, rams_dz_floor
+
+        c0_pe = self._resolve_c0(env)
+
+        # Spectrum bounds: slowest / fastest acoustic speeds in the env,
+        # widened to contain c₀ so [ξ_min, ξ_max] brackets the expansion
+        # point even when the caller pinned an out-of-range c0.
+        bounds = self._speed_bounds(env) or (c0_pe, c0_pe)
+        c_min = min(bounds[0], c0_pe)
+        c_max = max(bounds[1], c0_pe)
+
+        # Per-backend dz floor: λ_p/16 acoustic stability for Collins
+        # backends + cost cap for mpiramS; 0.55·λ_s shear-mode aliasing
+        # for rams. Override via ``dr=…``/``dz=…``.
+        if kind in ('mpiramS', 'rams', 'ramsurf', 'ramgeo'):
+            dz_floor_acoustic = c_min / (LAMBDA_PER_DZ_FLOOR * max(freq, 1.0))
+            cs_min = self._min_shear_speed(env) if kind == 'rams' else 0.0
+            dz_floor_shear = rams_dz_floor(cs_min, freq, factor=0.55)
+            dz_floor = max(dz_floor_shear, dz_floor_acoustic)
+        else:
+            cs_min = 0.0
+            dz_floor = 0.0
+
+        eps0 = self._accuracy
+        theta0 = self._resolve_theta_max(env)
+        res, eps_used, theta_used = self._optimize_grid_relaxing(
+            freq=freq, c_min=c_min, c_max=c_max, max_range=max_range,
+            c0_pe=c0_pe, eps0=eps0, theta0=theta0, kind=kind,
+        )
         if eps_used > eps0 or theta_used < theta0:
             warnings.warn(
                 f"RAM:{kind}: Lytaev relaxed ε={eps0:.0e}→{eps_used:.0e}, "
@@ -3134,15 +3167,15 @@ class RAM(PropagationModel):
         rcv_ranges = np.clip(receiver.ranges, rout[0], rout[-1])
 
         # Interpolate real and imaginary parts separately. NaN samples
-        # in the spectrum (e.g. above the seafloor for some backends,
-        # or PE divergence) are zeroed before interpolation; warn if
-        # any are present so the user knows their broadband output is
-        # not fully converged.
+        # in the centre-frequency slice (PE divergence, or a depth the
+        # march did not resolve) are zeroed before interpolation; warn if
+        # any are present so the user knows the field is not fully
+        # converged.
         n_nan_p = int(np.count_nonzero(~np.isfinite(pressure)))
         if n_nan_p > 0:
             # expected; not in filterwarnings — emerges to user
             warnings.warn(
-                f"RAM:mpiramS broadband: {n_nan_p}/{pressure.size} "
+                f"RAM:mpiramS: {n_nan_p}/{pressure.size} "
                 f"complex samples are NaN/inf and have been zeroed "
                 f"for interpolation. Inspect the result before use.",
                 UserWarning, skip_file_prefixes=USER_FRAME_SKIP
@@ -3380,7 +3413,6 @@ class RAM(PropagationModel):
         if result.stdout:
             self._log(f"mpiramS output:\n{result.stdout}", level='debug')
 
-        # Verify output exists
         if not (work_dir / 'psif.dat').exists():
             raise ModelExecutionError(
                 self.model_name,

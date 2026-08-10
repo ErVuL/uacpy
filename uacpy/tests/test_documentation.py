@@ -12,7 +12,7 @@ step (``python docs/generate_model_figures.py``).
 
 What these catch that the rest of the suite does not: a renamed page leaving a
 dead cross-reference, and the wreckage of an interrupted or twice-applied edit
-— duplicated blocks, unbalanced fences, code samples that no longer parse.
+— duplicated blocks, unbalanced fences, code samples that fail to parse.
 """
 
 from __future__ import annotations

@@ -1,6 +1,6 @@
 """
 Readers for the output of the Collins-style RAM family binaries
-uacpy dispatches to (``rams0.5``, ``ramsurf1.5``).
+uacpy dispatches to (``rams0.5``, ``ramsurf1.5``, ``ramgeo1.5``).
 
 Two output files are produced per run:
 
@@ -65,6 +65,8 @@ def _read_lz_records(
         f.seek(0, 2)
         file_size = f.tell()
         f.seek(0)
+        # 12 bytes is the smallest possible file: the header record is a
+        # 4-byte marker, one int32 ``lz``, and a 4-byte trailing marker.
         if file_size < 12:
             raise FileFormatError(f"{path}: too short to contain the header record")
 
@@ -167,11 +169,14 @@ def read_pcomplex_grid(
     """
     Read a uacpy-patched ``pcomplex.bin`` (unformatted Fortran binary).
 
-    Format (added to rams0.5 / ramsurf1.5 by uacpy — see
+    Format (added to rams0.5 / ramsurf1.5 / ramgeo1.5 by uacpy — see
     ``third_party/MODIFICATIONS.md``): record 1 holds a single int32 ``lz``
     (number of stored depth points, identical to the ``tl.grid`` header).
-    Records 2..N each hold ``lz`` ``complex*8`` samples — the envelope
-    ``u·f3 / sqrt(r)`` evaluated at the same (z, r) grid as ``tl.grid``.
+    Records 2..N each hold ``lz`` ``complex*8`` samples: whatever ``outpt``
+    takes the magnitude of for ``tl.grid``, divided by ``sqrt(r)``. That is
+    ``u·f3`` for the fluid codes (``ramsurf1.5.f:438``, ``ramgeo1.5.f:430``)
+    and the odd-indexed elastic component ``u(2i-1)`` for RAMS
+    (``rams0.5.f:263``), so the two grids stay consistent per backend.
     The carrier ``exp(+i k0 r)`` has been factored out by the PE march;
     the RAM wrapper bakes the engineering travelling-wave carrier
     ``exp(-i k0 r)`` back in before tagging the result.

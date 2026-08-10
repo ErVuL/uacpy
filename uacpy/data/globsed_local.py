@@ -53,7 +53,15 @@ def download_globsed_db(cache_dir=None, *, timeout=300.0, verbose=False):
 
 
 class _GlobSedGrid(NetcdfGrid):
-    """Nearest-cell accessor over the GlobSed ``z(lat, lon)`` thickness grid."""
+    """Nearest-cell accessor over the GlobSed ``z(lat, lon)`` thickness grid.
+
+    GlobSed is **gridline**-registered, not cell-centre: its 5′ axes are nodes
+    at exact degrees, latitude south-up over −90 → 90 (2161 nodes) and longitude
+    over −180 → 180 (4321). Both meridian ends are therefore stored, and a query
+    at +180° wraps to the −180° column — harmless, since the two columns hold
+    identical values. Land and unmapped cells are ``NaN``, not zero, so a real
+    zero means "no sediment", not "no data".
+    """
 
     def __init__(self, path):
         try:

@@ -6,9 +6,10 @@
 
 ``.irc`` is a different format and is **not** handled here: BOUNCE writes it
 as a title/frequency line, a count, then fixed-format ``(5G15.7, I5)`` rows of
-``x, Re f, Im f, Re g, Im g, iPower`` (``bounce.f90:225-228``), read back with
-the same fixed format by ``misc/RefCoef.f90:97-107``. It is consumed only by
-the Kraken-family ``BotOpt='P'`` path, which passes it straight to the Fortran.
+``x, Re f, Im f, Re g, Im g, iPower`` (``Kraken/bounce.f90:225-228``), read
+back with the same fixed format by ``misc/RefCoef.f90:97-107``. It is consumed
+only by the Kraken-family ``BotOpt='P'`` path, which passes it straight to the
+Fortran.
 * ``.sbp`` — source beam pattern (:func:`read_source_beam_pattern`,
   :func:`write_source_beam_pattern`)
 
@@ -199,6 +200,9 @@ def read_source_beam_pattern(
                         f"Number of source beam pattern points = {NSBPPts}",
                         verbose=verbose)
 
+            # Each point is one ASCII line of at least two numbers, so it
+            # cannot occupy fewer than 4 bytes on disk; a larger count is a
+            # malformed header rather than a huge table.
             _bound_counts(sbp_file, Path(sbp_file).stat().st_size, 4,
                           NSBPPts=NSBPPts)
             beam_pattern = np.zeros((NSBPPts, 2))
@@ -254,6 +258,9 @@ def write_reflection_coefficient(
     in to match :func:`read_reflection_coefficient` (which returns
     ``phi`` in radians) and the :class:`uacpy.ReflectionCoefficient`
     result convention.
+
+    ``misc/RefCoef.f90:53`` reads the table list-directed, so the column
+    widths below are for legibility only — nothing depends on them.
     """
     filepath = Path(filepath)
 
@@ -335,7 +342,16 @@ def stage_reflection_file(
     internal table), so a table produced elsewhere has to be copied next to
     the environment file. A table already at the destination — a BOUNCE run
     whose ``.brc`` sits in the same pinned ``work_dir`` the ``.env`` is
-    written into — is kept as is.
+    written into — is copied over itself, i.e. left in place.
+
+    The staged ``.brc`` / ``.trc`` then goes through
+    :func:`dedupe_reflection_file`, so the table the engine reads satisfies
+    ``InterpolateReflectionCoefficient``'s preconditions whatever produced it.
+    Doing it here rather than at the producer is what makes a user-supplied
+    ``reflection_file=`` equivalent to a :class:`~uacpy.Bounce` output: this is
+    the single boundary every angle table crosses on its way to a run
+    (``bellhop_writer``, ``oalib_writer``). An ``.irc`` is a different format
+    and is staged untouched.
 
     Parameters
     ----------
@@ -382,6 +398,8 @@ def stage_reflection_file(
     dest = Path(env_path).with_suffix(suffix)
     if src.resolve() != dest.resolve():
         shutil.copy(src, dest)
+    if not internal:
+        dedupe_reflection_file(dest)
     log_message('refl_io', f"staged {boundary} reflection file: {src} -> {dest}",
                 verbose=verbose)
     return dest
@@ -403,11 +421,15 @@ def stage_source_beam_pattern(
             )
         # ``bellhop.f90:273`` interpolates with
         # ``s = (SrcDeclAngle - SrcBmPat(IBP,1)) / (SrcBmPat(IBP+1,1) -
-        # SrcBmPat(IBP,1))`` and never checks the denominator: a repeated
-        # angle divides by zero and a decreasing one flips the weight, both
-        # silently. ``Source`` applies this check to the array form, so the
-        # file form has to get it too or the guard depends on which way the
-        # caller happened to supply the pattern.
+        # SrcBmPat(IBP,1))`` and never checks the denominator; what keeps a
+        # repeated angle out of that division is the load-time guard —
+        # ``misc/beampattern.f90:56`` (and ``bellhopcuda/src/module/sbp.hpp``
+        # :114) rejects a pattern whose angles are not *strictly* increasing,
+        # ``misc/monotonicMod.f90:32`` counting a repeated abscissa as
+        # non-monotonic. Checking here turns that mid-run engine abort into a
+        # Python-side error, and matches the check ``Source`` applies to the
+        # array form so the guard does not depend on which way the caller
+        # happened to supply the pattern.
         from uacpy.core._carrier_validate import _require_strictly_increasing
         _require_strictly_increasing(
             read_source_beam_pattern(src, sbp_option='*')[:, 0],
@@ -419,15 +441,23 @@ def stage_source_beam_pattern(
 
 
 def dedupe_reflection_file(filepath: Union[str, Path]) -> None:
-    """Rewrite a ``.brc`` / ``.trc`` file with a strictly-increasing angle axis.
+    """Rewrite a ``.brc`` / ``.trc`` file with a strictly-increasing angle axis
+    and an unwrapped phase column — the two preconditions
+    ``misc/RefCoef.f90`` places on the table.
 
-    BOUNCE's Fortran driver tabulates reflection coefficients by sweeping
-    phase velocity (kx = omega/c), which — for the c_low/c_high defaults —
-    produces many samples that round to the same grazing angle (hundreds of
-    duplicate 0-degree rows are typical). Bellhop tolerates non-decreasing
-    angles but bellhopcuda enforces strict monotonicity in ``bhc::setup()``
-    and aborts with "Bottom reflection coefficients must be monotonically
-    increasing".
+    BOUNCE sweeps the horizontal wavenumber uniformly from ``omega/c_high``
+    to ``omega/c_low`` (``Kraken/bounce.f90:45-46``, ``:172-175``). Every
+    sample whose phase speed falls below the reference speed — the top
+    half-space speed, else 1500 m/s (``:186-190``) — is evanescent and takes
+    the ``ELSEWHERE`` branch at ``:204-209``, which assigns ``theta = 0``,
+    ``R = 1``, ``phase = 180`` identically. That block is ``1 - c_low/c0`` of
+    the sweep — with uacpy's defaults (``c_low`` 1400 m/s, ``c_high``
+    unbounded, so ``kMin`` collapses to 0 at ``:47``) about 7% of a
+    several-thousand-row table, i.e. hundreds of byte-identical 0-degree rows
+    at the head of the file. Bellhop tolerates them — ``misc/RefCoef.f90:45-55``
+    reads the table with no monotonicity test — but bellhopcuda rejects them at
+    ``bellhopcuda/src/module/reflcoef.hpp:135-141``: "Bottom reflection
+    coefficients must be monotonically increasing".
 
     This loads the file, keeps only rows whose angle strictly exceeds the
     previous kept row, and rewrites it in the original 3-column BOUNCE
@@ -438,14 +468,12 @@ def dedupe_reflection_file(filepath: Union[str, Path]) -> None:
     strip the header and four of the six columns; a file whose first line is
     not a bare count is rejected.
 
-    Precision caveat: when two physically distinct phase velocities map to
-    grazing angles that round equal at the file's print precision, only the
-    first (lowest-c, i.e. shallowest-angle) row of that collision group is
-    kept and the rest are dropped — no averaging or re-gridding. This is
-    loss-free for true duplicates (the dominant case near 0°) but discards
-    one R(θ) sample per genuine collision, a slight under-resolution of the
-    reflection table near grazing. Raising the BOUNCE angle/print resolution
-    avoids the collisions.
+    Discarding the evanescent block down to its first row is loss-free — the
+    rows are equal by construction. Should two *propagating* samples ever
+    print equal angles, the first (lowest-c, shallowest-angle) is kept and
+    the rest dropped with no averaging or re-gridding, costing one R(θ)
+    sample; ``Kraken/bounce.f90:235`` writes the angle list-directed from a
+    ``REAL(KIND=8)``, so distinct wavenumbers do not normally collide there.
     """
     filepath = Path(filepath)
     with open(filepath, 'r') as fh:
@@ -489,8 +517,11 @@ def dedupe_reflection_file(filepath: Union[str, Path]) -> None:
     # ``misc/RefCoef.f90:119`` states the contract for this table outright —
     # "Assumes phi has been unwrapped so that it varies smoothly" — and
     # ``InterpolateReflectionCoefficient`` then interpolates phi linearly
-    # between the bracketing abscissas. BOUNCE writes the principal value, so
-    # its own output breaks that: measured on a 10 m sediment over a 1800 m/s
+    # between the bracketing abscissas. BOUNCE takes the principal value at
+    # ``Kraken/bounce.f90:203`` and attempts an unwrap at ``:212-223``, but the
+    # incrementing branch (``:219``) tests ``AIMAG(R1) > 0 .AND. AIMAG(R1) < 0``
+    # — a contradiction — so only the decrementing branch can fire and the
+    # result is not smooth: measured on a 10 m sediment over a 1800 m/s
     # half-space at 500 Hz, the table jumps 298.8 deg between adjacent angles.
     # Interpolating across such a step sweeps the phase the long way round and
     # returns a reflection phase that is wrong through the whole interval.

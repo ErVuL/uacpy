@@ -14,7 +14,12 @@ pytestmark = pytest.mark.requires_binary
 
 
 class TestVolumeAttenuation:
-    """Tests for volume attenuation models (Priority 1 gap)."""
+    """``env.absorption`` reaches the solvers and adds loss.
+
+    Only :func:`test_bellhop_thorp_attenuation` checks a magnitude; the
+    Kraken / Scooter cases are reachability smoke tests (the model accepts an
+    absorbing environment and returns a finite result).
+    """
 
     @pytest.fixture
     def shallow_env(self):
@@ -54,11 +59,10 @@ class TestVolumeAttenuation:
                                        high_freq_source, receiver):
         """Test Bellhop with Thorp attenuation formula.
 
-        At 10 kHz, Thorp absorption ≈ 0.6 dB/km; over the test ranges
-        the extra TL should be on the order of the predicted Thorp value.
-        We assert the depth-mean difference at the longest range is within
-        the predicted-times-[0.1, 10] band — a sign-error or unit
-        confusion would not satisfy that band.
+        At 10 kHz, Thorp absorption is 1.19 dB/km, i.e. 5.9 dB of extra
+        one-way loss over the 5 km longest range. We assert the depth-mean
+        difference there is within the predicted-times-[0.1, 10] band — a
+        sign-error or unit confusion would not satisfy that band.
         """
         bellhop = Bellhop(verbose=False)
 
@@ -104,7 +108,9 @@ class TestVolumeAttenuation:
     @pytest.mark.requires_binary
     def test_kraken_thorp_attenuation(self, shallow_env_thorp,
                                       high_freq_source, receiver):
-        """Test Kraken with Thorp attenuation formula (modes path)."""
+        """An absorbing environment reaches the modes path: kraken.exe accepts
+        the Thorp-derived attenuation and returns wavenumbers. The size of the
+        added loss is not asserted here."""
         kraken = Kraken(verbose=False)
         result = kraken.compute_modes(
             env=shallow_env_thorp,
@@ -117,7 +123,10 @@ class TestVolumeAttenuation:
     def test_frequency_dependent_attenuation(self, shallow_env_thorp,
                                              low_freq_source, high_freq_source,
                                              receiver):
-        """Test that attenuation increases with frequency."""
+        """The same absorbing environment runs at 100 Hz and 10 kHz and both
+        fields are finite. Thorp spans four orders of magnitude in alpha across
+        that pair, so an alpha that overflowed or went NaN at one end shows up
+        here; the ordering of the two losses is not asserted."""
         bellhop = Bellhop(verbose=False)
 
         result_low = bellhop.run(
@@ -143,7 +152,8 @@ class TestVolumeAttenuation:
     @pytest.mark.slow
     def test_attenuation_with_scooter(self, shallow_env_thorp,
                                       high_freq_source, receiver):
-        """Test Scooter with volume attenuation."""
+        """The spectral-integral path also accepts an absorbing environment and
+        returns a finite field. The size of the added loss is not asserted."""
         scooter = Scooter(verbose=False)
         result = scooter.run(
             env=shallow_env_thorp,

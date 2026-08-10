@@ -35,7 +35,8 @@ def get_component(modes_dict: Dict[str, Any], comp: str) -> np.ndarray:
         - 'z': Depth vector
         - 'Nmedia': Number of media layers
         - 'Mater': Material types ('ACOUSTIC' or 'ELASTIC ')
-        - 'N': Number of mesh points per medium (optional)
+        - 'N': Number of mesh points per medium. Read only by the KRAKEL
+          variant of the depth loop, which this does not take (see below).
     comp : str
         Component to extract:
         - 'H': Horizontal displacement
@@ -58,7 +59,10 @@ def get_component(modes_dict: Dict[str, Any], comp: str) -> np.ndarray:
     KRAKEL tabulates modes at finite difference grid points.
     Other codes (KRAKEN, KRAKENC) tabulate at receiver depths.
 
-    Translated from OALIB get_component.m by mbp
+    Mirrors ``Matlab/ReadWrite/get_component.m`` (mbp, 8/14/2010). No
+    ``krakel`` binary ships in ``uacpy/bin/oalib``, so with the shipped
+    solvers ``Mater`` never contains ``'ELASTIC'`` and the four-component
+    branch is unreachable; it is kept because the file format admits it.
 
     Examples
     --------
@@ -68,6 +72,20 @@ def get_component(modes_dict: Dict[str, Any], comp: str) -> np.ndarray:
     >>> # Extract pressure from acoustic modes (any component)
     >>> phi_p = get_component(modes, 'H')  # Same as 'V', 'T', 'N'
     """
+    # Mirrors ``Matlab/ReadWrite/get_component.m``, which differs from AT's
+    # Fortran EXTRACT (``KrakenField/ReadModes.f90:307-331``) in exactly one
+    # place: the depth-loop bound. EXTRACT walks ``N(Medium)+1`` grid points
+    # per medium, which is right for KRAKEL — it tabulates modes on the
+    # finite-difference grid — while KRAKEN/KRAKENC subtabulate to the
+    # receiver depths, so the MATLAB walks ``length(Modes.z)`` and keeps
+    # ``Modes.N`` only as a commented-out KRAKEL alternative
+    # (``get_component.m:6-7,16-18``). Two cursors, because the axes advance
+    # at different rates: ``k`` walks the packed stress-displacement vector,
+    # 1 entry per depth point in an acoustic medium but 4 (H, V, T, N) in an
+    # elastic one, while ``jj`` walks depth points. ``phi_full`` is trusted
+    # only up to its own length: a KRAKEN run does not tabulate the elastic
+    # media, so the stored block can be shorter than ``Nmedia``/``Mater``
+    # imply (``get_component.m:19-23``).
     phi = []
     jj = 0
     k = 0
@@ -236,7 +254,9 @@ def read_modes_asc(
     Both complex records store **interleaved pairs**, not a real block
     followed by an imaginary block: ``read_modes_asc.m:35,52`` reads them
     with ``fscanf(fid, '%f', [2, n])`` and MATLAB fills that matrix
-    column-major.
+    column-major. That script is a layout reference only — as vendored it
+    reads counts from bare ``ntot``/``m`` names it never defines
+    (``read_modes_asc.m:33,35``), so it does not run.
 
     ``'M'`` is the number of modes actually returned (always ``len(k)``
     and ``phi.shape[1]``), which is the file's total only when ``modes``
@@ -498,7 +518,8 @@ def _read_modes_bin_impl(
 
     References
     ----------
-    Based on BELLHOP/read_modes_bin.m by Aaron Thode (1996)
+    Mirrors ``Matlab/ReadWrite/read_modes_bin.m``, itself derived from
+    ``readKRAKEN.m``, Aaron Thode, 1996 (``read_modes_bin.m:16``).
 
     Examples
     --------
@@ -553,8 +574,11 @@ def _read_modes_bin_impl(
 
             ``kraken.f90:106-113`` writes the count, the halfspace record,
             ``M`` eigenfunction records and the folded eigenvalue records.
-            The zero-mode file (``kraken.f90:948-963``) stops after the
-            halfspace slot, and nothing past it is read.
+            A zero-mode run never reaches that writer: ``kraken.f90:958-961``
+            writes the profile header, puts ``M`` at ``iRecProfile + 6`` and
+            calls ERROUT, which STOPs (``misc/FatalError.f90:30``). This
+            reader reads the halfspace slot before it tests ``M``, so
+            ``rec + 2`` still bounds what it touches.
             """
             if M == 0:
                 return rec + 2
@@ -595,6 +619,13 @@ def _read_modes_bin_impl(
                     f"frequency block): {filename}"
                 )
 
+            # Records hdr+1..hdr+4 (kraken.f90:594-598, read back at
+            # ReadModes.f90:185-188). The first two are implied-DO pair lists
+            # over the media, so the two quantities interleave: int32 N with
+            # CHARACTER*8 Material, then REAL*4 depth with REAL*4 rho — hence
+            # the (2, Nmedia) Fortran-order reshape. freqVec is REAL(KIND=8)
+            # (SourceReceiverPositions.f90:14) while zTab is a default REAL
+            # and depth/rho are written through REAL(), so those are f4.
             fid.seek((hdr + 1) * lrecl, 0)
             N = []
             Mater = []
@@ -683,7 +714,7 @@ def _read_modes_bin_impl(
         # wraps for a negative index (returning the wrong mode).
         modes = modes[(modes >= 1) & (modes <= M)]
         # Top/Bot halfspace block sits at REC iRecProfile+1 per
-        # kraken.f90:603 and read_modes_bin.m:130.
+        # kraken.f90:603 and read_modes_bin.m:129-131.
         fid.seek((iRecProfile + 1) * lrecl, 0)
         Top = {}
         Top["BC"] = chr(np.fromfile(fid, dtype=np.uint8, count=1)[0])
@@ -709,6 +740,9 @@ def _read_modes_bin_impl(
         else:
             phi = np.zeros((NMat, len(modes)), dtype=np.complex64)
 
+            # Mode ``m`` (1-based) sits one record past the halfspace record:
+            # ReadModes.f90:243 reads REC = IRecProfile + 1 + Mode as NMat
+            # COMPLEX*8 values, i.e. 2*NMat interleaved re/im float32.
             for ii, mode_idx in enumerate(modes):
                 rec = iRecProfile + 1 + int(mode_idx)
                 fid.seek(rec * lrecl, 0)
@@ -721,7 +755,9 @@ def _read_modes_bin_impl(
             # on a record boundary, and KrakenField/ReadModes.f90:212-219
             # reads them back the same way. An odd LRecordLength leaves one
             # unwritten word at the end of every eigenvalue record, which a
-            # single contiguous read would absorb as data.
+            # single contiguous read would absorb as data. ``irec`` counts
+            # from 0 where the Fortran IREC counts from 1, hence ``+ 2`` here
+            # against kraken.f90:111's ``+ 1``.
             k_all = np.zeros(M, dtype=np.complex64)
             per_record = lrecl_words // 2
             ifirst = 0
@@ -872,6 +908,11 @@ def read_modes(
             Modes["Top"]["gamma"] = pekeris_root(gamma2)
             Modes["Top"]["phi"] = Modes["phi"][0, :]
         else:
+            # A non-acoustic halfspace carries no evanescent tail, so its
+            # interface terms are zeroed. The coupled-mode evaluator divides
+            # the interface mode value by rho (``Matlab/Kraken/evalcm.m:192,
+            # 197``); rho = 1 keeps that a well-defined zero whatever the file
+            # stores for a vacuum or rigid boundary (read_modes.m:87,98).
             Modes["Top"]["rho"] = 1.0
             Modes["Top"]["gamma"] = np.zeros_like(Modes["k"])
             Modes["Top"]["phi"] = np.zeros_like(Modes["phi"][0, :])

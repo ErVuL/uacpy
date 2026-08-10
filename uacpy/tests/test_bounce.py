@@ -67,7 +67,16 @@ class TestBareHalfspaceReferencePlane:
             self, tmp_path):
         """At 90 deg grazing the shear branch decouples, so R is the
         closed-form P-wave impedance ratio with zero phase. A padding medium of
-        thickness ``dz`` would show up as ``-2 k dz`` of phase here."""
+        thickness ``dz`` would show up as ``-2 k dz`` of phase here.
+
+        The match is close but not exact: ``misc/AttenMod.f90:73,113-114`` turns
+        ``alpha`` dB/wavelength into ``Im(c) = c * alpha / (2 pi * 8.6858896)``,
+        so the seabed impedance the code forms is complex. At the 0.2 dB/lambda
+        used here that displaces ``|R|`` by 8e-6 and rotates the phase by
+        0.30 deg. Both tolerances sit an order of magnitude above that — loose
+        enough not to track the loss model, tight enough that a shifted
+        reference plane (tens of degrees of phase) still fails.
+        """
         env = _halfspace_env()
         res = Bounce(work_dir=tmp_path, cleanup=False).run(env, _src(), _rcv())
         hs = env.bottom.halfspace_at(range=0.0)
@@ -248,9 +257,13 @@ class TestReflectionPhaseIsUnwrapped:
     """``misc/RefCoef.f90:119`` states the table's contract — "Assumes phi has
     been unwrapped so that it varies smoothly" — and
     ``InterpolateReflectionCoefficient`` interpolates phi linearly between the
-    bracketing abscissas. BOUNCE writes the principal value, so its own output
-    breaks that: a step of ~299 deg appeared between adjacent angles, and
-    interpolating across it sweeps the phase the long way round."""
+    bracketing abscissas. BOUNCE takes the principal value at
+    ``Kraken/bounce.f90:203`` and attempts an unwrap at ``:213-222``, but its
+    incrementing branch (``:219``) tests ``AIMAG(R1) > 0 .AND. AIMAG(R1) < 0``
+    — a contradiction that can never fire — so the raw table steps by nearly a
+    full turn and interpolating across such a step sweeps the phase the long
+    way round. uacpy re-unwraps in ``io/refl_io.py``; the 180 deg bound below
+    is the largest adjacent step a correctly unwrapped table can show."""
 
     @staticmethod
     def _env():
@@ -275,3 +288,85 @@ class TestReflectionPhaseIsUnwrapped:
         # The dedup contract and the magnitudes must survive the rewrite.
         assert np.all(np.diff(table[:, 0]) > 0)
         assert table[:, 1].min() >= 0.0 and table[:, 1].max() <= 1.0 + 1e-6
+
+
+class TestStagedTableGetsTheSameTreatment:
+    """A table handed straight to ``reflection_file=`` reaches the engine
+    through :func:`uacpy.io.refl_io.stage_reflection_file` and never through
+    ``Bounce.run``, so the unwrap has to happen at the staging boundary — the
+    one point every angle table crosses on its way to a run. Whatever produced
+    the file, what ``InterpolateReflectionCoefficient`` reads must satisfy
+    ``misc/RefCoef.f90:119``.
+
+    The synthetic table below is what BOUNCE's broken unwrap leaves behind: a
+    principal value that steps ~300 deg between adjacent angles, plus the
+    duplicate 0-degree rows of the evanescent block (``bounce.f90:204-209``)
+    that ``RefCoef.f90:165`` would divide by.
+    """
+
+    # Principal values of a phase falling smoothly past -180 deg.
+    _WRAPPED = [(0.0, 1.0, 180.0), (0.0, 1.0, 180.0), (10.0, 0.9, 150.0),
+                (20.0, 0.8, -170.0), (30.0, 0.7, -130.0), (40.0, 0.6, -90.0)]
+    _UNWRAPPED = [180.0, 150.0, 190.0, 230.0, 270.0]
+
+    @staticmethod
+    def _write(path, rows):
+        path.write_text(f"{len(rows):12d}\n" + ''.join(
+            f"   {a}        {r}        {p}\n" for a, r, p in rows))
+        return path
+
+    def _env(self, table, boundary='bottom'):
+        from uacpy.core.surface import Surface
+        props = BoundaryProperties('file', reflection_file=str(table))
+        if boundary == 'top':
+            return Environment(name='stage', bathymetry=100.0, ssp=1500.0,
+                               surface=Surface(properties=[props]))
+        return Environment(name='stage', bathymetry=100.0, ssp=1500.0,
+                           bottom=props)
+
+    def _stage_via_writer(self, tmp_path, table, boundary='bottom'):
+        from uacpy.io.bellhop_writer import write_bellhop_env_file
+        env_path = tmp_path / 'staged.env'
+        write_bellhop_env_file(env_path, self._env(table, boundary),
+                               _src(200.0), _rcv())
+        suffix = '.trc' if boundary == 'top' else '.brc'
+        return np.loadtxt(env_path.with_suffix(suffix), skiprows=1)
+
+    @pytest.mark.parametrize('boundary', ['bottom', 'top'])
+    def test_a_user_supplied_table_is_unwrapped_when_staged(self, tmp_path,
+                                                            boundary):
+        suffix = '.trc' if boundary == 'top' else '.brc'
+        src = self._write(tmp_path / f'user{suffix}', self._WRAPPED)
+        staged = self._stage_via_writer(tmp_path, src, boundary)
+        assert staged[:, 2] == pytest.approx(self._UNWRAPPED)
+        assert np.all(np.abs(np.diff(staged[:, 2])) <= 180.0)
+        assert np.all(np.diff(staged[:, 0]) > 0)       # duplicate row collapsed
+        assert staged[:, 1] == pytest.approx([1.0, 0.9, 0.8, 0.7, 0.6])
+
+    def test_the_users_own_file_is_left_alone(self, tmp_path):
+        """Staging copies before normalising, so the path the user passed keeps
+        the bytes they wrote."""
+        src = self._write(tmp_path / 'user.brc', self._WRAPPED)
+        before = src.read_text()
+        self._stage_via_writer(tmp_path, src)
+        assert src.read_text() == before
+
+    def test_an_already_smooth_table_is_unchanged(self, tmp_path):
+        rows = [(0.0, 1.0, 180.0), (10.0, 0.9, 150.0), (20.0, 0.8, 190.0)]
+        staged = self._stage_via_writer(
+            tmp_path, self._write(tmp_path / 'smooth.brc', rows))
+        assert staged == pytest.approx(np.array(rows))
+
+    def test_an_irc_is_staged_untouched(self, tmp_path):
+        """``boundary='internal'`` carries BOUNCE's six fixed-format columns,
+        not the 3-column angle table — normalising it would destroy it."""
+        from uacpy.io.refl_io import stage_reflection_file
+        src = tmp_path / 'user.irc'
+        src.write_text(" ' BOUNCE '  100.0\n 2\n"
+                       "     0.1000000     1.0000000     0.0000000"
+                       "     0.5000000     0.1000000    0\n"
+                       "     0.2000000     0.9000000     0.1000000"
+                       "     0.4000000     0.2000000    1\n")
+        dest = stage_reflection_file(src, tmp_path / 'deck.env',
+                                     boundary='internal')
+        assert dest.read_text() == src.read_text()

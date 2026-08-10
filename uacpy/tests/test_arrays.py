@@ -57,6 +57,9 @@ class TestCovariance:
 
 
 class TestBeamformers:
+    # 241 nodes over 120 deg = 0.5 deg spacing, and the spectra are read with
+    # a bare argmax, so the abs=1.0 below is a two-node allowance on the scan
+    # grid — not a bearing-accuracy claim.
     angles = np.linspace(-60, 60, 241)
 
     def test_bartlett_recovers_doa(self):
@@ -122,9 +125,9 @@ class TestPowerlessCovariance:
     with the trace: it stabilises a rank-deficient covariance that still
     carries power but cannot rescue an all-zero one. That is ordinary data —
     ``sample_covariance`` of a silent segment (dead element, digital silence)
-    returns exactly it. Unguarded, MVDR raised a bare numpy ``LinAlgError`` and
-    MUSIC returned a finite *uniform* pseudospectrum, which is worse: it looks
-    like an answer."""
+    returns exactly it. Without the guard MVDR's inverse is singular and
+    MUSIC's noise subspace is arbitrary, so both must decline rather than
+    return a finite *uniform* pseudospectrum that looks like an answer."""
 
     @staticmethod
     def _rig(n=8):

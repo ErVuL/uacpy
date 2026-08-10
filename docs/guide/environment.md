@@ -544,9 +544,15 @@ it has `at` / `isel` but no `eval`.
 Interfacial roughness lives on `BoundaryProperties.roughness` (RMS, metres) and
 applies to **any** boundary type — a rough but still pressure-release sea
 surface is `BoundaryProperties(roughness=2.0)`, which is why roughness never
-triggers the half-space inference. Only [Kraken](../models/kraken.md) and
-[Scooter](../models/scooter.md) consume it; every other model drops it with a
-warning.
+triggers the half-space inference.
+
+Which models consume it differs by boundary. [Kraken](../models/kraken.md) and
+the [OASES](../models/oases.md) family take it at both the sea surface and the
+seabed. [Scooter](../models/scooter.md) takes it at the sea surface **only when
+that surface is a vacuum** — its solver reads the value through the
+pressure-release impedance branch and nowhere else — and does not take it at
+the seabed at all. Every other model, and every combination not listed, drops
+it with a warning naming what was dropped.
 
 What `Surface` and `altimetry` between them do **not** carry is a bubble layer.
 Wind-driven bubbles change the sound speed in the top few metres — a void

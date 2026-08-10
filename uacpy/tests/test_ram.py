@@ -36,7 +36,13 @@ class TestRAMAdvancedParameters:
 
     @pytest.mark.parametrize('np_pade', [2, 6, 8])
     def test_ram_pade_order(self, ram_env, ram_source, ram_receiver, np_pade):
-        """RAM converges across the supported Padé-coefficient counts."""
+        """Every supported Padé-coefficient count marches to a finite field.
+
+        ``np_pade`` is the number of terms in the rational approximation of
+        the propagator, and each term costs one tridiagonal solve per range
+        step. A count the coefficient solver cannot deliver shows up as a
+        stopped binary or an all-NaN grid, not as a small accuracy change, so
+        finiteness is the discriminating assertion."""
         ram = RAM(verbose=False, dr=20.0, dz=2.0, np_pade=np_pade)
         result = ram.compute_tl(
             env=ram_env, source=ram_source, receiver=ram_receiver,
@@ -45,7 +51,11 @@ class TestRAMAdvancedParameters:
         assert np.all(np.isfinite(result.data))
 
     def test_ram_stability_parameter(self, ram_env, ram_source, ram_receiver):
-        """Test RAM stability parameter."""
+        """``ns_stability`` is the number of evanescent-spectrum points at
+        which the rational approximation is forced to vanish, trading
+        ``2n - ns`` accuracy constraints for stability (RAM manual §2). It
+        changes the Padé coefficients, so the march must still complete and
+        stay finite."""
         ram = RAM(verbose=False, dr=20.0, dz=2.0, ns_stability=1)
         result = ram.compute_tl(
             env=ram_env, source=ram_source, receiver=ram_receiver,
@@ -54,7 +64,8 @@ class TestRAMAdvancedParameters:
         assert np.all(np.isfinite(result.data))
 
     def test_ram_custom_dr_dz(self, ram_env, ram_source, ram_receiver):
-        """Test RAM with custom range and depth steps."""
+        """A pinned (dr, dz) bypasses the Lytaev optimiser entirely, so this
+        exercises the path where uacpy marches the caller's own grid."""
         ram = RAM(verbose=False, dr=10.0, dz=0.5)
         result = ram.compute_tl(
             env=ram_env, source=ram_source, receiver=ram_receiver,
@@ -67,7 +78,9 @@ class TestRAMAdvancedParameters:
     ):
         """RAM(Q=…, T=…) values reach the in.pe file written for COHERENT_TL.
 
-        Regression for the hardcoded ``Q_tl=1e6, T_tl=1.0`` in ``_run_tl``.
+        ``_run_tl`` defaults the pair to ``(1e6, 1.0)`` to collapse mpiramS's
+        broadband window onto a single bin; those defaults must apply only
+        when the caller left Q and T unset.
         """
         from uacpy.io import mpirams_writer as mpw
         from uacpy.models import ram as ram_mod
@@ -91,13 +104,13 @@ class TestRAMAdvancedParameters:
 class TestRAMRangeDependentSSPShortRange:
     """A range-dependent SSP over a SHORT receiver range must not crash mpiramS.
 
-    mpiramS's horizontal-interpolation branch sized its SSP resample grid as
-    ``nrp = nint(rmax/10000)`` (``third_party/mpiramS/src/peramx.f90:245``),
-    which rounds to 0 for any max receiver range below 5 km — a zero-length
-    allocation, an all-NaN field and a SIGABRT (exit -6); below 15 km it
-    silently mis-resampled to a single profile. uacpy now drives mpiramS with
-    ``ihorz=0`` so it steps directly between the per-range profiles it writes
-    itself.
+    mpiramS's horizontal-interpolation branch (``ihorz=1``) sizes its SSP
+    resample grid as ``nrp = nint(maxval(rmax)/10000)``
+    (``third_party/mpiramS/src/peramx.f90:245``). That rounds to 0 for any max
+    receiver range below 5 km — a zero-length allocation, an all-NaN field and
+    a SIGABRT (exit -6) — and to 1 below 15 km, which resamples the whole run
+    onto a single profile. uacpy therefore drives mpiramS with ``ihorz=0``, so
+    it steps directly between the per-range profiles uacpy writes itself.
     """
 
     _BOTTOM = BoundaryProperties(
@@ -116,7 +129,9 @@ class TestRAMRangeDependentSSPShortRange:
 
     @pytest.mark.parametrize('rmax', [1500.0, 2000.0, 2500.0, 4000.0])
     def test_short_range_is_finite(self, rmax):
-        """rmax < 5 km used to give nrp=nint(rmax/10000)=0 -> SIGABRT."""
+        """Every rmax here is below the 5 km at which ``nint(rmax/10000)``
+        first rounds up to 1, so each one hits the zero-length branch if the
+        ``ihorz=1`` path is ever taken."""
         field = RAM(timeout=120).compute_tl(
             env=self._rd_env(),
             source=Source(depths=25.0, frequencies=50.0),
@@ -130,8 +145,8 @@ class TestRAMRangeDependentSSPShortRange:
         assert np.all((tl > 0.0) & (tl < 120.0))
 
     def test_short_range_keeps_range_dependence(self):
-        """The fix must not silently collapse range dependence: a varying SSP
-        must give a different short-range field than a range-independent one."""
+        """``ihorz=0`` must not collapse range dependence: a varying SSP has to
+        give a different short-range field than a range-independent one."""
         src = Source(depths=25.0, frequencies=50.0)
         rcv = Receiver(depths=[50.0], ranges=[1000.0, 2000.0, 3000.0])
         z = np.array([0.0, 100.0])
@@ -156,10 +171,10 @@ def test_default_run_does_not_warn_about_its_own_accuracy_target():
     """A plain ``RAM()`` must not warn that uacpy's own default is unmet.
 
     The mpiramS stability floor (lambda_p/16) sits above the Lytaev dz for the
-    default epsilon at any ordinary frequency, so warning on the default target
-    fired on essentially every run — alarm fatigue that trains callers to
-    filter uacpy warnings entirely. An accuracy the caller *pinned* and did not
-    get is still a warning.
+    default epsilon at any ordinary frequency, so a warning on the default
+    target would fire on essentially every run — alarm fatigue that trains
+    callers to filter uacpy warnings entirely. An accuracy the caller *pinned*
+    and did not get is still a warning.
     """
     import warnings
     env = Environment(name='p', bathymetry=200.0, ssp=1500.0,

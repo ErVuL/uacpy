@@ -19,6 +19,11 @@ import numpy as np
 from uacpy.core.exceptions import ConfigurationError
 
 # Mackenzie (1961) deep-water bottom backscattering constant 10*log10(mu) [dB].
+# He measured it constant at this value for both 530 and 1030 Hz (Etter,
+# *Underwater Acoustic Modeling and Simulation*, eq. 9.6). For unconsolidated
+# sediments the empirical spread is -25 to -35 dB, with -29 dB a common first
+# guess (Jensen et al., *Computational Ocean Acoustics*, §1.7.2) — pass mu_db to
+# pick another point in that range.
 LAMBERT_MU_DB = -27.0
 
 

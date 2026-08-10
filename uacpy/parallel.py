@@ -254,6 +254,10 @@ def run_parallel(
                     # Unlike a clean per-job exception this cannot be isolated to
                     # one slot, so re-raise to the handler below instead of
                     # quietly stuffing the opaque error into every errors[i].
+                    # BrokenProcessPool derives from RuntimeError, hence from
+                    # Exception: this clause has to stay above the general one
+                    # or ``raise_on_error=False`` would swallow it as a per-job
+                    # failure.
                     raise
                 except Exception as exc:  # noqa: BLE001 — surface or collect per policy
                     if raise_on_error:

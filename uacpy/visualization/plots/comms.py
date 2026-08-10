@@ -191,6 +191,8 @@ def plot_ber_curve(ebn0_db, ber_measured, ax=None, *, scheme=None,
     ber = np.atleast_1d(np.asarray(ber_measured, dtype=float))
     fig, ax = fig_ax(ax, figsize)
     mpl_kw.setdefault("marker", "o")
+    # A run with zero observed errors gives BER = 0, which a log axis drops
+    # silently; floor it so the point stays visible at the bottom of the plot.
     ax.semilogy(ebn0, np.maximum(ber, 1e-12), label=label, **mpl_kw)
     if scheme is not None:
         fine = np.linspace(ebn0.min(), ebn0.max(), 100)

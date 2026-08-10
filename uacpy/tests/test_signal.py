@@ -198,7 +198,7 @@ class TestDecidecadeBands:
         psd = np.ones_like(f) * 1e-12
         with pytest.warns(UserWarning, match="too coarse"):
             c, lv = decidecade_band_levels(psd, f)
-        # at least one low band that would have been NaN is now finite
+        # coarse-grid bands still resolve a finite level
         assert np.any(np.isfinite(lv[c < 100]))
 
 
@@ -367,8 +367,6 @@ class TestFRF:
 def test_degenerate_input_guards_raise_configurationerror():
     """Pre-production robustness: degenerate inputs raise a typed
     ConfigurationError, not a raw ValueError/ZeroDivisionError."""
-    import numpy as np
-    import pytest
     from uacpy.core.exceptions import ConfigurationError
     from uacpy.acoustic_signal import sel, cwt, tone_burst
     with pytest.raises(ConfigurationError):       # sel: empty data
@@ -379,3 +377,58 @@ def test_degenerate_input_guards_raise_configurationerror():
         cwt(np.ones(5), 8000.0)
     with pytest.raises(ConfigurationError):       # tone_burst: frequency 0
         tone_burst(0.0, 5, 1000.0)
+
+
+class TestFRFEstimators:
+    """H1 and H2 differ only in which noise they reject (Bendat & Piersol):
+    ``H1 = Sxy/Sxx`` is unbiased when the noise is on the output, ``H2 =
+    Syy/Syx`` when it is on the input. Both recover the plant when there is no
+    noise at all."""
+
+    FS, N = 8000.0, 200_000
+    H = np.array([1.0, -0.7, 0.35, -0.1])
+
+    @classmethod
+    def _truth(cls, f):
+        n = np.arange(cls.H.size)
+        return (cls.H[None, :] * np.exp(-2j * np.pi * np.outer(f, n) / cls.FS)
+                ).sum(axis=1)
+
+    @classmethod
+    def _err(cls, estimator, x, y):
+        from uacpy.acoustic_signal.system_id import FRF
+        f, tf, coh = FRF(estimator=estimator,
+                         nperseg=4096).compute_welch(x, y, cls.FS)
+        band = (f > 100) & (f < 3500)
+        return (float(np.abs(tf[band] - cls._truth(f)[band]).max()),
+                float(coh[band].mean()))
+
+    def _signals(self, seed):
+        rng = np.random.default_rng(seed)
+        x = rng.standard_normal(self.N)
+        return rng, x, np.convolve(x, self.H)[: self.N]
+
+    def test_both_recover_the_plant_without_noise(self):
+        # Noise-free, so the residual is Welch segmentation/leakage only:
+        # measured max |tf - truth| is 4.6e-4 and the coherence is 1 - 4e-7.
+        # 1e-2 / 1e-3 are floors an order of magnitude above that.
+        _, x, y = self._signals(5)
+        for est in ('H1', 'H2'):
+            err, coh = self._err(est, x, y)
+            assert err < 1e-2 and coh == pytest.approx(1.0, abs=1e-3)
+
+    def test_h1_beats_h2_on_output_noise(self):
+        # H2 is biased UP by output noise: measured errors are H1 0.21 vs
+        # H2 0.91, a factor 4.3, so the required factor 3 leaves ~40 % margin
+        # on this seed.
+        rng, x, y = self._signals(6)
+        yn = y + 0.5 * rng.standard_normal(self.N)
+        assert self._err('H1', x, yn)[0] < self._err('H2', x, yn)[0] / 3
+
+    def test_h2_beats_h1_on_input_noise(self):
+        # The mirror case is weaker: measured H1 0.61 vs H2 0.39, a factor
+        # 1.57 against the required 1.5 — only ~5 % margin, so this assertion
+        # is seed-sensitive and the factor cannot be tightened.
+        rng, x, y = self._signals(7)
+        xn = x + 0.5 * rng.standard_normal(self.N)
+        assert self._err('H2', xn, y)[0] < self._err('H1', xn, y)[0] / 1.5

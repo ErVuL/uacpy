@@ -139,6 +139,9 @@ def test_mpirams_phase_matches_scooter():
     # circular mean of the per-range phase difference: a convention error is a
     # constant offset; per-range modal / numerical jitter averages out.
     mean_phase_deg = np.degrees(np.angle(np.mean(ratio / np.abs(ratio))))
+    # 20 deg sits below the 45 deg an unwanted exp(±iπ/4) would impose and well
+    # below the 180 deg of a sign flip, while leaving room for the PE's own
+    # wide-angle phase error against the exact field.
     assert abs(mean_phase_deg) < 20.0
 
 
@@ -164,8 +167,8 @@ def _arrival_window():
 
     Lower bound: r / c_bottom minus a small lead (refracted-bottom
     rays can be slightly faster than the slowest-mode-anchored
-    t_start). Upper bound: r / c_water plus the source pulse half-
-    duration so the convolved peak fits.
+    t_start). Upper bound: r / c_water plus the full 0.2 s source pulse, since
+    convolution delays the envelope peak by up to the pulse length.
     """
     c_water = 1500.0
     c_bottom = 1700.0
@@ -214,7 +217,10 @@ def test_broadband_time_series_envelope_peak_in_arrival_window(label):
     src, rcv = _src_rcv()
     tf = _RUNNERS[label](env, src, rcv)
 
-    fs = 4096.0                              # one-octave above f_hi
+    # Nyquist 2048 Hz is far above F_HI = 75 Hz, so the IFFT cannot alias; the
+    # point of going this fine is the 0.24 ms time step, which puts the
+    # envelope-peak quantisation ~400x below the 100 ms gate.
+    fs = 4096.0
     pulse = _gaussian_pulse(FC, fs)
     ts = tf.synthesize_time_series(pulse, sample_rate=fs)
     trace = np.asarray(ts.data[0, 0])

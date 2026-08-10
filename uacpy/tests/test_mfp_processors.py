@@ -10,8 +10,14 @@ from uacpy.core.results import Covariance, Replicas
 def _synthetic_mfp(n_rcv=8, n_zr=5, n_xr=4, n_yr=1, source_idx=(2, 2, 0),
                    noise_level=0.05, freq=200.0):
     """Build a covariance + replica pair where the source sits at
-    ``source_idx``. Each receiver gets a complex unit-magnitude weight
-    that varies across the candidate (z, x, y) grid."""
+    ``source_idx``.
+
+    The replica bank is complex Gaussian, one independent vector per
+    candidate (z, x, y) point; both processors normalise each vector to unit
+    length themselves, so only its direction matters. The seed is fixed
+    because the peak-location assertions hold for this draw, not for every
+    draw — a different seed can put two candidate points near-degenerate.
+    """
     rng = np.random.default_rng(0)
     # Make replica vectors random but unitary per-(z,x,y)
     replicas = (rng.normal(size=(1, n_zr, n_xr, n_yr, n_rcv))
@@ -83,8 +89,11 @@ class TestMVDRHeavyLoading:
         assert peak == src
 
     def test_heavy_loading_correlates_with_bartlett(self):
-        # Heavy diagonal loading collapses the MVDR surface onto the
-        # Bartlett surface (the constraint becomes inactive).
+        # Heavy diagonal loading collapses the MVDR surface onto the Bartlett
+        # surface: as delta grows, (C + delta*I)^-1 -> (I - C/delta)/delta, so
+        # 1/(w^H (C+delta*I)^-1 w) -> delta + w^H C w, an affine map of
+        # Bartlett with correlation 1. delta = 100 is short of that limit, so
+        # the threshold is "nearly collinear", not exact.
         cov, rep, _ = _synthetic_mfp(noise_level=0.1)
         bart = cov.bartlett(rep)[0].ravel()
         loaded = cov.mvdr(rep, diagonal_loading=100.0)[0].ravel()
@@ -170,8 +179,8 @@ class TestTheTwoMfpEntryPointsAgree:
 
     def test_an_empty_replica_cell_is_no_data_not_a_unit_peak(self):
         """An unpopulated ``.rpo`` cell has no energy, so ``wᴴC⁻¹w`` is 0.
-        Reporting a finite power there puts a fabricated peak in the surface —
-        and 1.0 would have been the global maximum of this one."""
+        Reporting a finite power there puts a fabricated peak in the surface;
+        1.0 is the global maximum of this one."""
         K, _bank, _cov, rep = self._rig()
         replicas = np.array(rep.replicas)
         replicas[0, 1] = 0.0                        # candidate point 1: no data

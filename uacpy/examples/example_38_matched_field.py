@@ -98,6 +98,10 @@ def main():
     cand_r = np.linspace(500, 5000, 121)
     bank = replica_bank(modes, array_depths, cand_z, cand_r)
     surf_b = bartlett(K, bank)
+    # Diagonal loading as a fraction of the average eigenvalue (the mvdr
+    # default, stated here because it sets the trade-off): smaller sharpens the
+    # Capon peak but makes it brittle to environmental mismatch, larger relaxes
+    # the surface back toward Bartlett.
     surf_m = mvdr(K, bank, loading=1e-2)
 
     for name, surf in [("Bartlett", surf_b), ("MVDR", surf_m)]:

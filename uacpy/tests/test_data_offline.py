@@ -6,6 +6,8 @@ CSVs) so the GEBCO/WOA23/DECK41 readers (``source='local'``) and a cache-first
 cache with no network. Skipped where netCDF4 is unavailable (the grids need it).
 """
 
+import re
+
 import numpy as np
 import pytest
 
@@ -20,10 +22,18 @@ from uacpy.data import (
     sediment_db, sound_speed, woa23_local,
 )
 
-_FILL = 9.96921e36
+_FILL = 9.96921e36                              # WOA23's netCDF _FillValue
 
 
 def _write_gebco(cache, *, deep=-1500.0, land_at=None):
+    """A 1° stand-in for GEBCO_2025.nc: ``elevation(lat, lon)``, positive up.
+
+    The real grid is 43200×86400 at 15″ with cell-centre axes starting at
+    ±89.99791666…/±179.99791666…; this one is 1° with axes on whole degrees.
+    ``NetcdfGrid`` reads origin and step from the file's own axis variables, so
+    it snaps to the nearest stored node under either registration and the
+    coarser fixture exercises the same code path.
+    """
     gdir = cache / 'gebco'; gdir.mkdir(parents=True)
     lat = np.arange(-90, 91, 1.0)
     lon = np.arange(-180, 180, 1.0)
@@ -40,6 +50,10 @@ def _write_gebco(cache, *, deep=-1500.0, land_at=None):
 
 
 def _write_woa(cache):
+    """WOA23 1° analysed-mean grids: ``t_an``/``s_an`` of shape (time, depth,
+    lat, lon) = (1, n_depth, 180, 360), everything but one column set to the
+    product's ``_FillValue``. The real annual file carries 102 levels to 5500 m
+    and the monthlies 57 to 1500 m; five levels is enough for the readers."""
     wdir = cache / 'woa23'; wdir.mkdir(parents=True)
     depth = np.array([0, 50, 100, 500, 1000.0])
     # column for grid_index(30.5, -40.5) == (120, 139) on the 1° grid.
@@ -87,6 +101,9 @@ def _write_emodnet(cache):
 
 
 def _write_globsed(cache):
+    # GlobSed is gridline-registered — its axes hit ±90 / ±180 exactly and both
+    # ±180 columns are stored, so the node count is odd (the real v3 grid is
+    # 2161×4321 at 5′). Keep that here: 181×361 on whole degrees.
     gdir = cache / 'globsed'; gdir.mkdir(parents=True)
     ds = netCDF4.Dataset(gdir / 'GlobSed-v3.nc', 'w')
     ds.createDimension('lat', 181); ds.createDimension('lon', 361)
@@ -98,8 +115,12 @@ def _write_globsed(cache):
 
 def _write_crust1(cache):
     cdir = cache / 'crust1'; cdir.mkdir(parents=True)
-    n = 180 * 360
-    rows = {                                       # uniform ocean column, 1 km sed
+    n = 180 * 360                                  # one whitespace row per 1° cell
+    # Nine columns per row, in CRUST1.0's layer order: water, ice, upper/middle/
+    # lower sediment, upper/middle/lower crystalline crust, mantle. ``bnds`` is
+    # the top of each layer in km (negative down), so this column is 4 km of
+    # water over 1 km of sediment (-4 → -5) over crust.
+    rows = {
         'crust1.bnds': [0, -4, -4, -5, -5, -5, -10, -20, -30],
         'crust1.vp':   [1.5, 3.8, 2.0, 0, 0, 5.0, 6.5, 7.1, 8.1],
         'crust1.vs':   [0, 1.9, 0.6, 0, 0, 2.7, 3.7, 4.0, 4.5],
@@ -179,8 +200,11 @@ def test_gebco_region_grid_marks_land_nan(cache):
 
 
 def test_gebco_masked_cell_raises(tmp_path, monkeypatch):
-    # A _FillValue/masked GEBCO cell must raise DataFetchError, not coerce a
-    # fill sentinel into a depth.
+    # A _FillValue/masked cell must raise DataFetchError, not coerce a fill
+    # sentinel into a depth. GEBCO_2025 itself declares no _FillValue (int16
+    # elevation, every cell valued), so this guards the shared NetcdfGrid.cell
+    # path that the fill-bearing sibling grids (WOA23, GLODAP) depend on, and a
+    # future GEBCO release that starts masking. The sentinel value is arbitrary.
     root = tmp_path / 'masked_cache'
     monkeypatch.setenv('UACPY_DATA_CACHE', str(root))
     _cache.invalidate_grids()
@@ -400,8 +424,10 @@ def test_cache_preset_never_hits_network(tmp_path, monkeypatch):
     env = data.fetch_environment((30.5, -40.5), bathymetry=3000.0, ssp=1500.0,
                                  bottom_sources='local')
     assert [s.source.id for s in env.data_sources] == ['pelagic']
-    # 3000 m is above the CCD at this latitude → calcareous ooze (ϕ 7.5).
-    assert env.bottom.columns[0].halfspace.density == pytest.approx(1.489, abs=1e-3)
+    # 3000 m is above the CCD at this latitude → calcareous ooze (ϕ 7.5), and
+    # ϕ 7.5 interpolates the Hamilton & Bachman density table between clayey
+    # silt (7.13, 1.484) and silty clay (8.80, 1.480) → 1.4831.
+    assert env.bottom.columns[0].halfspace.density == pytest.approx(1.483, abs=1e-3)
 
 
 def test_pelagic_without_a_supplied_depth_still_needs_the_cache(tmp_path,
@@ -481,3 +507,45 @@ def test_offline_emodnet_missing_names_flag(tmp_path, monkeypatch):
     emodnet_local._INDEX.clear()
     with pytest.raises(ConfigurationError, match='install.sh --data emodnet'):
         emodnet_local.fetch_bottom_local((56.0, 3.0))
+
+
+def test_every_backend_memo_is_registered_for_invalidation():
+    # invalidate_grids() is the single "drop everything" entry point, so a
+    # backend that memoises on its own must register that memo. Scan the layer
+    # for module-level cache dicts and require a register_cache call alongside.
+    import pathlib
+    import uacpy.data
+    root = pathlib.Path(uacpy.data.__file__).parent
+    # Matches the shape every backend memo currently uses: a module-level
+    # `_UPPER_NAME = {}` (optionally annotated `: dict`). A digit in the name or
+    # a parameterised annotation would slip past — widen this if one appears.
+    declares = re.compile(r'^_[A-Z_]+ *(?:: *dict *)?= *\{\}', re.M)
+    missing = [p.name for p in sorted(root.glob('*.py'))
+               if p.name != '_cache.py'
+               and declares.search(p.read_text())
+               and 'register_cache' not in p.read_text()]
+    assert not missing, f"memo declared but never registered: {missing}"
+
+
+def test_invalidate_grids_empties_every_registered_memo():
+    # Hand-listed, so it pins the *behaviour* of the registered clears rather
+    # than the roster; the scanner above is what fails when a new backend adds
+    # a memo without registering it.
+    from uacpy.data import (crust1_local, diesing_local, emodnet_local,
+                            sediment_db, seaice_local, wind_local, woa23_local)
+    memos = [_cache._GRIDS, crust1_local._MODEL, diesing_local._MODEL,
+             emodnet_local._INDEX, sediment_db._SAMPLES, seaice_local._MODEL,
+             wind_local._CLIM, woa23_local._DATASETS]
+
+    class _Handle:                     # WOA23 closes its handles before dropping
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    sentinel = _Handle()
+    for m in memos:
+        m['sentinel'] = sentinel
+    _cache.invalidate_grids()
+    assert all(not m for m in memos)
+    assert sentinel.closed

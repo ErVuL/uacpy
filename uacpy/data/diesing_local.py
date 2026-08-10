@@ -54,6 +54,7 @@ _CLASS = {
 }
 
 _MODEL = {}   # cache_root -> dict(arr, x0, y0, sx, sy, tf, H, W)
+_cache.register_cache(_MODEL.clear)
 
 
 def _pyproj_transformer():
@@ -109,7 +110,10 @@ def _model():
     arr = np.asarray(im, dtype=np.float32)
     tags = im.tag_v2
     sx, sy = float(tags[33550][0]), float(tags[33550][1])     # ModelPixelScale
-    tie = tags[33922]                                         # ModelTiepoint
+    # ModelTiepoint is (i, j, k, x, y, z): raster point (i, j) maps to model
+    # (x, y). Back out the corner of pixel (0, 0) — x grows with the column,
+    # y shrinks with the row.
+    tie = tags[33922]
     x0 = float(tie[3]) - float(tie[0]) * sx
     y0 = float(tie[4]) + float(tie[1]) * sy
     result = {'arr': arr, 'x0': x0, 'y0': y0, 'sx': sx, 'sy': sy,
@@ -121,14 +125,20 @@ def _model():
 def _class_code(lat, lon):
     """Diesing class code (1-5) at a point, or ``None`` outside deep-sea coverage."""
     m = _model()
+    # No normalize_lon: PROJ wraps the longitude relative to +lon_0 itself, so a
+    # query at 190° and one at −170° project to the same x.
     x, y = m['tf'].transform(lon, lat)
-    # The geotransform anchors the corner of pixel (0,0) (PixelIsArea), so the
-    # cell containing the point is floor(), not round() (a half-pixel bias).
+    # The raster declares GTRasterTypeGeoKey = RasterPixelIsArea, so the
+    # geotransform anchors the *corner* of pixel (0,0); the cell containing the
+    # point is floor(), not round() (which would bias it half a pixel). y0 is
+    # the northern edge, hence rows count southward.
     col = int(np.floor((x - m['x0']) / m['sx']))
     row = int(np.floor((m['y0'] - y) / m['sy']))
     if not (0 <= row < m['H'] and 0 <= col < m['W']):
         return None
     v = m['arr'][row, col]
+    # Class codes start at 1, so ``v < 1`` rejects both an unclassified cell and
+    # the raster's declared GDAL nodata sentinel of -3.4e38.
     if not np.isfinite(v) or v < 1:
         return None
     return int(v)

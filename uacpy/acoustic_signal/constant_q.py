@@ -22,9 +22,11 @@ constant-Q analogue of :func:`uacpy.acoustic_signal.ppsd` (McNamara & Buland
 2004, *BSSA* 94, 1517).
 
 **Power scaling** (``scaling=``): ``'spectrum'`` (default) returns the one-sided
-band power per constant-Q bin — a tone of amplitude ``A`` peaks at its
-mean-square power ``A**2/2`` (matching :func:`scipy.signal.welch`
-``scaling='spectrum'``). ``'density'`` further divides by the window's
+band power per constant-Q bin — a tone of amplitude ``A`` *whose frequency is a
+bin centre* peaks at its mean-square power ``A**2/2`` (matching
+:func:`scipy.signal.welch` ``scaling='spectrum'``). Between centres the response
+scallops like any filterbank: at most ~1.3 dB low for a tone midway between two
+bins, near-independent of ``bins_per_octave`` because Q tracks the spacing. ``'density'`` further divides by the window's
 noise-equivalent bandwidth to give a one-sided power *spectral density* (per
 Hz), calibrated to match :func:`scipy.signal.welch` density and hence comparable
 to Welch PSDs / Wenz curves. (The complex coefficients from

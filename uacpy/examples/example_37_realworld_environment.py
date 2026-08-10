@@ -238,7 +238,7 @@ def _sea_ice_overview(plt):
         rng_m, conc = seaice_local.fetch_sea_ice_concentration_transect(
             A, B, month=month, n_points=BOTTOM_POINTS)
         ice_grid = seaice_local.sea_ice_grid(month, hemi='N')
-    except (UACPYError, Exception) as exc:           # noqa: BLE001 — robust demo
+    except Exception as exc:                         # noqa: BLE001 — robust demo
         print(f"  sea-ice overview: [skipped] {str(exc).splitlines()[0]}")
         return
 
@@ -452,13 +452,13 @@ def main():
     plt.close(fig)
     print(f"\n  Composite figure saved → {out}")
 
-    # ── Modelled range-dependent layered bottom (fluid column → mpiramS) ──────
+    # ── Modelled range-dependent layered bottom (fluid column → ramgeo) ───────
     _rdlb_overview(env, (lats, lons, depth), plt)
 
     # ── Seabed model comparison: grain-size half-space vs CRUST1.0 layers ─────
     _compare_bottoms(env, plt)
 
-    # ── Second composite: an under-ice Fram Strait scenario (international) ────
+    # ── Second composite: an under-ice central-Arctic scenario (international) ─
     _sea_ice_overview(plt)
 
     # ── Attribution for every source used ────────────────────────────────────

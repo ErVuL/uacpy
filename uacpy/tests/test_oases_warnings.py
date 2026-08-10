@@ -38,10 +38,9 @@ class TestOASTWarnings:
 
         assert result is not None, "OAST failed with range-dependent environment"
 
-    @pytest.mark.requires_binary
     def test_oast_off_grid_range_interpolation_warning(self):
-        """Audit M7: OAST warns when receiver ranges miss its native FFT grid
-        and TL is therefore interpolated in dB (which smears nulls)."""
+        """OAST warns when receiver ranges miss its native FFT grid and TL is
+        therefore interpolated in dB (which smears nulls)."""
         env = uacpy.Environment(
             name='oast_offgrid', bathymetry=100.0, ssp=1500.0,
             bottom=uacpy.BoundaryProperties(

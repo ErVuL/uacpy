@@ -87,6 +87,9 @@ def plot_bathymetry_map(
     else:
         fig = ax.figure
     cm = plt.get_cmap(cmap)
+    # Plate carrée: degrees are plotted raw as (x, y) = (lon, lat), no
+    # coordinate transform. The latitude foreshortening is applied to the axes
+    # instead, via set_aspect below, so tick values stay in real degrees.
     proj = (lambda la, lo: (lo, la))
 
     if basemap:
@@ -101,8 +104,11 @@ def plot_bathymetry_map(
         ax.set_xlim(*lon_rng)
         ax.set_ylim(*lat_rng)
         _draw_graticule(ax, lon_rng, lat_rng, graticule, graticule_minor, proj)
+        # Equirectangular: on the ground 1° of longitude is cos(lat) as long as
+        # 1° of latitude, so stretching the y axis by 1/cos(lat) makes the panel
+        # distance-isotropic at the mid-latitude of the window.
         ax.set_aspect(aspect if aspect is not None
-                      else 1.0 / np.cos(np.radians(np.mean(lat_rng))))  # equirectangular
+                      else 1.0 / np.cos(np.radians(np.mean(lat_rng))))
     else:
         cm = cm.with_extremes(bad='#d9cdb8')
         pc = _draw_depth(ax, lons, lats, depth, cm, relief, relief_exag, 1)
@@ -370,6 +376,10 @@ def _draw_depth(ax, lons, lats, depth, cmap, relief, exag, zorder):
     """
     dm = np.ma.masked_invalid(depth)
     finite = np.asarray(depth, dtype=float)[np.isfinite(depth)]
+    # Hillshading takes ``np.gradient`` of the grid (matplotlib
+    # ``LightSource.hillshade``), which needs at least two samples along each
+    # axis and something to differentiate. Fall back to the flat mesh for a
+    # grid too small or too flat to shade, rather than shading a degenerate one.
     if (not relief or finite.size < 4 or min(np.shape(depth)) < 3
             or np.ptp(finite) < 1e-9):
         return ax.pcolormesh(lons, lats, dm, cmap=cmap, shading='auto',
@@ -378,10 +388,16 @@ def _draw_depth(ax, lons, lats, depth, cmap, relief, exag, zorder):
     from matplotlib.colors import LightSource, Normalize
     base = plt.get_cmap(cmap)
     norm = Normalize(float(finite.min()), float(finite.max()))
-    dy = (lats.max() - lats.min()) / lats.size * 111320.0
-    dx = ((lons.max() - lons.min()) / lons.size * 111320.0
+    # Cell size in metres, which the hillshade needs to turn ``vert_exag`` into
+    # a real slope: n samples span n-1 intervals. 111320 m is one degree of arc
+    # at the equator (40 075 km / 360); longitude degrees shrink by cos(lat).
+    dy = (lats.max() - lats.min()) / (lats.size - 1) * 111320.0
+    dx = ((lons.max() - lons.min()) / (lons.size - 1) * 111320.0
           * np.cos(np.radians(float(lats.mean()))))
-    filled = np.where(np.isnan(depth), norm.vmax, depth)
+    # Land holes take the shallowest depth, so they are the high ground of the
+    # relief and the coastline does not shade as a chasm. Their colour is
+    # irrelevant — they end up transparent.
+    filled = np.where(np.isnan(depth), norm.vmin, depth)
     nan_mask = np.isnan(depth)
     # imshow's extent below is anchored to (min-lat, min-lon) with
     # origin='lower', so the array must run south→north / west→east. Flip
@@ -394,9 +410,17 @@ def _draw_depth(ax, lons, lats, depth, cmap, relief, exag, zorder):
     if lons.size > 1 and lons[-1] < lons[0]:
         filled = filled[:, ::-1]
         nan_mask = nan_mask[:, ::-1]
-    rgb = LightSource(azdeg=315, altdeg=45).shade(
-        filled, cmap=base, blend_mode='soft', vert_exag=exag,
-        dx=dx, dy=dy, norm=norm)
+    # Colour by depth, but light the *relief*: the surface handed to the shader
+    # is seafloor height (-depth), or a seamount reads as a pit. And
+    # ``LightSource.hillshade`` negates dy ("dy is implicitly negative",
+    # matplotlib ``colors.py``) because it assumes row 0 is the top of the
+    # image, while ``filled`` runs south→north under origin='lower' — so -dy
+    # cancels that and azdeg means what it says. Measured on a Gaussian
+    # seamount, azdeg=315 now lights the flank bearing 315 deg.
+    rgb = base(norm(filled))
+    shaded = LightSource(azdeg=315, altdeg=45).shade_rgb(
+        rgb, -filled, blend_mode='soft', vert_exag=exag, dx=dx, dy=-dy)
+    rgb[..., :3] = shaded[..., :3]
     rgb[nan_mask, 3] = 0.0                              # land → transparent
     ax.imshow(rgb, extent=[lons.min(), lons.max(), lats.min(), lats.max()],
               origin='lower', zorder=zorder, interpolation='nearest',

@@ -72,28 +72,28 @@ def test_bellhop_paths_absent_when_cleanup_true():
 
 
 # ----------------------------------------------------------------------
-# Kraken (modes solver)
+# Kraken — the ``.mod`` the mode solver writes.
 # ----------------------------------------------------------------------
 
 @pytest.mark.requires_binary
 def test_kraken_paths_present_when_cleanup_false(tmp_path):
     env, src, rcv = _basic_setup()
     kr = Kraken(verbose=False, work_dir=tmp_path)
-    modes = kr.run(env, src, rcv)
-    assert 'mod_file' in modes.metadata
-    assert os.path.exists(modes.metadata['mod_file'])
+    field = kr.run(env, src, rcv)
+    assert 'mod_file' in field.metadata
+    assert os.path.exists(field.metadata['mod_file'])
 
 
 @pytest.mark.requires_binary
 def test_kraken_paths_absent_when_cleanup_true():
     env, src, rcv = _basic_setup()
     kr = Kraken(verbose=False)
-    modes = kr.run(env, src, rcv)
-    assert 'mod_file' not in modes.metadata
+    field = kr.run(env, src, rcv)
+    assert 'mod_file' not in field.metadata
 
 
 # ----------------------------------------------------------------------
-# Bounce (the original case)
+# Bounce (publishes a .brc rather than a field)
 # ----------------------------------------------------------------------
 
 @pytest.mark.requires_binary
@@ -120,11 +120,13 @@ def test_bounce_paths_absent_when_no_work_dir():
 
 
 # ----------------------------------------------------------------------
-# KrakenField (modes + field pipeline)
+# Kraken — the ``.shd`` field.exe writes. ``run()`` is the whole
+# modes-then-field pipeline, so it is the same call as above and one run
+# publishes both paths.
 # ----------------------------------------------------------------------
 
 @pytest.mark.requires_binary
-def test_krakenfield_paths_present_when_cleanup_false(tmp_path):
+def test_kraken_shd_paths_present_when_cleanup_false(tmp_path):
     env, src, rcv = _basic_setup()
     kf = Kraken(verbose=False, work_dir=tmp_path)
     field = kf.run(env, src, rcv)
@@ -133,7 +135,7 @@ def test_krakenfield_paths_present_when_cleanup_false(tmp_path):
 
 
 @pytest.mark.requires_binary
-def test_krakenfield_paths_absent_when_cleanup_true():
+def test_kraken_shd_paths_absent_when_cleanup_true():
     env, src, rcv = _basic_setup()
     kf = Kraken(verbose=False)
     field = kf.run(env, src, rcv)

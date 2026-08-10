@@ -40,8 +40,10 @@ def build_rd_environment() -> uacpy.Environment:
 
     The SSP at the near range is a downward-refracting summer thermocline
     (warm surface, cool below). The far range is upward-refracting / nearly
-    isothermal. This contrast makes the four 1-D collapses (r0, rmax, mean,
-    median) produce visibly different profiles.
+    isothermal. That contrast is what makes the SSP collapses below (``r0``,
+    ``rmax``, ``mean``) land on visibly different profiles. ``median`` is not
+    exercised: the middle profile is defined as the half-sum of the outer two,
+    so over three ranges it coincides with ``mean`` exactly.
     """
     bathy_ranges_m = np.linspace(0.0, 20_000.0, 11)
     bathy_depths_m = np.linspace(80.0, 200.0, 11)

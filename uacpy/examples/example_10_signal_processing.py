@@ -74,7 +74,7 @@ def main():
     # HFM chirp
     ax = axes[0, 1]
     ax.plot(t_hfm[:500], hfm_sig[:500], 'r-', linewidth=1)
-    ax.set_title('HFM Chirp (1000-100 Hz)', fontweight='bold')
+    ax.set_title('HFM Chirp (100-1000 Hz)', fontweight='bold')
     ax.set_xlabel('Time (s)')
     ax.set_ylabel('Amplitude')
     ax.grid(True, alpha=0.3)
@@ -112,7 +112,8 @@ def main():
     ax.set_xlabel('Frequency (Hz)')
     ax.set_ylabel('Magnitude (dB)')
     ax.grid(True, alpha=0.3)
-    # Set xlim to show relevant frequency range (2x chirp bandwidth)
+    # Twice the sweep's top frequency: shows the 100-1000 Hz band the chirp
+    # occupies plus the roll-off on either side of it.
     ax.set_xlim([0, min(2000, freqs[-1])])
 
     # Constant-Q spectrogram of the LFM chirp (log-frequency, Brown 1991): the

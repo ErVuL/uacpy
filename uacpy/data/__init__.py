@@ -8,9 +8,10 @@
   absorption helper.
 - **Bottom**: a grain-size (ϕ) / sediment-class → ``BoundaryProperties``
   conversion, *or* a fetched seafloor — EMODnet substrate (European seas), the
-  NCEI grain-size DB, the Diesing 2020 deep-sea map, a pelagic depth/latitude
-  fallback (all surficial), or GlobSed thickness + CRUST1.0 → a layered elastic
-  bottom for low-frequency work.
+  NCEI grain-size DB, the AusSeabed MARS samples (Australian margin), the
+  Diesing 2020 deep-sea map, the Graw 2021 seabed-density grid, a pelagic
+  depth/latitude fallback (all surficial), or GlobSed thickness + CRUST1.0 → a
+  layered elastic bottom for low-frequency work.
 - **Surface**: NSIDC sea-ice concentration → an elastic ice-canopy
   ``BoundaryProperties`` (:func:`fetch_sea_ice_surface`), so an ice-covered
   point replaces the free surface with a pack-ice boundary.

@@ -142,6 +142,11 @@ def delayandsum(
     min_delay = float(np.min(delays))
     max_delay = float(np.max(delays))
 
+    # Every arrival places a whole copy of the source waveform starting at its
+    # own delay, so the window must reach ``max_delay + src_duration`` for the
+    # last one to fit; ``2 *`` leaves a further source duration of tail. The
+    # lead-in keeps the earliest arrival's leading edge inside the window, and
+    # the max(0, ...) stops the clock from starting before source emission.
     if t_start is None:
         t_start = max(0.0, min_delay - 0.1 * src_duration)
 
@@ -349,19 +354,23 @@ class Bellhop(PropagationModel):
 
     def __init__(
         self,
+        # Binary selection
         executable: Optional[Path] = None,
         backend: Optional[str] = None,
         dimensionality: str = '2D',
+        # Ray fan and trace bounding box
         beam_type: str = 'B',
         n_beams: int = 0,
         alpha: tuple = (-80, 80),
         step: float = 0.0,
         z_box: Optional[float] = None,
         r_box: Optional[float] = None,
+        # Receiver grid and environment interpolation
         grid_type: str = 'R',
         interp_ssp: Optional[str] = None,
         interp_bathymetry: str = 'linear',
         interp_altimetry: str = 'linear',
+        # Cerveny beam shape (written only for beam_type 'C' / 'R')
         beam_width_type: str = 'F',
         beam_curvature: str = 'D',
         eps_multiplier: float = 1.0,
@@ -376,6 +385,7 @@ class Bellhop(PropagationModel):
         time_window: Optional[float] = None,
         t_start: Optional[float] = None,
         auto_bounce: bool = True,
+        # Standard plumbing
         use_tmpfs: bool = False,
         verbose: Union[bool, str] = False,
         work_dir: Optional[Path] = None,
@@ -669,9 +679,15 @@ class Bellhop(PropagationModel):
     def _run_eigenrays_multi_depth(self, env, source, receiver, run_mode,
                                    frequencies, source_waveform, sample_rate,
                                    output_duration):
-        """EIGENRAYS with multiple source depths: Bellhop's eigenray search
-        reorders ``alpha`` and ``WriteRay2D`` leaves no per-source boundary in
-        the ``.ray`` file, so loop one run per source depth in Python and stack."""
+        """EIGENRAYS with multiple source depths: the ``.ray`` file carries no
+        per-source boundary. Its header holds only the counts ``Pos%NSz`` and
+        ``Angles%Nalpha`` (``Bellhop/ReadEnvironmentBell.f90:559-560``) and each
+        record is a take-off angle plus a point list
+        (``Bellhop/WriteRay.f90:41-46``); on the eigenray path ``WriteRay2D``
+        fires from ``ApplyContribution`` only where a ray reaches a receiver
+        (``Bellhop/influence.f90:633-635``), so a source depth contributes a
+        data-dependent number of records and those counts cannot split the file.
+        Loop one run per source depth in Python and stack."""
         slabs = []
         for sd in source.depths:
             single = Source(
@@ -825,12 +841,14 @@ class Bellhop(PropagationModel):
             output_duration=output_duration,
         )
 
-        # Multi-source-depth EIGENRAYS: ``WriteRay2D`` fires only on
-        # receiver hits AND Bellhop's eigenray search reorders ``alpha``
-        # for its bracketing heuristic, so the ``.ray`` file has no
-        # parseable per-source boundary. Loop in Python for this one
-        # mode — TL / RAYS / ARRIVALS all split at the reader level
-        # from the single binary call.
+        # Multi-source-depth EIGENRAYS: ``WriteRay2D`` fires once per
+        # ray-meets-receiver (influence.f90:633-635), so the number of .ray
+        # records a source depth contributes is data-dependent and the header
+        # counts give no parseable per-source boundary. A RAYS run instead
+        # writes exactly Nalpha records per source depth (bellhop.f90:288-289,
+        # inside the SourceDepth / DeclinationAngle loops at :236, :262), so it
+        # — like TL and ARRIVALS — splits at the reader level from the single
+        # binary call. Loop in Python for this one mode.
         if (
             run_mode == RunMode.EIGENRAYS
             and len(np.atleast_1d(source.depths)) > 1
@@ -841,6 +859,8 @@ class Bellhop(PropagationModel):
 
         run_type = _RUN_MODE_TO_BELLHOP_TYPE[run_mode]
 
+        # ── Bottom physics: BOUNCE for what the ray tracer cannot model ──
+        #
         # Auto-route through BOUNCE whenever Bellhop's fluid ray-tracer
         # cannot represent the bottom's full reflection physics natively:
         #   - layered columns — Bellhop has no multi-medium .env format;
@@ -864,6 +884,7 @@ class Bellhop(PropagationModel):
         if routed is not None:
             return routed
 
+        # ── Resolve SSP interpolation, project the env, validate ────────
         from uacpy.io.oalib_writer import resolve_ssp_interp
         effective_interp = resolve_ssp_interp(env, self.interp_ssp)
         interp_for_writer = self.interp_ssp
@@ -935,6 +956,7 @@ class Bellhop(PropagationModel):
                 f"a rectilinear (Cartesian-product) grid, or rebuild the "
                 f"Receiver with matched arrays."
             )
+        # ── Write the deck, run the binary, read the one output it wrote ──
         fm = self._setup_file_manager()
 
         extra_writer_kwargs = {
@@ -1055,6 +1077,7 @@ class Bellhop(PropagationModel):
                     slab.receiver_depths = rcv_d
                     slab.receiver_ranges = rcv_r
 
+            # ── Stamp identity and provenance onto every slab ────────────
             f0 = np.atleast_1d(np.asarray(
                 float(np.atleast_1d(source.frequencies)[0]), dtype=float,
             ))
@@ -1498,6 +1521,11 @@ class Bellhop(PropagationModel):
         self._log(f"Built transfer function "
                   f"({nrd} depths x {nrr} ranges x {n_freq} freqs)")
 
+        # Sea-surface sound speed of the first profile: ``ssp.data`` is
+        # (n_depths, n_ranges) of speeds alone, the depths living on
+        # ``ssp.depths``. Carried on the result for ``Field.to_time_trace`` /
+        # ``Field.synthesize_time_series``, which use it as the reference speed
+        # that anchors the synthesis window to r/c.
         c0 = float(env.ssp.data[0, 0])
 
         H, coords, extra = _emit(H, 'frequency', frequencies)

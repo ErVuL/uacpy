@@ -28,6 +28,8 @@ from __future__ import annotations
 
 from typing import Tuple, Union
 
+import warnings
+
 import numpy as np
 
 from uacpy.core.exceptions import ConfigurationError
@@ -330,6 +332,12 @@ def _flatten_bank(replicas: np.ndarray) -> Tuple[np.ndarray, Tuple[int, ...]]:
     grid_shape = replicas.shape[1:]
     E = replicas.reshape(N, -1)
     norms = np.linalg.norm(E, axis=0)
+    # An identically-zero replica column is a candidate position the forward
+    # model put no energy at (a shadow-zone cell from a ray/PE bank, or a
+    # source depth on a pressure-release boundary where every mode shape
+    # vanishes). Dividing it by 1 leaves it zero, which :func:`bartlett` scores
+    # as a genuine zero ("nothing matches here"); the unguarded 0/0 would put a
+    # NaN in the surface and raise a RuntimeWarning instead.
     norms[norms == 0] = 1.0
     return E / norms[None, :], grid_shape
 
@@ -360,6 +368,10 @@ def bartlett(K: np.ndarray, replicas: np.ndarray) -> np.ndarray:
     K = np.asarray(K, dtype=np.complex128)
     trK = np.real(np.trace(K))
     num = np.real(np.einsum("ng,nm,mg->g", E.conj(), K, E))
+    # A CSDM with zero trace is a positive-semidefinite matrix of zeros, so the
+    # numerator is zero too: divide by 1 to return an all-zero surface rather
+    # than 0/0. :func:`mvdr` warns on the same condition because there the
+    # matrix has to be inverted.
     surf = num / (trK if trK != 0 else 1.0)
     return surf.reshape(grid_shape)
 
@@ -395,10 +407,24 @@ def mvdr(K: np.ndarray, replicas: np.ndarray, loading: float = 1e-2) -> np.ndarr
     E, grid_shape = _flatten_bank(replicas)
     K = np.asarray(K, dtype=np.complex128)
     N = K.shape[0]
+    # Loading is a *fraction of* tr(K)/N, so it vanishes with the trace: it
+    # rescues a rank-deficient CSDM that still carries power, but a CSDM with
+    # no power at all (silent snapshots) leaves K singular and every candidate
+    # point undefined.
+    if np.real(np.trace(K)) <= 0.0:
+        warnings.warn(
+            "mvdr: the CSDM carries no power, so the ambiguity surface is "
+            "undefined; returning NaN.", UserWarning, stacklevel=2)
+        return np.full(grid_shape, np.nan)
     if loading:
         K = K + loading * (np.real(np.trace(K)) / N) * np.eye(N)
     Kinv = np.linalg.inv(K)
     denom = np.real(np.einsum("ng,nm,mg->g", E.conj(), Kinv, E))
+    # e^H Kinv e is strictly positive for a positive-definite K and a non-zero
+    # replica. A non-positive value therefore means the loaded CSDM inverted
+    # without staying positive-definite, or the replica column was zero — mark
+    # that candidate undefined instead of emitting a negative or infinite
+    # "peak" that the max-scaling below would then normalise the surface to.
     denom[denom <= 0] = np.nan
     surf = 1.0 / denom
     m = np.nanmax(surf)

@@ -181,7 +181,16 @@ def _check_pngs_well_formed(example_dir: Path) -> None:
 
 @pytest.mark.parametrize("example", _params(ALL_EXAMPLES))
 def test_example_runs(example, tmp_path):
-    """Run an example end-to-end, verify clean exit + any PNG output."""
+    """Run an example end-to-end, verify clean exit + any PNG output.
+
+    The three tiers below are wall-clock subprocess timeouts, so they measure
+    contention as much as work: an example sized against the default 120 s on
+    an idle machine can exceed it when the suite runs under ``-n`` and every
+    worker is spawning its own binary. A timeout here is therefore evidence
+    about the machine first and the example second — re-run the case alone
+    before treating it as a real failure, and do not raise the bound to make a
+    contended run go green.
+    """
     if example.stem in _EXTRA_LONG_TIMEOUT_STEMS:
         timeout = 900
     elif example.stem in _LONG_TIMEOUT_STEMS:

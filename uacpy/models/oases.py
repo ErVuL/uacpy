@@ -203,10 +203,13 @@ def _stream_block(label: str, text: Optional[str]) -> str:
 
 #: OASES' wavenumber-array bound, ``NPEXP = 16, NP = 2**NPEXP``
 #: (third_party/oases/src/compar.f:37-38). OAST stops above it
-#: (unoast31.f:459 ``IF (NWVNO.GT.NP) STOP '>>> TOO MANY WAVENUMBERS <<<'``);
-#: OASP's automatic branch has no such test — AUTSAM (unoasp22.f:1130
-#: ``NW=(WNMAX-WNMIN)/DK+1``) applies no clamp — so it runs past the arrays
-#: and writes a transfer function whose values are meaningless.
+#: (unoast31.f:459 ``IF (NWVNO.GT.NP) STOP '>>> TOO MANY WAVENUMBERS <<<'``),
+#: which is what catches its automatic branch — a pinned NW never reaches
+#: that test, being clamped by ``NWVNO=MIN0(NWVNO,NP)`` at :435 first.
+#: OASP has no such test at all — AUTSAM (unoasp22.f:1130
+#: ``NW=(WNMAX-WNMIN)/DK+1``) applies no clamp and :174's MIN0 runs before
+#: it — so it runs past the arrays and writes a transfer function whose
+#: values are meaningless.
 _OASES_NP = 65536
 
 #: OASP echoes the count it settled on before the frequency loop
@@ -217,11 +220,21 @@ _OASES_NWVNO_ECHO = re.compile(r'NO\. OF WAVENUMBERS:\s*(\d+)')
 def _oases_subprocess_env(base_name: str, **extras: str) -> dict:
     """Build the FORnnn env-var dict the OASES csh wrappers set.
 
-    Common keys (FOR001 input, FOR019/FOR020 plot files, FOR028/FOR029/
-    FOR045 scratch) are populated for every sub-model; ``extras`` supplies
-    per-binary unit numbers (e.g. FOR002='src' for OAST, FOR016='xsm' for
-    OASN) — pass the suffix without the ``base_name + '.'`` prefix.
-    ``base_name`` is the stem of the input file (no extension).
+    OPFILW/OPFILR/OPFILB resolve every Fortran unit through
+    ``GETENV('FORnnn')`` (oases/src/oashun21.f:555-556, :590, :629), falling
+    back to ``<deck stem>.<nnn>`` when the variable is unset (:560, :633) —
+    which is why the readers also look for a bare ``.023``. The binary is
+    therefore run directly and this dict stands in for
+    ``third_party/oases/bin/{oast,oasn,oasp,oasr}``. The keys every
+    sub-model needs are FOR001 (the ``.dat`` deck), FOR019/FOR020 (the
+    ``.plp`` header and ``.plt`` data OASES' plotters write), FOR028/FOR029
+    (contour output, ``.cdr``/``.bdr`` in the wrappers) and FOR045
+    (scattering right-hand sides, ``.rhs``); the last three are given inert
+    numeric suffixes here because uacpy reads none of them. ``extras``
+    supplies the per-binary units the wrappers add (e.g. FOR002='src' for
+    OAST, FOR016='xsm' for OASN) — pass the suffix without the
+    ``base_name + '.'`` prefix. ``base_name`` is the stem of the input file
+    (no extension).
     """
     import os
     # ``base_name`` is interpolated straight into the FORnnn filenames the
@@ -427,7 +440,8 @@ class OAST(OASES):
     # bottom honoured. Single spectral solve → mean SSP / median bottom column.
     spec = ModelSpec(
         modes=(RunMode.COHERENT_TL,),
-        supports={'layered_bottom', 'elastic_media'},
+        supports={'layered_bottom', 'elastic_media',
+                  'rough_surface', 'rough_bottom'},
         collapse={'ssp': 'mean', 'bottom_range': 'median'},
     )
     source = 'oases'
@@ -661,9 +675,13 @@ class OAST(OASES):
             if fm.cleanup:
                 fm.cleanup_work_dir()
 
+    # Mirrors third_party/oases/bin/oast. FOR002 is the external source
+    # array option 'l' reads; FOR023 the tabulated reflection coefficient
+    # options 't'/'b' read (oaseun31.f:3727, :3757). uacpy rejects all three
+    # letters (_UNWRITTEN_OPTION_BLOCKS), so both units stay unopened.
     _FOR_FILES = {
-        'FOR002': 'src',  # Source file
-        'FOR023': 'trc',  # Optional reflection-coef table
+        'FOR002': 'src',
+        'FOR023': 'trc',
     }
     _OUTPUT_SUFFIXES = ('.plt',)
 
@@ -772,7 +790,8 @@ class OASN(OASES):
     # honoured. Single spectral solve per frequency → mean SSP / median column.
     spec = ModelSpec(
         modes=(RunMode.COVARIANCE, RunMode.REPLICA),
-        supports={'layered_bottom', 'elastic_media'},
+        supports={'layered_bottom', 'elastic_media',
+                  'rough_surface', 'rough_bottom'},
         collapse={'ssp': 'mean', 'bottom_range': 'median'},
     )
     source = 'oases'
@@ -1137,10 +1156,14 @@ class OASN(OASES):
     # ``compute_covariance`` / ``compute_replicas`` come from the base class
     # (RunMode.COVARIANCE / RunMode.REPLICA dispatch).
 
+    # Mirrors third_party/oases/bin/oasn: replica vectors on unit 14,
+    # covariance on unit 16 (oasmun21_bin.f:335 reads FOR016 back), and the
+    # unit-26 echo of the array and noise levels INPRCV opens at
+    # oasnun22.f:37.
     _FOR_FILES = {
-        'FOR014': 'rpo',  # Replica vectors (unit 14)
-        'FOR016': 'xsm',  # Covariance matrix (unit 16)
-        'FOR026': 'chk',  # Checkpoint file (per oasn wrapper)
+        'FOR014': 'rpo',
+        'FOR016': 'xsm',
+        'FOR026': 'chk',
     }
     _OUTPUT_SUFFIXES = ('.xsm', '.rpo', '.plt')
     _OUTPUT_FORT_FILES = ('fort.14', 'fort.16')
@@ -1196,7 +1219,8 @@ class OASR(OASES):
     # ('r0'), as the SSP is essentially irrelevant to the reflection coeff.
     spec = ModelSpec(
         modes=(RunMode.REFLECTION,),
-        supports={'layered_bottom', 'elastic_media'},
+        supports={'layered_bottom', 'elastic_media',
+                  'rough_surface', 'rough_bottom'},
         collapse={'bottom_range': 'median'},
     )
     source = 'oases'
@@ -1250,8 +1274,14 @@ class OASR(OASES):
             the reflection-vs-frequency output. ``None`` → ``n_freq //
             10``.
         interface_roughness : list, optional
-            Per-interface RMS roughness in metres (one entry per layer
-            interface, ordered top → bottom).
+            Per-interface RMS roughness in metres, one entry per layer
+            record, ordered top → bottom. Entry 0 is OASR's layer-1
+            (water half-space) record, whose RG INENVI discards
+            (``oaseun31.f:377``); entry 1 is the reflecting water/seabed
+            interface. An entry may be a float, or a ``(RG, CL, M)``
+            tuple / ``{'RG', 'CL', 'M'}`` dict to select the Goff-Jordan
+            roughness spectrum. Unset entries fall back to the
+            environment's own interface roughness.
         """
         super().__init__(
             use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir,
@@ -1419,13 +1449,14 @@ class OASR(OASES):
 
             proc = self._execute(base_name, fm.work_dir)
 
-            # OASR writes a grazing-angle table to .trc and a slowness
-            # table to .rco. Both files may be present even though the
-            # user only requested one — pick the one matching the
-            # requested sampling. uacpy emits angles by default (no 'p'
-            # option in the OASR options string), so .trc wins; the user
-            # can pass options='p ...' to switch to slowness sampling, in
-            # which case we prefer .rco.
+            # Under option 'T' REFLEC writes both tables on every sample —
+            # slowness in s/km to unit 22 (.rco) and grazing angle in
+            # degrees to unit 23 (.trc), oasjun21.f:103-104 — so the pair
+            # holds the same coefficients under two abscissae and the choice
+            # here is uacpy's. Option 'p' is what makes it matter: it
+            # reinterprets the deck's ANGLE1/ANGLE2/NANG triple as slowness
+            # (oasjun21.f:36-37 rescales ANGLE1 by 1e-3 into s/m), so under
+            # 'p' the .rco abscissa is the grid the user actually asked for.
             # OASES parses the option line character by character, so 'p' can
             # be glued to other letters ('Np'); match on the character set.
             opt_chars = set(str(self.options or '')) - set(' \t\n')
@@ -1469,11 +1500,17 @@ class OASR(OASES):
             if fm.cleanup:
                 fm.cleanup_work_dir()
 
+    # Units 22 and 23 are the two reflection-coefficient tables option 'T'
+    # opens (unoasr21.f:201-205). They are written together, not either/or:
+    # oasjun21.f:103 puts slowness on 22 and :104 grazing angle on 23, which
+    # is why both files can exist and run() picks by the 'p' option.
+    # third_party/oases/bin/oasr names those two and no others; FOR002 and
+    # FOR004 name files OASR never opens.
     _FOR_FILES = {
         'FOR002': 'src',
         'FOR004': 'trf',
-        'FOR022': 'rco',  # Reflection-coef table (slowness)
-        'FOR023': 'trc',  # Reflection-coef table (angle)
+        'FOR022': 'rco',
+        'FOR023': 'trc',
     }
     _OUTPUT_SUFFIXES = ('.rco', '.trc', '.023', '.plt')
     _OUTPUT_FORT_FILES = ('fort.023',)
@@ -1526,7 +1563,8 @@ class OASP(OASES):
     # frequency → mean SSP / median bottom column represent the path.
     spec = ModelSpec(
         modes=(RunMode.COHERENT_TL, RunMode.BROADBAND, RunMode.TIME_SERIES),
-        supports={'layered_bottom', 'elastic_media'},
+        supports={'layered_bottom', 'elastic_media',
+                  'rough_surface', 'rough_bottom'},
         collapse={'ssp': 'mean', 'bottom_range': 'median'},
     )
     source = 'oases'
@@ -1712,67 +1750,7 @@ class OASP(OASES):
                     "H(f) use RunMode.BROADBAND."
                 )
 
-        # The .trf reader collapses MSUFT / ISROW / NOUT axes onto the
-        # first slot. Refuse option letters that would produce
-        # multi-axis output rather than silently discard data.
-        # OASES GETOPT (unoasp22.f:871-872 `READ(1,200) OPT` /
-        # `200 FORMAT(40A1)`) parses the option line character by
-        # character, so whitespace is irrelevant and 'NJO' enables 'O'
-        # exactly like 'N J O'. Match on the character set, not
-        # whitespace-split tokens.
-        if self.options:
-            opt_chars = set(str(self.options)) - set(' \t\n')
-            # Letters that add an IOUT slot, i.e. increment NOUT and put a
-            # second component in every .trf record (unoasp22.f:890-921:
-            # N→1 V→2 H→3 R→5 K→6 S→7), plus 'U' (DECOMP), which splits the
-            # output over NCOMPO=5 separate files (unoasp22.f:455-456).
-            multi_axis = {'V', 'H', 'R', 'K', 'S', 'U'} & opt_chars
-            if multi_axis:
-                raise ConfigurationError(
-                    f"OASP.run: options {sorted(multi_axis)} request "
-                    "multi-component / decomposed output, which the .trf "
-                    "reader currently flattens. Pass options without "
-                    "these letters (default 'N J' returns scalar pressure) "
-                    "or read the .trf directly."
-                )
-            if 'O' in opt_chars:
-                # 'O' moves the frequency integration onto a complex
-                # contour (Im(omega) = -ln(50)·Δf, unoasp22.f:372-373). The
-                # .trf reader discards that offset and synthesize_time_series
-                # does not re-apply exp(-Im(omega)·t), so the time series
-                # would be silently wrong. Reject rather than mis-synthesise.
-                raise ConfigurationError(
-                    "OASP.run: option 'O' (complex frequency integration) "
-                    "bakes an exp(-ln(50)·Δf·t) contour into the spectrum "
-                    "that uacpy's time-series synthesis does not undo. "
-                    "Drop 'O' (the default 'N J' uses a real frequency axis)."
-                )
-            if 't' in opt_chars:
-                # Lowercase 't' sets INTTYP=-1 (unoasp22.f:1028-1029), and
-                # unoasp22.f:178-189 then overwrites the deck's R0 / RSPACE /
-                # NPLOTS with a slowness axis derived from CMIN/CMAX. The
-                # .trf's second coordinate is then slowness in s/m, which
-                # uacpy would label 'range' in metres.
-                raise ConfigurationError(
-                    "OASP.run: option 't' (tau-p seismograms) replaces the "
-                    "receiver range axis with slowness "
-                    "(unoasp22.f:178-189), which uacpy's Field has no "
-                    "coordinate for and would mislabel as range. Drop 't'."
-                )
-            if 'J' not in opt_chars and self.nw_samples < 1:
-                # Under automatic wavenumber sampling (nw_samples < 1 →
-                # AUSAMP), OASES forces the complex frequency contour
-                # OMEGIM = -ln(50)·Δf unless 'J' keeps ICNTIN > 0
-                # (unoasp22.f:288-296, :304-306 then :372-373). Without 'J'
-                # the .trf then carries the same offset 'O' would, which the
-                # time-series synthesis cannot undo.
-                raise ConfigurationError(
-                    "OASP.run: a custom options string without 'J' enables the "
-                    "complex frequency contour (OMEGIM≠0) under automatic "
-                    "wavenumber sampling, which uacpy's time-series synthesis "
-                    "cannot undo. Add 'J' (the default 'N J' keeps a real "
-                    "frequency axis) or pin nw_samples≥1."
-                )
+        self._reject_unreadable_options()
 
         if frequencies is not None:
             freqs_arr = np.atleast_1d(np.asarray(frequencies, dtype=float))
@@ -1806,7 +1784,12 @@ class OASP(OASES):
             else:
                 df_user = float(freqs_arr[0])
             if df_user > 0:
-                # OASP requires NT = 2^M (oasp.tex:129); round up.
+                # OASP's bin spacing is DLFREQ = 1/(DT*NX) (unoasp22.f:237)
+                # and the writer sets DT at Nyquist, 1/(2*freq_max), so
+                # NX = 2*freq_max/DLFREQ samples are needed to land bins as
+                # fine as the user's df. OASP requires NT = 2^M
+                # (oasp.tex:129), so round that up to a power of two — never
+                # down past whatever n_time_samples already asked for.
                 target = max(int(n_time_samples or 0),
                              int(np.ceil(2.0 * freq_max / df_user)))
                 if target > 1:
@@ -1820,6 +1803,10 @@ class OASP(OASES):
                 else float(np.atleast_1d(source.frequencies)[0])
             )
             if freq_max is None:
+                # Band headroom above the carrier, so the pulse's upper
+                # sidelobes fall inside FR2 rather than being truncated.
+                # OASES ties FR2 to nothing but FR1 (oasp.tex:131), so the
+                # 2.5 is uacpy's default, not a model constraint.
                 freq_max = 2.5 * fc_run
             elif fc_run > freq_max:
                 raise ConfigurationError(
@@ -1955,6 +1942,83 @@ class OASP(OASES):
         finally:
             if fm.cleanup:
                 fm.cleanup_work_dir()
+
+    def _reject_unreadable_options(self) -> None:
+        """Reject raw ``options`` letters whose ``.trf`` uacpy cannot read back.
+
+        Every case below writes a well-formed ``.trf`` that the reader parses
+        without complaint but that no longer means what the axis labels say —
+        an extra output component the reader flattens away, a range axis that
+        is really slowness, or a spectrum carrying a complex-contour offset
+        the time-series synthesis does not undo. Left unchecked they surface
+        as a plausible wrong answer, so each raises here instead. Leaving
+        ``options`` unset (the writer's default ``'N J'``) hits none of them
+        and skips the whole check.
+
+        OASES GETOPT (``unoasp22.f:871-872`` ``READ(1,200) OPT`` /
+        ``200 FORMAT(40A1)``, scanned character by character at ``:873``)
+        ignores whitespace, so ``'NJO'`` enables ``'O'`` exactly like
+        ``'N J O'`` — hence the tests below are on the character set, not on
+        whitespace-split tokens.
+        """
+        if not self.options:
+            return
+        opt_chars = set(str(self.options)) - set(' \t\n')
+
+        # The .trf reader collapses the MSUFT / ISROW / NOUT axes onto the
+        # first slot, so extra output components are dropped, not reported.
+        # Letters that add an IOUT slot, i.e. increment NOUT and put a second
+        # component in every .trf record (unoasp22.f:887-918: N→1 V→2 H→3 R→5
+        # K→6 S→7), plus 'U' (DECOMP), which splits the output over NCOMPO=5
+        # separate files (unoasp22.f:455-456, opened one unit apart at
+        # :539-540).
+        multi_axis = {'V', 'H', 'R', 'K', 'S', 'U'} & opt_chars
+        if multi_axis:
+            raise ConfigurationError(
+                f"OASP.run: options {sorted(multi_axis)} request "
+                "multi-component / decomposed output, which the .trf "
+                "reader currently flattens. Pass options without "
+                "these letters (default 'N J' returns scalar pressure) "
+                "or read the .trf directly."
+            )
+        if 'O' in opt_chars:
+            # 'O' moves the frequency integration onto a complex
+            # contour (Im(omega) = -ln(50)·Δf, unoasp22.f:372-373). The
+            # .trf reader discards that offset and synthesize_time_series
+            # does not re-apply exp(-Im(omega)·t), so the time series
+            # would be silently wrong. Reject rather than mis-synthesise.
+            raise ConfigurationError(
+                "OASP.run: option 'O' (complex frequency integration) "
+                "bakes an exp(-ln(50)·Δf·t) contour into the spectrum "
+                "that uacpy's time-series synthesis does not undo. "
+                "Drop 'O' (the default 'N J' uses a real frequency axis)."
+            )
+        if 't' in opt_chars:
+            # Lowercase 't' sets INTTYP=-1 (unoasp22.f:1028-1029), and
+            # unoasp22.f:178-189 then overwrites the deck's R0 / RSPACE /
+            # NPLOTS with a slowness axis derived from CMIN/CMAX. The
+            # .trf's second coordinate is then slowness in s/m, which
+            # uacpy would label 'range' in metres.
+            raise ConfigurationError(
+                "OASP.run: option 't' (tau-p seismograms) replaces the "
+                "receiver range axis with slowness "
+                "(unoasp22.f:178-189), which uacpy's Field has no "
+                "coordinate for and would mislabel as range. Drop 't'."
+            )
+        if 'J' not in opt_chars and self.nw_samples < 1:
+            # Under automatic wavenumber sampling (nw_samples < 1 →
+            # AUSAMP), OASES forces the complex frequency contour
+            # OMEGIM = -ln(50)·Δf unless 'J' keeps ICNTIN > 0
+            # (unoasp22.f:288-296, :304-306 then :372-373). Without 'J'
+            # the .trf then carries the same offset 'O' would, which the
+            # time-series synthesis cannot undo.
+            raise ConfigurationError(
+                "OASP.run: a custom options string without 'J' enables the "
+                "complex frequency contour (OMEGIM≠0) under automatic "
+                "wavenumber sampling, which uacpy's time-series synthesis "
+                "cannot undo. Add 'J' (the default 'N J' keeps a real "
+                "frequency axis) or pin nw_samples≥1."
+            )
 
     def _reject_wavenumber_overrun(self, process) -> None:
         """Raise when OASP integrated on more wavenumbers than NP arrays hold.

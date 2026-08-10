@@ -61,7 +61,17 @@ def ber_theory(scheme, ebn0_db):
     """Theoretical AWGN BER vs Eb/N0 (dB) for a Gray-mapped scheme.
 
     Exact for BPSK/QPSK; standard nearest-neighbour approximations for higher
-    M-PSK and square M-QAM (Proakis).
+    M-PSK and square M-QAM (Proakis & Salehi):
+
+    * M-PSK symbol error ``P_M = 2 Q(sqrt(2 k Eb/N0) sin(pi/M))``, eq. (4.3-17).
+    * square M-QAM ``P_M ~= 4 (1 - 1/sqrt(M)) Q(sqrt(3 k Eb/N0 / (M-1)))``,
+      eqs. (4.3-29) into (4.3-27), dropping the second-order term.
+
+    Both are **symbol** error rates; the ``1/k`` factor that converts them to a
+    bit error rate is only valid under Gray mapping (eq. 4.3-20): adjacent
+    constellation points then differ in a single bit, so the dominant
+    nearest-neighbour symbol error costs exactly one of the ``k`` bits.
+    :func:`uacpy.comms.constellation` is Gray-mapped throughout.
     """
     ebn0 = 10.0 ** (np.asarray(ebn0_db, dtype=float) / 10.0)
     s = scheme.lower()

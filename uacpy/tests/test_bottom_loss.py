@@ -24,11 +24,12 @@ class TestBottomLossCurve:
         assert loss[-1] > 0.5
 
     def test_subcritical_loss_smaller_than_supercritical(self):
-        # Below the critical angle ray bends fully back into water →
+        # Below the critical angle the ray bends fully back into the water →
         # loss is small; above it (up to normal incidence) some energy
-        # transmits → larger loss. For fluid 'sand' c_2=1650, c_1=1500
-        # the critical-angle complement is arccos(c1/c2) ≈ 24.6°
-        # measured from the interface.
+        # transmits → larger loss. Angles here are grazing (0 = along the
+        # interface), so for fluid 'sand' c_2=1650 over c_1=1500 the critical
+        # grazing angle is arccos(c1/c2) ≈ 24.6°; the 20°/30° windows below
+        # straddle it without touching it.
         ang, loss = bottom_loss_curve('sand')
         below = loss[ang < 20.0].mean()
         above = loss[(ang > 30.0) & (ang < 60.0)].mean()

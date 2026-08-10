@@ -221,19 +221,20 @@ def main():
         print(f"  SKIPPED: {e}")
 
     # =========================================================================
-    # 5. KRAKENFIELD BROADBAND (multi-frequency normal modes)
+    # 5. KRAKEN BROADBAND (multi-frequency normal modes)
     # =========================================================================
     print("\n--- Kraken Broadband ---")
     try:
-        kf = Kraken(verbose=False)
-        result_kf = kf.run(
+        kraken = Kraken(verbose=False)
+        result_kraken = kraken.run(
             env, source, receiver,
             run_mode=RunMode.BROADBAND,
             frequencies=frequencies
         )
-        print(f"  Output shape: {result_kf.data.shape} (depth x range x freq)")
-        print(f"  Frequencies: {result_kf.frequencies[0]:.1f} - {result_kf.frequencies[-1]:.1f} Hz")
-        results['Kraken'] = result_kf
+        print(f"  Output shape: {result_kraken.data.shape} (depth x range x freq)")
+        print(f"  Frequencies: {result_kraken.frequencies[0]:.1f} - "
+              f"{result_kraken.frequencies[-1]:.1f} Hz")
+        results['Kraken'] = result_kraken
     except Exception as e:
         print(f"  SKIPPED: {e}")
 
@@ -444,8 +445,6 @@ def main():
         # Separate impulse-response models from chirp/SPARC for cleaner comparison
         ir_results = {k: v for k, v in ts_results.items()
                       if k not in ('Bellhop (chirp)', 'SPARC')}
-        {k: v for k, v in ts_results.items()
-         if k in ('Bellhop (chirp)', 'SPARC')}
 
         n_ts = len(ts_results)
         fig, axes = plt.subplots(n_ts, 1, figsize=(14, 2.5 * n_ts), squeeze=False)

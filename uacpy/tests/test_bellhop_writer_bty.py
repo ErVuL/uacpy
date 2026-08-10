@@ -1,9 +1,11 @@
 """Bellhop env-writer boundary-file coverage.
 
-Three audited defects: a range-dependent bottom was silently dropped when the
-bathymetry is flat (no ``.bty`` vehicle); the long-format ``.bty`` resampled
-geoacoustics onto the bathymetry grid only, erasing interior property breaks;
-and a single-sample (constant-offset) altimetry wrote no ``.ati``.
+Every range-dependent boundary feature needs a file to travel in, and the
+``.env`` alone carries none of them. Three invariants: a range-dependent
+bottom reaches Bellhop even when the bathymetry is flat (the ``.bty`` is the
+only vehicle); the long-format ``.bty`` samples the union of the bathymetry
+and property grids, so interior property breaks survive; and a single-sample
+(constant-offset) altimetry still produces an ``.ati``.
 """
 
 import numpy as np
@@ -44,7 +46,7 @@ def test_flat_bathy_rd_bottom_writes_long_bty(tmp_path):
     bty = path.with_suffix('.bty')
     assert bty.exists()
     text = bty.read_text()
-    assert text.splitlines()[0].strip("'") .endswith('L')   # long format
+    assert text.splitlines()[0].strip("'").endswith('L')   # long format
     assert '1800.000' in text and '1600.000' in text
     # BOT line carries the '~' bathymetry flag
     env_text = path.read_text()

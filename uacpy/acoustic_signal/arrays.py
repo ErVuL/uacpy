@@ -91,9 +91,13 @@ def _powerless_covariance(R, caller: str) -> bool:
     the trace: it stabilises a rank-deficient covariance that still carries
     power, but cannot rescue an all-zero one. That case is ordinary data, not a
     contrived input — ``sample_covariance`` of a silent segment (a dead
-    element, a stretch of digital silence) returns exactly it. Left alone, MVDR
-    raises a bare ``numpy`` ``LinAlgError`` and MUSIC returns a finite *uniform*
-    pseudospectrum, which is worse: it looks like an answer.
+    element, a stretch of digital silence) returns exactly it. With no power
+    MVDR's inverse is singular and MUSIC's noise subspace is arbitrary, so both
+    decline rather than return a finite *uniform* pseudospectrum that looks
+    like an answer.
+
+    :func:`bartlett_spectrum` needs no such guard: ``e^H R e`` inverts nothing,
+    so a zero covariance simply gives zero power at every angle.
     """
     trace = np.trace(R).real
     scale = trace / R.shape[0]
@@ -150,6 +154,8 @@ def music_spectrum(R, steering, n_sources: int):
     e = np.asarray(steering, dtype=complex)
     if _powerless_covariance(R, "music_spectrum"):
         return np.full(e.shape[0], np.nan)
+    # np.linalg.eigh returns eigenvalues in ascending order, so the leading
+    # n - n_sources columns are the smallest eigenvalues: the noise subspace.
     evals, evecs = np.linalg.eigh(R)
     noise = evecs[:, : n - n_sources]
     proj = e.conj() @ noise

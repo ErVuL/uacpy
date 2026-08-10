@@ -6,6 +6,11 @@ Generates input files for the mpiramS binary:
 - SSP file: sound speed profiles
 - BTH file: bathymetry
 - ranges file: output ranges
+
+Every format here is fixed by ``mpiramS/src/peramx.f90``, which is uacpy's
+own I/O rewrite of the vendored source (``third_party/MODIFICATIONS.md``):
+it is authority on what this build reads and none at all on the physics.
+The stock ``mpiramS/in.pe`` carries a different layout.
 """
 
 import numpy as np
@@ -91,7 +96,10 @@ def write_inpe(
     rho : ndarray, optional
         Sediment density in g/cm^3, shape (nzs,).
     attn : ndarray, optional
-        Sediment attenuation in dB/wavelength, shape (nzs,).
+        Sediment attenuation in dB/wavelength, shape (nzs,). Enters the
+        sediment wavenumber as ``k = (omega/c)(1 + i*eta*attn)`` with
+        ``eta = 1/(40*pi*log10(e))`` — the dB/wavelength-to-nepers factor
+        (``mpiramS/src/ram.f90:276``, ``:348``).
     isedrd : int, optional
         Range-dependent sediment flag. 0=range-independent (default),
         1=range-dependent from external file.
@@ -101,7 +109,31 @@ def write_inpe(
         PE reference sound speed (m/s). The Fortran binary requires a
         positive value (e.g. Lytaev Eq. (15) optimum) and stops with
         an error otherwise.
+
+    Notes
+    -----
+    ``in.pe`` is positional: ``mpiramS/src/peramx.f90:74-97`` consumes one
+    record per line in exactly the order written here — a dummy line (``:74``),
+    then ``fc Q``, ``T``, ``zsrc``, ``deltaz``, ``deltar``, ``np_pade nss``,
+    ``rs``, ``dzm``, ``c0_user``, ``ssp_filename``, ``iflat``, ``ihorz``,
+    ``ibot``, ``bth_filename``, the output-ranges filename (``:91``),
+    ``sedlayer``, ``nzs``, ``isedrd`` (``:97``). ``isedrd = 1`` is followed by
+    the sediment filename (``:101``); otherwise by three ``nzs``-value
+    records — ``cs``, ``rho``, ``attn`` (``:143-145``).
+
+    That order comes from uacpy's own I/O rewrite of ``peramx.f90`` (see the
+    module docstring): authority on the file format, none on the physics.
     """
+    # Placeholder sediment column for a caller that supplies none — uacpy's
+    # RAM wrapper always passes arrays built from env.bottom. ``profl`` puts
+    # control point 1 at the sea surface, point 2 at the seafloor, points
+    # 3..nzs-1 through the sediment and point nzs on the domain floor
+    # (mpiramS/src/ram.f90:321-329 — uacpy's own rewrite of ``profl``, see
+    # MODIFICATIONS.md, so it defines what this build expects and is no
+    # authority on the physics). ``cs`` is added to the water profile at
+    # :333, so this is water speed down to the seafloor and +200 m/s below
+    # it, with a raised attenuation on the floor point that damps the
+    # absorbing layer.
     if cs is None:
         cs = np.zeros(nzs)
         cs[2:] = 200.0
@@ -112,7 +144,10 @@ def write_inpe(
         attn[-1] = 5.0
 
     with open(filepath, 'w') as f:
-        f.write("0.0\n")  # dummy line (read and discarded by peramx.f90)
+        # Dummy line, read and discarded at peramx.f90:74. It has to carry a
+        # value: the list-directed read would skip a blank record and eat the
+        # fc/Q line instead.
+        f.write("0.0\n")
         f.write(f"{fc}  {Q}\n")
         f.write(f"{T}\n")
         f.write(f"{zsrc}\n")
@@ -129,9 +164,7 @@ def write_inpe(
         f.write(f"{bth_filename}\n")
         # peramx.f90:91-92 takes the output-ranges filename from this line,
         # so this writer is what pins it to 'ranges.dat'. Keep in sync with
-        # :func:`write_ranges_file`. That read is inside uacpy's own I/O
-        # rewrite of peramx.f90 (MODIFICATIONS.md), so it records what this
-        # build expects, not independent upstream authority.
+        # :func:`write_ranges_file`.
         f.write("ranges.dat\n")
         # Bottom properties
         f.write(f"{sedlayer}\n")
@@ -158,7 +191,9 @@ def write_sediment_file(
     Write range-dependent sediment profile file for mpiramS.
 
     Same format as SSP: each profile starts with ``-1 range_km``,
-    followed by 3 lines of nzs values each (cs, rho, attn).
+    followed by 3 lines of nzs values each (cs, rho, attn). The negative
+    first column is the profile-header sentinel ``peramx.f90:121-122``
+    counts on; ``:132`` multiplies the second column by 1000 to get metres.
 
     Parameters
     ----------
@@ -195,8 +230,11 @@ def write_ssp_file(
     Write sound speed profile file for mpiramS.
 
     Format: Each profile starts with a header line ``-1 range_km``,
-    followed by ``depth speed`` pairs. All profiles must have the
-    same number of depth points.
+    followed by ``depth speed`` pairs. The negative first column is the
+    profile-header sentinel ``peramx.f90:220-224`` counts on, and it takes
+    the depth count from the first profile alone — hence all profiles must
+    have the same number of depth points. ``:232`` multiplies the second
+    column by 1000 to get metres.
 
     Parameters
     ----------
@@ -240,7 +278,9 @@ def write_bth_file(
     """
     Write bathymetry file for mpiramS.
 
-    Format: ``range(m) depth(m)`` pairs, one per line.
+    Format: ``range(m) depth(m)`` pairs, one per line. Metres, not the km
+    the ``.ssp`` / ``.sed`` range headers use — ``peramx.f90:315`` reads
+    this file with no scaling and marches ``rb`` against ``r`` in metres.
 
     Parameters
     ----------
@@ -271,7 +311,9 @@ def write_ranges_file(
     """
     Write output ranges file for mpiramS.
 
-    One range per line, in meters.
+    One range per line, in metres (``peramx.f90:160-162`` reads them
+    unscaled). There is no count header: ``:152-156`` reads to EOF to size
+    the array first, then rewinds and fills it.
 
     Parameters
     ----------

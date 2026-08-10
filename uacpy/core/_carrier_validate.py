@@ -120,6 +120,24 @@ def _coerce_data_sources(value, label: str) -> tuple:
     return records
 
 
+def _dedupe_provenance(carriers) -> tuple:
+    """Union of ``carrier.data_sources`` over ``carriers``, de-duplicated by
+    source id and kept in first-seen order.
+
+    The single home for the aggregation ``Bottom`` (over its columns),
+    ``Surface`` (over its nodes) and ``Environment`` (over its five carriers)
+    each expose. A carrier that is ``None``, or carries no ``data_sources``,
+    contributes nothing.
+    """
+    seen, out = set(), []
+    for carrier in carriers:
+        for record in getattr(carrier, 'data_sources', ()) or ():
+            if record.source.id not in seen:
+                seen.add(record.source.id)
+                out.append(record)
+    return tuple(out)
+
+
 def _sanitize_title(name: str) -> str:
     """Strip newlines/control chars and remove single quotes from a Fortran
     title field. Acoustics-Toolbox `.env` titles are single-quote-delimited and

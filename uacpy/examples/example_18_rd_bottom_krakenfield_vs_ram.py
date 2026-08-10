@@ -191,7 +191,8 @@ def main():
         ranges=np.linspace(1000, 6000, 300),
     )
 
-    np.array([0, 5000, 10000, 15000, 20000.0])
+    # Only the depth column is needed here — the figure's subtitle quotes the
+    # slope's endpoints; make_base_env owns the paired range/depth arrays.
     bathy_depths_m = np.array([100, 120, 150, 180, 200.0])
 
     # ── Run both bottom cases with all three models ─────────────
@@ -207,9 +208,9 @@ def main():
 
     models = [
         ('RAM', RAM(verbose=False, accuracy=1e-1)),
-        ('KF adiabatic', Kraken(verbose=False, n_segments=n_segments,
+        ('Kraken adiabatic', Kraken(verbose=False, n_segments=n_segments,
                                 mode_coupling='adiabatic')),
-        ('KF coupled', Kraken(verbose=False, n_segments=n_segments,
+        ('Kraken coupled', Kraken(verbose=False, n_segments=n_segments,
                               mode_coupling='coupled')),
     ]
 
@@ -229,9 +230,9 @@ def main():
             try:
                 field = model.run(env, source, receiver)
                 results[case_label][model_label] = field
-                print(f"    {model_label:15s} TL: [{np.nanmin(field.tl):.1f}, {np.nanmax(field.tl):.1f}] dB")
+                print(f"    {model_label:17s} TL: [{np.nanmin(field.tl):.1f}, {np.nanmax(field.tl):.1f}] dB")
             except Exception as e:
-                print(f"    {model_label:15s} ERROR: {e}")
+                print(f"    {model_label:17s} ERROR: {e}")
                 results[case_label][model_label] = None
                 errors[case_label][model_label] = e
 
@@ -252,20 +253,20 @@ def main():
     rms = {}
     for case_label in results:
         f_ram = results[case_label].get('RAM')
-        for kf_label in ['KF adiabatic', 'KF coupled']:
-            f_kf = results[case_label].get(kf_label)
-            if f_ram is None or f_kf is None:
-                print(f"    {case_label:15s} {kf_label:15s}  not computed")
+        for kraken_label in ['Kraken adiabatic', 'Kraken coupled']:
+            f_kraken = results[case_label].get(kraken_label)
+            if f_ram is None or f_kraken is None:
+                print(f"    {case_label:15s} {kraken_label:17s}  not computed")
                 continue
-            diff = f_ram.tl[mid_idx, :] - f_kf.tl[mid_idx, :]
-            rms[(case_label, kf_label)] = float(np.sqrt(np.nanmean(diff ** 2)))
-            print(f"    {case_label:15s} {kf_label:15s}  mean diff: {np.nanmean(diff):+.1f} dB,  "
+            diff = f_ram.tl[mid_idx, :] - f_kraken.tl[mid_idx, :]
+            rms[(case_label, kraken_label)] = float(np.sqrt(np.nanmean(diff ** 2)))
+            print(f"    {case_label:15s} {kraken_label:17s}  mean diff: {np.nanmean(diff):+.1f} dB,  "
                   f"RMS: {np.sqrt(np.nanmean(diff**2)):.1f} dB")
 
     print("\n  Does coupling move Kraken closer to the RAM reference?")
     for case_label in results:
-        r_ad = rms.get((case_label, 'KF adiabatic'))
-        r_co = rms.get((case_label, 'KF coupled'))
+        r_ad = rms.get((case_label, 'Kraken adiabatic'))
+        r_co = rms.get((case_label, 'Kraken coupled'))
         if r_ad is None or r_co is None:
             print(f"    {case_label:15s} cannot say — one of the two runs did not complete")
             continue
@@ -293,8 +294,8 @@ def main():
 
     model_panels = [
         ('RAM', 'RAM (PE)'),
-        ('KF adiabatic', 'Kraken (adiabatic)'),
-        ('KF coupled', 'Kraken (coupled)'),
+        ('Kraken adiabatic', 'Kraken (adiabatic)'),
+        ('Kraken coupled', 'Kraken (coupled)'),
     ]
 
     tl_im = None
@@ -317,8 +318,8 @@ def main():
                 ax.set_ylabel('')
 
         ax = axes[row_idx, 3]
-        colors = {'RAM': 'C0', 'KF adiabatic': 'C1', 'KF coupled': 'C2'}
-        for key in ['RAM', 'KF adiabatic', 'KF coupled']:
+        colors = {'RAM': 'C0', 'Kraken adiabatic': 'C1', 'Kraken coupled': 'C2'}
+        for key in ['RAM', 'Kraken adiabatic', 'Kraken coupled']:
             f = results[case_label].get(key)
             if f is not None:
                 ax.plot(ranges_km, f.tl[mid_idx, :], color=colors[key],
@@ -332,18 +333,18 @@ def main():
         ax.grid(True, alpha=0.3)
 
     diff_panels = [
-        ('KF adiabatic', 'RAM - Adiabatic'),
-        ('KF coupled', 'RAM - Coupled'),
+        ('Kraken adiabatic', 'RAM - Adiabatic'),
+        ('Kraken coupled', 'RAM - Coupled'),
     ]
 
     diff_im = None
     diff_vmax_shared = None
     for case_idx, case_label in enumerate(['Hard layered', 'Soft layered']):
         f_ram = results[case_label].get('RAM')
-        for diff_idx, (kf_key, _) in enumerate(diff_panels):
-            f_kf = results[case_label].get(kf_key)
-            if f_ram is not None and f_kf is not None:
-                d = np.asarray(f_ram.tl) - np.asarray(f_kf.tl)
+        for diff_idx, (kraken_key, _) in enumerate(diff_panels):
+            f_kraken = results[case_label].get(kraken_key)
+            if f_ram is not None and f_kraken is not None:
+                d = np.asarray(f_ram.tl) - np.asarray(f_kraken.tl)
                 finite = d[np.isfinite(d)]
                 if finite.size:
                     v = max(5.0, float(np.nanpercentile(np.abs(finite), 95)))
@@ -355,19 +356,19 @@ def main():
     for case_idx, case_label in enumerate(['Hard layered', 'Soft layered']):
         f_ram = results[case_label].get('RAM')
         env_plot = envs[case_label]
-        for diff_idx, (kf_key, diff_title) in enumerate(diff_panels):
+        for diff_idx, (kraken_key, diff_title) in enumerate(diff_panels):
             col = case_idx * 2 + diff_idx
             ax = axes[2, col]
-            f_kf = results[case_label].get(kf_key)
-            if f_ram is not None and f_kf is not None:
-                _plot_tl_difference(f_ram, f_kf, env_plot, ax=ax,
+            f_kraken = results[case_label].get(kraken_key)
+            if f_ram is not None and f_kraken is not None:
+                _plot_tl_difference(f_ram, f_kraken, env_plot, ax=ax,
                                    show_colorbar=False,
                                    diff_vmax=diff_vmax_shared)
                 diff_im = ax.collections[0] if ax.collections else diff_im
                 ax.set_title(f'{case_label} — {diff_title}', fontsize=10,
                              fontweight='bold')
             else:
-                missing = 'RAM' if f_ram is None else kf_key
+                missing = 'RAM' if f_ram is None else kraken_key
                 _mark_failed(ax, f'{case_label} — {diff_title}',
                              f'{missing} unavailable')
             if col > 0:

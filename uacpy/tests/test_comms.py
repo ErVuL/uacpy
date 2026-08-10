@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from uacpy import comms
+from uacpy.comms import janus
 from uacpy.core.exceptions import ConfigurationError
 
 
@@ -57,6 +58,12 @@ class TestModulation:
 class TestMetrics:
     @pytest.mark.parametrize("scheme", ["bpsk", "qpsk", "16qam"])
     def test_awgn_ber_matches_theory(self, scheme):
+        # Monte-Carlo sampling error sets the tolerance. At Eb/N0 = 7 dB over
+        # 300 000 bits the expected error COUNT is 232 for BPSK/QPSK
+        # (BER 7.7e-4) and 5090 for 16QAM (BER 1.7e-2), so the relative
+        # standard error is 1/sqrt(count) = 6.6 % and 1.4 %; rel=0.2 is ~3
+        # sigma on the worst case. Shrinking n_bits without widening rel makes
+        # this flaky, not stricter.
         rng = np.random.default_rng(0xACED)
         ebn0 = 7.0
         meas = comms.simulate_link(scheme, ebn0, 300000, rng=rng).ber
@@ -94,6 +101,11 @@ class TestEqualization:
         dfe = comms.DFE(n_ff=12, n_fb=6, forget=0.995)
         eq = comms.simulate_link("qpsk", 16.0, 40000, channel=h,
                                  equalizer=dfe, rng=rng)
+        # Order-of-magnitude floors, not fitted bounds: the unequalised link
+        # runs at BER 5.7e-2 while the equalised one makes zero errors in
+        # 40 000 bits, and the converged MSE is -17 dB. The thresholds sit far
+        # enough below that to survive a reseed but still fail a DFE that has
+        # stopped adapting.
         assert raw > 1e-2
         assert eq.ber < raw / 50
         assert 10 * np.log10(eq.mse[-2000:].mean()) < -10
@@ -129,6 +141,10 @@ class TestDoppler:
         best, scales, peak = comms.estimate_doppler_scale(
             received, template, np.linspace(0, 4e-3, 41))
         # estimate returns +v/c; compensate_doppler(received, best) recovers template
+        # estimate_doppler_scale returns a scan node verbatim (no sub-grid
+        # interpolation), so the resolution is the 1e-4 spacing of this
+        # 41-point 0..4e-3 scan; a_true sits exactly on a node and abs=2e-4
+        # allows a two-node miss.
         assert best == pytest.approx(a_true, abs=2e-4)
 
     def test_doppler_from_speed_is_the_v_over_c_scale(self):
@@ -208,6 +224,9 @@ class TestChannelEstimation:
         h[[0, 5, 11]] = [1.0, 0.5j, -0.3]
         pilots = comms.Modulator("qpsk").modulate(rng.integers(0, 2, 2000))
         rx = comms.apply_channel(pilots, h)[: pilots.size]
+        # No noise is added, so 1e-6 is a float-conditioning bound on the
+        # least-squares solve, not a statistical one. A regression that biases
+        # either estimator shows up orders of magnitude above it.
         assert np.linalg.norm(comms.ls_estimate(rx, pilots, 20) - h) < 1e-6
         h_omp = comms.omp_estimate(rx, pilots, 20, sparsity=3)
         assert np.linalg.norm(h_omp - h) < 1e-6
@@ -225,6 +244,20 @@ class TestOFDM:
         rx = comms.awgn(comms.apply_channel(sig, h), 25.0, rng=rng)
         out = comms.ofdm_demodulate(rx, 256, 32, channel=h)
         assert comms.bit_error_rate(bits, mod.demodulate(out)[: bits.size]) < 1e-3
+
+    def test_zero_forcing_survives_a_spectral_null(self):
+        # A channel whose response is exactly zero on one subcarrier must not
+        # turn that subcarrier into inf/NaN and poison the whole symbol.
+        nsc, cp = 64, 16
+        rng = np.random.default_rng(11)
+        sym = np.exp(1j * np.pi / 2 * rng.integers(0, 4, nsc))
+        tx = comms.ofdm_modulate(sym, nsc, cp)
+        h = np.array([1.0, -1.0])                      # H[0] = 1 - 1 = 0 exactly
+        out = comms.ofdm_demodulate(comms.apply_channel(tx, h)[: tx.size],
+                                    nsc, cp, channel=h)
+        assert np.all(np.isfinite(out))
+        assert abs(out[0]) < 1e-6                      # null carries nothing
+        assert np.allclose(out[1:], sym[1:], atol=1e-9)   # the rest is untouched
 
 
 class TestCoding:
@@ -287,6 +320,9 @@ class TestPHY:
         mf = comms.rrc_matched_filter(bb, sps)
         gd = 8 * sps                                  # two RRC of span=8
         peaks = mf[gd:gd + sym.size * sps:sps]
+        # The link is noiseless: the 5 % residual is the ISI left by truncating
+        # the RRC pair to span 8, which a longer span would shrink. It is not a
+        # sampling-error bar, so it does not move with the seed.
         assert np.linalg.norm(peaks - sym) / np.linalg.norm(sym) < 0.05
 
     def test_upconvert_real_and_downconvert_inverts(self):
@@ -538,7 +574,39 @@ class TestJanus:
         rx = rx + 0.05 * np.max(np.abs(wav)) * rng.standard_normal(rx.size)
         start, stat = comms.janus_detect(rx, fs)
         assert start is not None and stat.size > 0
-        assert abs(start - lead) <= int(0.01 * fs)        # within ~10 ms
+        # janus_detect reports a column of the quarter-chip alignment grid
+        # mapped back to samples, so its resolution is a fraction of the
+        # 6.25 ms chip; 10 ms is under two chips and pins the packet to the
+        # right hop, which is what the demodulator needs.
+        assert abs(start - lead) <= int(0.01 * fs)
+
+    @pytest.mark.parametrize("m, expected", [(104, 0.1538 * 104),      # initial band
+                                             (300, 0.1538 * 300),
+                                             (1200, 0.1538 * 1200 * (176 / 300))])
+    def test_cfar_window_correction_scales_with_training_window(self, m, expected):
+        # CMRE janus-c: rx.c:413 passes 0.1538 * fmin(176 / (step_length // 4), 1)
+        # and go_cfar.c:327 multiplies it by the training-window length hn - hg == m.
+        # The clamp only bites above m = 704, hence the third case.
+        assert janus._cfar_window_correction(m) == pytest.approx(expected)
+        assert janus._cfar_window_correction(104) == pytest.approx(16.0, abs=0.01)
+
+    def test_cfar_threshold_discounts_contaminated_right_window(self):
+        # The correction exists so the preamble's own energy, which fills the right
+        # training window for the 128 quarter-chip columns that follow the leading
+        # edge, does not inflate the threshold above the edge itself. Levels are
+        # chosen to sit between the two multipliers: with w = 0.1538 * m the leading
+        # edge crosses, with the bare 0.1538 it does not and the detector falls
+        # through to the global argmax of a stronger later arrival.
+        cd = 1.0 / (janus.BW_INITIAL / (2 * janus._N_SLOTS))
+        m = int(np.floor(janus._CHIP_OVERSAMPLING
+                         * max(janus._CFAR_MOV_AVG_TIME, 2 * janus._N_SLOTS * cd) / cd))
+        assert m == 104
+        edge = 300
+        stat = np.full(1200, 3.0)
+        stat[edge] = 10.0                                    # leading edge
+        stat[edge + 1:edge + 129] = 4.8                      # preamble in the right window
+        stat[edge + 400] = 12.0                              # beyond the channel spread
+        assert janus._go_cfar(stat, cd) == edge
 
     def test_doppler_search_can_be_disabled(self):
         bits = self._packet().to_bits()
@@ -565,3 +633,97 @@ class TestSpread:
         rec = comms.despread(comms.spread(syms, code), code)
         assert np.linalg.norm(rec - syms) < 1e-9
         assert comms.processing_gain_db(code) == pytest.approx(10 * np.log10(31))
+
+
+class TestAgainstPublishedExpressions:
+    """Closed forms checked against Proakis & Salehi *Digital Communications*
+    5th ed, and the convolutional generators against the code's own trellis.
+
+    Read what the error-probability tests do and do not establish. The expected
+    side re-states each expression with ``M`` and ``k`` as literals instead of
+    calling :func:`comms.ber_theory`, which pins the scheme-name → ``(M, k)``
+    tables and freezes the expressions against later edits. It is not an
+    independent reading of the printed equations: the expressions themselves
+    are the same ones the implementation carries, so a misreading shared by
+    both survives. The equation numbers below are what to re-read for that.
+
+    :meth:`test_constellations_are_gray_mapped` is the one genuinely
+    independent check here — it derives the Gray property from the
+    constellation rather than assuming it.
+    """
+
+    def test_ber_theory_matches_proakis_closed_forms(self):
+        """eq. (4.3-29)/(4.3-27): square M-QAM symbol error
+        ``4(1-1/sqrt(M))Q(sqrt(3k/(M-1) Eb/N0))``; eq. (4.3-17), M-PSK
+        ``2Q(sqrt(2k Eb/N0) sin(pi/M))``; and eq. (4.3-20), Gray mapping makes
+        ``P_b = P_M / k``. BPSK/QPSK are exact."""
+        from scipy.special import erfc
+
+        def q(x):
+            return 0.5 * erfc(np.asarray(x, float) / np.sqrt(2.0))
+
+        ebn0_db = np.array([4.0, 8.0, 12.0, 16.0])
+        e = 10 ** (ebn0_db / 10)
+        assert np.allclose(comms.ber_theory('bpsk', ebn0_db), q(np.sqrt(2 * e)))
+        assert np.allclose(comms.ber_theory('qpsk', ebn0_db), q(np.sqrt(2 * e)))
+        for scheme, M in (('8psk', 8), ('16psk', 16)):
+            k = np.log2(M)
+            assert np.allclose(comms.ber_theory(scheme, ebn0_db),
+                               (2 / k) * q(np.sqrt(2 * k * e) * np.sin(np.pi / M)))
+        for scheme, M in (('16qam', 16), ('64qam', 64), ('256qam', 256)):
+            k = np.log2(M)
+            assert np.allclose(
+                comms.ber_theory(scheme, ebn0_db),
+                (4 / k) * (1 - 1 / np.sqrt(M)) * q(np.sqrt(3 * k / (M - 1) * e)))
+
+    @pytest.mark.parametrize("scheme", ["qpsk", "8psk", "16psk", "16qam", "64qam"])
+    def test_constellations_are_gray_mapped(self, scheme):
+        """``P_b = P_M/k`` only holds because nearest neighbours differ in one
+        bit — the assumption eq. (4.3-20) is built on."""
+        mod = comms.Modulator(scheme)
+        c = mod.constellation
+        k = mod.bits_per_symbol
+        bits = ((np.arange(c.size)[:, None] >> np.arange(k)[::-1]) & 1)
+        for i in range(c.size):
+            d = np.abs(c - c[i])
+            d[i] = np.inf
+            for j in np.where(np.isclose(d, d.min()))[0]:
+                assert np.sum(bits[i] != bits[j]) == 1
+
+    def test_convolutional_generators_give_the_published_free_distance(self):
+        """(171, 133) octal at K=7 is the standard rate-1/2 code, free distance
+        10. Computing it from uacpy's own trellis checks the generators and the
+        state/output mapping together."""
+        import heapq
+        from uacpy.comms.coding import DEFAULT_K, DEFAULT_POLYS
+
+        K = DEFAULT_K
+
+        def out_bit(state, inbit, poly):
+            return bin(((inbit << (K - 1)) | state) & poly).count('1') & 1
+
+        best, pq, dfree = {}, [(0, 0, 0)], None
+        while pq:
+            w, s, moved = heapq.heappop(pq)
+            if moved and s == 0:
+                dfree = w
+                break
+            if best.get((s, moved), 1 << 30) < w:
+                continue
+            for b in (0, 1):
+                if not moved and b == 0:
+                    continue                      # must leave the all-zero path
+                ns = (s >> 1) | (b << (K - 2))
+                nw = w + sum(out_bit(s, b, p) for p in DEFAULT_POLYS)
+                if best.get((ns, 1), 1 << 30) > nw:
+                    best[(ns, 1)] = nw
+                    heapq.heappush(pq, (nw, ns, 1))
+        assert dfree == 10
+
+    def test_dsss_processing_gain_is_ten_log_n(self):
+        from uacpy.comms.dsss import m_sequence, processing_gain_db
+        for n, taps in ((3, [3, 2]), (5, [5, 3]), (7, [7, 6])):
+            code = m_sequence(n, taps)
+            assert code.size == 2 ** n - 1
+            assert processing_gain_db(code) == pytest.approx(
+                10 * np.log10(code.size))

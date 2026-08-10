@@ -1,7 +1,11 @@
 """Wavenumber/slowness transforms of (t-x) gathers: f-k, tau-p, Radon.
 
 Duals that decompose a time-offset gather by apparent slowness / wavenumber.
-Each has a standalone inverse: forward -> filter coefficients -> inverse.
+Each has a standalone reverse map, so the workflow is forward -> filter the
+coefficients -> reverse. Only :func:`inverse_fk` is a true inverse (an
+``ifft2``); :func:`inverse_taup` and :func:`inverse_radon` are the matched
+*adjoints* (back-projection), so a forward-then-reverse round trip is
+band-limited, not exact.
 """
 
 from __future__ import annotations
@@ -176,13 +180,19 @@ def taup_transform(data, sample_rate, dx, slownesses=None, n_slowness=201,
     x = np.arange(nx) * float(dx)
     if slownesses is None:
         if p_max is None:
+            # +/- 1e-3 s/m: everything with an apparent velocity above
+            # 1000 m/s, which spans the water column and most sediments.
             p_max = 1.0 / 1000.0
         slownesses = np.linspace(-p_max, p_max, int(n_slowness))
     slownesses = np.atleast_1d(np.asarray(slownesses, dtype=float))
     D = np.fft.rfft(d, n=NT, axis=0)
-    omega = 2.0 * np.pi * np.fft.rfftfreq(NT, 1.0 / fs)
+    omega = 2.0 * np.pi * np.fft.rfftfreq(NT, 1.0 / fs)  # rad/s
     taup = np.empty((slownesses.size, NT))
     for i, p in enumerate(slownesses):
+        # Sign: numpy's forward transform carries exp(-j*omega*t), so a
+        # +exp(j*omega*p*x) factor advances trace x by p*x. Summing over x is
+        # then u(tau, p) = sum_x d(tau + p*x, x) — the same moveout curve
+        # `radon_transform(kind='linear')` interpolates in the time domain.
         phase = np.exp(1j * omega[:, None] * (p * x)[None, :])
         taup[i] = np.fft.irfft(np.sum(D * phase, axis=1), n=NT)
     return TauPResult(slownesses, np.arange(NT) / fs, taup)
@@ -207,6 +217,8 @@ def inverse_taup(taup, slownesses, sample_rate, dx, nx):
     omega = 2.0 * np.pi * np.fft.rfftfreq(nt, 1.0 / float(sample_rate))
     D = np.zeros((omega.size, int(nx)), dtype=complex)
     for i, p in enumerate(slownesses):
+        # Conjugate phase of the forward transform (the adjoint): each slowness
+        # is spread back along its own moveout, delayed by p*x.
         D += U[i][:, None] * np.exp(-1j * omega[:, None] * (p * x)[None, :])
     return np.fft.irfft(D, n=nt, axis=0)
 

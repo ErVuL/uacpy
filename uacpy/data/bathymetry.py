@@ -6,12 +6,14 @@ into a water depth (m, positive down) ready to hand to
 range-dependent ``(N, 2)`` ``[range_m, depth_m]`` transect sampled along the
 great-circle path between two points.
 
-Depths come from the GEBCO_2020 global grid (~450 m resolution), served as
-JSON by the public OpenTopoData API
+``source='api'`` (the default) serves depths from the GEBCO_2020 global grid
+(~450 m resolution) as JSON via the public OpenTopoData API
 (https://www.opentopodata.org/datasets/gebco2020/). No API key is needed;
 the public host is rate-limited (≤100 locations per request, ≤1 request/s,
 ≤1000 requests/day). Point a ``base_url`` at a self-hosted OpenTopoData
-instance to lift those limits.
+instance to lift those limits. The other backends are ``'local'`` (the
+install-time GEBCO 2025 grid, offline and unthrottled), ``'gmrt'`` and
+``'emodnet'`` (live, higher-resolution, regional coverage).
 
 Bathymetry is static in time, so these fetches take coordinates only — the
 ``date`` axis enters the data layer at the sound-speed stage, not here.
@@ -56,7 +58,7 @@ OPENTOPODATA_MIN_INTERVAL_S = 1.0
 
 BATHY_SOURCES = ('api', 'gmrt', 'emodnet', 'local')
 
-_last_request_monotonic = 0.0    # wall-clock of the last public-host call
+_last_request_monotonic = 0.0    # time.monotonic() of the last public-host call
 
 
 def _check_source(source):
@@ -144,24 +146,29 @@ def fetch_bathy_transect(
 ) -> np.ndarray:
     """Range-dependent bathymetry along the great-circle ``start``→``end``.
 
-    Samples ``n_points`` evenly spaced (in distance) along the geodesic and
-    returns an ``(n_points, 2)`` array of ``[range_m, depth_m]`` with
-    ``range`` measured from ``start`` — exactly the shape consumed by
-    ``Environment(bathymetry=...)`` for range-dependent runs.
+    Samples evenly spaced (in distance) along the geodesic and returns an
+    ``(n, 2)`` array of ``[range_m, depth_m]`` with ``range`` measured from
+    ``start`` — exactly the shape consumed by ``Environment(bathymetry=...)``
+    for range-dependent runs. :func:`bathy_transect_plan` resolves ``n``.
 
     Parameters
     ----------
     start, end : (lat, lon)
         Endpoint coordinates in decimal degrees (WGS84).
-    n_points : int, optional
-        Number of samples (≥2). Default 50.
-    dataset, base_url, timeout, verbose
+    n_points : int or 'auto', optional
+        Number of samples (≥2). Default 50. ``'auto'`` targets GEBCO native
+        resolution (see :func:`bathy_transect_plan`).
+    max_points : int, optional
+        Ceiling on the sample count; a larger ``n_points`` (or an ``'auto'``
+        native count above it) is capped to this, with a ``UserWarning``.
+    source, dataset, base_url, timeout, verbose
         See :func:`fetch_bathy`.
 
     Returns
     -------
     numpy.ndarray
-        Shape ``(n_points, 2)``: column 0 range (m), column 1 depth (m).
+        Shape ``(n, 2)``: column 0 range (m), column 1 depth (m), where ``n``
+        is the resolved sample count.
 
     Raises
     ------
@@ -232,6 +239,7 @@ def bathy_transect_plan(
     disagree.
     """
     length_km = central_angle(start, end) * EARTH_RADIUS_KM
+    # +1 closes the fencepost: n samples span n-1 native-resolution intervals.
     native = int(np.ceil(length_km / GEBCO_NATIVE_KM)) + 1
     if n_points == 'auto':
         n = min(native, int(max_points))

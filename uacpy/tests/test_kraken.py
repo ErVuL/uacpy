@@ -1,4 +1,4 @@
-"""Kraken / KrakenC normal-mode-focused tests."""
+"""Normal-mode tests for ``Kraken``, on both the kraken and krakenc backends."""
 
 import pytest
 import numpy as np
@@ -11,8 +11,8 @@ from uacpy.core import Environment, BoundaryProperties, Source, Receiver
 pytestmark = pytest.mark.requires_binary
 
 
-class TestKrakenFieldBackend:
-    """The KrakenField ``backend=`` override (kraken / krakenc)."""
+class TestKrakenBackendSelection:
+    """The ``Kraken(backend=...)`` override (kraken / krakenc)."""
 
     def _fluid(self):
         return Environment(
@@ -52,12 +52,12 @@ class TestKrakenFieldBackend:
             Kraken(verbose=False, backend='nope')
 
 
-class TestKrakenFieldBroadband:
-    """End-to-end BROADBAND / TIME_SERIES tests for KrakenField."""
+class TestKrakenBroadband:
+    """End-to-end BROADBAND / TIME_SERIES tests for Kraken."""
 
     @pytest.mark.slow
-    def test_krakenfield_broadband_returns_transfer_function(self):
-        """KrakenField BROADBAND returns H(f) on the receiver grid."""
+    def test_kraken_broadband_returns_transfer_function(self):
+        """Kraken BROADBAND returns H(f) on the receiver grid."""
         env = Environment(name="kf_bb", bathymetry=100.0, ssp=1500.0)
         source = Source(depths=50.0, frequencies=100.0)
         receiver = Receiver(
@@ -80,8 +80,8 @@ class TestKrakenFieldBroadband:
         assert result.data.shape[2] > 0
 
     @pytest.mark.slow
-    def test_krakenfield_time_series_returns_time_series_field(self):
-        """KrakenField TIME_SERIES with a tonal waveform returns Field."""
+    def test_kraken_time_series_returns_time_series_field(self):
+        """Kraken TIME_SERIES with a tonal waveform returns Field."""
         env = Environment(name="kf_ts", bathymetry=100.0, ssp=1500.0)
         source = Source(depths=50.0, frequencies=100.0)
         receiver = Receiver(
@@ -111,8 +111,6 @@ class TestKrakenFieldBroadband:
         assert result.data.shape[2] > 0
         assert np.all(np.isfinite(result.data))
 
-    """Test KrakenC for complex modes with elastic bottom."""
-
     @pytest.fixture
     def elastic_env(self):
         """Create environment with elastic bottom."""
@@ -137,7 +135,7 @@ class TestKrakenFieldBroadband:
 
     @pytest.mark.requires_binary
     def test_krakenc_complex_modes(self, elastic_env, source, receiver):
-        """Test KrakenC complex mode computation."""
+        """The krakenc backend returns complex eigenvalues on an elastic bottom."""
         krakenc = Kraken(backend='krakenc', verbose=False)
 
         modes = krakenc.compute_modes(
@@ -176,7 +174,8 @@ class TestKrakenAttenuationUnit:
 
 
 class TestKrakenModePointsPerMeter:
-    """B6: Kraken / KrakenC expose mode_points_per_meter."""
+    """``mode_points_per_meter`` sets the density of the depth grid the modes
+    are tabulated on, independently of the solver's own internal mesh."""
 
     @pytest.mark.parametrize('cls', [Kraken])
     def test_default_is_1_5(self, cls):
@@ -254,11 +253,11 @@ class TestKrakenSourceGeometry:
                                       sound_speed=1800, density=1.8,
                                       attenuation=0.3))
 
-    def test_constructor_no_longer_accepts_source_type(self):
+    def test_constructor_rejects_source_type(self):
         with pytest.raises(TypeError):
             Kraken(source_type='R')
 
-    def test_constructor_no_longer_accepts_beam_pattern_file(self):
+    def test_constructor_rejects_beam_pattern_file(self):
         with pytest.raises(TypeError):
             Kraken(source_beam_pattern_file=None)
 
@@ -296,10 +295,12 @@ class TestKrakenSourceGeometry:
 
 
 def test_coarse_beam_pattern_does_not_hang_field_exe(tmp_path):
-    """Regression for the patched AT interp1 (MODIFICATIONS.md).
+    """A coarse ``.sbp`` must complete (patched AT interp1, MODIFICATIONS.md).
 
     A 3-point pattern puts x(N-1) at 0 deg, so every mode angle lands in
-    interp1's final segment — which looped forever before the patch.
+    interp1's final segment. Stock AT clamps its segment index at N-2 while
+    the ``DO WHILE`` keeps testing the same condition, so that segment is
+    unreachable and the search spins; the patch makes it terminate.
     """
     env = Environment(
         name='coarse', bathymetry=200.0, ssp=1500.0,
@@ -317,8 +318,8 @@ def test_field_exe_timeout_is_not_swallowed(tmp_path, monkeypatch):
     """A timeout must surface as a timeout, not as a downstream parse error.
 
     _run_field_exe deliberately tolerates a non-zero teardown status, but a
-    timeout means the run never finished — reading the 0-byte .shd it leaves
-    behind previously surfaced as FileFormatError from detect_endian.
+    timeout means the run never finished, and reading the 0-byte .shd it
+    leaves behind would surface as a FileFormatError from detect_endian.
     """
     from uacpy.core.exceptions import ModelExecutionError
 
@@ -354,9 +355,10 @@ def test_empty_shd_reports_no_usable_output(tmp_path, monkeypatch):
 def test_two_receiver_depths_are_not_range_offset():
     """NRz==2 must give the same field as those depths inside a larger grid.
 
-    AT's SubTab does not replicate the Rro sentinel below 3 elements, so a
-    two-depth run used to hand the shallowest receiver ro=-999.9 m and
-    evaluate its row at r-999.9 — plausible numbers at the wrong ranges.
+    AT's SubTab does not replicate the Rro sentinel below 3 elements, so the
+    two-depth deck has to carry its own: an unreplicated ro=-999.9 m reaches
+    ``EvaluateMod``'s ``r( ir ) + ro( : )`` and evaluates the shallowest
+    receiver's row at r-999.9 — plausible numbers at the wrong ranges.
     """
     env = Environment(name='pek', bathymetry=200.0, ssp=1500.0,
                       bottom=BoundaryProperties(acoustic_type='half-space',
@@ -374,13 +376,12 @@ def test_two_receiver_depths_are_not_range_offset():
 def test_mode_count_probe_matches_pekeris_theory():
     """``_count_modes_at_freq`` must return real counts, not a swallowed error.
 
-    It called ``read_modes_bin(freq=...)`` while the parameter is
-    ``frequency=``; the broad ``except Exception`` turned the resulting
-    TypeError into "0 modes" at *every* frequency, so
-    ``_propagating_frequency_floor`` concluded nothing propagates and the
-    broadband sub-cutoff recovery was dead. Counts are checked against the
-    Pekeris estimate M ~ (2 D f / c_w) sqrt(1 - (c_w/c_b)^2) rather than
-    against uacpy's own output.
+    Its broad ``except Exception`` maps any failure to "0 modes", which
+    ``_propagating_frequency_floor`` reads as "nothing propagates" — so a
+    probe that always errors silently disables the whole broadband
+    sub-cutoff recovery instead of failing. Counts are therefore checked
+    against the Pekeris estimate M ~ (2 D f / c_w) sqrt(1 - (c_w/c_b)^2)
+    rather than against uacpy's own output.
     """
     D, c_w, c_b = 200.0, 1500.0, 1800.0
     env = Environment(name='pek', bathymetry=D, ssp=c_w,
@@ -434,8 +435,9 @@ class TestFortranFatalErrorExitsZero:
     def test_every_character_stop_form_is_caught(self, tmp_path, banner):
         """The banners share no marker: AT stops both through ``ERROUT`` and
         directly, and of OASES' 46 stop strings only 19 carry ``***`` while 26
-        use ``>>> ... <<<`` and one is bare. Matching a banner caught under
-        half of them, so the test is on the character-stop *form*."""
+        use ``>>> ... <<<`` and one is bare. Matching on a banner therefore
+        catches under half of them, so the detection keys on the character-stop
+        *form* instead — any ``STOP`` carrying a message string."""
         from uacpy.core.exceptions import ModelExecutionError
         from types import SimpleNamespace
         model = Kraken(verbose=False)
@@ -588,10 +590,11 @@ class TestRangeDependentElasticMesh:
     def test_top_reflection_file_reaches_the_range_dependent_deck(self,
                                                                   tmp_path):
         """``_write_field_env`` branches to ``write_multi_profile_env`` and
-        never calls ``_write_kraken_env``, so expressing the knob inside the
-        single-profile writer left the range-dependent deck with a vacuum
-        ``TopOpt`` and no staged ``.trc`` — a silently different surface on
-        exactly the runs the knob routes to krakenc."""
+        never calls ``_write_kraken_env``, so the knob has to be expressed on
+        the projected environment rather than inside the single-profile
+        writer. Expressed there only, the range-dependent deck carries a
+        vacuum ``TopOpt`` and no staged ``.trc`` — a silently different
+        surface on exactly the runs the knob routes to krakenc."""
         from uacpy.io.oalib_writer import write_multi_profile_env
         from uacpy.models._segmentation import segment_environment_by_range
 
@@ -654,6 +657,9 @@ class TestRangeDependentElasticMesh:
         model = Kraken(verbose=False)
         segments, _, _, max_total_depth = model._segment_env_for_field(
             model._project_environment(self._env([0.0, 0.0, 0.0, 0.0])))
+        # A fluid seabed meshes on its compressional speed, so AT's own
+        # requirement here is ~270 points; 500 is ``_fixed_mesh_points``'
+        # own ``max(500, ...)`` floor, not a number the environment drove.
         assert model._fixed_mesh_points(segments, max_total_depth, 50.0) == 500
 
     @pytest.mark.slow
@@ -674,8 +680,9 @@ class TestRangeDependentElasticMesh:
 
     @pytest.mark.slow
     def test_uniformly_elastic_bottom_still_runs(self):
-        """The all-elastic case (which never had the short-shear median) must
-        not regress from the larger mesh."""
+        """A uniformly elastic seabed has no fluid column to drag its median
+        shear speed down, so it never needs the enlarged mesh — and must not be
+        broken by it either."""
         result = Kraken(verbose=False, mode_coupling='adiabatic',
                         n_segments=5, timeout=600).run(
             self._env([300.0, 400.0, 500.0, 600.0]), self._SRC(), self._RCV())
@@ -727,8 +734,10 @@ class TestBroadbandSingleFrequency:
             np.asarray(one.tl)[:, :, 0] - np.asarray(two.tl)[:, :, 1])) < 0.5
 
     def test_one_element_grid_can_synthesize_a_time_series(self):
-        """The 2-D fallback made ``synthesize_time_series`` raise on its
-        canonical-coords check; a real frequency axis feeds it."""
+        """``synthesize_time_series`` requires a canonical (depth, range,
+        frequency) Field tagged ``travelling_wave``. The coords are pinned by
+        the test above; this pins the phase reference the one-element grid
+        carries, so a 2-D fallback cannot reach the synthesis path."""
         result = Kraken(verbose=False).run(
             self._env(), self._SRC(), self._RCV(),
             run_mode=RunMode.BROADBAND, frequencies=np.array([137.0]))
@@ -736,7 +745,7 @@ class TestBroadbandSingleFrequency:
 
 
 class TestCoupledModeGridReachesTheDeclaredBottom:
-    """``EvaluateCMMod.f90:313`` stops a coupled run unless every profile's
+    """``EvaluateCMMod.f90:312-316`` stops a coupled run unless every profile's
     mode-tabulation grid ends *exactly* on the bottom the deck declares::
 
         IF ( z( 1 ) /= depthT .OR. z( NR ) /= depthB ) THEN
@@ -981,10 +990,10 @@ class TestModeCountProbeCleanup:
 
 
 class TestKrakenClassBody:
-    """``Kraken`` was hand-merged from a ``_KrakenBase`` + subclass pair, which
-    left ``spec`` and ``source`` defined twice in the class body. Python takes
-    the last definition, so a duplicate is dead code that silently ignores any
-    edit to the earlier copy."""
+    """``spec`` and ``source`` must each be assigned once in ``Kraken``'s class
+    body. Python keeps only the last assignment, so a duplicate is dead code
+    that silently ignores every edit to the earlier copy — and the class body
+    is long enough that a second assignment is easy to miss on review."""
 
     @staticmethod
     def _class_body_assignments():
@@ -1280,10 +1289,12 @@ def test_zero_receiver_range_is_no_data(recwarn):
 
 
 def test_mode_depth_grid_spans_the_thickest_bottom_column(monkeypatch):
-    """``compute_modes`` sizes its depth grid from the total media depth. It
-    summed ``bottom.columns[0]`` — the first column in storage order, not the
-    thickest and not necessarily the r=0 one — so a range-dependent layered
-    bottom lost the sediment below it."""
+    """``compute_modes`` sizes its depth grid from the total media depth, which
+    must be summed over the THICKEST bottom column. ``bottom.columns[0]`` is
+    merely the first in storage order — neither the thickest nor necessarily
+    the r=0 one — so keying on it truncates the grid above the sediment of
+    every deeper column. Here column 1 is 80 m against column 0's 20 m, so the
+    grid has to reach 100 + 80 = 180 m."""
     from uacpy.core.bottom import Bottom, SeabedColumn, SedimentLayer
 
     def _column(thickness):
@@ -1537,6 +1548,52 @@ class TestBroadbandFrequencyLimit:
                       run_mode=RunMode.BROADBAND,
                       frequencies=np.linspace(100.0, 210.0, 1001))
 
+    def test_exactly_maxnfreq_is_allowed_through(self, tmp_path, monkeypatch):
+        """``freqVec( MaxNfreq )`` holds 1000 entries and ``FreqLoop`` runs
+        ``DO ifreq = 1, MaxNfreq``, so 1000 is the last legal count — the guard
+        must be ``>``, not ``>=``. Reaching the launcher is the pass condition;
+        the binary itself is never run."""
+        model = Kraken(work_dir=tmp_path, cleanup=False)
+
+        def _no_launch(*args, **kwargs):
+            raise RuntimeError("reached the launcher")
+
+        monkeypatch.setattr(model, '_run_subprocess', _no_launch)
+        monkeypatch.setattr(model, '_run_and_attach_prt', _no_launch)
+        with pytest.raises(RuntimeError, match='reached the launcher'):
+            model.run(_pekeris(depth=50.0), Source(depths=[25.0],
+                                                   frequencies=[150.0]),
+                      Receiver(depths=[10.0], ranges=[1000.0]),
+                      run_mode=RunMode.BROADBAND,
+                      frequencies=np.linspace(100.0, 210.0, 1000))
+
+    def test_a_time_series_grid_hits_the_same_guard(self, tmp_path,
+                                                    monkeypatch):
+        """TIME_SERIES derives its own frequency grid from the waveform, so the
+        cap has to sit on the funnel every broadband path crosses
+        (``_compute_field_via_exe``) rather than on the caller's argument."""
+        from uacpy.core.exceptions import ConfigurationError
+        model = Kraken(work_dir=tmp_path, cleanup=False)
+
+        def _no_launch(*args, **kwargs):
+            raise AssertionError("a binary was launched past the guard")
+
+        monkeypatch.setattr(model, '_run_subprocess', _no_launch)
+        monkeypatch.setattr(model, '_run_and_attach_prt', _no_launch)
+        # Delta_f = 1/duration, band edges from the -40 dB spectral support:
+        # a 100->1100 Hz chirp over 2 s derives 2830 bins.
+        sample_rate = 4000.0
+        duration = 2.0
+        t = np.arange(0, duration, 1.0 / sample_rate)
+        waveform = np.sin(2 * np.pi * (100.0 * t
+                                       + 0.5 * (1000.0 / duration) * t ** 2))
+        with pytest.raises(ConfigurationError, match='MaxNfreq'):
+            model.run(_pekeris(depth=50.0), Source(depths=[25.0],
+                                                   frequencies=[150.0]),
+                      Receiver(depths=[10.0], ranges=[1000.0]),
+                      run_mode=RunMode.TIME_SERIES,
+                      source_waveform=waveform, sample_rate=sample_rate)
+
 
 class TestFieldExeErroutIsSurfaced:
     """Every ERROUT reached from field.exe writes the uppercase
@@ -1679,3 +1736,42 @@ class TestBioLayerLimit:
             Kraken(work_dir=tmp_path, cleanup=False).compute_tl(
                 env, Source(depths=[50.0], frequencies=[100.0]),
                 Receiver(depths=[50.0], ranges=[1000.0]))
+
+
+class TestModesErrorMessageReadsTheRealPrtStrings:
+    """The `.prt` diagnosis must match what the vendored binaries actually
+    write, not what the manual calls the routine.
+
+    `misc/RootFinderSecantMod.f90:80,136` sets
+    ``'Failure to converge in RootFinderSecant'``; `Kraken/kraken.f90:359,407`
+    and `Kraken/krakenc.f90:388` echo it behind their own
+    ``'Warning in KRAKEN[C] - RootFinderSecant'`` banner. The phrase
+    ``FAILURE TO CONVERGE IN SECANT`` appears only in
+    `Acoustics-Toolbox/doc/kraken.htm:1802`, which names a superseded routine —
+    matching on it selects nothing a binary can emit.
+    """
+
+    def _message(self, tmp_path, prt_text):
+        (tmp_path / 'run.prt').write_text(prt_text)
+        return Kraken._modes_error_message(str(tmp_path / 'run'))
+
+    def test_secant_failure_is_recognised(self, tmp_path):
+        msg = self._message(
+            tmp_path,
+            ' Warning in KRAKEN - RootFinderSecant'
+            ' Failure to converge in RootFinderSecant\n')
+        assert 'RootFinderSecant' in msg
+        assert 'c_low' in msg
+
+    def test_krakenc_banner_is_recognised_too(self, tmp_path):
+        msg = self._message(
+            tmp_path,
+            ' Warning in KRAKENC - RootFinderSecant : '
+            'Failure to converge in RootFinderSecant\n')
+        assert 'RootFinderSecant' in msg
+
+    def test_empty_spectrum_is_reported_as_a_phase_speed_window_problem(
+            self, tmp_path):
+        msg = self._message(
+            tmp_path, ' No modes for given phase speed interval\n')
+        assert 'c_low' in msg and 'c_high' in msg

@@ -126,6 +126,11 @@ def test_density_scaling_matches_welch_white_noise():
     # one-sided white PSD level (scipy welch density, and analytic 2*var/fs)
     fw, pw = welch(x, FS, nperseg=2048, scaling="density")
     welch_level = float(np.median(pw[(fw > 200) & (fw < 3000)]))
+    # Order-of-magnitude bounds only: on this seed the constant-Q median sits
+    # 0.2 % from the Welch median and 1 % from the analytic level, so the
+    # factor-2 window and rel=0.5 are ~50x looser than the observed spread.
+    # They catch a scaling blunder (a missing 2, a per-bin bandwidth) and
+    # nothing finer.
     assert 0.5 * welch_level < cq_level < 2.0 * welch_level
     assert cq_level == pytest.approx(2.0 * np.var(x) / FS, rel=0.5)
 
@@ -202,3 +207,28 @@ def test_plotter_unit_label_switches_with_scaling():
     lbl = ax.get_ylabel()
     assert "Pa²" in lbl and "/Hz" not in lbl
     plt.close("all")
+
+
+def test_spectrum_calibration_is_exact_on_a_bin_centre():
+    """The 'spectrum' scaling promises a tone of amplitude A peaks at A**2/2.
+    That holds on a bin centre; between centres the filterbank scallops, by at
+    most the ~1.3 dB the module docstring quotes."""
+    from uacpy.acoustic_signal.constant_q import _cq_frequencies
+    B, fs, A, fmin = 24, 48000.0, 1.7, 100.0
+    f = _cq_frequencies(fmin, 4000.0, B)
+    k = int(np.argmin(np.abs(f - 500.0)))
+    t = np.arange(int(fs)) / fs
+
+    on = A * np.cos(2 * np.pi * f[k] * t)
+    freqs, X = constant_q_transform(on, fs, fmin=fmin, fmax=4000.0,
+                                    bins_per_octave=B)
+    assert abs(X[k]) == pytest.approx(A / 2, rel=1e-3)
+    _, power = constant_q_psd(on, fs, fmin=fmin, fmax=4000.0,
+                              bins_per_octave=B, scaling='spectrum')
+    assert power.max() == pytest.approx(A ** 2 / 2, rel=1e-3)
+
+    mid = float(np.sqrt(f[k] * f[k + 1]))            # midway between centres
+    off = A * np.cos(2 * np.pi * mid * t)
+    _, pm = constant_q_psd(off, fs, fmin=fmin, fmax=4000.0, bins_per_octave=B,
+                           scaling='spectrum')
+    assert 0.0 < -10 * np.log10(pm.max() / (A ** 2 / 2)) < 1.5

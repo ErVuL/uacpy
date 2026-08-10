@@ -69,8 +69,9 @@ def lms_equalizer(rx, constellation, n_taps=11, step=0.01, train=None):
 def rls_equalizer(rx, constellation, n_taps=11, forget=0.99, train=None):
     """Symbol-spaced linear RLS equalizer (faster convergence than LMS).
 
-    Istepanian notes RLS converges in ~``2N`` vs LMS's ~``20N`` taps, at higher
-    per-symbol cost. Returns ``(eq_symbols, mse)``.
+    Istepanian & Stojanovic put RLS convergence at ~``2N`` symbol intervals
+    against LMS's ~``20N``, for ``N`` the total adaptive coefficient count, at
+    higher per-symbol cost. Returns ``(eq_symbols, mse)``.
     """
     return _dfe_core(rx, constellation, n_taps, 0, 0.0, forget, 0.0, train)
 
@@ -129,11 +130,11 @@ def _dfe_core(rx, constellation, n_ff, n_fb, step, forget, pll_bw, train):
     theta = 0.0
     phase_acc = 0.0
     kp = float(pll_bw)
-    ki = kp * kp / 4.0
+    ki = kp * kp / 4.0                       # critically damped: kp = 2*z*wn, ki = wn^2 at z = 1
     use_rls = forget is not None
     if use_rls:
         lam = float(forget)
-        P = np.eye(ntaps, dtype=complex) / 1e-2
+        P = np.eye(ntaps, dtype=complex) / 1e-2   # RLS init P(0) = I/delta, delta = 1e-2
     ntrain = 0 if train is None else len(np.asarray(train))
     train = None if train is None else np.asarray(train, dtype=complex)
     out = np.empty(N, dtype=complex)

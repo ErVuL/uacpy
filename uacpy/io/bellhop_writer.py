@@ -40,7 +40,7 @@ from uacpy.io.units import m_to_km
 # ReadEnvironmentBell.f90:387-395.
 _VALID_BEAM_TYPES = frozenset({'B', 'R', 'C', 'g', 'G', 'S'})
 
-# Cerveny beam-shape letters (ReadEnvironmentBell.f90:171-179).
+# Cerveny beam-shape letters (ReadEnvironmentBell.f90:178-185).
 _VALID_BEAM_WIDTH_TYPES = frozenset({'F', 'M', 'W'})
 _VALID_BEAM_CURVATURES = frozenset({'D', 'S', 'Z'})
 
@@ -103,7 +103,14 @@ def validate_beam_shape(
 
 
 def _bathymetry_within_mesh(bathymetry, z_max: float) -> np.ndarray:
-    """Return ``(N, 2)`` bathymetry pairs quantised onto the mesh bottom."""
+    """Return ``(N, 2)`` bathymetry pairs quantised onto the mesh bottom.
+
+    ``bdryMod.f90:211-212`` aborts on any ``.bty`` depth below the SSP mesh
+    bottom, and ``z_max`` reaches the deck rounded to the ``.1f`` depth
+    quantum, so a point sitting exactly on the seafloor can land a rounding
+    residue beneath it. Pull those onto the mesh; anything more than a whole
+    quantum deeper is a genuine bathymetry/mesh inconsistency and raises.
+    """
     if hasattr(bathymetry, 'to_pairs'):
         bathymetry = bathymetry.to_pairs()
     pairs = np.asarray(bathymetry, dtype=float).copy()
@@ -226,11 +233,36 @@ def write_bellhop_env_file(
 
     Notes
     -----
-    This is a shared method used across all Bellhop backends.
-    It handles all the complexity of the Acoustics Toolbox .env format.
+    Shared by every Bellhop backend. The ``.env`` is positional; blocks are
+    emitted in the order below, each against the Fortran READ that consumes
+    it (``Bellhop/ReadEnvironmentBell.f90`` unless another file is named)
+    and, for the optional ones, the option letter that gates it:
 
-    For range-dependent bathymetry, automatically generates a .bty file.
-    For range-dependent SSP with Quad interpolation, generates a .ssp file.
+    1.  title (:46), frequency (:51), NMedia — must be 1 (:54, ERROUT :56)
+    2.  ``TopOpt``, 6 chars (ReadTopOpt :243): (1:1) SSP interpolation,
+        (2:2) top BC, (3:4) attenuation units, (5:5) altimetry flag,
+        (6:6) development options
+    3.  Francois-Garrison record (:308) or bio-layer block (:313-317) —
+        gated by ``TopOpt(4:4)`` 'F' / 'B'
+    4.  top half-space row (TopBot :474) — gated by ``TopOpt(2:2)``
+    5.  ``NPts, Sigma, Depth`` (:73), then the SSP rows
+        (``Bellhop/sspMod.f90:903``)
+    6.  ``BotOpt, Sigma`` (:93)
+    7.  bottom half-space row (TopBot :474) — gated by ``BotOpt(1:1) == 'A'``
+    8.  source depths and receiver depths (ReadSzRz), receiver ranges
+        (ReadRcvrRanges)
+    9.  ``RunType``, 7 chars (ReadRunType :358)
+    10. beam count (``Bellhop/angleMod.f90:35``), then the launch-angle
+        line (:58)
+    11. ``deltas, Box%z, Box%r`` (:146) — ``Box%r`` in km (:154)
+    12. two Cerveny beam lines (:197, :217) — gated by ``RunType(2:2)``
+        in 'C' / 'R'
+
+    Auxiliary files are written beside the ``.env`` and opened by Bellhop
+    under its base name, never by a path in the deck: ``.ati``
+    (``TopOpt(5:5) == '~'``), ``.bty`` (``BotOpt(2:2) == '~'``), ``.ssp``
+    (``TopOpt(1:1) == 'Q'``), ``.trc`` / ``.brc`` (the BC letter 'F'),
+    ``.sbp`` (``RunType(3:3) == '*'``).
     """
     filepath = Path(filepath)
 
@@ -242,7 +274,9 @@ def write_bellhop_env_file(
         raise ConfigurationError(
             f"write_bellhop_env_file(n_beams={n_beams}) must be >= 0. "
             f"angleMod.f90:38 auto-estimates only on an exact 0; a negative "
-            f"count reaches ALLOCATE unchecked."
+            f"count is never rejected — ALLOCATE clamps it to MAX(3, Nalpha) "
+            f"(:54) and the beam loop (bellhop.f90:262) then traces nothing, "
+            f"leaving an all-zero field."
         )
 
     if z_box is None:
@@ -263,7 +297,9 @@ def write_bellhop_env_file(
         # Frequency
         f.write(f"{source.frequencies[0]:.6f}\n")
 
-        # Number of media (1 for simple case)
+        # Number of media. 1 is the only legal value —
+        # ReadEnvironmentBell.f90:56 ERROUTs on anything else ("sediment
+        # layers must be handled using a reflection coefficient").
         f.write("1\n")
 
         interp_char = resolve_ssp_topopt(env, interp_ssp)
@@ -318,6 +354,10 @@ def write_bellhop_env_file(
             if ati_data.shape[0] == 1:
                 # Single sample = constant offset; expand to a 2-point
                 # profile spanning the receiver range so it isn't dropped.
+                # bdryMod.f90:131 tests the range axis with the strict
+                # monotonic() of misc/monotonicMod.f90:32, so the second
+                # point has to sit strictly beyond the first — hence the
+                # 1 m floor when the receivers do not reach past it.
                 r_last = max(float(np.max(receiver.ranges)),
                              float(ati_data[0, 0]) + 1.0)
                 ati_data = np.array([[0.0, ati_data[0, 1]],
@@ -337,7 +377,11 @@ def write_bellhop_env_file(
             )
 
         # Extend SSP above MSL to cover any wave crests (env.altimetry
-        # positive-up, SSP z-axis positive-down).
+        # positive-up, SSP z-axis positive-down). bdryMod.f90:113-114 aborts
+        # with 'Altimetry rises above highest point in the sound speed
+        # profile' unless SSP%z(1) — the .env's first SSP depth, which
+        # ReadEnvironmentBell.f90:88 adopts as the top boundary — is at or
+        # above every .ati point, so the guard row clears the highest crest.
         z_min = 0.0
         if has_altimetry:
             max_alti_above_msl = env.altimetry.heights.max()
@@ -346,9 +390,12 @@ def write_bellhop_env_file(
 
         z_max = deck_depth(env.depth)
 
-        # Bellhop/sspMod.f90:427-431 pairs row iz2 of the .ssp matrix with SSP%z(iz2)
-        # read from the .env and stops after SSP%NPts rows, so both blocks are
-        # built from this one depth-aligned profile. A guard row above the
+        # Bellhop/sspMod.f90:922 ends the .env SSP block at the first row whose
+        # depth equals the Depth field of the NPts line, so the profile has to
+        # reach z_max exactly or the reader runs on into the bottom block.
+        # Bellhop/sspMod.f90:427-431 then pairs row iz2 of the .ssp matrix with
+        # SSP%z(iz2) from the .env and stops after SSP%NPts rows, so both blocks
+        # are built from this one depth-aligned profile. A guard row above the
         # shallowest sample covers a raised surface or an SSP starting below
         # 0 m; it goes into both.
         ssp_aligned = env.ssp.extend_to(z_max)
@@ -396,14 +443,21 @@ def write_bellhop_env_file(
 
         n_ssp = ssp_depths.size
         # Bellhop reads this line as (NPts, Sigma, Depth) per
-        # ReadEnvironmentBell.f90:73 — Sigma is the top-boundary RMS
-        # roughness, NOT z_min. Always emit Sigma=0.0; altimetry crests
-        # are handled via the .ati file, not via this slot.
+        # ReadEnvironmentBell.f90:73. NPts is informational — the SSP block
+        # ends on Depth, not on a count ("NPts, Sigma not used by BELLHOP",
+        # bellhop.f90:50; "LP: ignored", bellhopcuda/src/module/ssp.hpp:80-81
+        # against the Depth match at :115). Sigma is the top-boundary RMS
+        # roughness, NOT z_min; always emit 0.0, altimetry crests go through
+        # the .ati file.
         f.write(f"{n_ssp}  0.0  {z_max:.1f},\n")
 
         # SSP row: z alphaR betaR rhoR alphaI betaI /
-        # Emit all 6 columns so an elastic top halfspace doesn't leak ice
-        # properties into the water column via Fortran's READ.
+        # Bellhop/sspMod.f90:903 READs all six into the module variables
+        # ReadEnvironmentBell.f90:474 (TopBot) has already filled, and a short
+        # row leaves the missing ones untouched — the C++ port models this
+        # explicitly as `RecycledHS` (bellhopcuda/src/module/ssp.hpp:105-109).
+        # Emit all six or an elastic top halfspace leaks its ice properties
+        # into the water column.
         alpha_i = (
             env.absorption.value_db_per_wavelength
             if isinstance(env.absorption, ConstantAbsorption)
@@ -415,14 +469,14 @@ def write_bellhop_env_file(
                 f"{alpha_i:.6f} 0.0 /\n"
             )
 
-        bottom_acoustic_type = env.bottom.halfspace_at(range=0.0).acoustic_type
-        bottom_type = _BOUNDARY_TYPE_MAP.get(bottom_acoustic_type.lower(), "A")
+        hs = env.bottom.halfspace_at(range=0.0)
+        bottom_type = _BOUNDARY_TYPE_MAP.get(hs.acoustic_type.lower(), "A")
+        roughness = getattr(hs, 'roughness', 0.0)
 
         is_range_dependent_bathy = env.bathymetry.n_ranges > 1
         rd_bottom = (env.bottom.is_range_dependent
                      and len(env.bottom.ranges) > 0)
 
-        hs = env.bottom.halfspace_at(range=0.0)
         if is_range_dependent_bathy or rd_bottom:
             bty_filepath = filepath.with_suffix(".bty")
             # The 2nd TYPE char in the .bty (short 'S' vs long 'L') is
@@ -449,14 +503,12 @@ def write_bellhop_env_file(
                     _bathymetry_within_mesh(env.bathymetry, z_max),
                     interp_type=bty_code,
                 )
-            bottom_type_with_bathy = f"{bottom_type}~"
-            # 2nd field on this BOT line is the sigma slot
-            # (ReadEnvironmentBell.f90:93). Bellhop echoes it and drops it —
-            # "NPts, Sigma not used by BELLHOP" (bellhop.f90:50).
-            roughness = getattr(hs, 'roughness', 0.0)
-            f.write(f"'{bottom_type_with_bathy}' {roughness:.6f}\n")
+            # BotOpt(2:2) = '~' tells ReadEnvironmentBell.f90:97-99 to expect
+            # the .bty. The 2nd field is the sigma slot (:93); Bellhop echoes
+            # it and drops it — "NPts, Sigma not used by BELLHOP"
+            # (bellhop.f90:50).
+            f.write(f"'{bottom_type}~' {roughness:.6f}\n")
         else:
-            roughness = getattr(hs, 'roughness', 0.0)
             f.write(f"'{bottom_type}' {roughness:.6f}\n")
 
         # Write halfspace parameters (for range-independent or as defaults)
@@ -464,7 +516,6 @@ def write_bellhop_env_file(
             # Bellhop finds the .brc by name convention (same base name as the
             # .env), so staging it beside the file is the whole job — no extra
             # lines go into the env.
-            hs = env.bottom.halfspace_at(range=0.0)
             stage_reflection_file(hs.reflection_file, filepath,
                                   boundary='bottom', verbose=verbose)
         elif bottom_type == "A":  # Acousto-elastic halfspace
@@ -473,7 +524,6 @@ def write_bellhop_env_file(
             # i.e. depth cp cs rho alpha_p alpha_s — the 6th column is
             # SHEAR attenuation, NOT roughness. Roughness (sigma) lives
             # on the preceding BOT line ('A' sigma).
-            hs = env.bottom.halfspace_at(range=0.0)
             shear_speed = getattr(hs, 'shear_speed', 0.0)
             shear_atten = getattr(hs, 'shear_attenuation', 0.0)
             f.write(
@@ -501,8 +551,8 @@ def write_bellhop_env_file(
         # :372-375); lowercase 'g' picks the ray-centered geometric-hat
         # beam (ReadEnvironmentBell.f90:387-395).  Uppercasing destroys
         # both user intents.
-        # Position 3: '*' enables reading <base>.sbp source beam pattern
-        # file; blank otherwise (see bellhop.htm → ReadRunType).
+        # Position 3: bellhop.f90:137 copies it to SBPFlag and
+        # misc/beampattern.f90:22 opens <base>.sbp only on '*'.
         position_3 = '*' if source_beam_pattern else ' '
         # Position 4/5 use uppercase (only 'R'/'X' and 'R'/'I' accepted).
         position_4 = source_type.upper()
@@ -535,13 +585,19 @@ def write_bellhop_env_file(
         # Number of beams
         f.write(f"{n_beams}\n")
 
-        # Launch angles
+        # Launch angles. ``angleMod.f90:58`` READs the whole ``alpha`` array;
+        # the trailing '/' terminates list-directed input after two values, so
+        # alpha(3) keeps the -999.9 sentinel planted at :57 and SubTab
+        # (:60, misc/subtabulate.f90:41-45) fills the fan uniformly between
+        # alpha(1) and alpha(2). Dropping the '/' would make Bellhop read the
+        # step-size and box lines as further launch angles.
         f.write(f"{alpha[0]:.6f} {alpha[1]:.6f} /\n")
 
-        # Step size (0 for automatic)
+        # Step size (0 for automatic), then the ray box: z in m, r in km
+        # (converted back at ReadEnvironmentBell.f90:154). All three are one
+        # list-directed READ (:146), which spans records until its list is
+        # satisfied — the split across two lines is cosmetic.
         f.write(f"{step:.6f}\n")
-
-        # Box parameters (z in m, r in km as per Bellhop documentation)
         f.write(f"{z_box:.6f} {float(m_to_km(r_box)):.6f}\n")
 
         # Cerveny beam parameters.  ReadEnvironmentBell.f90 reads the two

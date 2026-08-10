@@ -22,10 +22,10 @@ class TestSPARCBasic:
     @pytest.mark.requires_binary
     @pytest.mark.slow
     def test_sparc_refuses_transmission_loss(self):
-        """SPARC's CW transmission loss was withdrawn: the pulse-to-CW
-        extraction is not quantitative (2.4 dB median with 13 dB excursions on
-        a single-mode guide, against 0.07 dB for Scooter). Only the native
-        time series remains."""
+        """SPARC computes no CW transmission loss: the pulse-to-CW extraction
+        is not quantitative (2.4 dB median with 13 dB excursions on a
+        single-mode guide, against 0.07 dB for Scooter), so the native time
+        series is the only product offered."""
         from uacpy.core.exceptions import UnsupportedFeatureError
         env = Environment(
             name="sparc_test",
@@ -296,11 +296,12 @@ class TestSPARCReceiverDepthAxis:
 class TestSPARCZeroRangeAgreesAcrossOutputModes:
     """A receiver on the source axis must be no-data in all three modes.
 
-    ``sparc.f90:622`` weights ``'R'`` by ``SQRT( rkT / Pos%Rr )`` and ``:292``
-    scales ``'D'`` by ``1 / SQRT( pi * Pos%Rr( 1 ) )``. Unmasked, ``'D'``
-    returned ``+Inf`` and ``'R'`` returned ``NaN`` mixed with exact zeros,
-    while ``'S'`` — whose Hankel transform runs in-tree — already returned
-    NaN. One model gave three different answers for one cell.
+    ``Scooter/sparc.f90:622`` weights ``'R'`` by ``SQRT( rkT / Pos%Rr )`` and
+    ``:292`` scales ``'D'`` by ``1 / SQRT( pi * Pos%Rr( 1 ) )``. Both divide by
+    ``Rr``, so each blows up at ``r = 0`` in its own way — ``'D'`` to ``+Inf``,
+    ``'R'`` to ``NaN`` mixed with exact zeros — while ``'S'``, whose Hankel
+    transform runs in-tree, yields NaN. Without an explicit mask one model
+    reports three different answers for one cell.
     """
 
     @staticmethod
@@ -373,6 +374,12 @@ class TestSPARCHankelNormalisation:
     The constant is pinned against the raw ``.rts`` rather than only across
     modes: agreement between modes is satisfied by scaling all three onto the
     *wrong* branch, so it cannot detect this on its own.
+
+    Tolerances: ``.rts`` is FORMATTED and written ``'( 12G15.6 )'``
+    (``Scooter/sparc.f90:294,299``) from arrays already cast through ``SNGL``,
+    so a value round-trips to about 6 significant digits. ``rtol=1e-5`` is an
+    order of magnitude above that text precision and orders of magnitude below
+    the ``sqrt(pi)`` = 1.77 factor under test.
     """
 
     @staticmethod

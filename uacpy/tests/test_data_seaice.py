@@ -93,11 +93,15 @@ def test_sea_ice_surface_gates_on_threshold():
     # Below the 15 % ice-edge → open water (no surface override).
     assert seaice_local.sea_ice_surface(0.10) is None
     assert seaice_local.sea_ice_surface(0.30, threshold=0.5) is None
-    # At/above → an elastic ice canopy with the COA canonical values.
+    # At/above → an elastic ice canopy. Jensen, Kuperman, Porter & Schmidt,
+    # *Computational Ocean Acoustics*, quote two attenuation pairs for the same
+    # 3500/1800 m/s, 900 kg/m³ canopy: 0.4/1.0 dB/λ for the Arctic propagation
+    # example and 0.5/1.0 dB/λ elsewhere. uacpy implements 0.4
+    # (``core/constants.py:66``), so that is what this pins.
     bp = seaice_local.sea_ice_surface(0.15)
     assert bp is not None and bp.acoustic_type == 'half-space'
     assert (bp.sound_speed, bp.shear_speed, bp.density) == (3500.0, 1800.0, 0.9)
-    assert (bp.attenuation, bp.shear_attenuation) == (0.5, 1.0)
+    assert (bp.attenuation, bp.shear_attenuation) == (0.4, 1.0)
 
 
 def test_sea_ice_surface_nan_is_open_water():

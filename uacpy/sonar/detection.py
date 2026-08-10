@@ -8,7 +8,8 @@ References
 Urick, R.J. (1983). *Principles of Underwater Sound*, 3rd ed., Ch. 12.
 Albersheim, W.J. (1981). A closed-form approximation to Robertson's
     detection characteristics. Proc. IEEE 69(7), 839.
-Richards, M.A. *Fundamentals of Radar Signal Processing* (Albersheim eq.).
+Richards, M.A. (2014). "Alternative Forms of Albersheim's Equation" —
+    states eq. (1) and its accuracy/validity ranges verbatim.
 """
 
 from __future__ import annotations
@@ -69,8 +70,12 @@ def albersheim_snr(pd: float, pf: float, n_pulses: int = 1) -> float:
     """Required per-sample SNR (dB) via Albersheim's equation.
 
     Non-coherent integration of ``n_pulses`` samples through a linear/square-law
-    envelope detector (single sample for ``n_pulses=1``). Accurate to ~0.2 dB
-    over ``0.1 <= P_D <= 0.9``, ``1e-7 <= P_F <= 1e-3``.
+    envelope detector (single sample for ``n_pulses=1``).
+
+    ``A = ln(0.62/P_F)``, ``B = ln(P_D/(1-P_D))`` and
+    ``SNR_dB = -5·log10(N) + (6.2 + 4.54/sqrt(N+0.44))·log10(A + 0.12·A·B + 1.7·B)``
+    (Richards 2014, eq. 1). Accurate to ~0.2 dB over ``0.1 <= P_D <= 0.9``,
+    ``1e-7 <= P_F <= 1e-3`` and ``1 <= N <= 8096``.
     """
     pd = _check_prob(pd, "pd")
     pf = _check_prob(pf, "pf")

@@ -1,3 +1,11 @@
+"""Smoke tests for the f-k / Radon / tau-p plotters.
+
+Each transform is fed a synthetic array-record and its plotter checked for an
+image artist and for honouring ``ax=``. The transforms' own numerics live in
+``test_transforms.py`` / ``test_transforms_fk.py``; nothing here asserts on
+the values drawn.
+"""
+
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402

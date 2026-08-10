@@ -48,10 +48,9 @@ def _propagator_taylor(dx: float, k0: float, n_terms: int) -> np.ndarray:
     """Maclaurin coefficients of ``f(ξ) = exp(ikΔx(√(1+ξ) − 1))`` to order
     ``n_terms-1``.
 
-    Built by composition: ``√(1+ξ) − 1 = Σ_{j≥1} (-1)^(j+1) (2j-2)! /
-    (j!(j-1)! · 4^(j-1) · (2j-1)) · ξ^j``  (binomial series of the
-    square root, minus the constant term), then ``exp(ik·Δx·g(ξ))``
-    expanded via the ordinary series for ``exp``.
+    Built by composition: ``√(1+ξ) − 1 = Σ_{j≥1} C(1/2, j) · ξ^j`` (binomial
+    series of the square root, minus the constant term), then
+    ``exp(ik·Δx·g(ξ))`` expanded via the ordinary series for ``exp``.
     """
     # Build g(ξ) = √(1+ξ) - 1 series via the binomial expansion.
     g = np.zeros(n_terms, dtype=complex)
@@ -146,6 +145,10 @@ def numerov_error(
 ) -> float:
     """Max FD error of the depth operator on ``k_z ∈ [-k₀ sin θ_max, 0]``.
 
+    ``theta_max`` is in **radians** here, unlike :func:`optimal_c0` /
+    :func:`optimize_grid` / :func:`grid_error`, whose ``theta_max`` is the
+    user-facing one in degrees — those convert before calling in.
+
     Lytaev (2023), Eq. (13) — *Mesh Optimization for the Acoustic
     Parabolic Equation*, https://doi.org/10.3390/jmse11030496.
     For ``alpha = 0`` this is the standard 3-point second-order operator;
@@ -173,6 +176,9 @@ def combined_error(
     """Per-step error τ(Δx, Δz) — worst case of ``|f(ξ₁) - P(ξ₂)/Q(ξ₂)|``
     over ``ξ₁ ∈ [ξ_min, ξ_max]``, ``|ξ₂-ξ₁| ≤ Δξ`` where
     ``Δξ = h(Δz)/k₀²`` is the discretisation-induced wander of ``ξ``.
+
+    ``theta_max`` is in **radians** (passed straight to
+    :func:`numerov_error`).
 
     Lytaev (2023), τ formula above Eq. (14) —
     https://doi.org/10.3390/jmse11030496. The discretisation spread

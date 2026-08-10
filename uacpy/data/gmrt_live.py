@@ -96,8 +96,8 @@ def region_grid(lat_range, lon_range, n_lat, n_lon, *, timeout=120.0, verbose=Fa
         names = {n.lower(): n for n in ds.variables}
         glon = np.asarray(ds.variables[names['lon']][:], dtype=float)
         glat = np.asarray(ds.variables[names['lat']][:], dtype=float)
-        alt = names.get('altitude') or names.get('z') or 'altitude'
-        gz = np.asarray(ds.variables[names.get(alt, alt)][:], dtype=float)
+        elev_var = names.get('altitude') or names.get('z') or 'altitude'
+        gz = np.asarray(ds.variables[elev_var][:], dtype=float)
         ds.close()
     finally:
         tmp.unlink(missing_ok=True)

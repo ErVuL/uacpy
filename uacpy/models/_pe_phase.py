@@ -19,7 +19,7 @@ Three convention strings cover the three vendored binaries:
 convention    What the backend writes                                Fortran source
 ============  ====================================================  =======================================
 ``'mpiramS'`` ``psif = ψ · exp(+i(k₀ r + π/4)) / (4π)``              ``third_party/mpiramS/`` patched output
-``'rams'``    ``ψ · exp(+i k₀ r)``  (carrier baked in via g₀)        ``rams0.5.f:848-851`` (g₀ at ``:889``)
+``'rams'``    ``ψ · exp(+i k₀ r rot₀)`` (carrier baked in via g₀)    ``rams0.5.f:848-851`` (g₀ at ``:889``)
 ``'ramsurf'`` ``ψ``                  (bare envelope, no carrier)     ``ramsurf1.5.f``: no ``g0`` anywhere
 ============  ====================================================  =======================================
 
@@ -136,7 +136,11 @@ def psi_to_travelling_wave(
         # extra exp(-iπ/4) (or +iπ/4) sits ~45° off. |TL| is unaffected.
         out = psi_bar * (4.0 * np.pi)
     elif convention == RAMS:
-        # rams0.5 already multiplies by g₀ = exp(+i k₀ r); conj suffices.
+        # rams0.5 marches its own carrier in, one g₀ = exp(+i k₀ Δr rot₀) per
+        # range step (``rams0.5.f:849-850``), so conj suffices. ``rot₀`` is the
+        # rotated-Padé scalar (``rams0.5.f:865-888``; exactly 1 when the
+        # rotation is off, ``:909``) and is left in — it belongs to the
+        # operator, not to the phase convention.
         out = psi_bar
     else:  # RAMSURF — needs explicit carrier
         if k0 is None or freq_axis is None:

@@ -17,7 +17,7 @@ Two models are provided:
   CC-BY ESAB supplement of Fonseca, Lurton, Fezzani & Roche (2025).
 - ``'apl-uw'`` — APL-UW TR 9407 (1994) §IV.A.4 grain-size relations (the
   **high-frequency** ρ, ν polynomials + α₂/f). These are the same formulas the
-  AT ``'G'`` bottom used internally.
+  AT ``'G'`` bottom uses internally.
 
 Sediment sound speed and density are computed as **ratios to the overlying
 seawater**, scaled by the in-situ water properties (so fine muds correctly come
@@ -34,23 +34,28 @@ from uacpy.core.exceptions import ConfigurationError
 
 __all__ = ['GRAIN_SIZE_MODELS', 'grain_size_to_geoacoustics']
 
-# Hamilton & Bachman (1982) "Continental Terrace (Shelf and Slope)" granular
-# sediments — bulk density (g/cm³) and sound-speed ratio (sediment/seawater) for
-# the representative classes, referenced to seawater c_w = 1510 m/s, ρ_w = 1.030
-# g/cm³. Tabulated in the open-access ESAB supplement (Fonseca et al. 2025); the
-# Mz values are the Wentworth class centres of Hamilton's named classes.
 _HB_REF_CW = 1510.0      # m/s   reference seawater sound speed
 _HB_REF_RHOW = 1.030     # g/cm³ reference seawater density
+# Hamilton & Bachman (1982), JASA 72(6), "Continental Terrace (Shelf and Slope)"
+# granular sediments: mean grain size from their Table I, bulk density (g/cm³)
+# and sound-speed ratio (sediment/seawater) from their Table II. Their Table II
+# footnote recommends the *median* rather than the mean when predicting clayey
+# silt, so that row carries 1.484 / 1.006.
+# The ϕ axis is irregularly spaced because each value is the measured mean over
+# that class's samples (Table I lists n = 2, 28, 16, 40, 47, 19, 29, 105, 54),
+# not a Wentworth class boundary or centre. ``np.interp`` handles the uneven
+# spacing; do not "regularise" it.
 _HB_TABLE = (
     # (Mz_phi, density_gcm3, velocity_ratio)   coarse → fine
-    (0.5, 2.034, 1.201),    # coarse sand
-    (2.5, 1.962, 1.152),    # fine sand
-    (3.5, 1.878, 1.120),    # very fine sand
-    (4.5, 1.783, 1.086),    # silty sand
-    (5.0, 1.769, 1.076),    # sandy silt
-    (6.0, 1.575, 1.036),    # sand-silt-clay
-    (7.5, 1.489, 1.012),    # clayey silt
-    (8.5, 1.480, 0.990),    # silty clay  (ratio < 1: slower than seawater)
+    (0.92, 2.034, 1.201),   # coarse sand
+    (2.61, 1.962, 1.152),   # fine sand
+    (3.34, 1.878, 1.120),   # very fine sand
+    (4.24, 1.783, 1.086),   # silty sand
+    (4.88, 1.769, 1.076),   # sandy silt
+    (5.40, 1.740, 1.057),   # silt
+    (5.82, 1.575, 1.036),   # sand-silt-clay
+    (7.13, 1.484, 1.006),   # clayey silt (median, per their Table II footnote)
+    (8.80, 1.480, 0.990),   # silty clay  (ratio < 1: slower than seawater)
 )
 _HB_PHI = np.array([r[0] for r in _HB_TABLE])
 _HB_RHO = np.array([r[1] for r in _HB_TABLE])      # g/cm³ at the reference water
@@ -58,10 +63,17 @@ _HB_VRATIO = np.array([r[2] for r in _HB_TABLE])
 
 GRAIN_SIZE_MODELS = ('hamilton', 'apl-uw')
 # Seawater each model's ratios are referenced to, used when the caller gives no
-# in-situ values. Hamilton & Bachman tabulate against 1510 m/s / 1.030 g/cm³;
+# in-situ values. These are uacpy's in-situ defaults, not the conditions the
+# tables were measured at: Hamilton & Bachman's ratios are laboratory values at
+# 23 degC / 1 atm (their Table II footnote a), whose implied reference water is
+# ~1527 m/s — Table II velocity divided by velocity ratio spans 1524.9 to 1532.3
+# m/s over the nine rows, with a median of 1527.0 and both extremes at the fine
+# end (clayey silt, silty clay). A ratio is tabulated precisely so it can be
+# re-applied at in-situ conditions, which is what happens here;
 # APL-UW's ratios are applied against 1500 m/s and a unit density ratio by the
-# Acoustics-Toolbox 'G' bottom (ReadEnvironmentBell.f90:528 `alphaR = vr*1500`,
-# and `HS%rho = rhoR` — the ratio used directly as g/cm³).
+# Acoustics-Toolbox 'G' bottom (Bellhop/ReadEnvironmentBell.f90:526
+# `alphaR = vr * 1500.0`, and :531 `HS%rho = rhoR` — the ratio used directly as
+# g/cm³).
 _MODEL_WATER_REFERENCE = {'hamilton': (_HB_REF_CW, _HB_REF_RHOW),
                           'apl-uw': (1500.0, 1.0)}
 # Valid ϕ range per model; outside it ϕ is clamped, and a UserWarning fires only
@@ -110,7 +122,8 @@ def _hamilton_geoacoustics(phi, water_sound_speed, water_density):
 # APL-UW TR 9407 (1994), §IV.A.4 "Model Input Parameters Using Grain Size"
 # (valid −1 ≤ Mz ≤ 9): density ratio ρ₂/ρ₁ and sound-speed ratio c₂/c₁ as
 # piecewise polynomials in Mz, plus the attenuation α₂/f (dB m⁻¹ kHz⁻¹). These
-# are the formulas the AT ``'G'`` bottom used internally (ReadEnvironmentBell).
+# are the formulas the AT ``'G'`` bottom uses internally
+# (Bellhop/ReadEnvironmentBell.f90:488 `CASE ( 'G' )`).
 def _apl_density_ratio(mz: float) -> float:
     if mz < 1.0:
         return 0.007797 * mz ** 2 - 0.17057 * mz + 2.3139

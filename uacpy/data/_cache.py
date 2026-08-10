@@ -16,7 +16,8 @@ from pathlib import Path
 
 from uacpy.core.exceptions import ConfigurationError
 
-__all__ = ['cache_root', 'dataset_root', 'require', 'cached_grid', 'cached_grid_at', 'invalidate_grids', 'DATASETS']
+__all__ = ['cache_root', 'dataset_root', 'require', 'cached_grid', 'cached_grid_at',
+           'register_cache', 'invalidate_grids', 'DATASETS']
 
 # uacpy/uacpy/data/_cache.py → parents[2] is the repo root (editable install).
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -34,13 +35,14 @@ class _Dataset:
 DATASETS = {
     'gebco': _Dataset(
         'gebco', 'gebco', './install.sh --data gebco',
-        'GEBCO 2025 global bathymetry grid (~4 GB)'),
+        'GEBCO 2025 global bathymetry grid (~7.5 GB)'),
     'woa23': _Dataset(
         'woa23', 'woa23', './install.sh --data woa23',
         'World Ocean Atlas 2023 temperature/salinity grids'),
     'sediment': _Dataset(
         'sediment', 'sediment', './install.sh --data sediment',
-        'DECK41 + NGDC grain-size seafloor sediment samples'),
+        'NCEI seafloor grain-size samples (grainsize.csv; the reader also picks '
+        'up a hand-placed deck41.csv)'),
     'emodnet': _Dataset(
         'emodnet', 'emodnet', './install.sh --data emodnet',
         'EMODnet Geology seabed substrate polygons (Folk 5cl, European seas)'),
@@ -126,6 +128,28 @@ def cached_grid_at(path, factory):
     return _GRIDS[key]
 
 
+_CLEARERS: list = []   # extra drop-my-memo callables, one per backend
+
+
+def register_cache(clear) -> None:
+    """Register a backend's own memo so :func:`invalidate_grids` drops it too.
+
+    Several backends memoise something that is not a grid — a KD-tree, an
+    STRtree, a stack of netCDF handles — keyed on the cache root rather than on
+    a file path. Each calls this at import with its own drop function so callers
+    have one invalidation entry point instead of seven.
+    """
+    _CLEARERS.append(clear)
+
+
 def invalidate_grids() -> None:
-    """Drop every memoised grid so a freshly downloaded file is reopened."""
+    """Drop every memo in the data layer so a freshly downloaded file is reopened.
+
+    Covers the :func:`cached_grid` / :func:`cached_grid_at` memo (GEBCO,
+    GlobSed, Graw, GLODAP) plus everything registered through
+    :func:`register_cache`. A backend that has not been imported has nothing
+    memoised, so an unregistered module is not a gap.
+    """
     _GRIDS.clear()
+    for clear in _CLEARERS:
+        clear()

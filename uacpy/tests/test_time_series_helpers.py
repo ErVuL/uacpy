@@ -2,7 +2,7 @@
 
 Covers the harmonisation layer that makes ``run(run_mode=TIME_SERIES,
 source_waveform=, sample_rate=, output_duration=)`` work uniformly
-across RAM / Scooter / KrakenField / Bellhop / OASP:
+across RAM / Scooter / Kraken / Bellhop / OASP:
 
 * ``PropagationModel._resolve_time_series_frequencies`` — derives a
   uniform frequency grid from the source-waveform spectrum when the
@@ -14,6 +14,14 @@ across RAM / Scooter / KrakenField / Bellhop / OASP:
 * ``output_duration=`` kwarg on the model wrappers — end-to-end check
   that the returned ``Field`` covers at least the requested duration.
 * DFT-wraparound warning in ``Field.synthesize_time_series``.
+
+The synthetic ``Field`` fixtures below all carry
+``phase_reference=TRAVELLING_WAVE``, which is a precondition rather than
+decoration: it declares that ``H(f)`` still carries the engineering
+propagator ``exp(-i k0 r)``, so ``2*Re[ifft(H)]`` puts the causal arrival
+at ``t = r/c0`` (``core/results/_base.py:37-41``). The synthesis helpers
+branch on it, and a fixture tagged ``TIME_DOMAIN_NATIVE`` would exercise
+a different code path.
 """
 
 import warnings
@@ -183,7 +191,9 @@ class TestResolveBroadbandGrid:
         assert (fc, Q, T) == (F_CENTER, 4.0, 5.0)
 
     def test_multi_freq_auto_derives_and_warns(self):
-        # Band [50, 350] Hz at Δf=0.5 → fc=200, Q=4/3, T=2.0
+        # Band [50, 350] Hz at Δf=0.5. The sweep is parameterised as
+        # fc·[1 - 1/Q, 1 + 1/Q] with Δf = 1/T, so Q is fc over the band
+        # HALF-width (models/ram.py:759, :795): 200/150 = 4/3, not 2/3.
         freqs = np.linspace(50.0, 350.0, 601)
         src = uacpy.Source(depths=25.0, frequencies=freqs)
         ram = self.RAM(verbose=False)
@@ -426,6 +436,11 @@ class TestSynthesisAbsoluteAmplitude:
             src, fs, window='none', nfft=nfft, t_start=0.0,
         )
         peak = float(np.abs(ts.data).max())
+        # A gate, not a precision budget: with H ≡ 1 the synthesis returns
+        # the source peak to machine precision (~4e-15 here). What the
+        # ``nfft`` parametrisation catches is a bin-count-dependent scaling,
+        # which would spread the peak over the 4x span of the nfft values —
+        # far outside 2%.
         assert peak == pytest.approx(1.0, rel=0.02)
 
     def test_impulse_response_grid_independent(self):
@@ -440,11 +455,11 @@ class TestSynthesisAbsoluteAmplitude:
 class TestSourceSpectrumAtArbitraryFrequencies:
     """``_source_spectrum_at`` must be exact off the waveform's own DFT grid.
 
-    The previous implementation linearly interpolated ``rfft(w)/fs``. That is a
-    convolution with a triangular kernel in frequency — a ``sinc^2(pi df_src t)``
-    taper anchored at t=0 plus periodisation at ``1/df_src`` — and is only
-    correct when the target grid happens to coincide with the source grid,
-    which is why an on-grid test could not see it.
+    Linear interpolation of ``rfft(w)/fs`` is not exact: it is a convolution
+    with a triangular kernel in frequency — a ``sinc^2(pi df_src t)`` taper
+    anchored at t=0, plus periodisation at ``1/df_src``. It agrees with the
+    DTFT only where the target grid coincides with the source grid, so the
+    off-grid cases below are the ones that can tell the two apart.
     """
 
     @staticmethod
@@ -674,7 +689,7 @@ class TestSynthesisBinAlignment:
         np.linspace(266.0, 386.0, 9),     # offset +4 Hz, coarser df
     ])
     def test_misaligned_grid_reproduces_the_source(self, freqs):
-        """Without the de-rotation these returned a band-shifted waveform."""
+        """Without the de-rotation the band lands shifted by the bin offset."""
         assert abs(self._bin_offset(freqs)) > 0.5
         assert self._flat_channel_error(freqs) < 0.05
 
@@ -716,7 +731,7 @@ class TestSynthesisWindowAnchor:
     """The output window must open before the earliest arrival.
 
     The earliest arrival travels at the fastest speed, so the anchor is
-    ``r / c_max``; anchoring on the slowest speed opened the window after it.
+    ``r / c_max``; anchoring on the slowest speed opens the window after it.
     """
 
     FREQS = np.arange(40.0, 81.0, 1.0)      # 1 Hz spacing -> 1 s record

@@ -169,6 +169,9 @@ def at_mesh_floor(media, frequency: float) -> int:
     """
     needed = [max(int(20.0 * thickness * frequency / c), 10)
               for thickness, c in media]
+    # ``NG >= Nneeded / 2`` passes, so the floor is the truncated half of the
+    # most demanding medium. With no media at all the ``MAX( …, 10 )`` inside
+    # Nneeded still puts the smallest floor AT can ever impose at 10 // 2.
     return max(needed) // 2 if needed else 5
 
 
@@ -188,6 +191,26 @@ def at_env_media(env):
                           shear if shear > 0.0 else float(layer.sound_speed)))
             top = bot
     return media
+
+
+def reject_unsupported_ssp_interp(model: str, interp_ssp) -> None:
+    """Reject an SSP interpolation the shared AT ``EvaluateSSP`` cannot read.
+
+    ``misc/sspMod.f90:61-89`` accepts codes A (analytic), N (N^2-linear),
+    C (C-linear), P (PCHIP) and S (spline); anything else falls to
+    ``CASE DEFAULT`` and stops with ``ERROUT('EvaluateSSP', 'Unknown profile
+    option')``. ``'Q'`` is Bellhop's external 2-D ``.ssp`` scheme, so every
+    model that reads its deck through ``EvaluateSSP`` has to refuse it here —
+    otherwise it surfaces as a bare Fortran fatal with no diagnostic.
+    """
+    if interp_ssp is None:
+        return
+    if str(interp_ssp).lower() in ('q', 'quad', 'quadratic'):
+        raise ConfigurationError(
+            f"{model} does not support the 'quad' SSP interpolation — it is "
+            f"Bellhop-only. Pick one of 'linear' (C-linear), 'n2linear', "
+            f"'pchip', 'cubic' / 'spline'."
+        )
 
 
 def reject_coarse_at_mesh(model: str, n_mesh: int, env,
@@ -227,7 +250,7 @@ def plan_multi_profile_media(segments) -> Tuple[int, float, List[List[Tuple]]]:
     Returns ``(n_media, bottom_depth_m, plans)``. Every profile is written with
     the same ``n_media`` and the same ``bottom_depth_m``; ``plans[i]`` holds
     media 2..``n_media`` of ``segments[i]`` as
-    ``(top, bot, cp, cs, rho, alpha_p, alpha_s)``, already quantised to the
+    ``(top, bot, cp, cs, rho, alpha_p, alpha_s, sigma)``, already quantised to the
     ``.1f`` depth resolution the deck is written at, with the last entry
     stretched to ``bottom_depth_m``.
 
@@ -264,15 +287,18 @@ def plan_multi_profile_media(segments) -> Tuple[int, float, List[List[Tuple]]]:
                 media.append((top, current, layer.sound_speed,
                               layer.shear_speed, layer.density,
                               layer.attenuation,
-                              getattr(layer, 'shear_attenuation', 0.0)))
+                              getattr(layer, 'shear_attenuation', 0.0),
+                              layer.roughness))
 
         hs_cs = getattr(hs, 'shear_speed', 0.0) or 0.0
         hs_as = getattr(hs, 'shear_attenuation', 0.0) or 0.0
         for _ in range(n_media - 1 - len(media)):
             top = current
             current = deck_depth(current + _MIN_LAYER_THICKNESS_M)
+            # A pad is a transparent slice of the half-space, so its top is
+            # not a real interface and must stay smooth.
             media.append((top, current, hs.sound_speed, hs_cs, hs.density,
-                          hs.attenuation, hs_as))
+                          hs.attenuation, hs_as, 0.0))
         plans.append(media)
 
     bottom_depth = max(media[-1][1] for media in plans)
@@ -336,8 +362,8 @@ def resolve_ssp_topopt(env: Environment, model_interp) -> str:
             f"interp_ssp={model_interp!r} not recognised. Valid: "
             f"{sorted(set(_AT_INTERP_TO_CODE))} (or None for auto)"
         )
-    # Only after the model's knob has been checked: an isovelocity env used to
-    # return here first, which swallowed every invalid ``interp_ssp``.
+    # Checked after the model's knob so an isovelocity env cannot swallow an
+    # invalid ``interp_ssp``.
     if getattr(env.ssp, 'shape', 'measured') == 'isovelocity':
         return 'C'
     return _AT_INTERP_TO_CODE[key]
@@ -538,6 +564,12 @@ def write_header(
         else ' '
     )
 
+    # ``atten_code`` fills TopOpt(3:3) and ``vol_atten_code`` TopOpt(4:4) — the
+    # two halves of the AttenUnit pair ``TopOpt( 3 : 4 )``
+    # (misc/ReadEnvironmentMod.f90:167). The literal blank holds TopOpt(5:5),
+    # which none of these models reads, so that ``broadband_code`` lands on
+    # TopOpt(6:6) where kraken/krakenc/scooter pick up the broadband flag
+    # (Kraken/kraken.f90:52, Kraken/krakenc.f90:52, Scooter/scooter.f90:172).
     topopt = f"{ssp_code}{surface_code}{atten_code}{vol_atten_code} {broadband_code}{topopt_extra}"
     f.write(f"'{topopt}'\n")
 
@@ -762,9 +794,10 @@ def write_ssp_section(
     bottom_depth_rounded = deck_depth(bottom_depth)
     # AT reads this mesh line as NG, SSP%sigma(Medium), Depth(Medium+1)
     # (misc/ReadEnvironmentMod.f90:81-88). For the water column that is sigma(1) —
-    # the *sea surface* interface. Seabed roughness is sigma(NMedia+1), written
-    # on the bottom halfspace line from env.bottom. Take each from its own
-    # carrier so neither can be mislabelled.
+    # the *sea surface* interface. Each sigma belongs to the interface at the top
+    # of its own medium, so the seafloor is sigma(2) when a sediment layer
+    # follows (write_layer_sections) and sigma(NMedia+1) on the bottom half-space
+    # line when none does. Take each from its own carrier so none is mislabelled.
     surface_roughness = float(getattr(env.surface, 'roughness', 0.0) or 0.0)
     f.write(f"{n_mesh}  {surface_roughness:.6f}  {bottom_depth_rounded}\n")
 
@@ -877,7 +910,12 @@ def write_layer_sections(
         # (misc/sspMod.f90:334) and feed CRCI unchanged (:390-393), so they
         # carry the same resolution as the water column's own attenuation
         # rather than a 0.01 dB/wavelength grid.
-        f.write(f"{n_layer_mesh}  0.0  {bottom_depth:{zfmt}}\n")
+        # SSP%sigma(M) is the interface at the TOP of medium M
+        # (ReadEnvironmentMod.f90:88 reads it on medium M's mesh line;
+        # kraken.f90:902 pairs it with the media above and below), so the first
+        # sediment layer's value is the seafloor and the half-space's own
+        # roughness stays on the BotOpt line at the base of the stack.
+        f.write(f"{n_layer_mesh}  {layer.roughness:g}  {bottom_depth:{zfmt}}\n")
         alpha_s = getattr(layer, 'shear_attenuation', 0.0)
         f.write(f"  {top_depth:{zfmt}} {layer.sound_speed:.6f} "
                 f"{layer.shear_speed:.1f} {layer.density:.2f} "
@@ -1060,7 +1098,7 @@ def write_multi_profile_env(
     .mod record length (``LRecordLength``) is consistent across
     profiles. kraken.exe sets the record length from the first
     profile and it must not increase for subsequent profiles
-    (``krakenc.f90`` line 629). All profiles are also padded to the
+    (``Kraken/krakenc.f90:629``). All profiles are also padded to the
     same NMedia so that NTotal (sum of mesh N across media) is
     identical for every profile.
 
@@ -1083,7 +1121,11 @@ def write_multi_profile_env(
     c_low = kwargs.get('c_low', None)
     c_high = kwargs.get('c_high', None)
     rmax_m = kwargs.get('rmax_m', 100000.0)
-    # If caller didn't specify, compute from max depth.
+    # A multi-profile deck cannot leave NG at 0: AT would then size each
+    # medium from its own thickness (misc/ReadEnvironmentMod.f90:107-109) and
+    # NTotal — hence the .mod record length — would differ between profiles.
+    # Pick one count for all of them, at AT's own 20-points-per-wavelength
+    # sampling (``deltaz = c / freq0 / 20``, :103) over the deepest profile.
     if n_mesh <= 0:
         freq = float(source.frequencies[0])
         max_depth = max(seg.depth for _, seg in segments)
@@ -1122,8 +1164,8 @@ def write_multi_profile_env(
             )
 
             # --- Sub-bottom media (2..max_n_media), from the shared plan ---
-            for top, bot, cp, cs, rho_v, ap, as_ in all_extra_media:
-                f.write(f"{n_mesh}  0.0  {bot:.1f}\n")
+            for top, bot, cp, cs, rho_v, ap, as_, sigma in all_extra_media:
+                f.write(f"{n_mesh}  {sigma:g}  {bot:.1f}\n")
                 f.write(f"  {top:.1f} {cp:.6f} "
                         f"{cs:.1f} {rho_v:.2f} "
                         f"{ap:.6f} {as_:.6f} /\n")
@@ -1198,7 +1240,8 @@ def write_fieldflp(
         Output file path (extension .flp added if missing)
     option : str
         4-character option string for field.exe. Column semantics per AT
-        ``field.f90:70-99`` and ``ReadModes.f90:315-324``:
+        ``KrakenField/field.f90:70-99`` and
+        ``KrakenField/ReadModes.f90:315-324``:
 
         - Pos 1 (source type):
           'R' = cylindrical point source, 'X' = line source (Cartesian),
@@ -1206,7 +1249,8 @@ def write_fieldflp(
         - Pos 2 (coupling, for NProf > 1):
           'C' = coupled modes, 'A' = adiabatic.
         - Pos 3: either ``'*'`` to apply a ``.sbp`` source beam pattern
-          or ``' '`` for omnidirectional. ``field.exe`` (``field.f90:83-90``)
+          or ``' '`` for omnidirectional. ``field.exe``
+          (``KrakenField/field.f90:83-90``)
           only accepts ``{' ', 'O', '*'}`` through this writer; elastic
           component selectors (``'P'``/``'H'``/``'V'``/``'T'``/``'N'``)
           are not reachable from uacpy.
@@ -1287,7 +1331,10 @@ def write_fieldflp(
                 f.write(f"    {r:6f}  ")
             f.write("/ \t ! rProf (km) \n")
 
-        # Receiver ranges
+        # Receiver ranges. The "first last /" shorthand below relies on
+        # SubTab expanding the record, which it only does for Nx >= 3
+        # (misc/subtabulate.f90:24,40) — hence the ``> 2`` gate on this and the
+        # two depth blocks; shorter vectors are written out in full.
         f.write(f"{len(r_ranges):5d} \t \t \t \t ! NRr \n")
         if len(r_ranges) > 2 and equally_spaced(r_ranges):
             f.write(f"    {r_ranges[0]:6f}  {r_ranges[-1]:6f} ")
@@ -1315,8 +1362,8 @@ def write_fieldflp(
         f.write("/ \t ! Rz(1)  ... (m) \n")
 
         # Receiver range offsets (array tilt) - default to zeros for every
-        # receiver. AT's field.f90 enforces ``NRro == NRz`` (see
-        # Kraken/field.f90:147), so we keep the count = NRz. The
+        # receiver. field.exe ERROUTs unless ``NRro == NRz``
+        # (KrakenField/field.f90:149-152), so we keep the count = NRz. The
         # sentinel ``/`` terminator paired with a single explicit value
         # lets AT's SubTab routine replicate it across the full vector
         # (see misc/subtabulate.f90 — when x(3) is left at its -999.9
@@ -1519,14 +1566,20 @@ def write_field3dflp(
         nnodes = nx * ny
         f.write(f"{nnodes:5d}\n")
 
-        # Write node data (x, y, mode_file)
+        # Node block: one ``x y modefile`` record each, read back in file order
+        # into x(I), y(I) (KrakenField/field3d.f90:191-193). Emitting them
+        # x-fastest fixes the numbering the element block below relies on —
+        # node (ix, iy) is 1 + iy * nx + ix.
         for iy in range(ny):
             for ix in range(nx):
                 x_coord = X[ix]
                 y_coord = Y[iy]
                 z_depth = depth[iy, ix]
 
-                # Generate mode file name
+                # A node with no water carries no mode set. FIELD3D reserves
+                # the name 'DUMMY' for those and treats the surrounding
+                # elements as acoustic absorbers rather than trying to open a
+                # .mod file (KrakenField/field3d.f90:78, :416-418).
                 if z_depth > 0:
                     if "{}" in mod_file_pattern or "{:" in mod_file_pattern:
                         modfil = mod_file_pattern.format(x_coord, y_coord)
@@ -1545,13 +1598,18 @@ def write_field3dflp(
         nelts = 2 * (nx - 1) * (ny - 1)
         f.write(f"{nelts:5d}\n")
 
+        # ``inode`` walks the lower-left corner of each grid cell in the same
+        # x-fastest order the nodes were written, so ``+ 1`` is the neighbour in
+        # x and ``+ nx`` the neighbour in y. Splitting the cell on its
+        # lower-left/upper-right diagonal gives the two triangles.
         inode = 1
         for iy in range(ny - 1):
             for ix in range(nx - 1):
-                # Two triangles per grid cell
                 f.write(f"{inode:5d} {inode + 1:5d} {inode + nx:5d}\n")
                 f.write(f"{inode + 1:5d} {inode + nx:5d} {inode + nx + 1:5d}\n")
                 inode += 1
+            # The ix loop stops one short of the row end, so step over the last
+            # column's node to land on the first cell of the next row.
             inode += 1
 
 
@@ -1755,10 +1813,20 @@ def write_sparc_env_file(
         ranges_str = ' '.join([f"{r:.6f}" for r in ranges_km])
         f.write(f"{ranges_str} /\n")
 
-        # Time output parameters.
+        # Output times. Read through ReadVector (Scooter/sparc.f90:159), so the
+        # "first last /" pair is expanded by SubTab into n_t_out uniformly
+        # spaced times — which needs n_t_out >= 3
+        # (misc/subtabulate.f90:24,40); below that the two values are taken
+        # verbatim.
         f.write(f"{n_t_out}\n")
         f.write(f"0.0 {t_max:.6f} /\n")
-        # Integration parameters: TSTART, TMULT, ALPHA, BETA, V.
+        # Integration parameters: TSTART, TMULT, ALPHA, BETA, V
+        # (Scooter/sparc.f90:168). The trailing three pin the finite-element
+        # time march to its standard scheme: ALPHA = 0 is a lumped mass matrix,
+        # BETA = 0 a standard explicit step (Scooter/sparc.f90:161-165), and
+        # V = 0 the convection velocity — a moving medium is not part of
+        # uacpy's Environment. ``doc/sparc.htm`` names all three and its own
+        # sample deck ends in the same three zeros.
         f.write(f"{t_start:.6f} {t_mult:.6f} 0.0 0.0 0.0\n")
 
 

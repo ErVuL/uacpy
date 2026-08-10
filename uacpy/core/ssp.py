@@ -455,7 +455,19 @@ class SoundSpeedProfile:
     def from_munk(
         cls, depth_max: float, n_points: int = 101
     ) -> 'SoundSpeedProfile':
-        """Munk canonical profile with axis at 1300 m, c_min = 1500 m/s."""
+        """Munk canonical profile with axis at 1300 m, c_min = 1500 m/s.
+
+        ``c(z) = 1500·[1 + ε(z̃ − 1 + e^−z̃)]`` with ``ε = 0.00737`` and
+        ``z̃ = 2(z − 1300)/1300``, i.e. Jensen, Kuperman, Porter & Schmidt,
+        *Computational Ocean Acoustics*, §5.6 "A Deep Water Problem: The Munk
+        Profile". ``z̃ − 1 + e^−z̃`` is zero at ``z̃ = 0`` and positive
+        elsewhere, so 1500 m/s is the sound-channel minimum, on the axis.
+
+        References
+        ----------
+        Munk, W. H. (1974). "Sound channel in an exponentially stratified ocean,
+        with application to SOFAR." JASA 55(2), 220-226.
+        """
         depths = np.linspace(0.0, float(depth_max), int(n_points))
         z_axis = 1300.0
         epsilon = 0.00737
@@ -532,6 +544,13 @@ def generate_sea_surface(
     altimetry : ndarray, shape (n_points, 2)
         Column 0: range (m), Column 1: surface height (m, positive up).
         Suitable for passing directly to ``Environment(altimetry=...)``.
+
+    References
+    ----------
+    Pierson, W. J. & Moskowitz, L. (1964). "A proposed spectral form for fully
+    developed wind seas based on the similarity theory of S. A. Kitaigorodskii."
+    JGR 69(24), 5181-5190. Spectrum and rms height as given by Medwin & Clay,
+    *Fundamentals of Acoustical Oceanography*, eqs. (13.1.11) and (13.1.12).
     """
     if not np.isfinite(max_range) or max_range <= 0:
         raise ConfigurationError(
@@ -559,8 +578,10 @@ def generate_sea_surface(
     k = np.arange(1, n_fft // 2 + 1) * dk  # positive frequencies
     omega = np.sqrt(g * 2 * np.pi * k)  # deep-water dispersion: omega^2 = g*k_wave
 
-    # Pierson-Moskowitz spectrum S(omega)
+    # Pierson-Moskowitz spectrum S(omega), M&C eq. (13.1.11):
     # S(omega) = (alpha * g^2 / omega^5) * exp(-beta * (omega_p / omega)^4)
+    # with alpha = 8.1e-3, beta = 0.74 and the nominal spectral peak at
+    # omega_p = g/W, W the wind speed 19.5 m above the surface.
     alpha_pm = 8.1e-3
     beta_pm = 0.74
     omega_p = g / wind_speed_ms  # peak angular frequency
@@ -588,7 +609,8 @@ def generate_sea_surface(
             UserWarning, stacklevel=2,
         )
 
-    # Generate random amplitudes from spectrum
+    # Random-phase realisation: each component carries variance S_k*dk, and a
+    # cosine of amplitude a has variance a^2/2.
     amplitude = np.sqrt(2 * S_k * dk)
     phase = rng.uniform(0, 2 * np.pi, len(k))
 

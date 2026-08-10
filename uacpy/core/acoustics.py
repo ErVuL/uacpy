@@ -2,11 +2,11 @@
 Underwater acoustics utilities for UACPY
 
 This module provides various underwater acoustics functions including:
-- Sound speed calculations
-- Ambient noise modeling (Wenz model)
-- Bubble acoustics
-- Absorption calculations
-- Acoustic pressure utilities
+- Seawater sound speed (Mackenzie, UNESCO, Del Grosso) and density
+- Plane-wave bottom reflection and bottom loss
+- Bubble acoustics (resonance, bubbly-water speed, surface bubble loss)
+- Acoustic pressure, SPL and power → dB utilities
+- The Pekeris branch of the complex square root
 
 Note
 ----
@@ -264,6 +264,12 @@ def density(temperature: float = 27, salinity: float = 35) -> float:
     scale and equation of state for seawater". Journal of Geophysical Research,
     90(C2), 3332-3342.
     """
+    # EOS-80 one-atmosphere equation of state, in Horner form:
+    # rho(S,t,0) = rho_w(t) + A(t)·S + B(t)·S^1.5 + C·S^2. The locals are offset
+    # by one from that notation — ``A`` accumulates rho_w, then ``B``/``C``/``D``
+    # are the S / S^1.5 / S^2 coefficients. Pressure is not a parameter, so this
+    # is surface density only; deeper water needs the full EOS-80 with the
+    # secant bulk modulus.
     t = temperature
     A = 1.001685e-04 + t * (-1.120083e-06 + t * 6.536332e-09)
     A = 999.842594 + t * (6.793952e-02 + t * (-9.095290e-03 + t * A))
@@ -322,13 +328,19 @@ def reflection_coeff(
     Parameters
     ----------
     angle : float or array_like
-        Angle of incidence in radians
+        Angle of incidence in radians, measured **from the interface normal**
+        (0 = normal incidence, π/2 = grazing). For a grazing-angle grid pass
+        ``pi/2 - grazing``.
     rho1 : float
         Density of second medium (e.g., sediment) in kg/m³
     c1 : float
         Sound speed in second medium in m/s
     alpha : float, optional
-        Attenuation coefficient (default: 0)
+        Loss tangent of the second medium, dimensionless: B&L write a lossy
+        medium as ``n = n0·(1 + i·alpha)`` with ``alpha > 0``. Numerically it is
+        nepers per radian of propagation — convert from dB/wavelength with
+        ``alpha = alpha_lambda · ln(10) / (40·pi)``, as
+        :func:`bottom_loss_curve` does. Default 0 (lossless).
     rho : float, optional
         Density of water in kg/m³ (default: calculated)
     c : float, optional
@@ -350,6 +362,9 @@ def reflection_coeff(
     References
     ----------
     Brekhovskikh, L. M. & Lysanov, Y. P. (2003). Fundamentals of Ocean Acoustics.
+    Eq. (3.1.12) / (5.5.1): ``V = (m cos θ − √(n² − sin²θ)) / (m cos θ +
+    √(n² − sin²θ))`` with ``m = ρ1/ρ``, ``n = c/c1``; §3.1 gives the lossy
+    convention ``n = n0(1 + iα), α > 0``.
     """
     if rho is None:
         rho = density()
@@ -409,6 +424,11 @@ def bottom_loss_curve(
         grazing_angles_deg = np.linspace(0.0, 90.0, 181)
     grazing = np.deg2rad(np.asarray(grazing_angles_deg, dtype=float))
     angle_from_normal = np.pi / 2.0 - grazing
+    # The preset carries dB/wavelength; ``reflection_coeff`` wants the loss
+    # tangent (the imaginary part it adds to the index of refraction, i.e.
+    # nepers per radian). ln(10)/(40π) = (1 / 8.6859) / 2π converts between
+    # them — the factor Acoustics-Toolbox uses for its 'L' unit
+    # (Bellhop/ReadEnvironmentBell.f90:527).
     alpha = float(m['attenuation']) * np.log(10.0) / (40.0 * np.pi)
     R = reflection_coeff(
         angle=angle_from_normal,
@@ -463,7 +483,9 @@ def bubble_resonance(
 
     References
     ----------
-    Medwin, H. & Clay, C. S. (1998). Fundamentals of Acoustical Oceanography.
+    Medwin, H. & Clay, C. S. (1998). Fundamentals of Acoustical Oceanography,
+    eq. (8.2.13): ``f_h = (1/2πa)·√(3γ p_A/ρ_A)`` with ``p_A = p_A0 + ρ_A g z``.
+    Valid while ``ka ≲ 1``.
     """
     g = 9.80665  # acceleration due to gravity (m/s²)
     p_air = p0 + rho_water * g * depth
@@ -501,10 +523,24 @@ def bubble_surface_loss(
     >>> loss_db = -20 * np.log10(mult)   # positive dB loss
     >>> print(f"Surface loss: {loss_db:.2f} dB")
 
+    Notes
+    -----
+    Surface bubble loss ``SBL`` (APL-UW TR 9407 eqs. 28a/28b, p. II-21):
+
+    ``SBL = 1.26e-3/sin(theta) * U**1.57 * f**0.85``   for ``U >= 6 m/s``,
+    ``SBL = SBL(U=6) * exp(1.2*(U-6))``                for ``U < 6 m/s``,
+
+    with ``U`` the wind speed 10 m above the surface, ``f`` in kHz and
+    ``theta`` the nominal grazing angle of the surface-bounce path. The 6 m/s
+    break is the breaking-wave (Beaufort) threshold below which bubbles are
+    not produced. The handbook fits 20-40 kHz data to within +/-3 dB and notes
+    a nominal 30 dB ceiling on ``SBL`` from scattering off the underside of the
+    bubble layer; that ceiling is not imposed here.
+
     References
     ----------
     APL-UW (1994). "APL-UW High-Frequency Ocean Environmental Acoustic Models
-    Handbook". Technical Report APL-UW TR 9407.
+    Handbook". Technical Report APL-UW TR 9407, sec. II.C.4.
     """
     beta = np.pi / 2 - angle
     f = frequency / 1000.0  # Convert to kHz
@@ -549,6 +585,14 @@ def bubble_soundspeed(
     >>> c_bubbly = bubble_soundspeed(1e-5)
     >>> print(f"Sound speed in bubbly water: {c_bubbly:.2f} m/s")
 
+    Notes
+    -----
+    Wood's equation as given by Medwin & Clay eq. (8.3.39): the mixture takes the
+    volume-averaged density ``rho_A = U·rho_b + (1-U)·rho_w`` and the
+    volume-averaged compressibility ``1/E_A = U/E_b + (1-U)/E_w``, with
+    ``c = sqrt(E_A/rho_A)``. Valid for every void fraction, and independent of
+    the bubble size distribution.
+
     References
     ----------
     Wood, A. B. (1964). A Textbook of Sound.
@@ -558,6 +602,11 @@ def bubble_soundspeed(
     if c is None:
         c = soundspeed()
 
+    # Splitting ``relative_density`` as m = sqrt(rho_w/rho_gas) puts the two
+    # averages on a common footing: ``numerator`` is (rho_w c_w²)/(rho_A c_A²)/m
+    # and ``denominator`` is m·rho_A/rho_w, so their product is exactly
+    # (c_w/c_A)² — the density ratio and the factor m both cancel, leaving one
+    # square root instead of two.
     m = np.sqrt(relative_density)
     numerator = void_fraction * (c / c_gas) ** 2 * m + (1 - void_fraction) / m
     denominator = void_fraction / m + (1 - void_fraction) * m

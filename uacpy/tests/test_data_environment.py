@@ -164,13 +164,16 @@ def test_range_dependent_ssp_copernicus_requires_date(stub_fetchers):
 
 
 def test_removed_global_keyword_rejected(stub_fetchers):
-    # 'global' (the CC-BY-NC Dutkiewicz source) was removed; not a fetch source.
+    # 'global' names no fetch source, so ``bottom='global'`` falls through to
+    # the sediment-class lookup and is refused there. uacpy carries no global
+    # seabed grid to bind it to: the CC-BY-NC candidate for that role is not
+    # redistributable, which is what ``pelagic`` covers instead.
     with pytest.raises(ConfigurationError, match='unknown sediment class'):
         env_mod.fetch_environment((43.2, 7.5), bottom='global')
 
 
 def test_bottom_auto_falls_back_to_pelagic(tmp_path, monkeypatch, stub_fetchers):
-    # 'auto' now always resolves: outside measured coverage (and with no DBs
+    # 'auto' always resolves: outside measured coverage (and with no DBs
     # installed) it uses the global, commercial-clean pelagic model rather than
     # raising. An empty cache forces the fall-through past EMODnet/Diesing.
     monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path / 'empty'))
@@ -209,8 +212,11 @@ def test_pelagic_never_refetches_the_bathymetry(tmp_path, monkeypatch,
     transect = env_mod.fetch_environment(
         (43.2, 7.5), transect_to=(42.8, 8.1), bottom_sources='pelagic',
         range_dependent_bottom=True, bottom_n_points='auto', max_points=40)
-    speeds = [c.halfspace.sound_speed for c in transect.bottom.columns]
-    assert len(speeds) == 2 and speeds[0] > speeds[1]   # ooze, then clay
+    # Compare densities, not speeds: a column's sound speed is its Hamilton
+    # ratio times the *local* water speed, which itself rises with depth, so it
+    # does not isolate the lithology. Density is monotone in grain size.
+    rho = [c.halfspace.density for c in transect.bottom.columns]
+    assert len(rho) == 2 and rho[0] > rho[1]            # ooze, then clay
 
 
 def test_range_dependent_bottom(monkeypatch, stub_fetchers):
@@ -279,8 +285,8 @@ class TestWoaWetCellSearch:
     """A coastal point must not be refused because it snaps onto a land cell.
 
     The documented quick-start ``fetch_environment((43.2, 7.5))`` is in the
-    Ligurian Sea, close enough to shore that the nearest WOA cell can be dry;
-    the fetch used to raise "on land or outside the analyzed domain".
+    Ligurian Sea, close enough to shore that the nearest WOA cell can be dry,
+    which must not be reported as "on land or outside the analyzed domain".
     """
 
     def test_ring_offsets_are_nearest_first_and_complete(self):

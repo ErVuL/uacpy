@@ -39,8 +39,11 @@ def _write_globsed(root):
 
 def _write_crust1(root):
     cdir = root / 'crust1'; cdir.mkdir(parents=True, exist_ok=True)
-    n = 180 * 360
-    # Uniform ocean column: water 0→−4 km, 1 km sediment (−4→−5), crust below.
+    n = 180 * 360                                  # one row per 1° cell
+    # Nine columns per row, in CRUST1.0's layer order: water, ice, upper/middle/
+    # lower sediment, upper/middle/lower crystalline crust, mantle. ``bnds`` is
+    # each layer's top in km (negative down), so this is a uniform ocean column:
+    # water 0→−4 km, 1 km of sediment (−4→−5), crust below.
     rows = {
         'crust1.bnds': [0, -4, -4, -5, -5, -5, -10, -20, -30],
         'crust1.vp':   [1.5, 3.8, 2.0, 0, 0, 5.0, 6.5, 7.1, 8.1],
@@ -143,8 +146,7 @@ def test_crust1_transect(cache):
 
 def test_crust1_transect_accepts_max_points(cache):
     # environment._fetch_bottom forwards max_points to every transect bottom
-    # fetcher; crust1's must accept it (it used to raise TypeError) and clamp
-    # n_points to it.
+    # fetcher; crust1's must accept it and clamp n_points to it.
     rdl = crust1_local.fetch_bottom_crust1_transect(
         (30.0, -40.0), (31.0, -40.0), n_points=6, max_points=3)
     assert isinstance(rdl, Bottom)

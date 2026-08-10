@@ -1,10 +1,9 @@
 """Modal / dispersion-based signal processing for shallow-water waveguides.
 
 Tools for analysing the dispersive modal arrivals that uacpy's normal-mode
-models produce: modal group velocity from the dispersion relation, the
-waveguide invariant, and time-warping that linearises ideal-waveguide
-dispersion so modes become tones (single-receiver mode separation and
-source-range estimation).
+models produce: modal group velocity from the dispersion relation, and
+time-warping that linearises ideal-waveguide dispersion so modes become tones
+(single-receiver mode separation and source-range estimation).
 
 References
 ----------
@@ -43,6 +42,9 @@ def modal_group_velocity(frequencies, k_horizontal):
     omega = 2.0 * np.pi * f
     if kr.shape[0] != f.size:
         raise ConfigurationError("modal_group_velocity: k_horizontal axis 0 must match freqs")
+    # Both gradients are taken in index space (unit spacing). Their ratio is
+    # (domega/di)/(dkr/di) = domega/dkr, so no frequency spacing is needed and
+    # a non-uniform `frequencies` grid is handled without extra care.
     domega = np.gradient(omega)
     if kr.ndim == 1:
         return domega / np.gradient(kr)
@@ -71,7 +73,9 @@ def warp_signal(signal, sample_rate: float, range_m: float,
     tw_axis = np.linspace(t_w[0], t_w[-1], n_w)
     t_orig = np.sqrt(tw_axis ** 2 + t_r ** 2)
     warped = np.interp(t_orig, t, x)
-    # Unitary Jacobian weighting so energy and the inverse are well-behaved.
+    # Unitary Jacobian weighting sqrt(dt/dt_w) = sqrt(t/t_w) so the warp
+    # preserves energy and is invertible. dt/dt_w diverges at t_w = 0 (t = t_r,
+    # the direct arrival), so the denominator is floored at one sample.
     warped = warped * np.sqrt(t_orig / np.maximum(tw_axis, 1.0 / fs))
     return warped, tw_axis
 

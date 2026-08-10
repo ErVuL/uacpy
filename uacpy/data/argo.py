@@ -60,7 +60,15 @@ def _abs_days(time_str, when):
 
 
 def _pressure_dbar_to_depth(pres_dbar, lat):
-    """Pressure (dbar) → depth (m): Newton inversion of the depth→pressure law."""
+    """Pressure (dbar) → depth (m): Newton inversion of the depth→pressure law.
+
+    Argo reports pressure, but a ``SoundSpeedProfile`` is indexed by depth, and
+    the shared helper only implements depth → pressure. The derivative is taken
+    as a central difference on that helper rather than analytically, so the
+    Leroy & Parthiot coefficients live in exactly one place; a 1 m step is safe
+    because ``h(z)`` is a smooth quartic whose curvature over a metre is
+    negligible against its ~1 dbar/m slope.
+    """
     from uacpy.data._geo import depth_to_pressure_dbar
     p = np.asarray(pres_dbar, dtype=float)
     z = p * 0.9905                                   # ~1 m per dbar initial guess
@@ -74,7 +82,7 @@ def _pressure_dbar_to_depth(pres_dbar, lat):
 
 def _query_url(point, when, max_distance_km, max_days, base_url):
     lat, lon = point
-    dlat = max_distance_km / 111.0
+    dlat = max_distance_km / 111.0          # ~111 km per degree of latitude
     dlon = dlat / max(np.cos(np.radians(lat)), 1e-3)
     la0, la1 = lat - dlat, lat + dlat
     lo_lo, lo_hi = normalize_lon(lon) - dlon, normalize_lon(lon) + dlon

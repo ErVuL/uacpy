@@ -111,12 +111,16 @@ class TestScooterBroadband:
             )
 
 
-def test_scooter_constructor_no_longer_accepts_source_type():
+def test_scooter_constructor_rejects_source_type():
+    """Source geometry belongs to the ``Source`` carrier, not the solver:
+    ``models/scooter.py:390`` reads ``source.source_type``. A duplicate on the
+    model would let the deck and the carrier disagree about what was radiated.
+    """
     with pytest.raises(TypeError):
         Scooter(source_type='R')
 
 
-def test_scooter_constructor_no_longer_accepts_field_interp():
+def test_scooter_constructor_rejects_field_interp():
     """``field_interp`` named an FLP option for ``fields.exe``, which uacpy
     never runs — the k→r transform is done in-tree."""
     with pytest.raises(TypeError):
@@ -159,8 +163,11 @@ class TestZeroReceiverRange:
         data = np.asarray(result.data)
         assert np.all(np.isnan(data[:, 0]))
         assert np.all(np.isfinite(data[:, 1:]))
-        # The clamped-denominator form returned |p| ~ 1e152 here (TL ~ -3000 dB),
-        # which poisons every colour scale and every max/mean over the grid.
+        # A clamped denominator turns the singular cell into |p| ~ 1e152
+        # (TL ~ -3000 dB), which poisons every colour scale and every max/mean
+        # over the grid. Beyond a wavelength or so from a unit-amplitude point
+        # source |p| < 1 everywhere, so 1.0 separates a physical field from a
+        # blown-up one by ~150 orders of magnitude.
         assert np.nanmax(np.abs(data)) < 1.0
 
     def test_kraken_and_scooter_agree_on_the_zero_range_cell(self):
@@ -203,8 +210,8 @@ class TestScooterReceiverDepthAxis:
                            bottom=Bottom(columns=[column]))
 
     def test_requested_depths_are_returned_verbatim(self):
-        # 200 m water + 20 m sediment ⇒ resolvable to 220 m; 300 and 400 are
-        # below it and would previously have collapsed onto one 217 m row.
+        # 200 m water + 20 m sediment ⇒ resolvable to 220 m; 300 and 400 sit
+        # below it and must not collapse onto one 217 m row.
         receiver = Receiver(depths=np.array([50.0, 150.0, 300.0, 400.0]),
                             ranges=np.linspace(500.0, 5000.0, 5))
         result = Scooter(verbose=False).run(
@@ -227,8 +234,9 @@ class TestScooterReceiverDepthAxis:
 class TestScooterRejectsATooCoarseMesh:
     """SCOOTER reads its deck through the same ``misc/ReadEnvironmentMod.f90``
     as KRAKEN, so a pinned ``n_mesh`` under the ``Nneeded / 2`` floor at
-    ``:110-112`` stops the binary with *Mesh is too coarse*. Guarding only
-    KRAKEN left that surfacing as a bare Fortran fatal."""
+    ``:110-112`` stops the binary with *Mesh is too coarse*. The guard has to
+    be on Scooter too, or the condition reaches the caller as a bare Fortran
+    fatal instead of a ConfigurationError."""
 
     @staticmethod
     def _env():

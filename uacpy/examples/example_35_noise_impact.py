@@ -30,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import numpy as np  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
 
+from uacpy.core.absorption import thorp_db_per_km  # noqa: E402
 from uacpy.core.acoustics import soundspeed_unesco  # noqa: E402
 from uacpy.acoustic_signal.bands import decidecade_bands  # noqa: E402
 from uacpy.noise import (  # noqa: E402
@@ -37,13 +38,6 @@ from uacpy.noise import (  # noqa: E402
     apply_weighting,
 )
 from uacpy.visualization import plot_source_level, plot_weighting  # noqa: E402
-
-
-def _thorp_db_per_km(f_hz):
-    """Thorp (1967) absorption [dB/km], f in kHz."""
-    f = np.asarray(f_hz, float) / 1000.0
-    return (3.3e-3 + 0.11 * f**2 / (1 + f**2)
-            + 44.0 * f**2 / (4100 + f**2) + 3.0e-4 * f**2)
 
 
 def main():
@@ -72,7 +66,7 @@ def main():
 
     # --- (4) propagate to a receiver 2 km away (spreading + Thorp) ---
     R = 2000.0
-    tl = 20 * np.log10(R) + _thorp_db_per_km(fc) * (R / 1000.0)
+    tl = 20 * np.log10(R) + thorp_db_per_km(fc) * (R / 1000.0)
     rl = msl - tl
     print(f"  received level @ {R/1000:.0f} km : {rl.max():.1f} dB re 1 µPa "
           f"(band peak)")

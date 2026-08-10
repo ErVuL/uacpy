@@ -230,6 +230,10 @@ def test_kraken_modes_match_pekeris_analytic():
     k_num = np.sort(np.real(np.asarray(modes.k)))[::-1]          # descending
     k_ana = pekeris_trapped_wavenumbers(FREQ, DEPTH, C_W, C_B, RHO_WATER, RHO_B)
 
+    # 4 modes are trapped here: (2*f*D/c_w)*sqrt(1-(c_w/c_b)^2) = 3.7, rounded
+    # up by the half-mode of the pressure-release/fluid pair. The assertion
+    # allows one short so a mesh that drops the mode nearest cutoff still
+    # exercises the eigenvalue comparison below.
     assert k_ana.size >= 3, "analytic solver should find the trapped modes"
     # Mode count may differ by at most one near the cutoff (mesh sensitivity).
     assert abs(k_num.size - k_ana.size) <= 1, (k_num.size, k_ana.size)
@@ -272,6 +276,10 @@ def test_oast_tl_matches_pekeris_modal_sum():
     from uacpy.models.oases import OAST
     src, rcv = _modal_src_rcv()
     d, ana = _modal_abs_dtl(OAST(timeout=120).run(_pekeris_env(), src, rcv).tl)
+    # The analytic field over this 3x5 grid runs 49.0-66.6 dB with a single
+    # outlier at 75.2 dB, so 70 sits in the gap and excises exactly that one
+    # null cell. Keeping it would let a sub-metre range difference dominate the
+    # median of fifteen samples.
     good = ana < 70.0
     assert good.sum() >= 10, "need enough strong-field cells"
     assert np.median(d[good]) < 0.3, f"median |dTL|={np.median(d[good]):.3f} dB"
@@ -365,9 +373,9 @@ def test_oasr_reflection_matches_rayleigh():
 
 
 def test_bellhop_lloyd_mirror():
-    """Bellhop coherent TL reproduces the analytic Lloyd-mirror interference
-    pattern. A deep, impedance-matched bottom (c=c_w, rho=rho_w → R=0) removes
-    the bottom path, leaving only the direct ray and its pressure-release
+    """Bellhop coherent TL reproduces the analytic Lloyd-mirror field across the
+    whole sampled span. A deep, impedance-matched bottom (c=c_w, rho=rho_w → R=0)
+    removes the bottom path, leaving only the direct ray and its pressure-release
     surface image — the geometry a ray model is exact for."""
     c, z_s, z_r, f = C_W, 18.0, 18.0, 200.0
     env = Environment(
@@ -376,18 +384,30 @@ def test_bellhop_lloyd_mirror():
         bottom=BoundaryProperties(acoustic_type='half-space',
                                   sound_speed=c, density=RHO_WATER, attenuation=0.0))
     ranges = np.linspace(200.0, 2000.0, 120)
-    tl_num = np.asarray(Bellhop(timeout=120).compute_tl(
-        env, Source(depths=z_s, frequencies=f),
-        Receiver(depths=[z_r], ranges=ranges)).tl).ravel()
     tl_ana = lloyd_mirror_tl(ranges, z_s, z_r, f, c)
+    # No sample is excluded: with the path-length difference k(R2-R1) ≈ 2*k*z_s*z_r/r
+    # the last constructive maximum falls at 2*k*z_s*z_r/pi = 173 m, before the span
+    # starts, so tl_ana is strictly monotone here and holds no interference null.
+    assert np.all(np.diff(tl_ana) > 0)
+    assert 2 * (2 * np.pi * f / c) * z_s * z_r / np.pi < ranges[0]
 
-    # Compare away from deep interference nulls (TL there is hyper-sensitive to
-    # sub-wavelength geometry and not a useful discriminator).
-    good = tl_ana < 55.0
-    assert good.sum() >= 15, "need enough non-null samples"
-    d = np.abs(tl_num - tl_ana)[good]
-    assert np.median(d) < 2.0, f"median |dTL|={np.median(d):.2f} dB"
-    assert np.percentile(d, 90) < 2.5, f"p90 |dTL|={np.percentile(d, 90):.2f} dB"
+    src = Source(depths=z_s, frequencies=f)
+    rcv = Receiver(depths=[z_r], ranges=ranges)
+    # Hat beams (beam_type='G') carry the geometric two-ray sum exactly; the fan is
+    # narrowed to ±20°, which still spans the 10.2° steepest path (200 m receiver),
+    # so 5001 rays resolve the near-grazing surface image at the far end.
+    tl_hat = np.asarray(Bellhop(timeout=120, beam_type='G', n_beams=5001,
+                                alpha=(-20.0, 20.0)).compute_tl(env, src, rcv).tl).ravel()
+    d_hat = np.abs(tl_hat - tl_ana)
+    assert np.max(d_hat) < 0.05, f"max |dTL|={np.max(d_hat):.4f} dB"
+
+    # The default geometric Gaussian beams spread energy across the beam width and
+    # so do not reproduce this field exactly: the residual measures 0.7 dB at 200 m,
+    # rises to 2.5 dB by 850 m and holds near that out to 2 km. Bounded, not pinned.
+    d_gauss = np.abs(np.asarray(Bellhop(timeout=120).compute_tl(env, src, rcv).tl)
+                     .ravel() - tl_ana)
+    assert np.max(d_gauss) < 3.0, f"max |dTL|={np.max(d_gauss):.2f} dB"
+    assert np.median(d_gauss[ranges < 400.0]) < 1.0
 
 
 def lloyd_mirror_pressure(ranges, z_s, z_r, f, c):
@@ -465,10 +485,11 @@ def test_complex_field_phase_matches_lloyd_mirror(model_cls):
     """Complex pressure must match the analytic Lloyd mirror in *phase*.
 
     ``lloyd_mirror_tl`` above validates |p| only, which is blind to an overall
-    sign: AT's ``ScalePressure`` (influence.f90:757-795) applies ``const = -1``
-    in the point-source branch, inverting Bellhop's ``.shd`` relative to the
-    convention Kraken and Scooter report. TL plots look identical either way,
-    so only a phase assertion catches it.
+    sign: AT's ``ScalePressure`` (``Bellhop/influence.f90:757-795``) sets
+    ``const = -1`` for geometric beams and scales the field by ``const/sqrt(r)``,
+    inverting Bellhop's ``.shd`` relative to the convention Kraken and Scooter
+    report. TL plots look identical either way, so only a phase assertion
+    catches it.
     """
     c, z_s, z_r, f = C_W, 25.0, 100.0, 100.0
     ranges = np.array([1000.0, 1500.0, 2000.0, 3000.0, 4000.0])
@@ -500,7 +521,8 @@ def test_complex_field_phase_matches_lloyd_mirror(model_cls):
 def test_scaled_cylindrical_removes_exactly_the_spreading_term():
     """``source_type='scaled'`` is 'point with cylindrical spreading removed'.
 
-    ``field.f90:76`` and ``fieldsco.m:133`` define it that way, so
+    ``KrakenField/field.f90:76`` and ``Matlab/Scooter/fieldsco.m:133`` define
+    it that way, so
     ``p_scaled = p_point * sqrt(r)`` and therefore
     ``TL_point - TL_scaled = 10*log10(r)`` exactly. Checked through the model,
     not just the transform helper.
@@ -527,9 +549,9 @@ def test_scaled_cylindrical_removes_exactly_the_spreading_term():
 @pytest.mark.requires_binary
 class TestBounceReflectsTheSeabedNotTheOcean:
     """BOUNCE shoots the impedance from the bottom half-space up through every
-    acoustic medium and forms R at the top of medium 1 (bounce.f90:180-201),
-    with the reference speed taken from the top half-space when it is 'A' and
-    hardcoded to 1500 otherwise. So a *seabed* reflection coefficient needs the
+    acoustic medium and forms R at the top of medium 1
+    (``Kraken/bounce.f90:178-201``), with the reference speed taken from the
+    top half-space when it is 'A' and hardcoded to 1500 otherwise. So a *seabed* reflection coefficient needs the
     water column absent and an 'A' top at the water speed — which is exactly
     what doc/bounce.htm prescribes.
     """

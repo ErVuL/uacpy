@@ -89,7 +89,7 @@ class DataProvenance:
             off = (f", {off_km:.0f} km from requested"
                    if off_km is not None else "")
             bits.append(f"at {la:.3f}, {lo:.3f}{off}")
-        return "  Fetched:     " + "; ".join(bits) if bits else None
+        return ("  Fetched:     " + "; ".join(bits)) if bits else None
 
 
 SOURCES: Dict[str, DataSource] = {

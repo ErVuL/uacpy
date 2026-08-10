@@ -82,8 +82,8 @@ def read_psif(work_dir: Union[str, Path]) -> Dict:
                 f"{frq.size}, rout.size={rout.size}."
             )
 
-        # ``nf`` and ``nr`` are now validated against the frq/rout records, but
-        # ``nzo`` is still a raw header field driving the (nzo, nf, nr) psif
+        # ``nf`` and ``nr`` are validated against the frq/rout records above;
+        # ``nzo`` is a raw header field driving the (nzo, nf, nr) psif
         # allocation. Each depth record holds 1 + 2*nf float64 (+ two Fortran
         # length markers), so nzo*nr records cannot occupy more than the file;
         # bound nzo against the remaining bytes before allocating to reject a
@@ -101,6 +101,9 @@ def read_psif(work_dir: Union[str, Path]) -> Dict:
             )
 
         # Depth records: 1 + 2*nf reals each, nzo records per range, nr ranges.
+        # Each record is [z, Re_1, Im_1, ..., Re_nf, Im_nf], so the real parts
+        # are the odd slots and the imaginary parts the even ones after z.
+        # The depth axis repeats across ranges; take it from the first only.
         zg = np.zeros(nzo, dtype=np.float64)
         psif = np.zeros((nzo, nf, nr), dtype=np.complex128)
         for ir in range(nr):

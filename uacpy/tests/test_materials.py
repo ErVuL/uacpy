@@ -65,7 +65,7 @@ class TestBoundaryPropertiesFromPreset:
         assert bp.attenuation == 0.8
         assert bp.shear_speed == 0.0
         assert bp.shear_attenuation == 0.0
-        assert bp.grain_size_phi == 2.0
+        assert bp.grain_size_phi == 3.34
 
     def test_elastic_keeps_shear(self):
         bp = BoundaryProperties.from_preset('sand', elastic=True)

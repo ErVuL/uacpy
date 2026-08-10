@@ -27,7 +27,12 @@ class FileManager:
     prefix : str, optional
         Prefix for temporary directory names. Default is ``'uacpy_'``.
     cleanup : bool, optional
-        Automatically cleanup files on exit. Default is True.
+        Cleanup on ``__exit__``. Default is True. Callers driving the
+        manager without ``with`` read the flag themselves — the model recipe
+        (``models/base.py:29-31``) calls :meth:`cleanup_work_dir` from a
+        ``finally``, so a run cleans up the same way whether it succeeded or
+        raised. What *this* class decides is how much gets removed; see
+        :meth:`cleanup_work_dir`.
 
     Attributes
     ----------

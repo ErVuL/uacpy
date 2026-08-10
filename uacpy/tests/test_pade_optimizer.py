@@ -46,7 +46,8 @@ class TestPadeError:
     4.1 properties on the code path the optimiser actually calls.
     """
 
-    # Δξ ≈ 2e-12 at k₀ = 2 — four orders below the tightest ξ window used here.
+    # Δξ = h(Δz)/k₀² ≈ 2e-12 at k₀ = 2 — six orders below the ±1e-6 ξ window,
+    # the tightest used here, so what is left is the Padé term alone.
     TINY_DZ = 1e-5
     THETA = np.deg2rad(30.0)
 

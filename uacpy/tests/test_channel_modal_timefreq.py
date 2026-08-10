@@ -88,6 +88,12 @@ class TestModal:
             * np.hanning(n)
         w, tw = warp_signal(x, FS, 500.0)
         _, x2 = unwarp_signal(w, tw, FS, 500.0)
+        # Both directions resample by linear interpolation onto a nonlinear
+        # time axis, so the round trip is lossy by construction; the loss is
+        # worst near t_w = 0, where the Jacobian sqrt(t/t_w) diverges and is
+        # floored at one sample. The 10-sample trim drops that end, and 0.9
+        # asks that the waveform survive in shape — it is not a round-trip
+        # bound and cannot be tightened without changing the interpolator.
         m = min(x.size, x2.size)
         corr = np.corrcoef(x[10:m - 10], x2[10:m - 10])[0, 1]
         assert corr > 0.9
@@ -265,6 +271,12 @@ class TestCWT:
              + 0.4 * np.sin(2 * np.pi * 150 * t))
         f, W = cwt(x, FS, wavelet=wavelet, n_freqs=96)
         xr = inverse_cwt(W, f, FS, wavelet=wavelet)
+        # A 96-scale bank over a finite frequency span cannot resolve the
+        # identity, and the cone of influence corrupts both ends of the record,
+        # so 0.95 is a shape check across all three wavelets rather than a
+        # reconstruction bound. The amplitude fidelity that IS pinned lives in
+        # test_icwt_amplitude_holds_for_nondefault_orders, which measures the
+        # interior only.
         assert np.corrcoef(x, xr)[0, 1] > 0.95
 
     def test_icwt_bad_shape_raises(self):
@@ -298,7 +310,16 @@ class TestCWT:
     def test_reconstruction_constants_match_torrence_compo(
             self, wavelet, w0, order, c_delta, psi0):
         """The derived constants must agree with Torrence & Compo (1998)
-        Table 2 at the three tabulated orders."""
+        Table 2 at the three tabulated orders.
+
+        Theory-vs-numeric tolerances, not float noise. ``_reconstruction_constants``
+        derives both by quadrature while T&C's caption calls the table
+        "empirically derived", so the two disagree by a real, wavelet-dependent
+        amount: C_delta is out by 0.31 % (Morlet), 0.10 % (Paul) and 2.13 %
+        (DOG m=2, 3.616 derived vs 3.541 tabulated) — rel=0.03 is sized by the
+        DOG case. psi0(0) is a closed-form integral and matches to <4e-4, so
+        rel=0.01 only has to cover T&C's 4-significant-figure rounding.
+        """
         from uacpy.acoustic_signal.timefreq import _reconstruction_constants
         cd, p0 = _reconstruction_constants(wavelet, w0, order)
         assert cd == pytest.approx(c_delta, rel=0.03)

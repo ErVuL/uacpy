@@ -33,7 +33,9 @@ WHEN TO USE EACH APPROACH:
 
     NOTE: BOUNCE generates both .brc and .irc files
           - BELLHOP, SCOOTER, KRAKENC use .brc files
-          - KRAKEN uses .irc files (NOT .brc)
+          - KRAKEN uses .irc files (NOT .brc): Kraken/kraken.f90:47-48 aborts
+            outright on a bottom 'F' (tabulated .brc) boundary condition, while
+            a bottom 'P' (.irc) one passes
           - SPARC does not support reflection files
 
 ═══════════════════════════════════════════════════════════════════════════════
@@ -131,12 +133,12 @@ def main():
     print("  • Automatically switches to krakenc (complex modes)")
     print("  • Computes TL field directly")
 
-    result_krakenfield, t_krakenfield = _median_time(
+    result_kraken, t_kraken = _median_time(
         lambda: Kraken(verbose=False).compute_tl(env, source, receiver))
 
-    print(f"  ✓ Kraken completed in {t_krakenfield:.3f}s"
+    print(f"  ✓ Kraken completed in {t_kraken:.3f}s"
           f" (median of {N_TIMING_REPEATS} runs after a warm-up)")
-    print(f"    - TL field shape: {result_krakenfield.data.shape}")
+    print(f"    - TL field shape: {result_kraken.data.shape}")
     print("    - Used krakenc internally for elastic bottom")
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -213,15 +215,15 @@ def main():
     print("=" * 80)
 
     # Compute difference
-    tl_diff = result_krakenfield.tl - result_scooter.tl
+    tl_diff = result_kraken.tl - result_scooter.tl
     max_diff = np.nanmax(np.abs(tl_diff))
     mean_diff = np.nanmean(np.abs(tl_diff))
     rms_diff = np.sqrt(np.nanmean(tl_diff**2))
 
     p95_diff = float(np.nanpercentile(np.abs(tl_diff), 95))
     worst = np.unravel_index(np.nanargmax(np.abs(tl_diff)), tl_diff.shape)
-    worst_depth = float(result_krakenfield.depths[worst[0]])
-    worst_range = float(result_krakenfield.ranges[worst[1]])
+    worst_depth = float(result_kraken.depths[worst[0]])
+    worst_range = float(result_kraken.ranges[worst[1]])
 
     print("\nTL Comparison (Kraken vs SCOOTER):")
     print(f"  • Maximum difference: {max_diff:.2f} dB"
@@ -231,11 +233,11 @@ def main():
     print(f"  • RMS difference: {rms_diff:.2f} dB")
 
     print("\nPerformance:")
-    print(f"  • Kraken: {t_krakenfield:.3f}s")
+    print(f"  • Kraken: {t_kraken:.3f}s")
     print(f"  • BOUNCE+SCOOTER: {t_bounce_total:.3f}s "
           f"(BOUNCE: {t_bounce:.3f}s + SCOOTER: {t_scooter:.3f}s)")
-    direction = 'faster' if t_krakenfield < t_bounce_total else 'slower'
-    print(f"  • Ratio: {t_bounce_total/t_krakenfield:.1f}x {direction}")
+    direction = 'faster' if t_kraken < t_bounce_total else 'slower'
+    print(f"  • Ratio: {t_bounce_total/t_kraken:.1f}x {direction}")
     print(f"    Medians of {N_TIMING_REPEATS} runs after a warm-up, on this"
           f" {len(receiver.depths)}x{len(receiver.ranges)} grid only.")
     print("    This compares two different algorithms — a krakenc mode sum against")
@@ -273,9 +275,9 @@ def main():
 
     vmin, vmax = 50, 100
     im1 = ax1.pcolormesh(
-        result_krakenfield.ranges / 1000,
-        result_krakenfield.depths,
-        result_krakenfield.tl,
+        result_kraken.ranges / 1000,
+        result_kraken.depths,
+        result_kraken.tl,
         shading='auto',
         cmap='jet_r',
         vmin=vmin,
@@ -314,8 +316,8 @@ def main():
 
     diff_max = max(5, max(abs(np.nanmin(tl_diff)), abs(np.nanmax(tl_diff))))
     im3 = ax3.pcolormesh(
-        result_krakenfield.ranges / 1000,
-        result_krakenfield.depths,
+        result_kraken.ranges / 1000,
+        result_kraken.depths,
         tl_diff,
         shading='auto',
         cmap='RdBu_r',
@@ -360,7 +362,7 @@ def main():
     # ─────────────────────────────────────────────────────────────────────
     ax5 = fig.add_subplot(gs[1, 1])
 
-    ax5.plot(result_krakenfield.ranges/1000, result_krakenfield.at(depth=source.depths[0]).tl,
+    ax5.plot(result_kraken.ranges/1000, result_kraken.at(depth=source.depths[0]).tl,
              'b-', linewidth=2.5, label='Kraken (Auto)', alpha=0.8)
     ax5.plot(result_scooter.ranges/1000, result_scooter.at(depth=source.depths[0]).tl,
              'r--', linewidth=2.5, label='SCOOTER (BOUNCE)', alpha=0.8)
@@ -377,9 +379,9 @@ def main():
     # ─────────────────────────────────────────────────────────────────────
     ax6 = fig.add_subplot(gs[1, 2])
 
-    mid_range_km = np.median(result_krakenfield.ranges) / 1000
+    mid_range_km = np.median(result_kraken.ranges) / 1000
 
-    ax6.plot(result_krakenfield.at(range=mid_range_km * 1000.0).tl, result_krakenfield.depths,
+    ax6.plot(result_kraken.at(range=mid_range_km * 1000.0).tl, result_kraken.depths,
              'b-', linewidth=2.5, label='Kraken (Auto)', alpha=0.8)
     ax6.plot(result_scooter.at(range=mid_range_km * 1000.0).tl, result_scooter.depths,
              'r--', linewidth=2.5, label='SCOOTER (BOUNCE)', alpha=0.8)
@@ -404,13 +406,13 @@ def main():
     workflow1 += "    shear_speed=400  # Elastic!\n"
     workflow1 += "  )\n\n"
     workflow1 += "Step 2: Run Kraken\n"
-    workflow1 += "  krakenfield = Kraken()\n"
-    workflow1 += "  result = krakenfield.run(...)\n"
+    workflow1 += "  kraken = Kraken()\n"
+    workflow1 += "  result = kraken.run(...)\n"
     workflow1 += "  # Auto-detects elastic\n"
     workflow1 += "  # Uses krakenc internally\n\n"
     workflow1 += "✓ Simple, one-step\n"
     workflow1 += "✓ Good for beginners\n"
-    workflow1 += f"✓ Time: {t_krakenfield:.1f}s"
+    workflow1 += f"✓ Time: {t_kraken:.1f}s"
 
     ax7.text(0.05, 0.95, workflow1, transform=ax7.transAxes,
              fontsize=8, verticalalignment='top', family='monospace',
@@ -495,12 +497,12 @@ def main():
     print(f"✓ RMS difference: {rms_diff:.2f} dB")
 
     print("\nPERFORMANCE:")
-    print(f"  • Kraken Auto: {t_krakenfield:.3f}s")
+    print(f"  • Kraken Auto: {t_kraken:.3f}s")
     print(f"  • BOUNCE+SCOOTER: {t_bounce_total:.3f}s")
-    if t_krakenfield < t_bounce_total:
-        print(f"  → On this grid Kraken ran {t_bounce_total/t_krakenfield:.1f}x faster")
+    if t_kraken < t_bounce_total:
+        print(f"  → On this grid Kraken ran {t_bounce_total/t_kraken:.1f}x faster")
     else:
-        print(f"  → On this grid SCOOTER ran {t_krakenfield/t_bounce_total:.1f}x faster")
+        print(f"  → On this grid SCOOTER ran {t_kraken/t_bounce_total:.1f}x faster")
     print("  → Two different algorithms, one grid size, one frequency — treat the")
     print("    ratio as a property of this configuration, not of the two codes.")
     print("  → And BOUNCE .brc can be reused across runs, which changes the sum")

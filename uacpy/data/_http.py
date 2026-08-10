@@ -45,8 +45,8 @@ _ALLOWED_SCHEMES = ('http', 'https')
 _DEFAULT_MAX_BYTES = 512 * 1024 * 1024   # 512 MiB
 # Ceiling on a single uncompressed archive member, so a tar/zip "decompression
 # bomb" cannot exhaust memory when an install-time download extracts a member
-# into memory. The largest legitimate member is the Diesing raster (~hundreds of
-# MB uncompressed); the cap is generous but bounded.
+# into memory. The largest legitimate member is the GLODAP pH grid (~100 MB
+# uncompressed); the cap is generous but bounded.
 MAX_MEMBER_BYTES = 2 * 1024 * 1024 * 1024   # 2 GiB
 
 
@@ -228,7 +228,13 @@ def checked_member_size(
 
 
 def _retry_after(exc: urllib.error.HTTPError) -> float:
-    """Seconds to wait before a retry, from the ``Retry-After`` header."""
+    """Seconds to wait before a retry, from the ``Retry-After`` header.
+
+    A missing or non-numeric header (it may also be an HTTP-date) falls back to
+    1.5 s. The result is clamped into ``[1, _MAX_BACKOFF_S]``: the floor keeps a
+    ``Retry-After: 0`` from becoming a hot retry loop, and the ceiling keeps a
+    host's multi-hour cool-off from hanging the fetch.
+    """
     header = exc.headers.get('Retry-After') if exc.headers else None
     try:
         wait = float(header)
@@ -246,7 +252,6 @@ def erddap_griddap_url(base_url: str, dataset: str, var: str, when,
     names that node. The ``[(...)]`` value selectors snap each axis to its
     nearest node, and the longitude axis is [0, 360).
     """
-    import urllib.parse
     from uacpy.data._time import parse_date
     constraint = (f"{var}[({parse_date(when)}T00:00:00Z)][({level})]"
                   f"[({lat})][({lon % 360.0})]")

@@ -86,9 +86,12 @@ def test_animate_field_default_frame_stride_caps_at_300():
 
 
 def test_animate_field_frame_updates_track_pulse_position():
-    """Update the animation at three frames and verify the heatmap's
-    argmax(|p|) range index moves outward — sanity check on the
-    set_array calls."""
+    """Stepping the update callback re-fills the heatmap with real data.
+
+    The three frame indices are chosen to span the pulse crossing the
+    receiver array, so a ``set_array`` that never fired (or that wrote the
+    wrong time slice) leaves at least one of them identically zero.
+    """
     import matplotlib
     matplotlib.use('Agg')
     from uacpy.visualization.plots import animate_field

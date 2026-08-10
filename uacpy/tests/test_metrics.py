@@ -72,7 +72,10 @@ class TestTLRmseBasic:
 class TestGridAlignment:
     """Grids agreeing to ~1 mm compare directly (models interpolate onto the
     requested receiver grid, leaving sub-mm rounding); genuinely different
-    grids raise."""
+    grids raise. The gate is ``np.allclose(rtol=1e-5, atol=1e-3)`` in
+    ``core/metrics.py``, so the two cases below sit either side of the 1 mm
+    absolute term — at 20 km the relative term contributes 0.2 m, which the
+    1 m case also clears."""
 
     def test_submillimetre_offset_compares(self):
         d = np.linspace(5, 95, 10)

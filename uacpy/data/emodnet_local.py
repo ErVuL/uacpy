@@ -41,6 +41,7 @@ _PAGE = 5000                        # WFS GetFeature page size (startIndex/count
 # The layer has no primary key, so GeoServer needs an explicit sort to page.
 _SORT_BY = 'objectid'
 _INDEX = {}                         # cache_root -> (STRtree, codes ndarray)
+_cache.register_cache(_INDEX.clear)
 
 
 def _shapely():

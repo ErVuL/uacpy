@@ -86,9 +86,10 @@ def test_nearest_indices_ascending_and_descending():
 
 
 def test_region_grid_descending_latitude(monkeypatch, tmp_path):
-    # A descending-latitude COARDS subset must still sample the right cells —
-    # the old searchsorted resample returned meaningless indices on a
-    # descending axis. Encode depth as the latitude so a wrong row is visible.
+    # A descending-latitude COARDS subset must still sample the right cells: a
+    # bare searchsorted resample is only meaningful on an ascending axis, so
+    # nearest-node selection has to handle both. Depth is encoded as the
+    # latitude index, making a wrong row visible in the values.
     netCDF4 = pytest.importorskip('netCDF4')
     path = tmp_path / 'grid_desc.nc'
     lon = np.linspace(7.0, 7.5, 6)

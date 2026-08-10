@@ -48,6 +48,12 @@ def ofdm_demodulate(rx, n_subcarriers, cp_len, channel=None, snr_linear=None):
     With ``channel`` given, divides each subcarrier by the channel frequency
     response ``H(f)`` (zero-forcing), or applies MMSE when ``snr_linear`` is also
     set. Returns the flat complex symbol array.
+
+    A multipath channel can put a spectral null on a subcarrier. Both equalizers
+    are written as ``conj(H)/(|H|^2 + eps)`` so such a subcarrier comes back as
+    zero rather than inf/NaN; for MMSE ``eps`` is the physical ``1/SNR``, for
+    zero-forcing it is only a floor, and the subcarrier is unrecoverable either
+    way.
     """
     nsc = int(n_subcarriers)
     cp = int(cp_len)
@@ -60,10 +66,8 @@ def ofdm_demodulate(rx, n_subcarriers, cp_len, channel=None, snr_linear=None):
     freq = np.fft.fft(grid, axis=1) / np.sqrt(nsc)
     if channel is not None:
         H = np.fft.fft(np.asarray(channel, dtype=complex), nsc)
-        if snr_linear is None:
-            freq = freq / H[None, :]
-        else:
-            freq = freq * (np.conj(H) / (np.abs(H) ** 2 + 1.0 / float(snr_linear)))[None, :]
+        eps = 1e-12 if snr_linear is None else 1.0 / float(snr_linear)
+        freq = freq * (np.conj(H) / (np.abs(H) ** 2 + eps))[None, :]
     return freq.ravel()
 
 
@@ -84,6 +88,10 @@ def schmidl_cox_preamble(n_subcarriers, cp_len, seed=0x5C0FFEE):
     rng = np.random.default_rng(seed)
     freq = np.zeros(nsc, dtype=complex)
     even = np.arange(0, nsc, 2)
+    # Schmidl & Cox 1997 sec. III-A: "the frequency components of this training
+    # symbol are multiplied by sqrt(2) at the transmitter" — it compensates for
+    # loading only the even subcarriers, so the block carries the same total
+    # energy (nsc) as a fully loaded one.
     freq[even] = np.exp(1j * np.pi / 2 * rng.integers(0, 4, even.size)) * np.sqrt(2)
     return ofdm_symbol(freq, nsc, int(cp_len))
 
@@ -102,8 +110,9 @@ def schmidl_cox_sync(rx, n_subcarriers, cp_len):
     n = r.size - 2 * L
     if n <= 0:
         return None, 0.0
-    # P(d) = sum conj(r[d+m]) r[d+m+L];  R(d) = sum |r[d+m+L]|^2 —
-    # both are length-L sliding sums, O(n) via cumulative sums.
+    # Schmidl & Cox 1997 eqs. (5) and (7): P(d) = sum conj(r[d+m]) r[d+m+L]
+    # and R(d) = sum |r[d+m+L]|^2 — both length-L sliding sums, O(n) here via
+    # cumulative sums rather than the paper's iterative form (6).
     a = np.conj(r[:-L]) * r[L:]
     ca = np.concatenate(([0.0 + 0.0j], np.cumsum(a)))
     p = ca[L:L + n] - ca[:n]
@@ -113,11 +122,17 @@ def schmidl_cox_sync(rx, n_subcarriers, cp_len):
     metric = np.abs(p) ** 2 / (rr ** 2 + 1e-12)
     metric[rr < 0.25 * rr.max()] = 0.0      # energy gate: ignore silent regions
     peak = int(np.argmax(metric))
+    # Timing metric M(d) = |P(d)|^2 / R(d)^2, eq. (8). Two exactly identical
+    # halves give |P| = R and hence M = 1, so half the ideal plateau height
+    # separates a preamble from a noise peak (the paper's Fig. 3 plateau sits
+    # near 0.8 at 10 dB SNR).
     if metric[peak] < 0.5:
         return None, 0.0
+    # The two halves are L = nsc/2 samples apart, so P accumulates a phase of
+    # 2*pi*cfo*L = pi*cfo*nsc; unambiguous only for |cfo| < 1/nsc.
+    cfo = np.angle(p[peak]) / (np.pi * nsc)        # cycles/sample
     # argmax sits at the useful-symbol start; step back by the CP to the block
     # boundary (a residual offset within the CP is absorbed by the pilot estimate)
-    cfo = np.angle(p[peak]) / (np.pi * nsc)        # cycles/sample
     return max(peak - cp, 0), float(cfo)
 
 

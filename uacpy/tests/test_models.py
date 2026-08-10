@@ -52,10 +52,10 @@ class TestKraken:
     """Tests for Kraken model."""
 
     def test_kraken_compute_modes(self, simple_env, source):
-        """Test Kraken mode computation.
+        """``compute_modes`` with no cap returns every mode kraken.exe found.
 
-        Note: standalone Kraken does not accept ``n_modes``; that knob
-        lives on ``KrakenField.run`` (MLimit in the FLP file).
+        The capped case is the next test: ``n_modes`` is optional and maps to
+        the FLP ``MLimit`` field.exe honours.
         """
         kraken = Kraken(verbose=False)
         modes = kraken.compute_modes(env=simple_env, source=source)
@@ -89,11 +89,13 @@ class TestKraken:
 
 
 @pytest.mark.requires_binary
-class TestKrakenField:
-    """Tests for KrakenField model."""
+class TestKrakenInFieldMode:
+    """``Kraken`` in its field mode: a single class covers both binaries, so
+    asking it for TL (rather than modes) is what makes it run field.exe after
+    kraken.exe."""
 
-    def test_krakenfield_compute_tl(self, simple_env, source, receiver_small):
-        """Test KrakenField TL computation."""
+    def test_kraken_field_mode_compute_tl(self, simple_env, source, receiver_small):
+        """``compute_tl`` returns a full depth x range grid, not a mode set."""
         kf = Kraken(verbose=False)
         result = kf.compute_tl(env=simple_env, source=source, receiver=receiver_small)
 
@@ -285,10 +287,10 @@ class TestRAM:
 
 
 # OASES instantiation/supported-mode tests live in test_oases_comprehensive.py;
-# the cross-model workflow tests below cover Bounce → {Bellhop, Scooter, KrakenC}.
+# the cross-model workflow tests below cover Bounce → {Bellhop, Scooter,
+# Kraken(backend='krakenc')}.
 
 
-@pytest.mark.requires_binary
 @pytest.mark.requires_binary
 class TestBasePlumbing:
     """Shared ``PropagationModel`` behaviour that no single wrapper owns."""
@@ -332,7 +334,7 @@ class TestBasePlumbing:
 class TestModelConsistency:
     """Tests for consistency between different models."""
 
-    # Bellhop ↔ KrakenField TL agreement is covered with tighter
+    # Bellhop ↔ Kraken TL agreement is covered with tighter
     # tolerance in test_cross_model_agreement.py.
 
     @pytest.mark.slow
@@ -341,7 +343,7 @@ class TestModelConsistency:
         [
             pytest.param("Bellhop", id="bellhop"),
             pytest.param(
-                "KrakenC",
+                "Kraken",
                 id="krakenc",
                 marks=pytest.mark.xfail(
                     reason=(
@@ -362,8 +364,8 @@ class TestModelConsistency:
 
         Step 1 computes reflection coefficients on an elastic half-space with
         BOUNCE, persisting the .brc file to ``tmp_path``. Step 2 feeds the
-        .brc back into the downstream model (Bellhop / KrakenC / Scooter)
-        and verifies it produces a valid result.
+        .brc back into the downstream model (Bellhop / Kraken on its krakenc
+        backend / Scooter) and verifies it produces a valid result.
         """
         import os
 
@@ -409,7 +411,7 @@ class TestModelConsistency:
         c_low_brc = bounce_result.metadata['c_low']
         c_high_brc = bounce_result.metadata['c_high']
 
-        if downstream == "KrakenC":
+        if downstream == "Kraken":
             modes = Kraken(backend='krakenc',
                 verbose=False, c_low=c_low_brc, c_high=c_high_brc,
             ).compute_modes(env=env_with_rc, source=source, receiver=receiver_small)

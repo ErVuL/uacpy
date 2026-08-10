@@ -117,14 +117,23 @@ def francois_garrison_db_per_km(
 
     c = 1412.0 + 3.21 * T + 1.19 * S + 0.0167 * z
 
+    # Three additive mechanisms, each ``A * P * f_relax * f^2 / (f_relax^2 +
+    # f^2)``: two chemical relaxations plus pure-water viscosity. ``A`` is the
+    # strength, ``P`` the pressure (depth) correction, ``f1``/``f2`` the
+    # relaxation frequencies in kHz.
+
+    # Boric acid B(OH)3, relaxing near 1 kHz — the only pH-dependent term.
     A1 = 8.86 / c * 10.0 ** (0.78 * pH - 5.0)
     P1 = 1.0
     f1 = 2.8 * np.sqrt(S / 35.0) * 10.0 ** (4.0 - 1245.0 / (T + 273.0))
 
+    # Magnesium sulphate MgSO4, relaxing near 65 kHz.
     A2 = 21.44 * S / c * (1.0 + 0.025 * T)
     P2 = 1.0 - 1.37e-4 * z + 6.2e-9 * z * z
     f2 = 8.17 * 10.0 ** (8.0 - 1990.0 / (T + 273.0)) / (1.0 + 0.0018 * (S - 35.0))
 
+    # Viscosity of pure water: no relaxation frequency, so it enters as plain
+    # f^2. Francois & Garrison fit A3 piecewise about 20 degC.
     P3 = 1.0 - 3.83e-5 * z + 4.9e-10 * z * z
     A3_cold = 4.937e-4 - 2.59e-5 * T + 9.11e-7 * T * T - 1.5e-8 * T * T * T
     A3_warm = 3.964e-4 - 1.146e-5 * T + 1.45e-7 * T * T - 6.5e-10 * T * T * T
@@ -147,9 +156,20 @@ def convert_attenuation_units(
 ) -> np.ndarray:
     """Convert volume attenuation between unit conventions.
 
-    Supported units: ``dB/km``, ``dB/m``, ``dB/wavelength``, ``Nepers/m``,
-    ``Q`` (quality factor), ``L`` (loss tangent). ``sound_speed`` is
-    required for the wavelength / Q / L paths.
+    Every path goes through dB/m, so each unit needs only its own definition
+    against the nepers/m attenuation ``a`` of ``exp(-a·x)``, at angular
+    frequency ``omega = 2·pi·f`` and sound speed ``c`` (the same definitions
+    Acoustics-Toolbox ``AttenMod.f90:57-80`` applies):
+
+    - ``Nepers/m`` — ``a`` itself.
+    - ``dB/m`` — ``a · 20/ln(10)``; the pivot every path converts through.
+    - ``dB/km`` — dB of amplitude loss per 1000 m.
+    - ``dB/wavelength`` — dB per ``lambda = c/f``, hence frequency-independent.
+    - ``Q`` — quality factor, ``a = omega/(2·c·Q)``.
+    - ``L`` — loss tangent, ``a = L·omega/c``.
+
+    ``sound_speed`` is therefore required for the wavelength / Q / L paths and
+    ignored for the rest.
 
     Notes
     -----

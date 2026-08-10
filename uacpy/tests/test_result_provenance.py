@@ -130,7 +130,7 @@ def test_filtered_arrivals_plot_shows_credit():
     assert _credits(fig)
 
 
-# ── single-result plotters that were missing the credit ─────────────────────
+# ── plotters that take a single result still draw the credit ────────────────
 
 def _se_field():
     d = np.linspace(5, 95, 8)

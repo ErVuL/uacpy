@@ -246,6 +246,9 @@ def demo_range_dependent_bottom():
     depths_ssp = np.array([0, 25, 50, 100, 150, 200, 250])
     ranges_ssp = np.array([0, 5, 10, 15])
     ssp_2d = np.zeros((len(depths_ssp), len(ranges_ssp)))
+    # ranges_ssp is in km here (the front gradients below are per km); the
+    # Environment gets it in metres. c(T, z) is Medwin's equation truncated
+    # after the T^2 term, with salinity fixed at its S = 35 PSU reference.
     for i, r in enumerate(ranges_ssp):
         t_surf = 18 - r * 0.4
         t_bot = 8 - r * 0.1

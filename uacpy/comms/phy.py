@@ -18,7 +18,11 @@ Istepanian & Stojanovic. *Underwater Acoustic DSP & Comms* — "signals are shap
     baseband front end translates to baseband, low-pass filters, frame-syncs.
 Gardner (1986), *A BPSK/QPSK timing-error detector for sampled receivers*, IEEE
     Trans. Comms — the non-data-aided timing-error detector used here.
-Proakis & Salehi. *Digital Communications* (matched filtering, synchronization).
+Proakis & Salehi. *Digital Communications*, eqs. (9.2-28)/(9.2-29) — with a
+    matched receiver filter ``G_T(f) = sqrt(|X_rc(f)|)`` and ``G_R(f) =
+    G_T*(f)``, so "the overall raised cosine spectral characteristic is split
+    evenly between the transmitting filter and the receiving filter"; eq.
+    (5.2-22) for the loop noise-equivalent bandwidth used in `symbol_sync`.
 """
 
 from __future__ import annotations
@@ -36,6 +40,11 @@ def rrc_filter(sps, rolloff, span):
     t = (np.arange(n + 1) - n / 2) / sps      # time in symbol periods
     b = float(rolloff)
     h = np.empty_like(t)
+    # The general expression below divides by ``pi*t*(1 - (4*b*t)**2)``, which
+    # vanishes at t = 0 and at |t| = 1/(4b) (t in symbol periods). Both are
+    # removable singularities of the RRC impulse response, so the two branches
+    # substitute their analytic limits; the 1e-8 tolerance catches the sampled
+    # grid landing on (or numerically next to) either point.
     for i, ti in enumerate(t):
         if abs(ti) < 1e-8:
             h[i] = 1 - b + 4 * b / np.pi
@@ -72,7 +81,12 @@ def upconvert(baseband, sample_rate, fc):
 
 
 def downconvert(passband, sample_rate, fc):
-    """Mix a real passband signal down to complex baseband (image left for the LPF/MF)."""
+    """Mix a real passband signal down to complex baseband (image left for the LPF/MF).
+
+    The factor 2 makes the ``upconvert``/``downconvert`` pair unity-gain:
+    ``upconvert`` emits ``Re{b·e^{jwn}} = (b·e^{jwn} + b*·e^{-jwn})/2``, so
+    ``2·x·e^{-jwn} = b + b*·e^{-2jwn}`` and the low-pass part is ``b`` itself.
+    """
     x = np.asarray(passband, dtype=float)
     n = np.arange(x.size)
     return 2.0 * x * np.exp(-2j * np.pi * fc * n / sample_rate)
@@ -115,6 +129,13 @@ def symbol_sync(samples, sps, loop_bw=0.005, damping=1.0, start=0):
     x = np.asarray(samples, dtype=complex).ravel()
     if sps < 2:
         raise ConfigurationError("symbol_sync: need sps >= 2 for Gardner")
+    # Standard second-order proportional-integral loop filter: map the
+    # requested noise bandwidth and damping to a per-sample loop constant
+    # ``theta``, then to the proportional (``kp``) and integral (``ki``) gains.
+    # A second-order loop has noise-equivalent bandwidth
+    # ``B_n = (w_n/2)*(damping + 1/(4*damping))`` (Proakis & Salehi eq. 5.2-22
+    # with ``tau2*w_n = 2*damping``), so ``theta = w_n*T/2`` inverts to the line
+    # below for a per-symbol-period normalized ``loop_bw = B_n*T``.
     theta = loop_bw / (damping + 0.25 / damping)
     denom = 1 + 2 * damping * theta + theta * theta
     kp = 4 * damping * theta / denom
@@ -132,6 +153,11 @@ def symbol_sync(samples, sps, loop_bw=0.005, damping=1.0, start=0):
         # Gardner TED (negative feedback for the positive-slope zero crossing)
         diff = y_on - prev_on
         e = -(diff.real * y_mid.real + diff.imag * y_mid.imag) / power
+        # Three heuristic bounds on the normalized error scale (``power``
+        # divides the TED down to O(1)): the first caps one outlier sample's
+        # contribution, the second is integrator anti-windup, and the third
+        # holds the per-symbol timing correction to half a sample so the
+        # interpolator cannot step past the crossing it is tracking.
         e = float(np.clip(e, -2.0, 2.0))
         vi = float(np.clip(vi + ki * e, -0.25, 0.25))
         adj = float(np.clip(kp * e + vi, -0.5, 0.5))

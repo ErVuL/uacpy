@@ -8,6 +8,7 @@ TL field via the in-tree Python Hankel transform in
 and broadband time-series output.
 """
 
+import warnings
 from pathlib import Path
 from typing import Dict, Optional, Union
 
@@ -16,14 +17,20 @@ import numpy as np
 from uacpy.core.exceptions import (
     ConfigurationError, ExecutableNotFoundError, ModelExecutionError,
 )
-from uacpy.models.base import PropagationModel, RunMode, ModelSpec
+from uacpy.models.base import (
+    PropagationModel, RunMode, ModelSpec, USER_FRAME_SKIP,
+    _max_roughness, _smooth_surface,
+)
 from uacpy.core.environment import Environment
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
 from uacpy.core.results import Result
 from uacpy.core.constants import parse_boundary_type
 from uacpy.io.grn_reader import read_grn_file, grn_to_field, grn_to_transfer_function
-from uacpy.io.oalib_writer import write_scooter_env_file, reject_coarse_at_mesh
+from uacpy.io.oalib_writer import (
+    write_scooter_env_file, reject_coarse_at_mesh,
+    reject_unsupported_ssp_interp,
+)
 
 
 # Source geometry -> fieldsco.m Opt(1:1), per fieldsco.m:120-140.
@@ -43,7 +50,10 @@ class Scooter(PropagationModel):
         Path to ``scooter.exe``. Auto-detected if ``None``.
     c_low, c_high : float, optional
         Phase-speed bounds (m/s). ``None`` ⇒ ``0.95 × min SSP`` /
-        ``1.05 × max SSP+bottom``.
+        ``1.05 × max SSP+bottom``; a vacuum or rigid bottom has no
+        half-space speed to cap on, so ``c_high`` resolves to the AT
+        "unbounded" sentinel instead (see
+        :func:`~uacpy.io.oalib_writer.resolve_phase_speed_bounds`).
     n_mesh : int, optional
         Mesh points per medium. ``0`` ⇒ auto. Default ``0``.
     rmax_multiplier : float, optional
@@ -76,7 +86,8 @@ class Scooter(PropagationModel):
     Defaults auto-derived at ``run()`` time:
 
     - ``c_low=None`` → ``min(env.ssp) × 0.95``
-    - ``c_high=None`` → ``max(max(env.ssp), env.bottom.sound_speed) × 1.05``
+    - ``c_high=None`` → ``max(max(env.ssp), env.bottom.sound_speed) × 1.05``,
+      or the unbounded sentinel for a vacuum / rigid bottom
     - Spectral ``RMax = receiver.range_max × rmax_multiplier``
     - ``n_mesh=0`` → Scooter picks from frequency / wavelength.
     - TopOpt position 4 reads ``env.absorption``.
@@ -95,10 +106,15 @@ class Scooter(PropagationModel):
     # collapsed to range-0. Single spectral solve → mean SSP / median
     # bottom column are the representative single profile.
     # INCOHERENT_TL is intentionally absent (no modal decomposition here).
+    #
+    # No ``rough_bottom``: ``SSP%sigma`` is read in exactly three places in
+    # ``Scooter/`` — ``scooter.f90:63`` rejects ``sigma(2:NMedia)``,
+    # ``scooter.f90:309`` reads ``sigma(1)``, and ``sparc.f90:177`` belongs to
+    # the other binary. The seabed's own slot, ``sigma(NMedia+1)``, is read
+    # nowhere, and a sediment-layer roughness lands in the rejected range.
     spec = ModelSpec(
         modes=(RunMode.COHERENT_TL, RunMode.BROADBAND, RunMode.TIME_SERIES),
-        supports={'layered_bottom', 'elastic_media', 'rough_surface',
-                  'rough_bottom'},
+        supports={'layered_bottom', 'elastic_media', 'rough_surface'},
         source_types=frozenset({'point', 'line', 'scaled'}),
         collapse={'ssp': 'mean', 'bottom_range': 'median'},
     )
@@ -129,7 +145,8 @@ class Scooter(PropagationModel):
         c_low : float, optional
             Lower phase speed limit (m/s). None = auto (0.95 * min SSP speed).
         c_high : float, optional
-            Upper phase speed limit (m/s). None = auto (1.05 * max of SSP and bottom speed).
+            Upper phase speed limit (m/s). None = auto (1.05 * max of SSP and
+            bottom speed; unbounded for a vacuum / rigid bottom).
         n_mesh : int, optional
             Total number of mesh points PER MEDIUM used by the finite-element
             spectral solver (AT's ``NG`` column on the SSP mesh line). 0 = let
@@ -142,20 +159,25 @@ class Scooter(PropagationModel):
             :meth:`_resolve_rmax_multiplier`). Default ``None`` → 2.0 for
             ``COHERENT_TL``, 3.0 for ``BROADBAND`` / ``TIME_SERIES``.
         interp_ssp : str, optional
-            SSP connection scheme. ``None`` (default) auto-picks
-            ``'quad'`` for a range-dependent ``env.ssp`` and
-            ``'linear'`` otherwise. Explicit values: ``'linear'``,
-            ``'pchip'``, ``'cubic'``, ``'quad'``, ``'n2linear'``,
-            ``env.ssp.shape='isovelocity'`` always
-            forces ``'C'`` regardless.
+            SSP connection scheme written into ``TopOpt(1)``. ``None``
+            (default) resolves to ``'linear'`` (C-linear): Scooter declares
+            no range-dependent-SSP capability, so ``run()`` collapses
+            ``env.ssp`` to 1-D before the deck is written and the
+            range-dependent auto-pick never applies. Explicit values:
+            ``'linear'``, ``'n2linear'``, ``'pchip'``, ``'cubic'`` /
+            ``'spline'``. ``env.ssp.shape='isovelocity'`` always forces
+            ``'C'`` regardless.
         spectrum : {'positive', 'negative', 'both'}, optional
-            FLP Option(2:2). 'positive' (default) uses only the positive
-            wavenumber spectrum (fast, recommended). 'negative' uses only
-            the negative branch; 'both' integrates along the full k-axis.
+            FLP Option(2:2) in AT nomenclature. uacpy writes no ``.flp`` —
+            the letter is applied by the in-tree Hankel transform, which
+            follows ``Matlab/Scooter/fieldsco.m:170-181``. 'positive'
+            (default) uses only the positive wavenumber spectrum (fast,
+            recommended). 'negative' uses only the negative branch; 'both'
+            integrates along the full k-axis.
         stabilizing_attenuation_off : bool, optional
             If True, writes ``'0'`` at TopOpt position 7. Scooter then
-            sets its stabilising attenuation to zero (see
-            ``scooter.f90:81,129``). Leave False (default) unless you
+            replaces its default ``Atten = Deltak`` with zero
+            (``scooter.f90:81,129-130``). Leave False (default) unless you
             know what you're doing — the stabiliser is there to prevent
             pole-on-contour blow-ups.
         """
@@ -273,6 +295,7 @@ class Scooter(PropagationModel):
         media_depth = self._total_media_depth(env)
 
         self.validate_inputs(env, source, receiver, run_mode=run_mode)
+        reject_unsupported_ssp_interp('Scooter', self.interp_ssp)
         reject_coarse_at_mesh('Scooter', self.n_mesh, env,
                               float(source.frequencies[0]))
 
@@ -328,6 +351,37 @@ class Scooter(PropagationModel):
         finally:
             if fm.cleanup:
                 fm.cleanup_work_dir()
+
+    def _project_environment(self, env):
+        """Collapse unsupported features, then drop a surface roughness the
+        top boundary condition cannot carry.
+
+        ``SSP%sigma(1)`` enters the solve only through the vacuum branch of
+        ``Scooter/scooter.f90:309`` (``g = -i·sqrt(omega2/cInside² − x)·
+        sigma(1)²``, reached from ``:635`` via ``BCImpedance(x, 'TOP', …)``).
+        Every other top boundary — rigid, acousto-elastic, tabulated — takes
+        an impedance that never reads the slot, so the deck would carry a
+        roughness the run silently ignores. Measured on a 100 m Pekeris guide
+        at 100 Hz, ``roughness=2.0`` against ``0.0`` moves TL by 20.3 dB under
+        a vacuum surface and by exactly 0.0 dB under a rigid or
+        acousto-elastic one.
+        """
+        env = super()._project_environment(env)
+        sigma = _max_roughness(env.surface.properties)
+        if not sigma:
+            return env
+        acoustic_type = env.surface.acoustic_type
+        if parse_boundary_type(acoustic_type).to_acoustics_toolbox_code() == 'V':
+            return env
+        env.surface = _smooth_surface(env.surface)
+        warnings.warn(
+            f"{self.model_name} reads the sea-surface roughness only for a "
+            f"pressure-release (vacuum) surface; the {acoustic_type!r} surface "
+            f"takes an impedance that never touches SSP%sigma(1), so "
+            f"env.surface.roughness={sigma:g} m was dropped.",
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+        )
+        return env
 
     def _max_receiver_depth(self, env) -> float:
         return self._total_media_depth(env)
@@ -434,8 +488,8 @@ class Scooter(PropagationModel):
         bottom_type = parse_boundary_type(env.bottom.halfspace_at(range=0.0).acoustic_type)
 
         # TopOpt position 7: '0' zeroes out Scooter's stabilising attenuation
-        # (see scooter.f90:81,129). Leave as ' ' otherwise — the Fortran
-        # reader keeps Atten=Deltak (the default stabiliser).
+        # (scooter.f90:81,129-130). Leave as ' ' otherwise — Scooter keeps
+        # Atten=Deltak, the default stabiliser.
         topopt_extra = '0' if self.stabilizing_attenuation_off else ''
 
         rmax_m = float(receiver.ranges.max()) * self._resolve_rmax_multiplier(run_mode)

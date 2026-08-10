@@ -101,6 +101,9 @@ def main():
     energy = np.abs(bb[L:]) ** 2
     rr = np.array([energy[d:d + L].sum() for d in range(bb.size - 2 * L)])
     metric = np.abs(p) ** 2 / (rr ** 2 + 1e-12)
+    # The Schmidl-Cox metric is a normalised ratio, so in the noise-only lead-in
+    # (tiny rr) it takes arbitrary values that would dwarf the real plateau on
+    # the plot. Blank the lags whose received energy is under a quarter of peak.
     metric[rr < 0.25 * rr.max()] = 0.0
     blk = nsc + cp
     x = apply_cfo(bb[start:], cfo)
@@ -108,6 +111,8 @@ def main():
     H = pilot_spec / (rxr.pilot_freq + 1e-12)
     dat = []
     cst = rxr.modulator.constellation
+    # Block 0 is the Schmidl-Cox preamble and block 1 the pilot (used for H
+    # just above), so the payload blocks start at index 2.
     for b in range(2, x.size // blk):
         d = np.fft.fft(x[b * blk + cp: b * blk + cp + nsc]) / np.sqrt(nsc) / (H + 1e-12)
         dec = cst[np.argmin(np.abs(d[:, None] - cst[None, :]), axis=1)]

@@ -49,7 +49,8 @@ ATTENUATION MECHANISMS (the three terms of Francois-Garrison 1982):
          high-frequency term, item 3.
 
     2. Magnesium sulfate relaxation (dominant ~10-500 kHz):
-       - Chemical relaxation, relaxation frequency ~100 kHz
+       - Chemical relaxation at f2 = 8.17·10^(8 - 1990/T_K) kHz, i.e. 76 kHz
+         at the 10 °C used below and rising steeply with temperature
        - Temperature, salinity and depth dependent
        - Carries the temperature behaviour seen in Scenario B: its A2*P2
          coefficient falls as temperature rises, so at 10 kHz attenuation

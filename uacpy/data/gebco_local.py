@@ -55,7 +55,7 @@ class _GebcoGrid(NetcdfGrid):
         rows = [self.row(v) for v in lats]
         cols = [self.col(v) for v in lons]
         r0, r1 = min(rows), max(rows)
-        ri = [r - r0 for r in rows]
+        slab_rows = [r - r0 for r in rows]      # row indices within the slab
         # Eastward longitudes give non-decreasing column indices with at most
         # one wrap back to 0; slicing min..max across that wrap would read all
         # 86 400 columns, so read each contiguous run and stitch.
@@ -67,7 +67,8 @@ class _GebcoGrid(NetcdfGrid):
             c0 = min(run)
             slab = np.asarray(self._elev[r0:r1 + 1, c0:max(run) + 1],
                               dtype=float)
-            blocks.append(slab[np.ix_(ri, [c - c0 for c in run])])
+            slab_cols = [c - c0 for c in run]
+            blocks.append(slab[np.ix_(slab_rows, slab_cols)])
         return lats, lons, np.hstack(blocks)
 
 

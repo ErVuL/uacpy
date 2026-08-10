@@ -84,7 +84,10 @@ def plot_field(
         ``'tl'`` (default, dB), ``'mag_db'`` (``20·log10|H|``), ``'mag'``,
         ``'phase'``, ``'real'``, ``'imag'``.
     vmin, vmax : float, optional
-        Colour limits (2-D heatmap only). ``None`` picks an auto-clip for TL.
+        Colour limits (2-D heatmap only). For ``value='tl'`` an unset limit
+        takes the fixed 20–120 dB TL scale (``_TL_LIMITS``), never an
+        autoscale: TL panels are meant to stay directly comparable across
+        models, frequencies and runs.
     cmap : str, optional
         Override the default colormap (2-D heatmap only).
     title : str, optional
@@ -250,13 +253,10 @@ def _plot_field_2d(
     receiver=None,
     show_colorbar=True, contours=None, **mpl_kw,
 ):
-    if axes_present == ['depth', 'range']:
-        x_name, y_name = 'range', 'depth'
-        Z = arr
-    else:
-        # General two-axis case: first axis on Y, second on X.
-        y_name, x_name = axes_present[0], axes_present[1]
-        Z = arr
+    # First coord axis on Y, second on X — which for the canonical
+    # ['depth', 'range'] field is the usual depth-vs-range cross-section.
+    y_name, x_name = axes_present
+    Z = arr
 
     x_coord = field.coords[x_name]
     y_coord = field.coords[y_name]
@@ -715,6 +715,9 @@ def compare_models(
             contours=contours, show_colorbar=False,
         )
         if ax.collections:
+            # Every panel was drawn with the same vmin/vmax/cmap, so any one
+            # mesh maps the shared scale — keep the last for the single
+            # figure-level colorbar.
             im_last = ax.collections[0]
     for ax in axes_flat[n:]:
         ax.axis('off')

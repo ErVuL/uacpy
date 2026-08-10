@@ -13,7 +13,8 @@ COMPLEXITY LEVEL: ⭐⭐⭐ (3/5) - Advanced Model Features
 FEATURES DEMONSTRATED:
     ✓ Coherent TL (run_mode=RunMode.COHERENT_TL) - Phase-preserving transmission loss
     ✓ Incoherent TL (run_mode=RunMode.INCOHERENT_TL) - Phase-averaged transmission loss
-    ✓ Semi-coherent TL (run_mode=RunMode.SEMICOHERENT_TL) - Hybrid coherent/incoherent
+    ✓ Semi-coherent TL (run_mode=RunMode.SEMICOHERENT_TL) - Incoherent sum with a
+      Lloyd-mirror source pattern (see RUN MODES EXPLAINED below)
     ✓ Ray tracing (run_mode=RunMode.RAYS) - Ray path visualization
     ✓ Eigenrays (run_mode=RunMode.EIGENRAYS) - Specific receiver rays
     ✓ Arrivals (run_mode=RunMode.ARRIVALS) - Arrival time/amplitude structure
@@ -560,7 +561,8 @@ def main():
     print("\nWhen to use each mode:")
     print("  → Coherent: CW signals, narrowband analysis, interference studies")
     print("  → Incoherent: Broadband signals, long-term averages")
-    print("  → Semi-coherent: Practical compromise")
+    print("  → Semi-coherent: incoherent sum for a source whose surface image")
+    print("    matters — a shallow source over a pressure-release surface")
     print("  → Rays: Understanding propagation paths, caustics")
     print("  → Eigenrays/Arrivals: Pulse propagation, time-domain analysis")
 

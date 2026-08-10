@@ -35,8 +35,9 @@ def test_as_coordinate_rejects_non_pairs(bad):
     (float('inf'), 0.0), (0.0, float('-inf')),
 ])
 def test_as_coordinate_rejects_non_finite(bad):
-    # NaN/inf used to slip through float() and only blow up later as a raw
-    # "cannot convert float NaN to integer" in a fetcher's grid-index maths.
+    # float() accepts NaN/inf, so without an explicit finiteness check they
+    # reach a fetcher's grid-index arithmetic and surface there as a raw
+    # "cannot convert float NaN to integer" far from the bad input.
     with pytest.raises(ConfigurationError, match='finite'):
         as_coordinate(bad)
 

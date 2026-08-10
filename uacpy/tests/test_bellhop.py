@@ -54,8 +54,10 @@ class TestBellhopRunModes:
 
     @pytest.mark.requires_binary
     def test_r0_column_is_no_data_nan(self, setup_env, setup_source):
-        """Bellhop writes zero pressure at r=0 (no ray travels zero distance);
-        the SHD reader surfaces those cells as NaN no-data."""
+        """``Bellhop/influence.f90:786-787`` short-circuits the cylindrical
+        spreading factor to 0 at ``r = 0`` to avoid dividing by zero, so the
+        binary writes exact zero pressure there. The SHD reader surfaces those
+        cells as NaN no-data rather than the -inf dB a literal reading gives."""
         rcv = Receiver(depths=np.array([25.0, 50.0, 75.0]),
                        ranges=np.array([0.0, 1000.0, 3000.0]))
         result = Bellhop(verbose=False).run(
@@ -714,16 +716,15 @@ class TestBellhopSourceGeometry:
     def _env():
         return Environment(bathymetry=200.0, ssp=1500.0)
 
-    def test_constructor_no_longer_accepts_source_type(self):
+    def test_constructor_rejects_source_type(self):
         with pytest.raises(TypeError):
             Bellhop(source_type='R')
 
-    def test_constructor_no_longer_accepts_beam_pattern_file(self):
+    def test_constructor_rejects_beam_pattern_file(self):
         with pytest.raises(TypeError):
             Bellhop(source_beam_pattern_file=None)
 
     def test_line_source_differs_from_point_source(self):
-        # The finding this refactor exists for: identical before the fix.
         env = self._env()
         rcv = Receiver(depths=100.0, ranges=np.linspace(100, 5000, 60))
         model = Bellhop(verbose=False)
@@ -735,10 +736,17 @@ class TestBellhopSourceGeometry:
         assert delta > 10.0, f"source_type is still inert (max dTL={delta})"
 
     def test_line_vs_point_matches_influence_f90_ratio(self):
-        # influence.f90:783 — line: factor = -4*sqrt(pi)*const;
-        # point: factor = const/sqrt(r). The 1/sqrt(r) is the only
-        # range-dependent term, so the slope of TL_point - TL_line over
-        # range is 10*log10(r2/r1).
+        # Bellhop/influence.f90:783-790 — line: factor = -4*sqrt(pi)*const;
+        # point: factor = const/sqrt(r). That 1/sqrt(r) is the only
+        # range-dependent term in ScalePressure, so the slope of
+        # TL_point - TL_line over range is 10*log10(r2/r1).
+        #
+        # The two fields are not otherwise identical: RunType(4:4)=='R' also
+        # applies a per-ray Ratio1 = sqrt(|cos(alpha)|) at
+        # Bellhop/influence.f90:52,185,321,423,534, so the beam sums differ
+        # before scaling and the residual drifts as the dominant ray family
+        # changes with range. abs=1.0 dB covers that drift; the 10*log10 term
+        # itself spans 6 dB over this range span.
         env = self._env()
         ranges = np.array([1000.0, 2000.0, 4000.0])
         rcv = Receiver(depths=100.0, ranges=ranges)
@@ -866,9 +874,13 @@ class TestAutoBounceWithBeamPattern:
 
 @pytest.mark.requires_binary
 def test_time_series_every_range_cell_carries_energy():
-    """One clock is locked for the whole receiver grid. A window taken from a
-    single cell covers only that cell's delays, and every farther receiver
-    convolves to EXACTLY zero. Measured pre-fix: 5 of 6 range cells silent."""
+    """One clock is locked for the whole receiver grid.
+
+    A window sized from a single cell covers only that cell's delays, so every
+    farther receiver convolves to EXACTLY zero — on this 6-range grid that
+    silences 5 of the 6 cells. Zero energy, not merely small energy, is the
+    signature, which is why the assertion is ``> 0`` rather than a threshold.
+    """
     from uacpy.core.environment import Environment
     from uacpy.core.source import Source
     from uacpy.core.receiver import Receiver
@@ -937,8 +949,8 @@ class TestEnvRecordOrder:
 
     ``:59 CALL ReadTopOpt`` reads the Francois-Garrison / biological rows
     itself (``:308-320``); the top half-space row is read only afterwards by
-    ``:69 CALL TopBot`` (``:474``). Emitting them the other way round fed the
-    F-G row to the half-space and killed the run in ``AttenMod : CRCI``.
+    ``:69 CALL TopBot`` (``:474``). Emitting them the other way round feeds the
+    F-G row to the half-space reader and kills the run in ``AttenMod : CRCI``.
     """
 
     @staticmethod
@@ -1032,8 +1044,9 @@ class TestQuadSSPMatrixAlignment:
                            for ln in ssp_lines[2:] if ln.strip()])
         assert matrix.shape[0] == n_pts
         assert depths[-1] == pytest.approx(self.DEPTH)
-        # The deepest .env sample interpolates 1490 @ 100 m and 1492 @ 200 m;
-        # the unaligned matrix handed Bellhop the raw 200 m sample instead.
+        # The deepest .env sample is the 150 m interpolant of 1490 @ 100 m and
+        # 1492 @ 200 m. A matrix built from the raw profile instead of the
+        # truncated .env block would put the 200 m sample (1492) on this row.
         assert speeds[-1] == pytest.approx(1491.0, abs=1e-6)
         # Every guard column holds a copy of an interior profile, so the
         # range-0 column of the matrix must reproduce the .env block exactly.
@@ -1058,10 +1071,11 @@ class TestQuadSSPMatrixAlignment:
 
 
 class TestMeshDepthCoversBathymetry:
-    """``bdryMod.f90:211`` aborts on any ``.bty`` depth below the medium depth
-    on the ``.env`` SSP header line, and that header carries one decimal
-    place — so any fractional bathymetry maximum (e.g. GEBCO) killed the run
-    when the header was rounded *down*."""
+    """``Bellhop/bdryMod.f90:211`` aborts on any ``.bty`` depth below the
+    medium depth on the ``.env`` SSP header line, and that header carries one
+    decimal place. A fractional bathymetry maximum (e.g. GEBCO's 100.04 m
+    below) therefore has to round the header UP: rounding to nearest puts the
+    header under the deepest ``.bty`` point and the run dies."""
 
     BATHY = [(0.0, 90.0), (2500.0, 100.04), (5000.0, 95.0)]
 
@@ -1194,8 +1208,8 @@ class TestLineSourceArrivalsPhase:
     def test_line_and_point_share_the_shd_phase_residual(self):
         """The source-type factor is a scalar applied at the very end of both
         codes, so the arrivals-vs-.shd phase residual — the beam-model bias —
-        must be identical for a line and a point source. It differed by pi/4
-        while only the .shd path carried the correction."""
+        must be identical for a line and a point source. A pi/4 gap between the
+        two means only one of the paths carries the 2-D correction."""
         env = Environment(name='line-phase', bathymetry=200.0, ssp=1500.0)
         rcv = Receiver(depths=np.array([100.0]),
                        ranges=np.array([2000.0, 4000.0]))
@@ -1218,10 +1232,11 @@ class TestLineSourceArrivalsPhase:
 class TestIrregularGridBroadband:
     """``ArrMod.f90:101-102`` writes ``NRz_per_range`` depth blocks, which
     ``bellhop.f90:202-206`` sets to 1 for an irregular grid — its entries are
-    the paired receivers ``(Rz(i), Rr(i))``. The broadband/time-series
-    synthesis indexed ``[0][ird][irr]`` over ``len(receiver_depths)`` blocks
-    and walked off the end; the depth axis has to collapse onto the range
-    axis, as ``read_shd_file`` already does for the TL path."""
+    the paired receivers ``(Rz(i), Rr(i))``. So broadband/time-series synthesis
+    cannot index ``[0][ird][irr]`` over ``len(receiver_depths)`` blocks; only
+    one block exists and the walk runs off the end. The depth axis has to
+    collapse onto the range axis, as ``read_shd_file`` already does for the TL
+    path."""
 
     @staticmethod
     def _fixture():

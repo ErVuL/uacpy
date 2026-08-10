@@ -228,6 +228,21 @@ def read_shd_bin(
         f4 = np.dtype(endian + 'f4')
         f8 = np.dtype(endian + 'f8')
 
+        # .shd is a Fortran DIRECT-access file whose logical record length is
+        # counted in 4-byte words, not bytes: misc/RWSHDFile.f90:100 sets
+        # LRecl = MAX( 41, 2*Nfreq, 2*Ntheta, 2*NSx, 2*NSy, NSz, NRz, 2*NRr )
+        # ("words/record") and :102 opens the file with RECL = 4 * LRecl. Record
+        # n therefore begins at byte (n - 1) * 4 * recl — the offset every seek
+        # below computes. Header records (misc/RWSHDFile.f90:103-114):
+        #   1  LRecl (i4) then Title, CHARACTER*80 (= 40 words, whence MAX(41,…))
+        #   2  PlotType, CHARACTER*10
+        #   3  Nfreq Ntheta NSx NSy NSz NRz NRr (i4) then freq0, atten (f8)
+        #   4  freqVec  5  theta  6  Sx  7  Sy  8  Sz  9  Rz  10  Rr
+        # The doubled terms of the LRecl formula are the REAL(KIND=8) vectors;
+        # NSz and NRz enter undoubled because Sz and Rz are REAL(KIND=4)
+        # (misc/SourceReceiverPositions.f90:22-27) — which is why those two
+        # alone are read as f4 here. Records 11.. hold the pressure, one row of
+        # NRr default-kind COMPLEX (two f4 words apiece) per receiver depth.
         recl = int(np.fromfile(fid, dtype=i4, count=1)[0])
         title_bytes = fid.read(80)
         title = title_bytes.decode("ascii", errors="ignore").strip()
@@ -270,6 +285,9 @@ def read_shd_bin(
             fid.seek(6 * 4 * recl, 0)
             s_y = np.fromfile(fid, dtype=f8, count=Nsy)
         else:
+            # Compressed FIELD3D 'TL' layout: records 6 and 7 carry only the
+            # first and last source coordinate (misc/RWSHDFile.f90:126-127),
+            # the grid between them being uniform.
             fid.seek(5 * 4 * recl, 0)
             s_x_lim = np.fromfile(fid, dtype=f8, count=2)
             s_x = np.linspace(s_x_lim[0], s_x_lim[1], Nsx)
@@ -288,7 +306,8 @@ def read_shd_bin(
         # single-frequency (the slice 'pressure_freq'); a broadband caller must
         # pass frequency= per frequency or iterate freqVec, never treat 'pressure' as
         # a multi-frequency cube. NB: only the standard 2D path (xs is None)
-        # carries a frequency axis in the record stream (field.f90 stacks frequency
+        # carries a frequency axis in the record stream (KrakenField/field.f90
+        # stacks frequency
         # outermost). The 3D / irregular multi-source path (xs given) is written
         # one frequency per file (bellhop3D.f90: iRec has no frequency stride),
         # so there is no frequency to select there.
@@ -303,9 +322,14 @@ def read_shd_bin(
                     "the (0, 0) slot only. Pass xs=, ys= to choose another.",
                     UserWarning, stacklevel=2,
                 )
-            idxX = 0
-            idxY = 0
-
+            # Records after the 10 header ones run frequency-major, then
+            # bearing, then source depth, then receiver depth — the nesting the
+            # writers step through one record at a time: KrakenField/field.f90
+            # resets iRec to 10 on the first frequency (:179) and bumps it once
+            # per (source depth, receiver depth) inside its frequency loop
+            # (:215), and Bellhop/bellhop.f90:323-326 lands on the same index
+            # via ``IRec = 10 + NRz_per_range * ( is - 1 )``. ``recnum`` is the
+            # 0-based record index, i.e. Fortran REC - 1.
             for itheta in range(Ntheta):
                 for isz in range(Nsz):
                     for irz in range(Nrcvrs_per_range):
@@ -333,11 +357,16 @@ def read_shd_bin(
                     "carry a single frequency; returning freqVec[0].",
                     UserWarning, stacklevel=2,
                 )
+            # Sx/Sy are metres on disk: ReadSxSy reads them as 'km' and
+            # ReadVector scales by 1000 before WriteHeader runs
+            # (misc/SourceReceiverPositions.f90:87-88, :277).
             x_diff = np.abs(s_x - km_to_m(xs))
             idxX = np.argmin(x_diff)
             y_diff = np.abs(s_y - km_to_m(ys))
             idxY = np.argmin(y_diff)
 
+            # Source x/y replace frequency as the outer strides here:
+            # Bellhop/bellhop3D.f90:407-410 builds exactly this index.
             for itheta in range(Ntheta):
                 for isz in range(Nsz):
                     for irz in range(Nrcvrs_per_range):
@@ -458,9 +487,10 @@ def read_shd_asc(filepath: Union[str, Path]) -> Dict[str, Any]:
     s_z = _take(Nsd)
     r_z = _take(Nrd)
     r_r = _take(Nrr)
-    temp = np.array([_take(2 * Nrr) for _ in range(Nrd)]).T
+    # One row of 2*Nrr interleaved re/im values per receiver depth.
+    rows = np.array([_take(2 * Nrr) for _ in range(Nrd)])
 
-    pressure = temp[0::2, :].T + 1j * temp[1::2, :].T
+    pressure = rows[:, 0::2] + 1j * rows[:, 1::2]
     # Exact complex zero = cell the engine never wrote (see read_shd_bin);
     # surface as NaN, uacpy's no-data convention.
     pressure[pressure == 0] = np.nan
@@ -512,7 +542,12 @@ def read_arr_file(filepath: Union[str, Path], *, grid_type: str = 'R'):
         Per-arrival fields, with units (ArrMod.f90:WriteArrivalsASCII):
 
         - ``amplitudes`` : real linear pressure magnitude (dimensionless);
-          combine with ``phases`` for the complex amplitude.
+          combine with ``phases`` for the complex amplitude. Bellhop has
+          already folded the spreading factor in on write
+          (``Bellhop/ArrMod.f90:103-110``): ``1/sqrt(r)`` for a point source,
+          ``4·sqrt(pi)`` for a line source, and a fixed ``1e5`` at ``r == 0``
+          to avoid the division — so an ``r = 0`` receiver carries an
+          arbitrary magnitude, not a physical one.
         - ``phases`` : degrees.
         - ``delays`` : real part of travel time in **seconds**.
         - ``delays_imag`` : imaginary part of travel time in **seconds**;
@@ -617,7 +652,10 @@ def read_arr_file(filepath: Union[str, Path], *, grid_type: str = 'R'):
 
     for isd in range(nsd):
         sd_list = []
-        # Skip the per-source max-narr value.
+        # WriteArrivalsASCII is called once per source depth
+        # (Bellhop/bellhop.f90:329, inside the source loop) and opens each call
+        # with MAXVAL( NArr ) over the whole receiver grid
+        # (Bellhop/ArrMod.f90:99) — a storage hint, not part of the data.
         _next_int(t_iter)
 
         for irz in range(n_depth_blocks):
@@ -647,6 +685,10 @@ def read_arr_file(filepath: Union[str, Path], *, grid_type: str = 'R'):
                     n_tops = []
                     n_bots = []
 
+                    # One record per arrival, in the column order of the single
+                    # WRITE at Bellhop/ArrMod.f90:119-126: A, Phase,
+                    # REAL(delay), AIMAG(delay), SrcDeclAngle, RcvrDeclAngle,
+                    # NTopBnc, NBotBnc.
                     for ia in range(narr):
                         values = _next_floats(t_iter, 8)
 
@@ -737,6 +779,8 @@ def read_ray_file(filepath: Union[str, Path]):
     n_sz = 1
     n_alpha = 0
 
+    # Seven header records, one per line, written by
+    # Bellhop/ReadEnvironmentBell.f90:557-568.
     with open(filepath, "r") as f:
         f.readline()                  # title
         f.readline()                  # frequency
@@ -780,6 +824,10 @@ def read_ray_file(filepath: Union[str, Path]):
             if not counts_line:
                 break
 
+            # Each ray is three records (Bellhop/WriteRay.f90:41-46): the
+            # take-off angle, then ``N2, NumTopBnc, NumBotBnc``, then N2 rows of
+            # the coordinate pair. N2 counts the points kept after WriteRay2D's
+            # subsampling, not the full step count.
             counts = counts_line.split()
             if len(counts) < 1:
                 continue
@@ -1073,7 +1121,8 @@ def read_flp(fileroot: Union[str, Path], verbose: bool = False) -> Dict[str, Any
         Dictionary containing:
         - 'title': str - Title from file
         - 'opt': str - 4-character field.exe option string. Column
-          semantics per AT ``field.f90:70-99`` / ``ReadModes.f90``:
+          semantics per AT ``KrakenField/field.f90:70-99`` /
+          ``KrakenField/ReadModes.f90``:
 
           * ``opt[0]`` (source type):
             'R' = cylindrical point source (pressure),
@@ -1081,10 +1130,16 @@ def read_flp(fileroot: Union[str, Path], verbose: bool = False) -> Dict[str, Any
             'S' = scaled-cylindrical point source.
           * ``opt[1]`` (profile mode for NProf > 1):
             'C' = coupled modes, 'A' = adiabatic.
-          * ``opt[2]`` (elastic component selector / SBP flag):
-            'P' = acoustic pressure (default), 'H' = horizontal velocity,
-            'V' = vertical velocity, 'T' = tangential stress,
-            'N' = normal stress, or '*' = apply .sbp beam pattern.
+          * ``opt[2]`` (source beam pattern, doubling as the elastic
+            component selector): ``'*'`` reads a ``.sbp`` file, ``'O'`` or
+            ``' '`` omnidirectional — the only three ``field.exe`` accepts
+            (``KrakenField/field.f90:83-90``). The same character reaches
+            ``ReadModes`` as ``Comp``, which picks one component of the
+            stress-displacement vector in **elastic** media: ``'H'``
+            horizontal displacement, ``'V'`` vertical displacement, ``'T'``
+            tangential stress, ``'N'`` normal stress
+            (``KrakenField/ReadModes.f90:315-324``). Any other letter —
+            ``'P'`` by MATLAB convention — leaves acoustic pressure.
           * ``opt[3]`` (mode summation):
             'C' = coherent, 'I' = incoherent.
         - 'comp': str - Component selector (same as ``opt[2]``).
@@ -1220,7 +1275,7 @@ def read_flp3d(fileroot: Union[str, Path]) -> Dict[str, Any]:
 
         - 'title': str — Title.
         - 'opt': str — FIELD3D option string. ``opt[0:3]`` selects the
-          field algorithm (``'STD'``/``'PAR'``/``'GBT'``), ``opt[3]`` is
+          field algorithm (``'STD'``/``'PDQ'``/``'GBT'``), ``opt[3]`` is
           ``'T'`` to run the tesselation check, ``opt[6]`` is the ``.sbp``
           beam-pattern flag (``field3d.f90:54``, ``:96``, ``:210``).
         - 'M_limit': int — Maximum number of modes to use.
@@ -1390,7 +1445,10 @@ def read_rts_file(filepath: Union[str, Path]) -> Dict[str, Any]:
         )
     ranges = np.array([float(x) for x in raw_tokens[1:1 + nr]])
 
-    # Remaining tokens are time-series records: (1 time + nr pressures) per step.
+    # Remaining tokens are time-series records: (1 time + nr pressures) per step
+    # (Scooter/sparc.f90:294,299 write ``tout( Itout ), values( 1 : nr )``).
+    # Floor-divide so a run killed mid-record contributes no partial time step,
+    # which would otherwise shift every later sample by one column.
     rest = raw_tokens[1 + nr:]
     values_per_timestep = 1 + nr
     nt = len(rest) // values_per_timestep
@@ -1470,6 +1528,12 @@ def rts_to_pressure(
         return p_freq[f_idx, :] / S_at_f0, ranges
 
     if method == "fft":
+        # Steady-tone amplitude from one rfft bin: the 2.0 restores the half of
+        # the tone's energy that sits in the negative-frequency bin rfft drops,
+        # and dividing by the window's coherent gain sum(w) undoes both the
+        # 1/N of the unnormalised transform and the taper's amplitude loss. On
+        # a pure tone at bin centre the pair returns the tone's own amplitude
+        # and phase, whatever nt and whatever window.
         window = np.hanning(nt)
         p_freq = np.fft.rfft(p * window[:, np.newaxis], axis=0)
         freqs = np.fft.rfftfreq(nt, dt)
@@ -1487,7 +1551,11 @@ def rts_to_pressure(
                 s0 = p[it, ir] + coeff * s1 - s2
                 s2 = s1
                 s1 = s0
-            p_at_freq[ir] = s0 - s1 * np.exp(-1j * omega * dt)
+            # After the shift ``s1`` aliases ``s0``, so the closing combination
+            # must use ``s2`` — the state one step back. The leading
+            # ``exp(+i w dt)`` advances by the one sample the recurrence lags,
+            # which is what makes this agree with ``np.fft.rfft`` bin-for-bin.
+            p_at_freq[ir] = s0 * np.exp(1j * omega * dt) - s2
         p_at_freq = 2.0 * p_at_freq / nt
     else:
         raise ConfigurationError(

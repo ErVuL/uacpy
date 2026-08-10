@@ -17,10 +17,10 @@ from uacpy.data import sediment
 def test_hamilton_table_endpoints():
     # Coarse sand and silty clay reproduce the Hamilton & Bachman (1982) table
     # at the reference seawater (c_w=1510 m/s, rho_w=1.030 g/cm3).
-    coarse = sediment.grain_size_to_geoacoustics(0.5)
+    coarse = sediment.grain_size_to_geoacoustics(0.92)
     assert coarse['sound_speed'] == pytest.approx(1813.5, abs=1.0)
     assert coarse['density'] == pytest.approx(2.034, abs=1e-3)
-    fine = sediment.grain_size_to_geoacoustics(8.5)
+    fine = sediment.grain_size_to_geoacoustics(8.80)
     assert fine['sound_speed'] == pytest.approx(1494.9, abs=1.0)
     assert fine['density'] == pytest.approx(1.480, abs=1e-3)
 
@@ -101,8 +101,9 @@ def test_bottom_from_class_unknown_raises():
 
 
 def test_grain_size_none_water_uses_hamilton_reference():
-    """Audit M3: water_sound_speed=None reproduces the 1510 m/s Hamilton
-    reference (so threading None is a no-op vs the old default)."""
+    """``water_sound_speed=None`` means "use Hamilton's own reference water"
+    (1510 m/s, 1.030 g/cm³), so it must agree exactly with passing those two
+    values explicitly — ``None`` is a default, not a separate code path."""
     explicit = sediment.grain_size_to_geoacoustics(1.0, water_sound_speed=1510.0,
                                                    water_density=1.030)
     default = sediment.grain_size_to_geoacoustics(1.0)
@@ -111,7 +112,7 @@ def test_grain_size_none_water_uses_hamilton_reference():
 
 
 def test_grain_size_scales_with_in_situ_water_speed():
-    """Audit M3: sediment cp is a velocity *ratio* to the overlying water, so a
+    """Sediment cp is a velocity *ratio* to the overlying water, so a
     colder/warmer in-situ water speed must shift the bottom cp proportionally
     instead of always referencing 1510 m/s."""
     cold = sediment.grain_size_to_geoacoustics(1.0, water_sound_speed=1450.0)
@@ -124,8 +125,9 @@ def test_grain_size_scales_with_in_situ_water_speed():
 
 
 def test_range_dependent_bottom_preserves_shear():
-    """Audit M4: range_dependent_bottom_along must carry shear so an elastic
-    (rock) waypoint is not silently flattened to a fluid half-space."""
+    """``range_dependent_bottom_along`` must carry shear so an elastic (rock)
+    waypoint is not silently flattened to a fluid half-space — dropping it
+    changes the physics at that column, not just its resolution."""
     elastic = BoundaryProperties(
         acoustic_type='half-space', sound_speed=2500.0, density=2.0,
         attenuation=0.1, shear_speed=1200.0, shear_attenuation=0.2)

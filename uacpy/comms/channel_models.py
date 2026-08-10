@@ -28,6 +28,9 @@ def awgn(signal, snr_db, *, rng=None):
     p = np.mean(np.abs(x) ** 2)
     n0 = p / (10.0 ** (float(snr_db) / 10.0))
     if np.iscomplexobj(x):
+        # n0 is the *total* noise power, split n0/2 into each quadrature so
+        # E|noise|^2 = n0 and the requested SNR means the same thing for a
+        # complex-baseband and a real-passband signal.
         noise = np.sqrt(n0 / 2) * (rng.standard_normal(x.shape)
                                    + 1j * rng.standard_normal(x.shape))
     else:

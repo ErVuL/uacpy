@@ -1,4 +1,35 @@
-"""Base class for acoustic propagation models."""
+"""Base class for acoustic propagation models.
+
+:class:`PropagationModel` holds the contracts every wrapper in
+:mod:`uacpy.models` inherits. The file reads in this order:
+
+* :class:`RunMode` — the run-mode vocabulary;
+* environment-projection policy — :data:`DEFAULT_COLLAPSE`,
+  :data:`VALID_COLLAPSE_METHODS`, :data:`_CAPABILITY_FLAGS`, and the
+  roughness helpers those drive;
+* :class:`ModelSpec` — the declarative per-model manifest, validated at
+  class-definition time by ``__init_subclass__``;
+* :class:`PropagationModel`, grouped as: construction + spec application,
+  run-mode / run-kwarg resolution, broadband and time-series grid
+  derivation, work-dir setup and logging, input validation, the
+  ``compute_*`` convenience wrappers, executable lookup and subprocess
+  launch, environment projection, output-path and ``.prt`` bookkeeping,
+  result stamping, depth policy, ``__repr__``;
+* module-private introspection helpers behind ``copy`` / ``__repr__``.
+
+Every concrete ``run()`` follows the same recipe, in this order::
+
+    run_mode = self._resolve_run_mode(run_mode)   # + optional-kwarg guards
+    env      = self._project_environment(env)     # collapse what we lack
+    self.validate_inputs(env, source, receiver, run_mode=run_mode)
+    fm = self._setup_file_manager()
+    try:      # write the deck, launch the binary, read it back, build Result
+        ...
+        self._attach_output_paths(result, fm.work_dir, base_name, ...)
+    finally:
+        if fm.cleanup:
+            fm.cleanup_work_dir()
+"""
 
 import copy as _copy
 import os
@@ -47,6 +78,9 @@ class RunMode(Enum):
     """
     COHERENT_TL = 'coherent_tl'          # Coherent transmission loss
     INCOHERENT_TL = 'incoherent_tl'      # Incoherent (averaged) TL
+    # Incoherent beam sum (Bellhop/influence.f90:139-141, same as 'I') with a
+    # Lloyd-mirror source directivity folded into the launch amplitude
+    # (Bellhop/bellhop.f90:276-278).
     SEMICOHERENT_TL = 'semicoherent_tl'
 
     RAYS = 'rays'                        # Ray paths only
@@ -141,16 +175,36 @@ def _smooth_surface(surface):
 
 
 def _smooth_bottom(bottom):
-    """``bottom`` with every column's half-space roughness zeroed."""
+    """``bottom`` with every interface roughness zeroed — layers and half-space."""
     smoothed = _copy.deepcopy(bottom)
     for column in smoothed.columns:
         column.halfspace.roughness = 0.0
+        for layer in getattr(column, 'layers', ()) or ():
+            layer.roughness = 0.0
     return smoothed
+
+
+def _bottom_roughness(bottom) -> float:
+    """Largest interfacial sigma anywhere in a ``Bottom``.
+
+    A sediment layer's roughness is the interface at its top, so the seafloor
+    of a layered column lives on ``layers[0]``, not on the half-space.
+    """
+    if bottom is None:
+        return 0.0
+    boundaries = []
+    for column in bottom.columns:
+        boundaries.append(column.halfspace)
+        boundaries.extend(getattr(column, 'layers', ()) or ())
+    return _max_roughness(boundaries)
 
 
 # Capability-flag names a model may advertise. Each maps to a
 # ``_supports_<name>`` instance attribute; the question each answers is "does
 # this env *shape* — or this source feature — work with this model?".
+# Declaring one is a promise: ``_project_environment`` then leaves that
+# feature in the env and emits no warning, so the model's deck writer has to
+# carry it — nothing downstream re-checks.
 # Keep in lockstep with the ``self._supports_*`` block in
 # ``PropagationModel.__init__``.
 _CAPABILITY_FLAGS: frozenset = frozenset({
@@ -427,9 +481,16 @@ class PropagationModel(ABC):
         #                   dependent bottom to one column (mean/median
         #                   numeric only for an all-half-space bottom)
         # 'bottom_layers' : 'halfspace'|'top_layer'|'volume_average' — flatten
-        #                   each column's layer stack to a half-space
+        #                   each column's layer stack to a half-space; see
+        #                   SeabedColumn.collapse for what each method keeps
         # 'altimetry'     : 'drop'
+        # 'surface'       : 'r0'|'rmax'|'mean'|'median' — reduce a range-
+        #                   dependent Surface to a single boundary
         # 'elastic'       : 'fluid' (zero shear) | 'vacuum'
+        #
+        # ``self._collapse`` is the resolved policy (defaults ← spec ← user);
+        # ``self.collapse`` keeps the constructor argument verbatim, because
+        # ``copy()`` and ``__repr__`` read every knob off ``self.<param>``.
         self._collapse: Dict[str, str] = dict(DEFAULT_COLLAPSE)
         self._user_collapse: Dict[str, str] = {}
         self.collapse = dict(collapse) if collapse else None
@@ -478,12 +539,15 @@ class PropagationModel(ABC):
         # a single binary call; everyone else loops in Python.
         self._supports_multi_source_depth: bool = False
         self._supports_source_beam_pattern: bool = False
-        # SPARC's GetPar and Bounce's elastic branch ERROUT on a
-        # non-zero SSP%sigma; Kraken/Scooter consume it.
+        # Surface sigma(1). SPARC's GetPar (Scooter/sparc.f90:177) and
+        # Bounce's elastic branch (Kraken/bounce.f90:104) ERROUT on a
+        # non-zero SSP%sigma; Kraken consumes it (Kraken/kraken.f90:902) and
+        # Scooter in its vacuum-boundary impedance (Scooter/scooter.f90:309).
         self._supports_rough_surface: bool = False
-        # Seabed sigma(NMedia+1). Kraken/Scooter apply the Kirchhoff
-        # attenuation; Bellhop's solver ignores the value and RAM's PE
-        # format has nowhere to put it.
+        # Seabed sigma(NMedia+1). Kraken/KrakenC feed it to the
+        # Kuperman-Ingenito interfacial-roughness perturbation
+        # (Kraken/Scattering.f90:8, Kraken/kraken.f90:902); Bellhop's solver
+        # ignores the value and RAM's PE format has nowhere to put it.
         self._supports_rough_bottom: bool = False
         self._supported_source_types: frozenset = frozenset({'point'})
 
@@ -882,6 +946,8 @@ class PropagationModel(ABC):
             bandwidth_factor = DEFAULT_BROADBAND_BANDWIDTH_FACTOR
         fc = float(src_f[0])
         half_bw = 0.5 * float(bandwidth_factor)
+        # The lower edge goes to zero or negative once bandwidth_factor >= 2;
+        # a 0 Hz bin is not a runnable model frequency, so floor it at 1 Hz.
         return np.linspace(
             max(1.0, fc * (1.0 - half_bw)),
             fc * (1.0 + half_bw),
@@ -940,6 +1006,8 @@ class PropagationModel(ABC):
             )
         i_lo = int(np.argmax(significant))
         i_hi = len(significant) - 1 - int(np.argmax(significant[::-1]))
+        # A pulse with DC content puts ``i_lo`` on bin 0, i.e. f = 0 Hz, which
+        # no model can be run at; the first non-zero bin is Δf.
         f_min = max(float(src_freqs[i_lo]), df)
         f_max = float(src_freqs[i_hi])
         if f_max <= f_min:
@@ -1230,14 +1298,14 @@ class PropagationModel(ABC):
         seafloor = np.asarray(env.bathymetry.eval(range=ranges), dtype=float)
 
         mask = depths[:, None] > seafloor[None, :]
-        row_ranges = np.broadcast_to(ranges[None, :], mask.shape)
-        row_floors = np.broadcast_to(seafloor[None, :], mask.shape)
-        depths = np.broadcast_to(depths[:, None], mask.shape)
 
         if np.any(mask):
+            row_ranges = np.broadcast_to(ranges[None, :], mask.shape)
+            row_floors = np.broadcast_to(seafloor[None, :], mask.shape)
+            row_depths = np.broadcast_to(depths[:, None], mask.shape)
             flat = int(np.argmax(mask))
             r = float(row_ranges.ravel()[flat])
-            z = float(depths.ravel()[flat])
+            z = float(row_depths.ravel()[flat])
             sf = float(row_floors.ravel()[flat])
             warnings.warn(
                 f"{self.model_name}: receiver at "
@@ -1285,7 +1353,7 @@ class PropagationModel(ABC):
         source: Source,
         receiver: Receiver,
         *,
-        run_mode: 'RunMode' = None,
+        run_mode: Optional['RunMode'] = None,
     ) -> Result:
         """Compute transmission loss (thin wrapper around ``run``).
 
@@ -1720,9 +1788,10 @@ class PropagationModel(ABC):
         All Fortran acoustic binaries are spawned through this helper so that
         failures surface as ``ModelExecutionError`` with stdout/stderr
         attached, and so every child inherits a raised ``RLIMIT_STACK``.
-        Several Acoustics-Toolbox binaries (notably SPARC) statically
-        allocate large COMPLEX arrays on the stack; the default 8 MB Linux
-        soft stack segfaults them on first use.
+        Several Acoustics-Toolbox binaries (notably SPARC, whose ``MARCH``
+        declares twelve automatic ``COMPLEX(NTot1)`` arrays at
+        ``Scooter/sparc.f90:354-355``) put large working arrays on the stack;
+        the default 8 MB Linux soft stack segfaults them on first use.
 
         Parameters
         ----------
@@ -1866,6 +1935,23 @@ class PropagationModel(ABC):
         ``_supports_*`` flag and reduced via the matching key in the
         configured ``collapse={…}`` dict. Emits one ``UserWarning`` per
         dropped feature.
+
+        Notes
+        -----
+        The caller's ``env`` is never touched — everything happens on
+        ``env.copy()``, so a user can reuse one ``Environment`` across models
+        that project it differently. Only ``altimetry``, ``surface``,
+        ``bathymetry``, ``ssp`` and ``bottom`` are rewritten;
+        ``env.absorption`` and everything else pass through.
+
+        Every branch *narrows* — it removes range dependence, layering or
+        shear that the model cannot represent — with one deliberate
+        exception: collapsing the bathymetry can deepen the seafloor, and the
+        SSP is then extended to match (see below).
+
+        Order matters (the bottom's range axis is collapsed before its layer
+        axis), so a subclass that overrides this must call ``super()`` —
+        Kraken does — rather than reimplement the sequence.
         """
         e = env.copy()
 
@@ -1899,18 +1985,19 @@ class PropagationModel(ABC):
             warnings.warn(
                 f"{self.model_name} does not carry a rough sea surface into "
                 f"its deck; env.surface.roughness={surf_sigma:g} m dropped. "
-                f"Use Kraken or Scooter to keep it.",
+                f"Use Kraken, an OASES model, or Scooter with a vacuum "
+                f"surface to keep it.",
                 UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
             )
 
-        bot_sigma = _max_roughness(
-            [c.halfspace for c in e.bottom.columns]) if e.bottom else 0.0
+        bot_sigma = _bottom_roughness(e.bottom)
         if bot_sigma and not self._supports_rough_bottom:
             e.bottom = _smooth_bottom(e.bottom)
             warnings.warn(
                 f"{self.model_name} does not carry seabed interfacial "
                 f"roughness into its deck; env.bottom roughness="
-                f"{bot_sigma:g} m dropped. Use Kraken or Scooter to keep it.",
+                f"{bot_sigma:g} m dropped. Use Kraken or an OASES model "
+                f"to keep it.",
                 UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
             )
 
@@ -1921,6 +2008,10 @@ class PropagationModel(ABC):
             max_d = float(e.bathymetry.depths.max())
             e.bathymetry = Bathymetry(
                 ranges=np.array([0.0]), depths=np.array([new_depth]))
+            # A collapse method that picks a deeper column than the profile
+            # was tabulated for (``'max'``, the default, on a sloping bottom)
+            # leaves the SSP short of the new seafloor, which the AT writers
+            # reject. Constant-extrapolate the deepest sound speed down to it.
             if e.ssp.depths[-1] < new_depth:
                 e.ssp = e.ssp.extend_to(new_depth)
             warnings.warn(
@@ -2025,7 +2116,7 @@ class PropagationModel(ABC):
             result.metadata['prt_file'] = str(prt_path)
 
     @staticmethod
-    def _attach_prt_tail(exc, work_dir, base_name, n_chars: int = 2000):
+    def _attach_prt_tail(exc, work_dir, base_name, tail_bytes: int = 2000):
         """Append the tail of the binary's ``<base>.prt`` log to ``exc``.
 
         Acoustics-Toolbox binaries dump fatal errors (``*** FATAL ERROR ***``)
@@ -2038,7 +2129,8 @@ class PropagationModel(ABC):
         round-trip that ``run_parallel`` relies on — the rebuilt message is
         re-derived from ``stderr``), keeping ``exc.args`` in sync.
         """
-        tail = read_prt(Path(work_dir) / f"{base_name}.prt", tail_bytes=n_chars)
+        tail = read_prt(Path(work_dir) / f"{base_name}.prt",
+                        tail_bytes=tail_bytes)
         if tail is None:
             return
         block = f"\n\n.prt tail:\n{tail}"
@@ -2163,6 +2255,16 @@ class PropagationModel(ABC):
         ``backend`` names the concrete binary that ran and is lowercase
         across the package (``'scooter'``, ``'oast'``, ``'mpiramS'``, …), so
         the default lowercases the class name rather than mixing conventions.
+
+        Identification only: this stamps who produced the result, never what
+        it means numerically. Nothing here — nor anywhere else in
+        :class:`PropagationModel` — rescales, normalises or re-references the
+        payload, so the amplitude a wrapper stores is whatever its reader
+        returned. The one cross-model *convention* the base class carries is
+        ``phase_reference`` (see
+        :class:`~uacpy.core.results._base.PhaseReference`), which is about
+        phase, not level; the absolute dB reference behind ``Field.tl`` is a
+        per-model property and is not asserted here.
         """
         kw = dict(
             model=self.model_name,
@@ -2203,6 +2305,11 @@ class PropagationModel(ABC):
         Ray/mode models stop at the seafloor; full-waveguide spectral
         solvers override this to include the sediment layers they mesh
         through (see :meth:`_total_media_depth`).
+
+        The value gates source and receiver depths asymmetrically in
+        :meth:`_validate_geometry`: a source below it raises, a receiver
+        below it only warns. Overriding this therefore changes which source
+        placements are legal, not just which receivers warn.
         """
         return float(env.depth)
 

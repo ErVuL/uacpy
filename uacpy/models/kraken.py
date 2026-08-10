@@ -208,11 +208,14 @@ class Kraken(PropagationModel):
         field evaluation used; :meth:`Modes.first_n` slices an existing result
         after the fact.
     leaky_modes : bool, optional
-        If True, override ``c_high`` to 1e9 so the modes binary attempts
-        leaky modes (trapped modes with phase speeds above the halfspace
-        P-wave speed). This forces ``backend='krakenc'`` because leaky
-        modes have complex wavenumbers. See the Kraken doc: "CHIGH will
-        attempt to compute leaky modes...". Default: False.
+        If True, override ``c_high`` to 1e9 so the modes binary attempts leaky
+        modes — modes whose phase speed exceeds the half-space S- or P-wave
+        speed, so they radiate into the half-space instead of being trapped.
+        This forces ``backend='krakenc'``: ``doc/kraken.htm:650-657`` has KRAKEN
+        "reduce CHIGH so that only trapped (non-leaky) modes are computed" while
+        "KRAKENC will attempt to compute leaky modes if CHIGH exceeds the phase
+        velocity of either the S-wave or P-wave speed in the half-space".
+        Default: False.
     top_reflection_file : Path, optional
         A ``.trc`` top-reflection-coefficient table. Overrides the surface
         boundary condition to ``'F'`` and is staged next to the ``.env``.
@@ -633,17 +636,18 @@ class Kraken(PropagationModel):
                 except ValueError:
                     pass
 
-            # 3. Kraken-specific failure string
-            modes_not_found = 'modes not found at cLow' in prt_content
-
-            # 4. Slow/failed root-finding on interfacial (Scholte/Stoneley)
-            #    modes. kraken.htm's remedy is to raise cLow to the minimum
-            #    p-wave speed so those modes are skipped.
+            # 3. Slow/failed root-finding on interfacial (Scholte/Stoneley)
+            #    modes. misc/RootFinderSecantMod.f90:80,136 sets the message;
+            #    Kraken/kraken.f90:359,407 and Kraken/krakenc.f90:388 echo it
+            #    into the .prt behind their own 'Warning in KRAKEN[C] -
+            #    RootFinderSecant' banner. kraken.htm's remedy is to raise cLow
+            #    to the minimum p-wave speed so those modes are skipped.
             secant_failure = bool(
-                re.search(r'CONVERGE\s+IN\s+SECANT', prt_content, re.IGNORECASE)
+                re.search(r'converge\s+in\s+RootFinderSecant',
+                          prt_content, re.IGNORECASE)
             )
 
-            # 5. The empty-spectrum ERROUT (Kraken/kraken.f90:961). This is a
+            # 4. The empty-spectrum ERROUT (Kraken/kraken.f90:962). This is a
             #    physical statement about [cLow, cHigh], not a solver failure,
             #    and it names its own remedy — so it is tested before the
             #    elastic markers, which the bottom's own 'ACOUSTO-ELASTIC
@@ -663,20 +667,20 @@ class Kraken(PropagationModel):
                 )
             elif secant_failure:
                 error_msg += (
-                    "Kraken reported 'FAILURE TO CONVERGE IN SECANT': the root "
-                    "finder is converging slowly to interfacial (Scholte / "
-                    "Stoneley) modes. Set c_low to the minimum p-wave speed in "
-                    "the problem to exclude those modes (kraken.htm, Phase "
-                    "Speed Limits), or use Kraken(backend='krakenc')."
+                    "Kraken reported 'Failure to converge in "
+                    "RootFinderSecant': the root finder is converging slowly "
+                    "to interfacial (Scholte / Stoneley) modes. Set c_low to "
+                    "the minimum p-wave speed in the problem to exclude those "
+                    "modes (kraken.htm, Phase Speed Limits), or use "
+                    "Kraken(backend='krakenc')."
                 )
-            elif has_acousto_elastic or has_nonzero_shear or modes_not_found:
+            elif has_acousto_elastic or has_nonzero_shear:
                 error_msg += (
-                    "Kraken (real arithmetic) failed. This is typical when "
-                    "the environment has an acousto-elastic bottom "
-                    "(non-zero shear speed) or when modes cannot be found "
-                    "at cLow. Try Kraken(backend='krakenc') (complex "
-                    "arithmetic), which handles shear and leaky modes. "
-                    "Alternatives: Bellhop, RAM, Scooter, OAST."
+                    "Kraken (real arithmetic) failed on an acousto-elastic "
+                    "bottom (non-zero shear speed). Try "
+                    "Kraken(backend='krakenc') (complex arithmetic), which "
+                    "handles shear and leaky modes. Alternatives: Bellhop, "
+                    "RAM, Scooter, OAST."
                 )
             else:
                 error_msg += f"Check the .prt file for details: {prt_file}"
@@ -1066,10 +1070,9 @@ class Kraken(PropagationModel):
         run_mode = self._resolve_run_mode(run_mode, default=smart_default)
 
         # Early gate: coupled-mode field calculations cannot be
-        # combined with incoherent mode addition. AT's field.f90
-        # (Kraken/field.f90 around line 123-127) calls ERROUT
-        # on Opt(2:2)='C' + Opt(4:4)='I', which surfaces in Python
-        # as an opaque "no .shd file" error. Fail loudly up front.
+        # combined with incoherent mode addition. ``KrakenField/field.f90:
+        # 125-129`` calls ERROUT on Opt(2:2)='C' + Opt(4:4)='I', which surfaces
+        # in Python as an opaque "no .shd file" error. Fail loudly up front.
         if (
             run_mode == RunMode.INCOHERENT_TL
             and env.is_range_dependent
@@ -1246,6 +1249,11 @@ class Kraken(PropagationModel):
             "field; returning NaN there.",
             UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
         )
+        # ``misc/SourceReceiverPositions.f90:212`` ERROUTs on an empty receiver
+        # vector, so a deck whose every requested depth sits in the sub-bottom
+        # still needs one legal depth. Mid-water is arbitrary: with ``keep``
+        # all-False ``_reinsert_nan_depths`` discards the computed column and
+        # returns NaN at every original depth.
         compute_depths = depths[keep] if keep.any() else np.array([0.5 * env.depth])
         compute_receiver = Receiver(
             depths=compute_depths, ranges=receiver.ranges,
@@ -1413,6 +1421,10 @@ class Kraken(PropagationModel):
                 continue
             for column in seg.bottom.columns:
                 media = list(column.layers)
+                # Same skip set as ``Bottom.all_sound_speeds``: a vacuum /
+                # rigid / file half-space carries the placeholder speed
+                # ``BoundaryProperties.__post_init__`` filled in, not a
+                # physical one, so it must not size the mesh.
                 if column.halfspace.acoustic_type not in ('vacuum', 'rigid',
                                                           'file'):
                     media.append(column.halfspace)
@@ -1558,7 +1570,7 @@ class Kraken(PropagationModel):
         below has to be trustworthy, so any earlier ``.shd`` in a pinned
         ``work_dir`` is cleared first (``_run_and_attach_prt``'s
         ``stale_outputs``, which this launch path cannot use). ``field.prt``
-        goes with it — it is now read back as a failure signal, so a previous
+        goes with it — it is read back as a failure signal, so an earlier
         run's copy must not be mistaken for this one's."""
         for suffix in _KRAKEN_FIELD_OUTPUTS:
             fm.get_path(f'{base_name}{suffix}').unlink(missing_ok=True)
@@ -1679,6 +1691,9 @@ class Kraken(PropagationModel):
             )
             for i_freq, fr in enumerate(freqs_read):
                 shd_i = read_shd_bin(str(shd_file), frequency=float(fr))
+                # read_shd_bin returns pressure as (Ntheta, Nsz, Nrz, Nrr);
+                # [0, 0] selects the single bearing and single source depth the
+                # deck was written with.
                 # field.exe (EvaluateMod.f90:34,42) emits the modal sum
                 # under the engineering carrier exp(-ikr) but with a
                 # leading factor i·√(2π)·exp(iπ/4); Scooter's Hankel
@@ -1706,7 +1721,9 @@ class Kraken(PropagationModel):
             )
         elif return_pressure:
             shd_data = read_shd_bin(str(shd_file))
-            p = -shd_data['pressure'][0, 0, :, :]  # (nrz, nrr)
+            # (Ntheta, Nsz, Nrz, Nrr) -> (nrz, nrr) at the deck's single
+            # bearing and source depth.
+            p = -shd_data['pressure'][0, 0, :, :]
             field = Field(
                 data=p,
                 coords={'depth': receiver.depths, 'range': receiver.ranges},
@@ -1810,6 +1827,7 @@ class Kraken(PropagationModel):
             else:
                 max_total_depth = self._total_media_depth(env)
 
+            # 1. Write the .env (multi-profile when segmented)
             bounds = self._write_field_env(
                 env, source, receiver, fm, base_name,
                 segments, max_total_depth, broadband, freq_vec)

@@ -19,11 +19,18 @@ class Modes(Result):
     Attributes
     ----------
     k : ndarray, shape ``(n_modes,)`` complex
-        Modal horizontal wavenumbers.
+        Modal horizontal wavenumbers (rad/m). A nonzero imaginary part
+        means an attenuating mode — leaky modes from ``backend='krakenc'``,
+        or the perturbation :meth:`with_attenuation` applies.
     phi : ndarray, shape ``(n_depths, n_modes)``
         Mode shapes sampled at ``depths``.
     depths : ndarray, shape ``(n_depths,)``
-        Sampling depths.
+        Depths (m below the surface) the mode shapes are tabulated at —
+        KRAKEN's ``zTab``, the merged, sorted, duplicate-free union of the
+        run's source and receiver depths (``Kraken/kraken.f90:573`` builds
+        it, ``:598`` writes it to the ``.mod``). The modes are known
+        nowhere else, and this object carries no half-space wavenumber from
+        which the evanescent tail below the span could be continued.
     """
     field_type = "modes"
 
@@ -236,10 +243,16 @@ class Modes(Result):
                 )
             cb = float(bottom.sound_speed)
             rho_b = float(bottom.density) * 1000.0
+            # dB/wavelength -> nepers/m: alpha[dB/lam] * (f/c) [lam/m] / (20/ln10).
             ab_neper_per_m = (
                 float(bottom.attenuation) * np.log(10.0) / 20.0
                 * float(self.f0) / cb
             )
+            # Same form as the water integral above, but the half-space tail
+            # has a closed form: the mode decays as psi(D)*exp(-gamma*(z-D)),
+            # so int_D^inf psi^2 dz = psi(D)^2 / (2*gamma) — which is where the
+            # 1/(2*gamma) comes from. gamma is real only for a trapped mode
+            # (kr > kb); a leaky one clamps to 0 and contributes nothing.
             psi_D = phi_re[-1, :]
             kb = omega / cb
             gamma_m = np.sqrt(np.maximum(kr ** 2 - kb ** 2, 0.0))
@@ -278,11 +291,18 @@ class Modes(Result):
 
         ``√(k_m)`` is the **complex** square root (principal branch), not
         ``√|k_m|`` — it carries a ``−arg(k_m)/2`` phase that
-        phase-sensitive consumers (MFP, coherent integration) need. The
-        textbook prefactor ``i/(ρ_s·√(8πr))`` appears here as
-        ``exp(−iπ/4)·√(2π/r)`` because TL's free-field 1 m reference
-        ``1/(4π)`` is folded in (``4π/√(8π) = √(2π)``). ``−20·log10|P|``
-        is insensitive to the sign convention.
+        phase-sensitive consumers (MFP, coherent integration) need.
+
+        The textbook prefactor ``i·exp(−iπ/4)/(ρ_s·√(8πr))`` is written for
+        ``e^{−iωt}`` with outgoing ``e^{+i k r}``; conjugating it into AT's
+        ``e^{i(ωt − k r)}`` and folding in TL's free-field 1 m reference
+        ``1/(4π)`` gives the ``exp(−iπ/4)·√(2π/r)/ρ_s`` used here
+        (``4π/√(8π) = √(2π)``). That ``√(2π)`` is the magnitude of AT's own
+        modal-evaluator prefactor ``i·√(2π)·exp(iπ/4)``
+        (``KrakenField/EvaluateMod.f90:34``), so ``|P|`` — and therefore TL
+        — lands on the same absolute scale as ``field.exe``; the two differ
+        by an overall ``−1``, which neither ``−20·log10|P|`` nor a phase
+        *difference* across the grid can see.
 
         Parameters
         ----------
@@ -382,9 +402,9 @@ class Modes(Result):
         # KRAKEN normalises its modes with rho in g/cm³ (the .env unit), so the
         # density enters here in g/cm³ too.
         rho_s = float(source_density)
-        # TL is referenced to the free-field pressure at 1 m, 1/(4*pi), so the
-        # 4*pi is folded into the pressure prefactor i*e^(-i*pi/4)/(rho*sqrt(8*pi*r)):
-        # 4*pi / sqrt(8*pi) == sqrt(2*pi).
+        # The textbook prefactor i*e^(-i*pi/4)/(rho*sqrt(8*pi*r)), conjugated
+        # into AT's e^(i(omega t - k r)) convention and carrying TL's
+        # free-field 1 m reference 1/(4*pi) (4*pi/sqrt(8*pi) == sqrt(2*pi)).
         pref = -1j * np.exp(1j * np.pi / 4.0) * np.sqrt(2.0 * np.pi) / rho_s
         P = pref * P / sqrt_r[None, :]
         P[outside, :] = np.nan

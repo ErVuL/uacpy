@@ -126,7 +126,6 @@ def main():
     )
     fig.savefig(OUTPUT_DIR / 'example_09_ssrp_spectrogram.png',
                 dpi=150, bbox_inches='tight')
-    # plt.close(fig)
     print("  ✓ Saved: output/example_09_ssrp_spectrogram.png")
 
     # ── 4. PPSD of the synthesised noise ────────────────────────────────
@@ -148,7 +147,6 @@ def main():
     ax.legend(loc='upper right', fontsize=9, framealpha=0.85)
     fig.savefig(OUTPUT_DIR / 'example_09_ppsd.png',
                 dpi=150, bbox_inches='tight')
-    # plt.close(fig)
     print("  ✓ Saved: output/example_09_ppsd.png")
 
     # ── 5. Sound Exposure Level (SEL) of the synthesised realisation ─────

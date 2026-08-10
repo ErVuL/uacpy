@@ -38,9 +38,10 @@ def close():
     """Close the open WOA23 handles and drop them; the next read reopens.
 
     A monthly SSP touches up to 24 files per resolution and they stay open for
-    the process lifetime. Every other cached grid in this layer is dropped by
-    its own downloader, but WOA23 is installed out-of-band
-    (``install.sh --data woa23``), so refreshing it mid-process needs this hook.
+    the process lifetime, so dropping the memo is not enough — the handles have
+    to be closed. Registered with :func:`uacpy.data._cache.register_cache`, and
+    also public because WOA23 is installed out of band
+    (``install.sh --data woa23``) rather than by a ``download_*`` function.
     """
     for ds in _DATASETS.values():
         try:
@@ -48,6 +49,9 @@ def close():
         except (RuntimeError, OSError):        # already closed / file vanished
             pass
     _DATASETS.clear()
+
+
+_cache.register_cache(close)
 
 
 def _field(period, var, *, resolution, decade):

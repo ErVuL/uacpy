@@ -120,11 +120,11 @@ class TestModalPropagationLoss:
         assert abs(pf_at.data[0, 0]) < abs(pf_loss.data[0, 0])
 
     def test_decays_under_raw_kraken_imag_sign(self):
-        # Raw Kraken/KrakenC eigenvalues encode decay as k.imag < 0, while
+        # Raw kraken/krakenc eigenvalues encode decay as k.imag < 0, while
         # with_attenuation builds k.imag > 0. modal_propagation_loss must be
         # convention-agnostic: a passive medium can only attenuate, so the
-        # field must DECAY with range under either sign (regression for the
-        # latent grow-with-range bug).
+        # field has to DECAY with range under either sign. Taking the sign at
+        # face value makes one of the two branches grow without bound.
         base = _pekeris_modes()
         ranges = np.array([500.0, 8000.0])
         for sign in (+1.0, -1.0):
@@ -168,12 +168,12 @@ def test_phase_advances_negatively_with_range():
 class TestDepthsOutsideTheTabulatedModes:
     """``kraken.f90:573,598`` tabulates the modes on ``zTab`` — the merged
     source/receiver depth vector the deck asked for — so ``Modes.depths`` is
-    exactly where ``phi`` is known. ``np.interp`` used to hold the end value
-    flat past it, reporting a plausible number for a depth the mode set never
-    covered; that is neither the mode shape nor the half-space evanescent tail
-    (which ``Modes`` carries no half-space wavenumber to compute, and which AT
-    does not compute either — ``calculateweights.f90:43-49`` extrapolates
-    linearly off the end)."""
+    exactly where ``phi`` is known. Outside it there is no mode shape to
+    interpolate, and holding the end value flat would report a plausible number
+    for a depth the mode set never covered — neither the mode shape nor the
+    half-space evanescent tail (which ``Modes`` carries no half-space
+    wavenumber to compute, and which AT does not compute either:
+    ``calculateweights.f90:43-49`` extrapolates linearly off the end)."""
 
     @staticmethod
     def _modes():

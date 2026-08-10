@@ -188,10 +188,11 @@ def fetch_environment(
         Environment name. Defaults to the coordinate string.
     ssp : SoundSpeedProfile or float or sequence, optional
         A **literal** sound-speed profile supplied directly (same forms as
-        :class:`Environment`'s ``ssp=``: a ``SoundSpeedProfile``, a scalar c →
-        isovelocity, or ``(depth, c)`` pairs). If ``ssp_sources`` is *also*
-        given, the source is fetched first and this literal is the **fallback**
-        when the fetch yields nothing; on its own, SSP is not fetched at all.
+        :class:`Environment`'s ``ssp=``: a ``SoundSpeedProfile``, a scalar c in
+        m/s → isovelocity, or ``(depth_m, c_m_per_s)`` pairs). If ``ssp_sources``
+        is *also* given, the source is fetched first and this literal is the
+        **fallback** when the fetch yields nothing; on its own, SSP is not
+        fetched at all.
     ssp_sources : str or sequence of str, optional
         Sound-speed source(s) to **fetch**, tried in order with the next as
         fallback (a bare string is a 1-element list), or a preset: ``'auto'``
@@ -204,10 +205,11 @@ def fetch_environment(
         ``'woa23'``. E.g. ``ssp_sources=('copernicus', 'woa23')`` = Copernicus,
         else WOA23.
     bathymetry : float or array, optional
-        A **literal** depth (m, scalar) or range-dependent ``(N, 2)`` ``(range,
-        depth)`` array, supplied directly. If ``bathymetry_sources`` is *also*
-        given, the source is fetched first and this literal is the **fallback**;
-        on its own, bathymetry is not fetched.
+        A **literal** depth (m, scalar) or range-dependent ``(N, 2)``
+        ``(range_m, depth_m)`` array — depth positive down — supplied directly.
+        If ``bathymetry_sources`` is *also* given, the source is fetched first
+        and this literal is the **fallback**; on its own, bathymetry is not
+        fetched.
     bathymetry_sources : str or sequence of str, optional
         Bathymetry source(s) to **fetch**, tried in order, or a preset:
         ``'auto'`` (best-available: ``emodnet_dtm`` → ``gmrt`` → ``gebco``, i.e.
@@ -233,10 +235,13 @@ def fetch_environment(
         pelagic, cached backends only). Per-source choices: ``'emodnet'``
         (European seas, high-res, CC-BY), ``'mars'`` (AusSeabed MARS samples,
         Australian margin, CC-BY — live), ``'grainsize'`` (NCEI grain-size
-        samples, worldwide, public-domain — cached), ``'crust1'``, ``'graw'``
-        (measured seabed-density grid — cached), ``'diesing'``, ``'pelagic'``
-        (first-principles, never fails). Default ``None`` — bottom is optional,
-        so it is only fetched when you ask. Most sources permit commercial use;
+        samples, worldwide, public-domain — cached), ``'diesing'`` (global
+        deep-sea lithology map, water deeper than 500 m, CC-BY — cached),
+        ``'crust1'`` (CRUST1.0 + GlobSed → a layered *elastic* bottom for
+        low-frequency work — cached), ``'graw'`` (measured seabed-density grid
+        — cached), ``'pelagic'`` (first-principles, never fails). Default
+        ``None`` — bottom is optional, so it is only fetched when you ask.
+        Most sources permit commercial use;
         CRUST1.0 does not without verification — a non-commercial source emits a
         ``UserWarning`` when fetched. See ``uacpy.data.citations(env)``.
     transect_to : (lat, lon), optional
@@ -305,12 +310,16 @@ def fetch_environment(
         the cached ``seaice`` climatology (``install.sh --data seaice``), and
         sets the surface from the NSIDC concentration at the point for
         ``date``'s month — an ice-covered point (≥15 %, the NSIDC ice-edge) gets
-        a homogeneous elastic ice canopy (cp 3500 m/s, cs 1800 m/s, ρ 0.9,
-        αp/αs 0.5/1.0 dB/λ — *Computational Ocean Acoustics*); open water keeps
-        the default free surface (no provenance). Default ``None`` (no surface
-        fetch). Point classification only (the carrier's surface is one boundary).
+        a homogeneous elastic ice canopy (cp 3500 m/s, cs 1800 m/s, ρ 0.9 g/cm³,
+        αp/αs 0.4/1.0 dB/λ — *Computational Ocean Acoustics*); open water keeps
+        the default free surface (no provenance). The canopy is an elastic
+        **half-space**, not a plate of finite thickness: the model writers emit
+        the top boundary as an upper half-space line, with no thickness field to
+        give it, so concentration decides *whether* there is ice, never how
+        thick. Default ``None`` (no surface fetch). Point classification only
+        (the carrier's surface is one boundary).
     altimetry : array-like, optional
-        A **literal** rough-surface wave profile ``[(range, height_m), …]``
+        A **literal** rough-surface wave profile ``[(range_m, height_m), …]``
         (height positive up; same as :class:`Environment`'s ``altimetry=``).
         If ``altimetry_sources`` is *also* given, the source is fetched first and
         this is the **fallback**. Default ``None`` (flat).
@@ -352,11 +361,16 @@ def fetch_environment(
         keyed on month only) and by the bottom/bathymetry sources. Default
         ``None`` → each source's own default (Argo 15, Copernicus 31).
     formula, resolution, timeout, verbose
-        Forwarded to the sound-speed / bathymetry fetchers; ``resolution`` also
-        selects the WOA23 grid the ``with_absorption`` T/S column is drawn from,
-        so the SSP and the absorption come from one cell. ``timeout`` does not
-        reach the Copernicus fetchers — the ``copernicusmarine`` session owns
-        its own (see :mod:`uacpy.data.copernicus`).
+        Forwarded to the sound-speed / bathymetry fetchers. ``formula`` is the
+        sound-speed equation, ``{'unesco', 'delgrosso'}``; ``resolution`` is the
+        WOA23 grid spacing in degrees, ``{'1.00', '0.25'}``, and also selects the
+        grid the ``with_absorption`` T/S column is drawn from, so the SSP and the
+        absorption come from one cell; ``timeout`` is a per-request network
+        timeout in seconds and does not reach the Copernicus fetchers — the
+        ``copernicusmarine`` session owns its own (see
+        :mod:`uacpy.data.copernicus`); ``verbose`` is the ``log_message`` gate,
+        ``False``/``'off'``/``'silent'`` (warnings only), ``True``/``'info'``,
+        or ``'debug'``.
 
     Returns
     -------
@@ -369,6 +383,13 @@ def fetch_environment(
     # the literal is the fallback if the fetch yields nothing (no coverage,
     # service down). Bathy/SSP are mandatory: with neither, fetch the default
     # chain.
+    #
+    # The axes below resolve in a fixed order set by their data dependencies:
+    # bathymetry → SSP (reconciled to the fetched seafloor) → bottom (scaled to
+    # the SSP at that seafloor) → surface → altimetry → assembly. The
+    # range_dependent_* flags are settled in one block between bathymetry and
+    # SSP, since they pick the point vs transect fetcher for the SSP, bottom and
+    # surface alike; bathymetry takes no flag — transect_to alone decides it.
 
     # ── Bathymetry ──
     bathy_cache_only = False
@@ -472,7 +493,8 @@ def fetch_environment(
                     )
                 from uacpy.data.copernicus import fetch_ssp_transect_operational
                 # Copernicus has no 'auto' resolver (no cheap cell identity
-                # exposed here); fall back to a fixed column count, capped.
+                # exposed here), so 'auto' falls back to that fetcher's own
+                # default column count, capped at max_points.
                 cop_n = ssp_n_points if isinstance(ssp_n_points, int) else 6
                 cop_extra = {} if max_days is None else {'max_days': max_days}
                 return fetch_ssp_transect_operational(
@@ -503,13 +525,15 @@ def fetch_environment(
     # Bathymetry (GEBCO) and SSP (WOA/Copernicus) come from independent
     # products, so their deepest points rarely coincide. Reconcile the SSP to
     # span exactly the fetched water column with the carrier's own method
-    # (extend short profiles to the seafloor; trim points below it). We do NOT
-    # resample onto a uniform grid — the native levels carry the real sampling,
+    # (extend short profiles to the seafloor; trim points below it). It is not
+    # resampled onto a uniform grid — the native levels carry the real sampling,
     # and each model owns SSP interpolation via its ``interp_ssp`` scheme.
     # This precedes the bottom: grain-size geoacoustics are a velocity ratio
     # against the water *at the interface*, so the reference sound speed has to
     # come from the reconciled profile, not from the deepest analysed level.
     seafloor = Bathymetry.coerce(bathymetry)
+    # Deepest point anywhere along the transect: the profile columns share one
+    # depth axis, so it has to reach the deepest seafloor the run touches.
     depth_max = float(np.max(seafloor.depths))
     if ssp_fetched:
         from uacpy.data.sound_speed import extend_ssp_below_data
@@ -636,6 +660,7 @@ def fetch_environment(
                 raise
             altimetry_result, altimetry_src = altimetry, None   # literal fallback
 
+    # ── Assemble ──
     kwargs = dict(
         name=name or f"{lat:.3f}, {lon:.3f}",
         bathymetry=bathymetry,
@@ -970,7 +995,6 @@ def _fetch_bottom(order, *args, transect, cache_only=False,
     Returns ``(bottom, source_keyword)``; a source with no coverage (or no
     installed cache) falls through to the next.
     """
-    idx = 1 if transect else 0
     errors = []
     for name in order:
         provider = _BOTTOM_BY_ID[name]
@@ -986,7 +1010,8 @@ def _fetch_bottom(order, *args, transect, cache_only=False,
         else:
             cached_flags = (False,)
         for cached in cached_flags:
-            fn = provider.resolve(cached)[idx]
+            point_fn, transect_fn = provider.resolve(cached)
+            fn = transect_fn if transect else point_fn
             try:
                 return fn(*args, **call_kwargs), name
             except (DataFetchError, ConfigurationError) as exc:

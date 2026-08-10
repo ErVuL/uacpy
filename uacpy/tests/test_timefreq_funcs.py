@@ -11,8 +11,9 @@ from uacpy.visualization.plots.signal import (  # noqa: E402
 
 def test_spectrogram_matches_scipy():
     x = np.random.default_rng(0).standard_normal(48000)
-    # spectrogram now defaults noverlap=None (B2), so scipy derives nperseg//8;
-    # the reference must use the same default to validate the pass-through.
+    # spectrogram passes noverlap=None straight through, letting scipy derive
+    # nperseg//8; the reference must use the same default or it compares two
+    # different overlaps.
     f0, t0, S0 = _scipy_spec(x, 48000.0, window="hann", nperseg=8192,
                              noverlap=None, scaling="density", mode="psd")
     f, t, S = spectrogram(x, 48000.0)

@@ -81,7 +81,7 @@ def _water_depth(point, timeout, verbose, cache_only):
         if cache_only:
             raise
         return fetch_bathy(point, source='api', timeout=timeout,
-                                 verbose=verbose)
+                           verbose=verbose)
 
 
 def fetch_bottom_pelagic(point: Coordinate, *, roughness: float = 0.0,

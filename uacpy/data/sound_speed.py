@@ -5,10 +5,11 @@ optionally, a calendar date/month) into a depth-vs-sound-speed profile
 ready for ``Environment(ssp=...)``.
 
 Temperature and salinity come from the NOAA/NCEI **World Ocean Atlas 2023**
-objectively-analyzed climatology (``t_an`` / ``s_an``), read remotely from
-the NCEI THREDDS OPeNDAP server. We request a single ``(lat, lon)`` water
-column via the DAP ``.ascii`` response — stdlib text, no NetCDF dependency.
-Sound speed is then computed from T, S and pressure with the UNESCO
+objectively-analyzed climatology (``t_an`` / ``s_an``). ``source='opendap'``
+reads a single ``(lat, lon)`` water column from the NCEI THREDDS server via the
+DAP ``.ascii`` response — stdlib text, no NetCDF dependency; ``source='local'``
+reads the same fields from the install-time NetCDF grids (``install.sh --data
+woa23``). Sound speed is then computed from T, S and pressure with the UNESCO
 (Chen-Millero) or Del Grosso equation already in :mod:`uacpy.core.acoustics`.
 
 Time handling
@@ -17,7 +18,8 @@ WOA23 is a *climatology*, not a forecast: ``date``/``month`` select a monthly
 or seasonal climatological mean, never a specific year's conditions. Monthly
 and seasonal fields only resolve the upper 1500 m; below that the annual mean
 is spliced on, giving a full-depth, season-aware profile. For true
-date-specific conditions use the (planned) Copernicus Marine source.
+date-specific conditions use the Copernicus Marine source
+(:mod:`uacpy.data.copernicus`).
 """
 
 import datetime as _dt
@@ -47,7 +49,10 @@ DEFAULT_BASE_URL = 'https://www.ncei.noaa.gov/thredds-ocean/dodsC/woa23/DATA'
 DEFAULT_DECADE = 'decav'              # 1955-2022 average of all decades
 WOA_FILL_THRESHOLD = 1e30             # _FillValue is 9.96921e36
 
-# Regular grids: (n_lat, n_lon, file_resolution_code, first_center, step).
+# Regular cell-centred grids: (n_lat, n_lon, file_resolution_code,
+# first_lat_center, step_deg). Both axes are cell-centred — the first centre
+# sits half a step inside the -90 / -180 edge — so the longitude origin is
+# derived as -180 + step/2 rather than tabulated (see _cell_center).
 _GRIDS = {
     '1.00': (180, 360, '01', -89.5, 1.0),
     '0.25': (720, 1440, '04', -89.875, 0.25),
@@ -315,9 +320,7 @@ def fetch_ts_profile(
             remediation="Pick an ocean location, or a coarser resolution.",
         )
     if (lat_idx, lon_idx) != nearest_idx:
-        _n_lat, _n_lon, _c, _first, _step = _GRIDS[resolution]
-        wet_lat = _first + lat_idx * _step
-        wet_lon = (-180.0 + _step / 2) + lon_idx * _step
+        wet_lat, wet_lon = _cell_center(lat_idx, lon_idx, resolution)
         warnings.warn(
             f"WOA23: nearest cell ({lat_c:.3f}, {lon_c:.3f}) is dry; using the "
             f"closest wet cell ({wet_lat:.3f}, {wet_lon:.3f}).",
@@ -382,7 +385,8 @@ def _nearest_wet_column(fetch, lat_idx, lon_idx, resolution):
 
     ``fetch(lat_idx, lon_idx)`` returns one column; an empty depth axis means a
     dry (land / unanalysed) cell. Searches the nearest cell first, then outward
-    by Chebyshev ring, wrapping in longitude and clamping in latitude.
+    by Chebyshev ring: longitude wraps, while a row past either pole is skipped
+    (clamping it would re-probe the same cell).
     """
     n_lat, n_lon, _code, _first, _step = _GRIDS[resolution]
     depths, temp, sal = fetch(lat_idx, lon_idx)
@@ -401,17 +405,21 @@ def _nearest_wet_column(fetch, lat_idx, lon_idx, resolution):
     return depths, temp, sal, lat_idx, lon_idx
 
 
+def _cell_center(lat_idx, lon_idx, resolution) -> Tuple[float, float]:
+    """Centre ``(lat, lon)`` in degrees of one WOA grid cell."""
+    _n_lat, _n_lon, _code, first_lat, step = _GRIDS[resolution]
+    return first_lat + lat_idx * step, (-180.0 + step / 2) + lon_idx * step
+
+
 def _grid_index(lat, lon, resolution) -> Tuple[int, int, float, float]:
     """Nearest WOA grid-cell indices and snapped centre coordinates."""
     if not -90.0 <= lat <= 90.0:
         raise ConfigurationError(f"fetch_ssp: lat must be in [-90, 90], got {lat}.")
     lon = normalize_lon(lon)
-    n_lat, n_lon, _code, first, step = _GRIDS[resolution]
-    lat_idx = int(np.clip(round((lat - first) / step), 0, n_lat - 1))
+    n_lat, n_lon, _code, first_lat, step = _GRIDS[resolution]
+    lat_idx = int(np.clip(round((lat - first_lat) / step), 0, n_lat - 1))
     lon_idx = int(np.clip(round((lon - (-180.0 + step / 2)) / step), 0, n_lon - 1))
-    lat_c = first + lat_idx * step
-    lon_c = (-180.0 + step / 2) + lon_idx * step
-    return lat_idx, lon_idx, lat_c, lon_c
+    return (lat_idx, lon_idx) + _cell_center(lat_idx, lon_idx, resolution)
 
 
 def _fetch_column(
@@ -501,7 +509,12 @@ def _fetch_axis(file_url, name, *, timeout, verbose) -> np.ndarray:
 
 
 def _fetch_data(file_url, var, last, lat_idx, lon_idx, *, timeout, verbose) -> np.ndarray:
-    """Read a single ``var`` water column ``[0][0:last][lat][lon]``."""
+    """Read a single ``var`` water column ``[0][0:last][lat][lon]``.
+
+    WOA fields are stored ``(time, depth, lat, lon)`` with a singleton time
+    axis, hence the leading ``[0]``. DAP hyperslab bounds are **inclusive**, so
+    the whole depth axis is ``0:n_depth-1`` — what the caller passes as ``last``.
+    """
     query = f"{var}[0][0:{last}][{lat_idx}][{lon_idx}]"
     text = http_get(f"{file_url}.ascii?{query}", timeout=timeout,
                     verbose=verbose, source='sound_speed').decode('utf-8', 'replace')
@@ -509,6 +522,8 @@ def _fetch_data(file_url, var, last, lat_idx, lon_idx, *, timeout, verbose) -> n
     return np.asarray(values, dtype=float)
 
 
+# A DAP .ascii data row is an index tuple, a comma, then the value:
+# ``[0][17][130][188], 3.4512``.
 _DATA_ROW = re.compile(r'^\[[\d\]\[]*\],\s*(\S+)')
 
 
@@ -557,7 +572,8 @@ ADIABATIC_GRADIENT = 0.0165
 # Physically plausible band for a measured deep gradient. Outside this the
 # last segment is noise (or an inversion) rather than the adiabatic trend.
 _ADIABATIC_BAND = (0.005, 0.030)
-# Below this, holding the last value is close enough to be not worth a warning.
+# Below this, holding the last value is close enough to be not worth a warning:
+# 50 m at the adiabatic gradient is 0.8 m/s.
 _EXTRAPOLATION_WARN_M = 50.0
 
 

@@ -29,6 +29,10 @@ def test_fk_single_segment_matches_direct_fft():
 
 
 def test_fk_averaging_reduces_variance():
+    # nperseg=32 with no overlap splits the 128-sample record into 4
+    # independent segments, so Welch averaging should cut the coefficient of
+    # variation of the noise floor by 1/sqrt(4) = 0.5. The 0.6 bound is that
+    # theoretical factor with slack for the finite 8-seed sample.
     cv = []
     for kw in ({}, dict(nperseg=32, noverlap=0)):
         floors = []
@@ -49,6 +53,8 @@ def test_inverse_fk_roundtrip_and_none_guard():
     d = _gather()
     _, _, _, spec = fk_transform(d, 1000.0, 5.0)
     rec = inverse_fk(spec)
+    # A single-segment forward/inverse FFT pair is algebraically exact, so
+    # 1e-10 is float round-off headroom, not a physical tolerance.
     assert np.linalg.norm(rec - d) / np.linalg.norm(d) < 1e-10
     with pytest.raises(ConfigurationError):
         inverse_fk(None)

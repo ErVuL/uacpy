@@ -9,7 +9,7 @@ Environment, for use by AT's multi-profile .env format.
 import numpy as np
 from typing import List, Tuple, Optional
 
-from uacpy.core.environment import Environment
+from uacpy.core.environment import Environment, SoundSpeedProfile
 from uacpy.core.exceptions import ConfigurationError
 
 
@@ -108,8 +108,12 @@ def segment_environment_by_range(
         bottom_segment = env.bottom.at(range=r)
         ssp_at_range = env.ssp.eval(range=r).to_pairs()
 
-        # Kraken .env writer uses .1f for the bottom depth on the mesh
-        # line, so the deepest SSP point must match that rounded value.
+        # AT ends a medium only at the SSP sample matching the mesh-line depth
+        # (Acoustics-Toolbox/misc/sspMod.f90:352-362), and the writer declares
+        # that depth quantised to 0.1 m (``deck_depth``, which rounds up).
+        # Truncating the segment profile on the same 0.1 m grid keeps its
+        # deepest sample at or above the declared bottom, for the writer's
+        # ``extend_to`` to land on exactly.
         depth_rounded = float(f"{depth_at_range:.1f}")
         ssp_for_segment = ssp_at_range[ssp_at_range[:, 0] < depth_rounded].copy()
         c_at_depth = float(np.interp(depth_rounded, ssp_at_range[:, 0], ssp_at_range[:, 1]))
@@ -120,7 +124,6 @@ def segment_environment_by_range(
             c_at_surface = float(np.interp(0.0, ssp_at_range[:, 0], ssp_at_range[:, 1]))
             ssp_for_segment = np.vstack([[0.0, c_at_surface], ssp_for_segment])
 
-        from uacpy.core.environment import SoundSpeedProfile
         seg_ssp = SoundSpeedProfile.from_pairs(
             ssp_for_segment, shape=env.ssp.shape,
         )

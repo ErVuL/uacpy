@@ -23,7 +23,7 @@ FEATURES DEMONSTRATED:
     ✓ Cerveny beam parameters (eps_multiplier, beam_width_type, etc.)
     ✓ Thorp volume attenuation
     ✓ Line source (Cartesian coordinates)
-    ✓ Irregular receiver grid
+    ✓ Rectilinear receiver grid (RunType position 5 = 'R')
     ✓ Beam shift on reflection
     ✓ Grain size boundary conditions
     ✓ Multiple run comparisons
@@ -114,7 +114,7 @@ def main():
     # RUN 1: Standard Gaussian Beams with Thorp Attenuation
     # ═══════════════════════════════════════════════════════════════════════
 
-    print("\n[1/4] Running Bellhop with Thorp volume attenuation...")
+    print("\n[1/5] Running Bellhop with Thorp volume attenuation...")
     bellhop_thorp = Bellhop(
         verbose=False,
         beam_type='B', grid_type='R',
@@ -134,7 +134,7 @@ def main():
     # RUN 2: Cerveny Beams with Advanced Control
     # ═══════════════════════════════════════════════════════════════════════
 
-    print("[2/4] Running Bellhop with Cerveny beams...")
+    print("[2/5] Running Bellhop with Cerveny beams...")
 
     bellhop_cerveny = Bellhop(
         verbose=False,
@@ -158,7 +158,7 @@ def main():
     # RUN 3: Line Source (Cartesian Coordinates)
     # ═══════════════════════════════════════════════════════════════════════
 
-    print("[3/4] Running Bellhop with line source...")
+    print("[3/5] Running Bellhop with line source...")
 
     bellhop_line = Bellhop(
         verbose=False,

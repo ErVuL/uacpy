@@ -63,6 +63,10 @@ def test_replica_reproduces_field_exe_up_to_global_scalar(pekeris):
     P = field.data  # (n_depth, n_range)
     assert syn.shape == P.shape
     corr = abs(np.vdot(syn, P)) / (np.linalg.norm(syn) * np.linalg.norm(P))
+    # The magnitude of a normalised correlation is invariant to the global
+    # complex scalar the replica omits, so it isolates the shape. What is left
+    # is the far-field (asymptotic Hankel) approximation both sides make, which
+    # is worth well under 1e-3 here: the nearest range is 200 m, i.e. k*r ≈ 13.
     assert corr > 0.999, f"replica vs field.exe normalized corr = {corr}"
 
 
@@ -205,8 +209,14 @@ def test_localizes_offgrid_source_from_noisy_snapshots(pekeris, processor):
 def test_replica_decays_under_either_imag_k_sign():
     """Raw Kraken carries Im(k) < 0; ``Modes.with_attenuation`` builds
     Im(k) > 0. A passive medium can only attenuate, so the replica must decay
-    with range under BOTH. Regression for the x1.75e11 grow-with-range bug that
-    put an MFP peak at 14 m / 5.75 km instead of 42 m / 10 km."""
+    with range under BOTH.
+
+    ``exp(i k r)`` decays only for Im(k) > 0, so the magnitude has to be taken
+    rather than the value as given. Over this 19 km span both signs must land
+    on ``exp(-|Im k| dr)`` = 3.3e-3; the other branch grows by ~300x, and a
+    replica that grows with range moves the MFP peak to the far edge of the
+    candidate grid.
+    """
     from uacpy.core.results import Modes
     from uacpy.sonar.matched_field import synthesize_replica
     depths = np.linspace(0.0, 100.0, 51)

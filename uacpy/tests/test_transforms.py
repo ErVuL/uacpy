@@ -53,6 +53,11 @@ class TestTauP:
         slow, tau, U = taup_transform(g, FS, DX, p_max=1 / 1000.0, n_slowness=241)
         rec = inverse_taup(U, slow, FS, DX, NX)
         assert rec.shape == g.shape
+        # inverse_taup is the adjoint slant stack, not an exact inverse: a
+        # finite slowness fan and 48 traces leave amplitude taper and aliasing
+        # fringes. 0.85 asks that the event be recovered in shape and position,
+        # which is what the adjoint promises; it is not a round-trip bound.
+        # The same figure governs the two other reconstruction checks below.
         assert np.corrcoef(g.ravel(), rec.ravel())[0, 1] > 0.85
 
     def test_requires_2d(self):
@@ -89,6 +94,9 @@ class TestRadon:
         m, tau, R = radon_transform(_hyperbolic_gather(v0, tau0), FS, DX, vels,
                                     kind='hyperbolic')
         i, j = np.unravel_index(np.argmax(np.abs(R)), R.shape)
+        # Two velocity nodes and three time samples of slack: the hyperbolic
+        # apex is flat in v near the true value, so the focus straddles nodes
+        # more than the linear case above (one node, two samples) does.
         assert m[i] == pytest.approx(v0, abs=2 * (vels[1] - vels[0]))
         assert tau[j] == pytest.approx(tau0, abs=3 / FS)
 

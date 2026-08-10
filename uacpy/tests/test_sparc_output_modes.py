@@ -1,16 +1,15 @@
 """Tests for SPARC's run mode and output mode.
 
 SPARC is a time-domain code: it marches a pulse and its product is ``p(t)``.
-CW transmission loss used to be extracted from that pulse, but the extraction
-is not quantitative — ``sparc.f90:313`` sets ``Atten = 0`` so the wavenumber
+Extracting CW transmission loss from that pulse is not quantitative — ``sparc.f90:313`` sets ``Atten = 0`` so the wavenumber
 sum has no contour offset to move it off the real-axis modal poles (Scooter
 uses ``Atten = Deltak``, ``scooter.f90:129``); ``Nk`` is sized across the whole
 pulse band so only a fraction of the samples land in the analysis frequency's
 window; and the default ``pulse_type='PN+B'`` band-pass is per-wavenumber while
 ``rts_to_pressure`` deconvolves a single scalar ``S(omega0)``. Measured on a
 guide with exactly one propagating mode — where the exact TL is smooth and
-monotone — SPARC gave 2.4 dB median error with 13 dB excursions against
-Scooter's 0.07 dB, and did not converge under any grid setting.
+monotone — SPARC shows 2.4 dB median error with 13 dB excursions against
+Scooter's 0.07 dB, and converges under no grid setting.
 
 ``RunMode.COHERENT_TL`` is therefore withdrawn. ``output_mode`` is **not** a CW
 concept: ``sparc.f90:579-609`` shows ``TopOpt(5:5)`` selecting three
@@ -18,9 +17,9 @@ concept: ``sparc.f90:579-609`` shows ``TopOpt(5:5)`` selecting three
 (vertical array, ``RTSrz(ir,Itout)``), ``'S'`` = snapshot. ``'R'`` and ``'D'``
 both return received time series. ``'S'`` writes a wavenumber-domain Green's function
 (``Green(Itout, irz, ik)``); ``doc/sparc.htm`` says FIELDS must be run
-afterwards to turn it into a pressure field, which uacpy now does in-tree with
-one inverse Hankel transform per output time. All three modes return received
-time series and are cross-checked against each other here.
+afterwards to turn it into a pressure field, which uacpy does in-tree with one
+inverse Hankel transform per output time. All three modes return received time
+series and are cross-checked against each other here.
 """
 
 import pytest
@@ -105,9 +104,13 @@ class TestSPARCOutputMode:
     @pytest.mark.requires_binary
     def test_vertical_and_horizontal_report_the_same_field(
             self, sparc_simple_env, source_50hz):
-        """sparc.f90:292 scales 'D' by 1/sqrt(pi*Rr) where 'R' carries
-        1/sqrt(r), so without a sqrt(pi) correction the vertical array reads
-        1/sqrt(pi) = 0.5642 of the horizontal one for the identical field."""
+        """``Scooter/sparc.f90:292`` scales 'D' by 1/sqrt(pi*Rr) where 'R'
+        carries 1/sqrt(r), so without a sqrt(pi) correction the vertical array
+        reads 1/sqrt(pi) = 0.5642 of the horizontal one for the identical
+        field. The 5% bound is set an order of magnitude below that 43.6%
+        signature, so it catches a dropped or doubled sqrt(pi) while leaving
+        room for the two paths' differing time interpolation.
+        """
         import warnings as _w
         depths = np.array([30.0, 50.0, 70.0])
         rng = np.array([1000.0])
@@ -212,7 +215,9 @@ class TestSPARCSnapshot:
         """Same field by a different route: the snapshot Hankel-transforms the
         wavenumber field while 'R' uses sparc.f90's own range synthesis. The
         conventions differ by exactly -2*sqrt(pi) (measured signed ratio
-        -3.5449, std 0.0000), which the transform undoes."""
+        -3.5449, std 0.0000), which the transform undoes. As in the 'D'-vs-'R'
+        check, 5% sits far below the factor a mis-applied convention would
+        leave behind."""
         import warnings as _w
         depths = np.array([30.0, 50.0])
         rngs = np.array([1000.0, 1500.0])

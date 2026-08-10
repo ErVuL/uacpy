@@ -93,11 +93,15 @@ def _phi_from_properties(p: Dict) -> Optional[Dict]:
 def _require_coverage(lat, lon, max_distance_km):
     """Raise ``DataFetchError`` for a point outside :data:`_COVERAGE_BOX`.
 
-    The box is padded by ``max_distance_km`` so the guard can never reject a
-    point whose nearest admissible sample could lie inside it.
+    The box is padded by ``max_distance_km`` converted at a flat 111 km/degree.
+    That is exact in latitude but under-pads in longitude away from the equator
+    (at 65°S a degree is only ~47 km, so the pad spans ~42 km of a 100 km
+    guard). Harmless only because :data:`_COVERAGE_BOX` is drawn far outside the
+    sampled area — the pad is a courtesy margin, not the thing keeping a real
+    sample in scope.
     """
     lat_min, lat_max, lon_min, lon_max = _COVERAGE_BOX
-    pad = float(max_distance_km) / 111.0
+    pad = float(max_distance_km) / 111.0    # ~111 km per degree of latitude
     lon = normalize_lon(lon)
     if (lat_min - pad <= lat <= lat_max + pad
             and lon_min - pad <= lon <= lon_max + pad):
@@ -112,7 +116,7 @@ def _require_coverage(lat, lon, max_distance_km):
 
 def _query_bbox(lat, lon, radius_km, *, layer, base_url, timeout, verbose):
     """All MARS features inside a ``radius_km`` box around ``(lat, lon)``."""
-    dlat = radius_km / 111.0
+    dlat = radius_km / 111.0                # ~111 km per degree of latitude
     dlon = radius_km / (111.0 * max(math.cos(math.radians(lat)), 0.1))
     lon = normalize_lon(lon)
     # The server wants lon-lat axis order for EPSG:4326 bbox values.

@@ -20,6 +20,11 @@ from typing import Optional, Sequence, Tuple, Union
 from uacpy.core.exceptions import ConfigurationError
 
 
+#: Block terminator. Every RAM-family block reader stops on a negative first
+#: column and never on a count: ``zread`` loops until ``zi.lt.0.0``
+#: (``ramsurf/ramsurf1.5.f:205-206``) and the surface / bathymetry loops until
+#: ``rsrf(i).lt.0.0`` / ``rb(i).lt.0.0`` (``:83-84``, ``:91-92``). The second
+#: column is read but discarded on that row.
 _TERM = "-1 -1\n"
 
 
@@ -27,7 +32,15 @@ def _write_block(
     fh,
     pairs: Sequence[Tuple[float, float]],
 ) -> None:
-    """Write a ``(depth, value)`` block followed by the ``-1 -1`` terminator."""
+    """Write a ``(depth, value)`` block followed by the ``-1 -1`` terminator.
+
+    ``zread`` pins each pair to the grid node ``i = int(1.5 + z/dz)`` and
+    linearly interpolates between pinned nodes (``ramsurf1.5.f:202-219``), so
+    the block is a control-point list on a ``dz`` grid, not a sampled curve.
+    Two pairs closer together than ``dz`` collide on one node; ``:208`` pushes
+    the second down a node rather than merging them, which shifts it by up to
+    ``dz``. Keep the pairs at least ``dz`` apart to place them exactly.
+    """
     if not pairs:
         raise ConfigurationError("Cannot write empty profile block")
     for d, v in pairs:
@@ -87,7 +100,11 @@ def write_ramin(
     c0, np_pade : float, int
         Reference sound speed (m/s) and number of Padé coefficients.
     bathymetry : list of (range, depth)
-        Seafloor profile vs range. Linearly interpolated by the binary.
+        Seafloor profile vs range, in metres. Linearly interpolated by the
+        binary, which self-extends past the last point by repeating its
+        depth out to ``2*rmax`` (``ramsurf1.5.f:95-96``,
+        ``ramgeo1.5.f:115-116``) or ``rmax + 2*dr`` (``rams0.5.f:116-117``),
+        so the profile need not reach ``rmax``.
     range_segments : list of dict
         One entry per range section, in order. The first entry's
         ``range`` is ignored (initial profile); subsequent entries write
@@ -103,7 +120,8 @@ def write_ramin(
     surface : list of (range, depth), optional
         Surface profile (only used / required when ``kind='ramsurf'``).
         ``depth`` ≥ 0 means how far below z=0 the pressure-release
-        surface sits at that range.
+        surface sits at that range. Self-extends to ``2*rmax`` like the
+        bathymetry (``ramsurf1.5.f:87-88``).
     ns_stab, rs_stab : int, float
         Row-5 stability fields (``ramsurf`` only).
     irot, theta : int, float
@@ -129,6 +147,10 @@ def write_ramin(
 
     Path(filepath).parent.mkdir(parents=True, exist_ok=True)
     with open(filepath, 'w') as fh:
+        # Rows 1-5 go to ``setup``: title, (freq zs zr), (rmax dr ndr),
+        # (zmax dz ndz zmplt), then row 5 — (c0 np ns rs) for the fluid
+        # codes (``ramsurf1.5.f:76-80``, ``ramgeo1.5.f:104-108``) or
+        # (c0 np irot theta) for RAMS (``rams0.5.f:105-109``).
         fh.write(f"{title}\n")
         fh.write(f"{float(fc):.6f} {float(zs):.6f} {float(zr_line):.6f}\n")
         fh.write(f"{float(rmax):.6f} {float(dr):.6f} {int(ndr)}\n")
@@ -149,6 +171,11 @@ def write_ramin(
 
         _write_block(fh, bathymetry)
 
+        # ``profl`` reads a segment's profile blocks first and only then the
+        # range at which the *next* segment starts (``rams0.5.f:198``,
+        # ``ramsurf1.5.f:180``), defaulting it to ``2*rmax`` at EOF. On disk
+        # that puts each range line between the blocks it separates, which is
+        # what writing it ahead of every segment but the first produces.
         for i, seg in enumerate(range_segments):
             if i > 0:
                 fh.write(f"{float(seg['range']):.6f}\n")

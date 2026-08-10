@@ -33,6 +33,12 @@ def bpsk_modulate(
     Each binary symbol (chip) is represented by a sinusoid of length
     samples_per_chip. The phase is 0 for +1, π for -1.
 
+    One chip-length carrier is built once and replicated, so the carrier phase
+    **restarts at zero in every chip** (as in the ``bpsk.m`` original). The
+    result is phase-continuous across chip boundaries only when ``fc`` is an
+    integer multiple of ``chips_per_sec``; otherwise each boundary carries a
+    phase step that widens the transmitted spectrum.
+
     Examples
     --------
     >>> # Binary sequence
@@ -57,10 +63,9 @@ def bpsk_modulate(
     t_chip = np.arange(samples_per_chip) * deltat
     sinwave = np.sin(2 * np.pi * fc * t_chip)
 
-    # Outer product: each column is one chip
+    # Outer product: each column is one chip, so a column-major (Fortran-order)
+    # flatten concatenates the chips in sequence order.
     s_matrix = np.outer(sinwave, s_bipolar)
-
-    # Flatten to 1D signal
     s = s_matrix.flatten(order="F")
 
     return s
@@ -89,12 +94,15 @@ def mseq(m: int) -> np.ndarray:
     Uses shift register with feedback based on primitive polynomials.
     The resulting sequence has:
     - Length N = 2^m - 1
-    - Nearly flat autocorrelation (ideal for matched filtering)
-    - Balanced +1/-1 symbols
+    - Two-valued periodic autocorrelation (N at zero lag, -1 at every other
+      lag) — ideal for matched filtering
+    - Balanced to within one symbol: 2^(m-1) chips of +1 and 2^(m-1)-1 of -1,
+      so the sequence sums to +1 rather than 0
 
-    Formulas from Proakis, Digital Communications
-
-    Translated from OALIB mseq.m by Michael B. Porter
+    Translated from ``third_party/Acoustics-Toolbox/Matlab/waveforms/mseq.m``
+    (Michael B. Porter, April 2000); the feedback-coefficient table and the
+    shift recursion below are that file's, which credits Proakis, *Digital
+    Communications*, p. 433.
 
     Examples
     --------
@@ -132,9 +140,11 @@ def mseq(m: int) -> np.ndarray:
     c = np.array(coefficients[m])
     length = 2**m - 1
 
-    # Successive shifts with feedback (Proakis p. 433)
+    # Successive shifts with feedback. Any non-zero seed traverses the same
+    # cycle (differing only by a shift); all-zero is the LFSR's absorbing state
+    # and would emit zeros forever, so it is the one seed that is excluded.
     seed = np.zeros(m)
-    seed[0] = 1  # All zero except first element
+    seed[0] = 1
     s = np.zeros(length)
 
     for ii in range(length):
@@ -182,8 +192,11 @@ def make_mseq_probe(fmin: float, fmax: float, sample_rate: float, T_tot: float) 
     3. BPSK modulation at center frequency fc = (fmin + fmax) / 2
     4. Zero-padding to T_tot
 
-    Chip rate is (fmax - fmin) / 2. Output is normalized to 0.95 of
-    full scale and is exactly ``round(T_tot * sample_rate)`` samples long.
+    Chip rate is (fmax - fmin) / 2: a rectangular chip of duration ``T_chip``
+    has a sinc spectrum whose first nulls sit at ``+/- 1/T_chip``, so a chip
+    rate of half the requested width fills ``[fmin, fmax]`` between those
+    nulls. Output is normalized to 0.95 of full scale and is exactly
+    ``round(T_tot * sample_rate)`` samples long.
 
     Raises :class:`~uacpy.core.exceptions.ConfigurationError` if ``T_tot`` is
     too short to hold the leader plus one full m-sequence period — a partial

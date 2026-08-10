@@ -78,9 +78,15 @@ class Field(Result):
     complex                    ``{source_depth, depth, range}``  Multi-source complex pressure (``.kind == 'pressure'``; ``.tl`` derives dB)
     =========================  ================================  =====================================
 
-    ``data.shape`` matches the insertion order of :attr:`coords`. The
-    canonical order is ``source_depth → depth → range → frequency``
-    (or ``time``).
+    ``data.shape`` matches the insertion order of :attr:`coords`, which
+    **is** the axis order — reordering ``coords`` after construction
+    desynchronises it from ``data``. The canonical order is
+    ``source_depth → depth → range → frequency`` (or ``time``).
+
+    Axis units and signs: ``depth`` and ``source_depth`` in metres below
+    the sea surface (positive down, as in the ``.env`` sound-speed profile
+    every wrapped model reads), ``range`` in metres from the source,
+    ``time`` in seconds, ``frequency`` in Hz.
 
     Slicing
     -------
@@ -95,6 +101,18 @@ class Field(Result):
     :meth:`max` does the same for every axis at once (picking the
     argmax of ``|data|``) — returns a scalar Field with empty
     ``coords`` and every axis pinned.
+
+    :attr:`pinned` is therefore the record of what was dropped:
+    ``{axis_name: label}`` in that axis's own units, never an index. It
+    accumulates over successive slices and every derived Field inherits it,
+    so a consumer can always recover which cell a reduced result came from
+    — that is what the plotters put in the subtitle and what
+    :meth:`plot_impulse_response` reads to place its time window. A pinned
+    value is one of the stored samples for :meth:`at` / :meth:`isel` /
+    :meth:`max`, but the *requested* value clamped into range for
+    :meth:`eval`, so a consumer must not assume it appears in any coord
+    array. Pinning ``frequency`` or ``source_depth`` also narrows the
+    identity fields ``frequencies`` / ``source_depths`` to the pinned value.
     """
 
     field_type = "field"
@@ -155,13 +173,15 @@ class Field(Result):
 
     @property
     def kind(self) -> str:
-        """Physical-quantity classification from ``(dtype, coords)``.
+        """Physical-quantity classification derived from ``(dtype, coords)``.
 
-        One of ``'tl'`` (real, no time/frequency axis), ``'pressure'``
-        (complex, no frequency axis), ``'transfer_function'``
-        (complex, ``'frequency'`` axis present), or ``'time_series'``
-        (real, ``'time'`` axis present). Independent of dimensionality —
-        ``tl.at(depth=20)`` is still ``'tl'``."""
+        Derived, never stored, by testing four cases in this order: complex
+        with a ``'frequency'`` axis is ``'transfer_function'``; real with a
+        ``'time'`` axis is ``'time_series'``; any other complex field is
+        ``'pressure'``; any other real field is ``'tl'`` (dB). So the real
+        dB spectrum :meth:`to_tl` returns for a broadband field is ``'tl'``
+        even though it keeps its frequency axis. Independent of
+        dimensionality — ``tl.at(depth=20)`` is still ``'tl'``."""
         axes = set(self.coords)
         if 'frequency' in axes and self.is_complex:
             return 'transfer_function'
@@ -589,7 +609,29 @@ class Field(Result):
         """Single-trace IFFT of ``H(d, r, :)`` at a chosen ``(depth, range)``.
 
         Requires ``coords == {'depth', 'range', 'frequency'}``. Returns
-        a single-point ``Field`` with ``coords={'time': ...}``."""
+        a single-point ``Field`` with ``coords={'time': ...}``.
+
+        Parameters
+        ----------
+        depth, range : float, optional
+            Cell to synthesise. Matched to the **nearest** stored
+            coordinate — never interpolated — and recorded in the returned
+            Field's :attr:`pinned`. Defaults are the middle depth
+            (``depths[n_d // 2]``) and the first range.
+        source_spectrum : ndarray, optional
+            Continuous source spectrum ``S(f)`` sampled at
+            ``coords['frequency']``. ``None`` synthesises the band-limited
+            impulse response.
+        window : str
+            Band-edge taper applied to ``H(f)`` before the IFFT: ``'hann'``,
+            ``'hamming'``, ``'blackman'``, ``'tukey'`` or ``'none'``.
+        nfft : int, optional
+            IFFT length. ``None`` sizes it automatically; an explicit value
+            that would put the highest data bin at or above Nyquist is
+            rejected rather than allowed to alias.
+        t_start : float, optional
+            Time of the first output sample (s). ``None`` estimates it from
+            the range and the fastest sound speed the model reported."""
         if list(self.coords) != ['depth', 'range', 'frequency']:
             raise ConfigurationError(
                 "Field.to_time_trace: requires canonical "
@@ -614,7 +656,22 @@ class Field(Result):
         """Convolve every grid trace with ``source_waveform`` to obtain a
         time-domain Field shaped ``(n_d, n_r, n_t)``.
 
-        Requires ``coords == {'depth', 'range', 'frequency'}``."""
+        Requires ``coords == {'depth', 'range', 'frequency'}``.
+
+        Parameters
+        ----------
+        source_waveform : ndarray
+            The 1-D signal only — the waveform generators return a
+            ``(time, signal)`` pair, so pass ``lfm_chirp(...)[1]``.
+        sample_rate : float
+            Sample rate (Hz) the waveform is sampled at. It sets the
+            spectrum ``S(f)`` and the *lower bound* on the output rate; the
+            realised rate is ``nfft·Δf`` (see :func:`_synthesize_time_series`).
+        t_start : float, optional
+            Start of the single time window every cell shares. ``None``
+            anchors it on the nearest cell (``depths[0]``, ``ranges[0]``).
+        window, nfft
+            As on :meth:`to_time_trace`, applied to every cell."""
         if list(self.coords) != ['depth', 'range', 'frequency']:
             raise ConfigurationError(
                 "Field.synthesize_time_series: requires canonical "
@@ -774,6 +831,11 @@ class Field(Result):
         The ``2·X/Σwin`` tone estimator assumes a non-DC, non-Nyquist
         bin; at exactly 0 Hz or the Nyquist frequency the doubling
         overestimates the amplitude by 2×.
+
+        The returned value is the phasor ``A`` of
+        ``p(t) = Re{A·e^{+2πift}}`` — the same sign convention the IFFT
+        synthesis consumes, so a tone extracted here and an ``H(f)`` bin
+        handed to :meth:`to_time_trace` carry phase the same way.
         """
         if list(self.coords) != ['depth', 'range', 'time']:
             raise ConfigurationError(
@@ -1129,6 +1191,12 @@ def _ifft_to_trace(
     explicit_nfft = nfft is not None
 
     if nfft is None:
+        # Floor the auto length at 4 bins per model frequency, and never below
+        # a time-sample count the model already reported. On a baseband grid
+        # the anti-aliasing minimum below is 2*max_bin + 2 = 2*n_freq, so the
+        # floor leaves the trace time-oversampled ~2x rather than critically
+        # sampled — the extra bins are zero-padding, which interpolates the
+        # trace without changing its band.
         nfft_min = max(int(tf.metadata.get('n_samples', 0)) or 0, 4 * n_freq)
         nfft_target = max(nfft_min, 2 * max_bin + 2)
         if sample_rate is not None:
@@ -1176,6 +1244,9 @@ def _ifft_to_trace(
             DEFAULT_SOUND_SPEED,
         )
         travel = actual_range / anchor_speed
+        # Centre the estimated first arrival in the record: half a window of
+        # lead absorbs an arrival earlier than the estimate, the other half
+        # holds the multipath tail behind it.
         lead = 0.5 * T_window
         t_start = max(0.0, travel - lead)
         # Without a c_max the anchor carries the fast/slow path spread as
@@ -1200,6 +1271,9 @@ def _ifft_to_trace(
 
     padded = np.zeros(nfft, dtype=complex)
 
+    # Advance the record to t_start. The synthesis below evaluates
+    # sum H(f) e^{+2*pi*i*f*t}, so pre-rotating by e^{+2*pi*i*f*t_start} puts
+    # ifft sample n at t = t_start + n*dt instead of at n*dt.
     spectrum = spectrum * np.exp(1j * 2.0 * np.pi * freqs * t_start)
     # Only the positive-frequency half is physical here: 2·Re(ifft) folds
     # anything at or above Nyquist onto the wrong frequency.
@@ -1266,7 +1340,7 @@ def _source_spectrum_at(
     idx = np.arange(n, dtype=np.float64)
     sel = np.flatnonzero(in_band)
     # Chunk over frequency so the phase matrix stays bounded regardless of
-    # waveform length x grid size.
+    # waveform length x grid size (4e6 complex128 elements ~ 64 MB per block).
     step = max(1, int(_max_elems // max(n, 1)))
     for a in range(0, sel.size, step):
         blk = sel[a:a + step]

@@ -21,7 +21,7 @@ from dataclasses import dataclass
 
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core._carrier_validate import (
-    _require_non_negative, _require_strictly_increasing,
+    _require_non_negative, _require_strictly_increasing, _dedupe_provenance,
 )
 from uacpy.core.bottom import BoundaryProperties, _reduce_boundaries
 
@@ -84,13 +84,7 @@ class Surface:
     def data_sources(self) -> tuple:
         """Aggregated provenance across surface nodes, de-duplicated by source
         id (harmonised with the leaf carriers and ``env.data_sources``)."""
-        seen, out = set(), []
-        for p in self.properties:
-            for r in getattr(p, 'data_sources', ()) or ():
-                if r.source.id not in seen:
-                    seen.add(r.source.id)
-                    out.append(r)
-        return tuple(out)
+        return _dedupe_provenance(self.properties)
 
     # ── constructors ────────────────────────────────────────────────────────
     @classmethod

@@ -257,6 +257,74 @@ class TestPlotEnvironment:
         plt.close(fig)
 
 
+class TestBottomTitles:
+    """The default bottom titles must name the bottom's *shape*. A class name
+    no longer discriminates — ``core.bottom`` declares one ``Bottom``."""
+
+    @staticmethod
+    def _layer(**kw):
+        from uacpy.core.environment import SedimentLayer
+        return SedimentLayer(thickness=15, sound_speed=1650, density=1.6,
+                             attenuation=0.4, **kw)
+
+    @staticmethod
+    def _column(layers):
+        from uacpy.core import BoundaryProperties
+        from uacpy.core.environment import SeabedColumn
+        return SeabedColumn(
+            layers=layers,
+            halfspace=BoundaryProperties(acoustic_type='half-space',
+                                         sound_speed=2000, density=2.0,
+                                         attenuation=0.2))
+
+    def _env(self, bottom):
+        return uacpy.Environment(name='bt', bathymetry=[(0, 100), (5000, 120)],
+                                 ssp=[(0, 1500), (120, 1490)], bottom=bottom)
+
+    @pytest.fixture
+    def bottoms(self):
+        from uacpy.core.bottom import Bottom
+        return {
+            'half-space': Bottom.from_column(self._column([])),
+            'layered': Bottom.from_column(self._column([self._layer()])),
+            'range-dependent half-space, 2 ranges': Bottom.from_columns(
+                [self._column([]), self._column([])], ranges=[0.0, 5000.0]),
+            'range-dependent layered, 2 ranges': Bottom.from_columns(
+                [self._column([self._layer()]), self._column([self._layer()])],
+                ranges=[0.0, 5000.0]),
+        }
+
+    def test_environment_title_names_the_shape(self, bottoms):
+        for expected, bottom in bottoms.items():
+            fig, ax = self._env(bottom).plot(data_source=None)
+            assert ax.get_title() == f"Bottom — {expected}"
+            plt.close(fig)
+
+    def test_bottom_properties_title_names_the_shape(self, bottoms):
+        for expected, bottom in bottoms.items():
+            fig, _ = plots.plot_bottom_properties(self._env(bottom),
+                                                  data_source=None)
+            assert fig._suptitle.get_text() == f"Seabed properties — {expected}"
+            plt.close(fig)
+
+    def test_explicit_title_still_wins(self, env):
+        fig, ax = env.plot(title='Custom')
+        assert ax.get_title() == 'Custom'
+        plt.close(fig)
+
+
+class TestPlotRangeProfile:
+    def test_title_distinguishes_bathymetry_from_altimetry(self):
+        bathy = uacpy.Bathymetry(ranges=[0.0, 1000.0], depths=[100.0, 120.0])
+        alti = uacpy.Altimetry(ranges=[0.0, 1000.0], heights=[0.0, 1.0])
+        fig, ax = bathy.plot()
+        assert ax.get_title() == 'Bathymetry profile'
+        plt.close(fig)
+        fig, ax = alti.plot()
+        assert ax.get_title() == 'Altimetry profile'
+        plt.close(fig)
+
+
 class TestPlotSSP:
     def test_profile_input_depth_down_single_line(self):
         ssp = uacpy.SoundSpeedProfile.from_pairs([(0, 1520), (100, 1490),
@@ -471,6 +539,83 @@ class TestBathymetryMap:
             lats, lons, depth, transect=((42, 4), (38.3, 6)))
         assert ax.get_legend() is not None        # transect labelled
         plt.close(fig)
+
+
+class TestReliefLighting:
+    """The shaded relief must light real seafloor *relief* from the requested
+    azimuth.
+
+    ``LightSource.hillshade`` negates ``dy`` (matplotlib ``colors.py``: "most
+    image and raster GIS data has the first row in the array as the top of the
+    image ... dy is implicitly negative"), so an array whose row index grows
+    northward under ``origin='lower'`` has to pass ``-dy`` to mean what it
+    says. And the field is water depth, positive *down*, so the shader must be
+    given ``-depth`` or a seamount lights like a pit.
+
+    The four probes below sit at equal radius from the feature's centre, so
+    they share a depth and therefore a base colour: any luminance difference
+    between them is the hillshade alone.
+    """
+
+    # cos(40.5 deg) ~ 0.76, so this longitude span makes the cells square in
+    # metres and the four probes symmetric under the shader's own metric.
+    _LATS = np.linspace(40.0, 41.0, 61)
+    _LONS = np.linspace(0.0, 1.316, 61)
+
+    def _feature(self, sign):
+        lo, la = np.meshgrid(self._LONS, self._LATS)
+        r2 = (((lo - self._LONS.mean()) / np.ptp(self._LONS)) ** 2
+              + ((la - self._LATS.mean()) / np.ptp(self._LATS)) ** 2)
+        return 3000.0 - sign * 1000.0 * np.exp(-r2 / (2 * 0.12 ** 2))
+
+    def _flank_luminance(self, depth):
+        """Rendered luminance at the NW / NE / SW / SE flanks."""
+        fig, ax = plots.plot_bathymetry_map(
+            self._LATS, self._LONS, depth, basemap=False, relief=True,
+            graticule=None)
+        rgba = np.asarray(ax.get_images()[0].get_array())
+        plt.close(fig)
+        lum = rgba[..., :3] @ np.array([0.2126, 0.7152, 0.0722])
+        mid, off = 30, 12          # origin='lower': row grows northward
+        return {'NW': lum[mid + off, mid - off], 'NE': lum[mid + off, mid + off],
+                'SW': lum[mid - off, mid - off], 'SE': lum[mid - off, mid + off]}
+
+    def test_a_seamount_is_lit_from_the_northwest(self):
+        lum = self._flank_luminance(self._feature(+1))
+        assert lum['NW'] == max(lum.values()), (
+            f"azdeg=315 requested, brightest flank is "
+            f"{max(lum, key=lum.get)}: {lum}")
+        assert lum['SE'] == min(lum.values()), lum
+
+    def test_a_basin_lights_the_opposite_flank(self):
+        """Same geometry, inverted: the wall a depression turns toward the
+        light is its far (SE) one. Depth-as-elevation would not flip."""
+        lum = self._flank_luminance(self._feature(-1))
+        assert lum['SE'] == max(lum.values()), (
+            f"a basin lit like a seamount: {lum}")
+        assert lum['NW'] == min(lum.values()), lum
+
+    def test_cell_size_and_dy_sign_reach_the_shader(self, monkeypatch):
+        """n samples span n-1 intervals, and the row order is south→north."""
+        from matplotlib.colors import LightSource
+        seen = {}
+        real = LightSource.shade_rgb
+
+        def spy(self, rgb, elevation, **kw):
+            seen.update(kw)
+            seen['elevation_sign'] = float(np.sign(np.mean(elevation)))
+            return real(self, rgb, elevation, **kw)
+
+        monkeypatch.setattr(LightSource, 'shade_rgb', spy)
+        self._flank_luminance(self._feature(+1))
+
+        deg_m = 111320.0
+        assert seen['dy'] == pytest.approx(
+            -np.ptp(self._LATS) / (self._LATS.size - 1) * deg_m)
+        assert seen['dx'] == pytest.approx(
+            np.ptp(self._LONS) / (self._LONS.size - 1) * deg_m
+            * np.cos(np.radians(self._LATS.mean())))
+        assert seen['elevation_sign'] == -1.0      # height, not depth
 
 
 class TestOverview:

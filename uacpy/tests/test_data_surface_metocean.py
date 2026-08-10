@@ -203,8 +203,12 @@ def test_fetch_waves_bad_source_raises():
 # ── sea surface ───────────────────────────────────────────────────────────────
 
 def test_hs_to_pm_wind():
-    # Hs = 0.021·U² → U = sqrt(Hs/0.021); Hs=2.1 → ~10 m/s.
-    assert sea_surface.hs_to_pm_wind(2.1) == pytest.approx(10.0, rel=1e-3)
+    # Inverts the Pierson-Moskowitz Hs = coeff·U², so it must round-trip
+    # against whatever coefficient the module carries.
+    for u in (5.0, 10.0, 18.0):
+        hs = sea_surface._PM_HS_COEFF * u ** 2
+        assert sea_surface.hs_to_pm_wind(hs) == pytest.approx(u)
+    assert sea_surface.hs_to_pm_wind(-1.0) == 0.0        # clamped, not NaN
 
 
 def test_fetch_sea_surface_from_waves(monkeypatch):

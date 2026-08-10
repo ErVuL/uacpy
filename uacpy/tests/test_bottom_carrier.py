@@ -411,3 +411,44 @@ def test_halfspace_at_rejects_bad_interp_on_range_independent_bottom():
     b = Bottom.from_halfspace(BoundaryProperties(sound_speed=1700.0))
     with pytest.raises(ConfigurationError, match='interp'):
         b.halfspace_at(range=0.0, interp='bogus')
+
+
+class TestBoundaryPropertiesRoughnessSign:
+    """``roughness`` is an RMS magnitude, so it takes the same sign check as
+    the acoustic parameters beside it.
+
+    Its exclusion from the ``half_space_offenders`` list is about
+    ``acoustic_type`` inference — roughness is an interface property every
+    boundary type carries, so it must not make a vacuum surface infer
+    ``'half-space'``. That is not a reason to accept a negative value: OASES
+    reads the sign of column 7 as an encoding, and ``rough(m).lt.-1e-10``
+    makes INENVI re-read the layer record as nine tokens
+    (``oases/src/oaseun31.f:72-93``) where uacpy emits eight, shifting every
+    later READ in the deck. ``SedimentLayer`` has always checked it.
+    """
+
+    def test_negative_roughness_is_rejected(self):
+        with pytest.raises(ConfigurationError,
+                           match='roughness must be non-negative'):
+            BoundaryProperties(roughness=-0.5)
+
+    def test_zero_and_positive_roughness_are_accepted(self):
+        assert BoundaryProperties(roughness=0.0).roughness == 0.0
+        assert BoundaryProperties(roughness=2.5).roughness == 2.5
+
+    def test_roughness_still_does_not_infer_a_half_space(self):
+        """The sign check must not turn roughness into a half-space
+        parameter — a rough pressure-release sea surface stays a vacuum."""
+        assert BoundaryProperties(roughness=2.0).acoustic_type == 'vacuum'
+
+    def test_roughness_may_accompany_an_explicit_vacuum(self):
+        """The explicit-conflict guard lists only cp/rho/alpha/cs, so a rough
+        vacuum surface is still constructible."""
+        assert BoundaryProperties(acoustic_type='vacuum',
+                                  roughness=2.0).roughness == 2.0
+
+    def test_sediment_layer_agrees(self):
+        with pytest.raises(ConfigurationError,
+                           match='roughness must be non-negative'):
+            SedimentLayer(thickness=10, sound_speed=1600, density=1.5,
+                          roughness=-1.0)

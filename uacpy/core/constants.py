@@ -12,7 +12,11 @@ from uacpy.core.exceptions import ConfigurationError
 
 
 DEFAULT_SOUND_SPEED = 1500.0  # m/s — typical ocean value
-TL_MAX_DB = 200.0             # dB — deep-shadow-zone TL clamp
+
+# dB — the level a wrapper reports for a cell carrying no energy: RAM pins both
+# a diverged Padé sample and its synthetic pressure-release surface row here,
+# and converts back to a magnitude with ``10**(-TL_MAX_DB/20)``.
+TL_MAX_DB = 200.0
 
 # Mean Earth radius (IUGG R1) for spherical great-circle geodesy when
 # sampling external geographic datasets (bathymetry transects, …).
@@ -30,6 +34,10 @@ EARTH_RADIUS_M = 6_371_008.8  # m
 # the slowest phase speed in the mode search; 0 makes KRAKEN compute it
 # automatically (kraken.htm, Phase Speed Limits). A positive c_low excludes
 # slow interfacial (Scholte / Stoneley) modes.
+#
+# ``C_HIGH_FACTOR`` pads the upper bound symmetrically: the writers take
+# ``c_high = 1.05 · max(c_max, bottom cp)`` so the fastest speed in the problem
+# sits strictly inside the interval rather than on its edge.
 C_LOW_FACTOR = 0.95
 C_LOW_FACTOR_KRAKEN = 0.0
 C_HIGH_FACTOR = 1.05
@@ -39,25 +47,30 @@ DEFAULT_C_MAX = 10000.0  # above fastest expected compressional speed
 
 # "No upper phase-speed limit" for the AT family. A vacuum / rigid boundary
 # traps every mode, so the mode search must not be capped on a half-space
-# speed that does not exist; kraken.htm prescribes this value for the same
-# reason ``leaky_modes`` uses it, and oases_gen.tex says to set CMax to 1E9
-# "for a full 90 degree calculation".
+# speed that does not exist. Acoustics-Toolbox/doc/bounce.htm prescribes the
+# value: "For a full 90 degree calculation set CMin to the lowest speed in the
+# problem (say 1400.0) CMax to 1.0E9." Kraken's ``leaky_modes`` uses the same
+# number.
 DEFAULT_C_MAX_UNBOUNDED = 1.0e9
 
 # Sea-ice canopy as a homogeneous elastic surface. Canonical Arctic pack-ice
 # values from Jensen, Kuperman, Porter & Schmidt, *Computational Ocean
 # Acoustics* (the ice cover modelled as a homogeneous elastic medium): cp 3500
-# m/s, cs 1800 m/s, ρ 900 kg/m³, αp 0.5 dB/λ, αs 1.0 dB/λ. Typical ranges
-# (Etter, *Underwater Acoustic Modeling*): cp 1300-3900, cs 1400-1900 m/s.
+# m/s, cs 1800 m/s, αp 0.4 dB/λ, αs 1.0 dB/λ ("realistic attenuations of
+# 0.4 dB/λ for compressional waves and 1.0 dB/λ for shear waves"). Typical
+# ranges (Etter, *Underwater Acoustic Modeling*): cp 1300-3900, cs 1400-1900
+# m/s.
 SEA_ICE_COMPRESSIONAL_SPEED = 3500.0       # m/s
 SEA_ICE_SHEAR_SPEED = 1800.0               # m/s
 SEA_ICE_DENSITY = 0.9                      # g/cm³
-SEA_ICE_COMPRESSIONAL_ATTENUATION = 0.5    # dB/wavelength
+SEA_ICE_COMPRESSIONAL_ATTENUATION = 0.4    # dB/wavelength
 SEA_ICE_SHEAR_ATTENUATION = 1.0            # dB/wavelength
 # NSIDC standard ice-edge definition: ≥15 % concentration counts as ice-covered.
 SEA_ICE_EDGE_CONCENTRATION = 0.15
 
-# Floor applied whenever we take 20*log10(|p|).
+# Floor applied whenever we take 20*log10(|p|). 1e-30 lands at 600 dB of loss,
+# three times past the ``TL_MAX_DB`` no-energy sentinel, so a floored cell and a
+# clamped one stay distinguishable in the output.
 PRESSURE_FLOOR = 1e-30
 
 # SPL reference pressures for dB conversion (levels are dB re ref²).

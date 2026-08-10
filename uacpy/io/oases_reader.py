@@ -4,15 +4,17 @@ OASES Output File Readers
 This module provides functions for reading output files from OASES models:
 - OAST: .plp/.plt files (transmission loss)
 - OASN: .xsm files (covariance matrices), .rpo files (replicas)
-- Mode files: .mod files (mode shapes and wavenumbers)
+- OASP: .trf files (complex transfer functions)
+- OASR: .rco/.trc files (reflection coefficients vs slowness / angle)
 
-OASES (Ocean Acoustics and Seismic Exploration Synthesis) was developed by
-Henrik Schmidt at MIT.
+OASES (Ocean Acoustic and Seismic Exploration Synthetics, per the source
+banner at ``src/oasgun21.f:4``) was developed by Henrik Schmidt at MIT.
 
 References:
-    Schmidt, H. OASES Version 2.1 User Guide and Reference Manual (bundled
-    under ``third_party/oases``). Public OASES is 3.1 but the distribution
-    vendored here is 2.1 — see the bundled README.
+    Schmidt, H. OASES User Guide and Reference Manual, bundled under
+    ``third_party/oases/doc``; its title page reads Version 3.1
+    (``doc/oases.tex:53``) while the vendored source distribution is 2.1
+    (``third_party/oases/README:2``).
 """
 
 from pathlib import Path
@@ -84,7 +86,9 @@ def read_oast_tl(
     """
     filepath = Path(filepath)
 
-    # Get file paths - OAST can output to .plt, .plp, or .020 (Fortran unit 20)
+    # OAST writes the curve data on unit 20 and the plot description on unit
+    # 19 (``bin/oast``: FOR019=.plp, FOR020=.plt); an unmapped unit 20 lands
+    # in .020 instead.
     if filepath.suffix == '.plt':
         plt_file = filepath
         plp_file = filepath.with_suffix('.plp')
@@ -255,11 +259,13 @@ def _parse_oast_plp(plp_file: Path) -> list:
         One entry per PLTWRI record, in file order, with keys ``tag`` (the
         6-character ``OPTION(2)``, e.g. ``'NTLRAN'``), ``index`` (position in
         the ``.plt`` block sequence), ``n``, ``xoff``, ``dx``, ``yoff``,
-        ``dy``. Offsets/increments are in the plot's own x units (km for a
-        TL-vs-range curve).
+        ``dy``. Offsets/increments are in the plot's own x units — km for a
+        TL-vs-range curve, whose axis PLTLOS labels ``'Range (km)$'``
+        (oasfun22.f:338), hence the km→m conversion in :func:`read_oast_tl`.
     """
-    # The xopt fields PLPWRI appends to the OPTION line are uninitialised
-    # CHARACTER*3 slots, so the file is only ASCII-ish — decode leniently.
+    # The xopt fields PLPWRI appends to the OPTION line come from COMMON
+    # /PLXOPT/ (oasgun21.f:601-602), which nothing in the tree assigns, so
+    # those CHARACTER*3 slots reach the file uninitialised — decode leniently.
     text = plp_file.read_bytes().decode('ascii', errors='replace')
     lines = text.split('\n')
     while lines and not lines[-1].strip():
@@ -419,7 +425,11 @@ def read_oasn_covariance(
     if not filepath.exists():
         raise FileFormatError(f"OASN covariance file not found: {filepath}")
 
-    # Record length in bytes (8 bytes = 1 complex64 = 2 float32)
+    # One COMPLEX per record. PUTXSM opens the file with ``RECL = 2 * ldaun``
+    # (oasmun21_bin.f:346), where DASREC (oashun21.f:667-693) probes how many
+    # RECL units a 4-byte word takes on the host compiler — 1 where RECL
+    # counts words, 4 where it counts bytes — so the record is two words, 8
+    # bytes, either way.
     recl = 8
 
     try:
@@ -449,8 +459,7 @@ def read_oasn_covariance(
             _bound_counts(filepath, file_size, recl,
                           n_rcv=n_rcv, n_freq=n_freq, n_rcv2=n_rcv)
 
-            # Record 6: IZERO, IZERO (dummy)
-            # Skip
+            # Record 6: ENSEM, IZERO (ensemble size, dummy) — skipped
 
             # Record 7: FREQ1, FREQ2 (2 floats)
             f.seek(6 * recl)
@@ -467,11 +476,15 @@ def read_oasn_covariance(
             # Record 10: ZERO, ZERO (reserved)
             # Skip
 
-            # Read covariance matrices. Data starts at record 11 (offset
-            # 10 * recl); one complex value (re, im float32) sits at the head
-            # of each ``recl``-byte record, ordered (ifreq, jrcv, ircv) with
-            # ircv innermost. A structured dtype with ``itemsize=recl`` strides
-            # over the records in a single read.
+            # Read covariance matrices. Data starts at record 11 and runs
+            # NRCV*NRCV records per frequency (``SRTREC = 11 + (IFR-1) *
+            # NRCV*NRCV``, oasmun21_bin.f:390-399), one complex value
+            # (re, im float32) at the head of each ``recl``-byte record. The
+            # matrix is flattened column-major — OASES addresses element
+            # (ircv, jrcv) as ``IRCV + (JRCV-1)*NRCV`` (oasnun22.f:1174) — so
+            # the receiver index of the first subscript runs fastest. A
+            # structured dtype with ``itemsize=recl`` strides over the records
+            # in a single read.
             n_total = n_freq * n_rcv * n_rcv
             f.seek(10 * recl)
             rec_dt = np.dtype({
@@ -491,7 +504,10 @@ def read_oasn_covariance(
             buf = buf.ljust(n_total * recl, b'\x00')
             flat = np.frombuffer(buf, dtype=rec_dt, count=n_total)
             vals = (flat['re'] + 1j * flat['im']).astype(np.complex64)
-            # Stored (ifreq, jrcv, ircv); the matrix wants (ifreq, ircv, jrcv).
+            # C-order reshape puts the fastest axis last, i.e. ircv; transpose
+            # to (ifreq, ircv, jrcv). The matrix is Hermitian
+            # (``CORRNS(JI)=CONJG(CORRNS(IJ))``, oasnun22.f:1148), so getting
+            # this backwards would silently conjugate every cross-spectrum.
             covariance = vals.reshape(n_freq, n_rcv, n_rcv).transpose(0, 2, 1).copy()
 
         return {
@@ -541,14 +557,21 @@ def read_oasn_replicas(
         - 'freq_min': float, minimum frequency (Hz)
         - 'freq_max': float, maximum frequency (Hz)
         - 'freq_delta': float, frequency increment (Hz)
-        - 'z_min', 'z_max', 'n_z': replica depth grid
-        - 'x_min', 'x_max', 'n_x': replica x-range grid
-        - 'y_min', 'y_max', 'n_y': replica y-range grid
-        - 'receiver_positions': ndarray, shape (n_rcv, 3) [x, y, z]
+        - 'z_min', 'z_max', 'n_z': replica depth grid (m)
+        - 'x_min', 'x_max', 'n_x': replica x-offset grid (km)
+        - 'y_min', 'y_max', 'n_y': replica y-offset grid (km)
+        - 'receiver_positions': ndarray, shape (n_rcv, 3) [x, y, z] in m
         - 'receiver_types': ndarray, receiver types
         - 'receiver_gains': ndarray, receiver gains (dB)
         - 'replicas': ndarray, shape (n_freq, n_z, n_x, n_y, n_rcv)
                      Complex replica fields
+
+    Notes
+    -----
+    The grid fields are reported in the units the deck states them in, which
+    are not the same for all three axes: depth in m, x/y offsets in km
+    (``doc/oasn.tex:109-111``). Receiver coordinates are all in m
+    (``doc/oasn.tex:47-51``).
 
     Examples
     --------
@@ -619,9 +642,10 @@ def read_oasn_replicas(
                 receiver_gains[i] = 20.0 * np.log10(gain) if gain > 0 else -np.inf
 
             # Each replica is a Fortran sequential record
-            # ``[marker][re im][marker]`` (16 bytes), written contiguously in
-            # (ifreq, iz, ix, iy, ircv) order with ircv innermost. Read the
-            # whole block in one strided pass.
+            # ``[marker][re im][marker]`` (16 bytes), written contiguously by
+            # nested loops over (ifreq, iz, ix, iy, ircv) with ircv innermost
+            # (``doc/oasn.tex:681-686``). Read the whole block in one strided
+            # pass.
             n_total = n_freq * n_z * n_x * n_y * n_rcv
             rep_dt = np.dtype([
                 ('m1', endian + 'i4'),
@@ -673,7 +697,7 @@ def read_oasn_replicas(
 
 
 #: The option letter that selects each 1-based ``IOUT``/NPAR slot in OASP's
-#: GETOPT (unoasp22.f:890-921: N→1 V→2 H→3 R→5 K→6 S→7). TRFHEAD stores the
+#: GETOPT (unoasp22.f:884-919: N→1 V→2 H→3 R→5 K→6 S→7). TRFHEAD stores the
 #: slot numbers, not letters (oasiun23.f:855-861), so rendering them back as
 #: something a user could type needs this table. Slot 4 has no OASP letter.
 _OASP_OUTPUT_PARAM_LETTERS = {1: 'N', 2: 'V', 3: 'H', 5: 'R', 6: 'K', 7: 'S'}
@@ -872,14 +896,15 @@ def _read_oasp_trf_binary(filepath: Path, receiver_depths: np.ndarray) -> Dict:
 
         # --- Data records ---
         nf = max(1, mx - lx + 1)
-        # OASES bin indices are 1-based: oasiun22.f:1256-1261 sets
-        # DLFRQP = 1/(DT*NX) and LX = nint(FMIN/DLFRQP + 1), so bin k carries
-        # frequency (k-1)*DLFRQ. Using k/(dt*nx) puts the whole axis one bin
+        # OASES bin indices are 1-based: OASP sets DLFREQ = 1/(DT*NX) and
+        # LX = FR1/DLFREQ + 1 (unoasp22.f:237-241; the pulse post-processor
+        # repeats it at oasiun22.f:1256-1261), so bin k carries frequency
+        # (k-1)*DLFREQ. Using k/(dt*nx) puts the whole axis one bin
         # (= 1/(dt*nx) Hz) too high.
         freq_array = np.array(
             [((k - 1) / (dt * nx)) for k in range(lx, mx + 1)],
             dtype=np.float64,
-        ) if nf >= 1 else np.array([freqs], dtype=np.float64)
+        )
 
         # Detect the data-record precision from the first record's length
         # marker: 2*nout float32 for the default COMPLEX*8 payload, 2*nout
@@ -942,11 +967,12 @@ def _read_oasp_trf_binary(filepath: Path, receiver_depths: np.ndarray) -> Dict:
                     rec = _read_fortran_record(f, data_fmt, endian=endian)
                     transfer_function[j, jrh, jrv] = complex(rec[0], rec[1])
 
-    unnamed = sorted(set(iparm) - set(_OASP_OUTPUT_PARAM_LETTERS))
+    # IPARM holds slot numbers, so compare against the table's keys.
+    unnamed = sorted(set(iparm) - set(_OASP_OUTPUT_PARAM_LETTERS.keys()))
     if unnamed:
         raise FileFormatError(
             f"{filepath}: IPARM names output slot(s) {unnamed}, which no OASP "
-            f"option letter selects (unoasp22.f:890-921)."
+            f"option letter selects (unoasp22.f:884-919)."
         )
     return {
         'title': title,
@@ -963,11 +989,13 @@ def _read_oasp_trf_binary(filepath: Path, receiver_depths: np.ndarray) -> Dict:
 def _read_oasp_trf_ascii(filepath: Path) -> Dict:
     """Read ASCII (formatted) TRF file.
 
-    ASCII TRF reading is not implemented — the previous stub silently returned
-    ``np.ones(...)`` for the transfer function, which produced bogus TL values
-    downstream (uniform 0 dB). OASES is expected to be run with binary TRF
-    output (the default); if users genuinely need ASCII TRF support they can
-    open a PR with the proper payload reader.
+    Not implemented. OASP's ``bintrf`` is a DATA-statement ``.true.``
+    (``oases/src/unoasp22.f:1166``) that nothing in the tree reassigns, so
+    TRFHEAD always takes its ``FORM='UNFORMATTED'`` branch
+    (``oases/src/oasiun23.f:844-846``) and every uacpy run reads the binary
+    layout. This is the typed second branch of :func:`read_oasp_trf`'s
+    dispatch, so a file the binary reader rejects fails loudly rather than
+    falling through to a fabricated payload.
 
     Raises
     ------
@@ -1011,20 +1039,28 @@ def read_oasr_reflection_coefficients(
         - 'freq_max': float, maximum frequency (Hz)
         - 'n_frequencies': int, number of frequencies
         - 'sampling_type': str, 'slowness' or 'angle'
-        - 'frequencies': list of ndarray, frequency array for each freq
+        - 'frequencies': list of float, the frequency of each block (Hz)
         - 'angles_or_slowness': list of ndarray, angle (deg) or slowness (s/km)
         - 'magnitude': list of ndarray, reflection coefficient magnitude
         - 'phase': list of ndarray, reflection coefficient phase (degrees)
 
     Notes
     -----
-    File format (from OASES documentation):
-    Line 1: freq_min freq_max n_freq sampling_type
-            where sampling_type is 1 for slowness, 2 for angle
-    For each frequency:
-        Line: frequency n_samples
-        Then n_samples lines of:
-            angle/slowness magnitude phase
+    File format::
+
+        freq_min freq_max n_freq sampling_type    (2F12.3, 2I4)
+        for each frequency:
+            frequency n_samples  # Frequency, # of slownesses|angles
+            n_samples x (angle_or_slowness  magnitude  phase)   (3F15.6)
+
+    ``sampling_type`` is 1 for the slowness table and 2 for the angle table:
+    OASR opens both at once and stamps the codes on them (unoasr21.f:204-205),
+    with unit 22 going to ``.rco`` and unit 23 to ``.trc`` (``bin/oasr:8-9``).
+    The per-frequency header carries a trailing ``# …`` annotation
+    (oasjun21.f:27-29), so only its first two tokens are values. The abscissa
+    is written as ``slw*1e3`` for the ``.rco`` — slowness in s/km — and as
+    ``degang`` for the ``.trc``; the phase is scaled by ``omr`` to degrees in
+    both (oasjun21.f:102-104).
 
     Examples
     --------

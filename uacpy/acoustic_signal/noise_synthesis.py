@@ -103,10 +103,19 @@ def synthesize_noise_from_psd(Pxx, Fxx, duration=1, scale=1, *,
         )
         n_fft = rounded
 
+    # Interior bins of the one-sided grid: an even n_fft has n_fft//2 + 1 rfft
+    # bins, of which DC and Nyquist must be real for a real signal. Drawing a
+    # complex value there would be wrong, so both are pinned to zero below and
+    # only the N = n_fft//2 - 1 interior bins are synthesised.
     N = n_fft // 2 - 1
     dF = sample_rate / n_fft
     f_grid = np.arange(1, N + 1) * dF
     Pxx_grid = _resample_psd(Pxx, Fxx, f_grid, interp)
+    # Per-bin variance of each complex draw below. The band power of a
+    # one-sided PSD is Pxx*dF, split evenly between +f and -f of the real
+    # signal, and w = (vi + i*vq)*sqrt(v) carries E|w|^2 = 2v — hence v =
+    # Pxx*dF/4. Synthesising a flat PSD and re-estimating it round-trips to
+    # within 0.3 %.
     v = Pxx_grid * dF / 4
 
     chunk_size = n_fft
@@ -122,9 +131,15 @@ def synthesize_noise_from_psd(Pxx, Fxx, duration=1, scale=1, *,
         vi = rng.standard_normal(N)
         vq = rng.standard_normal(N)
         w = (vi + 1j * vq) * np.sqrt(v)
-        spectrum = np.concatenate(([0.0], w, [0.0]))
+        spectrum = np.concatenate(([0.0], w, [0.0]))   # DC, interior, Nyquist
+        # numpy's irfft carries a 1/n_fft; the *chunk_size undoes it, giving
+        # the unnormalised inverse DFT the v = Pxx*dF/4 calibration assumes.
         chunk = np.fft.irfft(spectrum, chunk_size) * chunk_size
 
+        # Sine/cosine crossfade rather than linear: the fade-in sin(pi/2 * u)
+        # and fade-out cos(pi/2 * u) are power-complementary (sin^2 + cos^2 =
+        # 1), so summing two independent chunks over the overlap reproduces the
+        # target variance. A linear fade would dip to half power mid-overlap.
         fade = np.ones(chunk_size)
         if i > 0:
             fade[:overlap_size] = np.sin(
@@ -240,7 +255,7 @@ def make_noise_waveform(
     Examples
     --------
     >>> # Generate 1 kHz noise, 200 Hz bandwidth, 1 second
-    >>> nts, t = make_noise_waveform(1000, 200, 1.0, 10000)
+    >>> t, nts = make_noise_waveform(1000, 200, 1.0, 10000)
     >>> print(f"Noise signal: {len(nts)} samples")
     """
     N = int(T * sample_rate)  # number of samples
@@ -272,7 +287,10 @@ def _bandpass_design(fc: float, bandwidth: float, sample_rate: float):
     """4th-order Butterworth bandpass ``(b, a)`` for ``fc +/- bandwidth/2``.
 
     Band edges are clamped to ``[1 Hz, sample_rate/2 - 1]`` and to normalised
-    frequencies in ``(0, 1)``.
+    frequencies in ``(0, 1)``, which ``scipy.signal.butter`` requires. The two
+    lower clamps differ (0.01 and 0.02) so that a band pushed entirely below
+    the grid still comes back with ``low < high`` rather than a degenerate
+    zero-width band.
     """
     from scipy.signal import butter
     flow = max(fc - bandwidth / 2, 1.0)
@@ -437,7 +455,7 @@ def make_bandlimited_noise(
 
     Examples
     --------
-    >>> noise, t = make_bandlimited_noise(10000.0, 5000.0, 1.0, 48000.0)
+    >>> t, noise = make_bandlimited_noise(10000.0, 5000.0, 1.0, 48000.0)
     >>> print(f"Generated {len(noise)} samples")
     """
     from scipy.signal import filtfilt
@@ -517,11 +535,11 @@ def fourier_synthesis(
     >>> H_freq = np.random.randn(100, 50, 20) + 1j*np.random.randn(100, 50, 20)
     >>>
     >>> # Convert to time domain (impulse response)
-    >>> h_time, t = fourier_synthesis(H_freq, freqs)
+    >>> t, h_time = fourier_synthesis(H_freq, freqs)
     >>>
     >>> # With source spectrum
     >>> s_hat = np.exp(-(freqs - 500)**2 / (2*100**2))  # Gaussian spectrum
-    >>> r_time, t = fourier_synthesis(H_freq, freqs, source_spectrum=s_hat)
+    >>> t, r_time = fourier_synthesis(H_freq, freqs, source_spectrum=s_hat)
 
     References
     ----------
@@ -553,19 +571,17 @@ def fourier_synthesis(
             UserWarning, stacklevel=2,
         )
 
-    # Weight by source spectrum if provided
     if source_spectrum is not None:
         for irec in range(pressure_work.shape[1]):
             pressure_work[:, irec] = pressure_work[:, irec] * source_spectrum
 
-    # Inverse FFT to get time series
     rmod_work = np.fft.ifft(pressure_work, n=Nfreq, axis=0)
 
-    # Since spectrum is conjugate symmetric, result should be real
-    # Factor of 2 accounts for negative frequencies being zeroed
+    # stack.m zeroes the negative half of the spectrum before this transform,
+    # so the conjugate-symmetric partner of every bin is missing: doubling the
+    # real part restores the full real signal.
     rmod_work = 2 * np.real(rmod_work)
 
-    # Reshape back to original shape (with freq dim → time dim)
     if pressure_freq.ndim == 1:
         rmod = rmod_work.flatten()
     else:

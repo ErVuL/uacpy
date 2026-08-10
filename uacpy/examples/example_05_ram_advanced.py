@@ -96,6 +96,9 @@ def main():
 
     depths = np.array([0., 25, 50, 75, 100, 120, 150])
     T = 8 + 12 * np.exp(-depths / 50)  # 20 °C surface, ~8 °C deep
+    # Medwin's simplified c(T, z), lead constant rounded from 1449.2 and the
+    # salinity term dropped at its S = 35 PSU reference value (Stergiopoulos,
+    # Advanced Signal Processing Handbook, Table 10.1).
     ssp_c = 1449 + 4.6*T - 0.055*T**2 + 0.00029*T**3 + 0.016*depths
     ssp_1d = np.column_stack([depths, ssp_c])
     print(f"  ✓ SSP range: {ssp_c.min():.1f} to {ssp_c.max():.1f} m/s")
@@ -160,6 +163,10 @@ def main():
     print("  Mode: COHERENT_TL (narrowband, range-depth TL grid)")
 
     try:
+        # accuracy is the Lytaev optimiser's per-run Padé error budget; 1e-1
+        # is 100x looser than the 1e-3 default, so the optimiser picks a
+        # coarser dr/dz and the example runs quickly. Leave it at the default
+        # for production work.
         ram = RAM(verbose=True, accuracy=1e-1)
         result = ram.run(env, source, receiver)
         print("  RAM TL completed successfully")
@@ -183,13 +190,13 @@ def main():
 
     # Run Kraken
     try:
-        krakenfield = Kraken(verbose=False)
-        result_krakenfield = krakenfield.compute_tl(env, source, receiver)
+        kraken = Kraken(verbose=False)
+        result_kraken = kraken.compute_tl(env, source, receiver)
         print("  ✓ Kraken completed (using range-independent approximation)")
-        _print_tl_summary("Kraken", result_krakenfield)
+        _print_tl_summary("Kraken", result_kraken)
     except Exception as e:
         print(f"  ✗ Kraken: {e}")
-        result_krakenfield = None
+        result_kraken = None
 
     # Run Bellhop (supports range-dependent natively)
     print("\n  Running Bellhop (native range-dependent support)...")
@@ -203,9 +210,9 @@ def main():
         result_bellhop = None
 
     # Comparisons (use nanmean because RAM masks sub-bottom cells as NaN)
-    if result is not None and result_krakenfield is not None:
-        diff_kf = np.abs(result.tl - result_krakenfield.tl)
-        print(f"\n  RAM vs Kraken: Mean diff = {np.nanmean(diff_kf):.1f} dB (range-dependent effects)")
+    if result is not None and result_kraken is not None:
+        diff_kraken = np.abs(result.tl - result_kraken.tl)
+        print(f"\n  RAM vs Kraken: Mean diff = {np.nanmean(diff_kraken):.1f} dB (range-dependent effects)")
 
     if result is not None and result_bellhop is not None:
         diff_bh = np.abs(result.tl - result_bellhop.tl)
@@ -214,14 +221,15 @@ def main():
         d_lo, d_hi = env.bathymetry.depths.min(), env.bathymetry.depths.max()
         print(f"    Read that difference with care: at {source.frequencies[0]:.0f} Hz the"
               f" guide is only D/lambda = {d_lo / lam:.0f}-{d_hi / lam:.0f}")
-        print("    wavelengths deep. DOCUMENTATION.md section 5 puts ray methods at"
-              " D/lambda >~ 100, with")
-        print("    modes/PE taking over below D/lambda ~ 30, so Bellhop is outside its"
-              " regime here and")
-        print("    RAM is the reference, not the other way round.")
+        print("    wavelengths deep. Stergiopoulos, Advanced Signal Processing"
+              " Handbook section 10.2.2,")
+        print("    puts ray methods at D/lambda >~ 100 and mode/PE methods below"
+              " ~30, so Bellhop is")
+        print("    outside its regime here and RAM is the reference, not the other"
+              " way round.")
 
-    if result_bellhop is not None and result_krakenfield is not None:
-        diff_bk = np.abs(result_bellhop.tl - result_krakenfield.tl)
+    if result_bellhop is not None and result_kraken is not None:
+        diff_bk = np.abs(result_bellhop.tl - result_kraken.tl)
         print(f"  Bellhop vs Kraken: Mean diff = {np.nanmean(diff_bk):.1f} dB")
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -251,10 +259,10 @@ def main():
         print("  ✓ Saved: example_05_result.png")
 
     # Plot 5: Three-Model Comparison (RAM, Bellhop, Kraken)
-    if result is not None and result_bellhop is not None and result_krakenfield is not None:
+    if result is not None and result_bellhop is not None and result_kraken is not None:
         from uacpy.visualization.plots import compare_models
         fig5, _ = compare_models(
-            {'RAM': result, 'Bellhop': result_bellhop, 'Kraken': result_krakenfield},
+            {'RAM': result, 'Bellhop': result_bellhop, 'Kraken': result_kraken},
             env=env, vmin=40, vmax=100,
             title='Three-Model Comparison — Sediment Transition + Sloping Shelf',
         )
@@ -265,9 +273,9 @@ def main():
         fig6, axes6 = plt.subplots(1, 3, figsize=(20, 5))
         _plot_tl_difference(result, result_bellhop, env, ax=axes6[0],
                            title='RAM − Bellhop', show_colorbar=True)
-        _plot_tl_difference(result, result_krakenfield, env, ax=axes6[1],
+        _plot_tl_difference(result, result_kraken, env, ax=axes6[1],
                            title='RAM − Kraken', show_colorbar=True)
-        _plot_tl_difference(result_bellhop, result_krakenfield, env,
+        _plot_tl_difference(result_bellhop, result_kraken, env,
                            ax=axes6[2], title='Bellhop − Kraken',
                            show_colorbar=True)
         fig6.suptitle('Pairwise Differences (signed, dB)',

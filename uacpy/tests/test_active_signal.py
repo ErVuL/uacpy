@@ -61,6 +61,16 @@ class TestProcessingGain:
 
 
 class TestAmbiguity:
+    """``_chirp()`` is a REAL LFM; ``astype(complex)`` only changes the dtype,
+    it does not form the analytic signal. The surface therefore carries the
+    negative-frequency image as well as the wanted term. Both properties
+    asserted below are image-independent (the peak still sits at the origin,
+    and the zero-Doppler cut is the autocorrelation of whatever was passed in).
+    A range-Doppler *coupling* check is not: the measured ridge slope is
+    +2.1e-6 s/Hz for this real input against the analytic signal's exact
+    -1/k = -5.0e-6 s/Hz, so any such test must build the analytic signal first.
+    """
+
     def test_peak_at_origin(self):
         s = _chirp().astype(complex)
         lags, dop, A = ambiguity_function(s, FS, n_doppler=31)

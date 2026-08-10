@@ -96,9 +96,12 @@ def typed_format_error(reader):
 def strip_fortran_comment(line: str) -> str:
     """Drop a Fortran trailing comment (``! …``) and surrounding whitespace.
 
-    AT's list-directed ``READ`` stops at the first ``!``, so its own example
-    files and uacpy's writers annotate every scalar line (``999999   ! Mlimit``).
-    Readers must do the same before ``int()``/``float()``.
+    A list-directed ``READ`` ignores the rest of a record once its I/O list is
+    satisfied, so AT's example decks and uacpy's writers annotate scalar lines
+    (``999999   ! Mlimit``); ``int()``/``float()`` do not. ``!`` is not a
+    terminator to the Fortran runtime — reached while values are still
+    expected it is a read error; only ``/`` ends a read early
+    (see :func:`read_vector`).
     """
     return line.split('!', 1)[0].strip()
 
@@ -143,9 +146,10 @@ def detect_endian(first4: bytes, source: str = '_fortran_helpers') -> str:
     The Fortran framing puts a 4-byte record-length prefix at the head of
     every record. On a well-formed file that integer is much smaller than
     ``2**31`` in the correct endianness and absurdly large in the wrong
-    one. We pick the byte order that yields the smaller positive integer
-    (with a sanity cap of ``2**28``) and log a one-shot notice if it isn't
-    little-endian.
+    one: reading a marker byte-reversed multiplies a short length by
+    ``2**24``, so the smaller of the two candidates is the right one. The
+    ``2**28`` cap (256 MiB) sits far above any record these formats write,
+    and a one-shot notice is logged when the choice isn't little-endian.
 
     Returns ``'<'`` (little-endian) or ``'>'`` (big-endian).
     """
@@ -200,6 +204,12 @@ def read_fortran_record(f, fmt=None, raw=False, endian='<'):
 
     Both length markers must match; mismatch indicates file corruption or
     wrong endianness and raises :class:`~uacpy.core.exceptions.FileFormatError`.
+    The markers are signed int32 of the compiler's default width — a file
+    written with 8-byte record markers does not parse here — and the
+    ``2**28``-byte cap rejects the inflated length a wrong-endianness read
+    produces before it reaches ``f.read`` (see :func:`detect_endian`). A
+    payload shorter than its own marker announces is a truncated file, and
+    also raises.
 
     Parameters
     ----------
@@ -277,6 +287,11 @@ def read_vector(fid) -> Tuple[np.ndarray, int]:
     followed by ``SubTab`` (``misc/subtabulate.f90``): a list-directed
     ``READ`` of ``Nx`` values that continues across records until ``Nx`` are
     consumed, with ``/`` terminating early to trigger a generated vector.
+    ``ReadVector`` pre-fills ``x(2)`` and ``x(3)`` with ``-999.9``
+    (``SourceReceiverPositions.f90:219-220``) and ``SubTab`` generates only
+    where those sentinels survive the read — never for ``Nx < 3``, and never
+    once three values have been given (``subtabulate.f90:3-5,24-28``), which
+    is what separates the branches below.
 
     Parameters
     ----------

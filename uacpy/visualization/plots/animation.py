@@ -10,6 +10,7 @@ from typing import Optional, Sequence, Tuple
 from uacpy.core.environment import Environment
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.results import Field, ResultStack
+from uacpy.io.units import m_to_km
 from uacpy.visualization.style import SOURCE_MARKER_STYLE
 from uacpy.visualization.plots._common import ZORDER_SOURCE, _imshow_extent, _overlay_seafloor
 
@@ -62,7 +63,8 @@ def animate_field(
     show_seafloor : bool, optional
         Overlay env.bathymetry (or env.depth) on every frame.
     show_time : bool, optional
-        Append the current frame time to the title.
+        Draw the current frame time (ms) in a boxed label in the top-right
+        corner of the axes.
     title : str, optional
         Custom title prefix. ``None`` uses ``f"{field.model} — p(d, r, t)"``.
     aspect : str or float, optional
@@ -347,7 +349,9 @@ def plot_time_snapshots(
         data3 = np.moveaxis(
             np.asarray(field.data), [d_ax, r_ax, t_ax], [0, 1, 2],
         )
-        # Decide aspect ratio once per row from the data extent.
+        # Decide aspect ratio once per row from the data extent. The imshow
+        # extent is km in x and m in y, so aspect = 1/1000 displays 1 m of
+        # depth as long as 1 m of range — isotropic, wavefronts stay round.
         if aspect is None:
             range_span = float(ranges[-1] - ranges[0])
             depth_span = float(depths[-1] - depths[0])
@@ -378,7 +382,7 @@ def plot_time_snapshots(
             if field.source_depths is not None and len(field.source_depths):
                 ax.plot([0.0], [float(field.source_depths[0])],
                         zorder=ZORDER_SOURCE, **SOURCE_MARKER_STYLE)
-            ax.set_xlim(0, ranges[-1] / 1000)
+            ax.set_xlim(0, float(m_to_km(ranges[-1])))
             if i == 0:
                 ax.set_title(f"t = {times[k] * 1000:.0f} ms", fontsize=10)
             if j == 0:

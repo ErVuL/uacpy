@@ -88,6 +88,9 @@ def main():
     xe[d:] += 0.7 * pulse[:-d]
     cep = cepstrum(xe)
     quef = np.arange(cep.size) / fs
+    # Search 8-100 ms of quefrency. Below ~8 ms the cepstrum is dominated by
+    # the pulse's own spectral envelope (its 4 ms Gaussian width), which would
+    # outrank the echo rahmonic the peak search is after.
     lo, hi = int(0.008 * fs), int(0.1 * fs)
 
     # --- (F) hyperbolic (NMO) gather for the Radon transform ---
@@ -98,6 +101,8 @@ def main():
     vels = np.linspace(1200.0, 2000.0, 121)
     _, tauh, Rh = radon_transform(ghyp, gfs, gdx, vels, kind='hyperbolic')
 
+    # U and Rh are (slowness/velocity, tau); a flat argmax floor-divided by the
+    # column count recovers the first-axis index, i.e. the winning p or v.
     print(f"\n  tau-p strongest event ≈ {1/abs(pax[np.argmax(np.abs(U)) // U.shape[1]]):.0f} m/s")
     print(f"  cepstrum peak: {quef[lo + np.argmax(cep[lo:hi])]*1e3:.1f} ms "
           f"(echo {echo_delay*1e3:.0f} ms)")

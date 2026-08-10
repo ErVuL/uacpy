@@ -49,7 +49,7 @@ _NLAT, _NLON, _NLAYER = 180, 360, 9
 # 9 columns per cell: water, ice, upper/middle/lower sediment,
 # upper/middle/lower crystalline crust, mantle (below Moho).
 _UPPER_SED, _LOW_SED = 2, 4
-_UPPER_CRYST, _MID_CRYST = 5, 6
+_UPPER_CRYST, _MID_CRYST, _LOW_CRYST = 5, 6, 7
 
 # CRUST1.0 has no Q; nominal compressional attenuation (dB/λ) by default.
 DEFAULT_SEDIMENT_ATTENUATION = 0.5
@@ -76,6 +76,7 @@ def _warn_non_commercial():
 _MIN_SEDIMENT_M = 1.0
 
 _MODEL = {}   # cache_root -> dict(bnds=, vp=, vs=, rho=) each (64800, 9)
+_cache.register_cache(_MODEL.clear)
 
 
 def download_crust1_db(cache_dir=None, *, timeout=180.0, verbose=False):
@@ -126,7 +127,12 @@ def _model():
 
 
 def _column(lat, lon):
-    """The 9-layer (bnds, vp, vs, rho) vectors at a point (nearest 1° cell)."""
+    """The 9-layer (bnds, vp, vs, rho) vectors at a point (nearest 1° cell).
+
+    ``bnds[i]`` is the **elevation of the top of layer i in km, positive up** —
+    so it is negative below sea level, and a layer thickness is the *downward*
+    difference ``bnds[i] - bnds[i+1]``. Vp/Vs are km/s and rho is g/cm³.
+    """
     # Grid: row 0 = 89.5°N → row 179 = −89.5°N; col 0 = −179.5° → col 359 = 179.5°.
     row = int(np.clip(89 - np.floor(lat), 0, _NLAT - 1))
     col = int(np.clip(np.floor(normalize_lon(lon)) + 180, 0, _NLON - 1))
@@ -157,6 +163,10 @@ def _halfspace(i, vp, vs, rho, atten, elastic):
 def _layered_from_column(bnds, vp, vs, rho, *, sediment_attenuation,
                          basement_attenuation, elastic, sediment_thickness):
     """Build a :class:`SeabedColumn`: sediment stack over crystalline basement."""
+    # CRUST1.0 quantises every boundary to 0.01 km, so the thinnest layer it can
+    # express is 10 m and any sub-metre threshold separates "absent" from
+    # "present" identically — this one is in km, the one in
+    # fetch_crust1_profile is in m.
     sed = [i for i in range(_UPPER_SED, _LOW_SED + 1)
            if bnds[i] - bnds[i + 1] > 1e-3]
     # Effective sediment thickness (the GlobSed override when given, else the
@@ -210,20 +220,24 @@ def fetch_crust1_profile(point):
 
     Returns ``{'water_depth_m', 'sediment_thickness_m', 'layers'}`` where each
     layer is ``{'name', 'thickness_m', 'vp', 'vs', 'rho'}`` (m, m/s, m/s, g/cm³).
+
+    ``water_depth_m`` is the elevation of the base of the water layer, negated —
+    so on land or under an ice sheet, where CRUST1.0 puts no water, it comes back
+    **negative** and equals minus the ground/ice surface elevation.
     """
     lat, lon = as_coordinate(point)
     bnds, vp, vs, rho = _column(lat, lon)
     names = ['water', 'ice', 'upper_sed', 'mid_sed', 'low_sed',
              'upper_cryst', 'mid_cryst', 'low_cryst']
     layers = []
-    for i in range(_UPPER_SED, _MID_CRYST + 2):
+    for i in range(_UPPER_SED, _LOW_CRYST + 1):
         thk = (bnds[i] - bnds[i + 1]) * 1000.0
         if thk > 1e-3:
             layers.append({'name': names[i], 'thickness_m': float(thk),
                            'vp': float(vp[i] * 1000), 'vs': float(vs[i] * 1000),
                            'rho': float(rho[i])})
-    sed_thk = sum(l['thickness_m'] for l in layers
-                  if l['name'].endswith('sed'))
+    sed_thk = sum(layer['thickness_m'] for layer in layers
+                  if layer['name'].endswith('sed'))
     return {'water_depth_m': float(-bnds[1] * 1000.0),
             'sediment_thickness_m': float(sed_thk), 'layers': layers}
 

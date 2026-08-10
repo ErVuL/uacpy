@@ -34,6 +34,15 @@ def _require_image_grid(arr, n0, n1, caller, name0, name1):
     return a
 
 
+def _log_freq_xlim(frequencies):
+    """``(lo, hi)`` x-limits for a log frequency axis.
+
+    A log axis cannot render DC and every FFT / Welch grid starts at f = 0, so
+    the low end is clamped to 1 Hz; below that the first bin would drag the
+    whole decade scale toward -inf."""
+    return (np.max((frequencies[0], 1)), frequencies[-1])
+
+
 def _ref_label(ref):
     if ref == REFERENCE_PRESSURE_WATER:
         return "1µ"
@@ -84,6 +93,10 @@ def plot_fk(frequencies, wavenumbers, power, ax=None, *, ref=REFERENCE_PRESSURE_
     return fig, ax
 
 
+# Axis label and SI → display scale per Radon moveout family.
+# ``radon_transform`` scans moveout in SI units of the offset in metres:
+# slowness s/m (×1e3 → s/km), curvature s/m² (×1e6 → s/km²), velocity m/s
+# (already the display unit, ×1).
 _RADON_AXIS = {
     "linear": ("Slowness p (s/km)", 1e3),
     "parabolic": ("Curvature q (s/km²)", 1e6),
@@ -104,6 +117,9 @@ def plot_radon(moveout, taus, R, ax=None, *, kind="linear", vmin=None,
     vmax = amp.max() if vmax is None else vmax
     vmin = 0.0 if vmin is None else vmin
     fig, ax = fig_ax(ax, figsize)
+    # ``amp`` is (moveout, tau); transposed it is (tau, moveout) = (row, col).
+    # The extent puts the largest tau at the bottom, so intercept time runs
+    # downward — the seismic gather convention.
     im = ax.imshow(amp.T, aspect="auto", origin="upper",
                    extent=[m[0], m[-1], taus[-1], taus[0]],
                    vmin=vmin, vmax=vmax, cmap=cmap, **mpl_kw)
@@ -118,7 +134,7 @@ def plot_radon(moveout, taus, R, ax=None, *, kind="linear", vmin=None,
 def draw_slowness_line(ax, tau_max, sound_speed, *, color="w", ls="--",
                        lw=1.1, alpha=0.85, label=True):
     """Mark slowness ``p = +/-1/c`` (s/km) of a reference speed on a tau-p axis."""
-    p_skm = 1000.0 / float(sound_speed)
+    p_skm = 1000.0 / float(sound_speed)          # 1/c in s/m → s/km
     for sgn in (-1.0, 1.0):
         ax.axvline(sgn * p_skm, color=color, ls=ls, lw=lw, alpha=alpha)
     if label:
@@ -132,12 +148,14 @@ def plot_taup(slownesses, taus, taup, ax=None, *, vmin=None, vmax=None,
               show_colorbar=True, **mpl_kw):
     """Image a tau-p panel (slowness s/km on x, intercept time on y). Consumes
     :func:`taup_transform` output."""
-    p_skm = np.asarray(slownesses) * 1000.0
+    p_skm = np.asarray(slownesses) * 1000.0      # taup_transform returns s/m
     amp = _require_image_grid(np.abs(np.asarray(taup)), len(slownesses),
                               len(taus), "plot_taup", "slownesses", "taus")
     vmax = amp.max() if vmax is None else vmax
     vmin = 0.0 if vmin is None else vmin
     fig, ax = fig_ax(ax, figsize)
+    # Transposed to (tau, slowness) with tau increasing downward, as in
+    # plot_radon.
     im = ax.imshow(amp.T, aspect="auto", origin="upper",
                    extent=[p_skm[0], p_skm[-1], taus[-1], taus[0]],
                    vmin=vmin, vmax=vmax, cmap=cmap, **mpl_kw)
@@ -165,7 +183,7 @@ def plot_psd(frequencies, psd_linear, ax=None, *, ref=REFERENCE_PRESSURE_WATER,
     ax.set_xlabel("Frequency (Hz)")
     ax.set_ylabel(f"Level (dB re {_ref_label(ref)}Pa²/Hz)")
     ax.set_ylim((ymin, ymax))
-    ax.set_xlim((np.max((frequencies[0], 1)), frequencies[-1]))
+    ax.set_xlim(_log_freq_xlim(frequencies))
     ax.grid(which="both", alpha=0.75)
     if label:
         ax.legend()
@@ -178,8 +196,14 @@ def plot_ppsd(result, ax=None, *, ymin=0, ymax=200, vmin=0, vmax=None,
               **mpl_kw):
     """2-D histogram of PSD levels. Consumes a ``PPSDResult``."""
     if vmax is None:
+        # Each frequency column integrates to 1 over the level axis, so the
+        # largest attainable density is 1/binwidth (all mass in one bin) —
+        # the natural top of the colour scale.
         vmax = 1 / result.binwidth_db
     fig, ax = fig_ax(ax, figsize)
+    # ``level_edges`` are bin EDGES and ``pdf`` has one row per bin; shift by
+    # half a bin so each row is centred on its own level. Empty bins arrive as
+    # NaN and render as the axes background.
     align = result.binwidth_db / 2
     pcm = ax.pcolormesh(result.frequencies, result.level_edges[:-1] + align,
                         result.pdf, cmap=cmap, shading="auto",
@@ -195,7 +219,7 @@ def plot_ppsd(result, ax=None, *, ymin=0, ymax=200, vmin=0, vmax=None,
     ax.set_xlabel("Frequency (Hz)")
     ax.set_ylabel("Level (dB)")
     ax.set_xscale("log")
-    ax.set_xlim((np.max((result.frequencies[0], 1)), result.frequencies[-1]))
+    ax.set_xlim(_log_freq_xlim(result.frequencies))
     ax.set_ylim((ymin, ymax))
     ax.grid(which="both", alpha=0.5)
     ax.legend(loc="upper right")
@@ -208,6 +232,8 @@ def plot_sel(sel_pa2s, bands, ax=None, *, ref=REFERENCE_PRESSURE_WATER,
              title=None, figsize=(10, 6), **mpl_kw):
     """Bar plot of SEL per band (dB). Consumes :func:`sel` output."""
     fig, ax = fig_ax(ax, figsize)
+    # ``sel`` returns bands as (low, centre, high) triples; the contiguous edge
+    # vector is every low edge plus the top edge of the last band.
     Fedges = [low for low, _, _ in bands] + [bands[-1][2]]
     width = [Fedges[i + 1] - Fedges[i] for i in range(len(Fedges) - 1)]
     ax.bar(Fedges[:-1], power_to_db(np.asarray(sel_pa2s), ref), width=width,
@@ -290,7 +316,7 @@ def plot_constant_q_psd(frequencies, power, ax=None, *,
     ax.set_xlabel("Frequency (Hz)")
     ax.set_ylabel(f"Level (dB re {unit})")
     ax.set_ylim((ymin, ymax))
-    ax.set_xlim((np.max((frequencies[0], 1)), frequencies[-1]))
+    ax.set_xlim(_log_freq_xlim(frequencies))
     ax.grid(which="both", alpha=0.75)
     if label:
         ax.legend()
@@ -308,9 +334,9 @@ def plot_constant_q_ppsd(result, ax=None, *, scaling="spectrum", ymin=0,
     ``dB re µPa²/Hz`` (density)."""
     unit = "µPa²" + ("/Hz" if scaling == "density" else "")
     if vmax is None:
-        vmax = 1 / result.binwidth_db
+        vmax = 1 / result.binwidth_db          # density ceiling, as in plot_ppsd
     fig, ax = fig_ax(ax, figsize)
-    align = result.binwidth_db / 2
+    align = result.binwidth_db / 2             # bin edges → bin centres
     pcm = ax.pcolormesh(result.frequencies, result.level_edges[:-1] + align,
                         result.pdf, cmap=cmap, shading="auto",
                         vmin=vmin, vmax=vmax, **mpl_kw)
@@ -325,7 +351,7 @@ def plot_constant_q_ppsd(result, ax=None, *, scaling="spectrum", ymin=0,
     ax.set_xlabel("Frequency (Hz)")
     ax.set_ylabel(f"Level (dB re {unit})")
     ax.set_xscale("log")
-    ax.set_xlim((np.max((result.frequencies[0], 1)), result.frequencies[-1]))
+    ax.set_xlim(_log_freq_xlim(result.frequencies))
     ax.set_ylim((ymin, ymax))
     ax.grid(which="both", alpha=0.5)
     ax.legend(loc="upper right")
@@ -394,10 +420,14 @@ def plot_band_levels(centers, levels, ax=None, *, title=None, width=0.8,
     c = np.asarray(centers, dtype=float)
     lv = np.asarray(levels, dtype=float)
     fig, ax = fig_ax(ax, figsize)
+    # Bars are drawn against log10(f) on a LINEAR axis, with the ticks relabelled
+    # back to Hz below: decidecade bands are equal-width in log10(f), so every
+    # bar comes out the same width and none collapses at the low end (a true log
+    # axis would squash them).
     x = np.log10(c)
     bw = width * np.median(np.diff(x)) if c.size > 1 else 0.04
     ax.bar(x, lv, width=bw, **mpl_kw)
-    ticks = x[:: max(1, c.size // 12)]
+    ticks = x[:: max(1, c.size // 12)]          # ~12 labelled bands, else unreadable
     ax.set_xticks(ticks)
     ax.set_xticklabels([f"{v:.0f}" for v in 10 ** ticks], rotation=45)
     ax.set_xlabel("Decidecade band centre (Hz)")
@@ -413,6 +443,9 @@ def plot_angular_spectrum(angles_deg, spectrum, ax=None, *, db=True, label=None,
     """Line plot of a beamformer angular spectrum (Bartlett/MVDR/MUSIC)."""
     P = np.real(np.asarray(spectrum))
     if db:
+        # Beamformer output has no absolute reference (MVDR/MUSIC pseudo-power
+        # least of all), so the dB axis is relative to the peak: 0 dB = look
+        # direction of maximum response.
         P = 10.0 * np.log10(P / np.max(P))
     fig, ax = fig_ax(ax, figsize)
     ax.plot(angles_deg, P, label=label, **mpl_kw)
@@ -463,14 +496,14 @@ def plot_frf(frequencies, tf, ax=None, *, tag="", label=None, ymin=-60,
     ax1.set_ylabel("Magnitude (dB)")
     ax1.set_xscale("log")
     ax1.set_ylim((ymin, ymax))
-    ax1.set_xlim((np.max((frequencies[0], 1)), frequencies[-1]))
+    ax1.set_xlim(_log_freq_xlim(frequencies))
     ax1.grid(which="both", alpha=0.5)
     ax2.plot(frequencies, np.angle(tf, deg=True), label=lbl, **mpl_kw)
     ax2.set_ylabel("Phase (degrees)")
     ax2.set_xlabel("Frequency (Hz)")
     ax2.set_xscale("log")
     ax2.set_ylim((-180, 180))
-    ax2.set_xlim((np.max((frequencies[0], 1)), frequencies[-1]))
+    ax2.set_xlim(_log_freq_xlim(frequencies))
     ax2.grid(which="both", alpha=0.5)
     if lbl:
         ax1.legend()
@@ -488,7 +521,7 @@ def plot_coherence(frequencies, coh, ax=None, *, label=None, title=None,
     ax.set_ylabel("Coherence")
     ax.set_xscale("log")
     ax.set_ylim((0.75, 1.01))
-    ax.set_xlim((np.max((frequencies[0], 1)), frequencies[-1]))
+    ax.set_xlim(_log_freq_xlim(frequencies))
     ax.grid(which="both", alpha=0.5)
     ax.set_title(title or "Coherence", loc="left")
     if label:

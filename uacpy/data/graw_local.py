@@ -37,7 +37,14 @@ GRAW_FILE = 'Dataset_S2.nc'
 GRAW_URL = 'https://zenodo.org/records/3762390/files/Dataset_S2.nc'
 
 # Hamilton & Bachman density column reversed to be strictly increasing for the
-# ρ → ϕ inversion (the table runs coarse/dense → fine/light).
+# ρ → ϕ inversion (the table runs coarse/dense → fine/light), as np.interp
+# requires. The table spans only 1.480-2.034 g/cm³ (silty clay → coarse sand),
+# but the Graw grid runs 0.96-2.21 g/cm³ and about three quarters of its ocean
+# cells sit *below* 1.480 — the abyssal muds that H&B's continental-terrace
+# suite never sampled. The inversion therefore saturates at ϕ = 8.80 over most
+# of the deep ocean: there the returned density is still the measured one, but
+# the speed and attenuation derived from it are the silty-clay end member
+# rather than a value tracking the grid.
 _RHO_ASC = _HB_RHO[::-1]
 _PHI_DESC = _HB_PHI[::-1]
 
@@ -66,7 +73,12 @@ def download_graw_db(cache_dir=None, *, timeout=300.0, verbose=False):
 
 
 class _GrawGrid(NetcdfGrid):
-    """Nearest-cell accessor over the Graw ``z(lat, lon)`` density grid."""
+    """Nearest-cell accessor over the Graw ``z(lat, lon)`` density grid.
+
+    Unlike GlobSed's gridline-registered axes, this 5′ grid is **cell-centre**
+    registered: 2160 × 4320 cells whose first centre sits half a cell inside the
+    corner, latitude south-up and longitude over ``[-180, 180)``.
+    """
 
     def __init__(self, path):
         try:

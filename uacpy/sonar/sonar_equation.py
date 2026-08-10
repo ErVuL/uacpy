@@ -213,6 +213,10 @@ def _per_range_broadcast(values, tl_field, label: str) -> np.ndarray:
 
 
 def _spawn_se_field(tl_field, se: np.ndarray, budget: dict) -> Field:
+    """Wrap ``se`` in a Field carrying the TL field's identity and the budget.
+
+    ``id_kwargs`` hands back a fresh ``metadata`` dict, so stamping the budget
+    into it leaves the source field's own metadata untouched."""
     kwargs = tl_field.id_kwargs()
     kwargs['metadata']['sonar_budget'] = budget
     return Field(

@@ -33,6 +33,7 @@ _DEFAULT_YEARS = tuple(range(2013, 2023))            # a recent decade
 _USER_AGENT = 'uacpy (+https://github.com/ErVuL/uacpy)'
 
 _CLIM = {}   # path -> _Climatology
+_cache.register_cache(_CLIM.clear)
 
 
 def download_wind_db(cache_dir=None, *, years=_DEFAULT_YEARS, timeout=120.0,
@@ -126,12 +127,16 @@ class _Climatology:
         self._dlon = float(self.lon[1] - self.lon[0])
 
     def at(self, lat, lon, month):
-        r = int(np.clip(round((lat - self._lat0) / self._dlat),
-                        0, self.lat.size - 1))
+        """Climatological speed (m/s) at the nearest cell for ``month`` (1-12)."""
+        row = int(np.clip(round((lat - self._lat0) / self._dlat),
+                          0, self.lat.size - 1))
+        # NBS serves longitude on [0, 360) (0 → 359.75 at 0.25°) and the cache
+        # keeps that axis, so wrap the query into it before indexing (the same
+        # modulo _netcdf.NetcdfGrid.col applies). Latitude is south-up.
         lon = self._lon0 + ((normalize_lon(lon) - self._lon0) % 360.0)
-        c = int(np.clip(round((lon - self._lon0) / self._dlon),
-                        0, self.lon.size - 1))
-        return float(self.speed[month - 1, r, c])
+        col = int(np.clip(round((lon - self._lon0) / self._dlon),
+                          0, self.lon.size - 1))
+        return float(self.speed[month - 1, row, col])
 
 
 def _clim():

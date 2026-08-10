@@ -6,7 +6,10 @@ Part of the Acoustics Toolbox (OALIB).
 
 Outputs:
 - .BRC file: Bottom Reflection Coefficient (BotOpt 'F')
-  -> Read by BELLHOP (``Bellhop/ReflectMod.f90:113``), SCOOTER, KRAKENC
+  -> Read by BELLHOP (``Bellhop/bellhop.f90:136`` loads the table, ``:688-693``
+     applies it in the ``Reflect2D`` contained in that same file;
+     ``Bellhop/ReflectMod.f90`` holds a near-identical ``Reflect2D`` that only
+     bellhop3D links, per ``Bellhop/Makefile:4,8``), SCOOTER, KRAKENC
 - .IRC file: Internal Reflection Coefficient (BotOpt 'P')
   -> Read by KRAKENC (``Kraken/BCImpedancecMod.f90:105``), SCOOTER
      (``Scooter/scooter.f90:357``) and KRAKEL; BELLHOP has no 'P' branch at
@@ -127,6 +130,28 @@ class Bounce(PropagationModel):
     Per-model: ``'bottom_range': 'median'`` (the layer stack is kept since
     BOUNCE consumes layered seabed columns natively).
 
+    Model characteristics:
+
+    - BOUNCE uses the same environmental file format as KRAKEN
+    - The reflection coefficient depends on impedance contrast
+    - Supports acoustic, elastic, and poro-elastic layers
+    - Tabulated reflection coefficients cover angles from phase velocities [c_low, c_high]
+    - **Recommended workflow**: BOUNCE -> .brc -> SCOOTER (most reliable)
+    - Both tables go through the standard AT reflection-coefficient path:
+      ``.brc`` via ``acoustic_type='file'``, ``.irc`` via
+      ``acoustic_type='precalc'``. Kraken routes either to krakenc.exe.
+
+    Defaults auto-derived at ``run()`` time:
+
+    - ``rmax=None`` → ``receiver.range_max`` (or 10 km if 0).
+    - ``c_low`` / ``c_high`` constructor defaults
+      (``DEFAULT_C_MIN`` / ``DEFAULT_C_MAX_UNBOUNDED``) tabulate the full
+      0–90° grazing span; raise ``c_low`` or lower ``c_high`` to
+      concentrate the samples on a narrower angular band.
+    - TopOpt position 4 reads ``env.absorption``.
+
+    With ``verbose='info'`` the resolved ``rmax`` is logged.
+
     Examples
     --------
     Compute reflection coefficients for use in other models:
@@ -166,28 +191,6 @@ class Bounce(PropagationModel):
     >>> env_with_rc = Environment(name="test", bathymetry=100, bottom=bottom_with_rc)
     >>> scooter = Scooter()
     >>> tl = scooter.compute_tl(env_with_rc, source, receiver)
-
-    Notes
-    -----
-    - BOUNCE uses the same environmental file format as KRAKEN
-    - The reflection coefficient depends on impedance contrast
-    - Supports acoustic, elastic, and poro-elastic layers
-    - Tabulated reflection coefficients cover angles from phase velocities [c_low, c_high]
-    - **Recommended workflow**: BOUNCE -> .brc -> SCOOTER (most reliable)
-    - Both tables go through the standard AT reflection-coefficient path:
-      ``.brc`` via ``acoustic_type='file'``, ``.irc`` via
-      ``acoustic_type='precalc'``. Kraken routes either to krakenc.exe.
-
-    Defaults auto-derived at ``run()`` time:
-
-    - ``rmax=None`` → ``receiver.range_max`` (or 10 km if 0).
-    - ``c_low`` / ``c_high`` constructor defaults
-      (``DEFAULT_C_MIN`` / ``DEFAULT_C_MAX_UNBOUNDED``) tabulate the full
-      0–90° grazing span; raise ``c_low`` or lower ``c_high`` to
-      concentrate the samples on a narrower angular band.
-    - TopOpt position 4 reads ``env.absorption``.
-
-    With ``verbose='info'`` the resolved ``rmax`` is logged.
 
     References
     ----------
@@ -343,6 +346,11 @@ class Bounce(PropagationModel):
         to emit: ``kMin = omega / cHigh`` (zeroed at :47 once ``cHigh > 1e6``),
         ``kMax = omega / cLow`` and
         ``NkTab = INT( 1000 * RMax_km * ( kMax - kMin ) / 2 pi )``.
+
+        The ``.6f`` round-trip is the deck's own precision: ``RMax`` is written
+        in km at six decimals (``oalib_writer.write_phase_speed_and_rmax``), so
+        the count has to come off the rounded value the binary will read back,
+        not off the exact metres.
         """
         rmax_km = float(f"{m_to_km(rmax_m):.6f}")
         omega = 2.0 * np.pi * float(frequency)
@@ -461,6 +469,9 @@ class Bounce(PropagationModel):
                     f"omega·(1/cLow - 1/cHigh) is non-positive "
                     f"(omega={omega:.3g}, 1/cLow-1/cHigh={inv_c_diff:.3g})."
                 )
+            # NkTab = INT(1000 * RMax_km * (kMax - kMin) / 2π) and
+            # 1000 * RMax_km IS RMax in metres, so the km conversion cancels
+            # out of the inversion and this lands directly in metres.
             rmax = (
                 float(self.n_angles) * 2.0 * np.pi / (omega * inv_c_diff)
             )
@@ -546,12 +557,15 @@ class Bounce(PropagationModel):
                 self._attach_prt_tail(exc, fm.work_dir, base_name)
                 raise exc
 
-            # bellhopcuda's strict monotonicity check on the .brc rejects the
-            # duplicate near-zero angles bounce.f90 emits when many high-c
-            # samples round to the same kx — rewrite it with a strictly-
-            # increasing angle axis. The .irc is left byte-for-byte as BOUNCE
-            # wrote it: it is a different, fixed-format layout that only the
-            # Fortran BotOpt='P' path reads.
+            # Normalise the raw BOUNCE table before it is read back into the
+            # ReflectionCoefficient result: bellhopcuda's strict monotonicity
+            # check rejects the duplicate near-zero angles bounce.f90 emits when
+            # many high-c samples round to the same kx, and the phase column
+            # needs unwrapping because the incrementing branch of the Fortran's
+            # own unwrap (Kraken/bounce.f90:219) cannot fire. Staging repeats
+            # this for the consumer's copy; the rewrite is idempotent. The .irc
+            # is left byte-for-byte as BOUNCE wrote it: a different,
+            # fixed-format layout that only the Fortran BotOpt='P' path reads.
             dedupe_reflection_file(brc_file)
 
             self._log(f"Reading output: {brc_file}")

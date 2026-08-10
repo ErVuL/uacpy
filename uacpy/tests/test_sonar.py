@@ -44,7 +44,7 @@ class TestReverberation:
         # re-derives it.
         assert rl[0] == pytest.approx(98.751, abs=0.01)
 
-    def test_volume_grows_faster_than_boundary(self):
+    def test_volume_decays_slower_than_boundary(self):
         r = np.array([500.0, 5000.0])
         b = sonar.boundary_reverberation(r, 220, -40, pulse_length_s=0.1,
                                          horizontal_beamwidth_rad=0.1)
@@ -146,7 +146,12 @@ class TestDetection:
         assert pd.max() <= 1.0 and pd.min() >= 0.0
 
     def test_albersheim_reasonable(self):
-        # Single-pulse Pd=0.5, Pf=1e-4 -> ~9.4 dB.
+        # Albersheim's own eq. (1) at N=1, Pd=0.5, Pf=1e-4 evaluates to
+        # 9.396 dB, so 9.4 is that value rounded to 1 dp and abs=0.3 is slack
+        # on the anchor — NOT the +/-0.2 dB accuracy of the approximation
+        # against Robertson, which does not enter a self-consistency check.
+        # (Pd, Pf) sit inside the stated validity box (Pd 0.1-0.9,
+        # Pf 1e-7..1e-3, N 1..8096; Richards 2014).
         assert sonar.albersheim_snr(0.5, 1e-4) == pytest.approx(9.4, abs=0.3)
 
     def test_albersheim_integration_lowers_snr(self):
@@ -469,7 +474,11 @@ class TestTargetStrength:
         theta_null = np.degrees(np.arcsin(lam / (2.0 * L)))
         ts_null = sonar.ts_cylinder(1.0, L, f, angle_deg=theta_null,
                                     sound_speed=c)
-        assert ts_null < -60.0  # deep pattern null
+        # Evaluated exactly on the analytic null, sinc^2 bottoms out at the
+        # float64 sin() floor: TS is -306 dB here. -60 dB is a "this is a
+        # null, not a lobe" threshold with ~245 dB of headroom, so it does not
+        # pin the null depth, only its location.
+        assert ts_null < -60.0
         # Monotone decrease across the main lobe.
         angles = np.linspace(0.0, theta_null * 0.95, 10)
         ts = sonar.ts_cylinder(1.0, L, f, angle_deg=angles, sound_speed=c)
@@ -529,3 +538,98 @@ class TestDetectionThresholdReference:
         assert (urick - this) == pytest.approx(10.0 * np.log10(w), abs=1e-9)
         # 100 Hz -> exactly the 20 dB the docstring warns about
         assert (urick - this) == pytest.approx(20.0, abs=1e-9)
+
+
+class TestTargetStrengthAgainstAbraham:
+    """Abraham §3.4: eq. (3.217) ``a1*a2/4`` for a smooth convex body,
+    eq. (3.218) ``a**2/4`` for a rigid sphere (geometric regime, ka > 10),
+    eq. (3.221) ``(a*L**2/2*lam)*[sin(b)/b]**2*cos(th)**2`` for a cylinder with
+    ``b = k*L*sin(th)``, and the physical-optics ``A**2/lam**2`` for a plate."""
+
+    C, A, L, F = 1500.0, 0.5, 10.0, 5000.0
+
+    def test_sphere_and_its_degenerate_cases(self):
+        from uacpy.sonar.target_strength import (ts_convex, ts_ellipsoid,
+                                                 ts_sphere)
+        assert ts_sphere(2.0) == pytest.approx(0.0)      # Urick's TS=0 anchor
+        for a in (0.7, 2.5, 9.0):
+            assert ts_sphere(a) == pytest.approx(10 * np.log10(a ** 2 / 4))
+            assert ts_convex(a, a) == pytest.approx(ts_sphere(a))
+            assert ts_ellipsoid(a, a, a) == pytest.approx(ts_sphere(a))
+
+    def test_cylinder_matches_equation_3_221_at_every_aspect(self):
+        from uacpy.sonar.target_strength import ts_cylinder
+        lam = self.C / self.F
+        k = 2 * np.pi / lam
+        for ang in (0.0, 0.25, 0.5, 1.0, 2.0):
+            th = np.deg2rad(ang)
+            beta = k * self.L * np.sin(th)
+            # np.sinc is normalised, sinc(x) = sin(pi x)/(pi x), so beta/pi
+            # recovers Abraham's unnormalised [sin b / b]. This mirrors the
+            # implementation's own idiom, so the beta -> 0 limit at broadside
+            # is asserted against the same construction rather than
+            # independently.
+            ref = 10 * np.log10(self.A * self.L ** 2 / (2 * lam)
+                                * np.sinc(beta / np.pi) ** 2 * np.cos(th) ** 2)
+            assert ts_cylinder(self.A, self.L, self.F,
+                               angle_deg=ang) == pytest.approx(ref)
+
+    def test_cylinder_main_lobe_is_the_documented_width(self):
+        """The docstring promises a null-to-null width of ~lam/L radians, i.e.
+        the first null where ``beta = pi`` (``sin th = lam/2L``)."""
+        from uacpy.sonar.target_strength import ts_cylinder
+        lam = self.C / self.F
+        first_null = np.degrees(np.arcsin(lam / (2 * self.L)))
+        # -309 dB at the analytic null (float64 sin() floor); -100 dB only
+        # asserts that a null lands here, not how deep it is.
+        assert ts_cylinder(self.A, self.L, self.F,
+                           angle_deg=first_null) < -100.0
+        assert 2 * first_null == pytest.approx(np.degrees(lam / self.L),
+                                               rel=1e-3)
+
+    def test_plate_at_normal_incidence_is_physical_optics(self):
+        from uacpy.sonar.target_strength import ts_plate
+        lam = self.C / self.F
+        w, h = 4.0, 3.0
+        assert ts_plate(w, h, self.F) == pytest.approx(20 * np.log10(w * h / lam))
+
+
+class TestReverberationCells:
+    """The scattering cell is ``R*phi*(c*tau/2)`` for a boundary and
+    ``R*phi*(c*tau/2)*R*theta`` for a volume (Stergiopoulos, *Advanced Signal
+    Processing Handbook*; Urick Ch. 8), so with spherical spreading boundary
+    reverberation falls 30 dB per decade of range and volume 20 dB."""
+
+    KW = dict(pulse_length_s=0.01, sound_speed=1500.0)
+    SL, SB, SV, PHI, PSI = 200.0, -27.0, -70.0, 0.1, 0.01
+
+    def test_cells_match_the_published_expressions(self):
+        from uacpy.sonar.reverberation import (boundary_reverberation,
+                                               volume_reverberation)
+        r = np.array([500.0, 2000.0, 9000.0])
+        tl = 20 * np.log10(r)
+        c, tau = self.KW['sound_speed'], self.KW['pulse_length_s']
+        assert np.allclose(
+            boundary_reverberation(r, self.SL, self.SB,
+                                   horizontal_beamwidth_rad=self.PHI, **self.KW),
+            self.SL - 2 * tl + self.SB + 10 * np.log10(self.PHI * r * (c * tau / 2)))
+        assert np.allclose(
+            volume_reverberation(r, self.SL, self.SV,
+                                 solid_angle_beamwidth_sr=self.PSI, **self.KW),
+            self.SL - 2 * tl + self.SV + 10 * np.log10(self.PSI * r ** 2 * (c * tau / 2)))
+
+    def test_decay_slopes_are_the_classic_minus_30_and_minus_20(self):
+        from uacpy.sonar.reverberation import (boundary_reverberation,
+                                               volume_reverberation)
+        r = np.array([1e3, 1e4])                       # one decade
+        b = boundary_reverberation(r, self.SL, self.SB,
+                                   horizontal_beamwidth_rad=self.PHI, **self.KW)
+        v = volume_reverberation(r, self.SL, self.SV,
+                                 solid_angle_beamwidth_sr=self.PSI, **self.KW)
+        assert b[1] - b[0] == pytest.approx(-30.0)
+        assert v[1] - v[0] == pytest.approx(-20.0)
+
+    def test_total_is_an_incoherent_power_sum(self):
+        from uacpy.sonar.reverberation import total_reverberation
+        got = total_reverberation(np.array([80.0]), np.array([74.0]))
+        assert got[0] == pytest.approx(10 * np.log10(10 ** 8.0 + 10 ** 7.4))

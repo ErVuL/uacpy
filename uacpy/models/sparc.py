@@ -32,10 +32,8 @@ from uacpy.io.grn_reader import (
 from uacpy.models.base import (
     PropagationModel, RunMode, ModelSpec, USER_FRAME_SKIP,
 )
-# Shared with Scooter — both mesh through the sediment stack, so the
-# depth-axis restoration is identical. Its proper home is PropagationModel.
 from uacpy.io.oalib_reader import read_rts_file
-from uacpy.io.oalib_writer import write_sparc_env_file
+from uacpy.io.oalib_writer import write_sparc_env_file, reject_unsupported_ssp_interp
 
 
 # Factor above the Nyquist minimum used when naming the ``n_t_out`` that would
@@ -81,14 +79,19 @@ def _mask_zero_range_traces(data: np.ndarray, ranges: np.ndarray,
 # sparc.f90's GetPar rejects them with "Unknown source type" before
 # cans.f90 is reached.
 _PULSE_TYPE_POS1 = set('PRASHNGFBM')
-# Pos 2: post-processing applied to the pulse samples.
+# Pos 2: post-processing applied to the pulse samples
+# (tslib/sourceMod.f90:69-70).
 #   'H' = pre-envelope (|analytic signal|), 'Q' = Hilbert transform.
 #   Any other character (including ' ' or 'N') means "no transform".
 _PULSE_TYPE_POS2 = {' ', 'N', 'H', 'Q'}
-# Pos 3: sign flag. '-' inverts the pulse; any other character keeps it.
+# Pos 3: sign flag. '-' inverts the pulse (tslib/sourceMod.f90:178); any
+# other character keeps it.
 _PULSE_TYPE_POS3 = {' ', '+', '-'}
-# Pos 4: filter option applied in march.f90 / Matlab march.m.
-#   'N' / ' ' = no band-pass, 'L' = low-cut, 'H' = high-cut, 'B' = both.
+# Pos 4: per-wavenumber band-pass of the source pulse, set in sparc.f90's
+# MARCH (Scooter/sparc.f90:391-401, mirrored in Matlab/Sparc/march.m:93-102).
+#   'L' cuts below k·cLow/2π, 'H' cuts above k·cHigh/2π, 'B' does both.
+#   'N' skips the filter entirely (tslib/sourceMod.f90:68); any other
+#   character (including ' ') leaves the full band [0, 10·fMax] in place.
 _PULSE_TYPE_POS4 = {' ', 'N', 'L', 'H', 'B'}
 
 
@@ -110,8 +113,9 @@ def _validate_pulse_type(pulse_type: str) -> str:
     Raises
     ------
     ConfigurationError
-        If any character falls outside the alphabets documented in
-        ``sparc.f90:140`` / ``tslib/sourceMod.f90`` / ``Matlab/Sparc/march.m``.
+        If any character falls outside the alphabets read from
+        ``Scooter/sparc.f90:126-148`` (shape) and ``:391-401`` (filter), and
+        from ``tslib/sourceMod.f90:68-70,178`` (post-process, sign, filter).
     """
     if not isinstance(pulse_type, str):
         raise ConfigurationError(
@@ -179,20 +183,37 @@ class SPARC(PropagationModel):
         in ``cans.f90`` but rejected by ``sparc.f90``'s ``GetPar``),
         2 = post-process, 3 = sign, 4 = filter.
 
-        ``cans.f90``'s ``'R'`` (Ricker) is defined on ``U = ω·T - 5``
-        and therefore peaks at ``T ≈ 5/(2π·F) ≈ 0.796/F``, not at
-        ``T = 0`` (the comment in ``cans.f90:32`` says "peak at F"
-        meaning at *time* ``1/F``). When aligning expected vs measured
-        arrivals downstream, treat the Ricker peak as offset by
+        ``cans.f90:31-35``'s ``'R'`` (Ricker) is defined on ``U = ω·T - 5``
+        and therefore peaks at ``T = 5/(2π·F) ≈ 0.796/F``, not at ``T = 0``.
+        (``cans.f90``'s own per-case "peak at …, support […]" notes describe
+        the *spectrum*, not the waveform — its ``'C'`` sinc entry reads
+        "uniform spectrum from [0, F]" and its Gaussian says "peak at 0"
+        while peaking in time at ``T0 = 0.5/F``.) When aligning expected vs
+        measured arrivals downstream, treat the Ricker peak as offset by
         ``+5/(2π·F)`` from the source pulse origin.
     n_t_out : int, optional
         Number of output time samples. Default ``512``.
+
+        The deck writes the output times as the pair ``0.0 t_max /``, which
+        ``ReadVector`` leaves for ``SubTab`` to expand — and ``SubTab`` acts
+        only for ``Nx >= 3`` (``misc/subtabulate.f90:24,40``). ``n_t_out >= 3``
+        therefore gets ``n_t_out`` uniform samples on ``[0, t_max]``;
+        ``n_t_out == 2`` happens to land on the two endpoints unexpanded; and
+        **``n_t_out == 1`` reads only the ``0.0``** — the trailing ``t_max`` is
+        never consumed, so the run returns the single time ``t = 0`` and the
+        requested window is silently dropped.
     t_max : float, optional
         Maximum simulated time (s). ``None`` ⇒ ``2.5 ×`` travel time.
     t_start : float, optional
-        Integration start time (s). Default ``-0.1``.
+        Time the march begins (s), ``time = t_start + (i-1)·Δt``
+        (``sparc.f90:409``). ``cans.f90`` returns zero pulse amplitude for
+        ``T <= 0``, so a negative value starts the field from rest before the
+        source turns on. Default ``-0.1``.
     t_mult : float, optional
-        Integration time multiplier. Default ``0.999``.
+        Courant safety factor on the marching time step: ``sparc.f90:265``
+        sets ``Δt = t_mult / sqrt(1/crossT² + (0.5·cMax·k)²)``, so ``1.0`` is
+        exactly the stability limit and the default sits just inside it.
+        Default ``0.999``.
     max_depths : int, optional
         Cap on the axis the wrapper loops the binary over — receiver
         depths for ``output_mode='R'``, receiver ranges for ``'D'``.
@@ -269,8 +290,8 @@ class SPARC(PropagationModel):
         interp_ssp: Optional[str] = None,
         output_mode: str = 'R',
         pulse_type: str = 'PN+B',
-        # Power-of-two so the downstream np.fft.fft on this length runs
-        # in O(N log N) instead of the prime-factor 501=3*167 fallback.
+        # Power of two: p(t) comes back on this many samples and any
+        # downstream FFT over the time axis then stays on the radix-2 path.
         n_t_out: int = 512,
         t_max: Optional[float] = None,
         t_start: float = -0.1,
@@ -299,12 +320,14 @@ class SPARC(PropagationModel):
         n_mesh : int, optional
             Mesh points per wavelength. 0 = auto. Default: 0.
         interp_ssp : str, optional
-            SSP connection scheme. ``None`` (default) auto-picks
-            ``'quad'`` for a range-dependent ``env.ssp`` and
-            ``'linear'`` otherwise. Explicit values: ``'linear'``,
-            ``'pchip'``, ``'cubic'``, ``'quad'``, ``'n2linear'``,
-            ``env.ssp.shape='isovelocity'`` always
-            forces ``'C'`` regardless.
+            SSP connection scheme written into ``TopOpt(1)``. ``None``
+            (default) resolves to ``'linear'`` (C-linear): SPARC declares
+            no range-dependent-SSP capability, so ``run()`` collapses
+            ``env.ssp`` to 1-D before the deck is written and the
+            range-dependent auto-pick never applies. Explicit values:
+            ``'linear'``, ``'n2linear'``, ``'pchip'``, ``'cubic'`` /
+            ``'spline'``. ``env.ssp.shape='isovelocity'`` always forces
+            ``'C'`` regardless.
         output_mode : str, optional
             'R' (horizontal array), 'D' (vertical array), 'S' (snapshot). Default: 'R'.
 
@@ -322,9 +345,11 @@ class SPARC(PropagationModel):
         t_max : float, optional
             Maximum time (s). None = auto (2.5x travel time). Default: None.
         t_start : float, optional
-            Integration start time. Default: -0.1.
+            Time the march begins (s); negative starts from rest before the
+            pulse turns on. Default: -0.1.
         t_mult : float, optional
-            Integration time multiplier. Default: 0.999.
+            Courant safety factor on the marching time step (1.0 = the
+            stability limit). Default: 0.999.
         max_depths : int, optional
             Cap on the looped axis: receiver depths for ``output_mode='R'``,
             receiver ranges for ``'D'``. ``'S'`` is uncapped. Default: 20.
@@ -489,6 +514,7 @@ class SPARC(PropagationModel):
         media_depth = self._total_media_depth(env)
 
         self.validate_inputs(env, source, receiver, run_mode=run_mode)
+        reject_unsupported_ssp_interp('SPARC', self.interp_ssp)
 
         fm = self._setup_file_manager()
 
@@ -724,8 +750,9 @@ class SPARC(PropagationModel):
         """``output_mode='S'``: the snapshot — the whole field at each output
         time.
 
-        SPARC writes the wavenumber-domain field ``Green(Itout, irz, ik)`` to a
-        ``.grn`` (``sparc.f90:580-591``); ``doc/sparc.htm`` says FIELDS must be
+        SPARC accumulates the wavenumber-domain field ``Green(Itout, irz, ik)``
+        (``sparc.f90:580-591``) and dumps it to a ``.grn``
+        (``sparc.f90:282-290``); ``doc/sparc.htm`` says FIELDS must be
         run afterwards to turn it into a pressure field. uacpy does that step
         in-tree via one inverse Hankel transform per output time, giving
         ``p(z, r, t)`` on the requested receiver grid in a single SPARC run —
@@ -912,10 +939,11 @@ class SPARC(PropagationModel):
         Run SPARC as a subprocess (180 s timeout by default).
 
         Delegates to ``PropagationModel._run_subprocess`` (which raises the
-        child stack limit — required because SPARC statically allocates
-        ~80 MB of COMPLEX arrays and would otherwise segfault). On failure,
-        appends the ``.prt`` tail to the raised ``ModelExecutionError`` for
-        easier diagnosis. Override via the ``timeout`` constructor kwarg.
+        child stack limit — required because ``MARCH`` declares twelve
+        automatic ``COMPLEX(NTot1)`` arrays, ``sparc.f90:354-355``, which
+        gfortran puts on the stack). On failure, appends the ``.prt`` tail to
+        the raised ``ModelExecutionError`` for easier diagnosis. Override via
+        the ``timeout`` constructor kwarg.
         """
         self._run_and_attach_prt(
             [str(self._exe), base_name], work_dir, base_name,

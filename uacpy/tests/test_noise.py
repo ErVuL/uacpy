@@ -69,15 +69,15 @@ def test_compute_windnoise_band_integrate(freqs):
 
 
 def test_compute_windnoise_pinned_anchors():
-    """Pin the wind-noise spectral level at a few (wind, frequency) anchors.
+    """Pin the wind-noise spectral level at four (wind, frequency) anchors.
 
-    The melding constants in ``compute_windnoise`` (``f0w``, ``L0w``, the
-    ``s1w``/``s2w`` slopes) descend from a secondary IDL/MATLAB lineage and
-    are **not yet reconciled line-by-line against the primary references**
-    (Wenz 1962). These anchors are NOT independently validated — they lock
-    the *current* output so any future change to those coefficients is caught
-    and forced to be deliberate. Re-validate against Wenz (1962) before
-    updating the expected values here.
+    The values are DRDC-RDDC-2022-D051 eqs. (8)-(16) evaluated by hand for
+    deep water (c0 = 42): they agree with ``compute_windnoise`` to ~1e-11 dB,
+    so ``abs=1e-6`` is a float-noise tolerance, not a fitted margin. The
+    equation-level check lives in
+    ``test_noise_submodels.py::test_wind_follows_drdc_annex_a_below_the_cutoff``;
+    these anchors additionally freeze the numbers, so a coefficient edit
+    cannot pass by changing test and code together.
     """
     expected = {
         (10.0, 100.0): 58.9076655148,
@@ -311,17 +311,17 @@ class TestMarineMammalWeighting:
         f_fine = np.linspace(20.0, 20000.0, 500)
         wl_coarse = weighted_level(np.full(f_coarse.size, 120.0), f_coarse, "LF")
         wl_fine = weighted_level(np.full(f_fine.size, 120.0), f_fine, "LF")
-        assert abs(wl_coarse - wl_fine) < 0.5     # was ~10 dB before the fix
+        assert abs(wl_coarse - wl_fine) < 0.5
 
 
 class TestWindNoiseRollOffAnchor:
     """The >2 kHz roll-off must not depend on the caller's frequency grid.
 
-    The melded high-frequency line used to be anchored at ``f_temp[-1]``, the
-    last in-grid sample below the 2 kHz cutoff, so the level at 5 kHz moved by
-    17.6 dB depending on whether the grid happened to contain 1999 Hz or
-    100 Hz. It is now anchored at the cutoff itself, matching the rain
-    roll-off and the no-sub-cutoff-sample fallback.
+    The melded high-frequency line is anchored at the 2 kHz cutoff itself,
+    matching the rain roll-off and the no-sub-cutoff-sample fallback. Anchoring
+    it at ``f_temp[-1]`` — the last in-grid sample below the cutoff — would
+    move the 5 kHz level by 17.6 dB depending on whether the grid happens to
+    contain 1999 Hz or 100 Hz.
     """
 
     @pytest.mark.parametrize('anchor', [10.0, 100.0, 500.0, 1500.0, 1999.0])

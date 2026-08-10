@@ -63,7 +63,9 @@ def main():
     _, fbands, _ = decidecade_bands(50, 1000)
     draught = 8.0
     d_s = nominal_source_depth(draught)
-    rx_spl = 128.0 - 16.0 * np.log10(fbands / 50.0)       # a measured RNL spectrum
+    # Stand-in for a measured received SPL at the 150 m slant range below;
+    # radiated_noise_level turns it into an RNL, monopole_source_level into MSL.
+    rx_spl = 128.0 - 16.0 * np.log10(fbands / 50.0)
     msl = monopole_source_level(radiated_noise_level(rx_spl, 150.0), fbands, d_s,
                                 sound_speed=float(cz[0]))
     print(f"  ship d_s={d_s} m, {fbands.size} decidecade bands {fbands[0]:.0f}-{fbands[-1]:.0f} Hz")

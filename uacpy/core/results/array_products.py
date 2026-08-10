@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 from typing import Optional, Tuple
 
@@ -147,6 +149,16 @@ class Covariance(Result):
         for f in range(n_f):
             C = self.covariance[f]
             tr = float(np.real(np.trace(C))) / max(C.shape[0], 1)
+            # The loading is a fraction of tr(C)/N and vanishes with it, so a
+            # frequency bin carrying no power leaves C singular; that whole
+            # bin's surface is undefined rather than zero.
+            if tr <= 0.0:
+                warnings.warn(
+                    f"Covariance.mvdr: frequency bin {f} carries no power, so "
+                    f"its ambiguity surface is undefined; returning NaN.",
+                    UserWarning, stacklevel=2)
+                out[f] = np.nan
+                continue
             Cload = C + diagonal_loading * tr * np.eye(C.shape[0])
             Cinv = np.linalg.inv(Cload)
             W = self._normalise_weights(flat[f])
@@ -181,8 +193,9 @@ class Replicas(Result):
 
     Notes
     -----
-    To compute a Bartlett MFP ambiguity surface, contract a covariance
-    estimate against the replica field across the array index.
+    Feed these to :meth:`Covariance.bartlett` or :meth:`Covariance.mvdr`
+    for an ambiguity surface; both contract a covariance estimate against
+    the replica field across the array index.
     """
     field_type = "replicas"
 

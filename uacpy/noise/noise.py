@@ -50,10 +50,12 @@ def compute_windnoise(frequencies, u, water_depth='deep', band_integrate=False):
     frequencies : ndarray or float
         Frequencies in Hz (1-Hz band assumed for a scalar).
     u : float
-        Wind speed in knots. Must be non-negative; ``u == 0`` silences
-        the wind component and the returned spectral level is
-        ``-inf`` dB at every frequency (the surface-noise source has
-        no power).
+        Wind speed in **knots at the 10 m reference height** — the
+        variable DRDC-RDDC-2022-D051 §2.3 fits (eq. 8 is stated for
+        ``u`` in knots; the section defines it at 10 m). Must be
+        non-negative; ``u == 0`` silences the wind component and the
+        returned spectral level is ``-inf`` dB at every frequency (the
+        surface-noise source has no power).
     water_depth : {'deep', 'shallow'}
         Coefficient family. Default 'deep'.
     band_integrate : bool
@@ -91,9 +93,9 @@ def compute_windnoise(frequencies, u, water_depth='deep', band_integrate=False):
     if u == 0:
         NL = np.full_like(f, -np.inf)
     else:
-        n2 = f.size
+        n_freq = f.size
         if band_integrate:
-            if n2 < 2:
+            if n_freq < 2:
                 raise ConfigurationError(
                     "compute_windnoise(band_integrate=True) needs at least two "
                     "frequencies to define band edges; got one. Use "
@@ -109,16 +111,22 @@ def compute_windnoise(frequencies, u, water_depth='deep', band_integrate=False):
         else:
             df = np.ones_like(f)
 
-        # Bookkeeping:
-        # Some constants
-        f_wind = 2000  # Cutoff for wind noise section
-        s1w = 1.5   # Constant in wind calcs
-        s2w = -5.0  # Constant in wind calc
-        a = -25   # Curve melding exponent
-        slope = s2w * (0.1 / np.log10(2))  # Slope at high freq
+        # Symbols follow DRDC-RDDC-2022-D051 §2.3: f0w/L0w the peak frequency
+        # and peak level of the wind curve (eqs. 8, 9), s1w/s2w its rising and
+        # falling slopes in dB per **octave** (eqs. 14, 15 — the 1/log10(2)
+        # factors below turn those into a coefficient on log10(f)), a the
+        # exponent melding the two branches (eq. 16), cst the report's
+        # deep/shallow offset c0 (eq. 10). The empirical fit is valid only up
+        # to f_wind; above it the report continues as a power law of exponent
+        # ``slope`` — s2w restated on linear power (m0, eq. 17), so
+        # 10*log10(f**slope) falls s2w dB per doubling of f.
+        f_wind = 2000
+        s1w = 1.5
+        s2w = -5.0
+        a = -25
+        slope = s2w * (0.1 / np.log10(2))
         NL = np.zeros_like(f)
 
-        # Do the wind part for f <= 2000 Hz
         if water_depth == 'shallow':
             cst = 45
         elif water_depth == 'deep':
@@ -133,31 +141,45 @@ def compute_windnoise(frequencies, u, water_depth='deep', band_integrate=False):
             cst = 42
 
         i_wind = f <= f_wind
-        # so it doesn't crash if only f > 2000 are entered (arbitrary fallback):
-        f_temp = f[i_wind] if np.any(i_wind) else np.array([2000])
+        # With no sub-cutoff sample in the grid the block below computes a level
+        # that the empty mask never assigns, so the placeholder value only has
+        # to stay inside the fit's validity range.
+        f_below_cutoff = f[i_wind] if np.any(i_wind) else np.array([2000])
 
-        # Variable letters mirror the original Wenz/Coppens MATLAB script.
         f0w = 770 - 100 * np.log10(u)
         L0w = cst + 20 * np.log10(u) - 17 * np.log10(f0w / 770)
-        L1w = L0w + (s1w / np.log10(2)) * np.log10(f_temp / f0w)
-        L2w = L0w + (s2w / np.log10(2)) * np.log10(f_temp / f0w)
-        # The Wenz melding raises ``1 + (L1w/L2w)**(-a)`` to a fractional
-        # power, which is real only while that base is positive. Below about
-        # 0.01 kn the two asymptotes fall through zero and the base goes
-        # negative — the same physical statement as ``u == 0``: the surface
-        # source is silent, so those bins contribute no power.
+        L1w = L0w + (s1w / np.log10(2)) * np.log10(f_below_cutoff / f0w)
+        L2w = L0w + (s2w / np.log10(2)) * np.log10(f_below_cutoff / f0w)
+        # The exponent is 1/a. DRDC's typeset eq. (13)/(20) prints -1/a, but
+        # that is a sign typo: with -1/a the branch above f0w *rises* at
+        # +9.1 dB/octave, contradicting the report's own eq. (12)/(15), which
+        # define that branch by s2 = -5 dB/octave. With 1/a it falls at
+        # -4.5 dB/octave, converging on s2. The Annex A.2 Matlab also has 1/a.
+        #
+        # With a < 0 the melding is a smooth minimum of the two branches: they
+        # cross at f0w, so the rising L1w governs below it and the falling L2w
+        # above, and the melding rounds off that corner (a few dB below the
+        # crossing, which is why the melded curve peaks a little under f0w).
+        # It raises ``1 + (L1w/L2w)**(-a)`` to a fractional power, which is real
+        # only while that base is positive. Below about 0.01 kn the two
+        # asymptotes fall through zero and the base goes negative — the same
+        # physical statement as ``u == 0``: the surface source is silent, so
+        # those bins contribute no power.
         with np.errstate(invalid='ignore', divide='ignore'):
             blend = 1 + (L1w / L2w) ** (-a)
             Lw = np.where(blend > 0, L1w * np.abs(blend) ** (1 / a), -np.inf)
-        temp_noise_dist = 10 ** (Lw / 10)
+        psd_below_cutoff = 10 ** (Lw / 10)
 
         if np.any(i_wind):
-            NL[i_wind] = temp_noise_dist * df[i_wind]
+            NL[i_wind] = psd_below_cutoff * df[i_wind]
 
-        # Meld with a sensible line at freqs greater than 2000 Hz. Anchor the
-        # roll-off at the f_wind cutoff itself, not at whatever in-grid sample
-        # happens to be the last one below it — otherwise every level above
-        # 2 kHz depends on the caller's frequency spacing (measured: 17.6 dB
+        # Meld with a sensible line at freqs greater than 2000 Hz, per DRDC
+        # eq. (18)-(19): K = Lw,2000 - m0*(10 log10 2000), Lw = K + m0*10 log10 f.
+        # The anchor is the level at the f_wind cutoff *itself*, as those
+        # equations specify — not whatever in-grid sample happens to be the last
+        # one below it, which is the shortcut the Annex A.2 listing takes and
+        # which makes every level above 2 kHz depend on the caller's frequency
+        # spacing (measured: 17.6 dB
         # between a grid whose last sub-cutoff point is 1999 Hz and one where
         # it is 100 Hz). Same reasoning as the rain roll-off below.
         if np.any(~i_wind):
@@ -173,9 +195,6 @@ def compute_windnoise(frequencies, u, water_depth='deep', band_integrate=False):
         with np.errstate(divide='ignore'):
             NL = 10 * np.log10(NL)
 
-        if n2 != 1:
-            NL = NL.reshape((n2,))
-
     return NL
 
 
@@ -184,6 +203,9 @@ def compute_windnoise(frequencies, u, water_depth='deep', band_integrate=False):
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+# Traffic-density coefficient c2 of the Wenz shipping fit. ``'no'`` is not a
+# density in the fit — it is here only so ``WenzNoise`` accepts it as a
+# shipping_level; the submodels short-circuit to -inf before reading its value.
 _SHIPPING_C2 = {'low': 1, 'medium': 4, 'high': 7, 'no': 4}
 _RAIN_INDEX = {'no': 0, 'light': 1, 'moderate': 2, 'heavy': 3, 'veryheavy': 4}
 _RAIN_R0 = [0, 51.0769, 61.5358, 65.1107, 74.3464]
@@ -201,7 +223,7 @@ _RAIN_R3 = [0, 0.0335,  0.0277,  0.0251,  0.0277]
 # the incoherent logaddexp sum then drops.
 
 def _thermal_mellen(frequencies, **_):
-    """Thermal (Mellen 1952): ``-75 + 20·log10(f)``."""
+    """Thermal (Mellen 1952; DRDC §2.5 eq. 22): ``-75 + 20·log10(f_Hz)``."""
     return -75.0 + 20.0 * np.log10(frequencies)
 
 
@@ -247,31 +269,51 @@ def _shipping_coates(frequencies, *, shipping_level, **_):
 
 
 def _turbulence_wenz(frequencies, **_):
-    """Turbulence (Wenz 1962, canonical textbook form):
-    ``N_t = 17 − 30·log10(f_kHz)`` = ``107 − 30·log10(f_Hz)`` (−30 dB/decade).
-    This is the original Wenz turbulent-pressure curve."""
-    return 17.0 - 30.0 * np.log10(np.asarray(frequencies) / 1000.0)
+    """Turbulence (DRDC §2.1): ``NL_turb = NL_t + m_t·log10(f_Hz)`` with
+    ``NL_t = 107 dB re µPa`` and ``m_t = −10 dB/octave``, i.e.
+    ``−10/log10(2) = −33.2 dB/decade``. The slope is the primitive quantity —
+    Wenz, Urick and Nichols & Bradley all cite −8 to −10 dB/octave — so it is
+    written per octave and converted here.
+
+    DRDC's Annex A listing does not implement these values — it has
+    ``108.5 - 32.5*log10(f)`` (= -9.78 dB/octave), 1.5-2.9 dB higher over
+    1-100 Hz. Both sit inside the -8 to -10 dB/octave range the report cites, but
+    §2.1 is the specification and 107 dB is traceable to Nichols & Bradley Fig. 5
+    in its own Table 1, so uacpy implements the specification. That is the same
+    rule applied everywhere in this module: the numbered equations are
+    normative, and the annex is an implementation that takes shortcuts."""
+    m_t = -10.0 / np.log10(2.0)
+    return 107.0 + m_t * np.log10(np.asarray(frequencies))
 
 
 def _rain_torres_costa(frequencies, *, rain_rate, **_):
-    """Rain (Torres & Costa 2019; DRDC §2.4), valid to ~7 kHz; melded above."""
+    """Rain (Torres & Costa 2019; DRDC §2.4 eq. 21), valid to ~7 kHz; melded above.
+
+    The report's eq. (21) writes the cubic in a bare ``f``; its Table 2
+    coefficients and the Annex A.1 listing (``fk = f/1000``) both take that
+    argument in **kHz**, so ``cubic`` below is defined on kHz: the Hz grid is
+    divided by 1000 and the 7 kHz anchor is passed as ``7.0``.
+    """
     f = frequencies
     if rain_rate == 'no':
         return np.full_like(f, -np.inf)
     ir = _RAIN_INDEX[rain_rate]
-    fk = f / 1000.0
-    out = (_RAIN_R0[ir] + _RAIN_R1[ir] * fk
-           + _RAIN_R2[ir] * fk ** 2 + _RAIN_R3[ir] * fk ** 3)
+
+    def cubic(f_khz):
+        return (_RAIN_R0[ir] + _RAIN_R1[ir] * f_khz
+                + _RAIN_R2[ir] * f_khz ** 2 + _RAIN_R3[ir] * f_khz ** 3)
+
+    out = cubic(f / 1000.0)
     slope = -5.0 * (0.1 / np.log10(2))
     above = f > 7000.0
     if np.any(above):
-        # Anchor the −5 dB/octave roll-off at the cubic fit's value at its
-        # 7 kHz validity limit — independent of whether the frequency grid
-        # itself contains a sub-7 kHz sample (without an in-grid anchor the
-        # raw cubic would be extrapolated to physically impossible levels).
-        out7 = (_RAIN_R0[ir] + _RAIN_R1[ir] * 7.0
-                + _RAIN_R2[ir] * 7.0 ** 2 + _RAIN_R3[ir] * 7.0 ** 3)
-        prop_const = 10 ** (out7 / 10) / 7000.0 ** slope
+        # §2.4 extends the fit "with constant slope ... in a similar manner to
+        # that described for the wind noise (Section 2.3)", i.e. by eq. (18)-(19),
+        # so the anchor is the cubic's value at the 7 kHz validity limit itself
+        # — independent of whether the frequency grid contains a sub-7 kHz
+        # sample (without an in-grid anchor the raw cubic would be extrapolated
+        # to physically impossible levels).
+        prop_const = 10 ** (cubic(7.0) / 10) / 7000.0 ** slope
         out[above] = 10 * np.log10(prop_const * f[above] ** slope)
     return out
 
@@ -334,8 +376,8 @@ class WenzNoise:
     Each component is chosen via a ``*_model`` argument; ``None`` selects the
     default. The **defaults** are the Canadian/DRDC composite (Tollefsen &
     Pecknold 2018; DRDC "WenzCurves"): ``shipping='wenz'``,
-    ``wind='merklinger'``, ``rain='torres_costa'``, ``thermal='mellen'``, with
-    turbulence the **canonical Wenz 1962** curve (``17 − 30·log10(f_kHz)``).
+    ``wind='merklinger'``, ``rain='torres_costa'``, ``thermal='mellen'``,
+    ``turbulence='wenz'`` (DRDC §2.1 eq. 4, ``107 − 33.2·log10(f_Hz)``).
     Built-in alternatives include the Coates/Stojanović (2007) ``'coates'``
     wind and shipping models. Register your own by name
     (``WIND_MODELS['mine'] = fn``) or pass a callable directly. Each component
