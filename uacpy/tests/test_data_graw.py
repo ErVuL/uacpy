@@ -16,7 +16,7 @@ netCDF4 = pytest.importorskip('netCDF4')
 
 import uacpy.data as data
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
-from uacpy.data import gebco_local, graw_local, woa23_local
+from uacpy.data import graw_local, woa23_local
 from uacpy.data import _http
 
 

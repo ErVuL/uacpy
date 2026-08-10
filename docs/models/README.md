@@ -58,8 +58,9 @@ see [collapse policy](../guide/environment.md).
 exact, but BOUNCE is range-independent, so the seabed collapses to one column.
 ² requires `backend='krakenc'`; auto-selected.
 ³ routes to the `rams` backend.
-⁴ sea surface only — Scooter drops seabed interfacial roughness. Kraken and
-OASES carry both.
+⁴ sea surface only, and only under a pressure-release (vacuum) surface —
+Scooter drops seabed roughness, and a rough rigid/elastic surface, with a
+warning. Kraken and OASES carry both interfaces unconditionally.
 
 `OASES` is an abstract base: instantiate **OAST** (TL), **OASN** (covariance,
 replicas), **OASR** (reflection) or **OASP** (pulse/broadband) directly, or let

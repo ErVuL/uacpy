@@ -1825,8 +1825,9 @@ Interface roughness lives on the boundary carriers, not on the models:
 `env.surface.roughness` is the sea-surface RMS roughness (AT `sigma(1)`, the
 water column's mesh line) and `env.bottom`'s `roughness` is the seabed
 (`sigma(NMedia+1)`, the bottom half-space line). Kraken and the OASES models
-consume both; Scooter consumes a rough surface only. Every other model drops
-what it cannot carry, with a warning naming the value it dropped.
+consume both; Scooter consumes the sea surface only, and only when that surface
+is pressure-release (vacuum). Every other model drops what it cannot carry,
+with a warning naming the value it dropped.
 
 *(Environment and its carriers — bathymetry, SSP, bottom, surface, altimetry — are documented in §5; their units follow §15: metres / m/s / g/cm³ / dB-per-λ.)*
 
@@ -1836,7 +1837,7 @@ what it cannot carry, with a warning naming the value it dropped.
 |---|---|---|---|
 | `backend` | — | `None` | Binary variant: `'fortran'`/`'cxx'`/`'cuda'`; `None` auto-selects CUDA > C++ > Fortran. |
 | `dimensionality` | — | `'2D'` | Only `'2D'` is supported; `'3D'` raises. |
-| `beam_type` | — | `'B'` | `B` Gaussian, `R` ray-centered, `C` Cartesian, `b` geometric Gaussian, `g` geometric hat, `G` geometric hat Cartesian, `S` simple Gaussian. |
+| `beam_type` | — | `'B'` | `B` geometric Gaussian (Cartesian), `G` geometric hat (Cartesian), `g` geometric hat (ray-centred), `S` simple Gaussian, `C`/`R` Červený in Cartesian / ray-centred coordinates. `'b'` raises: `bellhop.f90:403` `ERROUT`s on it and the C++/CUDA ports silently substitute the Cartesian beam. |
 | `n_beams` | count | `0` | Number of beams; `0` defers to Bellhop's auto-selection. |
 | `alpha` | deg | `(-80, 80)` | Launch-angle limits `(min, max)`. |
 | `step` | m | `0.0` | Ray step size; `0` = automatic. |
