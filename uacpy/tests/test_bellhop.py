@@ -1097,7 +1097,11 @@ class TestMeshDepthCoversBathymetry:
         bty = path.with_suffix('.bty').read_text().splitlines()
         depths = np.array([float(ln.split()[1]) for ln in bty[2:] if ln.strip()])
         assert depths.max() <= z_max
-        assert z_max == pytest.approx(100.1)
+        # The mesh sits on the deepest bathymetry point itself. bdryMod.f90:211
+        # aborts only when a .bty point is STRICTLY deeper than the SSP's last
+        # depth, so equality is safe and no margin is needed — and a margin
+        # would put Bellhop on a different water column from the other models.
+        assert z_max == pytest.approx(max(d for _r, d in self.BATHY))
 
     @pytest.mark.requires_binary
     def test_fractional_bathymetry_runs(self, tmp_path):
@@ -1281,3 +1285,213 @@ class TestIrregularGridBroadband:
                 tmp_path / 'b.env', env, Source(depths=25.0, frequencies=200.0),
                 Receiver(depths=[50.0, 100.0, 150.0], ranges=[1000.0, 2000.0]),
                 grid_type='I')
+
+
+class TestBeamPatternMustSpanTheLaunchFan:
+    """``bellhop.f90:269-270`` clamps the beam-pattern table index but not the
+    interpolation weight at ``:273``, so ``Amp0`` (``:274``) extrapolates past
+    both ends. ``misc/beampattern.f90:59`` has already converted the levels to
+    linear amplitude, so extrapolating a roll-off drives ``Amp0`` negative — the
+    outer beams launch louder than declared and phase-inverted, and the field
+    returns partly NaN with no warning on any backend.
+    ``third_party/MODIFICATIONS.md`` records the site as deliberately left
+    unclamped so the three backends stay identical, so the input check is the
+    only guard available.
+    """
+
+    @staticmethod
+    def _env():
+        from uacpy.core.environment import (SoundSpeedProfile,
+                                            BoundaryProperties)
+        return Environment(
+            bathymetry=100.0,
+            ssp=SoundSpeedProfile.from_pairs([(0.0, 1500.0), (100.0, 1500.0)]),
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=1600.0, density=1.8,
+                                      attenuation=0.5))
+
+    @staticmethod
+    def _lobe(span_deg):
+        return np.array([[-span_deg, -40.0], [0.0, 0.0], [span_deg, -40.0]])
+
+    def _run(self, span_deg, fan):
+        rcv = Receiver(depths=[10.0, 50.0, 90.0],
+                       ranges=[50.0, 100.0, 200.0, 400.0, 800.0, 1600.0])
+        src = Source(depths=25.0, frequencies=200.0,
+                     beam_pattern=self._lobe(span_deg))
+        return Bellhop(beam_type='G', n_beams=501, alpha=fan,
+                       backend='fortran').compute_tl(self._env(), src, rcv)
+
+    def test_a_pattern_narrower_than_the_fan_is_refused(self):
+        with pytest.raises(ConfigurationError, match='launch fan'):
+            self._run(30.0, (-80.0, 80.0))
+
+    def test_the_default_fan_is_what_makes_this_reachable(self):
+        """``alpha`` defaults to ±80°, so an ordinary narrow lobe trips it."""
+        assert Bellhop().alpha == (-80, 80)
+
+    @pytest.mark.requires_binary
+    def test_a_pattern_covering_the_fan_runs_and_is_finite(self):
+        tl = np.asarray(self._run(80.0, (-80.0, 80.0)).tl)
+        assert np.isfinite(tl).all()
+
+    @pytest.mark.requires_binary
+    def test_narrowing_the_fan_to_the_pattern_also_works(self):
+        """The other remedy the error offers must work too."""
+        tl = np.asarray(self._run(60.0, (-60.0, 60.0)).tl)
+        assert np.isfinite(tl).all()
+
+
+class TestBeamTypeCapabilities:
+    """``Bellhop/influence.f90`` implements a different set of ``RunType(1:1)``
+    letters per influence routine, and uacpy used to write any pairing. The
+    unsupported ones are not merely unsupported: the arrivals/eigenray pairs
+    write ``U( iz, ir )`` into the ``U(1,1)`` dummy ``bellhop.f90:216``
+    allocated for them (glibc aborts, exit -6), and ``beam_type='S'`` with an
+    incoherent run returns a field that was measured 70 % NaN. The C++/CUDA
+    ports implemented some of the missing branches, so an ungated pair made the
+    *answer* depend on which binaries ``install.sh`` built."""
+
+    @staticmethod
+    def _fixture():
+        return (Environment(name='caps', bathymetry=100.0, ssp=1500.0),
+                Source(depths=25.0, frequencies=200.0),
+                Receiver(depths=50.0, ranges=np.linspace(500.0, 5000.0, 10)))
+
+    # (beam_type, run_mode) pairs whose influence routine has no such branch.
+    _UNSUPPORTED = [
+        ('S', RunMode.INCOHERENT_TL), ('S', RunMode.SEMICOHERENT_TL),
+        ('S', RunMode.ARRIVALS), ('S', RunMode.BROADBAND),
+        ('S', RunMode.TIME_SERIES),
+        ('C', RunMode.EIGENRAYS), ('C', RunMode.ARRIVALS),
+        ('C', RunMode.BROADBAND), ('C', RunMode.TIME_SERIES),
+        ('R', RunMode.EIGENRAYS), ('R', RunMode.ARRIVALS),
+        ('R', RunMode.BROADBAND), ('R', RunMode.TIME_SERIES),
+    ]
+
+    @pytest.mark.parametrize('beam_type,run_mode', _UNSUPPORTED)
+    def test_unsupported_pairs_are_refused(self, beam_type, run_mode):
+        env, src, rcv = self._fixture()
+        kw = ({'source_waveform': np.hanning(64), 'sample_rate': 8000.0}
+              if run_mode == RunMode.TIME_SERIES else {})
+        with pytest.raises(ConfigurationError, match='influence.f90'):
+            Bellhop(verbose=False, beam_type=beam_type).run(
+                env, src, rcv, run_mode, **kw)
+
+    @pytest.mark.parametrize('beam_type', ['G', 'B', 'g', 'S', 'C', 'R'])
+    def test_rays_is_safe_for_every_beam_type(self, beam_type):
+        """``bellhop.f90:288`` writes the trajectory and returns before the
+        influence dispatch, so no routine is entered at all."""
+        env, src, rcv = self._fixture()
+        result = Bellhop(verbose=False, beam_type=beam_type).run(
+            env, src, rcv, RunMode.RAYS)
+        assert isinstance(result, Rays)
+
+    @pytest.mark.parametrize('beam_type', ['G', 'B', 'g', 'C', 'R'])
+    def test_incoherent_still_runs_where_the_branch_exists(self, beam_type):
+        """Both Cerveny routines do implement ``CASE ( 'I', 'S' )``
+        (``influence.f90:137-140`` and :279-283), so only ``'S'`` is gated."""
+        env, src, rcv = self._fixture()
+        result = Bellhop(verbose=False, beam_type=beam_type).run(
+            env, src, rcv, RunMode.INCOHERENT_TL)
+        assert isinstance(result, Field)
+
+    def test_simple_gaussian_beam_still_runs_coherent_and_eigenrays(self):
+        """``InfluenceSGB`` has a ``'E'`` branch and a coherent ``CASE
+        DEFAULT``; the gate must not take those away."""
+        env, src, rcv = self._fixture()
+        model = Bellhop(verbose=False, beam_type='S')
+        assert isinstance(model.run(env, src, rcv, RunMode.COHERENT_TL), Field)
+        assert isinstance(model.run(env, src, rcv, RunMode.EIGENRAYS), Rays)
+
+    def test_the_table_matches_the_vendored_source(self):
+        """Only the routines calling ``ApplyContribution`` carry the ``'E'`` and
+        ``'A'``/``'a'`` branches, so a vendor refresh that changes which ones do
+        must fail here rather than silently invalidate the table."""
+        from pathlib import Path
+        from uacpy.models.bellhop import (_BEAM_TYPE_RUN_TYPES,
+                                          _INFLUENCE_ROUTINE)
+        src_file = (Path(__file__).resolve().parent.parent / 'third_party' /
+                    'Acoustics-Toolbox' / 'Bellhop' / 'influence.f90')
+        text = src_file.read_text()
+        for beam_type, routine in _INFLUENCE_ROUTINE.items():
+            start = text.index(f'SUBROUTINE {routine}(')
+            end = text.index('END SUBROUTINE', start)
+            body = text[start:end]
+            calls_apply = 'ApplyContribution' in body
+            claims_arrivals = 'A' in _BEAM_TYPE_RUN_TYPES[beam_type]
+            assert calls_apply == claims_arrivals, (
+                f"{routine} ({beam_type}): calls ApplyContribution="
+                f"{calls_apply} but the table claims arrivals support="
+                f"{claims_arrivals}")
+            has_eigenray_branch = calls_apply or "CASE ( 'E' )" in body
+            assert ('E' in _BEAM_TYPE_RUN_TYPES[beam_type]) is has_eigenray_branch, (
+                f"{routine} ({beam_type}): eigenray branch in the source="
+                f"{has_eigenray_branch}, table says "
+                f"{'E' in _BEAM_TYPE_RUN_TYPES[beam_type]}")
+
+
+class TestReceiverGridMatchesTheBeamType:
+    """Two receiver-grid choices are silently wrong for the routines that do not
+    implement them — no NaN, no warning, up to 30 dB of error."""
+
+    @staticmethod
+    def _env_src():
+        return (Environment(name='grid', bathymetry=100.0, ssp=1500.0),
+                Source(depths=25.0, frequencies=200.0))
+
+    @pytest.mark.parametrize('beam_type', ['g', 'S', 'C', 'R'])
+    def test_irregular_grid_is_refused(self, beam_type):
+        """``bellhop.f90:202-204`` pins ``NRz_per_range`` to 1 for
+        ``RunType(5:5)=='I'`` and only ``InfluenceGeoHatCart`` (:461-465) and
+        ``InfluenceGeoGaussianCart`` (:581-585) re-read ``Pos%Rz(ir)``; the rest
+        evaluate every paired receiver at ``receiver.depths[0]``."""
+        env, src = self._env_src()
+        rcv = Receiver(depths=[10.0, 30.0, 50.0, 70.0],
+                       ranges=[500.0, 1400.0, 2300.0, 3200.0])
+        with pytest.raises(ConfigurationError, match='NRz_per_range'):
+            Bellhop(verbose=False, beam_type=beam_type, grid_type='I').run(
+                env, src, rcv, RunMode.COHERENT_TL)
+
+    @pytest.mark.parametrize('beam_type', ['G', 'B'])
+    def test_irregular_grid_is_allowed_where_implemented(self, beam_type):
+        env, src = self._env_src()
+        rcv = Receiver(depths=[10.0, 30.0, 50.0, 70.0],
+                       ranges=[500.0, 1400.0, 2300.0, 3200.0])
+        result = Bellhop(verbose=False, beam_type=beam_type,
+                         grid_type='I').run(env, src, rcv, RunMode.COHERENT_TL)
+        assert np.asarray(result.tl).shape == (4,)
+
+    @pytest.mark.parametrize('beam_type', ['g', 'C', 'R'])
+    def test_non_uniform_ranges_are_refused(self, beam_type):
+        """These form the range index as
+        ``INT( ( r - Pos%Rr(1) ) / Pos%Delta_r ) + 1`` (``influence.f90:92``,
+        :223-224, :339, :351) and ``SourceReceiverPositions.f90:160`` sets
+        ``Delta_r`` from the last gap alone."""
+        env, src = self._env_src()
+        rcv = Receiver(depths=50.0,
+                       ranges=[500.0, 700.0, 1000.0, 1500.0, 2200.0, 3200.0])
+        with pytest.raises(ConfigurationError, match='Delta_r'):
+            Bellhop(verbose=False, beam_type=beam_type).run(
+                env, src, rcv, RunMode.COHERENT_TL)
+
+    @pytest.mark.parametrize('beam_type', ['G', 'B', 'S'])
+    def test_arbitrary_range_spacing_is_allowed_where_implemented(self,
+                                                                 beam_type):
+        """``doc/bellhop.htm``'s list is wrong twice: it includes
+        ``CervenyRayCen`` and omits ``S``. ``InfluenceSGB`` (:683) compares
+        ``rB > Pos%Rr( ir )`` directly and never touches ``Delta_r``."""
+        env, src = self._env_src()
+        rcv = Receiver(depths=50.0,
+                       ranges=[500.0, 700.0, 1000.0, 1500.0, 2200.0, 3200.0])
+        result = Bellhop(verbose=False, beam_type=beam_type).run(
+            env, src, rcv, RunMode.COHERENT_TL)
+        assert np.isfinite(np.asarray(result.tl)).all()
+
+    @pytest.mark.parametrize('beam_type', ['g', 'C', 'R'])
+    def test_uniform_ranges_still_accepted(self, beam_type):
+        env, src = self._env_src()
+        rcv = Receiver(depths=50.0, ranges=np.linspace(500.0, 5000.0, 10))
+        result = Bellhop(verbose=False, beam_type=beam_type).run(
+            env, src, rcv, RunMode.COHERENT_TL)
+        assert isinstance(result, Field)

@@ -399,14 +399,25 @@ def grid_error(
     return float(tau * int(np.ceil(float(x_max) / float(dr))))
 
 
-def rams_dz_floor(c_shear_min: float, freq: float, factor: float = 0.55) -> float:
-    """Lower bound on ``Δz`` for the rams0.5 elastic march so the rotated
-    Padé operator does not alias high-wavenumber shear modes (the
-    shear-stability constraint validated empirically on the example_06
-    Pekeris-with-elastic case).
+def rams_dz_shear_cap(c_shear_min: float, freq: float,
+                      per_wavelength: float = 14.0) -> float:
+    """Upper bound on ``Δz`` for the rams0.5 elastic march: the shear
+    wavelength must be resolved, so ``Δz <= λ_s / per_wavelength``.
+
+    Collins (1991), JASA 89(3) 1050-1057 — the higher-order-Padé elastic PE
+    rams0.5 implements — states the grid of all four of its worked examples,
+    and ``λ_s/Δz`` is 85 (ex. A), 24 (B), **14** (C) and 64 (D). 14 is the
+    coarsest grid the author himself uses, so it is the coarsest value with a
+    citation behind it; anything coarser rests on measurement alone.
+
+    Measured against OASES (wavenumber integration, exact for these
+    range-independent elastic half-spaces) on example D's own environment and
+    on a 50 Hz shelf case: ``λ_s/14`` gives 0.81 dB and 3.58 dB, while
+    ``0.55 λ_s`` — a *lower* bound this function replaced — gives 134 dB and
+    141 dB, the march having diverged.
 
     Returns ``0`` for fluid envs (``c_shear_min == 0``).
     """
     if c_shear_min <= 0:
         return 0.0
-    return float(factor * c_shear_min / max(freq, 1.0))
+    return float(c_shear_min / (per_wavelength * max(freq, 1.0)))

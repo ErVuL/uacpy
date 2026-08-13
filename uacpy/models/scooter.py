@@ -206,6 +206,23 @@ class Scooter(PropagationModel):
         self._spectrum_code = spectrum_map[spectrum]
 
         self.stabilizing_attenuation_off = bool(stabilizing_attenuation_off)
+        if self.stabilizing_attenuation_off:
+            # ``scooter.f90:581`` evaluates the FE solve on the contour
+            # ``k + i*Atten``, which is what holds the modal poles off the
+            # integration path. Zeroing it puts them back on a fixed-Δk grid that
+            # cannot resolve them: measured against Kraken on a 100 m Pekeris
+            # guide at 100 Hz, TL is 6.7 dB out at 5 km even with the inverse
+            # transform using the correct Atten = 0, versus 0.075 dB with the
+            # stabiliser left on.
+            warnings.warn(
+                "Scooter(stabilizing_attenuation_off=True) removes the contour "
+                "offset that keeps the modal poles off the integration path "
+                "(scooter.f90:581), so the wavenumber integral is evaluated "
+                "through them. Measured 6.7 dB TL error at 5 km against Kraken "
+                "on a 100 m Pekeris guide, against 0.075 dB with the stabiliser "
+                "on. Use it only to inspect the un-damped kernel.",
+                UserWarning, stacklevel=2,
+            )
 
         # Run modes, capability flags and collapse defaults come from the
         # class-level ``spec`` (applied by PropagationModel.__init__).

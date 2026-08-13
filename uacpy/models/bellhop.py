@@ -40,6 +40,7 @@ from uacpy.io.bellhop_writer import (
 from uacpy.io.refl_io import stage_source_beam_pattern
 from uacpy.io.file_manager import FileManager
 from uacpy.io.oalib_reader import read_shd_file, read_arr_file, read_ray_file
+from uacpy.io.utils import equally_spaced
 
 
 # Source geometry -> RunType(4:4), per ReadEnvironmentBell.f90:398-406.
@@ -190,6 +191,51 @@ _RUN_MODE_TO_BELLHOP_TYPE = {
     RunMode.EIGENRAYS: 'E',
     RunMode.ARRIVALS: 'A',
 }
+# ``_run_broadband`` runs ARRIVALS to get the eigenray set, so both broadband
+# routes inherit the arrivals row of _BEAM_TYPE_RUN_TYPES.
+_RUN_MODE_TO_INFLUENCE_LETTER = {
+    **_RUN_MODE_TO_BELLHOP_TYPE,
+    RunMode.BROADBAND: 'A',
+    RunMode.TIME_SERIES: 'A',
+}
+
+# Which RunType(1:1) letters each influence routine actually implements,
+# enumerated from Bellhop/influence.f90. 'G', 'B' and 'g' funnel through
+# ApplyContribution (:629-652), the sole implementer of the 'E' (eigenray) and
+# 'A'/'a' (arrivals) branches. The other three have no such branch and fall into
+# their own CASE DEFAULT, writing complex pressure into U — which
+# bellhop.f90:216 allocated as U(1,1) for an 'A'/'E' run, so the write runs off
+# the end of the heap block. 'S' (InfluenceSGB, :656-725) additionally has no
+# 'I'/'S' branch, so ScalePressure's SQRT( REAL( U ) ) (:779) takes the root of
+# a signed coherent sum. RAYS ('R') is safe for every beam type because
+# bellhop.f90:288 writes the trajectory and never calls an influence routine.
+_BEAM_TYPE_RUN_TYPES = {
+    'G': frozenset({'C', 'I', 'S', 'E', 'A', 'R'}),
+    'B': frozenset({'C', 'I', 'S', 'E', 'A', 'R'}),
+    'g': frozenset({'C', 'I', 'S', 'E', 'A', 'R'}),
+    'S': frozenset({'C', 'E', 'R'}),
+    'C': frozenset({'C', 'I', 'S', 'R'}),
+    'R': frozenset({'C', 'I', 'S', 'R'}),
+}
+_INFLUENCE_ROUTINE = {
+    'G': 'InfluenceGeoHatCart', 'B': 'InfluenceGeoGaussianCart',
+    'g': 'InfluenceGeoHatRayCen', 'S': 'InfluenceSGB',
+    'C': 'InfluenceCervenyCart', 'R': 'InfluenceCervenyRayCen',
+}
+# Beam types whose influence routine re-reads the paired receiver depth when
+# RunType(5:5)=='I' (influence.f90:461-465 and :581-585). The other four index
+# the depth by the depth-loop counter, which bellhop.f90:202-204 has pinned to
+# NRz_per_range == 1, so every paired receiver is evaluated at Pos%Rz(1).
+_IRREGULAR_GRID_BEAM_TYPES = frozenset({'G', 'B'})
+# Beam types that form the receiver index as
+# INT( ( r - Pos%Rr(1) ) / Pos%Delta_r ) + 1 — influence.f90:92 ('R'), :223-224
+# ('C'), :339 and :351 ('g'), each flagged "assumes uniform spacing in Pos%r".
+# Pos%Delta_r is only the *last* gap (SourceReceiverPositions.f90:160), so an
+# unevenly spaced range axis sends every step to the wrong column. 'G', 'B' walk
+# ir with a bracket test and 'S' compares rB > Pos%Rr(ir) directly, so all three
+# take an arbitrary range vector — doc/bellhop.htm's list is wrong twice, both
+# including 'R' and omitting 'S'.
+_UNIFORM_RANGE_BEAM_TYPES = frozenset({'g', 'C', 'R'})
 
 # RunType letter -> (metadata key, suffix, reader). A run writes exactly one of
 # these, so only the resolved entry is read and attached; the other two would be
@@ -635,6 +681,59 @@ class Bellhop(PropagationModel):
                 UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
             )
 
+    def _check_beam_type_supports_run_mode(self, run_mode) -> None:
+        """Reject ``beam_type`` × ``run_mode`` pairs the influence routine cannot
+        run — see :data:`_BEAM_TYPE_RUN_TYPES` for the enumeration and its
+        authority. Untrapped, the arrivals/eigenray pairs corrupt the heap
+        (``bellhop.exe`` aborts with SIGABRT) and ``beam_type='S'`` with an
+        incoherent run returns a field that is mostly NaN."""
+        letter = _RUN_MODE_TO_INFLUENCE_LETTER.get(run_mode)
+        if letter is None or letter in _BEAM_TYPE_RUN_TYPES[self.beam_type]:
+            return
+        usable = sorted(
+            mode.name for mode, code in _RUN_MODE_TO_INFLUENCE_LETTER.items()
+            if code in _BEAM_TYPE_RUN_TYPES[self.beam_type])
+        raise ConfigurationError(
+            f"Bellhop(beam_type={self.beam_type!r}) cannot run "
+            f"{run_mode.name}: {_INFLUENCE_ROUTINE[self.beam_type]} "
+            f"(Bellhop/influence.f90) has no RunType(1:1)=='{letter}' branch, "
+            f"so the run either corrupts the pressure matrix or returns NaN.",
+            remediation=f"Use beam_type='G' or 'B' for {run_mode.name}, or "
+                        f"keep beam_type={self.beam_type!r} and one of "
+                        f"{usable}.",
+        )
+
+    def _check_beam_type_supports_receiver_grid(self, receiver) -> None:
+        """Reject receiver grids the influence routine indexes incorrectly — see
+        :data:`_IRREGULAR_GRID_BEAM_TYPES` and
+        :data:`_UNIFORM_RANGE_BEAM_TYPES`. Both failures are silent and
+        plausible-looking: up to 30 dB off with no NaN and no warning."""
+        if (str(self.grid_type).upper() == 'I'
+                and self.beam_type not in _IRREGULAR_GRID_BEAM_TYPES):
+            raise ConfigurationError(
+                f"Bellhop(grid_type='I', beam_type={self.beam_type!r}) would "
+                f"evaluate every paired receiver at receiver.depths[0]: "
+                f"bellhop.f90:202-204 pins NRz_per_range to 1 for an irregular "
+                f"grid and {_INFLUENCE_ROUTINE[self.beam_type]} indexes the "
+                f"depth by the depth-loop counter.",
+                remediation="Use beam_type='G' or 'B' with grid_type='I', or "
+                            "grid_type='R' for a rectilinear grid.",
+            )
+        ranges = np.atleast_1d(receiver.ranges)
+        if (self.beam_type in _UNIFORM_RANGE_BEAM_TYPES and ranges.size > 2
+                and not equally_spaced(np.asarray(ranges, dtype=float))):
+            raise ConfigurationError(
+                f"Bellhop(beam_type={self.beam_type!r}) requires equally "
+                f"spaced receiver.ranges: {_INFLUENCE_ROUTINE[self.beam_type]} "
+                f"forms the range index by dividing by Pos%Delta_r, which "
+                f"SourceReceiverPositions.f90:160 sets from the last gap "
+                f"alone ({float(ranges[-1] - ranges[-2]):.6g} m here against a "
+                f"first gap of {float(ranges[1] - ranges[0]):.6g} m).",
+                remediation="Use np.linspace for receiver.ranges, or "
+                            "beam_type='G', 'B' or 'S', which take an "
+                            "arbitrary range vector.",
+            )
+
     def _find_bellhop_executable(self) -> Path:
         """Locate the Bellhop binary, keyed on ``self.backend``.
 
@@ -819,6 +918,12 @@ class Bellhop(PropagationModel):
         """
         # ── Resolve run_mode → internal single-char Bellhop code ────────
         run_mode = self._resolve_run_mode(run_mode)
+        # Before the backend is chosen, so all three backends agree: the ports
+        # implemented branches the Fortran lacks, which otherwise makes the
+        # answer depend on which binaries install.sh built.
+        self._check_beam_type_supports_run_mode(run_mode)
+        if run_mode != RunMode.RAYS:      # bellhop.f90:288 skips influence
+            self._check_beam_type_supports_receiver_grid(receiver)
 
         if run_mode in (RunMode.TIME_SERIES, RunMode.BROADBAND):
             # Both routes go through the arrivals → H(f) pipeline. Without
@@ -974,6 +1079,7 @@ class Bellhop(PropagationModel):
             use_sbp = source.beam_pattern is not None
             if use_sbp:
                 sbp_dest = env_file.with_suffix('.sbp')
+                self._check_beam_pattern_spans_the_fan(source.beam_pattern)
                 stage_source_beam_pattern(source.beam_pattern, sbp_dest)
                 self._log(f"Wrote source beam pattern: {sbp_dest}")
 
@@ -1116,7 +1222,7 @@ class Bellhop(PropagationModel):
         receiver: Receiver,
         *,
         run_mode: Optional[RunMode] = None,
-        c_low: float = DEFAULT_C_MIN,
+        c_low: Optional[float] = None,
         c_high: Optional[float] = None,
         rmax: Optional[float] = None,
         frequencies: Optional[np.ndarray] = None,
@@ -1146,8 +1252,10 @@ class Bellhop(PropagationModel):
             takes. Keyword-only, like every argument after ``receiver``, so
             it cannot bind to a BOUNCE knob by position.
         c_low : float, optional
-            Minimum phase velocity for the reflection table (m/s). Default
-            ``DEFAULT_C_MIN``.
+            Minimum phase velocity for the reflection table (m/s). ``None``
+            (default) uses ``min(DEFAULT_C_MIN, water speed at the seafloor)``,
+            which keeps the table's grazing wedge intact in cold or fresh
+            water too; ``Bounce.run`` rejects a larger value.
         c_high : float, optional
             Maximum phase velocity for the reflection table (m/s). ``None``
             (default) uses ``DEFAULT_C_MAX_UNBOUNDED``, which zeroes BOUNCE's
@@ -1182,6 +1290,14 @@ class Bellhop(PropagationModel):
             rmax = float(np.max(np.atleast_1d(receiver.ranges)))
         if c_high is None:
             c_high = DEFAULT_C_MAX_UNBOUNDED
+        if c_low is None:
+            # BOUNCE tabulates from kMax = omega/c_low but references angles to
+            # the water speed at the seafloor (bounce.f90:186-195), so a c_low
+            # above it truncates the grazing wedge. Cold or fresh water can sit
+            # below DEFAULT_C_MIN, and this route is often uacpy's own choice
+            # (``_maybe_route_through_bounce``), so derive rather than assume.
+            c_low = min(DEFAULT_C_MIN,
+                        float(np.atleast_1d(env.get_sound_speed(env.depth))[0]))
 
         # Bounce validates its arguments in __init__, so a rejected c_low /
         # c_high / rmax raises before the cleanup guard below is entered; the
@@ -1602,6 +1718,44 @@ class Bellhop(PropagationModel):
         omega_taui = np.outer(delays_imag, omega)                    # (n_arr, n_freq)
         contrib = A_complex[:, None] * np.exp(omega_taui - 1j * omega_tau)
         return contrib.sum(axis=0)
+
+    def _check_beam_pattern_spans_the_fan(self, pattern) -> None:
+        """Require the beam pattern to cover every launch angle in ``alpha``.
+
+        ``bellhop.f90:269-270`` clamps the table index but **not** the
+        interpolation weight at ``:273``, so ``Amp0`` at ``:274`` extrapolates
+        past both ends of the table. ``misc/beampattern.f90:59`` has already
+        converted the levels to linear amplitude by then, so extrapolating a
+        roll-off drives ``Amp0`` through zero and negative: the outermost beams
+        are launched louder than the pattern declares and phase-inverted, and the
+        field comes back partly NaN with no warning from any backend.
+        ``third_party/MODIFICATIONS.md`` records that this site is deliberately
+        left unclamped so the Fortran, C++ and CUDA backends stay identical,
+        which makes this the only available guard.
+        """
+        from uacpy.io.refl_io import read_source_beam_pattern
+
+        if isinstance(pattern, (str, Path)):
+            angles = read_source_beam_pattern(pattern, sbp_option='*')[:, 0]
+        else:
+            angles = np.asarray(pattern, dtype=float)[:, 0]
+        lo, hi = float(np.min(angles)), float(np.max(angles))
+        fan_lo, fan_hi = float(min(self.alpha)), float(max(self.alpha))
+        if lo > fan_lo + 1e-9 or hi < fan_hi - 1e-9:
+            raise ConfigurationError(
+                f"Bellhop: the source beam pattern spans "
+                f"[{lo:g}, {hi:g}]° but the launch fan alpha spans "
+                f"[{fan_lo:g}, {fan_hi:g}]°. Bellhop extrapolates the pattern "
+                f"past its ends on linear amplitude "
+                f"(Bellhop/bellhop.f90:273), which inverts the amplitude of "
+                f"the outer beams and returns a partly-NaN field with no "
+                f"warning.",
+                remediation=(
+                    f"Extend the pattern to cover [{fan_lo:g}, {fan_hi:g}]° — "
+                    f"repeat the edge level to hold it flat — or narrow "
+                    f"alpha= to the pattern's own span."
+                ),
+            )
 
     def _build_command(self, base_name: str) -> list:
         """Build the argv used to launch the binary.

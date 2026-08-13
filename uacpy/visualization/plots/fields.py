@@ -115,6 +115,21 @@ def plot_field(
             f"plot_field: expected Field, got {type(field).__name__}"
         )
 
+    if not stacked:
+        # A length-1 axis has no neighbours for ``shading='nearest'`` to build
+        # cell edges from, so every heatmap quad collapses to zero extent and the
+        # panel renders empty — indistinguishable from an all-NaN field. Models
+        # pass the receiver axes through verbatim and ``Receiver`` keeps a scalar
+        # as a length-1 array, so a single-receiver-depth run reaches this. Drop
+        # singleton axes onto ``.pinned`` (the reduction ``_reduce_to_spectrum``
+        # already performs) so a ``(1, n)`` field plots as the 1-D cut it is.
+        # At least one axis is always kept.
+        for axis in ('source_depth', 'frequency', 'depth', 'range', 'time'):
+            if len(field.coords) <= 1:
+                break
+            if axis in field.coords and field.coords[axis].size == 1:
+                field = field.isel(**{axis: 0})
+
     if value is None:
         value = 'real' if field.kind == 'time_series' else 'tl'
     arr, value_label = _value_array(field, value)
@@ -220,6 +235,10 @@ def _plot_field_1d(
     fig, ax = fig_ax(ax, figsize)
     coord = field.coords[axis_name]
     vals = np.asarray(arr).ravel()
+    # A line through one sample has nothing to join, so it draws nothing at all.
+    # Give a single-sample cut a marker so the value is visible.
+    if vals.size == 1:
+        mpl_kw.setdefault('marker', 'o')
     if axis_name == 'depth':
         # Depth cut: depth on the Y axis increasing downward (oceanographic
         # convention, consistent with the 2-D views), value on X.
@@ -700,6 +719,26 @@ def compare_models(
         v_lo, v_hi = _TL_LIMITS
         vmin = v_lo if vmin is None else vmin
         vmax = v_hi if vmax is None else vmax
+    elif vmin is None or vmax is None:
+        # Every other ``value`` has no fixed scale, so pool the panels: left to
+        # autoscale, each ``plot_field`` would map its own panel's range and the
+        # single figure-level colorbar below would then annotate the figure with
+        # only the last panel's limits — two fields differing by 100x would
+        # render identically. Signed quantities get a symmetric range so zero
+        # stays the neutral colour.
+        pooled = [np.asarray(_value_array(f, value)[0], dtype=float).ravel()
+                  for f in fields]
+        finite = np.concatenate([p[np.isfinite(p)] for p in pooled]) \
+            if any(np.isfinite(p).any() for p in pooled) else np.array([0.0])
+        if value in ('real', 'imag') or np.nanmin(finite) < 0.0:
+            span = float(np.max(np.abs(finite))) or 1.0
+            lo, hi = -span, span
+        else:
+            lo, hi = float(np.min(finite)), float(np.max(finite))
+            if hi <= lo:                       # a constant field has no range
+                lo, hi = lo - 0.5, hi + 0.5
+        vmin = lo if vmin is None else vmin
+        vmax = hi if vmax is None else vmax
     if cmap is None:
         cmap = get_cmap_for_field('tl' if value == 'tl' else 'pressure')
 

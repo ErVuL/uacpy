@@ -78,11 +78,44 @@ def _require_non_negative(values, label: str, *, hint: str = "") -> None:
             f"got {arr.ravel().tolist()}")
 
 
-def _require_strictly_increasing(values: np.ndarray, label: str) -> None:
+def _require_attenuation_in_range(value, label: str) -> None:
+    """Raise ``ConfigurationError`` for an attenuation past the AT solvers' own
+    ceiling — see :data:`uacpy.core.constants.MAX_ATTENUATION_DB_PER_WAVELENGTH`
+    for the derivation. Above it Kraken, Scooter, OAST and Bellhop's Fortran
+    build all abort in ``CRCI``, while ``bellhopcxx``/``bellhopcuda`` return a
+    field with *less* loss than a low attenuation gives.
+    """
+    from uacpy.core.constants import MAX_ATTENUATION_DB_PER_WAVELENGTH
+    if value is None:
+        return
+    alpha = float(value)
+    if alpha > MAX_ATTENUATION_DB_PER_WAVELENGTH:
+        raise ConfigurationError(
+            f"{label} = {alpha:g} dB/wavelength exceeds "
+            f"{MAX_ATTENUATION_DB_PER_WAVELENGTH:.4f}, above which the imaginary "
+            f"part of the complex sound speed exceeds the real part and every AT "
+            f"solver aborts in misc/AttenMod.f90's CRCI (:116). The bound is "
+            f"independent of frequency and sound speed because uacpy writes "
+            f"AttenUnit 'W' (dB/wavelength).",
+            remediation="Real seabeds are well under 2 dB/wavelength. To model a "
+                        "strongly absorbing bottom use a reflection-coefficient "
+                        "table (acoustic_type='file') instead.",
+        )
+
+
+def _require_strictly_increasing(values: np.ndarray, label: str, *,
+                                 min_step: float = 0.0,
+                                 step_reason: str = "") -> None:
     """Raise ``ConfigurationError`` if ``values`` is not strictly
     monotonically increasing. Used to guard every range / depth axis that
     feeds into ``np.interp``, which silently produces garbage on unsorted
     ``xp``.
+
+    ``min_step`` additionally requires neighbours to be separated by more than
+    the resolution the solver decks print the axis at, since two samples closer
+    than that collapse to a single token in the file. Pass
+    ``DECK_RANGE_RESOLUTION_M`` for a range axis or ``DECK_DEPTH_RESOLUTION_M``
+    for a depth axis (see those constants for the readers this protects).
     """
     arr = np.asarray(values, dtype=float).ravel()
     if arr.size <= 1:
@@ -94,6 +127,16 @@ def _require_strictly_increasing(values: np.ndarray, label: str) -> None:
             f"{label} must be strictly increasing; "
             f"got {arr[bad]} >= {arr[bad + 1]} at index {bad + 1} "
             f"(full axis: {arr.tolist()})"
+        )
+    if min_step > 0.0 and not np.all(diffs > min_step):
+        bad = int(np.argmin(diffs))
+        raise ConfigurationError(
+            f"{label} must increase by more than {min_step:g} m; "
+            f"got {arr[bad]} and {arr[bad + 1]} at index {bad + 1} "
+            f"({float(diffs[bad]):g} m apart). "
+            + (step_reason or "The solver decks print this axis at that "
+                              "resolution, so the two samples collapse to one "
+                              "value in the file.")
         )
 
 

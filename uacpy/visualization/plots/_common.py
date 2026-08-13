@@ -213,6 +213,33 @@ def _coord_axis(coord: np.ndarray, name: str) -> Tuple[np.ndarray, str]:
 _TL_LIMITS: Tuple[float, float] = (20.0, 120.0)
 
 
+def _cell_edge_extent(x: np.ndarray, y: np.ndarray):
+    """Edge-aligned ``imshow`` extent for centre-sampled ``x``/``y`` axes.
+
+    ``imshow`` stretches the array onto the OUTER edges of ``extent``, so
+    passing the first and last *centres* contracts the field by ``(N-1)/N``
+    about its middle — zero error at the centre, half a rendered pixel at the
+    edges, which is where every overlay (graticule, contours, markers) then
+    disagrees with the data. Pad by half a cell on each side instead.
+
+    Returns ``(left, right, bottom, top)`` for ``origin='lower'``, and is
+    orientation-agnostic so a descending axis is handled. Assumes a uniform
+    grid, which is ``imshow``'s own assumption anyway.
+    """
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    hx = abs(x[1] - x[0]) / 2.0 if x.size > 1 else 0.5
+    hy = abs(y[1] - y[0]) / 2.0 if y.size > 1 else 0.5
+    return (x.min() - hx, x.max() + hx, y.min() - hy, y.max() + hy)
+
+
+def _flip_y(extent):
+    """Swap an extent's y bounds, for an ``origin='upper'`` axis whose ordinate
+    increases downward (intercept time, depth)."""
+    left, right, bottom, top = extent
+    return (left, right, top, bottom)
+
+
 def _imshow_extent(ranges_m: np.ndarray, depths: np.ndarray):
     """Edge-aligned ``imshow`` extent for center-sampled (range, depth) data.
 

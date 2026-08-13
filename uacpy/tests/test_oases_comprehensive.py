@@ -1873,3 +1873,137 @@ class TestOaspFreqOutputIncrementZero:
 
     def test_omitting_it_takes_the_default(self, tmp_path):
         assert self._intf(tmp_path) == 40
+
+
+class TestOasrPhaseIsUnwrappedAtIngest:
+    """``oases/src/oasjun21.f:102`` writes the reflection phase as
+    ``phang = omr*atan2z(...)``, a principal value wrapped to (-180, 180].
+    Every consumer interpolates it linearly between bracketing angles, which
+    ``misc/RefCoef.f90:119`` states requires an unwrapped phase: "Assumes phi has
+    been unwrapped so that it varies smoothly." Interpolating across a +-360 deg
+    step sweeps the phase the long way round and flips the sign of R.
+    """
+
+    THETA = [0.0, 10.0, 20.0, 30.0, 40.0]
+    TRUE_DEG = np.array([150.0, 170.0, 190.0, 210.0, 230.0])
+
+    def _stacked(self):
+        from uacpy.models.oases import _stack_oasr_data
+        wrapped = (self.TRUE_DEG + 180.0) % 360.0 - 180.0
+        return _stack_oasr_data({
+            'frequencies': [100.0], 'angles_or_slowness': [self.THETA],
+            'magnitude': [[1.0] * 5], 'phase': [list(wrapped)],
+        })
+
+    def test_ingest_removes_the_atan2_wrap(self):
+        _theta, _R, phi, _freqs = self._stacked()
+        deg = np.degrees(np.asarray(phi).ravel())
+        assert np.all(np.abs(np.diff(deg)) < 180.0)
+        np.testing.assert_allclose(deg - deg[0], self.TRUE_DEG - self.TRUE_DEG[0],
+                                   atol=1e-9)
+
+    def test_interpolating_across_the_wrap_now_gives_the_true_phase(self):
+        from uacpy.core.results.reflection import ReflectionCoefficient
+        theta, R, phi, freqs = self._stacked()
+        rc = ReflectionCoefficient(
+            R=np.asarray(R).reshape(-1, 1), phi=np.asarray(phi).reshape(-1, 1),
+            theta=np.asarray(theta), frequencies=np.asarray(freqs))
+        # 15 deg falls inside the interval containing the wrap; 25 deg does
+        # not, so it was already right and must stay right.
+        for angle in (15.0, 25.0):
+            got = float(np.degrees(np.asarray(rc.eval(angle=angle).phi).ravel()[0]))
+            want = float(np.interp(angle, self.THETA, self.TRUE_DEG))
+            assert abs(((got - want + 180.0) % 360.0) - 180.0) < 1e-6
+
+    def test_an_already_smooth_table_is_untouched(self):
+        """The unwrap must be a no-op for a table that never wraps, so the
+        Bounce path's own already-unwrapped tables cannot move."""
+        from uacpy.models.oases import _stack_oasr_data
+        smooth = [10.0, 20.0, 30.0, 40.0, 50.0]
+        _t, _R, phi, _f = _stack_oasr_data({
+            'frequencies': [100.0], 'angles_or_slowness': [self.THETA],
+            'magnitude': [[1.0] * 5], 'phase': [smooth]})
+        np.testing.assert_allclose(np.degrees(np.asarray(phi).ravel()), smooth,
+                                   atol=1e-9)
+
+
+class TestOasesFrequencyReachesTheDeck:
+    """A requested frequency must appear on the deck, not a 0.1 Hz stand-in.
+
+    ``oases/src/unoasp22.f:129,176``, ``unoast31.f`` and ``unoasr21.f:128`` are
+    list-directed ``READ(1,*)`` into reals, so no width is imposed — the same
+    argument the writer already makes for the range fields in the *same* record
+    (``R0``/``RSPACE`` at ``%.9f``: "a list-directed read, so the extra digits
+    are free"). At 10 km a 0.05 Hz error is a phase error of
+    ``2*pi*df*R/c`` = 2.1 rad, so coherent broadband synthesis mis-times its bins
+    whenever the requested grid is not already on a 0.1 Hz raster.
+    """
+
+    @staticmethod
+    def _env():
+        from uacpy.core.environment import SoundSpeedProfile, BoundaryProperties
+        return Environment(
+            bathymetry=100.0,
+            ssp=SoundSpeedProfile.from_pairs([(0.0, 1500.0), (100.0, 1500.0)]),
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=1600.0, density=1.7,
+                                      attenuation=0.3))
+
+    def test_a_sub_decihertz_frequency_is_written_verbatim(self, tmp_path):
+        from uacpy.io.oases_writer import write_oast_input
+        path = tmp_path / 'f.dat'
+        write_oast_input(path, self._env(),
+                         Source(depths=50.0, frequencies=200.04),
+                         Receiver(depths=[75.0], ranges=[1000.0, 2000.0]))
+        text = path.read_text()
+        assert '200.04' in text, f"200.04 Hz not on the deck:\n{text}"
+        assert '200.0 ' not in text.replace('200.040', ''), \
+            "the frequency was rounded onto a 0.1 Hz raster"
+
+    @pytest.mark.requires_oases
+    def test_a_sub_decihertz_change_reaches_the_solver(self):
+        rcv = Receiver(depths=[75.0], ranges=np.linspace(1000.0, 10000.0, 91))
+        env = self._env()
+
+        def tl(freq):
+            return np.asarray(OAST().compute_tl(
+                env, Source(depths=50.0, frequencies=freq), rcv).tl).ravel()
+
+        # Bit-identical before the fix: the deck carried '200.0' either way.
+        assert np.nanmax(np.abs(tl(200.0) - tl(200.04))) > 0.1
+
+
+class TestOasesReceiverAxisKeepsItsDepths:
+    """The compact ``(z_min, z_max, n)`` receiver record makes OASES build its
+    own equidistant grid and discard the requested depths, so it may only be used
+    for an axis that really is equidistant.
+
+    ``oaseun31.f:1156,1165`` reads the block list-directed and the explicit
+    negative-``NR`` form (``doc/oast.tex:464-493``) is already implemented, so
+    nothing forces the compact form. The test is now
+    :func:`uacpy.io.utils.equally_spaced` — a verbatim port of
+    ``Matlab/ReadWrite/equally_spaced.m`` that the ``.flp`` writer uses for the
+    same decision — which measures against the ideal uniform grid rather than
+    against the first interval.
+    """
+
+    @staticmethod
+    def _near_uniform(n):
+        return np.cumsum(np.r_[10.0, [1.0 + 0.01 * (i % 2)
+                                      for i in range(n - 1)]])
+
+    @pytest.mark.parametrize('n', [5, 20, 100])
+    def test_a_near_uniform_axis_is_written_explicitly(self, n):
+        from uacpy.io.oases_writer import _receiver_block_lines
+        z = self._near_uniform(n)
+        lines = _receiver_block_lines(Receiver(depths=z, ranges=[1000.0]))
+        assert len(lines) == 2, "the requested depths were discarded"
+        written = np.array([float(v) for v in lines[1].split()])
+        assert written.size == n
+        assert np.max(np.abs(written - z)) < 1e-2
+
+    def test_a_truly_uniform_axis_still_uses_the_compact_form(self):
+        from uacpy.io.oases_writer import _receiver_block_lines
+        z = np.linspace(10.0, 90.0, 9)
+        lines = _receiver_block_lines(Receiver(depths=z, ranges=[1000.0]))
+        assert len(lines) == 1

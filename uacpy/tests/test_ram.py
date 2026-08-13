@@ -209,3 +209,188 @@ def test_copy_preserves_the_unpinned_accuracy_default():
 
     p = RAM(verbose=False, accuracy=1e-6)
     assert p.copy()._accuracy_explicit and p.copy()._accuracy == 1e-6
+
+
+class TestSedimentBlockIsResolvedByZread:
+    """``zread`` (``ramsurf1.5.f:194-225``, identical in ``ramgeo1.5.f:215-246``
+    and ``rams0.5.f:218-249``) pins each block point to the node
+    ``i = 1.5 + z/dz`` and remembers only the immediately preceding index, so its
+    collision push-down at :208 protects one duplicate depth and no more. A layer
+    thinner than ``dz/2`` therefore had its two faces land in one cell, the
+    deeper value overwrote the shallower, and the fill loop at :218-219 ramped
+    linearly across the rest of the sub-bottom. Measured on the *default*
+    dispatch path (``_prefer_ramgeo`` routes any layered fluid bottom there):
+    a 0.6 m mud layer over an 1800 m/s basement came out as a 692 m gradient
+    1500 → 1800 m/s, 22.6 dB from Scooter on the same environment."""
+
+    @staticmethod
+    def _env(thickness):
+        from uacpy.core.bottom import Bottom, SeabedColumn, SedimentLayer
+        halfspace = BoundaryProperties(sound_speed=1800.0, density=2.0,
+                                       attenuation=0.5)
+        layers = ([SedimentLayer(thickness=thickness, sound_speed=1500.0,
+                                 density=1.2, attenuation=0.2)]
+                  if thickness is not None else [])
+        return Environment(
+            name='block', bathymetry=100.0,
+            ssp=SoundSpeedProfile.from_pairs(
+                np.array([[0.0, 1500.0], [100.0, 1500.0]])),
+            bottom=Bottom(columns=[SeabedColumn(layers=layers,
+                                                halfspace=halfspace)]))
+
+    @staticmethod
+    def _src_rcv():
+        return (Source(depths=36.0, frequencies=50.0),
+                Receiver(depths=[20.0, 50.0],
+                         ranges=np.linspace(500.0, 8000.0, 151)))
+
+    @staticmethod
+    def _zread_nodes(block, dz):
+        """The vendored node assignment, verbatim: ``i = 1.5 + z/dz`` with the
+        one-step collision push-down. Returns the overwritten nodes."""
+        assigned, iold, clobbered = {}, None, []
+        for z, value in block:
+            i = int(1.5 + z / dz)
+            if iold is not None and i == iold:
+                i += 1
+            if i in assigned and assigned[i] != value:
+                clobbered.append(i)
+            assigned[i] = value
+            iold = i
+        return clobbered
+
+    @staticmethod
+    def _deck_blocks(path):
+        """Every ``(depth, value)`` block in a ``ramgeo.in``, split on the
+        ``-1 -1`` terminators. Parsed from the file the binary is handed, so this
+        test does not share a code path with the model's own block builder."""
+        blocks, current = [], []
+        for line in path.read_text().splitlines():
+            fields = line.split()
+            if len(fields) != 2:
+                continue
+            if fields[0] == '-1':
+                if current:
+                    blocks.append(current)
+                current = []
+                continue
+            try:
+                current.append((float(fields[0]), float(fields[1])))
+            except ValueError:
+                continue
+        return blocks
+
+    @pytest.mark.parametrize('thickness', [0.6, 0.9, 1.0, 3.0])
+    def test_no_block_point_is_overwritten(self, thickness, tmp_path):
+        """The mechanism test: run the Fortran's own arithmetic over the deck
+        uacpy actually wrote, and require every point to survive.
+
+        The block is parsed out of ``ramgeo.in`` rather than rebuilt, because
+        rebuilding it is exactly what went wrong once — the deck carries depths
+        *relative to the seafloor*, wraps a bare half-space as a synthetic layer,
+        and has extra attenuation points from the absorbing ramp."""
+        env = self._env(thickness)
+        src, rcv = self._src_rcv()
+        result = RAM(verbose=False, work_dir=str(tmp_path),
+                     cleanup=False).run(env, src, rcv)
+        dz = float(result.metadata['dz'])
+        deck = tmp_path / 'ramgeo.in'
+        assert deck.exists(), f"no deck written: {sorted(p.name for p in tmp_path.iterdir())}"
+        blocks = self._deck_blocks(deck)
+        assert blocks, "parsed no blocks out of the deck"
+        for n, block in enumerate(blocks):
+            assert self._zread_nodes(block, dz) == [], (
+                f"block {n} of the deck: a {thickness} m layer on dz={dz:.4f} m "
+                f"loses points to zread's node collision, so the layer is "
+                f"replaced by a linear ramp. Block: {block}")
+
+    @pytest.mark.parametrize('thickness', [0.6, 0.9])
+    def test_agrees_with_scooter(self, thickness):
+        """Arbitrated against wavenumber integration, never another PE backend.
+        These are the two thicknesses that collided on the auto grid: 22.60 dB at
+        0.6 m and 22.21 dB at 0.9 m before the cap, 0.67 and 1.64 dB after.
+
+        Thicker layers are deliberately not asserted here. 1.0-3.0 m does not
+        collide, so this fix leaves its grid alone, and it sits 5.6-6.3 dB from
+        Scooter — a layer spanned by about one cell of a grid the Lytaev
+        optimiser chose for the *water* wavelength. That is ordinary
+        under-resolution, a separate question from the lost block point."""
+        from uacpy.models import Scooter
+        env = self._env(thickness)
+        src, rcv = self._src_rcv()
+        ram = np.asarray(RAM(verbose=False).run(env, src, rcv).tl)
+        scooter = np.asarray(Scooter(verbose=False, c_low=1400.0,
+                                     c_high=1e9).run(env, src, rcv).tl)
+        ranges = np.asarray(rcv.ranges)
+        worst = 0.0
+        for iz in (0, 1):
+            for lo, hi in ((1500.0, 2100.0), (3500.0, 4100.0), (6500.0, 7100.0)):
+                sel = (ranges >= lo) & (ranges <= hi)
+                worst = max(worst, abs(float(np.nanmedian(
+                    ram[iz, sel] - scooter[iz, sel]))))
+        assert worst < 3.0, (
+            f"{thickness} m layer: RAM is {worst:.2f} dB from Scooter")
+
+    @pytest.mark.parametrize('thickness,dz', [(3.0, 2.0), (2.0, 1.9), (5.0, 4.0)])
+    def test_a_clean_grid_is_left_alone(self, thickness, dz):
+        """The bound ``gap >= 2*dz`` is sufficient but nowhere near necessary, so
+        it must never be used to *judge* a grid — only to pick a replacement. A
+        3 m step on ``dz = 2 m`` assigns nodes 1, 3, 4 and the skipped node is
+        filled between two equal values, i.e. nothing is lost. Judging by the
+        bound rejected this, which broke ``test_ram_with_rdl``."""
+        env = self._env(thickness)
+        src, rcv = self._src_rcv()
+        result = RAM(verbose=False, dz=dz).run(env, src, rcv)
+        assert float(result.metadata['dz']) == pytest.approx(dz)
+
+    @pytest.mark.parametrize('dz', [None, 1.886792])
+    def test_mpirams_is_exempt(self, dz):
+        """Only the three Collins backends pin block points to grid nodes — the
+        ``1.5+zi/dz`` arithmetic appears in ``ramsurf1.5.f``, ``ramgeo1.5.f`` and
+        ``rams0.5.f`` and in no mpiramS source, which interpolates the profile
+        onto the grid with ``interpolators.f90``'s ``interp1``. Tightening or
+        refusing an mpiramS run would be a false positive."""
+        env = self._env(0.6)
+        src, rcv = self._src_rcv()
+        result = RAM(verbose=False, backend='mpiramS', dz=dz).run(env, src, rcv)
+        if dz is not None:
+            assert float(result.metadata['dz']) == pytest.approx(dz)
+
+    def test_a_bottom_without_layers_is_untouched(self):
+        """The cap must not tighten a grid with no block step to resolve."""
+        env_plain, env_layered = self._env(None), self._env(0.6)
+        src, rcv = self._src_rcv()
+        dz_plain = float(RAM(verbose=False).run(env_plain, src, rcv)
+                         .metadata['dz'])
+        dz_layered = float(RAM(verbose=False).run(env_layered, src, rcv)
+                           .metadata['dz'])
+        assert dz_plain > dz_layered
+        # The writer wraps a pure half-space as one synthetic layer, so the block
+        # is not empty — what matters is that its points do not collide.
+        assert not RAM(verbose=False)._block_loses_a_point(
+            env_plain, dz_plain, 800.0, 'ramgeo', 50.0)
+
+    def test_a_pinned_dz_that_mangles_the_block_raises(self):
+        """A pinned ``dz`` is the caller's choice everywhere else in this model,
+        but here it silently changes the environment, so it has to raise."""
+        from uacpy.core.exceptions import ConfigurationError
+        env = self._env(0.6)
+        src, rcv = self._src_rcv()
+        with pytest.raises(ConfigurationError, match='overwrites the shallower'):
+            RAM(verbose=False, dz=1.886792).run(env, src, rcv)
+
+    def test_a_dz_the_caller_pinned_small_enough_is_accepted(self):
+        env = self._env(0.6)
+        src, rcv = self._src_rcv()
+        result = RAM(verbose=False, dz=0.25).run(env, src, rcv)
+        assert float(result.metadata['dz']) == pytest.approx(0.25)
+
+    def test_an_unrepresentable_block_raises_rather_than_coarsening(self):
+        """When the required refinement busts the binary's ``mz``, coarsening
+        would silently substitute the ramp — so this cannot be met by
+        coarsening and must be reported."""
+        from uacpy.core.exceptions import ConfigurationError
+        env = self._env(0.01)
+        src, rcv = self._src_rcv()
+        with pytest.raises(ConfigurationError, match='cannot be met by'):
+            RAM(verbose=False, backend='ramgeo').run(env, src, rcv)

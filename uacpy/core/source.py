@@ -9,6 +9,7 @@ from typing import Union, List, Optional
 from dataclasses import dataclass
 
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.core.constants import DECK_DEPTH_RESOLUTION_M
 from uacpy.core._carrier_validate import (
     _require_positive, _require_non_negative, _require_strictly_increasing,
 )
@@ -110,7 +111,8 @@ class Source:
             self.depths, "source depths", hint="metres, positive down from surface")
         # Strictly increasing, matching Receiver — outputs are indexed by source
         # depth, so a defined order keeps result rows unambiguous across models.
-        _require_strictly_increasing(self.depths, "source depths")
+        _require_strictly_increasing(self.depths, "source depths",
+                                     min_step=DECK_DEPTH_RESOLUTION_M)
         _require_positive(self.frequencies, "source frequencies", hint="Hz")
 
         valid_types = ['point', 'line', 'scaled']
@@ -129,6 +131,20 @@ class Source:
                     raise ConfigurationError(
                         "Source beam_pattern must have shape (N, 2): "
                         f"[angle_deg, level_dB]; got shape {pattern.shape}"
+                    )
+                # The engines interpolate between adjacent rows, so a single row
+                # leaves no pair to interpolate over: Bellhop's
+                # ``bellhop.f90:273`` clamps its index to ``NSBPPts - 1 = 0``
+                # and reads below the allocated bound, returning an all-NaN
+                # field with exit code 0. Its own monotone guard
+                # (``misc/monotonicMod.f90:20``) passes a one-element vector.
+                if pattern.shape[0] < 2:
+                    raise ConfigurationError(
+                        "Source beam_pattern needs at least 2 (angle, level) "
+                        f"rows; got {pattern.shape[0]}.",
+                        remediation="Pass beam_pattern=None for an "
+                                    "omnidirectional source, or give at least "
+                                    "two angles spanning the launch fan.",
                     )
                 _require_strictly_increasing(
                     pattern[:, 0], "source beam-pattern angles")

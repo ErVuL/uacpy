@@ -24,7 +24,8 @@ import numpy as np
 from uacpy._log import log_message
 from uacpy.core.acoustics import soundspeed_delgrosso, soundspeed_unesco
 from uacpy.core.environment import SoundSpeedProfile
-from uacpy.core.exceptions import ConfigurationError, DataFetchError
+from uacpy.core.exceptions import (ConfigurationError, DataFetchError,
+                                   FileFormatError)
 from uacpy.data._geo import (
     Coordinate, as_coordinate, normalize_lon, great_circle_km,
 )
@@ -43,6 +44,10 @@ DEFAULT_MAX_DISTANCE_KM = 250.0
 DEFAULT_MAX_DAYS = 15
 _FORMULAS = {'unesco': soundspeed_unesco, 'delgrosso': soundspeed_delgrosso}
 _GOOD_QC = {'1', '2'}                       # good / probably-good Argo QC flags
+# ERDDAP returns columns in the order requested, and the rows below are unpacked
+# positionally, so the header is checked against this list before it is trusted.
+_COLUMNS = ('platform_number', 'cycle_number', 'direction', 'time', 'latitude',
+            'longitude', 'pres', 'temp', 'psal', 'temp_qc', 'psal_qc')
 
 
 def _abs_days(time_str, when):
@@ -97,8 +102,7 @@ def _query_url(point, when, max_distance_km, max_days, base_url):
     else:
         lon_clause = f"&longitude%3E={lo_lo:.4f}&longitude%3C={lo_hi:.4f}"
     return (
-        f"{base_url}?platform_number,cycle_number,time,latitude,longitude,"
-        f"pres,temp,psal,temp_qc,psal_qc"
+        f"{base_url}?{','.join(_COLUMNS)}"
         f"&time%3E={t0}T00:00:00Z&time%3C={t1}T00:00:00Z"
         f"&latitude%3E={la0:.4f}&latitude%3C={la1:.4f}"
         f"{lon_clause}"
@@ -133,11 +137,25 @@ def fetch_argo_profile(
     text = body.decode() if isinstance(body, (bytes, bytearray)) else body
     rows = list(csv.reader(io.StringIO(text)))
     # rows[0] = header, rows[1] = units, rows[2:] = data.
-    profiles = {}      # (platform, cycle) -> dict(lat, lon, levels=[(p,t,s)])
+    if not rows or tuple(c.strip() for c in rows[0][:len(_COLUMNS)]) != _COLUMNS:
+        raise FileFormatError(
+            f"Argo ERDDAP returned columns {rows[0] if rows else []} rather "
+            f"than {list(_COLUMNS)}; the rows are unpacked positionally.",
+            remediation="Report this: the ArgoFloats table layout has changed.",
+        )
+    # A cycle can carry two stations — ERDDAP's own ``direction`` conventions are
+    # "A: ascending profiles, D: descending profiles" and its
+    # ``cdm_profile_variables`` lists ``direction`` — so the cast identity is
+    # (platform, cycle, direction), matching the Argo file naming
+    # ``<R|D><float>_<cycle>[D].nc``. Keyed on (platform, cycle) alone, the
+    # descent and ascent casts of one cycle interleave into a single column:
+    # float 3902110 cycle 463 merges casts 4 days and 22 km apart.
+    profiles = {}      # (platform, cycle, direction) -> dict(lat, lon, lev)
     for r in rows[2:]:
-        if len(r) < 10:
+        if len(r) < len(_COLUMNS):
             continue
-        plat, cyc, _t, rlat, rlon, pres, temp, psal, tqc, sqc = r[:10]
+        plat, cyc, dirn, _t, rlat, rlon, pres, temp, psal, tqc, sqc = \
+            r[:len(_COLUMNS)]
         if tqc not in _GOOD_QC or sqc not in _GOOD_QC:
             continue
         try:
@@ -145,7 +163,7 @@ def fetch_argo_profile(
                     float(psal))
         except ValueError:
             continue
-        prof = profiles.setdefault((plat, cyc),
+        prof = profiles.setdefault((plat, cyc, dirn),
                                    {'lat': vals[0], 'lon': vals[1],
                                     'time': _t, 'lev': []})
         prof['lev'].append(vals[2:])
@@ -180,11 +198,11 @@ def fetch_argo_profile(
         dt_days = _abs_days(p.get('time'), when)
         return (d_km / max_distance_km) ** 2 + (dt_days / max_days) ** 2
 
-    (plat, cyc), prof, dist = min(within, key=_spacetime_cost)
+    (plat, cyc, dirn), prof, dist = min(within, key=_spacetime_cost)
     lev = np.array(sorted(prof['lev']), dtype=float)        # sort by pressure
-    return {'platform': plat, 'cycle': cyc, 'lat': prof['lat'],
-            'lon': prof['lon'], 'distance_km': float(dist),
-            'time': prof.get('time'),
+    return {'platform': plat, 'cycle': cyc, 'direction': dirn,
+            'lat': prof['lat'], 'lon': prof['lon'],
+            'distance_km': float(dist), 'time': prof.get('time'),
             'pres': lev[:, 0], 'temp': lev[:, 1], 'psal': lev[:, 2]}
 
 
@@ -216,9 +234,10 @@ def fetch_ssp_argo(
     c = np.array([speed_fn(t, s, p)
                   for t, s, p in zip(prof['temp'], prof['psal'], prof['pres'])])
     log_message(
-        'sound_speed', f"Argo SSP from float {prof['platform']} "
-        f"({prof['distance_km']:.0f} km away): {depths.size} levels, "
-        f"c=[{c.min():.1f}, {c.max():.1f}] m/s", verbose=verbose)
+        'sound_speed', f"Argo SSP from float {prof['platform']} cycle "
+        f"{prof['cycle']}{prof['direction']} ({prof['distance_km']:.0f} km "
+        f"away): {depths.size} levels, c=[{c.min():.1f}, {c.max():.1f}] m/s",
+        verbose=verbose)
     lat, lon = as_coordinate(point)
     prov = DataProvenance(
         source=SOURCES['argo'],

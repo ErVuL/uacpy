@@ -259,3 +259,55 @@ class TestScooterRejectsATooCoarseMesh:
             self._env(), Source(depths=50.0, frequencies=100.0),
             Receiver(depths=[100.0], ranges=np.linspace(1000.0, 5000.0, 5)))
         assert np.all(np.isfinite(np.asarray(result.data)))
+
+
+class TestStabilisingAttenuationIsUndoneCorrectly:
+    """``scooter.f90:581`` evaluates the FE solve on the contour ``k + i*Atten``,
+    so the inverse transform must undo that offset with ``exp(+Atten*r)`` using
+    the ``Atten`` the solver actually used.
+
+    ``scooter.f90:122-125`` recomputes ``Deltak`` inside the frequency loop from
+    ``kMin = omega/cHigh``, so ``Atten`` scales with frequency while
+    ``scooter.f90:133`` writes the header only for ``ifreq == 1``. That is why
+    ``Matlab/Scooter/fieldsco.m:113-115`` re-derives it from the file's own ``k``
+    vector, and why that is right for a broadband run. But ``scooter.f90:130``
+    zeroes ``Atten`` at *every* frequency when ``TopOpt(7:7) == '0'``, so a zero
+    header is valid throughout — and re-deriving ``Δk`` there multiplies a
+    real-axis Green's function by ``exp(+Δk*r)``.
+    """
+
+    @staticmethod
+    def _grn(atten, k, title='SCOOTER - test'):
+        return {'is_sparc': False, 'title': title, 'atten': atten,
+                'freq': 100.0, 'cVec': np.array([1500.0])}, k
+
+    def test_a_zero_header_is_honoured(self):
+        """The solver wrote 0 because TopOpt(7:7) = '0'; Δk must not come back."""
+        from uacpy.io.grn_reader import _stab_attenuation
+        grn, k = self._grn(0.0, np.array([1.0, 1.0 + 1.5745e-4, 1.0 + 3.149e-4]))
+        assert _stab_attenuation(grn, k) == 0.0
+
+    def test_a_non_zero_header_is_re_derived_per_frequency(self):
+        """With the stabiliser on, the header carries only the first frequency's
+        Δk, so the k vector is the authority."""
+        from uacpy.io.grn_reader import _stab_attenuation
+        dk = 1.5745e-4
+        grn, k = self._grn(9.9e-9, np.array([1.0, 1.0 + dk, 1.0 + 2 * dk]))
+        assert _stab_attenuation(grn, k) == pytest.approx(dk)
+
+    def test_sparc_is_unaffected(self):
+        from uacpy.io.grn_reader import _stab_attenuation
+        grn, k = self._grn(1.0, np.array([1.0, 2.0]))
+        grn['is_sparc'] = True
+        assert _stab_attenuation(grn, k) == 0.0
+
+    def test_turning_the_stabiliser_off_warns_with_its_cost(self):
+        """Removing the contour offset puts the modal poles back on the
+        integration path, which a correct transform cannot repair."""
+        import warnings as _w
+        with pytest.warns(UserWarning, match='modal poles'):
+            Scooter(stabilizing_attenuation_off=True)
+        with _w.catch_warnings(record=True) as caught:
+            _w.simplefilter('always')
+            Scooter()
+        assert not [c for c in caught if 'modal poles' in str(c.message)]

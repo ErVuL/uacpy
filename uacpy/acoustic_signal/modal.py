@@ -52,7 +52,7 @@ def modal_group_velocity(frequencies, k_horizontal):
 
 
 def warp_signal(signal, sample_rate: float, range_m: float,
-                c: float = DEFAULT_SOUND_SPEED):
+                c: float = DEFAULT_SOUND_SPEED, *, oversample: int = 1):
     """Warp an impulsive shallow-water arrival to linearise ideal-waveguide dispersion.
 
     Maps original (reduced) time ``t`` to warped time ``t_w = sqrt(t^2 - t_r^2)``
@@ -62,6 +62,19 @@ def warp_signal(signal, sample_rate: float, range_m: float,
 
     Returns ``(warped, t_warp)`` — the resampled signal and its warped time axis.
     Invert with :func:`unwarp_signal`.
+
+    Parameters
+    ----------
+    oversample : int, optional
+        Length of the warped axis as a multiple of the input length. The map is
+        expansive (``dt_w/dt = t/t_w > 1``), so at ``oversample=1`` the warped
+        grid is coarser than the original in warped time and the round trip
+        ``warp -> unwarp`` is **lossy** — of order 50 % relative error, and the
+        error halves with each doubling of this factor. The default keeps the
+        warped axis the same length as the input; raise it when the round trip
+        matters. No published
+        prescription for the factor exists in the corpus here, so none is
+        imposed.
     """
     x = np.asarray(signal, dtype=float)
     fs = float(sample_rate)
@@ -69,14 +82,17 @@ def warp_signal(signal, sample_rate: float, range_m: float,
     t_r = float(range_m) / float(c)
     t = t_r + np.arange(n) / fs
     t_w = np.sqrt(np.maximum(t ** 2 - t_r ** 2, 0.0))
-    n_w = n
+    n_w = int(n * max(1, int(oversample)))
     tw_axis = np.linspace(t_w[0], t_w[-1], n_w)
     t_orig = np.sqrt(tw_axis ** 2 + t_r ** 2)
     warped = np.interp(t_orig, t, x)
-    # Unitary Jacobian weighting sqrt(dt/dt_w) = sqrt(t/t_w) so the warp
-    # preserves energy and is invertible. dt/dt_w diverges at t_w = 0 (t = t_r,
-    # the direct arrival), so the denominator is floored at one sample.
-    warped = warped * np.sqrt(t_orig / np.maximum(tw_axis, 1.0 / fs))
+    # Unitary Jacobian weighting. With t = sqrt(t_w^2 + t_r^2),
+    # dt/dt_w = t_w / t, so the energy-preserving weight is sqrt(t_w / t) —
+    # verified numerically against np.gradient(t, t_w), and by the resulting
+    # E_warp/E_in being range-INDEPENDENT (the reciprocal inflates it by ~30x
+    # at 20 km and grows with range). t_w = 0 at the direct arrival t = t_r, so
+    # the numerator is floored at one sample.
+    warped = warped * np.sqrt(np.maximum(tw_axis, 1.0 / fs) / t_orig)
     return warped, tw_axis
 
 
@@ -87,10 +103,16 @@ def unwarp_signal(warped, t_warp, sample_rate: float, range_m: float,
     tw = np.asarray(t_warp, dtype=float)
     fs = float(sample_rate)
     t_r = float(range_m) / float(c)
-    n = w.size
+    # The output grid follows the warped axis' own extent, not ``w.size``:
+    # ``warp_signal(oversample=k)`` returns k times as many samples over the
+    # same warped span, and reading the length off the array would unwarp onto
+    # a record k times too long, the tail of it extrapolated.
+    t_end = float(np.sqrt(tw[-1] ** 2 + t_r ** 2))
+    n = max(2, int(round((t_end - t_r) * fs)) + 1)
     t = t_r + np.arange(n) / fs
     t_w_of_t = np.sqrt(np.maximum(t ** 2 - t_r ** 2, 0.0))
-    w_unweighted = w / np.sqrt(np.maximum(np.sqrt(tw ** 2 + t_r ** 2), 1.0 / fs)
-                              / np.maximum(tw, 1.0 / fs))
+    # Divide out the forward weight sqrt(t_w / t) applied by ``warp_signal``.
+    w_unweighted = w / np.sqrt(np.maximum(tw, 1.0 / fs)
+                               / np.sqrt(tw ** 2 + t_r ** 2))
     signal = np.interp(t_w_of_t, tw, w_unweighted)
     return t, signal

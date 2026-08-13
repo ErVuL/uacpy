@@ -76,14 +76,33 @@ _BOUNDARY_TYPE_MAP = {
     "halfspace": BoundaryType.HALF_SPACE.to_acoustics_toolbox_code(),
 }
 
-#: Resolution of the ``.1f`` depth column every ``.env`` here writes.
-_DECK_DEPTH_QUANTUM = 0.1
+#: Decimals in every depth column these decks write, and the resolution that
+#: implies. The Acoustics-Toolbox manual states the format requirement outright —
+#: *"All user input in all modules is read using list-directed I/O. Thus data can
+#: be typed in free-format"* (``doc/index.htm``) — and the readers bear that out:
+#: ``misc/ReadEnvironmentMod.f90:88`` and ``misc/sspMod.f90:334`` are both
+#: ``READ( ENVFile, * )``. So no column width is imposed on uacpy; what the decks
+#: DO require is that a depth uacpy compares in Python is the depth the Fortran
+#: parses, which means one format for every depth written. Six decimals sits two
+#: orders below the tightest tolerance any reader applies
+#: (``sspMod.f90:353``'s ``100 * EPSILON( 1.0e0 )`` = 1.19e-05 m).
+_DECK_DEPTH_DECIMALS = 6
+_DECK_DEPTH_FMT = f'.{_DECK_DEPTH_DECIMALS}f'
+_DECK_DEPTH_RESOLUTION_M = 10.0 ** -_DECK_DEPTH_DECIMALS
 
-# A sediment layer thinner than one depth quantum collapses to zero thickness
-# (top depth == bottom depth) — a degenerate, over-meshed medium that Kraken /
-# Scooter / Bounce reject. Drop such sub-resolution layers when writing; the
-# medium below becomes the boundary.
-_MIN_LAYER_THICKNESS_M = _DECK_DEPTH_QUANTUM
+#: Thickness of the transparent pad media that equalise ``NMedia`` across the
+#: profiles of a range-dependent deck. This is uacpy's own construct, not
+#: anything AT prescribes: the pad repeats the half-space it sits in, so it is
+#: acoustically inert, and it only has to be thick enough to mesh
+#: (``misc/sspMod.f90:352`` wants >= 2 SSP points in a medium).
+_PAD_MEDIUM_THICKNESS_M = 0.1
+
+#: Resolution in metres of every range axis these decks write, which print km at
+#: six decimals — so two ranges closer than this collapse to one token. Callers
+#: that build a range axis for a deck must separate their samples by more than
+#: this, and ``models/_segmentation.py`` uses it when it builds one itself.
+DECK_RANGE_QUANTUM_M = 1.0e-3
+
 
 # Water density in the AT g/cm^3 convention the .env format wants; AT's own
 # default is 1.0.
@@ -98,56 +117,50 @@ _MAX_BIO_LAYERS = 200
 
 
 def deck_depth(depth_m: float) -> float:
-    """Quantise a depth onto the deck's ``.1f`` grid, rounding *up*.
+    """A depth as the deck writes it — the value the Fortran will parse back.
 
-    The single quantiser for every Acoustics-Toolbox deck uacpy writes:
-    each interface here — the water-column mesh bottom, each sediment
-    interface, the half-space top — plus Bellhop's SSP header depth
-    (``bellhop_writer``). One function keeps a fractional ``env.depth`` from
-    putting the AT models and Bellhop on water columns 0.1 m apart.
+    The single point of truth for every Acoustics-Toolbox depth uacpy writes:
+    the water-column mesh bottom, each sediment interface, the half-space top,
+    and Bellhop's SSP header depth (``bellhop_writer``). Routing them all through
+    one function is what keeps a fractional ``env.depth`` from putting two models
+    on different water columns.
 
-    Quantising makes the deck internally exact: ``EvaluateSSP`` accepts a
-    medium only when its deepest SSP sample equals the medium depth on the
-    mesh line (``misc/ReadEnvironmentMod.f90:88`` / ``misc/sspMod.f90``).
+    It round-trips through :data:`_DECK_DEPTH_FMT` rather than snapping to a grid.
+    The three invariants the decks actually impose are all satisfied by writing
+    the *same* number everywhere, not by coarsening it:
 
-    Rounding up rather than to nearest keeps the modelled water column at or
-    below the physical ``env.depth``, so a source or receiver sitting exactly
-    on the seafloor stays inside the mesh instead of being silently moved up
-    by ``ReadSzRz`` (``SourceReceiverPositions.f90:126-139``), and Bellhop's
-    mesh stays at or below every ``.bty`` point — ``bdryMod.f90:211`` aborts
-    on any bathymetry beneath it.
+    * ``misc/sspMod.f90:353`` ends a medium when its SSP sample matches the mesh
+      line's ``Depth`` to within ``100 * EPSILON( 1.0e0 )`` = 1.19e-05 m. Writing
+      one value in both places makes that difference exactly zero.
+    * ``misc/SourceReceiverPositions.f90:126-139`` moves a source or receiver
+      **strictly** below ``zMax`` up onto it. A receiver at exactly ``env.depth``
+      is not below a mesh bottom written from the same ``env.depth``.
+    * ``Bellhop/bdryMod.f90:211`` aborts when a ``.bty`` point is **strictly**
+      deeper than the SSP's last depth. The ``.bty`` is written at the same
+      resolution (``io/bathy_io.py``), so a seafloor point equal to ``env.depth``
+      is safe.
 
-    ``round(..., 6)`` absorbs the binary-float residue of the division, so a
-    depth already on the grid (150.0 → 1499.9999999999998 quanta) is not
-    pushed up a whole quantum.
+    Six decimals is two orders finer than the tightest of those tolerances, so
+    the quantisation that used to round every interface up onto a 0.1 m grid —
+    and with it an 11 dB water-depth error for any bathymetry not already on a
+    decimetre — is not needed to satisfy any of them.
     """
-    quanta = np.ceil(round(float(depth_m) / _DECK_DEPTH_QUANTUM, 6))
-    return float(f"{quanta * _DECK_DEPTH_QUANTUM:.1f}")
+    return float(f"{float(depth_m):{_DECK_DEPTH_FMT}}")
 
 
 def writable_layers(bottom):
-    """Sediment layers (of a range-independent ``Bottom`` or a
-    ``SeabedColumn``) thick enough to be a distinct AT medium (≥ the ``.1f``
-    depth resolution); sub-resolution layers are dropped as degenerate (they
-    would collapse to a zero-thickness medium)."""
+    """Sediment layers of a range-independent ``Bottom`` or a ``SeabedColumn``.
+
+    Every layer is written at its own thickness. Dropping a sub-decimetre layer
+    cost 0.212 in |R| — 4.7 dB per bottom bounce — against an exact plane-wave
+    impedance recursion on a 0.08 m layer at 5 kHz, and nothing in the readers
+    asks for it: ``misc/ReadEnvironmentMod.f90:88`` and ``misc/sspMod.f90:334``
+    are list-directed, as the manual states for all AT input
+    (``doc/index.htm``). ``SedimentLayer`` refuses a non-positive thickness at
+    construction, so there is no degenerate case left to guard here either.
+    """
     col = bottom.columns[0] if hasattr(bottom, 'columns') else bottom
-    keep, drop = [], []
-    for lyr in col.layers:
-        (keep if lyr.thickness >= _MIN_LAYER_THICKNESS_M else drop).append(lyr)
-    if drop:
-        named = ", ".join(
-            f"{getattr(lyr, 'name', None) or 'layer'} ({lyr.thickness:g} m, "
-            f"{lyr.sound_speed:g} m/s)" for lyr in drop)
-        warnings.warn(
-            f"{len(drop)} sediment layer(s) thinner than "
-            f"{_MIN_LAYER_THICKNESS_M:g} m are not written to the .env and "
-            f"take no part in the run: {named}. The .env depth column carries "
-            f"one decimal, so such a layer would collapse to a zero-thickness "
-            f"medium. The result is the one for the surrounding media alone — "
-            f"thicken the layer, or fold its properties into its neighbour.",
-            UserWarning, stacklevel=3,
-        )
-    return keep
+    return list(col.layers)
 
 
 def at_mesh_floor(media, frequency: float) -> int:
@@ -294,7 +307,7 @@ def plan_multi_profile_media(segments) -> Tuple[int, float, List[List[Tuple]]]:
         hs_as = getattr(hs, 'shear_attenuation', 0.0) or 0.0
         for _ in range(n_media - 1 - len(media)):
             top = current
-            current = deck_depth(current + _MIN_LAYER_THICKNESS_M)
+            current = deck_depth(current + _PAD_MEDIUM_THICKNESS_M)
             # A pad is a transparent slice of the half-space, so its top is
             # not a real interface and must stay smooth.
             media.append((top, current, hs.sound_speed, hs_cs, hs.density,
@@ -799,7 +812,7 @@ def write_ssp_section(
     # follows (write_layer_sections) and sigma(NMedia+1) on the bottom half-space
     # line when none does. Take each from its own carrier so none is mislabelled.
     surface_roughness = float(getattr(env.surface, 'roughness', 0.0) or 0.0)
-    f.write(f"{n_mesh}  {surface_roughness:.6f}  {bottom_depth_rounded}\n")
+    f.write(f"{n_mesh}  {surface_roughness:.6f}  {bottom_depth_rounded:{_DECK_DEPTH_FMT}}\n")
 
     baseline = (
         env.absorption.value_db_per_wavelength
@@ -886,7 +899,7 @@ def write_layer_sections(
 
     # The quantised interface is exact at one decimal by construction; an
     # unquantised one needs the full width the list-directed read accepts.
-    zfmt = '.1f' if quantise_depths else '.6f'
+    zfmt = _DECK_DEPTH_FMT
 
     layered = env.bottom
     current_depth = interface(seafloor_depth)
@@ -1165,11 +1178,11 @@ def write_multi_profile_env(
 
             # --- Sub-bottom media (2..max_n_media), from the shared plan ---
             for top, bot, cp, cs, rho_v, ap, as_, sigma in all_extra_media:
-                f.write(f"{n_mesh}  {sigma:g}  {bot:.1f}\n")
-                f.write(f"  {top:.1f} {cp:.6f} "
+                f.write(f"{n_mesh}  {sigma:g}  {bot:{_DECK_DEPTH_FMT}}\n")
+                f.write(f"  {top:{_DECK_DEPTH_FMT}} {cp:.6f} "
                         f"{cs:.1f} {rho_v:.2f} "
                         f"{ap:.6f} {as_:.6f} /\n")
-                f.write(f"  {bot:.1f} {cp:.6f} "
+                f.write(f"  {bot:{_DECK_DEPTH_FMT}} {cp:.6f} "
                         f"{cs:.1f} {rho_v:.2f} "
                         f"{ap:.6f} {as_:.6f} /\n")
 
@@ -1312,6 +1325,28 @@ def write_fieldflp(
             )
         if abs(profile_ranges_km[0]) > 1e-9:
             raise ConfigurationError("First profile range must be 0.0 km")
+        # Check the values as WRITTEN. field.exe never tests rProf for
+        # monotonicity — `grep monotonic KrakenField/field.f90` is empty, unlike
+        # ReadRcvrRanges (misc/SourceReceiverPositions.f90:163-165) — so a
+        # collapsed pair reaches EvaluateADMod.f90:75, whose
+        # `(rProf(iProf+1) - rProf(iProf))` denominator is unguarded. The 0/0
+        # then poisons a whole segment's interpolated wavenumbers and mode
+        # functions, and nothing in AT reports it: the caller gets a partly-NaN
+        # field with no error and no warning.
+        tokens = [f"{float(r):6f}" for r in profile_ranges_km]
+        written = np.array([float(t) for t in tokens])
+        if written.size > 1 and not np.all(np.diff(written) > 0):
+            bad = int(np.argmin(np.diff(written)))
+            raise ConfigurationError(
+                f"profile ranges {profile_ranges_m[bad]:g} m and "
+                f"{profile_ranges_m[bad + 1]:g} m both write as "
+                f"{tokens[bad]} km at the deck's 1 mm resolution, leaving the "
+                f"profile axis non-increasing.",
+                remediation=(
+                    f"Separate the profile ranges by more than "
+                    f"{DECK_RANGE_QUANTUM_M * 1e3:g} mm."
+                ),
+            )
 
     with open(filepath, "w") as f:
         f.write(f"'{title}' ! Title \n")

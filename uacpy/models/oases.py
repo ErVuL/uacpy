@@ -150,7 +150,15 @@ def _stack_oasr_data(data: dict):
     else:
         R = np.column_stack([np.asarray(m, dtype=float) for m in R_lists])
         phi_deg = np.column_stack([np.asarray(p, dtype=float) for p in phi_lists])
-    return theta, R, np.deg2rad(phi_deg), freqs
+    # OASR writes the phase as a principal value (`oases/src/oasjun21.f:102`
+    # takes `atan2z`), but every consumer interpolates it linearly between
+    # bracketing angles, which `misc/RefCoef.f90:119` states requires an
+    # unwrapped phase: "Assumes phi has been unwrapped so that it varies
+    # smoothly." Interpolating across a +-360 deg step sweeps the phase the long
+    # way round and returns a reflection coefficient of the wrong sign. Unwrap
+    # along the angle axis, which is a no-op for an already-smooth table.
+    phi = np.unwrap(np.deg2rad(phi_deg), axis=0)
+    return theta, R, phi, freqs
 
 
 def _oasn_freq_axis(data: dict) -> np.ndarray:

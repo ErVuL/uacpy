@@ -9,7 +9,10 @@ import numpy as np
 from typing import List, Tuple, Optional, Union
 from dataclasses import dataclass
 
-from uacpy.core.constants import DEFAULT_SOUND_SPEED
+from uacpy.core.constants import (DEFAULT_SOUND_SPEED,
+                                  AT_LAST_SSP_POINT_EPS_M,
+                                  DECK_DEPTH_RESOLUTION_M,
+                                  DECK_RANGE_RESOLUTION_M)
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core._carrier_validate import (
     _require_positive, _require_non_negative, _require_strictly_increasing,
@@ -20,6 +23,13 @@ from uacpy.core._carrier_validate import (
 _VALID_SSP_SHAPES = (
     'measured', 'isovelocity', 'munk', 'analytic', 'n2linear',
 )
+
+
+# A caller passing ``env.depth`` that has round-tripped through I/O can be a few
+# ulps off ``depths[-1]``; below this the two are the same request and the profile
+# is returned untouched. Anything larger is *moved* onto the target rather than
+# appended beside it — see ``extend_to`` for why appending breaks the reader.
+_ROUND_TRIP_NOISE_M = 1.0e-9
 
 
 # eq=False: a dataclass __eq__ over ndarray fields raises; compare by identity.
@@ -81,7 +91,8 @@ class SoundSpeedProfile:
                 "SoundSpeedProfile: needs at least one depth/sound-speed sample"
             )
         _require_positive(self.data, "SoundSpeedProfile sound speeds", hint="m/s")
-        _require_strictly_increasing(self.depths, "SoundSpeedProfile.depths")
+        _require_strictly_increasing(self.depths, "SoundSpeedProfile.depths",
+                                     min_step=DECK_DEPTH_RESOLUTION_M)
         if self.ranges is not None:
             self.ranges = np.array(self.ranges, dtype=float).reshape(-1)
             if self.ranges.size != self.data.shape[1]:
@@ -93,7 +104,7 @@ class SoundSpeedProfile:
                 self.ranges, "SoundSpeedProfile.ranges", hint="metres")
             _require_strictly_increasing(
                 self.ranges, "SoundSpeedProfile.ranges",
-            )
+                min_step=DECK_RANGE_RESOLUTION_M)
         elif self.data.shape[1] != 1:
             raise ConfigurationError(
                 f"SoundSpeedProfile: ranges=None requires single-column data; "
@@ -335,12 +346,23 @@ class SoundSpeedProfile:
           ``depth_max`` so writers that require ``ssp[-1] == env.depth``
           (Bellhop / Kraken) round-trip without manual alignment.
         """
-        # Tolerant float compare — caller may pass in e.g. ``env.depth``
-        # that's been round-tripped through I/O and differs by a few
-        # ulps from ``self.depths[-1]``.
+        # ``misc/sspMod.f90:353`` ends a medium's SSP block at the first sample
+        # within AT_LAST_SSP_POINT_EPS_M of the declared medium depth, so a second
+        # sample inside that window is never read as an SSP row — the reader takes
+        # it as the bottom-option record and the boundary condition comes out of a
+        # sound speed. Anything the reader would already call the last point must
+        # therefore *move* the existing sample, never add one beside it. The band
+        # this closes is 1e-7 m to 1.19e-5 m, which about 1 in 8400 arbitrary
+        # depths lands in; a fetched or interpolated bathymetry reaches it
+        # naturally, and the abort the user saw named the boundary condition.
         last = float(self.depths[-1])
-        if np.isclose(depth_max, last, rtol=1e-9, atol=1e-9):
-            return self
+        gap = abs(float(depth_max) - last)
+        if gap <= _ROUND_TRIP_NOISE_M:
+            return self          # a float round-trip artefact, not a request
+        if gap < AT_LAST_SSP_POINT_EPS_M:
+            snapped = self.copy()
+            snapped.depths[-1] = float(depth_max)
+            return snapped
         if depth_max > last:
             new_depths = np.append(self.depths, depth_max)
             new_data = np.vstack([self.data, self.data[-1:, :]])

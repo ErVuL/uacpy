@@ -176,13 +176,50 @@ def _rowcol(model, hemi, lat, lon):
     return row, col
 
 
+# How far the search for an observed cell may wander, in grid cells (25 km each).
+# NSIDC withholds a concentration at its coastline class (code 2530) because of
+# land spillover in the passive-microwave footprint, not because the cell is dry,
+# and `_to_fraction` cannot keep that class apart from true land (2540) once the
+# climatology is averaged — both are NaN. So an unobserved cell with an observed
+# ocean neighbour is treated as ocean and takes that neighbour's value, while a
+# cell with no observed neighbour stays unobserved and raises. Same construct and
+# the same reasoning as `sound_speed._WET_CELL_SEARCH_RINGS`; kept small so an
+# inland request still fails rather than silently sampling a distant sea.
+_OBSERVED_CELL_SEARCH_RINGS = 2
+
+
+def _observed_at(grid, row, col):
+    """Concentration at ``(row, col)``, else the nearest observed neighbour.
+
+    Returns ``NaN`` when no cell within :data:`_OBSERVED_CELL_SEARCH_RINGS`
+    carries a value, which is the signature of genuine land.
+    """
+    value = grid[row, col]
+    if np.isfinite(value):
+        return float(value)
+    height, width = grid.shape
+    for radius in range(1, _OBSERVED_CELL_SEARCH_RINGS + 1):
+        ring = [(dr, dc)
+                for dr in range(-radius, radius + 1)
+                for dc in range(-radius, radius + 1)
+                if max(abs(dr), abs(dc)) == radius]
+        ring.sort(key=lambda o: o[0] ** 2 + o[1] ** 2)   # nearest first
+        for dr, dc in ring:
+            r, c = row + dr, col + dc
+            if 0 <= r < height and 0 <= c < width:
+                candidate = grid[r, c]
+                if np.isfinite(candidate):
+                    return float(candidate)
+    return float('nan')
+
+
 def _concentration(lat, lon, month):
     m = _model()
     hemi = 'N' if lat >= 0 else 'S'
     rc = _rowcol(m, hemi, lat, lon)
     if rc is None:
         return 0.0                              # outside the polar grid → ice-free
-    return m[hemi][month - 1][rc]
+    return _observed_at(m[hemi][month - 1], *rc)
 
 
 def fetch_sea_ice_concentration(point: Coordinate, *, date=None,
@@ -190,7 +227,10 @@ def fetch_sea_ice_concentration(point: Coordinate, *, date=None,
     """Climatological sea-ice concentration (0-1) at ``(lat, lon)`` for a month.
 
     Pass ``date`` (its month is used) or ``month`` (1-12). Points outside the
-    polar grids return 0.0 (ice-free); land cells raise ``DataFetchError``.
+    polar grids return 0.0 (ice-free). A cell NSIDC leaves unobserved because of
+    coastal land spillover takes its nearest observed ocean neighbour's value; a
+    point with no observed cell within :data:`_OBSERVED_CELL_SEARCH_RINGS` is
+    inland and raises ``DataFetchError``.
     """
     lat, lon = as_coordinate(point)
     if date is not None and month is not None:
@@ -204,8 +244,9 @@ def fetch_sea_ice_concentration(point: Coordinate, *, date=None,
     conc = _concentration(lat, lon, int(month))
     if not np.isfinite(conc):
         raise DataFetchError(
-            f"NSIDC sea ice has no ocean value at {lat:.3f}, {lon:.3f} "
-            "(land / coast).",
+            f"NSIDC sea ice has no ocean value at {lat:.3f}, {lon:.3f}, nor "
+            f"within {_OBSERVED_CELL_SEARCH_RINGS} grid cells of it — the point "
+            f"is inland.",
             remediation="Pick an offshore point.",
         )
     return float(conc)

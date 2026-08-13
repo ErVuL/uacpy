@@ -9,8 +9,10 @@ from typing import List, Tuple, Optional, Dict
 from dataclasses import dataclass
 
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.core.constants import DECK_RANGE_RESOLUTION_M
 from uacpy.core._carrier_validate import (
     _validate_acoustic_type, _require_strictly_increasing,
+    _require_attenuation_in_range,
     _require_positive, _require_non_negative, _coerce_data_sources,
     _dedupe_provenance,
 )
@@ -60,6 +62,10 @@ class SedimentLayer:
         for attr in ('attenuation', 'shear_speed', 'shear_attenuation',
                      'roughness'):
             _require_non_negative(getattr(self, attr), f"SedimentLayer {attr}")
+        _require_attenuation_in_range(
+            self.attenuation, "SedimentLayer attenuation")
+        _require_attenuation_in_range(
+            self.shear_attenuation, "SedimentLayer shear_attenuation")
 
     def __repr__(self) -> str:
         tag = f"{self.name!r}, " if self.name else ""
@@ -212,8 +218,6 @@ class BoundaryProperties:
                 setattr(self, name, float(getattr(self, name)))
 
         _require_positive(self.density, "BoundaryProperties density", hint="g/cm^3")
-        # sound_speed is only required non-negative here, unlike
-        # SedimentLayer.sound_speed which must be strictly positive.
         # roughness is an RMS magnitude and the OASES writers put it in a
         # column whose sign is an encoding: RG < 0 makes INENVI re-read the
         # record as nine tokens (oases/src/oaseun31.f:72-93), so a negative
@@ -221,6 +225,10 @@ class BoundaryProperties:
         for name in ('sound_speed', 'attenuation', 'shear_speed',
                      'shear_attenuation', 'roughness'):
             _require_non_negative(getattr(self, name), f"BoundaryProperties {name}")
+        _require_attenuation_in_range(
+            self.attenuation, "BoundaryProperties attenuation")
+        _require_attenuation_in_range(
+            self.shear_attenuation, "BoundaryProperties shear_attenuation")
 
         # Explicitly passed acoustic params drive both the auto-inference
         # (when acoustic_type is None) and the explicit-conflict guard below.
@@ -259,6 +267,18 @@ class BoundaryProperties:
         _validate_acoustic_type(self.acoustic_type, "BoundaryProperties")
         from uacpy.core.constants import BoundaryType
         self.acoustic_type = BoundaryType.from_string(self.acoustic_type).value
+
+        # ``misc/ReadEnvironmentMod.f90:292`` aborts a half-space whose
+        # compressional speed *or* density vanishes. The density half of that
+        # guard is the _require_positive above; this is the other half. Checked
+        # after the type is resolved because vacuum/rigid/file boundaries carry
+        # placeholder speeds they never use, and reachable only here: an
+        # explicitly-passed sound_speed forces 'half-space' or trips the
+        # conflict guard below, and the unset default is non-zero.
+        if self.acoustic_type == 'half-space':
+            _require_positive(self.sound_speed,
+                              "BoundaryProperties sound_speed on a half-space",
+                              hint="m/s")
 
         # Explicit-conflict guard: vacuum/rigid ignore half-space params,
         # so explicitly setting one alongside non-default cp/ρ/α/cs is a
@@ -764,7 +784,8 @@ class Bottom:
         else:
             self.ranges = np.array(self.ranges, dtype=float).ravel()
             _require_non_negative(self.ranges, "Bottom.ranges", hint="metres")
-            _require_strictly_increasing(self.ranges, "Bottom.ranges")
+            _require_strictly_increasing(
+                self.ranges, "Bottom.ranges", min_step=DECK_RANGE_RESOLUTION_M)
             if len(self.ranges) != len(self.columns):
                 raise ConfigurationError(
                     f"Bottom: ranges length ({len(self.ranges)}) must match "

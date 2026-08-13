@@ -79,14 +79,19 @@ def _layered_halfspace_style(hs, cmap, cs_min, cs_range) -> dict:
     return _hatched_fill(cmap(0.25 + 0.6 * norm))
 
 
-def _draw_layered_bottom(ax_bathy, column, r_km, z_max_layer,
+def _draw_layered_bottom(ax_bathy, column, r_km, seafloor, z_max_layer,
                         _layer_cmap_and_norm):
     # Per-layer fills (earthy BOTTOM_CMAP by sound speed) + dashed inter-layer
     # edges + hatched half-space + side legend card. Same visual
     # template as the range-dependent layered branch below.
     cmap, cs_min, cs_max, _ = _layer_cmap_and_norm()
     cs_range = max(1e-9, cs_max - cs_min)
-    z_top = z_max_layer
+    # Every layer rides the seafloor, as in the range-dependent layered branch.
+    # A scalar top anchored at the deepest bathymetry point would detach the
+    # stack from a sloping seabed and leave the water colormap painted in the
+    # gap below the drawn seafloor line.
+    z_top = np.broadcast_to(np.asarray(seafloor, dtype=float),
+                            np.shape(r_km)).astype(float)
     for layer in column.layers:
         z_bot = z_top + layer.thickness
         norm_cs = (layer.sound_speed - cs_min) / cs_range
@@ -96,9 +101,9 @@ def _draw_layered_bottom(ax_bathy, column, r_km, z_max_layer,
             edgecolor='black', linewidth=0.4,
             zorder=ZORDER_SEDIMENT + 1,
         )
-        ax_bathy.axhline(z_bot, color='black', linewidth=0.8,
-                         linestyle='--', alpha=0.5,
-                         zorder=ZORDER_SEDIMENT + 2)
+        ax_bathy.plot(r_km, z_bot, color='black', linewidth=0.8,
+                      linestyle='--', alpha=0.5,
+                      zorder=ZORDER_SEDIMENT + 2)
         z_top = z_bot
     hs = column.halfspace
     hs_display = z_top + max(10.0, column.total_thickness() * 0.3)
@@ -107,8 +112,7 @@ def _draw_layered_bottom(ax_bathy, column, r_km, z_max_layer,
         **_layered_halfspace_style(hs, cmap, cs_min, cs_range),
     )
 
-    z_max_layer = hs_display
-    return z_max_layer
+    return float(np.max(hs_display))
 
 
 def _draw_rdl_bottom(ax_bathy, bottom, r_km, seafloor, z_max_layer,
@@ -117,10 +121,17 @@ def _draw_rdl_bottom(ax_bathy, bottom, r_km, seafloor, z_max_layer,
     # vertical boundaries between columns, P# labels above each
     # column, hatched half-space at the column bottom.
     prof_ranges_km = m_to_km(np.asarray(bottom.ranges, dtype=float))
-    boundaries = [prof_ranges_km[0]]
+    # Voronoi cell edges: midpoints between consecutive nodes, with the outer
+    # ends clamped to the bathymetry extent — as the range-dependent half-space
+    # sibling does. ``Bottom.at()`` holds the first/last column outside the
+    # profile nodes, so anchoring the outer edges on those nodes instead would
+    # leave the section beyond them bare while the model still uses that column.
+    r_lo_panel = float(np.min(r_km)) if np.size(r_km) else prof_ranges_km[0]
+    r_hi_panel = float(np.max(r_km)) if np.size(r_km) else prof_ranges_km[-1]
+    boundaries = [min(r_lo_panel, float(prof_ranges_km[0]))]
     for i in range(len(prof_ranges_km) - 1):
         boundaries.append(0.5 * (prof_ranges_km[i] + prof_ranges_km[i + 1]))
-    boundaries.append(prof_ranges_km[-1])
+    boundaries.append(max(r_hi_panel, float(prof_ranges_km[-1])))
 
     cmap, cs_min, cs_max, _ = _layer_cmap_and_norm()
     cs_range = max(1e-9, cs_max - cs_min)
@@ -434,7 +445,8 @@ def _plot_environment(
             ax_bathy, bottom, r_km, seafloor, z_max_layer)
     elif bottom.is_layered:
         z_max_layer = _draw_layered_bottom(
-            ax_bathy, bottom.columns[0], r_km, z_max_layer, _layer_cmap_and_norm)
+            ax_bathy, bottom.columns[0], r_km, seafloor, z_max_layer,
+            _layer_cmap_and_norm)
     else:  # single half-space
         z_max_layer = _draw_halfspace_bottom(
             ax_bathy, bottom.columns[0].halfspace, r_km, seafloor, z_max_layer)

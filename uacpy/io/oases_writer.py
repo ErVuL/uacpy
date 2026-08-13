@@ -25,6 +25,7 @@ from uacpy.core.environment import BoundaryProperties, Environment
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.io.utils import equally_spaced
 from uacpy.io.units import m_to_km
 from uacpy.io.oalib_writer import writable_layers
 
@@ -369,12 +370,12 @@ def _emit_oases_freq_line(
     if doppler:
         vrec_val = vrec if vrec is not None else 0.0
         f.write(
-            f"{freq_min:.1f} {freq_max:.1f} {nfreq} "
+            f"{freq_min:.9f} {freq_max:.9f} {nfreq} "
             f"{integration_offset} {vrec_val}\n"
         )
     else:
         f.write(
-            f"{freq_min:.1f} {freq_max:.1f} {nfreq} {integration_offset}\n"
+            f"{freq_min:.9f} {freq_max:.9f} {nfreq} {integration_offset}\n"
         )
 
 
@@ -847,10 +848,14 @@ def _receiver_block_lines(
     if n <= 1:
         return [f"{z_min:.2f} {z_max:.2f} {n}{trailing}"]
 
-    diffs = np.diff(depths)
-    # A grid is considered equidistant when all spacings match within 1 cm.
-    uniform = np.allclose(diffs, diffs[0], atol=1e-2)
-    if uniform:
+    # The compact (z_min, z_max, n) form makes OASES build its own equidistant
+    # grid, discarding the requested depths, so it may only be used for an axis
+    # that really is equidistant. Use the Acoustics-Toolbox's own test — a
+    # verbatim port of ``Matlab/ReadWrite/equally_spaced.m``, which the .flp
+    # writer uses for the same decision — rather than a local tolerance:
+    # it measures against the ideal uniform grid, so a deviation cannot
+    # accumulate with the receiver count the way a per-interval comparison does.
+    if equally_spaced(depths):
         return [f"{z_min:.2f} {z_max:.2f} {n}{trailing}"]
 
     # Non-uniform: emit NR = -n, then individual depths on the next line.
@@ -1736,7 +1741,7 @@ def write_oasp_input(
         # offset itself and the second token is discarded by the
         # list-directed read (:131-132). Option 'd' would demand a 5-token
         # Doppler form (:127) and is rejected above.
-        f.write(f"{center_freq:.1f} {integration_offset}\n")
+        f.write(f"{center_freq:.9f} {integration_offset}\n")
 
         # Block IV: Environment — NL then NL layer records, read by INENVI
         # from unoasp22.f:144. NL = upper halfspace + water + sediments +
@@ -1802,7 +1807,7 @@ def write_oasp_input(
         # spacing rounds to zero (every receiver onto one range) and metre-scale
         # spacing accumulates drift over the axis. %.9f is sub-micron.
         # unoasp22.f:176 is a list-directed read, so the extra digits are free.
-        f.write(f"{n_time} {freq_min:.1f} {freq_max:.1f} {dt:.6f} "
+        f.write(f"{n_time} {freq_min:.9f} {freq_max:.9f} {dt:.6f} "
                 f"{r1_km:.9f} {dr_km:.9f} {nr}\n")
 
 
@@ -2100,7 +2105,7 @@ def write_oasr_input(
 
         # Block IV: FREQ1 FREQ2 NFREQ IOUTF (unoasr21.f:116). IOUTF is the
         # manual's NFOU, the output/plot increment along frequency.
-        f.write(f"{freq_min:.1f} {freq_max:.1f} {n_frequencies} {freq_out_inc}\n")
+        f.write(f"{freq_min:.9f} {freq_max:.9f} {n_frequencies} {freq_out_inc}\n")
 
         # Block V: ANGLE1 ANGLE2 NANG IOUTA (unoasr21.f:128). OASR builds the
         # grid itself as ANGLE1 + (i-1)*DLANGLE (:173-177, evaluated at :284),
@@ -2127,7 +2132,7 @@ def write_oasr_input(
         # FREQ1 so a single-frequency deck does not ask for a zero increment.
         if angle_out_inc > 0:
             f_range = max(freq_max - freq_min, freq_min * 0.1)
-            f.write(f"{freq_min:.1f} {freq_max:.1f} 12 {f_range/10:.1f}\n")
+            f.write(f"{freq_min:.9f} {freq_max:.9f} 12 {f_range/10:.9f}\n")
             f.write("0 30 12 5\n")
 
         # Block VIII: Loss contours in angle and frequency — three rows read
@@ -2143,7 +2148,7 @@ def write_oasr_input(
             # (oasr.tex:101-102), not a whole-axis length.
             f.write(f"{angle_min:.1f} {angle_max:.1f} 12 {(angle_max-angle_min)/10:.1f}\n")
             octave_range = np.log2(freq_max / freq_min) if freq_max > freq_min else 1.0
-            f.write(f"{freq_min:.1f} {freq_max:.1f} {octave_range*2:.1f} 5\n")
+            f.write(f"{freq_min:.9f} {freq_max:.9f} {octave_range*2:.9f} 5\n")
             f.write("0 20 2\n")  # Contour levels 0-20 dB in 2 dB increments
 
         # Block IX: velocity-profile plot axes — two rows read under IPROF

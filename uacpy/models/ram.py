@@ -95,6 +95,15 @@ _COLLINS_ARRAY_LIMITS = {
 DEFAULT_RAM_ACCURACY = 1e-3
 
 LAMBDA_PER_DZ_FLOOR = 16.0
+# ``zread`` pins each sediment-block point to the node ``i = 1.5 + z/dz`` and
+# remembers only the *immediately* preceding index, so its collision push-down
+# (``ramsurf1.5.f:208``, identical in ramgeo1.5.f:229 and rams0.5.f:232) protects
+# one duplicate depth and no more. Two consecutive distinct depths landing in the
+# same cell make the later point overwrite the earlier, and the fill loop at
+# :218-219 then ramps linearly across the whole gap it left. A gap of at least
+# ``BLOCK_GAP_PER_DZ * dz`` keeps the nodes distinct, since
+# ``floor(x + g/dz) - floor(x) >= floor(g/dz)``.
+BLOCK_GAP_PER_DZ = 2.0
 RAMS_DR_LAMBDA_CAP = 5.0
 
 # Ceiling on the number of range records a Collins binary writes. The stride
@@ -2247,7 +2256,130 @@ class RAM(PropagationModel):
 
         if not dz_pinned:
             dz = self._fit_dz_to_mz(kind, dz, zmax)
+
+        # Resolving the sediment block outranks every coarsening above,
+        # including the mz budget: a block zread cannot represent is not a
+        # coarser answer, it is a different environment. Only the three Collins
+        # backends pin block points to grid nodes — mpiramS carries no such
+        # arithmetic in any of its sources and interpolates the profile onto the
+        # grid with ``interpolators.f90``'s ``interp1``, so it is exempt.
+        if (kind in _COLLINS_ARRAY_LIMITS
+                and self._block_loses_a_point(env, dz, zmax, kind, fc)):
+            block_cap = self._block_dz_cap(env, zmax, kind, fc)
+            if dz_pinned:
+                raise ConfigurationError(
+                    f"RAM(dz={dz:.4f}) cannot represent this sediment block: "
+                    f"zread ({kind}) pins block points to nodes 1.5 + z/dz and "
+                    f"two of them collide at this dz, so the deeper value "
+                    f"overwrites the shallower one and the fill loop replaces "
+                    f"the layer with a linear ramp across the whole sub-bottom. "
+                    f"The thinnest step is "
+                    f"{block_cap * BLOCK_GAP_PER_DZ:.4f} m.",
+                    remediation=f"Use dz <= {block_cap:.4f} m, leave dz=None to "
+                                f"have it derived, or merge the step into its "
+                                f"neighbour if it is not physically meant to be "
+                                f"resolved.",
+                )
+            budget = self._collins_mz_budget(kind, zmax)
+            if budget is not None and budget[0](block_cap) > budget[1]:
+                raise ConfigurationError(
+                    f"RAM:{kind}: resolving this sediment block needs dz <= "
+                    f"{block_cap:.4f} m, i.e. {budget[0](block_cap)} depth "
+                    f"slots against the binary's mz={budget[1]} over a "
+                    f"zmax={zmax:.1f} m domain. A coarser grid would silently "
+                    f"replace the block with a linear ramp, so this cannot be "
+                    f"met by coarsening.",
+                    remediation="Lower zmax, use backend='mpiramS' (no fixed "
+                                "depth-array bound), or thicken/merge the "
+                                "thinnest sediment step.",
+                )
+            self._log(
+                f"RAM:{kind}: tightened dz from {dz:.4f} m to {block_cap:.4f} m "
+                f"so zread resolves the sediment block (thinnest step "
+                f"{block_cap * BLOCK_GAP_PER_DZ:.4f} m)."
+            )
+            dz = block_cap
         return dr, dz, zmax
+
+    def _sediment_blocks(self, env: 'Environment', kind: str, zmax: float,
+                         freq: float):
+        """Exactly the ``(depth, value)`` blocks the deck will carry.
+
+        Taken from :meth:`_collins_range_segments` rather than rebuilt, because
+        three of that method's behaviours change the node arithmetic and a
+        hand-rolled copy got all three wrong: the depths are written **relative
+        to the seafloor** for ramgeo/ramsurf (:2660) so an absolute-depth copy
+        runs the arithmetic in the wrong frame; a pure half-space column is
+        wrapped as one **synthetic layer** (:2657) so it has interior block
+        points after all; and :meth:`_ramp_absorbing_attenuation` **adds** points
+        to the attenuation block. One section per range break, each with its own
+        seafloor.
+        """
+        blocks = []
+        for segment in self._collins_range_segments(env, kind, zmax, freq):
+            for key in ('bottom_c', 'bottom_rho', 'bottom_attn',
+                        'bottom_cs', 'bottom_attns'):
+                block = segment.get(key)
+                if block:
+                    blocks.append([(float(z), float(v)) for z, v in block])
+        return blocks
+
+    def _block_loses_a_point(self, env: 'Environment', dz: float,
+                             zmax: float, kind: str, freq: float) -> bool:
+        """Whether ``zread`` would lose a sediment-block point at this ``dz``.
+
+        This runs the vendored node assignment (``ramsurf1.5.f:200-211``) rather
+        than a bound on it, because the natural sufficient bound
+        (``gap >= BLOCK_GAP_PER_DZ * dz``) is far from necessary and would reject
+        grids that are in fact clean: a 3 m step on ``dz = 2 m`` assigns nodes 1,
+        3 and 4, and the node it skips is filled between two *equal* values.
+
+        What is not clean is an **overwrite**. A 0.6 m layer over an 1800 m/s
+        basement on the auto grid ``dz = 1.887 m`` puts the half-space value on
+        node 1 — the seafloor — and the fill loop at :218-219 then ramps across
+        the whole sub-bottom: the layer was marched as a 692 m gradient
+        1500 → 1800 m/s, 22.6 dB from Scooter, on the default dispatch for any
+        layered fluid bottom.
+        """
+        if dz <= 0:
+            return False
+        for block in self._sediment_blocks(env, kind, zmax, freq):
+            assigned, previous = {}, None
+            for depth, value in block:
+                node = int(1.5 + depth / dz)
+                if previous is not None and node == previous:
+                    node += 1                       # :208 collision push-down
+                if node in assigned and assigned[node] != value:
+                    return True
+                assigned[node] = value
+                previous = node
+        return False
+
+    def _block_dz_cap(self, env: 'Environment', zmax: float, kind: str,
+                      freq: float) -> float:
+        """A ``dz`` that ``zread`` is *guaranteed* to represent — the smallest
+        positive block gap over :data:`BLOCK_GAP_PER_DZ`. Used only to pick a
+        replacement once :meth:`_block_loses_a_point` has said the current grid
+        fails, never to judge a grid: see that method for why the bound is
+        sufficient but not necessary. ``0.0`` when there is no block to resolve.
+        """
+        gaps = set()
+        for block in self._sediment_blocks(env, kind, zmax, freq):
+            depths = [z for z, _ in block]
+            gaps |= {b - a for a, b in zip(depths, depths[1:]) if b > a}
+        if not gaps:
+            return 0.0
+        # The smallest gap always clears the collision, but it is often far finer
+        # than needed: a gap whose two points carry the *same* value loses nothing
+        # when they collide, and the absorbing-attenuation ramp routinely places
+        # such a point within a decimetre of the sediment base. Take the coarsest
+        # gap-derived candidate the exact predicate accepts — for a 0.9 m layer
+        # that is 0.45 m rather than the 0.05 m the ramp's gap would have forced.
+        candidates = sorted((g / BLOCK_GAP_PER_DZ for g in gaps), reverse=True)
+        for candidate in candidates:
+            if not self._block_loses_a_point(env, candidate, zmax, kind, freq):
+                return candidate
+        return candidates[-1]
 
     def _fit_dz_to_mz(self, kind: str, dz: float, zmax: float) -> float:
         """Coarsen an auto-picked ``dz`` so the depth grid fits ``mz``.
@@ -2787,7 +2919,7 @@ class RAM(PropagationModel):
         Raises ``ConfigurationError`` if no candidate ``(dr, dz)`` pair
         meets the accuracy budget even after auto-loosening.
         """
-        from uacpy.models._pade_optimizer import grid_error, rams_dz_floor
+        from uacpy.models._pade_optimizer import grid_error, rams_dz_shear_cap
 
         c0_pe = self._resolve_c0(env)
 
@@ -2798,17 +2930,22 @@ class RAM(PropagationModel):
         c_min = min(bounds[0], c0_pe)
         c_max = max(bounds[1], c0_pe)
 
-        # Per-backend dz floor: λ_p/16 acoustic stability for Collins
-        # backends + cost cap for mpiramS; 0.55·λ_s shear-mode aliasing
-        # for rams. Override via ``dr=…``/``dz=…``.
+        # Per-backend dz floor: λ_p/16 for the Collins backends, a cost bound
+        # so the optimizer cannot demand an absurdly fine depth grid.
+        # Override via ``dr=…``/``dz=…``.
         if kind in ('mpiramS', 'rams', 'ramsurf', 'ramgeo'):
-            dz_floor_acoustic = c_min / (LAMBDA_PER_DZ_FLOOR * max(freq, 1.0))
+            dz_floor = c_min / (LAMBDA_PER_DZ_FLOOR * max(freq, 1.0))
             cs_min = self._min_shear_speed(env) if kind == 'rams' else 0.0
-            dz_floor_shear = rams_dz_floor(cs_min, freq, factor=0.55)
-            dz_floor = max(dz_floor_shear, dz_floor_acoustic)
         else:
             cs_min = 0.0
             dz_floor = 0.0
+        # The shear wavelength is the binding physical scale for the elastic
+        # march, and resolving it is a correctness requirement rather than a
+        # cost preference — so it caps dz, and it also bounds how far the cost
+        # floor above may coarsen it.
+        dz_shear_cap = rams_dz_shear_cap(cs_min, freq) if kind == 'rams' else 0.0
+        if dz_shear_cap > 0:
+            dz_floor = min(dz_floor, dz_shear_cap)
 
         eps0 = self._accuracy
         theta0 = self._resolve_theta_max(env)
@@ -2888,6 +3025,31 @@ class RAM(PropagationModel):
                 dz_opt = float(h / n_layers)
             else:
                 dz_opt = dz_floor
+
+        # Resolving the shear wavelength outranks every coarsening above: a
+        # rams0.5 march on a grid coarser than λ_s/14 does not merely lose
+        # accuracy, it diverges (measured 134 dB against OASES on Collins
+        # 1991's own example D at 0.55 λ_s, versus 0.83 dB at λ_s/14).
+        if dz_shear_cap > 0 and dz_opt > dz_shear_cap:
+            dz_pre_cap = dz_opt
+            dz_opt = dz_shear_cap
+            self._log(
+                f"rams: tightened dz from {dz_pre_cap:.3f} m to "
+                f"{dz_opt:.3f} m to resolve the shear wavelength "
+                f"(λ_s/14 = {dz_shear_cap:.3f} m, c_s = {cs_min:.0f} m/s)."
+            )
+            # This cap outranks the MAX_DEPTH_POINTS budget applied above, since
+            # a coarser grid diverges rather than merely costing accuracy. Say so
+            # when it bites, so a slow run has a stated cause.
+            if h > 0 and h / dz_opt > MAX_DEPTH_POINTS:
+                warnings.warn(
+                    f"RAM:{kind}: resolving the shear wavelength needs dz="
+                    f"{dz_opt:.4f} m, i.e. {h / dz_opt:.0f} depth points — past "
+                    f"the {MAX_DEPTH_POINTS}-point runtime budget. A coarser "
+                    f"grid makes the elastic march diverge, so accuracy wins "
+                    f"here; expect a slow run.",
+                    UserWarning, skip_file_prefixes=USER_FRAME_SKIP
+                )
 
         # The optimizer knows nothing about the adjustments above, so its
         # own ``predicted_error`` describes a grid that may never be

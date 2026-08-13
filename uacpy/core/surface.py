@@ -20,6 +20,7 @@ from typing import List, Optional
 from dataclasses import dataclass
 
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.core.constants import DECK_RANGE_RESOLUTION_M
 from uacpy.core._carrier_validate import (
     _require_non_negative, _require_strictly_increasing, _dedupe_provenance,
 )
@@ -66,7 +67,8 @@ class Surface:
                     f"({len(self.properties)}) must have the same length.")
             _require_non_negative(self.ranges, "Surface.ranges", hint="metres")
             if self.ranges.size > 1:
-                _require_strictly_increasing(self.ranges, "Surface.ranges")
+                _require_strictly_increasing(
+                    self.ranges, "Surface.ranges", min_step=DECK_RANGE_RESOLUTION_M)
         elif len(self.properties) != 1:
             raise ConfigurationError(
                 "Surface: multiple boundaries require a matching ranges= axis.")

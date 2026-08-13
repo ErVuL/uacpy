@@ -10,6 +10,7 @@ from typing import Union, List, Optional
 from dataclasses import dataclass
 
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.core.constants import DECK_DEPTH_RESOLUTION_M, DECK_RANGE_RESOLUTION_M
 from uacpy.core._carrier_validate import (
     _require_non_negative, _require_strictly_increasing,
 )
@@ -122,8 +123,10 @@ class Receiver:
         _require_non_negative(
             self.ranges, "receiver ranges", hint="metres, outward from source")
 
-        _require_strictly_increasing(self.depths, "Receiver.depths")
-        _require_strictly_increasing(self.ranges, "Receiver.ranges")
+        _require_strictly_increasing(self.depths, "Receiver.depths",
+                                     min_step=DECK_DEPTH_RESOLUTION_M)
+        _require_strictly_increasing(self.ranges, "Receiver.ranges",
+                                     min_step=DECK_RANGE_RESOLUTION_M)
 
     @property
     def n_depths(self) -> int:

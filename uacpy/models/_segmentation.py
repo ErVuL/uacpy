@@ -11,6 +11,7 @@ from typing import List, Tuple, Optional
 
 from uacpy.core.environment import Environment, SoundSpeedProfile
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.io.oalib_writer import DECK_RANGE_QUANTUM_M
 
 
 def segment_environment_by_range(
@@ -75,12 +76,21 @@ def segment_environment_by_range(
         # bathymetry, 2-D SSP, and RD-bottom axes; insert intermediate
         # points where the gap between consecutive change points exceeds
         # ``max_segment_length``.
-        key_ranges_m = set(bathy_ranges_m.tolist())
+        candidates = list(bathy_ranges_m.tolist())
         if env.ssp.is_range_dependent:
-            key_ranges_m.update(env.ssp.ranges.tolist())
+            candidates.extend(env.ssp.ranges.tolist())
         if env.bottom.is_range_dependent:
-            key_ranges_m.update(env.bottom.ranges.tolist())
-        key_ranges_m = sorted(key_ranges_m)
+            candidates.extend(env.bottom.ranges.tolist())
+        # Merge at the resolution the deck can express, not at exact float
+        # equality: a bathymetry axis and an SSP axis that name the same physical
+        # range through different arithmetic differ in the last bits, and both
+        # would survive a set(). They then print as one token, and field.exe
+        # divides by the zero gap (EvaluateADMod.f90:75) with no diagnostic.
+        candidates.sort()
+        key_ranges_m = []
+        for r in candidates:
+            if not key_ranges_m or r - key_ranges_m[-1] > DECK_RANGE_QUANTUM_M:
+                key_ranges_m.append(r)
         # A profile axis that starts beyond r=0 would leave everything
         # shoreward of its first sample without a segment; anchor at 0 and let
         # the constant extrapolation every carrier already does fill it.

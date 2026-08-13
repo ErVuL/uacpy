@@ -370,3 +370,93 @@ class TestStagedTableGetsTheSameTreatment:
         dest = stage_reflection_file(src, tmp_path / 'deck.env',
                                      boundary='internal')
         assert dest.read_text() == src.read_text()
+
+
+class TestCLowCannotExceedTheWaterSpeed:
+    """``bounce.f90:46`` sets ``kMax = omega/cLow`` but ``:195`` references the
+    angles to ``k0 = omega/c0`` with ``c0 = HSTop%cP``, the water sound speed at
+    the seafloor. ``:198-210`` only computes ``theta`` ``WHERE( k0 > kx )``, so
+    ``cLow > c0`` makes the table start above 0 deg grazing, and
+    ``misc/RefCoef.f90:137-141`` then hands every consumer ``R = 0`` below the
+    first tabulated angle (its warning goes to the ``.prt`` only). Measured cost
+    at 1.3 % above the water speed: mean 5.1 dB, max 25 dB."""
+
+    @staticmethod
+    def _fixture(c_water):
+        from uacpy.core.environment import SoundSpeedProfile
+        env = Environment(
+            name='clow', bathymetry=100.0,
+            ssp=SoundSpeedProfile.from_pairs(
+                np.array([[0.0, c_water], [100.0, c_water]])),
+            bottom=BoundaryProperties(sound_speed=1600.0, density=1.8,
+                                      attenuation=0.5))
+        return (env, Source(depths=25.0, frequencies=200.0),
+                Receiver(depths=50.0, ranges=np.linspace(500.0, 5000.0, 20)))
+
+    @pytest.mark.parametrize('c_low', [1520.0, 1560.0, 2000.0])
+    def test_above_the_water_speed_is_refused(self, c_low):
+        env, src, rcv = self._fixture(1500.0)
+        with pytest.raises(ConfigurationError, match='grazing'):
+            Bounce(verbose=False, c_low=c_low, rmax=5000.0).run(env, src, rcv)
+
+    @pytest.mark.parametrize('c_low', [1400.0, 1450.0, 1500.0])
+    def test_at_or_below_the_water_speed_still_tabulates_from_zero(self, c_low):
+        env, src, rcv = self._fixture(1500.0)
+        result = Bounce(verbose=False, c_low=c_low, rmax=5000.0).run(
+            env, src, rcv)
+        theta = np.asarray(result.theta)
+        assert theta.min() == pytest.approx(0.0, abs=1e-6), (
+            f"c_low={c_low} against 1500 m/s water left the grazing wedge out: "
+            f"table starts at {theta.min():.3f} deg")
+        assert theta.max() == pytest.approx(90.0, abs=1e-6)
+
+    def test_the_default_is_refused_in_cold_fresh_water(self):
+        """``DEFAULT_C_MIN`` is 1400 m/s, which cold fresh water undercuts — so
+        the failure was reachable without the user setting anything."""
+        env, src, rcv = self._fixture(1380.0)
+        with pytest.raises(ConfigurationError, match='grazing'):
+            Bounce(verbose=False, rmax=5000.0).run(env, src, rcv)
+
+
+class TestRunWithBounceDerivesCLow:
+    """``Bellhop.run_with_bounce`` and the ``_maybe_route_through_bounce`` auto
+    route are uacpy's own choice, so they must not hand BOUNCE a ``c_low`` the
+    environment rejects."""
+
+    @staticmethod
+    def _fixture(c_water):
+        from uacpy.core.environment import SoundSpeedProfile
+        env = Environment(
+            name='derive', bathymetry=100.0,
+            ssp=SoundSpeedProfile.from_pairs(
+                np.array([[0.0, c_water], [100.0, c_water]])),
+            bottom=BoundaryProperties(sound_speed=1600.0, density=1.8,
+                                      attenuation=0.5))
+        return (env, Source(depths=25.0, frequencies=200.0),
+                Receiver(depths=[30.0, 50.0, 70.0],
+                         ranges=np.linspace(500.0, 5000.0, 12)))
+
+    @pytest.mark.parametrize('c_water', [1500.0, 1380.0])
+    def test_matches_the_direct_halfspace_in_cold_and_ordinary_water(self,
+                                                                    c_water):
+        from uacpy.models import Bellhop
+        from uacpy.models.base import RunMode
+        env, src, rcv = self._fixture(c_water)
+        model = Bellhop(verbose=False, beam_type='G', n_beams=2001,
+                        alpha=(-80.0, 80.0), backend='fortran')
+        reference = np.asarray(model.run(env, src, rcv,
+                                         RunMode.COHERENT_TL).tl)
+        routed = np.asarray(model.run_with_bounce(
+            env, src, rcv, run_mode=RunMode.COHERENT_TL).tl)
+        delta = np.abs(routed - reference)
+        assert np.nanmax(delta) < 0.5, (
+            f"water {c_water} m/s: BOUNCE round trip differs from the direct "
+            f"half-space by up to {np.nanmax(delta):.2f} dB")
+
+    def test_an_explicit_c_low_is_still_honoured(self):
+        env, src, rcv = self._fixture(1500.0)
+        from uacpy.models import Bellhop
+        from uacpy.models.base import RunMode
+        with pytest.raises(ConfigurationError, match='grazing'):
+            Bellhop(verbose=False, backend='fortran').run_with_bounce(
+                env, src, rcv, run_mode=RunMode.COHERENT_TL, c_low=1560.0)

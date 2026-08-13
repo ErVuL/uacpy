@@ -1587,6 +1587,14 @@ class Kraken(PropagationModel):
             if exc.timed_out:
                 self._attach_prt_tail(exc, fm.work_dir, base_name)
                 raise
+            # field.f90:228 writes 'Field completed successfully' before the
+            # teardown block whose deallocation can fail, so that line is what
+            # separates a benign non-zero exit from a run that died mid-field.
+            # Without this check an abort is downgraded to a warning and the
+            # truncated .shd surfaces as a misleading "malformed file" error.
+            if not self._field_reached_completion(fm.work_dir):
+                self._attach_prt_tail(exc, fm.work_dir, base_name)
+                raise
             warnings.warn(
                 f"{self.model_name}: field.exe exited with non-zero "
                 f"status ({exc}); attempting to read the .shd output "
@@ -1613,6 +1621,19 @@ class Kraken(PropagationModel):
             self._attach_prt_tail(exc, fm.work_dir, _FIELD_PRT_ROOT)
             raise exc
         return shd_file
+
+    def _field_reached_completion(self, work_dir) -> bool:
+        """Whether field.exe got past its last field write.
+
+        ``field.f90:228`` writes ``'Field completed successfully'`` after
+        ``FreqLoop`` closes and before the clean-up block whose deallocation is
+        the known benign failure, so the line is present for a teardown-only
+        error and absent for a run that died while computing. Like
+        :meth:`_raise_on_field_fatal` this reads ``field.prt``, whose name
+        ``field.f90:44`` hard-codes.
+        """
+        prt = read_prt(Path(work_dir) / f'{_FIELD_PRT_ROOT}.prt')
+        return bool(prt) and 'field completed successfully' in prt.lower()
 
     def _raise_on_field_fatal(self, work_dir) -> None:
         """Raise when field.exe reported a fatal but left a readable ``.shd``.
@@ -1799,6 +1820,25 @@ class Kraken(PropagationModel):
             and len(np.atleast_1d(frequencies)) > 1
         )
         freq_vec = np.asarray(frequencies, dtype=float) if broadband else None
+        if broadband and source.beam_pattern is not None:
+            # field.f90:191 allocates the beam-pattern work arrays inside
+            # FreqLoop under `SBPFlag == '*' .AND. iS == 1` but deallocates them
+            # only after the loop closes (:226), so the second frequency
+            # re-allocates an already-allocated array and gfortran terminates.
+            # The gate is the frequency count reaching field.exe, not the
+            # caller's run_mode: the multi-frequency path reaches here with the
+            # default COHERENT_TL. Dropping the pattern would silently change
+            # the source's directivity, so this raises.
+            raise UnsupportedFeatureError(
+                self.model_name,
+                f"a source beam pattern on a multi-frequency run "
+                f"({freq_vec.size} frequencies) — field.exe re-allocates its "
+                f"beam-pattern arrays once per frequency "
+                f"(KrakenField/field.f90:191) and aborts on the second one",
+                ["one frequency per call, which accepts the pattern",
+                 "Source(beam_pattern=None) for a multi-frequency run"],
+                alternatives_label='options',
+            )
         if broadband and freq_vec.size > _FIELD_MAX_NFREQ:
             raise ConfigurationError(
                 f"{self.model_name}: {freq_vec.size} frequencies exceed "

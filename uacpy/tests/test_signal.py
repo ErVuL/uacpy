@@ -74,15 +74,50 @@ class TestGenerators:
 class TestProcessing:
     """Processing helpers don't blow up on synthetic signals."""
 
-    def test_add_noise_increases_variance(self):
-        fs = 10_000.0
-        x = np.zeros(1024)
-        y = add_noise(
-            x, sample_rate=fs,
-            source_level=120.0, noise_level=80.0,
-            fc=1000.0, bandwidth=200.0,
-        )
-        assert np.var(y) > 0
+    def test_add_noise_adds_band_limited_noise(self):
+        """The added term is noise inside the requested band.
+
+        A silent input makes the output the noise term alone, so the band
+        occupancy and the sample-to-sample correlation both describe the noise
+        directly. Variance alone cannot tell noise from any other waveform.
+        """
+        fs, fc, bw = 48_000.0, 10_000.0, 10_000.0
+        y = np.asarray(add_noise(
+            np.zeros(8192), sample_rate=fs, source_level=0.0,
+            noise_level=40.0, fc=fc, bandwidth=bw,
+        )).ravel()
+
+        freqs = np.fft.rfftfreq(y.size, 1.0 / fs)
+        power = np.abs(np.fft.rfft(y)) ** 2
+        in_band = (freqs >= fc - bw / 2) & (freqs <= fc + bw / 2)
+        assert power[in_band].sum() / power.sum() > 0.9
+        assert freqs[np.argmax(power)] > fc - bw / 2
+
+        # Any monotone or otherwise smooth waveform correlates ~1 at lag 1.
+        assert abs(np.corrcoef(y[:-1], y[1:])[0, 1]) < 0.7
+
+    def test_add_noise_realisations_are_seeded_and_per_receiver(self):
+        """``rng`` selects the realisation, and receivers are independent.
+
+        The docstring's array-gain contract needs zero cross-channel
+        correlation, so a shared realisation across columns is a defect.
+        """
+        fs = 48_000.0
+        kw = dict(source_level=0.0, noise_level=40.0, fc=10_000.0,
+                  bandwidth=10_000.0)
+        x = np.zeros(4096)
+        first = np.asarray(add_noise(x, sample_rate=fs, **kw,
+                                     rng=np.random.default_rng(3)))
+        again = np.asarray(add_noise(x, sample_rate=fs, **kw,
+                                     rng=np.random.default_rng(3)))
+        other = np.asarray(add_noise(x, sample_rate=fs, **kw,
+                                     rng=np.random.default_rng(4)))
+        assert np.array_equal(first, again)
+        assert not np.array_equal(first, other)
+
+        block = np.asarray(add_noise(np.zeros((4096, 4)), sample_rate=fs, **kw))
+        corr = np.corrcoef(block.T)
+        assert np.max(np.abs(corr[~np.eye(4, dtype=bool)])) < 0.2
 
     def test_make_bandlimited_noise_runs(self):
         # Returns (time, signal) like the other generators.
@@ -432,3 +467,71 @@ class TestFRFEstimators:
         rng, x, y = self._signals(7)
         xn = x + 0.5 * rng.standard_normal(self.N)
         assert self._err('H2', xn, y)[0] < self._err('H1', xn, y)[0] / 1.5
+
+
+class TestBandLimitedNoiseLandsInTheRequestedBand:
+    """``scipy.signal.butter`` requires only ``0 < Wn < 1``. Clamping the
+    normalised edges to 0.01/0.02 instead moved any low-frequency band at a high
+    sample rate — the clamp is in *normalised* frequency, so its physical value
+    scales with ``sample_rate`` and the same request is honoured at one rate and
+    relocated at another.
+
+    Removing the clamps alone is not enough: a narrow band at a high sample rate
+    sits near a normalised frequency of 1e-3, where the transfer-function form
+    loses so much precision the response collapses. Second-order sections are
+    what make the requested band realisable, so both parts are exercised here.
+
+    Realisations are seeded: the in-band fraction of a single draw carries real
+    scatter (+/-0.05 at the hardest setting), so an unseeded threshold would be
+    flaky rather than discriminating.
+    """
+
+    FS = 48_000.0
+
+    @staticmethod
+    def _spectrum(fc, bw, fs, seed):
+        _t, n = make_bandlimited_noise(fc, bw, 2.0, fs,
+                                       rng=np.random.default_rng(seed))
+        freqs = np.fft.rfftfreq(n.size, 1.0 / fs)
+        power = np.abs(np.fft.rfft(n)) ** 2
+        in_band = (freqs >= fc - bw / 2) & (freqs <= fc + bw / 2)
+        return float(power[in_band].sum() / power.sum()), \
+            float(freqs[np.argmax(power)])
+
+    @pytest.mark.parametrize('fc,bw', [(100.0, 100.0), (250.0, 100.0),
+                                       (1000.0, 200.0), (10_000.0, 10_000.0)])
+    def test_most_power_lands_inside_the_request(self, fc, bw):
+        """Pre-fix, the 50-150 Hz request delivered 0.1 % of its power there."""
+        frac, peak = self._spectrum(fc, bw, self.FS, seed=0)
+        assert frac > 0.8, f"only {frac:.1%} of power inside {fc}+/-{bw / 2}"
+        assert fc - bw / 2 <= peak <= fc + bw / 2
+
+    def test_the_request_is_honoured_at_both_sample_rates(self):
+        """A clamp in *normalised* frequency makes the answer depend on the
+        sample rate: pre-fix this band was correct at 4 kHz and relocated to
+        252-457 Hz at 48 kHz. Both must now honour it, though the high-rate
+        design remains the harder one."""
+        for fs in (48_000.0, 4_000.0):
+            frac, peak = self._spectrum(100.0, 100.0, fs, seed=0)
+            assert frac > 0.8, f"{frac:.1%} in band at fs={fs:g}"
+            assert 50.0 <= peak <= 150.0
+
+    def test_add_noise_realises_the_requested_level_in_band(self):
+        """Pre-fix this read 5.2 dB against a requested 40 dB, because the
+        level was scaled from the same relocated design and so was internally
+        self-consistent — which is why nothing downstream noticed."""
+        fs, fc, bw, level = self.FS, 100.0, 100.0, 40.0
+        y = np.asarray(add_noise(np.zeros(int(2 * fs)), fs, 0.0, level, fc, bw,
+                                 rng=np.random.default_rng(0))).ravel()
+        freqs = np.fft.rfftfreq(y.size, 1.0 / fs)
+        psd = np.abs(np.fft.rfft(y)) ** 2 * 2.0 / (fs * y.size)
+        in_band = (freqs >= fc - bw / 2) & (freqs <= fc + bw / 2)
+        assert 10 * np.log10(psd[in_band].mean()) == pytest.approx(level, abs=3.0)
+
+    @pytest.mark.parametrize('fc,bw,fs', [(10.0, 100.0, 48_000.0),
+                                          (23_990.0, 100.0, 48_000.0),
+                                          (100.0, 100.0, 150.0)])
+    def test_an_unrealisable_band_is_refused_not_moved(self, fc, bw, fs):
+        from uacpy.core.exceptions import ConfigurationError
+        with pytest.raises(ConfigurationError, match='not realisable'):
+            make_bandlimited_noise(fc, bw, 0.5, fs)

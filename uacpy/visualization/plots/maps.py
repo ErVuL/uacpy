@@ -10,7 +10,7 @@ import matplotlib.collections as _mcoll
 from typing import Optional, Tuple
 
 from uacpy.visualization.style import SOURCE_MARKER_STYLE
-from uacpy.visualization.plots._common import _credit_attributions, _draw_credit, _draw_sea_ice, _model_attribution, typed_plot_error
+from uacpy.visualization.plots._common import _cell_edge_extent, _credit_attributions, _draw_credit, _draw_sea_ice, _model_attribution, typed_plot_error
 # plot_overview composes a map panel with the TL field and the environment
 # cross-section, so it reaches across to those plotters.
 from uacpy.visualization.plots.fields import plot_field
@@ -422,7 +422,12 @@ def _draw_depth(ax, lons, lats, depth, cmap, relief, exag, zorder):
         rgb, -filled, blend_mode='soft', vert_exag=exag, dx=dx, dy=-dy)
     rgb[..., :3] = shaded[..., :3]
     rgb[nan_mask, 3] = 0.0                              # land → transparent
-    ax.imshow(rgb, extent=[lons.min(), lons.max(), lats.min(), lats.max()],
+    # Pad to the cell EDGES: imshow stretches the array onto the outer edges of
+    # extent, so passing the first/last centres contracts the relief by
+    # (N-1)/N about the grid centre and it stops registering with the
+    # graticule, the contours, the coastline and the markers — all of which use
+    # the true coordinates, as does the flat pcolormesh branch above.
+    ax.imshow(rgb, extent=_cell_edge_extent(lons, lats),
               origin='lower', zorder=zorder, interpolation='nearest',
               aspect='auto')
     return plt.cm.ScalarMappable(norm=norm, cmap=base)

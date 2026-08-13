@@ -26,7 +26,8 @@ from uacpy.io.bathy_io import (
     write_ati_file,
 )
 from uacpy.io.oalib_writer import (
-    _BOUNDARY_TYPE_MAP, _DECK_DEPTH_QUANTUM, deck_depth, get_top_bc_code,
+    _BOUNDARY_TYPE_MAP, _DECK_DEPTH_FMT, _DECK_DEPTH_RESOLUTION_M,
+    deck_depth, get_top_bc_code,
     resolve_ssp_topopt, write_absorption_block, write_receiver_depths,
     write_receiver_ranges, write_source_depths, write_ssp,
     write_surface_halfspace,
@@ -115,10 +116,10 @@ def _bathymetry_within_mesh(bathymetry, z_max: float) -> np.ndarray:
         bathymetry = bathymetry.to_pairs()
     pairs = np.asarray(bathymetry, dtype=float).copy()
     deepest = float(np.max(pairs[:, 1]))
-    if deepest > z_max + _DECK_DEPTH_QUANTUM:
+    if deepest > z_max + _DECK_DEPTH_RESOLUTION_M:
         raise ConfigurationError(
             f"Bellhop: bathymetry reaches {deepest:.6f} m but the SSP mesh "
-            f"bottom is {z_max:.1f} m; Bellhop aborts with 'Bathymetry drops "
+            f"bottom is {z_max:.6f} m; Bellhop aborts with 'Bathymetry drops "
             f"below lowest point in the sound speed profile'."
         )
     pairs[:, 1] = np.minimum(pairs[:, 1], z_max)
@@ -449,7 +450,7 @@ def write_bellhop_env_file(
         # against the Depth match at :115). Sigma is the top-boundary RMS
         # roughness, NOT z_min; always emit 0.0, altimetry crests go through
         # the .ati file.
-        f.write(f"{n_ssp}  0.0  {z_max:.1f},\n")
+        f.write(f"{n_ssp}  0.0  {z_max:{_DECK_DEPTH_FMT}},\n")
 
         # SSP row: z alphaR betaR rhoR alphaI betaI /
         # Bellhop/sspMod.f90:903 READs all six into the module variables
@@ -527,7 +528,7 @@ def write_bellhop_env_file(
             shear_speed = getattr(hs, 'shear_speed', 0.0)
             shear_atten = getattr(hs, 'shear_attenuation', 0.0)
             f.write(
-                f" {z_max:.2f}  {hs.sound_speed:.2f} "
+                f" {z_max:{_DECK_DEPTH_FMT}}  {hs.sound_speed:.2f} "
                 f"{shear_speed:.2f} {hs.density:.2f} "
                 f"{hs.attenuation:.6f} {shear_atten:.6f} /\n"
             )

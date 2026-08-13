@@ -13,7 +13,8 @@ from uacpy.core.constants import (REFERENCE_PRESSURE_AIR,
                                   REFERENCE_PRESSURE_WATER)
 from uacpy.core.acoustics import power_to_db
 from uacpy.core.exceptions import ConfigurationError
-from uacpy.visualization.plots._common import fig_ax, typed_plot_error
+from uacpy.visualization.plots._common import (_cell_edge_extent, _flip_y,
+                                                 fig_ax, typed_plot_error)
 
 
 def _require_image_grid(arr, n0, n1, caller, name0, name1):
@@ -79,8 +80,11 @@ def plot_fk(frequencies, wavenumbers, power, ax=None, *, ref=REFERENCE_PRESSURE_
                         "plot_fk", "frequencies", "wavenumbers")
     fk_db = power_to_db(np.asarray(power), ref)
     fig, ax = fig_ax(ax, figsize)
-    im = ax.imshow(fk_db, extent=[wavenumbers[0], wavenumbers[-1],
-                   frequencies[0], frequencies[-1]], origin="lower", aspect="auto",
+    # Edge-aligned: the axes are FFT bin centres, and draw_sound_cone below
+    # places f = c*k/(2*pi) at true coordinates, so a half-bin shift would
+    # offset the image against the very line used to read it.
+    im = ax.imshow(fk_db, extent=_cell_edge_extent(wavenumbers, frequencies),
+                   origin="lower", aspect="auto",
                    vmin=vmin, vmax=vmax, cmap=cmap, **mpl_kw)
     if sound_speed is not None:
         draw_sound_cone(ax, frequencies[-1], wavenumbers[-1], sound_speed)
@@ -121,7 +125,7 @@ def plot_radon(moveout, taus, R, ax=None, *, kind="linear", vmin=None,
     # The extent puts the largest tau at the bottom, so intercept time runs
     # downward — the seismic gather convention.
     im = ax.imshow(amp.T, aspect="auto", origin="upper",
-                   extent=[m[0], m[-1], taus[-1], taus[0]],
+                   extent=_flip_y(_cell_edge_extent(m, taus)),
                    vmin=vmin, vmax=vmax, cmap=cmap, **mpl_kw)
     ax.set_title(title or f"Radon ({kind})", loc="left")
     ax.set_xlabel(xlabel)
@@ -157,7 +161,7 @@ def plot_taup(slownesses, taus, taup, ax=None, *, vmin=None, vmax=None,
     # Transposed to (tau, slowness) with tau increasing downward, as in
     # plot_radon.
     im = ax.imshow(amp.T, aspect="auto", origin="upper",
-                   extent=[p_skm[0], p_skm[-1], taus[-1], taus[0]],
+                   extent=_flip_y(_cell_edge_extent(p_skm, taus)),
                    vmin=vmin, vmax=vmax, cmap=cmap, **mpl_kw)
     if sound_speed is not None:
         draw_slowness_line(ax, taus[-1], sound_speed)
@@ -468,8 +472,9 @@ def plot_ambiguity(delays_s, doppler_hz, chi, ax=None, *, cmap="jet",
                               "doppler_hz", "delays_s")
     fig, ax = fig_ax(ax, figsize)
     im = ax.imshow(amp, aspect="auto", origin="lower",
-                   extent=[delays_s[0] * 1e3, delays_s[-1] * 1e3,
-                           doppler_hz[0], doppler_hz[-1]], cmap=cmap, **mpl_kw)
+                   extent=_cell_edge_extent(np.asarray(delays_s) * 1e3,
+                                            doppler_hz),
+                   cmap=cmap, **mpl_kw)
     if show_colorbar:
         fig.colorbar(im, ax=ax, label="|χ|")
     ax.set_title(title or "Ambiguity surface", loc="left")

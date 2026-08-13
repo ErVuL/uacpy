@@ -1384,6 +1384,16 @@ class TestSourceGeometryAndBeamPattern:
         with pytest.raises(ConfigurationError):
             uacpy.Source(depths=50, frequencies=100, beam_pattern=pat)
 
+    def test_beam_pattern_single_row_raises(self):
+        # bellhop.f90:273 interpolates between rows IBP and IBP+1 after clamping
+        # IBP to NSBPPts-1, so one row makes it read below the bound allocated at
+        # misc/beampattern.f90:36 and return an all-NaN field with exit code 0.
+        # misc/monotonicMod.f90:20 returns .TRUE. for N==1, so the engine's own
+        # guard cannot catch it either.
+        with pytest.raises(ConfigurationError, match="at least 2"):
+            uacpy.Source(depths=50, frequencies=100,
+                         beam_pattern=np.array([[0.0, 0.0]]))
+
     def test_beam_pattern_path_is_stored_as_path(self, tmp_path):
         from pathlib import Path
         sbp = tmp_path / 'pattern.sbp'

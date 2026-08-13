@@ -431,9 +431,29 @@ def stage_source_beam_pattern(
         # array form so the guard does not depend on which way the caller
         # happened to supply the pattern.
         from uacpy.core._carrier_validate import _require_strictly_increasing
+        angles = read_source_beam_pattern(src, sbp_option='*')[:, 0]
+        # A one- or zero-row table survives every guard on both sides:
+        # ``_require_strictly_increasing`` returns early for ``size <= 1``, and
+        # ``misc/monotonicMod.f90:30`` pre-sets ``.TRUE.`` then returns for
+        # ``N == 1`` (for ``N == 0`` its ``ANY`` runs over zero-size sections and
+        # is also false), so ``misc/beampattern.f90:56`` passes it too. The
+        # engines then index the table as a pair: ``bellhop.f90:270`` clamps
+        # ``IBP`` to ``NSBPPts - 1`` and reads below the bound allocated at
+        # ``beampattern.f90:36``, while ``field.f90:190-198`` brackets with
+        # ``x(iseg + 1)``. Bellhop yields an all-NaN field and field.exe a
+        # finite, plausible, wrong one — both at exit code 0 with nothing in the
+        # print file.
+        if angles.size < 2:
+            raise ConfigurationError(
+                f"source beam pattern {src.name} declares {angles.size} row(s); "
+                f"the engines interpolate between adjacent rows and need at "
+                f"least 2 (Bellhop/bellhop.f90:270).",
+                remediation="Pass beam_pattern=None for an omnidirectional "
+                            "source, or give at least two angles spanning the "
+                            "launch fan.",
+            )
         _require_strictly_increasing(
-            read_source_beam_pattern(src, sbp_option='*')[:, 0],
-            f"source beam-pattern angles in {src.name}")
+            angles, f"source beam-pattern angles in {src.name}")
         shutil.copy(src, dest)
         return
     arr = np.asarray(pattern, dtype=float)

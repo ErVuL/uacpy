@@ -1203,13 +1203,13 @@ class TestMultiProfileEnvKeepsLayerThickness:
         text = env_file.read_text()
         shallow = text[text.index("'shallow'"):]
         # Media interfaces: 150 (seafloor) → 155 (5 m layer) → 161 (6 m layer).
-        assert '  150.0 1600.000000' in shallow
-        assert '  155.0 1600.000000' in shallow
-        assert '  155.0 1650.000000' in shallow
-        assert '  161.0 1650.000000' in shallow, \
+        assert '  150.000000 1600.000000' in shallow
+        assert '  155.000000 1600.000000' in shallow
+        assert '  155.000000 1650.000000' in shallow
+        assert '  161.000000 1650.000000' in shallow, \
             "the 6 m sediment layer was stretched to the global max depth"
         # The pad that absorbs the stretch carries halfspace properties.
-        assert '  161.0 1800.000000' in shallow
+        assert '  161.000000 1800.000000' in shallow
 
     def test_every_profile_declares_the_same_nmedia_and_total_depth(self, tmp_path):
         from uacpy.io.oalib_writer import write_multi_profile_env
@@ -1224,8 +1224,12 @@ class TestMultiProfileEnvKeepsLayerThickness:
                    if line.startswith("'") and line.endswith("'")
                    and line[1:-1] in ('deep', 'mid', 'shallow')]
         assert len(n_media) == 3 and len(set(n_media)) == 1
-        halfspace_depths = [line.split()[0] for line in lines
-                            if line.startswith('  200.30')]
+        # Selected structurally: the half-space row is the line after each
+        # profile's bottom-option line. Keying on a depth or sound-speed format
+        # would only work while different rows happened to print differently.
+        halfspace_depths = [lines[i + 1].split()[0]
+                            for i, line in enumerate(lines)
+                            if line.startswith("'A'")]
         assert len(halfspace_depths) == 3
 
 
@@ -1620,9 +1624,13 @@ class TestSedimentLayerColumnOrder:
 
     def test_layer_line_fields_are_in_at_order(self, tmp_path):
         lines = self._write(tmp_path)
+        # Keyed on the sediment sound speed: the water SSP rows share the
+        # layer rows' depths, and every depth is written in one format, so a
+        # depth prefix cannot tell them apart.
         layer_rows = [ln.split() for ln in lines
-                      if ln.strip().startswith(('100.0 ', '112.0 '))
-                      and ln.strip().endswith('/')]
+                      if ln.strip().endswith('/')
+                      and len(ln.split()) >= 6
+                      and ln.split()[1].startswith('1623')]
         assert len(layer_rows) == 2, f"expected the layer's two rows, got {layer_rows}"
         for row in layer_rows:
             z, cp, cs, rho, alpha_p, alpha_s = (float(v) for v in row[:6])
@@ -1658,7 +1666,7 @@ def test_multi_profile_deck_shares_one_bottom_without_slivers(tmp_path):
     """
     import re
     from uacpy.io.oalib_writer import (
-        plan_multi_profile_media, _MIN_LAYER_THICKNESS_M)
+        plan_multi_profile_media, _PAD_MEDIUM_THICKNESS_M)
     from uacpy.core.environment import (
         Bathymetry, Bottom, SeabedColumn, SedimentLayer, BoundaryProperties)
     from uacpy.io.oalib_writer import write_multi_profile_env
@@ -1696,9 +1704,10 @@ def test_multi_profile_deck_shares_one_bottom_without_slivers(tmp_path):
 
     for p_i, block in enumerate(blocks):
         thick = [round(b - a, 1) for a, b in zip([0.0] + block[:-1], block)]
-        assert min(thick) >= _MIN_LAYER_THICKNESS_M, (
-            f"profile {p_i} has a medium thinner than the minimum KRAKEN will "
-            f"mesh: {thick}")
+        # The thinnest medium any profile can carry is a transparent pad.
+        assert min(thick) >= _PAD_MEDIUM_THICKNESS_M, (
+            f"profile {p_i} has a medium thinner than a transparent pad: "
+            f"{thick}")
 
 
 # ---------------------------------------------------------------------------
@@ -2157,7 +2166,13 @@ class TestDeckDepthQuantisation:
     0.1 m depth column. Rounding up keeps the water column at or below the
     physical ``env.depth`` — a source or receiver on the seafloor stays inside
     the mesh instead of being moved up by ReadSzRz — and keeps the AT models
-    on the same water column as Bellhop's ``.bty``-clipped mesh."""
+    on the same water column as Bellhop's ``.bty``-clipped mesh.
+
+    ``deck_depth`` delivers that by round-tripping through the one depth format
+    every deck writes, so the value uacpy compares is the value the Fortran
+    parses. The Acoustics-Toolbox manual states the licence for this outright:
+    *"All user input in all modules is read using list-directed I/O. Thus data
+    can be typed in free-format"* (``doc/index.htm``)."""
 
     def test_bellhop_shares_the_one_quantiser(self):
         """Two implementations of the same rule would drift; Bellhop's SSP
@@ -2168,17 +2183,34 @@ class TestDeckDepthQuantisation:
 
     @pytest.mark.parametrize('depth', [
         100.0, 150.0, 2000.0, 100.04, 100.05, 100.06, 99.999, 0.1, 200.3])
-    def test_a_fractional_depth_rounds_up_onto_the_grid(self, depth):
-        from uacpy.io.oalib_writer import deck_depth, _DECK_DEPTH_QUANTUM
-        got = deck_depth(depth)
-        assert got >= depth
-        assert got - depth < _DECK_DEPTH_QUANTUM
-        assert got == pytest.approx(round(got, 1))
+    def test_a_fractional_depth_survives_to_the_deck(self, depth):
+        """The requested depth must reach the deck, not a coarsened stand-in.
 
-    @pytest.mark.parametrize('depth', [100.0, 150.0, 2000.0, 200.3])
-    def test_a_depth_already_on_the_grid_is_unchanged(self, depth):
+        Snapping to a 0.1 m grid put ``OAST`` 11.20 dB (max) from the answer for
+        the depth the caller built, and made ``Scooter`` insensitive to a 6 cm
+        change entirely.
+        """
+        from uacpy.io.oalib_writer import (deck_depth,
+                                           _DECK_DEPTH_RESOLUTION_M)
+        got = deck_depth(depth)
+        assert abs(got - depth) <= _DECK_DEPTH_RESOLUTION_M
+
+    @pytest.mark.parametrize('depth', [
+        100.0, 150.0, 2000.0, 200.3, 100.04, 42.2999960])
+    def test_deck_depth_is_idempotent(self, depth):
+        """It reports what the deck writes, so re-applying it changes nothing —
+        which is what makes the mesh line and the SSP rows agree exactly."""
         from uacpy.io.oalib_writer import deck_depth
-        assert deck_depth(depth) == depth
+        once = deck_depth(depth)
+        assert deck_depth(once) == once
+
+    def test_the_resolution_is_finer_than_the_readers_own_tolerance(self):
+        """``misc/sspMod.f90:353`` ends a medium on
+        ``100 * EPSILON( 1.0e0 )`` = 1.19e-05 m, so the written resolution has to
+        sit below that for the mesh line and the SSP rows to count as equal."""
+        import numpy as np
+        from uacpy.io.oalib_writer import _DECK_DEPTH_RESOLUTION_M
+        assert _DECK_DEPTH_RESOLUTION_M < 100.0 * np.finfo(np.float32).eps
 
     @staticmethod
     def _mesh_line_depth(path):
@@ -2260,8 +2292,14 @@ class TestDeckDepthQuantisation:
         out = _write_kraken(tmp_path / 'kr.env', env,
                             surface_type=BoundaryType.VACUUM)
         text = out.read_text()
-        assert '  100.1 1600.000000' in text and '  105.1 1600.000000' in text, (
-            f"sediment interfaces are off the deck grid:\n{text}")
+        # The interfaces carry the depth the caller asked for, not a value
+        # snapped onto a 0.1 m grid: OAST answers 11.20 dB (max) differently for
+        # 100.04 m than for 100.1 m, and Scooter was insensitive to the
+        # difference entirely because both decks said 100.1.
+        assert '  100.040000 1600.000000' in text, (
+            f"seafloor interface is not the requested depth:\n{text}")
+        assert '  105.040000 1600.000000' in text, (
+            f"layer base is not seafloor + thickness:\n{text}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2691,8 +2729,13 @@ class TestOasesInterfaceRoughness:
         out = tmp_path / 'rg1.dat'
         write_oast_input(out, env, Source(depths=50, frequencies=100.0),
                          Receiver(depths=50, ranges=[5000.0]))
+        # Selected by the layer record's shape (8 columns), not by a numeric
+        # prefix: the frequency record now carries the same digits, and keying on
+        # a format is only stable while different records happen to print
+        # differently.
         seabed = next(ln for ln in out.read_text().splitlines()
-                      if ln.startswith('100.00'))
+                      if len(ln.split()) == 8
+                      and ln.split()[0].startswith('100.'))
         assert float(seabed.split()[6]) == pytest.approx(1.2)
 
 
@@ -2937,3 +2980,170 @@ class TestRtsToPressureGoertzel:
         # own leakage on an on-bin tone rather than to float precision.
         assert abs(p_g[0]) == pytest.approx(abs(p_f[0]), rel=1e-4)
         assert np.angle(p_g[0]) == pytest.approx(np.angle(p_f[0]), abs=1e-4)
+
+
+class TestStagedBeamPatternNeedsTwoRows:
+    """A degenerate ``.sbp`` passes every guard on both sides.
+
+    ``_require_strictly_increasing`` returns early for ``size <= 1``, and
+    ``misc/monotonicMod.f90:30`` pre-sets ``.TRUE.`` then returns for ``N == 1``
+    (for ``N == 0`` its ``ANY`` runs over zero-size sections and is also false),
+    so ``misc/beampattern.f90:56`` passes it too. The engines then index the
+    table as a pair — ``Bellhop/bellhop.f90:270`` clamps ``IBP`` to
+    ``NSBPPts - 1`` and reads below the bound allocated at
+    ``beampattern.f90:36``, and ``KrakenField/field.f90:190-198`` brackets with
+    ``x(iseg + 1)``. Bellhop then yields an all-NaN field and field.exe a finite
+    but wrong one, both at exit code 0 with nothing in the print file.
+
+    Staging is the single boundary every pattern crosses, so guarding there
+    covers the path form and the array form alike.
+    """
+
+    def _stage(self, tmp_path, text):
+        from uacpy.io.refl_io import stage_source_beam_pattern
+        src = tmp_path / 'pattern.sbp'
+        src.write_text(text)
+        return stage_source_beam_pattern(src, tmp_path / 'staged.sbp')
+
+    def test_one_row_is_refused(self, tmp_path):
+        with pytest.raises(ConfigurationError, match='at least 2'):
+            self._stage(tmp_path, "1\n0.00 0.000000\n")
+
+    def test_zero_rows_is_refused(self, tmp_path):
+        with pytest.raises(ConfigurationError, match='at least 2'):
+            self._stage(tmp_path, "0\n")
+
+    def test_two_rows_is_accepted(self, tmp_path):
+        self._stage(tmp_path, "2\n-90.0 0.0\n90.0 0.0\n")
+        assert (tmp_path / 'staged.sbp').exists()
+
+    def test_a_repeated_angle_is_still_refused(self, tmp_path):
+        """The strictly-increasing guard must survive alongside the row-count
+        one — a repeated abscissa is the division-by-zero case."""
+        with pytest.raises(ConfigurationError):
+            self._stage(tmp_path, "3\n-90.0 0.0\n0.0 0.0\n0.0 -3.0\n")
+
+
+class TestFieldFlpProfileRangeCollapse:
+    """``field.exe`` never tests ``rProf`` for monotonicity — unlike
+    ``ReadRcvrRanges`` (``misc/SourceReceiverPositions.f90:163-165``), a grep for
+    ``monotonic`` in ``KrakenField/field.f90`` is empty — so a collapsed pair
+    reaches ``KrakenField/EvaluateADMod.f90:75``, whose
+    ``(rProf(iProf+1) - rProf(iProf))`` denominator is unguarded. The 0/0 poisons
+    that segment's interpolated wavenumbers and mode functions, and nothing in AT
+    reports it, so neither of uacpy's fatal hooks can fire.
+    """
+
+    def _pos(self):
+        return {'s': {'z': np.array([50.0])},
+                'r': {'z': np.array([10.0, 30.0, 50.0]),
+                      'r': np.array([1000.0, 2000.0, 3000.0])}}
+
+    def _write(self, tmp_path, ranges_m):
+        from uacpy.io.oalib_writer import write_fieldflp
+        write_fieldflp(filepath=tmp_path / 'x.flp', option='RA  ',
+                       pos=self._pos(), title='t', n_profiles=len(ranges_m),
+                       profile_ranges_m=np.asarray(ranges_m, dtype=float))
+        return (tmp_path / 'x.flp').read_text()
+
+    def test_a_pair_that_collapses_at_1mm_is_refused(self, tmp_path):
+        with pytest.raises(ConfigurationError, match='1 mm'):
+            self._write(tmp_path, [0.0, 4000.0, 4000.0000001, 10000.0])
+
+    def test_a_separated_axis_is_written(self, tmp_path):
+        text = self._write(tmp_path, [0.0, 4000.0, 6000.0, 10000.0])
+        assert '4.000000' in text and '6.000000' in text
+
+    def test_the_quantum_is_the_boundary(self, tmp_path):
+        """1 mm apart is exactly representable; anything closer is not."""
+        from uacpy.io.oalib_writer import DECK_RANGE_QUANTUM_M
+        self._write(tmp_path, [0.0, 4000.0, 4000.0 + 2 * DECK_RANGE_QUANTUM_M,
+                               10000.0])
+        with pytest.raises(ConfigurationError):
+            self._write(tmp_path, [0.0, 4000.0,
+                                   4000.0 + DECK_RANGE_QUANTUM_M / 10.0, 10000.0])
+
+
+class TestOneEnvironmentOneWaterDepth:
+    """Every writer must put the caller's depth on its deck.
+
+    Nothing in the Acoustics Toolbox imposes a column width — the manual is
+    explicit that *"All user input in all modules is read using list-directed
+    I/O"* (``doc/index.htm``), and ``misc/ReadEnvironmentMod.f90:88`` /
+    ``misc/sspMod.f90:334`` are both ``READ( ENVFile, * )``. Snapping AT
+    interfaces onto a 0.1 m grid therefore modelled a different ocean from the
+    one the caller built, and a different one from OASES and RAM, which print
+    the depth as given.
+    """
+
+    DEPTH = 100.04
+
+    def _env(self):
+        from uacpy.core.environment import SoundSpeedProfile, BoundaryProperties
+        return uacpy.Environment(
+            name='x', bathymetry=self.DEPTH,
+            ssp=SoundSpeedProfile.from_pairs([(0.0, 1500.0),
+                                              (self.DEPTH, 1500.0)]),
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=1600.0, density=1.7,
+                                      attenuation=0.3))
+
+    def test_deck_depth_returns_the_requested_depth(self):
+        from uacpy.io.oalib_writer import deck_depth
+        assert deck_depth(self.DEPTH) == pytest.approx(self.DEPTH, abs=1e-6)
+
+    @pytest.mark.requires_binary
+    def test_every_at_writer_puts_the_same_depth_on_its_deck(self, tmp_path):
+        import re
+        import warnings
+        models = [('Kraken', uacpy.Kraken), ('Bellhop', uacpy.Bellhop),
+                  ('Scooter', uacpy.Scooter)]
+        src = uacpy.Source(depths=50.0, frequencies=200.0)
+        rcv = uacpy.Receiver(depths=[75.0], ranges=[1000.0, 2000.0])
+        seen = {}
+        for name, model in models:
+            work = tmp_path / name
+            work.mkdir()
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                try:
+                    model(work_dir=work, cleanup=False).compute_tl(
+                        self._env(), src, rcv)
+                except Exception:
+                    pass                      # the deck is what matters here
+            values = {round(float(m.group(0)), 6)
+                      for f in work.rglob('*.env') if f.is_file()
+                      for m in re.finditer(r'100\.0[0-9]*', f.read_text())}
+            seen[name] = values
+            assert values, f"{name} wrote no water depth"
+        pooled = sorted(set().union(*seen.values()))
+        assert len(pooled) == 1, \
+            f"writers disagree on the water depth: {seen}"
+        assert pooled[0] == pytest.approx(self.DEPTH, abs=1e-6), \
+            f"the decks carry {pooled[0]}, not the requested {self.DEPTH}"
+
+    @pytest.mark.requires_binary
+    def test_a_six_centimetre_depth_change_reaches_the_solver(self):
+        """Quantisation made ``Scooter`` answer identically for 100.04 m and
+        100.1 m, because both decks said 100.1 — the requested depth was
+        discarded. The two must now differ."""
+        import warnings
+        from uacpy.core.environment import SoundSpeedProfile, BoundaryProperties
+
+        def tl(depth):
+            env = uacpy.Environment(
+                name='x', bathymetry=depth,
+                ssp=SoundSpeedProfile.from_pairs([(0.0, 1500.0),
+                                                  (depth, 1500.0)]),
+                bottom=BoundaryProperties(acoustic_type='half-space',
+                                          sound_speed=1600.0, density=1.7,
+                                          attenuation=0.3))
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                return np.asarray(uacpy.Scooter().compute_tl(
+                    env, uacpy.Source(depths=50.0, frequencies=200.0),
+                    uacpy.Receiver(depths=[75.0],
+                                   ranges=np.linspace(1000.0, 10000.0, 91))
+                ).tl).ravel()
+
+        assert np.nanmax(np.abs(tl(100.04) - tl(100.1))) > 1.0

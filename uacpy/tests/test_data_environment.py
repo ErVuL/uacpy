@@ -352,13 +352,86 @@ class TestDeepSSPExtension:
         from uacpy.data.sound_speed import extend_ssp_below_data
         with _w.catch_warnings():
             _w.simplefilter('ignore')
-            out = extend_ssp_below_data(self._profile(), 8801.0)
+            out = extend_ssp_below_data(self._profile(), 8801.0, latitude=29.78)
         c_end = float(np.asarray(out.data)[-1, 0])
-        # UNESCO at 8801 m holding the deepest T/S gives 1611.93 m/s.
-        assert c_end == pytest.approx(1611.93, abs=2.0), (
+        # UNESCO at 8801 m holding the deepest T/S gives 1611.93 m/s. The
+        # tolerance is tight on purpose: at 2 m/s a fixed 0.0165 s^-1 gradient
+        # (6.4 m/s slow here) is only just excluded, and a fixed 0.017 is not.
+        assert c_end == pytest.approx(1611.93, abs=0.05), (
             f"deep sound speed {c_end:.2f} m/s — holding the last value would "
             f"give 1551.05, which is 61 m/s slow")
         assert float(np.asarray(out.depths)[-1]) == pytest.approx(8801.0)
+
+    def test_no_single_gradient_can_reproduce_the_extension(self):
+        """dc/dz is a function of depth (0.0168 s^-1 at 1 km against 0.0189 at
+        8 km, UNESCO), so the same sound speed extended over the same span must
+        gain *more* starting deeper. Any fixed-gradient implementation returns
+        exactly equal increments here."""
+        from uacpy.data.sound_speed import _deep_increment
+        shallow = _deep_increment(1500.0, 1500.0, 2500.0, 45.0)
+        deep = _deep_increment(1500.0, 5500.0, 6500.0, 45.0)
+        assert deep > shallow + 0.5, (
+            f"increment over 1000 m is {shallow:.3f} m/s at 1500 m and "
+            f"{deep:.3f} m/s at 5500 m — a constant gradient gives both alike")
+
+    def test_a_fixed_canonical_gradient_is_excluded(self):
+        """The shipped 0.0165 s^-1 sat below the UNESCO envelope (0.0168-0.0189)
+        at every deep condition, so it was slow by 6.4 m/s in the trench."""
+        from uacpy.data.sound_speed import _deep_increment
+        span = 8801.0 - 5500.0
+        got = _deep_increment(1551.05, 5500.0, 8801.0, 29.78)
+        assert got - 0.0165 * span > 5.0, (
+            f"increment {got:.2f} m/s against {0.0165 * span:.2f} m/s for the "
+            f"old constant — the bias has not been removed")
+        assert got / span > 0.0168, "below the UNESCO deep-gradient envelope"
+
+    def test_a_noisy_last_segment_cannot_contaminate_the_extension(self):
+        """The old gate admitted any measured gradient in (0.005, 0.030), so a
+        noisy WOA bottom pair was extrapolated for kilometres: 0.028 s^-1 over
+        3.3 km is +92 m/s against a true +61. The increment must depend only on
+        the deepest sound speed, never on the segment above it."""
+        import warnings as _w
+        from uacpy.core.environment import SoundSpeedProfile
+        from uacpy.data.sound_speed import extend_ssp_below_data
+
+        def extend(c_second_last):
+            p = SoundSpeedProfile.from_pairs(np.array(
+                [[0.0, 1540.0], [1000.0, 1484.0],
+                 [5400.0, c_second_last], [5500.0, 1551.05]]))
+            with _w.catch_warnings():
+                _w.simplefilter('ignore')
+                out = extend_ssp_below_data(p, 8801.0, latitude=29.78)
+            return float(np.asarray(out.data)[-1, 0])
+
+        clean = extend(1549.20)                       # 0.0185 s^-1
+        noisy = extend(1548.25)                       # 0.028  s^-1, was accepted
+        inverted = extend(1560.00)                    # negative, was rejected
+        assert clean == pytest.approx(noisy, abs=1e-9)
+        assert clean == pytest.approx(inverted, abs=1e-9)
+
+    def test_an_unphysical_column_clamps_rather_than_diverging(self):
+        """A sound speed outside UNESCO's range over the whole -3..35 C bracket
+        cannot be inverted; the extension must stay finite and monotone."""
+        from uacpy.data.sound_speed import _deep_increment
+        for c_absurd in (900.0, 2200.0):
+            got = _deep_increment(c_absurd, 1010.0, 3000.0, 45.0)
+            assert np.isfinite(got) and got > 0.0, (
+                f"c={c_absurd} m/s gave increment {got}")
+
+    def test_warm_deep_basins_are_handled(self):
+        """Mediterranean (~13 C) and Red Sea (~21 C) deep water are far off the
+        canonical polar values, and dc/dz falls with temperature. The inversion
+        recovers it from the column itself."""
+        from uacpy.core.acoustics import soundspeed_unesco
+        from uacpy.data._geo import depth_to_pressure_dbar
+        from uacpy.data.sound_speed import _deep_increment
+        for t_true, s_true in ((13.0, 38.5), (21.0, 40.5)):
+            p0 = float(depth_to_pressure_dbar(1500.0, 45.0))
+            p1 = float(depth_to_pressure_dbar(3000.0, 45.0))
+            c0 = soundspeed_unesco(t_true, s_true, p0)
+            truth = soundspeed_unesco(t_true, s_true, p1) - c0
+            assert _deep_increment(c0, 1500.0, 3000.0, 45.0) == pytest.approx(
+                truth, abs=0.15)
 
     def test_long_extrapolation_warns(self):
         from uacpy.data.sound_speed import extend_ssp_below_data
@@ -380,16 +453,33 @@ class TestDeepSSPExtension:
             out = extend_ssp_below_data(self._profile(), 2000.0)
         assert float(np.asarray(out.depths)[-1]) == pytest.approx(2000.0)
 
-    def test_noisy_last_segment_falls_back_to_the_canonical_gradient(self):
+    def test_a_single_level_profile_still_extends(self):
+        """The increment needs only the deepest sound speed, so a profile with
+        no segment to measure is no longer a special case."""
         import warnings as _w
         from uacpy.core.environment import SoundSpeedProfile
-        from uacpy.data.sound_speed import (extend_ssp_below_data,
-                                            ADIABATIC_GRADIENT)
-        # A strong inversion in the last segment is not the adiabatic trend.
-        p = SoundSpeedProfile.from_pairs(
-            np.array([[0.0, 1540.0], [1000.0, 1484.0], [1010.0, 1600.0]]))
+        from uacpy.data.sound_speed import extend_ssp_below_data, _deep_increment
+        p = SoundSpeedProfile.from_pairs(np.array([[1500.0, 1500.0]]))
         with _w.catch_warnings():
             _w.simplefilter('ignore')
-            out = extend_ssp_below_data(p, 3000.0)
-        expected = 1600.0 + ADIABATIC_GRADIENT * (3000.0 - 1010.0)
+            out = extend_ssp_below_data(p, 3000.0, latitude=45.0)
+        expected = 1500.0 + _deep_increment(1500.0, 1500.0, 3000.0, 45.0)
         assert float(np.asarray(out.data)[-1, 0]) == pytest.approx(expected)
+
+    def test_each_column_is_extended_from_its_own_deep_value(self):
+        """A range-dependent profile carries one column per range; a cold column
+        and a warm one must not be given the same increment."""
+        import warnings as _w
+        from uacpy.core.environment import SoundSpeedProfile
+        from uacpy.data.sound_speed import extend_ssp_below_data
+        p = SoundSpeedProfile(
+            depths=np.array([1000.0, 5500.0]),
+            data=np.array([[1484.0, 1500.0], [1551.05, 1575.0]]),
+            ranges=np.array([0.0, 50.0]), shape='measured')
+        with _w.catch_warnings():
+            _w.simplefilter('ignore')
+            out = extend_ssp_below_data(p, 8801.0, latitude=29.78)
+        cold, warm = np.asarray(out.data)[-1, :]
+        assert (cold - 1551.05) - (warm - 1575.0) > 0.5, (
+            f"increments {cold - 1551.05:.2f} and {warm - 1575.0:.2f} m/s — "
+            f"dc/dz falls with temperature, so the colder column gains more")

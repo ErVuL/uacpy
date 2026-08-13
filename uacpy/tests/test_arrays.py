@@ -165,3 +165,47 @@ class TestPowerlessCovariance:
                           steering_vectors(np.arange(8) * 0.75, angles, 1000.0))
         assert np.all(np.isfinite(P))
         assert angles[np.argmax(P)] == pytest.approx(15.0, abs=0.5)
+
+
+@pytest.mark.requires_binary
+def test_look_direction_agrees_with_an_independently_propagated_field():
+    """A downgoing arrival is reported at *positive* declination.
+
+    The field comes from Bellhop, so its depth-phase sign is the one the solver
+    produces under the Acoustics-Toolbox ``exp(+i*omega*t)`` convention
+    (``KrakenField/EvaluateMod.f90:41``) with depth positive down
+    (``Bellhop/bellhop.f90:453``), rather than one this module assumes. A test
+    that builds its snapshots from :func:`steering_vectors` cannot detect a
+    mirrored look direction, because the same convention appears on both sides
+    and the error cancels.
+    """
+    from uacpy import (Environment, Source, Receiver, Bellhop,
+                       SoundSpeedProfile, BoundaryProperties)
+    from uacpy.acoustic_signal import beamform
+
+    c, freq, z_src, range_m = 1500.0, 200.0, 200.0, 10_000.0
+    z_rcv = np.arange(1400.0, 1601.0, 3.0)
+    env = Environment(
+        bathymetry=5000.0,
+        ssp=SoundSpeedProfile.from_pairs([(0.0, c), (5000.0, c)]),
+        bottom=BoundaryProperties(acoustic_type='half-space',
+                                  sound_speed=1800.0, density=1.8,
+                                  attenuation=0.5),
+    )
+    field = Bellhop(beam_type='G', n_beams=4001, alpha=(6.0, 9.0)).compute_tl(
+        env, Source(depths=z_src, frequencies=freq),
+        Receiver(depths=z_rcv, ranges=[range_m]))
+    p = np.asarray(field.data).ravel()
+
+    # The narrow fan traces the direct eigenray only, so this is one plane wave
+    # and the array sees a single unambiguous arrival angle.
+    amp = np.abs(p)
+    assert amp.max() / amp.min() < 1.05
+
+    expected_deg = np.degrees(np.arctan2(z_rcv.mean() - z_src, range_m))
+    assert expected_deg > 0.0                      # receivers below the source
+
+    angles = np.arange(-20.0, 20.01, 0.05)
+    out = beamform(p, z_rcv, freq, angles=angles, c=c)
+    peak_deg = out.angles[np.argmax(out.snr)]
+    assert peak_deg == pytest.approx(expected_deg, abs=0.5)

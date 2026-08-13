@@ -284,33 +284,49 @@ def make_noise_waveform(
 
 
 def _bandpass_design(fc: float, bandwidth: float, sample_rate: float):
-    """4th-order Butterworth bandpass ``(b, a)`` for ``fc +/- bandwidth/2``.
+    """4th-order Butterworth bandpass, as second-order sections, for
+    ``fc +/- bandwidth/2``.
 
-    Band edges are clamped to ``[1 Hz, sample_rate/2 - 1]`` and to normalised
-    frequencies in ``(0, 1)``, which ``scipy.signal.butter`` requires. The two
-    lower clamps differ (0.01 and 0.02) so that a band pushed entirely below
-    the grid still comes back with ``low < high`` rather than a degenerate
-    zero-width band.
+    ``scipy.signal.butter`` requires only ``0 < Wn < 1``, so that is the sole
+    constraint applied. A band whose edges fall outside the sample rate is
+    refused rather than moved: substituting a different band silently returns
+    noise centred somewhere the caller did not ask for, while
+    ``_noise_equivalent_bandwidth`` scales the level from the *same* substituted
+    design — so the result is internally consistent and nothing downstream
+    notices.
     """
     from scipy.signal import butter
-    flow = max(fc - bandwidth / 2, 1.0)
-    fhigh = min(fc + bandwidth / 2, sample_rate / 2 - 1)
-    nyquist = sample_rate / 2
-    low = max(min(flow / nyquist, 0.99), 0.01)
-    high = max(min(fhigh / nyquist, 0.99), 0.02)
-    return butter(4, [low, high], btype='band')
+    nyquist = sample_rate / 2.0
+    flow = fc - bandwidth / 2.0
+    fhigh = fc + bandwidth / 2.0
+    if not (0.0 < flow < fhigh < nyquist):
+        raise ConfigurationError(
+            f"band {flow:g}-{fhigh:g} Hz (fc={fc:g}, bandwidth={bandwidth:g}) "
+            f"is not realisable at sample_rate={sample_rate:g} Hz; it must sit "
+            f"strictly inside 0-{nyquist:g} Hz.",
+            remediation="Raise sample_rate, or move fc / narrow bandwidth so "
+                        "the whole band fits below Nyquist.",
+        )
+    # Second-order sections, not transfer-function coefficients: a narrow band
+    # at a high sample rate sits at a normalised frequency of order 1e-3, where
+    # the (b, a) form loses so much precision that the response collapses. That
+    # numerical failure is what the old 0.01/0.02 normalised-frequency clamps
+    # were hiding — they kept the design away from the unstable region by
+    # silently moving the band.
+    return butter(4, [flow / nyquist, fhigh / nyquist], btype='band',
+                  output='sos')
 
 
-def _noise_equivalent_bandwidth(b, a, sample_rate: float, n_freq: int = 8192):
-    """One-sided noise-equivalent bandwidth (Hz) of ``filtfilt(b, a, ...)``.
+def _noise_equivalent_bandwidth(sos, sample_rate: float, n_freq: int = 8192):
+    """One-sided noise-equivalent bandwidth (Hz) of ``sosfiltfilt(sos, ...)``.
 
-    ``filtfilt`` applies ``(b, a)`` twice, so the power response is ``|H|**4``
+    ``sosfiltfilt`` applies the cascade twice, so the power response is ``|H|**4``
     and the equivalent rectangular bandwidth is ``∫|H|**4 df / max|H|**4``. This
     is what a unit-RMS band-limited realisation actually spreads its power over
     — narrower than the nominal -3 dB ``bandwidth``.
     """
-    from scipy.signal import freqz
-    f, h = freqz(b, a, worN=int(n_freq), fs=float(sample_rate))
+    from scipy.signal import sosfreqz
+    f, h = sosfreqz(sos, worN=int(n_freq), fs=float(sample_rate))
     p = np.abs(h) ** 4
     return float(np.trapezoid(p, f) / p.max())
 
@@ -389,7 +405,7 @@ def add_noise(
     # ``bandwidth``), so multiplying by ``A = RMS`` puts the in-band density at
     # exactly the requested level.
     neb = _noise_equivalent_bandwidth(
-        *_bandpass_design(fc, bandwidth, sample_rate), sample_rate)
+        _bandpass_design(fc, bandwidth, sample_rate), sample_rate)
     A = np.sqrt(neb * 10.0 ** (noise_level / 10.0))
 
     # Generate band-limited noise — independent realisation per receiver
@@ -400,12 +416,12 @@ def add_noise(
 
     if timeseries.ndim == 1:
         noise_ts = make_bandlimited_noise(
-            fc, bandwidth, T, sample_rate, rng=rng)[0] * A
+            fc, bandwidth, T, sample_rate, rng=rng)[1] * A
         rts = timeseries * SL + noise_ts
     else:
         n_rcv = timeseries.shape[1]
         noise_block = np.column_stack([
-            make_bandlimited_noise(fc, bandwidth, T, sample_rate, rng=rng)[0]
+            make_bandlimited_noise(fc, bandwidth, T, sample_rate, rng=rng)[1]
             for _ in range(n_rcv)
         ]) * A
         rts = timeseries * SL + noise_block
@@ -458,14 +474,14 @@ def make_bandlimited_noise(
     >>> t, noise = make_bandlimited_noise(10000.0, 5000.0, 1.0, 48000.0)
     >>> print(f"Generated {len(noise)} samples")
     """
-    from scipy.signal import filtfilt
+    from scipy.signal import sosfiltfilt
     n_samples = int(duration * sample_rate)
     time = np.arange(n_samples) / sample_rate
     rng = np.random.default_rng() if rng is None else rng
     noise = rng.standard_normal(n_samples)
 
-    b, a = _bandpass_design(fc, bandwidth, sample_rate)
-    filtered_noise = filtfilt(b, a, noise)
+    sos = _bandpass_design(fc, bandwidth, sample_rate)
+    filtered_noise = sosfiltfilt(sos, noise)
 
     # Normalise to unit RMS so callers can scale by the target RMS
     # directly (e.g. RMS = √(BW · 10^(PSD_dB/10)) for a target one-sided

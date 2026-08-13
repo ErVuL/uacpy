@@ -16,6 +16,7 @@ import copy as _copy
 import numpy as np
 
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.core.constants import DECK_RANGE_RESOLUTION_M
 from uacpy.core._carrier_validate import (
     _require_non_negative, _require_strictly_increasing,
 )
@@ -129,7 +130,8 @@ class _RangeProfile:
         _require_non_negative(self.ranges, f"{cls} ranges", hint="metres")
         self._validate_values()
         if self.ranges.size > 1:
-            _require_strictly_increasing(self.ranges, f"{cls}.ranges")
+            _require_strictly_increasing(
+                self.ranges, f"{cls}.ranges", min_step=DECK_RANGE_RESOLUTION_M)
 
     def __repr__(self) -> str:
         v = self._values

@@ -90,10 +90,10 @@ class TestModal:
         _, x2 = unwarp_signal(w, tw, FS, 500.0)
         # Both directions resample by linear interpolation onto a nonlinear
         # time axis, so the round trip is lossy by construction; the loss is
-        # worst near t_w = 0, where the Jacobian sqrt(t/t_w) diverges and is
-        # floored at one sample. The 10-sample trim drops that end, and 0.9
-        # asks that the waveform survive in shape — it is not a round-trip
-        # bound and cannot be tightened without changing the interpolator.
+        # worst near t_w = 0, where the Jacobian is floored at one sample. The
+        # 10-sample trim drops that end, and 0.9 asks that the waveform survive
+        # in shape — it is not a round-trip bound. Raise ``oversample`` to
+        # tighten it (see TestWarpIsUnitary).
         m = min(x.size, x2.size)
         corr = np.corrcoef(x[10:m - 10], x2[10:m - 10])[0, 1]
         assert corr > 0.9
@@ -332,3 +332,65 @@ class TestCWT:
         f, W = cwt(np.zeros(512), FS, wavelet="dog", order=order, n_freqs=16)
         with pytest.raises(ConfigurationError):
             inverse_cwt(W, f, FS, wavelet="dog", order=order)
+
+
+class TestWarpIsUnitary:
+    """``t_w = sqrt(t^2 - t_r^2)`` gives ``t = sqrt(t_w^2 + t_r^2)`` and hence
+    ``dt/dt_w = t_w / t``, so the energy-preserving weight is ``sqrt(t_w / t)``.
+    Its reciprocal inflates energy by a factor that grows with range — ~30x at
+    20 km — which the range-independence test below is what detects.
+
+    Bonnel et al. (2013) is not in the corpus here, so the weight is pinned by
+    the conservation law the docstring itself claims rather than by citation.
+    """
+
+    FS = 2000.0
+    N = 2048
+
+    def _signal(self):
+        return np.random.default_rng(0).standard_normal(self.N)
+
+    def test_the_jacobian_matches_a_numerical_derivative(self):
+        """Compared on the interior: ``np.gradient`` uses a one-sided stencil at
+        the ends, and the curvature of ``t(t_w)`` near ``t_w -> 0`` makes that
+        first point disagree by O(1) however fine the grid. The interior agrees
+        to ~1e-5, which the reciprocal weight misses by a factor of ~8 here."""
+        t_r = 0.6667
+        tw = np.linspace(1.0 / self.FS, 1.0, 400)
+        t = np.sqrt(tw ** 2 + t_r ** 2)
+        numerical = np.gradient(t, tw)[5:-5]
+        np.testing.assert_allclose(numerical, (tw / t)[5:-5], rtol=1e-4)
+        # The shipped reciprocal is nowhere near it.
+        assert not np.allclose(numerical, (t / tw)[5:-5], rtol=0.5)
+
+    def test_energy_ratio_is_range_independent(self):
+        """The discriminating property: a wrong Jacobian scales with range."""
+        x = self._signal()
+        ratios = []
+        for range_m in (200.0, 1000.0, 5000.0, 20_000.0):
+            w, tw = warp_signal(x, self.FS, range_m, c=1500.0)
+            t = range_m / 1500.0 + np.arange(self.N) / self.FS
+            ratios.append(float(np.trapezoid(w ** 2, tw)
+                                / np.trapezoid(x ** 2, t)))
+        assert max(ratios) / min(ratios) < 1.15, f"range-dependent: {ratios}"
+
+    def test_the_inverse_returns_the_input_grid_at_any_oversample(self):
+        """The output length follows the warped axis' extent, not ``w.size``."""
+        x = self._signal()
+        for k in (1, 2, 4, 8):
+            w, tw = warp_signal(x, self.FS, 1000.0, c=1500.0, oversample=k)
+            assert w.size == self.N * k
+            _t, back = unwarp_signal(w, tw, self.FS, 1000.0, c=1500.0)
+            assert back.size == self.N
+
+    def test_oversampling_tightens_the_round_trip(self):
+        """The map is expansive, so the warped grid is the limiting resolution;
+        the docstring's claim that the error halves per doubling is the contract."""
+        x = self._signal()
+        errs = []
+        for k in (1, 2, 4, 8):
+            w, tw = warp_signal(x, self.FS, 1000.0, c=1500.0, oversample=k)
+            _t, back = unwarp_signal(w, tw, self.FS, 1000.0, c=1500.0)
+            errs.append(float(np.linalg.norm(back - x) / np.linalg.norm(x)))
+        assert all(b < a for a, b in zip(errs, errs[1:])), errs
+        assert errs[-1] < errs[0] / 4.0

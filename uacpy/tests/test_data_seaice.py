@@ -33,7 +33,13 @@ def synthetic_model(monkeypatch):
     y = g['y0'] - 2 * g['px']
     north = np.zeros((12, 5, 6), dtype=np.float32)
     north[2, 2, 3] = 0.7                          # March, that pixel
-    north[5, 2, 3] = np.nan                       # June, land at that pixel
+    # June: one unobserved pixel amid observed water — NSIDC's coastline class,
+    # withheld for land spillover, not because the cell is dry.
+    north[5] = 0.8
+    north[5, 2, 3] = np.nan
+    # September: nothing observed anywhere, which is what genuine land looks
+    # like once the climatology has averaged the flag codes away.
+    north[8] = np.nan
     model = {'tf': {'N': _FakeTF(x, y), 'S': _FakeTF(0.0, 0.0)},
              'N': north, 'S': np.zeros((12, 5, 6), dtype=np.float32)}
     monkeypatch.setattr(seaice_local, '_model', lambda: model)
@@ -51,8 +57,20 @@ def test_concentration_by_date(synthetic_model):
 
 
 def test_land_raises(synthetic_model):
-    with pytest.raises(DataFetchError, match='land / coast'):
-        seaice_local.fetch_sea_ice_concentration((85.0, 0.0), month=6)
+    """No observed cell within the search radius means the point is inland."""
+    with pytest.raises(DataFetchError, match='inland'):
+        seaice_local.fetch_sea_ice_concentration((85.0, 0.0), month=9)
+
+
+def test_a_coastal_spillover_cell_takes_its_observed_neighbour(synthetic_model):
+    """NSIDC withholds a concentration at its coastline class because of land
+    spillover in the passive-microwave footprint, not because the cell is dry,
+    and the averaged climatology cannot tell that class from true land — both are
+    NaN. Reading such a cell as open water put a pressure-release surface in the
+    middle of pack ice: measured at Tiksi (71.65, 128.90) and Pond Inlet
+    (72.70, -77.95), both of which sit in 93-99 % March ice."""
+    got = seaice_local.fetch_sea_ice_concentration((85.0, 0.0), month=6)
+    assert got == pytest.approx(0.8)
 
 
 def test_out_of_grid_is_ice_free(monkeypatch):
@@ -113,10 +131,13 @@ def test_sea_ice_surface_nan_is_open_water():
 
 
 def test_fetch_sea_ice_surface(synthetic_model):
-    # 0.7 at the March pixel ≥ threshold → ice; June is land → raises.
+    # 0.7 at the March pixel >= threshold -> ice. June's unobserved pixel takes
+    # its 0.8 neighbour, so it is ice too. September has nothing observed
+    # anywhere -> inland -> raises.
     assert seaice_local.fetch_sea_ice_surface((85.0, 0.0), month=3) is not None
-    with pytest.raises(DataFetchError, match='land / coast'):
-        seaice_local.fetch_sea_ice_surface((85.0, 0.0), month=6)
+    assert seaice_local.fetch_sea_ice_surface((85.0, 0.0), month=6) is not None
+    with pytest.raises(DataFetchError, match='inland'):
+        seaice_local.fetch_sea_ice_surface((85.0, 0.0), month=9)
 
 
 def test_download_builds_climatology(tmp_path, monkeypatch):

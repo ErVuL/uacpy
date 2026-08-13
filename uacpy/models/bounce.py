@@ -146,8 +146,10 @@ class Bounce(PropagationModel):
     - ``rmax=None`` → ``receiver.range_max`` (or 10 km if 0).
     - ``c_low`` / ``c_high`` constructor defaults
       (``DEFAULT_C_MIN`` / ``DEFAULT_C_MAX_UNBOUNDED``) tabulate the full
-      0–90° grazing span; raise ``c_low`` or lower ``c_high`` to
-      concentrate the samples on a narrower angular band.
+      0–90° grazing span; lower ``c_high`` to concentrate the samples on a
+      narrower angular band. ``c_low`` cannot be raised past the water
+      sound speed — that truncates the grazing wedge instead
+      (``run()`` refuses it).
     - TopOpt position 4 reads ``env.absorption``.
 
     With ``verbose='info'`` the resolved ``rmax`` is logged.
@@ -238,7 +240,12 @@ class Bounce(PropagationModel):
         c_low : float, optional
             Minimum phase velocity (m/s) for tabulation. Default: 1400.
             Must be strictly positive (BOUNCE rejects ``c_low <= 0`` — the
-            angular grid is derived from ``kx = omega/c``).
+            angular grid is derived from ``kx = omega/c``) and must not
+            exceed the water sound speed at the seafloor, which BOUNCE takes
+            as its reference speed (``bounce.f90:186-195``): above it the
+            table starts at ``atan2(sqrt(k0**2 - kMax**2), kMax)`` rather
+            than 0 deg and the grazing wedge is unrecoverable. ``run()``
+            raises rather than emit such a table.
         c_high : float, optional
             Maximum phase velocity (m/s) for tabulation. Default: 1e9, which
             trips ``bounce.f90:47``'s ``IF ( cHigh > 1.0E6 ) kMin = 0.0`` and
@@ -315,6 +322,40 @@ class Bounce(PropagationModel):
         would reject and warn about geometry that never reaches the binary.
         ``receiver`` is read only to auto-derive ``rmax``.
         """
+
+    def _reject_c_low_above_the_water(self, env: Environment) -> None:
+        """``c_low`` above the water sound speed drops the grazing wedge.
+
+        ``bounce.f90:46`` sets ``kMax = omega/cLow`` and ``:195`` takes
+        ``k0 = omega/c0`` with ``c0 = HSTop%cP`` — which
+        ``write_bounce_input_file`` fills with the water sound speed at the
+        seafloor. ``:198-210`` computes ``theta = ATAN2( kz, kx )`` only
+        ``WHERE( k0 > kx )``, so when ``cLow > c0`` the table simply starts at
+        ``ATAN2( sqrt(k0**2 - kMax**2), kMax ) > 0`` instead of 0 deg. Every
+        consumer then substitutes ``R = 0, phi = 0`` below that first angle
+        (``misc/RefCoef.f90:137-141``, whose warning goes to the ``.prt`` only),
+        and ``Bellhop/bellhop.f90:688-693`` applies it as
+        ``ray2D%Amp = Amp * RInt%R``, annihilating the ray on its first bounce.
+        ``c_low`` 1.3 % above the water speed already costs a mean 5.1 dB /
+        max 25 dB against the same environment run as a direct half-space.
+        """
+        c_ref = float(np.atleast_1d(env.get_sound_speed(env.depth))[0])
+        if self.c_low <= c_ref:
+            return
+        theta_min = np.degrees(np.arctan2(
+            np.sqrt(max(1.0 / c_ref ** 2 - 1.0 / self.c_low ** 2, 0.0)),
+            1.0 / self.c_low))
+        raise ConfigurationError(
+            f"Bounce(c_low={self.c_low}) exceeds the water sound speed at the "
+            f"seafloor ({c_ref:.1f} m/s), which BOUNCE uses as its reference "
+            f"speed: the table would start at {theta_min:.2f} deg grazing "
+            f"instead of 0, and every consumer silently reads R = 0 below "
+            f"that.",
+            remediation=f"Set c_low <= {c_ref:.1f} m/s (the default "
+                        f"{DEFAULT_C_MIN:.0f} m/s covers the full grazing "
+                        f"span for ordinary sea water); to concentrate the "
+                        f"samples on a narrower band, lower c_high instead.",
+        )
 
     def _validate_phase_speed_bounds(self) -> None:
         """Phase-velocity bounds invariant, enforced at construction AND at
@@ -506,6 +547,7 @@ class Bounce(PropagationModel):
 
         env = self._project_environment(env)
         self.validate_inputs(env, source, receiver, run_mode=run_mode)
+        self._reject_c_low_above_the_water(env)
 
         seabed_type = env.bottom.halfspace_at(range=0.0).acoustic_type
         if seabed_type == 'precalc':

@@ -206,19 +206,34 @@ def _wavenumbers_for_frequency(grn_data: Dict[str, Any], freq: float) -> np.ndar
 def _stab_attenuation(grn_data: Dict[str, Any], k: np.ndarray) -> float:
     """Stabilising attenuation to use in the integrand.
 
-    ``fieldsco.m:113-115`` overrides ``atten = Δk`` for SCOOTER (the solver
-    writes one ``atten`` to the header, but sets it per frequency as
-    ``Atten = Deltak``, ``scooter.f90:129``). The override is unconditional
-    there and here, so a run that zeroed the stabilising attenuation with
-    ``TopOpt(7:7) = '0'`` (``scooter.f90:130``) still gets ``Δk`` back. For
-    SPARC this is 0. For other titles we trust the header value.
+    SCOOTER evaluates the FE solve on the contour ``k + i*Atten``
+    (``scooter.f90:581``), so the inverse transform has to undo that offset with
+    ``exp(+Atten*r)`` — which means using the ``Atten`` the solver actually used.
+
+    ``scooter.f90:122-125`` recomputes ``Deltak = (kMax - kMin)/(Nk - 1)`` inside
+    the frequency loop from ``kMin = omega/cHigh``, so ``Deltak`` — and hence
+    ``Atten`` — scales with frequency, while ``scooter.f90:133`` writes the header
+    only for ``ifreq == 1``. That is why ``fieldsco.m:113-115`` re-derives
+    ``Atten`` from the file's own per-frequency ``k`` vector instead of reading
+    the header, and it is right to for a broadband run.
+
+    But ``scooter.f90:130`` zeroes ``Atten`` for every frequency when
+    ``TopOpt(7:7) == '0'``, and a zero header is therefore valid at every
+    frequency. Re-deriving ``Δk`` there multiplies a Green's function computed on
+    the real axis by ``exp(+Δk*r)``, biasing TL by ``8.686*Δk*r`` dB — 6.8 dB at
+    the far receiver on the default ``rmax_multiplier = 2.0``. ``fieldsco.m`` has
+    no way to know the flag was set; uacpy wrote it, and the value the solver used
+    is in the header, so use it.
+
+    For SPARC this is 0.  For other titles the header is taken as given.
     """
     if grn_data["is_sparc"]:
         return 0.0
     title = grn_data["title"].upper()
-    if title.startswith('SCOOTER'):
-        return float(k[1] - k[0]) if len(k) > 1 else float(grn_data["atten"])
-    return float(grn_data["atten"])
+    header_atten = float(grn_data["atten"])
+    if title.startswith('SCOOTER') and header_atten != 0.0 and len(k) > 1:
+        return float(k[1] - k[0])
+    return header_atten
 
 
 def _hanning_taper(k: np.ndarray, freq: float,

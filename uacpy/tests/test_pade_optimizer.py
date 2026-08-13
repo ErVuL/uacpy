@@ -14,7 +14,7 @@ from uacpy.models._pade_optimizer import (
     optimal_c0,
     numerov_error,
     optimize_grid,
-    rams_dz_floor,
+    rams_dz_shear_cap,
 )
 
 
@@ -172,21 +172,35 @@ class TestGridError:
         assert grid_error(dr=res['dr'], dz=res['dz'], **self._KW) == \
             pytest.approx(res['predicted_error'], rel=1e-12)
 
-    def test_reports_the_floor_raised_grid_honestly(self):
-        """Raising dz to the rams shear floor costs orders of magnitude."""
+    def test_reports_a_bound_adjusted_grid_honestly(self):
+        """``grid_error`` must describe the grid actually marched.
+
+        RAM bounds the optimizer's Δz afterwards, so the optimizer's own
+        ``predicted_error`` no longer applies and has to be recomputed.
+        """
         res = optimize_grid(eps=1e-3, **self._KW)
-        floor = rams_dz_floor(c_shear_min=400.0, freq=50.0)
-        shipped = grid_error(dr=res['dr'], dz=floor, **self._KW)
-        assert floor > res['dz']
-        assert shipped > 1000.0 * res['predicted_error']
+        cap = rams_dz_shear_cap(c_shear_min=400.0, freq=50.0)
+        shipped = grid_error(dr=res['dr'], dz=cap, **self._KW)
+        assert cap != pytest.approx(res['dz'])
+        assert shipped != pytest.approx(res['predicted_error'], rel=1e-6)
 
 
-class TestRamsDzFloor:
+class TestRamsDzShearCap:
 
     def test_zero_for_fluid(self):
-        assert rams_dz_floor(c_shear_min=0.0, freq=100.0) == 0.0
+        assert rams_dz_shear_cap(c_shear_min=0.0, freq=100.0) == 0.0
 
-    def test_scales_with_lambda_s(self):
-        """Floor ≈ 0.55 × λ_s = 0.55 × c_s / f."""
-        f = rams_dz_floor(c_shear_min=400.0, freq=100.0, factor=0.55)
-        assert abs(f - 0.55 * 4.0) < 1e-9
+    def test_resolves_lambda_s(self):
+        """Cap = λ_s / 14 = c_s / (14 f), Collins (1991)'s coarsest own grid."""
+        dz = rams_dz_shear_cap(c_shear_min=400.0, freq=100.0)
+        assert abs(dz - 4.0 / 14.0) < 1e-9
+
+    def test_is_far_finer_than_a_fraction_of_the_shear_wavelength(self):
+        """Direction guard. Collins (1991) resolves λ_s at 14-85 points per
+        wavelength in every worked example, so the bound must sit well below
+        λ_s — a grid at 0.55 λ_s makes the rams0.5 march diverge (measured
+        134 dB against OASES on Collins' own example D)."""
+        cs, freq = 800.0, 25.0
+        lam_s = cs / freq
+        assert rams_dz_shear_cap(cs, freq) <= lam_s / 14.0 * (1.0 + 1e-9)
+        assert rams_dz_shear_cap(cs, freq) < 0.55 * lam_s / 4.0

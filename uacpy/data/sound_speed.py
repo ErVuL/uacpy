@@ -28,6 +28,7 @@ import warnings
 from typing import List, Optional, Tuple, Union
 
 import numpy as np
+from scipy.optimize import brentq
 
 from uacpy.core.acoustics import soundspeed_unesco, soundspeed_delgrosso
 from uacpy.core.environment import SoundSpeedProfile
@@ -565,19 +566,59 @@ def _parse_dods_ascii(text: str) -> Tuple[List[float], Optional[List[float]]]:
     return values, depths
 
 
-# Canonical deep-ocean sound-speed gradient (s^-1). Below the thermocline the
-# profile is dominated by the pressure term and is very nearly linear; this is
-# the fallback when a profile's own deepest segment is too noisy to trust.
-ADIABATIC_GRADIENT = 0.0165
-# Physically plausible band for a measured deep gradient. Outside this the
-# last segment is noise (or an inversion) rather than the adiabatic trend.
-_ADIABATIC_BAND = (0.005, 0.030)
+# Reference salinity for the extrapolation below. Medwin & Clay (Fundamentals
+# of Acoustical Oceanography 3.3.5) and Jensen et al. (Computational Ocean
+# Acoustics, prob. 1.1) both take S = 35 for the deep ocean. The extrapolated
+# increment moves by under 0.05 m/s over a 3.3 km span across S_ref in
+# 33..36, because the inversion absorbs the difference into the temperature.
+_DEEP_REFERENCE_SALINITY = 35.0
+# Effective-temperature search bracket, wider than any ocean water mass:
+# UNESCO spans 1435-1555 m/s across it at the surface. Sub-zero temperatures
+# are in range because polar deep water reaches -1.9 C and the profiles being
+# extended were themselves built by evaluating UNESCO at those temperatures.
+_EFFECTIVE_T_BRACKET_DEGC = (-3.0, 35.0)
+# Leroy & Parthiot's own reference latitude, for callers that have none. The
+# pressure conversion is the only latitude-dependent step and the increment
+# moves 0.33 m/s over a 3.3 km span from equator to pole.
+_REFERENCE_LATITUDE_DEG = 45.0
 # Below this, holding the last value is close enough to be not worth a warning:
-# 50 m at the adiabatic gradient is 0.8 m/s.
+# 50 m at the deep gradient is 0.9 m/s.
 _EXTRAPOLATION_WARN_M = 50.0
 
 
-def extend_ssp_below_data(ssp, depth_max: float):
+def _deep_increment(c_deepest: float, z_from: float, z_to: float,
+                    latitude: float) -> float:
+    """UNESCO sound-speed increment from ``z_from`` down to ``z_to``.
+
+    Extrapolation only ever happens below the deepest analysed level, so in the
+    deep isothermal layer, where temperature is nearly constant and sound speed
+    rises almost linearly under the pressure term alone (Stergiopoulos,
+    *Advanced Signal Processing Handbook* 10.2). The increment is therefore
+    UNESCO at fixed T/S. The temperature is not assumed: it is inverted from the
+    column's own deepest sound speed, which holds the increment to 0.07 m/s over
+    a 3.3 km span against UNESCO at the true T/S (worst case over T in -1..6 C,
+    S in 33..35.5, z in 1..8 km). Any single gradient is 7.3 m/s out over that
+    span, because dc/dz is itself a function of depth: 0.0168 s^-1 at 1 km
+    against 0.0189 s^-1 at 8 km.
+    """
+    p_from = float(depth_to_pressure_dbar(z_from, latitude))
+    p_to = float(depth_to_pressure_dbar(z_to, latitude))
+    t_lo, t_hi = _EFFECTIVE_T_BRACKET_DEGC
+    salinity = _DEEP_REFERENCE_SALINITY
+    if c_deepest <= soundspeed_unesco(t_lo, salinity, p_from):
+        t_eff = t_lo                     # unphysical column: clamp, stay finite
+    elif c_deepest >= soundspeed_unesco(t_hi, salinity, p_from):
+        t_eff = t_hi
+    else:
+        t_eff = brentq(
+            lambda t: soundspeed_unesco(t, salinity, p_from) - c_deepest,
+            t_lo, t_hi, xtol=1e-8)
+    return float(soundspeed_unesco(t_eff, salinity, p_to)
+                 - soundspeed_unesco(t_eff, salinity, p_from))
+
+
+def extend_ssp_below_data(ssp, depth_max: float,
+                          latitude: float = _REFERENCE_LATITUDE_DEG):
     """Extend ``ssp`` down to ``depth_max`` along its own deep gradient.
 
     Bathymetry (GEBCO, 15 arc-sec) and analysed T/S (WOA23, 1 deg) come from
@@ -589,10 +630,10 @@ def extend_ssp_below_data(ssp, depth_max: float):
     so a held profile is 61 m/s (3.9%) slow over the bottom 3.3 km — enough to
     move ray turning depths and convergence-zone structure.
 
-    The gradient is taken from each column's own deepest segment, which tracks
-    the local water mass (measured 0.0185 s^-1 against a UNESCO-derived 0.01844
-    at that trench point) and falls back to :data:`ADIABATIC_GRADIENT` when
-    that segment is absent or outside :data:`_ADIABATIC_BAND`.
+    The increment is :func:`_deep_increment`, evaluated per column from that
+    column's own deepest sound speed, so it carries the depth dependence of the
+    pressure term rather than a single gradient. At the trench point above it
+    reproduces the 1611.93 m/s reference to 0.01 m/s.
     """
     depths = np.asarray(ssp.depths, dtype=float)
     last = float(depths[-1])
@@ -601,17 +642,10 @@ def extend_ssp_below_data(ssp, depth_max: float):
 
     data = np.asarray(ssp.data, dtype=float)
     span = depth_max - last
-    lo, hi = _ADIABATIC_BAND
     new_row = np.empty(data.shape[1], dtype=float)
     for j in range(data.shape[1]):
-        gradient = ADIABATIC_GRADIENT
-        if depths.size >= 2:
-            dz = last - float(depths[-2])
-            if dz > 0:
-                measured = (data[-1, j] - data[-2, j]) / dz
-                if lo <= measured <= hi:
-                    gradient = measured
-        new_row[j] = data[-1, j] + gradient * span
+        new_row[j] = data[-1, j] + _deep_increment(
+            float(data[-1, j]), last, depth_max, latitude)
 
     if span > _EXTRAPOLATION_WARN_M:
         warnings.warn(

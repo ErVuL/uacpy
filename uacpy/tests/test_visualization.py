@@ -681,3 +681,274 @@ def test_plot_environment_rejects_non_environment():
     from uacpy.visualization.plots.environment import _plot_environment
     with pytest.raises(ConfigurationError, match="Environment"):
         _plot_environment("not an environment")
+
+
+class TestPlotFieldSingletonAxes:
+    """A length-1 axis has no neighbours for ``shading='nearest'`` to build cell
+    edges from, so every heatmap quad collapses to zero extent and the panel
+    renders empty — indistinguishable from an all-NaN field. Models pass the
+    receiver axes through verbatim and ``Receiver`` keeps a scalar as a length-1
+    array, so a single-receiver-depth run reaches this."""
+
+    @staticmethod
+    def _field(n_depth, n_range):
+        d = np.linspace(5.0, 95.0, n_depth)
+        r = np.linspace(100.0, 5000.0, n_range)
+        data = 50.0 + 10.0 * np.log10(np.maximum(r, 1.0))[None, :]
+        return Field(data=np.broadcast_to(data, (n_depth, n_range)).copy(),
+                     coords={'depth': d, 'range': r},
+                     model='Synth', frequencies=100.0)
+
+    @staticmethod
+    def _drawn_pixels(fig):
+        fig.canvas.draw()
+        rgba = np.asarray(fig.canvas.buffer_rgba()).astype(int)
+        return int((np.ptp(rgba[..., :3], axis=-1) > 12).sum())
+
+    def test_single_depth_plots_a_range_cut_not_an_empty_mesh(self):
+        fig, ax = plots.plot_field(self._field(1, 7))
+        assert len(ax.lines) == 1
+        assert not [c for c in ax.collections if hasattr(c, 'get_coordinates')]
+        assert ax.get_xlabel() == 'Range (km)'
+        assert ax.get_ylabel() == 'TL (dB)'
+        assert self._drawn_pixels(fig) > 0
+        plt.close(fig)
+
+    def test_single_range_plots_a_depth_profile(self):
+        fig, ax = plots.plot_field(self._field(5, 1))
+        assert len(ax.lines) == 1
+        assert ax.get_ylabel() == 'Depth (m)'
+        assert ax.yaxis_inverted()
+        assert self._drawn_pixels(fig) > 0
+        plt.close(fig)
+
+    def test_a_single_cell_is_still_visible(self):
+        """One sample gives a line nothing to join, so it needs a marker."""
+        fig, ax = plots.plot_field(self._field(1, 1))
+        assert self._drawn_pixels(fig) > 0
+        plt.close(fig)
+
+    def test_the_squeezed_axis_is_recorded_in_pinned(self):
+        """Dropping an axis must go through ``isel`` so the value is not lost."""
+        fig, ax = plots.plot_field(self._field(1, 7))
+        plt.close(fig)
+        squeezed = self._field(1, 7).isel(depth=0)
+        assert 'depth' in squeezed.pinned
+
+    def test_a_full_grid_still_uses_the_heatmap(self):
+        fig, ax = plots.plot_field(self._field(5, 7))
+        mesh = [c for c in ax.collections if hasattr(c, 'get_coordinates')]
+        assert len(mesh) == 1
+        assert not ax.lines
+        co = mesh[0].get_coordinates()
+        assert float(co[..., 1].max() - co[..., 1].min()) > 0.0
+        plt.close(fig)
+
+
+class TestImshowPanelsAreEdgeAligned:
+    """``imshow`` stretches the array onto the OUTER edges of ``extent``, so
+    passing the first and last cell *centres* contracts the field by
+    ``(N-1)/N`` about its middle — zero error at the centre, half a rendered
+    pixel at the edges. That is where every overlay drawn in true coordinates
+    (graticule, contours, coastline, markers, the analytic sound cone)
+    disagrees with the data it annotates.
+
+    Each case places its feature **off-centre** — a contraction has no error at
+    the centre by construction — and uses **non-square** grids so a
+    transposition raises instead of silently passing.
+    """
+
+    @staticmethod
+    def _centres(ax, nx, ny, y_down=False):
+        """Coordinates imshow actually gives each pixel centre."""
+        e = ax.images[-1].get_extent()
+        px = e[0] + (np.arange(nx) + 0.5) * (e[1] - e[0]) / nx
+        # origin='upper' puts row 0 at the top of the extent.
+        y0, y1 = (e[3], e[2]) if y_down else (e[2], e[3])
+        py = y0 + (np.arange(ny) + 0.5) * (y1 - y0) / ny
+        return px, py
+
+    def test_relief_map_registers_with_its_own_coordinates(self):
+        from uacpy.visualization.plots.maps import _draw_depth
+        lons = np.linspace(5.0, 9.0, 41)
+        lats = np.linspace(40.0, 44.0, 33)          # non-square on purpose
+        LO, LA = np.meshgrid(lons, lats)
+        i, j = 2, 3                                  # off-centre, near a corner
+        depth = 3000.0 - 2000.0 * np.exp(
+            -(((LO - lons[i]) / 0.15) ** 2 + ((LA - lats[j]) / 0.15) ** 2))
+        fig, ax = plt.subplots()
+        _draw_depth(ax, lons, lats, depth, 'viridis', True, 15.0, 1)
+        px, py = self._centres(ax, lons.size, lats.size)
+        assert px[i] == pytest.approx(lons[i], abs=1e-9)
+        assert py[j] == pytest.approx(lats[j], abs=1e-9)
+        plt.close(fig)
+
+    def test_relief_and_flat_branches_agree(self):
+        """The two branches of ``_draw_depth`` must place data identically."""
+        from uacpy.visualization.plots.maps import _draw_depth
+        lons = np.linspace(5.0, 9.0, 41)
+        lats = np.linspace(40.0, 44.0, 33)
+        depth = np.full((lats.size, lons.size), 2000.0)
+        depth[3, 2] = 1000.0
+        fig, ax = plt.subplots()
+        _draw_depth(ax, lons, lats, depth, 'viridis', False, 15.0, 1)
+        co = ax.collections[-1].get_coordinates()
+        flat_x = 0.5 * (co[0, :-1, 0] + co[0, 1:, 0])
+        plt.close(fig)
+        fig, ax = plt.subplots()
+        _draw_depth(ax, lons, lats, depth, 'viridis', True, 15.0, 1)
+        relief_x, _ = self._centres(ax, lons.size, lats.size)
+        np.testing.assert_allclose(relief_x, flat_x, atol=1e-9)
+        plt.close(fig)
+
+    def test_fk_panel_registers_against_the_sound_cone(self):
+        from uacpy.visualization.plots.signal import plot_fk
+        freqs = np.linspace(0.0, 320.0, 33)
+        ks = np.linspace(-1.2, 1.2, 25)              # non-square
+        power = np.zeros((freqs.size, ks.size))
+        power[3, 2] = 1.0
+        fig, ax = plot_fk(freqs, ks, power, sound_speed=1500.0)
+        px, py = self._centres(ax, ks.size, freqs.size)
+        assert px[2] == pytest.approx(ks[2], abs=1e-9)
+        assert py[3] == pytest.approx(freqs[3], abs=1e-9)
+        plt.close(fig)
+
+    def test_ambiguity_panel_is_edge_aligned(self):
+        from uacpy.visualization.plots.signal import plot_ambiguity
+        delays = np.linspace(-0.004, 0.004, 17)
+        doppler = np.linspace(-60.0, 60.0, 13)
+        chi = np.zeros((doppler.size, delays.size))
+        chi[2, 3] = 1.0
+        fig, ax = plot_ambiguity(delays, doppler, chi)
+        px, py = self._centres(ax, delays.size, doppler.size)
+        assert px[3] == pytest.approx(delays[3] * 1e3, abs=1e-9)
+        assert py[2] == pytest.approx(doppler[2], abs=1e-9)
+        plt.close(fig)
+
+    def test_radon_and_taup_panels_are_edge_aligned(self):
+        """Both draw ``origin='upper'`` with intercept time increasing downward
+        and an abscissa rescaled to s/km, so both conversions must survive."""
+        from uacpy.visualization.plots.signal import plot_radon, plot_taup
+        taus = np.linspace(0.0, 0.6, 21)
+        moveout = np.linspace(-0.002, 0.002, 15)
+        R = np.zeros((moveout.size, taus.size))
+        R[2, 3] = 1.0
+        fig, ax = plot_radon(moveout, taus, R)
+        px, py = self._centres(ax, moveout.size, taus.size, y_down=True)
+        assert px[2] == pytest.approx(moveout[2] * 1e3, abs=1e-9)
+        assert py[3] == pytest.approx(taus[3], abs=1e-9)
+        plt.close(fig)
+
+        slow = np.linspace(0.0, 0.0012, 19)
+        T = np.zeros((slow.size, taus.size))
+        T[4, 5] = 1.0
+        fig, ax = plot_taup(slow, taus, T)
+        px, py = self._centres(ax, slow.size, taus.size, y_down=True)
+        assert px[4] == pytest.approx(slow[4] * 1000.0, abs=1e-9)
+        assert py[5] == pytest.approx(taus[5], abs=1e-9)
+        plt.close(fig)
+
+
+class TestLayeredSeabedFollowsTheBathymetry:
+    """A layered seabed's layers ride the seafloor. Anchoring them on a scalar
+    (the deepest bathymetry point) detaches the stack from a sloping seabed and
+    leaves the water colormap painted in the gap below the drawn seafloor line —
+    while the range-dependent layered and half-space branches both track it."""
+
+    @staticmethod
+    def _env(bottom):
+        import uacpy
+        from uacpy.core.environment import SoundSpeedProfile
+        from uacpy.core.bathymetry import Bathymetry
+        return uacpy.Environment(
+            bathymetry=Bathymetry(ranges=np.array([0.0, 1500.0, 3300.0]),
+                                  depths=np.array([180.0, 210.0, 150.0])),
+            ssp=SoundSpeedProfile.from_pairs([(0.0, 1500.0), (210.0, 1490.0)]),
+            bottom=bottom)
+
+    @staticmethod
+    def _column(cs):
+        from uacpy.core.environment import (SeabedColumn, SedimentLayer,
+                                            BoundaryProperties)
+        return SeabedColumn(
+            layers=[SedimentLayer(thickness=20.0, sound_speed=cs, density=1.7,
+                                  attenuation=0.5)],
+            halfspace=BoundaryProperties(acoustic_type='half-space',
+                                         sound_speed=2200.0, density=2.1,
+                                         attenuation=0.2))
+
+    @staticmethod
+    def _drawn_at(ax, r_km, z_m):
+        polys = [c for c in ax.collections
+                 if hasattr(c, 'get_paths') and c.get_paths()]
+        return any(p.contains_point((r_km, z_m))
+                   for c in polys for p in c.get_paths())
+
+    def test_a_range_independent_stack_tracks_a_sloping_seafloor(self):
+        from uacpy.core.bottom import Bottom
+        env = self._env(Bottom([self._column(1600.0)]))
+        out = env.plot()
+        fig = out[0] if isinstance(out, tuple) else out
+        ax = fig.get_axes()[0]
+        # The shallow ends are the discriminating ones: only the range whose
+        # seafloor equals the maximum was drawn before.
+        for r_km, seafloor in ((0.0, 180.0), (1.5, 210.0), (3.3, 150.0)):
+            assert self._drawn_at(ax, r_km, seafloor + 2.0)
+            assert self._drawn_at(ax, r_km, seafloor + 15.0)
+        plt.close(fig)
+
+    def test_a_range_dependent_stack_covers_the_whole_panel(self):
+        """``Bottom.at()`` holds the last column beyond the final profile node,
+        so the section beyond it must be drawn, not left bare."""
+        from uacpy.core.bottom import Bottom
+        env = self._env(Bottom([self._column(1600.0), self._column(1700.0)],
+                               ranges=np.array([0.0, 2000.0])))
+        assert env.bottom.at(range=3300.0).layers[0].sound_speed == 1700.0
+        out = env.plot()
+        fig = out[0] if isinstance(out, tuple) else out
+        ax = fig.get_axes()[0]
+        for r_km, seafloor in ((0.5, 190.0), (2.5, 183.3), (3.2, 155.6)):
+            assert self._drawn_at(ax, r_km, seafloor + 5.0), f"bare at {r_km} km"
+        plt.close(fig)
+
+
+class TestCompareModelsSharesItsColourScale:
+    """``compare_models`` draws ONE figure-level colorbar, so every panel must
+    map the same limits. Left to autoscale, each panel maps its own range and
+    the single bar annotates the figure with only the last panel's — two fields
+    differing by 100x then render identically."""
+
+    @staticmethod
+    def _field(amp):
+        d = np.linspace(10.0, 90.0, 7)
+        r = np.linspace(100.0, 3000.0, 11)
+        return Field(data=np.full((7, 11), amp, dtype=complex),
+                     coords={'depth': d, 'range': r},
+                     model='Synth', frequencies=100.0)
+
+    @pytest.mark.parametrize('value', ['mag', 'real', 'mag_db', 'tl'])
+    def test_every_value_shares_one_scale(self, value):
+        from uacpy.visualization.plots.fields import compare_models
+        fig, axes = compare_models([self._field(1.0 + 0j),
+                                    self._field(100.0 + 0j)],
+                                   ['A', 'B'], value=value)
+        clims = []
+        for ax in np.asarray(axes).ravel()[:2]:
+            meshes = [c for c in ax.collections if hasattr(c, 'get_clim')]
+            assert meshes, "panel drew no mesh"
+            clims.append(meshes[0].get_clim())
+        assert clims[0] == pytest.approx(clims[1])
+        plt.close(fig)
+
+    def test_the_shared_scale_spans_both_fields(self):
+        """The scale must actually cover both panels' data, so a 100x
+        difference is visible rather than flattened."""
+        from uacpy.visualization.plots.fields import compare_models
+        fig, axes = compare_models([self._field(1.0 + 0j),
+                                    self._field(100.0 + 0j)],
+                                   ['A', 'B'], value='mag')
+        mesh = [c for c in np.asarray(axes).ravel()[0].collections
+                if hasattr(c, 'get_clim')][0]
+        lo, hi = mesh.get_clim()
+        assert lo <= 1.0 and hi >= 100.0
+        plt.close(fig)

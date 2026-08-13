@@ -673,10 +673,15 @@ class TestRamPekerisReference:
         )
 
 
-def test_rams_elastic_no_negative_tl():
-    """rams0.5 (Collins elastic PE) diverges for fast shear; the wrapper must
-    surface that (warn + clamp) rather than return physically-impossible
-    negative TL (field gain)."""
+def test_rams_elastic_field_is_physical_on_a_fast_shear_seabed():
+    """A fast-shear elastic seabed yields a physical field on the auto grid.
+
+    The Collins elastic march stays convergent because the shear wavelength
+    bounds Δz (:func:`rams_dz_shear_cap`); on a grid coarser than λ_s/8 it
+    diverges instead, and the wrapper then clamps the wreckage to 200 dB. So
+    the discriminating assertions are that nothing is clamped and nothing is
+    non-finite — not merely that TL is non-negative.
+    """
     import uacpy
     el = uacpy.BoundaryProperties(sound_speed=1800.0, density=2.0,
                                   attenuation=0.1, shear_speed=800.0,
@@ -685,10 +690,15 @@ def test_rams_elastic_no_negative_tl():
                             bottom=uacpy.Bottom([uacpy.SeabedColumn([], el)]))
     src = Source(depths=50.0, frequencies=100.0)
     rcv = Receiver(depths=np.linspace(10, 190, 8), ranges=np.linspace(500, 6000, 20))
-    with pytest.warns(UserWarning, match="unphysically negative|OAST"):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
         tl = np.asarray(RAM(backend='rams').compute_tl(env, src, rcv).tl)
-    finite = np.isfinite(tl)
-    assert (tl[finite] >= 0).all(), "TL must be >= 0 (no field gain)"
+    assert not [w for w in caught
+                if 'unphysically negative' in str(w.message)], \
+        "the march diverged and the field was clamped"
+    assert np.isfinite(tl).all(), "no sample may be NaN/inf"
+    assert (tl >= 0).all(), "TL must be >= 0 (no field gain)"
+    assert not (tl == 200.0).any(), "no sample may sit on the clamp"
 
 
 class TestCollinsArrayLimits:
@@ -1618,13 +1628,15 @@ class TestRamStampsCMax:
 
 @pytest.mark.requires_binary
 class TestRamAppliesTheStabilityFloor:
-    """The Lytaev search optimises accuracy alone; RAM raises the resulting
-    Δz to the floor its backend needs to stay stable, and says so.
+    """The Lytaev search optimises accuracy alone; RAM then bounds the
+    resulting Δz to what its backend needs, and says so.
 
-    ``rams`` aliases high-wavenumber shear modes below ``0.55·λ_s``
-    (:func:`rams_dz_floor`); the acoustic backends need ``λ_p/16``
-    (``LAMBDA_PER_DZ_FLOOR``). The floor lives here rather than in
-    ``optimize_grid`` so one function owns the grid actually marched.
+    A cost floor ``λ_p/16`` (``LAMBDA_PER_DZ_FLOOR``) stops the optimizer
+    demanding an absurdly fine depth grid. For ``rams`` the shear wavelength
+    is the binding physical scale, so :func:`rams_dz_shear_cap` caps Δz at
+    ``λ_s/14`` and also bounds how far the cost floor may coarsen it. The
+    bounds live here rather than in ``optimize_grid`` so one function owns
+    the grid actually marched.
     """
 
     def _elastic_env(self, shear_speed):
@@ -1639,18 +1651,23 @@ class TestRamAppliesTheStabilityFloor:
                 shear_attenuation=0.5),
         ))
 
-    def test_shear_floor_raises_dz_above_the_accuracy_optimum(self):
-        """A fast shear seabed at low frequency puts the floor well above the
-        accuracy-optimal Δz, so the returned grid must sit on the floor."""
-        from uacpy.models._pade_optimizer import rams_dz_floor
+    def test_the_shear_wavelength_caps_dz(self):
+        """A fast shear seabed at low frequency makes λ_s/8 the binding bound,
+        so the returned grid must resolve it.
+
+        Collins (1991) JASA 89(3) 1050-1057 resolves λ_s at 14-85 points per
+        wavelength in all four of its worked examples; a grid coarser than
+        λ_s/8 does not merely lose accuracy, the rams0.5 march diverges.
+        """
+        from uacpy.models._pade_optimizer import rams_dz_shear_cap
         env = self._elastic_env(shear_speed=1200.0)
         freq = 30.0
-        floor = rams_dz_floor(1200.0, freq, factor=0.55)
+        cap = rams_dz_shear_cap(1200.0, freq)
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
             dr, dz = RAM(backend='rams', verbose=False)._compute_grid_lytaev(
                 env, freq=freq, max_range=5000.0, kind='rams')
-        assert dz >= floor * (1.0 - 1e-9), f"dz={dz} below floor {floor}"
+        assert dz <= cap * (1.0 + 1e-9), f"dz={dz} coarser than the cap {cap}"
         assert dr > 0
 
     def test_missing_the_budget_warns_only_when_the_caller_pinned_one(self):
@@ -1673,7 +1690,7 @@ class TestRamAppliesTheStabilityFloor:
             RAM(backend='rams', verbose=False, accuracy=1e-3))
 
     def test_a_fluid_env_gets_the_acoustic_floor_not_the_shear_one(self):
-        """``rams_dz_floor`` returns 0 without shear, so the acoustic
+        """``rams_dz_shear_cap`` returns 0 without shear, so the acoustic
         λ_p/16 bound is what applies."""
         from uacpy.models.ram import LAMBDA_PER_DZ_FLOOR
         env = _env(bottom=_fluid_bottom())
@@ -2269,3 +2286,55 @@ class TestMpiramsAutoGridIsAccurateEnough:
         ref._assert_window_agreement(
             auto, ref._kraken_reference(env, src, rcv), tol_db=4.5,
             label='mpiramS auto grid')
+
+
+@pytest.mark.requires_oases
+@pytest.mark.benchmark
+class TestRamsElasticGridAgreesWithWavenumberIntegration:
+    """Collins (1991) JASA 89(3) 1050-1057 example D, arbitrated against OASES.
+
+    The case is range-independent, so OAST (wavenumber integration) is
+    essentially exact for an elastic half-space — an independent model rather
+    than another PE backend, which is the only way to say which grid is right.
+    Collins states his own grid for this example: ``Δr = 5 m and Δz = 0.5 m``,
+    i.e. λ_s/64. A rams0.5 march on a grid coarser than λ_s/8 diverges.
+    """
+
+    @staticmethod
+    def _example_d():
+        import uacpy
+        from uacpy.core.environment import SoundSpeedProfile
+        env = uacpy.Environment(
+            bathymetry=200.0,
+            ssp=SoundSpeedProfile.from_pairs([(0.0, 1500.0), (200.0, 1500.0)]),
+            bottom=BoundaryProperties(
+                acoustic_type='half-space', sound_speed=1700.0,
+                shear_speed=800.0, density=1.5, attenuation=0.5,
+                shear_attenuation=0.5))
+        return (env, Source(depths=100.0, frequencies=25.0),
+                Receiver(depths=[30.0],
+                         ranges=np.array([1000.0, 2000.0, 4000.0, 8000.0])))
+
+    def test_the_auto_grid_tracks_the_exact_reference(self):
+        from uacpy.models import OAST
+        from uacpy.models import RAM as _RAM
+        env, src, rcv = self._example_d()
+        assert _RAM().select_backend(env) == 'rams'
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            ref = np.asarray(OAST().compute_tl(env, src, rcv).tl).ravel()
+            tl = np.asarray(_RAM().compute_tl(env, src, rcv).tl).ravel()
+        # Padé-PE against exact wavenumber integration on a high-contrast
+        # elastic half-space; a diverged march reads 100+ dB out here.
+        assert np.max(np.abs(tl - ref)) < 8.0
+        assert not (tl == 200.0).any(), "no sample may sit on the clamp"
+
+    def test_the_grid_resolves_the_shear_wavelength(self):
+        from uacpy.models._pade_optimizer import rams_dz_shear_cap
+        from uacpy.models import RAM as _RAM
+        env, src, _rcv = self._example_d()
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            _dr, dz = _RAM(backend='rams', verbose=False)._compute_grid_lytaev(
+                env, freq=25.0, max_range=8000.0, kind='rams')
+        assert dz <= rams_dz_shear_cap(800.0, 25.0) * (1.0 + 1e-9)

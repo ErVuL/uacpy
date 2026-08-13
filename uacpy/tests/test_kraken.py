@@ -424,6 +424,21 @@ class TestFortranFatalErrorExitsZero:
     _RCV = staticmethod(lambda: Receiver(depths=[50.0, 60.0],
                                          ranges=[1000.0, 2000.0]))
 
+    @classmethod
+    def _env_that_fatals_in_crci(cls, depth, c):
+        """An environment whose bottom attenuation trips ``AttenMod : CRCI``.
+
+        ``BoundaryProperties`` now refuses an attenuation past
+        ``MAX_ATTENUATION_DB_PER_WAVELENGTH`` (54.575 dB/wavelength, derived from
+        the same ``CRCI`` abort), so the value is set after construction. That is
+        the point of these two tests: the carrier guard is the first line of
+        defence and the ``.prt``/stderr scan is the second, for a fatal that
+        arrives some other way — a hand-edited deck, a future carrier gap, or a
+        different AT fatal entirely."""
+        env = cls._env(depth, c)
+        env.bottom.columns[0].halfspace.attenuation = 100.0
+        return env
+
     @pytest.mark.parametrize('banner', [
         "STOP 'Fatal Error: Check the print file for details'",
         'STOP ERROR IN KRAKENC: Rough elastic interface not allowed',
@@ -464,7 +479,7 @@ class TestFortranFatalErrorExitsZero:
         from uacpy.core.exceptions import ModelExecutionError
         with pytest.raises(ModelExecutionError) as ei:
             Kraken(work_dir=str(tmp_path / 'w'), timeout=300).run(
-                self._env(1000.0, 1480.0, attenuation=100.0),
+                self._env_that_fatals_in_crci(1000.0, 1480.0),
                 self._SRC(), self._RCV())
         assert 'FATAL ERROR' in str(ei.value) or 'Fatal Error' in str(ei.value), (
             f"the Fortran diagnostic never reached the user: {ei.value}")
@@ -480,7 +495,7 @@ class TestFortranFatalErrorExitsZero:
 
         with pytest.raises(ModelExecutionError):
             Kraken(work_dir=wd, timeout=300).run(
-                self._env(1000.0, 1480.0, attenuation=100.0),
+                self._env_that_fatals_in_crci(1000.0, 1480.0),
                 self._SRC(), self._RCV())
 
 
@@ -1775,3 +1790,118 @@ class TestModesErrorMessageReadsTheRealPrtStrings:
         msg = self._message(
             tmp_path, ' No modes for given phase speed interval\n')
         assert 'c_low' in msg and 'c_high' in msg
+
+
+class TestBeamPatternOnMultipleFrequencies:
+    """``KrakenField/field.f90:191`` allocates ``kz2``/``thetaT``/``S`` inside
+    ``FreqLoop`` guarded only by ``SBPFlag == '*' .AND. iS == 1``, while the
+    matching ``DEALLOCATE`` sits after the loop closes (:226). The second
+    frequency therefore re-allocates an already-allocated array, which gfortran
+    terminates on. The allocation block is outside uacpy's ``rProf`` patch, so it
+    is upstream behaviour."""
+
+    PATTERN = np.array([[-90.0, 0.0], [90.0, 0.0]])
+
+    def test_multi_frequency_with_a_beam_pattern_is_refused_before_the_binary_runs(
+            self, tmp_path, monkeypatch):
+        from uacpy.core.exceptions import UnsupportedFeatureError
+        model = Kraken(work_dir=tmp_path, cleanup=False)
+
+        def _no_launch(*args, **kwargs):
+            raise AssertionError("a binary was launched past the guard")
+
+        monkeypatch.setattr(model, '_run_subprocess', _no_launch)
+        monkeypatch.setattr(model, '_run_and_attach_prt', _no_launch)
+        with pytest.raises(UnsupportedFeatureError, match=r'field\.f90:191'):
+            model.run(_pekeris(depth=100.0),
+                      Source(depths=[25.0], frequencies=[180.0, 200.0, 220.0],
+                             beam_pattern=self.PATTERN),
+                      Receiver(depths=[50.0], ranges=[1000.0, 2000.0]),
+                      run_mode=RunMode.BROADBAND)
+
+    def test_the_gate_is_the_frequency_count_not_the_run_mode(
+            self, tmp_path, monkeypatch):
+        """The multi-frequency path reaches the funnel with the default
+        ``COHERENT_TL``, so a guard keyed on ``run_mode`` would not fire."""
+        from uacpy.core.exceptions import UnsupportedFeatureError
+        model = Kraken(work_dir=tmp_path, cleanup=False)
+        monkeypatch.setattr(
+            model, '_run_subprocess',
+            lambda *a, **k: (_ for _ in ()).throw(
+                AssertionError("a binary was launched past the guard")))
+        with pytest.raises(UnsupportedFeatureError):
+            model._compute_field_via_exe(
+                _pekeris(depth=100.0),
+                Source(depths=[25.0], frequencies=[200.0],
+                       beam_pattern=self.PATTERN),
+                Receiver(depths=[50.0], ranges=[1000.0]),
+                frequencies=np.array([180.0, 200.0, 220.0]),
+            )
+
+    @pytest.mark.requires_binary
+    def test_a_single_frequency_still_accepts_the_pattern(self, tmp_path):
+        model = Kraken(work_dir=tmp_path, cleanup=False)
+        tl = model.compute_tl(
+            _pekeris(depth=100.0),
+            Source(depths=[25.0], frequencies=200.0, beam_pattern=self.PATTERN),
+            Receiver(depths=[50.0], ranges=[1000.0, 2000.0]))
+        assert np.all(np.isfinite(np.asarray(tl.tl)))
+
+    def test_field_completion_marker_separates_teardown_from_a_real_abort(
+            self, tmp_path):
+        """``field.f90:228`` writes the marker after ``FreqLoop`` and before the
+        clean-up block, so its absence means the run died while computing."""
+        model = Kraken(work_dir=tmp_path, cleanup=False)
+        prt = tmp_path / 'field.prt'
+        prt.write_text(' some output\n Field completed successfully\n')
+        assert model._field_reached_completion(tmp_path)
+        prt.write_text(' some output\n At line 191 of file field.f90\n')
+        assert not model._field_reached_completion(tmp_path)
+
+
+class TestAutoSegmentationIsWritableAtDeckResolution:
+    """``models/_segmentation.py`` unions the bathymetry / SSP / RD-bottom change
+    points itself, so it must not produce two ranges the ``.flp`` cannot tell
+    apart. A bathymetry axis and an SSP axis naming the same physical range
+    through different arithmetic differ in the last bits; both survived a
+    ``set()``, printed as one token, and ``KrakenField/EvaluateADMod.f90:75``
+    divided by the zero gap with no diagnostic — a partly-NaN field, no error,
+    no warning."""
+
+    @staticmethod
+    def _env(ssp_break_m):
+        from uacpy.core import SoundSpeedProfile, Bathymetry
+        z = np.array([0.0, 100.0, 200.0])
+        ssp = SoundSpeedProfile(
+            depths=z,
+            data=np.column_stack([[1500.0, 1495.0, 1490.0],
+                                  [1500.0, 1497.0, 1492.0],
+                                  [1500.0, 1499.0, 1494.0]]),
+            ranges=np.array([0.0, ssp_break_m, 10000.0]))
+        return Environment(
+            bathymetry=Bathymetry(ranges=np.linspace(0.0, 10000.0, 6),
+                                  depths=np.full(6, 200.0)),
+            ssp=ssp,
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=1700.0, density=1.8,
+                                      attenuation=0.5))
+
+    def test_segment_axis_never_collapses_at_the_deck_quantum(self):
+        from uacpy.models._segmentation import segment_environment_by_range
+        from uacpy.io.oalib_writer import DECK_RANGE_QUANTUM_M
+        segments = segment_environment_by_range(self._env(4000.0000001))
+        ranges = np.array([r for r, _e in segments], dtype=float)
+        assert np.all(np.diff(ranges) > DECK_RANGE_QUANTUM_M)
+
+    @pytest.mark.requires_binary
+    def test_a_1e_7_metre_shift_in_a_break_range_does_not_change_the_field(self):
+        """The two breaks are the same physical range, so the TL must be
+        identical — not merely finite."""
+        src = Source(depths=50.0, frequencies=200.0)
+        rcv = Receiver(depths=np.linspace(20.0, 180.0, 5),
+                       ranges=np.linspace(1000.0, 9000.0, 5))
+        on_node = np.asarray(Kraken().compute_tl(self._env(4000.0), src, rcv).tl)
+        off_node = np.asarray(
+            Kraken().compute_tl(self._env(4000.0000001), src, rcv).tl)
+        assert np.all(np.isfinite(on_node)) and np.all(np.isfinite(off_node))
+        np.testing.assert_allclose(off_node, on_node, rtol=0, atol=1e-9)

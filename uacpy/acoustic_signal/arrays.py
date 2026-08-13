@@ -31,10 +31,19 @@ def steering_vectors(positions_m, angles_deg, frequency: float,
                      c: float = DEFAULT_SOUND_SPEED):
     """Unit plane-wave steering vectors for a line array.
 
-    ``e_n(theta) = exp(j*k*z_n*sin(theta)) / sqrt(N)`` with ``k = 2*pi*f/c``,
-    ``theta`` measured from broadside. ``positions_m`` are element coordinates
-    along the array axis (m). The ``+j`` sign convention matches the
-    Acoustics-Toolbox ``planewave_rep.m`` reference.
+    ``e_n(theta) = exp(-j*k*z_n*sin(theta)) / sqrt(N)`` with ``k = 2*pi*f/c``,
+    ``theta`` measured from broadside and positive downward (the declination
+    sign of ``Bellhop/bellhop.f90:453``). ``positions_m`` are element
+    coordinates along the array axis (m).
+
+    The ``-j`` is the conjugate of Acoustics-Toolbox ``planewave_rep.m:32``
+    because every consumer here applies the vector in Hermitian form —
+    ``e**H p`` for :func:`beamform`, ``e**H R e`` for the spectra — whereas
+    ``Matlab/beamform.m:20`` applies its ``+j`` vector as ``e p``. Under AT's
+    ``exp(+i*omega*t)`` convention (``KrakenField/EvaluateMod.f90:41``) an
+    arrival at declination ``+theta`` carries depth phase
+    ``exp(-i*k*z*sin(theta))``, so ``e**H p`` peaks at ``+theta`` only with
+    this sign.
 
     Returns
     -------
@@ -45,7 +54,7 @@ def steering_vectors(positions_m, angles_deg, frequency: float,
     angles = np.atleast_1d(np.asarray(angles_deg, dtype=float))
     k = 2.0 * np.pi * float(frequency) / float(c)
     phase = np.outer(np.sin(np.deg2rad(angles)), z)
-    e = np.exp(1j * k * phase)
+    e = np.exp(-1j * k * phase)
     return e / np.sqrt(z.size)
 
 
@@ -244,9 +253,7 @@ def beamform(
     if angles is None:
         angles = np.arange(-90, 91, 1)
     e = steering_vectors(phone_coords, angles, frequency, c)
-    # Conjugate the steering vector (matched filter), consistent with
-    # bartlett/mvdr/music_spectrum; ``e @ pressure`` (no conjugate) resolves
-    # the mirror angle -theta for a source at +theta.
+    # Matched filter, the same Hermitian form bartlett/mvdr/music_spectrum use.
     beamformed = e.conj() @ pressure
     mag = np.abs(beamformed)
     if not np.any(mag):

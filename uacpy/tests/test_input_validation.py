@@ -280,24 +280,38 @@ def test_ram_collins_threads_rd_bottom(tmp_path):
     assert abs(p_rd - p_r0) > 0.05 * abs(p_r0)
 
 
-def test_oalib_writer_drops_subresolution_layers():
-    """A sediment layer thinner than the .env's .1f depth resolution is dropped,
-    so the AT writer never emits a degenerate (top==bottom) zero-thickness
-    medium, which makes Kraken/Scooter/Bounce fail. A fetched crustal column
-    rescaled to fit a thin sediment cover can produce such a sliver, so the
-    guard has to live in the writer rather than in the caller."""
-    from uacpy.io.oalib_writer import writable_layers, _MIN_LAYER_THICKNESS_M
+def test_oalib_writer_keeps_thin_layers():
+    """Every layer of positive thickness reaches the deck.
+
+    ``deck_depth`` rounds each interface *up*, so a sub-quantum layer is modelled
+    at one quantum rather than collapsing to a degenerate (top == bottom)
+    medium — measured on a 0.08 m layer at 5 kHz against an exact plane-wave
+    impedance recursion, writing it costs 5e-4 in |R| while omitting it costs
+    0.212, i.e. 4.7 dB per bottom bounce. Both AT and OASES read the depth
+    column list-directed (``misc/ReadEnvironmentMod.f90:88``,
+    ``misc/sspMod.f90:334``, ``oases/src/oaseun31.f:54``), so no format forbids a
+    thin layer, and the depth column is written at a resolution fine enough to
+    carry the layer at its own thickness. ``SedimentLayer`` already refuses a
+    non-positive thickness at construction, so the writer has no degenerate case
+    left to guard.
+    """
+    from uacpy.io.oalib_writer import writable_layers
     hs = BoundaryProperties(acoustic_type='half-space', sound_speed=1800,
                             density=2.0, attenuation=0.1)
-    lb = SeabedColumn(
-        layers=[SedimentLayer(thickness=1e-4, sound_speed=1600, density=1.6,
-                              attenuation=0.5),          # sub-resolution → dropped
+    thin = SeabedColumn(
+        layers=[SedimentLayer(thickness=0.08, sound_speed=1600, density=1.6,
+                              attenuation=0.5),
                 SedimentLayer(thickness=20.0, sound_speed=1700, density=1.8,
                               attenuation=0.4)],
         halfspace=hs)
-    assert _MIN_LAYER_THICKNESS_M == 0.1
-    kept = writable_layers(lb)
-    assert [round(lyr.thickness, 1) for lyr in kept] == [20.0]
+    kept = writable_layers(thin)
+    assert [round(lyr.thickness, 2) for lyr in kept] == [0.08, 20.0]
+
+    # The carrier is where a degenerate layer is stopped, so the writer needs no
+    # guard of its own.
+    with pytest.raises(ConfigurationError, match='thickness must be positive'):
+        SedimentLayer(thickness=0.0, sound_speed=1600, density=1.6,
+                      attenuation=0.5)
 
 
 # --- G6 Bellhop .env range=0 SSP fallback ----------------------------------
@@ -744,3 +758,229 @@ def test_receiver_type_line_is_rejected_not_silently_gridded(model_name):
                               uacpy.Receiver(depths=d, ranges=r)).tl)
     i = np.arange(len(d))
     assert tl[i, i].shape == (3,)
+
+
+# ── The AT solvers' own limits, enforced on the carriers ────────────────────
+#
+# Each guard below mirrors a specific fatal test (or a specific silent collapse)
+# in the vendored Fortran. They live on the carriers rather than in a writer
+# because the carrier owns the value: the same object feeds every model, and the
+# ad-hoc writer guards that existed before covered one axis on one model each.
+
+
+class TestHalfSpaceSoundSpeedMustBePositive:
+    """``misc/ReadEnvironmentMod.f90:292`` aborts a ``'A'`` half-space whose
+    compressional speed *or* density vanishes. uacpy mirrored only the density
+    half, so ``sound_speed=0`` gave a Kraken ``ModelExecutionError`` (``TopBot:
+    Sound speed or density vanishes in halfspace``) and Bellhop an all-NaN field
+    at exit 0 — the same carrier, two different wrong outcomes."""
+
+    def test_zero_sound_speed_on_a_half_space_is_refused(self):
+        with pytest.raises(uacpy.core.exceptions.ConfigurationError,
+                           match='sound_speed'):
+            uacpy.core.BoundaryProperties(sound_speed=0.0, density=1.7)
+
+    def test_a_real_half_space_is_untouched(self):
+        bp = uacpy.core.BoundaryProperties(sound_speed=1600.0, density=1.7)
+        assert bp.acoustic_type == 'half-space'
+
+    @pytest.mark.parametrize('kind', ['vacuum', 'rigid'])
+    def test_types_that_never_use_the_speed_are_untouched(self, kind):
+        """vacuum/rigid carry placeholder speeds the deck never emits, so the
+        guard must be keyed on the resolved acoustic_type, not on the field."""
+        assert uacpy.core.BoundaryProperties(
+            acoustic_type=kind).acoustic_type == kind
+
+
+class TestAttenuationCeiling:
+    """``misc/AttenMod.f90`` converts attenuation to an imaginary sound speed
+    (:73 for ``AttenUnit 'W'``, which uacpy always writes, then :113) and aborts
+    at :116 once that exceeds the real part. Substituting one into the other
+    leaves a bound on alpha alone, independent of frequency and sound speed:
+    ``8.6858896 * 2*pi``. Kraken/Scooter/OAST/Bellhop-Fortran all abort above it;
+    ``bellhopcxx`` instead returns *less* loss at 1e6 dB/lambda than at 0.5."""
+
+    def test_the_constant_is_the_one_the_fortran_implies(self):
+        from uacpy.core.constants import MAX_ATTENUATION_DB_PER_WAVELENGTH
+        assert MAX_ATTENUATION_DB_PER_WAVELENGTH == pytest.approx(54.57505391,
+                                                                 abs=1e-7)
+
+    @pytest.mark.parametrize('alpha', [54.6, 60.0, 1e6])
+    def test_above_the_ceiling_is_refused(self, alpha):
+        with pytest.raises(uacpy.core.exceptions.ConfigurationError,
+                           match='dB/wavelength'):
+            uacpy.core.BoundaryProperties(sound_speed=1800.0, density=2.0,
+                                          attenuation=alpha)
+
+    @pytest.mark.parametrize('alpha', [0.0, 0.5, 2.0, 54.0])
+    def test_below_the_ceiling_is_accepted(self, alpha):
+        """54.0 must still pass: the measured Kraken/Scooter transition sits
+        between 54.0 and 54.6, so a rounder bound would reject legal input."""
+        assert uacpy.core.BoundaryProperties(
+            sound_speed=1800.0, density=2.0, attenuation=alpha) is not None
+
+    def test_the_shear_channel_is_bounded_too(self):
+        from uacpy.core.bottom import SedimentLayer
+        with pytest.raises(uacpy.core.exceptions.ConfigurationError,
+                           match='shear_attenuation'):
+            SedimentLayer(thickness=1.0, sound_speed=1600.0, density=1.7,
+                          attenuation=0.5, shear_attenuation=100.0)
+
+    def test_sediment_layers_are_bounded_too(self):
+        from uacpy.core.bottom import SedimentLayer
+        with pytest.raises(uacpy.core.exceptions.ConfigurationError,
+                           match='dB/wavelength'):
+            SedimentLayer(thickness=1.0, sound_speed=1600.0, density=1.7,
+                          attenuation=1e6)
+
+
+class TestAxesMustSurviveTheDeckPrintResolution:
+    """Every carrier axis was validated at full float precision while every deck
+    prints depths in metres and ranges in kilometres at ``%.6f``. Two samples
+    closer than that become one token: on a range axis the readers reject it
+    (``misc/sspMod.f90:342``, ``Bellhop/bdryMod.f90:132``/``:231``,
+    ``misc/SourceReceiverPositions.f90:163``, with ``monotonicMod`` strict), and
+    on a source/receiver depth axis the equivalent ERROUTs are commented out
+    (``SourceReceiverPositions.f90:142``/``:146``) so the deck silently carries
+    the same depth twice. Two of the seven axes produced silent all-NaN from
+    Kraken before this."""
+
+    def test_ssp_depths(self):
+        with pytest.raises(uacpy.core.exceptions.ConfigurationError,
+                           match='must increase by more than'):
+            uacpy.core.SoundSpeedProfile.from_pairs(
+                np.array([[0.0, 1500.0], [1e-7, 1500.0], [100.0, 1500.0]]))
+
+    def test_ssp_ranges(self):
+        with pytest.raises(uacpy.core.exceptions.ConfigurationError,
+                           match='must increase by more than'):
+            uacpy.core.SoundSpeedProfile(
+                depths=[0.0, 100.0], data=np.full((2, 3), 1500.0),
+                ranges=[0.0, 1e-7, 5000.0])
+
+    def test_bathymetry_ranges(self):
+        with pytest.raises(uacpy.core.exceptions.ConfigurationError,
+                           match='must increase by more than'):
+            uacpy.core.bathymetry.Bathymetry(
+                depths=[100.0, 100.0, 120.0], ranges=[0.0, 1e-7, 5000.0])
+
+    def test_altimetry_ranges(self):
+        from uacpy.core.altimetry import Altimetry
+        with pytest.raises(uacpy.core.exceptions.ConfigurationError,
+                           match='must increase by more than'):
+            Altimetry(heights=[0.0, 0.0, 0.0], ranges=[0.0, 1e-7, 5000.0])
+
+    def test_source_depths(self):
+        with pytest.raises(uacpy.core.exceptions.ConfigurationError,
+                           match='must increase by more than'):
+            uacpy.core.Source(depths=[25.0, 25.0 + 1e-7], frequencies=200.0)
+
+    def test_receiver_ranges(self):
+        with pytest.raises(uacpy.core.exceptions.ConfigurationError,
+                           match='must increase by more than'):
+            uacpy.core.Receiver(depths=50.0, ranges=[1000.0, 1000.0 + 1e-7])
+
+    def test_receiver_depths(self):
+        with pytest.raises(uacpy.core.exceptions.ConfigurationError,
+                           match='must increase by more than'):
+            uacpy.core.Receiver(depths=[50.0, 50.0 + 1e-7], ranges=1000.0)
+
+    def test_bottom_ranges(self):
+        from uacpy.core.bottom import Bottom, SeabedColumn
+        hs = uacpy.core.BoundaryProperties(sound_speed=1600.0, density=1.7)
+        col = SeabedColumn(layers=[], halfspace=hs)
+        with pytest.raises(uacpy.core.exceptions.ConfigurationError,
+                           match='must increase by more than'):
+            Bottom(columns=[col, col, col], ranges=[0.0, 1e-7, 5000.0])
+
+    def test_the_resolutions_are_the_ones_the_decks_print(self):
+        """1 µm on a depth axis (metres at %.6f) and 1 mm on a range axis
+        (kilometres at %.6f)."""
+        from uacpy.core.constants import (DECK_DEPTH_RESOLUTION_M,
+                                          DECK_RANGE_RESOLUTION_M)
+        assert DECK_DEPTH_RESOLUTION_M == 1e-6
+        assert DECK_RANGE_RESOLUTION_M == 1e-3
+
+    @pytest.mark.parametrize('axis', ['depths', 'ranges'])
+    def test_ordinary_axes_still_pass(self, axis):
+        kw = {'depths': 50.0, 'ranges': np.linspace(500.0, 5000.0, 10)}
+        if axis == 'depths':
+            kw['depths'] = np.linspace(10.0, 90.0, 9)
+        assert uacpy.core.Receiver(**kw) is not None
+
+
+class TestExtendToUsesTheReadersOwnEpsilon:
+    """``misc/sspMod.f90:353`` ends a medium's SSP block at the first sample
+    within ``100*EPSILON(1.0e0)`` = 1.1920929e-05 m of the declared medium depth.
+    ``extend_to``'s own tolerance was ``rtol=atol=1e-9`` — 277× tighter at 42 m —
+    so for any target in between it *appended* a second terminal row that the
+    reader never reads as SSP: the next READ takes it as the bottom-option
+    record, so ``BotOpt(1:1)`` became ``'4'`` and sigma became 1500 m. Kraken,
+    Bellhop and Scooter all aborted, naming the boundary condition."""
+
+    @staticmethod
+    def _profile(last):
+        return uacpy.core.SoundSpeedProfile.from_pairs(
+            np.array([[0.0, 1500.0], [last, 1500.0]]))
+
+    @pytest.mark.parametrize('delta', [5.1e-7, 1e-6, 5e-6, 1.1e-5])
+    def test_a_target_inside_the_epsilon_never_appends(self, delta):
+        """The defect was the *appended* row, so this is the assertion that
+        matters at every delta inside the reader's window."""
+        base = 42.299996
+        out = self._profile(base).extend_to(base + delta)
+        assert np.asarray(out.depths).size == 2, (
+            f"appended a row {delta:g} m from the last sample — inside the "
+            f"reader's 1.1920929e-05 m window, so it is never read as SSP and "
+            f"the next READ takes it as the bottom-option record")
+
+    @pytest.mark.parametrize('delta', [5.1e-7, 1e-6, 5e-6, 1.1e-5])
+    def test_a_real_target_inside_the_window_moves_the_sample(self, delta):
+        """Anything past float round-trip noise and inside the reader's window is
+        a real request, so the last sample is moved onto it rather than left
+        beside it — leaving it beside it is the defect."""
+        base = 42.299996
+        out = self._profile(base).extend_to(base + delta)
+        assert float(np.asarray(out.depths)[-1]) == pytest.approx(
+            base + delta, abs=1e-12)
+
+    @pytest.mark.parametrize('delta', [0.0, 1e-12, 1e-9])
+    def test_float_round_trip_noise_is_the_same_object(self, delta):
+        """``env.depth`` round-tripped through I/O can be a few ulps off; that is
+        the same request, not a re-alignment."""
+        base = 42.299996
+        ssp = self._profile(base)
+        assert ssp.extend_to(base + delta) is ssp
+
+    @pytest.mark.parametrize('delta', [2e-5, 1e-3, 6e-2])
+    def test_a_target_outside_the_epsilon_still_appends(self, delta):
+        base = 42.299996
+        out = self._profile(base).extend_to(base + delta)
+        assert np.asarray(out.depths).size == 3
+        assert float(np.asarray(out.depths)[-1]) == pytest.approx(base + delta)
+
+    def test_the_epsilon_is_the_fortran_one(self):
+        from uacpy.core.constants import AT_LAST_SSP_POINT_EPS_M
+        assert AT_LAST_SSP_POINT_EPS_M == pytest.approx(1.1920929e-05, rel=1e-9)
+
+    def test_an_exact_match_is_a_no_op(self):
+        base = 42.299996
+        out = self._profile(base).extend_to(base)
+        assert np.asarray(out.depths).size == 2
+        assert float(np.asarray(out.depths)[-1]) == pytest.approx(base)
+
+    @pytest.mark.requires_binary
+    @pytest.mark.parametrize('depth', [87.499995, 1234.599995, 42.299996])
+    def test_the_broken_depths_now_run_end_to_end(self, depth):
+        """These arrive naturally from a fetched bathymetry — about 1 in 8400
+        arbitrary depths lands in the window."""
+        from uacpy.models import Kraken, Scooter
+        env = uacpy.core.Environment(
+            name='eps', bathymetry=depth, ssp=1500.0,
+            bottom=uacpy.core.BoundaryProperties(sound_speed=1800.0,
+                                                 density=2.0, attenuation=0.5))
+        src = uacpy.core.Source(depths=0.25 * depth, frequencies=200.0)
+        rcv = uacpy.core.Receiver(depths=0.5 * depth, ranges=[1000.0, 2000.0])
+        for model in (Kraken(verbose=False), Scooter(verbose=False)):
+            tl = np.asarray(model.run(env, src, rcv).tl)
+            assert np.isfinite(tl).all(), f"{model.model_name} returned {tl}"
