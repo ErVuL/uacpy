@@ -195,7 +195,7 @@ def main():
     )
     # Reverberation uses the same modeled TL as the echo — evaluated at the
     # seafloor depth, where the scattering patch sits.
-    tl_at_bottom = tl_field.at(depth=float(env.depth)).tl
+    tl_at_bottom = tl_field.at(depth=float(env.depth)).db
     rl_grid = sonar.boundary_reverberation(
         rcv.ranges, 190.0,
         sonar.lambert_bottom(np.rad2deg(np.arctan2(100.0, rcv.ranges))),

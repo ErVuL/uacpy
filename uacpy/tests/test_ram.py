@@ -1,12 +1,14 @@
+import warnings
 """RAM parabolic-equation-focused tests."""
 
 import pytest
 import numpy as np
 
-from uacpy.models import RAM
+from uacpy.models import RAM, RunMode
 from uacpy import Field
 from uacpy.core import (
     Environment, Source, Receiver, SoundSpeedProfile, BoundaryProperties,
+    Bottom, SeabedColumn, SedimentLayer,
 )
 
 pytestmark = pytest.mark.requires_binary
@@ -318,9 +320,9 @@ class TestSedimentBlockIsResolvedByZread:
         from uacpy.models import Scooter
         env = self._env(thickness)
         src, rcv = self._src_rcv()
-        ram = np.asarray(RAM(verbose=False).run(env, src, rcv).tl)
+        ram = np.asarray(RAM(verbose=False).run(env, src, rcv).db)
         scooter = np.asarray(Scooter(verbose=False, c_low=1400.0,
-                                     c_high=1e9).run(env, src, rcv).tl)
+                                     c_high=1e9).run(env, src, rcv).db)
         ranges = np.asarray(rcv.ranges)
         worst = 0.0
         for iz in (0, 1):
@@ -394,3 +396,93 @@ class TestSedimentBlockIsResolvedByZread:
         src, rcv = self._src_rcv()
         with pytest.raises(ConfigurationError, match='cannot be met by'):
             RAM(verbose=False, backend='ramgeo').run(env, src, rcv)
+
+
+class TestAbsorbingRampLeavesTheSedimentColumnAlone:
+    """``_ramp_absorbing_attenuation`` must not overwrite the deepest layer.
+
+    Collins' readme (``ramsurf/readme.orig:127-133``) makes the ramp *"a
+    buffer region"* below the modelled seabed, separate from the seabed's own
+    attenuation. The block carries duplicated abscissae at each interface, so
+    the point that pins a layer's value at its own base sits exactly at the
+    ramp start whenever the absorber clamps to the sediment base — a strict
+    ``<`` dropped it, and ``np.interp`` on the duplicate then returned the
+    half-space value, marching a 0.02 dB/lambda layer at up to 5.0."""
+
+    @staticmethod
+    def _ramp(pairs, z_sediment_base, z_bottom, width=1000.0, floor=10.0):
+        m = RAM.__new__(RAM)
+        m.absorbing_layer_attn = floor
+        return RAM._ramp_absorbing_attenuation(
+            m, pairs, z_sediment_base, z_bottom, width)
+
+    def test_clamped_ramp_keeps_the_layer_attenuation(self):
+        # z_abs == z_sediment_base == 30: the clamped case the defect needed.
+        out = self._ramp([(0.0, 0.02), (30.0, 0.02), (30.0, 5.0), (173.3, 5.0)],
+                         30.0, 173.3)
+        assert (0.0, 0.02) in out and (30.0, 0.02) in out      # layer intact
+        assert (30.0, 5.0) in out                              # half-space starts
+        assert out[-1] == (173.3, 10.0)                        # ramps to the floor
+
+    def test_two_layers_both_survive(self):
+        out = self._ramp([(0.0, 0.02), (10.0, 0.02), (10.0, 0.3), (40.0, 0.3),
+                          (40.0, 5.0), (200.0, 5.0)], 40.0, 200.0)
+        for p in [(0.0, 0.02), (10.0, 0.02), (10.0, 0.3), (40.0, 0.3), (40.0, 5.0)]:
+            assert p in out
+
+    def test_unclamped_ramp_still_starts_where_it_should(self):
+        # The discriminating counterpart: pinning the layer must not drag the
+        # ramp's start up with it. Here z_abs = 400 - 100 = 300.
+        out = self._ramp([(0.0, 0.02), (30.0, 0.02), (30.0, 5.0), (400.0, 5.0)],
+                         30.0, 400.0, width=100.0)
+        assert (300.0, 5.0) in out       # half-space held flat to the ramp start
+        assert out[-1] == (400.0, 10.0)
+
+
+class TestElasticLayerFollowsSlopingBathymetry:
+    """``rams0.5.f:490-516`` reads ``lamb(i)``/``mub(i)``/``rhob(i)`` at the
+    absolute depth index, unlike ``ramgeo1.5.f:262-268`` whose ``matrc``
+    re-anchors at the local seafloor (``ii=1 ... ii=ii+1``). So on rams a
+    layered elastic column stays where the first profile section put it: with
+    breakpoints taken only from the bottom and the SSP, a 20 m layer on a
+    100 -> 300 m slope thinned to nothing within ~1 km, silently."""
+
+    @staticmethod
+    def _env(layered):
+        hs = BoundaryProperties(
+            acoustic_type='half-space', sound_speed=2200.0, density=2.2,
+            attenuation=0.1, shear_speed=900.0, shear_attenuation=0.2)
+        col = (SeabedColumn(
+            layers=[SedimentLayer(thickness=20.0, sound_speed=1600.0,
+                                  density=1.4, attenuation=0.3,
+                                  shear_speed=300.0, shear_attenuation=1.0)],
+            halfspace=hs)
+            if layered else
+            SeabedColumn.from_halfspace(hs, water_depth=100.0))
+        return Environment(bathymetry=[(0.0, 100.0), (10000.0, 300.0)],
+                           ssp=1500.0, bottom=Bottom([col]))
+
+    def test_layered_elastic_column_is_reanchored_along_the_slope(self):
+        segs = RAM()._collins_range_segments(
+            self._env(layered=True), 'rams', zmax=700.0, freq=100.0)
+        tops = [s['bottom_cs'][0][0] for s in segs]
+        assert len(segs) > 10                       # was 1
+        assert tops[0] == pytest.approx(100.0, abs=1.0)
+        assert tops[-1] > 280.0                     # tracks to the deep end
+        assert all(b >= a for a, b in zip(tops, tops[1:]))
+
+    def test_half_space_column_gains_no_sections(self):
+        # from_halfspace(synthesize=True) gives every profile point the same
+        # value, so anchoring cannot matter and extra sections are pure cost.
+        segs = RAM()._collins_range_segments(
+            self._env(layered=False), 'rams', zmax=700.0, freq=100.0)
+        assert len(segs) == 1
+
+    def test_seafloor_relative_backends_gain_no_sections(self):
+        # ramgeo/ramsurf re-anchor in matrc already.
+        for kind in ('ramgeo', 'ramsurf'):
+            segs = RAM()._collins_range_segments(
+                self._env(layered=True), kind, zmax=700.0, freq=100.0)
+            assert len(segs) == 1, kind
+
+

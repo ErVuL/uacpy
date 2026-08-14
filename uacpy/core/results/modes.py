@@ -256,11 +256,32 @@ class Modes(Result):
             psi_D = phi_re[-1, :]
             kb = omega / cb
             gamma_m = np.sqrt(np.maximum(kr ** 2 - kb ** 2, 0.0))
-            gamma_safe = np.where(gamma_m > 0, gamma_m, 1.0)
-            alpha_bottom = (
+            trapped = gamma_m > 0
+            # A leaky mode gets no term, as the comment above already says.
+            # Substituting gamma = 1 put a bare number carrying units of 1/m
+            # into the denominator, so the invented loss scaled with the
+            # library's length unit — the same physics expressed in km came
+            # back 1000x different. There is no finite first-order bottom-
+            # absorption perturbation for a radiating mode: the tail integral
+            # diverges, so the closed form this line specialises does not exist.
+            alpha_bottom = np.where(
+                trapped,
                 psi_D ** 2 * ab_neper_per_m * omega
-                / (2.0 * kr_safe * gamma_safe * cb * rho_b)
+                / (2.0 * kr_safe * np.where(trapped, gamma_m, 1.0) * cb * rho_b),
+                0.0,
             )
+            if not trapped.all():
+                warnings.warn(
+                    f"Modes.with_attenuation: {int((~trapped).sum())} of "
+                    f"{gamma_m.size} mode(s) are leaky (kr <= omega/"
+                    f"bottom.sound_speed = {kb:g} 1/m) and get no bottom term: "
+                    "the evanescent-tail integral diverges for a radiating "
+                    "mode, so first-order perturbation theory does not apply. "
+                    "Their dominant loss is radiation into the half-space, "
+                    "which backend='krakenc' already carries in Im(k) and this "
+                    "method replaces.",
+                    UserWarning, stacklevel=2,
+                )
             alpha_m = alpha_m + alpha_bottom / norm
         new_k = kr + 1j * alpha_m
         return Modes(

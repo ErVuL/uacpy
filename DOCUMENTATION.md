@@ -122,8 +122,8 @@ uacpy.plot_field(field, env=env)
 plt.show()
 
 # field is a Field: TL as a (depth × range) array, plus the axes.
-print(field.tl.shape)                 # (101, 200)
-print(field.at(depth=50.0).tl.shape)  # (200,) — TL vs range at source depth
+print(field.db.shape)                 # (101, 200)
+print(field.at(depth=50.0).db.shape)  # (200,) — TL vs range at source depth
 ```
 
 `compute_tl` is the convenience wrapper for transmission loss; it is
@@ -256,7 +256,7 @@ engines (Acoustics Toolbox; the Collins RAM family) stay quiet.
 Every `run()` returns a typed `Result` subclass chosen by the run mode:
 `Field` (TL / H(f) / p(t) — one unified array type whose physical meaning
 follows from its dtype and coordinate axes), `Rays`, `Modes`, `Arrivals`,
-`Covariance`/`Replicas`, `ReflectionCoefficient`. `Field` exposes `.tl`,
+`Covariance`/`Replicas`, `ReflectionCoefficient`. `Field` exposes `.db`,
 the `.depths`/`.ranges` axes, and `.at(...)`/`.isel(...)`/`.max(...)` to
 slice a dimension away. Details are in the Results section.
 
@@ -663,7 +663,7 @@ back a grid. Take the paired samples from a grid run instead:
 
 ```python
 rcv = Receiver(depths=[10, 20, 30], ranges=[100, 200, 300])   # grid
-tl = model.run(env, src, rcv).tl
+tl = model.run(env, src, rcv).db
 i = np.arange(len(rcv.depths))
 paired = tl[i, i]        # (depths[k], ranges[k]) for each k
 ```
@@ -758,10 +758,12 @@ Keys and values: `bathymetry` (`max`/`median`/`mean`/`min`/`initial`), `ssp`
 
 ### Bellhop
 
-Gaussian beam / ray tracing with three interchangeable backends. `backend=None`
-(default) auto-selects the fastest installed binary (CUDA → C++ → Fortran); an
-explicitly requested backend that isn't installed falls back to Fortran with a
-`UserWarning`.
+Gaussian beam / ray tracing with three backends. `backend=None` (default)
+auto-selects the fastest installed binary (CUDA → C++ → Fortran); an explicitly
+requested backend that isn't installed falls back to Fortran with a
+`UserWarning`. They are not the same code — `cxx`/`cuda` port `A-New-BellHope`,
+a bug-fixed fork of the Fortran BELLHOP that `backend='fortran'` runs, so fields
+agree to ~0.3 dB at p99 with a few dB at interference nulls, without bias.
 
 ```python
 import numpy as np, uacpy
@@ -989,7 +991,7 @@ if __name__ == '__main__':
     ]
     batch = run_parallel(jobs, n_workers=3)                 # ParallelResult
     for label, result in zip(['bellhop', 'kraken', 'ram'], batch):
-        print(label, result.tl.min())
+        print(label, result.db.min())
 
     # Single-model sweep -> stack into one ResultStack:
     sweep = [Job(RAM(accuracy=1e-1).copy(np_pade=p), env, source, receiver, label=p)
@@ -1036,43 +1038,61 @@ Pass `env=` whenever you want the depth axis to span the full water column with
 the seabed drawn: on its own, `tl.plot()` can only span the receiver grid it was
 sampled on, which stops short of the seafloor whenever your receivers do.
 
-### Field — one container, meaning derived from (dtype, coords)
+### Field — one container described on three axes
 
-`Field` is the **single** gridded result type. Its physical meaning is not a
-constructor argument — it is *derived* from the dtype of `.data` plus the keys
-in `.coords`, and read back through `.kind`:
+`Field` is the **single** gridded result type. What it means is not a
+constructor argument — it is described on three independent axes, derived from
+the data unless a model tags otherwise:
 
-| `.data` dtype | `.coords` keys | `.kind` | meaning |
-|---|---|---|---|
-| real | `{depth, range}` | `tl` | transmission loss (dB) |
-| complex | `{depth, range}` | `pressure` | narrowband p(d, r) |
-| complex | `{depth, range, frequency}` | `transfer_function` | broadband H(d, r, f) |
-| real | `{time}` or `{…, time}` | `time_series` | p(t) |
-| complex | `{source_depth, depth, range}` | `pressure` | multi-source pressure |
+| axis | question | ask it when you need |
+|---|---|---|
+| `.kind` | *what* is this? | to know whether comparing two fields means anything |
+| `.unit` | what is it *measured in*? | to know which direction is louder |
+| `.dtype` | how is it *stored*? | to know whether there is phase to work with |
+
+| `.data` dtype | `.coords` keys | `.kind` | `.unit` | meaning |
+|---|---|---|---|---|
+| real | `{depth, range}` | `pressure` | `dB` | transmission loss |
+| complex | `{depth, range}` | `pressure` | `Pa` | narrowband p(d, r) |
+| complex | `{depth, range, frequency}` | `pressure` | `Pa` | broadband H(d, r, f) |
+| real | `{time}` or `{…, time}` | `pressure` | `Pa` | p(t) |
+| complex | `{source_depth, depth, range}` | `pressure` | `Pa` | multi-source pressure |
+
+Transmission loss is not a separate kind: `-20·log10|p|` is the same pressure
+field written in dB, which is what `.unit` records. That is why a RAM TL field
+and a Kraken complex field compare on one colour scale. Models producing a
+different *quantity* tag it — OASS reverberation, or `signal_excess` and
+`probability_of_detection` from the [sonar equation](docs/guide/sonar.md).
+
+Only transmission loss runs backwards: it is a *loss*, so less is louder.
+Reverberation and signal excess share its dB unit but are **levels**, where
+more is more — which is why `.max()` consults both axes, never the unit alone.
 
 `.data.shape` matches the insertion order of `.coords` (canonical order
 `source_depth → depth → range → frequency|time`).
 
 ```python
-field.tl          # dB; -20·log10(|data|) for complex, data as-is if already real
+field.db          # dB; -20·log10(|data|) for complex, data as-is if already real
 field.p           # complex pressure / H(f) (raises if data is real — phase gone)
 field.magnitude   # |data|;  field.phase  → angle in rad  (complex only)
 field.data        # raw ndarray
 field.coords['range']           # axis vectors, always 1-D, metres / Hz / s
 field.ranges, field.depths, field.times    # shorthand accessors
-field.kind        # 'tl' | 'pressure' | 'transfer_function' | 'time_series'
+field.kind        # 'pressure' (or a model-tagged quantity, e.g. 'reverberation')
+field.unit        # 'Pa' | 'dB'          -- which direction is louder
+field.data.dtype  # real | complex        -- is there phase to work with
 field.is_complex  # whether phase survives
 field.n_depths, field.n_ranges, field.n_frequencies, field.n_times   # axis lengths
 ```
 
-`.kind` is the physical meaning; the coarser `.field_type` (`'field'` / `'rays'`
+`.kind` is the physical quantity; the coarser `.field_type` (`'field'` / `'rays'`
 / `'modes'` / …) is the *category* every result carries, and is what tells the
 plot dispatcher which view to build.
 
 Derived views return new `Field`s and never re-run the solver:
 
 ```python
-field.to_tl()                              # → a real-dB Field (kind 'tl')
+field.to_db()                              # → the same kind in unit='dB'
 field.mask_below_seafloor(env.bathymetry)  # NaN out the sub-seafloor cells
 field.resample_to(depths=np.linspace(0, 100, 60),
                   ranges=np.linspace(100, 5_000, 200))   # onto another grid
@@ -1092,7 +1112,7 @@ chain and then plot.
 
 ```python
 H = bellhop.run(env, src, rcv, run_mode=RunMode.BROADBAND, frequencies=freqs)
-H.kind                       # 'transfer_function', coords = {depth, range, frequency}
+H.kind, H.unit               # 'pressure', 'Pa'; coords = {depth, range, frequency}
 
 narrow = H.at(frequency=200)        # nearest-label select
 narrow.coords                       # {'depth': ..., 'range': ...}
@@ -1247,7 +1267,7 @@ Models that don't support multiple source depths (e.g. `Kraken`) raise a
 ```python
 for src_depth, slab in stack: ...     # iterate (coordinate, slab) pairs
 stack.at(source_depth=20)             # nearest-label slab → a Field
-stack.tl                              # stacked TL, shape (n_slabs, *slab.tl.shape)
+stack.db                              # stacked TL, shape (n_slabs, *slab.db.shape)
 stack.n_slabs, stack.slab_type        # how many slabs, and of what result type
 stack.plot()                          # panel grid (Field slabs)
 ```
@@ -1380,7 +1400,7 @@ explicit `vmin=`/`vmax=` to override.
 
 ```python
 import uacpy
-tl = bellhop.compute_tl(env, src, rcv)     # Field, coords = {depth, range}; .tl → dB
+tl = bellhop.compute_tl(env, src, rcv)     # Field, coords = {depth, range}; .db → dB
 fig, ax = uacpy.plot_field(
     tl, env=env,            # env= overlays the seafloor on the (depth, range) heatmap
     contours=[60, 80, 100], # dB contour lines
@@ -1645,7 +1665,7 @@ uacpy is SI throughout; underwater levels reference **1 µPa**.
 - A `Field` with **complex** `data` holds the **acoustic pressure normalized to
   a unit point source at 1 m** — i.e. referenced to the free-field
   `p₀(r) = e^{i k₀ r}/(4π r)`. Hence transmission loss is simply
-  **`TL = −20·log₁₀|p|`** (`Field.tl`), in dB re 1 m. Real `data` is already in
+  **`TL = −20·log₁₀|p|`** (`Field.db`), in dB re 1 m. Real `data` is already in
   dB and returned as-is.
 - This is the 3-D point-source (**spherical-spreading**) convention, and it is
   **the same for every model** (Bellhop, Kraken, Scooter, RAM, SPARC) so that

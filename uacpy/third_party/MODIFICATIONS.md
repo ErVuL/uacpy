@@ -5,6 +5,48 @@ code shipped with uacpy, with exact diffs.
 
 ---
 
+## Collins RAM family — double-precision build
+
+`ramgeo1.5.f`, `ramsurf1.5.f` and `rams0.5.f` are built with
+`-fdefault-real-8 -fdefault-double-8` (their `Makefile`s), and the four explicit
+kind declarations at the `epade` interface are promoted to match:
+
+| file | was | now |
+|---|---|---|
+| `ramgeo1.5.f:451,453` | `complex*8 pd1,pd2` / `real*4 k0,c0,dr` | `complex*16` / `real*8` |
+| `ramsurf1.5.f:461,463` | same | same |
+| `rams0.5.f:900,901` | `complex*8 ci8,g0,pd1,pd2,nu8` / `real*4 k0,c0,dr,theta` | `complex*16` / `real*8` |
+
+**Why.** Collins' own guide (`mpiramS/doc/ram.pdf` §3) states the stock policy —
+*"The subroutines that compute the coefficients of the rational approximation are
+written in double precision. Everything else is written in single precision"* —
+and its limit: *"Double precision is required for both ram.f and ramp.f when the
+number of depth grid points is large."* `matrc` scales its discretisation terms
+as `1/dz**2` while the physical terms stay O(0.1), so on a fine grid each matrix
+entry becomes a small difference of large numbers. Measured on a 250 Hz Pekeris
+guide against KrakenC, refining `dz` made the answer **worse**:
+
+| `dz` (m) | single build | double build |
+|---|---|---|
+| 0.1 | 0.192 dB | 0.163 dB |
+| 0.025 | 0.486 dB | 0.116 dB |
+| 0.0125 | **2.186 dB** | **0.106 dB** |
+
+i.e. the convergence test both manuals prescribe returned a *diverging* sequence.
+uacpy's own array widening (below) had raised the reachable grid size into that
+regime. mpiramS was already double via its `kinds.f90` patch; this brings the
+Collins trio in line.
+
+**The promotions are required, not cosmetic.** `-fdefault-real-8` does not touch
+an explicit `complex*8`/`real*4`, so without them the caller passes `complex*16`
+to an `epade` still expecting `complex*8` and the run produces NaN from the first
+range step — it does not degrade quietly.
+
+**Consequence for readers.** `tl.grid` and `pcomplex.bin` are now 8-byte records;
+`io/ramsurf_reader.py` reads `'f8'`/`'c16'` accordingly. Every RAM number moves
+slightly.
+
+
 ## Acoustics Toolbox (Bellhop, Kraken, Scooter, Bounce, SPARC)
 
 Vendored from https://github.com/oalib-acoustics/Acoustics-Toolbox at commit
@@ -225,7 +267,7 @@ Both Collins drivers consume `pcomplex.bin` via `read_pcomplex_grid`:
 `RAM._run_collins_broadband` for `BROADBAND` / `TIME_SERIES`, which loops
 the binary over the Q/T-derived frequency vector and assembles a
 broadband `Field` (complex `data` over `coords={depth, range,
-frequency}`, so `.kind == 'transfer_function'`). Every Collins-backend
+frequency}`). Every Collins-backend
 run returns complex pressure, so a binary built from unpatched sources
 does not degrade to real TL — it fails outright, with the wrapper
 naming `pcomplex.bin` and telling the user to rebuild. The complex

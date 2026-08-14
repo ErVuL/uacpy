@@ -33,6 +33,7 @@ from uacpy.core.constants import (
 )
 from uacpy.core.exceptions import (
     ConfigurationError, ExecutableNotFoundError, ModelExecutionError,
+    UnsupportedFeatureError,
 )
 from uacpy.io.bellhop_writer import (
     validate_beam_shape, validate_beam_type, write_bellhop_env_file,
@@ -251,6 +252,11 @@ _BELLHOP_OUTPUT = {
 _BELLHOP_OUTPUT_SUFFIXES = ('.shd', '.arr', '.ray')
 
 
+# bellhop.f90:176-178 zeroes the angular spacing for a single beam, and two
+# beams cannot bracket a receiver; both give an all-NaN field at exit 0.
+_MIN_INFLUENCE_BEAMS = 3
+
+
 class Bellhop(PropagationModel):
     """
     Bellhop Gaussian beam/ray tracing model
@@ -263,6 +269,16 @@ class Bellhop(PropagationModel):
     - Fortran: Baseline single-threaded
     - bellhopcxx (C++): 10-30x faster (CPU multithreaded)
     - bellhopcuda (CUDA): 20-100x+ faster (GPU accelerated)
+
+    The backends are not the same code. ``'fortran'`` is Porter's
+    ``Acoustics-Toolbox`` BELLHOP; ``'cxx'`` and ``'cuda'`` are ports of
+    ``A-New-BellHope``, a fork that deliberately fixes bugs and edge cases in
+    it (``bellhopcuda/doc/accuracy.md:38-39``: results are compared "to our
+    modified Fortran version, not to the original BELLHOP"). Measured over
+    two 2-D scenarios, the ports agree with the Fortran to ~0.3 dB at p99
+    with excursions of a few dB at interference nulls, and **no bias**
+    (|signed mean| <= 0.0007 dB); ``'cxx'`` and ``'cuda'`` are identical to
+    each other. :attr:`Result.backend` records which binary ran.
 
     Parameters
     ----------
@@ -681,6 +697,97 @@ class Bellhop(PropagationModel):
                 UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
             )
 
+    def _validate_geometry(self, env, source, receiver, run_mode=None):
+        """Reject a source on or below the seabed at its own range.
+
+        ``bellhop.f90:488-492`` (``TraceRay2D``) tests ``DistBegTop <= 0 .OR.
+        DistBegBot <= 0`` and, when either holds, sets ``Beam%Nsteps = 1``,
+        prints *"Terminating the ray trace because the source is on or outside
+        the boundaries"* and returns — *"source must be within the medium"*.
+        Every beam is then one point long, so the run exits 0 with an all-NaN
+        field, zero arrivals and 1-point rays, and warns about none of it.
+        The test is ``<= 0``, so **on** the boundary already counts as outside.
+
+        Measured against the seafloor at **r = 0**, not ``env.depth``:
+        ``bellhop.f90:237`` launches from ``xs = [0.0, Pos%sz(is)]``, so on a
+        sloping bottom a source can be buried at its own range while sitting
+        well above ``env.depth`` — a check against ``env.depth`` misses it.
+
+        Bellhop-only. Kraken, Scooter and RAM all return finite, continuous
+        fields for a source at or below the seabed (measured -96.8, -58.6 and
+        -101.2 dB on the same environment), so this must not go on the shared
+        funnel.
+        """
+        super()._validate_geometry(env, source, receiver, run_mode)
+        seafloor = float(np.asarray(env.bathymetry.eval(range=0.0)).flat[0])
+        zs = np.atleast_1d(np.asarray(source.depths, dtype=float))
+        if np.any(zs >= seafloor):
+            raise ConfigurationError(
+                f"Bellhop: source depth {float(zs.max()):g} m is at or below "
+                f"the seafloor at the source range (r = 0), which is "
+                f"{seafloor:g} m. Bellhop terminates every ray at step 1 when "
+                f"the source is on or outside a boundary "
+                f"(Bellhop/bellhop.f90:488-492, 'source must be within the "
+                f"medium'), so the run would return an all-NaN field at exit 0.",
+                remediation="Move the source above the seafloor, or use "
+                            "Kraken / Scooter / RAM, which resolve a source at "
+                            "or below the seabed.")
+
+    def _reject_precalc_boundary(self, env) -> None:
+        """A ``'precalc'`` boundary has no reflection branch in BELLHOP.
+
+        ``ReadEnvironmentBell.f90:459`` accepts the ``'P'`` option letter and
+        prints "reading PRECALCULATED IRC", but ``bellhop.f90:681``'s
+        ``SELECT CASE ( HS%BC )`` implements only ``'R'``, ``'V'``, ``'F'``
+        and ``'A'``/``'G'`` — there is no ``'P'`` case, so the run fails with
+        a bare exit code instead of naming the boundary. ``bounce.py:80``
+        already records this; the guard belongs here, where the deck is built.
+        KRAKENC and SCOOTER do read ``.irc``.
+        """
+        for boundary, where in ((env.bottom, 'bottom'), (env.surface, 'surface')):
+            if boundary is None:
+                continue
+            props = getattr(boundary, 'properties', None) or getattr(
+                boundary, 'columns', None) or []
+            types = {getattr(p, 'acoustic_type', None) for p in props}
+            types.add(getattr(boundary, 'acoustic_type', None))
+            if 'precalc' in types:
+                raise UnsupportedFeatureError(
+                    'Bellhop',
+                    f"a {where} with acoustic_type='precalc' — "
+                    f"ReadEnvironmentBell.f90:459 accepts the 'P' option but "
+                    f"bellhop.f90:681 has no 'P' reflection branch, so the run "
+                    f"fails without naming the cause. Use acoustic_type='file' "
+                    f"with a .brc table instead",
+                    ['KrakenC', 'Scooter'])
+
+    def _check_beam_count_supports_run_mode(self, run_mode) -> None:
+        """Reject a beam fan too sparse to carry an influence calculation.
+
+        ``bellhop.f90:176-178`` leaves ``Angles%Dalpha = 0`` when
+        ``Nalpha == 1``, so ``q0 = c / Dalpha`` gives every beam zero width
+        and the influence sum contributes nothing: the field comes back
+        all-NaN at exit 0, with no diagnostic. Two beams have a finite
+        ``Dalpha`` but cannot bracket a receiver, and measure all-NaN too.
+
+        Ray and eigenray runs are unaffected — ``bellhop.f90:288`` skips the
+        influence step, and a single traced ray is a legitimate request.
+        """
+        if run_mode in (RunMode.RAYS, RunMode.EIGENRAYS):
+            return
+        n = self.n_beams
+        if n is None or n == 0 or n >= _MIN_INFLUENCE_BEAMS:
+            return                                  # 0 = Bellhop auto-picks
+        raise ConfigurationError(
+            f"Bellhop(n_beams={n}) cannot produce a {run_mode.name} field: "
+            f"bellhop.f90:176-178 leaves the angular spacing Dalpha at 0 for a "
+            f"single beam, so every beam has zero width and the influence sum "
+            f"is empty — the run exits 0 with an all-NaN field. Two beams "
+            f"cannot bracket a receiver either.",
+            remediation=f"Use n_beams >= {_MIN_INFLUENCE_BEAMS} (or 0 to let "
+                        f"Bellhop choose), or run_mode=RunMode.RAYS to trace "
+                        f"individual rays.")
+
     def _check_beam_type_supports_run_mode(self, run_mode) -> None:
         """Reject ``beam_type`` × ``run_mode`` pairs the influence routine cannot
         run — see :data:`_BEAM_TYPE_RUN_TYPES` for the enumeration and its
@@ -720,6 +827,19 @@ class Bellhop(PropagationModel):
                             "grid_type='R' for a rectilinear grid.",
             )
         ranges = np.atleast_1d(receiver.ranges)
+        if self.beam_type in _UNIFORM_RANGE_BEAM_TYPES and ranges.size == 1:
+            raise ConfigurationError(
+                f"Bellhop(beam_type={self.beam_type!r}) cannot use a single "
+                f"receiver range: {_INFLUENCE_ROUTINE[self.beam_type]} clamps "
+                f"the receiver index to Pos%NRr (influence.f90:339,351), so "
+                f"irA == irB at every step and influence.f90:354 skips the "
+                f"whole ray — the run exits 0 with an all-NaN field, zero "
+                f"eigenrays and zero arrivals.",
+                remediation="Use beam_type='G' or 'B', which walk the range "
+                            "index with a bracket test, or give "
+                            "receiver.ranges at least two equally spaced "
+                            "entries.",
+            )
         if (self.beam_type in _UNIFORM_RANGE_BEAM_TYPES and ranges.size > 2
                 and not equally_spaced(np.asarray(ranges, dtype=float))):
             raise ConfigurationError(
@@ -921,7 +1041,9 @@ class Bellhop(PropagationModel):
         # Before the backend is chosen, so all three backends agree: the ports
         # implemented branches the Fortran lacks, which otherwise makes the
         # answer depend on which binaries install.sh built.
+        self._reject_precalc_boundary(env)
         self._check_beam_type_supports_run_mode(run_mode)
+        self._check_beam_count_supports_run_mode(run_mode)
         if run_mode != RunMode.RAYS:      # bellhop.f90:288 skips influence
             self._check_beam_type_supports_receiver_grid(receiver)
 

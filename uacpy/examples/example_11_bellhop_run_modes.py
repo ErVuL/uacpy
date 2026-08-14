@@ -193,7 +193,7 @@ def scenario_a_tl_modes():
     # Coherent TL
     ax = axes[0, 0]
     im = ax.pcolormesh(result_coherent.ranges/1000, result_coherent.depths,
-                       result_coherent.tl, cmap='viridis', vmin=vmin, vmax=vmax,
+                       result_coherent.db, cmap='viridis', vmin=vmin, vmax=vmax,
                        shading='auto', zorder=1)
     ax.set_xlim([result_coherent.ranges[0]/1000, result_coherent.ranges[-1]/1000])
     ax.set_ylim([result_coherent.depths[-1], result_coherent.depths[0]])
@@ -208,7 +208,7 @@ def scenario_a_tl_modes():
     # Incoherent TL
     ax = axes[0, 1]
     im = ax.pcolormesh(result_incoherent.ranges/1000, result_incoherent.depths,
-                       result_incoherent.tl, cmap='viridis', vmin=vmin, vmax=vmax,
+                       result_incoherent.db, cmap='viridis', vmin=vmin, vmax=vmax,
                        shading='auto', zorder=1)
     ax.set_xlim([result_incoherent.ranges[0]/1000, result_incoherent.ranges[-1]/1000])
     ax.set_ylim([result_incoherent.depths[-1], result_incoherent.depths[0]])
@@ -223,7 +223,7 @@ def scenario_a_tl_modes():
     # Semi-coherent TL
     ax = axes[1, 0]
     im = ax.pcolormesh(result_semicoherent.ranges/1000, result_semicoherent.depths,
-                       result_semicoherent.tl, cmap='viridis', vmin=vmin, vmax=vmax,
+                       result_semicoherent.db, cmap='viridis', vmin=vmin, vmax=vmax,
                        shading='auto', zorder=1)
     ax.set_xlim([result_semicoherent.ranges[0]/1000, result_semicoherent.ranges[-1]/1000])
     ax.set_ylim([result_semicoherent.depths[-1], result_semicoherent.depths[0]])
@@ -237,9 +237,9 @@ def scenario_a_tl_modes():
 
     # Range cut comparison at the source depth
     ax = axes[1, 1]
-    tl_coherent = result_coherent.at(depth=1000).tl
-    tl_incoherent = result_incoherent.at(depth=1000).tl
-    tl_semicoherent = result_semicoherent.at(depth=1000).tl
+    tl_coherent = result_coherent.at(depth=1000).db
+    tl_incoherent = result_incoherent.at(depth=1000).db
+    tl_semicoherent = result_semicoherent.at(depth=1000).db
 
     ax.plot(result_coherent.ranges/1000, tl_coherent,
             'b-', linewidth=2.5, label='Coherent', alpha=0.8)
@@ -276,11 +276,11 @@ def scenario_a_tl_modes():
 
     # Whole-grid spread is the fair smoothness measure — one depth slice is
     # too short a sample to separate 'I' from 'S'.
-    std_c = np.nanstd(np.asarray(result_coherent.tl))
-    std_i = np.nanstd(np.asarray(result_incoherent.tl))
-    std_s = np.nanstd(np.asarray(result_semicoherent.tl))
-    max_is = np.nanmax(np.abs(np.asarray(result_incoherent.tl)
-                              - np.asarray(result_semicoherent.tl)))
+    std_c = np.nanstd(np.asarray(result_coherent.db))
+    std_i = np.nanstd(np.asarray(result_incoherent.db))
+    std_s = np.nanstd(np.asarray(result_semicoherent.db))
+    max_is = np.nanmax(np.abs(np.asarray(result_incoherent.db)
+                              - np.asarray(result_semicoherent.db)))
     print("\n  Whole-grid TL std dev:")
     print(f"    • Coherent {std_c:.2f} dB   • Incoherent {std_i:.2f} dB"
           f"   • Semi-coherent {std_s:.2f} dB")

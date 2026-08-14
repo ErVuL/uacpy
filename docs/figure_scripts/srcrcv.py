@@ -29,7 +29,7 @@ GUIDE = True
 def geometry_to_grid():
     """The receiver lattice you draw is the grid the model fills in."""
     env, source, receiver = shallow_water()
-    tl = Bellhop(n_beams=3000).run(env, source, receiver).to_tl()
+    tl = Bellhop(n_beams=3000).run(env, source, receiver).to_db()
 
     fig, axes = plt.subplots(2, 1, figsize=(9.0, 7.0))
     env.plot(source=source, receiver=receiver, ax=axes[0],
@@ -73,7 +73,7 @@ def spreading():
     curves = {}
     for kind in ('point', 'line', 'scaled'):
         source = uacpy.Source(depths=25.0, frequencies=200.0, source_type=kind)
-        curves[kind] = Kraken().run(env, source, receiver).to_tl().data.ravel()
+        curves[kind] = Kraken().run(env, source, receiver).to_db().data.ravel()
 
     fig, axes = plt.subplots(2, 1, figsize=(9.0, 6.4), sharex=True)
     for kind in ('point', 'line', 'scaled'):
@@ -109,8 +109,8 @@ def array_shapes():
     hla = uacpy.Receiver(depths=60.0, ranges=np.linspace(200.0, 5000.0, 240))
 
     model = Bellhop(n_beams=3000)
-    tl_v = model.run(env, source, vla).to_tl()
-    tl_h = model.run(env, source, hla).to_tl()
+    tl_v = model.run(env, source, vla).to_db()
+    tl_h = model.run(env, source, hla).to_db()
 
     fig, axes = plt.subplots(1, 2, figsize=(9.5, 4.2))
     tl_v.isel(range=0).plot(ax=axes[0])
@@ -135,7 +135,7 @@ def below_the_domain():
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
         for model in (Bellhop(n_beams=4000), Kraken(), RAM()):
-            field = model.run(env, source, receiver).to_tl()
+            field = model.run(env, source, receiver).to_db()
             cuts[model.model_name] = field.isel(range=0).data
 
     fig, ax = plt.subplots(figsize=(6.6, 5.6))

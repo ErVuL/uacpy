@@ -36,7 +36,7 @@ def animate_field(
     Parameters
     ----------
     field : Field
-        Must have ``kind='time_series'`` and ``coords={'depth', 'range',
+        Must have ``coords={'depth', 'range',
         'time'}``. Data is real-valued p(d, r, t).
     env : Environment, optional
         When supplied, the seafloor (and surface, if elastic) overlay is
@@ -85,11 +85,10 @@ def animate_field(
     from matplotlib.animation import FuncAnimation
     from uacpy.core.results import Field  # local import to avoid cycle
 
-    if not isinstance(field, Field) or field.kind != 'time_series':
+    if not isinstance(field, Field) or 'time' not in getattr(field, 'coords', {}):
         raise ConfigurationError(
-            "animate_field: needs a Field with kind='time_series' "
-            "(real-valued, ``coords`` containing a 'time' axis). "
-            f"Got kind={getattr(field, 'kind', None)!r}."
+            "animate_field: needs a Field carrying a 'time' axis. "
+            f"Got coords={tuple(getattr(field, 'coords', ()))!r}."
         )
     expected_axes = {'depth', 'range', 'time'}
     if expected_axes - set(field.coords):
@@ -201,7 +200,7 @@ def save_animation(
     Parameters
     ----------
     field : Field
-        Time-series field (``kind='time_series'``).
+        Time-domain field (carrying a ``'time'`` axis).
     path : str or Path
         Output file. ``.gif`` → :class:`PillowWriter`; ``.mp4`` →
         ``'ffmpeg'`` (requires ffmpeg installed).

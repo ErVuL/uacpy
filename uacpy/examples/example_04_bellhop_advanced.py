@@ -199,12 +199,12 @@ def main():
         )
         # ``stack`` is a ResultStack of Field slabs. Iterate to walk
         # (source_depth, slab) pairs, or stack.at(source_depth=z) to
-        # pick a single 2-D Field by label. Slab accessors (.tl, .p,
+        # pick a single 2-D Field by label. Slab accessors (.db, .p,
         # .at(depth=, range=)) live on the Field, not on the stack.
         print(f"  ✓ Success — ResultStack of {stack.slab_type.__name__} "
               f"with {stack.n_slabs} source-depth slabs")
         for sd_value, slab in stack:
-            tl = np.asarray(slab.tl)
+            tl = np.asarray(slab.db)
             real = tl[np.isfinite(tl)]        # NaN = no-data (no ray reached)
             if real.size:
                 print(f"      sd={sd_value:6.1f} m  →  median TL "
@@ -312,7 +312,7 @@ def main():
         if n_sd == 1:
             axes5 = [axes5]
         for ax, (sd_value, slab) in zip(axes5, stack):
-            plot_field(slab.to_tl(), env=env, ax=ax,
+            plot_field(slab.to_db(), env=env, ax=ax,
                                    show_colorbar=False)
             # Mark the source location (r = 0 km, z = source depth)
             # — TL plots use km on x and m on y.

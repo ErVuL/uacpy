@@ -1967,7 +1967,7 @@ class TestOasesFrequencyReachesTheDeck:
 
         def tl(freq):
             return np.asarray(OAST().compute_tl(
-                env, Source(depths=50.0, frequencies=freq), rcv).tl).ravel()
+                env, Source(depths=50.0, frequencies=freq), rcv).db).ravel()
 
         # Bit-identical before the fix: the deck carried '200.0' either way.
         assert np.nanmax(np.abs(tl(200.0) - tl(200.04))) > 0.1

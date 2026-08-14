@@ -122,8 +122,8 @@ def test_animate_field_rejects_non_timeseries():
         coords={'depth': np.arange(4.0), 'range': np.arange(5.0)},
         model='TL',
     )
-    assert field.kind != 'time_series'
-    with pytest.raises(ConfigurationError, match="kind=.time_series."):
+    assert 'time' not in field.coords
+    with pytest.raises(ConfigurationError, match="'time' axis"):
         animate_field(field)
 
 

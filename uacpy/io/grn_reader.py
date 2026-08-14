@@ -542,7 +542,7 @@ def sparc_snapshot_to_field(
     3. Hankel-transform :math:`G(k, z)` to range.
 
     Returns a complex narrowband :class:`Field` (``coords={'depth',
-    'range'}``); use ``.tl`` or ``.to_tl()`` for transmission loss in dB.
+    'range'}``); use ``.db`` or ``.to_db()`` for transmission loss in dB.
     """
     if not grn_data["is_sparc"]:
         raise ConfigurationError(

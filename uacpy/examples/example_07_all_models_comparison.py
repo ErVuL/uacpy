@@ -249,9 +249,9 @@ def main():
             if result is not None:
                 # NaN-aware: RAM masks sub-seafloor cells with NaN, so plain
                 # min/max/mean would print nan for the RAM summary line.
-                tl_min = np.nanmin(result.tl)
-                tl_max = np.nanmax(result.tl)
-                tl_mean = np.nanmean(result.tl)
+                tl_min = np.nanmin(result.db)
+                tl_max = np.nanmax(result.db)
+                tl_mean = np.nanmean(result.db)
                 print(f"  {model_name:12s}: TL range [{tl_min:5.1f}, {tl_max:5.1f}] dB, mean = {tl_mean:5.1f} dB")
             else:
                 print(f"  {model_name:12s}: Failed")

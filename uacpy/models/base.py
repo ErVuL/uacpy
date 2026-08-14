@@ -107,6 +107,12 @@ class RunMode(Enum):
 
     REFLECTION = 'reflection'            # Plane-wave reflection coefficients (Bounce, OASR)
 
+    # Scattered / reverberant field from rough interfaces (OASS, OASSP). Unlike
+    # every other mode this is a two-stage run: the scattering kernel is a
+    # post-processor over a .rhs written by a preceding mean-field run
+    # (OAST/OASR for OASS, OASP for OASSP) with option 's'.
+    REVERBERATION = 'reverberation'
+
 
 DEFAULT_COLLAPSE: Dict[str, str] = {
     'bathymetry': 'max',
@@ -2233,9 +2239,40 @@ class PropagationModel(ABC):
             self._attach_prt_tail(exc, work_dir, base_name)
             raise
         self._raise_on_fortran_fatal(result, work_dir, base_name)
+        self._warn_on_prt_warnings(work_dir, base_name)
         if result.stdout:
             self._log(f"{self.model_name} output:\n{result.stdout}", level='debug')
         return result
+
+    def _warn_on_prt_warnings(self, work_dir, base_name) -> None:
+        """Surface the binary's own non-fatal ``Warning in ...`` lines.
+
+        The AT binaries write both fatals and *non-fatal* diagnoses to the
+        ``.prt``. Only the fatals were read (``_attach_prt_tail``, on the
+        exception path), so a run the solver itself diagnosed came back at
+        exit 0 with a full-size result and nothing said — measured, BELLHOP
+        writes ``Warning in BELLHOP : Too few beams`` and uacpy emitted zero
+        warnings while returning a TL field the binary had just called
+        under-sampled.
+
+        These are the solver's words, not uacpy's, so they are passed through
+        verbatim rather than reinterpreted.
+        """
+        text = read_prt(Path(work_dir) / f"{base_name}.prt", tail_bytes=200000)
+        if not text:
+            return
+        seen, lines = set(), []
+        for raw in text.splitlines():
+            line = raw.strip()
+            if line.lower().startswith('warning in') and line not in seen:
+                seen.add(line)
+                lines.append(line)
+        if lines:
+            joined = "\n  ".join(lines)
+            warnings.warn(
+                f"{self.model_name} reported {len(lines)} non-fatal "
+                f"warning(s) in its .prt log:\n  {joined}",
+                UserWarning, stacklevel=3)
 
     def _result_kwargs(
         self,
@@ -2263,7 +2300,7 @@ class PropagationModel(ABC):
         returned. The one cross-model *convention* the base class carries is
         ``phase_reference`` (see
         :class:`~uacpy.core.results._base.PhaseReference`), which is about
-        phase, not level; the absolute dB reference behind ``Field.tl`` is a
+        phase, not level; the absolute dB reference behind ``Field.db`` is a
         per-model property and is not asserted here.
         """
         kw = dict(

@@ -161,7 +161,7 @@ def _run_tl(env):
     try:
         tl = Bellhop(verbose=False).run(env, source, receiver,
                                         run_mode=RunMode.COHERENT_TL)
-        print(f"  TL: ok  ({tl.tl.shape} grid, {FREQ_HZ:g} Hz, "
+        print(f"  TL: ok  ({tl.db.shape} grid, {FREQ_HZ:g} Hz, "
               f"source {SOURCE_DEPTH:g} m)")
     except Exception as exc:                       # model not built / run failed
         print(f"  TL: [skipped] {str(exc).splitlines()[0]}")
@@ -325,7 +325,7 @@ def _rdlb_overview(env, grid, plt):
             warnings.simplefilter('always')
             tl = model.run(env_rdlb, source, receiver,
                            run_mode=RunMode.COHERENT_TL)
-        print(f"  RDLB TL: ok  ({tl.tl.shape} grid, {RDLB_FREQ_HZ:g} Hz, "
+        print(f"  RDLB TL: ok  ({tl.db.shape} grid, {RDLB_FREQ_HZ:g} Hz, "
               f"RAM→{backend}, range-dependent fluid layered bottom)")
         # Surface any grid/accuracy compromise rather than presenting the
         # field as if it met the requested budget.

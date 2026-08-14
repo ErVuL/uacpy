@@ -162,10 +162,15 @@ def _slab_pressure(slab, array_depths) -> np.ndarray:
     ``depth`` is the array (receiver) axis. Optionally verifies the depth axis
     against ``array_depths``.
     """
-    if getattr(slab, "kind", None) != "pressure":
+    # Matched-field processing correlates phase, so the requirement is on the
+    # dtype axis, not the quantity: a real TL slab is the same ``kind`` and
+    # would pass a kind check having already thrown its phase away.
+    if getattr(slab, "kind", None) != "pressure" or not slab.is_complex:
         raise ConfigurationError(
             "replica_bank_from_field: slab must be complex narrowband pressure "
-            f"(kind='pressure'); got kind={getattr(slab, 'kind', None)!r}"
+            f"(kind='pressure', complex dtype); got "
+            f"kind={getattr(slab, 'kind', None)!r}, unit={slab.unit!r}, "
+            f"dtype={slab.data.dtype}"
         )
     coords = list(slab.coords)
     if coords != ["depth", "range"]:
@@ -268,10 +273,12 @@ def replica_bank_from_field(field, *, array_depths=None) -> np.ndarray:
         return np.ascontiguousarray(np.stack(cols, axis=1), dtype=np.complex128)
 
     # Single Field.
-    if getattr(field, "kind", None) != "pressure":
+    if getattr(field, "kind", None) != "pressure" or not field.is_complex:
         raise ConfigurationError(
             "replica_bank_from_field: needs complex narrowband pressure "
-            f"(kind='pressure'); got kind={getattr(field, 'kind', None)!r}. "
+            f"(kind='pressure', complex dtype); got "
+            f"kind={getattr(field, 'kind', None)!r}, unit={field.unit!r}, "
+            f"dtype={field.data.dtype}. "
             "Slice one frequency with field.at(frequency=…) and ensure the "
             "field is coherent (complex), not TL."
         )

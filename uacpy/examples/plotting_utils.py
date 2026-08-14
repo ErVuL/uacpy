@@ -54,7 +54,7 @@ def plot_model_statistics(results: Dict, source_depth: float):
     model_names = list(results.keys())
     stats = []
     for name, result in results.items():
-        tl = np.asarray(result.at(depth=source_depth).tl)
+        tl = np.asarray(result.at(depth=source_depth).db)
         stats.append([np.nanmean(tl), np.nanstd(tl)])
     stats = np.array(stats)
     x = np.arange(len(model_names))
@@ -80,8 +80,8 @@ def plot_model_statistics(results: Dict, source_depth: float):
                     continue
                 ri = results[model_names[i]]
                 rj = results[model_names[j]]
-                tl_i = np.asarray(ri.at(depth=source_depth).tl)
-                tl_j = np.asarray(rj.at(depth=source_depth).tl)
+                tl_i = np.asarray(ri.at(depth=source_depth).db)
+                tl_j = np.asarray(rj.at(depth=source_depth).db)
                 if len(tl_i) != len(tl_j):
                     if len(ri.ranges) < len(rj.ranges):
                         tl_j = np.interp(ri.ranges, rj.ranges, tl_j)
@@ -173,7 +173,7 @@ def create_example_report(example_num: int, title: str, description: str,
     for name, result in results.items():
         if result is not None:
             print(f"  {name:15s}: TL range "
-                  f"{np.nanmin(result.tl):.1f} to {np.nanmax(result.tl):.1f} dB")
+                  f"{np.nanmin(result.db):.1f} to {np.nanmax(result.db):.1f} dB")
         else:
             print(f"  {name:15s}: Skipped")
 

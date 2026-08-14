@@ -68,7 +68,7 @@ from uacpy.io.oases_reader import (
 
 
 def _oases_resample_frequencies(
-    freqs: np.ndarray, model_name: str,
+    freqs: np.ndarray, model_name: str, log_spaced: bool = False,
 ) -> tuple[float, float, int, bool]:
     """Convert an arbitrary user ``frequencies=`` vector to the
     ``(fmin, fmax, N)`` triple OASR/OASP write into the input file.
@@ -92,6 +92,29 @@ def _oases_resample_frequencies(
     fmax = float(freqs.max())
     n = int(freqs.size)
     resampled = False
+    if n > 1 and log_spaced:
+        # OASR option 'C' makes the kernel sweep LOGARITHMIC
+        # (unoasr21.f:123-125, :243) — it is not a plot option. The
+        # equispacing test below is then exactly inverted: a linear request
+        # is the one being silently regridded, and a log request is correct.
+        with np.errstate(divide='ignore', invalid='ignore'):
+            ratios = freqs[1:] / freqs[:-1]
+        target = (fmax / fmin) ** (1.0 / (n - 1)) if fmin > 0 else np.nan
+        if not (fmin > 0 and np.allclose(ratios, target, rtol=1e-6)):
+            resampled = True
+            grid = np.geomspace(fmin, fmax, n) if fmin > 0 else freqs
+            warnings.warn(
+                f"{model_name}: option 'C' makes the frequency sweep "
+                f"logarithmic (unoasr21.f:123-125 computes the coefficients at "
+                f"exp-spaced frequencies), but the frequencies= vector is not "
+                f"log-spaced. It will be evaluated at "
+                f"np.geomspace({fmin}, {fmax}, {n}) — "
+                f"{np.array2string(grid, precision=4, max_line_width=200)} — "
+                f"not at the values given. Pass a log-spaced vector, or drop "
+                f"'C' for a linear sweep.",
+                UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+            )
+        return fmin, fmax, n, resampled
     if n > 1:
         diffs = np.diff(freqs)
         # Equispaced if all diffs match the mean diff within tolerance
@@ -110,6 +133,40 @@ def _oases_resample_frequencies(
                 UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
             )
     return fmin, fmax, n, resampled
+
+
+def _warn_if_trf_grid_replaced_request(requested, produced) -> None:
+    """Warn when OASP's ``.trf`` grid is not the caller's ``frequencies=``.
+
+    OASP is a *pulse* model: its frequency axis is the FFT ladder implied by
+    the time window and sample rate, not the bins the caller listed. The
+    ``(fmin, fmax, N)`` triple in the deck bounds the computation, but the
+    ``.trf`` comes back on the ladder — measured, ``frequencies=[150, 200,
+    250]`` returns 2047 bins spanning 0.183-374.911 Hz. ``Kraken`` on the
+    identical call returns exactly the three requested, so a caller who has
+    used one has no reason to expect the other.
+
+    Not an error: the ladder is what OASP computes and it is usable. But the
+    caller asked for specific bins and silently got a different axis, so the
+    substitution has to be visible. ``Field.at(frequency=…)`` picks the
+    nearest ladder bin.
+    """
+    if requested is None:
+        return
+    req = np.atleast_1d(np.asarray(requested, dtype=float))
+    got = np.atleast_1d(np.asarray(produced, dtype=float))
+    if req.size == got.size and np.allclose(req, got, rtol=1e-6, atol=1e-9):
+        return
+    warnings.warn(
+        f"OASP: frequencies= asked for {req.size} bin(s) spanning "
+        f"{req.min():g}-{req.max():g} Hz; the .trf returns OASP's own FFT "
+        f"ladder of {got.size} bin(s) spanning {got.min():g}-{got.max():g} Hz, "
+        f"which is the axis on the Field. OASP is a pulse model — its "
+        f"frequency axis follows the time window, not the requested list. Use "
+        f"Field.at(frequency=…) to take the nearest bin, or Kraken/Scooter if "
+        f"you need exactly the frequencies you name.",
+        UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+    )
 
 
 def _stack_oasr_data(data: dict):
@@ -175,6 +232,29 @@ def _oasn_freq_axis(data: dict) -> np.ndarray:
     if n <= 1:
         return np.array([f1], dtype=float)
     return np.linspace(f1, f2, n, dtype=float)
+
+
+def _warn_offset_ignored_under_auto_sampling(model_name, integration_offset,
+                                             nw_samples):
+    """Warn that automatic wavenumber sampling discards a user contour offset.
+
+    ``unoast31.f:429`` sets ``OFFDB=0E0`` inside the ``NWVNOin < 0`` branch
+    (``unoasp22.f:323`` for OASP), so ``:499-507`` then applies the kernel's
+    own default and prints ``THE DEFAULT CONTOUR OFFSET IS APPLIED``. The
+    offset still reaches the deck; the binary throws it away. The manual
+    (``oast.tex:547-550``) documents only that ``IC1``/``IC2`` have no effect
+    here, so following it is not enough to know this. OASN is unaffected —
+    ``unoasn22.f:283`` tests ``OFFDBIN``, which its automatic branch never
+    touches.
+    """
+    if integration_offset and nw_samples <= 0:
+        warnings.warn(
+            f"{model_name}(integration_offset={integration_offset:g}) has no "
+            f"effect under automatic wavenumber sampling (nw_samples="
+            f"{nw_samples}): OASES zeroes the contour offset and applies its "
+            f"own default. Pin nw_samples >= 1 to use the value, or drop "
+            f"integration_offset to silence this.",
+            UserWarning, stacklevel=3)
 
 
 def _oases_find_executable(model: PropagationModel, name: str) -> Path:
@@ -408,10 +488,17 @@ class OAST(OASES):
         TL plot range axis bounds (m); ``None`` → 0 /
         ``receiver.range_max``.
     vrec : float
-        Receiver velocity (m/s) for OAST's Doppler compensation, the
-        fifth token of the frequency line. Read only when the option
-        string carries lowercase ``'d'`` (``unoast31.f:125-127``);
+        Receiver velocity (m/s) for OAST's source/receiver **dynamics**
+        option, the fifth token of the frequency line. Read only when the
+        option string carries lowercase ``'d'`` (``unoast31.f:125-127``);
         default 0.
+
+        Despite the binary's own "Doppler compensation" wording
+        (``unoast31.f:1094``), ``oast.tex:215-222`` is explicit that source
+        and receiver move *at the same speed and direction*, so **there is
+        no Doppler shift** — only a Green's function different from the
+        static one. OASP's ``'d'`` is the real radial-Doppler option and
+        carries three tokens (``IT VS VR``, ``oasp.tex:227-234``).
     dip_angle : float, optional
         Fault dip angle (degrees) for the dip-slip moment source that
         option ``'4'`` selects (``unoast31.f:1117-1122``). INSRC reads it
@@ -429,7 +516,7 @@ class OAST(OASES):
     :data:`DEFAULT_COLLAPSE`).** Per-model: ``'ssp': 'mean'``,
     ``'bottom_range': 'median'`` (the layer stack is kept).
 
-    ``COHERENT_TL`` here returns ``Field.kind == 'tl'`` (real dB), not the
+    ``COHERENT_TL`` here returns ``Field.kind == 'transmission_loss'`` (real dB), not the
     ``'pressure'`` the other OASES sub-model returns for the same run mode:
     OAST's ``.plt`` carries only real TL, so there is no complex pressure to
     hand back and no phase reference to tag. Use :class:`OASP` when the
@@ -505,6 +592,8 @@ class OAST(OASES):
         self.integration_offset = float(integration_offset)
         # ``-1`` lets the OASES kernel pick its own wavenumber sample count.
         self.nw_samples = int(nw_samples)
+        _warn_offset_ignored_under_auto_sampling(
+            'OAST', self.integration_offset, self.nw_samples)
         # Plot-axis bounds in metres. ``None`` → 0 / receiver.range_max.
         self.plot_rmin = float(plot_rmin) if plot_rmin is not None else None
         self.plot_rmax = float(plot_rmax) if plot_rmax is not None else None
@@ -879,8 +968,11 @@ class OASN(OASES):
         self.integration_offset = float(integration_offset)
         self.nw_samples = int(nw_samples)
         # OASN's deck has no range-axis or receiver-velocity field: it emits
-        # covariance matrices and replicas, not TL-vs-range, and VREC appears
-        # nowhere in oasnun22.f / unoasn22.f (it is OAST's Doppler-only slot).
+        # covariance matrices and replicas, not TL-vs-range. ``unoasn22.f``
+        # does recognise a 'D'/'d' option and carries a ``vrec`` variable
+        # (:702-704, defaulted at :762), but nothing reads a value for it from
+        # the input file — it stays at its 15.0 data-statement default, so the
+        # argument cannot reach the binary whatever it is set to.
         # Accepting these silently would advertise knobs that cannot reach the
         # binary, so they are rejected at construction instead.
         for name, value in (('plot_rmin', plot_rmin), ('plot_rmax', plot_rmax)):
@@ -894,9 +986,10 @@ class OASN(OASES):
                 )
         if vrec:
             raise ConfigurationError(
-                "OASN(vrec=...) has no effect: VREC is OAST's Doppler "
-                "receiver-velocity field (the 5-token frequency line enabled "
-                "by option 'd') and does not exist in OASN's input format.",
+                "OASN(vrec=...) has no effect: unoasn22.f:702-704 recognises "
+                "the 'd' option and carries a vrec variable, but never reads a "
+                "value for it from the deck — it keeps the 15.0 m/s default at "
+                ":762, so the argument cannot reach the binary.",
                 remediation="Use OAST with the 'd' option, or drop vrec.",
             )
         self.plot_rmin = None
@@ -1311,6 +1404,7 @@ class OASR(OASES):
                 f"in the result metadata without ever reaching the deck. "
                 f"Pass either the raw string or reflection_type, not both."
             )
+        self._reject_shear_reflection_types()
         self.angle_output_increment = (
             int(angle_output_increment)
             if angle_output_increment is not None else None
@@ -1340,6 +1434,62 @@ class OASR(OASES):
 
         if not self._exe.exists():
             raise ExecutableNotFoundError('OASR', str(self._exe))
+
+    def _oasr_is_log_swept(self) -> bool:
+        """True when option ``'C'`` puts OASR on a logarithmic sweep.
+
+        ``oasr.tex:135`` documents ``C`` as a plot option ("Loss contours
+        plotted in frequency and grazing angle"), but ``unoasr21.f:123-125``
+        computes ``F1LOG``/``DFLOG`` and ``:243`` evaluates the coefficients at
+        ``EXP(F1LOG + (JJ-1)*DFLOG)`` — so it changes the frequencies the
+        physics is computed at. ``oast.tex:200-203`` confirms it from the other
+        side, calling ``C`` the way to obtain "consistent logarithmic sampling".
+        """
+        return 'C' in (self.options or '')
+
+    def _reject_shear_reflection_types(self) -> None:
+        """Refuse the two reflection types that are identically zero here.
+
+        OASR reflects off the seabed, so the incident medium is the water
+        column — a fluid, which carries no shear. `oasr.tex:143-145` defines
+        option ``'S'`` as "the P-SV wave reflection coefficient"; with no SV
+        wave possible in the incident medium that coefficient is zero for
+        **every** environment uacpy can express, and OASES duly writes a
+        column of zeros to the ``.rco``. Measured: `max|R| = 0.000000` for
+        ``'P-SV'`` against `0.999947` for the default, with an elastic ice
+        canopy on the surface making no difference — the canopy is not the
+        incident medium at the seabed.
+
+        ``'P-Slow'`` (option ``'B'``) is the Biot slow wave and needs a
+        poro-elastic medium; no uacpy carrier expresses one.
+
+        Raised rather than warned: there is no configuration in which either
+        returns a usable number, so a warning would leave the caller holding
+        an all-zero array that looks like a computed result.
+        """
+        rt = self._resolve_reflection_type()
+        if rt not in ('P-SV', 'P-Slow'):
+            return
+        why = ("the incident medium at the seabed is the water column, a "
+               "fluid, which carries no SV wave (oasr.tex:143-145)"
+               if rt == 'P-SV' else
+               "it is the Biot slow wave and needs a poro-elastic medium, "
+               "which no uacpy carrier expresses")
+        if self.reflection_type is not None:
+            raise UnsupportedFeatureError(
+                'OASR',
+                f"reflection_type={rt!r} — {why}, so OASES returns a column "
+                f"of zeros rather than a coefficient. Use "
+                f"reflection_type='P-P' (the default) or 'transmission'",
+            )
+        # Reached via the raw ``options=`` escape hatch, which is documented
+        # as written verbatim. Warn rather than raise so the override stays an
+        # override — but the zeros are just as useless here.
+        warnings.warn(
+            f"OASR(options={self.options!r}) selects {rt}, which returns a "
+            f"column of zeros: {why}. The deck is written as given.",
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+        )
 
     def _resolve_reflection_type(self) -> str:
         """The reflection the deck actually computes.
@@ -1410,7 +1560,7 @@ class OASR(OASES):
                     "positive frequency."
                 )
             fmin, fmax, n_freq, _ = _oases_resample_frequencies(
-                freqs_arr, 'OASR',
+                freqs_arr, 'OASR', log_spaced=self._oasr_is_log_swept(),
             )
             writer_kwargs['freq_min'] = fmin
             writer_kwargs['freq_max'] = fmax
@@ -1423,7 +1573,9 @@ class OASR(OASES):
             source_freqs = np.atleast_1d(
                 np.asarray(source.frequencies, dtype=float))
             if source_freqs.size > 1:
-                _oases_resample_frequencies(source_freqs, 'OASR')
+                _oases_resample_frequencies(
+                    source_freqs, 'OASR',
+                    log_spaced=self._oasr_is_log_swept())
 
         if self.options is not None:
             writer_kwargs['options'] = self.options
@@ -1661,6 +1813,8 @@ class OASP(OASES):
         )
         self.integration_offset = float(integration_offset)
         self.nw_samples = int(nw_samples)
+        _warn_offset_ignored_under_auto_sampling(
+            'OASP', self.integration_offset, self.nw_samples)
         # DA, the dip angle INSRC reads only under the '4' (dip-slip) option.
         self.dip_angle = float(dip_angle) if dip_angle is not None else None
 
@@ -1879,6 +2033,13 @@ class OASP(OASES):
             transfer_func = trf_data['transfer_function']  # shape: (n_frequencies, n_range, n_depth)
 
             if run_mode in (RunMode.BROADBAND, RunMode.TIME_SERIES):
+                # A multi-element Source.frequencies names bins just as
+                # explicitly as run(frequencies=) does.
+                asked = frequencies
+                if asked is None and np.atleast_1d(
+                        np.asarray(source.frequencies)).size > 1:
+                    asked = source.frequencies
+                _warn_if_trf_grid_replaced_request(asked, trf_data['freq'])
                 # Convention: (n_depth, n_range, n_frequencies) — trailing
                 # axis is the variable dim. Source axes: (freq, range, depth).
                 tf_reordered = np.transpose(transfer_func, (2, 1, 0))
@@ -1909,7 +2070,7 @@ class OASP(OASES):
                 # COHERENT_TL: pick the bin nearest the source frequency
                 # and return the complex narrowband pressure (transposed
                 # to the (n_depth, n_range) layout). Users get TL via
-                # ``field.tl`` or ``.to_tl()``.
+                # ``field.db`` or ``.to_db()``.
                 freq_idx = 0
                 if len(trf_data['freq']) > 1:
                     freq_diff = np.abs(trf_data['freq'] - source.frequencies[0])

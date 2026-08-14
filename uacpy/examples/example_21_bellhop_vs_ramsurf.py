@@ -71,11 +71,11 @@ def main():
     res_bh = Bellhop(verbose=False).run(
         env, src, rcv, run_mode=RunMode.COHERENT_TL,
     )
-    tl_bh = res_bh.tl[0]
+    tl_bh = res_bh.db[0]
 
     print("Running RAM (dispatches to ramsurf1.5) ...")
     res_ram = RAM(verbose=False).run(env, src, rcv, run_mode=RunMode.COHERENT_TL)
-    tl_ram = res_ram.tl[0]
+    tl_ram = res_ram.db[0]
     print(f"  → backend: {res_ram.backend}")
     print()
 

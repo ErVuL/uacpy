@@ -10,6 +10,7 @@ from typing import Tuple
 from uacpy.core.environment import Environment
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.results import Field
+from uacpy.core.results.quantities import label as quantity_label
 from uacpy.io.units import m_to_km
 from uacpy.visualization.style import (
     BOTTOM_FILL_STYLE_SOLID, BOTTOM_LINE_STYLE, BOTTOM_LINE_STYLE_FLAT,
@@ -166,14 +167,25 @@ _AXIS_LABELS = {
 }
 
 
+def _db_label(field: Field) -> str:
+    """Axis label for the ``value='db'`` view of ``field``.
+
+    ``value`` is the caller's choice of *view*; ``field.kind`` is what the data
+    *is*. They are independent — one complex field renders every view — but the
+    label has to come from the field, or the dB view of a signal-excess grid
+    announces itself as transmission loss. Split out from :func:`_value_array`
+    so a caller that wants only the label does not build the array to get it."""
+    return quantity_label(field.kind, 'dB' if field.is_complex else field.unit)
+
+
 def _value_array(field: Field, value: str) -> Tuple[np.ndarray, str]:
-    """Return ``(array, axis_label)`` for ``value`` ∈ ``{'tl', 'mag_db',
+    """Return ``(array, axis_label)`` for ``value`` ∈ ``{'db', 'mag_db',
     'mag', 'phase', 'real', 'imag'}``."""
-    if value == 'tl':
-        return field.tl, 'TL (dB)'
+    if value == 'db':
+        return field.db, _db_label(field)
     if value == 'mag_db':
         # Modulus in dB: 20·log10|H| = −TL (shares the floored dB conversion).
-        return -field.tl, '|H| (dB)'
+        return -field.db, '|H| (dB)'
     if value in ('mag', 'phase'):
         if not field.is_complex:
             raise ConfigurationError(
@@ -188,7 +200,7 @@ def _value_array(field: Field, value: str) -> Tuple[np.ndarray, str]:
         return field.data.imag, 'Im(p)'
     raise ConfigurationError(
         f"plot_field: unknown value={value!r}; "
-        "valid: 'tl', 'mag_db', 'mag', 'phase', 'real', 'imag'"
+        "valid: 'db', 'mag_db', 'mag', 'phase', 'real', 'imag'"
     )
 
 

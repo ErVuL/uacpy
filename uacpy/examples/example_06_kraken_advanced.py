@@ -180,8 +180,8 @@ def main():
         )
         print(f"  ✓ Kraken completed with {kraken_adiabatic.n_segments} segments")
         # ``result.data`` is complex pressure; min/max on complex is numpy's
-        # lexicographic order, not a TL bound. Read TL off ``result.tl``.
-        print(f"  ✓ TL range: {np.nanmin(result.tl):.1f} to {np.nanmax(result.tl):.1f} dB")
+        # lexicographic order, not a TL bound. Read TL off ``result.db``.
+        print(f"  ✓ TL range: {np.nanmin(result.db):.1f} to {np.nanmax(result.db):.1f} dB")
     except Exception as e:
         print(f"  ✗ Kraken error: {e}")
         import traceback

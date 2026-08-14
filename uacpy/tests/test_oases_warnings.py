@@ -10,6 +10,8 @@ availability summary.
 import numpy as np
 import pytest
 
+from uacpy.core.exceptions import UnsupportedFeatureError
+
 import uacpy
 from uacpy.models import OAST, OASN, OASR, OASP
 from uacpy.models.base import RunMode
@@ -129,11 +131,17 @@ class TestRawOptionsVoidTypedKnobs:
     def test_oasr_provenance_follows_the_option_letters(self):
         """``options='S T'`` runs P-SV; recording 'P-P' would make the
         metadata state something the deck never computed."""
-        assert OASR(options='S T')._resolve_reflection_type() == 'P-SV'
+        # 'S' returns an all-zero coefficient (the incident medium is the
+        # fluid water column), so the raw path warns while still writing the
+        # deck verbatim; the named path refuses outright.
+        with pytest.warns(UserWarning, match='column of zeros'):
+            assert OASR(options='S T')._resolve_reflection_type() == 'P-SV'
         assert OASR(options='t T')._resolve_reflection_type() == 'transmission'
         assert OASR()._resolve_reflection_type() == 'P-P'
-        assert OASR(reflection_type='P-SV')._resolve_reflection_type() == 'P-SV'
-        assert OASR(options='S T').copy()._resolve_reflection_type() == 'P-SV'
+        with pytest.raises(UnsupportedFeatureError, match='zeros'):
+            OASR(reflection_type='P-SV')
+        with pytest.warns(UserWarning, match='column of zeros'):
+            assert OASR(options='S T').copy()._resolve_reflection_type() == 'P-SV'
 
 
 if __name__ == "__main__":

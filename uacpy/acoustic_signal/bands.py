@@ -92,13 +92,21 @@ def decidecade_band_levels(psd, frequencies, ref=REFERENCE_PRESSURE_WATER):
     lower, centers, upper = decidecade_bands(f_min, f_max)
     levels = np.full(centers.size, np.nan)
     n_coarse = 0
+    n_partial = 0
     for i, (lo, hi) in enumerate(zip(lower, upper)):
         # Integrate over [lo, hi] itself: splice the edges into the in-band
-        # grid points and interpolate the PSD onto them. Clip to the supplied
-        # frequency support so a partly-covered edge band is not extrapolated.
+        # grid points and interpolate the PSD onto them.
+        #
+        # A band the supplied grid does not fully cover is left ``nan``.
+        # Clipping the nodes to the support instead returned the integral over
+        # the covered part, which is not that band's level — measured 3.8 dB
+        # (first band) and 3.2 dB (last) off their own trend on a flat PSD,
+        # and 5.5 dB low on the realistic psd -> band_levels path.
+        if lo < f_min * (1.0 - 1e-12) or hi > f_max * (1.0 + 1e-12):
+            n_partial += 1
+            continue
         interior = frequencies[(frequencies > lo) & (frequencies < hi)]
         nodes = np.unique(np.concatenate(([lo], interior, [hi])))
-        nodes = nodes[(nodes >= f_min) & (nodes <= f_max)]
         if nodes.size < 2:
             continue
         if interior.size < 2:
@@ -106,6 +114,14 @@ def decidecade_band_levels(psd, frequencies, ref=REFERENCE_PRESSURE_WATER):
         power = np.trapezoid(np.interp(nodes, frequencies, psd), nodes)
         if power > 0:
             levels[i] = 10.0 * np.log10(power / ref ** 2)
+    if n_partial:
+        warnings.warn(
+            f"decidecade_band_levels: {n_partial} band(s) extend past the "
+            f"supplied frequency support {f_min:g}-{f_max:g} Hz and are "
+            f"returned as nan; a partial integral is not a band level. Supply "
+            f"a PSD covering [centre*10**-0.05, centre*10**0.05] for every "
+            f"band you need.",
+            UserWarning, stacklevel=2)
     if n_coarse:
         warnings.warn(
             f"decidecade_band_levels: {n_coarse} band(s) hold fewer than two "

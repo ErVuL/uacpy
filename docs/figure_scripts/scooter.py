@@ -138,7 +138,7 @@ def phase_speed_window():
             axes[0].axvspan(*span, color=colour, alpha=0.22, zorder=1,
                             label=f'excluded by {label}')
         axes[1].plot(np.asarray(line.ranges) / 1000.0,
-                     np.asarray(tl.tl, dtype=float).ravel(),
+                     np.asarray(tl.db, dtype=float).ravel(),
                      color=colour, linewidth=1.0,
                      label=f"{label} — {grn['nk']} k-samples")
 
@@ -196,7 +196,7 @@ def elastic_seabed():
     for label, e, colour in (('fluid seabed (no shear)', env, 'C0'),
                              ('elastic=True — $c_s$ = 3000 m/s in the '
                               'granite', elastic, 'C3')):
-        line_tl = np.asarray(Scooter().run(e, source, line).tl,
+        line_tl = np.asarray(Scooter().run(e, source, line).db,
                              dtype=float).ravel()
         axes[1].plot(np.asarray(line.ranges) / 1000.0, line_tl,
                      color=colour, linewidth=1.0, label=label)
@@ -222,7 +222,7 @@ def benchmark():
     """
     env, source, _ = shallow_water()
     line = uacpy.Receiver(depths=50.0, ranges=np.linspace(50.0, 5000.0, 400))
-    reference = np.asarray(Scooter().run(env, source, line).tl,
+    reference = np.asarray(Scooter().run(env, source, line).db,
                            dtype=float).ravel()
     others = [('Kraken (normal modes)', Kraken(), 'C1'),
               ('Bellhop (Gaussian beams)', Bellhop(n_beams=3000), 'C2')]
@@ -233,7 +233,7 @@ def benchmark():
     axes[0].plot(r_km, reference, color='C0', linewidth=1.4,
                  label='Scooter (wavenumber integration)')
     for label, model, colour in others:
-        tl = np.asarray(model.run(env, source, line).tl, dtype=float).ravel()
+        tl = np.asarray(model.run(env, source, line).db, dtype=float).ravel()
         axes[0].plot(r_km, tl, color=colour, linewidth=0.9, alpha=0.85,
                      label=label)
         axes[1].plot(r_km, np.abs(tl - reference), color=colour,

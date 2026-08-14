@@ -396,7 +396,7 @@ class TestSynthesisSizeCap:
     def test_normal_sample_rate_ok(self):
         ts = self._tf().synthesize_time_series(
             source_waveform=self._wf(), sample_rate=1e4)
-        assert ts.kind == 'time_series'
+        assert ts.kind == 'pressure' and 'time' in ts.coords
         assert ts.data.shape[-1] <= (1 << 26)
 
     def test_explicit_nfft_bypasses_cap(self):

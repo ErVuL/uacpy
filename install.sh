@@ -1253,7 +1253,15 @@ if [ -d "$RAMSURF_DIR" ]; then
     # too sensitive to reassociation, reciprocal approximations, and
     # -ffinite-math-only for unsafe-math to be acceptable. `-std=legacy -w`
     # accepts the F77-era idioms in Calvo's sources.
-    RAMSURF_FFLAGS="-O2 ${FORTRAN_ARCH_FLAGS} -std=legacy -w"
+    # -fdefault-real-8 -fdefault-double-8: the Collins march outside epade is
+    # single precision in stock (ram.pdf section 3), which makes refining dz past
+    # ~lambda/120 lose more to round-off than the finer grid gains — measured
+    # 2.19 dB against KrakenC at dz=0.0125 m, against 0.11 dB in double. The
+    # epade interface declarations are promoted in the sources to match
+    # (third_party/MODIFICATIONS.md). These flags are REQUIRED, not optional:
+    # io/ramsurf_reader.py reads tl.grid / pcomplex.bin as 8-byte records, so a
+    # single-precision build produces files uacpy cannot parse.
+    RAMSURF_FFLAGS="-O2 ${FORTRAN_ARCH_FLAGS} -std=legacy -w -fdefault-real-8 -fdefault-double-8"
     # FC=gfortran: same reason as mpiramS — make's built-in FC=f77 wins
     # over the Makefile's `FC ?= gfortran`, and no f77 alias exists on macOS.
     set +e
@@ -1310,7 +1318,15 @@ if [ -d "$RAMGEO_DIR" ]; then
     echo -e "${BLUE}Compiling ramgeo (Collins layered fluid PE)...${NC}"
     # Same numerics rationale as ramsurf: -O2 (no -ffast-math) for the
     # complex Padé recursion, -std=legacy -w for the F77-era source.
-    RAMGEO_FFLAGS="-O2 ${FORTRAN_ARCH_FLAGS} -std=legacy -w"
+    # -fdefault-real-8 -fdefault-double-8: the Collins march outside epade is
+    # single precision in stock (ram.pdf section 3), which makes refining dz past
+    # ~lambda/120 lose more to round-off than the finer grid gains — measured
+    # 2.19 dB against KrakenC at dz=0.0125 m, against 0.11 dB in double. The
+    # epade interface declarations are promoted in the sources to match
+    # (third_party/MODIFICATIONS.md). These flags are REQUIRED, not optional:
+    # io/ramsurf_reader.py reads tl.grid / pcomplex.bin as 8-byte records, so a
+    # single-precision build produces files uacpy cannot parse.
+    RAMGEO_FFLAGS="-O2 ${FORTRAN_ARCH_FLAGS} -std=legacy -w -fdefault-real-8 -fdefault-double-8"
     # FC=gfortran: make's built-in FC=f77 would otherwise win over the
     # Makefile's `FC ?= gfortran`, and no f77 alias exists on macOS
     # (gfortran ships via the Homebrew `gcc` formula). No OpenMP — RAMGEO is

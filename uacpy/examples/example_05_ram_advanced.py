@@ -63,7 +63,7 @@ def _plot_tl_difference(a, b, env=None, *, ax=None, title=None,
     from uacpy.visualization import plot_field
     if diff_vmax is not None:
         vmin, vmax = -abs(diff_vmax), abs(diff_vmax)
-    diff = Field(data=a.tl - b.tl, coords=dict(a.coords))
+    diff = Field(data=a.db - b.db, coords=dict(a.coords))
     return plot_field(
         diff, env=env, ax=ax, vmin=vmin, vmax=vmax,
         cmap='RdBu_r', title=title, **kw,
@@ -76,7 +76,7 @@ def _print_tl_summary(label, field):
     Receivers below the local seafloor come back NaN; a bare ``.min()``/
     ``.max()`` on such a grid returns ``nan`` and hides the gap.
     """
-    tl = np.asarray(field.tl)
+    tl = np.asarray(field.db)
     n_water = int(np.isfinite(tl).sum())
     print(f"  ✓ {label}: TL range {np.nanmin(tl):.1f} to {np.nanmax(tl):.1f} dB"
           f"  [{n_water}/{tl.size} cells in water,"
@@ -211,11 +211,11 @@ def main():
 
     # Comparisons (use nanmean because RAM masks sub-bottom cells as NaN)
     if result is not None and result_kraken is not None:
-        diff_kraken = np.abs(result.tl - result_kraken.tl)
+        diff_kraken = np.abs(result.db - result_kraken.db)
         print(f"\n  RAM vs Kraken: Mean diff = {np.nanmean(diff_kraken):.1f} dB (range-dependent effects)")
 
     if result is not None and result_bellhop is not None:
-        diff_bh = np.abs(result.tl - result_bellhop.tl)
+        diff_bh = np.abs(result.db - result_bellhop.db)
         print(f"  RAM vs Bellhop: Mean diff = {np.nanmean(diff_bh):.1f} dB (PE vs ray methods)")
         lam = 1500.0 / source.frequencies[0]
         d_lo, d_hi = env.bathymetry.depths.min(), env.bathymetry.depths.max()
@@ -229,7 +229,7 @@ def main():
               " way round.")
 
     if result_bellhop is not None and result_kraken is not None:
-        diff_bk = np.abs(result_bellhop.tl - result_kraken.tl)
+        diff_bk = np.abs(result_bellhop.db - result_kraken.db)
         print(f"  Bellhop vs Kraken: Mean diff = {np.nanmean(diff_bk):.1f} dB")
 
     # ═══════════════════════════════════════════════════════════════════════

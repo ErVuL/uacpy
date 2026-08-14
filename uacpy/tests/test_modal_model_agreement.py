@@ -111,12 +111,12 @@ class TestModalModelAgreement:
         """
         kf = Kraken(verbose=False)
         kf_result = kf.run(simple_environment, simple_source, single_receiver)
-        kf_tl = kf_result.tl[0, 0]
+        kf_tl = kf_result.db[0, 0]
 
         # Scooter
         scooter = Scooter(verbose=False)
         scooter_result = scooter.run(simple_environment, simple_source, single_receiver)
-        scooter_tl = scooter_result.tl[0, 0]
+        scooter_tl = scooter_result.db[0, 0]
 
         # Check agreement
         diff = np.abs(kf_tl - scooter_tl)
@@ -138,12 +138,12 @@ class TestModalModelAgreement:
         """
         kf = Kraken(verbose=False)
         kf_result = kf.run(simple_environment, simple_source, multi_range_receiver)
-        kf_tl = kf_result.tl[0, :]
+        kf_tl = kf_result.db[0, :]
 
         # Scooter
         scooter = Scooter(verbose=False)
         scooter_result = scooter.run(simple_environment, simple_source, multi_range_receiver)
-        scooter_tl = scooter_result.tl[0, :]
+        scooter_tl = scooter_result.db[0, :]
 
         # Check agreement at each range
         diffs = np.abs(kf_tl - scooter_tl)
@@ -170,15 +170,15 @@ class TestModalModelAgreement:
         # Run all models
         kf = Kraken(verbose=False)
         kf_result = kf.run(simple_environment, simple_source, single_receiver)
-        kf_tl = kf_result.tl[0, 0]
+        kf_tl = kf_result.db[0, 0]
 
         scooter = Scooter(verbose=False)
         scooter_result = scooter.run(simple_environment, simple_source, single_receiver)
-        scooter_tl = scooter_result.tl[0, 0]
+        scooter_tl = scooter_result.db[0, 0]
 
         oast = OAST(verbose=False)
         oast_result = oast.run(simple_environment, simple_source, single_receiver)
-        oast_tl = oast_result.tl[0, 0]
+        oast_tl = oast_result.db[0, 0]
 
         # Compute pairwise differences
         kf_scooter_diff = np.abs(kf_tl - scooter_tl)

@@ -438,15 +438,24 @@ def cepstrum(data, *, window=None, nfft=None, lifter=None):
     return c
 
 
-def complex_cepstrum(data):
-    """Complex cepstrum ``ifft(log(fft(data)))`` with phase unwrapping.
+ComplexCepstrum = namedtuple("ComplexCepstrum", "cepstrum delay")
 
-    Returns a **complex** array: phase unwrapping breaks the Hermitian
-    symmetry of ``log(fft(x))``, so the cepstrum carries information in its
-    imaginary part too. Keeping it (rather than taking the real part)
-    makes the homomorphic transform exactly reversible via
-    :func:`inverse_complex_cepstrum` — that imaginary part is what the
-    inverse needs to reconstruct ``data``.
+
+def complex_cepstrum(data):
+    """Complex cepstrum with the linear-phase (rotation) term removed.
+
+    Returns ``ComplexCepstrum(cepstrum, delay)``. ``delay`` is the integer
+    number of samples of linear phase taken out;
+    :func:`inverse_complex_cepstrum` needs it to reconstruct ``data``.
+
+    Without the removal the unwrapped phase carries a ramp whose inverse
+    transform is a ``1/q`` tail that swamps the echo structure the cepstrum
+    exists to show, and makes the result depend on the signal's absolute
+    arrival time rather than on its echo delays.
+
+    The cepstrum stays **complex**: unwrapping breaks the Hermitian symmetry
+    of ``log(fft(x))``, and the imaginary part is what makes the homomorphic
+    transform reversible.
     """
     xa = np.asarray(data)
     if np.iscomplexobj(xa):
@@ -458,10 +467,16 @@ def complex_cepstrum(data):
         raise ConfigurationError("complex_cepstrum: data must be 1-D")
     require_finite_signal(xr, "complex_cepstrum")
     spectrum = np.fft.fft(xr)
-    mag = np.abs(spectrum)
-    mag = np.maximum(mag, np.finfo(float).tiny)
-    log_spectrum = np.log(mag) + 1j * np.unwrap(np.angle(spectrum))
-    return np.fft.ifft(log_spectrum)
+    n = xr.size
+    mag = np.maximum(np.abs(spectrum), np.finfo(float).tiny)
+    phase = np.unwrap(np.angle(spectrum))
+    # Remove the linear-phase term: round the end-to-end ramp to a whole
+    # number of samples and subtract it, so the residual phase carries only
+    # the echo structure.
+    delay = int(np.round(phase[n // 2] * n / (2.0 * np.pi * (n // 2)))) if n > 1 else 0
+    phase = phase - 2.0 * np.pi * delay * np.arange(n) / n
+    log_spectrum = np.log(mag) + 1j * phase
+    return ComplexCepstrum(np.fft.ifft(log_spectrum), delay)
 
 
 def inverse_complex_cepstrum(c):
@@ -470,10 +485,17 @@ def inverse_complex_cepstrum(c):
     Takes the complex cepstrum :func:`complex_cepstrum` returns (the
     imaginary part is significant — see there) and reconstructs the real
     signal ``x``."""
+    delay = 0
+    if isinstance(c, ComplexCepstrum):
+        c, delay = c.cepstrum, int(c.delay)
     cr = np.asarray(c, dtype=complex)
     if cr.ndim != 1:
         raise ConfigurationError("inverse_complex_cepstrum: c must be 1-D")
-    return np.real(np.fft.ifft(np.exp(np.fft.fft(cr))))
+    n = cr.size
+    log_spectrum = np.fft.fft(cr)
+    # Restore the linear-phase term complex_cepstrum took out.
+    log_spectrum = log_spectrum + 1j * 2.0 * np.pi * delay * np.arange(n) / n
+    return np.real(np.fft.ifft(np.exp(log_spectrum)))
 
 
 def spectrogram(data, sample_rate, *, window="hann", nperseg=8192,

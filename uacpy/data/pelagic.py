@@ -26,6 +26,7 @@ Provinces (dominant surficial lithology → representative mean grain size ϕ):
 * otherwise (above CCD)  → **calcareous ooze** — low-to-mid latitude
 """
 
+import warnings
 from typing import Optional, Union
 
 from uacpy._log import log_message
@@ -57,8 +58,31 @@ _LITHOLOGY_PHI = {
 }
 
 
+#: Conventional shelf break; below it the deep-sea facies model applies.
+SHELF_BREAK_DEPTH = 200.0
+
+
 def pelagic_lithology(depth_m: float, lat: float) -> str:
-    """Dominant deep-sea surficial lithology from water depth (m) and latitude."""
+    """Dominant deep-sea surficial lithology from water depth (m) and latitude.
+
+    Both facies this returns are **deep-sea**: the siliceous belt and the
+    carbonate compensation depth are open-ocean features. Shelf sediment is
+    terrigenous and this model does not describe it, so a depth above the
+    conventional shelf break warns — the latitude test fires first and
+    unconditionally, so without it a 80 m shelf point at 60 deg came back as
+    diatom ooze (phi 9.0), identical to a 4800 m abyssal one.
+
+    It still returns a value: :func:`fetch_bottom_pelagic` is the last
+    fallback in the ``'auto'`` chain and is documented as never failing.
+    """
+    if depth_m < SHELF_BREAK_DEPTH:
+        warnings.warn(
+            f"pelagic_lithology: {depth_m:g} m is above the {SHELF_BREAK_DEPTH:g} m "
+            f"shelf break, and this model describes deep-sea facies only "
+            f"(siliceous belt / carbonate compensation depth). Shelf sediment "
+            f"is terrigenous. The value returned is a first-principles "
+            f"fallback, not a shelf estimate.",
+            UserWarning, stacklevel=2)
     if abs(lat) >= SILICEOUS_LATITUDE:
         return 'diatom ooze'               # high-latitude siliceous belt
     if depth_m >= CCD_DEPTH:

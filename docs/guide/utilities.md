@@ -148,7 +148,7 @@ from uacpy.metrics import tl_rmse, tl_max_error, tl_bias
 | `tl_bias(a, b, …)` | Mean **signed** difference; positive means `a` reports more loss |
 
 Both arguments must be 2-D `(depth, range)` [`Field`](results.md) instances.
-TL is pulled from `.tl`, so it does not matter whether a field stores complex
+TL is pulled from `.db`, so it does not matter whether a field stores complex
 pressure or real dB. Non-finite cells — Bellhop's shadow zones, an empty modal
 sum — are dropped rather than propagated.
 

@@ -28,15 +28,45 @@ def m_sequence(n_register, taps):
     taps explicitly for spreading-code experiments.
     """
     n = int(n_register)
-    reg = [1] * n
+    tap_list = [int(t) for t in taps]
+    if n < 2:
+        raise ConfigurationError(
+            f"m_sequence: n_register must be >= 2; got {n_register!r}")
+    if not tap_list or any(t < 1 or t > n for t in tap_list):
+        raise ConfigurationError(
+            f"m_sequence: taps must be 1-based positions in 1..{n}; "
+            f"got {taps!r}")
+    if len(set(tap_list)) != len(tap_list):
+        raise ConfigurationError(
+            f"m_sequence: repeated tap position in {taps!r}; a tap XORed with "
+            "itself cancels, leaving the register with no feedback")
+    seed = (1,) * n
+    reg = list(seed)
     length = (1 << n) - 1
     seq = np.empty(length, dtype=int)
+    period = None
     for i in range(length):
         seq[i] = reg[-1]
         fb = 0
-        for t in taps:
+        for t in tap_list:
             fb ^= reg[t - 1]
         reg = [fb] + reg[:-1]
+        if period is None and tuple(reg) == seed:
+            period = i + 1
+    # A non-primitive polynomial returns early to the seed, so the register
+    # cycles through a subset of its states. The output still has the right
+    # length, dtype and +/-1 alphabet, and processing_gain_db still reports
+    # 10log10(N) — nothing looks wrong until a link budget is far out.
+    if period != length:
+        raise ConfigurationError(
+            f"m_sequence: taps {taps!r} on a {n}-stage register give an LFSR "
+            f"period of {period if period is not None else '>' + str(length)}, "
+            f"not the maximal {length} — the feedback polynomial is not "
+            f"primitive, so the output is not an m-sequence and its off-peak "
+            f"autocorrelation is far above 1.",
+            remediation=f"Use uacpy.acoustic_signal.sequences.mseq({n}) for a "
+                        f"preset primitive polynomial, or a known primitive "
+                        f"tap set (e.g. [5,2], [5,3], [6,1], [6,5], [7,6]).")
     return 1 - 2 * seq          # {0,1} -> {+1,-1}
 
 

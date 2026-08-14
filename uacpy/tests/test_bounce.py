@@ -445,9 +445,9 @@ class TestRunWithBounceDerivesCLow:
         model = Bellhop(verbose=False, beam_type='G', n_beams=2001,
                         alpha=(-80.0, 80.0), backend='fortran')
         reference = np.asarray(model.run(env, src, rcv,
-                                         RunMode.COHERENT_TL).tl)
+                                         RunMode.COHERENT_TL).db)
         routed = np.asarray(model.run_with_bounce(
-            env, src, rcv, run_mode=RunMode.COHERENT_TL).tl)
+            env, src, rcv, run_mode=RunMode.COHERENT_TL).db)
         delta = np.abs(routed - reference)
         assert np.nanmax(delta) < 0.5, (
             f"water {c_water} m/s: BOUNCE round trip differs from the direct "

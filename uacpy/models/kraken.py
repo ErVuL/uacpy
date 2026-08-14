@@ -111,6 +111,13 @@ _FIELD_MAX_NFREQ = 1000
 _REFLECTION_TABLE_TYPES = ('file', 'precalc')
 
 
+# The KRAKEN and FIELD manuals both ask for ~10 points/wavelength on the
+# mode tabulation grid; the floor keeps a low-frequency run from getting
+# a coarser grid than the historical fixed density.
+MODE_POINTS_PER_WAVELENGTH = 10.0
+MODE_POINTS_PER_METER_FLOOR = 1.5
+
+
 class Kraken(PropagationModel):
     """
     Kraken - Normal modes + field computation (multi-backend).
@@ -133,7 +140,7 @@ class Kraken(PropagationModel):
       ``SQRT(SUM(|z|**2))`` only while the mode functions are real, i.e.
       on the ``kraken.exe`` path; with ``backend='krakenc'`` the complex
       ``phi``/``k`` leave cross-mode phase in the square and the run
-      warns. The result is a real dB :class:`Field` (``kind='tl'``) — it
+      warns. The result is a real dB :class:`Field` (``kind='transmission_loss'``) — it
       carries no phase, so it cannot feed a time-series synthesis.
       ``mode_coupling='coupled'`` has no incoherent path in ``field.exe``
       and is rejected.
@@ -167,7 +174,11 @@ class Kraken(PropagationModel):
         exceeds ``max_segment_length`` (2 km). Pass an explicit int
         to override with a uniform linspace decomposition.
     mode_points_per_meter : float, optional
-        Mode-depth grid density. Default ``1.5`` pts/m.
+        Mode-depth grid density in pts/m. ``None`` (default) derives it from
+        the run as ``10 * f_max / c_min`` — the ~10 points/wavelength the
+        KRAKEN and FIELD manuals require of the mode tabulation grid — with a
+        1.5 pts/m floor. An explicit value is used verbatim and warns if it
+        falls under that.
     executable, field_executable : Path, optional
         ``kraken.exe`` and ``field.exe`` paths. Auto-detected if ``None``.
     backend : str, optional
@@ -312,6 +323,45 @@ class Kraken(PropagationModel):
         speeds = [float(np.min(env.ssp.to_pairs()[:, 1]))]
         speeds.extend(env.bottom.all_sound_speeds())
         return min(speeds)
+
+    def _resolve_mode_points_per_meter(self, env, frequencies) -> float:
+        """Mode-depth grid density (pts/m) for this run.
+
+        ``kraken.htm`` block (9) and ``field.htm`` §(2) both require *"about
+        10 points/wavelength"* on the receiver grid the modes are tabulated
+        on, since that grid carries the mode shapes and the coupling
+        integrals. A density fixed in pts/**metre** meets it only up to one
+        frequency, so ``None`` derives it from the run instead, using the
+        highest frequency and the slowest medium.
+
+        Nothing downstream catches a grid that is too coarse:
+        ``KrakenField/ReadModes.f90:78`` sets ``Tolerance = 1500/freq`` — a
+        whole wavelength — so its "Modes not tabulated near requested pt."
+        warning stays silent and the ``.prt`` is clean.
+        """
+        f = np.atleast_1d(np.asarray(frequencies, dtype=float))
+        f_max = float(np.max(f)) if f.size else 0.0
+        speeds = [float(np.min(env.ssp.to_pairs()[:, 1]))]
+        if env.has_elastic_bottom or env.bottom is not None:
+            speeds.extend(s for s in env.bottom.all_sound_speeds() if s > 0)
+        c_min = min(speeds) if speeds else DEFAULT_SOUND_SPEED
+        needed = (MODE_POINTS_PER_WAVELENGTH * f_max / c_min) if f_max else 0.0
+        if self.mode_points_per_meter is not None:
+            ppm = float(self.mode_points_per_meter)
+            if needed and ppm < needed:
+                warnings.warn(
+                    f"Kraken(mode_points_per_meter={ppm:g}) gives "
+                    f"{ppm * c_min / f_max:.2g} points per wavelength at "
+                    f"{f_max:g} Hz, under the ~{MODE_POINTS_PER_WAVELENGTH:g} "
+                    f"the KRAKEN and FIELD manuals require for the mode "
+                    f"tabulation grid. Mode shapes and coupling integrals are "
+                    f"interpolated from this grid, so the TL error is silent — "
+                    f"measured 8.2 dB against Scooter at 1600 Hz. Pass "
+                    f"{needed:.3g} or leave mode_points_per_meter=None to "
+                    f"derive it.",
+                    UserWarning, stacklevel=3)
+            return ppm
+        return max(MODE_POINTS_PER_METER_FLOOR, needed)
 
     def _validate_phase_speed_limits(self):
         """Check 0 <= c_low < c_high when either is explicitly set."""
@@ -546,7 +596,7 @@ class Kraken(PropagationModel):
             mode_depths = self.mode_depth_grid
         else:
             total_depth = self._total_media_depth(env)
-            ppm = float(getattr(self, 'mode_points_per_meter', 0.0) or 0.0)
+            ppm = self._resolve_mode_points_per_meter(env, source.frequencies)
             n_pts = max(100, int(round(float(total_depth) * ppm)))
             mode_depths = np.linspace(0.0, float(total_depth), n_pts)
 
@@ -726,7 +776,7 @@ class Kraken(PropagationModel):
 
     def __init__(
         self,
-        mode_points_per_meter: float = 1.5,
+        mode_points_per_meter: Optional[float] = None,
         mode_coupling: str = 'adiabatic',
         n_segments: Optional[int] = None,
         executable: Optional[Path] = None,
@@ -1038,7 +1088,7 @@ class Kraken(PropagationModel):
             ``COHERENT_TL`` (default), ``INCOHERENT_TL``, ``BROADBAND``,
             or ``TIME_SERIES``. ``TIME_SERIES`` requires
             ``source_waveform`` + ``sample_rate``. ``INCOHERENT_TL`` sums
-            mode magnitudes and returns real dB TL (``kind='tl'``).
+            mode magnitudes and returns real dB TL (``kind='transmission_loss'``).
         frequencies : ndarray, optional
             Frequency vector (Hz) for native broadband computation. A
             multi-element grid uses TopOpt(6)='B' so kraken writes one
@@ -1505,7 +1555,9 @@ class Kraken(PropagationModel):
 
         # Mode depths must cover the full ocean + sediment for all
         # profiles. Use max total media depth across all segments.
-        n_mode_depths = max(100, int(max_total_depth * self.mode_points_per_meter))
+        ppm = self._resolve_mode_points_per_meter(
+            env, freq_vec if freq_vec is not None else source.frequencies)
+        n_mode_depths = max(100, int(max_total_depth * ppm))
         mode_depths = np.linspace(0, max_total_depth, n_mode_depths)
         receiver_for_modes = Receiver(depths=mode_depths, ranges=receiver.ranges)
 
@@ -1768,7 +1820,7 @@ class Kraken(PropagationModel):
                 # (EvaluateMod.f90:43,66); AT parks that in the complex .shd
                 # slot, where its phase is an artefact. Store real dB TL so
                 # the result claims only what it has.
-                field.data = np.asarray(field.tl, dtype=float)
+                field.data = np.asarray(field.db, dtype=float)
                 phase_reference = None
             else:
                 # field.exe emits the modal sum with a prefactor that differs
@@ -1917,7 +1969,7 @@ class Kraken(PropagationModel):
             # Tested on TL so it covers both the complex branches and the
             # real dB INCOHERENT_TL one: an empty sum saturates at the
             # PRESSURE_FLOOR clamp.
-            tl = np.asarray(field.tl, dtype=float)
+            tl = np.asarray(field.db, dtype=float)
             finite = np.isfinite(tl)
             if not np.any(tl[finite] < -20.0 * np.log10(PRESSURE_FLOOR)):
                 warnings.warn(

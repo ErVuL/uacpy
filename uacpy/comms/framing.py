@@ -38,25 +38,30 @@ def pack_frame(payload):
     """Frame a byte payload as ``[len:4][payload][crc32:4]`` -> bit array."""
     payload = bytes(payload)
     header = len(payload).to_bytes(_HEADER_BYTES, "big")
-    crc = zlib.crc32(payload).to_bytes(_CRC_BYTES, "big")
+    # The CRC covers the header as well as the payload: a corrupted length
+    # field otherwise steers the slice that the CRC is then read from, so the
+    # check can never see the error that caused it.
+    crc = zlib.crc32(header + payload).to_bytes(_CRC_BYTES, "big")
     return bytes_to_bits(header + payload + crc)
 
 
 def unpack_frame(bits):
     """Recover ``(payload_bytes, crc_ok)`` from a framed bit stream.
 
-    Reads the length header, slices the payload, and checks the trailing CRC-32.
-    Raises :class:`ConfigurationError` if the stream is too short or truncated.
+    Reads the length header, slices the payload, and checks the trailing
+    CRC-32 over ``header + payload``. A stream that is too short, or whose
+    length header does not fit the data supplied, is a **failed frame**, not a
+    caller error: it returns ``(b"", False)``. Only ``crc_ok=True`` means the
+    frame arrived intact — a receiver cannot distinguish "corrupt" from
+    "malformed" and should not have to.
     """
     data = bits_to_bytes(bits)
     if len(data) < _HEADER_BYTES + _CRC_BYTES:
-        raise ConfigurationError("unpack_frame: bit stream shorter than header+CRC")
+        return b"", False
     length = int.from_bytes(data[:_HEADER_BYTES], "big")
     end = _HEADER_BYTES + length
     if len(data) < end + _CRC_BYTES:
-        raise ConfigurationError(
-            f"unpack_frame: frame truncated (need {end + _CRC_BYTES} bytes, "
-            f"have {len(data)})")
+        return b"", False
     payload = data[_HEADER_BYTES:end]
     crc_rx = int.from_bytes(data[end:end + _CRC_BYTES], "big")
-    return payload, zlib.crc32(payload) == crc_rx
+    return payload, zlib.crc32(data[:end]) == crc_rx

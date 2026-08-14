@@ -35,7 +35,7 @@ also re-exported at the top level for convenience: `uacpy.plot_result`,
 
 ```python
 env, source, receiver = shallow_water()
-tl = Bellhop(n_beams=3000).run(env, source, receiver).to_tl()
+tl = Bellhop(n_beams=3000).run(env, source, receiver).to_db()
 rays = Bellhop(n_beams=25, alpha=(-12.0, 12.0)).run(
     env, source, receiver, run_mode=RunMode.RAYS)
 
@@ -246,7 +246,7 @@ spans exactly the receiver grid and draws no seabed. That is correct, not a bug.
 env, source, _ = shallow_water()
 receiver = uacpy.Receiver(depths=np.linspace(1.0, 60.0, 80),
                           ranges=np.linspace(50.0, 5000.0, 250))
-tl = Bellhop(n_beams=3000).run(env, source, receiver).to_tl()
+tl = Bellhop(n_beams=3000).run(env, source, receiver).to_db()
 
 tl.plot(ax=axes[0], show_colorbar=False)
 tl.plot(env=env, ax=axes[1], show_colorbar=False)
@@ -285,7 +285,7 @@ plotter draws both by default instead, and turns them off with
 TL heatmaps default to **`vmin=20`, `vmax=120` dB** — a fixed scale, not one
 derived from the data. `_TL_LIMITS` in
 [`uacpy/visualization/plots/_common.py`](../../uacpy/visualization/plots/_common.py)
-is the single definition; `plot_field(value='tl')` and `compare_models` both
+is the single definition; `plot_field(value='db')` and `compare_models` both
 read it.
 
 ![Why the TL scale is fixed](figures/plot_tl_scale.png)
@@ -293,8 +293,8 @@ read it.
 ```python
 env_s, src_s, rcv_s = shallow_water()
 env_d, src_d, rcv_d = deep_water()
-shallow = Bellhop(n_beams=3000).run(env_s, src_s, rcv_s).to_tl()
-deep = Bellhop(n_beams=3000).run(env_d, src_d, rcv_d).to_tl()
+shallow = Bellhop(n_beams=3000).run(env_s, src_s, rcv_s).to_db()
+deep = Bellhop(n_beams=3000).run(env_d, src_d, rcv_d).to_db()
 
 for col, (field, env, name) in enumerate(
         [(shallow, env_s, 'Shallow, 200 Hz, 5 km'),
@@ -336,8 +336,8 @@ and returns `(fig, ax)` for that figure; hand it nothing and it makes its own of
 
 ```python
 env, source, receiver = shallow_water()
-bellhop = Bellhop(n_beams=3000).run(env, source, receiver).to_tl()
-kraken = Kraken().run(env, source, receiver).to_tl()
+bellhop = Bellhop(n_beams=3000).run(env, source, receiver).to_db()
+kraken = Kraken().run(env, source, receiver).to_db()
 
 fig = plt.figure(figsize=(11.0, 6.4))
 gs = fig.add_gridspec(2, 2, width_ratios=[1.0, 2.2], hspace=0.38, wspace=0.24)
@@ -467,7 +467,7 @@ yours), `save_animation` and the two `draw_*` overlays; every entry takes
 |---|---|---|
 | `plot_result(result, env=None, **kw)` | — | type-dispatcher behind every `Result.plot()` |
 | `plot_field(field, ax=None, …)` | ✓ | the workhorse — §2 |
-| `compare(fields, labels=None, ax=None, value='tl')` | ✓ | overlay several 1-D sliced fields on one axes |
+| `compare(fields, labels=None, ax=None, value='db')` | ✓ | overlay several 1-D sliced fields on one axes |
 | `compare_models(fields, labels=None, env=None, ncols=None, contours=None)` | — | side-by-side heatmap grid, one shared colourbar |
 | `plot_signal_excess(field, ax=None, env=None, …)` | ✓ | diverging SE heatmap + the SE = 0 detection boundary → [sonar](sonar.md) |
 | `plot_detection_probability(field, ax=None, env=None, …)` | ✓ | `P_D` on a fixed [0, 1] scale with labelled contours → [sonar](sonar.md) |

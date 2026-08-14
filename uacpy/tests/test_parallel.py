@@ -223,7 +223,7 @@ def test_run_parallel_knob_sweep(pekeris_env):
     ]
     batch = run_parallel(jobs, n_workers=3, coordinate_name='n_beams')
     assert batch.ok and len(batch) == 3
-    assert all(np.isfinite(np.nanmax(r.tl)) for r in batch)
+    assert all(np.isfinite(np.nanmax(r.db)) for r in batch)
     stack = batch.stack()
     assert len(stack) == 3
     assert np.array_equal(stack.coordinate, np.array([200.0, 400.0, 800.0]))
@@ -242,7 +242,7 @@ def test_run_parallel_scenario_sweep(pekeris_env):
     ]
     batch = run_parallel(jobs, n_workers=3, coordinate_name='source_depth')
     assert batch.ok and len(batch) == 3
-    maxes = [float(np.nanmax(r.tl)) for r in batch]
+    maxes = [float(np.nanmax(r.db)) for r in batch]
     assert len(set(np.round(maxes, 3))) > 1
 
 
@@ -268,7 +268,7 @@ def test_run_parallel_cross_model(pekeris_env):
     assert batch.labels == ['bellhop', 'kraken', 'ram']
     for res in batch:
         assert isinstance(res, uacpy.Field)
-        assert np.isfinite(np.nanmax(res.tl))
+        assert np.isfinite(np.nanmax(res.db))
 
 
 @pytest.mark.requires_binary

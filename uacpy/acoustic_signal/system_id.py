@@ -1,5 +1,7 @@
 """Frequency Response Function (FRF) estimation: Welch / ETFE / LS-FIR."""
 
+import warnings
+
 import numpy as np
 import scipy.signal as _sig
 from scipy.linalg import toeplitz
@@ -42,6 +44,33 @@ def _info_matrices(u, y, N, order):
         W[i, :] = u_flipped[:order]
 
     return A - np.dot(W.T, W), phiuy - np.dot(W.T, y[: order - 1])
+
+
+_ETFE_REL_FLOOR = 1e-12          # relative to max|X| over the record
+
+
+def _etfe_divide(Y, X, caller: str):
+    """``Y/X`` with unexcited input bins returned as nan.
+
+    The threshold is relative to ``max|X|`` because a transfer function is a
+    ratio: adding an absolute epsilon made the estimate at a numerically empty
+    bin a function of the units the caller happened to use — the same signal
+    in Pa and in uPa gave answers 1e12 apart, and a bin with no excitation
+    came back as a finite ~1/eps number rather than as undefined.
+    """
+    peak = float(np.max(np.abs(X))) if X.size else 0.0
+    excited = (np.abs(X) > _ETFE_REL_FLOOR * peak if peak > 0
+               else np.zeros(X.shape, bool))
+    if not excited.all():
+        warnings.warn(
+            f"{caller}: {int((~excited).sum())} of {excited.size} frequency "
+            f"bins carry no input energy (|X| <= {_ETFE_REL_FLOOR:g} of the "
+            f"peak); the transfer function is undefined there and is returned "
+            f"as nan. Excite the whole band, or restrict the analysis to the "
+            f"excited band.",
+            UserWarning, stacklevel=3,
+        )
+    return np.where(excited, Y / np.where(excited, X, 1.0), np.nan)
 
 
 class FRF:
@@ -319,11 +348,10 @@ class FRF:
         # Average over periods to reduce noise
         x_avg = np.mean(x_reshaped, axis=0)
         y_avg = np.mean(y_reshaped, axis=0)
-        # eps keeps a numerically empty input bin from dividing by exactly zero
-        X = np.fft.rfft(x_avg) + np.finfo(float).eps
+        X = np.fft.rfft(x_avg)
         Y = np.fft.rfft(y_avg)
         freqs = np.fft.rfftfreq(period, d=1 / sample_rate)
-        tf = Y / X
+        tf = _etfe_divide(Y, X, 'FRF.compute_periodic_etfe')
 
         return freqs, tf
 
@@ -364,14 +392,13 @@ class FRF:
         min_len = min(len(x), len(y))
         x = x[:min_len]
         y = y[:min_len]
-        # eps keeps a numerically empty input bin from dividing by exactly zero
-        X = np.fft.rfft(x) + np.finfo(float).eps
+        X = np.fft.rfft(x)
         Y = np.fft.rfft(y)
 
         # Determine frequency grid based on n_freqs
         n_fft = min_len
         freqs = np.fft.rfftfreq(n_fft, d=1 / sample_rate)
-        tf = Y / X
+        tf = _etfe_divide(Y, X, 'FRF.compute_etfe')
 
         return freqs, tf
 

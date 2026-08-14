@@ -94,10 +94,10 @@ physics, use [RAM](ram.md) or [Bellhop](bellhop.md).
 
 | Class | `RunMode` | Returns | What it is for |
 |---|---|---|---|
-| `OAST` | `COHERENT_TL` | `Field` (`kind='tl'`) | Transmission loss over a depth × range grid |
+| `OAST` | `COHERENT_TL` | `Field` (`unit='dB'`) | Transmission loss over a depth × range grid |
 | `OASP` | `COHERENT_TL` | `Field` (`kind='pressure'`) | Complex narrowband pressure |
-| `OASP` | `BROADBAND` | `Field` (`kind='transfer_function'`) | `H(d, r, f)` across a band |
-| `OASP` | `TIME_SERIES` | `Field` (`kind='time_series'`) | `p(d, r, t)` — a synthetic seismogram |
+| `OASP` | `BROADBAND` | `Field` (complex, `frequency` axis) | `H(d, r, f)` across a band |
+| `OASP` | `TIME_SERIES` | `Field` (real, `time` axis) | `p(d, r, t)` — a synthetic seismogram |
 | `OASR` | `REFLECTION` | `ReflectionCoefficient` | `R(θ)` or `R(θ, f)` off the layer stack |
 | `OASN` | `COVARIANCE` | `Covariance` | `C(f, i, j)` across array elements |
 | `OASN` | `REPLICA` | `Replicas` | Array response per candidate source position |
@@ -229,7 +229,7 @@ inside 2 km is visibly finer, because the hard basement supports more trapped
 paths, and beyond 3 km the median TL is ~1.5 dB darker as shear conversion
 drains them.
 
-`OAST` returns a **real-dB** `Field` (`kind='tl'`). Every other TL mode in
+`OAST` returns a **real-dB** `Field` (`unit='dB'`). Every other TL mode in
 uacpy — including `OASP`'s — hands back complex pressure, so this is the one
 result you cannot take a phase from. Use `OASP` when you need one.
 

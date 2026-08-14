@@ -177,13 +177,21 @@ def music_spectrum(R, steering, n_sources: int):
 
 
 def shading_taper(n_elements: int, window: str = "hann"):
-    """Array-shading taper (amplitude weights), normalised to unit mean.
+    """Array-shading taper (amplitude weights), RMS-normalised: ``mean(w**2) = 1``.
+
+    So ``||w|| = sqrt(n_elements)`` and a ``'boxcar'`` taper is all-ones — the
+    normalisation that leaves a :func:`steering_vectors` row unit-norm after
+    ``steering_vectors(...) * shading_taper(N)``, and leaves ``trace(R)``
+    alone when the taper is applied to element data. Normalising to unit
+    *mean* instead scaled every power the taper touched by ``mean(w**2)``,
+    which is +2.04 dB for a Hann window on 16 elements — in the direction
+    that makes an array look better than it is.
 
     ``window`` is any ``scipy.signal.get_window`` name (e.g. ``'hann'``,
     ``'hamming'``, ``('chebwin', 30)``, ``('taylor', ...)``).
     """
     w = get_window(window, int(n_elements), fftbins=False)
-    return w / np.mean(w)
+    return w / np.sqrt(np.mean(w ** 2))
 
 
 def beamform(

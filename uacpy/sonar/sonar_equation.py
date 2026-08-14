@@ -177,13 +177,13 @@ def _tl_array_from_field(tl_field) -> np.ndarray:
             f"signal-excess field: expected a Field, got "
             f"{type(tl_field).__name__}"
         )
-    if tl_field.kind == 'time_series':
+    if 'time' in tl_field.coords:
         raise ConfigurationError(
             "signal-excess field: a time-domain Field is not transmission "
             "loss; pass a TL / pressure Field (e.g. from "
             "run_mode=COHERENT_TL)."
         )
-    return tl_field.tl
+    return tl_field.db
 
 
 def _per_range_broadcast(values, tl_field, label: str) -> np.ndarray:
@@ -216,9 +216,14 @@ def _spawn_se_field(tl_field, se: np.ndarray, budget: dict) -> Field:
     """Wrap ``se`` in a Field carrying the TL field's identity and the budget.
 
     ``id_kwargs`` hands back a fresh ``metadata`` dict, so stamping the budget
-    into it leaves the source field's own metadata untouched."""
+    into it leaves the source field's own metadata untouched.
+
+    The ``kind`` tag matters: signal excess is dB but it is not pressure and
+    not a loss, so leaving it to derive would both mislabel it and make
+    :meth:`Field.max` report the *worst* cell as the best."""
     kwargs = tl_field.id_kwargs()
     kwargs['metadata']['sonar_budget'] = budget
+    kwargs['metadata']['kind'] = 'signal_excess'
     return Field(
         data=np.asarray(se, dtype=float),
         coords={k: v.copy() for k, v in tl_field.coords.items()},
@@ -241,7 +246,7 @@ def passive_signal_excess_field(
 
     Grid counterpart of :func:`passive_signal_excess`: takes the
     :class:`~uacpy.core.results.Field` a propagation model returned
-    (real dB TL, or complex pressure — converted via ``Field.tl``) and
+    (real dB TL, or complex pressure — converted via ``Field.db``) and
     evaluates the sonar equation at every ``(depth, range)`` sample.
 
     Parameters
@@ -447,6 +452,10 @@ def probability_of_detection_field(se_field, *, sigma_db) -> Field:
     pd = norm.cdf(np.asarray(se_field.data, dtype=float) / sigma)
     kwargs = se_field.id_kwargs()
     kwargs['metadata']['sigma_db'] = sigma
+    # A probability is dimensionless, not dB; inheriting the SE field's tags
+    # would put a 0–1 array on a decibel axis.
+    kwargs['metadata']['kind'] = 'probability_of_detection'
+    kwargs['metadata']['unit'] = '1'
     return Field(
         data=pd,
         coords={k: v.copy() for k, v in se_field.coords.items()},

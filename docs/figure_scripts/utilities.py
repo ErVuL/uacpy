@@ -145,7 +145,7 @@ def cross_model_metrics():
     kraken.plot(env=env, ax=axes[1], show_colorbar=True)
     axes[1].set_title('Kraken — normal modes', fontweight='bold', fontsize=11)
 
-    difference = np.asarray(bellhop.tl) - np.asarray(kraken.tl)
+    difference = np.asarray(bellhop.db) - np.asarray(kraken.db)
     mesh = axes[2].pcolormesh(receiver.ranges / 1000.0, receiver.depths,
                               difference, cmap='RdBu_r', vmin=-20.0, vmax=20.0,
                               shading='auto')

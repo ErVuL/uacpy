@@ -84,6 +84,7 @@ from .timefreq import (
     spectrogram,
     analytic_signal,
     cepstrum,
+    ComplexCepstrum,
     complex_cepstrum,
     cwt,
     envelope,
@@ -148,7 +149,8 @@ __all__ = [
     "modal_group_velocity", "warp_signal", "unwarp_signal",
     # time-frequency
     "spectrogram", "analytic_signal", "envelope", "instantaneous_frequency",
-    "wigner_ville", "cwt", "inverse_cwt", "cepstrum", "complex_cepstrum",
+    "wigner_ville", "cwt", "inverse_cwt", "cepstrum", "ComplexCepstrum",
+    "complex_cepstrum",
     "inverse_complex_cepstrum",
     # constant-Q (Brown 1991)
     "constant_q_transform", "constant_q_psd", "constant_q_spectrogram",

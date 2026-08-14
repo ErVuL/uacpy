@@ -142,7 +142,7 @@ def main():
 
     # Plot 2: TL vs Range (at source depth)
     ax = axes[0, 1]
-    tl_vs_range = result.at(depth=source.depths[0]).tl
+    tl_vs_range = result.at(depth=source.depths[0]).db
     ax.plot(result.ranges/1000, tl_vs_range, 'b-', linewidth=2)
     ax.set_xlabel('Range (km)', fontweight='bold')
     ax.set_ylabel('Transmission Loss (dB)', fontweight='bold')
@@ -157,7 +157,7 @@ def main():
     # Plot 3: TL vs Depth (at mid-range)
     ax = axes[1, 0]
     mid_range_km = np.median(result.ranges) / 1000
-    tl_vs_depth = result.at(range=mid_range_km * 1000.0).tl
+    tl_vs_depth = result.at(range=mid_range_km * 1000.0).db
     ax.plot(tl_vs_depth, result.depths, 'r-', linewidth=2)
     ax.invert_yaxis()
     ax.axhline(source.depths[0], color='gray', linestyle='--', linewidth=1, alpha=0.5, label='Source depth')
@@ -228,7 +228,7 @@ def main():
     # ═══════════════════════════════════════════════════════════════════════
 
     print("\nResults:")
-    print(f"  • TL range: {np.nanmin(result.tl):.1f} to {np.nanmax(result.tl):.1f} dB")
+    print(f"  • TL range: {np.nanmin(result.db):.1f} to {np.nanmax(result.db):.1f} dB")
     print(f"  • Max range: {result.ranges[-1]/1000:.1f} km")
     print(f"  • Bellhop run time: {elapsed:.2f} s")
 

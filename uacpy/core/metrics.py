@@ -5,7 +5,7 @@ scripts. Keeps numeric-comparison logic out of plotting and IO modules.
 
 Public helpers: :func:`tl_rmse`, :func:`tl_max_error`, :func:`tl_bias`.
 All accept a pair of 2-D :class:`~uacpy.Field` instances. Read TL via
-``field.tl`` regardless of whether the field stores complex pressure or
+``field.db`` regardless of whether the field stores complex pressure or
 real dB — :class:`Field` handles the conversion.
 """
 
@@ -40,7 +40,7 @@ def _validate_tl_pair_and_window(
     """Shared validation for TL-pair metrics.
 
     Both inputs must be 2-D ``(depth, range)`` fields. TL is pulled from
-    ``.tl`` (handles complex → dB conversion). Returns ``(diff, finite)`` —
+    ``.db`` (handles complex → dB conversion). Returns ``(diff, finite)`` —
     the signed TL difference and the boolean mask of finite cells inside the
     requested window.
     """
@@ -55,8 +55,8 @@ def _validate_tl_pair_and_window(
                 f"got coords {list(f.coords)}"
             )
 
-    da = np.asarray(field_a.tl)
-    db = np.asarray(field_b.tl)
+    da = np.asarray(field_a.db)
+    db = np.asarray(field_b.db)
     if da.shape != db.shape:
         raise ConfigurationError(
             f"{fname}: shape mismatch — field_a {da.shape} vs field_b {db.shape}"

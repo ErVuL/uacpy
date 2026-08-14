@@ -890,11 +890,14 @@ the code can detect it, because decibels do not carry units.
 yourself subtracting array gain from a reverberation level, the beamwidth is
 already accounting for it in the scattering cell.
 
-**A signal-excess `Field` reports `kind='tl'`.** `Field.kind` is derived from
-`(dtype, coords)`, and real data on `{depth, range}` is `'tl'` by that rule —
-see [results](results.md#2-field--one-container-whose-meaning-is-derived).
-The payload is signal excess in dB, not loss. Read
-`metadata['sonar_budget']` if you need to confirm what you are holding.
+**A signal-excess `Field` reports `kind='signal_excess'`, `unit='dB'`.** It
+is tagged rather than derived, because signal excess is neither pressure nor a
+loss — see [results](results.md#2-field--one-container-described-on-three-axes).
+That tag is what keeps `.max()` reporting the *best* cell: transmission loss
+is the one quantity where less is louder, and signal excess must not inherit
+that inversion. `metadata['sonar_budget']` carries the term-by-term budget.
+`probability_of_detection_field` likewise returns
+`kind='probability_of_detection'`, `unit='1'` — dimensionless, not dB.
 
 **`detection_range` returns `inf` and `nan`, not exceptions.** `np.inf` when
 `SE ≥ 0` at every sampled range, `np.nan` when it is negative everywhere. Guard

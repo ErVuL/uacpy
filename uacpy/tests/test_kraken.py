@@ -1,7 +1,10 @@
 """Normal-mode tests for ``Kraken``, on both the kraken and krakenc backends."""
 
+import warnings
+
 import pytest
 import numpy as np
+import uacpy
 
 from uacpy.core.results import Field, Modes
 from uacpy.models import Kraken
@@ -178,9 +181,12 @@ class TestKrakenModePointsPerMeter:
     are tabulated on, independently of the solver's own internal mesh."""
 
     @pytest.mark.parametrize('cls', [Kraken])
-    def test_default_is_1_5(self, cls):
-        m = cls()
-        assert m.mode_points_per_meter == 1.5
+    def test_default_is_derived_not_fixed(self, cls):
+        # A density fixed in pts/metre satisfies the manuals' ~10
+        # points/wavelength at exactly one frequency, so the default is
+        # deferred to run() and resolved from f_max / c_min instead. The
+        # constructor keeps the sentinel; see TestModeGridTracksFrequency.
+        assert cls().mode_points_per_meter is None
 
     @pytest.mark.parametrize('cls', [Kraken])
     def test_density_kwarg_accepted(self, cls):
@@ -311,7 +317,7 @@ def test_coarse_beam_pattern_does_not_hang_field_exe(tmp_path):
     pat = np.array([[-90.0, -30.0], [0.0, 0.0], [90.0, -30.0]])
     field = Kraken(work_dir=tmp_path, cleanup=False, timeout=90.0).run(
         env, Source(depths=50, frequencies=200, beam_pattern=pat), rcv)
-    assert np.isfinite(np.asarray(field.tl)).any()
+    assert np.isfinite(np.asarray(field.db)).any()
 
 
 def test_field_exe_timeout_is_not_swallowed(tmp_path, monkeypatch):
@@ -367,8 +373,8 @@ def test_two_receiver_depths_are_not_range_offset():
     src = Source(depths=50.0, frequencies=100.0)
     ranges = np.array([1000., 2000., 3000.])
     m = Kraken(verbose=False)
-    tl2 = np.asarray(m.run(env, src, Receiver(depths=[60., 120.], ranges=ranges)).tl)
-    tl3 = np.asarray(m.run(env, src, Receiver(depths=[60., 120., 180.], ranges=ranges)).tl)
+    tl2 = np.asarray(m.run(env, src, Receiver(depths=[60., 120.], ranges=ranges)).db)
+    tl3 = np.asarray(m.run(env, src, Receiver(depths=[60., 120., 180.], ranges=ranges)).db)
     np.testing.assert_allclose(tl2[0], tl3[0], rtol=0, atol=0.05)
     np.testing.assert_allclose(tl2[1], tl3[1], rtol=0, atol=0.05)
 
@@ -490,7 +496,7 @@ class TestFortranFatalErrorExitsZero:
         from uacpy.core.exceptions import ModelExecutionError
         wd = str(tmp_path / 'shared')
         first = np.asarray(Kraken(work_dir=wd, timeout=300).run(
-            self._env(100.0, 1500.0), self._SRC(), self._RCV()).tl)
+            self._env(100.0, 1500.0), self._SRC(), self._RCV()).db)
         assert np.all(np.isfinite(first))
 
         with pytest.raises(ModelExecutionError):
@@ -543,7 +549,7 @@ class TestElasticCLowDefault:
         env = self._elastic_env(cs_layer)
         tl = np.asarray(Kraken(timeout=300).run(
             env, Source(depths=36.0, frequencies=100.0),
-            Receiver(depths=[20.0, 50.0], ranges=[1000.0, 3000.0])).tl)
+            Receiver(depths=[20.0, 50.0], ranges=[1000.0, 3000.0])).db)
         finite = tl[np.isfinite(tl)]
         assert finite.size, "no finite TL returned"
         assert finite.max() < 120.0, (
@@ -684,13 +690,13 @@ class TestRangeDependentElasticMesh:
         result = Kraken(verbose=False, mode_coupling='adiabatic',
                         n_segments=5, timeout=600).run(
             self._env([0.0, 0.0, 400.0, 600.0]), self._SRC(), self._RCV())
-        tl = np.asarray(result.tl)
+        tl = np.asarray(result.db)
         finite = tl[np.isfinite(tl)]
         assert finite.size, "no finite TL returned"
         assert finite.max() < 200.0, (
             f"max TL {finite.max():.1f} dB — not a physical waterborne field")
         # TL must grow with range, not sit at a constant or run backwards.
-        at_source_depth = np.asarray(result.at(depth=50.0).tl)
+        at_source_depth = np.asarray(result.at(depth=50.0).db)
         assert at_source_depth[-1] > at_source_depth[4] + 10.0
 
     @pytest.mark.slow
@@ -701,7 +707,7 @@ class TestRangeDependentElasticMesh:
         result = Kraken(verbose=False, mode_coupling='adiabatic',
                         n_segments=5, timeout=600).run(
             self._env([300.0, 400.0, 500.0, 600.0]), self._SRC(), self._RCV())
-        finite = np.asarray(result.tl)[np.isfinite(result.tl)]
+        finite = np.asarray(result.db)[np.isfinite(result.db)]
         assert finite.size and finite.max() < 200.0
 
 
@@ -727,7 +733,9 @@ class TestBroadbandSingleFrequency:
         result = Kraken(verbose=False).run(
             self._env(), self._SRC(), self._RCV(),
             run_mode=RunMode.BROADBAND, frequencies=np.array([137.0]))
-        assert result.kind == 'transfer_function'
+        # H(f) is not its own kind: it is pressure with a frequency axis, and
+        # the axis is what this test is about.
+        assert (result.kind, result.unit) == ('pressure', 'Pa')
         assert list(result.coords) == ['depth', 'range', 'frequency']
         assert result.data.shape == (2, 6, 1)
         assert np.iscomplexobj(result.data)
@@ -746,7 +754,7 @@ class TestBroadbandSingleFrequency:
             self._env(), self._SRC(), self._RCV(),
             run_mode=RunMode.BROADBAND, frequencies=np.array([100.0, 137.0]))
         assert np.nanmax(np.abs(
-            np.asarray(one.tl)[:, :, 0] - np.asarray(two.tl)[:, :, 1])) < 0.5
+            np.asarray(one.db)[:, :, 0] - np.asarray(two.db)[:, :, 1])) < 0.5
 
     def test_one_element_grid_can_synthesize_a_time_series(self):
         """``synthesize_time_series`` requires a canonical (depth, range,
@@ -839,7 +847,7 @@ class TestCoupledModeGridReachesTheDeclaredBottom:
             run_mode=RunMode.COHERENT_TL)
         assert result.metadata['mode_coupling'] == 'coupled'
         assert result.metadata['n_profiles'] == n_segments
-        tl = np.asarray(result.tl)
+        tl = np.asarray(result.db)
         finite = tl[np.isfinite(tl)]
         assert finite.size, "no finite TL returned"
         assert 20.0 < finite.min() < 200.0, (
@@ -918,7 +926,7 @@ class TestIncoherentTL:
         result = Kraken(verbose=False).run(
             self._env(), self._SRC(), self._RCV(),
             run_mode=RunMode.INCOHERENT_TL)
-        assert result.kind == 'tl'
+        assert result.kind == 'pressure' and result.unit == 'dB'
         assert not np.iscomplexobj(result.data)
         assert result.phase_reference is None
 
@@ -935,9 +943,9 @@ class TestIncoherentTL:
         magnitudes removes the modal interference nulls."""
         common = (self._env(), self._SRC(), self._RCV())
         coh = np.asarray(Kraken(verbose=False).run(
-            *common, run_mode=RunMode.COHERENT_TL).tl)[0]
+            *common, run_mode=RunMode.COHERENT_TL).db)[0]
         inc = np.asarray(Kraken(verbose=False).run(
-            *common, run_mode=RunMode.INCOHERENT_TL).tl)[0]
+            *common, run_mode=RunMode.INCOHERENT_TL).db)[0]
         assert np.ptp(inc) < np.ptp(coh), (
             "incoherent TL is no smoother than coherent — Opt(4:4)='I' "
             "never took effect")
@@ -1298,7 +1306,7 @@ def test_zero_receiver_range_is_no_data(recwarn):
                         ranges=np.array([0.0, 1000.0, 3000.0]))
     with pytest.warns(UserWarning, match="r = 0"):
         tl = np.asarray(Kraken(verbose=False).compute_tl(
-            env, Source(depths=50.0, frequencies=100.0), receiver).tl)
+            env, Source(depths=50.0, frequencies=100.0), receiver).db)
     assert np.all(np.isnan(tl[:, 0]))
     assert np.all(np.isfinite(tl[:, 1:]))
 
@@ -1381,14 +1389,14 @@ class TestRMaxPrecision:
     def test_a_short_range_run_still_refines_the_mesh(self, tmp_path):
         auto = Kraken(work_dir=tmp_path / 'auto', cleanup=False)
         tl_auto = np.asarray(auto.compute_tl(
-            self._env(), self._SRC(), self._RCV()).tl)
+            self._env(), self._SRC(), self._RCV()).db)
         assert self._deck_rmax(tmp_path / 'auto') > 0.0, (
             "RMax reached the deck as 0.0 km — kraken.f90:80 then skips every "
             "mesh doubling")
 
         pinned = Kraken(rmax_m=1000.0, work_dir=tmp_path / 'pin', cleanup=False)
         tl_pinned = np.asarray(pinned.compute_tl(
-            self._env(), self._SRC(), self._RCV()).tl)
+            self._env(), self._SRC(), self._RCV()).db)
         assert np.nanmax(np.abs(tl_auto - tl_pinned)) < 0.05, (
             "the auto-RMax deck converges to a different field than a pinned "
             "one — the mesh was not refined")
@@ -1421,11 +1429,11 @@ class TestSSPStartsAtTheSurface:
             offset = np.asarray(Kraken(
                 work_dir=tmp_path / 'off', cleanup=False).compute_tl(
                     _pekeris(ssp=[(10.0, 1500.0), (200.0, 1500.0)]),
-                    self._SRC(), self._RCV()).tl)
+                    self._SRC(), self._RCV()).db)
         surface = np.asarray(Kraken(
             work_dir=tmp_path / 'sfc', cleanup=False).compute_tl(
                 _pekeris(ssp=[(0.0, 1500.0), (200.0, 1500.0)]),
-                self._SRC(), self._RCV()).tl)
+                self._SRC(), self._RCV()).db)
         assert np.allclose(offset, surface, atol=1e-6), (
             "an SSP starting below the surface models a different waveguide")
 
@@ -1470,7 +1478,7 @@ class TestReflectionTableBackendDispatch:
         env = self._brc_env(tmp_path)
         model = Kraken(work_dir=tmp_path / 'w', cleanup=False)
         assert model.select_backend(env) == 'krakenc'
-        tl = np.asarray(model.compute_tl(env, self._SRC(), self._RCV()).tl)
+        tl = np.asarray(model.compute_tl(env, self._SRC(), self._RCV()).db)
         assert np.all(np.isfinite(tl)) and tl.max() < 200.0
 
     def test_a_top_trc_gives_the_same_field_on_auto_and_forced_krakenc(
@@ -1481,8 +1489,8 @@ class TestReflectionTableBackendDispatch:
         forced = Kraken(backend='krakenc', work_dir=tmp_path / 'b',
                         cleanup=False)
         assert np.allclose(
-            np.asarray(auto.compute_tl(env, self._SRC(), self._RCV()).tl),
-            np.asarray(forced.compute_tl(env, self._SRC(), self._RCV()).tl))
+            np.asarray(auto.compute_tl(env, self._SRC(), self._RCV()).db),
+            np.asarray(forced.compute_tl(env, self._SRC(), self._RCV()).db))
 
     def test_an_irc_bottom_dispatches_to_krakenc(self, tmp_path):
         table = tmp_path / 'bot.irc'
@@ -1528,13 +1536,13 @@ class TestTopReflectionFileKnob:
 
         knob = np.asarray(Kraken(
             top_reflection_file=table, work_dir=tmp_path / 'k',
-            cleanup=False).compute_tl(_pekeris(), src, rcv).tl)
+            cleanup=False).compute_tl(_pekeris(), src, rcv).db)
         env = _pekeris()
         env.surface = Surface(properties=[BoundaryProperties(
             acoustic_type='file', reflection_file=str(table))])
         carrier = np.asarray(Kraken(
             work_dir=tmp_path / 'c', cleanup=False).compute_tl(
-                env, src, rcv).tl)
+                env, src, rcv).db)
         assert np.allclose(knob, carrier)
         assert (tmp_path / 'k' / 'kfield.trc').exists()
 
@@ -1845,7 +1853,7 @@ class TestBeamPatternOnMultipleFrequencies:
             _pekeris(depth=100.0),
             Source(depths=[25.0], frequencies=200.0, beam_pattern=self.PATTERN),
             Receiver(depths=[50.0], ranges=[1000.0, 2000.0]))
-        assert np.all(np.isfinite(np.asarray(tl.tl)))
+        assert np.all(np.isfinite(np.asarray(tl.db)))
 
     def test_field_completion_marker_separates_teardown_from_a_real_abort(
             self, tmp_path):
@@ -1900,8 +1908,69 @@ class TestAutoSegmentationIsWritableAtDeckResolution:
         src = Source(depths=50.0, frequencies=200.0)
         rcv = Receiver(depths=np.linspace(20.0, 180.0, 5),
                        ranges=np.linspace(1000.0, 9000.0, 5))
-        on_node = np.asarray(Kraken().compute_tl(self._env(4000.0), src, rcv).tl)
+        on_node = np.asarray(Kraken().compute_tl(self._env(4000.0), src, rcv).db)
         off_node = np.asarray(
-            Kraken().compute_tl(self._env(4000.0000001), src, rcv).tl)
+            Kraken().compute_tl(self._env(4000.0000001), src, rcv).db)
         assert np.all(np.isfinite(on_node)) and np.all(np.isfinite(off_node))
         np.testing.assert_allclose(off_node, on_node, rtol=0, atol=1e-9)
+
+
+class TestModeGridTracksFrequency:
+    """The mode-tabulation grid carries the mode shapes and the coupling
+    integrals, so ``kraken.htm`` block (9) and ``field.htm`` §(2) both require
+    ~10 points/wavelength on it. A density fixed in pts/**metre** meets that at
+    one frequency only: at 1.5 pts/m the grid holds 2250/f points per
+    wavelength, i.e. 1.4 at 1600 Hz, and the resulting TL error is silent —
+    ``KrakenField/ReadModes.f90:78`` sets its tolerance at a whole wavelength,
+    so AT's own "Modes not tabulated near requested pt." never fires."""
+
+    @staticmethod
+    def _env():
+        return uacpy.Environment(
+            bathymetry=100.0, ssp=[(0.0, 1500.0), (100.0, 1480.0)],
+            bottom=uacpy.BoundaryProperties(
+                acoustic_type='half-space', sound_speed=1800.0,
+                density=1.8, attenuation=0.5))
+
+    @pytest.mark.parametrize('freq,floor_applies', [(200.0, True), (1600.0, False)])
+    def test_default_density_is_derived_from_frequency(self, freq, floor_applies):
+        from uacpy.models.kraken import (MODE_POINTS_PER_WAVELENGTH,
+                                         MODE_POINTS_PER_METER_FLOOR)
+        env = self._env()
+        ppm = uacpy.Kraken()._resolve_mode_points_per_meter(env, [freq])
+        needed = MODE_POINTS_PER_WAVELENGTH * freq / 1480.0
+        if floor_applies:
+            # 10*200/1480 = 1.35 < 1.5, so the floor keeps a low-frequency run
+            # from getting a coarser grid than the historical fixed density.
+            assert ppm == pytest.approx(MODE_POINTS_PER_METER_FLOOR)
+        else:
+            assert ppm == pytest.approx(needed)
+            assert ppm * 1480.0 / freq == pytest.approx(MODE_POINTS_PER_WAVELENGTH)
+
+    def test_explicit_density_is_honoured_but_warns_when_too_coarse(self):
+        env = self._env()
+        with pytest.warns(UserWarning, match='points per wavelength'):
+            ppm = uacpy.Kraken(mode_points_per_meter=1.5)._resolve_mode_points_per_meter(
+                env, [1600.0])
+        assert ppm == 1.5                      # verbatim, not silently raised
+
+    def test_adequate_explicit_density_is_silent(self):
+        env = self._env()
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            uacpy.Kraken(mode_points_per_meter=20.0)._resolve_mode_points_per_meter(
+                env, [1600.0])
+
+    @pytest.mark.slow
+    def test_default_grid_agrees_with_scooter_at_high_frequency(self):
+        # Scooter is the independent arbiter — wavenumber integration has no
+        # mode grid at all. At 1.5 pts/m this measured 8.249 dB.
+        env = self._env()
+        rcv = uacpy.Receiver(depths=[30.0, 50.0, 75.0],
+                             ranges=np.linspace(500.0, 5000.0, 10))
+        src = uacpy.Source(depths=20.0, frequencies=1600.0)
+        sc = np.squeeze(uacpy.Scooter().run(
+            env, src, rcv, run_mode=uacpy.RunMode.COHERENT_TL).db)
+        kr = np.squeeze(uacpy.Kraken().run(
+            env, src, rcv, run_mode=uacpy.RunMode.COHERENT_TL).db)
+        assert np.max(np.abs(kr - sc)) < 1.0

@@ -215,7 +215,7 @@ def main():
     print("=" * 80)
 
     # Compute difference
-    tl_diff = result_kraken.tl - result_scooter.tl
+    tl_diff = result_kraken.db - result_scooter.db
     max_diff = np.nanmax(np.abs(tl_diff))
     mean_diff = np.nanmean(np.abs(tl_diff))
     rms_diff = np.sqrt(np.nanmean(tl_diff**2))
@@ -277,7 +277,7 @@ def main():
     im1 = ax1.pcolormesh(
         result_kraken.ranges / 1000,
         result_kraken.depths,
-        result_kraken.tl,
+        result_kraken.db,
         shading='auto',
         cmap='jet_r',
         vmin=vmin,
@@ -297,7 +297,7 @@ def main():
     im2 = ax2.pcolormesh(
         result_scooter.ranges / 1000,
         result_scooter.depths,
-        result_scooter.tl,
+        result_scooter.db,
         shading='auto',
         cmap='jet_r',
         vmin=vmin,
@@ -362,9 +362,9 @@ def main():
     # ─────────────────────────────────────────────────────────────────────
     ax5 = fig.add_subplot(gs[1, 1])
 
-    ax5.plot(result_kraken.ranges/1000, result_kraken.at(depth=source.depths[0]).tl,
+    ax5.plot(result_kraken.ranges/1000, result_kraken.at(depth=source.depths[0]).db,
              'b-', linewidth=2.5, label='Kraken (Auto)', alpha=0.8)
-    ax5.plot(result_scooter.ranges/1000, result_scooter.at(depth=source.depths[0]).tl,
+    ax5.plot(result_scooter.ranges/1000, result_scooter.at(depth=source.depths[0]).db,
              'r--', linewidth=2.5, label='SCOOTER (BOUNCE)', alpha=0.8)
 
     ax5.set_xlabel('Range (km)', fontweight='bold')
@@ -381,9 +381,9 @@ def main():
 
     mid_range_km = np.median(result_kraken.ranges) / 1000
 
-    ax6.plot(result_kraken.at(range=mid_range_km * 1000.0).tl, result_kraken.depths,
+    ax6.plot(result_kraken.at(range=mid_range_km * 1000.0).db, result_kraken.depths,
              'b-', linewidth=2.5, label='Kraken (Auto)', alpha=0.8)
-    ax6.plot(result_scooter.at(range=mid_range_km * 1000.0).tl, result_scooter.depths,
+    ax6.plot(result_scooter.at(range=mid_range_km * 1000.0).db, result_scooter.depths,
              'r--', linewidth=2.5, label='SCOOTER (BOUNCE)', alpha=0.8)
 
     ax6.invert_yaxis()

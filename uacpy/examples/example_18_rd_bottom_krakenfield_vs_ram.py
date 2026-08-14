@@ -71,7 +71,7 @@ def _plot_tl_difference(a, b, env=None, *, ax=None, title=None,
     from uacpy.visualization import plot_field
     if diff_vmax is not None:
         vmin, vmax = -abs(diff_vmax), abs(diff_vmax)
-    diff = Field(data=a.tl - b.tl, coords=dict(a.coords))
+    diff = Field(data=a.db - b.db, coords=dict(a.coords))
     return plot_field(
         diff, env=env, ax=ax, vmin=vmin, vmax=vmax,
         cmap='RdBu_r', title=title, **kw,
@@ -230,7 +230,7 @@ def main():
             try:
                 field = model.run(env, source, receiver)
                 results[case_label][model_label] = field
-                print(f"    {model_label:17s} TL: [{np.nanmin(field.tl):.1f}, {np.nanmax(field.tl):.1f}] dB")
+                print(f"    {model_label:17s} TL: [{np.nanmin(field.db):.1f}, {np.nanmax(field.db):.1f}] dB")
             except Exception as e:
                 print(f"    {model_label:17s} ERROR: {e}")
                 results[case_label][model_label] = None
@@ -258,7 +258,7 @@ def main():
             if f_ram is None or f_kraken is None:
                 print(f"    {case_label:15s} {kraken_label:17s}  not computed")
                 continue
-            diff = f_ram.tl[mid_idx, :] - f_kraken.tl[mid_idx, :]
+            diff = f_ram.db[mid_idx, :] - f_kraken.db[mid_idx, :]
             rms[(case_label, kraken_label)] = float(np.sqrt(np.nanmean(diff ** 2)))
             print(f"    {case_label:15s} {kraken_label:17s}  mean diff: {np.nanmean(diff):+.1f} dB,  "
                   f"RMS: {np.sqrt(np.nanmean(diff**2)):.1f} dB")
@@ -283,7 +283,7 @@ def main():
     for case_label in results:
         for field in results[case_label].values():
             if field is not None:
-                all_tl.append(field.tl)
+                all_tl.append(field.db)
     if all_tl:
         vmin_shared = max(30, np.nanpercentile(np.concatenate([a.ravel() for a in all_tl]), 5))
         vmax_shared = min(140, np.nanpercentile(np.concatenate([a.ravel() for a in all_tl]), 95))
@@ -322,7 +322,7 @@ def main():
         for key in ['RAM', 'Kraken adiabatic', 'Kraken coupled']:
             f = results[case_label].get(key)
             if f is not None:
-                ax.plot(ranges_km, f.tl[mid_idx, :], color=colors[key],
+                ax.plot(ranges_km, f.db[mid_idx, :], color=colors[key],
                         label=key)
         ax.set_xlabel('Range (km)')
         ax.set_ylabel('TL (dB)')
@@ -344,7 +344,7 @@ def main():
         for diff_idx, (kraken_key, _) in enumerate(diff_panels):
             f_kraken = results[case_label].get(kraken_key)
             if f_ram is not None and f_kraken is not None:
-                d = np.asarray(f_ram.tl) - np.asarray(f_kraken.tl)
+                d = np.asarray(f_ram.db) - np.asarray(f_kraken.db)
                 finite = d[np.isfinite(d)]
                 if finite.size:
                     v = max(5.0, float(np.nanpercentile(np.abs(finite), 95)))

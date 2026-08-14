@@ -2,11 +2,13 @@
 Tests for core UACPY classes: Environment, Source, Receiver, Result
 """
 
+import warnings
+
 import pytest
 import numpy as np
 import uacpy
 from uacpy.core.exceptions import ConfigurationError
-from uacpy.core.results import Field
+from uacpy.core.results import Field, ReflectionCoefficient
 
 
 class TestEnvironment:
@@ -233,7 +235,7 @@ class TestField:
         ranges = np.linspace(0, 9000, 10)
         depths = np.linspace(0, 90, 10)
         field = self._tl_field(data, ranges, depths)
-        value = float(field.at(range=4500, depth=45).tl)
+        value = float(field.at(range=4500, depth=45).db)
         assert 44 <= value <= 55
 
     def test_field_at_range(self):
@@ -241,7 +243,7 @@ class TestField:
         ranges = np.linspace(0, 9000, 10)
         depths = np.linspace(0, 90, 10)
         field = self._tl_field(data, ranges, depths)
-        values = field.at(range=4500).tl
+        values = field.at(range=4500).db
         assert len(values) == 10
         assert 50 <= values[5] <= 59
 
@@ -250,7 +252,7 @@ class TestField:
         ranges = np.linspace(0, 9000, 10)
         depths = np.linspace(0, 90, 10)
         field = self._tl_field(data, ranges, depths)
-        values = field.at(depth=45).tl
+        values = field.at(depth=45).db
         assert len(values) == 10
         assert 40 <= values[5] <= 49
 
@@ -294,11 +296,106 @@ class TestField:
         assert out.shape == (2, 2)
         np.testing.assert_allclose(out.data, [[25.0, 25.0], [75.0, 75.0]])
 
+    @staticmethod
+    def _coherent_field(dr, dz=1.0, f0=200.0, c=1500.0):
+        """Complex pressure with carrier e^{ikr}, grid spaced ``dz`` x ``dr``."""
+        ranges = np.arange(1000.0, 1500.0 + dr, dr)
+        depths = np.arange(40.0, 60.0 + dz, dz)
+        k = 2.0 * np.pi * f0 / c
+        data = np.exp(1j * k * ranges)[None, :] / ranges[None, :]
+        return Field(
+            data=np.repeat(data, depths.size, axis=0),
+            coords={'depth': depths, 'range': ranges},
+            model='Test', frequencies=f0,
+        )
+
+    @staticmethod
+    def _midpoints(field):
+        r = field.coords['range']
+        z = field.coords['depth']
+        return dict(depths=z[:-1] + np.diff(z) / 2, ranges=r[:-1] + np.diff(r) / 2)
+
+    # Quarter wavelength at 200 Hz with c = 1500 m/s. Each axis is bracketed
+    # against it independently: a guard that fires on two axes needs the
+    # coarse and the resolved case *per axis*, or a regression re-opening the
+    # depth half (measured +1.36 dB, silent) passes on the range cases alone.
+    QUARTER = 1.875
+
+    @pytest.mark.parametrize('dr,dz,named,silent_axis', [
+        (2.0, 1.8, 'range', 'depth'),      # range just over, depth just under
+        (1.8, 2.0, 'depth', 'range'),      # depth just over, range just under
+    ])
+    def test_resample_to_brackets_each_axis_independently(self, dr, dz, named,
+                                                          silent_axis):
+        """Each axis is checked against the quarter wavelength on its own.
+        The pair brackets 1.875 m tightly from both sides *per axis*: the
+        named one is coarse at 2.0 m, the other resolved at 1.8 m, so the
+        message must name exactly one."""
+        field = self._coherent_field(dr, dz)
+        with pytest.warns(UserWarning, match=f'{named} samples are') as rec:
+            field.resample_to(**self._midpoints(field))
+        assert f'{silent_axis} samples are' not in str(rec[0].message)
+
+    @pytest.mark.parametrize('dr,dz,named', [
+        (25.0, 1.0, 'range'),        # range alone   — measured +2.6 dB
+        (1.0, 5.0, 'depth'),         # depth alone   — measured +1.4 dB, was silent
+        (25.0, 5.0, 'depth'),        # both          — measured +4.9 dB
+    ])
+    def test_resample_to_warns_and_names_the_coarse_axis(self, dr, dz, named):
+        """Interpolating a coherent field across opposite-phase lobes biases
+        the level upward. Both axes matter and their biases compound, and
+        ``resample_to`` always interpolates both — so a guard that reported
+        only the range axis stayed silent on a pure depth-axis error and
+        misattributed the mixed one."""
+        field = self._coherent_field(dr, dz)
+        with pytest.warns(UserWarning, match=f'{named} samples are'):
+            field.resample_to(**self._midpoints(field))
+
+    @pytest.mark.parametrize('dr,dz', [
+        (0.5, 0.5), (1.0, 1.0), (1.8, 1.8),   # both resolved
+        (1.8, 0.5), (0.5, 1.8),               # each axis at the bound in turn
+    ])
+    def test_resample_to_is_silent_when_both_axes_are_resolved(self, dr, dz):
+        # The discriminating half: the guard must not fire below the quarter
+        # wavelength, or it would be noise on every well-sampled field.
+        assert max(dr, dz) < self.QUARTER
+        field = self._coherent_field(dr, dz)
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            field.resample_to(**self._midpoints(field))
+
+    def test_resample_to_admits_it_cannot_check_a_field_with_no_frequency(self):
+        """A wrapped phase step cannot stand in for the frequency: a grid
+        spaced a whole wavelength aliases to 0.000 rad and reads as perfectly
+        sampled while being maximally undersampled (it misses 47.8 % of coarse
+        grids overall). So a Field with no f0 is reported as unverifiable
+        rather than silently passing — a silence that reads as a pass is worse
+        than an admission."""
+        field = self._coherent_field(7.5, dz=1.0)         # dr == one wavelength
+        blind = Field(data=field.data, coords=dict(field.coords),
+                      model='Test', frequencies=None)
+        assert blind.range_phase_step == pytest.approx(0.0, abs=1e-9)
+        with pytest.warns(UserWarning, match='carries no frequency'):
+            blind.resample_to(**self._midpoints(blind))
+
+    def test_resample_to_never_warns_for_a_real_field(self):
+        # A TL field carries no carrier, so it interpolates freely however
+        # coarse the grid — keying the guard on dtype rather than on grid
+        # spacing alone is what keeps this quiet.
+        ranges = np.arange(1000.0, 5000.0, 250.0)
+        depths = np.array([50.0, 100.0])
+        field = self._tl_field(np.zeros((depths.size, ranges.size)), ranges, depths,
+                               frequencies=200.0)
+        assert field.range_phase_step is None
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            field.resample_to(depths=[50.0], ranges=ranges[:-1] + 125.0)
+
 
 class TestFieldValueAccessorsAreWriteGuarded:
     """``Field`` copies on ingest, so no accessor may hand back a writable
     alias of ``data``: ``p = field.p; p *= k`` would otherwise corrupt the
-    stored result. Real ``.tl`` is the common path (RAM / OAST /
+    stored result. Real ``.db`` is the common path (RAM / OAST /
     Bellhop-incoherent all return real dB)."""
 
     @staticmethod
@@ -313,7 +410,7 @@ class TestFieldValueAccessorsAreWriteGuarded:
 
     def test_real_tl_is_read_only(self):
         f = self._real()
-        tl = f.tl
+        tl = f.db
         assert not tl.flags.writeable
         with pytest.raises(ValueError):
             tl[0, 0] = -999.0
@@ -321,16 +418,16 @@ class TestFieldValueAccessorsAreWriteGuarded:
 
     def test_real_tl_still_reads_the_stored_dB_values(self):
         f = self._real()
-        np.testing.assert_array_equal(np.asarray(f.tl), f.data)
+        np.testing.assert_array_equal(np.asarray(f.db), f.data)
 
     def test_scalar_tl_is_read_only_and_castable(self):
         f = self._real().at(depth=0.0, range=1.0)
-        assert not f.tl.flags.writeable
-        assert float(f.tl) == 70.0
+        assert not f.db.flags.writeable
+        assert float(f.db) == 70.0
 
     def test_complex_tl_is_a_fresh_array(self):
         f = self._complex()
-        tl = f.tl
+        tl = f.db
         assert not np.shares_memory(tl, f.data)
         tl[0, 0] = -999.0                       # derived array: safe to write
         assert f.data[0, 0] == 1 + 1j
@@ -915,7 +1012,7 @@ class TestFieldSlicing:
 
     def test_full_grid_tl_preserves_data_shape(self):
         f = self._full_grid(complex_data=True)
-        assert f.tl.shape == f.data.shape == (4, 5)
+        assert f.db.shape == f.data.shape == (4, 5)
         assert f.p.shape == f.data.shape
 
     def test_eval_interpolates_and_differs_from_neighbours(self):
@@ -970,7 +1067,7 @@ class TestFieldSlicing:
         point = f.at(range=500.0, depth=50.0)
         assert list(point.coords) == []
         assert point.data.shape == ()
-        assert isinstance(float(point.tl), float)
+        assert isinstance(float(point.db), float)
 
     def test_max_records_every_axis_in_pinned(self):
         f = self._full_grid()
@@ -993,7 +1090,7 @@ class TestFieldSlicing:
         )
 
     def test_max_on_tl_returns_loudest(self):
-        # kind='tl': loudest = smallest dB; a NaN no-data cell and an 80 dB
+        # unit='dB': loudest = smallest dB; a NaN no-data cell and an 80 dB
         # cell must lose to 35 dB.
         f = self._tl_grid([[40.0, np.nan], [35.0, 80.0]])
         m = f.max()
@@ -1055,7 +1152,7 @@ class TestFieldSlicing:
 
     def test_tf_to_tl_returns_real_field(self):
         tf = self._tf()
-        tl = tf.to_tl()
+        tl = tf.to_db()
         assert not tl.is_complex
         assert tl.data.shape == tf.data.shape
 
@@ -1477,3 +1574,200 @@ class TestReflectionFileDedupe:
         rows = [ln.split() for ln in brc.read_text().splitlines() if ln.strip()]
         assert int(rows[0][0]) == 3
         assert [float(r[0]) for r in rows[1:]] == [0.0, 30.0, 60.0]
+
+
+class TestFieldEvalSamplingGuard:
+    """``Field.eval`` interpolates the same coherent field as
+    ``resample_to`` and carried the same +2.3 dB level bias with no warning:
+    the guard existed on one public interpolation path and not the other.
+    ``eval`` is checked per **requested axis** — interpolating along range
+    says nothing about the depth spacing — and ``method='nearest'`` is exempt
+    because it fabricates nothing."""
+
+    @staticmethod
+    def _field(dr, dz, f0=200.0, c=1500.0):
+        ranges = np.arange(1000.0, 1100.0 + dr, dr)
+        depths = np.arange(40.0, 60.0 + dz, dz)
+        k = 2.0 * np.pi * f0 / c
+        row = np.exp(1j * k * ranges)[None, :] / ranges[None, :]
+        return Field(data=np.repeat(row, depths.size, axis=0),
+                     coords={'depth': depths, 'range': ranges},
+                     model='Test', frequencies=f0)
+
+    @pytest.mark.parametrize('axis,dr,dz', [('range', 25.0, 1.0),
+                                            ('depth', 1.0, 5.0)])
+    def test_eval_warns_on_the_axis_it_interpolates(self, axis, dr, dz):
+        field = self._field(dr, dz)
+        with pytest.warns(UserWarning, match=f'{axis} samples are'):
+            field.eval(**{axis: float(field.coords[axis][0]) + 0.5})
+
+    def test_eval_ignores_a_coarse_axis_it_is_not_interpolating(self):
+        # The discriminating half: a coarse depth axis is irrelevant to
+        # eval(range=...), and warning about it would be noise.
+        field = self._field(dr=1.0, dz=5.0)
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            field.eval(range=1000.5)
+
+    def test_eval_is_silent_on_a_resolved_axis(self):
+        field = self._field(dr=1.0, dz=1.0)
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            field.eval(depth=40.5, range=1000.5)
+
+    def test_nearest_never_warns(self):
+        field = self._field(dr=25.0, dz=5.0)
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            field.eval(method='nearest', depth=42.5, range=1012.5)
+
+
+class TestReflectionCoefficientExtrapolationIsAnnounced:
+    """``eval``/``at`` hold the end value outside the tabulated angles, like
+    every other carrier. A solver reading the same table does not:
+    ``misc/RefCoef.f90:137,145`` sets R = 0 and phi = 0 outside the range,
+    killing the ray. The number is deliberately unchanged — returning 0 would
+    make this the only carrier with a different extrapolation rule, and 0 is
+    AT's kill convention, not a claim about R at that angle — but the
+    disagreement is now named."""
+
+    @staticmethod
+    def _rc():
+        th = np.arange(10.0, 41.0, 5.0)
+        return ReflectionCoefficient(
+            theta=th, R=np.linspace(0.9, 0.3, th.size),
+            phi=np.zeros(th.size), model='Test', frequencies=100.0)
+
+    @pytest.mark.parametrize('angle', [5.0, 80.0])
+    def test_out_of_range_angle_warns_and_cites_the_solver(self, angle):
+        with pytest.warns(UserWarning, match='RefCoef.f90'):
+            self._rc().eval(angle=angle)
+
+    def test_in_range_angle_is_silent_and_interpolates(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            out = self._rc().eval(angle=25.0)
+        assert float(np.asarray(out.R).ravel()[0]) == pytest.approx(0.6)
+
+    def test_isel_takes_an_index_and_must_not_warn(self):
+        # The discriminating case: isel's `angle` is a positional index, so
+        # comparing it against degrees is meaningless. A guard on the shared
+        # funnel that forgets this fires a bogus warning on every isel.
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            self._rc().isel(angle=2)
+
+
+class TestKindUnitAndDtypeAreIndependentAxes:
+    """A Field is described on three axes that must not be collapsed into one:
+    ``kind`` (what it is), ``unit`` (what it is measured in) and ``dtype`` (how
+    it is stored). Each has a distinct consumer, and each collapse has already
+    produced a bug:
+
+    * ``Field.max`` inferred dB-ness from the quantity, so introducing
+      ``'reverberation'`` made it return the *quietest* cell of a dB grid.
+    * ``compare_models`` keyed on representation, so it refused the ordinary
+      RAM-vs-Kraken comparison of one quantity written two ways.
+    * ``replica_bank_from_field`` asked for a quantity when what matched-field
+      processing actually needs is phase, i.e. the dtype.
+    """
+
+    Z = np.array([10.0, 20.0])
+    R = np.array([100.0, 200.0])
+    DB = np.array([[40.0, 90.0], [70.0, 60.0]])      # 40 dB is the loudest
+
+    def _field(self, data=None, metadata=None, coords=None):
+        return Field(data=self.DB if data is None else data,
+                     coords=coords or {'depth': self.Z, 'range': self.R},
+                     model='Test', frequencies=100.0, metadata=metadata)
+
+    # ── kind: the quantity ────────────────────────────────────────────
+    def test_transmission_loss_is_not_a_separate_kind(self):
+        # TL is pressure in dB, so it must share pressure's kind and differ
+        # only on the unit axis. This is what lets example_07 compare a RAM
+        # TL field against a Kraken complex one.
+        tl, px = self._field(), self._field(data=self.DB.astype(complex))
+        assert tl.kind == px.kind == 'pressure'
+        assert (tl.unit, px.unit) == ('dB', 'Pa')
+
+    def test_a_model_tags_a_different_quantity(self):
+        assert self._field(metadata={'kind': 'reverberation'}).kind == \
+            'reverberation'
+
+    # ── unit: which way is louder ─────────────────────────────────────
+    def test_transmission_loss_is_the_one_quantity_that_inverts(self):
+        # TL is a *loss*, so the least of it is the loudest.
+        f = self._field()
+        assert (f.kind, f.unit) == ('pressure', 'dB')
+        assert float(f.max().data) == pytest.approx(40.0)
+
+    @pytest.mark.parametrize('kind', ['reverberation', 'signal_excess'])
+    def test_a_db_level_is_not_inverted(self, kind):
+        # Reverberation and signal excess share TL's dB unit but are levels,
+        # not losses: more is more. Deciding direction from the unit alone
+        # reports the *weakest* cell of a level grid as the strongest.
+        f = self._field(metadata={'kind': kind})
+        assert f.unit == 'dB'
+        assert float(f.max().data) == pytest.approx(90.0)
+
+    def test_a_time_trace_is_linear_not_db(self):
+        # Real data alone does not mean dB — a time trace is Pa, and treating
+        # it as a level would make max() return the trace's *trough*.
+        t = np.array([0.0, 1.0, 2.0, 3.0])
+        f = self._field(data=np.array([1.0, -5.0, 2.0, 0.5]),
+                        coords={'time': t})
+        assert f.kind == 'pressure' and f.unit == 'Pa'
+        assert float(f.max().data) == pytest.approx(-5.0)   # largest |p|
+
+    def test_a_model_may_pin_the_unit(self):
+        # probability_of_detection is dimensionless, so it cannot be derived
+        # from the storage the way pressure's Pa/dB split is.
+        f = self._field(metadata={'kind': 'probability_of_detection',
+                                  'unit': '1'})
+        assert (f.kind, f.unit) == ('probability_of_detection', '1')
+
+    def test_an_unregistered_quantity_is_refused_at_construction(self):
+        # The guard is on the funnel: a typo'd tag that survived construction
+        # would resurface as a wrong colour scale or a wrong argmax direction
+        # with nothing pointing back at the model that set it.
+        with pytest.raises(ConfigurationError, match='unknown Field kind'):
+            self._field(metadata={'kind': 'transmission_loss'})
+        with pytest.raises(ConfigurationError, match='not measured in'):
+            self._field(metadata={'kind': 'reverberation', 'unit': 'Pa'})
+
+    def test_the_untagged_path_never_consults_the_registry(self):
+        # Every slice builds a Field; validation must not cost the common
+        # case, so an untagged field carries no 'kind'/'unit' metadata at all.
+        f = self._field()
+        assert 'kind' not in (f.metadata or {})
+        assert (f.kind, f.unit) == ('pressure', 'dB')
+
+    # ── dtype: is there phase to work with ────────────────────────────
+    def test_matched_field_rejects_a_real_field_of_the_right_kind(self):
+        from uacpy.sonar.matched_field import replica_bank_from_field
+        tl = self._field()                      # kind='pressure', but real
+        assert tl.kind == 'pressure'            # would pass a kind-only guard
+        with pytest.raises(ConfigurationError, match='complex'):
+            replica_bank_from_field(tl)
+
+    # ── the axes stay independent ─────────────────────────────────────
+    def test_compare_models_keys_on_kind_not_representation(self):
+        import matplotlib
+        matplotlib.use('Agg')
+        from uacpy import compare_models
+        tl = self._field()
+        px = self._field(data=self.DB.astype(complex))
+        rv = self._field(metadata={'kind': 'reverberation'})
+        # One quantity, two representations: the ordinary comparison.
+        compare_models([tl, px])
+        # Same representation, different quantity: refused.
+        with pytest.raises(ConfigurationError, match='different physical'):
+            compare_models([tl, rv])
+
+    def test_all_three_axes_round_trip(self):
+        f = self._field(metadata={'kind': 'reverberation'})
+        d = f.to_dict()
+        assert (d['kind'], d['unit']) == ('reverberation', 'dB')
+        back = Field.from_dict(d)
+        assert (back.kind, back.unit, back.data.dtype) == \
+            (f.kind, f.unit, f.data.dtype)

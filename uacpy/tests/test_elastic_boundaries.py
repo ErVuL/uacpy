@@ -127,7 +127,7 @@ class TestElasticOverFluidHalfspaceGuard:
                        ranges=np.linspace(100, 3000, 20))
         with pytest.warns(UserWarning, match='sub-bottom'):
             field = Kraken().run(self._elastic_over_elastic(), src, rcv)
-        tl = field.tl
+        tl = field.db
         assert np.isfinite(tl[0]).any()          # water column: real values
         assert not np.isfinite(tl[1]).any()      # in elastic layer: all NaN
         assert not np.isfinite(tl[2]).any()      # in elastic halfspace: all NaN
@@ -173,8 +173,8 @@ class TestElasticBoundaryAutoDetection:
         # Finiteness above only rules out inf/NaN pressure. TL < 200 dB is
         # |p| > 1e-10, which additionally rules out a field that collapsed to
         # numerical zero — a real 100 m guide at 1-5 km sits near 50-90 dB.
-        assert np.any(result.tl > 0)
-        assert np.all(result.tl < 200)
+        assert np.any(result.db > 0)
+        assert np.all(result.db < 200)
 
     def test_kraken_fluid_bottom(self, fluid_env, source, receiver_small):
         """Test that Kraken works with a fluid bottom (dispatches to kraken.exe)."""
@@ -201,8 +201,8 @@ class TestElasticBoundaryAutoDetection:
         result_elastic = kraken.compute_tl(elastic_env, source, receiver_small)
         result_fluid = kraken.compute_tl(fluid_env, source, receiver_small)
 
-        # .tl is the dB view regardless of how the Field stores its data.
-        diff = np.abs(result_elastic.tl - result_fluid.tl)
+        # .db is the dB view regardless of how the Field stores its data.
+        diff = np.abs(result_elastic.db - result_fluid.db)
         mean_diff = np.nanmean(diff)
 
         assert mean_diff > 0.5, "Elastic and fluid bottoms should produce different results"
@@ -299,7 +299,7 @@ class TestBounceToScooterWorkflow:
         Both runs are Scooter on the same waveguide; the only difference is
         whether the seafloor is the elastic half-space itself or the
         ``R(theta)`` table BOUNCE computed from it. The bounds are in dB, so
-        the comparison is on ``.tl`` — ``core/results/field.py:250`` makes that
+        the comparison is on ``.db`` — ``core/results/field.py:250`` makes that
         the ``-20*log10(|data|)`` view, while ``.data`` is complex pressure and
         differences there are bounded by ``|p| < 1`` no matter how badly the
         two disagree.
@@ -338,7 +338,7 @@ class TestBounceToScooterWorkflow:
         # Workflow 2: Direct elastic
         result_direct = scooter.compute_tl(elastic_env, source, receiver_small)
 
-        diff = np.abs(result_with_file.tl - result_direct.tl)
+        diff = np.abs(result_with_file.db - result_direct.db)
         mean_diff = np.nanmean(diff)
         max_diff = np.nanmax(diff)
 
@@ -361,7 +361,7 @@ class TestWorkflowComparison:
 
         krakenc's normal-mode sum against Scooter's wavenumber integration
         over a BOUNCE ``.brc`` — different solvers, different seafloor
-        representations. The bound is in dB, so the comparison is on ``.tl``
+        representations. The bound is in dB, so the comparison is on ``.db``
         (``core/results/field.py:250``); ``.data`` is complex pressure, where
         ``|p| < 1`` caps any difference at ~2 regardless of agreement.
 
@@ -405,7 +405,7 @@ class TestWorkflowComparison:
         assert np.all(np.isfinite(result_kraken.data))
         assert np.all(np.isfinite(result_scooter.data))
 
-        diff = np.abs(result_kraken.tl - result_scooter.tl)
+        diff = np.abs(result_kraken.db - result_scooter.db)
         mean_diff = np.nanmean(diff)
 
         assert mean_diff < 1.0, f"Mean difference {mean_diff:.2f} dB between workflows"

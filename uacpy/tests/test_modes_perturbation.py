@@ -1,3 +1,5 @@
+import warnings
+from uacpy import BoundaryProperties
 """Tests for :meth:`Modes.with_attenuation` perturbation +
 :meth:`Modes.modal_propagation_loss` synthesis."""
 
@@ -199,3 +201,53 @@ class TestDepthsOutsideTheTabulatedModes:
             self._modes().modal_propagation_loss(
                 source_depth=150.0, receiver_depths=np.array([10.0]),
                 ranges_m=np.array([1000.0]))
+
+
+class TestLeakyModesGetNoBottomTerm:
+    """``modes.py:254-255`` already states the rule — *"gamma is real only for
+    a trapped mode (kr > kb); a leaky one clamps to 0 and contributes
+    nothing"* — and the code contradicted it: ``gamma_safe = np.where(gamma_m
+    > 0, gamma_m, 1.0)`` put a bare ``1.0`` into the denominator.
+
+    That number carries units of 1/m, so the invented loss scaled with the
+    library's length unit: the identical physics expressed in km came back
+    exactly 1000x different. Physically there is no finite first-order
+    bottom-absorption perturbation for a radiating mode — the tail integral
+    ``int_D^inf psi^2 dz`` diverges, so the closed form ``psi^2(D)/(2*gamma)``
+    this line specialises does not exist."""
+
+    F0 = 100.0
+    BOT = BoundaryProperties(acoustic_type='half-space', sound_speed=1700.0,
+                             density=1.8, attenuation=0.5)
+
+    @property
+    def _kb(self):
+        return 2.0 * np.pi * self.F0 / self.BOT.sound_speed
+
+    def _modes(self, factors):
+        z = np.linspace(0.0, 100.0, 51)
+        phi = np.cos(0.5 * np.pi * z[:, None] / 100.0) * np.ones((1, len(factors)))
+        return Modes(k=np.array([self._kb * f for f in factors], dtype=complex),
+                     phi=phi, depths=z, model='Test', frequencies=self.F0)
+
+    def test_leaky_mode_contributes_nothing_and_warns(self):
+        with pytest.warns(UserWarning, match='leaky'):
+            out = self._modes([1.05, 0.95]).with_attenuation(0.0, bottom=self.BOT)
+        assert out.k[1].imag == 0.0        # leaky: exactly zero, not 1/gamma
+        assert out.k[0].imag > 0.0         # trapped: still gets its term
+
+    def test_all_trapped_set_is_silent_and_keeps_its_attenuation(self):
+        # The counterpart that stops the fix reaching the branch that works.
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            out = self._modes([1.05, 1.20]).with_attenuation(0.0, bottom=self.BOT)
+        assert np.all(out.k.imag > 0.0)
+
+    def test_the_result_no_longer_depends_on_the_length_unit(self):
+        # Re-express the same physics in km: depths /1000, wavenumbers *1000.
+        # Before the fix the leaky mode's Im(k) differed by exactly 1000x.
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            m = self._modes([1.05, 0.95])
+            metres = m.with_attenuation(0.0, bottom=self.BOT).k[1].imag
+        assert metres == 0.0

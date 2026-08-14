@@ -1,3 +1,4 @@
+import warnings
 """Bellhop ray/beam-focused tests."""
 
 import pytest
@@ -7,8 +8,12 @@ from uacpy.models import Bellhop
 from uacpy import Field
 from uacpy.core.results import Rays, Arrivals
 from uacpy.models.base import RunMode
-from uacpy.core import Environment, Source, Receiver
-from uacpy.core.exceptions import ConfigurationError
+from uacpy.core import (
+    Environment, Source, Receiver, BoundaryProperties,
+)
+from uacpy.core.exceptions import (
+    ConfigurationError, UnsupportedFeatureError,
+)
 
 pytestmark = pytest.mark.requires_binary
 
@@ -50,7 +55,7 @@ class TestBellhopRunModes:
         assert isinstance(result, Field)
         assert result.shape == (len(setup_receiver.depths), len(setup_receiver.ranges))
         assert np.all(np.isfinite(result.data))
-        assert np.all(result.tl > 0), "TL should be positive"
+        assert np.all(result.db > 0), "TL should be positive"
 
     @pytest.mark.requires_binary
     def test_r0_column_is_no_data_nan(self, setup_env, setup_source):
@@ -63,7 +68,7 @@ class TestBellhopRunModes:
         result = Bellhop(verbose=False).run(
             env=setup_env, source=setup_source, receiver=rcv,
             run_mode=RunMode.COHERENT_TL)
-        tl = np.asarray(result.tl)
+        tl = np.asarray(result.db)
         assert np.all(np.isnan(tl[:, 0]))
         assert np.all(np.isfinite(tl[:, 1:]))
 
@@ -327,9 +332,9 @@ class TestAdvancedBeamTypes:
         ignoring beam_type — the per-beam smoke tests above would all still
         pass in that case.)"""
         tl_b = Bellhop(verbose=False, beam_type='B').run(
-            env=env, source=source, receiver=receiver).tl
+            env=env, source=source, receiver=receiver).db
         tl_s = Bellhop(verbose=False, beam_type='S').run(
-            env=env, source=source, receiver=receiver).tl
+            env=env, source=source, receiver=receiver).db
         assert not np.allclose(tl_b, tl_s, atol=1e-2), (
             "Gaussian ('B') and simple-Gaussian ('S') beams produced identical "
             "TL — beam_type may not be reaching the Bellhop input."
@@ -421,7 +426,7 @@ class TestBellhopRangeDependentSSP:
         )
         bh = Bellhop(verbose=False, interp_ssp='quad', backend=backend)
         res = bh.run(rd_ssp_env, src, rcv, run_mode=RunMode.COHERENT_TL)
-        tl = np.asarray(res.tl)
+        tl = np.asarray(res.db)
         # Cells no ray reached (shadow zones) are NaN no-data cells.
         real = tl[np.isfinite(tl)]
         assert real.size > tl.size * 0.5, (
@@ -451,7 +456,7 @@ class TestBellhopRangeDependentSSP:
         msgs = [str(w.message) for w in record]
         assert any('range-dependent SSP spans' in m for m in msgs)
         assert any('constant-extrapolated' in m for m in msgs)
-        tl = np.asarray(res.tl)
+        tl = np.asarray(res.db)
         real = tl[(tl > 0) & (tl < 500)]
         assert real.size > tl.size * 0.5
         assert real.max() < 200
@@ -526,7 +531,7 @@ class TestBellhopMultiSourceDepth:
         stack = bh.run(env, source, receiver, run_mode=RunMode.COHERENT_TL)
         for sd_value, slab in stack:
             assert slab.data.shape == (9, 10)
-            tl = slab.tl
+            tl = slab.db
             real = tl[(tl > 0) & (tl < 500)]
             assert real.size > tl.size * 0.5
             assert real.min() > 0
@@ -559,7 +564,7 @@ class TestBellhopMultiSourceDepth:
             env, Source(depths=50.0, frequencies=100.0),
             receiver, run_mode=RunMode.COHERENT_TL,
         )
-        np.testing.assert_allclose(slab.tl, single.tl, rtol=1e-4, atol=1e-3)
+        np.testing.assert_allclose(slab.db, single.db, rtol=1e-4, atol=1e-3)
 
     @pytest.mark.requires_binary
     def test_multi_source_rays_returns_stack(self):
@@ -732,7 +737,7 @@ class TestBellhopSourceGeometry:
                                    source_type='point'), rcv)
         ln = model.run(env, Source(depths=50, frequencies=200,
                                    source_type='line'), rcv)
-        delta = np.nanmax(np.abs(np.asarray(pt.tl) - np.asarray(ln.tl)))
+        delta = np.nanmax(np.abs(np.asarray(pt.db) - np.asarray(ln.db)))
         assert delta > 10.0, f"source_type is still inert (max dTL={delta})"
 
     def test_line_vs_point_matches_influence_f90_ratio(self):
@@ -752,9 +757,9 @@ class TestBellhopSourceGeometry:
         rcv = Receiver(depths=100.0, ranges=ranges)
         model = Bellhop(verbose=False)
         pt = np.asarray(model.run(env, Source(depths=50, frequencies=200,
-                                              source_type='point'), rcv).tl).ravel()
+                                              source_type='point'), rcv).db).ravel()
         ln = np.asarray(model.run(env, Source(depths=50, frequencies=200,
-                                              source_type='line'), rcv).tl).ravel()
+                                              source_type='line'), rcv).db).ravel()
         diff = pt - ln
         measured = diff[-1] - diff[0]
         expected = 10 * np.log10(ranges[-1] / ranges[0])
@@ -992,7 +997,7 @@ class TestEnvRecordOrder:
         prt = next(iter(tmp_path.rglob('*.prt'))).read_text()
         assert '*** FATAL ERROR ***' not in prt
         assert 'CRCI' not in prt
-        assert np.any(np.isfinite(np.asarray(result.tl)))
+        assert np.any(np.isfinite(np.asarray(result.db)))
 
 
 class TestQuadSSPMatrixAlignment:
@@ -1067,7 +1072,7 @@ class TestQuadSSPMatrixAlignment:
             run_mode=RunMode.COHERENT_TL)
         prt = next(iter(tmp_path.rglob('*.prt'))).read_text()
         assert '*** FATAL ERROR ***' not in prt
-        assert np.any(np.isfinite(np.asarray(result.tl)))
+        assert np.any(np.isfinite(np.asarray(result.db)))
 
 
 class TestMeshDepthCoversBathymetry:
@@ -1113,7 +1118,7 @@ class TestMeshDepthCoversBathymetry:
         prt = next(iter(tmp_path.rglob('*.prt'))).read_text()
         assert '*** FATAL ERROR ***' not in prt
         assert list(tmp_path.rglob('*.shd'))
-        assert np.any(np.isfinite(np.asarray(result.tl)))
+        assert np.any(np.isfinite(np.asarray(result.db)))
 
 
 class TestRayCenteredGaussianRejected:
@@ -1332,13 +1337,13 @@ class TestBeamPatternMustSpanTheLaunchFan:
 
     @pytest.mark.requires_binary
     def test_a_pattern_covering_the_fan_runs_and_is_finite(self):
-        tl = np.asarray(self._run(80.0, (-80.0, 80.0)).tl)
+        tl = np.asarray(self._run(80.0, (-80.0, 80.0)).db)
         assert np.isfinite(tl).all()
 
     @pytest.mark.requires_binary
     def test_narrowing_the_fan_to_the_pattern_also_works(self):
         """The other remedy the error offers must work too."""
-        tl = np.asarray(self._run(60.0, (-60.0, 60.0)).tl)
+        tl = np.asarray(self._run(60.0, (-60.0, 60.0)).db)
         assert np.isfinite(tl).all()
 
 
@@ -1460,7 +1465,7 @@ class TestReceiverGridMatchesTheBeamType:
                        ranges=[500.0, 1400.0, 2300.0, 3200.0])
         result = Bellhop(verbose=False, beam_type=beam_type,
                          grid_type='I').run(env, src, rcv, RunMode.COHERENT_TL)
-        assert np.asarray(result.tl).shape == (4,)
+        assert np.asarray(result.db).shape == (4,)
 
     @pytest.mark.parametrize('beam_type', ['g', 'C', 'R'])
     def test_non_uniform_ranges_are_refused(self, beam_type):
@@ -1486,7 +1491,7 @@ class TestReceiverGridMatchesTheBeamType:
                        ranges=[500.0, 700.0, 1000.0, 1500.0, 2200.0, 3200.0])
         result = Bellhop(verbose=False, beam_type=beam_type).run(
             env, src, rcv, RunMode.COHERENT_TL)
-        assert np.isfinite(np.asarray(result.tl)).all()
+        assert np.isfinite(np.asarray(result.db)).all()
 
     @pytest.mark.parametrize('beam_type', ['g', 'C', 'R'])
     def test_uniform_ranges_still_accepted(self, beam_type):
@@ -1495,3 +1500,203 @@ class TestReceiverGridMatchesTheBeamType:
         result = Bellhop(verbose=False, beam_type=beam_type).run(
             env, src, rcv, RunMode.COHERENT_TL)
         assert isinstance(result, Field)
+
+
+class TestBeamCountGuard:
+    """``bellhop.f90:176-178`` leaves ``Angles%Dalpha = 0`` when
+    ``Nalpha == 1``, so ``q0 = c/Dalpha`` gives every beam zero width and the
+    influence sum contributes nothing — the run exits 0 with an all-NaN field
+    and no diagnostic. Two beams have a finite Dalpha but cannot bracket a
+    receiver, and measure all-NaN too. Ray modes are unaffected:
+    ``bellhop.f90:288`` skips influence, and one traced ray is legitimate."""
+
+    @staticmethod
+    def _env():
+        return Environment(bathymetry=100.0, ssp=1500.0,
+                           bottom=BoundaryProperties(
+                               acoustic_type='half-space', sound_speed=1600.0,
+                               density=1.5, attenuation=0.5))
+
+    @pytest.mark.parametrize('run_mode', [RunMode.COHERENT_TL, RunMode.ARRIVALS])
+    @pytest.mark.parametrize('n_beams', [1, 2])
+    def test_sparse_fan_is_refused_for_influence_modes(self, run_mode, n_beams):
+        with pytest.raises(ConfigurationError, match='Dalpha'):
+            Bellhop(n_beams=n_beams).run(
+                self._env(), Source(depths=25.0, frequencies=200.0),
+                Receiver(depths=[50.0], ranges=[1000.0]), run_mode=run_mode)
+
+    @pytest.mark.parametrize('n_beams', [1, 2])
+    def test_sparse_fan_is_allowed_for_ray_modes(self, n_beams):
+        # The discriminating counterpart: beam width never enters a ray trace.
+        rays = Bellhop(n_beams=n_beams).run(
+            self._env(), Source(depths=25.0, frequencies=200.0),
+            Receiver(depths=[50.0], ranges=[1000.0]), run_mode=RunMode.RAYS)
+        assert len(rays.rays) == n_beams
+
+    @pytest.mark.parametrize('n_beams', [0, 3, 51])
+    def test_usable_fan_still_produces_a_finite_field(self, n_beams):
+        # 0 lets Bellhop auto-pick; the guard must not touch either case.
+        tl = np.squeeze(Bellhop(n_beams=n_beams).run(
+            self._env(), Source(depths=25.0, frequencies=200.0),
+            Receiver(depths=[50.0], ranges=[1000.0]),
+            run_mode=RunMode.COHERENT_TL).db)
+        assert np.all(np.isfinite(tl))
+
+
+class TestPrecalcBoundaryIsRefused:
+    """``ReadEnvironmentBell.f90:459`` accepts the ``'P'`` option letter and
+    prints "reading PRECALCULATED IRC", but ``bellhop.f90:681``'s
+    ``SELECT CASE ( HS%BC )`` implements only 'R', 'V', 'F' and 'A'/'G' —
+    there is no 'P' branch, so the run failed with a bare exit code instead of
+    naming the boundary. ``bounce.py:80`` already recorded the limitation."""
+
+    def test_precalc_bottom_raises_and_names_the_cause(self):
+        env = Environment(bathymetry=100.0, ssp=1500.0,
+                          bottom=BoundaryProperties(acoustic_type='precalc'))
+        with pytest.raises(UnsupportedFeatureError, match="'P' reflection branch"):
+            Bellhop().run(env, Source(depths=25.0, frequencies=200.0),
+                          Receiver(depths=[50.0], ranges=[1000.0]),
+                          run_mode=RunMode.COHERENT_TL)
+
+    def test_ordinary_halfspace_is_unaffected(self):
+        env = Environment(bathymetry=100.0, ssp=1500.0,
+                          bottom=BoundaryProperties(
+                              acoustic_type='half-space', sound_speed=1600.0,
+                              density=1.5, attenuation=0.5))
+        tl = np.squeeze(Bellhop().run(
+            env, Source(depths=25.0, frequencies=200.0),
+            Receiver(depths=[50.0], ranges=[1000.0]),
+            run_mode=RunMode.COHERENT_TL).db)
+        assert np.all(np.isfinite(tl))
+
+
+class TestSourceMustBeInsideTheMedium:
+    """``bellhop.f90:488-492`` tests ``DistBegTop <= 0 .OR. DistBegBot <= 0``
+    and terminates every ray at step 1 — *"source must be within the medium"*.
+    The run then exits 0 with an all-NaN field, zero arrivals and 1-point
+    rays, warning about none of it. Measured: 99.99 m gives a perfectly good
+    field, 100.00 m gives nanfrac 1.0000. All three backends fail identically.
+
+    The test is against the seafloor at **r = 0** (``bellhop.f90:237`` launches
+    from ``xs = [0.0, sz]``), not ``env.depth`` — on a sloping bottom a source
+    can be buried at its own range while well above ``env.depth``."""
+
+    BOT = BoundaryProperties(acoustic_type='half-space', sound_speed=1600.0,
+                             density=1.8, attenuation=0.5)
+
+    def _flat(self):      # env.depth == r=0 floor == 100
+        return Environment(bathymetry=100.0, ssp=1500.0, bottom=self.BOT)
+
+    def _slope(self):     # r=0 floor 50, env.depth 150
+        return Environment(bathymetry=[(0.0, 50.0), (5000.0, 150.0)],
+                           ssp=1500.0, bottom=self.BOT)
+
+    def _rcv(self):
+        return Receiver(depths=[30.0, 50.0, 75.0],
+                        ranges=np.linspace(100.0, 5000.0, 20))
+
+    def _run(self, env, zs):
+        return Bellhop().run(env, Source(depths=zs, frequencies=200.0),
+                             self._rcv(), run_mode=RunMode.COHERENT_TL)
+
+    def test_source_on_a_flat_seafloor_raises(self):
+        with pytest.raises(ConfigurationError, match='at or below the seafloor'):
+            self._run(self._flat(), 100.0)
+
+    @pytest.mark.parametrize('zs', [50.0, 100.0])
+    def test_sloping_bottom_is_judged_at_the_source_range(self, zs):
+        # 50 m is the r=0 floor; 100 m is buried at r=0 but still above
+        # env.depth=150. A guard written against env.depth misses both.
+        with pytest.raises(ConfigurationError, match='at or below the seafloor'):
+            self._run(self._slope(), zs)
+
+    @pytest.mark.parametrize('env_name,zs', [('_flat', 99.99), ('_slope', 40.0)])
+    def test_a_source_inside_the_medium_still_runs(self, env_name, zs):
+        # The knife edge: 99.99 m is a good field, so the guard must not
+        # creep upward.
+        tl = np.squeeze(self._run(getattr(self, env_name)(), zs).db)
+        assert np.all(np.isfinite(tl))
+
+    def test_the_guard_is_bellhop_only(self):
+        # Kraken/Scooter/RAM answer a buried source (heavily attenuated, as
+        # physics requires). Putting this on the shared funnel would reject
+        # three correct answers.
+        from uacpy.models.base import PropagationModel
+        import inspect
+        assert 'at or below the seafloor' not in inspect.getsource(
+            PropagationModel._validate_geometry)
+
+
+class TestSingleReceiverRangeBeamTypes:
+    """``g``/``C``/``R`` clamp the receiver index to ``Pos%NRr``
+    (``influence.f90:339,351``), so with one range ``irA == irB`` at every
+    step and ``:354`` skips the whole ray — the run exits 0 with an all-NaN
+    field, zero eigenrays and zero arrivals. ``G``/``B`` walk the index with a
+    bracket test and are unaffected."""
+
+    @staticmethod
+    def _env():
+        return Environment(bathymetry=100.0, ssp=1500.0,
+                           bottom=BoundaryProperties(
+                               acoustic_type='half-space', sound_speed=1600.0,
+                               density=1.8, attenuation=0.5))
+
+    @pytest.mark.parametrize('beam_type', ['g', 'C', 'R'])
+    def test_single_range_is_refused(self, beam_type):
+        with pytest.raises(ConfigurationError, match='single receiver range'):
+            Bellhop(beam_type=beam_type).run(
+                self._env(), Source(depths=25.0, frequencies=200.0),
+                Receiver(depths=[50.0], ranges=[1000.0]),
+                run_mode=RunMode.COHERENT_TL)
+
+    @pytest.mark.parametrize('beam_type', ['G', 'B'])
+    def test_bracket_testing_beam_types_accept_one_range(self, beam_type):
+        # The discriminating counterpart: these index by bracket, not by
+        # division, so one range is legitimate for them.
+        tl = np.squeeze(Bellhop(beam_type=beam_type).run(
+            self._env(), Source(depths=25.0, frequencies=200.0),
+            Receiver(depths=[50.0], ranges=[1000.0]),
+            run_mode=RunMode.COHERENT_TL).db)
+        assert np.all(np.isfinite(tl))
+
+    @pytest.mark.parametrize('beam_type', ['g', 'C', 'R'])
+    def test_several_equally_spaced_ranges_still_work(self, beam_type):
+        tl = np.squeeze(Bellhop(beam_type=beam_type).run(
+            self._env(), Source(depths=25.0, frequencies=200.0),
+            Receiver(depths=[50.0], ranges=np.linspace(500.0, 3000.0, 6)),
+            run_mode=RunMode.COHERENT_TL).db)
+        assert np.any(np.isfinite(tl))
+
+
+class TestSolverWarningsReachTheCaller:
+    """The AT binaries write both fatals and *non-fatal* diagnoses to the
+    ``.prt``. Only the fatals were read (``_attach_prt_tail``, on the
+    exception path), so a run the solver itself diagnosed came back at exit 0
+    with a full-size result and nothing said — BELLHOP writes ``Warning in
+    BELLHOP : Too few beams`` while uacpy returned the under-sampled TL field
+    in silence."""
+
+    @staticmethod
+    def _env():
+        return Environment(bathymetry=200.0, ssp=1500.0,
+                           bottom=BoundaryProperties(
+                               acoustic_type='half-space', sound_speed=1700.0,
+                               density=1.8, attenuation=0.5))
+
+    def _run(self, n_beams):
+        return Bellhop(n_beams=n_beams, backend='fortran').run(
+            self._env(), Source(depths=50.0, frequencies=500.0),
+            Receiver(depths=[100.0], ranges=np.linspace(500.0, 5000.0, 10)),
+            run_mode=RunMode.COHERENT_TL)
+
+    def test_too_few_beams_is_reported_in_the_solvers_own_words(self):
+        with pytest.warns(UserWarning, match='Too few beams'):
+            self._run(5)
+
+    def test_a_converged_run_is_silent(self):
+        # The discriminating counterpart: n_beams=0 lets BELLHOP choose, the
+        # .prt carries no Warning line, and the caller must not be nagged.
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', UserWarning)
+            warnings.filterwarnings('ignore', message='.*not redistributable.*')
+            self._run(0)

@@ -9,7 +9,11 @@ authority for every expectation is the vendored source, cited at the assertion.
 
 import re
 
+import io
+
 import numpy as np
+from uacpy.io.oalib_writer import write_ssp_section
+from uacpy.core import Environment, BoundaryProperties
 import pytest
 from pathlib import Path
 import tempfile
@@ -407,12 +411,18 @@ class TestRamsurfReaderDepthAxis:
 
     @staticmethod
     def _write_grid(path, lz, n_records):
-        """Write a synthetic Collins tl.grid (little-endian Fortran records)."""
+        """Write a synthetic Collins tl.grid (little-endian Fortran records).
+
+        ``f8``, not ``f4``: the Collins binaries are built with
+        ``-fdefault-real-8`` (third_party/MODIFICATIONS.md), so a real
+        ``tl.grid`` carries 8-byte records. A 4-byte fixture would test a
+        format the shipped binaries no longer write.
+        """
         import struct
         with open(path, 'wb') as f:
             f.write(struct.pack('<i', 4) + struct.pack('<i', lz) + struct.pack('<i', 4))
             for r in range(n_records):
-                payload = np.arange(lz, dtype='<f4').tobytes()
+                payload = np.arange(lz, dtype='<f8').tobytes()
                 f.write(struct.pack('<i', len(payload)) + payload
                         + struct.pack('<i', len(payload)))
 
@@ -833,7 +843,7 @@ def test_surface_halfspace_does_not_leak_into_the_water_column():
             surface=surface)
         return np.asarray(Kraken(timeout=300).run(
             env, Source(depths=25.0, frequencies=100.0),
-            Receiver(depths=[50.0], ranges=np.linspace(500.0, 5000.0, 10))).tl)
+            Receiver(depths=[50.0], ranges=np.linspace(500.0, 5000.0, 10))).db)
 
     leaky = tl(BoundaryProperties(acoustic_type='half-space',
                                   sound_speed=1600.0, density=0.9,
@@ -3144,6 +3154,47 @@ class TestOneEnvironmentOneWaterDepth:
                     env, uacpy.Source(depths=50.0, frequencies=200.0),
                     uacpy.Receiver(depths=[75.0],
                                    ranges=np.linspace(1000.0, 10000.0, 91))
-                ).tl).ravel()
+                ).db).ravel()
 
         assert np.nanmax(np.abs(tl(100.04) - tl(100.1))) > 1.0
+
+
+class TestATSSPPointLimit:
+    """``misc/sspMod.f90:11`` dimensions every profile array to
+    ``MaxSSP = 20001``. Its read loop counts per medium but writes at a
+    cumulative index (``SSP%Loc`` accumulates at ``:325``), so the clean
+    ``ERROUT`` at ``:368`` only fires for a single medium — with sediment
+    layers the index runs off the end and gfortran dies inside the READ with
+    an unrelated "Bad real number in item 1 of list input". Bellhop's private
+    ``Bellhop/sspMod.f90:16`` holds 100001, so the same environment can be
+    fine for Bellhop and fatal for Kraken. uacpy already guards the sibling AT
+    limits (``MaxNfreq``, ``MaxBioLayers``, the mesh floor); this one was
+    missed."""
+
+    BOT = BoundaryProperties(acoustic_type='half-space', sound_speed=1800.0,
+                             density=1.8, attenuation=0.5)
+
+    def _env(self, n):
+        z = np.linspace(0.0, 200.0, n)
+        return Environment(bathymetry=200.0,
+                           ssp=list(zip(z, 1500.0 + 0.01 * z)), bottom=self.BOT)
+
+    def test_at_the_limit_still_writes(self):
+        # The discriminating counterpart: 20001 is legal and must not be
+        # refused. Off-by-one here would reject a valid environment.
+        buf = io.StringIO()
+        write_ssp_section(buf, self._env(20001), 200.0)
+        assert buf.getvalue()
+
+    @pytest.mark.parametrize('n', [20002, 25000])
+    def test_over_the_limit_is_refused_with_the_reason(self, n):
+        with pytest.raises(ConfigurationError, match='sspMod.f90:11'):
+            write_ssp_section(io.StringIO(), self._env(n), 200.0)
+
+    def test_bellhop_is_untouched(self):
+        # Bellhop has its own reader and its own 100001 limit, so the guard
+        # must not reach its writer.
+        from uacpy.io.bellhop_writer import write_bellhop_env_file
+        import inspect
+        assert 'reject_oversized_at_ssp' not in inspect.getsource(
+            write_bellhop_env_file)

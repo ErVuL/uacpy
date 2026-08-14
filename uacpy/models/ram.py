@@ -220,6 +220,11 @@ def _interp_to_receiver_grid(src_depths, src_ranges, values,
     return _one(values)
 
 
+# Cap on profile sections added so a layered elastic seabed follows sloping
+# bathymetry under rams0.5. Each section costs six blocks in the deck.
+MAX_BATHY_SECTIONS = 64
+
+
 class RAM(PropagationModel):
     """
     RAM - Range-dependent Acoustic Model (Parabolic Equation), multi-backend.
@@ -780,8 +785,22 @@ class RAM(PropagationModel):
         if len(freqs) == 1:
             Q = 2.0 if self.Q is None else float(self.Q)
             T = 10.0 if self.T is None else float(self.T)
-            self._broadband_frequencies(float(freqs[0]), Q, T)
-            return float(freqs[0]), Q, T
+            fc = float(freqs[0])
+            frq = self._broadband_frequencies(fc, Q, T)
+            if self.Q is None or self.T is None:
+                warnings.warn(
+                    f"RAM BROADBAND: a single source frequency does not define "
+                    f"a band, and mpiramS / Collins march an internal "
+                    f"(fc, Q, T) sweep. fc={fc:g} Hz was given Q={Q:g} "
+                    f"({'pinned' if self.Q is not None else 'default'}) and "
+                    f"T={T:g} s "
+                    f"({'pinned' if self.T is not None else 'default'}), i.e. "
+                    f"{np.size(frq)} bins over "
+                    f"{float(np.min(frq)):.4g}-{float(np.max(frq)):.4g} Hz "
+                    f"(df = 1/T = {1.0 / T:.4g} Hz).",
+                    UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+                )
+            return fc, Q, T
 
         f_min, f_max = float(freqs[0]), float(freqs[-1])
         if f_max <= f_min:
@@ -2656,6 +2675,17 @@ class RAM(PropagationModel):
             breaks.update(float(r) for r in b.ranges)
         if env.has_range_dependent_ssp:
             breaks.update(float(r) for r in env.ssp.ranges)
+        # rams0.5 reads the bottom arrays at absolute depth indices
+        # (``rams0.5.f:490-516``, ``do 6 i=iz+1,ib+2`` reading ``lamb(i)``),
+        # so a layered elastic column stays where the first section put it
+        # and stops following the seafloor. ramgeo/ramsurf re-anchor at the
+        # local seafloor in ``matrc`` (``ramgeo1.5.f:262-268``, ``ii=1 …
+        # ii=ii+1``) and need no extra sections. A half-space column is
+        # immune either way — ``from_halfspace(synthesize=True)`` gives every
+        # profile point the same value.
+        if (not seafloor_relative and b.is_layered
+                and env.bathymetry.is_range_dependent):
+            breaks.update(self._bathy_anchor_ranges(env, b))
         ranges = sorted(breaks)
 
         absorbing_width = (
@@ -2701,6 +2731,42 @@ class RAM(PropagationModel):
             segments.append(seg)
         return segments
 
+    @staticmethod
+    def _bathy_anchor_ranges(env, bottom) -> list:
+        """Ranges at which to re-anchor an absolute-depth bottom profile.
+
+        Sections are emitted so the seafloor never moves by more than half the
+        thinnest sediment layer between two of them — the bound at which the
+        layer would start to slide off its own interval. The bathymetry's own
+        control points are not enough: a two-point linear slope has none in
+        between, and that is exactly where the layer detaches.
+        """
+        r_axis = np.atleast_1d(np.asarray(env.bathymetry.ranges, dtype=float))
+        r_end = float(np.max(r_axis))
+        if not r_end > 0.0:
+            return []
+        thicknesses = [
+            float(layer.thickness)
+            for r in r_axis
+            for layer in bottom.at(range=float(r)).layers
+            if float(layer.thickness) > 0.0
+        ]
+        if not thicknesses:
+            return []
+        tol = 0.5 * min(thicknesses)
+        probe = np.linspace(0.0, r_end, 1024)
+        floor = np.array([float(np.asarray(env.bathymetry.eval(range=float(r))).flat[0])
+                          for r in probe])
+        out, anchor = [], floor[0]
+        for r, z in zip(probe[1:], floor[1:]):
+            if abs(z - anchor) >= tol:
+                out.append(float(r))
+                anchor = z
+        if len(out) > MAX_BATHY_SECTIONS:
+            idx = np.linspace(0, len(out) - 1, MAX_BATHY_SECTIONS)
+            out = [out[int(round(i))] for i in idx]
+        return out
+
     def _ramp_absorbing_attenuation(self, pairs, z_sediment_base, z_bottom,
                                     absorbing_width):
         """Ramp a Collins attenuation block into the artificial absorbing layer.
@@ -2728,12 +2794,21 @@ class RAM(PropagationModel):
                     float(z_bottom) - float(absorbing_width))
         if not z_abs < float(z_bottom):
             return pairs
-        depths = np.array([d for d, _ in pairs], dtype=float)
-        values = np.array([v for _, v in pairs], dtype=float)
-        attn_local = float(np.interp(z_abs, depths, values))
+        # Keep every control point down to and including z_abs. A strict `<`
+        # drops the point that pins the deepest layer's value at its own base,
+        # which is exactly the point present when the ramp is clamped to the
+        # sediment base. The block carries duplicated abscissae at each layer
+        # interface, so the value entering the ramp is the last one *at or
+        # above* z_abs — the layer's, not the half-space's that np.interp
+        # would return from the right branch.
+        head = [p for p in pairs if p[0] <= z_abs]
+        attn_local = (head[-1][1] if head
+                      else float(np.interp(z_abs, [d for d, _ in pairs],
+                                           [v for _, v in pairs])))
+        if not head or head[-1][0] < z_abs:
+            head = head + [(z_abs, attn_local)]      # pin the ramp's start
         attn_floor = max(attn_local, float(self.absorbing_layer_attn))
-        return ([p for p in pairs if p[0] < z_abs]
-                + [(z_abs, attn_local), (float(z_bottom), attn_floor)])
+        return head + [(float(z_bottom), attn_floor)]
 
     # Settings that only the mpiramS backend consumes. When the dispatcher
     # picks rams0.5 / ramsurf1.5 and one of these has been overridden from
@@ -3372,7 +3447,7 @@ class RAM(PropagationModel):
             log_ranges[log_ranges <= 0.0] = dr
 
         # Convert the mpiramS .psif output to engineering travelling-
-        # wave pressure (see ``models/_pe_phase.py``). ``Field.tl``
+        # wave pressure (see ``models/_pe_phase.py``). ``Field.db``
         # only needs |p|, but downstream consumers that do coherent
         # integration get a meaningful phase.
         with np.errstate(divide='ignore', invalid='ignore'):

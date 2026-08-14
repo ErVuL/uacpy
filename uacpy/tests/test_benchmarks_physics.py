@@ -81,8 +81,8 @@ def test_constant_absorption_adds_the_expected_loss(model_name):
 
     src = uacpy.Source(depths=50.0, frequencies=f)
     rcv = uacpy.Receiver(depths=100.0, ranges=ranges)
-    tl0 = np.asarray(model_cls(verbose=False).run(env(None), src, rcv).tl).ravel()
-    tl1 = np.asarray(model_cls(verbose=False).run(env(value), src, rcv).tl).ravel()
+    tl0 = np.asarray(model_cls(verbose=False).run(env(None), src, rcv).db).ravel()
+    tl1 = np.asarray(model_cls(verbose=False).run(env(value), src, rcv).db).ravel()
     extra = tl1 - tl0
     predicted = ranges / (c / f) * value
 

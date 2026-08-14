@@ -42,6 +42,11 @@ def _oases_option_chars(options: str) -> set:
     return set(str(options)) - set(' \t\n')
 
 
+#: GETOPT reads the option record as FORMAT(40A1) in all four programs, so a
+#: letter past column 40 is discarded without a diagnostic.
+_OASES_OPTION_LINE_CHARS = 40
+
+
 def _write_oases_header(
     f: TextIO, env: Environment, options: str, fallback_title: str,
 ) -> None:
@@ -56,6 +61,18 @@ def _write_oases_header(
     :func:`_oases_option_chars`.
     """
     title = env.name if env.name else fallback_title
+    if len(str(options)) > _OASES_OPTION_LINE_CHARS:
+        raise ConfigurationError(
+            f"OASES option line is {len(str(options))} characters, over the "
+            f"{_OASES_OPTION_LINE_CHARS} GETOPT reads: its "
+            f"'READ(1,200) OPT / 200 FORMAT(40A1)' takes exactly 40 single "
+            f"characters and discards the rest of the record, so "
+            f"{str(options)[_OASES_OPTION_LINE_CHARS:]!r} would never reach "
+            f"the option scan — and unlike an unknown letter it produces no "
+            f"'UNKNOWN OPTION' diagnostic.",
+            remediation="Drop options, or remove the spaces between letters "
+                        "(the record is 40 single characters, so whitespace "
+                        "in it is insignificant).")
     f.write(f"{title}\n")
     f.write(f"{options}\n")
 

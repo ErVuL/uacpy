@@ -1,3 +1,5 @@
+import warnings
+import datetime as _dt
 """Tests for the offline local-cache backend (uacpy.data._cache + readers).
 
 Builds a synthetic ``$UACPY_DATA_CACHE`` (tiny GEBCO/WOA23 NetCDF + sediment
@@ -549,3 +551,68 @@ def test_invalidate_grids_empties_every_registered_memo():
     _cache.invalidate_grids()
     assert all(not m for m in memos)
     assert sentinel.closed
+
+
+class TestParseDateUsesUTC:
+    """Every dataset the date feeds — WOA23, NSIDC, Copernicus — is indexed in
+    UTC, and the **month** selects the climatology slice. Taking the local
+    calendar date picked the wrong month either side of midnight UTC:
+    ``2024-01-01T01:00+05:00`` is 2023-12-31 UTC (December, not January) and
+    ``2024-06-30T22:00-06:00`` is 2024-07-01 UTC (July, not June)."""
+
+    @pytest.mark.parametrize('value,expected', [
+        (_dt.datetime(2024, 1, 1, 1, 0,
+                      tzinfo=_dt.timezone(_dt.timedelta(hours=5))),
+         _dt.date(2023, 12, 31)),
+        (_dt.datetime(2024, 6, 30, 22, 0,
+                      tzinfo=_dt.timezone(_dt.timedelta(hours=-6))),
+         _dt.date(2024, 7, 1)),
+    ])
+    def test_tz_aware_datetime_resolves_in_utc(self, value, expected):
+        from uacpy.data._time import parse_date
+        assert parse_date(value) == expected
+
+    def test_tz_aware_iso_string_resolves_in_utc(self):
+        from uacpy.data._time import parse_date
+        assert parse_date('2024-01-01T01:00:00+05:00') == _dt.date(2023, 12, 31)
+
+    @pytest.mark.parametrize('value,expected', [
+        ('2024-01-01', _dt.date(2024, 1, 1)),
+        (_dt.date(2024, 1, 1), _dt.date(2024, 1, 1)),
+        (_dt.datetime(2024, 1, 1, 1, 0), _dt.date(2024, 1, 1)),
+    ])
+    def test_naive_and_plain_dates_are_unchanged(self, value, expected):
+        # The discriminating counterpart: a naive value has no offset to
+        # apply and must not move.
+        from uacpy.data._time import parse_date
+        assert parse_date(value) == expected
+
+
+class TestPelagicIsDeepSeaOnly:
+    """Both facies this model returns are open-ocean: the siliceous belt and
+    the carbonate compensation depth. The latitude test fires first and
+    returns unconditionally, so an 80 m shelf point at 60 deg came back as
+    diatom ooze (phi 9.0, c 1494.9, rho 1.48) — identical to a 4800 m abyssal
+    point — from a function whose own docstring says "deep-sea". It is the
+    last fallback in the 'auto' chain and documented as never failing, so it
+    still returns a value; it just no longer does so silently."""
+
+    @pytest.mark.parametrize('lat,depth', [(60.0, 80.0), (30.0, 80.0),
+                                           (-65.0, 120.0)])
+    def test_shelf_depth_warns(self, lat, depth):
+        from uacpy.data.pelagic import pelagic_lithology
+        with pytest.warns(UserWarning, match='shelf break'):
+            pelagic_lithology(depth, lat)
+
+    @pytest.mark.parametrize('lat,depth,expected', [
+        (60.0, 4800.0, 'diatom ooze'),
+        (30.0, 5000.0, 'pelagic clay'),
+        (30.0, 1000.0, 'calcareous ooze'),
+    ])
+    def test_deep_sea_is_unchanged_and_silent(self, lat, depth, expected):
+        # The discriminating counterpart: the model's own domain must keep
+        # working, unchanged and without noise.
+        from uacpy.data.pelagic import pelagic_lithology
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            assert pelagic_lithology(depth, lat) == expected

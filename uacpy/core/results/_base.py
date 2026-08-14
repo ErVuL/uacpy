@@ -14,7 +14,7 @@ from uacpy.core.constants import PRESSURE_FLOOR
 def _complex_to_db(data: np.ndarray) -> np.ndarray:
     """``-20·log10(|data|)`` with ``|data|`` clamped to :data:`PRESSURE_FLOOR`.
 
-    Canonical TL conversion used by :attr:`Field.tl` and the metrics in
+    Canonical TL conversion used by :attr:`Field.db` and the metrics in
     :mod:`uacpy.core.metrics`. Preserves shape — no squeeze. The clamp caps
     an exactly-zero sample (a cell no energy reached) at 600 dB rather than
     ``+inf``, keeping the array finite for plotting and reductions.

@@ -59,33 +59,44 @@ ResultStack[Field](n_slabs=3, source_depth=[15.0, 50.0, 85.0])
 
 ---
 
-## 2. `Field` — one container whose meaning is derived
+## 2. `Field` — one container described on three axes
 
 There is exactly one gridded result class. Transmission loss, complex
 pressure, a broadband transfer function and a time series are **not** four
-types: they are four states of `Field`, and `.kind` reads that state off the
-data rather than off a flag someone set.
+types: they are one class described on three independent axes, each derived
+from the data rather than read off a flag someone set.
 
+| axis | question it answers | ask it when you need |
+|---|---|---|
+| `.kind` | *what* is this? | to know whether comparing two fields means anything |
+| `.unit` | what is it *measured in*? | to know which direction is louder |
+| `.dtype` | how is it *stored*? | to know whether there is phase to work with |
+
+```python
+>>> tl
+Field(kind='pressure', unit='dB', model='Bellhop', f=200 Hz, axes=(depth, range))
 ```
-.kind  ←  ( dtype of .data ,  keys of .coords )
-```
 
-| `.data` dtype | `.coords` contains | `.kind` | Physical meaning |
-|---|---|---|---|
-| complex | a `frequency` axis | `'transfer_function'` | `H(f)` |
-| real | a `time` axis | `'time_series'` | `p(t)` |
-| complex | neither | `'pressure'` | complex pressure `p` |
-| real | neither | `'tl'` | transmission loss, dB |
+`.kind` is `'pressure'` unless a model tags something else — reverberation
+level, for instance. Transmission loss is deliberately **not** its own kind:
+`-20·log10|p|` is the same pressure field written in dB, and that difference
+is the `.unit` axis's job. The **domain** is not an axis either; it is already
+in `.coords`, as a `time` or `frequency` entry.
 
-The rule is evaluated **in that order**, which settles the two mixed cases:
-a *real* field with a frequency axis is `'tl'` (a dB spectrum, not a transfer
-function — it has no phase to invert), and a *complex* field with a time axis
-is `'pressure'`.
+| `.data` dtype | `.coords` contains | `.kind` | `.unit` | Physical meaning |
+|---|---|---|---|---|
+| complex | a `frequency` axis | `'pressure'` | `'Pa'` | `H(f)` |
+| real | a `time` axis | `'pressure'` | `'Pa'` | `p(t)` |
+| complex | neither | `'pressure'` | `'Pa'` | complex pressure `p` |
+| real | neither | `'pressure'` | `'dB'` | transmission loss, dB |
+
+Real data alone does not mean dB — a time trace is linear pressure, which is
+why `.unit` consults the axes too.
 
 Nothing about dimensionality enters into it. `tl.at(depth=20)` is a 1-D range
-cut and still `'tl'`; `tl.max()` is a scalar and still `'tl'`.
+cut and still dB; `tl.max()` is a scalar and still dB.
 
-![One Field, four kinds](figures/results_field_kinds.png)
+![One Field, four states](figures/results_field_kinds.png)
 
 All four panels above are the same class:
 
@@ -102,31 +113,73 @@ H = Bellhop(n_beams=3000).run(env, source_bb, point,
 spectrum = H.isel(depth=0, range=0)
 trace = H.to_time_trace()
 
-pressure.to_tl().plot(env=env)          # real    + {depth, range} → 'tl'
-pressure.plot(env=env, value='phase')   # complex + {depth, range} → 'pressure'
-spectrum.plot(value='mag_db')           # complex + {frequency}    → 'transfer_function'
-trace.plot()                            # real    + {time}         → 'time_series'
+pressure.to_db().plot(env=env)          # real    + {depth, range} → dB
+pressure.plot(env=env, value='phase')   # complex + {depth, range} → Pa
+spectrum.plot(value='mag_db')           # complex + {frequency}    → H(f)
+trace.plot()                            # real    + {time}         → p(t)
 ```
 
+### Why the axes are kept apart
+
+Collapsing them is not hypothetical — each collapse has produced a bug:
+
+- `Field.max` inferred dB-ness from the quantity. Introducing a reverberation
+  kind made it return the *quietest* cell of a dB grid instead of the loudest.
+- `compare_models` keyed on representation, so it refused a RAM TL field
+  against a Kraken complex one — the ordinary cross-model comparison, since
+  those are one quantity written two ways.
+- `replica_bank_from_field` asked for a quantity when what matched-field
+  processing actually needs is **phase**, i.e. the dtype. A real TL field
+  answers `kind='pressure'` and would have sailed past a kind-only guard.
+
+So: compare on `.kind`, decide loudness on `.unit`, and require phase on the
+dtype.
+
+### Adding a quantity
+
+Every quantity is registered once, in
+[`core/results/quantities.py`](../../uacpy/core/results/quantities.py), with
+the units it may carry and the label for each pairing:
+
+```python
+Quantity('reverberation', {'dB': 'Reverberation level (dB)'}),
+```
+
+A model then tags it — `metadata['kind'] = 'reverberation'` — and the label,
+the validation and the colour scale follow. An **unregistered** kind is
+refused when the `Field` is constructed rather than defaulting silently, since
+a typo'd tag otherwise resurfaces much later as a wrong colour scale or a
+wrong `.max()` direction with nothing pointing back at the model that set it.
+
+Colormaps are deliberately *not* in that registry — they are a rendering
+choice and live in `visualization/style.py`, which `core/` must not depend on.
+
+Two things it deliberately does not model: unit conversion, and a per-unit
+"which way is louder" flag. Transmission loss is the only inverted quantity in
+underwater acoustics, so one documented special case in `Field.max` beats a
+field that would read `+1` in every row but one.
+
 The consequence worth internalising: **operations that change the dtype or the
-axes change the kind**. `pressure.to_tl()` turns `'pressure'` into `'tl'`.
-`H.at(frequency=300)` drops the frequency axis and turns `'transfer_function'`
-into `'pressure'`. `H.to_time_trace()` produces `'time_series'`. You never
-declare any of it.
+axes change what the field is**. `pressure.to_db()` moves `Pa` to `dB`.
+`H.at(frequency=300)` drops the frequency axis. `H.to_time_trace()` returns to
+the time domain. You never declare any of it.
 
 ### Canonical layouts
 
 `data.shape` follows the insertion order of `coords`, and every uacpy producer
 uses the same order: `source_depth → depth → range → frequency` (or `time`).
 
-| `coords` | `.kind` | Produced by |
+| `coords` | `.unit` | Produced by |
 |---|---|---|
-| `{depth, range}`, complex | `'pressure'` | `COHERENT_TL` from every field model |
-| `{depth, range}`, real | `'tl'` | Kraken `INCOHERENT_TL`, OAST `COHERENT_TL`, any `.to_tl()` |
-| `{depth, range, frequency}` | `'transfer_function'` | `BROADBAND` |
-| `{depth, range, time}` | `'time_series'` | `TIME_SERIES` (natively from [SPARC](../models/sparc.md)) |
-| `{time}` | `'time_series'` | `to_time_trace()` on one cell |
-| `{source_depth, depth, range}` | `'pressure'` | a replica bank for [matched-field processing](sonar.md) |
+| `{depth, range}`, complex | `Pa` | `COHERENT_TL` from every field model |
+| `{depth, range}`, real | `dB` | Kraken `INCOHERENT_TL`, OAST `COHERENT_TL`, any `.to_db()` |
+| `{depth, range, frequency}` | `Pa` | `BROADBAND` |
+| `{depth, range, time}` | `Pa` | `TIME_SERIES` (natively from [SPARC](../models/sparc.md)) |
+| `{time}` | `Pa` | `to_time_trace()` on one cell |
+| `{source_depth, depth, range}` | `Pa` | a replica bank for [matched-field processing](sonar.md) |
+
+Every row is `kind='pressure'`; a model producing another quantity (OASS
+reverberation) tags its own `.kind`.
 
 Depths and ranges are **metres** throughout; kilometres appear only on plot
 axes. See [units and conventions](../README.md#conventions).
@@ -154,7 +207,7 @@ still a function of. `pinned` is the running record of where you are standing.
 ![Slicing a Field](figures/results_slicing.png)
 
 ```python
-tl = Bellhop(n_beams=3000).run(env, source, receiver).to_tl()
+tl = Bellhop(n_beams=3000).run(env, source, receiver).to_db()
 loudest = tl.max()
 
 tl.plot(env=env, source=source)     # coords = {depth, range}  → heatmap
@@ -169,7 +222,7 @@ and they are the honest answer to "what did I actually get?":
 ```python
 >>> cut = tl.at(depth=60.0)
 >>> cut
-Field(kind='tl', model='Bellhop', f=200 Hz, axes=(range))
+Field(kind='pressure', unit='dB', model='Bellhop', f=200 Hz, axes=(range))
 >>> cut.coords.keys()
 dict_keys(['range'])
 >>> cut.pinned
@@ -182,7 +235,7 @@ composes, and `pinned` accumulates:
 
 ```python
 >>> tl.at(depth=60.0).at(range=3000.0)
-Field(kind='tl', model='Bellhop', f=200 Hz, axes=(scalar))
+Field(kind='pressure', unit='dB', model='Bellhop', f=200 Hz, axes=(scalar))
 >>> _.pinned
 {'depth': 60.39393997192383, 'range': 2992.169}
 >>> _.data                       # 0-D array — a single number
@@ -232,16 +285,16 @@ None of these mutate the field; each returns a fresh array or a fresh `Field`.
 
 | Accessor | Returns | Notes |
 |---|---|---|
-| `.tl` | ndarray, dB | `-20·log10\|data\|` for complex data; a **read-only view** when data is already dB. Raises for `'time_series'`. |
+| `.db` | ndarray, dB | `-20·log10\|data\|` for complex data; a **read-only view** when data is already dB. Raises for a time-domain field. |
 | `.p` | ndarray, complex | read-only view; raises when data is real (the phase is gone) |
 | `.magnitude` | ndarray | `\|data\|`, complex only |
 | `.phase` | ndarray, radians | `angle(data)`, complex only |
-| `.to_tl()` | `Field` | the dB counterpart of this field; a no-op when already real |
+| `.to_db()` | `Field` | the dB counterpart of this field; a no-op when already real |
 | `.shape`, `.axes`, `.is_complex` | — | shape, axis names, dtype test |
 | `.depths`, `.ranges`, `.times` | ndarray or `None` | the coord vectors by name |
 | `.dt`, `.sample_rate` | float | time-axis spacing; `0.0` when not time-resolved |
 
-`.tl` and `.p` hand back read-only views on purpose: the array *is* the
+`.db` and `.p` hand back read-only views on purpose: the array *is* the
 result's payload, and `p = field.p; p *= 2` would otherwise silently corrupt
 it. Copy first if you need to modify.
 
@@ -288,10 +341,10 @@ validates that at construction rather than letting a mismatched bundle through.
 | `stack.isel(source_depth=1)` | the slab at a position |
 | `for depth, slab in stack:` | `(coordinate, slab)` pairs |
 | `len(stack)`, `stack.n_slabs` | slab count |
-| `stack.tl` | one dense array, shape `(n_slabs, *slab.tl.shape)` |
+| `stack.db` | one dense array, shape `(n_slabs, *slab.db.shape)` |
 | `stack.model`, `.backend`, `.frequencies`, `.source_depths` | the identity every slab agrees on |
 
-`stack.tl` exists so generic code can read `result.tl` whether one or many
+`stack.db` exists so generic code can read `result.db` whether one or many
 source depths were asked for. Everything else — `Rays`, `Arrivals` — stacks the
 same way, and `RunMode.RAYS` / `ARRIVALS` with several source depths gives you
 `ResultStack[Rays]` / `ResultStack[Arrivals]`. The exception is Bellhop's own
@@ -549,10 +602,10 @@ sharp interference nulls into something that never existed.
 `coords` and 0-D `data`; read `.data` and `.pinned`, do not try to plot it.
 
 **An incoherent field has no phase, whatever its dtype says.** Kraken's
-`INCOHERENT_TL` and OAST's `COHERENT_TL` return `kind='tl'` — real dB, and no
+`INCOHERENT_TL` and OAST's `COHERENT_TL` return `unit='dB'` — real dB, and no
 path to time-series synthesis. Bellhop writes its incoherent sum into the same
-complex `.shd` container, so `.kind` stays `'pressure'` with an **identically
-zero** imaginary part. The phase is meaningless in both cases; only `.kind`
+complex `.shd` container, so it stays complex with an **identically zero**
+imaginary part. The phase is meaningless in both cases; only the dtype
 differs.
 
 **No-data cells are `NaN`, not zero.** Where no ray reached, TL is `NaN`.
@@ -566,9 +619,9 @@ slice. Keep the parent if you need it.
 **A synthesised record is `1/Δf` long.** More `nfft` does not buy more time; a
 finer frequency grid does, at the cost of more model runs.
 
-**`.p` — and `.tl` on an already-real field — hand back read-only views.**
+**`.p` — and `.db` on an already-real field — hand back read-only views.**
 They look at the result's own buffer, so numpy refuses in-place edits rather
-than let you corrupt it. Copy first. (`.tl` on complex data computes a fresh
+than let you corrupt it. Copy first. (`.db` on complex data computes a fresh
 array, which is writable; do not rely on the difference.)
 
 ---

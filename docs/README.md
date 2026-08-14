@@ -70,7 +70,7 @@ are choosing a model.
 
 ### Working with what comes back
 - **[Results](guide/results.md)** — `Field`, `Rays`, `Modes` and friends; how
-  `Field.kind` is *derived* rather than declared, and how `.at` / `.isel` /
+  `Field.kind` / `.unit` / `.dtype` describe one container, and how `.at` / `.isel` /
   `.max` slice an axis into `.pinned`.
 - **[Plotting](guide/plotting.md)** — the `.plot()` convention, `plot_field`'s
   three render branches, overlays and composition.

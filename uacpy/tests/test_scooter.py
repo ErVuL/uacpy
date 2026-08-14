@@ -176,11 +176,11 @@ class TestZeroReceiverRange:
         env, source = self._env(), self._source()
         with pytest.warns(UserWarning, match="r = 0"):
             scooter_tl = np.asarray(
-                Scooter(verbose=False).run(env, source, self._receiver()).tl)
+                Scooter(verbose=False).run(env, source, self._receiver()).db)
         with pytest.warns(UserWarning, match="r = 0"):
             kraken_tl = np.asarray(
                 Kraken(verbose=False).compute_tl(
-                    env, source, self._receiver()).tl)
+                    env, source, self._receiver()).db)
 
         assert np.all(np.isnan(scooter_tl[:, 0]))
         assert np.all(np.isnan(kraken_tl[:, 0]))

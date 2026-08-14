@@ -41,9 +41,16 @@ def build_francois_garrison(
         Seawater pH (default 8.1). Supply a measured value where available.
     reference_depth : float, optional
         Depth (m) at which the nominal T/S row is taken. Default ``None``
-        selects the shallowest sample (surface). The Acoustics-Toolbox
-        formula re-evaluates per depth at run time; this only sets the
-        single-row nominal.
+        selects the **mid-depth** of the supplied column.
+
+        The models receive a single T/S row and re-evaluate the formula in
+        **depth only**, so this row's temperature governs absorption for the
+        whole column. Taking it at the surface therefore carried the warmest
+        water down the entire profile: on a mid-latitude column (22 C surface,
+        4 C at 2 km) that understated absorption by 34 % at 10 kHz and 20 % at
+        1 kHz against a mid-column reference. The mid-depth row is the
+        representative choice for a stratified profile; pass an explicit
+        value to pin it elsewhere.
 
     Returns
     -------
@@ -57,7 +64,10 @@ def build_francois_garrison(
             "build_francois_garrison: depths, temperature and salinity must be "
             f"non-empty and equal length; got {z.size}, {t.size}, {s.size}."
         )
-    ref = z[0] if reference_depth is None else float(reference_depth)
+    # Mid-depth, not z[0]: the single row this picks sets the temperature
+    # for the entire column (the models vary only depth).
+    ref = (0.5 * (float(z.min()) + float(z.max()))
+           if reference_depth is None else float(reference_depth))
     i = int(np.argmin(np.abs(z - ref)))
     return FrancoisGarrison(
         temperature_c=float(t[i]),

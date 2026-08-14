@@ -96,7 +96,7 @@ class TestGridAlignment:
 
 
 class TestTLMetricsUnits:
-    """Metrics pull TL via :attr:`Field.tl`, so a complex-pressure field
+    """Metrics pull TL via :attr:`Field.db`, so a complex-pressure field
     and an equivalent real-dB field round-trip."""
 
     def _pair(self, *, both_complex=False):

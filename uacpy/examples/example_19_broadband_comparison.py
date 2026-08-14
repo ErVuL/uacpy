@@ -384,7 +384,7 @@ def main():
         # cell so what's left is a 1-D vector over depth.
         depth_cut = result.at(
             frequency=source.frequencies[0], range=target_range,
-        ).to_tl().tl
+        ).to_db().db
         ax.plot(np.asarray(depth_cut).ravel(), result.depths,
                 label=name, linewidth=1.5)
 
@@ -574,13 +574,13 @@ def main():
 
     print("\nModels with TIME_SERIES support:")
     print("  Bellhop     - arrivals → H(f) via Fourier synthesis, or delay-and-sum")
-    print("  RAM         - native broadband PE (mpiramS/ramgeo/ramsurf1.5), transfer_function")
-    print("  Scooter     - multi-freq FFP (native freq loop), returns transfer_function")
-    print("  Kraken - multi-freq normal modes (Python loop), returns transfer_function")
-    print("  SPARC       - time-marched FFP (native time domain), returns time_series")
+    print("  RAM         - native broadband PE (mpiramS/ramgeo/ramsurf1.5), H(f)")
+    print("  Scooter     - multi-freq FFP (native freq loop), returns H(f)")
+    print("  Kraken - multi-freq normal modes (Python loop), returns H(f)")
+    print("  SPARC       - time-marched FFP (native time domain), returns p(t)")
     print("  OASP        - OASES transient (pulse) module: wavenumber integration /")
     print("                global matrix, NOT a parabolic equation. Returns")
-    print("                transfer_function.")
+    print("                H(f).")
     print("\nSeabed: every model above runs the same half-space")
     print(f"  (cp={pekeris_bottom.sound_speed:.0f} m/s, rho={pekeris_bottom.density:.1f},")
     print(f"   alpha={pekeris_bottom.attenuation:.1f} dB/wavelength)")

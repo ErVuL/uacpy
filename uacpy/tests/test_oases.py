@@ -4,8 +4,15 @@ The OASES Fortran is vendored read-only; everything here exercises uacpy's
 Python wrapper against what OASES actually reads.
 """
 
+import warnings
+
 import numpy as np
 import pytest
+
+import uacpy
+from uacpy.core.exceptions import (
+    ConfigurationError, UnsupportedFeatureError,
+)
 
 
 class _FakeProc:
@@ -67,9 +74,9 @@ class TestOasesKeepsTheFullSSP:
                              ranges=np.linspace(1000.0, 8000.0, 15))
         with _w.catch_warnings():
             _w.simplefilter('ignore')
-            k = np.asarray(uacpy.Kraken(timeout=600).run(env, src, rcv).tl)
+            k = np.asarray(uacpy.Kraken(timeout=600).run(env, src, rcv).db)
             o = np.asarray(uacpy.OASES.for_mode(RunMode.COHERENT_TL)
-                           .run(env, src, rcv).tl)
+                           .run(env, src, rcv).db)
         d = np.abs(k - o)
         # Median, not max: a modal sum and a wavenumber integral put the
         # interference nulls of a ducted profile at slightly different ranges,
@@ -211,7 +218,7 @@ def test_oast_short_range_run_returns_a_field_not_nan():
         tl = np.asarray(uacpy.OASES.for_mode(RunMode.COHERENT_TL).run(
             env, uacpy.Source(depths=50.0, frequencies=500.0),
             uacpy.Receiver(depths=np.linspace(10.0, 90.0, 9),
-                           ranges=np.linspace(10.0, 40.0, 20))).tl)
+                           ranges=np.linspace(10.0, 40.0, 20))).db)
     assert np.isfinite(tl).any(), "entire short-range TL field is NaN"
     finite = tl[np.isfinite(tl)]
     assert finite.min() > 0.0 and finite.max() < 200.0
@@ -391,3 +398,186 @@ class TestStaleOutputsAreCleared:
         from uacpy.models.oases import OAST, OASN, OASR, OASP
         for cls in (OAST, OASN, OASR, OASP):
             assert cls._OUTPUT_SUFFIXES, f'{cls.__name__} declares no outputs'
+
+
+class TestContourOffsetUnderAutomaticSampling:
+    """``unoast31.f:429`` sets ``OFFDB=0E0`` inside the ``NWVNOin < 0``
+    branch (``unoasp22.f:323`` for OASP), so the binary discards a
+    user-supplied contour offset and prints "THE DEFAULT CONTOUR OFFSET IS
+    APPLIED". Since ``nw_samples=-1`` is uacpy's own default, a documented
+    constructor argument silently had no effect in the default configuration.
+    The manual does not say so — ``oast.tex:547-550`` names only IC1/IC2 —
+    which is why the warning has to come from uacpy."""
+
+    @pytest.mark.parametrize('cls_name', ['OAST', 'OASP'])
+    def test_offset_with_automatic_sampling_warns(self, cls_name):
+        cls = getattr(uacpy, cls_name)
+        with pytest.warns(UserWarning, match='automatic wavenumber sampling'):
+            cls(integration_offset=2.0)
+
+    @pytest.mark.parametrize('cls_name', ['OAST', 'OASP'])
+    @pytest.mark.parametrize('kwargs', [
+        {'integration_offset': 2.0, 'nw_samples': 4096},   # offset is honoured
+        {'nw_samples': -1},                                # no offset to lose
+    ])
+    def test_no_warning_when_the_offset_reaches_the_kernel_or_is_unset(
+            self, cls_name, kwargs):
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            getattr(uacpy, cls_name)(**kwargs)
+
+    def test_oasn_is_not_affected(self):
+        # unoasn22.f:283 tests OFFDBIN, which its automatic branch never
+        # touches, so OASN keeps the user's offset and must stay silent.
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            uacpy.OASN(integration_offset=2.0)
+
+
+class TestOASRShearReflectionTypesAreRefused:
+    """OASR reflects off the seabed, so the incident medium is the water
+    column — a fluid, which carries no SV wave. `oasr.tex:143-145` defines
+    option 'S' as the P-SV reflection coefficient, which is therefore
+    identically zero for every environment uacpy can express: OASES writes a
+    column of zeros to the .rco and uacpy returned it as a result. 'P-Slow'
+    is the Biot slow wave and needs a poro-elastic medium no carrier has."""
+
+    @pytest.mark.parametrize('reflection_type', ['P-SV', 'P-Slow'])
+    def test_zero_valued_reflection_types_raise(self, reflection_type):
+        with pytest.raises(UnsupportedFeatureError, match='zeros'):
+            uacpy.OASR(reflection_type=reflection_type)
+
+    @pytest.mark.parametrize('reflection_type', [None, 'P-P', 'transmission'])
+    def test_usable_reflection_types_are_untouched(self, reflection_type):
+        # The discriminating half — measured max|R| 0.999947 (P-P) and
+        # 1.273706 (transmission); the guard must not reach them.
+        kwargs = ({} if reflection_type is None
+                  else {'reflection_type': reflection_type})
+        uacpy.OASR(**kwargs)
+
+
+class TestOASPFrequencyGridSubstitution:
+    """OASP is a pulse model: its frequency axis is the FFT ladder implied by
+    the time window, not the bins the caller names. Asking for 3 returned 820
+    (via ``run(frequencies=)``) or 2047 (via ``Source``) with no warning,
+    while Kraken on the identical call returns exactly 3 — so a caller who
+    has used one has no reason to expect the other."""
+
+    @staticmethod
+    def _env():
+        return uacpy.Environment(
+            bathymetry=100.0, ssp=1500.0,
+            bottom=uacpy.BoundaryProperties(
+                acoustic_type='half-space', sound_speed=1800.0,
+                density=1.8, attenuation=0.5))
+
+    def test_run_frequencies_substitution_warns(self):
+        with pytest.warns(UserWarning, match='FFT ladder'):
+            uacpy.OASP().run(
+                self._env(), uacpy.Source(depths=25.0, frequencies=200.0),
+                uacpy.Receiver(depths=[50.0], ranges=[1000.0]),
+                run_mode=uacpy.RunMode.BROADBAND, frequencies=[150., 200., 250.])
+
+    def test_source_frequencies_substitution_also_warns(self):
+        # A multi-element Source.frequencies names bins just as explicitly.
+        with pytest.warns(UserWarning, match='FFT ladder'):
+            uacpy.OASP().run(
+                self._env(),
+                uacpy.Source(depths=25.0, frequencies=[150., 200., 250.]),
+                uacpy.Receiver(depths=[50.0], ranges=[1000.0]),
+                run_mode=uacpy.RunMode.BROADBAND)
+
+    def test_single_frequency_names_nothing_and_is_silent(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', UserWarning)
+            warnings.filterwarnings('ignore', message='.*not redistributable.*')
+            warnings.filterwarnings('ignore', message='.*licence.*')
+            uacpy.OASP().run(
+                self._env(), uacpy.Source(depths=25.0, frequencies=200.0),
+                uacpy.Receiver(depths=[50.0], ranges=[1000.0]),
+                run_mode=uacpy.RunMode.BROADBAND)
+
+
+class TestOASRContourOptionIsLogSwept:
+    """`oasr.tex:135` documents option 'C' as a *plot* option ("Loss contours
+    plotted in frequency and grazing angle"), but `unoasr21.f:123-125`
+    computes F1LOG/DFLOG and `:243` evaluates the coefficients at
+    ``EXP(F1LOG + (JJ-1)*DFLOG)`` — it changes the frequencies the physics is
+    computed at. `oast.tex:200-203` confirms it from the other side, calling
+    'C' the way to get "consistent logarithmic sampling".
+
+    uacpy's equispacing check was therefore exactly **inverted** under 'C': a
+    linear request — the one silently regridded, 4 of 5 bins wrong — passed
+    without a word, while a correct log-spaced request was warned about and
+    told it had been resampled onto a linspace it was never put on."""
+
+    @staticmethod
+    def _env():
+        return uacpy.Environment(
+            bathymetry=100.0, ssp=1500.0,
+            bottom=uacpy.BoundaryProperties(
+                acoustic_type='half-space', sound_speed=1600.0,
+                density=1.8, attenuation=0.5))
+
+    def _run(self, options, freqs):
+        kwargs = {} if options is None else {'options': options}
+        return uacpy.OASR(**kwargs).run(
+            self._env(), uacpy.Source(depths=25.0, frequencies=freqs),
+            uacpy.Receiver(depths=[50.0], ranges=[1000.0]),
+            run_mode=uacpy.RunMode.REFLECTION)
+
+    def test_contour_option_with_a_linear_request_warns(self):
+        with pytest.warns(UserWarning, match='logarithmic'):
+            self._run('N T C', np.linspace(10.0, 10000.0, 5))
+
+    def test_contour_option_with_a_log_request_is_silent(self):
+        # The half that was previously warned about wrongly.
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', UserWarning)
+            warnings.filterwarnings('ignore', message='.*licence.*')
+            warnings.filterwarnings('ignore', message='.*redistributable.*')
+            self._run('N T C', np.geomspace(10.0, 10000.0, 5))
+
+    def test_without_the_option_a_linear_request_is_still_silent(self):
+        # The discriminating counterpart: the linear sweep is correct without
+        # 'C', so the new check must not reach it.
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', UserWarning)
+            warnings.filterwarnings('ignore', message='.*licence.*')
+            warnings.filterwarnings('ignore', message='.*redistributable.*')
+            self._run(None, np.linspace(10.0, 10000.0, 5))
+
+
+class TestOptionLineFitsGETOPT:
+    """`GETOPT` reads the option record as ``FORMAT(40A1)`` in all four
+    programs (``unoast31.f:978-979`` and siblings), so a letter in column 41
+    or beyond is discarded before the option scan — and unlike an unknown
+    letter it produces no ``UNKNOWN OPTION`` diagnostic. A dropped option
+    letter changes what the run computes, so this is not cosmetic the way the
+    title's 80-character `FORMAT(20A4)` truncation is."""
+
+    @staticmethod
+    def _env():
+        return uacpy.Environment(
+            bathymetry=100.0, ssp=1500.0,
+            bottom=uacpy.BoundaryProperties(
+                acoustic_type='half-space', sound_speed=1600.0,
+                density=1.8, attenuation=0.5))
+
+    def _write(self, options, tmp_path):
+        from uacpy.io.oases_writer import write_oast_input
+        write_oast_input(str(tmp_path / 't.dat'), self._env(),
+                         uacpy.Source(depths=25.0, frequencies=100.0),
+                         uacpy.Receiver(depths=[50.0], ranges=[1000.0, 2000.0]),
+                         options=options)
+
+    def test_an_over_length_option_line_is_refused(self, tmp_path):
+        with pytest.raises(ConfigurationError, match='40'):
+            self._write('N J T ' + 'Q ' * 25, tmp_path)
+
+    @pytest.mark.parametrize('options', ['N J T', 'N', 'A' * 40])
+    def test_a_fitting_option_line_still_writes(self, options, tmp_path):
+        # Exactly 40 is legal — the bound is inclusive, and an off-by-one here
+        # would refuse a deck GETOPT reads perfectly.
+        self._write(options, tmp_path)
+        assert (tmp_path / 't.dat').exists()

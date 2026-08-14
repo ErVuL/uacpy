@@ -1,3 +1,4 @@
+import warnings
 """
 Smoke tests for uacpy.acoustic_signal (uacpy.acoustic_signal).
 
@@ -535,3 +536,52 @@ class TestBandLimitedNoiseLandsInTheRequestedBand:
         from uacpy.core.exceptions import ConfigurationError
         with pytest.raises(ConfigurationError, match='not realisable'):
             make_bandlimited_noise(fc, bw, 0.5, fs)
+
+
+class TestDecidecadePartialBandsAreNaN:
+    """A band the supplied grid does not fully cover was returned as the
+    integral over the *covered part*, which is not that band's level —
+    measured 3.8 dB (first band) and 3.2 dB (last) off their own trend on a
+    flat PSD, and 5.5 dB low on the realistic ``psd() -> band_levels`` path.
+    The one warning the function emitted counted a different condition
+    (bands with <2 interior grid points), so it fired for bands that were
+    fine and stayed silent for the two that were wrong."""
+
+    @staticmethod
+    def _flat(fmin=1.0, fmax=25000.0, df=0.25):
+        f = np.arange(fmin, fmax, df)
+        return f, np.ones_like(f)
+
+    def test_fully_covered_bands_are_exact_and_partial_ones_are_nan(self):
+        from uacpy.acoustic_signal.bands import (decidecade_band_levels,
+                                                 decidecade_bands)
+        f, psd_flat = self._flat()
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            _, levels = decidecade_band_levels(psd_flat, f)
+        lo, _, hi = decidecade_bands(f.min(), f.max())
+        covered = (lo >= f.min()) & (hi <= f.max())
+        exact = 10.0 * np.log10((hi - lo) / 1e-6 ** 2)
+        # The discriminating half: the covered bands must stay exact, so the
+        # fix cannot have been "widen a tolerance".
+        assert np.nanmax(np.abs(levels[covered] - exact[covered])) < 1e-9
+        assert np.all(np.isnan(levels[~covered]))
+
+    def test_partial_bands_warn_and_name_the_support(self):
+        from uacpy.acoustic_signal.bands import decidecade_band_levels
+        f, psd_flat = self._flat()
+        with pytest.warns(UserWarning, match='extend past the supplied'):
+            decidecade_band_levels(psd_flat, f)
+
+    def test_arrays_stay_parallel_with_decidecade_bands(self):
+        # Shape contract: callers index the levels against a separately
+        # computed decidecade_bands() with one mask, so dropping unsupported
+        # bands would break them. nan keeps the arrays the same length.
+        from uacpy.acoustic_signal.bands import (decidecade_band_levels,
+                                                 decidecade_bands)
+        f, psd_flat = self._flat()
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            centres, levels = decidecade_band_levels(psd_flat, f)
+        lo, ctr, hi = decidecade_bands(f.min(), f.max())
+        assert centres.shape == levels.shape == ctr.shape

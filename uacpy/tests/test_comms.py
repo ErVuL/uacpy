@@ -4,6 +4,8 @@ Behavioral: BER vs AWGN theory, equalizer opens a closed eye, OFDM/FEC/DSSS
 round-trip, sparse channel estimation. Pure-Python; no model binary.
 """
 
+import warnings
+
 import numpy as np
 import pytest
 
@@ -193,8 +195,15 @@ class TestMultipathChannel:
         fs = 8000.0
         _, h = impulse_response([1.0], [0.7 / fs], fs, fractional=False)
         assert np.argmax(np.abs(h)) == 1
-        _, hf = impulse_response([1.0], [0.7 / fs], fs, fractional=True)
-        assert hf == pytest.approx([0.3, 0.7])
+        # fractional=True uses a windowed-sinc kernel, not a two-tap linear
+        # split: the latter is a frac-dependent lowpass (-3.0 dB at
+        # f/fs = 0.25 for frac = 0.5), so equal arrivals came back unequal.
+        # Placed clear of the array ends, where the kernel is not truncated.
+        _, hf = impulse_response([1.0], [100.7 / fs], fs, fractional=True,
+                                 n_samples=256)
+        assert hf.sum() == pytest.approx(1.0)
+        centroid = float(np.sum(np.arange(hf.size) * hf) / hf.sum())
+        assert centroid == pytest.approx(100.7, abs=0.01)
 
     @pytest.mark.parametrize("gains,delays", [([1.0, 0.5], [0.0]),
                                               ([1.0], [-1e-3])])
@@ -215,6 +224,54 @@ class TestFadingChannelConvention:
         # direct path: x itself; delayed path: taps[1, m]*x[m] shifted by 2
         expected = np.array([1.0, 2.0, 3.0 + 10.0, 40.0, 90.0], dtype=complex)
         assert np.allclose(y, expected)
+
+
+class TestFadingStatistics:
+    """``fading_taps`` must stay Rayleigh however few DFT bins the Doppler
+    band spans. Normalising each realisation by its own RMS pinned |H| to a
+    constant whenever the band collapsed to the DC bin, turning the channel
+    into a unit-modulus phase — a *perfect* channel returned where the
+    Rayleigh one was asked for, and the AWGN BER curve reported in its place."""
+
+    @staticmethod
+    def _stats(doppler_hz, seed, n=4096, fs=8000.0, n_taps=2000):
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            H = comms.fading_taps(n_taps, n, doppler_hz, fs,
+                                  rng=np.random.default_rng(seed))
+        return float(np.mean(np.abs(H) ** 2)), float(np.abs(H).std())
+
+    @pytest.mark.parametrize('doppler_hz', [0.5, 1.0, 1.9, 2.5, 10.0, 50.0])
+    @pytest.mark.parametrize('seed', [3, 7])
+    def test_envelope_is_rayleigh_at_every_doppler(self, doppler_hz, seed):
+        # fs/n = 1.953 Hz, so the first three cases retain the DC bin alone —
+        # exactly where the per-realisation normalisation used to give
+        # std|H| == 0.0000 (constant modulus). Rayleigh with unit mean power
+        # has std|H| = sqrt(1 - pi/4) = 0.4633.
+        #
+        # The bound is sized from the scatter across SEEDS, not across
+        # dopplers: below fs/n each tap is a single complex draw, so the
+        # estimator has one degree of freedom and ~5x the scatter of the
+        # many-bin case. Measured over 12 seeds, worst deviation is 0.021 in
+        # std and 0.037 in power at 0.5 Hz, against 0.0013 / 0.005 at 50 Hz.
+        # Sizing on the 50 Hz end (as a doppler-only sweep would) gives a
+        # bound the 0.5 Hz rows exceed on most seeds. These admit the measured
+        # spread with ~40 % margin and still exclude the pathology (std = 0)
+        # by 15x.
+        power, std = self._stats(doppler_hz, seed)
+        assert power == pytest.approx(1.0, abs=0.06)
+        assert std == pytest.approx(np.sqrt(1.0 - np.pi / 4.0), abs=0.03)
+
+    def test_unresolvable_doppler_warns(self):
+        # 0.5 Hz over a 4096-sample block at 8 kHz spans one bin: the process
+        # has too few degrees of freedom to realise the requested spread.
+        with pytest.warns(UserWarning, match='DFT bin'):
+            comms.fading_taps(4, 4096, 0.5, 8000.0, rng=np.random.default_rng(1))
+
+    def test_well_resolved_doppler_is_silent(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            comms.fading_taps(4, 4096, 50.0, 8000.0, rng=np.random.default_rng(1))
 
 
 class TestChannelEstimation:
@@ -421,6 +478,88 @@ class TestTransceiver:
         rx = comms.CommsReceiver("qpsk", code=code, equalizer=dfe, preamble=256)
         payload, ok = comms.unpack_frame(rx.receive_passband(rxsig, fs, fc, sps=sps))
         assert ok and payload == message
+
+
+class TestPassbandCarrierPlacement:
+    """``fc < sample_rate/2`` is not the physical constraint. The RRC band is
+    ``Rs*(1+rolloff)`` wide and its image sits at ``-2*fc``, so a carrier too
+    near either edge folds a sideband back onto the signal — silently, on a
+    noiseless loopback. Both ends of the link enforce it (Rule 6: the guard
+    belongs on the funnel, not at each call site)."""
+
+    FS, SPS, ROLLOFF = 48000.0, 8, 0.25       # Rs = 6 kHz, band = 7.5 kHz
+    BW = FS * (1.0 + ROLLOFF) / SPS
+    LO, HI = BW / 2.0, FS / 2.0 - BW / 2.0
+
+    def test_the_admissible_band_is_the_formula_not_four_numbers(self):
+        # Ties the cases below to Rs*(1+rolloff) rather than to hand-picked
+        # carriers, so changing sps/rolloff moves the test with the physics.
+        assert (self.LO, self.HI) == (3750.0, 20250.0)
+
+    @pytest.mark.parametrize('fc', [960.0, 3000.0, 22006.0, 23760.0])
+    def test_folding_carrier_is_refused_by_both_ends(self, fc):
+        # 3000 Hz is inside the guard's brickwall bound but was measured to
+        # round-trip at BER 0.0000, because an RRC skirt is not a brickwall.
+        # The guard is deliberately conservative; this pins that choice, so
+        # relaxing it later is a contract change, not a bug fix.
+        assert not self.LO < fc < self.HI
+        tx = comms.Transmitter("qpsk", preamble=64)
+        rx = comms.CommsReceiver("qpsk", preamble=64)
+        bits = np.random.default_rng(3).integers(0, 2, 400)
+        with pytest.raises(ConfigurationError, match='must lie in'):
+            tx.transmit_passband(bits, self.FS, fc, sps=self.SPS,
+                                 rolloff=self.ROLLOFF)
+        with pytest.raises(ConfigurationError, match='must lie in'):
+            rx.from_passband(np.zeros(4096), self.FS, fc, sps=self.SPS,
+                             rolloff=self.ROLLOFF)
+
+    @pytest.mark.parametrize('fc', [6000.0, 12000.0, 18000.0])
+    def test_interior_carrier_round_trips_exactly(self, fc):
+        # The discriminating half: an in-band carrier must still reach BER 0
+        # on a noiseless loopback, so the guard cannot be satisfied by simply
+        # refusing everything.
+        tx = comms.Transmitter("qpsk", preamble=64)
+        rx = comms.CommsReceiver("qpsk", preamble=64)
+        bits = np.random.default_rng(3).integers(0, 2, 4000)
+        pb = tx.transmit_passband(bits, self.FS, fc, sps=self.SPS,
+                                  rolloff=self.ROLLOFF)
+        out = rx.receive_passband(pb, self.FS, fc, sps=self.SPS,
+                                  rolloff=self.ROLLOFF)
+        n = min(out.size, bits.size)
+        assert np.mean(out[:n] != bits[:n]) == 0.0
+
+
+class TestUnsyncedReceiveIsAnnounced:
+    """Both receivers compute an explicit "no frame here" verdict and then
+    fall back to sample 0. The fallback is legitimate — a detector finding
+    nothing is a real outcome — but returning a full, same-dtype bit array
+    with no signal at all made a 43 %-BER decode indistinguishable from a
+    clean one. The verdict has to reach the caller."""
+
+    def test_undetected_preamble_warns_and_clean_decode_does_not(self):
+        tx = comms.Transmitter("qpsk", preamble=64)
+        rx = comms.CommsReceiver("qpsk", preamble=64)
+        bits = np.random.default_rng(4).integers(0, 2, 1200)
+        sym = tx.transmit(bits)
+
+        with warnings.catch_warnings():       # acquired: must stay silent
+            warnings.simplefilter('error')
+            clean = rx.receive(comms.awgn(sym, 20.0,
+                                          rng=np.random.default_rng(101)))
+        assert np.array_equal(clean[:bits.size], bits)
+
+        buried = comms.awgn(sym, -15.0, rng=np.random.default_rng(101))
+        assert comms.detect_preamble(buried, tx.preamble, threshold=0.4)[0] is None
+        with pytest.warns(UserWarning, match='preamble not detected'):
+            rx.receive(buried)
+
+    def test_unsynced_ofdm_frame_warns(self):
+        rx = comms.OFDMReceiver("qpsk", n_subcarriers=64, cp_len=8)
+        rng = np.random.default_rng(9)
+        noise = (rng.standard_normal(64 * 12) + 1j * rng.standard_normal(64 * 12))
+        assert comms.schmidl_cox_sync(noise, 64, 8)[0] is None
+        with pytest.warns(UserWarning, match='no preamble was found'):
+            rx.receive(noise)
 
 
 class TestOFDMModem:
@@ -727,3 +866,64 @@ class TestAgainstPublishedExpressions:
             assert code.size == 2 ** n - 1
             assert processing_gain_db(code) == pytest.approx(
                 10 * np.log10(code.size))
+
+
+class TestMSequencePrimitivity:
+    """A non-primitive tap set returns to the seed early, so the register
+    cycles a subset of its states. The output still has the right length,
+    dtype and +/-1 alphabet, and ``processing_gain_db`` still reports the full
+    ``10log10(N)`` — nothing looks wrong until a link budget is far out.
+    Measured off-peak autocorrelation: 1 for a real m-sequence, 11 for
+    ``[5,1]``, 31 for ``[5]``."""
+
+    @staticmethod
+    def _offpeak(s):
+        return int(max(abs(np.dot(s, np.roll(s, k))) for k in range(1, s.size)))
+
+    @pytest.mark.parametrize('n,taps', [(5, [5, 2]), (5, [5, 3]),
+                                        (6, [6, 1]), (7, [7, 6])])
+    def test_primitive_taps_give_a_real_m_sequence(self, n, taps):
+        s = comms.m_sequence(n, taps)
+        assert s.size == 2 ** n - 1
+        assert set(np.unique(s)) <= {-1, 1}
+        assert self._offpeak(s) == 1        # the defining property
+
+    @pytest.mark.parametrize('taps', [[5, 1], [5], [5, 4]])
+    def test_non_primitive_taps_raise(self, taps):
+        with pytest.raises(ConfigurationError, match='not primitive'):
+            comms.m_sequence(5, taps)
+
+    @pytest.mark.parametrize('taps', [[0, 2], [9], [2, 2]])
+    def test_malformed_tap_sets_raise(self, taps):
+        # tap 0 silently aliased to reg[-1] before; tap 9 raised an untyped
+        # IndexError; a repeated tap cancels itself leaving no feedback.
+        with pytest.raises(ConfigurationError):
+            comms.m_sequence(5, taps)
+
+
+class TestFramingReportsInsteadOfRaising:
+    """A corrupted length header is a *failed frame*, not a caller error — a
+    receiver cannot tell "corrupt" from "malformed" and should not have to.
+    It used to raise ``ConfigurationError: frame truncated (need 4294902280
+    bytes, have 520)``. The CRC now also covers the header: with the header
+    outside it, a corrupted length steers the slice the CRC is read from, so
+    the check could never see the error that caused it."""
+
+    MSG = b"uacpy framing round trip"
+
+    def test_clean_round_trip(self):
+        assert comms.unpack_frame(comms.pack_frame(self.MSG)) == (self.MSG, True)
+
+    def test_corrupt_length_header_is_reported_not_raised(self):
+        bits = comms.pack_frame(self.MSG).copy()
+        bits[3] ^= 1
+        assert comms.unpack_frame(bits) == (b"", False)
+
+    def test_corrupt_payload_fails_the_crc(self):
+        bits = comms.pack_frame(self.MSG).copy()
+        bits[100] ^= 1
+        _, ok = comms.unpack_frame(bits)
+        assert ok is False
+
+    def test_short_stream_is_reported_not_raised(self):
+        assert comms.unpack_frame(np.zeros(8, dtype=np.uint8)) == (b"", False)

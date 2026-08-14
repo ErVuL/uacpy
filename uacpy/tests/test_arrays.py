@@ -84,10 +84,29 @@ class TestBeamformers:
 
 
 class TestTaper:
-    def test_mean_normalised(self):
-        w = shading_taper(16, "hann")
+    """RMS normalisation, not unit mean. ``steering_vectors`` rows are
+    unit-norm, so a taper multiplied into one must preserve that; normalising
+    to unit *mean* scaled every power the taper touched by ``mean(w**2)`` —
+    +2.04 dB for Hann on 16 elements, in the direction that makes an array
+    look better than it is."""
+
+    @pytest.mark.parametrize("window", ["boxcar", "hann", "hamming",
+                                        ("chebwin", 30)])
+    def test_rms_normalised(self, window):
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            w = shading_taper(16, window)
         assert w.size == 16
-        assert np.mean(w) == pytest.approx(1.0)
+        assert np.mean(w ** 2) == pytest.approx(1.0)
+        # equivalently ||w|| = sqrt(N), which is what keeps e*w unit-norm
+        assert np.linalg.norm(w) == pytest.approx(4.0)
+
+    def test_boxcar_is_all_ones(self):
+        # The discriminating case: under unit-mean this was also all-ones, so
+        # it alone cannot tell the two normalisations apart — but under RMS it
+        # must stay all-ones, which pins the scale rather than just the shape.
+        assert np.allclose(shading_taper(16, "boxcar"), 1.0)
 
 
 @pytest.mark.parametrize("true_deg", [15.0, -30.0, 45.0])

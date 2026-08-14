@@ -114,7 +114,7 @@ def pade_order():
             tl = RAM(np_pade=order).run(env, source, line)
         dr.append(tl.metadata['dr'])
         axes[0].plot(np.asarray(line.ranges) / 1000.0,
-                     np.asarray(tl.tl, dtype=float).ravel(),
+                     np.asarray(tl.db, dtype=float).ravel(),
                      color=colour, linewidth=1.0,
                      label=f'np_pade={order} — dr={dr[-1]:.1f} m')
 

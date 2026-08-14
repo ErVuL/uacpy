@@ -361,9 +361,9 @@ goes further; [Bounce](bounce.md) gives you the reflection coefficient alone.
 from uacpy.models import Bellhop, Kraken
 
 line = uacpy.Receiver(depths=50.0, ranges=np.linspace(50.0, 5000.0, 400))
-reference = np.asarray(Scooter().run(env, source, line).tl, dtype=float).ravel()
+reference = np.asarray(Scooter().run(env, source, line).db, dtype=float).ravel()
 for model in (Kraken(), Bellhop(n_beams=3000)):
-    tl = np.asarray(model.run(env, source, line).tl, dtype=float).ravel()
+    tl = np.asarray(model.run(env, source, line).db, dtype=float).ravel()
     ...  # plot tl, and |tl - reference|
 ```
 

@@ -161,7 +161,7 @@ from uacpy.models import SPARC, RunMode
 
 | `RunMode` | Returns | What you get |
 |---|---|---|
-| `TIME_SERIES` | `Field` | real `p(depth, range, time)` — `Field.kind == 'time_series'` |
+| `TIME_SERIES` | `Field` | real `p(depth, range, time)` — `Field.unit == 'Pa'`, `time` axis |
 
 It is also the default, so `run_mode=` can be left off entirely. Ask for CW
 transmission loss and you get told where to go instead:
@@ -210,7 +210,7 @@ carries only `1/√r`, so `'R'` runs `√π` louder for the identical field. `'S
 normalises nothing at all: it writes the raw wavenumber-domain Green's function
 and uacpy transforms it in-tree, and *that* transform sits a further `−√(4π)`
 from `'R'`. uacpy scales `'D'` and `'S'` onto the `'R'` convention so that
-`Field.tl` means the same thing everywhere. That harmonisation is measured, not
+`Field.db` means the same thing everywhere. That harmonisation is measured, not
 derived, so `'D'` and `'S'` are **experimental**: trust their shapes, arrival
 times and relative structure; take decibels from `'R'` — and see
 [§7](#7-gotchas) for why even those are pulse-scaled rather than calibrated.

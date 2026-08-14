@@ -81,7 +81,7 @@ def phase_speed_window():
                      markersize=4, label=f'{label} — {modes.n_modes} modes')
         tl = model.run(env, source, line)
         axes[1].plot(np.asarray(line.ranges) / 1000.0,
-                     np.asarray(tl.tl, dtype=float).ravel(),
+                     np.asarray(tl.db, dtype=float).ravel(),
                      color=colour, linewidth=1.0, label=label)
 
     for c, name in ((c_water, f'min water speed ({c_water:.0f} m/s)'),

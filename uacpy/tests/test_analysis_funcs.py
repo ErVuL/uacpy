@@ -86,3 +86,43 @@ def test_ppsd_columns_are_densities_with_blank_bins_as_nan():
     first_moment = np.nansum(r.pdf * centres[:, None], axis=0) * r.binwidth_db
     band = (r.frequencies > 200) & (r.frequencies < 3500)
     assert np.abs(r.mean_db[band] - first_moment[band]).max() < r.binwidth_db
+
+
+class TestSELBandGridIsAnchoredAt1kHz:
+    """IEC 61260-1 anchors both band systems at 1 kHz — Pierce: "1, 10, 100,
+    1000, 10,000 Hz … are also standard 1/3-octave-band f_o's". Snapping the
+    ladder to the caller's ``fmin`` instead made the grid move with the
+    request: ``fmin=8.9125`` and ``fmin=10.0`` produced disjoint, interleaved
+    centres, and the nearest centre to 1 kHz was 1024 Hz (+2.4 %) or 912.3 Hz
+    (-8.8 %) depending on it. ``decidecade_bands`` in the same package already
+    anchors correctly; ``sel`` was the outlier."""
+
+    FS = 48000
+
+    def _centres(self, **kw):
+        y = np.zeros(self.FS)
+        return np.array([b[1] for b in sel(y, self.FS, **kw).bands])
+
+    @pytest.mark.parametrize('band_type', ['third_octave', 'octave'])
+    def test_one_kilohertz_is_a_band_centre(self, band_type):
+        assert np.isclose(self._centres(band_type=band_type), 1000.0).any()
+
+    def test_octave_ladder_is_not_powers_of_two(self):
+        # 1024 Hz was reported where a soundscape table expects 1000.
+        oc = self._centres(band_type='octave')
+        assert not np.isclose(oc, 1024.0).any()
+
+    @pytest.mark.parametrize('fmin', [10.0, 12.0, 20.0, 25.0])
+    def test_grids_nest_instead_of_interleaving(self, fmin):
+        # The discriminating property: changing fmin may drop bands off the
+        # bottom but must never shift the ladder. Before the fix these sets
+        # were disjoint from the default one.
+        base = self._centres()
+        got = self._centres(fmin=fmin)
+        assert np.isclose(got[:, None], base[None, :], rtol=1e-9).any(axis=1).all()
+
+    @pytest.mark.parametrize('fs', [2000, 8000, 48000])
+    def test_highest_band_stays_below_nyquist(self, fs):
+        y = np.zeros(fs)
+        highs = np.array([b[2] for b in sel(y, fs).bands])
+        assert highs.max() <= fs / 2

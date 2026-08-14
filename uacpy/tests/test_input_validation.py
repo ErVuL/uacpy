@@ -755,7 +755,7 @@ def test_receiver_type_line_is_rejected_not_silently_gridded(model_name):
         uacpy.Receiver(depths=d, ranges=r, receiver_type='line')
     # The documented workaround still works.
     tl = np.asarray(model.run(env, src,
-                              uacpy.Receiver(depths=d, ranges=r)).tl)
+                              uacpy.Receiver(depths=d, ranges=r)).db)
     i = np.arange(len(d))
     assert tl[i, i].shape == (3,)
 
@@ -982,5 +982,5 @@ class TestExtendToUsesTheReadersOwnEpsilon:
         src = uacpy.core.Source(depths=0.25 * depth, frequencies=200.0)
         rcv = uacpy.core.Receiver(depths=0.5 * depth, ranges=[1000.0, 2000.0])
         for model in (Kraken(verbose=False), Scooter(verbose=False)):
-            tl = np.asarray(model.run(env, src, rcv).tl)
+            tl = np.asarray(model.run(env, src, rcv).db)
             assert np.isfinite(tl).all(), f"{model.model_name} returned {tl}"

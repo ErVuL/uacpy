@@ -926,7 +926,7 @@ class TestCompareModelsSharesItsColourScale:
                      coords={'depth': d, 'range': r},
                      model='Synth', frequencies=100.0)
 
-    @pytest.mark.parametrize('value', ['mag', 'real', 'mag_db', 'tl'])
+    @pytest.mark.parametrize('value', ['mag', 'real', 'mag_db', 'db'])
     def test_every_value_shares_one_scale(self, value):
         from uacpy.visualization.plots.fields import compare_models
         fig, axes = compare_models([self._field(1.0 + 0j),

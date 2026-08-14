@@ -26,6 +26,8 @@ Schmidl & Cox (1997); Li, Stojanovic et al. (2007). Proakis & Salehi.
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 
 from uacpy.comms.coding import ConvCode
@@ -48,6 +50,32 @@ from uacpy.comms.phy import (
 )
 from uacpy.comms.sync import detect_preamble
 from uacpy.core.exceptions import ConfigurationError
+
+
+def _require_passband_fits(sample_rate, fc, sps, rolloff, where):
+    """Raise unless the RRC band sits clear of DC and of Nyquist at ``fc``.
+
+    The occupied bandwidth is ``Rs·(1+rolloff)`` for symbol rate
+    ``Rs = sample_rate/sps``. Synchronous demodulation needs the whole band
+    above DC and its image at ``-2·fc`` clear of it, so ``fc`` has to keep
+    half a bandwidth from both edges; ``fc < sample_rate/2`` alone lets a
+    sideband fold back onto the signal.
+    """
+    fs = float(sample_rate)
+    bw = fs * (1.0 + float(rolloff)) / float(sps)
+    lo, hi = bw / 2.0, fs / 2.0 - bw / 2.0
+    if lo >= hi:
+        raise ConfigurationError(
+            f"{where}: the RRC band (Rs*(1+rolloff) = {bw:g} Hz) does not fit "
+            f"below Nyquist ({fs / 2:g} Hz) at any carrier.",
+            remediation="Raise sample_rate, raise sps, or lower rolloff.")
+    if not lo < float(fc) < hi:
+        raise ConfigurationError(
+            f"{where}: fc ({float(fc):g} Hz) must lie in ({lo:g}, {hi:g}) Hz so "
+            f"the RRC band (Rs*(1+rolloff) = {bw:g} Hz) and its image at -2*fc "
+            f"do not fold onto the signal.",
+            remediation=f"Use a carrier inside ({lo:g}, {hi:g}) Hz, or change "
+                        f"sample_rate/sps/rolloff to narrow the band.")
 
 
 def _default_preamble(n_symbols, scheme, seed=0xC0FFEE):
@@ -89,8 +117,7 @@ class Transmitter:
 
     def to_passband(self, symbols, sample_rate, fc, sps=8, rolloff=0.25, span=8):
         """Pulse-shape and up-convert symbols to a real passband signal at ``fc``."""
-        if fc >= sample_rate / 2:
-            raise ConfigurationError("to_passband: need fc < sample_rate/2")
+        _require_passband_fits(sample_rate, fc, sps, rolloff, 'to_passband')
         return upconvert(pulse_shape(symbols, sps, rolloff, span), sample_rate, fc)
 
     def transmit_passband(self, bits, sample_rate, fc, sps=8, rolloff=0.25, span=8):
@@ -121,6 +148,7 @@ class CommsReceiver:
     def from_passband(self, samples, sample_rate, fc, sps=8, rolloff=0.25, span=8,
                       loop_bw=0.005):
         """Down-convert, matched-filter, and timing-recover to symbol-rate samples."""
+        _require_passband_fits(sample_rate, fc, sps, rolloff, 'from_passband')
         bb = downconvert(np.asarray(samples, dtype=float), sample_rate, fc)
         mf = matched_filter(bb, sps, rolloff, span)
         return symbol_sync(mf, sps, loop_bw=loop_bw, start=span * sps)
@@ -136,9 +164,16 @@ class CommsReceiver:
         """
         sym = np.asarray(symbols, dtype=complex).ravel()
         start = 0
-        k, _ = detect_preamble(sym, self.preamble, threshold=threshold)
+        k, metric = detect_preamble(sym, self.preamble, threshold=threshold)
         if k is not None:
             start = k
+        else:
+            warnings.warn(
+                f"CommsReceiver.receive: preamble not detected (best metric "
+                f"{float(np.max(metric)):.3f} < threshold {float(threshold):.3f}); "
+                f"decoding from sample 0. The returned bits are not frame-aligned "
+                f"and carry no indication of that.",
+                UserWarning, stacklevel=2)
         sym = sym[start:]
         pre = self.preamble
         if self.equalizer is not None:
@@ -260,6 +295,12 @@ class OFDMReceiver:
         x = np.asarray(baseband, dtype=complex).ravel()
         start, cfo = schmidl_cox_sync(x, nsc, cp)
         if start is None:
+            warnings.warn(
+                "OFDMReceiver.receive: Schmidl-Cox timing metric never reached "
+                "the 0.5 plateau threshold, so no preamble was found; decoding "
+                "from sample 0 with cfo=0. The returned bits are not frame-"
+                "aligned and carry no indication of that.",
+                UserWarning, stacklevel=2)
             start = 0
         x = apply_cfo(x[start:], cfo)
         nblocks = x.size // blk

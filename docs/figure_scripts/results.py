@@ -48,18 +48,18 @@ def field_kinds():
     trace = H.to_time_trace()
 
     fig, axes = plt.subplots(2, 2, figsize=(11.0, 7.4))
-    pressure.to_tl().plot(
+    pressure.to_db().plot(
         env=env, ax=axes[0][0], show_colorbar=False,
-        title="real + {depth, range}  →  .kind = 'tl'")
+        title="real + {depth, range}  →  TL, unit='dB'")
     pressure.plot(
         env=env, ax=axes[0][1], value='phase', show_colorbar=False,
         title="complex + {depth, range}  →  .kind = 'pressure'")
     spectrum.plot(
         ax=axes[1][0], value='mag_db',
-        title="complex + {frequency}  →  .kind = 'transfer_function'")
+        title="complex + {frequency}  →  H(f), unit='Pa'")
     trace.plot(
         ax=axes[1][1],
-        title="real + {time}  →  .kind = 'time_series'")
+        title="real + {time}  →  p(t), unit='Pa'")
     for ax in axes.ravel():
         ax.title.set_fontsize(10)
     fig.suptitle('One Field class — the kind is derived, never declared',
@@ -76,7 +76,7 @@ def field_slicing():
     titled with (no title was passed).
     """
     env, source, receiver = shallow_water()
-    tl = Bellhop(n_beams=3000).run(env, source, receiver).to_tl()
+    tl = Bellhop(n_beams=3000).run(env, source, receiver).to_db()
     loudest = tl.max()
 
     fig = plt.figure(figsize=(10.0, 7.6))

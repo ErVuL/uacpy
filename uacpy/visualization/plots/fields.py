@@ -11,8 +11,8 @@ from typing import Optional, Sequence, Tuple
 from uacpy.core.environment import Environment
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.results import Field
-from uacpy.visualization.style import get_cmap_for_field
-from uacpy.visualization.plots._common import _value_array, _coord_label, _coord_axis, _TL_LIMITS, _overlay_seafloor, _pinned_subtitle, _draw_result_credit, fig_ax, invert_yaxis_once, _draw_geometry, typed_plot_error
+from uacpy.visualization.style import cmap_for_field
+from uacpy.visualization.plots._common import _value_array, _db_label, _coord_label, _coord_axis, _TL_LIMITS, _overlay_seafloor, _pinned_subtitle, _draw_result_credit, fig_ax, invert_yaxis_once, _draw_geometry, typed_plot_error
 
 
 # Which of ``plot_field``'s knobs each of its three render branches reads.
@@ -35,7 +35,7 @@ _BRANCH_DESCRIPTION = {
 
 # Contour-label unit, keyed by ``value``. Linear pressure ('mag', 'real',
 # 'imag') carries no unit, so its labels are bare numbers.
-_CONTOUR_FMT = {'tl': '%g dB', 'mag_db': '%g dB', 'phase': '%g rad'}
+_CONTOUR_FMT = {'db': '%g dB', 'mag_db': '%g dB', 'phase': '%g rad'}
 
 
 @typed_plot_error
@@ -81,10 +81,10 @@ def plot_field(
         Draw the run geometry over a 2-D ``(depth, range)`` heatmap — same
         markers ``Environment.plot`` and the ray plotter use.
     value : str
-        ``'tl'`` (default, dB), ``'mag_db'`` (``20·log10|H|``), ``'mag'``,
+        ``'db'`` (default), ``'mag_db'`` (``20·log10|H|``), ``'mag'``,
         ``'phase'``, ``'real'``, ``'imag'``.
     vmin, vmax : float, optional
-        Colour limits (2-D heatmap only). For ``value='tl'`` an unset limit
+        Colour limits (2-D heatmap only). For ``value='db'`` an unset limit
         takes the fixed 20–120 dB TL scale (``_TL_LIMITS``), never an
         autoscale: TL panels are meant to stay directly comparable across
         models, frequencies and runs.
@@ -131,7 +131,7 @@ def plot_field(
                 field = field.isel(**{axis: 0})
 
     if value is None:
-        value = 'real' if field.kind == 'time_series' else 'tl'
+        value = 'real' if 'time' in field.coords else 'db'
     arr, value_label = _value_array(field, value)
     axes_present = list(field.coords)
     n_axes = len(axes_present)
@@ -300,13 +300,16 @@ def _plot_field_2d(
         if cmap is None:
             cmap = 'seismic'
         value_label = 'p(t)'
-    elif value == 'tl':
-        if vmin is None or vmax is None:
+    elif value == 'db':
+        # The fixed scale is a *transmission-loss* convention, so it applies
+        # only to a pressure field. Another dB quantity — signal excess spans
+        # roughly -20..+40 dB — renders as one flat block against 20..120.
+        if (vmin is None or vmax is None) and field.kind == 'pressure':
             v_lo, v_hi = _TL_LIMITS
             vmin = v_lo if vmin is None else vmin
             vmax = v_hi if vmax is None else vmax
         if cmap is None:
-            cmap = get_cmap_for_field('tl')
+            cmap = cmap_for_field(field.kind, db=True)
     elif value == 'phase':
         if vmin is None:
             vmin = -np.pi
@@ -316,7 +319,7 @@ def _plot_field_2d(
             cmap = 'twilight'
     else:
         if cmap is None:
-            cmap = get_cmap_for_field('tl')
+            cmap = cmap_for_field(field.kind, db=True)
 
     fig, ax = fig_ax(ax, figsize)
 
@@ -570,7 +573,7 @@ def compare(
     labels: Optional[Sequence[str]] = None,
     ax=None,
     *,
-    value: str = 'tl',
+    value: str = 'db',
     figsize: Tuple[float, float] = (10, 5),
     title: Optional[str] = None,
     **mpl_kw,
@@ -629,7 +632,7 @@ def compare(
     else:
         ax.set_xlabel(x_label)
         ax.set_ylabel(vlabel)
-        if value == 'tl':
+        if value == 'db':
             invert_yaxis_once(ax)
     ax.grid(True, alpha=0.3)
     ax.legend()
@@ -661,7 +664,7 @@ def compare_models(
     labels: Optional[Sequence[str]] = None,
     *,
     env: Optional[Environment] = None,
-    value: str = 'tl',
+    value: str = 'db',
     vmin: Optional[float] = None,
     vmax: Optional[float] = None,
     cmap: Optional[str] = None,
@@ -699,6 +702,18 @@ def compare_models(
 
     ref = fields[0]
     for f, lbl in zip(fields[1:], labels[1:]):
+        # Compare the QUANTITY, not the kind: a complex pressure field and a
+        # real TL field are the same quantity written two ways, and comparing
+        # them is the ordinary case. A reverberation level shares TL's
+        # representation exactly but is a different quantity, and putting the
+        # two on one colour scale asserts an equivalence that does not hold.
+        if f.kind != ref.kind:
+            raise ConfigurationError(
+                f"compare_models: {lbl!r} is a {f.kind!r} field but "
+                f"{labels[0]!r} is {ref.kind!r} — these are different "
+                f"physical quantities and share no colour scale.",
+                remediation="Compare like with like, or plot them separately "
+                            "with plot_field.")
         for axis in ('depth', 'range'):
             if axis not in ref.coords or axis not in f.coords:
                 continue
@@ -715,7 +730,10 @@ def compare_models(
                 )
                 break
 
-    if value == 'tl' and (vmin is None or vmax is None):
+    # As in plot_field: the fixed scale is a TL convention. Every panel here
+    # shares one kind already, so ``ref`` settles it for the whole figure.
+    if (value == 'db' and ref.kind == 'pressure'
+            and (vmin is None or vmax is None)):
         v_lo, v_hi = _TL_LIMITS
         vmin = v_lo if vmin is None else vmin
         vmax = v_hi if vmax is None else vmax
@@ -740,7 +758,7 @@ def compare_models(
         vmin = lo if vmin is None else vmin
         vmax = hi if vmax is None else vmax
     if cmap is None:
-        cmap = get_cmap_for_field('tl' if value == 'tl' else 'pressure')
+        cmap = cmap_for_field(ref.kind, db=(value == 'db'))
 
     if figsize is None:
         figsize = (6.0 * ncols + 1.6, 5.0 * nrows + 1.2)
@@ -765,7 +783,7 @@ def compare_models(
     fig.subplots_adjust(left=0.05, right=0.88, top=top, bottom=0.08,
                         wspace=0.22, hspace=0.30)
     if im_last is not None:
-        cbar_label = 'TL (dB)' if value == 'tl' else value
+        cbar_label = _db_label(ref) if value == 'db' else value
         cbar_ax = fig.add_axes([0.905, 0.08, 0.015, top - 0.08])
         fig.colorbar(im_last, cax=cbar_ax, label=cbar_label)
     if title:

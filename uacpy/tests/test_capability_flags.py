@@ -417,7 +417,7 @@ class TestRoughBottomCapability:
                 uacpy.Receiver(depths=50.0,
                                ranges=np.linspace(500, 3000, 11)),
             )
-        assert np.all(np.isfinite(result.tl))
+        assert np.all(np.isfinite(result.db))
 
 
 @pytest.mark.requires_binary
@@ -458,7 +458,7 @@ class TestScooterRoughnessReachesTheSolver:
         except ExecutableNotFoundError:
             pytest.skip("Scooter binary not available")
         rough = self._run(2.0)
-        assert np.nanmax(np.abs(smooth.tl - rough.tl)) > 1.0
+        assert np.nanmax(np.abs(smooth.db - rough.db)) > 1.0
 
     def test_rigid_surface_roughness_is_dropped_with_a_warning(self):
         import uacpy

@@ -343,7 +343,7 @@ def _pekeris_elastic_broadband_at_fc() -> Scenario:
             frequencies=np.linspace(25.5, 74.5, 99),
             run_mode=RunMode.BROADBAND,
         )
-        return kf.at(frequency=50.0).to_tl()
+        return kf.at(frequency=50.0).to_db()
 
     def rams_bb(env_unused, src_, rcv_):
         # Only the fc=50 Hz slice is asserted, and each band frequency is an
@@ -353,7 +353,7 @@ def _pekeris_elastic_broadband_at_fc() -> Scenario:
         ram = RAM(verbose=False, np_pade=6, dr=2.0, dz=0.25, zmax=400.0,
                   rams_theta=45.0, Q=2.0, T=0.2)
         hf = ram.run(env_layered, src_, rcv_, run_mode=RunMode.BROADBAND)
-        return hf.at(frequency=50.0).to_tl()
+        return hf.at(frequency=50.0).to_db()
 
     return Scenario(
         name='pekeris-elastic-broadband-50Hz-fc-slice',
@@ -411,7 +411,7 @@ def _altimetry_broadband_at_fc() -> Scenario:
         ram = RAM(verbose=False, np_pade=6, dr=2.0, dz=0.25, zmax=400.0,
                   Q=2.0, T=0.2)
         hf = ram.run(env_, src_, rcv_, run_mode=RunMode.BROADBAND)
-        return hf.at(frequency=200.0).to_tl()
+        return hf.at(frequency=200.0).to_db()
 
     return Scenario(
         name='altimetry-broadband-200Hz-fc-slice',
@@ -494,8 +494,8 @@ def test_cross_model_agreement(scenario: Scenario, label: str, callable_,
 
     # Pick the receiver-depth and ranges shared by both (single-depth
     # scenarios are the simple case; for multi-depth, take depth 0).
-    ref_tl = np.asarray(ref_field.tl)
-    cmp_tl = np.asarray(cmp_field.tl)
+    ref_tl = np.asarray(ref_field.db)
+    cmp_tl = np.asarray(cmp_field.db)
     if ref_tl.ndim == 2:
         ref_tl = ref_tl[0]
     if cmp_tl.ndim == 2:

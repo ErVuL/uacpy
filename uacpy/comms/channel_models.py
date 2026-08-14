@@ -15,10 +15,16 @@ Stojanovic, in Istepanian & Stojanovic. *Underwater Acoustic DSP & Comms*
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 
 from uacpy.acoustic_signal.channel import impulse_response
 from uacpy.core.exceptions import ConfigurationError
+
+# Retained DFT bins below which a band-limited tap process has too few degrees
+# of freedom for its envelope to be Rayleigh.
+_MIN_DOPPLER_BINS = 8
 
 
 def awgn(signal, snr_db, *, rng=None):
@@ -62,19 +68,39 @@ def fading_taps(n_taps, n_samples, doppler_hz, sample_rate, *, rician_k=0.0,
 
     Each tap is a band-limited complex-Gaussian process (max Doppler
     ``doppler_hz``) — Rayleigh fading; ``rician_k > 0`` adds a line-of-sight
-    component with the given Rice K-factor (linear). Per-tap unit average power.
+    component with the given Rice K-factor (linear). Unit average power over
+    the ensemble, not per realisation.
+
+    The Doppler band is resolved to ``sample_rate/n_samples``, so it spans
+    ``2·doppler_hz·n_samples/sample_rate`` DFT bins. That bin count is the
+    process's degrees of freedom: below a handful the block is too short to
+    realise the requested spread and the envelope is not Rayleigh, which
+    warns.
     """
     rng = np.random.default_rng() if rng is None else rng
     fs = float(sample_rate)
     n = int(n_samples)
     # white complex Gaussian per tap, low-pass filtered to the Doppler bandwidth
     H = (rng.standard_normal((n_taps, n)) + 1j * rng.standard_normal((n_taps, n)))
+    n_bins = n
     if doppler_hz > 0:
         f = np.fft.fftfreq(n, d=1.0 / fs)
         mask = (np.abs(f) <= float(doppler_hz)).astype(float)
+        n_bins = int(mask.sum())
         H = np.fft.ifft(np.fft.fft(H, axis=1) * mask[None, :], axis=1)
-    # normalise each tap to unit average power
-    H /= np.sqrt(np.mean(np.abs(H) ** 2, axis=1, keepdims=True))
+        if n_bins < _MIN_DOPPLER_BINS:
+            warnings.warn(
+                f"fading_taps: doppler_hz={float(doppler_hz):g} spans {n_bins} DFT "
+                f"bin(s) at sample_rate/n_samples={fs / n:g} Hz resolution, so the "
+                f"tap process is drawn from fewer than {_MIN_DOPPLER_BINS} degrees "
+                f"of freedom and its envelope statistics are not Rayleigh. Lengthen "
+                f"n_samples to at least {int(np.ceil(_MIN_DOPPLER_BINS * fs / (2.0 * float(doppler_hz))))} "
+                f"samples, or raise doppler_hz.",
+                UserWarning, stacklevel=2)
+    # Normalise by the filter's analytic gain, not per realisation: dividing each
+    # tap by its own RMS pins |H| to a constant when few bins survive, which is a
+    # unit-modulus phase, not a fading process.
+    H /= np.sqrt(2.0 * n_bins / n)
     if rician_k > 0:
         k = float(rician_k)
         H = np.sqrt(k / (k + 1)) + np.sqrt(1 / (k + 1)) * H

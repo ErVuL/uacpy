@@ -133,7 +133,7 @@ def main():
     for name, result in results.items():
         if result is None:
             continue
-        tl = np.asarray(result.tl)
+        tl = np.asarray(result.db)
         depths_m = np.asarray(result.depths)
         ranges_m = np.asarray(result.ranges)
         i_axis = int(np.argmin(np.abs(depths_m - 1300.0)))

@@ -41,6 +41,17 @@ from uacpy.io.units import m_to_km
 # ReadEnvironmentBell.f90:387-395.
 _VALID_BEAM_TYPES = frozenset({'B', 'R', 'C', 'g', 'G', 'S'})
 
+# RunType(1:1) letters ReadRunType accepts; anything else is a
+# CALL ERROUT( 'READIN', 'Unknown RunType selected' )
+# (ReadEnvironmentBell.f90:376-377). Case is significant: 'A' is ASCII
+# arrivals, 'a' binary.
+_VALID_RUN_TYPES = frozenset({'C', 'I', 'S', 'A', 'a', 'E', 'R'})
+# RunType(4:4) and (5:5). Both have a silent CASE DEFAULT
+# (ReadEnvironmentBell.f90:402-403 and :415-417), so a typo is never reported
+# by the binary — it is overridden, and the deck no longer says what ran.
+_VALID_SOURCE_TYPES = frozenset({'R', 'X'})
+_VALID_GRID_TYPES = frozenset({'R', 'I'})
+
 # Cerveny beam-shape letters (ReadEnvironmentBell.f90:178-185).
 _VALID_BEAM_WIDTH_TYPES = frozenset({'F', 'M', 'W'})
 _VALID_BEAM_CURVATURES = frozenset({'D', 'S', 'Z'})
@@ -268,6 +279,20 @@ def write_bellhop_env_file(
     filepath = Path(filepath)
 
     validate_beam_type(beam_type, 'write_bellhop_env_file')
+    for _value, _allowed, _name, _cite in (
+        (run_type, _VALID_RUN_TYPES, 'run_type',
+         "ReadEnvironmentBell.f90:376-377 ERROUTs any other RunType(1:1)"),
+        (source_type, _VALID_SOURCE_TYPES, 'source_type',
+         "ReadEnvironmentBell.f90:402-403 silently overrides RunType(4:4) to 'R'"),
+        (grid_type, _VALID_GRID_TYPES, 'grid_type',
+         "ReadEnvironmentBell.f90:415-417 silently overrides RunType(5:5) to 'R'"),
+    ):
+        if str(_value) not in _allowed:
+            raise ConfigurationError(
+                f"write_bellhop_env_file({_name}={_value!r}): must be one "
+                f"character from {sorted(_allowed)}. {_cite}, so a longer or "
+                f"unknown value shifts or silently changes the RunType record "
+                f"and the deck stops describing the run.")
 
     if n_beams is None:
         n_beams = 0

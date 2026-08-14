@@ -54,7 +54,8 @@ def _read_lz_records(
     records 2..N each hold ``lz`` samples of ``dtype``. Returns ``(lz,
     matrix[lz, n_records])``.
 
-    ``dtype`` is an endian-agnostic kind string (``'f4'``, ``'c8'``); this
+    ``dtype`` is an endian-agnostic kind string (``'f8'``, ``'c16'`` — the
+    Collins binaries are built with ``-fdefault-real-8``); this
     helper owns byte order entirely. Byte order is auto-detected from the
     first record marker and applied to ``dtype`` here, so callers must not
     pass a ``<``/``>`` prefix (any prefix is stripped defensively). A
@@ -150,7 +151,7 @@ def read_tl_grid(
         Range axis (m), depth axis (m), and TL field of shape
         ``(n_depths, n_ranges)``.
     """
-    lz, tl = _read_lz_records(filepath, dtype='f4')
+    lz, tl = _read_lz_records(filepath, dtype='f8')
     tl = tl.astype(float)
     ranges, depths = _grid_axes(lz, tl.shape[1], dr, ndr, dz, ndz,
                                 depth_index_offset)
@@ -193,7 +194,7 @@ def read_pcomplex_grid(
         Range axis (m), depth axis (m), complex envelope of shape
         ``(n_depths, n_ranges)``.
     """
-    lz, p = _read_lz_records(filepath, dtype='c8')
+    lz, p = _read_lz_records(filepath, dtype='c16')
     p = p.astype(complex)
     ranges, depths = _grid_axes(lz, p.shape[1], dr, ndr, dz, ndz,
                                 depth_index_offset)

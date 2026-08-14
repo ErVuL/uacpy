@@ -126,22 +126,44 @@ def ppsd(data, sample_rate, *, seg_duration=1.0, overlap_pct=50, ddB=1.0,
                       seg_duration)
 
 
+# IEC 61260-1 anchors both band systems at 1 kHz; the step is the band width
+# in octaves.
+_SEL_REF_FREQ = 1000.0
+_SEL_OCTAVE_STEP = {"octave": 1.0, "third_octave": 1.0 / 3.0}
+
+
 def _sel_adjust_fmin_fmax(fmin, fmax, band_type, sample_rate):
-    """Snap configured band edges to band boundaries for this ``sample_rate``."""
-    nyquist = sample_rate / 2
-    if band_type == "octave":
-        fmin = 2 ** np.floor(math.log2(fmin))
-        fmax = 2 ** np.ceil(math.log2(fmax))
-        # Snap down to the highest band boundary at or below Nyquist, so no
-        # band the caller gets back sits wholly in unsampled spectrum.
-        if fmax > nyquist:
-            fmax = 2 ** np.floor(math.log2(nyquist))
-    elif band_type == "third_octave":
-        base = math.pow(2, 1 / 6)
-        fmin = base ** np.floor(math.log(fmin, base))
-        fmax = base ** np.ceil(math.log(fmax, base))
-        if fmax > nyquist:
-            fmax = base ** np.floor(math.log(nyquist, base))
+    """Snap configured band edges onto the IEC 61260-1 ladder anchored at 1 kHz.
+
+    The anchor is what makes a band table comparable with anyone else's:
+    1 kHz is a standard centre in both the base-2 and the base-10 system
+    (Pierce, *Acoustics* — "1, 10, 100, 1000, 10,000 Hz … are also standard
+    1/3-octave-band f_o's"). Snapping to a ladder built from ``fmin`` instead
+    made the grid move with the caller's request — ``fmin=8.9125`` and
+    ``fmin=10.0`` gave disjoint, interleaved centres, and the nearest centre
+    to 1 kHz was 1024 Hz (+2.4 %) or 912.3 Hz (-8.8 %) depending on it.
+
+    ``sel``'s band types are the base-2 names, so it keeps the base-2 ladder;
+    :func:`~uacpy.acoustic_signal.bands.decidecade_bands` owns base-10 and
+    already anchors at 1 kHz (``bands.py`` ``_REF_FREQ``).
+    """
+    step = _SEL_OCTAVE_STEP.get(band_type)
+    if step is None:
+        return fmin, fmax
+
+    def centre(k):
+        return _SEL_REF_FREQ * 2.0 ** (k * step)
+
+    # fmin -> the centre of the band containing it. Rounding on the centre
+    # grid, rather than flooring onto the half-band grid, is what stops the
+    # ladder shifting by half a step with the parity of the floor.
+    fmin = centre(round(math.log2(fmin / _SEL_REF_FREQ) / step))
+    # fmax -> the upper edge of the highest band needed, clamped to the
+    # highest band whose whole support is sampled. Clamping the *edge* rather
+    # than the centre keeps a band that is fully below Nyquist.
+    k_hi = math.ceil(math.log2(fmax / _SEL_REF_FREQ) / step - 0.5)
+    k_nyq = math.floor(math.log2(sample_rate / 2.0 / _SEL_REF_FREQ) / step - 0.5)
+    fmax = centre(min(k_hi, k_nyq)) * 2.0 ** (step / 2.0)
     return fmin, fmax
 
 

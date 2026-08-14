@@ -421,8 +421,8 @@ class TestCollinsBinaries:
         assert result.data.shape == (3, 20)
         assert np.all(np.isfinite(result.data))
         # Sensible TL range (no gain, bounded loss)
-        assert 0 < result.tl.min() < 60
-        assert result.tl.max() < 200
+        assert 0 < result.db.min() < 60
+        assert result.db.max() < 200
 
     def test_rams_elastic_runs(self):
         env = _env(bottom=_elastic_bottom())
@@ -445,8 +445,8 @@ class TestCollinsBinaries:
         assert result.backend == 'ramgeo'
         assert result.data.shape == (3, 20)
         assert np.all(np.isfinite(result.data))
-        assert 0 < result.tl.min() < 80
-        assert result.tl.max() < 200
+        assert 0 < result.db.min() < 80
+        assert result.db.max() < 200
 
     def test_ramgeo_agrees_with_mpirams(self):
         """RAMGEO and mpiramS are independent PE codes; on the same fluid
@@ -457,7 +457,7 @@ class TestCollinsBinaries:
             env, src, rcv)
         mpi = RAM(verbose=False, dr=20.0, dz=1.0, backend='mpiramS').run(
             env, src, rcv)
-        d = np.abs(geo.tl - mpi.tl)
+        d = np.abs(geo.db - mpi.db)
         # The bound is loose because two independent PE codes discretise a
         # 15 m layer differently, and still discriminating because the thing
         # under test — ramgeo reading bottom depths from the local seafloor,
@@ -600,7 +600,7 @@ class TestRamPekerisReference:
         depths = np.asarray(field.depths)
         zi = int(np.argmin(np.abs(depths - depth)))
         mask = (ranges >= r_lo) & (ranges <= r_hi)
-        tl_strip = field.tl[zi, mask]
+        tl_strip = field.db[zi, mask]
         return float(np.median(tl_strip[np.isfinite(tl_strip)]))
 
     def _assert_window_agreement(self, ram_field, ref_field, tol_db, label):
@@ -692,7 +692,7 @@ def test_rams_elastic_field_is_physical_on_a_fast_shear_seabed():
     rcv = Receiver(depths=np.linspace(10, 190, 8), ranges=np.linspace(500, 6000, 20))
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter('always')
-        tl = np.asarray(RAM(backend='rams').compute_tl(env, src, rcv).tl)
+        tl = np.asarray(RAM(backend='rams').compute_tl(env, src, rcv).db)
     assert not [w for w in caught
                 if 'unphysically negative' in str(w.message)], \
         "the march diverged and the field was clamped"
@@ -888,7 +888,7 @@ def test_forcing_rams_on_a_fluid_bottom_is_rejected():
                                   attenuation=0.5, shear_speed=300.0))
     assert RAM(verbose=False).select_backend(elastic) == 'rams'
     tl = np.asarray(RAM(verbose=False, backend='rams').run(
-        elastic, src, rcv).tl).ravel()
+        elastic, src, rcv).db).ravel()
     assert np.all(np.isfinite(tl)) and np.all(tl < 150.0), tl
 
 
@@ -918,7 +918,7 @@ class TestCollinsArrayBoundaries:
         ``tl.grid``."""
         from uacpy.core.exceptions import ConfigurationError
         m = RAM(verbose=False, backend='ramgeo', timeout=600)
-        tl = np.asarray(m.run(self._bathy_env(504), self._SRC(), self._RCV()).tl)
+        tl = np.asarray(m.run(self._bathy_env(504), self._SRC(), self._RCV()).db)
         assert np.all(np.isfinite(tl))
         with pytest.raises(ConfigurationError, match="mr=505"):
             RAM(verbose=False, backend='ramgeo', timeout=600).run(
@@ -970,8 +970,8 @@ class TestUpslopeSubBottomIsNotStale:
         rcv = Receiver(depths=[30.0, 70.0],
                        ranges=np.linspace(500.0, 5000.0, 19))
         kw = dict(dr=10.0, dz=0.5, zmax=500.0, timeout=600, verbose=False)
-        a = np.asarray(RAM(backend='mpiramS', **kw).run(env, src, rcv).tl)
-        b = np.asarray(RAM(backend='ramgeo', **kw).run(env, src, rcv).tl)
+        a = np.asarray(RAM(backend='mpiramS', **kw).run(env, src, rcv).db)
+        b = np.asarray(RAM(backend='ramgeo', **kw).run(env, src, rcv).db)
         return np.abs(a - b)
 
     def test_upslope_agrees_with_ramgeo(self):
@@ -1013,8 +1013,8 @@ class TestBackendIndependentResultShape:
 
     def test_the_two_backends_agree_on_level(self):
         """A flat altimetry only changes the binary, not the physics."""
-        a, b = np.asarray(self._run().tl), np.asarray(
-            self._run(altimetry=[(0.0, 0.0), (10000.0, 0.0)]).tl)
+        a, b = np.asarray(self._run().db), np.asarray(
+            self._run(altimetry=[(0.0, 0.0), (10000.0, 0.0)]).db)
         ok = np.isfinite(a) & np.isfinite(b)
         assert np.nanmedian(np.abs(a[ok] - b[ok])) < 1.0
 
@@ -1040,7 +1040,7 @@ class TestBackendIndependentResultShape:
         native = _interp_to_receiver_grid(
             raw['depths'], raw['ranges'], np.asarray(raw['tl'], float),
             rcv.depths.astype(float), rcv.ranges.astype(float))
-        got = np.asarray(field.tl)
+        got = np.asarray(field.db)
         # Compare where the binary's own TL is unclamped; the near-source
         # samples the divergence clamp rewrites are not a level comparison.
         ok = (np.isfinite(native) & np.isfinite(got)
@@ -1079,7 +1079,7 @@ class TestCollinsBroadbandLevel:
         env, src, rcv = self._setup()
         m = RAM(backend='ramgeo', Q=8.0, T=0.05, verbose=False)
         bb = m.run(env, src, rcv, run_mode=RunMode.BROADBAND)
-        got = np.asarray(bb.at(frequency=250.0).to_tl().data, dtype=float)
+        got = np.asarray(bb.at(frequency=250.0).to_db().data, dtype=float)
 
         # Re-run the binary on the sweep's own numerics and dB-interpolate
         # its tl.grid — the reference the COHERENT_TL test uses.
@@ -1116,8 +1116,8 @@ class TestCollinsBroadbandLevel:
             env, src, rcv, run_mode=RunMode.BROADBAND)
         nb = RAM(backend='ramgeo', verbose=False).run(
             env, src, rcv, run_mode=RunMode.COHERENT_TL)
-        got = np.asarray(bb.at(frequency=250.0).to_tl().data, dtype=float)
-        ref = np.asarray(nb.tl, dtype=float)
+        got = np.asarray(bb.at(frequency=250.0).to_db().data, dtype=float)
+        ref = np.asarray(nb.db, dtype=float)
         ok = np.isfinite(got) & np.isfinite(ref)
         bias = float(np.median(got[ok] - ref[ok]))
         assert abs(bias) < 0.25, (
@@ -1285,8 +1285,8 @@ class TestSurfaceDepthIsResolvable:
         assert [i for i in range(d.shape[0])
                 if np.all(~np.isfinite(d[i, :]))] == []
         # z=0 carries no energy: the pressure-release boundary value.
-        assert np.allclose(field.tl[0, :], TL_MAX_DB)
-        assert np.all(field.tl[1, :] < TL_MAX_DB)
+        assert np.allclose(field.db[0, :], TL_MAX_DB)
+        assert np.all(field.db[1, :] < TL_MAX_DB)
 
     def test_prepended_node_is_skipped_when_the_grid_starts_at_zero(self):
         depths = np.array([0.0, 1.0, 2.0])
@@ -2322,8 +2322,8 @@ class TestRamsElasticGridAgreesWithWavenumberIntegration:
         assert _RAM().select_backend(env) == 'rams'
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
-            ref = np.asarray(OAST().compute_tl(env, src, rcv).tl).ravel()
-            tl = np.asarray(_RAM().compute_tl(env, src, rcv).tl).ravel()
+            ref = np.asarray(OAST().compute_tl(env, src, rcv).db).ravel()
+            tl = np.asarray(_RAM().compute_tl(env, src, rcv).db).ravel()
         # Padé-PE against exact wavenumber integration on a high-contrast
         # elastic half-space; a diverged march reads 100+ dB out here.
         assert np.max(np.abs(tl - ref)) < 8.0

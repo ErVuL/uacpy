@@ -226,6 +226,33 @@ def reject_unsupported_ssp_interp(model: str, interp_ssp) -> None:
         )
 
 
+#: ``misc/sspMod.f90:11`` declares ``MaxSSP = 20001`` and dimensions every
+#: profile array to it. The read loop at ``:331-332`` counts *per medium* but
+#: writes at a *cumulative* index (``SSP%Loc`` accumulates at ``:325``), so the
+#: clean ``ERROUT`` at ``:368`` only fires for a single medium — with sediment
+#: layers the index runs off the end of the array and gfortran dies inside the
+#: READ instead. Bellhop's private ``Bellhop/sspMod.f90:16`` sets 100001, so
+#: the same environment can be fine for Bellhop and fatal for Kraken.
+_AT_MAX_SSP_POINTS = 20001
+
+
+def reject_oversized_at_ssp(model: str, n_points: int) -> None:
+    """Reject an SSP with more rows than the shared AT reader can hold."""
+    if n_points <= _AT_MAX_SSP_POINTS:
+        return
+    raise ConfigurationError(
+        f"{model}: the environment writes {n_points} SSP rows across all "
+        f"media, over the {_AT_MAX_SSP_POINTS} that misc/sspMod.f90:11 "
+        f"dimensions its profile arrays to. The run would stop inside the "
+        f"reader — cleanly for a single medium, and with an unrelated "
+        f"'Bad real number in item 1 of list input' once sediment layers "
+        f"push the cumulative index past the end.",
+        remediation="Thin the sound-speed profile (AT re-meshes it anyway — "
+                    "the mesh line, not the tabulated point count, sets the "
+                    "solver's resolution), or use Bellhop, whose own reader "
+                    "holds 100001.")
+
+
 def reject_coarse_at_mesh(model: str, n_mesh: int, env,
                           frequency: float) -> None:
     """Reject a pinned ``n_mesh`` the shared AT env reader will refuse.
@@ -805,6 +832,16 @@ def write_ssp_section(
     describes, so the shallowest speed is extrapolated up to the surface.
     """
     bottom_depth_rounded = deck_depth(bottom_depth)
+    # Cumulative across every medium: sspMod.f90 indexes one shared array, so
+    # the water rows and each sediment layer's rows share the MaxSSP budget.
+    n_layers = 0
+    bottom = getattr(env, 'bottom', None)
+    if bottom is not None:
+        for col in (getattr(bottom, 'columns', None) or []):
+            n_layers = max(n_layers, len(getattr(col, 'layers', ()) or ()))
+    reject_oversized_at_ssp(
+        'AT env writer',
+        len(env.ssp.extend_to(bottom_depth_rounded).to_pairs()) + 2 * n_layers)
     # AT reads this mesh line as NG, SSP%sigma(Medium), Depth(Medium+1)
     # (misc/ReadEnvironmentMod.f90:81-88). For the water column that is sigma(1) —
     # the *sea surface* interface. Each sigma belongs to the interface at the top

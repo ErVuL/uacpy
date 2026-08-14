@@ -448,9 +448,9 @@ c
 c
       implicit real*8 (a-h,o-z)
       complex*16 ci,z1,z2,g,dg,dh1,dh2,dh3,a,b
-      complex*8 pd1(mp),pd2(mp)
+      complex*16 pd1(mp),pd2(mp)
       real*8 nu
-      real*4 k0,c0,dr
+      real*8 k0,c0,dr
       parameter (m=40)
       dimension bin(m,m),a(m,m),b(m),dg(m),dh1(m),dh2(m),dh3(m),fact(m)
       pi=4.0d0*datan(1.0d0)

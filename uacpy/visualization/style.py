@@ -3,11 +3,18 @@ the sediment palette. Importing this module does not touch ``rcParams``."""
 
 
 # Professional color schemes
-COLORMAPS = {
-    'tl': 'jet_r',             # Transmission loss: blue (low TL/good) → red (high TL/poor)
+# Heatmap colormap for a Field's dB view, keyed by ``Field.kind``. A rendering
+# choice only — what each quantity *is*, and how it is labelled, lives in
+# uacpy/core/results/quantities.py, which must not depend on this module.
+DB_VIEW_COLORMAPS = {
+    'pressure': 'jet_r',       # Transmission loss: blue (low TL/good) → red (high TL/poor)
                                # Matches Acoustic Toolbox standard: flipud(jet)
-    'pressure': 'seismic',     # Pressure field
+    'reverberation': 'jet_r',
+    'signal_excess': 'RdBu_r',  # diverging: the SE = 0 dB detection boundary is the midpoint
 }
+
+# Every linear view (magnitude, real, imaginary part) of any quantity.
+LINEAR_VIEW_COLORMAP = 'seismic'
 
 
 # ── Sediment colour — single source of truth ─────────────────────────────
@@ -104,18 +111,24 @@ RECEIVER_MARKER_STYLE = {
 }
 
 
-def get_cmap_for_field(field_type: str) -> str:
-    """
-    Return the colormap name associated with a field type.
+def cmap_for_field(kind: str, *, db: bool) -> str:
+    """Colormap for a :class:`~uacpy.core.results.Field` heatmap.
 
     Parameters
     ----------
-    field_type : str
-        Field type ('tl', 'pressure', 'ssp', ...).
+    kind : str
+        The field's ``kind`` — what quantity it carries.
+    db : bool
+        Whether the dB view is being rendered. Every linear view shares one
+        signed colormap regardless of quantity, so only the dB view varies:
+        transmission loss wants the Acoustic-Toolbox reversed jet, signal
+        excess a diverging map centred on its detection boundary.
 
     Returns
     -------
     cmap : str
-        Colormap name (falls back to ``'viridis'`` for unknown types).
+        Colormap name (``'viridis'`` for a quantity with no registered map).
     """
-    return COLORMAPS.get(field_type, 'viridis')
+    if not db:
+        return LINEAR_VIEW_COLORMAP
+    return DB_VIEW_COLORMAPS.get(kind, 'viridis')

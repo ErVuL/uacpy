@@ -137,7 +137,7 @@ def test_ir_unpinned_range_raises():
 def test_tf_real_field_raises_before_drawing():
     # A real (already-dB) broadband field has no phase panel; the guard must
     # be a typed error raised before any figure exists.
-    tl = _broadband().to_tl()
+    tl = _broadband().to_db()
     with pytest.raises(ConfigurationError, match='complex'):
         tl.plot_transfer_function()
     assert not plt.get_fignums()

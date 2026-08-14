@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 
 from uacpy.core.exceptions import ConfigurationError
@@ -143,6 +145,28 @@ class ReflectionCoefficient(Result):
                 f"ReflectionCoefficient.{who}: frequency= requires a broadband "
                 f"(2-D) reflection coefficient"
             )
+        # Holding the end value matches every other carrier's eval, but it is
+        # not what a solver reading the same table does: RefCoef.f90:137,145
+        # sets R = 0 and phi = 0 outside the tabulated range, killing the ray.
+        # Warn rather than return 0 — a lone carrier with a different
+        # extrapolation rule would be a worse trap, and 0 is AT's kill
+        # convention, not a claim about R at that angle.
+        # ``isel``'s angle is a positional index, not degrees, so the
+        # comparison below is meaningless there.
+        if who != 'isel' and angle is not None and np.size(self.theta):
+            lo, hi = float(np.min(self.theta)), float(np.max(self.theta))
+            a = np.asarray(angle, dtype=float)
+            if np.any(a < lo) or np.any(a > hi):
+                warnings.warn(
+                    f"ReflectionCoefficient.{who}: angle {angle} is outside the "
+                    f"tabulated range {lo:g}-{hi:g} deg; the end value is held "
+                    f"(the returned .theta records the angle actually used). "
+                    f"Acoustics-Toolbox does not hold — misc/RefCoef.f90:137,145 "
+                    f"sets R = 0 and phi = 0 outside the table, so a ray at this "
+                    f"angle is killed by the solver rather than given the end "
+                    f"value.",
+                    UserWarning, stacklevel=3,
+                )
         return angle, frequency
 
     def _build(self, theta, R, phi, freqs) -> "ReflectionCoefficient":

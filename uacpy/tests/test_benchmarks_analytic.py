@@ -253,7 +253,7 @@ def test_kraken_tl_matches_pekeris_modal_sum():
     *assembly and reader*, not just the eigenvalues. Measured agreement is
     ~0.02 dB median / 0.07 dB max; atol=0.3 dB is a tight, robust bound."""
     src, rcv = _modal_src_rcv()
-    d, _ = _modal_abs_dtl(Kraken(timeout=120).compute_tl(_pekeris_env(), src, rcv).tl)
+    d, _ = _modal_abs_dtl(Kraken(timeout=120).compute_tl(_pekeris_env(), src, rcv).db)
     assert np.median(d) < 0.1, f"median |dTL|={np.median(d):.3f} dB"
     assert np.max(d) < 0.4, f"max |dTL|={np.max(d):.3f} dB"
 
@@ -263,7 +263,7 @@ def test_scooter_tl_matches_pekeris_modal_sum():
     analytic Pekeris normal-mode sum — two *independent exact* range-independent
     methods. Measured median ~0.03 dB / p90 ~0.13 dB; bounds are tight."""
     src, rcv = _modal_src_rcv()
-    d, _ = _modal_abs_dtl(Scooter(timeout=120).compute_tl(_pekeris_env(), src, rcv).tl)
+    d, _ = _modal_abs_dtl(Scooter(timeout=120).compute_tl(_pekeris_env(), src, rcv).db)
     assert np.median(d) < 0.2, f"median |dTL|={np.median(d):.3f} dB"
     assert np.percentile(d, 90) < 0.6, f"p90 |dTL|={np.percentile(d, 90):.3f} dB"
 
@@ -275,7 +275,7 @@ def test_oast_tl_matches_pekeris_modal_sum():
     where TL is hyper-sensitive, are excluded). Measured median ~0.02 dB."""
     from uacpy.models.oases import OAST
     src, rcv = _modal_src_rcv()
-    d, ana = _modal_abs_dtl(OAST(timeout=120).run(_pekeris_env(), src, rcv).tl)
+    d, ana = _modal_abs_dtl(OAST(timeout=120).run(_pekeris_env(), src, rcv).db)
     # The analytic field over this 3x5 grid runs 49.0-66.6 dB with a single
     # outlier at 75.2 dB, so 70 sits in the gap and excises exactly that one
     # null cell. Keeping it would let a sub-metre range difference dominate the
@@ -293,7 +293,7 @@ def test_ram_tl_matches_pekeris_modal_sum():
     error — this validates RAM is physically correct in the ballpark (catches
     a grossly-wrong field), not a tight match. Measured median ~2.3 dB."""
     src, rcv = _modal_src_rcv()
-    d, _ = _modal_abs_dtl(RAM(timeout=180).compute_tl(_pekeris_env(), src, rcv).tl)
+    d, _ = _modal_abs_dtl(RAM(timeout=180).compute_tl(_pekeris_env(), src, rcv).db)
     assert np.median(d) < 3.5, f"median |dTL|={np.median(d):.2f} dB"
 
 
@@ -314,7 +314,7 @@ def test_bellhop_ideal_wedge_matches_analytic():
         bottom=BoundaryProperties(acoustic_type='vacuum'))
     tl_bh = np.asarray(Bellhop(n_beams=4000, timeout=180).compute_tl(
         env, Source(depths=z_s, frequencies=f),
-        Receiver(depths=[z_r], ranges=r_src)).tl).ravel()
+        Receiver(depths=[z_r], ranges=r_src)).db).ravel()
     tl_ana = ideal_wedge_tl(r_src, z_r, z_s, R_s, f, c, slope)
 
     diff = tl_bh - tl_ana
@@ -339,11 +339,13 @@ def test_bounce_reflection_matches_rayleigh():
     below = theta < theta_c - 3.0
     assert np.all(R_num[below] > 0.98), R_num[below]
 
-    # Away from the critical knee, |R| matches Rayleigh tightly. Bounce's
-    # coarse (~31-pt) angular grid puts the floor near 4.5e-3; atol=1e-2 sits
-    # just above it.
+    # Away from the critical knee, |R| matches Rayleigh to machine precision:
+    # the analytic side is evaluated on Bounce's own theta grid, so the grid's
+    # coarseness contributes no error and there is no discretisation term.
+    # Measured residual 3.3e-16; atol=1e-9 is ~3e6 above that floor, tight
+    # enough to catch a 1e-7 relative error in the interface parameters.
     far = np.abs(theta - theta_c) > 2.0
-    np.testing.assert_allclose(R_num[far], R_ana[far], atol=1e-2, rtol=0,
+    np.testing.assert_allclose(R_num[far], R_ana[far], atol=1e-9, rtol=0,
                                err_msg=f"theta={theta}\nnum={R_num}\nana={R_ana}")
 
     # Critical angle: first drop below 0.99 lands within ~3° of theory.
@@ -397,14 +399,14 @@ def test_bellhop_lloyd_mirror():
     # narrowed to ±20°, which still spans the 10.2° steepest path (200 m receiver),
     # so 5001 rays resolve the near-grazing surface image at the far end.
     tl_hat = np.asarray(Bellhop(timeout=120, beam_type='G', n_beams=5001,
-                                alpha=(-20.0, 20.0)).compute_tl(env, src, rcv).tl).ravel()
+                                alpha=(-20.0, 20.0)).compute_tl(env, src, rcv).db).ravel()
     d_hat = np.abs(tl_hat - tl_ana)
     assert np.max(d_hat) < 0.05, f"max |dTL|={np.max(d_hat):.4f} dB"
 
     # The default geometric Gaussian beams spread energy across the beam width and
     # so do not reproduce this field exactly: the residual measures 0.7 dB at 200 m,
     # rises to 2.5 dB by 850 m and holds near that out to 2 km. Bounded, not pinned.
-    d_gauss = np.abs(np.asarray(Bellhop(timeout=120).compute_tl(env, src, rcv).tl)
+    d_gauss = np.abs(np.asarray(Bellhop(timeout=120).compute_tl(env, src, rcv).db)
                      .ravel() - tl_ana)
     assert np.max(d_gauss) < 3.0, f"max |dTL|={np.max(d_gauss):.2f} dB"
     assert np.median(d_gauss[ranges < 400.0]) < 1.0
@@ -540,7 +542,7 @@ def test_scaled_cylindrical_removes_exactly_the_spreading_term():
     def tl(source_type):
         return np.asarray(Scooter(timeout=120).run(
             env, Source(depths=50.0, frequencies=100.0,
-                        source_type=source_type), rcv).tl).ravel()
+                        source_type=source_type), rcv).db).ravel()
 
     np.testing.assert_allclose(tl('point') - tl('scaled'),
                                10.0 * np.log10(ranges), atol=0.01)

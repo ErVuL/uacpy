@@ -258,7 +258,7 @@ def main():
         model = model_cls(verbose=False, **kwargs)
         try:
             field = model.run(env, source, receiver)
-            tl = field.tl
+            tl = field.db
             print(f"  {label:40s}  TL: [{np.nanmin(tl):5.1f}, {np.nanmax(tl):5.1f}] dB")
             fields.append(field)
             envs_out.append(env)
@@ -267,7 +267,7 @@ def main():
             fields.append(None)
             envs_out.append(env)
 
-    all_tl = [f.tl for f in fields if f is not None]
+    all_tl = [f.db for f in fields if f is not None]
     if all_tl:
         vmin = max(30, np.nanpercentile(np.concatenate([a.ravel() for a in all_tl]), 5))
         vmax = min(140, np.nanpercentile(np.concatenate([a.ravel() for a in all_tl]), 95))

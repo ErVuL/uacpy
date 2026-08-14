@@ -1,3 +1,4 @@
+import warnings
 """Tests for ``uacpy.acoustic_signal`` channel / modal / time-frequency tools."""
 
 import numpy as np
@@ -36,10 +37,13 @@ class TestChannel:
         # Delay 0.0105 s = sample 105.0 exactly -> single tap even when fractional.
         _, h = impulse_response([1.0], [0.0105], FS, fractional=True)
         assert h[105] == pytest.approx(1.0)
-        # A genuinely fractional delay splits between two taps but conserves sum.
+        # A genuinely fractional delay is placed with a windowed-sinc kernel,
+        # normalised to unit DC gain. It is deliberately NOT two taps: a
+        # two-tap linear split is a frac-dependent lowpass (-3.0 dB at
+        # f/fs = 0.25 for frac = 0.5), not a fractional delay.
         _, h2 = impulse_response([1.0], [0.01005], FS, fractional=True)
         assert h2.sum() == pytest.approx(1.0)
-        assert np.count_nonzero(h2) == 2
+        assert np.count_nonzero(h2) > 2
 
     def test_simulate_reception_shifts_transmit(self):
         tx = np.array([1.0, -1.0, 0.5])
@@ -199,7 +203,7 @@ class TestTimeFrequency:
         rng = np.random.default_rng(0)
         x = rng.standard_normal(512)
         assert np.all(np.isfinite(cepstrum(x)))
-        assert np.all(np.isfinite(complex_cepstrum(x)))
+        assert np.all(np.isfinite(complex_cepstrum(x).cepstrum))
 
     def test_complex_cepstrum_round_trip(self):
         # Smooth signal: phase unwraps cleanly so the homomorphic round trip
@@ -394,3 +398,97 @@ class TestWarpIsUnitary:
             errs.append(float(np.linalg.norm(back - x) / np.linalg.norm(x)))
         assert all(b < a for a, b in zip(errs, errs[1:])), errs
         assert errs[-1] < errs[0] / 4.0
+
+
+class TestComplexCepstrumRemovesLinearPhase:
+    """The unwrapped phase of a delayed signal carries a linear ramp whose
+    inverse transform is a ``1/q`` tail. Left in, it swamps the echo structure
+    the cepstrum exists to show — an echo at quefrency 120 measured 0.195
+    against a tail of 100 at q=1 — and makes the result depend on the
+    signal's absolute arrival time rather than on its echo delays."""
+
+    @staticmethod
+    def _two_arrivals(n=1024, t0=50, gap=120, amp=0.6):
+        x = np.zeros(n)
+        x[t0] = 1.0
+        x[t0 + gap] = amp
+        return x
+
+    def test_echo_dominates_the_tail(self):
+        from uacpy.acoustic_signal import complex_cepstrum
+        c = np.asarray(complex_cepstrum(self._two_arrivals()).cepstrum)
+        assert abs(c[120]) == pytest.approx(0.6, abs=1e-6)
+        assert abs(c[1]) < 1e-9          # the 1/q tail is gone
+
+    def test_result_is_independent_of_arrival_time(self):
+        # The discriminating property: the cepstrum describes echo delays, so
+        # shifting the whole signal must not change it.
+        from uacpy.acoustic_signal import complex_cepstrum
+        a = np.asarray(complex_cepstrum(self._two_arrivals(t0=50)).cepstrum)
+        b = np.asarray(complex_cepstrum(self._two_arrivals(t0=200)).cepstrum)
+        assert np.max(np.abs(a - b)) < 1e-9
+
+    def test_round_trip_is_still_exact(self):
+        from uacpy.acoustic_signal import (complex_cepstrum,
+                                           inverse_complex_cepstrum)
+        x = self._two_arrivals()
+        assert np.max(np.abs(x - inverse_complex_cepstrum(
+            complex_cepstrum(x)))) < 1e-9
+
+
+class TestFractionalDelayIsFlat:
+    """A two-tap linear split is not a fractional delay: its response
+    ``|(1-frac) + frac*e^{-jw}|`` is a lowpass whose attenuation depends on
+    ``frac``, with a full null at Nyquist for ``frac = 0.5`` — measured
+    -3.010 dB at ``f/fs = 0.25`` and -10.192 dB at 0.40. Two arrivals a
+    propagation model reports as equal came back differing by up to 10 dB,
+    decided by the sub-sample part of their travel times.
+
+    Peak amplitude is deliberately *not* the metric here: a unit impulse at a
+    fractional delay genuinely has no unit sample (the band-limited truth
+    ``sinc(n-p)`` peaks at 0.900 for frac=0.25), so a peak test would overstate
+    the defect. The spectral flatness is what is wrong and what is fixed."""
+
+    FS = 40000.0
+
+    def _kernel_response(self, frac, n=256):
+        from uacpy.acoustic_signal import impulse_response
+        _, h = impulse_response([1.0], [(100 + frac) / self.FS], self.FS,
+                                n_samples=n)
+        return np.fft.rfftfreq(n), np.fft.rfft(h)
+
+    @pytest.mark.parametrize('frac', [0.25, 0.5, 0.75])
+    def test_response_is_flat_across_the_band(self, frac):
+        f, H = self._kernel_response(frac)
+        band = f <= 0.35
+        assert np.max(np.abs(20 * np.log10(np.abs(H[band])))) < 0.1
+
+    @pytest.mark.parametrize('frac', [0.25, 0.5])
+    def test_group_delay_is_still_exact(self, frac):
+        # Group delay was correct before too — the defect was amplitude only,
+        # which is why it was silent. It must stay correct.
+        f, H = self._kernel_response(frac)
+        ph = np.unwrap(np.angle(H))
+        i = int(np.argmin(np.abs(f - 0.2)))
+        gd = -(ph[i + 1] - ph[i - 1]) / (2 * np.pi * (f[i + 1] - f[i - 1]))
+        assert gd == pytest.approx(100.0 + frac, abs=1e-3)
+
+    def test_truncated_kernel_warns_instead_of_dumping_full_amplitude(self):
+        # An arrival at 10.9 samples used to land entirely at sample 10 at
+        # full amplitude, 0.9 samples early and silently.
+        from uacpy.acoustic_signal import impulse_response
+        with pytest.warns(UserWarning, match='truncated'):
+            _, h = impulse_response([1.0], [10.9 / self.FS], self.FS,
+                                    n_samples=11)
+        assert h[10] < 0.2
+
+    def test_integer_delays_are_untouched(self):
+        # The discriminating counterpart: an arrival exactly on a sample must
+        # stay a clean unit impulse, and must not warn.
+        from uacpy.acoustic_signal import impulse_response
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            _, h = impulse_response([1.0], [100.0 / self.FS], self.FS,
+                                    n_samples=256)
+        assert h[100] == pytest.approx(1.0)
+        assert np.max(np.abs(np.delete(h, 100))) < 1e-12

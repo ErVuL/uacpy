@@ -82,7 +82,7 @@ def main():
             f"dz={meta.get('dz'):6.3f} m"
         )
 
-    diff = np.abs(fields['c1500'].tl - fields['c_eq15'].tl)
+    diff = np.abs(fields['c1500'].db - fields['c_eq15'].db)
     rms = float(np.sqrt(np.nanmean(diff ** 2)))
     print(f"\n  RMS |TL_c1500 - TL_c_eq15| = {rms:.2f} dB")
 
@@ -99,7 +99,7 @@ def main():
         f = fields[label]
         meta = f.metadata
         im = ax.imshow(
-            f.tl, aspect='auto', origin='upper', extent=extent,
+            f.db, aspect='auto', origin='upper', extent=extent,
             cmap='jet_r', vmin=40, vmax=100,
         )
         ax.set_title(

@@ -12,7 +12,12 @@ from typing import Optional, Dict, Any, List, Tuple, Union
 from uacpy.core.constants import DEFAULT_SOUND_SPEED
 from uacpy.core.exceptions import ConfigurationError
 
+from uacpy.core.results import quantities as _quantities
 from uacpy.core.results._base import PhaseReference, Result, _complex_to_db
+
+# Quarter-wavelength sampling. Linear interpolation of a coherent field tracks
+# its carrier only below this per-sample phase advance.
+_MAX_COHERENT_PHASE_STEP = np.pi / 2.0
 
 # Auto-sized IFFT length is ~sample_rate/df rounded up to a power of two, so a
 # too-high sample_rate (or a too-fine frequency grid) can silently demand a
@@ -75,7 +80,7 @@ class Field(Result):
     complex                    ``{depth, range, frequency}``     Broadband ``H(d, r, f)``
     real                       ``{depth, range, time}``          Time-domain ``p(d, r, t)``
     real                       ``{time}``                        Single-point trace
-    complex                    ``{source_depth, depth, range}``  Multi-source complex pressure (``.kind == 'pressure'``; ``.tl`` derives dB)
+    complex                    ``{source_depth, depth, range}``  Multi-source complex pressure (``.kind == 'pressure'``; ``.db`` derives dB)
     =========================  ================================  =====================================
 
     ``data.shape`` matches the insertion order of :attr:`coords`, which
@@ -156,6 +161,14 @@ class Field(Result):
         self.pinned: Dict[str, float] = (
             {k: float(v) for k, v in pinned.items()} if pinned else {}
         )
+        # Validate a quantity tag where it enters, not where it is read: a
+        # typo'd kind that survives construction resurfaces as a wrong colour
+        # scale or a wrong argmax direction, with nothing pointing back here.
+        # The untagged path — every slice, every model default — skips the
+        # lookup entirely.
+        meta = self.metadata or {}
+        if 'kind' in meta or 'unit' in meta:
+            _quantities.label(self.kind, self.unit)
 
     # ── shape / dtype ─────────────────────────────────────────────────
 
@@ -173,23 +186,53 @@ class Field(Result):
 
     @property
     def kind(self) -> str:
-        """Physical-quantity classification derived from ``(dtype, coords)``.
+        """What the field physically **is** — the quantity it carries.
 
-        Derived, never stored, by testing four cases in this order: complex
-        with a ``'frequency'`` axis is ``'transfer_function'``; real with a
-        ``'time'`` axis is ``'time_series'``; any other complex field is
-        ``'pressure'``; any other real field is ``'tl'`` (dB). So the real
-        dB spectrum :meth:`to_tl` returns for a broadband field is ``'tl'``
-        even though it keeps its frequency axis. Independent of
-        dimensionality — ``tl.at(depth=20)`` is still ``'tl'``."""
-        axes = set(self.coords)
-        if 'frequency' in axes and self.is_complex:
-            return 'transfer_function'
-        if 'time' in axes and not self.is_complex:
-            return 'time_series'
-        if self.is_complex:
-            return 'pressure'
-        return 'tl'
+        ``'pressure'`` by default; models producing something else tag it via
+        ``metadata['kind']`` (e.g. ``'reverberation'``). This is one of three
+        independent axes, and asking the wrong one is how consumers break:
+
+        =========  =========================  ============================
+        axis       question it answers        ask it for
+        =========  =========================  ============================
+        ``kind``   *what* is this?            is comparing these two
+                                              fields meaningful at all
+        ``unit``   what is it *measured in*?  which direction is louder
+        ``dtype``  how is it *stored*?        is there phase to work with
+        =========  =========================  ============================
+
+        Transmission loss is **not** a separate kind: ``-20·log10|p|`` is the
+        same pressure field written in dB, which is the ``unit`` axis's job.
+        That is why a RAM TL field and a Kraken complex field compare — same
+        kind — while reverberation, which shares TL's representation exactly,
+        does not.
+
+        The **domain** is not a fourth axis either: it is already in
+        :attr:`coords`, as a ``'time'`` or ``'frequency'`` entry.
+        """
+        tagged = (self.metadata or {}).get('kind')
+        return str(tagged) if tagged else 'pressure'
+
+    @property
+    def unit(self) -> str:
+        """What :attr:`data` is measured in — ``'Pa'`` or ``'dB'``.
+
+        Derived unless a model tags ``metadata['unit']``: complex data and
+        time-domain traces are linear pressure, real frequency-domain data is
+        a level in dB. Consumers that need to know which way is louder must
+        ask **this** and never :attr:`kind`, or every new dB quantity silently
+        inverts them — see :meth:`max`.
+        """
+        tagged = (self.metadata or {}).get('unit')
+        if tagged:
+            return str(tagged)
+        units = _quantities.quantity(self.kind).units
+        if len(units) == 1:
+            return next(iter(units))
+        # Pressure alone carries two units, and which one is a *storage*
+        # question: phase surviving (complex) or a time trace means linear Pa;
+        # a real frequency-domain grid is already a level.
+        return 'Pa' if (self.is_complex or 'time' in self.coords) else 'dB'
 
     # ── persistence ───────────────────────────────────────────────────
 
@@ -199,12 +242,14 @@ class Field(Result):
         Values are numpy arrays and Python scalars (data preserves its
         real/complex dtype), so the result is directly picklable and
         ``np.savez``-able; convert the arrays to lists yourself for JSON.
-        ``coords`` insertion order matches the data axes. ``kind`` is
-        included for inspection but is recomputed by :meth:`from_dict`.
+        ``coords`` insertion order matches the data axes. ``kind`` and
+        ``unit`` are included for inspection but are recomputed by
+        :meth:`from_dict` (both derive from ``metadata`` and the data).
         Reconstruct with ``Field.from_dict(d)``.
         """
         return {
             'kind': self.kind,
+            'unit': self.unit,
             'data': self.data.copy(),
             'coords': {k: v.copy() for k, v in self.coords.items()},
             'pinned': dict(self.pinned),
@@ -235,7 +280,7 @@ class Field(Result):
         )
 
     def __repr__(self) -> str:
-        bits = [f"kind={self.kind!r}"]
+        bits = [f"kind={self.kind!r}", f"unit={self.unit!r}"]
         if self.model:
             bits.append(f"model={self.model!r}")
         f0 = self.f0
@@ -247,22 +292,27 @@ class Field(Result):
     # ── value accessors ───────────────────────────────────────────────
 
     @property
-    def tl(self) -> np.ndarray:
-        """Transmission loss in dB at ``data.shape``.
+    def db(self) -> np.ndarray:
+        """This field's dB view, at ``data.shape``.
 
-        ``-20·log10(|data|)`` if data is complex, otherwise ``data``
-        itself (real data is taken to be already in dB) as a **read-only
-        view** — the dB values are the field, so mutating them in place
-        would corrupt the result.
+        ``-20·log10(|data|)`` if data is complex — for pressure that is
+        transmission loss — otherwise ``data`` itself (real data outside the
+        time domain is already a level) as a **read-only view**: the dB
+        values are the field, so mutating them in place would corrupt the
+        result.
 
-        Raises :class:`AttributeError` for ``kind='time_series'`` —
-        a time-domain trace is not transmission loss; use ``.data`` to
-        read raw samples or ``.extract_tone(f)`` to recover a complex
-        narrowband field first."""
-        if self.kind == 'time_series':
+        Named for the *unit*, not the quantity: on a reverberation or
+        signal-excess field this returns that level, and calling it ``.db``
+        would have been the same misnomer the ``kind`` axis removed.
+
+        Raises :class:`AttributeError` for a time-domain field (one
+        carrying a ``'time'`` axis) — a time trace is linear pressure, not a
+        level; use ``.data`` to read raw samples or ``.extract_tone(f)`` to
+        recover a complex narrowband field first."""
+        if 'time' in self.coords:
             raise AttributeError(
-                "Field.tl: time-domain trace is not transmission loss; "
-                "use .data for raw samples or .extract_tone(f) to "
+                "Field.db: a time-domain trace is linear pressure, not a "
+                "level; use .data for raw samples or .extract_tone(f) to "
                 "recover a complex narrowband field first"
             )
         if self.is_complex:
@@ -398,6 +448,8 @@ class Field(Result):
         from uacpy.core._grid import collapse_axis
         method = kwargs.pop('method', 'linear')
         self._check_axes(kwargs)
+        if method != 'nearest':      # 'nearest' fabricates nothing
+            self._warn_if_undersampled('Field.eval', axes=set(kwargs))
         data = self.data
         coords = dict(self.coords)
         pinned = dict(self.pinned)
@@ -423,16 +475,24 @@ class Field(Result):
     def max(self) -> "Field":
         """Slice at the loudest field point.
 
-        Complex / time-domain data: global argmax of ``|data|``. Real dB
-        (``kind='tl'``): the *minimum* finite TL — smaller dB is louder.
+        Linear data (``unit='Pa'``): global argmax of ``|data|``.
+
+        Exactly one quantity runs backwards, and it takes **both** axes to
+        identify it: transmission loss (``kind='pressure'`` in ``unit='dB'``)
+        is a *loss*, so the least of it is the loudest. Every other dB
+        quantity is a **level** — reverberation, signal excess — and more of
+        a level is more, so dB alone must not decide the direction.
+
         ``NaN`` no-data cells (e.g. Bellhop cells no ray reached) are
         excluded. Every axis collapses to a pinned scalar; the returned
         Field has empty :attr:`coords`, 0-D :attr:`data`, and every
         original axis recorded in :attr:`pinned`."""
         if self.data.size == 0:
             raise ConfigurationError("Field.max: data is empty")
-        if self.kind == 'tl':
-            strength = -np.asarray(self.tl, dtype=float)  # loudest = smallest dB
+        if self.kind == 'pressure' and self.unit == 'dB':
+            strength = -np.asarray(self.db, dtype=float)  # least loss = loudest
+        elif self.unit == 'dB':
+            strength = np.asarray(self.data, dtype=float)  # a level: more is more
         else:
             strength = np.abs(self.data)
         if not np.isfinite(strength).any():
@@ -492,7 +552,7 @@ class Field(Result):
             **id_kwargs,
         )
 
-    def to_tl(self) -> "Field":
+    def to_db(self) -> "Field":
         """Return a real-dB Field via ``-20·log10(|data|)``.
 
         No-op when ``data`` is already real."""
@@ -544,6 +604,84 @@ class Field(Result):
             **self.id_kwargs(),
         )
 
+    @property
+    def range_phase_step(self) -> Optional[float]:
+        """Median phase advance (rad) between adjacent range samples, for
+        inspection. ``None`` for a real field or one without a resolvable
+        range axis.
+
+        **Not a sampling test, and not used as one.** It answers only half
+        the question. Linear interpolation shortens the chord between two
+        phasors by ``cos(theta/2)``, so this wrapped step does predict the
+        *level* bias (``-20log10(cos(step/2))``, verified to 2 dp). But it is
+        blind to the *phase* error, which is maximal exactly where the level
+        error vanishes — a grid spaced a whole wavelength wraps to ~0 and
+        loses no level while the phase is off by ~pi. No single scalar
+        covers both, so whether a field may be interpolated is decided by
+        the sample spacing against a quarter wavelength, which
+        :meth:`resample_to` checks. Use this to inspect a field.
+        """
+        r = self.coords.get('range')
+        if not self.is_complex or r is None or r.size < 2:
+            return None
+        step = np.diff(np.angle(self.data), axis=-1)
+        step = np.abs((step + np.pi) % (2.0 * np.pi) - np.pi)
+        return float(np.nanmedian(step)) if step.size else None
+
+    def _warn_if_undersampled(self, where: str, axes=None) -> None:
+        """Warn when either axis is too coarse to interpolate coherently.
+
+        Sample spacing against a quarter wavelength, on **both** axes: the
+        depth and range biases compound (+2.6 and +1.4 dB alone, +4.9 dB
+        together), and `resample_to` always interpolates both. The vertical
+        wavenumber never exceeds the total wavenumber, so the same bound is
+        conservative on depth — it can warn where depth alone would have been
+        adequate, but it cannot stay silent on a grid that is not.
+
+        The wrapped phase step is deliberately **not** used as a fallback:
+        it misses 47.8 % of undersampled grids and is blind by construction
+        wherever the spacing nears a whole wavelength (``wrap(2*pi*n) = 0``),
+        so "sample every wavelength" — maximally aliased — reads as perfect.
+        A field with no frequency is reported as unverifiable instead, since
+        a silence that reads as a pass is worse than an admission.
+        """
+        if not self.is_complex:
+            return
+        wanted = ('depth', 'range') if axes is None else tuple(axes)
+        axes = [(name, np.asarray(self.coords[name], dtype=float))
+                for name in ('depth', 'range')
+                if name in wanted and self.coords.get(name) is not None
+                and self.coords[name].size > 1]
+        if not axes:
+            return
+        f0 = self.f0
+        if not f0:
+            warnings.warn(
+                f"{where}: this Field carries no frequency, so the "
+                f"quarter-wavelength condition that decides whether a coherent "
+                f"field may be interpolated cannot be checked. The result may "
+                f"carry an unreported level bias; take .db first if only the "
+                f"level is wanted.",
+                UserWarning, stacklevel=3)
+            return
+        quarter = DEFAULT_SOUND_SPEED / (4.0 * float(f0))
+        coarse = [(name, float(np.max(np.diff(a)))) for name, a in axes
+                  if float(np.max(np.diff(a))) > quarter]
+        if not coarse:
+            return
+        detail = ' and '.join(f"{name} samples are {d:g} m apart"
+                              for name, d in coarse)
+        warnings.warn(
+            f"{where}: {detail}, over the {quarter:.3g} m quarter wavelength at "
+            f"{float(f0):g} Hz (nominal c={DEFAULT_SOUND_SPEED:g} m/s), so "
+            f"interpolating this coherent field cuts across the carrier. It can "
+            f"bias the level upward by several dB (measured +2.6 in range, +1.4 "
+            f"in depth, +4.9 with both) and it corrupts the phase — the two peak "
+            f"at different spacings, so a small level error does not imply a "
+            f"usable phase. Re-run the model on the target grid instead, or take "
+            f".db first if only the level is wanted.",
+            UserWarning, stacklevel=3)
+
     def resample_to(
         self,
         *,
@@ -559,12 +697,22 @@ class Field(Result):
 
         Keyword-only and depth-first, like every other axis pair on a
         :class:`Field`: passing the two vectors the other way round would
-        otherwise resample onto a transposed grid that is mostly NaN."""
+        otherwise resample onto a transposed grid that is mostly NaN.
+
+        Interpolating a **coherent** field only works while the carrier is
+        resolved: samples must be under a quarter wavelength apart **on both
+        axes**, or the interpolant cuts across opposite-phase lobes and biases
+        the level upward — +2.6 dB from range alone, +1.4 dB from depth alone,
+        +4.9 dB from the two together. Both spacings are checked against the
+        wavelength at :attr:`f0` and a coarse one warns. Take :attr:`tl` first
+        if only the level is wanted; a real field carries no carrier and
+        interpolates freely."""
         if list(self.coords) != ['depth', 'range']:
             raise ConfigurationError(
                 "Field.resample_to: requires canonical ['depth', 'range'] "
                 f"coords; got {list(self.coords)}"
             )
+        self._warn_if_undersampled('Field.resample_to')
         from scipy.interpolate import RegularGridInterpolator
         new_depths = np.atleast_1d(np.asarray(depths, dtype=float))
         new_ranges = np.atleast_1d(np.asarray(ranges, dtype=float))
@@ -738,7 +886,7 @@ class Field(Result):
             raise ConfigurationError(
                 "Field.plot_transfer_function: needs a complex H(f) (a real "
                 "dB spectrum has no phase panel) — plot it with "
-                ".plot(value='tl') instead."
+                ".plot(value='db') instead."
             )
         owns_fig = axes is None
         if owns_fig:
@@ -1052,25 +1200,25 @@ class ResultStack:
         return self.slabs[int(kwargs[self.coordinate_name])]
 
     @property
-    def tl(self) -> np.ndarray:
-        """Transmission loss stacked along the coordinate axis — shape
-        ``(n_slabs, *slab.tl.shape)`` — so generic code can read ``result.tl``
+    def db(self) -> np.ndarray:
+        """Every slab's dB view stacked along the coordinate axis — shape
+        ``(n_slabs, *slab.db.shape)`` — so generic code can read ``result.db``
         whether one or many source depths were requested. Requires Field slabs.
         """
         first = self.slabs[0]
         if not isinstance(first, Field):
             raise ConfigurationError(
-                f"ResultStack.tl: slabs are {self.slab_type.__name__}, not "
-                f"Field — no transmission loss. Pick a slab with stack[i] or "
+                f"ResultStack.db: slabs are {self.slab_type.__name__}, not "
+                f"Field — no dB view. Pick a slab with stack[i] or "
                 f"stack.at({self.coordinate_name}=...)."
             )
-        if first.kind == 'time_series':
+        if 'time' in first.coords:
             raise ConfigurationError(
-                "ResultStack.tl: time-domain slabs are not transmission loss; "
-                "read the samples via stack[i].data, or recover a complex "
-                "narrowband field first with stack[i].extract_tone(f)."
+                "ResultStack.db: time-domain slabs are linear pressure, not "
+                "a level; read the samples via stack[i].data, or recover a "
+                "complex narrowband field first with stack[i].extract_tone(f)."
             )
-        return np.stack([s.tl for s in self.slabs], axis=0)
+        return np.stack([s.db for s in self.slabs], axis=0)
 
     def plot(self, **kwargs):
         """Plot every slab as a labelled panel grid (Field stacks), delegating
