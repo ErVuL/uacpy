@@ -143,4 +143,4 @@ python docs/check_structure.py
 
 **Reference:** [`DOCUMENTATION.md`](../DOCUMENTATION.md) ·
 **Internals:** [`DEV.md`](DEV.md) ·
-**Examples:** [`uacpy/examples/`](../uacpy/examples/) (38 runnable scripts)
+**Examples:** [`uacpy/examples/`](../uacpy/examples/) (39 runnable scripts)

@@ -63,9 +63,10 @@ Scooter drops seabed roughness, and a rough rigid/elastic surface, with a
 warning. Kraken and OASES carry both interfaces unconditionally.
 
 `OASES` is an abstract base: instantiate **OAST** (TL), **OASN** (covariance,
-replicas), **OASR** (reflection) or **OASP** (pulse/broadband) directly, or let
+replicas), **OASR** (reflection), **OASP** (pulse/broadband), **OASS**
+(reverberation) or **OASSP** (scattered pulse) directly, or let
 `OASES.for_mode(run_mode=...)` pick. Its columns here are the union across the
-four.
+six.
 
 ## Run modes
 
@@ -81,6 +82,7 @@ four.
 | `TIME_SERIES` | ✅ | ✅ | ✅ | ✅ | ✅ | ✗ | ✅ |
 | `REFLECTION` | ✗ | ✗ | ✗ | ✗ | ✗ | ✅ | ✅ |
 | `COVARIANCE` / `REPLICA` | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✅ |
+| `REVERBERATION` | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✅ |
 
 Generated from `model.supported_modes` — see each page for the authoritative list.
 

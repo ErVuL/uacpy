@@ -157,7 +157,11 @@ wavelength precision.
 
 Semi-coherent is not a blend of the two. It sums intensities exactly as the
 incoherent mode does, but first applies a Lloyd-mirror shading
-`S(θ₀) = 2sin²(ω z_s sinθ₀ / c)` to the source's launch-angle amplitude. The
+`√2·|sin(ω z_s sinθ₀ / c)|` to the source's launch-angle **amplitude**
+(`bellhop.f90:276-278`) — equivalently `2sin²(·)` once the contribution is
+squared into the intensity sum. That is the physical `4sin²` Lloyd pattern
+renormalised to unit mean, which is why the shading redistributes energy
+rather than adding any. The
 case for it is a shallow, mid-frequency source: the interference of the source
 with its own surface image is a stable feature worth keeping even when the
 ray-to-ray phase is not. That is why the middle panel tracks the incoherent one

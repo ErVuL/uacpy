@@ -49,7 +49,7 @@ Every one of these types prints a one-line summary of itself, which is the
 fastest way to see what you are holding:
 
 ```
-Field(kind='pressure', model='Bellhop', f=200 Hz, axes=(depth, range))
+Field(kind='pressure', unit='Pa', model='Bellhop', f=200 Hz, axes=(depth, range))
 Rays(model='Bellhop', f=200 Hz, n_eigenrays=2639)
 Arrivals(model='Bellhop', f=200 Hz, n_arrivals=2639)
 Modes(model='Kraken', f=200 Hz, n_modes=14, n_z=101)

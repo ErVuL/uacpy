@@ -31,7 +31,7 @@ uacpy/
     ├── noise/               Wenz curves, wind noise, ship noise
     ├── visualization/       plot_field / plot_bottom_properties / … (+ result.plot())
     ├── tests/               pytest suite (markers: slow, requires_binary, …)
-    ├── examples/            38 numbered example scripts (01–38)
+    ├── examples/            39 numbered example scripts (01–39)
     ├── third_party/         Vendored Fortran/C sources (see §9)
     ├── bin/                 Gitignored; populated by install.sh
     ├── parallel.py          run_parallel / Job — parallel batch runner

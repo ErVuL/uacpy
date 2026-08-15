@@ -175,9 +175,11 @@ frequency of each.
 `scaling='density'` (the default) gives Pa²/Hz and is independent of `nperseg`
 and of the window — the right choice for noise. `scaling='spectrum'` gives
 per-bin power instead, which is the right choice for a tone and which moves with
-`nperseg`. Either way a Hann window's noise-equivalent bandwidth is 1.5 bins, so
-a tone falling between bins reads about a decibel low; that is the estimator,
-not the signal.
+`nperseg`. Either way a tone falling between bins
+reads low — 1.42 dB at worst for a Hann window. That is *scalloping* loss, set
+by the mainlobe shape, and is a different figure of merit from the same
+window's 1.5-bin noise-equivalent bandwidth, which is what makes a density
+estimate window-independent. Both are the estimator, not the signal.
 
 ### Decidecade is the base-10 third-octave, not the base-2 one
 

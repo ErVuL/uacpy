@@ -5,8 +5,9 @@ import pytest
 import numpy as np
 
 from uacpy.models import RAM, RunMode
+from uacpy.core.exceptions import ConfigurationError
 from uacpy import Field
-from uacpy.core import (
+from uacpy.core import (Altimetry, Bathymetry, 
     Environment, Source, Receiver, SoundSpeedProfile, BoundaryProperties,
     Bottom, SeabedColumn, SedimentLayer,
 )
@@ -486,3 +487,487 @@ class TestElasticLayerFollowsSlopingBathymetry:
             assert len(segs) == 1, kind
 
 
+
+
+class TestProfileSectionsAreAllReachable:
+    """``profl`` reads exactly ONE section marker per call
+    (``ramgeo1.5.f:195``, defaulted at ``:194``), ``updat`` re-enters it only
+    ``if(r.ge.rp)``
+    (``:359``), and the march calls ``updat`` once per range step
+    (``:78-84``). So at most one section is consumed per ``dr``, and because
+    ``profl`` reads *sequentially* from the deck, sections closer together
+    than ``dr`` are never reached at all — the march falls permanently
+    behind and every later section is lost.
+
+    The run still exits 0 and writes a full grid, computed from a truncated
+    environment: measured at up to 8.75 dB with 101 sections written and 19
+    reachable. ``ram.pdf`` p.8 states the rule — "The size of the smallest
+    region is an upper bound on Delta-r."
+    """
+
+    @staticmethod
+    def _env(n_cols):
+        r_ax = np.linspace(0.0, 10000.0, n_cols)
+        c = np.where(r_ax < 5000.0, 1500.0, 1400.0)
+        return Environment(
+            bathymetry=220.0,
+            ssp=SoundSpeedProfile(depths=[0.0, 220.0],
+                                  data=np.vstack([c, c]), ranges=r_ax),
+            bottom=Bottom.from_halfspace(BoundaryProperties(
+                sound_speed=1700.0, density=1.8, attenuation=0.5)),
+        )
+
+    def _segments(self, n_cols):
+        m = RAM(backend='ramgeo', dz=2.0, zmax=700.0, verbose=False)
+        return m, m._collins_range_segments(self._env(n_cols), 'ramgeo',
+                                            700.0, 50.0)
+
+    @pytest.mark.parametrize('n_cols', [21, 51, 101, 201])
+    def test_every_section_is_reachable_within_the_march(self, n_cols):
+        m, segs = self._segments(n_cols)
+        markers = sorted({float(s['range']) for s in segs})
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            dr = m._constrain_dr_to_sections(500.0, segs, pinned=False)
+        assert int(10000.0 / dr) >= len(markers) - 1, (
+            f'{len(markers)} sections but only {int(10000.0/dr)} range steps '
+            f'— the surplus would be silently dropped')
+
+    def test_a_coarse_environment_leaves_dr_alone(self):
+        # The discriminating counterpart: when the sections are already
+        # further apart than dr there is nothing to constrain, and dr must
+        # come back untouched rather than be clamped on every run.
+        m, segs = self._segments(3)
+        assert m._constrain_dr_to_sections(10.0, segs, pinned=False) == 10.0
+
+    def test_a_pinned_dr_warns_rather_than_being_changed_in_silence(self):
+        # Single-config rule: uacpy may not quietly rewrite a knob the user
+        # set. It still reduces dr — wrong numbers are worse than a warning.
+        m, segs = self._segments(101)
+        with pytest.warns(UserWarning, match='silently dropped'):
+            dr = m._constrain_dr_to_sections(500.0, segs, pinned=True)
+        assert dr < 500.0
+
+
+class TestSeafloorOutsideTheGrid:
+    """``ram.pdf`` p.7 puts the grid bottom "well below the ocean bottom
+    interface". Nothing enforces it — ``ramgeo1.5.f:133-135`` clamps
+    ``iz=min(nz,iz)`` and ``rams0.5.f:135`` does not clamp at all — so a
+    pinned ``zmax`` above the seafloor runs happily and returns numbers up to
+    27.0 dB from an equivalent run with the seabed inside the grid."""
+
+    ENV = Environment(
+        bathymetry=220.0,
+        ssp=SoundSpeedProfile(depths=[0.0, 220.0], data=[1500.0, 1500.0]),
+        bottom=Bottom.from_halfspace(BoundaryProperties(
+            sound_speed=1700.0, density=1.8, attenuation=0.5)))
+
+    def _model(self, zmax):
+        return RAM(backend='ramgeo', zmax=zmax, dz=2.0, dr=50.0, verbose=False)
+
+    def test_pinned_zmax_above_the_seafloor_warns(self):
+        with pytest.warns(UserWarning, match='outside the PE grid'):
+            self._model(100.0)._warn_if_seafloor_outside_grid(100.0, self.ENV)
+
+    def test_a_grid_that_clears_the_seafloor_is_silent(self):
+        # The discriminating counterpart — this must not warn on every run.
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            self._model(700.0)._warn_if_seafloor_outside_grid(700.0, self.ENV)
+
+    def test_an_auto_zmax_is_never_flagged(self):
+        # _compute_zmax clears the seafloor by construction, so only a pinned
+        # value can reach the guard.
+        m = RAM(backend='ramgeo', dz=2.0, dr=50.0, verbose=False)
+        assert m.zmax is None
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            m.run(self.ENV, Source(depths=100.0, frequencies=50.0),
+                  Receiver(depths=[50.0], ranges=np.array([1000.0, 2000.0])))
+
+
+class TestSourceAgainstTheDepressedSurface:
+    """``matrc`` zeroes every row down to ``izsrf``
+    (``ramsurf1.5.f:281-290``) while ``selfs`` plants the source without
+    consulting it (``:396-400``), so a source inside the depression yields an
+    identically-zero field. ``_clamp_collins_envelope`` cannot catch it:
+    ``|u| = 0`` is a large POSITIVE TL, not a negative or NaN one."""
+
+    @staticmethod
+    def _surface(depth, partial=False):
+        return ([(0.0, 0.0), (5000.0, depth), (10000.0, depth)] if partial
+                else [(0.0, depth), (10000.0, depth)])
+
+    def _model(self):
+        return RAM(backend='ramsurf', zmax=700.0, dz=2.0, dr=50.0,
+                   verbose=False)
+
+    def test_source_inside_the_depression_at_r0_is_refused(self):
+        with pytest.raises(ConfigurationError, match='identically zero'):
+            self._model()._check_source_below_depressed_surface(
+                self._surface(30.0), 10.0, 2.0)
+
+    def test_a_keel_deeper_than_the_source_further_along_only_warns(self):
+        # The dangerous variant: the field dies partway and reads as a
+        # shadow zone. The near field is still meaningful, so warn.
+        with pytest.warns(UserWarning, match='shadow zone'):
+            self._model()._check_source_below_depressed_surface(
+                self._surface(30.0, partial=True), 10.0, 2.0)
+
+    def test_the_message_states_the_observable_not_inf(self):
+        # outpt adds eps=1e-20 before the log (ramsurf1.5.f:101), so a dead
+        # field reports ~414-437 dB. Telling the user to look for inf sends
+        # them after something that never appears.
+        with pytest.raises(ConfigurationError) as exc:
+            self._model()._check_source_below_depressed_surface(
+                self._surface(30.0), 10.0, 2.0)
+        msg = str(exc.value)
+        assert '414-437 dB' in msg, 'the message must name the observable'
+        assert 'eps=1e-20' in msg, 'and why it is not inf'
+
+    def test_a_source_below_every_depression_is_silent(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            self._model()._check_source_below_depressed_surface(
+                self._surface(30.0), 100.0, 2.0)
+
+
+class TestSeafloorGuardCoversEveryBackend:
+    """The seabed-outside-the-grid pathology is not Collins-specific.
+    mpiramS clamps the seafloor index identically —
+    ``mpiramS/src/ram.f90:101`` ``iz=min(nz,iz)`` against
+    ``ramgeo1.5.f:135`` — so a guard wired only into the Collins grid
+    resolver leaves a reachable, silent ~29 dB error on the other backend.
+    A correct helper does not bound its consumers; the check belongs on the
+    funnel both paths share."""
+
+    ENV = Environment(
+        bathymetry=220.0,
+        ssp=SoundSpeedProfile(depths=[0.0, 220.0], data=[1500.0, 1500.0]),
+        bottom=Bottom.from_halfspace(BoundaryProperties(
+            sound_speed=1700.0, density=1.8, attenuation=0.5)))
+
+    @pytest.mark.parametrize('backend', ['ramgeo', 'ramsurf', 'rams',
+                                         'mpiramS'])
+    def test_a_pinned_zmax_below_the_seafloor_warns_on_every_backend(
+            self, backend):
+        m = RAM(backend=backend, zmax=200.0, dz=2.0, dr=50.0, verbose=False)
+        with pytest.warns(UserWarning, match='outside the PE grid'):
+            m._compute_zmax(self.ENV, 50.0)
+
+    @pytest.mark.parametrize('backend', ['ramgeo', 'mpiramS'])
+    def test_a_grid_that_clears_the_seafloor_stays_silent(self, backend):
+        m = RAM(backend=backend, zmax=1500.0, dz=2.0, dr=50.0, verbose=False)
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            m._compute_zmax(self.ENV, 50.0)
+
+    @pytest.mark.parametrize('dz,zsrf,zs,alive', [
+        (0.7, 30.0, 29.7, True),    # zeroed only to 29.4 — the field survives
+        (0.7, 30.0, 29.0, False),   # inside the zeroed rows
+        (2.0, 30.0, 29.0, False),
+    ])
+    def test_the_band_the_truncation_leaves_alive_is_not_refused(
+            self, dz, zsrf, zs, alive):
+        """``izsrf = 1.0 + zsrf/dz`` (``ramsurf1.5.f:115``) truncates, and
+        ``matrc`` zeroes rows ``1..izsrf`` (``:282``) where row ``i`` sits at
+        ``(i-1)*dz``. The zeroed region therefore ends up to one ``dz``
+        ABOVE ``zsrf``, so comparing against ``zsrf`` itself refuses sources
+        that are measurably alive (84-91 dB at dz=0.7, zsrf=30, zs=29.7)."""
+        m = RAM(backend='ramsurf', zmax=700.0, dz=dz, dr=50.0, verbose=False)
+        surface = [(0.0, zsrf), (10000.0, zsrf)]
+        if alive:
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                m._check_source_below_depressed_surface(surface, zs, dz)
+        else:
+            with pytest.raises(ConfigurationError):
+                m._check_source_below_depressed_surface(surface, zs, dz)
+
+
+class TestRamsSeafloorIndexMustFitTheGrid:
+    """``rams0.5`` alone does not clamp the seafloor index: ``rams0.5.f:135``
+    is a bare ``iz=z/dz`` where ``ramgeo1.5.f:135`` and ``ramsurf1.5.f:120``
+    both apply ``min(nz,iz)``. Past ``nz`` the fluid-solid stencil at
+    ``rams0.5.f:590`` reads ``lamw(iz+2)`` — one slot beyond ``profl``'s
+    initialised ``1..nz+2`` (``:200-205``) — and divides by an unwritten
+    element, so the **whole field** returns NaN from a run that exits 0.
+
+    Measured on three independent grids, the boundary is exactly
+    ``iz = nz+1``. The fluid backends clamp and degrade to "seafloor at the
+    grid bottom", returning usable numbers, so only rams is fatal.
+
+    The condition is on the INDEX, not the depth: ``nz = zmax/dz - 0.5`` and
+    ``iz = z/dz``, so a ``zmax`` up to half a cell below the seabed clears a
+    naive ``zmax > depth`` test and still dies — measured, ``zmax=200.3`` over
+    a 200 m seabed with ``dz=1``.
+    """
+
+    ENV = Environment(
+        bathymetry=200.0,
+        ssp=SoundSpeedProfile(depths=[0.0, 200.0], data=[1500.0, 1500.0]),
+        bottom=Bottom.from_halfspace(BoundaryProperties(
+            sound_speed=1800.0, density=2.0, attenuation=0.1,
+            shear_speed=800.0, shear_attenuation=0.2)))
+
+    def _model(self, backend, zmax):
+        return RAM(backend=backend, zmax=zmax, dz=1.0, dr=25.0, verbose=False)
+
+    def test_rams_refuses_a_zmax_that_pushes_iz_past_nz(self):
+        # 0.3 m below the seabed: zmax > depth, so a depth-only test passes.
+        with pytest.raises(ConfigurationError, match='iz > nz|does not.*clamp'):
+            self._model('rams', 200.3)._resolve_collins_grid(
+                self.ENV, 100.0, 'rams', 6000.0, None, None, None)
+
+    def test_half_a_cell_more_is_accepted(self):
+        # The discriminating counterpart: iz == nz is in-domain and the run
+        # returns finite numbers. The guard must not creep upward.
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            self._model('rams', 200.6)._resolve_collins_grid(
+                self.ENV, 100.0, 'rams', 6000.0, None, None, None)
+
+    @pytest.mark.parametrize('backend', ['ramgeo', 'ramsurf'])
+    def test_the_clamped_backends_only_warn(self, backend):
+        # They apply min(nz,iz) and return usable numbers, so refusing them
+        # would reject a run that works.
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            self._model(backend, 200.3)._resolve_collins_grid(
+                self.ENV, 100.0, backend, 6000.0, None, None, None)
+
+
+class TestRamsSeafloorIndexFloor:
+    """The counterpart to the upper bound: ``rams0.5`` clamps ``iz`` at
+    neither end. Below 2 it indexes before the start of its own arrays —
+    ``matrc:418`` reads ``lamw(0)`` and ``matrc:717`` forms ``i0=2*iz-3=-1``
+    to read ``r5(0)``. A bounds-checked build aborts; the shipped ``-O2``
+    build exits 0 and returns a **fully finite, plausible** field, which is
+    what makes it worth refusing rather than warning about.
+
+    ``updat`` recomputes the index from the interpolated bathymetry at every
+    range step (``rams0.5.f:305``), so the SHALLOWEST point on the track
+    decides it. Every other depth guard in the class is written against
+    ``env.depth`` — the deepest — which is why this one exists separately and
+    why the case is reachable with no pinned knobs at all: uacpy's auto ``dz``
+    scales with wavelength, so at 10 Hz ``dz`` is 5.7 m and any shelf below
+    11.4 m trips it.
+    """
+
+    @staticmethod
+    def _env(shelf):
+        return Environment(
+            bathymetry=Bathymetry(ranges=[0.0, 8000.0, 20000.0],
+                                  depths=[200.0, shelf, shelf]),
+            ssp=SoundSpeedProfile(depths=[0.0, 200.0], data=[1500.0, 1500.0]),
+            bottom=Bottom.from_halfspace(BoundaryProperties(
+                sound_speed=1800.0, density=2.0, attenuation=0.1,
+                shear_speed=800.0, shear_attenuation=0.2)))
+
+    # 20 m, not 3 m: at 10 Hz the auto dz is 5.7 m, so a 3 m source lands in
+    # row 1 and trips the source-row guard instead of the one under test.
+    SRC = Source(depths=20.0, frequencies=10.0)
+    RCV = Receiver(depths=[3.0, 6.0], ranges=np.linspace(1000.0, 15000.0, 15))
+
+    @pytest.mark.parametrize('shelf', [8.0, 3.0])
+    def test_a_shoaling_track_that_drives_iz_below_two_is_refused(self, shelf):
+        # 8 m is the dangerous one: it used to return 30/30 finite values
+        # with no warning while reading out of bounds.
+        with pytest.raises(ConfigurationError, match='shoals'):
+            RAM(backend='rams', verbose=False).run(
+                self._env(shelf), self.SRC, self.RCV)
+
+    @pytest.mark.parametrize('shelf', [40.0, 14.0])
+    def test_a_track_that_stays_above_two_cells_still_runs(self, shelf):
+        # The discriminating counterpart — iz >= 2 is in-domain and must not
+        # be refused.
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            f = RAM(backend='rams', verbose=False).run(
+                self._env(shelf), self.SRC, self.RCV)
+        assert np.isfinite(f.db).all()
+
+    def test_the_clamped_backends_are_unaffected(self):
+        # ramgeo applies max(2,iz) (ramgeo1.5.f:134), so the same track is
+        # fine there and refusing it would be wrong.
+        env = Environment(
+            bathymetry=Bathymetry(ranges=[0.0, 8000.0, 20000.0],
+                                  depths=[200.0, 8.0, 8.0]),
+            ssp=SoundSpeedProfile(depths=[0.0, 200.0], data=[1500.0, 1500.0]),
+            bottom=Bottom.from_halfspace(BoundaryProperties(
+                sound_speed=1800.0, density=2.0, attenuation=0.1)))
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            RAM(backend='ramgeo', verbose=False).run(env, self.SRC, self.RCV)
+
+
+class TestSubBottomMarginIsEnoughForTheAbsorber:
+    """``ram.pdf`` p.7 asks for the grid bottom "well below the ocean bottom
+    interface", with the attenuation raised "over the lower few wavelengths".
+    A guard keyed on ``zmax > env.depth`` draws its line where the error has
+    already saturated: measured on ramgeo over a 220 m seabed against an
+    ample grid, ``zmax=220`` is 27.0 dB (caught) but ``zmax=222`` — two
+    metres of sub-bottom — is 16.0 dB and used to pass in silence.
+
+    The threshold is three wavelengths, calibrated against that curve rather
+    than assumed: it must stay silent where the error is negligible."""
+
+    ENV = Environment(
+        bathymetry=220.0,
+        ssp=SoundSpeedProfile(depths=[0.0, 220.0], data=[1500.0, 1500.0]),
+        bottom=Bottom.from_halfspace(BoundaryProperties(
+            sound_speed=1700.0, density=1.8, attenuation=0.5)))
+
+    def _warns(self, zmax):
+        m = RAM(backend='ramgeo', zmax=zmax, dz=2.0, dr=50.0, verbose=False)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            m._warn_if_seafloor_outside_grid(zmax, self.ENV, dz=2.0,
+                                             kind='ramgeo', freq=50.0)
+        return any('grid' in str(w.message) or 'absorbing' in str(w.message)
+                   for w in caught)
+
+    @pytest.mark.parametrize('zmax,measured_db', [(300.0, 3.1), (222.0, 16.0),
+                                                  (220.0, 27.0)])
+    def test_a_thin_sub_bottom_margin_warns(self, zmax, measured_db):
+        assert self._warns(zmax), f'{measured_db} dB error passed in silence'
+
+    @pytest.mark.parametrize('zmax,measured_db', [(700.0, 0.32), (1500.0, 0.0)])
+    def test_an_ample_margin_stays_silent(self, zmax, measured_db):
+        # The discriminating half. Comparing against uacpy's own 20-lambda
+        # auto pad would fire here, at 0.32 dB — a warning users would learn
+        # to ignore.
+        assert not self._warns(zmax), \
+            f'{measured_db} dB error warned — the threshold is too eager'
+
+
+class TestSourceRowIsActuallySolved:
+    """Every RAM binary plants the source with ``si=1.0+zs/dz`` / ``is=ifix(si)``
+    and splits it across ``u(is)``, ``u(is+1)`` (``ramgeo1.5.f:389-393``,
+    ``ramsurf1.5.f:396-400``, ``rams0.5.f:357-361``,
+    ``mpiramS/src/ram.f90:110-114``), and every solver sweeps from row 2
+    (``ramgeo1.5.f:312``, ``rams0.5.f:836``, ``solvetri.f90:47``).
+
+    So ``zs < dz`` freezes part of the source in ``u(1)`` for the whole march,
+    where it acts as a permanent Dirichlet source on the pressure-release
+    surface: the field gets *louder* as the source approaches the surface,
+    which is backwards. Measured against **Kraken** as an independent arbiter
+    — never backend-vs-backend — at ~46 dB mean and 72 dB peak on uacpy's own
+    default grid, silent on every backend.
+
+    This is the flat-surface case of the row-1 kill that
+    ``_check_source_below_depressed_surface`` catches for a ramsurf keel; it
+    needs no altimetry and is not ramsurf-specific.
+    """
+
+    @staticmethod
+    def _env(elastic=False, altimetry=False):
+        bp = (BoundaryProperties(sound_speed=1800.0, density=2.0,
+                                 attenuation=0.1, shear_speed=800.0,
+                                 shear_attenuation=0.2) if elastic else
+              BoundaryProperties(sound_speed=1700.0, density=1.8,
+                                 attenuation=0.5))
+        kw = {}
+        if altimetry:
+            kw['altimetry'] = Altimetry(ranges=[0.0, 5000.0],
+                                        heights=[0.0, 0.0])
+        return Environment(
+            bathymetry=100.0,
+            ssp=SoundSpeedProfile(depths=[0.0, 100.0], data=[1500.0, 1500.0]),
+            bottom=Bottom.from_halfspace(bp), **kw)
+
+    RCV = Receiver(depths=[10.0, 50.0, 90.0],
+                   ranges=np.linspace(500.0, 5000.0, 10))
+
+    @pytest.mark.parametrize('backend', ['ramgeo', 'ramsurf', 'rams',
+                                         'mpiramS'])
+    def test_a_source_inside_the_first_cell_is_refused(self, backend):
+        env = self._env(elastic=(backend == 'rams'),
+                        altimetry=(backend == 'ramsurf'))
+        with pytest.raises(ConfigurationError, match='shallower than one'):
+            RAM(backend=backend, verbose=False).run(
+                env, Source(depths=0.5, frequencies=100.0), self.RCV)
+
+    @pytest.mark.parametrize('backend', ['ramgeo', 'mpiramS'])
+    def test_a_source_below_the_first_cell_still_runs(self, backend):
+        # The discriminating counterpart.
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            f = RAM(backend=backend, verbose=False).run(
+                self._env(), Source(depths=25.0, frequencies=100.0), self.RCV)
+        assert np.isfinite(f.db).any()
+
+    def test_the_guard_is_keyed_to_dz_not_to_a_fixed_depth(self):
+        # A 0.5 m source is fine once dz is small enough to resolve it — the
+        # bound is the mechanism (is >= 2), not an absolute shallow-source
+        # rule.
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            f = RAM(backend='ramgeo', dz=0.1, dr=50.0, verbose=False).run(
+                self._env(), Source(depths=0.5, frequencies=100.0), self.RCV)
+        assert np.isfinite(f.db).any()
+
+
+class TestEveryPerRangeStreamBoundsDr:
+    """``updat`` advances three indices one step per range step: the profile
+    marker (``if(r.ge.rp)``), the bathymetry index
+    (``ramgeo1.5.f:348`` ``if(r.ge.rb(ib+1))ib=ib+1``) and, on ramsurf, the
+    altimetry index (``ramsurf1.5.f:346``). Bounding only the first lets the
+    other two fall behind, after which the seafloor is linearly extrapolated
+    from a pair of points far astern — range dependence silently lost.
+
+    Reachable on the default path: auto ``dr`` is 216 m at 25 Hz, so any
+    EMODnet-DTM-resolution bathymetry (~115 m) trips it.
+    """
+
+    @staticmethod
+    def _bathy(n):
+        r = np.linspace(0.0, 5000.0, n)
+        d = np.interp(r, [0.0, 2000.0, 3500.0, 5000.0],
+                      [100.0, 100.0, 60.0, 100.0])
+        return Bathymetry(ranges=r, depths=d)
+
+    def _model(self):
+        return RAM(backend='ramgeo', dz=0.5, verbose=False)
+
+    def test_bathymetry_finer_than_dr_bounds_dr(self):
+        env = Environment(
+            bathymetry=self._bathy(101),          # 50 m spacing
+            ssp=SoundSpeedProfile(depths=[0.0, 100.0], data=[1500.0, 1500.0]),
+            bottom=Bottom.from_halfspace(BoundaryProperties(
+                sound_speed=1700.0, density=1.8, attenuation=0.5)))
+        m = self._model()
+        segs = m._collins_range_segments(env, 'ramgeo', 200.0, 100.0)
+        bathy = [float(x) for x, _ in env.bathymetry.to_pairs().tolist()]
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            out = m._constrain_dr_to_sections(250.0, segs, pinned=False,
+                                              bathymetry_ranges=bathy)
+        assert out == pytest.approx(50.0)
+
+    def test_coarse_bathymetry_leaves_dr_alone(self):
+        env = Environment(
+            bathymetry=self._bathy(11),           # 500 m spacing
+            ssp=SoundSpeedProfile(depths=[0.0, 100.0], data=[1500.0, 1500.0]),
+            bottom=Bottom.from_halfspace(BoundaryProperties(
+                sound_speed=1700.0, density=1.8, attenuation=0.5)))
+        m = self._model()
+        segs = m._collins_range_segments(env, 'ramgeo', 200.0, 100.0)
+        bathy = [float(x) for x, _ in env.bathymetry.to_pairs().tolist()]
+        assert m._constrain_dr_to_sections(
+            250.0, segs, pinned=False, bathymetry_ranges=bathy) == 250.0
+
+    def test_a_constructor_pinned_dr_warns_before_being_changed(self):
+        # Single-config rule: dr set on __init__ is as user-set as one passed
+        # to run(), and must not be rewritten in silence.
+        env = Environment(
+            bathymetry=self._bathy(101),
+            ssp=SoundSpeedProfile(depths=[0.0, 100.0], data=[1500.0, 1500.0]),
+            bottom=Bottom.from_halfspace(BoundaryProperties(
+                sound_speed=1700.0, density=1.8, attenuation=0.5)))
+        m = RAM(backend='ramgeo', dr=250.0, dz=0.5, verbose=False)
+        segs = m._collins_range_segments(env, 'ramgeo', 200.0, 100.0)
+        bathy = [float(x) for x, _ in env.bathymetry.to_pairs().tolist()]
+        with pytest.warns(UserWarning, match='silently dropped'):
+            m._constrain_dr_to_sections(250.0, segs, pinned=True,
+                                        bathymetry_ranges=bathy)

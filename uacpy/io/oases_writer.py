@@ -6,6 +6,8 @@ This module provides functions for writing input files for OASES models:
 - OASN: Noise/covariance module (also used for normal mode computation)
 - OASR: Plane-wave reflection-coefficient module
 - OASP: Pulse / broadband transfer-function module
+- OASS: Reverberation / scattered-field statistics from rough interfaces
+- OASSP: Broadband realizations of the scattered field
 
 OASES (Ocean Acoustics and Seismic Exploration Synthesis) was developed by
 Henrik Schmidt at MIT.
@@ -18,13 +20,14 @@ References:
 
 import warnings
 from pathlib import Path
-from typing import Callable, List, Optional, TextIO, Tuple, Union
+from typing import (Callable, List, Mapping, Optional, Sequence, TextIO,
+                    Tuple, Union)
 import numpy as np
 
 from uacpy.core.environment import BoundaryProperties, Environment
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
-from uacpy.core.exceptions import ConfigurationError
+from uacpy.core.exceptions import ConfigurationError, UnsupportedFeatureError
 from uacpy.io.utils import equally_spaced
 from uacpy.io.units import m_to_km
 from uacpy.io.oalib_writer import writable_layers
@@ -135,6 +138,7 @@ def _extract_bottom_props(bottom: BoundaryProperties) -> dict:
 
 def _emit_water_layers(
     f: TextIO, ssp_rows, *, surface_roughness: float, extra_columns: int,
+    surface_suffix: Optional[str] = None,
 ) -> None:
     """Emit one OASES layer record per SSP sample, top down.
 
@@ -170,6 +174,14 @@ def _emit_water_layers(
         rg = float(surface_roughness) if i == 0 else 0.0
         if i == 0:
             _warn_rough_gradient_surface(rg, float(c), cs)
+            if surface_suffix is not None:
+                # The sea surface is the scattering interface: its record
+                # carries the nine-token -|RG| CL M form instead of a bare
+                # RMS, and the trailing IG column is dropped because INENVI
+                # re-reads the record as nine (oaseun31.f:91-93).
+                f.write(f"{d:.2f} {c:.2f} {cs:.2f} 0.0 0 1.0"
+                        f"{surface_suffix}\n")
+                continue
         f.write(f"{d:.2f} {c:.2f} {cs:.2f} 0.0 0 1.0 {rg:.4f}{trail}\n")
 
 
@@ -296,6 +308,22 @@ def _emit_bottom_layers(
             f.write(f"{current_depth:.2f} {layer.sound_speed:.2f} "
                     f"{layer.shear_speed:.2f} {layer.attenuation:.3f} "
                     f"{layer_as:.3f} {layer.density:.2f}{suffix_fn(iface)}\n")
+            # The depth column is "%.2f", so a layer thinner than 5 mm puts
+            # the next record at the SAME formatted depth. INENVI rejects only
+            # a decreasing depth (oaseun31.f:61-64), so equal depths pass and
+            # THICK(I) comes out 0 (:1508) — the layer is silently dropped.
+            # Nothing measurable is lost at that thickness (it is far below
+            # lambda/100 in any usable band); the warning exists because the
+            # request vanishes without trace.
+            if f"{current_depth:.2f}" == f"{current_depth + layer.thickness:.2f}":
+                warnings.warn(
+                    f"OASES layer record: a sediment layer {layer.thickness:g} "
+                    f"m thick is below the 0.01 m resolution of the deck's "
+                    f"depth column, so it is written at the same depth as the "
+                    f"layer below and OASES computes THICK=0 "
+                    f"(oaseun31.f:1508) — the layer is dropped.",
+                    UserWarning, stacklevel=2,
+                )
             current_depth += layer.thickness
             iface += 1
         # Deepest halfspace below all sediment layers.
@@ -343,6 +371,136 @@ def _bottom_interface_roughness(env: Environment) -> List[float]:
     rgs.append(_check_roughness_sign("env.bottom halfspace roughness",
                                      getattr(hs, 'roughness', 0.0) or 0.0))
     return rgs
+
+
+#: Smallest |RG| the OASES layer record can carry. The record formats RG with
+#: "%.4f", so anything below this renders as "-0.0000" and fails INENVI's
+#: ``rough(m).lt.-1e-10`` test (oaseun31.f:72) — the negative-RG flag is lost
+#: and the interface silently becomes smooth.
+_MIN_REPRESENTABLE_RG = 5e-5
+
+
+def _make_roughness_tail(
+    env: Environment,
+    interface_roughness=None,
+) -> Callable[[int], str]:
+    """Build the ``suffix_fn`` :func:`_emit_bottom_layers` appends to each
+    layer record — the interface-roughness tail.
+
+    ``_check_roughness_sign`` rejects a negative RG for the writers that can
+    only express an RMS value, which is right for them and wrong for the
+    scattering modules: OASES flags "a correlation length and spectral
+    exponent follow" precisely *by* making RG negative
+    (``oaseun31.f:72-75``, ``:91-93``), so a rough interface with a finite
+    correlation length is the nine-token form
+    ``D CC CS AC AS RO -|RG| CL M``. Every writer that needs that arity gets
+    it from here rather than reimplementing the split.
+
+    ``interface_roughness`` is the per-interface override, indexed the way
+    ``_emit_bottom_layers`` indexes interfaces; ``None`` entries and indices
+    past its end fall back to the environment's own roughness so the deck
+    describes the same interfaces the other writers would emit. Only the
+    override can reach the CL / M form.
+
+    Each entry may be a scalar (RMS only), a ``(RG, CL, M)`` tuple, or a dict
+    keyed ``RG``/``CL``/``M`` (or the spelled-out
+    ``roughness``/``correlation_length``/``spectral_exponent``).
+    """
+    if interface_roughness is None:
+        interface_roughness = []
+    env_rg = [0.0] + _bottom_interface_roughness(env)
+
+    is_mapping = isinstance(interface_roughness, Mapping)
+
+    def _roughness_tail(i: int) -> str:
+        def _from_env():
+            return f" {env_rg[i]:.4f}" if 0 <= i < len(env_rg) else " 0"
+
+        # A mapping is sparse — only the interfaces it names are overridden —
+        # so membership decides, not length. Testing length on a mapping
+        # silently drops every entry whose key is >= the number of entries,
+        # which is the usual case when one deep interface is overridden.
+        if is_mapping:
+            if i not in interface_roughness:
+                return _from_env()
+        elif i < 0 or i >= len(interface_roughness):
+            return _from_env()
+        spec = interface_roughness[i]
+        if spec is None:
+            return _from_env()
+        if isinstance(spec, (int, float)):
+            return f" {float(spec):.4f}"
+        if isinstance(spec, dict):
+            rg = spec.get('RG', spec.get('roughness', 0.0))
+            cl = spec.get('CL', spec.get('correlation_length', None))
+            m = spec.get('M', spec.get('spectral_exponent', None))
+        else:  # tuple / list
+            rg = spec[0] if len(spec) > 0 else 0.0
+            cl = spec[1] if len(spec) > 1 else None
+            m = spec[2] if len(spec) > 2 else None
+        if cl is None or m is None:
+            return f" {float(rg):.4f}"
+        # Negative RG is the flag that CL and M follow on the same record —
+        # but only if it SURVIVES formatting. INENVI gates the extended
+        # re-read on ``rough(m).lt.-1e-10`` (oaseun31.f:72), and "%.4f"
+        # renders every |RG| < 5e-5 m as "-0.0000", which fails that test.
+        # The deck still carries nine tokens so nothing shifts; INENVI simply
+        # takes the seven-token read, sets clen(m)=0 (:102) and promotes it to
+        # CLEN=1E6 (:111-114) — an infinite correlation length. Downstream
+        # RG2 is 0 (oaseun31.f:379), the integration constant FF is
+        # identically zero (oassun26.f:697), and the run exits 0 having
+        # produced a flat clipped level. Refuse the value the format cannot
+        # carry rather than emit a deck that means the opposite of the
+        # request.
+        if abs(float(rg)) < _MIN_REPRESENTABLE_RG:
+            raise ConfigurationError(
+                f"interface roughness |RG| = {abs(float(rg)):.3g} m is below "
+                f"{_MIN_REPRESENTABLE_RG:g} m, the smallest magnitude the "
+                f"OASES layer record's %.4f field can carry. It would be "
+                f"written as -0.0000, which INENVI reads as a SMOOTH "
+                f"interface with an infinite correlation length "
+                f"(oaseun31.f:72, :111-114) — the scattering integral is then "
+                f"identically zero and the run returns a flat level with no "
+                f"error.",
+                remediation=("Use a roughness of at least 1e-4 m, or model a "
+                             "smooth interface by not requesting a roughness "
+                             "spectrum at all."),
+            )
+        # CL rides the SAME "%.4f" as RG, and its failure is worse than a
+        # lost flag: INENVI reads 0.0 and then promotes it to an INFINITE
+        # correlation length (oaseun31.f:111-113 `IF (CLEN(M).EQ.0.0) …
+        # CLEN(M)=1E6`). Measured, a CL=1e-5 deck produces a .rco
+        # bit-identical to a hand-written CL=1e6 deck — 11 orders of
+        # magnitude, exit 0, no warning; > 6.2 dB of reflection loss by
+        # extrapolation from the 0.01 m case.
+        if abs(float(cl)) < _MIN_REPRESENTABLE_RG:
+            raise ConfigurationError(
+                f"correlation_length = {float(cl):.3g} m is below "
+                f"{_MIN_REPRESENTABLE_RG:g} m, the smallest magnitude the "
+                f"OASES layer record's %.4f field can carry. It would be "
+                f"written as 0.0000, which INENVI promotes to an INFINITE "
+                f"correlation length of 1e6 m (oaseun31.f:111-113) — the "
+                f"opposite of the request, with no error.",
+                remediation="Use a correlation length of at least 1e-4 m.",
+            )
+        # A NEGATIVE CL selects INENVI's twelve-token VOLUME-scattering read
+        # (oaseun31.f:77-79) from a record that carries nine. The
+        # list-directed read runs on into the following record and the whole
+        # deck shifts: measured, the source line is consumed and the binary
+        # dies naming a frequency the user never set. This is the same class
+        # _check_roughness_sign refuses for RG on the eight-token writers.
+        if float(cl) < 0.0:
+            raise ConfigurationError(
+                f"correlation_length = {float(cl):.3g} m is negative. OASES "
+                f"reads a negative CL as the flag for a twelve-token "
+                f"volume-scattering record (oaseun31.f:77-79), so the "
+                f"nine-token record written here would be over-read and the "
+                f"rest of the deck consumed with it.",
+                remediation="Pass a positive correlation length.",
+            )
+        return f" {-abs(float(rg)):.4f} {float(cl):.4f} {float(m):.4f}"
+
+    return _roughness_tail
 
 
 def _resolve_freq_sweep(
@@ -505,6 +663,83 @@ def _noise_nw(kwargs) -> str:
     return " ".join(str(v) for v in _OASN_NOISE_SAMPLES)
 
 
+def _emit_receiver_array(
+    f: TextIO,
+    receiver: Receiver,
+    *,
+    receiver_types=None,
+    receiver_gains=None,
+    writer: str = 'write_oases_input',
+) -> None:
+    """Emit the ``NRCV`` count and the ``Z X Y ITYP GAIN`` array records.
+
+    ``INPRCV`` (``oasnun22.f:30``, ``:36``) is shared by OASN and OASS, so
+    both decks carry this block verbatim: a count, then one record per
+    element consumed by a **single** list-directed read of ``5·NRCV`` values.
+    Line breaks inside it are therefore free, and one element per line is the
+    readable choice.
+
+    Coordinates are metres (``oasn.tex:47-49``); uacpy places its array on
+    the z axis, so ``X = Y = 0``. ``ITYP`` indexes ``CRTYP`` = HYDROP /
+    X-GEOP / Y-GEOP / Z-GEOP (``oasnun22.f:18``), so 1 is a hydrophone.
+
+    In OASS this column does double duty: there is no field-parameter option
+    letter, and ``oasnun22.f:97-118`` derives ``IOUT``/``NOUT`` from these
+    types instead. Mixing them then trips ``unoass21.f:165-169``
+    ``STOP '*** INTEGRATION ONLY ALLOWED FOR ONE FIELD PARAMETER ***'`` — a
+    hard stop with no output and no diagnostic uacpy could attribute — so a
+    mixed array is refused here, before the deck is written.
+    """
+    depths = np.atleast_1d(np.asarray(receiver.depths, dtype=float))
+    n = len(depths)
+    _check_receiver_depth_count(n)
+
+    if receiver_types is None:
+        types = [1] * n
+    else:
+        types = [int(t) for t in np.atleast_1d(receiver_types)]
+        if len(types) == 1:
+            types = types * n
+        if len(types) != n:
+            raise ConfigurationError(
+                f"{writer}: receiver_types has {len(types)} entries but the "
+                f"array has {n} elements; pass one per element or a single "
+                f"value for all."
+            )
+    unknown = sorted({t for t in types if t not in (1, 2, 3, 4)})
+    if unknown:
+        raise ConfigurationError(
+            f"{writer}: receiver_types {unknown} are not OASES receiver "
+            f"types; valid are 1 (hydrophone), 2 (x-geophone), "
+            f"3 (y-geophone), 4 (z-geophone) — oasnun22.f:18."
+        )
+    if len(set(types)) > 1:
+        raise ConfigurationError(
+            f"{writer}: receiver_types mixes {sorted(set(types))}, but the "
+            f"array must be all one type — the receiver type selects the "
+            f"field parameter (oasnun22.f:97-118) and a mixed array trips "
+            f"'INTEGRATION ONLY ALLOWED FOR ONE FIELD PARAMETER' "
+            f"(unoass21.f:165-169), which stops the binary with no output."
+        )
+
+    if receiver_gains is None:
+        gains = [0.0] * n
+    else:
+        gains = [float(g) for g in np.atleast_1d(receiver_gains)]
+        if len(gains) == 1:
+            gains = gains * n
+        if len(gains) != n:
+            raise ConfigurationError(
+                f"{writer}: receiver_gains has {len(gains)} entries but the "
+                f"array has {n} elements; pass one per element or a single "
+                f"value for all."
+            )
+
+    f.write(f"{n}\n")
+    for z, t, g in zip(depths, types, gains):
+        f.write(f"{z:.2f} 0 0 {t} {g:g}\n")
+
+
 def _oases_nw_line(nw_samples, icut2_auto: int) -> str:
     """``NW ICUT1 ICUT2`` wavenumber-sampling line.
 
@@ -636,6 +871,21 @@ _UNWRITTEN_OPTION_BLOCKS = {
               'oaseun31.f:3757-3758'),
     },
     'write_oasr_input': {},
+    'write_oassp_input': {
+        'd': ("the Doppler frequency line's ISTYP VSOU VREC tokens",
+              'unoassp30.f:136'),
+        'G': ('a dispersion-curve block (NMODES, then two axis rows)',
+              'unoassp30.f:397-400'),
+        'T': ('two extra receiver-line tokens ZREF and ANGLE for the tilted '
+              'array', 'oaseun31.f:1157-1158'),
+        'Z': ('two velocity-profile plot-axis rows', 'unoassp30.f:469-470'),
+        'l': ('an external source-array file on unit 2 — LS, then LS rows of '
+              'depth/delay/strength', 'oaseun31.f:1074-1087'),
+        'v': ('a source transfer-function file through RDSTRF',
+              'oaseun31.f:1086'),
+        'b': ('a third input file of bistatic data on unit 47',
+              'unoassp30.f:129'),
+    },
 }
 
 
@@ -1478,12 +1728,7 @@ def write_oasn_input(
         # OASN places uacpy's array on the z axis, so X = Y = 0. ITYP indexes
         # CRTYP = HYDROP / X-GEOP / Y-GEOP / Z-GEOP (oasnun22.f:18), so 1 is
         # a hydrophone, and GAIN is per-element gain in dB.
-        n_receivers = len(receiver.depths)
-        _check_receiver_depth_count(n_receivers)
-        f.write(f"{n_receivers}\n")
-
-        for z in receiver.depths:
-            f.write(f"{z:.2f} 0 0 1 0\n")
+        _emit_receiver_array(f, receiver, writer='write_oasn_input')
 
         # Blocks VI-IX are NOIPAR's, called only under
         # `IF (CALNSE.or.trfout)` (unoasn22.f:173-174).
@@ -1665,24 +1910,9 @@ def write_oasp_input(
     >>> write_oasp_input('pulse.dat', env, source, receiver)
     """
     _reject_unknown_kwargs('write_oasp_input', kwargs, _OASP_KWARGS)
-    filepath = Path(filepath)
 
     # Extract parameters
     center_freq = kwargs.get('center_frequency', float(source.frequencies[0]))
-    depth = env.depth
-
-    # Bottom properties
-    bottom = env.bottom.halfspace_at(range=0.0)
-    _bp = _extract_bottom_props(bottom)
-    rho, c_p, c_s = _bp['rho'], _bp['c_p'], _bp['c_s']
-    alpha_p, alpha_s = _bp['alpha_p'], _bp['alpha_s']
-
-    # Sound speed profile — align to env.depth (see OAST writer).
-    ssp_data = env.ssp.extend_to(depth).to_pairs()
-
-    # Source parameter (receiver depth bookkeeping handled by
-    # ``_receiver_block_lines`` which emits equidistant/explicit as needed).
-    src_depth = float(source.depths[0])
 
     # Frequency and time parameters
     n_time = kwargs.get('n_time_samples', 4096)
@@ -1699,41 +1929,7 @@ def write_oasp_input(
     else:
         dt = 1.0 / (2.0 * freq_max)
 
-    # Range parameters — public API in metres, OASES expects km on disk.
-    r_min_m = float(receiver.ranges.min())
-    r_max_m = float(receiver.ranges.max())
-    r1_km = float(m_to_km(kwargs.get('range_start', r_min_m)))
-
-    if 'range_step' in kwargs:
-        dr_km = float(m_to_km(kwargs['range_step']))
-    else:
-        n_ranges = len(receiver.ranges)
-        if n_ranges > 1:
-            # OASP evaluates r0 + i*dr (unoasp22.f:176 reads R0, RSPACE, NPLOTS
-            # and nothing else), so a non-uniform request cannot be honoured —
-            # it would silently return a different set of ranges than asked
-            # for. OAST warns and interpolates; OASP has no such option.
-            steps = np.diff(np.asarray(receiver.ranges, dtype=float))
-            if not np.allclose(steps, steps[0], rtol=1e-6, atol=1e-9):
-                raise ConfigurationError(
-                    f"OASP evaluates a uniform range axis (r0 + i*dr) but "
-                    f"receiver.ranges is not uniformly spaced (steps "
-                    f"{steps.min():.4g}-{steps.max():.4g} m).",
-                    remediation=(
-                        "Pass uniformly spaced ranges (np.linspace), or run "
-                        "on a uniform grid and interpolate the Field "
-                        "afterwards."),
-                )
-            dr_km = float(m_to_km((r_max_m - r_min_m) / (n_ranges - 1)))
-        else:
-            dr_km = 1.0
-
-    nr = len(receiver.ranges)
-
-    # Wavenumber sampling
-    integration_offset = kwargs.get('integration_offset', 0)
     nw_samples = kwargs.get('nw_samples', -1)  # -1 = automatic
-    cmin, cmax = _oases_wavenumber_bounds(ssp_data, cmax=1e9)
 
     # Options string. Default is single-component (normal stress / pressure)
     # plus the complex-contour integration flag. A second output letter such
@@ -1744,88 +1940,508 @@ def write_oasp_input(
     _reject_unwritten_option_blocks('write_oasp_input', options)
     _reject_tau_p('write_oasp_input', options)
     _check_nw_samples('write_oasp_input', nw_samples, power_of_two=False)
-    source_record = _resolve_source_record(
-        'write_oasp_input', options, kwargs.get('dip_angle'))
+
+    # INTF gates integrand *plots* (unoasp22.f:591
+    # `IF (MOD(JJ-LXP1,INTF).EQ.0) KPLOT=1`, consumed at :678) and, being > 0,
+    # also turns on the .plp/.plt plot files (:173); the .trf carries every bin
+    # LXP1..MX either way. The default 40 is uacpy's own — the manual only
+    # requires INTF >= 0, with 0 disabling the plots (oasp.tex:125, :663-664),
+    # so the default may only apply when the caller supplied nothing at all.
+    intf_arg = kwargs.get('freq_output_increment')
+
+    _write_oasp_family_deck(
+        filepath, env, source, receiver, options,
+        writer='write_oasp_input',
+        title="OASP Simulation via UACPY",
+        center_freq=center_freq,
+        integration_offset=kwargs.get('integration_offset', 0),
+        dip_angle=kwargs.get('dip_angle'),
+        cmax=1e9,
+        nw_samples=nw_samples,
+        block_vii_token4=40 if intf_arg is None else int(intf_arg),
+        n_time=n_time, freq_min=freq_min, freq_max=freq_max, dt=dt,
+        range_start=kwargs.get('range_start'),
+        range_step=kwargs.get('range_step'),
+    )
+
+
+def _oasp_range_axis(writer: str, receiver: Receiver,
+                     range_start, range_step) -> Tuple[float, float, int]:
+    """``R0``, ``RSPACE`` (km) and ``NPLOTS`` of Block VIII.
+
+    OASP and OASSP both evaluate ``r = R0 + i*RSPACE`` and read nothing else
+    about the range axis (``unoasp22.f:176``, ``unoassp30.f:179``), so a
+    non-uniform request cannot be honoured — it would silently return a
+    different set of ranges than asked for. OAST warns and interpolates;
+    neither of these has that option.
+    """
+    ranges = np.asarray(receiver.ranges, dtype=float)
+    r_min_m, r_max_m = float(ranges.min()), float(ranges.max())
+    r1_km = float(m_to_km(r_min_m if range_start is None else range_start))
+
+    if range_step is not None:
+        return r1_km, float(m_to_km(range_step)), len(ranges)
+
+    n_ranges = len(ranges)
+    if n_ranges <= 1:
+        return r1_km, 1.0, n_ranges
+    steps = np.diff(ranges)
+    if not np.allclose(steps, steps[0], rtol=1e-6, atol=1e-9):
+        raise ConfigurationError(
+            f"{writer}: the deck evaluates a uniform range axis (r0 + i*dr) "
+            f"but receiver.ranges is not uniformly spaced (steps "
+            f"{steps.min():.4g}-{steps.max():.4g} m).",
+            remediation=(
+                "Pass uniformly spaced ranges (np.linspace), or run "
+                "on a uniform grid and interpolate the Field "
+                "afterwards."),
+        )
+    return r1_km, float(m_to_km((r_max_m - r_min_m) / (n_ranges - 1))), n_ranges
+
+
+def _write_oasp_family_deck(
+    filepath: Union[str, Path],
+    env: Environment,
+    source: Source,
+    receiver: Receiver,
+    options: str,
+    *,
+    writer: str,
+    title: str,
+    center_freq: float,
+    integration_offset,
+    dip_angle: Optional[float],
+    cmax: float,
+    nw_samples,
+    block_vii_token4: int,
+    n_time: int,
+    freq_min: float,
+    freq_max: float,
+    dt: float,
+    range_start=None,
+    range_step=None,
+    c_low: Optional[float] = None,
+    c_high: Optional[float] = None,
+    roughness_tail: Optional[Callable[[int], str]] = None,
+) -> None:
+    """Write the eight-block deck OASP and OASSP share.
+
+    ``grep -n 'READ(1,\\*)' unoasp22.f unoassp30.f`` gives the same record
+    sequence with the same arities — OASSP is OASP's deck token for token. The
+    two differences are parameters here rather than a second copy of the body:
+
+    * **Block VII token 4.** OASP's ``INTF`` gates integrand plots
+      (``unoasp22.f:160``, ``:591``). OASSP reads the same column into
+      ``msft_0`` and derives the realization seed ``ISEED = -123 - msft_0``
+      from it (``unoassp30.f:170``, ``:535``), having disabled kernel plotting
+      unconditionally at ``:172``.
+    * **Block IV's roughness column.** OASSP's scattering interface must carry
+      the nine-token ``… -|RG| CL M`` form, which only a ``suffix_fn`` can
+      emit; OASP's records stop at the seven INENVI reads plus inert padding.
+
+    Everything else — Block III's two tokens, the layer stack, the single
+    ``SD`` source record, the three-token receiver record OASSP shares with
+    OASP by virtue of ``PROGNM`` (``oaseun31.f:1165``), and Block VIII's seven
+    fields — is identical, so it lives here once.
+    """
+    filepath = Path(filepath)
+    depth = env.depth
+
+    bottom = env.bottom.halfspace_at(range=0.0)
+    _bp = _extract_bottom_props(bottom)
+    rho, c_p, c_s = _bp['rho'], _bp['c_p'], _bp['c_s']
+    alpha_p, alpha_s = _bp['alpha_p'], _bp['alpha_s']
+
+    # Sound speed profile — align to env.depth (see OAST writer).
+    ssp_data = env.ssp.extend_to(depth).to_pairs()
+
+    # Source parameter (receiver depth bookkeeping handled by
+    # ``_receiver_block_lines`` which emits equidistant/explicit as needed).
+    src_depth = float(source.depths[0])
+
+    r1_km, dr_km, nr = _oasp_range_axis(writer, receiver,
+                                        range_start, range_step)
+
+    cmin, cmax = _oases_wavenumber_bounds(ssp_data, cmax=cmax)
+    if c_low is not None:
+        cmin = float(c_low)
+    if c_high is not None:
+        cmax = float(c_high)
+
+    source_record = _resolve_source_record(writer, options, dip_angle)
 
     _warn_volume_attenuation_ignored(env)
 
     with open(filepath, 'w') as f:
-        _write_oases_header(f, env, options, "OASP Simulation via UACPY")
+        _write_oases_header(f, env, options, title)
 
         # Block III: FREQS OFFDBIN — the pulse centre frequency and the
-        # contour offset (unoasp22.f:129). OFFDBIN is only read under
-        # ICNTIN > 0, i.e. option 'J' (:128); without it OASP zeroes the
-        # offset itself and the second token is discarded by the
-        # list-directed read (:131-132). Option 'd' would demand a 5-token
-        # Doppler form (:127) and is rejected above.
+        # contour offset (unoasp22.f:129, unoassp30.f:138). OFFDBIN is only
+        # read under ICNTIN > 0, i.e. option 'J'; without it the binary
+        # zeroes the offset itself and the second token is discarded by the
+        # list-directed read (unoasp22.f:131-132, unoassp30.f:140-142).
+        # Option 'd' would demand a 5-token Doppler form and is rejected by
+        # the callers.
         f.write(f"{center_freq:.9f} {integration_offset}\n")
 
         # Block IV: Environment — NL then NL layer records, read by INENVI
-        # from unoasp22.f:144. NL = upper halfspace + water + sediments +
-        # bottom halfspace.
-        n_sed_layers = _count_bottom_layers(env)
-        ssp_array = np.asarray(
-            _check_ssp_layer_count(ssp_data, 2 + n_sed_layers), dtype=float,
-        ).reshape(-1, 2)
-        n_water_layers = len(ssp_array)
-        n_layers = 1 + n_water_layers + n_sed_layers + 1
-        f.write(f"{n_layers}\n")
+        # from unoasp22.f:144 / unoassp30.f:155. NL = upper halfspace + water
+        # + sediments + bottom halfspace.
+        geom = _oasp_layer_geometry(env)
+        f.write(f"{geom['n_layers']}\n")
 
         f.write(f"{_format_upper_halfspace(env)}\n")
-        _emit_water_layers(f, ssp_array,
+        _emit_water_layers(f, geom['ssp_array'],
                            surface_roughness=_surface_roughness(env),
                            extra_columns=2)
-        _emit_bottom_layers(
-            f, env, depth,
-            c_p, c_s, alpha_p, alpha_s, rho,
-            extra_columns=2,
-        )
+        if roughness_tail is None:
+            _emit_bottom_layers(
+                f, env, depth,
+                c_p, c_s, alpha_p, alpha_s, rho,
+                extra_columns=2,
+            )
+        else:
+            _emit_bottom_layers(
+                f, env, depth,
+                c_p, c_s, alpha_p, alpha_s, rho,
+                suffix_fn=roughness_tail,
+                iface_start=1,
+            )
 
         # Block V: Sources — one source at src_depth, in the record shape
-        # INSRC's LINA / dip_sou branch expects (called from
-        # unoasp22.f:148).
+        # INSRC's LINA / dip_sou branch expects (called from unoasp22.f:148,
+        # unoassp30.f:157).
         f.write(_source_block_line(src_depth, **source_record) + '\n')
 
         # Block VI: Receiver depths — RD RDLOW IR, read by INREC
-        # (unoasp22.f:149 → oaseun31.f:1165). NRD<0 signals an explicit
-        # depth list on the following record (oasp.tex:559-585).
+        # (unoasp22.f:149 / unoassp30.f:158 → oaseun31.f:1165; three tokens,
+        # not OAST's four, because neither PROGNM is 'OASTL'). NRD<0 signals
+        # an explicit depth list on the following record (oasp.tex:559-585).
         for line in _receiver_block_lines(receiver):
             f.write(line + '\n')
 
-        # Block VII: Wavenumber sampling — CMIN CMAX (unoasp22.f:159).
+        # Block VII: Wavenumber sampling — CMIN CMAX (unoasp22.f:159,
+        # unoassp30.f:168).
         f.write(f"{cmin:.1f} {cmax:.1e}\n")
 
-        # NWVNO ICW1 ICW2 INTF (unoasp22.f:160). Anything below 1 selects
-        # automatic sampling (``AUSAMP=(NWVNO.LT.1)``, :161), which
+        # NWVNO ICW1 ICW2 <token4> (unoasp22.f:160, unoassp30.f:169). Anything
+        # below 1 selects automatic sampling (``AUSAMP=(NWVNO.LT.1)``), which
         # recomputes ICW1/ICW2 from AUTSAM and overwrites ICUT1/ICUT2
-        # (:341-342), so the pair is inert there — oasp.tex:677 says as much.
-        # A pinned NW needs ICW2 = NW or the Hankel transform is
+        # (unoasp22.f:341-342), so the pair is inert there — oasp.tex:677 says
+        # as much. A pinned NW needs ICW2 = NW or the Hankel transform is
         # Hanning-windowed away over ICW2+1..NW before integration
-        # (oasp.tex:657-660). INTF gates integrand *plots* (:591
-        # `IF (MOD(JJ-LXP1,INTF).EQ.0) KPLOT=1`, consumed at :678) and, being
-        # > 0, also turns on the .plp/.plt plot files (:173); the .trf carries
-        # every bin LXP1..MX either way. The default 40 is uacpy's own — the
-        # manual only requires INTF >= 0, with 0 disabling the plots
-        # (oasp.tex:125, :663-664).
+        # (oasp.tex:657-660).
         if nw_samples is None or nw_samples <= 0:
             ic1, ic2 = 1, 1
         else:
             ic1, ic2 = 1, int(nw_samples)
-        # 0 is legal and disables the plot output (oasp.tex:663-664), so the
-        # default may only apply when the caller supplied nothing at all.
-        intf_arg = kwargs.get('freq_output_increment')
-        intf = 40 if intf_arg is None else int(intf_arg)
-        f.write(f"{nw_samples} {ic1} {ic2} {intf}\n")
+        f.write(f"{nw_samples} {ic1} {ic2} {block_vii_token4}\n")
 
-        # Block VIII: NX FR1 FR2 DT R0 RSPACE NPLOTS (unoasp22.f:176) — the
-        # FFT length, band edges, time step and the uniform range axis
-        # r = R0 + i*RSPACE the .trf is written on.
+        # Block VIII: NX FR1 FR2 DT R0 RSPACE NPLOTS (unoasp22.f:176,
+        # unoassp30.f:179) — the FFT length, band edges, time step and the
+        # uniform range axis r = R0 + i*RSPACE the .trf is written on.
         # R0/RSPACE are km, so %.3f would be 1 m resolution: sub-metre receiver
         # spacing rounds to zero (every receiver onto one range) and metre-scale
         # spacing accumulates drift over the axis. %.9f is sub-micron.
-        # unoasp22.f:176 is a list-directed read, so the extra digits are free.
+        # The read is list-directed, so the extra digits are free.
         f.write(f"{n_time} {freq_min:.9f} {freq_max:.9f} {dt:.6f} "
                 f"{r1_km:.9f} {dr_km:.9f} {nr}\n")
+
+
+def _oasp_layer_geometry(env: Environment) -> dict:
+    """Block IV's layer counts, resolved once so callers can key on them.
+
+    ``write_oassp_input`` needs ``n_water_layers`` *before* the deck is
+    written, because the OASES interface index its roughness override is keyed
+    on counts deck layers from 1 while ``_emit_bottom_layers``' ``suffix_fn``
+    counts from its own first record.
+    """
+    n_sed_layers = _count_bottom_layers(env)
+    ssp_data = env.ssp.extend_to(env.depth).to_pairs()
+    ssp_array = np.asarray(
+        _check_ssp_layer_count(ssp_data, 2 + n_sed_layers), dtype=float,
+    ).reshape(-1, 2)
+    n_water_layers = len(ssp_array)
+    return {
+        'ssp_array': ssp_array,
+        'n_water_layers': n_water_layers,
+        'n_sed_layers': n_sed_layers,
+        'n_layers': 1 + n_water_layers + n_sed_layers + 1,
+    }
+
+
+#: Option letters ``GETOPT`` tests at ``unoassp30.f:887-1046``. Its closing
+#: ``ELSE`` is EMPTY (``:1049-1050``) — unlike OASS (``unoass21.f:688-690``)
+#: and OAST (``unoast31.f:1102-1104``), which print
+#: ``>>>> UNKNOWN OPTION <<<<`` — so a typo'd or wrong-case letter is discarded
+#: with no diagnostic anywhere. The wrapper therefore validates the string
+#: itself (spec guard G9).
+_OASSP_OPTIONS = frozenset('BANVHRKSGLlvPZJFfOX2m3CUTQtdsgprb')
+
+#: Letters whose output the ``.trf`` reader cannot represent. ``U`` splits the
+#: field over five files (see :func:`write_oassp_input`); the rest add an
+#: ``IOUT`` slot, i.e. a second component in every ``.trf`` record that
+#: ``read_oasp_trf`` flattens onto the first (``unoassp30.f:897-931``:
+#: N→1 V→2 H→3 R→5 K→6 S→7).
+_OASSP_MULTI_COMPONENT = frozenset('VHRKSU')
+
+
+def write_oassp_input(
+    filepath: Union[str, Path],
+    env: Environment,
+    source: Source,
+    receiver: Receiver,
+    options: Optional[str] = None,
+    *,
+    interface: int,
+    correlation_length: float,
+    n_time_samples: int,
+    freq_min: float,
+    freq_max: float,
+    time_step: float,
+    spectral_exponent: float = 2.0,
+    rms_roughness: Optional[float] = None,
+    realization: int = 0,
+    center_frequency: Optional[float] = None,
+    integration_offset: float = 0.0,
+    nw_samples: int = -1,
+    c_low: Optional[float] = None,
+    c_high: Optional[float] = None,
+    range_start: Optional[float] = None,
+    range_step: Optional[float] = None,
+    **kwargs,
+) -> None:
+    """Write an OASSP (OASES scattered-field realization) input deck.
+
+    OASSP is the *consumer* half of a two-binary chain: it reads the mean field
+    an OASP run with option ``'s'`` left in the ``.rhs`` (and its ``.vol``
+    sibling) and generates one **realization** of the field scattered from a
+    rough interface. Its output is an OASP ``.trf``, written by the same
+    ``TRFHEAD``/``WRTRF`` path (``oasiun23.f:830-834``), so the deck below is
+    OASP's token for token — :func:`_write_oasp_family_deck` writes both.
+
+    Parameters
+    ----------
+    filepath, env, source, receiver
+        As for the sibling writers.
+    options : str, optional
+        OASSP option letters, validated against ``GETOPT``. ``None`` writes
+        ``'N J s'``: normal stress, real wavenumber contour, scattered field
+        only. See Notes for why every letter of that default is load-bearing.
+    interface : int
+        ``INTFCE``, the 1-based OASES layer index whose roughness scatters.
+        This is **not** a deck token — OASSP reads it out of the ``.rhs``
+        (``unoassp30.f:546-547``) — but the deck's own layer record for that
+        index must carry the nine-token ``… -|RG| CL M`` form, because
+        ``:601-607`` takes ``RG2 = ROUGH(INTFCE)**2`` and
+        ``r_l = |CLEN(INTFCE)|`` from INENVI's arrays. Pass the index the
+        ``.rhs`` names (:func:`~uacpy.io.oases_reader.read_oases_rhs_header`).
+    correlation_length, spectral_exponent
+        ``CL`` and ``M`` of the roughness power spectrum, in metres and
+        dimensionless. A **negative** ``CL`` is OASES' switch to the 12-token
+        volume-scattering record and is refused — see Notes.
+    rms_roughness : float, optional
+        ``|RG|`` at ``interface`` (m). Defaults to the environment's own value
+        for that interface.
+    realization : int
+        Block VII's fourth token. See Notes.
+    n_time_samples, freq_min, freq_max, time_step
+        Block VIII's ``NT``, ``FR1``, ``FR2``, ``DT``. **Required, and they
+        must be the mean field's own** — OASSP overwrites all four from the
+        ``.rhs`` at ``unoassp30.f:181-188`` but its mismatch test covers only
+        ``NT`` and ``DT``, so a band that differs from the mean field's is
+        replaced with no message at all.
+    center_frequency : float, optional
+        Block III's ``FRC``. Defaults to the source's first frequency.
+    integration_offset, nw_samples, c_low, c_high, range_start, range_step
+        As for :func:`write_oasp_input`.
+
+    Notes
+    -----
+    **Block VII's fourth token is not a plot increment.** ``unoassp30.f:170``
+    assigns ``msft_0 = intf`` and ``:172`` then zeroes ``intf``, so kernel
+    plotting is unconditionally off and the manual's description
+    (``oassp.tex:503-504``) does not describe this binary. What the token does
+    reach is the random-number seed, ``ISEED = -123 - msft_0`` (``:535``) —
+    which hands uacpy a reproducible ensemble — and, through
+    ``mbf_0 = msft_0/2`` (``:171``), the tapered full-Bessel tabulation window
+    ``brk_0``/``bfrmax`` in cylindrical geometry (``:639-640``). OASP pins
+    ``mbf_0 = 0`` (``unoasp22.f:568``), so that second effect is OASSP's alone:
+    successive realizations are not a *pure* statistical ensemble under
+    cylindrical geometry, they also widen the Bessel table by ``k/2`` in ``kr``.
+
+    **The default option string.** ``'N'`` is the single output component the
+    ``.trf`` reader keeps; ``'J'`` holds ``ICNTIN = 1`` so automatic wavenumber
+    sampling takes the complex *wavenumber* contour rather than the complex
+    *frequency* contour ``OMEGIM = -ln(50)·Δf`` (``unoassp30.f:281-289``,
+    ``:382-385``), which uacpy's time-series synthesis does not undo; ``'s'``
+    sets ``SCTOUT``, which zeroes the source arrays (``:628-635``) so the
+    ``.trf`` holds the scattered field alone rather than scattered + direct.
+    ``'s'`` cannot overwrite the input ``.rhs`` here: the write at
+    ``oaseun31.f:1899`` is inside ``CALINT``, and OASSP integrates through
+    ``CALSRC``/``CALSRP`` in ``oasvun31.f`` instead (``unoassp30.f:684-687``).
+
+    **Volume scattering is not supported.** OASES selects it with a negative
+    ``CL`` on the layer record, which makes INENVI read twelve tokens
+    ``D CC CS AC AS RO RG CL SKW M RMS GAM`` (``oaseun31.f:76-90``). The last
+    four — skew, spectral exponent, Δc/c and the density-to-speed ratio γ —
+    have no home on any uacpy carrier, so a negative ``correlation_length``
+    raises rather than writing three of the twelve columns as zeros.
+    """
+    _reject_unknown_kwargs('write_oassp_input', kwargs, frozenset())
+
+    if options is None:
+        options = 'N J s'
+    chars = _oases_option_chars(options)
+
+    unknown = sorted(chars - _OASSP_OPTIONS)
+    if unknown:
+        raise ConfigurationError(
+            f"write_oassp_input: {unknown} are not OASSP option letters — "
+            f"GETOPT (unoassp30.f:887-1046) tests only "
+            f"{''.join(sorted(_OASSP_OPTIONS))}. Its closing ELSE is empty "
+            f"(:1049-1050), so the binary would discard them in silence and "
+            f"run a different configuration than asked for.",
+            remediation="Drop the letter(s) from options=.",
+        )
+    _reject_unwritten_option_blocks('write_oassp_input', options)
+    _reject_tau_p('write_oassp_input', options)
+
+    multi = sorted(chars & _OASSP_MULTI_COMPONENT)
+    if multi:
+        # 'U' is the only one that is not merely a second IOUT slot: DECOMP
+        # splits the output over NCOMPO=5 files opened one unit apart
+        # (unoassp30.f:459-465, :505-508). Chased through KERDEC
+        # (oasaun31.f:1626-1648) and the buffer→unit pairing at
+        # oasvun31.f:779, :862-869 and unoassp30.f:725-726, the DATA order at
+        # unoassp30.f:48-52 is the correct one: trf=total, trfdc=down-going
+        # compressional, trfds=down-going shear, trfuc=up-going compressional,
+        # trfus=up-going shear. oassp.tex:185-189 has 'ds' and 'uc' swapped.
+        # Either way uacpy reads one .trf, so the letter is refused.
+        raise UnsupportedFeatureError(
+            'OASSP',
+            f"option letter(s) {multi} — multi-component / decomposed output. "
+            f"'U' writes five separate transfer-function files (trf, trfdc, "
+            f"trfds, trfuc, trfus; unoassp30.f:48-52, :505-508) and the "
+            f"others add an IOUT component that read_oasp_trf flattens onto "
+            f"the first",
+            alternatives=["options without these letters (default 'N J s' "
+                          "returns scalar pressure)"],
+            alternatives_label='option strings',
+        )
+
+    if float(correlation_length) < 0.0:
+        raise UnsupportedFeatureError(
+            'OASSP',
+            "volume scattering (correlation_length < 0 is OASES' switch to "
+            "the twelve-token layer record D CC CS AC AS RO RG CL SKW M RMS "
+            "GAM, oaseun31.f:76-90). SKW (correlation-ellipse skew, deg), M "
+            "(spectral exponent), RMS (dc/c) and GAM (density-to-speed "
+            "ratio) have no field on any uacpy carrier",
+            alternatives=["interface roughness scattering "
+                          "(correlation_length > 0)"],
+            alternatives_label='configurations',
+        )
+    if float(correlation_length) == 0.0:
+        raise ConfigurationError(
+            "write_oassp_input: correlation_length must be positive — OASSP "
+            "forms r_l = |CLEN(INTFCE)| and hands it to PV "
+            "(unoassp30.f:606-614), so a zero correlation length gives a "
+            "degenerate roughness power spectrum."
+        )
+    if float(spectral_exponent) <= 1.5:
+        raise ConfigurationError(
+            f"write_oassp_input: spectral_exponent must exceed 1.5 or the "
+            f"roughness power spectrum is not integrable (oassp.tex:356-362; "
+            f"the exponent reaches amod(m)=fac(3+…) at oaseun31.f:98); got "
+            f"{spectral_exponent}.")
+    if int(realization) < 0:
+        raise ConfigurationError(
+            f"write_oassp_input: realization must be >= 0; it is written as "
+            f"Block VII's fourth token and OASSP forms ISEED = -123 - "
+            f"realization from it (unoassp30.f:170, :535), so a negative "
+            f"value walks the seed towards 0. Got {realization}.")
+    _check_nw_samples('write_oassp_input', nw_samples, power_of_two=False)
+
+    if c_high is not None and 'P' not in chars:
+        # unoassp30.f:205-217: without 'P' the run is cylindrical, and CMAXIN
+        # is then forced to 1e12 with inttyp driven to full Bessel. The deck
+        # still carries the user's value; the binary throws it away.
+        warnings.warn(
+            f"write_oassp_input: c_high={c_high:g} m/s has no effect without "
+            f"option 'P'. In cylindrical geometry OASSP forces CMAX = 1e12 "
+            f"and a full Hankel transform (unoassp30.f:205-217), printing "
+            f"'>>> Full Hankel transform forced <<<'. Add 'P' for plane "
+            f"geometry, or drop c_high.",
+            UserWarning, stacklevel=2,
+        )
+
+    # INTFC counts deck layers from 1 (the upper halfspace), but the suffix_fn
+    # _emit_bottom_layers calls is indexed from its own first bottom record.
+    # Bottom records begin at deck layer ``1 + n_water_layers + 1``, so that
+    # record is suffix index 1 — hence the offset below. Keying the override
+    # off INTFC directly lands on the wrong record, and the failure is SILENT:
+    # the named interface then carries a non-negative RG, INENVI leaves
+    # CLEN = 0 (oaseun31.f:100), and unoassp30.f:606 calls PV with a zero
+    # correlation length, from a run that exits 0.
+    geom = _oasp_layer_geometry(env)
+    first_bottom_layer = 1 + geom['n_water_layers'] + 1
+    suffix_index = int(interface) - (first_bottom_layer - 1)
+    if not 1 <= suffix_index <= geom['n_sed_layers'] + 1:
+        raise ConfigurationError(
+            f"write_oassp_input: interface={interface} is not a bottom "
+            f"interface of this deck. It has {geom['n_water_layers']} water "
+            f"layer(s), so the scattering interfaces are deck layers "
+            f"{first_bottom_layer}.."
+            f"{first_bottom_layer + geom['n_sed_layers']}.",
+            remediation=("The roughness spectrum can only be attached to a "
+                         "bottom layer record; a water interface has no RG "
+                         "column INENVI would re-read as CL and M."),
+        )
+
+    env_rgs = _bottom_interface_roughness(env)
+    if rms_roughness is None:
+        rg = env_rgs[min(suffix_index - 1, len(env_rgs) - 1)]
+    else:
+        rg = abs(float(rms_roughness))
+    if abs(rg) <= 1e-5:
+        raise ConfigurationError(
+            f"write_oassp_input: interface {interface} has rms roughness "
+            f"{rg:g} m, so there is nothing to scatter from. OASSP takes "
+            f"pow = |ROUGH(INTFCE)| straight from this deck "
+            f"(unoassp30.f:601, :615) and the scattered field would be "
+            f"identically zero; the mean-field run is worse off still, since "
+            f"SCTRHS skips every interface with ROUGH2 < 1e-10 "
+            f"(oaseun31.f:2310, :379) and would write an empty .rhs.",
+            remediation=("Set the roughness on the environment "
+                         "(BoundaryProperties(roughness=…) or the sediment "
+                         "layer), or pass rms_roughness=."),
+        )
+
+    _write_oasp_family_deck(
+        filepath, env, source, receiver, options,
+        writer='write_oassp_input',
+        title="OASSP Simulation via UACPY",
+        center_freq=(float(np.atleast_1d(source.frequencies)[0])
+                     if center_frequency is None else float(center_frequency)),
+        integration_offset=integration_offset,
+        dip_angle=None,
+        # Cylindrical geometry forces CMAX = 1e12 anyway (:205-217); the OASP
+        # writer's own 1e9 default is kept so the two decks agree wherever the
+        # binary does not override.
+        cmax=1e9,
+        nw_samples=nw_samples,
+        block_vii_token4=int(realization),
+        n_time=int(n_time_samples), freq_min=float(freq_min),
+        freq_max=float(freq_max), dt=float(time_step),
+        range_start=range_start, range_step=range_step,
+        c_low=c_low, c_high=c_high,
+        roughness_tail=_make_roughness_tail(
+            env,
+            {suffix_index: (rg, float(correlation_length),
+                            float(spectral_exponent))},
+        ),
+    )
 
 
 _REFL_TYPE_TO_OPTION = {
@@ -2042,43 +2658,7 @@ def write_oasr_input(
     # writes, index 1 being the reflecting water/seabed interface. OASR has
     # no sea surface — layer 1 IS the water halfspace — so env.surface's
     # roughness has nothing to attach to here and the default is 0.
-    if interface_roughness is None:
-        interface_roughness = []
-    _env_rg = [0.0] + _bottom_interface_roughness(env)
-
-    def _roughness_tail(i):
-        """Return roughness-suffix string for interface index ``i``.
-
-        Falls back to the environment's own roughness so OASR reads the same
-        interfaces as the other three writers; ``interface_roughness`` is the
-        override, and only it can reach the CL / M form.
-
-        OASES convention (oases_gen.tex): RG > 0 → RMS roughness only;
-        RG < 0 → |RG| plus CL and M on same line (Goff-Jordan power spectrum).
-        """
-        def _from_env():
-            return f" {_env_rg[i]:.4f}" if 0 <= i < len(_env_rg) else " 0"
-
-        if i < 0 or i >= len(interface_roughness):
-            return _from_env()
-        spec = interface_roughness[i]
-        if spec is None:
-            return _from_env()
-        if isinstance(spec, (int, float)):
-            return f" {float(spec):.4f}"
-        # dict or tuple
-        if isinstance(spec, dict):
-            rg = spec.get('RG', spec.get('roughness', 0.0))
-            cl = spec.get('CL', spec.get('correlation_length', None))
-            m = spec.get('M', spec.get('spectral_exponent', None))
-        else:  # assume tuple/list
-            rg = spec[0] if len(spec) > 0 else 0.0
-            cl = spec[1] if len(spec) > 1 else None
-            m = spec[2] if len(spec) > 2 else None
-        if cl is None or m is None:
-            return f" {float(rg):.4f}"
-        # Flag negative RG to signal CL + M follow.
-        return f" {-abs(float(rg)):.4f} {float(cl):.4f} {float(m):.4f}"
+    _roughness_tail = _make_roughness_tail(env, interface_roughness)
 
     with open(filepath, 'w') as f:
         _write_oases_header(f, env, options, "OASR Simulation via UACPY")
@@ -2179,3 +2759,374 @@ def write_oasr_input(
             c_max = max(c_water, c_p) * 1.05
             f.write(f"{c_min:.1f} {c_max:.1f} 12 100\n")
             f.write(f"0 {depth:.1f} 12 {depth/10:.1f}\n")
+
+
+#: Option letters ``GETOPT`` tests in ``unoass21.f:557-698``. Anything else
+#: prints ``>>>> UNKNOWN OPTION: <c> <<<<`` (``:688-690``) and is ignored, so
+#: the wrapper validates rather than let a typo vanish.
+_OASS_OPTIONS = frozenset('CDGgIPRSacprdkZQ')
+
+#: Letters that set ``REVERB`` on the way in — ``C`` (:626), ``D`` (:635),
+#: ``R`` (:616), ``a`` (:646), ``r`` (:607). Their presence is what makes
+#: Block VIII a required record.
+_OASS_REVERB_OPTIONS = frozenset('CDRar')
+
+#: Integrand/spectrum plot letters. ``unoass21.f`` computes them in the
+#: ``IF (.not.REVERB)`` branch only (``:342-344``), so pairing one with a
+#: reverberation letter silently produces no plot.
+_OASS_KERNEL_OPTIONS = frozenset('ISc')
+
+#: The scattered-field *products*, one per run. ``oassun26.f:683-688`` versus
+#: ``:897-902``: asking for the covariance alongside a reverberation curve
+#: returns a silently ZERO covariance.
+_OASS_PRODUCT_OPTIONS = frozenset('arCD')
+
+
+def write_oass_input(
+    filepath: Union[str, Path],
+    env: Environment,
+    source: Source,
+    receiver: Receiver,
+    options: str,
+    *,
+    interface: int,
+    correlation_length: float,
+    spectral_exponent: float,
+    rms_roughness: Optional[float] = None,
+    phase_speed: float = 0.0,
+    c_low: Optional[float] = None,
+    c_high: Optional[float] = None,
+    range_min: Optional[float] = None,
+    range_max: Optional[float] = None,
+    n_ranges: Optional[int] = None,
+    receiver_gains=None,
+    receiver_types=None,
+    **kwargs,
+) -> None:
+    """Write an OASS (OASES reverberation / scattered-field) input deck.
+
+    OASS is the *consumer* half of a two-binary chain: it reads the mean
+    field a producer run left in the ``.rhs`` file and integrates the
+    scattered field over it. The deck below is only the consumer's; the
+    producer deck is the caller's business (see :class:`~uacpy.OASS`).
+
+    Record order follows the reads in ``unoass21.f``; block numbers are the
+    manual's (``oass.tex:40-106``).
+
+    Parameters
+    ----------
+    filepath, env, source, receiver
+        As for the sibling writers.
+    options : str
+        OASS option letters. **Required and validated** — there is no safe
+        default, because the letter chooses the product (see Notes).
+    interface : int
+        ``INTFC``, the 1-based interface index the scattering is computed at
+        (``unoass21.f:151``); must be >= 2.
+    correlation_length, spectral_exponent
+        ``CL`` and ``M`` of the roughness power spectrum. OASS *requires*
+        them — ``oass.tex:182-183``: "the interface rms roughness,
+        correlation and spectral exponent **must** be specified. These are
+        not adopted from OASR or OAST."
+    rms_roughness : float, optional
+        ``|RG|`` at ``interface``. Defaults to the environment's own value
+        for that interface.
+    phase_speed : float
+        ``CPH`` (m/s), a dummy unless one of ``I``/``S``/``c`` is requested.
+    c_low, c_high : float, optional
+        ``CMIN``/``CMAX``. ``c_low`` is physically significant, not a tuning
+        knob — see Notes.
+    range_min, range_max : float, optional
+        Block VIII range bounds in **metres** (converted to km on the way
+        out). Default to the receiver's own range span.
+    n_ranges : int, optional
+        ``NR``; must be >= 2.
+    receiver_gains, receiver_types
+        Passed to :func:`_emit_receiver_array`. ``receiver_types`` selects
+        the field parameter and may not be mixed.
+
+    Notes
+    -----
+    **There is no field-parameter option letter in OASS.** ``GETOPT`` never
+    assigns ``IOUT``/``NOUT``; it ends ``IF (NOUT.NE.0) RETURN / IOUT(1)=1 /
+    NOUT=1`` (``unoass21.f:694-696``), and the parameter comes from the
+    receiver ``ITYP`` column instead (``oasnun22.f:97-118``). So the ``'N'``
+    prefix the OAST/OASP writers use is *not* an OASS option — the manual's
+    own worked example ``oass.tex:305`` (``P N I S``) makes the binary print
+    ``>>>> UNKNOWN OPTION: N <<<<``.
+
+    **``R`` means "reverberant field", not "radial stress".** In
+    OAST/OASP/OASSP it selects σ_rr; here it is the master reverberation
+    switch (``unoass21.f:616``). A shared option-translation table across the
+    OASES family silently turns one into the other.
+
+    **``c_low`` moves the answer.** Measured on one ``.rhs``, option ``r``,
+    only ``CMIN`` changed: lowering it below the mean field's is inert
+    (1e-4 dB), raising it truncates the scattering integral by **30 dB**.
+    ``REVINT``/``REVCOV`` bound their own buffer reads
+    (``oassun26.f:744-748``, ``:958-962``), so it should default to the mean
+    field's ``c_low`` rather than to a constant.
+    """
+    _reject_unknown_kwargs('write_oass_input', kwargs,
+                           frozenset({'n_wavenumbers'}))
+
+    chars = _oases_option_chars(options)
+    # 'k' is a real GETOPT letter (:664), so it is in _OASS_OPTIONS and would
+    # pass the unknown-letter test below; it is refused for its own reason.
+    if 'k' in chars:
+        raise ConfigurationError(
+            "write_oass_input: option 'k' (PLPOWER) is passed into GETOPT "
+            "but never initialised there (unoass21.f:577-590), leaving an "
+            "uninitialised LOGICAL in the main program (:35).",
+            remediation="Drop 'k'; the roughness power spectrum is not "
+                        "readable through uacpy.",
+        )
+    unknown = sorted(chars - _OASS_OPTIONS)
+    if unknown:
+        raise ConfigurationError(
+            f"write_oass_input: {unknown} are not OASS option letters — "
+            f"GETOPT (unoass21.f:557-698) tests only "
+            f"{''.join(sorted(_OASS_OPTIONS))}, and prints "
+            f"'>>>> UNKNOWN OPTION <<<<' for anything else.",
+            remediation=(
+                "'N' and 'J' in particular are OAST/OASP habits that OASS "
+                "does not share: the field parameter comes from the receiver "
+                "type (oasnun22.f:97-118) and the complex contour is "
+                "inherited from the .rhs (unoass21.f:213)."),
+        )
+    # oass.tex:141, :151, :160 each state that I, S and c "cannot be applied
+    # together with the reverb options C,D,R,a,r", and :146 that R "cancels
+    # options I, S, c". The mechanism is unoass21.f:342-344 gating CALSIN on
+    # IF (.not.REVERB): with any reverb letter present the kernel is never
+    # computed, so the requested plot simply never appears.
+    kernels = sorted(chars & _OASS_KERNEL_OPTIONS)
+    reverb = sorted(chars & _OASS_REVERB_OPTIONS)
+    if kernels and reverb:
+        raise ConfigurationError(
+            f"write_oass_input: options {kernels} (Hankel/angular/depth "
+            f"integrand plots) cannot be combined with {reverb} — CALSIN is "
+            f"gated on IF (.not.REVERB) (unoass21.f:342-344), so with a "
+            f"reverberation letter present the kernel is never computed and "
+            f"the plot never appears.",
+            remediation=("Run the kernel plots and the reverberation product "
+                         "as separate runs (oass.tex:141, :146, :151, :160)."),
+        )
+
+    products = sorted(chars & _OASS_PRODUCT_OPTIONS)
+    if len(products) > 1:
+        raise ConfigurationError(
+            f"write_oass_input: options {products} request more than one "
+            f"scattered-field product. OASS computes one per run — asking "
+            f"for the covariance ('a') alongside a reverberation curve "
+            f"returns a SILENTLY ZERO covariance (oassun26.f:683-688 vs "
+            f":897-902).",
+            remediation="Run once per product.",
+        )
+
+    if int(interface) < 2:
+        raise ConfigurationError(
+            f"write_oass_input: interface must be >= 2 (INTFC indexes the "
+            f"scattering interface, unoass21.f:151); got {interface}.")
+    if float(spectral_exponent) <= 1.5:
+        raise ConfigurationError(
+            f"write_oass_input: spectral_exponent must exceed 1.5 or the "
+            f"roughness power spectrum is not integrable "
+            f"(oassp.tex:356-362; the exponent reaches "
+            f"amod(m)=fac(3+…) at oaseun31.f:98); got {spectral_exponent}.")
+    if float(correlation_length) <= 0.0:
+        raise ConfigurationError(
+            f"write_oass_input: correlation_length must be positive; "
+            f"got {correlation_length}.")
+
+    depth = float(env.depth)
+    bottom = env.bottom.halfspace_at(range=0.0)
+    _bp = _extract_bottom_props(bottom)
+    rho, c_p, c_s = _bp['rho'], _bp['c_p'], _bp['c_s']
+    alpha_p, alpha_s = _bp['alpha_p'], _bp['alpha_s']
+    ssp_data = env.ssp.extend_to(depth).to_pairs()
+
+    frequency = float(np.atleast_1d(source.frequencies)[0])
+
+    cmin, cmax = _oases_wavenumber_bounds(ssp_data)
+    n_wavenumbers = int(kwargs.pop('n_wavenumbers', 2048))
+    if c_low is not None:
+        cmin = float(c_low)
+    if c_high is not None:
+        cmax = float(c_high)
+
+    # Block VIII is read whenever any REVERB letter is present — including
+    # 'a', whose GETOPT branch sets REVERB on the way in (unoass21.f:646-653)
+    # even though oass.tex:254-257 says the range offset "does not apply to
+    # option a". Omitting it for a covariance run makes the binary consume
+    # the *next* record as RMIN RMAX NR and shifts the whole deck.
+    needs_range_block = bool(chars & _OASS_REVERB_OPTIONS)
+    if not needs_range_block and float(phase_speed) <= 0.0:
+        raise ConfigurationError(
+            f"write_oass_input: phase_speed must be positive on a deck with "
+            f"no reverberation letter. unoass21.f:342-344 takes the "
+            f"`IF (.not.REVERB)` branch and forms ETA=DSQ/CPHASE, so "
+            f"CPH={float(phase_speed):g} divides by zero — gfortran does not "
+            f"trap it, and CALSIN then runs on Inf.",
+            remediation=("Set phase_speed to the trace speed the kernel is "
+                         "wanted at (oass.tex:194-197), or request a "
+                         "reverberation product instead."),
+        )
+    if needs_range_block:
+        r = np.atleast_1d(np.asarray(receiver.ranges, dtype=float))
+        r_min = float(r.min()) if range_min is None else float(range_min)
+        r_max = float(r.max()) if range_max is None else float(range_max)
+        nr = int(len(r)) if n_ranges is None else int(n_ranges)
+        if nr < 2:
+            raise ConfigurationError(
+                f"write_oass_input: n_ranges must be >= 2 — OASS forms "
+                f"RSTEP=(RMAX-RMIN)/(LF-1) with LF=NR (unoass21.f:269), so "
+                f"NR=1 divides by zero; got {nr}.")
+
+    # The environment block, resolved here because the roughness override has
+    # to be keyed against it.
+    n_sed_layers = _count_bottom_layers(env)
+    ssp_subset = _check_ssp_layer_count(ssp_data, 2 + n_sed_layers)
+    c_values = ssp_subset[:, 1]
+    isovelocity = bool(np.allclose(c_values, c_values[0], rtol=1e-6))
+    n_water_layers = 1 if isovelocity else len(ssp_subset)
+
+    # INTFC counts deck layers from 1 (upper halfspace), but the suffix_fn
+    # _emit_bottom_layers calls is indexed from its own first bottom record.
+    # Bottom records begin at deck layer ``1 + n_water_layers + 1``, so that
+    # record is suffix index 1 — hence the offset below. Keying the override
+    # off INTFC directly lands on the wrong record, and the failure is
+    # SILENT: the interface then carries a positive RG, which OASES reads as
+    # an infinite correlation length (oassp.tex:344-348), making P(k) a delta
+    # at k=0 — no back-scatter at all, from a run that exits 0.
+    first_bottom_layer = 1 + n_water_layers + 1
+    # Deck layer 2 is the first water record, whose RG is the SEA SURFACE:
+    # ROUGH(M) is the roughness of the interface at the top of layer M
+    # (oaseun31.f:381-383) and ROUGH(1)=ROUGH(2) at :377. OASS scatters from
+    # it as readily as from the seabed — an ice keel or a wind-roughened
+    # surface is the usual case — so it is a legal INTFC, not an error.
+    surface_is_target = int(interface) == 2
+    suffix_index = int(interface) - (first_bottom_layer - 1)
+    if not surface_is_target and not 1 <= suffix_index <= n_sed_layers + 1:
+        raise ConfigurationError(
+            f"write_oass_input: interface={interface} names no interface this "
+            f"deck carries. It has {n_water_layers} water layer(s), so the "
+            f"scattering interfaces are deck layer 2 (the sea surface) and "
+            f"{first_bottom_layer}..{first_bottom_layer + n_sed_layers} "
+            f"(the seabed and any sediment interfaces).",
+            remediation=("Interior water records carry no RG column INENVI "
+                         "would re-read as CL and M; only the first water "
+                         "record and the bottom records do."),
+        )
+
+    _roughness_tail = _make_roughness_tail(
+        env,
+        # The scattering interface must carry the nine-token form so INENVI
+        # re-reads CL and M (oaseun31.f:72-75, :91-93). When the target is the
+        # sea surface the tail goes on the water record instead, so the bottom
+        # records keep their plain RMS.
+        {} if surface_is_target else
+        {suffix_index: (
+            _bottom_interface_roughness(env)[min(
+                suffix_index - 1,
+                len(_bottom_interface_roughness(env)) - 1)]
+            if rms_roughness is None else float(rms_roughness),
+            float(correlation_length),
+            float(spectral_exponent),
+        )},
+    )
+
+    # A surface target gets the same nine-token tail the bottom override
+    # would have produced, routed to the water record instead. Built through
+    # _make_roughness_tail so the |RG| representability guard applies equally.
+    surface_suffix = None
+    if surface_is_target:
+        surface_rg = (_surface_roughness(env) if rms_roughness is None
+                      else float(rms_roughness))
+        surface_suffix = _make_roughness_tail(
+            env, {0: (surface_rg, float(correlation_length),
+                      float(spectral_exponent))})(0)
+
+    with open(filepath, 'w') as f:
+        _write_oases_header(f, env, options, "OASS Simulation via UACPY")
+
+        # Block III: FREQ. ICNTIN is initialised to 0 (unoass21.f:596) and
+        # GETOPT never sets it, so the two-token READ at :105 is unreachable
+        # and a trailing COFF would be inert. One token.
+        f.write(f"{frequency:.9f}\n")
+
+        # Block IV: NL (oaseun31.f:43) then NL layer records (:54), the same
+        # environment block the OAST writer emits — mirrored rather than
+        # re-derived so the two decks describe one environment identically.
+        # extra_columns=0: the roughness tail here is the suffix_fn's job,
+        # and it is the nine-token form at the scattering interface.
+        if isovelocity:
+            # One record for an isovelocity column; INENVI folds every
+            # CC = |CS| layer back to isovelocity anyway (oaseun31.f:181-182),
+            # so the general form would only burn NLA slots.
+            f.write(f"{3 + n_sed_layers}\n")
+            f.write(f"{_format_upper_halfspace(env)}\n")
+            # The sea surface's roughness rides on the FIRST water record:
+            # ROUGH(M) is the roughness of the interface at the TOP of layer M
+            # (oaseun31.f:381-383), and ROUGH(1)=ROUGH(2) at :377. Taking it
+            # from _roughness_tail(0) would read the hardcoded 0.0 anchor
+            # instead, which the gradient branch below and OAST both avoid.
+            # It is not inert: under option 'p' OASS keeps every interface's
+            # ROUGH2 (oassun26.f:685-688 zeroes the array only if .not.rescat)
+            # and oaskun21.f:54-66 builds the perturbed boundary operator from
+            # it, so dropping it silently omits surface re-scattering.
+            if surface_suffix is not None:
+                f.write(f"0.00 {c_values[0]:.2f} 0 0.0 0 1.0"
+                        f"{surface_suffix}\n")
+            else:
+                f.write(f"0.00 {c_values[0]:.2f} 0 0.0 0 1.0 "
+                        f"{_surface_roughness(env):.4f}\n")
+        else:
+            f.write(f"{1 + len(ssp_subset) + n_sed_layers + 1}\n")
+            f.write(f"{_format_upper_halfspace(env)}\n")
+            _emit_water_layers(f, ssp_subset,
+                               surface_roughness=_surface_roughness(env),
+                               extra_columns=0,
+                               surface_suffix=surface_suffix)
+        _emit_bottom_layers(
+            f, env, depth,
+            c_p, c_s, alpha_p, alpha_s, rho,
+            suffix_fn=_roughness_tail,
+            iface_start=1,
+        )
+
+        # Block V: CPH INTFC (unoass21.f:151).
+        f.write(f"{float(phase_speed):.2f} {int(interface)}\n")
+
+        # Block VI: the 3-D receiver array, which also picks the field
+        # parameter (§2.2a).
+        _emit_receiver_array(
+            f, receiver,
+            receiver_types=receiver_types,
+            receiver_gains=receiver_gains,
+            writer='write_oass_input',
+        )
+
+        # Block VII: CMIN CMAX, then NW IC1 IC2 — three tokens, not the four
+        # OASP/OASSP carry (unoass21.f:189).
+        #
+        # CMIN/CMAX are live: WK0 and WKMAX are formed from them at :190-191
+        # and survive. The NW record is not — under REVERB the binary
+        # recomputes NWVNO from the .rhs file's own DLWVNO and forces
+        # ICUT1=1, ICUT2=NWVNO (:211-215), discarding whatever the deck said.
+        # That asymmetry is exactly why c_low moves the answer by tens of dB
+        # while this record cannot.
+        #
+        # It is written explicitly rather than as the siblings' ``-1`` auto
+        # sentinel, because the override only happens under REVERB: on a
+        # plots-only deck (say 'I' alone) a -1 would survive into NWVNO as a
+        # negative wavenumber count.
+        f.write(f"{cmin:.2f} {cmax:.2f}\n")
+        f.write(f"{n_wavenumbers} 1 {n_wavenumbers}\n")
+
+        # Block VIII: RMIN RMAX NR, in km (unoass21.f:263).
+        if needs_range_block:
+            f.write(f"{m_to_km(r_min):.6f} {m_to_km(r_max):.6f} {nr}\n")
+
+        # Block IX: DR NDR (unoass21.f:265), read only under 'C'.
+        if 'C' in chars:
+            f.write("1.0 1\n")

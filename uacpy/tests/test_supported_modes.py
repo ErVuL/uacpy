@@ -14,7 +14,7 @@ from uacpy.models.kraken import Kraken
 from uacpy.models.scooter import Scooter
 from uacpy.models.sparc import SPARC
 from uacpy.models.bounce import Bounce
-from uacpy.models.oases import OAST, OASN, OASR, OASP
+from uacpy.models.oases import OAST, OASN, OASR, OASP, OASS, OASSP
 from uacpy.models.ram import RAM
 from uacpy.core.exceptions import ExecutableNotFoundError
 
@@ -63,6 +63,14 @@ _EXPECTED = {
         lambda: OASP(),
         {RunMode.COHERENT_TL, RunMode.BROADBAND, RunMode.TIME_SERIES},
     ),
+    'OASS': (
+        lambda: OASS(correlation_length=10.0),
+        {RunMode.REVERBERATION, RunMode.COVARIANCE},
+    ),
+    'OASSP': (
+        lambda: OASSP(correlation_length=10.0),
+        {RunMode.BROADBAND, RunMode.TIME_SERIES},
+    ),
     'RAM': (
         lambda: RAM(),
         {RunMode.COHERENT_TL, RunMode.BROADBAND, RunMode.TIME_SERIES},
@@ -70,7 +78,7 @@ _EXPECTED = {
 }
 
 
-_OASES_MODELS = {'OAST', 'OASN', 'OASR', 'OASP'}
+_OASES_MODELS = {'OAST', 'OASN', 'OASR', 'OASP', 'OASS', 'OASSP'}
 
 
 def _model_param(name):

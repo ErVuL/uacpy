@@ -1,6 +1,6 @@
 # OASES — seismo-acoustic wavenumber integration
 
-> `uacpy.models.OAST` · `OASP` · `OASR` · `OASN` · wraps Henrik Schmidt's
+> `uacpy.models.OAST` · `OASP` · `OASR` · `OASN` · `OASS` · `OASSP` · wraps Henrik Schmidt's
 > OASES (MIT) · **not redistributable — [see §9](#9-licensing-and-installation)**
 
 OASES is the package's most complete seabed physics. It solves the full
@@ -90,7 +90,7 @@ physics, use [RAM](ram.md) or [Bellhop](bellhop.md).
 
 ---
 
-## 2. The four sub-models
+## 2. The six sub-models
 
 | Class | `RunMode` | Returns | What it is for |
 |---|---|---|---|
@@ -101,6 +101,57 @@ physics, use [RAM](ram.md) or [Bellhop](bellhop.md).
 | `OASR` | `REFLECTION` | `ReflectionCoefficient` | `R(θ)` or `R(θ, f)` off the layer stack |
 | `OASN` | `COVARIANCE` | `Covariance` | `C(f, i, j)` across array elements |
 | `OASN` | `REPLICA` | `Replicas` | Array response per candidate source position |
+| `OASS` | `REVERBERATION` | `Field` (`kind='reverberation'`) | Reverberation level vs range off a rough interface |
+| `OASS` | `COVARIANCE` | `Covariance` | Spatial covariance of the reverberant field |
+| `OASSP` | `BROADBAND` | `Field` (complex, `frequency` axis) | Scattered `H(d, r, f)` for one roughness realization |
+| `OASSP` | `TIME_SERIES` | `Field` (real, `time` axis) | Scattered `p(d, r, t)` |
+
+**`OASS` and `OASSP` are post-processors, and `run()` drives two binaries.**
+Neither computes a field of its own: they integrate a *scattered* field over
+the mean-field boundary operators a producer run leaves in a `.rhs` file
+(written on unit 45 with option `'s'`). uacpy owns that chain — the producer
+runs first into the same work dir, and its `.rhs` becomes the consumer's
+`FOR045`. That is why `mean_field=` takes a whole configured model rather than
+a file path: three of the guards (single frequency, frequency match to 0.1 %,
+and a rough target interface **in the producer's deck**) cannot be checked
+from a path alone, and each failure is one the binary reports as a Fortran I/O
+error or a division by zero rather than as a diagnosis.
+
+`OASS`'s reverberation `Field` is tagged `kind='reverberation'`, not left to
+derive. It shares transmission loss's dB representation but is a different
+quantity, so it must not land on one colour scale with a TL field — see
+[results](../guide/results.md#2-field--one-container-described-on-three-axes).
+
+Two knobs are physically significant rather than numerical:
+
+- **`c_low`** defaults to the mean field's own and warns when it differs.
+  Lowering it below the producer's is inert (measured 1e-4 dB) because
+  `REVINT`/`REVCOV` bound their own buffer reads; **raising** it truncates the
+  scattering integral and moved a measured case by **30 dB**.
+- **`interface`** names the layer the roughness spectrum attaches to. Get it
+  wrong and the interface carries a *positive* RG, which OASES reads as an
+  infinite correlation length — `P(k)` collapses to a delta at `k=0`, so there
+  is no back-scatter at all, from a run that exits 0 and writes a full set of
+  curves. uacpy refuses an interface that is not a bottom layer rather than
+  let that through.
+
+Volume scattering is deliberately unsupported: `OASSP` raises
+`UnsupportedFeatureError` naming the SKW/M/RMS/GAM parameters instead of
+half-implementing the 12-token record.
+
+**The scattering writers refuse values the deck format cannot carry.** `RG` and
+`CL` are written with `%.4f`, and OASES acts on what it reads, not what you
+asked for: below 5e-5 m both round to zero, which OASES takes as a *smooth*
+interface with an *infinite* correlation length — the exact opposite of the
+request, returning a flat level with no error. A negative `correlation_length`
+is refused too; OASES reads it as the flag for a longer volume-scattering
+record and over-reads the deck. `OASR` inherits both through
+`interface_roughness=`.
+
+`OASS` also refuses two scattered-field products in one run — asking for the
+covariance alongside a reverberation curve returns a silently **zero**
+covariance — and a kernel plot (`I`/`S`/`c`) alongside any reverberation
+letter, which OASES accepts and then never computes.
 
 They subclass a common `OASES` base, so `isinstance(model, OASES)` is true for
 any of them, but `OASES` itself is abstract. To pick one by run mode:
@@ -295,10 +346,10 @@ seabed the two are interchangeable: over the shared sand half-space their
 over the fluid sand-over-granite stack — and there the disagreement is
 concentrated on the flank of the null, where the two angle grids differ most.
 Shear is where they part company, and where OASR earns its place — it carries
-the same full elastic layer machinery as the rest of OASES, which BOUNCE has no
-counterpart for: BOUNCE marches acoustic layers, so it takes shear only on the
-bottom half-space. If the seabed has shear, do not assume the two agree to the
-fluid tolerance; run both.
+the shear-converted coefficients BOUNCE has no counterpart for: BOUNCE marches
+elastic layers too, but emits the P-P coefficient only. If you need P-SV or
+P-Slow, OASR is the one that has them — and where the seabed has shear, do not
+assume the two agree to the fluid tolerance; run both.
 
 ---
 
@@ -532,7 +583,7 @@ wave can be reflected back into it.
 | `surface_noise_level` | `0.0` | Surface-generated noise (dB re 1 µPa²/Hz); `0` disables. |
 | `white_noise_level` | `0.0` | Uncorrelated per-hydrophone noise. |
 | `deep_noise_level`, `deep_source_depth` | `0.0`, `None` | Deep broad-area sheet. |
-| `discrete_sources` | `None` | List of `{'depth', 'x', 'y', 'level', 'phase'}`, metres. |
+| `discrete_sources` | `None` | List of `{'depth', 'x', 'y', 'level'}`, metres. Any other key raises — OASES carries no per-source phase. |
 | `xmin`/`xmax`/`nx` | `None`/`None`/`50` | Replica grid in x (m); `None` → 100 m / 10 km. |
 | `ymin`/`ymax`/`ny` | `None`/`None`/`1` | Replica grid in y (m); `None` → 0 / 0. |
 | `zmin`/`zmax`/`nz` | `None`/`None`/`20` | Replica grid in depth (m); `None` → 10 m / `depth − 10`. |

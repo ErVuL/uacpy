@@ -8,7 +8,10 @@ Two output files are produced per run:
   configured in row 2 of ``ram.in``. One row per range step.
 - ``tl.grid`` — unformatted Fortran binary. Record 1 is a single int32
   ``lz`` (number of stored depth points). Records 2..N hold ``lz``
-  ``real*4`` TL samples each, one record per range output step.
+  ``real*8`` TL samples each, one record per range output step.
+  uacpy builds the Collins binaries with ``-fdefault-real-8``
+  (``install.sh``, both Makefiles), so these are 8 bytes, not the 4 of a
+  stock build.
 
 The reader returns a regular ``Field`` of ``field_type='tl'`` so the rest
 of uacpy (visualization, max-finding, comparisons) handles the output
@@ -173,7 +176,8 @@ def read_pcomplex_grid(
     Format (added to rams0.5 / ramsurf1.5 / ramgeo1.5 by uacpy — see
     ``third_party/MODIFICATIONS.md``): record 1 holds a single int32 ``lz``
     (number of stored depth points, identical to the ``tl.grid`` header).
-    Records 2..N each hold ``lz`` ``complex*8`` samples: whatever ``outpt``
+    Records 2..N each hold ``lz`` ``complex*16`` samples (8-byte reals — see
+    the module docstring on the double-precision build): whatever ``outpt``
     takes the magnitude of for ``tl.grid``, divided by ``sqrt(r)``. That is
     ``u·f3`` for the fluid codes (``ramsurf1.5.f:438``, ``ramgeo1.5.f:430``)
     and the odd-indexed elastic component ``u(2i-1)`` for RAMS

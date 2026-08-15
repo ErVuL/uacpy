@@ -1182,6 +1182,7 @@ class TestOasesUnwrittenOptionBlocks:
         assert set(_UNWRITTEN_OPTION_BLOCKS) == {
             'write_oast_input', 'write_oasp_input',
             'write_oasn_input', 'write_oasr_input',
+            'write_oassp_input',
         }
 
     @pytest.mark.parametrize('options,contour', [

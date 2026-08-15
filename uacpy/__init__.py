@@ -50,7 +50,8 @@ from uacpy.core.exceptions import (
 from uacpy import models
 from uacpy.models.base import PropagationModel, RunMode, ModelSpec
 from uacpy.models import (
-    Bellhop, Kraken, RAM, Scooter, SPARC, Bounce, OAST, OASN, OASR, OASP, OASES,
+    Bellhop, Kraken, RAM, Scooter, SPARC, Bounce,
+    OAST, OASN, OASR, OASP, OASS, OASSP, OASES,
 )
 from uacpy.parallel import run_parallel, Job, ParallelResult
 from uacpy.visualization import plots as plot
@@ -98,7 +99,7 @@ __all__ = [
     'PropagationModel',
     'ModelSpec',
     'Bellhop', 'Kraken', 'RAM', 'Scooter', 'SPARC', 'Bounce',
-    'OAST', 'OASN', 'OASR', 'OASP', 'OASES',
+    'OAST', 'OASN', 'OASR', 'OASP', 'OASS', 'OASSP', 'OASES',
     'run_parallel',
     'Job',
     'ParallelResult',

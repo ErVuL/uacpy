@@ -7,7 +7,7 @@ from uacpy.models.kraken import Kraken
 from uacpy.models.bounce import Bounce
 from uacpy.models.scooter import Scooter
 from uacpy.models.sparc import SPARC
-from uacpy.models.oases import OASES, OAST, OASN, OASR, OASP
+from uacpy.models.oases import OASES, OAST, OASN, OASR, OASP, OASS, OASSP
 
 __all__ = [
     'PropagationModel',
@@ -24,4 +24,6 @@ __all__ = [
     'OASN',
     'OASR',
     'OASP',
+    'OASSP',
+    'OASS',
 ]

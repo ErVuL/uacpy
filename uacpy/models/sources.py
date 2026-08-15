@@ -81,9 +81,10 @@ MODEL_SOURCES: Dict[str, ModelSource] = {
         url='https://acoustics.mit.edu/faculty/henrik/oases.html',
         commercial_use=False,
         redistributable=False,
-        note='OAST / OASN / OASR / OASP. Academic licence: the user installs '
-             'it separately (install.sh --oases yes); uacpy never bundles or '
-             'redistributes the binary. Verify terms before commercial use.',
+        note='OAST / OASN / OASR / OASP / OASS / OASSP. Academic licence: '
+             'the user installs it separately (install.sh --oases yes); '
+             'uacpy never bundles or redistributes the binary. Verify terms '
+             'before commercial use.',
     ),
     'collins_ram': ModelSource(
         id='collins_ram',

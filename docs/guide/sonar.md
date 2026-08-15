@@ -290,10 +290,9 @@ built for `P_D = 0.9` still reports 0.5 on its own `SE = 0` contour and the two
 statements stop agreeing. Recompute `DT` at 0.5, or read the surface as a
 relative one.
 
-`probability_of_detection_field` applies the **log-normal** transition curve —
-the simplest member of the family Urick draws in Fig. 12.10: the decision
-statistic is taken log-normal, so in dB it is Gaussian with standard deviation
-`sigma_db`, giving
+`probability_of_detection_field` applies the **log-normal** transition curve:
+the decision statistic is taken log-normal, so in dB it is Gaussian with
+standard deviation `sigma_db`, giving
 
 ```
 P_D = Φ(SE / sigma_db)
@@ -325,9 +324,12 @@ edge collapses.
 channel, not a processing knob. Dyer's *saturated-multipath* result gives
 `σ ≈ 5.6` dB; measured one-way totals typically run 5–9 dB, which is exactly
 the span the two panels bracket. Saturation is the precondition: many arrivals
-of comparable amplitude and effectively random phase are what make the
-intensity log-normal in the first place. A two-path or few-path channel is not
-saturated, and the Gaussian-in-dB model has no claim on it.
+of comparable amplitude and effectively random phase are the central-limit
+condition for a circular complex-Gaussian field — a Rayleigh envelope and an
+**exponentially** distributed intensity. The log-normal is a *fit* to that, and
+5.6 dB is the number that makes the fit: the dB-domain spread of an exponential
+is `(10/ln10)·π/√6 = 5.57` dB. A two-path or few-path channel is not saturated,
+and the Gaussian-in-dB model has no claim on it.
 
 The log-normal approximation is most accurate near `SE = 0` and optimistic in
 the tails. For fluctuation statistics beyond Gaussian-in-dB the standard tool

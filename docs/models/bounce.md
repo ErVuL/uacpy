@@ -82,7 +82,7 @@ If you need it, you need [OASES](oases.md) or [Scooter](scooter.md) end to end.
 |---|---|---|
 | You want transmission loss | Bounce computes no field | any propagation model |
 | Reflection across a **band** | one frequency per run | [OASES](oases.md) (OASR) |
-| Elastic *layers* above the half-space | BOUNCE marches acoustic layers | [OASES](oases.md) (OASR), [Scooter](scooter.md) |
+| A shear-converted coefficient (P-SV, P-Slow) | BOUNCE emits P-P only | [OASES](oases.md) (OASR) |
 | P-SV conversion, transmission coefficients | BOUNCE emits P-P only | [OASES](oases.md) (OASR) |
 | The bottom changes along the track | range-independent by construction | [RAM](ram.md), [Bellhop](bellhop.md) |
 
@@ -93,7 +93,7 @@ a fluid stack they agree. They differ in reach and in plumbing:
 
 | | **Bounce** (AT) | **OASR** ([OASES](oases.md)) |
 |---|---|---|
-| Media | fluid layers over a fluid or elastic half-space | full seismo-acoustic, elastic layers included |
+| Media | fluid or elastic layers over a fluid or elastic half-space | full seismo-acoustic |
 | Frequency | one per run | swept in one run → 2-D `R(θ, f)` |
 | Angle grid | derived from `c_low`/`c_high`/`rmax` | you pass `angles=` |
 | Coefficient | P-P | P-P, P-SV, transmission |
@@ -109,7 +109,7 @@ for when you need physics BOUNCE does not model, or a broadband picture.
 | Feature | Native? | Note |
 |---|---|---|
 | Layered bottom | ✅ | the whole point — an arbitrary stack of fluid layers |
-| Elastic media (shear) | ⚠️ | half-space only; BOUNCE marches acoustic layers |
+| Elastic media (shear) | ✅ | elastic layers and half-space; P-P coefficient only |
 | Range-dependent bottom | ❌ | collapsed to the median column, with a `UserWarning` |
 | Range-dependent bathymetry / SSP | ❌ | Bounce reads no range axis |
 | Sea-surface altimetry | ❌ | |
@@ -159,7 +159,7 @@ Everything is configured on the constructor; `run()` has a fixed signature.
 | Name | Default | Meaning |
 |---|---|---|
 | `c_low` | `1400.0` | Lowest phase velocity tabulated (m/s). Must be `> 0`. |
-| `c_high` | `10000.0` | Highest phase velocity. `1e9` zeroes the minimum wavenumber and buys the full 0–90° sweep. |
+| `c_high` | `1e9` | Highest phase velocity. `1e9` zeroes the minimum wavenumber and buys the full 0–90° sweep. |
 | `rmax` | `None` | Range (m) the table is sized for — it sets how many angles you get. `None` auto-derives from `receiver.range_max`, or 10 km. |
 | `n_angles` | `None` | Ask for ≈ N samples directly; `rmax` is back-derived to match. |
 
@@ -495,11 +495,11 @@ tl = Bellhop().run(env_rc, source, receiver, run_mode=RunMode.COHERENT_TL)
 
 ## 8. Gotchas
 
-**The default `c_high` stops short of normal incidence.** The table runs from
-0° up to `arccos(c_water / c_high)`, which for the default 10 000 m/s is ~81°.
-That is fine for propagation-facing tables, but if you want the whole curve,
-pass `c_high=1e9` — it zeroes BOUNCE's minimum wavenumber and the sweep runs
-0–90°. Every figure on this page does.
+**`c_high` sets where the table stops.** It runs from 0° up to
+`arccos(c_water / c_high)`. The default `1e9` zeroes BOUNCE's minimum
+wavenumber, so the sweep is the full 0–90° out of the box; pinning a finite
+value truncates it — `c_high=10000` stops at ~81°, which is fine for a
+propagation-facing table but not for inspecting normal incidence.
 
 **The angle grid is uniform in `cos θ`, not in θ.** It comes from a uniform
 sweep in horizontal slowness, which means it is *coarse where you probably care
@@ -532,9 +532,9 @@ bottom = uacpy.SeabedColumn(
 The layer is the same material as the half-space, so the seabed is physically
 unchanged and `|R|` is identical to 3 × 10⁻⁶; the phase then lands on the
 closed-form `arg R` to 0.001° and is identically zero above the critical angle.
-Fluid media only — BOUNCE marches acoustic layers, so an elastic half-space
-cannot be respelled this way and keeps the offset. This is not confined to
-inspection work: a bare elastic half-space has no layers, so
+Fluid media only — an elastic half-space has no acoustic layer to absorb the
+respelling, so it keeps the offset. This is not confined to inspection work: a
+bare elastic half-space has no layers, so
 [Bellhop](bellhop.md)'s auto-BOUNCE route feeds on a table carrying the offset.
 
 **One frequency per run.** A multi-frequency `Source` raises

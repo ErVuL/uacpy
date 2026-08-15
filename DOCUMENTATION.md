@@ -7,7 +7,7 @@ real-world-data layer that builds an `Environment` from GPS coordinates.
 
 This guide is example-driven: each concept is introduced briefly, then shown
 with a minimal runnable snippet. Every public class and function also carries a
-docstring (`help(uacpy.Bellhop)`), `uacpy/examples/` holds 38 complete scripts,
+docstring (`help(uacpy.Bellhop)`), `uacpy/examples/` holds 39 complete scripts,
 and the internals are documented in `docs/DEV.md`.
 
 ## Table of Contents
@@ -202,6 +202,7 @@ eigenfunctions). Calling a wrapper a model doesn't support raises
 | `BROADBAND` | complex transfer function H(f) |
 | `TIME_SERIES` | time-domain pressure p(t) |
 | `COVARIANCE` / `REPLICA` | OASN array covariance / matched-field replicas |
+| `REVERBERATION` | OASS reverberation level scattered from a rough interface |
 | `REFLECTION` | plane-wave reflection coefficients |
 
 A model advertises what it supports via `model.supported_modes` /
@@ -701,8 +702,8 @@ The sections below are usage-oriented. For the **complete per-parameter tables**
 | **Kraken** | Normal modes. Want the modal decomposition itself (`k`, `φ(z)`) or modal-sum TL; range-dependent via adiabatic/coupled modes. Elastic media via `krakenc`. |
 | **Scooter** | Wavenumber integration (FFP). Exact range-independent field including layered/elastic bottoms and leaky energy that modes miss. |
 | **RAM** | Parabolic equation. The workhorse for strongly range-dependent environments (sloping bathymetry, fronts) at low-to-mid frequency. |
-| **SPARC** | Time-domain PE. Direct synthesis of the transient pressure pulse `p(t)` without an IFFT step. |
-| **OASES** | Wavenumber integration for arrays and elastic seismo-acoustics: TL (OAST), array covariance/replicas (OASN), reflection coefficients (OASR), pulse/broadband (OASP). |
+| **SPARC** | Time-marched FFP (wavenumber integration, Porter 1990) — direct synthesis of the transient pressure pulse `p(t)` without an IFFT step. |
+| **OASES** | Wavenumber integration for arrays and elastic seismo-acoustics: TL (OAST), array covariance/replicas (OASN), reflection coefficients (OASR), pulse/broadband (OASP), reverberation from rough interfaces (OASS), broadband scattered-field realizations (OASSP). |
 | **Bounce** | Not a propagation model — tabulates a bottom reflection coefficient `R(θ)` to a `.brc`/`.irc` file for the others to consume. |
 
 ### Capability matrix
@@ -720,6 +721,8 @@ Verified against each model's `_supported_modes` / `_supports_*` flags.
 | **OASN** | COVARIANCE, REPLICA | no | yes | no | (multi-freq sweep) |
 | **OASR** | REFLECTION | no | yes | no | (multi-freq sweep) |
 | **OASP** | COHERENT_TL, BROADBAND, TIME_SERIES | no | yes | no | yes |
+| **OASS** | REVERBERATION, COVARIANCE | no | yes | no | no |
+| **OASSP** | BROADBAND, TIME_SERIES | no | yes | no | yes |
 | **Bounce** | REFLECTION | no | yes | no | no |
 
 All range-independent models support a layered seabed (`_supports_layered_bottom`)
@@ -892,8 +895,9 @@ ts = ram.compute_time_series(env, source, receiver,
 
 ### SPARC
 
-Time-domain PE — marches the wave equation in time to produce `p(t)` directly,
-without the per-frequency synthesis the other models use. The pulse comes from
+Time-marched FFP (Porter 1990) — wavenumber integration marched in time to
+produce `p(t)` directly, without the per-frequency synthesis the other models
+use. Not a parabolic equation: it makes no one-way approximation. The pulse comes from
 the constructor `pulse_type` (a 4-character AT code); `output_mode` selects the
 geometry: `'R'` horizontal array, `'D'` vertical array, `'S'` snapshot.
 
@@ -941,12 +945,12 @@ want control over the table or to feed Scooter/krakenc.
 
 ### OASES
 
-OASES is the abstract base for four wavenumber-integration sub-models — pick one
+OASES is the abstract base for the wavenumber-integration sub-models — pick one
 directly, or use the `OASES.for_mode(run_mode=...)` factory. All OASES knobs are
 constructor-only.
 
 ```python
-from uacpy import OAST, OASN, OASR, OASP, OASES, RunMode
+from uacpy import OAST, OASN, OASR, OASP, OASS, OASSP, OASES, RunMode
 
 # OAST — transmission loss
 tl = OAST().run(env, source, receiver)                      # Field
@@ -960,8 +964,16 @@ rep  = oasn.compute_replicas(env, source, receiver)         # Replicas
 refl = OASR(angles=np.linspace(0, 90, 91)).run(env, source, receiver)
 
 # OASP — broadband pulse / transfer function
-oasp = OASP(n_time_samples=256, freq_max=120)
+oasp = OASP(n_time_samples=256, freq_max=500)
 hf   = oasp.run(env, source, receiver, run_mode=RunMode.BROADBAND)
+
+# OASS — reverberation from a rough interface (runs OAST first, then oass2)
+oass = OASS(correlation_length=10.0, rms_roughness=0.5)
+reverb = oass.run(env, source, receiver)                    # Field, kind='reverberation'
+
+# OASSP — one realization of the scattered field (runs OASP first, then oassp2)
+oassp = OASSP(correlation_length=5.0, realization=0, n_time_samples=512)
+h_scat = oassp.run(env, source, receiver)                   # Field, complex H(f)
 
 # Or dispatch by mode:
 model = OASES.for_mode(RunMode.REFLECTION, angles=np.linspace(0, 90, 91))
@@ -1019,6 +1031,7 @@ produces, plus the slicing and convenience methods that make sense for it.
 | `COVARIANCE` | `Covariance` | OASN hydrophone covariance |
 | `REPLICA` | `Replicas` | OASN MFP replica field |
 | `REFLECTION` | `ReflectionCoefficient` | R(θ[, f]) |
+| `REVERBERATION` | `Field` | OASS reverberation level (`kind='reverberation'`, dB) |
 
 All of them subclass `Result`, so every result carries the same identification
 fields: `result.model`, `result.backend`, `result.source_depths`,
@@ -1671,9 +1684,10 @@ uacpy is SI throughout; underwater levels reference **1 µPa**.
   **the same for every model** (Bellhop, Kraken, Scooter, RAM, SPARC) so that
   TL is directly comparable across them. Each native binary's own normalisation
   is bridged to it at the `io` boundary: e.g. SPARC's `'D'` and `'S'` outputs
-  are harmonised onto its `'R'`-native normalisation, which differs between
-  `sparc.f90`'s branches by `√π` and `−√(4π)` (SPARC `'D'`/`'S'` remain
-  experimental — see the SPARC parameter table in §18).
+  are harmonised onto its `'D'` normalisation — the branch that carries the true
+  inverse-Hankel weight `Δk·√(2k/(π·r))`. `'R'` is that weight without the
+  `1/√π` (~4.97 dB hot) and is divided back; `'S'` is scaled by `−2` (SPARC
+  `'D'`/`'S'` remain experimental — see the SPARC parameter table in §18).
 - A 2-D (line-source) analytic solution differs by the spreading factor
   `|G₃D/G₂D| = √(k/2πr)` — relevant only when comparing against closed-form 2-D
   references (see the ideal-wedge benchmark in `tests/test_benchmarks_analytic.py`).
@@ -1750,7 +1764,7 @@ uacpy is SI throughout; underwater levels reference **1 µPa**.
 
 ## 17. Examples Index
 
-All 38 runnable scripts live in `uacpy/examples/`.
+All 39 runnable scripts live in `uacpy/examples/`.
 
 | # | Topic |
 |---|-------|
@@ -1888,7 +1902,7 @@ with a warning naming the value it dropped.
 | `backend` | — | `None` | Modes binary: `'kraken'`/`'krakenc'`; `None` auto-picks `krakenc` for elastic/leaky media. |
 | `mode_coupling` | — | `'adiabatic'` | RD mode transitions: `'adiabatic'` or `'coupled'`. |
 | `n_segments` | count | `None` | Range segments for RD; `None` auto-picks from change-points (gaps > 2 km split). |
-| `mode_points_per_meter` | pts/m | `1.5` | Mode-depth grid density. |
+| `mode_points_per_meter` | pts/m | `None` (derived) | Mode-depth grid density. |
 | `field_executable` | path | `None` | `field.exe` path; auto-detected if `None`. |
 | `c_low` | m/s | `None` | Lower phase-speed limit of the modal solver. |
 | `c_high` | m/s | `None` | Upper phase-speed limit. |
@@ -1940,7 +1954,7 @@ with a warning naming the value it dropped.
 | `dr` | m | `None` | Range step; `None` → Lytaev optimiser. |
 | `dz` | m | `None` | Depth step; `None` → Lytaev optimiser (snapped to integer depth count). |
 | `zmax` | m | `None` | PE domain depth; `None` = seafloor + absorbing layer. |
-| `np_pade` | count | `6` | Number of Padé coefficients (2–8). |
+| `np_pade` | count | `6` | Number of Padé coefficients (2–10). |
 | `ns_stability` | count | `1` | Number of stability terms. |
 | `rs_stability` | m | `None` | Stability range; `None` = max output range. |
 | `Q` | — | `None` | Broadband bandwidth factor (bandwidth = fc/Q); `None` → 2.0 broadband / 1e6 COHERENT_TL. |
@@ -2031,3 +2045,87 @@ with a warning naming the value it dropped.
 | `plot_rmin` / `plot_rmax` | — | — | **Raise.** OASN writes covariance/replica outputs, not a TL plot. |
 | `vrec` | — | — | **Raise.** VREC is OAST's Doppler receiver velocity. |
 | `offdb` | dB | `None` | Single-mode horizontal offset. |
+
+### OASES — OASS (reverberation / scattered field)
+
+OASS is a post-processor: `run()` drives the mean-field producer (OAST or OASR
+with option `'s'`) first, then `oass2` over the `.rhs` it leaves behind. Both
+decks share one work dir, and the producer's `Result` comes back on
+`metadata['mean_field_result']`.
+
+| Parameter | Unit | Default | Meaning |
+|---|---|---|---|
+| `correlation_length` | m | — | **Required.** `CL` of the roughness power spectrum. OASS does not adopt it from the mean-field run (`oass.tex:182-183`). |
+| `spectral_exponent` | — | `2.0` | `M` of the roughness spectrum; must exceed 1.5 or the spectrum is not integrable. |
+| `spectrum` | — | `'gaussian'` | `'gaussian'` or `'goff-jordan'` (option `'g'`). |
+| `rms_roughness` | m | `None` | `|RG|` at the scattering interface **in the OASS deck**; `None` → the environment's own. The mean-field deck always uses the environment's value. |
+| `interface` | count | `None` | `INTFC`, the deck-layer index of the scattering interface; `None` → the seafloor. Must be rough in the environment, or the mean field writes an empty `.rhs`. |
+| `multiple_scattering` | — | `False` | Option `'p'`: perturbed boundary operator, a lower bound on the reverberation level. |
+| `plane_geometry` | — | `False` | Option `'P'`: plane rather than cylindrical geometry. |
+| `mean_field` | — | `None` | The producer model; `None` → `OAST(options='N J T s')`. Only OAST/OASR qualify, and the option line must carry `'s'`. |
+| `c_low` / `c_high` | m/s | `None` | `CMIN`/`CMAX`. `c_low` is physically significant, not a tuning knob: raising it above the mean field's truncates the scattering integral (measured 30 dB), lowering it is inert. `None` → the mean field's own bound; a different value warns. |
+| `receiver_gains` | dB | `None` | Per-element gain, Block VI column 5. |
+| `options` | — | `None` | Raw OASES options string; `None` → the run mode's product letter (`'r'` / `'a'`) plus the flags above. Mutually exclusive with them. |
+| `integration_offset` | — | — | **Raise.** Block III's `COFF` is unreachable (`unoass21.f:596`); set it on `mean_field` instead. |
+| `nw_samples` | — | — | **Raise.** `NWVNO` is re-derived from the `.rhs` (`unoass21.f:209-215`); set it on `mean_field` instead. |
+
+`RunMode.REVERBERATION` returns a real dB `Field` tagged `kind='reverberation'`
+(`-10·log10 E[|p_scat|²]`, **not** transmission loss, so it does not compare
+against a TL field). `RunMode.COVARIANCE` returns a `Covariance` shaped
+`(1, n_rcv, n_rcv)` — the same carrier and file format OASN produces, which is
+why the OASES manual ships an `addcov` utility to sum the two. One product per
+run: `'a'` sharing a deck with `'r'` returns a silently zero covariance, so the
+run mode picks exactly one letter.
+
+### OASES — OASSP (scattered-field realizations)
+
+OASSP is OASS's time-domain counterpart and the same shape of post-processor:
+`run()` drives an `OASP` mean-field run with option `'s'` first, then `oassp2`
+over the `.rhs`/`.vol` pair it leaves behind, in one shared work dir. Where
+OASS returns the *expectation* of the scattered field, OASSP returns one
+**realization** of it, in OASP's own `.trf` format and read by the same reader.
+The producer's `Result` comes back on `metadata['mean_field_result']`.
+
+| Parameter | Unit | Default | Meaning |
+|---|---|---|---|
+| `correlation_length` | m | — | **Required.** `CL` of the roughness power spectrum; OASSP reads it from this deck, not from the mean field. A **negative** value is OASES' switch to the 12-token volume-scattering record and raises `UnsupportedFeatureError` — see below. |
+| `spectral_exponent` | — | `2.0` | `M` of the roughness spectrum; must exceed 1.5 or the spectrum is not integrable. |
+| `spectrum` | — | `'gaussian'` | `'gaussian'` or `'goff-jordan'` (option `'g'`). |
+| `rms_roughness` | m | `None` | `\|RG\|` at the scattering interface **in the OASSP deck**; `None` → the environment's own. The scattered field is linear in it (`pow = \|ROUGH(INTFCE)\|`, `unoassp30.f:615`). |
+| `interface` | count | `None` | Cross-check only. OASSP reads the scattering interface out of the `.rhs` (`unoassp30.f:546-547`); a value that disagrees with the file raises rather than attaching the spectrum to a layer the binary never looks at. |
+| `realization` | count | `0` | Realization index `k`; the OASES seed is `-123 - k` (`unoassp30.f:170`, `:535`), so a given `k` is reproducible and different `k` are different draws. Under cylindrical geometry it also shifts the full-Bessel tabulation window by `k/2` in `kr` (`:171`, `:639-640`), which OASP pins to 0 — so a large-`k` ensemble is not *purely* statistical. |
+| `scattered_only` | — | `True` | Option `'s'`: zero the source arrays so the `.trf` holds the scattered field alone (`unoassp30.f:628-635`). |
+| `multiple_scattering` | — | `False` | Option `'p'`: perturbed boundary operator. |
+| `plane_geometry` | — | `False` | Option `'P'`. Without it OASSP forces `CMAX = 1e12` and a full Hankel transform (`unoassp30.f:205-217`), so `c_high` is inert and warns. |
+| `mean_field` | — | `None` | The producer model; `None` → an `OASP` built from the FFT-grid knobs below. Mutually exclusive with them, since the mean field owns the grid. Option `'s'` is added if missing — without it OASP writes no `.rhs` at all. |
+| `n_time_samples`, `freq_min`, `freq_max`, `center_frequency` | — | `None` | Passed to the mean-field `OASP`. **Not** OASSP's own Block VIII — see below. |
+| `c_low` / `c_high` | m/s | `None` | `CMIN`/`CMAX`. `c_high` needs `plane_geometry`. |
+| `nw_samples`, `integration_offset`, `range_start` | — | — | As for `OASP`. |
+| `options` | — | `None` | Raw OASES options string; `None` → `'N J s'` plus the flags above. Mutually exclusive with them. Validated by the wrapper, because OASSP's `GETOPT` closes with an empty `ELSE` (`unoassp30.f:1049`) and discards an unknown letter with no diagnostic. |
+
+**Block VIII is not the user's to set.** OASSP replaces its deck's
+`NT`/`FR1`/`FR2`/`DT` with the `.rhs`'s own values but warns on only two of the
+four (`unoassp30.f:181-188`), so a band that differs from the mean field's is
+substituted with no message at all. The wrapper reads those four straight out
+of the `.rhs` and writes them back, which makes the substitution a no-op — ask
+for a different band by configuring the mean field, or by passing
+`run(frequencies=…)`, which is forwarded to it. `Field.coords['frequency']` is
+therefore always the mean field's axis.
+
+`RunMode.BROADBAND` (default) returns a complex `Field` of the scattered `H(f)`
+on `(depth, range, frequency)`, tagged `phase_reference='travelling_wave'`;
+`RunMode.TIME_SERIES` returns real `p(t)` and needs `source_waveform` +
+`sample_rate`.
+
+**Not supported.** Volume scattering (`oassp.tex` ≥ 2.2) needs `SKW`, `M`,
+`RMS` and `GAM` on the layer record, and no uacpy carrier has a field for them,
+so it raises rather than writing zeros into three of twelve columns. Option
+`'U'` (wave-field decomposition) writes five separate `.trf` files and is
+refused; for the record, its file↔component order is the source's
+(`unoassp30.f:48-52`: `trf` total, `trfdc` down-going compressional, `trfds`
+down-going shear, `trfuc` up-going compressional, `trfus` up-going shear),
+verified through `KERDEC` — `oassp.tex:185-189` has `ds` and `uc` swapped.
+Option `'b'` (bistatic) needs an undocumented third input file. The scattering
+interface must be a **bottom** interface: the water-layer records carry no
+nine-token form, so a rough sea surface cannot be the scatterer (the same limit
+as OASS).

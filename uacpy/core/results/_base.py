@@ -389,6 +389,93 @@ _DOCUMENTED_METADATA: Dict[Tuple[str, str], Tuple[type, str]] = {
     ('OASP', 'source_depth'): (
         float, 'Source depth (m) read from the .trf header.'
     ),
+    # ───────── OASS (reverberation from a rough interface) ─────────
+    ('OASS', 'plt_file'): (
+        str, 'Reverberation-vs-range curve data (.plt).'
+    ),
+    ('OASS', 'xsm_file'): (
+        str, 'Reverberation covariance (.xsm) — RunMode.COVARIANCE.'
+    ),
+    ('OASS', 'cor_file'): (
+        str, 'Normalised spatial correlation the binary dumps as ASCII on '
+        'unit 24 (oassun26.f:1068), useful as a cross-check on the .xsm.'
+    ),
+    ('OASS', 'rhs_file'): (
+        str, 'Mean-field boundary operators consumed as FOR045 (.045), '
+        'written by the OAST/OASR producer run with option "s".'
+    ),
+    ('OASS', 'kind'): (
+        str, "Field quantity tag: 'reverberation'. The data is "
+        "-10*log10 E[|p_scat|^2] (oassun26.f:876-880), not transmission "
+        "loss, so it does not compare against a TL field."
+    ),
+    ('OASS', 'oass_quantity'): (
+        str, "Long name of the quantity on the Field: "
+        "'reverberation_loss_db'."
+    ),
+    ('OASS', 'interface'): (
+        int, 'OASES deck-layer index (INTFC) of the scattering interface the '
+        'reverberation was computed for.'
+    ),
+    ('OASS', 'n_wavenumbers'): (
+        int, 'Wavenumber count OASS derived from the .rhs sampling '
+        '(unoass21.f:209-215), which overrides the deck value.'
+    ),
+    ('OASS', 'mean_field_result'): (
+        'Field', 'The mean-field Result the .rhs came from, kept so the '
+        'coherent field need not be recomputed.'
+    ),
+    ('OASS', 'oass_native_ranges'): (
+        'ndarray',
+        'Equispaced range axis (m) OASS integrated on — present when the '
+        'wrapper resampled onto a non-equispaced receiver.ranges.'
+    ),
+    ('OASS', 'interpolated'): (
+        bool, 'True when the reverberation level was interpolated onto the '
+        'user receiver grid; False / absent when the native grid was kept.'
+    ),
+    ('OASS', 'n_receivers'): (
+        int, 'Number of receivers (NRCV) in the OASS array.'
+    ),
+    ('OASS', 'title'): (
+        str, 'Title string from the .xsm header. OASS leaves the COMMON the '
+        'writer reads unfilled (unoass21.f:34 declares TITLE locally), so it '
+        'is empty.'
+    ),
+    # ───────── OASSP (scattered-field realizations) ─────────
+    ('OASSP', 'trf_file'): (
+        str, 'Scattered-field transfer functions (.trf), in OASP format.'
+    ),
+    ('OASSP', 'rhs_file'): (
+        str, 'Mean-field boundary operators consumed as FOR045 (.045), '
+        'written by the OASP producer run with option "s".'
+    ),
+    ('OASSP', 'vol_file'): (
+        str, 'Mean field inside the scattering layer, consumed as FOR046 '
+        '(.046); OASSP opens it unconditionally (unoassp30.f:128).'
+    ),
+    ('OASSP', 'realization'): (
+        int, 'Realization index k. The OASES seed is -123 - k '
+        '(unoassp30.f:170, :535), so a given k is reproducible.'
+    ),
+    ('OASSP', 'interface'): (
+        int, 'OASES deck-layer index the scattering was computed at, read '
+        'from the .rhs (unoassp30.f:546-547) rather than from the deck.'
+    ),
+    ('OASSP', 'center_frequency'): (
+        float, 'Carrier (centre) frequency (Hz) read from the .trf header.'
+    ),
+    ('OASSP', 'n_time_samples'): (
+        int, 'FFT length NT, taken from the mean-field .rhs — OASSP replaces '
+        'the deck value with it (unoassp30.f:181-188).'
+    ),
+    ('OASSP', 'freq_max'): (
+        float, 'Upper band edge FR2, from the same .rhs record as NT.'
+    ),
+    ('OASSP', 'mean_field_result'): (
+        'Field', 'The OASP mean-field Result the .rhs came from, kept so the '
+        'coherent field need not be recomputed.'
+    ),
 }
 
 

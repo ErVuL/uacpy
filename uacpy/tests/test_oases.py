@@ -424,6 +424,13 @@ class TestContourOffsetUnderAutomaticSampling:
             self, cls_name, kwargs):
         with warnings.catch_warnings():
             warnings.simplefilter('error')
+            # The OASES licence notice is emitted once per source per process
+            # (base.py::_warn_restricted_source), so whichever test builds the
+            # first OASES model in this worker absorbs it. Under xdist that is
+            # a coin toss, which would make a strict block flaky for a warning
+            # it does not assert on.
+            warnings.filterwarnings('ignore', message='.*not redistributable.*')
+            warnings.filterwarnings('ignore', message='.*licence.*')
             getattr(uacpy, cls_name)(**kwargs)
 
     def test_oasn_is_not_affected(self):
@@ -431,6 +438,8 @@ class TestContourOffsetUnderAutomaticSampling:
         # touches, so OASN keeps the user's offset and must stay silent.
         with warnings.catch_warnings():
             warnings.simplefilter('error')
+            warnings.filterwarnings('ignore', message='.*not redistributable.*')
+            warnings.filterwarnings('ignore', message='.*licence.*')
             uacpy.OASN(integration_offset=2.0)
 
 

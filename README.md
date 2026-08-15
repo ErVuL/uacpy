@@ -69,7 +69,7 @@ models — consistent `Environment` / `Source` / `Receiver` construction and
 | **Scooter**       | Finite elements for range independent env                          |
 | **SPARC**         | Experimental time-marched FFP for pulses in range independent env  |
 | **RAM**           | Parabolic equation                                                 |
-| **OASES**         | OAST (TL) · OASN (covariance / MFP replicas) · OASR (reflection) · OASP (broadband TRF) |
+| **OASES**         | OAST (TL) · OASN (covariance / MFP replicas) · OASR (reflection) · OASP (broadband TRF) · OASS (reverberation) · OASSP (scattered pulse) |
 | **Bounce**        | Reflection coefficients                                            |
 
 **Toolkits** — first‑class modules, not just glue around the models:
@@ -296,8 +296,8 @@ Three entry points, depending on what you need:
 - **[`docs/DEV.md`](./docs/DEV.md) — internals**, for extending the package or
   adding a model wrapper.
 
-Inside `uacpy/examples/` you will find 38 example scripts numbered
-sequentially (`example_01_*.py` through `example_38_*.py`) — from a first TL
+Inside `uacpy/examples/` you will find 39 example scripts numbered
+sequentially (`example_01_*.py` through `example_39_*.py`) — from a first TL
 field to communications modems, a standards-based noise-impact assessment, a
 GPS-to-modelled-field real-world pipeline, and matched-field source
 localization. See the
@@ -436,7 +436,7 @@ redistributes Collins' original.
 - Collins, *A split-step Padé solution for the parabolic equation method*, JASA 93, 1736–1742, 1993
 - Collins, *Users Guide for RAM versions 1.0 and 1.0p / RAMGeo*, NRL, 1999
 
-### OASES --- OAST, OASN, OASR, OASP
+### OASES --- OAST, OASN, OASR, OASP, OASS, OASSP
 
 Henrik Schmidt (Massachusetts Institute of Technology) --- https://acoustics.mit.edu/faculty/henrik/oases.html
 

@@ -203,17 +203,23 @@ and are capped by `max_depths` (default 20) on the axis they loop; `'S'` runs
 once and is uncapped, converting the wavenumber-domain `.grn` in-tree with one
 inverse Hankel transform per output time.
 
-**Prefer `'R'` for absolute levels.** The three geometries do not arrive on a
-common scale. `'R'` and `'D'` are both range-domain outputs but normalise
-differently inside `sparc.f90` — `'D'` finishes with `1/√(π·r)` where `'R'`
-carries only `1/√r`, so `'R'` runs `√π` louder for the identical field. `'S'`
-normalises nothing at all: it writes the raw wavenumber-domain Green's function
-and uacpy transforms it in-tree, and *that* transform sits a further `−√(4π)`
-from `'R'`. uacpy scales `'D'` and `'S'` onto the `'R'` convention so that
-`Field.db` means the same thing everywhere. That harmonisation is measured, not
-derived, so `'D'` and `'S'` are **experimental**: trust their shapes, arrival
-times and relative structure; take decibels from `'R'` — and see
-[§7](#7-gotchas) for why even those are pulse-scaled rather than calibrated.
+**The three geometries do not arrive on a common scale.** `'R'` and `'D'` are
+both range-domain outputs but normalise differently inside `sparc.f90`: `'D'`
+finishes with `1/√(π·r)` where `'R'` carries only `1/√r`, so `'R'` runs `√π`
+louder for the identical field. `'S'` normalises nothing at all — it writes the
+raw wavenumber-domain Green's function and uacpy transforms it in-tree, a
+further `−√(4π)` away.
+
+**`'D'` is the reference, because it is the physics.** The far-field inverse
+Hankel transform weights each wavenumber sample by `Δk·√(2k/(π·r))`, which is
+exactly what `sparc.f90`'s `'D'` branch carries; `'R'` is that weight *without*
+the `1/√π`, i.e. ~4.97 dB hot. uacpy therefore divides `'R'` by `√π` and scales
+`'S'` by `−2` onto `'D'`, so `Field.db` means the same thing everywhere. That
+is derived from the kernel, not fitted.
+
+`'D'` and `'S'` remain **experimental** in the sense that matters here: see
+[§7](#7-gotchas) for why absolute levels are pulse-scaled rather than
+calibrated, whichever geometry you use.
 
 ---
 
@@ -515,7 +521,7 @@ deepest modelled interface, and `sparc.exe` would clamp a deeper receiver onto
 it. uacpy hands those cells back as `NaN` instead, so the depth axis still
 means what you asked for: use `np.nanmax` and friends.
 
-**Absolute levels are `'R'` plus a caveat.** The `'B'` band-pass in the
+**Absolute levels carry a caveat, whichever geometry you use.** The `'B'` band-pass in the
 default `'PN+B'` is not modelled by the CW source-spectrum deconvolution and
 adds a few dB; `'PN+N'` calibrates tighter (~±1.5 dB against Kraken). And the
 Ricker wavelet is defined on `U = ω·T − 5`, so its peak sits at

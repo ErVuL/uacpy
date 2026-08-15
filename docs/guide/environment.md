@@ -411,9 +411,9 @@ Nine class-typical materials, keyed by name:
 
 | | `c_p` (m/s) | `ρ` (g/cm³) | `α_p` (dB/λ) | `c_s` (m/s) | `α_s` (dB/λ) | `ϕ` |
 |---|--:|--:|--:|--:|--:|--:|
-| `clay` | 1500 | 1.5 | 0.2 | 80 | 1.0 | 9.0 |
-| `silt` | 1575 | 1.7 | 1.0 | 80 | 1.5 | 6.0 |
-| `sand` | 1650 | 1.9 | 0.8 | 110 | 2.5 | 2.0 |
+| `clay` | 1500 | 1.5 | 0.2 | 80 | 1.0 | 8.8 |
+| `silt` | 1575 | 1.7 | 1.0 | 80 | 1.5 | 5.4 |
+| `sand` | 1650 | 1.9 | 0.8 | 110 | 2.5 | 3.34 |
 | `gravel` | 1800 | 2.0 | 0.6 | 180 | 1.5 | −1.5 |
 | `moraine` | 1950 | 2.1 | 0.4 | 600 | 1.0 | — |
 | `chalk` | 2400 | 2.2 | 0.2 | 1000 | 0.5 | — |
@@ -556,8 +556,8 @@ it with a warning naming what was dropped.
 
 What `Surface` and `altimetry` between them do **not** carry is a bubble layer.
 Wind-driven bubbles change the sound speed in the top few metres — a void
-fraction of only 1e-6 puts `bubble_soundspeed` at 1486 m/s, 14 m/s below the
-bubble-free value — and add an excess attenuation no boundary property
+fraction of only 1e-6 drops `bubble_soundspeed` by 15.5 m/s (1539.1 → 1523.6 at
+its default reference) — and add an excess attenuation no boundary property
 reproduces. `uacpy.core.acoustics` has `bubble_soundspeed`, `bubble_resonance`
 and `bubble_surface_loss` for quantifying this by hand, but none of the three
 feeds an `Environment`: they are calculators, not carriers. Note also that
@@ -608,7 +608,7 @@ Reading the curves:
   absorption mechanism — Jensen attributes the regime to leakage out of the deep
   sound channel, not to anything the water does — so below ~50 Hz Thorp and
   Francois–Garrison diverge hard: at 10 Hz Thorp gives 3.3×10⁻³ dB/km against
-  FG's 1.3×10⁻⁵, and only FG is modelling absorption. And Eq. (1.47) is fitted at
+  FG's 1.2×10⁻⁵, and only FG is modelling absorption. And Eq. (1.47) is fitted at
   4 °C, 35 ppt, pH 8.0 and ~1000 m — the conditions of the 4 °C / 3000 m curve,
   not of the warm shallow one.
 - **Francois–Garrison** is the same physics with the T/S/pH/depth dependence

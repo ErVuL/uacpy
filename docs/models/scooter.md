@@ -296,8 +296,10 @@ poles, which are the ones that survive to long range: that curve is visibly
 wrong everywhere. The defaults (`0.95 × min SSP` to `1.05 × max speed`) bracket
 both ends with margin **at long range**, and cost accuracy close in: the
 default `c_high` starts the integration at `k_min = ω/c_high` rather than at
-`0`, dropping the steep-angle continuum, and COA §4.5.6 recommends including it
-(`k_min = 0`, i.e. an unbounded `c_high`) whenever you are unsure. In this
+`0`, dropping the steep-angle continuum, and COA Ch. 4 Appendix 1 (step 1)
+recommends including it (`k_min = 0`, i.e. an unbounded `c_high`) whenever you
+are unsure — raising `k_min` to save time is left to experienced modellers, who
+must then watch for the artifacts of COA §4.5.2. In this
 channel that costs 0.19 dB median beyond 2 km — and **29.8 dB at 100 m**, one
 water depth out. That is a second near-source limit, separate from the
 fast-field one in [§1](#1-what-it-solves) and scaled by the water depth rather

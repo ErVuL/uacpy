@@ -249,7 +249,7 @@ Everything is configured on the constructor; `run()` has a fixed signature.
 
 | Name | Default | Meaning |
 |---|---|---|
-| `mode_points_per_meter` | `1.5` | Density of the depth grid `ψ_m(z)` is returned on, spanning water plus sediment. |
+| `mode_points_per_meter` | `None` (derived: 10 pts/wavelength, floor 1.5) | Density of the depth grid `ψ_m(z)` is returned on, spanning water plus sediment. |
 | `mode_depth_grid` | `None` | Pin that grid explicitly instead. |
 
 **Range dependence**

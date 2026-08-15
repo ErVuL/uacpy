@@ -225,6 +225,14 @@ def _interp_to_receiver_grid(src_depths, src_ranges, values,
 MAX_BATHY_SECTIONS = 64
 
 
+#: Sub-bottom margin, in wavelengths, below which the absorbing layer has no
+#: room to work. ``ram.pdf`` p.7 asks for the grid bottom "well below the ocean
+#: bottom interface" with the attenuation raised "over the lower few
+#: wavelengths of the grid"; three is that "few", calibrated against the
+#: measured error curve rather than assumed.
+_MIN_SUBBOTTOM_WAVELENGTHS = 3.0
+
+
 class RAM(PropagationModel):
     """
     RAM - Range-dependent Acoustic Model (Parabolic Equation), multi-backend.
@@ -311,7 +319,7 @@ class RAM(PropagationModel):
         a depth grid node, capped at ``MAX_DEPTH_POINTS`` grid points, and
         floored at c_min/(16·freq) — 0.55·λ_s on rams). **[all backends]**
     np_pade : int, optional
-        Number of Pade coefficients (2-8). Default: 6. **[all backends]**
+        Number of Pade coefficients (2-10). Default: 6. **[all backends]**
     ns_stability : int, optional
         Number of stability terms. Default: 1 (use 0 for short ranges).
         **[mpiramS, ramgeo1.5, ramsurf1.5]** — rams0.5's row 5 carries
@@ -471,7 +479,7 @@ class RAM(PropagationModel):
             PE domain depth (m). None = auto (seafloor + absorbing layer).
             Default: None.
         np_pade : int, optional
-            Number of Pade coefficients (2-8). Default: 6.
+            Number of Pade coefficients (2-10). Default: 6.
         ns_stability : int, optional
             Number of stability terms. Default: 1.
         rs_stability : float, optional
@@ -564,13 +572,15 @@ class RAM(PropagationModel):
         if not self._exe.exists():
             raise ExecutableNotFoundError('RAM:mpiramS', str(self._exe))
 
-        # mpiramS allocates its Padé arrays dynamically (epade.f90:30) and the
-        # Collins binaries stop above ``parameter (mp=10)``. The 8 enforced
-        # below is a uacpy margin under that cap, with no recorded provenance.
-        if not isinstance(np_pade, int) or not (2 <= np_pade <= 8):
+        # mpiramS allocates its Padé arrays dynamically (epade.f90:30); the
+        # Collins binaries carry ``parameter (mp=10)`` and stop above it
+        # (``ramgeo1.5.f:142-145``). The bound below is the binaries' own, so
+        # np_pade=9 and 10 — legal, and the widest-angle operators available —
+        # are no longer refused by a margin nothing justified.
+        if not isinstance(np_pade, int) or not (2 <= np_pade <= 10):
             raise ConfigurationError(
-                f"np_pade must be an integer in [2, 8] (Collins mp=10 limit); "
-                f"got {np_pade!r}."
+                f"np_pade must be an integer in [2, 10] (Collins mp=10, "
+                f"ramgeo1.5.f:142-145); got {np_pade!r}."
             )
         # Catch garbage scalar inputs at construction time so they fail
         # with a clear Python error instead of a Fortran array-bound or
@@ -887,16 +897,32 @@ class RAM(PropagationModel):
             Reference sound speed for wavelength estimate.
         """
         if self.zmax is not None:
+            # mpiramS reaches a pinned zmax only through here; the Collins
+            # path resolves it in _resolve_collins_grid and guards it there.
+            # Both backends clamp the seafloor index the same way
+            # (mpiramS/src/ram.f90:101 iz=min(nz,iz), ramgeo1.5.f:135), so the
+            # seabed-outside-the-grid pathology is not Collins-specific:
+            # measured 29 dB silent error on mpiramS with zmax below depth.
+            self._warn_if_seafloor_outside_grid(self.zmax, env, freq=freq)
             return self.zmax
+        return self._adequate_zmax(env, freq, c0)
+
+    def _adequate_zmax(self, env: Environment, freq: float,
+                       c0: Optional[float] = None) -> float:
+        """The grid bottom ``ram.pdf`` p.7 asks for: the seafloor plus one
+        cell plus the absorbing layer.
+
+        Split out from :meth:`_compute_zmax` so the seafloor guard can compare
+        a pinned ``zmax`` against it without recursing back through the pinned
+        branch.
+        """
         if c0 is None:
             c0 = self._resolve_c0(env)
-        max_depth = env.depth
         wavelength = c0 / max(freq, 1.0)
         absorbing_width = self.absorbing_layer_width * wavelength
         dz_for_pad = (float(self.dz) if self.dz is not None
                       else self._compute_dz(env, freq, c0))
-        zmax = max_depth + dz_for_pad + absorbing_width
-        return zmax
+        return env.depth + dz_for_pad + absorbing_width
 
     @staticmethod
     def _flat_earth_depth(z: float) -> float:
@@ -1802,6 +1828,84 @@ class RAM(PropagationModel):
 
         return needed, limits['mz'], zmax / (nz_max - 0.5)
 
+    def _check_source_row_is_solved(self, zs: float, dz: float) -> None:
+        """Reject a source shallower than one ``dz``.
+
+        Every RAM binary plants the source with the same two statements —
+        ``si=1.0+zs/dz`` / ``is=ifix(si)``, then splits the amplitude across
+        ``u(is)`` and ``u(is+1)`` (``ramgeo1.5.f:389-393``,
+        ``ramsurf1.5.f:396-400``, ``rams0.5.f:357-361``,
+        ``mpiramS/src/ram.f90:110-114``). And every solver starts its sweep at
+        row 2 (``ramgeo1.5.f:312``, ``rams0.5.f:836``,
+        ``mpiramS/src/solvetri.f90:47``), so **row 1 is never written again**
+        while being read into every step (``ramgeo1.5.f:320``).
+
+        With ``zs < dz`` the index is 1, so a fraction of the source is frozen
+        in ``u(1)`` for the whole march and acts as a permanent Dirichlet
+        source sitting on the pressure-release surface. The field comes out
+        far too loud — the opposite of the physics, which requires it to get
+        *quieter* as the source approaches the surface. Measured against
+        Kraken as an independent arbiter: ~46 dB mean, 72 dB peak, on
+        uacpy's own default grid, with no warning on any backend.
+
+        This is the flat-surface case of the same row-1 kill
+        :meth:`_check_source_below_depressed_surface` catches for a ramsurf
+        keel; it needs no altimetry and applies to all four backends.
+        """
+        if float(dz) <= 0.0 or float(zs) >= float(dz):
+            return
+        raise ConfigurationError(
+            f"RAM: source at {float(zs):.4g} m is shallower than one depth "
+            f"cell (dz={float(dz):.4g} m), so selfs plants it at index 1 "
+            f"(si=1.0+zs/dz, ifix). No solver writes row 1 — every sweep "
+            f"starts at 2 — so the amplitude is frozen there for the whole "
+            f"march and acts as a permanent source on the pressure-release "
+            f"surface. Measured ~46 dB too loud against Kraken.",
+            remediation=(f"Set dz <= {float(zs):.4g} m so the source lands at "
+                         f"index 2 or deeper, or move the source below "
+                         f"{float(dz):.4g} m."),
+        )
+
+    def _check_rams_seafloor_index_floor(self, kind: str, dz: float,
+                                         bathymetry) -> None:
+        """Reject a track that drives ``rams0.5``'s seafloor index below 2.
+
+        ``rams0.5.f:135`` and ``:305`` both assign ``iz=z/dz`` with no clamp,
+        where ``ramgeo1.5.f:134`` and ``ramsurf1.5.f:119`` apply
+        ``max(2,iz)``. Below 2 the binary indexes before the start of its own
+        arrays: ``matrc:418`` runs ``do 2 i=ia-1,iz`` with ``ia=min(iz,jz)=1``
+        and reads ``lamw(0)``, and at ``iz=1`` ``matrc:717`` forms
+        ``i0=2*iz-3=-1`` and reads ``r5(0)``.
+
+        The reason this is worth refusing rather than warning: at ``iz=1`` the
+        run exits 0 and returns a **fully finite, entirely plausible** field.
+        A bounds-checked build of the same deck aborts. Only ``iz=0`` is loud
+        (all-NaN).
+
+        ``updat`` recomputes the index from the *interpolated* bathymetry at
+        every range step (``:305``), so the shallowest point anywhere on the
+        track decides this — not ``env.depth``, which is the deepest. Every
+        other depth guard in this class is written against the maximum, which
+        is why this one is separate.
+        """
+        if kind != 'rams' or not bathymetry:
+            return
+        shallowest = min(float(d) for _, d in bathymetry)
+        if shallowest >= 2.0 * float(dz):
+            return
+        raise ConfigurationError(
+            f"rams: the track shoals to {shallowest:.4g} m, which is less "
+            f"than 2*dz ({2.0 * float(dz):.4g} m), so the seafloor index "
+            f"iz=z/dz falls below 2. rams0.5 does not clamp it "
+            f"(rams0.5.f:135, :305 — unlike ramgeo1.5.f:134 / "
+            f"ramsurf1.5.f:119), and matrc then reads lamw(0) at :418 and "
+            f"r5(0) at :717. At iz=1 the run still exits 0 and returns a "
+            f"plausible finite field, so nothing downstream can catch it.",
+            remediation=(f"Set dz <= {shallowest / 2.0:.4g} m, or use "
+                         f"backend='ramgeo'/'ramsurf' (which clamp) if the "
+                         f"seabed needs no shear."),
+        )
+
     def _check_collins_array_limits(self, kind: str, dz: float, zmax: float,
                                     bathymetry, surface=None) -> None:
         """Reject a run that would overrun a Collins binary's fixed arrays.
@@ -2008,6 +2112,19 @@ class RAM(PropagationModel):
             env, fc, kind, max_range,
             dr_override, dz_override, zmax_override,
         )
+        # Built before the stride because the section spacing bounds ``dr``:
+        # the binary consumes at most one profile section per range step.
+        range_segments = self._collins_range_segments(env, kind, zmax, fc)
+        bathy_r = [float(r) for r, _ in env.bathymetry.to_pairs().tolist()]
+        alti_r = None
+        if kind == 'ramsurf' and env.altimetry is not None:
+            alti_r = [float(r) for r, _ in env.altimetry.to_pairs().tolist()]
+        dr = self._constrain_dr_to_sections(
+            dr, range_segments,
+            # A dr pinned on the CONSTRUCTOR is just as user-set as one passed
+            # to run(); testing only the override rewrites it in silence.
+            pinned=(dr_override is not None or self.dr is not None),
+            bathymetry_ranges=bathy_r, altimetry_ranges=alti_r)
         ndr, rmax_march = self._collins_output_stride(
             dr, max_range, receiver.ranges)
         ndz = max(1, int(self.depth_decimation))
@@ -2063,17 +2180,15 @@ class RAM(PropagationModel):
 
         surface = (self._build_ramsurf_surface(env, max_range)
                    if kind == 'ramsurf' else None)
+        if surface is not None:
+            self._check_source_below_depressed_surface(surface, zs, dz)
 
         # Checked here rather than in ``_run_collins`` so the broadband sweep,
         # which calls this method directly, is covered too; and after the
         # profiles are built so the bound sees exactly what gets written.
         self._check_collins_array_limits(kind, dz, zmax, bathymetry, surface)
-
-        # One profile section per range break carries the range-dependent
-        # SSP and (layered) bottom; bottom-profile depths are seafloor-
-        # relative for ramgeo/ramsurf, absolute for rams (see
-        # _collins_range_segments).
-        range_segments = self._collins_range_segments(env, kind, zmax, fc)
+        self._check_rams_seafloor_index_floor(kind, dz, bathymetry)
+        self._check_source_row_is_solved(zs, dz)
 
         owns_fm = fm is None
         fm = self._setup_file_manager() if owns_fm else fm
@@ -2272,6 +2387,9 @@ class RAM(PropagationModel):
             zmax = float(self.zmax)
         else:
             zmax = self._compute_zmax(env, fc)
+        if (zmax_override is not None or self.zmax is not None):
+            self._warn_if_seafloor_outside_grid(zmax, env, dz=dz,
+                                                kind=kind, freq=fc)
 
         if not dz_pinned:
             dz = self._fit_dz_to_mz(kind, dz, zmax)
@@ -2423,6 +2541,178 @@ class RAM(PropagationModel):
             UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
         )
         return dz_min
+
+    def _warn_if_seafloor_outside_grid(self, zmax: float, env, *,
+                                       dz: Optional[float] = None,
+                                       kind: Optional[str] = None,
+                                       freq: Optional[float] = None) -> None:
+        """Warn when a **pinned** ``zmax`` puts the seafloor outside the PE
+        domain.
+
+        ``ram.pdf`` p.7 places the grid bottom "well below the ocean bottom
+        interface" so the absorbing layer can kill downward energy before it
+        reflects. Nothing enforces it: ``ramgeo1.5.f:133-135`` and
+        ``ramsurf1.5.f:118-120`` clamp ``iz=min(nz,iz)`` and ``rams0.5.f:135``
+        does not clamp at all, so the run simply proceeds with the bottom
+        outside its own grid — measured at up to 68.8 dB against a sane
+        ``zmax``, with nothing in the output to show for it.
+
+        This warns rather than raises because ``zmax < depth`` is a legitimate
+        deck: the vendored ``ramsurf/tests/deep_flat.test/ram.in`` pairs
+        ``zb=20000`` with ``zmax=159.9`` deliberately, modelling a column with
+        no bottom inside the domain. uacpy cannot tell the two intents apart,
+        so it names the consequence and leaves the choice to the caller.
+
+        Only a pinned ``zmax`` reaches here — :meth:`_compute_zmax` already
+        clears the seafloor by construction.
+        """
+        depth = float(env.depth)
+
+        # The binary's condition is on the seafloor INDEX, not the depth:
+        # nz = zmax/dz - 0.5 and iz = z/dz (rams0.5.f:132, :135), so the
+        # grid holds the seafloor iff floor(depth/dz) <= floor(zmax/dz - 0.5).
+        # Testing zmax > depth misses a band up to dz/2 wide where zmax
+        # clears the seabed but the index does not — measured, zmax=200.3 m
+        # over a 200 m seabed with dz=1 gives iz = nz+1.
+        outside = float(zmax) <= depth
+        if dz is not None and float(dz) > 0.0:
+            iz = int(float(depth) / float(dz))
+            nz = int(float(zmax) / float(dz) - 0.5)
+            outside = iz > nz
+
+        if not outside:
+            # The seafloor is inside the grid, but ram.pdf p.7 asks for more
+            # than that: "the bottom of the computational grid is placed WELL
+            # BELOW the ocean bottom interface and the attenuation is
+            # increased over the lower few wavelengths of the grid". A zmax
+            # that merely clears the seabed leaves no absorbing layer, so the
+            # bottom of the domain reflects. Measured on ramgeo, 220 m seabed:
+            # zmax=222 m is 15.97 dB from an ample grid with no warning at
+            # all, while zmax=220 (the old threshold) is 27.0 dB. Drawing the
+            # line at env.depth put it where the error had already saturated.
+            if freq is not None:
+                # "the lower FEW wavelengths" (ram.pdf p.7), not uacpy's own
+                # generous 20-lambda auto pad: comparing against
+                # _adequate_zmax would warn at zmax=700 m here, which measures
+                # 0.32 dB — noise. Three wavelengths tracks the measured error
+                # curve instead: silent at 700 m (0.32 dB) and 1500 m, warning
+                # at 300 m (3.1 dB) and 222 m (16.0 dB).
+                lam = self._resolve_c0(env) / max(float(freq), 1.0)
+                adequate = depth + _MIN_SUBBOTTOM_WAVELENGTHS * lam
+                if float(zmax) < adequate:
+                    warnings.warn(
+                        f"RAM: zmax={float(zmax):.4g} m clears the seafloor "
+                        f"({depth:.4g} m) but leaves no room for the "
+                        f"absorbing layer — ram.pdf p.7 places the grid "
+                        f"bottom 'well below' the seabed, which here means "
+                        f"about {adequate:.4g} m. The domain floor reflects "
+                        f"instead of absorbing: measured 15.97 dB at 2 m of "
+                        f"sub-bottom, silently.",
+                        UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+                    )
+            return
+
+        # rams0.5 does not clamp iz (rams0.5.f:135, against ramgeo1.5.f:135
+        # and ramsurf1.5.f:120 which both do min(nz,iz)). Past nz the
+        # fluid-solid stencil at rams0.5.f:590 reads lamw(iz+2) — one slot
+        # beyond profl's 1..nz+2 (:200-205) — and divides by an unwritten
+        # element, so the WHOLE field is NaN while the run still exits 0.
+        # The fluid backends degrade to "seafloor at the grid bottom" and
+        # return usable numbers, so only rams is fatal.
+        if kind == 'rams':
+            raise ConfigurationError(
+                f"rams: zmax={float(zmax):.4g} m puts the seafloor "
+                f"({depth:.4g} m) at grid index iz > nz, and rams0.5 does not "
+                f"clamp iz (rams0.5.f:135, unlike ramgeo1.5.f:135 / "
+                f"ramsurf1.5.f:120). The fluid-solid stencil at "
+                f"rams0.5.f:590 then reads one slot past profl's initialised "
+                f"1..nz+2 range and the entire field comes back NaN, from a "
+                f"run that still exits 0.",
+                remediation=("Raise zmax so floor(depth/dz) <= "
+                             "floor(zmax/dz - 0.5) — half a cell is enough — "
+                             "or leave zmax unset and let uacpy size the "
+                             "domain."),
+            )
+        warnings.warn(
+            f"RAM: zmax={float(zmax):.4g} m is at or above the seafloor "
+            f"({depth:.4g} m), so the seabed lies outside the PE grid. The "
+            f"binaries do not reject this (ramgeo1.5.f:133-135 clamps "
+            f"iz=min(nz,iz); rams0.5.f:135 does not clamp), and the run "
+            f"returns plausible numbers with no other sign — measured up to "
+            f"27.0 dB from an equivalent run with the seafloor inside the "
+            f"grid. Intentional only if you mean 'no bottom in the domain'; "
+            f"otherwise put zmax well below the seafloor (ram.pdf p.7).",
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+        )
+
+    def _check_source_below_depressed_surface(self, surface, zs: float,
+                                              dz: float) -> None:
+        """Refuse (or warn about) a source at or above the depressed surface.
+
+        ``matrc`` forces ``r2=1, r1=r3=s1=s2=s3=0`` on rows ``1..izsrf``
+        (``ramsurf1.5.f:281-290``) with ``izsrf = 1.0 + zsrf/dz`` — a hard
+        Dirichlet zero at and above the surface index. ``selfs`` plants the
+        source delta at ``is = ifix(1 + zs/dz)`` and splits it across
+        ``u(is)``, ``u(is+1)`` (``:396-400``) **without consulting ``izsrf``**,
+        so a source inside the depressed region is zeroed the moment the
+        march starts.
+
+        The result is a field that is identically zero — TL ``inf``
+        everywhere — with nothing to flag it:
+        :meth:`_clamp_collins_envelope` cannot fire because ``|u| = 0`` gives
+        a large POSITIVE TL, not a negative or NaN one.
+
+        Two cases, deliberately handled differently:
+
+        * the surface is at or below the source **at the source's own range**
+          — the field is dead from the first step, so this is a bad
+          configuration and raises;
+        * a keel deeper than ``zs`` only further along the track — the field
+          dies partway and reads as a plausible shadow zone, which is the more
+          dangerous variant precisely because it looks like physics. That
+          warns, since the near field before the keel is still meaningful.
+        """
+        if not surface:
+            return
+
+        def zeroed_to(zsrf: float) -> float:
+            """Depth of the deepest row matrc actually zeroes for ``zsrf``.
+
+            ``izsrf = 1.0 + zsrf/dz`` (``ramsurf1.5.f:115``) truncates on
+            assignment to an integer, and ``matrc`` zeroes rows ``1..izsrf``
+            (``:282``). Row ``i`` sits at ``(i-1)*dz``, so the zeroed region
+            ends up to one ``dz`` **above** ``zsrf``. Comparing against
+            ``zsrf`` itself refuses a source in that band, where the field is
+            measurably alive — 84-91 dB with ``dz=0.7``, ``zsrf=30``,
+            ``zs=29.7``.
+            """
+            return (int(1.0 + float(zsrf) / float(dz)) - 1) * float(dz)
+
+        zsrf_at_source = zeroed_to(surface[0][1])
+        deepest = max(zeroed_to(z) for _, z in surface)
+        if zs <= zsrf_at_source:
+            raise ConfigurationError(
+                f"ramsurf: source at {zs:.4g} m is at or above the depressed "
+                f"surface at r=0 ({zsrf_at_source:.4g} m). matrc zeroes every "
+                f"row down to izsrf (ramsurf1.5.f:281-290) while selfs plants "
+                f"the source without checking it (:396-400), so the field is "
+                f"identically zero. outpt adds eps=1e-20 before the log "
+                f"(ramsurf1.5.f:101), so this reports as ~414-437 dB rather "
+                f"than inf — there is no NaN or inf to test for.",
+                remediation=("Put the source below the deepest surface "
+                             "depression, or reduce env.altimetry's depth."),
+            )
+        if zs <= deepest:
+            warnings.warn(
+                f"ramsurf: source at {zs:.4g} m is shallower than the deepest "
+                f"surface depression ({deepest:.4g} m). Where the keel reaches "
+                f"below the source the field is forced to zero "
+                f"(ramsurf1.5.f:281-290), which reads as a shadow zone rather "
+                f"than as a configuration error. The dead cells report "
+                f"~414-437 dB, not inf: outpt adds eps=1e-20 before the log "
+                f"(ramsurf1.5.f:101), so no isnan/isinf check will find them.",
+                UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+            )
 
     def _build_ramsurf_surface(self, env, max_range):
         """Build the ramsurf1.5 surface profile from ``env.altimetry``.
@@ -2626,6 +2916,69 @@ class RAM(PropagationModel):
             # through the band would otherwise strand the directory.
             if band_fm.cleanup:
                 band_fm.cleanup_work_dir()
+
+    def _constrain_dr_to_sections(self, dr, range_segments, *, pinned,
+                                  bathymetry_ranges=None,
+                                  altimetry_ranges=None):
+        """Bound ``dr`` by the closest pair of profile-section markers.
+
+        ``profl`` reads exactly ONE section marker per call
+        (``ramgeo1.5.f:195`` ``read(1,*,end=1)rp``, defaulted to ``2.0*rmax`` at
+        ``:194`` so an exhausted deck parks the marker past the end of the
+        march), ``updat`` re-enters it
+        only ``if(r.ge.rp)`` (``:359``), and the march calls ``updat`` once
+        per range step (``:78-84``). So the binary can consume at most one
+        section per ``dr`` — and because ``profl`` reads *sequentially* from
+        the deck, sections written closer together than ``dr`` are not merely
+        ignored, they are never reached. The march falls permanently behind
+        and every later section is lost.
+
+        Nothing downstream can detect this: the run exits 0 and writes a full
+        grid, computed from a truncated environment. Measured on two decks
+        differing only in range sampling of the same physics, the finer one
+        was wrong by up to 8.75 dB — the deck carried 101 sections and the
+        march could reach 19.
+
+        The manual states the rule directly (``ram.pdf`` p.8): "The size of
+        the smallest region is an upper bound on Delta-r."
+        """
+        markers = sorted({float(seg['range']) for seg in range_segments})
+
+        # `updat` advances THREE indices the same way, one step at a time:
+        # the profile marker (`if(r.ge.rp)`), the bathymetry index
+        # (`ramgeo1.5.f:348` `if(r.ge.rb(ib+1))ib=ib+1`) and, on ramsurf, the
+        # altimetry index (`ramsurf1.5.f:346`). Bounding only the first leaves
+        # the other two to fall behind, after which the seafloor is linearly
+        # extrapolated from a pair of points far astern for the rest of the
+        # march — range dependence silently lost. mpiramS is immune to all
+        # three: it interpolates (`ram.f90:198`) rather than consuming.
+        for stream in (bathymetry_ranges, altimetry_ranges):
+            if stream:
+                markers = sorted(set(markers) | {float(r) for r in stream})
+
+        if len(markers) < 2:
+            return dr
+        min_gap = min(b - a for a, b in zip(markers, markers[1:]))
+        if min_gap <= 0.0 or dr <= min_gap:
+            return dr
+        if pinned:
+            warnings.warn(
+                f"RAM: dr={dr:.4g} m exceeds the closest profile-section "
+                f"spacing ({min_gap:.4g} m), so the binary could consume only "
+                f"part of the {len(markers)}-section environment and the rest "
+                f"would be silently dropped (one section per range step; "
+                f"ramgeo1.5.f:194-195, :359, :78-84). dr has been reduced to "
+                f"{min_gap:.4g} m. Coarsen the environment's range axis to "
+                f"keep the dr you asked for.",
+                UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+            )
+        else:
+            self._log(
+                f"dr reduced {dr:.4g} -> {min_gap:.4g} m so every one of the "
+                f"{len(markers)} profile sections is reachable "
+                f"(ram.pdf p.8: the smallest region bounds dr)."
+            )
+        return min_gap
 
     def _collins_range_segments(
         self, env: Environment, kind: str, zmax: float, freq: float
@@ -3289,6 +3642,11 @@ class RAM(PropagationModel):
         # ihorz=0 so mpiramS steps directly between the per-range profiles
         # uacpy already builds in _prepare_ssp (at env.ssp.ranges) — both
         # crash-free and more faithful than the buggy 10-km resample.
+        # mpiramS plants the source identically (ram.f90:110-114) and its
+        # solver also starts at row 2 (solvetri.f90:47), so the row-1 kill is
+        # not a Collins peculiarity.
+        self._check_source_row_is_solved(float(source.depths[0]), dz)
+
         write_inpe(
             filepath=work_dir / 'in.pe',
             fc=freq,

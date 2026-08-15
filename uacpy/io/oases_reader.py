@@ -6,6 +6,8 @@ This module provides functions for reading output files from OASES models:
 - OASN: .xsm files (covariance matrices), .rpo files (replicas)
 - OASP: .trf files (complex transfer functions)
 - OASR: .rco/.trc files (reflection coefficients vs slowness / angle)
+- OASS/OASSP: the mean-field .rhs header the scattering modules consume;
+  their own outputs reuse the OAST .plt, OASN .xsm and OASP .trf readers
 
 OASES (Ocean Acoustic and Seismic Exploration Synthetics, per the source
 banner at ``src/oasgun21.f:4``) was developed by Henrik Schmidt at MIT.
@@ -30,6 +32,23 @@ from uacpy.io._fortran_helpers import (
     detect_endian,
 )
 from uacpy.io.units import km_to_m
+
+
+def _decode_fortran_title(raw: bytes) -> str:
+    """Decode a Fortran ``CHARACTER`` title field to a clean string.
+
+    Not every module initialises the title it writes. OASS declares it
+    (``unoass21.f:34``) but leaves it unset before ``PUTXSM`` copies it into
+    the ``.xsm`` header (``oasmun21_bin.f:364``), so the field arrives as NUL
+    bytes rather than the blanks a Fortran ``CHARACTER`` is padded with when
+    it *has* been assigned. ``str.strip()`` removes the blanks and keeps the
+    NULs, which is how a title becomes 32 invisible bytes that then flow into
+    ``Result.metadata['title']`` and print as nothing at all.
+
+    Every OASES title read goes through here so the three readers cannot
+    disagree about it.
+    """
+    return raw.decode('ascii', errors='ignore').strip('\x00').strip()
 
 
 def read_oast_tl(
@@ -446,7 +465,7 @@ def read_oasn_covariance(
             # the raw bytes and strip once. Stripping each slice would delete
             # any space that falls on a record boundary.
             f.seek(0)
-            title = f.read(4 * recl).decode('ascii', errors='ignore').strip()
+            title = _decode_fortran_title(f.read(4 * recl))
 
             # Record 5: NRCV, NFREQ (2 integers)
             f.seek(4 * recl)
@@ -592,8 +611,8 @@ def read_oasn_replicas(
             )
 
             # Read title (CHARACTER*80, oasmun21_bin.f:506)
-            title = _read_fortran_record(f, raw=True, endian=endian).decode(
-                'ascii', errors='ignore').strip()
+            title = _decode_fortran_title(
+                _read_fortran_record(f, raw=True, endian=endian))
 
             # Read NRCV, NFREQ
             n_rcv, n_freq = _read_fortran_record(f, 'ii', endian=endian)
@@ -847,8 +866,8 @@ def _read_oasp_trf_binary(filepath: Path, receiver_depths: np.ndarray) -> Dict:
         iparm = list(struct.unpack(endian + f'{len(iparm_raw) // 4}i',
                                    iparm_raw))[:nout]
 
-        title = _read_fortran_record(f, raw=True, endian=endian).decode(
-            'ascii', errors='ignore').strip()
+        title = _decode_fortran_title(
+            _read_fortran_record(f, raw=True, endian=endian))
         # signn record consumed but not used
         _read_fortran_record(f, raw=True, endian=endian)
 
@@ -1154,3 +1173,117 @@ def read_oasr_reflection_coefficients(
         raise
     except PARSE_ERRORS as e:
         raise FileFormatError(f"Failed to read OASR reflection coefficient file {filepath}: {e}") from e
+
+
+def read_oases_rhs_header(filepath: Union[str, Path]) -> Dict:
+    """Read the header of a mean-field ``.rhs`` (OASES unit 45).
+
+    A producer run with option ``'s'`` writes three kinds of record
+    (``unoasp22.f:254``, ``oaseun31.f:1899``, ``:2395``)::
+
+        WRITE(45) NX, FR1, FR2, DT                      ! once
+        WRITE(45) FREQ, LAYS(1), NWVNO, NFLAG, FNI5     ! per frequency
+        WRITE(45) WVNO, IN1, DBDZ(1..4), BLC(1..4)      ! per rough interface
+                                                        ! and wavenumber
+
+    **The first record's four slots mean different things per producer**, and
+    the key names below are OASP's because that is the broadband path. OASP
+    writes a genuine FFT grid, ``nx, fr1, fr2, dt`` (``unoasp22.f:254``); a
+    single-frequency OAST or OASR writes ``nfreq, freq1, freq2,
+    1/(nfreq*dlfreq)`` into the same four slots (``unoast31.f:164-165``,
+    ``unoasr21.f:222-223``). So on the OAST/OASR path ``n_time_samples`` is the
+    frequency-block count — which OASS requires to be 1, since it pins
+    ``nfreq=1`` and reads exactly one per-frequency header
+    (``unoass21.f:123``, ``:127``) — and ``freq_min`` is the single frequency
+    the mean field ran at. The keys are not renamed per producer: the file
+    layout is one layout, and a caller that knows which producer it drove knows
+    which reading applies.
+
+    OASSP reads exactly the same three records — the first at
+    ``unoassp30.f:181``, the other two at ``:546-547`` — and then **replaces**
+    its own deck's ``NT/FR1/FR2/DT`` with the first record's values, warning
+    only when ``NX`` or ``DT`` differ (``:182-188``). A caller that writes the
+    deck from these values instead of from a second guess makes that
+    substitution a no-op, which is the only way to be sure the band that ran is
+    the band that was asked for.
+
+    ``interface`` is the third record's ``IN1``: ``SCTRHS`` loops over
+    interfaces innermost (``oaseun31.f:2306-2308``), so the first such record
+    carries the shallowest rough interface, and that is the single interface
+    OASSP scatters from.
+
+    Returns
+    -------
+    dict
+        ``n_time_samples`` (int, ``NX`` — ``nfreq`` from OAST/OASR),
+        ``freq_min`` / ``freq_max`` (Hz; ``freq_min`` is *the* frequency from
+        OAST/OASR), ``time_step`` (s, ``DT`` — ``1/(nfreq*dlfreq)`` from
+        OAST/OASR), ``frequency`` (Hz, the per-frequency header's own
+        ``FREQ``), ``source_layer`` (``LAYS(1)``), ``n_wavenumbers``
+        (``NWVNO``), ``interface`` (``IN1``, 1-based OASES layer index).
+    """
+    filepath = Path(filepath)
+    try:
+        with open(filepath, 'rb') as f:
+            probe = f.read(4)
+            if len(probe) < 4:
+                raise FileFormatError(
+                    f"OASES .rhs {filepath} is empty or truncated. OPFILB "
+                    f"opens unit 45 with STATUS='UNKNOWN' (oashun21.f:634), so "
+                    f"a producer run that wrote no scattering right-hand sides "
+                    f"still leaves a zero-length file behind."
+                )
+            endian = detect_endian(
+                probe, source=f'read_oases_rhs_header:{filepath.name}')
+            f.seek(0)
+            nx, fr1, fr2, dt = _read_fortran_record(f, 'ifff', endian=endian)
+            freq, lays1, nwvno, _nflag, _fni5 = _read_fortran_record(
+                f, 'fiiif', endian=endian)
+            # The SCTRHS record opens with a COMPLEX wavenumber (two reals)
+            # followed by the interface index; the eight complex words after
+            # it are the boundary operators DBDZ and BLC, which nothing here
+            # needs. 19 four-byte words in all — checked, because a short
+            # record here means the file is a per-frequency header rather
+            # than a scattering record, i.e. the producer wrote none.
+            try:
+                payload = _read_fortran_record(f, raw=True, endian=endian)
+            except FileFormatError as e:
+                raise FileFormatError(
+                    f"OASES .rhs {filepath} ends after its frequency header, "
+                    f"so it holds no 76-byte SCTRHS record (WVNO, IN1, "
+                    f"DBDZ(4), BLC(4) — oaseun31.f:2395) and names no "
+                    f"scattering interface. SCTRHS skips every interface with "
+                    f"ROUGH2 < 1e-10 (oaseun31.f:2310), so the producer run's "
+                    f"environment was smooth. Underlying error: {e}"
+                ) from e
+            if len(payload) != 4 * (2 + 1 + 8 + 8):
+                raise FileFormatError(
+                    f"OASES .rhs {filepath}: expected a 76-byte SCTRHS record "
+                    f"(WVNO, IN1, DBDZ(4), BLC(4) — oaseun31.f:2395), got "
+                    f"{len(payload)} bytes."
+                )
+            interface = struct.unpack(endian + 'ffi', payload[:12])[2]
+    except FileFormatError:
+        raise
+    except PARSE_ERRORS as e:
+        raise FileFormatError(
+            f"Failed to read OASES .rhs header {filepath}: {e}") from e
+
+    if int(nx) < 1 or float(dt) <= 0.0:
+        raise FileFormatError(
+            f"OASES .rhs header {filepath} carries NX={nx}, DT={dt}, which "
+            f"cannot describe an FFT grid; the producer run probably wrote no "
+            f"scattering right-hand sides (option 's' missing, or every "
+            f"interface smooth — SCTRHS skips ROUGH2 < 1e-10, "
+            f"oaseun31.f:2310)."
+        )
+    return {
+        'n_time_samples': int(nx),
+        'freq_min': float(fr1),
+        'freq_max': float(fr2),
+        'time_step': float(dt),
+        'frequency': float(freq),
+        'source_layer': int(lays1),
+        'n_wavenumbers': int(nwvno),
+        'interface': int(interface),
+    }

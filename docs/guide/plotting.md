@@ -194,12 +194,12 @@ ConfigurationError: plot_field: env= has no effect on a heatmap that is not a
 ### 2.3 `value=` — which number gets drawn
 
 `value=` applies to every branch and picks what the field's complex pressure is
-reduced to. It defaults to `'real'` for a time-series field and `'tl'`
+reduced to. It defaults to `'real'` for a time-series field and `'db'`
 otherwise.
 
 | `value` | Draws | Auto colour treatment (heatmap) |
 |---|---|---|
-| `'tl'` | transmission loss, dB | fixed 20–120 dB scale (§4) |
+| `'db'` | the dB view (TL for a pressure field) | fixed 20–120 dB scale (§4) |
 | `'mag_db'` | 20·log10\|H\| = −TL, dB | TL colormap, autoscaled |
 | `'mag'` | \|p\|, linear (complex fields only) | TL colormap, autoscaled |
 | `'phase'` | arg(p), radians (complex fields only) | `twilight`, fixed ±π |

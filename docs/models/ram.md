@@ -67,7 +67,7 @@ Padé** solution replaces the whole exponential with a rational function of `X`:
 p(r + Δr, z) = exp(i k₀ Δr) · Πⱼ (1 + αⱼ X) / (1 + βⱼ X) · p(r, z)     j = 1 … p
 ```
 
-`p` is `np_pade` (2–8, default 6), and the complex coefficients `αⱼ, βⱼ` come
+`p` is `np_pade` (2–10, default 6), and the complex coefficients `αⱼ, βⱼ` come
 from accuracy and stability constraints on the rational function. The family is
 wide-angle from its very first term: at one term the split-step Padé reduces to
 the Crank–Nicolson solution of the rational-linear PE, which is Claerbout's
@@ -350,7 +350,7 @@ override one the selected backend cannot read.
 | `c0` | `None` | PE reference speed (m/s). `None` → Lytaev Eq. (15). |
 | `accuracy` | `None` | Optimiser error budget; unset means `1e-3`. |
 | `theta_max` | `30.0` | Widest propagation angle, degrees. |
-| `np_pade` | `6` | Number of Padé terms, 2–8. |
+| `np_pade` | `6` | Number of Padé terms, 2–10. |
 
 **Stability**
 
@@ -368,7 +368,7 @@ override one the selected backend cannot read.
 |---|---|---|
 | `absorbing_layer_width` | `20.0` | Absorbing layer below the seafloor, in wavelengths. **[mpiramS]** |
 | `absorbing_layer_attn` | `10.0` | Attenuation at the domain floor, dB/wavelength. **[mpiramS]** |
-| `n_sed_points` | `50` | Sediment-profile sample points. **[mpiramS]** |
+| `n_sed_points` | `1000` | Sediment-profile sample points. **[mpiramS]** |
 | `flat_earth` | `True` | Earth-curvature correction. **[mpiramS]** |
 | `collapse` | `None` | Per-feature collapse policy. |
 
@@ -568,6 +568,23 @@ reflections leak back in, and uacpy warns if you do.
 
 **Receivers below `zmax` come back `NaN`.** So do samples below the local
 seafloor, on every backend. `np.nanmedian`, not `np.median`.
+
+
+**RAM refuses grids the binaries cannot solve.** The Collins codes have no
+bounds checks of their own, so uacpy raises rather than returning the plausible
+wrong answer:
+
+| refused | measured cost if allowed |
+|---|---|
+| source shallower than one `dz` | ~46 dB too loud (vs Kraken), all four backends |
+| `rams` where the track shoals below `2·dz` | out-of-bounds reads; a plausible finite field |
+| `rams` with `zmax` too shallow for the seafloor | whole field `NaN`, exit 0 |
+
+A pinned `zmax` close above the seafloor warns instead (27 dB at the seabed,
+16 dB two metres below it), and bathymetry or SSP sampled finer than `dr`
+silently loses its range dependence — so uacpy reduces `dr`, warning if you
+pinned it. Both bite on the default path: auto `dz` at 10 Hz is 5.7 m, auto
+`dr` at 25 Hz is 216 m.
 
 ---
 
