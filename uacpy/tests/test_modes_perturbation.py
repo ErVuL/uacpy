@@ -240,7 +240,8 @@ class TestLeakyModesGetNoBottomTerm:
         # The counterpart that stops the fix reaching the branch that works.
         with warnings.catch_warnings():
             warnings.simplefilter('error')
-            out = self._modes([1.05, 1.20]).with_attenuation(0.0, bottom=self.BOT)
+            out = self._modes([1.05, 1.20]).with_attenuation(
+                0.0, bottom=self.BOT, seafloor_depth=100.0)
         assert np.all(out.k.imag > 0.0)
 
     def test_the_result_no_longer_depends_on_the_length_unit(self):

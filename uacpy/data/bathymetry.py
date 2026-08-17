@@ -274,6 +274,11 @@ def fetch_bathy_grid(
     array in metres (positive down). **Land cells are ``NaN``** (so coastlines
     map cleanly) — unlike the point/transect fetchers, which raise on land.
 
+    ``lats`` is **ascending** for every source, whatever order ``lat_range``
+    was given in; ``lons`` runs eastward from ``lon_range[0]`` (an end west of
+    the start crosses the antimeridian on the ``'api'``/``'local'`` paths,
+    while ``'gmrt'``/``'emodnet'`` reject such a range).
+
     With ``source='api'`` points are fetched in chunks of ≤100 (the OpenTopoData
     per-call cap), so a default 50×50 grid is 25 requests; the public host allows
     ≤1000 requests/day at ≤1/s, so very large grids need a self-hosted
@@ -289,6 +294,10 @@ def fetch_bathy_grid(
     if n_lat < 2 or n_lon < 2:
         raise ConfigurationError(
             f"fetch_bathy_grid: n_lat and n_lon must be >= 2; got {n_lat}, {n_lon}.")
+    # Ascending latitude for every source: gmrt/emodnet sort internally, so
+    # sort here too and all four backends share one axis order.
+    lat_range = (min(float(lat_range[0]), float(lat_range[1])),
+                 max(float(lat_range[0]), float(lat_range[1])))
     if source == 'local':
         from uacpy.data import gebco_local
         log_message('bathymetry', f"GEBCO grid (local) {n_lat}×{n_lon} over "

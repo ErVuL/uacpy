@@ -59,13 +59,22 @@ from uacpy.core.receiver import Receiver
 from uacpy.core.constants import (
     BoundaryType, AttenuationUnits,
     parse_boundary_type,
-    C_LOW_FACTOR, C_HIGH_FACTOR, DEFAULT_C_MAX_UNBOUNDED, DEFAULT_SOUND_SPEED,
+    C_LOW_FACTOR, C_HIGH_FACTOR, DEFAULT_C_MAX_UNBOUNDED,
 )
-from uacpy.io.utils import equally_spaced
+from uacpy.io.utils import equally_spaced, reject_unknown_kwargs
 from uacpy.io.units import m_to_km
 from uacpy.io.refl_io import stage_reflection_file
 from uacpy.core.exceptions import ConfigurationError, UnsupportedFeatureError
 
+
+#: AT source-geometry letters keyed by uacpy ``source.source_type``, written
+#: into the field/Hankel option string (Opt(1:1) of ``fieldsco.m:120-140`` /
+#: ``field.flp``): ``'R'`` point source with cylindrical spreading, ``'X'``
+#: line source with Cartesian spreading, ``'S'`` scaled point source with the
+#: cylindrical spreading removed. One table for every AT-family wrapper; each
+#: model's ``spec.source_types`` restricts which keys its ``validate_inputs``
+#: lets through.
+SOURCE_TYPE_CODE = {'point': 'R', 'line': 'X', 'scaled': 'S'}
 
 #: AT boundary letters keyed by ``acoustic_type``, derived from
 #: :class:`~uacpy.core.constants.BoundaryType` so the enum stays the single
@@ -438,9 +447,9 @@ def write_surface_halfspace(f, env: Environment, code: Optional[str] = None) -> 
         return
     s = env.surface
     f.write(
-        f" 0.00  {s.sound_speed:.2f} {getattr(s, 'shear_speed', 0.0) or 0.0:.1f}"
-        f" {s.density:.2f}"
-        f" {s.attenuation:.4f} {getattr(s, 'shear_attenuation', 0.0) or 0.0:.4f} /\n"
+        f" 0.00  {s.sound_speed:.6f} {getattr(s, 'shear_speed', 0.0) or 0.0:.6f}"
+        f" {s.density:.6f}"
+        f" {s.attenuation:.6f} {getattr(s, 'shear_attenuation', 0.0) or 0.0:.6f} /\n"
     )
 
 
@@ -590,7 +599,7 @@ def write_header(
         n_media = 1
         if env.has_layered_bottom:
             n_media += len(writable_layers(env.bottom))
-    f.write(f"{n_media}\n")
+    f.write(f"{int(n_media)}\n")
 
     ssp_code = ssp_topopt
     surface_code = surface_type.to_acoustics_toolbox_code()
@@ -849,7 +858,7 @@ def write_ssp_section(
     # follows (write_layer_sections) and sigma(NMedia+1) on the bottom half-space
     # line when none does. Take each from its own carrier so none is mislabelled.
     surface_roughness = float(getattr(env.surface, 'roughness', 0.0) or 0.0)
-    f.write(f"{n_mesh}  {surface_roughness:.6f}  {bottom_depth_rounded:{_DECK_DEPTH_FMT}}\n")
+    f.write(f"{int(n_mesh)}  {surface_roughness:.6f}  {bottom_depth_rounded:{_DECK_DEPTH_FMT}}\n")
 
     baseline = (
         env.absorption.value_db_per_wavelength
@@ -887,7 +896,6 @@ def write_layer_sections(
     env: 'Environment',
     seafloor_depth: float,
     n_mesh: int = 0,
-    quantise_depths: bool = True,
 ) -> float:
     """
     Write sediment layer SSP blocks for a layered SeabedColumn (NMEDIA > 1).
@@ -912,15 +920,16 @@ def write_layer_sections(
         each medium from its own thickness and its own shear speed. For
         multi-profile runs, use a fixed scalar to keep NTotal consistent
         across profiles.
-    quantise_depths : bool, optional
-        Snap each interface onto :func:`deck_depth`'s 0.1 m grid (default).
-        That grid exists so a source or receiver sitting on an interface stays
-        inside the mesh (``misc/SourceReceiverPositions.f90:126-139``); a
-        BOUNCE deck reads no source or receiver records at all, so it passes
-        ``False`` and keeps the layer thicknesses exact — an interface moved by
-        up to 0.1 m rotates the layer resonance by ``2 k dz sin(theta)``.
-        ``misc/ReadEnvironmentMod.f90:88`` reads the depth column
-        list-directed, so it takes any precision.
+
+    Notes
+    -----
+    Every interface depth goes through :func:`deck_depth`, so the depth
+    column carries exactly the value every other deck block writes — that
+    shared value is what keeps a source or receiver sitting on an
+    interface inside the mesh
+    (``misc/SourceReceiverPositions.f90:126-139``). ``deck_depth``
+    round-trips the deck's own ``%.6f`` format, so the written bytes are
+    identical to printing the raw float.
 
     Returns
     -------
@@ -931,11 +940,9 @@ def write_layer_sections(
     if not env.has_layered_bottom:
         return seafloor_depth
 
-    def interface(z: float) -> float:
-        return deck_depth(z) if quantise_depths else float(z)
-
-    # The quantised interface is exact at one decimal by construction; an
-    # unquantised one needs the full width the list-directed read accepts.
+    # ``deck_depth`` round-trips through the deck-wide depth format, so the
+    # quantised value reprints exactly.
+    interface = deck_depth
     zfmt = _DECK_DEPTH_FMT
 
     layered = env.bottom
@@ -965,13 +972,13 @@ def write_layer_sections(
         # kraken.f90:902 pairs it with the media above and below), so the first
         # sediment layer's value is the seafloor and the half-space's own
         # roughness stays on the BotOpt line at the base of the stack.
-        f.write(f"{n_layer_mesh}  {layer.roughness:g}  {bottom_depth:{zfmt}}\n")
+        f.write(f"{n_layer_mesh}  {layer.roughness:.6f}  {bottom_depth:{zfmt}}\n")
         alpha_s = getattr(layer, 'shear_attenuation', 0.0)
         f.write(f"  {top_depth:{zfmt}} {layer.sound_speed:.6f} "
-                f"{layer.shear_speed:.1f} {layer.density:.2f} "
+                f"{layer.shear_speed:.6f} {layer.density:.6f} "
                 f"{layer.attenuation:.6f} {alpha_s:.6f} /\n")
         f.write(f"  {bottom_depth:{zfmt}} {layer.sound_speed:.6f} "
-                f"{layer.shear_speed:.1f} {layer.density:.2f} "
+                f"{layer.shear_speed:.6f} {layer.density:.6f} "
                 f"{layer.attenuation:.6f} {alpha_s:.6f} /\n")
 
         current_depth = bottom_depth
@@ -1075,8 +1082,8 @@ def write_bottom_section(
         # real kraken.exe accepts the column and ignores it, so the
         # environment's value is written unconditionally.
         alpha_s = getattr(hs, 'shear_attenuation', 0.0)
-        f.write(f"  {z_bottom:.6f}  {cp:.2f}  {cs:.1f}  "
-                f"{rho:.2f}  {alpha:.6f}  {alpha_s:.6f} /\n")
+        f.write(f"  {z_bottom:.6f}  {cp:.6f}  {cs:.6f}  "
+                f"{rho:.6f}  {alpha:.6f}  {alpha_s:.6f} /\n")
 
 
 def write_source_depths(f: TextIO, source: Source) -> None:
@@ -1144,13 +1151,17 @@ def write_multi_profile_env(
     receiver depths. Receiver ranges are NOT included (field.exe
     reads them from the .flp file).
 
-    All profiles use the same n_mesh (fixed, non-zero) to ensure the
-    .mod record length (``LRecordLength``) is consistent across
-    profiles. kraken.exe sets the record length from the first
-    profile and it must not increase for subsequent profiles
-    (``Kraken/krakenc.f90:629``). All profiles are also padded to the
-    same NMedia so that NTotal (sum of mesh N across media) is
-    identical for every profile.
+    ``n_mesh`` is written as the ``NG`` mesh count on every medium line
+    of every profile. The default 0 lets KRAKEN size each medium of each
+    profile itself at 20 points per wavelength with a 10-point floor
+    (``misc/ReadEnvironmentMod.f90:99-110``). Per-profile meshes are
+    legal: the ``.mod`` record length is set once from the first profile
+    as ``MAX(2*Nfreq, 2*NzTab, 32, 3*NMedia_acoustic)``
+    (``Kraken/kraken.f90:587``, ``krakenc.f90:629``) and carries no mesh
+    term. What the record length does depend on is held constant another
+    way — every profile is padded to the same NMedia
+    (:func:`plan_multi_profile_media`) and the source/receiver depth
+    lines are written identically into each profile block.
 
     Parameters
     ----------
@@ -1167,19 +1178,19 @@ def write_multi_profile_env(
         TopOpt position 4 is taken from each segment env's ``absorption``
         field via :func:`write_header`.
     """
-    n_mesh = kwargs.get('n_mesh', 0)
+    # Reject any ``**kwargs`` key the blocks below never read, so a typo'd
+    # option fails loudly instead of being silently dropped.
+    reject_unknown_kwargs(
+        'write_multi_profile_env', kwargs,
+        {'n_mesh', 'c_low', 'c_high', 'rmax_m', 'interp_ssp', 'verbose'},
+    )
     c_low = kwargs.get('c_low', None)
     c_high = kwargs.get('c_high', None)
     rmax_m = kwargs.get('rmax_m', 100000.0)
-    # A multi-profile deck cannot leave NG at 0: AT would then size each
-    # medium from its own thickness (misc/ReadEnvironmentMod.f90:107-109) and
-    # NTotal — hence the .mod record length — would differ between profiles.
-    # Pick one count for all of them, at AT's own 20-points-per-wavelength
-    # sampling (``deltaz = c / freq0 / 20``, :103) over the deepest profile.
-    if n_mesh <= 0:
-        freq = float(source.frequencies[0])
-        max_depth = max(seg.depth for _, seg in segments)
-        n_mesh = max(500, int(max_depth * freq / DEFAULT_SOUND_SPEED * 20))
+    # NG = 0 on a mesh line asks the reader to size that medium of that
+    # profile itself (misc/ReadEnvironmentMod.f90:105-110); a negative
+    # request is normalised to the same automatic form.
+    n_mesh = max(int(kwargs.get('n_mesh', 0)), 0)
 
     max_n_media, _bottom_depth, media_plans = plan_multi_profile_media(segments)
 
@@ -1215,12 +1226,12 @@ def write_multi_profile_env(
 
             # --- Sub-bottom media (2..max_n_media), from the shared plan ---
             for top, bot, cp, cs, rho_v, ap, as_, sigma in all_extra_media:
-                f.write(f"{n_mesh}  {sigma:g}  {bot:{_DECK_DEPTH_FMT}}\n")
+                f.write(f"{int(n_mesh)}  {sigma:.6f}  {bot:{_DECK_DEPTH_FMT}}\n")
                 f.write(f"  {top:{_DECK_DEPTH_FMT}} {cp:.6f} "
-                        f"{cs:.1f} {rho_v:.2f} "
+                        f"{cs:.6f} {rho_v:.6f} "
                         f"{ap:.6f} {as_:.6f} /\n")
                 f.write(f"  {bot:{_DECK_DEPTH_FMT}} {cp:.6f} "
-                        f"{cs:.1f} {rho_v:.2f} "
+                        f"{cs:.6f} {rho_v:.6f} "
                         f"{ap:.6f} {as_:.6f} /\n")
 
             # Halfspace depth = bottom of all media
@@ -1392,10 +1403,10 @@ def write_fieldflp(
         f.write(f"'{option:4s}'  ! Option \n")
 
         # Mode limit
-        f.write(f"{M_limit}   ! Mlimit (number of modes to include) \n")
+        f.write(f"{int(M_limit)}   ! Mlimit (number of modes to include) \n")
 
         # Profile info
-        f.write(f"{n_profiles}        ! NProf  \n")
+        f.write(f"{int(n_profiles)}        ! NProf  \n")
         if n_profiles == 1:
             f.write("0.0 /    ! rProf (km) \n")
         else:
@@ -1577,10 +1588,10 @@ def write_field3dflp(
         # Header
         f.write(f"'{title}' ! Title\n")
         f.write(f"'{option}' \t ! OPT\n")
-        f.write(f"{M_limit}   ! Mlimit (number of modes to include)\n")
+        f.write(f"{int(M_limit)}   ! Mlimit (number of modes to include)\n")
 
         # Source x-coordinates
-        f.write(f"{Nsx}                 ! Nsx\n")
+        f.write(f"{int(Nsx)}                 ! Nsx\n")
         if Nsx > 2 and equally_spaced(s_x):
             f.write(f"{s_x[0]} {s_x[-1]}          /   ! Sx( 1 : Nsx ) (km)\n")
         else:
@@ -1589,7 +1600,7 @@ def write_field3dflp(
             f.write("/ ! Sx (km)\n")
 
         # Source y-coordinates
-        f.write(f"{Nsy}                 ! Nsy\n")
+        f.write(f"{int(Nsy)}                 ! Nsy\n")
         if Nsy > 2 and equally_spaced(s_y):
             f.write(f"{s_y[0]} {s_y[-1]}          /   ! Sy( 1 : Nsy ) (km)\n")
         else:
@@ -1810,7 +1821,7 @@ def write_sparc_env_file(
     SPARC extends the KRAKEN ENV format with an output-mode TopOpt char
     (R/D/S), time-domain pulse parameters, and time-output/integration
     blocks. Both boundaries are restricted to vacuum or rigid
-    (``sparc.f90:100-104``), so no half-space row is ever written — and a
+    (``sparc.f90:101-104``), so no half-space row is ever written — and a
     deck that declared one without writing the row would hand the SSP mesh
     line to ``TopBot``. Pulse band, RMax and the time window are resolved by
     the caller; this only formats.
@@ -1824,7 +1835,7 @@ def write_sparc_env_file(
                 'SPARC',
                 f"a {parse_boundary_type(code).value} {boundary} — "
                 f"GETPAR stops with 'SPARC only allows Vacuum or Rigid "
-                f"boundary conditions' (sparc.f90:100-104). Got "
+                f"boundary conditions' (sparc.f90:101-104). Got "
                 f"{carrier!r}",
                 alternatives=[
                     f"set the {boundary} to 'vacuum' (pressure-release) or "
@@ -1844,7 +1855,7 @@ def write_sparc_env_file(
         n_media = 1
         if env.has_layered_bottom:
             n_media += len(writable_layers(env.bottom))
-        f.write(f"{n_media}\n")
+        f.write(f"{int(n_media)}\n")
 
         atten_code = AttenuationUnits.DB_PER_WAVELENGTH.to_char()
         vol_atten_code = (
@@ -1971,7 +1982,7 @@ def write_bounce_input_file(
         )
         if layers:
             halfspace_top = write_layer_sections(
-                f, bounce_env, seafloor, n_mesh=n_mesh, quantise_depths=False)
+                f, bounce_env, seafloor, n_mesh=n_mesh)
         else:
             halfspace_top = seafloor
         write_bottom_section(
@@ -1981,8 +1992,9 @@ def write_bounce_input_file(
             halfspace_depth=halfspace_top,
             verbose=verbose,
         )
-        # Phase velocity bounds (define angular coverage).
-        f.write(f"{c_low:.2f} {c_high:.2f}\n")
+        # Phase velocity bounds (define angular coverage), in the same
+        # format write_phase_speed_and_rmax uses for the sibling decks.
+        f.write(f"{c_low:.1f} {c_high:.1f}\n")
         # Maximum range in km. bounce.f90:49 makes the tabulated-angle count
         # NkTab = INT( 1000 * RMax * ( kMax - kMin ) / 2 pi ) directly
         # proportional to this number, so it is written at the same millimetre

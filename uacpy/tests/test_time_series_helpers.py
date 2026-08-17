@@ -191,30 +191,33 @@ class TestResolveBroadbandGrid:
         assert (fc, Q, T) == (F_CENTER, 4.0, 5.0)
 
     def test_multi_freq_auto_derives_and_warns(self):
-        # Band [50, 350] Hz at Δf=0.5. The sweep is parameterised as
-        # fc·[1 - 1/Q, 1 + 1/Q] with Δf = 1/T, so Q is fc over the band
-        # HALF-width (models/ram.py:759, :795): 200/150 = 4/3, not 2/3.
+        # Band [50, 350] Hz at Δf=0.5. fc anchors on the upper-middle array
+        # bin and Q = fc / ((n//2 + 1/2)·Δf), so the marched (fc, Q, T)
+        # sweep reproduces every requested bin — the property that matters —
+        # rather than a nominal fc/half-width ratio.
         freqs = np.linspace(50.0, 350.0, 601)
         src = uacpy.Source(depths=25.0, frequencies=freqs)
         ram = self.RAM(verbose=False)
         with pytest.warns(UserWarning, match=r"From the 601-element"):
             fc, Q, T = ram._resolve_broadband_grid(src)
         assert fc == pytest.approx(200.0)
-        assert Q == pytest.approx(4.0 / 3.0, rel=1e-4)
         assert T == pytest.approx(2.0, rel=1e-4)
+        marched = ram._broadband_frequencies(fc, Q, T)
+        assert marched.size == freqs.size
+        assert np.allclose(marched, freqs)
 
-    def test_multi_freq_both_pinned_skips_warning(self):
+    def test_multi_freq_with_both_pinned_warns_and_names_the_sweep(self):
+        # A frequency array and a pinned (Q, T) pair each define the sweep;
+        # the pins win (compute_time_series legitimately derives an array
+        # while the user pins the sweep), but the replacement used to be
+        # silent — now the warning names both grids.
         freqs = np.linspace(50.0, 350.0, 601)
         src = uacpy.Source(depths=25.0, frequencies=freqs)
         ram = self.RAM(verbose=False, Q=1.333, T=2.0)
-        # No UserWarning expected.
-        import warnings as _w
-        with _w.catch_warnings(record=True) as caught:
-            _w.simplefilter('always')
-            ram._resolve_broadband_grid(src)
-        bb = [c for c in caught
-              if 'BROADBAND' in str(c.message) and 'mpiramS' in str(c.message)]
-        assert bb == []
+        with pytest.warns(UserWarning, match="pinned"):
+            fc, q, t = ram._resolve_broadband_grid(src)
+        assert fc == pytest.approx(200.0)    # the middle array bin (odd count)
+        assert (q, t) == (1.333, 2.0)
 
     def test_non_uniform_spacing_raises(self):
         freqs = np.array([50.0, 60.0, 80.0, 200.0, 350.0])
@@ -693,23 +696,25 @@ class TestSynthesisBinAlignment:
         assert abs(self._bin_offset(freqs)) > 0.5
         assert self._flat_channel_error(freqs) < 0.05
 
-    def test_auto_derived_timeseries_grid_keeps_the_carrier(self):
-        """``_MIN_TIMESERIES_FREQS`` refinement produces a misaligned grid.
+    def test_misaligned_refined_grid_keeps_the_carrier(self):
+        """A refinement-misaligned grid must still synthesise the carrier.
 
-        The refined ``linspace(f_min, f_max, 8)`` is exactly the case a
-        default TIME_SERIES run derives, and its band is narrower than the
-        source, so the assertion is on the carrier rather than on waveform
-        equality: the trace must sit at the frequency the caller asked for,
-        not at that frequency minus the bin offset.
+        ``_MIN_TIMESERIES_FREQS`` refinement subdivides the waveform Δf, so a
+        refined grid can sit between the record's own FFT bins. (The default
+        9-bin refinement of this source happens to land exactly on-grid, so
+        the misaligned 8-bin variant is built explicitly.) The band is
+        narrower than the source, so the assertion is on the carrier rather
+        than on waveform equality: the trace must sit at the frequency the
+        caller asked for, not at that frequency minus the bin offset.
         """
         model = uacpy.models.Bellhop.__new__(uacpy.models.Bellhop)
         model.model_name = 'Bellhop'
         t, wf = self._source()
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
-            freqs = model._resolve_time_series_frequencies(
+            derived = model._resolve_time_series_frequencies(
                 RunMode.TIME_SERIES, None, wf, self.FS)
-        assert freqs.size >= 8
+        freqs = np.linspace(derived[0], derived[-1], 8)
         assert abs(self._bin_offset(freqs)) > 0.5, "grid is already aligned"
 
         tf = uacpy.Field(
@@ -764,3 +769,102 @@ class TestSynthesisWindowAnchor:
         t0, caught = self._trace({'c0': 1500.0}, range_m=2000.0)
         assert t0 <= 2000.0 / 1500.0
         assert not [w for w in caught if 'wrap to the end' in str(w.message)]
+
+    def test_c_min_never_binds_the_anchor(self):
+        # Only fastest-speed candidates may anchor the window: r/c_min is an
+        # upper bound on the arrival, and anchoring on it opens the window
+        # early enough that the true arrival wraps to the end of the record.
+        t0, _ = self._trace({'c_min': 5000.0, 'c_max': 1550.0})
+        assert t0 == pytest.approx(60000.0 / 1550.0 - 0.5, abs=1e-9)
+
+    def test_pe_reference_speed_never_binds_the_anchor(self):
+        # RAM stamps its Padé expansion point as 'pe_reference_speed'; it is
+        # an algorithmic constant, often above every physical speed, so it
+        # must not enter the physical-speed max.
+        t0, _ = self._trace({'pe_reference_speed': 1700.0, 'c_max': 1550.0})
+        assert t0 == pytest.approx(60000.0 / 1550.0 - 0.5, abs=1e-9)
+
+
+class TestAllNaNCellPropagatesNaN:
+    """An all-NaN H(f) cell (e.g. one masked below the seafloor) carries no
+    valid model output, so its synthesised trace is NaN with a warning —
+    never a silent all-zero record that reads as a real quiet arrival.
+    Isolated NaN bins still count as carrying no energy (zeroed)."""
+
+    @staticmethod
+    def _tf(H):
+        from uacpy.core.results import Field, PhaseReference
+        n_d, n_r, n_f = H.shape
+        freqs = np.arange(50.0, 50.0 + 2.0 * n_f, 2.0)
+        return Field(
+            data=H,
+            coords={'depth': np.linspace(10.0, 90.0, n_d),
+                    'range': np.linspace(500.0, 3000.0, n_r),
+                    'frequency': freqs},
+            model='Synthetic', frequencies=freqs,
+            phase_reference=PhaseReference.TRAVELLING_WAVE,
+            metadata={'c0': 1500.0, 'c_max': 1520.0})
+
+    def test_to_time_trace_warns_and_returns_nan(self):
+        tf = self._tf(np.full((1, 1, 16), np.nan, dtype=complex))
+        with pytest.warns(UserWarning, match='entirely NaN'):
+            trace = tf.to_time_trace()
+        assert np.all(np.isnan(trace.data))
+
+    def test_isolated_nan_bins_stay_no_energy(self):
+        rng = np.random.default_rng(0)
+        H = (rng.standard_normal((1, 1, 16))
+             + 1j * rng.standard_normal((1, 1, 16)))
+        H[0, 0, 3] = np.nan
+        trace = self._tf(H).to_time_trace()
+        assert np.all(np.isfinite(trace.data))
+        assert np.any(trace.data != 0.0)
+
+    def test_synthesize_keeps_valid_cells_and_nans_the_dead_one(self):
+        rng = np.random.default_rng(1)
+        H = (rng.standard_normal((2, 2, 16))
+             + 1j * rng.standard_normal((2, 2, 16)))
+        H[1, 0, :] = np.nan
+        wf = np.zeros(32); wf[0] = 1.0
+        with pytest.warns(UserWarning, match='entirely NaN'):
+            out = self._tf(H).synthesize_time_series(wf, sample_rate=500.0)
+        assert np.all(np.isnan(out.data[1, 0]))
+        for di, ri in ((0, 0), (0, 1), (1, 1)):
+            assert np.all(np.isfinite(out.data[di, ri]))
+
+
+class TestBatchedSynthesisMatchesPerCellTraces:
+    """``synthesize_time_series`` computes every cell through batched iffts;
+    each cell of the grid must reproduce ``to_time_trace`` at that cell run
+    with the same shared window."""
+
+    def test_grid_equals_per_cell_traces(self):
+        from uacpy.core.results import Field, PhaseReference
+        from uacpy.core.results.field import _ifft_to_trace, _source_spectrum_at
+        rng = np.random.default_rng(2)
+        freqs = np.arange(40.0, 40.0 + 2.0 * 32, 2.0)
+        depths = np.linspace(10.0, 40.0, 2)
+        ranges = np.linspace(1000.0, 4000.0, 3)
+        H = (rng.standard_normal((2, 3, 32))
+             + 1j * rng.standard_normal((2, 3, 32)))
+        tf = Field(
+            data=H, coords={'depth': depths, 'range': ranges,
+                            'frequency': freqs},
+            model='Synthetic', frequencies=freqs,
+            phase_reference=PhaseReference.TRAVELLING_WAVE,
+            metadata={'c0': 1500.0, 'c_max': 1520.0})
+        fs = 500.0
+        wf = _gaussian_pulse(fc=70.0, fs=fs)
+        out = tf.synthesize_time_series(wf, sample_rate=fs)
+        t_start = float(out.coords['time'][0])
+        nfft = out.coords['time'].size
+        src = _source_spectrum_at(np.asarray(wf, float), fs, freqs)
+        for di in range(depths.size):
+            for ri in range(ranges.size):
+                tr = _ifft_to_trace(
+                    tf, depth=float(depths[di]), range=float(ranges[ri]),
+                    source_spectrum=src, window='hann', nfft=nfft,
+                    t_start=t_start)
+                np.testing.assert_allclose(
+                    out.data[di, ri], tr.data, rtol=0.0, atol=1e-12)
+        assert np.max(np.abs(out.data)) > 0.0

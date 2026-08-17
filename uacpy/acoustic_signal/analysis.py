@@ -5,6 +5,7 @@ histogram. Plotting lives in :mod:`uacpy.visualization.plots.signal`.
 """
 
 import math
+import warnings
 from collections import namedtuple
 
 import numpy as np
@@ -45,7 +46,7 @@ def psd(data, sample_rate, *, window="hann", nperseg=8192, noverlap=None,
 
 
 def ppsd(data, sample_rate, *, seg_duration=1.0, overlap_pct=50, ddB=1.0,
-         lvlmin=0, lvlmax=150, window="hann", nperseg=8192, noverlap=4096,
+         lvlmin=0, lvlmax=150, window="hann", nperseg=8192, noverlap=None,
          scaling="density", ref=REFERENCE_PRESSURE_WATER):
     """Probability density of Welch PSD levels over time segments.
 
@@ -54,6 +55,14 @@ def ppsd(data, sample_rate, *, seg_duration=1.0, overlap_pct=50, ddB=1.0,
     longer axis as time; pass a list of 1-D arrays to be explicit. For a
     constant-Q (geometric-frequency) PPSD, see
     :func:`uacpy.acoustic_signal.probabilistic_constant_q`.
+
+    ``overlap_pct`` steps the *time segments*; ``nperseg``/``noverlap`` are the
+    Welch parameters *within* a segment. ``nperseg`` is clamped to the segment
+    length when ``seg_duration`` is shorter. ``noverlap=None`` (default)
+    derives half the (clamped) ``nperseg``; an explicit ``noverlap`` is used
+    as given, unless the clamp leaves no room for it (``noverlap >= nperseg``),
+    in which case it falls back to half the clamped ``nperseg`` with a
+    warning.
 
     ``pdf`` is a probability *density* (each frequency column integrates to 1
     over the level axis, i.e. ``nansum(col) * binwidth_db == 1``) and **empty
@@ -91,13 +100,20 @@ def ppsd(data, sample_rate, *, seg_duration=1.0, overlap_pct=50, ddB=1.0,
             "advance; require overlap_pct < 100.")
 
     level_edges = np.arange(lvlmin, lvlmax + ddB, ddB)
+    nps = min(int(nperseg), chunk_size)
+    if noverlap is None:
+        nov = nps // 2
+    else:
+        nov = int(noverlap)
+        if nov >= nps:
+            warnings.warn(
+                f"ppsd: noverlap={noverlap} does not fit the Welch segment "
+                f"length nperseg={nps} (clamped to the {seg_duration}s "
+                f"chunk); using {nps // 2} instead.",
+                UserWarning, stacklevel=2)
+            nov = nps // 2
     psd_list = []
     for sig in signals:
-        nps = nperseg
-        nov = noverlap
-        if chunk_size < nps:
-            nps = chunk_size
-            nov = int(chunk_size * overlap_pct / 100)
         for i in range(0, len(sig) - chunk_size + 1, step):
             chunk = sig[i: i + chunk_size]
             freqs, p = _sig.welch(chunk, sample_rate, window=window,
@@ -228,6 +244,23 @@ def sel(data, sample_rate, *, fmin=8.9125, fmax=22387,
     they are then snapped to that base-2 grid and to Nyquist
     (:func:`_sel_adjust_fmin_fmax`); ``'linear'`` uses them as given. ``nfft``
     defaults to ``sample_rate``, i.e. 1 Hz wide bins.
+
+    **Band selectivity:** the *total* exposure (sum over all bands) is
+    Parseval-exact, but each band is a plain sum of rectangular FFT bins, not
+    an IEC 61260 fractional-octave filter. A tone that does not fall on a bin
+    centre leaks into each adjacent band at a floor of roughly -33 dB relative
+    to its own band (IEC 61260 class-1 filters provide 60-75 dB of stopband
+    rejection). Band levels of broadband signals are accurate; strong tonals
+    bleed into neighbouring bands at about that level.
+
+    **Chunk alignment:** each ``chunk_size`` chunk is zero-padded up to a
+    whole number of ``nfft`` segments. The padding adds no energy — the total
+    stays exact — but a tone truncated by the padded partial segment leaks
+    part of its power into neighbouring bands. With ``chunk_size`` not a
+    multiple of ``nfft`` *every* chunk ends in such a partial segment and
+    neighbouring-band levels wobble by a few tenths of a dB (a warning is
+    issued when the signal is actually chunked); with a multiple, only the
+    signal's final partial chunk does.
     """
     data = require_finite_signal(data, "sel")
     if integration_time is not None:
@@ -244,6 +277,20 @@ def sel(data, sample_rate, *, fmin=8.9125, fmax=22387,
         nfft = sample_rate
     nfft = int(nfft)
 
+    if not bands:
+        raise ConfigurationError(
+            f"sel: no {band_type} band fits below Nyquist "
+            f"({sample_rate / 2:g} Hz) with the requested fmin/fmax — the "
+            f"snapped lower edge sits above the Nyquist-clamped upper edge.",
+            remediation="Raise sample_rate, or pass a lower fmin explicitly.")
+    if len(data) > chunk_size and chunk_size % nfft:
+        warnings.warn(
+            f"sel: chunk_size ({chunk_size}) is not a multiple of nfft "
+            f"({nfft}), so every chunk ends in a zero-padded partial FFT "
+            "segment; tonal energy truncated there leaks into neighbouring "
+            "bands (band wobble of a few tenths of a dB). Pass a chunk_size "
+            "that is a multiple of nfft.",
+            UserWarning, stacklevel=2)
     window = _sig.windows.boxcar(nfft)
     f = np.fft.rfftfreq(nfft, d=1 / sample_rate)
     edges = np.array([b[0] for b in bands] + [bands[-1][2]])

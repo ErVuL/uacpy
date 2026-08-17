@@ -20,7 +20,7 @@ Output records:
 import numpy as np
 from pathlib import Path
 from typing import Union, Dict
-from scipy.io import FortranFile
+from scipy.io import FortranFile, FortranEOFError, FortranFormattingError
 from uacpy.core.exceptions import FileFormatError
 
 
@@ -59,6 +59,24 @@ def read_psif(work_dir: Union[str, Path]) -> Dict:
     # which is therefore correct here. (Unlike the vendored/cross-host binaries
     # read elsewhere, this is never a foreign-endian file — so it does not go
     # through ``_fortran_helpers.detect_endian``.)
+    try:
+        return _read_psif_records(psif_file)
+    except (FortranEOFError, FortranFormattingError, ValueError) as exc:
+        # scipy's FortranFile raises TypeError-derived FortranEOFError /
+        # FortranFormattingError on a truncated or mis-framed record, and
+        # ValueError on a garbage length marker; all mean the same thing
+        # here — psif.dat is not a complete mpiramS output.
+        raise FileFormatError(
+            f"{psif_file}: malformed or truncated mpiramS output "
+            f"({type(exc).__name__}: {exc}).",
+            remediation="The mpiramS run may have been killed mid-write; "
+                        "re-run it, or check the work_dir points at a "
+                        "completed run.",
+        ) from exc
+
+
+def _read_psif_records(psif_file: Path) -> Dict:
+    """Walk the sequential-unformatted records of one ``psif.dat``."""
     with FortranFile(str(psif_file), 'r') as f:
         header = f.read_reals(dtype=np.float64)
         if header.size != 8:
@@ -109,6 +127,13 @@ def read_psif(work_dir: Union[str, Path]) -> Dict:
         for ir in range(nr):
             for ii in range(nzo):
                 rec = f.read_reals(dtype=np.float64)
+                if rec.size < 1 + 2 * nf:
+                    raise FileFormatError(
+                        f"{psif_file}: depth record (ir={ir}, iz={ii}) holds "
+                        f"{rec.size} reals, expected {1 + 2 * nf} "
+                        f"(z + {nf} complex values); the file does not match "
+                        f"its own header."
+                    )
                 if ir == 0:
                     zg[ii] = rec[0]
                 psif[ii, :, ir] = rec[1::2][:nf] + 1j * rec[2::2][:nf]

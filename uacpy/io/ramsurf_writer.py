@@ -74,13 +74,17 @@ def write_ramin(
     title: str = "uacpy ram.in",
 ) -> None:
     """
-    Write a Collins-style ``ram.in`` file.
+    Write a Collins-style ``ram.in``-format file.
 
     Parameters
     ----------
     filepath : str
-        Destination file path. Convention is ``ram.in`` in the working
-        directory of the binary.
+        Destination file path. The filename is fixed per binary — each
+        hardcodes its own OPEN: ``ramsurf1.5`` reads ``ram.in``
+        (``ramsurf1.5.f:31``), ``ramgeo`` reads ``ramgeo.in``
+        (``ramgeo1.5.f:62``) and ``rams0.5`` reads ``rams.in`` — so the
+        caller must pass the name its target binary opens, in that
+        binary's working directory.
     kind : {'rams', 'ramsurf', 'ramgeo'}
         Which binary the file is targeted at. ``'ramsurf'`` adds a
         surface block right after row 5; ``'rams'`` swaps row-5 from

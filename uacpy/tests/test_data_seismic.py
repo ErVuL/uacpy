@@ -33,6 +33,9 @@ def _write_globsed(root):
     ds.createVariable('lon', 'f8', ('lon',))[:] = lon
     zv = ds.createVariable('z', 'f4', ('lat', 'lon'), fill_value=np.nan)
     z[0, 0] = np.nan                                   # one no-data cell
+    z[70, 20] = 149.0        # (-20, -160): distinct value for the wrap tests
+    z[100, 190] = 0.0        # (10, 10): bare basement (zero thickness)
+    z[120, 0] = 77.0         # (30, -180): distinct from the +180 end column
     zv[:] = z
     ds.close()
 
@@ -87,6 +90,22 @@ def test_globsed_transect(cache):
     assert r.shape == (3,) and thk.shape == (3,) and np.allclose(thk, 500.0)
 
 
+def test_globsed_0_360_longitude_wraps(cache):
+    # (-20, 200) and (-20, -160) are the same physical point; a [0, 360)
+    # longitude must wrap onto the stored [-180, 180] gridline axis rather
+    # than clip to the +180 edge column.
+    assert globsed_local.fetch_sediment_thickness((-20.0, 200.0)) == 149.0
+    assert globsed_local.fetch_sediment_thickness((-20.0, -160.0)) == 149.0
+
+
+def test_globsed_plus_180_reads_minus_180_column(cache):
+    # Both meridian ends are stored on the gridline axis; +180 resolves to the
+    # -180 column (identical values in the real product; distinct here so the
+    # test observes which column was read).
+    assert globsed_local.fetch_sediment_thickness((30.0, -180.0)) == 77.0
+    assert globsed_local.fetch_sediment_thickness((30.0, 180.0)) == 77.0
+
+
 # ── CRUST1.0 ─────────────────────────────────────────────────────────────────
 
 def test_crust1_profile(cache):
@@ -121,6 +140,16 @@ def test_crust1_uses_globsed_by_default(cache):
     b = crust1_local.fetch_bottom_crust1((30.0, -40.0))
     assert b.total_thickness() == pytest.approx(500.0)
     assert b.sediment_thickness_source == 'globsed'
+
+
+def test_crust1_globsed_zero_thickness_yields_bare_rock(cache):
+    # A genuine GlobSed 0.0 (bare basement) wins over CRUST1.0's own sediment
+    # column: the bottom is bare rock, and the stamp still names GlobSed as
+    # the thickness source.
+    b = crust1_local.fetch_bottom_crust1((10.0, 10.0))
+    assert b.sediment_thickness_source == 'globsed'
+    assert all(layer.sound_speed >= 5000.0 for layer in b.layers)  # crust, not sediment
+    assert b.halfspace.sound_speed == 6500.0        # middle crystalline crust
 
 
 def test_crust1_globsed_fallback_keeps_native(cache):

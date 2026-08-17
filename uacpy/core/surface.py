@@ -22,15 +22,24 @@ from dataclasses import dataclass
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.constants import DECK_RANGE_RESOLUTION_M
 from uacpy.core._carrier_validate import (
-    _require_non_negative, _require_strictly_increasing, _dedupe_provenance,
+    _require_non_negative, _require_positive, _require_strictly_increasing,
+    _require_attenuation_in_range, _dedupe_provenance,
 )
-from uacpy.core.bottom import BoundaryProperties, _reduce_boundaries
+from uacpy.core.bottom import (
+    BoundaryProperties, _reduce_boundaries, _PARAMETER_FREE_TYPES,
+)
 
 
 _SURFACE_DELEGATED = frozenset({
     'acoustic_type', 'density', 'sound_speed', 'attenuation', 'roughness',
     'shear_speed', 'shear_attenuation', 'grain_size_phi', 'reflection_file',
 })
+
+# Delegated fields that define what kind of boundary a node is. A write to one
+# cannot be validated field-by-field (the construction rules couple it to the
+# other fields), so the proxy refuses it instead of storing an unvalidated
+# node.
+_SURFACE_TYPE_FIELDS = frozenset({'acoustic_type', 'reflection_file'})
 
 
 # eq=False: a dataclass __eq__ over ndarray fields raises; compare by identity.
@@ -45,6 +54,19 @@ class Surface:
     ranges : ndarray, shape (N,), optional
         Range axis in metres for a range-dependent surface; ``None`` for a
         single uniform surface.
+
+    Notes
+    -----
+    `Surface` and :class:`~uacpy.core.bottom.Bottom` expose their nodes
+    through different mechanisms, by design. A surface node *is* a
+    :class:`BoundaryProperties`, so `Surface` delegates attribute access
+    (``surface.roughness`` and the other ``BoundaryProperties`` fields) to
+    the r = 0 node via ``__getattr__`` / ``__setattr__`` — a uniform
+    `Surface` is a drop-in for a single ``BoundaryProperties``. A `Bottom`
+    node is a whole :class:`SeabedColumn` (layers over a half-space), for
+    which single-attribute delegation is ill-defined, so `Bottom` instead
+    exposes explicit aggregate views (``halfspace_sound_speed``,
+    ``acoustic_type``, …).
     """
 
     properties: List[BoundaryProperties]
@@ -92,7 +114,10 @@ class Surface:
     @classmethod
     def coerce(cls, value) -> 'Surface':
         """Coerce ``None`` (→ vacuum) / ``BoundaryProperties`` / ``Surface`` /
-        ``[(range, BoundaryProperties), ...]`` into a :class:`Surface`."""
+        ``[(range, BoundaryProperties), ...]`` into a :class:`Surface`.
+
+        ``None`` policy: a uniform pressure-release (vacuum) surface — the
+        physical default for open water."""
         if isinstance(value, Surface):
             return value
         if value is None:
@@ -124,7 +149,13 @@ class Surface:
 
     @property
     def is_range_dependent(self) -> bool:
-        """True when the surface boundary varies with range."""
+        """True when the surface carries more than one range node.
+
+        A structural test (node count on the ranged axis), like
+        ``SoundSpeedProfile`` / ``Bottom``: nodes with identical properties
+        still count as range-dependent. Contrast
+        ``Bathymetry.is_range_dependent`` / ``Altimetry.is_range_dependent``,
+        which test whether the *values* actually vary with range."""
         return self.ranges is not None and len(self.properties) > 1
 
     @property
@@ -165,7 +196,11 @@ class Surface:
         ``'r0'`` / ``'rmax'`` keep the first / last node. ``'mean'`` /
         ``'median'`` numerically average the boundary properties across nodes
         (keeping the r = 0 ``acoustic_type``) — only physical when the nodes
-        share a type, mirroring :meth:`Bottom.select_range` for half-spaces."""
+        share a type, mirroring :meth:`Bottom.select_range` for half-spaces.
+        Uniform ``'file'``/``'precalc'`` nodes collapse to their shared
+        reflection file with only the roughness reduced, and raise when the
+        files differ (tables cannot be blended), again mirroring
+        :meth:`Bottom.select_range`."""
         if not self.is_range_dependent:
             return self
         if method == 'r0':
@@ -186,6 +221,24 @@ class Surface:
                 f"average; got {sorted(types)}. Boundary types cannot be "
                 f"blended — use 'r0' or 'rmax' (e.g. for a marginal ice zone).")
         reduce = np.mean if method == 'mean' else np.median
+        # A uniform 'file'/'precalc' surface carries no real numbers to
+        # reduce — each node is its reflection-coefficient table. Nodes
+        # sharing one table collapse to that shared spec (roughness, the one
+        # genuine number they carry, is still reduced); distinct tables
+        # cannot be averaged into anything.
+        (the_type,) = types
+        if the_type in ('file', 'precalc'):
+            specs = {p.reflection_file for p in self.properties}
+            if len(specs) > 1:
+                raise ConfigurationError(
+                    f"Surface.collapse({method!r}) cannot average "
+                    f"'{the_type}' nodes with different reflection files "
+                    f"({sorted(specs, key=str)}). Reflection-coefficient "
+                    f"tables cannot be blended — use 'r0' or 'rmax'.")
+            shared = _copy.deepcopy(self.properties[0])
+            shared.roughness = float(
+                reduce([p.roughness for p in self.properties]))
+            return Surface(properties=[shared])
         return Surface(properties=[
             _reduce_boundaries(self.properties, reduce)])
 
@@ -204,10 +257,49 @@ class Surface:
         # ``collapse()``, the repr and every writer — all of which read
         # ``properties`` — kept the old one.
         if name in _SURFACE_DELEGATED and 'properties' in self.__dict__:
+            value = self._validate_delegated_write(name, value)
             for node in self.properties:
                 setattr(node, name, value)
             return
         super().__setattr__(name, value)
+
+    def _validate_delegated_write(self, name, value):
+        """Apply the ``BoundaryProperties`` construction rules to a delegated
+        write, so the proxy cannot store a value on the nodes that their
+        constructor would refuse. Returns the value coerced to float."""
+        if name in _SURFACE_TYPE_FIELDS:
+            raise ConfigurationError(
+                f"Surface.{name} cannot be assigned in place: it defines what "
+                f"kind of boundary each node is, and the construction rules "
+                f"couple it to the other fields. Build new "
+                f"BoundaryProperties node(s) (and a Surface from them) "
+                f"instead.")
+        # vacuum/rigid nodes carry no half-space acoustic parameters, so a
+        # delegated write of one is the same conflict the constructor's
+        # explicit-conflict guard rejects. ``roughness`` stays writable — an
+        # interface property every boundary type carries.
+        if name != 'roughness':
+            bare = sorted({p.acoustic_type for p in self.properties
+                           if p.acoustic_type in _PARAMETER_FREE_TYPES})
+            if bare:
+                raise ConfigurationError(
+                    f"Surface.{name} = {value!r}: this surface has "
+                    f"{'/'.join(bare)} node(s), which ignore half-space "
+                    f"acoustic parameters. Build half-space "
+                    f"BoundaryProperties node(s) to give the surface "
+                    f"geoacoustics.")
+        value = float(value)
+        if name == 'density':
+            _require_positive(value, "Surface density", hint="g/cm^3")
+        elif name == 'sound_speed' and any(
+                p.acoustic_type == 'half-space' for p in self.properties):
+            _require_positive(value, "Surface sound_speed on a half-space",
+                              hint="m/s")
+        elif name != 'grain_size_phi':
+            _require_non_negative(value, f"Surface {name}")
+        if name in ('attenuation', 'shear_attenuation'):
+            _require_attenuation_in_range(value, f"Surface {name}")
+        return value
 
     def copy(self) -> 'Surface':
         """Deep copy (symmetric with ``Source`` / ``Receiver`` / the other

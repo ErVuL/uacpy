@@ -150,6 +150,19 @@ def test_fetch_bathy_grid(stub_http):
     assert np.isnan(depth[1, 1])       # land cell → NaN (point fetchers would raise)
 
 
+def test_fetch_bathy_grid_latitudes_ascend_for_descending_range(stub_http):
+    # A (max, min) lat_range yields the same ascending latitude axis as
+    # (min, max) — all four sources share that order.
+    stub_http['elevations'] = [-1000, -1100, -1200,
+                               -900, -950, -1300,
+                               -800, -850, -975]
+    lats, lons, depth = bathymetry.fetch_bathy_grid((42, 40), (7, 9),
+                                                    n_lat=3, n_lon=3)
+    assert np.all(np.diff(lats) > 0)
+    assert lats[0] == 40.0 and lats[-1] == 42.0
+    assert depth[0, 0] == 1000.0          # first fetched row = southernmost
+
+
 def test_fetch_grid_too_small_raises():
     with pytest.raises(ConfigurationError, match='>= 2'):
         bathymetry.fetch_bathy_grid((40, 42), (7, 9), n_lat=1, n_lon=5)

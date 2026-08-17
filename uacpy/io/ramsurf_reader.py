@@ -25,10 +25,13 @@ from typing import Tuple, Union
 
 import numpy as np
 
-from uacpy.io._fortran_helpers import detect_endian, read_fortran_record
+from uacpy.io._fortran_helpers import (
+    detect_endian, read_fortran_record, typed_format_error,
+)
 from uacpy.core.exceptions import FileFormatError
 
 
+@typed_format_error
 def read_tl_line(filepath: Union[str, Path]) -> Tuple[np.ndarray, np.ndarray]:
     """
     Read a Collins ``tl.line`` (ASCII range, TL).

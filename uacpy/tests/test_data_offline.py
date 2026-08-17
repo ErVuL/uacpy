@@ -194,6 +194,14 @@ def test_gebco_point_depth_and_land(cache):
         gebco_local.point_depth((0.0, 0.0))
 
 
+def test_gebco_region_grid_latitudes_ascend_for_descending_range(cache):
+    ref_lats, _ref_lons, ref_depth = gebco_local.region_grid((-3, 3), (-3, 3), 7, 7)
+    lats, lons, depth = gebco_local.region_grid((3, -3), (-3, 3), 7, 7)
+    assert np.all(np.diff(lats) > 0)
+    np.testing.assert_array_equal(lats, ref_lats)
+    np.testing.assert_array_equal(depth, ref_depth)
+
+
 def test_gebco_region_grid_marks_land_nan(cache):
     lats, lons, depth = gebco_local.region_grid((-3, 3), (-3, 3), 7, 7)
     assert depth.shape == (7, 7)

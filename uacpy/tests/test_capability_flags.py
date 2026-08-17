@@ -32,7 +32,6 @@ _FEATURES = (
     'range_dependent_ssp',
     'range_dependent_bottom',
     'layered_bottom',
-    'range_dependent_layered_bottom',
     'elastic_media',
 )
 
@@ -46,7 +45,6 @@ _EXPECTED = {
         {'altimetry': True, 'range_dependent_bathymetry': True,
          'range_dependent_ssp': True,
          'range_dependent_bottom': True, 'layered_bottom': False,
-         'range_dependent_layered_bottom': False,
          'elastic_media': True},
     ),
     'Kraken': (
@@ -54,7 +52,6 @@ _EXPECTED = {
         {'altimetry': False, 'range_dependent_bathymetry': True,
          'range_dependent_ssp': True,
          'range_dependent_bottom': False, 'layered_bottom': True,
-         'range_dependent_layered_bottom': False,
          'elastic_media': True},
     ),
     'Scooter': (
@@ -62,7 +59,6 @@ _EXPECTED = {
         {'altimetry': False, 'range_dependent_bathymetry': False,
          'range_dependent_ssp': False,
          'range_dependent_bottom': False, 'layered_bottom': True,
-         'range_dependent_layered_bottom': False,
          'elastic_media': True},
     ),
     'SPARC': (
@@ -70,7 +66,6 @@ _EXPECTED = {
         {'altimetry': False, 'range_dependent_bathymetry': False,
          'range_dependent_ssp': False,
          'range_dependent_bottom': False, 'layered_bottom': True,
-         'range_dependent_layered_bottom': False,
          'elastic_media': False},
     ),
     'Bounce': (
@@ -78,7 +73,6 @@ _EXPECTED = {
         {'altimetry': False, 'range_dependent_bathymetry': False,
          'range_dependent_ssp': False,
          'range_dependent_bottom': False, 'layered_bottom': True,
-         'range_dependent_layered_bottom': False,
          'elastic_media': True},
     ),
     'OAST': (
@@ -86,7 +80,6 @@ _EXPECTED = {
         {'altimetry': False, 'range_dependent_bathymetry': False,
          'range_dependent_ssp': False,
          'range_dependent_bottom': False, 'layered_bottom': True,
-         'range_dependent_layered_bottom': False,
          'elastic_media': True},
     ),
     'OASN': (
@@ -94,7 +87,6 @@ _EXPECTED = {
         {'altimetry': False, 'range_dependent_bathymetry': False,
          'range_dependent_ssp': False,
          'range_dependent_bottom': False, 'layered_bottom': True,
-         'range_dependent_layered_bottom': False,
          'elastic_media': True},
     ),
     'OASR': (
@@ -102,7 +94,6 @@ _EXPECTED = {
         {'altimetry': False, 'range_dependent_bathymetry': False,
          'range_dependent_ssp': False,
          'range_dependent_bottom': False, 'layered_bottom': True,
-         'range_dependent_layered_bottom': False,
          'elastic_media': True},
     ),
     'OASP': (
@@ -110,7 +101,6 @@ _EXPECTED = {
         {'altimetry': False, 'range_dependent_bathymetry': False,
          'range_dependent_ssp': False,
          'range_dependent_bottom': False, 'layered_bottom': True,
-         'range_dependent_layered_bottom': False,
          'elastic_media': True},
     ),
     'RAM': (
@@ -118,7 +108,6 @@ _EXPECTED = {
         {'altimetry': True, 'range_dependent_bathymetry': True,
          'range_dependent_ssp': True,
          'range_dependent_bottom': True, 'layered_bottom': True,
-         'range_dependent_layered_bottom': True,
          'elastic_media': True},
     ),
 }

@@ -34,7 +34,8 @@ from uacpy.data._geo import as_coordinate, normalize_lon, EARTH_RADIUS_KM
 from uacpy.data._http import http_get, checked_member_size
 from uacpy.data.sources import SOURCES, DataProvenance
 from uacpy.data.sediment import (
-    bottom_from_grain_size, range_dependent_bottom_along, water_sound_speed_at,
+    bottom_from_class, bottom_from_grain_size, range_dependent_bottom_along,
+    water_sound_speed_at,
 )
 
 __all__ = ['download_sediment_db', 'fetch_sediment_sample', 'fetch_bottom_local',
@@ -56,7 +57,12 @@ _DECK41_LITHOLOGY_TO_PHI = {
     'gravel': -2.0, 'sand': 1.5, 'silt': 5.5, 'clay': 9.0, 'mud': 7.5,
     'ooze': 7.5, 'calcareous ooze': 7.5, 'siliceous ooze': 8.5,
     'diatom ooze': 9.0, 'radiolarian ooze': 8.0, 'foraminiferal ooze': 6.5,
-    'rock': -5.0, 'gravel and coarser': -3.0,
+    # 'rock' has no honest phi (the Wentworth scale describes loose
+    # sediment): it carries the sentinel below through the phi index and
+    # fetch_sediment_sample translates it to the 'limestone' material —
+    # the same route the EMODnet substrate path uses for hard substrata
+    # (seabed.py _FOLK5_TO_BOTTOM class 5).
+    'rock': -99.0, 'gravel and coarser': -3.0,
 }
 
 # Candidate column names (lower-cased) for the tolerant CSV reader.
@@ -252,12 +258,20 @@ def _samples():
     return result
 
 
+#: Any stored phi at or below this is a lithology-class sentinel, not a
+#: grain size ('rock' -> -99.0 above).
+_PHI_CLASS_SENTINEL_MAX = -90.0
+
+
 def fetch_sediment_sample(point, *, max_distance_km=DEFAULT_MAX_DISTANCE_KM):
     """Nearest local sediment sample to ``point``.
 
-    Returns ``{'phi', 'distance_km', 'latitude', 'longitude'}`` — the sample's
-    own coordinates travel with it so a caller can record where the value
-    actually came from.
+    Returns ``{'phi', 'material', 'distance_km', 'latitude', 'longitude'}`` —
+    the sample's own coordinates travel with it so a caller can record where
+    the value actually came from. A grain-size sample carries ``phi``
+    (float) and ``material=None``; a hard-substrate sample ('rock' in
+    DECK41) carries ``phi=None`` and ``material='limestone'``, the same
+    material preset the EMODnet substrate route uses for hard substrata.
 
     Raises ``DataFetchError`` if the closest sample is farther than
     ``max_distance_km`` (sparse point data — no nearby ground truth).
@@ -273,7 +287,15 @@ def fetch_sediment_sample(point, *, max_distance_km=DEFAULT_MAX_DISTANCE_KM):
             f"(> max_distance_km={max_distance_km:.0f}).",
             remediation="Raise max_distance_km, or supply a bottom directly.",
         )
-    return {'phi': float(phis[idx]), 'distance_km': float(dist_km),
+    phi = float(phis[idx])
+    if phi <= _PHI_CLASS_SENTINEL_MAX:
+        # A lithology-class sentinel ('rock'): no grain size exists; the
+        # material preset carries the geoacoustics instead.
+        return {'phi': None, 'material': 'limestone',
+                'distance_km': float(dist_km),
+                'latitude': float(samp_lats[idx]),
+                'longitude': float(samp_lons[idx])}
+    return {'phi': phi, 'material': None, 'distance_km': float(dist_km),
             'latitude': float(samp_lats[idx]),
             'longitude': float(samp_lons[idx])}
 
@@ -290,9 +312,15 @@ def fetch_bottom_local(point, *, roughness=0.0, water_sound_speed=None,
     """
     lat, lon = as_coordinate(point)
     sample = fetch_sediment_sample(point, max_distance_km=max_distance_km)
-    bottom = bottom_from_grain_size(
-        sample['phi'], roughness=roughness,
-        water_sound_speed=water_sound_speed)
+    if sample['material'] is not None:
+        # Hard substrata route through the material preset (~3000 m/s
+        # limestone), exactly as the EMODnet substrate path does — a
+        # grain-size relation cannot describe rock.
+        bottom = bottom_from_class(sample['material'], roughness=roughness)
+    else:
+        bottom = bottom_from_grain_size(
+            sample['phi'], roughness=roughness,
+            water_sound_speed=water_sound_speed)
     # Point samples are sparse, so the nearest one can be far from the
     # requested position; record where it actually came from so
     # ``citations(env)`` reports the hop and ``prov.offset_km`` measures it.

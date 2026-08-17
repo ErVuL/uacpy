@@ -26,4 +26,14 @@ __all__ = [
     'OASP',
     'OASSP',
     'OASS',
+    # submodules
+    'base',
+    'bellhop',
+    'bounce',
+    'kraken',
+    'oases',
+    'ram',
+    'scooter',
+    'sources',
+    'sparc',
 ]

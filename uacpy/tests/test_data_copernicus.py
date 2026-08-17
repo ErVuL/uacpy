@@ -203,7 +203,10 @@ def test_environment_copernicus_ssp_prefers_bgc_ph(monkeypatch, tmp_path):
     env = data.fetch_environment((30.0, -40.0), bathymetry=1000.0,
                                  ssp_sources='copernicus', date='2020-06-15',
                                  with_absorption=True)
-    assert env.absorption.pH == pytest.approx(8.02)
+    # pH is read at the Francois-Garrison nominal-row depth (the T/S column
+    # mid-depth), so the stub level nearest that depth wins — not the 8.02
+    # surface value the old surface-pH pairing returned.
+    assert env.absorption.pH == pytest.approx(7.90)
     assert 'copernicus_bgc' in [s.source.id for s in env.data_sources]
 
 

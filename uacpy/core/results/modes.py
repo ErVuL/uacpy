@@ -5,7 +5,7 @@ from __future__ import annotations
 import warnings
 
 import numpy as np
-from typing import Union
+from typing import Optional, Union
 
 from uacpy.core.exceptions import ConfigurationError
 
@@ -150,13 +150,14 @@ class Modes(Result):
         sound_speed_z: Union[float, np.ndarray] = 1500.0,
         density_z: Union[float, np.ndarray] = 1.0,
         bottom=None,
+        seafloor_depth: Optional[float] = None,
     ) -> "Modes":
         """First-order modal attenuation perturbation.
 
         For mode ``m`` with horizontal wavenumber ``k_rm`` and depth
         eigenfunction ``ψ_m``, the imaginary part picks up
 
-        ``α_m = (ω / k_rm) · ∫ α(z)/(c(z) ρ(z)) · |ψ_m|² dz / ∫ |ψ_m|² / ρ(z) dz``
+        ``α_m = (ω / k_rm) · ∫ α(z)/(c(z) ρ(z)) · Re(ψ_m)² dz / ∫ Re(ψ_m)² / ρ(z) dz``
 
         replacing any prior ``k.imag``. The ``1/ρ``-weighted denominator
         matches the Kraken-class normalisation ``∫|ψ|²/ρ dz = 1``.
@@ -178,6 +179,20 @@ class Modes(Result):
             evanescent-tail bottom-attenuation contribution proportional
             to ``ψ²(D)``; ``bottom.attenuation`` is read in dB/λ_p and
             ``bottom.density`` in g/cm³.
+
+            ``ψ(D)`` is read at the **deepest tabulated depth**
+            ``depths[-1]``, so the tabulation must reach the seafloor: a
+            grid stopping 20 m short of a 100 m guide was measured to
+            inflate the bottom term by 2–4×. Pass ``seafloor_depth`` so
+            this is checked. The water-column integrals likewise want the
+            full column — a truncated span perturbs the ``∫ψ²/ρ``
+            normalisation by the missing tail.
+        seafloor_depth : float, optional
+            The seafloor depth D in metres. When given with ``bottom``,
+            ``depths[-1]`` is validated against it (0.1 % tolerance) and a
+            short tabulation raises instead of silently mis-evaluating
+            ``ψ(D)``. When omitted, a ``UserWarning`` states which depth
+            the bottom term was evaluated at.
 
         Returns
         -------
@@ -226,20 +241,89 @@ class Modes(Result):
             )
         rho_arr = rho_g * 1000.0  # g/cm³ → kg/m³
         a_neper = a * (np.log(10.0) / 20.0)
+        # Perturbation on Re(psi)**2: for krakenc's complex modes this is
+        # an approximation (JKPS 5.176 wants the complex psi**2); the
+        # imaginary part of a weakly-attenuated mode shape is O(alpha),
+        # so the error is second-order in the loss being computed.
         phi_re = np.asarray(self.phi).real
         weight = phi_re ** 2
         norm = np.trapezoid(weight / rho_arr[:, None], self.depths, axis=0)
+        if np.any(norm <= 0):
+            warnings.warn(
+                f"Modes.with_attenuation: {int(np.count_nonzero(norm <= 0))} "
+                f"mode(s) have a non-positive shape normalisation "
+                f"∫psi²/rho dz; their attenuation is computed with the "
+                f"normalisation clamped to 1 and is not meaningful.",
+                UserWarning, stacklevel=2)
         norm = np.where(norm > 0, norm, 1.0)
         integrand = (a_neper / (c_arr * rho_arr))[:, None] * weight
         kr = np.real(self.k)
+        if np.any(kr <= 0):
+            warnings.warn(
+                f"Modes.with_attenuation: {int(np.count_nonzero(kr <= 0))} "
+                f"mode(s) have Re(k) <= 0; their attenuation is computed "
+                f"with k clamped to 1 m⁻¹ and is not meaningful.",
+                UserWarning, stacklevel=2)
         kr_safe = np.where(kr > 0, kr, 1.0)
         alpha_m = (omega / kr_safe) * np.trapezoid(integrand, self.depths, axis=0) / norm
+        # A truncated span shorts the water-column integrals too (measured
+        # 0.5-0.7x on a half-column tabulation), so the check runs whenever
+        # the caller names the seafloor, bottom term or not.
+        if bottom is None and seafloor_depth is not None:
+            D = float(seafloor_depth)
+            z_last = float(self.depths[-1])
+            if (not np.isfinite(D) or D <= 0.0
+                    or not np.isclose(z_last, D, rtol=1e-3)):
+                raise ConfigurationError(
+                    f"Modes.with_attenuation: the mode tabulation ends at "
+                    f"{z_last:g} m but seafloor_depth={seafloor_depth!r}; "
+                    f"the water-column attenuation integral needs the full "
+                    f"column (a half-column tabulation measured 0.5-0.7x "
+                    f"the true value)."
+                )
         if bottom is not None:
             from uacpy.core.environment import BoundaryProperties as _BP
             if not isinstance(bottom, _BP):
                 raise ConfigurationError(
                     "Modes.with_attenuation: bottom must be a "
                     f"BoundaryProperties; got {type(bottom).__name__}"
+                )
+            # The closed-form tail below reads psi at depths[-1] as psi(D);
+            # a tabulation stopping above the seafloor mis-evaluates it (a
+            # 10-80 m grid in a 100 m guide measured 2-4x too much bottom
+            # loss), so check the span when the caller can name D and say
+            # which depth was used when they cannot.
+            z_last = float(self.depths[-1])
+            if seafloor_depth is not None:
+                D = float(seafloor_depth)
+                if not np.isfinite(D) or D <= 0.0:
+                    raise ConfigurationError(
+                        f"Modes.with_attenuation: seafloor_depth must be a "
+                        f"positive finite depth in metres; got "
+                        f"{seafloor_depth!r}.")
+                # Symmetric check: a tabulation stopping SHORT reads psi(D)
+                # in the water column (bottom term inflated up to 4x); one
+                # running PAST D reads it down the evanescent tail (term
+                # collapses to as little as 0.03x) — both silently wrong.
+                if not np.isclose(z_last, D, rtol=1e-3):
+                    raise ConfigurationError(
+                        f"Modes.with_attenuation: the mode tabulation ends at "
+                        f"{z_last:g} m but the seafloor is at {D:g} m, so "
+                        f"psi(D) would be read {abs(D - z_last):g} m "
+                        f"{'above' if z_last < D else 'below'} the seabed "
+                        f"and the bottom term would be wrong by up to "
+                        f"several ×.",
+                        remediation="Tabulate the modes down to exactly the "
+                                    "seafloor (e.g. include a receiver at D), "
+                                    "or drop bottom= to skip the tail term.",
+                    )
+            else:
+                warnings.warn(
+                    f"Modes.with_attenuation: bottom term evaluated with "
+                    f"psi(D) at the deepest tabulated depth {z_last:g} m; "
+                    f"pass seafloor_depth= to check the tabulation reaches "
+                    f"the seabed.",
+                    UserWarning, stacklevel=2,
                 )
             cb = float(bottom.sound_speed)
             rho_b = float(bottom.density) * 1000.0
@@ -417,6 +501,10 @@ class Modes(Result):
         expikr = np.exp(-1j * k[:, None] * r[None, :])
         contribution = (phi_zr * weights)[:, :, None] * expikr[None, :, :]
         P = contribution.sum(axis=1)
+        # The asymptotic modal sum is a far-field form, singular at r = 0;
+        # clamping sqrt(r) to 1 there returns a finite number that is NOT
+        # the field at the source range - treat r = 0 samples as
+        # placeholders, not physics.
         with np.errstate(divide='ignore', invalid='ignore'):
             sqrt_r = np.sqrt(r)
             sqrt_r = np.where(sqrt_r > 0, sqrt_r, 1.0)

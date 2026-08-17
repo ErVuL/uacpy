@@ -232,3 +232,23 @@ def test_spectrum_calibration_is_exact_on_a_bin_centre():
     _, pm = constant_q_psd(off, fs, fmin=fmin, fmax=4000.0, bins_per_octave=B,
                            scaling='spectrum')
     assert 0.0 < -10 * np.log10(pm.max() / (A ** 2 / 2)) < 1.5
+
+
+def test_kernel_analyses_at_bin_centre_up_to_nyquist():
+    """Every bin correlates at exactly f_k, so a tone on ANY bin centre —
+    including the short-window bins near Nyquist, where the ceil in
+    N_k = ceil(Q*fs/f_k) quantises hardest — reads its A**2/2 band power to
+    within a few hundredths of a dB."""
+    fs = 8000.0
+    f = _cq_frequencies(20.0, fs / 2, 24)
+    t = np.arange(int(4 * fs)) / fs
+    # skip bins above 0.48*fs: there the short window's mainlobe spans the
+    # tone's negative-frequency image and the one-sided power reads high for
+    # a real tone regardless of the analysis frequency.
+    top = f[-40:]
+    for f0 in top[top < 0.48 * fs]:                   # top ~1.7 octaves
+        x = np.cos(2 * np.pi * f0 * t)
+        r = constant_q_psd(x, fs, fmin=20.0, bins_per_octave=24)
+        k = int(np.argmin(np.abs(r.frequencies - f0)))
+        err_db = 10 * np.log10(r.power[k] / 0.5)
+        assert abs(err_db) < 0.05, f"{err_db:.3f} dB at f0={f0:.1f} Hz"

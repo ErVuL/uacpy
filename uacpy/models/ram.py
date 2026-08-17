@@ -54,7 +54,7 @@ from uacpy.core.receiver import Receiver
 from uacpy.core.results import Result, Field
 from uacpy.core.constants import DEFAULT_SOUND_SPEED, TL_MAX_DB
 from uacpy.core.exceptions import (
-    ConfigurationError, ExecutableNotFoundError, ModelExecutionError,
+    ConfigurationError,
     UnsupportedFeatureError,
 )
 from uacpy.io.mpirams_writer import write_inpe, write_ssp_file, write_bth_file, write_ranges_file
@@ -416,7 +416,6 @@ class RAM(PropagationModel):
             'range_dependent_ssp',
             'range_dependent_bottom',
             'layered_bottom',
-            'range_dependent_layered_bottom',
             'elastic_media',
         },
     )
@@ -555,22 +554,15 @@ class RAM(PropagationModel):
 
         # Run modes, capability flags and collapse defaults come from the
         # class-level ``spec`` (applied by PropagationModel.__init__).
-        #
-        # Keep the user's ``executable`` arg verbatim (``None`` when
-        # auto-detected) so ``model.copy()`` re-resolves the binary instead of
-        # re-pinning the already-resolved absolute path. The resolved mpiramS
-        # path lives in ``self._exe``; the Collins binaries resolve per-run via
-        # ``_collins_binary``.
-        self.executable = Path(executable) if executable is not None else None
-        if self.executable is None:
-            self._exe = self._find_executable_in_paths(
-                's_mpiram', bin_subdirs=['mpirams'], dev_subdir='mpiramS'
-            )
-        else:
-            self._exe = self.executable
-
-        if not self._exe.exists():
-            raise ExecutableNotFoundError('RAM:mpiramS', str(self._exe))
+        # The resolved mpiramS path lives in ``self._exe``; the Collins
+        # binaries resolve per-run via ``_collins_binary``.
+        self._exe = self._resolve_executable(
+            executable,
+            lambda: self._find_executable_in_paths(
+                's_mpiram', bin_subdirs=['mpirams'], dev_subdir='mpiramS',
+            ),
+            label='RAM:mpiramS',
+        )
 
         # mpiramS allocates its Padé arrays dynamically (epade.f90:30); the
         # Collins binaries carry ``parameter (mp=10)`` and stop above it
@@ -828,26 +820,50 @@ class RAM(PropagationModel):
                 f"constructor and pass a single fc."
             )
         df = float(spacings[0])
-        fc = 0.5 * (f_min + f_max)
-        half_width = 0.5 * (f_max - f_min)
-        Q_auto = fc / half_width
-        T_auto = 1.0 / df
-        Q = Q_auto if self.Q is None else float(self.Q)
-        T = T_auto if self.T is None else float(self.T)
-        if self.Q is None or self.T is None:
+        if self.Q is not None and self.T is not None:
+            # Both pinned: the constructor pair IS the sweep spec; the array
+            # only contributes the centre bin. Say exactly what replaces
+            # what — the old code substituted the band with zero warnings.
+            fc = float(freqs[len(freqs) // 2])
+            Q, T = float(self.Q), float(self.T)
+            marched = self._broadband_frequencies(fc, Q, T)
             warnings.warn(
-                f"RAM BROADBAND: mpiramS / Collins use an internal "
-                f"(fc, Q, T) sweep. From the {len(freqs)}-element "
-                f"frequency array ({f_min:.2f}-{f_max:.2f} Hz, "
-                f"Δf={df:.4g} Hz), picked fc={fc:.2f} Hz "
-                f"(band centre), Q={Q:.4f} "
-                f"({'pinned' if self.Q is not None else 'auto'}), "
-                f"T={T:.4f} s "
-                f"({'pinned' if self.T is not None else 'auto'}). "
-                f"To silence, pin both `Q=` and `T=` on the constructor.",
+                f"RAM BROADBAND: Q={Q:g} and T={T:g} are pinned, so the "
+                f"{len(freqs)}-bin frequency array ({f_min:.2f}-"
+                f"{f_max:.2f} Hz) contributes only its centre bin "
+                f"fc={fc:.2f} Hz; the sweep marches {np.size(marched)} bins "
+                f"over {float(np.min(marched)):.2f}-"
+                f"{float(np.max(marched)):.2f} Hz. Pass the array with Q/T "
+                f"unset to march the array itself.",
                 UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
             )
-        self._broadband_frequencies(fc, Q, T)
+            return fc, Q, T
+        # (fc, Q, T) can only march bins at fc + m·Δf, so anchor fc on an
+        # actual array bin (the upper-middle one) rather than the band
+        # midpoint — an even-length array's midpoint sits half a bin
+        # off-grid, which used to drop one bin and shift every other by
+        # Δf/2. The half-band (n//2 + 1/2)·Δf puts peramx.f90:353's
+        # nf1 = int((bw-df)/df)+1 mid-interval (robust to float noise):
+        # an odd count round-trips exactly, an even count marches one
+        # extra bin at f_max + Δf — a superset of the request.
+        fc = float(freqs[len(freqs) // 2])
+        bw_half = (len(freqs) // 2 + 0.5) * df
+        Q = fc / bw_half if self.Q is None else float(self.Q)
+        T = 1.0 / df if self.T is None else float(self.T)
+        marched = self._broadband_frequencies(fc, Q, T)
+        warnings.warn(
+            f"RAM BROADBAND: mpiramS / Collins use an internal "
+            f"(fc, Q, T) sweep. From the {len(freqs)}-element "
+            f"frequency array ({f_min:.2f}-{f_max:.2f} Hz, "
+            f"Δf={df:.4g} Hz), picked fc={fc:.2f} Hz (array bin), "
+            f"Q={Q:.4f} ({'pinned' if self.Q is not None else 'auto'}), "
+            f"T={T:.4f} s "
+            f"({'pinned' if self.T is not None else 'auto'}); the sweep "
+            f"marches {np.size(marched)} bins over "
+            f"{float(np.min(marched)):.2f}-{float(np.max(marched)):.2f} Hz. "
+            f"To silence, pass a single fc with both `Q=` and `T=` pinned.",
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+        )
         return fc, Q, T
 
     @staticmethod
@@ -2010,7 +2026,7 @@ class RAM(PropagationModel):
                 backend=kind,
                 frequencies=fc,
                 dr=raw['dr'], dz=raw['dz'], zmax=raw['zmax'],
-                c0=self._resolve_c0(env),
+                pe_reference_speed=self._resolve_c0(env),
                 c_max=self._resolve_c_max(env),
             )
         )
@@ -2193,9 +2209,7 @@ class RAM(PropagationModel):
         owns_fm = fm is None
         fm = self._setup_file_manager() if owns_fm else fm
         try:
-            # rams0.5 hardcodes 'rams.in'; ramsurf1.5 reads 'ram.in'.
-            in_name = {'rams': 'rams.in', 'ramgeo': 'ramgeo.in'}.get(
-                kind, 'ram.in')
+            in_name = self._collins_in_name(kind)
             ram_in = fm.get_path(in_name)
             c0_pe = self._resolve_c0(env)
             # ``tl.line``'s receiver depth indexes u(ir)/f3(ir+1) with no bounds
@@ -2228,17 +2242,13 @@ class RAM(PropagationModel):
                 timeout=self.timeout
             )
 
-            tlgrid = fm.work_dir / 'tl.grid'
-            if not tlgrid.exists():
-                raise ModelExecutionError(
-                    self.model_name,
-                    return_code=0,
-                    stdout=proc_result.stdout,
-                    stderr=(
-                        f"{kind}: tl.grid not produced (cwd={fm.work_dir})\n"
-                        + (proc_result.stderr or "")
-                    )
-                )
+            # A missing or empty tl.grid means the binary died silently; the
+            # raised error quotes the subprocess streams (the Collins codes
+            # write no print file).
+            tlgrid = self._require_output(
+                [fm.work_dir / 'tl.grid'],
+                what=f'a TL grid ({kind} tl.grid)', process=proc_result,
+            )
             # rams0.5 writes its output grid from index 1+ndz, ramsurf1.5
             # from ndz (third_party/ramsurf/{rams0.5,ramsurf1.5}.f outpt).
             depth_index_offset = 1 if kind == 'rams' else 0
@@ -2249,19 +2259,13 @@ class RAM(PropagationModel):
 
             # The patched outpt (third_party/ramsurf/{rams0.5,ramsurf1.5}.f
             # + MODIFICATIONS.md) writes pcomplex.bin alongside tl.grid.
-            pcgrid = fm.work_dir / 'pcomplex.bin'
-            if not pcgrid.exists():
-                raise ModelExecutionError(
-                    self.model_name,
-                    return_code=0,
-                    stdout=proc_result.stdout,
-                    stderr=(
-                        f"{kind}: pcomplex.bin not produced. Rebuild the "
-                        f"binaries via install.sh so the patched outpt "
-                        f"routine emits the complex envelope.\n"
-                        + (proc_result.stderr or "")
-                    )
-                )
+            pcgrid = self._require_output(
+                [fm.work_dir / 'pcomplex.bin'],
+                what=f'a complex-envelope grid ({kind} pcomplex.bin)',
+                process=proc_result,
+                hint=('Rebuild the binaries via install.sh so the patched '
+                      'outpt routine emits the complex envelope.'),
+            )
             _, _, pcomplex = read_pcomplex_grid(
                 pcgrid, dr=dr, ndr=ndr, dz=dz, ndz=ndz,
                 depth_index_offset=depth_index_offset
@@ -2282,6 +2286,12 @@ class RAM(PropagationModel):
         finally:
             if owns_fm and fm.cleanup:
                 fm.cleanup_work_dir()
+
+    @staticmethod
+    def _collins_in_name(kind: str) -> str:
+        """Input-deck filename the Collins binary of ``kind`` hardcodes:
+        rams0.5 reads 'rams.in', ramgeo 'ramgeo.in', ramsurf1.5 'ram.in'."""
+        return {'rams': 'rams.in', 'ramgeo': 'ramgeo.in'}.get(kind, 'ram.in')
 
     @staticmethod
     def _collins_zmplt(target_depth: float, dz: float, zmax: float,
@@ -2897,17 +2907,19 @@ class RAM(PropagationModel):
                     Q=Q_used, T=T_used,
                     bandwidth_hz=2.0 * bw, df_hz=df,
                     dr=dr_first, dz=dz_first, zmax=zmax_used,
-                    c0=c0,
+                    pe_reference_speed=c0,
                     c_min=(self._speed_bounds(env) or (c0, c0))[0],
                     c_max=self._resolve_c_max(env),
                 )
             )
+            # Every frequency ran in ``band_fm``'s directory, so the paths
+            # describe the sweep as a whole rather than any one iteration.
             self._attach_output_paths(
-                field, raw['work_dir'], '',
+                field, band_fm.work_dir, '',
                 primary_files=(
                     ('tl_grid_file', 'tl.grid'),
                     ('pcomplex_file', 'pcomplex.bin'),
-                    ('in_file', raw['in_name'])
+                    ('in_file', self._collins_in_name(kind))
                 )
             )
             return field
@@ -3490,7 +3502,7 @@ class RAM(PropagationModel):
 
         if dz_opt > dz_pre_floor:
             if cs_min > 0:
-                reason = 'shear-mode stability (λ_s × 0.55)'
+                reason = 'shear-wavelength resolution (λ_s / 14)'
             elif kind == 'mpiramS':
                 reason = 'mpiramS runtime cap (λ_p / 16)'
             else:
@@ -3790,19 +3802,26 @@ class RAM(PropagationModel):
         # In mpiramS, psif = psi * exp(i*(k0*r + pi/4)) / (4*pi),
         # so |psi| = |psif| * 4*pi.
         #
-        # Protect 10*log10(r) from r=0; warn if we had to clip.
+        # Receivers at r <= 0 sit on the source axis, where the cylindrical
+        # 1/sqrt(r) spreading is singular — those columns are NaN'd below
+        # (the convention every model shares; Kraken masks the same cells in
+        # ``_mask_zero_range``). Substitute dr in the scaling so the rest of
+        # the row still computes.
+        zero_range = np.atleast_1d(
+            np.asarray(receiver.ranges, dtype=float)) <= 0.0
         log_ranges = rcv_ranges.astype(np.float64).copy()
-        if log_ranges.size > 0 and log_ranges[0] <= 0.0:
+        if np.any(zero_range):
             # expected; not in filterwarnings — emerges to user
             warnings.warn(
-                f"{self.model_name}: receiver range at index 0 is "
-                f"{log_ranges[0]}; clipping to dr={dr} for TL "
-                f"conversion to avoid log(0). The receiver.ranges "
-                f"array is not modified.",
+                f"{self.model_name}: {int(zero_range.sum())} receiver "
+                f"range(s) at r <= 0, where the point-source cylindrical-"
+                f"spreading factor 1/sqrt(r) is singular; those columns are "
+                f"returned as NaN (no data). Move the receiver off the "
+                f"source axis (e.g. r = 1 m) to get a field value.",
                 UserWarning,
                 skip_file_prefixes=USER_FRAME_SKIP
             )
-            log_ranges[log_ranges <= 0.0] = dr
+        log_ranges[log_ranges <= 0.0] = dr
 
         # Convert the mpiramS .psif output to engineering travelling-
         # wave pressure (see ``models/_pe_phase.py``). ``Field.db``
@@ -3815,6 +3834,9 @@ class RAM(PropagationModel):
                 ranges_m=log_ranges,
                 range_axis=1,
             ).astype(np.complex128)
+        # NaN the r <= 0 columns announced above: the value computed at the
+        # substituted range belongs to no receiver position.
+        pressure_field[:, zero_range] = np.nan
 
         elapsed = time.time() - start_time
         self._log(f"TL completed in {elapsed:.2f}s")
@@ -3828,7 +3850,7 @@ class RAM(PropagationModel):
                 backend='mpiramS',
                 frequencies=float(freq),
                 dr=float(dr), dz=float(dz),
-                c0=self._resolve_c0(env),
+                pe_reference_speed=self._resolve_c0(env),
                 c_max=self._resolve_c_max(env),
             )
         )
@@ -3954,7 +3976,7 @@ class RAM(PropagationModel):
                     n_samples=result['n_samples'],
                     fs=result['fs'],
                     Q=result['Q'],
-                    c0=result['c0'],
+                    pe_reference_speed=result['c0'],
                     c_min=result['c_min'],
                     c_max=self._resolve_c_max(env),
                 )
@@ -4008,13 +4030,11 @@ class RAM(PropagationModel):
         if result.stdout:
             self._log(f"mpiramS output:\n{result.stdout}", level='debug')
 
-        if not (work_dir / 'psif.dat').exists():
-            raise ModelExecutionError(
-                self.model_name,
-                return_code=result.returncode,
-                stdout=result.stdout,
-                stderr=(
-                    "mpiramS produced no output file (psif.dat). "
-                    "Check input parameters.\n" + (result.stderr or "")
-                )
-            )
+        # A missing or empty psif.dat means the binary died silently; the
+        # raised error quotes the subprocess streams (mpiramS writes no
+        # print file).
+        self._require_output(
+            [work_dir / 'psif.dat'],
+            what='an output field (psif.dat)', process=result,
+            hint='Check input parameters.',
+        )

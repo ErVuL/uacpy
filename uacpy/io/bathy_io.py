@@ -24,7 +24,7 @@ from uacpy.core.exceptions import (
 )
 from uacpy.io.units import km_to_m, m_to_km
 from uacpy.io._fortran_helpers import (
-    read_vector, strip_fortran_comment, strip_fortran_quotes,
+    fortran_float, read_vector, strip_fortran_comment, strip_fortran_quotes,
     typed_format_error,
 )
 
@@ -88,9 +88,22 @@ def read_boundary_3d(
     with open(filename, "r") as fid:
         bdry_type_line = fid.readline().strip()
 
-        match = re.search(r"'(.)'", bdry_type_line)
+        match = re.search(r"'([^']{1,2})'", bdry_type_line)
         if match:
-            bdry_type = match.group(1)
+            # bdry3DMod.f90:30 declares CHARACTER(LEN=2): position 1 is the
+            # interpolation letter, position 2 'S' (short) or 'L' (long).
+            type_field = match.group(1)
+            bdry_type = type_field[0]
+            if len(type_field) > 1 and type_field[1].upper() == 'L':
+                raise FileFormatError(
+                    f"{filename}: long-format 3-D boundary ({type_field!r}) "
+                    f"carries province-index rows and per-province "
+                    f"geoacoustic records after the depth grid "
+                    f"(bdry3DMod.f90:332-357), which this reader does not "
+                    f"parse.",
+                    remediation="Convert the file to the short ('S') "
+                                "format, or read it with Bellhop3D "
+                                "directly.")
         else:
             raise FileFormatError(f"Cannot parse boundary type from: {bdry_type_line}")
 
@@ -123,7 +136,7 @@ def read_boundary_3d(
 
         z_values = []
         for line in fid:
-            values = [float(v) for v in line.split() if v]
+            values = [fortran_float(v) for v in line.split() if v]
             z_values.extend(values)
 
         # Bellhop3D writes the depth grid as ny rows of nx values
@@ -142,23 +155,39 @@ def _read_boundary_2d(
     same parser on two units, down to the long-format branch, so one reader
     serves both.
     """
+    # Use the path as given when it already exists (an explicit path is never
+    # shadowed by a sibling .bty/.ati); the suffix is appended only as a
+    # fallback so a bare base name still resolves to the conventional file.
     filepath = Path(filepath)
-    if filepath.suffix != suffix:
+    if not filepath.exists() and not filepath.suffix:
         filepath = filepath.with_suffix(suffix)
 
     with open(filepath, "r") as fid:
         log_message('bathy_io', f"Reading {kind} file", verbose=verbose)
 
-        type_str = strip_fortran_quotes(fid.readline()).upper()
+        type_str = strip_fortran_quotes(fid.readline())
 
         # TYPE is up to 2 chars: TYPE(1:1) sets the interpolation, TYPE(2:2)
         # selects short (geometry only) or long (geometry + geoacoustics).
+        # The comparison is case-sensitive because the Fortran's is:
+        # bdryMod.f90's SELECT CASE blocks test only 'C'/'L' (:162-165) and
+        # 'S'/''/'L' (:193-199) and ERROUT on anything else, so a lowercase
+        # letter that parsed here would still abort the binary.
         interp_type = type_str[:1]
-        is_long = type_str[1:2] == "L"
+        format_char = type_str[1:2].strip()
         if interp_type not in ("L", "C"):
             raise FileFormatError(
-                f"Unknown {kind} type: {interp_type} (must be 'L' or 'C')"
+                f"Unknown {kind} type: {interp_type!r} (must be 'L' or 'C'; "
+                f"the Fortran SELECT CASE is case-sensitive, bdryMod.f90:162-"
+                f"165, so 'l'/'c' abort the engine with ERROUT)"
             )
+        if format_char not in ("", "S", "L"):
+            raise FileFormatError(
+                f"Unknown {kind} format flag TYPE(2:2) = {format_char!r} "
+                f"(must be 'S', 'L' or absent; case-sensitive in the Fortran, "
+                f"bdryMod.f90:193-199)"
+            )
+        is_long = format_char == "L"
 
         approx = "Piecewise-linear" if interp_type == "L" else "Curvilinear"
         log_message('bathy_io', f"{approx} approximation to {kind}",
@@ -180,7 +209,7 @@ def _read_boundary_2d(
                     f"needs {n_cols} columns, got {len(parts)} "
                     f"({' '.join(parts)!r})."
                 )
-            rows.append([float(v) for v in parts[:n_cols]])
+            rows.append([fortran_float(v) for v in parts[:n_cols]])
 
         data = np.array(rows).T
 
@@ -216,7 +245,9 @@ def read_bathymetry(filepath: Union[str, Path], verbose: bool = False) -> Tuple[
     Parameters
     ----------
     filepath : str or Path
-        Path to bathymetry file (.bty extension).
+        Path to bathymetry file. An existing path is read exactly as
+        given, whatever its extension; a bare root without an extension
+        resolves to ``<root>.bty``.
     verbose : bool, optional
         If True, print bathymetry information. Default is False.
 
@@ -271,7 +302,9 @@ def read_altimetry(filepath: Union[str, Path], verbose: bool = False) -> Tuple[n
     Parameters
     ----------
     filepath : str or Path
-        Path to altimetry file (.ati extension).
+        Path to altimetry file. An existing path is read exactly as
+        given, whatever its extension; a bare root without an extension
+        resolves to ``<root>.ati``.
     verbose : bool, optional
         If True, print altimetry information. Default is False.
 
@@ -321,6 +354,37 @@ def _validate_interp_type(interp_type: str) -> str:
     return t
 
 
+def _validate_boundary_axis(label: str, axis: np.ndarray) -> None:
+    """Reject a boundary axis the engines cannot interpolate on.
+
+    Bellhop brackets a coordinate by searching the axis in ascending order
+    and interpolates within the bracketing segment
+    (``bdryMod.f90 GetTopSeg/GetBotSeg``, :256-282); a repeated value makes
+    a zero-length segment whose tangent normalisation divides by zero, and
+    a decreasing value breaks the segment search silently. Non-finite
+    values pass straight into the geometry (``bdry3DMod.f90:310`` only
+    *warns* about a NaN) and poison every tangent/normal derived from it.
+    """
+    axis = np.asarray(axis, dtype=float)
+    if not np.all(np.isfinite(axis)):
+        raise ConfigurationError(
+            f"{label}: contains non-finite values "
+            f"({np.count_nonzero(~np.isfinite(axis))} of {axis.size}); the "
+            f"engines interpolate the boundary from these coordinates and a "
+            f"NaN/Inf poisons the segment tangents."
+        )
+    if axis.size > 1 and np.diff(axis).min() <= 0.0:
+        i = int(np.argmin(np.diff(axis)))
+        raise ConfigurationError(
+            f"{label}: values must be strictly increasing, but "
+            f"index {i} -> {i + 1} goes {axis[i]:g} -> {axis[i + 1]:g}. The "
+            f"engines' segment search assumes an ascending axis and a "
+            f"repeated value creates a zero-length segment.",
+            remediation="Sort the axis and remove duplicate coordinates "
+                        "before writing.",
+        )
+
+
 def _write_boundary_2d(
     filepath: Union[str, Path], data: np.ndarray, interp_type: str,
 ) -> None:
@@ -342,6 +406,8 @@ def _write_boundary_2d(
     if hasattr(data, "to_pairs"):
         data = data.to_pairs()
     rows = np.asarray(data, dtype=float).copy()
+    _validate_boundary_axis(f"{filepath.suffix or '.bty/.ati'} range column",
+                            rows[:, 0])
     rows[:, 0] = m_to_km(rows[:, 0])
 
     with open(filepath, "w") as f:
@@ -439,6 +505,7 @@ def write_bty_long_format(
     if hasattr(bathymetry, "to_pairs"):
         bathymetry = bathymetry.to_pairs()
     bathy_km = np.asarray(bathymetry, dtype=float).copy()
+    _validate_boundary_axis(".bty (long) range column", bathy_km[:, 0])
     bathy_km[:, 0] = m_to_km(bathy_km[:, 0])
 
     rd_r_km = m_to_km(bottom_rd.ranges)
@@ -488,10 +555,11 @@ def write_ati_file(filepath: Union[str, Path], altimetry: np.ndarray, interp_typ
 
     Notes
     -----
-    File format identical to bathymetry (.bty) files. Per the
-    Acoustics-Toolbox ATI/BTY specification, TYPE is a 2-character
-    string — position 2 is always 'S' (short format) for altimetry
-    since no geoacoustic parameters apply to the surface.
+    File format identical to bathymetry (.bty) files. TYPE is a
+    2-character string; this writer emits only the 2-column short format,
+    so position 2 is hardcoded to 'S'. ``ReadATI`` itself also accepts
+    the long format (``bdryMod.f90:80-110``) carrying per-range *top*
+    geoacoustics — an ice cover — which this writer does not produce.
 
     Altimetry describes surface variations (ice keels, surface waves, etc.)
     """
@@ -531,10 +599,12 @@ def write_bty_3d(filepath: Union[str, Path], X: np.ndarray, Y: np.ndarray,
     - Line 5: Y coordinates (km, space-separated)
     - Following lines: Depth matrix (ny lines, nx values per line)
 
-    NaN values in the depth array are replaced with 0.0. Bellhop3D does not
+    Non-finite depths are rejected with
+    :class:`~uacpy.core.exceptions.ConfigurationError`. Bellhop3D does not
     repair them: ``bdry3DMod.f90:310`` only warns that "The bathymetry file
     contains a NaN" and lets it through into ``ComputeBdryTangentNormal``,
-    where it poisons the segment tangents and normals.
+    where it poisons the segment tangents and normals — and a NaN silently
+    mapped to 0.0 would place the seabed at the sea surface instead.
 
     The coordinate system uses:
     - X: Eastings (m) - horizontal coordinate
@@ -551,8 +621,22 @@ def write_bty_3d(filepath: Union[str, Path], X: np.ndarray, Y: np.ndarray,
     if interp_type not in ['R', 'C']:
         raise ConfigurationError(f"Unknown interpolation type: {interp_type}. Use 'R' or 'C'")
 
-    depth = depth.copy()
-    depth[np.isnan(depth)] = 0.0
+    depth = np.asarray(depth, dtype=float)
+    if not np.all(np.isfinite(depth)):
+        n_bad = int(np.count_nonzero(~np.isfinite(depth)))
+        raise ConfigurationError(
+            f"write_bty_3d: depth grid contains {n_bad} non-finite value(s). "
+            f"Bellhop3D only warns about a NaN (bdry3DMod.f90:310) and then "
+            f"computes boundary tangents from it, and mapping it to a depth "
+            f"of 0.0 would put the seabed at the sea surface.",
+            remediation="Fill the gaps (e.g. interpolate the grid) before "
+                        "writing.",
+        )
+
+    X = np.asarray(X, dtype=float)
+    Y = np.asarray(Y, dtype=float)
+    _validate_boundary_axis("write_bty_3d X axis", X)
+    _validate_boundary_axis("write_bty_3d Y axis", Y)
 
     nx = len(X)
     ny = len(Y)

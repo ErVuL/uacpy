@@ -4,6 +4,8 @@ Utility functions for IO operations
 
 import numpy as np
 
+from uacpy.core.exceptions import ConfigurationError
+
 
 def equally_spaced(x: np.ndarray, tol: float = 1e-9) -> bool:
     """
@@ -63,3 +65,19 @@ def equally_spaced(x: np.ndarray, tol: float = 1e-9) -> bool:
     delta = np.abs(x - x_linspace)
 
     return np.max(delta) < tol
+
+
+def reject_unknown_kwargs(writer: str, kwargs: dict, known) -> None:
+    """Raise on a writer knob no block of this deck reads.
+
+    Every deck writer that accepts ``**kwargs`` calls this first, so a
+    misspelled option fails loudly instead of being silently dropped and
+    leaving the deck subtly different from what the caller asked for.
+    """
+    unknown = sorted(set(kwargs) - set(known))
+    if unknown:
+        raise ConfigurationError(
+            f"{writer}: parameter(s) {unknown} are not read by this deck.",
+            remediation=f"Drop them, or check they belong to this writer's "
+                        f"program; it reads {sorted(known)}.",
+        )

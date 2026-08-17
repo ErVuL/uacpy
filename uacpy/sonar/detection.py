@@ -46,7 +46,17 @@ def detection_index(pd: float, pf: float) -> float:
 def probability_of_detection(deflection, pf):
     """``P_D = Q(Q^-1(P_F) - d')`` for a given deflection and false-alarm rate.
 
-    ``pf`` may be a scalar or array; ``deflection`` broadcasts against it.
+    Gaussian (Neyman-Pearson) detector model: signal-absent and
+    signal-present decision statistics are unit-variance Gaussians separated
+    by the deflection ``d'``, and the decision threshold is set by the
+    false-alarm constraint ``P_F``. ``pf`` may be a scalar or array;
+    ``deflection`` broadcasts against it.
+
+    This is **not** the scalar form of
+    :func:`uacpy.sonar.sonar_equation.probability_of_detection_field` —
+    that function evaluates a different model, Urick's transition curve
+    ``P_D = Phi(SE / sigma_db)`` (log-normal signal-excess fluctuation,
+    ``P_D = 0.5`` pinned at ``SE = 0``, no ``P_F`` argument).
     """
     pf = np.asarray(pf, dtype=float)
     if np.any((pf <= 0.0) | (pf >= 1.0)):

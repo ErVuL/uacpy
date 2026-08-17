@@ -983,7 +983,8 @@ class TestEnvRecordOrder:
         # F-G record (T S pH z_bar) first, then the elastic half-space row.
         assert lines[topopt + 1].split() == ['4.0000', '34.0000', '8.0000',
                                              '50.0000']
-        assert lines[topopt + 2].split()[:3] == ['0.00', '3500.00', '1800.0']
+        assert lines[topopt + 2].split()[:3] == ['0.00', '3500.000000',
+                                                 '1800.000000']
 
     @pytest.mark.requires_binary
     def test_ice_surface_with_francois_garrison_runs(self, tmp_path):
@@ -1558,6 +1559,25 @@ class TestPrecalcBoundaryIsRefused:
                           Receiver(depths=[50.0], ranges=[1000.0]),
                           run_mode=RunMode.COHERENT_TL)
 
+    def test_precalc_column_at_positive_range_raises(self):
+        # A range-dependent Bottom carries SeabedColumn entries whose
+        # acoustic_type lives on ``.halfspace``; a precalc column anywhere
+        # along the transect must be refused, not only one at r = 0.
+        from uacpy.core.bottom import Bottom, SeabedColumn
+        bot = Bottom(columns=[
+            SeabedColumn(layers=[], halfspace=BoundaryProperties(
+                acoustic_type='half-space', sound_speed=1600.0,
+                density=1.5, attenuation=0.5)),
+            SeabedColumn(layers=[],
+                         halfspace=BoundaryProperties(acoustic_type='precalc')),
+        ], ranges=[0.0, 5000.0])
+        env = Environment(bathymetry=100.0, ssp=1500.0, bottom=bot)
+        with pytest.raises(UnsupportedFeatureError,
+                           match="'P' reflection branch"):
+            Bellhop().run(env, Source(depths=25.0, frequencies=200.0),
+                          Receiver(depths=[50.0], ranges=[1000.0]),
+                          run_mode=RunMode.COHERENT_TL)
+
     def test_ordinary_halfspace_is_unaffected(self):
         env = Environment(bathymetry=100.0, ssp=1500.0,
                           bottom=BoundaryProperties(
@@ -1613,9 +1633,18 @@ class TestSourceMustBeInsideTheMedium:
     @pytest.mark.parametrize('env_name,zs', [('_flat', 99.99), ('_slope', 40.0)])
     def test_a_source_inside_the_medium_still_runs(self, env_name, zs):
         # The knife edge: 99.99 m is a good field, so the guard must not
-        # creep upward.
-        tl = np.squeeze(self._run(getattr(self, env_name)(), zs).db)
-        assert np.all(np.isfinite(tl))
+        # creep upward. Water-column cells are finite; on the sloping bottom
+        # the receivers that sit below the local seafloor at short range are
+        # NaN by the below-domain mask — masked cells, not a rejection.
+        env = getattr(self, env_name)()
+        rcv = self._rcv()
+        tl = np.atleast_2d(np.squeeze(self._run(env, zs).db))
+        seafloor = np.asarray(env.bathymetry.eval(range=rcv.ranges),
+                              dtype=float)
+        above = (np.asarray(rcv.depths, dtype=float)[:, None]
+                 <= seafloor[None, :])
+        assert np.all(np.isfinite(tl[above]))
+        assert np.all(np.isnan(tl[~above]))
 
     def test_the_guard_is_bellhop_only(self):
         # Kraken/Scooter/RAM answer a buried source (heavily attenuated, as
@@ -1700,3 +1729,43 @@ class TestSolverWarningsReachTheCaller:
             warnings.simplefilter('error', UserWarning)
             warnings.filterwarnings('ignore', message='.*not redistributable.*')
             self._run(0)
+
+
+class TestSubSeafloorReceiversAreMasked:
+    """BELLHOP clamps a receiver below the bottom boundary onto it
+    (``misc/SourceReceiverPositions.f90:136-139``): the ``.shd`` then carries
+    the clamped depth axis with the boundary row repeated, so uacpy used to
+    return a constant TL plateau under the requested depths. The wrapper now
+    restores the requested depth axis and NaNs every cell below the local
+    seafloor — the same below-domain convention as Scooter, SPARC and RAM.
+    Kraken and the OASES models still return their physical transmitted
+    field; this mask is Bellhop's, whose ray tracer evaluates nothing in the
+    sediment."""
+
+    @staticmethod
+    def _run(depths):
+        env = Environment(bathymetry=100.0, ssp=1500.0,
+                          bottom=BoundaryProperties(
+                              acoustic_type='half-space', sound_speed=1600.0,
+                              density=1.5, attenuation=0.5))
+        return Bellhop(verbose=False).run(
+            env, Source(depths=25.0, frequencies=200.0),
+            Receiver(depths=depths, ranges=np.array([500.0, 1000.0])),
+            run_mode=RunMode.COHERENT_TL)
+
+    def test_below_seafloor_cells_are_nan_on_the_requested_axis(self):
+        depths = np.linspace(10.0, 300.0, 30)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            field = self._run(depths)
+        np.testing.assert_allclose(field.coords['depth'], depths)
+        below = depths > 100.0
+        assert np.isnan(field.data[below, :]).all()
+        assert np.isfinite(field.data[~below, :]).all()
+
+    def test_water_column_only_grid_is_untouched(self):
+        depths = np.linspace(10.0, 90.0, 9)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            field = self._run(depths)
+        assert np.isfinite(field.data).all()

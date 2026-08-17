@@ -18,11 +18,16 @@ service down). ``*_sources`` are ordered fallback lists (a bare string is a
 best-available *cached* source — local data only, no network); bathymetry and
 SSP default to fetching ``'gebco'`` / ``'woa23'`` when neither form is given,
 while bottom and surface are optional (fetched only when asked). Altimetry
-(sea-state roughness) has no fetch source, so it is literal-only. Fetching is
-**cache-first**: a locally installed dataset is sampled before any network call,
-and ``*_sources='local'`` skips the network entirely (failing fast with an
-install hint), so an air-gapped or reproducible run sets ``'local'`` on the axes
-it wants pinned to local data (see ``install.sh --data``).
+(sea-state roughness) is fetched only via ``altimetry_sources`` (needs a
+transect and date), else literal-only. Fetching is **cache-first within each
+source**: a source with a locally installed twin (GEBCO, WOA23) samples it
+before its own live backend. The chain order itself is quality-first, so
+``'auto'`` tries the better live sources (Argo/Copernicus for SSP,
+EMODnet-DTM/GMRT for bathymetry) *before* the installed global grids — an
+``'auto'`` run can hit the network before any cache. ``*_sources='local'``
+skips the network entirely (failing fast with an install hint), so an
+air-gapped or reproducible run sets ``'local'`` on the axes it wants pinned to
+local data (see ``install.sh --data``).
 """
 
 import datetime as _dt
@@ -40,6 +45,7 @@ from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.data._geo import (
     Coordinate, as_coordinate, great_circle_km, DEFAULT_MAX_TRANSECT_POINTS,
 )
+from uacpy.data._http import raise_substantive
 from uacpy.data.bathymetry import fetch_bathy, fetch_bathy_transect
 from uacpy.data.sediment import bottom_from_class, bottom_from_grain_size
 from uacpy.data.sound_speed import fetch_ssp, fetch_ssp_transect
@@ -132,8 +138,7 @@ def _resolve_cached(call, order, *, axis):
             return call(token), token
         except (ConfigurationError, DataFetchError) as exc:
             errors.append(exc)
-    data_errs = [e for e in errors if isinstance(e, DataFetchError)]
-    raise (data_errs[0] if data_errs else errors[-1])
+    raise_substantive(errors)
 
 
 def _as_source_tuple(value):
@@ -485,7 +490,11 @@ def fetch_environment(
                     point, transect_to, n_points=ssp_n_points,
                     max_points=max_points, date=date,
                     formula=formula, resolution=resolution, source=backend,
-                    timeout=timeout, verbose=verbose)
+                    timeout=timeout, verbose=verbose,
+                    # Bathymetry resolved above: each column extends to its
+                    # own local seafloor before stacking.
+                    seafloor=(Bathymetry.coerce(bathymetry)
+                              if bathymetry is not None else None))
             if src == 'copernicus':
                 if date is None:
                     raise ConfigurationError(
@@ -499,7 +508,10 @@ def fetch_environment(
                 cop_extra = {} if max_days is None else {'max_days': max_days}
                 return fetch_ssp_transect_operational(
                     point, transect_to, date=date, n_points=min(cop_n, max_points),
-                    formula=formula, verbose=verbose, **cop_extra)
+                    formula=formula, verbose=verbose,
+                    seafloor=(Bathymetry.coerce(bathymetry)
+                              if bathymetry is not None else None),
+                    **cop_extra)
             raise ConfigurationError(
                 f"fetch_environment: range_dependent_ssp not supported for "
                 f"ssp_sources={src!r}.",
@@ -602,13 +614,16 @@ def fetch_environment(
                     f"fetch_environment: unknown surface source {s!r}.",
                     remediation="Use 'seaice' or 'auto'.",
                 )
-        if date is None:
-            raise ConfigurationError(
-                "fetch_environment: surface_sources='seaice' needs date= to "
-                "pick the climatological sea-ice month.",
-                remediation="Pass date='YYYY-MM-DD', or supply surface= / drop it.",
-            )
+        # The date guard sits inside the try so a supplied surface= literal is
+        # the fallback for a missing date, like any other fetch failure.
         try:
+            if date is None:
+                raise ConfigurationError(
+                    "fetch_environment: surface_sources='seaice' needs date= to "
+                    "pick the climatological sea-ice month.",
+                    remediation="Pass date='YYYY-MM-DD', or supply surface= / "
+                                "drop it.",
+                )
             if rd_surface:
                 from uacpy.data.seaice_local import sea_ice_surface_transect
                 fetched = sea_ice_surface_transect(
@@ -635,20 +650,23 @@ def fetch_environment(
     # a fetched altimetry needs both a transect (for its extent) and a date.
     altimetry_result, altimetry_src = altimetry, None
     if altimetry_sources is not None:
-        if transect_to is None:
-            raise ConfigurationError(
-                "fetch_environment: altimetry_sources requires transect_to= "
-                "(the sea-surface realization spans the transect range).",
-                remediation="Pass transect_to=(lat, lon), or supply altimetry= "
-                            "directly for a single point.")
-        if date is None:
-            raise ConfigurationError(
-                "fetch_environment: altimetry_sources needs date= (sea state is "
-                "time-specific).",
-                remediation="Pass date='YYYY-MM-DD'.")
         from uacpy.data.bathymetry import transect_length
         from uacpy.data.sea_surface import fetch_sea_surface
+        # The transect/date guards sit inside the try so a supplied altimetry=
+        # literal is the fallback for a missing prerequisite, like any other
+        # fetch failure.
         try:
+            if transect_to is None:
+                raise ConfigurationError(
+                    "fetch_environment: altimetry_sources requires transect_to= "
+                    "(the sea-surface realization spans the transect range).",
+                    remediation="Pass transect_to=(lat, lon), or supply "
+                                "altimetry= directly for a single point.")
+            if date is None:
+                raise ConfigurationError(
+                    "fetch_environment: altimetry_sources needs date= (sea "
+                    "state is time-specific).",
+                    remediation="Pass date='YYYY-MM-DD'.")
             altimetry_result, altimetry_src = fetch_sea_surface(
                 (lat, lon), date=date,
                 max_range=transect_length((lat, lon), transect_to),
@@ -788,14 +806,22 @@ def _fetch_absorption(point, *, date, ssp_source, ssp_backend, cache_only,
         depths, temp, sal = fetch_ts_profile(
             point, date=date, resolution=resolution, timeout=timeout,
             verbose=verbose, **ts_kwargs)
+    # Read pH at the depth of the nominal T/S row build_francois_garrison
+    # uses (its default: nearest sample to the column mid-depth). A surface
+    # pH paired with a mid-column temperature inflates the boric-acid
+    # relaxation term ×1.8 at 100 Hz.
+    z_arr = np.asarray(depths, dtype=float)
+    ref_depth = (0.5 * (float(z_arr.min()) + float(z_arr.max()))
+                 if z_arr.size else None)
     pH, ph_src = _fetch_ph(point, date=date, ssp_source=ssp_source,
                            cache_only=cache_only, timeout=timeout,
-                           verbose=verbose)
-    return build_francois_garrison(depths, temp, sal, pH=pH), ph_src
+                           verbose=verbose, reference_depth=ref_depth)
+    return build_francois_garrison(depths, temp, sal, pH=pH,
+                                   reference_depth=ref_depth), ph_src
 
 
 def _fetch_ph(point, *, date=None, ssp_source=None, cache_only=False,
-              timeout=120.0, verbose=False):
+              timeout=120.0, verbose=False, reference_depth=None):
     """Representative seawater pH at ``point``, pH-source-aware and cache-first.
 
     Returns ``(pH, source_id)``. On the Copernicus SSP branch (``ssp_source ==
@@ -813,14 +839,15 @@ def _fetch_ph(point, *, date=None, ssp_source=None, cache_only=False,
     if ssp_source == 'copernicus' and not cache_only and date is not None:
         from uacpy.data.copernicus import fetch_ph_operational
         try:
-            pH = fetch_ph_operational(point, date=date, verbose=verbose)
+            pH = fetch_ph_operational(point, date=date, verbose=verbose,
+                                      reference_depth=reference_depth)
             log_message('copernicus', f"pH {pH:.3f} from Copernicus BGC at "
                         f"{lat:.3f}, {lon:.3f}", verbose=verbose)
             return pH, 'copernicus_bgc'
         except (DataFetchError, ConfigurationError):
             pass                                    # fall through to GLODAP
     try:
-        pH = fetch_ph(point)
+        pH = fetch_ph(point, reference_depth=reference_depth)
     except (DataFetchError, ConfigurationError):
         return DEFAULT_OCEAN_PH, None
     log_message('glodap', f"pH {pH:.3f} from GLODAP at {lat:.3f}, {lon:.3f}",
@@ -873,10 +900,11 @@ def _fetch_ssp(point, *, date, ssp_source, formula, resolution, source,
 # (the accepted source keywords, the 'auto' fallback order, the fetcher lookup
 # and the provenance id) derives from this list.
 #
-# ``resolve(cached)`` returns the source's ``(point_fetcher, transect_fetcher)``
-# pair, imported lazily to keep optional deps optional and avoid import cycles.
-# Only EMODnet has a distinct cached backend (local polygons vs the live WFS),
-# tried cache-first; the rest are cache-or-compute and ignore the flag.
+# ``resolve`` returns the source's ``(point_fetcher, transect_fetcher)`` pair,
+# imported lazily to keep optional deps optional and avoid import cycles.
+# Providers with a cached twin (``has_cached_variant``: EMODnet's local
+# polygons vs the live WFS, pelagic's local-GEBCO vs API-allowed depth lookup)
+# take a ``cached`` flag and are tried cache-first; the rest take no argument.
 
 
 @dataclass(frozen=True)
@@ -888,7 +916,8 @@ class _BottomProvider:
     (cache-first); under ``cache_only`` only the local twin is used."""
 
     id: str
-    resolve: Callable                  # (cached: bool) -> (point_fn, transect_fn)
+    resolve: Callable                  # () -> (point_fn, transect_fn); takes
+                                       # (cached: bool) iff has_cached_variant
     has_cached_variant: bool = False
     in_auto: bool = False
     in_cache_auto: bool = False
@@ -904,27 +933,27 @@ def _emodnet_pair(cached):
     return (m.fetch_bottom, m.fetch_bottom_transect)
 
 
-def _grainsize_pair(cached):
+def _grainsize_pair():
     from uacpy.data import sediment_db as m
     return (m.fetch_bottom_local, m.fetch_bottom_local_transect)
 
 
-def _mars_pair(cached):
+def _mars_pair():
     from uacpy.data import mars as m
     return (m.fetch_bottom_mars, m.fetch_bottom_mars_transect)
 
 
-def _crust1_pair(cached):
+def _crust1_pair():
     from uacpy.data import crust1_local as m
     return (m.fetch_bottom_crust1, m.fetch_bottom_crust1_transect)
 
 
-def _diesing_pair(cached):
+def _diesing_pair():
     from uacpy.data import diesing_local as m
     return (m.fetch_bottom_diesing, m.fetch_bottom_diesing_transect)
 
 
-def _graw_pair(cached):
+def _graw_pair():
     from uacpy.data import graw_local as m
     return (m.fetch_bottom_graw, m.fetch_bottom_graw_transect)
 
@@ -1003,21 +1032,23 @@ def _fetch_bottom(order, *args, transect, cache_only=False,
             call_kwargs['max_distance_km'] = max_distance_km
         if provider.accepts_depth and depth is not None:
             call_kwargs['depth'] = depth
-        # Cache-first: the local twin before the live backend, where one exists;
-        # cache_only drops the live attempt.
+        # Cache-first: the local twin before the live backend, where one
+        # exists; cache_only drops the live attempt. Providers without a
+        # cached twin resolve one fetcher pair, with no flag to pass.
+        # Resolution stays inside the loop so a live backend's module is only
+        # imported when the cached attempt has failed.
         if provider.has_cached_variant:
-            cached_flags = (True,) if cache_only else (True, False)
+            arg_sets = ((True,),) if cache_only else ((True,), (False,))
         else:
-            cached_flags = (False,)
-        for cached in cached_flags:
-            point_fn, transect_fn = provider.resolve(cached)
+            arg_sets = ((),)
+        for resolve_args in arg_sets:
+            point_fn, transect_fn = provider.resolve(*resolve_args)
             fn = transect_fn if transect else point_fn
             try:
                 return fn(*args, **call_kwargs), name
             except (DataFetchError, ConfigurationError) as exc:
                 errors.append(exc)
-    data_errs = [e for e in errors if isinstance(e, DataFetchError)]
-    raise (data_errs[0] if data_errs else errors[-1])
+    raise_substantive(errors)
 
 
 def _seabed_sound_speed(ssp, seafloor, range_m=0.0):

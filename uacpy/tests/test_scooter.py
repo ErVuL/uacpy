@@ -311,3 +311,20 @@ class TestStabilisingAttenuationIsUndoneCorrectly:
             _w.simplefilter('always')
             Scooter()
         assert not [c for c in caught if 'modal poles' in str(c.message)]
+
+
+def test_broadband_n_mesh_is_checked_at_f_max():
+    """A pinned ``n_mesh`` is validated at the top of the broadband sweep:
+    the AT reader's 'Mesh is too coarse' floor scales with frequency, so a
+    mesh that clears the first frequency can under-resolve the last."""
+    import warnings as _w
+    env = Environment(bathymetry=100.0, ssp=1500.0)
+    with pytest.raises(ConfigurationError, match='Mesh is too coarse'):
+        with _w.catch_warnings():
+            _w.simplefilter('ignore')
+            Scooter(n_mesh=200, verbose=False).run(
+                env,
+                Source(depths=25.0,
+                       frequencies=np.linspace(100.0, 1000.0, 10)),
+                Receiver(depths=[50.0], ranges=[1000.0]),
+                run_mode=RunMode.BROADBAND)

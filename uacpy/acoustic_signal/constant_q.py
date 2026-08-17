@@ -12,8 +12,10 @@ For ``B`` bins per octave:
   spacing to the next bin);
 * per-bin window length ``N_k = ceil(Q * fs / f_k)`` samples — long at low
   frequency, short at high frequency;
-* coefficient ``X_cq[k] = (1/sum w) * sum_n w_Nk[n] x[n] exp(-2j*pi*Q*n/N_k)``,
-  where ``Q/N_k = f_k/fs`` so each bin is a windowed correlation at ``f_k``.
+* coefficient ``X_cq[k] = (1/sum w) * sum_n w_Nk[n] x[n] exp(-2j*pi*f_k*n/fs)``
+  — each bin is a windowed correlation at exactly ``f_k`` (``N_k`` only sets
+  the window length; the ceil in ``N_k`` must not shift the analysis
+  frequency).
 
 ``constant_q_transform`` returns the complex spectrum of one (centred) frame;
 ``constant_q_spectrogram`` slides that over time; ``constant_q_psd`` averages it;
@@ -77,7 +79,7 @@ def _cq_quality(bins_per_octave):
 def _cq_kernels(frequencies, Q, fs, window):
     """List of ``(N_k, kernel, density_factor)`` per bin.
 
-    ``kernel = w·exp(-2j·pi·Q·n/N_k) / Σw`` (so ``|X|**2`` is band power, the
+    ``kernel = w·exp(-2j·pi·f_k·n/fs) / Σw`` (so ``|X|**2`` is band power, the
     'spectrum' scaling). ``density_factor = (Σw)**2 / (fs·Σw**2)`` converts that
     band power to a one-sided PSD (per Hz), matching ``scipy.signal.welch``
     density scaling; the one-sided factor 2 is applied in
@@ -90,7 +92,7 @@ def _cq_kernels(frequencies, Q, fs, window):
         sw = float(np.sum(w))
         sw2 = float(np.sum(w * w))
         n = np.arange(Nk)
-        ker = (w * np.exp(-2j * np.pi * Q * n / Nk)) / sw
+        ker = (w * np.exp(-2j * np.pi * fk * n / fs)) / sw
         # |X|**2 captures only the positive-frequency sideband of a real signal
         # (a tone A·cos gives |X|=A/2); _cq_power_frames doubles it to one-sided
         # band power A**2/2. density_factor then divides by the noise-equivalent

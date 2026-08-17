@@ -228,3 +228,72 @@ class TestAltimetryProvenance:
                            data_sources=(self._record(),))
         env = uacpy.Environment(name='t', bathymetry=bathy, ssp=1500.0)
         assert [r.source.id for r in env.data_sources] == ['test-altimetry']
+
+
+class TestDelegatedWritesAreValidated:
+    """Writes through the Surface proxy obey the ``BoundaryProperties``
+    construction rules, so the proxy cannot store a value on the nodes that
+    their constructor would refuse."""
+
+    @staticmethod
+    def _halfspace_surface():
+        return Surface.coerce(BoundaryProperties(sound_speed=1700.0))
+
+    def test_type_fields_are_not_assignable(self):
+        s = self._halfspace_surface()
+        for name, value in (('acoustic_type', 'rigid'),
+                            ('reflection_file', 'top.trc')):
+            with pytest.raises(ConfigurationError, match='cannot be assigned'):
+                setattr(s, name, value)
+
+    def test_numeric_rules_mirror_the_constructor(self):
+        s = self._halfspace_surface()
+        with pytest.raises(ConfigurationError, match='must be positive'):
+            s.density = -3.0
+        with pytest.raises(ConfigurationError, match='must be positive'):
+            s.sound_speed = 0.0
+        with pytest.raises(ConfigurationError, match='exceeds'):
+            s.attenuation = 500.0
+        with pytest.raises(ConfigurationError, match='non-negative'):
+            s.roughness = -1.0
+
+    def test_vacuum_nodes_reject_halfspace_params(self):
+        s = Surface.coerce(None)
+        with pytest.raises(ConfigurationError, match='vacuum'):
+            s.sound_speed = 1700.0
+        s.roughness = 0.5
+        assert s.properties[0].roughness == 0.5
+
+    def test_valid_writes_reach_every_node(self):
+        s = Surface.coerce([(0.0, _ice()), (5000.0, _ice())])
+        s.attenuation = 0.7
+        assert [p.attenuation for p in s.properties] == [0.7, 0.7]
+        assert s.attenuation == 0.7
+
+
+class TestCollapseFileNodes:
+    """'mean'/'median' over uniform 'file' nodes keeps the shared table and
+    reduces only the roughness; distinct tables refuse to blend."""
+
+    @staticmethod
+    def _file_node(roughness):
+        return BoundaryProperties(acoustic_type='file',
+                                  reflection_file='top.trc',
+                                  roughness=roughness)
+
+    def test_shared_table_collapses_to_it_with_reduced_roughness(self):
+        s = Surface.coerce([(0.0, self._file_node(0.1)),
+                            (5000.0, self._file_node(0.3))])
+        c = s.collapse('mean')
+        node = c.properties[0]
+        assert node.acoustic_type == 'file'
+        assert node.reflection_file == 'top.trc'
+        assert node.roughness == pytest.approx(0.2)
+
+    def test_distinct_tables_refuse_to_blend(self):
+        a = self._file_node(0.1)
+        b = BoundaryProperties(acoustic_type='file',
+                               reflection_file='other.trc')
+        s = Surface.coerce([(0.0, a), (5000.0, b)])
+        with pytest.raises(ConfigurationError, match='different reflection'):
+            s.collapse('median')

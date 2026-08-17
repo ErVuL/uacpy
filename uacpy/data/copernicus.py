@@ -153,8 +153,13 @@ def fetch_ssp_transect_operational(
     max_days: int = DEFAULT_MAX_DAYS,
     dataset_id: str = DEFAULT_DATASET_ID,
     verbose: Union[bool, str] = False,
+    seafloor=None,
 ) -> SoundSpeedProfile:
     """Range-dependent operational SSP along ``start`` → ``end`` (Copernicus).
+
+    ``seafloor`` (a :class:`~uacpy.core.environment.Bathymetry`, optional)
+    supplies the local seafloor: each column is extended to its own local
+    depth before stacking (see :func:`uacpy.data.fetch_ssp_transect`).
 
     The Copernicus counterpart of :func:`uacpy.data.fetch_ssp_transect`: opens
     the dataset once, samples ``n_points`` columns along the great-circle path,
@@ -200,6 +205,17 @@ def fetch_ssp_transect_operational(
         'copernicus', f"operational range-dependent SSP: {n_points} columns "
         f"over {ranges_m[-1] / 1000:.1f} km", verbose=verbose,
     )
+    if seafloor is not None:
+        from uacpy.data.sound_speed import extend_ssp_below_data
+        # Same per-column extension as fetch_ssp_transect: never flat-hold a
+        # shallower column inside its used water column.
+        columns = [
+            extend_ssp_below_data(
+                col,
+                float(np.asarray(seafloor.eval(range=r)).flat[0]),
+                latitude=la)
+            for col, r, la in zip(columns, ranges_m, lats)
+        ]
     return assemble_range_dependent(columns, ranges_m)
 
 

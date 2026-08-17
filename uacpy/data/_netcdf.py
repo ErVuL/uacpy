@@ -41,6 +41,16 @@ class NetcdfGrid:
     nodes.
     """
 
+    def close(self) -> None:
+        """Close the underlying netCDF handle (``invalidate_grids`` calls
+        this on every memoised grid before dropping it)."""
+        ds = getattr(self, 'ds', None)
+        if ds is not None:
+            try:
+                ds.close()
+            except Exception:
+                pass        # a torn handle must not block the invalidation
+
     def __init__(self, path):
         self.ds = open_netcdf(path)
         self.names = {n.lower(): n for n in self.ds.variables}
@@ -86,6 +96,15 @@ class NetcdfGrid:
         # one (GLODAP's mapped product starts at 20.5°E). After the wrap the
         # query is inside one period of the axis, and clip only guards a grid
         # that does not span the full 360°.
-        lon = self._lon0 + ((float(lon) - self._lon0) % 360.0)
-        return int(np.clip(round((lon - self._lon0) / self._dlon),
-                           0, self._nlon - 1))
+        # Only a full-360 axis is periodic, under either registration:
+        # cell/pixel-registered nodes span nlon*dlon degrees (GEBCO, GLODAP),
+        # while a gridline-registered axis stores both meridian ends and spans
+        # (nlon-1)*dlon (GlobSed: 4321 nodes at 5'). Wrapping a
+        # partial-coverage grid would silently send a just-west-of-edge query
+        # to the east edge, so those clip on the raw longitude instead.
+        if (abs(self._nlon * self._dlon - 360.0) < 1e-6
+                or abs((self._nlon - 1) * self._dlon - 360.0) < 1e-6):
+            lon = self._lon0 + ((float(lon) - self._lon0) % 360.0)
+            return int(round((lon - self._lon0) / self._dlon)) % self._nlon
+        col = int(round((float(lon) - self._lon0) / self._dlon))
+        return int(np.clip(col, 0, self._nlon - 1))

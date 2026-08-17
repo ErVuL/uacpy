@@ -153,14 +153,14 @@ def write_inpe(
         f.write(f"{zsrc}\n")
         f.write(f"{deltaz}\n")
         f.write(f"{deltar}\n")
-        f.write(f"{np_pade} {nss}\n")
+        f.write(f"{int(np_pade)} {int(nss)}\n")
         f.write(f"{rs}\n")
-        f.write(f"{dzm}\n")
+        f.write(f"{int(dzm)}\n")
         f.write(f"{c0_user}\n")
         f.write(f"{ssp_filename}\n")
-        f.write(f"{iflat}\n")
-        f.write(f"{ihorz}\n")
-        f.write(f"{ibot}\n")
+        f.write(f"{int(iflat)}\n")
+        f.write(f"{int(ihorz)}\n")
+        f.write(f"{int(ibot)}\n")
         f.write(f"{bth_filename}\n")
         # peramx.f90:91-92 takes the output-ranges filename from this line,
         # so this writer is what pins it to 'ranges.dat'. Keep in sync with
@@ -168,8 +168,8 @@ def write_inpe(
         f.write("ranges.dat\n")
         # Bottom properties
         f.write(f"{sedlayer}\n")
-        f.write(f"{nzs}\n")
-        f.write(f"{isedrd}\n")
+        f.write(f"{int(nzs)}\n")
+        f.write(f"{int(isedrd)}\n")
         if isedrd == 1:
             # Range-dependent: write sediment filename
             f.write(f"{sed_filename}\n")
@@ -211,6 +211,26 @@ def write_sediment_file(
     """
     ranges_km = m_to_km(ranges_m)
     n_profiles = len(ranges_km)
+
+    # peramx.f90:120-123 counts profiles by testing the first token of every
+    # record for < 0 (the "-1 range" header sentinel); a data row whose first
+    # value is negative is miscounted as a header and the second read pass
+    # aborts on EOF. cs is a signed offset (cp - surface water speed), so a
+    # seabed slower than the surface water hits this format limitation.
+    for name, arr in (('cs', cs_profiles), ('rho', rho_profiles),
+                      ('attn', attn_profiles)):
+        first_row = np.asarray(arr, dtype=float)[0, :]
+        if np.any(first_row < 0):
+            raise ConfigurationError(
+                f"mpiramS sediment file: {name} profile(s) start with a "
+                f"negative value (min {float(first_row.min()):g}), which the "
+                f"binary's profile counter reads as a '-1 range' header "
+                f"sentinel (peramx.f90:120-123) — the deck cannot express "
+                f"it.",
+                remediation="Use a Collins backend (RAM(backend='ramgeo' or "
+                            "'ramsurf')), which writes sediment speeds "
+                            "absolutely.",
+            )
 
     with open(filepath, 'w') as f:
         for ip in range(n_profiles):

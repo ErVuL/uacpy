@@ -11,12 +11,14 @@ GeoJSON is fetched live, falling back to a sea-only map if unreachable.
 """
 
 import json
+import warnings
 from pathlib import Path
 
 import numpy as np
 
 from uacpy._log import log_message
 from uacpy.data import _cache
+from uacpy.core.exceptions import DataFetchError
 from uacpy.data._http import http_get
 
 __all__ = ['land_polygons', 'download_coastline', 'NATURAL_EARTH_URL',
@@ -60,14 +62,21 @@ def land_polygons(resolution='50m', *, url=None, timeout=40.0, verbose=False):
     local = _local_path(resolution)
     if url is None and local.exists():
         try:
-            return _rings(json.loads(local.read_text()))
+            return _rings(json.loads(local.read_text(encoding='utf-8')))
         except Exception:          # noqa: BLE001 — fall back to the live source
             pass
     src = (url or NATURAL_EARTH_URL).format(resolution=resolution)
     try:
         data = json.loads(http_get(src, timeout=timeout, verbose=verbose,
                                    source='coastline', user_agent=_USER_AGENT))
-    except Exception:          # noqa: BLE001 — backdrop is optional
+    except Exception as exc:   # noqa: BLE001 — backdrop is optional
+        # The map still renders (sea only); say why the land layer is
+        # missing instead of degrading silently after a multi-retry stall.
+        warnings.warn(
+            f"coastline backdrop unavailable ({type(exc).__name__}); the "
+            f"map renders without land. Run `./install.sh --data coastline` "
+            f"to cache it offline, or pass basemap=False.",
+            UserWarning, stacklevel=3)
         return None
     return _rings(data)
 
@@ -88,6 +97,19 @@ def download_coastline(cache_dir=None, *, resolutions=COASTLINE_RESOLUTIONS,
                     verbose=verbose)
         blob = http_get(NATURAL_EARTH_URL.format(resolution=res), timeout=timeout,
                         verbose=verbose, source='coastline', user_agent=_USER_AGENT)
+        # A captive portal or proxy error page arrives as HTTP 200 HTML;
+        # caching it would poison every later offline read. Parse before
+        # writing, and fail with the data layer's typed error.
+        try:
+            json.loads(blob)
+        except ValueError as exc:
+            raise DataFetchError(
+                f"coastline download for {res!r} is not valid GeoJSON — a "
+                f"captive portal or proxy error page was likely returned.",
+                remediation="Check connectivity (log in to the network "
+                            "portal if one appeared) and re-run "
+                            "./install.sh --data coastline.",
+            ) from exc
         out = dest / f'ne_{res}_land.geojson'
         out.write_bytes(blob)
         written.append(out)

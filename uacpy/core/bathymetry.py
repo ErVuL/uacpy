@@ -52,7 +52,11 @@ class Bathymetry(_RangeProfile):
     @classmethod
     def coerce(cls, value) -> 'Bathymetry':
         """Coerce ``Bathymetry`` / scalar depth / ``(N, 2)`` ``(range, depth)``
-        pairs into a :class:`Bathymetry`."""
+        pairs into a :class:`Bathymetry`.
+
+        ``None`` is rejected (bathymetry is required; there is no default
+        seafloor).
+        """
         if isinstance(value, Bathymetry):
             return value
         try:

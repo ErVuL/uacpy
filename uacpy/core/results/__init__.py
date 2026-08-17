@@ -18,4 +18,6 @@ __all__ = [
     'Result', 'PhaseReference', 'Field', 'ResultStack',
     'Arrivals', 'Rays', 'Modes',
     'Covariance', 'Replicas', 'ReflectionCoefficient',
+    # submodules
+    'array_products', 'field', 'modes', 'quantities', 'rays', 'reflection',
 ]

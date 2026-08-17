@@ -19,7 +19,7 @@ from pathlib import Path
 import tempfile
 
 import uacpy
-from uacpy.core.exceptions import ConfigurationError
+from uacpy.core.exceptions import ConfigurationError, FileFormatError
 from uacpy.core.environment import SoundSpeedProfile
 from uacpy.core.results import Field
 from uacpy.io.file_manager import FileManager
@@ -614,7 +614,9 @@ class TestHankelScaledCylindrical:
         rng = np.random.default_rng(0)
         k = np.linspace(0.1, 1.0, 64)
         G = rng.normal(size=(2, 64)) + 1j * rng.normal(size=(2, 64))
-        ranges = np.array([500.0, 1000.0, 2000.0])
+        # Ranges inside the transform's alias bound r*dk <= 10
+        # (fieldsco.m:109-111): dk ~ 0.0143 here, so r_max 400 m is safe.
+        ranges = np.array([100.0, 200.0, 400.0])
         kw = dict(atten=0.0, spectrum='P')
         p_point = _hankel_transform(G, k, ranges, source_type='R', **kw)
         p_scaled = _hankel_transform(G, k, ranges, source_type='S', **kw)
@@ -952,10 +954,11 @@ class TestBellhopWriterReflectionStaging:
 
     @staticmethod
     def _brc(path):
-        from uacpy.io import write_reflection_coefficient
         theta = np.linspace(0.0, 90.0, 91)
-        coeffs = np.column_stack([0.5 * np.ones(91), np.zeros(91)])
-        write_reflection_coefficient(path, theta, coeffs)
+        with open(path, 'w') as fh:
+            fh.write(f"{len(theta)}\n")
+            for t in theta:
+                fh.write(f"{t:12.6f}     0.500000     0.000000\n")
         return path
 
     @pytest.mark.parametrize('kwargs', [
@@ -1447,33 +1450,29 @@ class TestSourceBeamPatternRoundTrip:
         levels = np.array([-20.0, -6.0, 0.0, -6.0, -20.0])
         path = tmp_path / 'beam.sbp'
         write_source_beam_pattern(path, angles, levels)
-        back = read_source_beam_pattern(path, sbp_option='*')
+        back = read_source_beam_pattern(path)
         assert np.allclose(back[:, 0], angles)
         assert np.allclose(back[:, 1], levels)
-
-    def test_omni_default_is_zero_db(self):
-        from uacpy.io.refl_io import read_source_beam_pattern
-        back = read_source_beam_pattern('unused', sbp_option='O')
-        assert np.allclose(back[:, 1], 0.0)
 
     def test_root_name_without_extension_resolves(self, tmp_path):
         from uacpy.io.refl_io import (
             read_source_beam_pattern, write_source_beam_pattern)
         write_source_beam_pattern(tmp_path / 'beam.sbp', np.array([0.0]),
                                   np.array([-3.0]))
-        back = read_source_beam_pattern(tmp_path / 'beam', sbp_option='*')
+        back = read_source_beam_pattern(tmp_path / 'beam')
         assert np.allclose(back[:, 1], [-3.0])
 
 
 class TestBinaryArrivalsRejected:
     """``read_arr_file`` only parses the ASCII ``.arr``; the binary layout
-    (RunType 'a') is a configuration error, not a parse error."""
+    (RunType 'a') is file content this reader cannot parse, so it raises
+    the typed :class:`FileFormatError` like every other unreadable file."""
 
-    def test_binary_arrivals_raises_configurationerror(self, tmp_path):
+    def test_binary_arrivals_raises_fileformaterror(self, tmp_path):
         from uacpy.io.oalib_reader import read_arr_file
         p = tmp_path / 'run.arr'
         p.write_bytes(b'\x04\x00\x00\x00' + b'\x00' * 32)
-        with pytest.raises(ConfigurationError, match="RunType 'A'"):
+        with pytest.raises(FileFormatError, match="RunType 'A'"):
             read_arr_file(p)
 
 
@@ -1680,7 +1679,6 @@ def test_multi_profile_deck_shares_one_bottom_without_slivers(tmp_path):
     from uacpy.core.environment import (
         Bathymetry, Bottom, SeabedColumn, SedimentLayer, BoundaryProperties)
     from uacpy.io.oalib_writer import write_multi_profile_env
-    from uacpy.core.constants import BoundaryType
     hs = BoundaryProperties(acoustic_type='half-space', sound_speed=1800.0,
                             density=2.0, attenuation=0.5)
     bot = Bottom(columns=[SeabedColumn(
@@ -1697,8 +1695,6 @@ def test_multi_profile_deck_shares_one_bottom_without_slivers(tmp_path):
         str(out), segments,
         uacpy.Source(depths=30.0, frequencies=100.0),
         uacpy.Receiver(depths=[50.0], ranges=[1000.0]),
-        surface_type=BoundaryType.VACUUM,
-        bottom_type=BoundaryType.HALF_SPACE,
         n_mesh=500, rmax_m=6000.0, c_low=0.0, c_high=2000.0,
     )
     mesh = [float(m.group(1)) for m in
@@ -1968,12 +1964,12 @@ class TestTopReflectionTableStaging:
 
     @staticmethod
     def _table(tmp_path):
-        from uacpy.io.refl_io import write_reflection_coefficient
         path = tmp_path / 'top_table.trc'
         angles = np.linspace(0.0, 90.0, 19)
-        write_reflection_coefficient(
-            path, angles, np.column_stack([np.full_like(angles, 0.9),
-                                           np.zeros_like(angles)]))
+        with open(path, 'w') as fh:
+            fh.write(f"{len(angles)}\n")
+            for a in angles:
+                fh.write(f"{a:12.6f}     0.900000     0.000000\n")
         return path
 
     @staticmethod
@@ -2951,17 +2947,9 @@ class TestOasesNegativeRoughnessRejected:
         assert (tmp_path / 'neg.dat').exists()
 
 
-class TestRtsToPressureGoertzel:
-    """``method='goertzel'`` must agree with ``method='fft'`` and with the
-    analytic phasor.
-
-    The Goertzel recurrence leaves ``s1`` aliasing ``s0`` after its final
-    shift, so the closing combination has to read ``s2`` — the state one step
-    back — and advance by the single sample the recurrence lags. Reading
-    ``s1`` instead collapses the result to ``s0*(1 - exp(-i w dt))``, which is
-    wrong in magnitude *and* phase, and no cross-mode comparison catches it
-    because both modes are not exercised against each other anywhere else.
-    """
+class TestRtsToPressureFftOnly:
+    """``rts_to_pressure`` accepts only ``method='fft'``; the removed
+    'goertzel' selector raises a typed error naming the removal."""
 
     @staticmethod
     def _tone(amp, phase, n_t=512, fs=1000.0, bin_index=8):
@@ -2973,23 +2961,19 @@ class TestRtsToPressureGoertzel:
         return {'p': p, 'dt': dt, 'ranges': np.array([1000.0]),
                 'time': t}, freq
 
-    def test_goertzel_recovers_the_analytic_phasor(self):
+    def test_fft_recovers_the_analytic_phasor(self):
         from uacpy.io.oalib_reader import rts_to_pressure
         amp, phase = 3.0, 0.700
         rts, freq = self._tone(amp, phase)
-        p, _ = rts_to_pressure(rts, freq, method='goertzel')
-        assert abs(p[0]) == pytest.approx(amp, rel=1e-6)
-        assert np.angle(p[0]) == pytest.approx(phase, abs=1e-6)
+        p, _ = rts_to_pressure(rts, freq, method='fft')
+        assert abs(p[0]) == pytest.approx(amp, rel=1e-4)
+        assert np.angle(p[0]) == pytest.approx(phase, abs=1e-4)
 
-    def test_goertzel_agrees_with_fft(self):
+    def test_goertzel_selector_is_removed(self):
         from uacpy.io.oalib_reader import rts_to_pressure
         rts, freq = self._tone(2.5, -1.1)
-        p_g, _ = rts_to_pressure(rts, freq, method='goertzel')
-        p_f, _ = rts_to_pressure(rts, freq, method='fft')
-        # The FFT path applies a Hann window, so the two agree to the window's
-        # own leakage on an on-bin tone rather than to float precision.
-        assert abs(p_g[0]) == pytest.approx(abs(p_f[0]), rel=1e-4)
-        assert np.angle(p_g[0]) == pytest.approx(np.angle(p_f[0]), abs=1e-4)
+        with pytest.raises(ConfigurationError, match='goertzel'):
+            rts_to_pressure(rts, freq, method='goertzel')
 
 
 class TestStagedBeamPatternNeedsTwoRows:
@@ -3198,3 +3182,26 @@ class TestATSSPPointLimit:
         import inspect
         assert 'reject_oversized_at_ssp' not in inspect.getsource(
             write_bellhop_env_file)
+
+
+def test_read_flp_accepts_list_directed_records_and_sorts(tmp_path):
+    """AT's own decks carry trailing commas and bare descriptive text on
+    scalar records ('9999,<TAB>! M'), which a list-directed READ accepts —
+    the reader must too — and the Fortran Sorts every source/receiver axis
+    after SubTab (misc/SourceReceiverPositions.f90:224,268), so axes come
+    back ascending whatever order the deck listed."""
+    from uacpy.io.oalib_reader import read_flp
+    import pathlib
+    sduct = pathlib.Path('uacpy/third_party/Acoustics-Toolbox/tests/'
+                         'sduct/sductK.flp')
+    if sduct.exists():
+        d = read_flp(str(sduct))   # used to raise: invalid literal '9999,'
+        assert np.all(np.diff(d['pos']['r']['z']) >= 0)
+    deck = tmp_path / 'unsorted.flp'
+    deck.write_text(
+        "'title'\n'R'\n9999,\t! M\n1\n0.0 /\n3\n20 1 5 km sorted after read\n"
+        "2\n100 25 /\n3\n4000 0 2000 /\n1\n0.0 /\n")
+    d = read_flp(str(deck))
+    assert np.all(np.diff(d['pos']['r']['r']) >= 0)
+    assert np.all(np.diff(d['pos']['s']['z']) >= 0)
+    assert np.all(np.diff(d['pos']['r']['z']) >= 0)

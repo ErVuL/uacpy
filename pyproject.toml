@@ -40,11 +40,14 @@ dependencies = [
     # >=2.0 for np.trapezoid (the 2.0 rename of np.trapz), used in
     # marine_mammal, bands, noise_synthesis and results.modes.
     "numpy>=2.0.0,<3.0",
-    "scipy>=1.8.0,<2.0",
-    "matplotlib>=3.5.0,<4.0",
+    # scipy/matplotlib/netCDF4 floors are each family's first NumPy-2-ABI
+    # release — older floors declare an environment that cannot import
+    # against the numpy>=2 floor above.
+    "scipy>=1.13.0,<2.0",
+    "matplotlib>=3.9.0,<4.0",
     # External ocean data
     "copernicusmarine>=1.3",
-    "netCDF4>=1.6",
+    "netCDF4>=1.7",
     "shapely>=2.0",
     "pyproj>=3.4",
     "tifffile>=2021.1",
@@ -76,8 +79,13 @@ version = { attr = "uacpy._version.__version__" }
 # Restrict discovery to the uacpy package tree; without an explicit include,
 # flat-layout discovery also sweeps root .py-bearing dirs (docs/, notebooks/,
 # data_cache/) into the wheel as importable top-level modules.
-include = ["uacpy*"]
+# ``namespaces = false`` is load-bearing: the default (true) treats every
+# directory as a namespace package, so discovery swept uacpy/bin, uacpy/examples,
+# the whole of uacpy/third_party (~150 dirs) and even uacpy_venv (matched by a
+# bare "uacpy*" glob) into the wheel — 222 packages instead of 12.
+include = ["uacpy", "uacpy.*"]
 exclude = ["uacpy.tests", "uacpy.tests.*"]
+namespaces = false
 
 # No native binaries are bundled as package-data. Every model binary
 # (OALIB/bellhopcuda/mpiramS/ramsurf/ramgeo, and the academic-licensed OASES)

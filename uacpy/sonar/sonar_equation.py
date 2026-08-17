@@ -403,6 +403,12 @@ def probability_of_detection_field(se_field, *, sigma_db) -> Field:
     ``SE = 0`` contour — consistent with a detection threshold defined
     at the ``P_D = 0.5`` operating point.
 
+    This is **not** the field form of
+    :func:`uacpy.sonar.detection.probability_of_detection` — that function
+    evaluates a different model, the Gaussian (Neyman-Pearson) detector
+    ``P_D = Q(Q^-1(P_F) - d')``, parameterised by a false-alarm rate and a
+    deflection rather than by signal excess and a fluctuation spread.
+
     Parameters
     ----------
     se_field : Field

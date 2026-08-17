@@ -148,4 +148,13 @@ __all__ = [
     'animate_field',
     'save_animation',
     'plot_time_snapshots',
+    # submodules
+    'animation',
+    'comms',
+    'environment',
+    'fields',
+    'maps',
+    'noise',
+    'rays_modes',
+    'signal',
 ]

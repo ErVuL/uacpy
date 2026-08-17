@@ -222,7 +222,15 @@ def _query_profile(ranges, values, query, method='linear'):
     if x.size == 1:
         out = np.full(rq.shape, float(y[0]))
     elif method == 'nearest':
-        idx = np.abs(x[:, None] - rq.ravel()[None, :]).argmin(0)
+        # searchsorted + midpoint comparison: same nearest-node answer as the
+        # abs-difference argmin, without materialising the n_nodes x
+        # n_queries cross-product (measured 6 GB at 20k x 20k). Ties at an
+        # exact midpoint go to the LEFT node, matching argmin(0)'s
+        # first-minimum rule on an ascending axis.
+        rq_flat = rq.ravel()
+        hi = np.clip(np.searchsorted(x, rq_flat), 1, x.size - 1)
+        lo = hi - 1
+        idx = np.where(rq_flat - x[lo] <= x[hi] - rq_flat, lo, hi)
         out = y[idx].reshape(rq.shape)
     elif method == 'linear':
         out = np.interp(rq, x, y)                    # constant extrapolation

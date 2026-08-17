@@ -77,7 +77,7 @@ def main():
         fields[label] = field
         meta = field.metadata
         print(
-            f"  {label:8s}  c₀={meta.get('c0'):6.1f} m/s  "
+            f"  {label:8s}  c₀={meta.get('pe_reference_speed'):6.1f} m/s  "
             f"dr={meta.get('dr'):7.2f} m  "
             f"dz={meta.get('dz'):6.3f} m"
         )
@@ -104,7 +104,7 @@ def main():
         )
         ax.set_title(
             f"{title}\n"
-            f"c₀={meta.get('c0'):.1f} m/s, "
+            f"c₀={meta.get('pe_reference_speed'):.1f} m/s, "
             f"dr={meta.get('dr'):.2f} m, dz={meta.get('dz'):.3f} m"
         )
         ax.set_xlabel('Range (km)')

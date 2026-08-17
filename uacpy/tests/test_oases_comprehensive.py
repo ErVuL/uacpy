@@ -1077,10 +1077,10 @@ class TestOasesDocDefects:
         """``cmax`` is a caller-settable knob defaulting to OASES' own
         no-upper-limit value 1e8 (unoast31.f:226), not a value derived from
         the SSP; only ``cmin`` tracks the profile."""
-        from uacpy.io.oases_writer import _oases_wavenumber_bounds
+        from uacpy.io.oases_writer import oases_wavenumber_bounds
         ssp = np.array([[0.0, 1500.0], [100.0, 1480.0]])
-        assert _oases_wavenumber_bounds(ssp) == (1480.0 * 0.9, 1e8)
-        assert _oases_wavenumber_bounds(ssp, cmax=1e9)[1] == 1e9
+        assert oases_wavenumber_bounds(ssp) == (1480.0 * 0.9, 1e8)
+        assert oases_wavenumber_bounds(ssp, cmax=1e9)[1] == 1e9
 
     def test_oast_writer_kwargs_are_all_reachable(self):
         """Every ``_OAST_KWARGS`` / ``_OASR_KWARGS`` key must be settable
@@ -1182,7 +1182,7 @@ class TestOasesUnwrittenOptionBlocks:
         assert set(_UNWRITTEN_OPTION_BLOCKS) == {
             'write_oast_input', 'write_oasp_input',
             'write_oasn_input', 'write_oasr_input',
-            'write_oassp_input',
+            'write_oassp_input', 'write_oass_input',
         }
 
     @pytest.mark.parametrize('options,contour', [

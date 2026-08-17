@@ -31,9 +31,12 @@ def synthesize_noise_from_psd(Pxx, Fxx, duration=1, scale=1, *,
     scale : float
         Scale factor applied to the output signal.
     n_fft : int, optional
-        IFFT chunk size (must be even, ≥ 4). Defaults to 65536.
-    sample_rate : int, optional
-        Output sample rate in Hz. Defaults to 2*Fxx[-1]..
+        IFFT chunk size. Defaults to 65536; must be a power of two in
+        [16, 262144] — values below 16 are reset to 65536, values above
+        262144 are clamped, and non-powers of two are rounded to the
+        closest power of two, each with a warning.
+    sample_rate : float, optional
+        Output sample rate in Hz. Defaults to 2*Fxx[-1].
     interp : {'linear', 'log', 'pchip', 'nearest'}, optional
         How to resample ``Pxx(Fxx)`` onto the FFT-native grid. ``'log'``
         interpolates ``log10(Pxx)`` vs ``log10(f)`` — recommended for
@@ -49,8 +52,10 @@ def synthesize_noise_from_psd(Pxx, Fxx, duration=1, scale=1, *,
         Time array in seconds.
     x : ndarray
         Generated signal array.
-    sample_rate : int
-        Sampling frequency in Hz.
+    sample_rate : float
+        Sampling frequency in Hz — the rate the time axis is built from
+        (equal to the ``sample_rate`` argument, or ``2*Fxx[-1]`` when that
+        was omitted).
 
     Examples
     --------
@@ -157,7 +162,7 @@ def synthesize_noise_from_psd(Pxx, Fxx, duration=1, scale=1, *,
 
         x_total[start_idx:end_idx] += chunk[: end_idx - start_idx] * scale
 
-    return t_total, x_total, int(sample_rate)
+    return t_total, x_total, float(sample_rate)
 
 
 def _resample_psd(Pxx, Fxx, f_target, method):
@@ -568,11 +573,16 @@ def fourier_synthesis(
     # Reshape to (Nfreq, -1) for processing. ``.copy()`` so the in-place
     # multiplications below do not mutate the caller's input through the
     # reshape view.
+    # astype(complex) rather than .copy(): the in-place phase rotations
+    # below assign complex values, and on a real-dtype array numpy keeps
+    # only the real part (a ComplexWarning, not an error), silently
+    # discarding the rotation.
     if pressure_freq.ndim == 1:
-        pressure_work = pressure_freq.reshape(-1, 1).copy()
+        pressure_work = pressure_freq.reshape(-1, 1).astype(complex)
     else:
         n_receivers = np.prod(original_shape[1:])
-        pressure_work = pressure_freq.reshape(Nfreq, n_receivers).copy()
+        pressure_work = pressure_freq.reshape(
+            Nfreq, n_receivers).astype(complex)
     if Tstart != 0.0:
         for irec in range(pressure_work.shape[1]):
             pressure_work[:, irec] = (pressure_work[:, irec] *

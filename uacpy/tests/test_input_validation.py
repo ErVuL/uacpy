@@ -692,14 +692,15 @@ def test_altimetry_nonnumeric_is_typed():
 
 
 def test_surface_source_warns_for_field_runs():
-    """A source at z=0 sits on the pressure-release surface (field ~0) — a
-    field run warns; a positive depth does not."""
+    """A source at z=0 sits ON Bellhop's top boundary: bellhop.f90:488-492
+    terminates every ray (DistBegTop <= 0), so the run is refused rather
+    than returning an all-NaN field; a positive depth runs clean."""
     env = uacpy.Environment(
         bathymetry=100.0, ssp=1500.0,
         bottom=uacpy.BoundaryProperties(sound_speed=1600.0, density=1.5,
                                         attenuation=0.5))
     rcv = uacpy.Receiver(depths=[50.0], ranges=[2000.0])
-    with pytest.warns(UserWarning, match="pressure-release sea surface"):
+    with pytest.raises(uacpy.ConfigurationError, match="top boundary"):
         Bellhop().compute_tl(env, uacpy.Source(depths=0.0, frequencies=200.0), rcv)
     with warnings.catch_warnings():
         warnings.simplefilter("error", UserWarning)
@@ -963,6 +964,25 @@ class TestExtendToUsesTheReadersOwnEpsilon:
         from uacpy.core.constants import AT_LAST_SSP_POINT_EPS_M
         assert AT_LAST_SSP_POINT_EPS_M == pytest.approx(1.1920929e-05, rel=1e-9)
 
+    def test_a_snap_that_would_cross_the_previous_sample_raises(self):
+        """The reader's window (1.19e-5 m) is wider than the legal minimum
+        depth step (1e-6 m), so a downward snap can land the moved sample at
+        or below ``depths[-2]``. The rebuilt profile goes through axis
+        validation, so that case is a typed error — never a silently
+        non-increasing depth axis."""
+        ssp = uacpy.core.SoundSpeedProfile.from_pairs(
+            np.array([[0.0, 1500.0], [10.0, 1500.0], [10.000002, 1500.0]]))
+        with pytest.raises(ConfigurationError, match='strictly increasing'):
+            ssp.extend_to(9.999999)
+
+    def test_a_snap_inside_the_window_still_returns_a_valid_profile(self):
+        ssp = uacpy.core.SoundSpeedProfile.from_pairs(
+            np.array([[0.0, 1500.0], [10.0, 1500.0], [10.000002, 1500.0]]))
+        out = ssp.extend_to(10.00001)
+        assert np.all(np.diff(out.depths) > 0)
+        assert float(out.depths[-1]) == pytest.approx(10.00001, abs=1e-12)
+        assert out.n_depths == 3
+
     def test_an_exact_match_is_a_no_op(self):
         base = 42.299996
         out = self._profile(base).extend_to(base)
@@ -984,3 +1004,106 @@ class TestExtendToUsesTheReadersOwnEpsilon:
         for model in (Kraken(verbose=False), Scooter(verbose=False)):
             tl = np.asarray(model.run(env, src, rcv).db)
             assert np.isfinite(tl).all(), f"{model.model_name} returned {tl}"
+
+
+# --- Silent-all-zero guards added by the 2026-08 audit ----------------------
+@pytest.mark.requires_binary  # constructs SPARC (resolves its binary)
+def test_sparc_refuses_empty_wavenumber_loop():
+    """A near-CW band at tank-scale range gives sparc.f90:116 Nk <= 0: the
+    march loop runs empty and every output would come back all-zero at
+    exit 0 — the wrapper must refuse the deck instead."""
+    from uacpy.models.sparc import SPARC
+    env = uacpy.Environment(
+        bathymetry=100.0, ssp=1500.0,
+        bottom=uacpy.BoundaryProperties(acoustic_type='rigid'))
+    src = uacpy.Source(depths=25.0, frequencies=50.0)
+    rcv = uacpy.Receiver(depths=[50.0], ranges=[2.0, 4.0])
+    model = SPARC(f_min=49.0, f_max=50.0, c_low=1400.0, c_high=1600.0,
+                  rmax_safety_margin=1.0)
+    with pytest.raises(ConfigurationError, match="wavenumber"):
+        model.run(env, src, rcv)
+
+
+@pytest.mark.requires_binary  # constructs SPARC (resolves its binary)
+def test_sparc_refuses_inverted_pulse_band():
+    """f_min >= f_max makes Nk negative through the same sparc.f90:116
+    formula; the constructor names the cause instead."""
+    from uacpy.models.sparc import SPARC
+    with pytest.raises(ConfigurationError, match="f_min < f_max"):
+        SPARC(f_min=200.0, f_max=50.0)
+    with pytest.raises(ConfigurationError, match="f_min > 0"):
+        SPARC(f_min=0.0)
+
+
+@pytest.mark.requires_binary
+@pytest.mark.requires_oases
+def test_oassp_rejects_complex_contour_options():
+    """A custom options string that leaves the complex frequency contour on
+    ('O', or no 'J' under automatic sampling — unoassp30.f:285-290, :983,
+    :382-385) writes a spectrum the time-series synthesis cannot undo."""
+    from uacpy.models.oases import OASSP
+    with pytest.raises(ConfigurationError, match="'O'"):
+        OASSP(correlation_length=5.0,
+              options='N J s O')._reject_unreadable_options()
+    with pytest.raises(ConfigurationError, match="'J'"):
+        OASSP(correlation_length=5.0,
+              options='N s')._reject_unreadable_options()
+    # The typed-flag default path always carries 'J' and never 'O'.
+    OASSP(correlation_length=5.0)._reject_unreadable_options()
+
+
+@pytest.mark.requires_binary  # constructs RAM (resolves its binary)
+def test_ram_broadband_grid_round_trips_the_request():
+    """The (fc, Q, T) inversion must reproduce every requested bin: odd
+    counts exactly, even counts as a superset (one extra bin at f_max+Δf) —
+    never the old lose-a-bin-and-shift-by-Δf/2 behaviour. Pinning both Q and
+    T alongside a frequency array is a contradiction and raises."""
+    from uacpy.models.ram import RAM as _RAM
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        for n in (8, 9, 2, 16):
+            req = np.linspace(100.0, 100.0 + 5.0 * (n - 1), n)
+            model = _RAM()
+            fc, q, t = model._resolve_broadband_grid(
+                uacpy.Source(depths=25.0, frequencies=req))
+            marched = model._broadband_frequencies(fc, q, t)
+            for f in req:
+                assert np.isclose(marched, f).any(), (n, f, marched)
+            assert marched.size <= req.size + 1
+    with pytest.warns(UserWarning, match="pinned"):
+        RAM(Q=2.0, T=10.0)._resolve_broadband_grid(
+            uacpy.Source(depths=25.0, frequencies=np.linspace(100, 110, 11)))
+
+
+@pytest.mark.requires_binary  # constructs Kraken (resolves its binary)
+def test_kraken_leaky_modes_keeps_c_high_verbatim():
+    """leaky_modes used to overwrite self.c_high with 1e9, breaking the
+    copy()/repr() verbatim-storage invariant and skipping validation; now
+    the sentinel is resolved at deck time and the contradiction raises."""
+    from uacpy.models.kraken import Kraken
+    with pytest.raises(ConfigurationError, match="leaky_modes"):
+        Kraken(c_high=1700.0, leaky_modes=True)
+    m = Kraken(leaky_modes=True)
+    assert m.c_high is None
+    assert m._effective_c_high() == 1e9
+    clone = m.copy(leaky_modes=False)
+    assert clone.c_high is None and clone._effective_c_high() is None
+
+
+@pytest.mark.requires_binary  # constructs Kraken (resolves its binary)
+def test_kraken_top_reflection_file_keeps_surface_roughness(tmp_path):
+    """The tabulated-top rewrite replaces only the boundary condition;
+    roughness still reaches SSP%sigma(1) (oalib_writer.py:860)."""
+    from uacpy.models.kraken import Kraken
+    from uacpy.core.surface import Surface
+    trc = tmp_path / 'top.trc'
+    trc.write_text('3\n0.0 1.0 180.0\n45.0 0.9 170.0\n90.0 0.8 160.0\n')
+    env = uacpy.Environment(
+        bathymetry=100.0, ssp=1500.0,
+        bottom=uacpy.BoundaryProperties(sound_speed=1600.0, density=1.5,
+                                        attenuation=0.5),
+        surface=Surface(properties=[uacpy.BoundaryProperties(
+            acoustic_type='vacuum', roughness=1.5)]))
+    projected = Kraken(top_reflection_file=trc)._project_environment(env)
+    assert projected.surface.properties[0].acoustic_type == 'file'
+    assert float(projected.surface.roughness) == 1.5

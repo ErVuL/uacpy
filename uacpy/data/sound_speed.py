@@ -34,7 +34,8 @@ from uacpy.core.acoustics import soundspeed_unesco, soundspeed_delgrosso
 from uacpy.core.environment import SoundSpeedProfile
 from uacpy.data._geo import (
     Coordinate, as_coordinate, normalize_lon, depth_to_pressure_dbar,
-    geodesic_waypoints, run_representative_indices, DEFAULT_MAX_TRANSECT_POINTS,
+    geodesic_waypoints, ring_offsets, run_representative_indices,
+    DEFAULT_MAX_TRANSECT_POINTS,
 )
 from uacpy.data._time import parse_date
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
@@ -122,7 +123,7 @@ def fetch_ssp(
             remediation=f"Use one of {sorted(_FORMULAS)}.",
         )
     lat, lon = as_coordinate(point)
-    depths, temp, sal = fetch_ts_profile(
+    depths, temp, sal, lat_idx, lon_idx = _ts_profile_with_cell(
         point, date=date, month=month, resolution=resolution, source=source,
         decade=decade, base_url=base_url, timeout=timeout, verbose=verbose,
     )
@@ -134,10 +135,12 @@ def fetch_ssp(
         f"levels, c=[{c.min():.1f}, {c.max():.1f}] m/s", verbose=verbose,
     )
     # Provenance: WOA23 is a climatology snapped to a grid cell — the actual
-    # "date" is a month/annual period, and the actual coordinates are the cell
-    # centre (which can be tens of km from the requested point, even on land).
+    # "date" is a month/annual period, and the actual coordinates are the
+    # centre of the cell the column was read from: the nearest cell, or the
+    # closest wet neighbour when the nearest is dry, so ``offset_km`` measures
+    # the real hop.
     period = _resolve_period(date, month)
-    _, _, lat_c, lon_c = _grid_index(lat, lon, resolution)
+    lat_c, lon_c = _cell_center(lat_idx, lon_idx, resolution)
     prov = DataProvenance(
         source=SOURCES['woa23'],
         data_date=(f"month {period:02d} (climatology)" if period
@@ -206,8 +209,15 @@ def fetch_ssp_transect(
     base_url: str = DEFAULT_BASE_URL,
     timeout: float = 60.0,
     verbose: Union[bool, str] = False,
+    seafloor=None,
 ) -> SoundSpeedProfile:
     """Range-dependent sound-speed profile along ``start`` → ``end``.
+
+    ``seafloor`` (a :class:`~uacpy.core.environment.Bathymetry`, optional)
+    supplies the local seafloor along the transect: each column is then
+    extended to *its own* seafloor depth (deep-gradient extrapolation,
+    :func:`extend_ssp_below_data`) before the columns are stacked, so a
+    shallower column is never flat-held inside its used water column.
 
     With ``n_points='auto'`` (default) the transect is sampled at the
     **distinct WOA23 cells** the great-circle crosses: the grid cell is the
@@ -234,6 +244,19 @@ def fetch_ssp_transect(
                   base_url=base_url, timeout=timeout, verbose=verbose)
         for la, lo in zip(lats, lons)
     ]
+    # Extend each column to its own local seafloor BEFORE stacking: the
+    # common-axis assembly flat-holds a shallower column below its deepest
+    # analysed level, and a single post-assembly extension repairs only the
+    # segment below the common axis — measured -24 to -68 m/s inside the
+    # used water column on a 3-column transect.
+    if seafloor is not None:
+        columns = [
+            extend_ssp_below_data(
+                col,
+                float(np.asarray(seafloor.eval(range=r)).flat[0]),
+                latitude=la)
+            for col, r, la in zip(columns, ranges_m, lats)
+        ]
     log_message(
         'sound_speed',
         f"WOA23 range-dependent SSP: {len(columns)} columns "
@@ -252,13 +275,21 @@ def assemble_range_dependent(columns, ranges_m) -> SoundSpeedProfile:
     to strictly increasing range, so a caller that supplies them out of order
     still gets a correctly-ordered range axis (the carriers assume ascending
     range). The columns' provenance is aggregated onto the assembled profile,
-    de-duplicated by source id.
+    de-duplicated by source id: one record survives per dataset, carrying the
+    **first** column's cell/date specifics — the per-column cells are not
+    enumerated on the assembled profile.
     """
     ranges = np.asarray(ranges_m, dtype=float)
     order = np.argsort(ranges, kind='stable')
     ranges = ranges[order]
     columns = [columns[i] for i in order]
-    z = max(columns, key=lambda p: p.depths[-1]).depths
+    # The union of every column's depth nodes: an axis taken from any ONE
+    # column drops the others' own nodes (their seafloor-extension samples
+    # included), and np.interp across the gaps re-flattens what the
+    # extension just fixed — measured -11 to -31 m/s. The union reproduces
+    # every column exactly (residual 0.0 across 68 real transects).
+    z = np.unique(np.concatenate([np.asarray(c.depths, dtype=float)
+                                  for c in columns]))
     data = np.column_stack([
         np.interp(z, col.depths, col.data[:, 0]) for col in columns
     ])
@@ -292,6 +323,32 @@ def fetch_ts_profile(
     WOA does not carry).
 
     See :func:`fetch_ssp` for the parameters; raises identically.
+    """
+    depths, temp, sal, _lat_idx, _lon_idx = _ts_profile_with_cell(
+        point, date=date, month=month, resolution=resolution, source=source,
+        decade=decade, base_url=base_url, timeout=timeout, verbose=verbose,
+    )
+    return depths, temp, sal
+
+
+def _ts_profile_with_cell(
+    point: Coordinate,
+    *,
+    date: Union[str, _dt.date, None] = None,
+    month: Optional[int] = None,
+    resolution: str = '1.00',
+    source: str = 'opendap',
+    decade: str = DEFAULT_DECADE,
+    base_url: str = DEFAULT_BASE_URL,
+    timeout: float = 60.0,
+    verbose: Union[bool, str] = False,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, int, int]:
+    """:func:`fetch_ts_profile` plus the grid cell the column actually came
+    from: ``(depths, temp, sal, lat_idx, lon_idx)``.
+
+    The returned indices are the wet cell the ring search settled on, which
+    differs from the nearest cell when a coastal request snapped onto land —
+    provenance stamping reads them so ``offset_km`` reports the real cell.
     """
     if resolution not in _GRIDS:
         raise ConfigurationError(
@@ -341,7 +398,7 @@ def fetch_ts_profile(
         temp = np.concatenate([temp, t_a[below]])
         sal = np.concatenate([sal, s_a[below]])
 
-    return depths, temp, sal
+    return depths, temp, sal, lat_idx, lon_idx
 
 
 _MONTHLY_MAX_DEPTH = 1500.0  # deepest level in WOA monthly/seasonal fields
@@ -371,16 +428,6 @@ def _resolve_period(date, month) -> int:
 _WET_CELL_SEARCH_RINGS = 2
 
 
-def _ring_offsets(radius: int):
-    """(d_lat, d_lon) offsets on the Chebyshev ring of the given radius,
-    ordered nearest-first by Euclidean distance in cells."""
-    out = [(dla, dlo)
-           for dla in range(-radius, radius + 1)
-           for dlo in range(-radius, radius + 1)
-           if max(abs(dla), abs(dlo)) == radius]
-    return sorted(out, key=lambda o: o[0] ** 2 + o[1] ** 2)
-
-
 def _nearest_wet_column(fetch, lat_idx, lon_idx, resolution):
     """``(depths, temp, sal, lat_idx, lon_idx)`` for the closest wet cell.
 
@@ -395,7 +442,7 @@ def _nearest_wet_column(fetch, lat_idx, lon_idx, resolution):
         return depths, temp, sal, lat_idx, lon_idx
 
     for radius in range(1, _WET_CELL_SEARCH_RINGS + 1):
-        for d_lat, d_lon in _ring_offsets(radius):
+        for d_lat, d_lon in ring_offsets(radius):
             i = lat_idx + d_lat
             if not 0 <= i < n_lat:
                 continue

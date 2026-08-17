@@ -3,7 +3,8 @@
 Turns a fetched sea state into the ``(range, height)`` altimetry array that
 ``Environment(altimetry=...)`` consumes for rough-surface scattering. The
 observed significant wave height ``Hs`` is inverted to the effective
-Pierson-Moskowitz wind ``U = √(Hs / 0.021)`` and handed to
+Pierson-Moskowitz wind ``U = √(Hs / 0.0214)`` (see :data:`_PM_HS_COEFF` for
+the sources) and handed to
 :func:`uacpy.core.ssp.generate_sea_surface`, so the realization reproduces the
 observed ``Hs`` regardless of whether the sea is fully developed. When no wave
 source is available it falls back to the fetched 10 m wind, scaled to the
@@ -17,6 +18,7 @@ from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.core.ssp import generate_sea_surface
 from uacpy._log import log_message
 from uacpy.data._geo import as_coordinate
+from uacpy.data._http import raise_substantive
 
 __all__ = ['fetch_sea_surface', 'hs_to_pm_wind', 'SEA_SURFACE_SOURCES']
 
@@ -114,8 +116,7 @@ def fetch_sea_surface(point, *, date, max_range, n_points=500, seed=None,
         log_message('wind', f"U10 {u10:.1f} m/s (nbs {backend}) → PM wind "
                     f"{u:.1f} m/s", verbose=verbose)
         return _surface(max_range, u, n_points, seed), 'nbs'
-    data_errs = [e for e in errors if isinstance(e, DataFetchError)]
-    raise (data_errs[0] if data_errs else errors[-1])
+    raise_substantive(errors)
 
 
 def _surface(max_range, wind_ms, n_points, seed):

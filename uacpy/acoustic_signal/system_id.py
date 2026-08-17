@@ -119,6 +119,20 @@ class FRF:
             "nperseg": 8192,
             "noverlap": 0,
         }
+        # 'fs' and 'scaling' are set internally at every welch/csd call site:
+        # the sample rate is compute()'s sample_rate argument, and the spectral
+        # scaling is fixed to 'density' — the FRF is a ratio of cross- to
+        # auto-spectra, so any common Welch scaling cancels and cannot change
+        # the result. Letting either through would collide with the internal
+        # keyword and die in scipy with a bare TypeError.
+        reserved = {"fs", "scaling"} & set(kwargs)
+        if reserved:
+            raise ConfigurationError(
+                f"FRF: {sorted(reserved)} cannot be passed as Welch options — "
+                "the sample rate is the sample_rate argument of compute(), and "
+                "the spectral scaling is fixed to 'density' internally (the "
+                "transfer function is a spectral ratio, so a common scaling "
+                "cancels).")
         self.params.update(kwargs)
         self.method = method
         self.estimator = estimator
@@ -241,7 +255,10 @@ class FRF:
 
             tf_list.append(tf_i)
 
-        # Average across measurements; every method returns the same grid.
+        # Average across measurements. 'welch', 'ls_fir' and 'p_etfe' share
+        # the nperseg rfft grid (k*fs/nperseg); 'etfe' returns the full-record
+        # rfft grid (k*fs/len(x)). Within one call all rows have the same
+        # length, so every measurement lands on the same grid either way.
         freqs = freqs_i
         tf = np.mean(tf_list, axis=0)
 
@@ -383,7 +400,11 @@ class FRF:
         Returns
         -------
         freqs : ndarray
-            Array of frequencies (Hz).
+            Array of frequencies (Hz): the rfft grid of the whole record,
+            ``k * sample_rate / len(x)`` up to Nyquist. This is finer than
+            the ``nperseg`` grid that 'welch', 'ls_fir' and 'p_etfe' share —
+            the ETFE spends one raw rfft bin per frequency, so its grid is
+            set by the record length, not by ``nperseg``.
         tf : ndarray
             Complex transfer function.
         """
@@ -541,8 +562,9 @@ class FRF:
             self.Minfo, self.Vinfo = _info_matrices(u, y, N, m)
             g = np.linalg.solve(self.Minfo, self.Vinfo)
 
-        # Frequency response on the same rfft grid the other methods return,
-        # so an ls_fir result lines up bin-for-bin with a welch/etfe one.
+        # Frequency response on the nperseg rfft grid, so an ls_fir result
+        # lines up bin-for-bin with a welch or p_etfe one ('etfe' alone uses
+        # the full-record grid instead).
         freqs = np.fft.rfftfreq(int(self.params["nperseg"]), d=1.0 / sample_rate)
         _, h = _sig.freqz(g, worN=freqs, fs=sample_rate)
 

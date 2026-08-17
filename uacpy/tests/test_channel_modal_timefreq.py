@@ -84,6 +84,18 @@ class TestModal:
         vg = modal_group_velocity(f, kr)
         assert np.allclose(vg, c, rtol=1e-6)
 
+    def test_group_velocity_of_lossy_modes_uses_re_kr(self):
+        """Complex wavenumbers (KRAKENC lossy modes) are handled via the
+        Re(k_r) convention: same answer as the real part alone, with no
+        ComplexWarning."""
+        f = np.linspace(50, 500, 50)
+        kr = 2 * np.pi * f / 1500.0
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            vg = modal_group_velocity(f, kr + 2.5e-4j)
+        np.testing.assert_array_equal(vg, modal_group_velocity(f, kr))
+        assert np.allclose(vg, 1500.0, rtol=1e-6)
+
     def test_warp_unwarp_roundtrip(self):
         # Band-limited modal-like transient (warping targets dispersive arrivals).
         n = 1024

@@ -674,8 +674,8 @@ correlation gain is what rejects a narrowband interferer.
 
 The module is `uacpy.comms.dsss`; the spreading function is `comms.spread`.
 `uacpy.acoustic_signal.sequences.mseq` is the sibling generator keyed by
-preset polynomials rather than explicit taps — see [signal
-processing](signal.md).
+preset polynomials rather than explicit taps, with the same chip polarity
+(bit 0 → +1, bit 1 → −1) — see [signal processing](signal.md).
 
 ---
 

@@ -15,7 +15,7 @@ typed failure mode.
 import functools
 import struct
 import warnings
-from typing import Tuple
+from typing import Optional, Tuple
 
 import numpy as np
 
@@ -64,6 +64,35 @@ def _bound_counts(filepath, file_size, min_item_bytes, **counts):
         )
 
 
+def list_directed_int(line: str) -> int:
+    """First value of a list-directed integer READ.
+
+    A list-directed scalar READ consumes the first separator-delimited token
+    (separators: whitespace and commas) and ignores the record's remainder,
+    so ``'9999,\t! M'`` (AT tests/sduct/sductK.flp:3) and
+    ``'727  NUMBER OF ELEMENTS'`` (tests/3DAtlantic/lant.flp:414) are both
+    valid records. ``int()`` on the raw line rejects both.
+    """
+    tokens = strip_fortran_comment(line).replace(',', ' ').split()
+    if not tokens:
+        raise FileFormatError(
+            f"list-directed integer read on an empty record: {line!r}")
+    return int(tokens[0])
+
+
+def fortran_float(token) -> float:
+    """``float()`` accepting Fortran 'D' exponents (``'1.0D+00'``).
+
+    List-directed WRITEs emit them for double precision and list-directed
+    READs accept them (RefCoef.f90:53, bdryMod.f90:195), so the text
+    readers must too.
+    """
+    try:
+        return float(token)
+    except ValueError:
+        return float(str(token).replace('D', 'E').replace('d', 'e'))
+
+
 def typed_format_error(reader):
     """Decorator: surface a reader's raw parse/truncation exceptions as a typed
     :class:`~uacpy.core.exceptions.FileFormatError`.
@@ -80,6 +109,13 @@ def typed_format_error(reader):
     def wrapper(*args, **kwargs):
         try:
             return reader(*args, **kwargs)
+        except FileNotFoundError as exc:
+            raise FileFormatError(
+                f"{reader.__name__}: file not found: "
+                f"{exc.filename or (args[0] if args else '<stream>')}.",
+                remediation="Check the path; for a model output, the run "
+                            "may have failed before writing this file.",
+            ) from exc
         except PARSE_ERRORS as exc:
             target = args[0] if args else '<stream>'
             raise FileFormatError(
@@ -121,6 +157,64 @@ def strip_fortran_quotes(line: str) -> str:
         if end > start:
             return line[start + 1:end]
     return strip_fortran_comment(line)
+
+
+def take_tokens(tokens, cursor: int, n: int, what: str, source) -> Tuple[list, int]:
+    """Consume ``n`` tokens of a flat token stream starting at ``cursor``.
+
+    The reader for a free ``fscanf``-style token stream (MATLAB's
+    ``read_ts.m``, the ``.rts`` payload): line breaks carry no meaning at
+    all, so the caller tokenises the whole file once and this walks it.
+    Returns ``(tokens[cursor:cursor + n], cursor + n)`` and raises
+    :class:`FileFormatError` when the stream is too short.
+    """
+    end = cursor + n
+    if end > len(tokens):
+        raise FileFormatError(
+            f"{source}: token stream ended while reading {what} — needed "
+            f"{n} values, found {len(tokens) - cursor}.",
+            remediation="The file is truncated or not the expected format; "
+                        "verify it was written completely.",
+        )
+    return tokens[cursor:end], end
+
+
+def read_list_directed_values(fid, n: int, what: str, source,
+                              first_line: Optional[str] = None) -> np.ndarray:
+    """Consume the ``n`` values of one list-directed ``READ(unit, *) x(1:n)``.
+
+    A whole-vector list-directed READ keeps consuming records until ``n``
+    values have been read, then skips the remainder of the final record —
+    the next READ starts on a fresh record. Values may therefore wrap
+    across any number of lines (``Bellhop/sspMod.f90:417,428``,
+    ``misc/RefCoef.f90:53``), and several may share one line. Separators
+    are whitespace and commas; ``D`` exponents are accepted; a trailing
+    ``! …`` comment ends a record's values.
+
+    ``what`` and ``source`` name the record and file for the
+    :class:`FileFormatError` raised when the file ends short of ``n``.
+    ``first_line`` is a record the caller already read from ``fid`` (to
+    detect EOF or a count); it is consumed before any further ``readline``.
+    """
+    values: list = []
+    pending = first_line
+    while len(values) < n:
+        if pending is not None:
+            line, pending = pending, None
+        else:
+            line = fid.readline()
+        if line == '':
+            raise FileFormatError(
+                f"{source}: file ended while reading {what} — expected "
+                f"{n} values, found {len(values)}.",
+                remediation="The file is truncated or not the expected "
+                            "format; verify it was written completely.",
+            )
+        for tok in strip_fortran_comment(line).replace(',', ' ').split():
+            if len(values) >= n:
+                break
+            values.append(fortran_float(tok))
+    return np.array(values, dtype=float)
 
 
 _ENDIAN_WARN_EMITTED = False
@@ -173,26 +267,6 @@ def detect_endian(first4: bytes, source: str = '_fortran_helpers') -> str:
         )
     _warn_non_little_endian('big' if chosen == '>' else 'little', source)
     return chosen
-
-
-def read_fortran_record_marker(f, endian: str = '<') -> int:
-    """Read a 4-byte Fortran unformatted record-length marker.
-
-    Used by Fortran sequential-unformatted record framing
-    ``[len][payload][len]``.
-
-    Parameters
-    ----------
-    f : file object (binary mode)
-    endian : str, optional
-        '<' (little-endian, default) or '>' (big-endian). Pass the
-        value returned by :func:`detect_endian` after a one-time probe
-        of the file head.
-    """
-    marker_bytes = f.read(4)
-    if len(marker_bytes) < 4:
-        raise FileFormatError("Unexpected end of file while reading record marker")
-    return struct.unpack(endian + 'i', marker_bytes)[0]
 
 
 def read_fortran_record(f, fmt=None, raw=False, endian='<'):
@@ -265,6 +339,14 @@ def _read_vector_values(fid, Nx: int) -> Tuple[np.ndarray, bool]:
     records until ``Nx`` values have been read, or until a ``/`` terminates the
     read early. Returns the values collected and whether a ``/`` ended them.
     """
+    def _take(dest, text):
+        # Commas are value separators to a list-directed READ, and tokens
+        # past the Nx-th are the record remainder the READ never looks at.
+        for tok in text.replace(',', ' ').split():
+            if len(dest) >= Nx:
+                break
+            dest.append(fortran_float(tok))
+
     values = []
     while len(values) < Nx:
         line = fid.readline()
@@ -272,11 +354,10 @@ def _read_vector_values(fid, Nx: int) -> Tuple[np.ndarray, bool]:
             break
         line = strip_fortran_comment(line)
         if '/' in line:
-            head = line.split('/', 1)[0]
-            values.extend(float(tok) for tok in head.split())
-            return np.array(values[:Nx], dtype=float), True
-        values.extend(float(tok) for tok in line.split())
-    return np.array(values[:Nx], dtype=float), False
+            _take(values, line.split('/', 1)[0])
+            return np.array(values, dtype=float), True
+        _take(values, line)
+    return np.array(values, dtype=float), False
 
 
 def read_vector(fid) -> Tuple[np.ndarray, int]:
@@ -287,6 +368,11 @@ def read_vector(fid) -> Tuple[np.ndarray, int]:
     followed by ``SubTab`` (``misc/subtabulate.f90``): a list-directed
     ``READ`` of ``Nx`` values that continues across records until ``Nx`` are
     consumed, with ``/`` terminating early to trigger a generated vector.
+    AT then calls ``Sort`` on the result
+    (``SourceReceiverPositions.f90:224,268``), so the solver always computes
+    on an ascending axis whatever order the deck listed. This function does
+    **not** sort — callers that mirror an AT axis apply ``np.sort``
+    themselves (see ``oalib_reader``'s position readers).
     ``ReadVector`` pre-fills ``x(2)`` and ``x(3)`` with ``-999.9``
     (``SourceReceiverPositions.f90:219-220``) and ``SubTab`` generates only
     where those sentinels survive the read — never for ``Nx < 3``, and never
@@ -341,7 +427,7 @@ def read_vector(fid) -> Tuple[np.ndarray, int]:
     >>> print(x)
     [   0.  250.  500.  750. 1000.]
     """
-    Nx = int(strip_fortran_comment(fid.readline()))
+    Nx = list_directed_int(fid.readline())
     if Nx <= 0:
         return np.array([]), Nx
 

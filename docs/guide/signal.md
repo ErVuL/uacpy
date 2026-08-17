@@ -85,7 +85,7 @@ the signal.
 | `gaussian_pulse(time, delay, duration)` | `s` | `exp(−((t − delay)/duration)²)` |
 | `nwave(time, frequency)` | `s` | `sin(ωt) − ½sin(2ωt)`, forced to zero outside `[0, 1/f]` |
 | `sparc_pulse(t, omega, pulse_type)` | `(s, title)` | the 11-shape SPARC library; `omega` is **rad/s**, and the second return is the shape's name |
-| `mseq(m)` | `s` | maximum-length sequence, `2**m − 1` chips of ±1, `2 ≤ m ≤ 15` |
+| `mseq(m)` | `s` | maximum-length sequence, `2**m − 1` chips of ±1 (standard BPSK mapping bit 0 → +1, bit 1 → −1, the same polarity as `comms.m_sequence`), `2 ≤ m ≤ 15` |
 | `bpsk_modulate(chips, fc, sample_rate, chips_per_sec)` | `s` | one carrier cycle-block per chip; requires an integer `sample_rate / chips_per_sec` |
 | `make_mseq_probe(fmin, fmax, sample_rate, T_tot)` | `probe` | 0.2 s leader + whole periods of `mseq(10)`, BPSK'd at `(fmin + fmax)/2`, zero-filled to exactly `round(T_tot · sample_rate)` samples |
 

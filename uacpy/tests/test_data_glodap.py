@@ -137,12 +137,14 @@ def test_ph_missing_cache_names_install_flag(tmp_path, monkeypatch):
 # ── absorption integration ────────────────────────────────────────────────────
 
 def test_with_absorption_uses_glodap_ph(full_cache):
-    # A cached GLODAP grid replaces the default pH=8.1 with the real surface
-    # value (8.10 here) and stamps 'glodap' provenance.
+    # A cached GLODAP grid replaces the default pH=8.1 with the value at the
+    # Francois-Garrison nominal-row depth (the column mid-depth — the same
+    # level its T/S row comes from; 8.05 here), and stamps 'glodap'
+    # provenance.
     env = data.fetch_environment((30.5, -40.5), ssp_sources='local',
                                  bottom_sources='grainsize',
                                  with_absorption=True)
-    assert env.absorption.pH == pytest.approx(8.10)
+    assert env.absorption.pH == pytest.approx(8.05, abs=0.01)
     assert 'glodap' in [s.source.id for s in env.data_sources]
 
 

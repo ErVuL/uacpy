@@ -22,7 +22,9 @@ from scipy.signal import get_window
 
 from uacpy.core.constants import DEFAULT_SOUND_SPEED
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.core._beamforming import loaded_inverse, quadratic_form
 from uacpy._log import log_message
+from uacpy.acoustic_signal._signal_validate import require_finite_signal
 
 BeamformResult = namedtuple("BeamformResult", "snr angles peak_snr")
 
@@ -61,6 +63,10 @@ def steering_vectors(positions_m, angles_deg, frequency: float,
 def sample_covariance(snapshots, *, diagonal_loading: float = 0.0):
     """Spatial covariance ``R = <x x^H>`` from snapshots.
 
+    A non-finite snapshot (dead hydrophone) is refused here — one NaN
+    poisons every covariance entry and the downstream Bartlett surface
+    would come back all-NaN with no diagnostic.
+
     Parameters
     ----------
     snapshots : ndarray
@@ -73,7 +79,8 @@ def sample_covariance(snapshots, *, diagonal_loading: float = 0.0):
     ndarray
         Hermitian covariance matrix ``(n_elements, n_elements)``.
     """
-    x = np.asarray(snapshots, dtype=complex)
+    x = require_finite_signal(np.asarray(snapshots, dtype=complex),
+                              "sample_covariance")
     if x.ndim != 2:
         raise ConfigurationError("sample_covariance: snapshots must be 2-D (N, snaps)")
     n, m = x.shape
@@ -90,7 +97,9 @@ def bartlett_spectrum(R, steering):
     :func:`steering_vectors` — one steering vector per scan angle.
     """
     e = np.asarray(steering, dtype=complex)
-    return np.real(np.einsum("ai,ij,aj->a", e.conj(), R, e))
+    # The shared Bartlett/MVDR core (core/_beamforming): one einsum for all
+    # three beamforming surfaces in the package.
+    return quadratic_form(R, e)
 
 
 def _powerless_covariance(R, caller: str) -> bool:
@@ -130,14 +139,10 @@ def mvdr_spectrum(R, steering, *, diagonal_loading: float = 1e-6):
     see :func:`_powerless_covariance`.
     """
     R = np.asarray(R, dtype=complex)
-    n = R.shape[0]
     e = np.asarray(steering, dtype=complex)
     if _powerless_covariance(R, "mvdr_spectrum"):
         return np.full(e.shape[0], np.nan)
-    if diagonal_loading > 0.0:
-        R = R + diagonal_loading * (np.trace(R).real / n) * np.eye(n)
-    Rinv = np.linalg.inv(R)
-    denom = np.real(np.einsum("ai,ij,aj->a", e.conj(), Rinv, e))
+    denom = quadratic_form(loaded_inverse(R, diagonal_loading), e)
     # R carries power and diagonal_loading > 0, so R is positive-definite and
     # denom > 0. denom -> 0 only for a singular/rank-deficient R with no
     # loading, where 1/denom -> +inf is the honest degenerate answer (a steering
@@ -260,6 +265,7 @@ def beamform(
     """
     if angles is None:
         angles = np.arange(-90, 91, 1)
+    pressure = require_finite_signal(pressure, "beamform")
     e = steering_vectors(phone_coords, angles, frequency, c)
     # Matched filter, the same Hermitian form bartlett/mvdr/music_spectrum use.
     beamformed = e.conj() @ pressure

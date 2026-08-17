@@ -248,7 +248,9 @@ def test_signal_symbols_resolve():
     import uacpy
     for name in ('lfm_chirp', 'hfm_chirp', 'tone_burst', 'gaussian_pulse',
                  'ricker_wavelet', 'add_noise', 'make_bandlimited_noise',
-                 'psd', 'ppsd', 'sel', 'spectrogram'):
+                 'psd', 'ppsd', 'sel', 'spectrogram',
+                 'SpectrogramResult', 'CWTResult', 'WignerVilleResult',
+                 'FKResult', 'TauPResult', 'RadonResult'):
         assert hasattr(uacpy.acoustic_signal, name), \
             f"uacpy.acoustic_signal.{name} missing"
 
@@ -585,3 +587,120 @@ class TestDecidecadePartialBandsAreNaN:
             centres, levels = decidecade_band_levels(psd_flat, f)
         lo, ctr, hi = decidecade_bands(f.min(), f.max())
         assert centres.shape == levels.shape == ctr.shape
+
+
+class TestWaveformDegenerateInputs:
+    """Every generator raises a typed ConfigurationError on degenerate
+    parameters and accepts plain lists for time vectors."""
+
+    def test_hfm_chirp_degenerate_parameters_raise(self):
+        from uacpy.core.exceptions import ConfigurationError
+        with pytest.raises(ConfigurationError):   # equal bounds divide by zero
+            hfm_chirp(1000.0, 1000.0, 0.1, 8000.0)
+        with pytest.raises(ConfigurationError):   # zero lower bound
+            hfm_chirp(0.0, 500.0, 0.1, 8000.0)
+        with pytest.raises(ConfigurationError):   # zero upper bound
+            hfm_chirp(500.0, 0.0, 0.1, 8000.0)
+        with pytest.raises(ConfigurationError):   # non-positive duration
+            hfm_chirp(100.0, 500.0, 0.0, 8000.0)
+
+    def test_hfm_chirp_down_sweep_still_allowed(self):
+        t, s = hfm_chirp(2000.0, 100.0, 0.1, 8000.0)
+        assert len(t) == len(s) > 0 and np.all(np.isfinite(s))
+
+    def test_chirps_raise_instead_of_returning_empty(self):
+        from uacpy.core.exceptions import ConfigurationError
+        with pytest.raises(ConfigurationError):
+            lfm_chirp(100.0, 500.0, -1.0, 8000.0)
+        with pytest.raises(ConfigurationError):   # under one sample long
+            lfm_chirp(100.0, 500.0, 1e-6, 8000.0)
+        with pytest.raises(ConfigurationError):
+            tone_burst(100.0, 0, 8000.0)
+
+    def test_lfm_equal_bounds_is_a_pure_tone(self):
+        t, s = lfm_chirp(500.0, 500.0, 0.1, 8000.0)
+        np.testing.assert_allclose(s, np.sin(2 * np.pi * 500.0 * t))
+
+    def test_pulses_reject_degenerate_parameters(self):
+        from uacpy.core.exceptions import ConfigurationError
+        from uacpy.acoustic_signal.waveforms import nwave, sparc_pulse
+        time = np.linspace(0.0, 0.1, 64)
+        with pytest.raises(ConfigurationError):
+            nwave(time, 0.0)
+        with pytest.raises(ConfigurationError):
+            gaussian_pulse(time, 0.05, 0.0)
+        with pytest.raises(ConfigurationError):
+            ricker_wavelet(time, 0.0)
+        with pytest.raises(ConfigurationError):
+            sparc_pulse(time, 0.0, "R")
+
+    def test_time_vector_functions_accept_lists(self):
+        from uacpy.acoustic_signal.waveforms import nwave, sparc_pulse
+        tl = [0.0, 0.001, 0.002, 0.005]
+        assert ricker_wavelet(tl, 100.0).shape == (4,)
+        assert gaussian_pulse(tl, 0.002, 0.001).shape == (4,)
+        assert nwave(tl, 100.0).shape == (4,)
+        assert sparc_pulse(tl, 2 * np.pi * 100.0, "R")[0].shape == (4,)
+
+
+def test_synthesize_noise_returns_the_rate_the_time_axis_uses():
+    """The returned sample rate is the float rate the time axis was built
+    from, also when the default 2*Fxx[-1] is not an integer."""
+    from uacpy.acoustic_signal.noise_synthesis import synthesize_noise_from_psd
+    f = np.array([1.0, 10.3])
+    t, x, fs = synthesize_noise_from_psd(
+        np.array([1e-6, 1e-6]), f, duration=0.5,
+        rng=np.random.default_rng(0))
+    assert isinstance(fs, float) and fs == 2 * 10.3
+    assert abs(1.0 / (t[1] - t[0]) - fs) < 1e-9
+
+
+class TestFRFReservedKwargs:
+    """Welch options that the FRF sets internally are rejected typed, not
+    left to die in scipy as a bare TypeError."""
+
+    def test_scaling_and_fs_raise_configurationerror(self):
+        from uacpy.core.exceptions import ConfigurationError
+        from uacpy.acoustic_signal.system_id import FRF
+        with pytest.raises(ConfigurationError, match="scaling"):
+            FRF(method="welch", scaling="spectrum")
+        with pytest.raises(ConfigurationError, match="fs"):
+            FRF(method="welch", fs=48_000.0)
+
+    def test_legitimate_welch_kwargs_still_pass_through(self):
+        from uacpy.acoustic_signal.system_id import FRF
+        rng = np.random.default_rng(2)
+        x = rng.standard_normal(8192)
+        y = np.convolve(x, [1.0, 0.5], mode="same")
+        freqs, tf = FRF(method="welch", nperseg=1024,
+                        window="hamming").compute(x, y, 8000.0)
+        assert freqs.size == 513 and np.all(np.isfinite(tf))
+
+    def test_etfe_grid_is_the_full_record_grid(self):
+        from uacpy.acoustic_signal.system_id import FRF
+        rng = np.random.default_rng(3)
+        x = rng.standard_normal(16384)
+        y = np.convolve(x, [1.0, 0.5], mode="same")
+        f_etfe, _ = FRF(method="etfe").compute(x, y, 8000.0)
+        f_welch, _ = FRF(method="welch").compute(x, y, 8000.0)
+        np.testing.assert_allclose(
+            f_etfe, np.fft.rfftfreq(x.size, d=1 / 8000.0))
+        assert f_welch.size == 8192 // 2 + 1      # the nperseg grid
+
+
+def test_mseq_polarity_matches_dsss_m_sequence():
+    """Both m-sequence generators use the standard BPSK mapping
+    s = 1 - 2*bit (bit 0 -> +1, bit 1 -> -1): a full period sums to -1
+    (2**(m-1) ones map to -1), and despreading with either family's code
+    keeps the symbol sign."""
+    from uacpy.acoustic_signal.sequences import mseq
+    from uacpy.comms.dsss import m_sequence, spread, despread
+    s = mseq(5)
+    d = m_sequence(5, [5, 2])
+    assert s.sum() == -1 and d.sum() == -1
+    # two-valued periodic autocorrelation survives the mapping
+    ac = np.array([np.dot(s, np.roll(s, k)) for k in range(1, 31)])
+    assert np.all(ac == -1)
+    syms = np.array([1.0, -1.0, 1.0])
+    rec = despread(spread(syms, s), s)
+    np.testing.assert_allclose(rec.real, syms, atol=1e-12)

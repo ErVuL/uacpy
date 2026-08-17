@@ -590,23 +590,47 @@ class TestRangeDependentElasticMesh:
     _RCV = staticmethod(lambda: Receiver(depths=np.linspace(5.0, 380.0, 60),
                                          ranges=np.linspace(100.0, 20000.0, 100)))
 
-    def test_mesh_is_sized_on_the_shear_speed(self):
-        """``_fixed_mesh_points`` must mesh the elastic medium on ``cs``, not
-        ``cp`` — the number AT compares against is ~8x larger."""
+    def test_auto_mesh_defers_to_kraken_per_profile(self, tmp_path):
+        """The automatic path writes ``NG=0`` on every medium line: the
+        reader sizes each medium of each profile itself — on the shear
+        speed wherever one is set (``misc/ReadEnvironmentMod.f90:99-110``)
+        — and the ``.mod`` record length carries no mesh term
+        (``kraken.f90:587``), so no shared padded count is pinned across
+        profiles."""
+        from uacpy.io.oalib_writer import write_multi_profile_env
         model = Kraken(verbose=False)
         env = self._env([0.0, 0.0, 400.0, 600.0])
-        segments, _, _, max_total_depth = model._segment_env_for_field(
+        segments, _, _, _max_total_depth = model._segment_env_for_field(
             model._project_environment(env))
-        n = model._fixed_mesh_points(segments, max_total_depth, 50.0)
-        # AT: Nneeded = span / (c / f / 20) per medium, fataling below
-        # Nneeded/2. The seabed media span 400.1 - 100 m at the median shear
-        # speed of 200 m/s, so AT wants 1500 points.
-        assert n >= 1500, (
-            f"mesh of {n} points is below AT's 'Mesh is too coarse' floor for "
-            f"a 200 m/s shear medium at 50 Hz")
-        # Each medium class is bounded by its own span, so the shared value
-        # tracks AT's own number instead of over-meshing every medium.
-        assert n < 2 * 1500, f"mesh of {n} points over-shoots AT's 1500"
+        assert model._multi_profile_n_mesh(segments, 50.0) == 0
+
+        out = tmp_path / 'auto.env'
+        write_multi_profile_env(out, segments, self._SRC(), self._RCV(),
+                                n_mesh=model._multi_profile_n_mesh(
+                                    segments, 50.0))
+        ngs = [int(ln.split()[0]) for ln in out.read_text().splitlines()
+               if len(ln.split()) == 3 and ln.split()[0].isdigit()]
+        assert len(ngs) >= 2 * len(segments), f"mesh lines missing: {ngs}"
+        assert set(ngs) == {0}, (
+            f"expected NG=0 on every mesh line, got {sorted(set(ngs))}")
+
+    def test_an_explicit_n_mesh_round_trips_to_every_profile(self, tmp_path):
+        """A user-pinned ``n_mesh`` is still written verbatim on every
+        medium line of every profile."""
+        from uacpy.io.oalib_writer import write_multi_profile_env
+        model = Kraken(n_mesh=2000, verbose=False)
+        env = self._env([0.0, 0.0, 400.0, 600.0])
+        segments, _, _, _max_total_depth = model._segment_env_for_field(
+            model._project_environment(env))
+        out = tmp_path / 'pinned.env'
+        write_multi_profile_env(out, segments, self._SRC(), self._RCV(),
+                                n_mesh=model._multi_profile_n_mesh(
+                                    segments, 50.0))
+        ngs = [int(ln.split()[0]) for ln in out.read_text().splitlines()
+               if len(ln.split()) == 3 and ln.split()[0].isdigit()]
+        assert len(ngs) >= 2 * len(segments), f"mesh lines missing: {ngs}"
+        assert set(ngs) == {2000}, (
+            f"pinned n_mesh did not round-trip: {sorted(set(ngs))}")
 
     def test_top_reflection_file_reaches_the_range_dependent_deck(self,
                                                                   tmp_path):
@@ -673,15 +697,19 @@ class TestRangeDependentElasticMesh:
         assert max(t for t, _ in media) == pytest.approx(50.0)
         assert at_mesh_floor(media, 100.0) == 33
 
-    def test_fluid_bottom_mesh_is_unchanged(self):
-        """The shear term must not inflate the mesh for a fluid seabed."""
+    def test_fluid_bottom_pinned_floor_meshes_on_cp(self):
+        """For a fluid seabed the pinned-mesh floor is measured on the
+        compressional speed — the shear term must not inflate it."""
+        from uacpy.io.oalib_writer import at_mesh_floor
         model = Kraken(verbose=False)
-        segments, _, _, max_total_depth = model._segment_env_for_field(
+        segments, _, _, _max_total_depth = model._segment_env_for_field(
             model._project_environment(self._env([0.0, 0.0, 0.0, 0.0])))
-        # A fluid seabed meshes on its compressional speed, so AT's own
-        # requirement here is ~270 points; 500 is ``_fixed_mesh_points``'
-        # own ``max(500, ...)`` floor, not a number the environment drove.
-        assert model._fixed_mesh_points(segments, max_total_depth, 50.0) == 500
+        media = model._multi_profile_media(segments)
+        # With every shear speed at 0 the floor is driven by the 400 m water
+        # column at 1485 m/s — Nneeded = int(20 * 400 * 50 / 1485) = 269,
+        # rejected below 269 // 2 — not by the 200 m/s shear number the
+        # elastic variant of this seabed produces (750).
+        assert at_mesh_floor(media, 50.0) == 134
 
     @pytest.mark.slow
     def test_mixed_fluid_elastic_bottom_runs(self):
@@ -1155,92 +1183,19 @@ class TestResolvedPhaseSpeedBoundsMetadata:
             assert described[key]['description']
 
 
-class TestReadModesAsc:
-    """``read_modes_asc`` parses the ``.moa`` complex records.
+class TestReadModesNonBinaryRejected:
+    """The binary direct-access ``.mod`` is the only mode format any AT
+    program writes; the guessed-layout ``.moa`` ASCII reader was removed and
+    a non-``.mod`` path is a typed :class:`FileFormatError`."""
 
-    ``read_modes_asc.m:35,52`` reads them with ``fscanf(fid, '%f', [2, n])``
-    and MATLAB fills that matrix column-major, so the token stream is
-    ``re im re im …`` — interleaved pairs, not a real block followed by an
-    imaginary block. Reading them as blocks silently returns different
-    wavenumbers and mode shapes. No AT program writes ``.moa``, so the file
-    here is hand-built.
-    """
-
-    NTOT, M = 5, 3
-    Z = np.array([0.0, 25.0, 50.0, 75.0, 100.0])
-    K = np.array([1.0 + 0.1j, 2.0 + 0.2j, 3.0 + 0.3j])
-    # phi[i, m] = (m+1) + 0.1*(i+1) - 1j*(0.01*(m+1) + 0.001*i): every entry
-    # distinct, so a mis-paired parse cannot coincidentally match.
-    _MODE = np.arange(1, M + 1)[None, :]
-    _DEPTH = np.arange(NTOT)[:, None]
-    PHI = (_MODE + 0.1 * (_DEPTH + 1)) - 1j * (0.01 * _MODE + 0.001 * _DEPTH)
-
-    @staticmethod
-    def _pairs(values):
-        """One record of interleaved ``re im`` tokens."""
-        out = []
-        for v in np.atleast_1d(values):
-            out += [f"{float(v.real):.10g}", f"{float(v.imag):.10g}"]
-        return ' '.join(out)
-
-    def _write(self, tmp_path, wrap=False):
-        k_record = self._pairs(self.K)
-        if wrap:
-            # A Fortran runtime may break a record across lines; the record,
-            # not the line, is the unit.
-            toks = k_record.split()
-            k_record = ' '.join(toks[:3]) + '\n' + ' '.join(toks[3:])
-        lines = [
-            "        10",
-            "moa round trip",
-            f"100.0 1 {self.NTOT} {self.NTOT} {self.M}",
-            "  1 100.0 0.0",
-            "A 1500.0 0.0 0.0 0.0 1.0 0.0",
-            "A 1800.0 0.0 0.0 0.0 1.8 100.0",
-            "",
-            ' '.join(f"{v:.10g}" for v in self.Z),
-            k_record,
-        ] + [self._pairs(self.PHI[:, m]) for m in range(self.M)]
-        path = tmp_path / 'hand.moa'
-        path.write_text('\n'.join(lines) + '\n')
-        return path
-
-    def test_round_trip(self, tmp_path):
-        from uacpy.io.modes_reader import read_modes_asc
-
-        modes = read_modes_asc(str(self._write(tmp_path)))
-        assert modes['freq'] == 100.0
-        assert modes['ntot'] == self.NTOT
-        assert np.allclose(modes['z'], self.Z)
-        assert np.allclose(modes['k'], self.K)
-        assert modes['phi'].shape == (self.NTOT, self.M)
-        assert np.allclose(modes['phi'], self.PHI)
-        assert modes['Top']['BC'] == 'A'
-        assert modes['Bot']['cp'] == 1800.0 + 0j
-
-    def test_records_may_wrap_across_lines(self, tmp_path):
-        from uacpy.io.modes_reader import read_modes_asc
-
-        modes = read_modes_asc(str(self._write(tmp_path, wrap=True)))
-        assert np.allclose(modes['k'], self.K)
-        assert np.allclose(modes['phi'], self.PHI)
-
-    def test_mode_subset(self, tmp_path):
-        from uacpy.io.modes_reader import read_modes_asc
-
-        modes = read_modes_asc(str(self._write(tmp_path)), modes=[2])
-        assert np.allclose(modes['k'], self.K[[1]])
-        assert np.allclose(modes['phi'][:, 0], self.PHI[:, 1])
-        # 'M' is the number of modes RETURNED, matching read_modes_bin.
-        assert modes['M'] == 1 == len(modes['k'])
-
-    def test_dispatcher_reads_the_ascii_file(self, tmp_path):
+    def test_moa_extension_raises_file_format_error(self, tmp_path):
+        from uacpy.core.exceptions import FileFormatError
         from uacpy.io.modes_reader import read_modes
 
-        modes = read_modes(str(self._write(tmp_path)))
-        assert np.allclose(modes['k'], self.K)
-        # M != 0 gates the halfspace parameters read_modes computes.
-        assert 'gamma' in modes['Top']
+        path = tmp_path / 'hand.moa'
+        path.write_text('not a mode file\n')
+        with pytest.raises(FileFormatError, match=r'\.mod'):
+            read_modes(str(path))
 
 
 def test_read_modes_bin_M_counts_the_modes_returned(tmp_path):
@@ -1974,3 +1929,85 @@ class TestModeGridTracksFrequency:
         kr = np.squeeze(uacpy.Kraken().run(
             env, src, rcv, run_mode=uacpy.RunMode.COHERENT_TL).db)
         assert np.max(np.abs(kr - sc)) < 1.0
+
+
+class TestModesPathKeepsTheFullEnvContext:
+    """``_modes_single_profile`` reduces a range-dependent env to its r=0
+    profile for the modes solve. The rebuilt env must carry the original's
+    altimetry (so ``_project_environment`` still discloses dropping it),
+    plus the geolocation / transect / date / provenance fields — a reduced
+    profile is still the same place and time."""
+
+    @staticmethod
+    def _rd_env():
+        return Environment(
+            name='rd', bathymetry=[(0.0, 100.0), (5000.0, 120.0)],
+            ssp=1500.0,
+            altimetry=[(0.0, 0.5), (5000.0, -0.5)],
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=1600.0, density=1.5,
+                                      attenuation=0.5),
+            location=(43.0, 5.0), date='2020-06-01')
+
+    def test_reduced_env_carries_context(self):
+        env = self._rd_env()
+        env.data_sources = ('unit-test-source',)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            reduced = Kraken(verbose=False)._modes_single_profile(env)
+        assert reduced.altimetry is env.altimetry
+        assert reduced.location == env.location
+        assert reduced.date == env.date
+        assert reduced.data_sources == env.data_sources
+        assert not reduced.is_range_dependent or reduced.altimetry is not None
+
+    def test_modes_run_discloses_the_dropped_altimetry(self):
+        env = self._rd_env()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            Kraken(verbose=False).run(
+                env, Source(depths=25.0, frequencies=100.0),
+                Receiver(depths=[50.0], ranges=[1000.0]),
+                run_mode=RunMode.MODES)
+        assert any('altimetry' in str(w.message) for w in caught), (
+            "the modes path silently swallowed the altimetry-collapse "
+            "disclosure")
+
+    def test_compute_modes_discloses_each_collapse_once(self):
+        # compute_modes hands the env through to run(), whose modes path
+        # projects exactly once — the disclosure must not be duplicated by
+        # a second projection in the wrapper.
+        env = self._rd_env()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            Kraken(verbose=False).compute_modes(
+                env, Source(depths=25.0, frequencies=100.0))
+        alti = [w for w in caught if 'altimetry' in str(w.message)]
+        assert len(alti) == 1, (
+            f"altimetry-collapse disclosure emitted {len(alti)} times")
+
+
+class TestCoarseMeshIsValidatedAtTheSweepTop:
+    """A pinned ``n_mesh`` is checked against the AT reader's floor at the
+    highest frequency the deck will march, not at the first: the floor
+    scales with frequency, so a mesh that clears fc under-resolves the top
+    of a broadband sweep with no diagnostic from the binary."""
+
+    def test_broadband_n_mesh_is_checked_at_f_max(self):
+        from uacpy.core.exceptions import ConfigurationError
+        env = Environment(
+            bathymetry=100.0, ssp=1500.0,
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=1600.0, density=1.5,
+                                      attenuation=0.5))
+        # Floor is ~(20*100*f/1500)//2: 66 at 100 Hz, 666 at 1000 Hz —
+        # n_mesh=200 clears the bottom of the band and not the top.
+        with pytest.raises(ConfigurationError, match='Mesh is too coarse'):
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                Kraken(n_mesh=200, verbose=False).run(
+                    env,
+                    Source(depths=25.0,
+                           frequencies=np.linspace(100.0, 1000.0, 10)),
+                    Receiver(depths=[50.0], ranges=[1000.0]),
+                    run_mode=RunMode.BROADBAND)

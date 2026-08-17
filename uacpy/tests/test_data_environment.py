@@ -128,6 +128,25 @@ def test_literal_fallback_when_fetch_fails(monkeypatch):
     assert 'gebco' not in [s.source.id for s in env.data_sources]
 
 
+def test_surface_source_without_date_falls_back_to_literal():
+    # surface= is the documented fallback when the seaice fetch cannot run;
+    # a missing date= must reach that fallback, not raise past it.
+    ice = BoundaryProperties(acoustic_type='half-space', sound_speed=3500.0,
+                             density=0.9, attenuation=0.4, shear_speed=1800.0,
+                             shear_attenuation=1.0)
+    env = env_mod.fetch_environment((75.0, -10.0), bathymetry=2000.0,
+                                    ssp=1500.0, surface_sources='seaice',
+                                    surface=ice)
+    assert env.surface is not None
+    assert env.surface.properties[0].sound_speed == 3500.0
+
+
+def test_surface_source_without_date_or_literal_raises():
+    with pytest.raises(ConfigurationError, match='needs date'):
+        env_mod.fetch_environment((75.0, -10.0), bathymetry=2000.0,
+                                  ssp=1500.0, surface_sources='seaice')
+
+
 def test_range_dependent_ssp(monkeypatch, stub_fetchers):
     rd_ssp = SoundSpeedProfile(depths=[0.0, 100.0, 2000.0],
                                data=[[1500, 1502], [1490, 1492], [1510, 1512]],
@@ -290,11 +309,11 @@ class TestWoaWetCellSearch:
     """
 
     def test_ring_offsets_are_nearest_first_and_complete(self):
-        from uacpy.data.sound_speed import _ring_offsets
-        r1 = _ring_offsets(1)
+        from uacpy.data._geo import ring_offsets
+        r1 = ring_offsets(1)
         assert len(r1) == 8, r1
         assert r1[0] in {(0, -1), (0, 1), (-1, 0), (1, 0)}
-        assert len(_ring_offsets(2)) == 16
+        assert len(ring_offsets(2)) == 16
 
     def test_dry_nearest_cell_falls_back_to_a_wet_neighbour(self):
         import numpy as np

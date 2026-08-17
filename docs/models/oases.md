@@ -554,7 +554,7 @@ one. On `OASN` it is additive: the run mode's own letter (`N` for covariance,
 |---|---|---|
 | `n_time_samples` | `4096` | FFT length; must be a power of two. |
 | `freq_min`, `freq_max` | `0.0`, `None` | Sweep edges (Hz); `None` derives `2.5 × fc`. |
-| `center_frequency` | `None` | Pulse carrier; defaults to `source.frequencies[0]`. |
+| `center_frequency` | `None` | Pulse carrier; defaults to the midpoint of the run's frequency band (a single frequency is its own centre). |
 | `range_start` | `None` | First receiver range (m). |
 | `freq_output_increment` | `None` | Integrand-plot decimation; does **not** thin the `.trf`. |
 | `integration_offset`, `nw_samples` | `0.0`, `-1` | As OAST. |
@@ -581,7 +581,7 @@ wave can be reflected back into it.
 | Name | Default | Meaning |
 |---|---|---|
 | `surface_noise_level` | `0.0` | Surface-generated noise (dB re 1 µPa²/Hz); `0` disables. |
-| `white_noise_level` | `0.0` | Uncorrelated per-hydrophone noise. |
+| `white_noise_level` | `None` | Uncorrelated per-hydrophone noise. OASES adds it to the covariance diagonal unconditionally, so an explicit `0.0` is a literal 0 dB per sensor; `None` writes −200 dB (numerically nil). |
 | `deep_noise_level`, `deep_source_depth` | `0.0`, `None` | Deep broad-area sheet. |
 | `discrete_sources` | `None` | List of `{'depth', 'x', 'y', 'level'}`, metres. Any other key raises — OASES carries no per-source phase. |
 | `xmin`/`xmax`/`nx` | `None`/`None`/`50` | Replica grid in x (m); `None` → 100 m / 10 km. |

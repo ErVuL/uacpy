@@ -9,6 +9,8 @@ from typing import Optional, Tuple
 
 from uacpy.core.exceptions import ConfigurationError
 
+from uacpy.core._beamforming import loaded_inverse, quadratic_form
+
 from uacpy.core.results._base import Result
 
 
@@ -116,8 +118,8 @@ class Covariance(Result):
         out = np.empty((n_f, nz * nx * ny), dtype=float)
         for f in range(n_f):
             W = self._normalise_weights(flat[f])  # (n_pts, n_rcv)
-            CW = self.covariance[f] @ W.T          # (n_rcv, n_pts)
-            out[f] = np.real(np.einsum('pr,rp->p', W.conj(), CW))
+            # The shared Bartlett/MVDR core (core/_beamforming).
+            out[f] = quadratic_form(self.covariance[f], W)
         return out.reshape(n_f, nz, nx, ny)
 
     def mvdr(
@@ -159,11 +161,8 @@ class Covariance(Result):
                     UserWarning, stacklevel=2)
                 out[f] = np.nan
                 continue
-            Cload = C + diagonal_loading * tr * np.eye(C.shape[0])
-            Cinv = np.linalg.inv(Cload)
             W = self._normalise_weights(flat[f])
-            # wᴴC⁻¹w is real for Hermitian C; the imaginary part is round-off.
-            denom = np.real(np.einsum('pr,rs,ps->p', W.conj(), Cinv, W))
+            denom = quadratic_form(loaded_inverse(C, diagonal_loading), W)
             # For a positive-definite loaded covariance denom > 0. It reaches
             # 0 only for a replica carrying no energy (an unpopulated .rpo
             # cell) and goes negative only when C is not positive-definite,

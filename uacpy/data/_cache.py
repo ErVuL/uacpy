@@ -7,7 +7,9 @@ downloaded by ``install.sh`` into a gitignored cache and sampled locally; this
 module only *locates* them. A missing dataset raises a typed
 :class:`ConfigurationError` naming the exact install flag to run.
 
-Cache location: ``$UACPY_DATA_CACHE`` if set, else ``<repo>/data_cache``.
+Cache location: ``$UACPY_DATA_CACHE`` if set; else ``<repo>/data_cache``
+when running from a checkout; else the per-user cache directory
+(``$XDG_CACHE_HOME/uacpy/data_cache`` or ``~/.cache/uacpy/data_cache``).
 """
 
 import os
@@ -19,8 +21,26 @@ from uacpy.core.exceptions import ConfigurationError
 __all__ = ['cache_root', 'dataset_root', 'require', 'cached_grid', 'cached_grid_at',
            'register_cache', 'invalidate_grids', 'DATASETS']
 
-# uacpy/uacpy/data/_cache.py → parents[2] is the repo root (editable install).
+# uacpy/uacpy/data/_cache.py → parents[2] is the repo root in the documented
+# clone + `pip install -e .` layout; under a plain wheel install it is
+# site-packages, which must not grow a data_cache.
 _REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _default_cache_root() -> Path:
+    """Repo ``data_cache/`` from a checkout, else the per-user cache dir.
+
+    A checkout is recognised by ``install.sh`` sitting at the repo root —
+    the script that populates the cache. Anywhere else (a wheel install
+    resolving ``_REPO_ROOT`` to site-packages) the default goes to
+    ``$XDG_CACHE_HOME/uacpy/data_cache`` or ``~/.cache/uacpy/data_cache``
+    instead of writing into site-packages.
+    """
+    if (_REPO_ROOT / 'install.sh').exists():
+        return _REPO_ROOT / 'data_cache'
+    xdg = os.environ.get('XDG_CACHE_HOME')
+    base = Path(xdg).expanduser() if xdg else Path.home() / '.cache'
+    return base / 'uacpy' / 'data_cache'
 
 
 @dataclass(frozen=True)
@@ -74,9 +94,13 @@ DATASETS = {
 
 
 def cache_root() -> Path:
-    """Root of the offline data cache (``$UACPY_DATA_CACHE`` or repo default)."""
+    """Root of the offline data cache.
+
+    ``$UACPY_DATA_CACHE`` if set, else the repo's ``data_cache/`` in a
+    checkout, else the per-user cache directory (wheel installs).
+    """
     env = os.environ.get('UACPY_DATA_CACHE')
-    return Path(env).expanduser() if env else _REPO_ROOT / 'data_cache'
+    return Path(env).expanduser() if env else _default_cache_root()
 
 
 def dataset_root(name: str) -> Path:
@@ -150,6 +174,13 @@ def invalidate_grids() -> None:
     :func:`register_cache`. A backend that has not been imported has nothing
     memoised, so an unregistered module is not a gap.
     """
+    for grid in _GRIDS.values():
+        close = getattr(grid, 'close', None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass        # a torn handle must not block the invalidation
     _GRIDS.clear()
     for clear in _CLEARERS:
         clear()

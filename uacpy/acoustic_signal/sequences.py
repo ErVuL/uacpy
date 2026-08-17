@@ -96,13 +96,20 @@ def mseq(m: int) -> np.ndarray:
     - Length N = 2^m - 1
     - Two-valued periodic autocorrelation (N at zero lag, -1 at every other
       lag) — ideal for matched filtering
-    - Balanced to within one symbol: 2^(m-1) chips of +1 and 2^(m-1)-1 of -1,
-      so the sequence sums to +1 rather than 0
+    - Balanced to within one symbol: 2^(m-1) chips of -1 and 2^(m-1)-1 of +1,
+      so the sequence sums to -1 rather than 0
+
+    Chips use the standard BPSK mapping ``s = 1 - 2*bit`` (bit 0 → +1,
+    bit 1 → -1), the same polarity as
+    :func:`uacpy.comms.dsss.m_sequence` — despreading either function's
+    output with the other's sequence keeps its sign.
 
     Translated from ``third_party/Acoustics-Toolbox/Matlab/waveforms/mseq.m``
     (Michael B. Porter, April 2000); the feedback-coefficient table and the
     shift recursion below are that file's, which credits Proakis, *Digital
-    Communications*, p. 433.
+    Communications*, p. 433. The MATLAB original maps the opposite way
+    (``s(s == 0) = -1``, i.e. bit 1 → +1), so this sequence is the negative
+    of ``mseq.m``'s — the autocorrelation is unaffected.
 
     Examples
     --------
@@ -154,8 +161,8 @@ def mseq(m: int) -> np.ndarray:
         seed = out
         s[ii] = out[0]
 
-    # Convert 0/1 to -1/+1
-    s[s == 0] = -1
+    # Standard BPSK mapping: bit 0 -> +1, bit 1 -> -1.
+    s = 1.0 - 2.0 * s
 
     return s
 

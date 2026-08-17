@@ -151,6 +151,26 @@ def test_range_dependent_bottom_preserves_roughness():
         assert col.halfspace.roughness == pytest.approx(0.3)
 
 
+def test_range_dependent_bottom_preserves_provenance():
+    """Each sampled column's ``data_sources`` must survive the transect
+    rebuild, so the assembled ``Bottom`` reports the same provenance a
+    single-point fetch does."""
+    from uacpy.data.sources import SOURCES, DataProvenance
+
+    def point_bottom(la, lo):
+        prov = DataProvenance(source=SOURCES['grainsize'],
+                              data_point=(la, lo), requested_point=(la, lo))
+        return BoundaryProperties(
+            acoustic_type='half-space', sound_speed=1700.0, density=1.9,
+            attenuation=0.5, data_sources=(prov,))
+
+    bottom = sediment.range_dependent_bottom_along(
+        point_bottom, (0.0, 0.0), (0.0, 0.1), 3, source_label='test')
+    for col in bottom.columns:
+        assert [p.source.id for p in col.data_sources] == ['grainsize']
+    assert [p.source.id for p in bottom.data_sources] == ['grainsize']
+
+
 def _phi_bottom(phi, water_sound_speed):
     def point_bottom(lat, lon):
         return sediment.bottom_from_grain_size(
@@ -204,3 +224,21 @@ def test_auto_keys_on_geoacoustics_without_a_grain_size():
         crustal, (40.0, -30.0), (41.0, -30.0), 'auto', source_label='test',
         max_points=200)
     assert [c.halfspace.sound_speed for c in bottom.columns] == [1600.0, 2200.0]
+
+
+def test_deck41_rock_routes_to_limestone_material(monkeypatch):
+    """A 'rock' lithology cell carries the class sentinel through the phi
+    index and comes back as the limestone material preset (~3000 m/s), the
+    same route the EMODnet substrate path uses — never the coarse-sand
+    clamp (~1813 m/s) a phi of -5 used to produce."""
+    from uacpy.data import sediment_db
+    sentinel = sediment_db._phi_from_lithology('rock')
+    assert sentinel is not None
+    assert sentinel <= sediment_db._PHI_CLASS_SENTINEL_MAX
+    monkeypatch.setattr(
+        sediment_db, 'fetch_sediment_sample',
+        lambda point, max_distance_km=None: {
+            'phi': None, 'material': 'limestone', 'distance_km': 1.0,
+            'latitude': 0.0, 'longitude': 0.0})
+    b = sediment_db.fetch_bottom_local((0.0, 0.0))
+    assert b.sound_speed >= 2500.0

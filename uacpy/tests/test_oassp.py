@@ -329,6 +329,18 @@ class TestModelConfiguration:
         with pytest.raises(ConfigurationError, match="correlation_length"):
             uacpy.OASSP()
 
+    def test_negative_correlation_length_raises_at_construction(self):
+        # OASES reads a negative CL as the volume-scattering record switch,
+        # whose extra fields no uacpy carrier holds; fail at construction
+        # like every other constructor knob, not at deck-write time.
+        with pytest.raises(UnsupportedFeatureError,
+                           match="correlation_length"):
+            uacpy.OASSP(correlation_length=-5.0)
+
+    def test_zero_correlation_length_raises_at_construction(self):
+        with pytest.raises(ConfigurationError, match="correlation_length"):
+            uacpy.OASSP(correlation_length=0.0)
+
     def test_copy_round_trips_every_knob(self):
         m = uacpy.OASSP(correlation_length=5.0, spectral_exponent=2.5,
                         spectrum='goff-jordan', realization=3,

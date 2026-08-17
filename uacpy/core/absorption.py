@@ -53,7 +53,7 @@ _ArrayLike = Union[float, np.ndarray]
 def thorp_db_per_km(frequency: _ArrayLike) -> np.ndarray:
     """Thorp seawater volume attenuation in dB/km.
 
-    Uses the JKPS Eq. 1.34 coefficients, which match the AT
+    Uses the JKPS Eq. (1.47) coefficients, which match the AT
     ``AttenMod.f90:94`` formula used internally by the Acoustics-Toolbox
     binaries.
 
@@ -66,7 +66,7 @@ def thorp_db_per_km(frequency: _ArrayLike) -> np.ndarray:
     ----------
     Thorp, W. H. (1967). JASA 42(1), 270 (original).
     Jensen, Kuperman, Porter, Schmidt — *Computational Ocean
-    Acoustics*, 2nd ed., Eq. 1.34.
+    Acoustics*, 2nd ed., Eq. (1.47).
     """
     f = np.atleast_1d(np.asarray(frequency, dtype=float)) / 1000.0
     f2 = f * f
@@ -461,8 +461,17 @@ class Biological(Absorption):
             )
         z = np.atleast_1d(np.asarray(depths, dtype=float))
         a_km = np.zeros(z.shape, dtype=float)
+        # A depth exactly on a boundary two stacked layers share belongs to
+        # the upper layer only (the layer-boundary convention shared with
+        # ``SeabedColumn._layer_at``): each layer spans (z_top, z_bottom],
+        # with z_top kept inclusive when no other layer ends there.
+        layer_bottoms = {layer.z_bottom_m for layer in self.layers}
         for layer in self.layers:
-            in_layer = (z >= layer.z_top_m) & (z <= layer.z_bottom_m)
+            if layer.z_top_m in layer_bottoms:
+                above_top = z > layer.z_top_m
+            else:
+                above_top = z >= layer.z_top_m
+            in_layer = above_top & (z <= layer.z_bottom_m)
             denom = (1.0 - layer.f0_hz ** 2 / f ** 2) ** 2 + 1.0 / layer.Q ** 2
             a_km[in_layer] += layer.a0 / denom
         return a_km / 1000.0

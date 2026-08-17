@@ -11,6 +11,7 @@ The wave height drives the Pierson-Moskowitz sea surface in
 
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.data._geo import as_coordinate
+from uacpy.data._http import raise_substantive
 
 __all__ = ['fetch_waves', 'WAVE_SOURCES']
 
@@ -61,5 +62,4 @@ def fetch_waves(point, *, date, source='auto', max_days=None, timeout=120.0,
             continue
         out['source'] = _SOURCE_ID[name]
         return out
-    data_errs = [e for e in errors if isinstance(e, DataFetchError)]
-    raise (data_errs[0] if data_errs else errors[-1])
+    raise_substantive(errors)

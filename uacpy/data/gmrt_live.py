@@ -13,7 +13,7 @@ Endpoints (no auth):
 
 import numpy as np
 
-from uacpy.core.exceptions import DataFetchError
+from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.data._geo import (
     as_coordinate, nearest_indices, normalize_lon,
 )
@@ -79,6 +79,14 @@ def region_grid(lat_range, lon_range, n_lat, n_lon, *, timeout=120.0, verbose=Fa
 
     from uacpy.data._netcdf import open_netcdf
 
+    if normalize_lon(lon_range[1]) < normalize_lon(lon_range[0]):
+        raise ConfigurationError(
+            f"gmrt_live: lon_range {lon_range} crosses the antimeridian "
+            f"(end < start means an eastward crossing on the GEBCO/local "
+            f"path), but this service takes plain min<max boxes — the "
+            f"sorted request would silently sweep the long way around.",
+            remediation="Use bathymetry source 'local'/'gebco', or split "
+                        "the request at 180 deg.")
     lo0, lo1 = sorted((normalize_lon(lon_range[0]), normalize_lon(lon_range[1])))
     la0, la1 = sorted((float(lat_range[0]), float(lat_range[1])))
     url = (f"{GRID_URL}?minlongitude={lo0}&maxlongitude={lo1}"

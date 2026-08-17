@@ -70,7 +70,7 @@ what the `1:-1` trims.)
 |---|---|---|---|
 | Range, depth, thickness | metres | **km** for AT `.env` / `.bty` / `.ati` / `.ssp` / `.flp`, OASES `.dat` range specs, and the range axis of mpiramS' SSP and sediment files | `m_to_km` / `km_to_m` |
 | Range, depth | metres | **metres** for `ram.in` / `rams.in` / `ramgeo.in`, mpiramS' bathymetry and output-range files, and inside `.shd` (AT converts before writing the header) | — |
-| Frequency | Hz | Hz | `hz_to_khz` / `khz_to_hz` where a format wants kHz |
+| Frequency | Hz | Hz | — |
 | Reflection **phase** | radians | degrees | `deg_to_rad` / `rad_to_deg` |
 | Grazing **angle** | degrees | degrees | — |
 
@@ -78,9 +78,10 @@ The two that catch people: the RAM family is metres on disk almost
 everywhere (unlike everything Acoustics-Toolbox — the exceptions are the range
 axes of mpiramS' SSP and sediment decks), and reflection-coefficient tables are
 degrees for the *angle* axis on both sides but radians-in-Python /
-degrees-on-disk for the *phase* column. `read_reflection_coefficient` returns
-`phi` in radians and `write_reflection_coefficient` takes radians, matching the
-[`ReflectionCoefficient`](results.md) result.
+degrees-on-disk for the *phase* column: `read_reflection_coefficient` returns
+`phi` in radians, matching the [`ReflectionCoefficient`](results.md) result.
+(Reflection tables are produced by the engines — BOUNCE, OASR — not written
+from Python; uacpy only reads, stages and dedupes them.)
 
 `units.py` itself is not exported on `uacpy.io.__all__` — it is plumbing the
 readers and writers share, not something a caller needs.
@@ -103,8 +104,7 @@ The layout a Fortran `WRITE` to an unformatted sequential unit produces:
 The length marker appears twice, which is what makes the format
 self-validating: if head and tail disagree you have either a truncated file or
 the wrong byte order. `read_fortran_record` reads one, checks both markers,
-and raises `FileFormatError` on a mismatch; `read_fortran_record_marker` reads a
-bare marker when the payload is unpacked by hand.
+and raises `FileFormatError` on a mismatch.
 
 **Byte order is detected, not assumed.** `detect_endian` reads the first four
 bytes and picks the interpretation that yields a plausible record length — a
@@ -160,7 +160,7 @@ those rules so no reader has to re-derive them. The OASES `.dat` and RAM
 `ram.in` decks are plain fixed-layout text that uacpy only writes.
 
 Every helper named in this section — `read_fortran_record`,
-`read_fortran_record_marker`, `detect_endian`, `read_vector` and the string
+`detect_endian`, `read_vector` and the string
 strippers — lives in
 [`uacpy/io/_fortran_helpers.py`](../../uacpy/io/_fortran_helpers.py) and is
 deliberately **private**: mechanism, not interface.
@@ -276,8 +276,8 @@ convention. Bellhop opens `<env>.bty`, `<env>.ati`, `<env>.brc`, `<env>.trc`,
 | `.bty` | Bathymetry vs range | `read_bathymetry` | `write_bty_file`, `write_bty_long_format`, `write_bty_3d` |
 | `.ati` | Sea-surface altimetry vs range | `read_altimetry` | `write_ati_file` |
 | `.ssp` | Range-dependent sound-speed matrix | `read_ssp_2d`, `read_ssp_3d` | `write_ssp` |
-| `.brc` / `.irc` | Bottom / internal reflection coefficient `R(θ)` | `read_reflection_coefficient` | `write_reflection_coefficient` |
-| `.trc` | Top reflection coefficient `R(θ)` | `read_reflection_coefficient` | `write_reflection_coefficient` |
+| `.brc` / `.irc` | Bottom / internal reflection coefficient `R(θ)` | `read_reflection_coefficient` | — (BOUNCE writes them; `stage_reflection_file` copies) |
+| `.trc` | Top reflection coefficient `R(θ)` | `read_reflection_coefficient` | — (staged from a produced table) |
 | `.sbp` | Source beam pattern, angle vs dB re peak | `read_source_beam_pattern` | `write_source_beam_pattern` |
 
 **Short vs long `.bty`.** `write_bty_file` writes range and depth only.
@@ -616,7 +616,6 @@ Every name in `uacpy.io.__all__`, grouped by format family.
 | `write_bty_long_format` | `.bty` with per-range `c_p`, `c_s`, `ρ`, `α_p`, `α_s` |
 | `write_bty_3d` | 3-D `.bty` for BELLHOP3D |
 | `write_ati_file` | `.ati` altimetry |
-| `write_reflection_coefficient` | `.brc`/`.trc` from angles (deg) + complex or `[amp, phase_rad]` |
 | `write_source_beam_pattern` | `.sbp` from angles (deg) + dB re peak |
 | `stage_reflection_file` | Copy a table to the `<env>.brc`/`.trc` name the binary opens |
 | `stage_source_beam_pattern` | Materialise a `.sbp` from a path or an `(N, 2)` array |

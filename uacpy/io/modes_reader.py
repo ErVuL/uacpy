@@ -1,10 +1,13 @@
 """
-Readers for Kraken normal-mode files (``.mod`` binary, ``.moa`` ASCII).
+Readers for Kraken normal-mode files (binary ``.mod``).
 
-* ``read_modes`` — auto-detect binary/ASCII by extension.
+* ``read_modes`` — read a ``.mod`` and attach the halfspace parameters.
 * ``read_modes_bin`` — binary ``.mod``.
-* ``read_modes_asc`` — ASCII ``.moa``.
 * ``get_component`` — extract a column from a Kraken modes dict.
+
+The binary direct-access ``.mod`` is the only mode format any
+Acoustics-Toolbox program writes; a non-``.mod`` path raises
+:class:`~uacpy.core.exceptions.FileFormatError`.
 """
 
 import os
@@ -127,7 +130,9 @@ def get_component(modes_dict: Dict[str, Any], comp: str) -> np.ndarray:
                 k += 4
 
             else:
-                raise ConfigurationError(f"Unknown material type: {material}")
+                # Mater comes from the .mod file's own header, so an unknown
+                # value is malformed file content, not a caller error.
+                raise FileFormatError(f"Unknown material type: {material}")
 
             jj += 1
 
@@ -138,270 +143,6 @@ def get_component(modes_dict: Dict[str, Any], comp: str) -> np.ndarray:
             "this frequency; check the .mod record before requesting a component."
         )
     return np.array(phi)
-
-
-class _TokenStream:
-    """Whitespace-delimited token stream that also knows about line breaks.
-
-    ``read_modes_asc.m`` alternates two MATLAB primitives: ``fscanf(fid,
-    '%f', N)``, which is free-format and runs across line breaks, and
-    ``fgetl(fid)``, which returns the remainder of the *current* line. This
-    reproduces both against the same cursor, so a record that a Fortran
-    runtime wrapped across several lines still parses.
-    """
-
-    def __init__(self, text: str, filename: str):
-        self._lines = text.splitlines()
-        self._filename = filename
-        self._i = 0
-        self._toks = self._lines[0].split() if self._lines else []
-        self._j = 0
-
-    def _next_line_start(self) -> None:
-        self._i += 1
-        self._j = 0
-        self._toks = (
-            self._lines[self._i].split() if self._i < len(self._lines) else []
-        )
-
-    def line(self) -> str:
-        """Remainder of the current line; advances to the next one."""
-        if self._i >= len(self._lines):
-            raise FileFormatError(
-                f"Modes file {self._filename}: EOF while reading a text line"
-            )
-        rest = ' '.join(self._toks[self._j:])
-        self._next_line_start()
-        return rest
-
-    def floats(self, n: int) -> np.ndarray:
-        """``n`` free-format floats, crossing line breaks as needed."""
-        vals = []
-        while len(vals) < n:
-            if self._j >= len(self._toks):
-                if self._i >= len(self._lines):
-                    raise FileFormatError(
-                        f"Modes file {self._filename}: EOF while reading "
-                        f"{n} floats (got {len(vals)})"
-                    )
-                self._next_line_start()
-                continue
-            vals.append(float(self._toks[self._j]))
-            self._j += 1
-        return np.array(vals, dtype=float)
-
-    def complex_pairs(self, n: int) -> np.ndarray:
-        """``n`` complex values stored as ``re im re im …`` token pairs.
-
-        ``read_modes_asc.m:35,52`` reads these with ``fscanf(fid, '%f',
-        [2, n])``; MATLAB fills that 2×n matrix column-major, so row 1 is
-        the real parts and row 2 the imaginary parts of *consecutive*
-        tokens — the layout is interleaved, not two blocks.
-        """
-        vals = self.floats(2 * n)
-        return vals[0::2] + 1j * vals[1::2]
-
-
-def read_modes_asc(
-    filename: str, modes: Optional[Union[int, list, np.ndarray]] = None
-) -> Dict[str, Any]:
-    """
-    Read normal modes from KRAKEN ASCII format mode file.
-
-    KRAKEN is a normal mode model for underwater acoustics that computes
-    mode shapes and wavenumbers. This function reads the ASCII format
-    output file (.mod extension).
-
-    Parameters
-    ----------
-    filename : str
-        Mode filename (should include .mod extension)
-    modes : int, list, or ndarray, optional
-        Mode indices to read (1-indexed like MATLAB).
-        If None, reads all modes (default).
-        Can be:
-        - Single integer: read that mode
-        - List/array: read specified modes
-
-    Returns
-    -------
-    Modes : dict
-        Dictionary containing:
-        - 'pltitl': Plot title string
-        - 'freq': Frequency (Hz)
-        - 'Nmedia': Number of media layers
-        - 'ntot': Total number of depth points
-        - 'nmat': Number of material points
-        - 'M': Number of modes returned — ``len(k)`` (see Notes)
-        - 'z': Depth vector (m), shape (ntot,)
-        - 'k': Complex wavenumbers (1/m), shape (nmodes_read,)
-        - 'phi': Mode shapes, shape (ntot, nmodes_read)
-
-    Notes
-    -----
-    File format (.moa ASCII):
-    - Record length (not used in ASCII)
-    - Title line
-    - freq, Nmedia, ntot, nmat, M
-    - Nmedia lines of medium properties
-    - Top halfspace line
-    - Bottom halfspace line
-    - Blank line
-    - Depth vector (ntot floats)
-    - Wavenumbers: ``M`` interleaved ``re im`` pairs
-    - Per mode: a separator line then ``ntot`` interleaved ``re im`` pairs
-
-    Both complex records store **interleaved pairs**, not a real block
-    followed by an imaginary block: ``read_modes_asc.m:35,52`` reads them
-    with ``fscanf(fid, '%f', [2, n])`` and MATLAB fills that matrix
-    column-major. That script is a layout reference only — as vendored it
-    reads counts from bare ``ntot``/``m`` names it never defines
-    (``read_modes_asc.m:33,35``), so it does not run.
-
-    ``'M'`` is the number of modes actually returned (always ``len(k)``
-    and ``phi.shape[1]``), which is the file's total only when ``modes``
-    is ``None``. :func:`read_modes_bin` reports it the same way.
-
-    Mode indices are 1-indexed to match MATLAB convention.
-    Python users may prefer 0-indexing, but this maintains compatibility.
-
-    Wavenumbers are complex: k = k_real + 1j * k_imag
-    - k_real: horizontal wavenumber (rad/m)
-    - k_imag: attenuation (negative for decaying modes)
-
-    Mode shapes are complex pressure fields normalized by KRAKEN.
-
-    Examples
-    --------
-    >>> # Read all modes
-    >>> modes = read_modes_asc('pekeris.mod')
-    >>> print(f"Frequency: {modes['freq']} Hz")
-    >>> print(f"Number of modes: {len(modes['k'])}")
-    >>> print(f"Depth points: {len(modes['z'])}")
-
-    >>> # Read specific modes
-    >>> modes = read_modes_asc('pekeris.mod', modes=[1, 3, 5])
-    >>> print(f"Read modes: {len(modes['k'])}")
-
-    >>> # Plot first mode
-    >>> import matplotlib.pyplot as plt
-    >>> modes = read_modes_asc('pekeris.mod')
-    >>> plt.plot(np.real(modes['phi'][:, 0]), modes['z'])
-    >>> plt.gca().invert_yaxis()
-    >>> plt.xlabel('Mode amplitude')
-    >>> plt.ylabel('Depth (m)')
-    >>> plt.title(f"Mode 1, k = {modes['k'][0]:.6f}")
-
-    >>> # Compute horizontal wavenumbers
-    >>> modes = read_modes_asc('pekeris.mod')
-    >>> kr = np.real(modes['k'])  # horizontal wavenumber
-    >>> ki = np.imag(modes['k'])  # attenuation
-    >>> print(f"Mode 1: kr = {kr[0]:.6f}, alpha = {-ki[0]:.6e}")
-
-    See Also
-    --------
-    read_modes_bin : Read binary format mode files
-    get_component : Extract components from elastic modes
-    """
-    try:
-        with open(filename, "r") as fid:
-            stream = _TokenStream(fid.read(), filename)
-
-            int(stream.line().split()[0])  # lrecl (unused for ASCII)
-            pltitl = stream.line().strip()
-            params = stream.floats(5)
-            freq = float(params[0])
-            Nmedia = int(params[1])
-            ntot = int(params[2])
-            nmat = int(params[3])
-            M = int(params[4])  # total number of modes in the file
-            stream.line()       # rest of the parameter record's line
-            for _ in range(Nmedia):
-                stream.line()   # medium properties, unused
-
-            def _parse_halfspace(line: str) -> Dict[str, Any]:
-                """Parse a Kraken halfspace summary line.
-
-                No Acoustics-Toolbox program writes an ASCII mode file, so
-                the ASCII rendering of this record is inferred: the field
-                order mirrors the binary halfspace record at
-                ``Kraken/kraken.f90:603-605`` — boundary-condition character,
-                then ``cP_real cP_imag cS_real cS_imag rho depth``. Missing
-                trailing fields default to zero so vacuum / rigid halfspaces
-                parse cleanly.
-                """
-                toks = line.split()
-                if not toks:
-                    return {"BC": " ", "cp": 0.0 + 0j, "cs": 0.0 + 0j,
-                            "rho": 0.0, "depth": 0.0}
-                bc = toks[0]
-                vals = []
-                for t in toks[1:]:
-                    try:
-                        vals.append(float(t))
-                    except ValueError:
-                        break
-                vals = (vals + [0.0] * 6)[:6]
-                return {
-                    "BC": bc,
-                    "cp": complex(vals[0], vals[1]),
-                    "cs": complex(vals[2], vals[3]),
-                    "rho": vals[4],
-                    "depth": vals[5],
-                }
-
-            Top = _parse_halfspace(stream.line())
-            Bot = _parse_halfspace(stream.line())
-            stream.line()  # blank line
-            z = stream.floats(ntot)
-            stream.line()  # rest of the depth record's last line
-            k_all = stream.complex_pairs(M)
-            if modes is None:
-                modes_to_read = list(range(1, M + 1))  # 1-indexed
-            elif isinstance(modes, (int, np.integer)):
-                modes_to_read = [int(modes)]
-            else:
-                modes_to_read = [int(m) for m in modes]
-            modes_to_read = [m for m in modes_to_read if 1 <= m <= M]
-            k_selected = k_all[[m - 1 for m in modes_to_read]]  # Convert to 0-indexed
-            phi = np.zeros((ntot, len(modes_to_read)), dtype=complex)
-
-            # Stop at the highest requested mode (read_modes_asc.m:50,
-            # `for mode = 1: max( modes )`) — a file truncated after it still
-            # satisfies the request.
-            for mode_num in range(1, (max(modes_to_read) if modes_to_read else 0) + 1):
-                stream.line()  # rest of the previous record's line
-                phi_mode = stream.complex_pairs(ntot)
-                if mode_num in modes_to_read:
-                    idx = modes_to_read.index(mode_num)
-                    phi[:, idx] = phi_mode
-
-    except FileNotFoundError as e:
-        raise ConfigurationError(
-            f"ASCII mode file not found: {filename}. No Acoustics-Toolbox "
-            "program writes .moa — supply the path to an existing ASCII mode "
-            "file, or read a solver-written binary .mod with read_modes_bin."
-        ) from e
-    except PARSE_ERRORS as e:
-        raise FileFormatError(
-            f"Malformed Kraken mode file {filename}: {e}"
-        ) from e
-    return {
-        "pltitl": pltitl,
-        "title": pltitl,
-        "freq": freq,
-        "freqVec": np.asarray([freq], dtype=float),
-        "Nfreq": 1,
-        "Nmedia": Nmedia,
-        "ntot": ntot,
-        "nmat": nmat,
-        "M": int(len(k_selected)),  # modes returned, not the file's total
-        "z": z,
-        "k": k_selected,
-        "phi": phi,
-        "Top": Top,
-        "Bot": Bot,
-    }
 
 
 def _fortran_div(numerator: int, denominator: int) -> int:
@@ -490,8 +231,7 @@ def _read_modes_bin_impl(
         - 'z' : ndarray - Sample depths for modes
         - 'M' : int - Number of modes returned — always ``len(k)`` and
           ``phi.shape[1]``. Equals the number the solver found unless
-          ``modes`` selected a subset. :func:`read_modes_asc` reports it
-          the same way.
+          ``modes`` selected a subset.
         - 'phi' : ndarray - Mode shapes, shape (ntot, M) complex
         - 'k' : ndarray - Wavenumbers, shape (M,) complex
         - 'Top' : dict - Top boundary properties
@@ -515,6 +255,12 @@ def _read_modes_bin_impl(
       record, ``M`` eigenfunction records and the eigenvalues folded across
       ``1 + (2M-1)/LRecordLength`` records of ``LRecordLength/2`` complex
       values each (``Kraken/kraken.f90:106-117``).
+    - The stored ``phi`` are KRAKEN-normalised: the tabulated-span integral
+      ``SUM(phi**2 / rho) dz`` plus the analytic top/bottom halfspace-tail
+      terms equals 1 (``Kraken/kraken.f90:795-800``), so the tabulated span
+      alone integrates to less than 1 and the shapes must **not** be
+      re-normalised over ``z``. See :func:`read_modes` for the halfspace
+      extension formula and the sign convention.
 
     References
     ----------
@@ -812,46 +558,63 @@ def read_modes(
     profile: int = 1,
 ) -> Dict[str, Any]:
     """
-    Read mode data from KRAKEN output file (wrapper for binary and ASCII readers).
-
-    This is a convenience wrapper that automatically detects the file format
-    and calls the appropriate reader (read_modes_bin for .mod files,
-    read_modes_asc for .moa files).
+    Read mode data from a KRAKEN binary ``.mod`` file and attach the
+    halfspace parameters the modal-sum evaluators need.
 
     Parameters
     ----------
     filename : str
-        Mode file path, with or without extension. Supported extensions:
-        - '.mod': Binary format (default if no extension)
-        - '.moa': ASCII format
+        Mode file path; ``.mod`` is appended when no extension is given.
+        Any other extension raises :class:`FileFormatError` — the binary
+        direct-access ``.mod`` is the only mode format any
+        Acoustics-Toolbox program writes.
     frequency : float, optional
         Frequency in Hz to select from multi-frequency files (default: 0)
     modes : int, list, or ndarray, optional
         Mode indices to extract (1-indexed). If None, all modes are returned.
     profile : int, optional
-        Profile index to read from a binary ``.mod`` (1-indexed, default 1).
-        The ASCII format carries a single mode set, so any other value is a
-        :class:`ConfigurationError` there.
+        Profile index to read (1-indexed, default 1).
 
     Returns
     -------
     modes_data : dict
-        Mode data dictionary with fields from read_modes_bin or read_modes_asc,
+        Mode data dictionary with fields from :func:`read_modes_bin`,
         plus computed halfspace parameters:
         - 'Top': dict with top halfspace properties (k2, gamma, phi)
         - 'Bot': dict with bottom halfspace properties (k2, gamma, phi)
 
     Notes
     -----
-    ``Modes['M']`` is the number of modes returned (``len(Modes['k'])``)
-    from either reader; the halfspace parameters below are computed only
-    when it is non-zero.
+    ``Modes['M']`` is the number of modes returned (``len(Modes['k'])``);
+    the halfspace parameters below are computed only when it is non-zero.
 
     For acoustic halfspaces (boundary condition 'A'), computes:
     - k²: wavenumber squared in halfspace
     - γ: vertical wavenumber using Pekeris root, from the full complex
       eigenvalue for a KRAKENC file and from ``Re(k)`` otherwise
     - φ: mode value at interface
+
+    **Normalisation — do not re-normalise the mode shapes.** KRAKEN scales
+    each mode so that the *full* norm equals 1: the discrete
+    ``SUM(phi**2 / rho) dz`` over the tabulated span **plus** the analytic
+    contribution of the top and bottom halfspace tails, carried by the
+    admittance derivatives in ``RN = SqNorm - DrhoDx * Phi(1)**2 +
+    DetaDx * Phi(NTotal1)**2`` (``Kraken/kraken.f90:795-800``). The
+    tabulated span alone therefore integrates to *less* than 1 — the
+    deficit grows with mode number as more energy sits in the evanescent
+    tail (about 0.925 by mode 5 for a Pekeris case) — so re-normalising
+    ``phi`` over ``z`` breaks the eigenfunction scaling.
+
+    **Halfspace extension and sign convention.** Below the deepest
+    tabulated depth ``D`` an 'A'-halfspace mode continues analytically as
+    ``phi(z) = Bot['phi'] * exp(-Bot['gamma'] * (z - D))``, with
+    ``gamma**2 = k**2 - Bot['k2']`` and the root chosen with
+    ``Re(gamma) >= 0`` (decay into the halfspace; ``pekeris_root``, the
+    branch ``KrakenField/ReadModes.f90:254-272`` uses). The overall sign
+    of each mode follows KRAKEN's convention that ``phi`` is positive at
+    the mode's turning point (``Kraken/kraken.f90:808-809`` flips the
+    scale factor to enforce it). The mirrored ``Top`` entries extend
+    above the shallowest tabulated depth the same way.
 
     The frequency index is found by searching for the closest match to
     the requested frequency in freqVec.
@@ -867,9 +630,6 @@ def read_modes(
 
     >>> # Read specific modes
     >>> modes = read_modes('test.mod', frequency=100.0, modes=[1, 2, 3])
-
-    >>> # ASCII format
-    >>> modes = read_modes('test.moa')
     """
     fileroot, ext = os.path.splitext(filename)
 
@@ -877,20 +637,16 @@ def read_modes(
         ext = ".mod"  # Default extension
 
     filename = fileroot + ext
-    if ext == ".mod":
-        Modes = read_modes_bin(filename, frequency, modes, profile=profile)
-
-    elif ext == ".moa":
-        if profile != 1:
-            raise ConfigurationError(
-                f"read_modes: profile={profile} requested for an ASCII mode "
-                "file; the ASCII layout holds a single mode set. Read a "
-                "binary .mod to reach further profiles."
-            )
-        Modes = read_modes_asc(filename, modes)
-
-    else:
-        raise ConfigurationError(f"read_modes: Unrecognized file extension {ext}")
+    if ext != ".mod":
+        raise FileFormatError(
+            f"read_modes: {filename} is not a binary .mod mode file; the "
+            f"binary direct-access .mod is the only mode format any "
+            f"Acoustics-Toolbox program writes (the '.moa' ASCII reader was "
+            f"removed — no AT program ever produced that format).",
+            remediation="Read the solver's .mod output, or pass the root "
+                        "name and let '.mod' be appended.",
+        )
+    Modes = read_modes_bin(filename, frequency, modes, profile=profile)
     freq_diff = np.abs(Modes["freqVec"] - frequency)
     freq_index = int(np.argmin(freq_diff))
     f_selected = float(Modes["freqVec"][freq_index])

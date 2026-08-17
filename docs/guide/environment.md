@@ -229,7 +229,7 @@ range-independent case.
 | Factory | Use |
 |---|---|
 | `SoundSpeedProfile.from_pairs([(z, c), …])` | measured cast — the common case |
-| `SoundSpeedProfile.from_isovelocity(depth_max, c=1500.0)` | constant column |
+| `SoundSpeedProfile.from_isovelocity(depth_max, sound_speed=1500.0)` | constant column |
 | `SoundSpeedProfile.from_munk(depth_max, n_points=101)` | deep-water canonical profile |
 | `SoundSpeedProfile.from_mackenzie(depths, T, S)` | from in-situ `T(z)` and `S(z)` |
 | `SoundSpeedProfile.from_2d(depths, ranges, matrix)` | range-dependent `c(z, r)` |
@@ -743,6 +743,16 @@ One environment, three views. The reduced panels are built with the **public**
 carrier reductions — `Bottom.collapse(layers=…)`, `Bottom.select_range(…)`,
 `Environment.get_representative_depth(…)` — at each model's documented default
 method, so each panel reproduces exactly what that model hands its writer.
+
+The averaging reductions have one boundary-type rule: `'mean'` / `'median'` on
+`Bottom.select_range` and `Surface.collapse` average only across columns/nodes
+that share a single `acoustic_type` (blending, say, a vacuum node into a sand
+half-space would fold placeholders into the numbers). Over uniform `'file'` /
+`'precalc'` columns — where each column *is* a reflection-coefficient table,
+with no real numbers to average — they collapse to the shared reflection file,
+reducing only the roughness (the one genuine number those columns carry), and
+**raise** when the files differ: tables cannot be blended, so pick a column
+with `'r0'` / `'rmax'` instead.
 
 Bellhop keeps the slope, the two seabed columns and the rough surface, and
 loses only the sand and silt layers: past 10 km the fill turns to the pale

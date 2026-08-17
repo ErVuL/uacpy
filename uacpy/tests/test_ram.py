@@ -971,3 +971,69 @@ class TestEveryPerRangeStreamBoundsDr:
         with pytest.warns(UserWarning, match='silently dropped'):
             m._constrain_dr_to_sections(250.0, segs, pinned=True,
                                         bathymetry_ranges=bathy)
+
+
+class TestZeroRangeReceiverIsNaN:
+    """A receiver at r = 0 sits on the source axis, where the point-source
+    cylindrical-spreading factor 1/sqrt(r) is singular: the column is
+    returned as NaN with a warning — the convention every model shares —
+    never a finite value computed at a substituted range but labelled r = 0.
+    The broadband path handles its own zero-range output bin separately by
+    clipping the coordinate to match the scaled data."""
+
+    @staticmethod
+    def _setup():
+        env = Environment(
+            bathymetry=100.0, ssp=1500.0,
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=1600.0, density=1.5,
+                                      attenuation=0.5))
+        src = Source(depths=25.0, frequencies=100.0)
+        rcv = Receiver(depths=np.array([50.0]),
+                       ranges=np.array([0.0, 500.0, 1000.0]))
+        return env, src, rcv
+
+    def test_mpirams_tl_r0_column_is_nan_and_warns(self):
+        env, src, rcv = self._setup()
+        with pytest.warns(UserWarning, match=r"1/sqrt\(r\)"):
+            field = RAM(verbose=False).run(env, src, rcv,
+                                           run_mode=RunMode.COHERENT_TL)
+        assert np.isnan(field.data[:, 0]).all()
+        assert np.isfinite(field.data[:, 1:]).all()
+        np.testing.assert_allclose(field.coords['range'],
+                                   [0.0, 500.0, 1000.0])
+
+
+class TestBroadbandSynthesisWindowAnchor:
+    """The auto time-window of ``to_time_trace`` anchors on physical speeds
+    (``c_max``), never on the Padé expansion point. Stamped as ``c0``, the
+    expansion point (1677 m/s here, against an all-1500 m/s medium) entered
+    the fastest-speed max and opened the window a half-second early: the
+    3.333 s water arrival fell past the window end and wrapped silently to
+    ~2.94 s. It now rides on ``pe_reference_speed``, which the anchor
+    ignores."""
+
+    def test_time_trace_window_contains_the_water_arrival(self):
+        env = Environment(
+            bathymetry=100.0, ssp=1500.0,
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=1500.0, density=1.5,
+                                      attenuation=0.5))
+        src = Source(depths=25.0, frequencies=100.0)
+        rcv = Receiver(depths=np.array([50.0]), ranges=np.array([5000.0]))
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            tf = RAM(verbose=False, Q=4.0, T=0.4, theta_max=45.0).run(
+                env, src, rcv, run_mode=RunMode.BROADBAND)
+            trace = tf.to_time_trace(depth=50.0, range=5000.0)
+        assert tf.metadata['pe_reference_speed'] > 1600.0
+        assert 'c0' not in tf.metadata
+        t = np.asarray(trace.coords['time'], dtype=float)
+        arrival = 5000.0 / 1500.0
+        assert t[0] <= arrival <= t[-1], (
+            f"synthesis window [{t[0]:.3f}, {t[-1]:.3f}] s misses the "
+            f"{arrival:.3f} s water arrival")
+        peak = float(t[np.argmax(np.abs(trace.data))])
+        assert abs(peak - arrival) < 0.05, (
+            f"energy peak at {peak:.3f} s is not the {arrival:.3f} s arrival "
+            f"(a wrapped record puts it ~one window earlier)")

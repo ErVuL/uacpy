@@ -20,6 +20,11 @@
 #
 set -euo pipefail
 
+# Per-run build logs live under a mktemp dir (fixed /tmp names collide
+# between users on a shared machine and can be pre-created as symlinks);
+# allocated after argument parsing so --help leaves nothing behind.
+BUILD_LOG_DIR=""
+
 # -------------------------
 # Colors for pretty output
 # -------------------------
@@ -293,6 +298,9 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# Per-run build logs (kept after the run for post-mortem reading).
+BUILD_LOG_DIR="$(mktemp -d -t uacpy_build_logs.XXXXXX)"
 
 # -------------------------
 # OS detection
@@ -946,7 +954,7 @@ make -k all \
     FC=gfortran \
     FFLAGS="$OALIB_FFLAGS" \
     MAKEFLAGS= \
-    2>&1 | tee /tmp/oalib_build.log
+    2>&1 | tee "${BUILD_LOG_DIR}"/oalib_build.log
 OALIB_STATUS=${PIPESTATUS[0]:-1}
 set -e
 
@@ -955,10 +963,10 @@ if [[ $OALIB_STATUS -eq 0 ]]; then
     STATUS_OALIB="ok"
     NOTE_OALIB="$BIN_DIR_OALIB"
 else
-    echo -e "${YELLOW}⚠ OALIB build had issues (exit $OALIB_STATUS). See /tmp/oalib_build.log${NC}"
+    echo -e "${YELLOW}⚠ OALIB build had issues (exit $OALIB_STATUS). See ${BUILD_LOG_DIR}/oalib_build.log${NC}"
     echo -e "${YELLOW}  Continuing — any binaries that built will still be installed.${NC}"
     STATUS_OALIB="partial"
-    NOTE_OALIB="see /tmp/oalib_build.log"
+    NOTE_OALIB="see ${BUILD_LOG_DIR}/oalib_build.log"
 fi
 echo ""
 
@@ -987,6 +995,10 @@ if [ ! -d "$OASES_DIR" ]; then
     check_tar
     echo -e "${BLUE}Downloading OASES from $OASES_URL ...${NC}"
     OASES_TMP="$(mktemp -d)"
+    # An abort between here and the rm at the end of this function must not
+    # leak the scratch dir (plus its ~100 MB tarball).
+    trap 'rm -rf "$OASES_TMP"' EXIT
+    trap 'rm -rf "$OASES_TMP"; exit 130' INT TERM
     OASES_TARBALL="$OASES_TMP/oases.tar.gz"
 
     # --proto-redir =https blocks a redirect from downgrading to HTTP (kept as an
@@ -1120,7 +1132,7 @@ if [ -d "$OASES_DIR" ]; then
     OASES_FFLAGS="-O2"
     OASES_CFLAGS="-O2"
 
-    echo -e "${BLUE}Starting OASES make (log -> /tmp/oases_build.log)${NC}"
+    echo -e "${BLUE}Starting OASES make (log -> ${BUILD_LOG_DIR}/oases_build.log)${NC}"
     echo -e "  - HOSTTYPE=${OASES_HOSTTYPE}  OSTYPE=${OASES_OSTYPE}"
     echo -e "  - FC_STMNT='${OASES_FC}'  FFLAGS=${OASES_FFLAGS}"
 
@@ -1142,14 +1154,14 @@ if [ -d "$OASES_DIR" ]; then
         CFLAGS="$OASES_CFLAGS" \
         LFLAGS="" \
         RANLB=ranlib \
-        oases 2>&1 | tee /tmp/oases_build.log
+        oases 2>&1 | tee "${BUILD_LOG_DIR}"/oases_build.log
     OASES_STATUS=${PIPESTATUS[0]:-1}
     set -e
 
     if [[ $OASES_STATUS -eq 0 ]]; then
         echo -e "${GREEN}✓ OASES build completed${NC}"
     else
-        echo -e "${YELLOW}⚠ OASES build had issues. See /tmp/oases_build.log${NC}"
+        echo -e "${YELLOW}⚠ OASES build had issues. See ${BUILD_LOG_DIR}/oases_build.log${NC}"
     fi
 
     # Try to copy installed binaries (if any)
@@ -1174,9 +1186,9 @@ if [ -d "$OASES_DIR" ]; then
     ) || true
 
     if [[ $OASES_INSTALLED -eq 0 ]]; then
-        echo -e "${YELLOW}No OASES executables installed. Check /tmp/oases_build.log${NC}"
+        echo -e "${YELLOW}No OASES executables installed. Check ${BUILD_LOG_DIR}/oases_build.log${NC}"
         STATUS_OASES="failed"
-        NOTE_OASES="see /tmp/oases_build.log"
+        NOTE_OASES="see ${BUILD_LOG_DIR}/oases_build.log"
     else
         echo -e "${GREEN}✓ Installed $OASES_INSTALLED OASES components${NC}"
         STATUS_OASES="ok"
@@ -1214,7 +1226,7 @@ if [ -d "$MPIRAMS_DIR" ]; then
     # Ubuntu the f77 symlink resolves to gfortran; on macOS no such alias
     # exists and the build fails with "f77: No such file or directory".
     set +e
-    make FC=gfortran FFLAGS="$MPIRAMS_FFLAGS" LDFLAGS="$MPIRAMS_LDFLAGS" 2>&1 | tee /tmp/mpirams_build.log
+    make FC=gfortran FFLAGS="$MPIRAMS_FFLAGS" LDFLAGS="$MPIRAMS_LDFLAGS" 2>&1 | tee "${BUILD_LOG_DIR}"/mpirams_build.log
     MPIRAMS_STATUS=${PIPESTATUS[0]:-1}
     set -e
 
@@ -1225,9 +1237,9 @@ if [ -d "$MPIRAMS_DIR" ]; then
         STATUS_MPIRAMS="ok"
         NOTE_MPIRAMS="$BIN_DIR_MPIRAMS"
     else
-        echo -e "${YELLOW}⚠ mpiramS build failed. See /tmp/mpirams_build.log${NC}"
+        echo -e "${YELLOW}⚠ mpiramS build failed. See ${BUILD_LOG_DIR}/mpirams_build.log${NC}"
         STATUS_MPIRAMS="failed"
-        NOTE_MPIRAMS="see /tmp/mpirams_build.log"
+        NOTE_MPIRAMS="see ${BUILD_LOG_DIR}/mpirams_build.log"
     fi
 else
     echo -e "${YELLOW}mpiramS source not found at: $MPIRAMS_DIR. Skipping.${NC}"
@@ -1265,7 +1277,7 @@ if [ -d "$RAMSURF_DIR" ]; then
     # FC=gfortran: same reason as mpiramS — make's built-in FC=f77 wins
     # over the Makefile's `FC ?= gfortran`, and no f77 alias exists on macOS.
     set +e
-    make FC=gfortran FFLAGS="$RAMSURF_FFLAGS" 2>&1 | tee /tmp/ramsurf_build.log
+    make FC=gfortran FFLAGS="$RAMSURF_FFLAGS" 2>&1 | tee "${BUILD_LOG_DIR}"/ramsurf_build.log
     RAMSURF_STATUS=${PIPESTATUS[0]:-1}
     set -e
 
@@ -1289,12 +1301,12 @@ if [ -d "$RAMSURF_DIR" ]; then
             NOTE_RAMSURF="$RAMSURF_INSTALLED/2 binaries → $BIN_DIR_RAMSURF"
         else
             STATUS_RAMSURF="failed"
-            NOTE_RAMSURF="see /tmp/ramsurf_build.log"
+            NOTE_RAMSURF="see ${BUILD_LOG_DIR}/ramsurf_build.log"
         fi
     else
-        echo -e "${YELLOW}⚠ ramsurf build failed. See /tmp/ramsurf_build.log${NC}"
+        echo -e "${YELLOW}⚠ ramsurf build failed. See ${BUILD_LOG_DIR}/ramsurf_build.log${NC}"
         STATUS_RAMSURF="failed"
-        NOTE_RAMSURF="see /tmp/ramsurf_build.log"
+        NOTE_RAMSURF="see ${BUILD_LOG_DIR}/ramsurf_build.log"
     fi
 else
     echo -e "${YELLOW}ramsurf source not found at: $RAMSURF_DIR. Skipping.${NC}"
@@ -1332,7 +1344,7 @@ if [ -d "$RAMGEO_DIR" ]; then
     # (gfortran ships via the Homebrew `gcc` formula). No OpenMP — RAMGEO is
     # single-threaded, like ramsurf.
     set +e
-    make FC=gfortran FFLAGS="$RAMGEO_FFLAGS" 2>&1 | tee /tmp/ramgeo_build.log
+    make FC=gfortran FFLAGS="$RAMGEO_FFLAGS" 2>&1 | tee "${BUILD_LOG_DIR}"/ramgeo_build.log
     RAMGEO_STATUS=${PIPESTATUS[0]:-1}
     set -e
 
@@ -1343,9 +1355,9 @@ if [ -d "$RAMGEO_DIR" ]; then
         STATUS_RAMGEO="ok"
         NOTE_RAMGEO="$BIN_DIR_RAMGEO"
     else
-        echo -e "${YELLOW}⚠ RAMGEO build failed. See /tmp/ramgeo_build.log${NC}"
+        echo -e "${YELLOW}⚠ RAMGEO build failed. See ${BUILD_LOG_DIR}/ramgeo_build.log${NC}"
         STATUS_RAMGEO="failed"
-        NOTE_RAMGEO="see /tmp/ramgeo_build.log"
+        NOTE_RAMGEO="see ${BUILD_LOG_DIR}/ramgeo_build.log"
     fi
 else
     echo -e "${YELLOW}RAMGEO source not found at: $RAMGEO_DIR. Skipping.${NC}"
@@ -1441,7 +1453,7 @@ if [ ${#OALIB_MISSING[@]} -gt 0 ]; then
     OALIB_MISSING_LIST="$(IFS=,; echo "${OALIB_MISSING[*]}")"
     echo -e "${RED}✗ OALIB build is missing required binaries: ${OALIB_MISSING_LIST}${NC}"
     STATUS_OALIB="failed"
-    NOTE_OALIB="missing: ${OALIB_MISSING_LIST} (see /tmp/oalib_build.log)"
+    NOTE_OALIB="missing: ${OALIB_MISSING_LIST} (see ${BUILD_LOG_DIR}/oalib_build.log)"
 fi
 echo ""
 
@@ -1550,8 +1562,13 @@ download_woa23() {
             fname="woa23_${WOA_DECADE}_${var}${p}_${WOA_CODE}.nc"
             if [[ "$FORCE" != "1" && -s "${dir}/${fname}" ]]; then continue; fi
             url="${base}/${folder}/netcdf/${WOA_DECADE}/${WOA_RESOLUTION}/${fname}"
-            if ! robust_curl "$url" "${dir}/${fname}"; then
-                echo -e "${RED}  ✗ ${fname}${NC}"; rm -f "${dir}/${fname}"; ok=0
+            # Fetch to .part and move into place only on success: an
+            # interrupted transfer must never leave a truncated file the
+            # -s re-run guard above would accept as complete.
+            if robust_curl "$url" "${dir}/${fname}.part"; then
+                mv -f "${dir}/${fname}.part" "${dir}/${fname}"
+            else
+                echo -e "${RED}  ✗ ${fname}${NC}"; rm -f "${dir}/${fname}.part"; ok=0
             fi
         done
     done
@@ -1571,7 +1588,7 @@ download_sediment() {
     # importable in this Python. Otherwise fall back to a manual-placement note.
     if python3 -c "import uacpy.data" >/dev/null 2>&1; then
         echo -e "${BLUE}Downloading + normalizing NCEI grain-size DB (~3 MB)...${NC}"
-        if python3 -c "import uacpy.data as d; d.download_sediment_db(cache_dir='${dir}', verbose=True)"; then
+        if UACPY_INSTALL_CACHE_DIR="$dir" python3 -c "import os; import uacpy.data as d; d.download_sediment_db(cache_dir=os.environ['UACPY_INSTALL_CACHE_DIR'], verbose=True)"; then
             echo -e "${GREEN}✓ Sediment grain-size DB ready${NC}"; return 0
         fi
         echo -e "${YELLOW}◐ Automatic sediment download failed.${NC}"
@@ -1594,7 +1611,7 @@ download_emodnet() {
     # public WFS and stored as a local polygon index by emodnet_local.
     if python3 -c "import uacpy.data.emodnet_local" >/dev/null 2>&1; then
         echo -e "${BLUE}Downloading EMODnet seabed substrate (European seas)...${NC}"
-        if python3 -c "from uacpy.data import emodnet_local; emodnet_local.download_emodnet_db(cache_dir='${dir}', verbose=True)"; then
+        if UACPY_INSTALL_CACHE_DIR="$dir" python3 -c "import os; from uacpy.data import emodnet_local; emodnet_local.download_emodnet_db(cache_dir=os.environ['UACPY_INSTALL_CACHE_DIR'], verbose=True)"; then
             echo -e "${GREEN}✓ EMODnet seabed substrate ready${NC}"; return 0
         fi
         echo -e "${YELLOW}◐ Automatic EMODnet download failed.${NC}"
@@ -1614,7 +1631,7 @@ download_coastline() {
     fi
     if python3 -c "import uacpy.visualization.basemap" >/dev/null 2>&1; then
         echo -e "${BLUE}Downloading Natural Earth coastline (public domain)...${NC}"
-        if python3 -c "from uacpy.visualization.basemap import download_coastline; download_coastline(cache_dir='${dir}', verbose=True)"; then
+        if UACPY_INSTALL_CACHE_DIR="$dir" python3 -c "import os; from uacpy.visualization.basemap import download_coastline; download_coastline(cache_dir=os.environ['UACPY_INSTALL_CACHE_DIR'], verbose=True)"; then
             echo -e "${GREEN}✓ Coastline polygons ready${NC}"; return 0
         fi
         echo -e "${YELLOW}◐ Automatic coastline download failed.${NC}"
@@ -1650,7 +1667,7 @@ download_crust1() {
     fi
     if python3 -c "import uacpy.data.crust1_local" >/dev/null 2>&1; then
         echo -e "${BLUE}Downloading CRUST1.0 layered crustal model (~1 MB, no formal licence)...${NC}"
-        if python3 -c "from uacpy.data import crust1_local; crust1_local.download_crust1_db(cache_dir='${dir}', verbose=True)"; then
+        if UACPY_INSTALL_CACHE_DIR="$dir" python3 -c "import os; from uacpy.data import crust1_local; crust1_local.download_crust1_db(cache_dir=os.environ['UACPY_INSTALL_CACHE_DIR'], verbose=True)"; then
             echo -e "${GREEN}✓ CRUST1.0 grids ready${NC}"; return 0
         fi
         echo -e "${YELLOW}◐ Automatic CRUST1.0 download failed.${NC}"
@@ -1672,7 +1689,7 @@ download_diesing() {
     # the lithology raster extracted by diesing_local (PANGAEA serves urllib fast).
     if python3 -c "import uacpy.data.diesing_local" >/dev/null 2>&1; then
         echo -e "${BLUE}Downloading Diesing 2020 deep-sea lithology (CC-BY, ~40 MB)...${NC}"
-        if python3 -c "from uacpy.data import diesing_local; diesing_local.download_diesing_db(cache_dir='${dir}', verbose=True)"; then
+        if UACPY_INSTALL_CACHE_DIR="$dir" python3 -c "import os; from uacpy.data import diesing_local; diesing_local.download_diesing_db(cache_dir=os.environ['UACPY_INSTALL_CACHE_DIR'], verbose=True)"; then
             echo -e "${GREEN}✓ Diesing lithology map ready${NC}"; return 0
         fi
         echo -e "${YELLOW}◐ Automatic Diesing download failed.${NC}"
@@ -1694,7 +1711,7 @@ download_seaice() {
     # Builds a monthly climatology from NSIDC Sea Ice Index grids (needs tifffile).
     if python3 -c "import uacpy.data.seaice_local, tifffile" >/dev/null 2>&1; then
         echo -e "${BLUE}Building NSIDC sea-ice monthly climatology (downloads ~120 grids; a few minutes)...${NC}"
-        if python3 -c "from uacpy.data import seaice_local; seaice_local.download_seaice_db(cache_dir='${dir}', verbose=True)"; then
+        if UACPY_INSTALL_CACHE_DIR="$dir" python3 -c "import os; from uacpy.data import seaice_local; seaice_local.download_seaice_db(cache_dir=os.environ['UACPY_INSTALL_CACHE_DIR'], verbose=True)"; then
             echo -e "${GREEN}✓ Sea-ice climatology ready${NC}"; return 0
         fi
         echo -e "${YELLOW}◐ Automatic sea-ice build failed.${NC}"
@@ -1716,7 +1733,7 @@ download_glodap() {
     # downloaded and only the in-situ pH grid extracted by glodap_local.
     if python3 -c "import uacpy.data.glodap_local" >/dev/null 2>&1; then
         echo -e "${BLUE}Downloading GLODAPv2.2016b mapped pH (CC-BY, ~211 MB tarball)...${NC}"
-        if python3 -c "from uacpy.data import glodap_local; glodap_local.download_glodap_db(cache_dir='${dir}', verbose=True)"; then
+        if UACPY_INSTALL_CACHE_DIR="$dir" python3 -c "import os; from uacpy.data import glodap_local; glodap_local.download_glodap_db(cache_dir=os.environ['UACPY_INSTALL_CACHE_DIR'], verbose=True)"; then
             echo -e "${GREEN}✓ GLODAP pH grid ready${NC}"; return 0
         fi
         echo -e "${YELLOW}◐ Automatic GLODAP download failed.${NC}"
@@ -1738,7 +1755,7 @@ download_wind() {
     # monthly grids (needs netCDF4). Public domain.
     if python3 -c "import uacpy.data.wind_local, netCDF4" >/dev/null 2>&1; then
         echo -e "${BLUE}Building NBS wind monthly climatology (downloads ERDDAP grids; a few minutes)...${NC}"
-        if python3 -c "from uacpy.data import wind_local; wind_local.download_wind_db(cache_dir='${dir}', verbose=True)"; then
+        if UACPY_INSTALL_CACHE_DIR="$dir" python3 -c "import os; from uacpy.data import wind_local; wind_local.download_wind_db(cache_dir=os.environ['UACPY_INSTALL_CACHE_DIR'], verbose=True)"; then
             echo -e "${GREEN}✓ NBS wind climatology ready${NC}"; return 0
         fi
         echo -e "${YELLOW}◐ Automatic wind build failed.${NC}"
@@ -1759,10 +1776,13 @@ download_graw() {
     fi
     # Graw 2021 predicted global seabed bulk density (Zenodo, CC-BY 4.0, ~37 MB).
     echo -e "${BLUE}Downloading Graw 2021 seabed density grid (~37 MB)...${NC}"
-    if curl -fL --retry 3 -o "$out" "https://zenodo.org/records/3762390/files/Dataset_S2.nc"; then
+    # Staged .part + robust_curl (the shared download policy): a truncated
+    # final file would pass the -s guard above on every later run.
+    if robust_curl "https://zenodo.org/records/3762390/files/Dataset_S2.nc" "${out}.part"; then
+        mv -f "${out}.part" "$out"
         echo -e "${GREEN}✓ Graw density grid ready${NC}"; return 0
     fi
-    rm -f "$out"
+    rm -f "${out}.part"
     echo "    Fetch it from Python once uacpy is installed:"
     echo "      python -c \"from uacpy.data import graw_local; graw_local.download_graw_db()\""
     NOTE_DATA="${NOTE_DATA} graw:manual"
@@ -1839,7 +1859,7 @@ print_status_row "Offline data cache" "$STATUS_DATA"      "$NOTE_DATA"
 echo ""
 echo -e "${BLUE}Notes:${NC}"
 echo "  - OALIB row covers Bellhop (Fortran), Kraken, KrakenC, Bounce, Scooter, SPARC, KrakenField."
-echo "  - Per-build logs: /tmp/oalib_build.log /tmp/oases_build.log /tmp/mpirams_build.log /tmp/ramsurf_build.log"
+echo "  - Per-build logs: ${BUILD_LOG_DIR}/oalib_build.log ${BUILD_LOG_DIR}/oases_build.log ${BUILD_LOG_DIR}/mpirams_build.log ${BUILD_LOG_DIR}/ramsurf_build.log"
 echo ""
 echo "Quick test:"
 echo "  cd uacpy && python -c \"import uacpy; print(uacpy.__version__)\""

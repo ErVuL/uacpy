@@ -37,7 +37,9 @@ from uacpy.core.constants import (
 from uacpy.core.environment import BoundaryProperties
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.data import _cache
-from uacpy.data._geo import Coordinate, as_coordinate, normalize_lon
+from uacpy.data._geo import (
+    Coordinate, as_coordinate, normalize_lon, ring_offsets,
+)
 from uacpy.data._http import http_get
 from uacpy.data._time import parse_date
 
@@ -199,12 +201,7 @@ def _observed_at(grid, row, col):
         return float(value)
     height, width = grid.shape
     for radius in range(1, _OBSERVED_CELL_SEARCH_RINGS + 1):
-        ring = [(dr, dc)
-                for dr in range(-radius, radius + 1)
-                for dc in range(-radius, radius + 1)
-                if max(abs(dr), abs(dc)) == radius]
-        ring.sort(key=lambda o: o[0] ** 2 + o[1] ** 2)   # nearest first
-        for dr, dc in ring:
+        for dr, dc in ring_offsets(radius):
             r, c = row + dr, col + dc
             if 0 <= r < height and 0 <= c < width:
                 candidate = grid[r, c]

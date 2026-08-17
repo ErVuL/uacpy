@@ -294,8 +294,10 @@ _DOCUMENTED_METADATA: Dict[Tuple[str, str], Tuple[type, str]] = {
         'consumers that prefer the unwrapped form.'
     ),
     # ───────── RAM dispatcher (mpiramS / rams0.5 / ramsurf1.5) ─────────
-    ('RAM', 'c0'): (
-        float, 'Reference sound speed (m/s) the PE solver was initialised at.'
+    ('RAM', 'pe_reference_speed'): (
+        float, 'Padé expansion point c0 (m/s) the PE march was initialised '
+        'at — an algorithmic reference, not a physical medium speed (the '
+        'physical extremes ride on c_min / c_max).'
     ),
     ('RAM', 'c_min'): (
         float, 'Minimum sound speed (m/s) the solver brackets — used by '
@@ -338,6 +340,11 @@ _DOCUMENTED_METADATA: Dict[Tuple[str, str], Tuple[type, str]] = {
         bool,
         'True when the returned field was resampled onto the user '
         'receiver grid; False / absent when the native grid was kept.'
+    ),
+    ('OAST', 'n_frequencies'): (
+        int,
+        'Number of frequency blocks in the .plt file (multi-frequency '
+        'decks stack NFREQ curve sets; the model path always writes 1).'
     ),
     # ───────── OASN (covariance / replicas) ─────────
     ('OASN', 'xsm_file'): (

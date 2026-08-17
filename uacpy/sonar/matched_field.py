@@ -33,6 +33,7 @@ import warnings
 import numpy as np
 
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.core._beamforming import loaded_inverse, quadratic_form
 
 __all__ = [
     "synthesize_replica",
@@ -55,6 +56,18 @@ def _interp_modes(modes, z: np.ndarray) -> np.ndarray:
     z = np.atleast_1d(np.asarray(z, dtype=float))
     phi = modes.phi  # (n_depth, n_modes)
     zp = modes.depths
+    # np.interp end-clamps outside [zp[0], zp[-1]], returning a flat
+    # plateau that looks like physics; the modal sum in
+    # Modes.modal_propagation_loss raises for the same condition, so this
+    # path does too.
+    if float(np.min(z)) < float(zp[0]) or float(np.max(z)) > float(zp[-1]):
+        raise ConfigurationError(
+            f"matched_field: depth(s) [{float(np.min(z)):g}, "
+            f"{float(np.max(z)):g}] m fall outside the mode tabulation "
+            f"[{float(zp[0]):g}, {float(zp[-1]):g}] m — the mode shapes are "
+            f"unknown there (a clamped value would be a flat, wrong "
+            f"replica). Tabulate the modes over the full source/receiver "
+            f"span (Kraken().compute_modes does).")
     if np.iscomplexobj(phi):
         out = np.empty((z.size, phi.shape[1]), dtype=np.complex128)
         for m in range(phi.shape[1]):
@@ -325,10 +338,12 @@ def csdm(snapshots: np.ndarray) -> np.ndarray:
     ndarray, shape ``(N, N)``
         ``K = (1/L) sum_l d_l d_l^H`` (Hermitian).
     """
-    d = np.atleast_2d(np.asarray(snapshots, dtype=np.complex128))
+    d = np.asarray(snapshots, dtype=np.complex128)
     if d.ndim != 2:
         raise ConfigurationError(
-            f"csdm: snapshots must be 2-D (N, L); got shape {d.shape}"
+            f"csdm: snapshots must be 2-D (n_sensors, n_snapshots); got "
+            f"shape {d.shape}. A single snapshot is column-shaped: "
+            f"d[:, None]."
         )
     return (d @ d.conj().T) / d.shape[1]
 
@@ -374,7 +389,9 @@ def bartlett(K: np.ndarray, replicas: np.ndarray) -> np.ndarray:
     E, grid_shape = _flatten_bank(replicas)
     K = np.asarray(K, dtype=np.complex128)
     trK = np.real(np.trace(K))
-    num = np.real(np.einsum("ng,nm,mg->g", E.conj(), K, E))
+    # The shared Bartlett/MVDR core (core/_beamforming); E is column-major
+    # (N, G), the kernel takes row-major weights.
+    num = quadratic_form(K, E.T)
     # A CSDM with zero trace is a positive-semidefinite matrix of zeros, so the
     # numerator is zero too: divide by 1 to return an all-zero surface rather
     # than 0/0. :func:`mvdr` warns on the same condition because there the
@@ -413,7 +430,6 @@ def mvdr(K: np.ndarray, replicas: np.ndarray, loading: float = 1e-2) -> np.ndarr
     """
     E, grid_shape = _flatten_bank(replicas)
     K = np.asarray(K, dtype=np.complex128)
-    N = K.shape[0]
     # Loading is a *fraction of* tr(K)/N, so it vanishes with the trace: it
     # rescues a rank-deficient CSDM that still carries power, but a CSDM with
     # no power at all (silent snapshots) leaves K singular and every candidate
@@ -423,10 +439,7 @@ def mvdr(K: np.ndarray, replicas: np.ndarray, loading: float = 1e-2) -> np.ndarr
             "mvdr: the CSDM carries no power, so the ambiguity surface is "
             "undefined; returning NaN.", UserWarning, stacklevel=2)
         return np.full(grid_shape, np.nan)
-    if loading:
-        K = K + loading * (np.real(np.trace(K)) / N) * np.eye(N)
-    Kinv = np.linalg.inv(K)
-    denom = np.real(np.einsum("ng,nm,mg->g", E.conj(), Kinv, E))
+    denom = quadratic_form(loaded_inverse(K, loading), E.T)
     # e^H Kinv e is strictly positive for a positive-definite K and a non-zero
     # replica. A non-positive value therefore means the loaded CSDM inverted
     # without staying positive-definite, or the replica column was zero — mark

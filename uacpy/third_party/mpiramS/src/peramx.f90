@@ -441,10 +441,11 @@ allocate(psi1(nzo))
 !     zg1(ii), re(psif(ii,1,ir)), im(psif(ii,1,ir)), ..., re(psif(ii,nf,ir)), im(psif(ii,nf,ir))
 !%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-! Sequential unformatted I/O — gfortran writes a 4-byte big-endian
-! length marker before and after each record. ``scipy.io.FortranFile``
-! parses this format directly. No fixed record size means depth records
-! (1 + 2*nf reals) write as 1+2*nf reals, not padded to max(nf, nr).
+! Sequential unformatted I/O — gfortran writes a 4-byte native-endian
+! length marker before and after each record (little-endian on x86).
+! ``scipy.io.FortranFile`` reads native endianness and parses this format
+! directly. No fixed record size means depth records (1 + 2*nf reals)
+! write as 1+2*nf reals, not padded to max(nf, nr).
 open(nunit, access='sequential', form='unformatted', file='psif.dat')
 
 ! Record 1: header parameters

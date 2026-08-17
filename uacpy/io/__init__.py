@@ -48,7 +48,7 @@ from uacpy.io.oalib_writer import (
     resolve_ssp_interp, resolve_ssp_topopt, resolve_phase_speed_bounds,
 )
 from uacpy.io.modes_reader import (
-    read_modes, read_modes_bin, read_modes_asc, get_component,
+    read_modes, read_modes_bin, get_component,
 )
 from uacpy.io.bathy_io import (
     read_bathymetry, read_altimetry, read_boundary_3d,
@@ -56,7 +56,7 @@ from uacpy.io.bathy_io import (
 )
 from uacpy.io.refl_io import (
     read_reflection_coefficient, read_source_beam_pattern,
-    write_reflection_coefficient, write_source_beam_pattern,
+    write_source_beam_pattern,
     stage_reflection_file, stage_source_beam_pattern,
     dedupe_reflection_file,
 )
@@ -99,7 +99,7 @@ __all__ = [
     "read_source_beam_pattern",
     "dedupe_reflection_file",
     # Mode readers (Kraken)
-    "read_modes", "read_modes_bin", "read_modes_asc", "get_component",
+    "read_modes", "read_modes_bin", "get_component",
     # Scooter / SPARC outputs
     "read_grn_file",
     "grn_to_field", "grn_to_transfer_function",
@@ -127,7 +127,7 @@ __all__ = [
     # Boundary auxiliary writers
     "write_bty_file", "write_bty_long_format", "write_bty_3d",
     "write_ati_file",
-    "write_reflection_coefficient", "write_source_beam_pattern",
+    "write_source_beam_pattern",
     "stage_reflection_file", "stage_source_beam_pattern",
     # Bellhop writer
     "write_bellhop_env_file",
@@ -141,4 +141,11 @@ __all__ = [
     "write_ramin",
     # Utilities
     "equally_spaced",
+    # Submodules (importing uacpy.io makes each reachable as an attribute;
+    # ``units`` stays unlisted — it is an internal conversion helper shared by
+    # readers and writers, not part of the public io surface)
+    "bathy_io", "bellhop_writer", "file_manager", "grn_reader",
+    "modes_reader", "mpirams_reader", "mpirams_writer",
+    "oalib_reader", "oalib_writer", "oases_reader", "oases_writer",
+    "ramsurf_reader", "ramsurf_writer", "refl_io", "utils",
 ]

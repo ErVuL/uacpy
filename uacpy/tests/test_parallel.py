@@ -179,6 +179,21 @@ def test_run_parallel_broken_pool_after_a_job_completes_says_mid_run(monkeypatch
         """First future succeeds; the pool then breaks."""
         def __init__(self, *a, **k):
             self._n = 0
+            # Emulate one worker booting: the real pool runs the initializer
+            # in each worker, and run_parallel's bootstrap-vs-mid-run
+            # discriminator counts those runs.
+            if k.get('initializer') is not None:
+                # _worker_init sets the process-global tempfile.tempdir (in
+                # a REAL pool that happens inside the worker process);
+                # emulating it in-process must restore the global, or every
+                # later temp-file user in this pytest process points at a
+                # directory run_parallel deletes.
+                import tempfile as _tf
+                _saved = _tf.tempdir
+                try:
+                    k['initializer'](*k.get('initargs', ()))
+                finally:
+                    _tf.tempdir = _saved
 
         def __enter__(self): return self
         def __exit__(self, *a): return False

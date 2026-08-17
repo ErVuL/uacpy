@@ -23,7 +23,7 @@ from uacpy.core.constants import (
     DEFAULT_SOUND_SPEED,
 )
 from uacpy.core.exceptions import (
-    ConfigurationError, ExecutableNotFoundError, ModelExecutionError,
+    ConfigurationError, ModelExecutionError,
     UnsupportedFeatureError,
 )
 from uacpy.io.grn_reader import (
@@ -33,7 +33,11 @@ from uacpy.models.base import (
     PropagationModel, RunMode, ModelSpec, USER_FRAME_SKIP,
 )
 from uacpy.io.oalib_reader import read_rts_file
-from uacpy.io.oalib_writer import write_sparc_env_file, reject_unsupported_ssp_interp
+from uacpy.io.oalib_writer import (
+    write_sparc_env_file, reject_unsupported_ssp_interp,
+    resolve_phase_speed_bounds,
+    SOURCE_TYPE_CODE as _SOURCE_TYPE_CODE,
+)
 
 
 # Factor above the Nyquist minimum used when naming the ``n_t_out`` that would
@@ -145,10 +149,6 @@ def _validate_pulse_type(pulse_type: str) -> str:
     return pulse_type
 
 
-# Source geometry -> fieldsco.m Opt(1:1), consumed by the Hankel transform.
-_SOURCE_TYPE_CODE = {'point': 'R', 'line': 'X', 'scaled': 'S'}
-
-
 class SPARC(PropagationModel):
     """
     SPARC - Seismo-Acoustic Propagation in Realistic oCeans
@@ -246,9 +246,10 @@ class SPARC(PropagationModel):
     effect on the SPARC simulation).
 
     All three ``output_mode``s share one output grid: ``n_t_out``
-    samples over ``[t_start, t_max]``. A grid whose Nyquist sits below
-    the pulse band ``f_max`` aliases and emits a ``UserWarning`` naming
-    the ``n_t_out`` that would resolve it.
+    samples over ``[0, t_max]`` (``t_start`` only sets where the time
+    integration begins, not the output window). A grid whose Nyquist
+    sits below the pulse band ``f_max`` aliases and emits a
+    ``UserWarning`` naming the ``n_t_out`` that would resolve it.
 
     **Collapse defaults (overrides of :data:`DEFAULT_COLLAPSE`).**
     Per-model: ``'ssp': 'mean'``, ``'bottom_range': 'median'`` (the layer
@@ -412,28 +413,36 @@ class SPARC(PropagationModel):
         # ``source.frequencies[0]`` and :data:`DEFAULT_SOUND_SPEED`.
         self.f_min = float(f_min) if f_min is not None else None
         self.f_max = float(f_max) if f_max is not None else None
+        # An inverted or non-positive band feeds sparc.f90:116 a negative
+        # kMax-kMin, i.e. Nk < 0 — the same silent all-zero field the run()
+        # Nk guard refuses — so fail here with the cause named.
+        if self.f_min is not None and self.f_min <= 0.0:
+            raise ConfigurationError(
+                f"SPARC pulse band requires f_min > 0 Hz; got {self.f_min}."
+            )
+        if self.f_max is not None and self.f_max <= 0.0:
+            raise ConfigurationError(
+                f"SPARC pulse band requires f_max > 0 Hz; got {self.f_max}."
+            )
+        if (self.f_min is not None and self.f_max is not None
+                and self.f_min >= self.f_max):
+            raise ConfigurationError(
+                f"SPARC pulse band requires f_min < f_max; got "
+                f"f_min={self.f_min} Hz, f_max={self.f_max} Hz."
+            )
         self.sound_speed = (
             float(sound_speed) if sound_speed is not None else None
         )
 
         # Run modes, capability flags and collapse defaults come from the
         # class-level ``spec`` (applied by PropagationModel.__init__).
-        #
-        # Keep the user's ``executable`` arg verbatim (``None`` when
-        # auto-detected) so ``model.copy()`` re-resolves the binary instead of
-        # re-pinning the already-resolved absolute path. The resolved path
-        # lives in ``self._exe``.
-        self.executable = Path(executable) if executable is not None else None
-        if self.executable is None:
-            self._exe = self._find_executable_in_paths(
+        self._exe = self._resolve_executable(
+            executable,
+            lambda: self._find_executable_in_paths(
                 'sparc.exe', bin_subdirs='oalib',
                 dev_subdir='Acoustics-Toolbox/Scooter',
-            )
-        else:
-            self._exe = self.executable
-
-        if not self._exe.exists():
-            raise ExecutableNotFoundError('SPARC', str(self._exe))
+            ),
+        )
 
     def run(
         self,
@@ -583,14 +592,13 @@ class SPARC(PropagationModel):
     def _run_and_read_rts(self, fm, run_base):
         """Run the binary for ``run_base`` and read back its ``.rts``."""
         self._run_sparc(run_base, fm.work_dir)
-        rts_file = fm.get_path(f'{run_base}.rts')
-        if not rts_file.exists():
-            exc = ModelExecutionError(
-                self.model_name, return_code=0, stdout=None,
-                stderr=f"SPARC did not produce {rts_file}",
-            )
-            self._attach_prt_tail(exc, fm.work_dir, run_base)
-            raise exc
+        # A missing or empty .rts means the binary died silently; the raised
+        # error carries the .prt tail with the actual cause.
+        rts_file = self._require_output(
+            [fm.get_path(f'{run_base}.rts')],
+            what='a time-series file (.rts)',
+            prt_base=run_base, work_dir=fm.work_dir,
+        )
         return read_rts_file(rts_file)
 
     def _require_shared_time_grid(self, rts_data, time, fm, run_base):
@@ -763,14 +771,13 @@ class SPARC(PropagationModel):
         self._write_sparc_env(env_file, env, source, receiver)
         self._run_sparc(base_name, fm.work_dir)
 
-        grn_file = fm.get_path(f'{base_name}.grn')
-        if not grn_file.exists():
-            exc = ModelExecutionError(
-                self.model_name, return_code=0, stdout=None,
-                stderr=f"SPARC did not produce {grn_file}",
-            )
-            self._attach_prt_tail(exc, fm.work_dir, base_name)
-            raise exc
+        # A missing or empty .grn means the binary died silently; the raised
+        # error carries the .prt tail with the actual cause.
+        grn_file = self._require_output(
+            [fm.get_path(f'{base_name}.grn')],
+            what='a snapshot file (.grn)',
+            prt_base=base_name, work_dir=fm.work_dir,
+        )
 
         result = sparc_snapshot_to_time_field(
             read_grn_file(grn_file),
@@ -887,6 +894,29 @@ class SPARC(PropagationModel):
 
         n_t_out = self._resolve_n_t_out(f_max, t_max)
 
+        # Refuse a wavenumber count the binary cannot march. sparc.f90:116
+        # computes Nk = INT( 1000.0*RMax_km*(kMax-kMin)/(2π) ) with
+        # kMin = 2π·fMin/cHigh and kMax = 2π·fMax/cLow, which reduces to
+        # rmax_m·(fMax/cLow − fMin/cHigh). Nk <= 0 runs the march loop
+        # (sparc.f90:269) zero times, so every output comes back all-zero at
+        # exit 0, and :265 reads k(Nk) out of bounds first. Nk = 1 is a
+        # single-sample spectrum; require >= 2, the floor bounce.f90:49's own
+        # tabulation enforces.
+        c_low_res, c_high_res = resolve_phase_speed_bounds(
+            env, self.c_low, self.c_high)
+        nk = int(rmax_m * (f_max / c_low_res - f_min / c_high_res))
+        if nk < 2:
+            raise ConfigurationError(
+                f"SPARC would march Nk = {nk} wavenumber(s) (sparc.f90:116 "
+                f"with rmax = {rmax_m:.6g} m, band {f_min:.6g}–{f_max:.6g} Hz, "
+                f"c_low = {c_low_res:.6g} m/s, c_high = {c_high_res:.6g} m/s): "
+                f"the wavenumber loop would run empty and the field would come "
+                f"back all-zero at exit 0.",
+                remediation="Increase the receiver range or widen the pulse "
+                            "band (f_min/f_max) so that "
+                            "rmax·(f_max/c_low − f_min/c_high) ≥ 2.",
+            )
+
         write_sparc_env_file(
             filepath, env, source, receiver,
             ssp_code=ssp_code,
@@ -907,6 +937,12 @@ class SPARC(PropagationModel):
         """Output time-sample count — the caller's ``n_t_out``, with a warning
         when the resulting grid cannot resolve the pulse band.
 
+        ``n_t_out < 2`` is refused: the deck writes the output times as the
+        ``0.0 t_max /`` pair that ``misc/subtabulate.f90:24`` expands only
+        for ``Nx >= 3``, and ``Nx = 1`` consumes the leading ``0.0`` alone —
+        the whole window is discarded and the binary returns a single-sample
+        p(t) at exit 0.
+
         The native ``p(t)`` sampling is the caller's to choose, so the value is
         kept verbatim. But a grid whose Nyquist ``0.5 · n_t_out / t_max`` sits
         below ``f_max`` aliases silently: the returned p(t) looks perfectly
@@ -917,6 +953,15 @@ class SPARC(PropagationModel):
         (``oalib_writer``), not ``t_start``, which only sets where the
         integration begins.
         """
+        if int(self.n_t_out) < 2:
+            raise ConfigurationError(
+                f"SPARC: n_t_out={self.n_t_out} cannot express the "
+                f"[0, t_max] output window: the deck writes the times as a "
+                f"'0.0 t_max /' pair that misc/subtabulate.f90:24 expands "
+                f"only for Nx >= 3, and Nx = 1 reads the leading 0.0 alone — "
+                f"the run returns a single-sample p(t) at exit 0. Use "
+                f"n_t_out >= 2."
+            )
         window = float(t_max)
         if window > 0 and f_max > 0:
             fs = self.n_t_out / window

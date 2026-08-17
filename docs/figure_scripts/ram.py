@@ -158,7 +158,7 @@ def lytaev_grid():
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
             tl = model.run(env, source, point)
-        return tl.metadata['dr'], tl.metadata['c0']
+        return tl.metadata['dr'], tl.metadata['pe_reference_speed']
 
     swept = [grid_of(RAM(theta_max=angle)) for angle in angles]
     dr_auto, c0_auto = swept[2]

@@ -22,13 +22,18 @@ from typing import Union, Tuple, Dict, Any, Optional
 
 from uacpy._log import log_message
 from uacpy.acoustic_signal.waveforms import sparc_pulse
-from uacpy.core.exceptions import ConfigurationError, FileFormatError
+from uacpy.core.exceptions import (
+    ConfigurationError, FileFormatError, UnsupportedFeatureError,
+)
 from uacpy.core.results import (
     Field, ResultStack, Arrivals, Rays,
 )
 from uacpy.io._fortran_helpers import (
     _bound_counts,
     read_vector as _read_vector, detect_endian, typed_format_error,
+    fortran_float,
+    list_directed_int,
+    read_list_directed_values, take_tokens,
     strip_fortran_comment as _strip_fortran_comment,
     strip_fortran_quotes as _strip_fortran_quotes)
 from uacpy.io.units import km_to_m
@@ -56,7 +61,10 @@ def read_shd_file(filepath: Union[str, Path]):
     Multi-frequency and multi-bearing ``.shd`` files raise
     :class:`FileFormatError`: this wrapper carries neither axis. Call
     :func:`read_shd_bin` directly and build the result from its
-    ``(Ntheta, Nsz, Nrz, Nrr)`` cube.
+    ``(Ntheta, Nsz, Nrz, Nrr)`` cube. A file with several source (x, y)
+    positions (``Nsx``/``Nsy`` > 1, BELLHOP3D / FIELD3D) raises
+    :class:`~uacpy.core.exceptions.UnsupportedFeatureError` for the same
+    reason — use :func:`read_shd_bin` with ``xs=``/``ys=`` per source.
     """
     filepath = Path(filepath)
     shd = read_shd_bin(str(filepath))
@@ -88,6 +96,24 @@ def read_shd_file(filepath: Union[str, Path]):
             f"read_shd_file: {filepath} carries {n_theta} receiver bearings; "
             "use read_shd_bin(filepath) for the full (Ntheta, Nsz, Nrz, Nrr) "
             "cube and build the result from it."
+        )
+
+    # A file with several source (x, y) positions holds one pressure cube
+    # per position; read_shd_bin without xs=/ys= returns only slot (0, 0),
+    # so returning a Field here would silently present one source's field
+    # as the whole file.
+    n_sx = np.atleast_1d(np.asarray(pos['s']['x'], dtype=float)).size
+    n_sy = np.atleast_1d(np.asarray(pos['s']['y'], dtype=float)).size
+    if n_sx > 1 or n_sy > 1:
+        raise UnsupportedFeatureError(
+            'read_shd_file',
+            f"{filepath} carries Nsx={n_sx} x Nsy={n_sy} source positions; "
+            f"this wrapper returns fields for a single source position only",
+            alternatives=[
+                "read_shd_bin(filepath, xs=..., ys=...) once per source "
+                "position and build the result from each cube",
+            ],
+            alternatives_label='readers',
         )
 
     source_depths = np.atleast_1d(np.asarray(pos['s']['z'], dtype=float))
@@ -462,7 +488,7 @@ def read_shd_asc(filepath: Union[str, Path]) -> Dict[str, Any]:
     """
     filepath = Path(filepath)
     if not filepath.exists():
-        raise ConfigurationError(
+        raise FileFormatError(
             f"ASCII shade file not found: {filepath}. No Acoustics-Toolbox "
             "program writes .shd.asc — supply the path to an existing ASCII "
             "shade file, or read a solver-written binary .shd with "
@@ -584,7 +610,7 @@ def read_arr_file(filepath: Union[str, Path], *, grid_type: str = 'R'):
         head_text = ''
 
     if not head_text.lstrip().startswith(("'2D'", "'3D'")):
-        raise ConfigurationError(
+        raise FileFormatError(
             "Binary arrivals format (.arr written by RunType 'a') is not "
             "supported; see ArrMod.f90:WriteArrivalsBinary for the record "
             "layout.",
@@ -592,7 +618,7 @@ def read_arr_file(filepath: Union[str, Path], *, grid_type: str = 'R'):
                         "what uacpy's own runs emit.",
         )
     if head_text.lstrip().startswith("'3D'"):
-        raise ConfigurationError(
+        raise FileFormatError(
             "3-D arrivals format (the '3D' tag written by BELLHOP3D) is not "
             "supported; its records carry ten values per arrival plus a "
             "receiver-bearing loop (Bellhop/ArrMod.f90:256-302).",
@@ -821,17 +847,23 @@ def read_ray_file(filepath: Union[str, Path]):
                 continue
             alpha = float(angle_line.strip())
             counts_line = f.readline()
-            if not counts_line:
-                break
+            if not counts_line or not counts_line.split():
+                # A ray block is the angle record, the counts record, then
+                # the points (Bellhop/WriteRay.f90:41-46); an angle with no
+                # counts record is a run killed mid-write.
+                raise FileFormatError(
+                    f"read_ray_file: {filepath} ends after the take-off "
+                    f"angle {alpha:g} with no point-count record; the file "
+                    f"is truncated (the Bellhop run did not finish writing).",
+                    remediation="Re-run Bellhop, or read only completed "
+                                "rays from a fresh .ray file.",
+                )
 
             # Each ray is three records (Bellhop/WriteRay.f90:41-46): the
             # take-off angle, then ``N2, NumTopBnc, NumBotBnc``, then N2 rows of
             # the coordinate pair. N2 counts the points kept after WriteRay2D's
             # subsampling, not the full step count.
             counts = counts_line.split()
-            if len(counts) < 1:
-                continue
-
             n_points = int(counts[0])
             n_top_bounces = int(counts[1]) if len(counts) > 1 else 0
             n_bot_bounces = int(counts[2]) if len(counts) > 2 else 0
@@ -844,27 +876,32 @@ def read_ray_file(filepath: Union[str, Path]):
 
             for _ in range(n_points):
                 line = f.readline().strip()
-                if not line:
-                    break
                 parts = line.split()
-                if len(parts) >= 2:
-                    # Bellhop's WriteRay2D (WriteRay.f90:45) writes
-                    # ray2D(is)%x directly in meters (the MATLAB
-                    # plotray.m only divides by 1000 when the user
-                    # requests km output). No unit conversion here.
-                    ray_r.append(float(parts[0]))
-                    ray_z.append(float(parts[1]))
+                if len(parts) < 2:
+                    raise FileFormatError(
+                        f"read_ray_file: {filepath} declares {n_points} "
+                        f"points for the ray at {alpha:g} degrees but ends "
+                        f"after {len(ray_r)}; the file is truncated (the "
+                        f"Bellhop run did not finish writing).",
+                        remediation="Re-run Bellhop, or read only completed "
+                                    "rays from a fresh .ray file.",
+                    )
+                # Bellhop's WriteRay2D (WriteRay.f90:45) writes
+                # ray2D(is)%x directly in meters (the MATLAB
+                # plotray.m only divides by 1000 when the user
+                # requests km output). No unit conversion here.
+                ray_r.append(float(parts[0]))
+                ray_z.append(float(parts[1]))
 
-            if len(ray_r) > 0:
-                rays.append(
-                    {
-                        "r": np.array(ray_r),
-                        "z": np.array(ray_z),
-                        "alpha": alpha,
-                        "n_top_bounces": n_top_bounces,
-                        "n_bot_bounces": n_bot_bounces,
-                    }
-                )
+            rays.append(
+                {
+                    "r": np.array(ray_r),
+                    "z": np.array(ray_z),
+                    "alpha": alpha,
+                    "n_top_bounces": n_top_bounces,
+                    "n_bot_bounces": n_bot_bounces,
+                }
+            )
 
     if n_sz <= 1 or n_alpha == 0 or len(rays) != n_sz * n_alpha:
         # Single source, or EIGENRAYS (which writes a non-deterministic
@@ -948,10 +985,12 @@ def read_ssp_2d(filepath: Union[str, Path]) -> Dict[str, Any]:
     Notes
     -----
     - File format:
-        Line 1: NProf (number of range profiles)
-        Line 2: r1 r2 ... rNProf (ranges in km)
-        Lines 3+: Sound speeds for all profiles at each depth
-                  (NProf values per line, NSSP lines total)
+        Record 1: NProf (number of range profiles)
+        Record 2: r1 r2 ... rNProf (ranges in km)
+        Then one record of NProf sound speeds per depth (NSSP records).
+        Each record is a whole-vector list-directed READ
+        (``Bellhop/sspMod.f90:417,428``), so its values may wrap across
+        any number of lines; this parser accepts the same.
 
     - Sound speed matrix c_mat[i, j] gives speed at:
         - depth index i
@@ -972,32 +1011,28 @@ def read_ssp_2d(filepath: Union[str, Path]) -> Dict[str, Any]:
     """
     filepath = Path(filepath)
     # Canonical AT/Bellhop layout (Bellhop/sspMod.f90:407,417,428):
-    #   Line 1            : NProf (integer)
-    #   Line 2            : NProf range values (single list-directed record)
-    #   Lines 3..NSSP+2   : one SSP row per depth, each with NProf values
+    #   READ 1 : NProf (integer)
+    #   READ 2 : NProf range values (one whole-vector list-directed READ)
+    #   then one whole-vector READ of NProf speeds per depth row.
+    # Each whole-vector READ consumes records until its count is satisfied,
+    # so a row may wrap across lines; the remainder of a READ's final line
+    # is discarded, exactly as the Fortran does.
     with open(filepath, "r") as fid:
-        n_prof = int(fid.readline().strip())
-        r_prof = np.array(fid.readline().split()[:n_prof], dtype=float)
-        if r_prof.size != n_prof:
-            raise FileFormatError(
-                f"SSP file {filepath}: expected {n_prof} range values on line 2, "
-                f"parsed {r_prof.size}"
-            )
-        # Each remaining line is one depth row of NProf speed values. The
-        # number of depth rows isn't stored here (it lives in the .env file)
-        # so we read whatever the file contains and infer NSSP.
+        n_prof = list_directed_int(fid.readline())
+        r_prof = read_list_directed_values(
+            fid, n_prof, f"{n_prof} profile ranges", filepath)
+        # The number of depth rows isn't stored here (it lives in the .env
+        # file) so we read rows until the file ends and infer NSSP.
         rows = []
-        for line in fid:
-            tokens = line.split()
-            if not tokens:
+        while True:
+            line = fid.readline()
+            if line == '':
+                break
+            if not _strip_fortran_comment(line).replace(',', ' ').split():
                 continue
-            row = [float(t) for t in tokens]
-            if len(row) != n_prof:
-                raise FileFormatError(
-                    f"SSP file {filepath}: expected {n_prof} values per row, "
-                    f"got {len(row)}"
-                )
-            rows.append(row)
+            rows.append(read_list_directed_values(
+                fid, n_prof, f"SSP depth row {len(rows) + 1} "
+                f"({n_prof} values)", filepath, first_line=line))
         c_mat = np.array(rows)  # shape (n_depth, n_prof)
         n_depth = c_mat.shape[0]
 
@@ -1034,14 +1069,15 @@ def read_ssp_3d(filepath: Union[str, Path]) -> Dict[str, Any]:
 
     Notes
     -----
-    - File format:
-        Line 1: Nx
-        Line 2: x1 x2 ... xNx (x segment boundaries)
-        Line 3: Ny
-        Line 4: y1 y2 ... yNy (y segment boundaries)
-        Line 5: Nz
-        Line 6: z1 z2 ... zNz (depth values)
-        Lines 7+: For each depth iz=1:Nz:
+    - File format (each vector/row is one whole-vector list-directed READ,
+      ``Bellhop/sspMod.f90:570-617``, so its values may wrap across lines):
+        Record 1: Nx
+        Record 2: x1 x2 ... xNx (x segment boundaries)
+        Record 3: Ny
+        Record 4: y1 y2 ... yNy (y segment boundaries)
+        Record 5: Nz
+        Record 6: z1 z2 ... zNz (depth values)
+        Then, for each depth iz=1:Nz:
                     Nx values for y1, then Nx values for y2, ..., Nx values for yNy
 
     - Sound speed accessed as c_mat[iz, iy, ix] for:
@@ -1066,30 +1102,26 @@ def read_ssp_3d(filepath: Union[str, Path]) -> Dict[str, Any]:
     filepath = Path(filepath)
 
     # Bellhop3D (Bellhop/sspMod.f90:570-617) reads each Segx / Segy / Segz
-    # vector and each per-(z, y) SSP row with a single list-directed
-    # READ statement — one Fortran record per vector / row.
-    def _read_vec(fid, n):
-        vec = np.array(fid.readline().split()[:n], dtype=float)
-        if vec.size != n:
-            raise FileFormatError(
-                f"3D SSP file {filepath}: expected {n} values on line, "
-                f"parsed {vec.size}"
-            )
-        return vec
+    # vector and each per-(z, y) SSP row with a single whole-vector
+    # list-directed READ, which spans as many lines as it needs and
+    # discards the remainder of its final line.
+    def _read_vec(fid, n, what):
+        return read_list_directed_values(fid, n, what, filepath)
 
     with open(filepath, "r") as fid:
-        Nx = int(fid.readline().strip())
-        Segx = _read_vec(fid, Nx)
-        Ny = int(fid.readline().strip())
-        Segy = _read_vec(fid, Ny)
-        Nz = int(fid.readline().strip())
-        Segz = _read_vec(fid, Nz)
+        Nx = list_directed_int(fid.readline())
+        Segx = _read_vec(fid, Nx, f"{Nx} x segment values")
+        Ny = list_directed_int(fid.readline())
+        Segy = _read_vec(fid, Ny, f"{Ny} y segment values")
+        Nz = list_directed_int(fid.readline())
+        Segz = _read_vec(fid, Nz, f"{Nz} depth values")
         c_mat = np.zeros((Nz, Ny, Nx))
 
         # Bellhop3D writes outermost-iz, inner-iy, then one record of Nx values.
         for iz in range(Nz):
             for iy in range(Ny):
-                c_mat[iz, iy, :] = _read_vec(fid, Nx)
+                c_mat[iz, iy, :] = _read_vec(
+                    fid, Nx, f"SSP row (iz={iz}, iy={iy}, {Nx} values)")
 
     return {
         "Nx": Nx,
@@ -1192,12 +1224,13 @@ def read_flp(fileroot: Union[str, Path], verbose: bool = False) -> Dict[str, Any
         opt = _strip_fortran_quotes(f.readline())
         log_message('oalib_reader', f"Options: {opt}", verbose=verbose)
 
-        # Fill missing option columns with reasonable placeholders.
-        # pos 3 is the elastic-component / beam-pattern column; we fill
-        # it with ' ' (no beam pattern, no elastic component info) rather
-        # than fabricating a default. pos 4 defaults to 'C' (coherent).
-        if len(opt) <= 2:
-            opt += " "
+        # Fill missing option columns with reasonable placeholders:
+        # positions 2-3 (coupling override, elastic component) default to
+        # ' ' and position 4 to 'C' (coherent). Pad to three columns FIRST
+        # so a one-letter option never lands the 'C' in the component
+        # column (the old two-step pad turned 'R' into 'R C', i.e.
+        # comp = 'C').
+        opt = opt.ljust(3)
         if len(opt) <= 3:
             opt += "C"
 
@@ -1206,9 +1239,12 @@ def read_flp(fileroot: Union[str, Path], verbose: bool = False) -> Dict[str, Any
         # it verbatim rather than inventing a "P" default that wasn't in
         # the file — downstream code can distinguish ' ' vs 'P'.
         comp = opt[2]
-        M_limit = int(_strip_fortran_comment(f.readline()))
+        M_limit = list_directed_int(f.readline())
         log_message('oalib_reader', f"MLimit = {M_limit}", verbose=verbose)
+        # ReadVector Sorts every vector it returns
+        # (misc/SourceReceiverPositions.f90); rProf included (field.f90:106).
         r_prof, N_prof = _read_vector(f)
+        r_prof = np.sort(r_prof)
         log_message('oalib_reader', f"Number of profiles, NProf = {N_prof}",
                     verbose=verbose)
         if N_prof < 10:
@@ -1218,12 +1254,16 @@ def read_flp(fileroot: Union[str, Path], verbose: bool = False) -> Dict[str, Any
         log_message('oalib_reader', f"profile ranges rProf (km): {preview}",
                     verbose=verbose, level='debug')
 
+        # Receiver ranges pass through Sort in the Fortran
+        # (misc/SourceReceiverPositions.f90:268).
         r_rcv, _ = _read_vector(f)
-        r_rcv = km_to_m(r_rcv)
+        r_rcv = np.sort(km_to_m(r_rcv))
         pos_temp = _read_sz_rz(f)
         # Rro is read by AT with Units='m' (KrakenField/field.f90:147), so the
         # column is already metres on disk — no conversion.
+        # Rro passes through the same Sort (field.f90:147).
         r_offsets, N_offsets = _read_vector(f)
+        r_offsets = np.sort(r_offsets)
 
         log_message('oalib_reader',
                     f"Number of receiver range offsets = {N_offsets}",
@@ -1313,25 +1353,37 @@ def read_flp3d(fileroot: Union[str, Path]) -> Dict[str, Any]:
     with open(filepath, "r") as f:
         title = _strip_fortran_quotes(f.readline())
         opt = _strip_fortran_quotes(f.readline())
-        M_limit = int(_strip_fortran_comment(f.readline()))
+        M_limit = list_directed_int(f.readline())
 
         s_x, n_sx = _read_vector(f)
+        s_x = np.sort(s_x)
         s_y, n_sy = _read_vector(f)
+        s_y = np.sort(s_y)
         pos_temp = _read_sz_rz(f)
+        # Ranges and bearings pass through Sort in the Fortran
+        # (misc/SourceReceiverPositions.f90).
         r_rcv, _ = _read_vector(f)
+        r_rcv = np.sort(r_rcv)
         theta_rcv, _ = _read_vector(f)
+        theta_rcv = np.sort(theta_rcv)
+        # ReadRcvrBearings drops a duplicate closing radial (a 0..360 deg
+        # fan lists the same bearing twice) —
+        # misc/SourceReceiverPositions.f90:176-179.
+        if (theta_rcv.size > 1
+                and abs((theta_rcv[-1] - theta_rcv[0]) % 360.0) < 1e-9):
+            theta_rcv = theta_rcv[:-1]
 
-        n_nodes = int(_strip_fortran_comment(f.readline()))
+        n_nodes = list_directed_int(f.readline())
         node_x = np.zeros(n_nodes)
         node_y = np.zeros(n_nodes)
         mode_files = []
         for i in range(n_nodes):
             parts = _strip_fortran_comment(f.readline()).split()
-            node_x[i] = float(parts[0])
-            node_y[i] = float(parts[1])
+            node_x[i] = fortran_float(parts[0])
+            node_y[i] = fortran_float(parts[1])
             mode_files.append(parts[2].strip("'\""))
 
-        n_elts = int(_strip_fortran_comment(f.readline()))
+        n_elts = list_directed_int(f.readline())
         elements = np.zeros((n_elts, 3), dtype=int)
         for i in range(n_elts):
             elements[i] = [int(v) for v in
@@ -1370,12 +1422,16 @@ def _read_sz_rz(fid) -> Dict[str, np.ndarray]:
 
     Helper function for read_flp.
     """
+    # SubTab is followed by Sort in the Fortran
+    # (misc/SourceReceiverPositions.f90:224,268), so the solver computes on
+    # ascending depth axes whatever order the deck listed them in.
     sz, _ = _read_vector(fid)
     rz, _ = _read_vector(fid)
 
-    return {"sz": sz, "rz": rz}
+    return {"sz": np.sort(sz), "rz": np.sort(rz)}
 
 
+@typed_format_error
 def read_rts_file(filepath: Union[str, Path]) -> Dict[str, Any]:
     """
     Read SPARC time series file (.rts).
@@ -1485,12 +1541,12 @@ def rts_to_pressure(
     """
     Project SPARC time-series data onto complex pressure at one frequency.
 
-    ``method='fft'`` extracts the spectral bin nearest ``frequency`` from a
-    Hanning-windowed FFT; ``method='goertzel'`` uses the Goertzel
-    single-bin DFT. Both return ``(p_at_freq, ranges)`` where
-    ``p_at_freq`` is the model-native, source-normalised complex pressure
-    suitable for wrapping in a complex narrowband :class:`Field`
-    (``coords={'depth', 'range'}``, ``phase_reference='travelling_wave'``).
+    ``method='fft'`` (the only method) extracts the spectral bin nearest
+    ``frequency`` from a Hanning-windowed FFT and returns
+    ``(p_at_freq, ranges)`` where ``p_at_freq`` is the model-native,
+    source-normalised complex pressure suitable for wrapping in a complex
+    narrowband :class:`Field` (``coords={'depth', 'range'}``,
+    ``phase_reference='travelling_wave'``).
 
     A post-processing utility for a ``.rts`` read by :func:`read_rts_file`;
     :class:`uacpy.models.SPARC` returns ``p(t)`` and does not call it. The
@@ -1501,7 +1557,7 @@ def rts_to_pressure(
     dt = rts_data["dt"]
     ranges = rts_data["ranges"]
 
-    nt, nr = p.shape
+    nt = p.shape[0]
 
     if pulse_type is not None:
         # Deconvolve the known source spectrum (convolution theorem): the range
@@ -1539,28 +1595,12 @@ def rts_to_pressure(
         freqs = np.fft.rfftfreq(nt, dt)
         freq_idx = np.argmin(np.abs(freqs - frequency))
         p_at_freq = 2.0 * p_freq[freq_idx, :] / np.sum(window)
-    elif method == "goertzel":
-        omega = 2 * np.pi * frequency
-        coeff = 2 * np.cos(omega * dt)
-        p_at_freq = np.zeros(nr, dtype=complex)
-        for ir in range(nr):
-            s0 = 0.0
-            s1 = 0.0
-            s2 = 0.0
-            for it in range(nt):
-                s0 = p[it, ir] + coeff * s1 - s2
-                s2 = s1
-                s1 = s0
-            # After the shift ``s1`` aliases ``s0``, so the closing combination
-            # must use ``s2`` — the state one step back. The leading
-            # ``exp(+i w dt)`` advances by the one sample the recurrence lags,
-            # which is what makes this agree with ``np.fft.rfft`` bin-for-bin.
-            p_at_freq[ir] = s0 * np.exp(1j * omega * dt) - s2
-        p_at_freq = 2.0 * p_at_freq / nt
     else:
         raise ConfigurationError(
-            f"rts_to_pressure: unknown method {method!r}; "
-            f"use 'fft' or 'goertzel'."
+            f"rts_to_pressure: unknown method {method!r}; only 'fft' is "
+            f"supported (the 'goertzel' single-bin DFT was removed — it "
+            f"reproduced the rfft bin to machine precision but skipped the "
+            f"window, so its answer was not comparable)."
         )
 
     return p_at_freq, ranges
@@ -1593,10 +1633,16 @@ def read_ts(filepath: Union[str, Path]) -> Dict[str, Any]:
     -----
     File format:
     - Line 1: Plot title
-    - Line 2: nrd (number of receiver depths)
-    - Line 3: rd values (receiver depths in m)
-    - Following lines: time RTS[0,:] RTS[1,:] ... (nt rows)
-      First column is time, remaining columns are RTS values at each depth
+    - Then a free whitespace-separated token stream: nrd (number of
+      receiver depths), nrd depth values (m), then repeating blocks of
+      ``1 + nrd`` values — ``t, RTS(rd_1, t), ..., RTS(rd_nrd, t)``.
+
+    ``read_ts.m`` reads everything after the title with ``fscanf`` —
+    ``rz = fscanf(fid, '%f', nrz)`` then
+    ``temp = fscanf(fid, '%f', [nrz + 1, inf])`` — which ignores line
+    breaks entirely, so this parser tokenises the whole stream the same
+    way. A trailing partial time-step block (a run killed mid-write) is
+    dropped, matching the MATLAB column-major fill.
 
     This format is simpler than the .rts format used by SPARC.
 
@@ -1630,23 +1676,35 @@ def read_ts(filepath: Union[str, Path]) -> Dict[str, Any]:
             'tout': mat_data['tout'].ravel(),
             'RTS': mat_data['RTS'].T  # MATLAB stores transposed
         }
+    # Everything after the title line is a free fscanf-style token stream
+    # (read_ts.m:33-35): line breaks carry no meaning at all.
     with open(filepath, 'r') as f:
         plot_title = f.readline().strip()
-        nrd = int(f.readline().strip())
-        rd = np.array([float(x) for x in f.readline().strip().split()])
+        tokens = f.read().split()
 
-        if len(rd) != nrd:
-            raise FileFormatError(f"Expected {nrd} receiver depths, got {len(rd)}")
-        data = []
-        for line in f:
-            line = line.strip()
-            if line:
-                values = [float(x) for x in line.split()]
-                data.append(values)
+    if not tokens:
+        raise FileFormatError(
+            f"read_ts: {filepath} carries no data after the title line."
+        )
+    nrd = int(fortran_float(tokens[0]))
+    if nrd <= 0:
+        raise FileFormatError(
+            f"read_ts: {filepath} declares {nrd} receiver depths."
+        )
+    rd_toks, cursor = take_tokens(tokens, 1, nrd,
+                                  f"{nrd} receiver depths", filepath)
+    rd = np.array([fortran_float(t) for t in rd_toks])
 
-    data = np.array(data)
+    # Repeating (1 + nrd)-value time-step blocks; a partial trailing block
+    # (run killed mid-write) contributes nothing, as in the MATLAB
+    # column-major [nrz + 1, inf] fill.
+    rest = tokens[cursor:]
+    block = 1 + nrd
+    nt = len(rest) // block
+    data = np.array([fortran_float(t) for t in rest[:nt * block]],
+                    dtype=float).reshape(nt, block)
     tout = data[:, 0]
-    RTS = data[:, 1:nrd+1]
+    RTS = data[:, 1:]
 
     return {
         'PlotTitle': plot_title,

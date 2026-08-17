@@ -23,7 +23,20 @@ from uacpy.core.exceptions import DataFetchError
 from uacpy._log import log_message
 
 __all__ = ['http_get', 'curl_download', 'erddap_griddap_url', 'erddap_last_value',
-           'checked_member_size', 'MAX_MEMBER_BYTES']
+           'checked_member_size', 'raise_substantive', 'MAX_MEMBER_BYTES']
+
+
+def raise_substantive(errors):
+    """Raise the most substantive error collected by a source-fallback chain.
+
+    A :class:`DataFetchError` (no coverage / on land / live service failure)
+    is raised in preference to a bare ``ConfigurationError`` ("cache not
+    installed", missing prerequisite), so the caller sees the real cause
+    rather than the last fallback's complaint. ``errors`` must be non-empty;
+    ties keep the first ``DataFetchError``, else the last error.
+    """
+    data_errs = [e for e in errors if isinstance(e, DataFetchError)]
+    raise (data_errs[0] if data_errs else errors[-1])
 
 # HTTP status codes worth retrying (transient rate-limit / availability /
 # gateway hiccups — the urllib3/requests default transient set).
@@ -160,6 +173,16 @@ def _read_capped(response, url: str, max_bytes: int) -> bytes:
             remediation="Raise max_bytes= if this is expected, narrow the "
                         "request, or point base_url= at a mirror.",
         )
+    # http.client returns a short body on a mid-transfer disconnect without
+    # raising ("might break compatibility"); surface it as the stdlib's own
+    # IncompleteRead, which _TRANSIENT_EXC already lists, so the retry loop
+    # re-fetches instead of a truncated file being cached as complete.
+    try:
+        expected = int(clen) if clen is not None else None
+    except ValueError:
+        expected = None
+    if expected is not None and len(data) < expected:
+        raise http.client.IncompleteRead(data, expected - len(data))
     return data
 
 

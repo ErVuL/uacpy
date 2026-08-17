@@ -32,7 +32,7 @@ from uacpy.core.constants import (
     DEFAULT_BROADBAND_N_FREQS, DEFAULT_BROADBAND_BANDWIDTH_FACTOR,
 )
 from uacpy.core.exceptions import (
-    ConfigurationError, ExecutableNotFoundError, ModelExecutionError,
+    ConfigurationError, ModelExecutionError,
     UnsupportedFeatureError,
 )
 from uacpy.io.bellhop_writer import (
@@ -42,10 +42,7 @@ from uacpy.io.refl_io import stage_source_beam_pattern
 from uacpy.io.file_manager import FileManager
 from uacpy.io.oalib_reader import read_shd_file, read_arr_file, read_ray_file
 from uacpy.io.utils import equally_spaced
-
-
-# Source geometry -> RunType(4:4), per ReadEnvironmentBell.f90:398-406.
-_SOURCE_TYPE_CODE = {'point': 'R', 'line': 'X'}
+from uacpy.io.oalib_writer import SOURCE_TYPE_CODE as _SOURCE_TYPE_CODE
 
 # A line source carries the 2-D Green's function's exp(-i*pi/4): (i/4)*H0(kR)
 # ~ exp(i(kR + pi/4)) for large kR, while both AT scale factors are purely
@@ -657,20 +654,14 @@ class Bellhop(PropagationModel):
         self.dimensionality = dimensionality
         self.version = "unknown"
 
-        # Keep the user's ``executable`` arg verbatim (``None`` when
-        # auto-detected) so ``model.copy()`` re-resolves the binary honoring
-        # ``backend=`` instead of re-pinning the already-resolved path (which
-        # would flip ``version`` to 'custom' and drop the cxx/cuda ``--<dim>``
-        # flag). The resolved path lives in ``self._exe``.
-        self.executable = Path(executable) if executable is not None else None
-        if self.executable is None:
-            self._exe = self._find_bellhop_executable()
-        else:
-            self._exe = self.executable
+        # A copy re-resolves the binary honoring ``backend=`` instead of
+        # re-pinning the already-resolved path (which would flip ``version``
+        # to 'custom' and drop the cxx/cuda ``--<dim>`` flag).
+        self._exe = self._resolve_executable(
+            executable, self._find_bellhop_executable,
+        )
+        if self.executable is not None:
             self.version = "custom"
-
-        if not self._exe.exists():
-            raise ExecutableNotFoundError("Bellhop", str(self._exe))
 
         if self.version != "custom":
             self._log(f"Using Bellhop {self.version}: {self._exe}")
@@ -733,6 +724,28 @@ class Bellhop(PropagationModel):
                             "Kraken / Scooter / RAM, which resolve a source at "
                             "or below the seabed.")
 
+        # Top half of the same Fortran test: bellhop.f90:488-492 rejects
+        # DistBegTop <= 0 symmetrically with the bottom. The top boundary at
+        # the launch range r = 0 sits at z = 0 for a flat surface and at
+        # z = -height(0) with altimetry (bellhop_writer.py:404 writes the
+        # .ati depth column as -heights), so a source at or above it has
+        # every ray terminated at step 1 and the run returns an all-NaN
+        # field at exit 0.
+        top = 0.0
+        if env.altimetry is not None:
+            top = -float(np.asarray(env.altimetry.eval(range=0.0)).flat[0])
+        if np.any(zs <= top):
+            raise ConfigurationError(
+                f"Bellhop: source depth {float(zs.min()):g} m is at or above "
+                f"the top boundary at the source range (r = 0), which sits "
+                f"at z = {top:g} m. Bellhop terminates every ray at step 1 "
+                f"when the source is on or outside a boundary "
+                f"(Bellhop/bellhop.f90:488-492, 'source must be within the "
+                f"medium'), so the run would return an all-NaN field at "
+                f"exit 0.",
+                remediation="Move the source below the sea surface (below "
+                            "the altimetry crest at r = 0, if any).")
+
     def _reject_precalc_boundary(self, env) -> None:
         """A ``'precalc'`` boundary has no reflection branch in BELLHOP.
 
@@ -749,7 +762,10 @@ class Bellhop(PropagationModel):
                 continue
             props = getattr(boundary, 'properties', None) or getattr(
                 boundary, 'columns', None) or []
-            types = {getattr(p, 'acoustic_type', None) for p in props}
+            # A Surface entry is a BoundaryProperties; a Bottom entry is a
+            # SeabedColumn whose acoustic_type lives on ``.halfspace``.
+            types = {getattr(getattr(p, 'halfspace', p), 'acoustic_type', None)
+                     for p in props}
             types.add(getattr(boundary, 'acoustic_type', None))
             if 'precalc' in types:
                 raise UnsupportedFeatureError(
@@ -928,7 +944,8 @@ class Bellhop(PropagationModel):
         )
 
     def _maybe_route_through_bounce(self, env, source, receiver, run_mode,
-                                    frequencies, source_waveform, sample_rate):
+                                    frequencies, source_waveform, sample_rate,
+                                    output_duration):
         """Layered/elastic bottoms can't be represented by Bellhop's fluid ray
         tracer natively. With ``auto_bounce`` (default) route through BOUNCE for
         an exact reflection-coefficient table and return that Result; otherwise
@@ -958,6 +975,7 @@ class Bellhop(PropagationModel):
                 frequencies=frequencies,
                 source_waveform=source_waveform,
                 sample_rate=sample_rate,
+                output_duration=output_duration,
             )
         # auto_bounce=False: fall through. A LAYERED bottom is collapsed to
         # a halfspace by ``_project_environment`` (collapse policy). A pure
@@ -1107,7 +1125,7 @@ class Bellhop(PropagationModel):
         # users who want to control the BOUNCE constructor.
         routed = self._maybe_route_through_bounce(
             env, source, receiver, run_mode,
-            frequencies, source_waveform, sample_rate)
+            frequencies, source_waveform, sample_rate, output_duration)
         if routed is not None:
             return routed
 
@@ -1212,6 +1230,8 @@ class Bellhop(PropagationModel):
                 receiver=receiver,
                 run_type=run_type,
                 beam_type=self.beam_type,
+                # Letter lands in RunType(4:4), ReadEnvironmentBell.f90:398-
+                # 406; spec.source_types keeps 'scaled' out of this deck.
                 source_type=_SOURCE_TYPE_CODE[source.source_type],
                 grid_type=self.grid_type,
                 verbose=self.verbose,
@@ -1237,18 +1257,13 @@ class Bellhop(PropagationModel):
             self._run_bellhop(base_name, fm.work_dir)
 
             output_key, output_suffix, reader = _BELLHOP_OUTPUT[run_type]
-            output_file = fm.get_path(f'{base_name}{output_suffix}')
-
-            if not output_file.exists():
-                exc = ModelExecutionError(
-                    self.model_name, return_code=0, stdout=None,
-                    stderr=(
-                        f"Bellhop did not produce {output_file}; "
-                        f"check {output_file.with_suffix('.prt')} for diagnostics."
-                    ),
-                )
-                self._attach_prt_tail(exc, fm.work_dir, base_name)
-                raise exc
+            # A missing or empty output means the binary died silently; the
+            # raised error carries the .prt tail with the actual cause.
+            output_file = self._require_output(
+                [fm.get_path(f'{base_name}{output_suffix}')],
+                what=f'a {run_type} output ({output_suffix})',
+                prt_base=base_name, work_dir=fm.work_dir,
+            )
             # The .arr header reports the full ``Pos%NRz``
             # (``ReadEnvironmentBell.f90:591``) while its body carries only
             # ``NRz_per_range`` depth blocks — 1 for an irregular grid
@@ -1276,6 +1291,30 @@ class Bellhop(PropagationModel):
                 for _slab in (result.slabs
                               if isinstance(result, ResultStack) else [result]):
                     _slab.data = _slab.data * _corr
+
+                # BELLHOP clamps any receiver below the deck's bottom
+                # boundary onto it (misc/SourceReceiverPositions.f90:136-139)
+                # and the .shd then carries the clamped depth axis with the
+                # boundary row repeated — no field is evaluated at the asked
+                # depth. Restore the requested depth axis with NaN there,
+                # then NaN below the local seafloor too (a range-dependent
+                # .bty leaves sub-seafloor receivers above the deck depth
+                # unclamped but ray-free), matching the RAM / Scooter /
+                # SPARC below-domain convention. The irregular grid
+                # (RunType(5:5)='I') carries no depth axis and is left as
+                # read.
+                def _restore_depths_and_mask(slab):
+                    if list(slab.coords) != ['depth', 'range']:
+                        return slab
+                    slab = self._mask_unresolvable_depths(
+                        slab, receiver, float(env.depth))
+                    return slab.mask_below_seafloor(env.bathymetry)
+
+                if isinstance(result, ResultStack):
+                    result.slabs = [_restore_depths_and_mask(s)
+                                    for s in result.slabs]
+                else:
+                    result = _restore_depths_and_mask(result)
 
             # The .ray header records only NSz (count), not Pos%Sz; the
             # reader returns the stack with a placeholder coordinate.
@@ -1858,7 +1897,7 @@ class Bellhop(PropagationModel):
         from uacpy.io.refl_io import read_source_beam_pattern
 
         if isinstance(pattern, (str, Path)):
-            angles = read_source_beam_pattern(pattern, sbp_option='*')[:, 0]
+            angles = read_source_beam_pattern(pattern)[:, 0]
         else:
             angles = np.asarray(pattern, dtype=float)[:, 0]
         lo, hi = float(np.min(angles)), float(np.max(angles))

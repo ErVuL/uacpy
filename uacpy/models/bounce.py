@@ -37,7 +37,7 @@ from uacpy.core.constants import (
     parse_boundary_type,
 )
 from uacpy.core.exceptions import (
-    ConfigurationError, ExecutableNotFoundError, ModelExecutionError,
+    ConfigurationError,
     UnsupportedFeatureError,
 )
 from uacpy.io.refl_io import read_reflection_coefficient, dedupe_reflection_file
@@ -294,23 +294,13 @@ class Bounce(PropagationModel):
 
         # Run modes, capability flags and collapse defaults now come from the
         # class-level ``spec`` (applied by PropagationModel.__init__).
-        #
-        # Keep the user's ``executable`` arg verbatim (``None`` when
-        # auto-detected) so ``model.copy()`` re-resolves the binary instead of
-        # re-pinning the already-resolved absolute path. The resolved path
-        # lives in ``self._exe``.
-        self.executable = Path(executable) if executable is not None else None
-        if self.executable is None:
-            self._exe = self._find_executable_in_paths(
-                'bounce',
-                bin_subdirs='oalib',
+        self._exe = self._resolve_executable(
+            executable,
+            lambda: self._find_executable_in_paths(
+                'bounce', bin_subdirs='oalib',
                 dev_subdir='Acoustics-Toolbox/Kraken',
-            )
-        else:
-            self._exe = self.executable
-
-        if not self._exe.exists():
-            raise ExecutableNotFoundError('Bounce', str(self._exe))
+            ),
+        )
 
     def _validate_geometry(self, env, source, receiver, run_mode=None) -> None:
         """No-op: BOUNCE reads no source or receiver geometry.
@@ -586,18 +576,13 @@ class Bounce(PropagationModel):
             self._execute(input_file, fm.work_dir,
                           staged_input=_STAGED_TABLE_SUFFIX.get(seabed_type))
 
-            brc_file = fm.get_path(f'{base_name}.brc')
-
-            if not brc_file.exists():
-                exc = ModelExecutionError(
-                    self.model_name, return_code=0, stdout=None,
-                    stderr=(
-                        f"BOUNCE did not produce {brc_file}; "
-                        f"check {fm.work_dir}/{base_name}.prt for diagnostics."
-                    ),
-                )
-                self._attach_prt_tail(exc, fm.work_dir, base_name)
-                raise exc
+            # A missing or empty .brc means the binary died silently; the
+            # raised error carries the .prt tail with the actual cause.
+            brc_file = self._require_output(
+                [fm.get_path(f'{base_name}.brc')],
+                what='a reflection-coefficient table (.brc)',
+                prt_base=base_name, work_dir=fm.work_dir,
+            )
 
             # Normalise the raw BOUNCE table before it is read back into the
             # ReflectionCoefficient result: bellhopcuda's strict monotonicity
@@ -611,7 +596,7 @@ class Bounce(PropagationModel):
             dedupe_reflection_file(brc_file)
 
             self._log(f"Reading output: {brc_file}")
-            result = read_reflection_coefficient(str(brc_file), boundary='bottom')
+            result = read_reflection_coefficient(str(brc_file))
 
             theta_out = np.atleast_1d(np.asarray(result.get('theta', []), dtype=float))
             if theta_out.size == 0:

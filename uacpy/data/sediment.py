@@ -112,7 +112,10 @@ def range_dependent_bottom_along(
     ``point_bottom(lat, lon)`` returns a :class:`BoundaryProperties` or raises
     ``DataFetchError`` where the source has no coverage; such gaps hold the
     nearest covered value (forward fill, then back-fill leading gaps). Raises
-    only if *no* point along the transect is covered.
+    only if *no* point along the transect is covered. Each sampled column's
+    ``data_sources`` provenance is carried onto the corresponding column of
+    the returned ``Bottom`` (a forward-filled gap carries the record of the
+    sample that filled it).
 
     With ``n_points='auto'`` the transect is probed at ``max_points`` points and
     consecutive identical seabeds are collapsed to one column each (endpoints
@@ -152,7 +155,7 @@ def range_dependent_bottom_along(
         reps = list(range(len(props)))
     props = [props[r] for r in reps]
     rr = np.asarray(ranges_m)[reps]
-    return Bottom.from_halfspaces(
+    bottom = Bottom.from_halfspaces(
         rr,
         sound_speed=np.array([p.sound_speed for p in props]),
         density=np.array([p.density for p in props]),
@@ -161,6 +164,14 @@ def range_dependent_bottom_along(
         shear_attenuation=np.array([p.shear_attenuation for p in props]),
         roughness=np.array([p.roughness for p in props]),
     )
+    # ``from_halfspaces`` emits fresh half-spaces; copy each sampled column's
+    # provenance onto its rebuilt column so the transect reports the same
+    # ``data_sources`` (dataset + actual sample coordinates) a single-point
+    # fetch does.
+    for column, source_props in zip(bottom.columns, props):
+        column.halfspace.data_sources = tuple(
+            getattr(source_props, 'data_sources', ()) or ())
+    return bottom
 
 
 def _seabed_identity(props: BoundaryProperties):

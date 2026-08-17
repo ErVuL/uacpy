@@ -234,9 +234,12 @@ def _cell_edge_extent(x: np.ndarray, y: np.ndarray):
     edges, which is where every overlay (graticule, contours, markers) then
     disagrees with the data. Pad by half a cell on each side instead.
 
-    Returns ``(left, right, bottom, top)`` for ``origin='lower'``, and is
-    orientation-agnostic so a descending axis is handled. Assumes a uniform
-    grid, which is ``imshow``'s own assumption anyway.
+    Returns ``(left, right, bottom, top)`` for ``origin='lower'``, always
+    ASCENDING: the axes are canonicalised via min/max, so the caller must
+    flip its data rows/columns to ascending order to match — exactly what
+    ``maps.py`` does before calling (its ``[::-1]`` flips). Handing a
+    descending axis here WITHOUT flipping the data mirrors the image.
+    Assumes a uniform grid, which is ``imshow``'s own assumption anyway.
     """
     x = np.asarray(x, dtype=float)
     y = np.asarray(y, dtype=float)

@@ -169,20 +169,19 @@ def _layered_from_column(bnds, vp, vs, rho, *, sediment_attenuation,
     # fetch_crust1_profile is in m.
     sed = [i for i in range(_UPPER_SED, _LOW_SED + 1)
            if bnds[i] - bnds[i + 1] > 1e-3]
-    # Effective sediment thickness (the GlobSed override when given, else the
-    # CRUST1.0 column). Below ``_MIN_SEDIMENT_M`` the column is negligible and a
-    # real layer would only produce a sub-resolution medium, so emit bare rock.
+    # Effective sediment thickness (the GlobSed override when given — a real
+    # 0.0 means bare basement, not "no data" — else the CRUST1.0 column).
+    # Below ``_MIN_SEDIMENT_M`` the column is negligible and a real layer would
+    # only produce a sub-resolution medium, so emit bare rock.
     if sed:
-        crust1_total = sum((bnds[i] - bnds[i + 1]) * 1000.0 for i in sed)
-        eff_sed = (sediment_thickness
-                   if (sediment_thickness is not None and sediment_thickness > 0)
-                   else crust1_total)
+        eff_sed = (sum((bnds[i] - bnds[i + 1]) * 1000.0 for i in sed)
+                   if sediment_thickness is None else sediment_thickness)
     else:
         eff_sed = 0.0
     if sed and eff_sed >= _MIN_SEDIMENT_M:
         layers = [_layer(i, bnds, vp, vs, rho, sediment_attenuation, elastic)
                   for i in sed]
-        if sediment_thickness is not None and sediment_thickness > 0:
+        if sediment_thickness is not None:
             total = sum(layer.thickness for layer in layers)
             if total > 0:
                 scale = sediment_thickness / total
@@ -257,7 +256,9 @@ def fetch_bottom_crust1(point, *, sediment_attenuation=DEFAULT_SEDIMENT_ATTENUAT
     **GlobSed** total thickness by default (``use_globsed=True``); pass an
     explicit ``sediment_thickness`` (m) to override, or ``use_globsed=False`` to
     keep CRUST1.0's own column. Where GlobSed is not cached or has no value at
-    the point, CRUST1.0's native thickness is kept. The returned bottom carries
+    the point, CRUST1.0's native thickness is kept; a genuine GlobSed 0.0
+    (bare basement) is honoured and yields the bare-rock column. The returned
+    bottom carries
     ``.sediment_thickness_source`` (``'globsed'`` or ``None``) recording which
     was used. ``timeout`` is ignored (offline) for signature parity with the
     network bottom fetchers; ``water_sound_speed`` is likewise accepted and
@@ -291,11 +292,19 @@ def fetch_bottom_crust1_transect(start, end, *, n_points=6, max_points=None,
     Each profile rescales its CRUST1.0 sediment column to the local GlobSed
     thickness by default (``use_globsed``); the result carries
     ``.sediment_thickness_source`` (``'globsed'`` if any waypoint used it).
+    ``n_points='auto'`` targets roughly one waypoint per degree of arc —
+    CRUST1.0's native 1° resolution — unlike the probe-and-collapse ``'auto'``
+    of the sample-database bottom fetchers.
     ``max_points`` caps the waypoint count (signature parity with the other
     transect bottom fetchers); CRUST1.0 is a cached 1° grid, so the sole effect
     is clamping ``n_points``.
     """
     from uacpy.data._geo import geodesic_waypoints
+    # 'auto': CRUST1.0 is a 1-degree cached grid, so target roughly one
+    # waypoint per degree of arc, clamped like the siblings.
+    if n_points == 'auto':
+        from uacpy.data._geo import central_angle
+        n_points = max(2, int(np.degrees(central_angle(start, end))) + 1)
     if max_points is not None:
         n_points = max(2, min(int(n_points), int(max_points)))
     _warn_non_commercial()

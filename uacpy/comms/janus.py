@@ -85,7 +85,12 @@ _DOPPLER_C0 = 1540.0               # m/s (CMRE doppler.c:108, chips_alignment.c:
 _CHIP_OVERSAMPLING = 4             # JANUS_PREAMBLE_CHIP_OVERSAMPLING
 _CFAR_THRESHOLD = 2.5              # params->detection_threshold
 _CFAR_WINDOW_CORRECTION = 0.1538   # window_correction leading factor
-_CFAR_CHANNEL_SPREAD = 64          # chips past first detection (x oversampling in C)
+# 80 chips, not the C implementation's 64: janus_modulate(wakeup=True)
+# emits 12 wake-up chips + a 0.4 s gap (64 chips at the initial band)
+# BEFORE the preamble, so the search past the first detected energy must
+# cover 76 chips (+4 margin) or the preamble sits beyond the window and
+# the round trip fails with crc_ok=False.
+_CFAR_CHANNEL_SPREAD = 80          # chips past first detection (x oversampling in C)
 _CFAR_MOV_AVG_TIME = 0.150         # s training-window length floor
 
 
@@ -245,30 +250,34 @@ def janus_decode(symbols144):
     conv = np.empty(_N_CODED, dtype=int)
     conv[_interleave_perm()] = y                       # de-interleave
     nsteps = _N_CODED // 2
-    inf = float("inf")
-    pm = [inf] * _N_STATES
+    # Butterfly structure: the transition (s, b) -> ((b << 7) | (s >> 1))
+    # means state t is reached from exactly two predecessors, 2t and 2t+1
+    # (mod 256), both on input bit = the top bit of t.
+    states = np.arange(_N_STATES)
+    prev0 = (states << 1) & (_N_STATES - 1)
+    prev1 = prev0 | 1
+    bit_in = states >> 7
+    out0 = _TRELLIS_OUT[prev0, bit_in]                 # (256, 2) words into t
+    out1 = _TRELLIS_OUT[prev1, bit_in]
+    rx = conv.reshape(nsteps, 2)
+    # Branch metrics (r0 ^ hi) + (r1 ^ lo) per step for both transitions.
+    bm0 = np.sum(out0[None, :, :] ^ rx[:, None, :], axis=2)
+    bm1 = np.sum(out1[None, :, :] ^ rx[:, None, :], axis=2)
+    pm = np.full(_N_STATES, np.inf)
     pm[0] = 0.0
     prev = np.zeros((nsteps, _N_STATES), dtype=np.int32)
-    pbit = np.zeros((nsteps, _N_STATES), dtype=np.int8)
     for k in range(nsteps):
-        r0, r1 = conv[2 * k], conv[2 * k + 1]
-        npm = [inf] * _N_STATES
-        for s in range(_N_STATES):
-            if pm[s] == inf:
-                continue
-            for bit in (0, 1):
-                hi, lo = _TRELLIS_OUT[s, bit]
-                ns = _TRELLIS_NXT[s, bit]
-                m = pm[s] + (r0 ^ hi) + (r1 ^ lo)
-                if m < npm[ns]:
-                    npm[ns] = m
-                    prev[k, ns] = s
-                    pbit[k, ns] = bit
-        pm = npm
+        cand0 = pm[prev0] + bm0[k]
+        cand1 = pm[prev1] + bm1[k]
+        # Strict < keeps the even predecessor on a tie — the same survivor a
+        # state-ascending scan that replaces only on improvement selects.
+        take1 = cand1 < cand0
+        pm = np.where(take1, cand1, cand0)
+        prev[k] = np.where(take1, prev1, prev0)
     state = 0                                          # tail-flushed to state 0
     bits = np.zeros(nsteps, dtype=int)
     for k in range(nsteps - 1, -1, -1):
-        bits[k] = pbit[k, state]
+        bits[k] = state >> 7        # the input bit is the arriving state's top bit
         state = prev[k, state]
     return bits[:_N_INFO]
 

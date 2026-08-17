@@ -49,6 +49,28 @@ class TestEnvironment:
         assert range_dependent_env.max_range == pytest.approx(
             float(range_dependent_env.bathymetry.ranges.max()))
 
+    def test_max_range_covers_single_node_ranged_carriers(self):
+        """A carrier whose ranged axis holds one node still marks a range
+        coordinate, even though it is not range-*dependent* (that is a
+        more-than-one-node test); max_range must include it."""
+        from uacpy.core.environment import (
+            Bottom, SeabedColumn, BoundaryProperties, SoundSpeedProfile,
+            Surface,
+        )
+        surf = Surface(properties=[BoundaryProperties(acoustic_type='vacuum')],
+                       ranges=[5000.0])
+        assert uacpy.Environment(bathymetry=100.0,
+                                 surface=surf).max_range == 5000.0
+        ssp = SoundSpeedProfile(depths=[0.0, 100.0],
+                                data=[[1500.0], [1500.0]], ranges=[7000.0])
+        assert uacpy.Environment(bathymetry=100.0,
+                                 ssp=ssp).max_range == 7000.0
+        bot = Bottom(columns=[SeabedColumn(
+            layers=[], halfspace=BoundaryProperties(sound_speed=1700.0))],
+            ranges=[9000.0])
+        assert uacpy.Environment(bathymetry=100.0,
+                                 bottom=bot).max_range == 9000.0
+
     def test_ssp_pairs_shape(self, simple_env, parabolic_ssp_env):
         """SSP pairs view always has shape (N, 2)."""
         assert simple_env.ssp.to_pairs().shape[1] == 2
@@ -102,6 +124,63 @@ class TestBiologicalLayerValidation:
         from uacpy.core.absorption import BiologicalLayer
         with pytest.raises(ConfigurationError, match=match):
             BiologicalLayer(**kwargs)
+
+
+class TestBiologicalBoundaryOwnership:
+    """A depth exactly on a boundary two stacked layers share belongs to the
+    upper layer only (the layer-boundary convention shared with
+    ``SeabedColumn._layer_at``), so it contributes once, while the outer
+    edges of the stack stay inclusive."""
+
+    @staticmethod
+    def _stack():
+        from uacpy.core.absorption import Biological
+        return Biological(layers=[(0.0, 100.0, 500.0, 2.0, 10.0),
+                                  (100.0, 200.0, 500.0, 2.0, 10.0)])
+
+    def test_shared_boundary_counts_once(self):
+        a = self._stack().alpha_db_per_m(500.0, [50.0, 100.0, 150.0])
+        assert a[1] == pytest.approx(a[0])
+        assert a[1] == pytest.approx(a[2])
+
+    def test_outer_edges_are_inclusive(self):
+        a = self._stack().alpha_db_per_m(500.0, [0.0, 200.0, 250.0])
+        assert a[0] == pytest.approx(a[1])
+        assert a[0] > 0.0
+        assert a[2] == 0.0
+
+
+class TestGenerateSeaSurfaceSynthesis:
+    """The realisation is the inverse DFT of the Pierson-Moskowitz
+    random-phase spectrum, so it must equal the direct cosine sum it is
+    defined by and stay seed-reproducible."""
+
+    def test_matches_the_direct_cosine_sum(self):
+        from uacpy.core.ssp import generate_sea_surface
+        n, max_range, wind, seed = 257, 4000.0, 10.0, 12345
+        out = generate_sea_surface(max_range, wind, n, seed)
+        ranges, surface = out[:, 0], out[:, 1]
+        dx = ranges[1] - ranges[0]
+        dk = 1.0 / (n * dx)
+        k = np.arange(1, n // 2 + 1) * dk
+        g = 9.81
+        omega = np.sqrt(g * 2 * np.pi * k)
+        omega_p = g / wind
+        S_omega = (8.1e-3 * g ** 2 / omega ** 5) * np.exp(
+            -0.74 * (omega_p / omega) ** 4)
+        S_k = S_omega * (np.pi * g / omega)
+        amplitude = np.sqrt(2 * S_k * dk)
+        phase = np.random.default_rng(seed).uniform(0, 2 * np.pi, len(k))
+        direct = (amplitude[None, :]
+                  * np.cos(2 * np.pi * ranges[:, None] * k[None, :]
+                           + phase[None, :])).sum(axis=1)
+        assert float(np.max(np.abs(surface - direct))) < 1e-9
+
+    def test_seeded_runs_are_reproducible(self):
+        from uacpy.core.ssp import generate_sea_surface
+        a = generate_sea_surface(2000.0, 10.0, 128, 7)
+        b = generate_sea_surface(2000.0, 10.0, 128, 7)
+        assert np.array_equal(a, b)
 
 
 class TestSource:
@@ -374,7 +453,6 @@ class TestField:
         field = self._coherent_field(7.5, dz=1.0)         # dr == one wavelength
         blind = Field(data=field.data, coords=dict(field.coords),
                       model='Test', frequencies=None)
-        assert blind.range_phase_step == pytest.approx(0.0, abs=1e-9)
         with pytest.warns(UserWarning, match='carries no frequency'):
             blind.resample_to(**self._midpoints(blind))
 
@@ -386,7 +464,6 @@ class TestField:
         depths = np.array([50.0, 100.0])
         field = self._tl_field(np.zeros((depths.size, ranges.size)), ranges, depths,
                                frequencies=200.0)
-        assert field.range_phase_step is None
         with warnings.catch_warnings():
             warnings.simplefilter('error')
             field.resample_to(depths=[50.0], ranges=ranges[:-1] + 125.0)

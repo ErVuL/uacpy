@@ -3,6 +3,7 @@ bottom properties, and their range-dependent variants. Re-exported from
 :mod:`uacpy.core.environment` for stable import paths.
 """
 
+import warnings
 import copy as _copy
 import numpy as np
 from typing import List, Tuple, Optional, Dict
@@ -16,6 +17,16 @@ from uacpy.core._carrier_validate import (
     _require_positive, _require_non_negative, _coerce_data_sources,
     _dedupe_provenance,
 )
+
+
+# Boundary types whose cp/ρ/α/cs are construction-time placeholders, never
+# seabed geoacoustics: the solver reads the reflection behaviour from the type
+# (or its reflection_file), so these values must not feed numeric aggregates.
+_NON_GEOACOUSTIC_TYPES = frozenset({'vacuum', 'rigid', 'file', 'precalc'})
+
+# Boundary types defined by no parameters at all — of the acoustic fields only
+# the interfacial ``roughness`` is meaningful on them.
+_PARAMETER_FREE_TYPES = frozenset({'vacuum', 'rigid'})
 
 
 @dataclass
@@ -118,7 +129,7 @@ class BoundaryProperties:
     Attributes
     ----------
     acoustic_type : str, optional
-        Boundary type: 'vacuum', 'rigid', 'half-space', 'file'.
+        Boundary type: 'vacuum', 'rigid', 'half-space', 'file', 'precalc'.
         Inferred from the supplied parameters when omitted: ``reflection_file``
         → ``'file'``, any **explicitly passed** cp/ρ/α/cs →
         ``'half-space'`` (even a value equal to the documented default —
@@ -283,7 +294,7 @@ class BoundaryProperties:
         # Explicit-conflict guard: vacuum/rigid ignore half-space params,
         # so explicitly setting one alongside non-default cp/ρ/α/cs is a
         # mistake the auto-infer path would never make.
-        if self.acoustic_type in ('vacuum', 'rigid'):
+        if self.acoustic_type in _PARAMETER_FREE_TYPES:
             offenders = list(half_space_offenders)
             if self.reflection_file is not None:
                 offenders.append(f"reflection_file={self.reflection_file!r}")
@@ -299,10 +310,10 @@ class BoundaryProperties:
                 )
 
     def __repr__(self) -> str:
-        if self.acoustic_type in ('vacuum', 'rigid'):
+        if self.acoustic_type in _PARAMETER_FREE_TYPES:
             bits = [self.acoustic_type]
-        elif self.acoustic_type == 'file':
-            bits = [f"file={self.reflection_file!r}"]
+        elif self.acoustic_type in ('file', 'precalc'):
+            bits = [f"{self.acoustic_type}={self.reflection_file!r}"]
         else:
             bits = [self.acoustic_type,
                     f"cp={self.sound_speed:g} m/s",
@@ -410,7 +421,7 @@ def _boundary_from_values(template: BoundaryProperties, values: dict
     The single home for "reduced numbers → one boundary", shared by
     :func:`_reduce_boundaries` and :meth:`SeabedColumn.collapse`.
     """
-    if template.acoustic_type in ('vacuum', 'rigid'):
+    if template.acoustic_type in _PARAMETER_FREE_TYPES:
         return BoundaryProperties(
             acoustic_type=template.acoustic_type,
             roughness=values['roughness'],
@@ -501,7 +512,7 @@ class SeabedColumn:
                 or self.halfspace.shear_speed > 0:
             bits.append("elastic")
         bits.append(f"halfspace={self.halfspace.acoustic_type}")
-        if self.halfspace.acoustic_type not in ('vacuum', 'rigid', 'file'):
+        if self.halfspace.acoustic_type not in _NON_GEOACOUSTIC_TYPES:
             bits.append(f"cp={self.halfspace.sound_speed:g} m/s")
         return f"SeabedColumn({', '.join(bits)})"
 
@@ -630,6 +641,28 @@ class SeabedColumn:
             )
         if method == 'halfspace' or not self.layers:
             return _copy.deepcopy(self.halfspace)
+        # The solver reads no geoacoustic parameters from a non-geoacoustic
+        # half-space, so the caller's 'top_layer'/'volume_average' request
+        # cannot influence the result. Deliberate, but say so — and say what
+        # each type actually does with the reduced values: vacuum/rigid drop
+        # them (only roughness survives — see _boundary_from_values), while
+        # file/precalc store them on the returned object but the solver reads
+        # the reflection-coefficient file instead.
+        if self.halfspace.acoustic_type in _NON_GEOACOUSTIC_TYPES:
+            if self.halfspace.acoustic_type in _PARAMETER_FREE_TYPES:
+                outcome = (f"the {len(self.layers)} sediment layer(s)' "
+                           f"properties are dropped (only the interfacial "
+                           f"roughness survives)")
+            else:
+                outcome = (f"the values reduced from the {len(self.layers)} "
+                           f"sediment layer(s) are kept on the returned "
+                           f"boundary but the solver reads the "
+                           f"reflection-coefficient file and ignores them")
+            warnings.warn(
+                f"SeabedColumn.collapse({method!r}): the half-space is "
+                f"'{self.halfspace.acoustic_type}' — the solver reads no "
+                f"geoacoustic parameters from it, so {outcome}.",
+                UserWarning, stacklevel=2)
         if method == 'top_layer':
             top = self.layers[0]
             values = {name: float(getattr(top, name))
@@ -800,6 +833,13 @@ class Bottom:
 
     @property
     def is_range_dependent(self) -> bool:
+        """True when the bottom carries more than one range column.
+
+        A structural test (node count on the ranged axis), like
+        ``SoundSpeedProfile`` / ``Surface``: columns with identical
+        properties still count as range-dependent. Contrast
+        ``Bathymetry.is_range_dependent`` / ``Altimetry.is_range_dependent``,
+        which test whether the *values* actually vary with range."""
         return self.ranges is not None and len(self.columns) > 1
 
     @property
@@ -871,10 +911,25 @@ class Bottom:
             raise ConfigurationError(
                 f"Bottom.halfspace_at: interp must be 'linear', 'nearest' or "
                 f"None; got {interp!r}")
+        # Blending is well-defined only when every column is a genuine
+        # 'half-space' carrying real acoustic numbers: a vacuum/rigid/file
+        # column holds construction-time placeholders, and interpolating
+        # those (with column 0's type stamped on the result) fabricates a
+        # boundary that exists nowhere on the axis.
+        blendable = (not self.is_layered and all(
+            c.halfspace.acoustic_type == 'half-space' for c in self.columns))
         if interp is None:
-            interp = 'nearest' if self.is_layered else 'linear'
+            interp = 'linear' if blendable else 'nearest'
         if self.ranges is None or interp == 'nearest':
             return _copy.deepcopy(self.at(range=range).halfspace)
+        if not blendable:
+            types = sorted({c.halfspace.acoustic_type for c in self.columns})
+            raise ConfigurationError(
+                f"Bottom.halfspace_at(interp='linear') needs every column to "
+                f"be a pure 'half-space' to blend; got {types}"
+                f"{' with sediment layers' if self.is_layered else ''}. Use "
+                f"interp='nearest' (the default here) to read the nearest "
+                f"column intact.")
         return _reduce_boundaries(
             [c.halfspace for c in self.columns],
             lambda values: np.interp(range, self.ranges, values))
@@ -887,13 +942,14 @@ class Bottom:
         """Every *real* compressional speed in the seabed (all layers, plus the
         half-spaces that carry geoacoustics), for c₀ / grid sizing.
 
-        ``'vacuum'`` / ``'rigid'`` / ``'file'`` half-spaces are skipped: their
-        ``sound_speed`` is the placeholder ``__post_init__`` resolved, not a
-        seabed speed, and feeding it to a c₀ or dz estimate is meaningless."""
+        ``'vacuum'`` / ``'rigid'`` / ``'file'`` / ``'precalc'`` half-spaces are
+        skipped: their ``sound_speed`` is the placeholder ``__post_init__``
+        resolved, not a seabed speed, and feeding it to a c₀ or dz estimate is
+        meaningless."""
         speeds: List[float] = []
         for c in self.columns:
             speeds.extend(float(la.sound_speed) for la in c.layers)
-            if c.halfspace.acoustic_type not in ('vacuum', 'rigid', 'file'):
+            if c.halfspace.acoustic_type not in _NON_GEOACOUSTIC_TYPES:
                 speeds.append(float(c.halfspace.sound_speed))
         return speeds
 
@@ -930,7 +986,10 @@ class Bottom:
         ``'mean'`` / ``'median'`` numerically average the half-spaces — only
         meaningful when no column is layered. For a layered bottom ``'median'``
         falls back to picking the middle column (layers can't be averaged) and
-        ``'mean'`` is rejected."""
+        ``'mean'`` is rejected. Uniform ``'file'`` / ``'precalc'`` columns
+        carry no real numbers to average: they collapse to their shared
+        reflection file (reducing only the roughness), and differing files
+        are rejected."""
         if not self.is_range_dependent:
             return Bottom(columns=[self.columns[0]], ranges=None)
         if method == 'r0':
@@ -949,7 +1008,36 @@ class Bottom:
                 "Bottom.select_range('mean') is undefined for a layered "
                 "bottom (layer stacks can't be averaged); use 'r0', 'rmax' "
                 "or 'median'.")
+        # Averaging is only meaningful within one boundary type — the same
+        # guard Surface.collapse applies: reducing a vacuum node with a sand
+        # half-space would fold construction-time placeholders into the
+        # numbers and stamp one node's type on the result.
+        types = {c.halfspace.acoustic_type for c in self.columns}
+        if len(types) > 1:
+            raise ConfigurationError(
+                f"Bottom.select_range({method!r}) needs a single boundary "
+                f"type to average; got {sorted(types)}. Boundary types "
+                f"cannot be blended — use 'r0' or 'rmax'.")
         reduce = np.mean if method == 'mean' else np.median
+        # A uniform 'file'/'precalc' axis carries no real numbers to reduce —
+        # each column is its reflection-coefficient table. Columns sharing one
+        # table collapse to that shared spec (roughness, the one genuine
+        # number they carry, is still reduced); distinct tables cannot be
+        # averaged into anything.
+        (the_type,) = types
+        if the_type in ('file', 'precalc'):
+            specs = {c.halfspace.reflection_file for c in self.columns}
+            if len(specs) > 1:
+                raise ConfigurationError(
+                    f"Bottom.select_range({method!r}) cannot average "
+                    f"'{the_type}' columns with different reflection files "
+                    f"({sorted(specs, key=str)}). Reflection-coefficient "
+                    f"tables cannot be blended — use 'r0' or 'rmax'.")
+            shared = _copy.deepcopy(self.columns[0].halfspace)
+            shared.roughness = float(
+                reduce([c.halfspace.roughness for c in self.columns]))
+            return Bottom(columns=[SeabedColumn(layers=[], halfspace=shared)],
+                          ranges=None)
         return Bottom(columns=[SeabedColumn(
             layers=[],
             halfspace=_reduce_boundaries(

@@ -58,30 +58,37 @@ def viterbi_decode(coded, polys=DEFAULT_POLYS, K=DEFAULT_K):
         reg = [bit] + [(state >> (K - 2 - i)) & 1 for i in range(K - 1)]
         return [sum(r & g for r, g in zip(reg, t)) & 1 for t in taps]
 
-    # precompute transitions: from_state + bit -> (to_state, output word)
-    trans = {}
-    for st in range(n_states):
-        for bit in (0, 1):
-            nxt = ((bit << (K - 2)) | (st >> 1)) & (n_states - 1)
-            trans[(st, bit)] = (nxt, outputs(st, bit))
+    # Butterfly structure: the transition (st, bit) -> ((bit << (K-2)) |
+    # (st >> 1)) means state s is reached from exactly two predecessors,
+    # 2s and 2s+1 (mod n_states), both on input bit = the top bit of s.
+    states = np.arange(n_states)
+    prev0 = (states << 1) & (n_states - 1)
+    prev1 = prev0 | 1
+    bit_in = states >> (K - 2)
+    # branch[st, b] = encoder output word (n bits) leaving state st on bit b
+    branch = np.array([[outputs(st, b) for b in (0, 1)]
+                       for st in range(n_states)], dtype=int)
 
     nsteps = c.size // n
-    INF = float("inf")
-    pm = [0.0] + [INF] * (n_states - 1)
+    rx = c.reshape(nsteps, n)
+    # Hamming branch metrics per step for the two transitions into each state:
+    # bm0[k, s] = distance of rx[k] from the word on prev0[s] -> s.
+    bm_all = np.count_nonzero(branch[None, :, :, :] ^ rx[:, None, None, :],
+                              axis=3)
+    bm0 = bm_all[:, prev0, bit_in]
+    bm1 = bm_all[:, prev1, bit_in]
+
+    pm = np.full(n_states, np.inf)
+    pm[0] = 0.0
     back = np.zeros((nsteps, n_states), dtype=np.int32)   # holds prev-state index
     for k in range(nsteps):
-        rx = c[k * n:(k + 1) * n]
-        npm = [INF] * n_states
-        for st in range(n_states):
-            if pm[st] == INF:
-                continue
-            for bit in (0, 1):
-                nxt, ow = trans[(st, bit)]
-                metric = pm[st] + int(np.count_nonzero(rx ^ ow))
-                if metric < npm[nxt]:
-                    npm[nxt] = metric
-                    back[k, nxt] = st
-        pm = npm
+        cand0 = pm[prev0] + bm0[k]
+        cand1 = pm[prev1] + bm1[k]
+        # Strict < keeps the even predecessor on a tie — the same survivor a
+        # state-ascending scan that replaces only on improvement selects.
+        take1 = cand1 < cand0
+        pm = np.where(take1, cand1, cand0)
+        back[k] = np.where(take1, prev1, prev0)
     # The K-1 zero flush bits force the encoder to end in state 0, so the
     # traceback starts there; argmin(pm) could pick a different state on
     # noisy input and lose the tail constraint.

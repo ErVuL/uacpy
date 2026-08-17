@@ -15,10 +15,6 @@ from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.results import quantities as _quantities
 from uacpy.core.results._base import PhaseReference, Result, _complex_to_db
 
-# Quarter-wavelength sampling. Linear interpolation of a coherent field tracks
-# its carrier only below this per-sample phase advance.
-_MAX_COHERENT_PHASE_STEP = np.pi / 2.0
-
 # Auto-sized IFFT length is ~sample_rate/df rounded up to a power of two, so a
 # too-high sample_rate (or a too-fine frequency grid) can silently demand a
 # multi-GB buffer and OOM the process. Cap the *auto* size at 2**26 ≈ 67 M
@@ -296,8 +292,9 @@ class Field(Result):
         """This field's dB view, at ``data.shape``.
 
         ``-20·log10(|data|)`` if data is complex — for pressure that is
-        transmission loss — otherwise ``data`` itself (real data outside the
-        time domain is already a level) as a **read-only view**: the dB
+        transmission loss (a fresh array) — otherwise ``data`` itself (real
+        data outside the time domain is already a level) as a **read-only
+        view**: the dB
         values are the field, so mutating them in place would corrupt the
         result.
 
@@ -603,30 +600,6 @@ class Field(Result):
             pinned=dict(self.pinned),
             **self.id_kwargs(),
         )
-
-    @property
-    def range_phase_step(self) -> Optional[float]:
-        """Median phase advance (rad) between adjacent range samples, for
-        inspection. ``None`` for a real field or one without a resolvable
-        range axis.
-
-        **Not a sampling test, and not used as one.** It answers only half
-        the question. Linear interpolation shortens the chord between two
-        phasors by ``cos(theta/2)``, so this wrapped step does predict the
-        *level* bias (``-20log10(cos(step/2))``, verified to 2 dp). But it is
-        blind to the *phase* error, which is maximal exactly where the level
-        error vanishes — a grid spaced a whole wavelength wraps to ~0 and
-        loses no level while the phase is off by ~pi. No single scalar
-        covers both, so whether a field may be interpolated is decided by
-        the sample spacing against a quarter wavelength, which
-        :meth:`resample_to` checks. Use this to inspect a field.
-        """
-        r = self.coords.get('range')
-        if not self.is_complex or r is None or r.size < 2:
-            return None
-        step = np.diff(np.angle(self.data), axis=-1)
-        step = np.abs((step + np.pi) % (2.0 * np.pi) - np.pi)
-        return float(np.nanmedian(step)) if step.size else None
 
     def _warn_if_undersampled(self, where: str, axes=None) -> None:
         """Warn when either axis is too coarse to interpolate coherently.
@@ -1239,43 +1212,23 @@ class ResultStack:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _ifft_to_trace(
+def _synthesis_plan(
     tf: "Field",
     *,
-    depth: Optional[float],
-    range: Optional[float],
-    source_spectrum: Optional[np.ndarray],
     window: str,
     nfft: Optional[int],
-    t_start: Optional[float],
-    sample_rate: Optional[float] = None,
-) -> "Field":
-    """IFFT one (depth, range) cell of a broadband Field → time-domain trace Field.
+    sample_rate: Optional[float],
+) -> Tuple[np.ndarray, float, np.ndarray, float, int, np.ndarray]:
+    """Validate ``tf``'s frequency axis and size the synthesis grid that every
+    cell of the Field shares: returns ``(freqs, df, bin_indices,
+    bin_offset_hz, nfft, win)``.
 
-    Evaluates the Fourier synthesis ``p(t) = 2·Re Σ H(f_k)·S(f_k)·
-    e^{2πi f_k t}·df`` — a Riemann sum of the continuous inverse
-    transform, so the amplitude is independent of ``nfft`` and of the
-    bin grid. ``source_spectrum`` must therefore be the *continuous*
-    source spectrum sampled at the Field frequencies (a raw DFT times
-    the source sampling interval); ``None`` synthesizes the
-    band-limited impulse response.
-
-    Places each model frequency at bin ``round(f / Δf)`` with
-    ``Δf = f[1] - f[0]``, so the record length is exactly ``1/Δf`` — a longer
-    record requires a finer frequency grid, not a larger ``nfft``. The
-    frequency axis must therefore be uniformly spaced and ascending. A grid
-    whose first bin is not itself a multiple of ``Δf`` lands offset by a
-    common ``|δ| <= Δf/2``; the synthesis de-rotates the complex sum by
-    ``exp(-2πiδt)``, which recovers the requested band exactly rather than a
-    frequency-shifted copy of it. An auto-sized ``nfft`` always keeps the
-    largest data bin below Nyquist; an explicit ``nfft`` that would not is
-    rejected.
+    The single home for the per-Field half of the IFFT synthesis —
+    ``_ifft_to_trace`` (one cell) and ``_synthesize_time_series`` (every cell)
+    both build on it, so the two paths cannot drift apart.
     """
-    data = tf.data                                # (n_d, n_r, n_f)
     freqs = np.asarray(tf.coords['frequency'], dtype=float)
-    depths = tf.coords['depth']
-    ranges = tf.coords['range']
-    n_d, n_r, n_freq = data.shape
+    n_freq = freqs.size
 
     if n_freq < 2:
         raise ConfigurationError(
@@ -1289,20 +1242,6 @@ def _ifft_to_trace(
             "(SPARC) returned p(t) directly — read the time-domain Field "
             "from RunMode.TIME_SERIES instead of synthesising via IFFT"
         )
-
-    d_idx = (
-        int(np.argmin(np.abs(depths - depth))) if depth is not None
-        else n_d // 2
-    )
-    r_idx = (
-        int(np.argmin(np.abs(ranges - range))) if range is not None
-        else 0
-    )
-    actual_depth = float(depths[d_idx])
-    actual_range = float(ranges[r_idx])
-
-    spectrum = data[d_idx, r_idx, :].copy()
-    spectrum = np.nan_to_num(spectrum, nan=0.0)
 
     # The transfer function is sampled at df_data, so the trace it can
     # represent without aliasing is exactly 1/df_data long. Refining df below
@@ -1330,7 +1269,7 @@ def _ifft_to_trace(
     # A DFT of spacing df can only carry frequencies at integer multiples of
     # df, so each model frequency lands at bin round(f/df). When f[0] is not
     # itself a multiple of df the whole band is placed offset by a common
-    # ``bin_offset_hz`` (|offset| <= df/2); the synthesis below removes it
+    # ``bin_offset_hz`` (|offset| <= df/2); ``_synthesize_traces`` removes it
     # exactly by de-rotating the complex sum, so the trace is the band the
     # caller asked for rather than a frequency-shifted copy of it.
     bin_indices = np.floor(freqs / df + 0.5).astype(int)
@@ -1375,20 +1314,154 @@ def _ifft_to_trace(
             remediation=f"Pass nfft={2 * max_bin + 2} or larger.",
         )
 
-    win = _taper(window, n_freq, who='_ifft_to_trace', stacklevel=4)
+    win = _taper(window, n_freq, who='_ifft_to_trace', stacklevel=5)
+
+    return freqs, df, bin_indices, bin_offset_hz, int(nfft), win
+
+
+def _clean_cell_spectra(
+    spectra: np.ndarray,
+    *,
+    cell_depths: np.ndarray,
+    cell_ranges: np.ndarray,
+) -> np.ndarray:
+    """NaN policy for a batch of cell spectra ``(M, n_f)``, one row per cell.
+
+    Isolated NaN bins (a model failure at single frequencies) are treated as
+    carrying no energy and zeroed. An all-NaN cell has no valid output at all
+    — e.g. a cell masked below the seafloor — so its NaNs are kept and
+    propagate to the trace, with a warning, rather than synthesising silence
+    that reads as a real quiet arrival. ``cell_depths`` / ``cell_ranges`` give
+    each row's coordinates for the warning text.
+    """
+    all_nan = np.all(np.isnan(spectra), axis=1)
+    for i in np.flatnonzero(all_nan):
+        warnings.warn(
+            f"to_time_trace: H(f) at depth {float(cell_depths[i]):g} m, range "
+            f"{float(cell_ranges[i]):g} m is entirely NaN (no valid model "
+            f"output at this cell); the synthesised trace is NaN, not "
+            f"silence.",
+            UserWarning, stacklevel=4,
+        )
+    cleaned = np.nan_to_num(spectra, nan=0.0)
+    cleaned[all_nan] = spectra[all_nan]
+    return cleaned
+
+
+def _synthesize_traces(
+    spectra: np.ndarray,
+    *,
+    freqs: np.ndarray,
+    win: np.ndarray,
+    source_spectrum: Optional[np.ndarray],
+    bin_indices: np.ndarray,
+    bin_offset_hz: float,
+    nfft: int,
+    df: float,
+    t_start: float,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Fourier-synthesize a batch of cell spectra ``(M, n_f)`` into time
+    traces ``(M, nfft)`` sharing one window anchored at ``t_start``; returns
+    ``(traces, time)``. One ``np.fft.ifft`` over the batch computes every
+    cell's transform in a single call. See ``_ifft_to_trace`` for the
+    synthesis contract and ``_synthesis_plan`` for the grid inputs."""
+    dt = 1.0 / (nfft * df)
+    spectra = spectra * win
+    if source_spectrum is not None:
+        spectra = spectra * np.asarray(source_spectrum)
+
+    # Advance the record to t_start. The synthesis below evaluates
+    # sum H(f) e^{+2*pi*i*f*t}, so pre-rotating by e^{+2*pi*i*f*t_start} puts
+    # ifft sample n at t = t_start + n*dt instead of at n*dt.
+    spectra = spectra * np.exp(1j * 2.0 * np.pi * freqs * t_start)
+
+    # Only the positive-frequency half is physical here: 2·Re(ifft) folds
+    # anything at or above Nyquist onto the wrong frequency.
+    padded = np.zeros((spectra.shape[0], nfft), dtype=complex)
+    valid = (bin_indices >= 0) & (bin_indices < nfft // 2)
+    padded[:, bin_indices[valid]] = spectra[:, valid]
+
+    # ifft carries 1/nfft; ×(nfft·df) turns the bin sum into ∫…df
+    analytic = np.fft.ifft(padded, axis=-1) * (nfft * df)
+    elapsed = np.arange(nfft) * dt
+    if bin_offset_hz != 0.0:
+        analytic = analytic * np.exp(-2j * np.pi * bin_offset_hz * elapsed)
+    return 2.0 * np.real(analytic), t_start + elapsed
+
+
+def _ifft_to_trace(
+    tf: "Field",
+    *,
+    depth: Optional[float],
+    range: Optional[float],
+    source_spectrum: Optional[np.ndarray],
+    window: str,
+    nfft: Optional[int],
+    t_start: Optional[float],
+    sample_rate: Optional[float] = None,
+) -> "Field":
+    """IFFT one (depth, range) cell of a broadband Field → time-domain trace Field.
+
+    Evaluates the Fourier synthesis ``p(t) = 2·Re Σ H(f_k)·S(f_k)·
+    e^{2πi f_k t}·df`` — a Riemann sum of the continuous inverse
+    transform, so the amplitude is independent of ``nfft`` and of the
+    bin grid. ``source_spectrum`` must therefore be the *continuous*
+    source spectrum sampled at the Field frequencies (a raw DFT times
+    the source sampling interval); ``None`` synthesizes the
+    band-limited impulse response.
+
+    Places each model frequency at bin ``round(f / Δf)`` with
+    ``Δf = f[1] - f[0]``, so the record length is exactly ``1/Δf`` — a longer
+    record requires a finer frequency grid, not a larger ``nfft``. The
+    frequency axis must therefore be uniformly spaced and ascending. A grid
+    whose first bin is not itself a multiple of ``Δf`` lands offset by a
+    common ``|δ| <= Δf/2``; the synthesis de-rotates the complex sum by
+    ``exp(-2πiδt)``, which recovers the requested band exactly rather than a
+    frequency-shifted copy of it. An auto-sized ``nfft`` always keeps the
+    largest data bin below Nyquist; an explicit ``nfft`` that would not is
+    rejected.
+    """
+    data = tf.data                                # (n_d, n_r, n_f)
+    depths = tf.coords['depth']
+    ranges = tf.coords['range']
+    n_d, n_r, _ = data.shape
+
+    freqs, df, bin_indices, bin_offset_hz, nfft, win = _synthesis_plan(
+        tf, window=window, nfft=nfft, sample_rate=sample_rate)
+
+    d_idx = (
+        int(np.argmin(np.abs(depths - depth))) if depth is not None
+        else n_d // 2
+    )
+    r_idx = (
+        int(np.argmin(np.abs(ranges - range))) if range is not None
+        else 0
+    )
+    actual_depth = float(depths[d_idx])
+    actual_range = float(ranges[r_idx])
+
+    spectra = _clean_cell_spectra(
+        data[d_idx, r_idx, :][None, :].copy(),
+        cell_depths=np.array([actual_depth]),
+        cell_ranges=np.array([actual_range]),
+    )
 
     dt = 1.0 / (nfft * df)
 
     if t_start is None:
         T_window = nfft * dt
         # The earliest arrival travels at the FASTEST speed in the waveguide,
-        # so r/c_fast bounds it from below; anchoring on the slowest speed
-        # would open the window after the first arrival.
+        # so r/c_fast bounds it from below. Candidates are the physical
+        # speeds producers stamp: 'c_max' (RAM, the fastest speed anywhere
+        # in the waveguide) and 'c0' (Bellhop, the sea-surface water speed).
+        # Anchoring on a speed above c_fast opens the window before the
+        # estimate's lead can absorb, and the first arrival wraps to the end
+        # of the record — so no algorithmic speed (e.g. a PE expansion
+        # point) may enter this max, and c_min never binds it.
         c_max = float(tf.metadata.get('c_max') or 0.0)
         anchor_speed = max(
             c_max,
             float(tf.metadata.get('c0') or 0.0),
-            float(tf.metadata.get('c_min') or 0.0),
             DEFAULT_SOUND_SPEED,
         )
         travel = actual_range / anchor_speed
@@ -1413,31 +1486,13 @@ def _ifft_to_trace(
                 UserWarning, stacklevel=3,
             )
 
-    spectrum = spectrum * win
-    if source_spectrum is not None:
-        spectrum = spectrum * np.asarray(source_spectrum)
-
-    padded = np.zeros(nfft, dtype=complex)
-
-    # Advance the record to t_start. The synthesis below evaluates
-    # sum H(f) e^{+2*pi*i*f*t}, so pre-rotating by e^{+2*pi*i*f*t_start} puts
-    # ifft sample n at t = t_start + n*dt instead of at n*dt.
-    spectrum = spectrum * np.exp(1j * 2.0 * np.pi * freqs * t_start)
-    # Only the positive-frequency half is physical here: 2·Re(ifft) folds
-    # anything at or above Nyquist onto the wrong frequency.
-    valid = (bin_indices >= 0) & (bin_indices < nfft // 2)
-    padded[bin_indices[valid]] = spectrum[valid]
-
-    # ifft carries 1/nfft; ×(nfft·df) turns the bin sum into ∫…df
-    analytic = np.fft.ifft(padded) * (nfft * df)
-    elapsed = np.arange(nfft) * dt
-    if bin_offset_hz != 0.0:
-        analytic = analytic * np.exp(-2j * np.pi * bin_offset_hz * elapsed)
-    result = 2.0 * np.real(analytic)
-    time = t_start + elapsed
+    traces, time = _synthesize_traces(
+        spectra, freqs=freqs, win=win, source_spectrum=source_spectrum,
+        bin_indices=bin_indices, bin_offset_hz=bin_offset_hz, nfft=nfft,
+        df=df, t_start=t_start)
 
     return Field(
-        data=result,
+        data=traces[0],
         coords={'time': time},
         pinned={'depth': actual_depth, 'range': actual_range},
         model=tf.model,
@@ -1549,7 +1604,7 @@ def _synthesize_time_series(
     freqs = tf.coords['frequency']
     source_spectrum = _source_spectrum_at(wf, sample_rate, freqs)
 
-    n_d, n_r, _ = tf.data.shape
+    n_d, n_r, n_f = tf.data.shape
     depths = np.asarray(tf.coords['depth'])
     ranges = np.asarray(tf.coords['range'])
 
@@ -1562,20 +1617,31 @@ def _synthesize_time_series(
         )
         t_start = float(t0_trace.coords['time'][0]) if t0_trace.n_times else 0.0
 
-    out = None
+    plan_freqs, df, bin_indices, bin_offset_hz, nfft, win = _synthesis_plan(
+        tf, window=window, nfft=nfft, sample_rate=sample_rate)
+
+    # Every cell shares one synthesis grid, so one batched ifft per chunk of
+    # cells replaces a per-cell transform. Chunk over the flattened
+    # (depth, range) cell axis so the (cells × nfft) complex scratch stays
+    # bounded (~4M elements ≈ 64 MB) however large the field is.
+    n_cells = n_d * n_r
+    spectra = tf.data.reshape(n_cells, n_f)
+    out = np.empty((n_cells, nfft), dtype=np.float64)
     time_vec = None
-    for di in range(n_d):
-        for ri in range(n_r):
-            tr = _ifft_to_trace(
-                tf, depth=float(depths[di]), range=float(ranges[ri]),
-                source_spectrum=source_spectrum,
-                window=window, nfft=nfft, t_start=t_start,
-                sample_rate=sample_rate,
-            )
-            if out is None:
-                time_vec = tr.coords['time']
-                out = np.zeros((n_d, n_r, tr.n_times), dtype=tr.data.dtype)
-            out[di, ri, :] = tr.data
+    chunk = max(1, 4_000_000 // nfft)
+    for a in range(0, n_cells, chunk):
+        idx = np.arange(a, min(a + chunk, n_cells))
+        cleaned = _clean_cell_spectra(
+            spectra[idx].copy(),
+            cell_depths=depths[idx // n_r],
+            cell_ranges=ranges[idx % n_r],
+        )
+        traces, time_vec = _synthesize_traces(
+            cleaned, freqs=plan_freqs, win=win,
+            source_spectrum=source_spectrum, bin_indices=bin_indices,
+            bin_offset_hz=bin_offset_hz, nfft=nfft, df=df, t_start=t_start)
+        out[idx] = traces
+    out = out.reshape(n_d, n_r, nfft)
 
     # All cells share one time window anchored at (depths[0], ranges[0]);
     # arrivals for ranges further out than the window can hold wrap back

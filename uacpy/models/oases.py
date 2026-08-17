@@ -63,12 +63,13 @@ from uacpy.core.results import (
     Covariance, Replicas, ReflectionCoefficient,
 )
 from uacpy.core.exceptions import (
-    ConfigurationError, ExecutableNotFoundError, ModelExecutionError,
+    ConfigurationError,
     UnsupportedFeatureError,
 )
 from uacpy.io.oases_writer import (
     write_oast_input, write_oasn_input, write_oasp_input, write_oasr_input,
-    write_oass_input, write_oassp_input, _oases_wavenumber_bounds,
+    write_oass_input, write_oassp_input, oases_wavenumber_bounds,
+    oass_bottom_interfaces, bottom_interface_roughness,
 )
 from uacpy.io.units import m_to_km
 from uacpy.io.oases_reader import (
@@ -268,7 +269,7 @@ def _warn_offset_ignored_under_auto_sampling(model_name, integration_offset,
             f"{nw_samples}): OASES zeroes the contour offset and applies its "
             f"own default. Pin nw_samples >= 1 to use the value, or drop "
             f"integration_offset to silence this.",
-            UserWarning, stacklevel=3)
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
 
 
 def _oases_find_executable(model: PropagationModel, name: str) -> Path:
@@ -282,25 +283,6 @@ def _oases_find_executable(model: PropagationModel, name: str) -> Path:
         bin_subdirs=['oases', 'oalib'],
         dev_subdir='oases',
     )
-
-
-#: How much of a child stream to quote back in an error. OASES echoes the
-#: whole environment and every wavenumber block to stdout, so only the tail
-#: is useful; the abort reason is always last.
-_OASES_STREAM_TAIL = 2000
-
-
-def _tail(text: Optional[str], n_chars: int = _OASES_STREAM_TAIL) -> Optional[str]:
-    """Last ``n_chars`` of a captured child stream, or ``None`` if empty."""
-    if not text:
-        return None
-    return text if len(text) <= n_chars else '…' + text[-n_chars:]
-
-
-def _stream_block(label: str, text: Optional[str]) -> str:
-    """Render a captured child stream as a labelled block, or nothing."""
-    trimmed = _tail(text)
-    return f"\n\n{label}:\n{trimmed}" if trimmed else ''
 
 
 #: OASES' wavenumber-array bound, ``NPEXP = 16, NP = 2**NPEXP``
@@ -371,6 +353,9 @@ _OASS_MIN_MEAN_FIELD_ROUGHNESS = 1e-5
 #: OASS echoes the wavenumber count it settled on after re-deriving it from
 #: the .rhs (unoass21.f:231, FORMAT 550 at :50).
 _OASS_NW_ECHO = re.compile(r'NW\s+IC1\s+IC2\s*\n\s*(\d+)')
+#: FORMAT 550 (unoass21.f:50) prints NWVNO under 1X,I5: any count >= 100000
+#: renders as asterisks, which is itself proof of a count far past NP.
+_OASS_NW_I5_OVERFLOW = re.compile(r'NW\s+IC1\s+IC2\s*\n\s*\*+')
 
 
 def _oass_wavenumber_echo(process) -> Optional[int]:
@@ -380,8 +365,16 @@ def _oass_wavenumber_echo(process) -> Optional[int]:
     count comes from the mean field's wavenumber step (``unoass21.f:209-215``),
     so the binary's echo is the only place the value it used appears.
     """
-    match = _OASS_NW_ECHO.search(getattr(process, 'stdout', '') or '')
-    return int(match.group(1)) if match else None
+    stdout = getattr(process, 'stdout', '') or ''
+    match = _OASS_NW_ECHO.search(stdout)
+    if match:
+        return int(match.group(1))
+    if _OASS_NW_I5_OVERFLOW.search(stdout):
+        # The I5 field overflowed: the count is >= 100000, far past
+        # NP = 65536 — return a value the overrun check trips on rather
+        # than degrading to silence exactly when the overrun is worst.
+        return 100000
+    return None
 
 
 def _oases_mean_field_options(model: PropagationModel) -> str:
@@ -392,31 +385,6 @@ def _oases_mean_field_options(model: PropagationModel) -> str:
     """
     resolve = getattr(model, '_resolve_options', None)
     return resolve() if callable(resolve) else (model.options or '')
-
-
-def _oass_bottom_interfaces(env: Environment):
-    """``(deck index of the first bottom interface, RMS roughness per bottom
-    interface)``, in the order the deck emits them.
-
-    Mirrors the layer block :func:`write_oass_input` writes — one record for
-    an isovelocity water column, one per SSP row otherwise, on top of the
-    upper half-space — because ``INTFC`` indexes *deck layers*, and uacpy has
-    to name one without making the caller count records.
-    """
-    from uacpy.io.oases_writer import (
-        _bottom_interface_roughness, _check_ssp_layer_count,
-        _count_bottom_layers,
-    )
-    ssp_data = env.ssp.extend_to(float(env.depth)).to_pairs()
-    with warnings.catch_warnings():
-        # The writer emits the SSP-decimation warning where it matters.
-        warnings.simplefilter('ignore', UserWarning)
-        ssp_subset = _check_ssp_layer_count(ssp_data,
-                                            2 + _count_bottom_layers(env))
-    c_values = ssp_subset[:, 1]
-    n_water = (1 if np.allclose(c_values, c_values[0], rtol=1e-6)
-               else len(ssp_subset))
-    return 2 + n_water, _bottom_interface_roughness(env)
 
 
 class OASES(PropagationModel):
@@ -492,42 +460,55 @@ class OASES(PropagationModel):
         """
         return self._total_media_depth(env)
 
-    def _require_output(self, candidates, work_dir: Path, base_name: str, *,
-                        what: str, process=None, hint: str = '') -> Path:
-        """First of ``candidates`` that exists and is non-empty.
+    def _reject_wavenumber_overrun(self, process) -> None:
+        """Raise when the run integrated on more wavenumbers than NP holds.
 
-        None of them means the binary failed. OASES writes no print file and
-        has no equivalent of the Acoustics-Toolbox ``FatalError`` module: its
-        diagnostics go to stdout (``WRITE(6,*)``) and to gfortran's stop-code
-        echo on stderr, both of which exit 0. ``process`` is the binary's
-        :class:`subprocess.CompletedProcess`; its streams are carried into the
-        raised :class:`ModelExecutionError` because nothing else holds them.
+        Under automatic sampling AUTSAM sizes the wavenumber axis from the
+        frequency-range product with no bound (unoasp22.f:1130 and its OASSP
+        copy unoassp30.f:1125, ``NW=(WNMAX-WNMIN)/DK+1``), and — unlike OAST,
+        which stops at unoast31.f:459 — neither OASP nor OASSP has an
+        ``NWVNO.GT.NP`` test (their ``MIN0(NWVNO,NP)`` runs *before* AUTSAM,
+        so it cannot bound the automatic branch). Past NP the run completes,
+        exits 0 and writes a full-size ``.trf`` holding numbers that are not
+        the field (measured 3.2e27 against 1.3e-4 for the same geometry with
+        NW pinned under NP). The count the binary settled on is in its own
+        stdout, so read it from there rather than re-deriving AUTSAM.
         """
-        for candidate in candidates:
-            path = Path(candidate)
-            if path.exists() and path.stat().st_size > 0:
-                return path
-        checked = ', '.join(str(c) for c in candidates)
-        raise ModelExecutionError(
-            self.model_name,
-            return_code=getattr(process, 'returncode', 0),
-            stdout=_tail(getattr(process, 'stdout', None)),
-            stderr=(
-                f"{self.model_name} did not produce {what}. Checked: "
-                f"{checked}." + (f" {hint}" if hint else "")
-                + _stream_block('binary stderr',
-                                getattr(process, 'stderr', None))
-            ),
+        counts = [int(m) for m in
+                  _OASES_NWVNO_ECHO.findall(getattr(process, 'stdout', '') or '')]
+        if not counts or max(counts) <= _OASES_NP:
+            return
+        raise ConfigurationError(
+            f"{self.model_name} sampled {max(counts)} wavenumbers, past "
+            f"OASES' array bound NP = {_OASES_NP} (oases/src/compar.f:37-38); "
+            f"this binary has no bound check on automatic sampling, so the "
+            f"transfer function it wrote is not the acoustic field. The "
+            f"count grows with the highest frequency times the largest "
+            f"receiver range.",
+            remediation=(
+                "Shorten receiver.ranges, lower freq_max / the source "
+                "frequency, or pin nw_samples <= "
+                f"{_OASES_NP} to integrate on a bounded grid."),
         )
 
-    def _execute(self, base_name: str, work_dir: Path):
+    def _execute(self, base_name: str, work_dir: Path, *, extra_env=None):
         """Run the OASES binary and return its ``CompletedProcess``.
 
         FOR005 stays as stdin per OASES docs. The completed process is
         returned rather than dropped: OASES writes no print file, so its
         stdout/stderr are the only record of what it did.
+
+        ``extra_env`` adds FORnnn unit assignments that cannot live in
+        ``_FOR_FILES``: ``_oases_subprocess_env`` derives every suffix from
+        this run's ``base_name``, but the OASS/OASSP scattering
+        post-processors read files named after the *mean-field* run's stem
+        (an output for the producer, an input here). ``stale_outputs``
+        clears this run's stem only, so the producer's files survive the
+        pre-launch wipe — the two stems are distinct by construction.
         """
         env = _oases_subprocess_env(base_name, **self._FOR_FILES)
+        if extra_env:
+            env.update(extra_env)
         for name in self._OUTPUT_FORT_FILES:
             Path(work_dir).joinpath(name).unlink(missing_ok=True)
         return self._run_and_attach_prt(
@@ -687,19 +668,9 @@ class OAST(OASES):
 
         # Run modes, capability flags and collapse defaults come from the
         # class-level ``spec`` (applied by PropagationModel.__init__).
-        #
-        # Keep the user's ``executable`` arg verbatim (``None`` when
-        # auto-detected) so ``model.copy()`` re-resolves the binary instead of
-        # re-pinning the already-resolved absolute path. The resolved path
-        # lives in ``self._exe``.
-        self.executable = Path(executable) if executable is not None else None
-        if self.executable is None:
-            self._exe = _oases_find_executable(self, 'oast')
-        else:
-            self._exe = self.executable
-
-        if not self._exe.exists():
-            raise ExecutableNotFoundError('OAST', str(self._exe))
+        self._exe = self._resolve_executable(
+            executable, lambda: _oases_find_executable(self, 'oast'),
+        )
 
     def _resolve_options(self) -> str:
         """The OASES option line for this run.
@@ -789,7 +760,7 @@ class OAST(OASES):
             # Read output - OAST creates .plt (data) and .plp (metadata) files
             # Per OASES documentation: FOR019 -> .plp, FOR020 -> .plt
             output_file = self._require_output(
-                [fm.get_path(f'{base_name}.plt')], fm.work_dir, base_name,
+                [fm.get_path(f'{base_name}.plt')],
                 what='a TL table (FOR020 .plt)', process=proc,
                 hint=('Compare against the reference decks in '
                       'third_party/oases/tloss/.'),
@@ -899,9 +870,15 @@ class OASN(OASES):
         it names the Fortran unit number of a source-spectrum file uacpy
         does not write, so it is rejected. Requires a vacuum or air
         ``env.surface`` (``oasnun22.f:187``).
-    white_noise_level : float
+    white_noise_level : float, optional
         Uncorrelated (white) noise spectral level per hydrophone
-        (dB re 1 µPa²/Hz). 0 disables.
+        (dB re 1 µPa²/Hz), added to every covariance-matrix diagonal
+        element. OASES has no off switch for this field: it adds
+        ``10**(dB/10)`` to the diagonal unconditionally
+        (``oasnun22.f:228``, ``:1157``), so an explicit ``0.0`` is a
+        literal 0 dB — unit linear power — per sensor. ``None`` (the
+        default) writes -200 dB, whose 1e-20 linear power is
+        numerically nil against any noise field.
     deep_noise_level : float
         Deep broad-area source spectral level (dB re 1 µPa²/Hz). OASES
         uses two thresholds that disagree at exactly 0.01: the source
@@ -988,7 +965,7 @@ class OASN(OASES):
         # Noise field (Block VI): broad-area sources expressed as
         # spectral levels (dB re 1 µPa²/Hz) at three depths.
         surface_noise_level: float = 0.0,
-        white_noise_level: float = 0.0,
+        white_noise_level: Optional[float] = None,
         deep_noise_level: float = 0.0,
         deep_source_depth: Optional[float] = None,
         # Discrete (point) sources — list of dicts; each may carry
@@ -1035,7 +1012,12 @@ class OASN(OASES):
         )
         self.options = options
         self.surface_noise_level = float(surface_noise_level)
-        self.white_noise_level = float(white_noise_level)
+        # None means "no white noise": the writer maps it to the -200 dB
+        # level whose linear power is numerically nil (OASES itself has no
+        # off switch for the diagonal term).
+        self.white_noise_level = (
+            float(white_noise_level) if white_noise_level is not None else None
+        )
         self.deep_noise_level = float(deep_noise_level)
         self.deep_source_depth = (
             float(deep_source_depth) if deep_source_depth is not None else None
@@ -1088,23 +1070,19 @@ class OASN(OASES):
 
         # Run modes, capability flags and collapse defaults come from the
         # class-level ``spec`` (applied by PropagationModel.__init__).
-        #
-        # Keep the user's ``executable`` arg verbatim (``None`` when
-        # auto-detected) so ``model.copy()`` re-resolves the binary instead of
-        # re-pinning the already-resolved absolute path. The resolved path
-        # lives in ``self._exe``.
-        self.executable = Path(executable) if executable is not None else None
-        if self.executable is None:
-            self._exe = _oases_find_executable(self, 'oasn2_bin')
-        else:
-            self._exe = self.executable
-
-        if not self._exe.exists():
-            raise ExecutableNotFoundError('OASN', str(self._exe))
+        self._exe = self._resolve_executable(
+            executable, lambda: _oases_find_executable(self, 'oasn2_bin'),
+        )
 
     def _has_noise_field(self) -> bool:
-        """True when any Block VI source was configured on this instance."""
-        return bool(self.surface_noise_level or self.white_noise_level
+        """True when any Block VI source was configured on this instance.
+
+        White noise counts whenever it was set at all: an explicit 0.0 is
+        a literal 0 dB diagonal term, not "off", so the test is against
+        ``None`` rather than truthiness.
+        """
+        return bool(self.surface_noise_level
+                    or self.white_noise_level is not None
                     or self.deep_noise_level or self.discrete_sources)
 
     def _build_writer_kwargs(self) -> dict:
@@ -1268,8 +1246,7 @@ class OASN(OASES):
 
             if run_mode == RunMode.COVARIANCE:
                 cov_path = self._require_output(
-                    [fm.get_path(f'{base_name}.xsm'), fm.get_path('fort.16')],
-                    fm.work_dir, base_name, what='a covariance file',
+                    [fm.get_path(f'{base_name}.xsm'), fm.get_path('fort.16')], what='a covariance file',
                     process=proc,
                 )
                 self._log(f"Reading OASN covariance file: {cov_path}")
@@ -1304,8 +1281,7 @@ class OASN(OASES):
 
             # RunMode.REPLICA
             rep_path = self._require_output(
-                [fm.get_path(f'{base_name}.rpo'), fm.get_path('fort.14')],
-                fm.work_dir, base_name, what='a replica file', process=proc,
+                [fm.get_path(f'{base_name}.rpo'), fm.get_path('fort.14')], what='a replica file', process=proc,
                 hint=('Set the replica grid via OASN(xmin=…, xmax=…, nx=…, '
                       'zmin=…, zmax=…, nz=…) on the constructor.'),
             )
@@ -1508,19 +1484,9 @@ class OASR(OASES):
         # transmission loss. Declare that explicitly.
         # Run modes, capability flags and collapse defaults come from the
         # class-level ``spec`` (applied by PropagationModel.__init__).
-        #
-        # Keep the user's ``executable`` arg verbatim (``None`` when
-        # auto-detected) so ``model.copy()`` re-resolves the binary instead of
-        # re-pinning the already-resolved absolute path. The resolved path
-        # lives in ``self._exe``.
-        self.executable = Path(executable) if executable is not None else None
-        if self.executable is None:
-            self._exe = _oases_find_executable(self, 'oasr')
-        else:
-            self._exe = self.executable
-
-        if not self._exe.exists():
-            raise ExecutableNotFoundError('OASR', str(self._exe))
+        self._exe = self._resolve_executable(
+            executable, lambda: _oases_find_executable(self, 'oasr'),
+        )
 
     def _oasr_is_log_swept(self) -> bool:
         """True when option ``'C'`` puts OASR on a logarithmic sweep.
@@ -1588,9 +1554,9 @@ class OASR(OASES):
         """
         if self.options is None:
             return self.reflection_type or 'P-P'
-        from uacpy.io.oases_writer import _REFL_TYPE_TO_OPTION
+        from uacpy.io.oases_writer import REFL_TYPE_TO_OPTION
         chars = set(str(self.options)) - set(' \t\n')
-        named = [name for name, letter in _REFL_TYPE_TO_OPTION.items()
+        named = [name for name, letter in REFL_TYPE_TO_OPTION.items()
                  if letter in chars]
         return named[0] if len(named) == 1 else 'P-P'
 
@@ -1714,7 +1680,6 @@ class OASR(OASES):
             output_file = self._require_output(
                 [fm.get_path(ext if ext.startswith('fort')
                              else f'{base_name}{ext}') for ext in search],
-                fm.work_dir, base_name,
                 what='a reflection-coefficient table', process=proc,
             )
 
@@ -1852,12 +1817,14 @@ class OASP(OASES):
             Upper edge of the OASP broadband sweep (Hz). ``None``
             (default) derives ``2.5 ×`` the centre frequency at
             ``run()`` time; a pinned value below the centre frequency
-            raises at ``run()``.
+            or the top of the requested band raises at ``run()``.
         freq_min : float, optional
             Lower edge of the OASP broadband sweep (Hz). Default 0.0.
         center_frequency : float, optional
             Carrier frequency for the pulse (Hz). ``None`` defaults to
-            ``source.frequencies[0]`` at ``run()`` time.
+            the centre (midpoint) of the run's frequency band at
+            ``run()`` time — a single ``source.frequencies`` entry is
+            its own centre.
         freq_output_increment : int, optional
             OASP's ``INTF`` (Block VII, ``unoasp22.f:160``). It gates how
             often the wavenumber *integrand* is plotted
@@ -1911,19 +1878,9 @@ class OASP(OASES):
 
         # Run modes, capability flags and collapse defaults come from the
         # class-level ``spec`` (applied by PropagationModel.__init__).
-        #
-        # Keep the user's ``executable`` arg verbatim (``None`` when
-        # auto-detected) so ``model.copy()`` re-resolves the binary instead of
-        # re-pinning the already-resolved absolute path. The resolved path
-        # lives in ``self._exe``.
-        self.executable = Path(executable) if executable is not None else None
-        if self.executable is None:
-            self._exe = _oases_find_executable(self, 'oasp')
-        else:
-            self._exe = self.executable
-
-        if not self._exe.exists():
-            raise ExecutableNotFoundError('OASP', str(self._exe))
+        self._exe = self._resolve_executable(
+            executable, lambda: _oases_find_executable(self, 'oasp'),
+        )
 
     def run(
         self,
@@ -2022,6 +1979,15 @@ class OASP(OASES):
             fmin_user, freq_max, n_user, _ = _oases_resample_frequencies(
                 freqs_arr, 'OASP',
             )
+            # Deck fc: the centre of the requested band — the same centre
+            # convention the sibling broadband models use (RAM's (fc, Q, T)
+            # sweep is parameterised around the band midpoint). A pinned
+            # ``center_frequency`` wins.
+            fc_run = (
+                self.center_frequency
+                if self.center_frequency is not None
+                else float(0.5 * (freqs_arr.min() + freqs_arr.max()))
+            )
             if self.freq_min and abs(self.freq_min - fmin_user) > 1e-9:
                 warnings.warn(
                     f"OASP.run(frequencies=…) sets the sweep's lower edge to "
@@ -2050,24 +2016,34 @@ class OASP(OASES):
                 else:
                     n_time_samples = 2
         else:
+            # Centre convention shared with the sibling broadband models
+            # (RAM's (fc, Q, T) sweep centres on the band midpoint): a
+            # multi-element ``source.frequencies`` names a band, and its
+            # centre — not its lower edge — sets the deck fc and the derived
+            # sweep top. ``frequencies[0]`` as the centre put the top of the
+            # band above the 2.5*fc sweep edge, never computed.
+            src_freqs = np.atleast_1d(
+                np.asarray(source.frequencies, dtype=float))
             fc_run = (
                 self.center_frequency
                 if self.center_frequency is not None
-                else float(np.atleast_1d(source.frequencies)[0])
+                else float(0.5 * (src_freqs.min() + src_freqs.max()))
             )
+            f_top = max(fc_run, float(src_freqs.max()))
             if freq_max is None:
                 # Band headroom above the carrier, so the pulse's upper
                 # sidelobes fall inside FR2 rather than being truncated.
                 # OASES ties FR2 to nothing but FR1 (oasp.tex:131), so the
                 # 2.5 is uacpy's default, not a model constraint.
                 freq_max = 2.5 * fc_run
-            elif fc_run > freq_max:
+            elif f_top > freq_max:
                 raise ConfigurationError(
-                    f"OASP: centre frequency {fc_run:.1f} Hz exceeds the "
-                    f"pinned sweep edge freq_max={freq_max:.1f} Hz — the "
-                    f"sweep would never reach the requested frequency. "
-                    f"Raise freq_max (or leave it None to derive "
-                    f"2.5×fc), or pass frequencies= explicitly."
+                    f"OASP: the requested band reaches {f_top:.1f} Hz "
+                    f"(centre {fc_run:.1f} Hz), above the pinned sweep edge "
+                    f"freq_max={freq_max:.1f} Hz — the sweep would never "
+                    f"compute the top of the band. Raise freq_max (or leave "
+                    f"it None to derive 2.5×fc), or pass frequencies= "
+                    f"explicitly."
                 )
 
         env = self._project_environment(env)
@@ -2078,9 +2054,11 @@ class OASP(OASES):
             'integration_offset': self.integration_offset,
             'nw_samples': self.nw_samples,
             'freq_min': freq_min,
+            # Both branches above resolve fc_run (pinned value or band
+            # centre); the writer would otherwise default the deck fc to
+            # source.frequencies[0].
+            'center_frequency': fc_run,
         }
-        if self.center_frequency is not None:
-            writer_kwargs['center_frequency'] = self.center_frequency
         if self.freq_output_increment is not None:
             writer_kwargs['freq_output_increment'] = self.freq_output_increment
         if self.options is not None:
@@ -2113,8 +2091,7 @@ class OASP(OASES):
             output_file = self._require_output(
                 [fm.get_path(f'{base_name}.trf'),
                  fm.get_path(f'{base_name}.dtrf'),
-                 fm.get_path(f'{base_name}.plt')],
-                fm.work_dir, base_name, what='a transfer-function file',
+                 fm.get_path(f'{base_name}.plt')], what='a transfer-function file',
                 process=proc,
             )
             self._log(f"Reading OASP output: {output_file}")
@@ -2279,34 +2256,6 @@ class OASP(OASES):
                 "cannot undo. Add 'J' (the default 'N J' keeps a real "
                 "frequency axis) or pin nw_samples≥1."
             )
-
-    def _reject_wavenumber_overrun(self, process) -> None:
-        """Raise when OASP integrated on more wavenumbers than NP arrays hold.
-
-        Under automatic sampling AUTSAM sizes the wavenumber axis from the
-        frequency-range product with no bound (unoasp22.f:1130
-        ``NW=(WNMAX-WNMIN)/DK+1``), and — unlike OAST, which stops at
-        unoast31.f:459 — OASP has no ``NWVNO.GT.NP`` test. Past NP the run
-        completes, exits 0 and writes a full-size ``.trf`` holding numbers
-        that are not the field (measured 3.2e27 against 1.3e-4 for the same
-        geometry with NW pinned under NP). The count OASP settled on is in
-        its own stdout, so read it from there rather than re-deriving AUTSAM.
-        """
-        counts = [int(m) for m in
-                  _OASES_NWVNO_ECHO.findall(getattr(process, 'stdout', '') or '')]
-        if not counts or max(counts) <= _OASES_NP:
-            return
-        raise ConfigurationError(
-            f"OASP sampled {max(counts)} wavenumbers, past OASES' array bound "
-            f"NP = {_OASES_NP} (oases/src/compar.f:37-38); OASP has no bound "
-            f"check on automatic sampling (unoasp22.f:1130) so the transfer "
-            f"function it wrote is not the acoustic field. The count grows "
-            f"with the highest frequency times the largest receiver range.",
-            remediation=(
-                "Shorten receiver.ranges, lower freq_max / the source "
-                "frequency, or pin nw_samples <= "
-                f"{_OASES_NP} to integrate on a bounded grid."),
-        )
 
     _FOR_FILES = {
         'FOR002': 'src',
@@ -2520,6 +2469,24 @@ class OASSP(OASES):
                 remediation="Pass correlation_length in metres, e.g. "
                             "OASSP(correlation_length=5.0).",
             )
+        if self.correlation_length < 0.0:
+            raise UnsupportedFeatureError(
+                'OASSP',
+                "volume scattering (correlation_length < 0 is OASES' switch "
+                "to the twelve-token layer record whose extra fields — SKW, "
+                "M, RMS, GAM — have no home on any uacpy carrier; "
+                "oaseun31.f:76-90)",
+                alternatives=["interface roughness scattering "
+                              "(correlation_length > 0)"],
+                alternatives_label='configurations',
+            )
+        if self.correlation_length == 0.0:
+            raise ConfigurationError(
+                "OASSP(correlation_length=0) gives a degenerate roughness "
+                "power spectrum: OASSP forms r_l = |CLEN(INTFCE)| and hands "
+                "it to PV (unoassp30.f:606-614).",
+                remediation="Pass correlation_length > 0 (metres).",
+            )
         if str(self.spectrum).lower() not in ('gaussian', 'goff-jordan'):
             raise ConfigurationError(
                 f"OASSP(spectrum={self.spectrum!r}) is not a roughness "
@@ -2544,7 +2511,6 @@ class OASSP(OASES):
         if options is not None:
             pinned = [n for n, off in (('spectrum', 'gaussian'),
                                        ('scattered_only', True),
-                                       ('multiple_scattering', False),
                                        ('plane_geometry', False))
                       if getattr(self, n) != off]
             if pinned:
@@ -2557,22 +2523,12 @@ class OASSP(OASES):
 
         # Run modes, capability flags and collapse defaults come from the
         # class-level ``spec`` (applied by PropagationModel.__init__).
-        #
-        # Keep the user's ``executable`` arg verbatim (``None`` when
-        # auto-detected) so ``model.copy()`` re-resolves the binary instead of
-        # re-pinning the already-resolved absolute path. The resolved path
-        # lives in ``self._exe``.
-        self.executable = Path(executable) if executable is not None else None
-        if self.executable is None:
-            # install.sh:1157 copies the raw executables; bin/oases carries
-            # symlinks for oasn/oasp/oasr/oast but not for this one, so the
-            # name is 'oassp2', not 'oassp'.
-            self._exe = _oases_find_executable(self, 'oassp2')
-        else:
-            self._exe = self.executable
-
-        if not self._exe.exists():
-            raise ExecutableNotFoundError('OASSP', str(self._exe))
+        # install.sh:1157 copies the raw executables; bin/oases carries
+        # symlinks for oasn/oasp/oasr/oast but not for this one, so the
+        # name is 'oassp2', not 'oassp'.
+        self._exe = self._resolve_executable(
+            executable, lambda: _oases_find_executable(self, 'oassp2'),
+        )
 
     def _resolve_options(self) -> str:
         """OASSP option letters from the typed flags, or the raw string."""
@@ -2583,11 +2539,40 @@ class OASSP(OASES):
             letters.append('s')
         if str(self.spectrum).lower() == 'goff-jordan':
             letters.append('g')
-        if self.multiple_scattering:
-            letters.append('p')
         if self.plane_geometry:
             letters.append('P')
         return ' '.join(letters)
+
+    def _reject_unreadable_options(self) -> None:
+        """Reject raw option letters whose ``.trf`` uacpy cannot read back.
+
+        unoassp30.f carries the same complex-frequency-contour trap as OASP:
+        ``:285-290`` sets CFRFL under automatic wavenumber sampling unless
+        ``'J'`` keeps ICNTIN = 1, ``:983`` sets it for ``'O'``, and
+        ``:382-385`` then bakes OMEGIM = -ln(50)·Δf into the spectrum, which
+        the time-series synthesis does not undo — the last output sample
+        comes back 50× (34 dB) too small. Only a caller-supplied
+        ``self.options`` string can reach this: ``_resolve_options``' typed
+        path always carries ``'J'`` and never ``'O'``.
+        """
+        if self.options is None:
+            return
+        opt_chars = set(str(self.options)) - set(' \t\n')
+        if 'O' in opt_chars:
+            raise ConfigurationError(
+                "OASSP.run: option 'O' (complex frequency integration) bakes "
+                "an exp(-ln(50)·Δf·t) contour into the spectrum "
+                "(unoassp30.f:983, :382-385) that uacpy's time-series "
+                "synthesis does not undo. Drop 'O'."
+            )
+        if 'J' not in opt_chars and self.nw_samples < 1:
+            raise ConfigurationError(
+                "OASSP.run: a custom options string without 'J' enables the "
+                "complex frequency contour (OMEGIM≠0) under automatic "
+                "wavenumber sampling (unoassp30.f:285-290, :382-385), which "
+                "uacpy's time-series synthesis cannot undo. Add 'J' or pin "
+                "nw_samples >= 1."
+            )
 
     def _build_mean_field(self) -> 'OASP':
         """The OASP producer, with option ``'s'`` guaranteed.
@@ -2628,14 +2613,14 @@ class OASSP(OASES):
         mean_result = mean.run(env, source, receiver, RunMode.BROADBAND,
                                frequencies=frequencies)
         self._require_output(
-            [fm.get_path(f'{stem}.045')], fm.work_dir, stem,
+            [fm.get_path(f'{stem}.045')],
             what="a mean-field .rhs (option 's')",
             hint=("OPFILB opens unit 45 with STATUS='UNKNOWN' "
                   "(oashun21.f:634), so an empty file here means the producer "
                   "wrote no scattering right-hand sides."),
         )
         self._require_output(
-            [fm.get_path(f'{stem}.046')], fm.work_dir, stem,
+            [fm.get_path(f'{stem}.046')],
             what="a mean-field .vol (FOR046)",
             hint=("OASSP opens unit 46 unconditionally (unoassp30.f:128) and "
                   "its IOER test only covers the last OPFILb (:130)."),
@@ -2661,8 +2646,8 @@ class OASSP(OASES):
                 f"back-scatter.",
                 remediation=(f"Drop interface=, or set it to {from_file}."),
             )
-        from uacpy.io.oases_writer import _bottom_interface_roughness
-        rough = [rg for rg in _bottom_interface_roughness(env)
+        
+        rough = [rg for rg in bottom_interface_roughness(env)
                  if abs(rg) > 1e-5]
         if len(rough) > 1:
             warnings.warn(
@@ -2724,6 +2709,7 @@ class OASSP(OASES):
         )
 
         options = self._resolve_options()
+        self._reject_unreadable_options()
         env = self._project_environment(env)
         self.validate_inputs(env, source, receiver, run_mode=run_mode)
         fm = self._setup_file_manager()
@@ -2771,10 +2757,18 @@ class OASSP(OASES):
                 range_start=self.range_start,
             )
 
-            proc = self._execute(base_name, fm.work_dir, rhs_stem=mean_stem)
+            # FOR045/FOR046 point oassp2 at the mean-field run's kernel
+            # files, named after that run's stem (see OASES._execute).
+            proc = self._execute(base_name, fm.work_dir, extra_env={
+                'FOR045': f'{mean_stem}.045', 'FOR046': f'{mean_stem}.046',
+            })
+            # unoassp30.f has no NWVNO.GT.NP test either (see the base
+            # method), and its reference range min(cref·NX·DT + RM, 6·RM)
+            # (:295-306) can push NW ~2× past the mean-field OASP's, so the
+            # producer passing is no proxy for this run being in bounds.
+            self._reject_wavenumber_overrun(proc)
             output_file = self._require_output(
-                [fm.get_path(f'{base_name}.trf')],
-                fm.work_dir, base_name, what='a transfer-function file',
+                [fm.get_path(f'{base_name}.trf')], what='a transfer-function file',
                 process=proc,
             )
             self._log(f"Reading OASSP output: {output_file}")
@@ -2828,26 +2822,6 @@ class OASSP(OASES):
         finally:
             if fm.cleanup:
                 fm.cleanup_work_dir()
-
-    def _execute(self, base_name: str, work_dir: Path, *, rhs_stem: str):
-        """Run ``oassp2`` with FOR045/FOR046 naming the mean-field run's files.
-
-        Neither unit can live in ``_FOR_FILES``: for the producer they are
-        outputs named after the mean-field deck, for this consumer they are
-        inputs named after a different stem, and ``_oases_subprocess_env``
-        derives every suffix from one ``base_name``. ``stale_outputs`` clears
-        ``oassp_run.*`` only, so the producer's files survive the pre-launch
-        wipe — the two stems are distinct by construction.
-        """
-        env = _oases_subprocess_env(base_name, **self._FOR_FILES)
-        env['FOR045'] = f'{rhs_stem}.045'
-        env['FOR046'] = f'{rhs_stem}.046'
-        for name in self._OUTPUT_FORT_FILES:
-            Path(work_dir).joinpath(name).unlink(missing_ok=True)
-        return self._run_and_attach_prt(
-            [str(self._exe)], work_dir, base_name, env=env,
-            stale_outputs=self._OUTPUT_SUFFIXES,
-        )
 
     # Mirrors third_party/oases/bin/oassp (oassp.tex:524-536). The .trf is
     # named from the deck stem by TRFHEAD (oasiun23.f:830-834), not by an
@@ -3109,21 +3083,11 @@ class OASS(OASES):
 
         # Run modes, capability flags and collapse defaults come from the
         # class-level ``spec`` (applied by PropagationModel.__init__).
-        #
-        # Keep the user's ``executable`` arg verbatim (``None`` when
-        # auto-detected) so ``model.copy()`` re-resolves the binary instead of
-        # re-pinning the already-resolved absolute path. The resolved path
-        # lives in ``self._exe``.
-        self.executable = Path(executable) if executable is not None else None
-        if self.executable is None:
-            # install.sh:1157 copies the raw executable; bin/oases carries
-            # symlinks for oasn/oasp/oasr/oast but none for oass.
-            self._exe = _oases_find_executable(self, 'oass2')
-        else:
-            self._exe = self.executable
-
-        if not self._exe.exists():
-            raise ExecutableNotFoundError('OASS', str(self._exe))
+        # install.sh:1157 copies the raw executable; bin/oases carries
+        # symlinks for oasn/oasp/oasr/oast but none for oass.
+        self._exe = self._resolve_executable(
+            executable, lambda: _oases_find_executable(self, 'oass2'),
+        )
 
     def _resolve_options(self, run_mode: RunMode) -> str:
         """The OASS option line for this run.
@@ -3228,7 +3192,7 @@ class OASS(OASES):
         zero. The environment's roughness reaches the mean-field deck
         whatever ``rms_roughness`` overrides in the OASS deck.
         """
-        first_bottom, roughness = _oass_bottom_interfaces(env)
+        first_bottom, roughness = oass_bottom_interfaces(env)
         interface = (first_bottom if self.interface is None
                      else int(self.interface))
         index = interface - first_bottom
@@ -3266,7 +3230,7 @@ class OASS(OASES):
         if pinned is not None:
             return float(pinned)
         ssp_data = env.ssp.extend_to(float(env.depth)).to_pairs()
-        return _oases_wavenumber_bounds(ssp_data)[0]
+        return oases_wavenumber_bounds(ssp_data)[0]
 
     def _warn_on_c_low_mismatch(self, env: Environment) -> None:
         """Warn when this deck's ``CMIN`` is not the mean field's (G4).
@@ -3322,7 +3286,7 @@ class OASS(OASES):
         self._log(f"Running {mean.model_name} for the mean field (option 's')")
         mean_result = mean.run(env, source, receiver)
         rhs = self._require_output(
-            [fm.get_path(f'{stem}.045')], fm.work_dir, stem,
+            [fm.get_path(f'{stem}.045')],
             what="a mean-field .rhs (option 's')",
             hint=("The producer ran but left no boundary operators; check "
                   "that the scattering interface is rough."),
@@ -3423,7 +3387,10 @@ class OASS(OASES):
                 receiver_gains=self.receiver_gains,
             )
 
-            proc = self._execute(base_name, fm.work_dir, rhs_stem=rhs_stem)
+            # FOR045 points oass2 at the mean-field run's .rhs kernel,
+            # named after that run's stem (see OASES._execute).
+            proc = self._execute(base_name, fm.work_dir,
+                                 extra_env={'FOR045': f'{rhs_stem}.045'})
 
             kw = self._result_kwargs(
                 source,
@@ -3435,6 +3402,22 @@ class OASS(OASES):
             nwvno = _oass_wavenumber_echo(proc)
             if nwvno is not None:
                 kw['metadata']['n_wavenumbers'] = nwvno
+                # unoass21.f:209 re-derives NWVNO inside IF(REVERB) and the
+                # MIN0(NWVNO,NP) clamp at :225 sits in the ELSE branch only,
+                # so a reverberation run can integrate past the arrays and
+                # write a full-size garbage table at exit 0. The echo above
+                # is the count the binary actually used — bound it here.
+                if nwvno > _OASES_NP:
+                    raise ConfigurationError(
+                        f"OASS sampled {nwvno} wavenumbers, past OASES' "
+                        f"array bound NP = {_OASES_NP} "
+                        f"(oases/src/compar.f:37-38); the reverberation "
+                        f"branch has no clamp (unoass21.f:209 vs :225), so "
+                        f"the table it wrote is not the scattered field.",
+                        remediation="Raise c_low (WKMAX = 2π·f/c_low sets "
+                                    "the count), lower the frequency, or "
+                                    "shorten receiver.ranges.",
+                    )
 
             if run_mode == RunMode.COVARIANCE:
                 result = self._read_covariance(fm, base_name, receiver, proc,
@@ -3470,7 +3453,7 @@ class OASS(OASES):
         rather than left as pressure in dB.
         """
         plt_path = self._require_output(
-            [fm.get_path(f'{base_name}.plt')], fm.work_dir, base_name,
+            [fm.get_path(f'{base_name}.plt')],
             what='a reverberation table (FOR020 .plt)', process=proc,
         )
         self._log(f"Reading OASS output: {plt_path}")
@@ -3524,8 +3507,7 @@ class OASS(OASES):
         binary's own normalised ASCII dump on unit 24 to 6 decimals.
         """
         cov_path = self._require_output(
-            [fm.get_path(f'{base_name}.xsm'), fm.get_path('fort.16')],
-            fm.work_dir, base_name, what='a covariance file', process=proc,
+            [fm.get_path(f'{base_name}.xsm'), fm.get_path('fort.16')], what='a covariance file', process=proc,
         )
         self._log(f"Reading OASS covariance file: {cov_path}")
         cov_data = read_oasn_covariance(cov_path)
@@ -3547,24 +3529,6 @@ class OASS(OASES):
             primary_files=(('xsm_file', '.xsm'), ('cor_file', '.cor')),
         )
         return result
-
-    def _execute(self, base_name: str, work_dir: Path, *, rhs_stem: str):
-        """Run ``oass2`` with FOR045 pointing at the mean-field run's ``.rhs``.
-
-        FOR045 cannot live in ``_FOR_FILES``: for the producer it is an output
-        named after the mean-field deck, for this consumer an input named
-        after a different stem, and ``_oases_subprocess_env`` derives every
-        suffix from one ``base_name``. ``stale_outputs`` clears ``oass_run.*``
-        only, so the producer's ``.045`` survives the pre-launch wipe.
-        """
-        env = _oases_subprocess_env(base_name, **self._FOR_FILES)
-        env['FOR045'] = f'{rhs_stem}.045'
-        for name in self._OUTPUT_FORT_FILES:
-            Path(work_dir).joinpath(name).unlink(missing_ok=True)
-        return self._run_and_attach_prt(
-            [str(self._exe)], work_dir, base_name, env=env,
-            stale_outputs=self._OUTPUT_SUFFIXES,
-        )
 
     # Mirrors third_party/oases/bin/oass (oass.tex:438-448): covariance on
     # unit 16, the normalised-correlation ASCII dump on 24 (oassun26.f:1068),

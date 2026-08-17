@@ -159,6 +159,13 @@ class SoundSpeedProfile:
 
     @property
     def is_range_dependent(self) -> bool:
+        """True when the profile carries more than one range column.
+
+        A structural test (node count on the ranged axis), like ``Bottom`` /
+        ``Surface``: a 2-D profile whose columns are identical still counts
+        as range-dependent. Contrast ``Bathymetry.is_range_dependent`` /
+        ``Altimetry.is_range_dependent``, which test whether the *values*
+        actually vary with range."""
         return self.ranges is not None and self.data.shape[1] > 1
 
     @property
@@ -360,9 +367,20 @@ class SoundSpeedProfile:
         if gap <= _ROUND_TRIP_NOISE_M:
             return self          # a float round-trip artefact, not a request
         if gap < AT_LAST_SSP_POINT_EPS_M:
-            snapped = self.copy()
-            snapped.depths[-1] = float(depth_max)
-            return snapped
+            # Rebuild through the constructor so the moved sample is validated:
+            # a downward snap larger than the deck resolution can land at or
+            # below ``depths[-2]``, and that must raise as an invalid axis
+            # rather than return a non-increasing profile.
+            snapped_depths = self.depths.copy()
+            snapped_depths[-1] = float(depth_max)
+            return SoundSpeedProfile(
+                depths=snapped_depths,
+                data=self.data.copy(),
+                ranges=(self.ranges.copy() if self.ranges is not None
+                        else None),
+                shape=self.shape,
+                data_sources=self.data_sources,
+            )
         if depth_max > last:
             new_depths = np.append(self.depths, depth_max)
             new_data = np.vstack([self.data, self.data[-1:, :]])
@@ -398,6 +416,9 @@ class SoundSpeedProfile:
         * scalar (m/s) — isovelocity at that speed spanning ``0..depth_max``.
         * ``(depth, c)`` pairs — linear profile via :meth:`from_pairs`.
         * a :class:`SoundSpeedProfile` — returned as-is (by reference).
+
+        ``None`` policy: an isovelocity 1500 m/s water column — a usable
+        default profile, since every environment has *some* sound speed.
 
         ``depth_max`` (m) sets the column extent for the isovelocity cases.
         """
@@ -636,9 +657,12 @@ def generate_sea_surface(
     amplitude = np.sqrt(2 * S_k * dk)
     phase = rng.uniform(0, 2 * np.pi, len(k))
 
-    surface = (
-        amplitude[None, :]
-        * np.cos(2 * np.pi * np.outer(ranges, k) + phase[None, :])
-    ).sum(axis=1)
+    # Sum of a_j*cos(2*pi*k_j*x_m + phi_j) with k_j = j/(n_fft*dx) and
+    # x_m = m*dx is an inverse DFT: the cosine arguments reduce to
+    # 2*pi*j*m/n_fft, so placing a_j*exp(i*phi_j) at bin j and taking
+    # Re(n_fft * ifft) evaluates the identical sum in O(n log n).
+    spec = np.zeros(n_fft, dtype=complex)
+    spec[1:n_fft // 2 + 1] = amplitude * np.exp(1j * phase)
+    surface = n_fft * np.fft.ifft(spec).real
 
     return np.column_stack([ranges, surface])

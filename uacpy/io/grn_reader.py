@@ -278,6 +278,9 @@ def _hanning_taper(k: np.ndarray, freq: float,
     if Nk < 4:
         return win
 
+    # np.hanning includes the window's zero endpoints where MATLAB's
+    # hanning() drops them, so each roll-off differs from fieldsco.m's by a
+    # one-sample shift of the taper — sub-0.1% of the pass band.
     if k_left is not None and k_left > k[0]:
         n = 2 * round((k_left - k[0]) / (k[-1] - k[0]) * Nk) + 1
         han = np.hanning(n)
@@ -366,6 +369,20 @@ def _hankel_transform(
         raise ConfigurationError(f"spectrum must be 'P', 'N', or 'B', got {spectrum!r}")
 
     dk = float(k[1] - k[0]) if len(k) > 1 else 1.0
+    # fieldsco.m:109-111's own guard: the uniform-dk DFT is periodic in range
+    # with period 2*pi/dk, and beyond ~10/dk the wrapped tail is amplified
+    # exponentially by the exp(+atten*r) stabilisation compensation (+70 dB
+    # measured one alias period out) — refuse rather than return garbage.
+    r_max = float(np.max(np.abs(ranges))) if np.size(ranges) else 0.0
+    if r_max * dk > 10.0:
+        raise ConfigurationError(
+            f"Hankel transform: max range {r_max:g} m x wavenumber step "
+            f"dk = {dk:g} 1/m = {r_max * dk:.3g} > 10 — the range axis "
+            f"extends past the transform's alias period 2*pi/dk = "
+            f"{2.0 * np.pi / dk:g} m (fieldsco.m:109-111 stops here too).",
+            remediation="Increase the spectral RMax (rmax_multiplier on "
+                        "Scooter/SPARC) so dk shrinks, or shorten the "
+                        "receiver ranges.")
     ck = k + 1j * atten
     abs_r = np.abs(ranges)
     x = np.outer(ck, abs_r)
@@ -490,7 +507,14 @@ def grn_to_field(
         # selected — so it carries that depth alone.
         source_depths=np.atleast_1d(
             np.asarray(grn_data['sd'], dtype=float)[source_depth_idx]),
-        frequencies=float(grn_data["freq"]),
+        # Label with the frequency of the slab actually transformed (this
+        # function always takes slice 0), not the header's nominal freq0 —
+        # they differ for multi-frequency SCOOTER runs (RWSHDFile.f90:105-106
+        # keeps them independent). SPARC keeps freq: its freqVec holds the
+        # OUTPUT TIMES (sparc.f90:320), not frequencies.
+        frequencies=(float(grn_data["freqVec"][0])
+                     if grn_data["nfreq"] > 0 and not grn_data["is_sparc"]
+                     else float(grn_data["freq"])),
         phase_reference='travelling_wave',
         metadata={
             "transform_method": method,

@@ -134,8 +134,10 @@ class _Climatology:
         # keeps that axis, so wrap the query into it before indexing (the same
         # modulo _netcdf.NetcdfGrid.col applies). Latitude is south-up.
         lon = self._lon0 + ((normalize_lon(lon) - self._lon0) % 360.0)
-        col = int(np.clip(round((lon - self._lon0) / self._dlon),
-                          0, self.lon.size - 1))
+        # The axis spans a full 360 deg, so the index wraps: the half-cell
+        # west of the origin belongs to column 0, not the last column
+        # (same rule as _netcdf.NetcdfGrid.col).
+        col = int(round((lon - self._lon0) / self._dlon)) % self.lon.size
         return float(self.speed[month - 1, row, col])
 
 

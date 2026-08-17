@@ -113,12 +113,13 @@ def _source_from_filename(filename: str) -> str:
     paths outside the package are returned as the bare file stem.
     """
     try:
-        parts = Path(filename).resolve().parts
-        if 'uacpy' in parts:
-            i = len(parts) - 1 - parts[::-1].index('uacpy')
-            tail = parts[i:]
-            return '.'.join([*tail[:-1], Path(tail[-1]).stem])
+        resolved = Path(filename).resolve()
+        pkg_root = Path(__file__).resolve().parent   # the uacpy package dir
+        rel = resolved.relative_to(pkg_root)
+        return '.'.join(['uacpy', *rel.parts[:-1], rel.stem])
     except (ValueError, OSError):
+        # Outside the package (site-packages, <stdin>, user scripts): keep
+        # the bare stem — never dress third-party code as uacpy.
         pass
     return Path(filename).stem
 
@@ -158,5 +159,16 @@ def install_warning_formatter() -> None:
     as :func:`log_message`. Python's filtering, ``pytest.warns``,
     ``simplefilter('error')`` and friends keep working unchanged — only
     the rendered string is replaced.
+
+    A host application that already installed its own formatter keeps it:
+    only the stdlib default (or a previous install of this one) is
+    replaced.
     """
+    current = warnings.formatwarning
+    # A formatter that is neither the stdlib's (module 'warnings') nor a
+    # previous install of this one was set by the host application first —
+    # respect it rather than clobbering process-wide rendering.
+    if (current is not _uacpy_format_warning
+            and getattr(current, '__module__', '') != 'warnings'):
+        return
     warnings.formatwarning = _uacpy_format_warning

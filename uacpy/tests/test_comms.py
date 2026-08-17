@@ -927,3 +927,75 @@ class TestFramingReportsInsteadOfRaising:
 
     def test_short_stream_is_reported_not_raised(self):
         assert comms.unpack_frame(np.zeros(8, dtype=np.uint8)) == (b"", False)
+
+
+def test_janus_wakeup_round_trip():
+    """janus_modulate(wakeup=True) and janus_demodulate are inverses: the
+    CFAR's forward search must reach past the wake-up prefix the modulator
+    itself emits (12 tone chips + the 0.4 s gap = 76 chips; the C
+    implementation's 64-chip spread left the preamble outside the window
+    and the round trip failed with crc_ok=False)."""
+    adb = np.zeros(34, dtype=int)
+    adb[:8] = [1, 0, 1, 0, 1, 1, 0, 0]
+    bits = comms.JanusPacket(class_id=16, app_type=0, app_data=adb,
+                             mobility=1).to_bits()
+    fs = 48000.0
+    for wakeup in (False, True):
+        wav = comms.janus_modulate(bits, fs, wakeup=wakeup)
+        out_bits, ok = comms.janus_demodulate(wav, fs)
+        assert ok, f"crc failed (wakeup={wakeup})"
+        assert np.array_equal(out_bits, bits), f"bits differ (wakeup={wakeup})"
+
+
+class TestViterbiTieDeterminism:
+    """The trellis update resolves equal path metrics toward the even
+    predecessor (a state-ascending scan replacing only on improvement), so
+    degenerate tie-heavy inputs decode deterministically."""
+
+    def test_all_zero_symbols_decode_to_zeros(self):
+        dec = comms.viterbi_decode(np.zeros(200, dtype=int))
+        assert np.array_equal(dec, np.zeros(dec.size, dtype=int))
+        jdec = comms.janus_decode(np.zeros(144, dtype=int))
+        assert np.array_equal(jdec, np.zeros(64, dtype=int))
+
+    def test_roundtrip_survives_heavy_ties(self):
+        rng = np.random.default_rng(7)
+        info = rng.integers(0, 2, 120)
+        coded = comms.conv_encode(info)
+        assert np.array_equal(comms.viterbi_decode(coded), info)
+        noisy = coded.copy()
+        idx = rng.choice(coded.size, size=8, replace=False)
+        noisy[idx] ^= 1
+        assert np.array_equal(comms.viterbi_decode(noisy), info)
+        bits64 = rng.integers(0, 2, 64)
+        assert np.array_equal(comms.janus_decode(comms.janus_encode(bits64)),
+                              bits64)
+
+
+class TestDopplerTwoStageMatchesFullScan:
+    """The default-grid search (coarse every 15th candidate + fine window)
+    returns the same grid candidate as a full 601-point scan, and the
+    all-zero-metric guard still raises."""
+
+    def _rx(self, a_true, seed, noise=0.3):
+        fs = 12000.0
+        t = np.arange(int(0.2 * fs)) / fs
+        template = np.sin(2 * np.pi * (2000 * t + 3000 / 0.2 * t ** 2 / 2))
+        rng = np.random.default_rng(seed)
+        n_rx = int(round(template.size / (1.0 + a_true)))
+        sig = np.interp(np.linspace(0, template.size - 1, n_rx),
+                        np.arange(template.size), template)
+        rx = np.concatenate([np.zeros(200), sig, np.zeros(200)])
+        return rx + rng.standard_normal(rx.size) * noise, template
+
+    @pytest.mark.parametrize('a_true', [-5e-3, -1.3e-3, 0.0, 2.1e-3, 5e-3])
+    def test_same_candidate_as_full_scan(self, a_true):
+        rx, template = self._rx(a_true, seed=int(abs(a_true) * 1e6) + 1)
+        best2, _, _ = comms.estimate_doppler_scale(rx, template)
+        full = np.linspace(-5e-3, 5e-3, 601)
+        bestf, _, _ = comms.estimate_doppler_scale(rx, template, scales=full)
+        assert best2 == bestf
+
+    def test_all_zero_metric_still_raises(self):
+        with pytest.raises(ConfigurationError, match='no scale candidate'):
+            comms.estimate_doppler_scale(np.zeros(100), np.ones(500))

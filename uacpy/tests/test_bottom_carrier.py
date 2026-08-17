@@ -452,3 +452,87 @@ class TestBoundaryPropertiesRoughnessSign:
                            match='roughness must be non-negative'):
             SedimentLayer(thickness=10, sound_speed=1600, density=1.5,
                           roughness=-1.0)
+
+
+# ─── mixed-type blending guards (2026-08 audit) ────────────────────────────
+
+def test_halfspace_at_mixed_types_defaults_to_nearest():
+    """Mixed-type columns must not blend: the default reads the nearest
+    column intact (its own type and values), and an explicit
+    interp='linear' is refused instead of averaging placeholders."""
+    bot = Bottom(
+        columns=[
+            SeabedColumn(layers=[], halfspace=BoundaryProperties(
+                acoustic_type='vacuum')),
+            SeabedColumn(layers=[], halfspace=BoundaryProperties(
+                sound_speed=1800.0, density=1.9, attenuation=0.8)),
+        ],
+        ranges=[0.0, 10_000.0])
+    far = bot.halfspace_at(range=10_000.0)
+    assert far.acoustic_type == 'half-space'
+    assert far.sound_speed == pytest.approx(1800.0)
+    near = bot.halfspace_at(range=0.0)
+    assert near.acoustic_type == 'vacuum'
+    with pytest.raises(ConfigurationError, match="linear"):
+        bot.halfspace_at(range=5_000.0, interp='linear')
+
+
+def test_select_range_mean_refuses_mixed_types():
+    """Averaging across boundary types would fold construction placeholders
+    into the numbers — same guard Surface.collapse applies."""
+    bot = Bottom(
+        columns=[
+            SeabedColumn(layers=[], halfspace=BoundaryProperties(
+                acoustic_type='vacuum')),
+            SeabedColumn(layers=[], halfspace=BoundaryProperties(
+                sound_speed=1800.0, density=1.9, attenuation=0.8)),
+        ],
+        ranges=[0.0, 10_000.0])
+    for method in ('mean', 'median'):
+        with pytest.raises(ConfigurationError, match="single boundary type"):
+            bot.select_range(method)
+
+
+def test_all_sound_speeds_skips_precalc_placeholder():
+    """A 'precalc' half-space carries the resolved 1600 m/s placeholder, not
+    a seabed speed; aggregate speeds must skip it like vacuum/rigid/file so
+    it never feeds a c0 or phase-speed bound."""
+    col = SeabedColumn(
+        [SedimentLayer(thickness=10, sound_speed=1550, density=1.6,
+                       attenuation=0.4)],
+        BoundaryProperties(acoustic_type='precalc',
+                           reflection_file='bot.irc'))
+    assert Bottom.from_column(col).all_sound_speeds() == [1550.0]
+    bare = SeabedColumn([], BoundaryProperties(acoustic_type='precalc',
+                                               reflection_file='bot.irc'))
+    assert Bottom.from_column(bare).all_sound_speeds() == []
+
+
+class TestSelectRangeFileColumns:
+    """'mean'/'median' cannot numerically average reflection-table columns:
+    a uniform axis sharing one table collapses to that table (only the
+    roughness, the one genuine number such nodes carry, is reduced), and
+    differing tables are refused instead of silently dropping one."""
+
+    @staticmethod
+    def _file_col(path, roughness=0.0):
+        return SeabedColumn([], BoundaryProperties(
+            acoustic_type='file', reflection_file=path, roughness=roughness))
+
+    @pytest.mark.parametrize('method', ['mean', 'median'])
+    def test_shared_spec_collapses_to_it(self, method):
+        b = Bottom.from_columns(
+            [self._file_col('bot.brc', 0.1), self._file_col('bot.brc', 0.3)],
+            ranges=[0.0, 5000.0])
+        out = b.select_range(method).columns[0].halfspace
+        assert out.acoustic_type == 'file'
+        assert out.reflection_file == 'bot.brc'
+        assert out.roughness == pytest.approx(0.2)
+
+    @pytest.mark.parametrize('method', ['mean', 'median'])
+    def test_differing_specs_raise(self, method):
+        b = Bottom.from_columns(
+            [self._file_col('a.brc'), self._file_col('b.brc')],
+            ranges=[0.0, 5000.0])
+        with pytest.raises(ConfigurationError, match='reflection files'):
+            b.select_range(method)

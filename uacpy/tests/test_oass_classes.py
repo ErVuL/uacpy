@@ -226,9 +226,9 @@ class TestOASSPDeck:
         assert (float(last[1]), float(last[2])) == (100.0, 400.0)
 
 
-class TestReAuditFindings:
-    """Regressions for defects the adversarial re-audit found in the first
-    cut of this feature. Each pins the *mechanism*, not the symptom."""
+class TestScatteringOptionContracts:
+    """The OASS/OASSP scattering options map onto what the binaries actually
+    honour. Each test pins the *mechanism*, not the symptom."""
 
     def test_oassp_refuses_the_vendor_disabled_rescattering(self):
         # The letter is parsed and then does nothing: every routine

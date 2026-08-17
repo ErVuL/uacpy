@@ -682,6 +682,13 @@ def compare_models(
     ``title`` titles the whole figure; the per-panel titles come from
     ``labels``. ``ncols`` controls the grid width — defaults to ``n`` (single
     row). ``contours`` adds dB-level contour lines to every panel.
+
+    Returns
+    -------
+    fig, axes : Figure, ndarray of Axes
+        ``axes`` is the 2-D ``(nrows, ncols)`` array ``plt.subplots``
+        produced (unused cells are turned off) — the same shape every
+        grid-of-panels helper on this surface returns.
     """
     if isinstance(fields, dict):
         if labels is None:
@@ -789,7 +796,10 @@ def compare_models(
     if title:
         fig.suptitle(title, fontsize=14, fontweight='bold', y=0.97)
     _draw_multi_model_credit(fig, fields)
-    return fig, axes_flat
+    # One shape for every grid-of-panels return on this surface: the 2-D
+    # axes array, matching _plot_field_stack (documented in the Returns
+    # section above).
+    return fig, axes
 
 
 @typed_plot_error

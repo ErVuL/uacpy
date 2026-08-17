@@ -69,6 +69,24 @@ from uacpy.io.oalib_reader import read_prt
 # warnings module's dedup key.
 USER_FRAME_SKIP = (str(Path(__file__).parent) + os.sep,)
 
+#: How much of a captured child stream to quote back in an error. The
+#: binaries echo their whole deck and every progress block to stdout, so only
+#: the tail is useful; the abort reason is always last.
+_STREAM_TAIL = 2000
+
+
+def _tail(text: Optional[str], n_chars: int = _STREAM_TAIL) -> Optional[str]:
+    """Last ``n_chars`` of a captured child stream, or ``None`` if empty."""
+    if not text:
+        return None
+    return text if len(text) <= n_chars else '…' + text[-n_chars:]
+
+
+def _stream_block(label: str, text: Optional[str]) -> str:
+    """Render a captured child stream as a labelled block, or nothing."""
+    trimmed = _tail(text)
+    return f"\n\n{label}:\n{trimmed}" if trimmed else ''
+
 
 class RunMode(Enum):
     """
@@ -154,7 +172,10 @@ VALID_SOURCE_TYPES: frozenset = frozenset({'point', 'line', 'scaled'})
 # 1/waveform-duration, so a short pulse over a narrow band can derive 2-3 bins
 # — below what the band-edge taper in ``_ifft_to_trace`` can act on, and too
 # few to represent an arrival. Costs one model run per extra bin.
-_MIN_TIMESERIES_FREQS = 8
+# Odd on purpose: RAM re-parameterises a uniform grid as an (fc, Q, T) sweep
+# that is symmetric about a bin, so an odd count round-trips exactly while an
+# even one marches a superset (ram.py _resolve_broadband_grid).
+_MIN_TIMESERIES_FREQS = 9
 
 
 def _max_roughness(boundaries) -> float:
@@ -220,7 +241,6 @@ _CAPABILITY_FLAGS: frozenset = frozenset({
     'range_dependent_ssp',
     'range_dependent_bottom',
     'layered_bottom',
-    'range_dependent_layered_bottom',
     'elastic_media',
     'multi_source_depth',
     'source_beam_pattern',
@@ -303,22 +323,6 @@ class ModelSpec:
                 f"{model_name}.spec.supports has unknown capability flags: "
                 f"{sorted(bad_flags)}. Valid: {sorted(_CAPABILITY_FLAGS)}."
             )
-        # ``range_dependent_layered_bottom`` names the combined axis but is
-        # never consulted on its own: ``_project_environment`` collapses the
-        # range and layer axes independently, so declaring it without both
-        # component flags would advertise a capability the collapse still
-        # takes away.
-        if 'range_dependent_layered_bottom' in self.supports:
-            missing = ({'range_dependent_bottom', 'layered_bottom'}
-                       - set(self.supports))
-            if missing:
-                raise ConfigurationError(
-                    f"{model_name}.spec declares "
-                    f"'range_dependent_layered_bottom' but not "
-                    f"{sorted(missing)}. The combined capability is the "
-                    f"conjunction of the two axes; declare both or drop it."
-                )
-
         bad_types = set(self.source_types) - VALID_SOURCE_TYPES
         if bad_types:
             raise ConfigurationError(
@@ -536,10 +540,6 @@ class PropagationModel(ABC):
         self._supports_range_dependent_ssp: bool = False
         self._supports_range_dependent_bottom: bool = False
         self._supports_layered_bottom: bool = False
-        # Declared per model to document the axis as live; the combined
-        # range-dependent-layered capability is the conjunction of the two
-        # axes above (which is what _project_environment collapses against).
-        self._supports_range_dependent_layered_bottom: bool = False
         self._supports_elastic_media: bool = False
         # Bellhop is the only model that runs one source-depth grid in
         # a single binary call; everyone else loops in Python.
@@ -953,12 +953,32 @@ class PropagationModel(ABC):
         fc = float(src_f[0])
         half_bw = 0.5 * float(bandwidth_factor)
         # The lower edge goes to zero or negative once bandwidth_factor >= 2;
-        # a 0 Hz bin is not a runnable model frequency, so floor it at 1 Hz.
-        return np.linspace(
-            max(1.0, fc * (1.0 - half_bw)),
-            fc * (1.0 + half_bw),
-            int(n_freqs),
-        )
+        # a 0 Hz bin is not a runnable model frequency, so floor it at 1 Hz —
+        # and say so, since the band is then neither centred on fc nor the
+        # requested width.
+        lo = fc * (1.0 - half_bw)
+        hi = fc * (1.0 + half_bw)
+        if lo < 1.0:
+            warnings.warn(
+                f"{self.model_name} broadband: bandwidth_factor="
+                f"{bandwidth_factor:g} puts the lower band edge at "
+                f"{lo:.4g} Hz; floored at 1 Hz, so the band is no longer "
+                f"centred on fc = {fc:g} Hz nor the requested width.",
+                UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+            )
+            lo = 1.0
+        # A sub-1 Hz fc can put the floored lower edge at or above the upper
+        # edge; a descending or duplicated frequency axis is a silently
+        # mislabelled Field, so refuse it.
+        if hi <= lo:
+            raise ConfigurationError(
+                f"{self.model_name} broadband: the band "
+                f"[{lo:g}, {hi:g}] Hz is empty after the 1 Hz floor "
+                f"(fc = {fc:g} Hz, bandwidth_factor = {bandwidth_factor:g}). "
+                f"Sub-1 Hz centre frequencies need an explicit frequencies= "
+                f"grid."
+            )
+        return np.linspace(lo, hi, int(n_freqs))
 
     def _resolve_time_series_frequencies(
         self,
@@ -1026,16 +1046,20 @@ class PropagationModel(ABC):
         # the synthesis cannot use.
         refined = max(n_freqs, _MIN_TIMESERIES_FREQS)
         derived = np.linspace(f_min, f_max, refined)
+        # Quote the spacing of the grid actually returned; the waveform's own
+        # Δf = 1/duration goes in the refinement note so the two never
+        # contradict each other.
+        df_grid = (f_max - f_min) / (refined - 1)
         note = ""
         if refined != n_freqs:
-            note = (f" Δf refined to {(f_max - f_min) / (refined - 1):.4g} Hz "
-                    f"so the {n_freqs}-bin band resolves an arrival.")
+            note = (f" (waveform Δf = {df:.4g} Hz subdivided so the "
+                    f"{n_freqs}-bin band resolves an arrival)")
         warnings.warn(
             f"{self.model_name}.run(run_mode=TIME_SERIES): no "
             f"`frequencies=` passed; auto-derived {refined} freqs from "
             f"the source waveform ({f_min:.2f}-{f_max:.2f} Hz, "
-            f"Δf={df:.4g} Hz, threshold {threshold_db:.0f} dB).{note} Pass "
-            f"`frequencies=` to silence.",
+            f"Δf={df_grid:.4g} Hz, threshold {threshold_db:.0f} dB){note}. "
+            f"Pass `frequencies=` to silence.",
             UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
         )
         return derived
@@ -1268,11 +1292,13 @@ class PropagationModel(ABC):
         """Flat-bathymetry counterpart to
         :meth:`_check_per_range_receiver_depth`: warn — never raise — when a
         receiver lies below the depth this model resolves the field at.
-        Such receivers are accepted; every model degrades gracefully there
-        (Bellhop transmitted field, Kraken evanescent tail, RAM NaN in the
-        absorbing layer, Scooter/SPARC clipped to the sediment). The
-        range-dependent case is handled per-range by
-        :meth:`_check_per_range_receiver_depth`.
+        Such receivers are accepted; what comes back is per-engine:
+        Bellhop, Scooter, SPARC and RAM return NaN there (their solvers
+        clamp the receiver onto the domain or stop meshing, so no field is
+        evaluated at the asked depth), while Kraken and the OASES models
+        compute a physical transmitted / evanescent field through the
+        sediment they mesh. The range-dependent case is handled per-range
+        by :meth:`_check_per_range_receiver_depth`.
         """
         if env.has_range_dependent_bathymetry:
             return
@@ -1282,8 +1308,9 @@ class PropagationModel(ABC):
                 f"{float(receiver.depth_max):.1f} m is below the model's "
                 f"resolvable depth ({resolvable_depth:.1f} m). It is "
                 f"accepted; the result there reflects the model's "
-                f"below-domain behaviour (transmitted / evanescent field, "
-                f"or NaN inside a PE absorbing layer).",
+                f"below-domain behaviour (a physical transmitted / "
+                f"evanescent field from Kraken and OASES; NaN from "
+                f"Bellhop, Scooter, SPARC and RAM).",
                 UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
             )
 
@@ -1292,9 +1319,10 @@ class PropagationModel(ABC):
     ) -> None:
         """Emit a ``UserWarning`` if any receiver sits below the local
         seafloor in a range-dependent bathymetry. Below-seafloor receivers
-        are accepted, not rejected: several models (Bellhop, RAM) resolve
-        them natively (transmitted field, PE absorbing region). The
-        flat-bathy case is handled by
+        are accepted, not rejected; the cells come back NaN from the
+        engines that evaluate no field there (Bellhop, Scooter, SPARC,
+        RAM) and as a physical transmitted field from the ones that mesh
+        the sediment (Kraken, OASES). The flat-bathy case is handled by
         :meth:`_warn_receiver_below_resolvable`.
         """
         if not env.has_range_dependent_bathymetry:
@@ -1534,12 +1562,10 @@ class PropagationModel(ABC):
                 f"receiver-independent) — its third argument is n_modes. Pass "
                 f"it by keyword: compute_modes(env, source, n_modes=...).")
 
-        if env.is_range_dependent:
-            # Mode solvers (the Kraken backends) collapse the environment via
-            # ``collapse={'bathymetry': …}`` and warn, rather than reject —
-            # same pattern as OAST/OASP/Scooter/SPARC.
-            env = self._project_environment(env)
-
+        # The env is passed through as-is: the implementation's run() path
+        # projects it exactly once (Kraken's MODES path reduces a range-
+        # dependent env to its r=0 profile and then projects), so a second
+        # projection here would collapse and warn twice.
         return self._compute_modes_impl(env, source, n_modes)
 
     def _compute_modes_impl(self, env, source, n_modes):
@@ -1708,6 +1734,34 @@ class PropagationModel(ABC):
                 alternatives=['OASN'],
             )
         return self.run(env, source, receiver, run_mode=RunMode.REPLICA)
+
+    def _resolve_executable(self, executable, find, *,
+                            label: Optional[str] = None) -> Path:
+        """Store the user's ``executable`` arg verbatim and return the binary.
+
+        Keeps ``self.executable`` exactly as passed (``None`` when
+        auto-detected) so ``copy()`` / ``__repr__`` — which read every
+        constructor knob off ``self.<param>`` — round-trip the *intent*: a
+        clone re-resolves the binary instead of re-pinning an
+        already-resolved absolute path.
+
+        Parameters
+        ----------
+        executable : str or Path, optional
+            The user's constructor argument, verbatim.
+        find : callable
+            Zero-argument callable that locates the binary when
+            ``executable`` is ``None`` (typically a
+            :meth:`_find_executable_in_paths` closure).
+        label : str, optional
+            Model label for :class:`ExecutableNotFoundError`. Defaults to
+            ``self.model_name``.
+        """
+        self.executable = Path(executable) if executable is not None else None
+        exe = self.executable if self.executable is not None else find()
+        if not exe.exists():
+            raise ExecutableNotFoundError(label or self.model_name, str(exe))
+        return exe
 
     def _find_executable_in_paths(
         self,
@@ -2121,6 +2175,43 @@ class PropagationModel(ABC):
         if prt_path.exists():
             result.metadata['prt_file'] = str(prt_path)
 
+    def _require_output(self, candidates, *, what: str, process=None,
+                        hint: str = '', prt_base: Optional[str] = None,
+                        work_dir=None) -> Path:
+        """Return the first of ``candidates`` that exists and is non-empty.
+
+        None of them means the binary failed without a usable exit status —
+        the OALIB/OASES/RAM engines routinely exit 0 after writing nothing.
+        The raised :class:`ModelExecutionError` names every checked path and
+        carries whatever diagnostics the engine family has:
+
+        * ``process`` — the binary's :class:`subprocess.CompletedProcess`;
+          its stdout/stderr tails are quoted (OASES and the RAM family write
+          no print file, so the streams are the only record of the failure).
+        * ``prt_base`` + ``work_dir`` — appends the tail of
+          ``<work_dir>/<prt_base>.prt`` (the Acoustics-Toolbox models log
+          fatal errors there rather than on their streams).
+        """
+        for candidate in candidates:
+            path = Path(candidate)
+            if path.exists() and path.stat().st_size > 0:
+                return path
+        checked = ', '.join(str(c) for c in candidates)
+        exc = ModelExecutionError(
+            self.model_name,
+            return_code=getattr(process, 'returncode', 0),
+            stdout=_tail(getattr(process, 'stdout', None)),
+            stderr=(
+                f"{self.model_name} did not produce {what}. Checked: "
+                f"{checked}." + (f" {hint}" if hint else "")
+                + _stream_block('binary stderr',
+                                getattr(process, 'stderr', None))
+            ),
+        )
+        if prt_base is not None and work_dir is not None:
+            self._attach_prt_tail(exc, work_dir, prt_base)
+        raise exc
+
     @staticmethod
     def _attach_prt_tail(exc, work_dir, base_name, tail_bytes: int = 2000):
         """Append the tail of the binary's ``<base>.prt`` log to ``exc``.
@@ -2272,7 +2363,7 @@ class PropagationModel(ABC):
             warnings.warn(
                 f"{self.model_name} reported {len(lines)} non-fatal "
                 f"warning(s) in its .prt log:\n  {joined}",
-                UserWarning, stacklevel=3)
+                UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
 
     def _result_kwargs(
         self,

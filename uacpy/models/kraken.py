@@ -71,14 +71,11 @@ from uacpy.io.oalib_writer import (
     write_multi_profile_env, write_fieldflp, write_kraken_env_file,
     resolve_phase_speed_bounds, plan_multi_profile_media,
     at_mesh_floor, reject_coarse_at_mesh,
+    SOURCE_TYPE_CODE as _SOURCE_TYPE_CODE,
 )
 from uacpy.io.oalib_reader import read_shd_file, read_shd_bin, read_prt
 from uacpy.io.refl_io import stage_source_beam_pattern
 from uacpy.models._segmentation import segment_environment_by_range
-
-
-# Source geometry -> field.exe Opt(1:1), per field.f90:70-79.
-_SOURCE_TYPE_CODE = {'point': 'R', 'line': 'X', 'scaled': 'S'}
 
 # Cleared before each launch so a pinned work_dir cannot return an earlier
 # run's output: the modes binary writes <base>.mod, field.exe writes <base>.shd.
@@ -359,14 +356,22 @@ class Kraken(PropagationModel):
                     f"measured 8.2 dB against Scooter at 1600 Hz. Pass "
                     f"{needed:.3g} or leave mode_points_per_meter=None to "
                     f"derive it.",
-                    UserWarning, stacklevel=3)
+                    UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
             return ppm
         return max(MODE_POINTS_PER_METER_FLOOR, needed)
+
+    def _effective_c_high(self):
+        """The c_high the deck gets: the user's value, or the leaky-mode
+        'unbounded' sentinel (CHIGH → ∞ per the Kraken doc), or ``None``
+        for the writer's SSP/bottom auto-derivation."""
+        if self.c_high is not None:
+            return self.c_high
+        return 1e9 if self.leaky_modes else None
 
     def _validate_phase_speed_limits(self):
         """Check 0 <= c_low < c_high when either is explicitly set."""
         cl = self.c_low
-        ch = self.c_high
+        ch = self._effective_c_high()
         if cl is not None and cl < 0:
             raise ConfigurationError(
                 f"c_low must be >= 0, got {cl}"
@@ -483,7 +488,14 @@ class Kraken(PropagationModel):
         self._check_kraken_ssp_type()
         # Re-validate in case caller mutated attributes after __init__
         self._validate_phase_speed_limits()
-        self._reject_coarse_mesh(env, float(source.frequencies[0]))
+        # A pinned n_mesh is checked at the highest frequency the deck will
+        # march (the broadband vector when present): the AT reader's "Mesh
+        # is too coarse" floor scales with frequency, so a mesh that clears
+        # fc can still under-resolve the top of the sweep.
+        marched = (frequencies if frequencies is not None
+                   else source.frequencies)
+        self._reject_coarse_mesh(
+            env, float(np.max(np.atleast_1d(np.asarray(marched, dtype=float)))))
 
         from uacpy.io.oalib_writer import resolve_ssp_topopt
         ssp_topopt = resolve_ssp_topopt(env, self.interp_ssp)
@@ -505,8 +517,10 @@ class Kraken(PropagationModel):
             )
         )
 
-        cl, ch = resolve_phase_speed_bounds(env, self._c_low_for(env), self.c_high)
-        if self.c_high is None:
+        c_high_eff = self._effective_c_high()
+        cl, ch = resolve_phase_speed_bounds(env, self._c_low_for(env),
+                                            c_high_eff)
+        if c_high_eff is None:
             self._log(
                 f"c_high auto-derived from env.ssp + bottom = {ch:.1f} m/s "
                 f"(c_low = {cl:.1f} m/s)"
@@ -531,9 +545,21 @@ class Kraken(PropagationModel):
         terminated by a fluid halfspace (shear_speed == 0). Reject it up front
         so the caller gets a fast typed error instead of a ``timeout``-long
         hang. Elastic half-spaces and elastic-over-elastic stacks are fine."""
+        # A bottom with no layered column anywhere cannot carry the
+        # solid-over-liquid stack this guard rejects — return before any
+        # reduction, so a mixed-type non-layered RD bottom (which the MODES
+        # path reduces with 'r0') never hits select_range('median')'s
+        # single-type check.
         if not env.bottom.is_layered:
             return
-        col = env.bottom.at(range=0)
+        # Inspect the column the deck will carry: projection reduces a
+        # range-dependent bottom via collapse['bottom_range'] before the
+        # writer runs, so an elastic layer at r > 0 can reach the deck even
+        # when the r = 0 column is fluid.
+        bottom = env.bottom
+        if bottom.is_range_dependent:
+            bottom = bottom.select_range(self._collapse['bottom_range'])
+        col = bottom.at(range=0)
         has_elastic_layer = any(
             (getattr(layer, 'shear_speed', 0) or 0) > 0 for layer in col.layers
         )
@@ -829,9 +855,17 @@ class Kraken(PropagationModel):
             np.asarray(mode_depth_grid, dtype=float)
             if mode_depth_grid is not None else None
         )
-        if leaky_modes:
-            # CHIGH→∞ so kraken/krakenc attempts leaky modes (Kraken doc).
-            self.c_high = 1e9
+        # leaky_modes drives CHIGH to the 'unbounded' sentinel at deck time
+        # (_effective_c_high); pinning c_high alongside it is a contradiction
+        # that used to silently discard the pinned value — and c_high stays
+        # stored verbatim so copy()/repr() round-trip the constructor args.
+        if leaky_modes and c_high is not None:
+            raise ConfigurationError(
+                f"Kraken(leaky_modes=True) needs CHIGH at the 'unbounded' "
+                f"sentinel (1e9 m/s) for kraken/krakenc to search leaky "
+                f"modes; an explicit c_high={c_high} contradicts it. Pass "
+                f"one or the other."
+            )
         self._validate_phase_speed_limits()
         if backend is not None and backend not in ('kraken', 'krakenc'):
             raise ConfigurationError(
@@ -847,23 +881,15 @@ class Kraken(PropagationModel):
                 f"got {mode_coupling!r}"
             )
 
-        # Keep the user's ``executable`` arg verbatim (``None`` when
-        # auto-detected) so ``model.copy()`` re-resolves the binary instead of
-        # re-pinning the already-resolved absolute path. The resolved kraken.exe
-        # path lives in ``self._exe``; ``_select_kraken_exe`` may swap in
-        # krakenc.exe per-env.
-        self.executable = Path(executable) if executable is not None else None
-        if self.executable is None:
-            self._exe = self._find_executable_in_paths(
-                'kraken.exe',
-                bin_subdirs='oalib',
+        # The resolved kraken.exe path lives in ``self._exe``;
+        # ``_select_kraken_exe`` may swap in krakenc.exe per-env.
+        self._exe = self._resolve_executable(
+            executable,
+            lambda: self._find_executable_in_paths(
+                'kraken.exe', bin_subdirs='oalib',
                 dev_subdir='Acoustics-Toolbox/Kraken',
-            )
-        else:
-            self._exe = self.executable
-
-        if not self._exe.exists():
-            raise ExecutableNotFoundError(self.model_name, str(self._exe))
+            ),
+        )
 
         # field.exe is only needed for field-producing run modes (TL /
         # broadband / time-series), not for MODES. Store the user arg for
@@ -901,6 +927,7 @@ class Kraken(PropagationModel):
           (``RunMode.INCOHERENT_TL`` is the only 'I' case; BROADBAND /
           TIME_SERIES are coherent by construction).
         """
+        # Source geometry letter lands in field.exe Opt(1:1), field.f90:70-79.
         pos1 = _SOURCE_TYPE_CODE[source.source_type]
         if is_range_dependent:
             pos2 = 'C' if self.mode_coupling.lower() == 'coupled' else 'A'
@@ -968,9 +995,15 @@ class Kraken(PropagationModel):
             raise ConfigurationError(
                 f"top_reflection_file not found: {self.top_reflection_file}"
             )
+        # Replace only the boundary condition; roughness is a separate
+        # physical input the deck still reads — oalib_writer.py:860 writes
+        # env.surface.roughness as SSP%sigma(1) on the water mesh line
+        # independently of the TopOpt letter, and kraken.f90:845→:902 feeds
+        # it into KupIng.
         env.surface = Surface(properties=[BoundaryProperties(
             acoustic_type='file',
-            reflection_file=str(self.top_reflection_file))])
+            reflection_file=str(self.top_reflection_file),
+            roughness=env.surface.roughness)])
         return env
 
     def _reflection_table_boundaries(self, env) -> list:
@@ -1123,9 +1156,14 @@ class Kraken(PropagationModel):
         # combined with incoherent mode addition. ``KrakenField/field.f90:
         # 125-129`` calls ERROUT on Opt(2:2)='C' + Opt(4:4)='I', which surfaces
         # in Python as an opaque "no .shd file" error. Fail loudly up front.
+        # Gate on the range dependence that survives projection: bathymetry
+        # and SSP drive the multi-profile (coupled) deck, while a
+        # range-dependent bottom or surface alone is collapsed to one column
+        # and yields a single-profile run field.exe accepts.
         if (
             run_mode == RunMode.INCOHERENT_TL
-            and env.is_range_dependent
+            and (env.has_range_dependent_bathymetry
+                 or env.has_range_dependent_ssp)
             and self.mode_coupling == 'coupled'
         ):
             raise ConfigurationError(
@@ -1182,11 +1220,19 @@ class Kraken(PropagationModel):
         # as NaN below it. (The modes solve itself is fine here — the
         # elastic-over-fluid-halfspace case that hangs krakenc.exe was already
         # rejected by _reject_elastic_over_fluid_halfspace above.)
+        # Detect elasticity on the column the deck will carry: projection
+        # reduces a range-dependent bottom via collapse['bottom_range'], so
+        # columns[0] of the raw env can be fluid while the written deck is
+        # elastic (or vice versa).
+        deck_bottom = env.bottom
+        if deck_bottom.is_range_dependent:
+            deck_bottom = deck_bottom.select_range(
+                self._collapse['bottom_range'])
         elastic_subbottom = (
-            env.has_layered_bottom
+            deck_bottom.is_layered
             and any(
                 (getattr(layer, 'shear_speed', 0) or 0) > 0
-                for layer in env.bottom.columns[0].layers
+                for layer in deck_bottom.at(range=0.0).layers
             )
         )
         rcv, keep = self._partition_elastic_subbottom(env, receiver, elastic_subbottom)
@@ -1233,14 +1279,24 @@ class Kraken(PropagationModel):
         bottom = env.bottom
         if bottom is not None and bottom.is_range_dependent:
             bottom = bottom.select_range('r0')
-        return Environment(
+        # Carry the full context of the original env: altimetry passes
+        # through untouched so ``_project_environment`` still sees it and
+        # emits its collapse disclosure, and the geolocation / date /
+        # provenance fields survive onto the reduced env.
+        reduced = Environment(
             name=env.name,
             bathymetry=float(env.bathymetry.eval(range=0.0)),
             ssp=ssp,
+            altimetry=env.altimetry,
             bottom=bottom,
             surface=env.surface.collapse('r0'),
             absorption=env.absorption,
+            location=env.location,
+            transect=env.transect,
+            date=env.date,
         )
+        reduced.data_sources = env.data_sources
+        return reduced
 
     def _run_modes(self, env, source, receiver, *, n_modes, exe=None):
         """Run the modes binary only (kraken.exe / krakenc.exe by ``backend=``
@@ -1437,65 +1493,28 @@ class Kraken(PropagationModel):
                   f"mode_coupling={self.mode_coupling}")
         return segments, n_profiles, profile_ranges_m, max_total_depth
 
-    def _fixed_mesh_points(self, segments, max_total_depth, freq) -> int:
-        """Mesh points per medium shared by every profile of a multi-profile
+    def _multi_profile_n_mesh(self, segments, freq) -> int:
+        """``NG`` mesh count written on every medium line of a multi-profile
         ``.env``.
 
-        One value is used throughout so the ``.mod`` record length cannot grow
-        between profiles (``krakenc.f90:629``). AT sizes each medium at 20
-        points per wavelength and aborts with *Mesh is too coarse* below half
-        of that (``misc/ReadEnvironmentMod.f90:99-112``); crucially it takes
-        the wavelength from the medium's **shear** speed wherever one is set,
-        and an elastic sediment's shear wavelength can be an order of magnitude
-        shorter than its compressional one.
+        0 (the default ``n_mesh``) asks KRAKEN to size each medium of each
+        profile itself, at 20 points per wavelength with a 10-point floor
+        (``misc/ReadEnvironmentMod.f90:99-110``). Per-profile meshes are
+        legal: the ``.mod`` record length has no mesh term
+        (``kraken.f90:587`` / ``krakenc.f90:629`` — it is set by the
+        frequency count, the source/receiver tabulation and the padded
+        media count, all identical across profiles).
 
-        The shared value must clear every medium's own requirement, so each
-        medium class is bounded by the widest span it can occupy and the
-        slowest speed it can mesh on: the water column reaches at most the
-        deepest seafloor, while the seabed media run from the shallowest
-        seafloor down to ``max_total_depth`` (``write_multi_profile_env``
-        stretches its deepest pad there). Bounding the two separately keeps a
-        thin elastic layer under deep water from sizing the whole mesh.
-
-        A pinned ``n_mesh`` is honoured, and rejected when it falls under the
-        ``Nneeded / 2`` floor the same reader enforces. That floor is measured
-        per medium off the media the deck actually carries
-        (:meth:`_multi_profile_media`), not off these bounding spans: the spans
-        deliberately overshoot to keep the auto mesh generous, and reusing them
-        as the rejection threshold blocks configurations KRAKEN accepts.
+        A pinned ``n_mesh`` is honoured on every medium of every profile,
+        after the ``Nneeded / 2`` floor check the same reader enforces.
+        That floor is measured per medium off the media the deck actually
+        carries (:meth:`_multi_profile_media`); crucially AT takes the
+        wavelength from a medium's **shear** speed wherever one is set,
+        and an elastic sediment's shear wavelength can be an order of
+        magnitude shorter than its compressional one.
         """
-        water_speeds, seabed_speeds = [], []
-        for _, seg in segments:
-            water_speeds.append(float(np.min(seg.ssp.data)))
-            if seg.bottom is None:
-                continue
-            for column in seg.bottom.columns:
-                media = list(column.layers)
-                # Same skip set as ``Bottom.all_sound_speeds``: a vacuum /
-                # rigid / file half-space carries the placeholder speed
-                # ``BoundaryProperties.__post_init__`` filled in, not a
-                # physical one, so it must not size the mesh.
-                if column.halfspace.acoustic_type not in ('vacuum', 'rigid',
-                                                          'file'):
-                    media.append(column.halfspace)
-                for medium in media:
-                    shear = float(getattr(medium, 'shear_speed', 0.0) or 0.0)
-                    seabed_speeds.append(shear if shear > 0.0
-                                         else float(medium.sound_speed))
-
-        seafloors = [float(seg.depth) for _, seg in segments]
-        spans = [(max(seafloors), water_speeds)]
-        if seabed_speeds:
-            spans.append((float(max_total_depth) - min(seafloors),
-                          seabed_speeds))
-
-        needed = [
-            span * freq / (min(speeds) if speeds else DEFAULT_SOUND_SPEED) * 20
-            for span, speeds in spans
-        ]
-        computed = max(500, int(max(needed)))
         if self.n_mesh <= 0:
-            return computed
+            return 0
         floor = at_mesh_floor(self._multi_profile_media(segments), freq)
         if self.n_mesh < floor:
             raise ConfigurationError(
@@ -1503,8 +1522,9 @@ class Kraken(PropagationModel):
                 f"points misc/ReadEnvironmentMod.f90:110-112 requires for the "
                 f"coarsest medium of this range-dependent environment at "
                 f"{freq:.4g} Hz; the run would stop with 'Mesh is too coarse'.",
-                remediation=f"Pass n_mesh >= {floor}, or leave n_mesh=0 to let "
-                            f"uacpy size the shared mesh ({computed} here).",
+                remediation=f"Pass n_mesh >= {floor}, or leave n_mesh=0 to "
+                            f"let KRAKEN size each medium of each profile "
+                            f"itself.",
             )
         return int(self.n_mesh)
 
@@ -1571,8 +1591,8 @@ class Kraken(PropagationModel):
                 else self._compute_rmax_m(receiver, multiplier=1.05)
             )
 
-            n_mesh_fixed = self._fixed_mesh_points(
-                segments, max_total_depth, float(source.frequencies[0]))
+            n_mesh_deck = self._multi_profile_n_mesh(
+                segments, float(source.frequencies[0]))
 
             if broadband:
                 # ``write_multi_profile_env`` has no broadband form; refuse
@@ -1590,16 +1610,17 @@ class Kraken(PropagationModel):
                 source=source,
                 receiver=receiver_for_modes,
                 interp_ssp=self.interp_ssp,
-                n_mesh=n_mesh_fixed,
+                n_mesh=n_mesh_deck,
                 c_low=c_low,
-                c_high=self.c_high,
+                c_high=self._effective_c_high(),
                 rmax_m=rmax_m,
             )
             # cLow and RMax are written identically into every profile block;
             # an unpinned cHigh resolves per profile from that profile's SSP
             # and half-space, so the widest of them is what bounds the run.
             c_high = max(
-                resolve_phase_speed_bounds(seg_env, c_low, self.c_high)[1]
+                resolve_phase_speed_bounds(
+                    seg_env, c_low, self._effective_c_high())[1]
                 for _, seg_env in segments
             )
             return {'c_low': float(c_low), 'c_high': float(c_high),
@@ -1767,12 +1788,17 @@ class Kraken(PropagationModel):
                 # read_shd_bin returns pressure as (Ntheta, Nsz, Nrz, Nrr);
                 # [0, 0] selects the single bearing and single source depth the
                 # deck was written with.
-                # field.exe (EvaluateMod.f90:34,42) emits the modal sum
-                # under the engineering carrier exp(-ikr) but with a
-                # leading factor i·√(2π)·exp(iπ/4); Scooter's Hankel
-                # path produces -exp(iπ/4)/√(2πr). The two prefactors
-                # differ by an overall -1 (NOT a conjugation), so a
-                # plain negation aligns the two travelling-wave fields.
+                # field.exe already marches the engineering carrier
+                # exp(-ikr) (EvaluateMod.f90:42); only its constant is off.
+                # Its prefactor (EvaluateMod.f90:34) is i·√(2π)·e^{iπ/4}
+                # = -√(2π)·e^{-iπ/4}, whereas the point-source modal sum
+                # normalized to 1 m under this carrier carries
+                # +√(2π)·e^{-iπ/4} in that slot (the e^{-iπ/4}/√(8π) of
+                # the standard sum times the 4π the 1 m free-field
+                # reference strips) — the form Scooter's Hankel path
+                # returns. field.exe is therefore the wanted field times
+                # -1, so a plain negation aligns the two; conjugating
+                # instead would flip the already-correct carrier sign.
                 p_stack[:, :, i_freq] = -shd_i['pressure'][0, 0, :, :]
             field = Field(
                 data=p_stack,
@@ -1864,9 +1890,6 @@ class Kraken(PropagationModel):
             ``INCOHERENT_TL`` sums mode magnitudes, everything else sums
             complex modes.
         """
-        fm = self._setup_file_manager()
-        base_name = 'kfield'
-
         broadband = (
             frequencies is not None
             and len(np.atleast_1d(frequencies)) > 1
@@ -1906,6 +1929,11 @@ class Kraken(PropagationModel):
                     f"<= {_FIELD_MAX_NFREQ}-frequency passes and concatenated."
                 ),
             )
+
+        # Created only after the guards above, so a rejected call does not
+        # leave an orphaned scratch directory behind.
+        fm = self._setup_file_manager()
+        base_name = 'kfield'
 
         try:
             is_rd = env.is_range_dependent

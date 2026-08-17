@@ -15,7 +15,7 @@ from typing import Dict, Optional, Union
 import numpy as np
 
 from uacpy.core.exceptions import (
-    ConfigurationError, ExecutableNotFoundError, ModelExecutionError,
+    ConfigurationError, ModelExecutionError,
 )
 from uacpy.models.base import (
     PropagationModel, RunMode, ModelSpec, USER_FRAME_SKIP,
@@ -30,11 +30,8 @@ from uacpy.io.grn_reader import read_grn_file, grn_to_field, grn_to_transfer_fun
 from uacpy.io.oalib_writer import (
     write_scooter_env_file, reject_coarse_at_mesh,
     reject_unsupported_ssp_interp,
+    SOURCE_TYPE_CODE as _SOURCE_TYPE_CODE,
 )
-
-
-# Source geometry -> fieldsco.m Opt(1:1), per fieldsco.m:120-140.
-_SOURCE_TYPE_CODE = {'point': 'R', 'line': 'X', 'scaled': 'S'}
 
 
 class Scooter(PropagationModel):
@@ -221,27 +218,18 @@ class Scooter(PropagationModel):
                 "through them. Measured 6.7 dB TL error at 5 km against Kraken "
                 "on a 100 m Pekeris guide, against 0.075 dB with the stabiliser "
                 "on. Use it only to inspect the un-damped kernel.",
-                UserWarning, stacklevel=2,
+                UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
             )
 
         # Run modes, capability flags and collapse defaults come from the
         # class-level ``spec`` (applied by PropagationModel.__init__).
-        #
-        # Keep the user's ``executable`` arg verbatim (``None`` when
-        # auto-detected) so ``model.copy()`` re-resolves the binary instead of
-        # re-pinning the already-resolved absolute path. The resolved path
-        # lives in ``self._exe``.
-        self.executable = Path(executable) if executable is not None else None
-        if self.executable is None:
-            self._exe = self._find_executable_in_paths(
+        self._exe = self._resolve_executable(
+            executable,
+            lambda: self._find_executable_in_paths(
                 'scooter.exe', bin_subdirs='oalib',
                 dev_subdir='Acoustics-Toolbox/Scooter',
-            )
-        else:
-            self._exe = self.executable
-
-        if not self._exe.exists():
-            raise ExecutableNotFoundError('Scooter', str(self._exe))
+            ),
+        )
 
     def run(
         self,
@@ -313,8 +301,6 @@ class Scooter(PropagationModel):
 
         self.validate_inputs(env, source, receiver, run_mode=run_mode)
         reject_unsupported_ssp_interp('Scooter', self.interp_ssp)
-        reject_coarse_at_mesh('Scooter', self.n_mesh, env,
-                              float(source.frequencies[0]))
 
         # Broadband mode (BROADBAND or TIME_SERIES) requires a
         # frequency vector. The in-tree Python Hankel transform handles
@@ -328,6 +314,16 @@ class Scooter(PropagationModel):
             )
             self._log(f"Broadband: {len(broadband_freqs)} frequencies, "
                       f"{broadband_freqs[0]:.1f}-{broadband_freqs[-1]:.1f} Hz")
+
+        # A pinned n_mesh is checked at the highest frequency the run will
+        # march: the AT reader's "Mesh is too coarse" floor scales with
+        # frequency, so a mesh that clears fc can still under-resolve the
+        # top of a broadband sweep.
+        marched = (broadband_freqs if broadband_freqs is not None
+                   else source.frequencies)
+        reject_coarse_at_mesh(
+            'Scooter', self.n_mesh, env,
+            float(np.max(np.atleast_1d(np.asarray(marched, dtype=float)))))
 
         fm = self._setup_file_manager()
 
@@ -413,17 +409,13 @@ class Scooter(PropagationModel):
         self._log("Running...")
         self._run_scooter(base_name, fm.work_dir)
 
-        grn_file = fm.get_path(f'{base_name}.grn')
-        if not grn_file.exists():
-            exc = ModelExecutionError(
-                self.model_name, return_code=0, stdout=None,
-                stderr=(
-                    f"Scooter did not produce {grn_file}; "
-                    f"check {fm.work_dir}/{base_name}.prt for diagnostics."
-                ),
-            )
-            self._attach_prt_tail(exc, fm.work_dir, base_name)
-            raise exc
+        # A missing or empty .grn means the binary died silently; the raised
+        # error carries the .prt tail with the actual cause.
+        grn_file = self._require_output(
+            [fm.get_path(f'{base_name}.grn')],
+            what="a Green's function (.grn)",
+            prt_base=base_name, work_dir=fm.work_dir,
+        )
 
         self._log("Reading Green's function...")
         grn_data = read_grn_file(grn_file)

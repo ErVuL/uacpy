@@ -22,7 +22,10 @@ from __future__ import annotations
 
 import multiprocessing as mp
 import os
+import shutil
+import warnings
 import sys
+import tempfile
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
@@ -71,6 +74,20 @@ class Job:
     run_mode: Any = None
     run_kwargs: Dict[str, Any] = field(default_factory=dict)
     label: Any = None
+
+
+def _worker_init(started_counter, scratch_root: str) -> None:
+    """Pool initializer, run once per worker as it boots.
+
+    Increments ``started_counter`` — proof at least one worker survived
+    bootstrap, which is what separates a ``__main__`` re-import crash from a
+    native binary dying mid-run — and points ``tempfile`` at a parent-owned
+    scratch root so a SIGKILLed worker's model tempdirs are reaped by the
+    parent instead of accumulating in /tmp.
+    """
+    with started_counter.get_lock():
+        started_counter.value += 1
+    tempfile.tempdir = scratch_root
 
 
 def _job_worker(job: Job):
@@ -233,13 +250,38 @@ def run_parallel(
 
     if n_workers is None:
         n_workers = min(len(jobs), os.cpu_count() or 1)
+    # Typed errors for the two knobs the pool would otherwise reject with a
+    # bare ValueError/TypeError from concurrent.futures / multiprocessing.
+    try:
+        n_workers = int(n_workers)
+    except (TypeError, ValueError):
+        raise ConfigurationError(
+            f"run_parallel: n_workers must be an integer >= 1, got "
+            f"{n_workers!r}.") from None
+    if n_workers < 1:
+        raise ConfigurationError(
+            f"run_parallel: n_workers must be >= 1, got {n_workers}.")
+    if start_method not in ('fork', 'spawn', 'forkserver'):
+        raise ConfigurationError(
+            f"run_parallel: start_method must be 'fork', 'spawn' or "
+            f"'forkserver', got {start_method!r}.")
 
     results: List[Optional[Result]] = [None] * len(jobs)
     errors: Dict[int, BaseException] = {}
 
+    ctx = mp.get_context(start_method)
+    # started.value > 0 once any worker's initializer ran: the discriminator
+    # between "workers crashed on bootstrap" and "a worker died mid-run".
+    started = ctx.Value('i', 0)
+    # Parent-owned scratch root the workers point tempfile at, removed in the
+    # finally below — so model tempdirs of a SIGKILLed/OOM-killed worker are
+    # reaped instead of leaking in /tmp.
+    scratch_root = tempfile.mkdtemp(prefix='uacpy_parallel_')
+    pool_broken = False
     try:
         with ProcessPoolExecutor(
-            max_workers=n_workers, mp_context=mp.get_context(start_method)
+            max_workers=n_workers, mp_context=ctx,
+            initializer=_worker_init, initargs=(started, scratch_root),
         ) as executor:
             future_to_idx = {
                 executor.submit(_job_worker, job): i for i, job in enumerate(jobs)
@@ -266,6 +308,7 @@ def run_parallel(
                         raise
                     errors[i] = exc
     except BrokenProcessPool as exc:
+        pool_broken = True
         # The worker pool died before returning. The usual cause in interactive
         # use: spawn/forkserver workers re-import __main__, but an interactive
         # session (REPL, Jupyter, ``python -c``, piped stdin) has none, so the
@@ -283,19 +326,20 @@ def run_parallel(
             ) from exc
         # A spawned worker re-imports __main__. If the calling script runs
         # run_parallel at module level (no ``if __name__ == '__main__':``), the
-        # import re-enters here and the pool dies before any job completes.
-        # __main__ *is* importable in that case, so the check above does not
-        # catch it — distinguish on "nothing finished".
-        if (start_method in ('spawn', 'forkserver')
-                and not any(r is not None for r in results)):
+        # import re-enters here and the workers die on bootstrap — before any
+        # initializer runs. ``started`` distinguishes that from a worker that
+        # booted fine and was then killed mid-run (the old "did any job
+        # finish" test could not: an early OOM-kill also finishes nothing,
+        # and misblamed a __main__ guard that was already correct).
+        if (start_method in ('spawn', 'forkserver') and started.value == 0):
             raise ConfigurationError(
-                f"run_parallel: the {start_method!r} worker pool died before "
-                f"any job completed. If the calling script runs run_parallel "
-                f"at module level, wrap it in `if __name__ == '__main__':` — "
-                f"each worker re-imports __main__, so an unguarded call "
-                f"re-enters run_parallel on import. Otherwise a worker "
-                f"crashed on startup (missing model binary, or a native "
-                f"library that cannot initialise in a spawned process)."
+                f"run_parallel: the {start_method!r} workers died on "
+                f"bootstrap, before any began running. If the calling script "
+                f"runs run_parallel at module level, wrap it in "
+                f"`if __name__ == '__main__':` — each worker re-imports "
+                f"__main__, so an unguarded call re-enters run_parallel on "
+                f"import. Otherwise a native library crashed while "
+                f"initialising in the spawned process."
             ) from exc
         # Otherwise a worker died mid-run (a native binary segfaulted or was
         # OOM-killed). ProcessPoolExecutor cannot isolate this — the whole pool
@@ -308,6 +352,26 @@ def run_parallel(
             "suspect job on its own to see its error, lower n_workers if "
             "memory-bound, or check that job's model inputs."
         ) from exc
+
+    finally:
+        # Reap the workers' scratch root. Entries survive a NORMAL batch
+        # only when a job kept its dir (cleanup=False with an unpinned
+        # work_dir) — those are the caller's, so leave them and say where.
+        # (use_tmpfs=True dirs live in /dev/shm, outside this root, and
+        # cannot be reaped here.) After a broken pool the entries are
+        # debris from killed workers: reap.
+        try:
+            leftovers = os.listdir(scratch_root)
+        except OSError:
+            leftovers = []
+        if leftovers and not pool_broken:
+            warnings.warn(
+                f"run_parallel: {len(leftovers)} job work dir(s) were kept "
+                f"(cleanup=False) under {scratch_root}; remove that "
+                f"directory when done with the files.",
+                UserWarning, stacklevel=2)
+        else:
+            shutil.rmtree(scratch_root, ignore_errors=True)
 
     labels = [job.label if job.label is not None else i for i, job in enumerate(jobs)]
     return ParallelResult(results, errors, labels, coordinate_name)

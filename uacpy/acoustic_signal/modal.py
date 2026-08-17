@@ -28,7 +28,12 @@ def modal_group_velocity(frequencies, k_horizontal):
         Frequencies (Hz), strictly increasing.
     k_horizontal : array
         Horizontal wavenumber (rad/m). Shape ``(n_freq,)`` for one mode or
-        ``(n_freq, n_modes)`` for several.
+        ``(n_freq, n_modes)`` for several. May be complex (KRAKENC's lossy
+        modes): the group velocity is then ``d(omega)/d(Re k_r)`` — for
+        weakly attenuated modes the propagation speed follows the real part
+        of the wavenumber, while ``Im(k_r)`` is the modal attenuation and
+        controls amplitude decay, not travel time (Jensen et al., *COA*,
+        Sects. 2.4.5 and 5.9.2).
 
     Returns
     -------
@@ -36,7 +41,9 @@ def modal_group_velocity(frequencies, k_horizontal):
         Group velocity (m/s), same shape as ``k_horizontal``.
     """
     f = np.asarray(frequencies, dtype=float)
-    kr = np.asarray(k_horizontal, dtype=float)
+    # Complex wavenumbers carry the modal attenuation in the imaginary part;
+    # the dispersion (and hence the group velocity) lives in the real part.
+    kr = np.real(np.asarray(k_horizontal)).astype(float)
     if f.ndim != 1 or np.any(np.diff(f) <= 0):
         raise ConfigurationError("modal_group_velocity: frequencies must be 1-D increasing")
     omega = 2.0 * np.pi * f

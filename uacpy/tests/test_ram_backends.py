@@ -1126,13 +1126,16 @@ class TestCollinsBroadbandLevel:
 
     def test_metadata_c_min_is_the_environment_minimum(self):
         """``c_min`` documents the slowest speed the solver brackets, not
-        the Padé reference ``c0`` — which on this env is 1687 m/s against a
-        1500 m/s water column."""
+        the Padé reference — which on this env is 1687 m/s against a
+        1500 m/s water column and rides on ``pe_reference_speed``. No
+        ``c0`` key is stamped: the synthesis window anchor reads ``c0``
+        as a physical speed, which the Padé expansion point is not."""
         env, src, rcv = self._setup()
         m = RAM(backend='ramgeo', Q=8.0, T=0.05, verbose=False)
         field = m.run(env, src, rcv, run_mode=RunMode.BROADBAND)
         assert field.metadata['c_min'] == pytest.approx(1500.0)
-        assert field.metadata['c0'] != pytest.approx(1500.0)
+        assert field.metadata['pe_reference_speed'] != pytest.approx(1500.0)
+        assert 'c0' not in field.metadata
 
 
 def test_run_frequencies_preserves_every_source_field():
@@ -1683,7 +1686,7 @@ class TestRamAppliesTheStabilityFloor:
                 warnings.simplefilter('always')
                 model._compute_grid_lytaev(**kw)
             return [w for w in caught
-                    if 'shear-mode stability' in str(w.message)]
+                    if 'shear-wavelength resolution' in str(w.message)]
 
         assert not grid_warnings(RAM(backend='rams', verbose=False))
         assert grid_warnings(

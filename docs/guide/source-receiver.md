@@ -451,17 +451,20 @@ for model in (Bellhop(n_beams=4000), Kraken(), RAM()):
 ```
 UserWarning: Bellhop: receiver depth 150.0 m is below the model's resolvable
 depth (100.0 m). It is accepted; the result there reflects the model's
-below-domain behaviour (transmitted / evanescent field, or NaN inside a PE
-absorbing layer).
+below-domain behaviour (a physical transmitted / evanescent field from Kraken
+and OASES; NaN from Bellhop, Scooter, SPARC and RAM).
 ```
 
 A **receiver is an output**. Asking for a value under the seabed is a
 legitimate question — you want the transmitted field, or you are gridding
 uniformly and do not want to special-case the seafloor — and every model has a
-defined answer down there. So uacpy accepts it, warns once, and hands back
-whatever the model says: Bellhop's transmitted field flattens to a constant,
-Kraken's evanescent tail decays smoothly, RAM returns `NaN` inside its
-absorbing layer. Different answers, all honest, none of them a bug.
+defined answer down there. So uacpy accepts it, warns once, and hands back the
+per-engine truth: Kraken and the OASES models mesh the sediment and return the
+physical transmitted / evanescent field, while Bellhop, Scooter, SPARC and RAM
+return `NaN` — their solvers clamp such a receiver onto the domain or stop
+meshing, so no field is actually evaluated at the asked depth, and a fabricated
+number there would misreport where the field was sampled. Different answers,
+all honest, none of them a bug.
 
 A **source is an input**. It injects the energy the whole solution is built
 from, and a model has no defined behaviour for energy injected outside the

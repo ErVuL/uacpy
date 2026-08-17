@@ -82,6 +82,38 @@ def test_unesco_vs_delgrosso_close(annual_http):
     assert np.allclose(cu, cd, atol=1.0)  # standard formulas agree ~1 m/s
 
 
+def test_wet_cell_fallback_stamps_the_cell_actually_used(monkeypatch):
+    # The requested cell (30.5, -40.5) is dry and the column comes from its
+    # eastern neighbour; provenance must carry that neighbour's centre so
+    # offset_km measures the real hop, not 0 to the dry cell.
+    wet = (120, 140)                              # cell centre (30.5, -39.5)
+
+    def fake_get_column(source, period, lat_idx, lon_idx, **kw):
+        if (lat_idx, lon_idx) == wet:
+            return (np.asarray(_Z), np.asarray([18.0, 16.0, 13.0, 8.0, 5.0]),
+                    np.asarray([36.0, 36.1, 36.2, 35.5, 35.0]))
+        return np.array([]), np.array([]), np.array([])
+
+    monkeypatch.setattr(ss, '_get_column', fake_get_column)
+    with pytest.warns(UserWarning, match='closest wet cell'):
+        profile = ss.fetch_ssp((30.5, -40.5))
+    prov = profile.data_sources[0]
+    assert prov.requested_point == (30.5, -40.5)
+    assert prov.data_point == (30.5, -39.5)
+    assert prov.offset_km == pytest.approx(95.8, abs=0.5)  # 1 deg lon at 30.5N
+
+
+def test_on_centre_request_stamps_zero_offset(monkeypatch):
+    def fake_get_column(source, period, lat_idx, lon_idx, **kw):
+        return (np.asarray(_Z), np.asarray([18.0, 16.0, 13.0, 8.0, 5.0]),
+                np.asarray([36.0, 36.1, 36.2, 35.5, 35.0]))
+
+    monkeypatch.setattr(ss, '_get_column', fake_get_column)
+    prov = ss.fetch_ssp((30.5, -40.5)).data_sources[0]
+    assert prov.data_point == (30.5, -40.5)
+    assert prov.offset_km == 0.0
+
+
 def test_land_cell_raises(monkeypatch):
     land = {
         ('t', 0): (_Z, [FILL] * 5),

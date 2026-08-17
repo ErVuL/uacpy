@@ -332,13 +332,15 @@ class Environment:
         length, so it sizes a receiver range grid without recomputing the
         geodesic.
         """
+        # Any carrier with a ranged axis contributes, including a single-node
+        # one (ranges=[r] is a coordinate at range r even though
+        # ``is_range_dependent`` — a >1-node test — is False for it).
         extent = self.bathymetry.range_max
-        if self.ssp.is_range_dependent:
+        if self.ssp.ranges is not None:
             extent = max(extent, float(self.ssp.ranges[-1]))
-        if self.bottom.is_range_dependent:
+        if self.bottom.ranges is not None:
             extent = max(extent, float(self.bottom.ranges[-1]))
-        if self.surface.is_range_dependent:
-            extent = max(extent, self.surface.range_max)
+        extent = max(extent, self.surface.range_max)
         if self.altimetry is not None:
             extent = max(extent, self.altimetry.range_max)
         return extent
@@ -406,6 +408,11 @@ class Environment:
 
     @property
     def is_range_dependent(self) -> bool:
+        """True when any carrier is range-dependent, under each carrier's own
+        meaning of the term: for bathymetry the *values* must vary with range
+        (a flat multi-point bathymetry does not count), while for
+        ssp / bottom / surface the test is structural (more than one node on
+        a ranged axis, identical or not)."""
         return (
             self.has_range_dependent_bathymetry
             or self.ssp.is_range_dependent

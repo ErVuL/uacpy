@@ -63,7 +63,11 @@ def simulate_link(scheme, ebn0_db, n_bits=20000, *, channel=None,
         rx = np.concatenate([rx, np.zeros(tx.size + delay - rx.size, dtype=complex)])
 
     ebn0 = 10.0 ** (float(ebn0_db) / 10.0)
-    rx = awgn(rx, 10.0 * np.log10(k * ebn0), rng=rng)
+    # Es/N0 = (info Eb/N0) x bits-per-symbol x code rate: a coded frame
+    # carries R information bits per transmitted bit, so omitting R labels
+    # Ec/N0 as Eb/N0 and overstates coding gain by 10log10(1/R).
+    rate = float(getattr(code, 'rate', 1.0) or 1.0) if code is not None else 1.0
+    rx = awgn(rx, 10.0 * np.log10(k * rate * ebn0), rng=rng)
 
     mse = None
     if equalizer is not None:

@@ -119,8 +119,14 @@ def _query_bbox(lat, lon, radius_km, *, layer, base_url, timeout, verbose):
     dlat = radius_km / 111.0                # ~111 km per degree of latitude
     dlon = radius_km / (111.0 * max(math.cos(math.radians(lat)), 0.1))
     lon = normalize_lon(lon)
-    # The server wants lon-lat axis order for EPSG:4326 bbox values.
-    bbox = f"{lon - dlon:.4f},{lat - dlat:.4f},{lon + dlon:.4f},{lat + dlat:.4f}"
+    # The server wants lon-lat axis order for EPSG:4326 bbox values; clamp
+    # the box into [-180, 180] so a point near the coverage edge (180 E)
+    # cannot emit an out-of-range longitude (coverage ends there anyway).
+    lon_lo = max(lon - dlon, -180.0)
+    lon_hi = min(lon + dlon, 180.0)
+    lat_lo = max(lat - dlat, -90.0)
+    lat_hi = min(lat + dlat, 90.0)
+    bbox = f"{lon_lo:.4f},{lat_lo:.4f},{lon_hi:.4f},{lat_hi:.4f}"
     query = urllib.parse.urlencode({
         'service': 'WFS', 'version': '2.0.0', 'request': 'GetFeature',
         'typeNames': layer, 'outputFormat': 'application/json',

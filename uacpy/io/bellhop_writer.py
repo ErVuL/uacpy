@@ -16,7 +16,7 @@ from typing import Union
 from uacpy._log import log_message
 from uacpy.core.absorption import ConstantAbsorption
 from uacpy.core.constants import AttenuationUnits
-from uacpy.core.exceptions import ConfigurationError
+from uacpy.core.exceptions import ConfigurationError, UnsupportedFeatureError
 from uacpy.core.environment import Environment
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
@@ -34,7 +34,15 @@ from uacpy.io.oalib_writer import (
 )
 from uacpy.io.refl_io import stage_reflection_file
 from uacpy.io.units import m_to_km
+from uacpy.io.utils import reject_unknown_kwargs
 
+
+# The advanced Cerveny beam knobs — the only ``**kwargs`` the beam block of
+# ``write_bellhop_env_file`` reads.
+_CERVENY_KWARGS = frozenset({
+    'beam_width_type', 'beam_curvature', 'component', 'eps_multiplier',
+    'r_loop', 'n_image', 'ib_win',
+})
 
 # Beam-type letters honoured by the Bellhop env reader (case-significant).
 # Anything else maps to the geometric-hat DEFAULT case in
@@ -278,6 +286,11 @@ def write_bellhop_env_file(
     """
     filepath = Path(filepath)
 
+    # The only ``**kwargs`` this deck reads are the Cerveny beam knobs
+    # consumed by the beam block; anything else is a typo'd option and is
+    # rejected instead of silently dropped.
+    reject_unknown_kwargs('write_bellhop_env_file', kwargs, _CERVENY_KWARGS)
+
     validate_beam_type(beam_type, 'write_bellhop_env_file')
     for _value, _allowed, _name, _cite in (
         (run_type, _VALID_RUN_TYPES, 'run_type',
@@ -316,6 +329,36 @@ def write_bellhop_env_file(
     if r_box is None:
         r_box = 1.2 * receiver.range_max if receiver.range_max > 0 else 10000
 
+    # Deck-validity guards that depend only on the environment run BEFORE the
+    # file opens, so a refused deck never leaves a truncated .env behind.
+    interp_char = resolve_ssp_topopt(env, interp_ssp)
+    # TopOpt 'Q' makes Bellhop unconditionally open <root>.ssp
+    # (ReadEnvironmentBell.f90:262-268) and abort when it is absent, and the
+    # quad file is only written from a range-dependent SSP — so a
+    # range-independent env with interp_ssp='quad' is a deck the binary
+    # cannot run.
+    if interp_char == 'Q' and not env.has_range_dependent_ssp:
+        raise ConfigurationError(
+            "write_bellhop_env_file: interp_ssp='quad' (TopOpt 'Q') "
+            "needs a range-dependent SSP to build the .ssp file "
+            "Bellhop unconditionally opens "
+            "(ReadEnvironmentBell.f90:262-268); this environment's SSP "
+            "is range-independent.",
+            remediation="Use interp_ssp='linear'/'pchip'/'spline', or "
+                        "give env.ssp a range axis.")
+    # ReadEnvironmentBell.f90:459 accepts the 'P' (precalculated IRC) letter
+    # but bellhop.f90:681's boundary SELECT CASE has no 'P' branch, so its
+    # CASE DEFAULT (:779) aborts the run at the first bottom bounce.
+    if _BOUNDARY_TYPE_MAP.get(
+            env.bottom.halfspace_at(range=0.0).acoustic_type.lower(),
+            "A") == 'P':
+        raise UnsupportedFeatureError(
+            'Bellhop', "a 'precalc' (.irc) bottom — bellhop.f90:681's "
+            "boundary SELECT CASE has no 'P' branch, so the run aborts at "
+            "the first bottom bounce ('Unknown boundary condition type')",
+            alternatives=["acoustic_type='file' (a .brc table)",
+                          'Kraken / Scooter, which read .irc natively'])
+
     with open(filepath, "w") as f:
         # Title
         f.write(f"'{env.name}'\n")
@@ -327,8 +370,6 @@ def write_bellhop_env_file(
         # ReadEnvironmentBell.f90:56 ERROUTs on anything else ("sediment
         # layers must be handled using a reflection coefficient").
         f.write("1\n")
-
-        interp_char = resolve_ssp_topopt(env, interp_ssp)
 
         _GEOM_INTERP_TO_CODE = {'linear': 'L', 'curvilinear': 'C'}
         bty_code = _GEOM_INTERP_TO_CODE.get(str(interp_bathymetry).lower())
@@ -609,7 +650,7 @@ def write_bellhop_env_file(
         f.write(f"'{full_run_type}'\n")
 
         # Number of beams
-        f.write(f"{n_beams}\n")
+        f.write(f"{int(n_beams)}\n")
 
         # Launch angles. ``angleMod.f90:58`` READs the whole ``alpha`` array;
         # the trailing '/' terminates list-directed input after two values, so
@@ -648,4 +689,4 @@ def write_bellhop_env_file(
             f.write(f"'{beam_type_str}' {eps_multiplier:.6f} {r_loop_km:.6f}\n")
 
             # Line 2: n_image, ib_win, component
-            f.write(f"{n_image} {ib_win} '{component}'\n")
+            f.write(f"{int(n_image)} {int(ib_win)} '{component}'\n")

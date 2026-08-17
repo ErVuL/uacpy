@@ -310,6 +310,50 @@ def test_oasp_run_frequencies_honours_the_lower_band_edge():
 
 
 @pytest.mark.requires_binary
+def test_oasp_multi_frequency_source_centres_the_sweep_on_the_band():
+    """A multi-element ``source.frequencies`` names a band; its centre — not
+    its first element — sets the deck fc and the derived ``2.5×fc`` sweep
+    top, so the computed band covers every requested frequency.
+    ``frequencies[0]`` as the centre swept [100, 200, 300] only up to
+    2.5×100 = 250 Hz and never computed the top of the band."""
+    import uacpy
+    import warnings as _w
+    from uacpy.models import OASP
+    from uacpy.models.base import RunMode
+    with _w.catch_warnings():
+        _w.simplefilter('ignore')
+        field = OASP(n_time_samples=512).run(
+            _pekeris_env(),
+            uacpy.Source(depths=25.0, frequencies=[100.0, 200.0, 300.0]),
+            uacpy.Receiver(depths=np.array([50.0]),
+                           ranges=np.array([1000.0])),
+            run_mode=RunMode.BROADBAND)
+    f = np.asarray(field.coords['frequency'], dtype=float)
+    assert f.max() >= 300.0, (
+        f"computed band tops out at {f.max():.1f} Hz, below the requested "
+        f"300 Hz")
+    # The deck fc rides back on the .trf header.
+    assert field.metadata['center_frequency'] == pytest.approx(200.0, abs=1.0)
+
+
+@pytest.mark.requires_binary
+def test_oasp_pinned_freq_max_below_the_band_top_raises():
+    """A pinned sweep edge that cannot reach the top of the requested band
+    names the conflict instead of silently truncating the sweep."""
+    import uacpy
+    from uacpy.core.exceptions import ConfigurationError
+    from uacpy.models import OASP
+    from uacpy.models.base import RunMode
+    with pytest.raises(ConfigurationError, match="freq_max"):
+        OASP(n_time_samples=512, freq_max=250.0).run(
+            _pekeris_env(),
+            uacpy.Source(depths=25.0, frequencies=[100.0, 200.0, 300.0]),
+            uacpy.Receiver(depths=np.array([50.0]),
+                           ranges=np.array([1000.0])),
+            run_mode=RunMode.BROADBAND)
+
+
+@pytest.mark.requires_binary
 def test_oasp_run_frequencies_warns_when_it_overrides_a_pinned_freq_min():
     import uacpy
     import warnings as _w
@@ -398,6 +442,43 @@ class TestStaleOutputsAreCleared:
         from uacpy.models.oases import OAST, OASN, OASR, OASP
         for cls in (OAST, OASN, OASR, OASP):
             assert cls._OUTPUT_SUFFIXES, f'{cls.__name__} declares no outputs'
+
+
+class TestOasnWhiteNoiseDefaultThroughTheModel:
+    """OASES adds ``10**(WNLEVDB/10)`` to every covariance diagonal with no
+    off switch (oasnun22.f:228, :1157). The OASN model therefore defaults
+    ``white_noise_level`` to ``None`` — written as -200 dB, whose 1e-20
+    linear power is numerically nil — while an explicit 0.0 reaches the
+    deck as a literal 0 dB (unit linear power per sensor)."""
+
+    @staticmethod
+    def _deck(tmp_path, monkeypatch, **kw):
+        from uacpy.core.exceptions import ModelExecutionError
+        from uacpy.models.oases import OASN
+        env = uacpy.Environment(
+            bathymetry=100.0, ssp=1500.0,
+            bottom=uacpy.BoundaryProperties(
+                acoustic_type='half-space', sound_speed=1700.0,
+                density=1.8, attenuation=0.5))
+        model = OASN(surface_noise_level=70.0, verbose=False,
+                     work_dir=str(tmp_path), cleanup=False, **kw)
+        monkeypatch.setattr(type(model), '_run_subprocess',
+                            lambda self, *a, **k: _FakeProc())
+        # The fake subprocess writes no .xsm, so run() raises after the
+        # deck is on disk — the deck text is the object under test.
+        with pytest.raises(ModelExecutionError, match='did not produce'):
+            model.run(env, uacpy.Source(depths=10.0, frequencies=100.0),
+                      uacpy.Receiver(depths=[30.0, 50.0], ranges=[0.0]))
+        return (tmp_path / 'oasn_run.dat').read_text()
+
+    def test_default_deck_carries_the_nil_level(self, tmp_path, monkeypatch):
+        text = self._deck(tmp_path, monkeypatch)
+        assert '70.0 -200.0 0.0 0' in text
+
+    def test_explicit_zero_reaches_the_deck_as_0_db(self, tmp_path,
+                                                    monkeypatch):
+        text = self._deck(tmp_path, monkeypatch, white_noise_level=0.0)
+        assert '70.0 0.0 0.0 0' in text
 
 
 class TestContourOffsetUnderAutomaticSampling:

@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import numpy as np
 
+import warnings
+
 from uacpy.core.exceptions import ConfigurationError
 
 # Mackenzie (1961) deep-water bottom backscattering constant 10*log10(mu) [dB].
@@ -85,7 +87,14 @@ def chapman_harris_surface(grazing_deg, wind_speed_kn: float, frequency: float):
     # -42.4 per Chapman & Harris (1962) JASA 34(10):1592, eq. as reproduced in
     # Urick (1983) Ch. 8 and Jensen et al. "Computational Ocean Acoustics".
     # theta = 0 (horizontal) is -inf, the honest degenerate answer, matching
-    # lambert_bottom; silence the spurious divide warning.
+    # lambert_bottom; silence only the divide warning that case raises. A
+    # NEGATIVE angle is bad input (log10 -> NaN via 'invalid'), diagnosed
+    # like lambert_bottom rather than silenced.
+    if np.any(np.asarray(theta) < 0):
+        warnings.warn(
+            "chapman_harris: negative grazing angle(s) return NaN — grazing "
+            "angles are measured from horizontal and must be >= 0.",
+            UserWarning, stacklevel=2)
     with np.errstate(divide="ignore", invalid="ignore"):
         return 3.3 * beta * np.log10(theta / 30.0) - 42.4 * np.log10(beta) + 2.6
 

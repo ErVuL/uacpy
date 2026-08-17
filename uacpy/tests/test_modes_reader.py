@@ -212,11 +212,11 @@ class TestProfileSequence:
             first_mode[2].real, rel=1e-6)
 
 
-def test_ascii_reader_has_no_profiles(tmp_path):
+def test_non_mod_extension_is_a_typed_format_error(tmp_path):
     moa = tmp_path / 'x.moa'
     moa.write_text('32\ntitle\n100.0 1 1 1 0\n')
-    with pytest.raises(ConfigurationError, match='single mode set'):
-        read_modes(str(moa), profile=2)
+    with pytest.raises(FileFormatError, match=r'\.mod'):
+        read_modes(str(moa))
 
 
 @pytest.mark.requires_binary

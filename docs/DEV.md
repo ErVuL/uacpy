@@ -112,7 +112,6 @@ self._supports_range_dependent_bathymetry      = True
 self._supports_range_dependent_ssp             = True
 self._supports_range_dependent_bottom          = True
 self._supports_layered_bottom                  = False
-self._supports_range_dependent_layered_bottom  = False
 self._supports_elastic_media                   = False
 self._supports_multi_source_depth              = False
 self._supports_source_beam_pattern             = False

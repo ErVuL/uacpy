@@ -286,6 +286,16 @@ def test_altimetry_requires_date():
                                   transect_to=(50.5, 0.5), altimetry_sources='waves')
 
 
+def test_altimetry_guard_falls_back_to_literal():
+    # altimetry= is the documented fallback when the sea-state fetch cannot
+    # run; a missing date= must reach that fallback, not raise past it.
+    alt = np.column_stack([np.linspace(0.0, 5000.0, 10), np.zeros(10)])
+    env = env_mod.fetch_environment(
+        (50.0, 0.0), bathymetry=2000.0, ssp=1500.0, transect_to=(50.5, 0.5),
+        altimetry_sources='waves', altimetry=alt)
+    assert env.altimetry is not None
+
+
 def test_fetch_environment_altimetry(monkeypatch):
     # Literal bathy/ssp keep it offline; the sea-surface fetch is stubbed and its
     # provenance id must land in env.data_sources.

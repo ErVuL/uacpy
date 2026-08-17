@@ -126,3 +126,43 @@ class TestSELBandGridIsAnchoredAt1kHz:
         y = np.zeros(fs)
         highs = np.array([b[2] for b in sel(y, fs).bands])
         assert highs.max() <= fs / 2
+
+
+class TestPpsdNoverlap:
+    """A caller-provided Welch noverlap is respected; it is only replaced
+    (with a warning) when the segment clamp leaves no room for it."""
+
+    FS = 8000
+
+    def _sig(self, seconds=4):
+        rng = np.random.default_rng(0)
+        return rng.standard_normal(self.FS * seconds)
+
+    def test_explicit_noverlap_changes_the_estimate(self):
+        x = self._sig()
+        a = ppsd(x, self.FS, seg_duration=1.0, nperseg=2048, noverlap=0)
+        b = ppsd(x, self.FS, seg_duration=1.0, nperseg=2048, noverlap=1536)
+        assert not np.array_equal(np.nan_to_num(a.pdf), np.nan_to_num(b.pdf))
+
+    def test_unfittable_noverlap_warns_and_falls_back(self):
+        x = self._sig()
+        with pytest.warns(UserWarning, match="noverlap"):
+            r = ppsd(x, self.FS, seg_duration=0.1, noverlap=4096)
+        assert np.isfinite(np.nansum(r.pdf))
+
+    def test_default_matches_half_nperseg(self):
+        x = self._sig()
+        d = ppsd(x, self.FS, seg_duration=1.0, nperseg=2048)
+        e = ppsd(x, self.FS, seg_duration=1.0, nperseg=2048, noverlap=1024)
+        np.testing.assert_array_equal(np.nan_to_num(d.pdf), np.nan_to_num(e.pdf))
+
+
+def test_sel_warns_when_chunk_size_misaligned_with_nfft():
+    fs = 8000
+    x = np.sin(2 * np.pi * 1000.5 * np.arange(fs * 4) / fs)
+    with pytest.warns(UserWarning, match="multiple of nfft"):
+        sel(x, fs, chunk_size=fs + fs // 3)
+    import warnings as _w
+    with _w.catch_warnings():
+        _w.simplefilter("error")
+        sel(x, fs, chunk_size=2 * fs)          # aligned: silent

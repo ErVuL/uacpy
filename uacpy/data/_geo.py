@@ -10,7 +10,7 @@ from uacpy.core.exceptions import ConfigurationError
 __all__ = [
     'Coordinate', 'as_coordinate', 'normalize_lon', 'lon_linspace',
     'EARTH_RADIUS_KM', 'central_angle', 'great_circle_km', 'geodesic_waypoints',
-    'nearest_indices', 'run_representative_indices',
+    'nearest_indices', 'ring_offsets', 'run_representative_indices',
     'DEFAULT_MAX_TRANSECT_POINTS',
     'depth_to_pressure_dbar',
 ]
@@ -85,7 +85,13 @@ def lon_linspace(lon0: float, lon1: float, n: int) -> np.ndarray:
     if lon1 < lon0:
         lon1 += 360.0
     raw = np.linspace(lon0, lon1, int(n))
-    return ((raw + 180.0) % 360.0) - 180.0
+    wrapped = ((raw + 180.0) % 360.0) - 180.0
+    # Keep a node that lies exactly on +180 as +180: wrapping it to -180 made
+    # a full-globe axis non-monotonic with a duplicated first column. Exact
+    # equality is the right test — only an exact +180 wraps to exactly -180,
+    # while other multiples of 360 offset from it (-180, 540) stay -180.
+    wrapped[raw == 180.0] = 180.0
+    return wrapped
 
 
 def central_angle(start: Coordinate, end: Coordinate) -> float:
@@ -160,6 +166,22 @@ def nearest_indices(axis, queries) -> np.ndarray:
     pick_hi = np.abs(sorted_axis[hi] - queries) < np.abs(queries - sorted_axis[lo])
     nearest_sorted = np.where(pick_hi, hi, lo)
     return order[nearest_sorted]
+
+
+def ring_offsets(radius: int) -> 'list[tuple[int, int]]':
+    """``(d_row, d_col)`` offsets on the Chebyshev ring of the given radius,
+    ordered nearest-first by squared Euclidean distance in cells.
+
+    The expanding-ring neighbour search shared by the gridded climatology
+    readers (WOA23's nearest-wet-cell fallback, NSIDC sea ice's
+    nearest-observed-cell fallback): probe radius 1, then 2, … so the first
+    hit is the closest usable cell.
+    """
+    out = [(d_row, d_col)
+           for d_row in range(-radius, radius + 1)
+           for d_col in range(-radius, radius + 1)
+           if max(abs(d_row), abs(d_col)) == radius]
+    return sorted(out, key=lambda o: o[0] ** 2 + o[1] ** 2)
 
 
 def run_representative_indices(keys) -> 'list[int]':

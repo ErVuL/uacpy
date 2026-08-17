@@ -329,7 +329,7 @@ silent.
 The grid that actually ran is on the result:
 
 ```python
-tl.metadata['dr'], tl.metadata['dz'], tl.metadata['c0'], tl.metadata['zmax']
+tl.metadata['dr'], tl.metadata['dz'], tl.metadata['pe_reference_speed'], tl.metadata['zmax']
 ```
 
 ---

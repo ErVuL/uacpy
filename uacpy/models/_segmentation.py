@@ -119,11 +119,12 @@ def segment_environment_by_range(
         ssp_at_range = env.ssp.eval(range=r).to_pairs()
 
         # AT ends a medium only at the SSP sample matching the mesh-line depth
-        # (Acoustics-Toolbox/misc/sspMod.f90:352-362), and the writer declares
-        # that depth quantised to 0.1 m (``deck_depth``, which rounds up).
-        # Truncating the segment profile on the same 0.1 m grid keeps its
-        # deepest sample at or above the declared bottom, for the writer's
-        # ``extend_to`` to land on exactly.
+        # (Acoustics-Toolbox/misc/sspMod.f90:352-362). Quantise the segment
+        # depth to the nearest 0.1 m — a deliberate stability quantum, not a
+        # writer requirement (``deck_depth`` round-trips 6 decimals): it keeps
+        # segment decks identical under mm-scale bathymetry noise. Truncate
+        # the profile above it and append an interpolated sample exactly
+        # there; that appended sample is the one ``extend_to`` lands on.
         depth_rounded = float(f"{depth_at_range:.1f}")
         ssp_for_segment = ssp_at_range[ssp_at_range[:, 0] < depth_rounded].copy()
         c_at_depth = float(np.interp(depth_rounded, ssp_at_range[:, 0], ssp_at_range[:, 1]))

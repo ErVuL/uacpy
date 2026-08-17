@@ -7,6 +7,15 @@ import numpy as np
 from uacpy.core.exceptions import ConfigurationError
 
 
+def _require_positive(caller: str, **params: float) -> None:
+    """Raise :class:`ConfigurationError` naming each parameter that is not
+    strictly positive (NaN counts as invalid)."""
+    for name, value in params.items():
+        if not value > 0:
+            raise ConfigurationError(
+                f"{caller}: {name} must be > 0; got {value}.")
+
+
 def sparc_pulse(
     t: np.ndarray,
     omega: float,
@@ -88,7 +97,8 @@ def sparc_pulse(
     Both AT copies gate every pulse to ``T > 0``; the sinc here is evaluated at
     negative time too, so it is the full two-sided sinc.
     """
-    t = np.asarray(t)
+    _require_positive("sparc_pulse", omega=omega)
+    t = np.asarray(t, dtype=float)
     s = np.zeros(t.shape)
     F = omega / (2.0 * np.pi)
 
@@ -234,6 +244,8 @@ def ricker_wavelet(time: np.ndarray, frequency: float) -> np.ndarray:
     ----------
     Original MATLAB code: Ricker.m
     """
+    _require_positive("ricker_wavelet", frequency=frequency)
+    time = np.asarray(time, dtype=float)
     u = 2 * np.pi * frequency * time - 8  # Dimensionless time
     s = 0.5 * (0.25 * u**2 - 0.5) * np.sqrt(np.pi) * np.exp(-0.25 * u**2)
     return s
@@ -272,6 +284,8 @@ def gaussian_pulse(time: np.ndarray, delay: float, duration: float) -> np.ndarra
     ----------
     Original MATLAB code by mbp, 2001
     """
+    _require_positive("gaussian_pulse", duration=duration)
+    time = np.asarray(time, dtype=float)
     y = np.exp(-(((time - delay) / duration) ** 2))
     return y
 
@@ -311,6 +325,11 @@ def lfm_chirp(
     ``t = T``. This is a standard chirp used in sonar and radar
     applications.
 
+    ``fmin == fmax`` is accepted and yields a constant-frequency tone (the
+    sweep rate is simply zero); ``duration`` and ``sample_rate`` must be
+    positive and long enough for at least one sample, otherwise a
+    :class:`~uacpy.core.exceptions.ConfigurationError` is raised.
+
     Examples
     --------
     >>> # Generate 1-second chirp from 100 to 1000 Hz
@@ -325,10 +344,13 @@ def lfm_chirp(
     ----------
     Original MATLAB code: lfm.m
     """
+    _require_positive("lfm_chirp", duration=duration, sample_rate=sample_rate)
     T = duration  # local alias for the sweep-duration symbol in the phase law
     N = int(T * sample_rate)
     if N <= 0:
-        return np.array([]), np.array([])
+        raise ConfigurationError(
+            "lfm_chirp: duration * sample_rate must cover at least one sample; "
+            f"got duration={duration}, sample_rate={sample_rate}.")
     deltat = T / N
     time = np.linspace(0.0, T - deltat, N)
 
@@ -378,9 +400,8 @@ def tone_burst(
     # ``N`` is the *nearest* integer that keeps ``n_cycles`` faithful at
     # the given ``sample_rate``. ``time`` is built as
     # ``np.arange(N) / sample_rate`` so ``dt == 1 / sample_rate`` exactly.
-    if frequency <= 0:
-        raise ConfigurationError(
-            f"tone_burst: frequency must be > 0; got {frequency}.")
+    _require_positive("tone_burst", frequency=frequency, n_cycles=n_cycles,
+                      sample_rate=sample_rate)
     T = n_cycles / frequency
     N = int(round(T * sample_rate))
     time = np.arange(N) / float(sample_rate)
@@ -425,6 +446,11 @@ def hfm_chirp(
     HFM chirps have constant period change rate rather than constant
     frequency change rate (like LFM). This makes them more Doppler-tolerant.
 
+    ``fmin`` and ``fmax`` must both be positive and distinct (the phase law
+    divides by ``fmin - fmax`` and by ``fmin``); ``fmin > fmax`` is accepted
+    and gives a down-sweep. Degenerate parameters raise
+    :class:`~uacpy.core.exceptions.ConfigurationError`.
+
     The phase is: φ(t) = (2π/b) * log(1 + b*t/P1)
     where b = (fmin - fmax)/(fmin*fmax*T) and P1 = 1/fmin
 
@@ -444,10 +470,20 @@ def hfm_chirp(
     ----------
     Original MATLAB: ``third_party/Acoustics-Toolbox/Matlab/waveforms/hfm.m``
     """
+    _require_positive("hfm_chirp", fmin=fmin, fmax=fmax, duration=duration,
+                      sample_rate=sample_rate)
+    if fmin == fmax:
+        raise ConfigurationError(
+            "hfm_chirp: fmin and fmax must differ (the hyperbolic phase law "
+            f"divides by fmin - fmax); got fmin == fmax == {fmin}. For a "
+            "constant-frequency signal use tone_burst or lfm_chirp with "
+            "fmin == fmax.")
     T = duration  # local alias for the sweep-duration symbol in the phase law
     N = int(T * sample_rate)
     if N <= 0:
-        return np.array([]), np.array([])
+        raise ConfigurationError(
+            "hfm_chirp: duration * sample_rate must cover at least one sample; "
+            f"got duration={duration}, sample_rate={sample_rate}.")
     deltat = T / N
     time = np.linspace(0.0, T - deltat, N)
 
@@ -498,6 +534,8 @@ def nwave(time: np.ndarray, frequency: float) -> np.ndarray:
     >>> s = nwave(t, 100.0)
     >>> print(f"Non-zero samples: {np.sum(s != 0)}")
     """
+    _require_positive("nwave", frequency=frequency)
+    time = np.asarray(time, dtype=float)
     omega = 2 * np.pi * frequency
     s = np.sin(omega * time) - 0.5 * np.sin(2 * omega * time)
 
