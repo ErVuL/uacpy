@@ -13,6 +13,7 @@ import pytest
 from uacpy.core.environment import BoundaryProperties, Bottom
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.data import diesing_local
+from uacpy.data.sediment import bottom_from_grain_size
 
 
 @pytest.mark.parametrize('code, litho, phi', [
@@ -37,13 +38,25 @@ def test_no_coverage_raises(monkeypatch):
         diesing_local.fetch_seafloor_lithology((56.0, 3.0))         # shelf
 
 
-def test_transect(monkeypatch):
-    codes = iter([1, 2, 3])
-    monkeypatch.setattr(diesing_local, '_class_code', lambda lat, lon: next(codes))
+def test_transect_classifies_each_waypoint_from_its_own_cell(monkeypatch):
+    # Latitude-banded class raster: calcareous sediment (1, ϕ 7.5) south of
+    # 0.5°N, radiolarian ooze (5, ϕ 8.0) to 1.5°N, clay (2, ϕ 9.0) beyond.
+    # The waypoints at 0°, 1°, 2°N each read their own band.
+    def code_at(lat, lon):
+        if lat < 0.5:
+            return 1
+        return 5 if lat < 1.5 else 2
+
+    monkeypatch.setattr(diesing_local, '_class_code', code_at)
     rdb = diesing_local.fetch_bottom_diesing_transect((0.0, 0.0), (2.0, 0.0),
                                                       n_points=3)
     assert isinstance(rdb, Bottom)
-    assert rdb.halfspace_sound_speed.shape == (3,) and np.all(np.isfinite(rdb.halfspace_sound_speed))
+    assert rdb.ranges.shape == (3,) and rdb.ranges[0] == 0.0
+    expected = [bottom_from_grain_size(phi).sound_speed
+                for phi in (7.5, 8.0, 9.0)]
+    assert rdb.halfspace_sound_speed.tolist() == pytest.approx(expected)
+    # Hamilton c_p falls with ϕ: 1513.71 > 1506.47 > 1494.90 m/s.
+    assert np.all(np.diff(rdb.halfspace_sound_speed) < 0)
 
 
 def test_download_extracts_raster(tmp_path, monkeypatch):

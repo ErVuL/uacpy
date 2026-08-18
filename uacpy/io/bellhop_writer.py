@@ -14,8 +14,9 @@ from pathlib import Path
 from typing import Union
 
 from uacpy._log import log_message
+from uacpy.io.oalib_writer import quote_fortran_title
 from uacpy.core.absorption import ConstantAbsorption
-from uacpy.core.constants import AttenuationUnits
+from uacpy.core.constants import AttenuationUnits, parse_boundary_type
 from uacpy.core.exceptions import ConfigurationError, UnsupportedFeatureError
 from uacpy.core.environment import Environment
 from uacpy.core.source import Source
@@ -26,7 +27,7 @@ from uacpy.io.bathy_io import (
     write_ati_file,
 )
 from uacpy.io.oalib_writer import (
-    _BOUNDARY_TYPE_MAP, _DECK_DEPTH_FMT, _DECK_DEPTH_RESOLUTION_M,
+    _DECK_DEPTH_FMT, _DECK_DEPTH_RESOLUTION_M,
     deck_depth, get_top_bc_code,
     resolve_ssp_topopt, write_absorption_block, write_receiver_depths,
     write_receiver_ranges, write_source_depths, write_ssp,
@@ -55,7 +56,7 @@ _VALID_BEAM_TYPES = frozenset({'B', 'R', 'C', 'g', 'G', 'S'})
 # arrivals, 'a' binary.
 _VALID_RUN_TYPES = frozenset({'C', 'I', 'S', 'A', 'a', 'E', 'R'})
 # RunType(4:4) and (5:5). Both have a silent CASE DEFAULT
-# (ReadEnvironmentBell.f90:402-403 and :415-417), so a typo is never reported
+# (ReadEnvironmentBell.f90:403-404 and :416-419), so a typo is never reported
 # by the binary — it is overridden, and the deck no longer says what ran.
 _VALID_SOURCE_TYPES = frozenset({'R', 'X'})
 _VALID_GRID_TYPES = frozenset({'R', 'I'})
@@ -126,7 +127,7 @@ def _bathymetry_within_mesh(bathymetry, z_max: float) -> np.ndarray:
     """Return ``(N, 2)`` bathymetry pairs quantised onto the mesh bottom.
 
     ``bdryMod.f90:211-212`` aborts on any ``.bty`` depth below the SSP mesh
-    bottom, and ``z_max`` reaches the deck rounded to the ``.1f`` depth
+    bottom, and ``z_max`` reaches the deck rounded to the ``.6f`` depth
     quantum, so a point sitting exactly on the seafloor can land a rounding
     residue beneath it. Pull those onto the mesh; anything more than a whole
     quantum deeper is a genuine bathymetry/mesh inconsistency and raises.
@@ -296,9 +297,9 @@ def write_bellhop_env_file(
         (run_type, _VALID_RUN_TYPES, 'run_type',
          "ReadEnvironmentBell.f90:376-377 ERROUTs any other RunType(1:1)"),
         (source_type, _VALID_SOURCE_TYPES, 'source_type',
-         "ReadEnvironmentBell.f90:402-403 silently overrides RunType(4:4) to 'R'"),
+         "ReadEnvironmentBell.f90:403-404 silently overrides RunType(4:4) to 'R'"),
         (grid_type, _VALID_GRID_TYPES, 'grid_type',
-         "ReadEnvironmentBell.f90:415-417 silently overrides RunType(5:5) to 'R'"),
+         "ReadEnvironmentBell.f90:416-419 silently overrides RunType(5:5) to 'R'"),
     ):
         if str(_value) not in _allowed:
             raise ConfigurationError(
@@ -349,9 +350,9 @@ def write_bellhop_env_file(
     # ReadEnvironmentBell.f90:459 accepts the 'P' (precalculated IRC) letter
     # but bellhop.f90:681's boundary SELECT CASE has no 'P' branch, so its
     # CASE DEFAULT (:779) aborts the run at the first bottom bounce.
-    if _BOUNDARY_TYPE_MAP.get(
-            env.bottom.halfspace_at(range=0.0).acoustic_type.lower(),
-            "A") == 'P':
+    if parse_boundary_type(
+            env.bottom.halfspace_at(range=0.0).acoustic_type
+    ).to_acoustics_toolbox_code() == 'P':
         raise UnsupportedFeatureError(
             'Bellhop', "a 'precalc' (.irc) bottom — bellhop.f90:681's "
             "boundary SELECT CASE has no 'P' branch, so the run aborts at "
@@ -359,9 +360,37 @@ def write_bellhop_env_file(
             alternatives=["acoustic_type='file' (a .brc table)",
                           'Kraken / Scooter, which read .irc natively'])
 
+    _GEOM_INTERP_TO_CODE = {'linear': 'L', 'curvilinear': 'C'}
+    bty_code = _GEOM_INTERP_TO_CODE.get(str(interp_bathymetry).lower())
+    ati_code = _GEOM_INTERP_TO_CODE.get(str(interp_altimetry).lower())
+    if bty_code is None:
+        raise ConfigurationError(
+            f"interp_bathymetry must be 'linear' or 'curvilinear'; "
+            f"got {interp_bathymetry!r}"
+        )
+    if ati_code is None:
+        raise ConfigurationError(
+            f"interp_altimetry must be 'linear' or 'curvilinear'; "
+            f"got {interp_altimetry!r}"
+        )
+
+    # ``ReadEnvironmentBell.f90:414`` ERROUTs an irregular grid whose
+    # receiver-depth and receiver-range counts differ, so refuse it here
+    # rather than emit a deck bellhop.exe rejects at READIN.
+    if (grid_type.upper() == 'I'
+            and len(receiver.depths) != len(receiver.ranges)):
+        raise ConfigurationError(
+            f"grid_type='I' (irregular) requires len(receiver.depths) == "
+            f"len(receiver.ranges); got {len(receiver.depths)} depths and "
+            f"{len(receiver.ranges)} ranges.",
+            remediation="Use grid_type='R' for a rectilinear "
+                        "(Cartesian-product) grid, or rebuild the "
+                        "Receiver with matched arrays.",
+        )
+
     with open(filepath, "w") as f:
         # Title
-        f.write(f"'{env.name}'\n")
+        f.write(f"{quote_fortran_title(env.name)}\n")
 
         # Frequency
         f.write(f"{source.frequencies[0]:.6f}\n")
@@ -370,20 +399,6 @@ def write_bellhop_env_file(
         # ReadEnvironmentBell.f90:56 ERROUTs on anything else ("sediment
         # layers must be handled using a reflection coefficient").
         f.write("1\n")
-
-        _GEOM_INTERP_TO_CODE = {'linear': 'L', 'curvilinear': 'C'}
-        bty_code = _GEOM_INTERP_TO_CODE.get(str(interp_bathymetry).lower())
-        ati_code = _GEOM_INTERP_TO_CODE.get(str(interp_altimetry).lower())
-        if bty_code is None:
-            raise ConfigurationError(
-                f"interp_bathymetry must be 'linear' or 'curvilinear'; "
-                f"got {interp_bathymetry!r}"
-            )
-        if ati_code is None:
-            raise ConfigurationError(
-                f"interp_altimetry must be 'linear' or 'curvilinear'; "
-                f"got {interp_altimetry!r}"
-            )
 
         # Top boundary (surface)
         top_bc = get_top_bc_code(env)
@@ -537,7 +552,8 @@ def write_bellhop_env_file(
             )
 
         hs = env.bottom.halfspace_at(range=0.0)
-        bottom_type = _BOUNDARY_TYPE_MAP.get(hs.acoustic_type.lower(), "A")
+        bottom_type = parse_boundary_type(
+            hs.acoustic_type).to_acoustics_toolbox_code()
         roughness = getattr(hs, 'roughness', 0.0)
 
         is_range_dependent_bathy = env.bathymetry.n_ranges > 1
@@ -622,20 +638,10 @@ def write_bellhop_env_file(
         # misc/beampattern.f90:22 opens <base>.sbp only on '*'.
         position_3 = '*' if source_beam_pattern else ' '
         # Position 4/5 use uppercase (only 'R'/'X' and 'R'/'I' accepted).
+        # The irregular-grid receiver-count pairing was validated before the
+        # file opened.
         position_4 = source_type.upper()
         position_5 = grid_type.upper()
-        # ``ReadEnvironmentBell.f90:414`` ERROUTs an irregular grid whose
-        # receiver-depth and receiver-range counts differ, so refuse it here
-        # rather than emit a deck bellhop.exe rejects at READIN.
-        if position_5 == 'I' and len(receiver.depths) != len(receiver.ranges):
-            raise ConfigurationError(
-                f"grid_type='I' (irregular) requires len(receiver.depths) == "
-                f"len(receiver.ranges); got {len(receiver.depths)} depths and "
-                f"{len(receiver.ranges)} ranges.",
-                remediation="Use grid_type='R' for a rectilinear "
-                            "(Cartesian-product) grid, or rebuild the "
-                            "Receiver with matched arrays.",
-            )
         # Position 6: dimensionality. Hardcoded to '2' (2D Bellhop).
         # 3D support (BELLHOP3D) would set this to '3' and plug into
         # the ``--3D`` _build_command path; 3D also changes several

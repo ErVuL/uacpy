@@ -8,7 +8,9 @@ depths [50, 110] m — one water-column receiver, one below the seafloor):
    cylindrical-spreading factor that is singular on the source axis, so every
    engine returns the r = 0 column as NaN (no data) and finite values at
    r > 0. RAM regressed here once without any test noticing — the r = 0
-   convention was asserted for Kraken/Scooter but never for RAM.
+   convention was asserted for Kraken/Scooter but never for RAM. OASP and
+   OASS join this contract too (``R0_ENGINES``): both once returned finite
+   numbers on the source axis.
 
 2. **Below-seafloor receivers.** The engines whose solvers stop meshing at
    the seafloor (Bellhop, Scooter, SPARC, RAM) return NaN there — on the
@@ -31,12 +33,16 @@ engine.
 
 from __future__ import annotations
 
+import re
+import warnings
+
 import numpy as np
 import pytest
 
-from uacpy import BoundaryProperties, Environment, Receiver, Source
+from uacpy import Receiver, Source
 from uacpy.models import RAM, SPARC, Bellhop, Kraken, RunMode, Scooter
-from uacpy.models.oases import OAST
+from uacpy.models.oases import OASP, OASS, OAST
+from uacpy.tests.conftest import make_pekeris
 
 pytestmark = pytest.mark.requires_binary
 
@@ -47,14 +53,9 @@ RANGES = np.array([0.0, 500.0, 1000.0])
 I_WATER, I_SUBFLOOR = 0, 1             # rows of DEPTHS
 
 
-def _pekeris():
-    return Environment(
-        name='conventions-pekeris', bathymetry=WATER_DEPTH, ssp=1500.0,
-        bottom=BoundaryProperties(
-            acoustic_type='half-space',
-            sound_speed=1700.0, density=1.8, attenuation=0.5,
-        ),
-    )
+def _pekeris(roughness=0.0):
+    return make_pekeris(name='conventions-pekeris', bathymetry=WATER_DEPTH,
+                        roughness=roughness)
 
 
 def _source():
@@ -65,42 +66,77 @@ def _receiver():
     return Receiver(depths=DEPTHS.copy(), ranges=RANGES.copy())
 
 
+#: Warning messages captured while each module-scoped engine fixture ran,
+#: keyed by fixture name. ``pytest.warns`` cannot reach back into a
+#: module-scoped fixture that has already run for an earlier test, so the
+#: fixtures record what their one run warned and the warning contracts are
+#: asserted from this record.
+RUN_WARNINGS: dict = {}
+
+
+def _run_recorded(key, runner):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        field = runner()
+    RUN_WARNINGS[key] = [str(w.message) for w in caught]
+    return field
+
+
 @pytest.fixture(scope='module')
 def bellhop_field():
-    return Bellhop(verbose=False).run(
-        _pekeris(), _source(), _receiver(), run_mode=RunMode.COHERENT_TL)
+    return _run_recorded('bellhop_field', lambda: Bellhop(verbose=False).run(
+        _pekeris(), _source(), _receiver(), run_mode=RunMode.COHERENT_TL))
 
 
 @pytest.fixture(scope='module')
 def kraken_field():
-    return Kraken(verbose=False).run(
-        _pekeris(), _source(), _receiver(), run_mode=RunMode.COHERENT_TL)
+    return _run_recorded('kraken_field', lambda: Kraken(verbose=False).run(
+        _pekeris(), _source(), _receiver(), run_mode=RunMode.COHERENT_TL))
 
 
 @pytest.fixture(scope='module')
 def scooter_field():
-    return Scooter(verbose=False).run(
-        _pekeris(), _source(), _receiver(), run_mode=RunMode.COHERENT_TL)
+    return _run_recorded('scooter_field', lambda: Scooter(verbose=False).run(
+        _pekeris(), _source(), _receiver(), run_mode=RunMode.COHERENT_TL))
 
 
 @pytest.fixture(scope='module')
 def ram_field():
-    return RAM(verbose=False).run(
-        _pekeris(), _source(), _receiver(), run_mode=RunMode.COHERENT_TL)
+    return _run_recorded('ram_field', lambda: RAM(verbose=False).run(
+        _pekeris(), _source(), _receiver(), run_mode=RunMode.COHERENT_TL))
 
 
 @pytest.fixture(scope='module')
 def sparc_field():
     # SPARC's only mode is TIME_SERIES (it synthesises p(t) directly);
     # n_t_out kept small so its per-depth subprocess march stays in seconds.
-    return SPARC(verbose=False, n_t_out=256).run(
-        _pekeris(), _source(), _receiver(), run_mode=RunMode.TIME_SERIES)
+    return _run_recorded(
+        'sparc_field', lambda: SPARC(verbose=False, n_t_out=256).run(
+            _pekeris(), _source(), _receiver(), run_mode=RunMode.TIME_SERIES))
 
 
 @pytest.fixture(scope='module')
 def oast_field():
-    return OAST(verbose=False).run(
-        _pekeris(), _source(), _receiver(), run_mode=RunMode.COHERENT_TL)
+    return _run_recorded('oast_field', lambda: OAST(verbose=False).run(
+        _pekeris(), _source(), _receiver(), run_mode=RunMode.COHERENT_TL))
+
+
+@pytest.fixture(scope='module')
+def oasp_field():
+    return _run_recorded('oasp_field', lambda: OASP(verbose=False).run(
+        _pekeris(), _source(), _receiver(), run_mode=RunMode.COHERENT_TL))
+
+
+@pytest.fixture(scope='module')
+def oass_field():
+    # OASS scatters from a rough seabed, so its Pekeris variant carries a
+    # non-zero bottom roughness; the returned Field is a real dB
+    # reverberation level on the same (depth, range) grid.
+    return _run_recorded(
+        'oass_field',
+        lambda: OASS(correlation_length=10.0, verbose=False).run(
+            _pekeris(roughness=0.5), _source(), _receiver(),
+            run_mode=RunMode.REVERBERATION))
 
 
 # Every runnable engine; OAST additionally needs the OASES binaries.
@@ -108,6 +144,14 @@ ALL_ENGINES = [
     'bellhop_field', 'kraken_field', 'scooter_field', 'ram_field',
     'sparc_field',
     pytest.param('oast_field', marks=pytest.mark.requires_oases),
+]
+# The r = 0 contract is also asserted for OASP (complex .trf pressure) and
+# OASS (reverberation level) — both singular on the source axis like every
+# point-source field, and both once returned finite numbers there.
+R0_ENGINES = ALL_ENGINES + [
+    pytest.param('oasp_field', marks=pytest.mark.requires_oases),
+    pytest.param('oass_field', marks=[pytest.mark.requires_oases,
+                                      pytest.mark.slow]),
 ]
 # Engines that mask sub-seafloor receivers to NaN vs. engines that mesh the
 # sediment and return the physical transmitted field there (base.py
@@ -131,7 +175,7 @@ def _finite_over_extra_axes(field):
 # ── 1. r = 0 column ───────────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize('engine', ALL_ENGINES)
+@pytest.mark.parametrize('engine', R0_ENGINES)
 def test_r0_column_is_nan_for_every_engine(engine, request):
     """The r = 0 column of a point-source run is NaN at every depth."""
     field = request.getfixturevalue(engine)
@@ -143,7 +187,21 @@ def test_r0_column_is_nan_for_every_engine(engine, request):
     )
 
 
-@pytest.mark.parametrize('engine', ALL_ENGINES)
+@pytest.mark.parametrize('engine', R0_ENGINES)
+def test_r0_column_warns_for_every_engine(engine, request):
+    """source-receiver.md:365-375: the r = 0 column comes back NaN *with a
+    UserWarning* naming the singularity. The NaN half is pinned above; this
+    pins the warning, read back from the fixture-time record (Bellhop's text
+    says ``r=0``, the shared base helper says ``r = 0`` — the pattern admits
+    both)."""
+    request.getfixturevalue(engine)          # make sure the run happened
+    messages = RUN_WARNINGS[engine]
+    assert any(re.search(r'r\s*<?=\s*0', m) for m in messages), (
+        f"{engine}: the r=0 column was masked without the documented "
+        f"UserWarning; warnings seen: {messages!r}")
+
+
+@pytest.mark.parametrize('engine', R0_ENGINES)
 def test_water_column_receiver_is_finite_at_positive_ranges(engine, request):
     """The NaN at r = 0 is a masked column, not a broken run: the in-water
     receiver row is fully finite at every r > 0."""
@@ -216,6 +274,31 @@ def test_tl_engines_return_complex_pascal_travelling_wave(engine, request):
 
 
 @pytest.mark.requires_oases
+def test_oasp_shares_the_travelling_wave_sign_with_scooter(oasp_field):
+    """OASP's complex pressure is the same travelling-wave convention the
+    reference engines carry — the ratio to Scooter is +1, not -1.
+
+    Scooter runs at OASP's own FFT-bin frequency (the ladder rarely lands a
+    bin exactly on the request), so the comparison isolates the sign from
+    the bin-substitution phase drift. A convention flip would put the
+    angles near 180 deg."""
+    assert oasp_field.phase_reference == 'travelling_wave'
+    assert oasp_field.is_complex
+    f_bin = float(np.atleast_1d(oasp_field.frequencies)[0])
+    sco = Scooter(verbose=False).run(
+        _pekeris(), Source(depths=50.0, frequencies=f_bin), _receiver(),
+        run_mode=RunMode.COHERENT_TL)
+    ratio = (np.asarray(oasp_field.data)[I_WATER, 1:]
+             / np.asarray(sco.data)[I_WATER, 1:])
+    angles = np.abs(np.angle(ratio, deg=True))
+    assert (angles < 45.0).all(), (
+        f"arg(OASP/Scooter) = {np.angle(ratio, deg=True)} deg — a sign "
+        f"flip reads ~180 deg"
+    )
+    assert np.abs(ratio) == pytest.approx(1.0, rel=0.15)
+
+
+@pytest.mark.requires_oases
 def test_oast_returns_real_db_tl(oast_field):
     """OAST's .plt carries only real TL, so its Field is real with
     ``unit='dB'`` and ``.db`` is the data itself (no derivation)."""
@@ -273,3 +356,50 @@ def test_ram_metadata_key_is_pe_reference_speed(ram_field):
     assert 'c0' not in md, sorted(md)
     c0 = float(md['pe_reference_speed'])
     assert 1400.0 < c0 < 1800.0   # a sound speed, not a flag or an index
+
+
+# ── 4. shared geometry conventions ────────────────────────────────────────
+
+
+def test_depth_swap_reciprocity_on_a_range_independent_channel():
+    """kraken.md:604-613: swapping source and receiver depth on a
+    range-INDEPENDENT channel reproduces the TL — the doc measured the swap
+    at 0.000 dB, and pins the 3-12 dB non-reciprocity it documents to the
+    range-dependent adiabatic sum, not to the solver. One engine suffices;
+    Kraken is the engine the doc measured. 0.05 dB absorbs the mode
+    tabulation grid changing with the receiver depth while sitting two
+    orders below the range-dependent effect."""
+    env = _pekeris()
+    ranges = np.array([2000.0, 4000.0])
+    forward = np.asarray(Kraken(verbose=False).run(
+        env, Source(depths=30.0, frequencies=FREQ),
+        Receiver(depths=np.array([80.0]), ranges=ranges),
+        run_mode=RunMode.COHERENT_TL).db)
+    swapped = np.asarray(Kraken(verbose=False).run(
+        env, Source(depths=80.0, frequencies=FREQ),
+        Receiver(depths=np.array([30.0]), ranges=ranges),
+        run_mode=RunMode.COHERENT_TL).db)
+    np.testing.assert_allclose(swapped, forward, rtol=0, atol=0.05)
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize('model_cls', [Bellhop, Kraken, Scooter, RAM])
+def test_degenerate_receiver_axes_stay_two_dimensional(model_cls):
+    """source-receiver.md:100-115: shape follows the carrier for every field
+    engine, and a degenerate axis is KEPT, not dropped — a vertical line
+    array comes back ``(46, 1)`` and a horizontal one ``(1, 240)``, both
+    still two-axis fields with ``{depth, range}`` coords."""
+    env = _pekeris()
+    src = _source()
+    model = model_cls(verbose=False)
+    vla = model.run(
+        env, src, Receiver(depths=np.linspace(5.0, 95.0, 46), ranges=3000.0),
+        run_mode=RunMode.COHERENT_TL)
+    assert vla.data.shape == (46, 1)
+    assert list(vla.coords) == ['depth', 'range']
+    hla = model.run(
+        env, src,
+        Receiver(depths=60.0, ranges=np.linspace(200.0, 5000.0, 240)),
+        run_mode=RunMode.COHERENT_TL)
+    assert hla.data.shape == (1, 240)
+    assert list(hla.coords) == ['depth', 'range']

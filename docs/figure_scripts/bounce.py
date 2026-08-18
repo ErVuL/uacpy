@@ -52,37 +52,13 @@ def critical_angle(sound_speed):
     return np.degrees(np.arccos(WATER_SPEED / sound_speed))
 
 
-def as_explicit_layer(bottom, thickness=1.0):
-    """``bottom`` rewritten as one explicit layer of itself over itself.
-
-    A bare half-space makes uacpy hand BOUNCE a dummy slab at the *water* speed,
-    which leaves the tabulated phase referenced one metre above the seafloor —
-    see the Gotchas section of ``docs/models/bounce.md``. An explicit layer sends
-    the same seabed down BOUNCE's exact path instead. The layer is the same
-    material as the half-space, so the seabed is physically unchanged and ``|R|``
-    is identical; only the phase reference moves.
-
-    Fluid media only: BOUNCE marches acoustic layers, so an elastic layer is not
-    a valid way to spell an elastic half-space.
-    """
-    return uacpy.SeabedColumn(
-        layers=[uacpy.SedimentLayer(
-            thickness=thickness,
-            sound_speed=bottom.sound_speed,
-            density=bottom.density,
-            attenuation=bottom.attenuation,
-        )],
-        halfspace=bottom,
-    )
-
-
 def reflection_coefficient():
     """The canonical one-liner: |R(θ)| and its phase, from ``.plot()``."""
     sand = uacpy.BoundaryProperties(
         acoustic_type='half-space',
         sound_speed=1650.0, density=1.9, attenuation=0.0,
     )
-    rc = reflection(as_explicit_layer(sand))
+    rc = reflection(sand)
     fig, ax = rc.plot(
         show_phase=True, figsize=WIDE,
         title='Bounce — lossless sand half-space, 200 Hz')
@@ -179,13 +155,6 @@ def shear_loss():
     ax_r.legend(loc='lower left', fontsize=9)
     ax_p.set_ylabel('Phase (°)')
     ax_p.set_xlabel('Grazing angle (°)')
-    # Both bottoms here are bare half-spaces, and the elastic one cannot be
-    # respelled as a layer (BOUNCE marches acoustic layers only), so both phase
-    # traces keep the dummy slab's reference. The offset is identical for the
-    # two curves, so comparing them is still valid; their absolute level is not.
-    ax_p.text(0.012, 0.06,
-              'phase referenced 1 m above the seafloor (bare half-space — see Gotchas)',
-              transform=ax_p.transAxes, fontsize=8, color='0.35')
     fig.suptitle('Bounce — granite half-space, with and without shear',
                  fontweight='bold', fontsize=12)
     fig.tight_layout()
@@ -194,9 +163,7 @@ def shear_loss():
 
 def layered_stack():
     """A thin sediment layer turns a smooth mirror into an interference filter."""
-    # ``as_explicit_layer`` keeps the bare-granite phase on the same reference
-    # plane as the stack's, so the two phase traces are directly comparable.
-    bare = as_explicit_layer(uacpy.BoundaryProperties.from_preset('granite'))
+    bare = uacpy.BoundaryProperties.from_preset('granite')
     stack = uacpy.SeabedColumn.from_presets(
         layers=[('sand', 8.0)], halfspace='granite')
 

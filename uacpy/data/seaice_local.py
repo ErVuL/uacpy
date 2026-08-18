@@ -258,7 +258,7 @@ def sea_ice_surface(
     Above ``threshold`` (default the NSIDC 15 % ice-edge), returns a
     half-space :class:`~uacpy.core.environment.BoundaryProperties` for a
     homogeneous Arctic pack-ice canopy — compressional 3500 m/s, shear 1800
-    m/s, density 0.9 g/cm³, attenuations 0.5 / 1.0 dB/λ (Jensen, Kuperman,
+    m/s, density 0.9 g/cm³, attenuations 0.4 / 1.0 dB/λ (Jensen, Kuperman,
     Porter & Schmidt, *Computational Ocean Acoustics*). Below the threshold the
     surface is open water, so the function returns ``None`` (leave the
     free-surface default in place). The canopy is treated as a single
@@ -350,16 +350,17 @@ def sea_ice_surface_transect(start: Coordinate, end: Coordinate, *,
     ``UserWarning``); use the carrier to study / visualise the zone.
 
     With ``n_points='auto'`` (default) the transect is probed at ``max_points``
-    points (cheap — the NSIDC climatology is a local cached grid) and
-    consecutive identical zones (ice canopy vs open water) collapse to one
-    boundary each, endpoints anchored — so the marginal ice zone is resolved at
-    the grid's native scale without an oversampled staircase. An integer
-    samples exactly that many evenly-spaced waypoints.
+    points (cheap — the NSIDC climatology is a local cached grid) and each run
+    of identical zones (ice canopy vs open water) collapses to the probe
+    samples bracketing its edges, endpoints anchored — the ``Surface`` reads
+    nearest-node, so every reconstructed ice edge lands within one probe step
+    of the edge the probe observed, without an oversampled staircase. An
+    integer samples exactly that many evenly-spaced waypoints.
     """
     from uacpy.core.surface import Surface
     from uacpy.core.bottom import BoundaryProperties
     from uacpy.data._geo import (
-        run_representative_indices, DEFAULT_MAX_TRANSECT_POINTS,
+        run_boundary_indices, DEFAULT_MAX_TRANSECT_POINTS,
     )
     if max_points is None:
         max_points = DEFAULT_MAX_TRANSECT_POINTS
@@ -375,8 +376,10 @@ def sea_ice_surface_transect(start: Coordinate, end: Coordinate, *,
         nodes.append((float(r), bp))
     if n_points == 'auto':
         # Identity = the boundary kind (homogeneous ice canopy vs open-water
-        # vacuum); collapse consecutive equal zones, anchoring the endpoints.
+        # vacuum); keep the samples bracketing each zone change plus the
+        # endpoints, so the nearest-node Surface reproduces each edge where
+        # the probe observed it.
         keys = [(bp.acoustic_type, bp.sound_speed, bp.shear_speed)
                 for _, bp in nodes]
-        nodes = [nodes[i] for i in run_representative_indices(keys)]
+        nodes = [nodes[i] for i in run_boundary_indices(keys)]
     return Surface.coerce(nodes)

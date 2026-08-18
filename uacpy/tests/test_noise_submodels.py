@@ -273,6 +273,34 @@ def test_coates_alternatives_follow_stojanovic():
                            ref)
 
 
+def test_wind_model_pair_delta_at_10_khz():
+    """Coates minus Merklinger wind at 10 kHz, 25 kn, deep water: the two
+    closed forms give 56.2155 dB (Coates, ``w = 25/1.9438445`` m/s) and
+    51.4501 dB (DRDC eq. 18-19 from the 2 kHz anchor), a +4.765 dB delta —
+    the guide §5's "up to 4.8 dB louder at 10 kHz and 25 kn"."""
+    f = np.array([10000.0])
+    coates = N.WIND_MODELS['coates'](f, wind_speed=25.0)[0]
+    merk = N.WIND_MODELS['merklinger'](f, wind_speed=25.0,
+                                       water_depth='deep')[0]
+    assert coates == pytest.approx(56.2155, abs=1e-3)
+    assert merk == pytest.approx(51.4501, abs=1e-3)
+    assert coates - merk == pytest.approx(4.7654, abs=1e-3)
+
+
+def test_shipping_model_pair_delta_at_the_wenz_peak():
+    """Wenz minus Coates shipping at the 30 Hz deep-water hump, 'high': the
+    Wenz fit peaks at exactly 76 + 5·(7−4) = 91.0 dB while Coates gives
+    ``50 + 26·log10(0.03) − 60·log10(0.06)`` = 83.7161 dB — the guide §5's
+    7.3 dB disagreement."""
+    f = np.array([30.0])
+    wenz = N.SHIPPING_MODELS['wenz'](f, shipping_level='high',
+                                     water_depth='deep')[0]
+    coates = N.SHIPPING_MODELS['coates'](f, shipping_level='high')[0]
+    assert wenz == pytest.approx(91.0, abs=1e-9)
+    assert coates == pytest.approx(83.7161, abs=1e-3)
+    assert wenz - coates == pytest.approx(7.2839, abs=1e-3)
+
+
 def test_wind_above_the_cutoff_matches_drdc_equations_18_19():
     """``K = Lw,2000 - m0*(10 log10 2000)`` then ``Lw = K + m0*10 log10 f``,
     with ``m0 = s2*(0.1/log10 2)`` from eq. (17)."""

@@ -386,6 +386,12 @@ def tone_burst(
     s : ndarray
         Tone burst signal
 
+    Notes
+    -----
+    All parameters must be positive and the burst long enough for at least
+    one sample (``round(n_cycles / frequency * sample_rate) >= 1``),
+    otherwise a :class:`~uacpy.core.exceptions.ConfigurationError` is raised.
+
     Examples
     --------
     >>> # Generate 5-cycle 1000 Hz tone burst
@@ -404,6 +410,11 @@ def tone_burst(
                       sample_rate=sample_rate)
     T = n_cycles / frequency
     N = int(round(T * sample_rate))
+    if N <= 0:
+        raise ConfigurationError(
+            "tone_burst: n_cycles / frequency * sample_rate must cover at "
+            f"least one sample; got frequency={frequency}, "
+            f"n_cycles={n_cycles}, sample_rate={sample_rate}.")
     time = np.arange(N) / float(sample_rate)
 
     s = np.sin(2 * np.pi * frequency * time)

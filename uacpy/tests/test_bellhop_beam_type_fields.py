@@ -1,8 +1,8 @@
 """Bellhop ``beam_type`` changes the *field*, not just the object.
 
-The per-beam smoke tests in ``test_bellhop.py`` assert isinstance/isfinite,
-which would all still pass if the wrapper silently dropped ``beam_type``.
-This module pins the full chain on one small isovelocity case:
+A per-beam isinstance/isfinite smoke would still pass if the wrapper
+silently dropped ``beam_type``. This module pins the full chain on one
+small isovelocity case:
 
 * the requested beam letter lands verbatim in the ``.env`` run-type deck
   (``'<run_type><beam_type>…'``, case-significant — ``g`` and ``G`` are

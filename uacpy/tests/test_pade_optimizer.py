@@ -27,14 +27,32 @@ class TestOptimalC0:
         assert 1590 < c0 < 1592
 
     def test_pekeris_water_sediment_30deg(self):
-        """Water + faster sediment → c₀ between c_water and c_sediment."""
+        """Eq. (15) closed form:
+        ``c_min·c_max·sqrt((2 + sin²θ)/(c_min² + c_max²))`` at
+        (1500, 1700, 30°) → 1687.14 m/s — between the two speeds, and pinned
+        to ±1 m/s like the siblings so a formula change fails loudly."""
         c0 = optimal_c0(1500.0, 1700.0, 30.0)
         assert 1500 < c0 < 1700
+        assert 1686 < c0 < 1688
 
     def test_inhomogeneous_30deg(self):
         """Range [1500, 1550] @ 30° → ≈ 1616 m/s per Table 4."""
         c0 = optimal_c0(1500.0, 1550.0, 30.0)
         assert 1614 < c0 < 1618
+
+    def test_eq15_centres_the_spectrum_on_the_pade_sweet_spot(self):
+        """Eq. (15) is derived "Based on equality ξ_min = -ξ_max" (§4.2) —
+        the c₀ that makes the spectrum interval symmetric about ξ = 0, where
+        Fig. 2 shows the Padé error smallest. Asserted through the interval
+        ``optimize_grid`` itself reports, so the pin holds against the code
+        path RAM consumes, not a re-derived formula."""
+        c0 = optimal_c0(1480.0, 1750.0, 35.0)
+        res = optimize_grid(
+            freq=100.0, c_min=1480.0, c_max=1750.0, x_max=2000.0,
+            c0=c0, theta_max=35.0, eps=5e-2, p=4, alpha=0.0,
+        )
+        assert res['xi_min'] == pytest.approx(-res['xi_max'], abs=1e-12)
+        assert res['xi_max'] > 0
 
 
 class TestPadeError:
@@ -183,6 +201,76 @@ class TestGridError:
         shipped = grid_error(dr=res['dr'], dz=cap, **self._KW)
         assert cap != pytest.approx(res['dz'])
         assert shipped != pytest.approx(res['predicted_error'], rel=1e-6)
+
+
+class TestInfeasibleGridRelaxationLadder:
+    """RAM's ``_optimize_grid_relaxing`` (ram.py) wraps the optimiser in two
+    nested fallbacks (ram.md §5): ε is tripled until it passes 0.5, then
+    θ_max steps 30° → 20° → 15° restarting the ε ladder, and only then a
+    ``ConfigurationError`` is raised. The optimiser itself is stubbed, so no
+    grid search (and no binary) runs."""
+
+    _KW = dict(freq=100.0, c_min=1500.0, c_max=1700.0, max_range=5000.0,
+               c0_pe=1600.0, eps0=1e-2, theta0=30.0, kind='ramgeo')
+
+    @staticmethod
+    def _model():
+        from uacpy.models import RAM
+        return RAM(verbose=False)
+
+    def _record_calls(self, monkeypatch, succeed_when):
+        """Stub ``optimize_grid`` to record every (θ_max, ε) trial and
+        succeed only when ``succeed_when(theta, eps)`` says so."""
+        import uacpy.models._pade_optimizer as popt
+        calls = []
+
+        def fake(**kw):
+            calls.append((kw['theta_max'], kw['eps']))
+            if succeed_when(kw['theta_max'], kw['eps']):
+                return {'dr': 10.0, 'dz': 1.0, 'c0': kw['c0'],
+                        'predicted_error': kw['eps']}
+            raise RuntimeError('infeasible')
+
+        monkeypatch.setattr(popt, 'optimize_grid', fake)
+        return calls
+
+    def test_fully_infeasible_walks_the_whole_ladder_then_raises(
+            self, monkeypatch):
+        from uacpy.core.exceptions import ConfigurationError
+        calls = self._record_calls(monkeypatch, lambda t, e: False)
+        with pytest.raises(ConfigurationError, match=r'0\.5'):
+            self._model()._optimize_grid_relaxing(**self._KW)
+        # ε triples from 1e-2 until it passes 0.5 (4 trials), restarting at
+        # each θ rung 30 → 20 → 15.
+        eps_ladder = [1e-2, 3e-2, 9e-2, 0.27]
+        expected = [(t, e) for t in (30.0, 20.0, 15.0) for e in eps_ladder]
+        assert [(t, pytest.approx(e)) for t, e in expected] == calls
+
+    def test_epsilon_relaxation_is_tried_before_narrowing_theta(
+            self, monkeypatch):
+        self._record_calls(monkeypatch,
+                           lambda t, e: e >= 0.1)
+        res, eps_used, theta_used = self._model()._optimize_grid_relaxing(
+            **self._KW)
+        assert theta_used == 30.0
+        assert eps_used == pytest.approx(0.27)
+        assert res['dr'] == 10.0
+
+    def test_theta_steps_down_only_after_the_eps_ladder_fails(
+            self, monkeypatch):
+        self._record_calls(monkeypatch,
+                           lambda t, e: t <= 20.0)
+        res, eps_used, theta_used = self._model()._optimize_grid_relaxing(
+            **self._KW)
+        assert theta_used == 20.0
+        assert eps_used == pytest.approx(1e-2)
+
+    def test_a_narrow_caller_aperture_is_never_widened(self, monkeypatch):
+        calls = self._record_calls(monkeypatch, lambda t, e: True)
+        kw = dict(self._KW, theta0=18.0)
+        _, _, theta_used = self._model()._optimize_grid_relaxing(**kw)
+        assert theta_used == 18.0
+        assert calls == [(18.0, pytest.approx(1e-2))]
 
 
 class TestRamsDzShearCap:

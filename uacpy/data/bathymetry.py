@@ -367,7 +367,7 @@ def _fetch_elevations(
     elevations: List[float] = []
     for i in range(0, len(coords), MAX_LOCATIONS_PER_REQUEST):
         if throttled:
-            _rate_limit(verbose=verbose)
+            _rate_limit()
         chunk = coords[i:i + MAX_LOCATIONS_PER_REQUEST]
         elevations.extend(
             _request_chunk(chunk, dataset=dataset, base_url=base_url,
@@ -376,7 +376,7 @@ def _fetch_elevations(
     return np.asarray(elevations, dtype=float)
 
 
-def _rate_limit(*, verbose: Union[bool, str]) -> None:
+def _rate_limit() -> None:
     """Block until at least ``OPENTOPODATA_MIN_INTERVAL_S`` has passed since the
     last public-host call, so chunked fetches stay under the ≤1 req/s limit."""
     global _last_request_monotonic

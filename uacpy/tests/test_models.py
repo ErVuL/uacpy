@@ -21,7 +21,7 @@ class TestBellhop:
     in ``test_simplified_api.TestComputeAPI`` and ``test_bellhop`` —
     only model-specific scenarios live here."""
 
-    def test_bellhop_range_dependent(self, range_dependent_env, source, receiver_small):
+    def test_range_dependent_env_returns_full_receiver_grid(self, range_dependent_env, source, receiver_small):
         """Test Bellhop with range-dependent environment."""
         bellhop = Bellhop(verbose=False)
         result = bellhop.compute_tl(
@@ -66,10 +66,16 @@ class TestKraken:
         assert len(modes.k) > 0
 
     def test_kraken_n_modes_clips_output(self, simple_env, source):
-        """``n_modes`` caps the number of returned modes from Kraken."""
+        """``n_modes`` caps the number of returned modes from Kraken.
+
+        The 100 m / 100 Hz guide carries well over 3 propagating modes, so
+        the cap must deliver exactly 3 while the uncapped run returns more —
+        a ``<= 3`` alone is satisfied by a solver that found nothing."""
         kraken = Kraken(verbose=False)
+        uncapped = kraken.compute_modes(env=simple_env, source=source)
         capped = kraken.compute_modes(env=simple_env, source=source, n_modes=3)
-        assert len(capped.k) <= 3
+        assert len(uncapped.k) > 3
+        assert len(capped.k) == 3
         assert capped.metadata.get('n_modes_requested') == 3
 
     def test_kraken_modes_have_wavenumbers(self, simple_env, source):
@@ -152,6 +158,13 @@ class TestBounce:
         assert result.theta is not None
         assert len(result.R) > 0
         assert len(result.theta) > 0
+        # |R| is a passive-boundary amplitude ratio, and the table is a
+        # strictly increasing grazing-angle grid on [0, 90].
+        R = np.asarray(result.R, dtype=float)
+        theta = np.asarray(result.theta, dtype=float)
+        assert np.all(R >= 0.0) and np.all(R <= 1.0 + 1e-6)
+        assert theta.min() >= 0.0 and theta.max() <= 90.0 + 1e-9
+        assert np.all(np.diff(theta) > 0)
 
     def test_bounce_empty_table_raises(self, simple_env, source, tmp_path):
         """A degenerate RMax (sub-metre receiver range) makes BOUNCE emit a
@@ -197,7 +210,7 @@ class TestBounce:
 class TestRAM:
     """Tests for RAM model (mpiramS backend)."""
 
-    def test_ram_compute_tl(self, simple_env, source, receiver_small):
+    def test_ram_returns_finite_tl_grid(self, simple_env, source, receiver_small):
         """Test RAM TL computation."""
         ram = RAM(verbose=False, dr=20.0, dz=2.0)
         result = ram.compute_tl(env=simple_env, source=source, receiver=receiver_small)
@@ -224,7 +237,15 @@ class TestRAM:
         # variable dimension (frequency, here).
         assert result.data.shape[0] > 0  # depth
         assert result.data.shape[1] > 0  # range
-        assert result.data.shape[2] > 0  # frequency
+        # mpiramS builds its grid as frq = fc + [-nf1..nf1]·df with
+        # df = 1/T and nf1 = int((fc/Q - df)/df) + 1 (peramx.f90:345-366):
+        # fc=100, Q=2, T=2 → df=0.5, nf1=100, nf=201 spanning 50-150 Hz.
+        f = np.asarray(result.coords['frequency'], dtype=float)
+        assert result.data.shape[2] == 201
+        assert f[0] == pytest.approx(50.0)
+        assert f[-1] == pytest.approx(150.0)
+        assert np.allclose(np.diff(f), 0.5, atol=1e-6)
+        assert f[100] == pytest.approx(100.0)
 
     def test_ram_time_series_requires_waveform(self, simple_env, source):
         """TIME_SERIES without source_waveform must raise."""
@@ -435,3 +456,25 @@ class TestModelConsistency:
                 len(receiver_small.depths), len(receiver_small.ranges)
             )
             assert np.all(np.isfinite(result.data))
+
+
+class TestUserFrameSkipSpansTheLibrary:
+    """``skip_file_prefixes=USER_FRAME_SKIP`` must skip every library frame —
+    a warning raised in an io reader a model delegates to still points at the
+    user's call — while ``tests`` and ``examples`` stay reportable (their
+    files play the caller role the attribution points at)."""
+
+    def test_prefixes_cover_library_subpackages_but_not_tests(self):
+        import os
+        import uacpy
+        from uacpy.models.base import USER_FRAME_SKIP
+
+        pkg = os.path.dirname(os.path.abspath(uacpy.__file__)) + os.sep
+        assert USER_FRAME_SKIP
+        assert all(p.startswith(pkg) for p in USER_FRAME_SKIP)
+        tops = {os.path.relpath(p, pkg).split(os.sep)[0]
+                for p in USER_FRAME_SKIP}
+        for sub in ('models', 'io', 'core', 'acoustic_signal', 'data'):
+            assert sub in tops, f"{sub} missing from USER_FRAME_SKIP"
+        assert 'tests' not in tops
+        assert 'examples' not in tops

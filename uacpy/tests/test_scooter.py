@@ -16,7 +16,7 @@ class TestScooterBasic:
     """Basic tests for Scooter model (wavenumber integration)."""
 
     @pytest.mark.requires_binary
-    def test_scooter_basic_tl(self):
+    def test_compute_tl_returns_finite_grid_matching_receiver_shape(self):
         """Test basic Scooter TL computation."""
         env = Environment(
             name="scooter_test",
@@ -62,6 +62,24 @@ class TestScooterBroadband:
         assert np.iscomplexobj(result.data)
         assert result.data.shape[:2] == (len(receiver.depths), len(receiver.ranges))
         assert result.data.shape[2] > 0
+        assert np.all(np.isfinite(result.data))
+        assert np.any(np.abs(result.data) > 0)
+
+        # The 100 Hz slice of H(f) is the same physics as a COHERENT_TL run of
+        # the same environment (pattern: test_ram_backends.py
+        # ``test_broadband_fc_slice_matches_the_narrowband_run``). The two runs
+        # sample different wavenumber grids (rmax_multiplier 3.0 vs 2.0), so
+        # the comparison bounds the median bias rather than pinning equality.
+        nb = Scooter(verbose=False).compute_tl(env=env, source=source,
+                                               receiver=receiver)
+        got = np.asarray(result.at(frequency=100.0).to_db().data, dtype=float)
+        ref = np.asarray(nb.db, dtype=float)
+        ok = np.isfinite(got) & np.isfinite(ref)
+        assert ok.any()
+        bias = float(np.median(got[ok] - ref[ok]))
+        assert abs(bias) < 0.5, (
+            f"BROADBAND 100 Hz slice sits {bias:+.3f} dB off the COHERENT_TL "
+            f"run of the same environment")
 
     @pytest.mark.slow
     def test_scooter_time_series_returns_time_series_field(self):
@@ -328,3 +346,167 @@ def test_broadband_n_mesh_is_checked_at_f_max():
                        frequencies=np.linspace(100.0, 1000.0, 10)),
                 Receiver(depths=[50.0], ranges=[1000.0]),
                 run_mode=RunMode.BROADBAND)
+
+
+class TestScooterDeckResolution:
+    """Deck-level checks of the documented ``None`` resolutions
+    (``docs/models/scooter.md`` constructor table): the spectral
+    ``RMax = receiver.ranges.max() × rmax_multiplier`` with the multiplier
+    defaulting to 2.0 narrowband / 3.0 broadband, and
+    ``c_low = 0.95 × min(SSP)`` when only ``c_high`` is pinned. The deck is
+    written by ``_write_scooter_env`` without launching the binary; the
+    cLow/cHigh line and the RMax (km) line are consecutive
+    (``write_phase_speed_and_rmax``)."""
+
+    @staticmethod
+    def _env():
+        from uacpy.core import BoundaryProperties
+        return Environment(
+            name='deck', bathymetry=100.0, ssp=1500.0,
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=1800.0, density=1.8,
+                                      attenuation=0.5))
+
+    @staticmethod
+    def _deck_lines(tmp_path, model, run_mode=RunMode.COHERENT_TL,
+                    frequencies=None):
+        deck = tmp_path / 'deck.env'
+        model._write_scooter_env(
+            deck, TestScooterDeckResolution._env(),
+            Source(depths=50.0, frequencies=100.0),
+            Receiver(depths=np.array([50.0]),
+                     ranges=np.array([1000.0, 3000.0])),
+            frequencies=frequencies, run_mode=run_mode)
+        return deck.read_text().splitlines()
+
+    @staticmethod
+    def _rmax_km_after_speed_line(lines, speed_line):
+        assert speed_line in lines, (
+            f"expected phase-speed line {speed_line!r} in deck: {lines}")
+        return float(lines[lines.index(speed_line) + 1])
+
+    def test_narrowband_rmax_is_twice_the_receiver_max(self, tmp_path):
+        # 0.95×1500 = 1425.0, 1.05×1800 = 1890.0; RMax = 3000 m × 2.0.
+        lines = self._deck_lines(tmp_path, Scooter(verbose=False))
+        assert self._rmax_km_after_speed_line(
+            lines, '1425.0 1890.0') == pytest.approx(6.0)
+
+    def test_broadband_rmax_is_three_times_the_receiver_max(self, tmp_path):
+        lines = self._deck_lines(
+            tmp_path, Scooter(verbose=False), run_mode=RunMode.BROADBAND,
+            frequencies=np.linspace(80.0, 120.0, 5))
+        assert self._rmax_km_after_speed_line(
+            lines, '1425.0 1890.0') == pytest.approx(9.0)
+
+    def test_pinned_rmax_multiplier_wins_in_both_modes(self, tmp_path):
+        model = Scooter(rmax_multiplier=5.0, verbose=False)
+        narrow = self._deck_lines(tmp_path, model)
+        broad = self._deck_lines(tmp_path, model, run_mode=RunMode.BROADBAND,
+                                 frequencies=np.linspace(80.0, 120.0, 5))
+        assert self._rmax_km_after_speed_line(
+            narrow, '1425.0 1890.0') == pytest.approx(15.0)
+        assert self._rmax_km_after_speed_line(
+            broad, '1425.0 1890.0') == pytest.approx(15.0)
+
+    def test_c_low_auto_derives_with_c_high_pinned(self, tmp_path):
+        # Only c_high pinned: c_low still resolves to 0.95 × min(SSP).
+        lines = self._deck_lines(
+            tmp_path, Scooter(c_high=1700.0, verbose=False))
+        assert '1425.0 1700.0' in lines
+
+    def test_documented_factors_are_the_code_factors(self):
+        # scooter.md and DOCUMENTATION.md state 0.95 / 1.05 as literals; this
+        # pins the constants so doc-vs-code drift fails a test.
+        from uacpy.core.constants import C_LOW_FACTOR, C_HIGH_FACTOR
+        assert C_LOW_FACTOR == 0.95
+        assert C_HIGH_FACTOR == 1.05
+
+
+class TestScooterSpectrumOption:
+    """``spectrum`` names the wavenumber branch the k→r transform integrates
+    (``docs/models/scooter.md`` constructor table); the constructor maps it to
+    the one-letter code handed to ``grn_to_field`` / the ``.flp`` convention."""
+
+    @pytest.mark.parametrize('name,code', [
+        ('positive', 'P'), ('negative', 'N'), ('both', 'B')])
+    def test_spectrum_name_maps_to_code(self, name, code):
+        assert Scooter(spectrum=name, verbose=False)._spectrum_code == code
+
+    def test_unknown_spectrum_raises(self):
+        with pytest.raises(ConfigurationError, match='spectrum'):
+            Scooter(spectrum='full', verbose=False)
+
+
+class TestNMeshSilentFloor:
+    """``scooter.f90:110`` floors ``n_mesh`` at 100 points per medium without
+    any echo of the override, so sub-100 values change nothing
+    (``docs/models/scooter.md`` §7): 40 and 100 give bit-identical TL and only
+    a value above the floor moves the answer."""
+
+    @staticmethod
+    def _tl(n_mesh):
+        from uacpy.core import BoundaryProperties
+        env = Environment(
+            name='floor', bathymetry=100.0, ssp=1500.0,
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=1800.0, density=1.8,
+                                      attenuation=0.5))
+        result = Scooter(n_mesh=n_mesh, verbose=False).compute_tl(
+            env=env, source=Source(depths=50.0, frequencies=50.0),
+            receiver=Receiver(depths=np.array([25.0, 75.0]),
+                              ranges=np.linspace(500.0, 3000.0, 6)))
+        return np.asarray(result.db, dtype=float)
+
+    @pytest.mark.requires_binary
+    def test_sub_floor_n_mesh_is_bit_identical_to_the_floor(self):
+        assert np.array_equal(self._tl(40), self._tl(100))
+
+    @pytest.mark.requires_binary
+    def test_above_floor_n_mesh_moves_the_answer(self):
+        assert not np.array_equal(self._tl(150), self._tl(100))
+
+
+class TestPrecalcBottomIrcGuard:
+    """A 'precalc' bottom stages the user's file verbatim as ``<base>.irc``,
+    which ``misc/RefCoef.f90:94-107`` reads as Title/freq + NkTab +
+    ``(5G15.7,I5)`` f/g-impedance records — a different format from the
+    ``.brc``/``.trc`` angle tables. The natural mistake (handing it a
+    theta/|R|/phase table) used to abort the binary with a bare Fortran
+    backtrace at exit 2; the header is validated before launch instead."""
+
+    @staticmethod
+    def _run(table):
+        from uacpy.core import BoundaryProperties
+        env = Environment(
+            name='precalc', bathymetry=100.0, ssp=1500.0,
+            bottom=BoundaryProperties(acoustic_type='precalc',
+                                      reflection_file=str(table)))
+        return Scooter(verbose=False).run(
+            env, Source(depths=25.0, frequencies=50.0),
+            Receiver(depths=np.array([50.0]), ranges=np.array([1000.0])))
+
+    def test_angle_table_raises_typed_error_before_launch(self, tmp_path):
+        table = tmp_path / 'angles.brc'
+        table.write_text("3\n0.0 1.0 0.0\n45.0 0.5 0.0\n90.0 0.0 0.0\n")
+        with pytest.raises(ConfigurationError) as err:
+            self._run(table)
+        msg = str(err.value)
+        assert '.irc' in msg and '.brc' in msg
+        assert "acoustic_type='file'" in msg
+
+    def test_irc_shaped_header_passes_the_guard(self, tmp_path):
+        # BOUNCE's layout: quoted-title + freq, NkTab, (5G15.7,I5) records.
+        table = tmp_path / 'seabed.irc'
+        table.write_text(
+            "'seabed' 50.0\n2\n"
+            "  0.1000000E+00  0.2000000E+00  0.0000000E+00  0.3000000E+00"
+            "  0.0000000E+00    0\n"
+            "  0.2000000E+00  0.2500000E+00  0.0000000E+00  0.3500000E+00"
+            "  0.0000000E+00    0\n")
+        from uacpy.core import BoundaryProperties
+        env = Environment(
+            name='precalc', bathymetry=100.0, ssp=1500.0,
+            bottom=BoundaryProperties(acoustic_type='precalc',
+                                      reflection_file=str(table)))
+        # The guard alone: header accepted, no exception raised.
+        assert Scooter(verbose=False)._reject_malformed_irc_bottom(env) is None

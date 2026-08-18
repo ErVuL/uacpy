@@ -66,7 +66,8 @@ Table 3.3) — so do not read a sharp edge as physics.
 
 ### Turbulence — below ~13 Hz
 
-`17 − 30·log₁₀(f_kHz)`, so 107 dB at 1 Hz falling at 30 dB per decade.
+`107 − 33.2·log₁₀(f_Hz)`, so 107 dB at 1 Hz falling at 10 dB per octave —
+`−10/log₁₀2 ≈ −33.2` dB per decade.
 
 This is largely not radiated sound. The term fits the pressure fluctuation
 produced by non-linear interaction among wind-generated surface waves and by
@@ -290,12 +291,17 @@ composition rather than one fused formula:
 | `THERMAL_MODELS` | `mellen` | `mellen` |
 | `TURBULENCE_MODELS` | `wenz` | `wenz` |
 
-The defaults are the DRDC composite, with one exception: turbulence. DRDC's own
-term is `107 − 33.2·log₁₀(f_Hz)` in its text and `108.5 − 32.5·log₁₀(f_Hz)` in
-its reference code, while `TURBULENCE_MODELS['wenz']` is the canonical Wenz
-curve `107 − 30·log₁₀(f_Hz)`, whose −30 dB/decade sits inside the −8 to
-−10 dB/octave slope Wenz reports. It differs from DRDC's code by 1.5 dB at 1 Hz
-and 3.5 dB at 100 Hz, where turbulence is already 24 dB under the total.
+The defaults are the DRDC composite — turbulence included, though DRDC's two
+sources for that term disagree with each other. `TURBULENCE_MODELS['wenz']`
+implements the report's §2.1 specification, `107 − 33.2·log₁₀(f_Hz)`: the
+slope is the primitive quantity, −10 dB/octave (`−10/log₁₀2 ≈ −33.2`
+dB/decade), at the steep end of the −8 to −10 dB/octave range Wenz, Urick and
+Nichols & Bradley all cite, with the 107 dB anchor traceable to Nichols &
+Bradley in the report's own Table 1. DRDC's Annex A reference code implements
+something else — `108.5 − 32.5·log₁₀(f_Hz)` (−9.78 dB/octave), which sits
+1.5–2.9 dB higher over 1–100 Hz. uacpy follows the same rule here as
+everywhere in this module: the numbered equations are normative, and the annex
+is an implementation that takes shortcuts.
 
 `coates` is the Coates (1989) / Stojanović (2007) pair that the
 underwater-communications literature uses, so `WIND_MODELS` and
@@ -540,7 +546,7 @@ apply_weighting(wenz.total, f, 'LF')         # the weighted spectrum itself
 ![Weighted vs unweighted](figures/noise_weighted_soundscape.png)
 
 One ambient spectrum — 10 kn, medium shipping — heard six ways. Broadband it is
-97.7 dB re 1 µPa². A baleen whale receives 94.0 dB of that (−3.7 dB: it hears
+97.6 dB re 1 µPa². A baleen whale receives 94.0 dB of that (−3.5 dB: it hears
 almost all of it, because the energy is where its hearing is). A porpoise
 receives 83.5 dB (−14.2 dB). Nothing about the ocean changed between those two
 numbers.

@@ -252,7 +252,7 @@ The position-4 filter is applied **per wavenumber** at `k·c_low/2π` and
 |---|---|---|
 | `output_mode` | `'R'` | `'R'` horizontal array, `'D'` vertical array, `'S'` snapshot. |
 | `n_t_out` | `512` | Output time samples over `[0, t_max]`. Used verbatim; warns when the resulting Nyquist sits below `f_max`. |
-| `t_max` | `None` | Output window end (s). `None` ⇒ `2.5 ×` the travel time to `RMax`. |
+| `t_max` | `None` | Output window end (s). `None` ⇒ `2.5 ×` the travel time to the farthest receiver (`RMax`'s wavenumber margin is *not* folded in). |
 | `t_start` | `-0.1` | Where the **march** starts (s) — must be before the source rises. Not the output window. |
 | `t_mult` | `0.999` | Courant multiplier; `1.0` is the maximum stable step. |
 | `max_depths` | `20` | Cap on the looped axis: depths for `'R'`, ranges for `'D'`. `'S'` is uncapped. |
@@ -305,9 +305,10 @@ source = uacpy.Source(depths=25.0, frequencies=200.0)
 ```
 
 `t_max` is pinned in every snippet below. The automatic window is `2.5 ×` the
-travel time to `RMax`, and `RMax` is itself `3 ×` the furthest receiver — so
-the default window is about **7.5 travel times** long, which is far more than
-these figures need and (at `n_t_out=512`) aliases besides.
+travel time to the **farthest receiver** — `RMax`'s `3 ×` safety margin is a
+wavenumber-sampling knob and is deliberately *not* folded into the window —
+which is longer than these figures need, and at `n_t_out=512` can still sit
+below the source band (`run()` warns when it does).
 
 ### `output_mode='R'` — a horizontal array
 
@@ -320,7 +321,9 @@ p = SPARC(t_max=1.0, n_t_out=1024).run(env, source, array)
 section = p.at(depth=50.0).to_dict()
 section['data'] = (section['data']
                    * np.sqrt(section['coords']['range'])[:, None])
-Field.from_dict(section).plot(stacked=True)
+fig, ax = Field.from_dict(section).plot(
+    stacked=True, figsize=TALL,
+    title='SPARC — horizontal array at 50 m, gained by √r')
 ```
 
 ![SPARC record section](figures/sparc_record_section.png)
@@ -365,7 +368,9 @@ matched filter, dispersion — hand the trace to
 vla = uacpy.Receiver(depths=np.linspace(2.0, 98.0, 33),
                      ranges=np.array([800.0]))
 p = SPARC(output_mode='D', t_max=0.9, n_t_out=1024).run(env, source, vla)
-p.at(range=800.0).plot(stacked=True)
+fig, ax = p.at(range=800.0).plot(
+    stacked=True, figsize=TALL,
+    title='SPARC — vertical array at 800 m (output_mode=\'D\')')
 ```
 
 ![SPARC vertical array](figures/sparc_vertical_array.png)
@@ -385,10 +390,12 @@ grid = uacpy.Receiver(depths=np.linspace(1.0, 99.0, 40),
                       ranges=np.linspace(10.0, 500.0, 80))
 p = SPARC(output_mode='S', t_max=0.36, n_t_out=384).run(env, source, grid)
 
+times = (0.06, 0.14, 0.22, 0.30)
 late = np.asarray(p.data)[..., -1]
-plot_time_snapshots(
-    {'SPARC': p}, (0.06, 0.14, 0.22, 0.30), env=env,
-    p_max=float(np.percentile(np.abs(late[np.isfinite(late)]), 99.0)))
+fig, _ = plot_time_snapshots(
+    {'SPARC': p}, times, env=env,
+    p_max=float(np.percentile(np.abs(late[np.isfinite(late)]), 99.0)),
+    title='SPARC — pulse marching down the channel (output_mode=\'S\')')
 ```
 
 ![SPARC snapshots](figures/sparc_snapshots.png)
@@ -413,9 +420,13 @@ in a single march.
 
 ```python
 point = uacpy.Receiver(depths=50.0, ranges=np.array([600.0]))
-for code in ('PN+B', 'RN+N', 'HN+N'):
-    p = SPARC(pulse_type=code, t_max=0.7, n_t_out=2048).run(env, source, point)
-    p.at(depth=50.0, range=600.0).plot()
+pulses = [('PN+B', 'Pseudo-Gaussian, band-passed (default)'),
+          ('RN+N', 'Ricker wavelet'),
+          ('HN+N', 'Hanning-weighted four sine')]
+for ax, (code, label) in zip(axes, pulses):
+    p = SPARC(pulse_type=code, t_max=0.7, n_t_out=2048).run(
+        env, source, point)
+    p.at(depth=50.0, range=600.0).plot(ax=ax)
 ```
 
 ![SPARC pulse shapes](figures/sparc_pulse_shapes.png)
@@ -430,9 +441,9 @@ the shape; positions 2–4 post-process, flip and filter it.
 ### `n_t_out` — the output grid must resolve the band
 
 ```python
-for n_t_out in (128, 2048):
+for ax, n_t_out in zip(axes, (128, 2048)):
     p = SPARC(t_max=0.7, n_t_out=n_t_out).run(env, source, point)
-    p.at(depth=50.0, range=600.0).plot()
+    p.at(depth=50.0, range=600.0).plot(ax=ax)
 ```
 
 ![SPARC output sampling](figures/sparc_output_sampling.png)
@@ -461,9 +472,10 @@ bottom is silently — well, noisily — rigidified. Set the bottom to `'rigid'`
 or `'vacuum'` yourself if you meant it and want the warning to stop; use
 another model if you did not.
 
-**The default window is long, and the default `n_t_out` will alias in it.**
-`t_max = 2.5 × RMax/c` with `RMax = 3 × ranges.max()` gives ~7.5 travel times;
-512 samples across that rarely reaches `2·f_max`. Pin `t_max` to the span you
+**The default window is long, and the default `n_t_out` can alias in it.**
+`t_max = 2.5 × ranges.max()/c` — 2.5 travel times to the farthest receiver;
+512 samples across that clear `2·f_max` only at short range × low frequency
+(`run()` warns when they do not). Pin `t_max` to the span you
 actually want to see.
 
 **A truncated trace makes a window-dependent spectrum.** `n_t_out / t_max` has
@@ -541,7 +553,7 @@ file, which uacpy does not write. They pass `pulse_type` validation because
 they are in `sparc.f90`'s alphabet; the run then dies for want of the file.
 Note that `doc/sparc.htm` calls it a `.STS` file, but the Fortran opens a file
 named literally `STSFIL` in the working directory
-(`tslib/sourceMod.f90:96`) — writing `run.sts` will not satisfy it.
+(`tslib/sourceMod.f90:97`) — writing `run.sts` will not satisfy it.
 
 ---
 

@@ -34,7 +34,7 @@ namespace.
 | `bartlett_spectrum(R, steering)` | covariance + manifold | conventional power per angle |
 | `mvdr_spectrum(R, steering, *, diagonal_loading=1e-6)` | covariance + manifold | Capon power per angle |
 | `music_spectrum(R, steering, n_sources)` | covariance + manifold + model order | pseudospectrum per angle |
-| `shading_taper(n_elements, window='hann')` | element count, any `scipy.signal.get_window` spec | unit-mean amplitude weights |
+| `shading_taper(n_elements, window='hann')` | element count, any `scipy.signal.get_window` spec | RMS-normalised amplitude weights |
 
 Every figure on this page comes from
 [`docs/figure_scripts/arrays.py`](../figure_scripts/arrays.py) — the code
@@ -51,7 +51,7 @@ direction would look like across the elements. For an element at coordinate
 `z_n` and a wave arriving at θ from broadside:
 
 ```
-e_n(θ) = exp(+j·k·z_n·sin θ) / √N          k = 2πf/c
+e_n(θ) = exp(−j·k·z_n·sin θ) / √N          k = 2πf/c
 ```
 
 `steering_vectors` returns one such vector per scan angle, stacked into an
@@ -65,9 +65,11 @@ e.shape                                    # (361, 16)
 ```
 
 Two conventions are worth knowing because everything downstream depends on
-them. The sign is **+j**, matching the Acoustics-Toolbox `planewave_rep.m`
-reference — which is why every processor here correlates with `e.conj()`, and
-why using `e` unconjugated resolves the mirror bearing −θ. And each row is
+them. The sign is **−j** — deliberately the *conjugate* of the
+Acoustics-Toolbox `planewave_rep.m` reference, because every processor here
+applies the vector in Hermitian form (`e.conj()` against the data), and under
+AT's `exp(+iωt)` convention that is the sign that puts the peak at +θ; using
+`e` unconjugated resolves the mirror bearing −θ. And each row is
 **unit-norm**, so the array gain `10·log10(N)` is folded consistently into
 every output rather than being something you carry separately.
 
@@ -289,8 +291,9 @@ angle, no range, no depth, no environment model.
 
 ## 4. Shading — trading mainlobe width for sidelobes
 
-`shading_taper(n_elements, window)` returns real amplitude weights normalised
-to unit mean, from any `scipy.signal.get_window` specification. Multiply them
+`shading_taper(n_elements, window)` returns real amplitude weights
+RMS-normalised to `mean(w²) = 1` — so a `'boxcar'` taper is all-ones — from
+any `scipy.signal.get_window` specification. Multiply them
 into the manifold before the scan:
 
 ```python
@@ -302,7 +305,7 @@ power = bartlett_spectrum(R, e)
 ![Array shading](figures/arrays_shading.png)
 
 *Deterministic beampatterns, 32 elements at `d = λ/2` (`L = 16λ`) — no noise,
-no snapshots.* **Top left:** the tapers themselves, at unit mean. **Top
+no snapshots.* **Top left:** the tapers themselves, at unit RMS. **Top
 right:** the mainlobes, where the cost shows. **Bottom:** the full patterns
 over a 105 dB scale, where the benefit shows; the inset box gives the array
 gain each taper gives up relative to uniform weighting.
@@ -699,7 +702,8 @@ spectrum from a rank-deficient covariance rather than an error. Check `K` and
 compounds them.
 
 **Unconjugated steering resolves the mirror bearing.** The convention is
-`+j`, so the correlation is `e.conj() @ x`. Writing `e @ x` puts a source at
+`−j` applied in Hermitian form, so the correlation is `e.conj() @ x`.
+Writing `e @ x` puts a source at
 +θ at −θ, silently and symmetrically — and on a line array that ambiguity is
 real anyway, since a line array cannot tell port from starboard without
 motion or a second line.

@@ -168,7 +168,7 @@ def sync():
 
     baseband, _, _, _ = _ofdm_frame()
     sc = _sc_metric(baseband, 256)
-    sc_start, cfo = comms.schmidl_cox_sync(baseband, 256, 32)
+    sc_start, cfo = comms.schmidl_cox_sync(baseband, 256)
 
     fig, axes = plt.subplots(1, 2, figsize=ROW2)
     plot_sync_metric(metric, axes[0], threshold=0.4,
@@ -221,7 +221,7 @@ def ofdm():
     rx, tx, channel, crc_ok = _ofdm_frame()
     blk = N_SC + CP
 
-    start, cfo = comms.schmidl_cox_sync(rx, N_SC, CP)
+    start, cfo = comms.schmidl_cox_sync(rx, N_SC)
     x = comms.apply_cfo(rx[start:], cfo)
     h_est = comms.estimate_channel(x[blk:2 * blk], tx.pilot_freq, N_SC, CP)
     h_true = np.fft.fft(channel, N_SC)

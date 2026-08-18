@@ -27,7 +27,7 @@ from uacpy.core.exceptions import (
     UnsupportedFeatureError,
 )
 from uacpy.io.grn_reader import (
-    read_grn_file, sparc_snapshot_to_time_field, _zero_range_mask,
+    read_grn_file, sparc_snapshot_to_time_field,
 )
 from uacpy.models.base import (
     PropagationModel, RunMode, ModelSpec, USER_FRAME_SKIP,
@@ -43,38 +43,6 @@ from uacpy.io.oalib_writer import (
 # Factor above the Nyquist minimum used when naming the ``n_t_out`` that would
 # resolve the pulse band in the aliasing warning.
 _SPARC_PULSE_OVERSAMPLE = 3.0
-
-
-def _mask_zero_range_traces(data: np.ndarray, ranges: np.ndarray,
-                            output_mode: str) -> np.ndarray:
-    """Return ``data`` with the receivers on the source axis set to no-data.
-
-    ``sparc.f90:622`` weights the ``'R'`` branch by ``SQRT( rkT / Pos%Rr )``
-    and ``:292`` scales ``'D'`` by ``1 / SQRT( pi * Pos%Rr( 1 ) )``, both
-    singular at ``r = 0``. Measured on a 100 m Pekeris guide, ``'D'`` comes
-    back ``+Inf`` for the whole trace and ``'R'`` mixes ``NaN`` with exact
-    zeros — an amplitude a caller would read as a real, quiet sample. The
-    snapshot mode already returns no-data there (its Hankel transform runs
-    in-tree, ``grn_reader._hankel_transform``), so masking puts all three
-    output modes on one answer.
-    """
-    ranges = np.atleast_1d(np.asarray(ranges, dtype=float))
-    zero = _zero_range_mask(ranges)
-    n_zero = int(np.count_nonzero(zero))
-    if not n_zero:
-        return data
-
-    masked = np.asarray(data, dtype=float).copy()
-    masked[:, zero, :] = np.nan
-    warnings.warn(
-        f"{n_zero} receiver range(s) at r = 0: SPARC's output_mode="
-        f"{output_mode!r} carries a 1/sqrt(r) cylindrical-spreading factor "
-        f"that is singular there, so those cells are returned as NaN "
-        f"(no data). Move the receiver off the source axis (e.g. r = 1 m) to "
-        f"get a field value.",
-        UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
-    )
-    return masked
 
 
 # SPARC pulse_type alphabets (per Scooter/sparc.f90:126-148 GetPar SELECT CASE).
@@ -667,10 +635,16 @@ class SPARC(PropagationModel):
 
         # (n_depth, n_range, n_time) — the shared Field contract. The range
         # axis is SPARC's actual output grid; Field validates its length
-        # against the data shape.
+        # against the data shape. r = 0 columns are no-data:
+        # ``sparc.f90:622`` weights this branch by ``SQRT( rkT / Pos%Rr )``,
+        # singular there — measured, it mixes NaN with exact zeros a caller
+        # would read as real, quiet samples. The snapshot mode's in-tree
+        # Hankel transform masks the same cells, so all three output modes
+        # give one answer.
         result = Field(
-            data=_mask_zero_range_traces(
-                np.stack(traces, axis=0), ranges_out, 'R'),
+            data=self._mask_zero_range_columns(
+                np.stack(traces, axis=0), ranges_out,
+                "output_mode='R''s 1/sqrt(r) cylindrical-spreading factor"),
             coords={'depth': depths, 'range': ranges_out, 'time': time},
             **self._result_kwargs(
                 source,
@@ -734,10 +708,14 @@ class SPARC(PropagationModel):
             # convention the other two modes are brought onto.
             traces.append(np.asarray(rts_data['p']).T)
 
-        # (n_depth, n_range, n_time) — the shared Field contract.
+        # (n_depth, n_range, n_time) — the shared Field contract. r = 0
+        # columns are no-data: ``sparc.f90:292`` scales this branch by
+        # ``1 / SQRT( pi * Pos%Rr( 1 ) )``, singular there — measured, the
+        # whole trace comes back +Inf.
         result = Field(
-            data=_mask_zero_range_traces(
-                np.stack(traces, axis=1), ranges, 'D'),
+            data=self._mask_zero_range_columns(
+                np.stack(traces, axis=1), ranges,
+                "output_mode='D''s 1/sqrt(r) cylindrical-spreading factor"),
             coords={'depth': depths_out, 'range': ranges, 'time': time},
             **self._result_kwargs(
                 source,
@@ -786,7 +764,8 @@ class SPARC(PropagationModel):
             source_type=_SOURCE_TYPE_CODE[source.source_type],
         )
         self._stamp_result(result, source, backend='sparc',
-                           frequencies=freq)
+                           frequencies=freq,
+                           phase_reference='time_domain_native')
         result.metadata['output_mode'] = 'S'
         return self._finalize_sparc_result(result, fm, [base_name])
 
@@ -887,9 +866,13 @@ class SPARC(PropagationModel):
         f_min = self.f_min if self.f_min is not None else max(freq / 2.0, 0.1)
         f_max = self.f_max if self.f_max is not None else freq * 2.0
 
-        # Time output window (s).
+        # Time output window (s), anchored on the travel time to the farthest
+        # receiver (r_ref) — not on rmax_m, whose rmax_safety_margin factor is
+        # a wavenumber-sampling knob (Δk ≈ 2π/RMax): folding the margin into
+        # the window stretches [0, t_max] by that factor while n_t_out stays
+        # fixed, aliasing the default output grid.
         c_water = self.sound_speed if self.sound_speed is not None else DEFAULT_SOUND_SPEED
-        travel_time = rmax_m / c_water
+        travel_time = r_ref / c_water
         t_max = self.t_max if self.t_max is not None else travel_time * 2.5
 
         n_t_out = self._resolve_n_t_out(f_max, t_max)
@@ -925,7 +908,9 @@ class SPARC(PropagationModel):
             output_mode=self.output_mode,
             n_mesh=self.n_mesh,
             rmax_m=rmax_m,
-            c_low=self.c_low, c_high=self.c_high,
+            # The pair resolved once above (for the Nk guard); the writer's
+            # own resolver passes explicit values through unchanged.
+            c_low=c_low_res, c_high=c_high_res,
             pulse_type=self.pulse_type,
             f_min=f_min, f_max=f_max,
             n_t_out=n_t_out,

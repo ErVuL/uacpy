@@ -27,7 +27,7 @@ uacpy.list_materials()        # ['basalt', 'chalk', 'clay', 'granite', 'gravel',
 uacpy.get_material('sand')
 # {'sound_speed': 1650.0, 'density': 1.9, 'attenuation': 0.8,
 #  'shear_speed': 110.0, 'shear_attenuation': 2.5,
-#  'porosity': 45.0, 'grain_size_phi': 2.0, 'roughness': 0.0}
+#  'porosity': 45.0, 'grain_size_phi': 3.34, 'roughness': 0.0}
 ```
 
 `uacpy.MATERIALS` is the raw dict. `get_material(name)` is case-insensitive,
@@ -456,8 +456,8 @@ Models are quiet by default: only `WARN` and `ERROR` print.
 | `True` / `'info'` | `INFO`, `WARN`, `ERROR` |
 | `'debug'` | everything, including subprocess command lines and grid choices |
 
-Anything else raises `ValueError` at the call, rather than being treated as
-truthy.
+Anything else raises `ConfigurationError` at the call, rather than being
+treated as truthy.
 
 Every uacpy module routes status through one function —
 `uacpy._log.log_message(source, message, *, verbose=False, level='info')` —

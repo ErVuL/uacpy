@@ -16,8 +16,6 @@ import zlib
 
 import numpy as np
 
-from uacpy.core.exceptions import ConfigurationError
-
 _HEADER_BYTES = 4   # uint32 payload length
 _CRC_BYTES = 4      # uint32 CRC-32
 

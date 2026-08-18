@@ -285,13 +285,17 @@ Absorption rides along:
 ```python
 env = uacpy.data.fetch_environment((45.6, -6.2), date='2026-07-15',
                                    with_absorption=True)
-env.absorption      # FrancoisGarrison(temperature_c≈18.5, salinity_psu≈35.6,
-                    #                   pH≈8.17, z_bar_m=0.0)
+env.absorption      # FrancoisGarrison built from the T/S row nearest the
+                    # column mid-depth — z_bar_m ≈ 2400 m for this ~4800 m
+                    # column, with its cold deep temperature, not the surface
 ```
 
 One extra T/S request builds a site-specific `FrancoisGarrison` instead of the
 model-default Thorp, with pH from the cached GLODAP grid when installed and 8.1
-otherwise. The absorption is drawn from the same WOA23 cell and grid resolution
+otherwise. The one row picked sets the temperature for the *whole* column (the
+models vary only depth), so the default reference is the T/S sample nearest the
+column mid-depth, and pH is read at that same depth — pairing a surface pH
+with a mid-column temperature would inflate the boric-acid relaxation term. The absorption is drawn from the same WOA23 cell and grid resolution
 as the SSP, so the two are consistent. See
 [environment §6](environment.md#6-absorption--volume-attenuation) for what the
 absorption models do once attached.
@@ -481,7 +485,7 @@ for month, label in ((3, 'March — winter maximum'),
 `surface_sources='seaice'` reads the NSIDC concentration at the point for
 `date`'s month and, above the 15 % ice-edge, replaces the free surface with a
 homogeneous **elastic ice canopy** — c_p 3500 m/s, c_s 1800 m/s, ρ 0.9 g/cm³,
-α_p/α_s 0.5/1.0 dB/λ (*Computational Ocean Acoustics*). Below the ice edge it
+α_p/α_s 0.4/1.0 dB/λ (*Computational Ocean Acoustics*). Below the ice edge it
 returns nothing and the free surface stands, with no provenance recorded: an
 ice-free point is not silently given an "ice" source.
 

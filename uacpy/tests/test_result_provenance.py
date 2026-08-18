@@ -7,9 +7,6 @@ synthesizing a time series, subsetting modes — has to carry it across, or the
 derived result silently plots without attribution.
 """
 
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
 import numpy as np
 import pytest
 
@@ -19,12 +16,6 @@ from uacpy.models.sources import model_source
 
 _SRC = model_source('acoustics_toolbox')
 _FREQS = np.linspace(100.0, 300.0, 32)
-
-
-@pytest.fixture(autouse=True)
-def _close_figs():
-    yield
-    plt.close('all')
 
 
 def _broadband():

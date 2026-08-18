@@ -18,6 +18,7 @@ import uacpy.data as data
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.data import graw_local, woa23_local
 from uacpy.data import _http
+from uacpy.tests._cache_builders import _write_gebco, _write_woa
 
 
 def _write_graw(cache, *, value=1.962):
@@ -35,38 +36,6 @@ def _write_graw(cache, *, value=1.962):
     ds.createVariable('lon', 'f8', ('lon',))[:] = lon
     ds.createVariable('z', 'f4', ('lat', 'lon'))[:] = z
     ds.close()
-
-
-def _write_gebco(cache, *, deep=-1500.0):
-    gdir = cache / 'gebco'; gdir.mkdir(parents=True)
-    lat = np.arange(-90, 91, 1.0)
-    lon = np.arange(-180, 180, 1.0)
-    ds = netCDF4.Dataset(gdir / 'GEBCO_2025.nc', 'w')
-    ds.createDimension('lat', lat.size); ds.createDimension('lon', lon.size)
-    ds.createVariable('lat', 'f8', ('lat',))[:] = lat
-    ds.createVariable('lon', 'f8', ('lon',))[:] = lon
-    ds.createVariable('elevation', 'f4', ('lat', 'lon'))[:] = deep
-    ds.close()
-
-
-_FILL = 9.96921e36
-
-
-def _write_woa(cache):
-    wdir = cache / 'woa23'; wdir.mkdir(parents=True)
-    depth = np.array([0, 50, 100, 500, 1000.0])
-    def mk(var, vals):
-        arr = np.full((1, depth.size, 180, 360), _FILL)
-        arr[0, :, 120, 139] = vals                  # grid_index(30.5, -40.5)
-        ds = netCDF4.Dataset(wdir / f'woa23_decav_{var}_01.nc', 'w')
-        for d, n in [('time', 1), ('depth', depth.size), ('lat', 180), ('lon', 360)]:
-            ds.createDimension(d, n)
-        ds.createVariable('depth', 'f4', ('depth',))[:] = depth
-        name = 't_an' if var[0] == 't' else 's_an'
-        ds.createVariable(name, 'f4', ('time', 'depth', 'lat', 'lon'))[:] = arr
-        ds.close()
-    mk('t00', [18, 16, 13, 8, 5.0])
-    mk('s00', [36, 36.1, 36.2, 35.5, 35.0])
 
 
 @pytest.fixture

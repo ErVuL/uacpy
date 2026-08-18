@@ -22,6 +22,12 @@ default is compared against the live constructor / ``run()`` signature via
 read by column name, mode names and yes/no tokens extracted — never exact
 prose), so wording polish does not break it; renaming a model, dropping a
 column, or drifting a default does.
+
+Three further gates hold the doc tree to its own promises: the §17 examples
+index must list exactly the ``uacpy/examples/example_NN_*.py`` scripts on
+disk, the ``models/README.md`` run-mode matrix must agree with every model's
+``ModelSpec.modes``, and each model page's worked-example code must be
+verbatim figure-script code (the pages claim "the code below is that code").
 """
 
 from __future__ import annotations
@@ -499,3 +505,252 @@ def test_oasn_white_noise_level_default_is_none_sentinel() -> None:
     classes = _model_classes()
     sig = inspect.signature(classes["OASN"].__init__)
     assert sig.parameters["white_noise_level"].default is None
+
+
+# ── §17 examples index ────────────────────────────────────────────────────
+
+EXAMPLES_DIR = Path(uacpy.__file__).resolve().parent / "examples"
+
+
+def _section_17_rows():
+    """``(number_cell, topic_cell)`` per data row of the §17 table."""
+    text = _documentation_text()
+    match = re.search(r"^## .*Examples Index.*$", text, re.M)
+    if not match:
+        pytest.fail("DOCUMENTATION.md has no §17 / Examples Index section")
+    section = text[match.end():]
+    nxt = re.search(r"^## ", section, re.M)
+    if nxt:
+        section = section[: nxt.start()]
+    rows = [_split_row(line) for line in section.splitlines()
+            if line.lstrip().startswith("|")]
+    # Header + separator lead the table; data rows have a numeric first cell.
+    return section, [(r[0], r[1]) for r in rows
+                     if len(r) >= 2 and re.fullmatch(r"\d+", r[0])]
+
+
+def test_examples_index_lists_exactly_the_scripts_on_disk() -> None:
+    """§17 has one row per ``uacpy/examples/example_NN_*.py`` and no orphan
+    rows, and its "All N runnable scripts" claim states the real count."""
+    if not EXAMPLES_DIR.is_dir():
+        pytest.skip("uacpy/examples/ is not present")
+    section, rows = _section_17_rows()
+    assert rows, "§17 contains no parsable table rows"
+
+    on_disk = {}
+    for path in sorted(EXAMPLES_DIR.glob("example_*.py")):
+        m = re.match(r"example_(\d+)_", path.name)
+        if m:
+            on_disk[int(m.group(1))] = path.name
+    assert on_disk, f"no example_NN_*.py scripts found under {EXAMPLES_DIR}"
+
+    documented = [int(num) for num, _ in rows]
+    problems = []
+    dupes = {n for n in documented if documented.count(n) > 1}
+    if dupes:
+        problems.append(f"§17 lists example number(s) more than once: "
+                        f"{sorted(dupes)}")
+    for n in sorted(set(documented) - set(on_disk)):
+        problems.append(f"§17 row {n:02d} has no matching script on disk")
+    for n in sorted(set(on_disk) - set(documented)):
+        problems.append(f"{on_disk[n]} has no §17 row")
+
+    claim = re.search(r"All (\d+) runnable scripts", section)
+    if claim and int(claim.group(1)) != len(on_disk):
+        problems.append(
+            f"§17 claims 'All {claim.group(1)} runnable scripts' but "
+            f"{len(on_disk)} example_NN_*.py scripts exist"
+        )
+    assert not problems, "§17 examples-index drift:\n" + "\n".join(problems)
+
+
+# ── models/README.md run-mode matrix ──────────────────────────────────────
+
+MODELS_README = DOCS_DIR / "models" / "README.md"
+
+
+def _readme_run_mode_matrix():
+    """(header, rows) of the ``## Run modes`` table in models/README.md,
+    which the page itself says is generated from ``model.supported_modes``."""
+    if not MODELS_README.is_file():
+        pytest.skip("docs/models/README.md is not present")
+    text = MODELS_README.read_text(encoding="utf-8")
+    match = re.search(r"^## Run modes\s*$", text, re.M)
+    if not match:
+        pytest.fail("models/README.md has no '## Run modes' section")
+    section = text[match.end():]
+    nxt = re.search(r"^## ", section, re.M)
+    if nxt:
+        section = section[: nxt.start()]
+    table = [line for line in section.splitlines()
+             if line.lstrip().startswith("|")]
+    if len(table) < 3:
+        pytest.fail("the '## Run modes' section has no parsable table")
+    return _split_row(table[0]), [_split_row(r) for r in table[2:]]
+
+
+def _readme_matrix_supported_modes() -> dict:
+    """Mode-name sets per README column. The OASES column documents the
+    union across its six instantiable sub-models, as the page states."""
+    from uacpy.models import RAM, SPARC, Bellhop, Bounce, Kraken, Scooter
+    from uacpy.models.oases import OASN, OASP, OASR, OASS, OASSP, OAST
+    out = {name: {m.name for m in cls.spec.modes} for name, cls in (
+        ("Bellhop", Bellhop), ("Kraken", Kraken), ("Scooter", Scooter),
+        ("SPARC", SPARC), ("RAM", RAM), ("Bounce", Bounce))}
+    out["OASES"] = {m.name for cls in (OAST, OASN, OASR, OASP, OASS, OASSP)
+                    for m in cls.spec.modes}
+    return out
+
+
+def test_readme_run_mode_matrix_matches_model_specs() -> None:
+    """Every ✅/✗ in the README run-mode matrix agrees with the models'
+    ``ModelSpec.modes`` (the source ``supported_modes`` is built from): a ✅
+    cell's mode(s) are all supported, a ✗ cell's are all absent — and every
+    ``RunMode`` member appears in some row, so a new mode cannot ship
+    undocumented."""
+    from uacpy.models import RunMode
+
+    header, rows = _readme_run_mode_matrix()
+    supported = _readme_matrix_supported_modes()
+    columns = [(_matrix_model_name(cell), i)
+               for i, cell in enumerate(header) if _matrix_model_name(cell)]
+    for name, _ in columns:
+        if name not in supported:
+            pytest.fail(f"README run-mode matrix has an unknown model "
+                        f"column {name!r}")
+
+    problems = []
+    covered = set()
+    for row in rows:
+        modes = {m.name for m in RunMode
+                 if re.search(rf"\b{m.name}\b", row[0])}
+        if not modes:
+            problems.append(f"row {row[0]!r} names no RunMode member")
+            continue
+        covered |= modes
+        for name, ci in columns:
+            cell = row[ci].strip()
+            if cell.startswith("✅"):
+                missing = modes - supported[name]
+                if missing:
+                    problems.append(
+                        f"{row[0]!r} × {name}: ✅ but spec lacks "
+                        f"{sorted(missing)}")
+            elif cell.startswith("✗"):
+                extra = modes & supported[name]
+                if extra:
+                    problems.append(
+                        f"{row[0]!r} × {name}: ✗ but spec supports "
+                        f"{sorted(extra)}")
+            else:
+                problems.append(f"{row[0]!r} × {name}: unreadable cell "
+                                f"{cell!r}")
+    undocumented = {m.name for m in RunMode} - covered
+    if undocumented:
+        problems.append(f"RunMode member(s) absent from the matrix: "
+                        f"{sorted(undocumented)}")
+    assert not problems, ("README run-mode matrix drift:\n"
+                          + "\n".join(problems))
+
+
+# ── worked example ↔ figure script containment ────────────────────────────
+
+#: Model pages promising "the code below is that code" about their figure
+#: script (docs/models/README.md makes the same claim for every page).
+#: oases.md is exempt: it walks its six sub-models section by section and
+#: carries no single worked-example block.
+FIGURE_SCRIPT_PAGES = {
+    "bellhop.md": "bellhop.py",
+    "bounce.md": "bounce.py",
+    "kraken.md": "kraken.py",
+    "ram.md": "ram.py",
+    "scooter.md": "scooter.py",
+    "sparc.md": "sparc.py",
+}
+
+
+def _strip_inline_comment(line: str) -> str:
+    """``line`` without any trailing ``#`` comment (quote-aware), stripped."""
+    out, quote = [], None
+    for ch in line:
+        if quote:
+            if ch == quote:
+                quote = None
+        elif ch in ("'", '"'):
+            quote = ch
+        elif ch == "#":
+            break
+        out.append(ch)
+    return "".join(out).strip()
+
+
+def _code_line_set(text: str) -> set:
+    """Every non-blank line of ``text``, comment-stripped and whitespace-
+    normalized — the unit the containment gate compares at."""
+    return {s for s in map(_strip_inline_comment, text.splitlines()) if s}
+
+
+def _worked_example_section(page_text: str, page: str) -> str:
+    match = re.search(r"^## .*Worked example.*$", page_text, re.M)
+    if not match:
+        pytest.fail(f"{page} has no Worked example section")
+    section = page_text[match.end():]
+    nxt = re.search(r"^## ", section, re.M)
+    return section[: nxt.start()] if nxt else section
+
+
+def test_worked_examples_are_drawn_from_the_figure_scripts() -> None:
+    """Each model page's worked-example code is verbatim figure-script code.
+
+    The six pages above (and ``models/README.md``) promise that the worked
+    example *is* the page's figure code, so this gate makes drift between
+    them fail the suite: every code line of every ```python block in the
+    page's Worked-example section must appear verbatim in the named
+    ``docs/figure_scripts/`` module or in ``_common.py`` (the scripts import
+    their shared scenarios from there; the pages inline them).
+
+    Comparison is per line, whitespace-normalized, with trailing ``#``
+    comments stripped on both sides. Three doc-side line kinds are exempt,
+    because the pages legitimately condense the scripts there: ``import`` /
+    ``from`` lines (scripts also import matplotlib and ``_common``), pure
+    comments, and ``...`` elision markers.
+    """
+    common = _code_line_set(
+        (DOCS_DIR / "figure_scripts" / "_common.py").read_text(
+            encoding="utf-8"))
+
+    problems = []
+    for page, script in FIGURE_SCRIPT_PAGES.items():
+        page_path = DOCS_DIR / "models" / page
+        script_path = DOCS_DIR / "figure_scripts" / script
+        page_text = page_path.read_text(encoding="utf-8")
+        if "is that code" not in " ".join(page_text.split()):
+            problems.append(
+                f"{page}: the 'the code below is that code' claim is gone — "
+                f"if the page no longer promises containment, update "
+                f"FIGURE_SCRIPT_PAGES")
+            continue
+        corpus = _code_line_set(
+            script_path.read_text(encoding="utf-8")) | common
+        section = _worked_example_section(page_text, page)
+        blocks = re.findall(r"```python\n(.*?)```", section, re.S)
+        checked = 0
+        for bi, block in enumerate(blocks):
+            for line in block.splitlines():
+                s = _strip_inline_comment(line)
+                if not s or s.startswith(("import ", "from ", "...")):
+                    continue
+                checked += 1
+                if s not in corpus:
+                    problems.append(
+                        f"{page} (block {bi}): not in {script} or "
+                        f"_common.py: {s!r}")
+        # Structural self-check, as for §18: silence must mean "every line
+        # agreed", never "the parser matched nothing".
+        if len(blocks) < 4 or checked < 30:
+            problems.append(
+                f"{page}: only {len(blocks)} python block(s) / {checked} "
+                f"checked line(s) parsed from the Worked-example section — "
+                f"the page structure has changed and the gate needs updating")
+    assert not problems, ("worked-example ↔ figure-script drift:\n"
+                          + "\n".join(problems))

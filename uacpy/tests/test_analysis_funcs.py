@@ -1,11 +1,9 @@
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402
-import numpy as np  # noqa: E402
-import pytest  # noqa: E402
-from scipy.signal import welch  # noqa: E402
-from uacpy.acoustic_signal.analysis import psd, ppsd, sel, PPSDResult  # noqa: E402
-from uacpy.visualization.plots.signal import (  # noqa: E402
+import matplotlib.pyplot as plt
+import numpy as np
+import pytest
+from scipy.signal import welch
+from uacpy.acoustic_signal.analysis import psd, ppsd, sel, PPSDResult
+from uacpy.visualization.plots.signal import (
     plot_psd, plot_ppsd, plot_sel)
 
 
@@ -22,6 +20,75 @@ def test_psd_matches_welch():
     fig, ax = plot_psd(f, p, label="x")
     assert ax.lines
     plt.close(fig)
+
+
+def test_psd_scaling_density_is_invariant_spectrum_is_not():
+    """``scaling='density'`` normalises by the window's noise-equivalent
+    bandwidth, so the broadband-noise level is ``2*var/fs`` for every
+    nperseg/window combination. ``scaling='spectrum'`` is per-bin power: the
+    same noise level carries the NEB ``fs*sum(w**2)/sum(w)**2`` — 4x down
+    from nperseg=256 to 1024, 1.5x up from boxcar to hann. An on-bin tone is
+    the mirror image: 'spectrum' reads A**2/2 in every combination while
+    'density' spreads the tone over the NEB and moves with both knobs."""
+    fs = 8000.0
+    rng = np.random.default_rng(7)
+    noise = 0.1 * rng.standard_normal(16384)
+    f0 = 32 * fs / 256.0                    # bin centre for both npersegs
+    x = noise + np.cos(2 * np.pi * f0 * np.arange(noise.size) / fs)
+    target = 2.0 * np.var(noise) / fs
+    dens_noise, spec_noise, spec_tone, dens_tone = {}, {}, {}, {}
+    for nper in (256, 1024):
+        for win in ("hann", "boxcar"):
+            f, pd_ = psd(x, fs, window=win, nperseg=nper, scaling="density")
+            _, ps_ = psd(x, fs, window=win, nperseg=nper, scaling="spectrum")
+            band = (f > 0) & (f < fs / 2)
+            dens_noise[nper, win] = np.median(pd_[band])
+            spec_noise[nper, win] = np.median(ps_[band])
+            spec_tone[nper, win] = ps_.max()
+            dens_tone[nper, win] = pd_.max()
+    for level in dens_noise.values():
+        assert level == pytest.approx(target, rel=0.06)
+    for peak in spec_tone.values():
+        assert peak == pytest.approx(0.5, rel=0.02)
+    assert (spec_noise[256, "hann"] / spec_noise[1024, "hann"]
+            == pytest.approx(4.0, rel=0.1))
+    assert (spec_noise[256, "hann"] / spec_noise[256, "boxcar"]
+            == pytest.approx(1.5, rel=0.05))
+    assert (dens_tone[1024, "hann"] / dens_tone[256, "hann"]
+            == pytest.approx(4.0, rel=0.05))
+    assert (dens_tone[256, "boxcar"] / dens_tone[256, "hann"]
+            == pytest.approx(1.5, rel=0.05))
+
+
+def test_psd_hann_spectrum_to_density_ratio_is_1p5_bins():
+    """At every bin the hann spectrum/density ratio equals the window's
+    noise-equivalent bandwidth ``1.5*fs/nperseg`` — the 1.5-bin NEB that makes
+    the density estimate window-independent."""
+    fs, nper = 8000.0, 256
+    x = np.random.default_rng(3).standard_normal(4 * nper)
+    f, pd_ = psd(x, fs, nperseg=nper, scaling="density")
+    _, ps_ = psd(x, fs, nperseg=nper, scaling="spectrum")
+    np.testing.assert_allclose(ps_[1:-1] / pd_[1:-1], 1.5 * fs / nper,
+                               rtol=1e-12)
+
+
+def test_psd_hann_worst_case_scalloping_is_1_42_db():
+    """A tone half a bin off centre reads ``8/(3*pi)`` of the on-bin
+    amplitude through the default hann window: ``20*log10(8/(3*pi)) =
+    -1.4236`` dB, the worst-case 1.42 dB scalloping loss. On a bin centre
+    ``scaling='spectrum'`` reads the full ``A**2/2``."""
+    fs, nper = 1000.0, 256
+    t = np.arange(4 * nper) / fs
+    f_on = 32 * fs / nper
+    f_off = 32.5 * fs / nper
+    _, p_on = psd(np.cos(2 * np.pi * f_on * t), fs, nperseg=nper,
+                  scaling="spectrum")
+    _, p_off = psd(np.cos(2 * np.pi * f_off * t), fs, nperseg=nper,
+                   scaling="spectrum")
+    assert p_on.max() == pytest.approx(0.5, rel=1e-6)
+    loss_db = 10 * np.log10(p_off.max() / p_on.max())
+    assert loss_db == pytest.approx(20 * np.log10(8 / (3 * np.pi)), abs=1e-3)
+    assert loss_db == pytest.approx(-1.42, abs=0.01)
 
 
 def test_ppsd_function():
@@ -166,3 +233,28 @@ def test_sel_warns_when_chunk_size_misaligned_with_nfft():
     with _w.catch_warnings():
         _w.simplefilter("error")
         sel(x, fs, chunk_size=2 * fs)          # aligned: silent
+
+
+def test_sel_rejects_complex_input():
+    from uacpy.core.exceptions import ConfigurationError
+    fs = 8000.0
+    t = np.arange(int(fs)) / fs
+    with pytest.raises(ConfigurationError, match="complex"):
+        sel(np.exp(2j * np.pi * 1000.0 * t), fs)
+
+
+def test_sel_counts_tone_exactly_on_the_top_band_edge():
+    """A bin exactly on edges[-1] belongs to the last band (the top edge is
+    closed), so a tone at fmax carries its full exposure."""
+    fs = 8000.0
+    t = np.arange(int(fs)) / fs
+    x = np.sqrt(2.0) * np.cos(2 * np.pi * 3000.0 * t)   # 1 Pa^2 over 1 s
+    out = sel(x, fs, band_type="linear", fmin=100, fmax=3000, num_bands=8)
+    assert out.sel_pa2s.sum() == pytest.approx(1.0, rel=1e-9)
+    assert out.sel_pa2s[-1] == pytest.approx(1.0, rel=1e-9)
+
+
+def test_sel_rejects_nonpositive_sample_rate():
+    from uacpy.core.exceptions import ConfigurationError
+    with pytest.raises(ConfigurationError, match="sample_rate"):
+        sel(np.ones(100), 0.0)

@@ -512,8 +512,17 @@ def janus_detect(waveform, sample_rate=48000.0, fc=FC_INITIAL, bw=BW_INITIAL,
 
     The recording is resampled once to a canonical rate (integer samples/chip)
     before the Goertzel-bank + GO-CFAR detector runs; ``start`` is mapped back to a
-    sample index in the original ``waveform`` (``None`` if no packet is found).
+    sample index in the original ``waveform``.
     ``statistic`` is the chips-alignment statistic over quarter-chip columns.
+
+    ``start`` is ``None`` only when the recording is too short for the
+    detector to run at all (shorter than one Goertzel frame, or than the
+    32-chip alignment span). On any longer recording a start is **always**
+    returned — when nothing crosses the GO-CFAR threshold the detector falls
+    back to the argmax of the alignment statistic, so a noise-only recording
+    yields the best-looking (spurious) candidate, not ``None``. Deciding
+    whether a packet is really present is the caller's job (e.g. decode it:
+    :func:`janus_demodulate` CRC-checks the baseline packet).
     """
     f_low, fsw = _band_params(fc, bw)
     cd = 1.0 / fsw if cd is None else float(cd)

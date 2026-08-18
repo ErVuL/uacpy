@@ -37,44 +37,62 @@ class TestRAMAdvancedParameters:
             ranges=np.linspace(100, 5000, 11)
         )
 
+    @staticmethod
+    def _inpe_pade_line(work_dir):
+        """``in.pe`` is positional: line index 6 carries ``np_pade nss``
+        (peramx.f90:74-97, order pinned by ``write_inpe``)."""
+        decks = sorted(work_dir.rglob('in.pe'))
+        assert decks, f"no in.pe under {work_dir}"
+        return decks[0].read_text().splitlines()[6].split()
+
     @pytest.mark.parametrize('np_pade', [2, 6, 8])
-    def test_ram_pade_order(self, ram_env, ram_source, ram_receiver, np_pade):
+    def test_ram_pade_order(self, ram_env, ram_source, ram_receiver, np_pade,
+                            tmp_path):
         """Every supported Padé-coefficient count marches to a finite field.
 
         ``np_pade`` is the number of terms in the rational approximation of
         the propagator, and each term costs one tridiagonal solve per range
         step. A count the coefficient solver cannot deliver shows up as a
         stopped binary or an all-NaN grid, not as a small accuracy change, so
-        finiteness is the discriminating assertion."""
-        ram = RAM(verbose=False, dr=20.0, dz=2.0, np_pade=np_pade)
+        finiteness is the discriminating assertion — plus the deck itself,
+        which must carry the requested count."""
+        ram = RAM(verbose=False, dr=20.0, dz=2.0, np_pade=np_pade,
+                  work_dir=tmp_path, cleanup=False)
         result = ram.compute_tl(
             env=ram_env, source=ram_source, receiver=ram_receiver,
         )
         assert isinstance(result, Field)
         assert np.all(np.isfinite(result.data))
+        assert int(self._inpe_pade_line(tmp_path)[0]) == np_pade
 
-    def test_ram_stability_parameter(self, ram_env, ram_source, ram_receiver):
+    def test_ram_stability_parameter(self, ram_env, ram_source, ram_receiver,
+                                     tmp_path):
         """``ns_stability`` is the number of evanescent-spectrum points at
         which the rational approximation is forced to vanish, trading
         ``2n - ns`` accuracy constraints for stability (RAM manual §2). It
         changes the Padé coefficients, so the march must still complete and
-        stay finite."""
-        ram = RAM(verbose=False, dr=20.0, dz=2.0, ns_stability=1)
+        stay finite — and the deck's ``np nss`` line must carry the count."""
+        ram = RAM(verbose=False, dr=20.0, dz=2.0, ns_stability=1,
+                  work_dir=tmp_path, cleanup=False)
         result = ram.compute_tl(
             env=ram_env, source=ram_source, receiver=ram_receiver,
         )
         assert isinstance(result, Field)
         assert np.all(np.isfinite(result.data))
+        assert int(self._inpe_pade_line(tmp_path)[1]) == 1
 
     def test_ram_custom_dr_dz(self, ram_env, ram_source, ram_receiver):
         """A pinned (dr, dz) bypasses the Lytaev optimiser entirely, so this
-        exercises the path where uacpy marches the caller's own grid."""
+        exercises the path where uacpy marches the caller's own grid — and
+        the metadata must report that grid, not an optimiser suggestion."""
         ram = RAM(verbose=False, dr=10.0, dz=0.5)
         result = ram.compute_tl(
             env=ram_env, source=ram_source, receiver=ram_receiver,
         )
         assert isinstance(result, Field)
         assert np.all(np.isfinite(result.data))
+        assert float(result.metadata['dr']) == pytest.approx(10.0)
+        assert float(result.metadata['dz']) == pytest.approx(0.5)
 
     def test_ram_tl_honors_constructor_Q_T(
         self, ram_env, ram_source, ram_receiver, monkeypatch,
@@ -1037,3 +1055,261 @@ class TestBroadbandSynthesisWindowAnchor:
         assert abs(peak - arrival) < 0.05, (
             f"energy peak at {peak:.3f} s is not the {arrival:.3f} s arrival "
             f"(a wrapped record puts it ~one window earlier)")
+
+
+def _elastic_halfspace():
+    return BoundaryProperties(
+        acoustic_type='half-space', sound_speed=1700.0, shear_speed=400.0,
+        density=1.8, attenuation=0.5, shear_attenuation=0.5)
+
+
+class TestConstructorGuards:
+    """Pure-Python constructor contracts; no binary is launched."""
+
+    @pytest.mark.parametrize('bad', [1, 11, 0, -3])
+    def test_np_pade_outside_2_to_10_raises(self, bad):
+        with pytest.raises(ConfigurationError, match=r'np_pade'):
+            RAM(np_pade=bad, verbose=False)
+
+    def test_np_pade_must_be_an_integer(self):
+        with pytest.raises(ConfigurationError, match=r'np_pade'):
+            RAM(np_pade=6.0, verbose=False)
+
+    def test_rams_theta_accepts_a_callable(self):
+        m = RAM(rams_theta=lambda f: 20.0 + f / 100.0, verbose=False)
+        assert m._theta_for_freq(200.0) == pytest.approx(22.0)
+        assert m._theta_for_freq(500.0) == pytest.approx(25.0)
+
+    def test_rams_theta_float_out_of_range_raises(self):
+        with pytest.raises(ConfigurationError, match=r'rams_theta'):
+            RAM(rams_theta=95.0, verbose=False)
+
+    def test_low_absorbing_layer_attn_warns(self):
+        """Below 1 dB/λ the artificial absorber lets domain-bottom
+        reflections back into the field (ram.py's Collins-readme note)."""
+        with pytest.warns(UserWarning, match='absorbing_layer_attn'):
+            RAM(absorbing_layer_attn=0.5, verbose=False)
+
+    def test_ordinary_absorbing_layer_attn_is_silent(self):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            RAM(absorbing_layer_attn=5.0, verbose=False)
+        assert not [w for w in caught
+                    if 'absorbing_layer_attn' in str(w.message)]
+
+
+class TestClampCollinsEnvelope:
+    """``_clamp_collins_envelope`` sanitises one Collins run: NaN/inf TL and
+    unphysically negative TL (|p/p0| > 1, impossible for a passive medium)
+    are clamped to the TL_MAX_DB floor with a counting UserWarning, phase
+    preserved; a small negative near 0 and the z = 0 surface node are valid
+    values, clamped without being counted."""
+
+    FLOOR = 10.0 ** (-200.0 / 20.0)
+
+    @staticmethod
+    def _raw():
+        pcomplex = np.array([
+            0.3 * np.exp(0.7j),      # valid sample
+            2.0 * np.exp(0.3j),      # TL = -6 dB: divergence
+            np.nan + 1j * np.nan,    # NaN
+            5.0 + 0.0j,              # TL = +inf marker below
+            1.06 * np.exp(-0.2j),    # TL = -0.5 dB: noise around 0
+            0.0 + 0.0j,              # surface node
+        ])
+        tl = np.array([10.46, -6.0, np.nan, np.inf, -0.5, 200.0])
+        return {'tl': tl, 'pcomplex': pcomplex, 'frequency': 100.0}
+
+    @staticmethod
+    def _envs():
+        fluid = Environment(
+            bathymetry=100.0, ssp=1500.0,
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=1600.0, density=1.5,
+                                      attenuation=0.5))
+        elastic = Environment(bathymetry=100.0, ssp=1500.0,
+                              bottom=_elastic_halfspace())
+        return fluid, elastic
+
+    def test_divergent_samples_are_floored_with_a_counting_warning(self):
+        fluid, _ = self._envs()
+        m = RAM(verbose=False)
+        with pytest.warns(UserWarning, match=r'3/6 TL samples') as rec:
+            out = m._clamp_collins_envelope(self._raw(), fluid, 'ramgeo')
+        assert '200' in str(rec[0].message)
+        # Divergent magnitudes pinned to the 200 dB floor, phase kept.
+        assert out[1] == pytest.approx(self.FLOOR * np.exp(0.3j))
+        assert out[2] == pytest.approx(self.FLOOR + 0.0j)
+        assert out[3] == pytest.approx(self.FLOOR + 0.0j)
+
+    def test_valid_samples_pass_through_unchanged(self):
+        fluid, _ = self._envs()
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            out = RAM(verbose=False)._clamp_collins_envelope(
+                self._raw(), fluid, 'ramgeo')
+        assert out[0] == pytest.approx(0.3 * np.exp(0.7j))
+
+    def test_noise_and_surface_node_are_not_counted_as_divergence(self):
+        fluid, _ = self._envs()
+        raw = self._raw()
+        # Keep only the three uncounted kinds: valid, small negative, zero.
+        for key in ('tl', 'pcomplex'):
+            raw[key] = raw[key][[0, 4, 5]]
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            out = RAM(verbose=False)._clamp_collins_envelope(
+                raw, fluid, 'ramgeo')
+        assert not [w for w in caught if 'TL samples' in str(w.message)]
+        # |p/p0| slightly above 1 is capped to 1, phase kept.
+        assert out[1] == pytest.approx(1.0 * np.exp(-0.2j))
+        # The z = 0 pressure-release node is raised to the floor, not 600 dB.
+        assert out[2] == pytest.approx(self.FLOOR + 0.0j)
+
+    def test_rams_elastic_divergence_names_the_stable_alternatives(self):
+        _, elastic = self._envs()
+        with pytest.warns(UserWarning, match='OAST / Scooter'):
+            RAM(verbose=False)._clamp_collins_envelope(
+                self._raw(), elastic, 'rams')
+
+
+class TestGridResolverConstraints:
+    """The Lytaev optimiser minimises its error model alone; ram.md §5 lists
+    the constraints applied to its output afterwards. Feeding
+    ``_compute_grid_lytaev`` a known optimiser result via a stub isolates
+    exactly those constraints."""
+
+    @staticmethod
+    def _stub(model, dr, dz):
+        def fake(**kw):
+            return {'dr': dr, 'dz': dz}, kw['eps0'], kw['theta0']
+        model._optimize_grid_relaxing = fake
+        return model
+
+    @staticmethod
+    def _envs():
+        fluid = Environment(
+            bathymetry=100.0, ssp=1500.0,
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=1600.0, density=1.5,
+                                      attenuation=0.5))
+        elastic = Environment(bathymetry=100.0, ssp=1500.0,
+                              bottom=_elastic_halfspace())
+        return fluid, elastic
+
+    def test_rams_dr_safety_factor_divides_the_optimum(self):
+        # dr_opt = 10 → safety 10/5 = 2 m, tighter than the λ cap
+        # c_min/(5f) = 1500/500 = 3 m.
+        _, elastic = self._envs()
+        m = self._stub(RAM(backend='rams', verbose=False), dr=10.0, dz=1.0)
+        dr, _ = m._compute_grid_lytaev(elastic, 100.0, max_range=5000.0,
+                                       kind='rams')
+        assert dr == pytest.approx(2.0)
+
+    def test_rams_wavelength_cap_binds_when_tighter(self):
+        # With the safety factor disabled the λ cap c_min/(5f) = 3 m rules.
+        _, elastic = self._envs()
+        m = self._stub(RAM(backend='rams', rams_dr_safety_factor=1.0,
+                           verbose=False), dr=10.0, dz=1.0)
+        dr, _ = m._compute_grid_lytaev(elastic, 100.0, max_range=5000.0,
+                                       kind='rams')
+        assert dr == pytest.approx(1500.0 / (5.0 * 100.0))
+
+    def test_rams_dz_is_capped_at_the_shear_wavelength(self):
+        from uacpy.models._pade_optimizer import rams_dz_shear_cap
+        _, elastic = self._envs()
+        m = self._stub(RAM(backend='rams', verbose=False), dr=10.0, dz=1.0)
+        _, dz = m._compute_grid_lytaev(elastic, 100.0, max_range=5000.0,
+                                       kind='rams')
+        assert dz == pytest.approx(rams_dz_shear_cap(400.0, 100.0))
+
+    def test_depth_grid_is_capped_at_10000_points(self):
+        # dz = 5 mm over 100 m asks for 20000 depth points; the runtime cap
+        # coarsens it to ~1 cm with a warning. f = 10 kHz keeps the λ_p/16
+        # stability floor (≈ 9.4 mm) below the capped value.
+        fluid, _ = self._envs()
+        m = self._stub(RAM(backend='ramgeo', verbose=False),
+                       dr=10.0, dz=0.005)
+        with pytest.warns(UserWarning, match='10000'):
+            _, dz = m._compute_grid_lytaev(fluid, 10000.0, max_range=2000.0,
+                                           kind='ramgeo')
+        assert dz == pytest.approx(0.01, rel=1e-6)
+
+
+class TestRamsurfSurfaceCrestClamp:
+    """ramsurf1.5 takes a surface depression profile (zsrf >= 0 below z=0),
+    so altimetry wave crests (height > 0) are clamped to sea level with a
+    UserWarning (ram.md §7); depressions pass through negated."""
+
+    @staticmethod
+    def _env(altimetry):
+        return Environment(name='surf', bathymetry=100.0, ssp=1500.0,
+                           bottom=BoundaryProperties(
+                               acoustic_type='half-space', sound_speed=1600.0,
+                               density=1.5, attenuation=0.5),
+                           altimetry=altimetry)
+
+    def test_positive_crests_are_clamped_to_zero_with_a_warning(self):
+        m = RAM(backend='ramsurf', verbose=False)
+        env = self._env([(0.0, 0.0), (500.0, 1.5), (1000.0, -2.0),
+                         (5000.0, 0.0)])
+        with pytest.warns(UserWarning, match='clamped'):
+            surface = m._build_ramsurf_surface(env, 5000.0)
+        depths = dict(surface)
+        assert depths[500.0] == pytest.approx(0.0)     # crest clamped
+        assert depths[1000.0] == pytest.approx(2.0)    # trough negated
+        assert all(z >= 0.0 for z in depths.values())
+
+    def test_all_depression_profile_is_silent(self):
+        m = RAM(backend='ramsurf', verbose=False)
+        env = self._env([(0.0, 0.0), (1000.0, -2.0), (5000.0, 0.0)])
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            surface = m._build_ramsurf_surface(env, 5000.0)
+        assert not [w for w in caught if 'clamped' in str(w.message)]
+        assert dict(surface)[1000.0] == pytest.approx(2.0)
+
+    def test_missing_altimetry_is_a_configuration_error(self):
+        m = RAM(backend='ramsurf', verbose=False)
+        env = Environment(name='flat', bathymetry=100.0, ssp=1500.0)
+        with pytest.raises(ConfigurationError, match='altimetry'):
+            m._build_ramsurf_surface(env, 5000.0)
+
+
+class TestRangeDependentBottomIsHonoured:
+    """The Collins decks carry one profile block per range segment, so a
+    bottom that changes along the track must move the field relative to a
+    uniform-bottom control marched on the identical pinned grid."""
+
+    @staticmethod
+    def _column(speed, rho, attn, hs_speed):
+        return SeabedColumn(
+            layers=[SedimentLayer(thickness=5.0, sound_speed=speed,
+                                  density=rho, attenuation=attn)],
+            halfspace=BoundaryProperties(
+                acoustic_type='half-space', sound_speed=hs_speed,
+                density=rho + 0.2, attenuation=attn))
+
+    def _run(self, bottom):
+        env = Environment(name='rd', bathymetry=100.0, ssp=1500.0,
+                          bottom=bottom)
+        return RAM(backend='ramgeo', dr=25.0, dz=1.0, verbose=False).run(
+            env, Source(depths=25.0, frequencies=75.0),
+            Receiver(depths=np.array([30.0, 60.0, 90.0]),
+                     ranges=np.linspace(500.0, 4500.0, 9)),
+            run_mode=RunMode.COHERENT_TL)
+
+    def test_rd_bottom_field_differs_from_the_uniform_control(self):
+        near = self._column(1550.0, 1.5, 0.1, 1600.0)
+        far = self._column(1800.0, 2.1, 1.0, 2400.0)
+        rd = np.asarray(self._run(Bottom.from_columns(
+            [near, far], ranges=np.array([0.0, 2000.0]))).db)
+        uniform = np.asarray(self._run(Bottom.from_columns(
+            [near, near], ranges=np.array([0.0, 2000.0]))).db)
+        ok = np.isfinite(rd) & np.isfinite(uniform)
+        assert ok.any()
+        # Beyond the 2 km transition the two seabeds must separate the TL.
+        far_half = ok & (np.arange(rd.shape[1])[None, :] >= 4)
+        assert np.max(np.abs(rd[far_half] - uniform[far_half])) > 1.0, (
+            "a range-dependent bottom produced the same field as the "
+            "uniform control — the deck's per-range segments were dropped")

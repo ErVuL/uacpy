@@ -35,6 +35,7 @@ from uacpy.core.source import Source
 from uacpy.models import (
     Bellhop, Kraken, RAM, RunMode, Scooter,
 )
+from uacpy.tests.conftest import make_pekeris
 
 
 # Detect availability of compiled RAM-family binaries — env-dependent so
@@ -118,13 +119,7 @@ def _ram_tl(env, src, rcv):
 
 
 def _pekeris_fluid() -> Scenario:
-    env = Environment(
-        name='pekeris-fluid', bathymetry=100.0, ssp=1500.0,
-        bottom=BoundaryProperties(
-            acoustic_type='half-space',
-            sound_speed=1700.0, density=1.7, attenuation=0.5,
-        ),
-    )
+    env = make_pekeris(name='pekeris-fluid', density=1.7)
     src = Source(depths=36.0, frequencies=50.0)
     rcv = Receiver(
         depths=np.array([36.0]),

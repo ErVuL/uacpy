@@ -227,3 +227,61 @@ class TestModalModelAgreement:
             f"Mode count varies more than ±1 across resolutions: {mode_counts}. "
             "Should be stable to within one marginally-trapped mode."
         )
+
+
+class TestDocumentedModeCounts:
+    """kraken.md pins exact mode counts for its three worked decks: 14 for
+    the shallow-water channel at 200 Hz (§6.1), 28 over the sand-on-granite
+    layered seabed (§6.2), and 27 with ``leaky_modes=True`` on the channel
+    (§6.5 — the 14 trapped plus 13 leaky). The counts are deterministic
+    functions of the decks, so they pin the docs and the solver to each
+    other: a vendored-solver refresh, a changed auto ``c_high``, or a doc
+    edit that drifts from the code fails here by an exact integer."""
+
+    @staticmethod
+    def _shallow_channel():
+        # docs/figure_scripts/_common.py shallow_water(), verbatim.
+        return uacpy.Environment(
+            name='Shallow-water channel',
+            bathymetry=100.0,
+            ssp=[(0.0, 1500.0), (30.0, 1495.0), (100.0, 1490.0)],
+            bottom=uacpy.BoundaryProperties(
+                acoustic_type='half-space',
+                sound_speed=1650.0, density=1.8, attenuation=0.6,
+            ),
+        )
+
+    _SRC = staticmethod(lambda: uacpy.Source(depths=25.0, frequencies=200.0))
+
+    def test_shallow_channel_has_14_modes(self):
+        # kraken.md:313-317: "Fourteen modes at 200 Hz in 100 m of water —
+        # eleven trapped, plus three the default ceiling's 5% overshoot
+        # keeps past the 1650 m/s bottom speed".
+        modes = Kraken(verbose=False).compute_modes(
+            self._shallow_channel(), self._SRC())
+        assert modes.n_modes == 14
+
+    def test_sand_over_granite_deck_has_28_modes(self):
+        # kraken.md:333-353: docs/figure_scripts/_common.py
+        # layered_elastic(), verbatim. ``from_presets`` fluid-approximates
+        # by default, so the count rides on granite's 5500 m/s
+        # *compressional* speed lifting the auto c_high to 5775 m/s — the
+        # extra steep modes only exist because the basement supports them.
+        env = uacpy.Environment(
+            name='Layered elastic seabed',
+            bathymetry=100.0,
+            ssp=[(0.0, 1500.0), (100.0, 1490.0)],
+            bottom=uacpy.SeabedColumn.from_presets(
+                layers=[('sand', 8.0)], halfspace='granite',
+            ),
+        )
+        modes = Kraken(verbose=False).compute_modes(env, self._SRC())
+        assert modes.n_modes == 28
+
+    def test_leaky_modes_deck_has_27_modes(self):
+        # kraken.md:426-437: "The default run finds 14 modes; asking for
+        # leaky ones finds 27" — the 13 extra all sit past the bottom-speed
+        # line with |Im(k)| one to three orders above the trapped set.
+        modes = Kraken(verbose=False, leaky_modes=True).compute_modes(
+            self._shallow_channel(), self._SRC())
+        assert modes.n_modes == 27

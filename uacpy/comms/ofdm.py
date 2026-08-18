@@ -96,16 +96,17 @@ def schmidl_cox_preamble(n_subcarriers, cp_len, seed=0x5C0FFEE):
     return ofdm_symbol(freq, nsc, int(cp_len))
 
 
-def schmidl_cox_sync(rx, n_subcarriers, cp_len):
+def schmidl_cox_sync(rx, n_subcarriers):
     """Locate the Schmidl & Cox preamble and estimate the fractional CFO.
 
     Returns ``(start, cfo)`` — ``start`` is the index of the preamble's cyclic
     prefix; ``cfo`` the normalized carrier frequency offset (cycles/sample) from
     the half-symbol phase. ``start`` is ``None`` if no clear plateau is found.
+    The metric depends only on the two identical ``n_subcarriers/2`` halves,
+    so the cyclic-prefix length plays no part in the search.
     """
     r = np.asarray(rx, dtype=complex).ravel()
     nsc = int(n_subcarriers)
-    cp = int(cp_len)
     L = nsc // 2
     n = r.size - 2 * L
     if n <= 0:

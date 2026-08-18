@@ -161,6 +161,59 @@ class TestSPARCEnvironmentHandling:
                 env, source_50hz,
                 Receiver(depths=np.array([50.0]), ranges=np.array([1000.0])))
 
+    def test_oversized_depth_axis_raises_before_any_launch(
+            self, sparc_simple_env, source_50hz, monkeypatch):
+        """``output_mode='R'`` runs one subprocess per receiver depth, so a
+        depth axis past ``max_depths`` (default 20) raises
+        ``UnsupportedFeatureError`` rather than queueing hours of solves —
+        and it raises before any binary is launched."""
+        m = SPARC(verbose=False, output_mode='R')
+        monkeypatch.setattr(
+            m, "_run_sparc",
+            lambda *a, **k: pytest.fail("binary launched before the "
+                                        "max_depths cap fired"))
+        with pytest.raises(UnsupportedFeatureError, match='max_depths'):
+            m.run(sparc_simple_env, source_50hz,
+                  Receiver(depths=np.linspace(10.0, 90.0, 21),
+                           ranges=np.array([1000.0])))
+
+    def test_oversized_range_axis_raises_before_any_launch(
+            self, sparc_simple_env, source_50hz, monkeypatch):
+        """``'D'`` loops the binary per receiver range; the same cap guards
+        that axis."""
+        m = SPARC(verbose=False, output_mode='D')
+        monkeypatch.setattr(
+            m, "_run_sparc",
+            lambda *a, **k: pytest.fail("binary launched before the "
+                                        "max_depths cap fired"))
+        with pytest.raises(UnsupportedFeatureError, match='max_depths'):
+            m.run(sparc_simple_env, source_50hz,
+                  Receiver(depths=np.array([50.0]),
+                           ranges=np.linspace(100.0, 2100.0, 21)))
+
+    @pytest.mark.requires_binary
+    def test_one_binary_run_per_receiver_range_in_vertical_mode(
+            self, sparc_simple_env, source_50hz, monkeypatch):
+        """The vertical path loops the binary once per range and records the
+        loop count in the result metadata."""
+        import warnings as _w
+        m = SPARC(verbose=False, output_mode='D')
+        calls = {'n': 0}
+        original = m._run_sparc
+
+        def counting(*args, **kwargs):
+            calls['n'] += 1
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(m, "_run_sparc", counting)
+        with _w.catch_warnings():
+            _w.simplefilter('ignore')
+            res = m.run(sparc_simple_env, source_50hz,
+                        Receiver(depths=np.array([50.0]),
+                                 ranges=np.array([600.0, 800.0, 1000.0])))
+        assert calls['n'] == 3, f"expected one run per range, got {calls['n']}"
+        assert res.metadata['n_range_runs'] == 3
+
     @pytest.mark.requires_binary
     def test_one_binary_run_per_receiver_depth(self, sparc_simple_env,
                                                source_50hz, monkeypatch):

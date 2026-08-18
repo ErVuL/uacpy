@@ -63,15 +63,18 @@ def test_mpirams_broadband_matches_closed_form():
 
 def test_rams_broadband_no_carrier_no_radial():
     """``_run_collins_broadband`` site for ``rams0.5``: file already
-    carries ψ·exp(+i k0 r); conj suffices. No radial scaling here —
-    the Collins binaries write that in already."""
+    carries ψ·exp(+i k0 r); conj plus the Hankel ``exp(-iπ/4)`` the
+    Collins codes never factor out (``rams0.5.f:270`` divides by √r
+    only). No radial scaling here — the Collins binaries write that in
+    already."""
     g = _rng(2)
     H = g.standard_normal((4, 6, 8)) + 1j * g.standard_normal((4, 6, 8))
     out = psi_to_travelling_wave(
         H, convention=RAMS, ranges_m=np.linspace(100, 5000, 6),
         range_axis=1, freq_axis=2, apply_radial=False,
     )
-    np.testing.assert_array_equal(out, np.conj(H))
+    hankel = np.exp(-1j * np.pi / 4.0)
+    np.testing.assert_allclose(out, np.conj(H) * hankel, atol=1e-12, rtol=0)
 
 
 def test_ramsurf_broadband_carrier_applied():
@@ -90,7 +93,7 @@ def test_ramsurf_broadband_carrier_applied():
     )
 
     carrier = np.exp(-1j * k0[None, None, :] * ranges[None, :, None])
-    expected = np.conj(H) * carrier
+    expected = np.conj(H) * carrier * np.exp(-1j * np.pi / 4.0)
     np.testing.assert_allclose(out, expected, atol=1e-12, rtol=0)
 
 
@@ -107,7 +110,7 @@ def test_ramsurf_narrowband_scalar_k0():
     )
 
     carrier = np.exp(-1j * k0_scalar * ranges)
-    expected = np.conj(psi) * carrier[np.newaxis, :]
+    expected = np.conj(psi) * carrier[np.newaxis, :] * np.exp(-1j * np.pi / 4.0)
     np.testing.assert_allclose(out, expected, atol=1e-12, rtol=0)
 
 

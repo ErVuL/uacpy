@@ -220,6 +220,31 @@ def test_non_mod_extension_is_a_typed_format_error(tmp_path):
 
 
 @pytest.mark.requires_binary
+def test_read_modes_bin_M_counts_the_modes_returned(tmp_path):
+    """``M`` means the same thing in both readers: ``len(k)``. Reporting the
+    file's total instead would leave a ``modes=`` subset disagreeing with the
+    ``k`` / ``phi`` it is handed back with."""
+    from uacpy.models import Kraken
+
+    env = uacpy.Environment(
+        name='mcount', bathymetry=100.0, ssp=1500.0,
+        bottom=uacpy.BoundaryProperties(acoustic_type='half-space',
+                                        sound_speed=1800.0, density=1.8,
+                                        attenuation=0.3))
+    kraken = Kraken(verbose=False, work_dir=tmp_path, cleanup=False)
+    modes = kraken.compute_modes(env, uacpy.Source(depths=50.0,
+                                                   frequencies=100.0))
+    assert modes.n_modes > 1
+
+    mod_file = str(tmp_path / 'modes.mod')
+    full = read_modes_bin(mod_file)
+    assert full['M'] == len(full['k']) == modes.n_modes
+
+    subset = read_modes_bin(mod_file, modes=[1])
+    assert subset['M'] == 1 == len(subset['k']) == subset['phi'].shape[1]
+
+
+@pytest.mark.requires_binary
 def test_zero_mode_file_keeps_the_documented_phi_shape(tmp_path):
     """``kraken.f90:948-963`` writes a degraded header (NzTab = 0) and M = 0
     when no mode falls in the phase-speed window, then aborts. The file is on

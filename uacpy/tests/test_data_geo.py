@@ -1,5 +1,6 @@
 """Tests for the shared geographic helpers (uacpy.data._geo)."""
 
+import numpy as np
 import pytest
 
 from uacpy.core.exceptions import ConfigurationError
@@ -52,6 +53,47 @@ def test_as_coordinate_allows_unwrapped_longitude():
     # Longitude is cyclic and normalized downstream, so it is left as-is here.
     assert as_coordinate((0.0, 200.0)) == (0.0, 200.0)
     assert as_coordinate((-89.9, -181.0)) == (-89.9, -181.0)
+
+
+def test_transect_length_pins_the_documented_geodesic():
+    # Guide endpoints (48.2, -8.0) → (45.6, -6.2): the spherical haversine on
+    # the shared EARTH_RADIUS_M (6 371 008.8 m) gives 319 797.92 m. The WGS84
+    # ellipsoidal length is 319 906.6 m, 0.034 % longer — within the
+    # documented few-parts-in-10³ spherical approximation.
+    from uacpy.data.bathymetry import transect_length
+    A, B = (48.2, -8.0), (45.6, -6.2)
+    assert transect_length(A, B) == pytest.approx(319797.9, abs=0.05)
+    assert transect_length(B, A) == transect_length(A, B)
+    assert transect_length(A, A) == 0.0
+
+
+def test_geodesic_waypoints_round_trip_the_endpoints():
+    # First/last waypoints equal the requested endpoints, and the range axis
+    # runs 0 → transect_length, strictly increasing.
+    from uacpy.data._geo import geodesic_waypoints
+    from uacpy.data.bathymetry import transect_length
+    A, B = (48.2, -8.0), (45.6, -6.2)
+    lats, lons, ranges = geodesic_waypoints(A, B, 7)
+    assert (lats[0], lons[0]) == pytest.approx(A)
+    assert (lats[-1], lons[-1]) == pytest.approx(B)
+    assert ranges[0] == 0.0
+    assert ranges[-1] == pytest.approx(transect_length(A, B))
+    assert np.all(np.diff(ranges) > 0)
+
+
+def test_env_max_range_matches_the_transect_length():
+    # A bathymetry sampled on the A→B geodesic ranges makes env.max_range the
+    # transect length, and env.transect carries the two endpoints.
+    import uacpy
+    from uacpy.data._geo import geodesic_waypoints
+    from uacpy.data.bathymetry import transect_length
+    A, B = (48.2, -8.0), (45.6, -6.2)
+    _, _, ranges = geodesic_waypoints(A, B, 5)
+    env = uacpy.Environment(
+        bathymetry=np.column_stack([ranges, np.full(ranges.size, 4000.0)]),
+        ssp=1500.0, transect=(A, B))
+    assert env.max_range == pytest.approx(transect_length(A, B))
+    assert env.transect == (A, B)
 
 
 def test_parse_date_accepts_iso_and_objects():

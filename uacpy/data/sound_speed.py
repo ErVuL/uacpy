@@ -166,7 +166,9 @@ def ssp_transect_plan(
     plan reflects the **distinct WOA cells** the great-circle crosses (the
     grid cell is the sample identity, computed analytically — no network), so
     you can see how many independent columns are actually available before
-    paying to fetch them. ``max_points`` caps the probe (and thus the result).
+    paying to fetch them. ``max_points`` caps the probe (and thus the result);
+    an explicit ``n_points`` above it is capped to it with a ``UserWarning``
+    (the same cap warning :func:`fetch_bathy_transect` emits).
     """
     if resolution not in _GRIDS:
         raise ConfigurationError(
@@ -179,6 +181,11 @@ def ssp_transect_plan(
             raise ConfigurationError(
                 f"ssp_transect_plan: n_points must be >= 2, got {n_points}.",
                 remediation="Pass n_points>=2 or 'auto'.")
+        if int(n_points) > int(max_points):
+            warnings.warn(
+                f"ssp_transect_plan: n_points={n_points} exceeds "
+                f"max_points={max_points}; sampling {max_points}.",
+                UserWarning, stacklevel=2)
         probe_n = min(int(n_points), int(max_points))
     lats, lons, ranges_m = geodesic_waypoints(start, end, probe_n)
     if n_points == 'auto':
@@ -566,8 +573,7 @@ def _fetch_data(file_url, var, last, lat_idx, lon_idx, *, timeout, verbose) -> n
     query = f"{var}[0][0:{last}][{lat_idx}][{lon_idx}]"
     text = http_get(f"{file_url}.ascii?{query}", timeout=timeout,
                     verbose=verbose, source='sound_speed').decode('utf-8', 'replace')
-    values, _ = _parse_dods_ascii(text)
-    return np.asarray(values, dtype=float)
+    return np.asarray(_parse_dods_ascii(text), dtype=float)
 
 
 # A DAP .ascii data row is an index tuple, a comma, then the value:
@@ -584,12 +590,11 @@ def _parse_dods_axis(text: str, name: str) -> Optional[List[float]]:
     return None
 
 
-def _parse_dods_ascii(text: str) -> Tuple[List[float], Optional[List[float]]]:
-    """Parse a DAP ``.ascii`` body into ``(values, depths)``.
+def _parse_dods_ascii(text: str) -> List[float]:
+    """Parse a DAP ``.ascii`` body into the variable's values.
 
-    Collects the variable's array rows (``[i][j][k], value``) in order and the
-    ``*.depth[...]`` coordinate map. Returns ``depths=None`` if no depth map
-    is present.
+    Collects the variable's array rows (``[i][j][k], value``) in order. The
+    depth axis is fetched separately (see :func:`_parse_dods_axis`).
     """
     lines = text.splitlines()
     start = 0
@@ -599,18 +604,11 @@ def _parse_dods_ascii(text: str) -> Tuple[List[float], Optional[List[float]]]:
             break
 
     values: List[float] = []
-    depths: Optional[List[float]] = None
-    j = start
-    while j < len(lines):
-        s = lines[j].strip()
-        m = _DATA_ROW.match(s)
+    for line in lines[start:]:
+        m = _DATA_ROW.match(line.strip())
         if m:
             values.append(float(m.group(1)))
-        elif '.depth[' in s and j + 1 < len(lines):
-            depths = [float(x) for x in lines[j + 1].split(',') if x.strip()]
-            j += 1
-        j += 1
-    return values, depths
+    return values
 
 
 # Reference salinity for the extrapolation below. Medwin & Clay (Fundamentals

@@ -217,7 +217,8 @@ receiver = uacpy.Receiver(
 )
 
 tl = Scooter().run(env, source, receiver, run_mode=RunMode.COHERENT_TL)
-tl.plot(env=env, source=source, title='Scooter — coherent TL, 200 Hz')
+fig, ax = tl.plot(env=env, source=source, figsize=WIDE,
+                  title='Scooter — coherent transmission loss, 200 Hz')
 ```
 
 ![Scooter coherent TL](figures/scooter_tl.png)
@@ -241,9 +242,13 @@ def run_with_greens_function(env, source, receiver, **knobs):
         field = Scooter(work_dir=Path(tmp), **knobs).run(env, source, receiver)
         return field, read_grn_file(field.metadata['grn_file'])
 
+def _wavenumbers(grn):
+    """Horizontal wavenumbers behind a ``.grn``: ``k = 2πf / c``."""
+    return 2.0 * np.pi * grn['freq'] / grn['cVec']
+
 _, grn = run_with_greens_function(env, source, receiver)
-k = 2.0 * np.pi * grn['freq'] / grn['cVec']      # horizontal wavenumbers
-G = np.abs(grn['G'][0, 0])                       # (n_depth, n_wavenumber)
+k = _wavenumbers(grn)
+G = np.abs(grn['G'][0, 0])                       # (n_rd, n_k)
 ```
 
 ![Scooter Green's function](figures/scooter_greens_function.png)
@@ -279,7 +284,10 @@ where they are supposed to part company.
 
 ```python
 line = uacpy.Receiver(depths=50.0, ranges=np.linspace(50.0, 5000.0, 400))
-for knobs in ({}, {'c_high': 1600.0}, {'c_low': 1520.0}):
+cases = [('default — 1416 to 1732 m/s', {}, 'C0'),
+         ('c_high=1600', {'c_high': 1600.0}, 'C1'),
+         ('c_low=1520', {'c_low': 1520.0}, 'C2')]
+for label, knobs, colour in cases:
     tl, grn = run_with_greens_function(env, source, line, **knobs)
 ```
 
@@ -314,17 +322,16 @@ window are worth seeing side by side.
 
 ### Layered and elastic seabeds
 
+`layered_elastic()` is the shared 8 m-sand-over-granite scenario from
+[`_common.py`](../figure_scripts/_common.py):
+
 ```python
-env = uacpy.Environment(
-    bathymetry=100.0,
-    ssp=[(0.0, 1500.0), (100.0, 1490.0)],
-    bottom=uacpy.SeabedColumn.from_presets(
-        layers=[('sand', 8.0)], halfspace='granite'),
-)
+env, source, receiver = layered_elastic()
 tl = Scooter().run(env, source, receiver)
 
 # the same column, this time keeping the presets' shear parameters
 elastic = uacpy.Environment(
+    name='Layered seabed, shear on',
     bathymetry=env.bathymetry, ssp=env.ssp,
     bottom=uacpy.SeabedColumn.from_presets(
         layers=[('sand', 8.0)], halfspace='granite', elastic=True),
@@ -362,9 +369,13 @@ goes further; [Bounce](bounce.md) gives you the reflection coefficient alone.
 ```python
 from uacpy.models import Bellhop, Kraken
 
+env, source, _ = shallow_water()
 line = uacpy.Receiver(depths=50.0, ranges=np.linspace(50.0, 5000.0, 400))
-reference = np.asarray(Scooter().run(env, source, line).db, dtype=float).ravel()
-for model in (Kraken(), Bellhop(n_beams=3000)):
+reference = np.asarray(Scooter().run(env, source, line).db,
+                       dtype=float).ravel()
+others = [('Kraken (normal modes)', Kraken(), 'C1'),
+          ('Bellhop (Gaussian beams)', Bellhop(n_beams=3000), 'C2')]
+for label, model, colour in others:
     tl = np.asarray(model.run(env, source, line).db, dtype=float).ravel()
     ...  # plot tl, and |tl - reference|
 ```
@@ -384,9 +395,10 @@ Run the comparison as images rather than lines with
 ### Broadband: exact, one solve at a time
 
 ```python
-source = uacpy.Source(depths=25.0, frequencies=np.linspace(150.0, 450.0, 128))
+source = uacpy.Source(depths=25.0,
+                      frequencies=np.linspace(150.0, 450.0, 128))
 point = uacpy.Receiver(depths=60.0, ranges=3000.0)
-H = Scooter().run(env, source, point, run_mode=RunMode.BROADBAND)
+H_exact = Scooter().run(env, source, point, run_mode=RunMode.BROADBAND)
 ```
 
 ![Scooter broadband transfer function](figures/scooter_broadband.png)
@@ -474,9 +486,10 @@ convergence study over `n_mesh` = 20, 40, 60, 80, 100 returns five *identical*
 answers and reads as converged: at 50 Hz in the 100 m channel above, `n_mesh` of
 34, 40, 70 and 100 all give bit-identical TL, and only 150 moves it. Step by
 factors above 100. Going the other way, setting `n_mesh` below half what Scooter
-would have chosen aborts the run — `n_mesh=50` at 200 Hz here raises
-`ModelExecutionError`, with *"Mesh is too coarse"* and the count it wanted in
-the `.prt` tail. And in a multi-frequency run the mesh scales as `f/f₀`, so
+would have chosen is caught before anything launches — `n_mesh=50` at 200 Hz
+here raises `ConfigurationError` naming the count the deck reader requires
+(the run would otherwise stop with *"Mesh is too coarse"*). And in a
+multi-frequency run the mesh scales as `f/f₀`, so
 `n_mesh` is a count at the *first* frequency, not at every one.
 
 **Multi-frequency sources need an explicit `run_mode`.** `Scooter().run(env,

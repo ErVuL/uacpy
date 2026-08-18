@@ -44,7 +44,7 @@ def _write_block(
     if not pairs:
         raise ConfigurationError("Cannot write empty profile block")
     for d, v in pairs:
-        fh.write(f"{float(d):.6f} {float(v):.6f}\n")
+        fh.write(f"{float(d):.12g} {float(v):.12g}\n")
     fh.write(_TERM)
 
 
@@ -155,19 +155,26 @@ def write_ramin(
         # (zmax dz ndz zmplt), then row 5 — (c0 np ns rs) for the fluid
         # codes (``ramsurf1.5.f:76-80``, ``ramgeo1.5.f:104-108``) or
         # (c0 np irot theta) for RAMS (``rams0.5.f:105-109``).
+        #
+        # Every float is written at 12 significant digits (list-directed
+        # Fortran reads take any real spelling). ``dz`` is the critical one:
+        # the binaries place the seafloor at ``iz = int(1 + zb/dz)``
+        # (``ramgeo1.5.f:133``, ``ramsurf1.5.f:118``, ``rams0.5.f:135``), a
+        # truncation with a cliff exactly at integer ``zb/dz`` — a deck value
+        # rounded above ``h/n`` moves the seafloor node a whole cell up.
         fh.write(f"{title}\n")
-        fh.write(f"{float(fc):.6f} {float(zs):.6f} {float(zr_line):.6f}\n")
-        fh.write(f"{float(rmax):.6f} {float(dr):.6f} {int(ndr)}\n")
+        fh.write(f"{float(fc):.12g} {float(zs):.12g} {float(zr_line):.12g}\n")
+        fh.write(f"{float(rmax):.12g} {float(dr):.12g} {int(ndr)}\n")
         fh.write(
-            f"{float(zmax):.6f} {float(dz):.6f} {int(ndz)} {float(zmplt):.6f}\n"
+            f"{float(zmax):.12g} {float(dz):.12g} {int(ndz)} {float(zmplt):.12g}\n"
         )
         if kind == 'rams':
             fh.write(
-                f"{float(c0):.6f} {int(np_pade)} {int(irot)} {float(theta):.6f}\n"
+                f"{float(c0):.12g} {int(np_pade)} {int(irot)} {float(theta):.12g}\n"
             )
         else:
             fh.write(
-                f"{float(c0):.6f} {int(np_pade)} {int(ns_stab)} {float(rs_stab):.6f}\n"
+                f"{float(c0):.12g} {int(np_pade)} {int(ns_stab)} {float(rs_stab):.12g}\n"
             )
 
         if kind == 'ramsurf':
@@ -182,7 +189,7 @@ def write_ramin(
         # what writing it ahead of every segment but the first produces.
         for i, seg in enumerate(range_segments):
             if i > 0:
-                fh.write(f"{float(seg['range']):.6f}\n")
+                fh.write(f"{float(seg['range']):.12g}\n")
             _write_block(fh, seg['water_ssp'])
             _write_block(fh, seg['bottom_c'])
             if kind == 'rams':

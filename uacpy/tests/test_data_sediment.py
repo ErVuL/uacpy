@@ -201,15 +201,45 @@ def test_auto_collapses_uniform_seabed_under_varying_water_speed(
 
 
 def test_auto_still_splits_on_a_real_sediment_change():
-    """The collapse must not merge distinct sediments (ϕ 3 → ϕ 7)."""
+    """The collapse must not merge distinct sediments (ϕ 3 → ϕ 7): each run
+    keeps the probe columns bracketing its edges plus the endpoints."""
     bottom = sediment.range_dependent_bottom_along(
         _phi_bottom(lambda la: 3.0 if la < 40.5 else 7.0,
                     lambda la, lo: 1480.0 + 40.0 * (la - 40.0)),
         (40.0, -30.0), (41.0, -30.0), 'auto', source_label='test',
         max_points=200)
-    assert len(bottom.columns) == 2
-    assert (bottom.columns[0].halfspace.sound_speed
-            > bottom.columns[1].halfspace.sound_speed)
+    assert len(bottom.columns) == 4
+    speeds = [c.halfspace.sound_speed for c in bottom.columns]
+    assert speeds[0] > speeds[2] and speeds[1] > speeds[3]  # ϕ3 pair, ϕ7 pair
+
+
+def test_auto_places_the_transition_at_the_observed_boundary():
+    """Regression: the nearest-node ``Bottom`` must rebuild a sediment change
+    within one probe step of where the probe observed it. The former midpoint
+    collapse anchored a two-run transect at its endpoints only, so the
+    reconstructed boundary landed at mid-transect — hundreds of km off a real
+    NSIDC ice edge / Diesing lithology boundary near one end."""
+    probe_n = 200
+    boundary_lat = 40.2                   # a fifth of the way along, not midway
+    bottom = sediment.range_dependent_bottom_along(
+        _phi_bottom(lambda la: 3.0 if la < boundary_lat else 7.0, None),
+        (40.0, -30.0), (41.0, -30.0), 'auto', source_label='test',
+        max_points=probe_n)
+    length_m = bottom.ranges[-1]
+    step_m = length_m / (probe_n - 1)
+    true_edge_m = length_m * 0.2          # boundary_lat on the constant-lon path
+    rho = [c.halfspace.density for c in bottom.columns]   # ϕ3 denser than ϕ7
+    rr = np.asarray(bottom.ranges, dtype=float)
+    transitions = [(rr[i] + rr[i + 1]) / 2.0
+                   for i in range(len(rho) - 1) if rho[i] != rho[i + 1]]
+    assert len(transitions) == 1
+    assert abs(transitions[0] - true_edge_m) <= step_m
+    # The nearest-node read agrees one probe step either side of the boundary.
+    assert (bottom.at(range=true_edge_m - step_m).halfspace.density
+            == pytest.approx(rho[0]))
+    assert (bottom.at(range=true_edge_m + step_m).halfspace.density
+            == pytest.approx(rho[-1]))
+    assert rho[0] > rho[-1]
 
 
 def test_auto_keys_on_geoacoustics_without_a_grain_size():
@@ -223,7 +253,8 @@ def test_auto_keys_on_geoacoustics_without_a_grain_size():
     bottom = sediment.range_dependent_bottom_along(
         crustal, (40.0, -30.0), (41.0, -30.0), 'auto', source_label='test',
         max_points=200)
-    assert [c.halfspace.sound_speed for c in bottom.columns] == [1600.0, 2200.0]
+    assert ([c.halfspace.sound_speed for c in bottom.columns]
+            == [1600.0, 1600.0, 2200.0, 2200.0])
 
 
 def test_deck41_rock_routes_to_limestone_material(monkeypatch):

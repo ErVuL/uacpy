@@ -54,7 +54,11 @@ def ppsd(data, sample_rate, *, seg_duration=1.0, overlap_pct=50, ddB=1.0,
     dB levels per frequency. Returns a :class:`PPSDResult`. 2-D input uses the
     longer axis as time; pass a list of 1-D arrays to be explicit. For a
     constant-Q (geometric-frequency) PPSD, see
-    :func:`uacpy.acoustic_signal.probabilistic_constant_q`.
+    :func:`uacpy.acoustic_signal.probabilistic_constant_q` — note the two
+    histogram different populations: each sample here is a *Welch average*
+    over a ``seg_duration`` chunk (variance shrinks as the chunk holds more
+    Welch segments), whereas ``probabilistic_constant_q`` histograms single
+    unaveraged frames, so its level spread is wider for the same signal.
 
     ``overlap_pct`` steps the *time segments*; ``nperseg``/``noverlap`` are the
     Welch parameters *within* a segment. ``nperseg`` is clamped to the segment
@@ -263,6 +267,14 @@ def sel(data, sample_rate, *, fmin=8.9125, fmax=22387,
     signal's final partial chunk does.
     """
     data = require_finite_signal(data, "sel")
+    if np.iscomplexobj(data):
+        raise ConfigurationError(
+            "sel: data must be real (got complex input); band exposure is "
+            "defined for a real pressure time series. Demodulate to a real "
+            "signal first.")
+    if not sample_rate > 0:
+        raise ConfigurationError(
+            f"sel: sample_rate must be > 0 Hz (got {sample_rate}).")
     if integration_time is not None:
         data = data[:min(int(integration_time * sample_rate), len(data))]
 
@@ -297,7 +309,10 @@ def sel(data, sample_rate, *, fmin=8.9125, fmax=22387,
     # digitize is 1-based, so -1 gives the 0-based band index; bins below the
     # first edge become -1 and bins above the last become len(bands), and
     # neither matches any k in range(len(bands)) — they drop out of the sum.
+    # Interior edges are half-open [lo, hi), but the top edge is closed: a
+    # bin exactly on edges[-1] belongs to the last band, not outside it.
     bin_band = np.digitize(f, edges) - 1
+    bin_band[f == edges[-1]] = len(bands) - 1
     band_bins = [np.where(bin_band == k)[0] for k in range(len(bands))]
     out = np.zeros(len(bands))
 

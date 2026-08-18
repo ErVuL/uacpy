@@ -178,12 +178,17 @@ class TestResolveBroadbandGrid:
         self.RAM = RAM
         self.source_scalar = uacpy.Source(depths=25.0, frequencies=F_CENTER)
 
-    def test_single_freq_uses_defaults(self):
+    def test_single_freq_collapses_to_one_bin(self):
+        # A single frequency with neither Q nor T pinned asks for a 1-bin
+        # H(f): the sweep collapses the same way COHERENT_TL does, and the
+        # requested-bins helper trims the result to exactly that bin.
         ram = self.RAM(verbose=False)
         fc, Q, T = ram._resolve_broadband_grid(self.source_scalar)
         assert fc == F_CENTER
-        assert Q == 2.0  # broadband default
-        assert T == 10.0  # broadband default
+        assert Q == 1e6
+        assert T == 1.0
+        target = ram._requested_broadband_bins(self.source_scalar)
+        assert list(target) == [F_CENTER]
 
     def test_single_freq_respects_pinned_q_t(self):
         ram = self.RAM(verbose=False, Q=4.0, T=5.0)
@@ -225,6 +230,19 @@ class TestResolveBroadbandGrid:
         ram = self.RAM(verbose=False)
         with pytest.raises(ConfigurationError, match='non-uniform'):
             ram._resolve_broadband_grid(src)
+
+    def test_single_freq_partial_pin_fills_in_broadband_defaults(self):
+        """ram.md §5: with exactly one of Q/T pinned, the other fills in at
+        the broadband defaults Q=2.0 / T=10.0 (not the narrowband 1e6 / 1.0
+        collapse), and the warning names which value was defaulted."""
+        with pytest.warns(UserWarning, match='default'):
+            fc, Q, T = self.RAM(verbose=False, T=5.0)._resolve_broadband_grid(
+                self.source_scalar)
+        assert (fc, Q, T) == (F_CENTER, 2.0, 5.0)
+        with pytest.warns(UserWarning, match='default'):
+            fc, Q, T = self.RAM(verbose=False, Q=8.0)._resolve_broadband_grid(
+                self.source_scalar)
+        assert (fc, Q, T) == (F_CENTER, 8.0, 10.0)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -305,6 +323,186 @@ class TestSynthesisCarriesMetadata:
         assert trace.metadata['grn_file'] == '/pinned/model.grn'
         assert trace.metadata['c0'] == 1500.0
         assert trace.metadata['window'] == 'hann'
+
+
+class TestSynthesisCarriesPinned:
+    """Time-domain synthesis inherits the parent Field's pinned axes (the
+    accumulation contract in the Field class doc); ``to_time_trace`` adds
+    the synthesised cell's coordinates on top."""
+
+    @staticmethod
+    def _tf_pinned():
+        from uacpy.core.results import Field, PhaseReference
+        freqs = np.linspace(100.0, 300.0, 21)          # Δf = 10 Hz
+        return Field(
+            data=np.ones((1, 1, len(freqs)), dtype=complex),
+            coords={'depth': np.array([25.0]), 'range': np.array([100.0]),
+                    'frequency': freqs},
+            pinned={'source_depth': 5.0},
+            model='Synthetic', source_depths=np.array([5.0]),
+            frequencies=freqs,
+            phase_reference=PhaseReference.TRAVELLING_WAVE,
+        )
+
+    def test_to_time_trace_merges_pinned_under_cell_coords(self):
+        trace = self._tf_pinned().to_time_trace(depth=25.0, range=100.0)
+        assert trace.pinned['source_depth'] == 5.0
+        assert trace.pinned['depth'] == 25.0
+        assert trace.pinned['range'] == 100.0
+
+    def test_synthesize_time_series_keeps_pinned(self):
+        wf = np.zeros(int(0.05 * FS))
+        wf[: int(0.005 * FS)] = 1.0
+        ts = self._tf_pinned().synthesize_time_series(
+            source_waveform=wf, sample_rate=FS)
+        assert ts.pinned == {'source_depth': 5.0}
+
+
+class TestToTimeTraceDefaultCell:
+    """results.md §6: with no arguments ``to_time_trace`` takes the middle
+    depth and the first range, recording the chosen cell in ``pinned``."""
+
+    @staticmethod
+    def _tf():
+        from uacpy.core.results import Field, PhaseReference
+        freqs = np.linspace(100.0, 300.0, 21)          # Δf = 10 Hz
+        depths = np.array([10.0, 20.0, 30.0])
+        ranges = np.array([500.0, 1000.0])
+        # Amplitude encodes the cell so the defaulted pick is observable in
+        # the trace, not only in the pinned labels.
+        amp = 1.0 + np.arange(3)[:, None] * 10.0 + np.arange(2)[None, :]
+        data = amp[:, :, None] * np.ones((1, 1, freqs.size), dtype=complex)
+        return Field(
+            data=data,
+            coords={'depth': depths, 'range': ranges, 'frequency': freqs},
+            model='Synthetic', source_depths=np.array([25.0]),
+            frequencies=freqs,
+            phase_reference=PhaseReference.TRAVELLING_WAVE,
+        )
+
+    def test_defaults_to_middle_depth_first_range(self):
+        tf = self._tf()
+        trace = tf.to_time_trace()
+        assert trace.pinned['depth'] == 20.0
+        assert trace.pinned['range'] == 500.0
+        # The (20 m, 500 m) cell carries |H| = 11 against 2 at
+        # (10 m, 1000 m); the same synthesis on both cells preserves that
+        # amplitude ratio, so the defaulted pick is visible in the data too.
+        other = tf.to_time_trace(depth=10.0, range=1000.0)
+        ratio = (float(np.max(np.abs(trace.data)))
+                 / float(np.max(np.abs(other.data))))
+        assert ratio == pytest.approx(11.0 / 2.0, rel=1e-6)
+
+    def test_explicit_cell_still_wins(self):
+        trace = self._tf().to_time_trace(depth=30.0, range=1000.0)
+        assert trace.pinned['depth'] == 30.0
+        assert trace.pinned['range'] == 1000.0
+
+
+class TestSynthesisPhaseReferenceContract:
+    """results.md §6: both synthesis methods refuse a
+    ``'time_domain_native'`` input (that payload is already p(t)) and tag
+    their own output ``'time_domain_native'``."""
+
+    @staticmethod
+    def _tf(phase_reference):
+        from uacpy.core.results import Field
+        freqs = np.linspace(100.0, 300.0, 21)
+        return Field(
+            data=np.ones((1, 1, freqs.size), dtype=complex),
+            coords={'depth': np.array([25.0]), 'range': np.array([100.0]),
+                    'frequency': freqs},
+            model='Synthetic', source_depths=np.array([25.0]),
+            frequencies=freqs,
+            phase_reference=phase_reference,
+        )
+
+    def test_native_input_is_refused_by_both_entry_points(self):
+        from uacpy.core.results import PhaseReference
+        tf = self._tf(PhaseReference.TIME_DOMAIN_NATIVE)
+        wf = np.zeros(int(0.05 * FS))
+        wf[: int(0.005 * FS)] = 1.0
+        with pytest.raises(ConfigurationError, match='time_domain_native'):
+            tf.to_time_trace(depth=25.0, range=100.0)
+        with pytest.raises(ConfigurationError, match='time_domain_native'):
+            tf.synthesize_time_series(source_waveform=wf, sample_rate=FS)
+
+    def test_output_is_tagged_time_domain_native(self):
+        from uacpy.core.results import PhaseReference
+        tf = self._tf(PhaseReference.TRAVELLING_WAVE)
+        wf = np.zeros(int(0.05 * FS))
+        wf[: int(0.005 * FS)] = 1.0
+        trace = tf.to_time_trace(depth=25.0, range=100.0)
+        series = tf.synthesize_time_series(source_waveform=wf, sample_rate=FS)
+        assert trace.phase_reference == 'time_domain_native'
+        assert series.phase_reference == 'time_domain_native'
+
+
+class TestManualIfftRecipe:
+    """DOCUMENTATION.md §'Manual IFFT': the documented zero-padded-buffer
+    recipe, executed verbatim on the phase-only ``H = exp(-i 2π f r/c0)``
+    the doc names (r = 3000 m, c0 = 1500 m/s) — the impulse must land at
+    exactly t = 2.0 s."""
+
+    def test_impulse_lands_at_two_seconds(self):
+        from uacpy.core.results import Field, PhaseReference
+        r, c0 = 3000.0, 1500.0
+        freqs = np.arange(50.0, 400.0 + 0.125, 0.25)   # 1/Δf = 4 s > r/c0
+        H = Field(
+            data=np.exp(-2j * np.pi * freqs * r / c0)[None, None, :],
+            coords={'depth': np.array([50.0]), 'range': np.array([r]),
+                    'frequency': freqs},
+            model='Synthetic', source_depths=np.array([50.0]),
+            frequencies=freqs,
+            phase_reference=PhaseReference.TRAVELLING_WAVE,
+        )
+
+        # The doc recipe, verbatim.
+        f = H.coords['frequency']
+        spec1d = H.at(depth=50, range=3000).data
+        df = f[1] - f[0]
+        nfft = 1 << int(np.ceil(np.log2(2 * round(f[-1] / df) + 2)))
+        buf = np.zeros(nfft, complex)
+        buf[np.round(f / df).astype(int)] = spec1d
+        pt = 2.0 * np.real(np.fft.ifft(buf)) * (nfft * df)
+        t = np.arange(nfft) / (nfft * df)
+
+        peak = float(t[np.argmax(pt)])
+        assert peak == pytest.approx(r / c0, abs=2.0 / (nfft * df)), (
+            f"impulse at {peak:.4f} s, expected {r / c0:.4f} s")
+        # A real impulse, not a ripple: the peak dominates the record.
+        assert float(np.max(pt)) > 10.0 * float(np.median(np.abs(pt)))
+
+
+class TestSynthesisErrorsNameTheEntryPoint:
+    """``_synthesis_plan`` diagnostics carry the public entry point's name,
+    so the message names the method the caller actually invoked."""
+
+    @staticmethod
+    def _tf_one_freq():
+        from uacpy.core.results import Field, PhaseReference
+        freqs = np.array([200.0])
+        return Field(
+            data=np.ones((1, 1, 1), dtype=complex),
+            coords={'depth': np.array([25.0]), 'range': np.array([100.0]),
+                    'frequency': freqs},
+            model='Synthetic', source_depths=np.array([25.0]),
+            frequencies=freqs,
+            phase_reference=PhaseReference.TRAVELLING_WAVE,
+        )
+
+    def test_to_time_trace_label(self):
+        with pytest.raises(ConfigurationError,
+                           match="to_time_trace: need at least 2"):
+            self._tf_one_freq().to_time_trace(depth=25.0, range=100.0)
+
+    def test_synthesize_time_series_label(self):
+        wf = np.zeros(64)
+        wf[:8] = 1.0
+        with pytest.raises(ConfigurationError,
+                           match="synthesize_time_series: need at least 2"):
+            self._tf_one_freq().synthesize_time_series(
+                source_waveform=wf, sample_rate=FS)
 
 
 class TestDFTWraparoundWarning:

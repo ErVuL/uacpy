@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import ast
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -217,28 +218,205 @@ def test_example_runs(example, tmp_path):
 # warning, skips its figure, and still exits 0. Catch that here.
 _SWALLOW_MARKERS = ("! Warning: Could not", "✗ ", "Traceback (most recent call last)")
 
+# Unmarked degradation reports: handlers that print "RAM error: {e}" /
+# "{label} ERROR: {e}" carry no ✗ marker at all. The lookbehind keeps
+# CamelCase exception-class names out — example 20 prints
+# "→ UnsupportedFeatureError: ..." every run as a deliberate gap
+# demonstration, and that must not read as a marker.
+_ERRORISH_LINE = re.compile(r"(?i)(?<![a-z0-9_])error\s*:|\[error\]")
+
+_TRACEBACK_HEADER = "Traceback (most recent call last)"
+
+# Exception class names, plus the message shapes a handler prints when it
+# renders ``str(exc)`` instead of the type — which is the common case and
+# is what let a Fortran fatal hide behind "✗ Kraken error: ...".
+_REAL_DEFECT_SIGNATURES = (
+    "TypeError", "AttributeError", "ValueError", "KeyError",
+    "ModelExecutionError", "ConfigurationError", "UnboundLocalError",
+    "IndexError", "NameError", "ZeroDivisionError",
+    "execution failed", "unexpected keyword", "has no attribute",
+    "object is not", "not enough values", "too many values",
+    # ConfigurationError's deck-refusal shape, as rendered by str(exc)
+    # (no class name on the line) in "RAM error: {e}"-style handlers.
+    "the deck cannot express",
+)
+
+
+def _traceback_exception_lines(text: str):
+    """The ``SomeError: message`` line terminating each traceback in ``text``.
+
+    ``traceback.print_exc()`` indents every frame line; the first
+    non-indented, non-blank line after the header is the exception itself,
+    the only line of the block that carries the class name."""
+    lines = text.splitlines()
+    found = []
+    for i, line in enumerate(lines):
+        if _TRACEBACK_HEADER not in line:
+            continue
+        for follow in lines[i + 1:]:
+            if not follow.strip() or follow.startswith((" ", "\t")):
+                continue
+            found.append(follow)
+            break
+    return found
+
 
 def _check_no_swallowed_failure(example: Path, result) -> None:
     """Fail if an example degraded silently instead of doing its work.
 
     A handler that reports a *precondition* (no binary, no network, no
     licence) is legitimate; one reporting a ``TypeError`` / ``AttributeError``
-    / ``ModelExecutionError`` is a real defect the handler is hiding."""
-    # Exception class names, plus the message shapes a handler prints when it
-    # renders ``str(exc)`` instead of the type — which is the common case and
-    # is what let a Fortran fatal hide behind "✗ Kraken error: ...".
-    real_defect = (
-        "TypeError", "AttributeError", "ValueError", "KeyError",
-        "ModelExecutionError", "ConfigurationError", "UnboundLocalError",
-        "IndexError", "NameError", "ZeroDivisionError",
-        "execution failed", "unexpected keyword", "has no attribute",
-        "object is not", "not enough values", "too many values",
-    )
-    for line in result.stdout.splitlines():
-        if not any(m in line for m in _SWALLOW_MARKERS):
-            continue
-        if any(sig in line for sig in real_defect):
-            raise AssertionError(
-                f"{example.name}: a broad handler swallowed a real defect, so "
-                f"the example exited 0 without doing its work:\n  {line.strip()}"
-            )
+    / ``ModelExecutionError`` is a real defect the handler is hiding.
+
+    Both streams are scanned: ``traceback.print_exc()`` inside a handler
+    writes to STDERR while the handler's own status line goes to stdout, so
+    a stdout-only scan let example 05's swallowed ConfigurationError sail
+    through."""
+    for text in (result.stdout, result.stderr):
+        for line in text.splitlines():
+            marked = (any(m in line for m in _SWALLOW_MARKERS)
+                      or _ERRORISH_LINE.search(line))
+            if not marked:
+                continue
+            if any(sig in line for sig in _REAL_DEFECT_SIGNATURES):
+                raise AssertionError(
+                    f"{example.name}: a broad handler swallowed a real "
+                    f"defect, so the example exited 0 without doing its "
+                    f"work:\n  {line.strip()}"
+                )
+        # A printed traceback carries its class name only on the block's
+        # final exception line, never on the marker line itself.
+        for exc_line in _traceback_exception_lines(text):
+            if any(sig in exc_line for sig in _REAL_DEFECT_SIGNATURES):
+                raise AssertionError(
+                    f"{example.name}: a broad handler printed a traceback "
+                    f"for a real defect and exited 0 without doing its "
+                    f"work:\n  {exc_line.strip()}"
+                )
+
+
+# ---------------------------------------------------------------------------
+# The detector's own contract, pinned on synthetic subprocess results.
+# ---------------------------------------------------------------------------
+
+class _FakeResult:
+    """Stand-in for subprocess.CompletedProcess with just the two streams."""
+
+    def __init__(self, stdout: str = "", stderr: str = ""):
+        self.stdout = stdout
+        self.stderr = stderr
+        self.returncode = 0
+
+
+_EXAMPLE = EXAMPLES_DIR / "example_05_ram_advanced.py"
+
+# Example 05's output before its handler was de-silenced: the status line
+# went to stdout with no ✗ marker and no class name, and print_exc() put the
+# traceback on stderr — the old stdout-only, marker-gated scan passed both.
+_OLD_SWALLOWED_STDOUT = """\
+2. Running RAM (parabolic equation)...
+  RAM error: mpiramS sediment file: cs profile(s) start with a negative \
+value (min -21.32), which the binary's profile counter reads as a '-1 \
+range' header sentinel (peramx.f90:120-123) — the deck cannot express it.
+3. Running Kraken for comparison...
+  ✓ Kraken completed (using range-independent approximation)
+✓ Example 05 complete
+"""
+
+_OLD_SWALLOWED_STDERR = """\
+Traceback (most recent call last):
+  File "example_05_ram_advanced.py", line 163, in <module>
+    result_ram = ram.run(env, source, receiver)
+  File "uacpy/models/ram.py", line 1603, in run
+    return self._run_tl(env, source, receiver)
+uacpy.core.exceptions.ConfigurationError: mpiramS sediment file: cs \
+profile(s) start with a negative value (min -21.32), which the binary's \
+profile counter reads as a '-1 range' header sentinel (peramx.f90:120-123) \
+— the deck cannot express it.
+"""
+
+
+def test_detector_fails_example_05s_old_swallowed_output():
+    """The exact output that once sailed through must now fail — via the
+    stderr traceback and via the unmarked stdout "RAM error:" line, each on
+    its own, so removing either print path cannot re-open the hole."""
+    with pytest.raises(AssertionError, match="swallowed|traceback"):
+        _check_no_swallowed_failure(
+            _EXAMPLE,
+            _FakeResult(_OLD_SWALLOWED_STDOUT, _OLD_SWALLOWED_STDERR),
+        )
+    with pytest.raises(AssertionError):
+        _check_no_swallowed_failure(
+            _EXAMPLE, _FakeResult(stderr=_OLD_SWALLOWED_STDERR),
+        )
+    with pytest.raises(AssertionError):
+        _check_no_swallowed_failure(
+            _EXAMPLE, _FakeResult(stdout=_OLD_SWALLOWED_STDOUT),
+        )
+
+
+def test_detector_accepts_example_20s_gap_demonstration():
+    """Example 20 prints an UnsupportedFeatureError line every run as a
+    deliberate demonstration of the rams/ramsurf capability gap; the
+    CamelCase class name must not read as an 'error:' marker."""
+    _check_no_swallowed_failure(_EXAMPLE, _FakeResult(stdout=(
+        "  elastic + altimetry → UnsupportedFeatureError: RAM does not "
+        "support: elastic bottom + sea-surface altimetry\n"
+        "✓ Example 20 complete\n"
+    )))
+
+
+def test_detector_accepts_precondition_reports():
+    """A handler that reports a missing binary / network is a legitimate
+    graceful degradation, on either stream, marked or not."""
+    _check_no_swallowed_failure(_EXAMPLE, _FakeResult(
+        stdout=(
+            "  ✗ Kraken not available: [Errno 2] No such file or directory\n"
+            "! Warning: Could not fetch bathymetry (network unreachable) — "
+            "using flat default\n"
+            "  Scooter error: scooter binary not found in uacpy/bin — run "
+            "install.sh\n"
+        ),
+        stderr=(
+            "Traceback (most recent call last):\n"
+            '  File "example.py", line 10, in <module>\n'
+            "    model.run(env, source, receiver)\n"
+            "uacpy.core.exceptions.ExecutableNotFoundError: scooter binary "
+            "not found in uacpy/bin — run install.sh\n"
+        ),
+    ))
+
+
+def test_detector_accepts_the_suites_warning_stream():
+    """The [WARN] banners a green run writes to stderr (grid raises,
+    below-seafloor receivers, 'predicted error is …' accuracy notes) carry
+    error-ish words without the error: shape and must pass."""
+    _check_no_swallowed_failure(_EXAMPLE, _FakeResult(stderr=(
+        "[2026/08/17 20:46:10 UTC] [WARN] [uacpy.examples.example_05:171] "
+        "RAM:mpiramS: raised dz from 0.385 m to 0.935 m for mpiramS runtime "
+        "cap (λ_p / 16). The Lytaev accuracy budget ε=1e-01 is not met on "
+        "this grid — its predicted error is 4.30e-01.\n"
+        "[2026/08/17 20:46:11 UTC] [WARN] [uacpy.examples.example_05:189] "
+        "Kraken reported 2 non-fatal warning(s) in its .prt log:\n"
+        "  Warning in KRAKENC - RootFinderSecant : Failure to converge\n"
+    )))
+
+
+def test_detector_still_fails_marked_defects():
+    """The original stdout contract is preserved: a ✗-marked line whose
+    message shape betrays a stale API call is a real defect."""
+    with pytest.raises(AssertionError, match="swallowed"):
+        _check_no_swallowed_failure(_EXAMPLE, _FakeResult(stdout=(
+            "  ✗ Kraken error: run() got an unexpected keyword argument "
+            "'beam_type'\n"
+        )))
+
+
+def test_detector_fails_unmarked_error_lines_with_defect_signatures():
+    """An 'ERROR: {e}'-style line (examples 17/18) whose message carries a
+    defect class name fails even with no marker and no traceback."""
+    with pytest.raises(AssertionError, match="swallowed"):
+        _check_no_swallowed_failure(_EXAMPLE, _FakeResult(stdout=(
+            "    KrakenField       ERROR: 'Field' object has no attribute "
+            "'to_db'\n"
+        )))

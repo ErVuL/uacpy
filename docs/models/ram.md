@@ -148,7 +148,7 @@ asked for.
 | Source beam pattern | ❌ | raises; the march starts from Collins' self-starter, which is omnidirectional — use [Bellhop](bellhop.md) or [Kraken](kraken.md) |
 | Water-column volume attenuation | ❌ | `env.absorption` is ignored, with a `UserWarning` |
 | Surface shear | ❌ | collapsed; every backend models a pressure-release surface |
-| Rigid seabed | ❌ | the domain floor at `zmax` is an **absorbing layer**, not a Neumann wall |
+| Rigid / vacuum / tabulated-reflection seabed | ❌ | raises `UnsupportedFeatureError` — the RAM decks express the seabed only as fluid geoacoustic layers, and the domain floor at `zmax` is an **absorbing layer**, not a Neumann wall |
 
 See [collapse policy](../guide/environment.md) for what "collapsed" means and
 how to control it.
@@ -162,7 +162,7 @@ of four vendored binaries:
 
 | Environment | Backend | What it is |
 |---|---|---|
-| fluid seabed, flat surface, half-space or broadband | `mpiramS` | Dushaw's Fortran 90/95 rewrite of RAM, with a native broadband Q/T loop |
+| fluid seabed, flat surface, half-space or broadband | `mpiramS` | Dushaw's Fortran 90/95 rewrite of RAM, with a native broadband Q/T loop; seabeds slower than the surface water (soft mud) are supported |
 | fluid seabed, flat surface, **layered**, narrowband | `ramgeo` | Collins' RAMGeo — sediment layers parallel to the bathymetry |
 | **any** `shear_speed > 0` in the seabed | `rams` | Collins' RAMS elastic PE (rotated Padé) |
 | `env.altimetry is not None` | `ramsurf` | Collins' rough-surface / beach-geometry PE |
@@ -230,8 +230,11 @@ from uacpy.models import RAM, RunMode
 | `TIME_SERIES` | `Field` | `p(d, r, t)` |
 
 Default is `COHERENT_TL` — always. Unlike Bellhop and Kraken, RAM does **not**
-switch to `BROADBAND` when you hand it a frequency vector; a multi-element
-`frequencies` with `COHERENT_TL` raises, telling you which mode you wanted.
+switch to `BROADBAND` when you hand it a frequency vector: a multi-frequency
+`Source` with `COHERENT_TL` raises, telling you which mode you wanted, and a
+`run(frequencies=…)` argument on `COHERENT_TL` is **ignored with a warning**
+(it only means something on `BROADBAND` / `TIME_SERIES`, where it overrides
+`source.frequencies` for that call).
 
 There is no `INCOHERENT_TL`: the PE marches a complex field, and there is no
 independent set of paths to sum intensities over.
@@ -253,9 +256,14 @@ band = fc · [1 − 1/Q,  1 + 1/Q]          Δf = 1/T
 ```
 
 so uacpy derives `(fc, Q, T)` from a **uniformly spaced** `frequencies` array —
-`fc` is the band centre, `Q = fc / half-width`, `T = 1/Δf` — and warns that it
-did. Pin both `Q=` and `T=` on the constructor to take control and silence the
-warning; non-uniform spacing raises. Left unset, the defaults are `Q=1e6,
+`fc` is anchored on an actual array bin (the upper-middle one),
+`Q = fc / half-width`, `T = 1/Δf` — and warns that it did. The sweep the
+binary marches can overshoot the request by a bin, but the returned `H(f)` is
+trimmed to carry **exactly the frequencies you asked for**, bin for bin. Pin
+both `Q=` and `T=` on the constructor — and pass a single `fc` — to take
+control and silence the warning (with both pinned, the sweep *is* the spec:
+a frequency array then contributes only its centre bin, and uacpy warns of
+that too); non-uniform spacing raises. Left unset, the defaults are `Q=1e6,
 T=1.0` for `COHERENT_TL` (which collapses the band to one bin, so a narrowband
 call does not sweep hundreds of frequencies) and `Q=2.0, T=10.0` for the
 broadband paths.
@@ -296,8 +304,8 @@ Leaving `c0` alone buys a 26.6 m step where pinning it to 1500 m/s gives 16.0 m
 Four constraints are applied *after* the optimiser has spoken, because its
 error model does not know about them:
 
-1. a **`dz` floor** — `λ_p/16` for acoustic stability, and `0.55·λ_s` on
-   `rams` so the shear mode is not aliased;
+1. a **`dz` floor** of `λ_p/16` for acoustic stability — and on `rams` a
+   **`dz` cap** of `λ_s/14`, so the shear wavelength stays resolved;
 2. **seafloor-node snapping**, so `env.depth / dz` is an integer and the
    interface lands on a grid point;
 3. a **`dr` tightening on `rams`** — `rams_dr_safety_factor` (default 5×) and
@@ -421,7 +429,8 @@ receiver = uacpy.Receiver(
 )
 
 tl = RAM().run(env, source, receiver, run_mode=RunMode.COHERENT_TL)
-tl.plot(env=env, source=source, title='RAM — coherent transmission loss, 200 Hz')
+fig, ax = tl.plot(env=env, source=source, figsize=WIDE,
+                  title='RAM — coherent transmission loss, 200 Hz')
 ```
 
 ![RAM coherent TL](figures/ram_tl.png)
@@ -437,8 +446,9 @@ span the full water column; a result carries **no** environment of its own.
 # 100 m of water falling to 400 m over 20 km, source at 50 m, 100 Hz.
 env, source, receiver = sloping_shelf()
 tl = RAM().run(env, source, receiver, run_mode=RunMode.COHERENT_TL)
-tl.plot(env=env, source=source,
-        title='RAM — 100 m shelf falling to 400 m over 20 km, 100 Hz')
+fig, ax = tl.plot(env=env, source=source, figsize=WIDE,
+                  title='RAM — 100 m shelf falling to 400 m over 20 km, '
+                        '100 Hz')
 ```
 
 ![RAM over a sloping shelf](figures/ram_shelf.png)
@@ -454,8 +464,9 @@ profile before it could touch this.
 
 ```python
 line = uacpy.Receiver(depths=50.0, ranges=np.linspace(50.0, 5000.0, 400))
+orders = (2, 4, 6, 8)
 dr = []
-for order in (2, 4, 6, 8):
+for order, colour in zip(orders, ('C0', 'C1', 'C2', 'C3')):
     tl = RAM(np_pade=order).run(env, source, line)
     dr.append(tl.metadata['dr'])
 ```
@@ -477,14 +488,17 @@ source = uacpy.Source(depths=25.0,
                       frequencies=np.linspace(150.0, 450.0, 192))
 point = uacpy.Receiver(depths=60.0, ranges=3000.0)
 H = RAM().run(env, source, point, run_mode=RunMode.BROADBAND)
-H.plot_transfer_function(title='RAM — transfer function at (3 km, 60 m)')
+fig, _ = H.plot_transfer_function(
+    title='RAM — transfer function at (3 km, 60 m)')
 ```
 
 ![RAM transfer function](figures/ram_transfer_function.png)
 
 The same point and band as [Bellhop's transfer function](bellhop.md#6-worked-example),
 computed a completely different way: mpiramS marches the whole band in one
-call instead of phasing a set of arrivals. Feed it to
+call instead of phasing a set of arrivals. `H` comes back on exactly the 192
+frequencies requested — the internal `(fc, Q, T)` sweep is trimmed onto the
+request. Feed it to
 `Field.synthesize_time_series()`, or ask for `RunMode.TIME_SERIES` directly, to
 get `p(t)`.
 
@@ -563,7 +577,10 @@ column. At long range that matters — use [Bellhop](bellhop.md) or
 **The domain floor absorbs.** `zmax` sits below the seafloor with an absorbing
 layer (20 wavelengths by default, ramping to 10 dB/wavelength) so nothing
 reflects off the bottom of the computational box. A truly rigid seabed cannot
-be expressed. Dropping `absorbing_layer_attn` below 1 dB/wavelength lets
+be expressed — a bottom with `acoustic_type='rigid'` (or `'vacuum'`, or a
+tabulated-reflection `'file'`/`'precalc'`) raises `UnsupportedFeatureError`
+rather than silently modelling placeholder geoacoustics. Dropping
+`absorbing_layer_attn` below 1 dB/wavelength lets
 reflections leak back in, and uacpy warns if you do.
 
 **Receivers below `zmax` come back `NaN`.** So do samples below the local

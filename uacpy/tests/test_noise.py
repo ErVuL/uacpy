@@ -60,12 +60,26 @@ def test_compute_windnoise_shallow_louder_than_deep(freqs):
 
 
 def test_compute_windnoise_band_integrate(freqs):
-    """``band_integrate=True`` integrates each spectral band — must not crash."""
+    """``band_integrate=True`` returns the band SPL: the spectral level plus
+    ``10·log10(Δf)``, where the band edges sit at the midpoints between
+    consecutive frequencies and the two end bands span only the half-spacing
+    to their single neighbour."""
     pointwise = compute_windnoise(freqs, u=10, water_depth='deep')
     integrated = compute_windnoise(freqs, u=10, water_depth='deep', band_integrate=True)
     assert pointwise.shape == freqs.shape
     assert integrated.shape == freqs.shape
     assert np.all(np.isfinite(integrated))
+    mids = (freqs[1:] + freqs[:-1]) / 2
+    edges = np.concatenate(([freqs[0]], mids, [freqs[-1]]))
+    df = edges[1:] - edges[:-1]
+    np.testing.assert_allclose(integrated, pointwise + 10 * np.log10(df),
+                               rtol=0, atol=1e-9)
+    # Octave grid anchor: the 400 Hz band spans 300-600 Hz, so its band SPL
+    # is the spectral level plus 10·log10(300) = +24.771 dB.
+    f5 = np.array([100.0, 200.0, 400.0, 800.0, 1600.0])
+    spec = compute_windnoise(f5, u=10, water_depth='deep')
+    band = compute_windnoise(f5, u=10, water_depth='deep', band_integrate=True)
+    assert band[2] == pytest.approx(spec[2] + 10 * np.log10(300.0), abs=1e-9)
 
 
 def test_compute_windnoise_pinned_anchors():
@@ -115,6 +129,23 @@ def test_wenznoise_default_attributes(freqs):
     for attr in ('shipping', 'wind', 'rain', 'thermal', 'turbulence'):
         v = getattr(wenz, attr)
         assert not np.any(np.isnan(v)), f"{attr} contains NaN"
+
+
+def test_wenznoise_constructor_defaults():
+    """Constructor defaults are ``shipping_level='medium'``, ``rain_rate='no'``,
+    ``water_depth='deep'``; a default-constructed spectrum equals the fully
+    explicit one and carries rain switched off (``-inf``)."""
+    import inspect
+    sig = inspect.signature(WenzNoise.__init__)
+    assert sig.parameters['shipping_level'].default == 'medium'
+    assert sig.parameters['rain_rate'].default == 'no'
+    assert sig.parameters['water_depth'].default == 'deep'
+    f = np.logspace(1.0, 4.0, 50)
+    default = WenzNoise(f, wind_speed=10)
+    explicit = WenzNoise(f, wind_speed=10, shipping_level='medium',
+                         rain_rate='no', water_depth='deep')
+    np.testing.assert_array_equal(default.total, explicit.total)
+    assert np.all(np.isneginf(default.rain))
 
 
 def test_wenznoise_components_named(freqs):
@@ -241,6 +272,26 @@ def test_wenznoise_zero_wind_drops_wind_from_total(freqs):
     np.testing.assert_allclose(wenz.total, expected, rtol=1e-10, atol=1e-10)
 
 
+def test_thermal_overtakes_wind_near_110_khz_at_10_knots():
+    """The Mellen thermal floor (``-75 + 20·log10 f``, rising 20 dB/decade)
+    crosses above the 10 kn wind curve (falling 16.6 dB/decade above 2 kHz) at
+    112.6 kHz — the two closed forms intersect at
+    ``log10 f = (Lw,2000 + 16.6096·log10 2000 + 75) / 36.6096``. In a 1 kn
+    calm the crossover drops to 32.0 kHz."""
+    f = np.logspace(5.0, 5.1, 201)                # 100.0 - 125.9 kHz
+    wenz = WenzNoise(f, wind_speed=10.0, shipping_level='no')
+    d = wenz.thermal - wenz.wind
+    crossing = np.flatnonzero((d[:-1] < 0) & (d[1:] >= 0))
+    assert crossing.size == 1
+    assert 105e3 < f[crossing[0]] < 120e3
+    f_calm = np.logspace(4.45, 4.6, 201)          # 28.2 - 39.8 kHz
+    calm = WenzNoise(f_calm, wind_speed=1.0, shipping_level='no')
+    d_calm = calm.thermal - calm.wind
+    crossing_calm = np.flatnonzero((d_calm[:-1] < 0) & (d_calm[1:] >= 0))
+    assert crossing_calm.size == 1
+    assert 30e3 < f_calm[crossing_calm[0]] < 34e3
+
+
 class TestShipRadiatedNoise:
     """ISO 17208 radiated noise level + monopole source level."""
 
@@ -272,24 +323,95 @@ class TestShipRadiatedNoise:
         assert monopole_source_level(rnl, f, ds) == pytest.approx(
             rnl + lloyd_mirror_correction(f, ds))
 
+    def test_rnl_uncertainty_db_pinned(self):
+        """ISO 17208-2 §5 combined RNL measurement uncertainty per band group:
+        5 dB (10-100 Hz), 3 dB (125 Hz-16 kHz), 4 dB (>20 kHz)."""
+        from uacpy.noise import RNL_UNCERTAINTY_DB
+        assert RNL_UNCERTAINTY_DB == {"low": 5.0, "mid": 3.0, "high": 4.0}
+
+    def test_lloyd_mirror_low_frequency_anchors(self):
+        """ISO 17208-2 Formula 3 at 10 Hz, c = 1500 m/s: ΔL = +12.595 dB for
+        the 5.6 m nominal source depth of an 8 m draught (0.7·8), +18.615 dB
+        at 2.8 m and +7.146 dB at 10.5 m."""
+        from uacpy.noise import lloyd_mirror_correction, nominal_source_depth
+        d_s = nominal_source_depth(8.0)
+        assert d_s == pytest.approx(5.6)
+        assert lloyd_mirror_correction(10.0, d_s) == pytest.approx(12.5954, abs=1e-3)
+        assert lloyd_mirror_correction(10.0, 2.8) == pytest.approx(18.6151, abs=1e-3)
+        assert lloyd_mirror_correction(10.0, 10.5) == pytest.approx(7.1457, abs=1e-3)
+
+    def test_lloyd_mirror_dip(self):
+        """ΔL dips to −4.0708 dB at kd = 2.835 before settling on the
+        −3.01 dB asymptote; at d = 5.6 m that kd falls at
+        2.835·1500/(2π·5.6) = 120.9 Hz. The dip value depends on kd alone, so
+        it is identical at every depth."""
+        from uacpy.noise import lloyd_mirror_correction
+        import numpy as np
+        f = np.linspace(60.0, 400.0, 1701)
+        v = lloyd_mirror_correction(f, 5.6)
+        i = int(np.argmin(v))
+        assert v[i] == pytest.approx(-4.0708, abs=1e-3)
+        assert f[i] == pytest.approx(120.9, abs=1.0)
+        v_deep = lloyd_mirror_correction(np.linspace(30.0, 120.0, 1001), 10.5)
+        assert v_deep.min() == pytest.approx(-4.0708, abs=1e-3)
+
 
 class TestMarineMammalWeighting:
     """Southall et al. 2019 auditory weighting functions (Table 5)."""
+
+    ALL_GROUPS = ("LF", "HF", "VHF", "SI", "PCW", "OCW", "PCA", "OCA")
+
+    def test_weighting_params_cover_all_eight_groups(self):
+        """Southall Table 5 defines exactly eight hearing groups — the six
+        in-water ones plus the in-air PCA and OCA — each carrying the five
+        curve parameters and the published exposure constant K."""
+        from uacpy.noise import WEIGHTING_PARAMS, HEARING_GROUPS
+        assert set(WEIGHTING_PARAMS) == set(self.ALL_GROUPS)
+        assert set(HEARING_GROUPS) == set(self.ALL_GROUPS)
+        for params in WEIGHTING_PARAMS.values():
+            assert set(params) == {"a", "b", "f1", "f2", "C", "K"}
 
     def test_peak_is_zero_db(self):
         from uacpy.noise import auditory_weighting
         import numpy as np
         f = np.logspace(1, 5.5, 5000)
-        for g in ("LF", "HF", "VHF", "SI", "PCW", "OCW"):
+        for g in self.ALL_GROUPS:
             assert auditory_weighting(f, g).max() == pytest.approx(0.0, abs=0.02)
 
     def test_low_frequency_slope_is_20a(self):
         from uacpy.noise import auditory_weighting, WEIGHTING_PARAMS
-        for g in ("LF", "HF", "OCW"):
+        for g in self.ALL_GROUPS:
             a = WEIGHTING_PARAMS[g]["a"]
             f1 = WEIGHTING_PARAMS[g]["f1"] * 1000.0
             slope = auditory_weighting(0.1 * f1, g) - auditory_weighting(0.01 * f1, g)
             assert slope == pytest.approx(20.0 * a, abs=0.3)   # +20a dB/decade
+
+    def test_weighting_anchors_at_30_hz(self):
+        """Southall Table 5 closed form at the 30 Hz shipping peak:
+        LF −16.445 dB, VHF −92.314 dB — a 75.87 dB spread between the two
+        groups' reception of the same band."""
+        from uacpy.noise import auditory_weighting
+        lf = auditory_weighting(30.0, "LF")
+        vhf = auditory_weighting(30.0, "VHF")
+        assert lf == pytest.approx(-16.4448, abs=1e-3)
+        assert vhf == pytest.approx(-92.3142, abs=1e-3)
+        assert lf - vhf == pytest.approx(75.8694, abs=1e-2)
+
+    def test_weighted_broadband_levels_of_the_guide_spectrum(self):
+        """The guide §8 spectrum (10 kn, medium shipping, 10 Hz-100 kHz on a
+        1200-point log grid) integrates to 97.577 dB re 1 µPa² unweighted,
+        94.029 dB LF-weighted and 83.510 dB VHF-weighted. The values are the
+        independent DRDC + Southall closed forms; the guide text prints
+        97.7 / 94.0 / 83.5, and its unweighted 97.7 is 0.12 dB above what the
+        composite produces on its own stated grid (94.0 and 83.5 agree)."""
+        from uacpy.noise import weighted_level
+        import numpy as np
+        f = np.logspace(1.0, 5.0, 1200)
+        wenz = WenzNoise(f, wind_speed=10.0, shipping_level='medium')
+        unweighted = 10.0 * np.log10(np.trapezoid(10.0 ** (wenz.total / 10.0), f))
+        assert unweighted == pytest.approx(97.5772, abs=5e-3)
+        assert weighted_level(wenz.total, f, "LF") == pytest.approx(94.0292, abs=5e-3)
+        assert weighted_level(wenz.total, f, "VHF") == pytest.approx(83.5095, abs=5e-3)
 
     def test_unknown_group_raises(self):
         from uacpy.noise import auditory_weighting
@@ -312,6 +434,10 @@ class TestMarineMammalWeighting:
         wl_coarse = weighted_level(np.full(f_coarse.size, 120.0), f_coarse, "LF")
         wl_fine = weighted_level(np.full(f_fine.size, 120.0), f_fine, "LF")
         assert abs(wl_coarse - wl_fine) < 0.5
+        # Hand anchor: a flat 120 dB/Hz spectrum LF-weighted over 20 Hz-20 kHz
+        # is 120 + 10·log10(∫ 10^(W/10) df) = 160.9719 dB re 1 µPa² on the
+        # 500-point grid (the Southall closed form trapezoid-integrated).
+        assert wl_fine == pytest.approx(160.9719, abs=1e-3)
 
 
 class TestWindNoiseRollOffAnchor:

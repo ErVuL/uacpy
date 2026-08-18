@@ -172,7 +172,9 @@ frequency of each.
 1-D arrays; the list form is the unambiguous one. Its constant-Q counterpart is
 `probabilistic_constant_q`.
 
-`scaling='density'` (the default) gives Pa²/Hz and is independent of `nperseg`
+`scaling='density'` (the default for `psd` and the other linear estimators;
+the constant-Q family defaults to `'spectrum'` — see §4) gives Pa²/Hz and is
+independent of `nperseg`
 and of the window — the right choice for noise. `scaling='spectrum'` gives
 per-bin power instead, which is the right choice for a tone and which moves with
 `nperseg`. Either way a tone falling between bins
@@ -236,14 +238,15 @@ density level are different quantities and are only equal in a 1 Hz band.**
 The 316 Hz bar is the one visible departure from the smooth trend: that is the
 tonal, whose energy is confined to one band and so survives integration intact.
 
-The first and last bars read low. That is not an artefact of the estimator — the
-PSD was sliced to 20 Hz–11 kHz before integration, so those two bands were only
-partly covered and were integrated over the part they were given. Slice
-generously, or trim the end bands.
+The end bands come back `nan`. The band set is generated from the grid you
+supply, so the first and last bands usually reach past its ends — here the PSD
+was sliced to 20 Hz–11 kHz first — and a partial integral is not a band level,
+so those bands are returned as `nan` with a one-time warning naming the
+support. Slice generously, or trim the end bands.
 
 `decidecade_band_levels` also warns, once, if any band straddled fewer than two
-PSD grid points; those bands fall back to a rectangular `psd · bandwidth`
-estimate rather than silently returning zero. If you see that warning, your PSD
+PSD grid points; such a band's level rests almost entirely on its interpolated
+band edges rather than on integrated data. If you see that warning, your PSD
 grid is too coarse at the bottom of the band set — raise `nperseg`.
 
 ---
@@ -283,7 +286,14 @@ The constant-Q family bins geometrically (`bins_per_octave=24` by default)
 instead of linearly, which is the right resolution law for a soundscape spanning
 decades. Each is the constant-Q analogue of its linear counterpart:
 `constant_q_psd` ↔ `psd`, `constant_q_spectrogram` ↔ `spectrogram`,
-`probabilistic_constant_q` ↔ `ppsd`.
+`probabilistic_constant_q` ↔ `ppsd` — with one default that deliberately
+differs: the constant-Q functions default to `scaling='spectrum'` (Pa² per
+bin) where the linear ones default to `'density'` (Pa²/Hz). Compare the two
+without aligning `scaling=` and you are off by each bin's noise-equivalent
+bandwidth in Hz — and because constant-Q bins widen in proportion to
+frequency, that offset is frequency-dependent: on white noise it measures ~4×
+at 100 Hz and ~40× at 1 kHz. Pass the same `scaling=` to both when levels
+must line up.
 
 ### The resolution trade-off
 
@@ -672,10 +682,10 @@ here, which is why the figure uses a rigid bottom and isovelocity water.
 | Call | Returns | Notes |
 |---|---|---|
 | `synthesize_noise_from_psd(Pxx, Fxx, duration=1, scale=1, *, n_fft=65536, sample_rate=None, interp='linear', rng=None)` | `(t, x, sample_rate)` | realise a time series matching a target one-sided PSD |
-| `make_bandlimited_noise(fc, bandwidth, duration, sample_rate, *, rng=None)` | `(noise, t)` | **unit-RMS** band-limited Gaussian noise |
+| `make_bandlimited_noise(fc, bandwidth, duration, sample_rate, *, rng=None)` | `(t, noise)` | **unit-RMS** band-limited Gaussian noise |
 | `make_noise_waveform(fc, bandwidth_hz, T, sample_rate, *, rng=None)` | `(nts, t)` | heterodyned band-limited noise probe |
 | `add_noise(timeseries, sample_rate, source_level, noise_level, fc, bandwidth, *, rng=None)` | ndarray | scale a 0 dB-source record by `source_level` and add noise at `noise_level` |
-| `fourier_synthesis(pressure_freq, frequencies, source_spectrum=None, Tstart=0.0)` | `(rmod, time)` | AT `stack.m` — raw-DFT synthesis on the input frequency grid |
+| `fourier_synthesis(pressure_freq, frequencies, source_spectrum=None, Tstart=0.0)` | `(time, rmod)` | AT `stack.m` — raw-DFT synthesis on the input frequency grid |
 
 `synthesize_noise_from_psd` resamples the target onto the FFT-native grid, so
 `Fxx` may be uniform, log-spaced or coarse — Wenz curves drop straight in. Use

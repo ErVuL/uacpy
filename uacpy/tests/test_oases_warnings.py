@@ -1,10 +1,9 @@
 """
 OASES wrapper edge cases not covered in test_oases_comprehensive.py.
 
-Per-model smoke (TL, modes, reflection, PE) and cross-model comparisons all
-live in test_oases_comprehensive.py. This file holds the bits unique to the
-wrapper layer: warning behavior on unsupported configs, and a one-liner
-availability summary.
+This file holds the bits unique to the wrapper layer: warnings on
+unsupported, approximated or off-grid configurations, the option-line
+guards, and a one-liner availability summary.
 """
 
 import numpy as np
@@ -16,6 +15,7 @@ import uacpy
 from uacpy.models import OAST, OASN, OASR, OASP
 from uacpy.models.base import RunMode
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.tests.conftest import make_pekeris
 
 pytestmark = pytest.mark.requires_oases
 
@@ -53,7 +53,16 @@ class TestOASTWarnings:
         rcv = uacpy.Receiver(depths=[50.0], ranges=[1234.0, 4321.0])
         oast = OAST(verbose=False)
         with pytest.warns(UserWarning, match="receiver.ranges do not match"):
-            oast.run(env, src, rcv)
+            result = oast.run(env, src, rcv)
+        # The escape hatch the warning points at (oases.md §11): the native
+        # FFT grid rides back on the result so the caller can align to it.
+        native = np.asarray(result.metadata['oast_native_ranges'], dtype=float)
+        assert native.ndim == 1 and native.size > 1
+        assert np.all(np.diff(native) > 0)
+        assert result.metadata['interpolated'] is True
+        # The off-grid requests fall inside the native hull, or they would
+        # have come back NaN rather than interpolated.
+        assert native.min() <= 1234.0 and native.max() >= 4321.0
 
 
 def test_all_oases_models_available():
@@ -100,6 +109,22 @@ class TestOASPOptionGuard:
         with pytest.raises(ConfigurationError, match="multi-component"):
             self._run(options)
 
+    @pytest.mark.parametrize("options", ['N', 'N T', 'NT'])
+    def test_custom_options_without_J_under_auto_sampling_raise(self, options):
+        """oases.md §11: dropping 'J' under automatic wavenumber sampling
+        enables the complex frequency contour (OMEGIM ≠ 0) by the back
+        door — the same offset 'O' applies — which the time-series
+        synthesis cannot undo. Only the OASSP twin of this guard was
+        pinned before."""
+        with pytest.raises(ConfigurationError, match=r"without 'J'"):
+            self._run(options)
+
+    def test_without_J_but_pinned_sampling_passes_the_guard(self):
+        """nw_samples >= 1 disables AUSAMP, so the contour never engages and
+        the same option line is legal."""
+        assert OASP(options='N', nw_samples=2048)._reject_unreadable_options() \
+            is None
+
 
 @pytest.mark.requires_binary
 class TestRawOptionsVoidTypedKnobs:
@@ -142,6 +167,78 @@ class TestRawOptionsVoidTypedKnobs:
             OASR(reflection_type='P-SV')
         with pytest.warns(UserWarning, match='column of zeros'):
             assert OASR(options='S T').copy()._resolve_reflection_type() == 'P-SV'
+
+
+@pytest.mark.requires_binary
+class TestOASPNearestBinSubstitution:
+    """OASP's COHERENT_TL Field carries the FFT-ladder bin nearest the
+    request, and the ladder rarely lands a bin exactly on it (measured:
+    100 Hz asked, 99.97558 Hz returned, a phase error growing to ~36 deg by
+    6 km) — so the substitution warns, just as the BROADBAND branch warns
+    about its replaced axis."""
+
+    def test_coherent_tl_names_the_substituted_bin(self):
+        with pytest.warns(UserWarning, match='nearest bin'):
+            field = OASP(verbose=False).run(
+                make_pekeris(), uacpy.Source(depths=50.0, frequencies=100.0),
+                uacpy.Receiver(depths=[50.0], ranges=[500.0, 1000.0]))
+        f = float(np.atleast_1d(field.frequencies)[0])
+        assert f != 100.0
+        assert abs(f - 100.0) < 0.5    # nearest bin, not a different band
+
+
+@pytest.mark.requires_binary
+class TestOASNDegenerateCovarianceWarns:
+    """A COVARIANCE run with no Block VI source returns only the -200 dB
+    white-noise floor (diagonal 1e-20, zero cross terms), so it warns and
+    names the noise knobs."""
+
+    _RCV = dict(depths=np.array([30.0, 50.0, 70.0]), ranges=np.array([0.0]))
+
+    def test_default_covariance_names_the_noise_knobs(self):
+        with pytest.warns(UserWarning, match='no noise source'):
+            cov = OASN(verbose=False).run(
+                make_pekeris(), uacpy.Source(depths=50.0, frequencies=100.0),
+                uacpy.Receiver(**self._RCV), RunMode.COVARIANCE)
+        C = np.asarray(cov.covariance)
+        assert np.abs(np.diagonal(C[0])) == pytest.approx(1e-20)
+
+    def test_configured_noise_field_is_silent(self, recwarn):
+        OASN(verbose=False, surface_noise_level=40.0).run(
+            make_pekeris(), uacpy.Source(depths=50.0, frequencies=100.0),
+            uacpy.Receiver(**self._RCV), RunMode.COVARIANCE)
+        assert not [w for w in recwarn.list
+                    if 'no noise source' in str(w.message)]
+
+
+@pytest.mark.requires_binary
+def test_oast_names_ranges_outside_the_native_grid():
+    """OAST's native FFT range grid does not start at r = 0, and dB
+    interpolation cannot extrapolate below its first sample — the NaN
+    columns come with a warning naming the native span and the offending
+    ranges, not just the generic dB-interpolation notice."""
+    with pytest.warns(UserWarning, match='outside the native FFT range grid'):
+        tl = OAST(verbose=False).run(
+            make_pekeris(), uacpy.Source(depths=50.0, frequencies=100.0),
+            uacpy.Receiver(depths=[50.0], ranges=[0.0, 500.0, 1000.0]))
+    assert np.isnan(np.asarray(tl.data)[:, 0]).all()
+    assert np.isfinite(np.asarray(tl.data)[:, 1:]).all()
+
+
+@pytest.mark.requires_binary
+def test_oasr_surface_roughness_is_dropped_with_a_warning():
+    """The OASR deck has no sea surface — its layer 1 is the water
+    half-space the plane wave arrives through, whose RG INENVI discards
+    (oaseun31.f:377) — so surface roughness is collapsed by the projection
+    with the standard disclosure instead of being silently swallowed."""
+    env = make_pekeris()
+    env.surface.roughness = 1.0
+    with pytest.warns(UserWarning, match='rough sea surface'):
+        refl = OASR(verbose=False).run(
+            env, uacpy.Source(depths=50.0, frequencies=100.0),
+            uacpy.Receiver(depths=[50.0], ranges=[1000.0]),
+            RunMode.REFLECTION)
+    assert refl is not None
 
 
 if __name__ == "__main__":

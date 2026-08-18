@@ -121,6 +121,11 @@ def radon_transform(data, sample_rate, dx, moveout, kind="linear", x0=0.0):
     nt, nx = d.shape
     x = np.arange(nx) * float(dx) - float(x0)
     moveout = np.atleast_1d(np.asarray(moveout, dtype=float))
+    if kind == "hyperbolic" and np.any(moveout <= 0):
+        raise ConfigurationError(
+            "radon_transform: hyperbolic moveout is a velocity (m/s) and the "
+            "moveout curve sqrt(tau^2 + (x/v)^2) divides by it, so every "
+            f"value must be > 0; got min {moveout.min()}.")
     taus = np.arange(nt) / float(sample_rate)
     R = np.zeros((moveout.size, nt))
     for i, m in enumerate(moveout):
@@ -144,6 +149,11 @@ def inverse_radon(R, sample_rate, dx, moveout, nx, kind="linear", x0=0.0):
     moveout = np.atleast_1d(np.asarray(moveout, dtype=float))
     if moveout.size != nm:
         raise ConfigurationError("inverse_radon: moveout length must match R rows")
+    if kind == "hyperbolic" and np.any(moveout <= 0):
+        raise ConfigurationError(
+            "inverse_radon: hyperbolic moveout is a velocity (m/s) and the "
+            "moveout curve sqrt(tau^2 + (x/v)^2) divides by it, so every "
+            f"value must be > 0; got min {moveout.min()}.")
     taus = np.arange(nt) / float(sample_rate)
     x = np.arange(int(nx)) * float(dx) - float(x0)
     out = np.zeros((nt, int(nx)))
@@ -224,11 +234,19 @@ def inverse_taup(taup, slownesses, sample_rate, dx, nx):
 
 
 def inverse_fk(FK):
-    """Inverse f-k transform: complex (fftshifted) spectrum -> real ``(nt, nx)``.
+    """Inverse f-k transform: complex (fftshifted) spectrum -> real gather.
 
     Pass the (possibly filtered/muted) complex spectrum — i.e. the ``spectrum``
     returned by :func:`fk_transform` (single-segment), after any f-k mask. It
     must be in the ``fftshift``ed layout that :func:`fk_transform` produces.
+
+    The output has the **spectrum's** shape ``(NT, NX)`` — the zero-padded
+    ``nfft`` shape when the forward transform was padded, with the original
+    ``(nt, nx)`` gather in its top-left corner followed by the padding.
+    The forward ``window`` taper is **not** undone: a windowed forward
+    transform inverts to the *tapered* gather, and recovering the original
+    data requires dividing the tapers back out (undefined where they are
+    zero). For an exact round trip run ``fk_transform`` with ``window=None``.
     """
     if FK is None:
         raise ConfigurationError(

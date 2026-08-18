@@ -63,18 +63,75 @@ class TestWithAttenuation:
         assert np.all(out.k.imag > 0)
 
     def test_depth_dependent_alpha_weighted_by_phi_square(self):
+        """The stated formula, reimplemented independently on the same grid:
+        α_m = (ω/(c·k_rm)) · ∫α_np·φ²dz / ∫φ²dz  (uniform c=1500, ρ=1, so
+        the density weights cancel), pinned mode-by-mode at rel 1e-6. The
+        closed-form step integral (sin² between 50 and 100 m over the full
+        column; exactly 1/2 as (m+½)π zeroes the sin(2·kz·D) terms) sits
+        1-3 % away — the quadrature's half-cell smear of the step — so the
+        theory anchor is a 5 % band on top of the exact-quadrature pin."""
         modes = _pekeris_modes()
         a = np.where(modes.depths < 50.0, 0.0, 2.0)
         out = modes.with_attenuation(a)
+
+        a_np = a * np.log(10.0) / 20.0
+        phi2 = np.asarray(modes.phi).real ** 2
+        weight = (np.trapezoid(a_np[:, None] * phi2, modes.depths, axis=0)
+                  / np.trapezoid(phi2, modes.depths, axis=0))
+        omega = 2.0 * np.pi * float(modes.f0)
+        expected = (omega / (1500.0 * modes.k.real)) * weight
+        np.testing.assert_allclose(out.k.imag, expected, rtol=1e-6)
+
+        D, z0 = 100.0, 50.0
         max_np_m = 2.0 * np.log(10.0) / 20.0
-        # Allow some slack — the (k₀/k_rm) factor pushes the result a
-        # bit; bound it loosely below the deepest uniform value.
-        assert 0.0 < out.k[0].imag < 2.0 * max_np_m
+        for m in range(3):
+            kz = (m + 0.5) * np.pi / D
+            frac = (0.5 * (D - z0)
+                    + np.sin(2.0 * kz * z0) / (4.0 * kz)) / (D / 2.0)
+            analytic = (omega / (1500.0 * modes.k[m].real)) * max_np_m * frac
+            assert out.k[m].imag == pytest.approx(analytic, rel=0.05)
 
     def test_shape_mismatch_raises(self):
         modes = _pekeris_modes()
         with pytest.raises(ConfigurationError, match="must match depths"):
             modes.with_attenuation(np.array([0.001, 0.002]))
+
+
+class TestComputeGroupVelocity:
+    """``Modes.compute_group_velocity`` is the finite difference dω/dk from
+    two solves at nearby frequencies (kraken.md §4). The synthetic modes
+    carry the exact ideal-waveguide dispersion k(ω) = sqrt((ω/c)² − kz²),
+    whose group velocity is v_g = c²k/ω; the 1 Hz difference at 50 Hz
+    reproduces the midpoint value to better than 1e-5 relative."""
+
+    def test_matches_the_analytic_pekeris_group_velocity(self):
+        f1, f2 = 50.0, 51.0
+        m1 = _pekeris_modes(freq=f1)
+        m2 = _pekeris_modes(freq=f2)
+        vg = m1.compute_group_velocity(m2)
+        assert vg.shape == (3,)
+
+        c0, D = 1500.0, 100.0
+        fm = 0.5 * (f1 + f2)
+        omega_m = 2.0 * np.pi * fm
+        for m in range(3):
+            kz = (m + 0.5) * np.pi / D
+            km = np.sqrt((omega_m / c0) ** 2 - kz ** 2)
+            assert vg[m] == pytest.approx(c0 ** 2 * km / omega_m, rel=1e-4)
+        # Physical ordering: every mode travels below the free speed and
+        # higher modes are slower.
+        assert np.all(vg < c0)
+        assert np.all(np.diff(vg) < 0)
+
+    def test_same_frequency_pair_is_refused(self):
+        m1 = _pekeris_modes(freq=50.0)
+        with pytest.raises(ConfigurationError, match='distinct'):
+            m1.compute_group_velocity(_pekeris_modes(freq=50.0))
+
+    def test_mismatched_mode_counts_truncate_to_the_shared_set(self):
+        vg = _pekeris_modes(n_modes=3, freq=50.0).compute_group_velocity(
+            _pekeris_modes(n_modes=2, freq=51.0))
+        assert vg.shape == (2,)
 
 
 class TestModalPropagationLoss:

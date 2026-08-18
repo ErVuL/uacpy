@@ -82,14 +82,9 @@ class Receiver:
     receiver_type: str = 'grid'
 
     def __post_init__(self):
-        valid_types = ('grid', 'line')
-        if self.receiver_type not in valid_types:
+        if self.receiver_type != 'grid':
             raise ConfigurationError(
-                f"receiver_type must be one of {list(valid_types)}, "
-                f"got {self.receiver_type!r}"
-            )
-        if self.receiver_type == 'line':
-            raise ConfigurationError(
+                f"receiver_type must be 'grid'; got {self.receiver_type!r}. "
                 "receiver_type='line' is not implemented — every model "
                 "returns the full depth x range grid, so the paired "
                 "(depths[i], ranges[i]) sampling would be silently ignored. "

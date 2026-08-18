@@ -3,7 +3,6 @@ Readers for Kraken normal-mode files (binary ``.mod``).
 
 * ``read_modes`` — read a ``.mod`` and attach the halfspace parameters.
 * ``read_modes_bin`` — binary ``.mod``.
-* ``get_component`` — extract a column from a Kraken modes dict.
 
 The binary direct-access ``.mod`` is the only mode format any
 Acoustics-Toolbox program writes; a non-``.mod`` path raises
@@ -20,129 +19,6 @@ from uacpy.core.exceptions import (
     ConfigurationError, FileFormatError,
 )
 from uacpy.io._fortran_helpers import PARSE_ERRORS, detect_endian
-
-
-def get_component(modes_dict: Dict[str, Any], comp: str) -> np.ndarray:
-    """
-    Extract a single component from the stress-displacement vector in mode data.
-
-    For elastic media, mode solutions contain multiple components (horizontal
-    displacement, vertical displacement, stress components). This function
-    extracts the requested component.
-
-    Parameters
-    ----------
-    modes_dict : dict
-        Modes structure containing:
-        - 'phi': Mode shapes (ndarray)
-        - 'z': Depth vector
-        - 'Nmedia': Number of media layers
-        - 'Mater': Material types ('ACOUSTIC' or 'ELASTIC ')
-        - 'N': Number of mesh points per medium. Read only by the KRAKEL
-          variant of the depth loop, which this does not take (see below).
-    comp : str
-        Component to extract:
-        - 'H': Horizontal displacement
-        - 'V': Vertical displacement
-        - 'T': Tangential stress
-        - 'N': Normal stress
-        For acoustic media, any component returns the pressure field.
-
-    Returns
-    -------
-    phi : ndarray
-        Extracted component, shape (nz, nmodes)
-
-    Notes
-    -----
-    Mode structure conventions:
-    - Acoustic media: 1 component (pressure)
-    - Elastic media: 4 components (H, V, T, N)
-
-    KRAKEL tabulates modes at finite difference grid points.
-    Other codes (KRAKEN, KRAKENC) tabulate at receiver depths.
-
-    Mirrors ``Matlab/ReadWrite/get_component.m`` (mbp, 8/14/2010). No
-    ``krakel`` binary ships in ``uacpy/bin/oalib``, so with the shipped
-    solvers ``Mater`` never contains ``'ELASTIC'`` and the four-component
-    branch is unreachable; it is kept because the file format admits it.
-
-    Examples
-    --------
-    >>> # Extract horizontal displacement from elastic modes
-    >>> phi_h = get_component(modes, 'H')
-
-    >>> # Extract pressure from acoustic modes (any component)
-    >>> phi_p = get_component(modes, 'H')  # Same as 'V', 'T', 'N'
-    """
-    # Mirrors ``Matlab/ReadWrite/get_component.m``, which differs from AT's
-    # Fortran EXTRACT (``KrakenField/ReadModes.f90:307-331``) in exactly one
-    # place: the depth-loop bound. EXTRACT walks ``N(Medium)+1`` grid points
-    # per medium, which is right for KRAKEL — it tabulates modes on the
-    # finite-difference grid — while KRAKEN/KRAKENC subtabulate to the
-    # receiver depths, so the MATLAB walks ``length(Modes.z)`` and keeps
-    # ``Modes.N`` only as a commented-out KRAKEL alternative
-    # (``get_component.m:6-7,16-18``). Two cursors, because the axes advance
-    # at different rates: ``k`` walks the packed stress-displacement vector,
-    # 1 entry per depth point in an acoustic medium but 4 (H, V, T, N) in an
-    # elastic one, while ``jj`` walks depth points. ``phi_full`` is trusted
-    # only up to its own length: a KRAKEN run does not tabulate the elastic
-    # media, so the stored block can be shorter than ``Nmedia``/``Mater``
-    # imply (``get_component.m:19-23``).
-    phi = []
-    jj = 0
-    k = 0
-
-    Nmedia = modes_dict.get("Nmedia", 1)
-    phi_full = modes_dict["phi"]
-    z = modes_dict["z"]
-    Mater = modes_dict.get("Mater", [["ACOUSTIC"]])
-    for medium in range(Nmedia):
-        for ii in range(len(z)):
-            if k >= phi_full.shape[0]:
-                break
-            if medium < len(Mater):
-                material = (
-                    Mater[medium].strip()
-                    if isinstance(Mater[medium], str)
-                    else str(Mater[medium]).strip()
-                )
-            else:
-                material = "ACOUSTIC"
-
-            if material == "ACOUSTIC":
-                if jj < len(z):
-                    phi.append(phi_full[k, :])
-                k += 1
-
-            elif material == "ELASTIC":
-                if jj < len(z):
-                    if comp == "H":
-                        phi.append(phi_full[k, :])
-                    elif comp == "V":
-                        phi.append(phi_full[k + 1, :])
-                    elif comp == "T":
-                        phi.append(phi_full[k + 2, :])
-                    elif comp == "N":
-                        phi.append(phi_full[k + 3, :])
-                    else:
-                        raise ConfigurationError(f"Unknown component: {comp}")
-                k += 4
-
-            else:
-                # Mater comes from the .mod file's own header, so an unknown
-                # value is malformed file content, not a caller error.
-                raise FileFormatError(f"Unknown material type: {material}")
-
-            jj += 1
-
-    if not phi:
-        raise FileFormatError(
-            "get_component: the modes set contains no readable modes (M=0) — "
-            "nothing to extract. The waveguide is likely below modal cutoff at "
-            "this frequency; check the .mod record before requesting a component."
-        )
-    return np.array(phi)
 
 
 def _fortran_div(numerator: int, denominator: int) -> int:

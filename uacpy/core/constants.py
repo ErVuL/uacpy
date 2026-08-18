@@ -60,16 +60,13 @@ DECK_RANGE_RESOLUTION_M = 1.0e-3
 # blows up the integral). 0.95·c_min is the canonical conservative
 # choice.
 #
-# ``C_LOW_FACTOR_KRAKEN`` is the modal-solver default. KRAKEN's c_low is
-# the slowest phase speed in the mode search; 0 makes KRAKEN compute it
-# automatically (kraken.htm, Phase Speed Limits). A positive c_low excludes
-# slow interfacial (Scholte / Stoneley) modes.
-#
 # ``C_HIGH_FACTOR`` pads the upper bound symmetrically: the writers take
 # ``c_high = 1.05 · max(c_max, bottom cp)`` so the fastest speed in the problem
 # sits strictly inside the interval rather than on its edge.
+# (KRAKEN's modal-solver c_low default is the literal 0.0 written at its use
+# site in ``models/kraken.py`` — 0 makes KRAKEN compute the bound itself, per
+# kraken.htm, Phase Speed Limits.)
 C_LOW_FACTOR = 0.95
-C_LOW_FACTOR_KRAKEN = 0.0
 C_HIGH_FACTOR = 1.05
 
 DEFAULT_C_MIN = 1400.0   # below slowest expected water-column speed

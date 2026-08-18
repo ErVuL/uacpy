@@ -92,11 +92,13 @@ def demo_bellhop_bounce():
 
     bellhop = Bellhop(verbose=True)
 
-    # No-shear baseline: auto_bounce=False, else the elastic bottom
-    # auto-routes through BOUNCE and matches Method 2 exactly.
-    print("\n--- Standard Bellhop (half-space, no shear) ---")
-    bellhop_fluid = Bellhop(verbose=True, auto_bounce=False)
-    result_hs = bellhop_fluid.run(env, source, receiver, run_mode=RunMode.COHERENT_TL)
+    # Baseline: only *layered* bottoms auto-route through BOUNCE, so this
+    # elastic half-space runs natively either way — bellhop.f90 applies its
+    # exact acousto-elastic reflection coefficient (shear included);
+    # auto_bounce=False just makes that explicit.
+    print("\n--- Standard Bellhop (native elastic half-space) ---")
+    bellhop_native = Bellhop(verbose=True, auto_bounce=False)
+    result_hs = bellhop_native.run(env, source, receiver, run_mode=RunMode.COHERENT_TL)
 
     # Method 2: With BOUNCE (accounts for shear)
     print("\n--- Bellhop with BOUNCE reflection coefficients ---")
@@ -117,7 +119,7 @@ def demo_bellhop_bounce():
     vmin, vmax = 40, 90
     plot_field(result_hs, env=env, ax=axes[0],
                            show_colorbar=False, vmin=vmin, vmax=vmax)
-    axes[0].set_title('Half-space (no shear)', fontsize=11, fontweight='bold')
+    axes[0].set_title('Native elastic half-space', fontsize=11, fontweight='bold')
     plot_field(result_bounce, env=env, ax=axes[1],
                            show_colorbar=False, vmin=vmin, vmax=vmax)
     axes[1].set_title('BOUNCE (with shear)', fontsize=11, fontweight='bold')
@@ -271,21 +273,18 @@ def demo_range_dependent_bottom():
         ranges=np.linspace(100, 5000, 40),
     )
 
-    # Run RAM with true RD bottom (via modified Fortran)
+    # Run RAM with true RD bottom (via modified Fortran). A RAM failure
+    # propagates: this run is the part's subject, so there is nothing
+    # useful to show without it.
     print("\n--- Running RAM with range-dependent bottom ---")
-    try:
-        ram = RAM(verbose=True, accuracy=1e-1)
-        result = ram.run(env, source, receiver)
-        print(f"RAM TL: {np.nanmin(result.db):.1f} to {np.nanmax(result.db):.1f} dB")
+    ram = RAM(verbose=True, accuracy=1e-1)
+    result = ram.run(env, source, receiver)
+    print(f"RAM TL: {np.nanmin(result.db):.1f} to {np.nanmax(result.db):.1f} dB")
 
-        fig1, ax1 = plot_field(result, env=env, contours=[70, 85, 100])
-        ax1.set_title('RAM TL — Range-Dependent Bottom (Mud to Sand)')
-        plt.savefig(OUTPUT_DIR / 'example_16_rd_bottom_tl.png', dpi=150, bbox_inches='tight')
-        print("  ✓ Saved: output/example_16_rd_bottom_tl.png")
-    except Exception as e:
-        print(f"  RAM error: {e}")
-        import traceback
-        traceback.print_exc()
+    fig1, ax1 = plot_field(result, env=env, contours=[70, 85, 100])
+    ax1.set_title('RAM TL — Range-Dependent Bottom (Mud to Sand)')
+    plt.savefig(OUTPUT_DIR / 'example_16_rd_bottom_tl.png', dpi=150, bbox_inches='tight')
+    print("  ✓ Saved: output/example_16_rd_bottom_tl.png")
 
     # Plot RD bottom properties
     fig2, _ = env.plot()
@@ -381,23 +380,20 @@ def demo_rd_layered_bottom():
         ranges=np.linspace(100, 8000, 40),
     )
 
-    # Run RAM (supports RD layered via Fortran sediment file)
+    # Run RAM (supports RD layered via Fortran sediment file). A RAM
+    # failure propagates: this run is the part's subject, so there is
+    # nothing useful to show without it.
     print("\n--- Running RAM with range-dependent layered bottom ---")
-    try:
-        ram = RAM(verbose=True, accuracy=1e-1)
-        result = ram.run(env, source, receiver)
-        print(f"RAM TL: {np.nanmin(result.db):.1f} to "
-              f"{np.nanmax(result.db):.1f} dB")
+    ram = RAM(verbose=True, accuracy=1e-1)
+    result = ram.run(env, source, receiver)
+    print(f"RAM TL: {np.nanmin(result.db):.1f} to "
+          f"{np.nanmax(result.db):.1f} dB")
 
-        fig1, ax1 = plot_field(result, env=env, contours=[70, 85, 100])
-        ax1.set_title('RAM TL — Range-Dependent Layered Bottom')
-        plt.savefig(OUTPUT_DIR / 'example_16_rdl_tl.png', dpi=150,
-                    bbox_inches='tight')
-        print("  ✓ Saved: output/example_16_rdl_tl.png")
-    except Exception as e:
-        print(f"  RAM error: {e}")
-        import traceback
-        traceback.print_exc()
+    fig1, ax1 = plot_field(result, env=env, contours=[70, 85, 100])
+    ax1.set_title('RAM TL — Range-Dependent Layered Bottom')
+    plt.savefig(OUTPUT_DIR / 'example_16_rdl_tl.png', dpi=150,
+                bbox_inches='tight')
+    print("  ✓ Saved: output/example_16_rdl_tl.png")
 
     # Plot the RD layered structure
     fig2, axes2 = env.plot()

@@ -12,6 +12,8 @@ one. Whole file: a few seconds.
 
 import warnings
 
+import functools
+
 import numpy as np
 import pytest
 
@@ -261,15 +263,42 @@ def test_ram_collins_threads_rd_bottom(tmp_path):
     # rams writes six profile blocks per section, so bathymetry plus two
     # sections is 13 terminators. The section marker is the midpoint of the two
     # breakpoints, inside the 2 km march, and each section carries its own
-    # compressional column.
+    # compressional column. Values are parsed from the tokens rather than
+    # matched as strings so the assertion is independent of the writer's
+    # float format (%.12g renders the marker as a bare '1000').
     deck = (tmp_path / 'rams.in').read_text().splitlines()
     assert deck.count('-1 -1') == 1 + 6 * 2
-    cut = deck.index('1000.000000')
-    head, tail = deck[:cut], deck[cut:]
-    assert any('1700.000000' in ln for ln in head)
-    assert not any('1800.000000' in ln for ln in head)
-    assert any('1800.000000' in ln for ln in tail)
-    assert not any('1700.000000' in ln for ln in tail)
+
+    def _lone_token(line):
+        tokens = line.split()
+        if len(tokens) != 1:
+            return None
+        try:
+            return float(tokens[0])
+        except ValueError:
+            return None
+
+    # The section marker is the deck's only single-token line.
+    markers = [i for i, ln in enumerate(deck) if _lone_token(ln) == 1000.0]
+    assert len(markers) == 1
+    cut = markers[0]
+
+    def _column_values(lines):
+        values = set()
+        for ln in lines:
+            tokens = ln.split()
+            if len(tokens) == 2:
+                try:
+                    values.add(float(tokens[1]))
+                except ValueError:
+                    pass
+        return values
+
+    head, tail = _column_values(deck[:cut]), _column_values(deck[cut:])
+    assert 1700.0 in head
+    assert 1800.0 not in head
+    assert 1800.0 in tail
+    assert 1700.0 not in tail
 
     # Reducing the bottom to its r=0 column would reproduce this field exactly.
     p_r0 = complex(np.asarray(RAM().run(
@@ -572,7 +601,7 @@ def test_kraken_segmentation_unions_distinct_axes():
         bathymetry=[(0.0, 100.0), (5_000.0, 150.0), (10_000.0, 200.0)],
         ssp=ssp,
     )
-    segments = segment_environment_by_range(env, max_segment_length=20_000)
+    segments = segment_environment_by_range(env)
     seg_ranges = [r for r, _ in segments]
     for rk in (0.0, 2_000.0, 4_000.0, 5_000.0, 6_000.0, 10_000.0):
         assert any(abs(r - rk) < 1.0 for r in seg_ranges), (
@@ -1107,3 +1136,236 @@ def test_kraken_top_reflection_file_keeps_surface_roughness(tmp_path):
     projected = Kraken(top_reflection_file=trc)._project_environment(env)
     assert projected.surface.properties[0].acoustic_type == 'file'
     assert float(projected.surface.roughness) == 1.5
+
+
+# --- shared carrier validators (uacpy/core/_carrier_validate.py) -----------
+
+class TestValidatorMessagesStayBounded:
+    """The shared validators report the first offending element (value, flat
+    index) and the axis length, never the whole array — so the exception for
+    a large axis stays a single readable line."""
+
+    def test_finite_reports_first_offender_not_the_array(self):
+        from uacpy.core._carrier_validate import _require_finite
+        big = np.arange(50000.0)
+        big[123] = np.nan
+        with pytest.raises(ConfigurationError, match="must be finite") as exc:
+            _require_finite(big, "X")
+        msg = str(exc.value)
+        assert len(msg) < 500
+        assert "index 123" in msg
+        assert "50000" in msg
+
+    def test_positive_reports_first_offender(self):
+        from uacpy.core._carrier_validate import _require_positive
+        vals = np.ones(10000)
+        vals[7] = -2.0
+        with pytest.raises(ConfigurationError, match="must be positive") as exc:
+            _require_positive(vals, "X")
+        msg = str(exc.value)
+        assert len(msg) < 500
+        assert "-2" in msg and "index 7" in msg
+
+    def test_non_negative_reports_first_offender(self):
+        from uacpy.core._carrier_validate import _require_non_negative
+        vals = np.zeros(10000)
+        vals[42] = -1.5
+        with pytest.raises(ConfigurationError,
+                           match="must be non-negative") as exc:
+            _require_non_negative(vals, "X")
+        msg = str(exc.value)
+        assert len(msg) < 500
+        assert "-1.5" in msg and "index 42" in msg
+
+    def test_strictly_increasing_reports_pair_and_length(self):
+        from uacpy.core._carrier_validate import _require_strictly_increasing
+        axis = np.arange(10000.0)
+        axis[500] = 0.0
+        with pytest.raises(ConfigurationError,
+                           match="strictly increasing") as exc:
+            _require_strictly_increasing(axis, "X")
+        msg = str(exc.value)
+        assert len(msg) < 500
+        assert "axis length 10000" in msg
+
+
+def test_coerce_data_sources_none_is_empty_provenance():
+    """``data_sources=None`` means no provenance and coerces to ``()``,
+    like an empty sequence."""
+    from uacpy.core._carrier_validate import _coerce_data_sources
+    assert _coerce_data_sources(None, "X") == ()
+    assert _coerce_data_sources((), "X") == ()
+
+
+# --- base.py validate_inputs funnel: frequency / depth / surface guards ----
+#
+# Every concrete ``run()`` calls ``validate_inputs`` (Bounce overrides
+# ``_validate_geometry`` to a no-op — reflection decks read no geometry — so
+# it appears below only where its own guards fire). The tests call
+# ``validate_inputs`` directly where the guard lives there, and ``run()``
+# where the guard fires later on the run path but still before any deck is
+# written or binary launched.
+
+
+def _guard_env():
+    """Scalar Pekeris env with geoacoustic half-space (RAM's own
+    validate_inputs refuses vacuum/rigid/tabulated bottoms)."""
+    return uacpy.Environment(
+        name='guards', bathymetry=100.0, ssp=1500.0,
+        bottom=uacpy.BoundaryProperties(acoustic_type='half-space',
+                                        sound_speed=1700.0, density=1.7,
+                                        attenuation=0.5))
+
+
+def _guard_rcv():
+    return uacpy.Receiver(depths=[50.0], ranges=[1000.0])
+
+
+def _model_mode_params(entries):
+    """(model class, run mode) pytest params carrying the binary marks.
+
+    Constructing any model resolves (and existence-checks) its binary, so
+    every param carries ``requires_binary``; the OASES family adds
+    ``requires_oases``.
+    """
+    from uacpy.models.bellhop import Bellhop
+    from uacpy.models.bounce import Bounce
+    from uacpy.models.kraken import Kraken
+    from uacpy.models.oases import OAST, OASN, OASP, OASR, OASS, OASSP
+    from uacpy.models.ram import RAM
+    from uacpy.models.scooter import Scooter
+    from uacpy.models.sparc import SPARC
+    classes = {cls.__name__: cls for cls in (
+        Bellhop, Bounce, Kraken, OAST, OASN, OASP, OASR, OASS, OASSP,
+        RAM, Scooter, SPARC)}
+    params = []
+    for name, mode in entries:
+        marks = [pytest.mark.requires_binary]
+        if name.startswith('OAS'):
+            marks.append(pytest.mark.requires_oases)
+        ctor = classes[name]
+        if name in ('OASS', 'OASSP'):
+            # Both require the roughness correlation length at construction;
+            # without it the ctor guard fires before the guards under test.
+            ctor = functools.partial(ctor, correlation_length=10.0)
+        mode_tag = '' if mode is None else f'-{mode.name}'
+        params.append(pytest.param(ctor, mode,
+                                   id=f'{name}{mode_tag}', marks=marks))
+    return params
+
+
+@pytest.mark.parametrize('model_cls,mode', _model_mode_params([
+    ('Bellhop', uacpy.RunMode.COHERENT_TL),
+    ('Kraken', uacpy.RunMode.COHERENT_TL),
+    ('Kraken', uacpy.RunMode.MODES),
+    ('Scooter', uacpy.RunMode.COHERENT_TL),
+    ('RAM', uacpy.RunMode.COHERENT_TL),
+    ('OAST', uacpy.RunMode.COHERENT_TL),
+    ('OASP', uacpy.RunMode.COHERENT_TL),
+]))
+def test_single_frequency_mode_refuses_multi_frequency_source(model_cls,
+                                                              mode):
+    """A multi-frequency Source passed to a mode in
+    ``_SINGLE_FREQUENCY_MODES`` raises, pointing at BROADBAND/TIME_SERIES.
+
+    Not covered here because the base guard genuinely does not apply:
+    SPARC (TIME_SERIES only), Bounce (REFLECTION stays out of the set;
+    its own run()-level guard is pinned below) and OASR/OASN/OASS/OASSP,
+    whose modes (REFLECTION/COVARIANCE/REPLICA/REVERBERATION/BROADBAND)
+    sweep multiple frequencies by design.
+    """
+    src = uacpy.Source(depths=10.0, frequencies=[100.0, 200.0])
+    with pytest.raises(ConfigurationError, match='single source frequency'):
+        model_cls().validate_inputs(_guard_env(), src, _guard_rcv(),
+                                    run_mode=mode)
+
+
+@pytest.mark.requires_binary  # constructs Bounce (resolves its binary)
+def test_bounce_run_refuses_multi_frequency_source():
+    """``RunMode.REFLECTION`` stays out of ``_SINGLE_FREQUENCY_MODES`` (OASR
+    does sweep), so Bounce guards multi-frequency itself in ``run()`` — with
+    its own message, before any deck is written."""
+    from uacpy.models.bounce import Bounce
+    src = uacpy.Source(depths=10.0, frequencies=[100.0, 200.0])
+    with pytest.raises(ConfigurationError,
+                       match='reflection coefficient at one'):
+        Bounce().run(_guard_env(), src, _guard_rcv())
+
+
+@pytest.mark.parametrize('model_cls,mode', _model_mode_params([
+    ('Kraken', None), ('Scooter', None), ('SPARC', None), ('RAM', None),
+    ('OAST', None), ('OASN', None), ('OASR', None), ('OASP', None),
+    ('OASS', None), ('OASSP', None),
+]))
+def test_multi_depth_source_refused_without_multi_source_depth(model_cls,
+                                                               mode):
+    """Every model but Bellhop runs one source depth per binary call, so a
+    multi-depth Source raises 'single source depth' in
+    ``_validate_geometry``. Bellhop declares ``multi_source_depth`` and is
+    excluded; Bounce's geometry validation is a no-op, so the guard
+    genuinely does not exist for it."""
+    src = uacpy.Source(depths=[10.0, 20.0], frequencies=100.0)
+    with pytest.raises(ConfigurationError, match='single source depth'):
+        model_cls().validate_inputs(_guard_env(), src, _guard_rcv())
+
+
+def test_bounce_rejects_quad_interp_at_construction():
+    """BOUNCE decks carry no water column, so there is no .ssp file for the
+    'quad' scheme to read; the constructor refuses it. The guard precedes
+    binary resolution in ``__init__``, so no binary is needed."""
+    from uacpy.models.bounce import Bounce
+    with pytest.raises(ConfigurationError, match="'quad'"):
+        Bounce(interp_ssp='quad')
+
+
+@pytest.mark.parametrize('model_cls,mode', _model_mode_params([
+    ('Scooter', None), ('SPARC', None),
+]))
+def test_quad_interp_refused_before_launch(model_cls, mode):
+    """``reject_unsupported_ssp_interp`` fires on the run() path right after
+    ``validate_inputs`` — before any deck is written — because the shared AT
+    reader (``misc/sspMod.f90:61-89``) has no 'Q' code; it is Bellhop-only.
+    Kraken's equivalent guard is pinned in test_kraken.py."""
+    src = uacpy.Source(depths=10.0, frequencies=100.0)
+    with pytest.raises(ConfigurationError, match='Bellhop-only'):
+        model_cls(interp_ssp='quad').run(_guard_env(), src, _guard_rcv())
+
+
+@pytest.mark.parametrize('model_cls,mode', _model_mode_params([
+    ('Kraken', uacpy.RunMode.COHERENT_TL),
+    ('Scooter', uacpy.RunMode.COHERENT_TL),
+    ('SPARC', uacpy.RunMode.TIME_SERIES),
+    ('RAM', uacpy.RunMode.COHERENT_TL),
+    ('OAST', uacpy.RunMode.COHERENT_TL),
+    ('OASP', uacpy.RunMode.COHERENT_TL),
+    ('OASN', uacpy.RunMode.COVARIANCE),
+    ('OASS', uacpy.RunMode.REVERBERATION),
+    ('OASSP', uacpy.RunMode.BROADBAND),
+]))
+def test_surface_source_warns_on_non_bellhop_field_models(model_cls, mode):
+    """A source at exactly z=0 sits on the pressure-release surface, where
+    the field is ~0: field-producing modes warn (base.py
+    ``_validate_geometry``) rather than silently returning a degenerate
+    result. Bellhop instead *raises* (its rays terminate on the boundary) —
+    pinned in test_surface_source_warns_for_field_runs above."""
+    src = uacpy.Source(depths=0.0, frequencies=100.0)
+    with pytest.warns(UserWarning, match='pressure-release sea surface'):
+        model_cls().validate_inputs(_guard_env(), src, _guard_rcv(),
+                                    run_mode=mode)
+
+
+@pytest.mark.parametrize('model_cls,mode', _model_mode_params([
+    ('Kraken', uacpy.RunMode.MODES),
+    ('OASR', uacpy.RunMode.REFLECTION),
+    ('Bounce', uacpy.RunMode.REFLECTION),
+]))
+def test_surface_source_is_silent_for_modes_and_reflection(model_cls, mode):
+    """Mode shapes and reflection coefficients propagate no source field, so
+    the z=0 surface-source warning is suppressed for
+    ``RunMode.MODES``/``RunMode.REFLECTION`` (and Bounce validates no
+    geometry at all)."""
+    src = uacpy.Source(depths=0.0, frequencies=100.0)
+    with warnings.catch_warnings():
+        warnings.simplefilter('error', UserWarning)
+        model_cls().validate_inputs(_guard_env(), src, _guard_rcv(),
+                                    run_mode=mode)

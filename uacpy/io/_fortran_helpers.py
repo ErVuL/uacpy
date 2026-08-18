@@ -443,50 +443,26 @@ def read_vector(fid) -> Tuple[np.ndarray, int]:
             remediation="Verify the file was written completely by the "
                         "matching model/writer.",
         )
-    elif Nx == 1:
-        warnings.warn(
-            "read_vector: Nx=1 record had no values; using 0.0.",
-            UserWarning, stacklevel=2,
-        )
-        x = 0.0
-    elif Nx == 2:
-        # SubTab only generates for Nx >= 3, so a '/' before both values is a
-        # malformed record — AT leaves x(2) at ReadVector's -999.9 pre-fill.
-        if len(values) == 1:
-            warnings.warn(
-                f"read_vector: Nx=2 record had 1 value; broadcasting "
-                f"{values[0]} to both slots.",
-                UserWarning, stacklevel=2,
-            )
-            x = np.array([values[0], values[0]])
-        else:
-            warnings.warn(
-                "read_vector: Nx=2 record had no values; using zeros.",
-                UserWarning, stacklevel=2,
-            )
-            x = np.zeros(2)
-    elif len(values) == 2:
+    elif Nx >= 3 and len(values) == 2:
         # SubTab's two-value branch: equally spaced from x(1) to x(2).
         x = np.linspace(values[0], values[1], Nx)
-    elif len(values) == 1:
+    elif Nx >= 3 and len(values) == 1:
         # SubTab's replicate branch (x(2) defaults to x(1) ⇒ zero spacing).
         x = np.full(Nx, values[0])
-    elif len(values) == 0:
-        warnings.warn(
-            f"read_vector: Nx={Nx} record had no values; using zeros.",
-            UserWarning, stacklevel=2,
-        )
-        x = np.zeros(Nx)
     else:
-        # More than 2 values but fewer than Nx before the '/'. SubTab does not
-        # generate for this case and AT leaves x(4:Nx) uninitialised, so there
-        # is no correct reading to recover.
+        # A '/' short of Nx values that SubTab cannot generate from. SubTab
+        # only generates for Nx >= 3 with 1 or 2 values given
+        # (subtabulate.f90:3-5,24-28); every other slash-terminated shortfall
+        # leaves AT slots at ReadVector's -999.9 pre-fill (x(2)/x(3),
+        # SourceReceiverPositions.f90:219-220) or uninitialised (x(1),
+        # x(4:Nx)), so there is no correct reading to recover.
         raise FileFormatError(
             f"read_vector: Nx={Nx} record was terminated by '/' after "
-            f"{len(values)} values; only 1 (replicate) or 2 (equally spaced) "
-            f"values generate a vector.",
-            remediation="Give either 2 values before the '/' or all "
-                        f"{Nx} values.",
+            f"{len(values)} values; only a 1-value (replicate) or 2-value "
+            f"(equally spaced) record generates a vector, and only for "
+            f"Nx >= 3.",
+            remediation=f"Give all {Nx} values, or (for Nx >= 3) give 1 or 2 "
+                        f"values before the '/'.",
         )
 
     return np.atleast_1d(x), Nx

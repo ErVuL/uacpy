@@ -40,6 +40,7 @@ from typing import List, Tuple, Union
 
 from uacpy.core.constants import DEFAULT_SOUND_SPEED, NEPER_TO_DB
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.core._carrier_validate import _require_attenuation_in_range
 
 
 _ArrayLike = Union[float, np.ndarray]
@@ -62,13 +63,19 @@ def thorp_db_per_km(frequency: _ArrayLike) -> np.ndarray:
     frequency : float or array
         Frequency in Hz.
 
+    Returns
+    -------
+    ndarray, same shape as ``frequency``
+        0-d for a scalar input; an array input keeps its shape (a
+        1-element array stays 1-D).
+
     References
     ----------
     Thorp, W. H. (1967). JASA 42(1), 270 (original).
     Jensen, Kuperman, Porter, Schmidt — *Computational Ocean
     Acoustics*, 2nd ed., Eq. (1.47).
     """
-    f = np.atleast_1d(np.asarray(frequency, dtype=float)) / 1000.0
+    f = np.asarray(frequency, dtype=float) / 1000.0
     f2 = f * f
     a = (
         3.3e-3
@@ -76,7 +83,7 @@ def thorp_db_per_km(frequency: _ArrayLike) -> np.ndarray:
         + 44.0 * f2 / (4100.0 + f2)
         + 3.0e-4 * f2
     )
-    return np.squeeze(a)
+    return a
 
 
 def francois_garrison_db_per_km(
@@ -101,6 +108,12 @@ def francois_garrison_db_per_km(
     depth : float or array
         Depth (m). Default 1000.
 
+    Returns
+    -------
+    ndarray, the broadcast shape of the inputs
+        0-d when every input is scalar; array inputs keep their
+        broadcast shape (a 1-element array stays 1-D).
+
     Notes
     -----
     Implementation follows the Acoustics Toolbox ``AttenMod.f90``.
@@ -109,7 +122,7 @@ def francois_garrison_db_per_km(
     ----------
     Francois & Garrison (1982). JASA 72(6), 1879–1890.
     """
-    f = np.atleast_1d(np.asarray(frequency, dtype=float)) / 1000.0
+    f = np.asarray(frequency, dtype=float) / 1000.0
     T = np.asarray(temperature, dtype=float)
     S = np.asarray(salinity, dtype=float)
     z = np.asarray(depth, dtype=float)
@@ -144,7 +157,7 @@ def francois_garrison_db_per_km(
         + A2 * P2 * (f2 * f * f) / (f2 * f2 + f * f)
         + A3 * P3 * f * f
     )
-    return np.squeeze(a)
+    return a
 
 
 def convert_attenuation_units(
@@ -165,11 +178,16 @@ def convert_attenuation_units(
     - ``dB/m`` — ``a · 20/ln(10)``; the pivot every path converts through.
     - ``dB/km`` — dB of amplitude loss per 1000 m.
     - ``dB/wavelength`` — dB per ``lambda = c/f``, hence frequency-independent.
-    - ``Q`` — quality factor, ``a = omega/(2·c·Q)``.
+    - ``Q`` — quality factor, ``a = omega/(2·c·Q)``. Q divides, so a
+      conversion *from* ``'Q'`` requires ``alpha > 0`` and raises
+      :class:`ConfigurationError` otherwise.
     - ``L`` — loss tangent, ``a = L·omega/c``.
 
     ``sound_speed`` is therefore required for the wavelength / Q / L paths and
     ignored for the rest.
+
+    Returns an ndarray shaped like ``alpha``: 0-d for a scalar input; an
+    array input keeps its shape (a 1-element array stays 1-D).
 
     Notes
     -----
@@ -187,7 +205,7 @@ def convert_attenuation_units(
     Pass through Acoustics-Toolbox directly (set ``TopOpt`` position 4
     to ``'m'`` or ``'F'``) if you need those formulas.
     """
-    alpha = np.atleast_1d(np.asarray(alpha, dtype=float))
+    alpha = np.asarray(alpha, dtype=float)
 
     if from_unit == 'dB/km':
         alpha_db_m = alpha / 1000.0
@@ -199,7 +217,15 @@ def convert_attenuation_units(
     elif from_unit == 'Nepers/m':
         alpha_db_m = alpha * NEPER_TO_DB
     elif from_unit == 'Q':
-        # alphaT = omega / (2 * c * Q)
+        # Q sits in the denominator of alphaT = omega / (2 * c * Q), so a
+        # non-positive Q has no attenuation to convert (Q -> inf is the
+        # lossless limit).
+        if np.any(alpha <= 0):
+            raise ConfigurationError(
+                f"convert_attenuation_units: from_unit='Q' requires a "
+                f"positive quality factor (alphaT = omega / (2*c*Q)); "
+                f"got {float(np.min(alpha)):g}."
+            )
         alpha_nepers_m = np.pi * frequency / (alpha * sound_speed)
         alpha_db_m = alpha_nepers_m * NEPER_TO_DB
     elif from_unit == 'L':
@@ -227,7 +253,7 @@ def convert_attenuation_units(
     else:
         raise ConfigurationError(f"Unknown unit: {to_unit}")
 
-    return np.squeeze(result)
+    return result
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -360,7 +386,7 @@ class FrancoisGarrison(Absorption):
             pH=self.pH,
             depth=z,
         )
-        return np.atleast_1d(a_km) / 1000.0
+        return a_km / 1000.0
 
 
 @dataclass
@@ -461,17 +487,13 @@ class Biological(Absorption):
             )
         z = np.atleast_1d(np.asarray(depths, dtype=float))
         a_km = np.zeros(z.shape, dtype=float)
-        # A depth exactly on a boundary two stacked layers share belongs to
-        # the upper layer only (the layer-boundary convention shared with
-        # ``SeabedColumn._layer_at``): each layer spans (z_top, z_bottom],
-        # with z_top kept inclusive when no other layer ends there.
-        layer_bottoms = {layer.z_bottom_m for layer in self.layers}
+        # Each layer spans the closed interval [z_top, z_bottom] and is
+        # tested independently, exactly as the AttenMod.f90:102-109 loop
+        # tests ``z >= Z1 .AND. z <= Z2`` per layer and sums — so a depth
+        # exactly on a boundary two stacked layers share receives both
+        # layers' contributions.
         for layer in self.layers:
-            if layer.z_top_m in layer_bottoms:
-                above_top = z > layer.z_top_m
-            else:
-                above_top = z >= layer.z_top_m
-            in_layer = above_top & (z <= layer.z_bottom_m)
+            in_layer = (z >= layer.z_top_m) & (z <= layer.z_bottom_m)
             denom = (1.0 - layer.f0_hz ** 2 / f ** 2) ** 2 + 1.0 / layer.Q ** 2
             a_km[in_layer] += layer.a0 / denom
         return a_km / 1000.0
@@ -496,6 +518,9 @@ class ConstantAbsorption(Absorption):
                 f"ConstantAbsorption.value_db_per_wavelength must be "
                 f"non-negative; got {self.value_db_per_wavelength}."
             )
+        _require_attenuation_in_range(
+            self.value_db_per_wavelength,
+            "ConstantAbsorption.value_db_per_wavelength")
 
     def topopt_code(self) -> str:
         return ' '

@@ -193,6 +193,8 @@ class Surface:
     def collapse(self, method: str = 'r0') -> 'Surface':
         """Collapse a range-dependent surface to a single uniform boundary.
 
+        Returns ``self`` (not a copy) when the surface is already uniform.
+
         ``'r0'`` / ``'rmax'`` keep the first / last node. ``'mean'`` /
         ``'median'`` numerically average the boundary properties across nodes
         (keeping the r = 0 ``acoustic_type``) — only physical when the nodes

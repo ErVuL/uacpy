@@ -4,8 +4,8 @@ RAM file formats (which variously expect km, kHz, or degrees).
 
 Every writer that emits a km-on-disk axis goes through ``m_to_km``;
 every reader that returns a metres-API axis goes through ``km_to_m``.
-Same for phase columns via ``deg_to_rad`` / ``rad_to_deg``. Centralising
-the conversions makes the "did I convert?" question grep-able.
+Same for phase columns via ``deg_to_rad``. Centralising the conversions
+makes the "did I convert?" question grep-able.
 """
 
 from __future__ import annotations
@@ -28,9 +28,4 @@ def deg_to_rad(x):
     return np.asarray(x, dtype=float) * (np.pi / 180.0)
 
 
-def rad_to_deg(x):
-    """Convert radians to degrees."""
-    return np.asarray(x, dtype=float) * (180.0 / np.pi)
-
-
-__all__ = ["km_to_m", "m_to_km", "deg_to_rad", "rad_to_deg"]
+__all__ = ["km_to_m", "m_to_km", "deg_to_rad"]

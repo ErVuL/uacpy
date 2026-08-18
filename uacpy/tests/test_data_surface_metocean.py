@@ -17,6 +17,7 @@ from uacpy.data import (
     environment as env_mod, sea_surface, waves as waves_mod, wind_live,
     wind_local, ww3_live,
 )
+from uacpy.tests._cache_builders import _skip_or_fail
 
 _WIND_CSV = ("time,zlev,latitude,longitude,{var}\n"
              "UTC,m,degrees_north,degrees_east,m s-1\n"
@@ -307,18 +308,6 @@ def test_fetch_environment_altimetry(monkeypatch):
         date='2020-01-01', altimetry_sources='waves')
     assert env.altimetry is not None
     assert 'waverys' in [s.source.id for s in env.data_sources]
-
-
-_NETWORK_DOWN_TOKENS = ('could not reach', 'timed out', 'timeout', 'connection',
-                        'unreachable', 'http 502', 'http 503', 'http 504')
-
-
-def _skip_or_fail(exc, service):
-    """Skip only on network-level failure; a structured server rejection
-    (bad variable / constraint / axis) is a real bug and must fail."""
-    if any(tok in exc.message.lower() for tok in _NETWORK_DOWN_TOKENS):
-        pytest.skip(f"{service} unreachable: {exc.message}")
-    pytest.fail(f"{service} rejected the query: {exc.message}")
 
 
 @pytest.mark.requires_network

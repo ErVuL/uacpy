@@ -504,3 +504,21 @@ class TestFractionalDelayIsFlat:
                                     n_samples=256)
         assert h[100] == pytest.approx(1.0)
         assert np.max(np.abs(np.delete(h, 100))) < 1e-12
+
+
+def test_nearest_sample_placement_rounds():
+    """``fractional=False`` promises *nearest*-sample placement; floor
+    placement puts a 0.7-sample arrival one tap early."""
+    from uacpy.acoustic_signal import impulse_response
+    fs = 8000.0
+    _, h = impulse_response([1.0], [0.7 / fs], fs, fractional=False)
+    assert np.argmax(np.abs(h)) == 1
+    # fractional=True uses a windowed-sinc kernel, not a two-tap linear
+    # split: the latter is a frac-dependent lowpass (-3.0 dB at
+    # f/fs = 0.25 for frac = 0.5), so equal arrivals came back unequal.
+    # Placed clear of the array ends, where the kernel is not truncated.
+    _, hf = impulse_response([1.0], [100.7 / fs], fs, fractional=True,
+                             n_samples=256)
+    assert hf.sum() == pytest.approx(1.0)
+    centroid = float(np.sum(np.arange(hf.size) * hf) / hf.sum())
+    assert centroid == pytest.approx(100.7, abs=0.01)

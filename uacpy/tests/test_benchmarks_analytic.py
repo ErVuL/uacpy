@@ -412,6 +412,64 @@ def test_bellhop_lloyd_mirror():
     assert np.median(d_gauss[ranges < 400.0]) < 1.0
 
 
+def test_semicoherent_is_the_lloyd_shaded_incoherent_sum():
+    """SEMICOHERENT_TL is the incoherent intensity sum with every launch
+    amplitude pre-shaded by the Lloyd-mirror source-image factor
+    ``sqrt(2)·|sin(omega·z_s·sin(alpha)/c)|`` (``bellhop.f90:276-278``;
+    bellhop.md:166-176 — the physical ``2·sin(k z_s sin(theta))`` image
+    interference of COA §1, renormalised to unit mean square). On the
+    impedance-matched Lloyd geometry only the direct ray and its surface
+    image arrive, so both sums close analytically:
+
+        I_inc  = 1/R1² + 1/R2²
+        I_semi = w(α₁)/R1² + w(α₂)/R2²,   w = 2·sin²(k·z_s·sin α)
+
+    with the straight-ray launch angles sin α₁ = (z_r−z_s)/R1,
+    sin α₂ = (z_r+z_s)/R2 (the image path launches upward; |sin| makes the
+    sign irrelevant). The range window keeps both weights in [0.14, 1.9] —
+    no cell sits on a shading null where a dB comparison diverges — while
+    the shading itself sweeps ~6 dB, so the assertion cannot pass on the
+    unshaded sum. Hat beams carry the geometric two-path sum exactly (the
+    coherent variant above measures 0.05 dB max); 0.5 dB is 10x that floor."""
+    c, z_s, z_r, f = C_W, 20.0, 60.0, 200.0
+    ranges = np.linspace(1000.0, 2500.0, 40)
+    env = Environment(
+        bathymetry=3000.0,
+        ssp=SoundSpeedProfile.from_pairs([(0.0, c), (3000.0, c)]),
+        bottom=BoundaryProperties(acoustic_type='half-space',
+                                  sound_speed=c, density=RHO_WATER,
+                                  attenuation=0.0))
+    src = Source(depths=z_s, frequencies=f)
+    rcv = Receiver(depths=[z_r], ranges=ranges)
+    model = Bellhop(timeout=120, beam_type='G', n_beams=5001,
+                    alpha=(-20.0, 20.0))
+    tl_inc = np.asarray(model.run(env, src, rcv,
+                                  run_mode=RunMode.INCOHERENT_TL).db).ravel()
+    tl_semi = np.asarray(model.run(env, src, rcv,
+                                   run_mode=RunMode.SEMICOHERENT_TL).db).ravel()
+
+    k = 2.0 * np.pi * f / c
+    R1 = np.hypot(ranges, z_r - z_s)
+    R2 = np.hypot(ranges, z_r + z_s)
+    w1 = 2.0 * np.sin(k * z_s * (z_r - z_s) / R1) ** 2
+    w2 = 2.0 * np.sin(k * z_s * (z_r + z_s) / R2) ** 2
+    assert w1.min() > 0.1 and w2.min() > 0.1   # window stays off the nulls
+    ana_inc = -10.0 * np.log10(1.0 / R1**2 + 1.0 / R2**2)
+    ana_semi = -10.0 * np.log10(w1 / R1**2 + w2 / R2**2)
+
+    d_inc = np.abs(tl_inc - ana_inc)
+    assert np.max(d_inc) < 0.5, f"incoherent max |dTL|={np.max(d_inc):.3f} dB"
+    d_semi = np.abs(tl_semi - ana_semi)
+    assert np.max(d_semi) < 0.5, (
+        f"semicoherent max |dTL|={np.max(d_semi):.3f} dB")
+    # The shading in isolation, with the shared two-path spreading divided
+    # out: it sweeps ~6 dB over this window, so matching it to 0.5 dB pins
+    # the sqrt(2)|sin| factor itself, not just the intensity sum.
+    shading = ana_semi - ana_inc
+    assert np.ptp(shading) > 2.0
+    assert np.max(np.abs((tl_semi - tl_inc) - shading)) < 0.5
+
+
 def lloyd_mirror_pressure(ranges, z_s, z_r, f, c):
     """Complex Lloyd-mirror pressure, COA (Jensen et al.) Eq. (1.19)::
 

@@ -18,6 +18,7 @@ CQL ``BBOX`` filters (Oracle backend), so queries use the plain ``bbox=``
 parameter over an expanding search-radius ladder and filter client-side.
 """
 
+import dataclasses
 import json
 import math
 import urllib.parse
@@ -33,6 +34,7 @@ from uacpy.data._http import http_get
 from uacpy.data.sediment import (
     bottom_from_grain_size, range_dependent_bottom_along, water_sound_speed_at,
 )
+from uacpy.data.sources import SOURCES, DataProvenance
 from uacpy._log import log_message
 
 __all__ = ['fetch_mars_sediment', 'fetch_bottom_mars',
@@ -162,9 +164,11 @@ def fetch_mars_sediment(
 ) -> Dict:
     """Nearest usable MARS sediment sample to a ``(lat, lon)`` point.
 
-    Returns ``{'phi', 'via', 'distance_km', 'folk_class'}`` where ``via`` names
-    the conversion that produced ϕ (``'grain_size'`` / ``'percentages'`` /
-    ``'folk_class'``).
+    Returns ``{'phi', 'via', 'distance_km', 'folk_class', 'latitude',
+    'longitude'}`` where ``via`` names the conversion that produced ϕ
+    (``'grain_size'`` / ``'percentages'`` / ``'folk_class'``) and
+    ``latitude``/``longitude`` are the sample's own coordinates, so a caller
+    can record where the value actually came from.
 
     Raises
     ------
@@ -189,7 +193,9 @@ def fetch_mars_sediment(
             d = great_circle_km(lat, lon, coords[1], coords[0])
             if best is None or d < best['distance_km']:
                 best = {**conv, 'distance_km': float(d),
-                        'folk_class': (f['properties'] or {}).get('FOLK_CLASS')}
+                        'folk_class': (f['properties'] or {}).get('FOLK_CLASS'),
+                        'latitude': float(coords[1]),
+                        'longitude': float(coords[0])}
         # A bbox-corner hit can lie beyond the rung radius while a closer
         # sample sits just outside the box — only settle once the best find
         # is within the rung actually searched.
@@ -229,12 +235,23 @@ def fetch_bottom_mars(
     scales the grain-size velocity ratio to the in-situ near-seabed water;
     ``None`` uses the Hamilton reference.
     """
+    lat, lon = as_coordinate(point)
     sample = fetch_mars_sediment(
         point, max_distance_km=max_distance_km, layer=layer,
         base_url=base_url, timeout=timeout, verbose=verbose)
-    return bottom_from_grain_size(
+    bottom = bottom_from_grain_size(
         sample['phi'], roughness=roughness,
         water_sound_speed=water_sound_speed)
+    # Point samples are sparse, so the nearest one can be up to
+    # max_distance_km from the requested position; record where it actually
+    # came from so ``citations(env)`` reports the hop and ``prov.offset_km``
+    # measures it — the same stamp the local grain-size DB carries.
+    prov = DataProvenance(
+        source=SOURCES['mars'],
+        data_point=(sample['latitude'], sample['longitude']),
+        requested_point=(lat, lon),
+    )
+    return dataclasses.replace(bottom, data_sources=(prov,))
 
 
 def fetch_bottom_mars_transect(

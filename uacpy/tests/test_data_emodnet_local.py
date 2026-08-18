@@ -60,6 +60,10 @@ def test_transect_holds_and_varies(tmp_path, monkeypatch):
         (30.5, -40.5), (31.5, -40.5), n_points=3)
     assert rdb.halfspace_sound_speed.shape == (3,)
     assert (rdb.halfspace_sound_speed > 1500).all()
+    # Sand (ϕ 2.0) at the start, Mud to muddy Sand (ϕ 5.0) at the end: the
+    # first and last sound speeds differ, sand the faster.
+    assert rdb.halfspace_sound_speed[0] != rdb.halfspace_sound_speed[-1]
+    assert rdb.halfspace_sound_speed[0] > rdb.halfspace_sound_speed[-1]
 
 
 def test_unknown_folk_class_refuses_default(tmp_path, monkeypatch):

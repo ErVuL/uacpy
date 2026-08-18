@@ -44,9 +44,11 @@ def _require_finite(values, label: str, *, hint: str = "") -> None:
     """
     arr = np.asarray(values, dtype=float)
     if not np.all(np.isfinite(arr)):
+        flat = arr.ravel()
+        bad = int(np.flatnonzero(~np.isfinite(flat))[0])
         raise ConfigurationError(
             f"{label} must be finite (no NaN/inf){_hint(hint)}; "
-            f"got {arr.ravel().tolist()}")
+            f"got {flat[bad]} at flat index {bad} of {flat.size} value(s)")
 
 
 def _require_positive(values, label: str, *, hint: str = "") -> None:
@@ -59,9 +61,11 @@ def _require_positive(values, label: str, *, hint: str = "") -> None:
     arr = np.asarray(values, dtype=float)
     _require_finite(arr, label, hint=hint)
     if np.any(arr <= 0):
+        flat = arr.ravel()
+        bad = int(np.flatnonzero(flat <= 0)[0])
         raise ConfigurationError(
             f"{label} must be positive, > 0{_hint(hint)}; "
-            f"got {arr.ravel().tolist()}")
+            f"got {flat[bad]} at flat index {bad} of {flat.size} value(s)")
 
 
 def _require_non_negative(values, label: str, *, hint: str = "") -> None:
@@ -73,9 +77,11 @@ def _require_non_negative(values, label: str, *, hint: str = "") -> None:
     arr = np.asarray(values, dtype=float)
     _require_finite(arr, label, hint=hint)
     if np.any(arr < 0):
+        flat = arr.ravel()
+        bad = int(np.flatnonzero(flat < 0)[0])
         raise ConfigurationError(
             f"{label} must be non-negative, >= 0{_hint(hint)}; "
-            f"got {arr.ravel().tolist()}")
+            f"got {flat[bad]} at flat index {bad} of {flat.size} value(s)")
 
 
 def _require_attenuation_in_range(value, label: str) -> None:
@@ -104,8 +110,7 @@ def _require_attenuation_in_range(value, label: str) -> None:
 
 
 def _require_strictly_increasing(values: np.ndarray, label: str, *,
-                                 min_step: float = 0.0,
-                                 step_reason: str = "") -> None:
+                                 min_step: float = 0.0) -> None:
     """Raise ``ConfigurationError`` if ``values`` is not strictly
     monotonically increasing. Used to guard every range / depth axis that
     feeds into ``np.interp``, which silently produces garbage on unsorted
@@ -126,7 +131,7 @@ def _require_strictly_increasing(values: np.ndarray, label: str, *,
         raise ConfigurationError(
             f"{label} must be strictly increasing; "
             f"got {arr[bad]} >= {arr[bad + 1]} at index {bad + 1} "
-            f"(full axis: {arr.tolist()})"
+            f"(axis length {arr.size})"
         )
     if min_step > 0.0 and not np.all(diffs > min_step):
         bad = int(np.argmin(diffs))
@@ -134,9 +139,8 @@ def _require_strictly_increasing(values: np.ndarray, label: str, *,
             f"{label} must increase by more than {min_step:g} m; "
             f"got {arr[bad]} and {arr[bad + 1]} at index {bad + 1} "
             f"({float(diffs[bad]):g} m apart). "
-            + (step_reason or "The solver decks print this axis at that "
-                              "resolution, so the two samples collapse to one "
-                              "value in the file.")
+            "The solver decks print this axis at that resolution, so the "
+            "two samples collapse to one value in the file."
         )
 
 
@@ -149,8 +153,11 @@ def _coerce_data_sources(value, label: str) -> tuple:
     accepted iff it exposes ``.source`` with an ``.id``. A bare ``DataSource``
     (no ``.source``) or any other object is rejected with a typed error rather
     than leaking downstream to crash ``env.data_sources`` aggregation or
-    ``citations()`` on ``r.source.id``.
+    ``citations()`` on ``r.source.id``. ``None`` means no provenance and
+    coerces to ``()``.
     """
+    if value is None:
+        return ()
     records = tuple(value)
     for r in records:
         if not (hasattr(r, 'source') and hasattr(getattr(r, 'source'), 'id')):

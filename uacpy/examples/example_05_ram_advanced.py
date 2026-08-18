@@ -162,20 +162,15 @@ def main():
     print("\n[Run] RAM (mpiramS) with range-dependent SSP and bottom...")
     print("  Mode: COHERENT_TL (narrowband, range-depth TL grid)")
 
-    try:
-        # accuracy is the Lytaev optimiser's per-run Padé error budget; 1e-1
-        # is 100x looser than the 1e-3 default, so the optimiser picks a
-        # coarser dr/dz and the example runs quickly. Leave it at the default
-        # for production work.
-        ram = RAM(verbose=True, accuracy=1e-1)
-        result = ram.run(env, source, receiver)
-        print("  RAM TL completed successfully")
-        _print_tl_summary("RAM", result)
-    except Exception as e:
-        print(f"  RAM error: {e}")
-        import traceback
-        traceback.print_exc()
-        result = None
+    # accuracy is the Lytaev optimiser's per-run Padé error budget; 1e-1
+    # is 100x looser than the 1e-3 default, so the optimiser picks a
+    # coarser dr/dz and the example runs quickly. Leave it at the default
+    # for production work. A RAM failure propagates: this run is the
+    # example's subject, so there is nothing useful to show without it.
+    ram = RAM(verbose=True, accuracy=1e-1)
+    result = ram.run(env, source, receiver)
+    print("  ✓ RAM TL completed successfully")
+    _print_tl_summary("RAM", result)
 
     # ═══════════════════════════════════════════════════════════════════════
     # COMPARISON: Kraken with Range-Independent Approximation

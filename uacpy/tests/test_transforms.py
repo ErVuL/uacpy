@@ -192,3 +192,21 @@ class TestBringYourOwn:
     def test_inverse_taup_bad_shape_raises(self):
         with pytest.raises(ConfigurationError):
             inverse_taup(np.zeros((3, 10)), np.array([1.0, 2.0]), FS, DX, NX)
+
+
+class TestRadonHyperbolicMoveoutValidation:
+    def test_forward_rejects_nonpositive_velocity(self):
+        with pytest.raises(ConfigurationError, match="> 0"):
+            radon_transform(np.zeros((NT, NX)), FS, DX, [0.0, 1500.0],
+                            kind='hyperbolic')
+
+    def test_inverse_rejects_nonpositive_velocity(self):
+        with pytest.raises(ConfigurationError, match="> 0"):
+            inverse_radon(np.zeros((2, NT)), FS, DX, [-1.0, 1500.0], NX,
+                          kind='hyperbolic')
+
+    def test_positive_velocities_yield_finite_panel(self):
+        m, tau, R = radon_transform(_hyperbolic_gather(1500.0, 0.08), FS, DX,
+                                    np.linspace(1200, 2000, 5),
+                                    kind='hyperbolic')
+        assert np.all(np.isfinite(R))

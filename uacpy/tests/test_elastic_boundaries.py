@@ -185,6 +185,20 @@ class TestElasticBoundaryAutoDetection:
         assert result is not None
         assert result.data.shape == (len(receiver_small.depths), len(receiver_small.ranges))
         assert np.all(np.isfinite(result.data))
+        # Same bands as the elastic sibling: TL < 200 dB rules out a field
+        # collapsed to numerical zero, and this 100 m guide at 1-5 km sits
+        # near 50-90 dB, so the grid mean has a physical window too.
+        assert np.any(result.db > 0)
+        assert np.all(result.db < 200)
+        assert 30.0 < float(np.nanmean(result.db)) < 120.0
+
+    def test_elastic_env_resolves_to_the_krakenc_backend(self, fluid_env,
+                                                         elastic_env):
+        """environment.md ('Models and shear'): shear auto-routes Kraken to
+        ``backend='krakenc'``; the shear-free sibling stays on kraken.exe."""
+        m = Kraken(verbose=False)
+        assert m.select_backend(elastic_env) == 'krakenc'
+        assert m.select_backend(fluid_env) == 'kraken'
 
     def test_elastic_vs_fluid_difference(self, elastic_env, fluid_env, source, receiver_small):
         """A shear-supporting seabed must move the field.
@@ -215,20 +229,6 @@ class TestBounceReflectionCoefficients:
     def receiver_bounce(self):
         # BOUNCE doesn't need spatial receivers, just placeholder
         return Receiver(depths=np.array([50.0]), ranges=np.array([1000.0]))
-
-    def test_bounce_basic(self, elastic_env, source, receiver_bounce, tmp_path):
-        """Test basic BOUNCE execution."""
-        bounce = Bounce(verbose=False, c_low=1400.0, c_high=10000.0, rmax=10000.0, work_dir=tmp_path)
-
-        result = bounce.run(
-            env=elastic_env,
-            source=source,
-            receiver=receiver_bounce,
-        )
-
-        assert result is not None
-        assert 'brc_file' in result.metadata
-        assert Path(result.metadata['brc_file']).exists()
 
     def test_bounce_output_files(self, elastic_env, source, receiver_bounce, tmp_path):
         """Test that BOUNCE creates both .brc and .irc files."""
@@ -277,6 +277,21 @@ class TestBounceReflectionCoefficients:
 
         assert np.all(angles >= 0)
         assert np.all(angles <= 90)
+
+        # Closed-form fluid-solid coefficient for this seabed (cp=1600,
+        # cs=400, rho=1.8, alpha_p=0.2, alpha_s=0.5 under 1500 m/s water):
+        # below the compressional critical angle arccos(1500/1600) = 20.4 deg
+        # the reflection is near-total (0.91-0.98 — shear conversion and
+        # attenuation sag it slightly below 1), and well above it the p-wave
+        # radiates and |R| falls to 0.30-0.43.
+        theta = np.asarray(angles, dtype=float)
+        r = np.asarray(R_mag, dtype=float)
+        below = r[theta <= 15.0]
+        above = r[theta >= 30.0]
+        assert below.size and above.size
+        assert np.all(below > 0.85)
+        assert float(below.mean()) > 0.90
+        assert np.all(above < 0.6)
 
 
 class TestBounceToScooterWorkflow:

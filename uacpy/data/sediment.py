@@ -28,7 +28,7 @@ from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.core.materials import MATERIALS, get_material, list_materials
 from uacpy.core.sediment import GRAIN_SIZE_MODELS, grain_size_to_geoacoustics
 from uacpy.data._geo import (
-    geodesic_waypoints, run_representative_indices, DEFAULT_MAX_TRANSECT_POINTS,
+    geodesic_waypoints, run_boundary_indices, DEFAULT_MAX_TRANSECT_POINTS,
 )
 
 __all__ = [
@@ -117,9 +117,11 @@ def range_dependent_bottom_along(
     the returned ``Bottom`` (a forward-filled gap carries the record of the
     sample that filled it).
 
-    With ``n_points='auto'`` the transect is probed at ``max_points`` points and
-    consecutive identical seabeds are collapsed to one column each (endpoints
-    anchored) — the seabed analogue of the SSP 'auto'. Identity is the
+    With ``n_points='auto'`` the transect is probed at ``max_points`` points
+    and each run of identical seabeds collapses to the probe columns
+    bracketing its edges (endpoints anchored) — the ``Bottom`` reads
+    nearest-node, so every reconstructed seabed transition lands within one
+    probe step of the boundary the probe observed. Identity is the
     sediment's own (see :func:`_seabed_identity`), not the water-scaled
     geoacoustics. **Unlike the SSP/bathy grids, there is no analytic identity
     here**, so 'auto' calls ``point_bottom`` once per probe point: cheap for
@@ -150,7 +152,7 @@ def range_dependent_bottom_along(
         )
     props = _backfill_leading(props)
     if n_points == 'auto':
-        reps = run_representative_indices([_seabed_identity(p) for p in props])
+        reps = run_boundary_indices([_seabed_identity(p) for p in props])
     else:
         reps = list(range(len(props)))
     props = [props[r] for r in reps]

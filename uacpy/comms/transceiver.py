@@ -293,7 +293,7 @@ class OFDMReceiver:
         nsc, cp = self.n_subcarriers, self.cp_len
         blk = nsc + cp
         x = np.asarray(baseband, dtype=complex).ravel()
-        start, cfo = schmidl_cox_sync(x, nsc, cp)
+        start, cfo = schmidl_cox_sync(x, nsc)
         if start is None:
             warnings.warn(
                 "OFDMReceiver.receive: Schmidl-Cox timing metric never reached "

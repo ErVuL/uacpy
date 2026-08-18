@@ -54,6 +54,11 @@ def bpsk_modulate(
     ----------
     Original MATLAB code by Michael B. Porter, April 2000
     """
+    if sample_rate <= 0 or chips_per_sec <= 0:
+        raise ConfigurationError(
+            f"bpsk_modulate: sample_rate ({sample_rate}) and chips_per_sec "
+            f"({chips_per_sec}) must both be > 0 — the chip length is "
+            "sample_rate / chips_per_sec samples.")
     samples_per_chip = int(sample_rate / chips_per_sec)
 
     if sample_rate / chips_per_sec != samples_per_chip:

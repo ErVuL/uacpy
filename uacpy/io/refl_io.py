@@ -28,7 +28,8 @@ from uacpy.io.units import deg_to_rad
 from uacpy.core.exceptions import ConfigurationError, FileFormatError
 from uacpy.io._fortran_helpers import _bound_counts
 from uacpy.io._fortran_helpers import (
-    fortran_float, read_list_directed_values, typed_format_error,
+    fortran_float, list_directed_int, read_list_directed_values,
+    typed_format_error,
 )
 
 
@@ -87,8 +88,10 @@ def read_reflection_coefficient(
 
     try:
         with open(filename, "r") as fid:
-            # Read number of points
-            n_pts = int(fid.readline().strip())
+            # The count is a list-directed scalar READ (RefCoef.f90:45), so
+            # a comma or trailing annotation after the number is a valid
+            # record.
+            n_pts = list_directed_int(fid.readline())
 
             if n_pts == 0:
                 return {
@@ -188,22 +191,27 @@ def read_source_beam_pattern(
                         "beam_pattern=None for an omni-directional source.",
         )
     with open(sbp_file, "r") as fid:
-        line = fid.readline()
-        NSBPPts = int(line.strip())
+        # The count is a list-directed scalar READ (beampattern.f90:33), so
+        # a comma or trailing annotation after the number is a valid record.
+        NSBPPts = list_directed_int(fid.readline())
         log_message('refl_io',
                     f"Number of source beam pattern points = {NSBPPts}",
                     verbose=verbose)
 
-        # Each point is one ASCII line of at least two numbers, so it
-        # cannot occupy fewer than 4 bytes on disk; a larger count is a
-        # malformed header rather than a huge table.
+        # Each point is two numbers of at least 2 bytes each (value +
+        # separator) on disk; a larger count is a malformed header rather
+        # than a huge table.
         _bound_counts(sbp_file, Path(sbp_file).stat().st_size, 4,
                       NSBPPts=NSBPPts)
         beam_pattern = np.zeros((NSBPPts, 2))
+        # Each point is ONE list-directed READ of its (angle, level) pair
+        # (beampattern.f90:44), which continues across records — including
+        # blank lines — until both values are read, so a pair may wrap and
+        # this reader accepts the same files the binary does.
         for i in range(NSBPPts):
-            line = fid.readline()
-            vals = np.array(line.split()[:2], dtype=float)
-            beam_pattern[i, :] = vals
+            beam_pattern[i, :] = read_list_directed_values(
+                fid, 2, f"beam-pattern point {i + 1} (angle, level)",
+                sbp_file)
         log_message(
             'refl_io',
             f"angle (deg): {beam_pattern[:, 0].tolist()}",
@@ -458,9 +466,11 @@ def dedupe_reflection_file(filepath: Union[str, Path]) -> None:
     if not lines:
         return
 
+    # The count is a list-directed scalar READ (RefCoef.f90:45), so a comma
+    # or trailing annotation after the number is a valid record here too.
     try:
-        int(lines[0].split()[0])
-    except (ValueError, IndexError):
+        n_declared = list_directed_int(lines[0])
+    except (FileFormatError, ValueError, IndexError):
         raise FileFormatError(
             f"{filepath}: expected a .brc/.trc table, whose first line is the "
             f"row count; got {lines[0].strip()!r}.",
@@ -477,7 +487,6 @@ def dedupe_reflection_file(filepath: Union[str, Path]) -> None:
     for line in lines[1:]:
         tokens.extend(line.replace(',', ' ').split())
     try:
-        n_declared = int(lines[0].split()[0])
         n_triples = min(n_declared, len(tokens) // 3)
         triples = [
             (tokens[3 * i], tokens[3 * i + 1], tokens[3 * i + 2],

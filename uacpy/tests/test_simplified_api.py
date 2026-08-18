@@ -27,16 +27,23 @@ class TestComputeAPI:
         assert result.n_depths == len(receiver_small.depths)
         assert result.n_ranges == len(receiver_small.ranges)
 
-    def test_compute_modes_returns_field(self, simple_env, source):
+    def test_compute_modes_returns_modes_result(self, simple_env, source):
         """``compute_modes`` returns :class:`Modes`, a sibling of ``Field``
         under ``Result`` rather than a subclass of it — the mode set is not a
-        gridded field and carries ``k``/``phi`` instead of ``data``."""
+        gridded field and carries ``k``/``phi`` instead of ``data``. With
+        ``n_modes=10`` the wrapper caps the set via ``Modes.first_n`` and an
+        empty mode set raises instead of returning, so ``0 < len(k) <= 10``;
+        ``phi`` holds one column per mode, tabulated on the dense internal
+        depth grid (>= 100 strictly increasing depths)."""
         kraken = Kraken(verbose=False)
         modes = kraken.compute_modes(env=simple_env, source=source, n_modes=10)
 
         assert isinstance(modes, Modes)
-        assert modes.k is not None
-        assert modes.phi is not None
+        assert 0 < len(modes.k) <= 10
+        assert modes.n_modes == len(modes.k)
+        assert modes.phi.shape == (modes.depths.size, len(modes.k))
+        assert modes.depths.size >= 100
+        assert np.all(np.diff(modes.depths) > 0)
 
     def test_multiple_models_same_api(self, simple_env, source, receiver_small):
         """Test that multiple models use same API."""
@@ -86,14 +93,19 @@ class TestPlottingAPI:
         # canonical mode plotters.
         plt.close(fig)
 
-    def test_plot_with_custom_parameters(self, simple_env, source, receiver_small):
-        """Test plotting with custom parameters."""
+    def test_plot_accepts_custom_parameters(self, simple_env, source, receiver_small):
+        """Custom scale parameters land on the drawn mesh: ``vmin=40,
+        vmax=100`` pins the QuadMesh clim to (40, 100) and ``cmap='jet'``
+        selects the colormap."""
         bellhop = Bellhop(verbose=False)
         result = bellhop.compute_tl(env=simple_env, source=source, receiver=receiver_small)
 
         fig, ax = result.plot(env=simple_env, vmin=40, vmax=100, cmap='jet')
 
         assert fig is not None
+        mesh = ax.collections[0]
+        assert mesh.get_clim() == (40, 100)
+        assert mesh.get_cmap().name == 'jet'
         plt.close(fig)
 
     def test_plot_comparison(self, simple_env, source, receiver_small):

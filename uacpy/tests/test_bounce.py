@@ -372,6 +372,309 @@ class TestStagedTableGetsTheSameTreatment:
         assert dest.read_text() == src.read_text()
 
 
+def _lossless_sand_env():
+    """The doc's reference case (bounce.md §4): 1650 m/s / 1.9 g/cm³ lossless
+    sand under 100 m of 1500 m/s water."""
+    return _halfspace_env(sound_speed=1650.0, density=1.9, attenuation=0.0,
+                          shear_speed=0.0, shear_attenuation=0.0)
+
+
+# Critical grazing angle of the reference case: arccos(c1/c2).
+_SAND_THETA_C = float(np.degrees(np.arccos(1500.0 / 1650.0)))
+
+
+def _interp_R(rc, theta_deg):
+    theta = np.asarray(rc.theta, dtype=float)
+    return float(np.interp(theta_deg, theta, np.asarray(rc.R, dtype=float)))
+
+
+def _steepest_descent_deg(rc):
+    """Angle of the steepest |R| descent, on a uniform 0.25 deg resample of
+    the run's own grid (10-40 deg brackets the reference case's critical
+    angle)."""
+    grid = np.arange(10.0, 40.0, 0.25)
+    r = np.interp(grid, np.asarray(rc.theta, float), np.asarray(rc.R, float))
+    return float(grid[np.argmin(np.gradient(r, grid))])
+
+
+class TestLosslessSandRayleighAnalytics:
+    """COA §2.4's fluid-fluid Rayleigh reflection, on the doc's lossless sand
+    half-space (bounce.md §4): total reflection below
+    ``θc = arccos(c1/c2) = 24.62°``, the normal-incidence impedance-ratio
+    plateau ``(ρ2c2−ρ1c1)/(ρ2c2+ρ1c1) ≈ 0.353``, and a phase walking from
+    −180° at grazing to 0 at the critical angle (``e^{−iωt}`` convention,
+    bounce.md §2), flat at 0 above it. All expectations are closed-form."""
+
+    @pytest.fixture(scope='class')
+    def rc(self):
+        return Bounce(verbose=False).run(_lossless_sand_env(), _src(200.0),
+                                         _rcv())
+
+    def test_total_reflection_below_the_critical_angle(self, rc):
+        theta = np.asarray(rc.theta, dtype=float)
+        sub = np.asarray(rc.R, dtype=float)[theta <= _SAND_THETA_C - 0.3]
+        assert sub.size > 10
+        np.testing.assert_allclose(sub, 1.0, atol=1e-4)
+
+    def test_critical_angle_is_arccos_of_the_speed_ratio(self, rc):
+        theta = np.asarray(rc.theta, dtype=float)
+        r = np.asarray(rc.R, dtype=float)
+        first_loss = float(theta[r < 0.999].min())
+        assert first_loss == pytest.approx(_SAND_THETA_C, abs=0.3), (
+            f"|R| first drops below 1 at {first_loss:.2f} deg; "
+            f"arccos(1500/1650) = {_SAND_THETA_C:.2f} deg")
+
+    def test_normal_incidence_is_the_impedance_ratio(self, rc):
+        z1 = 1.0 * 1500.0
+        z2 = 1.9 * 1650.0
+        expected = (z2 - z1) / (z2 + z1)      # 0.3528
+        i = int(np.argmax(rc.theta))
+        assert rc.theta[i] == pytest.approx(90.0, abs=1e-6)
+        assert rc.R[i] == pytest.approx(expected, abs=5e-4)
+
+    def test_phase_walks_from_minus_180_at_grazing_to_zero_at_critical(
+            self, rc):
+        theta = np.asarray(rc.theta, dtype=float)
+        phi_deg = np.degrees(np.asarray(rc.phi, dtype=float))
+        i0 = int(np.argmin(theta))
+        assert theta[i0] == pytest.approx(0.0, abs=1e-6)
+        # R = -1 at grazing: -180 deg and +180 deg are the same angle, and
+        # np.angle reports it as +180.
+        assert abs(phi_deg[i0]) == pytest.approx(180.0, abs=2.0)
+        band = (theta > 0.5) & (theta < _SAND_THETA_C - 0.5)
+        # rc.phi is BOUNCE's raw .brc phase (bounce.md: R*exp(1j*phi) is
+        # exactly the coefficient BOUNCE computed): measured, it rides the
+        # positive branch — +180 deg at grazing falling monotonically to 0
+        # at the critical angle. Textbooks quoting the conjugate convention
+        # show the mirror image, -180 -> 0.
+        assert np.all(phi_deg[band] > -0.5)
+        assert np.all(phi_deg[band] < 180.5)
+        # Continuous, monotone sweep down to zero (0.2 deg of text-rounding
+        # slack per step).
+        assert np.all(np.diff(phi_deg[band]) < 0.2)
+        above = theta > _SAND_THETA_C + 0.5
+        assert np.all(np.abs(phi_deg[above]) < 1.0), (
+            "R is real and positive above critical; phase must be 0")
+
+
+class TestAttenuationSagsThePlateauNotTheCriticalAngle:
+    """bounce.md §4 ('What absorption does to it'): the evanescent field
+    samples the lossy sediment, so at α = 1.5 dB/λ a 10° ray gives up ~14 %
+    per bounce (closed-form Rayleigh with the AT dB/λ convention: 0.860) —
+    while the critical angle, set by the speed contrast alone, stays put."""
+
+    @pytest.fixture(scope='class')
+    def runs(self):
+        lossless = Bounce(verbose=False).run(_lossless_sand_env(), _src(200.0),
+                                             _rcv())
+        lossy = Bounce(verbose=False).run(
+            _halfspace_env(sound_speed=1650.0, density=1.9, attenuation=1.5,
+                           shear_speed=0.0, shear_attenuation=0.0),
+            _src(200.0), _rcv())
+        return lossless, lossy
+
+    def test_plateau_sags_about_14_percent_at_10_degrees(self, runs):
+        lossless, lossy = runs
+        assert _interp_R(lossless, 10.0) == pytest.approx(1.0, abs=1e-3)
+        assert _interp_R(lossy, 10.0) == pytest.approx(0.86, abs=0.02)
+
+    def test_the_sag_covers_the_whole_subcritical_plateau(self, runs):
+        lossless, lossy = runs
+        for deg in np.arange(5.0, 21.0, 2.5):
+            assert _interp_R(lossy, deg) < _interp_R(lossless, deg) - 0.02, (
+                f"no sag at {deg:g} deg")
+
+    def test_the_critical_angle_stays_put(self, runs):
+        # Closed form: steepest descent at 24.6 deg lossless, 25.6 deg at
+        # α = 1.5; both inside ±2.5 deg of arccos(c1/c2).
+        lossless, lossy = runs
+        assert _steepest_descent_deg(lossless) == pytest.approx(
+            _SAND_THETA_C, abs=2.5)
+        assert _steepest_descent_deg(lossy) == pytest.approx(
+            _SAND_THETA_C, abs=2.5)
+
+
+class TestElasticGraniteShearWindow:
+    """bounce.md §4 ('Shear'): between the shear (60°) and compressional
+    (74°) critical angles the elastic granite radiates a shear wave and |R|
+    drops to ~0.73 (closed-form fluid-solid coefficient: 0.73-0.78 across
+    62-72°), while the shear-dropped fluid preset still reflects ~0.999."""
+
+    @staticmethod
+    def _run(elastic):
+        bottom = BoundaryProperties.from_preset('granite', elastic=elastic)
+        env = Environment(name='granite', bathymetry=100.0,
+                          ssp=[(0.0, 1500.0), (100.0, 1500.0)],
+                          bottom=bottom)
+        return Bounce(verbose=False).run(env, _src(200.0), _rcv())
+
+    def test_shear_radiation_cuts_R_in_the_window(self):
+        rc = self._run(elastic=True)
+        theta = np.asarray(rc.theta, dtype=float)
+        window = np.asarray(rc.R, dtype=float)[(theta >= 62.0)
+                                               & (theta <= 72.0)]
+        assert window.size > 5
+        assert 0.65 < float(window.mean()) < 0.85, (
+            f"elastic granite window mean |R| = {window.mean():.3f}")
+        assert float(window.min()) < 0.80
+
+    def test_the_fluid_preset_cannot_see_the_loss(self):
+        rc = self._run(elastic=False)
+        theta = np.asarray(rc.theta, dtype=float)
+        window = np.asarray(rc.R, dtype=float)[(theta >= 62.0)
+                                               & (theta <= 72.0)]
+        assert float(window.min()) > 0.99
+
+
+class TestSandOverGraniteEtalonNulls:
+    """bounce.md §4 ('A layer turns a mirror into a filter'): 8 m of sand on
+    granite interferes its two returns into nulls near 34° and 60° at 200 Hz
+    (closed-form two-interface recursion: |R| 0.162 at 33.9° and 0.600 at
+    59.3°). Bounds, not exact values — the binary meshes the layer while the
+    closed form does not."""
+
+    @pytest.fixture(scope='class')
+    def rc(self):
+        stack = SeabedColumn.from_presets(layers=[('sand', 8.0)],
+                                          halfspace='granite')
+        env = Environment(name='etalon', bathymetry=100.0,
+                          ssp=[(0.0, 1500.0), (100.0, 1500.0)],
+                          bottom=Bottom(columns=[stack]))
+        return Bounce(verbose=False).run(env, _src(200.0), _rcv())
+
+    @staticmethod
+    def _window_min(rc, lo, hi):
+        theta = np.asarray(rc.theta, dtype=float)
+        mask = (theta >= lo) & (theta <= hi)
+        r = np.asarray(rc.R, dtype=float)[mask]
+        i = int(np.argmin(r))
+        return float(theta[mask][i]), float(r[i])
+
+    def test_first_null_near_34_degrees(self, rc):
+        angle, depth = self._window_min(rc, 28.0, 40.0)
+        assert depth < 0.30, f"|R| only reaches {depth:.3f}"
+        assert 31.0 < angle < 37.0, f"null sits at {angle:.1f} deg"
+
+    def test_second_null_near_60_degrees_is_partial(self, rc):
+        angle, depth = self._window_min(rc, 54.0, 66.0)
+        assert 0.40 < depth < 0.70, f"|R| at the null is {depth:.3f}"
+        assert 56.0 < angle < 63.0, f"null sits at {angle:.1f} deg"
+
+
+class TestHalfspaceReflectionIsFrequencyInvariant:
+    """A half-space has no length scale, so R(θ) carries no frequency
+    dependence (bounce.md §6): two runs at different frequencies must overlay.
+    The angle grids differ (NkTab scales with ω), so both are interpolated
+    onto one axis before comparing."""
+
+    def test_two_frequencies_give_identical_curves(self):
+        runs = [Bounce(verbose=False).run(_lossless_sand_env(), _src(f),
+                                          _rcv())
+                for f in (150.0, 600.0)]
+        common = np.linspace(1.0, 89.0, 177)
+        r = [np.interp(common, np.asarray(rc.theta, float),
+                       np.asarray(rc.R, float)) for rc in runs]
+        phi = [np.interp(common, np.asarray(rc.theta, float),
+                         np.degrees(np.asarray(rc.phi, float)))
+               for rc in runs]
+        assert np.max(np.abs(r[0] - r[1])) < 0.005
+        assert np.max(np.abs(phi[0] - phi[1])) < 1.0
+
+
+class TestAngleGridIsUniformInCosTheta:
+    """bounce.md §7: the grid comes from a uniform sweep in horizontal
+    slowness, so it is uniform in cos θ — coarse at grazing, dense at normal
+    incidence."""
+
+    def test_cos_theta_spacing_is_constant(self):
+        rc = Bounce(verbose=False).run(_lossless_sand_env(), _src(200.0),
+                                       _rcv())
+        theta = np.asarray(rc.theta, dtype=float)
+        spacing = -np.diff(np.cos(np.radians(theta)))
+        assert np.all(spacing > 0)
+        interior = (theta[:-1] > 1.0) & (theta[1:] < 89.0)
+        assert np.allclose(spacing[interior], np.median(spacing[interior]),
+                           rtol=0.05), (
+            "the angle grid is not uniform in cos(theta)")
+
+
+class _DeckCaptured(Exception):
+    """Raised by the capture stub so ``run()`` stops before any launch."""
+
+
+class TestRmaxResolutionAndReceiverInertness:
+    """bounce.md §5/§7: ``rmax=None`` auto-derives from
+    ``receiver.range_max`` (10 km when no positive range is available), and
+    that single number is all the receiver contributes — the deck writer
+    takes no receiver at all."""
+
+    @staticmethod
+    def _captured_rmax(monkeypatch, model, receiver):
+        seen = {}
+
+        def fake(**kw):
+            seen.update(kw)
+            raise _DeckCaptured
+
+        monkeypatch.setattr(model, '_write_bounce_input', fake)
+        with pytest.raises(_DeckCaptured):
+            model.run(_halfspace_env(shear_speed=0.0), _src(200.0), receiver)
+        return seen['rmax']
+
+    def test_rmax_defaults_to_the_receiver_range_max(self, monkeypatch):
+        rmax = self._captured_rmax(
+            monkeypatch, Bounce(verbose=False),
+            Receiver(depths=[50.0], ranges=[4000.0]))
+        assert rmax == pytest.approx(4000.0)
+
+    def test_zero_receiver_range_falls_back_to_10_km(self, monkeypatch):
+        rmax = self._captured_rmax(
+            monkeypatch, Bounce(verbose=False),
+            Receiver(depths=[50.0], ranges=[0.0]))
+        assert rmax == pytest.approx(10000.0)
+
+    def test_pinned_rmax_ignores_the_receiver(self, monkeypatch):
+        rmax = self._captured_rmax(
+            monkeypatch, Bounce(rmax=1234.0, verbose=False),
+            Receiver(depths=[50.0], ranges=[99999.0]))
+        assert rmax == pytest.approx(1234.0)
+
+    def test_the_deck_writer_takes_no_receiver(self):
+        import inspect
+        params = inspect.signature(Bounce._write_bounce_input).parameters
+        assert 'receiver' not in params
+
+    def test_receiver_none_without_rmax_is_refused(self):
+        with pytest.raises(TypeError, match='Receiver is required'):
+            Bounce(verbose=False).run(_halfspace_env(shear_speed=0.0),
+                                      _src(200.0), None)
+
+
+class TestGradientSSPAnchorsTheTopHalfspaceAtTheSeabed:
+    """bounce.md §7: the critical angle uses the water speed at the seabed.
+    The deck's top half-space row (the incident medium) must carry
+    ``env.get_sound_speed(seafloor)``, not the surface speed."""
+
+    def test_deck_top_halfspace_carries_the_seafloor_speed(self, tmp_path):
+        env = Environment(
+            name='grad', bathymetry=100.0,
+            ssp=[(0.0, 1540.0), (100.0, 1500.0)],
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=1800.0, density=2.0,
+                                      attenuation=0.5))
+        deck = tmp_path / 'bounce_run.env'
+        model = Bounce(verbose=False)
+        model._write_bounce_input(filepath=deck, env=env, source=_src(200.0),
+                                  c_low=model.c_low, c_high=model.c_high,
+                                  rmax=10000.0)
+        lines = deck.read_text().splitlines()
+        assert lines[2].strip() == '0'
+        # The top half-space parameter row directly follows the TopOpt line.
+        top_speed = float(lines[4].split()[1])
+        assert top_speed == pytest.approx(1500.0)
+        assert '1540' not in deck.read_text()
+
+
 class TestCLowCannotExceedTheWaterSpeed:
     """``bounce.f90:46`` sets ``kMax = omega/cLow`` but ``:195`` references the
     angles to ``k0 = omega/c0`` with ``c0 = HSTop%cP``, the water sound speed at

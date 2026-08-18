@@ -441,6 +441,10 @@ back into a solver, so they chain freely:
 | `.sorted_by_miss()`, `.top_n_by_miss(n)`, `.filter_by_miss_distance(max_miss)` | closest approach to the receiver; each kept ray gains `miss_distance_m` |
 | `.truncate_at_receiver()` | clip each polyline at its closest approach |
 
+`Rays`'s miss-distance helpers default their target to the receiver the run
+was aimed at, so `top_n_by_miss(12)` needs no coordinates when the receiver is
+a single point.
+
 | `Arrivals` | |
 |---|---|
 | `.arrivals` | list of dicts: `delay`, `amplitude`, `phase`, bounce counts, `src_angle`, `rcv_angle`, `kind`, cell indices |
@@ -449,9 +453,7 @@ back into a solver, so they chain freely:
 | `.sorted_by_amplitude()`, `.top_n_by_amplitude(n)` | rank by strength |
 | `len(arr)`, `for a in arr:` | count and iterate |
 
-The miss-distance helpers default their target to the receiver the run was
-aimed at, so `top_n_by_miss(12)` needs no coordinates when the receiver is a
-single point. `Arrivals` is the channel impulse response that
+`Arrivals` is the channel impulse response that
 [`uacpy.comms`](comms.md) simulates a modem link over.
 
 ### Modes and reflection coefficients

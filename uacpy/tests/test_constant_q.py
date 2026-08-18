@@ -162,6 +162,31 @@ def test_spectrum_and_density_differ():
     assert not np.allclose(sp.power, de.power)
 
 
+def test_default_scaling_is_spectrum_where_linear_psd_is_density():
+    """The constant-Q family defaults to scaling='spectrum' (Pa² per bin)
+    where the linear estimators default to 'density' (Pa²/Hz): pinned by
+    signature and by the default output matching the explicit spelling."""
+    import inspect
+    from uacpy.acoustic_signal import psd, spectrogram
+    for fn in (constant_q_psd, constant_q_spectrogram,
+               probabilistic_constant_q):
+        assert inspect.signature(fn).parameters["scaling"].default == "spectrum"
+    for fn in (psd, spectrogram):
+        assert inspect.signature(fn).parameters["scaling"].default == "density"
+    x = _tone(440.0, dur=1.0)
+    d = constant_q_psd(x, FS, fmin=200, fmax=2000, bins_per_octave=12)
+    s = constant_q_psd(x, FS, fmin=200, fmax=2000, bins_per_octave=12,
+                       scaling="spectrum")
+    np.testing.assert_array_equal(np.nan_to_num(d.power),
+                                  np.nan_to_num(s.power))
+    de = constant_q_psd(x, FS, fmin=200, fmax=2000, bins_per_octave=12,
+                        scaling="density")
+    assert not np.allclose(np.nan_to_num(d.power), np.nan_to_num(de.power))
+    _, p_default = psd(x, FS, nperseg=1024)
+    _, p_density = psd(x, FS, nperseg=1024, scaling="density")
+    np.testing.assert_array_equal(p_default, p_density)
+
+
 def test_scaling_validation():
     with pytest.raises(ConfigurationError):
         constant_q_psd(_tone(440.0), FS, scaling="bogus")

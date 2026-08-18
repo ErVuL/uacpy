@@ -305,7 +305,10 @@ receiver = uacpy.Receiver(
 
 ```python
 modes = Kraken().compute_modes(env, source)
-modes.plot(n_modes=5)
+fig, ax = modes.plot(
+    n_modes=5, figsize=TALL,
+    title=f'Kraken — mode functions ψ$_m$(z), 200 Hz '
+          f'({modes.n_modes} modes)')
 ```
 
 ![Kraken mode functions](figures/kraken_modes.png)
@@ -325,18 +328,18 @@ Plotting fourteen curves is already crowded; sixty is hopeless. The heatmap
 renders `ψ_m(z)` as an image over (depth, mode index), each column rescaled to
 peak `±1` so the high-order modes stay visible:
 
+The seabed here is `layered_elastic()`, the shared 8 m-sand-over-granite
+scenario from [`_common.py`](../figure_scripts/_common.py) that the
+[Bounce](bounce.md) page dissects boundary-first:
+
 ```python
 from uacpy.visualization.plots import plot_modes_heatmap
 
-layered = uacpy.Environment(
-    name='Layered seabed',
-    bathymetry=100.0,
-    ssp=[(0.0, 1500.0), (100.0, 1490.0)],
-    bottom=uacpy.SeabedColumn.from_presets(
-        layers=[('sand', 8.0)], halfspace='granite'),
-)
-modes = Kraken().compute_modes(layered, source)
-plot_modes_heatmap(modes)
+env, source, _ = layered_elastic()
+modes = Kraken().compute_modes(env, source)
+fig, ax = plot_modes_heatmap(
+    modes, figsize=TALL,
+    title=f'Kraken — all {modes.n_modes} modes over an 8 m sand layer')
 ```
 
 ![Kraken mode heatmap](figures/kraken_mode_heatmap.png)
@@ -353,7 +356,8 @@ only exist because the basement supports them.
 
 ```python
 tl = Kraken().run(env, source, receiver, run_mode=RunMode.COHERENT_TL)
-tl.plot(env=env, source=source)
+fig, ax = tl.plot(env=env, source=source, figsize=WIDE,
+                  title='Kraken — coherent transmission loss, 200 Hz')
 ```
 
 ![Kraken coherent TL](figures/kraken_tl.png)
@@ -372,13 +376,19 @@ they decide the size of the mode set — and therefore the answer.
 
 ```python
 line = uacpy.Receiver(depths=50.0, ranges=np.linspace(50.0, 5000.0, 400))
-
-for kwargs in ({}, {'c_high': 1600.0}, {'c_low': 1520.0}):
+cases = [
+    ('default (0 – 1732 m/s)', {}, 'C0'),
+    ('c_high=1600', {'c_high': 1600.0}, 'C1'),
+    ('c_low=1520', {'c_low': 1520.0}, 'C2'),
+]
+for label, kwargs, colour in cases:
     model = Kraken(**kwargs)
     modes = model.compute_modes(env, source)
-    modes.compute_phase_speeds()
     tl = model.run(env, source, line)
 ```
+
+The left panel plots each set's `modes.compute_phase_speeds()`; the right
+panel plots each `tl`.
 
 ![Kraken phase-speed window](figures/kraken_phase_speed_window.png)
 
@@ -414,12 +424,12 @@ eigenvalues are genuinely complex.
 ```python
 trapped = Kraken().compute_modes(env, source)
 leaky = Kraken(leaky_modes=True).compute_modes(env, source)
-np.abs(np.imag(leaky.k))          # modal attenuation, 1/m
 ```
 
 ![Kraken leaky modes](figures/kraken_leaky_modes.png)
 
-Modal attenuation against phase speed, both axes logarithmic. The default run
+Modal attenuation — `np.abs(np.imag(leaky.k))`, in 1/m — against phase speed,
+both axes logarithmic. The default run
 finds 14 modes; asking for leaky ones finds 27, and every extra one sits to the
 right of the bottom-speed line with an attenuation one to three orders of
 magnitude above the trapped set. That is the point: leaky modes exist, but they
@@ -451,12 +461,17 @@ env = uacpy.Environment(
     ),
 )
 source = uacpy.Source(depths=50.0, frequencies=100.0)
-receiver = uacpy.Receiver(depths=np.linspace(1.0, 395.0, 110),
-                          ranges=np.linspace(100.0, 20_000.0, 260))
+receiver = uacpy.Receiver(
+    depths=np.linspace(1.0, 395.0, 110),
+    ranges=np.linspace(100.0, 20_000.0, 260),
+)
 
-for coupling in ('adiabatic', 'coupled'):
-    tl = Kraken(mode_coupling=coupling, n_segments=12).run(env, source, receiver)
-    tl.plot(env=env, source=source)
+fig, axes = plt.subplots(2, 1, figsize=(9.0, 6.6), sharex=True, sharey=True)
+for ax, coupling in zip(axes, ('adiabatic', 'coupled')):
+    tl = Kraken(mode_coupling=coupling, n_segments=12).run(
+        env, source, receiver)
+    tl.plot(env=env, source=source, ax=ax,
+            show_colorbar=(ax is axes[0]))
 ```
 
 ![Kraken adiabatic vs coupled](figures/kraken_range_dependent.png)
@@ -516,10 +531,12 @@ env = uacpy.Environment(
 )
 source = uacpy.Source(depths=1000.0, frequencies=50.0)
 modes = Kraken().compute_modes(env, source)
-plot_modes_heatmap(modes, n_modes=60)
 ```
 
 ![Kraken deep-water modes](figures/kraken_deep_modes.png)
+
+The right panel is `plot_modes_heatmap(modes, n_modes=60)`, drawn beside the
+profile.
 
 The Munk profile's sound-speed minimum at 1300 m (dashed) is a waveguide in its
 own right, and the mode shapes show it directly: the low-order modes are
@@ -540,10 +557,10 @@ above it falls between 7.5 and 8 Hz — the Pekeris estimate
 `c_w / (4D·√(1 − (c_w/c_b)²))` says 8.7 Hz, and the default ceiling sitting 5 %
 past the bottom speed accounts for the difference. Below cutoff, `run()`
 returns an all-`NaN` field with a warning that names the cutoff.
-`compute_modes` also raises, but it raises whatever the solver produced, not a
-message about cutoff: just under it a raw Fortran abort from `kraken.f90`, and
-further under a `ConfigurationError` about `Modes.phi` having shape `(0,)`.
-Both mean the same thing. The field there is not zero in reality — it is
+`compute_modes` raises a typed `ModelExecutionError` that says what happened:
+no mode with a phase speed inside `[c_low, c_high]` at this frequency — widen
+the window, or raise the frequency above the waveguide's modal cutoff.
+The field there is not zero in reality — it is
 continuous-spectrum energy, so the model to use is [Scooter](scooter.md). A
 broadband sweep whose low bins fall below cutoff is handled for you: those bins
 are zero-filled with a warning naming the cutoff frequency, keeping the

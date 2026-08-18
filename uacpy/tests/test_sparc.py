@@ -263,6 +263,156 @@ def test_time_series_does_not_warn_when_adequately_sampled():
     assert not [x for x in w if 'alias' in str(x.message)]
 
 
+class TestPulseTypeValidation:
+    """``pulse_type`` is validated positionally against the alphabets read
+    from ``Scooter/sparc.f90:126-148`` (shape) and
+    ``tslib/sourceMod.f90:68-70,178`` (post-process / sign / filter); short
+    strings are right-padded to 4 characters like sparcM.m does."""
+
+    def test_short_string_is_ljust_padded_to_four(self):
+        assert SPARC(pulse_type='R', verbose=False).pulse_type == 'R   '
+
+    def test_default_code_survives_verbatim(self):
+        assert SPARC(verbose=False).pulse_type == 'PN+B'
+
+    @pytest.mark.parametrize('shape', ['T', 'C'])
+    def test_cans_only_shapes_are_rejected(self, shape):
+        """``T``/``C`` exist in tslib/cans.f90 but sparc.f90's GetPar rejects
+        them with 'Unknown source type' before cans.f90 is reached."""
+        from uacpy.core.exceptions import ConfigurationError
+        with pytest.raises(ConfigurationError, match='position 1'):
+            SPARC(pulse_type=f'{shape}N+B', verbose=False)
+
+    @pytest.mark.parametrize('code,pos', [
+        ('PX+B', 'position 2'),
+        ('PN*B', 'position 3'),
+        ('PN+Z', 'position 4'),
+    ])
+    def test_each_position_is_checked_against_its_own_alphabet(self, code, pos):
+        from uacpy.core.exceptions import ConfigurationError
+        with pytest.raises(ConfigurationError, match=pos):
+            SPARC(pulse_type=code, verbose=False)
+
+    def test_overlong_code_is_rejected(self):
+        from uacpy.core.exceptions import ConfigurationError
+        with pytest.raises(ConfigurationError, match='at most 4'):
+            SPARC(pulse_type='PN+BN', verbose=False)
+
+    def test_non_string_is_rejected(self):
+        from uacpy.core.exceptions import ConfigurationError
+        with pytest.raises(ConfigurationError, match='string'):
+            SPARC(pulse_type=42, verbose=False)
+
+
+class TestOnlyFirstSourceFrequencyIsUsed:
+    """``source.frequencies[0]`` is the pulse's nominal centre frequency and
+    the only entry SPARC reads (``docs/models/sparc.md`` §7); extra entries
+    are dropped and the result records just the first."""
+
+    @staticmethod
+    def _rig(frequencies):
+        env = Environment(
+            name='freq0', bathymetry=100.0, ssp=1500.0,
+            bottom=BoundaryProperties(acoustic_type='rigid'))
+        return (env, Source(depths=50.0, frequencies=frequencies),
+                Receiver(depths=np.array([50.0]), ranges=np.array([1000.0])))
+
+    def test_deck_carries_only_the_first_frequency(self, tmp_path):
+        env, source, receiver = self._rig(np.array([30.0, 300.0]))
+        deck = tmp_path / 'model.env'
+        SPARC(verbose=False)._write_sparc_env(deck, env, source, receiver)
+        lines = deck.read_text().splitlines()
+        # Line 2 is the deck frequency; the octave pulse band derives from it.
+        assert float(lines[1]) == pytest.approx(30.0)
+        assert '15.000000 60.000000' in lines, lines
+
+    @pytest.mark.requires_binary
+    @pytest.mark.slow
+    def test_result_records_the_first_frequency(self):
+        env, source, receiver = self._rig(np.array([30.0, 60.0]))
+        result = SPARC(verbose=False).run(env, source, receiver,
+                                          run_mode=RunMode.TIME_SERIES)
+        assert np.asarray(result.frequencies) == pytest.approx([30.0])
+
+
+class TestPulseBandDefaultsToOneOctave:
+    """``f_min``/``f_max`` default to one octave around the source frequency
+    (``max(f/2, 0.1)`` .. ``2f``, ``docs/models/sparc.md`` §5); the deck's
+    band line sits directly after the quoted pulse-type line."""
+
+    @staticmethod
+    def _deck_lines(tmp_path, **kw):
+        env = Environment(
+            name='band', bathymetry=100.0, ssp=1500.0,
+            bottom=BoundaryProperties(acoustic_type='rigid'))
+        deck = tmp_path / 'model.env'
+        SPARC(verbose=False, **kw)._write_sparc_env(
+            deck, env, Source(depths=50.0, frequencies=100.0),
+            Receiver(depths=np.array([50.0]), ranges=np.array([1000.0])))
+        return deck.read_text().splitlines()
+
+    def test_default_band_is_half_to_double_the_centre(self, tmp_path):
+        lines = self._deck_lines(tmp_path)
+        i = lines.index("'PN+B'")
+        assert lines[i + 1] == '50.000000 200.000000'
+
+    def test_explicit_band_wins(self, tmp_path):
+        lines = self._deck_lines(tmp_path, f_min=40.0, f_max=90.0)
+        i = lines.index("'PN+B'")
+        assert lines[i + 1] == '40.000000 90.000000'
+
+
+class TestOutputTimeGridContract:
+    """The output grid is ``n_t_out`` samples over ``[0, t_max]``; ``t_start``
+    only sets where the integration begins (``docs/models/sparc.md`` §7)."""
+
+    @pytest.mark.requires_binary
+    @pytest.mark.slow
+    def test_time_axis_spans_zero_to_t_max_with_shifted_t_start(self):
+        env = Environment(
+            name='window', bathymetry=100.0, ssp=1500.0,
+            bottom=BoundaryProperties(acoustic_type='rigid'))
+        result = SPARC(t_max=1.0, t_start=-0.4, verbose=False).run(
+            env, Source(depths=50.0, frequencies=50.0),
+            Receiver(depths=np.array([50.0]), ranges=np.array([1000.0])),
+            run_mode=RunMode.TIME_SERIES)
+        times = np.asarray(result.coords['time'], dtype=float)
+        assert times.size == 512
+        assert times[0] == pytest.approx(0.0, abs=1e-6)
+        assert times[-1] == pytest.approx(1.0, rel=1e-4)
+
+
+@pytest.mark.requires_binary
+@pytest.mark.slow
+def test_ricker_arrival_peaks_at_travel_time_plus_5_over_2pi_f():
+    """``tslib/cans.f90:31-35`` defines the ``'R'`` pulse on ``U = ω·T − 5``,
+    so it peaks at ``T = 5/(2πF)`` after the pulse origin and the direct
+    arrival at range r peaks at ``r/c + 5/(2πF)``, not at ``r/c``. Deep
+    isovelocity water keeps the boundary bounces (path 1077 m, 0.72 s) out of
+    the 0.5 s window so the direct arrival is the only one in it."""
+    env = Environment(
+        name='ricker', bathymetry=1000.0, ssp=1500.0,
+        bottom=BoundaryProperties(acoustic_type='rigid'))
+    freq = 25.0
+    # rmax_safety_margin=10 refines Δk (Nk ≈ 140) so the direct arrival is
+    # clean; the r = RMax replica then sits at 4 km / 2.7 s, out of window.
+    result = SPARC(pulse_type='RN+N', t_max=0.5, rmax_safety_margin=10.0,
+                   verbose=False).run(
+        env, Source(depths=500.0, frequencies=freq),
+        Receiver(depths=np.array([500.0]), ranges=np.array([400.0])),
+        run_mode=RunMode.TIME_SERIES)
+    times = np.asarray(result.coords['time'], dtype=float)
+    trace = np.abs(np.asarray(result.data, dtype=float)[0, 0])
+    peak_t = float(times[np.argmax(trace)])
+    travel = 400.0 / 1500.0
+    offset = 5.0 / (2.0 * np.pi * freq)
+    assert peak_t == pytest.approx(travel + offset, abs=0.010), (
+        f"peak at {peak_t:.4f} s, expected {travel + offset:.4f} s "
+        f"(= r/c {travel:.4f} + Ricker offset {offset:.4f})")
+    # The offset itself: a peak at the bare travel time is a failure.
+    assert peak_t - travel > offset / 2.0
+
+
 class TestSPARCReceiverDepthAxis:
     """Same below-domain policy as Scooter and the Kraken family: the caller's
     depth axis comes back intact, with the depths the finite-difference mesh
@@ -442,3 +592,53 @@ class TestSPARCHankelNormalisation:
         raw = np.asarray(read_rts_file(rts[0])['p'])       # (nt, n_depth)
         returned = np.asarray(result.data)[:, 0, :]        # (n_depth, nt)
         np.testing.assert_allclose(returned, raw.T, rtol=1e-5, atol=0.0)
+
+
+class TestDefaultOutputWindowTracksTravelTime:
+    """``t_max`` defaults to ``2.5 × r_max / c``. ``rmax_safety_margin`` is a
+    wavenumber-sampling knob (``Δk ≈ 2π/RMax``); folding it into the output
+    window stretched ``[0, t_max]`` by the margin while ``n_t_out`` stayed
+    fixed, so the default grid always aliased (measured 4.3 dB peak error at
+    50 Hz: peak |p| 8.910e-4 on the stretched window vs 1.468e-3 resolved)."""
+
+    @staticmethod
+    def _rig():
+        env = Environment(
+            name='window', bathymetry=100.0, ssp=1500.0,
+            bottom=BoundaryProperties(acoustic_type='rigid'),
+        )
+        return (env, Source(depths=25.0, frequencies=50.0),
+                Receiver(depths=np.array([50.0]), ranges=np.array([1000.0])))
+
+    def _deck_t_max(self, tmp_path, **kw):
+        import re
+        env, source, receiver = self._rig()
+        deck = tmp_path / 'model.env'
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            SPARC(verbose=False, **kw)._write_sparc_env(
+                deck, env, source, receiver)
+        times = [re.match(r'^0\.0 (\S+) /$', ln)
+                 for ln in deck.read_text().splitlines()]
+        t_max = float([m for m in times if m][-1].group(1))
+        return t_max, [w for w in caught if 'alias' in str(w.message)]
+
+    def test_default_window_is_travel_time_based_and_alias_free(self, tmp_path):
+        t_max, alias = self._deck_t_max(tmp_path)
+        assert t_max == pytest.approx(2.5 * 1000.0 / 1500.0, rel=1e-4)
+        assert not alias, [str(w.message) for w in alias]
+
+    def test_margin_moves_rmax_but_not_the_window(self, tmp_path):
+        t_max, _ = self._deck_t_max(tmp_path, rmax_safety_margin=10.0)
+        assert t_max == pytest.approx(2.5 * 1000.0 / 1500.0, rel=1e-4)
+
+    def test_explicit_t_max_still_wins(self, tmp_path):
+        t_max, _ = self._deck_t_max(tmp_path, t_max=7.0)
+        assert t_max == pytest.approx(7.0, rel=1e-9)
+
+    def test_t_start_does_not_shift_the_output_window(self, tmp_path):
+        """``t_start`` sets where the march begins, never the ``[0, t_max]``
+        output window the deck's time block declares."""
+        default, _ = self._deck_t_max(tmp_path)
+        shifted, _ = self._deck_t_max(tmp_path, t_start=-0.5)
+        assert shifted == pytest.approx(default, rel=1e-9)

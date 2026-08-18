@@ -26,10 +26,16 @@ import numpy as np
 from pathlib import Path
 from typing import Union, Dict, Any, Optional
 
-from uacpy.acoustic_signal.waveforms import sparc_pulse
 from uacpy.core.results import Field
 from uacpy.io._fortran_helpers import detect_endian, typed_format_error
 from uacpy.core.exceptions import ConfigurationError, FileFormatError
+
+#: Directory containing the ``uacpy`` package, computed from this file so no
+#: higher layer is imported for it. ``warnings.warn(...,
+#: skip_file_prefixes=...)`` uses it to attribute a warning to the first
+#: stack frame *outside* uacpy — the caller's own code — however many model/
+#: reader layers sit in between.
+_UACPY_PACKAGE_ROOT = str(Path(__file__).resolve().parents[1])
 
 
 @typed_format_error
@@ -304,19 +310,27 @@ def _zero_range_mask(ranges: np.ndarray) -> np.ndarray:
     return np.abs(np.asarray(ranges, dtype=float)) < np.finfo(float).tiny
 
 
-def _warn_zero_ranges(ranges: np.ndarray, source_type: str) -> None:
-    """Warn once per transform that ``r = 0`` cells come back as no-data."""
+def _warn_zero_ranges(ranges: np.ndarray, source_type: str,
+                      context: str = '') -> None:
+    """Warn once per transform that ``r = 0`` cells come back as no-data.
+
+    ``skip_file_prefixes`` pins the warning on the first frame outside the
+    uacpy package — the caller's own code — whatever chain of model/reader
+    frames sits in between. ``context`` names the producing ``.grn`` (its
+    title line) in the message.
+    """
     if source_type != 'R':
         return
     n_zero = int(np.count_nonzero(_zero_range_mask(ranges)))
     if n_zero:
+        origin = f" (grn title {context!r})" if context else ""
         warnings.warn(
-            f"{n_zero} receiver range(s) at r = 0: the point-source Hankel "
-            "transform carries a 1/sqrt(r) cylindrical-spreading factor that "
-            "is singular there, so those cells are returned as NaN (no data). "
-            "Move the receiver off the source axis (e.g. r = 1 m) to get a "
-            "field value.",
-            UserWarning, stacklevel=3)
+            f"grn_reader: {n_zero} receiver range(s) at r = 0{origin}: the "
+            "point-source Hankel transform carries a 1/sqrt(r) "
+            "cylindrical-spreading factor that is singular there, so those "
+            "cells are returned as NaN (no data). Move the receiver off the "
+            "source axis (e.g. r = 1 m) to get a field value.",
+            UserWarning, skip_file_prefixes=(_UACPY_PACKAGE_ROOT,))
 
 
 def _hankel_transform(
@@ -492,7 +506,8 @@ def grn_to_field(
         raise ConfigurationError(
             f"source_depth_idx={source_depth_idx} out of range for nsd={nsd}"
         )
-    _warn_zero_ranges(ranges, source_type)
+    _warn_zero_ranges(ranges, source_type,
+                      context=grn_data.get('title', ''))
 
     p_out = _grn_pressure_slice(
         grn_data, ranges, ifreq=0, isd=source_depth_idx,
@@ -599,7 +614,8 @@ def sparc_snapshot_to_field(
             f"source_depth_idx={source_depth_idx} out of range for nsd={nsd}"
         )
 
-    _warn_zero_ranges(ranges, source_type)
+    _warn_zero_ranges(ranges, source_type,
+                      context=grn_data.get('title', ''))
     G = grn_data["G"][:, source_depth_idx, :, :]   # (nt, nrd, nk)
     tout = grn_data["freqVec"]                      # actually the time vector
     nt = len(tout)
@@ -610,11 +626,6 @@ def sparc_snapshot_to_field(
         )
     dt = float(tout[1] - tout[0])
 
-    # Steady-tone amplitude estimator 2·X_k/Σwin (mirrors rts_to_pressure for
-    # the 'R'/'D' modes). This yields S(w0)·g; normalize='source' (default)
-    # divides out the source spectrum S(w0) below to recover calibrated g.
-    win = np.hanning(nt)
-    G_freq = np.fft.fft(G * win[:, np.newaxis, np.newaxis], axis=0)
     fft_freqs = np.fft.fftfreq(nt, dt)
     nyquist = 0.5 / dt
     if frequency > nyquist:
@@ -633,6 +644,9 @@ def sparc_snapshot_to_field(
         # both: a taper would break the convolution theorem and would null the
         # transient source pulse (which lives in the first few samples, where a
         # Hann window is ~0). uacpy generated the pulse, so s(t) is known.
+        # Imported here rather than at module level: sparc_pulse pulls scipy
+        # in, and only this deconvolution path needs it.
+        from uacpy.acoustic_signal.waveforms import sparc_pulse
         s_t, _ = sparc_pulse(tout, 2.0 * np.pi * frequency, pulse_type[0])
         S_at_f0 = np.fft.fft(s_t)[f_idx]
         if S_at_f0 == 0:
@@ -642,6 +656,11 @@ def sparc_snapshot_to_field(
                 "deconvolve (check pulse / frequency).")
         G_at_f0 = np.fft.fft(G, axis=0)[f_idx, :, :] / S_at_f0
     else:
+        # Steady-tone amplitude estimator 2·X_k/Σwin (mirrors rts_to_pressure
+        # for the 'R'/'D' modes). This yields S(w0)·g — the raw, uncalibrated
+        # field this branch returns.
+        win = np.hanning(nt)
+        G_freq = np.fft.fft(G * win[:, np.newaxis, np.newaxis], axis=0)
         G_at_f0 = 2.0 * G_freq[f_idx, :, :] / np.sum(win)   # (nrd, nk) = S·g
 
     # Wavenumber grid — SPARC's k vector is independent of frequency.
@@ -649,8 +668,8 @@ def sparc_snapshot_to_field(
     atten = _stab_attenuation(grn_data, k)          # 0 for SPARC
 
     if cmin is not None or cmax is not None:
-        win = _hanning_taper(k, frequency, cmin, cmax)
-        G_at_f0 = G_at_f0 * win[np.newaxis, :]
+        taper = _hanning_taper(k, frequency, cmin, cmax)
+        G_at_f0 = G_at_f0 * taper[np.newaxis, :]
 
     p_out = _hankel_transform(
         G_at_f0, k, ranges,
@@ -731,7 +750,8 @@ def sparc_snapshot_to_time_field(
             f"source_depth_idx={source_depth_idx} out of range for nsd={nsd}"
         )
 
-    _warn_zero_ranges(ranges, source_type)
+    _warn_zero_ranges(ranges, source_type,
+                      context=grn_data.get('title', ''))
     G = grn_data["G"][:, source_depth_idx, :, :]   # (nt, nrd, nk)
     tout = np.asarray(grn_data["freqVec"], dtype=float)   # times, not freqs
     k = _wavenumbers_for_frequency(grn_data, frequency)
@@ -800,7 +820,8 @@ def grn_to_transfer_function(
             f"source_depth_idx={source_depth_idx} out of range for nsd={nsd}"
         )
 
-    _warn_zero_ranges(ranges, source_type)
+    _warn_zero_ranges(ranges, source_type,
+                      context=grn_data.get('title', ''))
     pressure = np.zeros((nrd, len(ranges), nfreq), dtype=np.complex128)
     for ifreq in range(nfreq):
         pressure[:, :, ifreq] = _grn_pressure_slice(

@@ -126,6 +126,24 @@ def test_run_parallel_empty_raises():
         run_parallel([])
 
 
+def test_run_parallel_shared_pinned_work_dir_raises(tmp_path):
+    """One work_dir pinned on two jobs is rejected up front, before any pool
+    or worker exists. The guard resolves paths, so a str spelling and a Path
+    spelling of the same directory collide."""
+    class _PinnedModel:
+        def __init__(self, work_dir):
+            self.work_dir = work_dir
+
+    shared = tmp_path / 'shared_scratch'
+    jobs = [
+        Job(model=_PinnedModel(str(shared)), env='e', source='s', receiver='r'),
+        Job(model=_PinnedModel(shared), env='e', source='s', receiver='r'),
+    ]
+    with pytest.raises(uacpy.ConfigurationError,
+                       match="pinned on more than one job"):
+        run_parallel(jobs)
+
+
 def test_main_is_importable_helper(monkeypatch, tmp_path):
     """The spawn-safety probe: True only when __main__ is a real file."""
     import sys, types
@@ -227,10 +245,16 @@ def test_job_defaults():
 
 @pytest.mark.requires_binary
 def test_run_parallel_knob_sweep(pekeris_env):
-    """Sweep one model's knob by building jobs with ``model.copy()``."""
+    """Sweep one model's knob by building jobs with ``model.copy()``.
+
+    Each parallel result must equal the same job run serially in-process:
+    the worker executes the identical model/scenario/run_mode, so the data,
+    grid coordinates and shape all agree element-wise."""
     src = uacpy.Source(depths=25.0, frequencies=200.0)
     rcv = uacpy.Receiver(depths=np.linspace(10, 90, 9), ranges=np.linspace(100, 5000, 21))
-    base = uacpy.models.Bellhop()
+    # bellhopcuda's GPU reductions are nondeterministic at ~1e-7 relative;
+    # the fortran backend reruns bit-identically, which the equality needs.
+    base = uacpy.models.Bellhop(backend='fortran')
     jobs = [
         Job(base.copy(n_beams=n), pekeris_env, src, rcv,
             run_mode=uacpy.RunMode.COHERENT_TL, label=n)
@@ -243,13 +267,24 @@ def test_run_parallel_knob_sweep(pekeris_env):
     assert len(stack) == 3
     assert np.array_equal(stack.coordinate, np.array([200.0, 400.0, 800.0]))
 
+    for job, par in zip(jobs, batch):
+        ser = job.model.run(job.env, job.source, job.receiver,
+                            run_mode=job.run_mode, **job.run_kwargs)
+        assert type(par) is type(ser)
+        assert par.shape == ser.shape
+        assert np.array_equal(par.data, ser.data, equal_nan=True)
+        for name in ('depth', 'range'):
+            assert np.array_equal(par.coords[name], ser.coords[name])
+
 
 @pytest.mark.requires_binary
 def test_run_parallel_scenario_sweep(pekeris_env):
     """Same model, a different source per job."""
     rcv = uacpy.Receiver(depths=np.linspace(10, 90, 9), ranges=np.linspace(100, 5000, 21))
     depths = [10.0, 50.0, 90.0]
-    base = uacpy.models.Bellhop()
+    # bellhopcuda's GPU reductions are nondeterministic at ~1e-7 relative;
+    # the fortran backend reruns bit-identically, which the equality needs.
+    base = uacpy.models.Bellhop(backend='fortran')
     jobs = [
         Job(base.copy(), pekeris_env, uacpy.Source(depths=d, frequencies=200.0), rcv,
             run_mode=uacpy.RunMode.COHERENT_TL, label=d)
@@ -292,7 +327,9 @@ def test_run_parallel_preserves_rays_and_eigenrays(pekeris_env):
     wipes its scratch .ray file."""
     src = uacpy.Source(depths=25.0, frequencies=200.0)
     rcv = uacpy.Receiver(depths=np.array([50.0]), ranges=np.array([2000.0]))
-    base = uacpy.models.Bellhop()
+    # bellhopcuda's GPU reductions are nondeterministic at ~1e-7 relative;
+    # the fortran backend reruns bit-identically, which the equality needs.
+    base = uacpy.models.Bellhop(backend='fortran')
     jobs = [
         Job(base.copy(n_beams=n), pekeris_env, src, rcv, run_mode=uacpy.RunMode.RAYS)
         for n in (21, 41)
@@ -351,7 +388,9 @@ def test_run_parallel_collects_errors(pekeris_env):
     # RAYS with a multi-frequency source is rejected in run() before the binary
     # launches — a deterministic per-job failure.
     bad = uacpy.Source(depths=25.0, frequencies=np.array([150.0, 200.0, 250.0]))
-    base = uacpy.models.Bellhop()
+    # bellhopcuda's GPU reductions are nondeterministic at ~1e-7 relative;
+    # the fortran backend reruns bit-identically, which the equality needs.
+    base = uacpy.models.Bellhop(backend='fortran')
     jobs = [
         Job(base.copy(), pekeris_env, good, rcv, run_mode=uacpy.RunMode.RAYS),
         Job(base.copy(), pekeris_env, bad, rcv, run_mode=uacpy.RunMode.RAYS),
@@ -377,7 +416,9 @@ def test_copy_onto_a_user_work_dir_does_not_inherit_cleanup(tmp_path):
     keep = d / 'precious.txt'
     keep.write_text('do not delete')
 
-    base = uacpy.models.Bellhop()
+    # bellhopcuda's GPU reductions are nondeterministic at ~1e-7 relative;
+    # the fortran backend reruns bit-identically, which the equality needs.
+    base = uacpy.models.Bellhop(backend='fortran')
     assert base.cleanup is True, "unpinned model should own its temp dir"
 
     clone = base.copy(work_dir=d)

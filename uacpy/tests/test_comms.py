@@ -32,8 +32,6 @@ class TestModulation:
             comms.constellation("32qam")
 
     def test_plot_helpers_return_fig_ax(self):
-        import matplotlib
-        matplotlib.use("Agg")
         from uacpy.visualization import plot_constellation, plot_scatter
         mod = comms.Modulator("qpsk")
         fig, ax = plot_constellation(mod.constellation, scheme=mod.scheme)
@@ -93,6 +91,24 @@ class TestMetrics:
         with pytest.raises(ConfigurationError):
             comms.evm([], [])
 
+    def test_ber_sweep_matches_simulate_link(self):
+        # ber_sweep is one simulate_link call per Eb/N0 point drawing from a
+        # single rng stream, so a same-seeded sequential simulate_link run
+        # reproduces it bit-exactly.
+        pts = [2.0, 8.0]
+        rng = np.random.default_rng(0xBE12)
+        direct = [comms.simulate_link("qpsk", e, 20000, rng=rng).ber
+                  for e in pts]
+        sweep = comms.ber_sweep("qpsk", pts, 20000,
+                                rng=np.random.default_rng(0xBE12))
+        assert np.array_equal(sweep, direct)
+        # 2 dB measures 0.0385 against 0.0375 theory (770 error events, so
+        # rel=0.2 is ~5 sigma); 8 dB measures 3e-4 — the ordering holds by
+        # two orders of magnitude.
+        assert sweep[0] > sweep[1]
+        assert sweep[0] == pytest.approx(float(comms.ber_theory("qpsk", 2.0)),
+                                         rel=0.2)
+
 
 class TestEqualization:
     def test_dfe_opens_closed_eye(self):
@@ -129,6 +145,36 @@ class TestEqualization:
         with pytest.raises(ConfigurationError):
             comms.mmse_equalizer(np.ones(8, complex), np.array([1.0, 0.3]),
                                  snr_linear)
+
+    def test_lms_and_rls_converge_on_known_multipath(self):
+        rng = np.random.default_rng(50)
+        mod = comms.Modulator("qpsk")
+        tx = mod.modulate(rng.integers(0, 2, 2 * 1500))
+        h = np.array([1.0, 0.5, 0.25])
+        rx = comms.awgn(comms.apply_channel(tx, h)[: tx.size], 25.0, rng=rng)
+        raw = comms.evm(rx[-500:], tx[-500:])
+        eq_lms, mse_lms = comms.lms_equalizer(rx, mod.constellation,
+                                              n_taps=11, step=0.01,
+                                              train=tx[:400])
+        eq_rls, mse_rls = comms.rls_equalizer(rx, mod.constellation,
+                                              n_taps=11, forget=0.99,
+                                              train=tx[:400])
+        # One equalized output and one squared-error sample per input symbol.
+        assert eq_lms.size == mse_lms.size == tx.size
+        assert eq_rls.size == mse_rls.size == tx.size
+        # Measured over four seeds: raw tail EVM 0.56-0.58, equalized tail
+        # EVM 0.073-0.080 for both adaptations, converged MSE 0.0054-0.0063.
+        # The /3 and 0.02 floors keep 2-3x of margin on a reseed.
+        assert raw > 0.4
+        assert comms.evm(eq_lms[-500:], tx[-500:]) < raw / 3
+        assert comms.evm(eq_rls[-500:], tx[-500:]) < raw / 3
+        assert mse_lms[-500:].mean() < 0.02
+        assert mse_rls[-500:].mean() < 0.02
+        # Istepanian & Stojanovic put RLS convergence at ~2N against LMS's
+        # ~20N symbols (N = 11 taps here): over symbols 50..150 RLS has
+        # converged (MSE 0.005-0.008 across seeds) while LMS still sits at
+        # 0.40-0.44.
+        assert mse_rls[50:150].mean() < mse_lms[50:150].mean() / 10
 
 
 class TestDoppler:
@@ -167,6 +213,42 @@ class TestSync:
         k, metric = comms.detect_preamble(rx, pre, threshold=0.5)
         assert abs(k - offset) <= 1
 
+    def test_matched_filter_metric_bounded_and_scale_invariant(self):
+        rng = np.random.default_rng(70)
+        pre = comms.Modulator("qpsk").modulate(rng.integers(0, 2, 64))
+        noise = 0.3 * (rng.standard_normal(100) + 1j * rng.standard_normal(100))
+        tail = 0.3 * (rng.standard_normal(100) + 1j * rng.standard_normal(100))
+        rx = np.concatenate([noise, pre, tail])
+        m = comms.matched_filter_metric(rx, pre)
+        # Cauchy-Schwarz bounds |corr| <= sqrt(pe*win), so the metric lies in
+        # [0, 1] with 1 at a perfect match.
+        assert np.all(m >= 0.0) and np.all(m <= 1.0)
+        assert m.argmax() == noise.size
+        # A receive-level change a scales corr by a and the window energy by
+        # a^2, so a cancels out of the metric.
+        for a in (0.01, 3.7, 250.0):
+            assert np.allclose(comms.matched_filter_metric(a * rx, pre), m,
+                               atol=1e-9)
+        # rx == preamble gives |corr| = win = pe: the perfect-match value 1.
+        assert comms.matched_filter_metric(pre, pre)[0] == pytest.approx(1.0)
+
+    def test_preamble_longer_than_signal_raises_typed(self):
+        """A receiver preamble that outruns the whole record is a caller
+        error, and the funnel every detector shares raises it typed —
+        matched_filter_metric, detect_preamble and CommsReceiver.receive all
+        surface the same ConfigurationError."""
+        with pytest.raises(ConfigurationError,
+                           match="preamble longer than signal"):
+            comms.matched_filter_metric(np.ones(32, complex),
+                                        np.ones(64, complex))
+        with pytest.raises(ConfigurationError,
+                           match="preamble longer than signal"):
+            comms.detect_preamble(np.ones(32, complex), np.ones(64, complex))
+        rx = comms.CommsReceiver("qpsk", preamble=128)
+        with pytest.raises(ConfigurationError,
+                           match="preamble longer than signal"):
+            rx.receive(np.zeros(64, dtype=complex))
+
 
 class TestMultipathChannel:
     def test_shares_the_acoustic_signal_primitive(self):
@@ -187,23 +269,6 @@ class TestMultipathChannel:
         g = np.array([1.0, 0.6 * np.exp(1j * 1.1)])
         h = comms.multipath_channel(g, [0.0, 3 / fs], fs)
         assert h[0] == g[0] and h[3] == g[1]
-
-    def test_nearest_sample_placement_rounds(self):
-        """``fractional=False`` promises *nearest*-sample placement; floor
-        placement puts a 0.7-sample arrival one tap early."""
-        from uacpy.acoustic_signal import impulse_response
-        fs = 8000.0
-        _, h = impulse_response([1.0], [0.7 / fs], fs, fractional=False)
-        assert np.argmax(np.abs(h)) == 1
-        # fractional=True uses a windowed-sinc kernel, not a two-tap linear
-        # split: the latter is a frac-dependent lowpass (-3.0 dB at
-        # f/fs = 0.25 for frac = 0.5), so equal arrivals came back unequal.
-        # Placed clear of the array ends, where the kernel is not truncated.
-        _, hf = impulse_response([1.0], [100.7 / fs], fs, fractional=True,
-                                 n_samples=256)
-        assert hf.sum() == pytest.approx(1.0)
-        centroid = float(np.sum(np.arange(hf.size) * hf) / hf.sum())
-        assert centroid == pytest.approx(100.7, abs=0.01)
 
     @pytest.mark.parametrize("gains,delays", [([1.0, 0.5], [0.0]),
                                               ([1.0], [-1e-3])])
@@ -273,6 +338,22 @@ class TestFadingStatistics:
             warnings.simplefilter('error')
             comms.fading_taps(4, 4096, 50.0, 8000.0, rng=np.random.default_rng(1))
 
+    @pytest.mark.parametrize('rician_k', [0.0, 3.0, 10.0])
+    def test_rician_k_sets_the_los_to_scatter_power_ratio(self, rician_k):
+        # rician_k > 0 adds a constant LOS term sqrt(K/(K+1)) to scattered
+        # taps of power 1/(K+1), so the Rice factor is recovered from the
+        # taps as |mean|^2 / var — the ratio of coherent to incoherent power
+        # (Abraham). 200 Hz over 2048 samples at 8 kHz spans 102 DFT bins
+        # per tap; measured over four seeds the estimate lands at 2.7-3.1
+        # for K=3, 9.4-9.9 for K=10, and below 0.005 for K=0.
+        H = comms.fading_taps(4, 2048, 200.0, 8000.0, rician_k=rician_k,
+                              rng=np.random.default_rng(5))
+        k_hat = np.abs(np.mean(H)) ** 2 / np.var(H)
+        if rician_k == 0.0:
+            assert k_hat < 0.05
+        else:
+            assert k_hat == pytest.approx(rician_k, rel=0.25)
+
 
 class TestChannelEstimation:
     def test_ls_and_omp_recover_sparse_channel(self):
@@ -316,6 +397,51 @@ class TestOFDM:
         assert abs(out[0]) < 1e-6                      # null carries nothing
         assert np.allclose(out[1:], sym[1:], atol=1e-9)   # the rest is untouched
 
+    def test_cyclic_prefix_boundary_is_exact(self):
+        # cp_len >= len(h)-1 is the exact no-ISI condition: each block's
+        # linear-convolution tail (len(h)-1 samples) must die inside the
+        # next block's discarded prefix.
+        rng = np.random.default_rng(60)
+        nsc = 64
+        sym = comms.Modulator("qpsk").modulate(rng.integers(0, 2, 2 * nsc * 4))
+        h = np.array([1.0, 0.5, 0.3, 0.2], dtype=complex)
+
+        def run(cp):
+            sig = comms.ofdm_modulate(sym, nsc, cp)
+            rx = comms.apply_channel(sig, h)[: sig.size]
+            return comms.evm(comms.ofdm_demodulate(rx, nsc, cp, channel=h)
+                             [: sym.size], sym)
+
+        # The link is noiseless, so cp = len(h)-1 leaves only float error
+        # (1.5e-12 for this seed) and one sample short leaks inter-block
+        # interference at EVM 0.050 — an error floor no SNR would remove.
+        assert run(len(h) - 1) < 1e-9
+        assert run(len(h) - 2) > 0.03
+
+    def test_mmse_beats_zero_forcing_at_a_near_null_under_noise(self):
+        rng = np.random.default_rng(61)
+        nsc, cp = 64, 8
+        sym = comms.Modulator("qpsk").modulate(rng.integers(0, 2, 2 * nsc * 10))
+        h = np.array([1.0, -0.95], dtype=complex)   # |H[0]| = 0.05 near-null
+        sig = comms.ofdm_modulate(sym, nsc, cp)
+        rx = comms.awgn(comms.apply_channel(sig, h)[: sig.size], 20.0, rng=rng)
+        zf = comms.ofdm_demodulate(rx, nsc, cp, channel=h)
+        mmse = comms.ofdm_demodulate(rx, nsc, cp, channel=h, snr_linear=100.0)
+        err_zf = np.abs(zf[: sym.size].reshape(-1, nsc)
+                        - sym.reshape(-1, nsc))
+        err_mmse = np.abs(mmse[: sym.size].reshape(-1, nsc)
+                          - sym.reshape(-1, nsc))
+        null = int(np.argmin(np.abs(np.fft.fft(h, nsc))))
+        assert null == 0
+        # On the null carrier ZF's error is the noise over |H|
+        # (sigma/|H| = 0.1/0.05 = 2.0 at 20 dB); MMSE's is the Wiener bias
+        # plus damped noise, sqrt(0.8^2 + 0.4^2) = 0.89. Measured over three
+        # seeds: 2.3-2.9 against 0.87-0.96 on the null carrier, overall EVM
+        # 0.40-0.47 against 0.25-0.27 — the /2 keeps margin on a reseed.
+        assert np.sqrt((err_mmse[:, null] ** 2).mean()) \
+            < np.sqrt((err_zf[:, null] ** 2).mean()) / 2
+        assert comms.evm(mmse[: sym.size], sym) < comms.evm(zf[: sym.size], sym)
+
 
 class TestCoding:
     def test_viterbi_corrects_random_errors(self):
@@ -349,6 +475,38 @@ class TestCoding:
         cod = comms.simulate_link("bpsk", 4.0, 40000, code=code, rng=rng).ber
         assert cod < raw
 
+    @pytest.mark.parametrize("ebn0", [0.0, 1.0])
+    def test_coded_link_is_worse_below_the_crossover(self, ebn0):
+        # simulate_link's Eb/N0 is per CHANNEL bit (link.py scales the noise
+        # by k*rate), so a rate-1/2 code halves the energy behind each
+        # channel bit and the coded curve sits ABOVE the uncoded one below
+        # the ~3.3 dB crossover the guide documents. Measured over three
+        # seeds at 30 000 bits: 0.077-0.080 raw against 0.37-0.38 coded at
+        # 0 dB, 0.055-0.058 against 0.256-0.268 at 1 dB — a 4.7x gap the 2x
+        # bound clears with margin.
+        code = comms.ConvCode(interleave_depth=16)
+        rng = np.random.default_rng(12)
+        raw = comms.simulate_link("bpsk", ebn0, 30000, rng=rng).ber
+        cod = comms.simulate_link("bpsk", ebn0, 30000, code=code, rng=rng).ber
+        assert cod > 2 * raw
+
+    def test_decode_info_len_serves_a_separate_receive_codec(self):
+        # A receive codec that never encoded holds no recorded length:
+        # decode() returns the full Viterbi output — (777+6)*2 = 1566 coded
+        # bits padded to 7 whole 256-bit interleaver blocks = 1792, decoded
+        # to 1792/2 - 6 = 890 bits — and decode(info_len=) strips the
+        # padding to exactly the payload.
+        rng = np.random.default_rng(80)
+        info = rng.integers(0, 2, 777)
+        coded = comms.ConvCode(interleave_depth=16).encode(info)
+        rx_code = comms.ConvCode(interleave_depth=16)
+        full = rx_code.decode(coded)
+        assert full.size == 890
+        assert np.array_equal(full[: info.size], info)
+        out = rx_code.decode(coded, info_len=info.size)
+        assert out.size == info.size
+        assert np.array_equal(out, info)
+
 
 class TestFraming:
     def test_byte_bit_round_trip(self):
@@ -367,8 +525,32 @@ class TestFraming:
         _, ok = comms.unpack_frame(bits)
         assert not ok
 
+    def test_frame_bit_layout_is_big_endian_msb_first(self):
+        """Pins the wire format at the BIT level — a round trip alone would
+        also pass under LSB-first packing or a little-endian length field.
+        [length:4][payload][crc32:4]: length 2 as big-endian 00 00 00 02,
+        payload 0xC1 0x02, CRC-32 over header+payload = 0x8EA9F2EE (zlib
+        and an independent bitwise reflected-0xEDB88320 CRC agree), every
+        byte unpacked MSB first."""
+        expected = np.array([int(b) for b in
+                             "00000000" "00000000" "00000000" "00000010"
+                             "11000001" "00000010"
+                             "10001110" "10101001" "11110010" "11101110"],
+                            dtype=np.uint8)
+        assert np.array_equal(comms.pack_frame(b"\xc1\x02"), expected)
+
 
 class TestPHY:
+    @pytest.mark.parametrize("sps,rolloff,span", [(8, 0.25, 8), (4, 0.35, 10),
+                                                  (8, 0.0, 8), (2, 1.0, 6)])
+    def test_rrc_filter_has_unit_energy(self, sps, rolloff, span):
+        # span*sps + 1 symmetric taps normalised to sum(h^2) == 1, so the
+        # matched RRC pair peaks at exactly 1 (the raised cosine at t=0).
+        h = comms.rrc_filter(sps, rolloff, span)
+        assert h.size == span * sps + 1
+        assert np.sum(h ** 2) == pytest.approx(1.0)
+        assert np.allclose(h, h[::-1])
+
     def test_rrc_pulse_then_matched_filter_recovers_symbols(self):
         rng = np.random.default_rng(20)
         sps = 8
@@ -557,7 +739,7 @@ class TestUnsyncedReceiveIsAnnounced:
         rx = comms.OFDMReceiver("qpsk", n_subcarriers=64, cp_len=8)
         rng = np.random.default_rng(9)
         noise = (rng.standard_normal(64 * 12) + 1j * rng.standard_normal(64 * 12))
-        assert comms.schmidl_cox_sync(noise, 64, 8)[0] is None
+        assert comms.schmidl_cox_sync(noise, 64)[0] is None
         with pytest.warns(UserWarning, match='no preamble was found'):
             rx.receive(noise)
 
@@ -577,7 +759,7 @@ class TestOFDMModem:
         off, cfo_true = 137, 0.0007
         rx = comms.apply_cfo(np.concatenate([np.zeros(off, complex), frame]), -cfo_true)
         rx = rx + 0.02 * (rng.standard_normal(rx.size) + 1j * rng.standard_normal(rx.size))
-        start, cfo = comms.schmidl_cox_sync(rx, nsc, cp)
+        start, cfo = comms.schmidl_cox_sync(rx, nsc)
         assert abs(start - off) <= cp           # within the cyclic prefix
         assert abs(cfo - cfo_true) < 1e-4
 
@@ -657,6 +839,30 @@ class TestJanus:
         noisy = sym.copy()
         noisy[np.random.default_rng(0).choice(144, 8, replace=False)] ^= 1
         assert np.array_equal(comms.janus_decode(noisy), bits)
+
+    def test_waveform_duration_chip_and_band_pins(self):
+        # STANAG 4748 initial band (Potter et al. 2014 sec. K): Fc = 11520 Hz,
+        # Bw = 4160 Hz, FSw = Bw/26 = 160 Hz, Cd = 1/FSw = 6.25 ms. The
+        # packet is 32 preamble + 144 data chips = 176 x 6.25 ms = 1.10 s.
+        assert janus.FC_INITIAL == 11520.0
+        assert janus.BW_INITIAL == 4160.0
+        fs = 48000.0
+        wav = comms.janus_modulate(self._packet().to_bits(), fs)
+        assert wav.size == 52800
+        assert wav.size / fs == pytest.approx(1.10)
+        assert wav.size == 176 * int(0.00625 * fs)   # 300 samples per chip
+        # Tone table f_low + (2*hop + bit)*FSw over the 13 hop pairs spans
+        # 9440..13440 Hz, inside the band edges 9440 and 13600 Hz.
+        f_low = janus.FC_INITIAL - janus.BW_INITIAL / 2
+        tones = [janus._tone_freq(hop, bit, f_low, 160.0)
+                 for hop in range(13) for bit in (0, 1)]
+        assert min(tones) == 9440.0 and max(tones) == 13440.0
+        # 97 % of the waveform energy sits inside the band (measured; the
+        # remainder is the Tukey chip-edge sidelobes).
+        spec = np.abs(np.fft.rfft(wav)) ** 2
+        freqs = np.fft.rfftfreq(wav.size, 1.0 / fs)
+        band = (freqs >= f_low) & (freqs <= f_low + janus.BW_INITIAL)
+        assert spec[band].sum() > 0.95 * spec.sum()
 
     def test_fh_bfsk_waveform_round_trip_clean(self):
         bits = self._packet().to_bits()
@@ -999,3 +1205,19 @@ class TestDopplerTwoStageMatchesFullScan:
     def test_all_zero_metric_still_raises(self):
         with pytest.raises(ConfigurationError, match='no scale candidate'):
             comms.estimate_doppler_scale(np.zeros(100), np.ones(500))
+
+
+def test_detect_frames_finds_every_frame_and_suppresses_neighbours():
+    rng = np.random.default_rng(40)
+    preamble = comms.Modulator("qpsk").modulate(rng.integers(0, 2, 256))
+    gap = np.zeros(300, dtype=complex)
+    sig = np.concatenate([np.zeros(50, dtype=complex), preamble, gap,
+                          preamble, np.zeros(80, dtype=complex)])
+    sig = comms.awgn(sig, 10.0, rng=rng)
+    starts, metric = comms.detect_frames(sig, preamble, threshold=0.5)
+    assert starts == [50, 50 + preamble.size + gap.size]
+    assert metric.size == sig.size - preamble.size + 1
+    # min_gap suppresses the weaker of two candidates closer than the gap.
+    starts_wide, _ = comms.detect_frames(sig, preamble, threshold=0.05,
+                                         min_gap=sig.size)
+    assert len(starts_wide) == 1

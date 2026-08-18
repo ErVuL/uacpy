@@ -1,6 +1,6 @@
 # File I/O — the layer between metres and the native formats
 
-> `uacpy.io` · 82 public names · every reader and writer the models run on
+> `uacpy.io` · 87 public names · every reader and writer the models run on
 
 Underneath the Python API, uacpy drives seven native solvers by writing text
 and binary files, launching a subprocess, and parsing what comes back. Each of
@@ -71,7 +71,7 @@ what the `1:-1` trims.)
 | Range, depth, thickness | metres | **km** for AT `.env` / `.bty` / `.ati` / `.ssp` / `.flp`, OASES `.dat` range specs, and the range axis of mpiramS' SSP and sediment files | `m_to_km` / `km_to_m` |
 | Range, depth | metres | **metres** for `ram.in` / `rams.in` / `ramgeo.in`, mpiramS' bathymetry and output-range files, and inside `.shd` (AT converts before writing the header) | — |
 | Frequency | Hz | Hz | — |
-| Reflection **phase** | radians | degrees | `deg_to_rad` / `rad_to_deg` |
+| Reflection **phase** | radians | degrees | `deg_to_rad` (in `uacpy.io.units`) |
 | Grazing **angle** | degrees | degrees | — |
 
 The two that catch people: the RAM family is metres on disk almost
@@ -181,7 +181,7 @@ of outputs. See [Bellhop](../models/bellhop.md), [Kraken](../models/kraken.md),
 | `.shd` | out | direct-access binary | Complex pressure, `(Ntheta, Nsz, Nrz, Nrr)` |
 | `.arr` | out | ASCII | Bellhop arrivals: amplitude, delay and bounce counts per path |
 | `.ray` | out | ASCII or binary | Bellhop ray paths |
-| `.mod` / `.moa` | out | direct-access binary / ASCII | Kraken mode shapes and wavenumbers |
+| `.mod` | out | direct-access binary | Kraken mode shapes and wavenumbers (the only mode format any AT program writes) |
 | `.grn` | out | direct-access binary | Scooter / SPARC wavenumber-domain Green's function |
 | `.rts`, `.ts` | out | ASCII | SPARC time series; a simpler generic time series |
 | `.prt` | out | ASCII | The binary's diagnostic log — where AT puts fatal errors instead of stderr |
@@ -209,9 +209,9 @@ written, and are public so a wrapper can log the resolved values:
   rather than capping on a placeholder sound speed, which would silently
   truncate the mode spectrum.
 
-`writable_layers(bottom)` is the guard that drops sub-resolution sediment
-layers: a layer thinner than the `.1f` depth format can express would become a
-zero-thickness AT medium.
+`writable_layers(bottom)` keeps every sediment layer: each one has positive
+thickness by construction and is written at that thickness — the deck's depth
+column is fine enough that none collapses to a zero-thickness AT medium.
 
 `write_multi_profile_env` handles Kraken's range-dependent mode, where
 `kraken.exe` reads profile blocks sequentially from one `.env` and writes all
@@ -273,9 +273,9 @@ convention. Bellhop opens `<env>.bty`, `<env>.ati`, `<env>.brc`, `<env>.trc`,
 
 | File | What it is | Read | Write |
 |---|---|---|---|
-| `.bty` | Bathymetry vs range | `read_bathymetry` | `write_bty_file`, `write_bty_long_format`, `write_bty_3d` |
+| `.bty` | Bathymetry vs range | `read_bathymetry` | `write_bty_file`, `write_bty_long_format` |
 | `.ati` | Sea-surface altimetry vs range | `read_altimetry` | `write_ati_file` |
-| `.ssp` | Range-dependent sound-speed matrix | `read_ssp_2d`, `read_ssp_3d` | `write_ssp` |
+| `.ssp` | Range-dependent sound-speed matrix | `read_ssp_2d` | `write_ssp` |
 | `.brc` / `.irc` | Bottom / internal reflection coefficient `R(θ)` | `read_reflection_coefficient` | — (BOUNCE writes them; `stage_reflection_file` copies) |
 | `.trc` | Top reflection coefficient `R(θ)` | `read_reflection_coefficient` | — (staged from a produced table) |
 | `.sbp` | Source beam pattern, angle vs dB re peak | `read_source_beam_pattern` | `write_source_beam_pattern` |
@@ -365,7 +365,7 @@ become `n_samples` and `c_min` — so a consumer can forward them straight into
 | File | Direction | Written by / read by |
 |---|---|---|
 | `rams.in` / `ram.in` / `ramgeo.in` | in | `write_ramin(..., kind='rams'\|'ramsurf'\|'ramgeo')` |
-| `tl.line` | out | `read_tl_line` — ASCII `range TL` at one receiver depth |
+| `tl.line` | out | — (written by the binaries; uacpy reads `tl.grid` / `pcomplex.bin` instead) |
 | `tl.grid` | out | `read_tl_grid` — Fortran sequential, real TL on the `(z, r)` grid |
 | `pcomplex.bin` | out | `read_pcomplex_grid` — **uacpy-patched**, the complex envelope |
 
@@ -529,15 +529,16 @@ The conversion set is deliberately narrow. `AttributeError`, `TypeError` and
 `NameError` are **not** converted: those signal a defect in uacpy, and dressing
 them as `FileFormatError` would send you off to debug a file that is fine.
 
-The decorator is applied per reader, and two public ones do not carry it:
-`read_rts_file` and `read_tl_line` still surface a bare `ValueError` on
-malformed input.
+The decorator is applied per reader. Its two former holdouts are gone:
+`read_rts_file` now carries the conversion like the rest, and the `tl.line`
+reader was removed.
 
 ---
 
 ## 9. Reference — the whole public surface
 
-Every name in `uacpy.io.__all__`, grouped by format family.
+Every function and class in `uacpy.io.__all__`, grouped by format family.
+The 15 remaining names in `__all__` are the submodules themselves.
 
 ### Plumbing
 
@@ -550,23 +551,18 @@ Every name in `uacpy.io.__all__`, grouped by format family.
 
 | Name | |
 |---|---|
-| `read_shd_file` | `.shd` → `Field` (or `ResultStack` for several source depths) |
-| `read_shd_bin` | `.shd` binary → raw dict, one frequency slice |
-| `read_shd_asc` | ASCII `.shd` → raw dict |
+| `read_shd_file` | `.shd` → `Field` (or `ResultStack` for several source depths); multi-frequency / multi-bearing files raise `UnsupportedFeatureError` — use `read_shd_bin` |
+| `read_shd_bin` | `.shd` binary → raw dict |
 | `read_arr_file` | `.arr` → `Arrivals` |
 | `read_ray_file` | `.ray` → `Rays` |
 | `read_ssp_2d` | 2-D `.ssp` → depths, ranges (m), `c` matrix |
-| `read_ssp_3d` | 3-D `.ssp` for BELLHOP3D |
 | `read_flp` | `.flp` field-parameters deck → dict, including the 4-character option word |
-| `read_flp3d` | `.flp` for FIELD3D |
 | `read_rts_file` | SPARC `.rts` time series → dict |
 | `rts_to_pressure` | `.rts` dict + frequency → complex pressure |
 | `read_ts` | Generic ASCII `.ts` time series |
 | `read_prt` | `.prt` diagnostic log (whole file, or a trailing `tail_bytes`) |
-| `read_modes` | `.mod`/`.moa` by extension, plus derived half-space terms |
+| `read_modes` | Binary `.mod` plus derived half-space terms; any other extension raises `FileFormatError` (`.mod` is the only mode format the AT programs write) |
 | `read_modes_bin` | Binary `.mod`; `frequency=` selects the closest entry of a multi-frequency file — the default `0.0` silently gives you the lowest |
-| `read_modes_asc` | ASCII `.moa` |
-| `get_component` | Pull one stress-displacement component out of a modes dict |
 | `read_grn_file` | `.grn` Green's function → dict |
 | `grn_to_field` | `.grn` at one frequency → complex `Field` |
 | `grn_to_transfer_function` | `.grn` across frequencies → broadband `Field` |
@@ -591,13 +587,12 @@ Every name in `uacpy.io.__all__`, grouped by format family.
 | `write_ssp_section` | Water-column SSP block |
 | `write_layer_sections` | One SSP block per sediment layer (`NMEDIA > 1`) |
 | `write_bottom_section` | Bottom boundary block |
-| `writable_layers` | Layers thick enough to be a distinct AT medium |
+| `writable_layers` | The sediment layers of the bottom, each an AT medium |
 | `write_source_depths` | Source-depth section |
 | `write_receiver_depths` | Receiver-depth section |
 | `write_receiver_ranges` | Receiver-range section (m → km) |
 | `write_phase_speed_and_rmax` | `cLow`/`cHigh` line and `RMax` in km |
 | `write_fieldflp` | `.flp` for FIELD/FIELDS |
-| `write_field3dflp` | `.flp` for FIELD3D |
 | `write_ssp` | Range-dependent `.ssp` matrix (m → km) |
 | `resolve_ssp_interp` | Resolved `interp_ssp` for an env / model pair |
 | `resolve_ssp_topopt` | The AT `TopOpt(1)` character it maps to |
@@ -609,17 +604,15 @@ Every name in `uacpy.io.__all__`, grouped by format family.
 |---|---|
 | `read_bathymetry` | `.bty` → array (m), interpolation type; long format carries geoacoustics |
 | `read_altimetry` | `.ati` → array (m), interpolation type |
-| `read_boundary_3d` | 3-D boundary block for BELLHOP3D |
 | `read_reflection_coefficient` | `.brc`/`.irc`/`.trc` → `theta` (deg), `R`, `phi` (rad) |
 | `read_source_beam_pattern` | `.sbp` → angle / level array |
 | `write_bty_file` | `.bty`, short format (range, depth) |
 | `write_bty_long_format` | `.bty` with per-range `c_p`, `c_s`, `ρ`, `α_p`, `α_s` |
-| `write_bty_3d` | 3-D `.bty` for BELLHOP3D |
 | `write_ati_file` | `.ati` altimetry |
 | `write_source_beam_pattern` | `.sbp` from angles (deg) + dB re peak |
 | `stage_reflection_file` | Copy a table to the `<env>.brc`/`.trc` name the binary opens |
 | `stage_source_beam_pattern` | Materialise a `.sbp` from a path or an `(N, 2)` array |
-| `dedupe_reflection_file` | Rewrite `.brc`/`.irc` with a strictly-increasing angle axis |
+| `dedupe_reflection_file` | Rewrite `.brc`/`.trc` with a strictly-increasing angle axis; an `.irc` is rejected (`FileFormatError`) |
 
 ### OASES
 
@@ -646,7 +639,6 @@ Every name in `uacpy.io.__all__`, grouped by format family.
 | `write_sediment_file` | mpiramS range-dependent sediment profiles (range axis m → km) |
 | `read_psif` | mpiramS `psif.dat` → `psif` of shape `(nzo, nf, nr)`; takes the containing **directory**, not the file |
 | `write_ramin` | Collins `ram.in` / `rams.in` / `ramgeo.in` (metres) |
-| `read_tl_line` | `tl.line` → ranges (m), TL (dB) |
 | `read_tl_grid` | `tl.grid` → ranges, depths, TL grid |
 | `read_pcomplex_grid` | uacpy-patched `pcomplex.bin` → complex envelope |
 

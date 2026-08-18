@@ -11,7 +11,7 @@ from pathlib import Path
 
 import numpy as np
 
-from uacpy.core.exceptions import DataFetchError
+from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.data import _cache
 from uacpy.data._geo import as_coordinate, lon_linspace
 from uacpy.data._netcdf import NetcdfGrid
@@ -54,21 +54,26 @@ class _GebcoGrid(NetcdfGrid):
         lons = lon_linspace(lon_range[0], lon_range[1], n_lon)
         rows = [self.row(v) for v in lats]
         cols = [self.col(v) for v in lons]
-        r0, r1 = min(rows), max(rows)
-        slab_rows = [r - r0 for r in rows]      # row indices within the slab
+        # Read only the requested rows/cols (unique, ascending) via netCDF4
+        # orthogonal indexing, never the min..max bounding slab: a coarse
+        # request over a wide box (e.g. 50×50 over the globe) needs ~50 of the
+        # 43 200 rows, while the bounding slab materialises the whole
+        # 43 200 × 86 400 grid (tens of GB) to keep 2 500 cells of it.
+        u_rows = np.unique(rows)
+        pos_rows = np.searchsorted(u_rows, rows)    # row positions in the block
         # Eastward longitudes give non-decreasing column indices with at most
-        # one wrap back to 0; slicing min..max across that wrap would read all
-        # 86 400 columns, so read each contiguous run and stitch.
+        # one wrap back to 0; reading unique columns across that wrap in one
+        # ascending sequence would splice the west of the antimeridian onto
+        # the east out of order, so read each contiguous run and stitch.
         wrap = next((i for i in range(1, len(cols)) if cols[i] < cols[i - 1]),
                     None)
         runs = [cols] if wrap is None else [cols[:wrap], cols[wrap:]]
         blocks = []
         for run in runs:
-            c0 = min(run)
-            slab = np.asarray(self._elev[r0:r1 + 1, c0:max(run) + 1],
-                              dtype=float)
-            slab_cols = [c - c0 for c in run]
-            blocks.append(slab[np.ix_(slab_rows, slab_cols)])
+            u_cols = np.unique(run)
+            block = np.asarray(self._elev[u_rows, u_cols], dtype=float)
+            pos_cols = np.searchsorted(u_cols, run)
+            blocks.append(block[np.ix_(pos_rows, pos_cols)])
         return lats, lons, np.hstack(blocks)
 
 
@@ -76,9 +81,15 @@ def _grid():
     path = _cache.require('gebco')
     nc = next((p for p in sorted(path.glob('*.nc'))), None)
     if nc is None:
-        # No .nc in the (existing) cache dir → require() raises the typed
-        # ConfigurationError naming the install flag; it never returns here.
-        _cache.require('gebco', 'GEBCO_2025.nc')
+        # The cache dir exists but holds no .nc grid: raise the same typed
+        # error require() gives for the canonical missing file.
+        ds = _cache.DATASETS['gebco']
+        raise ConfigurationError(
+            f"Offline gebco data not found: {ds.description} "
+            f"({path / 'GEBCO_2025.nc'}).",
+            remediation=f"Run `{ds.install_flag}` to download it, or set "
+                        f"$UACPY_DATA_CACHE to a directory that has it.",
+        )
     return _cache.cached_grid_at(nc, _GebcoGrid)
 
 

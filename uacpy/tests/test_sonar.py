@@ -15,6 +15,14 @@ class TestScattering:
         # sin(90)=1 -> 20*log10(1)=0, so S_b = mu_db.
         assert sonar.lambert_bottom(90.0, mu_db=-27.0) == pytest.approx(-27.0)
 
+    def test_lambert_mu_db_constant(self):
+        # Mackenzie (1961) measured 10*log10(mu) constant at -27 dB for both
+        # 530 and 1030 Hz (Etter eq. 9.6); the module exports it and
+        # lambert_bottom defaults to it.
+        assert sonar.LAMBERT_MU_DB == -27.0
+        assert sonar.scattering.LAMBERT_MU_DB == -27.0
+        assert sonar.lambert_bottom(90.0) == pytest.approx(sonar.LAMBERT_MU_DB)
+
     def test_lambert_monotonic_in_angle(self):
         s = sonar.lambert_bottom([5, 20, 45, 80])
         assert np.all(np.diff(s) > 0)
@@ -43,6 +51,41 @@ class TestReverberation:
         # 220 - 120 - 40 + 38.751 = 98.751 dB — anchors the formula, not just
         # re-derives it.
         assert rl[0] == pytest.approx(98.751, abs=0.01)
+
+    def test_tl_db_callable_matches_precomputed(self):
+        # tl_db accepts a callable r -> TL(r); the equation evaluates it on
+        # the range grid, matching the same TL passed as a precomputed array.
+        r = np.array([500.0, 1000.0, 2000.0, 4000.0])
+        tl_fn = lambda rr: 15.0 * np.log10(rr)  # noqa: E731
+        b_call = sonar.boundary_reverberation(
+            r, 200.0, -27.0, pulse_length_s=0.01,
+            horizontal_beamwidth_rad=0.1, tl_db=tl_fn,
+        )
+        b_arr = sonar.boundary_reverberation(
+            r, 200.0, -27.0, pulse_length_s=0.01,
+            horizontal_beamwidth_rad=0.1, tl_db=15.0 * np.log10(r),
+        )
+        np.testing.assert_allclose(b_call, b_arr)
+        v_call = sonar.volume_reverberation(
+            r, 200.0, -70.0, pulse_length_s=0.01,
+            solid_angle_beamwidth_sr=0.01, tl_db=tl_fn,
+        )
+        v_arr = sonar.volume_reverberation(
+            r, 200.0, -70.0, pulse_length_s=0.01,
+            solid_angle_beamwidth_sr=0.01, tl_db=15.0 * np.log10(r),
+        )
+        np.testing.assert_allclose(v_call, v_arr)
+        # Spherical-spreading callable reproduces the tl_db=None default.
+        b_sph = sonar.boundary_reverberation(
+            r, 200.0, -27.0, pulse_length_s=0.01,
+            horizontal_beamwidth_rad=0.1,
+            tl_db=lambda rr: 20.0 * np.log10(rr),
+        )
+        b_none = sonar.boundary_reverberation(
+            r, 200.0, -27.0, pulse_length_s=0.01,
+            horizontal_beamwidth_rad=0.1, tl_db=None,
+        )
+        np.testing.assert_allclose(b_sph, b_none)
 
     def test_volume_decays_slower_than_boundary(self):
         r = np.array([500.0, 5000.0])
@@ -145,6 +188,33 @@ class TestDetection:
         assert np.all(np.diff(pd) >= -1e-9)
         assert pd.max() <= 1.0 and pd.min() >= 0.0
 
+    def test_roc_curve_default_pf_grid(self):
+        # Default grid: logspace(-6, log10(0.99), 200) — 200 points from
+        # 1e-6 up to 0.99 (the documented "[1e-6, ~1]"), log-spaced so
+        # adjacent-point ratios are constant.
+        pf, pd = sonar.roc_curve(2.0)
+        assert pf.shape == pd.shape == (200,)
+        assert pf[0] == pytest.approx(1e-6, rel=1e-12)
+        assert pf[-1] == pytest.approx(0.99, rel=1e-12)
+        ratios = pf[1:] / pf[:-1]
+        np.testing.assert_allclose(ratios, ratios[0], rtol=1e-10)
+        # n_points sets the grid length; endpoints stay pinned.
+        pf7, _ = sonar.roc_curve(2.0, n_points=7)
+        assert pf7.shape == (7,)
+        assert pf7[0] == pytest.approx(1e-6, rel=1e-12)
+        assert pf7[-1] == pytest.approx(0.99, rel=1e-12)
+
+    def test_pf_array_matches_scalar_calls(self):
+        # probability_of_detection broadcasts over an array of P_F values,
+        # returning one P_D per element, equal to the scalar-call results.
+        pf = np.array([1e-6, 1e-4, 1e-2, 0.1, 0.5])
+        pd = sonar.probability_of_detection(2.0, pf)
+        assert pd.shape == pf.shape
+        scalars = [float(sonar.probability_of_detection(2.0, p)) for p in pf]
+        np.testing.assert_allclose(pd, scalars, rtol=0, atol=1e-15)
+        # Higher tolerated P_F -> higher P_D at fixed deflection.
+        assert np.all(np.diff(pd) > 0)
+
     def test_albersheim_reasonable(self):
         # Albersheim's own eq. (1) at N=1, Pd=0.5, Pf=1e-4 evaluates to
         # 9.396 dB, so 9.4 is that value rounded to 1 dp and abs=0.3 is slack
@@ -153,6 +223,25 @@ class TestDetection:
         # (Pd, Pf) sit inside the stated validity box (Pd 0.1-0.9,
         # Pf 1e-7..1e-3, N 1..8096; Richards 2014).
         assert sonar.albersheim_snr(0.5, 1e-4) == pytest.approx(9.4, abs=0.3)
+        # The exact eq. (1) value: A = ln(0.62/1e-4), B = 0, so
+        # SNR = (6.2 + 4.54/sqrt(1.44))*log10(A) = 9.3956 dB.
+        assert sonar.albersheim_snr(0.5, 1e-4) == pytest.approx(9.3956,
+                                                                abs=1e-3)
+
+    def test_albersheim_matches_closed_form_across_validity_box(self):
+        # Abraham eq. (2.85): SNR = -5*log10(N)
+        # + (6.2 + 4.54/sqrt(N+0.44))*log10(A + 0.12*A*B + 1.7*B) with
+        # A = ln(0.62/Pf), B = ln(Pd/(1-Pd)). Checked at the corners of the
+        # Tufts & Cann accuracy box (Pd 0.3-0.95, Pf 1e-8..1e-4, N 1..16;
+        # Abraham §2.3.5.2) and at the page's (0.5, 1e-4) operating point.
+        for pd, pf, n in [(0.3, 1e-8, 1), (0.95, 1e-4, 1), (0.3, 1e-4, 16),
+                          (0.95, 1e-8, 16), (0.5, 1e-4, 1)]:
+            a = np.log(0.62 / pf)
+            b = np.log(pd / (1.0 - pd))
+            ref = (-5.0 * np.log10(n)
+                   + (6.2 + 4.54 / np.sqrt(n + 0.44))
+                   * np.log10(a + 0.12 * a * b + 1.7 * b))
+            assert sonar.albersheim_snr(pd, pf, n) == pytest.approx(ref)
 
     def test_albersheim_integration_lowers_snr(self):
         assert sonar.albersheim_snr(0.9, 1e-6, 10) < sonar.albersheim_snr(0.9, 1e-6, 1)
@@ -162,6 +251,22 @@ class TestDetection:
         d = sonar.detection_index(0.9, 0.01)
         # DT = 5*log10(d / (w*t)) (Urick energy detector); anchor to the value.
         assert dt == pytest.approx(5 * np.log10(d / (100.0 * 1.0)))
+
+    def test_detection_threshold_documented_anchors(self):
+        # The guide's two budgets (Abraham 9.2.3.1, DT = 5*log10(d/(w*t))):
+        # d = (Phi^-1(0.5) - Phi^-1(1e-4))^2 = 13.831, so
+        # w*t = 500 -> DT = -7.7906 dB and w*t = 50 -> DT = -2.7906 dB,
+        # the doc's -7.79 / -2.79 dB, exactly 5 dB (one decade of w*t) apart.
+        d = (norm.ppf(0.5) - norm.ppf(1e-4)) ** 2
+        dt_passive = sonar.detection_threshold_energy(
+            0.5, 1e-4, bandwidth_hz=50.0, integration_time_s=10.0)
+        dt_active = sonar.detection_threshold_energy(
+            0.5, 1e-4, bandwidth_hz=100.0, integration_time_s=0.5)
+        assert dt_passive == pytest.approx(5.0 * np.log10(d / 500.0))
+        assert dt_active == pytest.approx(5.0 * np.log10(d / 50.0))
+        assert dt_passive == pytest.approx(-7.7906, abs=5e-4)
+        assert dt_active == pytest.approx(-2.7906, abs=5e-4)
+        assert dt_active - dt_passive == pytest.approx(5.0, abs=1e-9)
 
     def test_detection_threshold_falls_with_time_bandwidth(self):
         # Incoherent integration lowers the required SNR: 5 dB per decade of w*t
@@ -233,6 +338,63 @@ class TestSignalExcessField:
         )
         np.testing.assert_allclose(se.data, expected)
         assert se.metadata['sonar_budget']['mode'] == 'active'
+
+    def test_sonar_budget_key_sets(self):
+        # Passive budget carries exactly the six always-present terms;
+        # 'array_gain' joins the set only when passed.
+        field, _ = self._tl_field()
+        se = sonar.passive_signal_excess_field(
+            field, source_level=140.0, noise_level=60.0,
+            directivity_index=15.0, detection_threshold=3.0,
+        )
+        assert set(se.metadata['sonar_budget']) == {
+            'mode', 'source_level', 'noise_level', 'directivity_index',
+            'detection_threshold', 'processing_loss_db',
+        }
+        se_ag = sonar.passive_signal_excess_field(
+            field, source_level=140.0, noise_level=60.0, array_gain=12.0,
+        )
+        assert set(se_ag.metadata['sonar_budget']) == {
+            'mode', 'source_level', 'noise_level', 'directivity_index',
+            'detection_threshold', 'processing_loss_db', 'array_gain',
+        }
+        # Active budget: five always-present terms, plus 'noise_level',
+        # 'reverberation_level' and 'array_gain' when supplied.
+        rl = np.linspace(90.0, 70.0, field.coords['range'].size)
+        se_act = sonar.active_signal_excess_field(
+            field, source_level=220.0, target_strength=10.0,
+            noise_level=60.0, reverberation_level=rl, array_gain=12.0,
+        )
+        assert set(se_act.metadata['sonar_budget']) == {
+            'mode', 'source_level', 'target_strength', 'directivity_index',
+            'detection_threshold', 'processing_loss_db',
+            'noise_level', 'reverberation_level', 'array_gain',
+        }
+        se_min = sonar.active_signal_excess_field(
+            field, source_level=220.0, target_strength=10.0,
+            noise_level=60.0,
+        )
+        assert set(se_min.metadata['sonar_budget']) == {
+            'mode', 'source_level', 'target_strength', 'directivity_index',
+            'detection_threshold', 'processing_loss_db', 'noise_level',
+        }
+
+    def test_se_field_kind_and_unit(self):
+        # The SE Field is tagged kind='signal_excess' and reports unit='dB'
+        # — dB but neither pressure nor a loss, so .max() finds the best cell.
+        field, _ = self._tl_field()
+        se = sonar.passive_signal_excess_field(
+            field, source_level=140.0, noise_level=60.0,
+        )
+        assert se.kind == 'signal_excess'
+        assert se.unit == 'dB'
+        assert se.metadata['kind'] == 'signal_excess'
+        se_act = sonar.active_signal_excess_field(
+            field, source_level=220.0, target_strength=10.0,
+            noise_level=60.0,
+        )
+        assert se_act.kind == 'signal_excess'
+        assert se_act.unit == 'dB'
 
     def test_reverberation_length_mismatch_raises(self):
         field, _ = self._tl_field()
@@ -376,6 +538,16 @@ class TestDetectionProbabilityField:
         assert pd.metadata['sigma_db'] == pytest.approx(sigma)
         assert list(pd.coords) == ['depth', 'range']
 
+    def test_pd_field_kind_and_unit(self):
+        # The P_D Field is tagged kind='probability_of_detection' with
+        # unit='1' — a dimensionless 0-1 probability, not dB.
+        se = self._se_field([[0.0, 6.0]])
+        pd = sonar.probability_of_detection_field(se, sigma_db=6.0)
+        assert pd.kind == 'probability_of_detection'
+        assert pd.unit == '1'
+        assert pd.metadata['kind'] == 'probability_of_detection'
+        assert pd.metadata['unit'] == '1'
+
     def test_monotonic_in_se_and_bounded(self):
         se = self._se_field(np.linspace(-30, 30, 61).reshape(1, -1))
         pd = sonar.probability_of_detection_field(se, sigma_db=6.0)
@@ -498,6 +670,22 @@ class TestTargetStrength:
         with _w.catch_warnings():
             _w.simplefilter("error")
             sonar.ts_sphere(0.5)
+
+    def test_cylinder_and_plate_warn_below_ka_one(self):
+        # Cylinder/plate geometric formulas hold for ka > 1 (Urick's
+        # ka >> 1; Abraham's reference cylinder runs at ka ~ 4).
+        # a = 0.05 m at 1 kHz -> ka = 2*pi*1000/1500*0.05 = 0.209 < 1: warn.
+        with pytest.warns(UserWarning, match="geometric"):
+            sonar.ts_cylinder(0.05, 5.0, 1000.0)
+        # Plate checks the smaller dimension: min(0.1, 0.2) -> ka = 0.419.
+        with pytest.warns(UserWarning, match="geometric"):
+            sonar.ts_plate(0.1, 0.2, 1000.0)
+        # ka > 1 stays silent: a = 0.5 m -> ka = 2.09; 1 m plate -> ka = 4.19.
+        import warnings as _w
+        with _w.catch_warnings():
+            _w.simplefilter("error")
+            sonar.ts_cylinder(0.5, 5.0, 1000.0)
+            sonar.ts_plate(1.0, 1.0, 1000.0)
 
     def test_invalid_inputs_raise(self):
         with pytest.raises(ConfigurationError):

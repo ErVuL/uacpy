@@ -455,7 +455,8 @@ detection probability and the ROC.
 
 ## 7. Reference — every public plotter
 
-All 50 names in `uacpy.plot.__all__`. **ax** marks a single-axes plotter you can
+All 50 plotters in `uacpy.plot.__all__` — the 8 remaining names in `__all__`
+are the submodules themselves. **ax** marks a single-axes plotter you can
 compose with. Every entry takes `title=` except `plot_result` (it forwards
 yours), `save_animation` and the two `draw_*` overlays; every entry takes
 `figsize=` except `plot_result`, `animate_field`, the two `draw_*` overlays and
@@ -561,8 +562,8 @@ Every one consumes the output of the same-named routine in
 
 **`from uacpy.plot import …` does not work.** `uacpy.plot` is an attribute
 alias for `uacpy.visualization.plots`, not an importable path. Use
-`import uacpy` then `uacpy.plot.X`, or
-`from uacpy.visualization import X`.
+`import uacpy` then `uacpy.plot.plot_field(...)`, or
+`from uacpy.visualization import plot_field`.
 
 **Slice, then plot.** There is no `depth=`/`range=` selection keyword on
 `plot_field`. The field decides its own picture from `coords`, so the way to ask

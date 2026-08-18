@@ -26,7 +26,7 @@ from uacpy.models.base import (
 from uacpy.core.environment import Environment, BoundaryProperties, Bottom
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
-from uacpy.core.results import Result, Field, ResultStack
+from uacpy.core.results import PhaseReference, Result, Field, ResultStack
 from uacpy.core.constants import (
     DEFAULT_C_MIN, DEFAULT_C_MAX_UNBOUNDED,
     DEFAULT_BROADBAND_N_FREQS, DEFAULT_BROADBAND_BANDWIDTH_FACTOR,
@@ -320,13 +320,15 @@ class Bellhop(PropagationModel):
         Cerveny advanced beam knobs (used when ``beam_type ∈ {C, R}``).
         ``r_loop`` is in metres; ``component`` is ``'P'``/``'V'``/``'H'``.
     auto_bounce : bool, optional
-        Default ``True``. When the env carries layered / RDLB / elastic
-        bottoms that Bellhop's fluid ray-tracer can't model accurately,
-        ``run(...)`` auto-routes through BOUNCE to derive a ``.brc``
-        reflection-coefficient table. Set ``False`` to skip the auto-route
-        — Bellhop then collapses the bottom via its own ``collapse={…}``
-        policy and runs with fluid-approximated physics, with one
-        ``UserWarning``. ``run_with_bounce(...)`` always uses BOUNCE
+        Default ``True``. When ``env.bottom`` is layered — a stack Bellhop's
+        single-halfspace ``.env`` cannot carry — ``run(...)`` auto-routes
+        through BOUNCE to derive a ``.brc`` reflection-coefficient table.
+        Set ``False`` to skip the auto-route — Bellhop then collapses the
+        layer stack to a halfspace via its own ``collapse={…}`` policy, with
+        one ``UserWarning``. A non-layered elastic halfspace never routes:
+        Bellhop computes its exact acousto-elastic reflection coefficient
+        natively (``bellhop.f90:694-712``), per range node on a
+        range-dependent bottom. ``run_with_bounce(...)`` always uses BOUNCE
         regardless of this flag.
     use_tmpfs, verbose, work_dir, cleanup, timeout, collapse : optional
         Standard plumbing (see :class:`PropagationModel`).
@@ -343,18 +345,24 @@ class Bellhop(PropagationModel):
       (``Thorp`` → ``'T'``, ``FrancoisGarrison`` → ``'F'`` + params,
       ``Biological`` → ``'B'`` + layers, ``ConstantAbsorption`` /
       ``None`` → ``' '``).
-    - Bottom reflection: when ``env.bottom`` is layered / elastic and
+    - Bottom reflection: when ``env.bottom`` is layered and
       ``auto_bounce=True``, BOUNCE is invoked transparently to derive
-      the ``.brc`` reflection coefficient table.
+      the ``.brc`` reflection coefficient table. An elastic halfspace
+      needs no table — ``bellhop.f90:694-712`` evaluates the exact
+      acousto-elastic reflection coefficient at each boundary hit.
 
     **Auto-route through BOUNCE.** ``Bellhop.run(...)`` detects a layered
-    or elastic ``Bottom`` (layered columns, an elastic halfspace, or
-    non-zero ``shear_speed`` anywhere along range), runs BOUNCE upstream
-    to derive a ``.brc``
+    ``Bottom`` (sediment layers over the halfspace, anywhere along range),
+    runs BOUNCE upstream to derive a ``.brc``
     reflection-coefficient table, and re-runs Bellhop against
     ``acoustic_type='file'`` (one ``UserWarning``). The user's
     ``collapse={…}`` dict is forwarded to the spawned Bounce. Use
     :meth:`run_with_bounce` for explicit control over BOUNCE parameters.
+    A non-layered elastic bottom runs natively: the halfspace's cp/cs pair
+    is written to the deck (per range node on a long-format ``.bty``) and
+    the ray tracer applies the exact acousto-elastic reflection
+    coefficient, so no BOUNCE pass — which would also collapse a
+    range-dependent bottom to one column — is interposed.
 
     Bellhop uses the global :data:`DEFAULT_COLLAPSE` policy without
     overrides — RD bathymetry / RD bottom / RD-SSP (when the model's
@@ -545,17 +553,18 @@ class Bellhop(PropagationModel):
             TIME_SERIES output start time (s). ``None`` auto-derives
             from the earliest arrival.
         auto_bounce : bool, optional
-            Default ``True``. When ``env`` carries a layered or elastic
-            ``Bottom`` (layered columns, an elastic halfspace, or non-zero
-            shear anywhere along range), ``run(...)``
+            Default ``True``. When ``env`` carries a *layered* ``Bottom``
+            (sediment layers Bellhop's ray tracer cannot mesh), ``run(...)``
             auto-routes through BOUNCE to derive a ``.brc`` reflection-
             coefficient table and re-runs Bellhop against
             ``acoustic_type='file'``, attaching the in-memory
             :class:`ReflectionCoefficient` to
-            ``result.metadata['bounce_result']``. Set ``False`` to skip
-            the auto-route — Bellhop then collapses the bottom via its
-            own ``collapse={…}`` policy and runs with fluid-approximated
-            physics, with one ``UserWarning``.
+            ``result.metadata['bounce_result']``. Elastic half-spaces
+            (shear, range-dependent included) never route: Bellhop applies
+            the exact acousto-elastic reflection coefficient natively
+            (``Bellhop/bellhop.f90:694-712``). Set ``False`` to skip the
+            auto-route — Bellhop then collapses the layered bottom via its
+            own ``collapse={…}`` policy, with one ``UserWarning``.
             ``run_with_bounce(...)`` always uses BOUNCE regardless.
         """
         super().__init__(
@@ -946,27 +955,30 @@ class Bellhop(PropagationModel):
     def _maybe_route_through_bounce(self, env, source, receiver, run_mode,
                                     frequencies, source_waveform, sample_rate,
                                     output_duration):
-        """Layered/elastic bottoms can't be represented by Bellhop's fluid ray
-        tracer natively. With ``auto_bounce`` (default) route through BOUNCE for
-        an exact reflection-coefficient table and return that Result; otherwise
-        warn that the reflection will be fluid-approximated and return ``None``
-        to continue the native run."""
-        is_layered = env.bottom.is_layered
-        is_elastic = env.has_elastic_bottom
-        if not (is_layered or is_elastic):
+        """A layered bottom can't be represented in Bellhop's single-halfspace
+        ``.env``. With ``auto_bounce`` (default) route through BOUNCE for an
+        exact reflection-coefficient table over the layer stack and return
+        that Result; otherwise warn that the stack will be collapsed to a
+        halfspace and return ``None`` to continue the native run. A
+        non-layered bottom — elastic included — always returns ``None``:
+        ``bellhop.f90:694-712`` computes the exact acousto-elastic halfspace
+        reflection coefficient natively (per range node on a range-dependent
+        bottom), which a BOUNCE pass would only degrade by collapsing the
+        range axis to one column."""
+        if not env.bottom.is_layered:
             return None
-        tag = ' (elastic)' if is_elastic else ''
-        kind = ('layered bottom' if is_layered else 'bottom') + tag
+        kind = ('layered bottom (elastic)' if env.has_elastic_bottom
+                else 'layered bottom')
         if self.auto_bounce:
             warnings.warn(
-                f"{self.model_name}: env.bottom is {kind}; auto-routing "
+                f"{self.model_name}: env.bottom is a {kind}; auto-routing "
                 f"through BOUNCE to derive a reflection-coefficient table. "
                 f"BOUNCE is range-independent — Bounce's collapse policy "
                 f"reduces the env (default: bottom_range='median', layer "
                 f"stack kept). "
                 f"Pass ``Bellhop(auto_bounce=False)`` to skip the auto-route "
-                f"(Bellhop will then collapse the bottom via its own "
-                f"collapse policy and run with fluid-approximated physics).",
+                f"(Bellhop will then collapse the layer stack to a halfspace "
+                f"via its own collapse policy).",
                 UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
             )
             return self.run_with_bounce(
@@ -977,29 +989,16 @@ class Bellhop(PropagationModel):
                 sample_rate=sample_rate,
                 output_duration=output_duration,
             )
-        # auto_bounce=False: fall through. A LAYERED bottom is collapsed to
-        # a halfspace by ``_project_environment`` (collapse policy). A pure
-        # ELASTIC halfspace is NOT collapsed — Bellhop sets
-        # ``_supports_elastic_media=True``, so the writer emits cs/alpha_s and
-        # the ray tracer fluid-approximates the elastic reflection internally.
-        if is_layered:
-            detail = (
-                "collapsing the layered bottom to a halfspace via the "
-                "model's collapse policy and running with fluid ray-tracer "
-                "physics"
-            )
-        else:
-            detail = (
-                "writing the elastic halfspace directly (no collapse — "
-                "Bellhop supports elastic media); its reflection coefficient "
-                "is fluid-approximated by the ray tracer"
-            )
+        # auto_bounce=False: fall through — the layer stack is collapsed to a
+        # halfspace by ``_project_environment`` (collapse policy), and the
+        # ray tracer reflects off that single halfspace (exactly, elastic or
+        # fluid — what is lost is the stack's interference structure).
         warnings.warn(
-            f"{self.model_name}: env.bottom is {kind}; auto_bounce=False → "
-            f"{detail}. Reflection-coefficient accuracy near elastic / "
-            f"layered bottoms will be degraded. Set auto_bounce=True "
-            f"(default) or call run_with_bounce() for the elastic-correct "
-            f"path.",
+            f"{self.model_name}: env.bottom is a {kind}; auto_bounce=False → "
+            f"collapsing the layer stack to a halfspace via the model's "
+            f"collapse policy. The stack's interference structure is lost "
+            f"from the bottom reflection. Set auto_bounce=True (default) or "
+            f"call run_with_bounce() to keep the layers via a BOUNCE table.",
             UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
         )
         return None
@@ -1026,6 +1025,15 @@ class Bellhop(PropagationModel):
             Which Bellhop mode to run. One of ``RunMode.COHERENT_TL``,
             ``INCOHERENT_TL``, ``SEMICOHERENT_TL``, ``RAYS``, ``EIGENRAYS``,
             ``ARRIVALS``, ``TIME_SERIES``. Defaults to ``COHERENT_TL``.
+
+            For ``INCOHERENT_TL`` / ``SEMICOHERENT_TL`` the returned
+            ``Field.data`` holds complex pressure (Pa re 1 m) as read from
+            the ``.shd`` — its magnitude is the incoherent / semicoherent
+            beam sum, its phase an artefact of AT's storage with no phase
+            reference stamped. Kraken's ``INCOHERENT_TL`` instead stores
+            real dB TL in ``.data``; the two engines agree on ``.db``,
+            which is the uniform cross-engine surface for magnitude-sum
+            results.
         frequencies : ndarray, optional
             Explicit frequency vector (Hz) for ``RunMode.BROADBAND`` /
             ``RunMode.TIME_SERIES``. When ``None`` and no
@@ -1064,6 +1072,39 @@ class Bellhop(PropagationModel):
         self._check_beam_count_supports_run_mode(run_mode)
         if run_mode != RunMode.RAYS:      # bellhop.f90:288 skips influence
             self._check_beam_type_supports_receiver_grid(receiver)
+
+        # Bellhop never writes the r=0 column (no ray travels zero
+        # distance), so it comes back as NaN no-data cells on the TL grids
+        # and as zero-arrival cells — NaN after synthesis — on the
+        # broadband routes. Newcomers using ``np.linspace(0, R, N)`` for
+        # ``receiver.ranges`` hit a wall of NaN at r=0 and rightly wonder
+        # what is wrong. Warn on every run, matching the r=0 cadence of the
+        # other engines; the check sits ahead of the broadband dispatch so
+        # both routes pass it (the nested ARRIVALS run warns no second
+        # time — ARRIVALS is not in the gated set — and a layered TL run
+        # about to auto-route through BOUNCE defers to the re-entrant run's
+        # own pass through this gate; the broadband routes never re-enter
+        # with a gated mode, so they warn here regardless).
+        _defers_to_bounce_rerun = (
+            self.auto_bounce and env.bottom.is_layered
+            and run_mode not in (RunMode.BROADBAND, RunMode.TIME_SERIES)
+        )
+        if (
+            run_mode in (RunMode.COHERENT_TL, RunMode.INCOHERENT_TL,
+                         RunMode.SEMICOHERENT_TL, RunMode.BROADBAND,
+                         RunMode.TIME_SERIES)
+            and len(receiver.ranges) > 0
+            and float(receiver.ranges[0]) == 0.0
+            and not _defers_to_bounce_rerun
+        ):
+            warnings.warn(
+                f"{self.model_name}: receiver.ranges starts at r=0 m. "
+                f"Bellhop writes no data there (no ray travels zero "
+                f"distance), so that column is NaN. Start ranges at a "
+                f"small positive value (e.g. ``np.linspace(eps, R, N)``) "
+                f"to avoid surprise.",
+                UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+            )
 
         if run_mode in (RunMode.TIME_SERIES, RunMode.BROADBAND):
             # Both routes go through the arrivals → H(f) pipeline. Without
@@ -1104,18 +1145,14 @@ class Bellhop(PropagationModel):
 
         run_type = _RUN_MODE_TO_BELLHOP_TYPE[run_mode]
 
-        # ── Bottom physics: BOUNCE for what the ray tracer cannot model ──
+        # ── Bottom physics: BOUNCE for what the ray tracer cannot carry ──
         #
-        # Auto-route through BOUNCE whenever Bellhop's fluid ray-tracer
-        # cannot represent the bottom's full reflection physics natively:
-        #   - layered columns — Bellhop has no multi-medium .env format;
-        #     without BOUNCE the layers are silently lost.
-        #   - a halfspace with non-zero shear — Bellhop's writer emits
-        #     cs/alpha_s on the 'A' line (or per-range on the long .bty),
-        #     but the ray tracer approximates the resulting reflection
-        #     coefficient with fluid physics; BOUNCE pre-computes the exact
-        #     elastic RC including shear-conversion and Bellhop consumes it
-        #     via the 'F' bottom type.
+        # Auto-route through BOUNCE only for layered columns — Bellhop has
+        # no multi-medium .env format, so without BOUNCE the layers are
+        # silently lost. A halfspace with non-zero shear stays native:
+        # the writer emits cs/alpha_s on the 'A' line (or per-range on the
+        # long .bty) and bellhop.f90:694-712 evaluates the exact
+        # acousto-elastic reflection coefficient at every boundary hit.
         # BOUNCE itself is range-independent; the spawned Bounce instance
         # collapses any range-dependent env via its own collapse policy
         # (Bounce default ``bottom_range='median'`` → median range, layer
@@ -1160,28 +1197,6 @@ class Bellhop(PropagationModel):
         # auto path the flag is True and the 2-D profile is written verbatim.
         env = self._project_environment(env)
         self.validate_inputs(env, source, receiver, run_mode=run_mode)
-
-        # Bellhop never writes the r=0 column (no ray travels zero
-        # distance), so it comes back as NaN no-data cells. Newcomers using
-        # ``np.linspace(0, R, N)`` for ``receiver.ranges`` hit a wall of
-        # NaN at r=0 and rightly wonder what is wrong. Warn once per
-        # ``Bellhop`` instance to nudge them toward a non-zero start.
-        if (
-            run_mode in (RunMode.COHERENT_TL, RunMode.INCOHERENT_TL,
-                         RunMode.SEMICOHERENT_TL)
-            and len(receiver.ranges) > 0
-            and float(receiver.ranges[0]) == 0.0
-            and not getattr(self, '_warned_r0_sentinel', False)
-        ):
-            warnings.warn(
-                f"{self.model_name}: receiver.ranges starts at r=0 m. "
-                f"Bellhop writes no data there (no ray travels zero "
-                f"distance), so that column is NaN. Start ranges at a "
-                f"small positive value (e.g. ``np.linspace(eps, R, N)``) "
-                f"to avoid surprise.",
-                UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
-            )
-            self._warned_r0_sentinel = True
 
         # Irregular receiver grid ('I' in RunType position 5) requires the
         # receiver.depths and receiver.ranges arrays to have the same
@@ -1752,8 +1767,17 @@ class Bellhop(PropagationModel):
             data = np.zeros((nrd, nrr, n_t), dtype=float)
             for ird in range(nrd):
                 for irr in range(nrr):
+                    cell = arrivals_by_rcv[0][ird][irr]
+                    if int(cell.get('n_arrivals', 0)) == 0:
+                        # No ray reached this cell (shadow zone, or the r=0
+                        # column Bellhop never writes): there is no data to
+                        # synthesise, so the trace is NaN — the same no-data
+                        # convention the TL modes report — not a silent
+                        # all-zero record that reads as a real quiet cell.
+                        data[ird, irr, :] = np.nan
+                        continue
                     rts, _ = delayandsum(
-                        rcv_arrivals=arrivals_by_rcv[0][ird][irr],
+                        rcv_arrivals=cell,
                         source_timeseries=source_waveform,
                         sample_rate=sample_rate,
                         fc=fc,
@@ -1761,23 +1785,38 @@ class Bellhop(PropagationModel):
                         t_start=t_start_locked,
                         phase_offset=arr_phase,
                     )
-                    # delayandsum may return a slightly different length on
-                    # cells with no arrivals — pad/truncate to n_t.
+                    # delayandsum may return a slightly different length —
+                    # pad/truncate to n_t.
                     m = min(len(rts), n_t)
                     data[ird, irr, :m] = np.asarray(rts[:m], dtype=float)
 
             data, coords, extra = _emit(data, 'time', t_vec)
-            return Field(
+            # The stamped frequency axis is the band the synthesised p(t)
+            # represents, derived from the (padded) source waveform the same
+            # way the IFFT-based engines derive their broadband grid — so a
+            # TIME_SERIES result names its band identically across engines.
+            # The ray-trace carrier fc stays on metadata['center_frequency'].
+            stamp_freqs = self._resolve_time_series_frequencies(
+                run_mode, None,
+                self._pad_waveform_to_duration(
+                    source_waveform, sample_rate, output_duration),
+                sample_rate, announce=False)
+            field = Field(
                 data=data,
                 coords=coords,
-                phase_reference='time_domain_native',
+                phase_reference=PhaseReference.TIME_DOMAIN_NATIVE,
                 **self._result_kwargs(
-                    source, backend=self.version, frequencies=fc,
+                    source, backend=self.version,
+                    frequencies=stamp_freqs if stamp_freqs is not None else fc,
                     dt=1.0 / sample_rate, fs=sample_rate, nt=n_t,
                     t_start=t_start_locked, center_frequency=fc,
                     arrivals_field=arr_field, **arr_paths, **extra,
                 ),
             )
+            if not irregular:
+                field = self._restore_broadband_depth_axis(
+                    field, receiver, env)
+            return field
 
         # ── Path B: frequency-domain transfer function ──
         frequencies = self._resolve_broadband_frequencies(
@@ -1806,10 +1845,10 @@ class Bellhop(PropagationModel):
         c0 = float(env.ssp.data[0, 0])
 
         H, coords, extra = _emit(H, 'frequency', frequencies)
-        return Field(
+        field = Field(
             data=H,
             coords=coords,
-            phase_reference='travelling_wave',
+            phase_reference=PhaseReference.TRAVELLING_WAVE,
             **self._result_kwargs(
                 source,
                 backend=self.version,
@@ -1821,6 +1860,35 @@ class Bellhop(PropagationModel):
                 **extra,
             ),
         )
+        if not irregular:
+            field = self._restore_broadband_depth_axis(field, receiver, env)
+        return field
+
+    def _restore_broadband_depth_axis(self, field, receiver, env):
+        """Restore the caller's depth axis on a broadband / time-series Field
+        and NaN its no-data cells.
+
+        BELLHOP clamps any receiver below the deck's bottom boundary onto it
+        (``misc/SourceReceiverPositions.f90:136-139``), so the ``.arr``
+        carries the clamped depth axis with the boundary row repeated — no
+        arrivals are evaluated at the asked depth. Reattach the requested
+        axis with NaN there, then NaN below the local seafloor too (a
+        range-dependent ``.bty`` leaves sub-seafloor receivers above the deck
+        depth unclamped but ray-free) — the 3-D
+        ``(depth, range, time|frequency)`` counterpart of the
+        ``_restore_depths_and_mask`` step the TL modes apply in :meth:`run`.
+        The irregular grid carries no depth axis and never reaches here.
+        """
+        field = self._mask_unresolvable_depths(
+            field, receiver, float(env.depth))
+        bathy = np.asarray(env.bathymetry.to_pairs(), dtype=float)
+        depths = np.asarray(field.coords['depth'], dtype=float)
+        ranges = np.asarray(field.coords['range'], dtype=float)
+        seafloor = np.interp(ranges, bathy[:, 0], bathy[:, 1])
+        data = np.array(field.data, copy=True)
+        data[depths[:, None] > seafloor[None, :], ...] = np.nan
+        field.data = data
+        return field
 
     @staticmethod
     def _arrivals_to_tf(
@@ -1857,11 +1925,15 @@ class Bellhop(PropagationModel):
         Returns
         -------
         H : ndarray
-            Complex transfer function, shape (n_freq,).
+            Complex transfer function, shape (n_freq,). All-NaN when the
+            cell has no arrivals (shadow zone, or the r=0 column Bellhop
+            never writes): a no-arrival cell carries no model output, and
+            ``H = 0`` would read as a real, perfectly quiet channel — the
+            same cell the TL modes report as NaN.
         """
         n_arr = rcv_arrivals['n_arrivals']
         if n_arr == 0:
-            return np.zeros(len(frequencies), dtype=complex)
+            return np.full(len(frequencies), np.nan, dtype=complex)
 
         amps = rcv_arrivals['amplitudes']
         phases_deg = rcv_arrivals['phases']

@@ -308,6 +308,8 @@ class SoundSpeedProfile:
     def collapse(self, method: str = 'r0') -> 'SoundSpeedProfile':
         """Collapse a 2-D profile to 1-D using ``method``.
 
+        Returns ``self`` (not a copy) when the profile is already 1-D.
+
         Methods
         -------
         ``'r0'``     : keep the range-0 column.

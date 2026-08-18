@@ -241,7 +241,11 @@ def test_unsupported_beam_pattern_is_rejected():
 
 _EXPECTED_ROUGH_SURFACE = {
     'Bellhop': False, 'Kraken': True, 'Scooter': True, 'SPARC': False,
-    'Bounce': False, 'OAST': True, 'OASN': True, 'OASR': True,
+    'Bounce': False, 'OAST': True, 'OASN': True,
+    # OASR's deck has no sea surface: its layer 1 is the water half-space
+    # the plane wave arrives through, whose RG INENVI discards
+    # (oaseun31.f:377), so surface roughness is collapsed with a warning.
+    'OASR': False,
     'OASP': True, 'RAM': False,
 }
 
@@ -257,7 +261,8 @@ def test_rough_surface_capability_matrix(model_name):
     ``Scooter/scooter.f90:309``, where ``SSP%sigma(1)`` enters the
     vacuum-boundary impedance). The OASES family reads it as column 7 (RG) of
     each layer record (``oases/src/oaseun31.f:54``,
-    ``oases/doc/oast.tex:48``).
+    ``oases/doc/oast.tex:48``) — except OASR, whose deck has no sea surface
+    at all (see the matrix entry).
     """
     try:
         m = _EXPECTED[model_name][0]()
@@ -287,6 +292,30 @@ def test_rough_surface_is_dropped_for_solvers_that_reject_it():
     assert [x for x in w if 'rough sea surface' in str(x.message)]
     # The caller's environment must not be mutated in place.
     assert env.surface.roughness == 2.0
+
+
+_EXPECTED_MULTI_SOURCE_DEPTH = {
+    'Bellhop': True, 'Kraken': False, 'Scooter': False, 'SPARC': False,
+    'Bounce': False, 'OAST': False, 'OASN': False, 'OASR': False,
+    'OASP': False, 'RAM': False,
+}
+
+
+@pytest.mark.parametrize('model_name', _MODEL_PARAMS)
+def test_multi_source_depth_capability_matrix(model_name):
+    """Bellhop is the only model that runs a source-depth *grid* in one
+    binary call (``ModelSpec.supports`` carries ``'multi_source_depth'``);
+    for every other model ``_validate_geometry`` refuses a multi-depth
+    Source with 'single source depth' (pinned in test_input_validation.py),
+    telling the caller to loop over Sources externally. Bounce also reads
+    ``False``, but its geometry validation is a no-op so nothing enforces it.
+    """
+    try:
+        m = _EXPECTED[model_name][0]()
+    except ExecutableNotFoundError:
+        pytest.skip(f"{model_name} binary not available")
+    assert (m._supports_multi_source_depth
+            is _EXPECTED_MULTI_SOURCE_DEPTH[model_name])
 
 
 _EXPECTED_ROUGH_BOTTOM = {

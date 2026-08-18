@@ -215,23 +215,6 @@ def reflection(bottom, frequency=200.0):
 def critical_angle(sound_speed):
     """Grazing angle below which a wave in the water cannot enter ``sound_speed``."""
     return np.degrees(np.arccos(WATER_SPEED / sound_speed))
-
-
-def as_explicit_layer(bottom, thickness=1.0):
-    """``bottom`` rewritten as one explicit layer of itself over itself.
-
-    Same seabed, same ``|R|`` — but it keeps the phase referenced to the
-    seafloor. See [Gotchas](#8-gotchas). Fluid media only.
-    """
-    return uacpy.SeabedColumn(
-        layers=[uacpy.SedimentLayer(
-            thickness=thickness,
-            sound_speed=bottom.sound_speed,
-            density=bottom.density,
-            attenuation=bottom.attenuation,
-        )],
-        halfspace=bottom,
-    )
 ```
 
 ### The critical angle
@@ -241,8 +224,10 @@ sand = uacpy.BoundaryProperties(
     acoustic_type='half-space',
     sound_speed=1650.0, density=1.9, attenuation=0.0,
 )
-rc = reflection(as_explicit_layer(sand))
-rc.plot(show_phase=True, title='Bounce — lossless sand half-space, 200 Hz')
+rc = reflection(sand)
+fig, ax = rc.plot(
+    show_phase=True, figsize=WIDE,
+    title='Bounce — lossless sand half-space, 200 Hz')
 ```
 
 ![Reflection coefficient of a lossless sand half-space](figures/bounce_reflection.png)
@@ -270,12 +255,13 @@ levelling off at normal incidence to the impedance-contrast value
 ### What absorption does to it
 
 ```python
-for alpha in [0.0, 0.2, 0.6, 1.5]:
+for alpha, style in [(0.0, '-'), (0.2, '--'), (0.6, '-.'), (1.5, ':')]:
     rc = reflection(uacpy.BoundaryProperties(
         acoustic_type='half-space',
         sound_speed=1650.0, density=1.9, attenuation=alpha,
     ))
-    ax.plot(rc.theta, rc.R, label=f'α = {alpha:g} dB/λ')
+    ax.plot(rc.theta, rc.R, style, lw=1.6,
+            label=f'α = {alpha:g} dB/λ')
 ```
 
 ![Effect of sediment attenuation on |R|](figures/bounce_attenuation.png)
@@ -294,13 +280,17 @@ where the plateau ends.
 ### The catalogue, side by side
 
 ```python
-for name in ['clay', 'silt', 'sand', 'gravel', 'limestone', 'granite']:
+names = ['clay', 'silt', 'sand', 'gravel', 'limestone', 'granite']
+for i, name in enumerate(names):
     bottom = uacpy.BoundaryProperties.from_preset(name)
     rc = reflection(bottom)
-    ax.plot(rc.theta, rc.R, label=f'{name} ({bottom.sound_speed:.0f} m/s)')
+    colour = f'C{i}'
+    ax.plot(rc.theta, rc.R, color=colour, lw=1.6,
+            label=f'{name} ({bottom.sound_speed:.0f} m/s)')
     if bottom.sound_speed > WATER_SPEED:
         theta_c = critical_angle(bottom.sound_speed)
-        ax.plot([theta_c], [np.interp(theta_c, rc.theta, rc.R)], 'o')
+        ax.plot([theta_c], [np.interp(theta_c, rc.theta, rc.R)],
+                'o', color=colour, ms=5.0)
 ```
 
 ![|R| for six material presets](figures/bounce_materials.png)
@@ -362,8 +352,9 @@ elastic media directly.
 ### A layer turns a mirror into a filter
 
 ```python
-bare = as_explicit_layer(uacpy.BoundaryProperties.from_preset('granite'))
-stack = uacpy.SeabedColumn.from_presets(layers=[('sand', 8.0)], halfspace='granite')
+bare = uacpy.BoundaryProperties.from_preset('granite')
+stack = uacpy.SeabedColumn.from_presets(
+    layers=[('sand', 8.0)], halfspace='granite')
 ```
 
 ![Bare granite vs 8 m of sand over granite](figures/bounce_layered.png)
@@ -398,7 +389,8 @@ for j, f in enumerate(freqs):
     rc = Bounce(**GRID).run(env, source, PROBE)
     R[:, j] = np.interp(theta, rc.theta, rc.R)
 
-ax.pcolormesh(freqs, theta, R, shading='nearest', cmap='viridis', vmin=0, vmax=1)
+im = ax.pcolormesh(freqs, theta, R, shading='nearest', cmap='viridis',
+                   vmin=0.0, vmax=1.0)
 ```
 
 ![|R(θ, f)| for the layered stack](figures/bounce_frequency.png)
@@ -435,12 +427,15 @@ frequency.
 ## 7. How Bounce reaches you without being called
 
 Most users meet Bounce indirectly.
-[Bellhop](bellhop.md#elastic-bottoms-and-the-auto-bounce-route) is a fluid ray
-tracer and cannot represent shear or a layer stack. When `env.bottom` carries
-either, uacpy runs Bounce first, writes the `.brc` table, and hands Bellhop that
-table as its bottom boundary. You get a `UserWarning` saying so, because BOUNCE
+[Bellhop](bellhop.md#elastic-bottoms-and-the-auto-bounce-route) carries a
+single-halfspace `.env` and cannot represent a layer stack. When `env.bottom`
+is layered, uacpy runs Bounce first, writes the `.brc` table, and hands Bellhop
+that table as its bottom boundary. (A non-layered elastic half-space never
+routes — bellhop.f90 evaluates its exact acousto-elastic reflection
+coefficient natively.) You get a `UserWarning` saying so, because BOUNCE
 is range-independent: the bottom is collapsed to one representative column
-first. `Bellhop(auto_bounce=False)` opts out and fluid-approximates instead.
+first. `Bellhop(auto_bounce=False)` opts out and collapses the stack to a
+single half-space instead.
 
 ```python
 env, source, receiver = layered_elastic()      # 8 m sand over granite
@@ -488,8 +483,10 @@ tl = Bellhop().run(env_rc, source, receiver, run_mode=RunMode.COHERENT_TL)
 ```
 
 `.brc` is read by [Bellhop](bellhop.md), [Scooter](scooter.md) and
-`Kraken(backend='krakenc')`; `.irc` is the internal-reflection form that
-`Kraken(backend='kraken')` wants. [SPARC](sparc.md) reads neither.
+`Kraken(backend='krakenc')`; `.irc` is the internal-reflection form, and it too
+dispatches to `krakenc` — real `kraken.exe` cannot honour a tabulated
+reflection coefficient, so forcing `backend='kraken'` on either table raises
+`ConfigurationError`. [SPARC](sparc.md) reads neither.
 
 ---
 
@@ -507,35 +504,23 @@ most*: with `rmax=10 km` the spacing is 0.9° below 5° grazing and 0.04° near
 normal incidence. Raise `rmax` (or set `n_angles`) if the sub-critical region
 looks under-sampled. You cannot specify the angles directly — OASR can.
 
-**The phase of a bare half-space's `.brc` is referenced 1 m above the seafloor.**
-BOUNCE needs at least one medium, so when `env.bottom` is a bare half-space with
-no layers, uacpy inserts a 1 m dummy slab at the *water* sound speed and puts the
-half-space beneath it. BOUNCE reports the impedance at the top of that slab, so
-the tabulated phase carries a spurious `−2 k (1 m) sin θ` term that grows with
-frequency: −96° at normal incidence at 200 Hz, −192° at 400 Hz. `|R|` is
-untouched — the slab is water on water — so magnitude-only work is unaffected.
-Give the bottom an explicit layer and BOUNCE takes its exact path instead:
-
-```python
-sand = uacpy.BoundaryProperties(
-    acoustic_type='half-space', sound_speed=1650.0, density=1.9, attenuation=0.0,
-)
-bottom = uacpy.SeabedColumn(
-    layers=[uacpy.SedimentLayer(
-        thickness=1.0, sound_speed=sand.sound_speed,
-        density=sand.density, attenuation=sand.attenuation,
-    )],
-    halfspace=sand,
-)
-```
-
-The layer is the same material as the half-space, so the seabed is physically
-unchanged and `|R|` is identical to 3 × 10⁻⁶; the phase then lands on the
-closed-form `arg R` to 0.001° and is identically zero above the critical angle.
-Fluid media only — an elastic half-space has no acoustic layer to absorb the
-respelling, so it keeps the offset. This is not confined to inspection work: a
-bare elastic half-space has no layers, so
-[Bellhop](bellhop.md)'s auto-BOUNCE route feeds on a table carrying the offset.
+**A bare half-space's phase is referenced at the seafloor — no workaround
+needed.** When `env.bottom` is a bare half-space with no layers, uacpy writes
+the deck with `NMedia = 0`, which BOUNCE documents ("If you only have a
+halfspace, you can set NMedia to 0", `doc/bounce.htm`): no medium is inserted
+above the half-space, so the `f`/`g` that become the tabulated `R` come
+straight from `BCImpedance('BOT')` at the seafloor. The phase column carries
+no offset — at normal incidence on a lossless bottom it lands on the
+closed-form impedance-ratio value, zero — and a regression pins both the
+`NMedia = 0` deck and the < 2° normal-incidence phase. Any padding medium of
+thickness `dz` would move the reference plane and rotate every `.brc`/`.irc`
+row by `−2 k dz sin θ`, so spelling the half-space as an explicit layer of
+itself over itself buys nothing: same seabed, same `|R|`, same phase — the
+deck merely takes BOUNCE's layer-marching path instead of the `NMedia = 0`
+shortcut. Elastic half-spaces included. (A bare elastic half-space never
+meets this table through [Bellhop](bellhop.md) anyway: auto-BOUNCE fires only
+for a *layered* bottom, and Bellhop evaluates a bare elastic half-space's
+reflection coefficient natively.)
 
 **One frequency per run.** A multi-frequency `Source` raises
 `ConfigurationError` rather than silently using the first. Loop, or use OASR.

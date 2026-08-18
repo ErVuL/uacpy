@@ -82,8 +82,8 @@ they are exact where Bellhop is asymptotic.
 | Low frequency / very shallow | Ray approximation breaks down | [Kraken](kraken.md), [Scooter](scooter.md) |
 | You need modes themselves | Bellhop has no modal decomposition | [Kraken](kraken.md) |
 | Layered *fluid* sediment stack | Reflection table, not resolved in the ray trace | [RAM](ram.md), [OASES](oases.md) |
-| Exact elastic seabed physics | Approximated via a reflection table | [OASES](oases.md), [Scooter](scooter.md) |
-| Seismo-acoustic / shear detail | Fluid-approximated | [OASES](oases.md) |
+| Full elastic wavefield (energy refracting through the sediment, head waves) | Only the *reflection* is elastic — the ray trace itself is fluid and specular | [OASES](oases.md), [Scooter](scooter.md) |
+| Seismo-acoustic / shear detail | No shear field, only shear's effect on `R(θ)` | [OASES](oases.md) |
 
 ---
 
@@ -99,27 +99,35 @@ What Bellhop takes natively, and what it routes or collapses first:
 | Sea-surface altimetry | ✅ | also supported by [RAM](ram.md) (`ramsurf` backend); no other model |
 | Multiple source depths | ✅ | returns a `ResultStack` |
 | Source beam pattern | ✅ | staged as an `.sbp` |
-| Elastic media | ✅ | via auto-BOUNCE — see below |
+| Elastic media | ✅ | native for a half-space — bellhop.f90's exact acousto-elastic `R(θ)`, per range node when the bottom is range-dependent; a layered *elastic* stack goes via auto-BOUNCE — see below |
 | Layered bottom | ✅ | via auto-BOUNCE; layer stack kept, range collapsed to one column |
 | Rough surface/bottom (`sigma`) | ❌ | collapsed |
 
 ### Elastic bottoms and the auto-BOUNCE route
 
-Bellhop is a **fluid** ray tracer: it cannot represent shear directly. When
-`env.bottom` carries shear or a layer stack, uacpy automatically runs
-[Bounce](bounce.md) first to compute a plane-wave reflection-coefficient table
-(`.brc`), then hands Bellhop that table as its bottom boundary.
+An elastic **half-space** needs no help: the writer puts the shear pair
+(`c_s`, `α_s`) on the halfspace line — per range node on a range-dependent
+bottom — and `bellhop.f90:694-712` evaluates the exact acousto-elastic
+reflection coefficient at every boundary hit. What Bellhop cannot represent is
+a **layer stack**: its `.env` carries a single halfspace, so a layered bottom
+(fluid or elastic) would silently lose its layers. When `env.bottom` is
+layered, uacpy therefore automatically runs [Bounce](bounce.md) first to
+compute a plane-wave reflection-coefficient table (`.brc`) over the stack,
+then hands Bellhop that table as its bottom boundary.
 
 The table is the exact **plane-wave** reflection coefficient of the layered
-elastic stack, angle by angle — the layer stack itself is kept. Two things it
-cannot carry. BOUNCE is range-independent, so the bottom collapses to one
-representative column (you get a `UserWarning`). And a plane-wave `R(θ)` applied
+(elastic) stack, angle by angle — the layer stack itself is kept. Two things
+the reflection treatment cannot carry, table or native. BOUNCE is
+range-independent, so a routed bottom collapses to one representative column
+(you get a `UserWarning`). And a plane-wave `R(θ)` applied
 at the bounce point is specular: it misses beam and time displacement — real
 energy enters the sediment, refracts, and re-emerges downrange — and misses the
 head (lateral) wave generated near the critical angle. `Bellhop(beam_shift=True)`
 turns on BELLHOP's own beam-displacement correction. Where those effects
 dominate, use [OASES](oases.md) or [Scooter](scooter.md). Disable the route with
-`Bellhop(auto_bounce=False)` to fluid-approximate instead.
+`Bellhop(auto_bounce=False)` — the layer stack is then collapsed to a single
+halfspace by the collapse policy (the halfspace reflection itself stays exact,
+shear included; what is lost is the stack's interference structure).
 
 ---
 
@@ -140,10 +148,11 @@ from uacpy.models import Bellhop, RunMode
 | `BROADBAND` | `Field` | `H(d, r, f)` transfer function |
 | `TIME_SERIES` | `Field` | `p(d, r, t)` |
 
-Default is `COHERENT_TL`. Unlike Kraken, Bellhop does not promote to
-`BROADBAND` on its own: a multi-frequency source left on the default run mode
-raises `ConfigurationError`. Ask for `RunMode.BROADBAND` (or `TIME_SERIES`)
-explicitly.
+Default is `COHERENT_TL`. A multi-frequency `Source` left on the default run
+mode raises `ConfigurationError` — here as in every model. The one promotion
+that exists is Kraken's, and it keys on the `frequencies=` *run kwarg*, not on
+the `Source`: Bellhop leaves the default alone even then. Ask for
+`RunMode.BROADBAND` (or `TIME_SERIES`) explicitly.
 
 ### The three TL modes, side by side
 
@@ -191,7 +200,7 @@ Everything is configured on the constructor; `run()` has a fixed signature.
 | `interp_ssp` | `None` | SSP connection scheme: `'linear'`, `'pchip'`, `'cubic'`, `'quad'`, `'n2linear'`, `'analytic'`. `None` auto-picks `'quad'` for a range-dependent `env.ssp`, `'linear'` otherwise. |
 | `interp_bathymetry` | `'linear'` | `'linear'` or `'curvilinear'`. |
 | `interp_altimetry` | `'linear'` | as above, for the sea surface. |
-| `auto_bounce` | `True` | Route elastic/layered bottoms through BOUNCE. |
+| `auto_bounce` | `True` | Route *layered* bottoms through BOUNCE (elastic half-spaces run natively). |
 
 **Červený beams only** (`beam_type='C'` or `'R'`)
 
@@ -252,9 +261,10 @@ receiver = uacpy.Receiver(
     ranges=np.linspace(50.0, 5000.0, 250),
 )
 
-tl = Bellhop(n_beams=3000).run(env, source, receiver,
-                               run_mode=RunMode.COHERENT_TL)
-tl.plot(env=env, source=source, title='Coherent transmission loss, 200 Hz')
+tl = Bellhop(n_beams=3000).run(
+    env, source, receiver, run_mode=RunMode.COHERENT_TL)
+fig, ax = tl.plot(env=env, source=source, figsize=WIDE,
+                  title='Bellhop — coherent transmission loss, 200 Hz')
 ```
 
 ![Bellhop coherent TL](figures/bellhop_tl.png)
@@ -269,7 +279,8 @@ receiver grid.
 ```python
 rays = Bellhop(n_beams=41, alpha=(-20.0, 20.0)).run(
     env, source, receiver, run_mode=RunMode.RAYS)
-rays.plot(env=env, show_receivers=False)
+fig, ax = rays.plot(env=env, show_receivers=False, figsize=WIDE,
+                    title='Bellhop — ray fan, alpha=(-20°, +20°)')
 ```
 
 ![Bellhop ray fan](figures/bellhop_rays.png)
@@ -283,7 +294,9 @@ Rays are coloured by what they hit: **red** direct, **green** surface-reflected,
 point = uacpy.Receiver(depths=60.0, ranges=3000.0)
 eig = Bellhop(n_beams=4000, alpha=(-45.0, 45.0)).run(
     env, source, point, run_mode=RunMode.EIGENRAYS)
-eig.top_n_by_miss(12).plot(env=env)
+fig, ax = eig.top_n_by_miss(12).plot(
+    env=env, figsize=WIDE,
+    title='Bellhop — 12 closest eigenrays to (3 km, 60 m)')
 ```
 
 ![Bellhop eigenrays](figures/bellhop_eigenrays.png)
@@ -297,7 +310,8 @@ returns 2639 of them, for the same beam-window reason as the arrivals below.
 ```python
 arr = Bellhop(n_beams=4000, alpha=(-45.0, 45.0)).run(
     env, source, point, run_mode=RunMode.ARRIVALS)
-arr.plot()
+fig, ax = arr.plot(figsize=WIDE,
+                   title='Bellhop — arrivals at (3 km, 60 m)')
 ```
 
 ![Bellhop arrivals](figures/bellhop_arrivals.png)
@@ -315,11 +329,12 @@ is what [`uacpy.comms`](../guide/comms.md) uses to simulate a modem link.
 ### Broadband transfer function
 
 ```python
-source_bb = uacpy.Source(depths=25.0,
-                         frequencies=np.linspace(150.0, 450.0, 192))
-H = Bellhop(n_beams=3000).run(env, source_bb, point,
-                              run_mode=RunMode.BROADBAND)
-H.plot_transfer_function()
+source = uacpy.Source(depths=25.0,
+                      frequencies=np.linspace(150.0, 450.0, 192))
+H = Bellhop(n_beams=3000).run(
+    env, source, point, run_mode=RunMode.BROADBAND)
+fig, _ = H.plot_transfer_function(
+    title='Bellhop — transfer function at (3 km, 60 m)')
 ```
 
 ![Bellhop transfer function](figures/bellhop_transfer_function.png)

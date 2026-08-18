@@ -559,6 +559,14 @@ class FRF:
 
         else:
             # Given m, compute directly
+            m = int(m)
+            if m > N:
+                raise ConfigurationError(
+                    f"FRF.compute_lsfir: FIR order m ({m}) must be <= N "
+                    f"({N}) — the fit solves for m coefficients from N data "
+                    "points. Reduce m, raise N, or pass a selection "
+                    "criterion ('AIC', 'BIC', 'FPE', 'CP') to choose the "
+                    "order automatically.")
             self.Minfo, self.Vinfo = _info_matrices(u, y, N, m)
             g = np.linalg.solve(self.Minfo, self.Vinfo)
 

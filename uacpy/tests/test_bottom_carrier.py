@@ -6,6 +6,7 @@ to any other carrier type).
 
 import pytest
 
+import uacpy
 from uacpy.core.bottom import (
     SedimentLayer, BoundaryProperties, SeabedColumn, Bottom,
 )
@@ -100,7 +101,7 @@ class TestBottomQueries:
         assert Bottom.from_column(SeabedColumn(
             [SedimentLayer(5, 1600, 1.5, 0.3, shear_speed=200)], _hs())).is_elastic
 
-    def test_validation(self):
+    def test_bottom_rejects_column_count_range_mismatch_and_nonmonotone_ranges(self):
         with pytest.raises(ConfigurationError):       # ranges=None needs 1 column
             Bottom(columns=[SeabedColumn([], _hs()), SeabedColumn([], _hs())])
         with pytest.raises(ConfigurationError):       # length mismatch
@@ -196,6 +197,97 @@ class TestLayeredColumn:
         assert col.collapse('top_layer').roughness == 0.25
         assert col.collapse('volume_average').roughness == 0.25
         assert col.collapse('halfspace').roughness == 0.25
+
+
+# ─── carrier construction ───────────────────────────────────────────────────
+
+class TestSedimentLayer:
+    """Tests for the SedimentLayer dataclass."""
+
+    def test_layer_stores_fields_and_defaults_attenuation_and_zero_shear(self):
+        layer = SedimentLayer(thickness=10, sound_speed=1650, density=1.9)
+        assert layer.thickness == 10
+        assert layer.sound_speed == 1650
+        assert layer.density == 1.9
+        assert layer.attenuation == 0.5  # default
+        assert layer.shear_speed == 0.0  # default
+
+    def test_validation_negative_thickness(self):
+        """A negative thickness is a bad user value, so ConfigurationError."""
+        with pytest.raises(ConfigurationError, match="thickness"):
+            SedimentLayer(thickness=-5, sound_speed=1650, density=1.9)
+
+    def test_validation_negative_sound_speed(self):
+        """A negative sound speed is a bad user value, so ConfigurationError."""
+        with pytest.raises(ConfigurationError, match="sound_speed"):
+            SedimentLayer(thickness=10, sound_speed=-100, density=1.9)
+
+    def test_elastic_layer(self):
+        """Test layer with shear properties."""
+        layer = SedimentLayer(
+            thickness=20, sound_speed=1700, density=2.0,
+            shear_speed=400, shear_attenuation=1.0
+        )
+        assert layer.shear_speed == 400
+        assert layer.shear_attenuation == 1.0
+
+
+class TestLayeredBottom:
+    """Tests for the SeabedColumn class."""
+
+    def test_two_layer_column_sums_total_thickness(self):
+        lb = SeabedColumn(
+            layers=[
+                SedimentLayer(thickness=10, sound_speed=1550, density=1.3, attenuation=0.5),
+                SedimentLayer(thickness=50, sound_speed=1650, density=1.7, attenuation=0.3),
+            ],
+            halfspace=BoundaryProperties(
+                acoustic_type='half-space',
+                sound_speed=1800, density=2.0, attenuation=0.1
+            )
+        )
+        assert len(lb.layers) == 2
+        assert lb.total_thickness() == 60
+
+    def test_layer_depths(self):
+        """Test layer depth computation."""
+        lb = SeabedColumn(
+            layers=[
+                SedimentLayer(thickness=10, sound_speed=1550, density=1.3),
+                SedimentLayer(thickness=50, sound_speed=1650, density=1.7),
+            ],
+            halfspace=BoundaryProperties(acoustic_type='half-space', sound_speed=1800, density=2.0)
+        )
+        depths = lb.layer_depths(200)
+        assert depths[0] == (200, 210)
+        assert depths[1] == (210, 260)
+
+    def test_empty_layers_is_halfspace(self):
+        """A 0-layer SeabedColumn is a valid pure half-space."""
+        col = SeabedColumn(
+            layers=[],
+            halfspace=BoundaryProperties(acoustic_type='half-space', sound_speed=1800, density=2.0)
+        )
+        assert not col.is_layered and col.total_thickness() == 0.0
+
+    def test_environment_with_layered_bottom(self):
+        """Test Environment coerces a SeabedColumn into a layered Bottom."""
+        lb = SeabedColumn(
+            layers=[SedimentLayer(thickness=10, sound_speed=1550, density=1.3)],
+            halfspace=BoundaryProperties(acoustic_type='half-space', sound_speed=1800, density=2.0)
+        )
+        env = uacpy.Environment(name='test', bathymetry=100, bottom=lb)
+
+        assert env.has_layered_bottom
+        assert not env.has_range_dependent_bottom
+        assert env.bottom.columns[0] is lb
+        assert env.bottom.columns[0].halfspace.sound_speed == 1800
+
+    def test_environment_plain_boundary_properties(self):
+        """A half-space bottom is a non-layered, range-independent Bottom."""
+        env = uacpy.Environment(name='test', bathymetry=100)
+        assert not env.has_layered_bottom and not env.bottom.is_range_dependent
+        assert isinstance(env.bottom, uacpy.Bottom)
 
 
 # ─── range-dependent half-space: linear blend + reductions ──────────────────
@@ -344,6 +436,16 @@ def test_from_halfspaces_roughness_length_mismatch():
         Bottom.from_halfspaces([0.0, 5000.0], sound_speed=[1600.0, 1700.0],
                                density=[1.5, 1.6], attenuation=[0.5, 0.4],
                                roughness=[0.1, 0.2, 0.3])
+
+
+def test_from_halfspaces_single_break_keeps_ranges():
+    """A single range break is still a range coordinate (it feeds
+    ``env.max_range``), even though one column is not range-*dependent*."""
+    b = Bottom.from_halfspaces([500.0], sound_speed=1600.0, density=1.8,
+                               attenuation=0.5)
+    assert b.ranges is not None
+    assert b.ranges.tolist() == [500.0]
+    assert not b.is_range_dependent
 
 
 # ─── collapse over a parameter-free half-space ─────────────────────────────

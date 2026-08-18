@@ -23,66 +23,10 @@ from uacpy.data import (
     crust1_local, emodnet_local, gebco_local, pelagic,
     sediment_db, sound_speed, woa23_local,
 )
-
-_FILL = 9.96921e36                              # WOA23's netCDF _FillValue
-
-
-def _write_gebco(cache, *, deep=-1500.0, land_at=None):
-    """A 1° stand-in for GEBCO_2025.nc: ``elevation(lat, lon)``, positive up.
-
-    The real grid is 43200×86400 at 15″ with cell-centre axes starting at
-    ±89.99791666…/±179.99791666…; this one is 1° with axes on whole degrees.
-    ``NetcdfGrid`` reads origin and step from the file's own axis variables, so
-    it snaps to the nearest stored node under either registration and the
-    coarser fixture exercises the same code path.
-    """
-    gdir = cache / 'gebco'; gdir.mkdir(parents=True)
-    lat = np.arange(-90, 91, 1.0)
-    lon = np.arange(-180, 180, 1.0)
-    elev = np.full((lat.size, lon.size), deep)
-    if land_at is not None:
-        i = int(round(land_at[0] + 90)); j = int(round(land_at[1] + 180))
-        elev[i, j] = 25.0
-    ds = netCDF4.Dataset(gdir / 'GEBCO_2025.nc', 'w')
-    ds.createDimension('lat', lat.size); ds.createDimension('lon', lon.size)
-    ds.createVariable('lat', 'f8', ('lat',))[:] = lat
-    ds.createVariable('lon', 'f8', ('lon',))[:] = lon
-    ds.createVariable('elevation', 'f4', ('lat', 'lon'))[:] = elev
-    ds.close()
-
-
-def _write_woa(cache):
-    """WOA23 1° analysed-mean grids: ``t_an``/``s_an`` of shape (time, depth,
-    lat, lon) = (1, n_depth, 180, 360), everything but one column set to the
-    product's ``_FillValue``. The real annual file carries 102 levels to 5500 m
-    and the monthlies 57 to 1500 m; five levels is enough for the readers."""
-    wdir = cache / 'woa23'; wdir.mkdir(parents=True)
-    depth = np.array([0, 50, 100, 500, 1000.0])
-    # column for grid_index(30.5, -40.5) == (120, 139) on the 1° grid.
-    def mk(var, vals):
-        arr = np.full((1, depth.size, 180, 360), _FILL)
-        arr[0, :, 120, 139] = vals
-        ds = netCDF4.Dataset(wdir / f'woa23_decav_{var}_01.nc', 'w')
-        for d, n in [('time', 1), ('depth', depth.size), ('lat', 180), ('lon', 360)]:
-            ds.createDimension(d, n)
-        ds.createVariable('depth', 'f4', ('depth',))[:] = depth
-        name = 't_an' if var[0] == 't' else 's_an'
-        ds.createVariable(name, 'f4', ('time', 'depth', 'lat', 'lon'))[:] = arr
-        ds.close()
-    # Period 00 = annual (date-less tests); 03 = March, so the sea-ice tests
-    # (which require a date) resolve WOA from the cache instead of falling
-    # through to a live OPeNDAP request.
-    for period in ('00', '03'):
-        mk(f't{period}', [18, 16, 13, 8, 5.0])
-        mk(f's{period}', [36, 36.1, 36.2, 35.5, 35.0])
-
-
-def _write_sediment(cache):
-    sdir = cache / 'sediment'; sdir.mkdir(parents=True)
-    (sdir / 'grainsize.csv').write_text(
-        'latitude,longitude,mean_phi\n30.5,-40.5,3.0\n43.0,7.0,2.0\n')
-    (sdir / 'deck41.csv').write_text(
-        'latitude,longitude,lithology\n44.0,8.0,Sand\n10.0,20.0,Clay\n')
+from uacpy.tests._cache_builders import (
+    _FILL, _write_crust1, _write_gebco, _write_globsed, _write_sediment,
+    _write_woa,
+)
 
 
 def _write_emodnet(cache):
@@ -102,39 +46,6 @@ def _write_emodnet(cache):
         pickle.dump({'codes': [2], 'wkb': [shapely.to_wkb(poly)]}, fh)
 
 
-def _write_globsed(cache):
-    # GlobSed is gridline-registered — its axes hit ±90 / ±180 exactly and both
-    # ±180 columns are stored, so the node count is odd (the real v3 grid is
-    # 2161×4321 at 5′). Keep that here: 181×361 on whole degrees.
-    gdir = cache / 'globsed'; gdir.mkdir(parents=True)
-    ds = netCDF4.Dataset(gdir / 'GlobSed-v3.nc', 'w')
-    ds.createDimension('lat', 181); ds.createDimension('lon', 361)
-    ds.createVariable('lat', 'f8', ('lat',))[:] = np.linspace(-90, 90, 181)
-    ds.createVariable('lon', 'f8', ('lon',))[:] = np.linspace(-180, 180, 361)
-    ds.createVariable('z', 'f4', ('lat', 'lon'))[:] = 500.0      # uniform 500 m
-    ds.close()
-
-
-def _write_crust1(cache):
-    cdir = cache / 'crust1'; cdir.mkdir(parents=True)
-    n = 180 * 360                                  # one whitespace row per 1° cell
-    # Nine columns per row, in CRUST1.0's layer order: water, ice, upper/middle/
-    # lower sediment, upper/middle/lower crystalline crust, mantle. ``bnds`` is
-    # the top of each layer in km (negative down), so this column is 4 km of
-    # water over 1 km of sediment (-4 → -5) over crust.
-    rows = {
-        'crust1.bnds': [0, -4, -4, -5, -5, -5, -10, -20, -30],
-        'crust1.vp':   [1.5, 3.8, 2.0, 0, 0, 5.0, 6.5, 7.1, 8.1],
-        'crust1.vs':   [0, 1.9, 0.6, 0, 0, 2.7, 3.7, 4.0, 4.5],
-        'crust1.rho':  [1.02, 0.9, 1.9, 0, 0, 2.6, 2.8, 3.0, 3.3],
-    }
-    # Every cell is identical, so repeat one formatted line — far cheaper than
-    # np.savetxt over the full 64800×9 grid in this per-test fixture.
-    for name, row in rows.items():
-        line = ' '.join('%g' % v for v in row) + '\n'
-        (cdir / name).write_text(line * n)
-
-
 @pytest.fixture
 def cache(tmp_path, monkeypatch):
     """A synthetic, fully-populated offline cache wired via $UACPY_DATA_CACHE."""
@@ -146,7 +57,7 @@ def cache(tmp_path, monkeypatch):
     sediment_db._SAMPLES.clear()
     emodnet_local._INDEX.clear()
     _write_gebco(root, land_at=(0.0, 0.0))
-    _write_woa(root)
+    _write_woa(root, periods=('00', '03'))
     _write_sediment(root)
     _write_emodnet(root)
     return root
@@ -167,7 +78,7 @@ def seismic_cache(tmp_path, monkeypatch):
     crust1_local._MODEL.clear()
     _cache.invalidate_grids()
     _write_gebco(root)
-    _write_woa(root)
+    _write_woa(root, periods=('00', '03'))
     _write_globsed(root)
     _write_crust1(root)
     return root
@@ -277,6 +188,35 @@ def test_gebco_region_across_the_antimeridian(cache):
     assert np.allclose(depth, expected)
     # Two runs, each a handful of columns — never the 360-column full width.
     assert len(widths) == 2 and max(widths) <= 10
+
+
+def test_gebco_region_reads_only_requested_rows_and_cols(cache):
+    # Regression: a coarse request over a wide box must read only the
+    # requested rows/cols (orthogonal indexing), never the min..max bounding
+    # slab — on the real 43 200 × 86 400 grid that slab is tens of GB for a
+    # 50×50 global request. Values must still match the point-wise depths.
+    grid = gebco_local._grid()
+    shapes = []
+    raw = grid._elev
+
+    class _Spy:
+        def __getitem__(self, key):
+            block = raw[key]
+            shapes.append(np.shape(block))
+            return block
+
+    grid._elev = _Spy()
+    try:
+        # Latitudes chosen so no waypoint hits the fixture's land cell (0, 0).
+        lats, lons, depth = gebco_local.region_grid((-58, 62), (-150, 150), 7, 9)
+    finally:
+        grid._elev = raw
+    # One contiguous column run; the block is exactly the 7 unique rows by the
+    # 9 unique cols — not the 121 × 301 bounding slab of the 1° fixture.
+    assert shapes == [(7, 9)]
+    expected = np.array([[gebco_local.point_depth((la, lo)) for lo in lons]
+                         for la in lats])
+    assert np.allclose(depth, expected)
 
 
 def test_bathymetry_sources_local(cache):
@@ -501,6 +441,63 @@ def test_fetch_environment_sea_ice_open_water(cache, monkeypatch):
 def test_fetch_environment_sea_ice_requires_date(cache):
     with pytest.raises(ConfigurationError, match="surface_sources='seaice' needs date"):
         data.fetch_environment((30.5, -40.5), surface_sources='seaice')
+
+
+def test_fetch_environment_sea_ice_transect_classifies_each_zone(monkeypatch):
+    # Concentration keyed on latitude — 0.9 pack ice at/above 83°N, 0.0 open
+    # water below — with literal bathymetry/SSP so only the surface fetches.
+    # The waypoints at 85, 83.33, 81.67, 80°N each classify from their own
+    # zone: canopy, canopy, open water, open water.
+    from uacpy.data import seaice_local
+    monkeypatch.setattr(seaice_local, 'fetch_sea_ice_concentration',
+                        lambda pt, date=None, *, month=None:
+                        0.9 if pt[0] >= 83.0 else 0.0)
+    env = data.fetch_environment((85.0, 0.0), transect_to=(80.0, 0.0),
+                                 date='2026-03-15', bathymetry=3000.0,
+                                 ssp=1500.0, surface_sources='seaice',
+                                 surface_n_points=4)
+    assert [bp.acoustic_type for bp in env.surface.properties] == \
+        ['half-space', 'half-space', 'vacuum', 'vacuum']
+    assert env.surface.at(range=0.0).shear_speed == 1800.0
+    assert [s.source.id for s in env.data_sources] == ['seaice']
+
+
+def test_fetch_environment_sea_ice_straddles_the_ice_edge_threshold(monkeypatch):
+    # 15.1 % — just above the NSIDC 15 % ice-edge → elastic canopy with
+    # 'seaice' provenance.
+    from uacpy.data import seaice_local
+    monkeypatch.setattr(seaice_local, 'fetch_sea_ice_concentration',
+                        lambda pt, date=None, *, month=None: 0.151)
+    env = data.fetch_environment((30.5, -40.5), date='2026-03-15',
+                                 bathymetry=3000.0, ssp=1500.0,
+                                 surface_sources='seaice')
+    assert env.surface.acoustic_type == 'half-space'
+    assert 'seaice' in [s.source.id for s in env.data_sources]
+    # 14.9 % — just below → the free surface stands, no 'seaice' provenance.
+    monkeypatch.setattr(seaice_local, 'fetch_sea_ice_concentration',
+                        lambda pt, date=None, *, month=None: 0.149)
+    env = data.fetch_environment((30.5, -40.5), date='2026-03-15',
+                                 bathymetry=3000.0, ssp=1500.0,
+                                 surface_sources='seaice')
+    assert env.surface.acoustic_type == 'vacuum'
+    assert 'seaice' not in [s.source.id for s in env.data_sources]
+
+
+def test_fetch_environment_sea_ice_canopy_full_property_set(monkeypatch):
+    # A canopy point carries the complete ice canopy of core.constants —
+    # elastic half-space, c_p 3500 m/s, c_s 1800 m/s, ρ 0.9 g/cm³,
+    # α_p 0.4 dB/λ, α_s 1.0 dB/λ, roughness 0, no grain size.
+    from uacpy.data import seaice_local
+    monkeypatch.setattr(seaice_local, 'fetch_sea_ice_concentration',
+                        lambda pt, date=None, *, month=None: 0.85)
+    env = data.fetch_environment((30.5, -40.5), date='2026-03-15',
+                                 bathymetry=3000.0, ssp=1500.0,
+                                 surface_sources='seaice')
+    s = env.surface
+    assert s.acoustic_type == 'half-space'
+    assert (s.sound_speed, s.shear_speed, s.density) == (3500.0, 1800.0, 0.9)
+    assert (s.attenuation, s.shear_attenuation) == (0.4, 1.0)
+    assert s.roughness == 0.0 and s.grain_size_phi is None
 
 
 def test_offline_emodnet_local_bottom(cache):

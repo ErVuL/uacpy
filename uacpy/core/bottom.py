@@ -1154,7 +1154,10 @@ class Bottom:
                 roughness=float(rough[i])))
             for i in range(n)
         ]
-        return cls(columns=columns, ranges=ranges if n > 1 else None)
+        # The caller's ranges are kept even for a single break: ranges=[r]
+        # is a coordinate at range r (it feeds env.max_range), while
+        # ``is_range_dependent`` — a >1-node test — stays False for it.
+        return cls(columns=columns, ranges=ranges)
 
     @classmethod
     def from_presets(cls, layers, *, halfspace, halfspace_overrides=None,

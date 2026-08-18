@@ -127,6 +127,16 @@ class TestErrorMessages:
         )
         assert 'Bellhop' in str(error)
 
+    def test_remediation_renders_as_the_documented_how_to_fix_block(self):
+        """``remediation=`` renders under the message as the 'How to fix:'
+        block documented in docs/guide/io.md; without one, ``str()`` is the
+        bare message."""
+        from uacpy.core.exceptions import ConfigurationError, UACPYError
+        err = ConfigurationError("bad knob", remediation="Turn the good knob.")
+        assert str(err) == "bad knob\n\nHow to fix:\nTurn the good knob."
+        assert err.remediation == "Turn the good knob."
+        assert str(UACPYError("plain message")) == "plain message"
+
 
 class TestValidationHelpers:
     """validate_inputs raises typed errors, not bare ValueError."""

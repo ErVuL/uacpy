@@ -710,8 +710,8 @@ over both.
 
 | Model | Overrides |
 |---|---|
-| [Kraken](../models/kraken.md), [Scooter](../models/scooter.md), [SPARC](../models/sparc.md), [OASES](../models/oases.md) | `ssp='mean'`, `bottom_range='median'` |
-| [Bounce](../models/bounce.md) | `bottom_range='median'` |
+| [Kraken](../models/kraken.md), [Scooter](../models/scooter.md), [SPARC](../models/sparc.md), [OASES](../models/oases.md) except OASR | `ssp='mean'`, `bottom_range='median'` |
+| [Bounce](../models/bounce.md), OASR | `bottom_range='median'` — the reflection-only engines leave the SSP on the global default |
 | [Bellhop](../models/bellhop.md), [RAM](../models/ram.md) | none — they take range dependence natively |
 
 The pattern: a modal or spectral solver reduces a 2-D profile by averaging

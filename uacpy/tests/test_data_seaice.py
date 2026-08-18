@@ -90,10 +90,35 @@ def test_requires_date_or_month(synthetic_model):
         seaice_local.fetch_sea_ice_concentration((85.0, 0.0))
 
 
-def test_transect(synthetic_model):
+def test_transect_classifies_each_waypoint_from_its_own_cell(monkeypatch):
+    # Two latitude bands of the North grid, both in column 3: row 1 (poleward
+    # of 85.25°N) holds 0.9 pack ice, row 3 (equatorward) holds 0.05 open
+    # water. Waypoints at 86, 85.67, 85.33, 85°N each read their own cell.
+    g = seaice_local._GRID['N']
+
+    class _LatBandTF:
+        def transform(self, lon, lat):
+            row = 1 if lat >= 85.25 else 3
+            return g['x0'] + 3.5 * g['px'], g['y0'] - (row + 0.5) * g['px']
+
+    north = np.zeros((12, 5, 6), dtype=np.float32)
+    north[2, 1, 3] = 0.9
+    north[2, 3, 3] = 0.05
+    model = {'tf': {'N': _LatBandTF(), 'S': _LatBandTF()},
+             'N': north, 'S': np.zeros((12, 5, 6), dtype=np.float32)}
+    monkeypatch.setattr(seaice_local, '_model', lambda: model)
+
     r, c = seaice_local.fetch_sea_ice_concentration_transect(
-        (85.0, 0.0), (85.5, 0.0), month=3, n_points=3)
-    assert r.shape == (3,) and c.shape == (3,)
+        (86.0, 0.0), (85.0, 0.0), month=3, n_points=4)
+    assert r.shape == (4,) and c.shape == (4,)
+    assert r[0] == 0.0 and np.all(np.diff(r) > 0)
+    assert c.tolist() == pytest.approx([0.9, 0.9, 0.9, 0.05])
+    # The same per-waypoint zones drive the surface classification: 0.9 ≥ the
+    # 15 % ice-edge → elastic canopy, 0.05 < it → open-water vacuum.
+    surf = seaice_local.sea_ice_surface_transect(
+        (86.0, 0.0), (85.0, 0.0), month=3, n_points=4)
+    assert [bp.acoustic_type for bp in surf.properties] == \
+        ['half-space', 'half-space', 'half-space', 'vacuum']
 
 
 def test_sea_ice_surface_transect(synthetic_model):
@@ -104,6 +129,54 @@ def test_sea_ice_surface_transect(synthetic_model):
         (85.0, 0.0), (85.5, 0.0), month=3, n_points=4)
     assert isinstance(surf, Surface)
     assert surf.n_ranges == 4 and surf.is_elastic
+    assert surf.at(range=0).acoustic_type == 'half-space'
+
+
+def test_auto_transect_places_ice_edge_at_observed_boundary(monkeypatch):
+    """Regression: the 'auto' collapse must keep the probe samples bracketing
+    each zone change. The former midpoint collapse anchored a two-run
+    (ice → open water) transect at its endpoints only, and the nearest-node
+    ``Surface`` then rebuilt the edge at mid-transect — 600+ km off the
+    NSIDC March edge on an (85°N, 0°E) → (60°N, 0°E) transect."""
+    length_m = 1_000_000.0
+    edge_m = 300_000.0                    # ice for r < edge_m, open water beyond
+    probe_n = 200
+    step_m = length_m / (probe_n - 1)
+
+    def fake_transect(start, end, *, date=None, month=None, n_points=6):
+        r = np.linspace(0.0, length_m, n_points)
+        return r, np.where(r < edge_m, 0.9, 0.0)
+
+    monkeypatch.setattr(seaice_local, 'fetch_sea_ice_concentration_transect',
+                        fake_transect)
+    surf = seaice_local.sea_ice_surface_transect(
+        (85.0, 0.0), (60.0, 0.0), month=3, max_points=probe_n)
+    rr = np.asarray(surf.ranges, dtype=float)
+    kinds = [bp.acoustic_type for bp in surf.properties]
+    assert rr[0] == 0.0 and rr[-1] == pytest.approx(length_m)
+    assert kinds[0] == 'half-space' and kinds[-1] == 'vacuum'
+    # Nearest-node reconstruction transitions midway between adjacent kept
+    # nodes of different kind; that must land within one probe step of the
+    # edge the probe observed.
+    transitions = [(rr[i] + rr[i + 1]) / 2.0
+                   for i in range(len(kinds) - 1) if kinds[i] != kinds[i + 1]]
+    assert len(transitions) == 1
+    assert abs(transitions[0] - edge_m) <= step_m
+    assert surf.at(range=edge_m - step_m).acoustic_type == 'half-space'
+    assert surf.at(range=edge_m + step_m).acoustic_type == 'vacuum'
+
+
+def test_auto_transect_collapses_a_uniform_zone_to_one_node(monkeypatch):
+    """A single run (ice everywhere) still collapses to one range-independent
+    node — two identical columns would read as a range-dependent surface."""
+    def fake_transect(start, end, *, date=None, month=None, n_points=6):
+        return np.linspace(0.0, 1.0e6, n_points), np.full(n_points, 0.9)
+
+    monkeypatch.setattr(seaice_local, 'fetch_sea_ice_concentration_transect',
+                        fake_transect)
+    surf = seaice_local.sea_ice_surface_transect(
+        (85.0, 0.0), (60.0, 0.0), month=3, max_points=50)
+    assert surf.n_ranges == 1
     assert surf.at(range=0).acoustic_type == 'half-space'
 
 

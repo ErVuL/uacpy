@@ -70,7 +70,6 @@ class FileManager:
         self.prefix = prefix
         self.cleanup = cleanup
         self.work_dir = None
-        self._temp_dir = None
         # Set when uacpy created the work dir itself, so cleanup may remove it
         # whole. A caller-pinned directory is adopted via ``adopt_work_dir``,
         # which records what was already there so cleanup spares it.
@@ -111,11 +110,10 @@ class FileManager:
         work_dir : Path
             Path to the working directory.
         """
-        self._temp_dir = tempfile.mkdtemp(
+        self.work_dir = Path(tempfile.mkdtemp(
             prefix=self.prefix,
             dir=str(self.base_dir)
-        )
-        self.work_dir = Path(self._temp_dir)
+        ))
         self._owns_work_dir = True
         self._preexisting = None
         return self.work_dir
@@ -134,7 +132,6 @@ class FileManager:
         existed = self.work_dir.exists()
         self.work_dir.mkdir(parents=True, exist_ok=True)
         self._owns_work_dir = not existed
-        self._temp_dir = None
         self._preexisting = (
             {p.name for p in self.work_dir.iterdir()} if existed else None)
         return self.work_dir
@@ -188,7 +185,6 @@ class FileManager:
                     except OSError:
                         pass
         self.work_dir = None
-        self._temp_dir = None
 
     def __enter__(self):
         self.create_work_dir()

@@ -10,8 +10,9 @@ import numpy as np
 import pytest
 
 import uacpy
+from uacpy.core.constants import parse_boundary_type
 from uacpy.core.environment import BoundaryProperties, SoundSpeedProfile
-from uacpy.io.oalib_writer import _BOUNDARY_TYPE_MAP, get_top_bc_code
+from uacpy.io.oalib_writer import get_top_bc_code
 from uacpy.io.bellhop_writer import write_bellhop_env_file
 from uacpy.io.oases_writer import (
     _format_upper_halfspace,
@@ -54,8 +55,11 @@ def src_rcv():
     (_ice(),                                     'A'),
 ])
 def test_get_top_bc_code_routes_each_acoustic_type(surface, expected_code):
-    """Pin the BOUNDARY_TYPE_MAP routing for every model that consumes env.surface."""
-    assert _BOUNDARY_TYPE_MAP['half-space'] == 'A'  # source-of-truth dict
+    """Pin the boundary-code routing for every model that consumes env.surface."""
+    # parse_boundary_type -> to_acoustics_toolbox_code is the single lookup
+    # path every writer takes.
+    assert parse_boundary_type(
+        'half-space').to_acoustics_toolbox_code() == 'A'
     assert get_top_bc_code(_basic_env(surface)) == expected_code
 
 

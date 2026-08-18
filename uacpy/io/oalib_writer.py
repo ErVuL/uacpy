@@ -2,9 +2,9 @@
 Acoustics Toolbox / OALIB environment-file writers.
 
 Each function writes one logical block of the AT ``.env`` format onto an
-open text handle, plus the ``.flp`` field-parameter writers used by
-Kraken. ``write_multi_profile_env`` and ``write_fieldflp`` /
-``write_field3dflp`` write the full file.
+open text handle, plus the ``.flp`` field-parameter writer used by
+Kraken. ``write_multi_profile_env`` and ``write_fieldflp`` write the
+full file.
 
 Top-block record order (the one contract every AT ``.env`` here obeys)
 ---------------------------------------------------------------------
@@ -38,8 +38,8 @@ Adoption across uacpy model wrappers:
   emitted by ``write_header`` for the AT-family writers here; Bellhop and
   SPARC call it directly from their own header code. Drives output from
   ``env.absorption``.
-- ``_BOUNDARY_TYPE_MAP`` / ``get_top_bc_code`` /
-  ``write_surface_halfspace``: all AT-family wrappers including Bellhop.
+- ``get_top_bc_code`` / ``write_surface_halfspace``: all AT-family
+  wrappers including Bellhop.
 """
 
 import warnings
@@ -52,7 +52,7 @@ from uacpy.core.absorption import (
     Biological, ConstantAbsorption, FrancoisGarrison,
 )
 from uacpy.core.environment import Environment
-from uacpy.core.bottom import BoundaryProperties
+from uacpy.core.bottom import BoundaryProperties, _NON_GEOACOUSTIC_TYPES
 from uacpy.core.surface import Surface
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
@@ -64,6 +64,7 @@ from uacpy.core.constants import (
 from uacpy.io.utils import equally_spaced, reject_unknown_kwargs
 from uacpy.io.units import m_to_km
 from uacpy.io.refl_io import stage_reflection_file
+from uacpy.core._carrier_validate import _sanitize_title
 from uacpy.core.exceptions import ConfigurationError, UnsupportedFeatureError
 
 
@@ -75,15 +76,6 @@ from uacpy.core.exceptions import ConfigurationError, UnsupportedFeatureError
 #: model's ``spec.source_types`` restricts which keys its ``validate_inputs``
 #: lets through.
 SOURCE_TYPE_CODE = {'point': 'R', 'line': 'X', 'scaled': 'S'}
-
-#: AT boundary letters keyed by ``acoustic_type``, derived from
-#: :class:`~uacpy.core.constants.BoundaryType` so the enum stays the single
-#: source of truth. ``get_top_bc_code`` parses through the enum directly (an
-#: unknown type raises); this mapping serves callers that want a plain lookup.
-_BOUNDARY_TYPE_MAP = {
-    **{bt.value: bt.to_acoustics_toolbox_code() for bt in BoundaryType},
-    "halfspace": BoundaryType.HALF_SPACE.to_acoustics_toolbox_code(),
-}
 
 #: Decimals in every depth column these decks write, and the resolution that
 #: implies. The Acoustics-Toolbox manual states the format requirement outright —
@@ -103,7 +95,7 @@ _DECK_DEPTH_RESOLUTION_M = 10.0 ** -_DECK_DEPTH_DECIMALS
 #: profiles of a range-dependent deck. This is uacpy's own construct, not
 #: anything AT prescribes: the pad repeats the half-space it sits in, so it is
 #: acoustically inert, and it only has to be thick enough to mesh
-#: (``misc/sspMod.f90:352`` wants >= 2 SSP points in a medium).
+#: (``misc/sspMod.f90:356-358`` rejects a medium with fewer than 2 SSP points).
 _PAD_MEDIUM_THICKNESS_M = 0.1
 
 #: Resolution in metres of every range axis these decks write, which print km at
@@ -123,6 +115,38 @@ WATER_DENSITY_G_CM3 = 1.0
 # Bellhop/ReadEnvironmentBell.f90:316-317 loops straight to NBioLayers, so a
 # longer block walks off the array.
 _MAX_BIO_LAYERS = 200
+
+# Compiled media bound shared by kraken/krakenc/scooter/sparc:
+# misc/ReadEnvironmentMod.f90 ERROUTs when NMedia exceeds MaxMedium = 500
+# (misc/sspMod.f90:11) — a bare Fortran fatal, so the writers refuse first.
+_AT_MAX_MEDIA = 500
+
+
+def _reject_media_overrun(n_media) -> None:
+    """Raise before writing an NMedia the AT binaries cannot compile in."""
+    if int(n_media) <= _AT_MAX_MEDIA:
+        return
+    raise ConfigurationError(
+        f"AT deck: NMedia = {int(n_media)} (water column + sediment layers) "
+        f"exceeds the compiled bound MaxMedium = {_AT_MAX_MEDIA} "
+        f"(Acoustics-Toolbox misc/sspMod.f90; ReadEnvironmentMod ERROUTs).",
+        remediation="Collapse the layered seabed below "
+                    f"{_AT_MAX_MEDIA} media, e.g. merge thin layers.",
+    )
+
+
+def quote_fortran_title(name) -> str:
+    """``name`` as the quoted deck-title literal, re-sanitized.
+
+    ``Environment`` already strips apostrophes and control characters from
+    names at construction (``_sanitize_title``: the Fortran ``''`` escape
+    is rejected by bellhopcxx's title parser, so apostrophes are removed,
+    not doubled). Re-running the same sanitizer here closes the
+    post-construction ``env.name = ...`` mutation path, which otherwise
+    writes a quote that silently truncates the Fortran list-directed READ.
+    """
+    return "'" + _sanitize_title(name) + "'"
+
 
 
 def deck_depth(depth_m: float) -> float:
@@ -299,9 +323,9 @@ def plan_multi_profile_media(segments) -> Tuple[int, float, List[List[Tuple]]]:
     Returns ``(n_media, bottom_depth_m, plans)``. Every profile is written with
     the same ``n_media`` and the same ``bottom_depth_m``; ``plans[i]`` holds
     media 2..``n_media`` of ``segments[i]`` as
-    ``(top, bot, cp, cs, rho, alpha_p, alpha_s, sigma)``, already quantised to the
-    ``.1f`` depth resolution the deck is written at, with the last entry
-    stretched to ``bottom_depth_m``.
+    ``(top, bot, cp, cs, rho, alpha_p, alpha_s, sigma)``, already quantised to
+    the ``.6f`` depth resolution the deck is written at (:func:`deck_depth`),
+    with the last entry stretched to ``bottom_depth_m``.
 
     This is the single source of truth for the deck's geometry. ``.env``
     writing takes ``plans`` verbatim, and the mode-tabulation grid must span
@@ -590,7 +614,7 @@ def write_header(
     verbose : bool, optional
         Log the reflection-table staging step.
     """
-    f.write(f"'{env.name}'\n")
+    f.write(f"{quote_fortran_title(env.name)}\n")
     f.write(f"{source.frequencies[0]:.6f}\n")
 
     if n_media_override is not None:
@@ -599,6 +623,7 @@ def write_header(
         n_media = 1
         if env.has_layered_bottom:
             n_media += len(writable_layers(env.bottom))
+    _reject_media_overrun(n_media)
     f.write(f"{int(n_media)}\n")
 
     ssp_code = ssp_topopt
@@ -626,11 +651,13 @@ def write_header(
 
     if surface_code == 'F':
         if filepath is None:
-            raise RuntimeError(
+            raise ConfigurationError(
                 "write_header: acoustic_type='file' on the surface needs "
                 "filepath= so the .trc table can be staged beside the .env; "
                 "the deck would otherwise declare 'F' with no reflection file "
-                "for AT to open."
+                "for AT to open.",
+                remediation="Pass filepath= (the path of the .env being "
+                            "written) so the .trc table lands next to it.",
             )
         stage_reflection_file(env.surface.reflection_file, filepath,
                               boundary='top', verbose=verbose)
@@ -756,12 +783,14 @@ def resolve_phase_speed_bounds(
       2. Otherwise: ``c_low = c_min · C_LOW_FACTOR`` and
          ``c_high = max(c_max, env.bottom.sound_speed) · C_HIGH_FACTOR``.
 
-    A **vacuum or rigid** bottom has no sound speed — modes above the
+    A **non-geoacoustic** bottom (vacuum, rigid, or a reflection table —
+    'file'/'precalc') carries no physical sound speed — modes above the
     half-space speed are leaky only when there *is* a half-space to leak into,
     and a parameter-free ``BoundaryProperties`` still carries the placeholder
     ``sound_speed`` its constructor defaults to. Capping on that placeholder
     silently truncates the mode spectrum (a 100 m rigid-bottom guide at 50 Hz
-    keeps 3 of its 7 modes, a 10.6 dB error), so those boundaries resolve to
+    keeps 3 of its 7 modes, a 10.6 dB error; a 'file' bottom's 1600 m/s
+    placeholder capped cHigh at 1680 m/s), so those boundaries resolve to
     :data:`DEFAULT_C_MAX_UNBOUNDED` instead — the AT idiom for "no upper
     limit", the same value ``leaky_modes`` uses.
 
@@ -773,7 +802,7 @@ def resolve_phase_speed_bounds(
     ssp_pairs = env.ssp.to_pairs()
     c_min = float(ssp_pairs[:, 1].min())
     halfspace = env.bottom.halfspace_at(range=0.0)
-    if halfspace.acoustic_type in ('vacuum', 'rigid'):
+    if halfspace.acoustic_type in _NON_GEOACOUSTIC_TYPES:
         c_high_auto = DEFAULT_C_MAX_UNBOUNDED
     else:
         c_max = max(float(ssp_pairs[:, 1].max()),
@@ -1043,20 +1072,24 @@ def write_bottom_section(
 
     if bottom_code == 'F':
         if filepath is None:
-            raise RuntimeError(
+            raise ConfigurationError(
                 "write_bottom_section: acoustic_type='file' needs filepath= so "
                 "the .brc table can be staged beside the .env; the model would "
-                "otherwise declare 'F' with no reflection file for AT to open."
+                "otherwise declare 'F' with no reflection file for AT to open.",
+                remediation="Pass filepath= (the path of the .env being "
+                            "written) so the .brc table lands next to it.",
             )
         stage_reflection_file(hs.reflection_file, filepath,
                               boundary='bottom', verbose=verbose)
 
     elif bottom_code == 'P':
         if filepath is None:
-            raise RuntimeError(
+            raise ConfigurationError(
                 "write_bottom_section: acoustic_type='precalc' needs filepath= "
                 "so the .irc table can be staged beside the .env; the model "
-                "would otherwise declare 'P' with no table for AT to open."
+                "would otherwise declare 'P' with no table for AT to open.",
+                remediation="Pass filepath= (the path of the .env being "
+                            "written) so the .irc table lands next to it.",
             )
         # RefCoef.f90:92-96 opens <root>.irc — BOUNCE's (x, f, g, iPow)
         # table, a different format from the angle/magnitude/phase .brc.
@@ -1255,26 +1288,30 @@ def write_multi_profile_env(
 
 
 #: ``field.exe`` option columns it validates itself and ERROUTs on
-#: (``KrakenField/field.f90:70-99``). Column 2 (mode coupling) is read by
-#: ReadModes rather than gated here.
+#: (``KrakenField/field.f90:70-99``; column 2 at ``:125-136``, which the
+#: program examines only when NProf > 1).
 _FLP_OPTION_ALPHABET = {
     1: (set('XRS'), 'source type (X line / R point / S scaled cylindrical)'),
+    2: (set('CA'), 'mode coupling (C coupled / A adiabatic)'),
     3: (set('*O '), 'source beam pattern (* file / O or blank omnidirectional)'),
     4: (set('CI '), 'mode addition (C coherent / I incoherent)'),
 }
 
-#: ``field3d.exe`` dispatches on ``Option(1:3)`` (``field3d.f90:96-107``).
-_FLP3D_EVALUATORS = {'STD', 'PDQ', 'GBT'}
 
-
-def _validate_flp_option(option: str) -> None:
+def _validate_flp_option(option: str, n_profiles: int = 1) -> None:
     """Reject a ``.flp`` option string ``field.exe`` would ERROUT on.
+
+    Column 2 is skipped for ``n_profiles == 1``: ``field.f90:125-136`` reaches
+    its coupling SELECT CASE only for a range-dependent run (NProf > 1), so a
+    blank there is legal in a single-profile deck.
 
     Without this the deck only fails inside the Fortran run, with the error
     buried in the ``.prt``.
     """
     padded = f"{option:<4s}"
     for col, (allowed, description) in _FLP_OPTION_ALPHABET.items():
+        if col == 2 and n_profiles <= 1:
+            continue
         char = padded[col - 1]
         if char not in allowed:
             raise ConfigurationError(
@@ -1298,7 +1335,10 @@ def write_fieldflp(
     Parameters
     ----------
     filepath : str or Path
-        Output file path (extension .flp added if missing)
+        Output file path. ``.flp`` is appended only when the path has no
+        suffix (the same convention :func:`~uacpy.io.oalib_reader.read_flp`
+        resolves with); a path that carries a suffix is written exactly as
+        given.
     option : str
         4-character option string for field.exe. Column semantics per AT
         ``KrakenField/field.f90:70-99`` and
@@ -1307,8 +1347,8 @@ def write_fieldflp(
         - Pos 1 (source type):
           'R' = cylindrical point source, 'X' = line source (Cartesian),
           'S' = scaled-cylindrical point source.
-        - Pos 2 (coupling, for NProf > 1):
-          'C' = coupled modes, 'A' = adiabatic.
+        - Pos 2 (coupling, examined by field.exe only for NProf > 1,
+          ``field.f90:125-136``): 'C' = coupled modes, 'A' = adiabatic.
         - Pos 3: either ``'*'`` to apply a ``.sbp`` source beam pattern
           or ``' '`` for omnidirectional. ``field.exe``
           (``KrakenField/field.f90:83-90``)
@@ -1349,13 +1389,12 @@ def write_fieldflp(
     See Also
     --------
     read_flp : Read field parameters file
-    write_field3dflp : Write 3D field parameters
     """
     filepath = Path(filepath)
-    if filepath.suffix != ".flp":
+    if not filepath.suffix:
         filepath = filepath.with_suffix(".flp")
 
-    _validate_flp_option(option)
+    _validate_flp_option(option, n_profiles)
 
     r_ranges = m_to_km(pos["r"]["r"])
     s_depths = pos["s"]["z"]
@@ -1397,7 +1436,7 @@ def write_fieldflp(
             )
 
     with open(filepath, "w") as f:
-        f.write(f"'{title}' ! Title \n")
+        f.write(f"{quote_fortran_title(title)} ! Title \n")
 
         # Option
         f.write(f"'{option:4s}'  ! Option \n")
@@ -1463,237 +1502,6 @@ def write_fieldflp(
             # is evaluated at r - 999.9 m. Write the vector out in full.
             zeros = "  ".join(f"{0.0:6f}" for _ in r_depths)
             f.write(f"    {zeros} /    \t \t \t \t ! Rro(1)  ... (m) \n")
-
-
-def write_field3dflp(
-    filepath: Union[str, Path],
-    option: str,
-    pos: Dict[str, Any],
-    bathy: Dict[str, Any],
-    mod_file_pattern: str = "'{}'",
-    title: str = "",
-    M_limit: int = 999999,
-) -> None:
-    """
-    Write 3D field parameters file (.flp) for FIELD3D program.
-
-    This creates a more complex .flp file for 3D acoustic field computation
-    that includes bathymetry nodes, elements, and mode file references.
-
-    Parameters
-    ----------
-    filepath : str or Path
-        Output file path (extension .flp added if missing)
-    option : str
-        Option string (e.g., 'STDFM' for standard field mode)
-    pos : dict
-        Position dictionary with:
-        - 's': dict with 'x', 'y', 'z' (source coords in m, m, m)
-        - 'r': dict with 'z' (receiver depths in m), 'r' (ranges in m),
-                         'theta' (bearings in degrees)
-        - 'Nsx', 'Nsy': Number of source x,y points
-
-        x/y/r values are converted to km on write to match the
-        Bellhop3D ``.flp`` format. The public API stays in metres for
-        symmetry with ``write_fieldflp`` and the 2-D sibling.
-    bathy : dict
-        Bathymetry dictionary with:
-        - 'X': ndarray - X coordinates in m, shape (nx,) — converted
-          to km on write.
-        - 'Y': ndarray - Y coordinates in m, shape (ny,) — converted
-          to km on write.
-        - 'depth': ndarray - Depths in m, shape (ny, nx)
-    mod_file_pattern : str, optional
-        Pattern for mode file names. Can include format specifiers.
-        Default: "'{}'" (single quoted)
-    title : str, optional
-        Title for the file (default: empty)
-    M_limit : int, optional
-        Maximum number of modes to include (default: 999999)
-
-    Notes
-    -----
-    3D field parameters files specify:
-    - Source/receiver positions in 3D
-    - Bathymetry node locations (x, y, z)
-    - Triangular mesh elements
-    - Mode file for each node
-
-    This is used for range and azimuth dependent propagation modeling.
-
-    The bathymetry is represented as a triangulated surface where each
-    node has an associated mode file containing normal modes for that
-    location.
-
-    Examples
-    --------
-    >>> import numpy as np
-    >>> from uacpy.io import write_field3dflp
-    >>>
-    >>> # Set up 3D positions
-    >>> pos = {
-    ...     's': {'x': np.array([0]), 'y': np.array([0]), 'z': np.array([50])},
-    ...     'r': {
-    ...         'z': np.linspace(0, 100, 11),
-    ...         'r': np.linspace(0, 50, 51),
-    ...         'theta': np.linspace(0, 360, 37)
-    ...     },
-    ...     'Nsx': 1,
-    ...     'Nsy': 1
-    ... }
-    >>>
-    >>> # Set up bathymetry grid
-    >>> X = np.linspace(0, 100, 11)
-    >>> Y = np.linspace(0, 100, 11)
-    >>> depth = 100 * np.ones((11, 11))
-    >>> bathy = {'X': X, 'Y': Y, 'depth': depth}
-    >>>
-    >>> # Write 3D field parameters
-    >>> write_field3dflp('field3d.flp', 'STDFM', pos, bathy,
-    ...                  mod_file_pattern="'mode_{:07.1f}_{:07.1f}'",
-    ...                  title='3D Test')
-
-    See Also
-    --------
-    read_flp3d : Read 3D field parameters
-    write_fieldflp : Write 2D field parameters
-    """
-    filepath = Path(filepath)
-    if filepath.suffix != ".flp":
-        filepath = filepath.with_suffix(".flp")
-
-    if option[:3].upper() not in _FLP3D_EVALUATORS:
-        raise ConfigurationError(
-            f"write_field3dflp: option positions 1-3 pick the field3d "
-            f"evaluator and must be one of {sorted(_FLP3D_EVALUATORS)}; got "
-            f"{option[:3]!r} in {option!r}."
-        )
-
-    s_x = m_to_km(pos["s"]["x"])
-    s_y = m_to_km(pos["s"]["y"])
-    s_z = pos["s"]["z"]
-    r_z = pos["r"]["z"]
-    r_r = m_to_km(pos["r"]["r"])
-    r_theta = pos["r"]["theta"]
-    Nsx = pos.get("Nsx", len(s_x))
-    Nsy = pos.get("Nsy", len(s_y))
-
-    X = m_to_km(bathy["X"])
-    Y = m_to_km(bathy["Y"])
-    depth = bathy["depth"]
-    nx = len(X)
-    ny = len(Y)
-
-    with open(filepath, "w") as f:
-        # Header
-        f.write(f"'{title}' ! Title\n")
-        f.write(f"'{option}' \t ! OPT\n")
-        f.write(f"{int(M_limit)}   ! Mlimit (number of modes to include)\n")
-
-        # Source x-coordinates
-        f.write(f"{int(Nsx)}                 ! Nsx\n")
-        if Nsx > 2 and equally_spaced(s_x):
-            f.write(f"{s_x[0]} {s_x[-1]}          /   ! Sx( 1 : Nsx ) (km)\n")
-        else:
-            for x in s_x:
-                f.write(f"{x} ")
-            f.write("/ ! Sx (km)\n")
-
-        # Source y-coordinates
-        f.write(f"{int(Nsy)}                 ! Nsy\n")
-        if Nsy > 2 and equally_spaced(s_y):
-            f.write(f"{s_y[0]} {s_y[-1]}          /   ! Sy( 1 : Nsy ) (km)\n")
-        else:
-            for y in s_y:
-                f.write(f"{y} ")
-            f.write("/ ! Sy (km)\n")
-
-        # Source depths
-        f.write(f"{len(s_z):5d} \t \t \t \t ! NSD\n")
-        if len(s_z) > 2 and equally_spaced(s_z):
-            f.write(f"    {s_z[0]:6f}  {s_z[-1]:6f} ")
-        else:
-            for z in s_z:
-                f.write(f"    {z:6f}  ")
-        f.write("/ \t ! SD(1)  ... (m)\n")
-
-        # Receiver depths
-        f.write(f"{len(r_z):5d} \t \t \t \t ! NRD\n")
-        if len(r_z) > 2 and equally_spaced(r_z):
-            f.write(f"    {r_z[0]:6f}  {r_z[-1]:6f} ")
-        else:
-            for z in r_z:
-                f.write(f"    {z:6f}  ")
-        f.write("/ \t ! RD(1)  ... (m)\n")
-
-        # Receiver ranges
-        f.write(f"{len(r_r):5d} \t \t \t \t ! NRR\n")
-        if len(r_r) > 2 and equally_spaced(r_r):
-            f.write(f"    {r_r[0]:6f}  {r_r[-1]:6f} ")
-        else:
-            for r in r_r:
-                f.write(f"    {r:6f}  ")
-        f.write("/ \t ! RR(1)  ... (km)\n")
-
-        # Receiver bearings
-        f.write(f"{len(r_theta)}              \n")
-        if len(r_theta) > 2 and equally_spaced(r_theta):
-            f.write(f"{r_theta[0]:.1f} {r_theta[-1]:.1f} /")
-        else:
-            for theta in r_theta:
-                f.write(f"{theta:.1f} ")
-            f.write("/")
-        f.write("        ! NTHETA THETA(1:NTHETA) (degrees)\n")
-
-        # Nodes
-        nnodes = nx * ny
-        f.write(f"{nnodes:5d}\n")
-
-        # Node block: one ``x y modefile`` record each, read back in file order
-        # into x(I), y(I) (KrakenField/field3d.f90:191-193). Emitting them
-        # x-fastest fixes the numbering the element block below relies on —
-        # node (ix, iy) is 1 + iy * nx + ix.
-        for iy in range(ny):
-            for ix in range(nx):
-                x_coord = X[ix]
-                y_coord = Y[iy]
-                z_depth = depth[iy, ix]
-
-                # A node with no water carries no mode set. FIELD3D reserves
-                # the name 'DUMMY' for those and treats the surrounding
-                # elements as acoustic absorbers rather than trying to open a
-                # .mod file (KrakenField/field3d.f90:78, :416-418).
-                if z_depth > 0:
-                    if "{}" in mod_file_pattern or "{:" in mod_file_pattern:
-                        modfil = mod_file_pattern.format(x_coord, y_coord)
-                    else:
-                        modfil = mod_file_pattern
-                else:
-                    modfil = "'DUMMY'"
-
-                # 6 decimals of km = mm, matching Sx/Sy/Rr on this same file
-                # and write_bty_3d; %8.2f would quantise the node grid to 10 m.
-                f.write(f"{x_coord:.6f} {y_coord:.6f} {modfil}\n")
-
-        # Elements (triangular mesh). FIELD3D indexes the node arrays
-        # directly with these values (``x( Node1 )``, field3d.f90:285-291),
-        # so they are 1-based.
-        nelts = 2 * (nx - 1) * (ny - 1)
-        f.write(f"{nelts:5d}\n")
-
-        # ``inode`` walks the lower-left corner of each grid cell in the same
-        # x-fastest order the nodes were written, so ``+ 1`` is the neighbour in
-        # x and ``+ nx`` the neighbour in y. Splitting the cell on its
-        # lower-left/upper-right diagonal gives the two triangles.
-        inode = 1
-        for iy in range(ny - 1):
-            for ix in range(nx - 1):
-                f.write(f"{inode:5d} {inode + 1:5d} {inode + nx:5d}\n")
-                f.write(f"{inode + 1:5d} {inode + nx:5d} {inode + nx + 1:5d}\n")
-                inode += 1
-            # The ix loop stops one short of the row end, so step over the last
-            # column's node to land on the first cell of the next row.
-            inode += 1
 
 
 def write_kraken_env_file(
@@ -1848,13 +1656,14 @@ def write_sparc_env_file(
 
     with open(filepath, 'w') as f:
         # SPARC TopOpt: [SSP][BC][AttenUnit(2 chars)][OutputMode]
-        f.write(f"'{env.name}'\n")
+        f.write(f"{quote_fortran_title(env.name)}\n")
         f.write(f"{source.frequencies[0]:.6f}\n")
         # NMedia = water column + one medium per sediment layer actually
         # emitted by write_layer_sections below.
         n_media = 1
         if env.has_layered_bottom:
             n_media += len(writable_layers(env.bottom))
+        _reject_media_overrun(n_media)
         f.write(f"{int(n_media)}\n")
 
         atten_code = AttenuationUnits.DB_PER_WAVELENGTH.to_char()
@@ -1992,11 +1801,13 @@ def write_bounce_input_file(
             halfspace_depth=halfspace_top,
             verbose=verbose,
         )
-        # Phase velocity bounds (define angular coverage), in the same
-        # format write_phase_speed_and_rmax uses for the sibling decks.
-        f.write(f"{c_low:.1f} {c_high:.1f}\n")
-        # Maximum range in km. bounce.f90:49 makes the tabulated-angle count
+        # Phase velocity bounds (define angular coverage) and RMax (km),
+        # through the same writer the sibling decks use. Both bounds arrive
+        # explicit from the caller, so no env-derived resolution applies.
+        # bounce.f90:49 makes the tabulated-angle count
         # NkTab = INT( 1000 * RMax * ( kMax - kMin ) / 2 pi ) directly
-        # proportional to this number, so it is written at the same millimetre
+        # proportional to RMax, which the writer emits at the same millimetre
         # resolution as the rest of the deck's ranges.
-        f.write(f"{float(m_to_km(rmax)):.6f}\n")
+        write_phase_speed_and_rmax(
+            f, bounce_env, rmax_m=rmax, c_low=c_low, c_high=c_high,
+        )

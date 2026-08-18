@@ -94,7 +94,7 @@ def main():
 
     # recompute internals for the figure
     bb = rxr.from_passband(rx, fs, fc, oversample=os, doppler_scale=scale)
-    start, cfo = schmidl_cox_sync(bb, nsc, cp)
+    start, cfo = schmidl_cox_sync(bb, nsc)
     L = nsc // 2
     a = np.conj(bb[:-L]) * bb[L:]
     p = np.array([a[d:d + L].sum() for d in range(bb.size - 2 * L)])

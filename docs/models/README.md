@@ -39,9 +39,11 @@ result = Model(**knobs).run(env, source, receiver, run_mode=...)
 
 ## Capability matrix
 
-What each model consumes **natively**. Anything marked ✗ is *collapsed* to
-something the model can take, with a `UserWarning` naming what was dropped —
-see [collapse policy](../guide/environment.md).
+What each model consumes **natively**. An *environment* feature marked ✗ is
+*collapsed* to something the model can take, with a `UserWarning` naming what
+was dropped — see [collapse policy](../guide/environment.md). The source row
+is the exception: multiple source depths on a ✗ model raise
+`ConfigurationError` rather than collapsing — loop over `Source`s externally.
 
 | | Bellhop | Kraken | Scooter | SPARC | RAM | Bounce | OASES |
 |---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
@@ -54,8 +56,10 @@ see [collapse policy](../guide/environment.md).
 | Elastic media (shear) | ✅¹ | ✅² | ✅ | ✗ | ✅³ | ✅ | ✅ |
 | Multiple source depths | ✅ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
 
-¹ via the auto-BOUNCE reflection table — the layer stack is kept and `R(θ)` is
-exact, but BOUNCE is range-independent, so the seabed collapses to one column.
+¹ an elastic *half-space* is native (bellhop.f90 applies its exact
+acousto-elastic `R(θ)`); a layered bottom goes via the auto-BOUNCE reflection
+table — the layer stack is kept and `R(θ)` is exact, but BOUNCE is
+range-independent, so the seabed collapses to one column.
 ² requires `backend='krakenc'`; auto-selected.
 ³ routes to the `rams` backend.
 ⁴ sea surface only, and only under a pressure-release (vacuum) surface —

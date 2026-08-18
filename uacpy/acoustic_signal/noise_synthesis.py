@@ -34,7 +34,8 @@ def synthesize_noise_from_psd(Pxx, Fxx, duration=1, scale=1, *,
         IFFT chunk size. Defaults to 65536; must be a power of two in
         [16, 262144] — values below 16 are reset to 65536, values above
         262144 are clamped, and non-powers of two are rounded to the
-        closest power of two, each with a warning.
+        geometrically closest power of two (nearest in log2), each with a
+        warning.
     sample_rate : float, optional
         Output sample rate in Hz. Defaults to 2*Fxx[-1].
     interp : {'linear', 'log', 'pchip', 'nearest'}, optional
@@ -126,6 +127,11 @@ def synthesize_noise_from_psd(Pxx, Fxx, duration=1, scale=1, *,
     chunk_size = n_fft
     overlap_size = chunk_size // 4
     samples_needed = int(duration * sample_rate)
+    if samples_needed < 1:
+        raise ConfigurationError(
+            "synthesize_noise_from_psd: duration * sample_rate must cover at "
+            f"least one sample; got duration={duration}, "
+            f"sample_rate={sample_rate}.")
     num_chunks = int(np.ceil(samples_needed / (chunk_size - overlap_size)))
 
     x_total = np.zeros(samples_needed)
@@ -208,6 +214,12 @@ def _is_power_of_two(x):
 
 
 def _closest_power_of_two(x):
+    """Power of two nearest to ``x`` in log2 (geometric) distance.
+
+    ``round(log2(x))`` splits at the geometric midpoint ``sqrt(2)*2**n``, not
+    the arithmetic one ``1.5*2**n``, so values between the two (e.g. 183)
+    round *up* even though the lower power is arithmetically closer.
+    """
     n = round(math.log2(x))
     return 2 ** n
 
@@ -399,6 +411,7 @@ def add_noise(
     ----------
     Original MATLAB code by mbp, 4/09
     """
+    timeseries = np.asarray(timeseries, dtype=float)
     SL = 10.0 ** (source_level / 20.0)
 
     # Target noise RMS for a one-sided in-band PSD level ``noise_level`` (dB

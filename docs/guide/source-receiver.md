@@ -366,21 +366,19 @@ Every rule below was checked by triggering it.
 `receiver.ranges` are horizontal separations from the source, not positions on
 some external chart. The source is at range zero, which is a **singularity**:
 the field there is infinite for a point source, so no engine can give you a
-useful number, and each one fails differently. One run,
-`Receiver(depths=[30.0, 60.0], ranges=[0.0, 1000.0])`, reading the `r = 0`
-column:
+useful number — and every engine now refuses it the same way. Run
+`Receiver(depths=[30.0, 60.0], ranges=[0.0, 1000.0])` on any model —
+Bellhop, Kraken, Scooter, RAM, SPARC, the OASES family included — and the
+`r = 0` column comes back **`NaN` with a `UserWarning`**: Bellhop's notes
+that no ray travels zero distance; the others name the `1/√r`-type spreading
+factor that is singular there and mask the meaningless number the engine
+wrote into that column.
 
-| Model | TL at `r = 0`, 30 m / 60 m | |
-|---|---|---|
-| [Bellhop](../models/bellhop.md) | `NaN` / `NaN` | warns: no ray travels zero distance |
-| [Kraken](../models/kraken.md) | `16.0` / `36.1 dB` | silently meaningless |
-| [Scooter](../models/scooter.md) | `−3056.9` / `−3039.8 dB` | silently meaningless |
-| [RAM](../models/ram.md) | `40.3` / `55.7 dB` | warns: range clipped to one PE step for the log |
-
-All four agree to about a decibel in the `r = 1 km` column of the very same
-run — 53–54 dB at 30 m, 50–51 dB at 60 m. So start a TL grid past the near field — `np.linspace(50.0, 5000.0, 250)`, not
-`np.linspace(0.0, 5000.0, 250)`. Bellhop and RAM will tell you; the other two
-will not.
+All the engines agree to about a decibel in the `r = 1 km` column of the very
+same run — 53–54 dB at 30 m, 50–51 dB at 60 m for Bellhop, Kraken, Scooter
+and RAM. So start a TL grid past the near field —
+`np.linspace(50.0, 5000.0, 250)`, not `np.linspace(0.0, 5000.0, 250)` — and
+the warning is your cue when you forget.
 
 ### Depths are positive down
 
@@ -392,10 +390,14 @@ A source at exactly `z = 0` is accepted but warns, because it sits on the
 pressure-release surface where the field is ~0 and the result is degenerate:
 
 ```
-UserWarning: Bellhop: a source at depth 0 m is on the pressure-release sea
+UserWarning: Kraken: a source at depth 0 m is on the pressure-release sea
 surface, where the field is ~0 — the result is degenerate (null / saturated
 TL, model-dependent). Use a small positive depth (e.g. 1 m).
 ```
+
+Bellhop is the exception: it refuses a `z = 0` source with a
+`ConfigurationError` instead of warning — a source on the top boundary has
+every ray terminated at step one, so the run would return an all-`NaN` field.
 
 ### Multi-element axes must be strictly increasing
 
@@ -405,10 +407,10 @@ equal neighbours are rejected too:
 ```python
 >>> uacpy.Receiver(depths=[90.0, 10.0], ranges=1000.0)
 ConfigurationError: Receiver.depths must be strictly increasing; got
-90.0 >= 10.0 at index 1 (full axis: [90.0, 10.0])
+90.0 >= 10.0 at index 1 (axis length 2)
 >>> uacpy.Source(depths=[10.0, 10.0], frequencies=100.0)
 ConfigurationError: source depths must be strictly increasing; got
-10.0 >= 10.0 at index 1 (full axis: [10.0, 10.0])
+10.0 >= 10.0 at index 1 (axis length 2)
 ```
 
 This is deliberate, and it is about the *output*. Row `i` of a returned `Field`
@@ -422,10 +424,10 @@ downstream `np.interp`, which produces silent garbage on an unsorted `xp`.
 ```python
 >>> uacpy.Source(depths=[10.0, np.nan], frequencies=100.0)
 ConfigurationError: source depths must be finite (no NaN/inf) (metres,
-positive down from surface); got [10.0, nan]
+positive down from surface); got nan at flat index 1 of 2 value(s)
 >>> uacpy.Receiver(depths=10.0, ranges=[100.0, np.inf])
 ConfigurationError: receiver ranges must be finite (no NaN/inf) (metres,
-outward from source); got [100.0, inf]
+outward from source); got inf at flat index 1 of 2 value(s)
 ```
 
 Every model writes a fixed-width Fortran input file. A `nan` reaching a writer

@@ -6,11 +6,11 @@ Bellhop output formats; modes are kept in their own ``modes_reader.py``).
 
 Provides:
 
-* ``.shd`` — :func:`read_shd_file`, :func:`read_shd_bin`, :func:`read_shd_asc`
+* ``.shd`` — :func:`read_shd_file`, :func:`read_shd_bin`
 * ``.arr`` — :func:`read_arr_file` (Bellhop arrivals, ASCII)
 * ``.ray`` — :func:`read_ray_file` (Bellhop rays, ASCII)
-* ``.ssp`` — :func:`read_ssp_2d`, :func:`read_ssp_3d`
-* ``.flp`` — :func:`read_flp`, :func:`read_flp3d`
+* ``.ssp`` — :func:`read_ssp_2d`
+* ``.flp`` — :func:`read_flp`
 * ``.rts`` — :func:`read_rts_file`, :func:`rts_to_pressure` (SPARC time series, ASCII)
 * ``.ts``  — :func:`read_ts` (generic time series, ASCII)
 """
@@ -21,7 +21,6 @@ from pathlib import Path
 from typing import Union, Tuple, Dict, Any, Optional
 
 from uacpy._log import log_message
-from uacpy.acoustic_signal.waveforms import sparc_pulse
 from uacpy.core.exceptions import (
     ConfigurationError, FileFormatError, UnsupportedFeatureError,
 )
@@ -58,13 +57,13 @@ def read_shd_file(filepath: Union[str, Path]):
     paired depths ride on ``metadata['receiver_depths']`` rather than forming
     a second axis.
 
-    Multi-frequency and multi-bearing ``.shd`` files raise
-    :class:`FileFormatError`: this wrapper carries neither axis. Call
+    Multi-frequency, multi-bearing, and multi-source-position ``.shd``
+    files (``Nsx``/``Nsy`` > 1, BELLHOP3D / FIELD3D) raise
+    :class:`~uacpy.core.exceptions.UnsupportedFeatureError`: the file is
+    well-formed, this wrapper just carries no axis for it. Call
     :func:`read_shd_bin` directly and build the result from its
-    ``(Ntheta, Nsz, Nrz, Nrr)`` cube. A file with several source (x, y)
-    positions (``Nsx``/``Nsy`` > 1, BELLHOP3D / FIELD3D) raises
-    :class:`~uacpy.core.exceptions.UnsupportedFeatureError` for the same
-    reason — use :func:`read_shd_bin` with ``xs=``/``ys=`` per source.
+    ``(Ntheta, Nsz, Nrz, Nrr)`` cube (with ``xs=``/``ys=`` per source
+    position).
     """
     filepath = Path(filepath)
     shd = read_shd_bin(str(filepath))
@@ -78,10 +77,18 @@ def read_shd_file(filepath: Union[str, Path]):
             f"least one frequency record)."
         )
     if nfreq > 1:
-        raise FileFormatError(
-            f"read_shd_file: {filepath} contains {nfreq} frequencies; "
-            "use read_shd_bin(filepath) for the full broadband payload "
-            "and construct a broadband Field from it."
+        # A capability limit of this wrapper, not corruption: the file is a
+        # well-formed broadband .shd, this function just has no frequency
+        # axis to put it on.
+        raise UnsupportedFeatureError(
+            'read_shd_file',
+            f"{filepath} contains {nfreq} frequencies; this wrapper returns "
+            f"single-frequency fields only",
+            alternatives=[
+                "read_shd_bin(filepath) for the full broadband payload, "
+                "then construct a broadband Field from it",
+            ],
+            alternatives_label='readers',
         )
 
     pressure = shd['pressure']               # (Ntheta, Nsz, Nrz, Nrr)
@@ -92,10 +99,16 @@ def read_shd_file(filepath: Union[str, Path]):
     # so refuse rather than return plane 0 as if it were the whole file.
     n_theta = np.atleast_1d(np.asarray(pos['theta'], dtype=float)).size
     if n_theta > 1:
-        raise FileFormatError(
-            f"read_shd_file: {filepath} carries {n_theta} receiver bearings; "
-            "use read_shd_bin(filepath) for the full (Ntheta, Nsz, Nrz, Nrr) "
-            "cube and build the result from it."
+        # Same capability limit as the multi-frequency case above.
+        raise UnsupportedFeatureError(
+            'read_shd_file',
+            f"{filepath} carries {n_theta} receiver bearings; this wrapper "
+            f"returns single-bearing fields only",
+            alternatives=[
+                "read_shd_bin(filepath) for the full "
+                "(Ntheta, Nsz, Nrz, Nrr) cube, then build the result from it",
+            ],
+            alternatives_label='readers',
         )
 
     # A file with several source (x, y) positions holds one pressure cube
@@ -432,103 +445,6 @@ def read_shd_bin(
         },
         "pressure": pressure,
         "pressure_freq": freq_label,
-    }
-
-
-@typed_format_error
-def read_shd_asc(filepath: Union[str, Path]) -> Dict[str, Any]:
-    """
-    Read ASCII shade file produced by acoustic models.
-
-    Parameters
-    ----------
-    filepath : str or Path
-        Path to ASCII shade file (typically .shd.asc extension)
-
-    Returns
-    -------
-    result : dict
-        The same header keys as :func:`read_shd_bin`. ``pressure`` is 2-D
-        here — one source depth, one frequency — and there is no
-        ``pressure_freq``:
-        - 'title': str, plot title
-        - 'PlotType': str, plot type
-        - 'freqVec': ndarray, frequency vector in Hz
-        - 'freq0': float, reference frequency in Hz
-        - 'atten': float, stabilizing attenuation in dB/wavelength
-        - 'Pos': dict with position information:
-          - 'theta': ndarray, bearing angles in degrees
-          - 's': dict with 'z' (source depths in m)
-          - 'r': dict with 'z' (receiver depths in m), 'r' (ranges in m)
-        - 'pressure': ndarray, complex pressure field, shape (n_depth, n_range)
-
-    Notes
-    -----
-    ASCII shade file format (``Matlab/ReadWrite/read_shd_asc.m:13-38``):
-    two title lines read whole, then one flat whitespace-delimited token
-    stream — every scalar and vector there is consumed with ``fscanf``, so
-    the values may be packed onto shared lines or spread one per line:
-
-    - Line 1: Title
-    - Line 2: Plot type
-    - Tokens: Nfreq, Ntheta, Nsd, Nrd, Nrr, freq0, atten
-    - Frequency vector, bearing angles, source depths, receiver depths,
-      receiver ranges
-    - Pressure data: ``Nrd`` groups of ``2 * Nrr`` interleaved
-      real/imaginary values
-
-    Reads the first source depth only, matching ``read_shd_asc.m:29-32``.
-
-    Examples
-    --------
-    >>> # Read ASCII shade file
-    >>> # data = read_shd_asc('test.shd.asc')
-    >>> # print(f"Pressure field shape: {data['pressure'].shape}")
-    >>> # print(f"Frequency: {data['freq0']} Hz")
-    """
-    filepath = Path(filepath)
-    if not filepath.exists():
-        raise FileFormatError(
-            f"ASCII shade file not found: {filepath}. No Acoustics-Toolbox "
-            "program writes .shd.asc — supply the path to an existing ASCII "
-            "shade file, or read a solver-written binary .shd with "
-            "read_shd_bin."
-        )
-    with open(filepath, "r") as fid:
-        title = fid.readline().strip()
-        plot_type = fid.readline().strip()
-        tokens = iter(fid.read().split())
-
-    # Every vector is sized off an on-disk count, but each is filled straight
-    # from the token stream: a garbage count exhausts the iterator (raising
-    # StopIteration, which @typed_format_error types as FileFormatError)
-    # instead of driving an allocation the file cannot back.
-    def _take(n: int) -> np.ndarray:
-        return np.array([float(next(tokens)) for _ in range(n)])
-
-    Nfreq, Ntheta, Nsd, Nrd, Nrr = (int(v) for v in _take(5))
-    freq0, atten = _take(2)
-    freq_vec = _take(Nfreq)
-    theta = _take(Ntheta)
-    s_z = _take(Nsd)
-    r_z = _take(Nrd)
-    r_r = _take(Nrr)
-    # One row of 2*Nrr interleaved re/im values per receiver depth.
-    rows = np.array([_take(2 * Nrr) for _ in range(Nrd)])
-
-    pressure = rows[:, 0::2] + 1j * rows[:, 1::2]
-    # Exact complex zero = cell the engine never wrote (see read_shd_bin);
-    # surface as NaN, uacpy's no-data convention.
-    pressure[pressure == 0] = np.nan
-
-    return {
-        "title": title,
-        "PlotType": plot_type,
-        "freqVec": freq_vec,
-        "freq0": freq0,
-        "atten": atten,
-        "Pos": {"theta": theta, "s": {"z": s_z}, "r": {"z": r_z, "r": r_r}},
-        "pressure": pressure,
     }
 
 
@@ -1041,100 +957,6 @@ def read_ssp_2d(filepath: Union[str, Path]) -> Dict[str, Any]:
 
 
 @typed_format_error
-def read_ssp_3d(filepath: Union[str, Path]) -> Dict[str, Any]:
-    """
-    Read 3D sound speed profile file used by BELLHOP3D.
-
-    Reads fully 3D SSP data where sound speed varies with x, y, and depth.
-    Used for 3D propagation modeling.
-
-    Parameters
-    ----------
-    filepath : str or Path
-        Path to 3D SSP file (typically .ssp extension).
-
-    Returns
-    -------
-    ssp_data : dict
-        Dictionary containing:
-        - 'Nx' : int - Number of x segments
-        - 'Ny' : int - Number of y segments
-        - 'Nz' : int - Number of depth points
-        - 'Segx' : ndarray - X segment boundaries in metres, shape (Nx,).
-          Stored on disk in km (``Bellhop/sspMod.f90:621-622``) and converted here.
-        - 'Segy' : ndarray - Y segment boundaries in metres, shape (Ny,).
-          Also km on disk.
-        - 'Segz' : ndarray - Depth values in metres, shape (Nz,)
-        - 'c_mat' : ndarray - Sound speed in m/s, shape (Nz, Ny, Nx)
-
-    Notes
-    -----
-    - File format (each vector/row is one whole-vector list-directed READ,
-      ``Bellhop/sspMod.f90:570-617``, so its values may wrap across lines):
-        Record 1: Nx
-        Record 2: x1 x2 ... xNx (x segment boundaries)
-        Record 3: Ny
-        Record 4: y1 y2 ... yNy (y segment boundaries)
-        Record 5: Nz
-        Record 6: z1 z2 ... zNz (depth values)
-        Then, for each depth iz=1:Nz:
-                    Nx values for y1, then Nx values for y2, ..., Nx values for yNy
-
-    - Sound speed accessed as c_mat[iz, iy, ix] for:
-        - depth index iz
-        - y index iy
-        - x index ix
-
-    References
-    ----------
-    Based on BELLHOP/readssp3d.m
-
-    Examples
-    --------
-    >>> ssp = read_ssp_3d('seamount.ssp')
-    >>> print(f"Grid size: {ssp['Nx']} x {ssp['Ny']} x {ssp['Nz']}")
-    >>> print(f"X range: {ssp['Segx'][0]} to {ssp['Segx'][-1]}")
-    >>> print(f"Y range: {ssp['Segy'][0]} to {ssp['Segy'][-1]}")
-    >>> print(f"Depth range: {ssp['Segz'][0]} to {ssp['Segz'][-1]}")
-    >>> # Sound speed at depth 10, y=5, x=3
-    >>> c = ssp['c_mat'][10, 5, 3]
-    """
-    filepath = Path(filepath)
-
-    # Bellhop3D (Bellhop/sspMod.f90:570-617) reads each Segx / Segy / Segz
-    # vector and each per-(z, y) SSP row with a single whole-vector
-    # list-directed READ, which spans as many lines as it needs and
-    # discards the remainder of its final line.
-    def _read_vec(fid, n, what):
-        return read_list_directed_values(fid, n, what, filepath)
-
-    with open(filepath, "r") as fid:
-        Nx = list_directed_int(fid.readline())
-        Segx = _read_vec(fid, Nx, f"{Nx} x segment values")
-        Ny = list_directed_int(fid.readline())
-        Segy = _read_vec(fid, Ny, f"{Ny} y segment values")
-        Nz = list_directed_int(fid.readline())
-        Segz = _read_vec(fid, Nz, f"{Nz} depth values")
-        c_mat = np.zeros((Nz, Ny, Nx))
-
-        # Bellhop3D writes outermost-iz, inner-iy, then one record of Nx values.
-        for iz in range(Nz):
-            for iy in range(Ny):
-                c_mat[iz, iy, :] = _read_vec(
-                    fid, Nx, f"SSP row (iz={iz}, iy={iy}, {Nx} values)")
-
-    return {
-        "Nx": Nx,
-        "Ny": Ny,
-        "Nz": Nz,
-        "Segx": km_to_m(Segx),
-        "Segy": km_to_m(Segy),
-        "Segz": Segz,
-        "c_mat": c_mat,
-    }
-
-
-@typed_format_error
 def read_flp(fileroot: Union[str, Path], verbose: bool = False) -> Dict[str, Any]:
     """
     Read field parameters file (.flp) for KRAKEN/FIELD programs.
@@ -1209,7 +1031,6 @@ def read_flp(fileroot: Union[str, Path], verbose: bool = False) -> Dict[str, Any
 
     See Also
     --------
-    read_flp3d : Read 3D field parameters
     write_fieldflp : Write field parameters file
     """
     fileroot = Path(fileroot)
@@ -1295,124 +1116,6 @@ def read_flp(fileroot: Union[str, Path], verbose: bool = False) -> Dict[str, Any
             "r": {"z": pos_temp["rz"], "r": r_rcv, "ro": r_offsets},
             "Nro": N_offsets,
         },
-    }
-
-
-@typed_format_error
-def read_flp3d(fileroot: Union[str, Path]) -> Dict[str, Any]:
-    """
-    Read a 3-D field parameters file (.flp) for the FIELD3D program.
-
-    Parameters
-    ----------
-    fileroot : str or Path
-        File root name (``.flp`` appended when the path has no suffix).
-
-    Returns
-    -------
-    flp3d_data : dict
-        Dictionary containing:
-
-        - 'title': str — Title.
-        - 'opt': str — FIELD3D option string. ``opt[0:3]`` selects the
-          field algorithm (``'STD'``/``'PDQ'``/``'GBT'``), ``opt[3]`` is
-          ``'T'`` to run the tesselation check, ``opt[6]`` is the ``.sbp``
-          beam-pattern flag (``field3d.f90:54``, ``:96``, ``:210``).
-        - 'M_limit': int — Maximum number of modes to use.
-        - 'pos': dict — Source/receiver geometry:
-
-          * ``'s'``: ``'x'``/``'y'`` source coordinates in m, ``'z'``
-            source depths in m.
-          * ``'r'``: ``'z'`` receiver depths in m, ``'r'`` receiver ranges
-            in m, ``'theta'`` receiver bearings in degrees.
-          * ``'Nsx'``/``'Nsy'``: source x/y counts.
-        - 'nodes': dict — Triangulation nodes: ``'x'``/``'y'`` in m and
-          ``'mode_files'`` (list of per-node mode-file names).
-        - 'elements': ndarray, shape (n_elts, 3), int — 1-based node
-          indices of each triangle, as FIELD3D indexes them
-          (``field3d.f90:285-291``).
-
-    Notes
-    -----
-    Read order follows ``KrakenField/field3d.f90`` ``READIN``: title,
-    option, Mlimit, ``Sx`` (km), ``Sy`` (km), ``Sz``/``Rz`` (m), ``Rr``
-    (km), ``theta`` (degrees), node block, element block. Axes on disk in
-    km are returned in metres.
-
-    See Also
-    --------
-    write_field3dflp : Write 3-D field parameters
-    read_flp : Read 2-D field parameters
-    """
-    fileroot = Path(fileroot)
-    if not fileroot.suffix:
-        filepath = fileroot.with_suffix(".flp")
-    else:
-        filepath = fileroot
-
-    with open(filepath, "r") as f:
-        title = _strip_fortran_quotes(f.readline())
-        opt = _strip_fortran_quotes(f.readline())
-        M_limit = list_directed_int(f.readline())
-
-        s_x, n_sx = _read_vector(f)
-        s_x = np.sort(s_x)
-        s_y, n_sy = _read_vector(f)
-        s_y = np.sort(s_y)
-        pos_temp = _read_sz_rz(f)
-        # Ranges and bearings pass through Sort in the Fortran
-        # (misc/SourceReceiverPositions.f90).
-        r_rcv, _ = _read_vector(f)
-        r_rcv = np.sort(r_rcv)
-        theta_rcv, _ = _read_vector(f)
-        theta_rcv = np.sort(theta_rcv)
-        # ReadRcvrBearings drops a duplicate closing radial (a 0..360 deg
-        # fan lists the same bearing twice) —
-        # misc/SourceReceiverPositions.f90:176-179.
-        if (theta_rcv.size > 1
-                and abs((theta_rcv[-1] - theta_rcv[0]) % 360.0) < 1e-9):
-            theta_rcv = theta_rcv[:-1]
-
-        n_nodes = list_directed_int(f.readline())
-        node_x = np.zeros(n_nodes)
-        node_y = np.zeros(n_nodes)
-        mode_files = []
-        for i in range(n_nodes):
-            parts = _strip_fortran_comment(f.readline()).split()
-            node_x[i] = fortran_float(parts[0])
-            node_y[i] = fortran_float(parts[1])
-            mode_files.append(parts[2].strip("'\""))
-
-        n_elts = list_directed_int(f.readline())
-        elements = np.zeros((n_elts, 3), dtype=int)
-        for i in range(n_elts):
-            elements[i] = [int(v) for v in
-                           _strip_fortran_comment(f.readline()).split()[:3]]
-
-    return {
-        "title": title,
-        "opt": opt,
-        "M_limit": M_limit,
-        "pos": {
-            "s": {
-                "x": km_to_m(s_x),
-                "y": km_to_m(s_y),
-                "z": pos_temp["sz"],
-            },
-            "r": {
-                "z": pos_temp["rz"],
-                "r": km_to_m(r_rcv),
-                "theta": theta_rcv,
-            },
-            "Nsx": n_sx,
-            "Nsy": n_sy,
-        },
-        "nodes": {
-            "x": km_to_m(node_x),
-            "y": km_to_m(node_y),
-            "mode_files": mode_files,
-        },
-        "elements": elements,
     }
 
 
@@ -1570,6 +1273,9 @@ def rts_to_pressure(
         # Kraken/Scooter — it is not a calibrated replacement for them.
         # Use the RECTANGULAR DFT (no taper): a window breaks the convolution
         # theorem and would null the transient source pulse (first few samples).
+        # Imported here rather than at module level: sparc_pulse pulls scipy
+        # in, and only this deconvolution path needs it.
+        from uacpy.acoustic_signal.waveforms import sparc_pulse
         t = np.asarray(rts_data["time"], dtype=float)
         s_t, _ = sparc_pulse(t, 2.0 * np.pi * frequency, pulse_type[0])
         freqs = np.fft.rfftfreq(nt, dt)
@@ -1668,14 +1374,15 @@ def read_ts(filepath: Union[str, Path]) -> Dict[str, Any]:
     """
     filepath = Path(filepath)
     if filepath.suffix == '.mat':
-        import scipy.io
-        mat_data = scipy.io.loadmat(str(filepath))
-        return {
-            'PlotTitle': str(mat_data.get('PlotTitle', [''])[0]),
-            'pos': {'r': {'z': mat_data['Pos'][0, 0]['r'][0, 0]['z'].ravel()}},
-            'tout': mat_data['tout'].ravel(),
-            'RTS': mat_data['RTS'].T  # MATLAB stores transposed
-        }
+        # No shipped model writes a MATLAB time-series container; this reader
+        # parses only the ASCII token-stream format.
+        raise FileFormatError(
+            f"read_ts: {filepath} is a .mat file; read_ts parses the ASCII "
+            f"time-series format only, and no Acoustics-Toolbox program "
+            f"uacpy runs writes a .mat time series.",
+            remediation="Load the file with scipy.io.loadmat and assemble "
+                        "the dict yourself, or pass the ASCII file.",
+        )
     # Everything after the title line is a free fscanf-style token stream
     # (read_ts.m:33-35): line breaks carry no meaning at all.
     with open(filepath, 'r') as f:

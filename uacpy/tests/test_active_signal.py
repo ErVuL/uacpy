@@ -7,6 +7,7 @@ import pytest
 
 from uacpy.acoustic_signal import (
     ambiguity_function,
+    analytic_signal,
     lfm_chirp,
     matched_filter,
     processing_gain,
@@ -52,7 +53,7 @@ class TestMatchedFilter:
 
 
 class TestProcessingGain:
-    def test_value(self):
+    def test_processing_gain_is_10log10_time_bandwidth(self):
         assert processing_gain(3000.0, 0.02) == pytest.approx(10 * np.log10(60.0))
 
     def test_nonpositive_raises(self):
@@ -84,3 +85,37 @@ class TestAmbiguity:
         lags, dop, A = ambiguity_function(s, FS, doppler_hz=[0.0])
         auto = np.abs(matched_filter(s, s))
         assert np.allclose(A[0], auto, atol=1e-9)
+
+    def test_default_doppler_span_is_plus_minus_fs_over_20(self):
+        """Leaving ``doppler_hz`` unset evaluates ``n_doppler`` (default 101)
+        evenly spaced points across exactly ``+/- sample_rate/20``, zero
+        included."""
+        s = np.exp(2j * np.pi * 1000.0 * np.arange(64) / FS)
+        lags, dop, A = ambiguity_function(s, FS)
+        assert dop.size == 101
+        assert dop[0] == pytest.approx(-FS / 20.0)
+        assert dop[-1] == pytest.approx(FS / 20.0)
+        assert np.any(dop == 0.0)
+        np.testing.assert_allclose(np.diff(dop), (FS / 10.0) / 100)
+        assert A.shape == (101, 2 * s.size - 1)
+        _, dop11, _ = ambiguity_function(s, FS, n_doppler=11)
+        assert dop11.size == 11
+        assert dop11[0] == pytest.approx(-FS / 20.0)
+        assert dop11[-1] == pytest.approx(FS / 20.0)
+
+    def test_lfm_ridge_slope_is_minus_t_over_b(self):
+        """The delay-Doppler ridge of an analytic LFM of duration T and
+        bandwidth B slides at -T/B seconds of delay per hertz of Doppler
+        (range-Doppler coupling: a Doppler-shifted echo is mis-ranged, not
+        lost)."""
+        fs, T, B = 4000.0, 0.05, 1000.0
+        _, s = lfm_chirp(300.0, 300.0 + B, T, fs)
+        z = analytic_signal(s)
+        doppler = np.linspace(-200.0, 200.0, 41)
+        lags, dop, A = ambiguity_function(z, fs, doppler_hz=doppler)
+        ridge = lags[np.argmax(A, axis=1)]
+        slope, intercept = np.polyfit(dop, ridge, 1)
+        assert slope == pytest.approx(-T / B, rel=0.02)
+        assert abs(intercept) < 1.0 / fs
+        resid = ridge - (slope * dop + intercept)
+        assert np.abs(resid).max() < 1.0 / fs

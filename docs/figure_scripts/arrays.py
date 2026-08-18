@@ -326,7 +326,7 @@ def shading():
 
     ax_w.set_xlabel('Element index')
     ax_w.set_ylabel('Weight')
-    ax_w.set_title('The tapers (unit mean)', fontweight='bold', fontsize=10)
+    ax_w.set_title('The tapers (unit RMS)', fontweight='bold', fontsize=10)
     ax_w.legend(fontsize=8)
     ax_w.grid(True, alpha=0.3)
 

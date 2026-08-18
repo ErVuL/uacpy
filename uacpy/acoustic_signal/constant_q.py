@@ -258,8 +258,11 @@ def probabilistic_constant_q(data, sample_rate, *, fmin=20.0, fmax=None,
     """Probability density of constant-Q power levels over time.
 
     Histograms the per-bin dB levels of the constant-Q frames, the constant-Q
-    analogue of :func:`uacpy.acoustic_signal.ppsd`. Only frames whose window lay
-    fully inside the signal contribute (per bin). Returns a :class:`CQPPSDResult`
+    analogue of :func:`uacpy.acoustic_signal.ppsd` — note the two histogram
+    different populations: each sample here is a *single unaveraged frame*,
+    whereas ``ppsd`` histograms Welch averages over ``seg_duration`` chunks,
+    so the level spread here is wider for the same signal. Only frames whose
+    window lay fully inside the signal contribute (per bin). Returns a :class:`CQPPSDResult`
     ``(frequencies, level_edges, pdf, mean_db, std_db, binwidth_db)``; ``pdf`` is
     shaped ``(n_levels, n_freqs)`` and density-normalised per frequency column
     (empty bins are ``NaN``). With ``scaling='density'`` the levels are PSD

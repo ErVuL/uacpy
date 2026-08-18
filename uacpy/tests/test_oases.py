@@ -272,13 +272,10 @@ def test_an_oases_stop_banner_does_not_point_at_a_prt(tmp_path, banner):
 
 
 def _pekeris_env():
-    import uacpy
-    return uacpy.Environment(
-        bathymetry=100.0,
+    from uacpy.tests.conftest import make_pekeris
+    return make_pekeris(
         ssp=uacpy.SoundSpeedProfile.from_pairs([(0.0, 1500.0), (100.0, 1500.0)]),
-        bottom=uacpy.BoundaryProperties(acoustic_type='half-space',
-                                        sound_speed=1700.0, density=1.7,
-                                        attenuation=0.5))
+        density=1.7)
 
 
 @pytest.mark.requires_binary
@@ -369,6 +366,26 @@ def test_oasp_run_frequencies_warns_when_it_overrides_a_pinned_freq_min():
             frequencies=np.linspace(100.0, 200.0, 21))
     assert any('freq_min' in str(x.message) for x in w), \
         "silently overrode the constructor's freq_min"
+
+
+@pytest.mark.requires_binary
+def test_oasp_run_frequencies_warns_when_it_overrides_a_pinned_freq_max():
+    """``frequencies=`` overrides both band edges; the upper one warns
+    symmetrically with the lower."""
+    import uacpy
+    import warnings as _w
+    from uacpy.models import OASP
+    from uacpy.models.base import RunMode
+    with _w.catch_warnings(record=True) as w:
+        _w.simplefilter('always')
+        OASP(n_time_samples=512, freq_max=400.0).run(
+            _pekeris_env(), uacpy.Source(depths=25.0, frequencies=150.0),
+            uacpy.Receiver(depths=np.array([50.0]),
+                           ranges=np.array([1000.0, 2000.0])),
+            run_mode=RunMode.BROADBAND,
+            frequencies=np.linspace(100.0, 200.0, 21))
+    assert any('freq_max' in str(x.message) for x in w), \
+        "silently overrode the constructor's freq_max"
 
 
 @pytest.mark.requires_binary
@@ -522,6 +539,92 @@ class TestContourOffsetUnderAutomaticSampling:
             warnings.filterwarnings('ignore', message='.*not redistributable.*')
             warnings.filterwarnings('ignore', message='.*licence.*')
             uacpy.OASN(integration_offset=2.0)
+
+
+class TestLicenceWarningIsOncePerProcess:
+    """Constructing any OASES sub-model emits a one-time licence/citation
+    UserWarning (oases.md §9; ``base.py`` ``_warn_restricted_source`` dedupes
+    per provenance id per process). This suite's config filters UserWarnings
+    and any earlier test in the worker may already have absorbed the one
+    emission, so the once-and-only-once contract is only observable in a
+    fresh interpreter."""
+
+    def test_two_constructions_warn_exactly_once(self):
+        import subprocess
+        import sys
+        import textwrap
+        code = textwrap.dedent("""
+            import warnings
+            from uacpy.models import OAST
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter('always')
+                OAST(verbose=False)
+                OAST(verbose=False)
+            print(sum('Cite:' in str(w.message) for w in caught))
+        """)
+        proc = subprocess.run([sys.executable, '-c', code],
+                              capture_output=True, text=True, timeout=180)
+        assert proc.returncode == 0, proc.stderr[-500:]
+        assert proc.stdout.strip().splitlines()[-1] == '1', (
+            f"expected exactly one licence warning; stdout={proc.stdout!r}")
+
+
+class TestOASPSweepDerivation:
+    """The (freq_max, n_time_samples) pair the deck receives (oases.md §10):
+    ``freq_max=None`` derives ``2.5 × fc``, and an explicit ``frequencies=``
+    vector rounds ``n_time_samples`` up to the power of two OASP requires
+    (``NT = 2^M``, oasp.tex:129). The writer is stubbed, so no deck is
+    written and no binary runs."""
+
+    class _DeckCaptured(Exception):
+        pass
+
+    def _capture(self, monkeypatch, model, **run_kwargs):
+        import uacpy.models.oases as oases_module
+        seen = {}
+
+        def fake(*args, **kwargs):
+            seen.update(kwargs)
+            raise self._DeckCaptured
+
+        monkeypatch.setattr(oases_module, 'write_oasp_input', fake)
+        env = uacpy.Environment(
+            bathymetry=100.0, ssp=1500.0,
+            bottom=uacpy.BoundaryProperties(
+                acoustic_type='half-space', sound_speed=1800.0,
+                density=1.8, attenuation=0.5))
+        with pytest.raises(self._DeckCaptured):
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                model.run(env, uacpy.Source(depths=25.0, frequencies=100.0),
+                          uacpy.Receiver(depths=[50.0], ranges=[1000.0]),
+                          **run_kwargs)
+        return seen
+
+    def test_freq_max_none_derives_two_and_a_half_fc(self, monkeypatch):
+        from uacpy.models import OASP
+        seen = self._capture(monkeypatch, OASP(verbose=False))
+        assert seen['freq_max'] == pytest.approx(2.5 * 100.0)
+        assert seen['n_time_samples'] == 4096
+
+    def test_pinned_freq_max_reaches_the_deck_verbatim(self, monkeypatch):
+        from uacpy.models import OASP
+        seen = self._capture(monkeypatch,
+                             OASP(freq_max=300.0, verbose=False))
+        assert seen['freq_max'] == pytest.approx(300.0)
+
+    def test_explicit_frequencies_round_nt_up_to_a_power_of_two(
+            self, monkeypatch):
+        from uacpy.models import OASP
+        from uacpy.models.base import RunMode
+        # df = 5 Hz up to 200 Hz needs ceil(2·200/5) = 80 samples; the
+        # caller's 100 rules, rounded up to the next power of two.
+        seen = self._capture(
+            monkeypatch, OASP(n_time_samples=100, verbose=False),
+            run_mode=RunMode.BROADBAND,
+            frequencies=np.linspace(50.0, 200.0, 31))
+        assert seen['n_time_samples'] == 128
+        assert seen['freq_max'] == pytest.approx(200.0)
 
 
 class TestOASRShearReflectionTypesAreRefused:

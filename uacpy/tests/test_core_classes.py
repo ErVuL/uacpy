@@ -77,9 +77,16 @@ class TestEnvironment:
         assert parabolic_ssp_env.ssp.to_pairs().shape[1] == 2
 
     def test_get_representative_depth(self, range_dependent_env):
-        """Test getting representative depth for range-dependent environment."""
-        median_depth = range_dependent_env.get_representative_depth('median')
-        assert 80 <= median_depth <= 120
+        """Median depth of the fixture's 11-node 80..120 m linspace is its
+        middle node — exactly 100.0."""
+        assert range_dependent_env.get_representative_depth('median') == 100.0
+
+    def test_depth_is_read_only(self, simple_env):
+        """``env.depth`` is derived from bathymetry (a getter-only property);
+        assigning to it raises rather than silently shadowing the
+        bathymetry."""
+        with pytest.raises(AttributeError):
+            simple_env.depth = 200.0
 
     def test_invalid_depth(self):
         """Test that negative depth raises error."""
@@ -126,28 +133,100 @@ class TestBiologicalLayerValidation:
             BiologicalLayer(**kwargs)
 
 
-class TestBiologicalBoundaryOwnership:
-    """A depth exactly on a boundary two stacked layers share belongs to the
-    upper layer only (the layer-boundary convention shared with
-    ``SeabedColumn._layer_at``), so it contributes once, while the outer
-    edges of the stack stay inclusive."""
+class TestBiologicalBoundaryContributions:
+    """Each layer is tested independently over its inclusive
+    ``[z_top, z_bottom]`` span and the contributions summed, matching the
+    AttenMod.f90:102-109 loop (``z >= Z1 .AND. z <= Z2`` per layer) — so a
+    depth exactly on a boundary two stacked layers share receives both
+    layers' contributions, and the outer edges of the stack stay
+    inclusive."""
 
     @staticmethod
     def _stack():
         from uacpy.core.absorption import Biological
-        return Biological(layers=[(0.0, 100.0, 500.0, 2.0, 10.0),
-                                  (100.0, 200.0, 500.0, 2.0, 10.0)])
+        return Biological(layers=[(0.0, 10.0, 100.0, 5.0, 10.0),
+                                  (10.0, 20.0, 100.0, 5.0, 10.0)])
 
-    def test_shared_boundary_counts_once(self):
-        a = self._stack().alpha_db_per_m(500.0, [50.0, 100.0, 150.0])
-        assert a[1] == pytest.approx(a[0])
-        assert a[1] == pytest.approx(a[2])
+    def test_shared_boundary_sums_both_layers(self):
+        a = self._stack().alpha_db_per_m(100.0, [5.0, 10.0, 15.0])
+        assert a[1] == pytest.approx(a[0] + a[2])
+        # At f = f0 each layer peaks at a0·Q² = 10·25 = 250 dB/km, so the
+        # shared depth carries 500 dB/km (the AttenMod.f90 sum).
+        assert a[0] * 1000.0 == pytest.approx(250.0)
+        assert a[1] * 1000.0 == pytest.approx(500.0)
 
     def test_outer_edges_are_inclusive(self):
-        a = self._stack().alpha_db_per_m(500.0, [0.0, 200.0, 250.0])
+        a = self._stack().alpha_db_per_m(100.0, [0.0, 20.0, 25.0])
         assert a[0] == pytest.approx(a[1])
         assert a[0] > 0.0
         assert a[2] == 0.0
+
+
+class TestAbsorptionFormulaOutputShapes:
+    """The bare formulas and the unit converter shape their output after
+    their input: 0-d for a scalar, unchanged for an array — a 1-element
+    array stays 1-D and indexable."""
+
+    def test_one_element_array_stays_indexable(self):
+        from uacpy.core.absorption import (
+            thorp_db_per_km, francois_garrison_db_per_km,
+            convert_attenuation_units)
+        assert thorp_db_per_km(np.array([100.0])).shape == (1,)
+        assert float(thorp_db_per_km(np.array([100.0]))[0]) > 0
+        assert francois_garrison_db_per_km(np.array([100.0])).shape == (1,)
+        assert convert_attenuation_units(
+            np.array([1.0]), 100.0, 'dB/km', 'dB/m').shape == (1,)
+
+    def test_scalar_input_yields_0d(self):
+        from uacpy.core.absorption import (
+            thorp_db_per_km, francois_garrison_db_per_km,
+            convert_attenuation_units)
+        assert np.ndim(thorp_db_per_km(100.0)) == 0
+        assert np.ndim(francois_garrison_db_per_km(100.0)) == 0
+        assert np.ndim(
+            convert_attenuation_units(1.0, 100.0, 'dB/km', 'dB/m')) == 0
+
+    def test_n_element_array_keeps_shape(self):
+        from uacpy.core.absorption import thorp_db_per_km
+        assert thorp_db_per_km(np.array([100.0, 200.0, 300.0])).shape == (3,)
+
+
+class TestConvertAttenuationUnitsFromQ:
+    """Q sits in the denominator of the from-'Q' path, so a non-positive
+    quality factor raises instead of dividing to inf."""
+
+    @pytest.mark.parametrize("bad_q", [0.0, -5.0])
+    def test_non_positive_q_raises(self, bad_q):
+        from uacpy.core.absorption import convert_attenuation_units
+        with pytest.raises(ConfigurationError, match="from_unit='Q'"):
+            convert_attenuation_units(bad_q, 100.0, 'Q', 'dB/m')
+
+    def test_positive_q_round_trips(self):
+        from uacpy.core.absorption import convert_attenuation_units
+        q = 50.0
+        db_m = convert_attenuation_units(q, 100.0, 'Q', 'dB/m')
+        back = convert_attenuation_units(float(db_m), 100.0, 'dB/m', 'Q')
+        assert float(back) == pytest.approx(q)
+
+
+class TestConstantAbsorptionCeiling:
+    """ConstantAbsorption enforces the same attenuation ceiling as the seabed
+    carriers (above it every AT solver aborts in AttenMod.f90's CRCI)."""
+
+    def test_above_ceiling_raises(self):
+        from uacpy.core.absorption import ConstantAbsorption
+        from uacpy.core.constants import MAX_ATTENUATION_DB_PER_WAVELENGTH
+        with pytest.raises(ConfigurationError, match="dB/wavelength exceeds"):
+            ConstantAbsorption(
+                value_db_per_wavelength=MAX_ATTENUATION_DB_PER_WAVELENGTH + 1.0)
+
+    def test_at_ceiling_constructs(self):
+        from uacpy.core.absorption import ConstantAbsorption
+        from uacpy.core.constants import MAX_ATTENUATION_DB_PER_WAVELENGTH
+        c = ConstantAbsorption(
+            value_db_per_wavelength=MAX_ATTENUATION_DB_PER_WAVELENGTH)
+        assert c.value_db_per_wavelength == pytest.approx(
+            MAX_ATTENUATION_DB_PER_WAVELENGTH)
 
 
 class TestGenerateSeaSurfaceSynthesis:
@@ -274,6 +353,15 @@ class TestReceiver:
         with pytest.raises(ConfigurationError, match="receiver_type='line'"):
             uacpy.Receiver(depths=50, ranges=1000, receiver_type='line')
 
+    def test_omitted_ranges_default_to_source_point_with_warning(self):
+        """``Receiver(depths=50)`` defaults ranges to a single point at 0 m
+        (the source location) and warns, because r=0 is singular for
+        TL/pressure runs."""
+        with pytest.warns(UserWarning, match="ranges not given"):
+            rx = uacpy.Receiver(depths=50.0)
+        np.testing.assert_array_equal(rx.ranges, [0.0])
+        np.testing.assert_array_equal(rx.depths, [50.0])
+
 
 class TestField:
     """Tests for the unified :class:`~uacpy.Field` container."""
@@ -309,31 +397,38 @@ class TestField:
         rt = Field.from_dict(field.to_dict())
         assert rt.model_source is src
 
-    def test_field_at_point(self):
-        data = np.arange(100).reshape(10, 10).astype(float)
-        ranges = np.linspace(0, 9000, 10)
-        depths = np.linspace(0, 90, 10)
-        field = self._tl_field(data, ranges, depths)
-        value = float(field.at(range=4500, depth=45).db)
-        assert 44 <= value <= 55
+    # data[d, r] = 10*d + r in the three tests below, so each value names
+    # its own cell and a depth/range transpose (data[r, d]) is caught
+    # exactly, which the previous 44-55 band assertions admitted.
 
-    def test_field_at_range(self):
+    def test_at_point_returns_nearest_cell_value(self):
         data = np.arange(100).reshape(10, 10).astype(float)
-        ranges = np.linspace(0, 9000, 10)
-        depths = np.linspace(0, 90, 10)
+        ranges = np.linspace(0, 9000, 10)   # 1000 m spacing
+        depths = np.linspace(0, 90, 10)     # 10 m spacing
         field = self._tl_field(data, ranges, depths)
-        values = field.at(range=4500).db
-        assert len(values) == 10
-        assert 50 <= values[5] <= 59
+        # Off-centre query: range=4200 → index 4, depth=68 → index 7,
+        # so the nearest cell is data[7, 4] = 74 (a transpose reads 47).
+        assert float(field.at(range=4200.0, depth=68.0).db) == 74.0
 
-    def test_field_at_depth(self):
+    def test_at_range_returns_nearest_cell_values(self):
         data = np.arange(100).reshape(10, 10).astype(float)
         ranges = np.linspace(0, 9000, 10)
         depths = np.linspace(0, 90, 10)
         field = self._tl_field(data, ranges, depths)
-        values = field.at(depth=45).db
-        assert len(values) == 10
-        assert 40 <= values[5] <= 49
+        values = field.at(range=4200.0).db
+        # Nearest range sample is index 4 (4000 m): the depth column
+        # 10*d + 4. A transposed field would return 40..49 instead.
+        np.testing.assert_array_equal(values, np.arange(10) * 10.0 + 4.0)
+
+    def test_at_depth_returns_nearest_cell_values(self):
+        data = np.arange(100).reshape(10, 10).astype(float)
+        ranges = np.linspace(0, 9000, 10)
+        depths = np.linspace(0, 90, 10)
+        field = self._tl_field(data, ranges, depths)
+        values = field.at(depth=68.0).db
+        # Nearest depth sample is index 7 (70 m): the range row 70..79.
+        # A transposed field would return 8, 18, ..., 98 instead.
+        np.testing.assert_array_equal(values, np.arange(10) + 70.0)
 
     def test_field_deepcopy(self):
         import copy as _copy
@@ -533,6 +628,24 @@ class TestFieldValueAccessorsAreWriteGuarded:
         d['coords']['depth'][0] = 99.0
         assert f.data[1, 1] == 90.0
         assert f.coords['depth'][0] == 0.0
+
+
+class TestFieldMaxComplexData:
+    """max() ranks complex data by magnitude whatever unit the field is
+    tagged with, so no float cast of complex values occurs."""
+
+    def test_complex_db_tagged_field_uses_magnitude(self):
+        f = Field(
+            data=np.array([[1 + 1j, 3 + 4j]]),
+            coords={'depth': np.array([1.0]),
+                    'range': np.array([10.0, 20.0])},
+            metadata={'kind': 'reverberation', 'unit': 'dB'},
+            frequencies=np.array([100.0]))
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            m = f.max()
+        assert complex(m.data) == 3 + 4j
+        assert m.pinned['range'] == 20.0
 
 
 class TestPublicReexports:
@@ -1233,6 +1346,18 @@ class TestFieldSlicing:
         assert not tl.is_complex
         assert tl.data.shape == tf.data.shape
 
+    def test_tf_to_tl_is_minus_20log10_magnitude(self):
+        """``to_db`` is exactly ``-20·log10(|data|)`` (every |data| here is
+        far above the PRESSURE_FLOOR clamp, so the clamp is inert)."""
+        tf = self._tf()
+        tl = tf.to_db()
+        np.testing.assert_allclose(
+            tl.data, -20.0 * np.log10(np.abs(tf.data)), rtol=1e-12)
+        # One hand-checked value: data flat index 3 is 3+1j, |3+1j|² = 10,
+        # so -20·log10(√10) = -10 dB exactly.
+        k = np.unravel_index(3, tf.data.shape)
+        assert tl.data[k] == pytest.approx(-10.0, abs=1e-12)
+
 
 class TestResultStackInvariants:
     """:class:`ResultStack` is a thin composition wrapper. The
@@ -1303,6 +1428,21 @@ class TestResultStackInvariants:
         assert stack.model == 'Test'
         np.testing.assert_array_equal(
             stack.coordinate, np.array([10.0, 20.0]))
+
+    def test_db_stacks_slab_views_into_a_dense_array(self):
+        """``stack.db`` is one dense ``(n_slabs, *slab.shape)`` ndarray, so
+        generic code can read ``result.db`` whether one or many source
+        depths were requested."""
+        from uacpy.core.results import ResultStack
+        a = self._slab(source_depth=10.0)               # |p| = 1 → 0 dB
+        b = self._slab(source_depth=20.0)
+        b.data[...] = 10.0 + 0j                          # |p| = 10 → -20 dB
+        stack = ResultStack(slabs=[a, b], coordinate=[10.0, 20.0])
+        db = stack.db
+        assert isinstance(db, np.ndarray)
+        assert db.shape == (2, 2, 3)                     # (n_slabs, z, r)
+        np.testing.assert_allclose(db[0], 0.0)
+        np.testing.assert_allclose(db[1], -20.0)
 
     def test_iteration_and_label_select_share_slab_identity(self):
         from uacpy.core.results import ResultStack
@@ -1463,6 +1603,12 @@ class TestCopyAndGeolocation:
         for o in objs:
             c = o.copy()
             assert type(c) is type(o) and c is not o
+            # Deep copy: no top-level array is shared, so mutating the
+            # copy can never reach the original.
+            for name, val in vars(o).items():
+                if isinstance(val, np.ndarray):
+                    assert not np.shares_memory(getattr(c, name), val), (
+                        type(o).__name__, name)
 
     def test_source_and_receiver_copy_the_whole_attribute_surface(self):
         """``Source`` / ``Receiver`` deep-copy like every other carrier, so an
@@ -1494,6 +1640,11 @@ class TestCopyAndGeolocation:
             uacpy.Receiver(depths=[100., 200.], ranges=[2000., 4000.]))
         c = f.copy()
         assert type(c) is type(f) and c is not f
+        # Mutating the copy's payload must not reach the original.
+        assert not np.shares_memory(c.data, f.data)
+        baseline = f.data.copy()
+        c.data[...] = 999.0
+        np.testing.assert_array_equal(f.data, baseline)
 
     def test_environment_geolocation_and_date(self):
         import datetime
@@ -1848,3 +1999,271 @@ class TestKindUnitAndDtypeAreIndependentAxes:
         back = Field.from_dict(d)
         assert (back.kind, back.unit, back.data.dtype) == \
             (f.kind, f.unit, f.data.dtype)
+
+
+class TestMaskBelowSeafloor:
+    """:meth:`Field.mask_below_seafloor` NaN-masks samples strictly below
+    the (range-interpolated) seafloor and returns a copy; a sample exactly
+    on the seafloor is kept."""
+
+    @staticmethod
+    def _field():
+        return Field(
+            data=np.ones((3, 2)),
+            coords={'depth': np.array([50.0, 120.0, 150.0]),
+                    'range': np.array([0.0, 1000.0])},
+            model='Test', frequencies=100.0)
+
+    def test_masks_only_cells_below_the_local_seafloor(self):
+        f = self._field()
+        # Sloping seafloor: 100 m at r=0, 140 m at r=1000. Column r=0
+        # loses 120 and 150 m; column r=1000 loses only 150 m.
+        masked = f.mask_below_seafloor([(0.0, 100.0), (1000.0, 140.0)])
+        expected = np.array([[1.0, 1.0],
+                             [np.nan, 1.0],
+                             [np.nan, np.nan]])
+        np.testing.assert_array_equal(masked.data, expected)
+        # The parent field is untouched (mask returns a copy).
+        assert np.isfinite(f.data).all()
+
+    def test_boundary_cell_on_the_seafloor_is_kept(self):
+        # The mask is strict (depth > seafloor), so a receiver exactly on
+        # the interface keeps its value.
+        f = Field(
+            data=np.ones((2, 1)),
+            coords={'depth': np.array([100.0, 100.5]),
+                    'range': np.array([500.0])},
+            model='Test', frequencies=100.0)
+        masked = f.mask_below_seafloor([(0.0, 100.0), (1000.0, 100.0)])
+        assert masked.data[0, 0] == 1.0          # exactly on the interface
+        assert np.isnan(masked.data[1, 0])       # half a metre below
+
+    def test_requires_canonical_depth_range_layout(self):
+        trace = Field(data=np.zeros(4),
+                      coords={'time': np.arange(4) * 0.1}, model='Test')
+        with pytest.raises(ConfigurationError, match='canonical'):
+            trace.mask_below_seafloor([(0.0, 100.0), (1000.0, 100.0)])
+
+
+class TestSpectrumAndToneExtraction:
+    """`get_spectrum` (bare rFFT) and `extract_tone` (windowed phasor
+    estimate) on a synthetic pure-tone time Field."""
+
+    A0 = 2.5
+    PHI0 = 0.7
+    F0 = 32.0
+    N = 256
+
+    def _tone_field(self):
+        # dt = 1/256 s puts every integer frequency exactly on an rFFT bin.
+        t = np.arange(self.N) / 256.0
+        p = self.A0 * np.cos(2 * np.pi * self.F0 * t + self.PHI0)
+        return Field(
+            data=p.reshape(1, 1, self.N),
+            coords={'depth': np.array([50.0]),
+                    'range': np.array([1000.0]),
+                    'time': t},
+            model='Test')
+
+    def test_get_spectrum_peaks_at_the_tone_bin(self):
+        freqs, X = self._tone_field().get_spectrum()
+        assert X.shape == (1, 1, self.N // 2 + 1)
+        k = int(np.argmax(np.abs(X[0, 0])))
+        assert freqs[k] == self.F0                       # exact-bin tone
+        # rFFT of A0·cos(2πft+φ0) at the tone bin is (N/2)·A0·e^{iφ0}.
+        assert X[0, 0, k] == pytest.approx(
+            (self.N / 2) * self.A0 * np.exp(1j * self.PHI0), rel=1e-9)
+
+    def test_extract_tone_recovers_the_complex_amplitude(self):
+        tone = self._tone_field().extract_tone(self.F0)
+        assert list(tone.coords) == ['depth', 'range']
+        assert tone.pinned['frequency'] == self.F0
+        np.testing.assert_array_equal(tone.frequencies, [self.F0])
+        # Phasor convention p(t) = Re{A·e^{+2πift}} → A = A0·e^{+iφ0}.
+        # rel=1e-5: the symmetric (non-periodic) np.hanning taper leaks
+        # ~8e-7 of the negative-frequency image into the tone bin
+        # (measured); a periodic window would make this exact.
+        assert complex(tone.data[0, 0]) == pytest.approx(
+            self.A0 * np.exp(1j * self.PHI0), rel=1e-5)
+
+
+class TestFieldDomainAccessorContracts:
+    """The documented unit/domain guards on the value accessors
+    (docs/guide/results.md §4): ``.db`` refuses a time-domain trace,
+    ``.p`` refuses real data, and ``.dt``/``.sample_rate`` read 0.0 when
+    no time axis exists."""
+
+    def test_db_raises_on_a_time_domain_field(self):
+        trace = Field(data=np.zeros((1, 1, 8)),
+                      coords={'depth': np.array([10.0]),
+                              'range': np.array([100.0]),
+                              'time': np.arange(8) * 0.01},
+                      model='Test')
+        with pytest.raises(AttributeError, match='time-domain'):
+            trace.db
+
+    def test_p_raises_on_a_real_db_field(self):
+        tl = Field(data=np.array([[60.0]]),
+                   coords={'depth': np.array([10.0]),
+                           'range': np.array([100.0])},
+                   model='Test', frequencies=100.0)
+        with pytest.raises(AttributeError, match='data is real'):
+            tl.p
+
+    def test_dt_and_sample_rate_are_zero_without_a_time_axis(self):
+        tl = Field(data=np.array([[60.0]]),
+                   coords={'depth': np.array([10.0]),
+                           'range': np.array([100.0])},
+                   model='Test', frequencies=100.0)
+        assert tl.dt == 0.0
+        assert tl.sample_rate == 0.0
+
+    def test_dt_and_sample_rate_read_the_time_axis(self):
+        trace = Field(data=np.zeros((1, 1, 50)),
+                      coords={'depth': np.array([10.0]),
+                              'range': np.array([100.0]),
+                              'time': np.arange(50) * 0.01},
+                      model='Test')
+        assert trace.dt == pytest.approx(0.01)
+        assert trace.sample_rate == pytest.approx(100.0)
+
+
+class TestResultReprSnapshots:
+    """Pins the stable ``__repr__`` format of the sparse results and
+    :class:`ResultStack`: ``Cls(model=..., f=... | n_f=..., <size extra>)``.
+    Each object below is fully hand-built, so the whole string is
+    deterministic."""
+
+    def test_rays_repr(self):
+        from uacpy.core.results import Rays
+        fan = Rays(rays=[{'r': [0.0], 'z': [0.0]}] * 2,
+                   model='Bellhop', frequencies=100.0)
+        assert repr(fan) == "Rays(model='Bellhop', f=100 Hz, n_rays=2)"
+
+    def test_eigenrays_repr_names_eigenrays(self):
+        from uacpy.core.results import Rays
+        eig = Rays(rays=[{'r': [0.0], 'z': [0.0]}], is_eigen=True,
+                   model='Bellhop', frequencies=100.0)
+        assert repr(eig) == "Rays(model='Bellhop', f=100 Hz, n_eigenrays=1)"
+
+    def test_arrivals_repr(self):
+        from uacpy.core.results import Arrivals
+        arr = Arrivals(arrivals=[{'delay': 0.1}, {'delay': 0.2}],
+                       receiver_depths=np.array([50.0]),
+                       receiver_ranges=np.array([1000.0]),
+                       model='Bellhop', frequencies=100.0)
+        assert repr(arr) == "Arrivals(model='Bellhop', f=100 Hz, n_arrivals=2)"
+
+    def test_modes_repr(self):
+        from uacpy.core.results import Modes
+        m = Modes(k=np.array([0.1 + 0j, 0.2 + 0j]),
+                  phi=np.zeros((3, 2)),
+                  depths=np.array([0.0, 50.0, 100.0]),
+                  model='Kraken', frequencies=25.0)
+        assert repr(m) == "Modes(model='Kraken', f=25 Hz, n_modes=2, n_z=3)"
+
+    def test_reflection_coefficient_repr_narrowband(self):
+        rc = ReflectionCoefficient(
+            theta=np.array([0.0, 45.0, 90.0]),
+            R=np.array([1.0, 0.5, 0.2]),
+            phi=np.zeros(3),
+            model='Bounce', frequencies=50.0)
+        assert repr(rc) == (
+            "ReflectionCoefficient(model='Bounce', f=50 Hz, "
+            "n_θ=3, narrowband)")
+
+    def test_reflection_coefficient_repr_broadband_counts_frequencies(self):
+        rc = ReflectionCoefficient(
+            theta=np.array([0.0, 45.0, 90.0]),
+            R=np.full((3, 2), 0.5),
+            phi=np.zeros((3, 2)),
+            model='OASR', frequencies=np.array([50.0, 100.0]))
+        assert repr(rc) == (
+            "ReflectionCoefficient(model='OASR', n_f=2, n_θ=3, broadband)")
+
+    def test_result_stack_repr(self):
+        from uacpy.core.results import ResultStack
+        def slab(z):
+            return Field(data=np.ones((1, 1), dtype=complex),
+                         coords={'depth': np.array([10.0]),
+                                 'range': np.array([100.0])},
+                         model='Test', frequencies=100.0,
+                         source_depths=np.array([z]))
+        stack = ResultStack(slabs=[slab(10.0), slab(20.0)],
+                            coordinate=[10.0, 20.0])
+        assert repr(stack) == (
+            "ResultStack[Field](n_slabs=2, source_depth=[10.0, 20.0])")
+
+
+class TestRaysFilterAndSortHelpers:
+    """Pure-data filtering/sorting on hand-built ray fans (no solver):
+    ``filter_by_miss_distance`` / ``sorted_by_miss`` / ``filter_nfirst``,
+    plus ``Arrivals.sorted_by_amplitude``."""
+
+    @staticmethod
+    def _fan(**kwargs):
+        from uacpy.core.results import Rays
+        # Each polyline has a vertex exactly at r=1000, so the closest
+        # approach to the (1000, 50) target is the plain depth offset:
+        # 3 m, 10 m and 30 m for alpha 1, 2 and 3 respectively.
+        def ray(alpha, z_end):
+            return {'r': np.array([0.0, 500.0, 1000.0]),
+                    'z': np.array([10.0, 30.0, z_end]),
+                    'alpha': alpha, 'n_top_bounces': 0, 'n_bot_bounces': 0}
+        return Rays(rays=[ray(1.0, 47.0), ray(2.0, 60.0), ray(3.0, 80.0)],
+                    model='Bellhop', frequencies=100.0, **kwargs)
+
+    def test_filter_by_miss_distance_keeps_and_annotates(self):
+        kept = self._fan().filter_by_miss_distance(
+            5.0, target_range_m=1000.0, target_depth_m=50.0)
+        assert [r['alpha'] for r in kept.rays] == [1.0]
+        assert kept.rays[0]['miss_distance_m'] == pytest.approx(3.0,
+                                                                abs=1e-12)
+        # The parent's ray dicts are not annotated in place.
+        assert 'miss_distance_m' not in self._fan().rays[0]
+
+    def test_sorted_by_miss_orders_ascending(self):
+        fan = self._fan()
+        # Shuffle so the sort has work to do.
+        fan.rays.reverse()
+        ordered = fan.sorted_by_miss(target_range_m=1000.0,
+                                     target_depth_m=50.0)
+        assert [r['alpha'] for r in ordered.rays] == [1.0, 2.0, 3.0]
+        np.testing.assert_allclose(
+            [r['miss_distance_m'] for r in ordered.rays], [3.0, 10.0, 30.0],
+            atol=1e-12)
+
+    def test_sorted_by_miss_defaults_to_single_point_receiver_context(self):
+        fan = self._fan(receiver_depths=np.array([50.0]),
+                        receiver_ranges=np.array([1000.0]))
+        ordered = fan.sorted_by_miss()
+        assert [r['alpha'] for r in ordered.rays] == [1.0, 2.0, 3.0]
+
+    def test_miss_helpers_without_target_or_context_raise(self):
+        with pytest.raises(ConfigurationError, match='target_range_m'):
+            self._fan().sorted_by_miss()
+
+    def test_filter_nfirst_keeps_the_first_n_in_order(self):
+        first_two = self._fan().filter_nfirst(2)
+        assert [r['alpha'] for r in first_two.rays] == [1.0, 2.0]
+        assert isinstance(first_two, type(self._fan()))
+        # Composes with the sorters: the 2 closest rays.
+        closest_two = self._fan().sorted_by_miss(
+            target_range_m=1000.0, target_depth_m=50.0).filter_nfirst(2)
+        assert [r['alpha'] for r in closest_two.rays] == [1.0, 2.0]
+
+    def test_arrivals_sorted_by_amplitude_both_directions(self):
+        from uacpy.core.results import Arrivals
+        arr = Arrivals(
+            arrivals=[{'delay': 0.1, 'amplitude': 0.5},
+                      {'delay': 0.2, 'amplitude': 1.0},
+                      {'delay': 0.3, 'amplitude': 0.2}],
+            receiver_depths=np.array([50.0]),
+            receiver_ranges=np.array([1000.0]),
+            model='Bellhop', frequencies=100.0)
+        down = arr.sorted_by_amplitude()
+        assert [a['amplitude'] for a in down.arrivals] == [1.0, 0.5, 0.2]
+        up = arr.sorted_by_amplitude(descending=False)
+        assert [a['amplitude'] for a in up.arrivals] == [0.2, 0.5, 1.0]
+        # The original order is untouched (sorts return copies).
+        assert [a['amplitude'] for a in arr.arrivals] == [0.5, 1.0, 0.2]

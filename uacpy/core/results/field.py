@@ -486,7 +486,9 @@ class Field(Result):
         original axis recorded in :attr:`pinned`."""
         if self.data.size == 0:
             raise ConfigurationError("Field.max: data is empty")
-        if self.kind == 'pressure' and self.unit == 'dB':
+        if self.is_complex:
+            strength = np.abs(self.data)  # complex is linear: loudest |p|
+        elif self.kind == 'pressure' and self.unit == 'dB':
             strength = -np.asarray(self.db, dtype=float)  # least loss = loudest
         elif self.unit == 'dB':
             strength = np.asarray(self.data, dtype=float)  # a level: more is more
@@ -677,7 +679,7 @@ class Field(Result):
         axes**, or the interpolant cuts across opposite-phase lobes and biases
         the level upward — +2.6 dB from range alone, +1.4 dB from depth alone,
         +4.9 dB from the two together. Both spacings are checked against the
-        wavelength at :attr:`f0` and a coarse one warns. Take :attr:`tl` first
+        wavelength at :attr:`f0` and a coarse one warns. Take :attr:`db` first
         if only the level is wanted; a real field carries no carrier and
         interpolates freely."""
         if list(self.coords) != ['depth', 'range']:
@@ -1218,6 +1220,7 @@ def _synthesis_plan(
     window: str,
     nfft: Optional[int],
     sample_rate: Optional[float],
+    who: str,
 ) -> Tuple[np.ndarray, float, np.ndarray, float, int, np.ndarray]:
     """Validate ``tf``'s frequency axis and size the synthesis grid that every
     cell of the Field shares: returns ``(freqs, df, bin_indices,
@@ -1225,19 +1228,21 @@ def _synthesis_plan(
 
     The single home for the per-Field half of the IFFT synthesis —
     ``_ifft_to_trace`` (one cell) and ``_synthesize_time_series`` (every cell)
-    both build on it, so the two paths cannot drift apart.
+    both build on it, so the two paths cannot drift apart. ``who`` is the
+    public entry point's name and prefixes every diagnostic (like
+    :func:`_taper`).
     """
     freqs = np.asarray(tf.coords['frequency'], dtype=float)
     n_freq = freqs.size
 
     if n_freq < 2:
         raise ConfigurationError(
-            f"_ifft_to_trace: need at least 2 frequencies for IFFT; got {n_freq}"
+            f"{who}: need at least 2 frequencies for IFFT; got {n_freq}"
         )
 
     if tf.phase_reference == 'time_domain_native':
         raise ConfigurationError(
-            "_ifft_to_trace: phase_reference='time_domain_native' is not a "
+            f"{who}: phase_reference='time_domain_native' is not a "
             "frequency-domain transfer function; the producing model "
             "(SPARC) returned p(t) directly — read the time-domain Field "
             "from RunMode.TIME_SERIES instead of synthesising via IFFT"
@@ -1259,7 +1264,7 @@ def _synthesis_plan(
     spacings = np.diff(freqs)
     if df <= 0 or not np.allclose(spacings, df, rtol=1e-6, atol=0.0):
         raise ConfigurationError(
-            f"_ifft_to_trace: the frequency axis must be uniformly spaced and "
+            f"{who}: the frequency axis must be uniformly spaced and "
             f"ascending; spacing runs from {spacings.min():.6g} Hz to "
             f"{spacings.max():.6g} Hz against a leading Δf of {df:.6g} Hz. "
             f"Resample H(f) onto an equispaced grid before synthesising.",
@@ -1293,7 +1298,7 @@ def _synthesis_plan(
             nfft *= 2
         if nfft > _MAX_SYNTHESIS_NFFT:
             raise ConfigurationError(
-                f"synthesize_time_series: the requested grid implies an "
+                f"{who}: the requested grid implies an "
                 f"{nfft:,}-sample output (~{nfft * 16 / 1e9:.1f} GB), above the "
                 f"{_MAX_SYNTHESIS_NFFT:,}-sample safety cap. This is driven by "
                 f"sample_rate={sample_rate!r} Hz against a frequency resolution "
@@ -1305,7 +1310,7 @@ def _synthesis_plan(
 
     if explicit_nfft and max_bin >= nfft // 2:
         raise ConfigurationError(
-            f"_ifft_to_trace: nfft={nfft} puts the highest data bin "
+            f"{who}: nfft={nfft} puts the highest data bin "
             f"({max_bin}, {freqs[-1]:.6g} Hz at Δf = {df:.6g} Hz) at or above "
             f"Nyquist (bin {nfft // 2}); those bins fold into the "
             f"negative-frequency half and alias onto the wrong frequencies. "
@@ -1314,7 +1319,7 @@ def _synthesis_plan(
             remediation=f"Pass nfft={2 * max_bin + 2} or larger.",
         )
 
-    win = _taper(window, n_freq, who='_ifft_to_trace', stacklevel=5)
+    win = _taper(window, n_freq, who=who, stacklevel=5)
 
     return freqs, df, bin_indices, bin_offset_hz, int(nfft), win
 
@@ -1399,6 +1404,7 @@ def _ifft_to_trace(
     nfft: Optional[int],
     t_start: Optional[float],
     sample_rate: Optional[float] = None,
+    who: str = 'to_time_trace',
 ) -> "Field":
     """IFFT one (depth, range) cell of a broadband Field → time-domain trace Field.
 
@@ -1427,7 +1433,7 @@ def _ifft_to_trace(
     n_d, n_r, _ = data.shape
 
     freqs, df, bin_indices, bin_offset_hz, nfft, win = _synthesis_plan(
-        tf, window=window, nfft=nfft, sample_rate=sample_rate)
+        tf, window=window, nfft=nfft, sample_rate=sample_rate, who=who)
 
     d_idx = (
         int(np.argmin(np.abs(depths - depth))) if depth is not None
@@ -1454,10 +1460,11 @@ def _ifft_to_trace(
         # so r/c_fast bounds it from below. Candidates are the physical
         # speeds producers stamp: 'c_max' (RAM, the fastest speed anywhere
         # in the waveguide) and 'c0' (Bellhop, the sea-surface water speed).
-        # Anchoring on a speed above c_fast opens the window before the
-        # estimate's lead can absorb, and the first arrival wraps to the end
-        # of the record — so no algorithmic speed (e.g. a PE expansion
-        # point) may enter this max, and c_min never binds it.
+        # Anchoring on a speed above c_fast opens the window too early: once
+        # the excess lead exceeds the half-window margin, the late multipath
+        # tail falls past the end of the record and wraps to the beginning
+        # — so no algorithmic speed (e.g. a PE expansion point) may enter
+        # this max, and c_min never binds it.
         c_max = float(tf.metadata.get('c_max') or 0.0)
         anchor_speed = max(
             c_max,
@@ -1494,7 +1501,10 @@ def _ifft_to_trace(
     return Field(
         data=traces[0],
         coords={'time': time},
-        pinned={'depth': actual_depth, 'range': actual_range},
+        # The parent's pinned axes carry through (the accumulation contract
+        # in the class doc), with this cell's coordinates added on top.
+        pinned={**dict(tf.pinned),
+                'depth': actual_depth, 'range': actual_range},
         model=tf.model,
         backend=tf.backend,
         source_depths=tf.source_depths,
@@ -1613,12 +1623,13 @@ def _synthesize_time_series(
             tf, depth=float(depths[0]), range=float(ranges[0]),
             source_spectrum=source_spectrum,
             window=window, nfft=nfft, t_start=None,
-            sample_rate=sample_rate,
+            sample_rate=sample_rate, who='synthesize_time_series',
         )
         t_start = float(t0_trace.coords['time'][0]) if t0_trace.n_times else 0.0
 
     plan_freqs, df, bin_indices, bin_offset_hz, nfft, win = _synthesis_plan(
-        tf, window=window, nfft=nfft, sample_rate=sample_rate)
+        tf, window=window, nfft=nfft, sample_rate=sample_rate,
+        who='synthesize_time_series')
 
     # Every cell shares one synthesis grid, so one batched ifft per chunk of
     # cells replaces a per-cell transform. Chunk over the flattened
@@ -1667,6 +1678,9 @@ def _synthesize_time_series(
     return Field(
         data=out,
         coords={'depth': depths, 'range': ranges, 'time': time_vec},
+        # The parent's pinned axes carry through (the accumulation contract
+        # in the class doc); no axis collapses here, so nothing is added.
+        pinned=dict(tf.pinned),
         model=tf.model,
         backend=tf.backend,
         source_depths=tf.source_depths,

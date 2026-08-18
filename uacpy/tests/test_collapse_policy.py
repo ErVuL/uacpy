@@ -226,7 +226,7 @@ def test_bellhop_rd_ssp_uses_collapse_policy():
 # ---------------------------------------------------------------------
 
 @pytest.mark.requires_binary  # constructs Bellhop
-def test_bellhop_auto_route_detects_elastic_rd_halfspace():
+def test_has_elastic_bottom_is_true_when_any_range_has_shear():
     """``env.has_elastic_bottom`` is true when ``shear_speed`` is non-zero at
     *any* range, not only at r=0 — it is one of the two predicates
     ``Bellhop._maybe_route_through_bounce`` ORs together to auto-route through

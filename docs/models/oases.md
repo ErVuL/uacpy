@@ -565,16 +565,20 @@ one. On `OASN` it is additive: the run mode's own letter (`N` for covariance,
 |---|---|---|
 | `angles` | `linspace(0, 90, 181)` | Angle grid, degrees. |
 | `angle_type` | `'grazing'` | `'grazing'` (native) or `'incidence'`. |
-| `reflection_type` | `'P-P'` | `'P-P'`, `'P-SV'`, `'P-Slow'` (Biot), `'transmission'`. |
+| `reflection_type` | `'P-P'` | `'P-P'` or `'transmission'`; `'P-SV'` / `'P-Slow'` (Biot) are refused — see below. |
 | `angle_output_increment` | `None` | Decimate the output table. |
 | `interface_roughness` | `None` | Per-interface RMS roughness (m), top → bottom. |
 
-`'P-Slow'` selects the Biot slow wave, and **no uacpy carrier can express a
-poro-elastic medium** — `SedimentLayer` and `BoundaryProperties` carry no
-porosity, permeability, tortuosity, frame moduli or pore-fluid modulus — so the
-option returns zeros at every angle rather than raising. `'P-SV'` also returns
-zeros whenever the upper medium is a fluid, which is the correct answer: no SV
-wave can be reflected back into it.
+`reflection_type='P-SV'` and `'P-Slow'` raise `UnsupportedFeatureError` at
+construction. `'P-Slow'` selects the Biot slow wave, and **no uacpy carrier
+can express a poro-elastic medium** — `SedimentLayer` and
+`BoundaryProperties` carry no porosity, permeability, tortuosity, frame
+moduli or pore-fluid modulus. `'P-SV'` asks for an SV wave reflected back
+into the incident medium, and at the seabed that medium is the water column,
+a fluid, which carries none. Either way OASES would return a column of zeros
+dressed as a result, so the refusal is up front. The raw `options='S T'`
+escape hatch still runs P-SV: the deck is written verbatim, with a
+`UserWarning` that the zeros are coming.
 
 **`OASN`**
 
@@ -604,8 +608,8 @@ OASP when null depth matters.
 
 **Everything is single-source-depth and (for OAST) single-frequency.** A
 multi-frequency `Source` on `OAST.run` raises `ConfigurationError` pointing at
-`OASP`; a multi-depth `Source` raises on any OASES sub-model, telling you to
-loop over `Source`s yourself.
+`RunMode.BROADBAND` / `RunMode.TIME_SERIES`; a multi-depth `Source` raises on
+any OASES sub-model, telling you to loop over `Source`s yourself.
 
 **OASN ignores `receiver.ranges`.** OASN models a vertical array at
 `x = y = 0`; only `receiver.depths` reaches the deck. Horizontal aperture is
@@ -622,8 +626,10 @@ you want a source-dominated covariance, background it with
 `white_noise_level` and leave `surface_noise_level` at zero — then check the
 eigenvalue spread of `cov.covariance[0]` before trusting the surface.
 
-**`OASP` option letters that uacpy refuses.** `'V'`, `'H'`, `'R'`, `'U'`,
-`'F'` request multi-component output that the `.trf` reader would flatten, and
+**`OASP` option letters that uacpy refuses.** `'V'`, `'H'`, `'R'`, `'K'`,
+`'S'`, `'U'` request multi-component output that the `.trf` reader would
+flatten (`'F'` — Filon integration — is fine: it selects an integration
+scheme and adds no `.trf` component), and
 `'O'` moves the frequency integration onto a complex contour that the
 time-series synthesis cannot undo. Both raise rather than return a wrong
 answer, as does a custom `options` string without `'J'` under automatic
@@ -644,7 +650,7 @@ block instead.
 | `OASP` | `G` | Dispersion curves — `NMODES` plus two axis rows (`unoasp22.f:387-390`) |
 | `OASP` | `Z` | Two velocity-profile plot-axis rows (`unoasp22.f:466-467`) |
 | `OASP` | `E` | Patch-scattering parameters (`unoasp22.f:479`) |
-| `OASN` | `Z`, `z` | Two velocity-profile plot-axis rows (`unoasn21.f:297-298`) |
+| `OASN` | `Z`, `z` | Two velocity-profile plot-axis rows (`unoasn22.f:322-323`) |
 
 `OAST` *does* write the velocity-profile block, so `'Z'` is supported there, and
 its `'d'` (Doppler) frequency line carries `vrec`. `OASR` needs nothing uacpy

@@ -22,6 +22,7 @@ from uacpy.core.exceptions import ConfigurationError, UnsupportedFeatureError
 from uacpy.io.oases_writer import write_oassp_input
 from uacpy.io.oases_reader import read_oases_rhs_header
 from uacpy.models.base import RunMode
+from uacpy.tests.conftest import make_pekeris
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -29,13 +30,10 @@ from uacpy.models.base import RunMode
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _env(roughness=0.5):
-    return uacpy.Environment(
+    return make_pekeris(
         bathymetry=128.0,
         ssp=uacpy.SoundSpeedProfile(depths=[0, 128], data=[1500, 1500]),
-        bottom=uacpy.BoundaryProperties(
-            sound_speed=2300.0, density=2.65, attenuation=0.5,
-            roughness=roughness),
-    )
+        sound_speed=2300.0, density=2.65, roughness=roughness)
 
 
 def _source():
@@ -316,6 +314,32 @@ class TestRhsHeaderReader:
 # Model construction — single-config rule
 # ─────────────────────────────────────────────────────────────────────────────
 
+class TestScatteringOptionContracts:
+    """The OASS/OASSP scattering options map onto what the binaries actually
+    honour. Each test pins the *mechanism*, not the symptom."""
+
+    @pytest.mark.parametrize('spectrum', ['gaussian', 'goff-jordan'])
+    def test_the_two_real_spectra_are_accepted(self, spectrum):
+        # The discriminating counterpart to test_bad_spectrum_raises: the
+        # guard must not refuse the spectra OASES actually implements.
+        uacpy.OASSP(correlation_length=10.0, spectrum=spectrum)
+
+    def test_oassp_refuses_the_vendor_disabled_rescattering(self):
+        # The letter is parsed and then does nothing: every routine
+        # unoassp30.f:677-688 dispatches to has the `if (.not.rescat)` guard
+        # commented out with ROUGH2(II)=0 left live (oasvun31.f:76-80 and
+        # three siblings). Returning a single-scatter answer under a
+        # multiple-scattering label is the failure being prevented.
+        with pytest.raises(UnsupportedFeatureError, match='rescat|980402'):
+            uacpy.OASSP(correlation_length=10.0, multiple_scattering=True)
+
+    def test_oass_still_honours_multiple_scattering(self):
+        # The discriminating counterpart — the asymmetry is real, not a
+        # blanket refusal. oassun26.f:491, :685, :901 all test .not.rescat.
+        assert uacpy.OASS(interface=3, correlation_length=10.0,
+                          multiple_scattering=True).multiple_scattering
+
+
 @pytest.mark.requires_oases
 class TestModelConfiguration:
 
@@ -402,6 +426,78 @@ class TestModelConfiguration:
         assert {k: m._collapse[k] for k in expected} == expected
 
 
+@pytest.mark.requires_oases
+class TestScatteringInterfacePreflight:
+    """OASSP's ``.rhs`` reader consumes one record per wavenumber with no
+    interface filter, taking the scattering interface from the file's first
+    record (``oasvun31.f:66-70``, ``unoassp30.f:549``) — so exactly one
+    interface may be rough, and it must be a bottom one. Each violation is
+    named up front, before a mean-field run is spent producing a ``.rhs``
+    the post-processor cannot use (measured: with a rough surface the binary
+    scatters from the water record's empty spectrum, derives a zero
+    wavenumber step from the interleaved records and stops on
+    '>>> ERROR: Frequency mismatch in rhs file <<<')."""
+
+    @staticmethod
+    def _model():
+        return uacpy.OASSP(correlation_length=5.0, spectral_exponent=2.5,
+                           n_time_samples=256, freq_min=400.0,
+                           freq_max=600.0)
+
+    @staticmethod
+    def _run(model, env):
+        return model.run(env, _source(), _receiver(n_depths=2))
+
+    def test_rough_sea_surface_is_refused_by_name(self):
+        env = uacpy.Environment(
+            bathymetry=128.0,
+            ssp=uacpy.SoundSpeedProfile(depths=[0, 128], data=[1500, 1500]),
+            surface=uacpy.BoundaryProperties(acoustic_type='vacuum',
+                                             roughness=0.5),
+            bottom=uacpy.BoundaryProperties(
+                sound_speed=2300.0, density=2.65, attenuation=0.5,
+                roughness=0.5))
+        with pytest.raises(UnsupportedFeatureError,
+                           match='rough sea surface'):
+            self._run(self._model(), env)
+
+    def test_smooth_environment_is_refused_before_the_mean_field(self,
+                                                                 tmp_path):
+        # The raise happens before any binary launches: the pinned work dir
+        # stays empty rather than holding a spent mean-field run.
+        m = uacpy.OASSP(correlation_length=5.0, spectral_exponent=2.5,
+                        n_time_samples=256, freq_min=400.0, freq_max=600.0,
+                        work_dir=tmp_path, cleanup=False)
+        with pytest.raises(ConfigurationError, match='smooth'):
+            self._run(m, _env(roughness=0.0))
+        assert not any(tmp_path.iterdir())
+
+    def test_rms_roughness_does_not_rescue_a_smooth_environment(self):
+        # rms_roughness= overrides only the OASSP deck; the mean field still
+        # writes an empty .rhs, so the same refusal applies.
+        m = uacpy.OASSP(correlation_length=5.0, spectral_exponent=2.5,
+                        rms_roughness=0.5,
+                        n_time_samples=256, freq_min=400.0, freq_max=600.0)
+        with pytest.raises(ConfigurationError, match='rms_roughness'):
+            self._run(m, _env(roughness=0.0))
+
+    def test_two_rough_bottom_interfaces_are_refused(self):
+        from uacpy.core.environment import SeabedColumn, SedimentLayer
+        env = uacpy.Environment(
+            bathymetry=128.0,
+            ssp=uacpy.SoundSpeedProfile(depths=[0, 128], data=[1500, 1500]),
+            bottom=SeabedColumn(
+                layers=[SedimentLayer(thickness=10.0, sound_speed=1700.0,
+                                      density=1.8, attenuation=0.5,
+                                      roughness=0.3)],
+                halfspace=uacpy.BoundaryProperties(
+                    acoustic_type='half-space', sound_speed=2300.0,
+                    density=2.65, attenuation=0.5, roughness=0.5)))
+        with pytest.raises(UnsupportedFeatureError,
+                           match='rough bottom interfaces'):
+            self._run(self._model(), env)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Round trips against the real binaries
 # ─────────────────────────────────────────────────────────────────────────────
@@ -458,6 +554,28 @@ class TestChain:
         assert layer == _SEABED_LAYER
         assert 'volume= F' in echo
         assert 'Random number generator seed:        -123' in echo
+
+    def test_total_field_shares_the_mean_fields_sign_convention(self):
+        # scattered_only=False leaves the source arrays live, so the .trf is
+        # the total field; with the OASSP deck's rms roughness dialled to
+        # near-nothing the realization's contribution vanishes and the total
+        # converges to the mean field — the elementwise ratio then exposes
+        # the relative sign of the two Fields. Both ride the same
+        # travelling-wave convention, so the ratio is +1, not -1.
+        result = _run(rms_roughness=0.01, scattered_only=False)
+        mean = result.metadata['mean_field_result']
+        tot = np.asarray(result.data)
+        mf = np.asarray(mean.data)
+        sel = np.abs(mf) > np.percentile(np.abs(mf), 60)
+        ratio = tot[sel] / mf[sel]
+        assert np.median(np.abs(np.angle(ratio, deg=True))) < 20.0, (
+            "total/mean angle far from 0 deg — the two .trf payloads no "
+            "longer share a sign convention")
+        # Magnitude is only a sanity bound: the OASSP deck's 0.01-m rms
+        # differs from the mean-field deck's environment value, so the two
+        # runs see different coherent scattering loss (measured ratio ~1.35
+        # here); the convention discriminator is the angle above.
+        assert 0.3 < float(np.median(np.abs(ratio))) < 3.0
 
     def test_realization_is_reproducible_and_distinct(self, tmp_path):
         # R5/R6. unoassp30.f:535 ISEED = -123 - msft_0.

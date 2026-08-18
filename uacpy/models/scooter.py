@@ -301,6 +301,11 @@ class Scooter(PropagationModel):
 
         self.validate_inputs(env, source, receiver, run_mode=run_mode)
         reject_unsupported_ssp_interp('Scooter', self.interp_ssp)
+        # A 'precalc' bottom is staged verbatim as <base>.irc; a table in the
+        # wrong layout (typically a theta/|R|/phase angle table) aborts the
+        # binary with a bare Fortran backtrace, so the header is checked here,
+        # ahead of the launch.
+        self._reject_malformed_irc_bottom(env)
 
         # Broadband mode (BROADBAND or TIME_SERIES) requires a
         # frequency vector. The in-tree Python Hankel transform handles

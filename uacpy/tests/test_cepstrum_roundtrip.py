@@ -118,3 +118,15 @@ def test_long_pass_lifter_isolates_echo_quefrency_in_noise():
     )
     # The peak carries ~a/2 (two-sided split of the log-spectrum series).
     assert c[delay] > 0.5 * (a / 2)
+
+
+def test_inverse_complex_cepstrum_requires_the_namedtuple():
+    """A bare cepstrum array carries no delay field, so the linear-phase term
+    cannot be restored; the inverse demands the ComplexCepstrum namedtuple."""
+    import pytest
+    from uacpy.core.exceptions import ConfigurationError
+    x = np.roll(np.exp(-np.arange(64) / 8.0), 10)
+    cc = complex_cepstrum(x)
+    with pytest.raises(ConfigurationError, match="ComplexCepstrum"):
+        inverse_complex_cepstrum(cc.cepstrum)
+    np.testing.assert_allclose(inverse_complex_cepstrum(cc), x, atol=1e-12)

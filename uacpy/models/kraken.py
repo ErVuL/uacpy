@@ -56,11 +56,10 @@ from uacpy.models.base import (
 from uacpy.core.environment import Environment
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
-from uacpy.core.results import Result, Modes, Field
+from uacpy.core.results import Result, Modes, Field, PhaseReference
 from uacpy.core.constants import (
     parse_boundary_type,
     DEFAULT_SOUND_SPEED,
-    C_LOW_FACTOR_KRAKEN,
     PRESSURE_FLOOR,
 )
 from uacpy.core.exceptions import (
@@ -168,8 +167,8 @@ class Kraken(PropagationModel):
         :func:`_segmentation.segment_environment_by_range` pick segment
         edges from the union of bathymetry / RD-SSP / RD-bottom
         change-points, inserting intermediates wherever the gap
-        exceeds ``max_segment_length`` (2 km). Pass an explicit int
-        to override with a uniform linspace decomposition.
+        exceeds :data:`_segmentation._MAX_SEGMENT_LENGTH_M` (2 km). Pass
+        an explicit int to override with a uniform linspace decomposition.
     mode_points_per_meter : float, optional
         Mode-depth grid density in pts/m. ``None`` (default) derives it from
         the run as ``10 * f_max / c_min`` — the ~10 points/wavelength the
@@ -187,7 +186,7 @@ class Kraken(PropagationModel):
         boundary), ``kraken.exe`` otherwise. Forcing ``'kraken'`` on either
         raises ``ConfigurationError``.
     c_low : float, optional
-        Lower phase speed limit (m/s). None ⇒ 0.0 (``C_LOW_FACTOR_KRAKEN``),
+        Lower phase speed limit (m/s). None ⇒ 0.0,
         which makes KRAKEN compute cLow automatically — the modal-solver
         default. A positive c_low skips slower modes and excludes interfacial
         (Scholte / Stoneley) modes; set it to the minimum p-wave speed if KRAKEN
@@ -258,7 +257,7 @@ class Kraken(PropagationModel):
 
     Defaults auto-derived at ``run()`` time (override only when tuning):
 
-    - ``c_low=None`` → ``0.0`` (``C_LOW_FACTOR_KRAKEN``; KRAKEN computes cLow automatically)
+    - ``c_low=None`` → ``0.0`` (KRAKEN computes cLow automatically)
     - ``c_high=None`` → ``max(max(env.ssp), env.bottom.sound_speed) × 1.05``
     - ``n_mesh=0`` → Kraken picks mesh from frequency / wavelength.
     - TopOpt position 4 reads ``env.absorption`` (``Thorp`` / ``FrancoisGarrison``
@@ -316,7 +315,10 @@ class Kraken(PropagationModel):
         if self.c_low is not None:
             return float(self.c_low)
         if not env.has_elastic_bottom:
-            return C_LOW_FACTOR_KRAKEN * DEFAULT_SOUND_SPEED
+            # 0.0 hands the search floor to KRAKEN, which computes cLow
+            # automatically (kraken.htm, Phase Speed Limits) — the right
+            # choice for a fluid environment.
+            return 0.0
         speeds = [float(np.min(env.ssp.to_pairs()[:, 1]))]
         speeds.extend(env.bottom.all_sound_speeds())
         return min(speeds)
@@ -339,7 +341,7 @@ class Kraken(PropagationModel):
         f = np.atleast_1d(np.asarray(frequencies, dtype=float))
         f_max = float(np.max(f)) if f.size else 0.0
         speeds = [float(np.min(env.ssp.to_pairs()[:, 1]))]
-        if env.has_elastic_bottom or env.bottom is not None:
+        if env.bottom is not None:
             speeds.extend(s for s in env.bottom.all_sound_speeds() if s > 0)
         c_min = min(speeds) if speeds else DEFAULT_SOUND_SPEED
         needed = (MODE_POINTS_PER_WAVELENGTH * f_max / c_min) if f_max else 0.0
@@ -830,7 +832,7 @@ class Kraken(PropagationModel):
         )
         # --- modal-solver knobs ---
         self.interp_ssp = interp_ssp
-        # c_low default 0.0 (C_LOW_FACTOR_KRAKEN) → KRAKEN computes cLow
+        # c_low default 0.0 → KRAKEN computes cLow
         # automatically; a positive c_low skips slower/interfacial (Scholte /
         # Stoneley) modes. Stored raw (None preserved) so repr/copy stay clean;
         # resolved via ``_c_low_for`` at write time.
@@ -1058,6 +1060,11 @@ class Kraken(PropagationModel):
         ``ConfigurationError`` rather than producing a wrong field.
         """
         self._reject_precalc_surface(env)
+        # A 'precalc' bottom is staged verbatim as <root>.irc; a table in the
+        # wrong layout (typically a theta/|R|/phase angle table) aborts the
+        # binary with a bare Fortran backtrace, so the header is checked here,
+        # ahead of any launch.
+        self._reject_malformed_irc_bottom(env)
         complex_modes = (
             env.has_elastic_bottom
             or env.has_elastic_surface
@@ -1121,7 +1128,12 @@ class Kraken(PropagationModel):
             ``COHERENT_TL`` (default), ``INCOHERENT_TL``, ``BROADBAND``,
             or ``TIME_SERIES``. ``TIME_SERIES`` requires
             ``source_waveform`` + ``sample_rate``. ``INCOHERENT_TL`` sums
-            mode magnitudes and returns real dB TL (``kind='transmission_loss'``).
+            mode magnitudes and returns real dB TL (``kind='transmission_loss'``)
+            in ``Field.data`` with no phase reference — a magnitude sum has
+            no phase, so the complex slot AT parks it in is not preserved.
+            Bellhop's ``INCOHERENT_TL`` instead keeps complex Pa in
+            ``.data``; the two engines agree on ``.db``, the uniform
+            cross-engine surface for magnitude-sum results.
         frequencies : ndarray, optional
             Frequency vector (Hz) for native broadband computation. A
             multi-element grid uses TopOpt(6)='B' so kraken writes one
@@ -1375,24 +1387,17 @@ class Kraken(PropagationModel):
         wavenumber transform masks the same cells
         (``grn_reader._hankel_transform``); masking here keeps the two models'
         grids comparable cell by cell. ``'line'`` / ``'scaled'`` sources carry
-        no ``1/√r`` and are left alone, as they are in both codes.
+        no ``1/√r`` and are left alone, as they are in both codes. Column
+        masking and the warning come from the shared
+        :meth:`PropagationModel._mask_zero_range_columns`.
         """
         if source.source_type != 'point':
             return field
-        ranges = np.atleast_1d(np.asarray(receiver.ranges, dtype=float))
-        zero = np.abs(ranges) < np.finfo(float).tiny
-        if not zero.any():
-            return field
-        warnings.warn(
-            f"{self.model_name}: {int(zero.sum())} receiver range(s) at r = 0, "
-            "where the point-source cylindrical-spreading factor 1/sqrt(r) is "
-            "singular; those cells are returned as NaN (no data). Move the "
-            "receiver off the source axis (e.g. r = 1 m) to get a field value.",
-            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
-        )
-        data = np.array(field.data)
-        data[:, zero, ...] = np.nan
-        field.data = data
+        masked = self._mask_zero_range_columns(
+            field.data, receiver.ranges,
+            'the point-source cylindrical-spreading factor 1/sqrt(r)')
+        if masked is not field.data:
+            field.data = masked
         return field
 
     def _reinsert_nan_depths(self, field, receiver, keep):
@@ -1755,10 +1760,23 @@ class Kraken(PropagationModel):
         """Build the result Field from field.exe's ``.shd``: native-broadband
         ``(n_d, n_r, n_f)``, single-frequency complex pressure
         (``return_pressure``), or narrowband TL. field.exe's modal sum differs
-        from Scooter's Hankel path by an overall -1, negated here so every
-        coherent branch carries the ``'travelling_wave'`` phase reference.
-        ``RunMode.INCOHERENT_TL`` instead yields real dB TL with no phase
-        reference — a magnitude sum has no phase to reference."""
+        from Scooter's Hankel path by an overall -1, negated here — times
+        ``exp(-i*pi/4)`` for a line source — so every coherent branch carries
+        the ``'travelling_wave'`` phase reference, upcast to complex128 (the
+        ``.shd`` payload is complex64) so every uacpy engine returns one
+        dtype. ``RunMode.INCOHERENT_TL`` instead yields real dB TL with no
+        phase reference — a magnitude sum has no phase to reference."""
+        # EvaluateMod.f90:34 applies one prefactor i*SQRT(2*pi)*EXP(i*pi/4)
+        # to every source geometry; its pi/4 is the stationary-phase term of
+        # the POINT-source Hankel asymptote. The 2-D line-source field has no
+        # such term — its exact kernel already integrates to the modal sum —
+        # so field.exe's 'X' branch comes out exp(+i*pi/4) ahead of Scooter's
+        # line-source transform and needs the same exp(-i*pi/4) Bellhop
+        # applies via _LINE_SOURCE_PHASE. 'point' / 'scaled' need only the
+        # overall -1 shared by every branch.
+        phase_corr = np.complex128(-1.0)
+        if source.source_type == 'line':
+            phase_corr = -np.exp(-1j * np.pi / 4.0)
         if broadband:
             shd0 = read_shd_bin(str(shd_file))
             freqs_read = np.asarray(shd0['freqVec'], dtype=float)
@@ -1797,9 +1815,10 @@ class Kraken(PropagationModel):
                 # the standard sum times the 4π the 1 m free-field
                 # reference strips) — the form Scooter's Hankel path
                 # returns. field.exe is therefore the wanted field times
-                # -1, so a plain negation aligns the two; conjugating
-                # instead would flip the already-correct carrier sign.
-                p_stack[:, :, i_freq] = -shd_i['pressure'][0, 0, :, :]
+                # -1 (times e^{iπ/4} for a line source), so ``phase_corr``
+                # aligns the two; conjugating instead would flip the
+                # already-correct carrier sign.
+                p_stack[:, :, i_freq] = phase_corr * shd_i['pressure'][0, 0, :, :]
             field = Field(
                 data=p_stack,
                 coords={
@@ -1807,7 +1826,7 @@ class Kraken(PropagationModel):
                     'range': receiver.ranges,
                     'frequency': freqs_read,
                 },
-                phase_reference='travelling_wave',
+                phase_reference=PhaseReference.TRAVELLING_WAVE,
                 **self._result_kwargs(
                     source,
                     backend='field',
@@ -1821,8 +1840,9 @@ class Kraken(PropagationModel):
         elif return_pressure:
             shd_data = read_shd_bin(str(shd_file))
             # (Ntheta, Nsz, Nrz, Nrr) -> (nrz, nrr) at the deck's single
-            # bearing and source depth.
-            p = -shd_data['pressure'][0, 0, :, :]
+            # bearing and source depth; complex128 like every other engine.
+            p = phase_corr * np.asarray(
+                shd_data['pressure'][0, 0, :, :], dtype=np.complex128)
             field = Field(
                 data=p,
                 coords={'depth': receiver.depths, 'range': receiver.ranges},
@@ -1837,7 +1857,7 @@ class Kraken(PropagationModel):
             )
             # Same negated-Hankel convention as the COHERENT_TL / broadband
             # branches, so the complex pressure carries one phase reference.
-            field.phase_reference = 'travelling_wave'
+            field.phase_reference = PhaseReference.TRAVELLING_WAVE
         else:
             field = read_shd_file(shd_file)
             if run_mode == RunMode.INCOHERENT_TL:
@@ -1850,12 +1870,16 @@ class Kraken(PropagationModel):
                 phase_reference = None
             else:
                 # field.exe emits the modal sum with a prefactor that differs
-                # from Scooter's Hankel path by an overall -1 (see the broadband
-                # branch above). Negate here too and tag travelling_wave so the
-                # COHERENT_TL complex pressure carries the SAME phase convention
-                # as the broadband / return_pressure branches and as Scooter
-                # (|TL| is unchanged; this only fixes the complex phase).
-                field.data = -field.data
+                # from Scooter's Hankel path by an overall -1 — times
+                # e^{+iπ/4} for a line source (see the broadband branch
+                # above). Apply ``phase_corr`` here too, upcast to
+                # complex128, and tag travelling_wave so the COHERENT_TL
+                # complex pressure carries the SAME phase convention and
+                # dtype as the broadband / return_pressure branches and as
+                # Scooter (|TL| is unchanged; this only fixes the complex
+                # phase).
+                field.data = phase_corr * np.asarray(
+                    field.data, dtype=np.complex128)
                 phase_reference = 'travelling_wave'
             self._stamp_result(
                 field, source, backend='field',

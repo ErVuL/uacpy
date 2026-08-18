@@ -107,7 +107,6 @@ Each model declares which **env shapes** it consumes natively:
 
 ```python
 self._supports_altimetry                       = False
-self._supports_range_dependent_surface         = False
 self._supports_range_dependent_bathymetry      = True
 self._supports_range_dependent_ssp             = True
 self._supports_range_dependent_bottom          = True
@@ -119,11 +118,12 @@ self._supports_rough_surface                   = False
 self._supports_rough_bottom                    = False
 ```
 
-`_supports_range_dependent_surface` is `False` for **every** model: the AT
-solvers carry a single global top boundary (only the SSP varies with range),
-so — exactly like a range-dependent *bottom* in Kraken — a range-dependent
-`Surface` is collapsed, not honoured. The `Surface` carrier still exists to
-build / fetch / plot a marginal ice zone.
+There is no `range_dependent_surface` flag: no engine consumes a
+range-dependent surface deck (the AT solvers carry one global top boundary,
+RAM one attenuator, OASES one top half-space), so a range-dependent `Surface`
+is collapsed **unconditionally** in `_project_environment()` —
+`collapse['surface']` picks the reduction method. The `Surface` carrier still
+exists to build / fetch / plot a marginal ice zone.
 
 Flip True for each axis the model handles natively. Anything left False
 that appears in `env` on `run()` is **collapsed** by
@@ -239,9 +239,8 @@ refl_io.py                          .brc / .trc / .irc reflection-
                                     coefficient files
 bathy_io.py                         .bty / .ati bathymetry / altimetry
 file_manager.py                     FileManager — see §6.1
-units.py                            km_to_m, m_to_km, deg_to_rad,
-                                    rad_to_deg (USE THESE at file
-                                    boundaries)
+units.py                            km_to_m, m_to_km, deg_to_rad
+                                    (USE THESE at file boundaries)
 _fortran_helpers.py                 detect_endian, read_fortran_record,
                                     read_vector — Fortran unformatted
                                     direct-access helpers
@@ -318,9 +317,8 @@ These are the physics-agnostic primitives every model consumes:
 - `constants.py` — `DEFAULT_SOUND_SPEED`, `TL_MAX_DB`, `PRESSURE_FLOOR`,
   the broadband-grid defaults (`DEFAULT_BROADBAND_N_FREQS`,
   `DEFAULT_BROADBAND_BANDWIDTH_FACTOR`), and the phase-speed search
-  factors (`C_LOW_FACTOR` for FFP solvers, `C_LOW_FACTOR_KRAKEN` for
-  the modal solver, `C_HIGH_FACTOR`). Promote any new "magic number"
-  to this module rather than embedding it.
+  factors (`C_LOW_FACTOR` for FFP solvers, `C_HIGH_FACTOR`). Promote any
+  new "magic number" to this module rather than embedding it.
 - `exceptions.py` — `UACPYError` (the base every other one derives
   from, so `except UACPYError` is the catch-all) plus
   `ConfigurationError`, `ExecutableNotFoundError`, `ModelExecutionError`,

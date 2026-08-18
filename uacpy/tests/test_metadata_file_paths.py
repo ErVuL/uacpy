@@ -166,16 +166,15 @@ def test_sparc_paths_present_when_cleanup_false(tmp_path):
                          ranges=np.linspace(500, 1500, 3))
     sp = SPARC(verbose=False, work_dir=tmp_path)
     field = sp.run(env, src, rcv)
-    # SPARC writes per-depth/.rts under base_name; one of grn/rts should
-    # be picked up by the helper at the wrapper base_name.
-    assert (
-        'rts_file' in field.metadata
-        or 'grn_file' in field.metadata
-        or 'prt_file' in field.metadata
-    ), (
-        f"Expected at least one SPARC output path in metadata; "
+    # output_mode='R' (the default) writes the received time series to the
+    # first run's ``.rts``; that is SPARC's primary output and must be the
+    # published path — an any-of-three OR here was satisfiable by a run
+    # that only attached the .prt diagnostics.
+    assert 'rts_file' in field.metadata, (
+        f"Expected the SPARC .rts path in metadata; "
         f"got keys: {list(field.metadata)}"
     )
+    assert os.path.exists(field.metadata['rts_file'])
 
 
 @pytest.mark.slow

@@ -15,6 +15,7 @@ import uacpy.data as data
 from uacpy.core.exceptions import DataFetchError
 from uacpy.data import mars
 from uacpy.data.environment import _AUTO_BOTTOM_ORDER
+from uacpy.tests._cache_builders import _skip_or_fail
 
 
 def _feature(lat, lon, *, grain_um=None, mud=None, sand=None, gravel=None,
@@ -133,12 +134,29 @@ def test_bottom_from_mars(monkeypatch):
     assert bp.sound_speed > 1510.0                       # coarse sand: faster
 
 
+def test_bottom_from_mars_stamps_sample_provenance(monkeypatch):
+    """Regression: a MARS hit can be up to max_distance_km from the request,
+    so the bottom must carry a ``DataProvenance`` with the sample's own
+    coordinates — the stamp the local grain-size DB already carries —
+    rather than a bare ``BoundaryProperties``."""
+    _install(monkeypatch, _collection(_feature(-34.4, 151.31, grain_um=500.0)))
+    bp = mars.fetch_bottom_mars(_P)
+    assert [p.source.id for p in bp.data_sources] == ['mars']
+    prov = bp.data_sources[0]
+    assert prov.data_point == (-34.4, 151.31)
+    assert prov.requested_point == _P
+    assert prov.offset_km == pytest.approx(44.5, abs=0.5)
+
+
 def test_bottom_transect(monkeypatch):
     _install(monkeypatch, _collection(_feature(-34.0, 151.31, grain_um=500.0)))
     bottom = mars.fetch_bottom_mars_transect(
         (-34.0, 151.3), (-34.0, 151.8), n_points=3)
     assert np.allclose(bottom.halfspace_sound_speed,
                        bottom.halfspace_sound_speed[0])
+    # Each rebuilt column carries the sample's provenance stamp.
+    for col in bottom.columns:
+        assert [p.source.id for p in col.data_sources] == ['mars']
 
 
 # ── registry wiring ─────────────────────────────────────────────────────────
@@ -199,18 +217,12 @@ def test_fetch_environment_bottom_sources_mars(monkeypatch, tmp_path):
 
 # ── live ────────────────────────────────────────────────────────────────────
 
-_NETWORK_DOWN_TOKENS = ('could not reach', 'timed out', 'timeout', 'connection',
-                        'unreachable', 'http 502', 'http 503', 'http 504')
-
-
 @pytest.mark.requires_network
 def test_live_mars_point():
     try:
         s = mars.fetch_mars_sediment((-34.0, 151.5))     # off Sydney
     except DataFetchError as exc:
-        if any(tok in exc.message.lower() for tok in _NETWORK_DOWN_TOKENS):
-            pytest.skip(f"AusSeabed WFS unreachable: {exc.message}")
-        pytest.fail(f"AusSeabed WFS rejected the query: {exc.message}")
+        _skip_or_fail(exc, 'AusSeabed WFS')
     assert -5.0 < s['phi'] < 13.0
 
 

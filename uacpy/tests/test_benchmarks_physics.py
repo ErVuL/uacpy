@@ -91,3 +91,17 @@ def test_constant_absorption_adds_the_expected_loss(model_name):
     # range and the measured loss sits at or just above the prediction.
     assert np.all(extra > 0.9 * predicted), f"{extra} vs {predicted}"
     assert np.all(extra < 1.4 * predicted), f"{extra} vs {predicted}"
+
+
+def test_unesco_and_delgrosso_documented_pair_at_15c_35psu_surface():
+    """DOCUMENTATION.md §14 quotes this pair as its worked example:
+    ``soundspeed_unesco(15, 35, 0)`` = 1506.675 m/s and
+    ``soundspeed_delgrosso(15, 35, 0)`` = 1506.667 m/s — the two standard
+    algorithms (UNESCO/Chen & Millero; Del Grosso NRL II, σ = 0.05 m/s)
+    agreeing to ~8 mm/s at the reference point. abs=1e-3 is the doc's own
+    rounding (the values print as 1506.6746 / 1506.6666)."""
+    from uacpy.core.acoustics import soundspeed_delgrosso, soundspeed_unesco
+    assert soundspeed_unesco(15.0, 35.0, 0.0) == pytest.approx(1506.675,
+                                                               abs=1e-3)
+    assert soundspeed_delgrosso(15.0, 35.0, 0.0) == pytest.approx(1506.667,
+                                                                  abs=1e-3)

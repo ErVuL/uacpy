@@ -12,36 +12,86 @@ from uacpy.acoustic_signal.waveforms import (
     gaussian_pulse, hfm_chirp, lfm_chirp, ricker_wavelet, tone_burst,
 )
 from uacpy.acoustic_signal.noise_synthesis import (
-    add_noise, make_bandlimited_noise, make_noise_waveform,
+    add_noise, fourier_synthesis, make_bandlimited_noise, make_noise_waveform,
 )
 
 
 class TestGenerators:
-    """Pulse / chirp generators return finite samples on plausible inputs."""
+    """Pulse / chirp generators produce the documented waveform, not just
+    finite samples."""
 
-    def test_gaussian_pulse_shape(self):
-        time = np.linspace(0, 0.1, 1024)
+    @staticmethod
+    def _instantaneous_frequency(s, dt):
+        """f_inst(t) from the analytic signal's unwrapped phase, on the
+        midpoint time grid of the finite difference."""
+        from scipy.signal import hilbert
+        phase = np.unwrap(np.angle(hilbert(s)))
+        return np.diff(phase) / (2.0 * np.pi * dt)
+
+    def test_gaussian_pulse_centred_at_delay(self):
+        # dt = 1e-4 s puts delay (index 500) and delay+duration (index 600)
+        # exactly on the grid, so the peak and the 1/e point are exact.
+        time = np.linspace(0, 0.1, 1001)
         s = gaussian_pulse(time, delay=0.05, duration=0.01)
         assert len(s) == len(time)
-        assert np.all(np.isfinite(s))
+        assert int(np.argmax(s)) == 500          # envelope peak at delay
+        assert s[500] == 1.0
+        # exp(-((t-delay)/duration)^2): one duration off the peak is 1/e.
+        assert s[600] == pytest.approx(np.exp(-1.0), rel=1e-12)
+        assert s[400] == pytest.approx(np.exp(-1.0), rel=1e-12)
 
-    def test_lfm_chirp_runs(self):
-        fs = 10_000.0
-        t, s = lfm_chirp(fmin=100, fmax=2000, duration=0.1, sample_rate=fs)
+    def test_lfm_chirp_sweeps_fmin_to_fmax(self):
+        fs, fmin, fmax, T = 20_000.0, 500.0, 1500.0, 0.2
+        t, s = lfm_chirp(fmin=fmin, fmax=fmax, duration=T, sample_rate=fs)
         assert len(t) == len(s)
-        assert np.all(np.isfinite(s))
+        f_inst = self._instantaneous_frequency(s, 1.0 / fs)
+        tm = 0.5 * (t[:-1] + t[1:])
+        # Hilbert edge ripple contaminates the ends, so fit the (linear)
+        # interior and read the endpoints off the fit: measured errors are
+        # < 1e-4 Hz at both ends, so 1 Hz on a 1000 Hz sweep is generous.
+        interior = (tm > 0.1 * T) & (tm < 0.9 * T)
+        slope, intercept = np.polyfit(tm[interior], f_inst[interior], 1)
+        assert intercept == pytest.approx(fmin, abs=1.0)
+        assert slope * T + intercept == pytest.approx(fmax, abs=1.0)
 
-    def test_hfm_chirp_runs(self):
-        fs = 10_000.0
-        t, s = hfm_chirp(fmin=100, fmax=2000, duration=0.1, sample_rate=fs)
-        assert len(t) == len(s)
-        assert np.all(np.isfinite(s))
+    def test_hfm_chirp_frequency_is_hyperbolic_in_time(self):
+        # HFM == linear *period* modulation: 1/f_inst(t) is linear in t,
+        # running from 1/fmin to 1/fmax (Abraham §8.3.6's pulse).
+        fs, fmin, fmax, T = 20_000.0, 500.0, 1500.0, 0.2
+        t, s = hfm_chirp(fmin=fmin, fmax=fmax, duration=T, sample_rate=fs)
+        period = 1.0 / self._instantaneous_frequency(s, 1.0 / fs)
+        tm = 0.5 * (t[:-1] + t[1:])
+        interior = (tm > 0.1 * T) & (tm < 0.9 * T)
+        slope, intercept = np.polyfit(tm[interior], period[interior], 1)
+        # Endpoint errors measured at 7e-8 s (P(0)) and 3e-8 s (P(T));
+        # 1e-5 s against a 1.3e-3 s period span is generous.
+        assert intercept == pytest.approx(1.0 / fmin, abs=1e-5)
+        assert slope * T + intercept == pytest.approx(1.0 / fmax, abs=1e-5)
+        # Discriminating half: the period really is linear (residual < 2 %
+        # of the span; an LFM period fitted the same way leaves ~20 %).
+        resid = period[interior] - (slope * tm[interior] + intercept)
+        assert np.max(np.abs(resid)) < 0.02 * (1.0 / fmin - 1.0 / fmax)
 
-    def test_ricker_wavelet_runs(self):
+    def test_ricker_wavelet_peaks_at_requested_frequency(self):
         time = np.linspace(0, 0.1, 1024)
-        s = ricker_wavelet(time, frequency=200.0)
+        f0 = 200.0
+        s = ricker_wavelet(time, frequency=f0)
         assert len(s) == len(time)
-        assert np.all(np.isfinite(s))
+        # Spectral peak at the nominal frequency (within one rFFT bin).
+        freqs = np.fft.rfftfreq(len(time), time[1] - time[0])
+        peak = freqs[int(np.argmax(np.abs(np.fft.rfft(s))))]
+        assert abs(peak - f0) <= freqs[1]
+        # Zero mean: the Ricker is the second derivative of a Gaussian and
+        # the u = 2πFt − 8 centring makes the truncation at t=0 negligible
+        # (measured mean -2.5e-9 against a 0.443 lobe).
+        assert abs(s.mean()) < 1e-6
+        # The central lobe at u = 0 (t = 4/(πF)) is a TROUGH of
+        # 0.5·(−0.5)·√π = −0.25·√π ≈ −0.4431 — the docs' "−0.44" value.
+        # abs=1e-3 covers the grid not sampling u = 0 exactly.
+        i0 = int(np.argmin(s))
+        assert s[i0] == pytest.approx(-0.25 * np.sqrt(np.pi), abs=1e-3)
+        assert time[i0] == pytest.approx(4.0 / (np.pi * f0),
+                                         abs=time[1] - time[0])
 
     def test_tone_burst_peaks_at_requested_frequency(self):
         f = 1000.0
@@ -704,3 +754,173 @@ def test_mseq_polarity_matches_dsss_m_sequence():
     syms = np.array([1.0, -1.0, 1.0])
     rec = despread(spread(syms, s), s)
     np.testing.assert_allclose(rec.real, syms, atol=1e-12)
+
+
+def test_more_degenerate_inputs_raise_typed_errors():
+    """Degenerate parameters raise ConfigurationError, not ZeroDivisionError /
+    ValueError / silently empty output."""
+    from uacpy.core.exceptions import ConfigurationError
+    from uacpy.acoustic_signal.sequences import bpsk_modulate
+    from uacpy.acoustic_signal.noise_synthesis import synthesize_noise_from_psd
+    from uacpy.acoustic_signal.system_id import FRF
+    with pytest.raises(ConfigurationError):       # chip rate of zero
+        bpsk_modulate(np.array([1, -1]), 100.0, 1000.0, 0.0)
+    with pytest.raises(ConfigurationError):       # zero-length realisation
+        synthesize_noise_from_psd(np.ones(8), np.linspace(10, 100, 8),
+                                  duration=0)
+    with pytest.raises(ConfigurationError):       # burst rounds to 0 samples
+        tone_burst(1000.0, 1, 400.0)
+    rng = np.random.default_rng(5)
+    u = rng.standard_normal(64)
+    y = np.convolve(u, [1.0, 0.5], mode="full")[:64]
+    with pytest.raises(ConfigurationError, match="m .*must be <= N"):
+        FRF().compute_lsfir(y, u, 1000.0, m=100, N=64)
+
+
+def test_add_noise_accepts_a_plain_list():
+    out = add_noise([0.0] * 1000, 1000.0, 100.0, 50.0, 100.0, 50.0,
+                    rng=np.random.default_rng(6))
+    assert isinstance(out, np.ndarray) and out.shape == (1000,)
+    assert np.all(np.isfinite(out)) and np.std(out) > 0
+
+
+class TestSparcPulseLibraryShapes:
+    """The 11-letter SPARC pulse library accepts every documented code and
+    gates each pulse as ``cans.m`` does."""
+
+    @pytest.mark.parametrize('code', list('PRASHNMGTCE'))
+    def test_all_eleven_shapes_accepted(self, code):
+        from uacpy.acoustic_signal.waveforms import sparc_pulse
+        t = np.linspace(-0.05, 0.1, 512)
+        s, title = sparc_pulse(t, 2 * np.pi * 100.0, code)
+        assert s.shape == t.shape
+        assert np.all(np.isfinite(s))
+        assert isinstance(title, str) and title
+        assert np.any(s != 0)
+        # Every shape but the sinc is gated to t > 0 (the sinc is the one
+        # documented two-sided pulse).
+        if code != 'C':
+            assert np.all(s[t < 0] == 0)
+
+    def test_unknown_code_raises(self):
+        from uacpy.core.exceptions import ConfigurationError
+        from uacpy.acoustic_signal.waveforms import sparc_pulse
+        with pytest.raises(ConfigurationError, match='Unknown pulse type'):
+            sparc_pulse(np.linspace(0, 0.1, 64), 2 * np.pi * 100.0, 'Z')
+
+    def test_nwave_is_gated_to_one_period(self):
+        from uacpy.acoustic_signal.waveforms import nwave
+        f = 100.0
+        t = np.linspace(-0.005, 0.02, 1001)
+        s = nwave(t, f)
+        outside = (t < 0) | (t > 1.0 / f)
+        assert np.all(s[outside] == 0)
+        inside = (t > 0) & (t < 1.0 / f)
+        w = 2 * np.pi * f
+        np.testing.assert_allclose(
+            s[inside],
+            np.sin(w * t[inside]) - 0.5 * np.sin(2 * w * t[inside]),
+            atol=1e-12)
+
+
+class TestMseqBounds:
+    """``mseq`` order bounds and chip alphabet."""
+
+    def test_mseq_rejects_out_of_range_order(self):
+        from uacpy.core.exceptions import ConfigurationError
+        from uacpy.acoustic_signal.sequences import mseq
+        for bad in (0, 1, 16, -3):
+            with pytest.raises(ConfigurationError, match='between 2 and 15'):
+                mseq(bad)
+
+    def test_mseq_chips_are_plus_minus_one_with_full_length(self):
+        from uacpy.acoustic_signal.sequences import mseq
+        for m in (2, 7, 15):
+            s = mseq(m)
+            assert len(s) == 2 ** m - 1
+            assert set(np.unique(s)) == {-1.0, 1.0}
+
+
+class TestMakeMseqProbe:
+    """Structure of the channel-sounding probe (docs/guide/signal.md §8):
+    0.2 s zero leader, whole BPSK'd ``mseq(10)`` periods at chip rate
+    ``(fmax − fmin)/2`` on carrier ``(fmin + fmax)/2``, normalised to 0.95
+    full scale and zero-filled to exactly ``round(T_tot·fs)`` samples."""
+
+    FS = 10_000.0
+    FMIN, FMAX = 1000.0, 2000.0    # fc = 1500 Hz, 500 chips/s → 20 smp/chip
+    N_PERIOD = 1023 * 20           # mseq(10) → 1023 chips
+
+    def _probe(self, T_tot=5.0):
+        from uacpy.acoustic_signal.sequences import make_mseq_probe
+        return make_mseq_probe(self.FMIN, self.FMAX, self.FS, T_tot)
+
+    def test_length_is_exactly_the_requested_duration(self):
+        assert self._probe().size == 50_000     # round(5.0 * 10 kHz)
+
+    def test_leader_is_zero_and_peak_is_095_full_scale(self):
+        probe = self._probe()
+        assert np.all(probe[:int(0.2 * self.FS)] == 0.0)
+        assert np.max(np.abs(probe)) == pytest.approx(0.95)
+
+    def test_whole_periods_repeat_and_tail_is_zero_filled(self):
+        # 50 000 − 2 000 leader samples fit exactly two 20 460-sample
+        # periods; a period is never truncated.
+        probe = self._probe()
+        lead = int(0.2 * self.FS)
+        seg1 = probe[lead:lead + self.N_PERIOD]
+        seg2 = probe[lead + self.N_PERIOD:lead + 2 * self.N_PERIOD]
+        np.testing.assert_array_equal(seg1, seg2)
+        assert np.any(seg1 != 0)
+        assert np.all(probe[lead + 2 * self.N_PERIOD:] == 0.0)
+
+    def test_probe_power_occupies_the_requested_band(self):
+        probe = self._probe()
+        freqs = np.fft.rfftfreq(probe.size, 1.0 / self.FS)
+        power = np.abs(np.fft.rfft(probe)) ** 2
+        in_band = (freqs >= self.FMIN) & (freqs <= self.FMAX)
+        # Chip rate (fmax − fmin)/2 puts the BPSK main lobe (first sinc
+        # nulls) exactly on [fmin, fmax]; measured in-band fraction 0.91.
+        assert power[in_band].sum() / power.sum() > 0.85
+        assert self.FMIN <= freqs[int(np.argmax(power))] <= self.FMAX
+
+    def test_too_short_for_leader_plus_one_period_raises(self):
+        from uacpy.core.exceptions import ConfigurationError
+        # One period lasts 2.046 s, so 1 s cannot hold leader + period.
+        with pytest.raises(ConfigurationError, match='too short'):
+            self._probe(T_tot=1.0)
+
+
+class TestFourierSynthesis:
+    """AT ``stack.m`` translation: raw-DFT synthesis on the input frequency
+    grid with the one-sided spectrum doubled, plus the ``Tstart`` phase-ramp
+    warning (docs/guide/signal.md §9)."""
+
+    def test_single_bin_synthesises_the_expected_cosine(self):
+        N, df = 64, 10.0
+        freqs = np.arange(N) * df           # grid starts at DC: no warning
+        H = np.zeros(N, dtype=complex)
+        H[8] = 3.0                          # one 80 Hz bin, real amplitude
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', UserWarning)
+            t, x = fourier_synthesis(H, freqs)
+        assert t[0] == 0.0 and t.size == x.size == N
+        # 2·Re{ifft}: a single one-sided bin of amplitude A comes back as
+        # (2A/N)·cos(2π f t) on the DFT time grid, exact to machine eps.
+        np.testing.assert_allclose(
+            x, (2.0 * 3.0 / N) * np.cos(2 * np.pi * 80.0 * t), atol=1e-12)
+
+    def test_offset_band_without_tstart_warns_of_phase_ramp(self):
+        freqs = np.arange(10.0, 100.0, 10.0)     # frequencies[0] > 0
+        H = np.ones(freqs.size, dtype=complex)
+        with pytest.warns(UserWarning, match='phase ramp'):
+            fourier_synthesis(H, freqs)
+
+    def test_tstart_silences_the_warning_and_anchors_the_time_axis(self):
+        freqs = np.arange(10.0, 100.0, 10.0)
+        H = np.ones(freqs.size, dtype=complex)
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', UserWarning)
+            t, x = fourier_synthesis(H, freqs, Tstart=0.5)
+        assert t[0] == pytest.approx(0.5)
+        assert x.shape == freqs.shape

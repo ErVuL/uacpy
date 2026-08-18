@@ -224,30 +224,6 @@ class TestSSPReadWriteRoundtrip:
         with pytest.raises(ConfigurationError, match="2-D"):
             write_ssp(out, np.array([0.0, 5.0]), np.zeros(5))
 
-    def test_read_ssp_3d_canonical_bellhop3d_file(self):
-        """read_ssp_3d must parse Bellhop3D's Munk3D.ssp (vectors and
-        per-(z,y) SSP rows each on one line with Nx values)."""
-        from uacpy.io.oalib_reader import read_ssp_3d
-        path = (_AT_REF_DIR / "Bellhop3DTests" / "MunkRot" / "Munk3D.ssp")
-        if not path.exists():
-            pytest.skip(f"reference Bellhop3D file missing: {path}")
-        r = read_ssp_3d(path)
-        assert r['Nx'] == 27
-        assert r['Ny'] == 3
-        assert r['Nz'] == 7
-        assert r['Segx'].shape == (27,)
-        assert r['Segy'].shape == (3,)
-        assert r['Segz'].shape == (7,)
-        # Segx/Segy are km on disk and returned in metres; Segz is already m.
-        np.testing.assert_allclose(r['Segy'], [0.0, 100_000.0, 200_000.0])
-        np.testing.assert_allclose(
-            r['Segz'], [0.0, 1000.0, 2000.0, 3000.0, 4000.0, 5000.0, 6000.0]
-        )
-        assert r['c_mat'].shape == (7, 3, 27)
-        # Munk3D.ssp repeats the same SSP at every (z,y); spot-check.
-        assert r['c_mat'][0, 0, 0] == pytest.approx(1549.617363)
-        assert r['c_mat'][6, 2, 0] == pytest.approx(1549.617363)
-
 
 class TestArrivalsReaderTokenStream:
     """``read_arr_file`` must tolerate Fortran records that wrap to multiple
@@ -452,26 +428,39 @@ class TestShdNoDataCells:
     (Bellhop no-ray cells, an empty KRAKEN modal sum) — surface as NaN,
     uacpy's no-data convention."""
 
-    def test_read_shd_asc_zero_pressure_is_nan(self, tmp_path):
-        from uacpy.io.oalib_reader import read_shd_asc
-        # 1 freq, 1 theta, 1 source, 2 receiver depths, 2 ranges; the
-        # (depth 0, range 0) cell is an exact complex zero = no data.
-        header = [
-            "'test'", "'rectilin'",
-            "1 1 1 2 2", "100.0 0.0",
-            "100.0",             # freq_vec
-            "0.0",               # theta
-            "50.0",              # s_z
-            "10.0", "20.0",      # r_z
-            "100.0", "200.0",    # r_r
+    @staticmethod
+    def _write_bin(path, rows):
+        """Emit a tiny little-endian direct-access ``.shd`` (one frequency,
+        one bearing, one source, two receiver depths, two ranges) in the
+        record layout of ``misc/RWSHDFile.f90:100-114``, whose
+        ``LRecl = MAX(41, 2*Nfreq, …)`` is counted in 4-byte words."""
+        recl = 41
+        rec_bytes = 4 * recl
+        records = [
+            np.array([recl], '<i4').tobytes() + b'title'.ljust(80),
+            b'rectilin'.ljust(10),
+            (np.array([1, 1, 1, 1, 1, 2, 2], '<i4').tobytes()
+             + np.array([100.0, 0.0], '<f8').tobytes()),
+            np.array([100.0], '<f8').tobytes(),          # freqVec
+            np.array([0.0], '<f8').tobytes(),            # theta
+            np.array([0.0], '<f8').tobytes(),            # Sx
+            np.array([0.0], '<f8').tobytes(),            # Sy
+            np.array([50.0], '<f4').tobytes(),           # Sz (REAL(KIND=4))
+            np.array([10.0, 20.0], '<f4').tobytes(),     # Rz
+            np.array([100.0, 200.0], '<f8').tobytes(),   # Rr
+        ] + [np.array(row, '<f4').tobytes() for row in rows]
+        path.write_bytes(b''.join(r.ljust(rec_bytes, b'\x00') for r in records))
+        return path
+
+    def test_read_shd_bin_zero_pressure_is_nan(self, tmp_path):
+        from uacpy.io.oalib_reader import read_shd_bin
+        # The (depth 0, range 0) cell is an exact complex zero = no data.
+        rows = [
+            [0.0, 0.0, 0.5, 0.25],     # depth 10 m: no-data, 0.5+0.25j
+            [1.0, 0.0, 2.0, -1.0],     # depth 20 m: 1+0j, 2-1j
         ]
-        pressure_rows = [
-            "0.0", "0.0", "0.5", "0.25",     # depth 10 m: no-data, 0.5+0.25j
-            "1.0", "0.0", "2.0", "-1.0",     # depth 20 m: 1+0j, 2-1j
-        ]
-        p = tmp_path / "t.shd.asc"
-        p.write_text("\n".join(header + pressure_rows) + "\n")
-        pr = read_shd_asc(p)['pressure']
+        pr = read_shd_bin(
+            str(self._write_bin(tmp_path / 't.shd', rows)))['pressure'][0, 0]
         assert pr.shape == (2, 2)
         assert np.isnan(pr[0, 0])
         assert pr[0, 1] == pytest.approx(0.5 + 0.25j)
@@ -859,10 +848,11 @@ def test_surface_halfspace_does_not_leak_into_the_water_column():
 
 
 class TestPhaseSpeedBoundsForParameterFreeBottoms:
-    """A vacuum/rigid boundary has no sound speed, but BoundaryProperties still
-    carries the constructor default. Capping c_high on that placeholder
-    truncates the mode spectrum (3 of 7 modes, 10.6 dB, on a 100 m rigid guide
-    at 50 Hz)."""
+    """A non-geoacoustic boundary (vacuum, rigid, or a reflection table) has
+    no physical sound speed, but BoundaryProperties still carries the
+    constructor default. Capping c_high on that placeholder truncates the
+    mode spectrum (3 of 7 modes, 10.6 dB, on a 100 m rigid guide at 50 Hz;
+    a 'file' bottom's 1600 m/s placeholder capped cHigh at 1680 m/s)."""
 
     @staticmethod
     def _env(bottom):
@@ -870,7 +860,7 @@ class TestPhaseSpeedBoundsForParameterFreeBottoms:
         return uacpy.Environment(name='b', bathymetry=100.0, ssp=1500.0,
                                  bottom=bottom)
 
-    @pytest.mark.parametrize('kind', ['rigid', 'vacuum'])
+    @pytest.mark.parametrize('kind', ['rigid', 'vacuum', 'file', 'precalc'])
     def test_parameter_free_bottom_is_unbounded_above(self, kind):
         from uacpy.core import BoundaryProperties
         from uacpy.core.constants import DEFAULT_C_MAX_UNBOUNDED
@@ -878,6 +868,34 @@ class TestPhaseSpeedBoundsForParameterFreeBottoms:
         _, c_high = resolve_phase_speed_bounds(
             self._env(BoundaryProperties(acoustic_type=kind)))
         assert c_high == DEFAULT_C_MAX_UNBOUNDED
+
+    def test_file_bottom_deck_carries_the_unbounded_c_high(self, tmp_path):
+        """The resolved bound must reach the deck itself: a 'file' bottom's
+        cLow/cHigh line carries the unbounded value, not a cap derived from
+        the 1600 m/s placeholder."""
+        import uacpy
+        from uacpy.core import BoundaryProperties
+        from uacpy.core.constants import BoundaryType, DEFAULT_C_MAX_UNBOUNDED
+        from uacpy.io.oalib_writer import (
+            resolve_phase_speed_bounds, write_kraken_env_file)
+        brc = tmp_path / 'table.brc'
+        brc.write_text("2\n0.0 1.0 180.0\n90.0 0.5 175.0\n")
+        env = self._env(BoundaryProperties(acoustic_type='file',
+                                           reflection_file=brc))
+        c_low, c_high = resolve_phase_speed_bounds(env)
+        out = tmp_path / 'case.env'
+        write_kraken_env_file(
+            out, env, uacpy.Source(depths=50.0, frequencies=100.0),
+            uacpy.Receiver(depths=[50.0], ranges=[1000.0]),
+            ssp_topopt='C', surface_type=BoundaryType.VACUUM,
+            bottom_type=BoundaryType.FILE, frequencies=None,
+            n_mesh=0, rmax_m=10000.0, c_low=c_low, c_high=c_high)
+        lines = out.read_text().splitlines()
+        bounds_line = next(
+            ln for ln in lines
+            if len(ln.split()) == 2
+            and ln.split()[1] == f"{DEFAULT_C_MAX_UNBOUNDED:.1f}")
+        assert float(bounds_line.split()[1]) == DEFAULT_C_MAX_UNBOUNDED
 
     def test_penetrable_bottom_still_caps_on_the_halfspace_speed(self):
         from uacpy.core import BoundaryProperties
@@ -972,6 +990,18 @@ class TestBellhopWriterReflectionStaging:
         with pytest.raises(ConfigurationError):
             write_bellhop_env_file(tmp_path / 'run.env', env, source, receiver,
                                    **kwargs)
+        # The guard runs before the file opens, so a refused deck leaves no
+        # truncated .env behind.
+        assert not (tmp_path / 'run.env').exists()
+
+    def test_refused_irregular_grid_leaves_no_truncated_env(self, tmp_path):
+        from uacpy.io.bellhop_writer import write_bellhop_env_file
+        env = uacpy.Environment(name='t', bathymetry=100, ssp=1500)
+        source, receiver = self._sr()   # 1 depth vs 20 ranges
+        with pytest.raises(ConfigurationError, match="grid_type='I'"):
+            write_bellhop_env_file(tmp_path / 'run.env', env, source, receiver,
+                                   grid_type='I')
+        assert not (tmp_path / 'run.env').exists()
 
     def test_bottom_file_without_reflection_file_raises_configurationerror(
             self, tmp_path):
@@ -1074,27 +1104,19 @@ class TestBathyIOTypedErrors:
     """``bathy_io``'s failure typing: a malformed file is a parse error, a bad
     user-supplied interpolation code is a configuration error."""
 
-    def test_read_boundary_3d_malformed_raises_fileformaterror(self, tmp_path):
-        from uacpy.io.bathy_io import read_boundary_3d
+    def test_malformed_bty_row_raises_fileformaterror(self, tmp_path):
+        from uacpy.io.bathy_io import read_bathymetry
         from uacpy.core.exceptions import FileFormatError
         bad = tmp_path / 'bad.bty'
-        bad.write_text("'R'\n2\n0.0 1.0\n2\n0.0 1.0\nqqq qqq\nqqq qqq\n")
+        bad.write_text("'L'\n2\n0.0 100.0\nqqq qqq\n")
         with pytest.raises(FileFormatError):
-            read_boundary_3d(str(bad))
+            read_bathymetry(str(bad))
 
-    def test_read_boundary_3d_short_grid_raises_fileformaterror(self, tmp_path):
-        from uacpy.io.bathy_io import read_boundary_3d
-        from uacpy.core.exceptions import FileFormatError
-        bad = tmp_path / 'short.bty'
-        bad.write_text("'R'\n3\n0.0 1.0 2.0\n2\n0.0 1.0\n1.0 2.0\n")
-        with pytest.raises(FileFormatError):
-            read_boundary_3d(str(bad))
-
-    @pytest.mark.parametrize('writer', ['bty', 'bty_long', 'ati', 'bty_3d'])
+    @pytest.mark.parametrize('writer', ['bty', 'bty_long', 'ati'])
     def test_bad_interp_type_raises_configurationerror(self, tmp_path, writer):
         from uacpy.core.bottom import Bottom
         from uacpy.io.bathy_io import (
-            write_bty_file, write_bty_long_format, write_ati_file, write_bty_3d)
+            write_bty_file, write_bty_long_format, write_ati_file)
         pairs = np.array([[0.0, 100.0], [1000.0, 120.0]])
         path = tmp_path / 'x.bty'
         with pytest.raises(ConfigurationError):
@@ -1102,16 +1124,13 @@ class TestBathyIOTypedErrors:
                 write_bty_file(path, pairs, interp_type='bogus')
             elif writer == 'ati':
                 write_ati_file(path, pairs, interp_type='bogus')
-            elif writer == 'bty_long':
+            else:
                 rd = Bottom.from_halfspaces(
                     np.array([0.0, 1000.0]),
                     sound_speed=np.array([1600.0, 1700.0]),
                     density=np.array([1.7, 1.9]),
                     attenuation=np.array([0.4, 0.6]))
                 write_bty_long_format(path, pairs, rd, interp_type='bogus')
-            else:
-                write_bty_3d(path, np.array([0.0, 1.0]), np.array([0.0, 1.0]),
-                             np.zeros((2, 2)), interp_type='bogus')
 
     def test_long_format_bty_round_trips_geoacoustics(self, tmp_path):
         from uacpy.core.bottom import Bottom
@@ -1175,6 +1194,21 @@ class TestReadVectorFortranSemantics:
         from uacpy.core.exceptions import FileFormatError
         with pytest.raises(FileFormatError):
             self._read("5\n10 20 30 /\n")
+
+    @pytest.mark.parametrize('text', [
+        "1\n/\n",        # Nx=1, no value: AT leaves x(1) uninitialised
+        "2\n10 /\n",     # Nx=2, one value: x(2) stays at the -999.9 pre-fill
+        "2\n/\n",        # Nx=2, no values
+        "5\n/\n",        # Nx>=3, no values: x(1) uninitialised, no SubTab
+    ])
+    def test_underfull_slash_record_raises_fileformaterror(self, text):
+        """SubTab generates only for Nx >= 3 with 1 or 2 values given
+        (subtabulate.f90:3-5,24-28); every other slash-terminated shortfall
+        leaves AT slots at the -999.9 pre-fill or uninitialised, so no value
+        may be fabricated for it."""
+        from uacpy.core.exceptions import FileFormatError
+        with pytest.raises(FileFormatError):
+            self._read(text)
 
 
 class TestMultiProfileEnvKeepsLayerThickness:
@@ -1291,109 +1325,31 @@ class TestFlpOptionValidation:
         write_fieldflp(tmp_path / 'good.flp', option, self._pos())
         assert (tmp_path / 'good.flp').exists()
 
-    def test_bad_3d_evaluator_raises_configurationerror(self, tmp_path):
-        from uacpy.io.oalib_writer import write_field3dflp
-        pos = {'s': {'x': np.array([0.0]), 'y': np.array([0.0]),
-                     'z': np.array([50.0])},
-               'r': {'z': np.linspace(0, 100, 11),
-                     'r': np.linspace(0, 5000, 11),
-                     'theta': np.linspace(0, 350, 36)},
-               'Nsx': 1, 'Nsy': 1}
-        bathy = {'X': np.linspace(0, 10000, 4), 'Y': np.linspace(0, 10000, 3),
-                 'depth': 100 * np.ones((3, 4))}
-        with pytest.raises(ConfigurationError, match='evaluator'):
-            write_field3dflp(tmp_path / 'bad3d.flp', 'ZZZFM', pos, bathy)
+    def test_bad_coupling_column_raises_for_multi_profile(self, tmp_path):
+        """field.exe gates Opt(2:2) with ERROUT for NProf > 1
+        (field.f90:125-136): only 'C' (coupled) and 'A' (adiabatic) run."""
+        from uacpy.io.oalib_writer import write_fieldflp
+        with pytest.raises(ConfigurationError, match='option position 2'):
+            write_fieldflp(
+                tmp_path / 'bad2.flp', 'R  C', self._pos(),
+                n_profiles=2, profile_ranges_m=np.array([0.0, 5000.0]))
 
+    def test_blank_coupling_column_is_fine_for_one_profile(self, tmp_path):
+        """field.f90 reaches its coupling SELECT CASE only when NProf > 1, so
+        a blank column 2 is legal in a single-profile deck."""
+        from uacpy.io.oalib_writer import write_fieldflp
+        write_fieldflp(tmp_path / 'one.flp', 'R  C', self._pos())
+        assert (tmp_path / 'one.flp').exists()
 
-class TestShdReaderKeysAgree:
-    """``read_shd_bin`` and ``read_shd_asc`` describe the same payload, so a
-    caller switching between them must not have to remap keys.
-
-    Both readers are exercised on the SAME field written twice: once in the
-    ASCII stream of ``Matlab/ReadWrite/read_shd_asc.m:13-38`` and once in the
-    direct-access record layout of ``misc/RWSHDFile.f90:100-114``, whose
-    ``LRecl = MAX(41, 2*Nfreq, …)`` is counted in 4-byte words.
-    """
-
-    #: One frequency, one bearing, one source, two receiver depths, two ranges.
-    TITLE = 'title'
-    PLOT_TYPE = 'rectilin'
-    FREQ0, ATTEN = 100.0, 0.0
-    FREQ_VEC = [100.0]
-    THETA = [0.0]
-    S_Z = [50.0]
-    R_Z = [10.0, 20.0]
-    R_R = [1000.0, 2000.0]
-    #: (real, imag) per (receiver depth, range). No exact zeros — both readers
-    #: map those to NaN as the "engine never wrote this cell" convention.
-    ROWS = [[1.0, 0.5, 2.0, 0.25], [3.0, -1.0, 0.75, 2.0]]
-
-    @classmethod
-    def _write_asc(cls, path):
-        tokens = [
-            len(cls.FREQ_VEC), len(cls.THETA), len(cls.S_Z), len(cls.R_Z),
-            len(cls.R_R), cls.FREQ0, cls.ATTEN,
-            *cls.FREQ_VEC, *cls.THETA, *cls.S_Z, *cls.R_Z, *cls.R_R,
-            *[v for row in cls.ROWS for v in row],
-        ]
-        path.write_text(f"{cls.TITLE}\n{cls.PLOT_TYPE}\n"
-                        + ' '.join(str(t) for t in tokens) + "\n")
-        return path
-
-    @classmethod
-    def _write_bin(cls, path):
-        """Emit the same field as a little-endian direct-access ``.shd``."""
-        n_rz, n_rr = len(cls.R_Z), len(cls.R_R)
-        recl = max(41, 2 * len(cls.FREQ_VEC), 2 * len(cls.THETA), 2, 2,
-                   len(cls.S_Z), n_rz, 2 * n_rr)          # RWSHDFile.f90:100
-        rec_bytes = 4 * recl
-        records = [
-            np.array([recl], '<i4').tobytes() + cls.TITLE.encode().ljust(80),
-            cls.PLOT_TYPE.encode().ljust(10),
-            (np.array([len(cls.FREQ_VEC), len(cls.THETA), 1, 1, len(cls.S_Z),
-                       n_rz, n_rr], '<i4').tobytes()
-             + np.array([cls.FREQ0, cls.ATTEN], '<f8').tobytes()),
-            np.array(cls.FREQ_VEC, '<f8').tobytes(),
-            np.array(cls.THETA, '<f8').tobytes(),
-            np.array([0.0], '<f8').tobytes(),                       # Sx
-            np.array([0.0], '<f8').tobytes(),                       # Sy
-            np.array(cls.S_Z, '<f4').tobytes(),      # Sz/Rz are REAL(KIND=4)
-            np.array(cls.R_Z, '<f4').tobytes(),
-            np.array(cls.R_R, '<f8').tobytes(),
-        ] + [np.array(row, '<f4').tobytes() for row in cls.ROWS]
-        path.write_bytes(b''.join(r.ljust(rec_bytes, b'\x00') for r in records))
-        return path
-
-    def test_both_readers_return_the_same_keys(self, tmp_path):
-        from uacpy.io.oalib_reader import read_shd_asc, read_shd_bin
-        asc = read_shd_asc(self._write_asc(tmp_path / 'tiny.shd.asc'))
-        bin_ = read_shd_bin(str(self._write_bin(tmp_path / 'tiny.shd')))
-        # The binary reader adds the slice label; nothing else may differ.
-        assert set(bin_) - set(asc) == {'pressure_freq'}
-        assert set(asc) - set(bin_) == set()
-        assert set(asc['Pos']) == set(bin_['Pos'])
-        assert set(asc['Pos']['r']) == set(bin_['Pos']['r']) == {'z', 'r'}
-        # The ASCII stream carries no source x/y, so its 's' is a subset.
-        assert set(asc['Pos']['s']) <= set(bin_['Pos']['s'])
-
-    def test_both_readers_return_the_same_values(self, tmp_path):
-        from uacpy.io.oalib_reader import read_shd_asc, read_shd_bin
-        asc = read_shd_asc(self._write_asc(tmp_path / 'tiny.shd.asc'))
-        bin_ = read_shd_bin(str(self._write_bin(tmp_path / 'tiny.shd')))
-        assert asc['title'] == bin_['title'] == self.TITLE
-        assert asc['PlotType'] == bin_['PlotType'].strip() == self.PLOT_TYPE
-        assert asc['freq0'] == bin_['freq0'] == self.FREQ0
-        assert asc['atten'] == bin_['atten'] == self.ATTEN
-        np.testing.assert_allclose(asc['freqVec'], bin_['freqVec'])
-        np.testing.assert_allclose(asc['Pos']['theta'], bin_['Pos']['theta'])
-        np.testing.assert_allclose(asc['Pos']['s']['z'], bin_['Pos']['s']['z'])
-        np.testing.assert_allclose(asc['Pos']['r']['z'], bin_['Pos']['r']['z'])
-        np.testing.assert_allclose(asc['Pos']['r']['r'], bin_['Pos']['r']['r'])
-        # read_shd_asc is 2-D (one bearing, one source depth); read_shd_bin
-        # keeps those axes, so index them away before comparing.
-        np.testing.assert_allclose(asc['pressure'], bin_['pressure'][0, 0],
-                                   rtol=1e-6)
-        assert bin_['pressure_freq'] == self.FREQ_VEC[0]
+    def test_explicit_suffix_is_kept(self, tmp_path):
+        """A caller-supplied suffix is written as given; '.flp' is appended
+        only to a bare root (the read_flp resolution convention)."""
+        from uacpy.io.oalib_writer import write_fieldflp
+        write_fieldflp(tmp_path / 'case.v2', 'RC C', self._pos())
+        assert (tmp_path / 'case.v2').exists()
+        assert not (tmp_path / 'case.flp').exists()
+        write_fieldflp(tmp_path / 'bare', 'RC C', self._pos())
+        assert (tmp_path / 'bare.flp').exists()
 
 
 class TestOASESWriterKnobsReachTheDeck:
@@ -1554,12 +1510,15 @@ class TestAltimetryLongFormat:
         assert np.allclose(ati[0, 1:-1], pairs[:, 0])
         assert np.allclose(ati[1, 1:-1], pairs[:, 1])
 
-    def test_short_row_in_a_long_file_raises_fileformaterror(self, tmp_path):
+    def test_truncated_long_row_raises_fileformaterror(self, tmp_path):
+        """A long row may wrap across lines (one list-directed READ per
+        point), so the typed error fires only when the file ends short of
+        the row's 7 values."""
         from uacpy.io.bathy_io import read_altimetry
         from uacpy.core.exceptions import FileFormatError
         p = tmp_path / 'bad.ati'
         p.write_text("'LL'\n1\n0.0 0.0 3500.0\n")
-        with pytest.raises(FileFormatError, match='columns'):
+        with pytest.raises(FileFormatError, match='file ended'):
             read_altimetry(p)
 
     def test_unknown_interp_type_raises_fileformaterror(self, tmp_path):
@@ -1651,6 +1610,76 @@ class TestSedimentLayerColumnOrder:
                 "column 5 must be compressional attenuation (alphaI)")
             assert alpha_s == pytest.approx(self.ALPHA_S)
         assert [float(r[0]) for r in layer_rows] == [100.0, 112.0]
+
+
+class TestATEnvWriterLayered:
+    """Test AT env writer with layered bottom."""
+
+    def test_nmedia_with_layers(self):
+        """AT env writer should set NMEDIA > 1 for layered bottom."""
+        from uacpy.io.oalib_writer import write_header
+        from uacpy.core.constants import BoundaryType
+        from uacpy.core.environment import SeabedColumn, SedimentLayer
+
+        lb = SeabedColumn(
+            layers=[
+                SedimentLayer(thickness=10, sound_speed=1550, density=1.3, attenuation=0.5),
+                SedimentLayer(thickness=50, sound_speed=1650, density=1.7, attenuation=0.3),
+            ],
+            halfspace=BoundaryProperties(acoustic_type='half-space', sound_speed=1800, density=2.0, attenuation=0.1)
+        )
+        env = uacpy.Environment(name='test', bathymetry=200, ssp=1500, bottom=lb)
+        source = uacpy.Source(frequencies=100, depths=25)
+
+        buf = io.StringIO()
+        write_header(buf, env, source,
+                     ssp_topopt='C',
+                     surface_type=BoundaryType.VACUUM)
+        content = buf.getvalue()
+
+        # Should have NMEDIA = 3 (1 water + 2 sediment layers)
+        lines = content.strip().split('\n')
+        nmedia_line = lines[2]  # Third line is NMEDIA
+        assert nmedia_line.strip() == '3'
+
+    def test_layer_sections_written(self):
+        """Layer sections should be written between SSP and bottom."""
+        from uacpy.io.oalib_writer import write_layer_sections
+        from uacpy.core.environment import SeabedColumn, SedimentLayer
+
+        lb = SeabedColumn(
+            layers=[SedimentLayer(thickness=10, sound_speed=1550, density=1.3, attenuation=0.5)],
+            halfspace=BoundaryProperties(acoustic_type='half-space', sound_speed=1800, density=2.0)
+        )
+        env = uacpy.Environment(name='test', bathymetry=100, ssp=1500, bottom=lb)
+
+        buf = io.StringIO()
+        depth_after = write_layer_sections(buf, env, 100)
+        content = buf.getvalue()
+
+        assert depth_after == 110  # 100 + 10m layer
+        assert '1550' in content  # Layer sound speed present
+
+    def test_halfspace_depth_below_layers(self):
+        """Halfspace depth should be below all layers."""
+        from uacpy.io.oalib_writer import write_bottom_section
+        from uacpy.core.environment import SeabedColumn, SedimentLayer
+
+        lb = SeabedColumn(
+            layers=[
+                SedimentLayer(thickness=10, sound_speed=1550, density=1.3),
+                SedimentLayer(thickness=50, sound_speed=1650, density=1.7),
+            ],
+            halfspace=BoundaryProperties(acoustic_type='half-space', sound_speed=1800, density=2.0, attenuation=0.1)
+        )
+        env = uacpy.Environment(name='test', bathymetry=200, ssp=1500, bottom=lb)
+
+        buf = io.StringIO()
+        write_bottom_section(buf, env)
+        content = buf.getvalue()
+
+        # Halfspace should be at 260m (200 + 10 + 50)
+        assert '260.00' in content
 
 
 def test_multi_profile_deck_shares_one_bottom_without_slivers(tmp_path):
@@ -2150,12 +2179,13 @@ class TestBoundaryTypeIsTheSingleSourceOfTruth:
     silent vacuum fallback for an unrecognised type would model a different
     surface than the one asked for."""
 
-    def test_map_agrees_with_the_enum(self):
-        from uacpy.core.constants import BoundaryType
-        from uacpy.io.oalib_writer import _BOUNDARY_TYPE_MAP
+    def test_parse_agrees_with_the_enum(self):
+        from uacpy.core.constants import BoundaryType, parse_boundary_type
         for bt in BoundaryType:
-            assert _BOUNDARY_TYPE_MAP[bt.value] == bt.to_acoustics_toolbox_code()
-        assert _BOUNDARY_TYPE_MAP['halfspace'] == 'A'
+            assert (parse_boundary_type(bt.value).to_acoustics_toolbox_code()
+                    == bt.to_acoustics_toolbox_code())
+        assert parse_boundary_type(
+            'halfspace').to_acoustics_toolbox_code() == 'A'
 
     def test_unknown_acoustic_type_raises(self):
         from uacpy.core import BoundaryProperties
@@ -2518,10 +2548,12 @@ class TestBellhop3DOutputsAreNotSilentlyFlattened:
 
     def test_read_shd_file_refuses_multi_bearing(self, tmp_path):
         from uacpy.io.oalib_reader import read_shd_file
-        from uacpy.core.exceptions import FileFormatError
+        from uacpy.core.exceptions import UnsupportedFeatureError
 
+        # The file is well-formed — the refusal is a capability limit of the
+        # single-bearing wrapper, not corruption.
         path = self._run(tmp_path, 'tl3d', 'C^   3').with_suffix('.shd')
-        with pytest.raises(FileFormatError, match='3 receiver bearings'):
+        with pytest.raises(UnsupportedFeatureError, match='3 receiver bearings'):
             read_shd_file(path)
 
     def test_xyz_ray_file_refused(self, tmp_path):
@@ -2562,71 +2594,6 @@ class TestRayFileIsAsciiOnly:
             read_ray_file(path)
         assert '5X8' in str(exc.value)
         assert 'byte order' not in str(exc.value)
-
-
-class TestShdAscIsATokenStream:
-    """``Matlab/ReadWrite/read_shd_asc.m:15-27`` reads every scalar and vector
-    with ``fscanf``, so the file is one whitespace-delimited token stream after
-    the two title lines — no per-line layout to honour."""
-
-    _COUNTS = "1 1 1 2 2"
-    _SCALARS = "100.0 0.0"
-    _VECTORS = ["50.0", "0.0", "10.0", "20.0", "30.0", "100.0", "200.0"]
-    _DATA = ["1", "2", "3", "4", "5", "6", "7", "8"]
-
-    def _layouts(self):
-        rest = self._VECTORS + self._DATA
-        return {
-            'counts_and_scalars_share_a_line':
-                self._COUNTS + " " + self._SCALARS + "\n" + "\n".join(rest),
-            'one_value_per_line':
-                self._COUNTS + "\n" + self._SCALARS + "\n" + "\n".join(rest),
-            'fully_packed':
-                " ".join([self._COUNTS, self._SCALARS] + rest),
-        }
-
-    def test_every_whitespace_layout_reads_the_same(self, tmp_path):
-        from uacpy.io.oalib_reader import read_shd_asc
-
-        for name, body in self._layouts().items():
-            path = tmp_path / f'{name}.asc'
-            path.write_text("'probe'\n'rectilin  '\n" + body + "\n")
-            shd = read_shd_asc(path)
-            assert shd['freq0'] == pytest.approx(100.0), name
-            assert shd['atten'] == pytest.approx(0.0), name
-            assert shd['Pos']['r']['z'].tolist() == [20.0, 30.0], name
-            assert shd['Pos']['r']['r'].tolist() == [100.0, 200.0], name
-            assert shd['pressure'].ravel().tolist() == [
-                1 + 2j, 3 + 4j, 5 + 6j, 7 + 8j], name
-
-    def test_implausible_count_raises_instead_of_allocating(self, tmp_path):
-        """A count the file cannot back must surface as a typed parse error,
-        never an allocation the token stream can never fill.
-
-        Runs in a subprocess that caps its address space after the import, so
-        a header count of 2e9 cannot be satisfied by the allocator and the
-        distinction between a typed parse error and ``MemoryError`` is real.
-        """
-        import subprocess
-        import sys
-        import textwrap
-
-        path = tmp_path / 'hostile.asc'
-        path.write_text("'probe'\n'rectilin  '\n2000000000 1 1 1 1\n100.0 0.0\n")
-        script = textwrap.dedent(f"""
-            import resource
-            from uacpy.io.oalib_reader import read_shd_asc
-            from uacpy.core.exceptions import FileFormatError
-            resource.setrlimit(resource.RLIMIT_AS, (2 * 1024 ** 3,) * 2)
-            try:
-                read_shd_asc({str(path)!r})
-            except FileFormatError:
-                print('TYPED')
-        """)
-        proc = subprocess.run([sys.executable, '-c', script],
-                              capture_output=True, text=True, timeout=300)
-        assert 'TYPED' in proc.stdout, (
-            f"expected FileFormatError, got:\n{proc.stderr[-800:]}")
 
 
 class TestInterfaceRoughnessGoesToItsOwnInterface:
@@ -3182,6 +3149,112 @@ class TestATSSPPointLimit:
         import inspect
         assert 'reject_oversized_at_ssp' not in inspect.getsource(
             write_bellhop_env_file)
+
+
+class TestReadPrt:
+    """io.md §3: AT binaries dump fatal-error detail to ``<base>.prt``, not
+    stderr; ``read_prt`` returns the text, ``None`` when the file is absent,
+    and only the trailing ``tail_bytes`` when asked for an excerpt."""
+
+    def test_absent_file_returns_none(self, tmp_path):
+        from uacpy.io.oalib_reader import read_prt
+        assert read_prt(tmp_path / 'missing.prt') is None
+
+    def test_full_text_round_trips(self, tmp_path):
+        from uacpy.io.oalib_reader import read_prt
+        p = tmp_path / 'run.prt'
+        p.write_text('*** FATAL ERROR ***\nMesh is too coarse\n')
+        assert read_prt(p) == '*** FATAL ERROR ***\nMesh is too coarse\n'
+
+    def test_tail_bytes_returns_only_the_trailing_excerpt(self, tmp_path):
+        from uacpy.io.oalib_reader import read_prt
+        p = tmp_path / 'run.prt'
+        p.write_text('A' * 90 + 'TAIL_MARKER')
+        assert read_prt(p, tail_bytes=11) == 'TAIL_MARKER'
+
+    def test_tail_bytes_past_the_file_size_returns_everything(self, tmp_path):
+        from uacpy.io.oalib_reader import read_prt
+        p = tmp_path / 'run.prt'
+        p.write_text('short log')
+        assert read_prt(p, tail_bytes=4096) == 'short log'
+
+
+class TestOasnReplicaGridDeckDefaults:
+    """oases.md §10 / DOCUMENTATION §OASN: the replica grid's ``None``
+    defaults on disk — z spans 10 m to ``depth − 10`` over 20 points, x
+    spans 0.1-10 km over 50, y is the degenerate 0/0 single point — and the
+    deep noise sheet sits at half the water depth when its depth is unset.
+    Deck-level asserts; no binary runs."""
+
+    @staticmethod
+    def _deck(tmp_path, options, **kw):
+        from uacpy.io.oases_writer import write_oasn_input
+        env = Environment(
+            bathymetry=100.0, ssp=1500.0,
+            bottom=BoundaryProperties(
+                acoustic_type='half-space', sound_speed=1700.0,
+                density=1.8, attenuation=0.5))
+        p = tmp_path / 'oasn_run.dat'
+        write_oasn_input(p, env, uacpy.Source(depths=10.0, frequencies=100.0),
+                         uacpy.Receiver(depths=[30.0, 70.0], ranges=[0.0]),
+                         options=options, **kw)
+        return p.read_text().splitlines()
+
+    def test_replica_grid_defaults(self, tmp_path):
+        lines = self._deck(tmp_path, 'R J')
+        # ZSMIN ZSMAX NSRCZ / XSMIN XSMAX NSRCX / YSMIN YSMAX NSRCY —
+        # consecutive rows (unoasn22.f:184-186); x/y are km on disk.
+        z = lines.index('10.00 90.00 20')
+        assert lines[z + 1] == '0.100 10.000 50'
+        assert lines[z + 2] == '0.000 0.000 1'
+
+    def test_deep_sheet_defaults_to_half_the_water_depth(self, tmp_path):
+        lines = self._deck(tmp_path, 'N J', deep_noise_level=60.0)
+        # DPSD (oasnun22.f:325) is a bare one-value record; 100 m water
+        # puts the default sheet at 50 m.
+        assert '50.00' in lines
+
+    def test_explicit_replica_grid_overrides_the_defaults(self, tmp_path):
+        lines = self._deck(tmp_path, 'R J',
+                           replica_zmin=20.0, replica_zmax=80.0,
+                           replica_nz=5, replica_xmin=0.5, replica_xmax=2.0,
+                           replica_nx=3)
+        z = lines.index('20.00 80.00 5')
+        assert lines[z + 1] == '0.500 2.000 3'
+
+
+class TestEquallySpacedToleranceBoundary:
+    """io.md §10: ``equally_spaced(x, tol=1e-9)`` decides compact vs
+    explicit axis encoding by comparing against the linspace rebuilt from
+    the endpoints — a single interior sample's jitter is the deviation."""
+
+    def test_uniform_axis_passes(self):
+        from uacpy.io.utils import equally_spaced
+        assert equally_spaced(np.linspace(0.0, 10.0, 11))
+
+    def test_jitter_below_the_default_tolerance_passes(self):
+        from uacpy.io.utils import equally_spaced
+        x = np.linspace(0.0, 10.0, 11)
+        x[5] += 5e-10
+        assert equally_spaced(x)
+
+    def test_jitter_above_the_default_tolerance_fails(self):
+        from uacpy.io.utils import equally_spaced
+        x = np.linspace(0.0, 10.0, 11)
+        x[5] += 2e-9
+        assert not equally_spaced(x)
+
+    def test_explicit_tolerance_moves_the_boundary(self):
+        from uacpy.io.utils import equally_spaced
+        x = np.linspace(0.0, 10.0, 11)
+        x[5] += 1e-6
+        assert equally_spaced(x, tol=1e-5)
+        assert not equally_spaced(x, tol=1e-7)
+
+    @pytest.mark.parametrize('x', [[], [3.0]])
+    def test_degenerate_axes_are_trivially_uniform(self, x):
+        from uacpy.io.utils import equally_spaced
+        assert equally_spaced(np.asarray(x, dtype=float))
 
 
 def test_read_flp_accepts_list_directed_records_and_sorts(tmp_path):

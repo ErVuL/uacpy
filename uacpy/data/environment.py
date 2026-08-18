@@ -300,9 +300,10 @@ def fetch_environment(
     surface_n_points : int or 'auto', optional
         Sea-ice samples along the transect when ``range_dependent_surface``.
         Default ``'auto'``: probe the local NSIDC grid (cheap) and collapse
-        consecutive identical ice/open-water zones to one boundary each (the
-        marginal ice zone at native scale, no staircase), capped at
-        ``max_points``. Pass an int for exactly that many waypoints.
+        each run of identical ice/open-water zones to the samples bracketing
+        its edges (the marginal ice zone at native scale, each edge within one
+        probe step, no staircase), capped at ``max_points``. Pass an int for
+        exactly that many waypoints.
     surface : BoundaryProperties, optional
         A **literal** top-boundary override supplied directly (e.g. a custom ice
         canopy). If ``surface_sources`` is *also* given, the source is fetched
@@ -351,12 +352,13 @@ def fetch_environment(
     max_distance_km : float, optional
         Maximum great-circle distance (km) to the nearest measured sample for
         the **nearest-neighbour** sources — ``ssp_sources`` ``'argo'`` and
-        ``bottom_sources`` ``'grainsize'``. A source whose nearest sample is
-        farther raises ``DataFetchError`` and the next source in the chain is
-        tried (so a tight value makes ``'auto'`` fall through from Argo to
-        WOA23). Ignored by grid/polygon/global sources (WOA23, Copernicus,
-        EMODnet, Diesing, CRUST1, pelagic, bathymetry) — they have no distance
-        concept. Default ``None`` → each source's own default (250 km).
+        ``bottom_sources`` ``'grainsize'`` and ``'mars'``. A source whose
+        nearest sample is farther raises ``DataFetchError`` and the next
+        source in the chain is tried (so a tight value makes ``'auto'`` fall
+        through from Argo to WOA23). Ignored by grid/polygon/global sources
+        (WOA23, Copernicus, EMODnet, Diesing, Graw, CRUST1, pelagic,
+        bathymetry) — they have no distance concept. Default ``None`` → each
+        source's own default (Argo and grainsize 250 km, MARS 100 km).
     max_days : int, optional
         Maximum days the data used may differ from ``date`` for the **time-
         specific** SSP sources — ``ssp_sources`` ``'argo'`` (nearest float

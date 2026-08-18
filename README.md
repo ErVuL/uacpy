@@ -283,7 +283,8 @@ rm -rf uacpy
 
 Three entry points, depending on what you need:
 
-- **[`docs/`](./docs/README.md) — the guided documentation.** 21 pages with 126
+- **[`docs/`](./docs/README.md) — the guided documentation.** 19 pages (21
+  counting the two index READMEs) with 126
   generated figures: one per model (Bellhop, Kraken, RAM, Scooter, SPARC,
   Bounce, OASES), plus guides to environments, sources and receivers, results,
   plotting, signal processing, arrays, communications, noise, sonar, external
@@ -300,7 +301,16 @@ Inside `uacpy/examples/` you will find 39 example scripts numbered
 sequentially (`example_01_*.py` through `example_39_*.py`) — from a first TL
 field to communications modems, a standards-based noise-impact assessment, a
 GPS-to-modelled-field real-world pipeline, and matched-field source
-localization. See the
+localization. Run them **by script path** (the form
+`uacpy/examples/run_all_examples.py` and the test suite use):
+
+```bash
+python uacpy/examples/example_01_basic_shallow_water.py
+```
+
+not as modules — `python -m uacpy.examples.example_01_…` fails for the
+examples that import their sibling `plotting_utils` as a top-level module.
+See the
 [examples index](./DOCUMENTATION.md#17-examples-index) for a description
 of each one.
 

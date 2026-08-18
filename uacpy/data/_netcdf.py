@@ -79,7 +79,7 @@ class NetcdfGrid:
         cell to ``NaN`` so every reader handles no-data uniformly.
         """
         v = variable[row, col]
-        if v is None or np.ma.is_masked(v) or not np.isfinite(v):
+        if np.ma.is_masked(v) or not np.isfinite(v):
             return np.nan
         return float(v)
 

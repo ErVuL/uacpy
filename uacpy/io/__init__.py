@@ -26,10 +26,10 @@ Layout:
 
 from uacpy.io.file_manager import FileManager
 from uacpy.io.oalib_reader import (
-    read_shd_file, read_shd_bin, read_shd_asc,
+    read_shd_file, read_shd_bin,
     read_arr_file, read_ray_file,
-    read_ssp_2d, read_ssp_3d,
-    read_flp, read_flp3d,
+    read_ssp_2d,
+    read_flp,
     read_rts_file, rts_to_pressure, read_ts,
     read_prt,
 )
@@ -43,16 +43,16 @@ from uacpy.io.oalib_writer import (
     write_multi_profile_env,
     write_kraken_env_file, write_scooter_env_file, write_sparc_env_file,
     write_bounce_input_file,
-    write_fieldflp, write_field3dflp,
+    write_fieldflp,
     write_phase_speed_and_rmax,
     resolve_ssp_interp, resolve_ssp_topopt, resolve_phase_speed_bounds,
 )
 from uacpy.io.modes_reader import (
-    read_modes, read_modes_bin, get_component,
+    read_modes, read_modes_bin,
 )
 from uacpy.io.bathy_io import (
-    read_bathymetry, read_altimetry, read_boundary_3d,
-    write_bty_file, write_bty_long_format, write_bty_3d, write_ati_file,
+    read_bathymetry, read_altimetry,
+    write_bty_file, write_bty_long_format, write_ati_file,
 )
 from uacpy.io.refl_io import (
     read_reflection_coefficient, read_source_beam_pattern,
@@ -80,26 +80,26 @@ from uacpy.io.mpirams_writer import (
 from uacpy.io.mpirams_reader import read_psif
 from uacpy.io.ramsurf_writer import write_ramin
 from uacpy.io.ramsurf_reader import (
-    read_tl_line, read_tl_grid, read_pcomplex_grid,
+    read_tl_grid, read_pcomplex_grid,
 )
 
 __all__ = [
     # File management
     "FileManager",
     # OALIB readers
-    "read_shd_file", "read_shd_bin", "read_shd_asc",
+    "read_shd_file", "read_shd_bin",
     "read_arr_file", "read_ray_file",
-    "read_ssp_2d", "read_ssp_3d",
-    "read_flp", "read_flp3d",
+    "read_ssp_2d",
+    "read_flp",
     "read_rts_file", "rts_to_pressure", "read_ts",
     "read_prt",
     # Boundary auxiliary I/O
-    "read_bathymetry", "read_altimetry", "read_boundary_3d",
+    "read_bathymetry", "read_altimetry",
     "read_reflection_coefficient",
     "read_source_beam_pattern",
     "dedupe_reflection_file",
     # Mode readers (Kraken)
-    "read_modes", "read_modes_bin", "get_component",
+    "read_modes", "read_modes_bin",
     # Scooter / SPARC outputs
     "read_grn_file",
     "grn_to_field", "grn_to_transfer_function",
@@ -110,7 +110,7 @@ __all__ = [
     # mpiramS outputs
     "read_psif",
     # ramsurf / rams (Collins) outputs
-    "read_tl_line", "read_tl_grid", "read_pcomplex_grid",
+    "read_tl_grid", "read_pcomplex_grid",
     # OALIB writers
     "write_ssp",
     "write_header", "write_absorption_block",
@@ -121,11 +121,11 @@ __all__ = [
     "write_multi_profile_env",
     "write_kraken_env_file", "write_scooter_env_file", "write_sparc_env_file",
     "write_bounce_input_file",
-    "write_fieldflp", "write_field3dflp",
+    "write_fieldflp",
     "write_phase_speed_and_rmax",
     "resolve_ssp_interp", "resolve_ssp_topopt", "resolve_phase_speed_bounds",
     # Boundary auxiliary writers
-    "write_bty_file", "write_bty_long_format", "write_bty_3d",
+    "write_bty_file", "write_bty_long_format",
     "write_ati_file",
     "write_source_beam_pattern",
     "stage_reflection_file", "stage_source_beam_pattern",

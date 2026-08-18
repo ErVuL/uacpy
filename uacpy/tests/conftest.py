@@ -94,6 +94,34 @@ def _redirect_tempdir(tmp_path, monkeypatch):
     monkeypatch.setattr(tempfile, 'tempdir', str(tmp_path))
 
 
+#: Keyword names ``make_pekeris`` routes to the bottom half-space rather than
+#: to the Environment.
+_PEKERIS_BOTTOM_KEYS = frozenset((
+    'acoustic_type', 'sound_speed', 'density', 'attenuation', 'roughness',
+    'shear_speed', 'shear_attenuation'))
+
+
+def make_pekeris(**overrides):
+    """Build the canonical 100-m Pekeris waveguide: 1500 m/s isovelocity water
+    over a 1700 m/s fluid half-space (density 1.8, attenuation 0.5).
+
+    A plain function rather than a fixture, so test files can call it from
+    module-level helpers and constants (``from uacpy.tests.conftest import
+    make_pekeris``). Keywords named in ``_PEKERIS_BOTTOM_KEYS`` override the
+    bottom half-space; every other keyword goes to :class:`uacpy.Environment`
+    (``name=``, ``bathymetry=``, ``ssp=``, ``surface=``, or a wholesale
+    ``bottom=``).
+    """
+    bottom_kw = dict(acoustic_type='half-space', sound_speed=1700.0,
+                     density=1.8, attenuation=0.5)
+    bottom_kw.update({k: overrides.pop(k) for k in list(overrides)
+                      if k in _PEKERIS_BOTTOM_KEYS})
+    env_kw = dict(bathymetry=100.0, ssp=1500.0,
+                  bottom=uacpy.BoundaryProperties(**bottom_kw))
+    env_kw.update(overrides)
+    return uacpy.Environment(**env_kw)
+
+
 @pytest.fixture
 def simple_env():
     """Simple isovelocity environment."""

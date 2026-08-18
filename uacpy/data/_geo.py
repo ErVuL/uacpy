@@ -11,6 +11,7 @@ __all__ = [
     'Coordinate', 'as_coordinate', 'normalize_lon', 'lon_linspace',
     'EARTH_RADIUS_KM', 'central_angle', 'great_circle_km', 'geodesic_waypoints',
     'nearest_indices', 'ring_offsets', 'run_representative_indices',
+    'run_boundary_indices',
     'DEFAULT_MAX_TRANSECT_POINTS',
     'depth_to_pressure_dbar',
 ]
@@ -187,10 +188,14 @@ def ring_offsets(radius: int) -> 'list[tuple[int, int]]':
 def run_representative_indices(keys) -> 'list[int]':
     """Indices of one representative per maximal run of consecutive-equal keys.
 
-    The reduction behind ``'auto'`` transect sampling: probe a source's
-    sample *identity* (e.g. the grid cell, or the nearest sample) at a fine set
-    of waypoints, then keep one waypoint per distinct run. ``keys`` must be
-    ``==``-comparable (tuples, scalars, or dataclasses); do not pass raw arrays.
+    The reduction behind ``'auto'`` transect sampling for **interpolated**
+    columns (the WOA23 SSP): probe a source's sample *identity* (e.g. the grid
+    cell, or the nearest sample) at a fine set of waypoints, then keep one
+    waypoint per distinct run. ``keys`` must be ``==``-comparable (tuples,
+    scalars, or dataclasses); do not pass raw arrays. A carrier reconstructed
+    by **nearest-node** lookup (categorical Surface/Bottom) uses
+    :func:`run_boundary_indices` instead — a midpoint representative would
+    displace each reconstructed transition to midway between run centres.
 
     Interior runs are represented by their **midpoint** (the centre of the
     range interval that sample covers). The **first and last** runs are
@@ -217,6 +222,36 @@ def run_representative_indices(keys) -> 'list[int]':
         else:
             reps.append((i + j) // 2)  # interior cell centre
     return reps
+
+
+def run_boundary_indices(keys) -> 'list[int]':
+    """Indices keeping both probe samples that bracket every change of key,
+    plus the two transect endpoints.
+
+    The reduction behind ``'auto'`` transect sampling for **categorical**
+    carriers reconstructed by nearest-node lookup (the ice-canopy/open-water
+    ``Surface``, the sediment-identity ``Bottom``): a nearest-node read places
+    each transition midway between adjacent kept samples, so keeping the last
+    sample of one run and the first of the next pins the reconstructed
+    transition to within half a probe step of the boundary the probe observed.
+    ``keys`` must be ``==``-comparable, as in
+    :func:`run_representative_indices`; a single run collapses to one
+    representative at the start (range-independent transect).
+    """
+    n = len(keys)
+    if n == 0:
+        return []
+    out = [0]
+    for i in range(1, n):
+        if not keys[i] == keys[i - 1]:
+            if out[-1] != i - 1:
+                out.append(i - 1)   # last sample of the run ending at i-1
+            out.append(i)           # first sample of the run starting at i
+    if len(out) == 1:
+        return out                  # single run: one representative (start)
+    if out[-1] != n - 1:
+        out.append(n - 1)           # anchor transect end (range L)
+    return out
 
 
 def depth_to_pressure_dbar(depth_m, latitude_deg) -> np.ndarray:

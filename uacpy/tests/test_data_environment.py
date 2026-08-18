@@ -233,9 +233,12 @@ def test_pelagic_never_refetches_the_bathymetry(tmp_path, monkeypatch,
         range_dependent_bottom=True, bottom_n_points='auto', max_points=40)
     # Compare densities, not speeds: a column's sound speed is its Hamilton
     # ratio times the *local* water speed, which itself rises with depth, so it
-    # does not isolate the lithology. Density is monotone in grain size.
+    # does not isolate the lithology. Density is monotone in grain size. The
+    # 'auto' collapse keeps the probe columns bracketing the CCD crossing plus
+    # the endpoints: an ooze pair, then a clay pair.
     rho = [c.halfspace.density for c in transect.bottom.columns]
-    assert len(rho) == 2 and rho[0] > rho[1]            # ooze, then clay
+    assert len(rho) == 4
+    assert rho[0] == rho[1] > rho[2] == rho[3]          # ooze pair, clay pair
 
 
 def test_range_dependent_bottom(monkeypatch, stub_fetchers):

@@ -637,6 +637,12 @@ _OASES_MAX_LAYERS = 1001
 # an overrun there corrupts the transfer function instead of aborting.
 _OASES_MAX_WAVENUMBERS = 65536
 
+# Replica-axis bound: OASN STOPs '>>> TOO MANY REPLICA POINTS <<<' when any
+# of NSRCZ/NSRCX/NSRCY exceeds NSMAX = 201 (oases/src/compar.f:51,
+# unoasn22.f:187-188) — a character STOP, so the binary exits 0 with no
+# ``.rpo`` written.
+_OASES_MAX_REPLICA_POINTS = 201
+
 # OASES' receiver-depth limit, `parameter (NRD = 501)` in
 # third_party/oases/src/compar.f:35 (and the twin `NRMAX = 501` at :52).
 # INREC stops on `iabs(ir).gt.nrd` (oaseun31.f:1172); OASN checks the same
@@ -976,6 +982,27 @@ def _check_frequency_contours(writer: str, options: str, letter: str,
         f"The binary would stop with '*** CONTOURS REQUIRE NRFR>1 … ***'.",
         remediation=f"Give the Source a frequency array, or drop {letter!r} "
                     f"from options=.",
+    )
+
+
+def _reject_log_frequency_ladder(options: str, nfreq: int) -> None:
+    """Raise on OAST option ``'o'`` with a multi-frequency sweep.
+
+    ``unoast31.f:393`` runs the NFREQ-point sweep LOG-spaced under
+    ``FRCONT`` (option ``'o'``), but the ``.plp`` records no frequency
+    values, so :func:`~uacpy.io.oases_reader.read_oast_tl` can only label
+    the curves with the deck's linear sweep — every curve would carry the
+    wrong frequency. (OASR's ``'C'`` twin is fine: the OASR model relabels
+    its own log sweep.)
+    """
+    if 'o' not in _oases_option_chars(options) or int(nfreq) <= 1:
+        return
+    raise ConfigurationError(
+        f"write_oast_input: option 'o' makes the binary run its "
+        f"{int(nfreq)}-frequency sweep log-spaced (unoast31.f:393), but the "
+        f".plp records no frequency values, so read_oast_tl would label the "
+        f"curves with the linear sweep — a mislabeled frequency axis.",
+        remediation="Drop 'o' from options=, or run one frequency per deck.",
     )
 
 
@@ -1397,6 +1424,7 @@ def write_oast_input(
 
     freq_min, freq_max, nfreq = _resolve_freq_sweep(source, freq)
     _check_frequency_contours('write_oast_input', options, 'o', nfreq)
+    _reject_log_frequency_ladder(options, nfreq)
 
     with open(filepath, 'w') as f:
         _write_oases_header(f, env, options, "OAST Simulation via UACPY")
@@ -1884,6 +1912,24 @@ def write_oasn_input(
             replica_ymin = kwargs.get('replica_ymin', 0.0)  # km
             replica_ymax = kwargs.get('replica_ymax', 0.0)  # km
             replica_ny = kwargs.get('replica_ny', 1)
+
+            over = {name: int(n) for name, n in
+                    (('replica_nz', replica_nz), ('replica_nx', replica_nx),
+                     ('replica_ny', replica_ny))
+                    if int(n) > _OASES_MAX_REPLICA_POINTS}
+            if over:
+                raise ConfigurationError(
+                    f"write_oasn_input: replica grid "
+                    f"{', '.join(f'{k}={v}' for k, v in over.items())} "
+                    f"exceeds OASN's compiled bound NSMAX = "
+                    f"{_OASES_MAX_REPLICA_POINTS} points per axis "
+                    f"(oases/src/compar.f:51); the binary would STOP with "
+                    f"'>>> TOO MANY REPLICA POINTS <<<' and EXIT CODE 0, "
+                    f"leaving no .rpo.",
+                    remediation="Coarsen the replica grid to at most "
+                                f"{_OASES_MAX_REPLICA_POINTS} points per "
+                                f"axis.",
+                )
 
             # ZSMIN ZSMAX NSRCZ / XSMIN XSMAX NSRCX / YSMIN YSMAX NSRCY
             # (unoasn22.f:184-186) — the candidate source positions the

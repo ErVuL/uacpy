@@ -87,21 +87,21 @@ def read_oast_tl(
 
     Returns
     -------
-    tl_data : ndarray
-        Transmission loss data on the OAST native grid. Shape
-        ``(n_depths, n_ranges_native)`` for a single-frequency run. A
-        multi-frequency deck (``NFREQ > 1``) writes one curve per receiver
-        *per frequency*, frequency-major (``unoast31.f:388`` wraps the
-        receiver loop at ``:584``), and returns shape
-        ``(n_freq, n_depths, n_ranges_native)``. The ``.plp`` does not
-        record the frequency values, only the curve order, so the
-        frequency axis is the run's own ascending sweep.
-    depths : ndarray
-        Depth axis (m), == ``receiver_depths``.
-    ranges : ndarray
-        OAST's native range grid in metres.
-    metadata : dict
-        ``{'oast_grid_shape': (n_d, n_r_native), 'n_frequencies': n_f}``.
+    result : dict
+        Named fields, like the sibling OASES readers:
+
+        - ``'tl'`` : ndarray — transmission loss on the OAST native grid.
+          Shape ``(n_depths, n_ranges_native)`` for a single-frequency run.
+          A multi-frequency deck (``NFREQ > 1``) writes one curve per
+          receiver *per frequency*, frequency-major (``unoast31.f:388``
+          wraps the receiver loop at ``:584``), and yields shape
+          ``(n_freq, n_depths, n_ranges_native)``. The ``.plp`` does not
+          record the frequency values, only the curve order, so the
+          frequency axis is the run's own ascending sweep.
+        - ``'depths'`` : ndarray — depth axis (m), == ``receiver_depths``.
+        - ``'ranges'`` : ndarray — OAST's native range grid in metres.
+        - ``'metadata'`` : dict —
+          ``{'oast_grid_shape': (n_d, n_r_native), 'n_frequencies': n_f}``.
 
     Raises
     ------
@@ -222,11 +222,15 @@ def read_oast_tl(
     if n_freq == 1:
         tl_oast = tl_oast[0]
 
-    metadata = {
-        'oast_grid_shape': tl_oast.shape,
-        'n_frequencies': n_freq,
+    return {
+        'tl': tl_oast,
+        'depths': np.asarray(receiver_depths, dtype=float),
+        'ranges': ranges_oast,
+        'metadata': {
+            'oast_grid_shape': tl_oast.shape,
+            'n_frequencies': n_freq,
+        },
     }
-    return tl_oast, np.asarray(receiver_depths, dtype=float), ranges_oast, metadata
 
 
 #: ``.plp`` curve tag PLTLOS writes for TL vs range: ``optpar(INR)//'TLRAN'``
@@ -920,12 +924,14 @@ def _read_oasp_trf_binary(filepath: Path, receiver_depths: np.ndarray) -> Dict:
         ranges = km_to_m(r0 + np.arange(nplots) * rspace)
 
         nx, lx, mx, dt = _read_fortran_record(f, 'iiif', endian=endian)
-        (icdr,) = _read_fortran_record(f, 'i', endian=endian)
+        # icdr record consumed but not used
+        _read_fortran_record(f, 'i', endian=endian)
         (omegim,) = _read_fortran_record(f, 'f', endian=endian)
 
         (msuft,) = _read_fortran_record(f, 'i', endian=endian)
         (isrow,) = _read_fortran_record(f, 'i', endian=endian)
-        (inttyp,) = _read_fortran_record(f, 'i', endian=endian)
+        # inttyp record consumed but not used
+        _read_fortran_record(f, 'i', endian=endian)
         for _ in range(2):
             _read_fortran_record(f, 'i', endian=endian)
         for _ in range(5):

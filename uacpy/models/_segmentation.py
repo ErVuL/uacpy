@@ -13,11 +13,17 @@ from uacpy.core.environment import Environment, SoundSpeedProfile
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.io.oalib_writer import DECK_RANGE_QUANTUM_M
 
+# Ceiling (m) on the gap between consecutive automatic segment edges:
+# adiabatic/coupled mode summation interpolates each mode between profiles,
+# so a slowly-varying stretch still gets a profile at least every 2 km.
+# The caller-facing knob is ``n_segments`` (an explicit uniform decomposition
+# overrides the automatic change-point edges entirely).
+_MAX_SEGMENT_LENGTH_M = 2000.0
+
 
 def segment_environment_by_range(
     env: Environment,
     n_segments: Optional[int] = None,
-    max_segment_length: float = 2000.0,
 ) -> List[Tuple[float, Environment]]:
     """
     Segment a range-dependent environment into range slices
@@ -28,9 +34,8 @@ def segment_environment_by_range(
         Range-dependent environment to segment
     n_segments : int, optional
         Number of evenly spaced segments (``>= 2``). If None, automatically
-        determined from the environment's change points.
-    max_segment_length : float
-        Maximum segment length in metres (default 2000 m).
+        determined from the environment's change points, with intermediate
+        edges wherever the gap exceeds :data:`_MAX_SEGMENT_LENGTH_M`.
 
     Returns
     -------
@@ -75,7 +80,7 @@ def segment_environment_by_range(
         # Automatic segmentation: union the change-point ranges from
         # bathymetry, 2-D SSP, and RD-bottom axes; insert intermediate
         # points where the gap between consecutive change points exceeds
-        # ``max_segment_length``.
+        # ``_MAX_SEGMENT_LENGTH_M``.
         candidates = list(bathy_ranges_m.tolist())
         if env.ssp.is_range_dependent:
             candidates.extend(env.ssp.ranges.tolist())
@@ -102,8 +107,8 @@ def segment_environment_by_range(
             prev = key_ranges_m[i - 1]
             curr = key_ranges_m[i]
             seg_length = curr - prev
-            if seg_length > max_segment_length:
-                n_subseg = int(np.ceil(seg_length / max_segment_length))
+            if seg_length > _MAX_SEGMENT_LENGTH_M:
+                n_subseg = int(np.ceil(seg_length / _MAX_SEGMENT_LENGTH_M))
                 subseg_ranges = np.linspace(
                     prev, curr, n_subseg + 1,
                 )[1:-1]

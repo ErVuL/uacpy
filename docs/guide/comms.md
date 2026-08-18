@@ -227,11 +227,11 @@ Before anything can be equalised, the frame has to be found.
 | `detect_preamble(rx, preamble, threshold)` | `(start_index_or_None, metric)` |
 | `detect_frames(rx, preamble, threshold, min_gap)` | `(list_of_starts, metric)` |
 | `schmidl_cox_preamble(n_subcarriers, cp_len)` | an OFDM training symbol, two identical halves |
-| `schmidl_cox_sync(rx, n_subcarriers, cp_len)` | `(start_or_None, cfo)` |
+| `schmidl_cox_sync(rx, n_subcarriers)` | `(start_or_None, cfo)` |
 
 ```python
 start, metric = comms.detect_preamble(rx, preamble, threshold=0.4)
-sc_start, cfo = comms.schmidl_cox_sync(baseband, 256, 32)
+sc_start, cfo = comms.schmidl_cox_sync(baseband, 256)
 ```
 
 ![Preamble matched filter and the Schmidl-Cox timing metric](figures/comms_sync.png)
@@ -470,7 +470,7 @@ rx = comms.awgn(comms.apply_channel(frame, channel), 22.0, rng=rng)
 rx = np.concatenate([np.zeros(137, dtype=complex), rx])  # propagation delay
 rx *= np.exp(2j * np.pi * 2.0e-3 * np.arange(rx.size))   # residual CFO
 
-start, cfo = comms.schmidl_cox_sync(rx, 256, 32)
+start, cfo = comms.schmidl_cox_sync(rx, 256)
 x = comms.apply_cfo(rx[start:], cfo)
 h_est = comms.estimate_channel(x[288:576], tx.pilot_freq, 256, 32)
 ```
@@ -568,10 +568,13 @@ of the chirp's ambiguity function — the case Abraham (§8.5.1) puts at
 Second, resolution is not accuracy. The estimate above lands `1.7×10⁻⁵` from
 truth, forty times inside that main lobe, because a smooth peak can be located
 far more finely than its width — as long as the `scales` grid is fine enough to
-sample it. That grid is the binding constraint here: at the default
-`linspace(-5e-3, 5e-3, 51)` — about ±7.5 m/s, in steps of `2×10⁻⁴` — the same
-record comes back an order of magnitude further out. Pass your own `scales`
-when you know the platform is slower, and you buy the finer step for free.
+sample it. The default grid is: `linspace(-5e-3, 5e-3, 601)` — about
+±7.5 m/s, in steps of `1.67×10⁻⁵`, or 0.025 m/s at `c = 1500` — searched in
+two stages, every 15th candidate and then the 29 grid steps around the coarse
+peak (~70 metric evaluations in all), and the same record handed to that
+default comes back the same one grid step from truth as the 101-point grid
+above. Pass your own `scales` when the platform can be faster than ±7.5 m/s,
+or to zoom below the 0.025 m/s step.
 
 The right panel confirms the convention across the whole speed range: the
 estimate that comes out is `a = v/c`, positive for a closing geometry, and it
@@ -763,9 +766,10 @@ plotters in `uacpy.visualization`. The comms family:
 | `plot_subcarriers(channel, n_subcarriers, ax)` | the OFDM channel response |
 | `plot_doppler_ambiguity(scales, peak, ax)` | the Doppler ambiguity curve |
 
-All of them take plain arrays, accept `ax` as the second positional argument,
-and return `(fig, ax)` — the convention described in
-[plotting](plotting.md). The `uacpy.comms` modules themselves never import
+All of them take plain arrays, accept `ax` as the last positional argument —
+directly after the data, so it sits second in the one-array signatures and
+third in the two-array ones, as the table shows — and return `(fig, ax)`, the
+convention described in [plotting](plotting.md). The `uacpy.comms` modules themselves never import
 matplotlib.
 
 ---

@@ -36,8 +36,9 @@ class TestPekerisWaveguide:
     """
 
     @pytest.fixture
-    def pekeris_env(self):
-        """Standard Pekeris waveguide environment."""
+    def pekeris_env_soft_bottom(self):
+        """Pekeris waveguide with a softer bottom (1600 m/s, density 1.5)
+        than conftest's ``pekeris_env`` (1700 m/s, density 1.8)."""
         bottom = BoundaryProperties(
             acoustic_type='half-space',
             sound_speed=1600.0,  # Slightly faster sediment
@@ -67,7 +68,7 @@ class TestPekerisWaveguide:
         )
 
     @pytest.mark.requires_binary
-    def test_bellhop_pekeris_tl_range(self, pekeris_env, pekeris_source, pekeris_receiver):
+    def test_bellhop_pekeris_tl_range(self, pekeris_env_soft_bottom, pekeris_source, pekeris_receiver):
         """
         Bellhop TL grows with range in a Pekeris waveguide.
 
@@ -79,7 +80,7 @@ class TestPekerisWaveguide:
         ``test_benchmarks_analytic.py::test_bellhop_lloyd_mirror``.
         """
         bellhop = Bellhop(verbose=False)
-        result = bellhop.compute_tl(pekeris_env, pekeris_source, pekeris_receiver)
+        result = bellhop.compute_tl(pekeris_env_soft_bottom, pekeris_source, pekeris_receiver)
 
         # Basic validation
         assert isinstance(result, Field)
@@ -103,7 +104,7 @@ class TestPekerisWaveguide:
         assert np.all(result.db < 200), "TL should not exceed 200 dB (sanity check)"
 
     @pytest.mark.requires_binary
-    def test_bellhop_pekeris_depth_structure(self, pekeris_env, pekeris_source, pekeris_receiver):
+    def test_bellhop_pekeris_depth_structure(self, pekeris_env_soft_bottom, pekeris_source, pekeris_receiver):
         """
         Bellhop should show Lloyd mirror interference pattern
 
@@ -112,7 +113,7 @@ class TestPekerisWaveguide:
         - Pattern depends on source/receiver geometry
         """
         bellhop = Bellhop(verbose=False)
-        result = bellhop.compute_tl(pekeris_env, pekeris_source, pekeris_receiver)
+        result = bellhop.compute_tl(pekeris_env_soft_bottom, pekeris_source, pekeris_receiver)
 
         # Check depth variation exists (not constant)
         tl_vs_depth_at_1km = result.db[:, 0]
@@ -121,7 +122,7 @@ class TestPekerisWaveguide:
 
     @pytest.mark.requires_binary
     @pytest.mark.slow
-    def test_kraken_pekeris_modes(self, pekeris_env, pekeris_source):
+    def test_kraken_pekeris_modes(self, pekeris_env_soft_bottom, pekeris_source):
         """
         Kraken computes physically reasonable modes on a Pekeris waveguide.
 
@@ -134,7 +135,7 @@ class TestPekerisWaveguide:
         eigenvalue, not a change in the loss model.
         """
         kraken = Kraken(verbose=False)
-        modes = kraken.compute_modes(pekeris_env, pekeris_source, n_modes=20)
+        modes = kraken.compute_modes(pekeris_env_soft_bottom, pekeris_source, n_modes=20)
 
         assert isinstance(modes, Modes)
         assert modes.k is not None, "Should have wavenumber data"

@@ -6,19 +6,19 @@ is not asserted — that's :mod:`uacpy.core.metrics` and the model
 regression tests' job.
 """
 
+import inspect
+
 import numpy as np
-import matplotlib  # noqa: E402 ordering — must precede pyplot
-matplotlib.use('Agg')
+import pytest
+import matplotlib.pyplot as plt
 
-import pytest  # noqa: E402
-import matplotlib.pyplot as plt  # noqa: E402
-
-import uacpy  # noqa: E402
-from uacpy.core.exceptions import ConfigurationError  # noqa: E402
-from uacpy.core.results import (  # noqa: E402
+import uacpy
+from uacpy.core.exceptions import ConfigurationError
+from uacpy.core.results import (
     Field, Modes, Arrivals, Rays, ReflectionCoefficient,
+    Covariance, Replicas, ResultStack,
 )
-from uacpy.visualization import plots  # noqa: E402
+from uacpy.visualization import plots
 
 
 @pytest.fixture
@@ -66,6 +66,18 @@ def broadband_field():
     )
 
 
+@pytest.fixture
+def time_field():
+    """Real 2-D ``(range, time)`` field — the stacked-traces / time-heatmap input."""
+    r = np.linspace(100.0, 2000.0, 6)
+    t = np.linspace(0.0, 0.1, 5)
+    data = np.random.default_rng(2).standard_normal((6, 5))
+    return Field(
+        data=data, coords={'range': r, 'time': t},
+        model='Synth', frequencies=100.0,
+    )
+
+
 class TestPlotField:
     """``plot_field`` auto-shapes based on what survives in
     :attr:`Field.coords` after slicing."""
@@ -108,7 +120,94 @@ class TestPlotField:
 
     def test_phase_value(self, complex_field):
         fig, ax = plots.plot_field(complex_field, value='phase')
+        # Phase heatmaps draw on the cyclic 'twilight' colormap with the
+        # fixed ±π colour scale.
+        mesh = ax.collections[0]
+        assert mesh.get_cmap().name == 'twilight'
+        assert mesh.get_clim() == pytest.approx((-np.pi, np.pi))
         plt.close(fig)
+
+    def test_three_axis_field_raises_slice_first(self, broadband_field):
+        # No axis of broadband_field is singleton, so nothing auto-squeezes:
+        # three surviving axes have no picture and the error says to slice.
+        with pytest.raises(ConfigurationError,
+                           match=r"cannot plot a 3-axis field .*slice it "
+                                 r"first"):
+            broadband_field.plot()
+
+
+class TestValueModeDefaults:
+    """``value=`` defaults to ``'real'`` if and only if the field carries a
+    ``time`` axis, and ``'db'`` otherwise; each default brings its own colour
+    treatment."""
+
+    def test_time_field_defaults_to_real_with_seismic_rms_clim(self, time_field):
+        fig, ax = plots.plot_field(time_field)
+        mesh = ax.collections[0]
+        # The drawn array is the raw real data — the 'real' default.
+        assert np.allclose(np.asarray(mesh.get_array()).ravel(),
+                           time_field.data.ravel())
+        # Real time-domain pressure gets the diverging 'seismic' colormap
+        # clipped symmetrically to ±RMS.
+        assert mesh.get_cmap().name == 'seismic'
+        rms = float(np.sqrt(np.mean(time_field.data ** 2)))
+        assert mesh.get_clim() == pytest.approx((-rms, rms))
+        plt.close(fig)
+
+    def test_non_time_field_defaults_to_db(self, complex_field):
+        fig, ax = plots.plot_field(complex_field)
+        mesh = ax.collections[0]
+        # The drawn array is the dB view, on the fixed TL scale.
+        assert np.allclose(np.asarray(mesh.get_array()).ravel(),
+                           complex_field.db.ravel())
+        assert mesh.get_clim() == (20.0, 120.0)
+        plt.close(fig)
+
+
+class TestStackedTraces:
+    """``stacked=True`` draws one vertically offset trace per row of a 2-D
+    field carrying a ``time`` axis, and is rejected anywhere else."""
+
+    def test_rejected_on_a_field_without_a_time_axis(self, tl_field):
+        with pytest.raises(ConfigurationError,
+                           match=r"stacked=True.*requires a 2-D field with "
+                                 r"a 'time' axis"):
+            plots.plot_field(tl_field, stacked=True)
+
+    def test_per_trace_vertical_offsets(self, time_field):
+        fig, ax = plots.plot_field(time_field, stacked=True, stack_offset=1.5)
+        # One Line2D per range row, each lifted by i · stack_offset.
+        assert len(ax.lines) == time_field.coords['range'].size
+        for i, line in enumerate(ax.lines):
+            np.testing.assert_allclose(
+                line.get_ydata() - time_field.data[i], i * 1.5)
+        plt.close(fig)
+
+
+class TestKwargOwnershipRejections:
+    """Every ``plot_field`` knob is owned by one render branch; a knob handed
+    to a branch that cannot read it raises before any figure exists."""
+
+    @pytest.mark.parametrize('case, match', [
+        ('vmin_on_line_cut',
+         r"vmin= has no effect on a 1-D line cut"),
+        ('label_on_heatmap',
+         r"label= has no effect on a 2-D heatmap"),
+        ('env_on_time_heatmap',
+         r"env= has no effect on a heatmap that is not a "
+         r"\(depth, range\) cross-section"),
+    ])
+    def test_foreign_kwarg_rejected(self, case, match, tl_field, time_field,
+                                    env):
+        calls = {
+            'vmin_on_line_cut': (tl_field.at(depth=50.0), {'vmin': 20.0}),
+            'label_on_heatmap': (tl_field, {'label': 'cut'}),
+            'env_on_time_heatmap': (time_field, {'env': env}),
+        }
+        field, kwargs = calls[case]
+        with pytest.raises(ConfigurationError, match=match):
+            plots.plot_field(field, **kwargs)
+        assert not plt.get_fignums()
 
 
 class TestCompare:
@@ -142,9 +241,51 @@ class TestCompareModels:
         )
         plt.close(fig)
 
+    def test_grid_mismatch_warns(self, tl_field):
+        # Two fields on different range grids share one colourbar, so the
+        # mismatch is announced as a UserWarning naming the odd axis.
+        shifted = Field(
+            data=tl_field.data.copy(),
+            coords={'depth': tl_field.coords['depth'],
+                    'range': tl_field.coords['range'] + 250.0},
+            model='B', frequencies=100.0,
+        )
+        with pytest.warns(UserWarning,
+                          match=r"'B' range axis differs from 'A'"):
+            fig, _ = plots.compare_models([tl_field, shifted],
+                                          labels=['A', 'B'])
+        plt.close(fig)
+
+
+class TestResultStackPlot:
+    """``stack.plot()`` renders one titled heatmap panel per slab."""
+
+    @staticmethod
+    def _slab(amp):
+        d = np.linspace(10.0, 90.0, 5)
+        r = np.linspace(100.0, 3000.0, 8)
+        return Field(data=np.full((5, 8), amp),
+                     coords={'depth': d, 'range': r},
+                     model='Synth', frequencies=100.0)
+
+    def test_panel_grid_one_axes_per_slab(self):
+        stack = ResultStack(
+            [self._slab(40.0), self._slab(60.0), self._slab(80.0)],
+            [10.0, 20.0, 30.0], coordinate_name='source_depth')
+        fig, axes = stack.plot()
+        axes = np.asarray(axes)
+        assert axes.shape == (1, 3)
+        # Every grid cell holds a drawn mesh — panel count == slab count.
+        drawn = [a for a in axes.ravel()
+                 if any(hasattr(c, 'get_coordinates') for c in a.collections)]
+        assert len(drawn) == stack.n_slabs
+        assert [a.get_title() for a in axes.ravel()] == [
+            'source_depth=10', 'source_depth=20', 'source_depth=30']
+        plt.close(fig)
+
 
 class TestPlotRays:
-    def test_basic_ray_fan(self, env):
+    def test_ray_fan_plot_smoke(self, env):
         rays = Rays(
             rays=[
                 {'r': np.linspace(0, 5000, 50),
@@ -229,6 +370,76 @@ class TestPlotRays:
         assert by_z[ZORDER_SOURCE].get_markersize() >= 16
         plt.close(fig)
 
+    def test_receiver_lattice_decimated(self):
+        # A 40-range × 30-depth lattice draws 20 × 10 markers: each axis is
+        # decimated by step size // cap (caps 20 range dots, 10 depth dots).
+        from uacpy.visualization.plots._common import ZORDER_RECEIVERS
+        rays = Rays(
+            rays=[{'r': np.linspace(0, 2000, 10),
+                   'z': np.linspace(10, 60, 10),
+                   'alpha': 0.0, 'n_top_bounces': 0, 'n_bot_bounces': 0}],
+            receiver_depths=np.linspace(5.0, 25.0, 30),
+            receiver_ranges=np.linspace(100.0, 2000.0, 40),
+            model='Bellhop',
+        )
+        fig, ax = rays.plot()
+        rcv = next(ln for ln in ax.lines
+                   if ln.get_zorder() == ZORDER_RECEIVERS)
+        assert len(rcv.get_xdata()) == 20 * 10
+        plt.close(fig)
+
+    @staticmethod
+    def _classed_rays(classes):
+        def ray(z_peak, n_top, n_bot):
+            return {'r': np.linspace(0, 1500, 10),
+                    'z': np.linspace(10, z_peak, 10),
+                    'alpha': 0.0, 'n_top_bounces': n_top,
+                    'n_bot_bounces': n_bot}
+        bounces = {'direct': (0, 0), 'surface': (1, 0),
+                   'bottom': (0, 1), 'both': (2, 3)}
+        return Rays(rays=[ray(40.0 + 10.0 * i, *bounces[k])
+                          for i, k in enumerate(classes)],
+                    receiver_depths=np.array([50.0]),
+                    receiver_ranges=np.array([1500.0]),
+                    model='Bellhop')
+
+    def test_ray_class_colours_and_legend_counts(self):
+        # Multipath class mapping: direct = red, surface-reflected = green,
+        # bottom-reflected = blue, both = black; the legend counts each class.
+        from uacpy.visualization.plots._common import ZORDER_RAYS
+        rays = self._classed_rays(['direct', 'surface', 'bottom', 'both'])
+        fig, ax = rays.plot()
+        ray_lines = [ln for ln in ax.lines if ln.get_zorder() == ZORDER_RAYS]
+        assert [ln.get_color() for ln in ray_lines] == [
+            '#e53935', '#43a047', '#1e88e5', '#000000']
+        assert [t.get_text() for t in ax.get_legend().get_texts()] == [
+            'direct (1)', 'surface (1)', 'bottom (1)', 'both (1)']
+        plt.close(fig)
+
+    def test_legend_lists_only_the_classes_present(self):
+        rays = self._classed_rays(['direct', 'surface'])
+        fig, ax = rays.plot()
+        assert [t.get_text() for t in ax.get_legend().get_texts()] == [
+            'direct (1)', 'surface (1)']
+        plt.close(fig)
+
+    def test_axis_span_without_env(self):
+        # Deepest ray point 80 m, receiver at 2 km. With no env= the depth
+        # axis spans the fan itself — 8 % headroom below, 4 % above z = 0 —
+        # and the x axis spans the receivers with a 3 % right margin.
+        rays = Rays(
+            rays=[{'r': np.linspace(0, 1500, 10),
+                   'z': np.linspace(10, 80, 10),
+                   'alpha': 0.0, 'n_top_bounces': 0, 'n_bot_bounces': 0}],
+            receiver_depths=np.array([50.0]),
+            receiver_ranges=np.array([2000.0]),
+            model='Bellhop',
+        )
+        fig, ax = rays.plot()
+        assert ax.get_ylim() == pytest.approx((80.0 * 1.08, -80.0 * 0.04))
+        assert ax.get_xlim() == pytest.approx((0.0, 2.0 * 1.03))
+        plt.close(fig)
+
 
 class TestPlotArrivals:
     def test_stem_plot(self):
@@ -251,9 +462,72 @@ class TestPlotArrivals:
         plt.close(fig)
 
 
+class TestPlotCovariance:
+    def test_dispatch_draws_csdm_image(self):
+        rng = np.random.default_rng(0)
+        C = rng.standard_normal((1, 4, 4)) + 1j * rng.standard_normal((1, 4, 4))
+        cov = Covariance(covariance=C, model='OASN', frequencies=200.0)
+        fig, ax = cov.plot()
+        # One imshow image of |C|, titled with the slice frequency.
+        assert len(ax.images) == 1
+        assert ax.get_title() == 'Covariance at 200.0 Hz'
+        plt.close(fig)
+
+
+class TestPlotReplicas:
+    def test_dispatch_draws_replica_field(self):
+        rng = np.random.default_rng(1)
+        R = (rng.standard_normal((1, 3, 4, 1, 2))
+             + 1j * rng.standard_normal((1, 3, 4, 1, 2)))
+        rep = Replicas(replicas=R, replica_z=np.linspace(10.0, 50.0, 3),
+                       replica_x=np.linspace(100.0, 400.0, 4),
+                       replica_y=[0.0], model='OASN', frequencies=200.0)
+        fig, ax = rep.plot()
+        # One (z, x) pcolormesh of |R| with the depth axis pointing down.
+        meshes = [c for c in ax.collections if hasattr(c, 'get_coordinates')]
+        assert len(meshes) == 1
+        assert ax.yaxis_inverted()
+        plt.close(fig)
+
+
 class TestPlotEnvironment:
     def test_flat_env(self, env):
         fig, _ = env.plot()
+        plt.close(fig)
+
+
+class TestDataAttributionFootnote:
+    """A figure the plotter owns is stamped with the environment's data
+    attribution as a ``Data:`` footnote; ``data_source=False`` and ``ax=``
+    (composition) both leave the figure unstamped."""
+
+    @pytest.fixture
+    def fetched_env(self, env):
+        # A fetched env carries data_sources; stamp them onto this
+        # hand-built one directly.
+        env.data_sources = ('GEBCO Compilation Group, GEBCO Grid',)
+        return env
+
+    @staticmethod
+    def _data_texts(fig):
+        return [t for t in fig.texts if t.get_text().startswith('Data:')]
+
+    def test_footnote_drawn_from_env_data_sources(self, fetched_env):
+        fig, _ = fetched_env.plot()
+        notes = self._data_texts(fig)
+        assert len(notes) == 1
+        assert 'GEBCO' in notes[0].get_text()
+        plt.close(fig)
+
+    def test_data_source_false_suppresses(self, fetched_env):
+        fig, _ = fetched_env.plot(data_source=False)
+        assert not self._data_texts(fig)
+        plt.close(fig)
+
+    def test_explicit_ax_suppresses(self, fetched_env):
+        fig, ax = plt.subplots()
+        fetched_env.plot(ax=ax)
+        assert not self._data_texts(fig)
         plt.close(fig)
 
 
@@ -462,6 +736,28 @@ class TestTLLimits:
     def test_fixed_limits(self):
         from uacpy.visualization.plots._common import _TL_LIMITS
         assert _TL_LIMITS == (20.0, 120.0)
+
+
+class TestNoiseSonarPlotterSignatures:
+    """Documented signatures of the noise / sonar free plotters, each with a
+    minimal-call smoke."""
+
+    @pytest.mark.parametrize('name, params, args, kwargs', [
+        ('plot_roc', ('deflection', 'ax', 'pfa', 'pd'),
+         (), {'deflection': 2.0, 'n_points': 16}),
+        ('plot_source_level', ('frequency', 'level_db', 'ax', 'label'),
+         (np.array([63.0, 125.0, 250.0]),
+          np.array([150.0, 148.0, 145.0])), {}),
+        ('plot_weighting', ('group', 'ax', 'frequency'),
+         ('LF',), {}),
+    ])
+    def test_signature_and_smoke(self, name, params, args, kwargs):
+        fn = getattr(plots, name)
+        sig = inspect.signature(fn)
+        assert all(p in sig.parameters for p in params)
+        fig, ax = fn(*args, **kwargs)
+        assert ax.has_data()
+        plt.close(fig)
 
 
 class TestBathymetryMap:

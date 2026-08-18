@@ -15,14 +15,15 @@ from uacpy.data._http import raise_substantive
 
 __all__ = ['fetch_waves', 'WAVE_SOURCES']
 
+#: Valid wave sources, in the order ``'auto'`` tries them: Copernicus WAVERYS
+#: (full history, needs the login) before WaveWatch III (no auth, recent).
 WAVE_SOURCES = ('copernicus', 'ww3')
-_AUTO_ORDER = ('copernicus', 'ww3')
 _SOURCE_ID = {'copernicus': 'waverys', 'ww3': 'ww3'}
 
 
 def _resolve_order(source):
     if source == 'auto':
-        return _AUTO_ORDER
+        return WAVE_SOURCES
     order = (source,) if isinstance(source, str) else tuple(source)
     for name in order:
         if name not in WAVE_SOURCES:

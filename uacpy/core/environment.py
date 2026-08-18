@@ -408,11 +408,17 @@ class Environment:
 
     @property
     def is_range_dependent(self) -> bool:
-        """True when any carrier is range-dependent, under each carrier's own
-        meaning of the term: for bathymetry the *values* must vary with range
-        (a flat multi-point bathymetry does not count), while for
-        ssp / bottom / surface the test is structural (more than one node on
-        a ranged axis, identical or not)."""
+        """True when bathymetry, SSP, bottom or surface is range-dependent,
+        under each carrier's own meaning of the term: for bathymetry the
+        *values* must vary with range (a flat multi-point bathymetry does not
+        count), while for ssp / bottom / surface the test is structural (more
+        than one node on a ranged axis, identical or not).
+
+        Altimetry is not consulted: a non-flat sea surface varies with range
+        by nature, but it is boundary geometry that Bellhop — the only model
+        reading altimetry — traces directly from its ``.ati`` file, so it
+        never triggers the segmented-profile machinery this flag selects for
+        the four carriers above."""
         return (
             self.has_range_dependent_bathymetry
             or self.ssp.is_range_dependent

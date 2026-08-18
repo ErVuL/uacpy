@@ -5,7 +5,7 @@ are analytic, and the fetch paths are stubbed."""
 import numpy as np
 import pytest
 
-from uacpy.data._geo import run_representative_indices
+from uacpy.data._geo import run_boundary_indices, run_representative_indices
 from uacpy.data import sound_speed as ss
 from uacpy.data import bathymetry as bath
 from uacpy.core.environment import SoundSpeedProfile
@@ -32,6 +32,36 @@ def test_run_representatives_strictly_increasing(seed):
     n_runs = 1 + sum(1 for a, b in zip(keys, keys[1:]) if a != b)
     if n_runs > 1:
         assert reps[-1] == n - 1            # last run anchored to the end
+
+
+def test_run_boundaries_bracket_every_change():
+    # Categorical (nearest-node) collapse: both samples around each change of
+    # key survive, plus the endpoints, so a nearest-node reconstruction puts
+    # each transition between the very samples that observed it.
+    assert run_boundary_indices([0, 0, 0, 1, 1, 2, 2, 2, 2]) == [0, 2, 3, 4, 5, 8]
+    assert run_boundary_indices([0, 1]) == [0, 1]
+    assert run_boundary_indices([0, 1, 2]) == [0, 1, 2]   # single-sample runs
+    assert run_boundary_indices([5, 5, 5]) == [0]         # one run
+    assert run_boundary_indices([]) == []
+
+
+@pytest.mark.parametrize("seed", range(50))
+def test_run_boundaries_strictly_increasing_and_pinned(seed):
+    rng = np.random.default_rng(seed)
+    n = int(rng.integers(2, 80))
+    keys = list(rng.integers(0, 4, size=n))
+    reps = run_boundary_indices(keys)
+    assert reps == sorted(reps) and len(set(reps)) == len(reps)
+    assert reps[0] == 0
+    n_runs = 1 + sum(1 for a, b in zip(keys, keys[1:]) if a != b)
+    if n_runs == 1:
+        assert reps == [0]
+    else:
+        assert reps[-1] == n - 1            # endpoints anchored
+        # every change of key keeps both bracketing indices
+        for i in range(1, n):
+            if keys[i] != keys[i - 1]:
+                assert i - 1 in reps and i in reps
 
 
 # ── SSP 'auto' plan (analytic — no network) ─────────────────────────────────
@@ -62,6 +92,15 @@ def test_ssp_plan_explicit_and_cap():
     assert p2['n_points'] <= 12
     with pytest.raises(ConfigurationError):
         ss.ssp_transect_plan((0.0, 0.0), (0.0, 1.0), n_points=1)
+
+
+def test_ssp_plan_warns_when_explicit_n_points_capped():
+    # Regression: the cap on an explicit n_points was silent here while
+    # fetch_bathy_transect warned; both now warn with the same message shape.
+    with pytest.warns(UserWarning, match=r'n_points=30 exceeds max_points=10'):
+        p = ss.ssp_transect_plan((0.0, 0.0), (0.0, 2.0), n_points=30,
+                                 max_points=10)
+    assert p['n_points'] == 10
 
 
 def test_ssp_fetch_auto_fetches_once_per_cell(monkeypatch):

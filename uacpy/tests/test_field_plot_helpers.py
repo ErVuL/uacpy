@@ -7,8 +7,6 @@ auto-squeezed), a multi-receiver field must be reduced with ``.at()`` first,
 and a non-broadband field is rejected.
 """
 
-import matplotlib
-matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
 import pytest
@@ -36,12 +34,6 @@ def _broadband(n_depth=1, n_range=1):
         model_source=model_source('acoustics_toolbox'),
         metadata={'c0': 1500.0},
     )
-
-
-@pytest.fixture(autouse=True)
-def _close_figs():
-    yield
-    plt.close('all')
 
 
 # ── plot_transfer_function ───────────────────────────────────────────────────
@@ -181,10 +173,23 @@ def _tl_field(max_depth=20.0):
 
 def test_env_extends_depth_axis_to_the_seabed():
     """A receiver grid ending above the seafloor still plots the full water
-    column once the environment is supplied."""
+    column once the environment is supplied — the axis bottom sits 5 %
+    below the seafloor (``env.depth * 1.05``)."""
     env = uacpy.Environment(bathymetry=30.0, ssp=1500.0)
     fig, ax = _tl_field().plot(env=env)
-    assert max(ax.get_ylim()) > 30.0
+    assert max(ax.get_ylim()) == pytest.approx(30.0 * 1.05)
+
+
+def test_range_dependent_seafloor_headroom_below_deepest_clipped_point():
+    """The bathymetry is clipped to the plotted range span, and the depth
+    axis bottom sits 5 % below the deepest seafloor point of that span."""
+    env = uacpy.Environment(bathymetry=[(0.0, 100.0), (5000.0, 120.0)],
+                            ssp=1500.0)
+    fig, ax = _tl_field().plot(env=env)
+    # The field spans 1–2000 m, so the deepest visible seafloor sits at the
+    # 2 km end of the 100→120 m slope.
+    deepest = np.interp(2000.0, [0.0, 5000.0], [100.0, 120.0])
+    assert max(ax.get_ylim()) == pytest.approx(deepest * 1.05)
 
 
 def test_without_env_the_plot_spans_only_the_data():

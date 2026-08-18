@@ -13,6 +13,7 @@ Oppenheim & Schafer. *Discrete-Time Signal Processing* (cepstrum).
 from __future__ import annotations
 
 import math
+import warnings
 from collections import namedtuple
 from functools import lru_cache
 
@@ -66,7 +67,8 @@ def _smoothing_window(spec, name):
     """Centered, odd-length smoothing window from a ``None`` / int / array spec.
 
     ``None`` -> no smoothing. An int ``L`` -> a symmetric Hann window of odd length (``L-1`` for even ``L``). A 1-D
-    array is used verbatim. Returns ``(w, half)`` with ``w`` of length
+    array is used verbatim when its length is odd; an even-length array has
+    its centre sample deleted, giving an odd length. Returns ``(w, half)`` with ``w`` of length
     ``2*half+1`` centered at index ``half`` (so ``w[half+k]`` weights offset
     ``k``); ``(None, 0)`` for no smoothing.
     """
@@ -87,7 +89,13 @@ def _smoothing_window(spec, name):
         if w.ndim != 1 or w.size < 1:
             raise ConfigurationError(f"wigner_ville: {name} must be a 1-D window")
         if w.size % 2 == 0:
-            w = w[:-1]
+            # Delete the centre sample, not the last one: an even symmetric
+            # window has two equal middle samples, so dropping one of them
+            # keeps the peak on-centre, while trimming the tail puts the peak
+            # off-centre and breaks the acc(-tau) = conj(acc(tau)) symmetry
+            # the transform's .real relies on (same reason the int path
+            # generates an odd length directly).
+            w = np.delete(w, w.size // 2)
     return w, w.size // 2
 
 
@@ -159,14 +167,22 @@ def wigner_ville(data, sample_rate: float, *, analytic: bool = True,
         if gv is None:
             acc = z[ti + taus] * np.conj(z[ti - taus])
         else:
-            acc = np.empty(taus.size, dtype=complex)
-            for a, tau in enumerate(taus):
-                mmax = min(Lg, ti + tau, n - 1 - ti - tau,
-                           ti - tau, n - 1 - ti + tau)
-                ms = np.arange(-mmax, mmax + 1)
-                gw = gv[Lg + ms]
-                acc[a] = (np.sum(gw * z[ti + tau + ms]
-                                 * np.conj(z[ti - tau + ms])) / np.sum(gw))
+            # All lags at once over the full time-smoothing support
+            # m in [-Lg, Lg]. Per lag tau the valid support is |m| <= mmax
+            # with mmax = min(Lg, ti - |tau|, n - 1 - ti - |tau|) (both
+            # z[ti+tau+m] and z[ti-tau+m] in range); out-of-support terms
+            # are masked to zero, indices clipped so the masked positions
+            # never index out of bounds.
+            ms = np.arange(-Lg, Lg + 1)
+            mmax = np.minimum(Lg, np.minimum(ti - np.abs(taus),
+                                             n - 1 - ti - np.abs(taus)))
+            valid = np.abs(ms)[None, :] <= mmax[:, None]
+            ip = np.clip(ti + taus[:, None] + ms[None, :], 0, n - 1)
+            im = np.clip(ti - taus[:, None] + ms[None, :], 0, n - 1)
+            gw = gv[Lg + ms]
+            prod = np.where(valid, gw[None, :] * z[ip] * np.conj(z[im]), 0.0)
+            wsum = np.where(valid, gw[None, :], 0.0).sum(axis=1)
+            acc = prod.sum(axis=1) / wsum
         if hv is not None:
             acc = acc * hv[Lh + taus]
         kernel = np.zeros(NF, dtype=complex)
@@ -288,14 +304,22 @@ def cwt(data, sample_rate, frequencies=None, wavelet="morlet", *, w0=6.0,
         complex CWT coefficients, shape ``(n_freqs, len(data))``;
         ``abs(coefficients)`` is the scalogram.
     """
-    xr = np.asarray(data, dtype=float)
+    xa = np.asarray(data)
+    if np.iscomplexobj(xa):
+        raise ConfigurationError(
+            "cwt: data must be real (got complex input); the transform "
+            "analyses a real signal.")
+    xr = xa.astype(float)
     if xr.ndim != 1:
         raise ConfigurationError("cwt: data must be 1-D")
     require_finite_signal(xr, "cwt")
+    fs = float(sample_rate)
+    if not fs > 0:
+        raise ConfigurationError(
+            f"cwt: sample_rate must be > 0 Hz (got {sample_rate}).")
     if order is None:
         order = 4 if wavelet == "paul" else 2
     n = xr.size
-    fs = float(sample_rate)
     if frequencies is None:
         f_lo = 4.0 * fs / n  # lowest default frequency = 4 cycles per record
         if f_lo >= fs / 2.0:
@@ -335,7 +359,10 @@ def inverse_cwt(W, frequencies, sample_rate, wavelet="morlet", *, w0=6.0,
     reconstruct at the right amplitude. Pass the same ``frequencies`` /
     ``wavelet`` / ``w0`` / ``order`` used in :func:`cwt`; amplitude is
     recovered to the accuracy of the scale coverage (a band-limited scale set
-    reconstructs only the band it spans).
+    reconstructs only the band it spans). The quadrature assumes the scale
+    grid is **uniform in log2** — true of :func:`cwt`'s default log-spaced
+    frequencies; a non-uniform grid (e.g. linearly spaced frequencies, or a
+    single frequency) biases the amplitude and raises a ``UserWarning``.
 
     Parameters
     ----------
@@ -361,7 +388,29 @@ def inverse_cwt(W, frequencies, sample_rate, wavelet="morlet", *, w0=6.0,
     fs = float(sample_rate)
     _, factor = _wavelet_fourier(wavelet, 1.0, np.array([1.0]), w0, order)
     scales = factor * fs / frequencies
-    dj = float(np.mean(np.abs(np.diff(np.log2(scales))))) if scales.size > 1 else 1.0
+    if scales.size > 1:
+        dlog = np.abs(np.diff(np.log2(scales)))
+        dj = float(np.mean(dlog))
+        # Eq. 11 is a quadrature over log2-uniform scales with spacing dj; on
+        # a non-uniform grid a single mean dj misweights every scale and the
+        # amplitude comes out wrong.
+        if float(np.std(dlog)) > 0.01 * dj:
+            warnings.warn(
+                "inverse_cwt: the scale grid implied by `frequencies` is not "
+                "uniform in log2 (std(diff(log2(scales))) = "
+                f"{float(np.std(dlog)):.3g} vs mean {dj:.3g}), but the "
+                "Torrence & Compo eq.-11 sum assumes log2-uniform scale "
+                "spacing dj — the reconstruction amplitude will be biased. "
+                "Use log-spaced frequencies (cwt's default grid).",
+                UserWarning, stacklevel=2)
+    else:
+        dj = 1.0
+        warnings.warn(
+            "inverse_cwt: a single scale cannot calibrate the log2 scale "
+            "spacing dj the Torrence & Compo eq.-11 sum assumes (dj is taken "
+            "as 1.0), so the reconstruction amplitude is arbitrary. Analyse "
+            "with several log-spaced frequencies.",
+            UserWarning, stacklevel=2)
     c_delta, psi0_zero = _reconstruction_constants(wavelet, float(w0), int(order))
     return (np.sum(np.real(Wc) / np.sqrt(scales)[:, None], axis=0)
             * dj / (c_delta * psi0_zero))
@@ -487,12 +536,21 @@ def complex_cepstrum(data):
 def inverse_complex_cepstrum(c):
     """Invert :func:`complex_cepstrum`: ``x = real(ifft(exp(fft(c))))``.
 
-    Takes the complex cepstrum :func:`complex_cepstrum` returns (the
-    imaginary part is significant — see there) and reconstructs the real
-    signal ``x``."""
-    delay = 0
-    if isinstance(c, ComplexCepstrum):
-        c, delay = c.cepstrum, int(c.delay)
+    Takes the :class:`ComplexCepstrum` namedtuple :func:`complex_cepstrum`
+    returns (the imaginary part of its ``cepstrum`` field is significant —
+    see there) and reconstructs the real signal ``x``. Both fields are
+    required: the ``delay`` restores the linear-phase term the forward
+    transform removed, without which the signal comes back at the wrong
+    arrival time."""
+    if not isinstance(c, ComplexCepstrum):
+        raise ConfigurationError(
+            "inverse_complex_cepstrum: c must be the ComplexCepstrum "
+            "namedtuple returned by complex_cepstrum — its delay field "
+            "restores the linear-phase term the forward transform removed, "
+            "and a bare cepstrum array carries no delay. Pass the "
+            "complex_cepstrum result unchanged, or "
+            "ComplexCepstrum(cepstrum=your_array, delay=your_delay).")
+    c, delay = c.cepstrum, int(c.delay)
     cr = np.asarray(c, dtype=complex)
     if cr.ndim != 1:
         raise ConfigurationError("inverse_complex_cepstrum: c must be 1-D")
@@ -506,14 +564,24 @@ def inverse_complex_cepstrum(c):
 def spectrogram(data, sample_rate, *, window="hann", nperseg=8192,
                 noverlap=None, nfft=None, scaling="density", mode="psd"):
     """Short-time spectrogram. Returns a :class:`SpectrogramResult`
-    ``(frequencies, times, power)`` (Pa²/Hz).
+    ``(frequencies, times, power)`` (Pa²/Hz with the default
+    ``scaling='density'``/``mode='psd'``).
 
     ``noverlap=None`` (default) lets scipy derive the overlap (``nperseg // 8``)
     and clamp ``nperseg`` to the input length, so short signals don't raise; pass
     an int to override. ``nfft`` (zero-pad length) mirrors
-    :func:`uacpy.acoustic_signal.psd`. For logarithmic / constant-Q frequency
-    resolution, see :func:`uacpy.acoustic_signal.constant_q_spectrogram`."""
+    :func:`uacpy.acoustic_signal.psd`. ``mode`` is passed through to
+    :func:`scipy.signal.spectrogram`: ``'psd'`` (default) is the power
+    spectral density the stated Pa²/Hz units apply to; ``'complex'`` /
+    ``'magnitude'`` return the (windowed) STFT itself in Pa /
+    ``'angle'``/``'phase'`` its phase in radians — for those the ``power``
+    field is not a power and the Pa²/Hz units do not apply. For logarithmic /
+    constant-Q frequency resolution, see
+    :func:`uacpy.acoustic_signal.constant_q_spectrogram`."""
     data = require_finite_signal(data, "spectrogram")
+    if not float(sample_rate) > 0:
+        raise ConfigurationError(
+            f"spectrogram: sample_rate must be > 0 Hz (got {sample_rate}).")
     f, t, Sxx = _sig.spectrogram(data, sample_rate, window=window,
                                  nperseg=nperseg, noverlap=noverlap, nfft=nfft,
                                  scaling=scaling, mode=mode)

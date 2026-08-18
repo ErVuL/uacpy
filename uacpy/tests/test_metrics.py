@@ -52,6 +52,22 @@ class TestTLRmseBasic:
         assert tl_rmse(a, b, range_window=(r[0], r[4])) == pytest.approx(10.0)
         assert tl_rmse(a, b, range_window=(r[5], r[-1])) == pytest.approx(0.0)
 
+    def test_window_selecting_no_finite_cells_raises(self):
+        """A window past the grid's edge (or one that lands only on NaN
+        no-data cells) selects nothing: an empty comparison is a bug, not a
+        zero (docs/guide/utilities.md)."""
+        d = np.linspace(5, 95, 10)
+        r = np.linspace(100, 5000, 20)
+        a = _tl_field(np.zeros((10, 20)), d, r)
+        b = _tl_field(np.zeros((10, 20)), d, r)
+        with pytest.raises(ConfigurationError, match='no finite cells'):
+            tl_rmse(a, b, range_window=(6000.0, 9000.0))
+        # All-NaN cells inside an otherwise valid window select nothing too.
+        nan_a = _tl_field(np.full((10, 20), np.nan), d, r)
+        nan_b = _tl_field(np.full((10, 20), np.nan), d, r)
+        with pytest.raises(ConfigurationError, match='no finite cells'):
+            tl_rmse(nan_a, nan_b)
+
     def test_type_error_on_non_field(self):
         a = _tl_field(np.zeros((4, 4)), np.arange(4), np.arange(4))
         with pytest.raises(ConfigurationError):
@@ -119,11 +135,12 @@ class TestTLMetricsUnits:
         a, b = self._pair(both_complex=False)
         assert tl_rmse(a, b) == pytest.approx(1.0, abs=1e-9)
 
-    def test_rmse_complex_pair_works(self):
+    def test_rmse_complex_pair_recovers_db_offset(self):
+        # The complex pair stores |p| = 10^(-TL/20) with independent random
+        # phases; .db discards the phases, so the built-in 1-dB offset comes
+        # back exactly — the same pin as the real-dB pair above.
         a, b = self._pair(both_complex=True)
-        v = tl_rmse(a, b)
-        assert v >= 0.0
-        assert np.isfinite(v)
+        assert tl_rmse(a, b) == pytest.approx(1.0, abs=1e-9)
 
     def test_rmse_mixed_units(self):
         """Same TL stored once as complex and once as real-dB → RMSE ≈ 0."""

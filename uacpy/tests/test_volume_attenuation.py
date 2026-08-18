@@ -106,11 +106,12 @@ class TestVolumeAttenuation:
         )
 
     @pytest.mark.requires_binary
-    def test_kraken_thorp_attenuation(self, shallow_env_thorp,
+    def test_kraken_thorp_attenuation(self, shallow_env, shallow_env_thorp,
                                       high_freq_source, receiver):
-        """An absorbing environment reaches the modes path: kraken.exe accepts
-        the Thorp-derived attenuation and returns wavenumbers. The size of the
-        added loss is not asserted here."""
+        """An absorbing environment reaches the modes path and adds modal
+        loss: at 10 kHz Thorp is ~1.19 dB/km ≈ 1.4e-4 nepers/m of extra
+        Im(k) on every mode, so the Thorp run's mean Im(k) must sit above
+        the no-absorption run's (the bottom's own loss is present in both)."""
         kraken = Kraken(verbose=False)
         result = kraken.compute_modes(
             env=shallow_env_thorp,
@@ -118,6 +119,35 @@ class TestVolumeAttenuation:
         )
         assert isinstance(result, Modes)
         assert result.k is not None
+        plain = kraken.compute_modes(env=shallow_env,
+                                     source=high_freq_source)
+        im_thorp = np.imag(np.asarray(result.k))
+        im_plain = np.imag(np.asarray(plain.k))
+        assert im_thorp.size and im_plain.size
+        # Im(k) <= 0 in the decaying convention: more absorption pushes it
+        # further NEGATIVE, so the comparison is on magnitudes.
+        assert float(np.abs(im_thorp).mean()) > float(np.abs(im_plain).mean()), (
+            "Thorp volume absorption did not increase the modal Im(k)")
+
+    def test_ram_warns_that_absorption_is_ignored(self, shallow_env,
+                                                  shallow_env_thorp):
+        """No RAM backend consumes water-column volume attenuation
+        (ram.md §7); an absorbing env warns instead of silently running a
+        lossless water column. Unit-tests the helper — no binary runs."""
+        import warnings as _w
+        from uacpy.models import RAM
+        from uacpy.core.absorption import ConstantAbsorption
+        m = RAM(verbose=False)
+        with pytest.warns(UserWarning, match='env.absorption'):
+            m._warn_on_dropped_absorption(shallow_env_thorp)
+        with _w.catch_warnings(record=True) as caught:
+            _w.simplefilter('always')
+            m._warn_on_dropped_absorption(shallow_env)
+            m._warn_on_dropped_absorption(Environment(
+                name='zero', bathymetry=100.0, ssp=1500.0,
+                absorption=ConstantAbsorption(0.0)))
+        assert not [w for w in caught
+                    if 'env.absorption' in str(w.message)]
 
     @pytest.mark.requires_binary
     def test_frequency_dependent_attenuation(self, shallow_env_thorp,

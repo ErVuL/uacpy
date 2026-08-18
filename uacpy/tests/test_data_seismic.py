@@ -20,47 +20,13 @@ from uacpy.core.environment import SeabedColumn, Bottom
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.data import crust1_local, globsed_local
 from uacpy.data import _http
-
-
-def _write_globsed(root):
-    gdir = root / 'globsed'; gdir.mkdir(parents=True, exist_ok=True)
-    lat = np.linspace(-90, 90, 181)
-    lon = np.linspace(-180, 180, 361)
-    z = np.full((181, 361), 500.0)
-    ds = netCDF4.Dataset(gdir / 'GlobSed-v3.nc', 'w')
-    ds.createDimension('lat', 181); ds.createDimension('lon', 361)
-    ds.createVariable('lat', 'f8', ('lat',))[:] = lat
-    ds.createVariable('lon', 'f8', ('lon',))[:] = lon
-    zv = ds.createVariable('z', 'f4', ('lat', 'lon'), fill_value=np.nan)
-    z[0, 0] = np.nan                                   # one no-data cell
-    z[70, 20] = 149.0        # (-20, -160): distinct value for the wrap tests
-    z[100, 190] = 0.0        # (10, 10): bare basement (zero thickness)
-    z[120, 0] = 77.0         # (30, -180): distinct from the +180 end column
-    zv[:] = z
-    ds.close()
-
-
-def _write_crust1(root):
-    cdir = root / 'crust1'; cdir.mkdir(parents=True, exist_ok=True)
-    n = 180 * 360                                  # one row per 1° cell
-    # Nine columns per row, in CRUST1.0's layer order: water, ice, upper/middle/
-    # lower sediment, upper/middle/lower crystalline crust, mantle. ``bnds`` is
-    # each layer's top in km (negative down), so this is a uniform ocean column:
-    # water 0→−4 km, 1 km of sediment (−4→−5), crust below.
-    rows = {
-        'crust1.bnds': [0, -4, -4, -5, -5, -5, -10, -20, -30],
-        'crust1.vp':   [1.5, 3.8, 2.0, 0, 0, 5.0, 6.5, 7.1, 8.1],
-        'crust1.vs':   [0, 1.9, 0.6, 0, 0, 2.7, 3.7, 4.0, 4.5],
-        'crust1.rho':  [1.02, 0.9, 1.9, 0, 0, 2.6, 2.8, 3.0, 3.3],
-    }
-    for name, row in rows.items():
-        np.savetxt(cdir / name, np.tile(row, (n, 1)), fmt='%g')
+from uacpy.tests._cache_builders import _write_crust1, _write_globsed
 
 
 @pytest.fixture(scope='module')
 def _seis_root(tmp_path_factory):
     root = tmp_path_factory.mktemp('seis_cache')
-    _write_globsed(root)
+    _write_globsed(root, marked_cells=True)
     _write_crust1(root)
     return root
 

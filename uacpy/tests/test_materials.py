@@ -30,6 +30,42 @@ class TestMaterialsCatalog:
         assert basalt['sound_speed'] == 5250.0
         assert basalt['shear_speed'] == 2500.0
 
+    # The full nine-row catalog (docs/guide/environment.md table plus the
+    # porosity/roughness columns), keyed (c_p, ρ, α_p, c_s, α_s, porosity,
+    # ϕ, roughness). Rows clay..basalt are JKPS *Computational Ocean
+    # Acoustics* Table 1.3 (c_p = ratio × 1500 m/s; clay c_s "<100" and the
+    # depth-dependent silt/sand/gravel c_s(z̄) take the catalog's 1 m
+    # values); granite has no Table 1.3 row (see core/materials.py). ϕ is
+    # Hamilton & Bachman (1982) per the module comment. Roughness is 0.0
+    # by construction unless overridden.
+    _FULL_TABLE = {
+        'clay':      (1500.0, 1.5, 0.2, 80.0, 1.0, 70.0, 8.80, 0.0),
+        'silt':      (1575.0, 1.7, 1.0, 80.0, 1.5, 55.0, 5.40, 0.0),
+        'sand':      (1650.0, 1.9, 0.8, 110.0, 2.5, 45.0, 3.34, 0.0),
+        'gravel':    (1800.0, 2.0, 0.6, 180.0, 1.5, 35.0, -1.5, 0.0),
+        'moraine':   (1950.0, 2.1, 0.4, 600.0, 1.0, 25.0, None, 0.0),
+        'chalk':     (2400.0, 2.2, 0.2, 1000.0, 0.5, None, None, 0.0),
+        'limestone': (3000.0, 2.4, 0.1, 1500.0, 0.2, None, None, 0.0),
+        'basalt':    (5250.0, 2.7, 0.1, 2500.0, 0.2, None, None, 0.0),
+        'granite':   (5500.0, 2.7, 0.1, 3000.0, 0.2, None, None, 0.0),
+    }
+
+    @pytest.mark.parametrize('name', sorted(_FULL_TABLE))
+    def test_full_catalog_row_pinned(self, name):
+        cp, rho, ap, cs, a_s, poro, phi, rough = self._FULL_TABLE[name]
+        m = get_material(name)
+        assert m['sound_speed'] == cp
+        assert m['density'] == rho
+        assert m['attenuation'] == ap
+        assert m['shear_speed'] == cs
+        assert m['shear_attenuation'] == a_s
+        assert m['porosity'] == poro
+        assert m['grain_size_phi'] == phi
+        assert m['roughness'] == rough
+
+    def test_catalog_holds_exactly_the_nine_documented_rows(self):
+        assert set(MATERIALS) == set(self._FULL_TABLE)
+
     def test_get_material_is_case_insensitive(self):
         assert get_material('Sand')['sound_speed'] == get_material('sand')['sound_speed']
         assert get_material('  GRAVEL  ')['sound_speed'] == 1800.0
@@ -109,7 +145,7 @@ class TestPublicReexports:
 
 
 class TestLayeredBottomFromPresets:
-    def test_simple_stack(self):
+    def test_from_presets_stacks_layers_in_order_with_catalog_values(self):
         bot = SeabedColumn.from_presets(
             layers=[('clay', 5.0), ('silt', 15.0), ('sand', 30.0)],
             halfspace='limestone',

@@ -68,8 +68,9 @@ def decidecade_band_levels(psd, frequencies, ref=REFERENCE_PRESSURE_WATER):
     Each band is integrated over its full support ``[lo, hi]``: the band edges
     are spliced into the in-band grid points and the PSD is interpolated onto
     them, so the edge intervals carry their true width. A band reaching past
-    the ends of ``frequencies`` is integrated over the covered part only, never
-    extrapolated, so its level reflects the data actually supplied.
+    the ends of ``frequencies`` is returned as ``nan``, with a one-time
+    :class:`UserWarning` naming the support — a partial integral is not a
+    band level.
 
     A band holding fewer than two interior grid points rests almost entirely on
     its interpolated edges; a one-time :class:`UserWarning` names how many such

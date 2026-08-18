@@ -2,16 +2,16 @@
 Readers for the output of the Collins-style RAM family binaries
 uacpy dispatches to (``rams0.5``, ``ramsurf1.5``, ``ramgeo1.5``).
 
-Two output files are produced per run:
+The file read here is:
 
-- ``tl.line`` — ASCII ``range  TL`` rows at the receiver depth ``zr_line``
-  configured in row 2 of ``ram.in``. One row per range step.
 - ``tl.grid`` — unformatted Fortran binary. Record 1 is a single int32
   ``lz`` (number of stored depth points). Records 2..N hold ``lz``
   ``real*8`` TL samples each, one record per range output step.
   uacpy builds the Collins binaries with ``-fdefault-real-8``
   (``install.sh``, both Makefiles), so these are 8 bytes, not the 4 of a
-  stock build.
+  stock build. (The binaries also emit an ASCII ``tl.line``, which the
+  models do not consume.) The uacpy-patched builds additionally write
+  ``pcomplex.bin`` on the same grid.
 
 The reader returns a regular ``Field`` of ``field_type='tl'`` so the rest
 of uacpy (visualization, max-finding, comparisons) handles the output
@@ -29,27 +29,6 @@ from uacpy.io._fortran_helpers import (
     detect_endian, read_fortran_record, typed_format_error,
 )
 from uacpy.core.exceptions import FileFormatError
-
-
-@typed_format_error
-def read_tl_line(filepath: Union[str, Path]) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Read a Collins ``tl.line`` (ASCII range, TL).
-
-    Parameters
-    ----------
-    filepath : str or Path
-        Path to the file.
-
-    Returns
-    -------
-    ranges, tl : (ndarray, ndarray)
-        Range (m) and transmission loss (dB), shape ``(N,)``.
-    """
-    data = np.loadtxt(str(filepath))
-    if data.ndim == 1:
-        data = data[None, :]
-    return data[:, 0].astype(float), data[:, 1].astype(float)
 
 
 def _read_lz_records(
@@ -118,6 +97,7 @@ def _grid_axes(lz, n_ranges, dr, ndr, dz, ndz, depth_index_offset):
     return ranges, depths
 
 
+@typed_format_error
 def read_tl_grid(
     filepath: Union[str, Path],
     *,
@@ -164,6 +144,7 @@ def read_tl_grid(
     return ranges, depths, tl
 
 
+@typed_format_error
 def read_pcomplex_grid(
     filepath: Union[str, Path],
     *,

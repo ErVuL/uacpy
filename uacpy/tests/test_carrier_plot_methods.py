@@ -8,20 +8,12 @@ frequency). ``Bottom`` is intentionally excluded — its geoacoustic section is 
 environment-level view.
 """
 
-import matplotlib
-matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
 import pytest
 
 import uacpy
 from uacpy.core.absorption import FrancoisGarrison, Thorp
-
-
-@pytest.fixture(autouse=True)
-def _close_figs():
-    yield
-    plt.close('all')
 
 
 def _env():

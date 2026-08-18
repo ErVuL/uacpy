@@ -56,18 +56,26 @@ from uacpy.core.exceptions import (
     UnsupportedFeatureError,
 )
 from uacpy.core.receiver import Receiver
-from uacpy.core.results import Result
+from uacpy.core.results import PhaseReference, Result
 from uacpy.core.source import Source
 from uacpy.io.file_manager import FileManager
 from uacpy.io.oalib_reader import read_prt
 
 # ``warnings.warn(..., skip_file_prefixes=USER_FRAME_SKIP)`` reports the first
-# frame outside ``uacpy/models``, so a warning raised from a nested helper
-# still points at the user's ``run()`` / constructor call. Hand-counted
-# ``stacklevel`` cannot do that: it breaks the moment a check moves one frame
-# deeper, and collapses distinct call sites onto one uacpy line in the
-# warnings module's dedup key.
-USER_FRAME_SKIP = (str(Path(__file__).parent) + os.sep,)
+# frame outside the uacpy library — a warning raised from a nested helper in a
+# model, or in an io / core layer a model delegates to, still points at the
+# user's ``run()`` / constructor call. ``tests`` and ``examples`` are excluded
+# from the prefixes: their files play the caller role the attribution points
+# at. Hand-counted ``stacklevel`` cannot do that: it breaks the moment a check
+# moves one frame deeper, and collapses distinct call sites onto one uacpy
+# line in the warnings module's dedup key.
+_PACKAGE_DIR = Path(__file__).parent.parent
+USER_FRAME_SKIP = tuple(
+    str(entry) + (os.sep if entry.is_dir() else '')
+    for entry in sorted(_PACKAGE_DIR.iterdir())
+    if entry.name not in ('tests', 'examples')
+    and (entry.is_dir() or entry.suffix == '.py')
+)
 
 #: How much of a captured child stream to quote back in an error. The
 #: binaries echo their whole deck and every progress block to stdout, so only
@@ -125,10 +133,11 @@ class RunMode(Enum):
 
     REFLECTION = 'reflection'            # Plane-wave reflection coefficients (Bounce, OASR)
 
-    # Scattered / reverberant field from rough interfaces (OASS, OASSP). Unlike
+    # Scattered / reverberant field from rough interfaces (OASS; OASSP emits
+    # its scattered field through BROADBAND / TIME_SERIES instead). Unlike
     # every other mode this is a two-stage run: the scattering kernel is a
-    # post-processor over a .rhs written by a preceding mean-field run
-    # (OAST/OASR for OASS, OASP for OASSP) with option 's'.
+    # post-processor over a .rhs written by a preceding OAST/OASR mean-field
+    # run with option 's'.
     REVERBERATION = 'reverberation'
 
 
@@ -236,7 +245,6 @@ def _bottom_roughness(bottom) -> float:
 # ``PropagationModel.__init__``.
 _CAPABILITY_FLAGS: frozenset = frozenset({
     'altimetry',
-    'range_dependent_surface',
     'range_dependent_bathymetry',
     'range_dependent_ssp',
     'range_dependent_bottom',
@@ -535,7 +543,6 @@ class PropagationModel(ABC):
         # interp scheme, volume-attenuation formula) belong in run()-time
         # asserts, not here.
         self._supports_altimetry: bool = False
-        self._supports_range_dependent_surface: bool = False
         self._supports_range_dependent_bathymetry: bool = False
         self._supports_range_dependent_ssp: bool = False
         self._supports_range_dependent_bottom: bool = False
@@ -987,6 +994,7 @@ class PropagationModel(ABC):
         source_waveform,
         sample_rate,
         threshold_db: float = -40.0,
+        announce: bool = True,
     ):
         """Resolve the broadband frequency grid for TIME_SERIES dispatch.
 
@@ -999,7 +1007,9 @@ class PropagationModel(ABC):
 
         Returns the resolved ndarray (uniformly spaced, Hz), or ``None``
         when no override applies. Emits a single ``UserWarning`` so the
-        user sees what band/Δf were picked.
+        user sees what band/Δf were picked; ``announce=False`` skips it —
+        used when the grid only labels a result's frequency axis (Bellhop's
+        delay-and-sum p(t)) rather than driving a solver run.
         """
         if (
             run_mode != RunMode.TIME_SERIES
@@ -1054,14 +1064,15 @@ class PropagationModel(ABC):
         if refined != n_freqs:
             note = (f" (waveform Δf = {df:.4g} Hz subdivided so the "
                     f"{n_freqs}-bin band resolves an arrival)")
-        warnings.warn(
-            f"{self.model_name}.run(run_mode=TIME_SERIES): no "
-            f"`frequencies=` passed; auto-derived {refined} freqs from "
-            f"the source waveform ({f_min:.2f}-{f_max:.2f} Hz, "
-            f"Δf={df_grid:.4g} Hz, threshold {threshold_db:.0f} dB){note}. "
-            f"Pass `frequencies=` to silence.",
-            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
-        )
+        if announce:
+            warnings.warn(
+                f"{self.model_name}.run(run_mode=TIME_SERIES): no "
+                f"`frequencies=` passed; auto-derived {refined} freqs from "
+                f"the source waveform ({f_min:.2f}-{f_max:.2f} Hz, "
+                f"Δf={df_grid:.4g} Hz, threshold {threshold_db:.0f} dB){note}. "
+                f"Pass `frequencies=` to silence.",
+                UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+            )
         return derived
 
     def _prepare_timeseries(
@@ -2029,7 +2040,11 @@ class PropagationModel(ABC):
                 UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
             )
 
-        if e.surface.is_range_dependent and not self._supports_range_dependent_surface:
+        # No model consumes a range-dependent surface deck (the AT family
+        # takes one TopOpt boundary, RAM one attenuator, OASES one top
+        # half-space), so the collapse is unconditional; ``collapse['surface']``
+        # picks the reduction method.
+        if e.surface.is_range_dependent:
             method = self._collapse["surface"]
             e.surface = e.surface.collapse(method)
             warnings.warn(
@@ -2377,8 +2392,12 @@ class PropagationModel(ABC):
         """Pre-built kwargs for any :mod:`uacpy.core.results` constructor.
 
         ``frequencies`` is auto-wrapped to a 1-D ndarray (length ≥ 1) when
-        scalar; ``None`` is preserved for time-domain results. Anything in
-        ``extra`` is stored on the result's ``metadata`` ad-hoc bag.
+        scalar; every wrapper passes a value (broadband / time-series
+        results carry the full frequency grid their synthesis derived,
+        SPARC's native p(t) its pulse centre frequency), so ``None`` —
+        passed through unchanged — occurs only for a caller that opts out
+        of the stamp. Anything in ``extra`` is stored on the result's
+        ``metadata`` ad-hoc bag.
 
         ``backend`` names the concrete binary that ran and is lowercase
         across the package (``'scooter'``, ``'oast'``, ``'mpiramS'``, …), so
@@ -2406,7 +2425,9 @@ class PropagationModel(ABC):
             metadata=dict(extra),
         )
         if phase_reference is not None:
-            kw['phase_reference'] = phase_reference
+            # Coerced to the PhaseReference enum member, so wrapper-built
+            # results carry the same type as the synthesis helpers stamp.
+            kw['phase_reference'] = PhaseReference(phase_reference)
         return kw
 
     def _stamp_result(self, result, source: 'Source', *,
@@ -2424,7 +2445,7 @@ class PropagationModel(ABC):
                      'model_source'):
             setattr(result, attr, kw[attr])
         if phase_reference is not None:
-            result.phase_reference = phase_reference
+            result.phase_reference = PhaseReference(phase_reference)
         return result
 
     def _max_receiver_depth(self, env: 'Environment') -> float:
@@ -2467,6 +2488,110 @@ class PropagationModel(ABC):
         data[depths > media_depth, ...] = np.nan
         d['coords'] = {**d['coords'], 'depth': depths}
         return Field.from_dict(d)
+
+    def _mask_zero_range_columns(self, data, ranges, singular_term: str):
+        """Return ``data`` with the range-axis (axis 1) columns at ``r = 0``
+        set to NaN, warning once with the model prefix.
+
+        The zero test mirrors ``abs( Rr ) < realmin`` from ``fieldsco.m:69``;
+        :class:`~uacpy.core.receiver.Receiver` rejects negative ranges, so it
+        is equivalent to ``r == 0`` for any constructible receiver.
+        ``singular_term`` names the 1/√r-type factor that has no value there
+        (it completes "... at r = 0, where <singular_term> is singular").
+        ``data`` is returned unchanged — and no warning is emitted — when no
+        column sits on the source axis. Used by the wrappers whose engine
+        returns a number there that belongs to no range (Kraken's field.exe,
+        SPARC's 'R'/'D' branches); every masked engine warns on every run.
+        """
+        ranges = np.atleast_1d(np.asarray(ranges, dtype=float))
+        zero = np.abs(ranges) < np.finfo(float).tiny
+        if not zero.any():
+            return data
+        warnings.warn(
+            f"{self.model_name}: {int(zero.sum())} receiver range(s) at "
+            f"r = 0, where {singular_term} is singular; those cells are "
+            f"returned as NaN (no data). Move the receiver off the source "
+            f"axis (e.g. r = 1 m) to get a field value.",
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+        )
+        masked = np.array(data, copy=True)
+        if not np.issubdtype(masked.dtype, np.inexact):
+            masked = masked.astype(float)
+        masked[:, zero, ...] = np.nan
+        return masked
+
+    def _reject_malformed_irc_bottom(self, env: 'Environment') -> None:
+        """Refuse a ``'precalc'`` seabed whose table is not in ``.irc`` layout.
+
+        A ``'precalc'`` bottom is staged verbatim as ``<root>.irc``, which
+        ``misc/RefCoef.f90:94-107`` reads as: line 1 ``Title freq``, line 2
+        the record count ``NkTab``, then ``NkTab`` records written
+        ``(5G15.7,I5)`` — tangential wavenumber ``x``, the complex impedance
+        pair ``f`` / ``g``, and a power-of-ten exponent: five reals and an
+        integer per record. That is a different format from the
+        ``.brc`` / ``.trc`` angle tables (a bare count line, then
+        ``theta |R| phase`` rows), and the binary answers the mismatch with a
+        bare Fortran I/O abort. Checked on the wrappers that stage the file
+        (Kraken, Scooter) before any binary is launched; a missing or unset
+        ``reflection_file`` is left to the staging step's own typed errors.
+        """
+        def _numeric(token: str) -> bool:
+            try:
+                float(token.replace('D', 'E').replace('d', 'e'))
+            except ValueError:
+                return False
+            return True
+
+        def _reason(lines) -> Optional[str]:
+            if len(lines) < 3:
+                return (f"only {len(lines)} non-blank line(s); the layout is "
+                        f"a Title/freq line, a record count, and the records")
+            head = lines[0].split()
+            if all(_numeric(t) for t in head):
+                return ("line 1 is all-numeric — an .irc starts with "
+                        "'Title freq', while a bare record count or a "
+                        "theta/|R|/phase row starts a .brc/.trc angle table")
+            if not _numeric(head[-1]):
+                return ("line 1 carries no trailing frequency — an .irc "
+                        "starts with 'Title freq'")
+            count = lines[1].split()
+            if len(count) != 1 or not count[0].lstrip('+-').isdigit() \
+                    or int(count[0]) < 1:
+                return (f"line 2 is {lines[1].strip()!r} where the .irc "
+                        f"record count NkTab (a single positive integer) "
+                        f"belongs")
+            record = lines[2].split()
+            if len(record) < 6 or not all(_numeric(t) for t in record[:6]):
+                return (f"the first record {lines[2].strip()!r} does not "
+                        f"carry the (5G15.7,I5) x/f/g/iPow fields — a "
+                        f"3-column row is a theta/|R|/phase angle table")
+            return None
+
+        for column in env.bottom.columns:
+            hs = column.halfspace
+            if hs.acoustic_type != 'precalc':
+                continue
+            table = getattr(hs, 'reflection_file', None)
+            if not table or not Path(table).exists():
+                continue
+            with open(table, 'r', errors='replace') as fh:
+                lines = [ln for ln in (fh.readline() for _ in range(64))
+                         if ln.strip()][:3]
+            reason = _reason(lines)
+            if reason:
+                raise ConfigurationError(
+                    f"{self.model_name}: acoustic_type='precalc' stages "
+                    f"{table} as the .irc internal-reflection table, but "
+                    f"{reason}. An .irc (BOUNCE's f/g impedance format, "
+                    f"misc/RefCoef.f90:94-107) is not a .brc/.trc "
+                    f"angle-magnitude-phase table; the binary aborts with a "
+                    f"bare Fortran backtrace on the mismatch.",
+                    remediation=(
+                        "Pass a BOUNCE result.metadata['irc_file'] as "
+                        "reflection_file=, or use acoustic_type='file' for "
+                        "a theta/|R|/phase angle table (.brc/.trc)."
+                    ),
+                )
 
     def _total_media_depth(self, env: 'Environment') -> float:
         """
