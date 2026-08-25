@@ -134,14 +134,56 @@ class TestFortranFloatSpellings:
             text, value = _spell_float(rng)
             assert fortran_float(text) == value, text
 
-    @pytest.mark.skip(reason="known gap (fuzz report, finding 1): "
-                      "fortran_float rejects letterless 3-digit exponents "
-                      "('0.123457-118') that gfortran G15.6 output emits — "
-                      "sparc.f90:294 writes .rts with 12G15.6 — and gfortran "
-                      "list-directed READ accepts.")
-    def test_letterless_exponent_spelling(self):
+    #: Every spelling below was read by gfortran 14.2 itself
+    #: (``read(token, *) x``) and the value is what it returned.
+    LETTERLESS = [
+        ('0.123457-118', 1.2345700000000000e-119),   # G15.6 drops the E at 3
+        ('0.200000+121', 2.0000000000000000e+120),   # digits of exponent
+        ('1.5+7', 1.5e7),                            # any width, in fact
+        ('1.5-2', 1.4999999999999999e-02),
+        ('-1.5-2', -1.4999999999999999e-02),
+        ('+2.5+003', 2.5e3),
+        ('1.-3', 1.0e-3),                            # mantissa may end in '.'
+        ('.5+2', 5.0e1),                             # or start with it
+        ('1+7', 1.0e7),                              # or carry no point
+    ]
+
+    @pytest.mark.parametrize('text,value', LETTERLESS)
+    def test_letterless_exponent_spelling(self, text, value):
+        """A ``Gw.d`` WRITE drops the ``E`` once the exponent needs three
+        digits, and SPARC writes its ``.rts`` with ``'( 12G15.6 )'``
+        (``Scooter/sparc.f90:294``) — so uacpy could not read a file the
+        toolbox produced at its own request whenever a sample fell below
+        ~1e-99. gfortran's list-directed READ takes the form at any exponent
+        width; the sign is what marks it."""
         from uacpy.io._fortran_helpers import fortran_float
-        assert fortran_float('0.123457-118') == 0.123457e-118
+        assert fortran_float(text) == value
+
+    @pytest.mark.parametrize('text', [
+        'abc', '', '1e5-2', '--3', '1.5+', '+', '1.5+e2',
+    ])
+    def test_a_signed_tail_does_not_make_junk_parseable(self, text):
+        """The letterless branch is a last resort, not a loosening: anything
+        gfortran itself rejects still raises."""
+        from uacpy.io._fortran_helpers import fortran_float
+        with pytest.raises(ValueError):
+            fortran_float(text)
+
+    def test_an_rts_with_a_letterless_exponent_reads(self, tmp_path):
+        """The end the gap was felt at: SPARC writes ``.rts`` with
+        ``'( 12G15.6 )'`` (``Scooter/sparc.f90:294``), so a sample below
+        ~1e-99 arrives with no ``E`` and the whole file failed to parse —
+        a file uacpy asked the toolbox to produce."""
+        from uacpy.io.oalib_reader import read_ts
+        p = tmp_path / 's.rts'
+        p.write_text("SPARC RTS\n"
+                     "   1\n"
+                     "   50.000000\n"
+                     "   0.500000       0.100000E-02\n"
+                     "   0.100000E-01   0.123457-118\n")
+        out = read_ts(p)
+        assert out['tout'].tolist() == [0.5, 0.01]
+        assert out['RTS'].ravel().tolist() == [1.0e-3, 1.23457e-119]
 
 
 class TestListDirectedRecovery:
@@ -209,7 +251,9 @@ class TestWriterReaderRoundTrips:
             read_source_beam_pattern, write_source_beam_pattern)
         rng = np.random.default_rng(0x5EED05)
         for case in range(12):
-            n = int(rng.integers(1, 40))
+            # From 2: the writer refuses a table the engines cannot interpolate
+            # between (bellhop.f90:270 reads adjacent rows as a pair).
+            n = int(rng.integers(2, 40))
             ang = _increasing(rng, n, -90.0, 90.0, 1e-4)
             lvl = rng.uniform(-60.0, 0.0, size=n)
             p = tmp_path / f'c{case}.sbp'
@@ -309,17 +353,42 @@ class TestWriterReaderRoundTrips:
             assert int(1.0 + ratio) == 1 + n, (kind, h, n, ratio)
             assert 0.0 <= ratio - n < 5e-8, (kind, h, n, ratio)
 
-    @pytest.mark.skip(reason="known bug (fuzz report, finding 2): "
-                      "_snap_dz_to_seafloor guards h/dz with the exact h, "
-                      "but the deck carries %.12g(h); a full-precision depth "
-                      "can round down and put zb/dz below n — iz lands one "
-                      "cell short (~14% of random doubles).")
     def test_full_precision_depth_seafloor_node(self):
+        """A depth carrying all 17 digits aligns as well as a quantised one.
+
+        The test above feeds ``%.6f`` depths, which is what a hand-written or
+        quantised bathymetry carries. A depth straight out of a computation
+        does not round-trip so kindly: the deck writes ``%.12g`` and the
+        binaries divide the *read-back* depth by the *read-back* ``dz``, so
+        both spellings of each have to clear ``n``. ``_snap_dz_to_seafloor``
+        is what guarantees it, by lowering ``dz`` until every spelling pair
+        does.
+        """
         from uacpy.models.ram import RAM
         h, n = 36.56550087062047, 2000
         dz = RAM._snap_dz_to_seafloor(h, n)
-        ratio = float(f"{h:.12g}") / float(f"{dz:.12g}")
-        assert int(1.0 + ratio) == 1 + n   # gets 2000, expected 2001
+        for hs in (h, float(f"{h:.12g}")):
+            for dzs in (dz, float(f"{dz:.12g}")):
+                ratio = hs / dzs
+                assert ratio >= n, (hs, dzs, ratio)
+                assert int(1.0 + ratio) == 1 + n, (hs, dzs, ratio)
+
+    def test_every_spelling_pair_clears_the_seafloor_node(self):
+        """The same property over full-precision depths, swept.
+
+        One seed proves nothing about a rounding cliff: this walks 2000
+        random ``(h, n)`` pairs and checks all four spelling combinations,
+        which is the shape of the guarantee ``iz = int(1 + zb/dz)`` needs.
+        """
+        from uacpy.models.ram import RAM
+        rng = np.random.default_rng(0x5EED0B)
+        for _ in range(2000):
+            h = float(rng.uniform(5.0, 6000.0))
+            n = int(rng.integers(2, 4000))
+            dz = RAM._snap_dz_to_seafloor(h, n)
+            for hs in (h, float(f"{h:.12g}")):
+                for dzs in (dz, float(f"{dz:.12g}")):
+                    assert int(1.0 + hs / dzs) == 1 + n, (h, n, hs, dzs)
 
 
 # Valid seed files for the totality properties: one per text format, small
@@ -367,7 +436,9 @@ class TestTextReaderTotality:
     """Total robustness: whatever the bytes, the eight text readers either
     return valid data or raise a typed uacpy error. Explored over ~10k
     probes (random bytes, token soup, mutations, all truncations); the one
-    escape found is pinned as the skipped repro below."""
+    escape found — ``read_vector`` returning non-finite axis values parsed
+    from ``NaN``/``1e999`` tokens — is refused by ``read_vector``'s finite
+    guard, pinned below."""
 
     def test_seeds_parse(self, tmp_path):
         for tag, reader in _text_readers():
@@ -413,19 +484,61 @@ class TestTextReaderTotality:
                 w[int(rng.integers(0, len(w)))] = str(rng.choice(vocab))
                 _assert_total(reader, p, ' '.join(w).encode())
 
-    @pytest.mark.skip(reason="known bug (fuzz report, finding 3): read_flp "
-                      "sizes np.linspace off the deck's vector count with no "
-                      "file-size bound (cf. _bound_counts elsewhere in io); "
-                      "a 40-byte file declaring Nx=999999999 raises an "
-                      "untyped MemoryError / multi-GB allocation.")
+    def test_non_finite_vector_values_raise_a_typed_error(self, tmp_path):
+        """``0.0 1e999 /`` (the generated branch would spread inf/nan over
+        all ``Nx`` slots via ``np.linspace``) and an explicit ``NaN`` token
+        both raise ``FileFormatError`` from ``read_vector``'s finite guard
+        instead of returning non-finite axis values."""
+        from uacpy.core.exceptions import FileFormatError
+        from uacpy.io._fortran_helpers import read_vector
+        p = tmp_path / 'v.txt'
+        for deck in ('5\n0.0 1e999 /\n', '3\n0.0 NaN 2.0\n'):
+            p.write_text(deck)
+            with p.open() as fh, pytest.raises(FileFormatError,
+                                               match='not finite'):
+                read_vector(fh)
+
     def test_flp_count_bomb(self, tmp_path):
+        """A 40-byte deck declaring ``Nx=999999999`` is refused, not allocated.
+
+        ``read_vector``'s generated branches are the one place a small record
+        can demand a large array — that is what the ``N`` / ``first last /``
+        shorthand is *for* — so the file-size bound ``_bound_counts`` applies
+        to the binary readers cannot be used. AT allocates and reports failure
+        (``SourceReceiverPositions.f90:215-216``), which on a large-memory host
+        means the 8 GB request simply succeeds.
+        """
         from uacpy.io.oalib_reader import read_flp
         p = tmp_path / 'bomb.flp'
         p.write_text("'t'\n'RA'\n9\n999999999\n0.0 100.0 /\n")
         _assert_total(read_flp, p, p.read_bytes())
 
+    def test_the_generated_vector_ceiling_names_the_count_and_the_size(self,
+                                                                      tmp_path):
+        from uacpy.io.oalib_reader import read_flp
+        p = tmp_path / 'bomb.flp'
+        p.write_text("'t'\n'RA'\n9\n999999999\n0.0 100.0 /\n")
+        from uacpy.core.exceptions import FileFormatError
+        with pytest.raises(FileFormatError, match=r'999999999 generated'):
+            read_flp(p)
 
-class TestParserBugPassthrough:
+    def test_the_largest_deck_the_toolbox_ships_expands(self, tmp_path):
+        """The bound must not clip a legal deck.
+
+        ``tests/Noise/ATOC/aet_VLA_C.flp:6`` is the largest generated vector
+        in any deck the Acoustics Toolbox ships — ``10001`` then
+        ``0.0 500.0 /`` — three orders of magnitude below the ceiling.
+        """
+        from uacpy.io._fortran_helpers import read_vector
+        p = tmp_path / 'v.txt'
+        p.write_text('10001\n0.0 500.0 /\n')
+        with p.open() as fh:
+            x, nx = read_vector(fh)
+        assert nx == 10001 and x.size == 10001
+        assert x[0] == 0.0 and x[-1] == 500.0
+
+
+class TestTypedFormatErrorWrapsParseErrorsOnly:
     """The ``typed_format_error`` conversion set is deliberately narrow
     (docs/guide/io.md §8): ``AttributeError`` / ``TypeError`` / ``NameError``
     raised inside a reader signal a uacpy defect, not a bad file, so they
@@ -441,12 +554,12 @@ class TestParserBugPassthrough:
         p.write_text('3\n0.0 100.0\n')
         for bug_type in (AttributeError, TypeError, NameError):
             @typed_format_error
-            def read_with_bug(path, _bug=bug_type):
+            def read_raising_a_code_defect(path, _bug=bug_type):
                 path.read_text()
                 raise _bug(f'synthetic reader defect: {_bug.__name__}')
 
             with pytest.raises(bug_type) as ei:
-                read_with_bug(p)
+                read_raising_a_code_defect(p)
             assert type(ei.value) is bug_type
             assert not isinstance(ei.value, FileFormatError)
 

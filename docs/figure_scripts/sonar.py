@@ -26,6 +26,7 @@ from uacpy.visualization.plots import (
     plot_roc,
     plot_signal_excess,
 )
+from uacpy.visualization.plots._common import _cell_edge_extent, _flip_y
 
 GUIDE = True
 
@@ -66,7 +67,11 @@ CAND_RANGES = np.linspace(500.0, 5000.0, 226)
 def _passive_deep():
     """Deep-water Bellhop TL turned into a passive signal-excess field."""
     env, source, receiver = deep_water()
-    tl = Bellhop(beam_type='G', n_beams=0).run(
+    # backend='fortran' keeps the P_D / SE=0 contours byte-stable across
+    # rebuilds: the parallel cxx/cuda backends sum TL contributions in
+    # thread-completion order, and the ULP-level differences move contour
+    # vertices.
+    tl = Bellhop(beam_type='G', n_beams=0, backend='fortran').run(
         env, source, receiver, run_mode=RunMode.INCOHERENT_TL)
     return env, sonar.passive_signal_excess_field(tl, **PASSIVE_DEEP)
 
@@ -105,8 +110,7 @@ def _draw_surface(ax, surface, title, *, extra='', floor_db=-20.0):
                                  10.0 ** (floor_db / 10.0), None))
     im = ax.imshow(
         db, aspect='auto', cmap='turbo', vmin=floor_db, vmax=0.0,
-        extent=[CAND_RANGES[0] / 1e3, CAND_RANGES[-1] / 1e3,
-                CAND_DEPTHS[-1], CAND_DEPTHS[0]])
+        extent=_flip_y(_cell_edge_extent(CAND_RANGES / 1e3, CAND_DEPTHS)))
     iz, ir = np.unravel_index(np.nanargmax(surface), surface.shape)
     ax.plot(TRUE_RANGE / 1e3, TRUE_DEPTH, '*', mfc='w', mec='k', ms=15,
             mew=0.8, label='true source')
@@ -426,10 +430,10 @@ def matched_field():
 
     panels = [
         ('Bartlett — matched', sonar.bartlett(k_matched, bank)),
-        ('MVDR — matched', sonar.mvdr(k_matched, bank, loading=1e-3)),
+        ('MVDR — matched', sonar.mvdr(k_matched, bank, diagonal_loading=1e-3)),
         ('Bartlett — 2 m depth mismatch', sonar.bartlett(k_mismatched, bank)),
         ('MVDR — 2 m depth mismatch',
-         sonar.mvdr(k_mismatched, bank, loading=1e-3)),
+         sonar.mvdr(k_mismatched, bank, diagonal_loading=1e-3)),
     ]
     fig, axes = plt.subplots(2, 2, figsize=(11.5, 7.6), sharex=True,
                              sharey=True)

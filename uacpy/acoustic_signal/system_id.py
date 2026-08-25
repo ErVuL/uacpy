@@ -4,9 +4,10 @@ import warnings
 
 import numpy as np
 import scipy.signal as _sig
-from scipy.linalg import toeplitz
+from scipy.linalg import get_lapack_funcs, toeplitz
 
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.core._warn_frames import USER_FRAME_SKIP
 
 
 def _info_matrices(u, y, N, order):
@@ -46,29 +47,112 @@ def _info_matrices(u, y, N, order):
     return A - np.dot(W.T, W), phiuy - np.dot(W.T, y[: order - 1])
 
 
+#: Reciprocal condition number at which the LU solve of the normal equations
+#: stops carrying a correct digit: ``cond(Minfo) * eps >= 1``. The bound is on
+#: a *reciprocal condition number*, which is dimensionless and invariant to the
+#: amplitude scale of the data — ``rcond(c*Minfo) == rcond(Minfo)`` exactly,
+#: because both norms in it scale by the same ``c`` — so the branch below
+#: cannot make the fit depend on whether a record is read in Pa or in uPa.
+_INFO_RCOND_FLOOR = np.finfo(float).eps
+
+
+def _solve_info_matrices(Minfo, Vinfo, order):
+    """``(g, rcond)`` from the normal equations, minimum-norm when singular.
+
+    ``Minfo`` is ``X.T @ X`` for the design matrix ``X``, so its condition
+    number is ``cond(X)**2`` and a band-limited excitation squares its way past
+    what float64 can represent: an ordinary 100 Hz - 20 kHz sweep at
+    fs = 48 kHz reaches ``cond(X) = 4.2e11`` and ``cond(Minfo) = 6.4e18`` at
+    the shipped default order ``m = 512``, where the LU solve returns an
+    impulse response 34x over-scale and a frequency response 5.2 dB wrong
+    across the excited band (measured).
+
+    ``rcond`` is LAPACK's 1-norm reciprocal condition estimate, taken from the
+    same LU factorization that solves the system, so it costs one extra
+    ``O(order**2)`` pass rather than a second factorization. Above
+    ``_INFO_RCOND_FLOOR`` the LU solution is returned. That is the same
+    algorithm ``np.linalg.solve`` runs — LAPACK ``getrf`` + ``getrs`` — but not
+    necessarily the same *build* of it: numpy and scipy ship separate OpenBLAS
+    binaries, so the two agree to a few ULP of the solution rather than bit for
+    bit. Measured over 60 well-conditioned solves (3 excitations x 10 orders x
+    2 record lengths, ``rcond`` down to 3.5e-11): identical in 30 of them and
+    never further apart than **2.75 eps of the peak coefficient**. At or below
+    ``_INFO_RCOND_FLOOR`` the equations are numerically singular, the LU
+    coefficients carry no correct digit, and the *minimum-norm* least-squares
+    solution of the same equations is returned instead — the truncation drops
+    the directions of ``X`` whose singular values fall below ``sqrt(eps)``
+    times the largest, which are exactly the ones the ``X.T @ X`` product
+    cannot represent. The user is warned there, because the answer that comes
+    back is then a choice of regularization rather than a fit the data
+    determines.
+
+    An *exactly* singular ``Minfo`` still raises ``LinAlgError``, the way
+    ``np.linalg.solve`` does, so the order-selection loop's skip and the typed
+    degenerate-input errors keep firing on an all-zero or constant input.
+    """
+    getrf, gecon, getrs = get_lapack_funcs(('getrf', 'gecon', 'getrs'),
+                                           (Minfo, Vinfo))
+    anorm = float(np.max(np.sum(np.abs(Minfo), axis=0))) if Minfo.size else 0.0
+    lu, piv, info = getrf(Minfo)
+    if info != 0:
+        raise np.linalg.LinAlgError("Singular matrix")
+    rcond = float(gecon(lu, anorm, norm='1')[0])
+
+    if rcond > _INFO_RCOND_FLOOR:
+        return getrs(lu, piv, Vinfo)[0], rcond
+
+    # numpy's own least-squares cutoff, spelled out rather than left to the
+    # ``rcond=None`` default: singular values of Minfo below order*eps times
+    # the largest are treated as zero.
+    g = np.linalg.lstsq(Minfo, Vinfo,
+                        rcond=Minfo.shape[0] * np.finfo(float).eps)[0]
+    warnings.warn(
+        f"FRF.compute_lsfir: the information matrix at FIR order {order} is "
+        f"numerically singular (reciprocal condition number {rcond:.2e} <= "
+        f"{_INFO_RCOND_FLOOR:.2e}), so its LU solution carries no correct "
+        f"digit; the impulse response returned is the minimum-norm "
+        f"least-squares solution of the same normal equations, and the "
+        f"frequency response is undetermined wherever the input does not "
+        f"excite. Lower the FIR order, or excite the whole band up to "
+        f"Nyquist.",
+        UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+    )
+    return g, rcond
+
+
 _ETFE_REL_FLOOR = 1e-12          # relative to max|X| over the record
 
 
-def _etfe_divide(Y, X, caller: str):
-    """``Y/X`` with unexcited input bins returned as nan.
+def _etfe_divide(Y, X, caller: str, quantity="the transfer function",
+                 denominator="input energy"):
+    """``Y/X`` with bins whose denominator is numerically zero returned as nan.
 
     The threshold is relative to ``max|X|`` because a transfer function is a
     ratio: adding an absolute epsilon made the estimate at a numerically empty
     bin a function of the units the caller happened to use — the same signal
     in Pa and in uPa gave answers 1e12 apart, and a bin with no excitation
     came back as a finite ~1/eps number rather than as undefined.
+    ``quantity`` and ``denominator`` name the estimate and its denominator
+    spectrum in the warning (the Welch H2 and coherence guards divide by
+    spectra other than the input's).
     """
     peak = float(np.max(np.abs(X))) if X.size else 0.0
     excited = (np.abs(X) > _ETFE_REL_FLOOR * peak if peak > 0
                else np.zeros(X.shape, bool))
     if not excited.all():
+        # Each estimator method reaches this divide through its own branch of
+        # ``FRF.compute``, so no single frame count reaches the user: a
+        # hand-counted ``stacklevel=3`` named the branch line in this module
+        # for welch, etfe and p_etfe alike (measured). ``skip_file_prefixes``
+        # counts no frames at all — it walks to the first file outside the
+        # package.
         warnings.warn(
             f"{caller}: {int((~excited).sum())} of {excited.size} frequency "
-            f"bins carry no input energy (|X| <= {_ETFE_REL_FLOOR:g} of the "
-            f"peak); the transfer function is undefined there and is returned "
-            f"as nan. Excite the whole band, or restrict the analysis to the "
-            f"excited band.",
-            UserWarning, stacklevel=3,
+            f"bins carry no {denominator} (denominator magnitude <= "
+            f"{_ETFE_REL_FLOOR:g} of its peak); {quantity} is undefined "
+            f"there and is returned as nan. Excite the whole band, or "
+            f"restrict the analysis to the excited band.",
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
         )
     return np.where(excited, Y / np.where(excited, X, 1.0), np.nan)
 
@@ -140,7 +224,17 @@ class FRF:
         self.Vinfo = np.array([[0]])
         self.m = m
         self.g = 0  # Impulse response
-        self.selected_order = None  # FIR order chosen by ls_fir order selection
+        # FIR order(s) chosen by ls_fir order selection: an int for 1-D
+        # input, a per-measurement list for 2-D input, None when m is an
+        # explicit order (nothing was selected) or the method is not ls_fir.
+        self.selected_order = None
+        # Reciprocal condition number of the information matrix the returned
+        # impulse response was solved from, ls_fir only: small means the fit
+        # is poorly determined, at or below _INFO_RCOND_FLOOR it is not
+        # determined at all and the coefficients are a minimum-norm choice.
+        # None when the method is not ls_fir; for 2-D input it carries the
+        # last measurement's fit, the row `g` also comes from.
+        self.info_rcond = None
         self.coh = None  # Coherence, welch only
         self.frequencies = None
         self.tf = None
@@ -163,6 +257,13 @@ class FRF:
 
         If inputs are 2D, average results are computed over all measurements.
 
+        ``m``, ``method``, ``estimator``, ``nperseg`` and ``noverlap`` apply to
+        this call alone: they override the constructor's values for the run and
+        leave the object's own settings as the constructor set them, so two
+        results from one ``FRF`` are comparable unless the caller says
+        otherwise on each call. The *result* attributes (``frequencies``,
+        ``tf``, ``coh``, ``g``, ``selected_order``) are rewritten by every run.
+
         Parameters
         ----------
         x : array_like
@@ -175,15 +276,21 @@ class FRF:
             Impulse response length (for TF methods), or an automatic
             order-selection criterion for ``'ls_fir'``: ``'AIC'``,
             ``'BIC'``, ``'FPE'``, or ``'CP'``. The order the criterion picks is
-            published on ``self.selected_order``.
+            published on ``self.selected_order`` — an int for 1-D input, a
+            per-measurement list for 2-D input; ``self.selected_order`` is
+            ``None`` when ``m`` is an explicit order.
         method : str, optional
-            Method to use ('welch', 'ls_fir', 'etfe', 'p_etfe').
+            Method for this call ('welch', 'ls_fir', 'etfe', 'p_etfe');
+            the constructor's ``method`` when omitted.
         estimator : str, optional
-            Estimator for Welch method ('H1', 'H2').
+            Estimator for the Welch method for this call ('H1', 'H2');
+            the constructor's ``estimator`` when omitted.
         nperseg : int, optional
-            Segment length for Welch.
+            Segment length for Welch for this call; the constructor's
+            ``params['nperseg']`` when omitted.
         noverlap : int, optional
-            Overlap for Welch.
+            Overlap for Welch for this call; the constructor's
+            ``params['noverlap']`` when omitted.
         m_max : int
             Maximum impulse response length.
         stop_count : int, optional
@@ -196,17 +303,19 @@ class FRF:
         tf : ndarray
             Transfer function (complex-valued).
         """
-        # Update parameters
-        if method is not None:
-            self.method = method
+        # Per-call arguments are resolved into locals and left there: the
+        # constructor's method, estimator, order and Welch parameters are what
+        # the next call with no arguments uses, so one `compute(method='etfe')`
+        # or `compute_periodic_etfe(nperseg=256)` cannot move a later plain
+        # `compute()` onto a different estimator or a different frequency grid.
+        method = self.method if method is None else method
+        estimator = self.estimator if estimator is None else estimator
+        m = self.m if m is None else m
+        params = dict(self.params)
         if nperseg is not None:
-            self.params["nperseg"] = nperseg
+            params["nperseg"] = nperseg
         if noverlap is not None:
-            self.params["noverlap"] = noverlap
-        if estimator is not None:
-            self.estimator = estimator
-        if m is not None:
-            self.m = m
+            params["noverlap"] = noverlap
         if stop_count is None:
             # early-stop after 50 consecutive orders with no score improvement
             # (compute_lsfir's documented default); m_max is the hard order cap.
@@ -215,6 +324,7 @@ class FRF:
         # Convert inputs to 2D arrays (rows = measurements)
         x = np.asarray(x)
         y = np.asarray(y)
+        single_measurement = x.ndim == 1
         if x.ndim == 1:
             x = x.reshape(1, -1)
         if y.ndim == 1:
@@ -233,23 +343,26 @@ class FRF:
         for i in range(n_meas):
             x_i = x[i, :].ravel()
             y_i = y[i, :].ravel()
-            if self.method == "welch":
-                freqs_i, tf_i, coh_i = self.compute_welch(x_i, y_i, sample_rate)
+            if method == "welch":
+                freqs_i, tf_i, coh_i = self.compute_welch(
+                    x_i, y_i, sample_rate, params=params, estimator=estimator)
                 coh_list.append(coh_i)
-            elif self.method == "ls_fir":
+            elif method == "ls_fir":
                 # compute_lsfir takes (output, input) — y before x, unlike the
                 # other three estimators.
                 freqs_i, tf_i, g_i = self.compute_lsfir(
-                    y_i, x_i, sample_rate, self.m, len(x_i), m_max=m_max, stop_count=stop_count
+                    y_i, x_i, sample_rate, m, len(x_i), m_max=m_max,
+                    stop_count=stop_count, nperseg=params["nperseg"]
                 )
                 m_list.append(len(g_i))
-            elif self.method == "etfe":
+            elif method == "etfe":
                 freqs_i, tf_i = self.compute_etfe(x_i, y_i, sample_rate)
-            elif self.method == "p_etfe":
-                freqs_i, tf_i = self.compute_periodic_etfe(x_i, y_i, sample_rate)
+            elif method == "p_etfe":
+                freqs_i, tf_i = self.compute_periodic_etfe(
+                    x_i, y_i, sample_rate, nperseg=params["nperseg"])
             else:
                 raise ConfigurationError(
-                    f"FRF.compute: unknown method={self.method!r}; "
+                    f"FRF.compute: unknown method={method!r}; "
                     "valid: 'welch', 'ls_fir', 'etfe', 'p_etfe'"
                 )
 
@@ -266,23 +379,36 @@ class FRF:
         # attributes so a reused FRF cannot report a previous method's result.
         self.frequencies = freqs
         self.tf = tf
-        self.coh = np.mean(coh_list, axis=0) if self.method == "welch" else None
-        if self.method == "ls_fir":
+        self.coh = np.mean(coh_list, axis=0) if method == "welch" else None
+        if method == "ls_fir":
             self.g = g_i  # For 2D inputs, uses last channel's impulse response
-            self.selected_order = int(np.mean(m_list))
+            if m in ("AIC", "BIC", "FPE", "CP"):
+                # Criterion-selected order(s): the int for 1-D input, the
+                # per-measurement list for 2-D input (a mean of the rows'
+                # orders is an order no row selected).
+                self.selected_order = (m_list[0] if single_measurement
+                                       else m_list)
+            else:
+                # m was an explicit order: nothing was selected.
+                self.selected_order = None
         else:
             self.g = 0
             self.selected_order = None
+            self.info_rcond = None
 
         return freqs, tf
 
-    def compute_welch(self, x, y, sample_rate):
+    def compute_welch(self, x, y, sample_rate, *, params=None,
+                      estimator=None):
         """
         Compute the Frequency Response Function (FRF) using Welch's method.
 
         This method is dedicated to stationary signals. Coherence indicates
         the degree of linear dependency between input (x) and output (y) at
-        each frequency.
+        each frequency. Bins where the estimator's denominator spectrum
+        (``Pxx`` for H1, ``Syx`` for H2, ``Pxx*Pyy`` for the coherence) is
+        numerically zero relative to its peak are returned as nan with a
+        warning, as in the ETFE estimators.
 
         Parameters
         ----------
@@ -292,6 +418,12 @@ class FRF:
             Output signal array.
         sample_rate : float
             Sampling frequency of the signals (Hz).
+        params : dict, optional
+            Welch/CSD keyword arguments for this call; the constructor's
+            ``params`` when omitted.
+        estimator : str, optional
+            ``'H1'`` or ``'H2'`` for this call; the constructor's
+            ``estimator`` when omitted.
 
         Returns
         -------
@@ -302,14 +434,24 @@ class FRF:
         coh : ndarray
             Array of coherence values.
         """
-        freqs, Pxx = _sig.welch(x, sample_rate, scaling="density", **self.params)
-        _, Pyy = _sig.welch(y, sample_rate, scaling="density", **self.params)
-        _, Pxy = _sig.csd(y, x, sample_rate, scaling="density", **self.params)
-        if self.estimator == "H2":
-            tf = Pyy / Pxy
+        params = self.params if params is None else params
+        estimator = self.estimator if estimator is None else estimator
+        freqs, Pxx = _sig.welch(x, sample_rate, scaling="density", **params)
+        _, Pyy = _sig.welch(y, sample_rate, scaling="density", **params)
+        _, Pxy = _sig.csd(y, x, sample_rate, scaling="density", **params)
+        # Each division masks bins whose denominator spectrum is numerically
+        # zero (relative to its own peak) to nan with a warning, the same
+        # policy _etfe_divide applies to the ETFE estimators; a zero or
+        # constant record yields masked nan rather than dividing through to
+        # inf/nan noise.
+        if estimator == "H2":
+            tf = _etfe_divide(Pyy, Pxy, "FRF.compute_welch",
+                              denominator="cross-spectral energy")
         else:  # Default to H1
-            tf = np.conj(Pxy) / Pxx
-        coh = abs(Pxy) ** 2 / (Pxx * Pyy)
+            tf = _etfe_divide(np.conj(Pxy), Pxx, "FRF.compute_welch")
+        coh = _etfe_divide(np.abs(Pxy) ** 2, Pxx * Pyy, "FRF.compute_welch",
+                           quantity="the coherence",
+                           denominator="input or output energy")
 
         return freqs, tf, coh
 
@@ -341,12 +483,10 @@ class FRF:
             Complex transfer function.
         """
 
-        if nperseg:
-            self.params["nperseg"] = nperseg
-
         # Frequency grid is the rfft grid of one period, k*sample_rate/period
-        # in Hz, up to Nyquist.
-        period = self.params["nperseg"]
+        # in Hz, up to Nyquist. ``nperseg`` applies to this call only — the
+        # constructor's value is what a later call with no ``nperseg`` uses.
+        period = int(nperseg) if nperseg else self.params["nperseg"]
         n_periods = len(x) // period
 
         if n_periods < 1:
@@ -456,10 +596,21 @@ class FRF:
             Complex frequency response.
         g : ndarray
             Impulse response estimate.
+
+        Notes
+        -----
+        The fit solves the normal equations ``X.T @ X`` of the covariance
+        design matrix, whose condition number is ``cond(X)**2``. The
+        reciprocal condition number of the system the returned ``g`` came out
+        of is published on ``self.info_rcond``; a warning names the order when
+        it falls to where the equations are numerically singular, which an
+        order longer than the excited band can support reaches easily — a
+        100 Hz - 20 kHz sweep at fs = 48 kHz does it at the default ``m=512``.
         """
 
-        if nperseg:
-            self.params["nperseg"] = nperseg
+        # ``nperseg`` sets this call's frequency grid only; the constructor's
+        # value is what a later call with no ``nperseg`` uses.
+        grid_nperseg = int(nperseg) if nperseg else self.params["nperseg"]
 
         y = np.array(y)
         u = np.array(u)
@@ -480,8 +631,24 @@ class FRF:
                 # reference fit (order well above any plausible true order,
                 # well below N), not the raw output variance.
                 full_model_m = min(m_max, max(2, N // 4))
-                g_full = np.linalg.solve(
-                    *_info_matrices(u, y, N, full_model_m))
+                # Every Cp score below divides by sigma2, so the reference fit
+                # cannot be skipped the way the candidate loop skips a singular
+                # order — continuing past it would leave sigma2 unbound. A
+                # degenerate input is reported here instead, matching the typed
+                # error the other criteria reach after their loop.
+                try:
+                    g_full = np.linalg.solve(
+                        *_info_matrices(u, y, N, full_model_m))
+                except np.linalg.LinAlgError as exc:
+                    raise ConfigurationError(
+                        f"FRF.compute_lsfir: criterion 'CP' needs a reference "
+                        f"fit at order {full_model_m} to set its residual "
+                        f"variance, and that fit gave a singular information "
+                        f"matrix. The input u is degenerate (constant, "
+                        f"all-zero, or too short); use a persistently exciting "
+                        f"input, pass an explicit integer m, or choose "
+                        f"'AIC'/'BIC'/'FPE', which select an order without a "
+                        f"reference fit.") from exc
                 y_hat_full = np.convolve(u[:N], g_full, mode="full")[:N]
                 sigma2 = np.sum((y[:N] - y_hat_full) ** 2) / (N - full_model_m)
 
@@ -553,9 +720,17 @@ class FRF:
                 )
             m = best_m
 
-            # Republish the normal equations for the order actually selected.
+            # Republish the normal equations for the order actually selected,
+            # and re-solve them through the rank-revealing path. The search
+            # above compares orders under one solve, and its LU is also its
+            # identifiability screen: a candidate whose equations are singular
+            # is skipped, and one that is merely near-singular fits worse and
+            # scores worse, so neither is selected. The order that *is*
+            # selected then gets its coefficients from _solve_info_matrices,
+            # which returns the same numbers bit for bit whenever the LU is
+            # trustworthy and says so when it is not.
             self.Minfo, self.Vinfo = _info_matrices(u, y, N, m)
-            g = best_g
+            g, self.info_rcond = _solve_info_matrices(self.Minfo, self.Vinfo, m)
 
         else:
             # Given m, compute directly
@@ -568,12 +743,12 @@ class FRF:
                     "criterion ('AIC', 'BIC', 'FPE', 'CP') to choose the "
                     "order automatically.")
             self.Minfo, self.Vinfo = _info_matrices(u, y, N, m)
-            g = np.linalg.solve(self.Minfo, self.Vinfo)
+            g, self.info_rcond = _solve_info_matrices(self.Minfo, self.Vinfo, m)
 
         # Frequency response on the nperseg rfft grid, so an ls_fir result
         # lines up bin-for-bin with a welch or p_etfe one ('etfe' alone uses
         # the full-record grid instead).
-        freqs = np.fft.rfftfreq(int(self.params["nperseg"]), d=1.0 / sample_rate)
+        freqs = np.fft.rfftfreq(grid_nperseg, d=1.0 / sample_rate)
         _, h = _sig.freqz(g, worN=freqs, fs=sample_rate)
 
         return freqs, h, g

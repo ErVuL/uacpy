@@ -19,11 +19,14 @@ FEATURES DEMONSTRATED:
 """
 
 import sys
+import os
 from pathlib import Path
 
-OUTPUT_DIR = Path(__file__).parent / 'output'
-OUTPUT_DIR.mkdir(exist_ok=True)
-sys.path.insert(0, str(Path(__file__).parent.parent))
+OUTPUT_DIR = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
+                  or Path(__file__).parent / 'output')
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+# Repo root, so ``import uacpy`` resolves from a source checkout.
+sys.path.insert(0, str(Path(__file__).parents[2]))
 
 import numpy as np  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
@@ -118,7 +121,7 @@ def main():
                    vmin=-40, vmax=0, cmap='jet')
     draw_sound_cone(ax, fkf[-1], fkk[-1], 1500)
     ax.set_title('f-k transform + 1500 m/s cone', fontweight='bold')
-    ax.set_xlabel('Spatial frequency [cycles/m]'); ax.set_ylabel('Frequency [Hz]')
+    ax.set_xlabel('Wavenumber k (rad/m)'); ax.set_ylabel('Frequency [Hz]')
     ax.set_ylim(0, 400)
     fig.colorbar(im, ax=ax, label='Relative power [dB]')
 

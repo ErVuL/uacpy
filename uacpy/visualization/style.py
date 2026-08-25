@@ -7,7 +7,10 @@ the sediment palette. Importing this module does not touch ``rcParams``."""
 # choice only — what each quantity *is*, and how it is labelled, lives in
 # uacpy/core/results/quantities.py, which must not depend on this module.
 DB_VIEW_COLORMAPS = {
-    'pressure': 'jet_r',       # Transmission loss: blue (low TL/good) → red (high TL/poor)
+    # Transmission loss, Acoustics-Toolbox convention: jet_r is flipud(jet),
+    # so LOW TL (loud, near) is red and HIGH TL (quiet, far) is blue —
+    # measured, jet_r(0.0) = (0.5, 0, 0) and jet_r(1.0) = (0, 0, 0.5).
+    'pressure': 'jet_r',
                                # Matches Acoustic Toolbox standard: flipud(jet)
     'reverberation': 'jet_r',
     'signal_excess': 'RdBu_r',  # diverging: the SE = 0 dB detection boundary is the midpoint

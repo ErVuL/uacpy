@@ -96,6 +96,30 @@ def test_env_max_range_matches_the_transect_length():
     assert env.transect == (A, B)
 
 
+def test_geodesic_waypoints_rejects_antipodal_endpoints():
+    # Antipodal endpoints are joined by infinitely many great circles, and the
+    # slerp's 1/sin(ang) returned waypoints that did not lie on the ranges it
+    # reported: (0, 0) → (0, 180) put waypoint 1 at 3921 km from the start
+    # while ranges_m called it 5004 km.
+    from uacpy.data._geo import geodesic_waypoints
+    antipodal = [((0.0, 0.0), (0.0, 180.0)),
+                 ((45.0, 10.0), (-45.0, -170.0)),
+                 ((10.0, 20.0), (-10.0, -160.0))]
+    for start, end in antipodal:
+        with pytest.raises(ConfigurationError, match='antipodal'):
+            geodesic_waypoints(start, end, 5)
+
+
+def test_geodesic_waypoints_hold_their_ranges_just_short_of_antipodal():
+    # Outside the guard the waypoints must still sit on the ranges reported
+    # for them, well inside the spherical model's own accuracy.
+    from uacpy.data._geo import geodesic_waypoints, great_circle_km
+    end = (0.0, 180.0 - np.degrees(1e-4))
+    lats, lons, ranges_m = geodesic_waypoints((0.0, 0.0), end, 5)
+    measured_m = great_circle_km(0.0, 0.0, lats, lons) * 1000.0
+    assert np.allclose(measured_m, ranges_m, atol=1.0)
+
+
 def test_parse_date_accepts_iso_and_objects():
     import datetime as dt
     from uacpy.data._time import parse_date

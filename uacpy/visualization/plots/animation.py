@@ -10,11 +10,12 @@ from typing import Optional, Sequence, Tuple
 from uacpy.core.environment import Environment
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.results import Field, ResultStack
-from uacpy.io.units import m_to_km
+from uacpy.core.units import m_to_km
 from uacpy.visualization.style import SOURCE_MARKER_STYLE
-from uacpy.visualization.plots._common import ZORDER_SOURCE, _imshow_extent, _overlay_seafloor
+from uacpy.visualization.plots._common import ZORDER_SOURCE, _imshow_extent, _overlay_seafloor, typed_plot_error
 
 
+@typed_plot_error
 def animate_field(
     field: 'Field',
     *,
@@ -112,6 +113,15 @@ def animate_field(
 
     if frame_stride is None:
         frame_stride = max(1, n_t // 300)
+    # A stride of 0 divides by zero inside `np.arange`, and a negative one
+    # yields an empty frame index that fails later as an IndexError blaming the
+    # caller's arrays. The test is numeric, not `isinstance(int)`, so the
+    # numpy integers a `range`/`shape` expression produces keep working.
+    if frame_stride < 1:
+        raise ConfigurationError(
+            f"animate_field: frame_stride must be at least 1, got "
+            f"{frame_stride!r}. It sub-samples the time axis — 1 renders every "
+            f"sample, and None caps the animation at ~300 frames.")
     frame_idx = np.arange(0, n_t, frame_stride)
     n_frames = frame_idx.size
 
@@ -180,6 +190,7 @@ def animate_field(
     return ani
 
 
+@typed_plot_error
 def save_animation(
     field: 'Field',
     path,
@@ -240,6 +251,7 @@ def save_animation(
     return out
 
 
+@typed_plot_error
 def plot_time_snapshots(
     fields,
     times_s: Sequence[float],
@@ -309,7 +321,23 @@ def plot_time_snapshots(
     n_models = len(rows)
     n_times = len(times_s)
     if n_models == 0 or n_times == 0:
-        raise ConfigurationError("plot_time_snapshots: empty fields or times_s.")
+        raise ConfigurationError(
+            f"plot_time_snapshots: empty fields or times_s. Got "
+            f"{n_models} field(s) and {n_times} snapshot time(s); both must "
+            f"be non-empty — the grid is one row per field, one column per "
+            f"time.")
+
+    required_axes = {'depth', 'range', 'time'}
+    for name, field in rows:
+        coords = getattr(field, 'coords', {})
+        missing = required_axes - set(coords)
+        if missing:
+            raise ConfigurationError(
+                f"plot_time_snapshots: field "
+                f"{(name or type(field).__name__)!r} is missing coord axes "
+                f"{sorted(missing)}. Need depth, range, and time — got "
+                f"{list(coords)}."
+            )
 
     fig, axes = plt.subplots(
         n_models, n_times,

@@ -12,8 +12,10 @@ Models exercised: RAM (bottom scenarios), Bellhop (surface scenarios)
 """
 
 import sys
+import os
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Repo root, so ``import uacpy`` resolves from a source checkout.
+sys.path.insert(0, str(Path(__file__).parents[2]))
 
 import numpy as np  # noqa: E402
 import uacpy  # noqa: E402
@@ -54,7 +56,7 @@ def example_rough_surface():
     """Rough sea surface from Pierson-Moskowitz spectrum (15 m/s wind)."""
     source, receiver = make_source_receiver()
     surface = generate_sea_surface(
-        max_range=10000, wind_speed_ms=15, n_points=300, seed=42,
+        max_range=10000, wind_speed_mps=15, n_points=300, seed=42,
     )
     env = uacpy.Environment(
         name='rough_surface',
@@ -304,8 +306,9 @@ def main():
         cbar_ax = fig.add_axes([0.945, 0.07, 0.012, 0.83])
         fig.colorbar(tl_im, cax=cbar_ax, label='TL (dB)')
 
-    out_dir = Path(__file__).parent / 'output'
-    out_dir.mkdir(exist_ok=True)
+    out_dir = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
+                   or Path(__file__).parent / 'output')
+    out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / 'example_17_boundary_conditions.png'
     fig.savefig(out_path, dpi=150)
     print(f"\n  ✓ Saved: {out_path}")

@@ -82,11 +82,44 @@ models — consistent `Environment` / `Source` / `Receiver` construction and
 - **Standards & metrics** — sound speed, decidecade bands, ship source level, marine‑mammal weighting.
 - **Visualization** — TL maps, rays, modes, fields, cross‑model comparisons.
 
+**Simplest example — 100 m of water, one model run, one plot.** Nothing but a
+finished [install](#-installation); no network, no downloads, no data cache:
+
+``` python
+import numpy as np
+import uacpy
+from uacpy.models import Bellhop, RunMode
+
+env = uacpy.Environment(
+    bathymetry=100.0,                                    # flat 100 m seabed
+    ssp=[(0.0, 1500.0), (100.0, 1490.0)],                # (depth m, speed m/s)
+    bottom=uacpy.BoundaryProperties(
+        acoustic_type='half-space',
+        sound_speed=1650.0, density=1.8, attenuation=0.6,
+    ),
+)
+source   = uacpy.Source(depths=25.0, frequencies=200.0)
+receiver = uacpy.Receiver(depths=np.linspace(1, 99, 100),
+                          ranges=np.linspace(50, 5000, 250))
+
+tl = Bellhop().run(env, source, receiver, run_mode=RunMode.COHERENT_TL)
+tl.plot(env=env, source=source)
+```
+
+Three carriers in, one result out, and the result plots itself — every model in
+the package has that shape. Walk it line by line in the
+[documentation](./docs/README.md).
+
 <div align="center">
   <img src="./docs/readme_realworld.png" alt="Real-world environment fetched from GPS, modelled, and plotted" width="820">
 </div>
 
-**Simplest example — from GPS to a modelled field, the code that produces the figure above:**
+**Real-world example — from GPS to a modelled field, the code that produces the
+figure above.** This one is a showcase rather than a starting point: the
+`data.fetch_*` calls reach out to public ocean databases, so it needs **network
+access**, or a local cache populated in advance with `./install.sh --data all`
+(the `--data` flag is in [Installation](#-installation)). It is also a 374 km
+transect at 800 Hz — minutes of Bellhop, not seconds.
 
 ``` python
 import numpy as np, matplotlib.pyplot as plt
@@ -283,14 +316,14 @@ rm -rf uacpy
 
 Three entry points, depending on what you need:
 
-- **[`docs/`](./docs/README.md) — the guided documentation.** 19 pages (21
+- **[`docs/`](./docs/README.md) — the guided documentation.** 20 pages (22
   counting the two index READMEs) with 126
   generated figures: one per model (Bellhop, Kraken, RAM, Scooter, SPARC,
   Bounce, OASES), plus guides to environments, sources and receivers, results,
   plotting, signal processing, arrays, communications, noise, sonar, external
-  data, I/O and utilities. Each page covers the physics, when to reach for the
-  model, its limits, and a worked example whose code is the code that generates
-  the page's figures.
+  data, I/O, utilities and reproducibility. Each page covers the physics, when
+  to reach for the model, its limits, and a worked example whose code is the
+  code that generates the page's figures.
 - **[`DOCUMENTATION.md`](./DOCUMENTATION.md) — the API reference.** Every
   signature, keyword and unit in a single file, plus quick start, environment
   setup and troubleshooting.
@@ -336,7 +369,6 @@ pip install -e ".[dev]"
 
 ``` bash
 
-cd uacpy
 pytest uacpy/tests/
 
 ```
@@ -350,6 +382,8 @@ Tests use custom markers to allow selective execution:
 - `requires_oases` -- Tests that need compiled OASES binaries
 - `requires_network` -- Tests that hit a live external service (the `uacpy.data`
   fetchers); **deselected by default** by `addopts` in `pyproject.toml`
+- `benchmark` -- Tests that validate model output against a closed-form
+  analytic or canonical published reference
 
 ``` bash
 

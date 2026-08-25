@@ -42,11 +42,14 @@ WHEN TO USE EACH APPROACH:
 """
 
 import sys
+import os
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Repo root, so ``import uacpy`` resolves from a source checkout.
+sys.path.insert(0, str(Path(__file__).parents[2]))
 
-OUTPUT_DIR = Path(__file__).parent / 'output'
-OUTPUT_DIR.mkdir(exist_ok=True)
+OUTPUT_DIR = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
+                  or Path(__file__).parent / 'output')
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 import numpy as np  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
@@ -156,7 +159,7 @@ def main():
         ranges=np.array([1000.0])
     )
 
-    bounce_output = Path(__file__).parent / 'output' / 'bounce_brc'
+    bounce_output = OUTPUT_DIR / 'bounce_brc'
     bounce_result, t_bounce = _median_time(
         lambda: Bounce(
             verbose=False, c_low=1400.0, c_high=10000.0, rmax=10000.0,

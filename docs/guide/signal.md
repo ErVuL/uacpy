@@ -238,11 +238,34 @@ density level are different quantities and are only equal in a 1 Hz band.**
 The 316 Hz bar is the one visible departure from the smooth trend: that is the
 tonal, whose energy is confined to one band and so survives integration intact.
 
-The end bands come back `nan`. The band set is generated from the grid you
-supply, so the first and last bands usually reach past its ends — here the PSD
-was sliced to 20 Hz–11 kHz first — and a partial integral is not a band level,
-so those bands are returned as `nan` with a one-time warning naming the
-support. Slice generously, or trim the end bands.
+The end bands come back `nan`, and no amount of widening will change that. The
+band set is generated *from the grid you supply* — `decidecade_band_levels`
+takes your grid's smallest positive and largest frequency and asks for every
+decidecade band that **overlaps** that span. Overlapping, not contained: so
+unless an endpoint happens to land exactly on a band edge, the outermost band on
+each side reaches past the support, and a partial integral is not a band level.
+Those two bands are returned as `nan` with a one-time warning naming the
+support.
+
+**"Slice generously" is not a remedy, because widening the grid moves the two
+`nan` bands outward without ever removing them.** Widening this page's
+20 Hz–11 kHz support by a decade at each end, three times over, gives 28, 48, 68
+and 88 bands — and **exactly two `nan`, at the first and last position, every
+time**. Across 300 randomly drawn grids the count was 2 every time. The two
+useful responses are to **trim**: `centers[1:-1]`, `levels[1:-1]` leaves 26
+finite bands here, from 25.1 Hz to 7.94 kHz; or, when you need a *specific* band
+set complete, to supply support running one decidecade past the outermost band
+you want and then drop the `nan` entries — that recipe delivered every requested
+band finite on all eight band ranges tried.
+
+The exception is that "unless": if both endpoints land *exactly* on decidecade
+band edges, nothing overhangs and no band is `nan`. `decidecade_bands(100, 1000)` returns 11 bands
+spanning 89.1251–1122.0185 Hz, and a PSD on exactly that span yields 11 bands
+and zero `nan`. Do not build on it, though — it is knife-edge. Alignment held
+for 5 of 8 band ranges tried; the other 3 pulled in a neighbouring band on each
+side through floating-point round-off in the overlap test, and those came back
+`nan`. Perturbing an aligned endpoint by one part in 10¹² was enough to bring
+the `nan` back. Trim the ends instead.
 
 `decidecade_band_levels` also warns, once, if any band straddled fewer than two
 PSD grid points; such a band's level rests almost entirely on its interpolated
@@ -273,10 +296,11 @@ actually used, so a non-default `w0` or `order` still reconstructs at the right
 amplitude — but a band-limited scale set only reconstructs its own band, which
 is why the round trip is approximate rather than exact.
 
-Two things `cwt` does not do for you. It does not check a `frequencies=` array
-you supply against Nyquist — only the default grid is capped at `fs/2` — so
-asking for 700 Hz at `fs = 1000` returns coefficients rather than an error, and
-what comes back is numerical residue, not signal. And it returns no cone of
+A `frequencies=` array you supply is checked against Nyquist: asking for
+700 Hz at `fs = 1000` raises a `ConfigurationError` (a frequency of exactly
+`fs/2` — the default grid's own cap — is still analysed).
+
+One thing `cwt` does not do for you: it returns no cone of
 influence: within roughly `w0/(2πf)` of either end of the record the wavelet
 runs off the data, so those coefficients are edge artefacts, worst at the lowest
 frequency where the wavelet is longest. Nothing marks that region for you, so
@@ -400,7 +424,7 @@ wavenumber. Each has a standalone inverse.
 | Forward | Returns | Inverse |
 |---|---|---|
 | `fk_transform(data, sample_rate, dx, *, nperseg=None, noverlap=None, window=None, nfft=None, normalize=False)` | `FKResult(frequencies, wavenumbers, power, spectrum)` | `inverse_fk(spectrum)` |
-| `taup_transform(data, sample_rate, dx, slownesses=None, n_slowness=201, p_max=None, *, window=None, nfft=None)` | `TauPResult(slownesses, taus, panel)` | `inverse_taup(taup, slownesses, sample_rate, dx, nx)` |
+| `taup_transform(data, sample_rate, dx, slownesses=None, n_slowness=201, p_max=None, *, x0=0.0, window=None, nfft=None)` | `TauPResult(slownesses, taus, panel)` | `inverse_taup(taup, slownesses, sample_rate, dx, nx, *, x0=0.0)` |
 | `radon_transform(data, sample_rate, dx, moveout, kind='linear', x0=0.0)` | `RadonResult(moveout, taus, panel)` | `inverse_radon(R, sample_rate, dx, moveout, nx, kind='linear', x0=0.0)` |
 
 `radon_transform` scans three moveout families: `'linear'` (`t = τ + p·x`,
@@ -436,8 +460,8 @@ frequencies, wavenumbers, power, spectrum = fk_transform(gather, fs, dz)
 
 kk, ff = np.meshgrid(wavenumbers, frequencies)
 mask = np.ones_like(power)
-mask[(ff > 0) & (kk > 0)] = 0.0
-mask[(ff < 0) & (kk < 0)] = 0.0
+mask[(ff > 0) & (kk < 0)] = 0.0
+mask[(ff < 0) & (kk > 0)] = 0.0
 down = inverse_fk(spectrum * mask)
 ```
 
@@ -456,8 +480,8 @@ one mask, one inverse.
 **Sign convention.** `wavenumbers` is the **angular** wavenumber `k = 2πν` in
 rad/m, matching the `k = ω/c` convention the propagation models use, so a wave
 of speed `c` lies on the line `ω = c·k`. A linear event `t = t₀ + p·z` maps to
-`k = −2πf·p`, so for `f > 0` the down-going half (`p > 0`, later at greater
-depth) is `k < 0`. Muting `k > 0` for `f > 0`, and its conjugate `k < 0` for
+`k = +2πf·p`, so for `f > 0` the down-going half (`p > 0`, later at greater
+depth) is `k > 0`. Muting `k < 0` for `f > 0`, and its conjugate `k > 0` for
 `f < 0`, is what keeps the down-going field. Get the conjugate quadrant wrong
 and `inverse_fk` returns a complex-symmetry-violating panel that no longer
 means anything.
@@ -492,10 +516,27 @@ wants. Decide up front whether you are estimating power or filtering.
 | `simulate_reception(transmit, amplitudes, delays_s, sample_rate)` | `(t, received)` | transmit waveform convolved with that IR |
 | `impulse_response_from_transfer_function(H, frequencies, sample_rate, n_samples=None)` | `(t, h)` | one-sided `H(f)` → real IR |
 
-`fractional=True` splits each arrival's amplitude linearly between the two
-nearest samples, so a delay is not quantised to the sample grid; `False` snaps
-to the nearest sample. `amplitudes` may be complex, in which case `h` is too —
-which is how you carry a Bellhop arrival's phase:
+`fractional=True` places each arrival with a windowed-sinc fractional-delay
+kernel (Kaiser `β = 8`, 8 taps each side, normalised to unit DC gain), so a
+delay is not quantised to the sample grid; `False` snaps to the nearest sample.
+
+The kernel is what keeps the arrival's **level** right, not just its timing. A
+two-tap linear split — the obvious way to straddle a sub-sample delay — is not
+a fractional delay at all: its response `|(1-frac) + frac·e^{-jω}|` is a
+lowpass whose attenuation depends on `frac`, −3.0 dB at `f/fs = 0.25`, −10.2 dB
+at 0.40, and a full null at Nyquist for `frac = 0.5`. Two arrivals a
+propagation model reports as equal would then come back differing by up to
+10 dB, decided by the sub-sample part of their travel times — at the right
+time, at the wrong level. The windowed sinc is flat to ~0.01 dB over the same
+band.
+
+An arrival sitting within 8 samples of either end of the response has its
+kernel truncated, which moves its amplitude in **either** direction (measured
++1.04 dB for an arrival half a sample from the end). That warns; lengthen
+`n_samples`, or pass `fractional=False` to quantise instead.
+
+`amplitudes` may be complex, in which case `h` is too — which is how you carry
+a Bellhop arrival's phase:
 
 ```python
 from uacpy.acoustic_signal import analytic_signal, simulate_reception
@@ -514,7 +555,13 @@ Bellhop `ARRIVALS` run drops straight in. The same machinery underpins
 [`uacpy.comms`](comms.md)'s replay benchmarks.
 
 `impulse_response_from_transfer_function` resamples `H` onto the uniform DFT
-grid over `[0, fs/2]` and inverse-transforms. Grid bins outside
+grid over `[0, fs/2]` and inverse-transforms. Left to itself it sizes that
+grid from the **spacing** of `frequencies`, not their count, so the unambiguous
+delay window is the `1/df` the spacing implies — a band-limited `H` therefore
+returns a full-band-length response rather than a short one that would wrap
+late arrivals back onto early ones. A spacing implying more than 2²² samples
+raises instead of allocating; pass `n_samples` to choose the window yourself.
+Grid bins outside
 `[frequencies[0], frequencies[-1]]` are set to **zero**, not extrapolated: a
 band-limited model result carries no out-of-band energy, and holding the edge
 value would fabricate a DC or high-frequency plateau in the impulse response.
@@ -620,8 +667,8 @@ points across ±`sample_rate/20`.
 | Call | Returns | Notes |
 |---|---|---|
 | `modal_group_velocity(frequencies, k_horizontal)` | m/s, same shape as `k_horizontal` | `dω/dk_r` by finite difference; `frequencies` must be strictly increasing, `k_horizontal` is `(n_freq,)` or `(n_freq, n_modes)` |
-| `warp_signal(signal, sample_rate, range_m, c=1500.0)` | `(warped, t_warp)` | `t_w = √(t² − t_r²)`, `t_r = range/c` |
-| `unwarp_signal(warped, t_warp, sample_rate, range_m, c=1500.0)` | `(signal, t)` | back onto the original grid |
+| `warp_signal(signal, sample_rate, range_m, c=1500.0, *, oversample=1)` | `(warped, t_warp)` | `t_w = √(t² − t_r²)`, `t_r = range/c`; `oversample` (≥ 1, fractional allowed) refines the warped grid — round-trip error roughly halves per doubling |
+| `unwarp_signal(warped, t_warp, sample_rate, range_m, c=1500.0)` | `(t, signal)` | back onto the original grid |
 
 `warp_signal` assumes `signal` **starts at the direct arrival** `t_r = range/c`.
 Feed it a record that starts earlier and the warp is meaningless; slice first.
@@ -683,7 +730,7 @@ here, which is why the figure uses a rigid bottom and isovelocity water.
 |---|---|---|
 | `synthesize_noise_from_psd(Pxx, Fxx, duration=1, scale=1, *, n_fft=65536, sample_rate=None, interp='linear', rng=None)` | `(t, x, sample_rate)` | realise a time series matching a target one-sided PSD |
 | `make_bandlimited_noise(fc, bandwidth, duration, sample_rate, *, rng=None)` | `(t, noise)` | **unit-RMS** band-limited Gaussian noise |
-| `make_noise_waveform(fc, bandwidth_hz, T, sample_rate, *, rng=None)` | `(nts, t)` | heterodyned band-limited noise probe |
+| `make_noise_waveform(fc, bandwidth, duration, sample_rate, *, rng=None)` | `(time, nts)` | heterodyned band-limited noise probe |
 | `add_noise(timeseries, sample_rate, source_level, noise_level, fc, bandwidth, *, rng=None)` | ndarray | scale a 0 dB-source record by `source_level` and add noise at `noise_level` |
 | `fourier_synthesis(pressure_freq, frequencies, source_spectrum=None, Tstart=0.0)` | `(time, rmod)` | AT `stack.m` — raw-DFT synthesis on the input frequency grid |
 
@@ -748,32 +795,43 @@ frequencies, tf = frf.compute(x, y, sample_rate, m='CP')
 returns `(frequencies, tf)` and accepts 1-D inputs or 2-D blocks of rows, in
 which case the transfer functions are averaged over measurements.
 
-**`m` holds the criterion; the chosen order is published separately.** Pass
-`m='AIC'`, `'BIC'`, `'FPE'` or `'CP'` and `FRF` searches FIR orders up to
-`m_max`, stopping early after `stop_count` consecutive non-improvements. The
-attribute `m` still reads back as the criterion string you asked for — the
-order the search actually settled on is on `selected_order`:
+**Every `compute` argument applies to that call alone.** `m`, `method`,
+`estimator`, `nperseg` and `noverlap` override the constructor for the run and
+leave the object's own settings as the constructor set them, so two results
+from one `FRF` are comparable unless you say otherwise on each call. Read the
+settings back off the constructor, not off the last call:
 
 ```python
->>> frf = FRF(method='ls_fir')
+>>> frf = FRF(method='ls_fir')          # m defaults to 512
 >>> frequencies, tf = frf.compute(u, y, 1000.0, m='CP')
->>> frf.m
-'CP'
->>> frf.selected_order
-4
->>> frf.g[:4]
-array([ 1. , -0.6,  0.3,  0.1])
+>>> frf.selected_order                  # what this run's search settled on
+6
+>>> frf.m                               # unchanged: the constructor's value
+512
+>>> frf.compute(u, y, 1000.0)           # no m= : the search does not repeat
 ```
 
-Read `selected_order` when you want to know what the fit did; read `m` when you
-want to know what you asked for. `selected_order` is `None` for every method
-other than `'ls_fir'`.
+Pass `m='AIC'`, `'BIC'`, `'FPE'` or `'CP'` and `FRF` searches FIR orders up to
+`m_max`, stopping early after `stop_count` consecutive non-improvements. The
+order the search settled on is published on `selected_order`, which is `None`
+when `m` was an explicit order and for every method other than `'ls_fir'`.
 
-After a run the object also carries `frequencies`, `tf`, `g` (the impulse
-response, `'ls_fir'` only) and `coh` (coherence, `'welch'` only). Every call
-rewrites all of them, so a reused `FRF` cannot report a previous method's
-result. Draw them with `plot_frf`, `plot_coherence` and
-`plot_impulse_response_info`.
+The *result* attributes are the ones a run does rewrite: `frequencies`, `tf`,
+`selected_order`, `g` (the impulse response, `'ls_fir'` only), `info_rcond`
+(the conditioning of the fit, `'ls_fir'` only) and `coh` (coherence,
+`'welch'` only). Every call rewrites all of them, so a reused `FRF` cannot
+report a previous method's result. Draw them with `plot_frf`,
+`plot_coherence` and `plot_impulse_response_info`.
+
+**Match the FIR order to the band you excite.** `'ls_fir'` fits through the
+normal equations `X.T @ X`, whose condition number is the square of the design
+matrix's, so an order longer than the excited band can support makes the system
+numerically singular: a 100 Hz - 20 kHz sweep at `sample_rate=48000` does it at
+the default `m=512`. `FRF` solves such a system for its minimum-norm impulse
+response and warns, naming the order; `info_rcond` carries the reciprocal
+condition number the fit came out of, and a value at or below `2.2e-16` means
+the frequency response is undetermined wherever the input carries no energy.
+Lower `m`, or excite the whole band up to Nyquist.
 
 ---
 
@@ -850,9 +908,9 @@ it a figure or a test is irreproducible.
 - **Files** — [I/O](io.md) for reading recorded data in;
   [utilities](utilities.md) for the rest.
 
-Every figure on this page comes from
-[`docs/figure_scripts/signal.py`](../figure_scripts/signal.py) — the code above
-is that code, so it cannot drift from what you see.
+Every figure on this page is generated by
+[`docs/figure_scripts/signal.py`](../figure_scripts/signal.py); the snippets
+above are condensed from it, so the script is the authoritative figure code.
 
 ---
 

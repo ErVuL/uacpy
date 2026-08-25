@@ -7,14 +7,16 @@ backend. Unlike the API, there is no per-request rate limit, so arbitrarily
 large grids and transects sample instantly once downloaded.
 """
 
+import warnings
 from pathlib import Path
 
 import numpy as np
 
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
+from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.data import _cache
 from uacpy.data._geo import as_coordinate, lon_linspace
-from uacpy.data._netcdf import NetcdfGrid
+from uacpy.data._netcdf import NetcdfGrid, netcdf_lock
 
 __all__ = ['point_depth', 'depths_along', 'region_grid']
 
@@ -22,6 +24,8 @@ __all__ = ['point_depth', 'depths_along', 'region_grid']
 
 class _GebcoGrid(NetcdfGrid):
     """Nearest-cell accessor over the GEBCO ``elevation`` variable."""
+
+    dataset_name = 'gebco'
 
     def __init__(self, path):
         try:
@@ -71,7 +75,10 @@ class _GebcoGrid(NetcdfGrid):
         blocks = []
         for run in runs:
             u_cols = np.unique(run)
-            block = np.asarray(self._elev[u_rows, u_cols], dtype=float)
+            # Same lock and typing as NetcdfGrid.cell: this reads the netCDF
+            # variable directly rather than cell by cell.
+            with netcdf_lock, _cache.reading('gebco', self.path):
+                block = np.asarray(self._elev[u_rows, u_cols], dtype=float)
             pos_cols = np.searchsorted(u_cols, run)
             blocks.append(block[np.ix_(pos_rows, pos_cols)])
         return lats, lons, np.hstack(blocks)
@@ -79,7 +86,16 @@ class _GebcoGrid(NetcdfGrid):
 
 def _grid():
     path = _cache.require('gebco')
-    nc = next((p for p in sorted(path.glob('*.nc'))), None)
+    # Newest grid first: the files are named GEBCO_<year>.nc, so descending
+    # name order ranks releases; names are unique within the directory, and
+    # the warning below names the file chosen.
+    grids = sorted(path.glob('*.nc'), key=lambda p: p.name, reverse=True)
+    nc = grids[0] if grids else None
+    if len(grids) > 1:
+        warnings.warn(
+            f"gebco: {len(grids)} grids are cached in {path} "
+            f"({', '.join(p.name for p in grids)}); sampling {nc.name}.",
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
     if nc is None:
         # The cache dir exists but holds no .nc grid: raise the same typed
         # error require() gives for the canonical missing file.
@@ -90,7 +106,7 @@ def _grid():
             remediation=f"Run `{ds.install_flag}` to download it, or set "
                         f"$UACPY_DATA_CACHE to a directory that has it.",
         )
-    return _cache.cached_grid_at(nc, _GebcoGrid)
+    return _cache.cached_grid_at(nc, _GebcoGrid, 'gebco')
 
 
 def _depth_from_elevation(elev, lat, lon):

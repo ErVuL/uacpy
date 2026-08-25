@@ -17,7 +17,7 @@ from uacpy.acoustic_signal.transforms import (
 from uacpy.visualization.plots.signal import (
     plot_fk, plot_radon, plot_taup,
     plot_angular_spectrum, plot_band_levels, plot_coherence, plot_frf,
-    plot_impulse_response_info)
+    plot_impulse_response_info, plot_psd)
 
 
 def test_plot_fk_returns_fig_ax():
@@ -81,3 +81,40 @@ def test_signal_plotter_signature_and_smoke(fn, params, args):
 def test_plot_impulse_response_info_is_figure_level():
     # It builds its own three-panel figure and takes no ax=.
     assert 'ax' not in inspect.signature(plot_impulse_response_info).parameters
+
+
+class TestFixedYWindowsAreEscapable:
+    """``plot_coherence`` and ``plot_psd`` pin the ordinate to the band their
+    quantity normally occupies, which keeps panels comparable — and renders a
+    record outside that band as an empty panel. The window has to be reachable,
+    and a record that falls entirely outside it has to say so rather than look
+    like "no data"."""
+
+    _F = np.array([10.0, 100.0, 1000.0])
+
+    def test_plot_coherence_takes_a_ylim(self):
+        assert 'ylim' in inspect.signature(plot_coherence).parameters
+        fig, ax = plot_coherence(self._F, np.full(3, 0.2), ylim=(0.0, 1.01))
+        assert ax.get_ylim() == pytest.approx((0.0, 1.01))
+        plt.close(fig)
+
+    def test_low_coherence_outside_the_default_window_warns(self):
+        with pytest.warns(UserWarning, match=r"outside the plotted y range"):
+            fig, ax = plot_coherence(self._F, np.full(3, 0.2))
+        plt.close(fig)
+
+    def test_a_quiet_psd_outside_the_default_window_warns(self):
+        # 1e-14 Pa²/Hz is -20 dB re 1 µPa²/Hz — entirely below the 0-150 dB
+        # default axes.
+        with pytest.warns(UserWarning, match=r"Pass ymin=/ymax="):
+            fig, ax = plot_psd(self._F, np.full(3, 1e-14))
+        plt.close(fig)
+
+    def test_an_ordinary_record_warns_about_nothing(self):
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            fig, ax = plot_psd(self._F, np.full(3, 1.0))
+            plt.close(fig)
+            fig, ax = plot_coherence(self._F, np.full(3, 0.98))
+            plt.close(fig)

@@ -23,7 +23,7 @@ GUIDE = True
 
 
 # ── the site every figure uses ───────────────────────────────────────────────
-# A Celtic-shelf-break transect into the Biscay abyssal plain: 320 km, 150 m of
+# A Celtic-shelf-break transect into the Biscay abyssal plain: 320 km, 181 m of
 # shelf falling to 4.8 km of abyss, inside EMODnet's European-seas seabed
 # coverage, so every axis has real data along the whole track.
 

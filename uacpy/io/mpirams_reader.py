@@ -130,7 +130,11 @@ def _read_psif_records(psif_file: Path) -> Dict:
         for ir in range(nr):
             for ii in range(nzo):
                 rec = f.read_reals(dtype=np.float64)
-                if rec.size < 1 + 2 * nf:
+                # Exact length, not a minimum: a record longer than the header
+                # implies is as much a header/file disagreement as a short one,
+                # and reading its first 1 + 2*nf reals would silently return a
+                # field built from a layout this reader has misidentified.
+                if rec.size != 1 + 2 * nf:
                     raise FileFormatError(
                         f"{psif_file}: depth record (ir={ir}, iz={ii}) holds "
                         f"{rec.size} reals, expected {1 + 2 * nf} "
@@ -139,7 +143,7 @@ def _read_psif_records(psif_file: Path) -> Dict:
                     )
                 if ir == 0:
                     zg[ii] = rec[0]
-                psif[ii, :, ir] = rec[1::2][:nf] + 1j * rec[2::2][:nf]
+                psif[ii, :, ir] = rec[1::2] + 1j * rec[2::2]
 
     return {
         'n_samples': Nsam,

@@ -147,7 +147,6 @@ def time_synthesis():
     ax_src.grid(True, alpha=0.3)
 
     series.isel(depth=0).plot(ax=ax_rx, stacked=True)
-    ax_rx.set_ylabel('Range (m), stacked')
     ax_rx.set_title('received p(t) — one trace per range', fontsize=10)
 
     fig.suptitle('H(f).synthesize_time_series(waveform, sample_rate)',

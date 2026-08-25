@@ -7,6 +7,7 @@ from typing import Tuple, Optional
 import numpy as np
 
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.acoustic_signal._signal_validate import require_below_nyquist
 
 
 def synthesize_noise_from_psd(Pxx, Fxx, duration=1, scale=1, *,
@@ -80,7 +81,10 @@ def synthesize_noise_from_psd(Pxx, Fxx, duration=1, scale=1, *,
             f"synthesize_noise_from_psd: Pxx must have at least 2 points (got {Pxx.size})"
         )
     if not np.all(np.diff(Fxx) > 0):
-        raise ConfigurationError("synthesize_noise_from_psd: Fxx must be strictly increasing")
+        raise ConfigurationError(
+            "synthesize_noise_from_psd: Fxx must be strictly increasing; got "
+            f"{int(np.count_nonzero(np.diff(Fxx) <= 0))} non-increasing "
+            f"step(s), first at index {int(np.argmax(np.diff(Fxx) <= 0))}")
 
     if sample_rate is None:
         sample_rate = 2 * Fxx[-1]
@@ -89,7 +93,8 @@ def synthesize_noise_from_psd(Pxx, Fxx, duration=1, scale=1, *,
         n_fft = 65536
     elif n_fft < 16:
         warnings.warn(
-            f"synthesize_noise_from_psd: n_fft={n_fft} below minimum 16; raising to 65536.",
+            f"synthesize_noise_from_psd: n_fft={n_fft} is below the minimum "
+            f"16; using the default 65536 instead.",
             UserWarning, stacklevel=2,
         )
         n_fft = 65536
@@ -183,7 +188,10 @@ def _resample_psd(Pxx, Fxx, f_target, method):
     if method == 'log':
         if Fxx[0] <= 0 or np.any(Pxx <= 0):
             raise ConfigurationError(
-                "synthesize_noise_from_psd: interp='log' requires strictly positive Pxx and Fxx"
+                "synthesize_noise_from_psd: interp='log' requires strictly "
+                f"positive Pxx and Fxx; got Fxx[0]={Fxx[0]:g} and "
+                f"{int(np.count_nonzero(Pxx <= 0))} non-positive Pxx value(s) "
+                f"(minimum {Pxx.min():g})"
             )
         out[in_range] = 10.0 ** np.interp(
             np.log10(f_target[in_range]),
@@ -225,7 +233,12 @@ def _closest_power_of_two(x):
 
 
 def make_noise_waveform(
-    fc: float, bandwidth_hz: float, T: float, sample_rate: float, *, rng=None
+    fc: float,
+    bandwidth: float,
+    duration: float,
+    sample_rate: float,
+    *,
+    rng=None
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Generate bandpass-filtered Gaussian random noise waveform.
@@ -237,9 +250,9 @@ def make_noise_waveform(
     ----------
     fc : float
         Center frequency in Hz
-    bandwidth_hz : float
+    bandwidth : float
         Bandwidth in Hz
-    T : float
+    duration : float
         Duration in seconds
     sample_rate : float
         Sample rate in Hz
@@ -252,7 +265,7 @@ def make_noise_waveform(
     time : ndarray
         Sample times (s), ``np.arange(N)/sample_rate``.
     nts : ndarray
-        Noise time series, 1-D of length ``int(T*sample_rate)``.
+        Noise time series, 1-D of length ``int(duration*sample_rate)``.
 
     The ``(time, signal)`` order is the package-wide convention, shared with
     the tonal generators (``tone_burst``, ``lfm_chirp``, ``hfm_chirp``) and
@@ -274,18 +287,39 @@ def make_noise_waveform(
     >>> # Generate 1 kHz noise, 200 Hz bandwidth, 1 second
     >>> t, nts = make_noise_waveform(1000, 200, 1.0, 10000)
     >>> print(f"Noise signal: {len(nts)} samples")
+    Noise signal: 10000 samples
     """
-    N = int(T * sample_rate)  # number of samples
+    N = int(duration * sample_rate)  # number of samples
     # Build the time axis from the same N used for resample so the carrier
-    # and the resampled noise always have matching length (np.arange(0, T,
-    # 1/sample_rate) can yield N±1 samples from float accumulation).
+    # and the resampled noise always have matching length (np.arange(0,
+    # duration, 1/sample_rate) can yield N±1 samples from float accumulation).
     time = np.arange(N) / sample_rate
-    N2 = int(T * bandwidth_hz)
+    N2 = int(duration * bandwidth)
     if N < 1 or N2 < 1:
         raise ConfigurationError(
-            f"make_noise_waveform: T*sample_rate ({N}) and T*bandwidth_hz "
-            f"({N2}) must each resolve to at least one sample; got T={T}, "
-            f"sample_rate={sample_rate}, bandwidth_hz={bandwidth_hz}")
+            f"make_noise_waveform: duration*sample_rate ({N}) and "
+            f"duration*bandwidth ({N2}) must each resolve to at least one "
+            f"sample; got duration={duration}, sample_rate={sample_rate}, "
+            f"bandwidth={bandwidth}")
+
+    # The generator side of the Nyquist split: the heterodyne below places
+    # the band at fc +/- bandwidth/2, and an edge at or above fs/2 folds
+    # back to fs - f, which returns a plausible-looking waveform centred
+    # somewhere else entirely. ``make_bandlimited_noise`` in this file refuses
+    # the same band through ``_bandpass_design``.
+    require_below_nyquist(fc + bandwidth / 2.0, sample_rate,
+                          "make_noise_waveform",
+                          "the upper band edge fc + bandwidth/2",
+                          "the band folds back to sample_rate - f and the "
+                          "noise comes out centred somewhere else")
+    require_below_nyquist(fc, sample_rate, "make_noise_waveform", "fc",
+                          "the carrier folds back to sample_rate - fc")
+    if not (fc - bandwidth / 2.0 > 0.0):
+        raise ConfigurationError(
+            f"make_noise_waveform: the lower band edge fc - bandwidth/2 "
+            f"({fc - bandwidth / 2.0:g} Hz) must be > 0 Hz; a band "
+            f"straddling DC is the mirror of the same fold. Got fc={fc!r}, "
+            f"bandwidth={bandwidth!r}.")
 
     rng = np.random.default_rng() if rng is None else rng
     nts = rng.standard_normal(N2)  # Gaussian white noise
@@ -400,8 +434,9 @@ def add_noise(
 
     Examples
     --------
-    >>> # Clean signal (0 dB reference)
-    >>> clean_signal = np.random.randn(48000)
+    >>> # Clean signal (0 dB reference); seeded so the example repeats
+    >>> rng = np.random.default_rng(0)
+    >>> clean_signal = rng.standard_normal(48000)
     >>> clean_signal = clean_signal / np.max(np.abs(clean_signal))
     >>>
     >>> # Add 185 dB source level and 40 dB noise
@@ -429,17 +464,23 @@ def add_noise(
     # Generate band-limited noise — independent realisation per receiver
     # so cross-channel correlation is zero (required for beamforming and
     # array-gain assertions).
-    T = len(timeseries) / sample_rate
+    # The noise is drawn by sample count, not by a duration: routing through
+    # seconds and back (`int((n/fs)*fs)`) returns n-1 samples for 4-7 % of
+    # lengths at every rate that is not a power of two, and the sum below
+    # would then raise a raw numpy broadcast error naming neither argument.
     rng = np.random.default_rng() if rng is None else rng
+    n_samples = timeseries.shape[0]
 
     if timeseries.ndim == 1:
-        noise_ts = make_bandlimited_noise(
-            fc, bandwidth, T, sample_rate, rng=rng)[1] * A
+        noise_ts = _bandlimited_noise_samples(
+            fc, bandwidth, n_samples, sample_rate, rng=rng,
+            caller="add_noise")[1] * A
         rts = timeseries * SL + noise_ts
     else:
         n_rcv = timeseries.shape[1]
         noise_block = np.column_stack([
-            make_bandlimited_noise(fc, bandwidth, T, sample_rate, rng=rng)[1]
+            _bandlimited_noise_samples(fc, bandwidth, n_samples, sample_rate,
+                                       rng=rng, caller="add_noise")[1]
             for _ in range(n_rcv)
         ]) * A
         rts = timeseries * SL + noise_block
@@ -491,14 +532,37 @@ def make_bandlimited_noise(
     --------
     >>> t, noise = make_bandlimited_noise(10000.0, 5000.0, 1.0, 48000.0)
     >>> print(f"Generated {len(noise)} samples")
+    Generated 48000 samples
+    """
+    return _bandlimited_noise_samples(
+        fc, bandwidth, int(duration * sample_rate), sample_rate,
+        rng=rng, caller="make_bandlimited_noise")
+
+
+def _bandlimited_noise_samples(fc, bandwidth, n_samples, sample_rate, *,
+                               rng=None, caller):
+    """``(time, noise)`` of exactly ``n_samples`` band-limited unit-RMS samples.
+
+    The sample count is the argument rather than a duration because
+    ``int(duration*sample_rate)`` is one short of ``round(duration*sample_rate)``
+    for 4-7 % of record lengths at every rate that is not a power of two
+    (``int((n/fs)*fs) == n - 1``), and a caller adding this noise to a record
+    of its own then hits a raw numpy broadcast error.
     """
     from scipy.signal import sosfiltfilt
-    n_samples = int(duration * sample_rate)
+    sos = _bandpass_design(fc, bandwidth, sample_rate)
+    # sosfiltfilt pads by 3*(2*n_sections+1) - 1 and refuses a shorter signal
+    # with a bare ValueError naming only `padlen`.
+    padlen = 3 * (2 * len(sos) + 1) - 1
+    if n_samples <= padlen:
+        raise ConfigurationError(
+            f"{caller}: {n_samples} sample(s) is too short for the "
+            f"zero-phase bandpass, which pads by {padlen} samples on each "
+            f"end; it needs more than {padlen}. Lengthen the record or "
+            f"raise the sample rate.")
     time = np.arange(n_samples) / sample_rate
     rng = np.random.default_rng() if rng is None else rng
     noise = rng.standard_normal(n_samples)
-
-    sos = _bandpass_design(fc, bandwidth, sample_rate)
     filtered_noise = sosfiltfilt(sos, noise)
 
     # Normalise to unit RMS so callers can scale by the target RMS
@@ -566,7 +630,9 @@ def fourier_synthesis(
     --------
     >>> # Generate frequency-domain transfer function
     >>> freqs = np.linspace(10, 1000, 100)
-    >>> H_freq = np.random.randn(100, 50, 20) + 1j*np.random.randn(100, 50, 20)
+    >>> rng = np.random.default_rng(0)
+    >>> H_freq = (rng.standard_normal((100, 50, 20))
+    ...           + 1j * rng.standard_normal((100, 50, 20)))
     >>>
     >>> # Convert to time domain (impulse response)
     >>> t, h_time = fourier_synthesis(H_freq, freqs)

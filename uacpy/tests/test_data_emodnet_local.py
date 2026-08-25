@@ -5,8 +5,8 @@ where shapely (a default uacpy dependency) is unavailable.
 """
 
 import json
-import pickle
 
+import numpy as np
 import pytest
 
 pytest.importorskip('shapely')
@@ -32,8 +32,10 @@ def test_download_builds_wkb_index(tmp_path, monkeypatch):
     monkeypatch.setattr(emodnet_local, 'http_get', lambda url, **kw: _fc(feats))
     out = emodnet_local.download_emodnet_db(cache_dir=str(tmp_path))
     assert out.exists()
-    data = pickle.load(open(out, 'rb'))
-    assert data['codes'] == [2, 5] and len(data['wkb']) == 2
+    with np.load(out, allow_pickle=False) as z:
+        assert z['codes'].tolist() == [2, 5]
+        # offsets are n+1 cut points into the concatenated WKB blob
+        assert z['offsets'].tolist() == [0, z['offsets'][1], z['wkb'].size]
 
 
 def test_query_after_download(tmp_path, monkeypatch):
@@ -83,3 +85,18 @@ def test_missing_cache_names_install_flag(tmp_path, monkeypatch):
     emodnet_local._INDEX.clear()
     with pytest.raises(ConfigurationError, match='install.sh --data emodnet'):
         emodnet_local.fetch_bottom_local((56.0, 3.0))
+
+
+def test_a_shared_boundary_point_resolves_to_the_lowest_polygon_index(
+        tmp_path, monkeypatch):
+    pytest.importorskip('shapely')
+    from uacpy.data import emodnet_local
+    monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path))
+    emodnet_local._INDEX.clear()
+    feats = [_poly_feature(2, (-41, 30, -40, 31)),
+             _poly_feature(1, (-41, 31, -40, 32))]   # share the lat=31 edge
+    fc = json.dumps({'type': 'FeatureCollection', 'features': feats})
+    monkeypatch.setattr(emodnet_local, 'http_get', lambda url, **kw: fc)
+    emodnet_local.download_emodnet_db()
+    sub = emodnet_local.fetch_seabed_local((31.0, -40.5))  # on the shared edge
+    assert sub['folk_5cl'] == 2                            # polygon index 0

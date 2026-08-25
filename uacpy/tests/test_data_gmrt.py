@@ -124,3 +124,95 @@ def test_live_gmrt_point():
     except DataFetchError as exc:
         pytest.skip(f"GMRT unreachable: {exc.message}")
     assert 1000.0 < d < 4000.0                         # Ligurian Sea, deep
+
+
+def test_gmrt_region_grid_maps_a_filled_cell_to_nan(monkeypatch, tmp_path):
+    """A ``_FillValue`` elevation must come back as NaN, not as a depth.
+
+    ``np.asarray`` on a netCDF4 masked array drops the mask and exposes the
+    raw fill: GMRT's -32768 sentinel read as a 32 768 m water depth.
+    """
+    netCDF4 = pytest.importorskip('netCDF4')
+    path = tmp_path / 'grid.nc'
+    lat = np.linspace(43.0, 43.2, 3)
+    lon = np.linspace(7.0, 7.2, 3)
+    ds = netCDF4.Dataset(path, 'w')
+    ds.createDimension('lat', lat.size); ds.createDimension('lon', lon.size)
+    ds.createVariable('lat', 'f8', ('lat',))[:] = lat
+    ds.createVariable('lon', 'f8', ('lon',))[:] = lon
+    z = ds.createVariable('altitude', 'f4', ('lat', 'lon'), fill_value=-32768.0)
+    block = np.ma.masked_array(np.full((3, 3), -2000.0))
+    block[1, 1] = np.ma.masked
+    z[:] = block
+    ds.close()
+    blob = path.read_bytes()
+    monkeypatch.setattr(gmrt_live, 'http_get', lambda url, **kw: blob)
+
+    _, _, depth = gmrt_live.region_grid((43.0, 43.2), (7.0, 7.2), 3, 3)
+    assert np.isnan(depth[1, 1])
+    assert depth[0, 0] == pytest.approx(2000.0)
+
+
+def _coards_blob(tmp_path, *, lon_name='lon', lat_name='lat',
+                 elev_name='altitude'):
+    """A tiny COARDS-style NetCDF byte blob with configurable variable names."""
+    netCDF4 = pytest.importorskip('netCDF4')
+    path = tmp_path / 'grid.nc'
+    lon = np.linspace(7.0, 7.5, 4)
+    lat = np.linspace(43.0, 43.5, 4)
+    ds = netCDF4.Dataset(path, 'w')
+    ds.createDimension('lon', lon.size)
+    ds.createDimension('lat', lat.size)
+    ds.createVariable(lon_name, 'f8', ('lon',))[:] = lon
+    ds.createVariable(lat_name, 'f8', ('lat',))[:] = lat
+    ds.createVariable(elev_name, 'f4', ('lat', 'lon'))[:] = np.full((4, 4), -500.0)
+    ds.close()
+    return path.read_bytes()
+
+
+def test_region_grid_without_an_elevation_variable_raises_typed_error(
+        monkeypatch, tmp_path):
+    blob = _coards_blob(tmp_path, elev_name='bathy')  # neither altitude nor z
+    monkeypatch.setattr(gmrt_live, 'http_get', lambda url, **kw: blob)
+    with pytest.raises(DataFetchError, match="missing an expected variable"):
+        gmrt_live.region_grid((43.0, 43.5), (7.0, 7.5), 3, 3)
+
+
+def test_region_grid_without_a_lon_axis_raises_typed_error(
+        monkeypatch, tmp_path):
+    blob = _coards_blob(tmp_path, lon_name='longitude')
+    monkeypatch.setattr(gmrt_live, 'http_get', lambda url, **kw: blob)
+    with pytest.raises(DataFetchError, match="'lon'"):
+        gmrt_live.region_grid((43.0, 43.5), (7.0, 7.5), 3, 3)
+
+
+def test_gmrt_region_grid_closes_its_handle_when_a_variable_is_missing(
+        monkeypatch):
+    from uacpy.data import _netcdf, gmrt_live
+    opened = []
+
+    def fake_open(path):
+        ds = _RecordingDataset()
+        ds.variables.pop('lon')
+        opened.append(ds)
+        return ds
+
+    monkeypatch.setattr(_netcdf, 'open_netcdf', fake_open)
+    monkeypatch.setattr(gmrt_live, 'http_get', lambda url, **kw: b'not-a-grid')
+    with pytest.raises(DataFetchError):
+        gmrt_live.region_grid((0.0, 1.0), (0.0, 1.0), 2, 2)
+    assert opened and all(ds.closed for ds in opened)
+
+
+class _RecordingDataset:
+    """netCDF stand-in with no data variable, so the reader raises mid-read."""
+
+    def __init__(self):
+        self.closed = False
+        self.variables = {'latitude': np.array([0.5, 1.5]),
+                          'longitude': np.array([0.5, 1.5]),
+                          'lat': np.array([0.5, 1.5]),
+                          'lon': np.array([0.5, 1.5])}
+
+    def close(self):
+        self.closed = True

@@ -122,6 +122,32 @@ def make_pekeris(**overrides):
     return uacpy.Environment(**env_kw)
 
 
+def concrete_model_classes() -> dict:
+    """Every concrete ``PropagationModel`` wrapper on ``uacpy.models``'s
+    public surface, ``{name: class}``.
+
+    Derived rather than listed, and a plain function rather than a fixture so
+    module-level helpers can call it (``from uacpy.tests.conftest import
+    concrete_model_classes``). Every gate over "the set of models" that keeps
+    its own copy of the list is blind to the model it does not know about: a
+    thirteenth wrapper enters ``uacpy.models.__all__`` and the hand-written
+    twelve never notices. ``PropagationModel`` and ``OASES`` are abstract
+    bases, not wrappers, and drop out on ``inspect.isabstract``.
+    """
+    import inspect
+
+    import uacpy.models as models
+    from uacpy.models.base import PropagationModel
+
+    found = {}
+    for name in models.__all__:
+        obj = getattr(models, name, None)
+        if (isinstance(obj, type) and issubclass(obj, PropagationModel)
+                and not inspect.isabstract(obj)):
+            found[name] = obj
+    return found
+
+
 @pytest.fixture
 def simple_env():
     """Simple isovelocity environment."""
@@ -218,12 +244,9 @@ def receiver_small():
 
 
 @pytest.fixture
-def receiver():
+def receiver(receiver_grid):
     """Default receiver grid (alias for ``receiver_grid``)."""
-    return uacpy.Receiver(
-        depths=np.linspace(10, 90, 9),
-        ranges=np.linspace(100, 5000, 11),
-    )
+    return receiver_grid
 
 
 @pytest.fixture
@@ -255,12 +278,7 @@ def elastic_bottom():
 @pytest.fixture
 def pekeris_env(halfspace_bottom):
     """Classic 100-m Pekeris waveguide with a fluid half-space bottom."""
-    return uacpy.Environment(
-        name="Pekeris (fluid bottom)",
-        bathymetry=100.0,
-        ssp=1500.0,
-        bottom=halfspace_bottom,
-    )
+    return make_pekeris(name="Pekeris (fluid bottom)", bottom=halfspace_bottom)
 
 
 @pytest.fixture

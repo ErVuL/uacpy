@@ -28,6 +28,7 @@ from uacpy.core.exceptions import (ConfigurationError, DataFetchError,
                                    FileFormatError)
 from uacpy.data._geo import (
     Coordinate, as_coordinate, normalize_lon, great_circle_km,
+    pressure_dbar_to_depth,
 )
 from uacpy.data._http import http_get
 from uacpy.data._time import parse_date
@@ -62,27 +63,6 @@ def _abs_days(time_str, when):
     except (ValueError, TypeError):
         return 0.0
     return abs(float((day - when) / np.timedelta64(1, 'D')))
-
-
-def _pressure_dbar_to_depth(pres_dbar, lat):
-    """Pressure (dbar) → depth (m): Newton inversion of the depth→pressure law.
-
-    Argo reports pressure, but a ``SoundSpeedProfile`` is indexed by depth, and
-    the shared helper only implements depth → pressure. The derivative is taken
-    as a central difference on that helper rather than analytically, so the
-    Leroy & Parthiot coefficients live in exactly one place; a 1 m step is safe
-    because ``h(z)`` is a smooth quartic whose curvature over a metre is
-    negligible against its ~1 dbar/m slope.
-    """
-    from uacpy.data._geo import depth_to_pressure_dbar
-    p = np.asarray(pres_dbar, dtype=float)
-    z = p * 0.9905                                   # ~1 m per dbar initial guess
-    for _ in range(5):
-        f = depth_to_pressure_dbar(z, lat) - p
-        df = (depth_to_pressure_dbar(z + 1.0, lat)
-              - depth_to_pressure_dbar(z - 1.0, lat)) / 2.0
-        z = z - f / df
-    return z
 
 
 def _query_url(point, when, max_distance_km, max_days, base_url):
@@ -230,7 +210,7 @@ def fetch_ssp_argo(
                               max_days=max_days, base_url=base_url,
                               timeout=timeout, verbose=verbose)
     speed_fn = _FORMULAS[formula]
-    depths = _pressure_dbar_to_depth(prof['pres'], prof['lat'])
+    depths = pressure_dbar_to_depth(prof['pres'], prof['lat'])
     c = np.array([speed_fn(t, s, p)
                   for t, s, p in zip(prof['temp'], prof['psal'], prof['pres'])])
     log_message(

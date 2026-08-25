@@ -119,3 +119,50 @@ class TestAmbiguity:
         assert abs(intercept) < 1.0 / fs
         resid = ridge - (slope * dop + intercept)
         assert np.abs(resid).max() < 1.0 / fs
+
+
+class TestAmbiguityFunctionCapsItsAllocation:
+    """The surface is ``n_doppler x (2N-1)`` float64 and one full-length FFT
+    convolution runs per Doppler row, so a long pulse at a high sample rate
+    asks for gigabytes and minutes from a call that names neither: a 10 s
+    pulse at 96 kHz on the default 101-Doppler grid is 1.44 GiB.
+    ``channel._MAX_DEFAULT_TAPS`` and ``_MAX_DEFAULT_IR_SAMPLES`` cap the same
+    kind of self-sizing allocation in the same package."""
+
+    def test_the_cap_is_one_gibibyte_of_float64(self):
+        from uacpy.acoustic_signal.active import _MAX_AMBIGUITY_CELLS
+        assert _MAX_AMBIGUITY_CELLS * 8 == 1 << 30
+
+    def test_a_surface_over_the_cap_is_refused_by_name(self):
+        from uacpy.acoustic_signal.active import (_MAX_AMBIGUITY_CELLS,
+                                                  ambiguity_function)
+        # Just over the cap on the default 101-row grid, chosen by arithmetic
+        # so the refused surface is never allocated.
+        n = _MAX_AMBIGUITY_CELLS // 101 // 2 + 2
+        with pytest.raises(ConfigurationError) as exc:
+            ambiguity_function(np.ones(n), 96000.0)
+        message = str(exc.value)
+        assert 'ambiguity_function' in message
+        assert 'n_doppler' in message
+
+    def test_a_surface_just_under_the_cap_is_accepted(self):
+        """Both sides of the threshold: the cap is checked on the cell count,
+        so a narrow Doppler grid buys back a long waveform."""
+        from uacpy.acoustic_signal.active import (_MAX_AMBIGUITY_CELLS,
+                                                  ambiguity_function)
+        n = 4096
+        n_doppler = _MAX_AMBIGUITY_CELLS // (2 * n - 1)
+        assert n_doppler * (2 * n - 1) <= _MAX_AMBIGUITY_CELLS
+        # Verified by arithmetic rather than allocation: the accepted call
+        # below uses a small grid, and the boundary itself is the comparison.
+        assert (n_doppler + 1) * (2 * n - 1) > _MAX_AMBIGUITY_CELLS
+        result = ambiguity_function(np.ones(n), 96000.0, n_doppler=5)
+        assert result.amplitude.shape == (5, 2 * n - 1)
+
+    def test_an_ordinary_call_produces_the_full_surface(self):
+        from uacpy.acoustic_signal.active import ambiguity_function
+        from uacpy.acoustic_signal.waveforms import lfm_chirp
+        _, x = lfm_chirp(2000.0, 8000.0, 0.01, 96000.0)
+        result = ambiguity_function(x, 96000.0)
+        assert result.amplitude.shape == (101, 2 * x.size - 1)
+        assert result.amplitude.max() == pytest.approx(1.0)

@@ -12,10 +12,13 @@ It reads up to two normalized CSVs from the cache:
   samples are sparse.
 
 A nearest-neighbour lookup (great-circle, via a unit-sphere KD-tree) returns the
-closest sample; quantitative grain-size samples are preferred over lithology
-descriptions. Because these are sparse point samples (not a continuous map), the
-nearest sample can be far offshore — a ``max_distance_km`` guard raises when no
-sample is close enough.
+closest sample. The two files hold **separate** trees, compared rather than
+merged: a grain-size sample is preferred over a lithology description at
+comparable range, where its precision is the only thing separating them, and
+the nearer sample wins once they are far enough apart to be describing
+different seabed. Because these are sparse point samples (not a continuous
+map), the nearest sample can be far offshore — a ``max_distance_km`` guard
+raises when no sample is close enough.
 """
 
 import csv
@@ -28,7 +31,7 @@ import numpy as np
 from scipy.spatial import cKDTree
 
 from uacpy._log import log_message
-from uacpy.core.exceptions import ConfigurationError, DataFetchError
+from uacpy.core.exceptions import DataFetchError
 from uacpy.data import _cache
 from uacpy.data._geo import as_coordinate, normalize_lon, EARTH_RADIUS_KM
 from uacpy.data._http import http_get, checked_member_size
@@ -71,7 +74,7 @@ _LON_COLS = ('longitude', 'lon', 'long', 'x')
 _PHI_COLS = ('phi', 'mean_phi', 'mean', 'mean_grain_size', 'grain_size_phi')
 _LITH_COLS = ('lithology', 'dominant_lithology', 'dominant', 'description')
 
-_SAMPLES = {}   # cache_root -> (tree, phis, sample_lats, sample_lons)
+_SAMPLES = {}   # cache_root -> (grainsize_index, lithology_index), either None
 _cache.register_cache(_SAMPLES.clear)
 
 
@@ -138,19 +141,22 @@ def download_sediment_db(cache_dir=None, *, timeout=180.0, verbose=False):
 
     out = dest / 'grainsize.csv'
     n = 0
-    with open(out, 'w', newline='') as fh:
-        writer = csv.writer(fh)
-        writer.writerow(['latitude', 'longitude', 'mean_phi'])
-        for key, (_interval, sum_w, sum_w_phi) in best.items():
-            if key in loc and sum_w > 0.0:
-                lat, lon = loc[key]
-                writer.writerow([lat, lon, round(sum_w_phi / sum_w, 3)])
-                n += 1
-    if n == 0:
-        raise DataFetchError(
-            "NCEI grain-size DB parsed to zero usable samples.",
-            remediation="Retry; the upstream tarball layout may have changed.",
-        )
+    with _cache.atomic_write(out) as part:
+        with open(part, 'w', newline='') as fh:
+            writer = csv.writer(fh)
+            writer.writerow(['latitude', 'longitude', 'mean_phi'])
+            for key, (_interval, sum_w, sum_w_phi) in best.items():
+                if key in loc and sum_w > 0.0:
+                    lat, lon = loc[key]
+                    writer.writerow([lat, lon, round(sum_w_phi / sum_w, 3)])
+                    n += 1
+        # Inside the staging block, so a header-only file is discarded rather
+        # than left in the cache for the reader to accept.
+        if n == 0:
+            raise DataFetchError(
+                "NCEI grain-size DB parsed to zero usable samples.",
+                remediation="Retry; the upstream tarball layout may have changed.",
+            )
     _SAMPLES.clear()                          # force rebuild of the KD-tree
     log_message('sediment', f"grain-size DB normalized: {n} samples → {out}",
                 verbose=verbose)
@@ -187,7 +193,17 @@ def _read_csv(path, value_cols, transform):
     """Return ``(lats, lons, phis)`` from a normalized sediment CSV.
 
     ``transform`` maps a raw cell (ϕ string or lithology text) to a float ϕ, or
-    ``None`` to skip the row.
+    ``None`` to skip the row. A row that is empty, short, or carries an
+    unreadable value is skipped; a row whose coordinates are not numbers raises
+    :class:`DataFetchError` naming the line — these files are hand-writable
+    (``deck41.csv``), so a typo has to be reported rather than swallowed.
+
+    Both raises are :class:`DataFetchError` because that is the data layer's
+    exception whatever the reason: the caller asks *can I get a sediment value
+    here?* and acts the same way on every no. Neither file is one the user
+    supplied — ``./install.sh`` wrote both — so neither unreadable cache is a
+    ``ConfigurationError``; ``gebco_local`` types the identical failure (a
+    cached dataset missing an expected variable) the same way.
     """
     lats, lons, phis = [], [], []
     with open(path, newline='') as fh:
@@ -199,24 +215,38 @@ def _read_csv(path, value_cols, transform):
         lon_c = _pick(header, _LON_COLS)
         val_c = _pick(header, value_cols)
         if lat_c is None or lon_c is None or val_c is None:
-            raise ConfigurationError(
+            raise DataFetchError(
                 f"Sediment file {path.name} is missing expected columns "
                 f"(need lat, lon and one of {value_cols}); got {header}.",
                 remediation="Re-run ./install.sh --data sediment to refresh it.",
             )
         idx = {h: i for i, h in enumerate(header)}
         li, oi, vi = idx[lat_c], idx[lon_c], idx[val_c]
-        for row in reader:
+        for line_no, row in enumerate(reader, start=2):     # 1 is the header
             if not row or len(row) <= max(li, oi, vi):
                 continue
             phi = transform(row[vi])
             if phi is None:
                 continue
+            # Parse both coordinates before appending either: appending as they
+            # convert leaves lats one longer than lons when the second cell is
+            # malformed, and the three lists then reach np.asarray/cKDTree at
+            # different lengths — an untyped "operands could not be broadcast"
+            # far from the row that caused it.
             try:
-                lats.append(float(row[li]))
-                lons.append(normalize_lon(float(row[oi])))
-            except ValueError:
-                continue
+                lat = float(row[li])
+                lon = normalize_lon(float(row[oi]))
+            except ValueError as exc:
+                raise DataFetchError(
+                    f"Sediment file {path.name} line {line_no} has a "
+                    f"non-numeric coordinate ({lat_c}={row[li]!r}, "
+                    f"{lon_c}={row[oi]!r}).",
+                    remediation="Fix or delete that row; for grainsize.csv, "
+                                "re-run ./install.sh --data sediment to "
+                                "regenerate it.",
+                ) from exc
+            lats.append(lat)
+            lons.append(lon)
             phis.append(phi)
     return lats, lons, phis
 
@@ -232,35 +262,97 @@ def _phi_from_lithology(cell):
     return _DECK41_LITHOLOGY_TO_PHI.get(cell.lower().strip())
 
 
-def _samples():
-    """Build (or reuse) the combined nearest-neighbour index of ϕ samples."""
-    root = str(_cache.cache_root())
-    if root in _SAMPLES:
-        return _SAMPLES[root]
-    _cache.require('sediment')                       # raises if not installed
-    lats, lons, phis = [], [], []
-    gs = _cache.dataset_root('sediment') / 'grainsize.csv'
-    if gs.exists():                                  # quantitative, preferred
-        la, lo, ph = _read_csv(gs, _PHI_COLS, _phi_from_float)
-        lats += la; lons += lo; phis += ph
-    d41 = _cache.dataset_root('sediment') / 'deck41.csv'
-    if d41.exists():
-        la, lo, ph = _read_csv(d41, _LITH_COLS, _phi_from_lithology)
-        lats += la; lons += lo; phis += ph
+def _index(path, value_cols, transform):
+    """``(tree, phis, lats, lons)`` for one CSV, or ``None`` if it has no rows."""
+    if not path.exists():
+        return None
+    lats, lons, phis = _read_csv(path, value_cols, transform)
     if not phis:
+        return None
+    lats, lons = np.array(lats), np.array(lons)
+    return cKDTree(_unit_vectors(lats, lons)), np.array(phis), lats, lons
+
+
+def _samples():
+    """Build (or reuse) the nearest-neighbour indices of ϕ samples.
+
+    Returns ``(grainsize_index, lithology_index)``, either of which may be
+    ``None``. The two files stay in **separate** KD-trees because they are not
+    peers: ``grainsize.csv`` carries a measured mean ϕ, ``deck41.csv`` a
+    lithology word mapped to a class-representative ϕ. Concatenated into one
+    tree, a marginally nearer lithology class wins on distance alone and the
+    measured sample beside it is never returned — the opposite of the
+    preference this module documents.
+
+    Built through :func:`uacpy.data._cache.memoize`, so threads racing a cold
+    memo build the trees once between them rather than once each.
+    """
+    return _cache.memoize(_SAMPLES, str(_cache.cache_root()), _build_samples)
+
+
+def _build_samples():
+    """Read both sample files into their nearest-neighbour indices."""
+    _cache.require('sediment')                       # raises if not installed
+    dataset = _cache.dataset_root('sediment')
+    result = (_index(dataset / 'grainsize.csv', _PHI_COLS, _phi_from_float),
+              _index(dataset / 'deck41.csv', _LITH_COLS, _phi_from_lithology))
+    if not any(result):
         raise DataFetchError(
             "No usable sediment samples found in the local cache.",
             remediation="Re-run ./install.sh --data sediment.",
         )
-    tree = cKDTree(_unit_vectors(np.array(lats), np.array(lons)))
-    result = (tree, np.array(phis), np.array(lats), np.array(lons))
-    _SAMPLES[root] = result
     return result
+
+
+def _nearest(index, lat, lon):
+    """``(distance_km, phi, sample_lat, sample_lon)`` from one index."""
+    tree, phis, samp_lats, samp_lons = index
+    chord, idx = tree.query(_unit_vectors(np.array([lat]), np.array([lon]))[0])
+    # chord length on the unit sphere → great-circle distance.
+    dist_km = 2.0 * EARTH_RADIUS_KM * np.arcsin(np.clip(chord / 2.0, 0, 1))
+    return (float(dist_km), float(phis[idx]),
+            float(samp_lats[idx]), float(samp_lons[idx]))
 
 
 #: Any stored phi at or below this is a lithology-class sentinel, not a
 #: grain size ('rock' -> -99.0 above).
 _PHI_CLASS_SENTINEL_MAX = -90.0
+
+#: Separation (km) within which a grain-size sample and a lithology
+#: description are treated as describing the same patch of seabed, so the
+#: quantitative one wins on precision alone. Both numbers here are a judgement
+#: about how fast the seabed decorrelates with distance, not a measurement:
+#: they are deliberately round, and nothing published pins them. The scale they
+#: are set against is the one the geoacoustic literature works at — Jensen,
+#: Kuperman, Porter & Schmidt §1.6 requires "information on the variation of
+#: all of these parameters with geographical position", and shelf sediment
+#: provinces turn over in tens of kilometres — so a few km is inside one
+#: province and a hundred is not.
+_SAME_SEABED_KM = 5.0
+
+#: How much farther than the nearest lithology description a grain-size sample
+#: may sit and still be preferred, once both are past :data:`_SAME_SEABED_KM`.
+#: A measured mean ϕ is worth perhaps ±0.2 against ±1 for a class-derived one,
+#: which buys some distance but nowhere near an order of magnitude: past this
+#: the sample is describing different seabed, and being quantitative about the
+#: wrong place is worse than being approximate about the right one.
+_QUANTITATIVE_REACH_FACTOR = 3.0
+
+
+def _prefers_grain_size(grainsize, lithology) -> bool:
+    """Whether the quantitative sample beats the lithology class here.
+
+    Both arguments are :func:`_nearest` hits already known to be in reach, or
+    ``None``. Preference is *distance-aware*, not absolute: an unconditional
+    preference hands back a measurement 138.7 km away over a class 1.4 km away
+    (a 101x hop) whenever a transect strays off the grain-size coverage, which
+    is a larger error than merging the two trees and taking the nearest hit of
+    either makes.
+    """
+    if lithology is None:
+        return True
+    return grainsize[0] <= max(_SAME_SEABED_KM,
+                               _QUANTITATIVE_REACH_FACTOR * lithology[0])
 
 
 def fetch_sediment_sample(point, *, max_distance_km=DEFAULT_MAX_DISTANCE_KM):
@@ -273,37 +365,58 @@ def fetch_sediment_sample(point, *, max_distance_km=DEFAULT_MAX_DISTANCE_KM):
     DECK41) carries ``phi=None`` and ``material='limestone'``, the same
     material preset the EMODnet substrate route uses for hard substrata.
 
+    The two files hold separate indices and are compared, not merged: a
+    quantitative grain-size sample is preferred over a lithology description
+    at *comparable* range (see :func:`_prefers_grain_size` and the constants
+    above it), and the nearer sample wins once they are far enough apart to be
+    describing different seabed. Merging them into one tree let a marginally
+    nearer class beat a better sample; preferring the sample unconditionally
+    let one a hundred times farther away beat a class next door.
+
     Raises ``DataFetchError`` if the closest sample is farther than
     ``max_distance_km`` (sparse point data — no nearby ground truth).
     """
     lat, lon = as_coordinate(point)
-    tree, phis, samp_lats, samp_lons = _samples()
-    chord, idx = tree.query(_unit_vectors(np.array([lat]), np.array([lon]))[0])
-    # chord length on the unit sphere → great-circle distance.
-    dist_km = 2.0 * EARTH_RADIUS_KM * np.arcsin(np.clip(chord / 2.0, 0, 1))
-    if max_distance_km is not None and dist_km > max_distance_km:
+    hits = [_nearest(index, lat, lon) if index is not None else None
+            for index in _samples()]
+    grainsize, lithology = [
+        h if h is not None and (max_distance_km is None
+                                or h[0] <= max_distance_km) else None
+        for h in hits
+    ]
+    if grainsize is not None and _prefers_grain_size(grainsize, lithology):
+        hit, dataset = grainsize, 'grainsize'
+    else:
+        hit, dataset = lithology, 'deck41'
+    if hit is None:
         raise DataFetchError(
-            f"Nearest sediment sample is {dist_km:.0f} km away "
-            f"(> max_distance_km={max_distance_km:.0f}).",
+            f"Nearest sediment sample is "
+            f"{min(h[0] for h in hits if h is not None):.0f} km "
+            f"away (> max_distance_km={max_distance_km:.0f}).",
             remediation="Raise max_distance_km, or supply a bottom directly.",
         )
-    phi = float(phis[idx])
+    dist_km, phi, samp_lat, samp_lon = hit
     if phi <= _PHI_CLASS_SENTINEL_MAX:
         # A lithology-class sentinel ('rock'): no grain size exists; the
         # material preset carries the geoacoustics instead.
-        return {'phi': None, 'material': 'limestone',
-                'distance_km': float(dist_km),
-                'latitude': float(samp_lats[idx]),
-                'longitude': float(samp_lons[idx])}
-    return {'phi': phi, 'material': None, 'distance_km': float(dist_km),
-            'latitude': float(samp_lats[idx]),
-            'longitude': float(samp_lons[idx])}
+        return {'phi': None, 'material': 'limestone', 'distance_km': dist_km,
+                'latitude': samp_lat, 'longitude': samp_lon,
+                'dataset': dataset}
+    return {'phi': phi, 'material': None, 'distance_km': dist_km,
+            'latitude': samp_lat, 'longitude': samp_lon, 'dataset': dataset}
 
 
 def fetch_bottom_local(point, *, roughness=0.0, water_sound_speed=None,
                        max_distance_km=DEFAULT_MAX_DISTANCE_KM,
                        timeout=None, verbose=False):
     """Model-ready bottom from the nearest local sediment sample.
+
+    This is the NCEI grain-size / DECK41 sample-database provider of the
+    ``fetch_bottom_local`` protocol name that ``fetch_environment`` resolves
+    per provider module (``bottom_sources='grainsize'``), and it is the one
+    exported at package level as ``uacpy.data.fetch_bottom_local``;
+    :mod:`uacpy.data.emodnet_local` exposes the same name for its EMODnet
+    substrate provider.
 
     ``timeout``/``verbose`` are accepted (and ignored — this backend is offline)
     for signature uniformity with the network bottom fetchers.
@@ -324,8 +437,12 @@ def fetch_bottom_local(point, *, roughness=0.0, water_sound_speed=None,
     # Point samples are sparse, so the nearest one can be far from the
     # requested position; record where it actually came from so
     # ``citations(env)`` reports the hop and ``prov.offset_km`` measures it.
+    # Cite the index the sample actually came from. Stamping 'grainsize'
+    # unconditionally reported a DECK41 lithology description under the NCEI
+    # grain-size database's name, licence and DOI (10.7289/V5G44N6W) — a
+    # citation for a dataset the value never touched.
     prov = DataProvenance(
-        source=SOURCES['grainsize'],
+        source=SOURCES[sample.get('dataset', 'grainsize')],
         data_point=(sample['latitude'], sample['longitude']),
         requested_point=(lat, lon),
     )
@@ -339,9 +456,28 @@ def fetch_bottom_local_transect(start, end, *, n_points=6, max_points=None,
                                 timeout=None, verbose=False):
     """Range-dependent bottom from local samples along ``start`` → ``end``.
 
-    ``water_sound_speed`` also takes a ``(lat, lon) -> m/s`` callable,
-    so each column scales to the water over its own seafloor.
+    The grain-size provider of the ``fetch_bottom_local_transect`` protocol
+    name, and the one exported at package level as
+    ``uacpy.data.fetch_bottom_local_transect``. ``water_sound_speed`` also
+    takes a ``(lat, lon) -> m/s`` callable, so each column scales to the
+    water over its own seafloor.
+
+    An unreadable cache is reported as itself: the sample indices are built
+    once here, before any waypoint, so a corrupt or absent CSV raises its own
+    message rather than the transect's coverage message.
     """
+    # ``range_dependent_bottom_along`` treats a waypoint's ``DataFetchError``
+    # as "this point is not covered" and fills it from the nearest covered
+    # neighbour. A cache that cannot be read raises that same exception at
+    # *every* waypoint, so all of them become gaps and the all-gaps guard
+    # reports the transect as uncovered — discarding the one remediation that
+    # would fix it ("Re-run ./install.sh --data sediment"). A broken source is
+    # not a property of any waypoint, so read it once up front and let the
+    # per-waypoint exception keep its single meaning. Discriminating on the
+    # message instead would be the wrong tool. ``_samples`` is memoized and
+    # the first waypoint would build it anyway, so a healthy cache pays a
+    # dict lookup.
+    _samples()
     return range_dependent_bottom_along(
         lambda la, lo: fetch_bottom_local(
             (la, lo), roughness=roughness,

@@ -2,7 +2,7 @@
 
 Every module that needs to emit a tagged line — models, writers,
 readers — calls :func:`log_message`. The ``verbose`` argument controls
-which severity levels reach stdout:
+which severity levels print:
 
 ``False`` / ``None`` / ``'off'`` / ``'silent'``
     Only ``WARN`` and ``ERROR`` print. Default.
@@ -11,7 +11,11 @@ which severity levels reach stdout:
 ``'debug'``
     Everything prints, including ``DEBUG``.
 
-Format on stdout:
+``DEBUG`` / ``INFO`` go to stdout and ``WARN`` / ``ERROR`` to stderr, so a
+script's own stdout stays separable from uacpy's problem reports by plain
+shell redirection.
+
+Format:
 
 ``[YYYY/MM/DD HH:MM:SS UTC] [LEVEL] [source] message``
 
@@ -24,6 +28,8 @@ readable — continuing").
 
 from __future__ import annotations
 
+import os
+import sys
 import warnings
 from datetime import datetime, timezone
 from pathlib import Path
@@ -103,20 +109,28 @@ def log_message(
         return
     label = {'warning': 'WARN'}.get(lvl, lvl.upper())
     ts = datetime.now(timezone.utc).strftime("%Y/%m/%d %H:%M:%S UTC")
-    print(f"[{ts}] [{label}] [{source}] {message}")
+    # WARN / ERROR go to stderr, the stream a caller can separate from a
+    # script's real output by redirection; DEBUG / INFO stay on stdout.
+    stream = sys.stderr if _LEVEL_VALUE[lvl] >= 30 else sys.stdout
+    print(f"[{ts}] [{label}] [{source}] {message}", file=stream)
 
 
 def _source_from_filename(filename: str) -> str:
     """Map a Python source path to a dotted module-ish tag for warnings.
 
-    ``/.../uacpy/models/bellhop.py`` → ``'uacpy.models.bellhop'``;
-    paths outside the package are returned as the bare file stem.
+    ``/.../uacpy/models/bellhop.py`` → ``'uacpy.models.bellhop'``; an
+    ``__init__.py`` is tagged as its package (``/.../uacpy/__init__.py`` →
+    ``'uacpy'``); paths outside the package are returned as the bare file
+    stem.
     """
     try:
         resolved = Path(filename).resolve()
         pkg_root = Path(__file__).resolve().parent   # the uacpy package dir
         rel = resolved.relative_to(pkg_root)
-        return '.'.join(['uacpy', *rel.parts[:-1], rel.stem])
+        parts = ['uacpy', *rel.parts[:-1]]
+        if rel.stem != '__init__':
+            parts.append(rel.stem)
+        return '.'.join(parts)
     except (ValueError, OSError):
         # Outside the package (site-packages, <stdin>, user scripts): keep
         # the bare stem — never dress third-party code as uacpy.
@@ -160,15 +174,31 @@ def install_warning_formatter() -> None:
     ``simplefilter('error')`` and friends keep working unchanged — only
     the rendered string is replaced.
 
-    A host application that already installed its own formatter keeps it:
-    only the stdlib default (or a previous install of this one) is
-    replaced.
+    ``warnings.formatwarning`` is process-global, so this reformats the
+    warnings of every library in the process, not just uacpy's — the price of
+    one consistent rendering for a package used as an application. Two escapes,
+    in the order they are checked: ``UACPY_NO_WARNING_FORMAT=1`` keeps Python's
+    own rendering (the same truthy opt-out spelling :mod:`uacpy._stack` uses
+    for its process-global RLIMIT change), and a host application that
+    installed its own formatter first keeps it — only the stdlib default (or a
+    previous install of this one) is replaced.
     """
+    # Truthy opt-out only: '0'/'false'/'no' keep the default behaviour
+    # (installing), since someone setting 0 means "do not disable".
+    if os.environ.get('UACPY_NO_WARNING_FORMAT', '').strip().lower() not in (
+            '', '0', 'false', 'no'):
+        return
     current = warnings.formatwarning
-    # A formatter that is neither the stdlib's (module 'warnings') nor a
-    # previous install of this one was set by the host application first —
-    # respect it rather than clobbering process-wide rendering.
+    # A formatter that is neither the stdlib's nor a previous install of this
+    # one was set by the host application first — respect it rather than
+    # clobbering process-wide rendering. Both module spellings count as the
+    # stdlib default: CPython defines `formatwarning` in the pure-Python
+    # `warnings` module, but the C accelerator `_warnings` shadows parts of it,
+    # so a build that sourced the default from there must still be replaced.
+    # An `endswith('warnings')` test would be wrong here — a host application
+    # with its own `myapp.warnings` submodule would match and get clobbered.
     if (current is not _uacpy_format_warning
-            and getattr(current, '__module__', '') != 'warnings'):
+            and getattr(current, '__module__', '') not in (
+                'warnings', '_warnings')):
         return
     warnings.formatwarning = _uacpy_format_warning

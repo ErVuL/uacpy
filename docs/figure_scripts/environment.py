@@ -48,7 +48,7 @@ def shelf_break():
             ranges=[0.0, 20_000.0],
         ),
         altimetry=uacpy.generate_sea_surface(
-            20_000.0, wind_speed_ms=15.0, n_points=1200, seed=0),
+            20_000.0, wind_speed_mps=15.0, n_points=1200, seed=0),
     )
     source = uacpy.Source(depths=40.0, frequencies=150.0)
     receiver = uacpy.Receiver(depths=np.linspace(40.0, 320.0, 8),
@@ -168,7 +168,7 @@ def range_profiles():
     """Bathymetry and Altimetry: two 1-D value(range) carriers, opposite signs."""
     env, _, _ = sloping_shelf()
     altimetry = uacpy.Altimetry.coerce(uacpy.generate_sea_surface(
-        2000.0, wind_speed_ms=12.0, n_points=800, seed=7))
+        2000.0, wind_speed_mps=12.0, n_points=800, seed=7))
 
     fig, (ax_a, ax_b) = plt.subplots(2, 1, figsize=(9.0, 5.2))
     altimetry.plot(

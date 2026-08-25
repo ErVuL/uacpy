@@ -1,5 +1,11 @@
 """Tests for the Padé-error grid optimiser.
 
+The estimators themselves — optimal ``c0``, the Padé, Numerov and grid error
+terms, and the relaxation ladder the optimiser walks when no feasible grid
+exists — plus the work-avoidance the model layer builds on top of them: the
+propagator is built once per depth ladder rather than per depth, and the
+optimiser hands back the grids it actually recorded.
+
 Reference: Lytaev, M.S. (2023). *Mesh Optimization for the Acoustic
 Parabolic Equation.* J. Mar. Sci. Eng. 11(3), 496.
 https://doi.org/10.3390/jmse11030496
@@ -8,6 +14,7 @@ https://doi.org/10.3390/jmse11030496
 import numpy as np
 import pytest
 
+from uacpy.models import RAM
 from uacpy.models._pade_optimizer import (
     combined_error,
     grid_error,
@@ -15,6 +22,10 @@ from uacpy.models._pade_optimizer import (
     numerov_error,
     optimize_grid,
     rams_dz_shear_cap,
+    _ladder,
+    _propagator_pade,
+    DZ_MAX,
+    DZ_MIN,
 )
 
 
@@ -151,11 +162,18 @@ class TestOptimizeGrid:
         Δz — see ``TestRamAppliesTheStabilityFloor`` in
         ``test_ram_backends.py``. A knob here would let the two disagree
         about which grid is actually marched.
+
+        ``tau_cache`` is the one parameter that is not a Lytaev input, and it
+        is not a knob either: it memoises τ(Δx, Δz) across RAM's ε-relaxation
+        ladder and is barred from changing the answer by
+        ``TestTauMemoAcrossTheRelaxationLadder`` below. Anything else appearing
+        here is a knob until proven otherwise.
         """
         import inspect
         params = set(inspect.signature(optimize_grid).parameters)
-        assert params == {'freq', 'c_min', 'c_max', 'x_max', 'c0',
-                          'theta_max', 'eps', 'p', 'alpha'}
+        assert params - {'tau_cache'} == {'freq', 'c_min', 'c_max', 'x_max',
+                                          'c0', 'theta_max', 'eps', 'p',
+                                          'alpha'}
 
     def test_infeasible_raises(self):
         """No grid satisfies ε at this combination of inputs."""
@@ -292,3 +310,201 @@ class TestRamsDzShearCap:
         lam_s = cs / freq
         assert rams_dz_shear_cap(cs, freq) <= lam_s / 14.0 * (1.0 + 1e-9)
         assert rams_dz_shear_cap(cs, freq) < 0.55 * lam_s / 4.0
+
+
+class TestPadeBuildIsHoistedOutOfTheDepthLadder:
+
+    _K0 = 2.0 * np.pi * 100.0 / 1600.0
+    _XI = dict(xi_min=-0.35, xi_max=0.25)
+
+    @pytest.mark.parametrize('dx', [1.0, 7.5, 60.0, 400.0])
+    @pytest.mark.parametrize('dz', [0.01, 0.1, 1.0, 5.0])
+    def test_a_prebuilt_approximant_scores_identically(self, dx, dz):
+        theta = np.deg2rad(30.0)
+        built_here = combined_error(dx, dz, self._K0, 6, theta_max=theta,
+                                    **self._XI)
+        passed_in = combined_error(dx, dz, self._K0, 6, theta_max=theta,
+                                   pade=_propagator_pade(dx, self._K0, 6),
+                                   **self._XI)
+        assert repr(passed_in) == repr(built_here)
+
+    def test_one_build_per_range_step_not_one_per_pair(self, monkeypatch):
+        """The approximant depends on ``(dx, k0, p)`` alone, so the Δz ladder
+        must not multiply the build count."""
+        import uacpy.models._pade_optimizer as popt
+
+        calls = []
+        real = popt._propagator_taylor
+
+        def counted(dx, k0, n_terms):
+            calls.append(dx)
+            return real(dx, k0, n_terms)
+
+        monkeypatch.setattr(popt, '_propagator_taylor', counted)
+        kwargs = dict(freq=50.0, c_min=1500.0, c_max=1700.0, x_max=8000.0,
+                      c0=1600.0, theta_max=30.0, eps=1e-3, p=6, alpha=0.0)
+        optimize_grid(**kwargs)
+
+        n_dx = len([dx for dx in _ladder(max(0.5, 1600.0 / 50.0 / 8.0),
+                                         8000.0 * 0.5)
+                    if 0 < dx <= 8000.0])
+        n_dz = len(_ladder(DZ_MIN, DZ_MAX))
+        assert n_dz > 1                          # else the pin proves nothing
+        assert len(calls) == n_dx
+        assert len(calls) < n_dx * n_dz
+        assert len(set(calls)) == len(calls)     # never twice for one Δx
+
+
+class TestOptimizerReturnsItsRecordedGrids:
+    """The independent pin for the Padé hoist: grids recorded from the
+    optimiser as it stood when the approximant was rebuilt for every
+    ``(Δx, Δz)`` pair. The hoist is a pure code motion, so every digit has
+    to survive it."""
+
+    _CASES = [
+        (dict(freq=100.0, c_min=1480.0, c_max=1750.0, x_max=5000.0,
+              c0=1600.0, theta_max=30.0, eps=1e-2, p=6, alpha=0.0),
+         {'alpha': '0.0', 'c0': '1600.0', 'dr': '34.171875',
+          'dz': '0.0759375', 'p': '6',
+          'predicted_error': '0.00627106990659567',
+          'xi_max': '0.16873630387143912',
+          'xi_min': '-0.4140816326530612'}),
+        (dict(freq=500.0, c_min=1500.0, c_max=1500.0, x_max=5000.0,
+              c0=1500.0, theta_max=30.0, eps=1e-3, p=8, alpha=1 / 12),
+         {'alpha': '0.08333333333333333', 'c0': '1500.0',
+          'dr': '19.2216796875', 'dz': '0.0759375', 'p': '8',
+          'predicted_error': '0.0008222153646561707',
+          'xi_max': '0.0', 'xi_min': '-0.25'}),
+        (dict(freq=50.0, c_min=1500.0, c_max=1700.0, x_max=8000.0,
+              c0=1600.0, theta_max=30.0, eps=1e-3, p=6, alpha=0.0),
+         {'alpha': '0.0', 'c0': '1600.0', 'dr': '68.34375', 'dz': '0.050625',
+          'p': '6', 'predicted_error': '0.000548694759595582',
+          'xi_max': '0.13777777777777778',
+          'xi_min': '-0.36418685121107264'}),
+        (dict(freq=500.0, c_min=1500.0, c_max=1700.0, x_max=20000.0,
+              c0=1600.0, theta_max=30.0, eps=0.081, p=6, alpha=0.0),
+         {'alpha': '0.0', 'c0': '1600.0', 'dr': '8.54296875', 'dz': '0.01',
+          'p': '6', 'predicted_error': '0.05666487620543339',
+          'xi_max': '0.13777777777777778',
+          'xi_min': '-0.36418685121107264'}),
+    ]
+
+    @pytest.mark.parametrize('kwargs,expected', _CASES)
+    def test_recorded_grid(self, kwargs, expected):
+        result = optimize_grid(**kwargs)
+        assert {k: repr(v) for k, v in sorted(result.items())} == expected
+
+
+class TestTauMemoAcrossTheRelaxationLadder:
+    """τ(Δx, Δz) is a property of the grid and the medium. ``eps`` moves only
+    the threshold it is compared against, so the ladder rescores an identical
+    candidate set on every retry — but the memo must not be able to answer
+    from the wrong medium either."""
+
+    _KW = dict(freq=50.0, c_min=1500.0, c_max=1700.0, x_max=8000.0,
+               c0=1600.0, p=6, alpha=0.0)
+
+    @staticmethod
+    def _rendered(result):
+        return {key: repr(value) for key, value in sorted(result.items())}
+
+    def test_a_shared_memo_cannot_change_the_selected_grid(self):
+        shared = {}
+        for eps in (1e-4, 3e-4, 9e-4, 2.7e-3, 8.1e-3):
+            with_memo = optimize_grid(eps=eps, theta_max=30.0,
+                                      tau_cache=shared, **self._KW)
+            alone = optimize_grid(eps=eps, theta_max=30.0, **self._KW)
+            assert self._rendered(with_memo) == self._rendered(alone)
+        assert shared                            # it really was populated
+
+    def test_the_memo_is_keyed_on_the_aperture_too(self):
+        """θ_max moves ``xi_min`` and the Numerov band, so a memo keyed on
+        ``(Δx, Δz)`` alone would hand 30°'s τ to the 20° rung the ladder
+        steps down to."""
+        shared = {}
+        for theta in (30.0, 20.0, 15.0):
+            with_memo = optimize_grid(eps=1e-3, theta_max=theta,
+                                      tau_cache=shared, **self._KW)
+            alone = optimize_grid(eps=1e-3, theta_max=theta, **self._KW)
+            assert self._rendered(with_memo) == self._rendered(alone), theta
+
+    def test_the_relaxation_ladder_returns_its_recorded_values(self):
+        """Pinned to the values the ladder produced before the memo existed,
+        on a case that walks the full ε ladder at 30° and succeeds at 20°."""
+        model = RAM(verbose=False)
+        result, eps_used, theta_used = model._optimize_grid_relaxing(
+            freq=1000.0, c_min=1500.0, c_max=1700.0, max_range=50000.0,
+            c0_pe=1600.0, eps0=1e-4, theta0=30.0, kind='ramgeo')
+        assert repr(theta_used) == '20.0'
+        assert repr(eps_used) == '0.21869999999999998'
+        assert self._rendered(result) == {
+            'alpha': '0.0', 'c0': '1600.0', 'dr': '5.6953125', 'dz': '0.01',
+            'p': '6', 'predicted_error': '0.1981215757911043',
+            'xi_max': '0.13777777777777778',
+            'xi_min': '-0.23116462965158358',
+        }
+
+
+def _spectrum(c_min, c_max, theta_max_deg=30.0, freq=100.0):
+    """``(k0, xi_min, xi_max, theta_rad)`` for a water/seabed speed pair."""
+    c0 = optimal_c0(c_min, c_max, theta_max_deg)
+    theta = np.deg2rad(theta_max_deg)
+    return (2.0 * np.pi * freq / c0,
+            -np.sin(theta) ** 2 + (c0 / c_max) ** 2 - 1.0,
+            (c0 / c_min) ** 2 - 1.0,
+            theta)
+
+
+class TestPadeErrorSurvivesAnEvanescentSpectrum:
+    """``xi`` drops below -1 — the evanescent part of the angular spectrum —
+    once ``sin(theta_max) > sqrt(2)*c_min/c_max``, which at the shipped 30°
+    default is any seabed faster than about 2.83x the water speed. A real
+    ``sqrt`` returns NaN there; ``abs(NaN - pq)`` is NaN and ``NaN > err_max``
+    is False, so the accumulator kept its ``0.0`` initialiser and every
+    candidate grid scored a perfect zero. ``optimize_grid`` then took the
+    coarsest rung of both ladders and the march returned a field 360 dB rms
+    from Scooter while the run logged "predicted error 0.00e+00".
+
+    Accuracy is now measured on the propagating part only — below ``xi = -1``
+    the exact propagator decays and those components never reach the receiver,
+    so requiring the Padé to reproduce them would reject grids that solve the
+    problem (basalt at dx = 10 m / dz = 0.05 m matches Scooter to 1.77 dB
+    rms). The evanescent band is checked for non-amplification instead.
+    """
+
+    # basalt over water: c_max/c_min = 3.5, comfortably past the 2.83 turnover
+    BASALT = (1500.0, 5250.0)
+
+    def test_a_fast_seabed_puts_the_spectrum_past_the_branch_point(self):
+        _, xi_min, _, _ = _spectrum(*self.BASALT)
+        assert xi_min < -1.0, (
+            "this test is only meaningful when the spectrum goes evanescent")
+
+    @pytest.mark.parametrize('dx, dz', [(4000.0, 5.0), (200.0, 1.0),
+                                        (50.0, 0.25), (10.0, 0.05)])
+    def test_every_candidate_scores_finite_and_non_zero(self, dx, dz):
+        k0, xi_min, xi_max, theta = _spectrum(*self.BASALT)
+        err = combined_error(dx, dz, k0, 6, xi_min, xi_max, theta)
+        assert np.isfinite(err)
+        assert err > 0.0, (
+            "a zero score is what let the coarsest grid look perfect")
+
+    def test_a_fine_grid_scores_better_than_the_coarsest_one(self):
+        # The functional has to RANK, not merely return a number: optimize_grid
+        # picks the coarsest candidate inside the budget, so any two candidates
+        # that tie are indistinguishable to it.
+        k0, xi_min, xi_max, theta = _spectrum(*self.BASALT)
+        coarse = combined_error(4000.0, 5.0, k0, 6, xi_min, xi_max, theta)
+        fine = combined_error(10.0, 0.05, k0, 6, xi_min, xi_max, theta)
+        assert fine < coarse
+
+    def test_a_wholly_propagating_spectrum_is_scored_on_every_sample(self):
+        # An ordinary seabed keeps the whole interval above the branch point,
+        # so the propagating mask selects every sample and the score is the
+        # plain worst-case over the interval. Pinning the value bounds the
+        # split's blast radius to spectra that actually go evanescent.
+        k0, xi_min, xi_max, theta = _spectrum(1500.0, 1800.0)
+        assert xi_min >= -1.0
+        assert combined_error(100.0, 1.0, k0, 6, xi_min, xi_max,
+                              theta) == pytest.approx(0.018687614024691053,
+                                                      rel=1e-12)

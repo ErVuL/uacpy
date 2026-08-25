@@ -22,7 +22,7 @@ reprojection needs ``pyproj`` (both default uacpy dependencies).
 
 import datetime as _dt
 import io
-import pickle
+import warnings
 from pathlib import Path
 from typing import Optional
 
@@ -36,6 +36,7 @@ from uacpy.core.constants import (
 )
 from uacpy.core.environment import BoundaryProperties
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
+from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.data import _cache
 from uacpy.data._geo import (
     Coordinate, as_coordinate, normalize_lon, ring_offsets,
@@ -46,9 +47,11 @@ from uacpy.data._time import parse_date
 __all__ = ['download_seaice_db', 'fetch_sea_ice_concentration',
            'fetch_sea_ice_concentration_transect', 'sea_ice_grid',
            'sea_ice_pixel', 'sea_ice_surface', 'fetch_sea_ice_surface',
-           'sea_ice_surface_transect']
+           'sea_ice_surface_transect', 'SEA_ICE_TYPICAL_ROUGHNESS_M']
 
-INDEX_FILE = 'seaice_climatology.pkl'
+INDEX_FILE = 'seaice_climatology.npz'
+#: The pre-npz pickled climatology, refused by :func:`uacpy.data._cache.require_npz`.
+RETIRED_INDEX_FILE = 'seaice_climatology.pkl'
 _BASE_URL = 'https://noaadata.apps.nsidc.org/NOAA/G02135'
 _MONTHS = ['01_Jan', '02_Feb', '03_Mar', '04_Apr', '05_May', '06_Jun',
            '07_Jul', '08_Aug', '09_Sep', '10_Oct', '11_Nov', '12_Dec']
@@ -57,6 +60,8 @@ _MONTHS = ['01_Jan', '02_Feb', '03_Mar', '04_Apr', '05_May', '06_Jun',
 # y0 the *northern* (maximum-y) edge, so rows count southward as y decreases.
 # The cached grids are 448 x 304 (N) and 332 x 316 (S); under these origins the
 # pole projects to (0, 0) and lands mid-grid, at cell (234, 154) and (174, 158).
+# Both origins are whole multiples of the 25 km pixel, so the pole sits exactly
+# on a cell *corner* and _rowcol's floor() picks the cell south-east of it.
 _GRID = {
     'N': {'epsg': 'EPSG:3411', 'x0': -3850000.0, 'y0': 5850000.0, 'px': 25000.0},
     'S': {'epsg': 'EPSG:3412', 'x0': -3950000.0, 'y0': 4350000.0, 'px': 25000.0},
@@ -91,7 +96,9 @@ def download_seaice_db(cache_dir=None, *, years=None, timeout=120.0,
 
     Averages the NSIDC monthly concentration grids over ``years`` (default: the
     five most recent complete calendar years) per hemisphere and calendar month,
-    writing ``<cache>/seaice/seaice_climatology.pkl``. Missing months are skipped.
+    writing ``<cache>/seaice/seaice_climatology.npz`` — one ``(12, H, W)``
+    float32 array per hemisphere, under the keys ``'N'`` and ``'S'``. Missing
+    months are skipped.
     """
     import tifffile
     dest = Path(cache_dir) if cache_dir else _cache.dataset_root('seaice')
@@ -115,6 +122,22 @@ def download_seaice_db(cache_dir=None, *, years=None, timeout=120.0,
                 except Exception:               # noqa: BLE001 — skip missing
                     continue
                 stacks[m - 1].append(_to_fraction(arr))
+        # The download loop above skips a grid it cannot fetch or decode, so a
+        # month can be averaged over fewer years than were asked for. Only a
+        # month with nothing at all raises; a partial month is a valid but
+        # thinner climatology, and staying silent about it would present a
+        # one-year mean as the multi-year mean the caller requested.
+        short = [(m + 1, len(stacks[m])) for m in range(12)
+                 if 0 < len(stacks[m]) < len(years)]
+        if short:
+            detail = ', '.join(f"{m}: {n}/{len(years)}" for m, n in short)
+            warnings.warn(
+                f"download_seaice_db: hemisphere {hemi} averaged "
+                f"{len(short)} of 12 months over fewer years than requested "
+                f"({detail}) — grids that could not be fetched or decoded "
+                f"were skipped. The climatology is usable but thinner than "
+                f"{years[0]}-{years[-1]} implies.",
+                UserWarning, stacklevel=2)
         months = []
         for m in range(12):
             if not stacks[m]:
@@ -130,8 +153,11 @@ def download_seaice_db(cache_dir=None, *, years=None, timeout=120.0,
                     verbose=verbose)
 
     out = dest / INDEX_FILE
-    with open(out, 'wb') as fh:
-        pickle.dump(climo, fh, protocol=pickle.HIGHEST_PROTOCOL)
+    with _cache.atomic_write(out) as part:
+        # A file object, not the path: np.savez_compressed appends '.npz' to a
+        # name that lacks it, and the staging name does not end in '.npz'.
+        with open(part, 'wb') as fh:
+            np.savez_compressed(fh, **climo)
     _MODEL.clear()
     log_message('seaice', f"sea-ice climatology cached → {out}", verbose=verbose)
     return out
@@ -149,17 +175,27 @@ def _pyproj_transformer(epsg):
     return Transformer.from_crs("EPSG:4326", epsg, always_xy=True)
 
 
-def _model():
-    root = str(_cache.cache_root())
-    if root in _MODEL:
-        return _MODEL[root]
-    path = _cache.require('seaice', INDEX_FILE)
-    with open(path, 'rb') as fh:
-        climo = pickle.load(fh)
+def _build_model():
+    """Read the cached climatology and pair it with the two projections."""
+    path = _cache.require_npz('seaice', INDEX_FILE, RETIRED_INDEX_FILE)
+    with _cache.reading('seaice', path):
+        # allow_pickle=False is passed rather than left to numpy's default:
+        # this file is read straight out of the cache directory, and under
+        # allow_pickle an object array in it would execute on load.
+        with np.load(path, allow_pickle=False) as z:
+            climo = {h: z[h] for h in ('N', 'S')}
     result = {'tf': {h: _pyproj_transformer(_GRID[h]['epsg']) for h in ('N', 'S')}}
     result.update(climo)
-    _MODEL[root] = result
     return result
+
+
+def _model():
+    """Load (or reuse) the sea-ice climatology and its projections.
+
+    Built through :func:`uacpy.data._cache.memoize`, so threads racing a cold
+    memo load the file once between them rather than once each.
+    """
+    return _cache.memoize(_MODEL, str(_cache.cache_root()), _build_model)
 
 
 def _rowcol(model, hemi, lat, lon):
@@ -191,14 +227,17 @@ _OBSERVED_CELL_SEARCH_RINGS = 2
 
 
 def _observed_at(grid, row, col):
-    """Concentration at ``(row, col)``, else the nearest observed neighbour.
+    """``(concentration, cell)`` at ``(row, col)`` or its nearest observed
+    neighbour.
 
-    Returns ``NaN`` when no cell within :data:`_OBSERVED_CELL_SEARCH_RINGS`
-    carries a value, which is the signature of genuine land.
+    ``cell`` is the ``(row, col)`` the value actually came from, so the caller
+    can tell a substitution from a direct hit. Returns ``(NaN, None)`` when no
+    cell within :data:`_OBSERVED_CELL_SEARCH_RINGS` carries a value, which is
+    the signature of genuine land.
     """
     value = grid[row, col]
     if np.isfinite(value):
-        return float(value)
+        return float(value), (row, col)
     height, width = grid.shape
     for radius in range(1, _OBSERVED_CELL_SEARCH_RINGS + 1):
         for dr, dc in ring_offsets(radius):
@@ -206,8 +245,21 @@ def _observed_at(grid, row, col):
             if 0 <= r < height and 0 <= c < width:
                 candidate = grid[r, c]
                 if np.isfinite(candidate):
-                    return float(candidate)
-    return float('nan')
+                    return float(candidate), (r, c)
+    return float('nan'), None
+
+
+def _cell_center(model, hemi, row, col):
+    """``(lat, lon)`` of the centre of grid cell ``(row, col)``.
+
+    ``x0``/``y0`` anchor the outer corner of cell (0, 0), so the centre sits
+    half a pixel inside it; rows count southward as y decreases.
+    """
+    g = _GRID[hemi]
+    x = g['x0'] + (col + 0.5) * g['px']
+    y = g['y0'] - (row + 0.5) * g['px']
+    lon, lat = model['tf'][hemi].transform(x, y, direction='INVERSE')
+    return float(lat), float(lon)
 
 
 def _concentration(lat, lon, month):
@@ -216,7 +268,21 @@ def _concentration(lat, lon, month):
     rc = _rowcol(m, hemi, lat, lon)
     if rc is None:
         return 0.0                              # outside the polar grid → ice-free
-    return _observed_at(m[hemi][month - 1], *rc)
+    value, cell = _observed_at(m[hemi][month - 1], *rc)
+    if cell is not None and cell != rc:
+        # Name the cell the value came from, as `sound_speed._nearest_wet_column`
+        # does for its dry-cell hop: the substitution is up to
+        # _OBSERVED_CELL_SEARCH_RINGS cells (50 km) and changes the answer.
+        sub_lat, sub_lon = _cell_center(m, hemi, *cell)
+        rings = max(abs(cell[0] - rc[0]), abs(cell[1] - rc[1]))
+        warnings.warn(
+            f"NSIDC sea ice: the cell at ({lat:.3f}, {lon:.3f}) is unobserved "
+            f"(coastal land spillover); using the nearest observed cell "
+            f"({sub_lat:.3f}, {sub_lon:.3f}), {rings} cell(s) — "
+            f"{rings * _GRID[hemi]['px'] / 1000:.0f} km — away.",
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+        )
+    return value
 
 
 def fetch_sea_ice_concentration(point: Coordinate, *, date=None,
@@ -225,9 +291,9 @@ def fetch_sea_ice_concentration(point: Coordinate, *, date=None,
 
     Pass ``date`` (its month is used) or ``month`` (1-12). Points outside the
     polar grids return 0.0 (ice-free). A cell NSIDC leaves unobserved because of
-    coastal land spillover takes its nearest observed ocean neighbour's value; a
-    point with no observed cell within :data:`_OBSERVED_CELL_SEARCH_RINGS` is
-    inland and raises ``DataFetchError``.
+    coastal land spillover takes its nearest observed ocean neighbour's value
+    and warns naming that cell; a point with no observed cell within
+    :data:`_OBSERVED_CELL_SEARCH_RINGS` is inland and raises ``DataFetchError``.
     """
     lat, lon = as_coordinate(point)
     if date is not None and month is not None:
@@ -249,9 +315,20 @@ def fetch_sea_ice_concentration(point: Coordinate, *, date=None,
     return float(conc)
 
 
+#: Representative RMS roughness (m) of the underside of Arctic pack ice, for
+#: callers who want the canopy scattering rather than the smooth plate. The
+#: under-ice relief is dominated by deformation features — ridge keels reaching
+#: tens of metres over a much flatter undeformed surface — so no single number
+#: describes it; a metre is the order the pack-ice literature reports for the
+#: RMS of the undeformed-plus-ridged surface, and it is offered as a starting
+#: point to vary, not a measurement of any particular ice cover.
+SEA_ICE_TYPICAL_ROUGHNESS_M = 1.0
+
+
 def sea_ice_surface(
     concentration: float, *,
     threshold: float = SEA_ICE_EDGE_CONCENTRATION,
+    roughness: float = 0.0,
 ) -> Optional[BoundaryProperties]:
     """Ice concentration (0-1) → the elastic surface the canopy presents.
 
@@ -264,6 +341,17 @@ def sea_ice_surface(
     free-surface default in place). The canopy is treated as a single
     homogeneous elastic boundary regardless of concentration; partial cover is
     reduced to the present/absent ice-edge decision rather than a mixed surface.
+
+    ``roughness`` is the RMS interface roughness (m), 0 by default — the
+    smooth homogeneous plate the source above tabulates these parameters for.
+    **That plate is known to under-predict the loss**: Computational Ocean
+    Acoustics §4, on this exact 0.4 / 1.0 dB/λ environment, records that "it
+    has been demonstrated that the loss computed for such an environment is too
+    low ... the ice cover is extremely inhomogeneous ... characterized by
+    significant roughness as well as many discrete features such as ridges with
+    keels". The default is kept at 0 so the returned properties stay the
+    published ones; pass :data:`SEA_ICE_TYPICAL_ROUGHNESS_M` (or a site value)
+    to have the solvers scatter off the canopy.
 
     A non-finite concentration (``NaN`` land/coast/out-of-grid cell) is treated
     as open water and returns ``None`` — never silently as ice, since
@@ -278,22 +366,26 @@ def sea_ice_surface(
         density=SEA_ICE_DENSITY,
         attenuation=SEA_ICE_COMPRESSIONAL_ATTENUATION,
         shear_attenuation=SEA_ICE_SHEAR_ATTENUATION,
+        roughness=float(roughness),
     )
 
 
 def fetch_sea_ice_surface(
     point: Coordinate, *, date=None, month: Optional[int] = None,
     threshold: float = SEA_ICE_EDGE_CONCENTRATION,
+    roughness: float = 0.0,
 ) -> Optional[BoundaryProperties]:
     """Fetch the climatological ice concentration and convert it to a surface.
 
     Combines :func:`fetch_sea_ice_concentration` and :func:`sea_ice_surface`:
     returns the elastic ice ``BoundaryProperties`` where the point is
     ice-covered (concentration ≥ ``threshold``) for the given month, or ``None``
-    for open water. Used by ``fetch_environment(surface_sources='seaice')``.
+    for open water. ``roughness`` passes through to :func:`sea_ice_surface`,
+    whose docstring records why the 0 default under-predicts the loss. Used by
+    ``fetch_environment(surface_sources='seaice')``.
     """
     conc = fetch_sea_ice_concentration(point, date=date, month=month)
-    return sea_ice_surface(conc, threshold=threshold)
+    return sea_ice_surface(conc, threshold=threshold, roughness=roughness)
 
 
 def sea_ice_grid(month: int, *, hemi: str = 'N') -> np.ndarray:
@@ -338,7 +430,8 @@ def fetch_sea_ice_concentration_transect(start: Coordinate, end: Coordinate, *,
 def sea_ice_surface_transect(start: Coordinate, end: Coordinate, *,
                              date=None, month: Optional[int] = None,
                              n_points='auto', max_points=None,
-                             threshold: float = SEA_ICE_EDGE_CONCENTRATION):
+                             threshold: float = SEA_ICE_EDGE_CONCENTRATION,
+                             roughness: float = 0.0):
     """Range-dependent ice surface along ``start`` → ``end`` as a ``Surface``.
 
     Each waypoint becomes the elastic ice canopy where the concentration is
@@ -355,23 +448,37 @@ def sea_ice_surface_transect(start: Coordinate, end: Coordinate, *,
     samples bracketing its edges, endpoints anchored — the ``Surface`` reads
     nearest-node, so every reconstructed ice edge lands within one probe step
     of the edge the probe observed, without an oversampled staircase. An
-    integer samples exactly that many evenly-spaced waypoints.
+    integer samples exactly that many evenly-spaced waypoints. ``roughness``
+    passes through to :func:`sea_ice_surface` for every ice node.
+
+    A waypoint where the climatology has no value (land / unobserved along
+    the track) becomes an open-water node, and one ``UserWarning`` per call
+    reports how many waypoints were classified that way without a
+    measurement.
     """
     from uacpy.core.surface import Surface
-    from uacpy.core.bottom import BoundaryProperties
     from uacpy.data._geo import (
-        run_boundary_indices, DEFAULT_MAX_TRANSECT_POINTS,
+        run_boundary_indices, DEFAULT_MAX_TRANSECT_POINTS, checked_max_points,
     )
     if max_points is None:
         max_points = DEFAULT_MAX_TRANSECT_POINTS
-    probe_n = (int(max_points) if n_points == 'auto'
-               else max(2, min(int(n_points), int(max_points))))
+    max_points = checked_max_points(max_points, 'sea_ice_surface_transect')
+    probe_n = (max_points if n_points == 'auto'
+               else max(2, min(int(n_points), max_points)))
     ranges_m, conc = fetch_sea_ice_concentration_transect(
         start, end, date=date, month=month, n_points=probe_n)
+    n_no_data = int(np.count_nonzero(~np.isfinite(np.asarray(conc, float))))
+    if n_no_data:
+        warnings.warn(
+            f"sea_ice_surface_transect: {n_no_data} of {len(conc)} waypoints "
+            f"have no NSIDC concentration (land / unobserved cells) and are "
+            f"classified as open water — no-data nodes, not measured "
+            f"open water.",
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
     nodes = []
     for r, c in zip(ranges_m, conc):
         c = 0.0 if not np.isfinite(c) else float(c)
-        bp = sea_ice_surface(c, threshold=threshold) \
+        bp = sea_ice_surface(c, threshold=threshold, roughness=roughness) \
             or BoundaryProperties(acoustic_type='vacuum')
         nodes.append((float(r), bp))
     if n_points == 'auto':

@@ -27,13 +27,30 @@ constant-Q analogue of :func:`uacpy.acoustic_signal.ppsd` (McNamara & Buland
 band power per constant-Q bin — a tone of amplitude ``A`` *whose frequency is a
 bin centre* peaks at its mean-square power ``A**2/2`` (matching
 :func:`scipy.signal.welch` ``scaling='spectrum'``). Between centres the response
-scallops like any filterbank: at most ~1.3 dB low for a tone midway between two
-bins, near-independent of ``bins_per_octave`` because Q tracks the spacing. ``'density'`` further divides by the window's
+scallops like any filterbank: at most ~1.4 dB low for a tone midway between two
+bins (1.37 dB at the default ``bins_per_octave=24``, converging on the Hann
+window's 1.42 dB scallop loss as the bins narrow, and 1.20 dB as wide as
+``bins_per_octave=6``) — only weakly dependent on ``bins_per_octave`` because Q
+tracks the spacing. ``'density'`` further divides by the window's
 noise-equivalent bandwidth to give a one-sided power *spectral density* (per
 Hz), calibrated to match :func:`scipy.signal.welch` density and hence comparable
 to Welch PSDs / Wenz curves. (The complex coefficients from
 :func:`constant_q_transform` are the analytic band amplitude ``A/2``; the power
 estimators double ``|X|**2`` to this one-sided convention.)
+
+**Bins near Nyquist** read a *coherent tone* high. A real tone at ``f_k``
+carries a ``-f_k`` component too; the kernel demodulates it to ``-2 f_k``,
+which the window rejects while ``2 f_k`` clears its main lobe and admits as
+``f_k`` approaches ``fs/2``. Averaged over frame phase the band power is
+inflated by ``1 + |W(2 f_k)/sum(w)|**2``: measured on the default Hann window
+at ``bins_per_octave=24`` that is under 0.005 dB for ``f_k/fs <= 0.4865``,
+0.68 dB at 0.4920, 1.21 dB at 0.4935, and 3.01 dB at ``f_k = fs/2``. It rises
+smoothly rather than switching on, and ``fmax=None`` resolves to ``fs/2``, so
+every default call has bins in the region and all four estimators warn when
+any bin's inflation exceeds 0.01 dB. **Broadband noise is not affected** — its
+band power is ``sigma**2 sum(w**2)/sum(w)**2`` at every bin, independent of
+``f_k`` — which is why the estimators report the affected bins instead of
+dividing the factor out. Lower ``fmax`` to read tone levels near Nyquist.
 
 **Edge frames:** the averaging estimators (``constant_q_psd`` /
 ``probabilistic_constant_q``) reduce, *per bin*, only over frames whose window
@@ -50,7 +67,10 @@ from scipy.signal import get_window
 from uacpy.core.constants import REFERENCE_PRESSURE_WATER
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.acoustics import power_to_db
-from uacpy.acoustic_signal._signal_validate import require_finite_signal
+from uacpy.core._warn_frames import USER_FRAME_SKIP
+from uacpy.acoustic_signal._signal_validate import (
+    require_at_most_nyquist, require_finite_signal,
+    require_positive_finite_scalar)
 
 CQTResult = namedtuple("CQTResult", "frequencies coefficients")
 CQPSDResult = namedtuple("CQPSDResult", "frequencies power")
@@ -100,6 +120,37 @@ def _cq_kernels(frequencies, Q, fs, window):
         density_factor = sw * sw / (fs * sw2)
         kernels.append((Nk, ker.astype(np.complex128), density_factor))
     return kernels
+
+
+# A bin whose one-sided band power is inflated by more than this much warns.
+# The bias is 10*log10(1 + ratio**2) and rises smoothly with f_k/fs: measured
+# on a Hann window at B=24 it is under 0.005 dB for every f_k/fs <= 0.4865,
+# first crosses 0.01 dB at f_k/fs ~ 0.4875, and reaches 3.01 dB at f_k = fs/2.
+_CQ_IMAGE_BIAS_WARN_DB = 0.01
+
+
+def _cq_image_ratio(frequencies, fs, kernels):
+    """``|W(2 f_k)| / sum(w)`` per bin — the negative-frequency image leak.
+
+    A real tone at ``f_k`` carries a ``+f_k`` and a ``-f_k`` component. The
+    kernel demodulates the first to DC and the second to ``-2 f_k``, where the
+    window's own transfer function ``W`` attenuates it; this ratio is what
+    survives. It inflates the one-sided band power ``2|X|**2`` by
+    ``1 + ratio**2`` averaged over frame phase, so the estimators read a
+    coherent tone high by that factor. The ratio is negligible while
+    ``2 f_k`` sits well outside the window's main lobe and rises to 1 at
+    ``f_k = fs/2``, where the image lands on DC.
+
+    Broadband noise is untouched: its band power is ``sigma**2 * sum(w**2) /
+    sum(w)**2`` at every bin, independent of ``f_k``, so the correct remedy is
+    to report the affected bins rather than divide the bias out.
+    """
+    ratios = np.empty(len(kernels))
+    for i, (Nk, ker, _) in enumerate(kernels):
+        n = np.arange(Nk)
+        image = np.sum(ker * np.exp(-2j * np.pi * frequencies[i] * n / fs))
+        ratios[i] = abs(image)
+    return ratios
 
 
 def _cq_frame(x, center, kernels):
@@ -153,7 +204,7 @@ def _resolve_hop(hop, kernels, n_samples, caller):
         hop = max(1, min(n_lowest // 8, max(1, n_samples // 8)))
     hop = int(hop)
     if hop < 1:
-        raise ConfigurationError(f"{caller}: hop must be >= 1")
+        raise ConfigurationError(f"{caller}: hop must be >= 1; got {hop}")
     return hop
 
 
@@ -165,25 +216,53 @@ def _cq_setup(data, sample_rate, fmin, fmax, bins_per_octave, window, caller):
             "(a complex array would be silently real-cast).")
     x = np.asarray(data, dtype=float)
     if x.ndim != 1:
-        raise ConfigurationError(f"{caller}: data must be 1-D")
+        raise ConfigurationError(
+            f"{caller}: data must be 1-D; got shape {x.shape}")
     require_finite_signal(x, caller)
-    fs = float(sample_rate)
+    fs = require_positive_finite_scalar(sample_rate, caller,
+                                        "sample_rate", " Hz")
     if fmax is None:
         fmax = fs / 2.0
-    if fmax > fs / 2.0:
-        raise ConfigurationError(
-            f"{caller}: fmax ({fmax}) exceeds Nyquist ({fs / 2.0})")
+    # The analyser side of the Nyquist split: fmax == fs/2 is admitted
+    # because the default fmax=None resolves to exactly that.
+    require_at_most_nyquist(fmax, fs, caller, "fmax",
+                            "the bin has no signal to analyse")
     freqs = _cq_frequencies(fmin, fmax, bins_per_octave)
     Q = _cq_quality(bins_per_octave)
     kernels = _cq_kernels(freqs, Q, fs, window)
     n_lowest = kernels[0][0]
     if n_lowest > x.size:
+        # Every public constant-Q estimator funnels through this setup helper,
+        # so the frame the user wrote is two deep here, not one: a
+        # hand-counted ``stacklevel=2`` named this module's own call line for
+        # all four of them (measured). ``skip_file_prefixes`` walks out to the
+        # first frame outside the package instead, which is the caller's own
+        # line whichever estimator they chose.
         warnings.warn(
             f"{caller}: lowest bin needs {n_lowest} samples (Q·fs/fmin) but the "
             f"signal has {x.size}; low-frequency bins never fit a full window "
             "and are dropped from the average. Raise fmin or lengthen the "
             "signal.",
-            UserWarning, stacklevel=2)
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
+    bias_db = 10.0 * np.log10(1.0 + _cq_image_ratio(freqs, fs, kernels) ** 2)
+    hot = np.flatnonzero(bias_db > _CQ_IMAGE_BIAS_WARN_DB)
+    if hot.size:
+        # ``fmax=None`` resolves to fs/2, which puts the top bin in this
+        # region on every default call, so this is a statement about the
+        # caller's ``fmax`` and has to name the caller's line. Same frame walk
+        # as the short-signal warning above and for the same reason: measured,
+        # ``stacklevel=2`` here names four *different* lines of this module,
+        # one per public estimator, and never the caller's — which also
+        # collapses every call site onto one dedup key.
+        warnings.warn(
+            f"{caller}: {hot.size} bin(s) above {freqs[hot[0]]:.4g} Hz sit "
+            f"close enough to Nyquist that the tone's negative-frequency "
+            f"image leaks through the analysis window: a coherent tone in "
+            f"those bins reads high by up to {bias_db[hot].max():.2f} dB "
+            f"(highest bin {freqs[-1]:.4g} Hz, f/fs = {freqs[-1] / fs:.4f}). "
+            f"Broadband noise in the same bins is unaffected. Lower fmax to "
+            f"read tone levels there.",
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
     return x, fs, freqs, kernels
 
 

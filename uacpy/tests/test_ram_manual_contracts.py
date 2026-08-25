@@ -23,7 +23,6 @@ Writer- and parser-level tests are binary-free; classes that construct
 ``RAM`` (which resolves its binary) carry ``requires_binary``.
 """
 
-import os
 import re
 from pathlib import Path
 

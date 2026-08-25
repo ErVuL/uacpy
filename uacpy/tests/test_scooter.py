@@ -131,8 +131,9 @@ class TestScooterBroadband:
 
 def test_scooter_constructor_rejects_source_type():
     """Source geometry belongs to the ``Source`` carrier, not the solver:
-    ``models/scooter.py:390`` reads ``source.source_type``. A duplicate on the
-    model would let the deck and the carrier disagree about what was radiated.
+    ``Scooter._assemble_field_from_grn`` reads ``source.source_type``. A
+    duplicate on the model would let the deck and the carrier disagree about
+    what was radiated.
     """
     with pytest.raises(TypeError):
         Scooter(source_type='R')
@@ -204,6 +205,20 @@ class TestZeroReceiverRange:
         assert np.all(np.isnan(kraken_tl[:, 0]))
         assert np.all(np.isfinite(scooter_tl[:, 1:]))
         assert np.all(np.isfinite(kraken_tl[:, 1:]))
+
+
+def test_a_receiver_with_no_positive_range_is_refused_before_launch():
+    """Scooter's spectral RMax derives from the maximum receiver range
+    (``RMax = range_max × rmax_multiplier``), so a receiver whose ranges
+    default to the single point at 0 m is refused with
+    ``ConfigurationError`` instead of reaching the binary's unexplained
+    STOP."""
+    env = Environment(name='no_range', bathymetry=100.0, ssp=1500.0)
+    source = Source(depths=50.0, frequencies=100.0)
+    with pytest.warns(UserWarning, match='ranges not given'):
+        receiver = Receiver(depths=np.array([25.0, 75.0]))
+    with pytest.raises(ConfigurationError, match='positive receiver range'):
+        Scooter(verbose=False).run(env, source, receiver)
 
 
 class TestScooterReceiverDepthAxis:
@@ -331,21 +346,35 @@ class TestStabilisingAttenuationIsUndoneCorrectly:
         assert not [c for c in caught if 'modal poles' in str(c.message)]
 
 
-def test_broadband_n_mesh_is_checked_at_f_max():
-    """A pinned ``n_mesh`` is validated at the top of the broadband sweep:
-    the AT reader's 'Mesh is too coarse' floor scales with frequency, so a
-    mesh that clears the first frequency can under-resolve the last."""
+def test_broadband_n_mesh_is_checked_at_the_deck_freq0():
+    """A pinned ``n_mesh`` is checked against the AT reader's floor at the
+    deck's ``freq0`` — the first frequency of the sweep — because that is
+    the only place the reader applies it.
+
+    ``misc/ReadEnvironmentMod.f90:103-112`` sizes the requirement from
+    ``freq0`` during the environment read; ``Scooter/scooter.f90:106`` then
+    marches each swept frequency on a mesh scaled by ``freq/freq0``. A mesh
+    clearing the floor at ``freq0`` therefore clears it for the whole
+    sweep, so validating at the top of the band would refuse decks the
+    binary runs.
+    """
     import warnings as _w
     env = Environment(bathymetry=100.0, ssp=1500.0)
+    sweep = Source(depths=25.0, frequencies=np.linspace(100.0, 1000.0, 10))
+    rcv = Receiver(depths=[50.0], ranges=[1000.0])
+
+    # Clears the floor at 100 Hz, far under it at 1000 Hz: accepted.
+    with _w.catch_warnings():
+        _w.simplefilter('ignore')
+        Scooter(n_mesh=200, verbose=False).run(
+            env, sweep, rcv, run_mode=RunMode.BROADBAND)
+
+    # Below the floor at freq0 itself: still refused.
     with pytest.raises(ConfigurationError, match='Mesh is too coarse'):
         with _w.catch_warnings():
             _w.simplefilter('ignore')
-            Scooter(n_mesh=200, verbose=False).run(
-                env,
-                Source(depths=25.0,
-                       frequencies=np.linspace(100.0, 1000.0, 10)),
-                Receiver(depths=[50.0], ranges=[1000.0]),
-                run_mode=RunMode.BROADBAND)
+            Scooter(n_mesh=3, verbose=False).run(
+                env, sweep, rcv, run_mode=RunMode.BROADBAND)
 
 
 class TestScooterDeckResolution:
@@ -510,3 +539,154 @@ class TestPrecalcBottomIrcGuard:
                                       reflection_file=str(table)))
         # The guard alone: header accepted, no exception raised.
         assert Scooter(verbose=False)._reject_malformed_irc_bottom(env) is None
+
+
+@pytest.mark.requires_binary
+class TestScooterBroadbandStampsThePhysicalCMax:
+    """A 3000 m/s half-space under 1500 m/s water — the configuration where
+    an unstamped result anchored ``to_time_trace`` at 1500 m/s and the
+    early bottom-refracted arrivals wrapped."""
+
+    def test_the_stamp_is_the_seabed_speed_and_anchors_the_window(self):
+        env = Environment(name='cmax_bb', bathymetry=100.0, ssp=1500.0,
+                          bottom=_halfspace(3000.0, density=2.0,
+                                            attenuation=0.1))
+        src = Source(depths=50.0, frequencies=100.0)
+        rcv = Receiver(depths=np.array([50.0]), ranges=np.array([2000.0]))
+        result = Scooter(verbose=False).run(
+            env, src, rcv, run_mode=RunMode.BROADBAND,
+            frequencies=np.linspace(80.0, 120.0, 5))
+
+        assert result.metadata['c_max'] == pytest.approx(3000.0)
+
+        trace = result.to_time_trace(depth=50.0, range=2000.0)
+        t = np.asarray(trace.coords['time'], dtype=float)
+        # T_window = 1/df = 0.1 s, so the window opens half a window ahead
+        # of the r / c_max = 0.667 s fastest possible arrival — not at the
+        # 1.283 s a 1500 m/s default anchor gives.
+        assert t[0] == pytest.approx(2000.0 / 3000.0 - 0.05, abs=0.02)
+
+
+@pytest.mark.requires_binary
+class TestScooterRefusesAPhaseSpeedBandInvertedByOnePinnedBound:
+    """The constructor can only compare two pinned bounds. One pinned bound is
+    comparable once the other is derived from the env, which happens in
+    ``_write_scooter_env``; on the 100 m / 1500 m/s guide the auto band is
+    (1425, 1680) m/s, so ``c_low=2000`` alone writes CLOW > CHIGH.
+    ``ReadEnvironmentMod.f90:135`` then stops the binary after the deck has
+    been written and the process spawned.
+    """
+
+    @staticmethod
+    def _write(tmp_path, **kwargs):
+        env = Environment(name='flat', bathymetry=100.0, ssp=1500.0)
+        Scooter(verbose=False, **kwargs)._write_scooter_env(
+            tmp_path / 'case.env', env,
+            Source(depths=25.0, frequencies=200.0),
+            Receiver(depths=np.array([50.0]), ranges=np.array([1000.0])))
+
+    def test_a_pinned_c_low_above_the_derived_c_high_names_c_low(self, tmp_path):
+        with pytest.raises(ConfigurationError, match='pinned c_low=2000'):
+            self._write(tmp_path, c_low=2000.0)
+        assert not (tmp_path / 'case.env').exists()
+
+    def test_a_pinned_c_high_below_the_derived_c_low_names_c_high(self, tmp_path):
+        with pytest.raises(ConfigurationError, match='pinned c_high=100'):
+            self._write(tmp_path, c_high=100.0)
+
+    def test_a_band_that_brackets_the_derived_bounds_writes_the_deck(self, tmp_path):
+        self._write(tmp_path, c_low=1200.0)
+        assert (tmp_path / 'case.env').exists()
+
+
+class TestScooterRefusesAWavenumberGridItCannotSpace:
+    """``scooter.f90:69`` derives ``Nk = INT(2000*RMax_km*(kMax-kMin)/pi)`` and
+    has no test of the value — the only ``IF`` naming ``Nk`` is the allocation
+    status at ``:74``. ``Nk = 1`` then divides by ``Nk - 1 = 0`` at ``:77`` and
+    ``:125``, so the binary writes an all-NaN Green's function and exits 0;
+    ``Nk = 0`` writes one with no samples at all. Both refused before launch,
+    as ``bounce.py`` and ``sparc.py`` refuse the same arithmetic.
+
+    On a 100 m isovelocity guide at 100 Hz with the band pinned to
+    (1500, 1935) m/s, ``RMax = ranges.max() x 2`` puts the ``Nk = 1`` / ``2``
+    boundary between a 16.6 m and a 16.7 m furthest receiver.
+    """
+
+    BAND = dict(c_low=1500.0, c_high=1935.0)
+
+    @staticmethod
+    def _write(tmp_path, r_max, **kwargs):
+        env = Environment(name='flat', bathymetry=100.0, ssp=1500.0)
+        Scooter(verbose=False, **kwargs)._write_scooter_env(
+            tmp_path / 'case.env', env,
+            Source(depths=25.0, frequencies=100.0),
+            Receiver(depths=np.array([50.0]), ranges=np.array([r_max])))
+
+    def test_a_single_sample_grid_is_refused_before_the_deck_is_written(
+            self, tmp_path):
+        with pytest.raises(ConfigurationError, match=r'Nk = 1 wavenumber'):
+            self._write(tmp_path, 16.6, **self.BAND)
+        assert not (tmp_path / 'case.env').exists()
+
+    def test_two_samples_write_the_deck(self, tmp_path):
+        """The high side of the same boundary — 0.1 m further out."""
+        self._write(tmp_path, 16.7, **self.BAND)
+        assert (tmp_path / 'case.env').exists()
+
+    def test_an_empty_grid_is_refused_before_the_deck_is_written(
+            self, tmp_path):
+        with pytest.raises(ConfigurationError, match=r'Nk = 0 wavenumber'):
+            self._write(tmp_path, 8.3, **self.BAND)
+        assert not (tmp_path / 'case.env').exists()
+
+    def test_the_two_counts_are_refused_for_their_own_reasons(self, tmp_path):
+        """``Nk = 1`` and ``Nk = 0`` fail differently in the Fortran, so the
+        message must not describe one as the other."""
+        with pytest.raises(ConfigurationError) as one:
+            self._write(tmp_path, 16.6, **self.BAND)
+        with pytest.raises(ConfigurationError) as zero:
+            self._write(tmp_path, 8.3, **self.BAND)
+        assert 'divides by zero' in str(one.value)
+        assert 'divides by zero' not in str(zero.value)
+
+    def test_the_remediation_names_the_knobs_that_raise_nk(self, tmp_path):
+        """``Nk`` grows with ``RMax``, and ``RMax = ranges.max() x
+        rmax_multiplier`` — so advice to shorten the receiver ranges lowers
+        the count that is already too low."""
+        with pytest.raises(ConfigurationError) as exc:
+            self._write(tmp_path, 16.6, **self.BAND)
+        text = str(exc.value)
+        assert 'rmax_multiplier' in text
+        assert 'c_low/c_high' in text
+        assert 'shorten the receiver ranges' not in text
+
+    def test_the_predicted_count_is_the_count_the_binary_prints(self, tmp_path):
+        """The guard's arithmetic is the binary's arithmetic, on a deck that
+        runs. Without this the boundary tests above pin a number nothing else
+        checks against ``scooter.f90:69``."""
+        import re
+        from uacpy.models.scooter import _deck_nk
+        env = Environment(name='flat', bathymetry=100.0, ssp=1500.0)
+        source = Source(depths=25.0, frequencies=100.0)
+        receiver = Receiver(depths=np.array([50.0]),
+                            ranges=np.array([1000.0]))
+        model = Scooter(verbose=False, work_dir=tmp_path, cleanup=False,
+                        **self.BAND)
+        model.compute_tl(env=env, source=source, receiver=receiver)
+        predicted = _deck_nk(2000.0, 100.0, 1500.0, 1935.0)
+        printed = int(re.search(r'Nk =\s+(-?\d+)',
+                                (tmp_path / 'model.prt').read_text()).group(1))
+        assert printed > 1, (
+            f"the binary printed Nk = {printed}: this fixture has to reach a "
+            f"count the guard would allow, or it pins nothing")
+        assert predicted == printed
+
+
+from uacpy.core.bottom import BoundaryProperties
+
+
+def _halfspace(sound_speed, **kwargs):
+    return BoundaryProperties(
+        acoustic_type='half-space', sound_speed=sound_speed,
+        density=kwargs.pop('density', 1.8),
+        attenuation=kwargs.pop('attenuation', 0.3), **kwargs)

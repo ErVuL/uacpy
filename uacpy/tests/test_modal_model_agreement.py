@@ -254,15 +254,16 @@ class TestDocumentedModeCounts:
     _SRC = staticmethod(lambda: uacpy.Source(depths=25.0, frequencies=200.0))
 
     def test_shallow_channel_has_14_modes(self):
-        # kraken.md:313-317: "Fourteen modes at 200 Hz in 100 m of water —
-        # eleven trapped, plus three the default ceiling's 5% overshoot
-        # keeps past the 1650 m/s bottom speed".
+        # kraken.md §6.1 "Fourteen modes at 200 Hz" — in 100 m of water,
+        # eleven trapped plus three the default ceiling's 5% overshoot
+        # keeps past the 1650 m/s bottom speed.
         modes = Kraken(verbose=False).compute_modes(
             self._shallow_channel(), self._SRC())
         assert modes.n_modes == 14
 
     def test_sand_over_granite_deck_has_28_modes(self):
-        # kraken.md:333-353: docs/figure_scripts/_common.py
+        # kraken.md §6.2 "28 modes here against 14 for the same water column";
+        # the env below is docs/figure_scripts/_common.py
         # layered_elastic(), verbatim. ``from_presets`` fluid-approximates
         # by default, so the count rides on granite's 5500 m/s
         # *compressional* speed lifting the auto c_high to 5775 m/s — the
@@ -279,8 +280,8 @@ class TestDocumentedModeCounts:
         assert modes.n_modes == 28
 
     def test_leaky_modes_deck_has_27_modes(self):
-        # kraken.md:426-437: "The default run finds 14 modes; asking for
-        # leaky ones finds 27" — the 13 extra all sit past the bottom-speed
+        # kraken.md §6.5 "finds 14 modes; asking for leaky ones finds 27"
+        # — the 13 extra all sit past the bottom-speed
         # line with |Im(k)| one to three orders above the trapped set.
         modes = Kraken(verbose=False, leaky_modes=True).compute_modes(
             self._shallow_channel(), self._SRC())

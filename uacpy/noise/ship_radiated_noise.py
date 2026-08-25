@@ -49,15 +49,25 @@ def radiated_noise_level(received_spl_db, distance_m):
     reference point to the hydrophone. Returns dB re 1 µPa·m.
     """
     r = np.asarray(distance_m, dtype=float)
-    if np.any(r <= 0):
-        raise ConfigurationError("radiated_noise_level: distance must be > 0")
+    # Written as the negation of the admissible condition so NaN is refused
+    # too: every comparison against NaN is False, so `r <= 0` let a NaN range
+    # through to a NaN level. `isfinite` is the other half — an infinite range
+    # returned +inf, "no ship is loud enough to hear", the safe-looking
+    # direction for a source level to be wrong in.
+    if not np.all(np.isfinite(r) & (r > 0)):
+        raise ConfigurationError(
+            f"radiated_noise_level: distance must be > 0 m and finite; got "
+            f"{int(np.count_nonzero(~(np.isfinite(r) & (r > 0))))} bad "
+            f"value(s) of {r.size}, first {float(np.ravel(r)[np.argmax(~(np.isfinite(r) & (r > 0)).ravel())])!r}.")
     return np.asarray(received_spl_db, dtype=float) + 20.0 * np.log10(r)
 
 
 def nominal_source_depth(draught_m):
     """Nominal monopole source depth ``d_s = 0.7 * draught`` (ISO 17208-2 Formula 1)."""
-    if draught_m <= 0:
-        raise ConfigurationError("nominal_source_depth: draught must be > 0")
+    if not (np.isfinite(draught_m) and draught_m > 0):
+        raise ConfigurationError(
+            f"nominal_source_depth: draught must be > 0 m and finite; got "
+            f"{draught_m!r}.")
     return 0.7 * float(draught_m)
 
 
@@ -73,7 +83,22 @@ def lloyd_mirror_correction(frequency, source_depth, sound_speed=DEFAULT_SOUND_S
     frequency (incoherent source+image) and grows large and positive at low
     frequency (the surface dipole suppresses radiation).
     """
-    k = 2.0 * np.pi * np.asarray(frequency, dtype=float) / float(sound_speed)
+    # ``kd`` enters only as even powers, so a negative depth returns exactly
+    # what its positive twin does: an upstream sign error would be invisible.
+    # Zero is admitted — it is the physical surface-mounted limit the
+    # ``errstate`` below is for — and NaN is refused by the negated form.
+    if not (np.isfinite(source_depth) and source_depth >= 0):
+        raise ConfigurationError(
+            f"lloyd_mirror_correction: source_depth must be >= 0 m and "
+            f"finite; got {source_depth!r}. The correction depends on "
+            f"(k*d)**2 and (k*d)**4 only, so a negative depth would return "
+            f"the same value as its positive twin.")
+    c = float(sound_speed)
+    if not (np.isfinite(c) and c > 0):
+        raise ConfigurationError(
+            f"lloyd_mirror_correction: sound_speed must be > 0 m/s and "
+            f"finite; got {sound_speed!r}.")
+    k = 2.0 * np.pi * np.asarray(frequency, dtype=float) / c
     kd = k * float(source_depth)
     num = 2.0 * kd ** 4 + 14.0 * kd ** 2
     den = 14.0 + 2.0 * kd ** 2 + kd ** 4

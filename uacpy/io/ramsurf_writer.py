@@ -41,8 +41,14 @@ def _write_block(
     the second down a node rather than merging them, which shifts it by up to
     ``dz``. Keep the pairs at least ``dz`` apart to place them exactly.
     """
-    if not pairs:
-        raise ConfigurationError("Cannot write empty profile block")
+    # len(), not truthiness: `pairs` may arrive as an ndarray, where
+    # `not pairs` raises numpy's "truth value of an array is ambiguous"
+    # ValueError instead of this module's typed error.
+    if len(pairs) == 0:
+        raise ConfigurationError(
+            "Cannot write empty profile block: RAM reads each block until "
+            "its terminator, so a block needs at least one (depth, value) "
+            "pair. Supply the profile, or drop the block from the deck.")
     for d, v in pairs:
         fh.write(f"{float(d):.12g} {float(v):.12g}\n")
     fh.write(_TERM)
@@ -139,7 +145,8 @@ def write_ramin(
         raise ConfigurationError(
             f"kind must be 'rams', 'ramsurf' or 'ramgeo'; got {kind!r}"
         )
-    if kind == 'ramsurf' and not surface:
+    # Same reason as the profile-block guard: `surface` may be an ndarray.
+    if kind == 'ramsurf' and (surface is None or len(surface) == 0):
         raise ConfigurationError("kind='ramsurf' requires a surface profile")
     if kind == 'rams':
         for seg in range_segments:

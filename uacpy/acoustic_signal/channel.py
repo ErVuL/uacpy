@@ -10,10 +10,14 @@ and active-sonar echo simulation.
 from __future__ import annotations
 
 import warnings
+from typing import Optional
 
 import numpy as np
 
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.core._warn_frames import USER_FRAME_SKIP
+from uacpy.acoustic_signal._signal_validate import (
+    require_increasing_axis, require_positive_finite_scalar)
 
 
 # Windowed-sinc fractional-delay kernel: taps each side of the arrival and
@@ -21,9 +25,22 @@ from uacpy.core.exceptions import ConfigurationError
 _FRAC_DELAY_HALF_LEN = 8
 _FRAC_DELAY_KAISER_BETA = 8.0
 
+# Largest impulse response ``impulse_response`` will size for itself off the
+# latest arrival (delays.max() * sample_rate taps): 2**26 taps occupy 1 GiB
+# as complex128, beyond any physical channel spread (2**26 taps is 699 s of
+# channel at 96 kHz). Past it the caller states n_samples rather than having
+# one mis-scaled delay allocate that much silently.
+_MAX_DEFAULT_TAPS = 1 << 26
+
+# Largest default DFT length ``impulse_response_from_transfer_function`` will
+# size for itself (~4 M samples, ~100 MB across the working arrays). Beyond it
+# the caller states n_samples rather than having a finely spaced frequency
+# vector allocate that much silently.
+_MAX_DEFAULT_IR_SAMPLES = 1 << 22
+
 
 def impulse_response(amplitudes, delays_s, sample_rate: float, *,
-                     n_samples: int = None, fractional: bool = True):
+                     n_samples: Optional[int] = None, fractional: bool = True):
     """Channel impulse response from discrete arrivals.
 
     Places each arrival ``amplitudes[i]`` at delay ``delays_s[i]``. With
@@ -48,7 +65,9 @@ def impulse_response(amplitudes, delays_s, sample_rate: float, *,
     sample_rate : float
         Sample rate (Hz).
     n_samples : int, optional
-        Length of the IR. Default: just past the latest arrival.
+        Length of the IR. Default: just past the latest arrival; defaults
+        above ``2**26`` taps (1 GiB as complex128) raise rather than
+        allocate.
     fractional : bool
         Windowed-sinc fractional-delay placement. ``False`` quantises the
         delay to the nearest sample (+/- 0.5 sample of timing error).
@@ -63,18 +82,36 @@ def impulse_response(amplitudes, delays_s, sample_rate: float, *,
     a = np.asarray(amplitudes)
     d = np.asarray(delays_s, dtype=float)
     if a.shape != d.shape or a.ndim != 1:
-        raise ConfigurationError("impulse_response: amplitudes and delays_s must be 1-D, equal length")
+        raise ConfigurationError(
+            "impulse_response: amplitudes and delays_s must be 1-D, equal "
+            f"length; got amplitudes shape {a.shape} and delays_s shape "
+            f"{d.shape}")
     if np.any(d < 0):
-        raise ConfigurationError("impulse_response: delays_s must be >= 0")
-    fs = float(sample_rate)
+        raise ConfigurationError(
+            f"impulse_response: delays_s must be >= 0; got "
+            f"{int(np.count_nonzero(d < 0))} negative value(s), first at "
+            f"index {int(np.argmax(d < 0))} ({d[d < 0][0]:g} s)")
+    fs = require_positive_finite_scalar(
+        sample_rate, "impulse_response", "sample_rate", " Hz")
     pos = d * fs
     L = _FRAC_DELAY_HALF_LEN
     if n_samples is None:
         if pos.size:
             # Non-fractional rounds to the nearest sample, so the last
             # occupied index is round(pos.max()), not floor(pos.max()).
-            n_samples = int(np.floor(pos.max()) + L + 1 if fractional
-                            else np.round(pos.max()) + 1)
+            # Compared as float before the int conversion so an inf/NaN
+            # delay hits the typed bound, not a raw OverflowError.
+            n_est = float(np.floor(pos.max()) + L + 1 if fractional
+                          else np.round(pos.max()) + 1)
+            if not n_est <= _MAX_DEFAULT_TAPS:
+                raise ConfigurationError(
+                    f"impulse_response: the latest delay {d.max():g} s at "
+                    f"sample_rate {fs:g} Hz implies a {n_est:.0f}-tap "
+                    f"response ({n_est * 16 / 2 ** 30:.3g} GiB as "
+                    f"complex128), above the {_MAX_DEFAULT_TAPS}-tap "
+                    f"default limit. Check the delay units (delays_s is "
+                    f"seconds), or pass n_samples explicitly.")
+            n_samples = n_est
         else:
             n_samples = 1
     n_samples = int(n_samples)
@@ -101,9 +138,13 @@ def impulse_response(amplitudes, delays_s, sample_rate: float, *,
         if gsum:
             g = g / gsum
         ok = (k >= 0) & (k < n_samples)
-        # A truncated kernel loses amplitude; say so rather than silently
-        # dumping the whole arrival on one sample, which is what the old
-        # else-branch did (an arrival at 10.9 samples landed entirely at 10).
+        # A truncated kernel changes the arrival's amplitude; say so rather
+        # than silently dumping the whole arrival on one sample, which is what
+        # falling back to the nearest sample does (an arrival at 10.9 samples
+        # lands entirely at 10). The change is not one-directional: the sinc tail can
+        # sum either way, and the worst case is a GAIN — measured DC gain
+        # 1.1274 (+1.04 dB) for an arrival 0.5 samples from the start against
+        # 0.9862 at 3.5 samples, at fs = 20 kHz over 128 samples.
         if not ok.all() and p != i0:
             n_clipped += 1
         h[k[ok]] += amp * g[ok]
@@ -111,9 +152,11 @@ def impulse_response(amplitudes, delays_s, sample_rate: float, *,
         warnings.warn(
             f"impulse_response: {n_clipped} fractional arrival(s) sit within "
             f"{L} samples of the ends of an {n_samples}-sample response, so "
-            f"their interpolation kernel is truncated and they lose amplitude. "
+            f"their interpolation kernel is truncated, so their amplitude "
+            f"is wrong in either direction (measured +1.04 dB for an arrival "
+            f"half a sample from the end). "
             f"Lengthen n_samples, or use fractional=False to quantise instead.",
-            UserWarning, stacklevel=2)
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
     t = np.arange(n_samples) / fs
     return t, h
 
@@ -131,7 +174,7 @@ def simulate_reception(transmit, amplitudes, delays_s, sample_rate: float):
 
 
 def impulse_response_from_transfer_function(H, frequencies, sample_rate: float,
-                                            n_samples: int = None):
+                                            n_samples: Optional[int] = None):
     """Real impulse response from a one-sided transfer function ``H(f)``.
 
     Resamples ``H`` onto a uniform DFT grid ``[0, fs/2]`` and inverse-transforms.
@@ -148,22 +191,77 @@ def impulse_response_from_transfer_function(H, frequencies, sample_rate: float,
     sizes the grid: ``df < 1 / tau_max`` for the longest delay the channel
     can produce (``range_max / c_min`` for a propagation model).
     ``df = sample_rate / n_samples`` when ``n_samples`` is given, else the
-    spacing of ``frequencies``.
+    spacing of ``frequencies`` (its smallest spacing if it is non-uniform), so
+    the default grid resolves every delay the supplied ``H(f)`` resolves. A
+    band-limited ``H`` therefore costs a full-band grid: 100-200 Hz on a 1 Hz
+    spacing at ``fs = 10`` kHz returns a 10 000-sample response whose 5 001
+    grid bins are zero outside the supplied 101. Pass ``n_samples`` to trade
+    that window down. Defaults above ``2**22`` samples raise rather than
+    allocate.
 
     Returns ``(t, h)``.
     """
     f = np.asarray(frequencies, dtype=float)
     Hc = np.asarray(H, dtype=complex)
     if f.ndim != 1 or f.shape != Hc.shape:
-        raise ConfigurationError("impulse_response_from_transfer_function: H and frequencies shapes differ")
-    if np.any(np.diff(f) <= 0) or f[0] < 0:
-        raise ConfigurationError("frequencies must be non-negative and strictly increasing")
+        raise ConfigurationError(
+            f"impulse_response_from_transfer_function: H and frequencies "
+            f"shapes differ — frequencies is {f.shape}, H is {Hc.shape}. "
+            f"Both must be the same 1-D shape: one transfer-function sample "
+            f"per frequency.")
+    if f.size and (np.any(np.diff(f) <= 0) or f[0] < 0):
+        raise ConfigurationError(
+            f"impulse_response_from_transfer_function: frequencies must be "
+            f"non-negative and strictly increasing; got first={f[0]:g} Hz and "
+            f"smallest step "
+            f"{np.min(np.diff(f)) if f.size > 1 else float('nan'):g} Hz. "
+            f"Sort the axis and drop duplicates before calling.")
+    require_increasing_axis(
+        f, "impulse_response_from_transfer_function: frequencies")
     fs = float(sample_rate)
+    # The DFT grid stops at fs/2, and out-of-grid bins are zero (see above), so
+    # a band sitting above Nyquist contributes nothing: it came back as an
+    # all-zero h with no diagnostic. Partial overlap is legitimate but lossy —
+    # a band straddling fs/2 silently loses the half above it — so it warns.
+    nyquist = fs / 2.0
+    if f.size and f[0] > nyquist:
+        raise ConfigurationError(
+            f"impulse_response_from_transfer_function: frequencies span "
+            f"{f[0]:g}-{f[-1]:g} Hz, entirely above the Nyquist frequency "
+            f"sample_rate/2 = {nyquist:g} Hz, so every DFT bin would be zero "
+            f"and h all-zero. Raise sample_rate above {2 * f[-1]:g} Hz, or "
+            f"pass a band inside [0, sample_rate/2].")
+    if f.size and f[-1] > nyquist:
+        warnings.warn(
+            f"impulse_response_from_transfer_function: frequencies reach "
+            f"{f[-1]:g} Hz, above the Nyquist frequency sample_rate/2 = "
+            f"{nyquist:g} Hz; the part of H above it is dropped from h. Raise "
+            f"sample_rate above {2 * f[-1]:g} Hz to keep the whole band.",
+            UserWarning, stacklevel=2)
     if n_samples is None:
-        # Inverse of the rfft bin count: an even-length real signal of
-        # 2*(K - 1) samples has exactly K one-sided bins, so the default grid
-        # is as fine as the supplied H(f) and no finer.
-        n_samples = 2 * (f.size - 1) if f.size > 1 else 2
+        # The grid spacing, not the bin count, is what the caller sizes the
+        # delay window with, so the default follows the spacing of
+        # `frequencies`: n = fs/df. Sizing it as 2*(f.size - 1) instead — the
+        # rfft bin count — agrees with that only when `frequencies` spans the
+        # whole of [0, fs/2]; on a band-limited vector it silently gave a much
+        # coarser grid than the caller's own spacing (100-200 Hz at 1 Hz
+        # spacing, fs = 10 kHz: df = 50 Hz, a 20 ms window, wrapping a 30 ms
+        # arrival onto 10 ms). The smallest spacing is used when `frequencies`
+        # is non-uniform, so no part of it is under-resolved.
+        if f.size < 2:
+            n_samples = 2
+        else:
+            df = float(np.min(np.diff(f)))
+            n_samples = max(2, int(round(fs / df)))
+            if n_samples > _MAX_DEFAULT_IR_SAMPLES:
+                raise ConfigurationError(
+                    f"impulse_response_from_transfer_function: the spacing of "
+                    f"frequencies ({df:g} Hz) implies a default grid of "
+                    f"{n_samples} samples at fs = {fs:g} Hz, above the "
+                    f"{_MAX_DEFAULT_IR_SAMPLES}-sample default limit. Pass "
+                    f"n_samples explicitly (its 1/df delay window must still "
+                    f"exceed the longest arrival), or coarsen frequencies."
+                )
     grid = np.fft.rfftfreq(int(n_samples), d=1.0 / fs)
     Hr = (np.interp(grid, f, Hc.real, left=0.0, right=0.0)
           + 1j * np.interp(grid, f, Hc.imag, left=0.0, right=0.0))

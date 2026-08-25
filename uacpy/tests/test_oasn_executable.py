@@ -44,9 +44,11 @@ class TestExecutableSearchOrder:
 
     def test_oasn_asks_for_the_bash_wrapper_first(self, monkeypatch, tmp_path):
         calls = []
-        # _resolve_executable verifies the found path exists, so the stub
-        # has to hand back a real file.
-        (tmp_path / 'oasn2_bin_bash').touch()
+        # _resolve_executable verifies the found path is a file this process
+        # can exec, so the stub has to hand back a real executable one.
+        wrapper = tmp_path / 'oasn2_bin_bash'
+        wrapper.touch()
+        wrapper.chmod(0o755)
 
         def fake_find(self, names, bin_subdirs=None, dev_subdir=None,
                       try_exe_suffix=True):
@@ -67,9 +69,11 @@ class TestExecutableSearchOrder:
         base_dir = pathlib.Path(base_mod.__file__).parent.parent
         bash_oases = base_dir / 'bin' / 'oases' / 'oasn2_bin_bash'
         bare_oalib = base_dir / 'bin' / 'oalib' / 'oasn2_bin'
-        existing = set()
-        monkeypatch.setattr(pathlib.Path, 'exists',
-                            lambda self, **kw: str(self) in existing)
+        runnable = set()
+        # The search selects a candidate the OS would actually exec, so the
+        # stub stands in for that predicate rather than for bare existence.
+        monkeypatch.setattr(base_mod, '_is_runnable',
+                            lambda path: str(path) in runnable)
         monkeypatch.setattr(base_mod.shutil, 'which', lambda name: None)
 
         model = OASN.__new__(OASN)      # only the search helper is exercised
@@ -82,18 +86,18 @@ class TestExecutableSearchOrder:
 
         # Both present: the _bash wrapper wins even though the bare binary
         # exists in an earlier-tried directory for its own name.
-        existing.update({str(bash_oases), str(bare_oalib)})
+        runnable.update({str(bash_oases), str(bare_oalib)})
         assert find() == bash_oases
 
         # Only the bare binary in bin/oalib: found by falling through every
         # _bash candidate first.
-        existing.clear()
-        existing.add(str(bare_oalib))
+        runnable.clear()
+        runnable.add(str(bare_oalib))
         assert find() == bare_oalib
 
         # Nothing anywhere: the error lists the candidates in search order,
         # _bash first.
-        existing.clear()
+        runnable.clear()
         with pytest.raises(ExecutableNotFoundError) as err:
             find()
         msg = str(err.value)

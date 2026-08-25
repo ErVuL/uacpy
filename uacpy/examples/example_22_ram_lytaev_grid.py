@@ -20,8 +20,10 @@ Output: ``output/example_22_ram_lytaev_grid.png``.
 """
 
 import sys
+import os
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Repo root, so ``import uacpy`` resolves from a source checkout.
+sys.path.insert(0, str(Path(__file__).parents[2]))
 
 import numpy as np  # noqa: E402
 import matplotlib  # noqa: E402
@@ -127,8 +129,10 @@ def main():
     )
     fig.tight_layout()
 
-    out = Path(__file__).parent / 'output' / 'example_22_ram_lytaev_grid.png'
-    out.parent.mkdir(exist_ok=True)
+    out_dir = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
+                   or Path(__file__).parent / 'output')
+    out = out_dir / 'example_22_ram_lytaev_grid.png'
+    out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out, dpi=120, bbox_inches='tight')
     print(f"\n  ✓ Saved: {out}")
 

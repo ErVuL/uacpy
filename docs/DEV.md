@@ -16,7 +16,9 @@ plumbing, start here.
 
 ```
 uacpy/
-├── docs/                    PDFs, screenshots, this file
+├── docs/                    Guided pages (guide/, models/), figure_scripts/,
+│                            doc checkers (check_links.py, check_structure.py),
+│                            generate_model_figures.py, this file
 ├── install.sh               Native-binary build script (Fortran/C/CUDA)
 ├── pyproject.toml           Package + pytest config (default `-n logical`)
 ├── DOCUMENTATION.md         Public API reference
@@ -37,7 +39,8 @@ uacpy/
     ├── parallel.py          run_parallel / Job — parallel batch runner
     ├── metrics.py           tl_rmse / tl_max_error / tl_bias (core.metrics shim)
     ├── _log.py              Single log channel + warning formatter
-    └── _stack.py            One-shot RLIMIT_STACK bump on import
+    ├── _stack.py            One-shot RLIMIT_STACK bump on import
+    └── _version.py          `__version__`; pyproject reads it via `dynamic`
 ```
 
 `uacpy/` (the source package) is installed editable via
@@ -92,10 +95,13 @@ COVARIANCE / REPLICA                   # OASN frequency-domain array products
 TIME_SERIES                            # p(t) at receivers
 BROADBAND                              # H(f) complex transfer function
 REFLECTION                             # Plane-wave coefficients (Bounce, OASR)
+REVERBERATION                          # Reverberation level vs range (OASS)
 ```
 
-A model advertises its supported subset in `self._supported_modes` and
-the base class refuses anything else with `UnsupportedFeatureError`.
+A model declares its supported subset in `spec.modes` (§2.3); the base copies
+that to `self._supported_modes` and refuses anything else with
+`UnsupportedFeatureError`. The first entry is the default when
+`run_mode=None`.
 
 `_SINGLE_FREQUENCY_MODES` (in `base.py`) refuses a multi-frequency
 `Source` for `COHERENT_TL` / `RAYS` / `MODES` / etc. — you must pick
@@ -103,20 +109,38 @@ BROADBAND, TIME_SERIES, or one of the OASES sweep modes for those.
 
 ### 2.3 Capability flags
 
-Each model declares which **env shapes** it consumes natively:
+Each model declares which **env shapes** it consumes natively, along with its
+run modes, source geometries and collapse defaults, in one `ModelSpec` class
+attribute. The base validates it at *class-definition* time
+(`PropagationModel.__init_subclass__` in `base.py`) and applies it in
+`__init__`, so a malformed spec fails on import rather than on the first run:
 
 ```python
-self._supports_altimetry                       = False
-self._supports_range_dependent_bathymetry      = True
-self._supports_range_dependent_ssp             = True
-self._supports_range_dependent_bottom          = True
-self._supports_layered_bottom                  = False
-self._supports_elastic_media                   = False
-self._supports_multi_source_depth              = False
-self._supports_source_beam_pattern             = False
-self._supports_rough_surface                   = False
-self._supports_rough_bottom                    = False
+class Scooter(PropagationModel):
+    spec = ModelSpec(
+        modes=(RunMode.COHERENT_TL, RunMode.BROADBAND, RunMode.TIME_SERIES),
+        supports={'layered_bottom', 'elastic_media', 'rough_surface'},
+        source_types=frozenset({'point', 'line', 'scaled'}),
+        collapse={'ssp': 'mean', 'bottom_range': 'median'},
+    )
+    source = 'acoustics_toolbox'          # MODEL_SOURCES id, not a spec field
 ```
+
+`supports` names a subset of these ten flags; every flag not named defaults
+False, and the base sets the matching `self._supports_<name>` attribute from
+it:
+
+```
+altimetry                       range_dependent_bathymetry
+range_dependent_ssp             range_dependent_bottom
+layered_bottom                  elastic_media
+multi_source_depth              source_beam_pattern
+rough_surface                   rough_bottom
+```
+
+A subclass with no `spec` keeps the base defaults and sets
+`_supported_modes` / `_supports_*` / collapse by hand in `__init__` — the
+fallback path, used by none of the twelve shipped wrappers.
 
 There is no `range_dependent_surface` flag: no engine consumes a
 range-dependent surface deck (the AT solvers carry one global top boundary,
@@ -134,6 +158,23 @@ feature.
 question of the form "does this env shape work with this model?".
 Numerical-method requirements (specific SSP interp scheme, 3-D-vs-2-D,
 volume-attenuation formula) belong in `run()`-time asserts, not flags.
+
+**Reading the flags back.** `spec.supports` is the *class-level declaration*
+— what the author wrote. Ask an **instance** instead, through the two public
+accessors that mirror `supported_modes` / `supports_mode`:
+
+```python
+model = Bellhop(interp_ssp='c-linear')
+model.supported_features              # sorted list of flag names
+model.supports_feature('range_dependent_ssp')   # False for this instance
+Bellhop.spec.supports                 # the declaration; says nothing about interp_ssp
+```
+
+The two can differ on purpose: a model may resolve a flag from its own
+constructor arguments in `__init__` (Bellhop turns `range_dependent_ssp` off
+when `interp_ssp` cannot carry a 2-D profile), and the class-level
+declaration cannot know that. `supports_feature` raises `ValueError` on a
+name outside the ten — a typo must not answer "no".
 
 ### 2.4 Collapse policy
 
@@ -154,8 +195,10 @@ default reduction method:
 asserted at module import. User overrides via
 `Model(collapse={'bathymetry': 'min', ...})` always win.
 
-Per-model physics-aware defaults go in `_set_collapse_defaults({...})`
-inside `__init__`. The base merges user overrides over those.
+Per-model physics-aware defaults go in `spec.collapse` (§2.3), which the base
+feeds to `_set_collapse_defaults({...})`; a spec-less subclass calls that
+helper itself in `__init__`. Either way the base merges user overrides over
+them.
 
 ### 2.5 Result construction helpers
 
@@ -179,12 +222,12 @@ are direct attributes on `Result`, **not** metadata.
 
 ## 3. Adding a new model
 
-1. Subclass `PropagationModel`. In `__init__`:
-   - call `super().__init__(...)` first;
-   - set `self._supported_modes`;
-   - flip the relevant `self._supports_*` flags;
-   - install model-specific collapse defaults via
-     `self._set_collapse_defaults({...})`;
+1. Subclass `PropagationModel` and declare a `ModelSpec` (§2.3) as a class
+   attribute — run modes, capability flags, source geometries and collapse
+   defaults — plus a `source` id from `models/sources.py`. Then in `__init__`:
+   - call `super().__init__(...)` first, which applies the spec;
+   - resolve the binary into `self._exe` (deliberately not a spec field:
+     multi-binary models pick theirs at `run()` time);
    - store every constructor argument as `self.<name>` so
      `model.copy()` can introspect them.
 2. Implement `run(self, env, source, receiver, run_mode=None, *,
@@ -203,8 +246,25 @@ are direct attributes on `Result`, **not** metadata.
    - read outputs through the matching `io/` reader;
    - return a `Result` built from `self._result_kwargs(...)` +
      `self._attach_output_paths(...)`.
-3. Register the model in `uacpy/models/__init__.py`.
-4. Add a test file under `uacpy/tests/`. Use the marker that fits:
+3. Register the model in `uacpy/models/__init__.py` — both the import and
+   `__all__`.
+4. Add it to `_LAZY_ATTRS` in `uacpy/__init__.py`. That table is what makes
+   `uacpy.NewModel` resolve at the top level; without the entry the wrapper is
+   importable as `uacpy.models.NewModel` and raises `AttributeError` as
+   `uacpy.NewModel`. `tests/test_lazy_imports.py` gates both directions.
+5. Register every key the wrapper writes into `result.metadata` in
+   `_DOCUMENTED_METADATA` (`uacpy/core/results/_base.py`), and add a drift case
+   in `tests/test_metadata_file_paths.py::_drift_cases` — `list_metadata()` is
+   public API and reads that registry.
+6. Add the model to the `alternatives=[...]` list of every
+   `compute_*` method in `uacpy/models/base.py` whose run mode it supports.
+   Those lists are the "try one of these models instead" text a user gets from
+   `UnsupportedFeatureError`.
+7. Add a row to the `DOCUMENTATION.md` §7 capability matrix and to
+   `docs/models/README.md`'s run-mode matrix. Both are gated
+   (`tests/test_documentation.py`), against the model set derived from
+   `uacpy.models.__all__`.
+8. Add a test file under `uacpy/tests/`. Use the marker that fits:
    - `slow` for broadband / large grids;
    - `requires_binary` if a native binary must be present;
    - `requires_oases` for OASES-only tests.
@@ -297,8 +357,10 @@ These are the physics-agnostic primitives every model consumes:
   `ResultStack`. Defines `PhaseReference` enum (`'travelling_wave'` /
   `'time_domain_native'`).
 - `absorption.py` — `Thorp`, `FrancoisGarrison`, `Biological`,
-  `ConstantAbsorption`. All implement `alpha_db_per_m(f, z)` and
-  `topopt_code()`. Models read `env.absorption` and emit the right AT
+  `ConstantAbsorption`. Callers use `alpha_db_per_m(f, z)`, which the base
+  class implements: it validates the frequency once for every model and
+  dispatches to `_alpha_db_per_m(f, z)`, the method a new subclass
+  overrides. All implement `topopt_code()`. Models read `env.absorption` and emit the right AT
   `TopOpt[4]` letter automatically.
 - `acoustics.py` — user-helper sound-speed / density / pekeris-root
   / SPL utilities. **Not** imported by the model wrappers; safe to
@@ -314,6 +376,22 @@ These are the physics-agnostic primitives every model consumes:
 - `metrics.py` — cross-model TL agreement helpers over a pair of 2-D
   `Field`s: `tl_rmse`, `tl_max_error`, `tl_bias`. Re-exported at
   `uacpy.metrics` by the top-level `metrics.py` shim.
+- `sediment.py` — grain size (Wentworth ϕ) → bulk geoacoustics. Distinct from
+  `data/sediment.py` (§7.1), which fetches ϕ; this converts it. It lives in
+  `core/` so `BoundaryProperties.from_grain_size` works without importing
+  `uacpy.data`.
+- `_beamforming.py` — the single Bartlett/MVDR numerical core behind both
+  `acoustic_signal.bartlett_spectrum` / `mvdr_spectrum` (steering vectors) and
+  `sonar.bartlett` / `mvdr` (replica banks). Change the algebra here, not in
+  either caller.
+- `_carrier_validate.py` — the shared input validators the carriers above call
+  (`bottom.py`, `ssp.py`, `environment.py`), so one wrong-shape message reads
+  the same wherever it comes from.
+- `_warn_frames.py` — `USER_FRAME_SKIP`, the tuple of package path prefixes
+  every `warnings.warn` in uacpy passes as `skip_file_prefixes` (§6.2). The
+  most widely imported module in `core/`: every subpackage warns through it.
+  Its docstring carries the trailing-separator and dropped-`.py` mechanics and
+  why `stacklevel` must not be combined with the skip walk.
 - `constants.py` — `DEFAULT_SOUND_SPEED`, `TL_MAX_DB`, `PRESSURE_FLOOR`,
   the broadband-grid defaults (`DEFAULT_BROADBAND_N_FREQS`,
   `DEFAULT_BROADBAND_BANDWIDTH_FACTOR`), and the phase-speed search
@@ -349,8 +427,10 @@ another's `/dev/shm`.
 
 ### 6.2 Logging — `uacpy/_log.py`
 
-Single output channel: `log_message(source, message, level='info')`.
-**Do not** use `print()` inside the package.
+Single output channel:
+`log_message(source, message, *, verbose=False, level='info')` — `verbose` is
+the caller's gate setting (below), `level` the severity of this message.
+**Do not** use `print()` inside the package: `_log.py` holds the only one.
 
 Verbose gate semantics (string OR bool, accepted by every model
 constructor and reader):
@@ -364,6 +444,26 @@ True  | 'info'                    →  + INFO
 Warnings go through the standard `warnings.warn(...)` machinery; uacpy
 installs a custom formatter at import (see `_uacpy_format_warning`) so
 they render compactly.
+
+Every warn site attributes itself to the **user's** call line, never to the
+uacpy frame that raised it — a warning that names a line inside the package
+tells the caller to change a knob without saying which of their own lines set
+it, and a `-W` filter keyed on their module never matches. Two forms do that,
+and every site in the package uses one of them:
+
+```python
+from uacpy.core._warn_frames import USER_FRAME_SKIP
+warnings.warn(msg, UserWarning, skip_file_prefixes=USER_FRAME_SKIP)   # preferred
+warnings.warn(msg, UserWarning, stacklevel=2)                         # fixed depth
+```
+
+`skip_file_prefixes` walks out to the first frame outside the package, so it
+survives a helper being inserted between the public function and the warn; a
+hand-counted `stacklevel` does not, and is for the sites whose depth is fixed
+by construction. **Never pass both** — the skip walk starts from the frame
+`stacklevel` already selected, and the two compose into a frame further out
+than either intends. A bare `warnings.warn(msg)` blames this package.
+`tests/test_warning_attribution.py` gates all three rules.
 
 ### 6.3 Stack-size bootstrapping — `uacpy/_stack.py`
 
@@ -404,7 +504,12 @@ objects (typically `Field`) or raw arrays.
 - `acoustic_signal/bands.py` — decidecade (ISO 18405) band levels;
   `timefreq.py` — Hilbert, spectrogram, CWT, Wigner-Ville, cepstrum;
   `channel.py`, `modal.py`, `noise_synthesis.py`, `system_id.py`.
-- `noise/noise.py` — `compute_windnoise`, Wenz curves, ship noise.
+- `noise/noise.py` — `compute_windnoise`, `WenzNoise`, and the per-mechanism
+  submodels (wind, shipping, rain, turbulence, thermal) the composite selects
+  between; `ship_radiated_noise.py` — ISO 17208 RNL and equivalent monopole
+  source level from a measured pass-by, a different quantity from the
+  shipping *ambient* term above; `marine_mammal.py` — Southall et al. 2019
+  auditory weighting.
 - `visualization/plots/` — every result/carrier plots via `.plot()`,
   which dispatches through `plot_result(result, env=…)` to the private
   per-type renderers (`_plot_rays`, `_plot_arrivals`, `_plot_mode_functions`,
@@ -413,12 +518,41 @@ objects (typically `Field`) or raw arrays.
   (`plot_bottom_properties`, `plot_mode_wavenumbers`, `plot_modes_heatmap`),
   composition (`compare`, `compare_models`, `plot_overview`, maps), and the
   raw-array DSP/comms plotters.
-- `visualization/style.py` — colour palette + font/sizing presets.
-  Touch this if you want to change the package look-and-feel globally.
+- `visualization/style.py` — colour palette: field colormaps, sediment
+  fill/hatch styles and source/receiver marker styles. No font or sizing
+  presets — importing it leaves `rcParams` untouched. Touch this if you want
+  to change the package look-and-feel globally.
 
 Convention: each result-type plotting function takes the `Result`
 positionally + an optional `env=` for seafloor / surface overlays +
 optional axis-control kwargs.
+
+**`core` reaches up into `visualization`, from inside function bodies.**
+`visualization/plots/` imports `uacpy.core` at module scope (it needs
+`Environment`, `Field` and the rest to render them), and `.plot()` on a core
+carrier or result calls back into it — eight edges, from `core/_grid.py`,
+`core/absorption.py`, `core/environment.py`, `core/ssp.py`,
+`core/results/_base.py` and `core/results/field.py`. Four of the eight name a
+private renderer (`_plot_range_profile`, `_plot_environment`, `_plot_ssp`,
+`_draw_result_credit`), so those names are depended on across a package
+boundary despite the underscore.
+
+Every one of those imports sits **inside the method that uses it**, and each
+carries a comment saying so. Hoisting one to file scope makes `import uacpy`
+raise `ImportError` from a partially initialised module, because
+`uacpy/__init__` eagerly loads `uacpy.core`; the failure is immediate and
+loud, and `tests/test_lazy_imports.py` catches it as well, since that test
+asserts a cold `import uacpy` leaves matplotlib out of `sys.modules`.
+
+Two consequences to keep in mind when touching either side. Renaming one of
+the four private renderers means editing its `core` caller in the same change
+(`tests/test_carrier_plot_methods.py` and `tests/test_visualization.py` fail
+otherwise). And `core` cannot be read, split or vendored without the plotting
+stack, even though nothing else in `core` needs matplotlib. Removing the eight
+edges would make `core` a sink but would *not* make the package graph acyclic:
+a 19-module SCC inside `uacpy.data` and a 3-module one across
+`core.results` / `core.results.field` / `core.results.modes` remain either
+way.
 
 ### 7.1 On-demand data layer (`uacpy/data/`)
 
@@ -438,8 +572,9 @@ downloaded by `install.sh --data`, `*_live.py` calls a web service:
 - `bathymetry.py` — GEBCO via OpenTopoData (`fetch_bathy`, `fetch_bathy_transect`).
 - `sound_speed.py` — WOA23 (`fetch_ssp`, `fetch_ssp_transect`, `fetch_ts_profile`)
   + the shared `assemble_range_dependent(columns, ranges)` helper.
-- `copernicus.py` — Copernicus Marine operational SSP (`copernicusmarine` core
-  dep, lazy-imported; needs a free Copernicus account + `copernicusmarine login`).
+- `copernicus.py` — Copernicus Marine operational SSP (`copernicusmarine` is an
+  optional extra, `pip install -e ".[copernicus]"`, lazy-imported; needs a free
+  Copernicus account + `copernicusmarine login`).
 - `sediment.py` — pure ϕ→geoacoustic conversion + `range_dependent_bottom_along`.
 - `seabed.py` — EMODnet (CC-BY) and Diesing (CC-BY) seabed substrate.
 - `sources.py` — the **data-source catalogue** (`SOURCES`, licences, citations).
@@ -522,16 +657,24 @@ Markers (registered in `pyproject.toml`):
 - `benchmark` — validates output against a closed-form analytic or
   canonical published reference.
 
-`test_documentation.py` is the docs gate: it imports `docs/check_links.py`
-and `docs/check_structure.py` and runs them over `docs/`, so a dead
-cross-reference, an unbalanced fence or an unparseable code sample fails the
-suite. Pure-Python, ~1 s, no marker. Figure regeneration
-(`python docs/generate_model_figures.py`) stays manual — it needs the native
-binaries and runs for minutes.
+`test_documentation.py` is the docs gate. It imports `docs/check_links.py` and
+`docs/check_structure.py` and runs them over `docs/` — dead link, dead section
+anchor, unbalanced fence, unparseable sample — and then holds the prose to the
+code: the §7 capability matrix and §18 defaults in `DOCUMENTATION.md`, the
+model pages' own `| Name | Default |` tables, the §17 examples index, the
+`models/README.md` run-mode matrix, worked-example ↔ figure-script
+containment, and every `uacpy.…` name and keyword argument used by a
+documented sample or an example script. Pure-Python, a few seconds, no marker.
+Figure regeneration (`python docs/generate_model_figures.py`) stays manual —
+it needs the native binaries and runs for minutes. Regenerating into a scratch
+directory and pixel-diffing against the committed PNGs is how figure staleness
+gets measured; mtime says nothing.
 
-`tests/conftest.py` autouse fixtures: force `matplotlib.use("Agg")`,
-seed `numpy.random` to `0xACED`, close all figures after each test,
-rewrite `tempfile.gettempdir()` to the per-test `tmp_path`.
+`tests/conftest.py` pins `matplotlib.use("Agg")` at import — before any test
+can import matplotlib — and adds three **autouse** fixtures: reseed
+`numpy.random` to `0xACED` before each test (worksteal means files do not run
+in order), close all figures after each test, and rewrite
+`tempfile.gettempdir()` to the per-test `tmp_path`.
 
 Lint (CI parity — real-bug subset only):
 
@@ -574,6 +717,22 @@ Every modification to a vendored source must:
    (Pekeris / Munk / canonical case agreement within tolerance). The
    README roadmap calls this out — silent numerical drift in vendored
    sources is the single biggest correctness risk in the project.
+3. Be followed by a re-resolution of every citation into the patched file.
+   An inserted or deleted line shifts every `file.f90:NNN` address below it,
+   and the citation gates cannot see that: they check that a target carries
+   code, not that it carries the *right* code, so a drifted address that
+   lands on any other line of code passes silently. The only drift they can
+   read without understanding the claim is a target that is blank, past the
+   file's last line, or nothing but the end of a block (`end if`,
+   `continue`) — measured on one such patch, they saw 2 of its 26 shifted
+   addresses. Re-resolve each one from what the citing comment **claims** —
+   read the sentence, find the Fortran that supports it, cite that — rather
+   than by adding the offset or by quoting whatever now sits at the old
+   address; on an already-drifted pin both of those launder the drift into a
+   form nothing can detect.
+   `command grep -rn 'file\.f90:[0-9]' uacpy --include='*.py'` enumerates
+   them; mind the bare `:NNN` continuations beside a full citation, which the
+   gate counts as skipped rather than checked.
 
 Touching the vendored sources is a re-validation event, **not** a
 refactor.
@@ -587,6 +746,13 @@ Worth knowing:
   C++ port; `cuda` adds the CUDA build (hard-errors if `nvcc` is
   absent).
 - `--oases yes|no` — downloads from acoustics.mit.edu when `yes`.
+- `--data LIST` — fills `./data_cache` for the offline `*_local.py` fetchers
+  (§7.1); `LIST` is a comma list of dataset ids (`gebco`, `woa23`, `sediment`,
+  `emodnet`, `coastline`, `globsed`, `crust1`, `diesing`, `seaice`, `glodap`,
+  `wind`, `graw`) or `all`. Several fetchers' remediation messages name this
+  flag, so it is the one to know when a cached-grid test skips.
+- `--no-models` (`--data-only`) — skip every native build; pure-Python
+  install, no compilers needed.
 - `--force` — full clean rebuild of every selected component.
 
 ---
@@ -605,6 +771,45 @@ Worth knowing:
   evolution ("this replaces the old…", "after the fix…"). Do **not**
   pin to current line numbers in nearby files; cite source-of-truth
   files (`AttenMod.f90:78`) instead.
+  - A uacpy file moves every time anyone edits above the citation, so
+    name the symbol (`write_ssp_section`, `Bellhop.run`) rather than
+    the line. `test_no_comment_pins_a_line_number_in_another_python_file`
+    enforces this across the package **and** `uacpy/tests/`.
+  - A line under `uacpy/third_party/` is a stable address only while
+    the patch set above it is unchanged. That tree is **not** pristine:
+    `third_party/MODIFICATIONS.md` documents patches uacpy applies
+    (a 12-line `BLOCK` inserted in `KrakenField/field.f90`, the
+    `misc/interpolation.f90` rewrite, RAM kind promotions and enlarged
+    array dimensions). Adding or dropping a patch shifts every citation
+    below its insertion point in that file, so re-check them alongside
+    the patch — a re-vendor is not the only event that invalidates a
+    line number.
+  - Source that is *not* vendored here cannot be checked by anything in
+    the repo, so mark it: prefix the address with `external:`
+    (`external:rx.c:413` for the CMRE janus-c reference `comms/janus.py`
+    transcribes). `test_vendored_citations_resolve_and_single_line_targets_carry_code`
+    fails on an unmarked address that resolves to no vendored file, on a
+    marked one that *does* resolve, and on a single-line target that is
+    blank; it reads every element of a comma-continued address
+    (`RefCoef.f90:139-140,146-147`) separately, and reports how many
+    citations it skipped as external or as ambiguous (a bare basename
+    shipping twice, e.g. `sspMod.f90`) so the gate's coverage stays
+    visible.
+- A leading underscore means **not public API** — it does not mean
+  module-private. Underscore-prefixed names are imported across *package*
+  boundaries in several directions, and each such import is a deliberate
+  internal dependency rather than an accident. Which ones, and why each is
+  not public, is recorded in one place: `_CROSS_PACKAGE_PRIVATES` in
+  `tests/test_packaging.py`, enforced by
+  `test_no_undocumented_private_name_crosses_a_package_boundary`. Read the
+  list there rather than a summary here — a count or a set of directions
+  written into this prose is a second copy that nothing checks, and it drifts.
+  To add a cross-package private, add it to that list with its reason; the
+  gate fails in both directions, so an entry that stops being imported has to
+  be dropped too. Renaming a private that appears in the list is a
+  cross-package change and needs its consumers updated in the same edit. The
+  gate reads `from … import _name` only — a private reached as an attribute
+  (`module._helper()`) does not appear in it.
 - No backwards-compatibility shims. Change code directly; uacpy is
   pre-1.0 and explicitly LLM-bootstrapped per the README roadmap.
 - One PR = one logical change. Mention which physics regime / file

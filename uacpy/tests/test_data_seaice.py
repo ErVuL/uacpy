@@ -1,6 +1,6 @@
 """Tests for the NSIDC sea-ice climatology backend (uacpy.data.seaice_local)."""
 
-import pickle
+import warnings
 
 import numpy as np
 import pytest
@@ -18,10 +18,21 @@ def test_decode_to_fraction():
 
 
 class _FakeTF:
-    def __init__(self, x, y):
-        self._x, self._y = x, y
+    """Stands in for a ``pyproj.Transformer``, forward and inverse.
 
-    def transform(self, lon, lat):
+    The forward map sends every coordinate to one projected point, so it has
+    no true inverse; ``direction='INVERSE'`` returns the seed lon/lat the fake
+    was built to represent. That is what ``_cell_center`` calls to name a
+    substituted cell, and no test here asserts on the coordinates it reports.
+    """
+
+    def __init__(self, x, y, lon=0.0, lat=85.0):
+        self._x, self._y = x, y
+        self._lon, self._lat = lon, lat
+
+    def transform(self, a, b, direction=None):
+        if direction == 'INVERSE':
+            return self._lon, self._lat
         return self._x, self._y
 
 
@@ -188,7 +199,7 @@ def test_sea_ice_surface_gates_on_threshold():
     # *Computational Ocean Acoustics*, quote two attenuation pairs for the same
     # 3500/1800 m/s, 900 kg/m³ canopy: 0.4/1.0 dB/λ for the Arctic propagation
     # example and 0.5/1.0 dB/λ elsewhere. uacpy implements 0.4
-    # (``core/constants.py:66``), so that is what this pins.
+    # (``SEA_ICE_COMPRESSIONAL_ATTENUATION``), so that is what this pins.
     bp = seaice_local.sea_ice_surface(0.15)
     assert bp is not None and bp.acoustic_type == 'half-space'
     assert (bp.sound_speed, bp.shear_speed, bp.density) == (3500.0, 1800.0, 0.9)
@@ -220,6 +231,128 @@ def test_download_builds_climatology(tmp_path, monkeypatch):
                         lambda b: np.full((4, 4), 600, dtype=np.uint16))
     out = seaice_local.download_seaice_db(cache_dir=str(tmp_path), years=[2023])
     assert out.exists()
-    climo = pickle.load(open(out, 'rb'))
-    assert climo['N'].shape == (12, 4, 4)
-    assert np.allclose(climo['N'], 0.6)          # 600/1000
+    with np.load(out, allow_pickle=False) as climo:
+        assert climo['N'].shape == (12, 4, 4)
+        assert np.allclose(climo['N'], 0.6)      # 600/1000
+
+
+def test_a_full_climatology_builds_without_a_coverage_warning(tmp_path,
+                                                              monkeypatch):
+    """Every requested grid decodes, so nothing is skipped and the build is
+    silent — the warning below must not fire on a healthy download."""
+    pytest.importorskip('tifffile')
+    monkeypatch.setattr(seaice_local, 'http_get', lambda url, **kw: b'TIFF')
+    monkeypatch.setattr('tifffile.imread',
+                        lambda b: np.full((4, 4), 600, dtype=np.uint16))
+    with warnings.catch_warnings():
+        warnings.simplefilter('error')           # any warning fails the test
+        seaice_local.download_seaice_db(cache_dir=str(tmp_path),
+                                        years=[2022, 2023])
+
+
+def test_a_partial_climatology_says_how_thin_it_is(tmp_path, monkeypatch):
+    """A grid that will not fetch or decode is skipped, so a month can be
+    averaged over fewer years than were requested. Only a month with nothing
+    at all raises; a partial one is a valid but thinner climatology, and
+    silence would present a one-year mean as the two-year mean asked for."""
+    pytest.importorskip('tifffile')
+    monkeypatch.setattr(seaice_local, 'http_get', lambda url, **kw: b'TIFF')
+
+    calls = {'n': 0}
+
+    def flaky(buf):
+        # Fail March of the first year only: that month averages 1 of 2 years
+        # while the other eleven get both, so the shortfall is per-month.
+        calls['n'] += 1
+        if calls['n'] == 3:
+            raise ValueError('truncated TIFF')
+        return np.full((4, 4), 600, dtype=np.uint16)
+
+    monkeypatch.setattr('tifffile.imread', flaky)
+    with pytest.warns(UserWarning, match=r'3: 1/2'):
+        out = seaice_local.download_seaice_db(cache_dir=str(tmp_path),
+                                              years=[2022, 2023])
+    with np.load(out, allow_pickle=False) as climo:
+        assert climo['N'].shape == (12, 4, 4)    # still a usable climatology
+
+
+def test_sea_ice_surface_transect_warns_once_for_no_data_waypoints(monkeypatch):
+    def fake_transect(start, end, *, date=None, month=None, n_points=6):
+        conc = np.full(n_points, 0.9)
+        conc[:2] = np.nan                      # land clipped along the track
+        return np.linspace(0.0, 1.0e5, n_points), conc
+
+    monkeypatch.setattr(seaice_local, 'fetch_sea_ice_concentration_transect',
+                        fake_transect)
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter('always')
+        surf = seaice_local.sea_ice_surface_transect(
+            (85.0, 0.0), (60.0, 0.0), month=3, n_points=8)
+    hits = [w for w in rec if 'no NSIDC concentration' in str(w.message)]
+    assert len(hits) == 1
+    assert '2 of 8' in str(hits[0].message)
+    assert 'not measured' in str(hits[0].message)
+    # The no-data waypoints classify as open water (vacuum), not as ice.
+    assert surf.at(range=0).acoustic_type == 'vacuum'
+
+
+def test_sea_ice_surface_transect_with_full_coverage_does_not_warn(monkeypatch):
+    def fake_transect(start, end, *, date=None, month=None, n_points=6):
+        conc = np.where(np.arange(n_points) < n_points // 2, 0.9, 0.0)
+        return np.linspace(0.0, 1.0e5, n_points), conc
+
+    monkeypatch.setattr(seaice_local, 'fetch_sea_ice_concentration_transect',
+                        fake_transect)
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter('always')
+        seaice_local.sea_ice_surface_transect(
+            (85.0, 0.0), (60.0, 0.0), month=3, n_points=8)
+    assert not [w for w in rec if 'no NSIDC concentration' in str(w.message)]
+
+
+def test_sea_ice_names_the_cell_it_substituted(monkeypatch):
+    """The hop to a neighbouring observed cell is up to 2 cells (50 km) and
+    changes the answer, so it warns like ``sound_speed._nearest_wet_column``."""
+    pytest.importorskip('pyproj')
+    from uacpy.data import seaice_local
+    grid = np.full((12, 5, 5), np.nan, dtype=np.float32)
+    grid[:, 2, 3] = 0.8                       # one observed cell, east of centre
+    model = {'tf': {h: seaice_local._pyproj_transformer(
+        seaice_local._GRID[h]['epsg']) for h in ('N', 'S')},
+        'N': grid, 'S': grid}
+    monkeypatch.setattr(seaice_local, '_model', lambda: model)
+    monkeypatch.setattr(seaice_local, '_rowcol',
+                        lambda m, hemi, lat, lon: (2, 2))
+    with pytest.warns(UserWarning, match='nearest observed cell'):
+        conc = seaice_local.fetch_sea_ice_concentration((85.0, 0.0), month=3)
+    assert conc == pytest.approx(0.8)
+
+
+def test_sea_ice_direct_hit_is_silent(monkeypatch):
+    pytest.importorskip('pyproj')
+    from uacpy.data import seaice_local
+    grid = np.full((12, 5, 5), 0.8, dtype=np.float32)
+    model = {'tf': {h: seaice_local._pyproj_transformer(
+        seaice_local._GRID[h]['epsg']) for h in ('N', 'S')},
+        'N': grid, 'S': grid}
+    monkeypatch.setattr(seaice_local, '_model', lambda: model)
+    monkeypatch.setattr(seaice_local, '_rowcol',
+                        lambda m, hemi, lat, lon: (2, 2))
+    with warnings.catch_warnings():
+        warnings.simplefilter('error')
+        assert seaice_local.fetch_sea_ice_concentration(
+            (85.0, 0.0), month=3) == pytest.approx(0.8)
+
+
+def test_sea_ice_canopy_roughness_is_opt_in():
+    """The published 0.4/1.0 dB/λ parameters describe a smooth plate, so the
+    default stays 0; a caller who wants the scattering passes a roughness."""
+    from uacpy.data.seaice_local import (SEA_ICE_TYPICAL_ROUGHNESS_M,
+                                         sea_ice_surface)
+    smooth = sea_ice_surface(0.9)
+    rough = sea_ice_surface(0.9, roughness=SEA_ICE_TYPICAL_ROUGHNESS_M)
+    assert not smooth.roughness
+    assert rough.roughness == pytest.approx(SEA_ICE_TYPICAL_ROUGHNESS_M)
+    for field in ('sound_speed', 'shear_speed', 'density', 'attenuation',
+                  'shear_attenuation'):
+        assert getattr(smooth, field) == getattr(rough, field)

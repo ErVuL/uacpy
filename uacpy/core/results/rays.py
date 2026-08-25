@@ -200,8 +200,16 @@ class Arrivals(Result):
                  len(self.by_receiver[0]) if self.by_receiver else 0,
                  len(self.by_receiver[0][0]) if self.by_receiver
                  and self.by_receiver[0] else 0)
-        keys = ('delays', 'delays_imag', 'amplitudes', 'phases',
-                'n_top_bounces', 'n_bot_bounces', 'src_angles', 'rcv_angles')
+        # The per-cell record ``io/oalib_reader.py`` builds when it parses a
+        # ``.arr``, key for key and dtype for dtype. A rebuilt cell that
+        # differs in either is one a consumer of ``by_receiver`` — e.g.
+        # ``models.bellhop.delayandsum``, which reads ``cell['n_arrivals']``
+        # and indexes the columns — handles on the freshly-read path and not
+        # on the filtered/sorted one.
+        keys = {'delays': 'float64', 'delays_imag': 'float64',
+                'amplitudes': 'float64', 'phases': 'float64',
+                'n_top_bounces': 'int32', 'n_bot_bounces': 'int32',
+                'src_angles': 'float64', 'rcv_angles': 'float64'}
         cells = [[[{k: [] for k in keys} for _ in range(shape[2])]
                   for _ in range(shape[1])] for _ in range(shape[0])]
         for a in arrivals:
@@ -217,8 +225,17 @@ class Arrivals(Result):
             cell['n_bot_bounces'].append(a['n_bot_bounces'])
             cell['src_angles'].append(a['src_angle'])
             cell['rcv_angles'].append(a['rcv_angle'])
-        return [[[{k: np.asarray(v) for k, v in cell.items()}
-                  for cell in by_depth] for by_depth in by_src]
+        def _finish(cell):
+            # ``n_arrivals`` is a Python ``int`` on the reader's cell, so it
+            # is written after the array pass: inside it, ``np.asarray`` would
+            # make it a 0-d array and the key sets would agree while the value
+            # types did not.
+            out = {k: np.asarray(cell[k], dtype=dtype)
+                   for k, dtype in keys.items()}
+            out['n_arrivals'] = int(len(out['delays']))
+            return out
+
+        return [[[_finish(cell) for cell in by_depth] for by_depth in by_src]
                 for by_src in cells]
 
     def filter(self, predicate) -> 'Arrivals':

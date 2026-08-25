@@ -14,6 +14,10 @@ from uacpy.acoustic_signal import (
     shading_taper,
 )
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.acoustic_signal.arrays import beamform
+
+#: The scalars every sample-rate / dimension guard must refuse.
+BAD_SCALARS = [0.0, -100.0, np.nan, np.inf]
 
 
 FREQ = 1000.0
@@ -181,7 +185,7 @@ class TestPowerlessCovariance:
         R = sample_covariance(np.zeros((8, 200), dtype=complex))
         assert np.all(bartlett_spectrum(R, self._rig()) == 0.0)
 
-    def test_a_powered_rank_deficient_covariance_still_resolves(self):
+    def test_a_powered_rank_deficient_covariance_resolves(self):
         """The case the loading exists for must keep working: fewer snapshots
         than elements, but non-zero trace."""
         from uacpy.acoustic_signal.arrays import (
@@ -202,7 +206,7 @@ def test_look_direction_agrees_with_an_independently_propagated_field():
 
     The field comes from Bellhop, so its depth-phase sign is the one the solver
     produces under the Acoustics-Toolbox ``exp(+i*omega*t)`` convention
-    (``KrakenField/EvaluateMod.f90:41``) with depth positive down
+    (``KrakenField/EvaluateMod.f90:42``) with depth positive down
     (``Bellhop/bellhop.f90:453``), rather than one this module assumes. A test
     that builds its snapshots from :func:`steering_vectors` cannot detect a
     mirrored look direction, because the same convention appears on both sides
@@ -602,3 +606,63 @@ class TestMusicModelOrder:
         _, p2 = self._mainlobe_peaks(2)
         contrast = lambda p: 10.0 * np.log10(p.max() / np.median(p))
         assert contrast(p2) - contrast(p1) > 15.0
+
+
+class TestArrayGuards:
+    @pytest.mark.parametrize("bad", BAD_SCALARS)
+    def test_steering_vectors_bad_sound_speed_raises(self, bad):
+        with pytest.raises(ConfigurationError,
+                           match="c must be > 0 m/s and finite"):
+            steering_vectors([0.0, 0.75], [0.0], 100.0, bad)
+
+    @pytest.mark.parametrize("bad", BAD_SCALARS)
+    def test_steering_vectors_bad_frequency_raises(self, bad):
+        with pytest.raises(ConfigurationError,
+                           match="frequency must be > 0 Hz and finite"):
+            steering_vectors([0.0, 0.75], [0.0], bad)
+
+    def test_beamform_rejects_zero_sound_speed(self):
+        with pytest.raises(ConfigurationError, match="c must be > 0 m/s"):
+            beamform(np.ones((2, 3)), np.array([0.0, 0.75]), 100.0, c=0.0)
+
+    @pytest.mark.parametrize("bad", [-0.1, np.nan])
+    def test_sample_covariance_negative_or_nan_loading_raises(self, bad):
+        # A negative loading was skipped by the `> 0` application branch, so
+        # the caller got an unregularised R that looked regularised.
+        x = np.ones((2, 4), dtype=complex)
+        with pytest.raises(ConfigurationError,
+                           match="diagonal_loading must be >= 0"):
+            sample_covariance(x, diagonal_loading=bad)
+
+    def test_positive_loading_scales_the_trace_by_one_plus_dl(self):
+        x = (np.random.default_rng(7).standard_normal((3, 16))
+             + 1j * np.random.default_rng(8).standard_normal((3, 16)))
+        t0 = np.trace(sample_covariance(x)).real
+        t1 = np.trace(sample_covariance(x, diagonal_loading=0.5)).real
+        assert t1 == pytest.approx(1.5 * t0)
+
+
+class TestBeamformValidatesOwnArguments:
+    @pytest.mark.parametrize("bad_c", [0.0, np.inf])
+    def test_zero_or_infinite_sound_speed_error_names_beamform(self, bad_c):
+        with pytest.raises(ConfigurationError,
+                           match="beamform: c must be > 0 m/s and finite"):
+            beamform(np.ones((4, 3), dtype=complex), np.arange(4.0),
+                     100.0, c=bad_c)
+
+    def test_negative_frequency_error_names_beamform(self):
+        with pytest.raises(ConfigurationError,
+                           match="beamform: frequency must be > 0 Hz and "
+                                 "finite"):
+            beamform(np.ones((4, 3), dtype=complex), np.arange(4.0), -5.0)
+
+    def test_steering_vectors_keeps_its_own_sound_speed_guard(self):
+        with pytest.raises(ConfigurationError,
+                           match="steering_vectors: c must be > 0 m/s and "
+                                 "finite"):
+            steering_vectors(np.arange(4.0), [0.0], 100.0, c=0.0)
+
+    def test_valid_arguments_beamform(self):
+        snr, angles, peak = beamform(np.ones((4, 3), dtype=complex),
+                                     np.arange(4.0), 100.0)
+        assert snr.shape == (angles.size, 3) and np.isfinite(peak)

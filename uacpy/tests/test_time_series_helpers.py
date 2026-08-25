@@ -19,7 +19,7 @@ The synthetic ``Field`` fixtures below all carry
 ``phase_reference=TRAVELLING_WAVE``, which is a precondition rather than
 decoration: it declares that ``H(f)`` still carries the engineering
 propagator ``exp(-i k0 r)``, so ``2*Re[ifft(H)]`` puts the causal arrival
-at ``t = r/c0`` (``core/results/_base.py:37-41``). The synthesis helpers
+at ``t = r/c0`` (``PhaseReference.TRAVELLING_WAVE``). The synthesis helpers
 branch on it, and a fixture tagged ``TIME_DOMAIN_NATIVE`` would exercise
 a different code path.
 """
@@ -393,7 +393,7 @@ class TestToTimeTraceDefaultCell:
                  / float(np.max(np.abs(other.data))))
         assert ratio == pytest.approx(11.0 / 2.0, rel=1e-6)
 
-    def test_explicit_cell_still_wins(self):
+    def test_explicit_cell_wins(self):
         trace = self._tf().to_time_trace(depth=30.0, range=1000.0)
         assert trace.pinned['depth'] == 30.0
         assert trace.pinned['range'] == 1000.0
@@ -503,6 +503,79 @@ class TestSynthesisErrorsNameTheEntryPoint:
                            match="synthesize_time_series: need at least 2"):
             self._tf_one_freq().synthesize_time_series(
                 source_waveform=wf, sample_rate=FS)
+
+    @staticmethod
+    def _tf_nan_cell_no_stamped_speed():
+        """A Field that trips both shared synthesis warnings at once.
+
+        The second range cell is entirely NaN, and the metadata carries no
+        ``c_max``/``c0``, so ``_clean_cell_spectra`` and the window-anchor
+        branch of ``_ifft_to_trace`` both fire on either entry point."""
+        from uacpy.core.results import Field, PhaseReference
+        freqs = np.linspace(100.0, 500.0, 9)
+        data = np.ones((1, 2, freqs.size), dtype=complex)
+        data[0, 1, :] = np.nan
+        return Field(
+            data=data,
+            coords={'depth': np.array([20.0]),
+                    'range': np.array([1000.0, 2000.0]),
+                    'frequency': freqs},
+            model='Synthetic', source_depths=np.array([5.0]),
+            frequencies=freqs,
+            phase_reference=PhaseReference.TRAVELLING_WAVE,
+        )
+
+    def test_to_time_trace_warnings_carry_its_label(self):
+        with warnings.catch_warnings(record=True) as record:
+            warnings.simplefilter('always')
+            self._tf_nan_cell_no_stamped_speed().to_time_trace(
+                depth=20.0, range=2000.0)
+        messages = [str(w.message) for w in record]
+        assert any('entirely NaN' in m for m in messages), messages
+        assert any('stamped no sound speed' in m for m in messages), messages
+        assert all(m.startswith('to_time_trace: ') for m in messages), messages
+
+    def test_synthesize_time_series_warnings_carry_its_label(self):
+        wf = np.zeros(64)
+        wf[:8] = 1.0
+        with warnings.catch_warnings(record=True) as record:
+            warnings.simplefilter('always')
+            self._tf_nan_cell_no_stamped_speed().synthesize_time_series(
+                source_waveform=wf, sample_rate=4000.0)
+        messages = [str(w.message) for w in record]
+        assert any('entirely NaN' in m for m in messages), messages
+        assert any('stamped no sound speed' in m for m in messages), messages
+        assert all(m.startswith('synthesize_time_series: ') for m in messages), \
+            messages
+
+    @staticmethod
+    def _tf_c0_only_short_window():
+        """A Field whose window-start estimate carries the fast/slow spread.
+
+        ``c0`` is stamped and ``c_max`` is not, and 5 % of the 66.7 s travel
+        time exceeds the 0.01 s of lead a 0.02 s window offers, which is the
+        third shared diagnostic in ``_ifft_to_trace``."""
+        from uacpy.core.results import Field, PhaseReference
+        freqs = np.linspace(100.0, 500.0, 9)          # Δf = 50 Hz
+        return Field(
+            data=np.ones((1, 1, freqs.size), dtype=complex),
+            coords={'depth': np.array([20.0]),
+                    'range': np.array([100000.0]),
+                    'frequency': freqs},
+            model='Synthetic', source_depths=np.array([5.0]),
+            frequencies=freqs,
+            phase_reference=PhaseReference.TRAVELLING_WAVE,
+            metadata={'c0': C_WATER},
+        )
+
+    def test_short_window_warning_carries_the_entry_points_label(self):
+        with warnings.catch_warnings(record=True) as record:
+            warnings.simplefilter('always')
+            self._tf_c0_only_short_window().to_time_trace(
+                depth=20.0, range=100000.0)
+        messages = [str(w.message) for w in record]
+        assert any('synthesis window is short' in m for m in messages), messages
+        assert all(m.startswith('to_time_trace: ') for m in messages), messages
 
 
 class TestDFTWraparoundWarning:
@@ -716,6 +789,202 @@ class TestSourceSpectrumAtArbitraryFrequencies:
             _source_spectrum_at(wf, fs, grid, _max_elems=1000),
             _source_spectrum_at(wf, fs, grid),
             rtol=1e-12, atol=1e-15)
+
+
+def _outer_product_dtft(wf, fs, freqs):
+    """The dense evaluation the chirp-z path stands in for, kept as reference.
+
+    Same sum, same out-of-band rule, one frequency per row of an explicit
+    phase matrix.
+    """
+    wf = np.asarray(wf, dtype=np.float64).ravel()
+    freqs = np.atleast_1d(np.asarray(freqs, dtype=np.float64))
+    out = np.zeros(freqs.size, dtype=np.complex128)
+    sel = np.flatnonzero((freqs >= 0.0) & (freqs <= 0.5 * fs))
+    if sel.size:
+        phase = np.exp(-2j * np.pi * np.outer(
+            freqs[sel], np.arange(wf.size, dtype=np.float64)) / fs)
+        out[sel] = phase @ wf
+    return out / fs
+
+
+def _rel_norm(ref, got):
+    denom = np.linalg.norm(ref)
+    return float(np.linalg.norm(np.asarray(ref) - np.asarray(got)) / denom
+                 ) if denom else float(np.linalg.norm(np.asarray(ref) - got))
+
+
+class TestSourceSpectrumChirpZEqualsTheOuterProduct:
+    """A uniform ascending frequency grid is a chirp-z contour — with
+    ``z_k = a*w**-k``, ``a = exp(2i*pi*f0/fs)`` and ``w = exp(-2i*pi*df/fs)``,
+    scipy's ``czt`` sums exactly the DTFT ``_source_spectrum_at`` documents,
+    by FFT convolution instead of an (n_freq x n_sample) phase matrix.
+
+    Two things then need pinning, and neither is the speed. The transform has
+    to return what the dense sum returns, on the ordinary grids and on the
+    awkward ones (a single bin, a grid crossing or clearing Nyquist, negative
+    frequencies, a one- or two-sample waveform). And it must NOT be
+    unconditional: the contour passes through the requested frequencies only
+    where they are uniformly spaced, while the function's contract is
+    arbitrary ones — a caller passing ``[-10, fs, 2*fs]`` is in this same
+    file.
+    """
+
+    CASES = [
+        # (label, n_wf, fs, grid)
+        ('native rfft grid', 256, 2000.0, np.fft.rfftfreq(256, 1 / 2000.0)),
+        ('half-bin offset', 256, 2000.0,
+         np.fft.rfftfreq(256, 1 / 2000.0)[:-1] + 2000.0 / 512),
+        ('finer than native', 256, 2000.0,
+         np.linspace(0.0, 1000.0, 1024)),
+        ('narrow in-band band', 400, 8000.0, np.linspace(50.0, 2000.0, 512)),
+        ('single bin in band', 512, 1000.0, np.array([100.0])),
+        ('single bin at zero', 512, 1000.0, np.array([0.0])),
+        ('single bin out of band', 512, 1000.0, np.array([9e9])),
+        ('one-sample waveform', 1, 1000.0, np.linspace(0.0, 500.0, 33)),
+        ('two-sample waveform', 2, 1000.0, np.linspace(0.0, 500.0, 9)),
+        ('grid straddles nyquist', 128, 1000.0, np.linspace(0.0, 900.0, 19)),
+        ('grid clears nyquist', 128, 1000.0, np.linspace(600.0, 900.0, 7)),
+        ('grid reaches below zero', 128, 1000.0,
+         np.linspace(-200.0, 400.0, 13)),
+    ]
+
+    @staticmethod
+    def _waveform(n, seed=17):
+        return np.random.default_rng(seed).standard_normal(n)
+
+    @pytest.mark.parametrize('label,n_wf,fs,grid', CASES,
+                             ids=[c[0] for c in CASES])
+    def test_it_matches_the_outer_product(self, label, n_wf, fs, grid):
+        from uacpy.core.results.field import _source_spectrum_at
+        wf = self._waveform(n_wf)
+        ref = _outer_product_dtft(wf, fs, grid)
+        got = _source_spectrum_at(wf, fs, grid)
+        assert got.shape == ref.shape
+        assert _rel_norm(ref, got) < 1e-9
+        # The out-of-band zeros are exact zeros on both routes, not small.
+        np.testing.assert_array_equal(got == 0, ref == 0)
+
+    def test_an_all_zero_waveform_returns_exact_zeros(self):
+        from uacpy.core.results.field import _source_spectrum_at
+        got = _source_spectrum_at(np.zeros(64), 1000.0,
+                                  np.linspace(0.0, 400.0, 11))
+        assert np.array_equal(got, np.zeros(11, dtype=np.complex128))
+
+    def test_a_non_uniform_grid_keeps_the_dense_sum(self):
+        from uacpy.core.results.field import _source_spectrum_at, _chirp_step
+        wf, fs = self._waveform(256), 2000.0
+        grid = np.geomspace(20.0, 900.0, 64)          # ascending, not uniform
+        np.testing.assert_allclose(
+            _source_spectrum_at(wf, fs, grid),
+            _outer_product_dtft(wf, fs, grid), rtol=1e-13, atol=1e-16)
+        assert _chirp_step(grid, wf.size, fs) is None
+
+    def test_the_dense_fallback_chunks_over_frequency(self):
+        # ``_max_elems`` bounds the phase matrix, and only the dense path
+        # builds one now — so the block arithmetic is exercised on a grid the
+        # contour cannot serve rather than on the uniform one above, where
+        # both calls would take the chirp-z route and agree vacuously.
+        from uacpy.core.results.field import _source_spectrum_at
+        wf, fs = self._waveform(256), 2000.0
+        grid = np.geomspace(20.0, 900.0, 137)
+        np.testing.assert_allclose(
+            _source_spectrum_at(wf, fs, grid, _max_elems=1000),
+            _source_spectrum_at(wf, fs, grid), rtol=1e-13, atol=1e-16)
+
+    def test_the_chirp_contour_would_be_wrong_on_that_grid(self):
+        # Why the fallback is not decoration: the contour is anchored at f[0]
+        # and steps by a constant, so on a non-uniform grid it evaluates the
+        # spectrum at frequencies nobody asked for.
+        from scipy.signal import czt
+        wf, fs = self._waveform(256), 2000.0
+        grid = np.geomspace(20.0, 900.0, 64)
+        df = (grid[-1] - grid[0]) / (grid.size - 1)
+        contour = czt(wf, m=grid.size, w=np.exp(-2j * np.pi * df / fs),
+                      a=np.exp(2j * np.pi * grid[0] / fs)) / fs
+        assert _rel_norm(_outer_product_dtft(wf, fs, grid), contour) > 0.1
+
+    def test_a_grid_uniform_only_to_a_loose_tolerance_is_refused(self):
+        # The contour has to LAND on the frequencies, not merely resemble
+        # them: a drift that a spacing-ratio test would wave through is a
+        # phase error growing with waveform length.
+        from uacpy.core.results.field import _chirp_step
+        grid = np.linspace(100.0, 900.0, 401)
+        grid[200] += 1e-4                       # 1e-7 of the span
+        assert _chirp_step(grid, 4096, 8000.0) is None
+        assert _chirp_step(np.linspace(100.0, 900.0, 401), 4096, 8000.0) \
+            == pytest.approx(2.0)
+
+    def test_the_synthesised_trace_matches_the_dense_sum(self, monkeypatch):
+        # End to end through the public entry point, against the same Field
+        # synthesised with the dense sum forced back in.
+        import uacpy.core.results.field as F
+        from uacpy.core.results import Field, PhaseReference
+        rng = np.random.default_rng(4)
+        freqs = np.linspace(50.0, 2000.0, 256)
+        data = ((rng.standard_normal((2, 3, freqs.size)) +
+                 1j * rng.standard_normal((2, 3, freqs.size)))
+                / (1.0 + np.arange(freqs.size)))
+        tf = Field(data=data,
+                   coords={'depth': np.array([10.0, 20.0]),
+                           'range': np.array([100.0, 200.0, 300.0]),
+                           'frequency': freqs},
+                   model='Synthetic', source_depths=np.array([5.0]),
+                   frequencies=freqs,
+                   phase_reference=PhaseReference.TRAVELLING_WAVE)
+        wf = np.hanning(400) * np.sin(
+            2 * np.pi * 700 * np.arange(400) / 8000.0)
+        got = tf.synthesize_time_series(source_waveform=wf, sample_rate=8000.0)
+        monkeypatch.setattr(F, '_chirp_step', lambda *a, **k: None)
+        ref = tf.synthesize_time_series(source_waveform=wf, sample_rate=8000.0)
+        a, b = np.asarray(ref.data, float), np.asarray(got.data, float)
+        assert np.abs(a - b).max() / np.abs(a).max() < 1e-12
+        assert np.array_equal(ref.coords['time'], got.coords['time'])
+
+
+def _never_called(*args, **kwargs):
+    raise AssertionError("_source_spectrum_at ran before the axis was checked")
+
+
+class TestSynthesisChecksTheFrequencyAxisBeforeUsingIt:
+    """``_synthesis_plan`` refuses a non-uniform frequency axis, but the
+    synthesis evaluates the source spectrum on that axis before it ever builds
+    a plan — and the chirp-z evaluation assumes the same uniform grid the plan
+    demands. So the refusal has to come first, or a broken axis gets a
+    computed answer before it gets its error.
+    """
+
+    @staticmethod
+    def _tf(freqs):
+        from uacpy.core.results import Field, PhaseReference
+        return Field(
+            data=np.ones((1, 1, len(freqs)), dtype=complex),
+            coords={'depth': np.array([25.0]), 'range': np.array([100.0]),
+                    'frequency': np.asarray(freqs, dtype=float)},
+            model='Synthetic', source_depths=np.array([25.0]),
+            frequencies=np.asarray(freqs, dtype=float),
+            phase_reference=PhaseReference.TRAVELLING_WAVE)
+
+    def test_a_non_uniform_axis_raises_before_the_spectrum_is_evaluated(
+            self, monkeypatch):
+        import uacpy.core.results.field as F
+        monkeypatch.setattr(F, '_source_spectrum_at', _never_called)
+        tf = self._tf([100.0, 110.0, 130.0, 140.0])
+        with pytest.raises(ConfigurationError, match='uniformly spaced'):
+            tf.synthesize_time_series(source_waveform=np.ones(64),
+                                      sample_rate=FS)
+
+    def test_a_descending_axis_is_refused_the_same_way(self, monkeypatch):
+        import uacpy.core.results.field as F
+        monkeypatch.setattr(F, '_source_spectrum_at', _never_called)
+        with pytest.raises(ConfigurationError, match='uniformly spaced'):
+            self._tf([300.0, 200.0, 100.0]).synthesize_time_series(
+                source_waveform=np.ones(64), sample_rate=FS)
+
+    def test_a_uniform_axis_synthesises(self):
+        ts = self._tf(np.linspace(100.0, 300.0, 21)).synthesize_time_series(
+            source_waveform=np.ones(64), sample_rate=FS)
+        assert ts.n_times > 0
 
 
 class TestNarrowBandWindowDoesNotAnnihilate:

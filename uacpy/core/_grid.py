@@ -18,32 +18,78 @@ import numpy as np
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.constants import DECK_RANGE_RESOLUTION_M
 from uacpy.core._carrier_validate import (
-    _require_non_negative, _require_strictly_increasing,
+    _reject_complex, _require_non_negative, _require_strictly_increasing,
 )
 
 INTERP_METHODS = ('linear', 'nearest', 'cubic')
 
 
-def collapse_axis(arr, axis_values, value, method='linear', *, axis=0):
+def _as_finite_scalar_label(value, name):
+    """Coerce a slice label to ``float``, raising ``ConfigurationError`` for
+    array-valued and non-finite labels — the shared ``at``/``eval`` label
+    contract (the guard ``Field.at`` applies on its own path).
+    """
+    try:
+        v = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ConfigurationError(
+            f"{name}={value!r} is not a scalar label: at()/eval() collapse "
+            f"the {name!r} axis at ONE coordinate. Pass a single number per "
+            f"call, or use isel() for positional indexing."
+        ) from exc
+    if not np.isfinite(v):
+        raise ConfigurationError(
+            f"{name}={value!r} is not a finite label. Every "
+            f"|{name} - {value!r}| is NaN or inf, so a nearest lookup ranks "
+            f"nothing and falls to index 0 — a real sample, which is why it "
+            f"would read as a successful slice — and an interpolated slice "
+            f"propagates the NaN into the result."
+        )
+    return v
+
+
+def _nearest_index_on_axis(axis_values, value, name='range'):
+    """Index of the sample in ``axis_values`` nearest to the label ``value``.
+
+    The nearest rule the non-blendable carriers select with (``Surface``,
+    ``Bottom``): they cannot interpolate between entries, so ``at`` and its
+    read-only counterparts all land on a stored index. The label goes through
+    :func:`_as_finite_scalar_label` first, and *before* the single-entry
+    shortcut — a carrier with no axis still refuses a NaN/inf or array-valued
+    label rather than answering 0 to a query it never examined.
+    """
+    label = _as_finite_scalar_label(value, name)
+    if axis_values is None:
+        return 0
+    return int(np.argmin(np.abs(axis_values - label)))
+
+
+def collapse_axis(arr, axis_values, value, method='linear', *, axis=0,
+                  name='axis'):
     """Collapse ``arr`` along ``axis`` at coordinate ``value``.
 
     Returns ``(reduced_array, coord)`` where ``reduced_array`` has ``axis``
     removed and ``coord`` is the coordinate the slice sits at (the nearest
     stored value for ``'nearest'``, else the requested value clamped into
-    range). ``axis_values`` is the 1-D, increasing coordinate vector. Values
-    outside ``[axis_values[0], axis_values[-1]]`` use constant extrapolation.
+    range). ``value`` must be a finite scalar; a NaN/inf or array-valued
+    label raises ``ConfigurationError``. ``axis_values`` is the 1-D
+    coordinate vector, ascending or descending; a non-monotonic axis raises
+    ``ConfigurationError`` for the interpolating methods, and ``name`` labels
+    the axis in these errors. Values outside the axis ends use constant
+    extrapolation.
     """
     if method not in INTERP_METHODS:
         raise ConfigurationError(
             f"interpolation method must be one of {INTERP_METHODS}; "
             f"got {method!r}"
         )
+    label = _as_finite_scalar_label(value, name)
     x = np.asarray(axis_values, dtype=float)
     n = x.size
     if n <= 1:
         return np.take(arr, 0, axis=axis), float(x[0])
     if method == 'nearest':
-        i = int(np.argmin(np.abs(x - float(value))))
+        i = int(np.argmin(np.abs(x - label)))
         return np.take(arr, i, axis=axis), float(x[i])
 
     # searchsorted and the clamp below both read the axis as ascending, so a
@@ -51,8 +97,15 @@ def collapse_axis(arr, axis_values, value, method='linear', *, axis=0):
     if x[0] > x[-1]:
         x = x[::-1]
         arr = np.flip(arr, axis=axis)
+    if not np.all(np.diff(x) >= 0):
+        raise ConfigurationError(
+            f"collapse_axis: the {name!r} coordinate is not monotonic, so an "
+            f"interpolated slice would bracket the query by binary search "
+            f"over an unsorted axis. Sort the axis (with its data) first, or "
+            f"use method='nearest'."
+        )
 
-    v = float(min(max(float(value), float(x[0])), float(x[-1])))   # clamp
+    v = float(min(max(label, float(x[0])), float(x[-1])))   # clamp
     if method == 'linear':
         j = int(np.clip(np.searchsorted(x, v), 1, n - 1))
         x0, x1 = float(x[j - 1]), float(x[j])
@@ -118,6 +171,10 @@ class _RangeProfile:
 
     def _init_range_profile(self) -> None:
         cls = type(self).__name__
+        # Ahead of the float64 casts below, which discard an imaginary part —
+        # see _reject_complex for the two ways they do it.
+        _reject_complex(self.ranges, f"{cls} ranges")
+        _reject_complex(self._values, f"{cls} {self._VALUE_FIELD}")
         self.ranges = np.array(self.ranges, dtype=float).reshape(-1)
         setattr(self, self._VALUE_FIELD,
                 np.array(self._values, dtype=float).reshape(-1))
@@ -165,14 +222,16 @@ class _RangeProfile:
 
     def at(self, *, range):
         """Nearest value to ``range`` (m) — never fabricates. Float for a
-        scalar range, array for an array of ranges. See :meth:`eval`
-        (interpolate) and :meth:`isel` (positional)."""
+        scalar range, array for an array of ranges; every range must be
+        finite. See :meth:`eval` (interpolate) and :meth:`isel`
+        (positional)."""
         return self._query(range, 'nearest')
 
     def eval(self, *, range, method: str = 'linear'):
         """Interpolated value at ``range`` (m). ``method`` is ``'linear'``
         (default), ``'nearest'`` or ``'cubic'``; constant extrapolation past
-        the ends. The interpolating counterpart of :meth:`at`."""
+        the ends, and every range must be finite. The interpolating
+        counterpart of :meth:`at`."""
         return self._query(range, method)
 
     def isel(self, *, range):
@@ -193,15 +252,19 @@ class _RangeProfile:
     def _query(self, range, method):
         return _query_profile(self.ranges, self._values, range, method)
 
-    def plot(self, ax=None, *, title=None, figsize=(10, 4), **mpl_kw):
+    def plot(self, ax=None, *, title=None, figsize=(10, 4), **kwargs):
         """Plot the profile against range.
 
         Depth-valued profiles (:class:`~uacpy.core.bathymetry.Bathymetry`)
         point their axis downward; height-valued ones
         (:class:`~uacpy.core.altimetry.Altimetry`) keep it upward."""
+        # Deferred into the body: ``uacpy.visualization`` imports
+        # ``uacpy.core`` at module scope, so this line at file scope makes
+        # ``import uacpy`` raise ImportError. docs/DEV.md section 7 records
+        # the inversion.
         from uacpy.visualization.plots.environment import _plot_range_profile
         return _plot_range_profile(self, ax=ax, title=title,
-                                   figsize=figsize, **mpl_kw)
+                                   figsize=figsize, **kwargs)
 
 
 def _query_profile(ranges, values, query, method='linear'):
@@ -210,7 +273,9 @@ def _query_profile(ranges, values, query, method='linear'):
     Shared by the :class:`Bathymetry` / :class:`Altimetry` carriers (seafloor
     depth and sea-surface height vs range). ``'nearest'`` / ``'linear'`` /
     ``'cubic'`` with constant extrapolation past the ends. Returns a float for
-    a scalar ``query``, an ndarray for an array of queries.
+    a scalar ``query``, an ndarray for an array of queries. Every query range
+    must be finite; a NaN/inf anywhere in ``query`` raises
+    ``ConfigurationError``.
     """
     if method not in INTERP_METHODS:
         raise ConfigurationError(
@@ -218,6 +283,22 @@ def _query_profile(ranges, values, query, method='linear'):
     x = np.asarray(ranges, dtype=float)
     y = np.asarray(values, dtype=float)
     rq = np.asarray(query, dtype=float)
+    # The array counterpart of ``_as_finite_scalar_label``: this profile query
+    # takes a whole vector of ranges (models/base.py hands it the receiver
+    # range axis), so the finiteness check is element-wise rather than the
+    # scalar helper the collapsing selectors use.
+    if not np.all(np.isfinite(rq)):
+        n_bad = int(np.count_nonzero(~np.isfinite(rq)))
+        count = ('' if rq.ndim == 0
+                 else f" ({n_bad} of {rq.size} query ranges)")
+        raise ConfigurationError(
+            f"range={query!r} is not a finite label{count}: NaN and inf "
+            f"ranges have no nearest node. Every |range - query| is NaN, so "
+            f"the nearest lookup ranks nothing and searchsorted lands on an "
+            f"end node — a real sample, which is why it would read as a "
+            f"successful lookup — and an interpolated query propagates the "
+            f"NaN into the result."
+        )
     scalar = rq.ndim == 0
     if x.size == 1:
         out = np.full(rq.shape, float(y[0]))

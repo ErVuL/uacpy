@@ -9,11 +9,11 @@ Examples
 >>> import numpy as np
 >>> from uacpy.noise import WenzNoise
 >>> f = np.linspace(1, 1e5, 1000)
->>> wenz = WenzNoise(f, wind_speed=15,
+>>> wenz = WenzNoise(f, wind_speed_kn=15,
 ...                  water_depth='deep', shipping_level='medium',
 ...                  rain_rate='moderate')
 >>> from uacpy.visualization import plot_wenz
->>> plot_wenz(wenz)
+>>> _fig, _ax = plot_wenz(wenz)
 >>> psd_upa2_per_hz = wenz.as_psd()                # linear µPa²/Hz (10·log10 == .total)
 >>> psd_pa2_per_hz = wenz.as_psd(ref=1e-6)         # SI Pa²/Hz (ref = 1 µPa in Pa)
 """

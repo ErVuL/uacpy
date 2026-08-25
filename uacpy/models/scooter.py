@@ -33,6 +33,47 @@ from uacpy.io.oalib_writer import (
     SOURCE_TYPE_CODE as _SOURCE_TYPE_CODE,
 )
 
+def _nk_consequence(nk: int) -> str:
+    """What a wavenumber count below 2 costs the run.
+
+    ``Nk <= 0`` allocates ``k( Nk )`` empty (``scooter.f90:73``) and the
+    Green's function comes back with no wavenumber samples at all. ``Nk = 1``
+    allocates one sample and then divides by ``Nk - 1 = 0`` at
+    ``scooter.f90:77`` and again per frequency at ``:125``, so ``Deltak`` and
+    the stabilising ``Atten`` (``:129``) are both infinite and every Green's
+    function value is NaN. Neither case changes the exit status, so both reach
+    the caller as a full-shape result unless something refuses them.
+    """
+    if nk == 1:
+        return (
+            "scooter.f90:77 spaces the grid as "
+            "Deltak = (kMax - kMin) / (Nk - 1), so a single sample divides by "
+            "zero: the binary writes an all-NaN Green's function at exit 0 "
+            "and the transformed field is all-NaN."
+        )
+    return (
+        "The wavenumber vector is empty and the Green's function comes back "
+        "with no samples at exit 0."
+    )
+
+
+def _deck_nk(rmax_m: float, f_max: float, c_low: float, c_high: float) -> int:
+    """The ``Nk`` ``scooter.f90:69`` will derive from this deck.
+
+    ``Nk = INT( 2000.0 * RMax * ( kMax - kMin ) / pi )`` with ``RMax`` in km
+    and ``kMax - kMin = 2*pi*freqVec(Nfreq)*(1/cLow - 1/cHigh)`` from
+    ``scooter.f90:67-68``, which reduces to
+    ``4000 * RMax_km * f_max * (1/cLow - 1/cHigh)``.
+
+    The deck's own rounding is applied first — ``write_phase_speed_and_rmax``
+    writes RMax as ``%.6f`` km and the phase-speed pair as ``%.1f`` — so this
+    reproduces the binary's count rather than an unrounded neighbour of it.
+    """
+    rmax_km = round(float(rmax_m) / 1000.0, 6)
+    cl = round(float(c_low), 1)
+    ch = round(float(c_high), 1)
+    return int(4000.0 * rmax_km * float(f_max) * (1.0 / cl - 1.0 / ch))
+
 
 class Scooter(PropagationModel):
     """
@@ -61,6 +102,12 @@ class Scooter(PropagationModel):
         ``COHERENT_TL``, 3.0 for ``BROADBAND`` / ``TIME_SERIES``.
     spectrum : str, optional
         FLP Opt(2): ``'positive'`` (fast, default) | ``'negative'`` | ``'both'``.
+        This is the WAVENUMBER spectrum half — which side of the real k-axis
+        the spectral integral covers. Not to be confused with
+        :class:`~uacpy.models.OASS` / :class:`~uacpy.models.OASSP`'s
+        ``spectrum=``, which selects a ROUGHNESS power-spectrum model
+        (``'gaussian'`` / ``'goff-jordan'``). The two share a name and nothing
+        else.
     stabilizing_attenuation_off : bool, optional
         Disable Scooter's stabilising attenuation. Default ``False``;
         leave it unless you know what you're doing (the stabiliser
@@ -282,6 +329,7 @@ class Scooter(PropagationModel):
             broadband complex ``H(f)`` for BROADBAND, real ``p(d, r, t)``
             for TIME_SERIES.
         """
+        self._require_run_triple(env, source, receiver)
         run_mode = self._resolve_run_mode(run_mode)
         if run_mode not in (RunMode.BROADBAND, RunMode.TIME_SERIES):
             self._warn_ignored_run_kwargs(
@@ -320,15 +368,17 @@ class Scooter(PropagationModel):
             self._log(f"Broadband: {len(broadband_freqs)} frequencies, "
                       f"{broadband_freqs[0]:.1f}-{broadband_freqs[-1]:.1f} Hz")
 
-        # A pinned n_mesh is checked at the highest frequency the run will
-        # march: the AT reader's "Mesh is too coarse" floor scales with
-        # frequency, so a mesh that clears fc can still under-resolve the
-        # top of a broadband sweep.
-        marched = (broadband_freqs if broadband_freqs is not None
-                   else source.frequencies)
+        # A pinned n_mesh is checked at the deck's freq0 — the frequency AT
+        # applies its own floor at. misc/ReadEnvironmentMod.f90:103-112 sizes
+        # Nneeded from freq0 during the environment read, and scooter.f90:106
+        # then scales N with freq/freq0 for every swept frequency, so a mesh
+        # that clears the floor at freq0 stays proportionally as fine across
+        # the whole sweep. Testing max(freq) instead rejected meshes the
+        # binary would have run.
         reject_coarse_at_mesh(
             'Scooter', self.n_mesh, env,
-            float(np.max(np.atleast_1d(np.asarray(marched, dtype=float)))))
+            float(np.atleast_1d(
+                np.asarray(source.frequencies, dtype=float))[0]))
 
         fm = self._setup_file_manager()
 
@@ -351,6 +401,13 @@ class Scooter(PropagationModel):
             freqs = broadband_freqs if broadband_mode else float(source.frequencies[0])
             self._stamp_result(result, source, backend='scooter',
                                frequencies=freqs, phase_reference='travelling_wave')
+            # Physical fastest compressional speed in the waveguide (water
+            # column + sediment + half-space): the time-series synthesis
+            # helpers anchor their output window at r / c_max, ahead of the
+            # earliest bottom-refracted arrival.
+            c_max = self._resolve_c_max(env)
+            if c_max is not None:
+                result.metadata['c_max'] = c_max
 
             self._attach_output_paths(
                 result, fm.work_dir, base_name,
@@ -367,8 +424,7 @@ class Scooter(PropagationModel):
                 result, receiver, media_depth)
 
         finally:
-            if fm.cleanup:
-                fm.cleanup_work_dir()
+            fm.finish()
 
     def _project_environment(self, env):
         """Collapse unsupported features, then drop a surface roughness the
@@ -407,9 +463,12 @@ class Scooter(PropagationModel):
     def _run_and_read_grn(self, fm, base_name):
         """Run the binary and read back its Green's function.
 
-        A missing ``.grn`` and an ``nk=0`` one are both run failures the binary
-        does not report through its exit status, so each is turned into a typed
-        error carrying the ``.prt`` diagnostics.
+        A missing ``.grn`` and one carrying fewer than two wavenumber samples
+        are both run failures the binary does not report through its exit
+        status, so each is turned into a typed error carrying the ``.prt``
+        diagnostics. ``_write_scooter_env`` refuses ``Nk < 2`` before the
+        launch; this is the backstop for a count the deck-side arithmetic did
+        not predict.
         """
         self._log("Running...")
         self._run_scooter(base_name, fm.work_dir)
@@ -424,10 +483,14 @@ class Scooter(PropagationModel):
 
         self._log("Reading Green's function...")
         grn_data = read_grn_file(grn_file)
-        if grn_data['nk'] == 0:
+        nk = int(grn_data['nk'])
+        if nk < 2:
             exc = ModelExecutionError(
                 self.model_name, return_code=0, stdout=None,
-                stderr="Scooter produced empty Green's function (nk=0)",
+                stderr=(
+                    f"Scooter produced a Green's function with nk={nk} "
+                    f"wavenumber sample(s); {_nk_consequence(nk)}"
+                ),
             )
             self._attach_prt_tail(exc, fm.work_dir, base_name)
             raise exc
@@ -492,9 +555,12 @@ class Scooter(PropagationModel):
         - Maximum range with multiplier (RMax)
         - Supports shear wave parameters in bottom halfspace
 
-        No receiver ranges are written: ``scooter.f90``'s ``GetPar`` never
-        calls ``ReadRcvrRanges`` — the ``.env`` ends at ``RMax``, and the
-        range axis is applied in-tree when the ``.grn`` is transformed.
+        No receiver *ranges* are written: ``scooter.f90``'s ``GetPar``
+        (``:154-178``) reads the environment, then ``ReadSzRz`` and
+        ``ReadfreqVec``, and never calls ``ReadRcvrRanges`` — so the deck
+        continues past ``RMax`` with the source depths, the receiver depths
+        and (broadband only) the frequency vector, and simply stops there.
+        The range axis is applied in-tree when the ``.grn`` is transformed.
         """
         from uacpy.io.oalib_writer import resolve_ssp_topopt
         ssp_topopt = resolve_ssp_topopt(env, self.interp_ssp)
@@ -506,13 +572,75 @@ class Scooter(PropagationModel):
         # Atten=Deltak, the default stabiliser.
         topopt_extra = '0' if self.stabilizing_attenuation_off else ''
 
+        # Scooter's spectral RMax derives from the maximum receiver range
+        # (RMax = range_max × multiplier), and scooter.f90:69 sizes the
+        # wavenumber grid from RMax — a non-positive value stops the binary
+        # with a bare STOP that names no cause, so it is refused here.
+        if receiver.range_max <= 0.0:
+            raise ConfigurationError(
+                f"Scooter requires a positive receiver range: the spectral "
+                f"RMax is receiver.range_max × rmax_multiplier, and "
+                f"receiver.range_max = {receiver.range_max:.6g} m would "
+                f"write RMax = 0, which scooter.exe rejects with an "
+                f"unexplained STOP.",
+                remediation="Pass a Receiver with at least one range > 0 m.",
+            )
         rmax_m = float(receiver.ranges.max()) * self._resolve_rmax_multiplier(run_mode)
         from uacpy.io.oalib_writer import resolve_phase_speed_bounds
         cl, ch = resolve_phase_speed_bounds(env, self.c_low, self.c_high)
+        # The constructor (:195-199) can only compare two pinned bounds. A
+        # single pinned bound is only comparable once the other has been
+        # derived from this env, and an inverted pair reaches
+        # ReadEnvironmentMod.f90:135, which stops the binary after the deck
+        # has been written and the process spawned. Catch it here instead and
+        # name the bound the user pinned, since that is the one to move.
+        if cl >= ch:
+            if self.c_low is not None and self.c_high is None:
+                pinned = (f"the pinned c_low={self.c_low} m/s is at or above "
+                          f"the env-derived c_high = {ch:.1f} m/s")
+            elif self.c_high is not None and self.c_low is None:
+                pinned = (f"the pinned c_high={self.c_high} m/s is at or "
+                          f"below the env-derived c_low = {cl:.1f} m/s")
+            else:
+                pinned = (f"the env-derived band collapsed to c_low = "
+                          f"{cl:.1f} m/s, c_high = {ch:.1f} m/s")
+            raise ConfigurationError(
+                f"Scooter spectral phase-velocity band requires "
+                f"c_low < c_high: {pinned}.",
+                remediation="Widen the pinned bound, or leave both unset to "
+                            "derive the band from the SSP and bottom.",
+            )
         if self.c_low is None or self.c_high is None:
             self._log(
                 f"c_low / c_high auto-derived = "
                 f"{cl:.1f} / {ch:.1f} m/s"
+            )
+
+        # Refuse a wavenumber count the binary cannot space, before the deck
+        # is written: scooter.f90 has no Nk test of its own (the only IF
+        # naming it is the allocation status at :74), so an Nk below 2 runs
+        # to completion at exit 0 and reaches the caller as a full-shape
+        # result. The two siblings that derive the same quantity refuse it
+        # pre-launch for the same reason — see ``Bounce._n_ktab`` and the Nk
+        # guard inside ``SPARC._write_sparc_env``.
+        f_deck = self._deck_max_frequency(source, frequencies)
+        nk = _deck_nk(rmax_m, f_deck, cl, ch)
+        if nk < 2:
+            raise ConfigurationError(
+                f"This deck asks Scooter for Nk = {nk} wavenumber sample(s): "
+                f"scooter.f90:69 derives Nk = INT(2000 * RMax_km * "
+                f"(kMax - kMin) / pi) from RMax = {rmax_m:g} m at "
+                f"{f_deck:.6g} Hz with "
+                f"c_low = {cl:.1f} and c_high = {ch:.1f} m/s. "
+                f"{_nk_consequence(nk)}",
+                remediation=(
+                    "Nk grows with RMax, frequency and the width of the "
+                    "phase-speed window: raise rmax_multiplier (RMax = "
+                    "receiver.ranges.max() x rmax_multiplier), raise the "
+                    "source frequency, or widen c_low/c_high. Lengthening "
+                    "the receiver ranges also raises RMax; shortening them "
+                    "lowers it."
+                ),
             )
 
         write_scooter_env_file(
@@ -526,6 +654,22 @@ class Scooter(PropagationModel):
             rmax_m=rmax_m,
             c_low=cl, c_high=ch,
         )
+
+    @staticmethod
+    def _deck_max_frequency(source, frequencies):
+        """``freqVec( Nfreq )`` for the deck ``_write_scooter_env`` writes.
+
+        ``scooter.f90:67-68`` sizes the wavenumber grid from the *last* entry
+        of the frequency vector, so this mirrors the writer's own branch:
+        ``write_broadband_freqs`` emits the vector only when it holds more
+        than one entry, and otherwise the deck carries the single header
+        frequency ``write_header`` takes from ``source.frequencies[0]``.
+        """
+        if frequencies is not None:
+            freqs = np.atleast_1d(frequencies)
+            if len(freqs) > 1:
+                return float(freqs[-1])
+        return float(source.frequencies[0])
 
     def _run_scooter(self, base_name: str, work_dir: Path):
         """Execute Scooter via the shared binary-launch helper."""

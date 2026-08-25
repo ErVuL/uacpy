@@ -6,14 +6,21 @@ import copy as _copy
 import warnings
 
 import numpy as np
-from typing import Union, List, Optional
+from typing import TYPE_CHECKING, Any, Union, List, Optional
 from dataclasses import dataclass
 
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.constants import DECK_DEPTH_RESOLUTION_M, DECK_RANGE_RESOLUTION_M
 from uacpy.core._carrier_validate import (
-    _require_non_negative, _require_strictly_increasing,
+    _reject_complex, _require_non_negative, _require_strictly_increasing,
 )
+
+
+#: Constructor sentinel for ``ranges``: ``None`` means "not given", which
+#: ``__post_init__`` turns into a single 0 m point after warning. Typed
+#: ``Any`` so the field itself can declare the ndarray every attribute read
+#: sees, without the sentinel widening that declaration back to Optional.
+_RANGES_NOT_GIVEN: Any = None
 
 
 # eq=False: a dataclass __eq__ over ndarray fields raises; compare by identity.
@@ -77,9 +84,26 @@ class Receiver:
     ... )
     """
 
-    depths: Union[float, List[float], np.ndarray]
-    ranges: Optional[Union[float, List[float], np.ndarray]] = None
+    depths: np.ndarray
+    ranges: np.ndarray = _RANGES_NOT_GIVEN
     receiver_type: str = 'grid'
+
+    if TYPE_CHECKING:
+        # The two roles of a dataclass field annotation, separated: the
+        # attributes hold what ``__post_init__`` normalizes them to (float64
+        # ndarrays, as the Attributes section above says), while the
+        # constructor keeps taking the wide input union the Parameters
+        # section documents. Declaring both through the field annotation
+        # alone gives the union to every attribute read, so ``r.ranges.max()``
+        # and ``for d in r.depths`` are reported as errors in downstream code
+        # that runs correctly. Never executed, so the decorator compiles the
+        # runtime ``__init__`` from the fields exactly as before.
+        def __init__(
+            self,
+            depths: Union[float, List[float], np.ndarray],
+            ranges: Optional[Union[float, List[float], np.ndarray]] = None,
+            receiver_type: str = 'grid',
+        ) -> None: ...
 
     def __post_init__(self):
         if self.receiver_type != 'grid':
@@ -92,15 +116,33 @@ class Receiver:
                 "tl[np.arange(len(depths)), np.arange(len(ranges))]."
             )
         if self.ranges is None:
+            # stacklevel=3, not 2: a dataclass reaches ``__post_init__``
+            # through the ``__init__`` the decorator compiles from a string,
+            # so level 2 is that generated frame and attributes the warning
+            # to ``<string>:6``. Every call site then shares one dedup key
+            # and only the first ``Receiver(depths=…)`` in a program warns.
+            # ``skip_file_prefixes`` cannot fix it — the generated frame's
+            # ``<string>`` filename matches no package prefix, so the walk
+            # stops there (measured).
+            # The count survives the second-entry-point test that retired
+            # most hand-counts: the models build a ``Receiver`` internally,
+            # but every one of those passes an explicit ``ranges=``, so this
+            # branch is reachable only from a user's own constructor call.
             warnings.warn(
                 "Receiver: ranges not given, defaulting to a single point at "
                 "0 m (the source location), which is singular for TL/pressure "
                 "runs; pass explicit ranges= to avoid this.",
                 UserWarning,
-                stacklevel=2,
+                stacklevel=3,
             )
-            self.ranges = 0.0
+            # An array, not the 0.0 scalar: the field declares ndarray, and
+            # the atleast_1d cast below turns either into the same array([0.]).
+            self.ranges = np.zeros(1)
 
+        # Ahead of the float64 casts below, which discard an imaginary part —
+        # see _reject_complex for the two ways they do it.
+        _reject_complex(self.depths, "receiver depths")
+        _reject_complex(self.ranges, "receiver ranges")
         self.depths = np.atleast_1d(np.array(self.depths, dtype=np.float64))
         self.ranges = np.atleast_1d(np.array(self.ranges, dtype=np.float64))
 
@@ -159,3 +201,15 @@ class Receiver:
     def copy(self):
         """Deep copy (symmetric with the other carriers)."""
         return _copy.deepcopy(self)
+
+# The dataclass compiles ``__init__`` from the *field* annotations, so
+# ``inspect.signature`` / ``help()`` would advertise a default the annotation
+# refuses (``ranges: np.ndarray = None``). Restate the input types on the
+# generated ``__init__`` so the runtime signature says what the block above
+# and the Parameters section say. Annotations only: no default, no field and
+# no behaviour changes, and the class annotations — which are what an
+# attribute read is checked against — are untouched.
+Receiver.__init__.__annotations__.update(
+    depths=Union[float, List[float], np.ndarray],
+    ranges=Optional[Union[float, List[float], np.ndarray]],
+)

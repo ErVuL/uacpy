@@ -106,7 +106,11 @@ class Covariance(Result):
         ``B(z, x, y; f) = w(z, x, y; f)ᴴ · C(f) · w(z, x, y; f)``
 
         with ``w`` the replica vector at each candidate point, normalised
-        to unit length.
+        to unit length. A zero-norm replica row — a candidate position the
+        forward model put no energy at — is left at zero rather than
+        normalised, so it scores as a genuine zero ("nothing matches
+        here"); :meth:`mvdr` instead returns NaN for the same degenerate
+        candidate point.
 
         Returns
         -------
@@ -144,7 +148,9 @@ class Covariance(Result):
         CSDM — defaults to 1e-2 instead, because a few-snapshot ``csdm()``
         is routinely rank-deficient. The two agree numerically at equal
         loading, up to the max-scaling ``sonar.mvdr`` applies, and both
-        return NaN for a degenerate candidate point.
+        return NaN for a degenerate candidate point — a zero-norm replica
+        row, which :meth:`bartlett` instead scores as a genuine zero
+        ("nothing matches here").
         """
         flat, (n_f, nz, nx, ny) = self._replica_grid(replicas)
         out = np.empty((n_f, nz * nx * ny), dtype=float)

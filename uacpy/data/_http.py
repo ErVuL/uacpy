@@ -14,12 +14,12 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from pathlib import Path
 from typing import Union
 
 import numpy as np
 
-from uacpy.core.exceptions import DataFetchError
+from uacpy.core.exceptions import ConfigurationError, DataFetchError
+from uacpy.data._cache import staging_path
 from uacpy._log import log_message
 
 __all__ = ['http_get', 'curl_download', 'erddap_griddap_url', 'erddap_last_value',
@@ -32,9 +32,20 @@ def raise_substantive(errors):
     A :class:`DataFetchError` (no coverage / on land / live service failure)
     is raised in preference to a bare ``ConfigurationError`` ("cache not
     installed", missing prerequisite), so the caller sees the real cause
-    rather than the last fallback's complaint. ``errors`` must be non-empty;
-    ties keep the first ``DataFetchError``, else the last error.
+    rather than the last fallback's complaint. Ties keep the first
+    ``DataFetchError``, else the last error.
+
+    An empty ``errors`` means the chain ran no source at all — an empty source
+    list, not a fetch failure — so it raises :class:`ConfigurationError`
+    rather than an ``IndexError`` off the end of the list.
     """
+    if not errors:
+        raise ConfigurationError(
+            "No data source was tried, so no fetch error explains the "
+            "failure.",
+            remediation="Pass at least one source: an empty sequence "
+                        "(bottom_sources=(), source=(), …) selects none.",
+        )
     data_errs = [e for e in errors if isinstance(e, DataFetchError)]
     raise (data_errs[0] if data_errs else errors[-1])
 
@@ -192,14 +203,22 @@ def curl_download(url: str, out, *, timeout: float, verbose: bool) -> bool:
     ``False`` when curl is absent or fails, so the caller can fall back to
     :func:`http_get`. The large static grid hosts (NCEI/Akamai, Zenodo, GLODAP)
     throttle Python urllib to a trickle but serve curl at full speed, so this is
-    the preferred path for them. Downloads to ``<out>.part`` and moves it into
-    place only on success, so an interrupted transfer never leaves a truncated
-    ``out`` for the cache to accept.
+    the preferred path for them. Downloads to a staging sibling and moves it
+    into place only on success, so an interrupted transfer never leaves a
+    truncated ``out`` for the cache to accept.
+
+    The staging file is :func:`uacpy.data._cache.staging_path`'s, so the name
+    is unguessable: a predictable name such as ``<out>.part`` lets a symlink be
+    pre-placed there, and ``curl -o`` then writes through it before
+    ``os.replace`` moves the link itself onto ``out``. It shares that helper
+    rather than the whole ``atomic_write`` context manager because a curl
+    failure is a ``False`` return, not an exception, and so must drop the
+    staging file on a path that context manager treats as success.
     """
     curl = shutil.which('curl')
     if not curl:
         return False
-    part = Path(str(out) + '.part')
+    part = staging_path(out)
     try:
         subprocess.run(
             [curl, '-fL', '--retry', '3', '--max-time', str(int(timeout)),

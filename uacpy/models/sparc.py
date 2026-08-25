@@ -10,7 +10,7 @@ uacpy's SPARC is a rigid/vacuum-bounded fluid model.
 
 import warnings
 from pathlib import Path
-from typing import Dict, Optional, Union
+from typing import Dict, List, Optional, Union
 import numpy as np
 
 from uacpy.core.environment import Environment
@@ -37,12 +37,22 @@ from uacpy.io.oalib_writer import (
     write_sparc_env_file, reject_unsupported_ssp_interp,
     resolve_phase_speed_bounds,
     SOURCE_TYPE_CODE as _SOURCE_TYPE_CODE,
+    at_env_media,
 )
 
 
 # Factor above the Nyquist minimum used when naming the ``n_t_out`` that would
 # resolve the pulse band in the aliasing warning.
 _SPARC_PULSE_OVERSAMPLE = 3.0
+
+# Tail of the output window measured by ``_warn_on_truncated_window``, and the
+# peak-relative level (-20 dB) at which that tail counts as a truncated trace.
+_TRUNCATION_TAIL_FRACTION = 0.1
+_TRUNCATION_LEVEL = 0.1
+
+# Ceiling on the complex64 Green's-function cube an ``output_mode='S'`` run
+# holds (both in the binary and in the reader): 2 GiB.
+_MAX_SNAPSHOT_GREEN_BYTES = 2 * 1024 ** 3
 
 
 # SPARC pulse_type alphabets (per Scooter/sparc.f90:126-148 GetPar SELECT CASE).
@@ -65,6 +75,22 @@ _PULSE_TYPE_POS3 = {' ', '+', '-'}
 #   'N' skips the filter entirely (tslib/sourceMod.f90:68); any other
 #   character (including ' ') leaves the full band [0, 10·fMax] in place.
 _PULSE_TYPE_POS4 = {' ', 'N', 'L', 'H', 'B'}
+
+
+def _peak_ignoring_nan(data: np.ndarray) -> float:
+    """``np.nanmax(data)`` as a float, returning NaN for an all-NaN input.
+
+    ``np.nanmax`` reports that case by raising a RuntimeWarning, and the only
+    way to mute one is ``warnings.catch_warnings()`` — whose filter stack is
+    process-global, so the window would also swallow warnings other threads
+    raise while it is open. Masking the NaNs decides the same thing without
+    touching global state. ``where=``/``initial=`` keep ``nanmax``'s treatment
+    of the infinities: they are values, not gaps, and propagate to the result.
+    """
+    present = ~np.isnan(data)
+    if not present.any():
+        return float('nan')
+    return float(np.max(data, where=present, initial=-np.inf))
 
 
 def _validate_pulse_type(pulse_type: str) -> str:
@@ -115,6 +141,15 @@ def _validate_pulse_type(pulse_type: str) -> str:
     if pulse_type[3] not in _PULSE_TYPE_POS4:
         raise _bad(4, pulse_type[3], _PULSE_TYPE_POS4)
     return pulse_type
+
+
+# The sampling ReadEnvironmentMod.f90:103 sizes an automatic mesh at:
+# ``deltaz = c / freq0 / 20``. Written explicitly for SPARC because sparc.f90
+# never rescales the mesh with frequency the way kraken.f90:75 and
+# scooter.f90:106 do, so "automatic" means 20 points per wavelength at the
+# deck's nominal frequency and only 10 at the top of the pulse band this
+# wrapper writes.
+_AT_POINTS_PER_WAVELENGTH = 20.0
 
 
 class SPARC(PropagationModel):
@@ -171,7 +206,12 @@ class SPARC(PropagationModel):
         never consumed, so the run returns the single time ``t = 0`` and the
         requested window is silently dropped.
     t_max : float, optional
-        Maximum simulated time (s). ``None`` ⇒ ``2.5 ×`` travel time.
+        Maximum simulated time (s). ``None`` ⇒ ``2.5 ×`` the direct travel
+        time at the slowest speed in the profile. That is a heuristic, not a
+        bound on the last arrival — a waveguide's tail is set by the slowest
+        modal *group* velocity, which falls to zero at cutoff — so a run
+        whose trace is still ringing at the end of the window emits a
+        ``UserWarning`` saying the trace is truncated.
     t_start : float, optional
         Time the march begins (s), ``time = t_start + (i-1)·Δt``
         (``sparc.f90:409``). ``cans.f90`` returns zero pulse amplitude for
@@ -188,16 +228,24 @@ class SPARC(PropagationModel):
         ``'S'`` runs once and is uncapped. Default ``20``.
     rmax_safety_margin : float, optional
         Multiplier applied to ``receiver.ranges.max()`` to set SPARC's
-        ``RMax``. ``None`` (default) ⇒ ``3.0``. ``RMax`` fixes the
+        ``RMax``. ``None`` (default) ⇒ ``4.0``. ``RMax`` fixes the
         wavenumber sampling — ``sparc.f90:116`` takes
         ``Nk = INT(1000·RMax_km·(kMax−kMin)/2π)``, i.e.
         ``Δk ≈ 2π/RMax_m`` — and the range synthesis is a direct ``Δk``
         sum over that grid, so the output is periodic in range with
-        period ``2π/Δk = RMax``. A tight margin therefore puts the
-        source's non-physical replica at ``r = receiver.ranges.max()``.
-        Increasing this knob raises ``Nk`` (and SPARC runtime) in
-        proportion. ``sparc.f90:153-155`` rejects the run outright when
-        the largest receiver range exceeds ``RMax``.
+        period ``2π/Δk = RMax``. The replica that period puts at
+        ``r = RMax`` is not the whole story: a receiver at range ``r``
+        sees the fold from ``r − RMax``, i.e. the arrival that belongs at
+        ``|RMax − r|``, so the alias reaches it at ``(RMax − r)/c`` and
+        pushing ``RMax`` just past the receivers does *not* clear it. At
+        margin ``m`` the alias lands at ``(m−1)·r/c`` while the auto
+        window runs to ``2.5·r/c``, so the margin has to exceed ``3.5``;
+        ``4.0`` is the first round value that does. Increasing this knob
+        raises ``Nk`` (and SPARC runtime) in proportion. A pinned margin
+        (or a pinned ``t_max``) that leaves the alias inside the output
+        window emits a ``UserWarning`` naming the margin that clears it.
+        ``sparc.f90:153-155`` rejects the run outright when the largest
+        receiver range exceeds ``RMax``.
     timeout : float, optional
         Subprocess timeout per run (s). Default ``180.0``.
     use_tmpfs, verbose, work_dir, cleanup, collapse : optional
@@ -287,7 +335,8 @@ class SPARC(PropagationModel):
         c_high : float, optional
             Upper phase speed limit (m/s). None = auto. Default: None.
         n_mesh : int, optional
-            Mesh points per wavelength. 0 = auto. Default: 0.
+            Total mesh points per medium (not per wavelength). 0 = auto,
+            which lets SPARC size the mesh from the frequency. Default: 0.
         interp_ssp : str, optional
             SSP connection scheme written into ``TopOpt(1)``. ``None``
             (default) resolves to ``'linear'`` (C-linear): SPARC declares
@@ -312,7 +361,10 @@ class SPARC(PropagationModel):
         n_t_out : int, optional
             Number of time samples. Default: 512.
         t_max : float, optional
-            Maximum time (s). None = auto (2.5x travel time). Default: None.
+            Maximum time (s). None = auto (2.5x the direct travel time,
+            which does not bound a waveguide's slow modal tail — a
+            still-ringing trace is warned about after the run).
+            Default: None.
         t_start : float, optional
             Time the march begins (s); negative starts from rest before the
             pulse turns on. Default: -0.1.
@@ -326,20 +378,23 @@ class SPARC(PropagationModel):
             Multiplier on ``receiver.ranges.max()`` to set SPARC's RMax.
             RMax sets the wavenumber step (``Δk ≈ 2π/RMax_m``,
             ``sparc.f90:116``) and the range synthesis is a direct ``Δk``
-            sum, so the r-domain output is periodic with period RMax — the
-            source's image at r=RMax contaminates the receivers unless
-            RMax is pushed well past them. Default: ``None`` → 3.0
-            (alias at 3× receiver max).
+            sum, so the r-domain output is periodic with period RMax — a
+            receiver at range r sees the fold from ``|RMax − r|`` at time
+            ``(RMax − r)/c``, which stays inside the output window until
+            the margin exceeds 3.5. Default: ``None`` → 4.0.
         f_min, f_max : float, optional
             Pulse frequency band (Hz). ``None`` (default) resolves at
             ``run()`` time to one octave around the source frequency
             (``max(f/2, 0.1)`` .. ``2f``) — SPARC's work scales with
             the band's wavenumber span, so a much wider band slows it
-            sharply.
+            sharply. ``f_min=0`` is accepted (``sparc.f90:114`` clamps
+            the resulting ``kMin`` to 1e-20).
         sound_speed : float, optional
             Water sound speed (m/s) used for the travel-time window
-            when ``t_max`` is auto. ``None`` (default) →
-            :data:`DEFAULT_SOUND_SPEED`.
+            when ``t_max`` is auto. ``None`` (default) → the slowest
+            speed in ``env.ssp``, which puts the *direct* arrival well
+            inside the window; :data:`DEFAULT_SOUND_SPEED` only when the
+            profile carries none.
         timeout : float, optional
             Subprocess timeout (s) for each SPARC run. Default: 180.0.
         """
@@ -371,6 +426,22 @@ class SPARC(PropagationModel):
         self.pulse_type = _validate_pulse_type(pulse_type)
         self.n_t_out = n_t_out
         self.t_max = t_max
+        # The march runs time = t_start + (i-1)·Δt from a field at rest
+        # (sparc.f90:409) while the deck always asks for the output window
+        # [0, t_max]. A positive t_start therefore starts the solution after
+        # cans.f90's pulse has already turned on (it is zero only for T <= 0),
+        # and EXTRACT's DO WHILE (:571) empties every requested time below
+        # t_start out of the first step at a negative interpolation weight.
+        if float(t_start) > 0.0:
+            raise ConfigurationError(
+                f"SPARC t_start={t_start} s starts the time march after the "
+                f"source pulse has turned on (t = 0) and after the start of "
+                f"the [0, t_max] output window the deck writes, so the field "
+                f"is marched from rest mid-pulse and the output times below "
+                f"t_start are extrapolated backwards out of the first step. "
+                f"Use t_start <= 0 (the default -0.1 s pre-rolls the march "
+                f"before the pulse)."
+            )
         self.t_start = t_start
         self.t_mult = t_mult
         self.max_depths = max_depths
@@ -378,15 +449,17 @@ class SPARC(PropagationModel):
         # Pulse band (``f_min``/``f_max``) and ``sound_speed`` (used for
         # the travel-time window when ``t_max`` is auto) default to
         # ``None`` and are resolved at ``run()`` time from
-        # ``source.frequencies[0]`` and :data:`DEFAULT_SOUND_SPEED`.
+        # ``source.frequencies[0]`` and the environment's own profile.
         self.f_min = float(f_min) if f_min is not None else None
         self.f_max = float(f_max) if f_max is not None else None
-        # An inverted or non-positive band feeds sparc.f90:116 a negative
+        # An inverted or negative band feeds sparc.f90:116 a negative
         # kMax-kMin, i.e. Nk < 0 — the same silent all-zero field the run()
-        # Nk guard refuses — so fail here with the cause named.
-        if self.f_min is not None and self.f_min <= 0.0:
+        # Nk guard refuses — so fail here with the cause named. f_min = 0 is
+        # legal and stays: sparc.f90:114 clamps kMin to 1e-20 for exactly
+        # that case, and doc/sparc.htm's own example deck reads "0.0 15.0".
+        if self.f_min is not None and self.f_min < 0.0:
             raise ConfigurationError(
-                f"SPARC pulse band requires f_min > 0 Hz; got {self.f_min}."
+                f"SPARC pulse band requires f_min >= 0 Hz; got {self.f_min}."
             )
         if self.f_max is not None and self.f_max <= 0.0:
             raise ConfigurationError(
@@ -450,6 +523,7 @@ class SPARC(PropagationModel):
         SPARC is range-independent. If a range-dependent environment is provided,
         it will automatically use a median-depth approximation with a warning.
         """
+        self._require_run_triple(env, source, receiver)
         if run_mode == RunMode.COHERENT_TL:
             # Named explicitly so the refusal points at a model that does
             # compute CW TL; the generic _resolve_run_mode error can only
@@ -497,7 +571,7 @@ class SPARC(PropagationModel):
 
         try:
             base_name = 'model'
-            freq = source.frequencies[0]
+            freq = self._resolve_pulse_frequency(source)
 
             if self.output_mode == 'D':
                 result = self._run_vertical(fm, env, source, receiver,
@@ -512,8 +586,29 @@ class SPARC(PropagationModel):
                 result, receiver, media_depth)
 
         finally:
-            if fm.cleanup:
-                fm.cleanup_work_dir()
+            fm.finish()
+
+    def _resolve_pulse_frequency(self, source: Source) -> float:
+        """The single frequency SPARC's pulse band is derived from.
+
+        ``TIME_SERIES`` is not in ``_SINGLE_FREQUENCY_MODES`` (the mode is
+        broadband by nature), but SPARC's deck carries one pulse band, and
+        the auto band is one octave around this frequency
+        (:meth:`_write_sparc_env`) — a multi-frequency Source silently loses
+        every entry but the first, so say which one is being read.
+        """
+        freqs = np.atleast_1d(np.asarray(source.frequencies, dtype=float))
+        if freqs.size > 1:
+            warnings.warn(
+                f"SPARC drives one pulse band per run: reading "
+                f"source.frequencies[0] = {float(freqs[0]):.6g} Hz and "
+                f"ignoring the other {freqs.size - 1} "
+                f"({list(freqs[1:])}). The auto band is one octave around "
+                f"it; pass SPARC(f_min=..., f_max=...) to cover the whole "
+                f"source band in the single run.",
+                UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+            )
+        return float(freqs[0])
 
     def _reject_oversized_loop_axis(self, n_runs: int, axis: str,
                                     mode_label: str) -> None:
@@ -539,6 +634,43 @@ class SPARC(PropagationModel):
             ],
         )
 
+    def _reject_oversized_snapshot(self, receiver, nk: int,
+                                   n_t_out: int) -> None:
+        """Cap the wavenumber-domain table ``output_mode='S'`` materialises.
+
+        ``'R'`` / ``'D'`` are bounded by ``max_depths`` because the wrapper
+        loops the binary over them; ``'S'`` runs once and is bounded by the
+        ``Green(Itout, irz, ik)`` cube instead (``sparc.f90:580-591``), which
+        the binary holds whole and ``read_grn_file`` reads back as a
+        ``complex64`` array of the same shape. Its size is set by the
+        wavenumber count — which grows with ``rmax_safety_margin`` and the
+        pulse band — so it can reach tens of GB without any single knob
+        looking unreasonable.
+        """
+        if self.output_mode != 'S':
+            return
+        n_depth = int(np.atleast_1d(np.asarray(receiver.depths)).size)
+        n_bytes = 8 * int(n_t_out) * n_depth * int(nk)
+        if n_bytes <= _MAX_SNAPSHOT_GREEN_BYTES:
+            return
+        raise UnsupportedFeatureError(
+            model_name='SPARC',
+            feature=(
+                f"a snapshot (output_mode='S') whose Green's-function table "
+                f"is {n_bytes / 1024 ** 3:.1f} GiB (n_t_out={int(n_t_out)} × "
+                f"{n_depth} receiver depth(s) × Nk={int(nk)} × 8 B), over the "
+                f"{_MAX_SNAPSHOT_GREEN_BYTES / 1024 ** 3:.1f} GiB cap"
+            ),
+            alternatives=[
+                "Reduce n_t_out (the table scales with it one-for-one)",
+                "Reduce receiver.depths",
+                "Narrow the pulse band (f_min/f_max) or lower "
+                "rmax_safety_margin — both set Nk",
+                "SPARC(output_mode='R') or 'D', which stream one trace per "
+                "run instead of holding the whole cube",
+            ],
+        )
+
     def _finalize_sparc_result(self, result, fm, run_bases):
         """Attach output paths + finishing log; the shared R/D/S tail.
 
@@ -554,8 +686,48 @@ class SPARC(PropagationModel):
                 ('rts_file', '.rts'),
             ),
         )
+        self._warn_on_truncated_window(result)
         self._log("Simulation complete")
         return result
+
+    def _warn_on_truncated_window(self, result) -> None:
+        """Warn when p(t) is still ringing at the end of the output window.
+
+        ``t_max`` is sized from the direct travel time
+        (:meth:`_write_sparc_env`), which does not bound the last arrival: in
+        a waveguide that is set by the slowest modal *group* velocity, which
+        falls to zero at cutoff, and SPARC's vacuum / rigid boundaries leave
+        the near-cutoff tail undamped. An arrival past ``t_max`` is absent
+        from p(t) with nothing in the output marking it — so measure the tail
+        that did come back (the peak over the final tenth of the window
+        against the peak over the whole of it) and say so while it is within
+        ``_TRUNCATION_LEVEL`` of the peak.
+        """
+        time = np.asarray(result.coords.get('time', ()), dtype=float)
+        data = np.abs(np.asarray(result.data))
+        if time.size < 10 or data.ndim == 0 or data.shape[-1] != time.size:
+            return
+        n_tail = max(1, int(round(_TRUNCATION_TAIL_FRACTION * time.size)))
+        # An all-NaN slice (every receiver masked) is not a finding, and
+        # :func:`_peak_ignoring_nan` returns NaN for one without raising the
+        # warning that would have to be muted process-wide.
+        peak = _peak_ignoring_nan(data)
+        tail = _peak_ignoring_nan(data[..., -n_tail:])
+        if not (np.isfinite(peak) and np.isfinite(tail) and peak > 0.0):
+            return
+        ratio = tail / peak
+        if ratio < _TRUNCATION_LEVEL:
+            return
+        warnings.warn(
+            f"SPARC TIME_SERIES: p(t) is still at {100.0 * ratio:.0f}% of "
+            f"its peak over the last {100.0 * _TRUNCATION_TAIL_FRACTION:.0f}%"
+            f" of the [0, {float(time[-1]):.4g}] s output window, so arrivals "
+            f"past it are missing from the returned trace. The auto window is "
+            f"2.5 direct travel times, which does not bound the slow modal "
+            f"tail of a waveguide — raise it with SPARC(t_max=...) (and keep "
+            f"n_t_out / rmax_safety_margin in step with the longer window).",
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+        )
 
     def _run_and_read_rts(self, fm, run_base):
         """Run the binary for ``run_base`` and read back its ``.rts``."""
@@ -810,12 +982,131 @@ class SPARC(PropagationModel):
         direct DFT (``grn_reader._hankel_transform``) — no FFT anywhere. A
         uniform-``Δk`` sum is periodic in range with period ``2π/Δk =
         RMax``, so the alias is a visible non-physical wave at the far range
-        edge unless ``RMax`` is pushed well past the receivers. User-pinned
-        values win.
+        edge unless ``RMax`` is pushed well past the receivers.
+
+        The fold is not only the replica sitting at ``r = RMax``: the
+        receiver at range ``r`` also carries the arrival that belongs at
+        ``r - RMax``, i.e. a copy of the source response from the distance
+        ``|RMax - r|``, reaching it at ``(RMax - r)/c``. Pushing ``RMax``
+        just past the receivers therefore leaves the alias *early*, not
+        late. At margin ``m`` the farthest receiver gets it at
+        ``(m-1)*r/c`` against an auto window of ``2.5*r/c``
+        (:meth:`_write_sparc_env`), so the margin has to exceed 3.5.
+        User-pinned values win; :meth:`_warn_on_range_alias` checks whichever
+        margin is in force against the window actually written.
+
+        Scooter needs no such margin: ``scooter.f90:69`` samples four times
+        as finely (``Nk = 2000*RMax_km*(kMax-kMin)/pi``, i.e.
+        ``Δk ≈ π/(2·RMax)``), putting its period at ``4·RMax``.
         """
         if self.rmax_safety_margin is not None:
             return float(self.rmax_safety_margin)
-        return 3.0
+        return 4.0
+
+    def _profile_speed_bounds(self, env: Environment) -> tuple:
+        """``(slowest, fastest)`` sound speed (m/s) for the timing checks.
+
+        The output window is anchored on the slowest speed (the latest the
+        direct arrival can land) and the range-alias check on the fastest
+        (the earliest the folded replica can). ``sound_speed`` pins the slow
+        end; ``DEFAULT_SOUND_SPEED`` covers a profile that carries no usable
+        speed at all.
+
+        The two ends read different parts of the environment, on purpose.
+        ``c_slow`` stays water-only: it anchors ``t_max``, which is a
+        heuristic rather than a bound on the last arrival (see
+        :meth:`_write_sparc_env`) and is backstopped after the run by
+        :meth:`_warn_on_truncated_window` measuring the trace that came back.
+        ``c_fast`` spans every medium the deck carries, water and seabed
+        alike, because the replica :meth:`_warn_on_range_alias` looks for
+        travels the fold distance through the whole waveguide: a fast
+        sediment layer over a 1500 m/s column carries it in ahead of any
+        water path. That is also what the binary itself does —
+        ``Scooter/sparc.f90:207`` runs ``MediumLoop: DO medium = 1,
+        SSP%NMedia`` taking ``cMax = MAX(cpR, cMax)`` over EVERY medium, and
+        ``write_layer_sections`` emits each sediment layer as one more
+        medium with ``NMEDIA`` incremented. ``all_sound_speeds`` is the
+        matching accessor: compressional speeds only, skipping the
+        vacuum / rigid / file / precalc half-spaces that carry no seabed
+        speed — including the one ``_sparc_rigidify_halfspace`` has already
+        converted, which the deck no longer marches as a medium.
+        """
+        speeds = np.asarray(env.ssp.data, dtype=float).ravel()
+        speeds = speeds[np.isfinite(speeds) & (speeds > 0.0)]
+        c_slow = self.sound_speed
+        if c_slow is None:
+            c_slow = (float(speeds.min()) if speeds.size
+                      else DEFAULT_SOUND_SPEED)
+        c_fast = float(speeds.max()) if speeds.size else float(c_slow)
+        seabed = [c for c in env.bottom.all_sound_speeds()
+                  if np.isfinite(c) and c > 0.0]
+        if seabed:
+            c_fast = max(c_fast, max(seabed))
+        return float(c_slow), max(float(c_fast), float(c_slow))
+
+    def _warn_on_range_alias(self, rmax_m: float, r_ref: float,
+                             c_fast: float, t_max: float) -> None:
+        """Warn when the ``Δk`` sum's range replica falls inside ``[0, t_max]``.
+
+        The farthest receiver (``r_ref``) sees the fold from ``RMax - r_ref``
+        (see :meth:`_resolve_rmax_safety_margin`); the earliest it can arrive
+        is that distance over the fastest speed in the profile. Inside the
+        output window it is indistinguishable from a real late arrival, so
+        name the ``rmax_safety_margin`` that pushes it clear.
+        """
+        if not (r_ref > 0.0 and c_fast > 0.0 and t_max > 0.0):
+            return
+        t_alias = (rmax_m - r_ref) / c_fast
+        if t_alias > t_max:
+            return
+        margin_needed = 1.0 + t_max * c_fast / r_ref
+        warnings.warn(
+            f"SPARC range alias: RMax = {rmax_m:.6g} m puts the "
+            f"wavenumber sum's range replica at t = {t_alias:.4g} s at the "
+            f"farthest receiver ({r_ref:.6g} m), inside the "
+            f"{t_max:.4g} s output window — it will read as a real late "
+            f"arrival. Use SPARC(rmax_safety_margin>"
+            f"{margin_needed:.3g}) (runtime scales with it) or shorten the "
+            f"window with t_max.",
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+        )
+
+    def _resolve_n_mesh(self, env, f_max: float) -> Union[int, List[int]]:
+        """Mesh count for the deck: the caller's if pinned, else sized at the
+        band top this run actually marches. A pinned ``n_mesh`` comes back as
+        a single ``int`` the writer applies to every medium; the automatic
+        path returns a ``list`` with one count per medium.
+
+        ``misc/ReadEnvironmentMod.f90:103`` sizes an automatic mesh as
+        ``deltaz = c / freq0 / 20`` — 20 points per wavelength at the deck's
+        NOMINAL frequency. KRAKEN and SCOOTER then rescale it per frequency
+        (``kraken.f90:75`` and ``scooter.f90:106`` both multiply ``NG`` by
+        ``freq/freq0``), which is what lets those wrappers check the mesh at
+        ``freq0`` and be done. ``sparc.f90`` has no such rescaling anywhere: it
+        takes ``N`` as written and sets ``h = (Depth(2) - Depth(1)) / N``
+        (``:54``, ``:85``). But this wrapper writes a pulse band reaching
+        ``2*freq`` by default, so an automatic mesh ran the top of that band at
+        10 points per wavelength.
+
+        Measured on a 100 m isovelocity guide, vacuum surface / rigid bottom,
+        source and receiver at 50 m, TIME_SERIES, against a converged mesh:
+        the automatic count is 0.239 relative rms at 20 Hz / 500 m and 0.375 at
+        60 Hz / 300 m (peak -0.86 dB), with the coarse mesh also putting the
+        arrival about 1.7 ms early over 300 m. Convergence is monotone in the
+        count, so sizing at ``f_max`` rather than ``freq0`` is the fix rather
+        than a tuning choice.
+        """
+        if self.n_mesh:
+            return int(self.n_mesh)
+        f = float(f_max)
+        if not np.isfinite(f) or f <= 0.0:
+            return int(self.n_mesh)
+        # One count per MEDIUM, not one scalar: AT sizes each medium from its
+        # OWN thickness and speed (ReadEnvironmentMod.f90:101-106), so the
+        # water column's count broadcast to a 10 m sediment layer over-resolves
+        # that layer by the thickness ratio and the march fails outright.
+        return [max(int(_AT_POINTS_PER_WAVELENGTH * thickness * f / c), 10)
+                for thickness, c in at_env_media(env)]
 
     def _write_sparc_env(self, filepath, env, source, receiver, *,
                          rmax_reference_m=None):
@@ -845,9 +1136,17 @@ class SPARC(PropagationModel):
         elif bottom_acoustic_type == 'rigid':
             bottom_type = BoundaryType.RIGID
         else:
-            raise ConfigurationError(
-                f"Invalid bottom boundary type '{hs.acoustic_type}' for SPARC. "
-                f"Only 'vacuum' and 'rigid' are supported."
+            # ``_validate_acoustic_type`` has already rejected unrecognised
+            # names and ``_sparc_rigidify_halfspace`` has already converted a
+            # halfspace, so what reaches here is a reflection-table bottom
+            # ('file' / 'precalc') — valid everywhere else, unrepresentable in
+            # SPARC's Vacuum/Rigid-only deck. Kraken and Scooter stage the
+            # same table.
+            raise UnsupportedFeatureError(
+                'SPARC',
+                f"a {hs.acoustic_type!r} bottom — its deck carries only the "
+                f"'vacuum' and 'rigid' boundary conditions",
+                alternatives=['Kraken', 'Scooter'],
             )
 
         # RMax is the period of SPARC's inverse Hankel FFT — too tight leaks
@@ -871,9 +1170,22 @@ class SPARC(PropagationModel):
         # a wavenumber-sampling knob (Δk ≈ 2π/RMax): folding the margin into
         # the window stretches [0, t_max] by that factor while n_t_out stays
         # fixed, aliasing the default output grid.
-        c_water = self.sound_speed if self.sound_speed is not None else DEFAULT_SOUND_SPEED
-        travel_time = r_ref / c_water
+        #
+        # The auto window is 2.5 direct travel times at the slowest speed the
+        # profile carries. That is a heuristic, not a bound on the last
+        # arrival: in a guide the
+        # tail is set by the slowest modal GROUP velocity, which goes to zero
+        # at cutoff, and SPARC's vacuum/rigid boundaries (sparc.f90:101-104)
+        # leave that tail undamped. An arrival past t_max is simply absent
+        # from p(t) with nothing in the output to say so, hence the post-run
+        # ``_warn_on_truncated_window`` check on the trace that comes back.
+        # ``sound_speed`` pins the speed; DEFAULT_SOUND_SPEED is only the
+        # fallback for an environment that declares no usable speed at all.
+        c_slow, c_fast = self._profile_speed_bounds(env)
+        travel_time = r_ref / c_slow
         t_max = self.t_max if self.t_max is not None else travel_time * 2.5
+
+        self._warn_on_range_alias(rmax_m, r_ref, c_fast, t_max)
 
         n_t_out = self._resolve_n_t_out(f_max, t_max)
 
@@ -899,6 +1211,7 @@ class SPARC(PropagationModel):
                             "band (f_min/f_max) so that "
                             "rmax·(f_max/c_low − f_min/c_high) ≥ 2.",
             )
+        self._reject_oversized_snapshot(receiver, nk, n_t_out)
 
         write_sparc_env_file(
             filepath, env, source, receiver,
@@ -906,7 +1219,7 @@ class SPARC(PropagationModel):
             surface_type=surface_type,
             bottom_type=bottom_type,
             output_mode=self.output_mode,
-            n_mesh=self.n_mesh,
+            n_mesh=self._resolve_n_mesh(env, f_max),
             rmax_m=rmax_m,
             # The pair resolved once above (for the Nk guard); the writer's
             # own resolver passes explicit values through unchanged.
@@ -929,10 +1242,12 @@ class SPARC(PropagationModel):
         p(t) at exit 0.
 
         The native ``p(t)`` sampling is the caller's to choose, so the value is
-        kept verbatim. But a grid whose Nyquist ``0.5 · n_t_out / t_max`` sits
-        below ``f_max`` aliases silently: the returned p(t) looks perfectly
-        plausible at the wrong frequency. Say so, and name the ``n_t_out``
-        that fixes it.
+        kept verbatim. But a grid whose Nyquist sits below ``f_max`` aliases
+        silently: the returned p(t) looks perfectly plausible at the wrong
+        frequency. Say so, and name the ``n_t_out`` that fixes it. ``SubTab``
+        expands ``0.0 t_max /`` inclusive of both endpoints, so the step is
+        ``t_max/(n_t_out − 1)`` and the sample rate ``(n_t_out − 1)/t_max``
+        — not ``n_t_out/t_max``, which overstates it by ``n/(n−1)``.
 
         The window is ``[0, t_max]`` — the *output* window the writer emits
         (``oalib_writer``), not ``t_start``, which only sets where the
@@ -949,9 +1264,9 @@ class SPARC(PropagationModel):
             )
         window = float(t_max)
         if window > 0 and f_max > 0:
-            fs = self.n_t_out / window
+            fs = (int(self.n_t_out) - 1) / window
             if f_max > 0.5 * fs:
-                n_needed = int(np.ceil(
+                n_needed = 1 + int(np.ceil(
                     window * _SPARC_PULSE_OVERSAMPLE * 2.0 * f_max))
                 warnings.warn(
                     f"SPARC TIME_SERIES: the output grid samples at "

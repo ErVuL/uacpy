@@ -22,9 +22,14 @@ from scipy.signal import get_window
 
 from uacpy.core.constants import DEFAULT_SOUND_SPEED
 from uacpy.core.exceptions import ConfigurationError
-from uacpy.core._beamforming import loaded_inverse, quadratic_form
+from uacpy.core._warn_frames import USER_FRAME_SKIP
+from uacpy.core._beamforming import (
+    loaded_inverse, quadratic_form, snapshot_covariance)
 from uacpy._log import log_message
-from uacpy.acoustic_signal._signal_validate import require_finite_signal
+from uacpy.acoustic_signal._signal_validate import (
+    require_finite_signal,
+    require_positive_finite_scalar,
+)
 
 BeamformResult = namedtuple("BeamformResult", "snr angles peak_snr")
 
@@ -42,7 +47,7 @@ def steering_vectors(positions_m, angles_deg, frequency: float,
     because every consumer here applies the vector in Hermitian form —
     ``e**H p`` for :func:`beamform`, ``e**H R e`` for the spectra — whereas
     ``Matlab/beamform.m:20`` applies its ``+j`` vector as ``e p``. Under AT's
-    ``exp(+i*omega*t)`` convention (``KrakenField/EvaluateMod.f90:41``) an
+    ``exp(+i*omega*t)`` convention (``KrakenField/EvaluateMod.f90:42``) an
     arrival at declination ``+theta`` carries depth phase
     ``exp(-i*k*z*sin(theta))``, so ``e**H p`` peaks at ``+theta`` only with
     this sign.
@@ -52,9 +57,21 @@ def steering_vectors(positions_m, angles_deg, frequency: float,
     ndarray
         Shape ``(n_angles, n_elements)``, unit-norm per row.
     """
-    z = np.asarray(positions_m, dtype=float)
+    z = np.atleast_1d(np.asarray(positions_m, dtype=float))
+    if z.ndim != 1:
+        # np.outer flattens, so an (N, 2) coordinate array would come back as
+        # a unit-norm (n_angles, 2N) manifold — the right shape for a 2N-element
+        # array that does not exist. sample_covariance checks ndim for the same
+        # reason.
+        raise ConfigurationError(
+            f"steering_vectors: positions_m must be 1-D element coordinates "
+            f"along the array axis (m); got shape {z.shape}. For a planar or "
+            f"volumetric array, project the coordinates onto the array axis.")
     angles = np.atleast_1d(np.asarray(angles_deg, dtype=float))
-    k = 2.0 * np.pi * float(frequency) / float(c)
+    frequency = require_positive_finite_scalar(
+        frequency, "steering_vectors", "frequency", " Hz")
+    c = require_positive_finite_scalar(c, "steering_vectors", "c", " m/s")
+    k = 2.0 * np.pi * frequency / c
     phase = np.outer(np.sin(np.deg2rad(angles)), z)
     e = np.exp(-1j * k * phase)
     return e / np.sqrt(z.size)
@@ -66,6 +83,10 @@ def sample_covariance(snapshots, *, diagonal_loading: float = 0.0):
     A non-finite snapshot (dead hydrophone) is refused here — one NaN
     poisons every covariance entry and the downstream Bartlett surface
     would come back all-NaN with no diagnostic.
+
+    :func:`uacpy.sonar.csdm` is the same estimate under the matched-field
+    name; both call ``core._beamforming.snapshot_covariance``, so they carry
+    the same guards. This one adds ``diagonal_loading``.
 
     Parameters
     ----------
@@ -79,12 +100,15 @@ def sample_covariance(snapshots, *, diagonal_loading: float = 0.0):
     ndarray
         Hermitian covariance matrix ``(n_elements, n_elements)``.
     """
-    x = require_finite_signal(np.asarray(snapshots, dtype=complex),
-                              "sample_covariance")
-    if x.ndim != 2:
-        raise ConfigurationError("sample_covariance: snapshots must be 2-D (N, snaps)")
-    n, m = x.shape
-    r = (x @ x.conj().T) / m
+    if not diagonal_loading >= 0.0:
+        raise ConfigurationError(
+            f"sample_covariance: diagonal_loading must be >= 0 (got "
+            f"{diagonal_loading!r}); it scales the trace(R)/N ridge added "
+            f"to the diagonal, and only a non-negative ridge regularises R.")
+    # The shared covariance core (core/_beamforming): the same average and the
+    # same shape/L/finiteness checks as uacpy.sonar.csdm.
+    r = snapshot_covariance(snapshots, "sample_covariance")
+    n = r.shape[0]
     if diagonal_loading > 0.0:
         r = r + diagonal_loading * (np.trace(r).real / n) * np.eye(n)
     return r
@@ -94,7 +118,13 @@ def bartlett_spectrum(R, steering):
     """Conventional (Bartlett) beamformer power vs angle: ``e^H R e``.
 
     ``steering`` is the ``(n_angles, n_elements)`` matrix from
-    :func:`steering_vectors` — one steering vector per scan angle.
+    :func:`steering_vectors` — one steering vector per scan angle. The power
+    is unnormalised, in the units of ``R``.
+
+    :func:`uacpy.sonar.bartlett` is the same processor over a matched-field
+    replica bank: column-major weights and a surface divided by ``tr K``. The
+    ``uacpy.sonar.matched_field`` module docstring tabulates the four
+    differences.
     """
     e = np.asarray(steering, dtype=complex)
     # The shared Bartlett/MVDR core (core/_beamforming): one einsum for all
@@ -124,7 +154,7 @@ def _powerless_covariance(R, caller: str) -> bool:
     warnings.warn(
         f"{caller}: the covariance carries no power (trace={trace:g}), so the "
         f"spectrum is undefined; returning NaN.",
-        UserWarning, stacklevel=3,
+        UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
     )
     return True
 
@@ -136,7 +166,13 @@ def mvdr_spectrum(R, steering, *, diagonal_loading: float = 1e-6):
     :func:`steering_vectors`. ``diagonal_loading`` (fraction of
     ``trace(R)/N``) stabilises the inverse for rank-deficient or
     snapshot-starved covariances — but only while ``R`` still carries power;
-    see :func:`_powerless_covariance`.
+    see :func:`_powerless_covariance`. The output is unscaled.
+
+    :func:`uacpy.sonar.mvdr` is the same processor over a matched-field
+    replica bank, with a max-scaled surface and a 10 000x larger loading
+    default (``1e-2`` against this ``1e-6``) — a deliberate per-surface
+    policy, not drift. The ``uacpy.sonar.matched_field`` module docstring
+    tabulates the four differences.
     """
     R = np.asarray(R, dtype=complex)
     e = np.asarray(steering, dtype=complex)
@@ -266,6 +302,9 @@ def beamform(
     if angles is None:
         angles = np.arange(-90, 91, 1)
     pressure = require_finite_signal(pressure, "beamform")
+    frequency = require_positive_finite_scalar(
+        frequency, "beamform", "frequency", " Hz")
+    c = require_positive_finite_scalar(c, "beamform", "c", " m/s")
     e = steering_vectors(phone_coords, angles, frequency, c)
     # Matched filter, the same Hermitian form bartlett/mvdr/music_spectrum use.
     beamformed = e.conj() @ pressure

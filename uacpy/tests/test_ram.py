@@ -1,11 +1,22 @@
+"""RAM parabolic-equation-focused tests.
+
+Pade parameters and stability, the range/depth grids the deck carries, and the
+tolerances the Fortran march itself imposes on where a receiver can land.
+"""
+
+import types
 import warnings
-"""RAM parabolic-equation-focused tests."""
+from pathlib import Path
 
 import pytest
 import numpy as np
 
+import uacpy
 from uacpy.models import RAM, RunMode
-from uacpy.core.exceptions import ConfigurationError
+from uacpy.models.ram import MAX_BATHY_SECTIONS, MPIRAMS_RANGE_TOL_M
+from uacpy.core.exceptions import (
+    ConfigurationError, ExecutableNotFoundError,
+)
 from uacpy import Field
 from uacpy.core import (Altimetry, Bathymetry, 
     Environment, Source, Receiver, SoundSpeedProfile, BoundaryProperties,
@@ -449,7 +460,7 @@ class TestAbsorbingRampLeavesTheSedimentColumnAlone:
         for p in [(0.0, 0.02), (10.0, 0.02), (10.0, 0.3), (40.0, 0.3), (40.0, 5.0)]:
             assert p in out
 
-    def test_unclamped_ramp_still_starts_where_it_should(self):
+    def test_an_unclamped_ramp_starts_at_the_seabed(self):
         # The discriminating counterpart: pinning the layer must not drag the
         # ramp's start up with it. Here z_abs = 400 - 100 = 300.
         out = self._ramp([(0.0, 0.02), (30.0, 0.02), (30.0, 5.0), (400.0, 5.0)],
@@ -767,9 +778,19 @@ class TestRamsSeafloorIndexFloor:
     range step (``rams0.5.f:305``), so the SHALLOWEST point on the track
     decides it. Every other depth guard in the class is written against
     ``env.depth`` — the deepest — which is why this one exists separately and
-    why the case is reachable with no pinned knobs at all: uacpy's auto ``dz``
-    scales with wavelength, so at 10 Hz ``dz`` is 5.7 m and any shelf below
-    11.4 m trips it.
+    why the case is reachable with no pinned knobs at all.
+
+    The threshold moves with the auto ``dz``, so these cases are stated
+    against the resolved grid rather than a remembered number.
+    ``_align_dz_with_seafloor`` takes the coarsest ``dz`` that divides the
+    shelf depth and still clears the shear-wavelength cap — 5.714 m here
+    (c_s = 800 m/s, 10 Hz). So a shelf *deeper* than that cap gets split into
+    at least two cells and is in-domain (6 m → dz 3.0, iz 2; 8 m → dz 4.0,
+    iz 2), while a shelf *at or under* the cap cannot be split at all: the
+    coarsest divisor is the depth itself, the whole water column becomes one
+    cell, and ``iz`` falls to 1 (5 m → dz 5.0; 3 m → dz 3.0). The refusal
+    boundary is therefore the shear cap, and both sides of it are pinned
+    below.
     """
 
     @staticmethod
@@ -787,18 +808,22 @@ class TestRamsSeafloorIndexFloor:
     SRC = Source(depths=20.0, frequencies=10.0)
     RCV = Receiver(depths=[3.0, 6.0], ranges=np.linspace(1000.0, 15000.0, 15))
 
-    @pytest.mark.parametrize('shelf', [8.0, 3.0])
+    @pytest.mark.parametrize('shelf', [5.0, 3.0])
     def test_a_shoaling_track_that_drives_iz_below_two_is_refused(self, shelf):
-        # 8 m is the dangerous one: it used to return 30/30 finite values
-        # with no warning while reading out of bounds.
+        # Both sit at or under the 5.714 m shear cap, so the column cannot be
+        # split and iz = 1 — the case that returns 30/30 finite values with no
+        # warning while reading out of bounds.
         with pytest.raises(ConfigurationError, match='shoals'):
             RAM(backend='rams', verbose=False).run(
                 self._env(shelf), self.SRC, self.RCV)
 
-    @pytest.mark.parametrize('shelf', [40.0, 14.0])
-    def test_a_track_that_stays_above_two_cells_still_runs(self, shelf):
+    @pytest.mark.parametrize('shelf', [40.0, 14.0, 6.0])
+    def test_a_track_that_stays_above_two_cells_runs(self, shelf):
         # The discriminating counterpart — iz >= 2 is in-domain and must not
-        # be refused.
+        # be refused. 6 m is the tightest admitted case: just past the shear
+        # cap, so the alignment can split it into two cells (dz 3.0, iz 2).
+        # Pinning it here means a future change to the auto dz cannot move
+        # the boundary without one of these two tests failing.
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
             f = RAM(backend='rams', verbose=False).run(
@@ -907,7 +932,7 @@ class TestSourceRowIsActuallySolved:
                 env, Source(depths=0.5, frequencies=100.0), self.RCV)
 
     @pytest.mark.parametrize('backend', ['ramgeo', 'mpiramS'])
-    def test_a_source_below_the_first_cell_still_runs(self, backend):
+    def test_a_source_below_the_first_cell_runs(self, backend):
         # The discriminating counterpart.
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
@@ -1011,11 +1036,16 @@ class TestZeroRangeReceiverIsNaN:
                        ranges=np.array([0.0, 500.0, 1000.0]))
         return env, src, rcv
 
-    def test_mpirams_tl_r0_column_is_nan_and_warns(self):
+    def test_mpirams_tl_r0_column_is_nan_and_warns_once(self):
         env, src, rcv = self._setup()
-        with pytest.warns(UserWarning, match=r"1/sqrt\(r\)"):
+        with pytest.warns(UserWarning, match=r"starts at r=0 m") as record:
             field = RAM(verbose=False).run(env, src, rcv,
                                            run_mode=RunMode.COHERENT_TL)
+        r0_warnings = [w for w in record
+                       if 'r=0' in str(w.message) or 'r <= 0' in str(w.message)]
+        assert len(r0_warnings) == 1, (
+            f"expected the shared run() warning alone, got "
+            f"{[str(w.message) for w in r0_warnings]}")
         assert np.isnan(field.data[:, 0]).all()
         assert np.isfinite(field.data[:, 1:]).all()
         np.testing.assert_allclose(field.coords['range'],
@@ -1313,3 +1343,1248 @@ class TestRangeDependentBottomIsHonoured:
         assert np.max(np.abs(rd[far_half] - uniform[far_half])) > 1.0, (
             "a range-dependent bottom produced the same field as the "
             "uniform control — the deck's per-range segments were dropped")
+
+
+def test_near_side_receivers_lie_within_the_march_exit_tolerance() -> None:
+    """The premise the near-side ``np.clip(..., rout[0], None)`` rests on.
+
+    ``rout[0]`` is the achieved range of ``receiver.ranges[0]``: the deck
+    writer emits ``receiver.ranges`` verbatim and in order, and the carrier
+    forbids a non-increasing range axis. So the nearest receiver is the first
+    one written, and the march's ``if (abs(rnow-rend)<0.1_wp) exit`` bounds how
+    far ``rout[0]`` can sit above it — the same 10 cm the far side snaps.
+    Nothing can be silently dragged further than that, which is why the near
+    side carries no tolerance of its own.
+    """
+    from uacpy.io.mpirams_writer import write_ranges_file
+    from uacpy.models.ram import MPIRAMS_RANGE_TOL_M
+
+    ranges = [500.0, 1500.0, 3000.0]
+    receiver = Receiver(depths=[10.0, 20.0], ranges=ranges)
+    stored = np.asarray(receiver.ranges, dtype=float)
+
+    # The carrier forbids a range axis that is not strictly increasing, so
+    # ranges[0] is the minimum.
+    assert np.all(np.diff(stored) > 0)
+    assert float(stored[0]) == float(stored.min())
+    with pytest.raises(uacpy.ConfigurationError):
+        Receiver(depths=[10.0], ranges=[3000.0, 500.0])
+
+    # The deck carries those ranges through unchanged and in order.
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "ranges.dat"
+        write_ranges_file(path, receiver.ranges)
+        written = [float(line) for line in
+                   path.read_text().split() if line.strip()]
+    assert written == list(stored)
+
+    # And the tolerance the far side uses is the march's own exit test, which
+    # is what bounds the near side too.
+    source = (Path(uacpy.__file__).parent / "third_party" / "mpiramS" /
+              "src" / "ram.f90")
+    if not source.is_file():
+        pytest.skip("vendored mpiramS source not present")
+    assert (f"abs(rnow-rend)<{MPIRAMS_RANGE_TOL_M}_wp"
+            in source.read_text(encoding="utf-8", errors="replace"))
+
+
+class TestMpiramsOutputRangeSpacing:
+    """``rout(irr)`` is the position the march stopped at, not the range that
+    was asked for, so two output ranges closer together than the march's exit
+    tolerance share one entry. ``validate_inputs`` refuses that grid; these
+    pin the threshold against the march itself, on both sides."""
+
+    ENV = Environment(name='spacing', bathymetry=100.0, ssp=1500.0)
+    SOURCE = Source(depths=50.0, frequencies=50.0)
+
+    @staticmethod
+    def _receiver(ranges):
+        return Receiver(depths=[20.0, 40.0], ranges=ranges)
+
+    @staticmethod
+    def _march(ranges):
+        """Return the ``rout`` the binary writes for ``ranges``."""
+        import tempfile
+        from uacpy.io.mpirams_reader import read_psif
+        model = RAM(backend='mpiramS', verbose=False, dr=20.0, dz=2.0)
+        receiver = Receiver(depths=[20.0], ranges=ranges)
+        with tempfile.TemporaryDirectory() as tmp:
+            work_dir = Path(tmp)
+            model._write_mpirams_deck(
+                TestMpiramsOutputRangeSpacing.ENV,
+                TestMpiramsOutputRangeSpacing.SOURCE,
+                receiver, work_dir, 50.0, 1e6, 1.0, 20.0, 2.0)
+            model._run_binary(work_dir)
+            return np.asarray(read_psif(work_dir)['rout'], dtype=float)
+
+    @pytest.mark.parametrize('run_mode', [RunMode.COHERENT_TL,
+                                          RunMode.BROADBAND])
+    def test_a_pair_below_the_exit_tolerance_is_refused(self, run_mode):
+        """The message carries the two ranges, their separation and the limit
+        — the three numbers needed to respace the grid."""
+        receiver = self._receiver([500.0, 1000.0, 1000.05, 1500.0])
+        model = RAM(backend='mpiramS', verbose=False)
+        with pytest.raises(ConfigurationError) as exc:
+            model.validate_inputs(self.ENV, self.SOURCE, receiver,
+                                  run_mode=run_mode)
+        message = str(exc.value)
+        assert '1000.05' in message
+        assert '0.05 m apart' in message
+        assert f'{MPIRAMS_RANGE_TOL_M} m' in message
+        assert 'ranges' in exc.value.remediation
+
+    def test_a_pair_at_the_exit_tolerance_is_accepted(self):
+        ranges = [500.0, 1000.0, 1000.1, 1500.0]
+        assert ranges[2] - ranges[1] >= MPIRAMS_RANGE_TOL_M
+        RAM(backend='mpiramS', verbose=False).validate_inputs(
+            self.ENV, self.SOURCE, self._receiver(ranges),
+            run_mode=RunMode.COHERENT_TL)
+
+    @pytest.mark.parametrize('base, collapses', [(1000.0, False),
+                                                 (3000.0, True)])
+    def test_the_guard_refuses_the_grids_the_march_collapses(self, base,
+                                                             collapses):
+        """Two grids both spelled ``base`` and ``base + 0.1`` sit on opposite
+        sides of the tolerance once the addition is rounded to a double, and
+        the march applies its exit test to those same doubles. The guard has
+        to follow the arithmetic rather than the nominal spacing."""
+        ranges = [base, base + 0.1]
+        assert ((ranges[1] - ranges[0]) < MPIRAMS_RANGE_TOL_M) is collapses
+        rout = self._march(ranges)
+        assert bool(rout[1] - rout[0] <= 0.0) is collapses
+        model = RAM(backend='mpiramS', verbose=False)
+        if collapses:
+            with pytest.raises(ConfigurationError):
+                model.validate_inputs(self.ENV, self.SOURCE,
+                                      self._receiver(ranges),
+                                      run_mode=RunMode.COHERENT_TL)
+        else:
+            model.validate_inputs(self.ENV, self.SOURCE,
+                                  self._receiver(ranges),
+                                  run_mode=RunMode.COHERENT_TL)
+
+    def test_a_collins_backend_accepts_the_grid_mpirams_refuses(self):
+        """ramgeo marches its own uniform output grid and interpolates it onto
+        receiver.ranges, so the tolerance is mpiramS's alone."""
+        receiver = self._receiver([500.0, 1000.0, 1000.05, 1500.0])
+        RAM(backend='ramgeo', verbose=False).validate_inputs(
+            self.ENV, self.SOURCE, receiver, run_mode=RunMode.COHERENT_TL)
+
+
+def _elastic_column(thickness, speed):
+    return SeabedColumn(
+        layers=[SedimentLayer(thickness=thickness, sound_speed=speed,
+                              density=1.5, attenuation=0.5,
+                              shear_speed=400.0, shear_attenuation=1.0)],
+        halfspace=BoundaryProperties(
+            acoustic_type='half-space', sound_speed=1900.0, density=2.0,
+            attenuation=0.1, shear_speed=600.0, shear_attenuation=0.5),
+    )
+
+
+def _fluid_column(thickness, speed):
+    return SeabedColumn(
+        layers=[SedimentLayer(thickness=thickness, sound_speed=speed,
+                              density=1.6, attenuation=0.4)],
+        halfspace=BoundaryProperties(
+            acoustic_type='half-space', sound_speed=1900.0, density=1.9,
+            attenuation=0.2),
+    )
+
+
+def _env_range_dependent_elastic():
+    """Range-dependent in all three of bathymetry, SSP and bottom.
+
+    The bathymetry is deliberately non-monotonic so ``_bathy_anchor_ranges``
+    emits many sections, and the layer thickness varies with range so the
+    sediment base — where the absorbing ramp starts — moves between them.
+    """
+    ssp = SoundSpeedProfile(
+        depths=np.array([0.0, 50.0, 200.0]),
+        data=np.array([[1500.0, 1510.0],
+                       [1490.0, 1495.0],
+                       [1480.0, 1485.0]]),
+        ranges=np.array([0.0, 6000.0]),
+    )
+    bottom = Bottom(
+        columns=[_elastic_column(20.0, 1700.0), _elastic_column(8.0, 1750.0),
+                 _elastic_column(30.0, 1650.0)],
+        ranges=[0.0, 3000.0, 6000.0],
+    )
+    return Environment(
+        name='rd-elastic',
+        bathymetry=[(0.0, 120.0), (2000.0, 180.0), (4000.0, 90.0),
+                    (6000.0, 200.0)],
+        ssp=ssp, bottom=bottom,
+    )
+
+
+def _env_flat_fluid():
+    return Environment(name='flat-fluid', bathymetry=100.0, ssp=1500.0,
+                       bottom=_fluid_column(15.0, 1650.0))
+
+
+def _env_slope_range_independent_bottom():
+    """Sloping seafloor over a bottom that carries a single column."""
+    return Environment(
+        name='slope-ri', bathymetry=[(0.0, 60.0), (5000.0, 400.0)],
+        ssp=1500.0, bottom=_fluid_column(4.0, 1600.0),
+    )
+
+
+def _env_slope_range_dependent_bottom():
+    return Environment(
+        name='slope-rd',
+        bathymetry=[(0.0, 60.0), (2500.0, 300.0), (5000.0, 400.0)],
+        ssp=1500.0,
+        bottom=Bottom(columns=[_fluid_column(4.0, 1600.0),
+                               _fluid_column(9.0, 1700.0)],
+                      ranges=[0.0, 5000.0]),
+    )
+
+
+def _exact(segments):
+    """A segment list rendered so ``==`` compares the doubles themselves.
+
+    ``repr`` round-trips a float exactly and separates ``0.0`` from ``-0.0``,
+    which plain equality does not.
+    """
+    return [{key: (repr(value) if not isinstance(value, list)
+                   else [(repr(a), repr(b)) for a, b in value])
+             for key, value in segment.items()}
+            for segment in segments]
+
+
+# 105 Hz is where this environment's absorbing ramp starts *inside* the
+# sediment for some sections and at its base for others — see
+# ``test_the_attenuation_block_changes_length_within_one_deck``.
+_DECK_FREQS = (1.0, 10.0, 50.0, 105.0, 200.0, 800.0, 5000.0, 20000.0)
+
+
+class TestHoistedCollinsDeck:
+    """``_collins_deck_base`` + ``_ramp_range_segments`` must reproduce
+    ``_collins_range_segments`` exactly at every frequency, because the
+    broadband loop cuts the deck once for the whole band and re-ramps it."""
+
+    @pytest.mark.parametrize('kind', ['ramgeo', 'ramsurf', 'rams'])
+    @pytest.mark.parametrize('flat', [True, False])
+    def test_one_base_survives_being_reramped_and_its_decks_mangled(
+            self, kind, flat):
+        """A sweep re-ramps one payload hundreds of times and hands each
+        finished deck to a writer. Nothing that happens to a deck may reach
+        the payload, so the frequencies are visited out of order and each
+        deck is mutated before the next one is cut."""
+        model = RAM(verbose=False)
+        env = _env_flat_fluid() if flat else _env_range_dependent_elastic()
+        zmax = 400.0 if flat else 500.0
+        base = model._collins_deck_base(env, kind, zmax)
+        for freq in sorted(_DECK_FREQS, reverse=True) + list(_DECK_FREQS):
+            reramped = model._ramp_range_segments(base, freq, kind=kind,
+                                                  zmax=zmax)
+            rebuilt = model._collins_range_segments(env, kind, zmax, freq)
+            assert _exact(reramped) == _exact(rebuilt), f"freq={freq}"
+            for segment in reramped:
+                for value in segment.values():
+                    if isinstance(value, list):
+                        value.clear()
+
+    def test_the_deck_matches_the_values_recorded_before_the_hoist(self):
+        """The independent pin: decks recorded from the single-stage builder
+        the split replaced. Every other check here compares the two stages
+        against a rebuild that now goes *through* them, so this is what
+        stands between the deck and a shared drift."""
+        model = RAM(verbose=False)
+
+        flat = model._collins_range_segments(_env_flat_fluid(), 'rams',
+                                             400.0, 800.0)
+        assert _exact(flat) == [{
+            'range': '0.0',
+            'water_ssp': [('0.0', '1500.0'), ('100.0', '1500.0')],
+            'bottom_c': [('100.0', '1650.0'), ('115.0', '1650.0'),
+                         ('115.0', '1900.0'), ('400.0', '1900.0')],
+            'bottom_rho': [('100.0', '1.6'), ('115.0', '1.6'),
+                           ('115.0', '1.9'), ('400.0', '1.9')],
+            'bottom_attn': [('100.0', '0.4'), ('115.0', '0.4'),
+                            ('115.0', '0.2'),
+                            ('355.8503444387448', '0.2'), ('400.0', '10.0')],
+            'bottom_cs': [('100.0', '0.0'), ('115.0', '0.0'),
+                          ('115.0', '0.0'), ('400.0', '0.0')],
+            'bottom_attns': [('100.0', '0.0'), ('115.0', '0.0'),
+                             ('115.0', '0.0'), ('400.0', '0.0')],
+        }]
+
+        sloped = model._collins_range_segments(
+            _env_range_dependent_elastic(), 'ramgeo', 500.0, 50.0)
+        assert _exact(sloped) == [
+            {'range': '0.0',
+             'water_ssp': [('0.0', '1500.0'), ('50.0', '1490.0'),
+                           ('200.0', '1480.0')],
+             'bottom_c': [('0.0', '1700.0'), ('20.0', '1700.0'),
+                          ('20.0', '1900.0'), ('380.0', '1900.0')],
+             'bottom_rho': [('0.0', '1.5'), ('20.0', '1.5'),
+                            ('20.0', '2.0'), ('380.0', '2.0')],
+             'bottom_attn': [('0.0', '0.5'), ('20.0', '0.5'),
+                             ('20.0', '0.1'), ('380.0', '10.0')]},
+            {'range': '1500.0',
+             'water_ssp': [('0.0', '1505.0'), ('50.0', '1492.5'),
+                           ('200.0', '1482.5')],
+             'bottom_c': [('0.0', '1750.0'), ('8.0', '1750.0'),
+                          ('8.0', '1900.0'), ('365.0', '1900.0')],
+             'bottom_rho': [('0.0', '1.5'), ('8.0', '1.5'),
+                            ('8.0', '2.0'), ('365.0', '2.0')],
+             'bottom_attn': [('0.0', '0.5'), ('8.0', '0.5'),
+                             ('8.0', '0.1'), ('365.0', '10.0')]},
+            {'range': '4500.0',
+             'water_ssp': [('0.0', '1510.0'), ('50.0', '1495.0'),
+                           ('200.0', '1485.0')],
+             'bottom_c': [('0.0', '1650.0'), ('30.0', '1650.0'),
+                          ('30.0', '1900.0'), ('300.0', '1900.0')],
+             'bottom_rho': [('0.0', '1.5'), ('30.0', '1.5'),
+                            ('30.0', '2.0'), ('300.0', '2.0')],
+             'bottom_attn': [('0.0', '0.5'), ('30.0', '0.5'),
+                             ('30.0', '0.1'), ('300.0', '10.0')]},
+        ]
+
+        # The 62-section elastic deck, spot-checked at both ends: full text
+        # here would be unreadable, and the ends are where the seafloor is
+        # shallowest and deepest.
+        wide = _exact(model._collins_range_segments(
+            _env_range_dependent_elastic(), 'rams', 500.0, 200.0))
+        assert len(wide) == 62
+        assert wide[0]['range'] == '0.0'
+        assert wide[-1]['range'] == '5973.6070381231675'
+        assert wide[0]['bottom_attn'] == [
+            ('120.0', '0.5'), ('140.0', '0.5'), ('140.0', '0.1'),
+            ('324.8631220870285', '0.1'), ('500.0', '10.0')]
+        assert wide[-1]['bottom_attn'] == [
+            ('200.0', '0.5'), ('230.0', '0.5'), ('230.0', '0.1'),
+            ('324.8631220870285', '0.1'), ('500.0', '10.0')]
+
+    def test_the_attenuation_block_changes_length_with_frequency(self):
+        """The block is not a fixed-shape array that could be scaled in
+        place: the ramp keeps every control point at or above its start
+        depth, and that count moves with ``absorbing_width ∝ 1/f``."""
+        model = RAM(verbose=False)
+        env = _env_range_dependent_elastic()
+        lengths = {
+            freq: {len(seg['bottom_attn'])
+                   for seg in model._collins_range_segments(
+                       env, 'rams', 500.0, freq)}
+            for freq in (50.0, 800.0)
+        }
+        assert lengths[50.0] == {4}
+        assert lengths[800.0] == {5}
+
+    def test_the_attenuation_block_changes_length_within_one_deck(self):
+        """Worse than a per-frequency length: at one frequency the sections
+        of a single deck disagree, because the seafloor — and with it the
+        sediment base the ramp is clamped to — moves with range."""
+        model = RAM(verbose=False)
+        segments = model._collins_range_segments(
+            _env_range_dependent_elastic(), 'rams', 500.0, 105.0)
+        lengths = [len(seg['bottom_attn']) for seg in segments]
+        assert set(lengths) == {4, 5}
+        assert min(lengths.count(4), lengths.count(5)) > 10
+
+    @pytest.mark.parametrize('kind,zmax', [('ramgeo', 501.0), ('rams', 500.0)])
+    def test_a_deck_cut_against_another_grid_is_refused(self, kind, zmax):
+        """Condition the hoist rests on: ``zmax`` is fixed for the band.
+        Nothing in the code forces that, so reuse is checked rather than
+        assumed — a stale deck would march a different domain in silence."""
+        model = RAM(verbose=False)
+        base = model._collins_deck_base(
+            _env_range_dependent_elastic(), 'ramsurf', 500.0)
+        with pytest.raises(AssertionError, match='zmax'):
+            model._ramp_range_segments(base, 100.0, kind=kind, zmax=zmax)
+
+    def test_the_broadband_loop_owns_one_deck_and_keeps_it_off_the_model(self):
+        """The deck is a local of the sweep, not a cache on ``self``: an
+        attribute would outlive this ``env`` and be handed to the next
+        ``run()``. Every bin must also get the *same* payload, at the
+        band's own ``zmax``."""
+        model = RAM(verbose=False, backend='ramgeo', dr=50.0, dz=0.5,
+                    zmax=400.0, Q=4.0, T=0.2)
+        env = _env_slope_range_dependent_bottom()
+        source = Source(depths=[40.0], frequencies=[150.0])
+        receiver = Receiver(depths=np.array([30.0, 90.0]),
+                            ranges=np.array([500.0, 1500.0]))
+
+        class _Stop(Exception):
+            pass
+
+        seen, builds = [], []
+        before = set(vars(model))
+        real_base = model._collins_deck_base
+
+        def spy_base(*args, **kwargs):
+            built = real_base(*args, **kwargs)
+            builds.append(built)
+            return built
+
+        def stub_one_freq(*args, **kwargs):
+            seen.append(kwargs['deck_base'])
+            if len(seen) == 3:
+                raise _Stop
+            return dict(tl=np.zeros((2, 2)), pcomplex=np.zeros((2, 2), complex),
+                        depths=np.array([30.0, 90.0]),
+                        ranges=np.array([500.0, 1500.0]),
+                        dr=50.0, dz=0.5, zmax=400.0)
+
+        model._collins_deck_base = spy_base
+        model._run_collins_one_freq = stub_one_freq
+        with pytest.raises(_Stop):
+            model.run(env, source, receiver, run_mode='broadband')
+
+        assert len(builds) == 1
+        assert all(deck is builds[0] for deck in seen)
+        assert builds[0]['zmax'] == 400.0
+        assert set(vars(model)) - before <= {'_collins_deck_base',
+                                             '_run_collins_one_freq'}
+        assert not any(value is builds[0] for value in vars(model).values())
+
+
+class TestBathyAnchorRanges:
+
+    @pytest.mark.parametrize('env_factory', [
+        _env_slope_range_independent_bottom,
+        _env_slope_range_dependent_bottom,
+        _env_range_dependent_elastic,
+    ])
+    def test_the_vectorised_probe_matches_the_scalar_one_exactly(
+            self, env_factory):
+        """The fix replaced 1024 scalar ``eval`` calls with one vectorised
+        call. ``_query_profile`` runs the same arithmetic either way, so the
+        anchors must land on identical doubles — asserted against a scalar
+        re-derivation of the whole method, not a tolerance."""
+        env = env_factory()
+        bottom = env.bottom
+        r_axis = np.atleast_1d(np.asarray(env.bathymetry.ranges, dtype=float))
+        r_end = float(np.max(r_axis))
+        thicknesses = [
+            float(layer.thickness)
+            for r in r_axis
+            for layer in bottom.at(range=float(r)).layers
+            if float(layer.thickness) > 0.0
+        ]
+        tol = 0.5 * min(thicknesses)
+        probe = np.linspace(0.0, r_end, 1024)
+        floor = np.array(
+            [float(np.asarray(env.bathymetry.eval(range=float(r))).flat[0])
+             for r in probe])
+        expected, anchor = [], floor[0]
+        for r, z in zip(probe[1:], floor[1:]):
+            if abs(z - anchor) >= tol:
+                expected.append(float(r))
+                anchor = z
+        if len(expected) > MAX_BATHY_SECTIONS:
+            idx = np.linspace(0, len(expected) - 1, MAX_BATHY_SECTIONS)
+            expected = [expected[int(round(i))] for i in idx]
+
+        got = RAM._bathy_anchor_ranges(env, bottom)
+        assert [repr(v) for v in got] == [repr(v) for v in expected]
+
+    def test_the_sloping_case_keeps_its_recorded_anchors(self):
+        """A second, independent pin: values recorded from the scalar-probe
+        implementation, so a change to *both* paths still fails."""
+        env = _env_slope_range_independent_bottom()
+        got = RAM._bathy_anchor_ranges(env, env.bottom)
+        assert len(got) == 64
+        assert repr(got[0]) == '34.21309872922776'
+        assert repr(got[-1]) == '4995.112414467253'
+
+    def test_a_single_column_bottom_answers_every_node_the_same(self):
+        """What the copy de-duplication rests on: a bottom with one column
+        has nothing to choose between, so every node resolves to it and the
+        layer thicknesses cannot differ by range."""
+        env = _env_slope_range_independent_bottom()
+        bottom = env.bottom
+        assert not bottom.is_range_dependent
+        per_node = {tuple(float(layer.thickness)
+                          for layer in bottom.at(range=float(r)).layers)
+                    for r in np.linspace(0.0, 5000.0, 37)}
+        assert len(per_node) == 1
+
+
+class TestRamShearCapKeepsSeafloorAlignment:
+    """``rams0.5`` places the seafloor at ``iz = int(zb/dz)`` (``:135``), a
+    truncation with its cliff at integer ``zb/dz``, so ``dz`` has to divide
+    the water depth. The shear-wavelength cap is a *bound* on dz, not a grid:
+    assigning ``lambda_s/14`` raw gives ``h/dz = 233.33`` at c_s = 300 m/s,
+    f = 50 Hz, h = 100 m. Measured against a seafloor-aligned h/2000
+    reference: 9.08 dB max / 1.37 dB rms unsnapped, 0.81 / 0.13 snapped."""
+
+    @staticmethod
+    def _elastic_env(depth=100.0, shear=300.0):
+        return Environment(
+            name='elastic', bathymetry=depth, ssp=1500.0,
+            bottom=BoundaryProperties(
+                acoustic_type='half-space', sound_speed=1800.0, density=1.8,
+                attenuation=0.5, shear_speed=shear, shear_attenuation=0.2))
+
+    @pytest.mark.parametrize('freq', [50.0, 100.0, 250.0])
+    def test_auto_grid_puts_the_seafloor_on_a_node(self, freq):
+        from uacpy.models._pade_optimizer import rams_dz_shear_cap
+        env = self._elastic_env()
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            _, dz = RAM(backend='rams', verbose=False)._compute_grid_lytaev(
+                env, freq, max_range=5000.0, kind='rams')
+        layers = 100.0 / dz
+        assert layers == pytest.approx(round(layers), abs=1e-6), (
+            f"h/dz = {layers} is not an integer, so the seafloor falls "
+            f"between depth nodes")
+        assert dz <= rams_dz_shear_cap(300.0, freq) * (1 + 1e-12), (
+            "the aligned dz must still resolve the shear wavelength")
+
+    def test_alignment_helper_respects_the_bound_direction(self):
+        model = RAM(backend='rams', verbose=False)
+        env = self._elastic_env()
+        tighter = model._align_dz_with_seafloor(env, 0.428571)
+        coarser = model._align_dz_with_seafloor(env, 0.428571, coarsen=True)
+        assert tighter <= 0.428571 < coarser
+        for dz in (tighter, coarser):
+            assert 100.0 / dz == pytest.approx(round(100.0 / dz), abs=1e-6)
+
+    def test_an_already_aligned_dz_is_left_where_it_is(self):
+        model = RAM(backend='rams', verbose=False)
+        env = self._elastic_env()
+        aligned = RAM._snap_dz_to_seafloor(100.0, 250)
+        assert model._align_dz_with_seafloor(env, aligned) == pytest.approx(
+            aligned, rel=1e-9)
+
+
+class TestRamBackendBinaryResolution:
+    """``RAM(backend='rams')`` never executes ``s_mpiram``, so resolving it at
+    construction refuses a configuration that runs; and a pinned
+    ``executable`` has to reach whichever binary the dispatch lands on."""
+
+    @pytest.mark.parametrize('backend,expected', [
+        ('rams', 'rams0.5'), ('ramsurf', 'ramsurf1.5'), ('ramgeo', 'ramgeo'),
+        ('mpiramS', 's_mpiram'), (None, 's_mpiram'),
+    ])
+    def test_the_resolved_binary_follows_the_backend(self, backend, expected):
+        assert RAM(backend=backend, verbose=False)._exe.name == expected
+
+    def test_an_unknown_backend_is_refused_before_any_lookup(self):
+        with pytest.raises(ConfigurationError, match='not a known backend'):
+            RAM(backend='definitely-not-a-backend', verbose=False)
+
+    def test_a_pinned_executable_reaches_the_collins_path(self):
+        exe = RAM(backend='rams', verbose=False)._exe
+        model = RAM(backend='rams', executable=exe, verbose=False)
+        assert model._collins_binary('rams') == exe
+        assert model._collins_binary('ramgeo') == exe
+
+    def test_a_pinned_missing_executable_is_named(self):
+        from uacpy.core.exceptions import ExecutableNotFoundError
+        with pytest.raises(ExecutableNotFoundError):
+            RAM(backend='rams', executable='/no/such/binary', verbose=False)
+
+
+def test_ram_source_row_guard_runs_before_the_deck_is_written(tmp_path):
+    """``_check_source_row_is_solved`` refuses a source shallower than one
+    depth cell; on the mpiramS path it used to fire after ssp.dat, the
+    bathymetry file, the sediment file and ranges.dat were already on disk."""
+    env = Environment(
+        name='shallow_source', bathymetry=100.0, ssp=1500.0,
+        bottom=BoundaryProperties(acoustic_type='half-space',
+                                  sound_speed=1600.0, density=1.6,
+                                  attenuation=0.5))
+    source = Source(depths=0.05, frequencies=50.0)
+    receiver = Receiver(depths=np.array([50.0]), ranges=np.array([1000.0]))
+    model = RAM(backend='mpiramS', verbose=False)
+    with pytest.raises(ConfigurationError, match='shallower than one depth'):
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            model._write_mpirams_deck(env, source, receiver, tmp_path,
+                                      50.0, 0.0, 0.0, dr=10.0, dz=1.0)
+    assert list(tmp_path.iterdir()) == [], (
+        "the refusal left a half-written deck behind")
+
+
+class TestRamHalfSpaceSedimentLayerIsFloored:
+    """A bare half-space contributes no layer thickness of its own, so without
+    a floor ``sedlayer`` collapses to one depth cell and the attenuation ramp
+    starts at the seabed itself — replacing the seabed's own attenuation over
+    the whole sub-bottom, which ``_absorber_span`` exists to prevent. The floor
+    is the same synthetic thickness the Collins path wraps a half-space in
+    (``SeabedColumn.from_halfspace``: 10 % of the water depth, at least 5 m),
+    so the ramp begins below genuinely modelled seabed.
+    """
+
+    @staticmethod
+    def _halfspace_env(depth):
+        return Environment(
+            bathymetry=depth, ssp=1500.0,
+            bottom=BoundaryProperties(
+                acoustic_type='half-space', sound_speed=1800.0, density=1.8,
+                attenuation=0.5, shear_speed=800.0, shear_attenuation=0.2))
+
+    @pytest.mark.parametrize('depth, expected', [(100.0, 10.0), (30.0, 5.0)])
+    def test_the_floor_follows_the_synthetic_layer_thickness(self, depth,
+                                                             expected,
+                                                             tmp_path):
+        # 100 m -> 10 % of the water depth; 30 m -> the 5 m minimum, since
+        # 10 % of 30 m is under it.
+        sedlayer = RAM(backend='rams', verbose=False)._prepare_bottom_properties(
+            self._halfspace_env(depth), tmp_path,
+            1.0, depth * 2.0)[0]
+        assert sedlayer == pytest.approx(expected)
+
+    def test_a_deeper_absorber_span_sets_the_thickness(self, tmp_path):
+        # The floor is a minimum, not an override: every builder stretches
+        # sedlayer to the absorbing layer's start.
+        sedlayer = RAM(backend='rams', verbose=False)._prepare_bottom_properties(
+            self._halfspace_env(100.0), tmp_path,
+            250.0, 200.0)[0]
+        assert sedlayer == pytest.approx(250.0)
+
+
+class TestRamSectionSpacingWarnsOnlyForACallersOwnDr:
+    """``dr`` is always bounded by the closest profile-section spacing, because
+    ``profl`` reads sequentially and one section per ``dr`` (``ramgeo1.5.f:195``,
+    ``:359``, ``:78-84``) — sections closer together than ``dr`` are never
+    reached, and the run still exits 0 on the truncated environment.
+
+    The ``pinned`` flag decides only whether the caller is TOLD. It has to
+    track whose ``dr`` it is: the Collins broadband loop passes one ``dr``
+    override for the whole band, so keying the warning off the override's mere
+    presence announced an adjustment to a value the caller never chose.
+    """
+
+    SEGMENTS = [{'range': r} for r in (0.0, 100.0, 200.0, 300.0)]
+
+    def test_an_auto_derived_dr_is_bounded_silently(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            dr = RAM(backend='ramgeo', verbose=False)._constrain_dr_to_sections(
+                250.0, self.SEGMENTS, pinned=False)
+        assert dr == pytest.approx(100.0)
+
+    def test_a_callers_own_dr_is_bounded_and_announced(self):
+        with pytest.warns(UserWarning, match='profile-section spacing'):
+            dr = RAM(backend='ramgeo', verbose=False)._constrain_dr_to_sections(
+                250.0, self.SEGMENTS, pinned=True)
+        assert dr == pytest.approx(100.0)      # bounded either way
+
+    def test_a_dr_already_inside_the_spacing_is_left_alone(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            dr = RAM(backend='ramgeo', verbose=False)._constrain_dr_to_sections(
+                50.0, self.SEGMENTS, pinned=True)
+        assert dr == pytest.approx(50.0)
+
+
+class TestCollinsBroadbandSizesItsRangeStepAtTheBandTop:
+    """A broadband march runs one grid for the whole band, so the step has to
+    resolve the SMALLEST wavelength in it. Sizing ``dr`` at ``f_min`` leaves it
+    ``f_max/f_min`` times too coarse at the top: measured on a 100 m Pekeris
+    guide (1700/1.7/0.5) against Scooter at 500 Hz, ramgeo with ``dr`` from
+    ``f_min = 100 Hz`` (54.05 m) is 8.85 dB rms / 16.86 dB max out, against
+    1.64 / 5.24 with ``dr`` from ``f_max`` (12.81 m).
+
+    ``rams`` keeps ``f_min`` deliberately, and that is not the same question:
+    its rotated-Pade elastic march is only marginally stable, so the extra
+    range steps a finer ``dr`` implies inject a spurious acausal precursor into
+    the broadband synthesis. The stability argument is specific to the elastic
+    march; applying it to the fluid backends only under-resolved them.
+    """
+
+    @staticmethod
+    def _env():
+        from uacpy.core import BoundaryProperties, Environment
+        return Environment(
+            bathymetry=100.0, ssp=1500.0,
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=1700.0, density=1.7,
+                                      attenuation=0.5))
+
+    @pytest.mark.requires_binary
+    @pytest.mark.slow
+    def test_the_broadband_top_bin_matches_a_resolved_narrowband_run(self):
+        """The behaviour the sizing exists for: the top bin of a BROADBAND
+        march must agree with a narrowband run at that same frequency. With dr
+        sized at f_min the broadband bin was marching a step 4x too coarse for
+        it, and the two disagreed by 7 dB rms.
+        """
+        import numpy as np
+        from uacpy.core import Receiver, Source
+        from uacpy.models import RAM
+        from uacpy.models.base import RunMode
+        env = self._env()
+        ranges = np.linspace(500.0, 5000.0, 19)
+        rcv = Receiver(depths=[50.0], ranges=ranges)
+        band = np.linspace(100.0, 500.0, 9)
+        wide = RAM(backend='ramgeo', verbose=False).run(
+            env, Source(depths=25.0, frequencies=band), rcv,
+            run_mode=RunMode.BROADBAND)
+        db = np.asarray(wide.db, dtype=float)
+        top = db[..., -1].ravel() if db.ndim > 1 else db.ravel()
+        narrow = np.asarray(RAM(backend='ramgeo', verbose=False).run(
+            env, Source(depths=25.0, frequencies=500.0), rcv).db,
+            dtype=float).ravel()
+        rms = float(np.sqrt(np.nanmean((top - narrow) ** 2)))
+        assert rms < 2.0, f"broadband top bin is {rms:.2f} dB rms from the " \
+                          f"narrowband run at the same frequency"
+
+
+class TestRamWarnsWhenReceiverRangesStartAtZero:
+    """RAM writes no r=0 column on any backend: the self-starter sets ``r=dr``
+    before its only ``outpt`` call (``ramgeo1.5.f:124,172``) and the march loop
+    advances ``r=r+dr`` at ``:82`` BEFORE ``outpt`` at ``:83``.
+
+    The Collins near-range guard filters ``near[near > 0.0]`` — deliberately,
+    so its "pin a smaller dr" advice stays honest, since that advice is exactly
+    what cannot fix zero — so r=0 fell through every check and returned bare
+    NaN. Bellhop warns on identical geometry, so ``np.linspace(0, R, N)`` cost
+    a silent column on one engine and a warning on another.
+    """
+
+    @staticmethod
+    def _env():
+        from uacpy.core import BoundaryProperties, Environment
+        return Environment(bathymetry=100.0, ssp=1500.0,
+                           bottom=BoundaryProperties(
+                               acoustic_type='half-space', sound_speed=1600.0,
+                               density=1.5, attenuation=0.5))
+
+    @staticmethod
+    def _zero_range_warnings(record):
+        return [w for w in record if 'r=0 m' in str(w.message)]
+
+    def test_a_zero_first_range_warns_and_the_column_is_nan(self):
+        import warnings
+        import numpy as np
+        from uacpy.core import Receiver, Source
+        from uacpy.models import RAM
+        rcv = Receiver(depths=[50.0], ranges=np.array([0.0, 500.0, 1000.0]))
+        with warnings.catch_warnings(record=True) as rec:
+            warnings.simplefilter("always")
+            field = RAM(verbose=False).run(
+                self._env(), Source(depths=25.0, frequencies=100.0), rcv)
+        assert len(self._zero_range_warnings(rec)) == 1
+        tl = np.asarray(field.to_db().db, dtype=float).ravel()
+        assert np.isnan(tl[0]) and np.isfinite(tl[1:]).all()
+
+    def test_a_positive_first_range_is_silent(self):
+        import warnings
+        import numpy as np
+        from uacpy.core import Receiver, Source
+        from uacpy.models import RAM
+        rcv = Receiver(depths=[50.0], ranges=np.array([500.0, 1000.0]))
+        with warnings.catch_warnings(record=True) as rec:
+            warnings.simplefilter("always")
+            RAM(verbose=False).run(
+                self._env(), Source(depths=25.0, frequencies=100.0), rcv)
+        assert self._zero_range_warnings(rec) == []
+
+    def test_a_broadband_sweep_warns_once_not_once_per_frequency(self):
+        # The check sits ahead of the backend dispatch precisely so the
+        # frequency loop does not repeat it.
+        import warnings
+        import numpy as np
+        from uacpy.core import Receiver, Source
+        from uacpy.models import RAM
+        from uacpy.models.base import RunMode
+        rcv = Receiver(depths=[50.0], ranges=np.array([0.0, 500.0, 1000.0]))
+        with warnings.catch_warnings(record=True) as rec:
+            warnings.simplefilter("always")
+            RAM(verbose=False).run(
+                self._env(),
+                Source(depths=25.0, frequencies=[80.0, 100.0, 120.0]),
+                rcv, run_mode=RunMode.BROADBAND)
+        assert len(self._zero_range_warnings(rec)) == 1
+
+    def test_the_collins_family_warns_on_the_same_geometry(self):
+        # mpiramS and the Collins backends reach the guard by different
+        # dispatch arms; one wording covers both.
+        import warnings
+        import numpy as np
+        from uacpy.core import Receiver, Source
+        from uacpy.models import RAM
+        rcv = Receiver(depths=[50.0], ranges=np.array([0.0, 500.0, 1000.0]))
+        with warnings.catch_warnings(record=True) as rec:
+            warnings.simplefilter("always")
+            RAM(backend='ramgeo', verbose=False).run(
+                self._env(), Source(depths=25.0, frequencies=100.0), rcv)
+        hits = self._zero_range_warnings(rec)
+        assert len(hits) == 1
+        assert 'ramgeo' in str(hits[0].message)
+
+
+class TestRamLeavesRealSeabedBeforeTheAbsorber:
+    """``_absorber_span`` puts the artificial attenuation ramp over the deepest
+    ``absorbing_layer_width`` wavelengths, so the NON-absorbing sub-bottom the
+    automatic grid leaves is ``(zmax - depth) - absorbing_width``. With the old
+    ``depth + dz + absorbing_width`` that was exactly ``dz`` — 1.0 m at 25 Hz,
+    0.31 m at 300 Hz — i.e. the ramp began one cell below the seafloor, which
+    is the very thing ``_absorber_span``'s own docstring warns against.
+
+    Measured against Kraken on a 200 m guide (source 30 m, receiver 150 m,
+    1-20 km), comparing RANGE-SMOOTHED levels so interference fringes cannot be
+    mistaken for a level error: at 25 Hz over a lossless seabed the old grid
+    was biased +2.24 dB, against +0.07 dB on a converged deep grid. Two bottom
+    wavelengths of real seabed reach +0.12 dB; one is not enough (+0.54 dB) and
+    four is indistinguishable from converged. A lossy seabed absorbs the tails
+    itself and hides most of it (+0.14 dB at 0.5 dB/lambda), and by 50 Hz the
+    effect is under 0.04 dB at every attenuation.
+    """
+
+    @staticmethod
+    def _half_space(att=0.0):
+        import uacpy
+        return uacpy.Environment(
+            bathymetry=200.0, ssp=1500.0,
+            bottom=uacpy.BoundaryProperties(
+                acoustic_type='half-space', sound_speed=1800.0,
+                density=1.8, attenuation=att))
+
+    @staticmethod
+    def _layered():
+        from uacpy.core import BoundaryProperties, Environment
+        from uacpy.core.environment import SeabedColumn, SedimentLayer
+        return Environment(
+            bathymetry=100.0, ssp=1500.0,
+            bottom=SeabedColumn(
+                layers=[SedimentLayer(thickness=5.0, sound_speed=1520.0,
+                                      density=1.3, attenuation=0.2)],
+                halfspace=BoundaryProperties(
+                    acoustic_type='half-space', sound_speed=2800.0,
+                    density=2.5, attenuation=0.1)))
+
+    def _real_seabed(self, model, env, freq):
+        c0 = model._resolve_c0(env)
+        absorbing = model.absorbing_layer_width * c0 / freq
+        return (model._adequate_zmax(env, freq) - env.depth) - absorbing
+
+    def test_the_span_is_two_bottom_wavelengths_not_one_cell(self):
+        from uacpy.models import RAM
+        model = RAM(verbose=False)
+        for freq in (25.0, 100.0, 300.0):
+            got = self._real_seabed(model, self._half_space(), freq)
+            assert got == pytest.approx(2.0 * 1800.0 / freq, rel=1e-6)
+
+    def test_the_span_scales_with_the_seabed_speed_not_the_water(self):
+        # A faster seabed has a longer wavelength and so needs a thicker pad;
+        # reading a 'sound_speed' attribute off Bottom (which has none) would
+        # silently size it by the water column instead.
+        from uacpy.models import RAM
+        model = RAM(verbose=False)
+        assert model._seabed_sound_speed(self._half_space(), 1500.0) == \
+            pytest.approx(1800.0)
+
+    def test_a_layered_bottom_keeps_the_tight_span(self):
+        # The same quantity sets the span mpiramS distributes a FIXED number
+        # of sediment control points over, so widening it on a modelled stack
+        # smears the layer contrasts the deck exists to represent.
+        from uacpy.models import RAM
+        model = RAM(verbose=False)
+        env = self._layered()
+        got = self._real_seabed(model, env, 100.0)
+        assert got < 2.0 * 2800.0 / 100.0
+        assert got == pytest.approx(model._compute_dz(env, 100.0,
+                                                      model._resolve_c0(env)))
+
+
+def _mpirams_model():
+    try:
+        return uacpy.RAM(backend='mpiramS', verbose=False)
+    except ExecutableNotFoundError:
+        pytest.skip("mpiramS binary not installed")
+
+
+def _assemble(model, rout, ranges, tmp_path):
+    """Drive ``_assemble_tl_field`` over a synthesised mpiramS result whose
+    ``rout`` is whatever the caller wants — including shorter than the ranges
+    that were requested, which is what a march that stopped early would
+    report."""
+    env = uacpy.Environment(bathymetry=200.0, ssp=1500.0)
+    source = uacpy.Source(depths=50.0, frequencies=100.0)
+    receiver = uacpy.Receiver(depths=np.array([25.0, 75.0]),
+                              ranges=np.asarray(ranges, dtype=float))
+    zg = np.linspace(0.0, 400.0, 81)
+    rout = np.asarray(rout, dtype=float)
+    result = {
+        'psif': np.full((zg.size, 1, rout.size), 1e-3, dtype=np.complex128),
+        'zg': zg,
+        'rout': rout,
+        'frq': np.array([100.0]),
+    }
+    fm = types.SimpleNamespace(work_dir=Path(tmp_path))
+    return model._assemble_tl_field(
+        result, env, source, receiver, fm, 100.0, 10.0, 5.0, 0.0)
+
+
+@pytest.mark.requires_binary
+class TestMpiramsRangesBeyondTheMarchAreNotRelabelled:
+    """``rout`` is the receiver grid handed back (uacpy writes
+    ``receiver.ranges`` into ``ranges.dat``), so on a completed march the two
+    agree. When they do not, the old ``max(1e-6, 0.5·receiver spacing)``
+    tolerance was wide enough to clip an unmarched receiver onto ``rout[-1]``
+    and return that position's field under the requested range's label."""
+
+    def test_a_short_rout_leaves_the_unmarched_columns_nan(self, tmp_path):
+        model = _mpirams_model()
+        with pytest.warns(UserWarning, match='exceed the PE marched range'):
+            field = _assemble(model, rout=[1000.0, 2000.0],
+                              ranges=[1000.0, 2000.0, 3000.0],
+                              tmp_path=tmp_path)
+        assert np.all(np.isfinite(field.data[:, :2]))
+        assert np.all(np.isnan(field.data[:, 2]))
+
+    def test_the_unmarched_column_is_not_a_copy_of_the_last_marched_one(
+            self, tmp_path):
+        """The substitution this pin exists for: silently equal columns are
+        exactly what the old clip produced."""
+        model = _mpirams_model()
+        with pytest.warns(UserWarning):
+            field = _assemble(model, rout=[1000.0, 2000.0],
+                              ranges=[1000.0, 2000.0, 3000.0],
+                              tmp_path=tmp_path)
+        assert not np.array_equal(field.data[:, 1], field.data[:, 2])
+
+    def test_a_range_inside_the_march_exit_band_is_interpolated(
+            self, tmp_path):
+        """``ram.f90:169`` stops stepping once it is within 10 cm of an output
+        range and records that position, so a completed march can report
+        ``rout[-1]`` up to ``MPIRAMS_RANGE_TOL_M`` short. That is the same
+        range under a rounding, and must not be dropped."""
+        model = _mpirams_model()
+        last = 3000.0 - MPIRAMS_RANGE_TOL_M
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            field = _assemble(model, rout=[1000.0, 2000.0, last],
+                              ranges=[1000.0, 2000.0, 3000.0],
+                              tmp_path=tmp_path)
+        assert np.all(np.isfinite(field.data))
+
+    def test_a_range_just_past_the_exit_band_is_dropped(self, tmp_path):
+        """The other side of the same threshold, 1 µm further out."""
+        model = _mpirams_model()
+        last = 3000.0 - MPIRAMS_RANGE_TOL_M - 1e-6
+        with pytest.warns(UserWarning, match='exceed the PE marched range'):
+            field = _assemble(model, rout=[1000.0, 2000.0, last],
+                              ranges=[1000.0, 2000.0, 3000.0],
+                              tmp_path=tmp_path)
+        assert np.all(np.isnan(field.data[:, 2]))
+
+    def test_the_tolerance_does_not_scale_with_the_receiver_spacing(
+            self, tmp_path):
+        """The replaced tolerance was half the receiver spacing. With 20 km
+        between receivers it reached 10 km, so a march that stopped 3 km short
+        was reported as reached."""
+        model = _mpirams_model()
+        with pytest.warns(UserWarning, match='exceed the PE marched range'):
+            field = _assemble(model, rout=[20000.0, 40000.0],
+                              ranges=[20000.0, 40000.0, 60000.0],
+                              tmp_path=tmp_path)
+        assert np.all(np.isnan(field.data[:, 2]))
+
+    def test_a_complete_march_is_silent_and_finite_on_every_column(self, tmp_path):
+        """The identity case, which is what every real mpiramS run does:
+        ``rout`` is ``receiver.ranges``, no warning, every column finite."""
+        model = _mpirams_model()
+        ranges = [1000.0, 1731.7, 4000.0, 9999.5]
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            field = _assemble(model, rout=ranges, ranges=ranges,
+                              tmp_path=tmp_path)
+        assert np.all(np.isfinite(field.data))
+
+    def test_the_tolerance_constant_matches_the_fortran_exit_test(self):
+        """``MPIRAMS_RANGE_TOL_M`` is not a tuned number: it is the march's own
+        ``if (abs(rnow-rend)<0.1_wp) exit``."""
+        src = (Path(uacpy.__file__).parent / 'third_party' / 'mpiramS' /
+               'src' / 'ram.f90')
+        if not src.is_file():
+            pytest.skip("vendored mpiramS source not present")
+        text = src.read_text(encoding='utf-8', errors='replace')
+        assert f'abs(rnow-rend)<{MPIRAMS_RANGE_TOL_M}_wp' in text
+
+
+class TestRsStabilityIsInertOnAMultiRangeOutputGrid:
+    """``rs_stability`` names an absolute range; on mpiramS it acts as one
+    only when the receiver carries a single range.
+
+    ``mpiramS/src/ram.f90:68`` sets ``rsc = |rg(nr)| - rs`` once, and
+    ``:251`` tests ``abs(rend - rnow) < rsc`` where ``:166`` has reassigned
+    ``rend`` to the *current* output range. The Collins codes test the
+    absolute range instead (``ramgeo/ramgeo1.5.f:368``: ``if(r.ge.rs)``).
+    """
+
+    RANGES = list(np.linspace(500.0, 20000.0, 40))
+
+    @staticmethod
+    def _env():
+        return Environment(
+            bathymetry=100.0, ssp=1500.0,
+            bottom=BoundaryProperties(sound_speed=1700.0, density=1.7,
+                                      attenuation=0.5))
+
+    @staticmethod
+    def _run(ranges, rs):
+        kw = dict(backend='mpiramS', verbose=False)
+        if rs is not None:
+            kw['rs_stability'] = rs
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            field = RAM(**kw).run(
+                TestRsStabilityIsInertOnAMultiRangeOutputGrid._env(),
+                Source(depths=25.0, frequencies=100.0),
+                Receiver(depths=[20.0, 50.0, 80.0], ranges=ranges))
+        return np.asarray(field.data)
+
+    def test_a_pinned_rs_stability_warns_on_a_multi_range_grid(self):
+        with pytest.warns(UserWarning, match='rs_stability'):
+            RAM(backend='mpiramS', rs_stability=10000.0, verbose=False).run(
+                self._env(), Source(depths=25.0, frequencies=100.0),
+                Receiver(depths=[50.0], ranges=[500.0, 20000.0]))
+
+    def test_two_output_ranges_are_already_enough_to_warn(self):
+        """The low side of the grid-size threshold."""
+        model = RAM(backend='mpiramS', rs_stability=10000.0, verbose=False)
+        with pytest.warns(UserWarning, match='rs_stability'):
+            model._warn_rs_stability_inert_on_a_multi_range_grid(
+                Receiver(depths=[50.0], ranges=[500.0, 20000.0]))
+
+    def test_a_single_output_range_does_not_warn(self):
+        """The other side: with one output range ``rend`` never moves and the
+        test reduces to the absolute one the parameter name promises."""
+        model = RAM(backend='mpiramS', rs_stability=10000.0, verbose=False)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            model._warn_rs_stability_inert_on_a_multi_range_grid(
+                Receiver(depths=[50.0], ranges=[20000.0]))
+        assert not [w for w in caught if 'rs_stability' in str(w.message)]
+
+    def test_an_unpinned_rs_stability_does_not_warn(self):
+        model = RAM(backend='mpiramS', verbose=False)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            model._warn_rs_stability_inert_on_a_multi_range_grid(
+                Receiver(depths=[50.0], ranges=self.RANGES))
+        assert not [w for w in caught if 'rs_stability' in str(w.message)]
+
+    @pytest.mark.slow
+    def test_the_measurement_the_warning_reports(self):
+        """Two ``rs_stability`` values 9 km apart give bit-identical output on
+        a 40-range grid and different output on a single-range one — the
+        second half is what shows the observable is live rather than the
+        fixture being blind to ``rs_stability`` altogether."""
+        multi = [self._run(self.RANGES, rs) for rs in (10000.0, 19000.0)]
+        assert np.array_equal(multi[0], multi[1])
+        single = [self._run([20000.0], rs) for rs in (10000.0, 19000.0)]
+        assert not np.array_equal(single[0], single[1])
+
+
+class TestRamOutputDomainStopsAtTheSeafloor:
+    """RAM's output domain is the water column, and one number expresses it.
+
+    ``_mask_below_seafloor`` returns NaN below the seafloor although the PE
+    marches through the sediment and computes a field there — measured on this
+    fixture (mask neutralised at runtime): |p| at 120 m is 5.4e-4 on mpiramS
+    and 6.8e-4 on ramgeo, against Kraken 6.3e-4 and Scooter 6.2e-4. The same
+    depth gates source placement, so a source in the sediment is refused on
+    RAM alone. These pin the three halves of that: the depth, the explanation
+    the refusal carries, and the warning that must keep accompanying the
+    receiver NaNs.
+    """
+
+    @staticmethod
+    def _layered_env():
+        return Environment(
+            bathymetry=100.0, ssp=1500.0,
+            bottom=Bottom(columns=[SeabedColumn(
+                layers=[SedimentLayer(thickness=50.0, sound_speed=1600.0,
+                                      density=1.6, attenuation=0.2)],
+                halfspace=BoundaryProperties(sound_speed=1800.0, density=2.0,
+                                             attenuation=0.5))]))
+
+    @staticmethod
+    def _flat_env():
+        return Environment(
+            bathymetry=100.0, ssp=1500.0,
+            bottom=BoundaryProperties(sound_speed=1700.0, density=1.7,
+                                      attenuation=0.5))
+
+    def test_the_cut_is_the_seafloor_not_the_media_column(self):
+        model = RAM(verbose=False)
+        env = self._layered_env()
+        assert model._max_receiver_depth(env) == 100.0
+        assert model._total_media_depth(env) == 150.0
+
+    def test_ram_declares_the_cut_itself(self):
+        """Not inherited: RAM declares ``layered_bottom``, so a rule derived
+        from that flag would return the media column and move the cut without
+        anything failing."""
+        assert '_max_receiver_depth' in vars(RAM)
+
+    def test_a_buried_source_is_refused_with_the_reason(self):
+        from uacpy.core.exceptions import InvalidDepthError
+        with pytest.raises(InvalidDepthError) as exc:
+            RAM(verbose=False).validate_inputs(
+                self._layered_env(),
+                Source(depths=120.0, frequencies=100.0),
+                Receiver(depths=[50.0], ranges=[2000.0]))
+        text = str(exc.value)
+        assert 'output convention' in text
+        assert 'not something the solver cannot compute' in text
+        assert 'Kraken, Scooter, SPARC' in text
+
+    def test_a_source_below_a_bottom_with_no_sediment_gets_no_extra_note(self):
+        """The other side of the note's own condition: with nothing meshed
+        below the seafloor there is no sediment column to name."""
+        from uacpy.core.exceptions import InvalidDepthError
+        with pytest.raises(InvalidDepthError) as exc:
+            RAM(verbose=False).validate_inputs(
+                self._flat_env(),
+                Source(depths=120.0, frequencies=100.0),
+                Receiver(depths=[50.0], ranges=[2000.0]))
+        assert 'output convention' not in str(exc.value)
+
+    def test_a_below_seafloor_receiver_warns_and_comes_back_nan(self):
+        """The NaN below the seafloor stays a *warned* NaN. Widening the cut
+        to the media column would accept the buried source and silence this
+        warning while ``_mask_below_seafloor`` kept returning NaN — trading a
+        warned NaN for a silent one."""
+        model = RAM(verbose=False)
+        with pytest.warns(UserWarning, match='receiver depth'):
+            field = model.run(
+                self._layered_env(),
+                Source(depths=25.0, frequencies=100.0),
+                Receiver(depths=[50.0, 120.0], ranges=[2000.0]))
+        data = np.asarray(field.data)
+        assert np.isfinite(data[0]).all(), (
+            "the water-column receiver must be finite, or this fixture cannot "
+            "tell a masked sample from a failed run")
+        assert np.isnan(data[1]).all()
+
+
+def _column(thickness, speed):
+    return SeabedColumn(
+        layers=[SedimentLayer(thickness=thickness, sound_speed=speed,
+                              density=1.5, attenuation=0.5,
+                              shear_speed=400.0, shear_attenuation=1.0),
+                SedimentLayer(thickness=2.0 * thickness, sound_speed=speed + 50,
+                              density=1.7, attenuation=0.6)],
+        halfspace=BoundaryProperties(
+            acoustic_type='half-space', sound_speed=1900.0, density=2.0,
+            attenuation=0.1, shear_speed=600.0, shear_attenuation=0.5),
+    )
+
+
+def _wide_range_dependent_env(n_columns=24, n_bathy=97, r_end=60000.0):
+    """A bottom with many columns under a wavy seafloor with many nodes.
+
+    The two axes deliberately do not line up, so most bathymetry nodes fall
+    between bottom columns and the nearest-column rule actually has to choose.
+    """
+    ranges = np.linspace(0.0, r_end, n_columns)
+    bottom = Bottom(
+        columns=[_column(10.0 + 5.0 * (i % 7), 1650.0 + 10.0 * (i % 11))
+                 for i in range(n_columns)],
+        ranges=ranges)
+    r_bathy = np.linspace(0.0, r_end, n_bathy)
+    z_bathy = 120.0 + 60.0 * np.sin(r_bathy / r_end * 6.0 * np.pi)
+    return Environment(name='wide-rd',
+                       bathymetry=list(zip(r_bathy.tolist(), z_bathy.tolist())),
+                       ssp=1500.0, bottom=bottom)
+
+
+def _range_independent_env():
+    return Environment(name='ri', bathymetry=[(0.0, 60.0), (5000.0, 400.0)],
+                       ssp=1500.0, bottom=_column(4.0, 1600.0))
+
+
+def _anchor_ranges_via_copies(env, bottom):
+    """``_bathy_anchor_ranges`` as it read the bottom before the fix.
+
+    Kept verbatim rather than parameterised: the point of the comparison is
+    that the copying read and the live read produce the *same doubles*, and a
+    shared helper could only prove they share a helper.
+    """
+    r_axis = np.atleast_1d(np.asarray(env.bathymetry.ranges, dtype=float))
+    r_end = float(np.max(r_axis))
+    if not r_end > 0.0:
+        return []
+    columns = ([bottom.at(range=float(r)) for r in r_axis]
+               if bottom.is_range_dependent
+               else [bottom.at(range=float(r_axis[0]))])
+    thicknesses = [
+        float(layer.thickness)
+        for col in columns
+        for layer in col.layers
+        if float(layer.thickness) > 0.0
+    ]
+    if not thicknesses:
+        return []
+    tol = 0.5 * min(thicknesses)
+    probe = np.linspace(0.0, r_end, 1024)
+    floor = np.asarray(env.bathymetry.eval(range=probe), dtype=float)
+    out, anchor = [], floor[0]
+    for r, z in zip(probe[1:], floor[1:]):
+        if abs(z - anchor) >= tol:
+            out.append(float(r))
+            anchor = z
+    if len(out) > MAX_BATHY_SECTIONS:
+        idx = np.linspace(0, len(out) - 1, MAX_BATHY_SECTIONS)
+        out = [out[int(round(i))] for i in idx]
+    return out
+
+
+class TestBathyAnchorRangesReadsWithoutCopying:
+
+    @pytest.mark.parametrize('env_factory',
+                             [_wide_range_dependent_env, _range_independent_env],
+                             ids=['range-dependent', 'range-independent'])
+    def test_it_produces_the_doubles_the_copying_read_produced(self,
+                                                               env_factory):
+        env = env_factory()
+        got = RAM._bathy_anchor_ranges(env, env.bottom)
+        assert got == _anchor_ranges_via_copies(env, env.bottom)
+
+    @pytest.mark.parametrize('env_factory',
+                             [_wide_range_dependent_env, _range_independent_env],
+                             ids=['range-dependent', 'range-independent'])
+    def test_it_never_reaches_the_copying_accessor(self, env_factory,
+                                                   monkeypatch):
+        # ``Bottom.at`` is the deep copy. Making it explode is the sharpest
+        # statement that the hot loop does not call it — and the assertion
+        # that fails the moment such a call appears.
+        env = env_factory()
+
+        def explode(self, **kwargs):
+            raise AssertionError("_bathy_anchor_ranges called Bottom.at")
+
+        monkeypatch.setattr(Bottom, 'at', explode)
+        assert RAM._bathy_anchor_ranges(env, env.bottom) == \
+            pytest.approx(_ANCHORS_WIDE if env.name == 'wide-rd'
+                          else _ANCHORS_RI)
+
+    def test_a_bottom_with_no_sediment_yields_no_anchors(self):
+        env = Environment(
+            name='halfspace', bathymetry=[(0.0, 60.0), (5000.0, 400.0)],
+            ssp=1500.0,
+            bottom=SeabedColumn(layers=[], halfspace=BoundaryProperties(
+                acoustic_type='half-space', sound_speed=1800.0, density=1.9,
+                attenuation=0.2)))
+        assert RAM._bathy_anchor_ranges(env, env.bottom) == []
+
+
+# The anchor ranges the two fixtures produce, captured once through the
+# copying reference implementation so the monkeypatched test above has
+# something to compare against that ``Bottom.at`` did not compute.
+_ANCHORS_WIDE = _anchor_ranges_via_copies(_wide_range_dependent_env(),
+                                          _wide_range_dependent_env().bottom)
+
+
+_ANCHORS_RI = _anchor_ranges_via_copies(_range_independent_env(),
+                                        _range_independent_env().bottom)
+
+
+def test_the_captured_anchor_lists_are_not_empty():
+    # An anti-vacuity floor on the comparison above: two empty lists compare
+    # equal, and the monkeypatched test would then assert nothing.
+    assert len(_ANCHORS_WIDE) > 10
+    assert len(_ANCHORS_RI) > 10

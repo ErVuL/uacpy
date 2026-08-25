@@ -33,9 +33,11 @@ class TestExplicitPathsAreNeverShadowed:
         bty, _ = read_bathymetry(tmp_path / 'survey')
         assert bty[1, 1:-1].tolist() == [50.0, 60.0]
 
-    def test_missing_explicit_path_is_a_typed_error(self, tmp_path):
+    def test_a_missing_explicit_path_is_a_configuration_error(self, tmp_path):
+        """A .bty is a deck the caller wrote, so an absent one is a bad
+        argument — the provenance split core/exceptions.py states."""
         from uacpy.io.bathy_io import read_bathymetry
-        with pytest.raises(FileFormatError):
+        with pytest.raises(ConfigurationError):
             read_bathymetry(tmp_path / 'absent.dat')
 
 
@@ -75,7 +77,7 @@ class TestReflectionTableIsOneListDirectedRead:
         assert d['n_pts'] == 4, "dedupe dropped legally packed records"
         assert d['theta'].tolist() == [0.0, 10.0, 20.0, 30.0]
 
-    def test_dedupe_still_drops_the_evanescent_head(self, tmp_path):
+    def test_dedupe_drops_the_evanescent_head(self, tmp_path):
         from uacpy.io.refl_io import (
             dedupe_reflection_file, read_reflection_coefficient)
         p = tmp_path / 'evan.brc'
@@ -243,36 +245,58 @@ class TestSbpAngleResolution:
                                       np.array([0.0, 1e-8, 1.0]), np.zeros(3))
 
 
+def _plp_tl_pair(tmp_path, curves, n_ranges=4, stem='r'):
+    """Write a ``.plp``/``.plt`` pair holding ``curves`` TL-vs-range records.
+
+    ``curves`` is a list of ``(freq, rd, xoff, dx)``; ``freq``/``rd`` go into
+    the ``Freq:``/``RD:`` A16 labels PLTLOS writes ahead of the axis block
+    (``oasfun22.f:334-337``, ``:368-370``), which is what the reader keys the
+    ``(frequency, depth)`` grid off. Curve ``k`` holds the values
+    ``k*100 + i``. Pass ``freq=None`` for a label-less block, the shape a
+    ``.plp`` written by something other than PLTLOS has.
+    """
+    def rec(value, label):
+        return f"{value:<19}{label}"
+
+    lines = [' OAST  MODU']
+    blocks = []
+    for curve_id, (freq, rd, xoff, dx) in enumerate(curves):
+        lines += [' OAST  NTLRAN', 'ptit', 'title']
+        if freq is None:
+            lines += [rec(0, 'NUMBER OF LABELS')]
+        else:
+            lines += [rec(3, 'NUMBER OF LABELS'),
+                      f" Freq:{freq:7.1f} Hz$",
+                      f" SD:{50.0:9.1f} m$",
+                      f" RD:{rd:9.1f} m$"]
+        lines += [rec(0.0, name) for name in
+                  ('XLEN', 'YLEN', 'IGRID', 'XLEFT', 'XRIGHT', 'XINC',
+                   'XDIV', 'XTXT', 'XTYP', 'YDOWN', 'YUP', 'YINC',
+                   'YDIV', 'YTXT', 'YTYP')]
+        lines += [rec(1, 'NC'),
+                  rec(n_ranges, 'N'), rec(xoff, 'XOFF'), rec(dx, 'DX'),
+                  rec(0.0, 'YOFF'), rec(0.0, 'DY')]
+        blocks.append('\n'.join(
+            f' {curve_id * 100 + i}.0' for i in range(n_ranges)))
+    lines += [' OAST  PLTEND']
+    (tmp_path / f'{stem}.plp').write_text('\n'.join(lines) + '\n')
+    (tmp_path / f'{stem}.plt').write_text('\n\n'.join(blocks) + '\n\n')
+    return tmp_path / f'{stem}.plp'
+
+
 class TestOastTlMultiFrequency:
-    """OAST writes one TL curve per receiver *per frequency*,
-    frequency-major (``unoast31.f:388`` wraps ``:584``); the reader returns
-    an ``(n_freq, n_depths, n_ranges)`` stack for NFREQ > 1."""
+    """OAST writes one TL curve per plotted receiver *per frequency*, and
+    each curve carries its own ``Freq:``/``RD:`` labels (oasfun22.f:334-337);
+    the reader returns an ``(n_freq, n_depths, n_ranges)`` stack for
+    NFREQ > 1."""
 
     @staticmethod
     def _write_pair(tmp_path, n_freq, n_depths, n_ranges=4):
-        def rec(value, label):
-            return f"{value:<19}{label}"
-
-        lines = [' OAST  MODU']
-        blocks = []
-        curve_id = 0
-        for _ in range(n_freq * n_depths):
-            lines += [' OAST  NTLRAN', 'ptit', 'title',
-                      rec(0, 'NUMBER OF LABELS')]
-            lines += [rec(0.0, name) for name in
-                      ('XLEN', 'YLEN', 'IGRID', 'XLEFT', 'XRIGHT', 'XINC',
-                       'XDIV', 'XTXT', 'XTYP', 'YDOWN', 'YUP', 'YINC',
-                       'YDIV', 'YTXT', 'YTYP')]
-            lines += [rec(1, 'NC'),
-                      rec(n_ranges, 'N'), rec(1.0, 'XOFF'), rec(0.5, 'DX'),
-                      rec(0.0, 'YOFF'), rec(0.0, 'DY')]
-            blocks.append('\n'.join(
-                f' {curve_id * 100 + i}.0' for i in range(n_ranges)))
-            curve_id += 1
-        lines += [' OAST  PLTEND']
-        (tmp_path / 'r.plp').write_text('\n'.join(lines) + '\n')
-        (tmp_path / 'r.plt').write_text('\n\n'.join(blocks) + '\n\n')
-        return tmp_path / 'r.plp'
+        # Frequency-major, the order the NFREQ loop (unoast31.f:388) wrapping
+        # the receiver loop (:584) produces.
+        curves = [(100.0 * (i_f + 1), 10.0 * (i_d + 1), 1.0, 0.5)
+                  for i_f in range(n_freq) for i_d in range(n_depths)]
+        return _plp_tl_pair(tmp_path, curves, n_ranges=n_ranges)
 
     def test_single_frequency_keeps_2d_shape(self, tmp_path):
         from uacpy.io.oases_reader import read_oast_tl
@@ -292,12 +316,151 @@ class TestOastTlMultiFrequency:
         # Frequency-major order: curve (ifreq, idepth) = ifreq*2 + idepth.
         assert out['tl'][1, 1, 0] == 300.0
         assert out['tl'][2, 0, 0] == 400.0
+        assert out['metadata']['frequencies'].tolist() == [100.0, 200.0, 300.0]
 
     def test_non_multiple_curve_count_is_a_typed_error(self, tmp_path):
+        """A label-less ``.plp`` falls back to the positional walk, which is
+        the one that can only check the count."""
         from uacpy.io.oases_reader import read_oast_tl
-        plp = self._write_pair(tmp_path, n_freq=1, n_depths=3)
+        curves = [(None, None, 1.0, 0.5)] * 3
+        plp = _plp_tl_pair(tmp_path, curves)
         with pytest.raises(FileFormatError, match='whole multiple'):
             read_oast_tl(plp, [10.0, 20.0])
+
+    def test_a_label_less_plp_warns_before_walking_by_position(self, tmp_path):
+        """Nothing but PLTLOS writes a ``…TLRAN`` curve, so a block without
+        the labels came from elsewhere; the positional walk still reads it,
+        but it is the reading ``IDINC`` breaks."""
+        from uacpy.io.oases_reader import read_oast_tl
+        plp = _plp_tl_pair(tmp_path, [(None, None, 1.0, 0.5)] * 2)
+        with pytest.warns(UserWarning, match='by position'):
+            out = read_oast_tl(plp, [10.0, 20.0])
+        assert out['tl'].shape == (2, 4)
+        assert out['depths'].tolist() == [10.0, 20.0]
+        assert 'frequencies' not in out['metadata']
+
+
+class TestOastCurvesAreKeyedByTheirLabels:
+    """PLTLOS writes ``Freq:``/``SD:``/``RD:`` into every plot block
+    (``oasfun22.f:334-337``) and runs only for ``MOD( NREC-1, INTF ) == 0``
+    (``unoast31.f:630``), ``INTF`` being ``IDINC``, the 4th field of the
+    OASTL receiver record (``oaseun31.f:1156``). A decimated run therefore
+    writes fewer curves than the deck has receivers, and only the labels say
+    which receiver each curve belongs to."""
+
+    def test_decimated_receivers_land_on_the_depths_that_were_plotted(
+            self, tmp_path):
+        from uacpy.io.oases_reader import read_oast_tl
+        # 'RD1 RD2 4 2' over 10..90 m: OAST plots receivers 1 and 3 only.
+        rd = np.linspace(10.0, 90.0, 4)
+        curves = [(400.0, 10.0, 0.0, 0.25), (400.0, 63.3, 0.0, 0.25),
+                  (800.0, 10.0, 0.0, 0.125), (800.0, 63.3, 0.0, 0.125)]
+        plp = _plp_tl_pair(tmp_path, curves)
+        out = read_oast_tl(plp, rd)
+        assert out['tl'].shape == (2, 2, 4)
+        assert out['metadata']['n_frequencies'] == 2
+        # The F9.1 label names the receiver to 0.1 m; the axis the caller
+        # passed supplies the full-precision value.
+        assert out['depths'] == pytest.approx([10.0, 190.0 / 3.0])
+        assert out['metadata']['frequencies'].tolist() == [400.0, 800.0]
+
+    def test_a_label_off_the_receiver_axis_is_returned_as_printed(
+            self, tmp_path):
+        from uacpy.io.oases_reader import read_oast_tl
+        curves = [(100.0, 33.3, 0.0, 0.25)]
+        plp = _plp_tl_pair(tmp_path, curves)
+        out = read_oast_tl(plp, [10.0, 20.0])
+        assert out['depths'].tolist() == [33.3]
+
+    def test_colliding_labels_fall_back_to_position(self, tmp_path):
+        """Two receivers closer than the F9.1 label quantum print the same
+        ``RD:``. The grid stops factoring, and the positional walk — right
+        for every run that does not decimate — takes over behind a warning."""
+        from uacpy.io.oases_reader import read_oast_tl
+        curves = [(100.0, 10.0, 0.0, 0.25), (100.0, 10.0, 0.0, 0.25)]
+        plp = _plp_tl_pair(tmp_path, curves)
+        with pytest.warns(UserWarning, match='by position'):
+            out = read_oast_tl(plp, [10.00, 10.04])
+        assert out['tl'].shape == (2, 4)
+        assert out['depths'].tolist() == [10.0, 10.04]
+
+    def test_labels_that_neither_factor_nor_divide_are_a_typed_error(
+            self, tmp_path):
+        from uacpy.io.oases_reader import read_oast_tl
+        curves = [(400.0, 10.0, 0.0, 0.25), (400.0, 20.0, 0.0, 0.25),
+                  (800.0, 10.0, 0.0, 0.25)]
+        plp = _plp_tl_pair(tmp_path, curves)
+        with pytest.raises(FileFormatError, match='not a whole multiple'):
+            read_oast_tl(plp, [10.0, 20.0])
+
+    def test_a_grid_with_a_hole_is_a_typed_error(self, tmp_path):
+        """The grid factors on its totals — 2 frequencies by 2 depths, 4
+        curves — while one pair repeats and another is absent, which would
+        otherwise return whatever ``np.empty`` allocated."""
+        from uacpy.io.oases_reader import read_oast_tl
+        curves = [(400.0, 10.0, 0.0, 0.25), (400.0, 20.0, 0.0, 0.25),
+                  (800.0, 10.0, 0.0, 0.25), (800.0, 10.0, 0.0, 0.25)]
+        plp = _plp_tl_pair(tmp_path, curves)
+        with pytest.raises(FileFormatError, match='no TL curve for'):
+            read_oast_tl(plp, [10.0, 20.0])
+
+
+class TestOastRangeAxisIsPerFrequency:
+    """``DLRAN = 2*pi/(NWVNO*DLWVNO)`` is recomputed inside the frequency
+    loop (``unoast31.f:481``) with ``DLWVNO`` proportional to FREQ, so DX
+    halves when the frequency doubles while ``LF`` stays pinned at NWVNO
+    (``:492``) — equal point counts, different range axes."""
+
+    def test_each_frequency_gets_its_own_axis(self, tmp_path):
+        from uacpy.io.oases_reader import read_oast_tl
+        curves = [(400.0, 10.0, 0.00336845, 0.00336845),
+                  (800.0, 10.0, 0.00168423, 0.00168423)]
+        plp = _plp_tl_pair(tmp_path, curves, n_ranges=512)
+        out = read_oast_tl(plp, [10.0])
+        assert out['ranges'].shape == (2, 512)
+        assert out['ranges'][0, -1] == pytest.approx(1724.6464)
+        assert out['ranges'][1, -1] == pytest.approx(862.32576)
+
+    def test_one_frequency_returns_a_1d_axis(self, tmp_path):
+        from uacpy.io.oases_reader import read_oast_tl
+        plp = _plp_tl_pair(tmp_path, [(400.0, 10.0, 1.0, 0.5)])
+        out = read_oast_tl(plp, [10.0])
+        assert out['ranges'].shape == (4,)
+        assert out['tl'].shape == (1, 4)
+
+    def test_receivers_of_one_frequency_must_share_a_grid(self, tmp_path):
+        from uacpy.io.oases_reader import read_oast_tl
+        curves = [(400.0, 10.0, 1.0, 0.5), (400.0, 20.0, 1.0, 0.25)]
+        plp = _plp_tl_pair(tmp_path, curves)
+        with pytest.raises(FileFormatError, match='do not share a range grid'):
+            read_oast_tl(plp, [10.0, 20.0])
+
+
+class TestPlpCountsAreValidated:
+    """``NLAB`` and ``NC`` are the file's own DO-loop bounds
+    (``oasgun21.f:614``, ``:653``) and the ``.plp`` walk advances by them, so
+    a negative count moves the cursor backwards and the walk never reaches
+    ``PLTEND``."""
+
+    @staticmethod
+    def _truncated(tmp_path, n_lab):
+        def rec(value, label):
+            return f"{value:<19}{label}"
+        lines = [' OAST  MODU', ' OAST  NTLRAN', 'ptit', 'title',
+                 rec(n_lab, 'NUMBER OF LABELS')]
+        p = tmp_path / 'bad.plp'
+        p.write_text('\n'.join(lines) + '\n')
+        return p
+
+    def test_a_negative_label_count_is_a_typed_error(self, tmp_path):
+        from uacpy.io.oases_reader import _parse_oast_plp
+        with pytest.raises(FileFormatError, match='NLAB=-5'):
+            _parse_oast_plp(self._truncated(tmp_path, -5))
+
+    def test_a_label_count_past_the_end_is_a_typed_error(self, tmp_path):
+        from uacpy.io.oases_reader import _parse_oast_plp
+        with pytest.raises(FileFormatError, match='NLAB=9999'):
+            _parse_oast_plp(self._truncated(tmp_path, 9999))
 
 
 class TestOasnWhiteNoiseContract:
@@ -484,7 +647,7 @@ class TestShdExtraAxesAreCapabilityRefusals:
         with pytest.raises(UnsupportedFeatureError, match='2 receiver bearings'):
             rdr.read_shd_file(tmp_path / 'x.shd')
 
-    def test_zero_frequencies_is_still_corruption(self, tmp_path, monkeypatch):
+    def test_zero_frequencies_is_corruption(self, tmp_path, monkeypatch):
         """No AT writer emits zero frequency records, so that stays a
         FileFormatError."""
         rdr = self._patched(monkeypatch, freqVec=())

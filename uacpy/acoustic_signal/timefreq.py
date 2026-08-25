@@ -24,7 +24,11 @@ from scipy.special import gamma
 import scipy.signal as _sig
 
 from uacpy.core.exceptions import ConfigurationError
-from uacpy.acoustic_signal._signal_validate import require_finite_signal
+from uacpy.acoustic_signal._signal_validate import (
+    require_finite_signal,
+    require_positive_finite_scalar,
+)
+from uacpy.acoustic_signal.analysis import _warn_two_sided
 
 
 WignerVilleResult = namedtuple("WignerVilleResult",
@@ -43,7 +47,8 @@ def analytic_signal(data):
         )
     xr = xa.astype(float)
     if xr.ndim != 1:
-        raise ConfigurationError("analytic_signal: data must be 1-D")
+        raise ConfigurationError(
+            f"analytic_signal: data must be 1-D; got shape {xr.shape}")
     require_finite_signal(xr, "analytic_signal")
     return hilbert(xr)
 
@@ -59,8 +64,10 @@ def instantaneous_frequency(data, sample_rate: float):
     Returns an array of length ``len(data)`` (centred differences of the
     unwrapped phase via :func:`numpy.gradient`, time-aligned with ``data``).
     """
+    fs = require_positive_finite_scalar(
+        sample_rate, "instantaneous_frequency", "sample_rate", " Hz")
     phase = np.unwrap(np.angle(analytic_signal(data)))
-    return np.gradient(phase) / (2.0 * np.pi) * float(sample_rate)
+    return np.gradient(phase) / (2.0 * np.pi) * fs
 
 
 def _smoothing_window(spec, name):
@@ -77,7 +84,8 @@ def _smoothing_window(spec, name):
     if np.isscalar(spec):
         L = int(spec)
         if L < 1:
-            raise ConfigurationError(f"wigner_ville: {name} length must be >= 1")
+            raise ConfigurationError(
+                f"wigner_ville: {name} length must be >= 1; got {L}")
         # Generate an odd length directly: trimming an even symmetric
         # window (hann(6)[:-1]) puts the peak off-centre, which breaks the
         # acc(-tau) = conj(acc(tau)) symmetry the transform's .real relies
@@ -87,7 +95,9 @@ def _smoothing_window(spec, name):
     else:
         w = np.asarray(spec, dtype=float)
         if w.ndim != 1 or w.size < 1:
-            raise ConfigurationError(f"wigner_ville: {name} must be a 1-D window")
+            raise ConfigurationError(
+                f"wigner_ville: {name} must be a 1-D window; "
+                f"got shape {w.shape}")
         if w.size % 2 == 0:
             # Delete the centre sample, not the last one: an even symmetric
             # window has two equal middle samples, so dropping one of them
@@ -143,7 +153,8 @@ def wigner_ville(data, sample_rate: float, *, analytic: bool = True,
     """
     xc = np.asarray(data)
     if xc.ndim != 1:
-        raise ConfigurationError("wigner_ville: data must be 1-D")
+        raise ConfigurationError(
+            f"wigner_ville: data must be 1-D; got shape {xc.shape}")
     require_finite_signal(xc, "wigner_ville")
     if np.iscomplexobj(xc):
         z = xc
@@ -152,7 +163,8 @@ def wigner_ville(data, sample_rate: float, *, analytic: bool = True,
     else:
         z = xc.astype(complex)
     n = z.size
-    fs = float(sample_rate)
+    fs = require_positive_finite_scalar(sample_rate, "wigner_ville",
+                                        "sample_rate", " Hz")
     NF = n if nfft is None else int(nfft)
     if NF < n:
         raise ConfigurationError(
@@ -311,12 +323,11 @@ def cwt(data, sample_rate, frequencies=None, wavelet="morlet", *, w0=6.0,
             "analyses a real signal.")
     xr = xa.astype(float)
     if xr.ndim != 1:
-        raise ConfigurationError("cwt: data must be 1-D")
-    require_finite_signal(xr, "cwt")
-    fs = float(sample_rate)
-    if not fs > 0:
         raise ConfigurationError(
-            f"cwt: sample_rate must be > 0 Hz (got {sample_rate}).")
+            f"cwt: data must be 1-D; got shape {xr.shape}")
+    require_finite_signal(xr, "cwt")
+    fs = require_positive_finite_scalar(sample_rate, "cwt", "sample_rate",
+                                        " Hz")
     if order is None:
         order = 4 if wavelet == "paul" else 2
     n = xr.size
@@ -332,7 +343,18 @@ def cwt(data, sample_rate, frequencies=None, wavelet="morlet", *, w0=6.0,
                                   int(n_freqs))
     frequencies = np.atleast_1d(np.asarray(frequencies, dtype=float))
     if np.any(frequencies <= 0):
-        raise ConfigurationError("cwt: frequencies must be > 0")
+        bad = frequencies <= 0
+        raise ConfigurationError(
+            f"cwt: frequencies must be > 0; got {int(bad.sum())} value(s) "
+            f"<= 0, first at index {int(np.argmax(bad))} "
+            f"({frequencies[bad][0]:g} Hz)")
+    above = frequencies > fs / 2.0
+    if np.any(above):
+        raise ConfigurationError(
+            f"cwt: analysis frequencies {frequencies[above]} Hz lie above "
+            f"the Nyquist frequency sample_rate/2 = {fs / 2.0:g} Hz, where "
+            f"the sampled wavelet aliases and the coefficients are "
+            f"numerical residue, not band content.")
     omega = 2.0 * np.pi * np.fft.fftfreq(n)  # rad/sample
     Xf = np.fft.fft(xr)
     # One scale gives the factor; scales follow from f = factor*fs/s.
@@ -382,10 +404,12 @@ def inverse_cwt(W, frequencies, sample_rate, wavelet="morlet", *, w0=6.0,
     frequencies = np.atleast_1d(np.asarray(frequencies, dtype=float))
     if Wc.ndim != 2 or Wc.shape[0] != frequencies.size:
         raise ConfigurationError(
-            "inverse_cwt: W must be (n_freqs, n_time) matching frequencies")
+            "inverse_cwt: W must be (n_freqs, n_time) matching frequencies"
+            f"; got W shape {Wc.shape} and {frequencies.size} frequencies")
     if order is None:
         order = 4 if wavelet == "paul" else 2
-    fs = float(sample_rate)
+    fs = require_positive_finite_scalar(sample_rate, "inverse_cwt",
+                                        "sample_rate", " Hz")
     _, factor = _wavelet_fourier(wavelet, 1.0, np.array([1.0]), w0, order)
     scales = factor * fs / frequencies
     if scales.size > 1:
@@ -475,7 +499,8 @@ def cepstrum(data, *, window=None, nfft=None, lifter=None):
             "spectrum use complex_cepstrum.")
     xr = xa.astype(float)
     if xr.ndim != 1:
-        raise ConfigurationError("cepstrum: data must be 1-D")
+        raise ConfigurationError(
+            f"cepstrum: data must be 1-D; got shape {xr.shape}")
     require_finite_signal(xr, "cepstrum")
     n = xr.size
     NF = n if nfft is None else int(nfft)
@@ -518,7 +543,8 @@ def complex_cepstrum(data):
             "homomorphic cepstrum is defined for a real signal.")
     xr = xa.astype(float)
     if xr.ndim != 1:
-        raise ConfigurationError("complex_cepstrum: data must be 1-D")
+        raise ConfigurationError(
+            f"complex_cepstrum: data must be 1-D; got shape {xr.shape}")
     require_finite_signal(xr, "complex_cepstrum")
     spectrum = np.fft.fft(xr)
     n = xr.size
@@ -549,11 +575,13 @@ def inverse_complex_cepstrum(c):
             "restores the linear-phase term the forward transform removed, "
             "and a bare cepstrum array carries no delay. Pass the "
             "complex_cepstrum result unchanged, or "
-            "ComplexCepstrum(cepstrum=your_array, delay=your_delay).")
+            "ComplexCepstrum(cepstrum=your_array, delay=your_delay). "
+            f"Got {type(c).__name__}.")
     c, delay = c.cepstrum, int(c.delay)
     cr = np.asarray(c, dtype=complex)
     if cr.ndim != 1:
-        raise ConfigurationError("inverse_complex_cepstrum: c must be 1-D")
+        raise ConfigurationError(
+            f"inverse_complex_cepstrum: c must be 1-D; got shape {cr.shape}")
     n = cr.size
     log_spectrum = np.fft.fft(cr)
     # Restore the linear-phase term complex_cepstrum took out.
@@ -577,11 +605,16 @@ def spectrogram(data, sample_rate, *, window="hann", nperseg=8192,
     ``'angle'``/``'phase'`` its phase in radians — for those the ``power``
     field is not a power and the Pa²/Hz units do not apply. For logarithmic /
     constant-Q frequency resolution, see
-    :func:`uacpy.acoustic_signal.constant_q_spectrogram`."""
+    :func:`uacpy.acoustic_signal.constant_q_spectrogram`.
+
+    **Complex input** is accepted, unlike :func:`cwt` or
+    :func:`analytic_signal`, but returns a two-sided spectrum on an unsorted
+    frequency axis (``0 .. fs/2`` then ``-fs/2 .. 0``) rather than the
+    one-sided density above; a ``UserWarning`` says so."""
     data = require_finite_signal(data, "spectrogram")
-    if not float(sample_rate) > 0:
-        raise ConfigurationError(
-            f"spectrogram: sample_rate must be > 0 Hz (got {sample_rate}).")
+    _warn_two_sided("spectrogram", data)
+    sample_rate = require_positive_finite_scalar(
+        sample_rate, "spectrogram", "sample_rate", " Hz")
     f, t, Sxx = _sig.spectrogram(data, sample_rate, window=window,
                                  nperseg=nperseg, noverlap=noverlap, nfft=nfft,
                                  scaling=scaling, mode=mode)

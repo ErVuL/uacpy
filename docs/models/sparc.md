@@ -136,7 +136,7 @@ with a warning:
 
 ```
 UserWarning: SPARC supports only 'vacuum' / 'rigid' bottom boundaries;
-auto-converting the env's halfspace to 'rigid'.
+auto-converting the env's halfspace to 'rigid'. …
 ```
 
 Every figure on this page carries that warning, because they all run over the
@@ -264,8 +264,8 @@ The position-4 filter is applied **per wavenumber** at `k·c_low/2π` and
 | `c_low`, `c_high` | `None` | Phase-speed bounds (m/s) — they set `kMin`/`kMax`. `None` ⇒ derived from the SSP and the seabed. |
 | `n_mesh` | `0` | Mesh points per medium; `0` lets SPARC choose per wavelength. |
 | `interp_ssp` | `None` | SSP interpolation scheme; `None` auto-picks. |
-| `rmax_safety_margin` | `None` | `RMax = receiver.ranges.max() × this`. `None` ⇒ `3.0`. |
-| `sound_speed` | `None` | Reference speed for the auto `t_max` window; `None` ⇒ 1500 m/s. |
+| `rmax_safety_margin` | `None` | `RMax = receiver.ranges.max() × this`. `None` ⇒ `4.0`. |
+| `sound_speed` | `None` | Reference speed for the auto `t_max` window; `None` ⇒ the slowest speed in `env.ssp`, or 1500 m/s only when the profile carries no usable speed. |
 
 **Execution**
 
@@ -305,7 +305,7 @@ source = uacpy.Source(depths=25.0, frequencies=200.0)
 ```
 
 `t_max` is pinned in every snippet below. The automatic window is `2.5 ×` the
-travel time to the **farthest receiver** — `RMax`'s `3 ×` safety margin is a
+travel time to the **farthest receiver** — `RMax`'s `4 ×` safety margin is a
 wavenumber-sampling knob and is deliberately *not* folded into the window —
 which is longer than these figures need, and at `n_t_out=512` can still sit
 below the source band (`run()` warns when it does).
@@ -448,15 +448,16 @@ for ax, n_t_out in zip(axes, (128, 2048)):
 
 ![SPARC output sampling](figures/sparc_output_sampling.png)
 
-The output window is `[0, t_max]`, so the sample rate is `n_t_out / t_max` —
-183 Hz on the top panel, against a pulse band reaching 400 Hz. The top trace
+The output window is `[0, t_max]` inclusive of both ends, so the sample rate is
+`(n_t_out − 1) / t_max` — 181 Hz on the top panel, against a pulse band
+reaching 400 Hz. (`n_t_out / t_max` overstates it by `n/(n−1)`.) The top trace
 is not obviously broken; it is smooth, plausible, and wrong, which is exactly
 why uacpy warns:
 
 ```
-UserWarning: SPARC TIME_SERIES: the output grid samples at 182.9 Hz
-(Nyquist 91.4 Hz) over a 0.70 s window, below the 400 Hz source band —
-p(t) will alias. Set n_t_out>=1680, lower f_max, or shorten the window via
+UserWarning: SPARC TIME_SERIES: the output grid samples at 181.4 Hz
+(Nyquist 90.7 Hz) over a 0.70 s window, below the 400 Hz source band —
+p(t) will alias. Set n_t_out>=1681, lower f_max, or shorten the window via
 t_max / receiver.ranges.max().
 ```
 
@@ -519,10 +520,15 @@ warns and changes nothing.
 exactly, and the transform is a discrete sum over `k` (`sparc.f90:593-624` — a
 running sum inside the wavenumber loop, not an FFT), so the answer is periodic
 in range with period exactly `RMax`. `sparc.f90:153-155` refuses outright any
-receiver beyond it. The default 3.0 puts your furthest receiver at `RMax/3`,
-comfortably inside the window; tightening towards 1.0 folds the source's own
-image back onto your receivers, and the alias arrives looking like a second
-wavefront rather than like a bug. Note that SPARC has no contour offset to lean
+receiver beyond it. The period does more than plant a replica at `r = RMax`: a
+receiver at range `r` also carries the arrival that belongs at `|RMax − r|`, so
+at margin `m` the wrap image reaches the farthest receiver at `(m−1)·r/c` —
+against the auto output window of `2.5·r/c`, the margin has to exceed 3.5 to
+keep it out, and the default 4.0 is the first round value that does. Tightening
+the margin pulls the alias *earlier* into the window, where it arrives looking
+like a second wavefront rather than like a bug; a pinned margin (or a pinned
+`t_max`) that leaves it inside the window draws a `UserWarning` naming the
+margin that clears it. Note that SPARC has no contour offset to lean
 on the way Scooter does — `Atten` is a hardcoded zero (`sparc.f90:313`) —
 because a pulse is limited in space, so its wavenumber kernel is band-limited
 and the real-axis sum converges on its own (COA §8.3.2). The margin is what

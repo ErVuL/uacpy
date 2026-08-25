@@ -34,12 +34,15 @@ FEATURES DEMONSTRATED:
 """
 
 import sys
+import os
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Repo root, so ``import uacpy`` resolves from a source checkout.
+sys.path.insert(0, str(Path(__file__).parents[2]))
 
-OUTPUT_DIR = Path(__file__).parent / 'output'
-OUTPUT_DIR.mkdir(exist_ok=True)
+OUTPUT_DIR = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
+                  or Path(__file__).parent / 'output')
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 import numpy as np  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
@@ -102,7 +105,7 @@ def main():
     # default, stated here because it sets the trade-off): smaller sharpens the
     # Capon peak but makes it brittle to environmental mismatch, larger relaxes
     # the surface back toward Bartlett.
-    surf_m = mvdr(K, bank, loading=1e-2)
+    surf_m = mvdr(K, bank, diagonal_loading=1e-2)
 
     for name, surf in [("Bartlett", surf_b), ("MVDR", surf_m)]:
         iz, ir = np.unravel_index(np.argmax(surf), surf.shape)

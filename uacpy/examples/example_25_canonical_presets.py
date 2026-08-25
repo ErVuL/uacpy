@@ -16,8 +16,10 @@ Output: ``output/example_25_canonical_presets.png``.
 """
 
 import sys
+import os
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Repo root, so ``import uacpy`` resolves from a source checkout.
+sys.path.insert(0, str(Path(__file__).parents[2]))
 
 import numpy as np  # noqa: E402
 import matplotlib  # noqa: E402
@@ -29,8 +31,9 @@ from uacpy.core.acoustics import bottom_loss_curve  # noqa: E402
 
 
 def main():
-    out_dir = Path(__file__).parent / 'output'
-    out_dir.mkdir(exist_ok=True)
+    out_dir = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
+                   or Path(__file__).parent / 'output')
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     print("\n" + "═" * 80)
     print("EXAMPLE 25: Canonical SSP shapes + bottom-loss curves")

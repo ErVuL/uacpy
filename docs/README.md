@@ -70,8 +70,8 @@ are choosing a model.
 
 ### Working with what comes back
 - **[Results](guide/results.md)** — `Field`, `Rays`, `Modes` and friends; how
-  `Field.kind` / `.unit` / `.dtype` describe one container, and how `.at` / `.isel` /
-  `.max` slice an axis into `.pinned`.
+  `Field.kind` / `.unit` / `.data.dtype` describe one container, and how `.at` /
+  `.isel` / `.max` slice an axis into `.pinned`.
 - **[Plotting](guide/plotting.md)** — the `.plot()` convention, `plot_field`'s
   three render branches, overlays and composition.
 
@@ -94,6 +94,9 @@ are choosing a model.
 - **[File I/O](guide/io.md)** — the readers and writers behind every model.
 - **[Utilities](guide/utilities.md)** — material presets, TL metrics,
   sound-speed and density helpers, parallel batch runs.
+- **[Reproducibility](guide/reproducibility.md)** — what comes back
+  byte-identical, what you have to pin to get it, and what has not been
+  measured.
 
 ---
 

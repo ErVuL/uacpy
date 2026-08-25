@@ -131,6 +131,43 @@ def pekeris_modal_tl(z_s, z_r, ranges, f, depth, c_w, c_b, rho_w, rho_b):
     return np.array(out)
 
 
+def dirichlet_modal_tl(z_s, z_r, ranges, f, depth, c):
+    """Analytic transmission loss of an isovelocity waveguide that is
+    pressure-release at the surface AND at the bottom — the range-independent
+    limit of the ideal wedge, and the control for the wedge benchmark below.
+
+    Both boundaries being Dirichlet makes every mode elementary: the water
+    holds the whole mode (no evanescent bottom tail to normalise against), so
+    gamma_m = m*pi/D exactly, k_m = sqrt(k^2 - gamma_m^2), and the depth-
+    normalised shape is Z_m = sqrt(2/D)*sin(gamma_m z). Summed with the same
+    far-field prefactor and 1 m TL reference as ``pekeris_modal_tl``, so a
+    model checked against one is checked on the same convention as the other.
+    """
+    k = 2 * np.pi * f / c
+    gamma = np.arange(1, int(np.floor(k * depth / np.pi)) + 1) * np.pi / depth
+    km = np.sqrt(np.maximum(k**2 - gamma**2, 0.0))
+    # A mode AT cutoff carries k_m = 0 and the far-field term below divides by
+    # sqrt(k_m), so it has to go. Which side of cutoff the top mode lands on is
+    # decided by the float value of k*depth/pi, and a waveguide sitting exactly
+    # at a cutoff can put it one ULP inside: at 25 Hz in 150 m, k*depth/pi
+    # evaluates to 5.000000000000001, so mode 5 is generated with 1/sqrt(k_m)
+    # 6907x the largest other mode and swamps the sum. Testing `gamma < k` does
+    # not catch that — gamma IS below k, by one ULP. Guard on the wavenumber
+    # actually used instead: k_m > 1e-6*k drops only modes within 5e-13
+    # (relative) of exact cutoff — three decades above what double precision
+    # resolves k*depth/pi to, and three below any mode that carries energy.
+    keep = km > 1e-6 * k
+    gamma, km = gamma[keep], km[keep]
+    Zs = np.sqrt(2.0 / depth) * np.sin(gamma * z_s)
+    Zr = np.sqrt(2.0 / depth) * np.sin(gamma * z_r)
+    out = []
+    for r in np.atleast_1d(ranges).astype(float):
+        p = np.sqrt(2 * np.pi / r) * np.sum(
+            Zs * Zr * np.exp(1j * km * r) / np.sqrt(km))
+        out.append(-20.0 * np.log10(np.abs(p)))
+    return np.array(out)
+
+
 def ideal_wedge_tl(r_from_source, z_r, z_s, R_s_apex, f, c, slope):
     """Analytic transmission loss of the ASA 'ideal wedge' (benchmark problem 1,
     Buckingham & Tolstoy, JASA 87, 1990): an isovelocity wedge with a
@@ -297,6 +334,119 @@ def test_ram_tl_matches_pekeris_modal_sum():
     assert np.median(d) < 3.5, f"median |dTL|={np.median(d):.2f} dB"
 
 
+# Pressure-release (Dirichlet-Dirichlet) waveguide — the flat control for the
+# ideal-wedge benchmark below: same boundaries, same frequency, same source and
+# receiver depths, slope removed. It is what isolates a wedge disagreement to
+# the *slope* rather than to the boundary condition or the engine's absolute
+# level. 200 m at 25 Hz holds six trapped modes; the source at mid-depth
+# excites the odd three.
+_PR_DEPTH, _PR_F, _PR_ZS, _PR_ZR = 200.0, 25.0, 100.0, 30.0
+_PR_RANGES = np.arange(300.0, 3301.0, 25.0)
+
+# RAM's decks carry no spelling for a vacuum (``RAM.validate_inputs`` refuses
+# every non-geoacoustic bottom type), so the pressure-release floor reaches it
+# as a near-massless half-space at the water's own sound speed: with c_b = c_w
+# the Rayleigh coefficient collapses to (rho_b - rho_w)/(rho_b + rho_w) at
+# *every* grazing angle, i.e. |R| = 0.99980 — 0.0017 dB per bounce from a true
+# pressure release. The two tests below check that surrogate against a true
+# ``'vacuum'`` bottom through the same analytic reference.
+RHO_SOFT = 1e-4
+
+
+def _pressure_release_env(bottom):
+    return Environment(
+        bathymetry=_PR_DEPTH,
+        ssp=SoundSpeedProfile.from_pairs([(0.0, C_W), (_PR_DEPTH, C_W)]),
+        bottom=bottom)
+
+
+def _pr_src_rcv():
+    return (Source(depths=_PR_ZS, frequencies=_PR_F),
+            Receiver(depths=[_PR_ZR], ranges=_PR_RANGES))
+
+
+def _pr_abs_dtl(tl):
+    ana = dirichlet_modal_tl(_PR_ZS, _PR_ZR, _PR_RANGES, _PR_F, _PR_DEPTH, C_W)
+    return np.abs(np.asarray(tl, dtype=float).ravel() - ana)
+
+
+def test_a_waveguide_exactly_at_a_cutoff_does_not_generate_the_cutoff_mode():
+    """A mode at cutoff carries ``k_m = 0`` and the far-field sum divides by
+    ``sqrt(k_m)``, so a waveguide sitting exactly at a cutoff must give the
+    same field as one a hair below it.
+
+    25 Hz in 150 m is such a waveguide: ``k*depth/pi`` is 5 in exact
+    arithmetic and ``5.000000000000001`` in floating point, so ``floor`` hands
+    back mode 5 and the ``gamma < k`` test that used to guard this waves it
+    through — ``gamma`` is below ``k``, by one ULP. The mode arrives with
+    ``1/sqrt(k_m)`` 6907x the largest other mode's and swamps the sum. Latent
+    when found: both live callers of ``dirichlet_modal_tl`` sit at
+    ``k*depth/pi = 6.667``.
+
+    The perturbation below is 1.5e-7 m of water depth, which no physical field
+    can resolve, and the bound is 1e-4 dB against a measured 1.4e-6 dB. The
+    receiver is at 45 m and not at this suite's usual 30 m: mode 5 of a 150 m
+    guide has nodes every 30 m, so a receiver at 30 m multiplies the spurious
+    mode by its own zero and hides it entirely.
+    """
+    z_s, z_r, ranges, f, c = 100.0, 45.0, np.array([300.0, 1000.0, 3300.0]), 25.0, C_W
+    depth = 150.0
+    assert 2 * np.pi * f / c * depth / np.pi == 5.000000000000001, (
+        "this fixture is only a test while k*depth/pi rounds ABOVE the "
+        "integer cutoff")
+    at_cutoff = dirichlet_modal_tl(z_s, z_r, ranges, f, depth, c)
+    below = dirichlet_modal_tl(z_s, z_r, ranges, f, depth * (1 - 1e-9), c)
+    assert np.max(np.abs(at_cutoff - below)) < 1e-4, (
+        f"TL moved by {np.max(np.abs(at_cutoff - below)):.4g} dB over a "
+        f"1.5e-7 m depth change: the mode at cutoff is being generated")
+
+
+def test_kraken_vacuum_waveguide_matches_dirichlet_modal_sum():
+    """Kraken over a true ``'vacuum'`` bottom reproduces the closed-form
+    Dirichlet-Dirichlet modal sum in absolute dB. This is what makes
+    ``dirichlet_modal_tl`` usable as a reference for the other engines: an
+    independent eigenvalue solver lands on it over 121 ranges with no free
+    parameter. Measured median 0.014 dB / max 0.091 dB, so the bounds below sit
+    7x and 4x above the measurement."""
+    src, rcv = _pr_src_rcv()
+    d = _pr_abs_dtl(Kraken(timeout=120).compute_tl(
+        _pressure_release_env(BoundaryProperties(acoustic_type='vacuum')),
+        src, rcv).db)
+    assert np.median(d) < 0.1, f"median |dTL|={np.median(d):.3f} dB"
+    assert np.max(d) < 0.4, f"max |dTL|={np.max(d):.3f} dB"
+
+
+def test_ram_pressure_release_waveguide_matches_dirichlet_modal_sum():
+    """RAM reproduces the same closed-form Dirichlet modal sum to 0.012 dB
+    median — ~190x tighter than the ~2.3 dB the Pekeris case above allows it.
+    The mid-depth source is what buys that: it excites only the odd modes, so
+    the steepest one carrying energy has gamma_5/k = 0.75, a 49 deg ray well
+    inside the Pade-6 aperture, where the Pekeris fixture's source excites the
+    near-cutoff mode the PE under-resolves.
+
+    The discretisation is pinned rather than left to the Lytaev optimizer: the
+    default grid gives 3.55 dB median on this problem, and ``dr=5, dz=0.25,
+    np_pade=6`` gives 0.012 dB median / 0.043 dB p90 / 0.185 dB max. The bounds
+    below are 12x and 11x that measurement. ``max`` is deliberately not bounded
+    — the field runs 40.7 to 74.4 dB and the deepest cells are hypersensitive
+    to a sub-metre shift of a null (a nearby grid, dr=2.5, moves one cell to
+    3.97 dB while its median stays at 0.064 dB).
+
+    Paired with the Kraken test above this also validates the near-massless
+    half-space as a stand-in for the vacuum bottom RAM cannot spell: both
+    engines land on the same analytic field from opposite sides of that
+    substitution.
+    """
+    src, rcv = _pr_src_rcv()
+    d = _pr_abs_dtl(RAM(dr=5.0, dz=0.25, np_pade=6, timeout=300).compute_tl(
+        _pressure_release_env(BoundaryProperties(
+            acoustic_type='half-space', sound_speed=C_W,
+            density=RHO_SOFT, attenuation=0.0)),
+        src, rcv).db)
+    assert np.median(d) < 0.15, f"median |dTL|={np.median(d):.3f} dB"
+    assert np.percentile(d, 90) < 0.5, f"p90 |dTL|={np.percentile(d, 90):.3f} dB"
+
+
 def test_bellhop_ideal_wedge_matches_analytic():
     """ASA 'ideal wedge' (benchmark problem 1): uacpy reproduces the exact
     Buckingham-Tolstoy analytic solution. The ideal wedge has pressure-release
@@ -304,7 +454,27 @@ def test_bellhop_ideal_wedge_matches_analytic():
     ``BoundaryProperties(acoustic_type='vacuum')``; Bellhop runs the coherent
     field on the 2.86 deg up-slope. Bellhop is a ray/beam model at 25 Hz, so
     ~1 dB absolute agreement with the exact analytic field is expected —
-    the interference structure (shape) is reproduced to ~0.4 dB."""
+    the interference structure (shape) is reproduced to ~0.4 dB.
+
+    Bellhop is the only engine here, and RAM is deliberately absent. A PE
+    marches one way, and the ideal wedge is a two-way problem: at a receiver
+    between the source and the apex the exact Green's function carries
+    J_nu(k r_recv), and J_nu = (H1_nu + H2_nu)/2 is a radial *standing* wave —
+    the apex-ward wave plus the wave the perfectly reflecting wedge returns
+    down-slope from each mode's cutoff radius. Measured, on this fixture with
+    the near-massless bottom of ``RHO_SOFT``: RAM sits 5.03 dB from the exact
+    solution and 0.94 dB from the same series with the receiver-side J_nu
+    replaced by H2_nu/2, i.e. it reproduces the one-way half and nothing else.
+    That gap is structural, not a grid: it moves by 0.09 dB over dr 1-10 m,
+    dz 0.1-1.0 m, Pade 4 and 8, and both the mpiramS and ramgeo backends, while
+    RAM on the same boundaries with the slope removed matches
+    ``dirichlet_modal_tl`` to 0.012 dB (the test above). Reversing the geometry
+    does not help: down-slope the standing wave moves into the source-side
+    factor J_nu(k r_src), and comparing the two analytic series against each
+    other — source 2 km from the apex, receivers out to 4 km — leaves them
+    3.68 dB apart in median, so there is no one-way half to match. Adding RAM would
+    need a bound near 10 dB, which would assert nothing this fixture can catch.
+    """
     f, c, slope, R_s, z_s, z_r = 25.0, 1500.0, 0.05, 4000.0, 100.0, 30.0
     r_src = np.array([500., 1000., 1500., 2000., 2500., 3000.])
     rr = np.linspace(0.0, 3800.0, 40)
@@ -416,7 +586,8 @@ def test_semicoherent_is_the_lloyd_shaded_incoherent_sum():
     """SEMICOHERENT_TL is the incoherent intensity sum with every launch
     amplitude pre-shaded by the Lloyd-mirror source-image factor
     ``sqrt(2)·|sin(omega·z_s·sin(alpha)/c)|`` (``bellhop.f90:276-278``;
-    bellhop.md:166-176 — the physical ``2·sin(k z_s sin(theta))`` image
+    bellhop.md §4 "Semi-coherent is not a blend of the two" — the physical
+    ``2·sin(k z_s sin(theta))`` image
     interference of COA §1, renormalised to unit mean square). On the
     impedance-matched Lloyd geometry only the direct ray and its surface
     image arrive, so both sums close analytically:

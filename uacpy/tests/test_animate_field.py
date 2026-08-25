@@ -241,6 +241,29 @@ def test_plot_time_snapshots_empty_raises():
         plot_time_snapshots({}, times_s=(0.1,))
 
 
+@pytest.mark.parametrize("frame_stride, accepted", [
+    (0, False),         # divides by zero inside np.arange
+    (1, True),          # the documented "render every sample" value
+    (-1, False),
+    (np.int64(2), True),   # a numpy integer, which a type test would reject
+])
+def test_a_frame_stride_below_one_is_refused_by_name(frame_stride, accepted):
+    """Both sides of the smallest usable stride. A stride of 0 escaped as a raw
+    ``ZeroDivisionError`` and a negative one as a typed message about the
+    caller's arrays, neither of which names the knob that is wrong."""
+    from uacpy.visualization.plots import animate_field
+    import matplotlib.pyplot as plt
+
+    field = _make_synthetic_field(n_t=20, t_max=0.5)
+    if accepted:
+        assert animate_field(field, frame_stride=frame_stride) is not None
+        plt.close('all')
+        return
+    with pytest.raises(ConfigurationError, match='frame_stride must be at least 1'):
+        animate_field(field, frame_stride=frame_stride)
+    plt.close('all')
+
+
 def test_plot_time_snapshots_global_pmax():
     """``p_max`` scalar applies the same colour scale to every panel."""
     from uacpy.visualization import plot_time_snapshots

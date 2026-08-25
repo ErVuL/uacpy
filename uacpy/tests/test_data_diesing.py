@@ -75,3 +75,24 @@ def test_missing_cache_names_flag(tmp_path, monkeypatch):
     diesing_local._MODEL.clear()
     with pytest.raises(ConfigurationError, match='install.sh --data diesing'):
         diesing_local.fetch_bottom_diesing((0.0, -150.0))
+
+
+def test_the_antimeridian_reads_alike_from_either_side(monkeypatch):
+    """Wagner IV sends +180 and −180 to opposite ends of the same parallel, and
+    the rasterized nodata margin covers one end without covering the other."""
+    pytest.importorskip('pyproj')
+    from uacpy.data import diesing_local
+    tf = diesing_local._pyproj_transformer()
+    sx = 1.0e6
+    x_edge = abs(tf.transform(180.0, 0.0)[0])
+    width = int(np.ceil(2 * x_edge / sx)) + 4
+    arr = np.full((8, width), 2.0, dtype=np.float32)    # class 2 = clay
+    arr[:, :4] = -3.4e38                               # west margin: nodata
+    monkeypatch.setattr(diesing_local, '_model', lambda: {
+        'arr': arr, 'x0': -x_edge - 2 * sx, 'y0': 4 * sx, 'sx': sx, 'sy': sx,
+        'tf': tf, 'H': arr.shape[0], 'W': width})
+    assert diesing_local._class_code(0.0, 180.0) == 2
+    assert diesing_local._class_code(0.0, -180.0) == 2
+    # An interior miss is still a miss — the retry is edge-only.
+    arr[:] = -3.4e38
+    assert diesing_local._class_code(0.0, 0.0) is None

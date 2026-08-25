@@ -39,8 +39,9 @@ def _validate_tl_pair_and_window(
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Shared validation for TL-pair metrics.
 
-    Both inputs must be 2-D ``(depth, range)`` fields. TL is pulled from
-    ``.db`` (handles complex → dB conversion). Returns ``(diff, finite)`` —
+    Both inputs must be 2-D ``(depth, range)`` fields carrying the same
+    :attr:`~uacpy.Field.kind`. TL is pulled from ``.db`` (handles complex → dB
+    conversion). Returns ``(diff, finite)`` —
     the signed TL difference and the boolean mask of finite cells inside the
     requested window.
     """
@@ -54,9 +55,39 @@ def _validate_tl_pair_and_window(
                 f"{fname}: {label} must be a 2-D (depth, range) Field; "
                 f"got coords {list(f.coords)}"
             )
+    # Compare the QUANTITY, not the representation: complex pressure and real
+    # TL are the same quantity written two ways and ``.db`` reconciles them,
+    # while reverberation shares TL's dB representation exactly and is a
+    # different quantity. Same rule ``compare_models`` applies before it puts
+    # two fields on one colour scale.
+    if field_a.kind != field_b.kind:
+        raise ConfigurationError(
+            f"{fname}: field_a is a {field_a.kind!r} field but field_b is "
+            f"{field_b.kind!r} — these are different physical quantities and "
+            f"their difference is not an agreement metric.",
+            remediation="Compare like with like (two TL fields, or two "
+                        "reverberation fields).",
+        )
 
-    da = np.asarray(field_a.db)
-    db = np.asarray(field_b.db)
+    # ``Field.db`` refuses a real field whose unit is not dB, and raises
+    # AttributeError doing it. Matching the kind above is not enough to make
+    # the pair a TL pair — a probability-of-detection field passes it — so the
+    # unit is checked here, the way ``ResultStack.db`` pre-checks its slabs.
+    for label, f in (('field_a', field_a), ('field_b', field_b)):
+        if not f.is_complex and f.unit != 'dB':
+            raise ConfigurationError(
+                f"{fname}: {label} is in {f.unit!r}, not dB, so its values "
+                f"are not a level and their difference is not a TL error.",
+                remediation="Compare two TL (or complex pressure) fields; "
+                            "read the raw values via field.data.",
+            )
+
+    # dtype=float, not the field's own: ``Field.db`` hands back the stored
+    # dtype, and a ``.shd``-backed result is float32. The differences below
+    # are reduced to one RMSE / bias scalar, and that accumulation is done in
+    # float64 whichever engine produced either side.
+    da = np.asarray(field_a.db, dtype=float)
+    db = np.asarray(field_b.db, dtype=float)
     if da.shape != db.shape:
         raise ConfigurationError(
             f"{fname}: shape mismatch — field_a {da.shape} vs field_b {db.shape}"
@@ -68,9 +99,10 @@ def _validate_tl_pair_and_window(
     ranges_b = field_b.coords['range']
     if depths.shape != depths_b.shape or ranges.shape != ranges_b.shape:
         raise ConfigurationError(f"{fname}: depth/range axes must have matching shapes")
-    # Tolerance is ~1 mm: models interpolate onto the requested receiver grid,
-    # so two runs of the same grid agree to sub-millimetre (unit-conversion
-    # rounding). Genuinely different grids differ by metres and still raise.
+    # Two tolerance terms: atol=1e-3 admits sub-millimetre unit-conversion
+    # rounding near the origin, and rtol=1e-5 scales the allowance with the
+    # coordinate (it dominates beyond 100 m — 1 mm at 100 m, 1 m at 100 km).
+    # Genuinely different grids differ by whole grid steps and still raise.
     if not np.allclose(depths, depths_b, rtol=1e-5, atol=1e-3):
         raise ConfigurationError(
             f"{fname}: depth axes differ — sample-cells are not aligned. "
@@ -105,10 +137,11 @@ def tl_rmse(
     """Root-mean-square TL difference between two TL fields.
 
     Both fields must be sampled on the same ``depths`` and ``ranges``
-    grid. Agreement is checked to ~1 mm (models interpolate onto the
-    requested receiver grid, so two runs of the same grid match to
-    sub-millimetre); grids differing by more raise — resample one onto
-    the other first.
+    grid. Agreement is checked with a mixed tolerance — 1 mm absolute plus
+    1e-5 relative, the latter dominating beyond 100 m (models interpolate
+    onto the requested receiver grid, so two runs of the same grid match
+    within it); grids differing by more raise — resample one onto the
+    other first.
 
     Parameters
     ----------

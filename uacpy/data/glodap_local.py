@@ -11,7 +11,6 @@ without it :func:`uacpy.data.build_francois_garrison` falls back to a constant
 letting :func:`uacpy.data.fetch_environment` build absorption from measured pH.
 """
 
-import os
 import tarfile
 import tempfile
 from pathlib import Path
@@ -22,7 +21,7 @@ from uacpy._log import log_message
 from uacpy.core.exceptions import DataFetchError
 from uacpy.data import _cache
 from uacpy.data._geo import as_coordinate
-from uacpy.data._netcdf import NetcdfGrid
+from uacpy.data._netcdf import NetcdfGrid, netcdf_lock
 
 __all__ = ['download_glodap_db', 'fetch_ph_profile', 'fetch_ph']
 
@@ -55,10 +54,9 @@ def download_glodap_db(cache_dir=None, *, timeout=600.0, verbose=False):
         tar_path = Path(tmp) / GLODAP_TARBALL
         if not curl_download(GLODAP_URL, tar_path, timeout=timeout,
                              verbose=verbose):
-            part = Path(str(tar_path) + '.part')
-            part.write_bytes(http_get(GLODAP_URL, timeout=timeout,
-                                      verbose=verbose, source='glodap'))
-            os.replace(part, tar_path)
+            with _cache.atomic_write(tar_path) as part:
+                part.write_bytes(http_get(GLODAP_URL, timeout=timeout,
+                                          verbose=verbose, source='glodap'))
         _extract_ph(tar_path, out)
     _cache.invalidate_grids()
     log_message('glodap', f"GLODAP pH grid cached → {out}", verbose=verbose)
@@ -69,7 +67,8 @@ def _extract_ph(tar_path, out):
     """Extract the pH member from the mapped-product tarball to ``out``.
 
     Iterates lazily (member data is never read before its declared size passes
-    the decompression-bomb cap) and writes atomically via ``<out>.part``."""
+    the decompression-bomb cap) and writes through
+    :func:`uacpy.data._cache.atomic_write`."""
     from uacpy.data._http import checked_member_size
     with tarfile.open(tar_path, 'r:gz') as tar:
         member = next((m for m in tar
@@ -87,9 +86,8 @@ def _extract_ph(tar_path, out):
                 f"GLODAP tarball member {member.name!r} is not a regular file.",
                 remediation="Check the GLODAP mapped-product download.",
             )
-        part = Path(str(out) + '.part')
-        part.write_bytes(src.read())
-        os.replace(part, out)
+        with _cache.atomic_write(out) as part:
+            part.write_bytes(src.read())
 
 
 class _GlodapGrid(NetcdfGrid):
@@ -105,11 +103,14 @@ class _GlodapGrid(NetcdfGrid):
     here; the 33 levels of the depth axis run 0 → 5500 m.
     """
 
+    dataset_name = 'glodap'
+
     def __init__(self, path):
         try:
             super().__init__(path)
             self._ph = self.var(*_PH_VARS)
-            self._depth = np.asarray(self.var(*_DEPTH_VARS)[:], dtype=float)
+            with netcdf_lock:
+                self._depth = np.asarray(self.var(*_DEPTH_VARS)[:], dtype=float)
         except KeyError as exc:
             raise DataFetchError(
                 f"GLODAP NetCDF {Path(path).name} is missing an expected "
@@ -127,10 +128,13 @@ class _GlodapGrid(NetcdfGrid):
         # the raw value, which for this file is the declared _FillValue of -999
         # — a number np.isfinite then accepts as a real pH. Fill *through* the
         # mask instead.
-        col = np.ma.filled(
-            np.ma.asarray(self._ph[:, self.row(lat), self.col(lon)],
-                          dtype=float),
-            np.nan)
+        # Same lock and typing as NetcdfGrid.cell: this reads the netCDF
+        # variable directly rather than cell by cell.
+        with netcdf_lock, _cache.reading('glodap', self.path):
+            col = np.ma.filled(
+                np.ma.asarray(self._ph[:, self.row(lat), self.col(lon)],
+                              dtype=float),
+                np.nan)
         # Backstop for a file whose fill is a bare sentinel with no mask:
         # seawater pH cannot leave the 0-14 scale.
         col[(col < 0.0) | (col > 14.0)] = np.nan

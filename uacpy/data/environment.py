@@ -42,8 +42,10 @@ from uacpy.core.environment import (
     Bathymetry, BoundaryProperties, Environment, SoundSpeedProfile,
 )
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
+from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.data._geo import (
     Coordinate, as_coordinate, great_circle_km, DEFAULT_MAX_TRANSECT_POINTS,
+    pressure_dbar_to_depth,
 )
 from uacpy.data._http import raise_substantive
 from uacpy.data.bathymetry import fetch_bathy, fetch_bathy_transect
@@ -103,9 +105,16 @@ def _axis_attempts(sources, backends_map, *, axis, cache_only):
     attempts = []
     for src in sources:
         if src not in backends_map:
+            if src in ('auto', 'local'):
+                remediation = (
+                    f"{src!r} is a preset for the whole *_sources= value and "
+                    f"is not valid inside a sequence; pass it alone, or list "
+                    f"sources from {sorted(backends_map)}.")
+            else:
+                remediation = f"Use one of {sorted(backends_map)}."
             raise ConfigurationError(
                 f"fetch_environment: unknown {axis} source {src!r}.",
-                remediation=f"Use one of {sorted(backends_map)}.",
+                remediation=remediation,
             )
         backends = backends_map[src]
         if cache_only:
@@ -146,6 +155,23 @@ def _as_source_tuple(value):
     return (value,) if isinstance(value, str) else tuple(value)
 
 
+def _require_nonempty_sources(spec, *, axis):
+    """Reject an explicit empty ``*_sources`` sequence: it selects no source,
+    so nothing could ever be fetched for that axis (the pre-fetch twin of
+    :func:`raise_substantive`'s empty-chain diagnostic). ``None`` (axis not
+    requested) and strings (``'auto'`` / ``'local'`` / a source name) pass
+    through."""
+    if spec is None or isinstance(spec, str):
+        return
+    if len(_as_source_tuple(spec)) == 0:
+        raise ConfigurationError(
+            f"fetch_environment: {axis}_sources={spec!r} selects no source.",
+            remediation="Pass at least one source: an empty sequence "
+                        f"({axis}_sources=()) selects none. Use 'auto', "
+                        f"'local', or omit {axis}_sources=.",
+        )
+
+
 def fetch_environment(
     point: Coordinate,
     *,
@@ -161,7 +187,7 @@ def fetch_environment(
     surface_sources: Union[str, Sequence[str], None] = None,
     altimetry=None,
     altimetry_sources: Optional[str] = None,
-    sea_surface_n_points: int = 500,
+    sea_surface_n_points: Optional[int] = None,
     sea_surface_seed: Optional[int] = None,
     transect_to: Optional[Coordinate] = None,
     n_points: Union[int, str] = 50,
@@ -231,6 +257,25 @@ def fetch_environment(
         **fallback**. (A bottom *string* is a material name here, never a
         source — source keywords go in ``bottom_sources`` — which is why the two
         are separate args.)
+
+        There is no ``bottom_roughness=`` knob, and because the literal is only
+        a fallback, a ``BoundaryProperties(roughness=...)`` passed alongside a
+        ``bottom_sources`` that resolves is discarded along with the rest of the
+        literal. At a **point**, fetched geoacoustics *and* a site roughness
+        come from fetching the boundary yourself and handing it over as the
+        literal — the direct analogue of the ``surface=`` remedy below::
+
+            bp  = fetch_bottom_local(pt, roughness=0.5)
+            env = fetch_environment(pt, bathymetry_sources='local',
+                                    ssp_sources='local', bottom=bp)
+
+        Provenance is preserved, but naming one provider forfeits the
+        ``'auto'``/``'local'`` fallback chain. On a **range-dependent
+        transect** there is no route: this function takes a
+        ``BoundaryProperties`` literal, not the ``Bottom`` a
+        ``fetch_bottom_*_transect`` returns, and refuses one with a typed
+        error. Build the range-dependent :class:`~uacpy.Environment` directly
+        for that case.
     bottom_sources : str or sequence of str, optional
         Seafloor source(s) to **fetch**, tried in order, or a preset: ``'auto'``
         (best-available, cached-first: EMODnet → Diesing → MARS → pelagic — the
@@ -271,7 +316,10 @@ def fetch_environment(
         ``'auto'``: the transect is sampled at the **distinct WOA23 cells** it
         crosses (one column per cell — WOA's native range resolution, found
         analytically so no duplicate column is fetched), capped at
-        ``max_points``. Pass an int for exactly that many evenly-spaced columns.
+        ``max_points``. For the Copernicus source, which exposes no cheap cell
+        identity, ``'auto'`` maps to 6 evenly-spaced columns (capped at
+        ``max_points``). Pass an int for exactly that many evenly-spaced
+        columns.
     range_dependent_bottom : bool, optional
         Whether a fetched seafloor varies along the transect. A bottom is fetched
         only when requested (``bottom_sources=`` given, or this flag ``True``).
@@ -279,7 +327,7 @@ def fetch_environment(
         transect**, range-independent at a point. Pass ``False`` to force a
         single representative bottom even along a transect; ``True`` on a point
         raises (and, with no ``bottom_sources``, implies ``'auto'``). A single
-        source spans the transect, so gaps forward-fill the nearest covered
+        source spans the transect, so gaps fill from the nearest covered
         value — ``bottom_sources='grainsize'`` is a uniform worldwide source.
     bottom_n_points : int or 'auto', optional
         Seabed samples along the transect when ``range_dependent_bottom``.
@@ -323,7 +371,12 @@ def fetch_environment(
         the top boundary as an upper half-space line, with no thickness field to
         give it, so concentration decides *whether* there is ice, never how
         thick. Default ``None`` (no surface fetch). Point classification only
-        (the carrier's surface is one boundary).
+        (the carrier's surface is one boundary). The fetched canopy is the
+        smooth plate the tabulated parameters describe (roughness 0), which
+        under-predicts the loss over real deformed pack ice (see
+        :func:`uacpy.data.sea_ice_surface`); a site roughness needs an
+        explicit ``surface=`` literal, e.g. built with
+        ``sea_ice_surface(conc, roughness=...)``.
     altimetry : array-like, optional
         A **literal** rough-surface wave profile ``[(range_m, height_m), …]``
         (height positive up; same as :class:`Environment`'s ``altimetry=``).
@@ -340,7 +393,10 @@ def fetch_environment(
         specific); a single point has no range, so point altimetry is not
         fetched. Default ``None`` (flat surface unless ``altimetry=`` is given).
     sea_surface_n_points : int, optional
-        Range samples in a fetched sea-surface realization. Default 500.
+        Range samples in a fetched sea-surface realization. Default ``None``:
+        :func:`~uacpy.data.fetch_sea_surface` sizes it from the sea state, so
+        the realization resolves the wave spectrum's peak over the whole
+        transect (a fixed count aliases the waves away on a long one).
     sea_surface_seed : int, optional
         Random seed for a fetched sea-surface realization (reproducibility).
     with_absorption : bool, optional
@@ -384,6 +440,14 @@ def fetch_environment(
     Environment
     """
     lat, lon = as_coordinate(point)
+
+    # An explicit empty *_sources sequence selects no source on all four
+    # fetchable axes, so it is rejected before any axis resolves or fetches.
+    for _spec, _ax in ((ssp_sources, 'ssp'),
+                       (bathymetry_sources, 'bathymetry'),
+                       (bottom_sources, 'bottom'),
+                       (surface_sources, 'surface')):
+        _require_nonempty_sources(_spec, axis=_ax)
 
     # Each axis is a literal (ssp=/bathymetry=/bottom=) and/or fetched from
     # source(s) (*_sources). When both are given the source is fetched first and
@@ -762,7 +826,7 @@ def _record_provenance(env, bathy_src, ssp_src, bottom_kw, bottom_props,
                 f"fetch_environment: data source {src.id!r} ({src.name}) does "
                 f"not permit commercial use without verification — see "
                 f"uacpy.data.citations(env) for its licence/attribution.",
-                UserWarning, stacklevel=2)
+                UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
 
 
 def _fetch_absorption(point, *, date, ssp_source, ssp_backend, cache_only,
@@ -792,7 +856,7 @@ def _fetch_absorption(point, *, date, ssp_source, ssp_backend, cache_only,
         depths, temp, sal = fetch_ts_profile_operational(
             point, date=date, verbose=verbose, **extra)
     elif ssp_source == 'argo':
-        from uacpy.data.argo import fetch_argo_profile, _pressure_dbar_to_depth
+        from uacpy.data.argo import fetch_argo_profile
         extra = {}
         if max_distance_km is not None:
             extra['max_distance_km'] = max_distance_km
@@ -800,7 +864,7 @@ def _fetch_absorption(point, *, date, ssp_source, ssp_backend, cache_only,
             extra['max_days'] = max_days
         prof = fetch_argo_profile(point, date=date, timeout=timeout,
                                   verbose=verbose, **extra)
-        depths = _pressure_dbar_to_depth(prof['pres'], prof['lat'])
+        depths = pressure_dbar_to_depth(prof['pres'], prof['lat'])
         temp, sal = prof['temp'], prof['psal']
     else:
         from uacpy.data.sound_speed import fetch_ts_profile

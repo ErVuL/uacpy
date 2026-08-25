@@ -16,7 +16,9 @@ import numpy as np
 
 from uacpy.models import OAST, OASN, OASR, OASP, OASES, RunMode
 from uacpy.core import Environment, BoundaryProperties, Source, Receiver
-from uacpy.core.exceptions import ConfigurationError, FileFormatError
+from uacpy.core.exceptions import (
+    ConfigurationError, FileFormatError, UnsupportedFeatureError,
+)
 from uacpy.core.results import Field, ReflectionCoefficient
 from uacpy.tests.conftest import make_pekeris
 
@@ -803,7 +805,7 @@ class TestOastPlotBlockGates:
         lines = self._deck(tmp_path, 'N V J T C')
         assert lines[-2:] == ['40 100 10', '40 100 10']
 
-    def test_depth_average_alone_still_emits_block_ix(self, tmp_path):
+    def test_depth_average_alone_emits_block_ix(self, tmp_path):
         """DEPTAV ('A') gates Block IX only when FRCONT ('o') is off."""
         assert self._deck(tmp_path, 'N J A')[-1] == '20 100 12 10'
 
@@ -1211,7 +1213,7 @@ class TestOasesUnwrittenOptionBlocks:
     def test_oast_rejects_patch_scattering(self, tmp_path, options, pattern):
         from uacpy.io.oases_writer import write_oast_input
         env, source, receiver = self._rig()
-        with pytest.raises(ConfigurationError, match=pattern):
+        with pytest.raises(UnsupportedFeatureError, match=pattern):
             write_oast_input(tmp_path / 'e.dat', env, source, receiver,
                              options=options)
 
@@ -1227,7 +1229,7 @@ class TestOasesUnwrittenOptionBlocks:
         letters reads past the end of the deck."""
         from uacpy.io.oases_writer import write_oasp_input
         env, source, receiver = self._rig()
-        with pytest.raises(ConfigurationError, match=pattern):
+        with pytest.raises(UnsupportedFeatureError, match=pattern):
             write_oasp_input(tmp_path / 'p.dat', env, source, receiver,
                              options=options)
 
@@ -1239,7 +1241,8 @@ class TestOasesUnwrittenOptionBlocks:
         links unoasn22.o into oasn2_bin); unoasn21.f is not compiled."""
         from uacpy.io.oases_writer import write_oasn_input
         env, source, receiver = self._rig()
-        with pytest.raises(ConfigurationError, match=r'unoasn22\.f:322-323'):
+        with pytest.raises(UnsupportedFeatureError,
+                           match=r'unoasn22\.f:322-323'):
             write_oasn_input(tmp_path / 'n.dat', env, source, receiver,
                              options=options)
 
@@ -1328,7 +1331,8 @@ class TestOaspTiltedArray:
 
     def test_writer_rejects_the_tilt_letter(self, tmp_path):
         from uacpy.io.oases_writer import write_oasp_input
-        with pytest.raises(ConfigurationError, match=r'oaseun31\.f:1157-1158'):
+        with pytest.raises(UnsupportedFeatureError,
+                           match=r'oaseun31\.f:1157-1158'):
             write_oasp_input(
                 tmp_path / 'p.dat', _pekeris(),
                 Source(depths=25.0, frequencies=100.0),
@@ -1337,7 +1341,8 @@ class TestOaspTiltedArray:
                 options='N J T')
 
     def test_model_rejects_the_tilt_letter(self, tmp_path):
-        with pytest.raises(ConfigurationError, match=r'oaseun31\.f:1157-1158'):
+        with pytest.raises(UnsupportedFeatureError,
+                           match=r'oaseun31\.f:1157-1158'):
             OASP(verbose=False, options='N J T',
                  work_dir=tmp_path).run(
                 _pekeris(), Source(depths=25.0, frequencies=100.0),
@@ -1594,9 +1599,20 @@ class TestOasesWavenumberSampleCount:
         with pytest.raises(ConfigurationError, match='NP = 65536'):
             self._write(writer, tmp_path, nw_samples=200000)
 
-    def test_oast_warns_when_the_count_is_not_a_power_of_two(self, tmp_path):
-        with pytest.warns(UserWarning, match='rounds it up to 4096'):
+    def test_oast_writes_the_rounded_count_not_the_one_asked_for(self,
+                                                                 tmp_path):
+        """OAST takes its integration cut from the count in the deck
+        (``icut1=1, icut2=nwvno``, unoast31.f:441-442) and only *then* rounds
+        the grid up to a power of two (:447-458), computing DLWVNO from the
+        rounded count (:474). A non-power-of-two NW therefore became a cut
+        partway up a wider grid and the integral stopped short of CMIN,
+        deleting the trapped modes — measured 78.8 dB (nw=3000) and 91.8 dB
+        (nw=5000) from the nw=4096 answer on a 100 m Pekeris guide at 100 Hz.
+        Writing the rounded count makes the binary's rounding a no-op.
+        """
+        with pytest.warns(UserWarning, match='written as 4096'):
             self._write('write_oast_input', tmp_path, nw_samples=3000)
+        assert '4096' in (tmp_path / 'w.dat').read_text()
 
     def test_oasp_does_not_round(self, tmp_path):
         """OASP has no power-of-two branch — CFFX sizing aside, unoasp22.f
@@ -1737,7 +1753,7 @@ class TestOasnNoiseBlockGating:
         assert data['replicas'].shape == (1, 3, 3, 1, 5)
 
     @pytest.mark.requires_binary
-    def test_replica_run_still_carries_a_requested_noise_field(self, tmp_path):
+    def test_replica_run_carries_a_requested_noise_field(self, tmp_path):
         """A REPLICA run given noise levels must still emit them, so 'N' is
         added for that case alone."""
         from uacpy import Replicas
@@ -1910,7 +1926,7 @@ class TestOasesUnservableOptionLetters:
                                                       options, pattern):
         from uacpy.io import oases_writer
         env, source, receiver = self._rig()
-        with pytest.raises(ConfigurationError, match=pattern):
+        with pytest.raises(UnsupportedFeatureError, match=pattern):
             getattr(oases_writer, writer)(
                 tmp_path / 'x.dat', env, source, receiver, options=options)
 
@@ -2060,7 +2076,7 @@ class TestOasrPhaseIsUnwrappedAtIngest:
         np.testing.assert_allclose(deg - deg[0], self.TRUE_DEG - self.TRUE_DEG[0],
                                    atol=1e-9)
 
-    def test_interpolating_across_the_wrap_now_gives_the_true_phase(self):
+    def test_interpolating_across_the_wrap_gives_the_true_phase(self):
         from uacpy.core.results.reflection import ReflectionCoefficient
         theta, R, phi, freqs = self._stacked()
         rc = ReflectionCoefficient(
@@ -2160,7 +2176,7 @@ class TestOasesReceiverAxisKeepsItsDepths:
         assert written.size == n
         assert np.max(np.abs(written - z)) < 1e-2
 
-    def test_a_truly_uniform_axis_still_uses_the_compact_form(self):
+    def test_a_truly_uniform_axis_uses_the_compact_form(self):
         from uacpy.io.oases_writer import _receiver_block_lines
         z = np.linspace(10.0, 90.0, 9)
         lines = _receiver_block_lines(Receiver(depths=z, ranges=[1000.0]))

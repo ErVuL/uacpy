@@ -36,6 +36,8 @@ import numpy as np
 
 from uacpy.core.results import Result, ResultStack
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.core._warn_frames import USER_FRAME_SKIP
+from uacpy.io.file_manager import FileManager
 
 
 @dataclass
@@ -90,6 +92,96 @@ def _worker_init(started_counter, scratch_root: str) -> None:
     tempfile.tempdir = scratch_root
 
 
+# Where FileManager puts a use_tmpfs=True work dir (see its ``_tmpfs_available``).
+_TMPFS_ROOT = Path('/dev/shm')
+
+
+def _kept_tmpfs_dirs(results) -> List[str]:
+    """The RAM-backed work dirs this batch's results name, deduplicated.
+
+    A work dir is created inside its worker process, so the only record of its
+    path that reaches the parent is the ``*_file`` metadata a kept run attaches
+    to its result — which is attached iff ``cleanup=False``, i.e. iff the
+    directory survived. A job that raised before writing an output names
+    nothing, so this can come back shorter than the count of kept jobs.
+    """
+    dirs = set()
+    for result in results:
+        metadata = getattr(result, 'metadata', None) or {}
+        for key, value in metadata.items():
+            if not (key.endswith('_file') and isinstance(value, str)):
+                continue
+            work_dir = Path(value).parent
+            if _TMPFS_ROOT in work_dir.parents:
+                dirs.add(str(work_dir))
+    return sorted(dirs)
+
+
+def _reap_scratch_root(scratch_root: str, jobs, results=()) -> bool:
+    """Remove the parent-owned scratch root, or keep the work dirs a job asked
+    for. Returns True when the root was removed.
+
+    An entry under the root is either a work dir a job was ASKED to keep —
+    ``cleanup=False`` with an unpinned ``work_dir``, so the model allocated its
+    tempdir here and left it behind — or debris: a killed worker's tempdir after
+    a broken pool, or one a model could not unwind after a per-job exception
+    (which ``raise_on_error=False`` collects, and which then arrives here).
+
+    The decision is all-or-nothing, not per entry: an entry carries nothing
+    that ties it back to the job that made it, so when ANY job was configured
+    to keep its work dir the whole root is retained — debris from other jobs
+    included — and the warning names the directory so the caller can clear it.
+    Erring the other way would delete files a caller explicitly asked to keep.
+    When no job asked, every entry is debris by elimination and the root is
+    removed, which is what stops it leaking for the life of the machine.
+
+    ``use_tmpfs=True`` dirs live in /dev/shm, outside this root, so they are
+    neither reaped nor even visible here — which is why the decision below
+    reads the *jobs* for them rather than the root's contents. Left to the
+    listing alone, a batch of kept tmpfs work dirs looked like an empty root
+    and the caller was never told RAM was still held. ``results`` is read only
+    to name those dirs in the warning: /dev/shm is a shared system directory,
+    so unlike the scratch root it cannot simply be handed over for removal."""
+    try:
+        leftovers = os.listdir(scratch_root)
+    except OSError:
+        leftovers = []
+    keepers = [
+        job for job in jobs
+        if getattr(job.model, 'cleanup', True) is False
+        and getattr(job.model, 'work_dir', None) is None
+    ]
+    # A tmpfs request falls back to disk where /dev/shm is missing or
+    # unwritable, and the dir then lands under scratch_root like any other —
+    # covered by the leftovers warning, so it must not also be reported as
+    # RAM-backed.
+    kept_on_tmpfs = [job for job in keepers
+                     if getattr(job.model, 'use_tmpfs', False)]
+    if kept_on_tmpfs and FileManager._tmpfs_available():
+        # Name the individual dirs, the way the leftovers warning below names
+        # its directory: /dev/shm holds every process's RAM-backed scratch, so
+        # naming the root alone leaves the caller to work out which entries
+        # are this batch's. Falls back to "them" for a batch whose results
+        # carry no paths to name.
+        named = _kept_tmpfs_dirs(results)
+        removable = ', '.join(named) if named else 'them'
+        warnings.warn(
+            f"run_parallel: {len(kept_on_tmpfs)} job work dir(s) were kept "
+            f"(cleanup=False, use_tmpfs=True) under {_TMPFS_ROOT}; they hold "
+            f"RAM until removed, and are outside {scratch_root} so this call "
+            f"cannot reap them. Remove {removable} when done with the files.",
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
+    if leftovers and keepers:
+        warnings.warn(
+            f"run_parallel: {len(leftovers)} job work dir(s) were kept "
+            f"(cleanup=False) under {scratch_root}; remove that "
+            f"directory when done with the files.",
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
+        return False
+    shutil.rmtree(scratch_root, ignore_errors=True)
+    return True
+
+
 def _job_worker(job: Job):
     """Execute one job. Runs in a worker process; the job (and its model)
     arrives by pickle, so the worker holds its own isolated copy."""
@@ -142,7 +234,6 @@ class ParallelResult:
         try:
             coord = np.array([float(self.labels[i]) for i in keep], dtype=float)
         except (TypeError, ValueError):
-            import warnings
             warnings.warn(
                 "ParallelResult.stack: job labels are non-numeric; using "
                 "the successful-job indices as the stack coordinate "
@@ -228,7 +319,10 @@ def run_parallel(
     """
     jobs = list(jobs)
     if not jobs:
-        raise ConfigurationError("run_parallel: jobs is empty.")
+        raise ConfigurationError(
+            "run_parallel: jobs is empty. Pass at least one Job(model, env, "
+            "source, receiver, run_mode=…, run_kwargs=…) — one per model run "
+            "you want executed.")
 
     # A pinned (cleanup=False) work_dir must be unique per job: concurrent
     # workers sharing one dir collide on the models' fixed scratch filenames.
@@ -277,7 +371,6 @@ def run_parallel(
     # finally below — so model tempdirs of a SIGKILLed/OOM-killed worker are
     # reaped instead of leaking in /tmp.
     scratch_root = tempfile.mkdtemp(prefix='uacpy_parallel_')
-    pool_broken = False
     try:
         with ProcessPoolExecutor(
             max_workers=n_workers, mp_context=ctx,
@@ -308,7 +401,6 @@ def run_parallel(
                         raise
                     errors[i] = exc
     except BrokenProcessPool as exc:
-        pool_broken = True
         # The worker pool died before returning. The usual cause in interactive
         # use: spawn/forkserver workers re-import __main__, but an interactive
         # session (REPL, Jupyter, ``python -c``, piped stdin) has none, so the
@@ -354,24 +446,7 @@ def run_parallel(
         ) from exc
 
     finally:
-        # Reap the workers' scratch root. Entries survive a NORMAL batch
-        # only when a job kept its dir (cleanup=False with an unpinned
-        # work_dir) — those are the caller's, so leave them and say where.
-        # (use_tmpfs=True dirs live in /dev/shm, outside this root, and
-        # cannot be reaped here.) After a broken pool the entries are
-        # debris from killed workers: reap.
-        try:
-            leftovers = os.listdir(scratch_root)
-        except OSError:
-            leftovers = []
-        if leftovers and not pool_broken:
-            warnings.warn(
-                f"run_parallel: {len(leftovers)} job work dir(s) were kept "
-                f"(cleanup=False) under {scratch_root}; remove that "
-                f"directory when done with the files.",
-                UserWarning, stacklevel=2)
-        else:
-            shutil.rmtree(scratch_root, ignore_errors=True)
+        _reap_scratch_root(scratch_root, jobs, results)
 
     labels = [job.label if job.label is not None else i for i, job in enumerate(jobs)]
     return ParallelResult(results, errors, labels, coordinate_name)

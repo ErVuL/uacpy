@@ -157,3 +157,85 @@ class TestTLMetricsUnits:
         a, b = self._pair(both_complex=False)
         assert tl_max_error(a, b) == pytest.approx(1.0, abs=1e-9)
         assert tl_bias(a, b) == pytest.approx(-1.0, abs=1e-9)
+
+
+class TestKindsMustMatch:
+    """The metrics compare the QUANTITY, not the representation. Complex
+    pressure and real TL are one quantity written two ways (the class above
+    pins that they round-trip); reverberation shares TL's dB representation
+    exactly and is a different quantity, so subtracting the two produces a
+    number with no meaning. ``compare_models`` refuses the same pairing
+    before it puts both on one colour scale."""
+
+    def _pair(self, kind_b):
+        d = np.linspace(10, 90, 4)
+        r = np.linspace(100, 1000, 5)
+        data = 60.0 + np.zeros((4, 5))
+        return (
+            _tl_field(data, d, r, model='A',
+                      metadata={'kind': 'pressure', 'unit': 'dB'}),
+            _tl_field(data + 1.0, d, r, model='B',
+                      metadata={'kind': kind_b, 'unit': 'dB'}),
+        )
+
+    @pytest.mark.parametrize('fn', [tl_rmse, tl_max_error, tl_bias])
+    def test_pressure_against_reverberation_raises(self, fn):
+        a, b = self._pair('reverberation')
+        with pytest.raises(ConfigurationError,
+                           match='different physical quantities'):
+            fn(a, b)
+
+    @pytest.mark.parametrize('fn', [tl_rmse, tl_max_error, tl_bias])
+    def test_matching_kinds_compare(self, fn):
+        a, b = self._pair('pressure')
+        assert np.isfinite(fn(a, b))
+
+    def test_two_reverberation_fields_compare(self):
+        a, b = self._pair('reverberation')
+        a = _tl_field(np.asarray(a.data), a.coords['depth'], a.coords['range'],
+                      model='A', metadata={'kind': 'reverberation',
+                                           'unit': 'dB'})
+        assert tl_rmse(a, b) == pytest.approx(1.0, abs=1e-9)
+
+
+def _uniform_tl_field(value):
+    return Field(data=np.full((2, 3), value),
+                 coords={'depth': np.array([10.0, 20.0]),
+                         'range': np.array([100.0, 200.0, 300.0])})
+
+
+def _probability_field(value):
+    return Field(data=np.full((2, 3), value),
+                 coords={'depth': np.array([10.0, 20.0]),
+                         'range': np.array([100.0, 200.0, 300.0])},
+                 metadata={'kind': 'probability_of_detection'})
+
+
+class TestTlMetricsPreCheckTheUnit:
+    """Matching ``kind`` is not enough to make a pair a TL pair: a
+    probability-of-detection field passes it and then reaches ``Field.db``,
+    whose refusal is an ``AttributeError``."""
+
+    @pytest.mark.parametrize('metric', [tl_rmse, tl_max_error, tl_bias])
+    def test_a_non_db_pair_raises_a_typed_error(self, metric):
+        with pytest.raises(ConfigurationError, match="not dB"):
+            metric(_probability_field(0.4), _probability_field(0.6))
+
+    @pytest.mark.parametrize('metric', [tl_rmse, tl_max_error, tl_bias])
+    def test_the_error_names_the_offending_argument(self, metric):
+        with pytest.raises(ConfigurationError) as exc:
+            metric(_uniform_tl_field(10.0), _probability_field(0.6))
+        assert 'field_b' in str(exc.value)
+
+    def test_two_db_fields_compute_the_metrics(self):
+        a, b = _uniform_tl_field(10.0), _uniform_tl_field(20.0)
+        assert tl_rmse(a, b) == pytest.approx(10.0)
+        assert tl_max_error(a, b) == pytest.approx(10.0)
+        assert tl_bias(a, b) == pytest.approx(-10.0)
+
+    def test_a_complex_field_derives_its_db_view_and_compares(self):
+        complex_field = Field(
+            data=np.full((2, 3), 1e-3 + 0j),
+            coords={'depth': np.array([10.0, 20.0]),
+                    'range': np.array([100.0, 200.0, 300.0])})
+        assert tl_rmse(complex_field, _uniform_tl_field(60.0)) == pytest.approx(0.0)

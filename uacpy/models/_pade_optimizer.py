@@ -33,7 +33,7 @@ the internal march grid.
 
 from __future__ import annotations
 
-from typing import Tuple
+from typing import Optional, Tuple
 
 import numpy as np
 
@@ -126,6 +126,18 @@ def _pade_pp(taylor: np.ndarray, p: int) -> Tuple[np.ndarray, np.ndarray]:
     return P, Q
 
 
+def _propagator_pade(dx: float, k0: float,
+                     p: int) -> Tuple[np.ndarray, np.ndarray]:
+    """``[p/p]`` Padé coefficients ``(P, Q)`` of one propagator step.
+
+    A function of ``(dx, k0, p)`` alone. ``Δz`` reaches
+    :func:`combined_error` through the spectral spread ``Δξ`` rather than
+    through the approximant, so a whole ``Δz`` ladder scored at one ``Δx``
+    shares a single build.
+    """
+    return _pade_pp(_propagator_taylor(dx, k0, n_terms=2 * p + 5), p)
+
+
 def _eval_poly(coeffs: np.ndarray, x: np.ndarray) -> np.ndarray:
     """Horner evaluation of ``Σ coeffs[k] · x^k`` (ascending order)."""
     out = np.zeros_like(x, dtype=complex)
@@ -167,11 +179,19 @@ def numerov_error(
     return float(np.max(np.abs(discrete_neg_kz2 - (-(kz ** 2)))))
 
 
+# How much the Padé operator may exceed unit modulus on the evanescent part of
+# the spectrum before the candidate grid is rejected. A proper Padé
+# approximation of the square-root propagator is non-amplifying there; the
+# slack absorbs rounding only.
+_EVANESCENT_GROWTH_TOL = 1e-9
+
+
 def combined_error(
     dx: float, dz: float, k0: float, p: int,
     xi_min: float, xi_max: float,
     theta_max: float, alpha: float = 0.0,
     n_xi: int = 161, n_offsets: int = 5,
+    pade: Optional[Tuple[np.ndarray, np.ndarray]] = None,
 ) -> float:
     """Per-step error τ(Δx, Δz) — worst case of ``|f(ξ₁) - P(ξ₂)/Q(ξ₂)|``
     over ``ξ₁ ∈ [ξ_min, ξ_max]``, ``|ξ₂-ξ₁| ≤ Δξ`` where
@@ -186,13 +206,17 @@ def combined_error(
     accurate not just on ``[ξ_min, ξ_max]`` but at all *nearby* points
     too — the propagator is phase-sensitive in ξ, so a small ξ shift
     can rotate the complex value substantially.
+
+    ``pade`` accepts an already-built ``(P, Q)`` from
+    :func:`_propagator_pade`, which is how :func:`optimize_grid` keeps the
+    build out of its Δz ladder. It must have been built at this call's
+    ``(dx, k0, p)``; ``None`` builds it here.
     """
     h = numerov_error(dz, k0, theta_max, alpha=alpha)
     delta_xi = h / (k0 ** 2)
 
-    # Build the Padé approximation once (it depends only on dx, k0, p).
-    taylor = _propagator_taylor(dx, k0, n_terms=2 * p + 5)
-    P, Q = _pade_pp(taylor, p)
+    # Depends only on (dx, k0, p) — see _propagator_pade.
+    P, Q = _propagator_pade(dx, k0, p) if pade is None else pade
 
     xi1_grid = np.linspace(xi_min, xi_max, n_xi)
     if delta_xi > 0:
@@ -200,17 +224,50 @@ def combined_error(
     else:
         offsets = np.array([0.0])
 
-    # exact propagator at ξ₁
-    f_xi1 = np.exp(1j * k0 * dx * (np.sqrt(1.0 + xi1_grid) - 1.0))
-    # for each offset, evaluate Padé at ξ₂ = ξ₁ + offset
+    # Exact propagator at ξ₁, on the COMPLEX branch. ξ drops below -1 over the
+    # evanescent part of the angular spectrum, which the auto grid reaches
+    # whenever sin(theta_max) > sqrt(2)·c_min/c_max — with the shipped 30°
+    # default, any seabed faster than ~2.83× the water speed (basalt, granite,
+    # limestone under a slope). A REAL sqrt returns NaN there, `abs(NaN - pq)`
+    # is NaN, and `NaN > err_max` is False, so err_max kept its 0.0 initialiser
+    # and EVERY candidate grid scored a perfect zero: optimize_grid then took
+    # the coarsest rung of both ladders (dx = x_max/2, dz = DZ_MAX) and the
+    # march came back 360 dB rms from Scooter while the run logged "predicted
+    # error 0.00e+00". The complex branch evaluates the evanescent propagator
+    # exp(-k0·dx·|Im√|) that belongs there.
+    f_xi1 = np.exp(1j * k0 * dx
+                   * (np.sqrt((1.0 + xi1_grid).astype(complex)) - 1.0))
+    # Accuracy is required only where the propagator OSCILLATES (ξ ≥ -1).
+    # Below that it decays, those components never reach the receiver, and
+    # demanding the Padé reproduce them rejects grids that solve the problem
+    # correctly — measured on a basalt seabed (c_max/c_min = 3.5),
+    # dx = 10 m / dz = 0.05 m matches Scooter to 1.77 dB rms while a
+    # whole-interval test scores it unusable. What the scheme must not do in
+    # the evanescent band is AMPLIFY, so that part is checked for stability
+    # instead of accuracy.
+    propagating = xi1_grid >= -1.0
     err_max = 0.0
     for off in offsets:
         xi2 = xi1_grid + off
         pq = _eval_poly(P, xi2) / _eval_poly(Q, xi2)
-        diff = np.abs(f_xi1 - pq)
-        m = float(np.max(diff))
-        if m > err_max:
-            err_max = m
+        if propagating.any():
+            m = float(np.max(np.abs(f_xi1 - pq)[propagating]))
+            if not np.isfinite(m):
+                # A non-finite score must never read as "no error" — that is
+                # exactly what let the coarsest grid look perfect. Report the
+                # candidate as unusable so the search rejects it; if every
+                # candidate is unusable, optimize_grid raises rather than
+                # returning a grid nothing vouched for.
+                return float('inf')
+            if m > err_max:
+                err_max = m
+        if not propagating.all():
+            # Measured 1.000000 for every candidate on the basalt case, so
+            # this is a safety net rather than a discriminator: a Padé that
+            # grew the evanescent spectrum would blow the march up.
+            growth = float(np.max(np.abs(pq[~propagating])))
+            if not np.isfinite(growth) or growth > 1.0 + _EVANESCENT_GROWTH_TOL:
+                return float('inf')
     return err_max
 
 
@@ -266,6 +323,7 @@ def optimize_grid(
     eps: float = 1e-3,
     p: int = 6,
     alpha: float = 0.0,
+    tau_cache: Optional[dict] = None,
 ) -> dict:
     """Find the coarsest ``(Δx, Δz)`` whose accumulated error stays under
     ``ε`` over ``⌈x_max/Δx⌉`` march steps for the given ``c₀``.
@@ -297,6 +355,16 @@ def optimize_grid(
         Vertical-FD scheme parameter. ``0.0`` = standard second-order
         tridiagonal (rams0.5 / ramsurf1.5). ``1/12`` = 4th-order Numerov
         (Lytaev's enhancement, not currently used by the Collins binaries).
+    tau_cache : dict, optional
+        Memo for the per-step error τ(Δx, Δz), shareable across calls. τ is
+        a property of the grid and the medium; ``eps`` is only the threshold
+        it is compared against, so RAM's ε-relaxation ladder
+        (``RAM._optimize_grid_relaxing``) otherwise rescores an identical
+        candidate set on every retry. Each key carries every input τ depends
+        on, so a cache handed to a call with different physics misses rather
+        than answering from the wrong medium. This is **not** a search knob:
+        the ``(Δx, Δz)`` selected and its ``predicted_error`` are the same
+        values with the cache as without.
 
     Returns
     -------
@@ -326,18 +394,32 @@ def optimize_grid(
     dx_candidates = _ladder(max(0.5, c0_use / freq / 8.0), dx_top)
     dz_candidates = _ladder(DZ_MIN, DZ_MAX)
 
+    cache = {} if tau_cache is None else tau_cache
+
     best = None
     best_product = -1.0
     for dx in dx_candidates:
         if dx <= 0 or dx > x_max:
             continue
         n_steps = int(np.ceil(x_max / dx))
+        # One Padé build per Δx instead of one per (Δx, Δz): the approximant
+        # is a function of (dx, k0, p) alone (:func:`_propagator_pade`), while
+        # the ladder below moves only Δz. Built lazily so a retry whose whole
+        # Δz ladder is already memoised builds nothing.
+        pade = None
         for dz in dz_candidates:
             if dz <= 0:
                 continue
-            tau = combined_error(
-                dx, dz, k0, p, xi_min, xi_max, theta_max_rad, alpha=alpha,
-            )
+            key = (dx, dz, k0, p, xi_min, xi_max, theta_max_rad, alpha)
+            tau = cache.get(key)
+            if tau is None:
+                if pade is None:
+                    pade = _propagator_pade(dx, k0, p)
+                tau = combined_error(
+                    dx, dz, k0, p, xi_min, xi_max, theta_max_rad, alpha=alpha,
+                    pade=pade,
+                )
+                cache[key] = tau
             total = tau * n_steps
             if total < eps:
                 product = dx * dz

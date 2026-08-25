@@ -470,3 +470,118 @@ def test_pool_death_before_any_job_names_the_main_guard(monkeypatch):
                   uacpy.Receiver(depths=50.0, ranges=[1000.0]))
     with pytest.raises(ConfigurationError, match="__main__"):
         par.run_parallel([job], n_workers=1)
+
+
+class TestScratchRootIsReaped:
+    """``run_parallel`` points every worker's ``tempfile`` at one parent-owned
+    scratch root so a SIGKILLed worker's model tempdirs are reaped instead of
+    leaking. What survives there is only the caller's when a job asked to keep
+    it — ``cleanup=False`` with an unpinned ``work_dir``. Debris from a failed
+    job (which ``raise_on_error=False`` collects and then returns normally from)
+    reads identically on disk, so a leftover-count-only test kept it forever."""
+
+    class _Model:
+        def __init__(self, cleanup=True, work_dir=None):
+            self.cleanup = cleanup
+            self.work_dir = work_dir
+
+    def _job(self, **kw):
+        return Job(self._Model(**kw), None, None, None)
+
+    @staticmethod
+    def _root_with_debris(tmp_path, name):
+        root = tmp_path / name
+        (root / 'uacpy_bellhop_abc').mkdir(parents=True)
+        return root
+
+    def test_debris_from_a_cleanup_true_job_is_removed(self, tmp_path):
+        from uacpy.parallel import _reap_scratch_root
+        root = self._root_with_debris(tmp_path, 'failed')
+        assert _reap_scratch_root(str(root), [self._job()]) is True
+        assert not root.exists()
+
+    def test_a_kept_work_dir_survives_with_a_warning(self, tmp_path):
+        from uacpy.parallel import _reap_scratch_root
+        root = self._root_with_debris(tmp_path, 'kept')
+        jobs = [self._job(cleanup=False)]
+        with pytest.warns(UserWarning, match=r"work dir\(s\) were kept"):
+            assert _reap_scratch_root(str(root), jobs) is False
+        assert root.exists()
+
+    def test_a_pinned_work_dir_does_not_keep_the_root(self, tmp_path):
+        """A pinned ``work_dir`` lives outside the scratch root, so a job using
+        one cannot be what left anything inside it."""
+        from uacpy.parallel import _reap_scratch_root
+        root = self._root_with_debris(tmp_path, 'pinned')
+        jobs = [self._job(cleanup=False, work_dir=str(tmp_path / 'mine'))]
+        assert _reap_scratch_root(str(root), jobs) is True
+        assert not root.exists()
+
+    def test_a_kept_work_dir_survives_a_broken_pool(self, tmp_path,
+                                                    monkeypatch):
+        """The reap hangs off ``run_parallel``'s ``finally``, so it runs on the
+        path where a leak actually happens — the pool dying and the batch
+        aborting. The keep decision there is still the jobs' configuration
+        alone: a job that asked to keep its work dir keeps the root, because
+        deleting would drop files the caller asked for."""
+        from concurrent.futures.process import BrokenProcessPool
+        import uacpy.parallel as par
+        from uacpy.core.exceptions import ConfigurationError
+
+        root = tmp_path / 'scratch'
+        root.mkdir()
+        monkeypatch.setattr(par.tempfile, 'mkdtemp', lambda **kw: str(root))
+
+        class _DeadPool:
+            def __init__(self, *a, **k): pass
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+            def submit(self, *a, **k):
+                # The model tempdir a worker allocated under the root before
+                # it was killed — indistinguishable on disk from a work dir
+                # a job asked to keep.
+                (root / 'uacpy_bellhop_abc').mkdir(exist_ok=True)
+                raise BrokenProcessPool("pool died")
+
+        monkeypatch.setattr(par, 'ProcessPoolExecutor', _DeadPool)
+        job = par.Job(self._Model(cleanup=False), None, None, None)
+        with pytest.warns(UserWarning, match=r"work dir\(s\) were kept"):
+            with pytest.raises(ConfigurationError):
+                par.run_parallel([job], n_workers=1)
+        assert root.exists()
+
+    def test_a_broken_pool_reaps_debris_from_cleanup_true_jobs(
+            self, tmp_path, monkeypatch):
+        """The other half of the same ``finally``: with no job asking to keep
+        anything, the dead pool's leftovers are debris by elimination and the
+        root goes, rather than leaking for the life of the machine."""
+        from concurrent.futures.process import BrokenProcessPool
+        import uacpy.parallel as par
+        from uacpy.core.exceptions import ConfigurationError
+
+        root = tmp_path / 'scratch'
+        root.mkdir()
+        monkeypatch.setattr(par.tempfile, 'mkdtemp', lambda **kw: str(root))
+
+        class _DeadPool:
+            def __init__(self, *a, **k): pass
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+            def submit(self, *a, **k):
+                (root / 'uacpy_bellhop_abc').mkdir(exist_ok=True)
+                raise BrokenProcessPool("pool died")
+
+        monkeypatch.setattr(par, 'ProcessPoolExecutor', _DeadPool)
+        job = par.Job(self._Model(), None, None, None)
+        with pytest.raises(ConfigurationError):
+            par.run_parallel([job], n_workers=1)
+        assert not root.exists()
+
+    def test_an_empty_root_is_removed(self, tmp_path):
+        from uacpy.parallel import _reap_scratch_root
+        root = tmp_path / 'empty'
+        root.mkdir()
+        assert _reap_scratch_root(str(root), [self._job()]) is True
+        assert not root.exists()

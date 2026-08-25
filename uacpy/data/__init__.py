@@ -91,8 +91,18 @@ from uacpy.data.seaice_local import (
 )
 from uacpy.data.environment import fetch_environment
 from uacpy.data.sources import DataSource, DataProvenance, SOURCES, citations
+# The cache's own introspection: where it lives and what is in it. The rest of
+# `_cache` (staging writes, grid memos, the DATASETS registry) is machinery a
+# contributor uses, documented in DEV.md; these three answer questions a *user*
+# asks — "where is my cache?", "is dataset X installed?" — and are the only
+# part of it a guide page or an example should have to reach for.
+from uacpy.data._cache import cache_root, dataset_root, is_installed
 
 __all__ = [
+    # offline cache
+    'cache_root',
+    'dataset_root',
+    'is_installed',
     # bathymetry
     'fetch_bathy',
     'fetch_bathy_transect',

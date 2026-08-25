@@ -12,8 +12,8 @@ __all__ = [
     'EARTH_RADIUS_KM', 'central_angle', 'great_circle_km', 'geodesic_waypoints',
     'nearest_indices', 'ring_offsets', 'run_representative_indices',
     'run_boundary_indices',
-    'DEFAULT_MAX_TRANSECT_POINTS',
-    'depth_to_pressure_dbar',
+    'DEFAULT_MAX_TRANSECT_POINTS', 'checked_max_points',
+    'depth_to_pressure_dbar', 'pressure_dbar_to_depth',
 ]
 
 #: Default ceiling on the number of points sampled along a transect *before*
@@ -25,6 +25,44 @@ __all__ = [
 DEFAULT_MAX_TRANSECT_POINTS = 1000
 
 Coordinate = Tuple[float, float]
+
+
+def checked_max_points(max_points, caller: str) -> int:
+    """Validate a transect fetch budget: an integer of at least 2.
+
+    ``n_points`` is guarded at >= 2 wherever it is accepted, but the cap it is
+    reduced against was not, and ``'auto'`` resolves straight to the cap:
+    ``max_points=1`` produced a one-waypoint "transect" with
+    ``ranges_m=[0.0]``, ``max_points=0`` an empty one, and a negative value an
+    untyped ``ValueError`` out of ``np.linspace``. Two points are the fewest
+    that define a path.
+    """
+    try:
+        value = int(max_points)
+    except (TypeError, ValueError):
+        raise ConfigurationError(
+            f"{caller}: max_points must be an integer >= 2, got "
+            f"{max_points!r}.",
+            remediation="Pass max_points>=2, the transect fetch budget.",
+        ) from None
+    if value < 2:
+        raise ConfigurationError(
+            f"{caller}: max_points must be >= 2, got {max_points}.",
+            remediation="Pass max_points>=2; fewer than two waypoints is not "
+                        "a transect.",
+        )
+    return value
+
+#: How close to antipodal (radians of central angle short of π) a pair of
+#: endpoints may be before :func:`geodesic_waypoints` refuses them. The slerp
+#: divides by ``sin(ang)``, and the haversine central angle saturates at
+#: exactly π once the endpoints are within ~0.1 m of antipodal, so past this
+#: point the waypoints stop lying on the path ``ranges_m`` reports. Measured
+#: disagreement between a waypoint's great-circle distance from ``start`` and
+#: its reported range: 0.13 m at π − ang = 1e-5, 142 m at 1e-6, 37 km at 1e-7
+#: and 1083 km at exactly π. 1e-6 rad is ~6 m of antipodal offset, so no real
+#: transect is refused.
+_ANTIPODAL_TOL_RAD = 1e-6
 
 #: Spherical-Earth radius in km, derived from the single source of truth in
 #: ``core.constants`` so every haversine in the data layer shares one value.
@@ -124,6 +162,11 @@ def geodesic_waypoints(
     point, total length at the last). Spherical-Earth slerp — accurate to a
     few parts in 10³ versus the WGS84 ellipsoid, ample for sampling a grid
     of ~450 m resolution.
+
+    Coincident endpoints, and endpoints antipodal to within
+    :data:`_ANTIPODAL_TOL_RAD` (where infinitely many great circles join them
+    and the slerp's ``1/sin(ang)`` returns waypoints that do not lie on the
+    reported ranges), raise :class:`ConfigurationError`.
     """
     lat1, lon1 = np.radians(as_coordinate(start))
     lat2, lon2 = np.radians(as_coordinate(end))
@@ -133,6 +176,15 @@ def geodesic_waypoints(
         raise ConfigurationError(
             "geodesic_waypoints: start and end coordinates coincide.",
             remediation="Use a single-point fetch, or pass distinct endpoints.",
+        )
+    if np.pi - ang < _ANTIPODAL_TOL_RAD:
+        raise ConfigurationError(
+            f"geodesic_waypoints: the endpoints are antipodal to within "
+            f"{(np.pi - ang) * EARTH_RADIUS_M:.1f} m, so no single great "
+            f"circle joins them.",
+            remediation="Split the path into two transects through an "
+                        "intermediate waypoint, or move an endpoint away from "
+                        "the other's antipode.",
         )
 
     f = np.linspace(0.0, 1.0, n_points)
@@ -273,3 +325,25 @@ def depth_to_pressure_dbar(depth_m, latitude_deg) -> np.ndarray:
            - 1.25e-13 * z ** 3 + 2.8e-19 * z ** 4)          # MPa
     k = (g_phi - 2e-5 * z) / (9.80612 - 2e-5 * z)
     return h45 * k * 100.0                                   # MPa → dbar
+
+
+def pressure_dbar_to_depth(pres_dbar, lat) -> np.ndarray:
+    """Pressure (dbar) → depth (m): Newton inversion of
+    :func:`depth_to_pressure_dbar`.
+
+    Pressure-indexed sources (Argo reports pressure) need depth for a
+    ``SoundSpeedProfile``, and only the depth → pressure direction has a
+    closed form. The derivative is taken as a central difference on
+    :func:`depth_to_pressure_dbar` rather than analytically, so the Leroy &
+    Parthiot coefficients live in exactly one place; a 1 m step is safe
+    because ``h(z)`` is a smooth quartic whose curvature over a metre is
+    negligible against its ~1 dbar/m slope.
+    """
+    p = np.asarray(pres_dbar, dtype=float)
+    z = p * 0.9905                                   # ~1 m per dbar initial guess
+    for _ in range(5):
+        f = depth_to_pressure_dbar(z, lat) - p
+        df = (depth_to_pressure_dbar(z + 1.0, lat)
+              - depth_to_pressure_dbar(z - 1.0, lat)) / 2.0
+        z = z - f / df
+    return z

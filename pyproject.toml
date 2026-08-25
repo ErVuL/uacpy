@@ -1,5 +1,7 @@
 [build-system]
-requires = ["setuptools>=61", "wheel"]
+# >=77 for the PEP 639 licence fields below (SPDX ``license`` string plus
+# ``license-files``); older backends reject both.
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,7 +10,12 @@ dynamic = ["version"]
 description = "Unified Python interface for underwater acoustic propagation models"
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.12"
-license = { text = "GPL-3.0-or-later" }
+# PEP 639: an SPDX expression, with the licence text shipped alongside it. The
+# ``License ::`` trove classifier is deliberately absent — pairing one with an
+# SPDX ``license`` string is a hard InvalidConfigError, and the classifier is
+# itself deprecated.
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
 authors = [
     { name = "ErVuL", email = "ervul.github@gmail.com" },
 ]
@@ -28,13 +35,20 @@ classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
     "Topic :: Scientific/Engineering :: Physics",
-    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
     "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS",
     "Operating System :: Microsoft :: Windows",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    # PyPI rejects any upload carrying an unregistered classifier, and this is
+    # the spelling reserved for asking it to. It enforces the clone-first
+    # install flow recorded under [tool.setuptools.package-data] below: this
+    # config builds a complete, valid wheel and sdist, but neither can carry a
+    # model binary, so a `pip install uacpy` would install cleanly and then
+    # raise ExecutableNotFoundError from every model — pointing at an
+    # ./install.sh the artifact does not contain.
+    "Private :: Do Not Upload",
 ]
 dependencies = [
     # >=2.0 for np.trapezoid (the 2.0 rename of np.trapz), used in
@@ -46,18 +60,47 @@ dependencies = [
     "scipy>=1.13.0,<2.0",
     "matplotlib>=3.9.0,<4.0",
     # External ocean data
-    "copernicusmarine>=1.3",
     "netCDF4>=1.7",
     "shapely>=2.0",
-    "pyproj>=3.4",
+    # pyproj and pillow floors are each family's first release carrying a Linux
+    # wheel for every interpreter in `classifiers` above. pyproj publishes no
+    # cp312 wheel before 3.6.1 and no cp313 wheel before 3.7.0; pillow 9.5's
+    # only cp312 wheels are win32 and win_amd64 (10.0 is the first with a
+    # Linux cp312 wheel) and no release before 10.4 publishes a cp313 wheel.
+    # Below these the declared minimum environment cannot be built from wheels
+    # on the primary supported platform (README: Linux, with Windows via WSL2)
+    # on both 3.12 and 3.13.
+    "pyproj>=3.7.0",
     "tifffile>=2021.1",
-    "pillow>=9",
+    "pillow>=10.4",
 ]
 
 [project.optional-dependencies]
+# Copernicus Marine operational fields (SSP, waves). An extra rather than a
+# core dependency: the toolbox is credential-gated (a free CMEMS account and
+# `copernicusmarine login`), it is imported at the point of use so nothing else
+# in uacpy needs it present, and it drags xarray/dask/zarr/boto3/pydantic into
+# every install that will never call a Copernicus fetcher. The fetchers raise a
+# typed DataFetchError naming this extra when it is missing.
+copernicus = [
+    "copernicusmarine>=2.0",
+]
+
 test = [
-    "pytest>=6.0,<9.0",
-    "pytest-xdist>=3.0,<4.0",
+    # Floors are what this project's own config needs, not the oldest release
+    # that ever worked: pytest gained Python 3.12 support in 7.3.2 (the
+    # requires-python floor above), and the ``--dist=worksteal`` in addopts
+    # below is the scheduler pytest-xdist added in 3.2.0 — resolve to 3.0/3.1
+    # and every single invocation dies on an unknown --dist value.
+    "pytest>=7.4,<9.0",
+    "pytest-xdist>=3.2,<4.0",
+    # The packaging guards drive the project's own PEP 517 backend — they read
+    # `[tool.setuptools.packages.find]` through `setuptools.find_packages` and
+    # build a wheel to read the artifact. A 3.13 venv has no setuptools by
+    # default, and the whole module sits behind an importorskip, so without
+    # this floor all of those guards skip and the run is green having gated
+    # nothing.
+    "setuptools>=77",
 ]
 
 dev = [
@@ -65,6 +108,10 @@ dev = [
     "pytest-cov",
     "black",
     "flake8",
+    # `py.typed` promises a downstream checker that the annotations mean
+    # something, and nothing in the suite or in CI ran one. The gate that
+    # holds `uacpy/noise` at zero errors needs this to be more than a skip.
+    "mypy>=1.11",
 ]
 
 [project.urls]
@@ -87,6 +134,12 @@ include = ["uacpy", "uacpy.*"]
 exclude = ["uacpy.tests", "uacpy.tests.*"]
 namespaces = false
 
+[tool.setuptools.package-data]
+# PEP 561 marker: without it a downstream type checker ignores every annotation
+# in the package, however completely it is annotated. One marker in the
+# top-level package covers the subpackages under it.
+uacpy = ["py.typed"]
+
 # No native binaries are bundled as package-data. Every model binary
 # (OALIB/bellhopcuda/mpiramS/ramsurf/ramgeo, and the academic-licensed OASES)
 # is built post-install by `install.sh` into `uacpy/bin/` and is gitignored,
@@ -103,7 +156,7 @@ testpaths = ["uacpy/tests"]
 # Live-network tests (``requires_network``) hit external NOAA/GMRT servers
 # and are minutes-long + server-dependent, so they are deselected by default.
 # Run them explicitly with ``pytest -m requires_network`` (a command-line
-# ``-m`` overrides this one) — CI does so in a dedicated job.
+# ``-m`` overrides this one).
 addopts = "-n logical --dist=worksteal -m 'not requires_network'"
 # Silence warnings in the test report — uacpy emits many intentional
 # UserWarnings (capability collapse, RAM grid caps, degenerate-input notes)
@@ -116,9 +169,14 @@ addopts = "-n logical --dist=worksteal -m 'not requires_network'"
 # regression-relevant categories — RuntimeWarning (divide/overflow/invalid),
 # DeprecationWarning, FutureWarning from numpy/scipy/matplotlib — are left
 # visible so a new one surfaces instead of being silently swallowed (the old
-# blanket "ignore" hid them). A module-scoped UserWarning filter was avoided:
-# stacklevel attributes some uacpy warnings to the caller's frame, so they
-# leak past a `:uacpy.*` module match.
+# blanket "ignore" hid them). One category is *not* left visible by that line:
+# `numpy.exceptions.VisibleDeprecationWarning` subclasses UserWarning, not
+# DeprecationWarning, so `ignore::UserWarning` swallows it — and it is numpy's
+# channel for deprecations users are meant to act on. The explicit
+# `error::…VisibleDeprecationWarning:uacpy` entry below re-exposes it (later
+# ini entries win; see the note there). A module-scoped UserWarning filter was
+# avoided: stacklevel attributes some uacpy warnings to the caller's frame, so
+# they leak past a `:uacpy.*` module match.
 filterwarnings = [
     "ignore::UserWarning",
     # Deprecation gate: escalate any uacpy-originated DeprecationWarning /
@@ -134,16 +192,39 @@ filterwarnings = [
     "error::DeprecationWarning:uacpy",
     "error::PendingDeprecationWarning:uacpy",
     "error::FutureWarning:uacpy",
+    # Same gate, fourth channel. `numpy.exceptions.VisibleDeprecationWarning`
+    # is a *UserWarning* subclass (MRO: VisibleDeprecationWarning → UserWarning
+    # → Warning), so `ignore::UserWarning` above would swallow it despite it
+    # being the category numpy reserves for deprecations it wants callers to
+    # notice. pytest applies ini entries in order via `warnings.filterwarnings`,
+    # which *prepends*, so a later entry outranks an earlier one — this line
+    # sitting after `ignore::UserWarning` is what re-exposes the category.
+    # No uacpy call site emits one today (numpy 2.5 raises it only from
+    # `genfromtxt`; uacpy uses `np.loadtxt`), so this is a forward guard: it
+    # goes red the day a uacpy-attributed VisibleDeprecationWarning appears.
+    "error::numpy.exceptions.VisibleDeprecationWarning:uacpy",
     # Third-party exception to the gate above. netCDF4's compiled Cython
     # (`_netCDF4.pyx`) sets `.shape` on a NumPy array when writing a variable —
     # an operation NumPy 2.5 deprecated. NumPy attributes the warning to the
     # *calling* frame (a uacpy test writing a synthetic .nc cache via the
     # standard `createVariable(...)[:] = data` idiom), so the `:uacpy` gate
     # would escalate a deprecation that lives entirely inside netCDF4 and that
-    # uacpy cannot fix in its own code. Scoped to this exact message so every
-    # genuine uacpy-originated deprecation still fails CI. Remove once netCDF4
-    # ships a NumPy-2.5-compatible release.
-    "ignore:Setting the shape on a NumPy array has been deprecated:DeprecationWarning",
+    # uacpy cannot fix in its own code. Scoped to this exact message *and* to
+    # `uacpy.tests`, the only place the netCDF4 write path runs: shipped uacpy
+    # code never assigns `ndarray.shape` (the sole `.shape =` in the package,
+    # `uacpy/core/ssp.py`, sets a string field on a dataclass), so a bare
+    # message scope would silence the pattern if it ever reached shipped code.
+    # A pytest ini module scope is an unanchored prefix regex — unlike a
+    # command-line `-W`, which pytest anchors with `\Z` — so `uacpy.tests`
+    # matches every `uacpy.tests.*` test module. Remove once netCDF4 ships a
+    # NumPy-2.5-compatible release.
+    "ignore:Setting the shape on a NumPy array has been deprecated:DeprecationWarning:uacpy.tests",
+    # Same NumPy 2.5 deprecation, second emitter: reading a masked netCDF
+    # variable reaches `MaskedArray.shape.__set__` (numpy/ma/core.py), which
+    # assigns `ndarray.shape` internally. NumPy attributes it to numpy's own
+    # frame, not uacpy's, so the `:uacpy` gate never saw it — but the scoping
+    # of the line above would surface it as report noise uacpy cannot act on.
+    "ignore:Setting the shape on a NumPy array has been deprecated:DeprecationWarning:numpy.ma.core",
 ]
 markers = [
     "slow: long-running tests (excluded by `-m 'not slow'`)",

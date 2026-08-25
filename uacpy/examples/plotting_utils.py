@@ -18,6 +18,7 @@ bathymetry overlays, range / depth cuts, etc.
 
 import numpy as np
 import matplotlib.pyplot as plt
+import os
 from pathlib import Path
 from typing import Dict
 
@@ -26,8 +27,10 @@ from uacpy.visualization import (
 )
 
 # Default output directory: next to this file, so examples drop plots under
-# uacpy/uacpy/examples/output/ regardless of the caller's cwd.
-DEFAULT_OUTPUT_DIR = Path(__file__).parent / 'output'
+# uacpy/uacpy/examples/output/ regardless of the caller's cwd, unless
+# UACPY_EXAMPLE_OUTPUT names a different destination.
+DEFAULT_OUTPUT_DIR = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
+                          or Path(__file__).parent / 'output')
 
 
 def plot_model_statistics(results: Dict, source_depth: float):
@@ -38,10 +41,11 @@ def plot_model_statistics(results: Dict, source_depth: float):
     ``source_depth`` then reduced with NaN-aware stats (RAM masks
     below-seafloor cells with NaN).
 
-    The RMS matrix masks its diagonal so it gets the cmap's bad-value
-    (``with_extremes(bad=…)``) deep-green ``cmap(0.0)`` colour — i.e. a
-    clean "zero error" tile,
-    not a white off-scale square.
+    The RMS matrix's diagonal is a true zero and takes the colormap's own
+    deep-green ``cmap(0.0)`` — a clean "zero error" tile, not a white
+    off-scale square. Every off-diagonal cell is the RMS over the ranges both
+    models actually computed; a pair sharing no range at all has nothing to
+    compare and is drawn as a neutral tile labelled ``n/a``.
     """
     results = {k: v for k, v in results.items() if v is not None}
     if not results:
@@ -82,23 +86,40 @@ def plot_model_statistics(results: Dict, source_depth: float):
                 rj = results[model_names[j]]
                 tl_i = np.asarray(ri.at(depth=source_depth).db)
                 tl_j = np.asarray(rj.at(depth=source_depth).db)
-                if len(tl_i) != len(tl_j):
-                    if len(ri.ranges) < len(rj.ranges):
-                        tl_j = np.interp(ri.ranges, rj.ranges, tl_j)
-                    else:
-                        tl_i = np.interp(rj.ranges, ri.ranges, tl_i)
-                diff = tl_i - tl_j
+                r_i = np.asarray(ri.ranges, dtype=float)
+                r_j = np.asarray(rj.ranges, dtype=float)
+                # Every cell under the "RMS Error (dB)" label has to come from
+                # a range both models computed. Equal lengths are not equal
+                # grids: two 200-point axes over different spans difference
+                # cell-by-cell into a plausible number for ranges that never
+                # met — the pairing `uacpy.metrics.tl_rmse` refuses outright.
+                # The common grid is the coarser axis clipped to the span the
+                # two share. `np.interp` reproduces a node exactly, NaN
+                # included, so an aligned pair is untouched; the clip keeps the
+                # flat extrapolation `np.interp` does past the ends of its own
+                # domain out of the number.
+                common = r_i if r_i.size <= r_j.size else r_j
+                common = common[(common >= max(r_i[0], r_j[0]))
+                                & (common <= min(r_i[-1], r_j[-1]))]
+                if common.size == 0:      # no shared range: nothing to compare
+                    rms_matrix[i, j] = np.nan
+                    continue
+                diff = (np.interp(common, r_i, tl_i)
+                        - np.interp(common, r_j, tl_j))
                 finite = np.isfinite(diff)
                 rms_matrix[i, j] = (
                     np.sqrt(np.mean(diff[finite] ** 2))
                     if finite.any() else np.nan
                 )
-        rms_max = np.max(rms_matrix)
+        comparable = rms_matrix[np.isfinite(rms_matrix)]
+        rms_max = comparable.max() if comparable.size else 0.0
         vmax = (max(10, np.percentile(rms_matrix[rms_matrix > 0], 95))
                 if rms_max > 0 else 15)
-        display = np.ma.array(rms_matrix, mask=np.eye(n, dtype=bool))
-        cmap = plt.get_cmap('RdYlGn_r')
-        cmap = cmap.with_extremes(bad=cmap(0.0))
+        # Only a pair with no shared range is masked. The diagonal stays a
+        # real 0.0 and lands on the colormap's own deep green, so a
+        # not-comparable tile cannot be read as perfect agreement.
+        display = np.ma.masked_invalid(rms_matrix)
+        cmap = plt.get_cmap('RdYlGn_r').with_extremes(bad='0.85')
         im = ax.imshow(display, cmap=cmap, vmin=0, vmax=vmax,
                        interpolation='none')
         plt.colorbar(im, ax=ax, label='RMS Error (dB)')
@@ -112,8 +133,13 @@ def plot_model_statistics(results: Dict, source_depth: float):
             for j in range(n):
                 if i == j:
                     continue
-                colour = 'white' if rms_matrix[i, j] > vmax / 2 else 'black'
-                ax.text(j, i, f'{rms_matrix[i, j]:.1f}',
+                value = rms_matrix[i, j]
+                if not np.isfinite(value):
+                    ax.text(j, i, 'n/a', ha='center', va='center',
+                            color='0.3', fontweight='bold')
+                    continue
+                colour = 'white' if value > vmax / 2 else 'black'
+                ax.text(j, i, f'{value:.1f}',
                         ha='center', va='center',
                         color=colour, fontweight='bold')
     else:

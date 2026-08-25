@@ -10,6 +10,7 @@ Brown 1991, APL-UW TR 9407, UNESCO 1983, Del Grosso 1974).
 """
 
 import io as _io
+import math
 
 import numpy as np
 import pytest
@@ -20,6 +21,79 @@ from uacpy.core.exceptions import ConfigurationError, FileFormatError
 # ─────────────────────────────────────────────────────────────────────────────
 # core/absorption.py — bare formulas
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+def _thorp_db_per_km_published(f_hz):
+    """Thorp attenuation in dB/km, transcribed from the published polynomial.
+
+    JKPS *Computational Ocean Acoustics* 2nd ed. Eq. (1.47) — four terms in
+    ``f`` measured in **kHz**:
+
+        alpha = 3.3e-3 + 0.11·f²/(1 + f²) + 44·f²/(4100 + f²) + 3e-4·f²
+
+    AT's ``misc/AttenMod.f90`` carries the same four terms character for
+    character (its comment numbers it Eq. 1.34, the 1st-edition numbering for
+    the same expression). Written out here so a coefficient mis-transcribed
+    into ``uacpy.core.absorption`` disagrees with something, rather than being
+    frozen by the check values below — those were evaluated from these same
+    coefficients and so cannot flag the transcription itself.
+    """
+    f = f_hz / 1000.0
+    return (3.3e-3
+            + 0.11 * f ** 2 / (1.0 + f ** 2)
+            + 44.0 * f ** 2 / (4100.0 + f ** 2)
+            + 3.0e-4 * f ** 2)
+
+
+def _francois_garrison_db_per_km_published(f_hz, T, S, pH, z):
+    """Francois–Garrison attenuation in dB/km, transcribed from the published
+    formulas: Francois & Garrison (1982), JASA 72(6) 1879–1890, in the form AT
+    codes in ``misc/AttenMod.f90``. ``f`` in **kHz**, ``T`` in °C, ``S`` in
+    psu, ``z`` in m. Two chemical relaxations of the form
+    ``A·P·f_r·f²/(f_r² + f²)`` plus pure-water viscosity, which has no
+    relaxation and so enters as a plain ``f²``:
+
+        c  = 1412 + 3.21·T + 1.19·S + 0.0167·z
+        A1 = 8.86/c · 10^(0.78·pH − 5)              P1 = 1
+        f1 = 2.8·sqrt(S/35) · 10^(4 − 1245/(T + 273))
+        A2 = 21.44·S/c · (1 + 0.025·T)              P2 = 1 − 1.37e-4·z + 6.2e-9·z²
+        f2 = 8.17·10^(8 − 1990/(T + 273)) / (1 + 0.0018·(S − 35))
+                                                    P3 = 1 − 3.83e-5·z + 4.9e-10·z²
+        A3 = 4.937e-4 − 2.59e-5·T + 9.11e-7·T² − 1.5e-8·T³      (T < 20)
+             3.964e-4 − 1.146e-5·T + 1.45e-7·T² − 6.5e-10·T³    (otherwise)
+
+        alpha = A1·P1·f1·f²/(f1² + f²) + A2·P2·f2·f²/(f2² + f²) + A3·P3·f²
+
+    The published statement gives the two A3 fits for "T < 20" and "T > 20"
+    and says nothing about T = 20 exactly; ``AttenMod.f90`` writes
+    ``if (T < 20)`` with the warm fit in its ``else``, so T = 20.0 takes the
+    **warm** branch there. This transcription writes the branch the same way,
+    which is the behaviour uacpy matches.
+
+    Same purpose as :func:`_thorp_db_per_km_published`: the 16-digit check
+    values below were produced from these coefficients, so only an independent
+    statement of the coefficients can catch a slip in them.
+    """
+    f = f_hz / 1000.0
+    c = 1412.0 + 3.21 * T + 1.19 * S + 0.0167 * z
+
+    A1 = 8.86 / c * 10.0 ** (0.78 * pH - 5.0)
+    P1 = 1.0
+    f1 = 2.8 * math.sqrt(S / 35.0) * 10.0 ** (4.0 - 1245.0 / (T + 273.0))
+
+    A2 = 21.44 * S / c * (1.0 + 0.025 * T)
+    P2 = 1.0 - 1.37e-4 * z + 6.2e-9 * z ** 2
+    f2 = 8.17 * 10.0 ** (8.0 - 1990.0 / (T + 273.0)) / (1.0 + 0.0018 * (S - 35.0))
+
+    P3 = 1.0 - 3.83e-5 * z + 4.9e-10 * z ** 2
+    if T < 20.0:
+        A3 = 4.937e-4 - 2.59e-5 * T + 9.11e-7 * T ** 2 - 1.5e-8 * T ** 3
+    else:
+        A3 = 3.964e-4 - 1.146e-5 * T + 1.45e-7 * T ** 2 - 6.5e-10 * T ** 3
+
+    return (A1 * P1 * f1 * f ** 2 / (f1 ** 2 + f ** 2)
+            + A2 * P2 * f2 * f ** 2 / (f2 ** 2 + f ** 2)
+            + A3 * P3 * f ** 2)
 
 
 class TestThorpReferenceValues:
@@ -37,6 +111,20 @@ class TestThorpReferenceValues:
         from uacpy.core.absorption import thorp_db_per_km
         assert float(thorp_db_per_km(f_hz)) == pytest.approx(
             a_db_km, rel=1e-12)
+
+    @pytest.mark.parametrize("f_hz", [
+        10.0, 100.0, 1e3, 1e4, 5e4, 1e5, 3e5,
+    ])
+    def test_matches_the_published_polynomial(self, f_hz):
+        """The implementation against :func:`_thorp_db_per_km_published`, which
+        states the coefficients independently of it. Evaluated on the four
+        pinned frequencies plus three more, so a coefficient change that
+        happened to leave the pinned values alone still has nowhere to hide.
+        The 1e-12 is for float association, not for the algebra: the two
+        expressions are the same polynomial and agree to a few ulp."""
+        from uacpy.core.absorption import thorp_db_per_km
+        assert float(thorp_db_per_km(f_hz)) == pytest.approx(
+            _thorp_db_per_km_published(f_hz), rel=1e-12)
 
     def test_class_converts_db_per_km_to_db_per_m(self):
         """Thorp.alpha_db_per_m is the bare formula divided by 1000, flat in
@@ -69,6 +157,69 @@ class TestFrancoisGarrisonReferenceValues:
         from uacpy.core.absorption import francois_garrison_db_per_km
         got = float(francois_garrison_db_per_km(f_hz, T, S, pH, z))
         assert got == pytest.approx(a_db_km, rel=1e-12)
+
+    @pytest.mark.parametrize("f_hz, T, S, pH, z", [
+        # Every point the check values above pin, so the two sets are tied
+        # together rather than each standing alone.
+        (1e3, 10.0, 35.0, 8.0, 0.0),
+        (1e4, 10.0, 35.0, 8.0, 0.0),
+        (1e5, 10.0, 35.0, 8.0, 0.0),
+        (1e4, 4.0, 34.0, 7.9, 2000.0),
+        (5e5, 20.0, 35.0, 8.0, 0.0),
+        (5e5, 10.0, 35.0, 8.0, 0.0),
+        (5e5, 25.0, 35.0, 8.0, 0.0),
+        # The 63-kHz depth pair of test_depth_correction_attenuates_mgso4_term.
+        (6.3e4, 10.0, 35.0, 8.0, 0.0),
+        (6.3e4, 10.0, 35.0, 8.0, 4000.0),
+        # Off the pinned grid: either side of the A3 break to a tenth of a
+        # degree, the pH and salinity terms away from their nominal values, and
+        # a deep cold case that leans on P2/P3.
+        (2e5, 19.9, 35.0, 8.0, 0.0),
+        (2e5, 20.1, 35.0, 8.0, 0.0),
+        (3e3, 12.0, 35.0, 7.4, 0.0),
+        (3e4, 12.0, 8.0, 8.2, 0.0),
+        (1e5, 2.0, 34.7, 8.1, 5000.0),
+    ])
+    def test_matches_the_published_formula(self, f_hz, T, S, pH, z):
+        """The implementation against
+        :func:`_francois_garrison_db_per_km_published`, which states every
+        coefficient independently of it. Same role as the Thorp transcription
+        test, and the same reason for 1e-12: the two expressions differ only in
+        how the products associate."""
+        from uacpy.core.absorption import francois_garrison_db_per_km
+        got = float(francois_garrison_db_per_km(f_hz, T, S, pH, z))
+        assert got == pytest.approx(
+            _francois_garrison_db_per_km_published(f_hz, T, S, pH, z),
+            rel=1e-12)
+
+    def test_the_a3_branch_at_exactly_20_degrees_is_the_warm_fit(self):
+        """T = 20.0 exactly. The publication states the two A3 fits for
+        "T < 20" and "T > 20" and says nothing about 20; ``AttenMod.f90``
+        writes ``if (T < 20)`` with the warm fit in its ``else``, so AT takes
+        the warm branch there and uacpy matches AT. Both the implementation and
+        the transcription are held to that here, so the choice cannot drift on
+        one side only.
+
+        The two fits are built to nearly meet at the break — 2.2000e-4 against
+        2.2010e-4, 4.5e-4 apart — which moves α at 500 kHz by only 1.7e-4
+        relative. That is 8 orders above the 1e-12 the tests compare at and
+        wholly invisible to a percent-level check, so the branch is worth
+        pinning and only worth pinning tightly.
+        """
+        from uacpy.core.absorption import francois_garrison_db_per_km
+        f_khz, T, z = 500.0, 20.0, 0.0
+        A3_warm = 3.964e-4 - 1.146e-5 * T + 1.45e-7 * T ** 2 - 6.5e-10 * T ** 3
+        A3_cold = 4.937e-4 - 2.59e-5 * T + 9.11e-7 * T ** 2 - 1.5e-8 * T ** 3
+        P3 = 1.0 - 3.83e-5 * z + 4.9e-10 * z ** 2
+
+        warm = _francois_garrison_db_per_km_published(f_khz * 1e3, T, 35.0, 8.0, z)
+        # A3 is the only thing the branch changes, so swapping it is the whole
+        # of the difference between the two readings at this T.
+        cold = warm + (A3_cold - A3_warm) * P3 * f_khz ** 2
+        assert abs(cold - warm) / warm > 1e-5
+
+        assert float(francois_garrison_db_per_km(f_khz * 1e3, T, 35.0, 8.0, z)) \
+            == pytest.approx(warm, rel=1e-12)
 
     def test_depth_correction_attenuates_mgso4_term(self):
         """P2 = 1 − 1.37e-4·z + 6.2e-9·z² cuts the 63-kHz (MgSO4-dominated)
@@ -498,9 +649,12 @@ class TestConstantQSetupWarningBoundary:
         n_lowest = _cq_kernels(
             _cq_frequencies(fmin, fs / 2, B), _cq_quality(B), fs,
             "hann")[0][0]
-        with _w.catch_warnings():
-            _w.simplefilter("error", UserWarning)
+        with _w.catch_warnings(record=True) as caught:
+            _w.simplefilter("always")
             _cq_setup(np.zeros(n_lowest), fs, fmin, None, B, "hann", "t")
+        # Only this warning is under test. `fmax=None` resolves to fs/2, so
+        # the near-Nyquist image note fires on the same call by design.
+        assert not any("lowest bin needs" in str(c.message) for c in caught)
         with pytest.warns(UserWarning, match="lowest bin needs"):
             _cq_setup(np.zeros(n_lowest - 1), fs, fmin, None, B, "hann", "t")
 
@@ -551,7 +705,7 @@ class TestProbabilisticConstantQContracts:
         assert r.level_edges[-1] == 150.0
         assert r.level_edges.size == 151
 
-    def test_single_valid_frame_is_still_data(self):
+    def test_single_valid_frame_is_data(self):
         from uacpy.acoustic_signal.constant_q import (
             constant_q_psd, probabilistic_constant_q)
         x, fs, fmin, B, n_lowest = self._one_frame_case()

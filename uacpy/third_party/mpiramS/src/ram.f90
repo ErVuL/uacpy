@@ -171,7 +171,20 @@ real(kind=wp),dimension(:),allocatable :: rb1, zb1
       upd=0
       iflag=0
 
-      if (abs(rend-rnow)<abs(dr)) then
+      ! UACPY: the remainder is tested against deltar, the march step, and NOT
+      ! against dr, which this branch may already have shrunk to a shorter
+      ! remainder. Against the shrunk dr, an output range whose remainder was
+      ! longer than that leftover step but shorter than deltar failed the test,
+      ! fell through to the restore branch below, and was marched a full deltar
+      ! PAST its own target; the next iteration then walked "backward" onto it
+      ! with a step epade builds from dre=abs(dr) at :189 — a FORWARD
+      ! propagator, since abs() strips the sign (the self-starter's deliberate
+      ! backward step at :134 writes dre=-abs(dr), so epade is sign-aware and
+      ! the sign carries meaning). Against deltar, a remainder shorter than a
+      ! full step shrinks onto its target and a longer one is marched at the
+      ! restored deltar, so rnow can never pass rend — at any deltar, on any
+      ! output grid.
+      if (abs(rend-rnow)<abs(deltar)) then
         dr=rend-rnow
         dre=abs(dr)
         ip=1

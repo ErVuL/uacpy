@@ -25,6 +25,28 @@ imports **no plotting** — all visualisation lives in
 :mod:`uacpy.visualization` (``plot_psd``, ``plot_fk``, ``plot_spectrogram`` …).
 ``FRF`` (``system_id``) remains a class, as it carries fitted state.
 
+Output dtype
+------------
+Two estimators preserve a ``float32`` input and the rest promote to
+``float64``; nothing here downcasts. Measured on a ``float32`` record:
+
+============================  =================================
+``psd``, ``spectrogram``      ``.power`` stays ``float32``
+                              (the axes are always ``float64``)
+``envelope``, ``cepstrum``,   promote to ``float64``
+``ppsd``, ``constant_q_psd``,
+``sel``, ``wigner_ville``
+``analytic_signal``,          ``complex128`` from either input
+``fk_transform``
+============================  =================================
+
+The split follows what each estimator's backend does — the two that preserve
+are the scipy ``welch``/``stft`` wrappers — and it is stated rather than
+enforced because making the eight agree would change the dtype ``psd`` and
+``spectrogram`` return today. Stacking a ``psd`` result against a
+``constant_q_psd`` one therefore promotes; cast explicitly if a pipeline
+depends on the width.
+
 Lazy loading
 ------------
 Sub-modules import on first attribute access (PEP 562), not at package

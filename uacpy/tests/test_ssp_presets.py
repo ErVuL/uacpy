@@ -75,9 +75,9 @@ class TestIsovelocityShapeMustBeTrue:
 
     def test_the_shape_does_not_swallow_an_invalid_interp(self):
         """``resolve_ssp_topopt`` validates the model's ``interp_ssp`` before
-        the ``shape='isovelocity'`` shortcut returns ``'C'``
-        (``io/oalib_writer.py:360-368``), so an unrecognised scheme raises on
-        an isovelocity env exactly as it does on any other."""
+        the ``shape='isovelocity'`` shortcut returns ``'C'``, so an
+        unrecognised scheme raises on an isovelocity env exactly as it does on
+        any other."""
         from uacpy.core.environment import Environment
         from uacpy.io.oalib_writer import resolve_ssp_topopt
         env = Environment(bathymetry=200.0, ssp=SoundSpeedProfile.from_pairs(

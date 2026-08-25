@@ -20,6 +20,7 @@ from figure_scripts._common import (
 import uacpy
 from uacpy.io import read_grn_file
 from uacpy.models import Bellhop, Kraken, RunMode, Scooter
+from uacpy.visualization.plots._common import _cell_edge_extent, _flip_y
 
 
 def run_with_greens_function(env, source, receiver, **knobs):
@@ -71,7 +72,7 @@ def greens_function():
                              gridspec_kw={'height_ratios': [1.5, 1.0]})
     im = axes[0].imshow(
         G_db, aspect='auto', origin='upper', cmap='inferno', vmin=-55, vmax=0,
-        extent=[k[0], k[-1], grn['rd'][-1], grn['rd'][0]])
+        extent=_flip_y(_cell_edge_extent(k, grn['rd'])))
     axes[0].set_ylabel('Depth (m)')
     axes[0].set_title(f"$|G(k, z)|$ — {grn['nk']} wavenumbers × "
                       f"{grn['nrd']} depths", fontweight='bold', fontsize=11)

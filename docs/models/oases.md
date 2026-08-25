@@ -132,8 +132,10 @@ Two knobs are physically significant rather than numerical:
   wrong and the interface carries a *positive* RG, which OASES reads as an
   infinite correlation length — `P(k)` collapses to a delta at `k=0`, so there
   is no back-scatter at all, from a run that exits 0 and writes a full set of
-  curves. uacpy refuses an interface that is not a bottom layer rather than
-  let that through.
+  curves. uacpy refuses an interface that names no rough boundary rather than
+  let that through: the sea surface (deck layer 2) is accepted when the
+  surface itself carries roughness, and every other non-bottom layer is
+  rejected.
 
 Volume scattering is deliberately unsupported: `OASSP` raises
 `UnsupportedFeatureError` naming the SKW/M/RMS/GAM parameters instead of
@@ -541,9 +543,9 @@ one. On `OASN` it is additive: the run mode's own letter (`N` for covariance,
 
 | Name | Default | Meaning |
 |---|---|---|
-| `complex_contour` | `True` | The `'J'` option — complex integration contour. |
-| `compute_contour` | `False` | `'C'`, range–depth contour output. |
-| `compute_depth_average` | `False` | `'A'`, depth-averaged TL. |
+| `complex_contour` | `None` | The `'J'` option — complex integration contour; unset → `True`. |
+| `compute_contour` | `None` | `'C'`, range–depth contour output; unset → `False`. |
+| `compute_depth_average` | `None` | `'A'`, depth-averaged TL; unset → `False`. |
 | `integration_offset` | `0.0` | Wavenumber-contour offset (dB/wavelength). |
 | `nw_samples` | `-1` | Wavenumber samples; `-1` lets OASES choose. |
 | `plot_rmin`, `plot_rmax` | `None` | Range-axis bounds (m). |
@@ -565,7 +567,7 @@ one. On `OASN` it is additive: the run mode's own letter (`N` for covariance,
 |---|---|---|
 | `angles` | `linspace(0, 90, 181)` | Angle grid, degrees. |
 | `angle_type` | `'grazing'` | `'grazing'` (native) or `'incidence'`. |
-| `reflection_type` | `'P-P'` | `'P-P'` or `'transmission'`; `'P-SV'` / `'P-Slow'` (Biot) are refused — see below. |
+| `reflection_type` | `None` | `'P-P'` (unset → this) or `'transmission'`; `'P-SV'` / `'P-Slow'` (Biot) are refused — see below. |
 | `angle_output_increment` | `None` | Decimate the output table. |
 | `interface_roughness` | `None` | Per-interface RMS roughness (m), top → bottom. |
 
@@ -640,8 +642,10 @@ and correct, not an oversight.
 **Option letters whose deck block uacpy never writes.** A separate class: the
 letter is valid OASES, but setting its flag makes the program read a block the
 writer does not emit, so the run dies inside Fortran on an `End of file` naming
-only a line number. These raise a `ConfigurationError` naming the letter and the
-block instead.
+only a line number. These raise an `UnsupportedFeatureError` naming the letter and
+the block, and offering the same option string with the letter dropped. (An
+option letter that is not in the program's `GETOPT` table at all is a
+different failure — a bad argument, so a `ConfigurationError`.)
 
 | Program | Letters | What the deck then demands |
 |---|---|---|

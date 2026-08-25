@@ -3,7 +3,7 @@
 # Scope: Linux (ubuntu-latest), Python 3.12, --bellhop cxx, --oases yes.
 # What this DOES test: native Fortran/C builds + the python package against
 # the standard test markers.
-# What this does NOT test: macOS, Windows/WSL, Python 3.10/3.11/3.13, the
+# What this does NOT test: macOS, Windows/WSL, Python 3.13, the
 # CUDA build, the fortran-only Bellhop fallback, the no-OASES partial
 # install. Those configurations are advertised as supported but exercised
 # by users, not by this workflow. Expand this matrix if any of the above
@@ -21,6 +21,14 @@ on:
   push:
     branches: [main, master]
   pull_request:
+  # Manual re-run. `pip install -e ".[dev]"` is unpinned, so every run resolves
+  # the newest releases its caps allow — a red run caused by a dependency, not
+  # by the diff, can be re-tried against a fixed upstream without a dummy
+  # commit. Deliberately NOT a cron `--pre` job: pre-releases of pytest / black
+  # / flake8 / setuptools would go red for reasons nobody here can act on, and
+  # the numpy<3.0 / scipy<2.0 / matplotlib<4.0 caps already exclude the major
+  # bumps that a nightly would be watching for.
+  workflow_dispatch:
 
 # Least-privilege default token: the workflow only builds + tests (no PR
 # comments, releases, or pushes), so a read-only token caps the blast radius

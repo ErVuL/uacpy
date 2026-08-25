@@ -11,13 +11,14 @@ specifications, and run-type / beam-parameter configuration.
 import warnings
 import numpy as np
 from pathlib import Path
-from typing import Union
+from typing import Optional, Union
 
 from uacpy._log import log_message
 from uacpy.io.oalib_writer import quote_fortran_title
 from uacpy.core.absorption import ConstantAbsorption
 from uacpy.core.constants import AttenuationUnits, parse_boundary_type
 from uacpy.core.exceptions import ConfigurationError, UnsupportedFeatureError
+from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core.environment import Environment
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
@@ -146,6 +147,76 @@ def _bathymetry_within_mesh(bathymetry, z_max: float) -> np.ndarray:
     return pairs
 
 
+def _write_altimetry_beside(filepath: Path, env, receiver, *,
+                            interp_code: str, verbose: bool) -> None:
+    """Write the ``.ati`` Bellhop opens under ``filepath``'s base name.
+
+    ``env.altimetry`` is positive-up and the ``.ati`` is positive-down, so the
+    height column is negated on the way out. Called only when the deck's
+    ``TopOpt(5:5)`` says ``'~'``; the caller writes that letter.
+    """
+    ati_filepath = filepath.with_suffix(".ati")
+    ati_data = env.altimetry.to_pairs()
+    if ati_data.shape[0] == 1:
+        # Single sample = constant offset; expand to a 2-point profile
+        # spanning the receiver range so it isn't dropped. bdryMod.f90:131
+        # tests the range axis with the strict monotonic() of
+        # misc/monotonicMod.f90:32, so the second point has to sit strictly
+        # beyond the first — hence the 1 m floor when the receivers do not
+        # reach past it.
+        r_last = max(float(np.max(receiver.ranges)),
+                     float(ati_data[0, 0]) + 1.0)
+        ati_data = np.array([[0.0, ati_data[0, 1]],
+                             [r_last, ati_data[0, 1]]])
+    ati_data[:, 1] = -ati_data[:, 1]
+    write_ati_file(ati_filepath, ati_data, interp_type=interp_code)
+    log_message('bellhop_writer',
+                f"wrote altimetry file: {ati_filepath}",
+                verbose=verbose)
+
+
+def _write_bathymetry_beside(filepath: Path, env, receiver, *, z_max: float,
+                             interp_code: str) -> bool:
+    """Write the ``.bty`` when the seabed varies with range; report whether
+    one was written, since the deck's ``BotOpt(2:2)`` has to say so.
+
+    The ``.bty`` TYPE is auto-selected by the writer: ``write_bty_long_format``
+    emits ``'LL'``/``'CL'``, ``write_bty_file`` the bare ``'L'``/``'C'`` —
+    Bellhop compares the whole ``CHARACTER(LEN=2) btyType``
+    (``bellhop.f90:552``), so ``'CS'`` never matches ``'C '`` and the blank
+    second character selects the short format (``bdryMod.f90:179-181``). The
+    first char is the interpolation the caller resolved.
+    """
+    is_range_dependent_bathy = env.bathymetry.n_ranges > 1
+    rd_bottom = (env.bottom.is_range_dependent
+                 and len(env.bottom.ranges) > 0)
+    if not (is_range_dependent_bathy or rd_bottom):
+        return False
+
+    bty_filepath = filepath.with_suffix(".bty")
+    if rd_bottom:
+        # The long-format .bty is the only vehicle for per-range
+        # geoacoustics; a flat bathymetry becomes a 2-point constant profile
+        # so the property breaks still reach Bellhop.
+        bathy_for_bty = env.bathymetry
+        if not is_range_dependent_bathy:
+            r_last = max(float(np.max(env.bottom.ranges)),
+                         float(np.max(receiver.ranges)))
+            bathy_for_bty = np.array(
+                [[0.0, env.depth], [r_last, env.depth]])
+        write_bty_long_format(
+            bty_filepath, _bathymetry_within_mesh(bathy_for_bty, z_max),
+            env.bottom, interp_type=interp_code,
+        )
+    else:
+        write_bty_file(
+            bty_filepath,
+            _bathymetry_within_mesh(env.bathymetry, z_max),
+            interp_type=interp_code,
+        )
+    return True
+
+
 def write_bellhop_env_file(
     filepath: Union[str, Path],
     env: Environment,
@@ -163,8 +234,8 @@ def write_bellhop_env_file(
     n_beams: int = 0,
     alpha: tuple = (-80, 80),
     step: float = 0.0,
-    z_box: float = None,
-    r_box: float = None,
+    z_box: Optional[float] = None,
+    r_box: Optional[float] = None,
     verbose: bool = False,
     **kwargs
 ):
@@ -429,26 +500,9 @@ def write_bellhop_env_file(
 
         write_surface_halfspace(f, env)
 
-        # env.altimetry is positive-up; Bellhop's .ati is positive-down.
         if has_altimetry:
-            ati_filepath = filepath.with_suffix(".ati")
-            ati_data = env.altimetry.to_pairs()
-            if ati_data.shape[0] == 1:
-                # Single sample = constant offset; expand to a 2-point
-                # profile spanning the receiver range so it isn't dropped.
-                # bdryMod.f90:131 tests the range axis with the strict
-                # monotonic() of misc/monotonicMod.f90:32, so the second
-                # point has to sit strictly beyond the first — hence the
-                # 1 m floor when the receivers do not reach past it.
-                r_last = max(float(np.max(receiver.ranges)),
-                             float(ati_data[0, 0]) + 1.0)
-                ati_data = np.array([[0.0, ati_data[0, 1]],
-                                     [r_last, ati_data[0, 1]]])
-            ati_data[:, 1] = -ati_data[:, 1]
-            write_ati_file(ati_filepath, ati_data, interp_type=ati_code)
-            log_message('bellhop_writer',
-                        f"wrote altimetry file: {ati_filepath}",
-                        verbose=verbose)
+            _write_altimetry_beside(filepath, env, receiver,
+                                    interp_code=ati_code, verbose=verbose)
 
         # A surface reflection file ('F') is read by base name, so it has to
         # sit next to the .env as <base>.trc.
@@ -496,19 +550,35 @@ def write_bellhop_env_file(
             # the last SSP range is still flagged "outside the soundspeed box",
             # so the .ssp must extend *strictly past* r_box. When the profile
             # grid stops at or before the box, hold the last profile constant
-            # out to 1.1·r_box (range-independent beyond the last profile) and
-            # warn.
-            if ssp_ranges.size and ssp_ranges.max() <= r_box:
-                warnings.warn(
-                    f"Bellhop: range-dependent SSP spans to "
-                    f"{ssp_ranges.max():.0f} m but the ray box reaches "
-                    f"{r_box:.0f} m; holding the last profile constant beyond "
-                    f"{ssp_ranges.max():.0f} m. Define SSP profiles out to the "
-                    f"receiver range to control the far-range sound speed.",
-                    UserWarning, stacklevel=2,
-                )
+            # out to 1.1·r_box (range-independent beyond the last profile).
+            ssp_max = float(ssp_ranges.max()) if ssp_ranges.size else 0.0
+            if ssp_ranges.size and ssp_max <= r_box:
                 ssp_ranges = np.append(ssp_ranges, 1.1 * r_box)
                 ssp_data = np.column_stack([ssp_data, ssp_data[:, -1]])
+            # Warn only where RECEIVERS sit beyond the last profile, i.e. where
+            # the held-constant column is the sound speed a returned TL value
+            # was computed in. Padding out to the box alone is not a modelling
+            # choice the caller made: no receiver lies in the 20% margin r_box
+            # adds past receiver.range_max, and a ray that has passed the
+            # outermost receiver cannot come back to contribute to one. The
+            # old ``ssp_max <= r_box`` test therefore fired on every
+            # environment whose SSP stopped exactly at the receiver range it
+            # was built for — README's own front-page transect among them —
+            # and answered it by asking for profiles "out to the receiver
+            # range", which was already true.
+            if ssp_ranges.size and ssp_max < receiver.range_max:
+                warnings.warn(
+                    f"Bellhop: the range-dependent SSP spans to {ssp_max:.0f} m "
+                    f"but receivers reach {receiver.range_max:.0f} m; the last "
+                    f"profile is held constant beyond {ssp_max:.0f} m, so TL at "
+                    f"the outer receivers is computed in a range-independent "
+                    f"column. Define SSP profiles out to at least "
+                    f"{receiver.range_max:.0f} m, or shorten receiver.ranges. "
+                    f"Rays are traced to the box at {r_box:.0f} m (1.2 x "
+                    f"receiver.range_max unless r_box= says otherwise); "
+                    f"profiles beyond the box are never read.",
+                    UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+                )
             # The source sits at range 0 == Seg.r[0]; a ray back-scattered off
             # a steep up-slope can step to negative range, which Quad's box
             # check (x < Seg.r[0]) flags as BHC_ERR_OUTSIDE_SSP under
@@ -556,43 +626,14 @@ def write_bellhop_env_file(
             hs.acoustic_type).to_acoustics_toolbox_code()
         roughness = getattr(hs, 'roughness', 0.0)
 
-        is_range_dependent_bathy = env.bathymetry.n_ranges > 1
-        rd_bottom = (env.bottom.is_range_dependent
-                     and len(env.bottom.ranges) > 0)
-
-        if is_range_dependent_bathy or rd_bottom:
-            bty_filepath = filepath.with_suffix(".bty")
-            # The 2nd TYPE char in the .bty (short 'S' vs long 'L') is
-            # auto-selected by the writer: write_bty_long_format emits
-            # 'LL'/'CL', write_bty_file emits 'LS'/'CS'. The first char
-            # is the interpolation chosen via ``interp_bathymetry``.
-            if rd_bottom:
-                # The long-format .bty is the only vehicle for per-range
-                # geoacoustics; a flat bathymetry becomes a 2-point constant
-                # profile so the property breaks still reach Bellhop.
-                bathy_for_bty = env.bathymetry
-                if not is_range_dependent_bathy:
-                    r_last = max(float(np.max(env.bottom.ranges)),
-                                 float(np.max(receiver.ranges)))
-                    bathy_for_bty = np.array(
-                        [[0.0, env.depth], [r_last, env.depth]])
-                write_bty_long_format(
-                    bty_filepath, _bathymetry_within_mesh(bathy_for_bty, z_max),
-                    env.bottom, interp_type=bty_code,
-                )
-            else:
-                write_bty_file(
-                    bty_filepath,
-                    _bathymetry_within_mesh(env.bathymetry, z_max),
-                    interp_type=bty_code,
-                )
-            # BotOpt(2:2) = '~' tells ReadEnvironmentBell.f90:97-99 to expect
-            # the .bty. The 2nd field is the sigma slot (:93); Bellhop echoes
-            # it and drops it — "NPts, Sigma not used by BELLHOP"
-            # (bellhop.f90:50).
-            f.write(f"'{bottom_type}~' {roughness:.6f}\n")
-        else:
-            f.write(f"'{bottom_type}' {roughness:.6f}\n")
+        wrote_bty = _write_bathymetry_beside(
+            filepath, env, receiver, z_max=z_max, interp_code=bty_code)
+        # BotOpt(2:2) = '~' tells ReadEnvironmentBell.f90:97-99 to expect the
+        # .bty, so the letter and the file are decided together. The 2nd field
+        # is the sigma slot (:93); Bellhop echoes it and drops it — "NPts,
+        # Sigma not used by BELLHOP" (bellhop.f90:50).
+        f.write(f"'{bottom_type}{'~' if wrote_bty else ''}' "
+                f"{roughness:.6f}\n")
 
         # Write halfspace parameters (for range-independent or as defaults)
         if bottom_type == "F":
@@ -607,11 +648,18 @@ def write_bellhop_env_file(
             # i.e. depth cp cs rho alpha_p alpha_s — the 6th column is
             # SHEAR attenuation, NOT roughness. Roughness (sigma) lives
             # on the preceding BOT line ('A' sigma).
+            # The read is list-directed, so no column width is imposed (the
+            # F10.2 at :475 is the .prt echo). Six decimals on every column
+            # is what the AT writers share, and it is what keeps one
+            # Environment from handing Bellhop and Kraken different seabeds:
+            # at .2f a 1572.348 m/s / 112.607 m/s / 1.4449 g/cm3 halfspace
+            # reaches Bellhop as 1572.35 / 112.61 / 1.44, moving |R| at 20 deg
+            # grazing by 0.022 dB per bounce.
             shear_speed = getattr(hs, 'shear_speed', 0.0)
             shear_atten = getattr(hs, 'shear_attenuation', 0.0)
             f.write(
-                f" {z_max:{_DECK_DEPTH_FMT}}  {hs.sound_speed:.2f} "
-                f"{shear_speed:.2f} {hs.density:.2f} "
+                f" {z_max:{_DECK_DEPTH_FMT}}  {hs.sound_speed:.6f} "
+                f"{shear_speed:.6f} {hs.density:.6f} "
                 f"{hs.attenuation:.6f} {shear_atten:.6f} /\n"
             )
 
@@ -643,9 +691,13 @@ def write_bellhop_env_file(
         position_4 = source_type.upper()
         position_5 = grid_type.upper()
         # Position 6: dimensionality. Hardcoded to '2' (2D Bellhop).
-        # 3D support (BELLHOP3D) would set this to '3' and plug into
-        # the ``--3D`` _build_command path; 3D also changes several
-        # downstream blocks (bearings, 3D bty, beam fan).
+        # 3D support (BELLHOP3D) is not yet available; adding it sets this to
+        # '3' and plugs into the ``--3D`` _build_command path, and also
+        # changes several downstream blocks (bearings, 3D bty, beam fan).
+        # The file layer those blocks need already ships and is retained for
+        # it: ``uacpy.io.write_bty_3d`` / ``read_boundary_3d`` for the 3-D
+        # boundary grid, ``read_ssp_3d`` for the hexahedral SSP, and
+        # ``write_field3dflp`` / ``read_flp3d`` for the FIELD3D deck.
         position_6 = '2'
         # Position 7: 'S' for beam shift, otherwise blank.
         position_7 = 'S' if beam_shift else ' '

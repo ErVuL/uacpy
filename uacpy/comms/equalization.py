@@ -20,6 +20,7 @@ from __future__ import annotations
 import numpy as np
 
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.comms._equalizer_core import regularizer
 
 
 def slicer(x, constellation):
@@ -32,8 +33,16 @@ def slicer(x, constellation):
 def mmse_equalizer(rx, h, snr_linear):
     """Block MMSE (Wiener) equalization of ``rx`` for a known channel ``h``.
 
-    Frequency-domain ``W(f) = H*(f) / (|H(f)|^2 + 1/snr)``. ``snr_linear`` is the
-    operating SNR; ``snr_linear -> inf`` gives the zero-forcing inverse.
+    Frequency-domain ``W(f) = H*(f) / (|H(f)|^2 + mean(|H|^2)/snr)``.
+    ``snr_linear`` is the operating SNR **at the equalizer input** — received
+    signal power over noise power — so it means the same thing here as in
+    :func:`uacpy.comms.ofdm.ofdm_demodulate`, and the same number can be
+    calibrated once and passed to either. The Wiener regularizer is a
+    noise-to-signal power ratio and so must be expressed in the units of
+    ``|H|^2``: writing it as a bare ``1/snr`` assumed a channel of unit mean
+    power, and equalizing the same link with ``h`` scaled by a propagation
+    gain then changed the damping instead of leaving it alone.
+    ``snr_linear -> inf`` gives the zero-forcing inverse.
 
     The FFT makes the equalization **circular**: ``rx`` must carry a cyclic
     prefix of at least ``len(h)-1`` samples, or the first ``len(h)-1`` outputs
@@ -52,8 +61,23 @@ def mmse_equalizer(rx, h, snr_linear):
             f"mmse_equalizer: snr_linear must be > 0 (linear power ratio, not "
             f"dB); got {snr_linear!r}. A non-positive value makes the Wiener "
             "regularizer 1/snr zero or negative, which un-damps the inverse.")
-    H = np.fft.fft(np.asarray(h, dtype=complex), r.size)
-    W = np.conj(H) / (np.abs(H) ** 2 + 1.0 / snr)
+    hc = np.asarray(h, dtype=complex).ravel()
+    if hc.size > r.size:
+        # np.fft.fft(h, r.size) would truncate the channel to the transform
+        # length and equalize a channel the caller never described.
+        raise ConfigurationError(
+            f"mmse_equalizer: channel h has {hc.size} taps but rx is only "
+            f"{r.size} samples, so the length-{r.size} transform would drop "
+            f"the tail of h. The circular equalization needs rx at least as "
+            f"long as h (and a cyclic prefix of >= {hc.size - 1} samples).")
+    H = np.fft.fft(hc, r.size)
+    h2 = np.abs(H) ** 2
+    eps = regularizer(h2, snr)
+    if eps <= 0.0:
+        # A channel with no power anywhere: nothing is recoverable, which is
+        # the all-zero output conj(H)/(0 + 1/snr) already gave.
+        return np.zeros_like(r)
+    W = np.conj(H) / (h2 + eps)
     return np.fft.ifft(np.fft.fft(r) * W)
 
 
@@ -116,13 +140,31 @@ def _dfe_core(rx, constellation, n_ff, n_fb, step, forget, pll_bw, train):
     N = rx.size
     ntaps = n_ff + n_fb
     if n_ff < 1:
-        raise ConfigurationError("equalizer: n_ff must be >= 1")
+        raise ConfigurationError(
+            f"equalizer: n_ff must be >= 1; got {n_ff}")
     if forget is not None and not 0.0 < float(forget) <= 1.0:
         raise ConfigurationError(
             f"equalizer: the RLS forgetting factor must be in (0, 1]; got "
             f"{forget!r}. The inverse-correlation update divides by it, so 0 "
             f"or a negative value makes the taps non-finite."
         )
+    # Bring the record to unit mean power before adapting. Everything below
+    # carries an absolute scale — LMS's stability bound is step < 2/(ntaps*P),
+    # RLS's P(0) = I/1e-2 is an inverse-power, the center-spike init is 1.0,
+    # and the slicer compares against a unit-energy constellation — so the
+    # answer depended on the units the caller held the signal in. Measured on
+    # a 16-QAM passband link through CommsReceiver, BER was 0.0000 at unit
+    # amplitude but 0.2375 at 0.3x, 0.3600 at 3x and ~0.48 at 1e-9 or 1e9:
+    # silent below the window, and above it only a raw numpy overflow from
+    # abs(e)**2. Normalising here rather than tap-by-tap is what actually
+    # works: the register is mixed-scale by construction (feedforward samples
+    # at the record's amplitude, feedback decisions at constellation
+    # amplitude), so a single normalised-LMS divisor over-corrects one half
+    # and starves the other. At unit input power this is a no-op, so an
+    # already-calibrated record is bit-identical.
+    p_in = float(np.mean(np.abs(rx) ** 2)) if rx.size else 0.0
+    if np.isfinite(p_in) and p_in > 0.0:
+        rx = rx / np.sqrt(p_in)
     w = np.zeros(ntaps, dtype=complex)
     w[n_ff // 2] = 1.0                       # center-spike feedforward init
     uff = np.zeros(n_ff, dtype=complex)      # feedforward register (newest first)

@@ -15,8 +15,10 @@ woa23``). Sound speed is then computed from T, S and pressure with the UNESCO
 Time handling
 -------------
 WOA23 is a *climatology*, not a forecast: ``date``/``month`` select a monthly
-or seasonal climatological mean, never a specific year's conditions. Monthly
-and seasonal fields only resolve the upper 1500 m; below that the annual mean
+climatological mean (pass neither for the annual mean), never a specific
+year's conditions. WOA's own *seasonal* periods (winter…autumn) are not
+reachable from here — a month inside the season is the closest equivalent.
+The monthly fields only resolve the upper 1500 m; below that the annual mean
 is spliced on, giving a full-depth, season-aware profile. For true
 date-specific conditions use the Copernicus Marine source
 (:mod:`uacpy.data.copernicus`).
@@ -31,21 +33,23 @@ import numpy as np
 from scipy.optimize import brentq
 
 from uacpy.core.acoustics import soundspeed_unesco, soundspeed_delgrosso
+from uacpy.core._carrier_validate import _dedupe_provenance
 from uacpy.core.environment import SoundSpeedProfile
 from uacpy.data._geo import (
     Coordinate, as_coordinate, normalize_lon, depth_to_pressure_dbar,
     geodesic_waypoints, ring_offsets, run_representative_indices,
-    DEFAULT_MAX_TRANSECT_POINTS,
+    DEFAULT_MAX_TRANSECT_POINTS, checked_max_points,
 )
 from uacpy.data._time import parse_date
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
+from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.data._http import http_get
 from uacpy.data.sources import SOURCES, DataProvenance
 from uacpy._log import log_message
 
 __all__ = ['fetch_ssp', 'fetch_ssp_transect', 'ssp_transect_plan',
            'fetch_ts_profile', 'assemble_range_dependent',
-           'extend_ssp_below_data']
+           'extend_ssp_below_data', 'extend_column_to_seafloor']
 
 DEFAULT_BASE_URL = 'https://www.ncei.noaa.gov/thredds-ocean/dodsC/woa23/DATA'
 DEFAULT_DECADE = 'decav'              # 1955-2022 average of all decades
@@ -174,19 +178,20 @@ def ssp_transect_plan(
         raise ConfigurationError(
             f"ssp_transect_plan: unknown resolution={resolution!r}.",
             remediation=f"Use one of {sorted(_GRIDS)}.")
+    max_points = checked_max_points(max_points, 'ssp_transect_plan')
     if n_points == 'auto':
-        probe_n = int(max_points)
+        probe_n = max_points
     else:
         if int(n_points) < 2:
             raise ConfigurationError(
                 f"ssp_transect_plan: n_points must be >= 2, got {n_points}.",
                 remediation="Pass n_points>=2 or 'auto'.")
-        if int(n_points) > int(max_points):
+        if int(n_points) > max_points:
             warnings.warn(
                 f"ssp_transect_plan: n_points={n_points} exceeds "
                 f"max_points={max_points}; sampling {max_points}.",
-                UserWarning, stacklevel=2)
-        probe_n = min(int(n_points), int(max_points))
+                UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
+        probe_n = min(int(n_points), max_points)
     lats, lons, ranges_m = geodesic_waypoints(start, end, probe_n)
     if n_points == 'auto':
         # Identity = WOA grid cell (analytic, no fetch). Collapse runs that
@@ -221,10 +226,13 @@ def fetch_ssp_transect(
     """Range-dependent sound-speed profile along ``start`` → ``end``.
 
     ``seafloor`` (a :class:`~uacpy.core.environment.Bathymetry`, optional)
-    supplies the local seafloor along the transect: each column is then
-    extended to *its own* seafloor depth (deep-gradient extrapolation,
-    :func:`extend_ssp_below_data`) before the columns are stacked, so a
-    shallower column is never flat-held inside its used water column.
+    supplies the local seafloor along the transect: a column that stops short
+    of *its own* seafloor is extended down to it (deep-gradient
+    extrapolation, :func:`extend_column_to_seafloor`) before the columns are
+    stacked, so a shallower column is never flat-held inside its used water
+    column. A column that already reaches past its seafloor is left whole —
+    the transect's own reconciliation to the bathymetry happens once, on the
+    assembled profile, in :func:`uacpy.data.fetch_environment`.
 
     With ``n_points='auto'`` (default) the transect is sampled at the
     **distinct WOA23 cells** the great-circle crosses: the grid cell is the
@@ -237,10 +245,10 @@ def fetch_ssp_transect(
     ``max_points`` caps the number of waypoints probed *before* the reduction
     (the fetch budget); the result is never larger.
 
-    Columns are placed on a common depth axis (the deepest sampled column);
-    shallower columns hold their deepest value below their own seafloor
-    (constant extrapolation, the usual SSP convention). Parameters otherwise
-    mirror :func:`fetch_ssp`; ``start``/``end`` are ``(lat, lon)``.
+    Columns are placed on a common depth axis (the union of every sampled
+    column's own nodes); shallower columns hold their deepest value below their
+    own seafloor (constant extrapolation, the usual SSP convention). Parameters
+    otherwise mirror :func:`fetch_ssp`; ``start``/``end`` are ``(lat, lon)``.
     """
     plan = ssp_transect_plan(start, end, n_points=n_points,
                              max_points=max_points, resolution=resolution)
@@ -258,10 +266,7 @@ def fetch_ssp_transect(
     # used water column on a 3-column transect.
     if seafloor is not None:
         columns = [
-            extend_ssp_below_data(
-                col,
-                float(np.asarray(seafloor.eval(range=r)).flat[0]),
-                latitude=la)
+            extend_column_to_seafloor(col, seafloor, r, latitude=la)
             for col, r, la in zip(columns, ranges_m, lats)
         ]
     log_message(
@@ -276,8 +281,10 @@ def fetch_ssp_transect(
 def assemble_range_dependent(columns, ranges_m) -> SoundSpeedProfile:
     """Stack 1-D ``SoundSpeedProfile`` columns into a 2-D range-dependent one.
 
-    The common depth axis is the deepest column's; shallower columns hold their
-    deepest value below their own seafloor (``np.interp`` constant-edge fill).
+    The common depth axis is the union of every column's depth nodes (see the
+    comment on the assembly for why an axis taken from one column loses the
+    others' nodes); shallower columns hold their deepest value below their own
+    seafloor (``np.interp`` constant-edge fill).
     Shared by the WOA23 and Copernicus transect fetchers. Columns are reordered
     to strictly increasing range, so a caller that supplies them out of order
     still gets a correctly-ordered range axis (the carriers assume ascending
@@ -300,14 +307,13 @@ def assemble_range_dependent(columns, ranges_m) -> SoundSpeedProfile:
     data = np.column_stack([
         np.interp(z, col.depths, col.data[:, 0]) for col in columns
     ])
-    seen, provs = set(), []
-    for col in columns:
-        for prov in getattr(col, 'data_sources', ()) or ():
-            if prov.source.id not in seen:
-                seen.add(prov.source.id)
-                provs.append(prov)
+    # Union the columns' provenance through the carriers' own aggregator, so
+    # an assembled profile de-duplicates by source id exactly as ``Bottom``,
+    # ``Surface`` and ``Environment`` do (first-seen order, one record per
+    # dataset, a column without ``data_sources`` contributing nothing).
+    sources = _dedupe_provenance(columns)
     return SoundSpeedProfile(depths=z, data=data, ranges=ranges,
-                             shape='measured', data_sources=tuple(provs))
+                             shape='measured', data_sources=sources)
 
 
 def fetch_ts_profile(
@@ -389,7 +395,7 @@ def _ts_profile_with_cell(
         warnings.warn(
             f"WOA23: nearest cell ({lat_c:.3f}, {lon_c:.3f}) is dry; using the "
             f"closest wet cell ({wet_lat:.3f}, {wet_lon:.3f}).",
-            UserWarning, stacklevel=2,
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
         )
 
     # Monthly/seasonal fields cap at 1500 m. If this column reached that cap
@@ -699,7 +705,7 @@ def extend_ssp_below_data(ssp, depth_max: float,
             f"profile's deep gradient to {new_row[0]:.1f} m/s. Analysed T/S "
             f"products are shallower than bathymetry over much of the deep "
             f"ocean — supply a measured profile if the deep column matters.",
-            UserWarning, stacklevel=3,
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
         )
 
     return type(ssp)(
@@ -709,3 +715,29 @@ def extend_ssp_below_data(ssp, depth_max: float,
         shape=ssp.shape,
         data_sources=ssp.data_sources,
     )
+
+
+def extend_column_to_seafloor(column, seafloor, range_m: float,
+                              latitude: float = _REFERENCE_LATITUDE_DEG):
+    """One transect column, extended down to the seafloor under ``range_m``.
+
+    Extension only: a column that already reaches past its local seafloor is
+    returned unchanged. :func:`extend_ssp_below_data` delegates the shallower
+    case to ``SoundSpeedProfile.extend_to``, which *truncates* — right for a
+    single profile being reconciled to one water column, wrong per column
+    along a transect. Bathymetry is sampled far more finely (50-60 points)
+    than the SSP columns (7-35), so the seafloor *between* two column
+    waypoints is routinely deeper than at either; a column cut back to its own
+    waypoint's seafloor has lost analysed levels that the assembled field
+    still interpolates through at those intermediate ranges, and the cut value
+    is flat-held where real data existed. Sampling only inside the genuine
+    water column, the cut costs 3.97 / 13.22 / 29.08 m/s on Biscay / North
+    Atlantic / Hawaii-ridge transects against 1.64 / 1.96 / 9.63 m/s without
+    it. Nothing downstream needs the cut here: ``fetch_environment``
+    reconciles the assembled profile to the bathymetry afterwards, and each
+    solver masks below its own local seafloor.
+    """
+    depth = float(np.asarray(seafloor.eval(range=range_m)).flat[0])
+    if depth <= float(np.asarray(column.depths)[-1]):
+        return column
+    return extend_ssp_below_data(column, depth, latitude=latitude)

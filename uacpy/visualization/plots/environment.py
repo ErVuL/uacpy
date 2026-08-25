@@ -14,7 +14,7 @@ from uacpy.visualization.style import (
 )
 from uacpy.visualization.plots._common import ZORDER_SEDIMENT, _credit_attributions, _draw_credit, _draw_geometry, _draw_sea_ice, _draw_surface_boundary, _draw_altimetry, fig_ax, typed_plot_error, invert_yaxis_once
 from uacpy.core.exceptions import ConfigurationError
-from uacpy.io.units import km_to_m, m_to_km
+from uacpy.core.units import km_to_m, m_to_km
 
 
 # A single half-space is shaded by sound speed on a fixed (absolute) scale so
@@ -262,6 +262,7 @@ def _draw_halfspace_bottom(ax_bathy, halfspace, r_km, seafloor, z_max_layer):
     return z_max_layer
 
 
+@typed_plot_error
 def _plot_environment(
     env: Environment,
     *,
@@ -321,26 +322,33 @@ def _plot_environment(
     bottom = env.bottom
     # Pull a sensible x-extent from any range-dependent axis available.
     # Falls back to (0, 1) only when nothing carries a range vector.
-    candidate_rmaxes = []
+    candidate_rmaxes_km = []
     if env.has_range_dependent_bathymetry:
-        candidate_rmaxes.append(m_to_km(float(env.bathymetry.ranges[-1])))
+        candidate_rmaxes_km.append(m_to_km(float(env.bathymetry.ranges[-1])))
     if bottom.is_range_dependent:
-        candidate_rmaxes.append(m_to_km(float(np.max(bottom.ranges))))
+        candidate_rmaxes_km.append(m_to_km(float(np.max(bottom.ranges))))
     if (receiver is not None and getattr(receiver, 'ranges', None) is not None
             and len(receiver.ranges) > 0):
-        candidate_rmaxes.append(m_to_km(float(np.max(receiver.ranges))))
+        candidate_rmaxes_km.append(m_to_km(float(np.max(receiver.ranges))))
     if (env.ssp.is_range_dependent
             and env.ssp.ranges is not None and len(env.ssp.ranges) > 0):
-        candidate_rmaxes.append(m_to_km(float(np.max(env.ssp.ranges))))
-    x_max = max(candidate_rmaxes) if candidate_rmaxes else 1.0
+        candidate_rmaxes_km.append(m_to_km(float(np.max(env.ssp.ranges))))
+    x_max_km = max(candidate_rmaxes_km) if candidate_rmaxes_km else 1.0
 
     if env.has_range_dependent_bathymetry:
         r_km = m_to_km(env.bathymetry.ranges)
         seafloor = env.bathymetry.depths
+        # Every model holds the last bathymetry value constant out to the
+        # furthest receiver, so the profile gets an end anchor at the panel's
+        # right edge (as ``_overlay_seafloor`` draws) and the seafloor line and
+        # the bottom fills below span the whole xlim.
+        if float(r_km[-1]) < x_max_km:
+            r_km = np.append(r_km, x_max_km)
+            seafloor = np.append(seafloor, seafloor[-1])
     else:
-        r_km = np.array([0.0, x_max])
+        r_km = np.array([0.0, x_max_km])
         seafloor = np.array([env.depth, env.depth])
-    x_range = (float(r_km.min()), float(x_max))
+    x_range = (float(r_km.min()), float(x_max_km))
 
     z_max_layer = float(np.max(seafloor))
     seafloor_depth = z_max_layer  # remember the *actual* deepest seafloor
@@ -419,8 +427,15 @@ def _plot_environment(
     # the SSP heatmap.
     if ssp.is_range_dependent:
         ssp_r_km_b = m_to_km(ssp.ranges)
+        ssp_grid = np.asarray(ssp.data, dtype=float)
+        # Models hold the last profile constant past its node; anchoring the
+        # mesh at the right edge keeps the water colormap under the whole
+        # xlim rather than stopping at the last SSP range.
+        if float(ssp_r_km_b[-1]) < x_max_km:
+            ssp_r_km_b = np.append(ssp_r_km_b, x_max_km)
+            ssp_grid = np.column_stack([ssp_grid, ssp_grid[:, -1]])
         ax_bathy.pcolormesh(
-            ssp_r_km_b, ssp.depths, ssp.data,
+            ssp_r_km_b, ssp.depths, ssp_grid,
             cmap=water_cmap,
             vmin=water_cs_min, vmax=water_cs_max,
             shading='nearest', zorder=0,
@@ -428,7 +443,7 @@ def _plot_environment(
     else:
         ssp_1d = np.asarray(ssp.data, dtype=float).reshape(-1, 1)
         x_water = np.array([float(r_km.min()),
-                            float(r_km.max() if r_km.size > 1 else x_max)])
+                            float(r_km.max() if r_km.size > 1 else x_max_km)])
         ax_bathy.pcolormesh(
             x_water, ssp.depths, np.tile(ssp_1d, (1, 2)),
             cmap=water_cmap,
@@ -455,9 +470,7 @@ def _plot_environment(
     # depth axis in composite/`ax=` layouts). Uniform handling: ANY bottom that
     # carries a cp value (half-space, layered, range-dependent — all the same)
     # gets a 'Bottom cp' bar; only vacuum / rigid / file (no cp) show the water
-    # bar alone. The Bottom cp bar is the INNER (left) of the two, with its ticks
-    # /label on its own LEFT side (toward the plot) so nothing sits between the
-    # two bars — they read cleanly as [plot] Bottom | Water.
+    # bar alone.
     has_bottom_cbar = bottom_colorbar and bottom_has_cp
     if has_bottom_cbar:
         # Stack the two cp colorbars vertically in a single right-margin
@@ -522,6 +535,7 @@ def _plot_environment(
     return fig, ax_bathy
 
 
+@typed_plot_error
 def _plot_ssp(env_or_ssp, *, ax=None, title: Optional[str] = None,
               figsize=(5, 6)):
     """Plot the sound-speed profile ``c(z)`` as a depth-down line.
@@ -609,12 +623,18 @@ def _seabed_property_grid(bottom, prop, r_km, z, seafloor_r):
         below = z >= seafloor_r[j]
         if not np.any(below):
             continue
-        col = bottom.at(range=r_m)
+        # Read the live column rather than ``at()``'s deep copy: this loop
+        # only reads layer scalars, and copying a whole layer stack per
+        # range node dominated the panel's cost. Pinned by the test asserting
+        # ``Bottom.at`` is never called while this grid is built, and that
+        # every cell still carries its layer's property.
+        col = bottom.columns[bottom.column_index_at(range=r_m)]
         grid[below, j] = _layered_property_at_depths(
             col, prop, seafloor_r[j], z[below])
     return grid
 
 
+@typed_plot_error
 def plot_bottom_properties(env, *, properties=None, title: Optional[str] = None,
                            figsize=None, n_range=240, n_depth=200,
                            data_source=True):
@@ -635,15 +655,18 @@ def plot_bottom_properties(env, *, properties=None, title: Optional[str] = None,
     """
     bottom = env.bottom
     if bottom is None:
-        raise ConfigurationError("plot_bottom_properties: env.bottom is None.")
+        raise ConfigurationError(
+            "plot_bottom_properties: env.bottom is None. Attach a seabed to "
+            "the environment (env.bottom = Bottom(...)) before plotting its "
+            "properties.")
 
-    rmaxes = []
+    rmaxes_km = []
     if env.has_range_dependent_bathymetry:
-        rmaxes.append(m_to_km(float(env.bathymetry.ranges[-1])))
+        rmaxes_km.append(m_to_km(float(env.bathymetry.ranges[-1])))
     if bottom.is_range_dependent:
-        rmaxes.append(m_to_km(float(np.max(bottom.ranges))))
-    x_max = max(rmaxes) if rmaxes else 1.0
-    r_km = np.linspace(0.0, x_max, n_range)
+        rmaxes_km.append(m_to_km(float(np.max(bottom.ranges))))
+    x_max_km = max(rmaxes_km) if rmaxes_km else 1.0
+    r_km = np.linspace(0.0, x_max_km, n_range)
 
     if env.has_range_dependent_bathymetry:
         b = env.bathymetry
@@ -670,8 +693,14 @@ def plot_bottom_properties(env, *, properties=None, title: Optional[str] = None,
         panels.append((prop, sym, unit, cmap, grid))
 
     if not panels:
+        considered = [prop for prop, sym, _u, _c in _BOTTOM_PROPERTIES
+                      if properties is None
+                      or prop in properties or sym in properties]
         raise ConfigurationError(
-            "plot_bottom_properties: no plottable seabed properties found.")
+            f"plot_bottom_properties: no plottable seabed properties found. "
+            f"None of {considered} carried a finite, non-zero profile on "
+            f"this bottom. Set them on env.bottom, or pass properties= "
+            f"naming ones it does carry.")
 
     n = len(panels)
     ncols = min(n, 3)

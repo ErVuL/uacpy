@@ -39,6 +39,7 @@ import warnings
 import numpy as np
 import pytest
 
+import uacpy
 from uacpy import Receiver, Source
 from uacpy.models import RAM, SPARC, Bellhop, Kraken, RunMode, Scooter
 from uacpy.models.oases import OASP, OASS, OAST
@@ -189,7 +190,8 @@ def test_r0_column_is_nan_for_every_engine(engine, request):
 
 @pytest.mark.parametrize('engine', R0_ENGINES)
 def test_r0_column_warns_for_every_engine(engine, request):
-    """source-receiver.md:365-375: the r = 0 column comes back NaN *with a
+    """source-receiver.md §7 "The source is at range zero":
+    the r = 0 column comes back NaN *with a
     UserWarning* naming the singularity. The NaN half is pinned above; this
     pins the warning, read back from the fixture-time record (Bellhop's text
     says ``r=0``, the shared base helper says ``r = 0`` — the pattern admits
@@ -271,6 +273,63 @@ def test_tl_engines_return_complex_pascal_travelling_wave(engine, request):
     db = np.asarray(field.db)
     assert not np.iscomplexobj(db)
     assert np.isfinite(db[I_WATER, 1:]).all()
+
+
+PHASE_REFERENCE_ENGINES = COMPLEX_PA_ENGINES + [
+    'sparc_field',
+    pytest.param('oasp_field', marks=pytest.mark.requires_oases),
+]
+
+
+@pytest.mark.parametrize('engine', PHASE_REFERENCE_ENGINES)
+def test_phase_reference_is_stamped_as_the_enum_member(engine, request):
+    """Every wrapper's ``phase_reference`` arrives as a ``PhaseReference``
+    member, not a bare string.
+
+    ``PhaseReference`` is a ``str`` enum, so ``==``, ``.upper()``,
+    ``json.dumps`` and ``csv`` cannot tell the two spellings apart — only
+    ``str()``/``repr()`` can, which is what a log line, a plot annotation or a
+    saved metadata header renders. ``PropagationModel._result_kwargs``
+    coerces; a wrapper that passes ``phase_reference=`` to the results
+    constructor directly instead bypasses the coercion.
+    """
+    from uacpy.core.results import PhaseReference
+    field = request.getfixturevalue(engine)
+    assert isinstance(field.phase_reference, PhaseReference), (
+        f"{engine} stamped {field.phase_reference!r} "
+        f"({type(field.phase_reference).__name__})")
+
+
+def test_no_model_bypasses_the_phase_reference_coercion():
+    """The writer-side half: in ``uacpy/models/``, a literal
+    ``phase_reference=`` may only be an argument to ``_result_kwargs`` or
+    ``_stamp_result``, which coerce it. Passing it straight to a results
+    constructor is what produces the bare string the test above catches, and
+    it is invisible to any single-engine assertion."""
+    import ast
+    from pathlib import Path
+    models_dir = Path(uacpy.__file__).parent / 'models'
+    offenders = []
+    for path in sorted(models_dir.glob('*.py')):
+        tree = ast.parse(path.read_text(encoding='utf-8'))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            literal = any(
+                kw.arg == 'phase_reference'
+                and isinstance(kw.value, ast.Constant)
+                and isinstance(kw.value.value, str)
+                for kw in node.keywords)
+            if not literal:
+                continue
+            callee = node.func
+            name = (callee.attr if isinstance(callee, ast.Attribute)
+                    else getattr(callee, 'id', ''))
+            if name not in ('_result_kwargs', '_stamp_result'):
+                offenders.append(f"{path.name}:{node.lineno} -> {name}(...)")
+    assert not offenders, (
+        "a bare-string phase_reference reaches a results constructor "
+        "uncoerced at: " + ", ".join(offenders))
 
 
 @pytest.mark.requires_oases
@@ -362,7 +421,8 @@ def test_ram_metadata_key_is_pe_reference_speed(ram_field):
 
 
 def test_depth_swap_reciprocity_on_a_range_independent_channel():
-    """kraken.md:604-613: swapping source and receiver depth on a
+    """kraken.md §7 "The same swap on a range-independent channel":
+    swapping source and receiver depth on a
     range-INDEPENDENT channel reproduces the TL — the doc measured the swap
     at 0.000 dB, and pins the 3-12 dB non-reciprocity it documents to the
     range-dependent adiabatic sum, not to the solver. One engine suffices;
@@ -385,7 +445,8 @@ def test_depth_swap_reciprocity_on_a_range_independent_channel():
 @pytest.mark.slow
 @pytest.mark.parametrize('model_cls', [Bellhop, Kraken, Scooter, RAM])
 def test_degenerate_receiver_axes_stay_two_dimensional(model_cls):
-    """source-receiver.md:100-115: shape follows the carrier for every field
+    """source-receiver.md §2 "axis is kept, not dropped":
+    shape follows the carrier for every field
     engine, and a degenerate axis is KEPT, not dropped — a vertical line
     array comes back ``(46, 1)`` and a horizontal one ``(1, 240)``, both
     still two-axis fields with ``{depth, range}`` coords."""
@@ -403,3 +464,75 @@ def test_degenerate_receiver_axes_stay_two_dimensional(model_cls):
         run_mode=RunMode.COHERENT_TL)
     assert hla.data.shape == (1, 240)
     assert list(hla.coords) == ['depth', 'range']
+
+
+class TestWaveEnginesAreReciprocal:
+    """Swapping source and receiver depth must not change the field.
+
+    Reciprocity is a property of the wave equation itself, so every
+    wave-theoretic engine has to satisfy it in a range-independent guide.
+    Measured on a 200 m Pekeris case at 150 Hz, 30 m <-> 150 m over 5 km:
+    Kraken 0.004 dB, RAM 0.000 dB, Scooter 0.000 dB.
+
+    Bellhop is deliberately excluded. ``beam_type='B'`` (the default) is NOT
+    reciprocal — 0.9-1.0 dB on this case, and the gap does not shrink with
+    beam count (0.91 dB at 2001 beams, 0.97 dB at 4001), so it is not a
+    discretisation error. ``beam_type='G'`` (geometric hat) IS exactly
+    reciprocal, and that is pinned below so the distinction cannot silently
+    invert.
+
+    The difference is in the beam SUM, not the ray amplitudes: JKPS Sect. 3.6.8
+    proves the spreading function is symmetric under exchange of endpoints,
+    and both letters are geometric beams (``bellhop.f90:309`` sends ``B`` to
+    ``InfluenceGeoGaussianCart``, not to the Cerveny routines). ``B`` only
+    swaps the hat shape function for a Gaussian of the same fan-derived width
+    (JKPS Sect. 3.3.5.5). The hat vanishes at its neighbouring rays so the sum
+    returns the ray-tube field that proof covers; the Gaussian overlaps its
+    neighbours. See :class:`~uacpy.models.Bellhop`'s ``beam_type`` docs for the
+    accuracy trade that makes ``B`` the default anyway.
+    """
+
+    Z1, Z2, RANGE, FREQ = 30.0, 150.0, 5000.0, 150.0
+
+    @staticmethod
+    def _env():
+        import uacpy
+        return uacpy.Environment(
+            bathymetry=200.0, ssp=1500.0,
+            bottom=uacpy.BoundaryProperties(
+                acoustic_type='half-space', sound_speed=1800.0,
+                density=1.8, attenuation=0.5))
+
+    def _tl(self, model, zs, zr):
+        import warnings
+        import numpy as np
+        import uacpy
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            f = model.run(self._env(),
+                          uacpy.Source(depths=zs, frequencies=self.FREQ),
+                          uacpy.Receiver(depths=[zr], ranges=[self.RANGE]))
+        return float(np.asarray(f.to_db().db, dtype=float).ravel()[0])
+
+    @pytest.mark.parametrize('engine', ['Kraken', 'RAM', 'Scooter'])
+    def test_swapping_source_and_receiver_depth_returns_the_same_level(
+            self, engine):
+        from uacpy import models
+        model = getattr(models, engine)(verbose=False)
+        forward = self._tl(model, self.Z1, self.Z2)
+        reverse = self._tl(model, self.Z2, self.Z1)
+        assert abs(forward - reverse) < 0.05
+
+    def test_the_geometric_hat_beam_is_reciprocal(self):
+        from uacpy.models import Bellhop
+        model = Bellhop(beam_type='G', n_beams=2001, verbose=False)
+        assert abs(self._tl(model, self.Z1, self.Z2)
+                   - self._tl(model, self.Z2, self.Z1)) < 0.05
+
+    def test_the_default_gaussian_beam_is_not_reciprocal(self):
+        # Pins the documented limitation, so a future change that makes B
+        # reciprocal (or makes G stop being so) is noticed rather than assumed.
+        from uacpy.models import Bellhop
+        model = Bellhop(beam_type='B', n_beams=2001, verbose=False)
+        assert abs(self._tl(model, self.Z1, self.Z2)
+                   - self._tl(model, self.Z2, self.Z1)) > 0.3

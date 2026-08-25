@@ -36,6 +36,21 @@ def _basic_setup():
     return env, src, rcv
 
 
+def _rough_setup():
+    """The geometry OASSP scatters in: a rough seabed, and a source whose
+    frequency sits inside the ``freq_min``/``freq_max`` band the realization
+    is synthesised over."""
+    from uacpy.tests.conftest import make_pekeris
+    env = make_pekeris(
+        bathymetry=128.0,
+        ssp=uacpy.SoundSpeedProfile(depths=[0, 128], data=[1500, 1500]),
+        sound_speed=2300.0, density=2.65, roughness=0.5)
+    src = uacpy.Source(depths=100.0, frequencies=500.0)
+    rcv = uacpy.Receiver(depths=np.linspace(60.0, 127.0, 2),
+                         ranges=np.array([500.0, 1000.0]))
+    return env, src, rcv
+
+
 def _elastic_env():
     return uacpy.Environment(
         name='elastic', bathymetry=100.0, ssp=1500.0,
@@ -321,13 +336,13 @@ def _registered_keys_for(model_name: str) -> set:
 # (model_cls, run_kwargs) — keep small fast runs; covers the path that
 # actually attaches metadata keys. ``work_dir`` is pinned so the
 # ``_attach_output_paths`` branch fires (cleanup=True suppresses it).
-_OASES_MODELS = {'OAST', 'OASN', 'OASR', 'OASP'}
+_OASES_MODELS = {'OAST', 'OASN', 'OASR', 'OASP', 'OASSP'}
 
 
 def _drift_cases():
     from uacpy.models import (
         Bellhop, Bounce, Kraken, RAM, Scooter, SPARC,
-        OAST, OASR, OASP,
+        OAST, OASN, OASR, OASP, OASSP,
     )
     raw = [
         ('Bellhop', Bellhop, {}, {}),
@@ -338,8 +353,15 @@ def _drift_cases():
         ('Scooter', Scooter, {}, {}),
         ('SPARC',   SPARC,   dict(n_t_out=256), {}),
         ('OAST',    OAST,    {}, {}),
+        ('OASN',    OASN,    dict(surface_noise_level=70.0),
+         dict(run_mode=uacpy.RunMode.COVARIANCE)),
         ('OASR',    OASR,    {}, dict(run_mode=uacpy.RunMode.REFLECTION)),
         ('OASP',    OASP,    {}, dict(run_mode=uacpy.RunMode.BROADBAND)),
+        ('OASSP',   OASSP,   dict(correlation_length=5.0,
+                                  spectral_exponent=2.5,
+                                  n_time_samples=256,
+                                  freq_min=400.0, freq_max=600.0),
+         dict(run_mode=uacpy.RunMode.BROADBAND)),
     ]
     # OASES models need their separately-licensed binaries; tag those params
     # so ``pytest -m 'not requires_oases'`` deselects them at collection.
@@ -350,6 +372,32 @@ def _drift_cases():
         )
         for name, cls, ce, re in raw
     ]
+
+
+#: The one wrapper whose drift gate lives elsewhere. OASS runs a two-binary
+#: chain (an OAST producer, then OASS), so its case is built from the OASS
+#: fixtures in ``test_oass.py`` (``test_every_metadata_key_is_documented``)
+#: rather than from ``_basic_setup``.
+_DRIFT_GATED_ELSEWHERE = {'OASS'}
+
+
+def test_every_wrapper_has_a_metadata_drift_gate():
+    """``_DOCUMENTED_METADATA`` is hand-maintained, so a wrapper with no case
+    here can attach any key it likes and nothing says so.
+
+    The model set is derived from ``uacpy.models.__all__`` rather than listed
+    again, because a list is exactly what a thirteenth wrapper walks past.
+    This runs without a binary: it compares names, not results."""
+    from uacpy.tests.conftest import concrete_model_classes
+
+    gated = {case.values[0] for case in _drift_cases()} | _DRIFT_GATED_ELSEWHERE
+    missing = sorted(set(concrete_model_classes()) - gated)
+    assert not missing, (
+        f"wrapper(s) {missing} attach result.metadata with no drift gate; add "
+        f"a case to _drift_cases() (or to _DRIFT_GATED_ELSEWHERE with the "
+        f"test that covers it)")
+    stale = sorted(gated - set(concrete_model_classes()))
+    assert not stale, f"gate names a model uacpy.models no longer exports: {stale}"
 
 
 @pytest.mark.requires_binary
@@ -373,6 +421,11 @@ def test_metadata_keys_are_all_documented(
     if name == 'OASR':
         # OASR needs an elastic bottom for a meaningful reflection result.
         env = _elastic_env()
+    if name == 'OASSP':
+        # OASSP scatters off a rough interface; a smooth seabed leaves it
+        # nothing to scatter from, and the source has to sit in the
+        # realization's own frequency band.
+        env, src, rcv = _rough_setup()
     work = tmp_path / f'{name.lower()}_drift'
     model = model_cls(work_dir=work, cleanup=False, verbose=False, **ctor_extras)
     result = model.run(env, src, rcv, **run_extras)

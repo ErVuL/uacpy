@@ -14,7 +14,8 @@ from uacpy.core.constants import (REFERENCE_PRESSURE_AIR,
 from uacpy.core.acoustics import power_to_db
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.visualization.plots._common import (_cell_edge_extent, _flip_y,
-                                                 fig_ax, typed_plot_error)
+                                               fig_ax, typed_plot_error,
+                                               _plot_warn)
 
 
 def _require_image_grid(arr, n0, n1, caller, name0, name1):
@@ -35,13 +36,78 @@ def _require_image_grid(arr, n0, n1, caller, name0, name1):
     return a
 
 
+def _clamped_freq_limits(frequencies, clamp, hi):
+    """``(lo, hi)`` frequency-axis limits that keep the axis ascending.
+
+    A fixed low clamp keeps panels comparable and holds the near-DC bins off
+    the axis, but a record whose whole band sits below the clamp (infrasound,
+    or a very long window) cannot take it: the low limit would land above the
+    high one and the axis would silently reverse, putting the record outside
+    its own window. Such a band starts at its first positive bin instead —
+    never DC, which a log axis cannot render at all."""
+    f = np.asarray(frequencies, dtype=float)
+    if hi > clamp:
+        return (max(float(f[0]), float(clamp)), hi)
+    positive = f[f > 0]
+    return ((float(positive[0]) if positive.size else float(f[0])), hi)
+
+
 def _log_freq_xlim(frequencies):
     """``(lo, hi)`` x-limits for a log frequency axis.
 
     A log axis cannot render DC and every FFT / Welch grid starts at f = 0, so
     the low end is clamped to 1 Hz; below that the first bin would drag the
     whole decade scale toward -inf."""
-    return (np.max((frequencies[0], 1)), frequencies[-1])
+    f = np.asarray(frequencies, dtype=float)
+    return _clamped_freq_limits(f, 1.0, float(f[-1]))
+
+
+def _all_outside(values, lo, hi):
+    """``(vmin, vmax, lo, hi)`` when every finite sample of ``values`` lies
+    outside the window ``[lo, hi]``, else ``None``.
+
+    An empty or all-NaN record is outside nothing and yields ``None``; the
+    window is sorted, so a reversed pair is read as the interval it spans."""
+    v = np.asarray(values, dtype=float).ravel()
+    v = v[np.isfinite(v)]
+    if not v.size or lo is None or hi is None:
+        return None
+    lo, hi = sorted((float(lo), float(hi)))
+    if v.min() > hi or v.max() < lo:
+        return (float(v.min()), float(v.max()), lo, hi)
+    return None
+
+
+def _warn_if_offscreen(ax, values, caller, knob):
+    """Warn when a fixed y window excludes every finite sample.
+
+    Several of these plotters pin the ordinate to the range their quantity
+    normally occupies, which keeps panels comparable but renders a record
+    outside that range as an empty panel — a silent, easily-missed failure that
+    looks like "no data". Say so, and name the knob that widens the window."""
+    outside = _all_outside(values, *ax.get_ylim())
+    if outside is not None:
+        v_min, v_max, lo, hi = outside
+        _plot_warn(
+            f"{caller}: every sample ({v_min:.4g} … {v_max:.4g}) lies "
+            f"outside the plotted y range ({lo:g}, {hi:g}), so the panel is "
+            f"empty. Pass {knob}= to widen it.")
+
+
+def _warn_if_colour_saturated(values, vmin, vmax, caller, knob):
+    """Warn when a fixed colour window excludes every finite sample.
+
+    A pinned dB window keeps panels comparable, but a record entirely above or
+    below it maps to one end of the colormap everywhere: a flat single-colour
+    image that reads as a valid featureless record rather than as a window
+    problem. Say so, and name the knobs that move the window."""
+    outside = _all_outside(values, vmin, vmax)
+    if outside is not None:
+        v_min, v_max, lo, hi = outside
+        _plot_warn(
+            f"{caller}: every sample ({v_min:.4g} … {v_max:.4g} dB) lies "
+            f"outside the colour window ({lo:g}, {hi:g}) dB, so the panel is a "
+            f"single flat colour. Pass {knob}= to move it.")
 
 
 def _ref_label(ref):
@@ -49,7 +115,7 @@ def _ref_label(ref):
         return "1µ"
     if ref == REFERENCE_PRESSURE_AIR:
         return "20µ"
-    return f"{ref:02e}"
+    return f"{ref:g}"
 
 
 
@@ -71,9 +137,19 @@ def draw_sound_cone(ax, f_max, k_max, sound_speed, *, color="w", ls="--",
                 va="top", ha="right")
 
 
+# The colour window autoscales, as it does on the other transform panels
+# (plot_radon, plot_taup). A fixed -60..+20 dB window suits a PEAK-RELATIVE
+# scale — which is what docs/figure_scripts/signal.py hand-rolls, at
+# vmin=-40, vmax=0 — but the level here goes through
+# power_to_db(power, ref), an ABSOLUTE dB re 1 uPa^2. Measured on the
+# fk_transform output this function documents itself as consuming, for a 1 Pa
+# plane-wave gather at fs = 2 kHz, dx = 2 m: the panel spans 107.3 .. 196.9 dB
+# with a median of 122.2, so every pixel would sit above that vmax and the
+# figure would come out a uniform block. A fixed absolute window cannot work here anyway: the
+# transform sums over the gather, so the level moves with its size.
 @typed_plot_error
 def plot_fk(frequencies, wavenumbers, power, ax=None, *, ref=REFERENCE_PRESSURE_WATER,
-            vmin=-60, vmax=20, cmap=None, sound_speed=None, title=None,
+            vmin=None, vmax=None, cmap=None, sound_speed=None, title=None,
             figsize=(10, 6), show_colorbar=True, **mpl_kw):
     """Image an f-k power panel (dB). Consumes :func:`fk_transform` output."""
     _require_image_grid(power, len(frequencies), len(wavenumbers),
@@ -179,7 +255,11 @@ def plot_taup(slownesses, taus, taup, ax=None, *, vmin=None, vmax=None,
 def plot_psd(frequencies, psd_linear, ax=None, *, ref=REFERENCE_PRESSURE_WATER,
              label=None, ymin=0, ymax=150, title=None, figsize=(10, 6),
              **mpl_kw):
-    """Line plot of a Welch PSD (dB). Consumes :func:`psd` output."""
+    """Line plot of a Welch PSD (dB). Consumes :func:`psd` output.
+
+    ``ymin`` / ``ymax`` pin the level axis to the 0–150 dB window an ambient
+    record occupies; a quieter one needs them widened or the panel comes out
+    empty."""
     psd_db = power_to_db(np.asarray(psd_linear), ref)
     fig, ax = fig_ax(ax, figsize)
     ax.semilogx(frequencies, psd_db, label=label, **mpl_kw)
@@ -188,6 +268,7 @@ def plot_psd(frequencies, psd_linear, ax=None, *, ref=REFERENCE_PRESSURE_WATER,
     ax.set_ylabel(f"Level (dB re {_ref_label(ref)}Pa²/Hz)")
     ax.set_ylim((ymin, ymax))
     ax.set_xlim(_log_freq_xlim(frequencies))
+    _warn_if_offscreen(ax, psd_db, "plot_psd", "ymin=/ymax")
     ax.grid(which="both", alpha=0.75)
     if label:
         ax.legend()
@@ -221,10 +302,16 @@ def plot_ppsd(result, ax=None, *, ymin=0, ymax=200, vmin=0, vmax=None,
     ax.plot(result.frequencies, result.mean_db - result.std_db, "k--")
     ax.set_title(title or f"PPSD ({result.seg_duration}s)", loc="left")
     ax.set_xlabel("Frequency (Hz)")
-    ax.set_ylabel("Level (dB)")
+    # ppsd fixes ref=1e-6 and defaults to scaling='density', so the axis
+    # is dB re 1 uPa^2/Hz. The constant-Q twin already names its reference;
+    # a dB axis without one is an incomplete unit on a published figure.
+    ax.set_ylabel("Level (dB re µPa²/Hz)")
     ax.set_xscale("log")
     ax.set_xlim(_log_freq_xlim(result.frequencies))
     ax.set_ylim((ymin, ymax))
+    # The level axis carries the histogram, not the density: level_edges spans
+    # every row the mesh draws.
+    _warn_if_offscreen(ax, result.level_edges, "plot_ppsd", "ymin=/ymax")
     ax.grid(which="both", alpha=0.5)
     ax.legend(loc="upper right")
     return fig, ax
@@ -240,7 +327,8 @@ def plot_sel(sel_pa2s, bands, ax=None, *, ref=REFERENCE_PRESSURE_WATER,
     # vector is every low edge plus the top edge of the last band.
     Fedges = [low for low, _, _ in bands] + [bands[-1][2]]
     width = [Fedges[i + 1] - Fedges[i] for i in range(len(Fedges) - 1)]
-    ax.bar(Fedges[:-1], power_to_db(np.asarray(sel_pa2s), ref), width=width,
+    sel_db = power_to_db(np.asarray(sel_pa2s), ref)
+    ax.bar(Fedges[:-1], sel_db, width=width,
            align="edge", edgecolor="black", **mpl_kw)
     ax.set_title(title or f"SEL ({duration}s)", loc="left")
     ax.set_ylabel(f"Level (dB re {_ref_label(ref)}Pa²·s)")
@@ -248,6 +336,7 @@ def plot_sel(sel_pa2s, bands, ax=None, *, ref=REFERENCE_PRESSURE_WATER,
         ax.set_xscale("log")
     ax.set_xlabel(f"Frequency ({band_type}) (Hz)")
     ax.set_ylim(ylim)
+    _warn_if_offscreen(ax, sel_db, "plot_sel", "ylim")
     ax.grid(which="both", alpha=0.75)
     ax.set_axisbelow(True)
     return fig, ax
@@ -260,7 +349,13 @@ def plot_spectrogram(frequencies, times, Sxx, ax=None, *,
                      ref=REFERENCE_PRESSURE_WATER, ymin=1, ymax=None, vmin=0,
                      vmax=200, cmap="jet", title=None, figsize=(10, 6),
                      show_colorbar=True, **mpl_kw):
-    """Spectrogram colormap (dB). Consumes :func:`spectrogram` output."""
+    """Spectrogram colormap (dB). Consumes :func:`spectrogram` output.
+
+    ``ymin`` / ``ymax`` bound the frequency axis and are symmetric: ``None`` on
+    either end takes the record's own first / last bin, so ``ymin=None`` drops
+    the 1 Hz clamp the default applies. A clamp that sits above the record's
+    whole band would reverse the axis, so such a band starts at its own first
+    positive bin instead."""
     Sxx_db = power_to_db(np.asarray(Sxx), ref)
     fig, ax = fig_ax(ax, figsize)
     pcm = ax.pcolormesh(times, frequencies, Sxx_db, cmap=cmap, shading="auto",
@@ -270,7 +365,11 @@ def plot_spectrogram(frequencies, times, Sxx, ax=None, *,
     ax.set_title(title or "Spectrogram", loc="left")
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("Frequency (Hz)")
-    ax.set_ylim((ymin, frequencies[-1] if ymax is None else ymax))
+    hi = float(frequencies[-1] if ymax is None else ymax)
+    ax.set_ylim((float(frequencies[0]), hi) if ymin is None
+                else _clamped_freq_limits(frequencies, ymin, hi))
+    _warn_if_offscreen(ax, frequencies, "plot_spectrogram", "ymin/ymax")
+    _warn_if_colour_saturated(Sxx_db, vmin, vmax, "plot_spectrogram", "vmin/vmax")
     ax.grid(which="both", alpha=0.25, color="black")
     return fig, ax
 
@@ -298,6 +397,8 @@ def plot_constant_q_spectrogram(frequencies, times, power, ax=None, *,
     ax.set_ylabel("Frequency (Hz)")
     ax.set_yscale("log")
     ax.set_ylim((frequencies[0], frequencies[-1]))
+    _warn_if_colour_saturated(power_db, vmin, vmax,
+                              "plot_constant_q_spectrogram", "vmin/vmax")
     ax.grid(which="both", alpha=0.25, color="black")
     return fig, ax
 
@@ -321,6 +422,7 @@ def plot_constant_q_psd(frequencies, power, ax=None, *,
     ax.set_ylabel(f"Level (dB re {unit})")
     ax.set_ylim((ymin, ymax))
     ax.set_xlim(_log_freq_xlim(frequencies))
+    _warn_if_offscreen(ax, power_db, "plot_constant_q_psd", "ymin=/ymax")
     ax.grid(which="both", alpha=0.75)
     if label:
         ax.legend()
@@ -357,6 +459,10 @@ def plot_constant_q_ppsd(result, ax=None, *, scaling="spectrum", ymin=0,
     ax.set_xscale("log")
     ax.set_xlim(_log_freq_xlim(result.frequencies))
     ax.set_ylim((ymin, ymax))
+    # The level axis carries the histogram, not the density: level_edges spans
+    # every row the mesh draws.
+    _warn_if_offscreen(ax, result.level_edges, "plot_constant_q_ppsd",
+                       "ymin=/ymax")
     ax.grid(which="both", alpha=0.5)
     ax.legend(loc="upper right")
     return fig, ax
@@ -496,12 +602,16 @@ def plot_frf(frequencies, tf, ax=None, *, tag="", label=None, ymin=-60,
         ax1, ax2 = ax
         fig = ax1.figure
     lbl = (f"{tag} {label}").strip() if (tag or label) else None
-    ax1.plot(frequencies, 20 * np.log10(np.abs(tf)), label=lbl, **mpl_kw)
+    mag_db = 20 * np.log10(np.abs(tf))
+    ax1.plot(frequencies, mag_db, label=lbl, **mpl_kw)
     ax1.set_title(title or "Frequency response", loc="left")
     ax1.set_ylabel("Magnitude (dB)")
     ax1.set_xscale("log")
     ax1.set_ylim((ymin, ymax))
     ax1.set_xlim(_log_freq_xlim(frequencies))
+    # Only the magnitude panel is pinned to a fixed window; the phase axis
+    # below spans the full ±180° a phase can occupy.
+    _warn_if_offscreen(ax1, mag_db, "plot_frf", "ymin=/ymax")
     ax1.grid(which="both", alpha=0.5)
     ax2.plot(frequencies, np.angle(tf, deg=True), label=lbl, **mpl_kw)
     ax2.set_ylabel("Phase (degrees)")
@@ -518,15 +628,20 @@ def plot_frf(frequencies, tf, ax=None, *, tag="", label=None, ymin=-60,
 
 @typed_plot_error
 def plot_coherence(frequencies, coh, ax=None, *, label=None, title=None,
-                   figsize=(10, 4), **mpl_kw):
-    """Coherence vs frequency. Consumes ``FRF`` ``(frequencies, coh)``."""
+                   ylim=(0.75, 1.01), figsize=(10, 4), **mpl_kw):
+    """Coherence vs frequency. Consumes ``FRF`` ``(frequencies, coh)``.
+
+    ``ylim`` defaults to the near-unity window a well-conditioned FRF lives in;
+    widen it (``ylim=(0, 1.01)``) to see a poorly coherent band, which would
+    otherwise fall entirely below the default axes."""
     fig, ax = fig_ax(ax, figsize)
     ax.plot(frequencies, coh, label=label, **mpl_kw)
     ax.set_xlabel("Frequency (Hz)")
     ax.set_ylabel("Coherence")
     ax.set_xscale("log")
-    ax.set_ylim((0.75, 1.01))
+    ax.set_ylim(ylim)
     ax.set_xlim(_log_freq_xlim(frequencies))
+    _warn_if_offscreen(ax, coh, "plot_coherence", "ylim")
     ax.grid(which="both", alpha=0.5)
     ax.set_title(title or "Coherence", loc="left")
     if label:

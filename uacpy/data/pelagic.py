@@ -35,6 +35,7 @@ from typing import Optional, Union
 from uacpy._log import log_message
 from uacpy.core.environment import BoundaryProperties, Bottom
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.data._geo import Coordinate, as_coordinate, normalize_lon
 from uacpy.data.sediment import (
     bottom_from_grain_size, range_dependent_bottom_along,
@@ -118,7 +119,7 @@ def pelagic_lithology(depth_m: float, lat: float,
             f"(siliceous belt / carbonate compensation depth). Shelf sediment "
             f"is terrigenous. The value returned is a first-principles "
             f"fallback, not a shelf estimate.",
-            UserWarning, stacklevel=2)
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
     if _in_siliceous_belt(lat, lon):
         return 'diatom ooze'               # high-latitude siliceous belt
     if depth_m >= CCD_DEPTH:
@@ -155,6 +156,11 @@ def fetch_bottom_pelagic(point: Coordinate, *, roughness: float = 0.0,
                          timeout=None,
                          verbose: Union[bool, str] = False) -> BoundaryProperties:
     """Model-ready bottom from the pelagic depth/latitude model at ``(lat, lon)``.
+
+    Provenance is catalogue-level: the value is computed from depth and
+    latitude, and no per-cell ``data_point``/``offset_km`` is recorded —
+    unlike the sample sources (``grainsize``, ``mars``), which record the
+    sample the value came from.
 
     The water depth is taken from ``depth`` if given, else fetched from GEBCO
     (local cache, falling back to the live API unless ``cache_only``). The

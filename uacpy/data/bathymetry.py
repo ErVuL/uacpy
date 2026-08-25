@@ -20,6 +20,7 @@ Bathymetry is static in time, so these fetches take coordinates only — the
 """
 
 import json
+import threading
 import time
 import urllib.parse
 import warnings
@@ -29,10 +30,11 @@ import numpy as np
 
 from uacpy.core.constants import EARTH_RADIUS_M
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
+from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.data._geo import (
     Coordinate, as_coordinate, normalize_lon, lon_linspace,
     central_angle, geodesic_waypoints, EARTH_RADIUS_KM,
-    DEFAULT_MAX_TRANSECT_POINTS,
+    DEFAULT_MAX_TRANSECT_POINTS, checked_max_points,
 )
 from uacpy.data._http import http_get
 from uacpy._log import log_message
@@ -59,6 +61,7 @@ OPENTOPODATA_MIN_INTERVAL_S = 1.0
 BATHY_SOURCES = ('api', 'gmrt', 'emodnet', 'local')
 
 _last_request_monotonic = 0.0    # time.monotonic() of the last public-host call
+_rate_limit_lock = threading.Lock()   # serializes the read-sleep-stamp above
 
 
 def _check_source(source):
@@ -192,12 +195,12 @@ def fetch_bathy_transect(
                 f"(~{length_km / max(max_points, 1):.1f} km spacing). Raise "
                 f"max_points, or use GMRT / a self-hosted OpenTopoData for "
                 f"finer sampling.",
-                UserWarning, stacklevel=2)
+                UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
     elif int(n_points) > int(max_points):
         warnings.warn(
             f"fetch_bathy_transect: n_points={n_points} exceeds "
             f"max_points={max_points}; sampling {max_points}.",
-            UserWarning, stacklevel=2)
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
 
     log_message(
         'bathymetry', f"sampling {n} GEBCO depths along "
@@ -238,18 +241,31 @@ def bathy_transect_plan(
     :func:`fetch_bathy_transect` resolves its sampling, so the two can never
     disagree.
     """
+    max_points = checked_max_points(max_points, 'bathy_transect_plan')
     length_km = central_angle(start, end) * EARTH_RADIUS_KM
     # +1 closes the fencepost: n samples span n-1 native-resolution intervals.
     native = int(np.ceil(length_km / GEBCO_NATIVE_KM)) + 1
     if n_points == 'auto':
-        n = min(native, int(max_points))
+        n = min(native, max_points)
     else:
-        if int(n_points) < 2:
+        try:
+            n_requested = int(n_points)
+            if n_requested != n_points:
+                raise ValueError
+        except (TypeError, ValueError) as exc:
+            raise ConfigurationError(
+                f"bathy_transect_plan: n_points={n_points!r} is not a "
+                f"sample count. Valid forms: an integer >= 2, or 'auto' "
+                f"for GEBCO native resolution.",
+                remediation="Pass n_points as an int (e.g. n_points=50) "
+                            "or n_points='auto'.",
+            ) from exc
+        if n_requested < 2:
             raise ConfigurationError(
                 f"bathy_transect_plan: n_points must be >= 2, got {n_points}.",
                 remediation="Pass n_points>=2 (or 'auto') to define a transect.",
             )
-        n = min(int(n_points), int(max_points))
+        n = min(n_requested, max_points)
     lats, lons, ranges_m = geodesic_waypoints(start, end, n)
     return {'n_points': int(n), 'native_points': native, 'lats': lats,
             'lons': lons, 'ranges_m': ranges_m}
@@ -378,14 +394,26 @@ def _fetch_elevations(
 
 def _rate_limit() -> None:
     """Block until at least ``OPENTOPODATA_MIN_INTERVAL_S`` has passed since the
-    last public-host call, so chunked fetches stay under the ≤1 req/s limit."""
+    last public-host call, so chunked fetches stay under the ≤1 req/s limit.
+
+    The lock spans the wait as well as the stamp, so concurrent callers queue
+    one interval apart instead of each reading the same stale timestamp and
+    firing together: eight threads at a 0.2 s interval left 0.2 ms between
+    their calls unguarded, against the 1.4 s the limit asks for.
+
+    The state is per-process, so a fan-out across :mod:`uacpy.parallel` (a
+    ``ProcessPoolExecutor``) still gets one budget *per worker*. Lower
+    ``OPENTOPODATA_MIN_INTERVAL_S``'s reciprocal by the worker count, or point
+    ``base_url`` at a self-hosted OpenTopoData, before fetching in parallel.
+    """
     global _last_request_monotonic
     interval = OPENTOPODATA_MIN_INTERVAL_S
-    if interval > 0.0:
-        wait = interval - (time.monotonic() - _last_request_monotonic)
-        if wait > 0.0:
-            time.sleep(wait)
-    _last_request_monotonic = time.monotonic()
+    with _rate_limit_lock:
+        if interval > 0.0:
+            wait = interval - (time.monotonic() - _last_request_monotonic)
+            if wait > 0.0:
+                time.sleep(wait)
+        _last_request_monotonic = time.monotonic()
 
 
 def _fetch_depths(

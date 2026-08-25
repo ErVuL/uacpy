@@ -1,16 +1,24 @@
 """
-Readers for Kraken normal-mode files (binary ``.mod``).
+Readers for Kraken normal-mode files (binary ``.mod``, ASCII ``.moa``).
 
 * ``read_modes`` — read a ``.mod`` and attach the halfspace parameters.
 * ``read_modes_bin`` — binary ``.mod``.
+* ``read_modes_asc`` — ASCII ``.moa``.
+* ``get_component`` — one component of the stress-displacement vector of an
+  elastic-medium mode set.
 
 The binary direct-access ``.mod`` is the only mode format any
-Acoustics-Toolbox program writes; a non-``.mod`` path raises
-:class:`~uacpy.core.exceptions.FileFormatError`.
+Acoustics-Toolbox program *writes*, so :func:`read_modes` takes ``.mod``
+only and a non-``.mod`` path raises
+:class:`~uacpy.core.exceptions.FileFormatError`. :func:`read_modes_asc` is
+the reader for an ASCII ``.moa`` produced elsewhere — the AT Matlab tools or
+another OALIB-family code — and is called directly, not through
+:func:`read_modes`.
 """
 
 import os
-from typing import Any, Dict, Optional, Union
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
 
@@ -18,7 +26,9 @@ from uacpy.core.acoustics import pekeris_root
 from uacpy.core.exceptions import (
     ConfigurationError, FileFormatError,
 )
-from uacpy.io._fortran_helpers import PARSE_ERRORS, detect_endian
+from uacpy.io._fortran_helpers import (
+    PARSE_ERRORS, detect_endian, list_directed_int, typed_format_error,
+)
 
 
 def _fortran_div(numerator: int, denominator: int) -> int:
@@ -32,6 +42,323 @@ def _fortran_div(numerator: int, denominator: int) -> int:
     if numerator < 0:
         return -((-numerator) // denominator)
     return numerator // denominator
+
+
+#: The four components of the stress-displacement vector KRAKEL tabulates in
+#: an elastic medium, in the order it writes them
+#: (``Matlab/ReadWrite/get_component.m:29-41``): horizontal displacement,
+#: vertical displacement, tangential stress, normal stress.
+_ELASTIC_COMPONENTS = ('H', 'V', 'T', 'N')
+
+
+def get_component(modes_dict: Dict[str, Any], comp: str) -> np.ndarray:
+    """
+    Extract one component of the stress-displacement vector from a Kraken
+    mode set.
+
+    In an **elastic** medium a mode is a four-component vector at each mesh
+    point — horizontal displacement, vertical displacement, tangential
+    stress, normal stress — stacked into consecutive rows of ``phi``. In an
+    acoustic medium a mode is the single pressure row. This walks the media
+    in order and pulls the requested component out of each elastic block
+    while copying each acoustic row through, so the result is one row per
+    depth whatever the medium stack is.
+
+    Parameters
+    ----------
+    modes_dict : dict
+        A mode set as :func:`read_modes_bin` returns it. Uses:
+
+        - ``'phi'`` : ndarray ``(nrows, nmodes)`` — the stacked rows.
+        - ``'z'`` : ndarray — the depth axis.
+        - ``'Nmedia'`` : int — how many media; one when the key is absent.
+        - ``'Mater'`` : sequence of str, optional — ``'ACOUSTIC'`` or
+          ``'ELASTIC'`` per medium. Absent, every medium is taken as
+          acoustic, which is what the shipped solvers produce: without
+          KRAKEL, ``Mater`` never contains ``'ELASTIC'`` and this reduces to
+          a copy of ``phi``.
+    comp : str
+        One of ``'H'``, ``'V'``, ``'T'``, ``'N'``. Any of the four returns
+        the pressure row for an acoustic medium; the choice only selects
+        inside an elastic block. The value is validated up front, so a typo
+        raises even on an all-acoustic mode set rather than being ignored.
+
+    Returns
+    -------
+    phi : ndarray
+        The extracted component, shape ``(nz, nmodes)``.
+
+    Raises
+    ------
+    ~uacpy.core.exceptions.ConfigurationError
+        ``comp`` is not one of the four components, or ``Mater`` names a
+        material that is neither ``'ACOUSTIC'`` nor ``'ELASTIC'``.
+    ~uacpy.core.exceptions.FileFormatError
+        The mode set holds no modes (``M == 0``), so there is nothing to
+        extract.
+
+    Notes
+    -----
+    KRAKEL tabulates modes on its finite-difference grid; KRAKEN and KRAKENC
+    subtabulate to the receiver depths and do **not** tabulate inside an
+    elastic medium at all. The walk therefore stops as soon as it runs past
+    the last row of ``phi`` (``get_component.m:20-22`` returns there), which
+    is how a KRAKEN file with an elastic layer terminates cleanly instead of
+    indexing off the end.
+
+    References
+    ----------
+    Translated from ``Matlab/ReadWrite/get_component.m`` (mbp, 2010).
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> modes = {'phi': np.arange(12.0).reshape(6, 2), 'z': np.zeros(6),
+    ...          'Nmedia': 1, 'Mater': ['ACOUSTIC']}
+    >>> get_component(modes, 'N').shape
+    (6, 2)
+
+    An elastic medium stacks four rows per depth; ``'V'`` takes the second
+    of each group:
+
+    >>> modes = {'phi': np.arange(8.0).reshape(8, 1), 'z': np.zeros(2),
+    ...          'Nmedia': 1, 'Mater': ['ELASTIC']}
+    >>> get_component(modes, 'V').ravel()
+    array([1., 5.])
+    """
+    if comp not in _ELASTIC_COMPONENTS:
+        raise ConfigurationError(
+            f"get_component(comp={comp!r}) is not a component of the "
+            f"stress-displacement vector.",
+            remediation="Use 'H' (horizontal displacement), 'V' (vertical "
+                        "displacement), 'T' (tangential stress) or 'N' "
+                        "(normal stress).",
+        )
+
+    phi_full = np.asarray(modes_dict["phi"])
+    z = modes_dict["z"]
+    n_media = int(modes_dict.get("Nmedia", 1))
+    # A flat list of per-medium material names. The fallback is all-acoustic
+    # rather than a nested placeholder: with the shipped solvers (no KRAKEL)
+    # ``Mater`` never contains 'ELASTIC', so the acoustic path is the one a
+    # caller without the key means.
+    mater = list(modes_dict.get("Mater") or [])
+
+    rows: List[np.ndarray] = []
+    jj = 0    # depth index across all media
+    k = 0     # row index into phi
+
+    for medium in range(n_media):
+        for _ in range(len(z)):
+            # KRAKEN / KRAKENC do not tabulate inside an elastic medium, so
+            # phi runs out before the media do (get_component.m:20-22).
+            if k >= phi_full.shape[0]:
+                break
+
+            material = (str(mater[medium]).strip().upper()
+                        if medium < len(mater) else "ACOUSTIC")
+
+            if material == "ACOUSTIC":
+                if jj < len(z):
+                    rows.append(phi_full[k, :])
+                k += 1
+            elif material == "ELASTIC":
+                if jj < len(z):
+                    rows.append(phi_full[k + _ELASTIC_COMPONENTS.index(comp), :])
+                k += 4
+            else:
+                raise ConfigurationError(
+                    f"get_component: medium {medium + 1} has material "
+                    f"{material!r}; a Kraken mode file describes each medium "
+                    f"as 'ACOUSTIC' or 'ELASTIC' "
+                    f"(Kraken/kraken.f90 writes the 8-character name).",
+                    remediation="Check the mode file was read by "
+                                "read_modes_bin; a hand-built dict must use "
+                                "one of those two names.",
+                )
+            jj += 1
+
+    if not rows:
+        raise FileFormatError(
+            "get_component: the modes set contains no readable modes (M=0) — "
+            "nothing to extract. The waveguide is likely below modal cutoff "
+            "at this frequency; check the .mod record before requesting a "
+            "component."
+        )
+    return np.array(rows)
+
+
+@typed_format_error
+def read_modes_asc(
+    filename: Union[str, Path],
+    modes: Optional[Union[int, list, np.ndarray]] = None,
+) -> Dict[str, Any]:
+    """
+    Read a KRAKEN ASCII mode file (``.moa``) — the text sibling of the
+    binary ``.mod`` :func:`read_modes_bin` parses.
+
+    Parameters
+    ----------
+    filename : str or Path
+        Path to the mode file, extension included.
+    modes : int, list or ndarray, optional
+        Mode indices to keep, **1-indexed** (the Fortran/MATLAB
+        convention). An int selects that one mode; ``None`` (default) keeps
+        all of them. Indices outside ``1..M`` are dropped rather than
+        raising, matching ``read_modes_asc.m:41-43``.
+
+    Returns
+    -------
+    Modes : dict
+        - ``'pltitl'`` / ``'title'`` : str — the title line (both keys, so
+          the dict reads like the binary reader's).
+        - ``'freq'`` : float — frequency in Hz; ``'freqVec'`` is the same
+          value as a one-element array and ``'Nfreq'`` is 1.
+        - ``'Nmedia'``, ``'ntot'``, ``'nmat'`` : int — medium count, total
+          depth points, total matrix rows.
+        - ``'M'`` : int — the number of modes **returned**, i.e.
+          ``len(k)``, the same meaning ``read_modes_bin`` gives it.
+        - ``'z'`` : ndarray ``(ntot,)`` — depths in metres.
+        - ``'k'`` : complex ndarray ``(M,)`` — horizontal wavenumbers in
+          rad/m; the imaginary part is the attenuation.
+        - ``'phi'`` : complex ndarray ``(ntot, M)`` — mode shapes.
+
+    Raises
+    ------
+    ~uacpy.core.exceptions.FileFormatError
+        The file is absent or malformed, or a declared count is
+        non-positive.
+
+    Notes
+    -----
+    Layout, in the order ``read_modes_asc.m`` scans it: the record length
+    (unused in ASCII), the title line, ``freq Nmedia ntot nmat M``, one line
+    per medium, the top and bottom halfspace lines, a blank line, the depth
+    axis, the wavenumbers, then for each mode a separator line followed by
+    the mode shape.
+
+    **Complex values are stored as interleaved ``(Re, Im)`` pairs**, not as
+    a real block followed by an imaginary block: the reference reader takes
+    them with ``fscanf( fid, '%f', [ 2, N ] )``
+    (``read_modes_asc.m:33,50``), which fills a 2-by-N array in column
+    order. Both the wavenumber record and every mode-shape record follow
+    that, and reading them as two blocks silently returns the first half of
+    the file's values as real parts of everything.
+
+    The medium and halfspace records are skipped, as the reference skips
+    them (``read_modes_asc.m:26-32``). They are **not** parsed into a
+    ``Top``/``Bot`` pair here: no shipped Acoustics-Toolbox program writes
+    this format — every ``MODFile`` OPEN is ``ACCESS = 'DIRECT'``
+    (``Kraken/kraken.f90:588``, ``Kraken/krakenc.f90:439,631``,
+    ``Krakel/krakel.f90:493``) — so their column layout is not established
+    by any producer, and inventing one would put fabricated halfspace speeds
+    into a caller's modal sum. Read the binary ``.mod`` through
+    :func:`read_modes` when the halfspace terms are needed.
+
+    References
+    ----------
+    Translated from ``Matlab/ReadWrite/read_modes_asc.m``.
+
+    See Also
+    --------
+    read_modes_bin : The binary ``.mod`` reader.
+    get_component : Pull one component out of an elastic mode set.
+    """
+    filename = Path(filename)
+    if not filename.exists():
+        raise FileFormatError(
+            f"read_modes_asc: mode file not found: {filename}.",
+            remediation="Check the path; the ASCII .moa is written by the "
+                        "AT Matlab tools, not by the shipped solvers.",
+        )
+
+    with open(filename, "r") as fid:
+        # Each numeric record below is a token stream that may span lines,
+        # mirroring the reference reader's ``fscanf( fid, '%f', N )``: a
+        # Fortran runtime may wrap a long record and this must not care.
+        def _read_floats(n: int, what: str) -> np.ndarray:
+            values: list = []
+            while len(values) < n:
+                line = fid.readline()
+                if line == '':
+                    raise FileFormatError(
+                        f"read_modes_asc: {filename} ended while reading "
+                        f"{what} — expected {n} values, found {len(values)}.",
+                        remediation="The file is truncated; verify it was "
+                                    "written completely.",
+                    )
+                values.extend(float(tok) for tok in line.split())
+            # A list-directed WRITE ends each record with a newline, so the
+            # surplus tokens of the final line belong to this record's
+            # padding, not to the next one.
+            return np.array(values[:n], dtype=float)
+
+        def _read_complex(n: int, what: str) -> np.ndarray:
+            """``fscanf( fid, '%f', [ 2, n ] )``: interleaved (Re, Im)."""
+            pairs = _read_floats(2 * n, what).reshape(n, 2)
+            return pairs[:, 0] + 1j * pairs[:, 1]
+
+        list_directed_int(fid.readline())          # lrecl, unused in ASCII
+        pltitl = fid.readline().strip()
+        params = _read_floats(5, "freq Nmedia ntot nmat M")
+        freq = float(params[0])
+        n_media = int(params[1])
+        ntot = int(params[2])
+        nmat = int(params[3])
+        n_modes_total = int(params[4])
+
+        if ntot <= 0 or n_media <= 0:
+            raise FileFormatError(
+                f"read_modes_asc: {filename} declares Nmedia={n_media}, "
+                f"ntot={ntot}; both must be positive.",
+                remediation="Check the 'freq Nmedia ntot nmat M' record — a "
+                            "misaligned file reads the wrong line as it.",
+            )
+
+        for _ in range(n_media):
+            fid.readline()                         # per-medium record
+        fid.readline()                             # top halfspace
+        fid.readline()                             # bottom halfspace
+        fid.readline()                             # blank line
+
+        z = _read_floats(ntot, f"{ntot} depths")
+        k_all = _read_complex(n_modes_total,
+                              f"{n_modes_total} wavenumbers")
+
+        if modes is None:
+            wanted = list(range(1, n_modes_total + 1))
+        elif isinstance(modes, (int, np.integer)):
+            wanted = [int(modes)]
+        else:
+            wanted = [int(m) for m in modes]
+        wanted = [m for m in wanted if 1 <= m <= n_modes_total]
+
+        k_selected = k_all[[m - 1 for m in wanted]]
+        phi = np.zeros((ntot, len(wanted)), dtype=complex)
+
+        for mode_num in range(1, n_modes_total + 1):
+            fid.readline()                         # per-mode separator line
+            shape = _read_complex(ntot, f"mode {mode_num} shape ({ntot} "
+                                        f"depths)")
+            if mode_num in wanted:
+                phi[:, wanted.index(mode_num)] = shape
+
+    return {
+        "pltitl": pltitl,
+        "title": pltitl,
+        "freq": freq,
+        "freqVec": np.asarray([freq], dtype=float),
+        "Nfreq": 1,
+        "Nmedia": n_media,
+        "ntot": ntot,
+        "nmat": nmat,
+        # len(k), the same meaning read_modes_bin gives M.
+        "M": len(k_selected),
+        "z": z,
+        "k": k_selected,
+        "phi": phi,
+    }
+
 
 
 def read_modes_bin(
@@ -517,10 +844,13 @@ def read_modes(
         raise FileFormatError(
             f"read_modes: {filename} is not a binary .mod mode file; the "
             f"binary direct-access .mod is the only mode format any "
-            f"Acoustics-Toolbox program writes (the '.moa' ASCII reader was "
-            f"removed — no AT program ever produced that format).",
+            f"Acoustics-Toolbox program writes, and it is the only one this "
+            f"dispatcher can attach halfspace terms to.",
             remediation="Read the solver's .mod output, or pass the root "
-                        "name and let '.mod' be appended.",
+                        "name and let '.mod' be appended. An ASCII '.moa' "
+                        "written by the AT Matlab tools is read by "
+                        "read_modes_asc directly (it carries no halfspace "
+                        "record this function could use).",
         )
     Modes = read_modes_bin(filename, frequency, modes, profile=profile)
     freq_diff = np.abs(Modes["freqVec"] - frequency)

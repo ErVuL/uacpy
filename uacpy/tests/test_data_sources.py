@@ -11,13 +11,18 @@ from uacpy.data import environment as env_mod
 
 
 def test_catalogue_pins_the_registry():
-    # The documented catalogue: 20 entries, keyed by the *_sources ids.
-    assert len(sources.SOURCES) == 20
+    # The documented catalogue: 21 entries, keyed by the *_sources ids.
+    # 'deck41' is its own entry rather than being reported as 'grainsize':
+    # the two local sediment indices are different datasets with different
+    # licences and DOIs, and `fetch_sediment_sample` answers from whichever
+    # is nearer, so citing both under one name credited a dataset the value
+    # never touched.
+    assert len(sources.SOURCES) == 21
     assert set(sources.SOURCES) == {
         'gebco', 'gmrt', 'emodnet_dtm', 'woa23', 'argo', 'copernicus',
         'glodap', 'copernicus_bgc', 'nbs', 'ww3', 'waverys', 'seaice',
         'emodnet', 'globsed', 'crust1', 'diesing', 'pelagic', 'mars',
-        'graw', 'grainsize'}
+        'graw', 'grainsize', 'deck41'}
 
 
 def test_catalogue_complete_and_consistent():

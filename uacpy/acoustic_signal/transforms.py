@@ -6,6 +6,11 @@ coefficients -> reverse. Only :func:`inverse_fk` is a true inverse (an
 ``ifft2``); :func:`inverse_taup` and :func:`inverse_radon` are the matched
 *adjoints* (back-projection), so a forward-then-reverse round trip is
 band-limited, not exact.
+
+All three agree on sign: a wave travelling towards +x at speed ``c`` has
+apparent slowness ``p = +1/c`` in the tau-p and Radon panels and sits at
+``k = +ω/c`` in the f-k panel. The f-k spatial axis is therefore the negative
+of raw ``np.fft.fft2`` indexing (see :func:`_flip_wavenumber_axis`).
 """
 
 from __future__ import annotations
@@ -16,6 +21,7 @@ import numpy as np
 from scipy.signal import get_window
 
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.acoustic_signal._signal_validate import require_positive_finite_scalar
 
 
 _RADON_KINDS = ("linear", "parabolic", "hyperbolic")
@@ -46,7 +52,8 @@ def _fk_tapers(window, nt, nx):
     if isinstance(window, list):
         if len(window) != 2:
             raise ConfigurationError(
-                "fk_transform: window list must be [time_window, space_window]")
+                "fk_transform: window list must be [time_window, space_window]"
+                f"; got {len(window)} entries")
         t_spec, x_spec = window
     else:
         t_spec = x_spec = window
@@ -63,13 +70,43 @@ def _fk_nfft(nfft, nt, nx):
         nfft = tuple(nfft)
         if len(nfft) != 2:
             raise ConfigurationError(
-                "fk_transform: nfft must be an int or (n_time, n_space)")
+                "fk_transform: nfft must be an int or (n_time, n_space)"
+                f"; got {len(nfft)} entries")
         NT, NX = int(nfft[0]), int(nfft[1])
     if NT < nt or NX < nx:
         raise ConfigurationError(
             f"fk_transform: nfft {(NT, NX)} must be >= data shape {(nt, nx)} "
             "(zero-pad only, no truncation)")
     return NT, NX
+
+
+def _require_scalar_geometry(caller, sample_rate, dx, signature):
+    """Reject an array where a scalar ``sample_rate``/``dx`` belongs.
+
+    ``inverse_taup`` and ``inverse_radon`` both take a panel, a parameter axis
+    and the scalar geometry, but in different positions, so passing one's
+    argument order to the other lands an array on a scalar slot. Catching it
+    here names the expected signature instead of failing later inside numpy.
+    """
+    for name, value in (("sample_rate", sample_rate), ("dx", dx)):
+        if np.ndim(value) != 0:
+            raise ConfigurationError(
+                f"{caller}: {name} must be a scalar, got an array of shape "
+                f"{np.shape(value)} — check the argument order, which is "
+                f"{signature}.")
+
+
+def _flip_wavenumber_axis(F):
+    """Negate the spatial-frequency convention of an unshifted 2-D DFT.
+
+    numpy's ``fft2`` carries ``exp(-i2π(ft + νx))``, which puts a wave
+    travelling towards +x on ``ω = -c·k``. Reversing the (unshifted) spatial
+    axis re-indexes column ``ν`` to hold ``-ν``, so the wave lands on
+    ``ω = +c·k`` — the package-wide ``k = ω/c`` convention that
+    :func:`taup_transform` and :func:`radon_transform` already use. The map is
+    its own inverse, so :func:`inverse_fk` applies the same reversal.
+    """
+    return np.roll(F[:, ::-1], 1, axis=1)
 
 
 def _moveout_times(kind, taus, x, m):
@@ -117,9 +154,14 @@ def radon_transform(data, sample_rate, dx, moveout, kind="linear", x0=0.0):
     """
     d = np.asarray(data, dtype=float)
     if d.ndim != 2:
-        raise ConfigurationError("radon_transform: data must be 2-D (nt, nx)")
+        raise ConfigurationError(
+            "radon_transform: data must be 2-D (nt, nx)"
+            f"; got shape {d.shape}")
     nt, nx = d.shape
-    x = np.arange(nx) * float(dx) - float(x0)
+    sample_rate = require_positive_finite_scalar(
+        sample_rate, "radon_transform", "sample_rate", " Hz")
+    dx = require_positive_finite_scalar(dx, "radon_transform", "dx", " m")
+    x = np.arange(nx) * dx - float(x0)
     moveout = np.atleast_1d(np.asarray(moveout, dtype=float))
     if kind == "hyperbolic" and np.any(moveout <= 0):
         raise ConfigurationError(
@@ -140,54 +182,93 @@ def inverse_radon(R, sample_rate, dx, moveout, nx, kind="linear", x0=0.0):
 
     Spreads each Radon sample back along its moveout curve. This is the matched
     adjoint, not a least-squares inverse, so a forward-then-adjoint round trip is
-    band-limited, not exact.
+    band-limited, not exact. It is the exact transpose of
+    :func:`radon_transform` for every ``kind`` — ``<L x, y> == <x, A y>`` to
+    machine precision — which is what an iterative least-squares (sparse Radon)
+    solver needs.
+
+    ``sample_rate``/``dx`` are the geometry and ``moveout`` the scanned
+    parameter axis; note the order differs from :func:`inverse_taup`, whose
+    slowness axis comes second.
     """
     R = np.asarray(R, dtype=float)
     if R.ndim != 2:
-        raise ConfigurationError("inverse_radon: R must be 2-D (n_moveout, nt)")
+        raise ConfigurationError(
+            "inverse_radon: R must be 2-D (n_moveout, nt)"
+            f"; got shape {R.shape}")
     nm, nt = R.shape
+    _require_scalar_geometry(
+        "inverse_radon", sample_rate, dx,
+        "inverse_radon(R, sample_rate, dx, moveout, nx)")
     moveout = np.atleast_1d(np.asarray(moveout, dtype=float))
     if moveout.size != nm:
-        raise ConfigurationError("inverse_radon: moveout length must match R rows")
+        raise ConfigurationError(
+            f"inverse_radon: moveout length ({moveout.size}) must match R rows "
+            f"({nm}); the signature is inverse_radon(R, sample_rate, dx, "
+            "moveout, nx) — the moveout axis comes fourth, unlike "
+            "inverse_taup where the slowness axis comes second.")
     if kind == "hyperbolic" and np.any(moveout <= 0):
         raise ConfigurationError(
             "inverse_radon: hyperbolic moveout is a velocity (m/s) and the "
             "moveout curve sqrt(tau^2 + (x/v)^2) divides by it, so every "
             f"value must be > 0; got min {moveout.min()}.")
-    taus = np.arange(nt) / float(sample_rate)
+    fs = float(sample_rate)
+    taus = np.arange(nt) / fs
     x = np.arange(int(nx)) * float(dx) - float(x0)
     out = np.zeros((nt, int(nx)))
     for i, m in enumerate(moveout):
         for ix in range(int(nx)):
-            tt = _moveout_times(kind, taus, x[ix], m)
-            out[:, ix] += np.interp(taus, tt, R[i], left=0.0, right=0.0)
+            # Scatter: each Radon sample is split between the two grid samples
+            # straddling t(tau, x) with the same weights the forward
+            # `np.interp` gives them, which is the transpose of that
+            # interpolation. Gathering instead — reading the curve back with
+            # `np.interp(taus, tt, ...)` — only coincides with the transpose
+            # when the moveout is a pure time shift (linear, parabolic); a
+            # hyperbolic curve compresses near tau=0 and the gather returns
+            # early samples at a fraction of their forward weight.
+            idx = _moveout_times(kind, taus, x[ix], m) * fs
+            inside = (idx >= 0.0) & (idx <= nt - 1)
+            j = np.floor(idx[inside]).astype(int)
+            w = idx[inside] - j
+            r = R[i][inside]
+            out[:, ix] += np.bincount(j, weights=(1.0 - w) * r,
+                                      minlength=nt)[:nt]
+            out[:, ix] += np.bincount(j + 1, weights=w * r,
+                                      minlength=nt + 1)[:nt]
     return out
 
 
 def taup_transform(data, sample_rate, dx, slownesses=None, n_slowness=201,
-                   p_max=None, *, window=None, nfft=None):
+                   p_max=None, *, x0=0.0, window=None, nfft=None):
     """Forward linear tau-p (slant stack), frequency-domain.
 
     Returns a :class:`TauPResult` namedtuple ``(slownesses, taus, panel)``:
     slowness axis (s/m), intercept-time axis (s), and the panel ``(n_slowness,
     NT)``.
 
-    ``window`` is a temporal :func:`scipy.signal.get_window` spec (name or
-    ``(name, *params)`` tuple) applied down each trace before the time FFT to
-    curb leakage; ``None`` is rectangular. ``nfft`` zero-pads the time FFT to
-    ``NT >= nt`` samples (finer ``tau`` spacing); ``None`` keeps ``nt``.
+    ``x0`` is the reference offset (m) subtracted from the sensor positions, as
+    in :func:`radon_transform` — it walks the same moveout curve
+    ``t = tau + p*(x - x0)``, so the two agree only when both are given the
+    same ``x0``. ``window`` is a temporal :func:`scipy.signal.get_window` spec
+    (name or ``(name, *params)`` tuple) applied down each trace before the time
+    FFT to curb leakage; ``None`` is rectangular. ``nfft`` zero-pads the time
+    FFT to ``NT >= nt`` samples (finer ``tau`` spacing); ``None`` keeps ``nt``.
     """
     d = np.asarray(data, dtype=float)
     if d.ndim != 2:
-        raise ConfigurationError("taup_transform: data must be 2-D (nt, nx)")
+        raise ConfigurationError(
+            "taup_transform: data must be 2-D (nt, nx)"
+            f"; got shape {d.shape}")
     nt, nx = d.shape
-    fs = float(sample_rate)
+    fs = require_positive_finite_scalar(sample_rate, "taup_transform",
+                                        "sample_rate", " Hz")
+    dx = require_positive_finite_scalar(dx, "taup_transform", "dx", " m")
     NT = nt if nfft is None else int(nfft)
     if NT < nt:
         raise ConfigurationError(
             f"taup_transform: nfft ({NT}) must be >= nt ({nt}) (zero-pad only)")
     d = d * _taper(window, nt)[:, None]
-    x = np.arange(nx) * float(dx)
+    x = np.arange(nx) * dx - float(x0)
     if slownesses is None:
         if p_max is None:
             # +/- 1e-3 s/m: everything with an apparent velocity above
@@ -208,21 +289,35 @@ def taup_transform(data, sample_rate, dx, slownesses=None, n_slowness=201,
     return TauPResult(slownesses, np.arange(NT) / fs, taup)
 
 
-def inverse_taup(taup, slownesses, sample_rate, dx, nx):
+def inverse_taup(taup, slownesses, sample_rate, dx, nx, *, x0=0.0):
     """Adjoint slant stack ``(n_slowness, nt) -> (nt, nx)``.
 
     Standalone inverse — pass a tau-p panel you already have (e.g. a filtered
     one) plus its slowness axis and geometry; no prior :func:`taup_transform`
-    call needed.
+    call needed. ``x0`` is the reference offset (m) the forward transform used;
+    pass the same value back.
+
+    The slowness axis comes **second** here, while :func:`inverse_radon` takes
+    its moveout axis **fourth** (after ``sample_rate`` and ``dx``). Both are
+    positional arrays, so the two orders are not interchangeable; the scalar
+    geometry arguments are type-checked below to catch the swap.
     """
     u = np.asarray(taup, dtype=float)
     if u.ndim != 2:
-        raise ConfigurationError("inverse_taup: taup must be 2-D (n_slowness, nt)")
+        raise ConfigurationError(
+            "inverse_taup: taup must be 2-D (n_slowness, nt)"
+            f"; got shape {u.shape}")
     n_p, nt = u.shape
+    _require_scalar_geometry("inverse_taup", sample_rate, dx,
+                             "inverse_taup(taup, slownesses, sample_rate, dx, nx)")
     slownesses = np.atleast_1d(np.asarray(slownesses, dtype=float))
     if slownesses.size != n_p:
-        raise ConfigurationError("inverse_taup: slownesses length must match taup rows")
-    x = np.arange(int(nx)) * float(dx)
+        raise ConfigurationError(
+            f"inverse_taup: slownesses length ({slownesses.size}) must match "
+            f"taup rows ({n_p}); the signature is inverse_taup(taup, "
+            "slownesses, sample_rate, dx, nx) — the slowness axis comes "
+            "second, unlike inverse_radon where it comes fourth.")
+    x = np.arange(int(nx)) * float(dx) - float(x0)
     U = np.fft.rfft(u, axis=1)
     omega = 2.0 * np.pi * np.fft.rfftfreq(nt, 1.0 / float(sample_rate))
     D = np.zeros((omega.size, int(nx)), dtype=complex)
@@ -259,8 +354,11 @@ def inverse_fk(FK):
             "element of fk_transform's result), not the whole FKResult tuple.")
     fk = np.asarray(FK)
     if fk.ndim != 2:
-        raise ConfigurationError("inverse_fk: FK must be 2-D (nt, nx)")
-    return np.real(np.fft.ifft2(np.fft.ifftshift(fk, axes=(0, 1))))
+        raise ConfigurationError(
+            "inverse_fk: FK must be 2-D (nt, nx)"
+            f"; got shape {fk.shape}")
+    return np.real(np.fft.ifft2(
+        _flip_wavenumber_axis(np.fft.ifftshift(fk, axes=(0, 1)))))
 
 
 def fk_transform(data, sample_rate, dx, *, nperseg=None, noverlap=None,
@@ -270,7 +368,12 @@ def fk_transform(data, sample_rate, dx, *, nperseg=None, noverlap=None,
     Returns an :class:`FKResult` namedtuple ``(frequencies, wavenumbers, power,
     spectrum)``. ``frequencies`` are in Hz; ``wavenumbers`` is the **angular**
     wavenumber ``k = 2π·ν`` in **rad/m** (the package-wide ``k = ω/c``
-    convention), so a wave of speed ``c`` sits on the line ``ω = c·k``.
+    convention), so a wave travelling towards +x at speed ``c`` sits on the
+    line ``ω = +c·k`` — the same sign as the apparent slowness ``p = +1/c``
+    that :func:`taup_transform` and :func:`radon_transform` report for it.
+    The spatial axis is therefore the negative of raw ``np.fft.fft2``
+    indexing, whose ``exp(-i2πνx)`` kernel would place that wave on
+    ``ω = -c·k``; directional f-k muting must use this sign.
     ``power`` is the real ``|FK|^2`` panel (fftshifted); when ``normalize=True``
     it is a PSD density per ``Hz·rad/m`` with ``ΣP·Δf·Δk = ⟨x²⟩``. Whenever the
     settings yield a single segment (``nperseg=None``, i.e. the whole record, or
@@ -300,9 +403,13 @@ def fk_transform(data, sample_rate, dx, *, nperseg=None, noverlap=None,
     """
     d = np.asarray(data)
     if d.ndim != 2:
-        raise ConfigurationError("fk_transform: data must be 2-D (nt, nx)")
+        raise ConfigurationError(
+            "fk_transform: data must be 2-D (nt, nx)"
+            f"; got shape {d.shape}")
     nt, nx = d.shape
-    fs = float(sample_rate)
+    fs = require_positive_finite_scalar(
+        sample_rate, "fk_transform", "sample_rate", " Hz")
+    dx = require_positive_finite_scalar(dx, "fk_transform", "dx", " m")
     seg = nt if nperseg is None else int(nperseg)
     if seg > nt or seg < 1:
         raise ConfigurationError(
@@ -323,7 +430,8 @@ def fk_transform(data, sample_rate, dx, *, nperseg=None, noverlap=None,
     for s0 in starts:
         block = d[s0:s0 + seg]
         bw = block * wt[:, None] * wx[None, :]
-        FKc = np.fft.fftshift(np.fft.fft2(bw, s=(NF, NX)), axes=(0, 1))
+        FKc = np.fft.fftshift(
+            _flip_wavenumber_axis(np.fft.fft2(bw, s=(NF, NX))), axes=(0, 1))
         last_spectrum = FKc
         FKp = np.abs(FKc) ** 2
         if normalize:
@@ -339,6 +447,8 @@ def fk_transform(data, sample_rate, dx, *, nperseg=None, noverlap=None,
     # Angular wavenumber k = 2π·ν in rad/m (ν = fftfreq is cycles/m), matching
     # the package-wide convention k = ω/c used by the models: a wave of speed c
     # lies on the line ω = c·k (i.e. f = c·k/2π — the acoustic "sound cone").
+    # The axis needs no negation here because `_flip_wavenumber_axis` already
+    # re-indexed the panel columns onto it.
     wavenumbers = 2.0 * np.pi * np.fft.fftshift(np.fft.fftfreq(NX, d=dx))
     spectrum = last_spectrum if n_seg == 1 else None
     return FKResult(freqs, wavenumbers, power, spectrum)

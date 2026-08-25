@@ -3,10 +3,10 @@
 OASSP is a post-processor: it consumes the ``.rhs`` an OASP run with option
 ``'s'`` writes and returns one realization of the scattered field, in OASP's
 own ``.trf`` format. Everything a wrapper can get wrong here fails *silently* —
-``GETOPT``'s closing ``ELSE`` is empty (``unoassp30.f:1049``), Block VIII is
+``GETOPT``'s closing ``ELSE`` is empty (``unoassp30.f:1050``), Block VIII is
 overwritten from the ``.rhs`` with a warning covering only two of its four
 fields (``:181-188``), and a roughness spectrum attached to the wrong layer
-leaves ``CLEN = 0`` on the one that scatters (``oaseun31.f:100``). So the
+leaves ``CLEN = 0`` on the one that scatters (``oaseun31.f:102``). So the
 writer tests below parse the deck off disk rather than re-deriving it, and the
 chain tests read the binary's own echo.
 """
@@ -21,6 +21,10 @@ import uacpy
 from uacpy.core.exceptions import ConfigurationError, UnsupportedFeatureError
 from uacpy.io.oases_writer import write_oassp_input
 from uacpy.io.oases_reader import read_oases_rhs_header
+from uacpy.core import BoundaryProperties, Environment
+from uacpy.core.environment import SeabedColumn, SedimentLayer
+from uacpy.core.surface import Surface
+from uacpy.models import OASS, OASSP
 from uacpy.models.base import RunMode
 from uacpy.tests.conftest import make_pekeris
 
@@ -177,8 +181,13 @@ class TestWriterGuards:
             _write(tmp_path, options='N J s W')
 
     def test_option_letters_needing_unwritten_blocks_raise(self, tmp_path):
+        # The letter is valid OASES; what is missing is a deck block this
+        # writer emits, so the refusal is a capability of the writer rather
+        # than an illegal argument — unlike the unknown letter above, which
+        # stays a ConfigurationError.
         for letter in ('d', 'G', 'T', 'Z', 'l', 'v', 'b'):
-            with pytest.raises(ConfigurationError, match="not supported"):
+            with pytest.raises(UnsupportedFeatureError,
+                               match="produces no such input"):
                 _write(tmp_path, options=f'N J s {letter}')
 
     def test_tau_p_raises(self, tmp_path):
@@ -211,7 +220,7 @@ class TestWriterGuards:
 
     def test_smooth_interface_raises(self, tmp_path):
         # G3: pow = |ROUGH(INTFCE)| comes from this deck (unoassp30.f:601,
-        # :615), and SCTRHS skips ROUGH2 < 1e-10 in the producer
+        # :613), and SCTRHS skips ROUGH2 < 1e-10 in the producer
         # (oaseun31.f:2310), so the whole chain returns zero.
         with pytest.raises(ConfigurationError, match="nothing to scatter"):
             _write(tmp_path, env=_env(roughness=0.0))
@@ -333,7 +342,7 @@ class TestScatteringOptionContracts:
         with pytest.raises(UnsupportedFeatureError, match='rescat|980402'):
             uacpy.OASSP(correlation_length=10.0, multiple_scattering=True)
 
-    def test_oass_still_honours_multiple_scattering(self):
+    def test_oass_honours_multiple_scattering(self):
         # The discriminating counterpart — the asymmetry is real, not a
         # blanket refusal. oassun26.f:491, :685, :901 all test .not.rescat.
         assert uacpy.OASS(interface=3, correlation_length=10.0,
@@ -532,7 +541,13 @@ class TestChain:
         # The scattered field is not the mean field.
         assert not np.array_equal(result.data, mean.data)
         assert result.metadata['interface'] == _SEABED_LAYER
-        assert str(result.phase_reference).endswith('travelling_wave')
+        # Stamped as the enum member, like every other wrapper's result:
+        # PropagationModel._result_kwargs coerces, so ``str()`` renders
+        # 'PhaseReference.TRAVELLING_WAVE' and the value still compares equal
+        # to the plain string.
+        from uacpy.core.results import PhaseReference
+        assert result.phase_reference is PhaseReference.TRAVELLING_WAVE
+        assert result.phase_reference == 'travelling_wave'
 
     def test_the_binary_reports_no_frequency_sampling_mismatch(self, tmp_path):
         # unoassp30.f:182-188 warns on NT/DT only; a band mismatch is silent.
@@ -616,13 +631,13 @@ class TestChain:
 
     def test_interface_pinned_against_the_rhs(self, tmp_path):
         # Attaching the roughness spectrum to a layer the .rhs does not name
-        # leaves CLEN = 0 on the one that scatters (oaseun31.f:100) and the run
+        # leaves CLEN = 0 on the one that scatters (oaseun31.f:102) and the run
         # exits 0 with no back-scatter — so the mismatch has to raise.
         with pytest.raises(ConfigurationError, match="disagrees with the"):
             _run(interface=_SEABED_LAYER - 1)
 
     def test_rms_roughness_scales_the_scattered_field(self, tmp_path):
-        # unoassp30.f:601, :615: pow = |ROUGH(INTFCE)|, and CALSRC scales the
+        # unoassp30.f:601, :613: pow = |ROUGH(INTFCE)|, and CALSRC scales the
         # realized perturbation by it, so the scattered field is linear in the
         # rms roughness. This exercises carrier → writer → binary → reader.
         base = _run(rms_roughness=0.5)
@@ -630,3 +645,158 @@ class TestChain:
         ratio = np.abs(doubled.data) / np.abs(base.data)
         assert np.allclose(ratio, 2.0, rtol=2e-2), (
             float(ratio.min()), float(ratio.max()))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The NP guard has to count what the binary integrates, not what it echoes
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.requires_oases
+class TestPlaneGeometryDoublesTheWavenumberCount:
+    """``unoassp30.f:327`` prints ``NO. OF WAVENUMBERS`` straight out of
+    AUTSAM, and the plane-geometry branch immediately below (``:337-341``)
+    then doubles it — "scattering kernels not symmetric", so the integration
+    also runs over negative wavenumbers: ``nwvno = 2*nwvno`` with
+    ``ICUT2 = NWVNO``. Reading the echo verbatim under-counted by 2x, so an
+    echoed 40000 (80000 integrated, already past ``NP = 2**16``) passed the
+    guard and left the meaningless full-size ``.trf`` its own docstring
+    warns about. Cylindrical geometry keeps ``icut2 = nwvno`` and is
+    unaffected; OASP prints its count after the branch that would have
+    doubled it (``unoasp22.f:340-349``) and never doubles at all."""
+
+    class _Proc:
+        """Echo from a run whose real grid is 80000 in plane geometry."""
+        stdout = ('    >>> Automatic Sampling <<<\n'
+                  '    NO. OF WAVENUMBERS:       40000\n')
+        stderr = ''
+        returncode = 0
+
+    @staticmethod
+    def _model(**kw):
+        kw.setdefault('correlation_length', 5.0)
+        return uacpy.OASSP(**kw)
+
+    def test_the_scale_follows_the_option_letter(self):
+        assert self._model()._wavenumber_echo_scale() == 1
+        assert self._model(plane_geometry=True)._wavenumber_echo_scale() == 2
+        assert self._model(options='N J P')._wavenumber_echo_scale() == 2
+        assert self._model(options='N J')._wavenumber_echo_scale() == 1
+
+    def test_plane_geometry_is_caught_at_half_the_echoed_bound(self):
+        with pytest.raises(ConfigurationError, match='80000 wavenumbers'):
+            self._model(plane_geometry=True)._reject_wavenumber_overrun(
+                self._Proc())
+
+    def test_cylindrical_geometry_under_np_is_accepted_silently(self):
+        # 40000 is under NP, and in cylindrical geometry that is the real
+        # count — the guard must stay silent.
+        self._model()._reject_wavenumber_overrun(self._Proc())
+
+    def test_oasp_never_doubles(self):
+        assert uacpy.OASP()._wavenumber_echo_scale() == 1
+        uacpy.OASP()._reject_wavenumber_overrun(self._Proc())
+
+
+@pytest.mark.requires_oases
+def test_oassp_spectrum_spelling_is_normalised_before_the_options_check():
+    """``spectrum`` was lower-cased for validation but compared literally
+    against ``'gaussian'`` by the options-exclusivity check, so
+    ``OASSP(spectrum='Gaussian', options=…)`` was rejected as if a
+    non-default spectrum had been pinned. Normalising on the way in makes
+    both comparisons exact, and matches OASS."""
+    assert uacpy.OASSP(correlation_length=5.0,
+                       spectrum='Gaussian').spectrum == 'gaussian'
+    assert uacpy.OASSP(correlation_length=5.0,
+                       spectrum='Goff-Jordan').spectrum == 'goff-jordan'
+    # The default spelled with a capital is still the default.
+    model = uacpy.OASSP(correlation_length=5.0, spectrum='Gaussian',
+                        options='N J s')
+    assert model.spectrum == 'gaussian'
+    assert 'g' in uacpy.OASSP(correlation_length=5.0, spectrum='Goff-Jordan'
+                              )._resolve_options().split()
+    with pytest.raises(ConfigurationError, match='von-karman'):
+        uacpy.OASSP(correlation_length=5.0, spectrum='von-karman')
+
+
+class TestScatteringSpectralExponent:
+    """``M <= 1.5`` leaves the roughness power spectrum unintegrable
+    (``oassp.tex:356-362``; the exponent reaches ``amod(m) = fac(3+…)`` at
+    ``oaseun31.f:99``). The deck writer refuses it, but the scattering models
+    reach their writer only after the mean-field binary has run, so the check
+    also belongs on a constructor argument that cannot change in between."""
+
+    @pytest.mark.parametrize('model_cls', [OASS, OASSP])
+    @pytest.mark.parametrize('exponent', [1.5, 1.0, 0.0, -1.0])
+    def test_an_unintegrable_exponent_is_refused(self, model_cls, exponent):
+        with pytest.raises(ConfigurationError, match='spectral_exponent'):
+            model_cls(correlation_length=10.0, spectral_exponent=exponent,
+                      verbose=False)
+
+    @pytest.mark.parametrize('model_cls', [OASS, OASSP])
+    @pytest.mark.parametrize('exponent', [1.51, 2.0, 3.5])
+    def test_an_integrable_exponent_is_kept(self, model_cls, exponent):
+        model = model_cls(correlation_length=10.0,
+                          spectral_exponent=exponent, verbose=False)
+        assert model.spectral_exponent == pytest.approx(exponent)
+
+    @pytest.mark.parametrize('model_cls', [OASS, OASSP])
+    def test_the_default_exponent_is_accepted(self, model_cls):
+        assert model_cls(correlation_length=10.0,
+                         verbose=False).spectral_exponent == 2.0
+
+
+class TestOasspTakesExactlyOneRoughBottomInterface:
+    """``SCTRHS`` writes one ``.rhs`` record per rough interface per
+    wavenumber, the sea surface's first (``oaseun31.f:2306-2310``, ``:2395``),
+    and ``oassp2`` reads back one record per wavenumber with **no** interface
+    filter, taking its scattering interface from the first record
+    (``unoassp30.f:549``, ``oasvun31.f:66-70``) — unlike OASS, whose binary
+    filters records by the deck's ``INTFC`` (``oassun26.f:360-362``). So a
+    rough surface makes OASSP scatter from the water record's empty spectrum,
+    and two rough bottoms interleave records the reader cannot separate. A
+    mean field with no rough interface writes no SCTRHS records at all
+    (skipped below ``ROUGH2 < 1e-10``, ``oaseun31.f:2310``), which is equally
+    unusable.
+
+    The check runs before the mean-field binary, because that is the run whose
+    cost it saves.
+    """
+
+    @staticmethod
+    def _model():
+        return OASSP(correlation_length=5.0, spectral_exponent=2.5,
+                     verbose=False)
+
+    @staticmethod
+    def _env(surface_roughness, *bottom_roughnesses):
+        """Deepest roughness is the half-space; any earlier ones are layers."""
+        layers = [SedimentLayer(thickness=5.0, sound_speed=1600.0,
+                                density=1.6, attenuation=0.2, roughness=r)
+                  for r in bottom_roughnesses[:-1]]
+        return Environment(
+            bathymetry=100.0, ssp=1500.0,
+            surface=Surface(properties=[BoundaryProperties(
+                acoustic_type='vacuum', roughness=surface_roughness)]),
+            bottom=SeabedColumn(layers=layers, halfspace=BoundaryProperties(
+                acoustic_type='half-space', sound_speed=2300.0, density=2.65,
+                attenuation=0.5, roughness=bottom_roughnesses[-1])))
+
+    def test_one_rough_bottom_under_a_smooth_surface_is_accepted(self):
+        self._model()._require_single_rough_interface(self._env(0.0, 0.5))
+
+    def test_a_rough_sea_surface_is_refused(self):
+        with pytest.raises(UnsupportedFeatureError, match='rough sea surface'):
+            self._model()._require_single_rough_interface(self._env(0.5, 0.5))
+
+    def test_two_rough_bottom_interfaces_are_refused(self):
+        with pytest.raises(UnsupportedFeatureError,
+                           match='2 rough bottom interfaces'):
+            self._model()._require_single_rough_interface(
+                self._env(0.0, 0.3, 0.5))
+
+    def test_an_entirely_smooth_environment_is_refused(self):
+        # No SCTRHS record is written at all, so the .rhs the scattering run
+        # reads back has nothing in it.
+        with pytest.raises(ConfigurationError, match='smooth'):
+            self._model()._require_single_rough_interface(self._env(0.0, 0.0))

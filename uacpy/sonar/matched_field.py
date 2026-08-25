@@ -22,6 +22,37 @@ Typical use::
     bank  = replica_bank(modes, array_depths, cand_depths, cand_ranges)
     K     = csdm(measured_snapshots)          # (n_rcv, n_snap) -> (n_rcv, n_rcv)
     surf  = bartlett(K, bank)                 # (n_cand_depths, n_cand_ranges)
+
+Against ``acoustic_signal.arrays``
+----------------------------------
+:mod:`uacpy.acoustic_signal.arrays` runs the same two processors over a
+plane-wave steering bank. They share the numerical core
+(``core/_beamforming``) and differ in four stated ways, so a number carried
+from one to the other needs converting:
+
+=====================  ============================  ==========================
+                       ``sonar`` (this module)       ``acoustic_signal.arrays``
+=====================  ============================  ==========================
+covariance             :func:`csdm`                  ``sample_covariance``
+                                                     (identical estimate; this
+                                                     one adds
+                                                     ``diagonal_loading``)
+weight bank            ``replicas`` ``(N, *grid)``   ``steering``
+                       — column-major, one column    ``(n_angles, N)`` —
+                       per candidate                 row-major, one row per
+                                                     angle
+Bartlett scaling       normalised to ``[0, 1]``:     unnormalised
+                       divided by ``tr K``           ``e^H R e``
+MVDR scaling           max-scaled to 1               unscaled ``1/(w^H R^-1 w)``
+MVDR loading default   ``diagonal_loading=0.01``     ``diagonal_loading=1e-06``
+=====================  ============================  ==========================
+
+The loading defaults differ on purpose and are **not** aligned: a replica bank
+over a dense candidate grid is routinely rank-deficient against a short
+snapshot record, which is why ``1e-2`` is the default here (see
+:func:`mvdr`); the array-processing surface assumes a full-rank sample
+covariance and only needs a numerical floor. ``core/_beamforming``'s docstring
+states that each surface keeps its own loading, normalisation and NaN policy.
 """
 
 from __future__ import annotations
@@ -33,7 +64,8 @@ import warnings
 import numpy as np
 
 from uacpy.core.exceptions import ConfigurationError
-from uacpy.core._beamforming import loaded_inverse, quadratic_form
+from uacpy.core._beamforming import (
+    loaded_inverse, quadratic_form, snapshot_covariance)
 
 __all__ = [
     "synthesize_replica",
@@ -117,7 +149,10 @@ def synthesize_replica(
     """
     r = np.atleast_1d(np.asarray(ranges, dtype=float))
     if np.any(r <= 0):
-        raise ConfigurationError("synthesize_replica: ranges must be > 0")
+        raise ConfigurationError(
+            f"synthesize_replica: ranges must be > 0; got "
+            f"{int(np.count_nonzero(r <= 0))} value(s) <= 0, first at index "
+            f"{int(np.argmax(r <= 0))} ({r[r <= 0][0]:g} m)")
     z = np.atleast_1d(np.asarray(array_depths, dtype=float))
 
     k = np.asarray(modes.k, dtype=np.complex128)            # (M,)
@@ -198,7 +233,9 @@ def _slab_pressure(slab, array_depths) -> np.ndarray:
             raise ConfigurationError(
                 "replica_bank_from_field: slab 'depth' axis does not match "
                 "array_depths — resample receivers to the element depths first "
-                "(field.eval / field.resample_to)."
+                "(field.eval / field.resample_to). Got a slab 'depth' axis of "
+                f"shape {got.shape} against array_depths of shape "
+                f"{want.shape}."
             )
     return np.asarray(slab.p, dtype=np.complex128)
 
@@ -239,7 +276,8 @@ def replica_bank_from_field(field, *, array_depths=None) -> np.ndarray:
 
     Caveat: opening MFP to range-dependent (PE/ray) replicas invites exactly the
     regime where Capon/MVDR mismatch sensitivity is worst — small environmental
-    or model error collapses the MVDR peak (COA §10.6). Raise ``mvdr(loading=…)``
+    or model error collapses the MVDR peak (COA §10.6). Raise
+    ``mvdr(diagonal_loading=…)``
     toward Bartlett for robustness; Bartlett is comparatively forgiving.
 
     Parameters
@@ -281,7 +319,12 @@ def replica_bank_from_field(field, *, array_depths=None) -> np.ndarray:
                 raise ConfigurationError(
                     "replica_bank_from_field: every slab must share the same "
                     "depth (array) and range (candidate) axes — the stack mixes "
-                    "different receiver geometries or range grids."
+                    "different receiver geometries or range grids. Got slab "
+                    f"{len(cols) - 1} on a "
+                    f"{slab.coords['depth'].size}-depth x "
+                    f"{slab.coords['range'].size}-range grid against slab 0 "
+                    f"on {ref.coords['depth'].size} x "
+                    f"{ref.coords['range'].size}."
                 )
         return np.ascontiguousarray(np.stack(cols, axis=1), dtype=np.complex128)
 
@@ -315,7 +358,9 @@ def replica_bank_from_field(field, *, array_depths=None) -> np.ndarray:
             raise ConfigurationError(
                 "replica_bank_from_field: field 'depth' axis does not match "
                 "array_depths — resample receivers to the element depths first "
-                "(field.eval / field.resample_to)."
+                "(field.eval / field.resample_to). Got a field 'depth' axis "
+                f"of shape {got.shape} against array_depths of shape "
+                f"{want.shape}."
             )
     sensor_pos = coords.index("depth")
     # np.array (copy) — field.p is a read-only view; without copying, a
@@ -337,15 +382,24 @@ def csdm(snapshots: np.ndarray) -> np.ndarray:
     -------
     ndarray, shape ``(N, N)``
         ``K = (1/L) sum_l d_l d_l^H`` (Hermitian).
+
+    Raises
+    ------
+    ConfigurationError
+        If ``snapshots`` is not 2-D, carries no snapshot column, or holds a
+        NaN/Inf. A single non-finite sample makes every entry of ``K`` NaN
+        and :func:`bartlett` then returns an all-NaN ambiguity surface with
+        no diagnostic — engines NaN their ``r <= 0`` columns and Bellhop NaNs
+        shadow-zone cells, so snapshots assembled from modelled fields reach
+        here non-finite.
+
+    Notes
+    -----
+    :func:`uacpy.acoustic_signal.sample_covariance` is the same estimate
+    under the array-processing name; both call
+    ``core._beamforming.snapshot_covariance``.
     """
-    d = np.asarray(snapshots, dtype=np.complex128)
-    if d.ndim != 2:
-        raise ConfigurationError(
-            f"csdm: snapshots must be 2-D (n_sensors, n_snapshots); got "
-            f"shape {d.shape}. A single snapshot is column-shaped: "
-            f"d[:, None]."
-        )
-    return (d @ d.conj().T) / d.shape[1]
+    return snapshot_covariance(snapshots, "csdm")
 
 
 def _flatten_bank(replicas: np.ndarray) -> Tuple[np.ndarray, Tuple[int, ...]]:
@@ -400,11 +454,14 @@ def bartlett(K: np.ndarray, replicas: np.ndarray) -> np.ndarray:
     return surf.reshape(grid_shape)
 
 
-def mvdr(K: np.ndarray, replicas: np.ndarray, loading: float = 1e-2) -> np.ndarray:
+def mvdr(
+    K: np.ndarray, replicas: np.ndarray, diagonal_loading: float = 1e-2
+) -> np.ndarray:
     """Minimum-variance (Capon/MVDR) ambiguity surface, normalized to max 1.
 
     ``P_MV = 1 / (e^H Kinv e)`` for unit-norm replicas, with diagonal loading
-    ``K + loading * tr(K)/N * I``. Small loading gives sharp Capon peaks but is
+    ``K + diagonal_loading * tr(K)/N * I``. Small loading gives sharp Capon
+    peaks but is
     sensitive to environmental mismatch; larger loading flattens the surface
     toward Bartlett for robustness. Loading is required when ``K`` is
     rank-deficient (e.g. a single snapshot) — hence the 1e-2 default here,
@@ -420,7 +477,7 @@ def mvdr(K: np.ndarray, replicas: np.ndarray, loading: float = 1e-2) -> np.ndarr
         CSDM.
     replicas : ndarray, shape ``(N, *grid)``
         Replica bank.
-    loading : float, optional
+    diagonal_loading : float, optional
         Diagonal-loading fraction of the average eigenvalue. Default 1e-2.
 
     Returns
@@ -439,7 +496,7 @@ def mvdr(K: np.ndarray, replicas: np.ndarray, loading: float = 1e-2) -> np.ndarr
             "mvdr: the CSDM carries no power, so the ambiguity surface is "
             "undefined; returning NaN.", UserWarning, stacklevel=2)
         return np.full(grid_shape, np.nan)
-    denom = quadratic_form(loaded_inverse(K, loading), E.T)
+    denom = quadratic_form(loaded_inverse(K, diagonal_loading), E.T)
     # e^H Kinv e is strictly positive for a positive-definite K and a non-zero
     # replica. A non-positive value therefore means the loaded CSDM inverted
     # without staying positive-definite, or the replica column was zero — mark

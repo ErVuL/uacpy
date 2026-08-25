@@ -35,7 +35,19 @@ from uacpy.core.exceptions import ConfigurationError
 def rrc_filter(sps, rolloff, span):
     """Root-raised-cosine taps: ``span`` symbols, ``sps`` samples/symbol, unit energy."""
     if not 0.0 <= rolloff <= 1.0:
-        raise ConfigurationError("rrc_filter: rolloff must be in [0, 1]")
+        raise ConfigurationError(
+            f"rrc_filter: rolloff must be in [0, 1]; got {rolloff!r}")
+    # sps is the divisor of the symbol-period axis: 0 makes every tap NaN and
+    # returns a length-1 filter, a negative value makes `span*sps` negative
+    # and returns an empty one — both convolve without complaint.
+    if int(sps) < 1:
+        raise ConfigurationError(
+            f"rrc_filter: sps must be >= 1 (samples per symbol); got "
+            f"{sps!r}. It sets the taps' time axis (arange(span*sps + 1) "
+            f"scaled by 1/sps), so the filter is undefined below 1.")
+    if int(span) < 1:
+        raise ConfigurationError(
+            f"rrc_filter: span must be >= 1 (symbols); got {span!r}.")
     n = span * sps
     t = (np.arange(n + 1) - n / 2) / sps      # time in symbol periods
     b = float(rolloff)
@@ -61,6 +73,9 @@ def rrc_filter(sps, rolloff, span):
 
 def pulse_shape(symbols, sps, rolloff=0.25, span=8):
     """Upsample symbols by ``sps`` and root-raised-cosine filter -> baseband samples."""
+    if sps < 1:
+        raise ConfigurationError(
+            f"pulse_shape: need sps >= 1 (samples per symbol); got {sps!r}")
     s = np.asarray(symbols, dtype=complex).ravel()
     up = np.zeros(s.size * sps, dtype=complex)
     up[::sps] = s
@@ -128,7 +143,21 @@ def symbol_sync(samples, sps, loop_bw=0.005, damping=1.0, start=0):
     """
     x = np.asarray(samples, dtype=complex).ravel()
     if sps < 2:
-        raise ConfigurationError("symbol_sync: need sps >= 2 for Gardner")
+        raise ConfigurationError(
+            f"symbol_sync: need sps >= 2 for Gardner; got {sps!r}")
+    # theta below is loop_bw / (damping + 1/(4*damping)): zero damping is a
+    # bare ZeroDivisionError, and a non-positive loop bandwidth leaves the
+    # loop gains at zero so the interpolator never steers.
+    if not (np.isfinite(damping) and damping > 0):
+        raise ConfigurationError(
+            f"symbol_sync: damping must be > 0 and finite; got {damping!r} "
+            f"(~1.0 is critically damped). The loop constant divides by "
+            f"damping + 1/(4*damping).")
+    if not (np.isfinite(loop_bw) and loop_bw > 0):
+        raise ConfigurationError(
+            f"symbol_sync: loop_bw must be > 0 and finite; got {loop_bw!r}. "
+            f"At zero the proportional and integral gains are zero and the "
+            f"timing estimate never moves off `start`.")
     # Standard second-order proportional-integral loop filter: map the
     # requested noise bandwidth and damping to a per-sample loop constant
     # ``theta``, then to the proportional (``kp``) and integral (``ki``) gains.
@@ -140,7 +169,19 @@ def symbol_sync(samples, sps, loop_bw=0.005, damping=1.0, start=0):
     denom = 1 + 2 * damping * theta + theta * theta
     kp = 4 * damping * theta / denom
     ki = 4 * theta * theta / denom
-    power = np.mean(np.abs(x) ** 2) + 1e-12   # normalize TED gain to signal level
+    # Normalize the TED gain to the signal level: the detector's numerator
+    # scales as amplitude**2, and dividing by the record's own mean power puts
+    # the error back at O(1) whatever the record is scaled to. Adding an
+    # absolute floor here made the loop gain a function of that scale instead:
+    # once mean|x|**2 fell to the floor (~1e-6 amplitude) the error shrank with
+    # amplitude**2, the correction went to zero, and the loop stopped adapting
+    # and decimated at a fixed stride — measured, the recovered symbols drifted
+    # 7.2e-3 from the unit-amplitude answer at 1e-6 and 1.4e-2 by 1e-8. An
+    # all-zero record carries no timing information and has a zero numerator
+    # too, so the 1.0 below keeps its error at 0 rather than 0/0.
+    power = float(np.mean(np.abs(x) ** 2)) if x.size else 1.0
+    if power == 0.0:
+        power = 1.0
 
     mu = 0.0          # fractional delay in [0, 1)
     idx = int(start)

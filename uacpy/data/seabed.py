@@ -46,6 +46,44 @@ _FOLK5_TO_BOTTOM = {
     4: ('phi', 3.0),     # Mixed sediment
     5: ('class', 'limestone'),  # Rock or other hard substrata
 }
+#: A sixth code the harmonised layer carries that the Folk 5-class legend does
+#: not define. It is not an oddity of one response: the cached 1:1M layer holds
+#: 70 such polygons — slivers in the North Sea, the Gulf of Finland and the
+#: Caspian totalling 0.8 deg², against class 5's 10 622 polygons and 89 deg² —
+#: so they read as gaps in the harmonisation rather than a substrate type.
+#: There is nothing to convert, so a point inside one is refused the way a
+#: point outside coverage is, and an 'auto' bottom chain falls through to the
+#: global grain-size DB. Refused with its own message so a real-data gap is not
+#: reported as a schema change.
+_FOLK5_UNCLASSIFIED = 6
+
+
+def _bottom_from_folk5(code, lat, lon, *, roughness, water_sound_speed=None):
+    """``BoundaryProperties`` for one Folk 5-class code, or a typed refusal.
+
+    Shared by the live WFS backend and the offline polygon backend
+    (:mod:`uacpy.data.emodnet_local`) so both convert a class — and refuse one
+    they cannot convert — identically.
+    """
+    if code not in _FOLK5_TO_BOTTOM:
+        message = (
+            f"The EMODnet polygon at {lat:.3f}, {lon:.3f} carries "
+            f"folk_5cl={_FOLK5_UNCLASSIFIED}, a code the Folk 5-class legend "
+            f"(1-5) does not define, so it names no substrate to convert."
+            if code == _FOLK5_UNCLASSIFIED else
+            f"EMODnet returned an unrecognised Folk-5 class {code!r} at "
+            f"{lat:.3f}, {lon:.3f}; refusing to fabricate a default bottom.")
+        raise DataFetchError(
+            message,
+            remediation="Pass an explicit grain size (ϕ) or sediment class, or "
+                        "let the 'auto' bottom chain fall through to another "
+                        "source.",
+        )
+    kind, value = _FOLK5_TO_BOTTOM[code]
+    if kind == 'phi':
+        return bottom_from_grain_size(value, roughness=roughness,
+                                      water_sound_speed=water_sound_speed)
+    return bottom_from_class(value, roughness=roughness)
 
 
 def _to_web_mercator(lat: float, lon: float):
@@ -130,21 +168,8 @@ def fetch_bottom(
     lat, lon = as_coordinate(point)
     sub = fetch_seabed_substrate(point, layer=layer, base_url=base_url,
                                  timeout=timeout, verbose=verbose)
-    if sub['folk_5cl'] not in _FOLK5_TO_BOTTOM:
-        raise DataFetchError(
-            f"EMODnet returned an unrecognised Folk-5 class "
-            f"{sub['folk_5cl']!r} at {lat:.3f}, {lon:.3f}; "
-            "refusing to fabricate a default bottom.",
-            remediation="Pass an explicit grain size (ϕ) or sediment class, or "
-                        "let the 'auto' bottom chain fall through to another "
-                        "source.",
-        )
-    kind, value = _FOLK5_TO_BOTTOM[sub['folk_5cl']]
-    if kind == 'phi':
-        bottom = bottom_from_grain_size(
-            value, roughness=roughness, water_sound_speed=water_sound_speed)
-    else:
-        bottom = bottom_from_class(value, roughness=roughness)
+    bottom = _bottom_from_folk5(sub['folk_5cl'], lat, lon, roughness=roughness,
+                                water_sound_speed=water_sound_speed)
     log_message(
         'seabed', f"EMODnet '{sub['folk_5cl_txt']}' at {lat:.3f}, {lon:.3f} → "
         f"{bottom.acoustic_type} c_p={bottom.sound_speed:.0f} m/s",

@@ -16,12 +16,18 @@ import zlib
 
 import numpy as np
 
+from uacpy.core.exceptions import ConfigurationError
+
 _HEADER_BYTES = 4   # uint32 payload length
 _CRC_BYTES = 4      # uint32 CRC-32
 
 
 def bytes_to_bits(data):
     """Unpack bytes to an MSB-first 0/1 bit array."""
+    if isinstance(data, str):
+        raise ConfigurationError(
+            "bytes_to_bits: data is a str; the framing layer carries bytes "
+            "— encode it first, e.g. data.encode('utf-8').")
     return np.unpackbits(np.frombuffer(bytes(data), dtype=np.uint8))
 
 

@@ -74,10 +74,11 @@ def region_grid(lat_range, lon_range, n_lat, n_lon, *, timeout=120.0, verbose=Fa
     the requested ``n_lat × n_lon`` mesh so the return shape matches
     :func:`uacpy.data.fetch_bathy_grid`.
     """
+    import contextlib
     import tempfile
     from pathlib import Path
 
-    from uacpy.data._netcdf import open_netcdf
+    from uacpy.data._netcdf import netcdf_lock, open_netcdf
 
     if normalize_lon(lon_range[1]) < normalize_lon(lon_range[0]):
         raise ConfigurationError(
@@ -100,13 +101,39 @@ def region_grid(lat_range, lon_range, n_lat, n_lon, *, timeout=120.0, verbose=Fa
         fh.write(blob)
         tmp = Path(fh.name)
     try:
-        ds = open_netcdf(tmp)
-        names = {n.lower(): n for n in ds.variables}
-        glon = np.asarray(ds.variables[names['lon']][:], dtype=float)
-        glat = np.asarray(ds.variables[names['lat']][:], dtype=float)
-        elev_var = names.get('altitude') or names.get('z') or 'altitude'
-        gz = np.asarray(ds.variables[elev_var][:], dtype=float)
-        ds.close()
+        # closing(), not a bare close() after the reads: a grid whose variable
+        # names do not match raises between the two and would leave the handle
+        # open on the file the finally is about to unlink.
+        #
+        # netcdf_lock spans the whole statement, so the slices below and the
+        # close() that ends it are inside it as well as the open — netCDF4 is
+        # not thread-safe here, and a live download on one thread would
+        # otherwise read and close alongside another thread's grid read.
+        with netcdf_lock, contextlib.closing(open_netcdf(tmp)) as ds:
+            names = {n.lower(): n for n in ds.variables}
+            try:
+                glon = np.asarray(ds.variables[names['lon']][:], dtype=float)
+                glat = np.asarray(ds.variables[names['lat']][:], dtype=float)
+                elev_var = names.get('altitude') or names.get('z') or 'altitude'
+                # netCDF4 returns a masked array where the grid declares a
+                # _FillValue; np.asarray would drop the mask and expose the raw
+                # fill as a real elevation (a large positive one reads as land,
+                # a large negative one as a kilometres-deep basin). Fill
+                # *through* the mask to NaN, the no-data value the rest of this
+                # module already uses.
+                gz = np.ma.filled(
+                    np.ma.asarray(ds.variables[elev_var][:], dtype=float),
+                    np.nan)
+            except KeyError as exc:
+                raise DataFetchError(
+                    f"GMRT COARDS grid is missing an expected variable "
+                    f"({exc}): the schema is 'lon'/'lat' axes with an "
+                    f"'altitude' (or 'z') elevation; this file has "
+                    f"{sorted(names)}. The GridServer response format may "
+                    f"have changed.",
+                    remediation="Retry, or use bathymetry source "
+                                "'gebco'/'local'.",
+                ) from exc
     finally:
         tmp.unlink(missing_ok=True)
 

@@ -5,19 +5,42 @@ Every numeric expectation here is anchored either on the vendored Fortran
 or on closed-form plane-wave theory, never on another uacpy code path.
 """
 
+import inspect
 import time
+import warnings
 
 import numpy as np
 import pytest
 
+import uacpy
 from uacpy.core import (
     Environment, Source, Receiver, BoundaryProperties,
 )
 from uacpy.core.bottom import Bottom, SeabedColumn, SedimentLayer
-from uacpy.core.exceptions import ConfigurationError, UnsupportedFeatureError
+from uacpy.core.constants import DEFAULT_C_MIN
+from uacpy.core.environment import SoundSpeedProfile
+from uacpy.core.exceptions import (
+    ConfigurationError, ModelExecutionError, UnsupportedFeatureError,
+)
 from uacpy.models import Bounce
 
 pytestmark = pytest.mark.requires_binary
+
+
+def _env(ssp_pairs, bathymetry=100.0):
+    return Environment(
+        name='r26', bathymetry=bathymetry,
+        ssp=SoundSpeedProfile.from_pairs(np.asarray(ssp_pairs, dtype=float)),
+        bottom=BoundaryProperties(sound_speed=1600.0, density=1.8,
+                                  attenuation=0.5))
+
+
+def _isothermal(c, bathymetry=100.0):
+    return _env([[0.0, c], [bathymetry, c]], bathymetry)
+
+
+_SRC = Source(depths=25.0, frequencies=200.0)
+_RCV = Receiver(depths=50.0, ranges=np.linspace(500.0, 5000.0, 20))
 
 
 def _src(freq=500.0):
@@ -665,7 +688,8 @@ class TestGradientSSPAnchorsTheTopHalfspaceAtTheSeabed:
         deck = tmp_path / 'bounce_run.env'
         model = Bounce(verbose=False)
         model._write_bounce_input(filepath=deck, env=env, source=_src(200.0),
-                                  c_low=model.c_low, c_high=model.c_high,
+                                  c_low=model._resolve_c_low(env),
+                                  c_high=model.c_high,
                                   rmax=10000.0)
         lines = deck.read_text().splitlines()
         assert lines[2].strip() == '0'
@@ -703,7 +727,7 @@ class TestCLowCannotExceedTheWaterSpeed:
             Bounce(verbose=False, c_low=c_low, rmax=5000.0).run(env, src, rcv)
 
     @pytest.mark.parametrize('c_low', [1400.0, 1450.0, 1500.0])
-    def test_at_or_below_the_water_speed_still_tabulates_from_zero(self, c_low):
+    def test_at_or_below_the_water_speed_tabulates_from_zero(self, c_low):
         env, src, rcv = self._fixture(1500.0)
         result = Bounce(verbose=False, c_low=c_low, rmax=5000.0).run(
             env, src, rcv)
@@ -713,12 +737,16 @@ class TestCLowCannotExceedTheWaterSpeed:
             f"table starts at {theta.min():.3f} deg")
         assert theta.max() == pytest.approx(90.0, abs=1e-6)
 
-    def test_the_default_is_refused_in_cold_fresh_water(self):
-        """``DEFAULT_C_MIN`` is 1400 m/s, which cold fresh water undercuts — so
-        the failure was reachable without the user setting anything."""
+    def test_the_default_tabulates_from_zero_in_cold_fresh_water(self):
+        """``DEFAULT_C_MIN`` is 1400 m/s, which cold fresh water undercuts, so a
+        fixed 1400 default put the failure one ``Bounce()`` away with nothing
+        set by the user. ``c_low=None`` derives ``min(1400, min(env.ssp))``
+        instead — AT ``bounce.htm``'s "lowest speed in the problem"."""
         env, src, rcv = self._fixture(1380.0)
-        with pytest.raises(ConfigurationError, match='grazing'):
-            Bounce(verbose=False, rmax=5000.0).run(env, src, rcv)
+        result = Bounce(verbose=False, rmax=5000.0).run(env, src, rcv)
+        theta = np.asarray(result.theta)
+        assert theta.min() == pytest.approx(0.0, abs=1e-6)
+        assert theta.max() == pytest.approx(90.0, abs=1e-6)
 
 
 class TestRunWithBounceDerivesCLow:
@@ -756,10 +784,310 @@ class TestRunWithBounceDerivesCLow:
             f"water {c_water} m/s: BOUNCE round trip differs from the direct "
             f"half-space by up to {np.nanmax(delta):.2f} dB")
 
-    def test_an_explicit_c_low_is_still_honoured(self):
+    def test_an_explicit_c_low_is_honoured(self):
         env, src, rcv = self._fixture(1500.0)
         from uacpy.models import Bellhop
         from uacpy.models.base import RunMode
         with pytest.raises(ConfigurationError, match='grazing'):
             Bellhop(verbose=False, backend='fortran').run_with_bounce(
                 env, src, rcv, run_mode=RunMode.COHERENT_TL, c_low=1560.0)
+
+
+class TestBounceCLowDerivesFromTheEnvironment:
+    """AT ``doc/bounce.htm``: "For a full 90 degree calculation set CMin to the
+    lowest speed in the problem (say 1400.0) CMax to 1.0E9." The rule is *the
+    lowest speed in the problem*; the 1400 is that sentence's example, and a
+    fixed 1400 default put a ``ConfigurationError`` one bare ``Bounce()`` away
+    for any column of cold or brackish water. 8 of the other 9 AT/OASES model
+    classes already declare ``c_low: Optional[float] = None``."""
+
+    def test_the_default_is_none_not_a_fixed_speed(self):
+        param = inspect.signature(Bounce.__init__).parameters['c_low']
+        assert param.default is None
+
+    @pytest.mark.parametrize('c_water', [1540.0, 1480.0, 1400.0])
+    def test_ordinary_sea_water_resolves_to_the_1400_cap(self, c_water):
+        """The half of the change that must move nothing: ``min()`` pins the
+        resolved value at ``DEFAULT_C_MIN`` for every column that never drops
+        below it, so the wavenumber grid is bit-identical to the old fixed
+        default."""
+        model = Bounce(verbose=False, rmax=10000.0)
+        env = _isothermal(c_water)
+        assert model._resolve_c_low(env) == DEFAULT_C_MIN
+        assert (model._n_ktab(10000.0, 200.0, model._resolve_c_low(env))
+                == model._n_ktab(10000.0, 200.0, DEFAULT_C_MIN))
+
+    @pytest.mark.parametrize('c_water, n_ktab', [(1390.0, 1438),
+                                                 (1350.0, 1481)])
+    def test_water_below_the_cap_widens_the_wavenumber_grid(self, c_water,
+                                                            n_ktab):
+        """The other half: below 1400 m/s the resolved value follows the water
+        and the tabulated-angle count grows with it (1428 at ``DEFAULT_C_MIN``,
+        which the assertion below pins, for this 10 km / 200 Hz deck)."""
+        model = Bounce(verbose=False, rmax=10000.0)
+        env = _isothermal(c_water)
+        assert model._resolve_c_low(env) == c_water
+        assert model._n_ktab(10000.0, 200.0, DEFAULT_C_MIN) == 1428
+        assert model._n_ktab(10000.0, 200.0, c_water) == n_ktab
+
+    def test_the_whole_profile_is_read_not_only_the_seafloor_sample(self):
+        """``min(SSP)``, the manual's rule, rather than
+        ``Bellhop.run_with_bounce``'s seafloor sample: a cold surface layer over
+        warmer deep water has its lowest speed at the top of the column.
+
+        Below the seafloor speed the extra samples are evanescent — ``theta=0,
+        R=1, phase=180`` from ``bounce.f90``'s ``ELSEWHERE`` branch — so they
+        are duplicate head rows that ``dedupe_reflection_file`` removes, not
+        extra angular coverage. The manual is still followed because it is
+        ground truth for the deck and the cost is rows already dropped
+        downstream."""
+        env = _env([[0.0, 1380.0], [100.0, 1500.0]])
+        assert float(np.atleast_1d(env.get_sound_speed(env.depth))[0]) == 1500.0
+        assert Bounce(verbose=False)._resolve_c_low(env) == 1380.0
+
+    def test_every_range_column_is_read_not_only_the_one_at_range_zero(self):
+        """``SoundSpeedProfile.to_pairs`` returns the **range-0 column** by
+        contract, so resolving through it reads one column and misses a slower
+        one further out; ``SoundSpeedProfile.data`` is the whole
+        ``(n_depth, n_range)`` block. ``collapse['ssp']`` defaults to ``'r0'``,
+        which hides the difference; under any other documented method a bare
+        ``Bounce()`` with ``c_low`` unset then raised, telling the user to leave
+        ``c_low`` None — which is exactly what they had done."""
+        from uacpy.core.ssp import SoundSpeedProfile
+        ssp = SoundSpeedProfile(
+            depths=np.array([0.0, 100.0]),
+            data=np.array([[1500.0, 1300.0], [1500.0, 1300.0]]),
+            ranges=np.array([0.0, 5000.0]))
+        env = Environment(
+            name='rd', bathymetry=100.0, ssp=ssp,
+            bottom=BoundaryProperties(sound_speed=1600.0, density=1.8,
+                                      attenuation=0.5))
+        assert float(ssp.to_pairs()[:, 1].min()) == 1500.0, (
+            "fixture no longer exercises the range-0 shortcut")
+        assert Bounce(verbose=False)._resolve_c_low(env) == 1300.0
+        # The invariant enforced, not asserted: with a non-default collapse the
+        # projected column is the slow one, and the resolved c_low has to sit
+        # at or below it or the wedge guard refuses the run.
+        model = Bounce(verbose=False, rmax=5000.0, collapse={'ssp': 'rmax'})
+        assert model._resolve_c_low(env) <= 1300.0
+        result = model.run(env, _SRC, _RCV)
+        assert np.asarray(result.theta).min() == pytest.approx(0.0, abs=1e-6)
+
+    def test_an_explicit_c_low_is_used_unchanged(self):
+        assert Bounce(verbose=False, c_low=1234.0)._resolve_c_low(
+            _isothermal(1500.0)) == 1234.0
+
+    def test_an_explicit_c_low_above_the_water_is_refused(self):
+        with pytest.raises(ConfigurationError, match='grazing'):
+            Bounce(verbose=False, c_low=1560.0, rmax=5000.0).run(
+                _isothermal(1500.0), _SRC, _RCV)
+
+    def test_a_bare_bounce_tabulates_from_zero_in_cold_fresh_water(self):
+        """End to end through the binary: the deck a stock ``Bounce()`` writes
+        for a 1390 m/s column now covers the grazing wedge."""
+        result = Bounce(verbose=False, rmax=5000.0).run(
+            _isothermal(1390.0), _SRC, _RCV)
+        theta = np.asarray(result.theta)
+        assert theta.min() == pytest.approx(0.0, abs=1e-6)
+        assert theta.max() == pytest.approx(90.0, abs=1e-6)
+        assert result.metadata['c_low'] == 1390.0
+
+    def test_a_bare_bounce_in_ordinary_water_records_the_1400_cap(self):
+        result = Bounce(verbose=False, rmax=5000.0).run(
+            _isothermal(1500.0), _SRC, _RCV)
+        assert result.metadata['c_low'] == DEFAULT_C_MIN
+        assert np.asarray(result.theta).min() == pytest.approx(0.0, abs=1e-6)
+
+
+class _StubReached(Exception):
+    """Raised by the stub Bounce once it has recorded its arguments."""
+
+
+def _cold_layer_fixture():
+    """A column whose slowest water is *above* the seafloor, so the two rules
+    give different numbers: ``min(env.ssp)`` is 1300 m/s while the water at
+    the seafloor is 1490 m/s. The rule this replaced returns 1400 here."""
+    env = Environment(
+        name="cold-layer", bathymetry=100.0,
+        ssp=[(0.0, 1500.0), (50.0, 1300.0), (100.0, 1490.0)],
+        bottom=Bottom.from_halfspace(BoundaryProperties(
+            "half-space", sound_speed=1800.0, density=2.0, attenuation=0.1)))
+    return (env, uacpy.Source(depths=25.0, frequencies=200.0),
+            Receiver(depths=[30.0, 50.0], ranges=np.linspace(500.0, 3000.0, 6)))
+
+
+def test_run_with_bounce_hands_bounce_an_unresolved_c_low(monkeypatch) -> None:
+    """``run_with_bounce`` passes ``c_low=None`` through to ``Bounce``.
+
+    Asserted on the argument ``Bounce`` actually receives, not on the text of
+    the caller: any local derivation — an assignment, a keyword-argument
+    conditional, a ternary — makes this a float instead of ``None`` and fails
+    here. The rule this replaced took ``min(1400, water speed at the
+    seafloor)``, which on this column returns 1400 and misses the 1300 m/s
+    layer above it; ``Bounce`` owning the rule is what the delegation buys, so
+    the resolved value is checked too.
+    """
+    env, source, receiver = _cold_layer_fixture()
+    seen = {}
+
+    class _StubBounce:
+        def __init__(self, **kwargs):
+            seen.update(kwargs)
+            raise _StubReached
+
+    import uacpy.models.bounce as bounce_module
+    monkeypatch.setattr(bounce_module, "Bounce", _StubBounce)
+
+    with pytest.raises(_StubReached):
+        uacpy.Bellhop(verbose=False).run_with_bounce(
+            env, source, receiver, run_mode=uacpy.RunMode.COHERENT_TL)
+
+    assert "c_low" in seen, "run_with_bounce did not pass c_low to Bounce"
+    assert seen["c_low"] is None, (
+        f"run_with_bounce resolved c_low itself and handed Bounce "
+        f"{seen['c_low']!r}; Bounce owns that rule"
+    )
+
+    # And the rule Bounce applies to the forwarded None is the faithful one:
+    # the lowest speed in the column, not the speed at the seafloor.
+    assert Bounce()._resolve_c_low(env) == pytest.approx(1300.0)
+
+
+def test_run_with_bounce_forwards_an_explicit_c_low_unchanged(monkeypatch) -> None:
+    """An explicit ``c_low`` still reaches ``Bounce`` as given — delegating the
+    ``None`` case did not start overriding the caller."""
+    env, source, receiver = _cold_layer_fixture()
+    seen = {}
+
+    class _StubBounce:
+        def __init__(self, **kwargs):
+            seen.update(kwargs)
+            raise _StubReached
+
+    import uacpy.models.bounce as bounce_module
+    monkeypatch.setattr(bounce_module, "Bounce", _StubBounce)
+
+    with pytest.raises(_StubReached):
+        uacpy.Bellhop(verbose=False).run_with_bounce(
+            env, source, receiver, run_mode=uacpy.RunMode.COHERENT_TL,
+            c_low=1350.0)
+
+    assert seen["c_low"] == pytest.approx(1350.0)
+
+
+@pytest.mark.parametrize("ssp, expected", [
+    ([(0.0, 1500.0), (100.0, 1500.0)], DEFAULT_C_MIN),
+    ([(0.0, 1520.0), (50.0, 1500.0), (100.0, 1490.0)], DEFAULT_C_MIN),
+    ([(0.0, 1480.0), (100.0, 1510.0)], DEFAULT_C_MIN),
+    ([(0.0, 1500.0), (50.0, 1300.0), (100.0, 1490.0)], 1300.0),
+    ([(0.0, 1380.0), (50.0, 1450.0), (100.0, 1500.0)], 1380.0),
+])
+def test_derived_c_low_never_exceeds_the_bounce_reference_speed(
+        ssp, expected) -> None:
+    """The delegated ``c_low`` is ``min(DEFAULT_C_MIN, min(env.ssp))`` and
+    stays at or below the water speed at the seafloor.
+
+    BOUNCE references its angles to that speed (``bounce.f90:186-195``), and
+    ``Bounce`` rejects a ``c_low`` above it. ``min(env.ssp)`` is a minimum over
+    the whole profile, so it can never be the value that trips the rejection —
+    which is what makes the delegation safe. The first three rows are ordinary
+    water, where the derived value is ``DEFAULT_C_MIN`` exactly and the deck is
+    unchanged from the seafloor-only rule this replaced.
+    """
+    env = Environment(
+        name="t", bathymetry=100.0, ssp=ssp,
+        bottom=Bottom.from_halfspace(BoundaryProperties(
+            "half-space", sound_speed=1800.0, density=2.0, attenuation=0.1)))
+
+    derived = Bounce()._resolve_c_low(env)
+    seafloor_speed = float(np.atleast_1d(
+        env.get_sound_speed(env.depth))[0])
+
+    assert derived == pytest.approx(expected)
+    assert derived <= seafloor_speed
+
+
+def test_bounce_empty_table_from_a_legal_deck_is_a_run_failure(monkeypatch,
+                                                               tmp_path):
+    """A deck the ``NkTab`` guard accepts but whose binary still writes no
+    angle rows is an outcome of the run, not a bad configuration — so it
+    raises ModelExecutionError, carrying the .prt tail the message cites."""
+    import uacpy.models.bounce as bounce_module
+
+    monkeypatch.setattr(bounce_module, 'read_reflection_coefficient',
+                        lambda path: {'theta': np.array([]),
+                                      'R': np.array([]),
+                                      'phi': np.array([])})
+    env = Environment(
+        name='elastic', bathymetry=100.0, ssp=1500.0,
+        bottom=BoundaryProperties(acoustic_type='half-space',
+                                  sound_speed=1600.0, shear_speed=400.0,
+                                  density=1.8, attenuation=0.2,
+                                  shear_attenuation=0.5))
+    with pytest.raises(ModelExecutionError,
+                       match='empty reflection-coefficient'):
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            Bounce(verbose=False, work_dir=tmp_path).run(
+                env=env, source=Source(depths=50.0, frequencies=100.0),
+                receiver=Receiver(depths=[50.0], ranges=[3000.0]))
+
+
+class TestBounceMeshFollowsItsOwnManual:
+    """``doc/bounce.htm``: "BOUNCE is very fast, there's no reason to skimp...
+    I'll suggest perhaps 100 points/wavelength as a good balance between run
+    time and accuracy. I have seen cases where 10 points/wavelength gave very
+    poor accuracy in R( theta )."
+
+    The wrapper previously used 20 — the density AT's GENERIC automatic mesh
+    uses (``ReadEnvironmentMod.f90:103``), not BOUNCE's own recommendation, and
+    the docstring wrongly said the manual "states the same rule". 10/wavelength
+    is precisely the binary's acceptance floor (it sizes ``Nneeded`` at 20 and
+    rejects below ``Nneeded/2``), so the coarsest deck BOUNCE accepts is the
+    one its manual calls very poor.
+
+    Measured on a 20 m sediment layer over a half-space at 200 Hz against a
+    converged 400/wavelength reference: max |dR| = 0.0049 at 20/wavelength,
+    0.0031 at 50, 0.00074 at 100, 0.00015 at 200. Cost at 2 kHz: 0.02 s
+    against 0.03 s.
+    """
+
+    @staticmethod
+    def _layered(thickness=20.0):
+        import uacpy
+        from uacpy.core.environment import SeabedColumn, SedimentLayer
+        return uacpy.Environment(
+            bathymetry=100.0, ssp=1500.0,
+            bottom=SeabedColumn(
+                layers=[SedimentLayer(thickness=thickness, sound_speed=1600.0,
+                                      density=1.6, attenuation=0.3)],
+                halfspace=uacpy.BoundaryProperties(
+                    acoustic_type='half-space', sound_speed=1800.0,
+                    density=2.0, attenuation=0.5)))
+
+    def test_the_density_is_the_manuals_hundred_not_the_generic_twenty(self):
+        from uacpy.models import bounce
+        assert bounce._MESH_POINTS_PER_WAVELENGTH == 100
+        assert bounce._AT_AUTO_MESH_POINTS_PER_WAVELENGTH == 20
+
+    def test_a_layer_gets_a_hundred_points_per_shear_wavelength(self):
+        from uacpy.models import Bounce
+        counts = Bounce(verbose=False)._resolve_n_mesh(self._layered(), 2000.0)
+        assert counts == [int(100 * 20.0 * 2000.0 / 1600.0)]
+
+    def test_the_ceiling_clips_where_the_binary_accepts(self):
+        # At 50 kHz the manual's density wants 62500 points, above the 20000
+        # ceiling — but AT itself needs only 12500 and rejects below 6250, so
+        # clipping keeps a deck the binary runs instead of refusing it.
+        from uacpy.models import Bounce
+        counts = Bounce(verbose=False)._resolve_n_mesh(self._layered(), 50000.0)
+        assert counts == [20000]
+
+    def test_a_stack_the_binary_would_reject_is_refused(self):
+        # 400 m at 50 kHz needs 250000 points even at AT's own density, so the
+        # 20000 ceiling sits below the binary's floor and refusing is right.
+        from uacpy.core.exceptions import ConfigurationError
+        from uacpy.models import Bounce
+        with pytest.raises(ConfigurationError, match='mesh points'):
+            Bounce(verbose=False)._resolve_n_mesh(
+                self._layered(thickness=400.0), 50000.0)

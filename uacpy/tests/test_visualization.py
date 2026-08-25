@@ -7,18 +7,50 @@ regression tests' job.
 """
 
 import inspect
+import warnings
+from pathlib import Path
 
 import numpy as np
 import pytest
+import matplotlib.collections as mcoll
+import matplotlib.figure as mfig
 import matplotlib.pyplot as plt
+from matplotlib.transforms import Bbox
 
 import uacpy
+from uacpy import (Bathymetry, Bottom, BoundaryProperties, Environment,
+                   SeabedColumn, SedimentLayer)
+from uacpy.core.bottom import Bottom as _Bottom
+from uacpy.core.constants import REFERENCE_PRESSURE_WATER
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.visualization.plots.environment import _seabed_property_grid
 from uacpy.core.results import (
     Field, Modes, Arrivals, Rays, ReflectionCoefficient,
     Covariance, Replicas, ResultStack,
 )
+from uacpy.acoustic_signal.analysis import PPSDResult
+from uacpy.acoustic_signal.constant_q import CQPPSDResult
+from uacpy.noise import WenzNoise
 from uacpy.visualization import plots
+from uacpy.visualization.plots import plot_field
+from uacpy.visualization.plots import fields as _fields
+from uacpy.visualization.plots.fields import (compare,
+                                              plot_detection_probability,
+                                              plot_signal_excess)
+from uacpy.data._geo import lon_linspace
+from uacpy.visualization.plots.maps import (_lon_label_value,
+                                            _unwrap_lon_axis,
+                                            plot_overview)
+from uacpy.visualization.plots.noise import plot_source_level, plot_wenz
+from uacpy.visualization.plots.rays_modes import _plot_rays, plot_modes_heatmap
+from uacpy.visualization.plots.signal import (_clamped_freq_limits,
+                                              _log_freq_xlim, _ref_label,
+                                              plot_constant_q_ppsd,
+                                              plot_constant_q_psd,
+                                              plot_constant_q_spectrogram,
+                                              plot_frf, plot_ppsd, plot_psd,
+                                              plot_sel, plot_spectrogram)
+from uacpy.visualization.plots.fields import compare_models
 
 
 @pytest.fixture
@@ -581,7 +613,7 @@ class TestBottomTitles:
             assert fig._suptitle.get_text() == f"Seabed properties — {expected}"
             plt.close(fig)
 
-    def test_explicit_title_still_wins(self, env):
+    def test_explicit_title_wins(self, env):
         fig, ax = env.plot(title='Custom')
         assert ax.get_title() == 'Custom'
         plt.close(fig)
@@ -818,7 +850,28 @@ class TestBathymetryMap:
         assert any('°E' in t.get_text() for t in ax.get_xticklabels())
         plt.close(fig)
 
-    def test_coastline_unreachable_still_draws(self, monkeypatch):
+    @pytest.mark.parametrize("kwargs, labelled", [
+        ({}, True),                                      # both layers on
+        ({'graticule_minor': None}, True),               # fine layer off
+        ({'graticule': None}, False),                    # labelled layer off
+        ({'graticule': None, 'graticule_minor': None}, False),
+    ])
+    def test_either_graticule_layer_can_be_switched_off(self, monkeypatch,
+                                                        kwargs, labelled):
+        """``graticule`` is documented as disable-able but was not Optional, so
+        ``graticule=None`` reached ``np.ceil(rng[0] / step)`` and raised a bare
+        ``TypeError`` — on the ``basemap=True`` default only, which is why the
+        tests passing ``graticule=None`` on the plain branch never saw it."""
+        monkeypatch.setattr('uacpy.visualization.basemap.land_polygons',
+                            lambda *a, **k: None)
+        lats, lons, depth = self._grid()
+        fig, ax = plots.plot_bathymetry_map(lats, lons, depth, **kwargs)
+        fig.canvas.draw()
+        ticks = [t.get_text() for t in ax.get_xticklabels() if t.get_text()]
+        assert bool(ticks) is labelled, ticks
+        plt.close(fig)
+
+    def test_coastline_unreachable_draws(self, monkeypatch):
         monkeypatch.setattr('uacpy.visualization.basemap.land_polygons',
                             lambda *a, **k: None)
         lats, lons, depth = self._grid()
@@ -834,6 +887,203 @@ class TestBathymetryMap:
         fig, ax = plots.plot_bathymetry_map(
             lats, lons, depth, transect=((42, 4), (38.3, 6)))
         assert ax.get_legend() is not None        # transect labelled
+        plt.close(fig)
+
+    def test_relief_orientation_invariant_to_lon_order(self):
+        # The lon counterpart of the lat test above: imshow's extent is
+        # anchored to the minimum longitude, so a descending lon axis has to be
+        # flipped to west→east or the relief renders mirrored against the flat
+        # pcolormesh path and every overlay.
+        lats = np.linspace(36, 44, 8)
+        lons_east = np.linspace(0, 10, 10)               # ascending W→E
+        depth_east = np.random.default_rng(0).uniform(500, 3000, (8, 10))
+        depth_east[0, -1] = np.nan                       # land at the EAST edge
+
+        def relief_rgba(lons, depth):
+            fig, ax = plots.plot_bathymetry_map(
+                lats, lons, depth, basemap=False, relief=True, graticule=None)
+            rgba = np.asarray(ax.get_images()[0].get_array())
+            plt.close(fig)
+            return rgba
+
+        east = relief_rgba(lons_east, depth_east)
+        west = relief_rgba(lons_east[::-1], depth_east[:, ::-1])
+        assert np.array_equal(east, west, equal_nan=True)
+        assert east[0, -1, 3] == 0.0                     # the land cell, transparent
+
+
+@pytest.mark.parametrize("step, wraps", [
+    (-180.0, False),          # exactly half a turn back: a real westward span
+    (-180.0 - 1e-9, True),    # the smallest step past it, which is the wrap
+    (180.0, False),           # exactly half a turn on: a real eastward span
+    (180.0 + 1e-9, True),     # a range crossing the antimeridian westward
+    (360.0, False),           # the two ends of a full-globe axis, one meridian
+])
+def test_only_a_step_past_half_a_turn_reads_as_an_antimeridian_wrap(step, wraps):
+    """The unwrap has to fire on the [-180, 180) fold and on nothing else: a
+    step of half a turn or less is a real span, and a step of a whole turn is
+    the two ends of a full-globe axis sampling the same meridian twice."""
+    lons = np.array([0.0, step])
+    out, wrapped = _unwrap_lon_axis(lons)
+    assert wrapped is wraps
+    turn = -np.sign(step) * 360.0 if wraps else 0.0
+    assert out == pytest.approx(np.array([0.0, step + turn]))
+
+
+@pytest.mark.parametrize("lons", [
+    np.linspace(0.0, 10.0, 6),        # plainly ascending
+    np.linspace(10.0, 0.0, 6),        # plainly descending: the relief flip's case
+    np.linspace(-180.0, 180.0, 9),    # the whole globe, no fold
+])
+def test_a_longitude_axis_without_a_fold_is_returned_untouched(lons):
+    out, wrapped = _unwrap_lon_axis(lons)
+    assert wrapped is False
+    assert np.array_equal(out, lons)
+
+
+@pytest.mark.parametrize("lon, label", [
+    (182.0, -178.0),      # a turn past the antimeridian folds to the west
+    (180.0, 180.0),       # the antimeridian itself keeps the sign it was given
+    (-180.0, -180.0),
+    (-3.5, -3.5),         # an ordinary tick is its own label
+    (-182.0, 178.0),
+])
+def test_a_tick_past_the_antimeridian_takes_its_folded_label(lon, label):
+    assert _lon_label_value(lon) == pytest.approx(label)
+
+
+class TestAntimeridianMap:
+    """plot_bathymetry_map on a grid crossing the antimeridian.
+
+    :func:`uacpy.data.fetch_bathy_grid` documents, and
+    :func:`uacpy.data._geo.lon_linspace` implements, an eastward range whose end
+    lies west of its start. Its longitudes come back folded into [-180, 180), so
+    the axis ascends with one fold in it — which read literally is a full-globe
+    span running the wrong way.
+    """
+
+    _N = 12
+    _CELL = 4.0 / (_N - 1)
+
+    @classmethod
+    def _crossing(cls):
+        """A crossing grid whose depth ramps monotonically west → east."""
+        lats = np.linspace(-20.0, -16.0, cls._N)
+        lons = lon_linspace(178.0, -178.0, cls._N)
+        depth = np.tile(np.linspace(100.0, 5000.0, cls._N), (cls._N, 1))
+        return lats, lons, depth
+
+    @staticmethod
+    def _relief(lats, lons, depth):
+        """``(rgba, extent, xlim)`` from the shaded-relief path."""
+        fig, ax = plots.plot_bathymetry_map(lats, lons, depth, basemap=False,
+                                            relief=True, graticule=None)
+        im = ax.get_images()[0]
+        out = (np.asarray(im.get_array()), tuple(im.get_extent()),
+               tuple(ax.get_xlim()))
+        plt.close(fig)
+        return out
+
+    def test_a_crossing_grid_spans_only_its_own_longitudes(self):
+        """The fold makes ``lons.min()``/``lons.max()`` a whole-globe pair, and
+        the extent built from them stretches a 4° strip across the world."""
+        rgba, extent, _ = self._relief(*self._crossing())
+        assert extent[:2] == pytest.approx((178.0 - self._CELL / 2,
+                                            182.0 + self._CELL / 2))
+        assert extent[1] - extent[0] == pytest.approx(4.0 + self._CELL)
+
+    def test_a_crossing_grid_keeps_its_west_to_east_order(self):
+        """The fold also satisfies the descending-axis test that mirrors the
+        relief, so the strip must reach that test already unwrapped to draw in
+        the same column order as an equivalent monotone axis."""
+        lats, lons, depth = self._crossing()
+        crossing, extent, _ = self._relief(lats, lons, depth)
+        control, control_extent, _ = self._relief(
+            lats, np.linspace(178.0, 182.0, self._N), depth)
+        assert np.array_equal(crossing, control)
+        assert extent == pytest.approx(control_extent)
+
+    def test_a_crossing_map_draws_the_land_west_of_the_dateline(self, monkeypatch):
+        """Natural Earth cuts its rings at ±180, so the half of an unwrapped
+        window beyond 180 is covered only by a copy of the land a turn east."""
+        ring = np.array([[-179.5, -19.0], [-178.5, -19.0], [-178.5, -17.0],
+                         [-179.5, -17.0], [-179.5, -19.0]])
+        monkeypatch.setattr('uacpy.visualization.basemap.land_polygons',
+                            lambda *a, **k: [ring])
+        fig, ax = plots.plot_bathymetry_map(*self._crossing())
+        x0, x1 = ax.get_xlim()
+        assert (x0, x1) == pytest.approx((178.0, 182.0))
+        drawn = [p.get_xy()[:, 0] for p in ax.patches]
+        assert any(x0 <= xs.min() and xs.max() <= x1 for xs in drawn), \
+            [(xs.min(), xs.max()) for xs in drawn]
+        plt.close(fig)
+
+    def test_a_crossing_map_names_the_hemisphere_on_the_plain_branch_too(self):
+        """``basemap=False`` draws no graticule, so its ticks are matplotlib's
+        own numbers. Over an unwrapped window those run past 180, where a plain
+        number reads 182 for a map that is at 178°W."""
+        fig, ax = plots.plot_bathymetry_map(*self._crossing(), basemap=False)
+        fig.canvas.draw()
+        labels = [t.get_text() for t in ax.get_xticklabels() if t.get_text()]
+        assert labels, "no x tick labels rendered"
+        assert all(label.endswith(('°E', '°W')) for label in labels), labels
+        assert any(label.endswith('°W') for label in labels), labels
+        assert ax.get_xlabel() == 'Longitude'
+        plt.close(fig)
+
+    def test_a_non_crossing_map_keeps_plain_degrees_east_on_the_plain_branch(self):
+        """The counterpart: a window that does not cross keeps the numbering
+        and the axis label it has always had."""
+        lons = np.linspace(0.0, 10.0, self._N)
+        lats = np.linspace(36.0, 44.0, self._N)
+        depth = np.tile(np.linspace(100.0, 5000.0, self._N), (self._N, 1))
+        fig, ax = plots.plot_bathymetry_map(lats, lons, depth, basemap=False)
+        fig.canvas.draw()
+        labels = [t.get_text() for t in ax.get_xticklabels() if t.get_text()]
+        assert not any(label.endswith(('°E', '°W')) for label in labels), labels
+        assert ax.get_xlabel() == 'Longitude (°E)'
+        plt.close(fig)
+
+    def test_a_crossing_map_labels_its_ticks_by_hemisphere(self, monkeypatch):
+        monkeypatch.setattr('uacpy.visualization.basemap.land_polygons',
+                            lambda *a, **k: None)
+        fig, ax = plots.plot_bathymetry_map(*self._crossing(), graticule=1.0,
+                                            graticule_minor=None)
+        assert [t.get_text() for t in ax.get_xticklabels()] == [
+            '178°E', '179°E', '180°E', '179°W', '178°W']
+        plt.close(fig)
+
+    def test_overlays_west_of_the_dateline_land_beside_the_grid(self, monkeypatch):
+        """A transect end and a source given as -179 belong at 181, next to the
+        strip they annotate, not a whole globe away from it."""
+        monkeypatch.setattr('uacpy.visualization.basemap.land_polygons',
+                            lambda *a, **k: None)
+        fig, ax = plots.plot_bathymetry_map(
+            *self._crossing(), transect=((-19.0, 179.0), (-17.0, -179.0)),
+            source=(-18.0, -178.5))
+        x0, x1 = ax.get_xlim()
+        transect = [ln for ln in ax.lines if ln.get_label() == 'transect'][0]
+        assert transect.get_xdata() == pytest.approx([179.0, 181.0])
+        marker = [ln for ln in ax.lines if ln is not transect][0]
+        assert float(np.ravel(marker.get_xdata())[0]) == pytest.approx(181.5)
+        assert x0 <= 181.5 <= x1
+        plt.close(fig)
+
+    def test_a_non_crossing_map_keeps_every_coordinate_as_given(self, monkeypatch):
+        """The unwrap must be invisible to an ordinary window: same extent, same
+        overlay coordinates, same tick labels."""
+        monkeypatch.setattr('uacpy.visualization.basemap.land_polygons',
+                            lambda *a, **k: None)
+        lats = np.linspace(44.5, 49.5, self._N)
+        lons = np.linspace(-11.0, -3.5, self._N)
+        depth = np.tile(np.linspace(100.0, 5000.0, self._N), (self._N, 1))
+        fig, ax = plots.plot_bathymetry_map(
+            lats, lons, depth, transect=((48.2, -8.0), (45.6, -6.2)),
+            source=(48.2, -8.0), graticule=1.0, graticule_minor=None)
+        assert ax.get_xlim() == pytest.approx((-11.0, -3.5))
+        transect = [ln for ln in ax.lines if ln.get_label() == 'transect'][0]
+        assert transect.get_xdata() == pytest.approx([-8.0, -6.2])
+        assert [t.get_text() for t in ax.get_xticklabels()][0] == '11°W'
         plt.close(fig)
 
 
@@ -1018,7 +1268,7 @@ class TestPlotFieldSingletonAxes:
         assert self._drawn_pixels(fig) > 0
         plt.close(fig)
 
-    def test_a_single_cell_is_still_visible(self):
+    def test_a_single_cell_is_visible(self):
         """One sample gives a line nothing to join, so it needs a marker."""
         fig, ax = plots.plot_field(self._field(1, 1))
         assert self._drawn_pixels(fig) > 0
@@ -1031,7 +1281,7 @@ class TestPlotFieldSingletonAxes:
         squeezed = self._field(1, 7).isel(depth=0)
         assert 'depth' in squeezed.pinned
 
-    def test_a_full_grid_still_uses_the_heatmap(self):
+    def test_a_full_grid_uses_the_heatmap(self):
         fig, ax = plots.plot_field(self._field(5, 7))
         mesh = [c for c in ax.collections if hasattr(c, 'get_coordinates')]
         assert len(mesh) == 1
@@ -1248,3 +1498,1248 @@ class TestCompareModelsSharesItsColourScale:
         lo, hi = mesh.get_clim()
         assert lo <= 1.0 and hi >= 100.0
         plt.close(fig)
+
+
+class TestCrossSectionKnobsKeepTheDepthAxis:
+    """``plot_field`` drops singleton axes so a ``(1, n)`` field renders as the
+    line cut it is — but ``env=`` / ``source=`` / ``receiver=`` draw over the
+    physical (depth, range) plane, which a line cut no longer has. A
+    single-receiver-depth run therefore keeps its depth axis whenever one of
+    those is supplied, and the row is drawn as a band."""
+
+    @staticmethod
+    def _field(n_depth=1, n_range=24, extra=None):
+        coords = {'depth': np.linspace(50.0, 50.0 + 10.0 * (n_depth - 1),
+                                       n_depth),
+                  'range': np.linspace(100.0, 6000.0, n_range)}
+        shape = (n_depth, n_range)
+        if extra:
+            coords.update(extra)
+            shape = shape + tuple(v.size for v in extra.values())
+        rng = np.random.default_rng(3)
+        data = (rng.standard_normal(shape) + 1j * rng.standard_normal(shape))
+        return Field(data=data * 1e-3, coords=coords,
+                     model='Synth', frequencies=100.0)
+
+    @staticmethod
+    def _mesh(ax):
+        meshes = [c for c in ax.collections if hasattr(c, 'get_coordinates')]
+        assert meshes, "no heatmap mesh was drawn"
+        return meshes[0]
+
+    @pytest.mark.parametrize('knob', ['env', 'source', 'receiver'])
+    def test_a_single_receiver_depth_takes_the_overlay(self, knob, env):
+        """The mainstream OO path ``result.plot(env=env)`` must not hard-fail
+        on a run the user cannot reshape — models pass a single receiver depth
+        straight through."""
+        arg = {
+            'env': env,
+            'source': uacpy.Source(depths=10.0, frequencies=100.0),
+            'receiver': uacpy.Receiver(depths=50.0,
+                                       ranges=np.linspace(100.0, 6000.0, 24)),
+        }[knob]
+        fig, ax = plots.plot_field(self._field(), **{knob: arg})
+        assert ax.get_ylabel() == 'Depth (m)'
+        plt.close(fig)
+
+    def test_the_kept_row_is_drawn_with_a_visible_extent(self, env):
+        """A length-1 axis has no spacing for ``shading='nearest'`` to work
+        from, so the quads must get explicit edges or the panel is empty."""
+        fig, ax = plots.plot_field(self._field(), env=env)
+        co = self._mesh(ax).get_coordinates()
+        assert float(co[..., 1].max() - co[..., 1].min()) > 0.0
+        fig.canvas.draw()
+        rgba = np.asarray(fig.canvas.buffer_rgba()).astype(int)
+        assert int((np.ptp(rgba[..., :3], axis=-1) > 12).sum()) > 0
+        plt.close(fig)
+
+    def test_without_a_cross_section_knob_it_is_a_line_cut(self):
+        fig, ax = plots.plot_field(self._field())
+        assert len(ax.lines) == 1
+        assert not [c for c in ax.collections if hasattr(c, 'get_coordinates')]
+        assert ax.get_xlabel() == 'Range (km)'
+        plt.close(fig)
+
+    def test_only_the_depth_range_plane_is_kept(self, env):
+        """Other singleton axes still collapse: a frequency-pinned slab of a
+        broadband run must reach the 2-axis heatmap, not a 3-axis rejection."""
+        f = self._field(extra={'frequency': np.array([200.0])})
+        fig, ax = plots.plot_field(f, env=env)
+        assert ax.get_ylabel() == 'Depth (m)'
+        plt.close(fig)
+
+    def test_a_genuine_line_cut_rejects_the_knobs(self, env):
+        """A field sliced to one axis by the *user* has no cross-section, and
+        the knob must still be refused rather than silently dropped."""
+        cut = self._field(n_depth=6).at(depth=50.0)
+        with pytest.raises(ConfigurationError,
+                           match=r"env= has no effect on a 1-D line cut"):
+            plots.plot_field(cut, env=env)
+
+    def test_contours_are_refused_on_a_one_sample_axis(self, env):
+        """A contour is interpolated between neighbours; an axis held at one
+        sample has none, and matplotlib's own error is an untyped TypeError."""
+        with pytest.raises(ConfigurationError,
+                           match=r"contours= needs at least 2 samples"):
+            plots.plot_field(self._field(), env=env, contours=[60.0])
+
+
+class TestLinearViewsGetTheLinearColormap:
+    """``style.LINEAR_VIEW_COLORMAP`` covers every linear view of any quantity;
+    only a dB view takes the quantity's own dB map. Signed pressure on the
+    transmission-loss ``jet_r`` with an asymmetric autoscale puts zero at an
+    arbitrary colour."""
+
+    @staticmethod
+    def _field():
+        d = np.linspace(10.0, 90.0, 6)
+        r = np.linspace(100.0, 3000.0, 9)
+        rng = np.random.default_rng(4)
+        p = rng.standard_normal((6, 9)) + 1j * rng.standard_normal((6, 9))
+        return Field(data=p, coords={'depth': d, 'range': r},
+                     model='Synth', frequencies=100.0)
+
+    @pytest.mark.parametrize('value, expected', [
+        ('db', 'jet_r'), ('mag_db', 'jet_r'),
+        ('mag', 'seismic'), ('real', 'seismic'), ('imag', 'seismic'),
+    ])
+    def test_colormap_per_value_mode(self, value, expected):
+        fig, ax = plots.plot_field(self._field(), value=value)
+        assert ax.collections[0].get_cmap().name == expected
+        plt.close(fig)
+
+    @pytest.mark.parametrize('value', ['real', 'imag'])
+    def test_signed_views_are_symmetric_about_zero(self, value):
+        fig, ax = plots.plot_field(self._field(), value=value)
+        lo, hi = ax.collections[0].get_clim()
+        assert lo == pytest.approx(-hi)
+        plt.close(fig)
+
+    def test_the_modulus_starts_at_zero(self):
+        """|p| is non-negative, so anchoring at 0 keeps the diverging map's
+        neutral colour on silence — the same reading as real/imag."""
+        fig, ax = plots.plot_field(self._field(), value='mag')
+        lo, hi = ax.collections[0].get_clim()
+        assert lo == 0.0 and hi > 0.0
+        plt.close(fig)
+
+    @pytest.mark.parametrize('value', ['db', 'mag_db', 'mag', 'real'])
+    def test_compare_models_picks_the_same_colormap(self, value):
+        """One field must not render two ways through the two public entry
+        points."""
+        from uacpy.visualization.plots.fields import compare_models
+        f = self._field()
+        fig_one, ax_one = plots.plot_field(f, value=value)
+        single = ax_one.collections[0].get_cmap().name
+        plt.close(fig_one)
+        fig, axes = compare_models([f, f], ['A', 'B'], value=value)
+        assert np.asarray(axes).ravel()[0].collections[0].get_cmap().name \
+            == single
+        plt.close(fig)
+
+
+class TestSeafloorSpansTheWholePanel:
+    """The bathymetry is anchored to both ends of the data range. Without the
+    end anchors a profile NARROWER than the field stops at its last sample and
+    the panel shows a water column with no seabed under it — while the model
+    held that depth out to the end of the run."""
+
+    @staticmethod
+    def _field():
+        d = np.linspace(10.0, 90.0, 6)
+        r = np.linspace(0.0, 10000.0, 12)
+        return Field(data=np.full((6, 12), 60.0),
+                     coords={'depth': d, 'range': r},
+                     model='Synth', frequencies=100.0)
+
+    @pytest.mark.parametrize('bathy, label', [
+        ([(2000.0, 100.0), (6000.0, 140.0)], 'narrower than the field'),
+        ([(0.0, 100.0), (20000.0, 140.0)], 'wider than the field'),
+        ([(0.0, 100.0), (10000.0, 140.0)], 'exactly the field'),
+    ])
+    def test_the_seabed_covers_the_data_range(self, bathy, label):
+        e = uacpy.Environment(name='bt', bathymetry=bathy, ssp=1500.0)
+        fig, ax = plots.plot_field(self._field(), env=e)
+        seabed = [ln for ln in ax.lines if len(np.atleast_1d(ln.get_xdata())) > 1]
+        assert seabed, f"no seafloor line drawn ({label})"
+        x = np.concatenate([np.asarray(ln.get_xdata()) for ln in seabed])
+        assert x.min() == pytest.approx(0.0)
+        assert x.max() == pytest.approx(10.0)
+        plt.close(fig)
+
+
+class TestStackedTracesLabelRangeInKm:
+    """Every other view converts a range axis to km via ``_coord_axis``; the
+    stacked view labelled the same axis in metres."""
+
+    def test_axis_label_and_ticks_are_km(self):
+        r = np.linspace(100.0, 1000.0, 5)
+        t = np.linspace(0.0, 0.1, 8)
+        f = Field(data=np.random.default_rng(5).standard_normal((5, 8)),
+                  coords={'range': r, 'time': t},
+                  model='Synth', frequencies=100.0)
+        fig, ax = plots.plot_field(f, stacked=True)
+        assert ax.get_ylabel() == 'Range (km) (stacked)'
+        labels = [tl.get_text() for tl in ax.get_yticklabels()]
+        assert labels[0] == '0.1' and labels[-1] == '1'
+        # Significant digits, not one decimal: 0.325 km and 0.55 km must not
+        # collapse to the same tick label.
+        assert len(set(labels)) == len(labels)
+        plt.close(fig)
+
+
+class TestReceiverLatticeFitsThePanel:
+    """A count-only cap is blind to the room the panel has: the same 20 x 10
+    lattice that reads cleanly on a full-page figure buries the TL heatmap of a
+    composite panel a fifth the size."""
+
+    @staticmethod
+    def _dots(ax):
+        return sum(len(np.atleast_1d(ln.get_xdata()))
+                   for ln in ax.lines if ln.get_marker() == 'o')
+
+    def test_a_small_panel_draws_fewer_markers(self):
+        d = np.linspace(5.0, 95.0, 50)
+        r = np.linspace(100.0, 10000.0, 200)
+        rng = np.random.default_rng(6)
+        f = Field(data=rng.standard_normal((50, 200)) * 1e-3,
+                  coords={'depth': d, 'range': r},
+                  model='Synth', frequencies=100.0)
+        rec = uacpy.Receiver(depths=d, ranges=r)
+        fig_big, ax_big = plots.plot_field(f, receiver=rec, figsize=(10, 5))
+        big = self._dots(ax_big)
+        plt.close(fig_big)
+        fig_small, ax_small = plots.plot_field(f, receiver=rec, figsize=(2, 1.5))
+        small = self._dots(ax_small)
+        plt.close(fig_small)
+        assert small < big, "the lattice ignored the panel size"
+        assert small >= 4, "a panel must still show the lattice, not one dot"
+        # A full-page panel keeps the documented 20 x 10 ceiling.
+        assert big == 200
+
+
+# ── which mappable the figure-level colorbar takes ──────────────────────────
+#
+# `compare_models` draws every panel through `plot_field` and then hangs one
+# colorbar off the figure, taking its mappable from the last panel's axes. It
+# selected `ax.collections[0]`, which is the panel's `QuadMesh` only because
+# the mesh happens to be drawn before the contour set and the seafloor fills —
+# on matplotlib >= 3.8 a `ContourSet` is itself a `Collection`, so the axes of
+# a contoured panel holds three collections and index 0 is a statement about
+# draw order, not about which one carries the shared colour scale. (What that
+# scale spans is `TestCompareModelsSharesItsColourScale`, above.)
+#
+# The first test below is the one that bites: it puts a non-mesh collection on
+# the axes before the mesh and checks the colorbar still gets the mesh. Through
+# the public API alone the two forms agree, so the decoy stands in for any
+# later edit that draws something first — the failure mode is silent (a
+# colorbar built from a `fill_between` polygon carries the default 0..1 norm
+# under a dB label, and matplotlib raises nothing).
+
+
+_DEPTH = np.array([5.0, 25.0, 60.0])
+_RANGE = np.array([0.0, 500.0, 1000.0, 1500.0])
+
+
+def _grid(kind='pressure'):
+    """A complex 2-D ``(depth, range)`` pressure field spanning a full phase
+    turn, so the cyclic wrap at ±π is present in the data.
+
+    ``kind`` labels the field as a derived dB quantity; the default leaves it
+    a bare pressure field with no metadata.
+    """
+    mag = np.linspace(1e-4, 1e-2, 12).reshape(3, 4)
+    phase = np.linspace(-3.14, 3.14, 12).reshape(3, 4)
+    meta = None if kind == 'pressure' else {'kind': kind, 'unit': 'dB'}
+    return Field(data=mag * np.exp(1j * phase),
+                 coords={'depth': _DEPTH, 'range': _RANGE}, metadata=meta)
+
+
+@pytest.fixture
+def colorbar_mappables(monkeypatch):
+    """Every mappable ``compare_models`` hands to ``fig.colorbar``.
+
+    The function keeps no handle on the colorbar it draws, so the mappable is
+    read off the call rather than off the returned figure.
+    """
+    seen = []
+    real = mfig.Figure.colorbar
+
+    def record(self, mappable, *args, **kwargs):
+        seen.append(mappable)
+        return real(self, mappable, *args, **kwargs)
+
+    monkeypatch.setattr(mfig.Figure, 'colorbar', record)
+    return seen
+
+
+def _draw_decoy_then(real_plot_field):
+    """A ``plot_field`` that puts a non-mesh collection on the axes first."""
+    def wrapper(field, *args, ax=None, **kwargs):
+        ax.fill_between([0.0, 1.0], [0.0, 0.0], [1.0, 1.0], color='0.8')
+        return real_plot_field(field, *args, ax=ax, **kwargs)
+    return wrapper
+
+
+def test_colorbar_takes_the_mesh_when_another_collection_is_drawn_first(
+        monkeypatch, colorbar_mappables):
+    """Index 0 is the mesh by draw order alone, so a panel helper that drew
+    anything before the ``pcolormesh`` would caption the whole figure with a
+    polygon's default 0..1 scale under the field's own dB label."""
+    monkeypatch.setattr(_fields, 'plot_field',
+                        _draw_decoy_then(_fields.plot_field))
+    fig, axes = compare_models([_grid()], labels=['a'], value='db')
+    panel = axes[0, 0]
+    assert [type(c).__name__ for c in panel.collections][0] != 'QuadMesh'
+    assert len(colorbar_mappables) == 1
+    assert isinstance(colorbar_mappables[0], mcoll.QuadMesh)
+    assert colorbar_mappables[0] is next(
+        c for c in panel.collections if isinstance(c, mcoll.QuadMesh))
+
+
+def test_no_colorbar_when_no_panel_drew_a_mesh(monkeypatch,
+                                               colorbar_mappables):
+    """The selection has to keep a default: a panel with no mesh must leave
+    the figure bare, not raise ``StopIteration`` out of a plotting call and
+    not caption the figure with whatever else the axes holds."""
+    def mesh_free(field, *args, ax=None, **kwargs):
+        ax.fill_between([0.0, 1.0], [0.0, 0.0], [1.0, 1.0], color='0.8')
+        return ax.figure, ax
+
+    monkeypatch.setattr(_fields, 'plot_field', mesh_free)
+    fig, axes = compare_models([_grid()], labels=['a'], value='db')
+    assert axes[0, 0].collections            # the panel is not empty
+    assert colorbar_mappables == []
+
+
+def test_colorbar_maps_the_shared_scale_through_contours_and_seafloor(
+        colorbar_mappables):
+    """The real figure a contoured, seafloor-overlaid comparison produces: the
+    colorbar is the last panel's mesh, at the limits every panel was drawn
+    with. Draw order puts the mesh first here, so this one agrees with the
+    index form it replaces — it pins the contract, not the selection."""
+    env = uacpy.Environment(bathymetry=200.0, ssp=1500.0)
+    fig, axes = compare_models([_grid(), _grid()], labels=['a', 'b'], env=env,
+                               value='db', contours=[60.0, 80.0], vmin=40.0,
+                               vmax=90.0)
+    panel = axes[0, -1]
+    kinds = [type(c).__name__ for c in panel.collections]
+    assert 'QuadContourSet' in kinds and any('Poly' in k for k in kinds)
+    assert len(colorbar_mappables) == 1
+    assert colorbar_mappables[0] is next(
+        c for c in panel.collections if isinstance(c, mcoll.QuadMesh))
+    assert np.allclose(colorbar_mappables[0].get_clim(), (40.0, 90.0))
+
+
+def _range_dependent_env() -> Environment:
+    """Three-column layered seabed over sloping bathymetry — the shape whose
+    panel paid a deep copy per range node."""
+    def column(cp, cs, rho, alpha, thickness):
+        return SeabedColumn(
+            layers=[SedimentLayer(thickness=thickness, sound_speed=cp,
+                                  density=rho, attenuation=alpha,
+                                  shear_speed=cs, shear_attenuation=0.5),
+                    SedimentLayer(thickness=2 * thickness, sound_speed=cp + 120,
+                                  density=rho + 0.2, attenuation=alpha + 0.2,
+                                  shear_speed=cs + 40, shear_attenuation=0.7)],
+            halfspace=BoundaryProperties("half-space", sound_speed=cp + 400,
+                                         density=rho + 0.5,
+                                         attenuation=alpha + 0.4))
+    return Environment(
+        name="rd",
+        bathymetry=Bathymetry(ranges=[0.0, 2500.0, 5000.0],
+                              depths=[90.0, 130.0, 110.0]),
+        ssp=[(0.0, 1500.0), (130.0, 1490.0)],
+        bottom=Bottom(columns=[column(1600.0, 180.0, 1.8, 0.6, 8.0),
+                               column(1720.0, 240.0, 2.0, 0.9, 14.0),
+                               column(1650.0, 200.0, 1.9, 0.7, 11.0)],
+                      ranges=[0.0, 2500.0, 5000.0]))
+
+
+def test_seabed_property_grid_reads_columns_without_copying(monkeypatch) -> None:
+    """``_seabed_property_grid`` resolves each range node with
+    ``Bottom.column_index_at`` and reads the carrier's live column.
+
+    ``Bottom.at`` deep-copies a whole layer stack to answer a query this loop
+    uses only to read layer scalars, and it ran once per range node per panel.
+    The values are unchanged — ``column_index_at`` is documented as ``at``'s
+    read-only counterpart with the same nearest rule — so this pins the call,
+    which is the only thing a revert would alter.
+    """
+    env = _range_dependent_env()
+    calls = []
+    original = _Bottom.at
+    monkeypatch.setattr(
+        _Bottom, "at",
+        lambda self, **kwargs: (calls.append(kwargs), original(self, **kwargs))[1])
+
+    r_km = np.linspace(0.0, 5.0, 240)
+    z = np.linspace(0.0, 200.0, 200)
+    seafloor = np.interp(r_km * 1000.0, env.bathymetry.ranges,
+                         env.bathymetry.depths)
+    grid = _seabed_property_grid(env.bottom, "sound_speed", r_km, z, seafloor)
+
+    assert not calls, (
+        f"_seabed_property_grid deep-copied a column {len(calls)} time(s) via "
+        f"Bottom.at; it should index with Bottom.column_index_at"
+    )
+
+    # The grid still carries the right values: every cell below the local
+    # seafloor holds the property of the layer containing that depth.
+    assert np.isfinite(grid).sum() > 0
+    for j in (0, 120, 239):
+        column = env.bottom.columns[env.bottom.column_index_at(
+            range=float(r_km[j] * 1000.0))]
+        top = seafloor[j]
+        for layer in column.layers:
+            inside = (z >= top) & (z < top + layer.thickness)
+            if inside.any():
+                assert np.allclose(grid[inside, j], layer.sound_speed)
+            top += layer.thickness
+        deepest = z >= top
+        if deepest.any():
+            assert np.allclose(grid[deepest, j], column.halfspace.sound_speed)
+
+
+def test_seabed_property_grid_leaves_the_water_column_blank() -> None:
+    """Cells above the range-local seafloor stay NaN, so they render as the
+    axes background rather than as a property value."""
+    env = _range_dependent_env()
+    r_km = np.linspace(0.0, 5.0, 60)
+    z = np.linspace(0.0, 200.0, 80)
+    seafloor = np.interp(r_km * 1000.0, env.bathymetry.ranges,
+                         env.bathymetry.depths)
+    grid = _seabed_property_grid(env.bottom, "sound_speed", r_km, z, seafloor)
+
+    for j in range(len(r_km)):
+        assert np.all(np.isnan(grid[z < seafloor[j], j]))
+        assert np.all(np.isfinite(grid[z >= seafloor[j], j]))
+
+
+def _range_cut(kind=None, offset=0.0):
+    """1-D dB range cut; ``kind`` tags a non-pressure quantity."""
+    r = np.linspace(100.0, 5000.0, 30)
+    data = offset + 50.0 + 10.0 * np.log10(r)
+    metadata = {'kind': kind, 'unit': 'dB'} if kind else None
+    return Field(data=data, coords={'range': r}, model='Synth',
+                 frequencies=100.0, metadata=metadata)
+
+
+class TestCompareSharesOneQuantity:
+    def test_mixed_kinds_are_refused_in_either_order(self):
+        tl = _range_cut()
+        reverb = _range_cut(kind='reverberation')
+        for pair in ([tl, reverb], [reverb, tl]):
+            with pytest.raises(ConfigurationError,
+                               match="different physical quantities"):
+                plots.compare(pair, labels=['A', 'B'])
+        assert not plt.get_fignums()
+
+    def test_same_kind_tl_overlay_draws_both_and_reads_downward(self):
+        fig, ax = plots.compare([_range_cut(), _range_cut(offset=2.0)],
+                                labels=['A', 'B'])
+        assert len(ax.get_lines()) == 2
+        assert ax.get_xlabel() == 'Range (km)'
+        # A transmission-loss value axis runs downward: loud end on top.
+        assert ax.yaxis_inverted()
+        plt.close(fig)
+
+
+class TestEnvironmentPanelSpansToReceivers:
+    """The panel's xlim follows the furthest receiver; the water mesh, the
+    sediment fill, and the seafloor line hold the last bathymetry value out
+    to that edge, as every model does."""
+
+    def _artists_xmax(self, ax):
+        from matplotlib.collections import QuadMesh, PolyCollection
+        meshes = [c for c in ax.collections if isinstance(c, QuadMesh)]
+        fills = [c for c in ax.collections
+                 if isinstance(c, PolyCollection) and not isinstance(c, QuadMesh)]
+        mesh_xmax = max(float(m.get_coordinates()[..., 0].max())
+                        for m in meshes) if meshes else -np.inf
+        fill_xmax = max(float(p.vertices[:, 0].max())
+                        for c in fills for p in c.get_paths()) if fills else -np.inf
+        return mesh_xmax, fill_xmax
+
+    def test_bathymetry_short_of_receivers_reaches_the_right_xlim(self):
+        ranges = np.linspace(0.0, 10_000.0, 6)
+        depths = np.linspace(100.0, 150.0, 6)
+        env = uacpy.Environment(
+            bathymetry=np.column_stack([ranges, depths]), ssp=1500.0)
+        receiver = uacpy.Receiver(depths=[50.0], ranges=[20_000.0])
+        fig, ax = env.plot(receiver=receiver)
+        x_hi = max(ax.get_xlim())
+        assert x_hi == pytest.approx(20.0)
+
+        mesh_xmax, fill_xmax = self._artists_xmax(ax)
+        assert mesh_xmax >= x_hi
+        assert fill_xmax >= x_hi
+
+        seafloor_lines = [l for l in ax.get_lines()
+                          if np.atleast_1d(l.get_xdata()).size > ranges.size]
+        assert seafloor_lines, "seafloor line missing its right-edge anchor"
+        line = seafloor_lines[0]
+        assert float(np.max(line.get_xdata())) == pytest.approx(x_hi)
+        # The anchor continues the last bathymetry value, constant.
+        assert float(np.asarray(line.get_ydata())[-1]) == pytest.approx(150.0)
+        plt.close(fig)
+
+    def test_range_dependent_ssp_mesh_reaches_the_right_xlim(self):
+        from uacpy.core.environment import SoundSpeedProfile
+        ssp = SoundSpeedProfile(
+            depths=[0.0, 100.0],
+            data=[[1500.0, 1510.0], [1500.0, 1510.0]],
+            ranges=[0.0, 10_000.0],
+        )
+        env = uacpy.Environment(bathymetry=100.0, ssp=ssp)
+        receiver = uacpy.Receiver(depths=[50.0], ranges=[20_000.0])
+        fig, ax = env.plot(receiver=receiver)
+        x_hi = max(ax.get_xlim())
+        assert x_hi == pytest.approx(20.0)
+        mesh_xmax, _ = self._artists_xmax(ax)
+        assert mesh_xmax >= x_hi
+        plt.close(fig)
+
+
+class TestTimeSnapshotsValidateCoords:
+    def test_field_without_time_axis_is_refused_naming_the_axis(self):
+        f = Field(
+            data=np.zeros((4, 5)),
+            coords={'depth': np.linspace(0.0, 100.0, 4),
+                    'range': np.linspace(100.0, 2000.0, 5)},
+            model='Synth', frequencies=100.0,
+        )
+        with pytest.raises(ConfigurationError,
+                           match=r"missing coord axes.*time"):
+            plots.plot_time_snapshots({'M': f}, times_s=[0.01])
+        assert not plt.get_fignums()
+
+
+class TestReferenceLabel:
+    def test_named_references_keep_their_micro_pascal_shorthand(self):
+        assert _ref_label(1e-6) == "1µ"
+        assert _ref_label(20e-6) == "20µ"
+
+    def test_custom_reference_renders_as_a_compact_number(self):
+        assert _ref_label(1.0) == "1"
+        assert _ref_label(2e-7) == "2e-07"
+
+
+def test_rays_plot_with_mismatched_ray_arrays_raises_typed_error_and_closes_figures():
+    """A ray whose r and z vectors disagree in length raises
+    ``ConfigurationError`` (not matplotlib's raw ``ValueError``) and leaves
+    pyplot's figure registry empty."""
+    rays = Rays(
+        rays=[{"r": np.linspace(0.0, 1000.0, 50), "z": np.zeros(49),
+               "n_top_bounces": 0, "n_bot_bounces": 0}],
+        model="Bellhop",
+    )
+    with pytest.raises(ConfigurationError, match="invalid plot input"):
+        rays.plot()
+    assert not plt.get_fignums()
+
+
+def test_arrivals_plot_with_missing_delay_key_raises_typed_error_and_closes_figures():
+    """An arrival dict lacking ``'delay'`` raises ``ConfigurationError``
+    (not a raw ``KeyError``) and leaves no open figure."""
+    arrivals = Arrivals(
+        arrivals=[{"kind": "direct", "amplitude": 1.0}],
+        receiver_depths=np.array([10.0]),
+        receiver_ranges=np.array([100.0]),
+        model="Bellhop",
+    )
+    with pytest.raises(ConfigurationError, match="invalid plot input"):
+        arrivals.plot()
+    assert not plt.get_fignums()
+
+
+# Entry points that are not plain decorated plotters: the type dispatcher
+# (each of its targets is decorated) and the two axis-annotation overlays,
+# which draw onto an axes the caller owns and open no figure of their own.
+_UNDECORATED_ENTRY_POINTS = {
+    "plot_result", "draw_sound_cone", "draw_slowness_line",
+}
+
+
+# Private renderers reached through ``result.plot()`` / ``env.plot()`` /
+# ``env.ssp.plot()`` rather than ``plots.__all__``.
+_PRIVATE_RENDERERS = (
+    ("rays_modes", "_plot_rays"),
+    ("rays_modes", "_plot_arrivals"),
+    ("rays_modes", "_plot_mode_functions"),
+    ("rays_modes", "_plot_reflection_coefficient"),
+    ("rays_modes", "_plot_covariance"),
+    ("rays_modes", "_plot_replicas"),
+    ("fields", "_plot_field_stack"),
+    ("environment", "_plot_environment"),
+    ("environment", "_plot_ssp"),
+    ("environment", "_plot_range_profile"),
+)
+
+
+def _is_wrapped(fn) -> bool:
+    return inspect.unwrap(fn) is not fn
+
+
+def test_every_plotter_entry_point_is_wrapped_by_typed_plot_error():
+    """Every public ``plots.__all__`` plotter and every private per-type
+    renderer carries the ``typed_plot_error`` wrapper, so plotting.md's
+    "ConfigurationError + no figure left behind" claim holds package-wide."""
+    unwrapped = []
+    for name in plots.__all__:
+        obj = getattr(plots, name)
+        if inspect.ismodule(obj) or name in _UNDECORATED_ENTRY_POINTS:
+            continue
+        if not _is_wrapped(obj):
+            unwrapped.append(name)
+    for module_name, fn_name in _PRIVATE_RENDERERS:
+        fn = getattr(getattr(plots, module_name), fn_name)
+        if not _is_wrapped(fn):
+            unwrapped.append(f"{module_name}.{fn_name}")
+    assert not unwrapped, f"plotters without typed_plot_error: {unwrapped}"
+
+
+def _range_time_field() -> Field:
+    ranges = np.linspace(0.0, 2140.0, 5)
+    times = np.linspace(0.0, 1.0, 4)
+    rng = np.random.default_rng(0)
+    return Field(
+        data=rng.standard_normal((ranges.size, times.size)),
+        coords={"range": ranges, "time": times},
+        model="test",
+    )
+
+
+def test_heatmap_with_range_on_the_y_axis_draws_it_in_km():
+    """A ``(range, time)`` heatmap puts range on y in km — same scale and
+    label as every other view of a range axis."""
+    fig, ax = plot_field(_range_time_field())
+    assert ax.get_ylabel() == "Range (km)"
+    lo, hi = sorted(ax.get_ylim())
+    assert -1.0 < lo and hi < 3.0, (lo, hi)
+
+
+def test_pinned_range_subtitle_reads_in_km():
+    """Slicing at range=2140 m subtitles the cut ``Range = 2.14 km``."""
+    fig, ax = plot_field(_range_time_field().at(range=2140.0))
+    assert ax.get_title() == "Range = 2.14 km"
+
+
+def _se_field(n_depth, n_range, *, scale=1.0):
+    """Signal excess in dB on an ``(n_depth, n_range)`` grid spanning
+    ``scale × (-20 … +40)`` dB, so it crosses the SE = 0 boundary."""
+    depths = (np.linspace(10.0, 90.0, n_depth) if n_depth > 1
+              else np.array([50.0]))
+    ranges = (np.linspace(500.0, 4500.0, n_range) if n_range > 1
+              else np.array([1000.0]))
+    data = scale * np.linspace(-20.0, 40.0, n_depth * n_range)
+    return Field(data=data.reshape(n_depth, n_range),
+                 coords={'depth': depths, 'range': ranges},
+                 metadata={'kind': 'signal_excess', 'unit': 'dB'},
+                 model='test')
+
+
+def _pd_field(n_depth, n_range):
+    """Detection probability on an ``(n_depth, n_range)`` grid spanning 0 … 1,
+    so every default contour level falls inside the data."""
+    depths = (np.linspace(10.0, 90.0, n_depth) if n_depth > 1
+              else np.array([50.0]))
+    ranges = (np.linspace(500.0, 4500.0, n_range) if n_range > 1
+              else np.array([1000.0]))
+    return Field(data=np.linspace(0.0, 1.0, n_depth * n_range).reshape(
+                     n_depth, n_range),
+                 coords={'depth': depths, 'range': ranges},
+                 metadata={'kind': 'probability_of_detection'}, model='test')
+
+
+def _mesh_extent(ax) -> Bbox:
+    """Data-space bounding box of every quad the heatmap drew."""
+    mesh = ax.collections[0]
+    return Bbox.union([p.get_extents() for p in mesh.get_paths()])
+
+
+def _contour_sets(ax):
+    return [c for c in ax.collections if 'Contour' in type(c).__name__]
+
+
+def _ppsd_result(level_lo, level_hi):
+    """A ``PPSDResult`` whose histogram sits between ``level_lo`` and
+    ``level_hi`` dB."""
+    frequencies = np.array([100.0, 200.0, 400.0])
+    level_edges = np.linspace(level_lo, level_hi, 5)
+    pdf = np.full((level_edges.size - 1, frequencies.size), 0.25)
+    mean_db = np.full(frequencies.size, 0.5 * (level_lo + level_hi))
+    return PPSDResult(frequencies, level_edges, pdf, mean_db,
+                      np.ones(frequencies.size), 1.0, 1.0)
+
+
+def _cq_ppsd_result(level_lo, level_hi):
+    r = _ppsd_result(level_lo, level_hi)
+    return CQPPSDResult(r.frequencies, r.level_edges, r.pdf, r.mean_db,
+                        r.std_db, r.binwidth_db)
+
+
+def _bands():
+    """``sel``-shaped ``(low, centre, high)`` band triples."""
+    return [(88.0, 100.0, 112.0), (112.0, 125.0, 141.0)]
+
+
+def _modes(n=10):
+    depths = np.linspace(0.0, 100.0, 21)
+    phi = np.sin(np.outer(depths, np.arange(1, n + 1)) * np.pi / 100.0)
+    return Modes(k=np.linspace(0.42, 0.30, n) + 0j, phi=phi, depths=depths,
+                 model='Test', frequencies=100.0)
+
+
+def _rays():
+    return Rays(rays=[{'r': np.linspace(0.0, 2000.0, 20),
+                       'z': np.linspace(0.0, 80.0, 20),
+                       'n_top_bounces': 1, 'n_bot_bounces': 0}],
+                model='Bellhop')
+
+
+@pytest.mark.parametrize("shape", [(1, 8), (8, 1)])
+def test_signal_excess_renders_an_axis_held_at_one_sample_as_a_band(shape):
+    """A single-receiver-depth run (and its transpose, a single range) is a
+    mainstream shape. The SE = 0 contour raised a raw ``TypeError`` on it, and
+    ``show_boundary=False`` drew a zero-extent mesh — an empty panel."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        fig, ax = plot_signal_excess(_se_field(*shape))
+    extent = _mesh_extent(ax)
+    assert extent.width > 0.0 and extent.height > 0.0
+    plt.close(fig)
+
+
+@pytest.mark.parametrize("shape", [(1, 8), (8, 1)])
+def test_detection_probability_renders_an_axis_held_at_one_sample_as_a_band(
+        shape):
+    """Same shape, same crash: ``plot_detection_probability`` drew its ``P_D``
+    contours through the same ``contour`` call."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        fig, ax = plot_detection_probability(_pd_field(*shape))
+    extent = _mesh_extent(ax)
+    assert extent.width > 0.0 and extent.height > 0.0
+    plt.close(fig)
+
+
+@pytest.mark.parametrize("shape", [(1, 8), (8, 1)])
+def test_signal_excess_warns_that_one_sample_leaves_no_boundary_to_trace(shape):
+    """A contour is interpolated between neighbouring samples, so the SE = 0
+    boundary cannot be drawn — the heatmap can, and the panel says which."""
+    with pytest.warns(UserWarning, match="at least 2 samples on both axes"):
+        fig, ax = plot_signal_excess(_se_field(*shape))
+    assert not _contour_sets(ax)
+    plt.close(fig)
+
+
+@pytest.mark.parametrize("shape", [(1, 8), (8, 1)])
+def test_detection_probability_warns_that_one_sample_leaves_no_contour(shape):
+    with pytest.warns(UserWarning, match="at least 2 samples on both axes"):
+        fig, ax = plot_detection_probability(_pd_field(shape[0], shape[1]))
+    assert not _contour_sets(ax)
+    plt.close(fig)
+
+
+def test_signal_excess_draws_the_boundary_when_both_axes_carry_samples():
+    """The skip is keyed on the degenerate shape alone: an ordinary grid keeps
+    its detection boundary."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        fig, ax = plot_signal_excess(_se_field(4, 5))
+    assert _contour_sets(ax)
+    plt.close(fig)
+
+
+def test_compare_models_signal_excess_window_spans_every_panel():
+    """The symmetric window came from ``fields[0]`` alone, so a wider second
+    panel saturated (measured: 70% of its samples) under a colourbar that
+    claimed to describe it."""
+    narrow, wide = _se_field(4, 5), _se_field(4, 5, scale=4.0)
+    fig, axes = compare_models([narrow, wide], value='db')
+    lo, hi = axes[0, 0].collections[0].get_clim()
+    peak = float(np.max(np.abs(np.asarray(wide.data))))
+    assert (lo, hi) == pytest.approx((-peak, peak))
+    assert np.all(np.asarray(wide.data) >= lo)
+    assert np.all(np.asarray(wide.data) <= hi)
+    plt.close(fig)
+
+
+def test_compare_models_signal_excess_window_ignores_the_panel_order():
+    """Order-dependence was the proof the window was one panel's own: reversing
+    the list changed the shared colour limits."""
+    narrow, wide = _se_field(4, 5), _se_field(4, 5, scale=4.0)
+    fig_a, axes_a = compare_models([narrow, wide], value='db')
+    fig_b, axes_b = compare_models([wide, narrow], value='db')
+    assert (axes_a[0, 0].collections[0].get_clim()
+            == axes_b[0, 0].collections[0].get_clim())
+    plt.close(fig_a)
+    plt.close(fig_b)
+
+
+def test_compare_models_keeps_signal_excess_zero_on_the_neutral_colour():
+    """A diverging map carries its meaning in the neutral colour, and for
+    signal excess that colour is the SE = 0 dB detection boundary. The generic
+    pooled scale is an asymmetric min/max and would move it."""
+    fig, axes = compare_models([_se_field(4, 5), _se_field(4, 5, scale=4.0)],
+                               value='db')
+    lo, hi = axes[0, 0].collections[0].get_clim()
+    assert lo == pytest.approx(-hi)
+    plt.close(fig)
+
+
+def test_compare_models_signal_excess_panels_share_one_window():
+    fig, axes = compare_models([_se_field(4, 5), _se_field(4, 5, scale=4.0)],
+                               value='db')
+    clims = [ax.collections[0].get_clim() for ax in axes.ravel()]
+    assert clims[0] == clims[1]
+    plt.close(fig)
+
+
+def _plot_offscreen_ppsd():
+    return plot_ppsd(_ppsd_result(300.0, 320.0))
+
+
+def _plot_offscreen_sel():
+    return plot_sel(np.array([1e-30, 1e-30]), _bands(), duration=1.0)
+
+
+def _plot_offscreen_constant_q_psd():
+    return plot_constant_q_psd(np.array([100.0, 200.0, 400.0]),
+                               np.array([1e-30, 1e-30, 1e-30]))
+
+
+def _plot_offscreen_constant_q_ppsd():
+    return plot_constant_q_ppsd(_cq_ppsd_result(300.0, 320.0))
+
+
+def _plot_offscreen_frf():
+    return plot_frf(np.array([10.0, 100.0, 1000.0]),
+                    np.array([1e-9 + 0j, 1e-9 + 0j, 1e-9 + 0j]))
+
+
+@pytest.mark.parametrize("call, caller", [
+    (_plot_offscreen_ppsd, "plot_ppsd"),
+    (_plot_offscreen_sel, "plot_sel"),
+    (_plot_offscreen_constant_q_psd, "plot_constant_q_psd"),
+    (_plot_offscreen_constant_q_ppsd, "plot_constant_q_ppsd"),
+    (_plot_offscreen_frf, "plot_frf"),
+])
+def test_a_record_outside_the_pinned_level_window_says_the_panel_is_empty(
+        call, caller):
+    """These plotters pin the ordinate to the range their quantity normally
+    occupies, so a record in the wrong units renders as a blank panel that
+    looks like "no data". ``plot_psd`` / ``plot_coherence`` warned; these five
+    did not."""
+    with pytest.warns(UserWarning, match=f"{caller}: every sample"):
+        fig, _ = call()
+    plt.close(fig)
+
+
+def test_a_record_inside_the_pinned_level_window_is_not_flagged():
+    """The warning fires on an empty panel only — an ordinary record must not
+    train the reader to ignore it."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        fig, _ = plot_frf(np.array([10.0, 100.0, 1000.0]),
+                          np.array([1.0 + 1.0j, 2.0 + 0j, 0.5 - 0.5j]))
+        plt.close(fig)
+        fig, _ = plot_ppsd(_ppsd_result(60.0, 90.0))
+        plt.close(fig)
+
+
+def test_stacked_traces_take_a_caller_supplied_linewidth():
+    """``linewidth`` was hardcoded into the same ``plot`` call ``**mpl_kw``
+    lands in, so passing it raised a raw ``TypeError``."""
+    field = Field(data=np.random.default_rng(0).standard_normal((3, 6)),
+                  coords={'range': np.linspace(0.0, 1000.0, 3),
+                          'time': np.linspace(0.0, 1.0, 6)}, model='test')
+    fig, ax = plot_field(field, stacked=True, linewidth=2.5)
+    assert ax.lines[0].get_linewidth() == pytest.approx(2.5)
+    plt.close(fig)
+    fig, ax = plot_field(field, stacked=True)
+    assert ax.lines[0].get_linewidth() == pytest.approx(0.8)
+    plt.close(fig)
+
+
+@pytest.mark.parametrize("show_components", [True, False])
+def test_plot_wenz_total_line_takes_caller_supplied_styles(show_components):
+    """``**mpl_kw`` is documented as styling the total-noise line, but colour,
+    width and label were all hardcoded into that call."""
+    wenz = WenzNoise(np.logspace(1, 5, 40), wind_speed_kn=10.0)
+    fig, ax = plot_wenz(wenz, show_components=show_components, color='red',
+                        linewidth=3.5, label='mine')
+    total = ax.lines[0]
+    assert total.get_color() == 'red'
+    assert total.get_linewidth() == pytest.approx(3.5)
+    assert total.get_label() == 'mine'
+    plt.close(fig)
+
+
+def test_plot_wenz_total_line_keeps_its_own_style_by_default():
+    wenz = WenzNoise(np.logspace(1, 5, 40), wind_speed_kn=10.0)
+    fig, ax = plot_wenz(wenz)
+    total = ax.lines[0]
+    assert total.get_color() == 'black'
+    assert total.get_linewidth() == pytest.approx(2.0)
+    assert total.get_label().startswith('Total noise')
+    plt.close(fig)
+
+
+def test_plot_source_level_takes_a_caller_supplied_marker():
+    """``marker`` collided; ``label`` is a named parameter and never did."""
+    fig, ax = plot_source_level(np.array([100.0, 200.0]),
+                                np.array([120.0, 118.0]), marker='s',
+                                label='ship')
+    assert ax.lines[0].get_marker() == 's'
+    assert ax.lines[0].get_label() == 'ship'
+    plt.close(fig)
+    fig, ax = plot_source_level(np.array([100.0, 200.0]),
+                                np.array([120.0, 118.0]))
+    assert ax.lines[0].get_marker() == 'o'
+    plt.close(fig)
+
+
+def test_ray_plot_rejects_an_unknown_colour_mode():
+    """A typo'd ``color_by`` fell through to the monochrome branch and dropped
+    the per-class legend, so the fan came back looking like a deliberate
+    ``color_by=None`` call."""
+    with pytest.raises(ConfigurationError, match="not a colouring mode"):
+        _plot_rays(_rays(), color_by='bounce')
+    assert not plt.get_fignums()
+
+
+@pytest.mark.parametrize("color_by", ['bounces', None])
+def test_ray_plot_accepts_its_two_colour_modes(color_by):
+    fig, ax = _plot_rays(_rays(), color_by=color_by)
+    assert ax.lines
+    plt.close(fig)
+
+
+@pytest.mark.parametrize("mode_range", [(-3, 4), (-3, 8), (5, 2), (4, 4)])
+def test_mode_heatmap_rejects_a_range_that_selects_nothing(mode_range):
+    """A negative start wraps under numpy slicing and ``start >= stop`` selects
+    no column; ``(-3, 8)`` with ``normalize=False`` reached ``pcolormesh`` as a
+    raw ``TypeError`` naming neither knob."""
+    for normalize in (True, False):
+        with pytest.raises(ConfigurationError, match="0 <= start < stop"):
+            plot_modes_heatmap(_modes(), mode_range=mode_range,
+                               normalize=normalize)
+    assert not plt.get_fignums()
+
+
+def test_mode_heatmap_rejects_a_range_starting_past_the_last_mode():
+    with pytest.raises(ConfigurationError, match="starts past"):
+        plot_modes_heatmap(_modes(10), mode_range=(12, 20))
+    assert not plt.get_fignums()
+
+
+def test_mode_heatmap_clamps_a_range_reaching_past_the_last_mode():
+    """The open end is a slice bound, not a claim about how many modes exist."""
+    fig, ax = plot_modes_heatmap(_modes(10), mode_range=(2, 999))
+    assert '8 modes' in ax.get_title()
+    plt.close(fig)
+
+
+def test_mode_heatmap_rejects_n_modes_together_with_mode_range():
+    """``mode_range`` took the slice wholesale, so ``n_modes`` was dropped
+    without a word."""
+    with pytest.raises(ConfigurationError, match="pass one"):
+        plot_modes_heatmap(_modes(10), 3, mode_range=(0, 8))
+    assert not plt.get_fignums()
+
+
+def _cut(kind):
+    """A 1-D range cut of a dB quantity, ascending with range."""
+    data = np.array([4.18, 10.0, 15.82, 20.0])
+    if kind == 'pressure':
+        return Field(data=data, coords={'range': _RANGE})
+    return Field(data=data, coords={'range': _RANGE},
+                 metadata={'kind': kind, 'unit': 'dB'})
+
+
+def _ylim_direction(ax):
+    """``'down'`` when the y axis increases downward, else ``'up'``."""
+    lo, hi = ax.get_ylim()
+    return 'down' if lo > hi else 'up'
+
+
+@pytest.mark.parametrize("kind, expected", [
+    ('pressure', 'down'),            # TL: a loss, so the loud end is the top
+    ('signal_excess', 'up'),         # a level: more is more
+    ('reverberation', 'up'),
+])
+def test_db_cut_points_the_same_way_through_either_entry_point(kind, expected):
+    """``compare`` keyed the flip on ``value == 'db'`` and ``plot_field`` on the
+    quantity, so every dB view except TL came out vertically mirrored between
+    the two — and the tick labels stayed truthful, so nothing looked wrong."""
+    field = _cut(kind)
+    _, ax_single = plot_field(field, value='db')
+    _, ax_overlay = compare([field], labels=['a'], value='db')
+    assert _ylim_direction(ax_single) == expected
+    assert _ylim_direction(ax_overlay) == expected
+
+
+def test_a_real_tl_grid_and_a_complex_one_agree():
+    """TL reaches the plotters two ways — a real dB grid from RAM, complex
+    pressure from Kraken — and both are transmission loss."""
+    real_tl = Field(data=np.array([40.0, 60.0, 80.0, 100.0]),
+                    coords={'range': _RANGE},
+                    metadata={'kind': 'pressure', 'unit': 'dB'})
+    complex_tl = Field(data=np.array([1e-2, 1e-3, 1e-4, 1e-5]) * (1 + 0j),
+                       coords={'range': _RANGE})
+    for field in (real_tl, complex_tl):
+        _, ax = plot_field(field, value='db')
+        assert _ylim_direction(ax) == 'down'
+        _, ax = compare([field], labels=['a'], value='db')
+        assert _ylim_direction(ax) == 'down'
+
+
+def test_a_depth_cut_inverts_for_every_quantity():
+    """Depth on Y is the oceanographic convention and has nothing to do with
+    which way the quantity reads."""
+    field = Field(data=np.array([1.0, 2.0, 3.0]), coords={'depth': _DEPTH},
+                  metadata={'kind': 'signal_excess', 'unit': 'dB'})
+    _, ax = compare([field], labels=['a'], value='db')
+    assert _ylim_direction(ax) == 'down'
+    assert ax.get_ylabel() == 'Depth (m)'
+
+
+def _panel(fig_axes):
+    fig, axes = fig_axes
+    return axes[0, 0].collections[0]
+
+
+@pytest.mark.parametrize("value", ['db', 'mag_db', 'mag', 'phase',
+                                   'real', 'imag'])
+def test_one_field_renders_identically_alone_and_in_a_panel(value):
+    """``compare_models`` computed one figure-level colormap and colour range
+    and pushed them into every panel, overriding the per-value defaults
+    ``plot_field`` applies."""
+    field = _grid()
+    _, ax = plot_field(field, value=value)
+    alone = ax.collections[0]
+    tiled = _panel(compare_models([field], value=value))
+    assert tiled.get_cmap().name == alone.get_cmap().name
+    assert np.allclose(tiled.get_clim(), alone.get_clim())
+
+
+def test_phase_keeps_its_cyclic_colormap_in_a_panel():
+    """-π and +π are the same phase. On a non-cyclic map they land at opposite
+    ends of the scale and the wrap reads as a real discontinuity."""
+    mesh = _panel(compare_models([_grid()], value='phase'))
+    assert mesh.get_cmap().name == 'twilight'
+    assert np.allclose(mesh.get_clim(), (-np.pi, np.pi))
+
+
+def test_a_quiet_response_is_not_stretched_to_a_symmetric_scale():
+    """``mag_db`` is a level, not a signed quantity: a -80..-20 dB response
+    forced out to ±80 occupies half the colormap."""
+    mag = 10 ** (np.linspace(-80, -20, 12).reshape(3, 4) / 20)
+    field = Field(data=mag * np.exp(1j * 0.1),
+                  coords={'depth': _DEPTH, 'range': _RANGE})
+    lo, hi = _panel(compare_models([field], value='mag_db')).get_clim()
+    assert (lo, hi) == pytest.approx((-80.0, -20.0))
+
+
+def test_a_signed_view_takes_a_symmetric_scale():
+    """Zero has to keep the diverging map's neutral colour."""
+    lo, hi = _panel(compare_models([_grid()], value='real')).get_clim()
+    assert lo == pytest.approx(-hi)
+
+
+def test_panels_share_one_pooled_scale():
+    """The reason the figure-level limits exist at all: left to autoscale, two
+    fields differing by 100x would render identically under one colorbar."""
+    loud, quiet = _grid(), _grid()
+    quiet = Field(data=quiet.data * 0.01,
+                  coords={'depth': _DEPTH, 'range': _RANGE})
+    fig, axes = compare_models([loud, quiet], value='mag')
+    first = axes[0, 0].collections[0].get_clim()
+    second = axes[0, 1].collections[0].get_clim()
+    assert first == second
+    assert first[1] == pytest.approx(float(np.max(np.abs(loud.data))))
+
+
+@pytest.mark.parametrize("value, expected", [
+    ('db', 'TL (dB)'),
+    ('mag_db', '|H| (dB)'),
+    ('mag', '|p|'),
+    ('phase', 'Phase (rad)'),
+    ('real', 'Re(p)'),
+    ('imag', 'Im(p)'),
+])
+def test_the_shared_colorbar_names_the_quantity(value, expected):
+    """The colorbar carried the raw ``value`` string for every non-dB view, so
+    a phase panel was labelled 'phase' where plot_field writes 'Phase (rad)'."""
+    fig, axes = compare_models([_grid()], value=value)
+    panels = list(axes.ravel())
+    labels = [a.get_ylabel() for a in fig.axes if a not in panels]
+    assert expected in labels
+
+
+def test_the_shared_colorbar_names_the_quantity_not_transmission_loss():
+    """A dB view is labelled from the field: signal excess is not TL."""
+    fig, axes = compare_models([_grid('signal_excess')], value='db')
+    panels = list(axes.ravel())
+    labels = [a.get_ylabel() for a in fig.axes if a not in panels]
+    assert 'Signal excess (dB)' in labels
+
+
+def _overview(**kwargs):
+    env = uacpy.Environment(bathymetry=200.0, ssp=1500.0)
+    tl = _grid()
+    lats, lons = np.linspace(40.0, 41.0, 4), np.linspace(-1.0, 1.0, 5)
+    depth = np.full((4, 5), 1000.0)
+    return plot_overview(env=env, tl=tl, map_args=(lats, lons, depth),
+                         map_kwargs=dict(basemap=False), **kwargs)
+
+
+@pytest.mark.parametrize("tl_kwargs, expected", [
+    (None, 'TL (dB)'),
+    (dict(value='mag'), '|p|'),
+    (dict(value='phase'), 'Phase (rad)'),
+])
+def test_the_overview_colorbar_follows_tl_kwargs(tl_kwargs, expected):
+    """The label was hardcoded 'TL (dB)', so ``tl_kwargs=dict(value='mag')``
+    captioned linear |p| as a loss in dB."""
+    fig, (ax_map, ax_tl, ax_env) = _overview(tl_kwargs=tl_kwargs)
+    assert [c.get_ylabel() for c in ax_tl.child_axes] == [expected]
+
+
+def test_a_panel_grid_warning_points_at_the_caller():
+    """``typed_plot_error`` wraps every plotter, so a plotter's own
+    ``stacklevel`` lands on the decorator: the user was told to fix a call and
+    handed a line in uacpy's _common.py, and a ``-W`` filter keyed on their own
+    module never matched."""
+    other = Field(data=_grid().data,
+                  coords={'depth': _DEPTH, 'range': _RANGE + 1.0})
+    with pytest.warns(UserWarning, match='axis differs') as record:
+        compare_models([_grid(), other])
+    assert Path(record[0].filename).name == Path(__file__).name
+
+
+def test_an_offscreen_psd_warning_points_at_the_caller():
+    """Same offset, one frame deeper: the warning is raised by a helper the
+    plotter calls."""
+    frequencies = np.array([0.0, 10.0, 100.0, 1000.0])
+    with pytest.warns(UserWarning, match='outside the plotted y range') as rec:
+        plot_psd(frequencies, np.full(4, 1e-30))
+    assert Path(rec[0].filename).name == Path(__file__).name
+
+
+def test_a_sub_hertz_band_keeps_an_ascending_frequency_axis():
+    """The low end is clamped to 1 Hz because a log axis cannot render DC. A
+    record whose whole band sits below 1 Hz got lo > hi from that clamp, and
+    the axis silently reversed."""
+    lo, hi = _log_freq_xlim(np.array([0.0, 0.1, 0.2, 0.5]))
+    assert 0 < lo < hi
+
+    _, ax = plot_psd(np.array([0.0, 0.1, 0.2, 0.5]), np.full(4, 1.0))
+    left, right = ax.get_xlim()
+    assert left < right
+
+
+def test_an_ordinary_band_starts_at_one_hertz():
+    assert _log_freq_xlim(np.array([0.0, 10.0, 100.0])) == (1.0, 100.0)
+
+
+def _flat_spectrogram(level_db, n_f=6, n_t=5, f_lo=1.0, f_hi=500.0):
+    """``(frequencies, times, Sxx)`` whose every cell sits at ``level_db``
+    re 1 µPa²/Hz, so the whole record is on one side of a colour window."""
+    power = (10.0 ** (level_db / 10.0)) * REFERENCE_PRESSURE_WATER ** 2
+    return (np.linspace(f_lo, f_hi, n_f), np.linspace(0.0, 10.0, n_t),
+            np.full((n_f, n_t), power))
+
+
+def test_a_sub_hertz_spectrogram_keeps_an_ascending_frequency_axis():
+    """``plot_spectrogram``'s ``ymin=1`` default lands above the whole band of
+    a record below 1 Hz, which reverses the y axis and puts the record outside
+    its own window. Such a band starts at its first positive bin instead."""
+    frequencies = np.linspace(0.01, 0.5, 8)
+    fig, ax = plot_spectrogram(frequencies, np.linspace(0.0, 600.0, 5),
+                               np.full((8, 5), 1e-12))
+    lo, hi = ax.get_ylim()
+    assert 0 < lo < hi
+    assert not ax.yaxis_inverted()
+    assert (lo, hi) == pytest.approx((frequencies[0], frequencies[-1]))
+    plt.close(fig)
+
+
+def test_a_spectrogram_band_above_one_hertz_starts_at_the_clamp():
+    """The clamp holds wherever the band can take it, so an ordinary panel
+    keeps the published ``ymin=1`` window."""
+    fig, ax = plot_spectrogram(np.linspace(0.0, 2000.0, 8),
+                               np.linspace(0.0, 600.0, 5),
+                               np.full((8, 5), 1e-12), ymax=800.0)
+    assert ax.get_ylim() == pytest.approx((1.0, 800.0))
+    plt.close(fig)
+
+
+@pytest.mark.parametrize("top, expected_lo", [
+    (1.0, 0.25),            # top == clamp: the window would be empty
+    (1.0 + 1e-9, 1.0),      # top above the clamp by the smallest step measured
+])
+def test_the_frequency_clamp_applies_only_above_the_high_limit(top, expected_lo):
+    """Both sides of the clamp boundary: at ``hi == clamp`` the clamped window
+    has zero height, so the record's own first positive bin is the low end."""
+    frequencies = np.array([0.0, 0.25, 0.5, top])
+    assert _clamped_freq_limits(frequencies, 1.0, top)[0] == pytest.approx(expected_lo)
+
+
+def test_a_spectrogram_outside_the_pinned_colour_window_says_it_is_flat():
+    """Both spectrograms pin a 0-200 dB colour window, so a record wholly above
+    or below it maps to one end of the colormap in every cell — a flat image
+    that reads as a valid featureless record."""
+    for plotter, caller in ((plot_spectrogram, "plot_spectrogram"),
+                            (plot_constant_q_spectrogram,
+                             "plot_constant_q_spectrogram")):
+        for level_db in (240.0, -80.0):
+            with pytest.warns(UserWarning,
+                              match=f"{caller}: every sample.*colour window"):
+                fig, _ = plotter(*_flat_spectrogram(level_db))
+            plt.close(fig)
+
+
+@pytest.mark.parametrize("level_db", [0.0, 200.0])
+def test_a_spectrogram_on_the_colour_window_edge_is_not_flagged(level_db):
+    """Both edges of the window are inside it — the warning fires only when
+    every sample is strictly outside, or an ordinary panel trains the reader
+    to ignore it."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        fig, _ = plot_spectrogram(*_flat_spectrogram(level_db))
+        plt.close(fig)
+
+
+@pytest.mark.parametrize("kwargs, expected", [
+    ({}, (1.0, 500.0)),                        # the published default
+    ({'ymin': None}, (0.0, 500.0)),            # low end from the record
+    ({'ymax': None}, (1.0, 500.0)),            # high end from the record
+    ({'ymin': None, 'ymax': None}, (0.0, 500.0)),
+    ({'ymin': None, 'ymax': 300.0}, (0.0, 300.0)),
+    ({'ymin': 50.0, 'ymax': None}, (50.0, 500.0)),
+])
+def test_either_frequency_limit_takes_the_records_own_end_when_none(kwargs,
+                                                                    expected):
+    """``ymin`` and ``ymax`` are symmetric: ``None`` on either takes the
+    record's own first / last bin. ``ymax=None`` is the documented spelling and
+    ``ymin=None`` is its mirror — reaching the clamp comparison with ``None``
+    raises a bare ``TypeError``, which ``typed_plot_error`` does not catch."""
+    frequencies = np.linspace(0.0, 500.0, 24)
+    fig, ax = plot_spectrogram(frequencies, np.linspace(0.0, 10.0, 12),
+                               np.full((24, 12), 1e-12), **kwargs)
+    assert ax.get_ylim() == pytest.approx(expected)
+    assert not ax.yaxis_inverted()
+    plt.close(fig)
+
+
+def test_a_spectrogram_pinned_off_its_own_band_says_the_panel_is_empty():
+    """A caller pinning both ends of the y window away from the record gets an
+    empty panel that the clamp rule cannot rescue, so it is named."""
+    with pytest.warns(UserWarning,
+                      match=r"plot_spectrogram: every sample.*plotted y range"):
+        fig, _ = plot_spectrogram(*_flat_spectrogram(140.0),
+                                  ymin=800.0, ymax=900.0)
+    plt.close(fig)

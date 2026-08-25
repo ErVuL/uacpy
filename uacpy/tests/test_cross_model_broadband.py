@@ -7,7 +7,9 @@ suite runs each broadband-capable model on a Pekeris fluid waveguide
 and asserts:
 
 1. ``|H(fc)|`` agrees with Scooter (the wavenumber-integration ground
-   truth) within 6 dB.
+   truth) within the per-model bound in ``_H_FC_TOLERANCE_DB`` — 1.5 dB
+   for Kraken, 3.5 for RAM, 6.0 for Bellhop, each sized on the measured
+   difference at this cell.
 2. The IFFT'd, source-convolved trace's envelope peak lands inside the
    physically plausible early-arrival window ``[r/c_bottom, r/c_water]
    + (-50, +200) ms``, and the inter-model spread of those peaks is
@@ -101,6 +103,43 @@ _RUNNERS = {
 }
 
 
+# |H(fc)| agreement with Scooter, one bound per model rather than a single
+# gate sized for the loosest of them: Kraken agrees to 0.29 dB here and a
+# shared 6 dB bound spends all of that sensitivity on Bellhop's account.
+# Each number below is the difference measured at this cell (RANGE_M,
+# DEPTH_M, FC) followed by the multiple of it the bound allows.
+_H_FC_TOLERANCE_DB = {
+    # Measured -0.286 dB. Modes vs wavenumber integration on a fluid Pekeris
+    # is an apples-to-apples comparison, so 1.5 dB is 5.2x the measurement
+    # and still catches a factor-2 amplitude convention (6.02 dB) by 3.8x in
+    # the nearer of the two directions.
+    'Kraken': 1.5,
+    # Measured -1.970 dB, and left loose deliberately. This fixture is
+    # D/lambda = 3.33 (100 m water column at 50 Hz), below the D/lambda >= 5
+    # floor uacpy's own model-validity table sets for ray theory — the run
+    # emits exactly that warning. Bellhop's disagreement here is a
+    # validity-regime gap, not numerical error with a bound to tighten, so
+    # 6.0 dB is a sanity bound (3.0x the measurement) and Bellhop is the
+    # only model in this gate that needs one that loose.
+    'Bellhop': 6.0,
+    # Measured +1.415 dB. 3.5 dB is 2.5x it — more headroom than Kraken gets
+    # because RAM is the only model here whose accuracy is set by
+    # user-facing marching parameters (``_ram_bb`` pins dr=2.0, dz=0.25), so
+    # this difference is a function of a grid the caller chooses and the
+    # others' are not. Still catches a factor-2 (6.02 dB) by 1.3x in the
+    # nearer direction.
+    'RAM': 3.5,
+}
+
+# Every model compared against the Scooter reference needs its own bound;
+# adding a runner without one must fail here rather than quietly inherit a
+# neighbour's number.
+assert set(_H_FC_TOLERANCE_DB) == set(_RUNNERS) - {'Scooter'}, (
+    f'_H_FC_TOLERANCE_DB {sorted(_H_FC_TOLERANCE_DB)} does not cover the '
+    f'non-reference runners {sorted(set(_RUNNERS) - {"Scooter"})}'
+)
+
+
 def test_mpirams_phase_matches_scooter():
     """Anchor the mpiramS phase convention to the exact field.
 
@@ -161,12 +200,15 @@ def _arrival_window():
 
     Lower bound: r / c_bottom minus a small lead (refracted-bottom
     rays can be slightly faster than the slowest-mode-anchored
-    t_start). Upper bound: r / c_water plus the full 0.2 s source pulse, since
-    convolution delays the envelope peak by up to the pulse length.
+    t_start). Upper bound: r / c_water plus the full 0.2 s source pulse
+    (convolution delays the envelope peak by up to the pulse length) plus
+    the 0.1 s modal-tail allowance the inter-model spread assertion uses —
+    in a Pekeris cell the envelope maximum builds from late high-order
+    modes and lands after the first water-speed arrival cluster.
     """
     c_water = 1500.0
     c_bottom = 1700.0
-    return (RANGE_M / c_bottom - 0.05, RANGE_M / c_water + 0.20)
+    return (RANGE_M / c_bottom - 0.05, RANGE_M / c_water + 0.20 + 0.10)
 
 
 def _runner_param(label):
@@ -177,9 +219,9 @@ def _runner_param(label):
 
 @pytest.mark.parametrize('label', [_runner_param(lbl) for lbl in _RUNNERS])
 def test_broadband_transfer_function_magnitude(label):
-    """|H(fc)| at the test cell is finite, positive, and within 6 dB of
-    the Scooter reference (Scooter is the wavenumber-integration ground
-    truth on Pekeris)."""
+    """|H(fc)| at the test cell is finite, positive, and within the model's
+    own ``_H_FC_TOLERANCE_DB`` bound of the Scooter reference (Scooter is the
+    wavenumber-integration ground truth on Pekeris)."""
     env = _pekeris_env()
     src, rcv = _src_rcv()
     tf = _RUNNERS[label](env, src, rcv)
@@ -196,8 +238,10 @@ def test_broadband_transfer_function_magnitude(label):
     j_fc = int(np.argmin(np.abs(ref_freqs - FC)))
     Href = np.abs(np.asarray(ref.data)[0, 0, j_fc])
     diff_db = 20.0 * np.log10(Hfc / Href)
-    assert abs(diff_db) <= 6.0, (
-        f'{label} vs Scooter at fc: |H| differs by {diff_db:.2f} dB'
+    tolerance_db = _H_FC_TOLERANCE_DB[label]
+    assert abs(diff_db) <= tolerance_db, (
+        f'{label} vs Scooter at fc: |H| differs by {diff_db:.2f} dB '
+        f'> {tolerance_db} dB'
     )
 
 
@@ -279,7 +323,8 @@ def test_synthesize_time_series_honors_user_sample_rate():
 
 @pytest.mark.parametrize('model_cls', [Bellhop, Kraken, Scooter])
 def test_single_frequency_broadband_auto_expands_the_band(model_cls):
-    """source-receiver.md:316-320: for BROADBAND a single-element frequency
+    """source-receiver.md §6 "a single value auto-expands to":
+    for BROADBAND a single-element frequency
     is a *centre* frequency, auto-expanded to ``fc·(1 ± bandwidth/2)`` — 128
     uniform bins over ``[0.75·fc, 1.25·fc]`` with the shared defaults
     (base.py ``_resolve_broadband_frequencies``) — while a multi-element
@@ -313,7 +358,8 @@ def _sparc_pseudo_gaussian(t: np.ndarray, f: float) -> np.ndarray:
 
 @pytest.mark.slow
 def test_sparc_pn_n_pulse_deconvolves_onto_kraken_broadband():
-    """sparc.md:527-538: with ``pulse_type='PN+N'`` — no per-wavenumber
+    """sparc.md §7 "calibrates tighter": with ``pulse_type='PN+N'`` — no
+    per-wavenumber
     band-pass, which is what the scalar deconvolution cannot undo — SPARC's
     p(t) calibrates to ~±1.5 dB against Kraken. SPARC appears in no other
     cross-model comparison, so this is the one place its absolute level is

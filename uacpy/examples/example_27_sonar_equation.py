@@ -29,11 +29,14 @@ NOTE:
 """
 
 import sys
+import os
 from pathlib import Path
 
-OUTPUT_DIR = Path(__file__).parent / 'output'
-OUTPUT_DIR.mkdir(exist_ok=True)
-sys.path.insert(0, str(Path(__file__).parent.parent))
+OUTPUT_DIR = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
+                  or Path(__file__).parent / 'output')
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+# Repo root, so ``import uacpy`` resolves from a source checkout.
+sys.path.insert(0, str(Path(__file__).parents[2]))
 
 import numpy as np  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
@@ -52,9 +55,11 @@ def thorp_db_per_km(freq_hz):
     """Thorp volume absorption, dB/km, with f in Hz.
 
     The two small terms differ from ``uacpy.core.absorption.thorp_db_per_km``,
-    which carries the JKPS Eq. 1.34 pair (3.0e-4, 3.3e-3) rather than
-    (2.75e-4, 0.003). The gap is 4e-4 dB/km at the 2 kHz used here, i.e. under
-    0.03 dB over the whole 60 km sweep.
+    which carries the (3.0e-4, 3.3e-3) pair rather than (2.75e-4, 0.003). That
+    pair is JKPS 2nd ed. Eq. (1.47); AT's ``AttenMod.f90:93`` labels the same
+    expression "JKPS Eq. 1.34" using 1st-edition numbering. The gap is
+    4e-4 dB/km at the 2 kHz used here, i.e. under 0.03 dB over the whole 60 km
+    sweep.
     """
     f = freq_hz / 1000.0
     return (0.11 * f**2 / (1 + f**2) + 44 * f**2 / (4100 + f**2)
@@ -198,7 +203,9 @@ def main():
     tl_at_bottom = tl_field.at(depth=float(env.depth)).db
     rl_grid = sonar.boundary_reverberation(
         rcv.ranges, 190.0,
-        sonar.lambert_bottom(np.rad2deg(np.arctan2(100.0, rcv.ranges))),
+        # Grazing angle at the seafloor patch in THIS scene: the 18 m source
+        # sits 200 - 18 = 182 m above the 200 m bottom.
+        sonar.lambert_bottom(np.rad2deg(np.arctan2(182.0, rcv.ranges))),
         pulse_length_s=0.05, horizontal_beamwidth_rad=0.1,
         tl_db=tl_at_bottom,
     )

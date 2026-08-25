@@ -13,7 +13,6 @@ attenuation) are ϕ-derived by **inverting** that same table — so
 grid value and whose speed/attenuation are consistent with it.
 """
 
-import os
 from pathlib import Path
 
 import numpy as np
@@ -63,10 +62,9 @@ def download_graw_db(cache_dir=None, *, timeout=300.0, verbose=False):
     log_message('graw', "downloading Graw 2021 seabed density grid (~37 MB)",
                 verbose=verbose)
     if not curl_download(GRAW_URL, out, timeout=timeout, verbose=verbose):
-        part = Path(str(out) + '.part')
-        part.write_bytes(http_get(GRAW_URL, timeout=timeout, verbose=verbose,
-                                  source='graw'))
-        os.replace(part, out)
+        with _cache.atomic_write(out) as part:
+            part.write_bytes(http_get(GRAW_URL, timeout=timeout, verbose=verbose,
+                                      source='graw'))
     _cache.invalidate_grids()
     log_message('graw', f"Graw density grid cached → {out}", verbose=verbose)
     return out
@@ -79,6 +77,8 @@ class _GrawGrid(NetcdfGrid):
     registered: 2160 × 4320 cells whose first centre sits half a cell inside the
     corner, latitude south-up and longitude over ``[-180, 180)``.
     """
+
+    dataset_name = 'graw'
 
     def __init__(self, path):
         try:
@@ -137,6 +137,11 @@ def _phi_from_density(rho):
 def fetch_bottom_graw(point, *, roughness=0.0, water_sound_speed=None,
                       timeout=None, verbose=False):
     """Model-ready half-space bottom from the Graw measured-density grid.
+
+    Provenance is catalogue-level: the grid cell under the point supplies the
+    value, and no per-cell ``data_point``/``offset_km`` is recorded — unlike
+    the sample sources (``grainsize``, ``mars``), which record the sample the
+    value came from.
 
     The density is the grid value; the grain size is recovered by inverting
     the Hamilton ρ(ϕ) table and yields the consistent sound speed and

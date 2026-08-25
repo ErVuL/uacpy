@@ -12,7 +12,7 @@ Adding a scenario:
    reference=..., comparisons=[...], tolerance_db=...)`` to ``SCENARIOS``.
 2. Each entry in ``comparisons`` is a ``(label, callable)`` pair, where
    the callable takes ``(env, source, receiver)`` and returns a
-   ``Field`` with ``field_type='tl'`` (uacpy's standard TL field).
+   ``Field`` holding TL (the comparison reads its ``.db``).
 
 Tests are parametrised over ``(scenario, comparison)`` so the failure
 report tells you exactly which model disagreed on which scenario.
@@ -215,9 +215,15 @@ def _altimetry_consistency() -> Scenario:
     convention; the RAM dispatcher converts to ramsurf's "depth below z=0"
     convention internally. This scenario guards against any sign drift.
 
-    Loose tolerance (8 dB RMSE) because ray-vs-PE on a rough-surface
-    Pekeris waveguide is genuinely a different physics, but it's enough to
-    catch a sign flip — an inverted-surface scenario shows >25 dB RMSE.
+    ``dz=0.25`` is what lets that guard bite. The keel is 1.5 m deep, so a
+    PE depth step coarser than the keel leaves it off the depth grid
+    entirely: at ``dz=2.0`` the ramsurf field is bit-identical to a
+    flat-surface run (max|dTL| = 0.000000 dB), and the sign of the
+    conversion then makes no difference to anything. Measured RMSE against
+    Bellhop in this window: dz=0.25 → 3.45 dB (keel resolved), dz=1.0 →
+    5.85, dz=2.0 → 5.10. The sibling ``_altimetry_broadband_at_fc`` runs
+    the same 0.25 on the same surface.
+
     Range window kept short to stay in the regime where rays converge
     without too much surface-loss accumulation.
     """
@@ -248,13 +254,19 @@ def _altimetry_consistency() -> Scenario:
             env, s, r, run_mode=RunMode.COHERENT_TL),
         comparisons=[
             # Ray-vs-PE on a rough Pekeris surface naturally diverges past
-            # ~3 km as surface multipaths accumulate; 8 dB RMSE is the
-            # empirical bar in 1-5 km. The test still catches sign flips
-            # cleanly — an inverted surface produces RMSE > 25 dB.
-            ('RAM(ramsurf1.5)', lambda env, s, r: RAM(verbose=False, dr=20.0, dz=2.0).run(
-                env, s, r, run_mode=RunMode.COHERENT_TL), 8.0),
+            # ~3 km as surface multipaths accumulate: measured RMSE 3.45 dB
+            # (max|err| 9.34) in 1-5 km, so 4.5 dB is 1.3x the measurement.
+            # Sized to bite on the sign drift this scenario exists for:
+            # flipping the conversion hands ramsurf a negative zsrf, which it
+            # clamps back to a flat surface and measures 6.64 dB — 1.5x the
+            # gate. Losing the keel off the depth grid (dz=2.0 → 5.10 dB,
+            # dz=1.0 → 5.85 dB) fails here too. The max|err| tripwire does
+            # NOT catch the flip (14.91 dB, under 6x4.5 = 27 dB); the RMSE
+            # gate is what guards this scenario.
+            ('RAM(ramsurf1.5)', lambda env, s, r: RAM(verbose=False, dr=20.0, dz=0.25).run(
+                env, s, r, run_mode=RunMode.COHERENT_TL), 4.5),
         ],
-        tolerance_db=8.0,
+        tolerance_db=4.5,
         range_window_m=(1000.0, 5000.0),
     )
 
@@ -413,7 +425,14 @@ def _altimetry_broadband_at_fc() -> Scenario:
         env=env, source=src, receiver=rcv,
         reference_label='Bellhop',
         reference=reference,
-        # Rough-surface ray/PE phase drift dominates; ~9 dB RMSE empirical.
+        # Rough-surface ray/PE phase drift dominates: measured RMSE 4.46 dB
+        # (max|err| 11.27) in this 1-5 km window, so 9.0 dB is 2.0x the
+        # measurement. The extra headroom over the 1.3x its narrowband
+        # sibling runs on is deliberate: the drift is concentrated rather
+        # than uniform — per-km RMSE runs 0.88, 0.97, 4.44, 6.82, 3.55 dB
+        # over 0-5 km — so a gate near 6-7 dB would sit inside the swing a
+        # retuned range window produces, while 9.0 still clears the worst
+        # single kilometre by 1.3x.
         comparisons=[('RAM(ramsurf1.5) broadband', ramsurf_bb, 9.0)],
         tolerance_db=9.0,
         range_window_m=(1000.0, 5000.0),

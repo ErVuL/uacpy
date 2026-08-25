@@ -1,11 +1,15 @@
 """SPARC time-domain-focused tests."""
 
+import threading
 import warnings
 
 import pytest
 import numpy as np
 
 from uacpy.core.results import Field
+from uacpy.core.exceptions import (
+    ConfigurationError, UnsupportedFeatureError,
+)
 from uacpy.models import SPARC
 from uacpy.models.base import RunMode
 from uacpy.core import Environment, Source, Receiver, BoundaryProperties
@@ -215,10 +219,10 @@ class TestSPARCRigidifyLayered:
 
 def test_sparc_rejects_geometry_outside_snapshot_mode():
     """output_mode 'R'/'D' never Hankel-transform, so they honour no geometry."""
-    from uacpy.core.exceptions import ConfigurationError
+    from uacpy.core.exceptions import UnsupportedFeatureError
     env = Environment(name='sp_rej', bathymetry=200.0, ssp=1500.0)
     rcv = Receiver(depths=100.0, ranges=np.linspace(100, 2000, 20))
-    with pytest.raises(ConfigurationError, match="source_type"):
+    with pytest.raises(UnsupportedFeatureError, match="source_type"):
         SPARC(output_mode='R').run(
             env, Source(depths=50, frequencies=200, source_type='line'), rcv)
 
@@ -602,17 +606,17 @@ class TestDefaultOutputWindowTracksTravelTime:
     50 Hz: peak |p| 8.910e-4 on the stretched window vs 1.468e-3 resolved)."""
 
     @staticmethod
-    def _rig():
+    def _rig(ssp=1500.0):
         env = Environment(
-            name='window', bathymetry=100.0, ssp=1500.0,
+            name='window', bathymetry=100.0, ssp=ssp,
             bottom=BoundaryProperties(acoustic_type='rigid'),
         )
         return (env, Source(depths=25.0, frequencies=50.0),
                 Receiver(depths=np.array([50.0]), ranges=np.array([1000.0])))
 
-    def _deck_t_max(self, tmp_path, **kw):
+    def _deck_t_max(self, tmp_path, ssp=1500.0, **kw):
         import re
-        env, source, receiver = self._rig()
+        env, source, receiver = self._rig(ssp)
         deck = tmp_path / 'model.env'
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter('always')
@@ -632,7 +636,7 @@ class TestDefaultOutputWindowTracksTravelTime:
         t_max, _ = self._deck_t_max(tmp_path, rmax_safety_margin=10.0)
         assert t_max == pytest.approx(2.5 * 1000.0 / 1500.0, rel=1e-4)
 
-    def test_explicit_t_max_still_wins(self, tmp_path):
+    def test_explicit_t_max_wins(self, tmp_path):
         t_max, _ = self._deck_t_max(tmp_path, t_max=7.0)
         assert t_max == pytest.approx(7.0, rel=1e-9)
 
@@ -642,3 +646,437 @@ class TestDefaultOutputWindowTracksTravelTime:
         default, _ = self._deck_t_max(tmp_path)
         shifted, _ = self._deck_t_max(tmp_path, t_start=-0.5)
         assert shifted == pytest.approx(default, rel=1e-9)
+
+    def test_window_follows_the_environments_own_sound_speed(self, tmp_path):
+        """The last arrival travels at the slowest speed in the column, so the
+        window scales with that speed and not with a fixed 1500 m/s. Pinning it
+        to a constant cuts a slow column's window short by exactly the speed
+        ratio, and an arrival past ``t_max`` is simply absent from p(t)."""
+        from uacpy.core import SoundSpeedProfile
+        slow = SoundSpeedProfile.from_pairs([(0.0, 1450.0), (100.0, 1450.0)])
+        fast = SoundSpeedProfile.from_pairs([(0.0, 1540.0), (100.0, 1540.0)])
+        t_slow, _ = self._deck_t_max(tmp_path, ssp=slow)
+        t_fast, _ = self._deck_t_max(tmp_path, ssp=fast)
+        assert t_slow == pytest.approx(2.5 * 1000.0 / 1450.0, rel=1e-4)
+        assert t_fast == pytest.approx(2.5 * 1000.0 / 1540.0, rel=1e-4)
+        assert t_slow > t_fast
+
+    def test_a_profiled_column_uses_its_slowest_sample(self, tmp_path):
+        from uacpy.core import SoundSpeedProfile
+        profile = SoundSpeedProfile.from_pairs(
+            [(0.0, 1520.0), (50.0, 1480.0), (100.0, 1510.0)])
+        t_max, _ = self._deck_t_max(tmp_path, ssp=profile)
+        assert t_max == pytest.approx(2.5 * 1000.0 / 1480.0, rel=1e-4)
+
+    def test_pinned_sound_speed_wins(self, tmp_path):
+        from uacpy.core import SoundSpeedProfile
+        slow = SoundSpeedProfile.from_pairs([(0.0, 1450.0), (100.0, 1450.0)])
+        t_max, _ = self._deck_t_max(tmp_path, ssp=slow, sound_speed=1500.0)
+        assert t_max == pytest.approx(2.5 * 1000.0 / 1500.0, rel=1e-4)
+
+
+def _rigid_env(depth=100.0, speed=1500.0):
+    return Environment(name='rigid', bathymetry=depth, ssp=speed,
+                       bottom=BoundaryProperties(acoustic_type='rigid'))
+
+
+def _point(depth=50.0, freq=30.0, r=1000.0):
+    return (Source(depths=depth, frequencies=freq),
+            Receiver(depths=np.array([depth]), ranges=np.array([r])))
+
+
+def _sediment_layer_env(layer_speed, depth=100.0, water_speed=1500.0,
+                        thickness=50.0):
+    """A water column over one sediment layer over a rigid half-space, run
+    through the same projection + rigidify that ``SPARC.run`` applies before
+    any deck is written, so what comes back is what the writer actually sees.
+    """
+    bottom = SeabedColumn(
+        layers=[SedimentLayer(thickness=thickness, sound_speed=layer_speed,
+                              density=2.0, attenuation=0.2)],
+        halfspace=BoundaryProperties(acoustic_type='rigid'),
+    )
+    env = Environment(name='sparc_sediment_layer', bathymetry=depth,
+                      ssp=water_speed, bottom=bottom)
+    sparc = SPARC(verbose=False)
+    return sparc._sparc_rigidify_halfspace(sparc._project_environment(env))
+
+
+def _halfspace_env(hs_speed=1900.0, depth=100.0, water_speed=1500.0):
+    """A water column over a fluid half-space, put through the same
+    projection + rigidify. SPARC's deck carries only vacuum / rigid
+    boundaries, so what comes back has no seabed medium left at all."""
+    env = Environment(
+        name='sparc_halfspace', bathymetry=depth, ssp=water_speed,
+        bottom=BoundaryProperties(acoustic_type='half-space',
+                                  sound_speed=hs_speed, density=2.0,
+                                  attenuation=0.5),
+    )
+    sparc = SPARC(verbose=False)
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        return sparc._sparc_rigidify_halfspace(sparc._project_environment(env))
+
+
+def _alias_warnings(env, tmp_path, name, **sparc_kwargs):
+    source, receiver = _point()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        SPARC(verbose=False, **sparc_kwargs)._write_sparc_env(
+            tmp_path / f'{name}.env', env, source, receiver)
+    return [w for w in caught if 'range alias' in str(w.message)]
+
+
+class TestSparcRangeAlias:
+    """``sparc.f90:116`` gives ``dk = 2*pi/RMax`` and ``EXTRACT`` (:595, :622)
+    sums over that grid directly, so the output is periodic in range with
+    period ``RMax``: the receiver at ``r`` carries a copy of the response from
+    ``|RMax - r|``, arriving at ``(RMax - r)/c``. At margin ``m`` that is
+    ``(m-1)*r/c`` against an auto window of ``2.5*r/c``, so every margin at or
+    below 3.5 puts the replica inside the window. Measured at margin 3,
+    r = 1000 m: the trace peaks at 0.0014 near t = 1.333 s where a converged
+    margin-12 run has 0.0008."""
+
+    def test_default_margin_clears_the_auto_window(self):
+        margin = SPARC(verbose=False)._resolve_rmax_safety_margin()
+        assert margin > 3.5, (
+            f"default rmax_safety_margin={margin} leaves the range replica "
+            f"at (margin-1)*r/c inside the 2.5*r/c auto window")
+        # The same statement in arrival times, at the measured geometry:
+        # r = 1000 m in an isovelocity 1500 m/s guide.
+        r, c = 1000.0, 1500.0
+        assert (margin - 1.0) * r / c > 2.5 * r / c
+
+    def test_tight_pinned_margin_warns(self, tmp_path):
+        env = _rigid_env()
+        source, receiver = _point()
+        with pytest.warns(UserWarning, match='range alias'):
+            SPARC(verbose=False, rmax_safety_margin=3.0)._write_sparc_env(
+                tmp_path / 'tight.env', env, source, receiver)
+
+    def test_default_margin_is_silent(self, tmp_path):
+        env = _rigid_env()
+        source, receiver = _point()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            SPARC(verbose=False)._write_sparc_env(
+                tmp_path / 'default.env', env, source, receiver)
+        assert not [w for w in caught if 'range alias' in str(w.message)]
+
+    def test_the_warning_names_a_margin_that_clears(self, tmp_path):
+        env = _rigid_env()
+        source, receiver = _point()
+        with pytest.warns(UserWarning, match='rmax_safety_margin') as rec:
+            SPARC(verbose=False, rmax_safety_margin=2.0)._write_sparc_env(
+                tmp_path / 'tight2.env', env, source, receiver)
+        message = ' '.join(str(w.message) for w in rec)
+        needed = float(message.split('rmax_safety_margin>')[1].split(')')[0])
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            SPARC(verbose=False,
+                  rmax_safety_margin=needed * 1.01)._write_sparc_env(
+                tmp_path / 'wide.env', env, source, receiver)
+        assert not [w for w in caught if 'range alias' in str(w.message)]
+
+
+class TestSparcRangeAliasReadsEveryMedium:
+    """The folded replica travels the distance ``RMax - r`` through the whole
+    waveguide, so its earliest arrival is set by the fastest medium the deck
+    marches, not by the fastest water speed. ``Scooter/sparc.f90:207`` takes
+    ``cMax = MAX(cpR, cMax)`` over ``DO medium = 1, SSP%NMedia``, and
+    ``write_layer_sections`` writes each sediment layer as one more medium.
+
+    At the default margin 4 and r = 1000 m in a 1500 m/s column the replica
+    lands at ``3000 / c_fast`` against a ``2.5 * 1000 / 1500 = 1.667 s``
+    window, so the alias enters the window at exactly ``c_fast = 1800`` m/s —
+    a 1.2 speed ratio, which an ordinary 1650 m/s sand seabed does not reach
+    but a coarse 1900 m/s sediment does.
+    """
+
+    def test_the_fastest_sediment_layer_sets_the_fast_bound(self):
+        env = _sediment_layer_env(1900.0)
+        assert env.bottom.all_sound_speeds() == [1900.0]
+        c_slow, c_fast = SPARC(verbose=False)._profile_speed_bounds(env)
+        assert (c_slow, c_fast) == (1500.0, 1900.0)
+
+    def test_a_fast_sediment_layer_warns_at_the_default_margin(self, tmp_path):
+        found = _alias_warnings(_sediment_layer_env(1900.0), tmp_path, 'fast')
+        assert len(found) == 1
+        assert '1.579' in str(found[0].message), str(found[0].message)
+
+    def test_a_layer_just_over_the_threshold_warns(self, tmp_path):
+        assert _alias_warnings(_sediment_layer_env(1810.0), tmp_path, 'over')
+
+    def test_a_layer_just_under_the_threshold_is_silent(self, tmp_path):
+        assert not _alias_warnings(_sediment_layer_env(1790.0),
+                                   tmp_path, 'under')
+
+    def test_a_sand_speed_layer_is_silent(self, tmp_path):
+        assert not _alias_warnings(_sediment_layer_env(1650.0),
+                                   tmp_path, 'sand')
+
+    def test_a_rigidified_halfspace_contributes_no_speed(self, tmp_path):
+        """``_sparc_rigidify_halfspace`` leaves the deck with the water column
+        as its only medium, so the 1900 m/s the caller wrote is not a speed
+        SPARC marches and must not move the fast bound."""
+        env = _halfspace_env(1900.0)
+        assert env.bottom.all_sound_speeds() == []
+        assert SPARC(verbose=False)._profile_speed_bounds(env) == (1500.0,
+                                                                   1500.0)
+        assert not _alias_warnings(env, tmp_path, 'rigidified')
+
+
+class TestSparcWindowTruncation:
+    """``t_max`` is 2.5 direct travel times, which does not bound a
+    waveguide's last arrival: the tail is set by the slowest modal *group*
+    velocity, and SPARC's vacuum / rigid boundaries leave it undamped.
+    Measured on a 100 m rigid guide at 30 Hz, r = 1000 m: the trace is still
+    at 50% of its peak over the final tenth of the default window."""
+
+    @staticmethod
+    def _field(tail_level):
+        time = np.linspace(0.0, 1.0, 100)
+        trace = np.exp(-8.0 * time)
+        trace[-10:] = tail_level * trace.max()
+        return Field(data=trace.reshape(1, 1, -1),
+                     coords={'depth': np.array([50.0]),
+                             'range': np.array([1000.0]),
+                             'time': time})
+
+    def test_a_still_ringing_trace_is_reported(self):
+        with pytest.warns(UserWarning, match='still at'):
+            SPARC(verbose=False)._warn_on_truncated_window(self._field(0.5))
+
+    def test_a_decayed_trace_is_not_reported(self):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            SPARC(verbose=False)._warn_on_truncated_window(self._field(0.01))
+        assert not [w for w in caught if 'still at' in str(w.message)]
+
+    def test_an_all_nan_trace_is_not_reported(self):
+        field = self._field(0.5)
+        field.data = np.full_like(field.data, np.nan)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            SPARC(verbose=False)._warn_on_truncated_window(field)
+        assert not [w for w in caught if 'still at' in str(w.message)]
+
+    def test_an_all_nan_trace_raises_no_warning_of_its_own(self):
+        """The all-NaN case is decided by masking, so numpy's 'All-NaN slice'
+        RuntimeWarning is never raised and never has to be muted."""
+        field = self._field(0.5)
+        field.data = np.full_like(field.data, np.nan)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            SPARC(verbose=False)._warn_on_truncated_window(field)
+        assert [str(w.message) for w in caught] == []
+
+    def test_the_check_opens_no_process_global_warning_filter_window(self):
+        """``warnings.filters`` is process-global: a ``catch_warnings()``
+        window opened here would swallow every warning other threads raise
+        for as long as it is held."""
+        opened = []
+        real_catch_warnings = warnings.catch_warnings
+
+        class _CountingCatchWarnings(real_catch_warnings):
+            def __enter__(self):
+                opened.append(1)
+                return super().__enter__()
+
+        field = self._field(0.5)
+        field.data = np.full_like(field.data, np.nan)
+        warnings.catch_warnings = _CountingCatchWarnings
+        try:
+            SPARC(verbose=False)._warn_on_truncated_window(field)
+        finally:
+            warnings.catch_warnings = real_catch_warnings
+        assert opened == []
+
+    def test_a_warning_raised_on_another_thread_survives_the_check(self):
+        """The check runs on one thread while another raises a RuntimeWarning
+        it never asked to hide. Handing off through ``warnings.simplefilter``
+        puts that warning inside whatever filter window the check installs, so
+        no timing decides the outcome."""
+        installed_filter = threading.Event()
+        probe_raised = threading.Event()
+        delivered = []
+        real_simplefilter = warnings.simplefilter
+
+        def releasing_simplefilter(*args, **kwargs):
+            outcome = real_simplefilter(*args, **kwargs)
+            installed_filter.set()
+            probe_raised.wait(30.0)
+            return outcome
+
+        field = self._field(0.5)
+        field.data = np.full_like(field.data, np.nan)
+
+        def run_the_check():
+            try:
+                SPARC(verbose=False)._warn_on_truncated_window(field)
+            finally:
+                # Nothing was installed, so raise the probe unconditionally.
+                installed_filter.set()
+
+        with warnings.catch_warnings():
+            warnings.simplefilter('always')
+            warnings.showwarning = (
+                lambda message, *a, **k: delivered.append(str(message)))
+            warnings.simplefilter = releasing_simplefilter
+            try:
+                worker = threading.Thread(target=run_the_check)
+                worker.start()
+                assert installed_filter.wait(30.0)
+                warnings.warn('probe from another thread', RuntimeWarning)
+                probe_raised.set()
+                worker.join(30.0)
+            finally:
+                warnings.simplefilter = real_simplefilter
+        assert not worker.is_alive()
+        assert delivered == ['probe from another thread']
+
+    def test_the_peak_helper_masks_nan_and_keeps_infinity(self):
+        """``_peak_ignoring_nan`` stands in for ``np.nanmax``: NaN is a gap,
+        infinity is a value, an all-NaN input is NaN."""
+        from uacpy.models.sparc import _peak_ignoring_nan
+        assert _peak_ignoring_nan(np.array([1.0, np.nan, 3.0])) == 3.0
+        assert _peak_ignoring_nan(np.array([1.0, np.nan, np.inf])) == np.inf
+        assert np.isnan(_peak_ignoring_nan(np.full(4, np.nan)))
+
+
+class TestSparcDeckContracts:
+    """``f_min = 0`` is legal (``sparc.f90:114`` clamps ``kMin`` to 1e-20 for
+    exactly that case and ``doc/sparc.htm``'s example deck reads "0.0 15.0");
+    ``t_start > 0`` is not, since the march would start from rest after the
+    pulse has already turned on (``sparc.f90:409``, ``cans.f90``); and
+    ``SubTab`` expands ``0.0 t_max /`` inclusive of both ends, so the output
+    sample rate is ``(n_t_out - 1)/t_max``."""
+
+    def test_zero_f_min_reaches_the_deck(self, tmp_path):
+        deck = tmp_path / 'fmin0.env'
+        source, receiver = _point()
+        SPARC(verbose=False, f_min=0.0, f_max=60.0)._write_sparc_env(
+            deck, _rigid_env(), source, receiver)
+        lines = deck.read_text().splitlines()
+        assert lines[lines.index("'PN+B'") + 1] == '0.000000 60.000000'
+
+    def test_negative_f_min_is_refused(self):
+        with pytest.raises(ConfigurationError, match='f_min >= 0'):
+            SPARC(f_min=-1.0)
+
+    def test_positive_t_start_is_refused(self):
+        with pytest.raises(ConfigurationError, match='t_start'):
+            SPARC(t_start=0.2)
+
+    @pytest.mark.parametrize('t_start', [0.0, -0.1, -1.0])
+    def test_non_positive_t_start_is_kept(self, t_start):
+        assert SPARC(t_start=t_start).t_start == t_start
+
+    def test_sample_rate_counts_intervals_not_samples(self):
+        # 20 samples over 1 s is 19 intervals -> 19 Hz, Nyquist 9.5 Hz, so a
+        # 10 Hz band aliases. Counting samples would read 20 Hz and stay
+        # silent on exactly this case.
+        with pytest.warns(UserWarning, match='19.0 Hz'):
+            SPARC(verbose=False, n_t_out=20)._resolve_n_t_out(10.0, 1.0)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            SPARC(verbose=False, n_t_out=21)._resolve_n_t_out(10.0, 1.0)
+        assert not [w for w in caught if 'alias' in str(w.message)]
+
+    def test_multi_frequency_source_names_what_it_reads(self):
+        source = Source(depths=50.0, frequencies=np.array([30.0, 300.0]))
+        with pytest.warns(UserWarning, match='frequencies'):
+            freq = SPARC(verbose=False)._resolve_pulse_frequency(source)
+        assert freq == pytest.approx(30.0)
+
+    def test_single_frequency_source_is_silent(self):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            freq = SPARC(verbose=False)._resolve_pulse_frequency(
+                Source(depths=50.0, frequencies=30.0))
+        assert freq == pytest.approx(30.0)
+        assert not caught
+
+    def test_snapshot_greens_function_cube_is_capped(self):
+        receiver = Receiver(depths=np.linspace(10, 90, 30),
+                            ranges=np.array([50_000.0]))
+        with pytest.raises(UnsupportedFeatureError, match='GiB'):
+            SPARC(output_mode='S', verbose=False)._reject_oversized_snapshot(
+                receiver, nk=300_000, n_t_out=512)
+        # A modest cube passes, and the looped modes are never capped here.
+        SPARC(output_mode='S', verbose=False)._reject_oversized_snapshot(
+            receiver, nk=300, n_t_out=512)
+        SPARC(output_mode='R', verbose=False)._reject_oversized_snapshot(
+            receiver, nk=300_000, n_t_out=512)
+
+
+@pytest.mark.requires_binary
+@pytest.mark.slow
+def test_sparc_reports_a_truncated_shallow_guide_trace():
+    """The end-to-end wiring of the truncation check: a 100 m rigid guide at
+    30 Hz still carries half its peak amplitude at the end of the default
+    window, and the run has to say so."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        source, receiver = _point()
+        SPARC(verbose=False).run(_rigid_env(), source, receiver,
+                                 run_mode=RunMode.TIME_SERIES)
+    assert [w for w in caught if 'still at' in str(w.message)], (
+        "a trace still ringing at t_max was returned without a word")
+
+
+class TestSparcSizesItsMeshPerMediumAtTheBandTop:
+    """``misc/ReadEnvironmentMod.f90:103`` sizes an automatic mesh at
+    ``deltaz = c / freq0 / 20`` — 20 points per wavelength at the deck's
+    NOMINAL frequency. ``kraken.f90:75`` and ``scooter.f90:106`` then rescale
+    it per frequency, which is what lets those wrappers check the mesh at
+    ``freq0`` and stop there. ``sparc.f90`` has no such rescaling anywhere, and
+    this wrapper writes a pulse band reaching ``2*freq``, so an automatic mesh
+    ran the top of that band at 10 points per wavelength: measured 0.375
+    relative rms against a converged mesh at 60 Hz / 300 m, improving to 0.106
+    when sized at the band top.
+
+    One count per MEDIUM, not one scalar. AT sizes each medium from its own
+    thickness and speed, and the deck writer broadcasts a scalar to every
+    sediment layer — so the water column's count landed on a 10 m layer and
+    over-resolved it by the thickness ratio until the march failed outright.
+    """
+
+    @staticmethod
+    def _half_space():
+        from uacpy.core import BoundaryProperties, Environment
+        return Environment(bathymetry=100.0, ssp=1500.0,
+                           bottom=BoundaryProperties(acoustic_type='rigid'))
+
+    @staticmethod
+    def _layered():
+        from uacpy.core import BoundaryProperties, Environment
+        from uacpy.core.environment import SeabedColumn, SedimentLayer
+        return Environment(
+            bathymetry=100.0, ssp=1500.0,
+            bottom=SeabedColumn(
+                layers=[SedimentLayer(thickness=10.0, sound_speed=1600.0,
+                                      density=1.5, attenuation=0.2)],
+                halfspace=BoundaryProperties(acoustic_type='half-space',
+                                             sound_speed=1800.0, density=1.8,
+                                             attenuation=0.3)))
+
+    def test_the_count_scales_with_the_band_top(self):
+        from uacpy.models import SPARC
+        model = SPARC(verbose=False)
+        low = model._resolve_n_mesh(self._half_space(), 40.0)
+        high = model._resolve_n_mesh(self._half_space(), 120.0)
+        assert high[0] > low[0]
+
+    def test_a_thin_layer_gets_its_own_count_not_the_water_columns(self):
+        # The regression this guards: broadcasting the water column's count to
+        # a 10 m sediment layer over-resolves it by the thickness ratio.
+        from uacpy.models import SPARC
+        counts = SPARC(verbose=False)._resolve_n_mesh(self._layered(), 120.0)
+        assert len(counts) == 2
+        assert counts[1] < counts[0]
+
+    def test_a_pinned_count_is_passed_through(self):
+        from uacpy.models import SPARC
+        assert SPARC(n_mesh=333, verbose=False)._resolve_n_mesh(
+            self._layered(), 120.0) == 333

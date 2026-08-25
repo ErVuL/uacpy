@@ -64,7 +64,12 @@ def equally_spaced(x: np.ndarray, tol: float = 1e-9) -> bool:
     # Compute maximum deviation
     delta = np.abs(x - x_linspace)
 
-    return np.max(delta) < tol
+    # bool(), not the bare comparison: ``np.max(...) < tol`` is a numpy scalar,
+    # and np.bool_ is NOT a Python bool — ``isinstance(r, bool)`` and
+    # ``r is True`` are both False, and json.dumps raises TypeError on it. The
+    # ``n <= 1`` branch above already returns a real bool, so without this the
+    # return type depended on the input length.
+    return bool(np.max(delta) < tol)
 
 
 def reject_unknown_kwargs(writer: str, kwargs: dict, known) -> None:

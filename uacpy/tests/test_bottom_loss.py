@@ -2,10 +2,17 @@
 :func:`uacpy.core.acoustics.bottom_loss_curve` and the matching plot
 helper."""
 
+import warnings
+from pathlib import Path
+
 import numpy as np
 import pytest
 
-from uacpy.core.acoustics import bottom_loss_curve, reflection_coeff
+from uacpy.core import acoustics
+from uacpy.core.acoustics import (
+    bottom_loss_curve, density, reflection_coeff, soundspeed)
+
+_THIS_FILE = Path(__file__).resolve()
 
 
 class TestBottomLossCurve:
@@ -153,6 +160,134 @@ class TestReflectionCoeffCrossCheck:
                              rho=1000.0, c=1500.0)
         np.testing.assert_allclose(loss, -20.0 * np.log10(np.abs(R)),
                                    atol=1e-10)
+
+
+class TestDefaultWaterColumnIsAnnounced:
+    """``reflection_coeff`` called without ``c`` runs against a different
+    water column than ``bottom_loss_curve`` does — Mackenzie at its own
+    defaults (27 °C / S = 35 / 10 m, 1539.087 m/s) rather than the pinned
+    1500.0 m/s — and the seabed's reflection loss moves by roughly 4 dB near
+    the critical angle between the two. The value is not being changed here,
+    because every external caller that omitted ``c`` would silently move with
+    it; what is pinned is that the fallback announces itself and names the
+    number it took, so a caller can see which water column produced the curve.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _forget_the_one_shot_notice(self):
+        """The flag deduplicates per PROCESS, so a test that did not reset it
+        would pass or fail on the selection order — the lesson
+        ``test_bellhop.py`` records for ``_WARNED_RAY_VALIDITY``. Saved and
+        restored rather than just cleared: this file is not the only caller of
+        ``reflection_coeff`` in a session."""
+        emitted = acoustics._DEFAULT_WATER_COLUMN_WARN_EMITTED
+        acoustics._DEFAULT_WATER_COLUMN_WARN_EMITTED = False
+        yield
+        acoustics._DEFAULT_WATER_COLUMN_WARN_EMITTED = emitted
+
+    @staticmethod
+    def _record(call):
+        with warnings.catch_warnings(record=True) as record:
+            warnings.simplefilter('always')
+            call()
+        return record
+
+    def test_omitting_c_warns_and_names_the_sound_speed_it_took(self):
+        record = self._record(
+            lambda: reflection_coeff(np.pi / 4.0, 1800.0, 1700.0))
+        assert len(record) == 1, [str(w.message) for w in record]
+        assert record[0].category is UserWarning
+        message = str(record[0].message)
+        assert 'soundspeed()' in message
+        # The number itself, not just the fact of a fallback: 1539.087 m/s is
+        # what a reader has to be able to compare against the 1500.0 m/s the
+        # wrapper pins, and 1022.72 kg/m³ against its 1000 kg/m³.
+        assert f"{soundspeed():.3f}" in message
+        assert f"{density():.2f}" in message
+
+    def test_the_notice_names_the_callers_file(self):
+        """``stacklevel=2`` has to land on the line the user wrote. Naming a
+        line inside ``acoustics.py`` would also key the once-per-location
+        registry to that line, so under the default filter one caller anywhere
+        in a program would silence every other."""
+        record = self._record(
+            lambda: reflection_coeff(np.pi / 4.0, 1800.0, 1700.0))
+        assert Path(record[0].filename).resolve() == _THIS_FILE
+
+    def test_supplying_the_water_column_is_silent(self):
+        record = self._record(
+            lambda: reflection_coeff(np.pi / 4.0, 1800.0, 1700.0,
+                                     rho=1000.0, c=1500.0))
+        assert [str(w.message) for w in record] == []
+
+    def test_supplying_only_c_is_silent(self):
+        """The notice is keyed to ``c``, the half worth ~4 dB; ``rho`` alone
+        falling back is a units convention worth a few tenths."""
+        record = self._record(
+            lambda: reflection_coeff(np.pi / 4.0, 1800.0, 1700.0, c=1500.0))
+        assert [str(w.message) for w in record] == []
+
+    def test_bottom_loss_curve_stays_silent(self):
+        """The one in-package caller passes ``c`` on every path, so the
+        wrapper — which pins its own water column deliberately — must never
+        emit the notice meant for callers who did not choose one."""
+        record = self._record(lambda: bottom_loss_curve('sand'))
+        assert [str(w.message) for w in record] == []
+        record = self._record(lambda: bottom_loss_curve(
+            dict(sound_speed=1700.0, density=1.8, attenuation=0.3),
+            grazing_angles_deg=np.linspace(1.0, 89.0, 89)))
+        assert [str(w.message) for w in record] == []
+
+    def test_a_swept_grid_of_calls_warns_once(self):
+        record = self._record(lambda: [
+            reflection_coeff(np.deg2rad(a), 1800.0, 1700.0)
+            for a in (10.0, 20.0, 30.0)])
+        assert len(record) == 1, [str(w.message) for w in record]
+
+    def test_the_notice_returns_after_the_flag_is_cleared(self):
+        """The other side of the once-per-process boundary: silence after the
+        first call is the flag doing it, not the call being unreachable."""
+        self._record(lambda: reflection_coeff(np.pi / 4.0, 1800.0, 1700.0))
+        assert acoustics._DEFAULT_WATER_COLUMN_WARN_EMITTED is True
+        acoustics._DEFAULT_WATER_COLUMN_WARN_EMITTED = False
+        record = self._record(
+            lambda: reflection_coeff(np.pi / 4.0, 1800.0, 1700.0))
+        assert len(record) == 1, [str(w.message) for w in record]
+
+    def test_the_returned_coefficient_matches_the_explicit_seawater_defaults(self):
+        """The notice is the whole change: the number the fallback produces is
+        still ``soundspeed()``/``density()`` evaluated at their own defaults,
+        bit for bit, and the docstring's worked example still reads 0.1198 /
+        -18.43 dB."""
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            R_default = reflection_coeff(np.pi / 4.0, 1800.0, 1700.0)
+            R_doc = reflection_coeff(np.pi / 4, 1200, 1600)
+        R_explicit = reflection_coeff(np.pi / 4.0, 1800.0, 1700.0,
+                                      rho=density(), c=soundspeed())
+        assert R_default == R_explicit
+        assert f"{R_doc:.4f}" == '0.1198'
+        assert f"{20.0 * np.log10(abs(R_doc)):.2f}" == '-18.43'
+
+    def test_the_two_entry_points_differ_by_about_four_db(self):
+        """The magnitude the docstring quotes, on the seabed it quotes. The
+        peak sits at the critical angle and its exact height depends on how
+        finely the grid samples there (4.29 dB on the wrapper's own 181-point
+        grid, 4.34 dB at 100x that), so the bound is loose on purpose."""
+        crit_pinned = np.degrees(np.arccos(1500.0 / 1700.0))
+        crit_fallback = np.degrees(np.arccos(soundspeed() / 1700.0))
+        assert crit_pinned == pytest.approx(28.072, abs=0.001)
+        assert crit_fallback == pytest.approx(25.130, abs=0.001)
+
+        g, loss_pinned = bottom_loss_curve(
+            dict(sound_speed=1700.0, density=1.8, attenuation=0.0))
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            R = reflection_coeff(np.pi / 2.0 - np.deg2rad(g), 1800.0, 1700.0)
+        loss_fallback = -20.0 * np.log10(np.abs(R) + 1e-300)
+        gap = np.abs(loss_pinned - loss_fallback)
+        assert 3.5 < gap.max() < 5.0
+        assert crit_fallback < g[np.argmax(gap)] < crit_pinned + 1.0
 
 
 def _fluid_solid_R(graz_deg, cp1, rho1, cp2, cs2, rho2,

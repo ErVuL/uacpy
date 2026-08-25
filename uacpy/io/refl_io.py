@@ -2,7 +2,8 @@
 
 * ``.brc`` / ``.trc`` — precomputed plane-wave reflection coefficients as
   ``(angle_deg, |R|, phase_deg)`` triples behind a count line
-  (:func:`read_reflection_coefficient`)
+  (:func:`read_reflection_coefficient`,
+  :func:`write_reflection_coefficient`)
 
 ``.irc`` is a different format and is **not** handled here: BOUNCE writes it
 as a title/frequency line, a count, then fixed-format ``(5G15.7, I5)`` rows of
@@ -18,14 +19,17 @@ Bathymetry / altimetry / 3-D boundary files live in
 """
 
 import shutil
+import warnings
 
 import numpy as np
 from pathlib import Path
-from typing import Dict, Optional, Union
+from typing import Optional, TypedDict, Union
 
 from uacpy._log import log_message
-from uacpy.io.units import deg_to_rad
+from uacpy.io.units import deg_to_rad, rad_to_deg
+from uacpy.core.constants import SBP_ANGLE_RESOLUTION_DEG
 from uacpy.core.exceptions import ConfigurationError, FileFormatError
+from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.io._fortran_helpers import _bound_counts
 from uacpy.io._fortran_helpers import (
     fortran_float, list_directed_int, read_list_directed_values,
@@ -33,10 +37,24 @@ from uacpy.io._fortran_helpers import (
 )
 
 
+class ReflectionTable(TypedDict):
+    """What :func:`read_reflection_coefficient` hands back: the three columns
+    of the table, plus the record count the header declared.
+
+    ``n_pts`` is an ``int``, so a ``Dict[str, np.ndarray]`` return type makes
+    ``table["n_pts"] + 1`` arithmetic on something a reader is told is an
+    array."""
+
+    theta: np.ndarray
+    R: np.ndarray
+    phi: np.ndarray
+    n_pts: int
+
+
 @typed_format_error
 def read_reflection_coefficient(
     filename: Union[str, Path]
-) -> Dict[str, np.ndarray]:
+) -> ReflectionTable:
     """
     Read reflection coefficient data from file (.trc or .brc).
 
@@ -157,8 +175,10 @@ def read_source_beam_pattern(
 
     Raises
     ------
+    ConfigurationError
+        No ``.sbp`` file at the given path.
     FileFormatError
-        Missing or malformed ``.sbp`` file.
+        Malformed ``.sbp`` file.
 
     Notes
     -----
@@ -184,8 +204,14 @@ def read_source_beam_pattern(
     sbp_file = Path(filepath)
     if not sbp_file.exists() and not sbp_file.suffix:
         sbp_file = sbp_file.with_name(sbp_file.name + ".sbp")
+    # A .sbp is always user-authored — no uacpy model writes one that a uacpy
+    # reader reads back, and both internal callers pass a path the caller
+    # supplied — so an absent one is a bad argument rather than a failed run,
+    # which is the split :class:`~uacpy.core.exceptions.FileFormatError`
+    # documents. ``stage_source_beam_pattern`` raises the same type for the
+    # identical condition.
     if not sbp_file.exists():
-        raise FileFormatError(
+        raise ConfigurationError(
             f"Source beam pattern file not found: {sbp_file}.",
             remediation="Provide the .sbp file next to the env, or pass "
                         "beam_pattern=None for an omni-directional source.",
@@ -226,6 +252,167 @@ def read_source_beam_pattern(
     return beam_pattern
 
 
+def write_reflection_coefficient(
+    filepath: Union[str, Path],
+    angles: np.ndarray,
+    coefficients: np.ndarray,
+) -> None:
+    """
+    Write a ``.brc`` / ``.trc`` reflection-coefficient table — the writer
+    side of :func:`read_reflection_coefficient`.
+
+    Parameters
+    ----------
+    filepath : str or Path
+        Output path, written exactly as given: ``.brc`` for a bottom table,
+        ``.trc`` for a top one (the layout is identical; the extension is
+        what tells the engine which boundary it belongs to). No suffix is
+        added or replaced. :func:`stage_reflection_file` is what renames a
+        table onto the ``<env>.brc`` / ``.trc`` the binary opens.
+    angles : ndarray
+        Grazing angles in **degrees**, shape ``(N,)``, non-decreasing.
+    coefficients : ndarray
+        The table's other two columns, in any of three forms:
+
+        - complex ``(N,)`` — ``|R|`` and ``np.angle`` (radians) are taken;
+        - real ``(N, 2)`` — ``[amplitude, phase_radians]``;
+        - real ``(N,)`` — amplitudes only, phase zero.
+
+    Raises
+    ------
+    ~uacpy.core.exceptions.ConfigurationError
+        The two columns disagree in length, the table is empty, the angles
+        decrease, or two distinct angles collide in the written column.
+
+    Notes
+    -----
+    File format (``misc/RefCoef.f90:45,53``): a count line, then ``N``
+    ``THETA(deg)  RMAG  RPHASE(deg)`` triples read by a single list-directed
+    ``READ``.
+
+    **Phase is radians in, degrees on disk.** That direction matches
+    :func:`read_reflection_coefficient`, which returns ``phi`` in radians,
+    and the :class:`~uacpy.core.results.ReflectionCoefficient` convention —
+    so a table read, modified and written back keeps its units.
+
+    Guards this writer applies that the format does not:
+
+    * **Non-decreasing angles.** ``read_reflection_coefficient`` rejects a
+      decreasing theta column as malformed, so a writer that emitted one
+      would produce a file uacpy itself refuses to read. Equal angles are
+      allowed — BOUNCE produces them by construction, which is what
+      :func:`dedupe_reflection_file` exists to collapse.
+    * **Angles that survive the written column.** The angle column is
+      written at ``%12.6f``, i.e.
+      :data:`~uacpy.core.constants.SBP_ANGLE_RESOLUTION_DEG` = 1e-6 degrees.
+      Two *distinct* angles closer than that land on the same token, turning
+      a resolved table into a duplicated one: ``bhc::setup()`` aborts on it
+      ("Bottom reflection coefficients must be monotonically increasing")
+      and Bellhop interpolates across a zero-width segment. Refused here,
+      the way :func:`write_source_beam_pattern` refuses a colliding beam
+      axis.
+
+    See Also
+    --------
+    read_reflection_coefficient : Read the table back.
+    stage_reflection_file : Copy a table onto the name a run opens.
+    dedupe_reflection_file : Collapse BOUNCE's duplicate angle rows.
+
+    Examples
+    --------
+    >>> import tempfile, os
+    >>> import numpy as np
+    >>> from uacpy.io.refl_io import read_reflection_coefficient
+    >>> theta = np.array([0.0, 45.0, 90.0])
+    >>> R = np.array([0.9, 0.5, 0.1]) * np.exp(1j * np.array([0.0, 1.0, 2.0]))
+    >>> with tempfile.TemporaryDirectory() as d:
+    ...     path = os.path.join(d, 'bottom.brc')
+    ...     write_reflection_coefficient(path, theta, R)
+    ...     table = read_reflection_coefficient(path)
+    >>> table['n_pts']
+    3
+    >>> bool(np.allclose(table['theta'], theta))
+    True
+    >>> bool(np.allclose(table['R'], np.abs(R)))
+    True
+    >>> bool(np.allclose(table['phi'], np.angle(R)))
+    True
+    """
+    filepath = Path(filepath)
+
+    angles = np.asarray(angles, dtype=float)
+    coefficients = np.asarray(coefficients)
+
+    if np.iscomplexobj(coefficients):
+        amplitude = np.abs(coefficients)
+        phase_rad = np.angle(coefficients)
+    elif coefficients.ndim == 2 and coefficients.shape[1] == 2:
+        amplitude = np.asarray(coefficients[:, 0], dtype=float)
+        phase_rad = np.asarray(coefficients[:, 1], dtype=float)
+    else:
+        amplitude = np.asarray(coefficients, dtype=float)
+        phase_rad = np.zeros_like(amplitude)
+
+    # The row loop is driven by len(angles), so a longer coefficient column
+    # is silently truncated into a valid-looking table that describes a
+    # different bottom, and a shorter one raises IndexError partway through
+    # and leaves the truncated file behind. Checked before ``open``, the same
+    # way write_source_beam_pattern pairs its two columns.
+    if amplitude.shape != angles.shape:
+        raise ConfigurationError(
+            f"write_reflection_coefficient: angles has shape {angles.shape} "
+            f"and the coefficient column has shape {amplitude.shape}; each "
+            f"angle needs exactly one (|R|, phase) pair.",
+            remediation="Pass one reflection coefficient per angle.",
+        )
+    if angles.size == 0:
+        raise ConfigurationError(
+            "write_reflection_coefficient: no angles given; a reflection "
+            "table declaring 0 rows leaves every grazing angle outside the "
+            "tabulated domain, where InterpolateReflectionCoefficient "
+            "returns R = 0 — a totally absorbing boundary "
+            "(misc/RefCoef.f90:144-149).",
+            remediation="Pass at least one (angle, coefficient) pair "
+                        "spanning the grazing angles of the run.",
+        )
+
+    steps = np.diff(angles)
+    if steps.size and steps.min() < 0.0:
+        i = int(np.argmin(steps))
+        raise ConfigurationError(
+            f"write_reflection_coefficient: angles must be non-decreasing, "
+            f"but index {i} -> {i + 1} goes {angles[i]:g} -> "
+            f"{angles[i + 1]:g} degrees. read_reflection_coefficient rejects "
+            f"a decreasing theta column as malformed, so this would write a "
+            f"file uacpy cannot read back.",
+            remediation="Sort the table by grazing angle before writing.",
+        )
+    # Distinct angles that collide once rounded into the written column.
+    written = np.round(angles, 6)
+    collision = (steps > 0.0) & (np.diff(written) == 0.0)
+    if collision.any():
+        i = int(np.argmax(collision))
+        raise ConfigurationError(
+            f"write_reflection_coefficient: angles[{i}]={angles[i]!r} and "
+            f"angles[{i + 1}]={angles[i + 1]!r} are distinct but both write "
+            f"{written[i]:.6f}, the file's "
+            f"{SBP_ANGLE_RESOLUTION_DEG:g}-degree angle resolution. The "
+            f"table would carry a duplicated angle it does not have: "
+            f"bellhopcuda aborts on a non-strictly-increasing table and "
+            f"Bellhop interpolates across the zero-width segment.",
+            remediation=f"Separate the angles by at least "
+                        f"{SBP_ANGLE_RESOLUTION_DEG:g} degrees, or drop the "
+                        f"one you do not need.",
+        )
+
+    phase_deg = rad_to_deg(phase_rad)
+
+    with open(filepath, "w") as f:
+        f.write(f"{angles.size}\n")
+        for theta, mag, phase in zip(angles, amplitude, phase_deg):
+            f.write(f"{theta:12.6f} {mag:12.6f} {phase:12.6f}\n")
+
+
 def write_source_beam_pattern(
     filepath: Union[str, Path], angles: np.ndarray, pattern: np.ndarray
 ) -> None:
@@ -253,27 +440,74 @@ def write_source_beam_pattern(
 
     Used to specify directional source characteristics.
 
-    The angle column is written at ``%.6f``: Bellhop's load-time guard
-    rejects a pattern whose angles are not strictly increasing
-    (``misc/beampattern.f90:56``), so two distinct angles that collide on
-    the file's angle grid abort the run with ERROUT. Angles closer than
-    the 1e-6-degree column resolution are rejected here for the same
-    reason.
+    At least two angles are required, and the angle column is written at
+    ``%.6f``: Bellhop's load-time guard rejects a pattern whose angles are
+    not strictly increasing (``misc/beampattern.f90:56``), so two distinct
+    angles that collide on the file's angle grid abort the run with ERROUT.
+    Angles closer than that column resolution are rejected here for the same
+    reason, against the
+    :data:`~uacpy.core.constants.SBP_ANGLE_RESOLUTION_DEG` bound
+    :class:`~uacpy.core.source.Source` validates a carrier's angles with.
+
+    ``angles`` and ``pattern`` are paired row for row and must have the same
+    shape; a mismatch raises :class:`~uacpy.core.exceptions.ConfigurationError`
+    before the file is opened.
     """
     filepath = Path(filepath)
 
     angles = np.asarray(angles, dtype=float)
+    # ``dtype=float`` up front so a non-numeric column raises a typed
+    # ConfigurationError below rather than escaping the row loop as a bare
+    # ``ValueError`` from the format spec, after the file is already open.
+    try:
+        pattern = np.asarray(pattern, dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise ConfigurationError(
+            f"write_source_beam_pattern: pattern is not a numeric array "
+            f"({exc}); the level column is written at %12.6f.",
+            remediation="Pass beam-pattern levels in dB re peak as a real "
+                        "array of the same length as angles.",
+        ) from exc
+    # A table shorter than two rows passes every guard on both sides and then
+    # gets indexed as a pair: ``bellhop.f90:270`` clamps ``IBP`` to
+    # ``NSBPPts - 1`` and reads ``SrcBmPat(IBP+1, :)`` past the bound allocated
+    # at ``beampattern.f90:36``, yielding an all-NaN field at exit code 0 with
+    # nothing in the print file. ``stage_source_beam_pattern`` refuses the path
+    # form for the same reason, so refusing here makes the guard independent of
+    # which way the caller supplied the pattern.
+    if angles.size < 2:
+        raise ConfigurationError(
+            f"write_source_beam_pattern: {angles.size} angle(s) given; the "
+            f"engines interpolate between adjacent beam-pattern rows and need "
+            f"at least 2 (Bellhop/bellhop.f90:270).",
+            remediation="Give at least two angles spanning the launch fan, or "
+                        "omit the beam pattern for an omnidirectional source.",
+        )
     steps = np.diff(angles)
-    if angles.size > 1 and steps.min() < 1e-6:
+    if steps.min() < SBP_ANGLE_RESOLUTION_DEG:
         i = int(np.argmin(steps))
         raise ConfigurationError(
             f"write_source_beam_pattern: angles[{i}]={angles[i]!r} and "
             f"angles[{i + 1}]={angles[i + 1]!r} are closer than the file's "
-            f"1e-6-degree angle resolution (or not increasing). Bellhop "
-            f"requires strictly increasing beam-pattern angles "
-            f"(misc/beampattern.f90:56) and aborts on a repeated value.",
-            remediation="Pass strictly increasing angles with steps of at "
-                        "least 1e-6 degrees.",
+            f"{SBP_ANGLE_RESOLUTION_DEG:g}-degree angle resolution (or not "
+            f"increasing). Bellhop requires strictly increasing beam-pattern "
+            f"angles (misc/beampattern.f90:56) and aborts on a repeated "
+            f"value.",
+            remediation=f"Pass strictly increasing angles with steps of at "
+                        f"least {SBP_ANGLE_RESOLUTION_DEG:g} degrees.",
+        )
+    # The row loop is driven by ``len(angles)``, so a longer ``pattern`` is
+    # truncated to a valid-looking table that carries a different directivity
+    # than the caller passed, and a shorter one raises ``IndexError`` partway
+    # through the write and leaves the truncated file behind. Both columns
+    # declare shape (N,), so requiring the shapes to agree — before ``open`` —
+    # is what makes the written table the one the caller described.
+    if pattern.shape != angles.shape:
+        raise ConfigurationError(
+            f"write_source_beam_pattern: angles has shape {angles.shape} and "
+            f"pattern has shape {pattern.shape}; each angle needs exactly one "
+            f"level, so the two columns must have the same shape (N,).",
+            remediation="Pass one beam-pattern level per angle.",
         )
 
     n_angles = len(angles)
@@ -305,7 +539,7 @@ def stage_reflection_file(
     whose ``.brc`` sits in the same pinned ``work_dir`` the ``.env`` is
     written into — is copied over itself, i.e. left in place.
 
-    The staged ``.brc`` / ``.trc`` then goes through
+    A ``.brc`` / ``.trc`` that was *copied* here then goes through
     :func:`dedupe_reflection_file`, so the table the engine reads satisfies
     ``InterpolateReflectionCoefficient``'s preconditions whatever produced it.
     Doing it here rather than at the producer is what makes a user-supplied
@@ -313,6 +547,14 @@ def stage_reflection_file(
     the single boundary every angle table crosses on its way to a run
     (``bellhop_writer``, ``oalib_writer``). An ``.irc`` is a different format
     and is staged untouched.
+
+    A table already *at* the destination is staged untouched as well. The copy
+    is what earns the right to rewrite: with the source and the destination
+    the same file, a dedupe would edit an input — dropping rows from and
+    reformatting a file the caller supplied. Such a table is instead checked
+    and warned about. :class:`~uacpy.Bounce` already dedupes its own ``.brc``
+    where it writes it, so the pinned-``work_dir`` BOUNCE → BELLHOP path is
+    unaffected.
 
     Parameters
     ----------
@@ -357,10 +599,30 @@ def stage_reflection_file(
             remediation=remediation,
         )
     dest = Path(env_path).with_suffix(suffix)
-    if src.resolve() != dest.resolve():
+    in_place = src.resolve() == dest.resolve()
+    if not in_place:
         shutil.copy(src, dest)
-    if not internal:
+    if not internal and not in_place:
         dedupe_reflection_file(dest)
+    elif not internal:
+        # The table the engine will read *is* the caller's own file — a pinned
+        # work_dir holding a .brc next to the .env it names. Rewriting it would
+        # drop rows from and reformat a file uacpy was given, not one it
+        # produced, so the table is left exactly as supplied. Bellhop reads it
+        # either way (misc/RefCoef.f90:45-55 applies no monotonicity test); it
+        # is bellhopcuda that refuses a repeated angle
+        # (src/module/reflcoef.hpp:135-141), so say so instead of editing.
+        angles = read_reflection_coefficient(dest)['theta']
+        if angles.size > 1 and not np.all(np.diff(angles) > 0):
+            warnings.warn(
+                f"{dest} is both the reflection table you supplied and the "
+                f"name the engine reads, so it is staged unmodified; its "
+                f"angle column repeats a value, which bellhopcuda rejects "
+                f"(src/module/reflcoef.hpp:135-141). Pass the table from a "
+                f"path other than {dest} to have uacpy stage a cleaned copy.",
+                UserWarning,
+                skip_file_prefixes=USER_FRAME_SKIP,
+            )
     log_message('refl_io', f"staged {boundary} reflection file: {src} -> {dest}",
                 verbose=verbose)
     return dest
@@ -432,10 +694,13 @@ def dedupe_reflection_file(filepath: Union[str, Path]) -> None:
     half-space speed, else 1500 m/s (``:186-190``) — is evanescent and takes
     the ``ELSEWHERE`` branch at ``:204-209``, which assigns ``theta = 0``,
     ``R = 1``, ``phase = 180`` identically. That block is ``1 - c_low/c0`` of
-    the sweep — with uacpy's defaults (``c_low`` 1400 m/s, ``c_high``
-    unbounded, so ``kMin`` collapses to 0 at ``:47``) about 7% of a
-    several-thousand-row table, i.e. hundreds of byte-identical 0-degree rows
-    at the head of the file. Bellhop tolerates them — ``misc/RefCoef.f90:45-55``
+    the sweep (with ``c_high`` unbounded, so ``kMin`` collapses to 0 at
+    ``:47``). Its ceiling is ~7% of a several-thousand-row table, reached
+    when ``c_low`` sits at the 1400 m/s cap; it shrinks from there as
+    ``c_low`` resolves lower, since an auto ``c_low`` takes
+    ``min(1400, min(SSP))`` (``Bounce._resolve_c_low``) and the block is then
+    ``1 - min(SSP)/c0``. Either way it is hundreds of byte-identical 0-degree
+    rows at the head of the file. Bellhop tolerates them — ``misc/RefCoef.f90:45-55``
     reads the table with no monotonicity test — but bellhopcuda rejects them at
     ``bellhopcuda/src/module/reflcoef.hpp:135-141``: "Bottom reflection
     coefficients must be monotonically increasing".
@@ -450,7 +715,14 @@ def dedupe_reflection_file(filepath: Union[str, Path]) -> None:
     ``.brc`` / ``.trc`` only. An ``.irc`` carries a title/frequency line ahead
     of its count and six fixed-format columns, so running this over one would
     strip the header and four of the six columns; a file whose first line is
-    not a bare count is rejected.
+    not a bare count is rejected. A table whose angle column *decreases*
+    anywhere is rejected too, on the same terms
+    :func:`read_reflection_coefficient` applies: collapsing duplicates is
+    loss-free only on an ascending axis. So is a table holding fewer rows
+    than its header declares — a truncated file, which this function must not
+    turn into a well-formed shorter one, since
+    :func:`stage_reflection_file` runs it over every table it copies and the
+    reader downstream would then never see the shortfall.
 
     Discarding the evanescent block down to its first row is loss-free — the
     rows are equal by construction. Should two *propagating* samples ever
@@ -486,18 +758,53 @@ def dedupe_reflection_file(filepath: Union[str, Path]) -> None:
     tokens = []
     for line in lines[1:]:
         tokens.extend(line.replace(',', ' ').split())
+    # A short file is a truncated file, never a shorter table. Rewriting the
+    # header down to what survived would hand Bellhop a table it reads without
+    # complaint, and every grazing angle past the cut then falls outside the
+    # tabulated domain, where ``InterpolateReflectionCoefficient`` returns
+    # ``RInt%R = 0`` — a totally absorbing bottom — with its own warning
+    # commented out (misc/RefCoef.f90:144-149). A BOUNCE run killed mid-write
+    # and a partly-downloaded ``reflection_file=`` both land here. Extra
+    # tokens past the count are fine: the single READ of 3*N values at :53
+    # stops at N.
+    n_available = len(tokens) // 3
+    if n_available < n_declared:
+        raise FileFormatError(
+            f"{filepath}: the header declares {n_declared} rows but the file "
+            f"holds only {n_available} complete (angle, |R|, phase) triples — "
+            f"it is truncated.",
+            remediation="Re-run BOUNCE or re-fetch the table; correcting the "
+                        "count instead would silently give every angle past "
+                        "the cut |R| = 0, a totally absorbing bottom "
+                        "(misc/RefCoef.f90:144-149).",
+        )
     try:
-        n_triples = min(n_declared, len(tokens) // 3)
         triples = [
             (tokens[3 * i], tokens[3 * i + 1], tokens[3 * i + 2],
              fortran_float(tokens[3 * i]))
-            for i in range(n_triples)
+            for i in range(n_declared)
         ]
     except ValueError as exc:
         raise FileFormatError(
             f"{filepath}: the reflection table holds a non-numeric token "
             f"({exc}); the file is not a .brc/.trc angle table."
         ) from None
+
+    # Only an equal angle is a duplicate to collapse; a *decreasing* one means
+    # the table runs the other way (90 deg down to 0 is a common grazing
+    # convention, and RefCoef.f90 applies no monotonicity test, so such a file
+    # reaches here intact). Keeping "angle > last kept" would answer that with
+    # a one-row table — one constant reflection coefficient at every angle —
+    # so it is rejected on the same terms read_reflection_coefficient uses.
+    angles = np.array([angle for *_toks, angle in triples], dtype=float)
+    if angles.size > 1 and not np.all(np.diff(angles) >= 0):
+        i = int(np.argmin(np.diff(angles)))
+        raise FileFormatError(
+            f"{filepath}: angles must be non-decreasing (row {i + 1} is "
+            f"{angles[i]:g} deg, row {i + 2} is {angles[i + 1]:g} deg).",
+            remediation="Write the table from the smallest angle to the "
+                        "largest; RefCoef.f90 interpolates it in that order.",
+        )
 
     kept_rows = []  # list of (angle, mag, phase_deg) as strings
     last_angle = -np.inf

@@ -10,7 +10,6 @@ reaches basement (and how thick the column is) matters more than the top-cm
 texture. Pair it with :mod:`uacpy.data.crust1_local` for a layered bottom.
 """
 
-import os
 from pathlib import Path
 
 import numpy as np
@@ -43,10 +42,9 @@ def download_globsed_db(cache_dir=None, *, timeout=300.0, verbose=False):
     log_message('globsed', "downloading GlobSed v3 sediment thickness (~11 MB)",
                 verbose=verbose)
     if not curl_download(GLOBSED_URL, out, timeout=timeout, verbose=verbose):
-        part = Path(str(out) + '.part')
-        part.write_bytes(http_get(GLOBSED_URL, timeout=timeout, verbose=verbose,
-                                  source='globsed'))
-        os.replace(part, out)
+        with _cache.atomic_write(out) as part:
+            part.write_bytes(http_get(GLOBSED_URL, timeout=timeout,
+                                      verbose=verbose, source='globsed'))
     _cache.invalidate_grids()
     log_message('globsed', f"GlobSed grid cached → {out}", verbose=verbose)
     return out
@@ -62,6 +60,8 @@ class _GlobSedGrid(NetcdfGrid):
     identical values. Land and unmapped cells are ``NaN``, not zero, so a real
     zero means "no sediment", not "no data".
     """
+
+    dataset_name = 'globsed'
 
     def __init__(self, path):
         try:

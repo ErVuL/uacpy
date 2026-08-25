@@ -25,8 +25,10 @@ FEATURES DEMONSTRATED:
 
 import sys
 import time
+import os
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Repo root, so ``import uacpy`` resolves from a source checkout.
+sys.path.insert(0, str(Path(__file__).parents[2]))
 
 import numpy as np  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
@@ -36,8 +38,9 @@ from uacpy.core.environment import BoundaryProperties  # noqa: E402
 from uacpy.visualization.plots import plot_field  # noqa: E402
 from uacpy.models import RunMode  # noqa: E402
 
-OUTPUT_DIR = Path(__file__).parent / 'output'
-OUTPUT_DIR.mkdir(exist_ok=True)
+OUTPUT_DIR = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
+                  or Path(__file__).parent / 'output')
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def main():
@@ -240,7 +243,8 @@ def main():
 
     print("\nPlotting features used:")
     print("  ✓ plot_field() with the fixed TL colour scale")
-    print("  ✓ jet_r colormap (blue=good, red=poor) - Acoustic Toolbox standard")
+    print("  ✓ jet_r colormap (red=low TL/loud, blue=high TL/quiet)"
+          " - Acoustic Toolbox standard")
     print("  ✓ Fixed TL limits, 20 to 120 dB, identical across every figure")
 
     print("\nNext steps:")

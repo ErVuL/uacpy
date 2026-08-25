@@ -9,10 +9,11 @@ from typing import Optional, Tuple
 from uacpy.core.environment import Environment
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.results import Arrivals, Rays, Modes, Covariance, Replicas, ReflectionCoefficient
-from uacpy.io.units import m_to_km
+from uacpy.core.units import m_to_km
 from uacpy.visualization.plots._common import ZORDER_RAYS, ZORDER_SURFACE, _overlay_seafloor, _draw_geometry, _draw_receiver_grid, _draw_result_credit, fig_ax, typed_plot_error, invert_yaxis_once
 
 
+@typed_plot_error
 def _plot_rays(
     rays: Rays,
     ax=None,
@@ -36,6 +37,14 @@ def _plot_rays(
     """
     if not isinstance(rays, Rays):
         raise ConfigurationError(f"_plot_rays: expected Rays, got {type(rays).__name__}")
+    if color_by not in ('bounces', None):
+        # A typo'd mode falling through to the monochrome branch would also
+        # drop the per-class legend, so the fan would look like a deliberate
+        # color_by=None call.
+        raise ConfigurationError(
+            f"_plot_rays: color_by={color_by!r} is not a colouring mode; pass "
+            "'bounces' (colour by multipath class) or None (one colour)."
+        )
     _owns_fig = ax is None
     fig, ax = fig_ax(ax, figsize)
 
@@ -132,6 +141,7 @@ def _plot_rays(
     return fig, ax
 
 
+@typed_plot_error
 def _plot_arrivals(
     arrivals: Arrivals,
     ax=None,
@@ -196,6 +206,7 @@ def _plot_arrivals(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+@typed_plot_error
 def _plot_mode_functions(
     modes: Modes,
     n_modes: Optional[int] = None,
@@ -241,6 +252,7 @@ def _plot_mode_functions(
     return fig, ax
 
 
+@typed_plot_error
 def plot_mode_wavenumbers(
     modes: Modes,
     ax=None,
@@ -257,10 +269,10 @@ def plot_mode_wavenumbers(
     fig, ax = fig_ax(ax, figsize)
     idx = np.arange(1, modes.n_modes + 1)
     k = np.asarray(modes.k)
-    ax.plot(idx, k.real, 'o-', label=r'$\mathrm{Re}(k_m)$')
+    ax.plot(idx, k.real, 'o-')
     if np.any(np.abs(k.imag) > 0):
         ax2 = ax.twinx()
-        ax2.plot(idx, k.imag, 's--', color='C1', label=r'$\mathrm{Im}(k_m)$')
+        ax2.plot(idx, k.imag, 's--', color='C1')
         ax2.set_ylabel(r'$\mathrm{Im}(k_m)$ (1/m)')
     ax.set_xlabel('Mode index')
     ax.set_ylabel(r'$\mathrm{Re}(k_m)$ (1/m)')
@@ -285,7 +297,10 @@ def plot_modes_heatmap(
 ):
     """Heatmap of ``ψ_m(z)`` over (depth, mode index).
 
-    ``mode_range=(start, stop)`` selects a half-open mode-index slice.
+    ``mode_range=(start, stop)`` selects a half-open mode-index slice with
+    ``0 <= start < stop`` (``stop`` past the last mode simply clamps), and is
+    an alternative to ``n_modes``, not a modifier of it — passing both is a
+    :class:`~uacpy.core.exceptions.ConfigurationError`.
     ``normalize=True`` (default) rescales each column to peak ``±1`` so
     high-order modes don't disappear next to the dominant low-order ones.
     """
@@ -293,12 +308,34 @@ def plot_modes_heatmap(
         raise ConfigurationError(
             f"plot_modes_heatmap: expected Modes, got {type(modes).__name__}"
         )
+    if mode_range is not None:
+        if n_modes is not None:
+            # mode_range takes the slice wholesale, so a call passing both used
+            # to plot the range and drop n_modes without saying so.
+            raise ConfigurationError(
+                f"plot_modes_heatmap: got both n_modes={n_modes!r} and "
+                f"mode_range={mode_range!r}; pass one — n_modes for the first "
+                "N modes, mode_range=(start, stop) for a slice."
+            )
+        start, stop = mode_range
+        start, stop = int(start), int(stop)
+        if not 0 <= start < stop:
+            # A negative start wraps under numpy slicing and start >= stop
+            # selects nothing, both of which reach pcolormesh as a shape
+            # mismatch rather than as an error about the range.
+            raise ConfigurationError(
+                f"plot_modes_heatmap: mode_range={mode_range!r} must be a "
+                "half-open (start, stop) with 0 <= start < stop."
+            )
+        if start >= modes.n_modes:
+            raise ConfigurationError(
+                f"plot_modes_heatmap: mode_range={mode_range!r} starts past "
+                f"the {modes.n_modes} mode(s) this result carries."
+            )
+        stop = min(stop, modes.n_modes)
     _owns_fig = ax is None
     fig, ax = fig_ax(ax, figsize)
-    if mode_range is not None:
-        start, stop = mode_range
-        stop = min(stop, modes.n_modes)
-    else:
+    if mode_range is None:
         start = 0
         stop = (modes.n_modes if n_modes is None
                 else min(int(n_modes), modes.n_modes))
@@ -328,10 +365,11 @@ def plot_modes_heatmap(
     ax.set_xlabel('Mode index')
     ax.set_ylabel('Depth (m)')
     invert_yaxis_once(ax)
-    f0 = modes.f0 if modes.f0 is not None else 0.0
-    ax.set_title(
-        title or f'Mode shapes — {n_plot} modes @ {f0:.1f} Hz',
-    )
+    # A Modes carrying no f0 gets no frequency in the title rather than a
+    # fabricated '@ 0.0 Hz', which a published figure would assert as fact.
+    auto = (f'Mode shapes — {n_plot} modes @ {modes.f0:.1f} Hz'
+            if modes.f0 is not None else f'Mode shapes — {n_plot} modes')
+    ax.set_title(title or auto)
     if _owns_fig:
         _draw_result_credit(fig, modes, env=None)
     return fig, ax
@@ -342,6 +380,7 @@ def plot_modes_heatmap(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+@typed_plot_error
 def _plot_reflection_coefficient(
     rc: ReflectionCoefficient,
     ax=None,

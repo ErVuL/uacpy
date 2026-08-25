@@ -22,8 +22,10 @@ FEATURES DEMONSTRATED:
 """
 
 import sys
+import os
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Repo root, so ``import uacpy`` resolves from a source checkout.
+sys.path.insert(0, str(Path(__file__).parents[2]))
 
 import numpy as np  # noqa: E402
 import matplotlib  # noqa: E402
@@ -39,8 +41,9 @@ from uacpy import (  # noqa: E402
 from uacpy.models import Bellhop, RAM, RunMode  # noqa: E402
 from uacpy.visualization.plots import plot_field  # noqa: E402
 
-OUTPUT_DIR = Path(__file__).parent / 'output'
-OUTPUT_DIR.mkdir(exist_ok=True)
+OUTPUT_DIR = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
+                  or Path(__file__).parent / 'output')
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _plot_tl_difference(a, b, env=None, *, ax=None, title=None,

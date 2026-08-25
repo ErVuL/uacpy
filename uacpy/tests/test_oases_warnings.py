@@ -138,7 +138,7 @@ class TestRawOptionsVoidTypedKnobs:
         with pytest.raises(ConfigurationError, match="compute_contour"):
             OAST(options='N T', compute_contour=True)
 
-    def test_oast_typed_flags_still_derive_the_option_line(self):
+    def test_oast_typed_flags_derive_the_option_line(self):
         assert OAST()._resolve_options() == 'N T J'
         assert OAST(complex_contour=False)._resolve_options() == 'N T'
         assert OAST(compute_contour=True,
@@ -243,3 +243,90 @@ def test_oasr_surface_roughness_is_dropped_with_a_warning():
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])
+
+
+@pytest.mark.requires_binary
+class TestOasesForwardsItsOwnStdoutWarnings:
+    """OASES writes no ``.prt``, so its own non-fatal diagnostics reach the
+    user only if uacpy reads stdout.
+
+    The case driven here is the only check of its kind in the pipeline:
+    ``oaseun31.f:204-207`` flags ``(cs/cp)**2 > 0.75`` on an elastic
+    half-space, and nothing on the Python side tests that ratio — so if the
+    line is dropped, an unphysical seabed returns a full TL field with
+    nothing said.
+    """
+
+    @staticmethod
+    def _env(shear_speed, shear_attenuation=0.5):
+        return uacpy.Environment(
+            bathymetry=100.0, ssp=1500.0,
+            bottom=uacpy.BoundaryProperties(
+                acoustic_type='half-space', sound_speed=1800.0,
+                shear_speed=shear_speed, density=2.0,
+                attenuation=0.2, shear_attenuation=shear_attenuation))
+
+    @staticmethod
+    def _run(env):
+        import warnings as _w
+        model = OAST(verbose=False)
+        with _w.catch_warnings(record=True) as caught:
+            _w.simplefilter('always')
+            field = model.run(env,
+                              uacpy.Source(depths=25.0, frequencies=100.0),
+                              uacpy.Receiver(depths=[50.0],
+                                             ranges=[1000.0, 2000.0]))
+        return field, [str(x.message) for x in caught
+                       if 'on stdout' in str(x.message)]
+
+    def test_an_unphysical_shear_ratio_is_reported_verbatim(self):
+        """cs/cp = 1650/1800 gives (cs/cp)^2 = 0.840, above the 0.75 the
+        binary refuses to call physical."""
+        field, said = self._run(self._env(1650.0))
+        assert len(said) == 1
+        assert 'UNPHYSICAL SPEED RATIO' in said[0]
+        assert np.isfinite(np.asarray(field.db)).all(), (
+            "the run must still return a field — this warning is the only "
+            "sign anything was wrong, so a failed run would not test it")
+
+    def test_a_physical_shear_ratio_says_nothing(self):
+        """The other side of the binary's own two 0.75 thresholds: cs/cp =
+        1200/1800 gives (cs/cp)^2 = 0.444, and 0.444 x As = 0.044 stays under
+        0.75 x Ap = 0.15, so neither line is emitted to forward."""
+        _, said = self._run(self._env(1200.0, shear_attenuation=0.1))
+        assert said == []
+
+    def test_the_attenuation_threshold_is_pinned_on_its_own(self):
+        """``oaseun31.f:208-210`` is a second, independent check —
+        (As/Ap)(cs/cp)^2 > 0.75 — reachable with a perfectly physical speed
+        ratio. 0.444 x 0.5 = 0.222 against 0.75 x 0.2 = 0.15."""
+        _, said = self._run(self._env(1200.0, shear_attenuation=0.5))
+        assert len(said) == 1
+        assert 'UNPHYSICAL ATTENUATION' in said[0]
+
+    def test_progress_traces_are_not_forwarded_as_warnings(self):
+        """OASES prefixes ordinary traces with the same ``>>>``; only lines
+        that say *warning* are passed on."""
+        model = OAST(verbose=False)
+        import warnings as _w
+        import types
+        chatter = types.SimpleNamespace(stdout=(
+            " >>> Entering SOLDIS <<<\n"
+            " >>> Done, CPU=  0.13\n"
+            " >>> Max Bessel kr:  1234.5\n"))
+        with _w.catch_warnings(record=True) as caught:
+            _w.simplefilter('always')
+            model._warn_on_stdout_warnings(chatter)
+        assert not caught
+
+    def test_a_warning_line_in_the_same_stream_is_forwarded(self):
+        """...and one that does is, deduplicated."""
+        model = OAST(verbose=False)
+        import types
+        stream = types.SimpleNamespace(stdout=(
+            " >>> Entering SOLDIS <<<\n"
+            " >>> WARNING: ARRAY OVERFLOW IN RINTPL, ARG=  2.0\n"
+            " >>> WARNING: ARRAY OVERFLOW IN RINTPL, ARG=  2.0\n"))
+        with pytest.warns(UserWarning, match='ARRAY OVERFLOW') as caught:
+            model._warn_on_stdout_warnings(stream)
+        assert 'reported 1 non-fatal' in str(caught[0].message)

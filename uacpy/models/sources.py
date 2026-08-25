@@ -20,6 +20,8 @@ import re
 from dataclasses import dataclass
 from typing import Dict, Optional
 
+from uacpy.core.exceptions import ConfigurationError
+
 __all__ = ['ModelSource', 'MODEL_SOURCES', 'model_source']
 
 
@@ -107,7 +109,18 @@ MODEL_SOURCES: Dict[str, ModelSource] = {
 
 
 def model_source(source_id: Optional[str]) -> Optional[ModelSource]:
-    """The :class:`ModelSource` for ``source_id``, or ``None`` if unset."""
+    """The :class:`ModelSource` for ``source_id``, or ``None`` if unset.
+
+    An id absent from :data:`MODEL_SOURCES` raises
+    :class:`~uacpy.core.exceptions.ConfigurationError` naming it and the
+    catalogued ids.
+    """
     if source_id is None:
         return None
-    return MODEL_SOURCES[source_id]
+    try:
+        return MODEL_SOURCES[source_id]
+    except KeyError:
+        raise ConfigurationError(
+            f"Unknown model source id {source_id!r}. Catalogued ids: "
+            f"{', '.join(sorted(MODEL_SOURCES))}."
+        ) from None

@@ -124,13 +124,13 @@ class TestCastsOfOneCycleAreDistinctStations:
 
 
 def test_pressure_to_depth_inverts():
-    # ``_pressure_dbar_to_depth`` is a 5-step Newton inversion of
+    # ``pressure_dbar_to_depth`` is a 5-step Newton inversion of
     # ``depth_to_pressure_dbar``, so the round trip is exact up to Newton
     # convergence — the residual here is ~5e-13 m. ``atol=0.1`` is an
     # acceptability bound on depth (a decimetre is far below any Argo level
     # spacing), not a measure of the method's accuracy.
-    from uacpy.data._geo import depth_to_pressure_dbar
+    from uacpy.data._geo import depth_to_pressure_dbar, pressure_dbar_to_depth
     z = np.array([0.0, 100.0, 1000.0, 4000.0])
     p = depth_to_pressure_dbar(z, 30.0)
-    z_back = argo._pressure_dbar_to_depth(p, 30.0)
+    z_back = pressure_dbar_to_depth(p, 30.0)
     assert np.allclose(z, z_back, atol=0.1)

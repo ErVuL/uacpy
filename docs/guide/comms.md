@@ -58,9 +58,12 @@ Every stage is a function you can call on its own, and the whole chain is also
 available as one call:
 
 ```python
+import numpy as np
+
 from uacpy import comms
 
-link = comms.simulate_link('qpsk', ebn0_db=12.0, n_bits=20000)
+rng = np.random.default_rng(0xACED)
+link = comms.simulate_link('qpsk', ebn0_db=12.0, n_bits=20000, rng=rng)
 print(f'BER {link.ber:.2e}, EVM {link.evm:.1%}')
 ```
 
@@ -68,6 +71,15 @@ print(f'BER {link.ber:.2e}, EVM {link.evm:.1%}')
 BER, EVM, the transmitted and received symbols, and the equaliser's learning
 curve. It is the fastest way to sanity-check an idea before wiring up the
 passband chain.
+
+That `rng` is not decoration, and every snippet on this page carries it. Every
+call in `uacpy.comms` that draws — `simulate_link`, `ber_sweep`, `awgn`,
+`fading_taps` — takes an `rng` and falls back to `np.random.default_rng()`,
+an *unseeded* generator, when you leave it out. Omit it and the BER you print
+moves from run to run, which is the right default for a Monte-Carlo sweep and
+the wrong one for a number you are about to quote, commit, or compare against
+a previous run. Pass a seeded generator whenever the answer needs to
+reproduce.
 
 The alternative chain — **OFDM** — is in [§12](#12-ofdm-the-multicarrier-route),
 and the standards-compliant **JANUS** beacon is in [§17](#17-janus-nato-stanag-4748).
@@ -192,7 +204,7 @@ the stochastic and time-varying parts, and the noise.
 |---|---|
 | `multipath_channel(gains, delays_s, sample_rate)` | static FIR taps from sparse arrivals |
 | `apply_channel(signal, h)` | convolve with a static channel |
-| `fading_taps(n_taps, n_samples, doppler_hz, sample_rate, rician_k=...)` | time-varying tap gains, Rayleigh or Rician |
+| `fading_taps(n_taps, n_samples, doppler_hz, sample_rate, rician_k=..., rng=...)` | time-varying tap gains, Rayleigh or Rician |
 | `apply_fading_channel(signal, taps, delays_samples)` | apply the time-varying tap-delay line |
 | `awgn(signal, snr_db, rng=...)` | additive noise at a target in-band SNR |
 | `apply_cfo(signal, cfo)` | de-rotate by a normalised carrier offset |
@@ -346,6 +358,13 @@ that matters most.
 | `rls_equalizer(rx, constellation, n_taps, forget, train)` | training symbols | `(eq_symbols, mse)` |
 | `mmse_equalizer(rx, h, snr_linear)` | the channel `h` | equalised signal only |
 
+`snr_linear` is the linear SNR **at the equaliser input** — received signal
+power over noise power, not a ratio in dB. It means the same thing for
+`mmse_equalizer`, `ofdm_demodulate` and `OFDMReceiver`, so one calibrated
+number can be passed to any of them: each damps by `mean(|H|²)/snr_linear`,
+which is the Wiener regulariser in the units of `|H|²` and so does not move
+when you rescale the channel.
+
 The **decision-feedback equaliser** is the workhorse. Its `n_ff` feedforward
 taps act on the received samples; its `n_fb` feedback taps subtract the ISI
 that *already-decided* symbols contribute, which is why a DFE handles a long
@@ -391,7 +410,8 @@ converges in ~330. On a channel that stays put, both are fine; on one that
 changes inside a packet, the convergence rate *is* the performance.
 
 `mmse_equalizer` is the one-shot alternative when you already know `h`: a
-Wiener solution in the frequency domain, `W(f) = H*(f)/(|H(f)|² + 1/snr)`.
+Wiener solution in the frequency domain,
+`W(f) = H*(f)/(|H(f)|² + mean(|H|²)/snr)`.
 Because it is an FFT, the equalisation is **circular** — feed it a
 cyclic-prefixed block, or discard the first `len(h)-1` outputs.
 
@@ -498,11 +518,14 @@ points. `from_passband` is the one that estimates and resamples away the common
 Doppler scale before down-converting; `receive` takes it from there —
 Schmidl-Cox for timing and fractional CFO, FFT, pilot channel estimate,
 one-tap equalisation, then a decision-directed common-phase correction per
-block. `receive_passband` chains the two. Handing `receive` a baseband frame
+block. `receive_passband` chains the two. The bit stream `receive` returns
+runs past the payload — every block after the pilot is decoded as data, the
+transmitter's trailing zero guard included — so slice it to the known payload
+length. Handing `receive` a baseband frame
 yourself skips the resampling, which is right only when the platform is
-stationary. Set `snr_linear` for MMSE per-subcarrier
-equalisation instead of zero-forcing; it damps exactly the null-carrier noise
-amplification above.
+stationary. Set `snr_linear` — the same input-referred linear SNR defined for
+`mmse_equalizer` above — for MMSE per-subcarrier equalisation instead of
+zero-forcing; it damps exactly the null-carrier noise amplification above.
 
 **Why the resampling has to come first.** A Doppler scale `a` shifts subcarrier
 `k` by `a·f_k`, so the shift grows across the band and no single frequency

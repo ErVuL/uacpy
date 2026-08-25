@@ -12,8 +12,10 @@ Abraham §3.4):
 
 Every function warns below its geometric-regime bound: ``ka > 10`` for
 the sphere family (Abraham §3.4: "reasonably accurate when ka > 10"),
-``ka > 1`` for cylinder/plate (Urick's ``ka ≫ 1`` condition; Abraham's
-reference cylinder runs at ka ≈ 4). All formulas assume the far field
+``ka > 1`` on the cylinder radius (Urick's ``ka ≫ 1`` condition;
+Abraham's reference cylinder runs at ka ≈ 4), and both plate dimensions
+above one wavelength (``kw > 2π``, since the plate's check scale is a
+full dimension rather than a radius). All formulas assume the far field
 (``r > L²/λ`` for the cylinder, ``r > A/λ`` for the plate). Aspect
 patterns for the cylinder and plate are valid near broadside / normal
 incidence only: they null at end-on even though real end-caps and edges
@@ -32,20 +34,54 @@ import numpy as np
 
 from uacpy.core.constants import DEFAULT_SOUND_SPEED
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.core._warn_frames import USER_FRAME_SKIP
 
 # Geometric-scattering validity bounds. Sphere-family: the rigid-sphere
 # approximation is "reasonably accurate when ka > 10" (Abraham §3.4,
-# after eq. 3.218). Cylinder/plate: Urick Table 9.1 requires only
-# ka >> 1, and Abraham's reference cylinder (Fig. 3.24) runs at ka ≈ 4.
+# after eq. 3.218). Cylinder: Urick Table 9.1 requires only ka >> 1 on the
+# radius, and Abraham's reference cylinder (Fig. 3.24) runs at ka ≈ 4.
+#
+# The plate needs its own, larger bound. Its check scale is a full dimension,
+# not a radius, so ka > 1 would pass any plate wider than λ/2π ≈ 0.16λ — deep
+# in the Rayleigh regime, where the physical-optics 20·log10(A/λ) has no
+# validity at all (a 0.2 × 0.2 m plate at λ = 1 m returned TS = -28.0 dB
+# unflagged). Urick Table 9.1 and Abraham §3.4 both require every dimension
+# ≫ λ, so the bound is set at exactly one wavelength, k·w = 2π, and the
+# formula only becomes accurate well above it.
 _KA_MIN_SPHERE = 10.0
-_KA_MIN_CYLINDER_PLATE = 1.0
+_KA_MIN_CYLINDER = 1.0
+_KA_MIN_PLATE = 2.0 * np.pi
 
 
 def _require_positive(value, label: str) -> float:
-    v = float(value)
-    if v <= 0.0:
+    """Validate a scalar dimension / frequency / sound speed and return it as
+    ``float``. Sibling of
+    :func:`uacpy.acoustic_signal._signal_validate.require_positive_finite_scalar`,
+    kept local only for the ``"target strength: "`` prefix and so ``sonar``
+    keeps importing from ``core`` alone; the *behaviour* is deliberately
+    identical and is pinned that way.
+    :func:`uacpy.core._carrier_validate._require_positive` carries the note on
+    why three of these exist.
+    """
+    try:
+        v = float(value)
+    except (TypeError, ValueError) as exc:
+        # Typed rather than the raw ``TypeError`` ``float()`` raises, which
+        # names neither the function nor the parameter: a list of radii passed
+        # to ts_sphere reported only "only length-1 arrays can be converted".
         raise ConfigurationError(
-            f"target strength: {label} must be positive; got {value}"
+            f"target strength: {label} must be a scalar number "
+            f"(got {value!r})."
+        ) from exc
+    # ``isfinite`` as well as the sign, and the sign as a negated admissible
+    # condition. Either half alone leaks a value the message promises to
+    # refuse: ``nan <= 0`` is False, and ``inf > 0`` is True — an infinite
+    # dimension or frequency was accepted here and returned an infinite target
+    # strength, unflagged, from every ts_* function, exactly as the private
+    # copy in ``acoustic_signal/waveforms.py`` did before it was consolidated.
+    if not np.isfinite(v) or not (v > 0.0):
+        raise ConfigurationError(
+            f"target strength: {label} must be positive and finite; got {value}"
         )
     return v
 
@@ -68,7 +104,7 @@ def _warn_below_geometric(scale_m: float, frequency_hz, sound_speed,
             f"{label}: k·a = {ka:.2f} < {ka_min:g} — below the "
             f"geometric-scattering regime; the formula overestimates the "
             f"response of a Rayleigh/resonance-regime scatterer.",
-            UserWarning, stacklevel=3,
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
         )
 
 
@@ -182,7 +218,7 @@ def ts_cylinder(
     L = _require_positive(length_m, 'length_m')
     f = _require_positive(frequency_hz, 'frequency_hz')
     c = _require_positive(sound_speed, 'sound_speed')
-    _warn_below_geometric(a, f, c, 'ts_cylinder', _KA_MIN_CYLINDER_PLATE)
+    _warn_below_geometric(a, f, c, 'ts_cylinder', _KA_MIN_CYLINDER)
     lam = c / f
     k = 2.0 * np.pi / lam
     theta = np.deg2rad(np.asarray(angle_deg, dtype=float))
@@ -212,7 +248,7 @@ def ts_plate(
     the rotation plane). At normal incidence this is the physical-optics
     ``TS = 20·log10(A/λ)`` for a flat plate of area ``A`` (Urick
     Table 9.1; Abraham §3.4). Requires both dimensions ≫ λ; valid near
-    normal incidence only.
+    normal incidence only. A dimension below one wavelength warns.
 
     Parameters
     ----------
@@ -235,7 +271,7 @@ def ts_plate(
     f = _require_positive(frequency_hz, 'frequency_hz')
     c = _require_positive(sound_speed, 'sound_speed')
     _warn_below_geometric(min(w, h), f, c, 'ts_plate',
-                          _KA_MIN_CYLINDER_PLATE)
+                          _KA_MIN_PLATE)
     lam = c / f
     k = 2.0 * np.pi / lam
     theta = np.deg2rad(np.asarray(angle_deg, dtype=float))

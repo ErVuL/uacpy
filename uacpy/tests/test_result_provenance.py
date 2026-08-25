@@ -10,9 +10,11 @@ derived result silently plots without attribution.
 import numpy as np
 import pytest
 
+from uacpy.core.exceptions import ConfigurationError
+
 import uacpy
 from uacpy.core.results import Arrivals, Field, Modes, PhaseReference, Rays
-from uacpy.models.sources import model_source
+from uacpy.models.sources import MODEL_SOURCES, model_source
 
 _SRC = model_source('acoustics_toolbox')
 _FREQS = np.linspace(100.0, 300.0, 32)
@@ -183,3 +185,24 @@ def test_synthesize_time_series_stamps_source_model():
     ts = H.synthesize_time_series(wf, sample_rate=4000.0)
     assert ts.metadata['source_model'] == H.model
     assert H.to_time_trace().metadata['source_model'] == H.model
+
+
+class TestModelSourceLookup:
+    """``model_source`` maps an id to its catalogue entry, keeps the
+    None-if-unset convention, and refuses an unknown id with a
+    :class:`ConfigurationError` that names it and the catalogued ids."""
+
+    def test_none_returns_none(self):
+        assert model_source(None) is None
+
+    def test_each_catalogued_id_returns_its_entry(self):
+        for source_id, entry in MODEL_SOURCES.items():
+            assert model_source(source_id) is entry
+
+    def test_an_unknown_id_is_a_configuration_error_naming_the_ids(self):
+        with pytest.raises(ConfigurationError) as excinfo:
+            model_source('not_a_catalogued_engine')
+        message = str(excinfo.value)
+        assert 'not_a_catalogued_engine' in message
+        for source_id in MODEL_SOURCES:
+            assert source_id in message

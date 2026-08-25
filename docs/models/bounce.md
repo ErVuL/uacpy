@@ -158,7 +158,7 @@ Everything is configured on the constructor; `run()` has a fixed signature.
 
 | Name | Default | Meaning |
 |---|---|---|
-| `c_low` | `1400.0` | Lowest phase velocity tabulated (m/s). Must be `> 0`. |
+| `c_low` | `None` | Lowest phase velocity tabulated (m/s). Must be `> 0`. `None` derives `min(1400, min(env.ssp))` at `run()` time — AT `bounce.htm` asks for "the lowest speed in the problem (say 1400.0)", and the 1400 there is the example, not the rule, so cold or brackish water needs the lower value or the table loses its grazing wedge. |
 | `c_high` | `1e9` | Highest phase velocity. `1e9` zeroes the minimum wavenumber and buys the full 0–90° sweep. |
 | `rmax` | `None` | Range (m) the table is sized for — it sets how many angles you get. `None` auto-derives from `receiver.range_max`, or 10 km. |
 | `n_angles` | `None` | Ask for ≈ N samples directly; `rmax` is back-derived to match. |

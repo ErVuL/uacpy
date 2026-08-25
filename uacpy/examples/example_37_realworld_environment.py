@@ -43,11 +43,14 @@ NOTE: runs from the offline cache when installed (no network); otherwise hits
 """
 
 import sys
+import os
 from pathlib import Path
 
-OUTPUT_DIR = Path(__file__).parent / 'output'
-OUTPUT_DIR.mkdir(exist_ok=True)
-sys.path.insert(0, str(Path(__file__).parent.parent))
+OUTPUT_DIR = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
+                  or Path(__file__).parent / 'output')
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+# Repo root, so ``import uacpy`` resolves from a source checkout.
+sys.path.insert(0, str(Path(__file__).parents[2]))
 
 import datetime as _dt  # noqa: E402
 import warnings  # noqa: E402
@@ -56,7 +59,6 @@ import matplotlib.pyplot as plt  # noqa: E402
 
 import uacpy  # noqa: E402
 from uacpy import data  # noqa: E402
-from uacpy.data import _cache  # noqa: E402
 from uacpy.models import Bellhop, RAM, RunMode  # noqa: E402
 from uacpy.core.environment import (  # noqa: E402
     SoundSpeedProfile, Bottom, SeabedColumn,
@@ -67,11 +69,7 @@ from uacpy.core.exceptions import UACPYError  # noqa: E402
 
 def _have(dataset):
     """True if a local dataset (./data_cache/<dataset>) is installed."""
-    try:
-        _cache.require(dataset)
-        return True
-    except UACPYError:
-        return False
+    return data.is_installed(dataset)
 
 # ── USER SETTINGS — tune everything here ─────────────────────────────────────
 REGION_LAT, REGION_LON = (56.5, 62.0), (-2.0, 9.0)   # North Sea / Norwegian Trench

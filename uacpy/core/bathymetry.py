@@ -59,6 +59,11 @@ class Bathymetry(_RangeProfile):
         """
         if isinstance(value, Bathymetry):
             return value
+        if isinstance(value, (bool, np.bool_)):
+            raise ConfigurationError(
+                f"Bathymetry: {value!r} is a bool, not a depth — as a scalar "
+                f"it would mean a {float(value):g} m deep seafloor."
+            )
         try:
             if np.ndim(value) == 0:
                 return cls(ranges=np.array([0.0]),

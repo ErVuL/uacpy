@@ -8,9 +8,14 @@ Each test cites the manual section it pins:
 - ``doc/kraken.htm`` / KRAKEN manual (2001) §4.2.2 ``kraken.hlp``: blocks
   (7) CLOW/CHIGH, (8) RMAX, (9) source/receiver depths, and the broadband
   frequency vector appended after them (TopOpt(6:6)='B').
-- KRAKEN manual (2001) §4.2.2 ``notes.hlp`` (KRAKENC replaces elastic layers
-  by a reflection coefficient, so fields inside them cannot be evaluated).
-- ``doc/field.htm`` / manual §4.3.1 ``field.hlp``: RPROF(1) must be 0.0.
+- ``doc/index.htm`` (vendored): KRAKENC replaces elastic layers by an
+  equivalent reflection coefficient, so fields inside them cannot be
+  evaluated. (The same text is KRAKEN manual (2001) §4.2.1 ``notes.hlp``;
+  the vendored HTML is cited because the manual PDF is not readable here.)
+- ``KrakenField/field.f90:139``: RPROF(1) must be 0.0 — the binary itself
+  refuses otherwise, ``ERROUT('FIELD', 'The first profile must be at a
+  range of 0 km')``. ``doc/field.htm`` documents the record but not this
+  constraint, so the Fortran is the citation.
 - ``doc/sparc.htm``: the SPARC-only TopOpt(5:5) output mode and the four
   documented tail blocks (PULSE, FMin/FMax, ranges, output times, time
   integration).
@@ -27,7 +32,6 @@ readers directly.
 
 import numpy as np
 import pytest
-from pathlib import Path
 
 import uacpy
 from uacpy.core import Environment, BoundaryProperties
@@ -379,14 +383,23 @@ class TestAtiFileFollowsTheBtyContract:
     or bottom bathymetry' — TYPE(2:2) defaults to 'S' (short), R() is in
     km, and the range vector 'must increase strictly monotonically'. The
     .bty side is pinned elsewhere; this pins the .ati writer on the same
-    contract."""
+    contract.
+
+    The writer takes that default by omitting TYPE(2:2) rather than spelling
+    'S', which ``bdryMod.f90:179-181`` accepts as ``CASE ( 'S', '' )`` and
+    AT's own decks use (``tests/ParaBot/ParaBot.bty`` is ``'C'``). One
+    character is required, not merely permitted: ``atiType``/``btyType`` are
+    ``CHARACTER(LEN=2)`` and ``bellhop.f90:535``/``:552`` test the whole
+    string against ``'C'``, so a spelled-out ``'CS'`` never selects the
+    curvilinear reflection geometry.
+    """
 
     def test_ranges_are_written_in_km_with_short_type(self, tmp_path):
         from uacpy.io.bathy_io import write_ati_file
         path = tmp_path / 'a.ati'
         write_ati_file(path, np.array([[0.0, 2.0], [500.0, 2.0]]))
         lines = [ln for ln in path.read_text().splitlines() if ln.strip()]
-        assert lines[0] == "'LS'"
+        assert lines[0] == "'L'"
         assert int(lines[1]) == 2
         assert _floats(lines[2]) == [0.0, 2.0]
         assert _floats(lines[3]) == [0.5, 2.0]
@@ -400,10 +413,11 @@ class TestAtiFileFollowsTheBtyContract:
 
 
 class TestElasticSubBottomReceiversArePartitioned:
-    """KRAKEN manual (2001) §4.2.1 notes.hlp: 'Internally KRAKENC replaces
-    elastic layers by an equivalent reflection coefficient. For this
+    """``doc/index.htm`` (vendored AT tree): 'Internally KRAKENC replaces
+    elastic layers by an equivalent reflection coefficent. For this
     reason, you cannot use KRAKENC to look at fields within the elastic
-    layers.' uacpy honours this by computing the field only at
+    layers.' (the misspelling is the original's; the same text appears as
+    KRAKEN manual (2001) §4.2.1 ``notes.hlp``.) uacpy honours this by computing the field only at
     water-column depths and returning NaN (with a warning) below."""
 
     def _model_env(self):
@@ -419,7 +433,7 @@ class TestElasticSubBottomReceiversArePartitioned:
         np.testing.assert_array_equal(keep, [True, False])
         np.testing.assert_allclose(compute_rcv.depths, [50.0])
 
-    def test_all_sub_bottom_still_yields_one_legal_compute_depth(self):
+    def test_all_sub_bottom_yields_one_legal_compute_depth(self):
         # misc/SourceReceiverPositions.f90:212 ERROUTs on an empty receiver
         # vector, so the split substitutes a mid-water depth and the keep
         # mask discards its column afterwards.

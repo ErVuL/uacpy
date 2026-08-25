@@ -7,6 +7,7 @@ run fully offline. Skipped where netCDF4 (the grid dependency) is unavailable.
 
 import io
 import tarfile
+import threading
 import warnings
 
 import numpy as np
@@ -139,6 +140,71 @@ def test_crust1_transect(cache):
     assert rdl.sediment_thickness_source == 'globsed'   # GlobSed applied per point
 
 
+@pytest.mark.parametrize("point, shape", [
+    ((30.0, -40.0), 'sediment over basement'),
+    ((10.0, 10.0), 'bare rock'),        # the other column shape the builder makes
+])
+def test_crust1_roughness_lands_on_the_seafloor_interface(cache, point, shape):
+    """``SedimentLayer.roughness`` is the interface at the *top* of its layer,
+    so the seafloor is the first layer's. Every other bottom fetcher takes
+    ``roughness=``; these two claim signature parity with them."""
+    assert crust1_local.fetch_bottom_crust1(point).layers[0].roughness == 0.0
+    rough = crust1_local.fetch_bottom_crust1(point, roughness=0.5)
+    assert rough.layers[0].roughness == pytest.approx(0.5), shape
+
+
+def test_crust1_roughness_is_the_top_interface_not_the_deepest(cache):
+    """The cached fixture's columns are single-layer, where the seafloor and
+    the deepest interface are the same object. A column with three sediment
+    layers separates them: only the topmost one is the water/seabed
+    interface."""
+    n = crust1_local._MID_CRYST + 2
+    boundaries = np.array([0.0, -0.3, -0.9, -1.8, -6.0, -12.0, -20.0, -30.0])[:n]
+    column = crust1_local._layered_from_column(
+        boundaries, np.linspace(1.8, 7.0, n), np.linspace(0.5, 4.0, n),
+        np.linspace(1.7, 3.0, n), sediment_attenuation=0.5,
+        basement_attenuation=0.1, elastic=True, sediment_thickness=None,
+        roughness=0.5)
+    assert len(column.layers) > 1, "the synthetic column collapsed to one layer"
+    assert [layer.roughness for layer in column.layers] == [0.5] + [0.0] * (
+        len(column.layers) - 1)
+
+
+def test_crust1_roughness_leaves_the_geoacoustics_alone(cache):
+    """The knob is an interface property; it must not move Vp, Vs, ρ or the
+    sediment column."""
+    plain = crust1_local.fetch_bottom_crust1((30.0, -40.0))
+    rough = crust1_local.fetch_bottom_crust1((30.0, -40.0), roughness=0.5)
+    assert ([(l.thickness, l.sound_speed, l.density, l.shear_speed)
+             for l in rough.layers]
+            == [(l.thickness, l.sound_speed, l.density, l.shear_speed)
+                for l in plain.layers])
+    assert rough.halfspace.sound_speed == plain.halfspace.sound_speed
+    assert rough.total_thickness() == pytest.approx(plain.total_thickness())
+
+
+def test_crust1_transect_carries_roughness_to_every_waypoint(cache):
+    rdl = crust1_local.fetch_bottom_crust1_transect(
+        (30.0, -40.0), (31.0, -40.0), n_points=3, roughness=0.5)
+    assert [c.layers[0].roughness for c in rdl.columns] == [0.5, 0.5, 0.5]
+    plain = crust1_local.fetch_bottom_crust1_transect(
+        (30.0, -40.0), (31.0, -40.0), n_points=3)
+    assert [c.layers[0].roughness for c in plain.columns] == [0.0, 0.0, 0.0]
+
+
+def test_every_bottom_fetcher_takes_a_roughness_argument():
+    """The parity ``fetch_bottom_crust1``'s docstring claims with the network
+    bottom fetchers, checked across the whole public family."""
+    import inspect
+
+    import uacpy.data as data
+
+    missing = [name for name in data.__all__ if name.startswith('fetch_bottom')
+               if 'roughness' not in inspect.signature(
+                   getattr(data, name)).parameters]
+    assert missing == []
+
+
 def test_crust1_transect_accepts_max_points(cache):
     # environment._fetch_bottom forwards max_points to every transect bottom
     # fetcher; crust1's must accept it and clamp n_points to it.
@@ -162,6 +228,72 @@ def test_crust1_emits_commercial_warning(cache):
                   if issubclass(w.category, UserWarning)
                   and 'commercial' in str(w.message)]
     assert len(commercial) == 1
+
+
+def test_crust1_transect_opens_no_process_global_filter_window(cache):
+    # The transect buys its once-per-fetch notice from the non-warning builder,
+    # not from a ``warnings.catch_warnings()`` window: ``warnings.filters`` is
+    # process-global, so such a window mutes every thread for as long as it is
+    # held.
+    opened = []
+    real_catch_warnings = warnings.catch_warnings
+
+    class _CountingCatchWarnings(real_catch_warnings):
+        def __enter__(self):
+            opened.append(1)
+            return super().__enter__()
+
+    warnings.catch_warnings = _CountingCatchWarnings
+    try:
+        crust1_local.fetch_bottom_crust1_transect(
+            (30.0, -40.0), (31.0, -40.0), n_points=3)
+    finally:
+        warnings.catch_warnings = real_catch_warnings
+    assert opened == []
+
+
+def test_crust1_transect_lets_another_thread_raise_the_same_notice(cache):
+    # The transect runs on one thread while another raises the very notice the
+    # transect wants quiet for its own waypoints. Only that thread's copy may
+    # be silenced. The probe is released from inside a waypoint build, so no
+    # timing decides the outcome.
+    inside_a_waypoint = threading.Event()
+    probe_raised = threading.Event()
+    delivered = []
+    real_builder = crust1_local._bottom_at_point
+
+    def releasing_builder(*args, **kwargs):
+        inside_a_waypoint.set()
+        probe_raised.wait(30.0)
+        return real_builder(*args, **kwargs)
+
+    def run_the_transect():
+        try:
+            crust1_local.fetch_bottom_crust1_transect(
+                (30.0, -40.0), (31.0, -40.0), n_points=3)
+        finally:
+            inside_a_waypoint.set()
+
+    with warnings.catch_warnings():
+        warnings.simplefilter('always')
+        warnings.showwarning = (
+            lambda message, *a, **k: delivered.append(str(message)))
+        crust1_local._bottom_at_point = releasing_builder
+        try:
+            worker = threading.Thread(target=run_the_transect)
+            worker.start()
+            assert inside_a_waypoint.wait(30.0)
+            before = delivered.count(crust1_local._COMMERCIAL_WARNING)
+            warnings.warn(crust1_local._COMMERCIAL_WARNING, UserWarning)
+            after = delivered.count(crust1_local._COMMERCIAL_WARNING)
+            probe_raised.set()
+            worker.join(30.0)
+        finally:
+            crust1_local._bottom_at_point = real_builder
+    assert not worker.is_alive()
+    assert before == 1                  # the transect's own, raised once
+    assert after == 2                   # and this thread's, not swallowed
+    assert delivered.count(crust1_local._COMMERCIAL_WARNING) == 2
 
 
 def test_crust1_missing_cache_names_flag(tmp_path, monkeypatch):

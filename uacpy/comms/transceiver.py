@@ -27,9 +27,11 @@ Schmidl & Cox (1997); Li, Stojanovic et al. (2007). Proakis & Salehi.
 from __future__ import annotations
 
 import warnings
+from typing import Optional
 
 import numpy as np
 
+from uacpy.comms._equalizer_core import regularizer
 from uacpy.comms.coding import ConvCode
 from uacpy.comms.doppler import compensate_doppler, estimate_doppler_scale
 from uacpy.comms.equalization import DFE, slicer
@@ -50,6 +52,7 @@ from uacpy.comms.phy import (
 )
 from uacpy.comms.sync import detect_preamble
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.core._warn_frames import USER_FRAME_SKIP
 
 
 def _require_passband_fits(sample_rate, fc, sps, rolloff, where):
@@ -99,7 +102,8 @@ class Transmitter:
         "generate this many" (matched by :class:`CommsReceiver` with the same count).
     """
 
-    def __init__(self, modulation: str, code: ConvCode = None, preamble=None):
+    def __init__(self, modulation: str, code: Optional[ConvCode] = None,
+                 preamble=None):
         self.modulation = modulation
         self.modulator = Modulator(modulation)
         self.code = code
@@ -133,8 +137,8 @@ class CommsReceiver:
     tracking residual carrier offset). ``preamble`` must match the transmitter's.
     """
 
-    def __init__(self, modulation: str, code: ConvCode = None,
-                 equalizer: DFE = None, preamble=None):
+    def __init__(self, modulation: str, code: Optional[ConvCode] = None,
+                 equalizer: Optional[DFE] = None, preamble=None):
         self.modulation = modulation
         self.modulator = Modulator(modulation)
         self.code = code
@@ -173,7 +177,7 @@ class CommsReceiver:
                 f"{float(np.max(metric)):.3f} < threshold {float(threshold):.3f}); "
                 f"decoding from sample 0. The returned bits are not frame-aligned "
                 f"and carry no indication of that.",
-                UserWarning, stacklevel=2)
+                UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
         sym = sym[start:]
         pre = self.preamble
         if self.equalizer is not None:
@@ -219,7 +223,7 @@ class OFDMTransmitter:
     """
 
     def __init__(self, modulation: str, n_subcarriers: int = 256,
-                 cp_len: int = 32, code: ConvCode = None):
+                 cp_len: int = 32, code: Optional[ConvCode] = None):
         self.modulation = modulation
         self.modulator = Modulator(modulation)
         self.n_subcarriers = int(n_subcarriers)
@@ -252,7 +256,13 @@ class OFDMTransmitter:
         os = int(oversample)
         if fc - sample_rate / (2 * os) <= 0 or fc + sample_rate / (2 * os) >= sample_rate / 2:
             raise ConfigurationError(
-                "to_passband: OFDM band fc +/- sample_rate/(2*oversample) must lie in (0, sample_rate/2)")
+                "to_passband: OFDM band fc +/- sample_rate/(2*oversample) "
+                "must lie in (0, sample_rate/2); got fc="
+                f"{float(fc):g} Hz, sample_rate={float(sample_rate):g} Hz, "
+                f"oversample={os} — band "
+                f"{fc - sample_rate / (2 * os):g}-"
+                f"{fc + sample_rate / (2 * os):g} Hz against Nyquist "
+                f"{sample_rate / 2:g} Hz")
         up = resample_poly(baseband, os, 1)
         return upconvert(up, sample_rate, fc)
 
@@ -273,7 +283,8 @@ class OFDMReceiver:
     """
 
     def __init__(self, modulation: str, n_subcarriers: int = 256,
-                 cp_len: int = 32, code: ConvCode = None, snr_linear=None):
+                 cp_len: int = 32, code: Optional[ConvCode] = None,
+                 snr_linear=None):
         self.modulation = modulation
         self.modulator = Modulator(modulation)
         self.n_subcarriers = int(n_subcarriers)
@@ -284,12 +295,32 @@ class OFDMReceiver:
         self.pilot_freq = _pilot_spectrum(self.n_subcarriers, modulation)
 
     def _equalize(self, freq, h):
-        if self.snr_linear is None:
-            return freq / (h + 1e-12)
-        return freq * np.conj(h) / (np.abs(h) ** 2 + 1.0 / float(self.snr_linear))
+        """One-tap-per-subcarrier ZF (or MMSE) division by the channel estimate.
+
+        Both branches take the ``conj(h)/(|h|^2 + eps)`` form of
+        :func:`~uacpy.comms.ofdm.ofdm_demodulate`, with ``eps`` scaled to the
+        estimate's own power. ``h`` here comes from the received pilot, so its
+        magnitude is the receive amplitude: against a fixed offset the estimate
+        stopped being used at all once the record fell near it — measured,
+        16-QAM over a 4-tap channel ran at BER 0.24 at a receive amplitude of
+        1e-12, and MMSE at 1e-9. A subcarrier the estimate calls silent comes
+        back as zero.
+        """
+        h2 = np.abs(h) ** 2
+        eps = regularizer(h2, self.snr_linear)
+        if eps <= 0.0:
+            return np.zeros_like(freq)
+        return freq * np.conj(h) / (h2 + eps)
 
     def receive(self, baseband):
-        """Baseband OFDM frame -> information bits (sync, channel est, equalize)."""
+        """Baseband OFDM frame -> information bits (sync, channel est, equalize).
+
+        Every whole block after the pilot is decoded as data — the
+        transmitter's trailing zero guard block and any extra captured
+        samples included — so the returned stream runs past the payload (the
+        guard alone contributes ``n_subcarriers * bits_per_symbol`` coded
+        bits of noise). Slice the result to the known payload length.
+        """
         nsc, cp = self.n_subcarriers, self.cp_len
         blk = nsc + cp
         x = np.asarray(baseband, dtype=complex).ravel()
@@ -300,12 +331,15 @@ class OFDMReceiver:
                 "the 0.5 plateau threshold, so no preamble was found; decoding "
                 "from sample 0 with cfo=0. The returned bits are not frame-"
                 "aligned and carry no indication of that.",
-                UserWarning, stacklevel=2)
+                UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
             start = 0
         x = apply_cfo(x[start:], cfo)
         nblocks = x.size // blk
         if nblocks < 3:
-            raise ConfigurationError("OFDMReceiver: frame too short (need preamble+pilot+data)")
+            raise ConfigurationError(
+                "OFDMReceiver: frame too short (need preamble+pilot+data); "
+                f"got {nblocks} block(s) of {blk} samples from {x.size} "
+                f"samples, need >= 3")
 
         def block_spectrum(b):
             """FFT of OFDM block ``b`` (cyclic prefix removed)."""

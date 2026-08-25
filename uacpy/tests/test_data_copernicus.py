@@ -366,3 +366,106 @@ def test_assemble_range_dependent_aggregates_provenance():
                               data_sources=(p,)) for p in provs]
     out = assemble_range_dependent(cols, [0.0, 1000.0, 2000.0])
     assert [p.source.id for p in out.data_sources] == ['copernicus', 'woa23']
+
+
+def _install_operational_dataset(monkeypatch, ds):
+    """Route the copernicusmarine open through a synthetic xarray dataset."""
+    monkeypatch.setattr(copernicus, '_import_copernicusmarine', lambda: None)
+    monkeypatch.setattr(copernicus, '_open_dataset',
+                        lambda marine, dataset_id, **kw: ds)
+
+
+def _metocean_coords():
+    """0.25-degree axes over 30-31N, 41-40W with a single 2020-06-15 step."""
+    return (np.array(['2020-06-15'], dtype='datetime64[ns]'),
+            np.arange(30.0, 31.001, 0.25),
+            np.arange(-41.0, -39.999, 0.25))
+
+
+def _wave_xr_dataset():
+    xr = pytest.importorskip('xarray')
+    time, lat, lon = _metocean_coords()
+    dims = ('time', 'latitude', 'longitude')
+    coords = {'time': time, 'latitude': lat, 'longitude': lon}
+    shape = (time.size, lat.size, lon.size)
+    return xr.Dataset({
+        copernicus.WAVE_HS_VAR: xr.DataArray(np.full(shape, 2.5),
+                                             dims=dims, coords=coords),
+        copernicus.WAVE_TP_VAR: xr.DataArray(np.full(shape, 9.0),
+                                             dims=dims, coords=coords),
+    })
+
+
+def _bgc_xr_dataset():
+    xr = pytest.importorskip('xarray')
+    time, lat, lon = _metocean_coords()
+    depth = np.array([0.0, 100.0])
+    dims = ('time', 'depth', 'latitude', 'longitude')
+    coords = {'time': time, 'depth': depth, 'latitude': lat, 'longitude': lon}
+    shape = (time.size, depth.size, lat.size, lon.size)
+    return xr.Dataset({
+        copernicus.BGC_PH_VAR: xr.DataArray(np.full(shape, 8.05),
+                                            dims=dims, coords=coords),
+    })
+
+
+def test_fetch_waves_operational_accepts_a_point_inside_the_domain(
+        monkeypatch):
+    _install_operational_dataset(monkeypatch, _wave_xr_dataset())
+    out = copernicus.fetch_waves_operational((30.4, -40.4), date='2020-06-15')
+    assert out['hs'] == pytest.approx(2.5)
+    assert out['tp'] == pytest.approx(9.0)
+
+
+def test_fetch_waves_operational_rejects_a_point_outside_the_domain(
+        monkeypatch):
+    _install_operational_dataset(monkeypatch, _wave_xr_dataset())
+    with pytest.raises(DataFetchError, match='spatial domain'):
+        copernicus.fetch_waves_operational((45.0, -40.4), date='2020-06-15')
+
+
+def test_fetch_ph_operational_accepts_a_point_inside_the_domain(monkeypatch):
+    _install_operational_dataset(monkeypatch, _bgc_xr_dataset())
+    ph = copernicus.fetch_ph_operational((30.4, -40.4), date='2020-06-15')
+    assert ph == pytest.approx(8.05)
+
+
+def test_fetch_ph_operational_rejects_a_point_outside_the_domain(monkeypatch):
+    _install_operational_dataset(monkeypatch, _bgc_xr_dataset())
+    with pytest.raises(DataFetchError, match='spatial domain'):
+        copernicus.fetch_ph_operational((30.4, -10.0), date='2020-06-15')
+
+
+def _regional_xr_dataset():
+    """A 0.25-degree regional T/S dataset over 30-31N, 41-40W."""
+    xr = pytest.importorskip('xarray')
+    lat = np.arange(30.0, 31.001, 0.25)
+    lon = np.arange(-41.0, -39.999, 0.25)
+    depth = np.array([0.0, 100.0])
+    dims = ('depth', 'latitude', 'longitude')
+    coords = {'depth': depth, 'latitude': lat, 'longitude': lon}
+    shape = (depth.size, lat.size, lon.size)
+    return xr.Dataset({
+        'thetao': xr.DataArray(np.full(shape, 15.0), dims=dims, coords=coords),
+        'so': xr.DataArray(np.full(shape, 35.0), dims=dims, coords=coords),
+    })
+
+
+def test_extract_ts_accepts_a_point_inside_the_domain():
+    ds = _regional_xr_dataset()
+    z, t, s, actual = copernicus._extract_ts(ds, 30.4, -40.4, None)
+    assert z.tolist() == [0.0, 100.0]
+    assert t.tolist() == [15.0, 15.0]
+    assert actual['point'] == pytest.approx((30.5, -40.5))
+
+
+def test_extract_ts_rejects_a_point_outside_the_domain():
+    ds = _regional_xr_dataset()
+    with pytest.raises(DataFetchError, match='outside the dataset'):
+        copernicus._extract_ts(ds, 45.0, -40.4, None)
+
+
+def test_extract_ts_rejects_a_longitude_outside_the_domain():
+    ds = _regional_xr_dataset()
+    with pytest.raises(DataFetchError, match='longitude'):
+        copernicus._extract_ts(ds, 30.4, -10.0, None)

@@ -47,17 +47,20 @@ FEATURES DEMONSTRATED:
 """
 
 import sys
-import os
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt  # noqa: E402
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-
+import os  # noqa: E402
 from pathlib import Path  # noqa: E402
-OUTPUT_DIR = Path(__file__).parent / 'output'
-OUTPUT_DIR.mkdir(exist_ok=True)
+
+# Repo root, so ``import uacpy`` resolves from a source checkout.
+sys.path.insert(0, str(Path(__file__).parents[2]))
+
+OUTPUT_DIR = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
+                  or Path(__file__).parent / 'output')
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 import uacpy  # noqa: E402
 from uacpy.core.environment import BoundaryProperties  # noqa: E402

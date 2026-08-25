@@ -32,12 +32,14 @@ from uacpy.models.base import DEFAULT_COLLAPSE, RunMode
 # Two patterns explain the shape of this table. ``bottom_range: 'median'``
 # appears for every model except Bellhop and RAM — the two that declare
 # ``_supports_range_dependent_bottom`` and so never collapse the range axis at
-# all. ``ssp: 'mean'`` is absent for OASR and Bounce because both return a
-# reflection coefficient rather than a field: only the bottom stack feeds the
-# answer, so the global ``'r0'`` stands.
+# all. ``ssp: 'mean'`` is absent wherever ``collapse['ssp']`` cannot reach the
+# answer, so the global ``'r0'`` stands: OASR and Bounce return a reflection
+# coefficient off the bottom stack rather than a field, and Kraken declares
+# ``range_dependent_ssp``, which is exactly the condition under which
+# ``_project_environment``'s SSP-collapse branch does not run.
 _PER_MODEL_DEFAULTS = [
     ('Bellhop',     {}),
-    ('Kraken',      {'ssp': 'mean', 'bottom_range': 'median'}),
+    ('Kraken',      {'bottom_range': 'median'}),
     ('Scooter',     {'ssp': 'mean', 'bottom_range': 'median'}),
     ('SPARC',       {'ssp': 'mean', 'bottom_range': 'median'}),
     ('OAST',        {'ssp': 'mean', 'bottom_range': 'median'}),
@@ -121,7 +123,17 @@ def _bare_model_factory(supports_layered: bool):
     """Build a minimal subclass that doesn't spawn any binary."""
     from uacpy.models.base import PropagationModel
 
+    from uacpy.models.base import ModelSpec, RunMode
+
     class _Bare(PropagationModel):
+        # ``spec`` and ``source`` are required of any subclass that defines
+        # run(); this double spawns no binary, so the source id only has to
+        # be a real one — 'acoustics_toolbox' is unrestricted, so nothing
+        # here emits a licence warning. ``_supports_layered_bottom`` is set
+        # per-instance below, after the spec has been applied.
+        spec = ModelSpec(modes=(RunMode.COHERENT_TL,))
+        source = 'acoustics_toolbox'
+
         def __init__(self, **kw):
             super().__init__(**kw)
             self._supports_layered_bottom = supports_layered
@@ -228,10 +240,12 @@ def test_bellhop_rd_ssp_uses_collapse_policy():
 @pytest.mark.requires_binary  # constructs Bellhop
 def test_has_elastic_bottom_is_true_when_any_range_has_shear():
     """``env.has_elastic_bottom`` is true when ``shear_speed`` is non-zero at
-    *any* range, not only at r=0 — it is one of the two predicates
-    ``Bellhop._maybe_route_through_bounce`` ORs together to auto-route through
-    BOUNCE (``models/bellhop.py:718-720``). Asserted on the env API rather
-    than through a run, so nothing here proves the route fires."""
+    *any* range, not only at r=0. ``Bellhop._maybe_route_through_bounce``
+    gates the auto-route on ``env.bottom.is_layered`` alone and reads
+    ``has_elastic_bottom`` only to name the bottom in the warning it raises,
+    so a shear speed that appears first at r>0 decides what the user is told
+    the route is for. Asserted on the env API rather than through a run, so
+    nothing here proves the route fires."""
     from uacpy.models import Bellhop
     rd = Bottom.from_halfspaces(np.array([0.0, 5000.0, 10000.0]),
         sound_speed=np.array([1600.0, 1650.0, 1700.0]),
@@ -245,8 +259,6 @@ def test_has_elastic_bottom_is_true_when_any_range_has_shear():
     # Don't actually run BOUNCE — just confirm the predicate fires.
     bh = Bellhop(verbose=False)
     assert bh._supports_range_dependent_bottom is True  # fluid-RD is native
-    # The auto-route trigger inside Bellhop.run reads env.has_elastic_bottom
-    # — assert directly on the env API to avoid binary execution.
 
 
 # ---------------------------------------------------------------------

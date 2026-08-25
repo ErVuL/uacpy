@@ -4,6 +4,7 @@ import pytest
 import numpy as np
 
 from uacpy.core.environment import SoundSpeedProfile
+from uacpy.core.exceptions import ConfigurationError
 from uacpy import Field
 from uacpy.models import Bellhop
 from uacpy.core import Environment, Receiver, Source
@@ -120,3 +121,40 @@ class TestSSPInterpolationMethods:
         # proves the TopOpt letter reached the binary; 0.1 dB keeps the
         # assertion above numeric trivia.
         assert np.max(np.abs(tl['linear'][both] - tl['cubic'][both])) > 0.1
+
+
+class TestExtendToTargetMustBeBelowTheProfileStart:
+    """``extend_to`` returns a profile whose deepest sample sits exactly
+    at the target, so a target at or above ``depths[0]`` (outside the
+    reader-epsilon snap windows) leaves no sample to keep and raises —
+    previously a 1-point profile silently moved its only sample and a
+    negative target was accepted."""
+
+    def test_a_negative_target_on_a_1_point_profile_raises(self):
+        ssp = SoundSpeedProfile(depths=[5.0], data=[1500.0])
+        with pytest.raises(ConfigurationError,
+                           match="not below the profile's first sample"):
+            ssp.extend_to(-10.0)
+
+    def test_a_target_at_the_first_sample_raises(self):
+        with pytest.raises(ConfigurationError,
+                           match="not below the profile's first sample"):
+            _profile_1d().extend_to(0.0)
+
+    @pytest.mark.parametrize('target', [np.nan, np.inf, -np.inf])
+    def test_a_non_finite_target_raises(self, target):
+        with pytest.raises(ConfigurationError,
+                           match="not a finite depth"):
+            _profile_1d().extend_to(target)
+
+    def test_deepening_appends_and_truncation_interpolates(self):
+        deeper = _profile_1d().extend_to(150.0)
+        assert deeper.n_depths == 3
+        assert float(deeper.depths[-1]) == pytest.approx(150.0)
+        shallower = _profile_1d().extend_to(50.0)
+        assert float(shallower.depths[-1]) == pytest.approx(50.0)
+        assert shallower.data[-1, 0] == pytest.approx(1495.0)
+
+
+def _profile_1d():
+    return SoundSpeedProfile.from_pairs([[0.0, 1500.0], [100.0, 1490.0]])

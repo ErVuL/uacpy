@@ -99,7 +99,7 @@ def write_inpe(
         Sediment attenuation in dB/wavelength, shape (nzs,). Enters the
         sediment wavenumber as ``k = (omega/c)(1 + i*eta*attn)`` with
         ``eta = 1/(40*pi*log10(e))`` — the dB/wavelength-to-nepers factor
-        (``mpiramS/src/ram.f90:276``, ``:348``).
+        (``mpiramS/src/ram.f90:289``, ``:361``).
     isedrd : int, optional
         Range-dependent sediment flag. 0=range-independent (default),
         1=range-dependent from external file.
@@ -128,10 +128,10 @@ def write_inpe(
     # RAM wrapper always passes arrays built from env.bottom. ``profl`` puts
     # control point 1 at the sea surface, point 2 at the seafloor, points
     # 3..nzs-1 through the sediment and point nzs on the domain floor
-    # (mpiramS/src/ram.f90:321-329 — uacpy's own rewrite of ``profl``, see
+    # (mpiramS/src/ram.f90:334-342 — uacpy's own rewrite of ``profl``, see
     # MODIFICATIONS.md, so it defines what this build expects and is no
     # authority on the physics). ``cs`` is added to the water profile at
-    # :333, so this is water speed down to the seafloor and +200 m/s below
+    # :346, so this is water speed down to the seafloor and +200 m/s below
     # it, with a raised attenuation on the floor point that damps the
     # absorbing layer.
     if cs is None:
@@ -142,6 +142,18 @@ def write_inpe(
     if attn is None:
         attn = np.full(nzs, 0.5)
         attn[-1] = 5.0
+
+    if isedrd != 1:
+        for name, row in (('cs', cs), ('rho', rho), ('attn', attn)):
+            n_row = len(np.atleast_1d(np.asarray(row)))
+            if n_row != int(nzs):
+                raise ConfigurationError(
+                    f"write_inpe: nzs={int(nzs)} but the {name} row holds "
+                    f"{n_row} value(s). peramx.f90:143-145 reads exactly "
+                    f"nzs values per row, so a longer row is truncated "
+                    f"without a diagnostic and a shorter one runs the "
+                    f"read off the end of the deck."
+                )
 
     with open(filepath, 'w') as f:
         # Dummy line, read and discarded at peramx.f90:74. It has to carry a
@@ -166,7 +178,18 @@ def write_inpe(
         # so this writer is what pins it to 'ranges.dat'. Keep in sync with
         # :func:`write_ranges_file`.
         f.write("ranges.dat\n")
-        # Bottom properties
+        # Bottom properties. ``peramx.f90:143-145`` reads the three sediment
+        # rows as ``read (nunit,*) (cs(jj,1), jj=1,nzs)`` — a list-directed
+        # read of exactly ``nzs`` values, which stops mid-record and discards
+        # the rest. A row longer than ``nzs`` is therefore truncated in
+        # silence, taking the absorbing-layer attenuation that lives at the
+        # end of it with it: measured with nzs=5 against 10-element rows,
+        # s_mpiram exits 0, echoes "Sediment speed (cs): 0.00 0.00 200.00
+        # 200.00 200.00", and the water-column TL moves by a median 0.82 dB /
+        # max 29.5 dB against the deck that honours all ten. The mirror case
+        # (nzs larger than the rows) is loud — "End of file", exit 2 — so only
+        # the truncating direction needs catching. Same guard as
+        # :func:`write_bth_file`.
         f.write(f"{sedlayer}\n")
         f.write(f"{int(nzs)}\n")
         f.write(f"{int(isedrd)}\n")
@@ -186,6 +209,7 @@ def write_sediment_file(
     cs_profiles: np.ndarray,
     rho_profiles: np.ndarray,
     attn_profiles: np.ndarray,
+    nzs: Optional[int] = None,
 ):
     """
     Write range-dependent sediment profile file for mpiramS.
@@ -208,9 +232,29 @@ def write_sediment_file(
         Density profiles, shape (nzs, N).
     attn_profiles : ndarray
         Attenuation profiles, shape (nzs, N).
+    nzs : int, optional
+        The ``nzs`` written into the ``.inpe`` deck by :func:`write_inpe`.
+        When given, every profile row is checked against it: ``peramx.f90:
+        133-135`` reads each row as ``read (nunit,*) (cs(jj,1), jj=1,nzs)``, a
+        list-directed read of exactly ``nzs`` values, so a longer row is
+        truncated with no diagnostic. Omitting it trusts the caller to keep
+        the two decks consistent, which is what ``models/ram.py`` does by
+        building both from one plan.
     """
     ranges_km = m_to_km(ranges_m)
     n_profiles = len(ranges_km)
+
+    if nzs is not None:
+        for name, arr in (('cs', cs_profiles), ('rho', rho_profiles),
+                          ('attn', attn_profiles)):
+            n_row = int(np.asarray(arr).shape[0])
+            if n_row != int(nzs):
+                raise ConfigurationError(
+                    f"write_sediment_file: the deck declares nzs={int(nzs)} "
+                    f"but {name}_profiles holds {n_row} depth point(s). "
+                    f"peramx.f90:133-135 reads exactly nzs values per row, so "
+                    f"a longer row is truncated without a diagnostic."
+                )
 
     # peramx.f90:120-123 counts profiles by testing the first token of every
     # record for < 0 (the "-1 range" header sentinel); a data row whose first
@@ -261,16 +305,18 @@ def write_ssp_file(
     filepath : str or Path
         Output file path
     depths : ndarray
-        Depth points (m), shape (nz,)
+        Depth points (m), shape (nz,). Must be non-negative — see below.
     speeds : ndarray
         Sound speed values. Either 1D (nz,) for range-independent,
         or 2D (nz, n_profiles) for range-dependent.
     ranges_m : ndarray, optional
         Range of each profile in metres, converted to the km the
         ``.ssp`` format expects at this boundary. Required if speeds
-        is 2D. If None and speeds is 1D, writes a single profile at 0.
+        is 2D, and must hold one range per profile. If None and speeds
+        is 1D, writes a single profile at 0.
     """
     depths = np.asarray(depths)
+    speeds = np.asarray(speeds)
 
     if speeds.ndim == 1:
         # Range-independent: single profile
@@ -281,7 +327,32 @@ def write_ssp_file(
         n_profiles = speeds.shape[1]
         if ranges_m is None:
             raise ConfigurationError("ranges_m required for range-dependent SSP")
+        ranges_m = np.asarray(ranges_m)
+        if ranges_m.size != n_profiles:
+            raise ConfigurationError(
+                f"write_ssp_file: ranges_m holds {ranges_m.size} range(s) but "
+                f"speeds declares {n_profiles} profile(s); the two are written "
+                f"as one header per profile, so a mismatch either indexes past "
+                f"the range vector or silently drops the trailing profiles."
+            )
         ranges_km = m_to_km(ranges_m)
+
+    # peramx.f90:220-224 makes both counts from the sign of each record's first
+    # token: a first token < 0 is the "-1 range" profile header, and only the
+    # non-negative ones inside the first profile are counted as depths. A
+    # negative depth is therefore counted as a profile AND missed as a depth,
+    # so the second read pass walks records the file does not have.
+    depth_values = np.asarray(depths, dtype=float)
+    if np.any(depth_values < 0):
+        raise ConfigurationError(
+            f"mpiramS SSP file: {int(np.count_nonzero(depth_values < 0))} of "
+            f"{depth_values.size} depth point(s) are negative (min "
+            f"{float(depth_values.min()):g}), and the binary's counter reads a "
+            f"negative first column as a '-1 range' profile-header sentinel "
+            f"(peramx.f90:220-224) — inflating the profile count and deflating "
+            f"the depth count. The deck cannot express it.",
+            remediation="Give depths as non-negative metres below the surface.",
+        )
 
     with open(filepath, 'w') as f:
         for ip in range(n_profiles):

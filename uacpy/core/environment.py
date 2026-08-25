@@ -12,6 +12,7 @@ import numpy as np
 from typing import TYPE_CHECKING, Union, List, Tuple, Optional
 
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core._carrier_validate import _sanitize_title, _dedupe_provenance
 from uacpy.core.bottom import (
     SedimentLayer, BoundaryProperties, SeabedColumn, Bottom,
@@ -28,7 +29,12 @@ if TYPE_CHECKING:
 def _coerce_coordinate(value, label):
     """Validate a ``(lat, lon)`` pair (decimal degrees, WGS84) → ``(float,
     float)``. Used for the optional geolocation an :class:`Environment`
-    carries (e.g. stamped by ``uacpy.data.fetch_environment``)."""
+    carries (e.g. stamped by ``uacpy.data.fetch_environment``).
+
+    Longitude accepts either sign convention up to one full wrap
+    (``|lon| <= 360``); a value already in ``[-180, 180)`` is stored exactly
+    as given, anything else is wrapped into that interval, so e.g. 250°E
+    stores as -110."""
     try:
         lat, lon = float(value[0]), float(value[1])
     except (TypeError, ValueError, IndexError, KeyError):
@@ -40,6 +46,15 @@ def _coerce_coordinate(value, label):
     if not -90.0 <= lat <= 90.0:
         raise ConfigurationError(
             f"Environment: {label} latitude must be in [-90, 90]; got {lat}.")
+    if not -360.0 <= lon <= 360.0:
+        raise ConfigurationError(
+            f"Environment: {label} longitude must be in [-360, 360]; "
+            f"got {lon}.")
+    if not -180.0 <= lon < 180.0:
+        # Wrap only out-of-interval values: the modulo arithmetic is not
+        # bit-exact (-6.2 would come back -6.199999999999989), and a stored
+        # coordinate must compare equal to the pair the caller passed.
+        lon = ((lon + 180.0) % 360.0) - 180.0
     return (lat, lon)
 
 
@@ -293,6 +308,12 @@ class Environment:
             return Bottom.from_column(bottom)
         if isinstance(bottom, BoundaryProperties):
             return Bottom.from_halfspace(bottom)
+        if isinstance(bottom, (bool, np.bool_)):
+            raise ConfigurationError(
+                f"Environment: bottom={bottom!r} is a bool, not a scalar "
+                f"sound speed — as a scalar it would mean a {float(bottom):g} "
+                f"m/s half-space."
+            )
         if isinstance(bottom, (int, float, np.integer, np.floating)):
             # Explicit type: a scalar always means "half-space at this cp" —
             # never let inference see it (a bare 1600.0 equals the resolved
@@ -306,15 +327,21 @@ class Environment:
             "BoundaryProperties, a scalar sound speed (m/s), or a material "
             f"preset name; got {type(bottom).__name__}")
 
-    def plot(self, **kwargs):
+    def plot(self, ax=None, **kwargs):
         """Plot the water column + seafloor cross-section.
 
         Water column (SSP) + seafloor cross-section, with optional
         ``source=`` / ``receiver=`` markers. The carrier counterpart of
         :meth:`Result.plot` — any uacpy object you plot on its own has
-        ``.plot()``. ``kwargs`` are forwarded to the renderer."""
+        ``.plot()``. ``ax`` draws into an existing Axes, spelled the way every
+        other uacpy plot method spells it; the remaining ``kwargs`` are
+        forwarded to the renderer."""
+        # Deferred into the body: ``uacpy.visualization`` imports
+        # ``uacpy.core`` at module scope, so this line at file scope makes
+        # ``import uacpy`` raise ImportError. docs/DEV.md section 7 records
+        # the inversion.
         from uacpy.visualization.plots.environment import _plot_environment
-        return _plot_environment(self, **kwargs)
+        return _plot_environment(self, ax=ax, **kwargs)
 
     @property
     def depth(self) -> float:
@@ -363,7 +390,7 @@ class Environment:
                 f"get_sound_speed: depth(s) outside the profile "
                 f"[{float(z[0]):.1f}, {float(z[-1]):.1f}] m were "
                 f"constant-extrapolated to the nearest endpoint.",
-                UserWarning, stacklevel=2,
+                UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
             )
         return np.interp(d, z, slice_1d.data[:, 0])
 

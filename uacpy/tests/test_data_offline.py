@@ -1,5 +1,3 @@
-import warnings
-import datetime as _dt
 """Tests for the offline local-cache backend (uacpy.data._cache + readers).
 
 Builds a synthetic ``$UACPY_DATA_CACHE`` (tiny GEBCO/WOA23 NetCDF + sediment
@@ -8,7 +6,11 @@ CSVs) so the GEBCO/WOA23/DECK41 readers (``source='local'``) and a cache-first
 cache with no network. Skipped where netCDF4 is unavailable (the grids need it).
 """
 
+import datetime as _dt
+import os
+import pickle
 import re
+import warnings
 
 import numpy as np
 import pytest
@@ -36,14 +38,16 @@ def _write_emodnet(cache):
     there exercises the EMODnet-miss → grain-size fallthrough.
     """
     try:
-        import pickle
         import shapely
     except ImportError:                              # pragma: no cover
         return
     edir = cache / 'emodnet'; edir.mkdir(parents=True)
     poly = shapely.geometry.box(2.0, 54.0, 3.0, 56.0)       # lon0,lat0,lon1,lat1
-    with open(edir / 'seabed_substrate.pkl', 'wb') as fh:
-        pickle.dump({'codes': [2], 'wkb': [shapely.to_wkb(poly)]}, fh)
+    wkb = shapely.to_wkb(poly)
+    np.savez_compressed(edir / emodnet_local.INDEX_FILE,
+                        codes=np.asarray([2], dtype=np.int32),
+                        wkb=np.frombuffer(wkb, dtype=np.uint8),
+                        offsets=np.asarray([0, len(wkb)], dtype=np.int64))
 
 
 @pytest.fixture
@@ -292,6 +296,11 @@ def test_sediment_sample_and_bottom(cache):
 
 
 def test_sediment_deck41_lithology_path(cache):
+    # Also the far side of the grain-size preference: this point sits 1.37 km
+    # from the DECK41 'Sand' record and 138.74 km from the nearest grain-size
+    # sample, both inside the 250 km default reach. The class next door wins —
+    # preferring the measurement whatever the separation would answer from a
+    # different sediment province 101x farther away.
     bp = sediment_db.fetch_bottom_local((44.01, 8.01))
     assert bp.grain_size_phi == 1.5            # 'Sand' → ϕ 1.5
 
@@ -380,8 +389,8 @@ def test_cache_preset_never_hits_network(tmp_path, monkeypatch):
     assert env.bottom.columns[0].halfspace.density == pytest.approx(1.483, abs=1e-3)
 
 
-def test_pelagic_without_a_supplied_depth_still_needs_the_cache(tmp_path,
-                                                                monkeypatch):
+def test_pelagic_without_a_supplied_depth_needs_the_cache(tmp_path,
+                                                          monkeypatch):
     # The depth lookup is only skipped when the caller supplies one. Called
     # directly with cache_only and no depth=, pelagic must still fail fast on
     # the missing GEBCO cache rather than falling back to the live API.
@@ -600,7 +609,7 @@ class TestPelagicIsDeepSeaOnly:
     diatom ooze (phi 9.0, c 1494.9, rho 1.48) — identical to a 4800 m abyssal
     point — from a function whose own docstring says "deep-sea". It is the
     last fallback in the 'auto' chain and documented as never failing, so it
-    still returns a value; it just no longer does so silently."""
+    returns a value and warns rather than refusing."""
 
     @pytest.mark.parametrize('lat,depth', [(60.0, 80.0), (30.0, 80.0),
                                            (-65.0, 120.0)])
@@ -621,3 +630,204 @@ class TestPelagicIsDeepSeaOnly:
         with warnings.catch_warnings():
             warnings.simplefilter('error')
             assert pelagic_lithology(depth, lat) == expected
+
+
+class TestNpzReadsCloseTheirFile:
+    """**F24-9** — ``np.load`` without ``with`` leaked one descriptor per
+    failed read of the wind climatology, and the DataFetchError it raises
+    tells the user to delete and re-fetch, which invites the retry loop that
+    exhausts them. Measured 1 -> 5 over five attempts."""
+
+    def test_a_failed_climatology_read_leaks_no_descriptors(self, tmp_path):
+        from uacpy.data.wind_local import _Climatology
+
+        bad = tmp_path / 'wind_bad.npz'
+        np.savez(bad, lat=np.arange(3.0), lon=np.arange(3.0))  # no 'speed'
+
+        def open_count():
+            return len(os.listdir('/proc/self/fd'))
+
+        for _ in range(3):                      # warm the import/stat caches
+            with pytest.raises(Exception):
+                _Climatology(bad)
+        before = open_count()
+        for _ in range(5):
+            with pytest.raises(Exception):
+                _Climatology(bad)
+        assert open_count() == before
+
+
+def _write_gebco_like(path, elevation):
+    netCDF4 = pytest.importorskip('netCDF4')
+    lat = np.linspace(-2.0, 2.0, 5)
+    lon = np.linspace(-2.0, 2.0, 5)
+    ds = netCDF4.Dataset(path, 'w')
+    ds.createDimension('lat', lat.size)
+    ds.createDimension('lon', lon.size)
+    ds.createVariable('lat', 'f8', ('lat',))[:] = lat
+    ds.createVariable('lon', 'f8', ('lon',))[:] = lon
+    ds.createVariable('elevation', 'f4', ('lat', 'lon'))[:] = \
+        np.full((5, 5), elevation)
+    ds.close()
+
+
+def test_grid_samples_the_newest_cached_gebco_and_warns_naming_it(
+        tmp_path, monkeypatch):
+    root = tmp_path / 'gebco'
+    root.mkdir(parents=True)
+    _write_gebco_like(root / 'GEBCO_2024.nc', -1000.0)
+    _write_gebco_like(root / 'GEBCO_2025.nc', -2000.0)
+    monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path))
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter('always')
+        depth = gebco_local.point_depth((0.0, 0.0))
+    assert depth == 2000.0                       # the GEBCO_2025.nc value
+    hits = [w for w in rec if '2 grids' in str(w.message)]
+    assert len(hits) == 1
+    assert 'GEBCO_2025.nc' in str(hits[0].message)
+
+
+def test_grid_with_a_single_cached_gebco_does_not_warn(tmp_path, monkeypatch):
+    root = tmp_path / 'gebco'
+    root.mkdir(parents=True)
+    _write_gebco_like(root / 'GEBCO_2025.nc', -1500.0)
+    monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path))
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter('always')
+        depth = gebco_local.point_depth((0.0, 0.0))
+    assert depth == 1500.0
+    assert not [w for w in rec if 'grids are cached' in str(w.message)]
+
+
+def test_atomic_write_leaves_no_destination_on_an_interrupted_build(tmp_path):
+    """Ctrl-C mid-write must leave neither the destination nor the staging
+    file — the cache accepts any file that merely exists."""
+    out = tmp_path / 'index.pkl'
+    with pytest.raises(KeyboardInterrupt):
+        with _cache.atomic_write(out) as part:
+            part.write_bytes(b'half a pickle')
+            raise KeyboardInterrupt
+    assert not out.exists()
+    assert not (tmp_path / 'index.pkl.part').exists()
+    # The staging name is mkstemp's now, so naming one file cannot show the
+    # directory is clean: nothing at all may survive the interrupt.
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_atomic_write_publishes_only_on_success(tmp_path):
+    out = tmp_path / 'index.pkl'
+    with _cache.atomic_write(out) as part:
+        part.write_bytes(pickle.dumps({'codes': [2]}))
+    assert pickle.loads(out.read_bytes()) == {'codes': [2]}
+    assert not (tmp_path / 'index.pkl.part').exists()
+    assert list(tmp_path.iterdir()) == [out]
+
+
+@pytest.mark.parametrize('dataset, filename, module_name, reader_name', [
+    ('emodnet', 'seabed_substrate.npz', 'emodnet_local', '_index'),
+    ('seaice', 'seaice_climatology.npz', 'seaice_local', '_model'),
+    ('crust1', 'crust1.bnds', 'crust1_local', '_model'),
+])
+def test_a_truncated_cache_file_raises_the_layers_typed_error(
+        dataset, filename, module_name, reader_name, tmp_path, monkeypatch):
+    """``require`` only tests that the path exists, so a file truncated by an
+    interrupted install reaches the parser and fails with *its* exception —
+    numpy's ``ValueError`` on a headerless npz, ``UnicodeDecodeError`` on the
+    CRUST1 text — which the source-fallback chains do not catch."""
+    pytest.importorskip('shapely')
+    import importlib
+    module = importlib.import_module(f'uacpy.data.{module_name}')
+    root = tmp_path / 'data_cache'
+    (root / dataset).mkdir(parents=True)
+    (root / dataset / filename).write_bytes(b'\x80\x05\x95 truncated')
+    monkeypatch.setenv('UACPY_DATA_CACHE', str(root))
+    _cache.invalidate_grids()
+    with pytest.raises(DataFetchError, match='present but unreadable'):
+        getattr(module, reader_name)()
+    _cache.invalidate_grids()
+
+
+def test_a_corrupt_cache_lets_the_auto_bottom_chain_reach_its_terminus(
+        tmp_path, monkeypatch):
+    """``bottom_sources='auto'`` is documented never to fail: it ends at the
+    pelagic model. An untyped error from a corrupt cache aborted the chain at
+    its first source instead."""
+    pytest.importorskip('shapely')
+    from uacpy.data import environment as env_mod
+    root = tmp_path / 'data_cache'
+    (root / 'emodnet').mkdir(parents=True)
+    (root / 'emodnet' / 'seabed_substrate.npz').write_bytes(b'PK\x03\x04 cut')
+    monkeypatch.setenv('UACPY_DATA_CACHE', str(root))
+    _cache.invalidate_grids()
+    order, _ = env_mod._bottom_order('auto')
+    assert order[0] == 'emodnet'
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        _, source = env_mod._fetch_bottom(order, (54.0, 3.0), transect=False,
+                                          cache_only=True, depth=40.0)
+    assert source == 'pelagic'
+    _cache.invalidate_grids()
+
+
+@pytest.fixture
+def regional_grid(tmp_path):
+    """A 40-50 N, 10 W-0 grid: neither axis spans a full 360 deg."""
+    netCDF4 = pytest.importorskip('netCDF4')
+    from uacpy.data._netcdf import NetcdfGrid
+    path = tmp_path / 'regional.nc'
+    lat = np.arange(40.0, 50.1, 1.0)
+    lon = np.arange(-10.0, 0.1, 1.0)
+    ds = netCDF4.Dataset(path, 'w')
+    ds.createDimension('lat', lat.size)
+    ds.createDimension('lon', lon.size)
+    ds.createVariable('lat', 'f8', ('lat',))[:] = lat
+    ds.createVariable('lon', 'f8', ('lon',))[:] = lon
+    ds.createVariable('z', 'f4', ('lat', 'lon'))[:] = np.zeros(
+        (lat.size, lon.size))
+    ds.close()
+    grid = NetcdfGrid(path)
+    yield grid
+    grid.ds.close()
+
+
+def test_a_regional_grid_warns_outside_its_coverage(regional_grid):
+    with pytest.warns(UserWarning, match='outside this grid'):
+        assert regional_grid.row(60.0) == 10
+    with pytest.warns(UserWarning, match='outside this grid'):
+        assert regional_grid.col(20.0) == 10
+
+
+def test_a_regional_grid_is_silent_inside_its_coverage(regional_grid):
+    with warnings.catch_warnings():
+        warnings.simplefilter('error')
+        assert regional_grid.row(45.0) == 5
+        assert regional_grid.col(-5.0) == 5
+        # Half a step past the outermost node is still that node's cell.
+        assert regional_grid.row(50.4) == 10
+        assert regional_grid.col(-10.4) == 0
+
+
+class TestCorruptNetcdfCacheRaisesTheTypedError:
+    """The source-fallback chains catch ``DataFetchError`` and
+    ``ConfigurationError`` only, so a reader that lets netCDF4's bare
+    ``OSError`` escape aborts the chain — and ``'auto'``, documented never to
+    fail, never reaches its pelagic terminus. The five netCDF-backed readers
+    open through ``_cache.cached_grid_at``/``reading`` like the pickle- and
+    raster-backed ones, which covers the two largest and most
+    download-interruptible files in the cache (GEBCO 7.5 GB, WOA23 1.5 GB).
+    """
+
+    def test_an_unreadable_grid_file_is_a_data_fetch_error(self, tmp_path):
+        from uacpy.core.exceptions import DataFetchError
+        from uacpy.data import _cache
+        bad = tmp_path / 'broken.nc'
+        bad.write_bytes(b'not a netcdf file at all')
+        _cache.invalidate_grids()
+
+        def factory(path):
+            from uacpy.data._netcdf import open_netcdf
+            return open_netcdf(path)
+
+        with pytest.raises(DataFetchError, match='unreadable'):
+            _cache.cached_grid_at(bad, factory, 'test-grid')
+        _cache.invalidate_grids()

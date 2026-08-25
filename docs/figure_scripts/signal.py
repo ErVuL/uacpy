@@ -50,6 +50,7 @@ from uacpy.acoustic_signal import (
 )
 from uacpy.models import Bellhop, Kraken, RunMode
 from uacpy.visualization import draw_sound_cone, plot_band_levels, plot_psd
+from uacpy.visualization.plots._common import _cell_edge_extent, _flip_y
 
 # Write into docs/guide/figures/ rather than docs/models/figures/.
 GUIDE = True
@@ -237,8 +238,7 @@ def ambiguity_surfaces():
         delays, dop, chi = ambiguity_function(
             analytic_signal(sig), fs, doppler_hz=doppler)
         im = ax.imshow(_db(chi, floor=-30.0), aspect='auto', origin='lower',
-                       extent=[delays[0] * 1e3, delays[-1] * 1e3,
-                               dop[0], dop[-1]],
+                       extent=_cell_edge_extent(delays * 1e3, dop),
                        vmin=-30.0, vmax=0.0, cmap='viridis')
         ax.set_xlim(-6.0, 6.0)
         ax.set_xlabel('Delay τ (ms)')
@@ -382,18 +382,18 @@ def fk_round_trip():
 
     frequencies, wavenumbers, power, spectrum = fk_transform(gather, fs, dz)
     kk, ff = np.meshgrid(wavenumbers, frequencies)
-    # A linear event t = t0 + p*z maps to k = -2*pi*f*p, so the down-going half
-    # (p > 0, later at greater depth) is k < 0 for f > 0; muting the complement
+    # A linear event t = t0 + p*z maps to k = +2*pi*f*p, so the down-going half
+    # (p > 0, later at greater depth) is k > 0 for f > 0; muting the complement
     # keeps it.
     mask = np.ones_like(power)
-    mask[(ff > 0) & (kk > 0)] = 0.0
-    mask[(ff < 0) & (kk < 0)] = 0.0
+    mask[(ff > 0) & (kk < 0)] = 0.0
+    mask[(ff < 0) & (kk > 0)] = 0.0
     down = inverse_fk(spectrum * mask)
 
     def draw(ax, data, title):
         v = 0.3 * np.abs(gather).max()
         ax.imshow(data, aspect='auto', origin='upper', cmap='RdBu_r',
-                  extent=[depths[0], depths[-1], times[-1], times[0]],
+                  extent=_flip_y(_cell_edge_extent(depths, times)),
                   vmin=-v, vmax=v)
         ax.set_title(title, fontweight='bold', fontsize=10)
         ax.set_xlabel('Receiver depth (m)')
@@ -403,8 +403,7 @@ def fk_round_trip():
     draw(axes[0, 0], gather, 'Bellhop gather — 64-element vertical array, 1 km')
     ax = axes[0, 1]
     ax.imshow(_power_db(power, floor=-40.0), aspect='auto', origin='lower',
-              extent=[wavenumbers[0], wavenumbers[-1],
-                      frequencies[0], frequencies[-1]],
+              extent=_cell_edge_extent(wavenumbers, frequencies),
               vmin=-40.0, vmax=0.0, cmap='magma')
     draw_sound_cone(ax, frequencies[-1], wavenumbers[-1], 1500.0, color='#7fffd4')
     ax.axvspan(0.0, wavenumbers[-1], facecolor='w', alpha=0.22, hatch='//',

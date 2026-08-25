@@ -22,7 +22,9 @@ from uacpy.models.sparc import SPARC
 from uacpy.models.bounce import Bounce
 from uacpy.models.oases import OAST, OASN, OASR, OASP
 from uacpy.models.ram import RAM
-from uacpy.core.exceptions import ExecutableNotFoundError, ConfigurationError
+from uacpy.core.exceptions import (
+    ConfigurationError, ExecutableNotFoundError, UnsupportedFeatureError,
+)
 from uacpy.models.base import VALID_SOURCE_TYPES
 
 
@@ -152,7 +154,7 @@ def test_capability_flag(model_name, feature):
 # (source geometries the model honours, whether it reads a .sbp beam pattern).
 # Every entry is read off a default-constructed model. SPARC's is the only
 # instance-dependent one: ``SPARC(output_mode='S')`` widens it to all three
-# (``models/sparc.py:400-401``), so the ``{'point'}`` below pins the default
+# (``SPARC.__init__``), so the ``{'point'}`` below pins the default
 # ``output_mode='R'`` and nothing here covers the snapshot mode.
 _EXPECTED_SOURCE_TYPES = {
     'Bellhop': ({'point', 'line'}, True),
@@ -162,7 +164,10 @@ _EXPECTED_SOURCE_TYPES = {
     'Bounce':  ({'point', 'line', 'scaled'}, False),
     'OAST':    ({'point'}, False),
     'OASN':    ({'point'}, False),
-    'OASR':    ({'point'}, False),
+    # The one OASES class that widens past 'point': a plane-wave reflection
+    # coefficient does not depend on source geometry, and OASR's deck writer
+    # reads only source.frequencies — same reasoning as Bounce, same run mode.
+    'OASR':    ({'point', 'line', 'scaled'}, False),
     'OASP':    ({'point'}, False),
     'RAM':     ({'point'}, False),
 }
@@ -192,6 +197,45 @@ def test_source_capability_matrix(model_name):
     assert m._supports_source_beam_pattern is pattern
 
 
+def test_the_two_reflection_models_accept_the_same_source_types():
+    """``RunMode.REFLECTION`` is answered by Bounce and OASR, and neither
+    reads source geometry — Bounce says so in its spec comment and OASR's
+    deck writer reads only ``source.frequencies``. A ``Source`` that works on
+    one must work on the other, or reusing it across models breaks for a
+    reason no engine has."""
+    from uacpy.models.oases import OASR as _OASR
+    assert (set(_EXPECTED_SOURCE_TYPES['OASR'][0])
+            == set(_EXPECTED_SOURCE_TYPES['Bounce'][0]))
+    assert set(_OASR.spec.source_types) == set(Bounce.spec.source_types)
+
+
+@pytest.mark.requires_oases
+@pytest.mark.parametrize('source_type', ['point', 'line', 'scaled'])
+def test_oasr_returns_the_same_coefficient_for_every_source_type(source_type):
+    """And the acceptance is honest: the answer does not move, so widening
+    the declaration cannot have changed a number."""
+    try:
+        from uacpy.models.oases import OASR as _OASR
+        model = _OASR(verbose=False)
+    except ExecutableNotFoundError:
+        pytest.skip("OASR binary not available")
+    env = uacpy.Environment(
+        bathymetry=100.0, ssp=1500.0,
+        bottom=uacpy.BoundaryProperties(sound_speed=1700.0, density=1.7,
+                                        attenuation=0.5))
+    receiver = uacpy.Receiver(depths=[50.0], ranges=[1000.0])
+    reference = model.run(
+        env, uacpy.Source(depths=25.0, frequencies=100.0), receiver)
+    result = model.run(
+        env,
+        uacpy.Source(depths=25.0, frequencies=100.0, source_type=source_type),
+        receiver)
+    assert np.any(np.asarray(reference.R) != 0.0), (
+        "the reference coefficient is identically zero — this fixture cannot "
+        "tell an unchanged answer from an absent one")
+    assert np.array_equal(np.asarray(result.R), np.asarray(reference.R))
+
+
 def test_every_declared_source_type_is_valid():
     for types, _ in _EXPECTED_SOURCE_TYPES.values():
         assert types <= VALID_SOURCE_TYPES
@@ -200,7 +244,7 @@ def test_every_declared_source_type_is_valid():
 @pytest.mark.requires_binary
 def test_sparc_honours_no_source_geometry():
     # A source geometry is a weighting inside the wavenumber->range Hankel
-    # transform, and only the snapshot mode runs one (``models/sparc.py:775-779``
+    # transform, and only the snapshot mode runs one (``SPARC._run_snapshot``
     # hands ``source_type`` to ``sparc_snapshot_to_time_field``). The default
     # ``output_mode='R'`` and ``'D'`` are range- / depth-native and never
     # reach it, so they honour no geometry beyond a point source.
@@ -216,7 +260,7 @@ def test_unsupported_source_type_is_rejected():
         m = RAM()
     except ExecutableNotFoundError:
         pytest.skip("RAM binary not available")
-    with pytest.raises(ConfigurationError, match="source_type"):
+    with pytest.raises(UnsupportedFeatureError, match="source_type"):
         m.validate_inputs(
             _reference_environment(),
             uacpy.Source(depths=50, frequencies=100, source_type='line'),
@@ -239,6 +283,61 @@ def test_unsupported_beam_pattern_is_rejected():
         )
 
 
+class TestPublicEnvShapeAccessors:
+    """``supported_features`` / ``supports_feature`` are the env-shape twins
+    of ``supported_modes`` / ``supports_mode``.
+
+    They read the *instance* flags, which is the only place the answer is
+    right for a model that resolves a flag from its constructor arguments —
+    ``Bellhop`` declares no ``range_dependent_ssp`` in ``spec.supports`` and
+    carries it on every instance whose ``interp_ssp`` can express a 2-D
+    profile.
+    """
+
+    @pytest.mark.parametrize('model_name', _MODEL_PARAMS)
+    def test_the_accessors_agree_with_the_private_flags(self, model_name):
+        try:
+            m = _EXPECTED[model_name][0]()
+        except ExecutableNotFoundError:
+            pytest.skip(f"{model_name} binary not available")
+        from uacpy.models.base import _CAPABILITY_FLAGS
+        for name in _CAPABILITY_FLAGS:
+            assert m.supports_feature(name) is bool(
+                getattr(m, f'_supports_{name}'))
+        assert m.supported_features == sorted(
+            n for n in _CAPABILITY_FLAGS if getattr(m, f'_supports_{n}'))
+
+    def test_an_unknown_feature_name_raises_rather_than_answering_no(self):
+        """A typo answering ``False`` reads as a real "this model cannot do
+        it" — the failure this accessor exists to prevent."""
+        try:
+            m = Bellhop()
+        except ExecutableNotFoundError:
+            pytest.skip("Bellhop binary not available")
+        with pytest.raises(ValueError, match='unknown capability'):
+            m.supports_feature('range_dependant_ssp')
+
+    def test_a_known_name_next_to_the_typo_answers(self):
+        """The other side of the same check."""
+        try:
+            m = Bellhop()
+        except ExecutableNotFoundError:
+            pytest.skip("Bellhop binary not available")
+        assert m.supports_feature('range_dependent_ssp') is True
+
+    def test_the_accessor_is_instance_correct_where_the_spec_is_not(self):
+        """The case that motivates reading the instance: ``interp_ssp``
+        decides, and ``Bellhop.spec.supports`` cannot know it."""
+        try:
+            quad = Bellhop(interp_ssp='quad')
+            clinear = Bellhop(interp_ssp='c-linear')
+        except ExecutableNotFoundError:
+            pytest.skip("Bellhop binary not available")
+        assert 'range_dependent_ssp' not in Bellhop.spec.supports
+        assert quad.supports_feature('range_dependent_ssp') is True
+        assert clinear.supports_feature('range_dependent_ssp') is False
+
+
 _EXPECTED_ROUGH_SURFACE = {
     'Bellhop': False, 'Kraken': True, 'Scooter': True, 'SPARC': False,
     'Bounce': False, 'OAST': True, 'OASN': True,
@@ -257,9 +356,10 @@ def test_rough_surface_capability_matrix(model_name):
     ``Scooter/sparc.f90:177`` ERROUTs on any non-zero ``SSP%sigma(1:NMedia)``
     and ``Kraken/bounce.f90:104`` on a rough elastic interface, so those must
     not receive ``env.surface.roughness``; Kraken and Scooter consume it
-    (Kraken via the Kuperman-Ingenito perturbation, Scooter at
-    ``Scooter/scooter.f90:309``, where ``SSP%sigma(1)`` enters the
-    vacuum-boundary impedance). The OASES family reads it as column 7 (RG) of
+    (Kraken via the Kuperman-Ingenito perturbation, on any top boundary whose
+    ``Kraken/kraken.f90:850-867`` branch leaves ``rho1`` non-zero — 'A', 'V'
+    and 'R'; Scooter at ``Scooter/scooter.f90:309``, where ``SSP%sigma(1)``
+    enters the vacuum-boundary impedance). The OASES family reads it as column 7 (RG) of
     each layer record (``oases/src/oaseun31.f:54``,
     ``oases/doc/oast.tex:48``) — except OASR, whose deck has no sea surface
     at all (see the matrix entry).
@@ -318,6 +418,29 @@ def test_multi_source_depth_capability_matrix(model_name):
             is _EXPECTED_MULTI_SOURCE_DEPTH[model_name])
 
 
+@pytest.mark.parametrize('model_name', _MODEL_PARAMS)
+def test_a_multi_depth_source_raises_or_reaches_no_deck(model_name):
+    """What the flag costs a caller, per model.
+
+    Bellhop runs the grid. Bounce reads no source geometry and overrides
+    ``_validate_geometry`` to a no-op, so it accepts the extra depths and
+    they reach no deck. Every other model raises and names the loop the
+    caller has to write — nothing loops over source depths inside uacpy.
+    """
+    try:
+        m = _EXPECTED[model_name][0]()
+    except ExecutableNotFoundError:
+        pytest.skip(f"{model_name} binary not available")
+    source = uacpy.Source(depths=[30.0, 60.0], frequencies=100.0)
+    args = (_reference_environment(), source, _reference_receiver())
+    if model_name in ('Bellhop', 'Bounce'):
+        m.validate_inputs(*args)
+    else:
+        with pytest.raises(ConfigurationError,
+                           match='single source depth per run'):
+            m.validate_inputs(*args)
+
+
 _EXPECTED_ROUGH_BOTTOM = {
     'Bellhop': False, 'Kraken': True, 'Scooter': False, 'SPARC': False,
     'Bounce': False, 'OAST': True, 'OASN': True, 'OASR': True,
@@ -332,7 +455,7 @@ def test_rough_bottom_capability_matrix(model_name):
     Kraken does: ``Kraken/kraken.f90:902`` feeds ``SSP%sigma(Medium+1)`` to
     ``KupIng``, which at ``Medium == LastAcoustic`` is the seabed interface.
     Scooter does not — the writer puts the half-space sigma on the BotOpt line
-    (``io/oalib_writer.py:985`` → ``SSP%sigma(NMedia+1)``) and no line in
+    (``write_bottom_section`` → ``SSP%sigma(NMedia+1)``) and no line in
     ``Scooter/`` reads that slot, while a *layer* sigma lands in the
     ``sigma(2:NMedia)`` range that ``Scooter/scooter.f90:63`` ERROUTs on. The
     OASES family reads it as column 7 (RG) of each layer record
@@ -387,7 +510,8 @@ class TestRoughBottomCapability:
 
     def test_collapse_rebuilds_rather_than_shadowing(self):
         """Surface.roughness is served by __getattr__ delegation, so a plain
-        assignment would shadow it while properties[] kept the old value."""
+        assignment would shadow it while properties[] would keep the previous
+        value."""
         import uacpy
         env = uacpy.Environment(
             bathymetry=100.0, ssp=1500.0,
@@ -409,7 +533,7 @@ class TestRoughBottomCapability:
     def test_scooter_layer_roughness_is_collapsed_not_run(self):
         """A *layer* sigma is the fatal case, not merely the inert one.
 
-        ``io/oalib_writer.py:918`` writes it onto the layer's mesh line, i.e.
+        ``write_layer_sections`` writes it onto the layer's mesh line, i.e.
         ``SSP%sigma(2:NMedia)`` — the exact range ``Scooter/scooter.f90:63``
         stops the run on. Without the projection this raises
         ``ModelExecutionError('Rough interfaces not allowed')``.

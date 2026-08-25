@@ -6,6 +6,7 @@ import pytest
 from uacpy.core.environment import BoundaryProperties, Environment, SoundSpeedProfile
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.data import environment as env_mod
+from uacpy.data import seaice_local
 
 
 @pytest.fixture
@@ -65,6 +66,53 @@ def test_bottom_passthrough(stub_fetchers):
     env = env_mod.fetch_environment((43.2, 7.5), bottom=bp)
     # A bare BoundaryProperties is coerced into a Bottom, preserving the halfspace.
     assert env.bottom.columns[0].halfspace is bp
+
+
+def test_a_fetched_boundary_carries_its_roughness_through_the_literal(
+        stub_fetchers, monkeypatch):
+    """The route ``bottom=``'s docstring names for getting fetched geoacoustics
+    *and* a caller-chosen seabed roughness at a point. ``fetch_environment``
+    has no roughness knob of its own, so this is the only way to have both."""
+    fetched = BoundaryProperties(acoustic_type='half-space', sound_speed=1792.5,
+                                 density=2.014, roughness=0.5)
+    env = env_mod.fetch_environment((43.2, 7.5), bottom=fetched)
+    assert env.bottom.columns[0].halfspace.roughness == pytest.approx(0.5)
+    assert env.bottom.columns[0].halfspace.sound_speed == pytest.approx(1792.5)
+
+
+def test_a_resolving_bottom_source_discards_the_literals_roughness(
+        stub_fetchers, monkeypatch):
+    """The other half of the documented behaviour: the literal is a *fallback*,
+    so a resolving ``bottom_sources`` replaces it whole — roughness included.
+    That is why the route above names no ``bottom_sources``."""
+    monkeypatch.setattr(
+        env_mod, '_fetch_bottom',
+        lambda *a, **kw: (BoundaryProperties(acoustic_type='half-space',
+                                             sound_speed=1785.36, density=1.9),
+                          None))
+    fetched = BoundaryProperties(acoustic_type='half-space', sound_speed=1792.5,
+                                 density=2.014, roughness=0.5)
+    env = env_mod.fetch_environment((43.2, 7.5), bottom_sources='local',
+                                    bottom=fetched)
+    halfspace = env.bottom.columns[0].halfspace
+    assert halfspace.sound_speed == pytest.approx(1785.36)
+    assert not halfspace.roughness
+
+
+def test_a_range_dependent_bottom_literal_is_refused_by_type(stub_fetchers):
+    """The transect gap the ``bottom=`` docstring records: a
+    ``fetch_bottom_*_transect`` returns a ``Bottom``, which this function does
+    not take, so there is no roughness route at all on a transect."""
+    from uacpy.core.environment import Bottom, SeabedColumn
+
+    rd = Bottom.from_columns(
+        [SeabedColumn(layers=[], halfspace=BoundaryProperties(
+            acoustic_type='half-space', sound_speed=1700.0, density=1.8,
+            roughness=0.5)) for _ in range(2)],
+        ranges=np.array([0.0, 5000.0]))
+    with pytest.raises(ConfigurationError, match='got Bottom'):
+        env_mod.fetch_environment((43.2, 7.5), transect_to=(42.8, 8.1),
+                                  bottom=rd)
 
 
 def test_literal_ssp_skips_fetch(monkeypatch):
@@ -347,7 +395,7 @@ class TestWoaWetCellSearch:
         z, t, s, i, j = _nearest_wet_column(fetch, 10, n_lon - 1, '1.00')
         assert (i, j) == wet, "search must wrap across the antimeridian"
 
-    def test_land_locked_request_still_fails(self):
+    def test_land_locked_request_fails(self):
         import numpy as np
         from uacpy.data.sound_speed import _nearest_wet_column
         empty = (np.array([]), np.array([]), np.array([]))
@@ -467,7 +515,7 @@ class TestDeepSSPExtension:
             _w.simplefilter('error')
             extend_ssp_below_data(self._profile(), 5510.0)
 
-    def test_shallower_target_still_trims(self):
+    def test_shallower_target_trims(self):
         import warnings as _w
         from uacpy.data.sound_speed import extend_ssp_below_data
         with _w.catch_warnings():
@@ -475,7 +523,7 @@ class TestDeepSSPExtension:
             out = extend_ssp_below_data(self._profile(), 2000.0)
         assert float(np.asarray(out.depths)[-1]) == pytest.approx(2000.0)
 
-    def test_a_single_level_profile_still_extends(self):
+    def test_a_single_level_profile_extends(self):
         """The increment needs only the deepest sound speed, so a profile with
         no segment to measure is no longer a special case."""
         import warnings as _w
@@ -505,3 +553,78 @@ class TestDeepSSPExtension:
         assert (cold - 1551.05) - (warm - 1575.0) > 0.5, (
             f"increments {cold - 1551.05:.2f} and {warm - 1575.0:.2f} m/s — "
             f"dc/dz falls with temperature, so the colder column gains more")
+
+
+def test_empty_bottom_sources_raises_a_typed_error():
+    with pytest.raises(ConfigurationError, match='No data source was tried'):
+        env_mod._fetch_bottom((), transect=False)
+
+
+def _block_all_fetchers(monkeypatch):
+    """Replace every fetcher ``fetch_environment`` can reach with a recorder,
+    so a test can assert that a rejected call fetched nothing."""
+    calls = []
+
+    def _recorder(name):
+        def fn(*args, **kwargs):
+            calls.append(name)
+            raise AssertionError(f"{name} was called")
+        return fn
+
+    for mod, name in [(env_mod, 'fetch_bathy'),
+                      (env_mod, 'fetch_bathy_transect'),
+                      (env_mod, 'fetch_ssp'),
+                      (env_mod, 'fetch_ssp_transect'),
+                      (env_mod, '_fetch_ssp'),
+                      (env_mod, '_fetch_bottom'),
+                      (seaice_local, 'fetch_sea_ice_surface'),
+                      (seaice_local, 'sea_ice_surface_transect')]:
+        monkeypatch.setattr(mod, name, _recorder(f'{mod.__name__}.{name}'))
+    return calls
+
+
+@pytest.mark.parametrize('axis', ['ssp', 'bathymetry', 'bottom', 'surface'])
+def test_an_empty_sources_sequence_is_rejected_before_any_fetch(
+        axis, monkeypatch):
+    calls = _block_all_fetchers(monkeypatch)
+    kwargs = {f'{axis}_sources': ()}
+    with pytest.raises(ConfigurationError, match=f'{axis}_sources'):
+        env_mod.fetch_environment((43.0, 7.5), date='2024-06-01',
+                                      ssp=1500.0, bathymetry=200.0, **kwargs)
+    assert calls == []
+
+
+def test_an_empty_sources_list_is_rejected_like_an_empty_tuple(monkeypatch):
+    calls = _block_all_fetchers(monkeypatch)
+    with pytest.raises(ConfigurationError, match='selects no source'):
+        env_mod.fetch_environment((43.0, 7.5), ssp=1500.0,
+                                      bathymetry=200.0, bottom_sources=[])
+    assert calls == []
+
+
+def test_the_empty_sources_error_blames_the_sequence_not_the_local_preset(
+        monkeypatch):
+    _block_all_fetchers(monkeypatch)
+    with pytest.raises(ConfigurationError) as err:
+        env_mod.fetch_environment((43.0, 7.5), ssp_sources=())
+    assert 'selects no source' in err.value.message
+    assert 'at least one source' in err.value.remediation
+    # The diagnosis half must not claim a 'local' preset was passed; only
+    # the remediation offers 'local' as an alternative.
+    assert "'local'" not in err.value.message
+
+
+def test_empty_surface_sources_raise_instead_of_fetching_sea_ice(monkeypatch):
+    calls = _block_all_fetchers(monkeypatch)
+    with pytest.raises(ConfigurationError, match='surface_sources'):
+        env_mod.fetch_environment((85.0, 0.0), date='2024-03-01',
+                                      ssp=1450.0, bathymetry=500.0,
+                                      surface_sources=())
+    assert calls == []
+
+
+def test_a_preset_inside_a_source_sequence_says_presets_go_alone():
+    with pytest.raises(ConfigurationError, match='pass it alone'):
+        env_mod._axis_attempts(('local', 'woa23'),
+                                   env_mod._SSP_BACKENDS,
+                                   axis='ssp', cache_only=False)

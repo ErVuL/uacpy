@@ -18,7 +18,9 @@ import numpy as np
 import pytest
 
 import uacpy
-from uacpy.core.exceptions import ConfigurationError
+from uacpy.core.exceptions import (
+    ConfigurationError, UnsupportedFeatureError,
+)
 from uacpy.models.bellhop import Bellhop
 from uacpy.models.ram import RAM
 from uacpy.models.scooter import Scooter
@@ -931,8 +933,44 @@ class TestAxesMustSurviveTheDeckPrintResolution:
         assert DECK_DEPTH_RESOLUTION_M == 1e-6
         assert DECK_RANGE_RESOLUTION_M == 1e-3
 
+    def test_the_writer_prints_at_the_resolution_the_carriers_admit(self):
+        """The link the two numbers rest on, driven rather than restated.
+
+        The carriers admit a step of ``DECK_DEPTH_RESOLUTION_M`` because the
+        deck can print it; the writer's column format is what decides whether
+        it can. Both sides of that threshold: one resolution apart must give
+        two tokens, and anything below it must give one."""
+        from uacpy.core.constants import (DECK_AXIS_DECIMALS,
+                                          DECK_DEPTH_RESOLUTION_M,
+                                          DECK_RANGE_RESOLUTION_M)
+        from uacpy.io.oalib_writer import _DECK_DEPTH_FMT, DECK_RANGE_QUANTUM_M
+        from uacpy.io.units import m_to_km
+
+        def token(value, fmt):
+            return format(value, fmt)
+
+        depth = 100.0
+        assert (token(depth, _DECK_DEPTH_FMT)
+                != token(depth + DECK_DEPTH_RESOLUTION_M, _DECK_DEPTH_FMT))
+        assert (token(depth, _DECK_DEPTH_FMT)
+                == token(depth + DECK_DEPTH_RESOLUTION_M / 10.0,
+                         _DECK_DEPTH_FMT))
+
+        range_fmt = f'.{DECK_AXIS_DECIMALS}f'
+        r = 4000.0
+        assert (token(float(m_to_km(r)), range_fmt)
+                != token(float(m_to_km(r + DECK_RANGE_RESOLUTION_M)),
+                         range_fmt))
+        assert (token(float(m_to_km(r)), range_fmt)
+                == token(float(m_to_km(r + DECK_RANGE_RESOLUTION_M / 10.0)),
+                         range_fmt))
+
+        # The writer's own name for the range quantum is the carriers' number,
+        # not a second copy of it.
+        assert DECK_RANGE_QUANTUM_M == DECK_RANGE_RESOLUTION_M
+
     @pytest.mark.parametrize('axis', ['depths', 'ranges'])
-    def test_ordinary_axes_still_pass(self, axis):
+    def test_ordinary_axes_pass(self, axis):
         kw = {'depths': 50.0, 'ranges': np.linspace(500.0, 5000.0, 10)}
         if axis == 'depths':
             kw['depths'] = np.linspace(10.0, 90.0, 9)
@@ -983,7 +1021,7 @@ class TestExtendToUsesTheReadersOwnEpsilon:
         assert ssp.extend_to(base + delta) is ssp
 
     @pytest.mark.parametrize('delta', [2e-5, 1e-3, 6e-2])
-    def test_a_target_outside_the_epsilon_still_appends(self, delta):
+    def test_a_target_outside_the_epsilon_appends(self, delta):
         base = 42.299996
         out = self._profile(base).extend_to(base + delta)
         assert np.asarray(out.depths).size == 3
@@ -1004,7 +1042,7 @@ class TestExtendToUsesTheReadersOwnEpsilon:
         with pytest.raises(ConfigurationError, match='strictly increasing'):
             ssp.extend_to(9.999999)
 
-    def test_a_snap_inside_the_window_still_returns_a_valid_profile(self):
+    def test_a_snap_inside_the_window_returns_a_valid_profile(self):
         ssp = uacpy.core.SoundSpeedProfile.from_pairs(
             np.array([[0.0, 1500.0], [10.0, 1500.0], [10.000002, 1500.0]]))
         out = ssp.extend_to(10.00001)
@@ -1020,7 +1058,7 @@ class TestExtendToUsesTheReadersOwnEpsilon:
 
     @pytest.mark.requires_binary
     @pytest.mark.parametrize('depth', [87.499995, 1234.599995, 42.299996])
-    def test_the_broken_depths_now_run_end_to_end(self, depth):
+    def test_depths_inside_the_readers_window_run_end_to_end(self, depth):
         """These arrive naturally from a fetched bathymetry — about 1 in 8400
         arbitrary depths lands in the window."""
         from uacpy.models import Kraken, Scooter
@@ -1055,13 +1093,20 @@ def test_sparc_refuses_empty_wavenumber_loop():
 
 @pytest.mark.requires_binary  # constructs SPARC (resolves its binary)
 def test_sparc_refuses_inverted_pulse_band():
-    """f_min >= f_max makes Nk negative through the same sparc.f90:116
-    formula; the constructor names the cause instead."""
+    """f_min >= f_max makes Nk negative through the sparc.f90:116 formula
+    ``Nk = INT(1000·RMax·(kMax − kMin)/2π)``; the constructor names the cause
+    instead. A negative f_min is refused for the same reason.
+
+    ``f_min = 0`` is *not* refused: ``sparc.f90:114`` clamps the resulting
+    ``kMin`` to 1e-20 ("avoid a zero that would produce a divide check when
+    the phase speed is written"), so the binary runs that deck.
+    """
     from uacpy.models.sparc import SPARC
     with pytest.raises(ConfigurationError, match="f_min < f_max"):
         SPARC(f_min=200.0, f_max=50.0)
-    with pytest.raises(ConfigurationError, match="f_min > 0"):
-        SPARC(f_min=0.0)
+    with pytest.raises(ConfigurationError, match="f_min >= 0"):
+        SPARC(f_min=-1.0)
+    assert SPARC(f_min=0.0).f_min == 0.0
 
 
 @pytest.mark.requires_binary
@@ -1120,9 +1165,17 @@ def test_kraken_leaky_modes_keeps_c_high_verbatim():
 
 
 @pytest.mark.requires_binary  # constructs Kraken (resolves its binary)
-def test_kraken_top_reflection_file_keeps_surface_roughness(tmp_path):
-    """The tabulated-top rewrite replaces only the boundary condition;
-    roughness still reaches SSP%sigma(1) (oalib_writer.py:860)."""
+def test_kraken_top_reflection_file_carries_roughness_into_the_drop(tmp_path):
+    """The tabulated-top rewrite replaces only the boundary condition, and
+    carries the caller's roughness forward far enough for the tabulated-top
+    drop to name the value that was set.
+
+    ``Kraken/kraken.f90:864-866`` zeroes ``rho1``/``eta1Sq`` for a tabulated
+    top, so ``Kraken/Scattering.f90:23`` is false and the roughness in
+    ``SSP%sigma(1)`` never reaches the eigenvalue perturbation; the value is
+    reported and dropped instead of being written into a deck that discards
+    it. A rewrite that clobbered the roughness before the drop ran would warn
+    about 0 m, or not warn at all."""
     from uacpy.models.kraken import Kraken
     from uacpy.core.surface import Surface
     trc = tmp_path / 'top.trc'
@@ -1133,9 +1186,10 @@ def test_kraken_top_reflection_file_keeps_surface_roughness(tmp_path):
                                         attenuation=0.5),
         surface=Surface(properties=[uacpy.BoundaryProperties(
             acoustic_type='vacuum', roughness=1.5)]))
-    projected = Kraken(top_reflection_file=trc)._project_environment(env)
+    with pytest.warns(UserWarning, match=r'roughness=1\.5 m was dropped'):
+        projected = Kraken(top_reflection_file=trc)._project_environment(env)
     assert projected.surface.properties[0].acoustic_type == 'file'
-    assert float(projected.surface.roughness) == 1.5
+    assert float(projected.surface.roughness) == 0.0
 
 
 # --- shared carrier validators (uacpy/core/_carrier_validate.py) -----------
@@ -1187,6 +1241,64 @@ class TestValidatorMessagesStayBounded:
         msg = str(exc.value)
         assert len(msg) < 500
         assert "axis length 10000" in msg
+
+
+class TestAnEmptyAxisIsRefused:
+    """``_require_strictly_increasing`` guards every range / depth axis that
+    a deck writer indexes and an interpolator samples, and both read the axis
+    positionally: a zero-length one reaches them as a bare ``IndexError`` or
+    zero-size reduction. One sample is a legitimate axis and stays accepted.
+    """
+
+    def test_zero_samples_are_refused_and_one_sample_is_accepted(self):
+        from uacpy.core._carrier_validate import _require_strictly_increasing
+        with pytest.raises(ConfigurationError,
+                           match="at least one value") as exc:
+            _require_strictly_increasing(np.array([]), "X.ranges")
+        assert "X.ranges" in exc.value.remediation
+        _require_strictly_increasing(np.array([7.0]), "X.ranges")
+
+    def test_an_ssp_range_axis_of_zero_columns_is_refused(self):
+        """Measured entry point: this profile carries no sound speeds at all.
+        It reaches ``write_bellhop_env_file``'s ``ssp_matrix[:, 0]`` as an
+        ``IndexError`` naming no input the caller passed."""
+        with pytest.raises(ConfigurationError, match="at least one value"):
+            SoundSpeedProfile(depths=np.array([0.0, 200.0]),
+                              data=np.zeros((2, 0)), ranges=np.array([]))
+
+    @pytest.mark.parametrize('build', [
+        lambda: uacpy.Receiver(depths=[], ranges=[1000.0]),
+        lambda: uacpy.Receiver(depths=[10.0], ranges=[]),
+        lambda: uacpy.Source(depths=[], frequencies=[100.0]),
+        lambda: SoundSpeedProfile(depths=np.array([]), data=np.array([])),
+        lambda: SoundSpeedProfile(depths=np.array([0.0, 200.0]),
+                                  data=np.zeros((2, 0)), ranges=np.array([])),
+        lambda: Bottom(columns=[SeabedColumn(
+            layers=[], halfspace=BoundaryProperties(
+                acoustic_type='half-space', sound_speed=1600.0,
+                density=1.8, attenuation=0.5))], ranges=np.array([])),
+        lambda: uacpy.Bathymetry(ranges=np.array([]), depths=np.array([])),
+        lambda: uacpy.Altimetry(ranges=np.array([]), heights=np.array([])),
+    ])
+    def test_every_axis_carrier_refuses_an_empty_axis(self, build):
+        with pytest.raises(ConfigurationError):
+            build()
+
+    def test_the_value_predicates_accept_an_empty_array(self):
+        """The asymmetry is deliberate: ``_require_finite`` also guards
+        ``Field.coords``, where an axis sliced to nothing is a supported
+        state that ``Field.max`` reports in those terms."""
+        from uacpy.core._carrier_validate import (
+            _require_finite, _require_positive, _require_non_negative)
+        empty = np.array([])
+        _require_finite(empty, "X")
+        _require_positive(empty, "X")
+        _require_non_negative(empty, "X")
+        field = uacpy.Field(data=np.zeros((0,), dtype=complex),
+                            coords={'range': empty})
+        assert field.coords['range'].size == 0
+        with pytest.raises(ConfigurationError, match="sliced to nothing"):
+            field.max()
 
 
 def test_coerce_data_sources_none_is_empty_provenance():
@@ -1327,7 +1439,7 @@ def test_quad_interp_refused_before_launch(model_cls, mode):
     reader (``misc/sspMod.f90:61-89``) has no 'Q' code; it is Bellhop-only.
     Kraken's equivalent guard is pinned in test_kraken.py."""
     src = uacpy.Source(depths=10.0, frequencies=100.0)
-    with pytest.raises(ConfigurationError, match='Bellhop-only'):
+    with pytest.raises(UnsupportedFeatureError, match='Bellhop-only'):
         model_cls(interp_ssp='quad').run(_guard_env(), src, _guard_rcv())
 
 
@@ -1363,9 +1475,19 @@ def test_surface_source_is_silent_for_modes_and_reflection(model_cls, mode):
     """Mode shapes and reflection coefficients propagate no source field, so
     the z=0 surface-source warning is suppressed for
     ``RunMode.MODES``/``RunMode.REFLECTION`` (and Bounce validates no
-    geometry at all)."""
+    geometry at all).
+
+    Scoped to the surface-source phrase rather than erroring on every
+    ``UserWarning``. The blanket form also caught the OASES licence notice,
+    which ``PropagationModel`` deduplicates per PROCESS
+    (``_WARNED_MODEL_SOURCES``, ``models/base.py``), so the OASR case passed
+    only when some earlier test in the same worker had already consumed it —
+    green under the full suite, red whenever the selection changed.
+    """
     src = uacpy.Source(depths=0.0, frequencies=100.0)
-    with warnings.catch_warnings():
-        warnings.simplefilter('error', UserWarning)
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter('always')
         model_cls().validate_inputs(_guard_env(), src, _guard_rcv(),
                                     run_mode=mode)
+    assert [w for w in rec
+            if 'pressure-release sea surface' in str(w.message)] == []

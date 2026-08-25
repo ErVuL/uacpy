@@ -5,12 +5,15 @@ Source class for defining acoustic sources in underwater environments
 import copy as _copy
 import numpy as np
 from pathlib import Path
-from typing import Union, List, Optional
+from typing import TYPE_CHECKING, Union, List, Optional
 from dataclasses import dataclass
 
 from uacpy.core.exceptions import ConfigurationError
-from uacpy.core.constants import DECK_DEPTH_RESOLUTION_M
+from uacpy.core.constants import (
+    DECK_DEPTH_RESOLUTION_M, SBP_ANGLE_RESOLUTION_DEG,
+)
 from uacpy.core._carrier_validate import (
+    _reject_complex,
     _require_positive, _require_non_negative, _require_strictly_increasing,
 )
 
@@ -88,12 +91,34 @@ class Source:
     >>> source = Source(depths=[10, 20, 30], frequencies=200)
     """
 
-    depths: Union[float, List[float], np.ndarray]
-    frequencies: Union[float, List[float], np.ndarray]
+    depths: np.ndarray
+    frequencies: np.ndarray
     source_type: str = 'point'
     beam_pattern: Optional[Union[np.ndarray, str, Path]] = None
 
+    if TYPE_CHECKING:
+        # The two roles of a dataclass field annotation, separated: the
+        # attributes hold what ``__post_init__`` normalizes them to (float64
+        # ndarrays, as the Attributes section above says), while the
+        # constructor keeps taking the wide input union the Parameters
+        # section documents. Declaring both through the field annotation
+        # alone gives the union to every attribute read, so ``len(s.depths)``
+        # and ``s.depths.shape`` are reported as errors in downstream code
+        # that runs correctly. Never executed, so the decorator compiles the
+        # runtime ``__init__`` from the fields exactly as before.
+        def __init__(
+            self,
+            depths: Union[float, List[float], np.ndarray],
+            frequencies: Union[float, List[float], np.ndarray],
+            source_type: str = 'point',
+            beam_pattern: Optional[Union[np.ndarray, str, Path]] = None,
+        ) -> None: ...
+
     def __post_init__(self):
+        # Ahead of the float64 casts below, which discard an imaginary part —
+        # see _reject_complex for the two ways they do it.
+        _reject_complex(self.depths, "source depths")
+        _reject_complex(self.frequencies, "source frequencies")
         self.depths = np.atleast_1d(np.array(self.depths, dtype=np.float64))
         self.frequencies = np.atleast_1d(
             np.array(self.frequencies, dtype=np.float64))
@@ -146,8 +171,14 @@ class Source:
                                     "omnidirectional source, or give at least "
                                     "two angles spanning the launch fan.",
                     )
+                # The ``.sbp`` angle column's resolution, so a pattern that
+                # would collapse two angles into one token is refused here
+                # rather than at write. A step of exactly the resolution is
+                # refused here and accepted by ``write_source_beam_pattern``,
+                # which writes the two distinct tokens it produces.
                 _require_strictly_increasing(
-                    pattern[:, 0], "source beam-pattern angles")
+                    pattern[:, 0], "source beam-pattern angles",
+                    min_step=SBP_ANGLE_RESOLUTION_DEG, unit='deg')
                 self.beam_pattern = pattern
 
     @property
@@ -176,3 +207,16 @@ class Source:
     def copy(self):
         """Deep copy (symmetric with the other carriers)."""
         return _copy.deepcopy(self)
+
+# The dataclass compiles ``__init__`` from the *field* annotations, so
+# ``inspect.signature`` / ``help()`` would advertise a default the annotation
+# refuses (``depths: np.ndarray`` with no default is honest, but the two array
+# fields still advertise the narrow type to a caller passing a float). Restate the input types on the
+# generated ``__init__`` so the runtime signature says what the block above
+# and the Parameters section say. Annotations only: no default, no field and
+# no behaviour changes, and the class annotations — which are what an
+# attribute read is checked against — are untouched.
+Source.__init__.__annotations__.update(
+    depths=Union[float, List[float], np.ndarray],
+    frequencies=Union[float, List[float], np.ndarray],
+)

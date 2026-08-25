@@ -20,6 +20,7 @@ matplotlib/scipy are paid for only by code that actually uses them.
 """
 
 import importlib
+from typing import TYPE_CHECKING as _TYPE_CHECKING
 
 from uacpy._version import __version__
 __author__ = 'ErVuL'
@@ -98,6 +99,33 @@ _LAZY_ATTRS = {
     'plot_overview': ('uacpy.visualization.plots', 'plot_overview'),
     'compare_models': ('uacpy.visualization.plots', 'compare_models'),
 }
+
+
+if _TYPE_CHECKING:
+    # Static mirror of the two tables above, for PEP 561 consumers. The body
+    # never runs (``TYPE_CHECKING`` is False at runtime), so the PEP 562
+    # deferral above is untouched and nothing here is imported eagerly; it
+    # exists so a checker resolves ``uacpy.Bellhop`` to the class rather than
+    # to the ``ModuleType | Any`` union it infers from ``__getattr__``'s two
+    # return paths — which makes ``from uacpy import Bellhop; Bellhop()`` a
+    # hard pyright error on a py.typed package. Kept in step with the tables
+    # by ``test_every_lazy_name_is_statically_re_imported_for_type_checkers``.
+    from uacpy import (  # noqa: F401
+        acoustic_signal, comms, data, io, metrics, models, noise, parallel,
+        sonar, visualization,
+    )
+    from uacpy.visualization import plots as plot  # noqa: F401
+    from uacpy.models import (  # noqa: F401
+        Bellhop, Kraken, RAM, Scooter, SPARC, Bounce,
+        OAST, OASN, OASR, OASP, OASS, OASSP, OASES,
+    )
+    from uacpy.models.base import (  # noqa: F401
+        ModelSpec, PropagationModel, RunMode,
+    )
+    from uacpy.parallel import Job, ParallelResult, run_parallel  # noqa: F401
+    from uacpy.visualization.plots import (  # noqa: F401
+        compare_models, plot_field, plot_overview, plot_result,
+    )
 
 
 def __getattr__(name):

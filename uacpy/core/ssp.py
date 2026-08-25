@@ -14,7 +14,9 @@ from uacpy.core.constants import (DEFAULT_SOUND_SPEED,
                                   DECK_DEPTH_RESOLUTION_M,
                                   DECK_RANGE_RESOLUTION_M)
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core._carrier_validate import (
+    _reject_complex,
     _require_positive, _require_non_negative, _require_strictly_increasing,
     _coerce_data_sources,
 )
@@ -73,6 +75,10 @@ class SoundSpeedProfile:
         # forward; the fresh-construction classmethods do not.
         self.data_sources = _coerce_data_sources(
             self.data_sources, "SoundSpeedProfile")
+        # Ahead of the float64 casts below, which discard an imaginary part —
+        # see _reject_complex for the two ways they do it.
+        _reject_complex(self.depths, "SoundSpeedProfile.depths")
+        _reject_complex(self.data, "SoundSpeedProfile sound speeds")
         self.depths = np.array(self.depths, dtype=float).reshape(-1)
         self.data = np.array(self.data, dtype=float)
         if self.data.ndim == 1:
@@ -94,6 +100,7 @@ class SoundSpeedProfile:
         _require_strictly_increasing(self.depths, "SoundSpeedProfile.depths",
                                      min_step=DECK_DEPTH_RESOLUTION_M)
         if self.ranges is not None:
+            _reject_complex(self.ranges, "SoundSpeedProfile.ranges")
             self.ranges = np.array(self.ranges, dtype=float).reshape(-1)
             if self.ranges.size != self.data.shape[1]:
                 raise ConfigurationError(
@@ -148,14 +155,20 @@ class SoundSpeedProfile:
         bits.append(f"c=[{c_lo:g}, {c_hi:g}] m/s")
         return f"SoundSpeedProfile({', '.join(bits)})"
 
-    def plot(self, **kwargs):
+    def plot(self, ax=None, **kwargs):
         """Plot the sound-speed profile ``c(z)`` (depth increasing downward).
 
         The carrier counterpart of :meth:`Result.plot` — any uacpy object you
         plot on its own has ``.plot()``. A range-dependent profile draws one
-        line per range column. ``kwargs`` are forwarded to the renderer."""
+        line per range column. ``ax`` draws into an existing Axes, spelled the
+        way every other uacpy plot method spells it; the remaining ``kwargs``
+        are forwarded to the renderer."""
+        # Deferred into the body: ``uacpy.visualization`` imports
+        # ``uacpy.core`` at module scope, so this line at file scope makes
+        # ``import uacpy`` raise ImportError. docs/DEV.md section 7 records
+        # the inversion.
         from uacpy.visualization.plots.environment import _plot_ssp
-        return _plot_ssp(self, **kwargs)
+        return _plot_ssp(self, ax=ax, **kwargs)
 
     @property
     def is_range_dependent(self) -> bool:
@@ -262,7 +275,9 @@ class SoundSpeedProfile:
     def _slice(
         self, *, depth: Optional[float], range: Optional[float], interp: str,
     ) -> 'SoundSpeedProfile':
-        from uacpy.core._grid import collapse_axis, INTERP_METHODS
+        from uacpy.core._grid import (
+            collapse_axis, INTERP_METHODS, _as_finite_scalar_label,
+        )
         if interp not in INTERP_METHODS:
             raise ConfigurationError(
                 f"SoundSpeedProfile: interpolation method must be one of "
@@ -272,9 +287,14 @@ class SoundSpeedProfile:
         data = self.data
         if range is not None:
             if not self.is_range_dependent:
+                # Any range reads the single column, but the label contract
+                # (finite scalar) is the same one collapse_axis applies on
+                # the range-dependent path.
+                _as_finite_scalar_label(range, 'range')
                 col = data[:, 0]
             else:
-                col, _ = collapse_axis(data, self.ranges, range, interp, axis=1)
+                col, _ = collapse_axis(data, self.ranges, range, interp,
+                                       axis=1, name='range')
             data = col.reshape(-1, 1)
         if depth is None:
             if range is None:
@@ -282,7 +302,8 @@ class SoundSpeedProfile:
             return SoundSpeedProfile(
                 depths=self.depths.copy(), data=data.copy(),
                 ranges=None, shape=self.shape, data_sources=self.data_sources)
-        c, dv = collapse_axis(data[:, 0], self.depths, depth, interp, axis=0)
+        c, dv = collapse_axis(data[:, 0], self.depths, depth, interp,
+                              axis=0, name='depth')
         return SoundSpeedProfile(
             depths=np.array([float(dv)]), data=np.array([[float(c)]]),
             ranges=None, shape=self.shape, data_sources=self.data_sources)
@@ -353,15 +374,37 @@ class SoundSpeedProfile:
         * ``depth_max < depths[-1]`` — truncate samples below
           ``depth_max`` and interpolate a final sample exactly at
           ``depth_max`` so writers that require ``ssp[-1] == env.depth``
-          (Bellhop / Kraken) round-trip without manual alignment.
+          (Bellhop / Kraken) round-trip without manual alignment. When the
+          deepest surviving sample already sits within
+          ``AT_LAST_SSP_POINT_EPS_M`` of ``depth_max`` it is *moved* onto it
+          instead, for the reason the comment below gives.
+
+        ``depth_max`` must be a finite depth below the profile's first
+        sample (outside the epsilon windows above): the returned profile's
+        deepest sample sits exactly at ``depth_max``, so a target at or
+        above ``depths[0]`` would leave no sample to keep and raises
+        ``ConfigurationError``.
         """
+        try:
+            depth_max = float(depth_max)
+        except (TypeError, ValueError) as exc:
+            raise ConfigurationError(
+                f"SoundSpeedProfile.extend_to: depth_max={depth_max!r} is "
+                f"not a single depth in metres."
+            ) from exc
+        if not np.isfinite(depth_max):
+            raise ConfigurationError(
+                f"SoundSpeedProfile.extend_to: depth_max={depth_max!r} is "
+                f"not a finite depth, so no deepest sample can sit exactly "
+                f"at it."
+            )
         # ``misc/sspMod.f90:353`` ends a medium's SSP block at the first sample
         # within AT_LAST_SSP_POINT_EPS_M of the declared medium depth, so a second
         # sample inside that window is never read as an SSP row — the reader takes
         # it as the bottom-option record and the boundary condition comes out of a
         # sound speed. Anything the reader would already call the last point must
         # therefore *move* the existing sample, never add one beside it. The band
-        # this closes is 1e-7 m to 1.19e-5 m, which about 1 in 8400 arbitrary
+        # this closes is 1e-9 m to 1.19e-5 m, which about 1 in 8400 arbitrary
         # depths lands in; a fetched or interpolated bathymetry reaches it
         # naturally, and the abort the user saw named the boundary condition.
         last = float(self.depths[-1])
@@ -383,6 +426,18 @@ class SoundSpeedProfile:
                 shape=self.shape,
                 data_sources=self.data_sources,
             )
+        first = float(self.depths[0])
+        if depth_max <= first:
+            raise ConfigurationError(
+                f"SoundSpeedProfile.extend_to: depth_max={depth_max:g} m is "
+                f"not below the profile's first sample ({first:g} m). The "
+                f"returned profile's deepest sample sits exactly at "
+                f"depth_max, so truncating to this target would discard "
+                f"every sample the profile has.",
+                remediation="Pass a depth below the first sample, or build "
+                            "a new profile (from_pairs / from_isovelocity) "
+                            "if the water column really is this shallow.",
+            )
         if depth_max > last:
             new_depths = np.append(self.depths, depth_max)
             new_data = np.vstack([self.data, self.data[-1:, :]])
@@ -390,12 +445,25 @@ class SoundSpeedProfile:
             keep = self.depths < depth_max
             kept_depths = self.depths[keep]
             kept_data = self.data[keep]
-            interp_row = np.array([
-                np.interp(depth_max, self.depths, self.data[:, j])
-                for j in range(self.data.shape[1])
-            ])
-            new_depths = np.append(kept_depths, depth_max)
-            new_data = np.vstack([kept_data, interp_row[None, :]])
+            if (kept_depths.size
+                    and depth_max - kept_depths[-1] < AT_LAST_SSP_POINT_EPS_M):
+                # The deepest surviving sample already falls inside the
+                # reader's last-point window, so it is the row the reader will
+                # treat as the end of the block: snap it onto depth_max rather
+                # than interpolating a second row beside it, which the reader
+                # would consume as the bottom-option record. The move is
+                # upward, so the axis stays strictly increasing and needs no
+                # revalidation.
+                new_depths = kept_depths
+                new_depths[-1] = float(depth_max)
+                new_data = kept_data
+            else:
+                interp_row = np.array([
+                    np.interp(depth_max, self.depths, self.data[:, j])
+                    for j in range(self.data.shape[1])
+                ])
+                new_depths = np.append(kept_depths, depth_max)
+                new_data = np.vstack([kept_data, interp_row[None, :]])
         return SoundSpeedProfile(
             depths=new_depths,
             data=new_data,
@@ -415,7 +483,8 @@ class SoundSpeedProfile:
         hand-rolling the dispatch:
 
         * ``None`` — isovelocity 1500 m/s spanning ``0..depth_max``.
-        * scalar (m/s) — isovelocity at that speed spanning ``0..depth_max``.
+        * scalar (m/s), in any spelling — a Python number, a numpy scalar or
+          a 0-d array — isovelocity at that speed spanning ``0..depth_max``.
         * ``(depth, c)`` pairs — linear profile via :meth:`from_pairs`.
         * a :class:`SoundSpeedProfile` — returned as-is (by reference).
 
@@ -428,8 +497,33 @@ class SoundSpeedProfile:
             return cls.from_isovelocity(depth_max, DEFAULT_SOUND_SPEED)
         if isinstance(value, SoundSpeedProfile):
             return value
+        # A 0-d ndarray is a scalar in every respect except ``isinstance``,
+        # so both the bool guard and the numeric branch have to see through
+        # it — otherwise ``np.array(1500.0)`` reaches ``from_pairs`` and the
+        # error names an ``(N, 2)`` shape the caller never asked for, and
+        # ``np.array(True)`` walks past the bool guard entirely.
+        # ``Bathymetry.coerce`` admits the same spelling.
+        zero_d = isinstance(value, np.ndarray) and value.ndim == 0
+        if (isinstance(value, (bool, np.bool_))
+                or (zero_d and value.dtype == np.bool_)):
+            raise ConfigurationError(
+                f"Environment: ssp={value!r} is a bool, not a sound speed — "
+                f"as a scalar it would mean a {float(value):g} m/s ocean."
+            )
         if isinstance(value, (int, float, np.integer, np.floating)):
             return cls.from_isovelocity(depth_max, float(value))
+        if zero_d:
+            # Guarded because a 0-d array can hold a string or an object,
+            # which ``float`` refuses with an untyped error.
+            try:
+                sound_speed = float(value)
+            except (TypeError, ValueError):
+                raise ConfigurationError(
+                    f"Environment: ssp must be a scalar (m/s), a list of "
+                    f"(depth, sound_speed) pairs, or a SoundSpeedProfile; got "
+                    f"a 0-d array of dtype {value.dtype}."
+                ) from None
+            return cls.from_isovelocity(depth_max, sound_speed)
         if isinstance(value, (list, tuple, np.ndarray)):
             return cls.from_pairs(value)
         raise ConfigurationError(
@@ -560,7 +654,7 @@ class SoundSpeedProfile:
 
 def generate_sea_surface(
     max_range: float,
-    wind_speed_ms: float = 10.0,
+    wind_speed_mps: float = 10.0,
     n_points: int = 500,
     seed: Optional[int] = None,
 ) -> np.ndarray:
@@ -571,7 +665,7 @@ def generate_sea_surface(
     ----------
     max_range : float
         Maximum range in meters.
-    wind_speed_ms : float
+    wind_speed_mps : float
         Wind speed at 19.5 m height in m/s (Pierson-Moskowitz
         convention). The fully developed significant wave height is
         Hs = 4*sqrt(alpha/beta)*U^2/(2g) = 0.021*U^2:
@@ -602,10 +696,10 @@ def generate_sea_surface(
             f"generate_sea_surface: max_range must be a positive distance (m); "
             f"got {max_range}."
         )
-    if not np.isfinite(wind_speed_ms) or wind_speed_ms <= 0:
+    if not np.isfinite(wind_speed_mps) or wind_speed_mps <= 0:
         raise ConfigurationError(
-            f"generate_sea_surface: wind_speed_ms must be a positive m/s value; "
-            f"got {wind_speed_ms}."
+            f"generate_sea_surface: wind_speed_mps must be a positive m/s value; "
+            f"got {wind_speed_mps}."
         )
     if n_points < 2:
         raise ConfigurationError(
@@ -629,7 +723,7 @@ def generate_sea_surface(
     # omega_p = g/W, W the wind speed 19.5 m above the surface.
     alpha_pm = 8.1e-3
     beta_pm = 0.74
-    omega_p = g / wind_speed_ms  # peak angular frequency
+    omega_p = g / wind_speed_mps  # peak angular frequency
     S_omega = (alpha_pm * g**2 / omega**5) * np.exp(-beta_pm * (omega_p / omega)**4)
 
     # Convert to spatial spectrum S(k) via S(k) = S(omega) * domega/dk
@@ -646,12 +740,12 @@ def generate_sea_surface(
         warnings.warn(
             f"generate_sea_surface: the range grid resolves wavenumbers only "
             f"to {k_nyquist:.4g} cycles/m, below 2x the Pierson-Moskowitz peak "
-            f"at {k_peak:.4g} cycles/m for wind_speed_ms={wind_speed_ms:g}. The "
+            f"at {k_peak:.4g} cycles/m for wind_speed_mps={wind_speed_mps:g}. The "
             f"realisation captures only the spectral tail and its significant "
             f"wave height will fall short of the fully developed "
-            f"{0.021 * wind_speed_ms ** 2:.2f} m. Increase n_points (or "
+            f"{0.021 * wind_speed_mps ** 2:.2f} m. Increase n_points (or "
             f"shorten max_range) to resolve the peak.",
-            UserWarning, stacklevel=2,
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
         )
 
     # Random-phase realisation: each component carries variance S_k*dk, and a

@@ -212,8 +212,9 @@ whose defining feature is missing does not fall back gracefully.
 Four environments over the same water, the same source and the same receiver
 grid. The bottom two differ only by `elastic=`: identical geoacoustics, but
 declaring shear moves the run from the layered fluid PE onto the elastic one.
-The two fields agree to 0.2 dB in median level but differ by about 1.2 dB
-sample by sample — a shifted interference pattern, not a level offset.
+The two fields agree to 0.2 dB in median level but differ by 1.3 dB sample by
+sample (mean `|Δ|`; median 0.8 dB) — a shifted interference pattern, not a
+level offset.
 
 ---
 
@@ -279,7 +280,7 @@ things from you, and all three have defaults:
 
 | Knob | Default | What it means |
 |---|---|---|
-| `accuracy` | `1e-3` | budget on the single-step Padé error accumulated over the march |
+| `accuracy` | `None` | budget on the single-step Padé error accumulated over the march; unset → `1e-3`. Naming it explicitly also promotes "budget not met" from a log line to a `UserWarning` |
 | `theta_max` | `30.0` | the widest propagation angle the spectrum must represent |
 | `c0` | `None` | the PE reference speed; `None` → Lytaev **Eq. (15)** |
 
@@ -313,6 +314,19 @@ error model does not know about them:
    rotated Padé march accumulates floating-point noise;
 4. a **10 000-point cap** on the depth grid, purely to keep runtimes sane.
 
+One thing that is *not* on that list, and used to be: a cap on `dr` at the
+output-range spacing. mpiramS marches onto each requested range rather than
+writing on a fixed stride, and a bug in its step-shrink test used to send a
+step longer than the gap past the range it was aiming at, then walk it back
+onto it with a forward propagator. That is fixed in `ram.f90` itself (see
+`third_party/MODIFICATIONS.md`), so **on mpiramS `dr` is the longest step the
+march takes, not the step it takes everywhere**: a leg shorter than `dr` is
+marched in one step of that leg's length, and the effective step is
+`min(dr, leg)`. Nothing overshoots at any `dr` on any output grid, so nothing
+needs to cap `dr` against the receivers — which is just as well, since the
+shortest gap has no lower bound, and a legal 2 mm receiver pair sized a
+5 000 000-step march to 10 km.
+
 Any of these can push the delivered grid above the accuracy you asked for. If
 you pinned `accuracy` yourself you get a `UserWarning`; if you left it at the
 default it is logged at `verbose='info'` instead, because the stability floor
@@ -321,6 +335,48 @@ binds on essentially every ordinary run and a warning there would be noise.
 If no grid is feasible at all, uacpy loosens `ε` up to 0.5 and then steps
 `theta_max` down 30° → 20° → 15°, warning each time, before giving up with a
 `ConfigurationError` telling you to set `dr`/`dz` yourself.
+
+**How far from converged does the default actually land?** Far enough to matter
+in shallow water, and the `dz` floor is most of what is left. On a 200 m / 25 Hz
+pressure-release waveguide, measured against a closed-form Dirichlet modal sum
+that Kraken reproduces to 0.014 dB:
+
+| grid | `dr` | `dz` | median &#124;ΔTL&#124; | wall |
+|---|---|---|---|---|
+| default | 305.8 m | 3.77 m (`λ/16` floor) | 2.13 dB | 0.8 s |
+| `dr=25, dz=0.25` | 25 m | 0.25 m | 0.011 dB | 11 s |
+
+The engine is capable of 0.011 dB on that problem; the default grid is nearly
+200× coarser in accuracy and 14× cheaper, and **nothing warns** — the floor
+binds on essentially every ordinary run, so warning on it would be noise. Most
+of the gap is the 305.8 m step itself: pinning `dr=150` on the default `dz`
+gives 1.70 dB, so the optimiser's `dr` is worth about 0.4 dB here on its own.
+
+The shortfall is not a low-frequency corner: under a geometry scaled by water
+depth the error tracks `f·H`, so 100 Hz in 200 m of water behaves like 25 Hz in
+800 m. In deep refracting water (3000 m, 25 Hz, 60 km) the default sits 0.78 dB
+from a converged grid.
+
+**Where the default really is safe is narrower than a mode count suggests**, and
+it is set by `kH/π = 2fH/c`, the number of trapped modes:
+
+| `kH/π` | `f·H` (at 1500 m/s) | source at `H/2` | source at `0.3H` |
+|---|---|---|---|
+| 1.87 | 1400 | — | 0.06 dB |
+| 2.13 | 1600 | — | 10.96 dB |
+| 2.67 | 2000 | 0.04 dB | 3.19 dB |
+
+**The safe corner is `kH/π < 2`, i.e. `f·H < c` (1500 Hz·m), for an ordinary
+source depth** — below it a single mode propagates and there is no interference
+to get wrong. A mid-depth source looks good far past that only because it
+excites the odd modes alone: its own step is at `kH/π = 3` (`f·H = 3c/2 = 2250`
+Hz·m), where the second odd mode appears. Do not read a mid-depth-source result
+as the general case — at `f·H = 2000` the same waveguide is 0.04 dB with the
+source at `H/2` and 3.19 dB with it at `0.3H`.
+
+**If you need better than a decibel in shallow water, pin `dz`** — that is the
+one knob the floor overrides. The `accuracy` budget will not do it for you: it
+is advisory, and the floor is applied after it.
 
 **The optimiser never looks at range dependence, and this one can bite.** Its
 error model is stratified: frequency, the slowest and fastest speed anywhere,
@@ -374,8 +430,8 @@ override one the selected backend cannot read.
 
 | Name | Default | Meaning |
 |---|---|---|
-| `absorbing_layer_width` | `20.0` | Absorbing layer below the seafloor, in wavelengths. **[mpiramS]** |
-| `absorbing_layer_attn` | `10.0` | Attenuation at the domain floor, dB/wavelength. **[mpiramS]** |
+| `absorbing_layer_width` | `20.0` | Absorbing layer below the seafloor, in wavelengths. Sizes `zmax` on every backend. |
+| `absorbing_layer_attn` | `10.0` | Attenuation at the domain floor, dB/wavelength. Drives the attenuation ramp on every backend. |
 | `n_sed_points` | `1000` | Sediment-profile sample points. **[mpiramS]** |
 | `flat_earth` | `True` | Earth-curvature correction. **[mpiramS]** |
 | `collapse` | `None` | Per-feature collapse policy. |
@@ -384,8 +440,8 @@ override one the selected backend cannot read.
 
 | Name | Default | Meaning |
 |---|---|---|
-| `Q` | `None` | `fc / bandwidth`. Unset → `1e6` narrowband, `2.0` broadband. |
-| `T` | `None` | Time-window width (s), `Δf = 1/T`. Unset → `1.0` / `10.0`. |
+| `Q` | `None` | `fc / half-bandwidth` (the band spans `2·fc/Q`). Unset it is resolved from what the source carries: a single frequency with `T` also unset → `1e6` (the band collapses to one bin); a single frequency with `T` pinned → `2.0`; a multi-frequency source → the array's own half-width, `fc / ((n//2 + ½)·Δf)`. |
+| `T` | `None` | Time-window width (s), `Δf = 1/T`. Unset, resolved alongside `Q`: a single frequency with `Q` also unset → `1.0` (the single-bin band); a single frequency with `Q` pinned → `10.0`; a multi-frequency source → `1/Δf` from the array's spacing. |
 
 **Execution**
 
@@ -477,9 +533,9 @@ All four orders resolve this waveguide, so the TL curves lie on top of one
 another — that is the point. What changes is the price: two Padé terms need a
 1.6 m range step to hit the accuracy budget, eight need almost 60 m. Each Padé
 term is one more tridiagonal solve per step, so eight terms cost 4× two terms
-*per step* — but they buy a 37× longer step. Over this 5 km track that is 6250
-tridiagonal solves at `np_pade=2` against 669 at 8, which is why the default of
-6 is a deliberate bias toward fewer, bigger steps.
+*per step* — but they buy a 38× longer step. Over this 5 km track that is about
+6400 tridiagonal solves at `np_pade=2` against about 670 at 8, which is why the
+default of 6 is a deliberate bias toward fewer, bigger steps.
 
 ### Broadband
 

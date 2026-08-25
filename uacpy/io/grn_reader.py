@@ -27,15 +27,11 @@ from pathlib import Path
 from typing import Union, Dict, Any, Optional
 
 from uacpy.core.results import Field
-from uacpy.io._fortran_helpers import detect_endian, typed_format_error
+from uacpy.core._warn_frames import USER_FRAME_SKIP
+from uacpy.io._fortran_helpers import (
+    detect_endian, require_model_output, typed_format_error,
+)
 from uacpy.core.exceptions import ConfigurationError, FileFormatError
-
-#: Directory containing the ``uacpy`` package, computed from this file so no
-#: higher layer is imported for it. ``warnings.warn(...,
-#: skip_file_prefixes=...)`` uses it to attribute a warning to the first
-#: stack frame *outside* uacpy — the caller's own code — however many model/
-#: reader layers sit in between.
-_UACPY_PACKAGE_ROOT = str(Path(__file__).resolve().parents[1])
 
 
 @typed_format_error
@@ -69,6 +65,7 @@ def read_grn_file(filepath: Union[str, Path]) -> Dict[str, Any]:
         ``is_sparc``     : bool — True iff ``title`` starts with ``'SPARC'``.
     """
     filepath = Path(filepath)
+    require_model_output(filepath, 'read_grn_file')
 
     with open(filepath, "rb") as f:
         head = f.read(4)
@@ -151,12 +148,31 @@ def read_grn_file(filepath: Union[str, Path]) -> Dict[str, Any]:
 
         # Records 11+: complex Green's function, one record per
         # (freq, source_depth, receiver_depth) tuple, receiver depth fastest —
-        # ``REC = 10 + (ifreq-1)*NSz*NRz + (iS-1)*NRz + iR`` (scooter.f90:588;
-        # SPARC's snapshot writes the same slabs with output time in the
-        # frequency slot, sparc.f90:286-287). ``irec`` is the 0-based record
-        # index used by every seek above (``irec * 4 * recl`` is the head of
-        # record ``irec + 1``), so starting at 9 and incrementing before the
-        # first seek lands the first slab on record 11.
+        # ``REC = 10 + (ifreq-1)*NSz*NRz + (iS-1)*NRz + iR`` (scooter.f90:588).
+        # ``irec`` is the 0-based record index used by every seek above
+        # (``irec * 4 * recl`` is the head of record ``irec + 1``), so starting
+        # at 9 and incrementing before the first seek lands the first slab on
+        # record 11.
+        #
+        # SPARC's snapshot indexes ``iG = (Itout-1)*Pos%NRz + ir``
+        # (sparc.f90:286-287) — output time stands in for the frequency axis
+        # (``WriteHeaderSparc`` sets ``Nfreq = Ntout``, sparc.f90:318-320) and
+        # there is NO source-depth factor, because ``Green`` carries no
+        # source-depth axis in a snapshot run. That matches the sequential walk
+        # below only while ``NSz == 1``. ``WriteHeaderSparc`` never rewrites
+        # ``Pos%NSz``, so a snapshot header still reports whatever the deck
+        # asked for: were a deck to carry two source depths, the walk would
+        # read time slot 2's slabs into slot 1's second source and run off the
+        # end of the file. `SPARC.run` refuses a multi-depth Source for exactly
+        # this reason, so the case is unreachable from the public API — this
+        # check states that coupling here, where the layout assumption lives.
+        if title.upper().startswith('SPARC') and nsd != 1:
+            raise FileFormatError(
+                f"read_grn_file: SPARC snapshot header reports NSz={nsd}, but "
+                f"sparc.f90:286-287 writes its records with no source-depth "
+                f"factor, so only NSz=1 is readable. The Green's function of a "
+                f"snapshot run carries no source-depth axis.",
+            )
         G = np.zeros((nfreq, nsd, nrd, nk), dtype=np.complex64)
         irec = 9
         for ifreq in range(nfreq):
@@ -330,7 +346,7 @@ def _warn_zero_ranges(ranges: np.ndarray, source_type: str,
             "cylindrical-spreading factor that is singular there, so those "
             "cells are returned as NaN (no data). Move the receiver off the "
             "source axis (e.g. r = 1 m) to get a field value.",
-            UserWarning, skip_file_prefixes=(_UACPY_PACKAGE_ROOT,))
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
 
 
 def _hankel_transform(
@@ -539,6 +555,45 @@ def grn_to_field(
     )
 
 
+def _dft_row(G: np.ndarray, f_idx: int,
+             win: Optional[np.ndarray] = None) -> np.ndarray:
+    """Row ``f_idx`` of ``np.fft.fft(G, axis=0)``, without the other rows.
+
+    ``np.fft.fft(cube, axis=0)[f_idx]`` transforms all ``nt`` frequencies and
+    keeps one — measured 5.1x the cube in peak RSS, which is ~17 GB on a
+    512 x 200 x 4096 snapshot, to produce an (nrd, nk) slab. That row is a
+    contraction of ``G`` against ``exp(-2i pi f_idx n / nt)``, so it costs the
+    slab plus one pass over the cube instead.
+
+    ``win`` (a real per-sample taper) folds into the kernel. Mind what numpy
+    does with it today: ``G * win[:, None, None]`` promotes a complex64 cube
+    to complex128, so that FFT runs in DOUBLE precision and the windowed
+    branch is accurate to ~1e-16 rather than the ~1e-7 of a single-precision
+    transform. Contracting a complex128 kernel against the whole cube would
+    promote it the same way and hand most of the memory back (3.2x the cube
+    against 1.6x), so the windowed path casts and accumulates in complex128
+    over chunks of the last axis: same accuracy, bounded scratch.
+    """
+    nt = G.shape[0]
+    phase = np.exp(-2j * np.pi * float(f_idx) * np.arange(nt) / nt)
+    if win is None:
+        # Mirror numpy's own FFT precision rule so the row keeps the dtype the
+        # full transform gave it: single in, single out; anything else double.
+        single = np.result_type(G.dtype, np.complex64) == np.complex64
+        return np.tensordot(
+            phase.astype(np.complex64 if single else np.complex128), G, axes=1)
+    kernel = phase * np.asarray(win, dtype=np.float64)
+    out = np.empty(G.shape[1:], dtype=np.complex128)
+    # ~4e6 complex128 elements (64 MB) of cast cube per block — the scratch
+    # budget the synthesis chunking in core/results/field.py works to.
+    per_column = max(int(np.prod(G.shape[:-1])), 1)
+    step = max(1, 4_000_000 // per_column)
+    for a in range(0, G.shape[-1], step):
+        out[..., a:a + step] = np.tensordot(
+            kernel, G[..., a:a + step].astype(np.complex128), axes=1)
+    return out
+
+
 def sparc_snapshot_to_field(
     grn_data: Dict[str, Any],
     ranges: np.ndarray,
@@ -654,14 +709,13 @@ def sparc_snapshot_to_field(
                 "sparc_snapshot_to_field: source spectrum is zero at "
                 f"{frequency} Hz for pulse_type={pulse_type!r}; cannot "
                 "deconvolve (check pulse / frequency).")
-        G_at_f0 = np.fft.fft(G, axis=0)[f_idx, :, :] / S_at_f0
+        G_at_f0 = _dft_row(G, f_idx) / S_at_f0
     else:
         # Steady-tone amplitude estimator 2·X_k/Σwin (mirrors rts_to_pressure
         # for the 'R'/'D' modes). This yields S(w0)·g — the raw, uncalibrated
         # field this branch returns.
         win = np.hanning(nt)
-        G_freq = np.fft.fft(G * win[:, np.newaxis, np.newaxis], axis=0)
-        G_at_f0 = 2.0 * G_freq[f_idx, :, :] / np.sum(win)   # (nrd, nk) = S·g
+        G_at_f0 = 2.0 * _dft_row(G, f_idx, win) / np.sum(win)  # (nrd,nk) = S·g
 
     # Wavenumber grid — SPARC's k vector is independent of frequency.
     k = _wavenumbers_for_frequency(grn_data, frequency)
@@ -811,7 +865,21 @@ def grn_to_transfer_function(
 
     Output: complex ``Field`` with ``coords={'depth', 'range',
     'frequency'}``, shape ``(n_d, n_r, n_f)``.
+
+    Rejects a SPARC snapshot: its frequency slot holds output *times*.
     """
+    if grn_data["is_sparc"]:
+        raise ConfigurationError(
+            "grn_to_transfer_function expects a multi-frequency Green's "
+            f"function; got a SPARC snapshot (title {grn_data['title']!r}). "
+            "SPARC stores its output TIME vector in the .grn's frequency slot "
+            "(sparc.f90:317-319), so the returned Field would carry seconds "
+            "on a 'frequency' axis and a center_frequency that is a time.",
+            remediation="Use sparc_snapshot_to_field for the steady-state "
+                        "field at one frequency, or "
+                        "sparc_snapshot_to_time_field for p(z, r, t).",
+        )
+
     nfreq = grn_data["nfreq"]
     nrd = grn_data["nrd"]
     nsd = grn_data["nsd"]

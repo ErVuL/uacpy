@@ -48,7 +48,7 @@ def _shade_regimes(ax, wenz):
 def wenz_composite():
     """The Wenz composite with every component drawn under the envelope."""
     f = np.logspace(0.0, 5.3, 1200)              # 1 Hz - 200 kHz
-    wenz = WenzNoise(f, wind_speed=10.0, shipping_level='medium')
+    wenz = WenzNoise(f, wind_speed_kn=10.0, shipping_level='medium')
 
     fig, ax = uacpy.plot.plot_wenz(
         wenz, figsize=(9.6, 5.6),
@@ -65,7 +65,7 @@ def wind_sea_state():
     fig, (ax_s, ax_u) = plt.subplots(1, 2, figsize=(11.0, 4.4))
     cmap = plt.get_cmap('viridis')
     for i, u in enumerate(speeds):
-        wenz = WenzNoise(f, wind_speed=u, shipping_level='no')
+        wenz = WenzNoise(f, wind_speed_kn=u, shipping_level='no')
         ax_s.semilogx(f, wenz.wind, color=cmap(i / (len(speeds) - 1)),
                       label=f'{u:g} kn')
     ax_s.set_xlabel('Frequency [Hz]')
@@ -77,7 +77,7 @@ def wind_sea_state():
 
     probes = np.array([100.0, 1000.0, 10_000.0])
     u_grid = np.linspace(1.0, 40.0, 160)
-    levels = np.array([WenzNoise(probes, wind_speed=u).wind for u in u_grid])
+    levels = np.array([WenzNoise(probes, wind_speed_kn=u).wind for u in u_grid])
     for j, fp in enumerate(probes):
         label = f'{fp:.0f} Hz' if fp < 1000 else f'{fp / 1000:.0f} kHz'
         ax_u.plot(u_grid, levels[:, j], color=f'C{j}', label=label)
@@ -107,8 +107,8 @@ def shipping_and_rain():
 
     fig, (ax_s, ax_r) = plt.subplots(1, 2, figsize=(11.0, 4.4))
     for i, level in enumerate(['low', 'medium', 'high']):
-        deep = WenzNoise(f, wind_speed=5.0, shipping_level=level)
-        shallow = WenzNoise(f, wind_speed=5.0, shipping_level=level,
+        deep = WenzNoise(f, wind_speed_kn=5.0, shipping_level=level)
+        shallow = WenzNoise(f, wind_speed_kn=5.0, shipping_level=level,
                             water_depth='shallow')
         ax_s.semilogx(f, deep.shipping, color=f'C{i}', label=f'{level} (deep)')
         ax_s.semilogx(f, shallow.shipping, color=f'C{i}', linestyle='--',
@@ -122,9 +122,9 @@ def shipping_and_rain():
     ax_s.legend(fontsize=8, ncol=2)
 
     for i, rate in enumerate(['light', 'moderate', 'heavy', 'veryheavy']):
-        wenz = WenzNoise(f, wind_speed=5.0, rain_rate=rate)
+        wenz = WenzNoise(f, wind_speed_kn=5.0, rain_rate=rate)
         ax_r.semilogx(f, wenz.rain, color=f'C{i}', label=rate)
-    ax_r.semilogx(f, WenzNoise(f, wind_speed=15.0).wind, color='green',
+    ax_r.semilogx(f, WenzNoise(f, wind_speed_kn=15.0).wind, color='green',
                   linestyle=':', label='wind at 15 kn')
     ax_r.axvline(7000.0, color='0.5', linewidth=0.9, linestyle='-.')
     ax_r.text(6300.0, 96.0, 'cubic fit valid to 7 kHz;\n−5 dB/octave above',
@@ -147,8 +147,8 @@ def component_models():
 
     fig, (ax_w, ax_s) = plt.subplots(1, 2, figsize=(11.0, 4.4))
     for i, u in enumerate([10.0, 25.0]):
-        merk = WenzNoise(f, wind_speed=u, wind_model='merklinger')
-        coat = WenzNoise(f, wind_speed=u, wind_model='coates')
+        merk = WenzNoise(f, wind_speed_kn=u, wind_model='merklinger')
+        coat = WenzNoise(f, wind_speed_kn=u, wind_model='coates')
         ax_w.semilogx(f, merk.wind, color=f'C{i}',
                       label=f"merklinger, {u:g} kn")
         ax_w.semilogx(f, coat.wind, color=f'C{i}', linestyle='--',
@@ -161,9 +161,9 @@ def component_models():
     ax_w.legend(fontsize=8)
 
     for i, level in enumerate(['low', 'high']):
-        wenz_ship = WenzNoise(f, wind_speed=10.0, shipping_level=level,
+        wenz_ship = WenzNoise(f, wind_speed_kn=10.0, shipping_level=level,
                               shipping_model='wenz')
-        coat_ship = WenzNoise(f, wind_speed=10.0, shipping_level=level,
+        coat_ship = WenzNoise(f, wind_speed_kn=10.0, shipping_level=level,
                               shipping_model='coates')
         ax_s.semilogx(f, wenz_ship.shipping, color=f'C{i}',
                       label=f'wenz, {level}')
@@ -240,7 +240,7 @@ def weighting_groups():
 def weighted_soundscape():
     """What weighting changes: the same ambient spectrum, six ways of hearing it."""
     f = np.logspace(1.0, 5.0, 1200)              # 10 Hz - 100 kHz
-    wenz = WenzNoise(f, wind_speed=10.0, shipping_level='medium')
+    wenz = WenzNoise(f, wind_speed_kn=10.0, shipping_level='medium')
     in_water = ['LF', 'HF', 'VHF', 'SI', 'PCW', 'OCW']
 
     unweighted = 10.0 * np.log10(np.trapezoid(10.0 ** (wenz.total / 10.0), f))

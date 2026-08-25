@@ -19,6 +19,7 @@ like RAM or Kraken *honour* RD bathymetry and SSP natively, so
 their collapse kwargs would be no-ops on this env.
 """
 
+import os
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -31,8 +32,9 @@ from uacpy.models import Scooter
 from uacpy.visualization.plots import compare_models
 
 
-OUTPUT_DIR = Path(__file__).parent / 'output'
-OUTPUT_DIR.mkdir(exist_ok=True)
+OUTPUT_DIR = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
+                  or Path(__file__).parent / 'output')
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def build_rd_environment() -> uacpy.Environment:

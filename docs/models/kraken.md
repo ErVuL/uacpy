@@ -108,7 +108,6 @@ nonsense.
 | Near field, or below the modal cutoff | The continuous spectrum is not in the sum | [Scooter](scooter.md), [OASES](oases.md) |
 | Steep slopes, long range, strong range dependence | Segmentation + adiabatic/coupled is an approximation | [RAM](ram.md) |
 | A rough or moving sea surface | Altimetry is dropped | [Bellhop](bellhop.md) |
-| An elastic sea surface (ice canopy) | `krakenc.exe` aborts on solid-over-liquid top interfaces; uacpy raises | [Bellhop](bellhop.md) |
 | A true elastic *modal* decomposition | `krakenc` handles elastic media with complex wavenumbers, but AT's elastic-mode solver `krakel.exe` is not wrapped | [OASES](oases.md) |
 
 ---
@@ -224,8 +223,9 @@ To trim an existing `Modes` result instead, use `modes.first_n(N)`.
 The `Modes` result is documented with the other result types in the
 [results guide](../guide/results.md). Beyond `k`, `phi` and `depths` it carries
 `compute_phase_speeds()`, `compute_group_velocity(other)` (from a second solve
-at a nearby frequency), `first_n(n)`, `with_attenuation(...)` for a first-order
-perturbation, and `modal_propagation_loss(...)` to build a field from the modal
+at a nearby frequency), `first_n(n)`, `with_attenuation(..., bottom=env.bottom)` for a first-order
+perturbation (pass `bottom=` — the mode normalisation has to run into the
+half-space or the returned attenuation is an upper bound), and `modal_propagation_loss(...)` to build a field from the modal
 sum in Python.
 
 ---
@@ -238,12 +238,12 @@ Everything is configured on the constructor; `run()` has a fixed signature.
 
 | Name | Default | Meaning |
 |---|---|---|
-| `c_low` | `None` | Lower phase-speed bound (m/s). `None` → `0.0` for a fluid environment, which hands the floor to KRAKEN; → the slowest compressional speed when the bottom carries shear. |
+| `c_low` | `None` | Lower phase-speed bound (m/s). `None` → `0.0` for a fluid environment, which hands the floor to KRAKEN; → the slowest compressional speed when the bottom **or the surface** carries shear (an elastic ice canopy drags KRAKEN's automatic floor down exactly as an elastic seabed does). |
 | `c_high` | `None` | Upper bound (m/s). `None` → `1.05 ×` the fastest speed among the SSP and the seabed. |
 | `leaky_modes` | `False` | Push `c_high` to `1e9` so the solver attempts leaky modes. Forces `backend='krakenc'`. |
 | `n_mesh` | `0` | Finite-difference points **per medium** — a total count, not a per-wavelength density, and the *initial* mesh that `rmax_m` then doubles. `0` lets Kraken size it: 20 points per wavelength, taken from the medium's **shear** speed wherever one is set (`ReadEnvironmentMod.f90:101-104`), which is far finer than the compressional wavelength would ask for. A value below half of what it would have chosen is not silently accepted — it aborts with *Mesh is too coarse*. |
-| `interp_ssp` | `None` | SSP connection scheme: `'linear'` (the default), `'n2linear'`, `'pchip'`, `'cubic'` / `'spline'`, `'analytic'`. `'quad'` is Bellhop-only and rejected. |
-| `rmax_m` | `None` | `RMax` written into the deck (m, converted to km) — the range at which the eigenvalues must be accurate. Kraken solves on successively doubled meshes (multipliers 1, 2, 4, 8, 16), Richardson-extrapolates, and stops once `Error × RMax < 1` (`kraken.f90:80`); `0` accepts the first mesh and performs no refinement. `None` → `1.05 ×` the outermost receiver range, or `3 ×` for a broadband sweep. |
+| `interp_ssp` | `None` | SSP connection scheme: `'linear'` (the default), `'n2linear'`, `'pchip'`, `'cubic'` / `'spline'`. `'quad'` (Bellhop-only) is refused with `UnsupportedFeatureError` — a capability limit, not a bad argument — and `'analytic'` (the Acoustics-Toolbox hard-coded Munk curve, which would ignore `env.ssp`) with `ConfigurationError`. |
+| `rmax_m` | `None` | `RMax` written into the deck (m, converted to km) — the range at which the eigenvalues must be accurate. Kraken solves on successively doubled meshes (multipliers 1, 2, 4, 8, 16), Richardson-extrapolates, and stops once `Error × RMax < 1` (`kraken.f90:80`); a value `≤ 0` would satisfy that test on the coarsest mesh, so the constructor refuses it with `ConfigurationError`. `None` → `1.05 ×` the outermost receiver range, or `3 ×` for a broadband sweep. |
 
 **How the modes are sampled**
 
@@ -421,6 +421,20 @@ the seabed as it travels. `leaky_modes=True` pushes `c_high` to `1e9` so the
 solver keeps going up the spectrum, and forces `krakenc.exe` because those
 eigenvalues are genuinely complex.
 
+`leaky_modes=False`, the default, is **not** "no leaky modes". kraken.htm says
+KRAKEN "will (if necessary) reduce CHIGH so that only trapped (non-leaky) modes
+are computed", but in the vendored source that clamp is live only for an
+*elastic* half-space (`Kraken/kraken.f90:209`); one branch below, the acoustic
+one is commented out — `kraken.f90:212`,
+`! cHigh = MIN( cHigh, DBLE( HSBot%cP ) )`. Over a fluid seabed the ceiling
+therefore stands where uacpy wrote it, 5 % past the bottom speed, and the
+default run keeps whatever modes fall in that 5 % slice — the three of fourteen
+in §6.1. `Kraken(verbose='info')` logs how many. Real `kraken.exe` cannot
+represent those properly: above the half-space speed
+`Kraken/BCImpedanceMod.f90:83-89` collapses to the rigid-bottom condition, so
+what comes back is a rigid-bottom eigenvalue plus a first-order radiation-loss
+perturbation. `leaky_modes=True` is the way to get the real ones.
+
 ```python
 trapped = Kraken().compute_modes(env, source)
 leaky = Kraken(leaky_modes=True).compute_modes(env, source)
@@ -553,11 +567,17 @@ would be over a thousand, which is the point at which you switch to
 
 **Below the modal cutoff there is nothing to sum.** Every waveguide has a
 lowest frequency at which it supports a trapped mode. For the 100 m channel
-above it falls between 7.5 and 8 Hz — the Pekeris estimate
-`c_w / (4D·√(1 − (c_w/c_b)²))` says 8.7 Hz, and the default ceiling sitting 5 %
-past the bottom speed accounts for the difference. Below cutoff, `run()`
-returns an all-`NaN` field with a warning that names the cutoff.
-`compute_modes` raises a typed `ModelExecutionError` that says what happened:
+above it falls between 9 and 10 Hz, which brackets the Pekeris estimate
+`c_w / (4D·√(1 − (c_w/c_b)²))` — 8.7 Hz on the 1490 m/s speed at the bottom of
+the column, 9.0 Hz on the 1500 m/s at the top. The default ceiling sits 5 %
+past the bottom speed, so between about 7.5 and 10 Hz the solver does return a
+root: one mode at `c_p` = 1699.66 m/s at 8 Hz, 1660.36 at 9 Hz, both of them
+above the 1650 m/s seabed and therefore radiating into it rather than
+propagating in the duct. That is the continuous spectrum wearing a mode's
+clothes, and `compute_modes` refuses a mode set in which *every* mode is one
+(§6.5). Below cutoff, `run()` returns an all-`NaN` field with a warning that
+names the cutoff. `compute_modes` raises a typed `ModelExecutionError` that
+says what happened:
 no mode with a phase speed inside `[c_low, c_high]` at this frequency — widen
 the window, or raise the frequency above the waveguide's modal cutoff.
 The field there is not zero in reality — it is
@@ -572,8 +592,10 @@ once shear is present: `krakenc` folds shear speeds into its minimum and the
 search floor lands below the slowest shear speed, so the solver returns
 interfacial (Scholte / Stoneley) modes instead of the waterborne field, and TL
 comes back hundreds of dB. uacpy therefore sets `c_low` to the slowest
-compressional speed automatically whenever the bottom is elastic. If you pin
-`c_low` yourself on an elastic seabed, that is the value to pin it to.
+compressional speed automatically whenever the bottom — or the surface, an
+elastic ice canopy counting exactly like an elastic seabed — carries shear. If
+you pin `c_low` yourself over an elastic boundary, that is the value to pin it
+to.
 
 **`n_modes` truncates, it does not converge.** `Kraken(n_modes=N)` caps the
 sum at N modes. Dropping the high-order ones removes the steep energy, which

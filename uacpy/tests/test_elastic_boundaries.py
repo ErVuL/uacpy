@@ -314,7 +314,7 @@ class TestBounceToScooterWorkflow:
         Both runs are Scooter on the same waveguide; the only difference is
         whether the seafloor is the elastic half-space itself or the
         ``R(theta)`` table BOUNCE computed from it. The bounds are in dB, so
-        the comparison is on ``.db`` — ``core/results/field.py:250`` makes that
+        the comparison is on ``.db`` — ``Field.db`` makes that
         the ``-20*log10(|data|)`` view, while ``.data`` is complex pressure and
         differences there are bounded by ``|p| < 1`` no matter how badly the
         two disagree.
@@ -377,7 +377,7 @@ class TestWorkflowComparison:
         krakenc's normal-mode sum against Scooter's wavenumber integration
         over a BOUNCE ``.brc`` — different solvers, different seafloor
         representations. The bound is in dB, so the comparison is on ``.db``
-        (``core/results/field.py:250``); ``.data`` is complex pressure, where
+        (``Field.db``); ``.data`` is complex pressure, where
         ``|p| < 1`` caps any difference at ~2 regardless of agreement.
 
         Measured on this grid: mean 0.40 dB, max 0.78 dB (bit-reproducible).

@@ -2,33 +2,113 @@
 Readers for the output of the Collins-style RAM family binaries
 uacpy dispatches to (``rams0.5``, ``ramsurf1.5``, ``ramgeo1.5``).
 
-The file read here is:
+The files read here are:
 
+- ``tl.line`` — ASCII ``range  TL`` rows at the single receiver depth
+  ``zr_line`` from row 2 of ``ram.in``, one row per output range step
+  (:func:`read_tl_line`). No uacpy model consumes it — the RAM wrappers
+  build their ``Field`` from ``tl.grid`` — but it is the run's own
+  single-depth trace and the cheapest cross-check on the grid.
 - ``tl.grid`` — unformatted Fortran binary. Record 1 is a single int32
   ``lz`` (number of stored depth points). Records 2..N hold ``lz``
   ``real*8`` TL samples each, one record per range output step.
   uacpy builds the Collins binaries with ``-fdefault-real-8``
   (``install.sh``, both Makefiles), so these are 8 bytes, not the 4 of a
-  stock build. (The binaries also emit an ASCII ``tl.line``, which the
-  models do not consume.) The uacpy-patched builds additionally write
+  stock build. The uacpy-patched builds additionally write
   ``pcomplex.bin`` on the same grid.
 
-The reader returns a regular ``Field`` of ``field_type='tl'`` so the rest
-of uacpy (visualization, max-finding, comparisons) handles the output
-without special cases.
+The readers return plain ``(ranges, depths, values)`` arrays; the RAM
+wrapper builds a regular ``Field`` from them so the rest of uacpy
+(visualization, max-finding, comparisons) handles the output without
+special cases.
 """
 
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 from typing import Tuple, Union
 
 import numpy as np
 
 from uacpy.io._fortran_helpers import (
-    detect_endian, read_fortran_record, typed_format_error,
+    detect_endian, read_fortran_record, require_model_output,
+    typed_format_error,
 )
 from uacpy.core.exceptions import FileFormatError
+
+
+@typed_format_error
+def read_tl_line(filepath: Union[str, Path]) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Read a Collins ``tl.line`` — the ASCII ``range  TL`` trace at the single
+    receiver depth ``zr_line`` from row 2 of ``ram.in``.
+
+    Parameters
+    ----------
+    filepath : str or Path
+        Path to the file.
+
+    Returns
+    -------
+    ranges : ndarray, shape ``(N,)``
+        Range in **metres**. The Fortran works in metres throughout and
+        writes the range verbatim (``rams0.5.f:253`` /
+        ``ramsurf1.5.f:429``: ``write(2,*) r, tl``), so no conversion is
+        applied.
+    tl : ndarray, shape ``(N,)``
+        Transmission loss in dB.
+
+    Raises
+    ------
+    ~uacpy.core.exceptions.FileFormatError
+        The file is absent, holds no rows, or does not carry two columns.
+        An empty ``tl.line`` is what a run that died before its first output
+        range leaves behind, so it is named rather than indexed into.
+
+    Notes
+    -----
+    One row is written per output range step (every ``ndr``-th march step),
+    so this is :func:`read_tl_grid`'s single-depth sibling on the same range
+    axis, and the two agree row for row where ``zr_line`` falls on a stored
+    depth. It is unaffected by the ``-fdefault-real-8`` build the binary
+    ``tl.grid`` reader has to account for: this file is text.
+
+    See Also
+    --------
+    read_tl_grid : The full range-depth TL grid from the same run.
+    """
+    filepath = Path(filepath)
+    require_model_output(filepath, 'read_tl_line')
+
+    # ``ndmin=2`` because the default squeezes both a one-row file and a
+    # one-column file to the same 1-D array: a stray single-column file would
+    # then read as one row of (range, TL) instead of being refused below.
+    with warnings.catch_warnings():
+        # An empty file is the one case this reader answers with its own
+        # typed error below; numpy's UserWarning about it would arrive first
+        # and name a numpy frame, so it is dropped here rather than shown
+        # alongside the FileFormatError that actually says what to do.
+        warnings.filterwarnings('ignore', message='.*input contained no data',
+                                category=UserWarning)
+        data = np.loadtxt(str(filepath), ndmin=2)
+    if data.size == 0:
+        raise FileFormatError(
+            f"{filepath}: the file holds no rows. RAM writes one "
+            f"(range, TL) row per output range step, so an empty tl.line "
+            f"means the run stopped before its first output range.",
+            remediation="Check the run log and ram.in's rmax / dr / ndr "
+                        "row — an ndr larger than the number of march steps "
+                        "produces no output.",
+        )
+    if data.shape[1] < 2:
+        raise FileFormatError(
+            f"{filepath}: rows carry {data.shape[1]} column(s); a tl.line "
+            f"row is 'range TL' (rams0.5.f:253).",
+            remediation="Verify this is the tl.line of a Collins RAM run, "
+                        "not another output file.",
+        )
+    return data[:, 0].astype(float), data[:, 1].astype(float)
 
 
 def _read_lz_records(
@@ -137,6 +217,7 @@ def read_tl_grid(
         Range axis (m), depth axis (m), and TL field of shape
         ``(n_depths, n_ranges)``.
     """
+    require_model_output(filepath, 'read_tl_grid')
     lz, tl = _read_lz_records(filepath, dtype='f8')
     tl = tl.astype(float)
     ranges, depths = _grid_axes(lz, tl.shape[1], dr, ndr, dz, ndz,
@@ -182,6 +263,7 @@ def read_pcomplex_grid(
         Range axis (m), depth axis (m), complex envelope of shape
         ``(n_depths, n_ranges)``.
     """
+    require_model_output(filepath, 'read_pcomplex_grid')
     lz, p = _read_lz_records(filepath, dtype='c16')
     p = p.astype(complex)
     ranges, depths = _grid_axes(lz, p.shape[1], dr, ndr, dz, ndz,

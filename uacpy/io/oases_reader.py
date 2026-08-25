@@ -22,11 +22,12 @@ References:
 import struct
 import warnings
 from pathlib import Path
-from typing import Dict, Tuple, Union
+from typing import Any, Dict, Tuple, TypedDict, Union
 
 import numpy as np
 
 from uacpy.core.exceptions import FileFormatError, UnsupportedFeatureError
+from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.io._fortran_helpers import (
     PARSE_ERRORS,
     _bound_counts,
@@ -47,16 +48,35 @@ def _decode_fortran_title(raw: bytes) -> str:
     NULs, which is how a title becomes 32 invisible bytes that then flow into
     ``Result.metadata['title']`` and print as nothing at all.
 
+    NULs and blanks come off in one pass rather than two: a field that is
+    part text, part NUL, part blank ends on whichever of the two the record
+    happened to stop with, so stripping one class and then the other leaves
+    the first class behind wherever it sits inside the second.
+
     Every OASES title read goes through here so the three readers cannot
     disagree about it.
     """
-    return raw.decode('ascii', errors='ignore').strip('\x00').strip()
+    return raw.decode('ascii', errors='ignore').strip('\x00 \t\r\n\v\f')
+
+
+class OastTL(TypedDict):
+    """The named fields :func:`read_oast_tl` hands back; the function's own
+    Returns section carries the shapes, which depend on ``NFREQ``.
+
+    A ``Tuple[...]`` return type here is read by the caller in
+    ``uacpy/models/oases.py`` as ``oast_out['depths']`` — a string subscript
+    of something declared a tuple."""
+
+    tl: np.ndarray
+    depths: np.ndarray
+    ranges: np.ndarray
+    metadata: Dict[str, Any]
 
 
 def read_oast_tl(
     filepath: Union[str, Path],
     receiver_depths: np.ndarray,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict]:
+) -> OastTL:
     """
     Read OAST transmission loss output on its native grid.
 
@@ -82,8 +102,11 @@ def read_oast_tl(
     filepath : str or Path
         Path to .plt or .plp file (base name works for both)
     receiver_depths : ndarray
-        Receiver depth axis (m). OAST writes one TL curve per receiver, in
-        receiver order; the depth axis is taken verbatim from the user.
+        Receiver depth axis (m) the deck asked for. It is what the ``RD:``
+        labels of the ``.plp`` are matched against, so the returned depths
+        carry the caller's own precision rather than the labels' 0.1 m; it
+        is *not* assumed to be the axis OAST plotted, which the deck's
+        ``IDINC`` may decimate.
 
     Returns
     -------
@@ -93,15 +116,21 @@ def read_oast_tl(
         - ``'tl'`` : ndarray — transmission loss on the OAST native grid.
           Shape ``(n_depths, n_ranges_native)`` for a single-frequency run.
           A multi-frequency deck (``NFREQ > 1``) writes one curve per
-          receiver *per frequency*, frequency-major (``unoast31.f:388``
-          wraps the receiver loop at ``:584``), and yields shape
-          ``(n_freq, n_depths, n_ranges_native)``. The ``.plp`` does not
-          record the frequency values, only the curve order, so the
-          frequency axis is the run's own ascending sweep.
-        - ``'depths'`` : ndarray — depth axis (m), == ``receiver_depths``.
+          plotted receiver *per frequency* and yields shape
+          ``(n_freq, n_depths, n_ranges_native)``, the frequency axis
+          ascending as the run swept it.
+        - ``'depths'`` : ndarray — the depths OAST actually plotted, which
+          is a subset of ``receiver_depths`` on a deck whose receiver record
+          carries ``IDINC > 1``.
         - ``'ranges'`` : ndarray — OAST's native range grid in metres.
-        - ``'metadata'`` : dict —
-          ``{'oast_grid_shape': (n_d, n_r_native), 'n_frequencies': n_f}``.
+          **Shape ``(n_ranges_native,)`` for a single frequency and
+          ``(n_freq, n_ranges_native)`` for a sweep**: OAST rebuilds the
+          grid inside its frequency loop, so ``DX`` scales as ``1/f`` and
+          the frequencies do not share one range axis.
+        - ``'metadata'`` : dict — ``{'oast_grid_shape': …,
+          'n_frequencies': n_f, 'frequencies': ndarray}``. ``'frequencies'``
+          comes from the ``Freq:`` labels (``F7.1``, oasfun22.f:368) and is
+          absent from a ``.plp`` that carries no labels.
 
     Raises
     ------
@@ -109,8 +138,8 @@ def read_oast_tl(
         If the ``.plp`` file is missing or cannot be parsed (OAST chooses
         its own range grid via FFT-based sampling, so the native grid
         cannot be reconstructed without it), if it carries no TL-vs-range
-        curve, or if the curve count is not a whole multiple of
-        ``receiver_depths``.
+        curve, if its ``Freq:``/``RD:`` labels do not form a full grid, or
+        if the receivers of one frequency disagree about the range axis.
     """
     filepath = Path(filepath)
 
@@ -141,7 +170,12 @@ def read_oast_tl(
     elif f020_file.exists():
         tl_data_file = f020_file
     else:
-        raise FileFormatError(f"OAST TL data file not found. Checked: {plt_file}, {f020_file}")
+        raise FileFormatError(
+            f"OAST TL data file not found. Checked: {plt_file}, {f020_file}",
+            remediation="Add the 'T' option (PLTL) to the OAST option string "
+                        "and re-run: OAST writes its TL data file only when "
+                        "TL plotting is enabled.",
+        )
 
     # Parse .plp file to get OAST's native range grid. The grid is
     # mandatory: OAST chooses its own ranges via FFT-based sampling, so
@@ -175,19 +209,14 @@ def read_oast_tl(
             f"in the OAST option string."
         )
 
-    # One PLTLOS curve per receiver per frequency, frequency-major: the
-    # NFREQ loop (unoast31.f:388) wraps the receiver loop (:584), so curves
-    # 0..NREC-1 are frequency 1, NREC..2*NREC-1 frequency 2, and so on.
-    n_depths_oast = len(receiver_depths)
-    n_freq, remainder = divmod(len(tl_curves), n_depths_oast)
-    if remainder or n_freq == 0:
-        raise FileFormatError(
-            f"{plp_file} carries {len(tl_curves)} TL-vs-range curves, which "
-            f"is not a whole multiple of the {n_depths_oast} receiver depths "
-            f"requested. OAST writes one curve per receiver per frequency "
-            f"(unoast31.f:388, :629-640), so the run does not correspond to "
-            f"this receiver array."
-        )
+    freq_axis, depth_axis, slots = _oast_curve_slots(
+        plp_file, tl_curves, receiver_depths)
+    n_freq = len(freq_axis) if freq_axis is not None else (
+        max(s[0] for s in slots) + 1)
+    depths_oast = (_match_label_depths(depth_axis, receiver_depths)
+                   if depth_axis is not None
+                   else np.asarray(receiver_depths, dtype=float))
+    n_depths_oast = len(depths_oast)
 
     blocks = _read_plt_blocks(tl_data_file)
     n_expected = sum(1 for c in curves if c['index'] is not None)
@@ -195,7 +224,11 @@ def read_oast_tl(
         raise FileFormatError(
             f"{tl_data_file} holds {len(blocks)} data blocks but "
             f"{plp_file} describes {n_expected}; the pair is inconsistent "
-            f"(truncated or interleaved run)."
+            f"(truncated or interleaved run).",
+            remediation="Delete both files and re-run the case: the .plp and "
+                        "its data file must come from one run, so a stale "
+                        "file left in the working directory by an earlier "
+                        "run produces exactly this mismatch.",
         )
 
     n_ranges_oast = tl_curves[0]['n']
@@ -205,32 +238,192 @@ def read_oast_tl(
     _bound_counts(tl_data_file, tl_data_file.stat().st_size, 2,
                   n_freq=n_freq, n_depths=n_depths_oast,
                   n_ranges=n_ranges_oast)
-    ranges_oast = km_to_m(
-        tl_curves[0]['xoff'] + np.arange(n_ranges_oast) * tl_curves[0]['dx']
-    )
 
+    # OAST recomputes DLRAN = 2*pi/(NWVNO*DLWVNO) inside the frequency loop
+    # (unoast31.f:481, DLWVNO proportional to FREQ at :477), so RSTEP scales
+    # as 1/f and each frequency owns its own range axis. The point count LF
+    # is clamped to NWVNO at :492, which is what makes the axes look alike:
+    # equal N, halved DX. Within one frequency every receiver shares the
+    # grid; across frequencies they need not.
+    grids: Dict[int, Tuple[float, float]] = {}
     tl_oast = np.empty((n_freq, n_depths_oast, n_ranges_oast), dtype=float)
-    for i, curve in enumerate(tl_curves):
+    filled = np.zeros((n_freq, n_depths_oast), dtype=bool)
+    for i, (curve, (i_freq, i_depth)) in enumerate(zip(tl_curves, slots)):
         if curve['n'] != n_ranges_oast:
             raise FileFormatError(
                 f"{plp_file}: TL curve {i} has {curve['n']} range samples, "
                 f"curve 0 has {n_ranges_oast} — the curves do not share one "
                 f"range grid."
             )
-        tl_oast[divmod(i, n_depths_oast)] = _curve_values(
+        grid = (curve['xoff'], curve['dx'])
+        if grids.setdefault(i_freq, grid) != grid:
+            raise FileFormatError(
+                f"{plp_file}: TL curve {i} starts at XOFF={curve['xoff']} km "
+                f"in steps of DX={curve['dx']} km, but another curve of the "
+                f"same frequency uses {grids[i_freq]} — the receivers of one "
+                f"frequency do not share a range grid."
+            )
+        if curve['index'] is None:
+            raise FileFormatError(
+                f"{plp_file}: TL curve {i} ({curve['tag']}) parameterises "
+                f"both axes (DX={curve['dx']}, DY={curve['dy']}), so PLTWRI "
+                f"wrote no {tl_data_file.suffix} block for it "
+                f"(oasgun21.f:658-660) and it carries no TL."
+            )
+        tl_oast[i_freq, i_depth] = _curve_values(
             blocks[curve['index']], curve, tl_data_file)
+        filled[i_freq, i_depth] = True
+
+    # The label grid factors on its totals, so two curves sharing one
+    # (Freq:, RD:) pair leave another slot untouched — and untouched here is
+    # whatever np.empty allocated.
+    if not filled.all():
+        missing = [(freq_axis[j] if freq_axis is not None else j,
+                    float(depths_oast[k]))
+                   for j, k in zip(*np.nonzero(~filled))]
+        raise FileFormatError(
+            f"{plp_file}: no TL curve for {missing} (frequency Hz, depth m); "
+            f"the run's curves do not cover every frequency at every plotted "
+            f"receiver."
+        )
+
+    range_rows = np.array([
+        km_to_m(grids[j][0] + np.arange(n_ranges_oast) * grids[j][1])
+        for j in range(n_freq)
+    ])
     if n_freq == 1:
         tl_oast = tl_oast[0]
+        ranges_oast = range_rows[0]
+    else:
+        ranges_oast = range_rows
 
+    metadata = {
+        'oast_grid_shape': tl_oast.shape,
+        'n_frequencies': n_freq,
+    }
+    if freq_axis is not None:
+        metadata['frequencies'] = np.asarray(freq_axis, dtype=float)
     return {
         'tl': tl_oast,
-        'depths': np.asarray(receiver_depths, dtype=float),
+        'depths': depths_oast,
         'ranges': ranges_oast,
-        'metadata': {
-            'oast_grid_shape': tl_oast.shape,
-            'n_frequencies': n_freq,
-        },
+        'metadata': metadata,
     }
+
+
+def _unique_in_order(values: list) -> list:
+    """The distinct entries of ``values``, first-appearance order kept.
+
+    A ``dict`` keeps insertion order, so this is the hashed form of the
+    membership scan the same walk would otherwise do per value. A ``set`` is
+    not a substitute: the order is the receiver axis
+    :func:`_match_label_depths` walks when it hands out depths greedily, so
+    reordering it moves curves onto other receivers rather than raising.
+    """
+    return list(dict.fromkeys(values))
+
+
+def _oast_curve_slots(plp_file: Path, tl_curves: list, receiver_depths):
+    """Attribute each TL curve to its ``(frequency, depth)`` slot.
+
+    Returns ``(freq_labels, depth_labels, slots)``. ``slots[i]`` is the
+    ``(i_freq, i_depth)`` pair curve ``i`` belongs in; the two label lists
+    are the axes those indices run over, or ``None`` when the ``.plp``
+    carries no labels to key off.
+
+    PLTLOS writes ``NLAB = 3`` labels into every plot block — ``Freq:``,
+    ``SD:``, ``RD:`` (oasfun22.f:334-337) — which is the only per-curve
+    record of *which* frequency and *which* receiver a curve came from.
+    Counting instead is what the deck's ``IDINC`` breaks: PLTLOS runs only
+    for ``MOD( NREC-1, INTF ) == 0`` (unoast31.f:630) with ``INTF`` the 4th
+    field of the OASTL receiver record (oaseun31.f:1156), so a decimated run
+    writes fewer curves than it has receivers and every curve past the first
+    lands on the wrong depth.
+
+    The labels are printed at ``F7.1`` / ``F9.1`` (oasfun22.f:368-370), so
+    two frequencies within 0.05 Hz — or two receivers within 0.05 m —
+    collapse onto one label. A label set that no longer factors into a full
+    grid has collided that way, and a ``.plp`` carrying no labels at all did
+    not come from PLTLOS. Both fall back to the positional walk
+    (frequency-major: the NFREQ loop at unoast31.f:388 wraps the receiver
+    loop at :584) behind a warning naming which reading was used, since that
+    walk is right for every run that does not decimate.
+    """
+    freq_labels = [c['labels'].get('Freq') for c in tl_curves]
+    depth_labels = [c['labels'].get('RD') for c in tl_curves]
+
+    if all(v is not None for v in freq_labels + depth_labels):
+        freq_axis = _unique_in_order(freq_labels)
+        depth_axis = _unique_in_order(depth_labels)
+        # Collisions only ever merge two curves onto one slot, never split
+        # one, so a product below the curve count is the whole test.
+        if len(tl_curves) == len(freq_axis) * len(depth_axis):
+            # Both axes are already distinct, so a position lookup keyed on
+            # the label is the ``.index()`` scan without the per-curve walk.
+            freq_pos = {value: i for i, value in enumerate(freq_axis)}
+            depth_pos = {value: i for i, value in enumerate(depth_axis)}
+            return freq_axis, depth_axis, [
+                (freq_pos[f], depth_pos[d])
+                for f, d in zip(freq_labels, depth_labels)
+            ]
+        reason = (
+            f"its {len(tl_curves)} TL curves carry {len(freq_axis)} distinct "
+            f"'Freq:' and {len(depth_axis)} distinct 'RD:' labels, which do "
+            f"not form a full grid — the F7.1 / F9.1 label fields "
+            f"(oasfun22.f:368-370) cannot separate them")
+    else:
+        reason = ("its TL curves carry none of the 'Freq:'/'RD:' labels "
+                  "PLTLOS writes (oasfun22.f:334-337)")
+
+    n_depths = len(receiver_depths)
+    n_freq, remainder = divmod(len(tl_curves), n_depths)
+    if remainder or n_freq == 0:
+        raise FileFormatError(
+            f"{plp_file} carries {len(tl_curves)} TL-vs-range curves, "
+            f"which is not a whole multiple of the {n_depths} receiver "
+            f"depths requested, and {reason}. OAST writes one curve per "
+            f"plotted receiver per frequency (unoast31.f:388, :629-640), so "
+            f"the run does not correspond to this receiver array."
+        )
+    warnings.warn(
+        f"{plp_file}: {reason}, so the curves are attributed to frequencies "
+        f"and depths by position. That reading is wrong for a deck whose "
+        f"receiver record decimates with IDINC > 1 (unoast31.f:630, "
+        f"oaseun31.f:1156), which writes fewer curves than the deck has "
+        f"receivers.",
+        UserWarning,
+        skip_file_prefixes=USER_FRAME_SKIP,
+    )
+    return None, None, [divmod(i, n_depths) for i in range(len(tl_curves))]
+
+
+#: Half of the ``F9.1`` quantum PLTLOS prints the receiver depth label at
+#: (``oasfun22.f:370``): the widest a label can sit from the depth it names.
+_PLP_DEPTH_LABEL_TOLERANCE_M = 0.05
+
+
+def _match_label_depths(depth_labels: list, receiver_depths) -> np.ndarray:
+    """Full-precision depths for the ``RD:`` labels of the plotted curves.
+
+    The label is an ``F9.1`` field, so it names a receiver to 0.1 m. Each
+    label is matched back to the caller's own receiver axis and answered with
+    that value where one lies within half a print quantum, so a decimated run
+    returns the depths that were asked for rather than their printed
+    roundings. A label with no such receiver — a ``.plp`` from a different
+    deck — is returned as printed.
+    """
+    axis = np.asarray(receiver_depths, dtype=float).ravel()
+    available = list(range(axis.size))
+    matched = []
+    for label in depth_labels:
+        near = [k for k in available
+                if abs(axis[k] - label) <= _PLP_DEPTH_LABEL_TOLERANCE_M]
+        if near:
+            available.remove(near[0])
+            matched.append(float(axis[near[0]]))
+        else:
+            matched.append(float(label))
+    return np.asarray(matched, dtype=float)
 
 
 #: ``.plp`` curve tag PLTLOS writes for TL vs range: ``optpar(INR)//'TLRAN'``
@@ -251,6 +444,34 @@ _PLP_END_TAG = 'PLTEND'
 
 #: The five PLTWRI fields, in the order oasgun21.f:653-657 writes them.
 _PLTWRI_FIELDS = ('N', 'XOFF', 'DX', 'YOFF', 'DY')
+
+#: The labelled quantities PLTLOS puts in the ``NLAB`` A16 records ahead of
+#: the axis block — ``'Freq:',F7.1,' Hz$'`` / ``'SD:',F9.1,' m$'`` /
+#: ``'RD:',F9.1,' m$'`` (oasfun22.f:335-337, :368-370).
+_PLP_LABEL_KEYS = ('Freq', 'SD', 'RD')
+
+
+def _plp_labels(lines: list, i: int, n_lab: int) -> Dict[str, float]:
+    """Numeric ``Freq:`` / ``SD:`` / ``RD:`` labels of one plot block.
+
+    PLPWRI writes each label as ``FORMAT(1H ,A16)`` (oasgun21.f:779), and
+    the plot programs terminate the text with ``'$'``. A record that is not
+    one of :data:`_PLP_LABEL_KEYS` followed by a number is skipped: the
+    label list is free text that other routines fill differently.
+    """
+    labels: Dict[str, float] = {}
+    for line in lines[i:i + n_lab]:
+        key, sep, tail = line.strip().rstrip('$').partition(':')
+        if not sep or key.strip() not in _PLP_LABEL_KEYS:
+            continue
+        tokens = tail.split()
+        if not tokens:
+            continue
+        try:
+            labels[key.strip()] = float(tokens[0])
+        except ValueError:
+            continue
+    return labels
 
 
 def _plp_value(plp_file: Path, lines: list, i: int, expect: str) -> float:
@@ -281,6 +502,21 @@ def _plp_value(plp_file: Path, lines: list, i: int, expect: str) -> float:
         ) from e
 
 
+def _check_plp_count(plp_file: Path, i: int, name: str, value: int,
+                     n_lines: int) -> None:
+    """Reject a ``.plp`` DO-loop bound that cannot describe the file.
+
+    The positional walk advances by counts the file supplies, so a negative
+    one moves the cursor backwards and the walk never reaches ``PLTEND``.
+    """
+    if value < 0 or i + value > n_lines:
+        raise FileFormatError(
+            f"{plp_file}: line {i + 1} declares {name}={value}, which no "
+            f"{n_lines}-line file can hold; the file is not an OASES .plp, "
+            f"or the run was truncated."
+        )
+
+
 def _parse_oast_plp(plp_file: Path) -> list:
     """Parse an OASES ``.plp`` into its ordered list of curve descriptors.
 
@@ -303,7 +539,9 @@ def _parse_oast_plp(plp_file: Path) -> list:
     -------
     list of dict
         One entry per PLTWRI record, in file order, with keys ``tag`` (the
-        6-character ``OPTION(2)``, e.g. ``'NTLRAN'``), ``index`` (position in
+        6-character ``OPTION(2)``, e.g. ``'NTLRAN'``), ``labels`` (the
+        block's numeric ``Freq:`` / ``SD:`` / ``RD:`` records, see
+        :func:`_plp_labels`), ``index`` (position in
         the ``.plt`` block sequence), ``n``, ``xoff``, ``dx``, ``yoff``,
         ``dy``. Offsets/increments are in the plot's own x units — km for a
         TL-vs-range curve, whose axis PLTLOS labels ``'Range (km)$'``
@@ -333,8 +571,14 @@ def _parse_oast_plp(plp_file: Path) -> list:
             )
         i += 3                                    # OPTION, PTIT, TITLE
         n_lab = int(_plp_value(plp_file, lines, i, 'NUMBER OF LABELS'))
+        # NLAB and NC are the file's own DO-loop bounds (oasgun21.f:614,
+        # :653). A negative NLAB walks the cursor backwards over records it
+        # has already read, which never terminates.
+        _check_plp_count(plp_file, i, 'NLAB', n_lab, len(lines))
+        labels = _plp_labels(lines, i + 1, n_lab)
         i += 1 + n_lab + _PLP_AXIS_RECORDS
         n_curves = int(_plp_value(plp_file, lines, i, 'NC'))
+        _check_plp_count(plp_file, i, 'NC', n_curves, len(lines))
         i += 1
         for _ in range(n_curves):
             fields = {name: _plp_value(plp_file, lines, i + k, name)
@@ -347,6 +591,7 @@ def _parse_oast_plp(plp_file: Path) -> list:
             writes_block = (dx == 0.0) or (dy == 0.0)
             curves.append({
                 'tag': tag,
+                'labels': labels,
                 'index': n_blocks if writes_block else None,
                 'n': int(fields['N']),
                 'xoff': fields['XOFF'],
@@ -358,7 +603,11 @@ def _parse_oast_plp(plp_file: Path) -> list:
     else:
         raise FileFormatError(
             f"{plp_file}: no {_PLP_END_TAG} record — the run did not finish "
-            f"writing its plot file."
+            f"writing its plot file.",
+            remediation="Re-run the case and read the binary's stdout: a "
+                        "plot file without its end record means the model "
+                        "died mid-write, so the real failure is in that "
+                        "output rather than in this file.",
         )
 
     if not curves:
@@ -458,8 +707,10 @@ def read_oasn_covariance(
 
     Notes
     -----
-    Record length is 8 bytes on most systems, but may be 2 words on some
-    (e.g., DEC workstations). This function assumes 8-byte records.
+    Each record holds one COMPLEX: PUTXSM opens the file with ``RECL = 2 *
+    ldaun`` (``oasmun21_bin.f:346``), where DASREC (``oashun21.f:667-693``)
+    probes how many RECL units a 4-byte word takes on the host compiler, so
+    the record is 8 bytes whether RECL counts words or bytes.
 
     Examples
     --------
@@ -470,7 +721,12 @@ def read_oasn_covariance(
     filepath = Path(filepath)
 
     if not filepath.exists():
-        raise FileFormatError(f"OASN covariance file not found: {filepath}")
+        raise FileFormatError(
+            f"OASN covariance file not found: {filepath}",
+            remediation="Re-run OASN with 'N' in the option string: the "
+                        "covariance matrices reach the .xsm file only under "
+                        "that letter.",
+        )
 
     # One COMPLEX per record. PUTXSM opens the file with ``RECL = 2 * ldaun``
     # (oasmun21_bin.f:346), where DASREC (oashun21.f:667-693) probes how many
@@ -628,7 +884,12 @@ def read_oasn_replicas(
     filepath = Path(filepath)
 
     if not filepath.exists():
-        raise FileFormatError(f"OASN replica file not found: {filepath}")
+        raise FileFormatError(
+            f"OASN replica file not found: {filepath}",
+            remediation="Re-run OASN with 'R' in the option string: the "
+                        "replica fields reach the .rpo file only under that "
+                        "letter.",
+        )
 
     try:
         with open(filepath, 'rb') as f:
@@ -811,7 +1072,13 @@ def read_oasp_trf(
     filepath = Path(filepath)
 
     if not filepath.exists():
-        raise FileFormatError(f"OASP transfer function file not found: {filepath}")
+        raise FileFormatError(
+            f"OASP transfer function file not found: {filepath}",
+            remediation="Check the OASP run completed: the .trf is its "
+                        "primary output, so a missing one means the binary "
+                        "stopped before writing it and its stdout carries "
+                        "the reason.",
+        )
 
     depths = np.atleast_1d(np.asarray(receiver_depths, dtype=float))
 
@@ -909,7 +1176,11 @@ def _read_oasp_trf_binary(filepath: Path, receiver_depths: np.ndarray) -> Dict:
                 f"{filepath}: header declares {nrd} receiver depths "
                 f"(RD={rd:g} m, RDLOW={rdlow:g} m) but {receiver_depths.size} "
                 f"were supplied; the file does not belong to this receiver "
-                f"array."
+                f"array.",
+                remediation=f"Pass the depths this file was written on — "
+                            f"OASES lays them out uniformly, so "
+                            f"receiver_depths=np.linspace({rd:g}, {rdlow:g}, "
+                            f"{nrd}) reproduces them.",
             )
 
         r0, rspace, nplots = _read_fortran_record(f, 'ffi', endian=endian)
@@ -958,12 +1229,14 @@ def _read_oasp_trf_binary(filepath: Path, receiver_depths: np.ndarray) -> Dict:
         # the caller.) Anything else is a wrong-endianness or truncated file.
         pos = f.tell()
         marker = f.read(4)
-        data_fmt = f'{2 * nout}f'
+        data_bytes = 2 * nout * 4
+        data_ftype = 'f4'
         out_dtype = np.complex64
         if len(marker) == 4:
             (rec_bytes,) = struct.unpack(endian + 'i', marker)
             if rec_bytes == 2 * nout * 8:
-                data_fmt = f'{2 * nout}d'      # double-precision COMPLEX*16
+                data_bytes = 2 * nout * 8      # double-precision COMPLEX*16
+                data_ftype = 'f8'
                 out_dtype = np.complex128
             elif rec_bytes != 2 * nout * 4:
                 raise FileFormatError(
@@ -1003,12 +1276,39 @@ def _read_oasp_trf_binary(filepath: Path, receiver_depths: np.ndarray) -> Dict:
         f.seek(cur)
         _bound_counts(filepath, file_size, 16, nf=nf, nplots=nplots, nrd=nrd)
 
-        transfer_function = np.zeros((nf, nplots, nrd), dtype=out_dtype)
-        for j in range(nf):
-            for jrh in range(nplots):
-                for jrv in range(nrd):
-                    rec = _read_fortran_record(f, data_fmt, endian=endian)
-                    transfer_function[j, jrh, jrv] = complex(rec[0], rec[1])
+        # The nout == 1 pin above fixes every data record at the same
+        # ``[marker][re im][marker]`` frame, and CFFX writes them back to back
+        # over (JRH, JRV) inside the frequency loop (oasiun23.f:305-311), so
+        # the whole block reads in one strided pass rather than three
+        # ``f.read``/``struct.unpack`` pairs per record. The .rpo replicas
+        # at :932 can compare their marker against the constant 8 because
+        # PUTREP writes COMPLEX*8 only; a .trf is COMPLEX*8 or COMPLEX*16, so
+        # the marker checked here is the payload width detected above and
+        # hardcoding 8 would reject every double-precision file.
+        n_total = nf * nplots * nrd
+        rec_dt = np.dtype([
+            ('m1', endian + 'i4'),
+            ('re', endian + data_ftype),
+            ('im', endian + data_ftype),
+            ('m2', endian + 'i4'),
+        ])
+        flat = np.fromfile(f, dtype=rec_dt, count=n_total)
+        if flat.size < n_total:
+            raise FileFormatError(
+                f"{filepath}: truncated transfer function — expected "
+                f"{n_total} data records of {data_bytes + 8} bytes, got "
+                f"{flat.size}"
+            )
+        if np.any(flat['m1'] != data_bytes) or np.any(flat['m2'] != data_bytes):
+            raise FileFormatError(
+                f"Fortran record marker mismatch: .trf data records are not "
+                f"all framed by the expected {data_bytes}-byte payload length "
+                f"(wrong endianness or truncated file)"
+            )
+        transfer_function = np.empty(n_total, dtype=out_dtype)
+        transfer_function.real = flat['re']
+        transfer_function.imag = flat['im']
+        transfer_function = transfer_function.reshape(nf, nplots, nrd)
 
     # IPARM holds slot numbers, so compare against the table's keys.
     if omegim != 0.0:
@@ -1020,7 +1320,7 @@ def _read_oasp_trf_binary(filepath: Path, receiver_depths: np.ndarray) -> Dict:
             f"— because the synthesis does not undo the contour. Re-run "
             f"with option 'J' or pinned nw_samples >= 1 for a real "
             f"frequency axis.",
-            UserWarning, stacklevel=2,
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
         )
     unnamed = sorted(set(iparm) - set(_OASP_OUTPUT_PARAM_LETTERS.keys()))
     if unnamed:
@@ -1100,7 +1400,12 @@ def read_oasr_reflection_coefficients(
     filepath = Path(filepath)
 
     if not filepath.exists():
-        raise FileFormatError(f"OASR reflection coefficient file not found: {filepath}")
+        raise FileFormatError(
+            f"OASR reflection coefficient file not found: {filepath}",
+            remediation="Re-run OASR with 'T' in the option string: the "
+                        "reflection coefficient table reaches the .rco/.trc "
+                        "files only under that letter.",
+        )
 
     # Auto-detect format from extension
     if format_type == 'auto':
@@ -1153,7 +1458,8 @@ def read_oasr_reflection_coefficients(
                             f"{filepath}: frequency header {i_freq + 1} of "
                             f"{n_freq} is malformed or missing "
                             f"({raw_header.strip()!r}) — the file is "
-                            f"truncated or not a .rco.")
+                            f"truncated or not a valid OASR "
+                            f"{filepath.suffix or '.rco/.trc'} table.")
                 else:
                     freq = float(freq_header[0])
                     n_samples = int(freq_header[1])
@@ -1245,6 +1551,17 @@ def read_oases_rhs_header(filepath: Union[str, Path]) -> Dict:
         (``NWVNO``), ``interface`` (``IN1``, 1-based OASES layer index).
     """
     filepath = Path(filepath)
+
+    if not filepath.is_file():
+        raise FileFormatError(
+            f"OASES .rhs mean-field file not found: {filepath}",
+            remediation="Re-run the producer with 's' in the option string, "
+                        "over an environment carrying a rough interface: "
+                        "SCTRHS skips every interface with ROUGH2 < 1e-10 "
+                        "(oaseun31.f:2310), so a smooth deck writes no .rhs "
+                        "even under 's'.",
+        )
+
     try:
         with open(filepath, 'rb') as f:
             probe = f.read(4)

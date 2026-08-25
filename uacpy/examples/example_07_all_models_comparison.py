@@ -35,11 +35,14 @@ FEATURES DEMONSTRATED:
 """
 
 import sys
+import os
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Repo root, so ``import uacpy`` resolves from a source checkout.
+sys.path.insert(0, str(Path(__file__).parents[2]))
 
-OUTPUT_DIR = Path(__file__).parent / 'output'
-OUTPUT_DIR.mkdir(exist_ok=True)
+OUTPUT_DIR = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
+                  or Path(__file__).parent / 'output')
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 import numpy as np  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
@@ -268,7 +271,8 @@ def main():
     print("  ✓ Shared colorbar for multi-panel comparisons (show_colorbar=False)")
     print("  ✓ Fixed TL limits, 20 to 120 dB")
     print("  ✓ Contour overlays at 70, 90 dB")
-    print("  ✓ jet_r colormap (blue=good, red=poor) - AT standard")
+    print("  ✓ jet_r colormap (red=low TL/loud, blue=high TL/quiet)"
+          " - AT standard")
     print("\n  All models tested with realistic, complex environment!")
 
     print("\n✓ Example 07 complete\n")

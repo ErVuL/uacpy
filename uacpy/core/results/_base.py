@@ -9,6 +9,7 @@ import numpy as np
 from typing import Optional, Dict, Any, Tuple, Union
 
 from uacpy.core.constants import PRESSURE_FLOOR
+from uacpy.core.exceptions import ConfigurationError
 
 
 def _complex_to_db(data: np.ndarray) -> np.ndarray:
@@ -147,6 +148,12 @@ _DOCUMENTED_METADATA: Dict[Tuple[str, str], Tuple[type, str]] = {
     ),
     ('Kraken', 'shd_file'): (
         str, 'Kraken pressure-field output (.shd) from the field.exe step.'
+    ),
+    ('Kraken', 'field_prt_file'): (
+        str, "field.exe's own diagnostic log — field.f90 hard-codes the "
+        "name field.prt, so it is distinct from the modes run's "
+        '<base_name>.prt recorded as prt_file. Attached only when '
+        'cleanup=False and the log exists.'
     ),
     ('Kraken', 'mode_coupling'): (
         str, "'adiabatic', 'coupled', or 'none' (range-independent run)."
@@ -341,6 +348,11 @@ _DOCUMENTED_METADATA: Dict[Tuple[str, str], Tuple[type, str]] = {
         'True when the returned field was resampled onto the user '
         'receiver grid; False / absent when the native grid was kept.'
     ),
+    ('OAST', 'frequencies'): (
+        object,
+        'Frequencies the .plp curves were plotted at, read back from their '
+        'Freq: labels (one entry per frequency block).'
+    ),
     ('OAST', 'n_frequencies'): (
         int,
         'Number of frequency blocks in the .plt file (multi-frequency '
@@ -483,6 +495,11 @@ _DOCUMENTED_METADATA: Dict[Tuple[str, str], Tuple[type, str]] = {
         'Field', 'The OASP mean-field Result the .rhs came from, kept so the '
         'coherent field need not be recomputed.'
     ),
+    ('OASSP', 'source_depth'): (
+        float, 'Source depth (m) read from the .trf header — the realization '
+        'is returned in OASP\'s .trf format, so it carries OASP\'s header '
+        'fields.'
+    ),
 }
 
 
@@ -568,6 +585,26 @@ class Result:
             )
         else:
             self.frequencies = None
+        # Membership-checked but stored unchanged: the consumers compare it
+        # against the plain strings (``field.py``'s IFFT guard reads
+        # ``== 'time_domain_native'``), which the enum members satisfy through
+        # their str base, so both a member and its value are accepted and
+        # neither is rewritten into the other. A value outside the enum would
+        # pass that comparison silently and defeat the guard.
+        if phase_reference is not None:
+            try:
+                PhaseReference(phase_reference)
+            except (ValueError, TypeError):
+                raise ConfigurationError(
+                    f"{type(self).__name__}: phase_reference="
+                    f"{phase_reference!r} is not a known phase convention; "
+                    f"pass one of "
+                    f"{[m.value for m in PhaseReference]} (or the "
+                    f"PhaseReference member). An unrecognised value reads as "
+                    f"'not time_domain_native' everywhere downstream, so the "
+                    f"IFFT/synthesis guards would let a time-domain payload "
+                    f"through as a transfer function."
+                ) from None
         self.phase_reference: Optional[str] = phase_reference
         self.metadata: Dict[str, Any] = dict(metadata) if metadata else {}
 
@@ -632,6 +669,10 @@ class Result:
         Dispatches on result type; concrete subclasses may override. ``kwargs``
         are forwarded to the selected plotter.
         """
+        # Deferred into the body: ``uacpy.visualization`` imports
+        # ``uacpy.core`` at module scope, so this line at file scope makes
+        # ``import uacpy`` raise ImportError. docs/DEV.md section 7 records
+        # the inversion.
         from uacpy.visualization import plots
         return plots.plot_result(self, **kwargs)
 
@@ -642,11 +683,11 @@ class Result:
         expected type (if uacpy knows about it), and a one-line
         description. ``Bounce``'s ``'c_low'`` lookup, for example::
 
-            >>> ref = Bounce(work_dir=tmp).run(env, src, rcv)
-            >>> ref.list_metadata()['c_low']
-            {'value_type': 'float',
-             'documented_type': 'float',
-             'description': 'Lower phase-speed bound (m/s) passed to Bounce.'}
+            ref = Bounce(work_dir=tmp).run(env, src, rcv)
+            ref.list_metadata()['c_low']
+            # {'value_type': 'float',
+            #  'documented_type': 'float',
+            #  'description': 'Lower phase-speed bound (m/s) passed to Bounce.'}
 
         Undocumented keys still appear (with ``documented_type=None``
         and ``description=None``) so callers can see everything the

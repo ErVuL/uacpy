@@ -197,3 +197,30 @@ def test_module_all_covers_what_the_package_reexports():
     # fetch_environment calls, so it must also resolve on uacpy.data.
     assert 'sea_ice_surface_transect' in data.__all__
     assert callable(data.sea_ice_surface_transect)
+
+
+@pytest.mark.parametrize('bad', [1, 0, -3])
+def test_max_points_below_two_is_refused(bad):
+    from uacpy.data.bathymetry import bathy_transect_plan
+    from uacpy.data.sound_speed import ssp_transect_plan
+    # max_points=1 resolved 'auto' to a one-waypoint transect, ranges_m=[0.0].
+    with pytest.raises(ConfigurationError, match='max_points'):
+        bathy_transect_plan((0.0, 0.0), (1.0, 0.0), max_points=bad)
+    with pytest.raises(ConfigurationError, match='max_points'):
+        ssp_transect_plan((0.0, 0.0), (1.0, 0.0), max_points=bad)
+
+
+def test_max_points_two_plans_a_transect():
+    from uacpy.data.bathymetry import bathy_transect_plan
+    plan = bathy_transect_plan((0.0, 0.0), (1.0, 0.0), max_points=2)
+    assert plan['n_points'] == 2
+    assert plan['ranges_m'][0] == 0.0 and plan['ranges_m'][-1] > 0.0
+
+
+def test_range_dependent_bottom_refuses_a_one_point_budget():
+    from uacpy.core.bottom import BoundaryProperties
+    from uacpy.data.sediment import range_dependent_bottom_along
+    with pytest.raises(ConfigurationError, match='max_points'):
+        range_dependent_bottom_along(
+            lambda lat, lon: BoundaryProperties.from_grain_size(3.0),
+            (0.0, 0.0), (1.0, 0.0), max_points=1, source_label='test')

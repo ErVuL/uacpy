@@ -77,21 +77,36 @@ def spread(symbols, code):
     s = np.asarray(symbols, dtype=complex).ravel()
     c = np.asarray(code, dtype=complex).ravel()
     if c.size < 1:
-        raise ConfigurationError("spread: empty code")
+        raise ConfigurationError(
+            "spread: empty code (0 chips); pass the spreading sequence the "
+            "receiver will despread with, e.g. m_sequence(n_stages, taps).")
     return np.kron(s, c)
 
 
 def despread(chips, code):
     """Correlate chips against ``code`` per symbol period -> symbol estimates.
 
+    The correlation is normalised by the code energy ``sum(|c|^2)``, so
+    ``despread(spread(s, c), c)`` returns ``s`` itself for any code amplitude
+    (dividing by the chip count is equivalent only for unit-modulus codes).
     A trailing partial symbol (fewer than ``len(code)`` chips) is dropped.
     """
     c = np.asarray(code, dtype=complex).ravel()
     x = np.asarray(chips, dtype=complex).ravel()
+    if c.size < 1:
+        raise ConfigurationError(
+            "despread: empty code (0 chips); pass the same spreading "
+            "sequence spread() was called with.")
+    energy = float(np.sum(np.abs(c) ** 2))
+    if energy == 0.0:
+        raise ConfigurationError(
+            "despread: code energy sum(|c|^2) is zero (every chip is 0), so "
+            "the per-symbol correlation carries no signal and the "
+            "normalisation is undefined")
     n = c.size
     nsym = x.size // n
     blocks = x[: nsym * n].reshape(nsym, n)
-    return (blocks @ np.conj(c)) / n
+    return (blocks @ np.conj(c)) / energy
 
 
 def processing_gain_db(code):

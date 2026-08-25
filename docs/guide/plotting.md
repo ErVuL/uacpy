@@ -125,7 +125,7 @@ So the way to control the picture is to slice the field first —
 
 ```python
 def _time_series():
-    """p(depth, range, time) — the field every render branch is drawn from."""
+    """``p(depth, range, time)`` — the field every render branch is drawn from."""
     env, _, _ = shallow_water()
     source = uacpy.Source(depths=25.0,
                           frequencies=np.arange(150.0, 450.1, 0.5))
@@ -140,9 +140,12 @@ series = _time_series()
 panel = series.isel(depth=0)     # coords {range, time}
 
 fig, axes = plt.subplots(1, 3, figsize=(13.5, 4.2))
-panel.plot(ax=axes[0], title="2 axes  →  heatmap")
-panel.at(range=CUT_RANGE).plot(ax=axes[1], title="1 axis  →  line cut")
-panel.plot(stacked=True, ax=axes[2], title="stacked=True  →  offset traces")
+panel.plot(ax=axes[0],
+           title="2 axes  →  heatmap")
+panel.at(range=CUT_RANGE).plot(ax=axes[1],
+                               title="1 axis  →  line cut")
+panel.plot(stacked=True, ax=axes[2],
+           title="stacked=True  →  offset traces")
 ```
 
 A field with **three or more** surviving axes has no picture, and says so:
@@ -201,9 +204,9 @@ otherwise.
 |---|---|---|
 | `'db'` | the dB view (TL for a pressure field) | fixed 20–120 dB scale (§4) |
 | `'mag_db'` | 20·log10\|H\| = −TL, dB | TL colormap, autoscaled |
-| `'mag'` | \|p\|, linear (complex fields only) | TL colormap, autoscaled |
+| `'mag'` | \|p\|, linear (complex fields only) | linear colormap (`seismic`), anchored at zero |
 | `'phase'` | arg(p), radians (complex fields only) | `twilight`, fixed ±π |
-| `'real'`, `'imag'` | Re(p) / Im(p) (`'imag'` complex only) | real time-domain data gets `seismic` clipped to ±RMS |
+| `'real'`, `'imag'` | Re(p) / Im(p) (`'imag'` complex only) | linear colormap (`seismic`), symmetric about zero; real time-domain data is clipped to ±RMS |
 
 ![The heatmap-only knobs](figures/plot_heatmap_knobs.png)
 
@@ -211,9 +214,11 @@ otherwise.
 env, source, receiver = deep_water()
 model = Bellhop(n_beams=3000)
 p = model.run(env, source, receiver)
-incoherent = model.run(env, source, receiver, run_mode=RunMode.INCOHERENT_TL)
+incoherent = model.run(env, source, receiver,
+                       run_mode=RunMode.INCOHERENT_TL)
 
-p.plot(env=env, ax=axes[0][0], title='default — fixed 20-120 dB TL scale')
+p.plot(env=env, ax=axes[0][0],
+       title='default — fixed 20-120 dB TL scale')
 p.plot(env=env, ax=axes[0][1], vmin=70.0, vmax=110.0, cmap='viridis',
        title="vmin=70, vmax=110, cmap='viridis'")
 p.plot(env=env, ax=axes[1][0], value='phase',
@@ -248,10 +253,13 @@ receiver = uacpy.Receiver(depths=np.linspace(1.0, 60.0, 80),
                           ranges=np.linspace(50.0, 5000.0, 250))
 tl = Bellhop(n_beams=3000).run(env, source, receiver).to_db()
 
-tl.plot(ax=axes[0], show_colorbar=False)
-tl.plot(env=env, ax=axes[1], show_colorbar=False)
+tl.plot(ax=axes[0], show_colorbar=False,
+        title='tl.plot()  —  depth axis spans the receiver grid')
+tl.plot(env=env, ax=axes[1], show_colorbar=False,
+        title='tl.plot(env=env)  —  seafloor drawn, axis extended')
 tl.plot(env=env, source=source, receiver=receiver, ax=axes[2],
-        show_colorbar=False)
+        show_colorbar=False,
+        title='+ source=, receiver=  —  the run geometry')
 ```
 
 The receiver grid stops at 60 m in a 100 m channel, which makes the difference
@@ -299,9 +307,11 @@ deep = Bellhop(n_beams=3000).run(env_d, src_d, rcv_d).to_db()
 for col, (field, env, name) in enumerate(
         [(shallow, env_s, 'Shallow, 200 Hz, 5 km'),
          (deep, env_d, 'Deep (Munk), 50 Hz, 100 km')]):
-    field.plot(env=env, ax=axes[0][col])                    # default scale
+    field.plot(env=env, ax=axes[0][col],
+               title=f'{name} — default scale')
     lo, hi = np.nanpercentile(field.data, [2.0, 98.0])
-    field.plot(env=env, ax=axes[1][col], vmin=lo, vmax=hi)  # per-panel limits
+    field.plot(env=env, ax=axes[1][col], vmin=lo, vmax=hi,
+               title=f'{name} — vmin/vmax per panel')
 ```
 
 The top row says something true: the deep-water field at 100 km is roughly
@@ -340,7 +350,8 @@ bellhop = Bellhop(n_beams=3000).run(env, source, receiver).to_db()
 kraken = Kraken().run(env, source, receiver).to_db()
 
 fig = plt.figure(figsize=(11.0, 6.4))
-gs = fig.add_gridspec(2, 2, width_ratios=[1.0, 2.2], hspace=0.38, wspace=0.24)
+gs = fig.add_gridspec(2, 2, width_ratios=[1.0, 2.2],
+                      hspace=0.38, wspace=0.24)
 
 env.ssp.plot(ax=fig.add_subplot(gs[:, 0]), title='env.ssp.plot()')
 ax_tl = fig.add_subplot(gs[0, 1])
@@ -421,11 +432,16 @@ bits = rng.integers(0, 2, size=4 * 600)
 symbols = awgn(mod.modulate(bits), 18.0, rng=rng)
 
 uacpy.plot.plot_spectrogram(f_s, t_s, S, ax=axes[0][0], vmin=30, vmax=85,
-                            ymax=800.0)
-uacpy.plot.plot_psd(f_p, P, ax=axes[0][1], ymin=0, ymax=80)
+                            ymax=800.0,
+                            title='plot_spectrogram — chirp at 1 km')
+uacpy.plot.plot_psd(f_p, P, ax=axes[0][1], ymin=0, ymax=80,
+                    title='plot_psd — same trace')
 uacpy.plot.plot_constellation(constellation('16qam'), ax=axes[1][0],
-                              scheme='16qam')
-uacpy.plot.plot_scatter(symbols, ax=axes[1][1], ideal=constellation('16qam'))
+                              scheme='16qam',
+                              title='plot_constellation — 16-QAM map')
+uacpy.plot.plot_scatter(symbols, ax=axes[1][1],
+                        ideal=constellation('16qam'),
+                        title='plot_scatter — received, 18 dB SNR')
 ```
 
 The pairing is one-to-one and mechanical: `spectrogram` → `plot_spectrogram`,
@@ -458,7 +474,7 @@ detection probability and the ROC.
 All 50 plotters in `uacpy.plot.__all__` — the 8 remaining names in `__all__`
 are the submodules themselves. **ax** marks a single-axes plotter you can
 compose with. Every entry takes `title=` except `plot_result` (it forwards
-yours), `save_animation` and the two `draw_*` overlays; every entry takes
+yours) and the two `draw_*` overlays; every entry takes
 `figsize=` except `plot_result`, `animate_field`, the two `draw_*` overlays and
 `plot_time_snapshots`, which sizes itself from `figsize_per_panel=` instead.
 
@@ -575,9 +591,9 @@ closes any figure a failed call opened. Nothing half-drawn survives in
 `plt.get_fignums()`.
 
 **`ConfigurationError` is what a bad plot call raises**, including for degenerate
-array input (empty, mismatched lengths, wrong shape) that would otherwise leak a
-bare `IndexError` or `ValueError` from matplotlib. That same guard does the
-relabelling. A genuine wrong-type call still raises `TypeError` — that is a bug
+input (empty or mismatched-length arrays, wrong shapes, a missing arrival key)
+that would otherwise leak a bare `IndexError`, `KeyError` or `ValueError` from
+matplotlib. That same guard does the relabelling. A genuine wrong-type call still raises `TypeError` — that is a bug
 in the caller, not bad input.
 
 **Importing `uacpy.visualization` does not touch `matplotlib.rcParams`.** Your

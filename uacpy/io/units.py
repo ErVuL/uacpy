@@ -4,28 +4,18 @@ RAM file formats (which variously expect km, kHz, or degrees).
 
 Every writer that emits a km-on-disk axis goes through ``m_to_km``;
 every reader that returns a metres-API axis goes through ``km_to_m``.
-Same for phase columns via ``deg_to_rad``. Centralising the conversions
-makes the "did I convert?" question grep-able.
+Same for phase columns via ``deg_to_rad`` on the way in and ``rad_to_deg``
+on the way out. Centralising the conversions makes the "did I convert?"
+question grep-able.
+
+The four functions are defined in :mod:`uacpy.core.units` — they are pure
+arithmetic with no file format in them, and layers above ``io`` label axes
+with the same conversions — and re-exported here under their own names, so
+``from uacpy.io.units import m_to_km`` resolves to the one definition.
 """
 
 from __future__ import annotations
 
-import numpy as np
+from uacpy.core.units import deg_to_rad, km_to_m, m_to_km, rad_to_deg
 
-
-def km_to_m(x):
-    """Multiply a km axis by 1000 to get metres."""
-    return np.asarray(x, dtype=float) * 1000.0
-
-
-def m_to_km(x):
-    """Divide a metres axis by 1000 to get km."""
-    return np.asarray(x, dtype=float) / 1000.0
-
-
-def deg_to_rad(x):
-    """Convert degrees to radians."""
-    return np.asarray(x, dtype=float) * (np.pi / 180.0)
-
-
-__all__ = ["km_to_m", "m_to_km", "deg_to_rad"]
+__all__ = ["km_to_m", "m_to_km", "deg_to_rad", "rad_to_deg"]

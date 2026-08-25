@@ -20,6 +20,7 @@ from uacpy.io.ramsurf_writer import write_ramin
 from uacpy.models import RAM, RunMode
 from uacpy.core.exceptions import (
     ConfigurationError,
+    FileFormatError,
     ModelExecutionError,
     UnsupportedFeatureError,
 )
@@ -928,7 +929,7 @@ class TestCollinsArrayLimits:
         needed, mz, _ = m._collins_mz_budget('ramgeo', field.metadata['zmax'])
         assert needed(field.metadata['dz']) <= mz
 
-    def test_broadband_pinned_dz_past_mz_is_still_rejected(self):
+    def test_broadband_pinned_dz_past_mz_is_rejected(self):
         """Coarsening applies only to an auto grid; a pinned ``dz`` the
         binary cannot hold is still an error the caller must resolve."""
         from uacpy.core.exceptions import ConfigurationError
@@ -1201,7 +1202,7 @@ class TestBackendIndependentResultShape:
         ok = np.isfinite(a) & np.isfinite(b)
         assert np.nanmedian(np.abs(a[ok] - b[ok])) < 1.0
 
-    def test_collins_tl_still_reproduces_the_binary_grid(self):
+    def test_collins_tl_reproduces_the_binary_grid(self):
         """Deriving TL from the complex envelope must not shift the level.
 
         Interpolating the complex field instead of its modulus biases the
@@ -1680,7 +1681,7 @@ def _bottom_props(model, env, work_dir, freq=100.0):
 
 class TestSedimentSpeedFollowsTheLocalSeafloor:
     """mpiramS rebuilds the sediment speed as ``csg = cwg + cs``
-    (``mpiramS/src/ram.f90:332-333``) against the water column at the *local*
+    (``mpiramS/src/ram.f90:345-346``) against the water column at the *local*
     seafloor, so the offset uacpy writes must be referenced to the same
     column."""
 
@@ -1696,7 +1697,7 @@ class TestSedimentSpeedFollowsTheLocalSeafloor:
     def _written_csg(model, env, tmp_path, freq=100.0):
         """``(range, z_ctrl, csg)`` per written sediment profile.
 
-        ``csg = cwg + cs`` (``ram.f90:332-333``) is what mpiramS rebuilds, so
+        ``csg = cwg + cs`` (``ram.f90:345-346``) is what mpiramS rebuilds, so
         it is the quantity the deck has to get right — not the raw offset.
         """
         dz = model._effective_dz()
@@ -1728,7 +1729,7 @@ class TestSedimentSpeedFollowsTheLocalSeafloor:
             assert csg[1:] == pytest.approx(1600.0, abs=1e-6)
 
     @pytest.mark.requires_binary
-    def test_flat_environment_still_writes_one_profile(self, tmp_path):
+    def test_flat_environment_writes_one_profile(self, tmp_path):
         env = _env(bottom=_fluid_bottom())
         model = RAM(backend='mpiramS', verbose=False)
         assert model._varying_seafloor_speeds(env) == (None, None)
@@ -1980,7 +1981,7 @@ class TestCollinsPlotDepthReachesTheDeepestReceiver:
         assert RAM._collins_deepest_output(zmplt, dz, int(ndz), kind) >= 100.0
 
     @pytest.mark.requires_binary
-    def test_decimated_output_still_reaches_the_seafloor(self, tmp_path):
+    def test_decimated_output_reaches_the_seafloor(self, tmp_path):
         """``depth_decimation`` strides the same loop, so the deepest visited
         index — not ``nzplt`` — is what has to reach the receiver."""
         env = _env(bottom=_fluid_layered_bottom())
@@ -2002,7 +2003,7 @@ class TestCollinsPlotDepthReachesTheDeepestReceiver:
 class TestMpiramsLayeredSubBottomIsNotSmeared:
     """``profl`` puts the sediment control points at ``zwork = [0, d,
     d + k·sedlayer/(nzs-3), max(zg(n), …)]`` and interpolates them linearly
-    (``mpiramS/src/ram.f90:321-337``, ``gorp`` at ``:360-390``). Only one control
+    (``mpiramS/src/ram.f90:334-350``, ``gorp`` at ``:373-403``). Only one control
     point lies between ``d + sedlayer`` and the domain floor, so whatever
     contrast sits between the last two points is spread over the entire
     sub-bottom. The half-space must therefore already be reached at
@@ -2095,7 +2096,7 @@ class TestMpiramsLayeredSubBottomIsNotSmeared:
 class TestMpiramsAbsorbingLayerHasTheRequestedWidth:
     """``profl`` interpolates the sediment arrays linearly between control
     point ``nzs-1`` at ``seafloor + sedlayer`` and control point ``nzs`` at
-    ``zmax`` (``mpiramS/src/ram.f90:321-329,332-337``), and only the last point
+    ``zmax`` (``mpiramS/src/ram.f90:334-342,345-350``), and only the last point
     carries ``absorbing_layer_attn``. The absorbing layer is therefore the span
     ``[seafloor + sedlayer, zmax]``, so ``sedlayer`` is what sets its width.
 
@@ -2193,7 +2194,7 @@ class TestRangeSegmentMarkersAreMidpoints:
     """``if(r.ge.rp)`` (``ramgeo1.5.f:359``, ``ramsurf1.5.f:364``,
     ``rams0.5.f:332``) switches to a section at its marker range, while
     mpiramS marches with the nearest profile (``minloc(abs(rp-rint))``,
-    ``mpiramS/src/ram.f90:218,228``) — the rule ``Bottom.at`` declares. The
+    ``mpiramS/src/ram.f90:231,241``) — the rule ``Bottom.at`` declares. The
     marker is the midpoint so the two agree."""
 
     def _env(self, breaks):
@@ -2349,7 +2350,7 @@ class TestThetaMaxIncludesTheBottomSlope:
 @pytest.mark.requires_binary
 class TestSubBottomIsIndependentOfSspTabulationDepth:
     """``profl`` rebuilds the sediment speed as ``csg = cwg + cs``
-    (``mpiramS/src/ram.f90:332-333``) at every depth, so a water gradient
+    (``mpiramS/src/ram.f90:345-346``) at every depth, so a water gradient
     tabulated below the seabed would be added into the sediment unless the
     offset cancels it there. ``_sediment_offsets`` takes ``cs`` per control
     point, which cancels *any* column — so the written SSP stays true and the
@@ -2362,8 +2363,8 @@ class TestSubBottomIsIndependentOfSspTabulationDepth:
     def test_the_written_column_keeps_the_true_ssp(self, tmp_path):
         """Holding it flat below the seabed would corrupt real water on a
         slope: mpiramS picks this column by nearest neighbour
-        (``ram.f90:295-296``) while interpolating the seafloor continuously
-        (``ram.f90:315-317``)."""
+        (``ram.f90:308-309``) while interpolating the seafloor continuously
+        (``ram.f90:328-330``)."""
         env = self._env([(0.0, 1450.0), (400.0, 1550.0)])
         RAM(backend='mpiramS', verbose=False)._prepare_ssp(
             env, tmp_path, 100.0, 0.25)
@@ -2405,7 +2406,7 @@ class TestSubBottomIsIndependentOfSspTabulationDepth:
         deep = tl([(0.0, 1450.0), (400.0, 1550.0)], 'deep')
         cut = tl([(0.0, 1450.0), (100.0, 1475.0)], 'cut')
         # Not bit-identical: uacpy cancels the column with the linear
-        # interpolation it writes, while ``gorp2`` (``ram.f90:296``) splines it
+        # interpolation it writes, while ``gorp2`` (``ram.f90:309``) splines it
         # back onto the grid, so the two tabulations leave a spline-vs-linear
         # residual of order 1e-4 dB rather than exact agreement.
         assert np.nanmax(np.abs(deep - cut)) < 1e-2
@@ -2459,38 +2460,42 @@ class TestMpiramsMarchStepIsRestored:
 
 @pytest.mark.requires_binary
 class TestMpiramsAutoGridIsAccurateEnough:
-    """OPEN DEFECT: mpiramS's auto ``dr`` is far too coarse on a shallow
-    waveguide, and Lytaev's error model does not see it.
+    """mpiramS's auto ``dr`` used to be far too coarse on a shallow waveguide,
+    and Lytaev's error model never saw it.
 
     For the Pekeris case below (100 m water, cb=1700 m/s, 50 Hz, 8 km)
     ``optimize_grid`` returns ``dr = 108.1 m`` — 3.6 wavelengths — whose
-    window-median TL sits 5.75 dB from Kraken at z=20 m, r=6.5-7.1 km. Pinning
-    ``dr`` converges: 50 m → 5.31 dB, 20 m → 0.57 dB, and 10 m / 5 m reproduce
+    window-median TL sat 5.75 dB from Kraken at z=20 m, r=6.5-7.1 km. Pinning
+    ``dr`` converged: 50 m → 5.31 dB, 20 m → 0.57 dB, and 10 m / 5 m reproduce
     20 m exactly. The error model disagrees with all of that — it predicts
     9.37e-4 at ``dr=108`` against 9.05e-4 at ``dr=10``, i.e. essentially no
-    ``dr`` sensitivity — so the grid is chosen on a term that does not govern
-    the accuracy here.
+    ``dr`` sensitivity — so the grid was being chosen on a term that does not
+    govern the accuracy here.
 
-    Unlike ``rams`` (which gets both ``rams_dr_safety_factor`` and a
-    ``dr <= c_min/(5f)`` wavelength cap) mpiramS applies no cap to the
-    optimiser's ``dr``. A blanket wavelength cap is not obviously right
-    either: upstream's own ``ram.in`` marches 50 Hz at ``dr = 500 m``, so
-    large steps are legitimate for the problems RAM was built for.
+    The missing term was not Padé error at all, which is why a wavelength cap
+    never looked right (upstream's own ``ram.in`` marches 50 Hz at
+    ``dr = 500 m``). It was the interaction with the OUTPUT grid, recorded here
+    while unexplained as "at ``dr=60`` the window sits 4.44 dB from Kraken at
+    37.7 m receiver spacing and 0.62 dB at 100 m or 197 m spacing": a ``deltar``
+    longer than the gap between requested output ranges sent the march past
+    each range and then "backward" onto it with a forward propagator, because
+    mpiramS tested the remainder against the shrunk ``dr`` instead of against
+    ``deltar``. That is fixed in ``ram.f90`` itself — the march now lands on
+    every requested range at any ``deltar``, which is what makes the auto grid
+    below answerable on accuracy alone; the mechanism is pinned by
+    :class:`TestMarchLandsOnEachOutputRange`.
 
     The patched march step (see :class:`TestMpiramsMarchStepIsRestored`) is
-    what makes this visible: with the remainder step left unrestored the run
-    silently refines its own grid past the optimiser's ``dr``, so the coarse
-    choice never reaches the physics.
+    what made this visible: with the remainder step left unrestored the run
+    silently refined its own grid past the optimiser's ``dr``, so the coarse
+    choice never reached the physics.
     """
 
     @pytest.mark.slow
-    @pytest.mark.xfail(strict=True, reason=(
-        "mpiramS auto dr = 108 m (3.6 lambda) on a 100 m Pekeris waveguide at "
-        "50 Hz puts the window-median TL 5.75 dB from Kraken; pinning dr=20 m "
-        "gives 0.57 dB and refining further changes nothing. Lytaev's error "
-        "model predicts near-identical error for dr=108 and dr=10, so the cap "
-        "has to come from elsewhere. Fixing it makes this XPASS."))
     def test_the_auto_grid_matches_kraken_as_well_as_a_pinned_one(self):
+        """The 4.5 dB bound sits between the two regimes rather than near
+        either: the uncapped auto grid scored 5.75 dB here and a converged
+        pinned grid scores 0.57 dB."""
         env = _env(bottom=BoundaryProperties(
             acoustic_type='half-space',
             sound_speed=1700.0, density=1.7, attenuation=0.5,
@@ -2703,7 +2708,7 @@ class TestNonGeoacousticBottomsAreRefused:
                            match=r"acoustic_type"):
             RAM().run(env, src, rcv)
 
-    def test_a_real_halfspace_still_validates(self):
+    def test_a_real_halfspace_validates(self):
         env = _env(bottom=_fluid_bottom())
         src = Source(depths=25.0, frequencies=100.0)
         rcv = Receiver(depths=np.array([50.0]), ranges=np.array([1000.0]))
@@ -2801,3 +2806,591 @@ class TestSurfaceNodeReportsTlFloor:
         tl = np.asarray(f.db)
         assert tl[0, 0] == pytest.approx(TL_MAX_DB)
         assert tl[1, 0] < TL_MAX_DB
+
+
+# ─── One mpiramS grid has to serve the whole band ──────────────────────────
+
+
+@pytest.mark.requires_binary  # constructs RAM (resolves its binary)
+class TestMpiramsBroadbandGridSpansTheBand:
+    """mpiramS reads ``deltaz``/``deltar`` once (``peramx.f90:78-79``) and
+    sizes its depth grid once (``icount = floor(zmax/deltaz - 0.5) + 2``,
+    ``:374``) *before* the frequency loop opens at ``:404``, so a single grid
+    marches every bin of the band. Sizing that grid at the band centre leaves
+    the top of the band under-sampled in depth and the absorbing layer short
+    of ``absorbing_layer_width`` wavelengths at the bottom of it, and nothing
+    reports either: the Lytaev error is only ever evaluated at the frequency
+    the grid was sized for.
+
+    The band below is 50-350 Hz over a 100 m isovelocity column, where a
+    centre-frequency grid gives ~9 depth samples per wavelength at 350 Hz
+    (``LAMBDA_PER_DZ_FLOOR`` promises 16) and an absorber 5.7 wavelengths
+    deep at 50 Hz (``absorbing_layer_width`` promises 20)."""
+
+    BAND = np.arange(50.0, 350.1, 10.0)
+    F_MIN, F_MAX = 50.0, 350.0
+    C_WATER = 1500.0
+    DEPTH = 100.0
+    RCV = Receiver(depths=[50.0], ranges=[2000.0])
+
+    def _deck(self, tmp_path, monkeypatch, frequencies,
+              run_mode=RunMode.BROADBAND):
+        """Write the mpiramS deck for ``frequencies`` and stop at the solver.
+
+        Returns ``(deltar, deltaz, zmax)`` — the two grid steps ``in.pe``
+        carries and the domain depth mpiramS reads back off the SSP as
+        ``zmax = maxval(zw)`` (``peramx.f90:371``).
+        """
+        def stop(model_self, *args, **kwargs):
+            raise _SolverStopped()
+
+        monkeypatch.setattr(RAM, '_run_subprocess', stop)
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        env = _env(bottom=_fluid_bottom())
+        src = Source(depths=25.0, frequencies=frequencies)
+        ram = RAM(work_dir=str(tmp_path), cleanup=False, verbose=False)
+        with pytest.raises(_SolverStopped), warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            ram.run(env, src, self.RCV, run_mode=run_mode)
+        lines = (tmp_path / 'in.pe').read_text().splitlines()
+        deltaz, deltar = float(lines[4].split()[0]), float(lines[5].split()[0])
+        zmax = np.loadtxt(tmp_path / 'ssp.dat')[:, 0].max()
+        return deltar, deltaz, zmax
+
+    def test_depth_step_resolves_the_top_of_the_band(
+            self, tmp_path, monkeypatch):
+        _, deltaz, _ = self._deck(tmp_path, monkeypatch, self.BAND)
+        per_wavelength = self.C_WATER / (deltaz * self.F_MAX)
+        assert per_wavelength >= 15.0, (
+            f"deltaz={deltaz} gives {per_wavelength:.1f} depth samples per "
+            f"wavelength at {self.F_MAX} Hz")
+
+    def test_range_step_resolves_the_top_of_the_band(
+            self, tmp_path, monkeypatch):
+        """The Padé error per range step grows with ``k0·dr``, so ``dr`` has
+        to be sized at ``f_max`` too — unlike the Collins path, which trades
+        that accuracy away to keep rams0.5's elastic march short."""
+        deltar, _, _ = self._deck(tmp_path, monkeypatch, self.BAND)
+        env = _env(bottom=_fluid_bottom())
+        ram = RAM(verbose=False)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            dr_top, _ = ram._resolve_mpirams_grid(env, self.F_MAX, 2000.0)
+            dr_bottom, _ = ram._resolve_mpirams_grid(env, self.F_MIN, 2000.0)
+        assert deltar == pytest.approx(dr_top)
+        assert deltar < dr_bottom
+
+    def test_absorbing_layer_is_sized_at_the_bottom_of_the_band(
+            self, tmp_path, monkeypatch):
+        _, _, zmax = self._deck(tmp_path, monkeypatch, self.BAND)
+        below_seafloor = zmax - self.DEPTH
+        # absorbing_layer_width wavelengths at f_min, using the water speed
+        # as a lower bound on the reference speed the model actually uses.
+        wanted = RAM(verbose=False).absorbing_layer_width * (
+            self.C_WATER / self.F_MIN)
+        assert below_seafloor >= wanted, (
+            f"zmax={zmax} leaves {below_seafloor:.0f} m below the seabed, "
+            f"under the {wanted:.0f} m the absorbing layer asks for")
+
+    def test_a_narrowband_run_is_unaffected(self, tmp_path, monkeypatch):
+        """A single source frequency collapses the band onto fc, so the
+        BROADBAND deck must still be the one COHERENT_TL writes."""
+        bb = self._deck(tmp_path / 'bb', monkeypatch, 200.0)
+        tl = self._deck(tmp_path / 'tl', monkeypatch, 200.0,
+                        run_mode=RunMode.COHERENT_TL)
+        assert bb == tl
+
+
+@pytest.mark.requires_binary  # constructs RAM (resolves its binary)
+class TestDiscardedDepthStepDoesNotWarn:
+    """A broadband sweep sizes ``dr`` and ``dz`` at different band edges, so
+    one of the two ``_compute_grid_lytaev`` calls keeps only ``dr``. Its
+    depth-step messages describe a ``dz`` that is thrown away a line later —
+    the ``MAX_DEPTH_POINTS`` cap and the ``dz`` floor — and firing them
+    trains callers to ignore uacpy warnings. ``warn_dz=False`` demotes them
+    to log lines; nothing else about the call changes."""
+
+    @staticmethod
+    def _env():
+        return _env(bottom=_fluid_bottom())
+
+    @staticmethod
+    def _grid(warn_dz):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            # An explicit accuracy is what turns the dz-floor message into a
+            # warning rather than a log line.
+            grid = RAM(verbose=False, accuracy=1e-3)._compute_grid_lytaev(
+                TestDiscardedDepthStepDoesNotWarn._env(), 50.0,
+                max_range=5000.0, kind='mpiramS', warn_dz=warn_dz)
+        return grid, [str(w.message) for w in caught if 'raised dz' in str(w.message)]
+
+    def test_the_kept_call_warns(self):
+        _grid, raised = self._grid(True)
+        assert raised, "the dz-floor warning stopped firing where it applies"
+
+    def test_the_discarded_call_is_quiet(self):
+        _grid, raised = self._grid(False)
+        assert not raised, raised
+
+    def test_the_returned_grid_is_identical_either_way(self):
+        assert self._grid(True)[0] == self._grid(False)[0]
+
+
+# ─── Short / mismatched Collins output ─────────────────────────────────────
+
+
+@pytest.mark.requires_binary  # constructs RAM (resolves its binary)
+class TestShortCollinsOutputIsAudible:
+    """A Collins march that ends before the farthest receiver used to return a
+    partly-NaN Field with no exception and no warning.
+
+    ``_read_lz_records`` stops before a partial trailing record, so a short
+    ``tl.grid`` decodes as a SHORTER RANGE AXIS, and
+    ``_interp_to_receiver_grid`` NaN-fills what lies beyond it. Measured on a
+    5 km ramgeo run truncated to 30% of its bytes: 80% of the Field NaN, and
+    ``np.nanmean(-TL)`` reading 52.68 dB against 58.18 dB true — a plausible
+    number 5.5 dB out. A non-zero exit already raises before the read, so the
+    silence needs short output AND exit 0; truncation is one way there, a
+    binary that ends its march early is another.
+
+    The companion case is the two output files decoding to DIFFERENT lengths,
+    which used to surface as ``operands could not be broadcast together with
+    shapes (51,74) (51,137)`` — naming neither file.
+    """
+
+    DR, DZ = 20.0, 2.0
+    DEPTH = 100.0
+    FULL_RECORDS = 250          # 250 x dr x ndr = the 5000 m farthest receiver
+    RCV = Receiver(depths=np.linspace(10, 90, 9),
+                   ranges=np.linspace(500, 5000, 10))
+
+    @classmethod
+    def _output_bytes(cls, n_records, dtype, fill):
+        """One Collins output file: an int32 ``lz`` header record followed by
+        ``n_records`` data records of ``lz`` samples, each record framed by the
+        4-byte length markers ``_read_lz_records`` walks."""
+        lz = int(round(cls.DEPTH / cls.DZ)) + 1        # covers z = 0..100 m
+        framed = lambda payload: (np.int32(len(payload)).tobytes() + payload
+                                  + np.int32(len(payload)).tobytes())
+        out = framed(np.int32(lz).tobytes())
+        for _ in range(n_records):
+            out += framed(np.full(lz, fill, dtype=dtype).tobytes())
+        return out
+
+    def _run(self, tmp_path, monkeypatch, n_tl, n_pcomplex):
+        """Run ramgeo with the binary replaced by a writer of synthetic output
+        grids ``n_tl`` and ``n_pcomplex`` range records long."""
+        tl_bytes = self._output_bytes(n_tl, 'f8', 60.0)
+        pc_bytes = self._output_bytes(n_pcomplex, 'c16', 1e-3 + 0j)
+
+        def fake_run(model_self, cmd, cwd, **kwargs):
+            Path(cwd, 'tl.grid').write_bytes(tl_bytes)
+            Path(cwd, 'pcomplex.bin').write_bytes(pc_bytes)
+            return _FakeProc()
+
+        monkeypatch.setattr(RAM, '_run_subprocess', fake_run)
+        ram = RAM(verbose=False, backend='ramgeo', dr=self.DR, dz=self.DZ,
+                  work_dir=str(tmp_path), cleanup=False)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            field = ram.run(_env(bottom=_fluid_bottom()),
+                            Source(depths=50.0, frequencies=50.0), self.RCV)
+        return field, [str(w.message) for w in caught]
+
+    def test_full_length_output_is_quiet_and_finite(self, tmp_path,
+                                                    monkeypatch):
+        field, messages = self._run(tmp_path, monkeypatch,
+                                    self.FULL_RECORDS, self.FULL_RECORDS)
+        assert np.isfinite(np.asarray(field.db)).all()
+        assert not [m for m in messages if 'output grid stops' in m], messages
+
+    def test_short_output_warns_naming_both_ranges(self, tmp_path,
+                                                   monkeypatch):
+        field, messages = self._run(tmp_path, monkeypatch,
+                                    self.FULL_RECORDS // 2, self.FULL_RECORDS // 2)
+        short = [m for m in messages if 'output grid stops' in m]
+        assert short, messages
+        assert '2500.0 m' in short[0] and '5000.0 m' in short[0], short[0]
+        assert not np.isfinite(np.asarray(field.db)).all(), (
+            "the truncated march should still NaN-fill beyond its grid")
+
+    def test_mismatched_grid_lengths_raise_naming_both_files(
+            self, tmp_path, monkeypatch):
+        with pytest.raises(FileFormatError) as excinfo:
+            self._run(tmp_path, monkeypatch, 74, 137)
+        message = str(excinfo.value)
+        assert 'tl.grid' in message and 'pcomplex.bin' in message, message
+        assert '(51, 74)' in message and '(51, 137)' in message, message
+
+
+class TestWriteSspFileAcceptsListInput:
+
+    def test_list_speeds_write_one_profile_of_depth_speed_pairs(
+            self, tmp_path):
+        from uacpy.io.mpirams_writer import write_ssp_file
+        path = tmp_path / 'profile.ssp'
+        write_ssp_file(path, depths=[0.0, 50.0, 100.0],
+                       speeds=[1500.0, 1510.0, 1520.0])
+        lines = path.read_text().splitlines()
+        assert lines[0].split()[0] == '-1'
+        pairs = [ln.split() for ln in lines[1:]]
+        assert [float(p[0]) for p in pairs] == [0.0, 50.0, 100.0]
+        assert [float(p[1]) for p in pairs] == [1500.0, 1510.0, 1520.0]
+
+    def test_nested_list_speeds_without_ranges_are_refused(self, tmp_path):
+        from uacpy.core.exceptions import ConfigurationError
+        from uacpy.io.mpirams_writer import write_ssp_file
+        with pytest.raises(ConfigurationError, match='ranges_m'):
+            write_ssp_file(tmp_path / 'p.ssp', depths=[0.0, 100.0],
+                           speeds=[[1500.0, 1501.0], [1520.0, 1521.0]])
+
+
+class TestRamsurfWritersUseLengthNotTruthiness:
+    """``pairs`` and ``surface`` may arrive as ndarrays, where ``not x`` raises
+    numpy's "truth value of an array is ambiguous" ValueError instead of this
+    package's typed error.
+    """
+
+    def test_an_empty_ndarray_block_raises_the_typed_error(self):
+        import io as _io
+        from uacpy.io.ramsurf_writer import _write_block
+        with pytest.raises(ConfigurationError, match='empty profile block'):
+            _write_block(_io.StringIO(), np.zeros((0, 2)))
+
+
+def _write_psif(work_dir, *, nf=1, nzo=2, nr=1, record_extra=()):
+    """A ``psif.dat`` whose depth records carry ``record_extra`` past the
+    ``1 + 2*nf`` reals its own header declares."""
+    from scipy.io import FortranFile
+    work_dir.mkdir(parents=True, exist_ok=True)
+    with FortranFile(str(work_dir / 'psif.dat'), 'w') as ff:
+        ff.write_record(np.array([8.0, nf, nzo, nr, 1500.0, 1450.0, 1000.0,
+                                  0.0], dtype=np.float64))
+        ff.write_record(np.full(nf, 100.0, dtype=np.float64))
+        ff.write_record(np.full(nr, 500.0, dtype=np.float64))
+        for _ir in range(nr):
+            for iz in range(nzo):
+                row = [10.0 * (iz + 1)] + [1.0, 2.0] * nf + list(record_extra)
+                ff.write_record(np.array(row, dtype=np.float64))
+    return work_dir
+
+
+class TestMpiramsSspRejectsDecksThePeramxCounterMisreads:
+    """``peramx.f90:220-224`` derives both counts from the sign of each
+    record's first token: a negative one is a ``-1 range`` profile header, and
+    only the non-negative tokens inside the first profile are counted as
+    depths. A negative depth is therefore counted as a profile *and* missed as
+    a depth, and the second read pass walks records the file does not have. A
+    range vector shorter than the profile count indexes past its own end;
+    longer, it drops the trailing profiles without a word."""
+
+    def test_a_short_range_vector_raises_configurationerror(self, tmp_path):
+        from uacpy.io.mpirams_writer import write_ssp_file
+        with pytest.raises(ConfigurationError, match='2 range.*3 profile'):
+            write_ssp_file(tmp_path / 'a.ssp', np.array([0.0, 10.0]),
+                           np.full((2, 3), 1500.0), np.array([0.0, 100.0]))
+
+    def test_a_long_range_vector_raises_configurationerror(self, tmp_path):
+        from uacpy.io.mpirams_writer import write_ssp_file
+        with pytest.raises(ConfigurationError, match='3 range.*2 profile'):
+            write_ssp_file(tmp_path / 'b.ssp', np.array([0.0, 10.0]),
+                           np.full((2, 2), 1500.0),
+                           np.array([0.0, 100.0, 200.0]))
+
+    def test_a_negative_depth_names_the_header_sentinel(self, tmp_path):
+        from uacpy.io.mpirams_writer import write_ssp_file
+        with pytest.raises(ConfigurationError, match='-1 range'):
+            write_ssp_file(tmp_path / 'c.ssp', np.array([-5.0, 10.0]),
+                           np.array([1500.0, 1520.0]))
+
+    def test_matched_ranges_write_one_header_per_profile(self, tmp_path):
+        from uacpy.io.mpirams_writer import write_ssp_file
+        out = tmp_path / 'd.ssp'
+        write_ssp_file(out, np.array([0.0, 10.0]), np.full((2, 2), 1500.0),
+                       np.array([0.0, 100.0]))
+        lines = out.read_text().splitlines()
+        assert [ln for ln in lines if ln.startswith('-1')] == \
+            ['-1 0.0', '-1 0.1']
+
+
+class TestMpiramsSedimentRowsMustMatchNzsExactly:
+    """``peramx.f90:133-145`` reads every sediment row as
+    ``read (nunit,*) (cs(jj,1), jj=1,nzs)``, a list-directed read of exactly
+    ``nzs`` values. A row longer than ``nzs`` is truncated with no diagnostic,
+    taking the absorbing-layer values at its end with it; a shorter one runs
+    the read off the end of the deck. Both writers test for equality, so both
+    directions are refused rather than only the shorter one."""
+
+    @staticmethod
+    def _write_deck(tmp_path, **overrides):
+        from uacpy.io.mpirams_writer import write_inpe
+        kwargs = dict(
+            fc=100.0, Q=1.0, T=1.0, zsrc=10.0, deltaz=0.5, deltar=10.0,
+            np_pade=6, nss=1, rs=0.0, dzm=1, ssp_filename='S.ssp',
+            iflat=0, ihorz=0, ibot=1, bth_filename='B.bth', nzs=3,
+            cs=np.zeros(3), rho=np.full(3, 1.2), attn=np.full(3, 0.5),
+            c0_user=1500.0,
+        )
+        kwargs.update(overrides)
+        write_inpe(tmp_path / 'in.pe', **kwargs)
+
+    def test_an_inpe_row_longer_than_nzs_raises_configurationerror(
+            self, tmp_path):
+        with pytest.raises(ConfigurationError, match=r'nzs=3.*4 value'):
+            self._write_deck(tmp_path, attn=np.full(4, 0.5))
+
+    def test_an_inpe_row_shorter_than_nzs_raises_configurationerror(
+            self, tmp_path):
+        with pytest.raises(ConfigurationError, match=r'nzs=3.*2 value'):
+            self._write_deck(tmp_path, cs=np.zeros(2))
+
+    def test_matched_inpe_rows_write_three_nzs_value_records(self, tmp_path):
+        self._write_deck(tmp_path)
+        lines = (tmp_path / 'in.pe').read_text().splitlines()
+        assert [len(ln.split()) for ln in lines[-3:]] == [3, 3, 3]
+
+    @staticmethod
+    def _write_sed(tmp_path, n_depths):
+        from uacpy.io.mpirams_writer import write_sediment_file
+        write_sediment_file(
+            tmp_path / 'a.sed', np.array([0.0, 1000.0]),
+            np.zeros((n_depths, 2)), np.full((n_depths, 2), 1.2),
+            np.full((n_depths, 2), 0.5), nzs=3)
+
+    def test_a_sediment_profile_longer_than_nzs_raises_configurationerror(
+            self, tmp_path):
+        with pytest.raises(ConfigurationError, match=r'nzs=3.*4 depth point'):
+            self._write_sed(tmp_path, 4)
+
+    def test_a_sediment_profile_shorter_than_nzs_raises_configurationerror(
+            self, tmp_path):
+        with pytest.raises(ConfigurationError, match=r'nzs=3.*2 depth point'):
+            self._write_sed(tmp_path, 2)
+
+    def test_matched_sediment_profiles_write_one_header_per_range(
+            self, tmp_path):
+        self._write_sed(tmp_path, 3)
+        lines = (tmp_path / 'a.sed').read_text().splitlines()
+        assert [ln for ln in lines if ln.startswith('-1')] == \
+            ['-1 0.0', '-1 1.0']
+
+
+class TestBadCountsAreNamedRatherThanLeakedAsIndexErrors:
+    """A boundary deck declaring no points and a ``psif.dat`` depth record
+    longer than its own header are both header/file disagreements. Naming the
+    count sends the reader to the count line; the generic wrapper pointed at
+    the data rows instead."""
+
+    @pytest.mark.parametrize('count', [0, -3])
+    def test_a_non_positive_bathymetry_count_is_named(self, tmp_path, count):
+        from uacpy.io.bathy_io import read_bathymetry
+        p = tmp_path / f'n{abs(count)}.bty'
+        p.write_text(f"'L'\n{count}\n")
+        with pytest.raises(FileFormatError,
+                           match=f'declares {count} points'):
+            read_bathymetry(p)
+
+    def test_a_one_point_bathymetry_deck_reads(self, tmp_path):
+        from uacpy.io.bathy_io import read_bathymetry
+        p = tmp_path / 'one.bty'
+        p.write_text("'L'\n1\n0.0 200.0\n")
+        data, interp = read_bathymetry(p)
+        assert interp == 'L'
+        # One row plus the ±1e50 sentinels the reader extends the deck with.
+        assert data.shape == (2, 3)
+
+    def test_an_over_long_psif_depth_record_raises_fileformaterror(
+            self, tmp_path):
+        from uacpy.io.mpirams_reader import read_psif
+        wd = _write_psif(tmp_path / 'long', record_extra=(3.0, 4.0))
+        with pytest.raises(FileFormatError, match='holds 5 reals, expected 3'):
+            read_psif(wd)
+
+    def test_a_short_psif_depth_record_raises_fileformaterror(self, tmp_path):
+        from scipy.io import FortranFile
+        from uacpy.io.mpirams_reader import read_psif
+        wd = tmp_path / 'short'
+        wd.mkdir()
+        with FortranFile(str(wd / 'psif.dat'), 'w') as ff:
+            ff.write_record(np.array([8.0, 1, 2, 1, 1500.0, 1450.0, 1000.0,
+                                      0.0], dtype=np.float64))
+            ff.write_record(np.array([100.0], dtype=np.float64))
+            ff.write_record(np.array([500.0], dtype=np.float64))
+            for iz in range(2):
+                ff.write_record(np.array([10.0 * (iz + 1), 1.0],
+                                         dtype=np.float64))
+        with pytest.raises(FileFormatError, match='holds 2 reals, expected 3'):
+            read_psif(wd)
+
+    def test_an_exact_psif_depth_record_reads(self, tmp_path):
+        from uacpy.io.mpirams_reader import read_psif
+        wd = _write_psif(tmp_path / 'exact')
+        out = read_psif(wd)
+        assert np.array_equal(out['zg'], [10.0, 20.0])
+        assert np.array_equal(out['psif'].ravel(), [1 + 2j, 1 + 2j])
+
+
+@pytest.mark.requires_binary  # constructs RAM (resolves its binary)
+class TestMarchLandsOnEachOutputRange:
+    """mpiramS marches onto each requested output range instead of writing on
+    a fixed stride, shrinking its step to the remainder to land on one. That
+    shrink test compares the remainder against ``deltar``, the march step, and
+    a remainder is never longer than a full step once it has been marched down
+    to one — so the marched range never passes the range it is aiming at, at
+    any ``deltar``, on any output grid.
+
+    It used to compare against the *shrunk* ``dr``. An output range whose
+    remainder was longer than that leftover step but shorter than ``deltar``
+    then failed the test, fell through to uacpy's step-restore branch, and was
+    marched a full ``deltar`` PAST its own target; the next iteration walked
+    "backward" onto it with a step ``epade`` builds from ``dre = abs(dr)``,
+    i.e. a FORWARD propagator, because ``abs()`` strips the sign the march put
+    there. Nothing conjugated the field for it.
+
+    Measured on the 200 m / 25 Hz pressure-release waveguide of
+    ``test_ram_pressure_release_waveguide_matches_dirichlet_modal_sum``
+    (121 ranges at 25 m, auto ``deltar`` = 305.8 m), with the count of
+    backward steps read out of an instrumented ``ram.f90``: **60 backward
+    steps in 181, against 121 forward steps and 0 backward after the fix** —
+    the correct march is also the cheaper one. Against the closed-form modal
+    sum, median |dTL| 3.55 dB -> 2.13 dB; with ``dr`` pinned at 40 m,
+    3.87 dB -> 1.69 dB.
+
+    The sharpest statement of the defect is that TL depended on which OTHER
+    ranges were requested, because the shrink history did. At the 61 ranges
+    common to a 25 m and a 50 m output grid over the same water, same source
+    and same ``dr``, the two runs disagreed by 3.58 dB median and 20.76 dB max
+    with ``dr=40`` pinned. After the fix: 6.0e-6 dB median, 3.8e-5 dB max.
+    """
+
+    RANGES = np.arange(500.0, 5001.0, 50.0)   # 50 m gaps, far under the auto dr
+    RCV = Receiver(depths=[50.0], ranges=RANGES)
+
+    _RAM_F90 = (Path(__import__('uacpy').__file__).parent / 'third_party' /
+                'mpiramS' / 'src' / 'ram.f90')
+
+    def test_the_shrink_test_compares_the_remainder_against_deltar(self):
+        """The one-line property the whole class rests on, read off the
+        vendored source: ``deltar`` is the live march step's ceiling, and
+        testing the shrunk ``dr`` instead is what let the march overshoot."""
+        src = self._RAM_F90.read_text()
+        assert 'if (abs(rend-rnow)<abs(deltar)) then' in src, (
+            "ram.f90's step-shrink test no longer compares the remainder "
+            "against deltar; against the live dr the march overshoots every "
+            "output range whose remainder exceeds an earlier shrunk step")
+        assert 'if (abs(rend-rnow)<abs(dr)) then' not in src
+
+    def _deltar(self, tmp_path, monkeypatch, **ram_kw):
+        """``deltar`` from the ``in.pe`` a real ``run()`` writes, stopping at
+        the solver so no binary marches."""
+        def stop(model_self, *args, **kwargs):
+            raise _SolverStopped()
+
+        monkeypatch.setattr(RAM, '_run_subprocess', stop)
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        ram = RAM(work_dir=str(tmp_path), cleanup=False, verbose=False,
+                  **ram_kw)
+        with pytest.raises(_SolverStopped), warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            ram.run(_env(bottom=_fluid_bottom()),
+                    Source(depths=25.0, frequencies=25.0), self.RCV)
+        lines = (tmp_path / 'in.pe').read_text().splitlines()
+        return float(lines[5].split()[0])
+
+    def test_the_auto_step_is_not_pulled_down_to_the_output_spacing(
+            self, tmp_path, monkeypatch):
+        """Since the march cannot overshoot, nothing needs to hold ``deltar``
+        at the output spacing — and holding it there is a trap: the shortest
+        gap has no lower bound (``Receiver.ranges`` admits a 1 mm step), so a
+        legal 2 mm pair would size a 5,000,000-step march to 10 km. On the
+        degenerate grid ``[1000, 1001, 2000...10000]`` that cap cost 196x the
+        march steps (51 -> 10,000) and removed no backward step, both counts
+        measured."""
+        gap = float(np.min(np.diff(self.RANGES)))
+        deltar = self._deltar(tmp_path, monkeypatch)
+        assert deltar > gap, (
+            f"auto deltar={deltar:.2f} m was reduced to the {gap:.0f} m "
+            f"output-range gap; the Lytaev optimiser's step is what mpiramS "
+            f"should march, and the shortest gap has no lower bound")
+
+    def test_a_pinned_step_is_left_alone(self, tmp_path, monkeypatch):
+        """``dr=`` is an override, so nothing between the caller and ``in.pe``
+        may rewrite it."""
+        gap = float(np.min(np.diff(self.RANGES)))
+        assert self._deltar(tmp_path, monkeypatch,
+                            dr=4.0 * gap) == pytest.approx(4.0 * gap)
+
+    def test_the_march_never_steps_past_the_range_it_is_aiming_at(self):
+        """The branch logic replayed: with the remainder tested against
+        ``deltar`` the marched range never decreases, at any step against any
+        grid, while testing the live ``dr`` walks backward."""
+        def marched(deltar, ranges, against_deltar):
+            dr, rnow, seq = deltar, 0.0, []
+            for rend in ranges:
+                while abs(rnow - rend) >= 0.1:
+                    ceiling = deltar if against_deltar else dr
+                    if abs(rend - rnow) < abs(ceiling):
+                        dr = rend - rnow
+                    elif abs(abs(dr) - abs(deltar)) > 0.0:
+                        dr = deltar if rend - rnow > 0 else -deltar
+                    rnow += dr
+                    seq.append(rnow)
+            return np.array(seq)
+
+        gap = float(np.min(np.diff(self.RANGES)))
+        for deltar in (0.5 * gap, gap, 1.5 * gap, 7.3 * gap, 40.0 * gap):
+            assert np.all(np.diff(marched(deltar, self.RANGES, True)) > 0.0), (
+                f"deltar={deltar} m stepped backward onto an output range")
+        assert np.any(np.diff(marched(1.5 * gap, self.RANGES, False)) < 0.0), (
+            "against the live dr, a deltar above the shortest gap should "
+            "overshoot and walk back — the defect this fix closes")
+
+
+@pytest.mark.requires_binary
+@pytest.mark.slow
+class TestTlDoesNotDependOnTheOutputGrid:
+    """The field mpiramS reports at a range must not depend on which *other*
+    ranges were asked for. It did: the march step at any moment carried the
+    shrink history of every earlier output range, so adding receivers changed
+    the propagator sequence — and, before the ``ram.f90`` fix pinned by
+    :class:`TestMarchLandsOnEachOutputRange`, changed how far the field had
+    actually been marched.
+
+    Measured on this fixture with ``dr=40`` pinned against a 25 m and a 50 m
+    output grid: 3.585 dB median and 20.755 dB max disagreement at the 61
+    shared physical ranges before the fix, 5.96e-6 dB median and 3.83e-5 dB
+    max after it. What is left is not zero and should not be: the two grids
+    still decompose each leg into different Padé steps, and a rational
+    approximant of ``exp`` does not compose exactly. The bound below is
+    1e-3 dB — 26x over that residual, and 20,000x under the defect.
+    """
+
+    DEPTH, FREQ, ZS, ZR = 200.0, 25.0, 100.0, 30.0
+    FINE = np.arange(300.0, 3301.0, 25.0)
+    COARSE = np.arange(300.0, 3301.0, 50.0)
+
+    def _tl(self, ranges):
+        from uacpy.core.environment import SoundSpeedProfile
+        env = Environment(
+            bathymetry=self.DEPTH,
+            ssp=SoundSpeedProfile.from_pairs(
+                [(0.0, 1500.0), (self.DEPTH, 1500.0)]),
+            bottom=BoundaryProperties(
+                acoustic_type='half-space', sound_speed=1500.0,
+                density=1e-4, attenuation=0.0))
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            res = RAM(backend='mpiramS', dr=40.0, verbose=False,
+                      timeout=300).compute_tl(
+                env, Source(depths=self.ZS, frequencies=self.FREQ),
+                Receiver(depths=[self.ZR], ranges=ranges))
+        return np.asarray(res.db, dtype=float).ravel()
+
+    def test_tl_at_a_range_is_unchanged_by_a_finer_output_grid(self):
+        shared = np.isin(self.FINE, self.COARSE)
+        d = np.abs(self._tl(self.FINE)[shared] - self._tl(self.COARSE))
+        assert np.max(d) < 1e-3, (
+            f"TL at the {int(shared.sum())} shared ranges moved by up to "
+            f"{np.max(d):.4f} dB (median {np.median(d):.4f}) when the output "
+            f"grid was refined from 50 m to 25 m")

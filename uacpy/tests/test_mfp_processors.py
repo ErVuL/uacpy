@@ -164,7 +164,7 @@ class TestTheTwoMfpEntryPointsAgree:
         from uacpy.sonar.matched_field import mvdr
         K, bank, cov, rep = self._rig()
         core = cov.mvdr(rep, diagonal_loading=loading).ravel()
-        sonar = mvdr(K, bank, loading=loading).ravel()
+        sonar = mvdr(K, bank, diagonal_loading=loading).ravel()
         np.testing.assert_allclose(core / core.max(), sonar, rtol=1e-10)
 
     def test_the_two_defaults_are_the_documented_pair(self):
@@ -174,7 +174,8 @@ class TestTheTwoMfpEntryPointsAgree:
         from uacpy.sonar.matched_field import mvdr
         core_default = inspect.signature(
             Covariance.mvdr).parameters['diagonal_loading'].default
-        sonar_default = inspect.signature(mvdr).parameters['loading'].default
+        sonar_default = inspect.signature(
+            mvdr).parameters['diagonal_loading'].default
         assert (core_default, sonar_default) == (1e-6, 1e-2)
 
     def test_an_empty_replica_cell_is_no_data_not_a_unit_peak(self):

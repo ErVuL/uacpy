@@ -27,6 +27,7 @@ from typing import Dict, Optional, Union
 
 from uacpy.core.environment import BoundaryProperties, Bottom
 from uacpy.core.exceptions import DataFetchError
+from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.data._geo import (
     Coordinate, as_coordinate, great_circle_km, normalize_lon,
 )
@@ -61,6 +62,23 @@ _GRAVEL_PHI, _SAND_PHI, _MUD_PHI = -2.0, 1.5, 7.5
 
 # Folk code → representative ϕ. Codes are gravel/sand/mud end members with
 # s(andy)/m(uddy)/g(ravelly) modifiers; '(g)' = slightly gravelly.
+#
+# The ϕ scale is Krumbein's, ϕ = -log2(d / 1 mm) — the same conversion
+# :func:`_phi_from_properties` applies to MEAN_GRAIN_SIZE just below. Medwin &
+# Clay Sect. 14.2 fixes the coarse end against it: "Marine geologists define
+# gravel as being the loose material that ranges in size from 2 to 256 mm
+# (Gross 1972, Glossary)", i.e. ϕ = -1 down to -8.
+#
+# These are MIXTURE MEANS, not class ranges, and the distinction matters if
+# anyone is tempted to "correct" them: a muddy gravel ('mG') is gravel plus
+# mud, so its mean sits at ϕ = 0 — inside the sand range — even though its
+# dominant end member is gravel and gravel proper begins at ϕ = -1. Read as
+# class bounds the table looks wrong; read as mixture means it is monotone
+# from 'G' = -2.0 to 'M' = 7.5, with every gravel-dominant code coarser than
+# every sand-dominant one and so on.
+#
+# The Folk (1954) ternary classification itself is NOT in the local corpus;
+# only the ϕ scale and the gravel boundary above are grounded here.
 _FOLK_TO_PHI = {
     'G': -2.0, 'sG': -1.0, 'msG': -0.5, 'mG': 0.0, 'gS': 0.0, 'gmS': 1.0,
     '(g)S': 1.0, 'S': 1.5, '(g)mS': 3.0, 'mS': 4.0, 'gM': 5.0, '(g)sM': 5.5,
@@ -149,7 +167,7 @@ def _query_bbox(lat, lon, radius_km, *, layer, base_url, timeout, verbose):
             f"AusSeabed MARS returned {len(features)} of {int(matched)} "
             f"matching samples (server page cap) — the result may not be the "
             f"nearest sample; use a smaller search radius.",
-            UserWarning, stacklevel=2)
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
     return features
 
 

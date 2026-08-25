@@ -72,10 +72,10 @@ def test_resolve_submodel():
 
 
 def test_default_matches_registry_defaults():
-    w = N.WenzNoise(F, wind_speed=15.0, rain_rate='heavy',
+    w = N.WenzNoise(F, wind_speed_kn=15.0, rain_rate='heavy',
                     water_depth='deep', shipping_level='high')
     th = N.THERMAL_MODELS['mellen'](F)
-    wi = N.WIND_MODELS['merklinger'](F, wind_speed=15.0, water_depth='deep')
+    wi = N.WIND_MODELS['merklinger'](F, wind_speed_kn=15.0, water_depth='deep')
     sh = N.SHIPPING_MODELS['wenz'](F, shipping_level='high', water_depth='deep')
     tu = N.TURBULENCE_MODELS['wenz'](F)
     ra = N.RAIN_MODELS['torres_costa'](F, rain_rate='heavy')
@@ -89,33 +89,33 @@ def test_default_matches_registry_defaults():
 
 
 def test_models_recorded():
-    w = N.WenzNoise(F, 15.0)
+    w = N.WenzNoise(F, wind_speed_kn=15.0)
     assert w.models == {'wind': 'merklinger', 'shipping': 'wenz',
                         'rain': 'torres_costa', 'thermal': 'mellen',
                         'turbulence': 'wenz'}
 
 
 def test_string_selector_equals_default():
-    a = N.WenzNoise(F, 15.0)
-    b = N.WenzNoise(F, 15.0, wind_model='merklinger')
+    a = N.WenzNoise(F, wind_speed_kn=15.0)
+    b = N.WenzNoise(F, wind_speed_kn=15.0, wind_model='merklinger')
     assert np.array_equal(a.wind, b.wind)
 
 
 def test_bad_selector_raises():
     with pytest.raises(ConfigurationError):
-        N.WenzNoise(F, 15.0, wind_model='nope')
+        N.WenzNoise(F, wind_speed_kn=15.0, wind_model='nope')
 
 
 def test_custom_callable_changes_only_that_component():
-    base = N.WenzNoise(F, 15.0)
-    flat = N.WenzNoise(F, 15.0, wind_model=lambda f, **k: np.full_like(f, 50.0))
+    base = N.WenzNoise(F, wind_speed_kn=15.0)
+    flat = N.WenzNoise(F, wind_speed_kn=15.0, wind_model=lambda f, **k: np.full_like(f, 50.0))
     assert np.allclose(flat.wind, 50.0)
     assert np.array_equal(flat.shipping, base.shipping)
     assert flat.models['wind'] == 'custom'
 
 
 def test_components_namedtuple():
-    w = N.WenzNoise(F, 15.0, rain_rate='light')
+    w = N.WenzNoise(F, wind_speed_kn=15.0, rain_rate='light')
     c = w.components
     assert isinstance(c, N.NoiseComponents)
     assert c._fields == ('total', 'wind', 'shipping', 'rain',
@@ -128,7 +128,7 @@ def test_registry_extensible_and_exported():
     import uacpy.noise as pkg
     pkg.WIND_MODELS['flat50'] = lambda f, **k: np.full_like(f, 50.0)
     try:
-        w = N.WenzNoise(F, 15.0, wind_model='flat50')
+        w = N.WenzNoise(F, wind_speed_kn=15.0, wind_model='flat50')
         assert np.allclose(w.wind, 50.0) and w.models['wind'] == 'flat50'
     finally:
         del pkg.WIND_MODELS['flat50']
@@ -141,12 +141,12 @@ def test_coates_alternatives_registered():
 
 
 def test_coates_wind_plausible_and_differs():
-    base = N.WenzNoise(F, 19.4)                       # ~10 m/s
-    coates = N.WenzNoise(F, 19.4, wind_model='coates')
+    base = N.WenzNoise(F, wind_speed_kn=19.4)                       # ~10 m/s
+    coates = N.WenzNoise(F, wind_speed_kn=19.4, wind_model='coates')
     assert coates.models['wind'] == 'coates'
     assert np.all(np.isfinite(coates.wind[np.isfinite(coates.wind)]))
     # Coates wind @1 kHz, 10 m/s ≈ 50 + 7.5*sqrt(10) - 40*log10(1.4) ≈ 68 dB
-    w1k = N.WIND_MODELS['coates'](np.array([1000.0]), wind_speed=19.4)[0]
+    w1k = N.WIND_MODELS['coates'](np.array([1000.0]), wind_speed_kn=19.4)[0]
     assert 60.0 < w1k < 75.0
     assert not np.array_equal(coates.wind, base.wind)   # genuinely different model
 
@@ -156,23 +156,23 @@ def test_total_finite_when_wind_zero_midband():
     # negative, shipping/rain off) nothing may floor a component to -inf, which
     # would drive the incoherent total to -inf. The real levels keep it finite.
     f = np.array([4000.0, 5000.0])
-    w = N.WenzNoise(f, wind_speed=0.0, shipping_level='no', rain_rate='no')
+    w = N.WenzNoise(f, wind_speed_kn=0.0, shipping_level='no', rain_rate='no')
     assert np.all(np.isfinite(w.total))
 
 
 def test_negative_wind_speed_rejected():
     # N8: uniform guard so the Coates √(wind) model can't silently produce NaN.
     with pytest.raises(ConfigurationError):
-        N.WenzNoise(F, wind_speed=-1.0)
+        N.WenzNoise(F, wind_speed_kn=-1.0)
 
 
 def test_custom_submodel_errors_are_typed():
     # N9: a custom callable that raises, or returns a wrong-shaped array, is
     # surfaced as a typed ConfigurationError, not a raw TypeError/broadcast error.
     with pytest.raises(ConfigurationError):
-        N.WenzNoise(F, 15.0, wind_model=lambda f, **k: 1 / 0)
+        N.WenzNoise(F, wind_speed_kn=15.0, wind_model=lambda f, **k: 1 / 0)
     with pytest.raises(ConfigurationError):
-        N.WenzNoise(F, 15.0, wind_model=lambda f, **k: np.zeros(f.size + 1))
+        N.WenzNoise(F, wind_speed_kn=15.0, wind_model=lambda f, **k: np.zeros(f.size + 1))
 
 
 def test_coates_shipping_silent_and_activity_order():
@@ -264,7 +264,7 @@ def test_coates_alternatives_follow_stojanovic():
         w = u_kn / 1.9438445                      # the model wants m/s
         ref = (50.0 + 7.5 * np.sqrt(w) + 20.0 * np.log10(fk)
                - 40.0 * np.log10(fk + 0.4))
-        assert np.allclose(N.WIND_MODELS['coates'](f, wind_speed=u_kn), ref)
+        assert np.allclose(N.WIND_MODELS['coates'](f, wind_speed_kn=u_kn), ref)
 
     for level, s in (('low', 0.0), ('medium', 0.5), ('high', 1.0)):
         ref = (40.0 + 20.0 * (s - 0.5) + 26.0 * np.log10(fk)
@@ -279,8 +279,8 @@ def test_wind_model_pair_delta_at_10_khz():
     51.4501 dB (DRDC eq. 18-19 from the 2 kHz anchor), a +4.765 dB delta —
     the guide §5's "up to 4.8 dB louder at 10 kHz and 25 kn"."""
     f = np.array([10000.0])
-    coates = N.WIND_MODELS['coates'](f, wind_speed=25.0)[0]
-    merk = N.WIND_MODELS['merklinger'](f, wind_speed=25.0,
+    coates = N.WIND_MODELS['coates'](f, wind_speed_kn=25.0)[0]
+    merk = N.WIND_MODELS['merklinger'](f, wind_speed_kn=25.0,
                                        water_depth='deep')[0]
     assert coates == pytest.approx(56.2155, abs=1e-3)
     assert merk == pytest.approx(51.4501, abs=1e-3)
@@ -312,3 +312,72 @@ def test_wind_above_the_cutoff_matches_drdc_equations_18_19():
             spec = (lw2000 - m0 * 10 * np.log10(2000.0)) + m0 * 10 * np.log10(f)
             got = N.compute_windnoise(np.concatenate(([2000.0], f)), u, depth)[1:]
             assert np.allclose(got, spec)
+
+
+class TestEveryRegistryEntryTakesTheSameFrequencyArgument:
+    """``WenzNoise``'s docstring advertises every registry entry as
+    ``model(frequencies, *, wind_speed_kn, water_depth, shipping_level,
+    rain_rate, **_)`` and all five registries are in ``uacpy.noise.__all__``,
+    so a caller may hold one and call it directly. Three spellings of the same
+    frequencies must reach the same answer."""
+
+    KW = dict(wind_speed_kn=10.0, water_depth='deep',
+              shipping_level='medium', rain_rate='moderate')
+
+    @staticmethod
+    def _entries():
+        from uacpy.noise import (RAIN_MODELS, SHIPPING_MODELS,
+                                 THERMAL_MODELS, TURBULENCE_MODELS,
+                                 WIND_MODELS)
+        out = []
+        for family, registry in (('wind', WIND_MODELS),
+                                 ('shipping', SHIPPING_MODELS),
+                                 ('rain', RAIN_MODELS),
+                                 ('thermal', THERMAL_MODELS),
+                                 ('turbulence', TURBULENCE_MODELS)):
+            for name, fn in registry.items():
+                out.append((f'{family}/{name}', fn))
+        return out
+
+    @pytest.mark.parametrize('label, model',
+                             _entries.__func__(),
+                             ids=[label for label, _ in _entries.__func__()])
+    def test_a_list_and_an_ndarray_give_the_same_answer(self, label, model):
+        want = model(np.array([100.0, 1000.0]), **self.KW)
+        got = model([100.0, 1000.0], **self.KW)
+        assert np.shape(got) == np.shape(want) == (2,)
+        np.testing.assert_allclose(got, want)
+
+    @pytest.mark.parametrize('label, model',
+                             _entries.__func__(),
+                             ids=[label for label, _ in _entries.__func__()])
+    def test_a_scalar_gives_a_length_one_array(self, label, model):
+        got = model(100.0, **self.KW)
+        assert np.shape(got) == (1,)
+        np.testing.assert_allclose(
+            got, model(np.array([100.0]), **self.KW))
+
+    def test_the_rain_model_takes_a_scalar_above_its_own_fit_limit(self):
+        """The specific face: above 7 kHz the model indexes ``out[above]``,
+        which a 0-d result met as ``'float' object is not subscriptable`` —
+        so the failure depended on the *value*, not only on the type."""
+        from uacpy.noise import RAIN_MODELS
+        model = RAIN_MODELS['torres_costa']
+        below = float(model(6999.0, **self.KW)[0])
+        above = float(model(7001.0, **self.KW)[0])
+        assert np.isfinite(below) and np.isfinite(above)
+        assert abs(below - above) < 0.1     # continuous across the meld
+
+    def test_a_two_dimensional_frequency_grid_is_refused_by_name(self):
+        from uacpy.noise import THERMAL_MODELS
+        with pytest.raises(ConfigurationError, match='frequencies'):
+            THERMAL_MODELS['mellen'](np.ones((2, 2)), **self.KW)
+
+    def test_wenznoise_assembles_a_finite_spectrum(self):
+        """The negative control: the public wrapper already converted its
+        input, so the assembled spectrum must be untouched."""
+        from uacpy.noise import WenzNoise
+        got = WenzNoise(np.array([100.0, 1000.0, 10000.0]),
+                        wind_speed_kn=10.0).as_psd()
+        assert np.shape(np.asarray(got)) == (3,)
+        assert np.all(np.isfinite(np.asarray(got)))

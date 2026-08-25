@@ -12,14 +12,18 @@ when running from a checkout; else the per-user cache directory
 (``$XDG_CACHE_HOME/uacpy/data_cache`` or ``~/.cache/uacpy/data_cache``).
 """
 
+import contextlib
 import os
+import tempfile
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
-from uacpy.core.exceptions import ConfigurationError
+from uacpy.core.exceptions import ConfigurationError, DataFetchError
 
-__all__ = ['cache_root', 'dataset_root', 'require', 'cached_grid', 'cached_grid_at',
-           'register_cache', 'invalidate_grids', 'DATASETS']
+__all__ = ['cache_root', 'dataset_root', 'require', 'require_npz', 'cached_grid',
+           'cached_grid_at', 'register_cache', 'invalidate_grids', 'atomic_write',
+           'staging_path', 'reading', 'memoize', 'memo_lock', 'DATASETS']
 
 # uacpy/uacpy/data/_cache.py → parents[2] is the repo root in the documented
 # clone + `pip install -e .` layout; under a plain wheel install it is
@@ -127,7 +131,191 @@ def require(name: str, *relative: str) -> Path:
     return path
 
 
+def is_installed(name: str, *relative: str) -> bool:
+    """Whether a cached dataset (or one file inside it) is present.
+
+    The predicate behind :func:`require`'s raise, for code that picks a source
+    rather than failing on a missing one. An unknown dataset name is a caller
+    error, not an uninstalled dataset, so it raises rather than answering
+    ``False``.
+    """
+    if name not in DATASETS:
+        raise ConfigurationError(
+            f"is_installed: unknown dataset {name!r}.",
+            remediation=f"Known datasets: {', '.join(sorted(DATASETS))}.")
+    try:
+        require(name, *relative)
+    except ConfigurationError:
+        return False
+    return True
+
+
+def require_npz(name: str, filename: str, superseding: str) -> Path:
+    """Resolve a cached ``.npz`` index, refusing the pickle it replaced.
+
+    The EMODnet polygon index and the NSIDC sea-ice climatology used to be
+    cached as pickles, so anything that could write the cache directory could
+    run arbitrary code in every later reader. Both are ``.npz`` now, loaded
+    with ``allow_pickle=False``.
+
+    A cache still holding the old ``superseding`` file is refused rather than
+    converted: converting it would have to unpickle it first, which is exactly
+    the execution this format change removes. The error names the file to
+    delete and the flag that rebuilds the dataset.
+    """
+    root = dataset_root(name)
+    stale = root / superseding
+    if not (root / filename).exists() and stale.exists():
+        raise ConfigurationError(
+            f"Offline {name} data at {stale} is in the retired pickle format. "
+            f"This is a security migration, not a damaged file: the cache used "
+            f"to be unpickled on every read, which runs whatever code the file "
+            f"contains, so the index is now a data-only .npz ({filename}) and "
+            f"the pickle is refused instead of converted — converting it would "
+            f"have to unpickle it.",
+            remediation=f"Delete {stale} and run "
+                        f"`{DATASETS[name].install_flag}` to rebuild it as "
+                        f"{filename}.",
+        )
+    return require(name, filename)
+
+
+# mkstemp creates its file 0600, but the cached datasets are public reference
+# grids and $UACPY_DATA_CACHE may point at a directory a group shares, so the
+# staging file is widened to what a plain create would have produced. The umask
+# can only be read by setting it, so it is sampled once here at import — while
+# the import lock is held — rather than on every write.
+_UMASK = os.umask(0o022)
+os.umask(_UMASK)
+_CACHE_FILE_MODE = 0o666 & ~_UMASK
+
+
+def staging_path(out) -> Path:
+    """Create an empty staging sibling of ``out`` and return its path.
+
+    Every install-time writer stages here first and ``os.replace``s onto the
+    destination, so an interrupted build never leaves a partial file where
+    :func:`require` will accept it.
+
+    The name comes from :func:`tempfile.mkstemp`, not from a predictable
+    sibling such as ``<out>.part``. A predictable sibling lets anything that
+    can write the cache directory pre-place a symlink there: the build then
+    writes through it to wherever the link points, and ``os.replace`` moves the
+    *link* onto ``out``, so every later write to that dataset redirects as
+    well. mkstemp creates the file ``O_CREAT|O_EXCL`` under a name that cannot be guessed, so
+    there is no name to pre-place a link at. Callers re-open the path by name
+    rather than being handed the descriptor, which leaves a race in principle —
+    but only for an attacker who can guess an unguessable name.
+
+    The trailing ``.tmp`` keeps a staging file out of the readers that locate
+    their grid by extension (:func:`uacpy.data.gebco_local._grid` globs
+    ``*.nc``).
+    """
+    out = Path(out)
+    fd, name = tempfile.mkstemp(dir=out.parent, prefix=out.name + '.',
+                                suffix='.tmp')
+    os.close(fd)
+    part = Path(name)
+    os.chmod(part, _CACHE_FILE_MODE)
+    return part
+
+
+@contextlib.contextmanager
+def atomic_write(out):
+    """Yield a private staging path to write, and move it onto ``out`` on success.
+
+    An install-time writer that opens the destination directly leaves a
+    truncated file behind when the transfer is interrupted (Ctrl-C during a
+    multi-minute paging loop) or the disk fills, and :func:`require` accepts it
+    forever after — it tests only that the path exists. The staging file is a
+    sibling in the same directory, so ``os.replace`` is atomic; it is removed
+    if the body raises. Same contract as
+    :func:`uacpy.data._http.curl_download`, for the writers that build their
+    file locally rather than downloading it whole.
+
+    The staging file is :func:`staging_path`'s, whose docstring records why the
+    name is unguessable rather than ``<out>.part``.
+    """
+    part = staging_path(out)
+    try:
+        yield part
+    except BaseException:
+        part.unlink(missing_ok=True)
+        raise
+    os.replace(part, out)
+
+
+@contextlib.contextmanager
+def reading(name: str, path):
+    """Re-raise whatever a cached file's parser throws as a typed error.
+
+    A file the cache accepts can still be unreadable — truncated by an
+    interrupted install predating :func:`atomic_write`, or damaged on disk —
+    and each reader then fails with its own parser's exception
+    (``OSError``, ``ValueError``, ``UnicodeDecodeError``). The source-fallback
+    chains in :mod:`uacpy.data.environment` catch ``DataFetchError`` and
+    ``ConfigurationError`` only, so an untyped failure aborts the chain
+    instead of falling through to the next source — and ``'auto'``, documented
+    never to fail, never reaches its pelagic terminus.
+    """
+    try:
+        yield
+    except (ConfigurationError, DataFetchError):
+        raise
+    except Exception as exc:
+        # The remediation names the install flag when `name` is a known
+        # dataset. Looking it up unguarded put a KeyError on the error path
+        # itself — an untyped failure raised from the helper whose whole
+        # purpose is to stop untyped failures escaping.
+        entry = DATASETS.get(name)
+        remedy = (f"Delete {path} and re-run `{entry.install_flag}`."
+                  if entry is not None else
+                  f"Delete {path} and re-fetch it.")
+        raise DataFetchError(
+            f"Cached {name} data at {path} is present but unreadable "
+            f"({type(exc).__name__}: {exc}).",
+            remediation=remedy,
+        ) from exc
+
+
 _GRIDS: dict = {}   # resolved path -> opened grid object
+
+# One lock behind every memo in the data layer. A memo written as a bare
+# ``if key not in store: store[key] = factory()`` lets N threads racing a cold
+# entry all run the factory: the array-backed readers then build N copies of
+# one grid and keep the last (8 threads took EMODnet from 620 MB to 4.2 GB of
+# peak RSS, and the 7 losers are unreachable from invalidate_grids), while the
+# netCDF-backed ones open one HDF5 file N times at once, which the
+# non-thread-safe HDF5 build under netCDF4 answers with a SIGSEGV.
+#
+# One shared lock rather than one per entry: the netCDF opens have to
+# serialise against each other anyway (see uacpy.data._netcdf), and the warm
+# path never takes it, so the only cost is that two cold loads of *different*
+# datasets queue instead of running together. Reentrant because one backend's
+# factory may consult another backend's memo on the same thread.
+_MEMO_LOCK = threading.RLock()
+
+
+def memo_lock():
+    """The lock guarding every data-layer memo; hold it to mutate one directly."""
+    return _MEMO_LOCK
+
+
+def memoize(store, key, factory):
+    """Return ``store[key]``, calling ``factory()`` at most once across threads.
+
+    The lookup that hits a warm entry takes no lock — a dict read is atomic
+    under the GIL, and an entry is published only after its factory has
+    returned. A miss takes :func:`memo_lock` and re-checks under it, so N
+    threads arriving on a cold key produce one object and one factory call
+    however slow that call is.
+    """
+    if key in store:
+        return store[key]
+    with _MEMO_LOCK:
+        if key not in store:
+            store[key] = factory()
+        return store[key]
 
 
 def cached_grid(name: str, filename: str, factory):
@@ -137,19 +325,33 @@ def cached_grid(name: str, filename: str, factory):
     once and sampled many times; this is the single memo they share, keyed on
     the resolved path so a changed ``$UACPY_DATA_CACHE`` reopens.
     """
-    return cached_grid_at(require(name, filename), factory)
+    return cached_grid_at(require(name, filename), factory, name)
 
 
-def cached_grid_at(path, factory):
+def cached_grid_at(path, factory, name: str = 'cached'):
     """Memoise ``factory(path)`` on an already-resolved path.
 
     For backends that locate their file themselves (a glob, a versioned name)
     rather than by a fixed filename.
+
+    The open runs under :func:`reading`, so a truncated or damaged NetCDF file
+    raises this package's ``DataFetchError`` rather than netCDF4's bare
+    ``OSError``. Without it the largest, most download-interruptible files in
+    the cache — GEBCO at 7.5 GB and WOA23 at 1.5 GB — aborted the
+    source-fallback chains that catch only ``DataFetchError`` and
+    ``ConfigurationError``: a corrupt GLODAP file took down an entire
+    ``fetch_environment`` whose pH axis is documented as best-effort, and a
+    corrupt Graw or GlobSed file stopped ``'auto'`` from reaching the pelagic
+    terminus it is documented never to fail at.
+
+    The open runs through :func:`memoize`, so threads racing a cold path open
+    the file once between them rather than once each.
     """
-    key = str(path)
-    if key not in _GRIDS:
-        _GRIDS[key] = factory(path)
-    return _GRIDS[key]
+    def open_grid():
+        with reading(name, path):
+            return factory(path)
+
+    return memoize(_GRIDS, str(path), open_grid)
 
 
 _CLEARERS: list = []   # extra drop-my-memo callables, one per backend
@@ -173,14 +375,18 @@ def invalidate_grids() -> None:
     GlobSed, Graw, GLODAP) plus everything registered through
     :func:`register_cache`. A backend that has not been imported has nothing
     memoised, so an unregistered module is not a gap.
+
+    Runs under :func:`memo_lock`, so it cannot interleave with a memo fill and
+    close a handle a :func:`memoize` call is about to hand back.
     """
-    for grid in _GRIDS.values():
-        close = getattr(grid, 'close', None)
-        if callable(close):
-            try:
-                close()
-            except Exception:
-                pass        # a torn handle must not block the invalidation
-    _GRIDS.clear()
-    for clear in _CLEARERS:
-        clear()
+    with _MEMO_LOCK:
+        for grid in _GRIDS.values():
+            close = getattr(grid, 'close', None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass    # a torn handle must not block the invalidation
+        _GRIDS.clear()
+        for clear in _CLEARERS:
+            clear()

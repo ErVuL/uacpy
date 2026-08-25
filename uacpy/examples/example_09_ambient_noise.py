@@ -28,19 +28,22 @@ output/example_09_ppsd.png             — PPSD with analytic Wenz overlay.
 output/example_09_sel.png              — per-band SEL of the realisation.
 """
 
+import os
 from pathlib import Path
 import sys
 
 import matplotlib.pyplot as plt
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Repo root, so ``import uacpy`` resolves from a source checkout.
+sys.path.insert(0, str(Path(__file__).parents[2]))
 
 import uacpy  # noqa: E402
 from uacpy.noise import WenzNoise  # noqa: E402
 
-OUTPUT_DIR = Path(__file__).parent / 'output'
-OUTPUT_DIR.mkdir(exist_ok=True)
+OUTPUT_DIR = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
+                  or Path(__file__).parent / 'output')
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # 1 µPa = 10⁻⁶ Pa (water-acoustics dB reference).
 UPA = 1e-6
@@ -55,14 +58,14 @@ def main():
     f_plot = np.linspace(1.0, 1e5, int(1e5 - 1))
     wenz_plot = WenzNoise(
         f_plot,
-        wind_speed=24,                  # knots (Beaufort 6)
+        wind_speed_kn=24,                  # knots (Beaufort 6)
         water_depth='deep',
         shipping_level='high',
         rain_rate='heavy',
     )
     fig, _ = uacpy.visualization.plot_wenz(
         wenz_plot,
-        title=(f'{wenz_plot.wind_speed:g} kn / '
+        title=(f'{wenz_plot.wind_speed_kn:g} kn / '
                f'{wenz_plot.shipping_level} shipping / '
                f'{wenz_plot.rain_rate} rain'),
     )
@@ -83,7 +86,7 @@ def main():
     f_ssrp = np.linspace(1.0, 5e4, 10000)
     wenz_ssrp = WenzNoise(
         f_ssrp,
-        wind_speed=wenz_plot.wind_speed,
+        wind_speed_kn=wenz_plot.wind_speed_kn,
         water_depth=wenz_plot.water_depth,
         shipping_level=wenz_plot.shipping_level,
         rain_rate=wenz_plot.rain_rate,
@@ -118,7 +121,7 @@ def main():
         x, fs, nperseg=4096, noverlap=2048)
     fig, ax = uacpy.visualization.plot_spectrogram(
         sf, st, sSxx, ref=UPA,
-        title=(f'Wenz @ {wenz_ssrp.wind_speed:g} kn / '
+        title=(f'Wenz @ {wenz_ssrp.wind_speed_kn:g} kn / '
                f'{wenz_ssrp.shipping_level} shipping / '
                f'{wenz_ssrp.rain_rate} rain'),
         ymin=10, ymax=fs / 2,
@@ -135,7 +138,7 @@ def main():
     )
     fig, ax = uacpy.visualization.plot_ppsd(
         ppsd_result,
-        title=(f'Wenz @ {wenz_ssrp.wind_speed:g} kn / '
+        title=(f'Wenz @ {wenz_ssrp.wind_speed_kn:g} kn / '
                f'{wenz_ssrp.shipping_level} shipping / '
                f'{wenz_ssrp.rain_rate} rain'),
         ymin=20, ymax=120,
@@ -164,7 +167,7 @@ def main():
     fig, ax = uacpy.visualization.plot_sel(
         sel_vals, sel_bands, ref=UPA, duration=sel_dur,
         band_type='third_octave',
-        title=(f'Wenz @ {wenz_ssrp.wind_speed:g} kn / '
+        title=(f'Wenz @ {wenz_ssrp.wind_speed_kn:g} kn / '
                f'{wenz_ssrp.shipping_level} shipping / '
                f'{wenz_ssrp.rain_rate} rain'),
     )

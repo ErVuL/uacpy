@@ -138,9 +138,11 @@ def pulse_shapes():
 def output_sampling():
     """``n_t_out`` is the output Nyquist, and SPARC says so when it is short.
 
-    The window is ``[0, t_max]``, so the output sample rate is
-    ``n_t_out / t_max``. Below ``2·f_max`` the marched pulse is folded back
-    into the band and p(t) looks plausible at the wrong frequency.
+    The window is ``[0, t_max]`` inclusive of both ends, so the output sample
+    rate is ``(n_t_out - 1) / t_max`` — the same expression the wrapper's own
+    aliasing check uses (``SPARC._resolve_n_t_out``), not ``n_t_out / t_max``,
+    which overstates it by ``n/(n-1)``. Below ``2·f_max`` the marched pulse is
+    folded back into the band and p(t) looks plausible at the wrong frequency.
     """
     env, source, _ = shallow_water()
     point = uacpy.Receiver(depths=50.0, ranges=np.array([600.0]))
@@ -151,7 +153,7 @@ def output_sampling():
             warnings.simplefilter('always')
             p = SPARC(t_max=0.7, n_t_out=n_t_out).run(env, source, point)
         p.at(depth=50.0, range=600.0).plot(ax=ax)
-        fs = n_t_out / 0.7
+        fs = (n_t_out - 1) / 0.7
         ax.set_title(f'n_t_out={n_t_out} → {fs:.0f} Hz sampling, '
                      f'Nyquist {fs / 2:.0f} Hz',
                      fontweight='bold', fontsize=11)

@@ -31,6 +31,7 @@ from typing import Dict, Optional
 import numpy as np
 
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.core._warn_frames import USER_FRAME_SKIP
 
 __all__ = ['GRAIN_SIZE_MODELS', 'grain_size_to_geoacoustics']
 
@@ -76,8 +77,10 @@ GRAIN_SIZE_MODELS = ('hamilton', 'apl-uw')
 # g/cm³).
 _MODEL_WATER_REFERENCE = {'hamilton': (_HB_REF_CW, _HB_REF_RHOW),
                           'apl-uw': (1500.0, 1.0)}
-# Valid ϕ range per model; outside it ϕ is clamped, and a UserWarning fires only
-# for genuine extrapolation (≳ 1 ϕ beyond).
+# Valid ϕ range per model; outside it ϕ is clamped. The clamp is silent
+# wherever it changes nothing — on 'hamilton' it never can, because that model
+# is an np.interp lookup that already flat-extrapolates past the table ends —
+# and warns whenever it moves the returned values, which is 'apl-uw' only.
 _MODEL_RANGE = {'hamilton': (float(_HB_PHI[0]), float(_HB_PHI[-1])),
                 'apl-uw': (-1.0, 9.0)}
 
@@ -124,6 +127,27 @@ def _hamilton_geoacoustics(phi, water_sound_speed, water_density):
 # piecewise polynomials in Mz, plus the attenuation α₂/f (dB m⁻¹ kHz⁻¹). These
 # are the formulas the AT ``'G'`` bottom uses internally
 # (Bellhop/ReadEnvironmentBell.f90:488 `CASE ( 'G' )`).
+# Verified against that Fortran: the velocity-ratio, density-ratio and
+# alpha2_f branches reproduce ``ReadEnvironmentBell.f90:497-520`` to 0.0e+00
+# over Mz in [-1, 9], and the dB/wavelength attenuation below is AT's 'L' loss
+# parameter times exactly 40*pi/ln(10) = 54.575054 (``AttenMod.f90:79-80``).
+# One deliberate difference: AT guards its first branch with ``Mz >= -1``, so
+# below -1 it falls through to the LINEAR branch, whereas the ratios here keep
+# the quadratic. ``_MODEL_RANGE['apl-uw']`` clamps to [-1, 9] before either is
+# called, so the public API never reaches that region.
+# A second, equally deliberate difference, at the other end: AT does not clamp
+# at all. ``ReadEnvironmentBell.f90``'s velocity ratio ends in a bare
+# ``ELSE vr = -0.0024324*Mz + 1.0019`` that keeps running above Mz = 9 with no
+# upper limit, and its ``alpha2_f`` takes 0.0601 above 9.5. uacpy holds the fit
+# flat at the Wentworth bounds instead — ϕ = -1 is 2 mm gravel, ϕ = 9 is ~2 µm
+# clay — because a cubic left to run past its last fitted point diverges
+# (the -0.0165406 Mz³ density term turns over), whereas a flat endpoint stays
+# physical. ``grain_size_to_geoacoustics`` warns when that clamp moves the
+# answer, so the divergence is visible at the call site rather than only here.
+# Stated honestly: TR 9407's own validity range could not be checked against a
+# copy of the report, so the "valid -1 <= Mz <= 9" above restates uacpy's own
+# docstring rather than a verified source. The clamp is justified by the
+# Wentworth bounds and by the fits' behaviour outside them, not by TR 9407.
 def _apl_density_ratio(mz: float) -> float:
     if mz < 1.0:
         return 0.007797 * mz ** 2 - 0.17057 * mz + 2.3139
@@ -203,8 +227,14 @@ def grain_size_to_geoacoustics(
         1500 m/s / 1.0 g/cm³, which reproduces the Acoustics-Toolbox ``'G'``
         bottom exactly.
 
-    A ``UserWarning`` is emitted when ``grain_size_phi`` is well outside the
-    model's valid range (ϕ is then clamped).
+    ``grain_size_phi`` outside the model's ϕ range is clamped to it. A
+    ``UserWarning`` is emitted exactly when that clamp changes the returned
+    values, so the warning marks a real substitution rather than a boundary
+    crossing. It never fires for ``'hamilton'``: that model interpolates a
+    table, and ``np.interp`` already holds the end rows flat, so the clamp
+    cannot move the result. It fires for ``'apl-uw'`` at any ϕ outside
+    ``[-1, 9]``, whose polynomials do keep extrapolating (ϕ = 9.5 differs by
+    1.8 m/s, ϕ = -1.5 by 47 m/s).
     """
     if model not in _GEOACOUSTIC_MODELS:
         raise ConfigurationError(
@@ -218,12 +248,25 @@ def grain_size_to_geoacoustics(
         water_density = ref_rhow
     lo, hi = _MODEL_RANGE[model]
     phi = float(np.clip(grain_size_phi, lo, hi))
-    if grain_size_phi < lo - 1.0 or grain_size_phi > hi + 1.0:
-        warnings.warn(
-            f"grain_size_to_geoacoustics: ϕ={grain_size_phi:g} is well outside "
-            f"the {model} valid range [{lo:g}, {hi:g}]; clamped.",
-            UserWarning, stacklevel=2,
-        )
     cp, density, attenuation = _GEOACOUSTIC_MODELS[model](
         phi, water_sound_speed, water_density)
+    # Warn on the substitution, not on the boundary crossing. The previous
+    # +-1 phi deadband warned for neither model in the band just outside the
+    # range, and for 'hamilton' the clamp is a provable no-op at any phi
+    # (np.interp flat-extrapolates), so a deadband keyed on phi alone either
+    # cried wolf or stayed silent on a real change. Evaluating the fit at the
+    # raw phi and comparing is the direct test, and it costs one extra call
+    # only when the clamp actually engaged.
+    if phi != grain_size_phi and np.isfinite(grain_size_phi):
+        raw = _GEOACOUSTIC_MODELS[model](
+            float(grain_size_phi), water_sound_speed, water_density)
+        if raw != (cp, density, attenuation):
+            warnings.warn(
+                f"grain_size_to_geoacoustics: ϕ={grain_size_phi:g} is outside "
+                f"the {model} valid range [{lo:g}, {hi:g}] and was clamped to "
+                f"ϕ={phi:g}; the unclamped fit gives "
+                f"sound_speed={raw[0]:.4f} m/s, density={raw[1]:.4f} g/cm³, "
+                f"attenuation={raw[2]:.4f} dB/λ.",
+                UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+            )
     return {'sound_speed': cp, 'density': density, 'attenuation': attenuation}

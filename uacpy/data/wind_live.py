@@ -6,7 +6,7 @@ historical date, not just recent ones. Served live from the NOAA CoastWatch
 **ERDDAP** griddap service (no auth), like the Argo / EMODnet fetchers.
 
 The 10 m wind speed feeds two consumers: the Wenz ambient-noise wind term
-(:class:`uacpy.noise.WenzNoise`, whose ``wind_speed`` is in **knots** — multiply the
+(:class:`uacpy.noise.WenzNoise`, whose ``wind_speed_kn`` is in **knots** — multiply the
 m/s returned here by ``1.9438``) and the Pierson-Moskowitz sea surface
 (:func:`uacpy.data.fetch_sea_surface`, when no wave source is available).
 
@@ -107,7 +107,7 @@ def fetch_wind(point, *, date, source='erddap', timeout=60.0, verbose=False):
 
 def fetch_wind_transect(start, end, *, date, n_points=6, source='erddap',
                         timeout=60.0, verbose=False):
-    """``(ranges_m, wind_speed_ms)`` sampled along ``start`` → ``end``."""
+    """``(ranges_m, wind_speed_mps)`` sampled along ``start`` → ``end``."""
     from uacpy.data._geo import geodesic_waypoints
     _check_source(source)
     lats, lons, ranges_m = geodesic_waypoints(start, end, n_points)

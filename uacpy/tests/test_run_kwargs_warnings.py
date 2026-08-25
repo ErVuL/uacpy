@@ -78,7 +78,7 @@ def test_bellhop_coherent_tl_lists_all_ignored_kwargs(pekeris, monkeypatch):
 
 
 @pytest.mark.requires_binary
-def test_sparc_waveform_kwargs_still_warn(pekeris, monkeypatch):
+def test_sparc_waveform_kwargs_warn(pekeris, monkeypatch):
     """SPARC drives its pulse via the constructor pulse_type; the waveform
     kwargs must keep warning through the shared helper."""
     from uacpy.models import SPARC

@@ -43,8 +43,12 @@ RASTER_FILE = 'lithology_classes.tif'
 # Wagner IV global equal-area projection the raster is georeferenced in.
 WAGNER4_PROJ = ('+proj=wag4 +lon_0=0 +x_0=0 +y_0=0 +datum=WGS84 +units=m '
                 '+no_defs')
-# Class code → (lithology name, representative mean grain size ϕ). ϕ values match
-# the local sediment DB's lithology→ϕ map; lithogenous (gravel/sand/silt) ≈ silt.
+# Class code → (lithology name, representative mean grain size ϕ). The four
+# biogenic classes carry the ϕ the local sediment DB's lithology map gives the
+# same term (``sediment_db._DECK41_LITHOLOGY_TO_PHI``). 'Lithogenous' has no
+# term there — it is terrigenous gravel/sand/silt rather than one Wentworth
+# class — so it takes the Wentworth sand/silt boundary, coarser than that map's
+# silt (5.5).
 _CLASS = {
     1: ('calcareous sediment', 7.5),
     2: ('clay', 9.0),
@@ -92,42 +96,44 @@ def download_diesing_db(cache_dir=None, *, timeout=300.0, verbose=False):
         checked_member_size(info.file_size, RASTER_FILE)
         data = zf.read(RASTER_FILE)
     out = dest / RASTER_FILE
-    out.write_bytes(data)
+    with _cache.atomic_write(out) as part:
+        part.write_bytes(data)
     _MODEL.clear()
     log_message('diesing', f"Diesing lithology map cached → {out}", verbose=verbose)
     return out
 
 
-def _model():
-    """Load (or reuse) the raster, its geotransform and the projection."""
-    root = str(_cache.cache_root())
-    if root in _MODEL:
-        return _MODEL[root]
+def _build_model():
+    """Read the raster and derive its geotransform and projection."""
     from PIL import Image
     path = _cache.require('diesing', RASTER_FILE)
     Image.MAX_IMAGE_PIXELS = None
-    im = Image.open(path)
-    arr = np.asarray(im, dtype=np.float32)
-    tags = im.tag_v2
-    sx, sy = float(tags[33550][0]), float(tags[33550][1])     # ModelPixelScale
-    # ModelTiepoint is (i, j, k, x, y, z): raster point (i, j) maps to model
-    # (x, y). Back out the corner of pixel (0, 0) — x grows with the column,
-    # y shrinks with the row.
-    tie = tags[33922]
-    x0 = float(tie[3]) - float(tie[0]) * sx
-    y0 = float(tie[4]) + float(tie[1]) * sy
-    result = {'arr': arr, 'x0': x0, 'y0': y0, 'sx': sx, 'sy': sy,
-              'tf': _pyproj_transformer(), 'H': arr.shape[0], 'W': arr.shape[1]}
-    _MODEL[root] = result
-    return result
+    with _cache.reading('diesing', path):
+        im = Image.open(path)
+        arr = np.asarray(im, dtype=np.float32)
+        tags = im.tag_v2
+        sx, sy = float(tags[33550][0]), float(tags[33550][1])  # ModelPixelScale
+        # ModelTiepoint is (i, j, k, x, y, z): raster point (i, j) maps to
+        # model (x, y). Back out the corner of pixel (0, 0) — x grows with the
+        # column, y shrinks with the row.
+        tie = tags[33922]
+        x0 = float(tie[3]) - float(tie[0]) * sx
+        y0 = float(tie[4]) + float(tie[1]) * sy
+    return {'arr': arr, 'x0': x0, 'y0': y0, 'sx': sx, 'sy': sy,
+            'tf': _pyproj_transformer(), 'H': arr.shape[0], 'W': arr.shape[1]}
 
 
-def _class_code(lat, lon):
-    """Diesing class code (1-5) at a point, or ``None`` outside deep-sea coverage."""
-    m = _model()
-    # No normalize_lon: PROJ wraps the longitude relative to +lon_0 itself, so a
-    # query at 190° and one at −170° project to the same x.
-    x, y = m['tf'].transform(lon, lat)
+def _model():
+    """Load (or reuse) the raster, its geotransform and the projection.
+
+    Built through :func:`uacpy.data._cache.memoize`, so threads racing a cold
+    memo decode the raster once between them rather than once each.
+    """
+    return _cache.memoize(_MODEL, str(_cache.cache_root()), _build_model)
+
+
+def _sample(m, x, y):
+    """Class code at projected ``(x, y)``, or ``None`` where the raster has none."""
     # The raster declares GTRasterTypeGeoKey = RasterPixelIsArea, so the
     # geotransform anchors the *corner* of pixel (0,0); the cell containing the
     # point is floor(), not round() (which would bias it half a pixel). y0 is
@@ -142,6 +148,26 @@ def _class_code(lat, lon):
     if not np.isfinite(v) or v < 1:
         return None
     return int(v)
+
+
+def _class_code(lat, lon):
+    """Diesing class code (1-5) at a point, or ``None`` outside deep-sea coverage."""
+    m = _model()
+    # No normalize_lon: PROJ wraps the longitude relative to +lon_0 itself, so a
+    # query at 190° and one at −170° project to the same x.
+    x, y = m['tf'].transform(lon, lat)
+    code = _sample(m, x, y)
+    if code is not None:
+        return code
+    # +180 and −180 are the same meridian but sit at opposite ends of the
+    # parallel under Wagner IV, and the rasterized nodata margin covers one end
+    # without covering the other: (0, 180) reads clay while (0, −180) reads as
+    # uncovered. A miss within one pixel of the map edge is retried at the
+    # mirrored end of the same parallel, so both spellings answer alike.
+    x_edge = abs(m['tf'].transform(180.0, lat)[0])
+    if abs(abs(x) - x_edge) <= m['sx']:
+        return _sample(m, -x, y)
+    return None
 
 
 def fetch_seafloor_lithology(point: Coordinate) -> dict:
@@ -170,6 +196,11 @@ def fetch_bottom_diesing(point: Coordinate, *, roughness: float = 0.0,
                          timeout=None, verbose: Union[bool, str] = False
                          ) -> BoundaryProperties:
     """Model-ready bottom from the Diesing 2020 lithology at ``(lat, lon)``.
+
+    Provenance is catalogue-level: the raster cell under the point supplies
+    the value, and no per-cell ``data_point``/``offset_km`` is recorded —
+    unlike the sample sources (``grainsize``, ``mars``), which record the
+    sample the value came from.
 
     ``timeout`` is accepted (and ignored — this backend is offline) for signature
     parity with the network bottom fetchers. ``water_sound_speed`` (m/s) scales

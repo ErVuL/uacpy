@@ -110,19 +110,17 @@ def test_cwt_rejects_complex_input():
         cwt(xc, 1000.0)
 
 
-def test_cwt_explicit_frequencies_are_not_nyquist_checked():
-    """An explicit ``frequencies=`` array is analysed as given — only the
-    default grid is capped at fs/2 — so requesting 700 Hz at fs=1000 returns
-    coefficients, not an error, and what comes back is numerical residue far
-    below any in-band coefficient."""
+def test_cwt_explicit_frequency_above_nyquist_raises():
+    """An explicit analysis frequency above fs/2 raises a typed error naming
+    Nyquist; exactly fs/2 — the top of the default grid — is analysed."""
     fs = 1000.0
     x = np.sin(2 * np.pi * 50 * np.arange(128) / fs)
-    r = cwt(x, fs, frequencies=[50.0, 700.0])
+    with pytest.raises(ConfigurationError, match="Nyquist"):
+        cwt(x, fs, frequencies=[50.0, 700.0])
+    r = cwt(x, fs, frequencies=[50.0, fs / 2.0])
     assert r.coefficients.shape == (2, 128)
-    np.testing.assert_allclose(r.frequencies, [50.0, 700.0])
+    np.testing.assert_allclose(r.frequencies, [50.0, fs / 2.0])
     assert np.isfinite(r.coefficients).all()
-    assert (np.abs(r.coefficients[1]).max()
-            < 0.02 * np.abs(r.coefficients[0]).max())
 
 
 def test_analytic_signal_and_cepstrum_reject_complex_input():

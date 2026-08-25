@@ -32,8 +32,10 @@ FEATURES DEMONSTRATED:
 """
 
 import sys
+import os
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Repo root, so ``import uacpy`` resolves from a source checkout.
+sys.path.insert(0, str(Path(__file__).parents[2]))
 
 import numpy as np  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
@@ -45,8 +47,9 @@ from uacpy.models import Bellhop  # noqa: E402
 from uacpy.visualization.plots import plot_field  # noqa: E402
 from uacpy.models import RunMode  # noqa: E402
 
-OUTPUT_DIR = Path(__file__).parent / 'output'
-OUTPUT_DIR.mkdir(exist_ok=True)
+OUTPUT_DIR = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
+                  or Path(__file__).parent / 'output')
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _tl_mappable(ax):
@@ -243,7 +246,9 @@ def main():
 
     # Plot 1: Environment setup with range-dependent bottom
     fig1, axes1 = env.plot()
-    plt.savefig(OUTPUT_DIR / 'example_04_environment.png', dpi=150, bbox_inches='tight')
+    fig1.savefig(OUTPUT_DIR / 'example_04_environment.png', dpi=150,
+                 bbox_inches='tight')
+    plt.close(fig1)
     print("  ✓ Saved: example_04_environment.png")
 
     # Plot 2: Compare standard vs Cerveny beams
@@ -268,9 +273,11 @@ def main():
         cb = fig2.colorbar(_tl_mappable(ax1), cax=cbar_ax, orientation='vertical')
         cb.set_label('TL (dB)', fontsize=12, fontweight='bold')
 
-        plt.suptitle('Bellhop: Gaussian vs Cerveny Beams (contour overlays + shared colorbar)',
-                     fontsize=16, fontweight='bold')
-        plt.savefig(OUTPUT_DIR / 'example_04_beam_comparison.png', dpi=150, bbox_inches='tight')
+        fig2.suptitle('Bellhop: Gaussian vs Cerveny Beams (contour overlays '
+                      '+ shared colorbar)', fontsize=16, fontweight='bold')
+        fig2.savefig(OUTPUT_DIR / 'example_04_beam_comparison.png', dpi=150,
+                     bbox_inches='tight')
+        plt.close(fig2)
         print("  ✓ Saved: example_04_beam_comparison.png")
 
     # Plot 3: Point source vs Line source
@@ -290,9 +297,11 @@ def main():
         cb = fig3.colorbar(_tl_mappable(ax1), cax=cbar_ax, orientation='vertical')
         cb.set_label('TL (dB)', fontsize=12, fontweight='bold')
 
-        plt.suptitle('Bellhop: Point vs Line Source (fixed 20-120 dB TL scale)',
-                     fontsize=16, fontweight='bold')
-        plt.savefig(OUTPUT_DIR / 'example_04_source_comparison.png', dpi=150, bbox_inches='tight')
+        fig3.suptitle('Bellhop: Point vs Line Source (fixed 20-120 dB TL scale)',
+                      fontsize=16, fontweight='bold')
+        fig3.savefig(OUTPUT_DIR / 'example_04_source_comparison.png', dpi=150,
+                     bbox_inches='tight')
+        plt.close(fig3)
         print("  ✓ Saved: example_04_source_comparison.png")
 
     # Plot 4: Ray trace
@@ -302,7 +311,9 @@ def main():
                                      color_by="bounces")  # Color-code rays by bounce type
         ax4.set_title("Ray Trace with Beam Shift\nRunType: 'Rg RR2S'\n" +
                       '(rays colored by bounce type - R/G/B/K)')
-        plt.savefig(OUTPUT_DIR / 'example_04_rays.png', dpi=150, bbox_inches='tight')
+        fig4.savefig(OUTPUT_DIR / 'example_04_rays.png', dpi=150,
+                     bbox_inches='tight')
+        plt.close(fig4)
         print("  ✓ Saved: example_04_rays.png")
 
     # Plot 5: Multi-source-depth — one TL panel per source slab.
@@ -324,13 +335,14 @@ def main():
         cb = fig5.colorbar(_tl_mappable(axes5[0]), cax=cbar_ax,
                            orientation='vertical')
         cb.set_label('TL (dB)', fontsize=12, fontweight='bold')
-        plt.suptitle(
+        fig5.suptitle(
             'Bellhop multi-source-depth: one binary call, '
             'ResultStack[Field] slabs',
             fontsize=15, fontweight='bold',
         )
-        plt.savefig(OUTPUT_DIR / 'example_04_multi_source.png',
-                    dpi=150, bbox_inches='tight')
+        fig5.savefig(OUTPUT_DIR / 'example_04_multi_source.png',
+                     dpi=150, bbox_inches='tight')
+        plt.close(fig5)
         print("  ✓ Saved: example_04_multi_source.png")
 
     print("\nFeatures demonstrated:")
@@ -347,7 +359,7 @@ def main():
     print("  ✓ Contour overlays on TL plots (labeled contours)")
     print("  ✓ Fixed TL limits, 20 to 120 dB, shared by every panel")
     print("  ✓ Subplot colorbar control (shared colorbar off a panel's mappable)")
-    print("  ✓ jet_r colormap (blue=good, red=poor)")
+    print("  ✓ jet_r colormap (red=low TL/loud, blue=high TL/quiet)")
 
     print("\n✓ Example 04 complete\n")
 

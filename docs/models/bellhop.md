@@ -226,7 +226,7 @@ any of them under another beam type — including the default `'B'` — emits a
 
 | Name | Default | Meaning |
 |---|---|---|
-| `backend` | `None` | `'fortran'`, `'cxx'`, `'cuda'`; `None` auto-picks in the order cuda → cxx → fortran, silently. |
+| `backend` | `None` | `'fortran'`, `'cxx'`, `'cuda'`; `None` auto-picks in the order cuda → cxx → fortran, silently. The auto-pick's usual winner, `cuda`, is not run-to-run reproducible — §7. |
 | `dimensionality` | `'2D'` | Only `'2D'`; `'3D'` raises. It is the `--2D` flag the cxx/cuda CLIs require; the Fortran binary takes none. |
 | `work_dir` | `None` | Pin the scratch dir to keep `.env`/`.shd`/`.prt`. |
 | `cleanup` | `None` | Defaults to *keep* when `work_dir` is pinned. |
@@ -326,6 +326,26 @@ get one arrival per path; that is what the BELLHOP user guide prescribes for
 arrivals and eigenrays. Either way this is the channel impulse response, and it
 is what [`uacpy.comms`](../guide/comms.md) uses to simulate a modem link.
 
+One caveat if you read the `.arr` file itself: its record count and order are
+backend- and threading-dependent. The serial Fortran binary merges
+contributions that land within its delay/phase tolerance as it accumulates
+them (`ArrMod.f90`), while the multithreaded `cxx`/`cuda` binaries append
+every contribution unmerged, in thread-completion order — the same run writes
+far more records there, and an incoherent energy sum taken directly over the
+raw records disagrees between backends. uacpy applies the Fortran merge rule
+on read (`read_arr_file`'s default; `merge=False` returns the raw records), so
+an `Arrivals` result holds the same *set* of records — the same count, in the
+same order — whichever backend produced the file. It does not hold the same
+*numbers*: the merge rule normalises the record structure, not the arithmetic
+that filled it, and the two binaries compute that arithmetic differently in
+float32. On the `beam_type='G'` run above, fortran and cuda agreed on all 52
+records but disagreed on amplitude in 52 of 52 (max 2.1e-08), delay in 39 of
+52 (max 1.1e-06 s), receiver angle in 25 of 52 (max 7.3e-05°), source angle in
+8 of 52 and phase in 1 of 52. So compare arrivals across backends with a
+float32-scale tolerance, never for equality, and expect anything that
+*thresholds* an arrival — a peak pick, a count above a cutoff — to be able to
+land on the other side of the threshold when the backend changes.
+
 ### Broadband transfer function
 
 ```python
@@ -383,6 +403,20 @@ falls back to fortran with a `UserWarning` when the `bellhopcuda` *binary* is
 missing. A binary that is present but has no usable GPU is not detected here,
 and the `backend=None` auto-pick never warns at all. Check `result.backend` to
 see what actually ran.
+
+**The default backend is not run-to-run reproducible.** `result.backend` tells
+you *which* binary ran; it does not promise that binary returns the same
+numbers twice. Two default `Bellhop()` runs of the same environment — both
+auto-picked to `'cuda'` here — wrote a byte-identical `model.env` and
+`model.prt` but a differing `model.shd`: TL differed in 57 of 500 elements, by
+up to 1.53e-05 dB, about one ULP of the complex64 field. That is the GPU
+reduction order changing between launches, and it is the price of letting the
+auto-pick choose. If you need a field you can reproduce bit for bit — a
+regression baseline, a published figure, a hash — pass
+`Bellhop(backend='fortran')`, whose `.shd` is byte-identical and whose field
+compares `array_equal` across runs. Note the two backends fail in *opposite*
+places, so pin the file you actually depend on: the fortran `.prt` is **not**
+byte-identical, because it carries a `CPU Time = …` stamp.
 
 ---
 

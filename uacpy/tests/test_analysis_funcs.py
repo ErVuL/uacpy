@@ -3,6 +3,14 @@ import numpy as np
 import pytest
 from scipy.signal import welch
 from uacpy.acoustic_signal.analysis import psd, ppsd, sel, PPSDResult
+import warnings
+
+from uacpy.acoustic_signal.bands import decidecade_band_levels
+from uacpy.acoustic_signal.timefreq import spectrogram
+from uacpy.core.exceptions import ConfigurationError
+
+#: The scalars every sample-rate / dimension guard must refuse.
+BAD_SCALARS = [0.0, -100.0, np.nan, np.inf]
 from uacpy.visualization.plots.signal import (
     plot_psd, plot_ppsd, plot_sel)
 
@@ -258,3 +266,155 @@ def test_sel_rejects_nonpositive_sample_rate():
     from uacpy.core.exceptions import ConfigurationError
     with pytest.raises(ConfigurationError, match="sample_rate"):
         sel(np.ones(100), 0.0)
+
+
+def _boxcar_bin_energy(x, fs, nfft):
+    """Per-bin exposure (Pa²·s) of the whole record, sel's own decomposition."""
+    from scipy.signal import spectrogram, windows
+    f, _t, Sxx = spectrogram(x, fs, window=windows.boxcar(nfft), noverlap=0,
+                             nfft=nfft, detrend=False, scaling="density")
+    return f, Sxx.sum(axis=1)
+
+
+def test_sel_total_is_parseval_over_the_covered_band_only():
+    """The band total accounts for every FFT bin inside
+    ``[bands[0][0], bands[-1][2]]`` and nothing outside it.
+
+    The docstring used to call the total Parseval-exact outright, which
+    overstates it: a third-octave request snapped well below Nyquist keeps
+    only the energy its bands span.
+    """
+    fs, nfft = 2000.0, 2000
+    x = np.random.default_rng(0).standard_normal(4000)
+    total = np.sum(x ** 2) / fs
+    out = sel(x, fs, fmin=10, fmax=900, band_type="third_octave")
+    lo, hi = out.bands[0][0], out.bands[-1][2]
+
+    f, per_bin = _boxcar_bin_energy(x, fs, nfft)
+    covered = per_bin[(f >= lo) & (f <= hi)].sum()
+    assert out.sel_pa2s.sum() == pytest.approx(covered, rel=1e-9)
+    # ... and that is a long way short of the whole record's exposure.
+    assert out.sel_pa2s.sum() / total < 0.95
+
+
+def test_sel_full_span_linear_drops_only_the_dc_bin():
+    """A DC-to-Nyquist ``'linear'`` request keeps every bin but DC, whose
+    band edges cannot reach (they must be > 0). The top band's edge is pinned
+    to ``fmax`` so the Nyquist bin is not lost to float drift in the
+    accumulated band width.
+    """
+    fs, nfft = 2000.0, 2000
+    x = np.random.default_rng(0).standard_normal(4000)
+    total = np.sum(x ** 2) / fs
+    out = sel(x, fs, fmin=1e-12, fmax=fs / 2, band_type="linear", num_bands=50)
+    assert out.bands[-1][2] == fs / 2
+
+    f, per_bin = _boxcar_bin_energy(x, fs, nfft)
+    assert total - out.sel_pa2s.sum() == pytest.approx(per_bin[f == 0.0].sum(),
+                                                       rel=1e-9)
+    # The top band is closed at fmax, so it carries the Nyquist bin too.
+    top_lo = out.bands[-1][0]
+    assert out.sel_pa2s[-1] == pytest.approx(
+        per_bin[(f >= top_lo) & (f <= fs / 2)].sum(), rel=1e-9)
+
+
+def test_ppsd_square_input_warns_and_takes_the_first_axis_as_time():
+    """'the longer axis is time' cannot choose on a square input, so the
+    first axis wins and the ambiguity is announced."""
+    rng = np.random.default_rng(2)
+    fs, n = 200.0, 64
+    data = rng.standard_normal((n, n))
+    with pytest.warns(UserWarning, match="square"):
+        out = ppsd(data, fs, seg_duration=0.16, nperseg=16, lvlmin=-200,
+                   lvlmax=200)
+    columns = ppsd([data[:, i] for i in range(n)], fs, seg_duration=0.16,
+                   nperseg=16, lvlmin=-200, lvlmax=200)
+    assert np.allclose(out.mean_db, columns.mean_db)
+
+
+def test_ppsd_segment_shorter_than_one_sample_is_diagnosed_as_such():
+    """A ``seg_duration`` under one sample used to surface as an
+    ``overlap_pct`` error, because the zero-length chunk made the step
+    non-positive before anything checked the chunk itself."""
+    from uacpy.core.exceptions import ConfigurationError
+    x = np.random.default_rng(0).standard_normal(4000)
+    with pytest.raises(ConfigurationError, match="seg_duration"):
+        ppsd(x, 2000.0, seg_duration=1e-4)
+    with pytest.raises(ConfigurationError, match="seg_duration"):
+        ppsd(x, 2000.0, seg_duration=0.0)
+    # The overlap check still owns its own case.
+    with pytest.raises(ConfigurationError, match="overlap_pct"):
+        ppsd(x, 2000.0, seg_duration=0.5, overlap_pct=100)
+
+
+def test_ppsd_rejects_a_list_containing_a_non_1d_array():
+    good = np.random.default_rng(0).standard_normal(2000)
+    with pytest.raises(ConfigurationError, match='list element'):
+        ppsd([good, np.ones((4, 4))], 1000.0, seg_duration=0.5)
+
+
+class TestDecidecadeGuards:
+    def _flat(self):
+        f = np.linspace(50.0, 2000.0, 400)
+        return np.ones_like(f), f
+
+    @pytest.mark.parametrize("bad", BAD_SCALARS)
+    def test_nonpositive_or_nonfinite_ref_raises(self, bad):
+        p, f = self._flat()
+        with pytest.raises(ConfigurationError,
+                           match="ref must be > 0 Pa and finite"):
+            decidecade_band_levels(p, f, ref=bad)
+
+    def test_negative_psd_raises_typed(self):
+        # A negative-power band failed the `power > 0` publication test and
+        # came back as a silent NaN level.
+        p, f = self._flat()
+        p[10] = -1.0
+        with pytest.raises(ConfigurationError, match="negative"):
+            decidecade_band_levels(p, f)
+
+    def test_flat_psd_gives_finite_levels_inside_support(self):
+        p, f = self._flat()
+        _, levels = decidecade_band_levels(p, f)
+        assert np.isfinite(levels).any()
+
+
+class TestSilentZerosAreAnnounced:
+    def test_sel_warns_for_bands_holding_no_fft_bin(self):
+        # 'linear' bands are used as given, so a fmax above Nyquist produces
+        # whole bands that sum to exactly 0 Pa^2*s — indistinguishable from a
+        # measured silence. The octave ladders clamp instead.
+        rng = np.random.default_rng(0)
+        x = rng.normal(size=4000)
+        with pytest.warns(UserWarning, match="no FFT bin"):
+            r = sel(x, 2000.0, band_type='linear', fmin=100.0, fmax=3000.0,
+                    num_bands=6)
+        assert np.all(r.sel_pa2s[2:] == 0.0)
+        # Bands entirely below Nyquist stay silent about it.
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            sel(x, 2000.0, band_type='linear', fmin=100.0, fmax=900.0,
+                num_bands=4)
+
+    @pytest.mark.parametrize("estimator", ["psd", "ppsd", "spectrogram"])
+    def test_complex_input_warns_about_the_two_sided_axis(self, estimator):
+        # These three accept complex input and return an unsorted two-sided
+        # axis, not the one-sided Pa^2/Hz their docstrings describe.
+        rng = np.random.default_rng(0)
+        z = rng.normal(size=2048) + 1j * rng.normal(size=2048)
+        with pytest.warns(UserWarning, match="TWO-SIDED"):
+            if estimator == "psd":
+                f = psd(z, 1000.0, nperseg=128).frequencies
+            elif estimator == "ppsd":
+                f = ppsd(z, 1000.0, seg_duration=0.5, nperseg=128).frequencies
+            else:
+                f = spectrogram(z, 1000.0, nperseg=128).frequencies
+        assert f.min() < 0.0                       # the two-sided axis
+        assert not np.all(np.diff(f) > 0)          # and it is not sorted
+
+    @pytest.mark.parametrize("estimator", [psd, spectrogram])
+    def test_real_input_does_not_warn(self, estimator):
+        x = np.random.default_rng(0).normal(size=2048)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            estimator(x, 1000.0, nperseg=128)

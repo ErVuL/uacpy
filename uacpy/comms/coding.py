@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from uacpy.core.exceptions import ConfigurationError
+
 # Rate-1/2 maximum-free-distance generator pair for K=7 (Proakis & Salehi
 # Table 8.3-1, after Odenwalder 1970 / Larsen 1973): d_free = 10, which meets
 # that table's upper bound, so no other K=7 rate-1/2 code does better.
@@ -47,6 +49,10 @@ def viterbi_decode(coded, polys=DEFAULT_POLYS, K=DEFAULT_K):
 
     Returns the decoded information bits (tail removed).
     """
+    # Deliberately generic twin of uacpy.comms.janus.janus_decode: this core
+    # takes any (polys, K) where that one hard-codes the K=9 rate-1/2 JANUS
+    # code with precomputed trellis words. Any change to the
+    # add-compare-select or traceback logic here must be mirrored there.
     n = len(polys)
     c = np.asarray(coded, dtype=int).ravel()
     c = c[: (c.size // n) * n]            # drop a trailing partial symbol (garbage)
@@ -119,8 +125,12 @@ class ConvCode:
 
     Examples
     --------
+    >>> import numpy as np
+    >>> bits = np.random.default_rng(0).integers(0, 2, 64)
     >>> code = ConvCode(interleave_depth=16)
     >>> rx = code.decode(code.encode(bits))
+    >>> bool(np.array_equal(np.asarray(rx)[:bits.size], bits))
+    True
     """
 
     def __init__(self, polys=DEFAULT_POLYS, K: int = DEFAULT_K,
@@ -170,6 +180,21 @@ class ConvCode:
         return bits
 
 
+def _require_depth(caller: str, depth) -> int:
+    """Reject an interleaver depth below 1.
+
+    The block size is ``depth*depth``, so depth 0 divides by zero and a
+    negative depth reaches the reshape as an unknown dimension — both bare
+    numpy/Python errors with nothing naming the argument.
+    """
+    d = int(depth)
+    if d < 1:
+        raise ConfigurationError(
+            f"{caller}: depth must be >= 1 (it is the side of the "
+            f"depth x depth interleaver block); got {depth!r}")
+    return d
+
+
 def interleave(bits, depth):
     """Block-local ``depth x depth`` interleaver (transpose per square block).
 
@@ -181,7 +206,7 @@ def interleave(bits, depth):
     length so :meth:`ConvCode.decode` can strip the resulting tail exactly.
     """
     b = np.asarray(bits, dtype=int).ravel()
-    d = int(depth)
+    d = _require_depth("interleave", depth)
     block = d * d
     nblk = int(np.ceil(b.size / block))
     pad = np.zeros(nblk * block, dtype=int)
@@ -192,7 +217,7 @@ def interleave(bits, depth):
 def deinterleave(bits, depth):
     """Inverse of :func:`interleave`; drops a trailing partial (garbage) block."""
     b = np.asarray(bits, dtype=int).ravel()
-    d = int(depth)
+    d = _require_depth("deinterleave", depth)
     block = d * d
     nblk = b.size // block
     b = b[: nblk * block]

@@ -14,7 +14,32 @@ import scipy.signal as _sig
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.constants import REFERENCE_PRESSURE_WATER
 from uacpy.core.acoustics import power_to_db
-from uacpy.acoustic_signal._signal_validate import require_finite_signal
+from uacpy.core._warn_frames import USER_FRAME_SKIP
+from uacpy.acoustic_signal._signal_validate import (
+    require_finite_signal,
+    require_positive_finite_scalar,
+)
+
+
+def _warn_two_sided(caller: str, data):
+    """Warn that complex input yields a two-sided, unsorted frequency axis.
+
+    scipy's Welch/spectrogram switch to ``return_onesided=False`` for complex
+    input: the axis then runs ``0 .. fs/2`` and continues at ``-fs/2 .. 0``,
+    which is neither one-sided nor monotonic, so anything that assumes an
+    ascending axis (interpolation, band selection, a plot) reads it wrong.
+    The estimate itself is correct — only the docstrings' one-sided promise
+    does not hold — so this is a warning, not the rejection the real-pressure
+    estimators (``sel``, ``cwt``, ``analytic_signal``) issue.
+    """
+    if np.iscomplexobj(data):
+        warnings.warn(
+            f"{caller}: complex input gives a TWO-SIDED spectrum — "
+            f"'frequencies' runs 0..fs/2 then -fs/2..0 and is not sorted, and "
+            f"the density is not the one-sided Pa^2/Hz this function "
+            f"documents. Sort both arrays together (i = np.argsort(f)) or "
+            f"np.fft.fftshift them, or pass a real pressure series.",
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
 
 
 PSDResult = namedtuple("PSDResult", "frequencies power")
@@ -38,8 +63,15 @@ def psd(data, sample_rate, *, window="hann", nperseg=8192, noverlap=None,
     ``nperseg`` to the input length, so short signals don't raise. Note scipy's
     Welch **detrends the constant (DC) component** of each segment, so the DC
     bin is suppressed; :func:`sel` keeps DC (no detrending) for an exact energy
-    sum, so the two are not directly comparable at 0 Hz."""
+    sum, so the two are not directly comparable at 0 Hz.
+
+    **Complex input** is accepted, unlike :func:`sel`, but returns a two-sided
+    spectrum on an unsorted frequency axis (``0 .. fs/2`` then ``-fs/2 .. 0``)
+    rather than the one-sided density above; a ``UserWarning`` says so."""
     data = require_finite_signal(data, "psd")
+    sample_rate = require_positive_finite_scalar(
+        sample_rate, "psd", "sample_rate", " Hz")
+    _warn_two_sided("psd", data)
     freqs, Pxx = _sig.welch(data, sample_rate, window=window, nperseg=nperseg,
                             noverlap=noverlap, nfft=nfft, scaling=scaling)
     return PSDResult(freqs, Pxx)
@@ -52,7 +84,9 @@ def ppsd(data, sample_rate, *, seg_duration=1.0, overlap_pct=50, ddB=1.0,
 
     Segments the signal(s), computes a Welch PSD per segment and histograms the
     dB levels per frequency. Returns a :class:`PPSDResult`. 2-D input uses the
-    longer axis as time; pass a list of 1-D arrays to be explicit. For a
+    longer axis as time; a **square** input gives that rule nothing to choose
+    on, so the first axis is taken as time (one signal per column) and a
+    ``UserWarning`` is issued — pass a list of 1-D arrays to be explicit. For a
     constant-Q (geometric-frequency) PPSD, see
     :func:`uacpy.acoustic_signal.probabilistic_constant_q` — note the two
     histogram different populations: each sample here is a *Welch average*
@@ -77,14 +111,29 @@ def ppsd(data, sample_rate, *, seg_duration=1.0, overlap_pct=50, ddB=1.0,
     ``mean_db`` and ``std_db`` are taken over *all* segments, so they are not
     clipped by ``lvlmin`` / ``lvlmax`` the way the histogram is; if levels fall
     outside that window the two stop describing the same population.
+
+    **Complex input** is accepted but returns a two-sided spectrum on an
+    unsorted frequency axis, as in :func:`psd`; a ``UserWarning`` says so.
     """
     if isinstance(data, list):
-        signals = data
+        signals = [np.asarray(s) for s in data]
+        for i, s in enumerate(signals):
+            if s.ndim != 1:
+                raise ConfigurationError(
+                    "ppsd: data must be 1-D, 2-D, or a list of 1-D arrays; "
+                    f"list element {i} has ndim={s.ndim}")
     else:
         data = np.asarray(data)
         if data.ndim == 1:
             signals = [data]
         elif data.ndim == 2:
+            if data.shape[0] == data.shape[1]:
+                warnings.warn(
+                    f"ppsd: square {data.shape} input — 'the longer axis is "
+                    "time' cannot choose, so the first axis is taken as time "
+                    "(one signal per column). Pass a list of 1-D arrays, or "
+                    "transpose, to be explicit.",
+                    UserWarning, stacklevel=2)
             if data.shape[0] < data.shape[1]:
                 signals = [data[i, :] for i in range(data.shape[0])]
             else:
@@ -94,8 +143,19 @@ def ppsd(data, sample_rate, *, seg_duration=1.0, overlap_pct=50, ddB=1.0,
                 "ppsd: data must be 1-D, 2-D, or a list of 1-D arrays; "
                 f"got ndim={data.ndim}")
     signals = [require_finite_signal(s, "ppsd") for s in signals]
+    sample_rate = require_positive_finite_scalar(
+        sample_rate, "ppsd", "sample_rate", " Hz")
+    complex_signal = next((s for s in signals if np.iscomplexobj(s)), None)
+    if complex_signal is not None:
+        _warn_two_sided("ppsd", complex_signal)
 
     chunk_size = int(seg_duration * sample_rate)
+    if chunk_size < 1:
+        raise ConfigurationError(
+            f"ppsd: seg_duration ({seg_duration} s) x sample_rate "
+            f"({sample_rate} Hz) is {seg_duration * sample_rate:g} samples, "
+            "which truncates to an empty time segment; require seg_duration "
+            f">= 1/sample_rate ({1.0 / sample_rate:g} s).")
     overlap_samples = int(chunk_size * overlap_pct / 100)
     step = chunk_size - overlap_samples
     if step <= 0:
@@ -221,8 +281,10 @@ def _sel_bands(fmin, fmax, band_type, num_bands, sample_rate):
             f_high = f_low + bw
             bands.append((f_low, (f_low + f_high) / 2, f_high))
             f_low = f_high
-        if bands and bands[-1][2] > fmax:
-            bands[-1] = (bands[-1][0], bands[-1][1], fmax)
+        # Accumulating bw num_bands times drifts the final edge a few ULPs off
+        # fmax; pinning it keeps a bin sitting exactly on fmax (the Nyquist bin
+        # of a full-span request) inside the top band.
+        bands[-1] = (bands[-1][0], bands[-1][1], fmax)
     else:
         raise ConfigurationError(
             f"sel: unknown band_type={band_type!r}; valid: 'octave', "
@@ -250,8 +312,20 @@ def sel(data, sample_rate, *, fmin=8.9125, fmax=22387,
     defaults to ``sample_rate``, i.e. 1 Hz wide bins.
 
     **Band selectivity:** the *total* exposure (sum over all bands) is
-    Parseval-exact, but each band is a plain sum of rectangular FFT bins, not
-    an IEC 61260 fractional-octave filter. A tone that does not fall on a bin
+    Parseval-exact **over the covered band** — it equals ``sum(data**2) /
+    sample_rate`` restricted to the FFT bins inside ``[bands[0][0],
+    bands[-1][2]]``, each bin counted in exactly one band. Bins outside that
+    span are dropped, which always includes DC (band edges must be > 0) and
+    includes Nyquist unless a bin falls exactly on the top edge. So the total
+    is *not* the whole signal's exposure whenever the bands do not span the
+    full spectrum: for white noise sampled at 2 kHz the default third-octave
+    request snaps to 8.8-891 Hz (the highest whole band under Nyquist) and
+    returns about 88 % of it, and even a DC-to-Nyquist ``'linear'`` request
+    falls short by the DC bin alone. Compare a total against the band span it
+    covers, not against ``sum(data**2) / sample_rate``.
+
+    Each band is a plain sum of rectangular FFT bins, not an IEC 61260
+    fractional-octave filter. A tone that does not fall on a bin
     centre leaks into each adjacent band at a floor of roughly -33 dB relative
     to its own band (IEC 61260 class-1 filters provide 60-75 dB of stopband
     rejection). Band levels of broadband signals are accurate; strong tonals
@@ -272,10 +346,15 @@ def sel(data, sample_rate, *, fmin=8.9125, fmax=22387,
             "sel: data must be real (got complex input); band exposure is "
             "defined for a real pressure time series. Demodulate to a real "
             "signal first.")
-    if not sample_rate > 0:
-        raise ConfigurationError(
-            f"sel: sample_rate must be > 0 Hz (got {sample_rate}).")
+    sample_rate = require_positive_finite_scalar(
+        sample_rate, "sel", "sample_rate", " Hz")
     if integration_time is not None:
+        # Guarded before it reaches the slice: a negative integration_time is
+        # a Python end-slice, so -1.0 s of a 5 s record returns bit-identically
+        # what +4.0 s returns, and NaN/Inf raise an untyped ValueError /
+        # OverflowError out of int().
+        integration_time = require_positive_finite_scalar(
+            integration_time, "sel", "integration_time", " s")
         data = data[:min(int(integration_time * sample_rate), len(data))]
 
     bands = _sel_bands(fmin, fmax, band_type, num_bands, sample_rate)
@@ -284,7 +363,9 @@ def sel(data, sample_rate, *, fmin=8.9125, fmax=22387,
     if chunk_size <= 0:
         raise ConfigurationError(
             "sel: no samples to integrate (empty data, or integration_time "
-            "shorter than one sample). Provide a non-empty signal.")
+            "shorter than one sample). Provide a non-empty signal. Got "
+            f"{len(data)} sample(s) at sample_rate={sample_rate:g} Hz, "
+            f"integration_time={integration_time!r}.")
     if nfft is None:
         nfft = sample_rate
     nfft = int(nfft)
@@ -293,7 +374,8 @@ def sel(data, sample_rate, *, fmin=8.9125, fmax=22387,
         raise ConfigurationError(
             f"sel: no {band_type} band fits below Nyquist "
             f"({sample_rate / 2:g} Hz) with the requested fmin/fmax — the "
-            f"snapped lower edge sits above the Nyquist-clamped upper edge.",
+            f"snapped lower edge sits above the Nyquist-clamped upper edge; "
+            f"got fmin={fmin!r}, fmax={fmax!r}.",
             remediation="Raise sample_rate, or pass a lower fmin explicitly.")
     if len(data) > chunk_size and chunk_size % nfft:
         warnings.warn(
@@ -314,6 +396,23 @@ def sel(data, sample_rate, *, fmin=8.9125, fmax=22387,
     bin_band = np.digitize(f, edges) - 1
     bin_band[f == edges[-1]] = len(bands) - 1
     band_bins = [np.where(bin_band == k)[0] for k in range(len(bands))]
+    # A band holding no bin sums to exactly 0 Pa^2*s, which reads as a measured
+    # silence rather than as "not measured" — 'linear' bands are used as given,
+    # so a fmax above Nyquist produces whole empty bands (the octave ladders
+    # clamp to Nyquist instead, but a band narrower than the bin spacing is
+    # empty on any ladder).
+    empty = [k for k, idx in enumerate(band_bins) if idx.size == 0]
+    if empty:
+        named = ', '.join(f"{bands[k][0]:.4g}-{bands[k][2]:.4g}" for k in empty[:4])
+        if len(empty) > 4:
+            named += f", ... ({len(empty)} in all)"
+        warnings.warn(
+            f"sel: {len(empty)} of {len(bands)} bands contain no FFT bin and "
+            f"are returned as exactly 0 Pa^2*s, which is not a measurement: "
+            f"{named} Hz. A band above Nyquist ({sample_rate / 2:g} Hz) has no "
+            f"data at all; a band narrower than the {sample_rate / nfft:g} Hz "
+            f"bin spacing falls between bins. Lower fmax, or raise nfft.",
+            UserWarning, stacklevel=2)
     out = np.zeros(len(bands))
 
     for i in range(0, len(data), chunk_size):

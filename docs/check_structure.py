@@ -22,12 +22,14 @@ are not executable and are skipped by design.
 
 Usage
 -----
-    python docs/check_structure.py            # whole docs tree
+    python docs/check_structure.py            # docs tree + repo-root pages
     python docs/check_structure.py docs/guide # a subtree
 
 Exit status is non-zero if any problem is found. CI does not call this script:
 ``uacpy/tests/test_documentation.py`` imports it and runs the same check over
-``docs/``, so ``pytest`` and the command line give the same verdict.
+the same default scope — the ``docs/`` tree plus the repo-root
+``DOCUMENTATION.md`` and ``README.md`` — so ``pytest`` and the no-argument
+command line give the same verdict.
 """
 
 from __future__ import annotations
@@ -172,11 +174,17 @@ def check_page(path: Path) -> list[tuple[str, str]]:
 
 def main(argv=None) -> int:
     args = argv if argv is not None else sys.argv[1:]
-    root = (REPO_ROOT / args[0]).resolve() if args else REPO_ROOT / "docs"
+    if args:
+        files = list(markdown_files((REPO_ROOT / args[0]).resolve()))
+    else:
+        # Default scope: the docs/ tree plus the repo-root pages
+        # (DOCUMENTATION.md, README.md), which live outside it.
+        files = list(markdown_files(REPO_ROOT / "docs"))
+        files += sorted(REPO_ROOT.glob("*.md"))
 
     n_files = 0
     problems: list[tuple[Path, str, str]] = []
-    for path in markdown_files(root):
+    for path in files:
         n_files += 1
         for kind, detail in check_page(path):
             problems.append((path.relative_to(REPO_ROOT), kind, detail))

@@ -6,6 +6,16 @@ open text handle, plus the ``.flp`` field-parameter writer used by
 Kraken. ``write_multi_profile_env`` and ``write_fieldflp`` write the
 full file.
 
+``write_field3dflp`` writes the FIELD3D deck. **It is deliberately retained
+and is not dead code**: no uacpy model runs ``field3d`` yet, so nothing in
+the 2-D public API calls it, but it is the deck writer a future 3-D
+implementer builds on — with :func:`~uacpy.io.oalib_reader.read_flp3d`,
+:func:`~uacpy.io.oalib_reader.read_ssp_3d`,
+:func:`~uacpy.io.bathy_io.read_boundary_3d` and
+:func:`~uacpy.io.bathy_io.write_bty_3d`.
+``uacpy/tests/test_io_restored_capabilities.py`` pins the five against a
+dead-code sweep proposing their removal a second time.
+
 Top-block record order (the one contract every AT ``.env`` here obeys)
 ---------------------------------------------------------------------
 ``misc/ReadEnvironmentMod.f90`` reads the records after NMedia in this
@@ -52,6 +62,7 @@ from uacpy.core.absorption import (
     Biological, ConstantAbsorption, FrancoisGarrison,
 )
 from uacpy.core.environment import Environment
+from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core.bottom import BoundaryProperties, _NON_GEOACOUSTIC_TYPES
 from uacpy.core.surface import Surface
 from uacpy.core.source import Source
@@ -60,6 +71,7 @@ from uacpy.core.constants import (
     BoundaryType, AttenuationUnits,
     parse_boundary_type,
     C_LOW_FACTOR, C_HIGH_FACTOR, DEFAULT_C_MAX_UNBOUNDED,
+    DECK_AXIS_DECIMALS, DECK_DEPTH_RESOLUTION_M, DECK_RANGE_RESOLUTION_M,
 )
 from uacpy.io.utils import equally_spaced, reject_unknown_kwargs
 from uacpy.io.units import m_to_km
@@ -87,9 +99,13 @@ SOURCE_TYPE_CODE = {'point': 'R', 'line': 'X', 'scaled': 'S'}
 #: parses, which means one format for every depth written. Six decimals sits two
 #: orders below the tightest tolerance any reader applies
 #: (``sspMod.f90:353``'s ``100 * EPSILON( 1.0e0 )`` = 1.19e-05 m).
-_DECK_DEPTH_DECIMALS = 6
+#: Taken from ``core.constants`` rather than restated: the carriers admit a
+#: step down to ``DECK_DEPTH_RESOLUTION_M`` on the strength of this column
+#: format, so a deck printed coarser than the carriers admit would collapse
+#: two admitted samples onto one token.
+_DECK_DEPTH_DECIMALS = DECK_AXIS_DECIMALS
 _DECK_DEPTH_FMT = f'.{_DECK_DEPTH_DECIMALS}f'
-_DECK_DEPTH_RESOLUTION_M = 10.0 ** -_DECK_DEPTH_DECIMALS
+_DECK_DEPTH_RESOLUTION_M = DECK_DEPTH_RESOLUTION_M
 
 #: Thickness of the transparent pad media that equalise ``NMedia`` across the
 #: profiles of a range-dependent deck. This is uacpy's own construct, not
@@ -98,11 +114,13 @@ _DECK_DEPTH_RESOLUTION_M = 10.0 ** -_DECK_DEPTH_DECIMALS
 #: (``misc/sspMod.f90:356-358`` rejects a medium with fewer than 2 SSP points).
 _PAD_MEDIUM_THICKNESS_M = 0.1
 
-#: Resolution in metres of every range axis these decks write, which print km at
-#: six decimals — so two ranges closer than this collapse to one token. Callers
-#: that build a range axis for a deck must separate their samples by more than
-#: this, and ``models/_segmentation.py`` uses it when it builds one itself.
-DECK_RANGE_QUANTUM_M = 1.0e-3
+#: Resolution in metres of every range axis these decks write, which print km
+#: at :data:`~uacpy.core.constants.DECK_AXIS_DECIMALS` decimals — so two ranges
+#: closer than this collapse to one token. Callers that build a range axis for
+#: a deck must separate their samples by more than this, and
+#: ``models/_segmentation.py`` uses it when it builds one itself. The same
+#: number the carriers validate against, taken from ``core.constants``.
+DECK_RANGE_QUANTUM_M = DECK_RANGE_RESOLUTION_M
 
 
 # Water density in the AT g/cm^3 convention the .env format wants; AT's own
@@ -174,9 +192,9 @@ def deck_depth(depth_m: float) -> float:
       is safe.
 
     Six decimals is two orders finer than the tightest of those tolerances, so
-    the quantisation that used to round every interface up onto a 0.1 m grid —
-    and with it an 11 dB water-depth error for any bathymetry not already on a
-    decimetre — is not needed to satisfy any of them.
+    quantising onto a 0.1 m grid — which rounds every interface up, and costs
+    an 11 dB water-depth error for any bathymetry not already on a decimetre —
+    is not needed to satisfy any of them.
     """
     return float(f"{float(depth_m):{_DECK_DEPTH_FMT}}")
 
@@ -252,10 +270,17 @@ def reject_unsupported_ssp_interp(model: str, interp_ssp) -> None:
     if interp_ssp is None:
         return
     if str(interp_ssp).lower() in ('q', 'quad', 'quadratic'):
-        raise ConfigurationError(
-            f"{model} does not support the 'quad' SSP interpolation — it is "
-            f"Bellhop-only. Pick one of 'linear' (C-linear), 'n2linear', "
-            f"'pchip', 'cubic' / 'spline'."
+        # A model-capability refusal, not a bad argument: 'quad' is a real
+        # uacpy interpolation that Bellhop honours, so the caller's recourse
+        # is another interpolation or another model — the choice
+        # ``except UnsupportedFeatureError`` exists to make.
+        raise UnsupportedFeatureError(
+            model,
+            "the 'quad' SSP interpolation — it is Bellhop-only, the "
+            "external 2-D .ssp scheme the shared EvaluateSSP has no case for",
+            alternatives=["'linear' (C-linear)", "'n2linear'", "'pchip'",
+                          "'cubic' / 'spline'"],
+            alternatives_label='SSP interpolations',
         )
 
 
@@ -317,6 +342,73 @@ def _profile_n_media(env_seg) -> int:
     return n
 
 
+def _profile_media(env_seg) -> List[Tuple]:
+    """Media 2..N of one profile: its sediment layers, nothing invented.
+
+    Each entry is ``(top, bot, cp, cs, rho, alpha_p, alpha_s, sigma)`` with
+    both interfaces already quantised to the deck's depth resolution
+    (:func:`deck_depth`), so the depths compared in Python are the depths the
+    Fortran parses back.
+    """
+    current = deck_depth(env_seg.depth)
+    media: List[Tuple] = []
+    if env_seg.has_layered_bottom:
+        for layer in writable_layers(env_seg.bottom):
+            top = current
+            current = deck_depth(current + layer.thickness)
+            media.append((top, current, layer.sound_speed,
+                          layer.shear_speed, layer.density,
+                          layer.attenuation,
+                          getattr(layer, 'shear_attenuation', 0.0),
+                          layer.roughness))
+    return media
+
+
+def _plan_unpadded_media(segments, acoustic_types
+                         ) -> Tuple[int, float, List[List[Tuple]]]:
+    """Media plan for profiles whose half-space carries no material.
+
+    ``vacuum``, ``rigid`` and the two reflection-table types
+    (:data:`~uacpy.core.bottom._NON_GEOACOUSTIC_TYPES`) are boundary
+    conditions, not media: the ``sound_speed`` / ``density`` /
+    ``attenuation`` a parameter-free ``BoundaryProperties`` carries are the
+    constructor's placeholders, which is why
+    :func:`resolve_phase_speed_bounds` refuses to cap cHigh on them either.
+    A pad medium built from those placeholders would put metres of invented
+    sediment between the water and a boundary the user asked to be
+    pressure-release, so no pad is emitted here.
+
+    Without a pad there is nothing to stretch onto a common bottom, so the
+    profiles have to already agree on both their media count and their total
+    depth — the ``z( NR ) == depthB`` equality ``EvaluateCMMod.f90:313``
+    enforces per profile against one shared mode-tabulation grid. A
+    range-dependent bathymetry over a boundary-condition seabed cannot
+    satisfy it in any deck, so it is refused rather than approximated.
+    """
+    plans = [_profile_media(env_seg) for _range_km, env_seg in segments]
+    bottoms = {(media[-1][1] if media else deck_depth(env_seg.depth))
+               for media, (_range_km, env_seg) in zip(plans, segments)}
+    counts = {len(media) for media in plans}
+
+    if len(bottoms) > 1 or len(counts) > 1:
+        types = ', '.join(repr(t) for t in acoustic_types)
+        raise ConfigurationError(
+            f"range-dependent KRAKEN deck: the profiles end at "
+            f"{sorted(bottoms)} m with {sorted(counts)} sub-bottom "
+            f"medium/media, and the half-space acoustic_type is {types}. "
+            f"Profiles of unequal geometry are normally equalised with pad "
+            f"media repeating the half-space, but a boundary-condition "
+            f"seabed carries no material to repeat — the pads would be "
+            f"invented sediment between the water and the boundary.",
+            remediation="Give every profile the same total depth and the "
+                        "same sediment-layer count, or model the seabed as "
+                        "acoustic_type='half-space' / 'acousto-elastic' so "
+                        "the profiles can be padded with real material.",
+        )
+
+    return len(plans[0]) + 1, bottoms.pop(), plans
+
+
 def plan_multi_profile_media(segments) -> Tuple[int, float, List[List[Tuple]]]:
     """Lay out the sub-bottom media of a multi-profile KRAKEN ``.env``.
 
@@ -325,7 +417,9 @@ def plan_multi_profile_media(segments) -> Tuple[int, float, List[List[Tuple]]]:
     media 2..``n_media`` of ``segments[i]`` as
     ``(top, bot, cp, cs, rho, alpha_p, alpha_s, sigma)``, already quantised to
     the ``.6f`` depth resolution the deck is written at (:func:`deck_depth`),
-    with the last entry stretched to ``bottom_depth_m``.
+    with the last entry stretched to ``bottom_depth_m``. A profile whose
+    sediment stack already reaches the common bottom gets no extra medium, so
+    ``plans[i]`` is empty when the deck needs none.
 
     This is the single source of truth for the deck's geometry. ``.env``
     writing takes ``plans`` verbatim, and the mode-tabulation grid must span
@@ -339,29 +433,28 @@ def plan_multi_profile_media(segments) -> Tuple[int, float, List[List[Tuple]]]:
     ``tests/wedge/wedge.env`` gives all 51 profiles ``NMedia=2``, a common
     total depth of 2000 m, and ``NRz`` spanning ``0.0 2000.0``.
 
-    One medium beyond the deepest layer stack is always reserved. The stretch
-    onto the common bottom must land on a transparent pad carrying the
-    halfspace properties — never on a real ``SedimentLayer``, whose thickness
-    is physical. Reserving it also satisfies AT multi-profile kraken's
-    ``NMedia >= 2`` for range-dependent environments.
+    Over a **geoacoustic** half-space one medium beyond the deepest layer
+    stack is reserved. The stretch onto the common bottom must land on a
+    transparent pad carrying the halfspace properties — never on a real
+    ``SedimentLayer``, whose thickness is physical. Reserving it also
+    satisfies AT multi-profile kraken's ``NMedia >= 2`` for range-dependent
+    environments. Over a boundary-condition seabed there are no halfspace
+    properties to repeat, so :func:`_plan_unpadded_media` takes over.
     """
+    non_geoacoustic = sorted(
+        {env_seg.bottom.halfspace_at(range=0.0).acoustic_type
+         for _range_km, env_seg in segments} & _NON_GEOACOUSTIC_TYPES
+    )
+    if non_geoacoustic:
+        return _plan_unpadded_media(segments, non_geoacoustic)
+
     n_media = max(_profile_n_media(seg) for _, seg in segments) + 1
 
     plans = []
     for _range_km, env_seg in segments:
         hs = env_seg.bottom.halfspace_at(range=0.0)
-        current = deck_depth(env_seg.depth)
-        media: List[Tuple] = []
-
-        if env_seg.has_layered_bottom:
-            for layer in writable_layers(env_seg.bottom):
-                top = current
-                current = deck_depth(current + layer.thickness)
-                media.append((top, current, layer.sound_speed,
-                              layer.shear_speed, layer.density,
-                              layer.attenuation,
-                              getattr(layer, 'shear_attenuation', 0.0),
-                              layer.roughness))
+        media = _profile_media(env_seg)
+        current = media[-1][1] if media else deck_depth(env_seg.depth)
 
         hs_cs = getattr(hs, 'shear_speed', 0.0) or 0.0
         hs_as = getattr(hs, 'shear_attenuation', 0.0) or 0.0
@@ -383,16 +476,30 @@ def plan_multi_profile_media(segments) -> Tuple[int, float, List[List[Tuple]]]:
     return n_media, bottom_depth, plans
 
 
+#: User-facing ``interp_ssp`` name -> ``TopOpt(1:1)`` letter. The letters are
+#: AT's (``doc/EnvironmentalFile.htm``): 'C' C-linear, 'N' N2-linear (n the
+#: index of refraction), 'P' PCHIP, 'S' cubic Spline, 'Q' Quadrilateral 2D SSP
+#: read from a file (BELLHOP only). 'H' (Hexahedral 3D, BELLHOP3D) and 'A'
+#: (Analytic, needs ANALYT.FOR recompiled) are deliberately absent — this
+#: writer emits neither.
+#:
+#: ``'bilinear'`` names the PROFILE SHAPE, not a 2-D interpolation rule: an
+#: oceanographic bilinear SSP is two linear segments (a zero-gradient mixed
+#: layer over a thermocline gradient, as in
+#: ``examples/example_02_sound_speed_profiles.py``), and two linear segments
+#: are interpolated C-linearly. The 2-D range-depth option is 'Q', which this
+#: table reaches as ``'quad'`` — do not read ``'bilinear'`` as bilinear
+#: interpolation and route it there.
 _AT_INTERP_TO_CODE = {
     'linear': 'C',
     'c-linear': 'C',
     'clin': 'C',
-    'bilinear': 'C',
+    'bilinear': 'C',      # profile shape (two linear segments), see above
     'n2linear': 'N',
     'pchip': 'P',
     'cubic': 'S',
     'spline': 'S',
-    'quad': 'Q',
+    'quad': 'Q',          # AT 'Q' = Quadrilateral 2-D SSP from a file
 }
 
 
@@ -506,11 +613,19 @@ def write_ssp(filepath: Union[str, Path], ranges_m: np.ndarray, c: np.ndarray) -
 
     Examples
     --------
-    >>> # Create range-dependent SSP
-    >>> ranges_m = np.array([0, 10000, 20000, 30000])
+    A range-dependent SSP: one column per range, so ``c`` is
+    ``(n_depth, len(ranges_m))``. Written to a temporary directory so running
+    the example leaves nothing behind:
+
+    >>> import os, tempfile
+    >>> ranges_m = np.array([0.0, 10000.0, 20000.0, 30000.0])
     >>> z = np.linspace(0, 100, 11)
-    >>> c = 1500 - 0.1 * z[:, np.newaxis]  # Simple gradient
-    >>> write_ssp('test.ssp', ranges_m, c)
+    >>> gradient = 1500 - 0.1 * z[:, np.newaxis]      # (11, 1)
+    >>> c = np.tile(gradient, (1, len(ranges_m)))     # (11, 4)
+    >>> with tempfile.TemporaryDirectory() as d:
+    ...     write_ssp(os.path.join(d, 'test.ssp'), ranges_m, c)
+    ...     print(open(os.path.join(d, 'test.ssp')).readline().strip())
+    4
     """
     filepath = Path(filepath)
     r_km = m_to_km(ranges_m)
@@ -763,10 +878,12 @@ def write_broadband_freqs(f: TextIO, frequencies: np.ndarray) -> None:
     """
     f.write(f"{len(frequencies)}\n")
     # AT reads this vector list-directed into REAL(KIND=8)
-    # (SourceReceiverPositions.f90), so the grid is written at a precision that
-    # round-trips a double. Fixed 6-decimal text would quantise the spacing and
-    # the returned axis would no longer be uniform to the tolerance the
-    # time-domain transforms require.
+    # (SourceReceiverPositions.f90). 12 significant digits does NOT round-trip
+    # an IEEE-754 double — that needs 17 ('%.17g') — but it puts the write
+    # error at ~1e-9 Hz for a kHz-scale grid, orders below the spacing
+    # uniformity the time-domain transforms need. Fixed 6-decimal text is what
+    # fails: it quantises the spacing and the returned axis is no longer
+    # uniform to that tolerance.
     freq_str = " ".join(f"{freq:.12g}" for freq in frequencies)
     f.write(f"{freq_str} /\n")
 
@@ -870,6 +987,7 @@ def write_ssp_section(
     describes, so the shallowest speed is extrapolated up to the surface.
     """
     bottom_depth_rounded = deck_depth(bottom_depth)
+    pairs = env.ssp.extend_to(bottom_depth_rounded).to_pairs()
     # Cumulative across every medium: sspMod.f90 indexes one shared array, so
     # the water rows and each sediment layer's rows share the MaxSSP budget.
     n_layers = 0
@@ -877,9 +995,12 @@ def write_ssp_section(
     if bottom is not None:
         for col in (getattr(bottom, 'columns', None) or []):
             n_layers = max(n_layers, len(getattr(col, 'layers', ()) or ()))
+    # The count is what the deck carries: the extended profile, the z = 0
+    # guard row prepended below when the profile starts under the surface,
+    # and two rows per sediment layer.
     reject_oversized_at_ssp(
         'AT env writer',
-        len(env.ssp.extend_to(bottom_depth_rounded).to_pairs()) + 2 * n_layers)
+        len(pairs) + int(pairs[0, 0] > 0.0) + 2 * n_layers)
     # AT reads this mesh line as NG, SSP%sigma(Medium), Depth(Medium+1)
     # (misc/ReadEnvironmentMod.f90:81-88). For the water column that is sigma(1) —
     # the *sea surface* interface. Each sigma belongs to the interface at the top
@@ -894,7 +1015,6 @@ def write_ssp_section(
         if isinstance(env.absorption, ConstantAbsorption)
         else 0.0
     )
-    pairs = env.ssp.extend_to(bottom_depth_rounded).to_pairs()
     if pairs[0, 0] > 0.0:
         warnings.warn(
             f"The sound-speed profile starts at {pairs[0, 0]:g} m, not at the "
@@ -904,7 +1024,7 @@ def write_ssp_section(
             f"waveguide would be {pairs[0, 0]:g} m thinner than env.depth and "
             f"every source/receiver above that depth would be moved down onto "
             f"it. Supply a sample at 0 m to control the near-surface water.",
-            UserWarning, stacklevel=3,
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
         )
         pairs = np.vstack([[0.0, pairs[0, 1]], pairs])
 
@@ -1267,8 +1387,10 @@ def write_multi_profile_env(
                         f"{cs:.6f} {rho_v:.6f} "
                         f"{ap:.6f} {as_:.6f} /\n")
 
-            # Halfspace depth = bottom of all media
-            hs_depth = all_extra_media[-1][1]
+            # Halfspace depth = bottom of all media; a profile with no
+            # sub-bottom medium ends on its own seafloor.
+            hs_depth = (all_extra_media[-1][1] if all_extra_media
+                        else deck_depth(env_seg.depth))
 
             write_bottom_section(
                 f, env_seg, bottom_type=bottom_type,
@@ -1290,6 +1412,13 @@ def write_multi_profile_env(
 #: ``field.exe`` option columns it validates itself and ERROUTs on
 #: (``KrakenField/field.f90:70-99``; column 2 at ``:125-136``, which the
 #: program examines only when NProf > 1).
+#:
+#: The same letter means different things in different COLUMNS of this one
+#: string — column 2 ``'C'`` is Coupled, column 4 ``'C'`` is Coherent — so the
+#: alphabets are keyed by column and never merged. A blank is meaningful in
+#: columns 3 and 4 (``CASE ( 'O', ' ' )`` and ``CASE ( 'C', ' ' )``), which is
+#: why those sets carry a space; columns 1 and 2 have no blank case and
+#: ERROUT on one.
 _FLP_OPTION_ALPHABET = {
     1: (set('XRS'), 'source type (X line / R point / S scaled cylindrical)'),
     2: (set('CA'), 'mode coupling (C coupled / A adiabatic)'),
@@ -1318,6 +1447,19 @@ def _validate_flp_option(option: str, n_profiles: int = 1) -> None:
                 f"write_fieldflp: option position {col} ({description}) must be "
                 f"one of {sorted(allowed)}; got {char!r} in {option!r}."
             )
+    # The per-column alphabets are not the whole contract: field.f90:126-129
+    # ERROUTs on coupled modes asked for an incoherent sum. That matters more
+    # than an ordinary deck error because misc/FatalError.f90:30 is
+    # ``STOP '<string>'``, so every Acoustics-Toolbox fatal error exits with
+    # status 0 — the run writes no .shd and a caller trusting the return code
+    # reads a stale or missing output as success.
+    if n_profiles > 1 and padded[1] == 'C' and padded[3] == 'I':
+        raise ConfigurationError(
+            f"write_fieldflp: option {option!r} asks for coupled modes "
+            f"(position 2 = 'C') with an incoherent sum (position 4 = 'I'), "
+            f"which field.f90:126-129 rejects outright. Use 'C' with a "
+            f"coherent sum, or adiabatic modes ('A') for an incoherent one."
+        )
 
 
 def write_fieldflp(
@@ -1420,7 +1562,7 @@ def write_fieldflp(
         # then poisons a whole segment's interpolated wavenumbers and mode
         # functions, and nothing in AT reports it: the caller gets a partly-NaN
         # field with no error and no warning.
-        tokens = [f"{float(r):6f}" for r in profile_ranges_km]
+        tokens = [f"{float(r):.6f}" for r in profile_ranges_km]
         written = np.array([float(t) for t in tokens])
         if written.size > 1 and not np.all(np.diff(written) > 0):
             bad = int(np.argmin(np.diff(written)))
@@ -1450,7 +1592,7 @@ def write_fieldflp(
             f.write("0.0 /    ! rProf (km) \n")
         else:
             for r in profile_ranges_km:
-                f.write(f"    {r:6f}  ")
+                f.write(f"    {r:.6f}  ")
             f.write("/ \t ! rProf (km) \n")
 
         # Receiver ranges. The "first last /" shorthand below relies on
@@ -1459,28 +1601,28 @@ def write_fieldflp(
         # two depth blocks; shorter vectors are written out in full.
         f.write(f"{len(r_ranges):5d} \t \t \t \t ! NRr \n")
         if len(r_ranges) > 2 and equally_spaced(r_ranges):
-            f.write(f"    {r_ranges[0]:6f}  {r_ranges[-1]:6f} ")
+            f.write(f"    {r_ranges[0]:.6f}  {r_ranges[-1]:.6f} ")
         else:
             for r in r_ranges:
-                f.write(f"    {r:6f}  ")
+                f.write(f"    {r:.6f}  ")
         f.write("/ \t ! Rr(1)  ... (km) \n")
 
         # Source depths
         f.write(f"{len(s_depths):5d} \t \t \t \t ! NSz \n")
         if len(s_depths) > 2 and equally_spaced(s_depths):
-            f.write(f"    {s_depths[0]:6f}  {s_depths[-1]:6f} ")
+            f.write(f"    {s_depths[0]:.6f}  {s_depths[-1]:.6f} ")
         else:
             for z in s_depths:
-                f.write(f"    {z:6f}  ")
+                f.write(f"    {z:.6f}  ")
         f.write("/ \t ! Sz(1)  ... (m) \n")
 
         # Receiver depths
         f.write(f"{len(r_depths):5d} \t \t \t \t ! NRz \n")
         if len(r_depths) > 2 and equally_spaced(r_depths):
-            f.write(f"    {r_depths[0]:6f}  {r_depths[-1]:6f} ")
+            f.write(f"    {r_depths[0]:.6f}  {r_depths[-1]:.6f} ")
         else:
             for z in r_depths:
-                f.write(f"    {z:6f}  ")
+                f.write(f"    {z:.6f}  ")
         f.write("/ \t ! Rz(1)  ... (m) \n")
 
         # Receiver range offsets (array tilt) - default to zeros for every
@@ -1500,8 +1642,221 @@ def write_fieldflp(
             # -999.9 pre-fill (SourceReceiverPositions.f90:219-221) and the
             # following Sort moves it to Rro(1), so the shallowest receiver
             # is evaluated at r - 999.9 m. Write the vector out in full.
-            zeros = "  ".join(f"{0.0:6f}" for _ in r_depths)
+            zeros = "  ".join(f"{0.0:.6f}" for _ in r_depths)
             f.write(f"    {zeros} /    \t \t \t \t ! Rro(1)  ... (m) \n")
+
+
+def write_field3dflp(
+    filepath: Union[str, Path],
+    option: str,
+    pos: Dict[str, Any],
+    bathy: Dict[str, Any],
+    mod_file_pattern: str = "'{}'",
+    title: str = "",
+    M_limit: int = 999999,
+) -> None:
+    """
+    Write the FIELD3D field-parameter deck (``.flp``).
+
+    **Retained for planned 3-D support — this is not dead code.** Nothing in
+    the 2-D public API writes a FIELD3D deck; this is the writer a future
+    3-D implementer builds on, and the round-trip partner of
+    :func:`~uacpy.io.oalib_reader.read_flp3d`.
+
+    Parameters
+    ----------
+    filepath : str or Path
+        Output path. ``.flp`` is appended only when the path has no suffix —
+        the convention :func:`write_fieldflp` and
+        :func:`~uacpy.io.oalib_reader.read_flp` share; a path that carries a
+        suffix is written exactly as given.
+    option : str
+        FIELD3D option word, ``CHARACTER(LEN=7)`` in the Fortran
+        (``KrakenField/field3d.f90:152``). Columns 1-3 select the evaluator
+        (``'STD'`` / ``'PAR'`` / ``'GBT'``, ``:96``), column 4 ``'T'``
+        requests the tesselation check (``:210``), column 7 is the
+        source-beam-pattern flag (``:54``). ``'STDFM'`` is what the shipped
+        AT deck uses.
+    pos : dict
+        Positions, all in **metres** / degrees:
+
+        - ``'s'``: ``{'x': (Nsx,), 'y': (Nsy,), 'z': (Nsz,)}``
+        - ``'r'``: ``{'z': (Nrz,), 'r': (Nrr,), 'theta': (Ntheta,) degrees}``
+        - optional ``'Nsx'`` / ``'Nsy'`` overriding the counts.
+
+        ``x``, ``y`` and ``r`` are converted to the km the deck holds
+        (``field3d.f90:174-175, 177``); depths and bearings are not.
+    bathy : dict
+        The node grid: ``{'X': (nx,) m, 'Y': (ny,) m, 'depth': (ny, nx) m}``.
+        ``X``/``Y`` are converted to km on write. ``depth`` chooses which
+        nodes get a real mode file and which get ``'DUMMY'``.
+    mod_file_pattern : str, optional
+        Mode-file name written beside each wet node. A pattern carrying
+        ``{}`` / ``{:`` is formatted with ``(x_km, y_km)``; anything else is
+        written verbatim. Default ``"'{}'"``.
+    title : str, optional
+        Deck title. Default empty.
+    M_limit : int, optional
+        Mode-count cap. Default 999999.
+
+    Raises
+    ------
+    ~uacpy.core.exceptions.ConfigurationError
+        An axis is empty, ``depth`` does not match the node grid, or the
+        grid is too small to triangulate (both ``nx`` and ``ny`` need at
+        least two points for a single quad, hence two triangles).
+
+    Notes
+    -----
+    Record order, matching ``field3d.f90:163-207`` exactly — title, option,
+    ``Mlimit``, ``Sx``, ``Sy``, ``Sz``, ``Rz``, ``Rr``, ``theta``, the node
+    table, the element table. Each axis is emitted as the AT
+    ``first last /`` shorthand when it is uniformly sampled and longer than
+    two points, which ``SubTab`` expands back to the declared count.
+
+    **Element node indices are 1-based**, because the Fortran reads them
+    straight into arrays it indexes from 1 (``field3d.f90:207``, then
+    ``x( Node( 1, iElt ) )``): a 0-based table addresses ``x(0)`` on every
+    triangle of the first row and runs one past ``x(NNodes)`` on the last.
+    The shipped AT deck ``tests/3DAtlantic/lant.flp`` numbers its 397 nodes
+    1..397, and ``field3d.exe`` echoes that count back on load.
+
+    See Also
+    --------
+    ~uacpy.io.oalib_reader.read_flp3d : Read the deck back.
+    write_fieldflp : The 2-D field-parameter writer.
+
+    Examples
+    --------
+    >>> import tempfile, os
+    >>> import numpy as np
+    >>> from uacpy.io.oalib_reader import read_flp3d
+    >>> pos = {
+    ...     's': {'x': np.array([0.0]), 'y': np.array([0.0]),
+    ...           'z': np.array([50.0])},
+    ...     'r': {'z': np.linspace(0.0, 100.0, 11),
+    ...           'r': np.linspace(0.0, 50000.0, 51),
+    ...           'theta': np.linspace(0.0, 350.0, 36)},
+    ... }
+    >>> bathy = {'X': np.linspace(0.0, 100000.0, 11),
+    ...          'Y': np.linspace(0.0, 100000.0, 11),
+    ...          'depth': 100.0 * np.ones((11, 11))}
+    >>> with tempfile.TemporaryDirectory() as d:
+    ...     path = os.path.join(d, 'field3d.flp')
+    ...     write_field3dflp(path, 'STDFM', pos, bathy,
+    ...                      mod_file_pattern="'mode_{:07.1f}_{:07.1f}'",
+    ...                      title='3D Test')
+    ...     deck = read_flp3d(path)
+    >>> deck['title'], deck['method']
+    ('3D Test', 'STD')
+    >>> len(deck['nodes']['mode_file']), deck['elements'].shape
+    (121, (200, 3))
+    >>> int(deck['elements'].min()), int(deck['elements'].max())
+    (1, 121)
+    """
+    filepath = Path(filepath)
+    # Append only when the caller gave no suffix. Replacing an explicit one
+    # silently renames the file the caller asked for -- the defect
+    # write_fieldflp was corrected for, and read_flp3d resolves the same way.
+    if not filepath.suffix:
+        filepath = filepath.with_suffix(".flp")
+
+    s_x = m_to_km(np.asarray(pos["s"]["x"], dtype=float))
+    s_y = m_to_km(np.asarray(pos["s"]["y"], dtype=float))
+    s_z = np.asarray(pos["s"]["z"], dtype=float)
+    r_z = np.asarray(pos["r"]["z"], dtype=float)
+    r_r = m_to_km(np.asarray(pos["r"]["r"], dtype=float))
+    r_theta = np.asarray(pos["r"]["theta"], dtype=float)
+    Nsx = pos.get("Nsx", s_x.size)
+    Nsy = pos.get("Nsy", s_y.size)
+
+    X = m_to_km(np.asarray(bathy["X"], dtype=float))
+    Y = m_to_km(np.asarray(bathy["Y"], dtype=float))
+    depth = np.asarray(bathy["depth"], dtype=float)
+    nx = X.size
+    ny = Y.size
+
+    # ReadVector ERROUTs on a non-positive count
+    # (misc/SourceReceiverPositions.f90:212), which is STOP at exit 0 with no
+    # field written, so an empty axis is refused before the deck exists.
+    for label, axis in (("source x", s_x), ("source y", s_y),
+                        ("source depths", s_z), ("receiver depths", r_z),
+                        ("receiver ranges", r_r),
+                        ("receiver bearings", r_theta)):
+        if axis.size == 0:
+            raise ConfigurationError(
+                f"write_field3dflp: {label} is empty; FIELD3D's ReadVector "
+                f"ERROUTs on a count of 0 "
+                f"(misc/SourceReceiverPositions.f90:212).",
+                remediation=f"Give at least one {label} value.",
+            )
+    if depth.shape != (ny, nx):
+        raise ConfigurationError(
+            f"write_field3dflp: bathy['depth'] has shape {depth.shape}, but "
+            f"bathy['X']/['Y'] describe a (ny={ny}, nx={nx}) node grid.",
+            remediation="Pass depth[iy, ix] = depth at (X[ix], Y[iy]); "
+                        "transpose an (nx, ny) array before calling.",
+        )
+    if nx < 2 or ny < 2:
+        raise ConfigurationError(
+            f"write_field3dflp: the node grid is {nx} x {ny}; a "
+            f"triangulation needs at least 2 x 2 nodes to form one quad, and "
+            f"FIELD3D ERROUTs on an element count of 0 "
+            f"(field3d.f90:199-203).",
+            remediation="Give at least two X and two Y node coordinates.",
+        )
+
+    def _write_axis(f, values, count, trailer):
+        """One AT vector record: the ``first last /`` shorthand when SubTab
+        can regenerate the axis, otherwise every value then ``/``."""
+        f.write(f"{count}\n")
+        if count > 2 and equally_spaced(values):
+            f.write(f"{values[0]:.6f} {values[-1]:.6f} /{trailer}\n")
+        else:
+            f.write(" ".join(f"{v:.6f}" for v in values) + f" /{trailer}\n")
+
+    with open(filepath, "w") as f:
+        f.write(f"'{title}' ! TITLE\n")
+        f.write(f"'{option}' ! OPT\n")
+        f.write(f"{M_limit} ! MLIMIT\n")
+
+        _write_axis(f, s_x, Nsx, " ! Sx (km)")
+        _write_axis(f, s_y, Nsy, " ! Sy (km)")
+        _write_axis(f, s_z, s_z.size, " ! Sz (m)")
+        _write_axis(f, r_z, r_z.size, " ! Rz (m)")
+        _write_axis(f, r_r, r_r.size, " ! Rr (km)")
+        _write_axis(f, r_theta, r_theta.size, " ! theta (degrees)")
+
+        # Node table: x (km), y (km), mode-file name. Row-major over y, so
+        # node (ix, iy) is number iy * nx + ix + 1.
+        f.write(f"{nx * ny} ! NNODES\n")
+        for iy in range(ny):
+            for ix in range(nx):
+                x_coord = X[ix]
+                y_coord = Y[iy]
+                if depth[iy, ix] > 0:
+                    if "{}" in mod_file_pattern or "{:" in mod_file_pattern:
+                        modfil = mod_file_pattern.format(x_coord, y_coord)
+                    else:
+                        modfil = mod_file_pattern
+                else:
+                    modfil = "'DUMMY'"
+                # %.6f km = 1 mm, the resolution every other km column in
+                # this package is written at. AT's own deck
+                # (tests/3DAtlantic/lant.flp) prints 2 decimals, i.e. 10 m,
+                # which silently moves a node the caller placed; the READ is
+                # list-directed (field3d.f90:192) so the extra digits cost
+                # nothing.
+                f.write(f"{x_coord:14.6f} {y_coord:14.6f} {modfil}\n")
+
+        # Element table: two triangles per quad, node indices 1-based
+        # (field3d.f90:207 reads them into a Fortran array indexed from 1).
+        f.write(f"{2 * (nx - 1) * (ny - 1)} ! NELTS\n")
+        for iy in range(ny - 1):
+            for ix in range(nx - 1):
+                n0 = iy * nx + ix + 1
+                f.write(f"{n0:5d} {n0 + 1:5d} {n0 + nx:5d}\n")
+                f.write(f"{n0 + 1:5d} {n0 + nx:5d} {n0 + nx + 1:5d}\n")
 
 
 def write_kraken_env_file(
@@ -1676,8 +2031,19 @@ def write_sparc_env_file(
         # ReadTopOpt consumes these rows before any top half-space row; the
         # V/R guard above means there is never one to follow them.
         write_absorption_block(f, env)
-        write_ssp_section(f, env, env.depth, n_mesh=n_mesh)
-        write_layer_sections(f, env, env.depth, n_mesh=n_mesh)
+        # One count per MEDIUM when a sequence is given: AT sizes each medium
+        # separately (ReadEnvironmentMod.f90:101-112 takes each one's own
+        # thickness and speed), so a single scalar broadcast to a thin sediment
+        # layer over-resolves it by the ratio of the layer's thickness to the
+        # water column's. Element 0 is the water column, the rest the writable
+        # sediment layers.
+        if isinstance(n_mesh, (list, tuple, np.ndarray)):
+            counts = [int(n) for n in n_mesh]
+            write_ssp_section(f, env, env.depth, n_mesh=counts[0])
+            write_layer_sections(f, env, env.depth, n_mesh=counts[1:])
+        else:
+            write_ssp_section(f, env, env.depth, n_mesh=n_mesh)
+            write_layer_sections(f, env, env.depth, n_mesh=n_mesh)
 
         # Bottom section (V or R only, so no halfspace params follow).
         sigma = getattr(env.bottom.halfspace_at(range=0.0), 'roughness', 0.0)

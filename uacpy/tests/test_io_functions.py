@@ -7,13 +7,17 @@ emits, checked by running the vendored Acoustics-Toolbox binaries on them
 authority for every expectation is the vendored source, cited at the assertion.
 """
 
+import hashlib
 import re
+import warnings
 
 import io
 
 import numpy as np
 from uacpy.io.oalib_writer import write_ssp_section
 from uacpy.core import Environment, BoundaryProperties
+from uacpy.core.bathymetry import Bathymetry
+from uacpy.core.bottom import Bottom, SeabedColumn, SedimentLayer
 import pytest
 from pathlib import Path
 import tempfile
@@ -612,7 +616,7 @@ class TestHankelScaledCylindrical:
         np.testing.assert_allclose(
             p_scaled, p_point * np.sqrt(ranges)[None, :], rtol=1e-12)
 
-    def test_unknown_source_type_still_raises(self):
+    def test_unknown_source_type_raises(self):
         from uacpy.io.grn_reader import _hankel_transform
         with pytest.raises(ConfigurationError):
             _hankel_transform(
@@ -654,7 +658,7 @@ class TestConstantAbsorptionColumn:
             assert float(cols[4]) == pytest.approx(0.5), (
                 f"absorption must be in alphaI (col 5); got {cols}")
 
-    def test_zero_absorption_still_pins_all_six_columns(self, tmp_path):
+    def test_zero_absorption_pins_all_six_columns(self, tmp_path):
         """The short ``z c /`` form is unsafe even at zero absorption: AT's
         ``/`` terminator leaves the remaining items at their previous value,
         and ``TopBot`` (ReadEnvironmentMod.f90:285) has already loaded the top
@@ -897,7 +901,7 @@ class TestPhaseSpeedBoundsForParameterFreeBottoms:
             and ln.split()[1] == f"{DEFAULT_C_MAX_UNBOUNDED:.1f}")
         assert float(bounds_line.split()[1]) == DEFAULT_C_MAX_UNBOUNDED
 
-    def test_penetrable_bottom_still_caps_on_the_halfspace_speed(self):
+    def test_penetrable_bottom_caps_on_the_halfspace_speed(self):
         from uacpy.core import BoundaryProperties
         from uacpy.core.constants import C_HIGH_FACTOR
         from uacpy.io.oalib_writer import resolve_phase_speed_bounds
@@ -949,7 +953,7 @@ class TestUserWorkDirIsNeverDestroyed:
         fm.cleanup_work_dir()
         assert d.exists() and (d / 'PRECIOUS.txt').exists()
 
-    def test_uacpy_owned_temp_dir_is_still_fully_removed(self):
+    def test_uacpy_owned_temp_dir_is_fully_removed(self):
         from uacpy.io.file_manager import FileManager
         fm = FileManager(use_tmpfs=False, base_dir=None, cleanup=True)
         wd = fm.create_work_dir()
@@ -1413,10 +1417,10 @@ class TestSourceBeamPatternRoundTrip:
     def test_root_name_without_extension_resolves(self, tmp_path):
         from uacpy.io.refl_io import (
             read_source_beam_pattern, write_source_beam_pattern)
-        write_source_beam_pattern(tmp_path / 'beam.sbp', np.array([0.0]),
-                                  np.array([-3.0]))
+        write_source_beam_pattern(tmp_path / 'beam.sbp', np.array([-10.0, 10.0]),
+                                  np.array([-3.0, -6.0]))
         back = read_source_beam_pattern(tmp_path / 'beam')
-        assert np.allclose(back[:, 1], [-3.0])
+        assert np.allclose(back[:, 1], [-3.0, -6.0])
 
 
 class TestBinaryArrivalsRejected:
@@ -1499,7 +1503,7 @@ class TestAltimetryLongFormat:
         assert np.allclose(ati[4, 1:-1], [0.9, 0.91, 0.92])
         assert ati[0, 0] == -1e50 and ati[0, -1] == 1e50
 
-    def test_short_format_still_two_rows(self, tmp_path):
+    def test_short_format_yields_two_rows(self, tmp_path):
         from uacpy.io.bathy_io import read_altimetry, write_ati_file
         pairs = np.array([[0.0, 0.0], [2500.0, 2.0], [5000.0, 0.0]])
         p = tmp_path / 'flat.ati'
@@ -2784,7 +2788,7 @@ class TestOasesSeaSurfaceRoughnessRecord:
         ('write_oast_input', 1), ('write_oasn_input', 1),
         ('write_oasp_input', 2),
     ])
-    def test_record_arity_is_unchanged(self, tmp_path, writer_name, extra):
+    def test_every_layer_record_carries_its_full_column_count(self, tmp_path, writer_name, extra):
         """INENVI's reads are list-directed but positional, so column 7 has to
         stay column 7 and the inert padding past it has to stay put."""
         import warnings
@@ -2978,7 +2982,7 @@ class TestStagedBeamPatternNeedsTwoRows:
         self._stage(tmp_path, "2\n-90.0 0.0\n90.0 0.0\n")
         assert (tmp_path / 'staged.sbp').exists()
 
-    def test_a_repeated_angle_is_still_refused(self, tmp_path):
+    def test_a_repeated_angle_is_refused(self, tmp_path):
         """The strictly-increasing guard must survive alongside the row-count
         one — a repeated abscissa is the division-by-zero case."""
         with pytest.raises(ConfigurationError):
@@ -3130,7 +3134,7 @@ class TestATSSPPointLimit:
         return Environment(bathymetry=200.0,
                            ssp=list(zip(z, 1500.0 + 0.01 * z)), bottom=self.BOT)
 
-    def test_at_the_limit_still_writes(self):
+    def test_at_the_limit_writes(self):
         # The discriminating counterpart: 20001 is legal and must not be
         # refused. Off-by-one here would reject a valid environment.
         buf = io.StringIO()
@@ -3141,6 +3145,24 @@ class TestATSSPPointLimit:
     def test_over_the_limit_is_refused_with_the_reason(self, n):
         with pytest.raises(ConfigurationError, match='sspMod.f90:11'):
             write_ssp_section(io.StringIO(), self._env(n), 200.0)
+
+    def _submerged_env(self, n):
+        z = np.linspace(10.0, 200.0, n)
+        return Environment(bathymetry=200.0,
+                           ssp=list(zip(z, 1500.0 + 0.01 * z)), bottom=self.BOT)
+
+    def test_the_z0_guard_row_counts_toward_the_limit(self):
+        # A profile starting under the surface gains a prepended z = 0 row,
+        # so 20001 tabulated samples put 20002 rows in the deck.
+        with pytest.raises(ConfigurationError, match='sspMod.f90:11'):
+            write_ssp_section(io.StringIO(), self._submerged_env(20001), 200.0)
+
+    def test_a_submerged_profile_at_the_limit_writes_with_its_guard_row(self):
+        buf = io.StringIO()
+        with pytest.warns(UserWarning, match='sound-speed profile starts'):
+            write_ssp_section(buf, self._submerged_env(20000), 200.0)
+        rows = [ln for ln in buf.getvalue().splitlines() if ln.endswith('/')]
+        assert len(rows) == 20001
 
     def test_bellhop_is_untouched(self):
         # Bellhop has its own reader and its own 100001 limit, so the guard
@@ -3205,8 +3227,8 @@ class TestOasnReplicaGridDeckDefaults:
         # ZSMIN ZSMAX NSRCZ / XSMIN XSMAX NSRCX / YSMIN YSMAX NSRCY —
         # consecutive rows (unoasn22.f:184-186); x/y are km on disk.
         z = lines.index('10.00 90.00 20')
-        assert lines[z + 1] == '0.100 10.000 50'
-        assert lines[z + 2] == '0.000 0.000 1'
+        assert lines[z + 1] == '0.100000000 10.000000000 50'
+        assert lines[z + 2] == '0.000000000 0.000000000 1'
 
     def test_deep_sheet_defaults_to_half_the_water_depth(self, tmp_path):
         lines = self._deck(tmp_path, 'N J', deep_noise_level=60.0)
@@ -3220,7 +3242,7 @@ class TestOasnReplicaGridDeckDefaults:
                            replica_nz=5, replica_xmin=0.5, replica_xmax=2.0,
                            replica_nx=3)
         z = lines.index('20.00 80.00 5')
-        assert lines[z + 1] == '0.500 2.000 3'
+        assert lines[z + 1] == '0.500000000 2.000000000 3'
 
 
 class TestEquallySpacedToleranceBoundary:
@@ -3278,3 +3300,1081 @@ def test_read_flp_accepts_list_directed_records_and_sorts(tmp_path):
     assert np.all(np.diff(d['pos']['r']['r']) >= 0)
     assert np.all(np.diff(d['pos']['s']['z']) >= 0)
     assert np.all(np.diff(d['pos']['r']['z']) >= 0)
+
+
+class TestPhaseSpeedBoundsStayContractedToRangeZero:
+    """``resolve_phase_speed_bounds`` derives BOTH bounds from
+    ``env.ssp.to_pairs()`` — the range-0 column. That is correct, and correct
+    for one reason only: the deck it describes is that same column, because
+    ``write_ssp_section`` writes ``env.ssp.extend_to(...).to_pairs()`` and the
+    half-space is pinned with ``halfspace_at(range=0.0)`` on the very next
+    line. It is *not* correct on a multi-profile deck, which is why
+    ``Kraken._c_low_for`` derives its own floor from the full ``env.ssp.data``
+    block instead.
+
+    The ``c_high`` half carries the identical range-0 reading, and its safety
+    rests entirely on that argument: every caller either supplies ``c_high``
+    explicitly or has already collapsed the SSP to one column. The day a model
+    that declares ``range_dependent_ssp`` calls it with ``c_high=None``, it
+    will silently under-derive ``c_high`` off one column and truncate the top
+    of the mode spectrum. These two tests pin the invariant that keeps that
+    from happening quietly."""
+
+    _EXPECTED_CALLERS = {
+        'io/oalib_writer.py',      # write_phase_speed_and_rmax and its writers
+        'models/kraken.py',
+        'models/scooter.py',
+        'models/sparc.py',
+    }
+
+    def test_only_the_known_modules_derive_phase_speed_bounds(self):
+        """A new caller must extend the drive test below, not appear silently."""
+        import ast
+        import uacpy as _uacpy
+        pkg = Path(_uacpy.__file__).parent
+        targets = {'resolve_phase_speed_bounds', 'write_phase_speed_and_rmax'}
+        found = set()
+        for path in sorted(pkg.rglob('*.py')):
+            if 'tests' in path.relative_to(pkg).parts:
+                continue
+            tree = ast.parse(path.read_text(), filename=str(path))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                fn = node.func
+                name = (fn.id if isinstance(fn, ast.Name)
+                        else fn.attr if isinstance(fn, ast.Attribute) else None)
+                if name in targets:
+                    found.add(path.relative_to(pkg).as_posix())
+        assert found == self._EXPECTED_CALLERS, (
+            f"the set of modules deriving AT phase-speed bounds changed: "
+            f"{found ^ self._EXPECTED_CALLERS}. Each caller must either pass "
+            f"c_low and c_high explicitly or hand in an SSP already collapsed "
+            f"to one range column — add it to "
+            f"test_no_driver_derives_a_bound_from_a_two_dimensional_ssp and "
+            f"prove it there.")
+
+    @staticmethod
+    def _range_dependent_env(bottom=None):
+        ssp = SoundSpeedProfile(
+            depths=np.array([0.0, 100.0, 200.0]),
+            data=np.array([[1500.0, 1480.0, 1450.0]] * 3),
+            ranges=np.array([0.0, 5000.0, 10000.0]))
+        return uacpy.Environment(
+            name='rd', bathymetry=np.array([[0.0, 200.0], [10000.0, 220.0]]),
+            ssp=ssp,
+            bottom=bottom if bottom is not None else BoundaryProperties(
+                acoustic_type='half-space', sound_speed=1600.0, density=1.8,
+                attenuation=0.2))
+
+    def test_no_driver_derives_a_bound_from_a_two_dimensional_ssp(
+            self, monkeypatch, tmp_path):
+        """Instrument the real resolver and drive every deck writer that reaches
+        it on a range-dependent-SSP environment."""
+        import warnings as _warnings
+        from uacpy.io import oalib_writer
+        from uacpy.models import kraken as kraken_mod, sparc as sparc_mod
+
+        real = oalib_writer.resolve_phase_speed_bounds
+        seen = []
+
+        def spy(env, c_low=None, c_high=None):
+            seen.append((env.ssp.n_ranges, c_low is None, c_high is None))
+            return real(env, c_low, c_high)
+
+        for mod in (oalib_writer, kraken_mod, sparc_mod):
+            if hasattr(mod, 'resolve_phase_speed_bounds'):
+                monkeypatch.setattr(mod, 'resolve_phase_speed_bounds', spy)
+
+        env = self._range_dependent_env()
+        src = uacpy.Source(depths=100.0, frequencies=200.0)
+        rcv = uacpy.Receiver(depths=[50.0, 150.0],
+                             ranges=np.linspace(1000.0, 9000.0, 5))
+
+        class _Fm:
+            def __init__(self, root):
+                self.work_dir = root
+
+            def get_path(self, name):
+                return self.work_dir / name
+
+        with _warnings.catch_warnings():
+            _warnings.simplefilter('ignore')
+            k = uacpy.Kraken(verbose=False, n_segments=3)
+            k_env = k._project_environment(env)
+            segments, _n, _r, max_total_depth = k._segment_env_for_field(
+                k_env, freq=200.0)
+            k._write_field_env(k_env, src, rcv, _Fm(tmp_path), 'kf',
+                               segments, max_total_depth, False, None)
+            k._write_kraken_env(
+                tmp_path / 'ksingle.env', k._modes_single_profile(k_env), src,
+                receiver_obj=rcv, receiver_depths=rcv.depths)
+
+            sc = uacpy.Scooter(verbose=False)
+            sc._write_scooter_env(tmp_path / 'sc.env',
+                                  sc._project_environment(env), src, rcv)
+
+            # SPARC's deck carries only vacuum/rigid boundaries, and the
+            # half-space conversion happens in run(); hand it a rigid seabed so
+            # the writer itself is what gets exercised.
+            sp = uacpy.SPARC(verbose=False)
+            sp_env = self._range_dependent_env(
+                bottom=BoundaryProperties(acoustic_type='rigid'))
+            sp._write_sparc_env(tmp_path / 'sp.env',
+                                sp._project_environment(sp_env), src, rcv)
+
+        assert seen, "the resolver was never reached — the drive is not driving"
+        derived = [rec for rec in seen if rec[1] or rec[2]]
+        assert all(n_ranges == 1 for n_ranges, _cl, _ch in derived), (
+            f"a driver derived a phase-speed bound from a range-dependent SSP: "
+            f"{[rec for rec in derived if rec[0] != 1]} of {seen}")
+
+
+class TestFileManagerStateMatchesTheDirectoryUsed:
+
+    def test_base_dir_overrides_a_tmpfs_request(self, tmp_path):
+        from uacpy.io.file_manager import FileManager
+        fm = FileManager(use_tmpfs=True, base_dir=tmp_path)
+        assert fm.use_tmpfs is False
+        assert 'disk' in repr(fm)
+
+    def test_tmpfs_fallback_reports_disk(self, monkeypatch):
+        from uacpy.io.file_manager import FileManager
+        monkeypatch.setattr(FileManager, '_tmpfs_available',
+                            staticmethod(lambda: False))
+        fm = FileManager(use_tmpfs=True)
+        assert fm.use_tmpfs is False
+        assert 'disk' in repr(fm)
+
+    def test_available_tmpfs_reports_tmpfs(self):
+        from uacpy.io.file_manager import FileManager
+        if not FileManager._tmpfs_available():
+            pytest.skip('/dev/shm unavailable')
+        fm = FileManager(use_tmpfs=True)
+        assert fm.use_tmpfs is True
+        assert fm.base_dir == Path('/dev/shm')
+
+
+class TestCleanupWorkDirForgetsOwnershipState:
+
+    def test_cleanup_of_an_adopted_dir_drops_the_snapshot(self, tmp_path):
+        from uacpy.io.file_manager import FileManager
+        fm = FileManager(base_dir=tmp_path)
+        adopted = tmp_path / 'caller_dir'
+        adopted.mkdir()
+        (adopted / 'keep.txt').write_text('x')
+        fm.adopt_work_dir(adopted)
+        assert fm._preexisting == {'keep.txt'}
+        fm.cleanup_work_dir()
+        assert fm.work_dir is None
+        assert fm._owns_work_dir is False
+        assert fm._preexisting is None
+        assert (adopted / 'keep.txt').exists()
+
+    def test_cleanup_of_an_owned_dir_drops_ownership(self, tmp_path):
+        from uacpy.io.file_manager import FileManager
+        fm = FileManager(base_dir=tmp_path)
+        fm.create_work_dir()
+        assert fm._owns_work_dir is True
+        fm.cleanup_work_dir()
+        assert fm.work_dir is None
+        assert fm._owns_work_dir is False
+        assert fm._preexisting is None
+
+
+# omega = 2π·100; AddArr merges at omega·|Δdelay| < 0.05, i.e. complex
+# delay distance below ~7.96e-5 s at this frequency (ArrMod.f90:8,44).
+_FREQ = 100.0
+
+
+def _write_arr(path, records, freq=_FREQ):
+    """One source (50 m), one receiver depth (75 m), one range (500 m).
+
+    ``records``: 8-tuples ``(amp, phase_deg, delay_s, delay_imag_s,
+    src_angle, rcv_angle, n_top, n_bot)`` in the column order of
+    ``Bellhop/ArrMod.f90:119-126``. Floats are written with ``repr`` so the
+    file round-trips them bit-exactly.
+    """
+    lines = ["'2D'", repr(float(freq)), "1 50.0", "1 75.0", "1 500.0",
+             str(len(records)), str(len(records))]
+    for r in records:
+        lines.append(' '.join(repr(float(v)) for v in r[:6])
+                     + f' {int(r[6])} {int(r[7])}')
+    path.write_text('\n'.join(lines) + '\n')
+    return path
+
+
+def _cell(result):
+    return result.by_receiver[0][0][0]
+
+
+class TestAddArrPostMerge:
+
+    def test_within_tolerance_pair_merges_amplitude_add_weighted_delay(
+            self, tmp_path):
+        """omega·|Δdelay| = 0.032 and |Δphase| = 0.035 rad are both inside
+        AddArr's 0.05 tolerance: the pair becomes one arrival whose
+        amplitude is the sum, whose delay/delays_imag and both angles are
+        amplitude-weighted, and whose phase and bounce counts come from the
+        record that is first in (src_angle, delay) order — here the record
+        listed SECOND in the file."""
+        from uacpy.io.oalib_reader import read_arr_file
+        first_by_angle = (0.3, 0.0, 0.001, 0.0, -5.0, 5.0, 0, 1)
+        second_by_angle = (0.1, 2.0, 0.00105, -4e-6, -4.9, 5.1, 2, 3)
+        path = _write_arr(tmp_path / 'pair.arr',
+                          [second_by_angle, first_by_angle])
+
+        cell = _cell(read_arr_file(path))
+        assert cell['n_arrivals'] == 1
+        assert cell['amplitudes'][0] == pytest.approx(0.4)
+        assert cell['delays'][0] == pytest.approx(
+            0.75 * 0.001 + 0.25 * 0.00105)
+        assert cell['delays_imag'][0] == pytest.approx(0.25 * -4e-6)
+        assert cell['src_angles'][0] == pytest.approx(
+            0.75 * -5.0 + 0.25 * -4.9)
+        assert cell['rcv_angles'][0] == pytest.approx(
+            0.75 * 5.0 + 0.25 * 5.1)
+        assert cell['phases'][0] == 0.0
+        assert cell['n_top_bounces'][0] == 0
+        assert cell['n_bot_bounces'][0] == 1
+
+    def test_beyond_delay_tolerance_pair_stays_two_arrivals(self, tmp_path):
+        """omega·|Δdelay| = 0.31 exceeds the 0.05 tolerance: both records
+        survive, sorted by delay."""
+        from uacpy.io.oalib_reader import read_arr_file
+        path = _write_arr(tmp_path / 'far.arr', [
+            (0.1, 0.0, 0.0015, 0.0, -4.9, 5.1, 2, 3),
+            (0.3, 0.0, 0.001, 0.0, -5.0, 5.0, 0, 1),
+        ])
+        cell = _cell(read_arr_file(path))
+        assert cell['n_arrivals'] == 2
+        assert cell['delays'].tolist() == [0.001, 0.0015]
+        assert cell['amplitudes'].tolist() == [0.3, 0.1]
+
+    def test_same_delay_different_phase_stays_two_arrivals(self, tmp_path):
+        """|Δphase| = π/2 exceeds the 0.05 rad tolerance — AddArr's phase
+        test exists to keep surface-reflected and direct paths apart even
+        at equal delay (ArrMod.f90:41)."""
+        from uacpy.io.oalib_reader import read_arr_file
+        path = _write_arr(tmp_path / 'phase.arr', [
+            (0.3, 0.0, 0.001, 0.0, -5.0, 5.0, 0, 1),
+            (0.1, 90.0, 0.001, 0.0, -4.9, 5.1, 1, 1),
+        ])
+        cell = _cell(read_arr_file(path))
+        assert cell['n_arrivals'] == 2
+        assert sorted(cell['phases'].tolist()) == [0.0, 90.0]
+
+    def test_merge_false_returns_records_unmerged_in_file_order(
+            self, tmp_path):
+        """The raw escape hatch: a within-tolerance pair stays two records
+        and the out-of-delay-order file listing is preserved."""
+        from uacpy.io.oalib_reader import read_arr_file
+        records = [
+            (0.2, 0.0, 0.003, 0.0, 10.0, -10.0, 1, 1),
+            (0.3, 0.0, 0.001, 0.0, -5.0, 5.0, 0, 1),
+            (0.1, 2.0, 0.00105, -4e-6, -4.9, 5.1, 2, 3),
+        ]
+        path = _write_arr(tmp_path / 'raw.arr', records)
+        cell = _cell(read_arr_file(path, merge=False))
+        assert cell['n_arrivals'] == 3
+        expected = np.array(records)
+        for col, key in enumerate(_FIELD_KEYS):
+            assert cell[key].tolist() == expected[:, col].tolist(), key
+
+
+class TestTotalKeyRecordSort:
+
+    @staticmethod
+    def _records():
+        """Six pairwise non-merging records (delays 1 ms apart:
+        omega·Δ = 0.63) plus one within-tolerance pair, so a shuffle
+        exercises the sort and the merge's visit order together."""
+        recs = [(0.1 * (k + 1), 10.0 * k, 0.001 * (k + 1), -1e-6 * k,
+                 -10.0 + 2.0 * k, 8.0 - 2.0 * k, k, k + 1)
+                for k in range(6)]
+        recs.append((0.05, 0.5, 0.001 + 5e-5, 0.0, -9.9, 8.1, 3, 4))
+        return recs
+
+    def test_shuffled_file_order_reads_identically(self, tmp_path):
+        from uacpy.io.oalib_reader import read_arr_file
+        recs = self._records()
+        shuffled = [recs[i] for i in
+                    np.random.default_rng(0x19F2).permutation(len(recs))]
+        assert shuffled != recs
+
+        cell_a = _cell(read_arr_file(_write_arr(tmp_path / 'a.arr', recs)))
+        cell_b = _cell(read_arr_file(
+            _write_arr(tmp_path / 'b.arr', shuffled)))
+
+        assert cell_a['n_arrivals'] == cell_b['n_arrivals'] == 6
+        for key in _FIELD_KEYS:
+            assert np.array_equal(cell_a[key], cell_b[key]), key
+
+    def test_merging_an_already_merged_set_is_identity(self, tmp_path):
+        """Re-reading a file that lists exactly the merged, sorted records
+        reproduces them bit-for-bit — the merge pass is idempotent."""
+        from uacpy.io.oalib_reader import read_arr_file
+        cell_a = _cell(read_arr_file(
+            _write_arr(tmp_path / 'a.arr', self._records())))
+
+        remerged = [tuple(cell_a[key][i] for key in _FIELD_KEYS)
+                    for i in range(cell_a['n_arrivals'])]
+        cell_b = _cell(read_arr_file(
+            _write_arr(tmp_path / 'b.arr', remerged)))
+
+        assert cell_b['n_arrivals'] == cell_a['n_arrivals']
+        for key in _FIELD_KEYS:
+            assert np.array_equal(cell_a[key], cell_b[key]), key
+
+
+def _write_rts(path, body):
+    path.write_text("'T'\n" + body)
+    return path
+
+
+class TestReadRtsFileRefusesNonPositiveReceiverCounts:
+
+    def test_negative_receiver_count_raises_file_format_error(self, tmp_path):
+        from uacpy.core.exceptions import FileFormatError
+        from uacpy.io import read_rts_file
+        rts = _write_rts(tmp_path / 'n.rts', '-5 1.0 2.0 3.0\n')
+        with pytest.raises(FileFormatError, match='declares -5'):
+            read_rts_file(rts)
+
+    def test_zero_receiver_count_raises_file_format_error(self, tmp_path):
+        from uacpy.core.exceptions import FileFormatError
+        from uacpy.io import read_rts_file
+        rts = _write_rts(tmp_path / 'z.rts', '0 1.0 2.0\n')
+        with pytest.raises(FileFormatError, match='declares 0'):
+            read_rts_file(rts)
+
+    def test_positive_receiver_count_parses_ranges_and_time_steps(
+            self, tmp_path):
+        from uacpy.io import read_rts_file
+        rts = _write_rts(tmp_path / 'p.rts',
+                         '2 10.0 20.0\n0.0 1.0 2.0\n0.5 3.0 4.0\n')
+        data = read_rts_file(rts)
+        assert data['nr'] == 2
+        assert data['nt'] == 2
+        assert data['ranges'].tolist() == [10.0, 20.0]
+        assert data['p'].shape == (2, 2)
+
+
+class TestStripFortranQuotesDecodesDoubledApostrophes:
+
+    def test_doubled_apostrophe_reads_as_one_apostrophe(self):
+        from uacpy.io._fortran_helpers import strip_fortran_quotes
+        assert strip_fortran_quotes("'It''s a title'") == "It's a title"
+
+    def test_doubled_apostrophe_does_not_end_the_literal(self):
+        from uacpy.io._fortran_helpers import strip_fortran_quotes
+        assert strip_fortran_quotes("'a''b' ! comment") == "a'b"
+
+    def test_literal_holding_only_an_escaped_apostrophe(self):
+        from uacpy.io._fortran_helpers import strip_fortran_quotes
+        assert strip_fortran_quotes("''''") == "'"
+
+    def test_empty_literal_returns_empty_string(self):
+        from uacpy.io._fortran_helpers import strip_fortran_quotes
+        assert strip_fortran_quotes("''") == ''
+
+    def test_plain_literal_returns_its_contents(self):
+        from uacpy.io._fortran_helpers import strip_fortran_quotes
+        assert strip_fortran_quotes("'CVW'  ! options") == 'CVW'
+
+    def test_unquoted_line_falls_back_to_comment_stripping(self):
+        from uacpy.io._fortran_helpers import strip_fortran_quotes
+        assert strip_fortran_quotes('CVW ! options') == 'CVW'
+
+    def test_unclosed_literal_falls_back_to_comment_stripping(self):
+        from uacpy.io._fortran_helpers import strip_fortran_quotes
+        assert strip_fortran_quotes("'unclosed") == "'unclosed"
+
+
+_FIELD_KEYS = ('amplitudes', 'phases', 'delays', 'delays_imag',
+               'src_angles', 'rcv_angles', 'n_top_bounces', 'n_bot_bounces')
+
+
+class TestBoundaryConditionSeabedGetsNoPadMedia:
+    """``plan_multi_profile_media`` equalises the profiles of a
+    range-dependent KRAKEN deck with pad media repeating the half-space. A
+    ``vacuum`` / ``rigid`` / reflection-table half-space carries no material
+    to repeat — the ``sound_speed`` / ``density`` / ``attenuation`` on a
+    parameter-free ``BoundaryProperties`` are constructor placeholders, which
+    is why ``resolve_phase_speed_bounds`` consults
+    ``_NON_GEOACOUSTIC_TYPES`` before capping cHigh on them. Padding with
+    them writes metres of invented sediment under a seabed the caller asked
+    to be pressure-release."""
+
+    @staticmethod
+    def _segment(water_depth, halfspace, layers=()):
+        return uacpy.Environment(
+            bathymetry=Bathymetry(ranges=[0.0, 4000.0],
+                                  depths=[water_depth, water_depth]),
+            ssp=SoundSpeedProfile(depths=[0.0, water_depth],
+                                  data=[1500.0, 1490.0]),
+            bottom=Bottom(columns=[SeabedColumn(layers=list(layers),
+                                                halfspace=halfspace)]))
+
+    @pytest.mark.parametrize('acoustic_type', ['vacuum', 'rigid'])
+    def test_equal_profiles_carry_no_sub_bottom_medium(self, acoustic_type):
+        from uacpy.io.oalib_writer import plan_multi_profile_media
+        hs = BoundaryProperties(acoustic_type=acoustic_type)
+        segments = [(0.0, self._segment(100.0, hs)),
+                    (2.0, self._segment(100.0, hs))]
+        n_media, bottom, plans = plan_multi_profile_media(segments)
+        assert n_media == 1
+        assert bottom == 100.0
+        assert plans == [[], []]
+
+    def test_the_deck_names_no_invented_sediment(self, tmp_path):
+        from uacpy.io.oalib_writer import write_multi_profile_env
+        hs = BoundaryProperties(acoustic_type='vacuum')
+        segments = [(0.0, self._segment(100.0, hs)),
+                    (2.0, self._segment(100.0, hs))]
+        out = tmp_path / 'vac.env'
+        write_multi_profile_env(
+            str(out), segments,
+            uacpy.Source(depths=30.0, frequencies=50.0),
+            uacpy.Receiver(depths=np.linspace(0.0, 100.0, 101),
+                           ranges=[1000.0]),
+            rmax_m=4000.0)
+        text = out.read_text()
+        # The placeholder trio BoundaryProperties defaults to.
+        assert '1600' not in text
+        assert '1.500000' not in text
+        # NMedia is written once per profile, right after the frequency.
+        assert text.count("\n1\n'") == 2
+        assert "'V'" in text
+
+    def test_unequal_bathymetry_is_refused_by_acoustic_type(self):
+        from uacpy.io.oalib_writer import plan_multi_profile_media
+        hs = BoundaryProperties(acoustic_type='vacuum')
+        segments = [(0.0, self._segment(100.0, hs)),
+                    (2.0, self._segment(80.0, hs))]
+        with pytest.raises(ConfigurationError, match="'vacuum'"):
+            plan_multi_profile_media(segments)
+
+    def test_a_geoacoustic_half_space_is_padded(self):
+        """The pad is correct there: the half-space *is* that material, so a
+        transparent slice of it below the seafloor changes nothing."""
+        from uacpy.io.oalib_writer import (
+            plan_multi_profile_media, _PAD_MEDIUM_THICKNESS_M)
+        hs = BoundaryProperties(acoustic_type='half-space',
+                                sound_speed=1800.0, density=2.0,
+                                attenuation=0.5)
+        segments = [(0.0, self._segment(100.0, hs)),
+                    (2.0, self._segment(80.0, hs))]
+        n_media, bottom, plans = plan_multi_profile_media(segments)
+        assert n_media == 2
+        assert bottom == pytest.approx(100.0 + _PAD_MEDIUM_THICKNESS_M)
+        assert [len(p) for p in plans] == [1, 1]
+        assert plans[1][0][2] == 1800.0
+
+    def test_a_layer_stack_over_a_vacuum_writes_its_own_layers(self):
+        from uacpy.io.oalib_writer import plan_multi_profile_media
+        hs = BoundaryProperties(acoustic_type='rigid')
+        layer = SedimentLayer(thickness=5.0, sound_speed=1600.0,
+                              density=1.7, attenuation=0.3)
+        segments = [(0.0, self._segment(100.0, hs, [layer])),
+                    (2.0, self._segment(100.0, hs, [layer]))]
+        n_media, bottom, plans = plan_multi_profile_media(segments)
+        assert n_media == 2
+        assert bottom == 105.0
+        assert [len(p) for p in plans] == [1, 1]
+        assert plans[0][0][:3] == (100.0, 105.0, 1600.0)
+
+
+class TestReflectionTablesAreNeverEditedInPlace:
+    """``stage_reflection_file`` copies a table next to the ``.env`` that
+    names it and then normalises the copy. When the source already *is* the
+    destination — a pinned ``work_dir`` holding the caller's own ``.brc`` —
+    there is no copy, and normalising would edit an input."""
+
+    TABLE = ("4\n 10.0 0.50 -175.0\n 20.0 0.55 -170.0\n"
+             " 20.0 0.56 -169.0\n 30.0 0.60 -160.0\n")
+
+    def test_a_table_at_the_destination_is_left_byte_identical(self, tmp_path):
+        from uacpy.io.refl_io import stage_reflection_file
+        src = tmp_path / 'deck.brc'
+        src.write_text(self.TABLE)
+        before = hashlib.sha256(src.read_bytes()).hexdigest()
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', UserWarning)
+            dest = stage_reflection_file(src, tmp_path / 'deck.env',
+                                         boundary='bottom')
+        assert dest == src
+        assert hashlib.sha256(src.read_bytes()).hexdigest() == before
+
+    def test_a_repeated_angle_at_the_destination_is_reported(self, tmp_path):
+        from uacpy.io.refl_io import stage_reflection_file
+        src = tmp_path / 'deck.brc'
+        src.write_text(self.TABLE)
+        with pytest.warns(UserWarning, match='bellhopcuda'):
+            stage_reflection_file(src, tmp_path / 'deck.env',
+                                  boundary='bottom')
+
+    def test_a_clean_table_at_the_destination_warns_about_nothing(
+            self, tmp_path):
+        from uacpy.io.refl_io import stage_reflection_file
+        src = tmp_path / 'deck.brc'
+        src.write_text("2\n 10.0 0.5 -175.0\n 20.0 0.6 -170.0\n")
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            stage_reflection_file(src, tmp_path / 'deck.env',
+                                  boundary='bottom')
+        assert [str(w.message) for w in caught] == []
+
+    def test_a_copied_table_is_normalised(self, tmp_path):
+        """The copy is what earns the right to rewrite."""
+        from uacpy.io.refl_io import (
+            stage_reflection_file, read_reflection_coefficient)
+        src = tmp_path / 'user.brc'
+        src.write_text(self.TABLE)
+        before = hashlib.sha256(src.read_bytes()).hexdigest()
+        dest = stage_reflection_file(src, tmp_path / 'deck.env',
+                                     boundary='bottom')
+        assert dest != src
+        assert hashlib.sha256(src.read_bytes()).hexdigest() == before
+        assert read_reflection_coefficient(dest)['n_pts'] == 3
+
+
+class TestReflectionTableAngleOrderIsChecked:
+    """``dedupe_reflection_file`` keeps the rows whose angle exceeds the last
+    kept one, which collapses a descending table to a single row — one
+    constant reflection coefficient at every angle, and exit code 0.
+    ``misc/RefCoef.f90`` applies no monotonicity test of its own, so such a
+    file reaches the engine intact and must be caught here, on the terms
+    ``read_reflection_coefficient`` already states."""
+
+    def test_a_descending_table_is_a_typed_error(self, tmp_path):
+        from uacpy.io.refl_io import dedupe_reflection_file
+        p = tmp_path / 'grazing.brc'
+        original = ("5\n 90.0 0.9 -175.0\n 70.0 0.8 -170.0\n"
+                    " 50.0 0.7 -160.0\n 30.0 0.6 -150.0\n 10.0 0.5 -140.0\n")
+        p.write_text(original)
+        with pytest.raises(FileFormatError, match='non-decreasing'):
+            dedupe_reflection_file(p)
+        assert p.read_text() == original
+
+    def test_the_reader_and_the_dedupe_agree(self, tmp_path):
+        from uacpy.io.refl_io import (
+            dedupe_reflection_file, read_reflection_coefficient)
+        p = tmp_path / 'grazing.brc'
+        p.write_text("2\n 90.0 0.9 -175.0\n 10.0 0.5 -140.0\n")
+        with pytest.raises(FileFormatError):
+            read_reflection_coefficient(p)
+        with pytest.raises(FileFormatError):
+            dedupe_reflection_file(p)
+
+    def test_a_repeated_angle_is_collapsed(self, tmp_path):
+        from uacpy.io.refl_io import (
+            dedupe_reflection_file, read_reflection_coefficient)
+        p = tmp_path / 'evan.brc'
+        p.write_text("3\n 0.0 1.0 180.0\n 0.0 1.0 180.0\n 10.0 0.9 170.0\n")
+        dedupe_reflection_file(p)
+        assert read_reflection_coefficient(p)['theta'].tolist() == [0.0, 10.0]
+
+
+class TestRtsProjectionNeedsATimeAxis:
+    """``read_rts_file`` reports ``dt = 0.0`` for a run that wrote a single
+    output time — there is no second sample to difference against — and
+    ``rts_to_pressure`` then asks ``np.fft.rfftfreq(nt, 0.0)``."""
+
+    @staticmethod
+    def _rts(tmp_path, n_steps):
+        p = tmp_path / 'sparc.rts'
+        rows = ''.join(f"{0.05 * i} 1.5 -0.5\n" for i in range(n_steps))
+        p.write_text("'SPARC'\n2\n1000.0 2000.0\n" + rows)
+        return p
+
+    def test_a_single_step_file_reads_with_a_zero_step(self, tmp_path):
+        from uacpy.io.oalib_reader import read_rts_file
+        data = read_rts_file(self._rts(tmp_path, 1))
+        assert data['nt'] == 1 and data['dt'] == 0.0
+
+    def test_projecting_it_is_a_typed_error(self, tmp_path):
+        from uacpy.io.oalib_reader import read_rts_file, rts_to_pressure
+        data = read_rts_file(self._rts(tmp_path, 1))
+        with pytest.raises(ConfigurationError, match='no frequency axis'):
+            rts_to_pressure(data, 100.0)
+
+    def test_two_steps_project(self, tmp_path):
+        from uacpy.io.oalib_reader import read_rts_file, rts_to_pressure
+        data = read_rts_file(self._rts(tmp_path, 8))
+        p_at_f, ranges = rts_to_pressure(data, 2.5)
+        assert p_at_f.shape == (2,)
+        assert ranges.tolist() == [1000.0, 2000.0]
+
+
+class TestFortranTitleDecoding:
+    """OASS never assigns the title it hands ``PUTXSM``
+    (``unoass21.f:34``, ``oasmun21_bin.f:364``), so the field arrives as NUL
+    bytes where an assigned ``CHARACTER`` would carry blanks. Stripping one
+    class and then the other leaves the first behind wherever it sits inside
+    the second."""
+
+    @pytest.mark.parametrize('raw,expected', [
+        (b'TITLE\x00\x00   ', 'TITLE'),
+        (b'   TITLE\x00\x00', 'TITLE'),
+        (b'\x00\x00   TITLE   \x00', 'TITLE'),
+        (b'\x00' * 32, ''),
+        (b' ' * 32, ''),
+        (b'OASS run 3      ', 'OASS run 3'),
+    ])
+    def test_nuls_and_blanks_come_off_together(self, raw, expected):
+        from uacpy.io.oases_reader import _decode_fortran_title
+        assert _decode_fortran_title(raw) == expected
+
+
+class TestATruncatedReflectionTableIsNeverNormalisedIntoAValidOne:
+    """``dedupe_reflection_file`` runs over every table
+    ``stage_reflection_file`` copies, so a shortfall it repairs never reaches
+    ``read_reflection_coefficient``, which would have raised. Bellhop reads
+    the repaired file without complaint and every grazing angle past the cut
+    then falls outside the tabulated domain, where
+    ``InterpolateReflectionCoefficient`` returns ``RInt%R = 0`` — a totally
+    absorbing bottom — with its warning commented out
+    (misc/RefCoef.f90:144-149)."""
+
+    def test_a_short_table_is_refused_rather_than_renumbered(self, tmp_path):
+        from uacpy.io.refl_io import dedupe_reflection_file
+        p = tmp_path / 'trunc.brc'
+        rows = [f"{0.02 * i:.6f} 0.5 180.0" for i in range(3000)]
+        p.write_text("4500\n" + "\n".join(rows) + "\n")
+        with pytest.raises(FileFormatError, match='4500'):
+            dedupe_reflection_file(p)
+
+    def test_the_refused_file_is_left_byte_identical(self, tmp_path):
+        from uacpy.io.refl_io import dedupe_reflection_file
+        p = tmp_path / 'trunc.brc'
+        text = "3\n 10.0 0.5 -175.0\n 20.0 0.6 -170.0\n"
+        p.write_text(text)
+        with pytest.raises(FileFormatError):
+            dedupe_reflection_file(p)
+        assert p.read_text() == text
+
+    def test_the_reader_agrees_the_file_is_broken(self, tmp_path):
+        """The two must not disagree: before the guard, the same file raised
+        on a raw read and passed cleanly after dedupe."""
+        from uacpy.io.refl_io import (dedupe_reflection_file,
+                                      read_reflection_coefficient)
+        p = tmp_path / 'trunc.brc'
+        p.write_text("3\n 10.0 0.5 -175.0\n 20.0 0.6 -170.0\n")
+        with pytest.raises(FileFormatError):
+            read_reflection_coefficient(p)
+        with pytest.raises(FileFormatError):
+            dedupe_reflection_file(p)
+
+    def test_tokens_past_the_declared_count_are_ignored(self, tmp_path):
+        """``RefCoef.f90:53`` consumes exactly 3*N values and stops, so a
+        trailing row is surplus, not corruption."""
+        from uacpy.io.refl_io import dedupe_reflection_file
+        p = tmp_path / 'extra.brc'
+        p.write_text("2\n0.0 1.0 180.0\n1.0 0.5 170.0\n2.0 0.4 160.0\n")
+        dedupe_reflection_file(p)
+        tokens = p.read_text().split()
+        assert tokens[0] == '2'
+        assert '2.0' not in tokens
+
+    def test_a_complete_table_dedupes(self, tmp_path):
+        from uacpy.io.refl_io import dedupe_reflection_file
+        p = tmp_path / 'ok.brc'
+        rows = ["0.0 1.0 180.0"] * 3 + [f"{i}.0 0.5 170.0" for i in (1, 2)]
+        p.write_text(f"{len(rows)}\n" + "\n".join(rows) + "\n")
+        dedupe_reflection_file(p)
+        assert int(p.read_text().split()[0]) == 3
+
+
+class TestFieldFlpRejectsCoupledIncoherent:
+    """``field.f90:126-129`` ERROUTs on coupled modes asked for an incoherent
+    sum. It matters more than an ordinary deck error because
+    ``misc/FatalError.f90:30`` is ``STOP '<string>'``, so every
+    Acoustics-Toolbox fatal error exits with status 0 — the run writes no
+    ``.shd`` and a caller trusting the return code reads a stale or missing
+    output as success. Column 2 is only read for a range-dependent run
+    (``field.f90:122``), so a single-profile deck is unaffected.
+    """
+
+    @staticmethod
+    def _check(option, n_profiles):
+        from uacpy.io.oalib_writer import _validate_flp_option
+        _validate_flp_option(option, n_profiles=n_profiles)
+
+    def test_coupled_with_an_incoherent_sum_is_refused(self):
+        with pytest.raises(ConfigurationError, match='coupled modes'):
+            self._check('RC I', 2)
+
+    @pytest.mark.parametrize('option', ['RC C', 'RA I'])
+    def test_the_legal_combinations_are_accepted(self, option):
+        self._check(option, 2)
+
+    def test_a_single_profile_deck_never_reads_column_two(self):
+        self._check('RC I', 1)
+
+
+class TestAnIrregularShdIsStridedByItsOwnLayout:
+    """``bellhop3D.f90:166`` sets ``NRz_per_range = 1`` for an irregular grid
+    and then never uses it: its record index is ``Pos%NRz`` in every term
+    (``:405-410``), while 2-D ``bellhop.f90:323`` really does stride by
+    ``NRz_per_range``. Both share ``ReadEnvironmentBell``, so both write the
+    same ``'irregular '`` PlotType and the header alone cannot tell them apart.
+
+    The two layouts differ in total record count, so the file settles it —
+    rather than a guess from ``Ntheta``, since a 3-D run may carry a single
+    bearing.
+    """
+
+    @staticmethod
+    def _build(path, *, three_d, nfreq=1, ntheta=2, nsz=2, nrz=3, nrr=4):
+        import struct
+        recl = 41
+        record_bytes = recl * 4
+        buf = bytearray()
+
+        def record(payload):
+            assert len(payload) <= record_bytes
+            buf.extend(payload.ljust(record_bytes, b'\x00'))
+
+        record(struct.pack('<i', recl) + b'BELLHOP test'.ljust(80, b' '))
+        record(b'irregular '.ljust(10, b' '))
+        record(struct.pack('<7i', nfreq, ntheta, 1, 1, nsz, nrz, nrr)
+               + struct.pack('<dd', 100.0, 0.0))
+        record(np.full(nfreq, 100.0, dtype='<f8').tobytes())
+        record(np.arange(ntheta, dtype='<f8').tobytes())
+        record(np.zeros(1, dtype='<f8').tobytes())
+        record(np.zeros(1, dtype='<f8').tobytes())
+        record(np.zeros(nsz, dtype='<f4').tobytes())
+        record(np.zeros(nrz, dtype='<f4').tobytes())
+        record(np.arange(nrr, dtype='<f8').tobytes())
+        per_block = nrz if three_d else 1
+        n_data = nfreq * ntheta * nsz * per_block
+        for i in range(n_data):
+            v = np.zeros(2 * nrr, dtype='<f4')
+            # Tag from 1, not 0: an all-zero sample is legitimately read back
+            # as no-data (NaN), which would make record 0 indistinguishable
+            # from a gap.
+            v[0::2] = float(i + 1)
+            record(v.tobytes())
+        path.write_bytes(bytes(buf))
+        return n_data
+
+    def test_a_two_d_irregular_file_keeps_one_receiver_per_block(self,
+                                                                 tmp_path):
+        from uacpy.io.oalib_reader import read_shd_bin
+        path = tmp_path / 'flat.shd'
+        self._build(path, three_d=False)
+        assert read_shd_bin(str(path))['pressure'].shape == (2, 2, 1, 4)
+
+    def test_a_three_d_irregular_file_is_read_in_record_order(self, tmp_path):
+        from uacpy.io.oalib_reader import read_shd_bin
+        path = tmp_path / 'cube.shd'
+        n_data = self._build(path, three_d=True)
+        pressure = read_shd_bin(str(path))['pressure']
+        assert pressure.shape == (2, 2, 3, 4)
+        # Each record was tagged with its own index; reading them in order is
+        # exactly what a correct stride produces.
+        tags = np.real(pressure[..., 0]).ravel()
+        assert np.array_equal(tags, np.arange(1, n_data + 1, dtype=float))
+
+    def test_read_shd_file_refuses_a_three_d_irregular_file(self, tmp_path):
+        """A 3-D irregular cube has Nrz receiver rows per source depth; a
+        Field carries one paired receiver axis, so the wrapper refuses
+        rather than returning row 0 as the whole file."""
+        from uacpy.core.exceptions import UnsupportedFeatureError
+        from uacpy.io.oalib_reader import read_shd_bin, read_shd_file
+        path = tmp_path / 'cube_single_bearing.shd'
+        self._build(path, three_d=True, ntheta=1, nrz=3, nrr=3)
+        assert read_shd_bin(str(path))['pressure'].shape == (1, 2, 3, 3)
+        with pytest.raises(UnsupportedFeatureError, match='receiver rows'):
+            read_shd_file(path)
+
+    def test_read_shd_file_returns_the_paired_row_of_a_two_d_irregular_file(
+            self, tmp_path):
+        from uacpy.io.oalib_reader import read_shd_file
+        path = tmp_path / 'flat_single_bearing.shd'
+        self._build(path, three_d=False, ntheta=1, nsz=1, nrz=3, nrr=3)
+        field = read_shd_file(path)
+        assert field.data.shape == (3,)
+        assert 'depth' not in field.coords
+        assert field.metadata['receiver_depths'].size == 3
+
+
+class TestEquallySpacedReturnsARealBool:
+    """``equally_spaced`` is annotated ``-> bool`` and documents "is_equal :
+    bool", but returned ``np.bool_`` from its main path — ``np.max(delta) <
+    tol`` is a numpy scalar. The distinction is not cosmetic:
+    ``isinstance(np.True_, bool)`` is False, ``np.True_ is True`` is False, and
+    ``json.dumps`` raises ``TypeError: Object of type bool is not JSON
+    serializable`` on it.
+
+    It was also internally inconsistent: the ``n <= 1`` early return gave a
+    real ``True``, so the return type depended on the input length. Found by
+    running the module's own docstring examples, which expected ``True`` and
+    got ``np.True_``.
+    """
+
+    @staticmethod
+    def _cases():
+        import numpy as np
+        return [(np.linspace(0.0, 10.0, 11), True),
+                (np.array([0.0, 1.0, 3.0, 7.0, 10.0]), False),
+                (np.array([1.0]), True),          # the n <= 1 early return
+                (np.array([]), True)]
+
+    def test_every_path_returns_a_python_bool(self):
+        from uacpy.io.utils import equally_spaced
+        for x, _ in self._cases():
+            got = equally_spaced(x)
+            assert isinstance(got, bool), f"{type(got)} for size {x.size}"
+            assert got is True or got is False
+
+    def test_each_case_returns_its_expected_verdict(self):
+        from uacpy.io.utils import equally_spaced
+        for x, expected in self._cases():
+            assert equally_spaced(x) == expected
+
+    def test_the_result_is_json_serialisable(self):
+        import json
+        import numpy as np
+        from uacpy.io.utils import equally_spaced
+        assert json.dumps({'ok': equally_spaced(np.linspace(0.0, 10.0, 11))}) \
+            == '{"ok": true}'
+
+
+class TestRtsFileParsesEveryFortranRealSpelling:
+    """``read_rts_file`` walks the same free token stream ``read_ts`` does, so
+    it accepts the same reals. Python's ``float()`` rejects two spellings a
+    list-directed READ takes: the 'D' exponent a double-precision WRITE emits,
+    and the letterless three-digit exponent a ``Gw.d`` WRITE produces when the
+    ``E`` no longer fits (``Scooter/sparc.f90:294``)."""
+
+    @staticmethod
+    def _rts(path, body):
+        path.write_text("'Title'\n" + body)
+        return path
+
+    def test_a_letterless_three_digit_exponent_parses(self, tmp_path):
+        from uacpy.io.oalib_reader import read_rts_file
+        p = self._rts(tmp_path / 'a.rts',
+                      "2\n0.0 100.0\n0.0 0.123457-118 1.0\n")
+        assert read_rts_file(p)['p'][0, 0] == pytest.approx(1.23457e-119)
+
+    def test_a_d_exponent_parses(self, tmp_path):
+        from uacpy.io.oalib_reader import read_rts_file
+        p = self._rts(tmp_path / 'b.rts', "2\n0.0 100.0\n1.0D-03 1.0 2.0\n")
+        assert read_rts_file(p)['time'][0] == pytest.approx(1e-3)
+
+    def test_the_range_column_takes_the_same_spellings(self, tmp_path):
+        from uacpy.io.oalib_reader import read_rts_file
+        p = self._rts(tmp_path / 'c.rts', "2\n0.0 1.0-120\n0.0 1.0 2.0\n")
+        assert read_rts_file(p)['ranges'][1] == pytest.approx(1e-120)
+
+    def test_a_non_numeric_token_raises_fileformaterror(self, tmp_path):
+        from uacpy.io.oalib_reader import read_rts_file
+        p = self._rts(tmp_path / 'd.rts', "2\n0.0 100.0\n0.0 wrong 1.0\n")
+        with pytest.raises(FileFormatError, match='wrong'):
+            read_rts_file(p)
+
+
+class TestSourceBeamPatternNeedsTwoRows:
+    """``bellhop.f90:270`` clamps ``IBP`` to ``NSBPPts - 1`` and then reads
+    ``SrcBmPat(IBP+1, :)``, so a table shorter than two rows is indexed past
+    the allocation at ``beampattern.f90:36`` and the run ends at exit 0 with
+    an all-NaN field. ``stage_source_beam_pattern`` already refuses the path
+    form of that table; the array form refuses it too, so the guard does
+    not depend on how the caller supplied the pattern."""
+
+    def test_a_one_row_pattern_raises_configurationerror(self, tmp_path):
+        from uacpy.io.refl_io import write_source_beam_pattern
+        with pytest.raises(ConfigurationError, match='at least 2'):
+            write_source_beam_pattern(tmp_path / 'one.sbp', np.array([0.0]),
+                                      np.array([-3.0]))
+        assert not (tmp_path / 'one.sbp').exists()
+
+    def test_an_empty_pattern_raises_configurationerror(self, tmp_path):
+        from uacpy.io.refl_io import write_source_beam_pattern
+        with pytest.raises(ConfigurationError, match='0 angle'):
+            write_source_beam_pattern(tmp_path / 'none.sbp', np.array([]),
+                                      np.array([]))
+
+    def test_a_two_row_pattern_round_trips(self, tmp_path):
+        from uacpy.io.refl_io import (read_source_beam_pattern,
+                                      write_source_beam_pattern)
+        p = tmp_path / 'two.sbp'
+        write_source_beam_pattern(p, np.array([-10.0, 10.0]),
+                                  np.array([-3.0, -6.0]))
+        back = read_source_beam_pattern(p)
+        assert np.allclose(back[:, 0], [-10.0, 10.0])
+        assert np.allclose(back[:, 1], [-3.0, -6.0])
+
+    def test_a_repeated_angle_raises_configurationerror(self, tmp_path):
+        from uacpy.io.refl_io import write_source_beam_pattern
+        with pytest.raises(ConfigurationError, match='strictly increasing'):
+            write_source_beam_pattern(tmp_path / 'dup.sbp',
+                                      np.array([0.0, 0.0, 1.0]), np.zeros(3))
+
+    def test_a_step_of_exactly_the_angle_resolution_is_written(self, tmp_path):
+        # %12.6f prints 0.000000 and 0.000001 as two distinct tokens, so a
+        # step of exactly SBP_ANGLE_RESOLUTION_DEG still reaches Bellhop as a
+        # strictly increasing column. The guard rejects steps *below* it.
+        from uacpy.io.refl_io import write_source_beam_pattern
+        out = tmp_path / 'edge.sbp'
+        write_source_beam_pattern(out, np.array([0.0, 1e-6]),
+                                  np.array([0.0, -3.0]))
+        assert [ln.split()[0] for ln in out.read_text().splitlines()[1:]] == \
+            ['0.000000', '0.000001']
+
+    def test_a_step_below_the_angle_resolution_raises_configurationerror(
+            self, tmp_path):
+        # Whether a sub-resolution pair actually collides depends on where it
+        # falls on the grid (1e-7 and 2e-7 both print 0.000000), so the guard
+        # rejects the step size itself rather than the printed pair.
+        from uacpy.io.refl_io import write_source_beam_pattern
+        with pytest.raises(ConfigurationError, match='angle resolution'):
+            write_source_beam_pattern(tmp_path / 'sub.sbp',
+                                      np.array([0.0, 9e-7]),
+                                      np.array([0.0, -3.0]))
+
+
+class TestSourceBeamPatternRequiresOneLevelPerAngle:
+    """The row loop is driven by ``len(angles)``, so an over-long ``pattern``
+    would be truncated into a table Bellhop reads happily while it carries a
+    different directivity than the caller passed, and a short one would raise
+    ``IndexError`` partway through the write with the truncated file already on
+    disk. Both columns are refused before ``open``."""
+
+    def test_a_longer_pattern_than_angles_raises_configurationerror(
+            self, tmp_path):
+        from uacpy.io.refl_io import write_source_beam_pattern
+        out = tmp_path / 'long.sbp'
+        with pytest.raises(ConfigurationError, match='same shape'):
+            write_source_beam_pattern(out, np.array([-90.0, 0.0, 90.0]),
+                                      np.array([0.0, -3.0, 0.0, -99.0, -99.0]))
+        assert not out.exists()
+
+    def test_a_shorter_pattern_than_angles_raises_configurationerror(
+            self, tmp_path):
+        from uacpy.io.refl_io import write_source_beam_pattern
+        out = tmp_path / 'short.sbp'
+        with pytest.raises(ConfigurationError, match='same shape'):
+            write_source_beam_pattern(out, np.array([-90.0, 0.0, 90.0]),
+                                      np.array([0.0, -3.0]))
+        assert not out.exists()
+
+    def test_one_level_per_angle_is_written(self, tmp_path):
+        # The boundary either side of the length guard: N and N are written,
+        # N and N-1 / N and N+1 are refused by the two tests above.
+        from uacpy.io.refl_io import (read_source_beam_pattern,
+                                      write_source_beam_pattern)
+        out = tmp_path / 'match.sbp'
+        write_source_beam_pattern(out, np.array([-90.0, 0.0, 90.0]),
+                                  np.array([0.0, -3.0, 0.0]))
+        back = read_source_beam_pattern(out)
+        assert back.shape == (3, 2)
+        assert np.allclose(back[:, 1], [0.0, -3.0, 0.0])
+
+    def test_a_column_shaped_pattern_raises_configurationerror(self, tmp_path):
+        # (N, 1) formats as an array in the row loop rather than a float.
+        from uacpy.io.refl_io import write_source_beam_pattern
+        out = tmp_path / 'col.sbp'
+        with pytest.raises(ConfigurationError, match='same shape'):
+            write_source_beam_pattern(out, np.array([-90.0, 0.0, 90.0]),
+                                      np.array([[0.0], [-3.0], [0.0]]))
+        assert not out.exists()
+
+    def test_a_non_numeric_pattern_raises_configurationerror(self, tmp_path):
+        from uacpy.io.refl_io import write_source_beam_pattern
+        out = tmp_path / 'text.sbp'
+        with pytest.raises(ConfigurationError, match='not a numeric array'):
+            write_source_beam_pattern(out, np.array([-90.0, 0.0, 90.0]),
+                                      ['a', 'b', 'c'])
+        assert not out.exists()
+
+
+class TestFileManagerReportsWorkDirMisuseTypedly:
+    """``models/base.py`` hands the user's ``work_dir=`` straight to
+    ``adopt_work_dir``, so ``Bellhop(work_dir='some_file.txt')`` reaches
+    ``mkdir`` on a regular file. And the manager tracks exactly one directory:
+    a second ``create_work_dir`` would drop the only reference to the first
+    and leave it on disk with nothing able to remove it."""
+
+    def test_adopting_a_path_that_is_a_file_raises_configurationerror(
+            self, tmp_path):
+        from uacpy.io.file_manager import FileManager
+        target = tmp_path / 'notadir.txt'
+        target.write_text('x')
+        with pytest.raises(ConfigurationError, match='not a directory'):
+            FileManager(base_dir=tmp_path).adopt_work_dir(target)
+
+    def test_adopting_a_missing_directory_creates_and_returns_it(
+            self, tmp_path):
+        from uacpy.io.file_manager import FileManager
+        target = tmp_path / 'fresh'
+        adopted = FileManager(base_dir=tmp_path).adopt_work_dir(target)
+        assert adopted == target and target.is_dir()
+
+    def test_a_second_create_work_dir_raises_rather_than_stranding_the_first(
+            self, tmp_path):
+        from uacpy.io.file_manager import FileManager
+        fm = FileManager(base_dir=tmp_path)
+        first = fm.create_work_dir()
+        with pytest.raises(ConfigurationError, match='already holds work_dir'):
+            fm.create_work_dir()
+        assert fm.work_dir == first
+        fm.cleanup_work_dir()
+        assert not first.exists()
+
+    def test_entering_the_context_reuses_a_directory_already_created(
+            self, tmp_path):
+        from uacpy.io.file_manager import FileManager
+        fm = FileManager(base_dir=tmp_path, cleanup=True)
+        first = fm.create_work_dir()
+        with fm as entered:
+            assert entered.work_dir == first
+        assert not first.exists()
+        assert [p for p in tmp_path.iterdir()] == []
+
+
+class TestUnitHelpersHaveOneDefinition:
+    """``km_to_m`` / ``m_to_km`` / ``deg_to_rad`` are pure arithmetic with no
+    file format in them, so they live in :mod:`uacpy.core.units`;
+    :mod:`uacpy.io.units` re-exports them under the same names and carries the
+    file-format mandate.
+
+    Two things have to hold for that split to be free: every existing
+    ``from uacpy.io.units import ...`` still resolves, and the two module
+    attributes are one object rather than two definitions free to drift."""
+
+    NAMES = ('km_to_m', 'm_to_km', 'deg_to_rad')
+
+    @pytest.mark.parametrize('name', NAMES)
+    def test_the_io_name_is_the_core_object(self, name):
+        import uacpy.core.units as core_units
+        import uacpy.io.units as io_units
+        assert getattr(io_units, name) is getattr(core_units, name)
+
+    @pytest.mark.parametrize('name', NAMES)
+    def test_exactly_one_definition_ships(self, name):
+        import ast
+        package = Path(uacpy.__file__).resolve().parent
+        sites = []
+        for path in sorted(package.rglob('*.py')):
+            if 'third_party' in path.parts or 'tests' in path.parts:
+                continue
+            for node in ast.walk(ast.parse(path.read_text(encoding='utf-8'))):
+                if isinstance(node, ast.FunctionDef) and node.name == name:
+                    sites.append(str(path.relative_to(package)))
+        assert sites == [str(Path('core') / 'units.py')], sites
+
+    def test_the_conversions_round_trip(self):
+        from uacpy.io.units import deg_to_rad, km_to_m, m_to_km
+        assert float(m_to_km(2000.0)) == 2.0
+        assert float(km_to_m(2.0)) == 2000.0
+        assert float(km_to_m(m_to_km(1234.5))) == pytest.approx(1234.5)
+        assert float(deg_to_rad(180.0)) == pytest.approx(np.pi)
+
+    def test_the_names_stay_off_the_io_public_surface(self):
+        # They were never exported; the move must not add them.
+        import uacpy.io as io_package
+        assert not (set(self.NAMES) & set(io_package.__all__))

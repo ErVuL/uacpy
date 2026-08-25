@@ -24,7 +24,10 @@ def bit_error_rate(tx_bits, rx_bits):
     b = np.asarray(rx_bits, dtype=int).ravel()
     n = min(a.size, b.size)
     if n == 0:
-        raise ConfigurationError("bit_error_rate: empty input")
+        raise ConfigurationError(
+            f"bit_error_rate: empty input — tx_bits carries {a.size} bits, "
+            f"rx_bits {b.size}. The BER is taken over the overlap of the two "
+            f"streams, so both must be non-empty.")
     return float(np.mean(a[:n] != b[:n]))
 
 
@@ -34,7 +37,10 @@ def symbol_error_rate(tx_symbols_or_labels, rx_symbols_or_labels):
     b = np.asarray(rx_symbols_or_labels).ravel()
     n = min(a.size, b.size)
     if n == 0:
-        raise ConfigurationError("symbol_error_rate: empty input")
+        raise ConfigurationError(
+            f"symbol_error_rate: empty input — tx carries {a.size} symbols, "
+            f"rx {b.size}. The SER is taken over the overlap of the two "
+            f"streams, so both must be non-empty.")
     return float(np.mean(a[:n] != b[:n]))
 
 
@@ -47,9 +53,20 @@ def evm(rx_symbols, ref_symbols):
     s = np.asarray(ref_symbols, dtype=complex).ravel()
     n = min(r.size, s.size)
     if n == 0:
-        raise ConfigurationError("evm: empty input")
+        raise ConfigurationError(
+            f"evm: empty input — rx_symbols carries {r.size} symbols, "
+            f"ref_symbols {s.size}. The EVM is taken over the overlap of the "
+            f"two streams, so both must be non-empty.")
     err = np.mean(np.abs(r[:n] - s[:n]) ** 2)
     ref = np.mean(np.abs(s[:n]) ** 2)
+    if ref == 0.0:
+        # EVM is a ratio to the reference power, so a zero-energy reference
+        # leaves it undefined; returning inf behind a numpy divide warning
+        # reads as "infinitely bad", not "not defined".
+        raise ConfigurationError(
+            "evm: reference symbols carry no energy, so the error vector has "
+            "nothing to be relative to. Pass the transmitted constellation "
+            "symbols as ref_symbols.")
     return float(np.sqrt(err / ref))
 
 

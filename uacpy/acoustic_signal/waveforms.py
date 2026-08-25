@@ -5,15 +5,10 @@ from typing import Tuple, Literal
 import numpy as np
 
 from uacpy.core.exceptions import ConfigurationError
-
-
-def _require_positive(caller: str, **params: float) -> None:
-    """Raise :class:`ConfigurationError` naming each parameter that is not
-    strictly positive (NaN counts as invalid)."""
-    for name, value in params.items():
-        if not value > 0:
-            raise ConfigurationError(
-                f"{caller}: {name} must be > 0; got {value}.")
+from uacpy.acoustic_signal._signal_validate import (
+    require_below_nyquist,
+    require_positive_finite_scalar,
+)
 
 
 def sparc_pulse(
@@ -97,7 +92,8 @@ def sparc_pulse(
     Both AT copies gate every pulse to ``T > 0``; the sinc here is evaluated at
     negative time too, so it is the full two-sided sinc.
     """
-    _require_positive("sparc_pulse", omega=omega)
+    omega = require_positive_finite_scalar(omega, "sparc_pulse", "omega",
+                                           " rad/s")
     t = np.asarray(t, dtype=float)
     s = np.zeros(t.shape)
     F = omega / (2.0 * np.pi)
@@ -244,7 +240,8 @@ def ricker_wavelet(time: np.ndarray, frequency: float) -> np.ndarray:
     ----------
     Original MATLAB code: Ricker.m
     """
-    _require_positive("ricker_wavelet", frequency=frequency)
+    frequency = require_positive_finite_scalar(frequency, "ricker_wavelet",
+                                               "frequency", " Hz")
     time = np.asarray(time, dtype=float)
     u = 2 * np.pi * frequency * time - 8  # Dimensionless time
     s = 0.5 * (0.25 * u**2 - 0.5) * np.sqrt(np.pi) * np.exp(-0.25 * u**2)
@@ -284,7 +281,8 @@ def gaussian_pulse(time: np.ndarray, delay: float, duration: float) -> np.ndarra
     ----------
     Original MATLAB code by mbp, 2001
     """
-    _require_positive("gaussian_pulse", duration=duration)
+    duration = require_positive_finite_scalar(duration, "gaussian_pulse",
+                                              "duration", " s")
     time = np.asarray(time, dtype=float)
     y = np.exp(-(((time - delay) / duration) ** 2))
     return y
@@ -301,9 +299,10 @@ def lfm_chirp(
     Parameters
     ----------
     fmin : float
-        Minimum frequency in Hz
+        Sweep start frequency in Hz, ``>= 0``
     fmax : float
-        Maximum frequency in Hz
+        Sweep end frequency in Hz, ``>= 0`` (may be below ``fmin`` for a
+        downsweep)
     duration : float
         Duration of time-series in seconds
     sample_rate : float
@@ -327,7 +326,8 @@ def lfm_chirp(
 
     ``fmin == fmax`` is accepted and yields a constant-frequency tone (the
     sweep rate is simply zero); ``duration`` and ``sample_rate`` must be
-    positive and long enough for at least one sample, otherwise a
+    positive and long enough for at least one sample, and the sweep must stay
+    below the Nyquist frequency ``sample_rate/2``, otherwise a
     :class:`~uacpy.core.exceptions.ConfigurationError` is raised.
 
     Examples
@@ -344,7 +344,25 @@ def lfm_chirp(
     ----------
     Original MATLAB code: lfm.m
     """
-    _require_positive("lfm_chirp", duration=duration, sample_rate=sample_rate)
+    duration = require_positive_finite_scalar(duration, "lfm_chirp",
+                                              "duration", " s")
+    sample_rate = require_positive_finite_scalar(sample_rate, "lfm_chirp",
+                                                 "sample_rate", " Hz")
+    # >= 0 rather than > 0: fmin == fmax == 0 is a DC "sweep", degenerate but
+    # harmless. A negative bound is not — the sweep crosses DC and folds about
+    # it, returning a waveform whose instantaneous frequency never matches what
+    # was asked for. hfm_chirp and tone_burst already refuse it via
+    # require_positive_finite_scalar; written as the negated condition so NaN
+    # is refused here too.
+    for _name, _value in (("fmin", fmin), ("fmax", fmax)):
+        if not (_value >= 0.0):
+            raise ConfigurationError(
+                f"lfm_chirp: {_name} must be a finite frequency >= 0 Hz; got "
+                f"{_value}. A negative bound folds the sweep about DC.")
+    f_top = max(fmin, fmax)
+    require_below_nyquist(f_top, sample_rate, "lfm_chirp",
+                          "the top of the sweep",
+                          "the sampled waveform aliases")
     T = duration  # local alias for the sweep-duration symbol in the phase law
     N = int(T * sample_rate)
     if N <= 0:
@@ -388,9 +406,10 @@ def tone_burst(
 
     Notes
     -----
-    All parameters must be positive and the burst long enough for at least
-    one sample (``round(n_cycles / frequency * sample_rate) >= 1``),
-    otherwise a :class:`~uacpy.core.exceptions.ConfigurationError` is raised.
+    All parameters must be positive, the tone below the Nyquist frequency
+    ``sample_rate/2``, and the burst long enough for at least one sample
+    (``round(n_cycles / frequency * sample_rate) >= 1``), otherwise a
+    :class:`~uacpy.core.exceptions.ConfigurationError` is raised.
 
     Examples
     --------
@@ -406,8 +425,14 @@ def tone_burst(
     # ``N`` is the *nearest* integer that keeps ``n_cycles`` faithful at
     # the given ``sample_rate``. ``time`` is built as
     # ``np.arange(N) / sample_rate`` so ``dt == 1 / sample_rate`` exactly.
-    _require_positive("tone_burst", frequency=frequency, n_cycles=n_cycles,
-                      sample_rate=sample_rate)
+    frequency = require_positive_finite_scalar(frequency, "tone_burst",
+                                               "frequency", " Hz")
+    n_cycles = require_positive_finite_scalar(n_cycles, "tone_burst",
+                                              "n_cycles", " cycles")
+    sample_rate = require_positive_finite_scalar(sample_rate, "tone_burst",
+                                                 "sample_rate", " Hz")
+    require_below_nyquist(frequency, sample_rate, "tone_burst", "frequency",
+                          "the sampled tone aliases")
     T = n_cycles / frequency
     N = int(round(T * sample_rate))
     if N <= 0:
@@ -458,7 +483,8 @@ def hfm_chirp(
     frequency change rate (like LFM). This makes them more Doppler-tolerant.
 
     ``fmin`` and ``fmax`` must both be positive and distinct (the phase law
-    divides by ``fmin - fmax`` and by ``fmin``); ``fmin > fmax`` is accepted
+    divides by ``fmin - fmax`` and by ``fmin``), and the sweep must stay below
+    the Nyquist frequency ``sample_rate/2``; ``fmin > fmax`` is accepted
     and gives a down-sweep. Degenerate parameters raise
     :class:`~uacpy.core.exceptions.ConfigurationError`.
 
@@ -481,14 +507,22 @@ def hfm_chirp(
     ----------
     Original MATLAB: ``third_party/Acoustics-Toolbox/Matlab/waveforms/hfm.m``
     """
-    _require_positive("hfm_chirp", fmin=fmin, fmax=fmax, duration=duration,
-                      sample_rate=sample_rate)
+    fmin = require_positive_finite_scalar(fmin, "hfm_chirp", "fmin", " Hz")
+    fmax = require_positive_finite_scalar(fmax, "hfm_chirp", "fmax", " Hz")
+    duration = require_positive_finite_scalar(duration, "hfm_chirp",
+                                              "duration", " s")
+    sample_rate = require_positive_finite_scalar(sample_rate, "hfm_chirp",
+                                                 "sample_rate", " Hz")
     if fmin == fmax:
         raise ConfigurationError(
             "hfm_chirp: fmin and fmax must differ (the hyperbolic phase law "
             f"divides by fmin - fmax); got fmin == fmax == {fmin}. For a "
             "constant-frequency signal use tone_burst or lfm_chirp with "
             "fmin == fmax.")
+    f_top = max(fmin, fmax)
+    require_below_nyquist(f_top, sample_rate, "hfm_chirp",
+                          "the top of the sweep",
+                          "the sampled waveform aliases")
     T = duration  # local alias for the sweep-duration symbol in the phase law
     N = int(T * sample_rate)
     if N <= 0:
@@ -544,13 +578,15 @@ def nwave(time: np.ndarray, frequency: float) -> np.ndarray:
     >>> t = np.linspace(-0.01, 0.02, 1000)
     >>> s = nwave(t, 100.0)
     >>> print(f"Non-zero samples: {np.sum(s != 0)}")
+    Non-zero samples: 332
     """
-    _require_positive("nwave", frequency=frequency)
+    frequency = require_positive_finite_scalar(frequency, "nwave",
+                                               "frequency", " Hz")
     time = np.asarray(time, dtype=float)
     omega = 2 * np.pi * frequency
     s = np.sin(omega * time) - 0.5 * np.sin(2 * omega * time)
 
-    # Zero outside [0, 1/frequency]
-    s[(time > 1 / frequency) | (time < 0)] = 0
-
-    return s
+    # Zero outside [0, 1/frequency]. np.where rather than mask assignment: a
+    # scalar `time` makes `s` 0-d, which does not support item assignment, and
+    # ricker_wavelet/sparc_pulse both take scalars.
+    return np.where((time > 1 / frequency) | (time < 0), 0.0, s)

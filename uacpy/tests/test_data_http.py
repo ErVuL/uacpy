@@ -4,8 +4,9 @@ import urllib.error
 
 import pytest
 
-from uacpy.core.exceptions import DataFetchError
+from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.data import _http
+from uacpy.data._http import raise_substantive
 
 
 class _FakeResp:
@@ -115,3 +116,9 @@ def test_checked_member_size_caps_bomb():
         _http.checked_member_size(2000, 'a.tif', max_bytes=1000)
     with pytest.raises(DataFetchError, match='decompression bomb'):
         _http.checked_member_size(-1, 'a.tif', max_bytes=1000)
+
+
+def test_raise_substantive_rejects_an_empty_error_list():
+    # errors[-1] on an empty chain raised IndexError with no remediation.
+    with pytest.raises(ConfigurationError, match='No data source was tried'):
+        raise_substantive([])

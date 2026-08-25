@@ -29,9 +29,12 @@ The ``*_field`` variants (:func:`passive_signal_excess_field`,
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core.results import Field
 
 
@@ -69,7 +72,9 @@ def noise_background(noise_level, directivity_index=None, *, array_gain=None):
         if directivity_index is not None:
             raise ConfigurationError(
                 "noise_background: pass either directivity_index or "
-                "array_gain, not both — AG replaces DI."
+                "array_gain, not both — AG replaces DI. Got "
+                f"directivity_index={directivity_index!r} and "
+                f"array_gain={array_gain!r}."
             )
         return np.asarray(noise_level, float) - np.asarray(array_gain, float)
     di = 0.0 if directivity_index is None else directivity_index
@@ -90,6 +95,8 @@ def passive_signal_excess(
     implementation/system loss ``L_sp >= 0`` (windowing, scalloping,
     beam-pattern, integration mismatch) subtracted from the budget.
     """
+    _reject_field(tl, 'passive_signal_excess', 'tl',
+                  'passive_signal_excess_field')
     return (
         np.asarray(source_level, float)
         - np.asarray(tl, float)
@@ -131,6 +138,8 @@ def active_signal_excess(
     ``L_sp >= 0`` subtracted from the budget. ``SL``, ``NL`` and ``RL``
     share one band reference — see :func:`noise_background`.
     """
+    _reject_field(tl, 'active_signal_excess', 'tl',
+                  'active_signal_excess_field')
     if noise_level is None and reverberation_level is None:
         raise ConfigurationError(
             "active_signal_excess: provide noise_level and/or reverberation_level"
@@ -181,9 +190,44 @@ def _tl_array_from_field(tl_field) -> np.ndarray:
         raise ConfigurationError(
             "signal-excess field: a time-domain Field is not transmission "
             "loss; pass a TL / pressure Field (e.g. from "
-            "run_mode=COHERENT_TL)."
+            f"run_mode=COHERENT_TL). Got axes {list(tl_field.coords)}."
         )
     return tl_field.db
+
+
+def _reject_field(value, caller: str, label: str, twin: str) -> None:
+    """Raise a typed error naming ``twin`` when ``value`` is a ``Field``.
+
+    The scalar sonar-equation functions take arrays and the ``*_field``
+    functions take a :class:`~uacpy.core.results.Field`; handing a Field to the
+    scalar one reaches ``float()`` and raises
+    ``TypeError: float() argument must be … not 'Field'``, which names neither
+    the argument nor the function one suffix away.
+    """
+    if isinstance(value, Field):
+        raise ConfigurationError(
+            f"{caller}: {label} is a Field; this function takes dB arrays. "
+            f"Use {twin}(...) for a Field, or pass {label}.db().data / "
+            f"np.asarray({label}.data) to stay here.")
+
+
+def _require_scalar_db(value, caller: str, label: str) -> float:
+    """Validate a sonar-budget term documented as a scalar and return it.
+
+    ``reverberation_level`` is the one term of the budget that may be
+    per-range; the rest are scalars, and an array reached ``float()`` at the
+    budget dict *after* the signal excess had already been computed, raising
+    ``TypeError: only 0-dimensional arrays can be converted to Python
+    scalars`` — no function name, no argument name, and the work thrown away.
+    """
+    arr = np.asarray(value, dtype=float)
+    if arr.ndim != 0:
+        raise ConfigurationError(
+            f"{caller}: {label} must be a scalar dB level; got shape "
+            f"{arr.shape}. reverberation_level is the one per-range term of "
+            f"this budget — for a range-varying background, pass the profile "
+            f"there, or evaluate the field once per {label} value.")
+    return float(arr)
 
 
 def _per_range_broadcast(values, tl_field, label: str) -> np.ndarray:
@@ -279,6 +323,9 @@ def passive_signal_excess_field(
         :func:`uacpy.visualization.plots.plot_signal_excess`.
     """
     tl = _tl_array_from_field(tl_field)
+    noise_level = _require_scalar_db(noise_level,
+                                     'passive_signal_excess_field',
+                                     'noise_level')
     se = passive_signal_excess(
         source_level, tl, noise_level,
         directivity_index=directivity_index,
@@ -356,6 +403,10 @@ def active_signal_excess_field(
         budget terms in ``result.metadata['sonar_budget']``.
     """
     tl = _tl_array_from_field(tl_field)
+    if noise_level is not None:
+        noise_level = _require_scalar_db(noise_level,
+                                         'active_signal_excess_field',
+                                         'noise_level')
     rl = (
         _per_range_broadcast(reverberation_level, tl_field,
                              'reverberation_level')
@@ -383,9 +434,14 @@ def active_signal_excess_field(
     if noise_level is not None:
         budget['noise_level'] = float(noise_level)
     if reverberation_level is not None:
+        # RL is the one term that may be per-range, so it cannot go through
+        # float() like its siblings. ``.tolist()`` keeps the budget dict plain
+        # Python all the same — a float for a scalar RL, a list for a per-range
+        # one — so the whole of ``metadata['sonar_budget']`` stays comparable
+        # and serialisable rather than holding one bare ndarray.
         budget['reverberation_level'] = np.asarray(
             reverberation_level, dtype=float,
-        )
+        ).tolist()
     return _spawn_se_field(tl_field, se, budget)
 
 
@@ -447,7 +503,8 @@ def probability_of_detection_field(se_field, *, sigma_db) -> Field:
         raise ConfigurationError(
             "probability_of_detection_field: field must carry real "
             "signal excess in dB — build it with "
-            "passive/active_signal_excess_field."
+            "passive/active_signal_excess_field. Got dtype "
+            f"{se_field.data.dtype}."
         )
     sigma = float(sigma_db)
     if sigma <= 0.0:
@@ -507,8 +564,18 @@ def detection_range(ranges_m, signal_excess_db):
     """Largest range (m) at which the signal excess is still non-negative.
 
     Finds the outermost zero-crossing of ``signal_excess_db`` versus range by
-    linear interpolation. Returns ``np.inf`` if SE >= 0 everywhere, or
-    ``np.nan`` if SE < 0 everywhere.
+    linear interpolation. Returns ``np.inf`` if SE >= 0 everywhere, the last
+    sampled range where SE recovers positive at the far edge without crossing
+    back down, and ``np.nan`` if SE < 0 everywhere. When the outermost positive
+    sample and the next finite sample are separated by no-data (NaN) cells, the
+    positive sample's range is returned as-is — a crossing inside a no-data hole
+    has no modeled location to interpolate.
+
+    The far-edge-recovery return is a **lower bound**, not a crossing: the
+    outermost crossing lies beyond ``ranges_m``, so the number moves with the
+    grid. It is finite, so the ``np.isfinite`` test the sonar guide recommends
+    does not separate it from a modeled crossing; a :class:`UserWarning` names
+    it instead.
 
     Parameters
     ----------
@@ -520,7 +587,9 @@ def detection_range(ranges_m, signal_excess_db):
     r = np.asarray(ranges_m, dtype=float)
     se = np.asarray(signal_excess_db, dtype=float)
     if r.shape != se.shape:
-        raise ConfigurationError("detection_range: ranges and signal_excess shape mismatch")
+        raise ConfigurationError(
+            "detection_range: ranges and signal_excess shape mismatch; got "
+            f"ranges_m shape {r.shape} and signal_excess_db shape {se.shape}")
     # NaN marks a cell the propagation model never filled (no ray reached it),
     # not a cell where the target is undetectable, so the crossing is sought
     # among the sampled ranges only — the same no-data handling as
@@ -528,7 +597,8 @@ def detection_range(ranges_m, signal_excess_db):
     known = np.isfinite(se)
     if not known.any():
         return np.nan
-    r, se = r[known], se[known]
+    idx = np.where(known)[0]
+    r, se = r[idx], se[idx]
     positive = se >= 0.0
     if positive.all():
         return np.inf
@@ -540,6 +610,25 @@ def detection_range(ranges_m, signal_excess_db):
     if last_pos == r.size - 1:
         # SE stays/recovers positive at the far edge; detectable out to the
         # last sampled range, with no crossing-down beyond it to interpolate.
+        # The value is then the grid's own edge rather than a modeled crossing,
+        # so it tracks ``receiver.ranges``: on one shelf budget a 20 km grid
+        # returned 20000.0 m against 45947 m on a 120 km grid, a factor 2.3.
+        # ``positive.all()`` above already took the "SE >= 0 everywhere" case,
+        # so reaching here means SE went negative inside the grid and came back.
+        warnings.warn(
+            f"detection_range: signal excess goes negative inside the grid but "
+            f"is back to >= 0 at the outermost sampled range with data "
+            f"({float(r[-1]):.6g} m), so no crossing was found beyond it. The "
+            f"returned {float(r[-1]):.6g} m is a LOWER BOUND on the detection "
+            f"range, not the outermost zero-crossing — widen receiver.ranges "
+            f"and re-run to locate the crossing.",
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+        )
+        return float(r[last_pos])
+    # ``idx`` keeps each sample's position in the unmasked array: a step > 1
+    # between consecutive known samples is a no-data hole, and a crossing
+    # inside it has no modeled location to interpolate.
+    if idx[last_pos + 1] - idx[last_pos] > 1:
         return float(r[last_pos])
     se0, se1 = se[last_pos], se[last_pos + 1]
     frac = se0 / (se0 - se1)

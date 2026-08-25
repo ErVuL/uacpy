@@ -17,6 +17,7 @@ import numpy as np
 import pytest
 
 import uacpy
+from uacpy.core import BoundaryProperties, Environment, Receiver, Source
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.io.oases_writer import write_oass_input
 from uacpy.tests.conftest import make_pekeris
@@ -504,7 +505,8 @@ class TestGuardsThatFireBeforeAnyBinaryRuns:
         assert float(record[6]) < 0.0
 
     def test_out_of_range_interface_is_refused(self):
-        with pytest.raises(ConfigurationError, match='not a bottom interface'):
+        with pytest.raises(ConfigurationError,
+                           match='not a scattering interface'):
             _oass(interface=7).run(_env(), _CLASS_SRC, _CLASS_RCV)
 
     @pytest.mark.parametrize('interface,record_index', [(3, 6), (4, 7)])
@@ -957,7 +959,7 @@ class TestTheSeaSurfaceIsAScatteringInterface:
                   if ln.split() and ln.split()[0] == '100.00'][-1]
         assert len(bottom) == 7 and float(bottom[6]) > 0.0
 
-    def test_an_interior_water_record_is_still_refused(self, tmp_path):
+    def test_an_interior_water_record_is_refused(self, tmp_path):
         # Only the FIRST water record carries an RG column INENVI re-reads;
         # an interior one does not, so naming it must still fail.
         with pytest.raises(ConfigurationError, match='no interface'):
@@ -1037,7 +1039,6 @@ class TestCorrelationLengthMustSurviveTheRecordFormat:
     def test_oasr_inherits_the_guard_through_its_public_knob(self):
         # OASR exposes interface_roughness=[(RG, CL, M)] and had no CL check
         # of its own; the funnel is what gives it one.
-        from uacpy.io.oases_writer import _make_roughness_tail
         with pytest.raises(ConfigurationError):
             self._tail(1e-5)
 
@@ -1081,7 +1082,7 @@ class TestSubMillimetreLayersDoNotVanishSilently:
     """The layer record's depth column is ``%.2f``, so a sediment layer
     thinner than 5 mm is written at the same formatted depth as the layer
     below it. ``INENVI`` rejects only a *decreasing* depth
-    (``oaseun31.f:61-64``), so equal depths pass and ``THICK(I)`` comes out 0
+    (``oaseun31.f:58-61``), so equal depths pass and ``THICK(I)`` comes out 0
     (``:1508``) — the layer is dropped.
 
     Nothing measurable is lost at that thickness (far below λ/100 in any
@@ -1137,3 +1138,164 @@ class TestSubMillimetreLayersDoNotVanishSilently:
         depths = [ln.split()[0] for ln in deck.splitlines()
                   if ln.split() and ln.split()[0] == '100.00']
         assert len(depths) >= 2, 'the sediment and halfspace records collide'
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# What the .rhs contract actually admits
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.requires_oases
+class TestOasrIsNotAUsableMeanField:
+    """``oass.tex:18-23`` names OASR alongside OAST as a producer, but the
+    pairing divides by zero inside oass2 for the decks uacpy writes.
+
+    ``unoass21.f:200-211`` keeps only the ``.rhs`` records whose interface
+    index equals ``INTFC``, takes ``DLWVNO`` from the gap between the first
+    two it keeps, and then computes ``NWVNO=(WKMAX-WK0)/DLWVNO+1``. An OASR
+    deck's layer 1 is the water half-space, so ``SCTRHS`` stamps ``IN1 = 2``
+    (``oaseun31.f:2308-2309``) on every record, while ``INTFC`` here is a
+    bottom deck layer, 3 or deeper — nothing matches, ``KCNT`` stays 0 and
+    ``DLWVNO`` is never assigned. Independently, OASR calls ``SCTRHS`` from
+    inside its angle loop with ``WVNO = Re(AK(1,1))*cos(ANG)``
+    (``oasjun21.f:70,108``), so its wavenumber grid is cosine-spaced and the
+    two-record ``DLWVNO`` inference does not describe it."""
+
+    def test_an_oasr_mean_field_is_refused(self):
+        from uacpy.models import OASR
+        with pytest.raises(ConfigurationError) as ei:
+            OASS(correlation_length=10.0, mean_field=OASR())
+        message = str(ei.value)
+        assert 'IN1=2' in message, message
+        assert 'cos(ANG)' in message, message
+
+    def test_an_oast_mean_field_is_accepted(self):
+        assert OASS(correlation_length=10.0,
+                    mean_field=OAST(options='N J T s')).mean_field is not None
+
+    def test_a_producer_that_writes_no_rhs_is_refused_by_type(self):
+        with pytest.raises(ConfigurationError, match='oass.tex:18-23'):
+            OASS(correlation_length=10.0, mean_field=OASN())
+
+
+@pytest.mark.requires_oases
+class TestSeaSurfaceIsALegalScatteringInterface:
+    """Deck layer 2 is the first water record and ``ROUGH(M)`` is the
+    roughness of the interface at the TOP of layer M (``oaseun31.f:377-383``),
+    so layer 2's RG is the sea surface; ``SCTRHS`` writes its operators under
+    ``IN1 = 2`` like any other interface, and ``write_oass_input`` already
+    carries a ``surface_is_target`` branch that routes the nine-token
+    roughness tail to the water record. ``OASS.spec.supports`` advertises
+    ``'rough_surface'``. Only the model-side interface check refused it."""
+
+    @staticmethod
+    def _env(surface_roughness, bottom_roughness):
+        return uacpy.Environment(
+            bathymetry=100.0,
+            ssp=uacpy.SoundSpeedProfile(depths=[0.0, 100.0],
+                                        data=[1500.0, 1500.0]),
+            surface=uacpy.BoundaryProperties(acoustic_type='vacuum',
+                                             roughness=surface_roughness),
+            bottom=uacpy.BoundaryProperties(
+                acoustic_type='half-space', sound_speed=1700.0, density=1.8,
+                attenuation=0.5, roughness=bottom_roughness))
+
+    def test_interface_2_resolves_against_the_surface_roughness(self):
+        model = OASS(correlation_length=10.0, interface=2)
+        assert model._resolve_interface(self._env(0.5, 0.0)) == 2
+
+    def test_a_smooth_surface_is_named_as_the_reason(self):
+        model = OASS(correlation_length=10.0, interface=2)
+        with pytest.raises(ConfigurationError, match='sea surface'):
+            model._resolve_interface(self._env(0.0, 0.5))
+
+    def test_the_default_interface_resolves_to_the_seabed(self):
+        model = OASS(correlation_length=10.0)
+        assert model._resolve_interface(self._env(0.0, 0.5)) == 3
+
+    def test_an_interface_below_the_stack_is_refused(self):
+        model = OASS(correlation_length=10.0, interface=9)
+        with pytest.raises(ConfigurationError, match='not a scattering'):
+            model._resolve_interface(self._env(0.5, 0.5))
+
+    @pytest.mark.slow
+    def test_the_chain_runs_and_answers(self, tmp_path):
+        model = OASS(correlation_length=10.0, rms_roughness=0.5, interface=2,
+                     work_dir=tmp_path, cleanup=False)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            result = model.run(self._env(0.5, 0.0), _CLASS_SRC, _CLASS_RCV,
+                               run_mode=RunMode.REVERBERATION)
+        data = np.asarray(result.data)
+        assert data.shape == (len(_CLASS_RCV.depths), len(_CLASS_RCV.ranges))
+        assert np.isfinite(data).all()
+        # A reverberation level, not a saturated sentinel.
+        assert 0.0 < float(np.min(data)) < 200.0
+
+
+@pytest.mark.requires_oases
+def test_oass_accepts_the_same_spectrum_spellings_as_oassp():
+    """OASS compared ``spectrum`` exactly while OASSP lower-cased it, so
+    ``'Gaussian'`` raised on one and ran on the other. Both normalise now, so
+    the stored value — which the option letter and the options-exclusivity
+    check both read — is the canonical spelling."""
+    assert OASS(correlation_length=10.0,
+                spectrum='Gaussian').spectrum == 'gaussian'
+    assert OASS(correlation_length=10.0,
+                spectrum='Goff-Jordan').spectrum == 'goff-jordan'
+    # The canonical value is what reaches the option line.
+    assert 'g' in OASS(correlation_length=10.0, spectrum='Goff-Jordan'
+                       )._resolve_options(RunMode.REVERBERATION).split()
+    # A default spelled with a capital must not read as a pinned non-default.
+    assert OASS(correlation_length=10.0, spectrum='Gaussian',
+                options='r').spectrum == 'gaussian'
+    with pytest.raises(ConfigurationError, match='von-karman'):
+        OASS(correlation_length=10.0, spectrum='von-karman')
+
+
+class TestOassMeanFieldOptionLine:
+    """OASS runs a producer for the mean field and consumes only its ``.rhs``,
+    but it runs that producer through the producer's own wrapper — which
+    requires the table ``'T'`` writes (OAST's FOR020 ``.plt``, OASR's
+    ``.rco``/``.trc``). ``options='N J s'`` is documented as legal and does
+    write the ``.rhs``, so the run died on a missing table nothing here reads,
+    after the binary had already been spent. Both letters are now stated up
+    front, before any deck is written."""
+
+    @staticmethod
+    def _rig(tmp_path, options):
+        model = OASS(correlation_length=10.0, verbose=False,
+                     work_dir=tmp_path, cleanup=False,
+                     mean_field=OAST(options=options, verbose=False))
+        env = Environment(
+            name='rough', bathymetry=100.0, ssp=1500.0,
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=1600.0, density=1.6,
+                                      attenuation=0.2, roughness=0.5))
+        return (model, env, Source(depths=50.0, frequencies=100.0),
+                Receiver(depths=np.array([50.0]),
+                         ranges=np.linspace(500.0, 2500.0, 5)))
+
+    def _run_mean_field(self, tmp_path, options):
+        model, env, source, receiver = self._rig(tmp_path, options)
+        return model._run_mean_field(env, source, receiver,
+                                     model._setup_file_manager(), 100.0)
+
+    def test_a_producer_without_s_is_refused(self, tmp_path):
+        with pytest.raises(ConfigurationError, match="must contain 's'"):
+            self._run_mean_field(tmp_path, 'N J T')
+
+    def test_a_producer_without_T_is_refused(self, tmp_path):
+        with pytest.raises(ConfigurationError, match="must also"):
+            self._run_mean_field(tmp_path, 'N J s')
+
+    def test_the_refusal_names_a_line_that_works(self, tmp_path):
+        with pytest.raises(ConfigurationError) as excinfo:
+            self._run_mean_field(tmp_path, 'N J s')
+        assert "'N J T s'" in str(excinfo.value)
+
+    def test_the_default_producer_carries_both_letters(self):
+        # The default mean field is built inside _run_mean_field, so a
+        # missing letter there would refuse every default OASS run.
+        chars = set(OAST(options='N J T s', verbose=False)._resolve_options())
+        assert {'s', 'T'} <= chars

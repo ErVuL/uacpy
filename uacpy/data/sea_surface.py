@@ -12,9 +12,12 @@ source is available it falls back to the fetched 10 m wind, scaled to the
 first, then the cached NBS monthly climatology.
 """
 
+import warnings
+
 import numpy as np
 
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
+from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core.ssp import generate_sea_surface
 from uacpy._log import log_message
 from uacpy.data._geo import as_coordinate
@@ -43,6 +46,27 @@ _PM_HS_COEFF = 0.0214
 #: value in common use; treat a wave height built from a 10 m wind as
 #: approximate.
 _U10_TO_U195 = 1.026
+_G = 9.81
+#: Range samples per Pierson-Moskowitz peak wavelength λ_p = 2πU²/g (64 m at
+#: U = 10 m/s) when the realization is sized from the sea state. Nearly all of
+#: the variance sits at the peak, so a grid coarser than λ_p/2 puts the whole
+#: spectrum above Nyquist and returns an essentially flat surface: at
+#: U = 10 m/s and a fixed 500 samples the realized Hs is 86 % of the requested
+#: one over 10 km, 2.7 % over 50 km and numerically zero over 427 km. Eight
+#: samples per peak wavelength holds the realized Hs within a few percent.
+_SAMPLES_PER_PEAK = 8
+#: Floor on a sea-state-sized realization (the historical fixed default), so a
+#: short transect keeps a smooth surface rather than the ~130 samples the peak
+#: wavelength alone asks for over 1 km.
+_MIN_SURFACE_POINTS = 500
+#: Ceiling on a sea-state-sized realization, so a long transect under a calm
+#: (short-wavelength) sea cannot allocate without bound. 200 000 samples is a
+#: 3.2 MB altimetry array and resolves the peak of a 5 m/s wind over 400 km;
+#: past it the realization is capped and warned about rather than grown.
+_MAX_SURFACE_POINTS = 200_000
+#: Wind below which the sea is treated as calm: the floor that keeps
+#: :func:`generate_sea_surface`'s positive-wind guard satisfied.
+_CALM_WIND_MS = 0.5
 
 
 def hs_to_pm_wind(hs):
@@ -50,7 +74,7 @@ def hs_to_pm_wind(hs):
     return float(np.sqrt(max(float(hs), 0.0) / _PM_HS_COEFF))
 
 
-def fetch_sea_surface(point, *, date, max_range, n_points=500, seed=None,
+def fetch_sea_surface(point, *, date, max_range, n_points=None, seed=None,
                       source='auto', max_days=None, timeout=120.0,
                       verbose=False):
     """Sea-surface altimetry ``(n_points, 2)`` from the fetched sea state.
@@ -64,7 +88,13 @@ def fetch_sea_surface(point, *, date, max_range, n_points=500, seed=None,
     max_range : float
         Range extent (m) of the realization — set to the transect length.
     n_points : int, optional
-        Range samples in the returned altimetry. Default 500.
+        Range samples in the returned altimetry. Default ``None``: size the
+        realization from the sea state, at :data:`_SAMPLES_PER_PEAK` samples
+        per Pierson-Moskowitz peak wavelength (between
+        :data:`_MIN_SURFACE_POINTS` and :data:`_MAX_SURFACE_POINTS`), so the
+        realized wave height tracks the fetched one at any transect length. A
+        pinned count too coarse to resolve the peak warns and returns the
+        aliased (flatter than requested) surface.
     seed : int, optional
         Random seed for the surface realization (reproducibility).
     source : {'auto', 'waves', 'wind', 'local'}, optional
@@ -79,7 +109,7 @@ def fetch_sea_surface(point, *, date, max_range, n_points=500, seed=None,
     Returns
     -------
     (altimetry, source_id)
-        ``altimetry`` is an ``(n_points, 2)`` ``[range_m, height_m]`` array;
+        ``altimetry`` is an ``(n, 2)`` ``[range_m, height_m]`` array;
         ``source_id`` is the catalogue id that supplied the sea state
         (``'waverys'`` / ``'ww3'`` / ``'nbs'``).
     """
@@ -122,6 +152,36 @@ def fetch_sea_surface(point, *, date, max_range, n_points=500, seed=None,
 def _surface(max_range, wind_ms, n_points, seed):
     # A calm sea (near-zero wind / wave) would trip generate_sea_surface's
     # positive-wind guard; floor it to a light breeze so a flat-ish surface is
-    # still returned rather than raising.
-    return generate_sea_surface(max_range, max(wind_ms, 0.5), n_points=n_points,
+    # still returned rather than raising. Its peak wavelength is 0.16 m and its
+    # Hs 5 mm, so the floored case keeps the fixed count and stays silent: the
+    # realization stands in for a flat surface either way, and resolving those
+    # ripples over a transect would ask for millions of samples.
+    calm = wind_ms < _CALM_WIND_MS
+    wind_ms = max(wind_ms, _CALM_WIND_MS)
+    # Deep-water peak wavelength of the Pierson-Moskowitz spectrum: the peak
+    # sits at omega_p = g/U, and omega² = g·k_wave gives k_wave = g/U².
+    lambda_p = 2.0 * np.pi * wind_ms ** 2 / _G
+    needed = int(np.ceil(_SAMPLES_PER_PEAK * max_range / lambda_p)) + 1
+    if n_points is None:
+        n_points = _MIN_SURFACE_POINTS if calm else int(
+            min(max(needed, _MIN_SURFACE_POINTS), _MAX_SURFACE_POINTS))
+    else:
+        n_points = int(n_points)
+    if not calm and n_points < needed and n_points > 1:
+        remedy = (f"Shorten max_range: resolving it needs {needed} samples, "
+                  f"past the {_MAX_SURFACE_POINTS} cap"
+                  if n_points >= _MAX_SURFACE_POINTS else
+                  f"Pass n_points >= {needed}, or n_points=None to size the "
+                  f"realization from the sea state")
+        warnings.warn(
+            f"fetch_sea_surface: {n_points} samples over {max_range:.0f} m "
+            f"give dx = {max_range / (n_points - 1):.1f} m, coarser than the "
+            f"{lambda_p / _SAMPLES_PER_PEAK:.1f} m that resolves the "
+            f"{lambda_p:.1f} m Pierson-Moskowitz peak at U = {wind_ms:.1f} m/s. "
+            f"The realization aliases the wave spectrum away and its "
+            f"significant wave height falls short of the fetched sea state. "
+            f"{remedy}.",
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+        )
+    return generate_sea_surface(max_range, wind_ms, n_points=n_points,
                                 seed=seed)

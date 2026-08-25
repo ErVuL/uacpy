@@ -3,6 +3,9 @@
 This document summarizes all changes applied to the original Fortran/C source
 code shipped with uacpy, with exact diffs.
 
+Patching a vendored file shifts the line numbers uacpy's comments cite into
+it. See `docs/DEV.md` §9.1 for what a patch owes those citations.
+
 ---
 
 ## Collins RAM family — double-precision build
@@ -282,7 +285,7 @@ so its `u` accumulates the full `exp(+i k₀ r)` carrier — same
 convention as mpiramS' `psif`. ramsurf1.5's `solve` has no `g0`
 argument (`ramsurf1.5.f:310`); the carrier is absorbed into the
 matrix coefficients by the operator function
-`g(x) = (1−νx)²·exp(α·log(1+x) + i σ (√(1+x)−1))` (`ramsurf1.5.f:564`),
+`g(x) = (1−νx)²·exp(α·log(1+x) + i σ (√(1+x)−1))` (`ramsurf1.5.f:566-567`),
 so its `u` carries no `exp(+i k₀ r)`. ramsurf1.5 stores
 `u · f3 / sqrt(r+eps)` (the density-jump-rescaled, range-rescaled
 envelope; matches what `tlg` is computed from). Since `f3 ∈ ℝ`, the
@@ -347,7 +350,7 @@ Both are fixed:
 
 **Why `mz` is 40004 here but 20002 for the fluid codes.** rams0.5 is elastic
 and interleaves the field vector, so it indexes the depth arrays to `2*nz+4`
-(`rams0.5.f:137`, and `2*nz` at `:673-675`, `:778-825`) where ramgeo/ramsurf
+(`rams0.5.f:141`, and `2*nz` at `:673-675`, `:778-825`) where ramgeo/ramsurf
 index `nz+2`. `mz=40004` therefore gives all three the same usable depth grid,
 `nz ≤ 20000`. Cost is ~48 MB of static arrays (14 `(mz,mp)` complex arrays),
 against ~12 MB before.
@@ -463,7 +466,7 @@ build works on any machine with gfortran installed.
  ###########################################
  # Gnu g77/gfortran options (64 bit)
 -FC = /usr/bin/gfortran-13
-+FC = gfortran
++FC ?= gfortran
  
  #FFLAGS = -march=native -mtune=native -fopenmp -m64 -mfpmath=sse -I $(MODDIR) -Wall -finline-functions -ffast-math -fno-strength-reduce -falign-functions=2  -O3 -fomit-frame-pointer 
  #FFLAGS = -g -pg -march=native -fopenmp -m64 -mfpmath=sse -I $(MODDIR) -Wall 
@@ -576,7 +579,7 @@ Added module-level variables to support the extended sediment model:
 -                           ! bottom properties are simple and range independent - four values.
 +
 +! Bottom sediment properties.
-+! When isedrd==0 (range-independent): cs(nzs,1), rho(nzs,1), attn(nzs,1) -- single profile.
++! When isedrd==0 (range-independent): cs(nzs,1), rho(nzs,1), attn(nzs,1) — single profile.
 +! When isedrd==1 (range-dependent):   cs(nzs,nrp_sed), rho(nzs,nrp_sed), attn(nzs,nrp_sed)
 +!   with rp_sed(nrp_sed) giving the range points (in metres).
 +integer :: isedrd                                          ! 0=range-indep, 1=range-dep sediment
@@ -646,7 +649,7 @@ the seafloor index moves.
      allocate(uu(nz+2))
 -    ! zero uu
 -    uu=0.0_wp*uu
-+    ! zero uu (use assignment, not multiply -- 0*NaN=NaN on uninitialized memory)
++    ! zero uu (use assignment, not multiply — 0*NaN=NaN on uninitialized memory)
 +    uu=cmplx(0.0_wp,0.0_wp,wp)
      ! Conditions for the delta function.
      zsc=1.0_wp+zsrc(1)/deltaz
@@ -694,6 +697,16 @@ the seafloor index moves.
 The original set `rnow = rg(1)` (first output range), which skipped PE
 self-starter propagation from range zero.  The modified version keeps
 `rnow = 0` so the field is correctly marched from the source.
+
+Side effect, recorded because nothing else states it: `rnow` is read four
+lines later by `rsc = abs(rend - rnow) - rs` (`ram.f90:68`), so on a
+multi-range output grid `rsc` becomes `rg(nr) - rs` where upstream it was
+`rg(nr) - rg(1) - rs`. That makes the `ram.f90:251` stability-constraint
+branch fire slightly earlier. It fires within the first output segment
+either way — the branch compares the distance left to the *current* output
+range rather than the absolute range marched, which is what makes
+`rs_stability` largely inert on a multi-range grid (upstream behaviour;
+`RAM._warn_rs_stability_inert_on_a_multi_range_grid` warns about it).
 
 ```diff
 @@ -59,7 +59,6 @@
@@ -864,10 +877,30 @@ on a 100 m Pekeris waveguide at 250 Hz over the same 10 km, `OMP_NUM_THREADS=1`:
 | 10 | 1.870 s (3.2x) | 0.669 s (1.2x) |
 | 50 | 8.700 s (15.1x) | 1.067 s (1.9x) |
 
-This is a cost defect, not an accuracy one — the shrunken step is *smaller*, so
-TL moved by only ~2e-4 dB. But it also meant the marched `dr` was not the `dr`
-uacpy resolves and reports in the `Result` metadata; after the fix TL at a given
-range is bit-identical however many other output ranges are requested.
+Left alone, this is a cost defect and not an accuracy one — the shrunken step
+is *smaller*, so TL moved by only ~2e-4 dB. But it also meant the marched `dr`
+was not the `dr` uacpy resolves and reports in the `Result` metadata.
+
+> **Correction.** Two claims first recorded here were wrong, and both are
+> measured below in *Remainder tested against the live step*.
+>
+> 1. "A cost defect, not an accuracy one" describes the *upstream* code. It
+>    does not describe this patch: restoring the step is what made an
+>    **overshoot** possible, because the test above it compared the remainder
+>    against the live `dr` rather than against `deltar`. Upstream, `dr` only
+>    ever shrinks, so the march can never pass its target at any grid. This
+>    patch is what put the accuracy defect there; the entry below is what
+>    closes it, and the two belong together.
+> 2. "After the fix TL at a given range is bit-identical however many other
+>    output ranges are requested" is false and stays false, though the
+>    magnitude is now negligible. mpiramS lands on each requested range, so
+>    the output grid decides how each leg is decomposed into Padé steps, and a
+>    rational approximant of `exp` does not compose exactly. At the 61 ranges
+>    common to a 25 m and a 50 m output grid over the same water — same
+>    source, same `dr=40` — the two runs disagreed by **3.585 dB median /
+>    20.755 dB max** with only this patch applied, and by **5.96e-6 dB median
+>    / 3.83e-5 dB max** with both. Pinned by
+>    `test_ram_backends.TestTlDoesNotDependOnTheOutputGrid`.
 
 **Fix:** restore the full step when it has been shrunk, as the `else` of the
 same test, reusing that branch's `upd=1` so `matrc` rebuilds the matrices for
@@ -888,6 +921,66 @@ the restored `dre`.
 +        upd=1
        end if
 ```
+
+#### Remainder tested against the live step, so the march overshot its target
+
+The shrink test above compares the remainder against `dr` — the loop's live,
+possibly already-shrunk step — rather than against `deltar`. On its own that is
+harmless, because upstream `dr` only ever shrinks and a remainder can never
+exceed it. Paired with the step restore added above it is not: after a shrink,
+an output range whose remainder is longer than that leftover step but shorter
+than `deltar` fails the test, falls into the restore branch, and is marched a
+full `deltar` **past** its own target. The next iteration shrinks to the
+*negative* remainder and walks "backward" onto the range it missed.
+
+Nothing conjugates the field for a backward step. `dre=abs(dr)` at `:189`,
+`:201` and `:255` strips the sign, and `epade` builds its coefficients from
+`dre`, so the backward step applies a **forward** propagator — the field is
+marched further away from the source, not back toward it, and is then written
+out under the label of a range it has already passed. That `epade` is sign-aware
+is not an inference: the self-starter's own deliberate backward step at `:134`
+writes `dre=-abs(dr)`. `grep -rn conjg src/` is empty.
+
+The misplacement accumulates over the march, so "roughly twice as far" — the
+step doubles — understates it badly. On uacpy's own 200 m / 25 Hz
+pressure-release fixture (121 output ranges at 25 m, auto `deltar` = 305.8 m),
+replaying this branch exactly: half the output ranges take a backward step, and
+the field written at the last range, labelled **3300 m**, has been propagated
+**37 020 m — 11.2x its own label**.
+
+Measured with a step counter compiled into `ram.f90` (`OMP_NUM_THREADS=1`):
+
+| fixture | backward steps | total steps | median &#124;ΔTL&#124; vs the closed-form modal sum |
+|---|---|---|---|
+| auto `deltar`=305.8, 121 ranges @ 25 m | 60 | 181 | 3.548 dB |
+| …after the fix | **0** | **121** | **2.127 dB** |
+| `dr`=40 pinned, 121 ranges @ 25 m | 120 | 248 | 3.868 dB |
+| …after the fix | **0** | **128** | **1.691 dB** |
+
+The correct march is also the cheaper one: an overshoot costs a forward *and* a
+backward step per output range.
+
+**Fix:** test the remainder against `deltar`. A remainder shorter than a full
+step then shrinks onto its target, and a longer one is marched at the restored
+`deltar`, so `rnow` can never pass `rend` — at any `deltar`, on any output grid.
+No cap on `deltar` and no knowledge of the receiver grid is needed for that,
+which is what let uacpy drop its Python-side `dr` cap (`_mpirams_dr_output_cap`,
+whose own floor-less `min` over the output gaps sized a 5 000 000-step march
+from a legal 2 mm receiver pair).
+
+```diff
+-      if (abs(rend-rnow)<abs(dr)) then
++      if (abs(rend-rnow)<abs(deltar)) then
+         dr=rend-rnow
+         dre=abs(dr)
+         ip=1
+         call epade
+         upd=1
+       else if (abs(abs(dr)-abs(deltar))>tiny(deltar)) then
+```
+
+The restore branch stays: without it, `dr` never returns to `deltar` and the
+upstream cost defect above comes back.
 
 ### `src/peramx.f90` -- I/O rewrite (largest change)
 
@@ -996,7 +1089,7 @@ characters to accommodate full paths.
  integer :: nss
  
 -integer :: nb,nzp,nrp,nrp0,n,nf1,nf
-+integer :: nb,nzp,nrp,nrp0,n,nf1,nf,nr
++integer :: nb,nzp,nrp,nrp0,nf1,nf,nr
  real(kind=wp) :: bw, fs, Nsam, df, tmp
  real(kind=wp),dimension(:),allocatable :: frq
  
@@ -1005,7 +1098,7 @@ characters to accommodate full paths.
  integer :: t1,t2,cr,cm
  
 -integer :: ii,jj,iff,length
-+integer :: ii,jj,iff,ir,length
++integer :: ii,jj,iff,ir
  
  integer, parameter :: nunit=2
 -complex(kind=wp), parameter :: j=cmplx(0.0_wp,1.0_wp)

@@ -324,6 +324,18 @@ SOURCES: Dict[str, DataSource] = {
         url='https://doi.org/10.5281/zenodo.3762390',
         commercial_use=True,
     ),
+    'deck41': DataSource(
+        id='deck41',
+        name='DECK41 Surficial Seafloor Sediment Description Database (NOAA)',
+        used_for='sediment (global, dominant-lithology descriptions)',
+        license='U.S. Government work — public domain',
+        attribution='NOAA NCEI DECK41 Surficial Seafloor Sediment Descriptions',
+        citation='Jenkins, C. (2011): Dominant Bottom Types and Habitats In '
+                 'World Ocean Circulation Experiment. NOAA NCEI. '
+                 'doi:10.7289/V5VD6WCT',
+        url='https://www.ngdc.noaa.gov/mgg/geology/deck41.html',
+        commercial_use=True,
+    ),
     'grainsize': DataSource(
         id='grainsize',
         name='NCEI Seafloor Sediment Grain-Size Database (NOAA, G00127)',

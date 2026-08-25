@@ -13,13 +13,18 @@ import warnings
 import numpy as np
 import pytest
 
+from uacpy.core.exceptions import ConfigurationError
+
 from uacpy.core.acoustics import (
     bubble_resonance,
+    spl,
     bubble_soundspeed,
     bubble_surface_loss,
     density,
     power_to_db,
     soundspeed,
+    soundspeed_delgrosso,
+    soundspeed_unesco,
 )
 from uacpy.core.constants import PRESSURE_FLOOR, REFERENCE_PRESSURE_WATER
 
@@ -47,6 +52,66 @@ class TestMackenzieValidityWarnings:
             c = soundspeed()                     # T=27, S=35, D=10
         # The default-point value the environment.md bubble example quotes.
         assert c == pytest.approx(1539.087, abs=1e-3)
+
+
+class TestUnescoValidityWarnings:
+    """``soundspeed_unesco`` announces extrapolation the way ``soundspeed``
+    does. Its pressure argument is **decibars** while Chen & Millero state the
+    range in bar, so the bound is 10 000 dbar and not 1000: a 5000 m cast is
+    comfortably inside it. The cold end warns below −3 °C rather than the
+    fit's 0 °C, because seawater is liquid down to about −3 °C under pressure
+    and polar deep water lives there."""
+
+    def test_a_deep_cast_in_decibars_is_silent(self):
+        # 9000 dbar ≈ 9 km of water — inside 1000 bar, and the value the
+        # 10x trap would have flagged.
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', UserWarning)
+            c = soundspeed_unesco(2.0, 34.7, 9000.0)
+        assert 1500.0 < c < 1700.0
+
+    def test_pressure_past_the_range_warns_and_names_the_unit(self):
+        with pytest.warns(UserWarning, match='DECIBARS'):
+            soundspeed_unesco(15.0, 35.0, 10001.0)
+
+    @pytest.mark.parametrize('kwargs', [
+        dict(temperature=41.0),          # T > 40
+        dict(temperature=-3.5),          # T below the freezing point
+        dict(salinity=41.0),             # S > 40
+        dict(pressure=-1.0),             # P < 0
+    ])
+    def test_out_of_range_input_warns_of_extrapolation(self, kwargs):
+        with pytest.warns(UserWarning, match='outside validated range'):
+            soundspeed_unesco(**kwargs)
+
+    def test_negative_salinity_is_reported_as_undefined_and_returns_nan(self):
+        """Eqn 36's ``B(T,P)·S^1.5`` has no real value below S = 0, so the
+        function cannot extrapolate there — it returns NaN. Saying
+        "extrapolation" would describe a number the caller never gets, and
+        numpy's own "invalid value encountered in power" is suppressed so the
+        one diagnostic that names the cause is the one that reaches them."""
+        with pytest.warns(UserWarning, match='undefined, not extrapolated'):
+            value = soundspeed_unesco(salinity=-1.0)
+        assert np.isnan(value)
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            soundspeed_unesco(salinity=-1.0)
+        assert not [w for w in caught if w.category is RuntimeWarning], (
+            [str(w.message) for w in caught])
+
+    def test_polar_deep_water_is_silent(self):
+        """The relaxed cold bound exists for this case, and uacpy's own deep
+        extrapolation evaluates the formula at exactly −3 °C."""
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', UserWarning)
+            assert soundspeed_unesco(-3.0, 34.7, 0.0) == pytest.approx(
+                1434.45, abs=0.01)
+
+    def test_in_range_defaults_are_silent(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', UserWarning)
+            assert soundspeed_unesco() == pytest.approx(1507.0, abs=1.0)
 
 
 class TestSeawaterDensityEOS80CheckValues:
@@ -145,3 +210,236 @@ class TestPowerToDb:
     def test_custom_floor_is_honoured(self):
         assert power_to_db(0.0, floor=1e-12) == pytest.approx(
             10.0 * np.log10(1e-12 / REFERENCE_PRESSURE_WATER ** 2))
+
+
+class TestDelGrossoValidityWarnings:
+    """``soundspeed_delgrosso`` announces extrapolation the way its two
+    siblings do.
+
+    It shipped with no domain guard at all while :func:`soundspeed` and
+    :func:`soundspeed_unesco` both had one, so the function its own docstring
+    recommends "at high pressure / in deep water" was the one that said
+    nothing when handed 50 °C, S = -5 or a pressure ten times its fit.
+
+    The domain is the paper's own: Del Grosso (1974) states "The temperatures
+    considered range from 0 to 35 C ... salinity ranges from 29 to 43 ppt ...
+    Pressure ranges from 0 to 1000 kg/cm2 gauge", and Etter's Table 2.1
+    tabulates the same triple.
+    """
+
+    @pytest.mark.parametrize('kwargs', [
+        dict(temperature=-3.5),          # T below the coldest seawater
+        dict(temperature=35.5),          # T > 35
+        dict(salinity=28.0),             # S < 29 — brackish, outside the fit
+        dict(salinity=44.0),             # S > 43
+        dict(pressure=-1.0),             # P < 0
+        dict(pressure=9900.0),           # P > 1000 kg/cm2 == 9806.65 dbar
+    ])
+    def test_out_of_range_input_warns_of_extrapolation(self, kwargs):
+        with pytest.warns(UserWarning, match='outside validated range'):
+            soundspeed_delgrosso(**kwargs)
+
+    def test_a_deep_open_ocean_cast_is_silent(self):
+        """The bounds are in the argument's decibars, not the paper's kg/cm2.
+        Getting that conversion backwards would warn on every cast past 102 m,
+        which is the mistake the UNESCO docstring calls out for its own bar /
+        decibar pair."""
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', UserWarning)
+            c = soundspeed_delgrosso(2.0, 34.7, 5000.0)
+        assert 1500.0 < c < 1600.0
+
+    def test_the_pressure_message_names_the_unit(self):
+        with pytest.warns(UserWarning, match='DECIBARS'):
+            soundspeed_delgrosso(15.0, 35.0, 9900.0)
+
+    def test_the_salinity_message_points_at_the_equation_that_covers_fresher(self):
+        """29 ppt is a floor, not a formality: below it the caller needs a
+        different equation, and the message says which."""
+        with pytest.warns(UserWarning, match='soundspeed_unesco'):
+            soundspeed_delgrosso(salinity=5.0)
+
+    def test_in_range_defaults_are_silent(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', UserWarning)
+            assert soundspeed_delgrosso() == pytest.approx(1506.67, abs=0.01)
+
+    def test_polar_deep_water_is_silent(self):
+        """The cold end is relaxed to −3 °C for the same reason UNESCO's is:
+        a literal 0 °C floor fires on every polar and deep cast, and the
+        extrapolation across that gap is smooth, monotone, and within Del
+        Grosso's own 0.05 m/s standard deviation of UNESCO at −3 °C."""
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', UserWarning)
+            assert soundspeed_delgrosso(-3.0, 34.7, 0.0) == pytest.approx(
+                1434.51, abs=0.01)
+
+
+class TestBubbleSurfaceLossAcceptsSequences:
+    """``frequency`` and ``angle`` are documented array_like, so a plain
+    list must produce the same multipliers as the equivalent ndarray."""
+
+    def test_list_and_ndarray_inputs_agree(self):
+        freqs = [10000.0, 20000.0]
+        angles = [0.0, 0.3]
+        from_lists = bubble_surface_loss(8.0, freqs, angles)
+        from_arrays = bubble_surface_loss(
+            8.0, np.asarray(freqs), np.asarray(angles))
+        np.testing.assert_allclose(from_lists, from_arrays)
+
+    def test_list_inputs_take_the_low_wind_branch_too(self):
+        got = bubble_surface_loss(3.0, [10000.0], [0.2])
+        want = bubble_surface_loss(3.0, np.array([10000.0]), np.array([0.2]))
+        np.testing.assert_allclose(got, want)
+
+
+class TestSplFloorsSilentSignal:
+    """``spl`` floors the rms pressure at ``sqrt(PRESSURE_FLOOR)`` before the
+    log, so an all-zero signal returns the same finite level as
+    ``power_to_db`` gives zero power, with no runtime warning."""
+
+    def test_all_zero_signal_returns_the_pressure_floor_level(self):
+        assert spl(np.zeros(64)) == pytest.approx(
+            10.0 * np.log10(PRESSURE_FLOOR))
+
+    def test_zero_signal_level_matches_power_to_db_of_zero_power(self):
+        assert spl(np.zeros(64)) == pytest.approx(
+            float(power_to_db(0.0, ref=1.0)))
+
+    def test_zero_signal_emits_no_runtime_warning(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            spl(np.zeros(64))
+
+    def test_nonzero_signal_level_is_the_plain_rms_level(self):
+        assert spl(np.full(10, 100.0)) == pytest.approx(40.0)
+
+
+class TestBubbleSurfaceLossValidatesItsInputs:
+    """APL-UW TR 9407 eqs. 28a/28b are written for a non-negative wind speed,
+    a positive frequency and an incidence angle inside a quarter turn of the
+    surface normal. Outside that the arithmetic answered anyway: a negative
+    wind speed took the ``U < 6 m/s`` branch and reported a multiplier of
+    ~1.0 (no loss), a negative frequency raised a negative base to 0.85 and
+    returned a *complex* multiplier, and an angle past ``π/2`` flipped
+    ``sin(β)`` negative and returned a multiplier above 1 — a surface that
+    amplifies."""
+
+    @pytest.mark.parametrize('windspeed', [-5.0, -1e-9, float('nan'),
+                                           float('inf')])
+    def test_a_negative_or_non_finite_windspeed_is_refused(self, windspeed):
+        with pytest.raises(ConfigurationError, match='windspeed'):
+            bubble_surface_loss(windspeed, 20000.0, 0.0)
+
+    @pytest.mark.parametrize('frequency', [0.0, -1.0, float('nan'),
+                                           float('inf')])
+    def test_a_non_positive_frequency_is_refused(self, frequency):
+        with pytest.raises(ConfigurationError, match='frequency'):
+            bubble_surface_loss(10.0, frequency, 0.0)
+
+    def test_one_bad_entry_in_a_frequency_array_is_enough(self):
+        with pytest.raises(ConfigurationError, match='frequency'):
+            bubble_surface_loss(10.0, np.array([20000.0, -1.0]), 0.0)
+
+    @pytest.mark.parametrize('angle', [1.6, -1.6, np.pi, float('nan')])
+    def test_an_angle_outside_a_quarter_turn_is_refused(self, angle):
+        with pytest.raises(ConfigurationError, match='angle'):
+            bubble_surface_loss(10.0, 20000.0, angle)
+
+    def test_the_angle_message_says_it_is_from_the_normal(self):
+        with pytest.raises(ConfigurationError, match='surface normal'):
+            bubble_surface_loss(10.0, 20000.0, 2.0)
+
+    def test_exact_grazing_is_the_zero_limit_and_stays_quiet(self):
+        """``sin(β) = 0`` is the ``1/sin β → ∞`` limit, whose multiplier is
+        0.0. That is a real answer, so it is returned — without the
+        divide-by-zero RuntimeWarning it used to raise on the way."""
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            assert bubble_surface_loss(10.0, 20000.0, np.pi / 2) == 0.0
+
+    def test_a_grazing_entry_in_an_angle_array_stays_quiet(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            got = bubble_surface_loss(10.0, 20000.0,
+                                      np.array([0.0, np.pi / 2]))
+        np.testing.assert_allclose(got, [0.93354, 0.0], atol=1e-5)
+
+    def test_a_mirrored_angle_gives_the_same_loss(self):
+        """β = π/2 − angle enters only through ``sin β = cos(angle)``, which
+        is even, so ±angle are the same ray."""
+        assert (bubble_surface_loss(10.0, 20000.0, -1.0)
+                == pytest.approx(bubble_surface_loss(10.0, 20000.0, 1.0)))
+
+    def test_the_handbook_values_and_the_secant_angle_law_are_reproduced(self):
+        assert bubble_surface_loss(10.0, 20000.0, 0.0) == pytest.approx(
+            0.93354, abs=1e-4)
+        below = bubble_surface_loss(5.999, 20000.0, 0.0)
+        assert below == pytest.approx(
+            bubble_surface_loss(6.0, 20000.0, 0.0), abs=1e-4)
+        db0 = -20.0 * np.log10(bubble_surface_loss(10.0, 20000.0, 0.0))
+        db1 = -20.0 * np.log10(bubble_surface_loss(10.0, 20000.0, 1.0))
+        assert db1 / db0 == pytest.approx(1.0 / np.cos(1.0), rel=1e-9)
+
+
+class TestArrayCapableHelpersAnnotateArrayReturns:
+    """``uacpy`` ships ``py.typed`` (``pyproject.toml``), so every annotation
+    in the package is what a downstream type checker sees. A helper annotated
+    ``-> float`` that hands back an ``ndarray`` for array input makes the
+    checker reject the array call — including the package's own, at
+    ``SoundSpeedProfile.from_ts``, which calls ``soundspeed`` on three raveled
+    arrays."""
+
+    #: ``(function, array kwargs, scalar kwargs)`` for every helper in
+    #: ``core.acoustics`` documented to take either. Both spellings are driven,
+    #: so an annotation that admits only one of them fails here.
+    CASES = [
+        ('soundspeed',
+         dict(temperature=np.array([10.0, 20.0]), salinity=35.0, depth=10.0),
+         dict(temperature=10.0, salinity=35.0, depth=10.0)),
+        ('density',
+         dict(temperature=np.array([10.0, 20.0]), salinity=35.0),
+         dict(temperature=10.0, salinity=35.0)),
+        ('doppler',
+         dict(speed=np.array([1.0, 2.0]), frequency=1000.0),
+         dict(speed=1.0, frequency=1000.0)),
+        ('bubble_resonance',
+         dict(radius=np.array([1e-3, 2e-3])), dict(radius=1e-3)),
+        ('reflection_coeff',
+         dict(angle=np.array([10.0, 20.0]), rho1=2000.0, c1=1800.0,
+              rho=1000.0, c=1500.0),
+         dict(angle=10.0, rho1=2000.0, c1=1800.0, rho=1000.0, c=1500.0)),
+    ]
+
+    @staticmethod
+    def _returns_of(name):
+        import inspect
+        import typing
+        from uacpy.core import acoustics
+        annotation = inspect.signature(
+            getattr(acoustics, name)).return_annotation
+        if annotation is inspect.Signature.empty:
+            return None
+        return set(typing.get_args(annotation)) or {annotation}
+
+    @pytest.mark.parametrize('name,array_kwargs,scalar_kwargs', CASES,
+                             ids=[c[0] for c in CASES])
+    def test_the_return_annotation_admits_both_shapes(
+            self, name, array_kwargs, scalar_kwargs):
+        from uacpy.core import acoustics
+        function = getattr(acoustics, name)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            array_out = function(**array_kwargs)
+            scalar_out = function(**scalar_kwargs)
+        assert isinstance(array_out, np.ndarray), name
+        assert not isinstance(scalar_out, np.ndarray), name
+
+        returns = self._returns_of(name)
+        assert returns is not None, f"{name} has no return annotation"
+        assert np.ndarray in returns, (
+            f"{name} returns an ndarray for array input but annotates "
+            f"{returns}")
+        assert float in returns, (
+            f"{name} returns a scalar for scalar input but annotates "
+            f"{returns}")

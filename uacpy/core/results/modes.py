@@ -8,6 +8,8 @@ import numpy as np
 from typing import Optional, Union
 
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.core._warn_frames import USER_FRAME_SKIP
+from uacpy.core._finite_difference import warn_if_storage_under_resolves
 
 from uacpy.core.results._base import Result
 from uacpy.core.results.field import Field
@@ -122,7 +124,39 @@ class Modes(Result):
         v_g : ndarray, shape ``(min(self.n_modes, other.n_modes),)``
             Mode-by-mode group velocity in m/s. Modes that exist in only
             one of the two results are dropped (the array is truncated to
-            the shared count).
+            the shared count). The estimate is second-order accurate at the
+            **midpoint** frequency ``(f0_self + f0_other)/2``, not at either
+            endpoint, and it inherits the dtype of ``k`` — float32 for the
+            complex64 wavenumbers a ``.mod`` file carries.
+
+        Notes
+        -----
+        **There is an accuracy-optimal Δf, and it is not the smallest one.**
+        The truncation error falls as Δf², but ``k`` arrives quantized —
+        KRAKEN's ``.mod`` record is ``COMPLEX*8`` — so the difference carries
+        about one float32 step of noise however small Δf is, and the storage
+        contributes ``spacing(k_r)/|Δk_r|`` relative. The two balance at
+
+        .. math:: \\Delta f \\approx \\left(
+            \\frac{\\mathrm{spacing}(k_r)\\, v_g}
+                 {2\\pi\\,|\\mathrm{d}^2 k_r/\\mathrm{d}\\omega^2|}
+            \\right)^{1/3}
+
+        which moves with frequency and mode order: on a 100 m Pekeris guide
+        (c 1500/1800 m/s, ρ 1.0/1.8) at 100 Hz the optimum is Δf = 1 Hz, at
+        7.3e-06 relative against exact roots; a decade below it the answer is
+        6x worse, two decades below 85x worse, and at Δf = 1e-4 Hz the seven
+        modes collapse onto four distinct speeds. Upcasting ``k`` recovers
+        none of this — the bits were never written — so a step whose storage
+        floor exceeds 1e-5 is warned about instead.
+
+        The warning does **not** prescribe a step. ``|d²k_r/dω²|`` is not
+        visible from two frequencies, and a step chosen from the floor alone
+        made the answer worse in 14 of 30 firings on five ideal waveguides, by
+        up to 16x (measured). It gives the test instead: recompute at twice
+        the separation and keep the wider answer only if v_g stays inside the
+        floor. :func:`uacpy.acoustic_signal.modal_group_velocity`, which is
+        handed a whole sweep, runs that test itself and names the step.
         """
         f0_self, f0_other = self.f0, other.f0
         if f0_self is None or f0_other is None:
@@ -141,7 +175,76 @@ class Modes(Result):
         domega = 2.0 * np.pi * (f0_other - f0_self)
         dk = np.real(other.k[:n] - self.k[:n])
         with np.errstate(divide='ignore', invalid='ignore'):
-            return np.where(dk != 0, domega / dk, np.nan)
+            v_g = np.where(dk != 0, domega / dk, np.nan)
+        warn_if_storage_under_resolves(
+            np.real(self.k[:n]), dk, v_g, "Modes.compute_group_velocity")
+        return v_g
+
+    # Samples per vertical wavelength :meth:`with_attenuation` wants before it
+    # trusts its trapezoids. psi² oscillates at twice the mode's vertical
+    # wavenumber, so 8 per wavelength is 4 per period of the integrand.
+    # Measured on a Pekeris set (D = 100 m, f = 50 Hz, 6 modes) against a
+    # 8001-point reference, with alpha(z) stepping 0 → 2 dB/m at 50 m: 1-3 %
+    # error at 51 depths (dz = 2 m, every mode over the bar), 3-7 % at 21,
+    # 6-19 % at 9, and up to 104 % at 5.
+    _SAMPLES_PER_VERTICAL_WAVELENGTH = 8.0
+
+    def _warn_if_depth_axis_underresolves(
+        self,
+        a_neper: np.ndarray,
+        kr: np.ndarray,
+        omega: float,
+        c_arr: np.ndarray,
+    ) -> None:
+        """Warn when :attr:`depths` is too coarse to carry
+        :meth:`with_attenuation`'s integrals.
+
+        The perturbation is a ratio of two trapezoid sums over the same axis,
+        so their quadrature errors cancel *exactly* while ``alpha(z)/c(z)`` is
+        constant — a scalar alpha comes out right on any grid, which is why a
+        coarse axis is invisible there — and stop cancelling the moment it
+        varies with depth. What is left over is then set by how well the axis
+        resolves ``psi²``, so the test compares the coarsest sample spacing
+        against the shortest vertical wavelength ``2π/sqrt(k_water² - k_rm²)``
+        in the set.
+
+        ``a_neper`` is the attenuation in nepers/m on :attr:`depths`, ``kr``
+        the real horizontal wavenumbers, ``omega`` the angular frequency and
+        ``c_arr`` the sound speed on the same axis.
+
+        Structure in ``alpha(z)`` *below* the sample spacing (a step, or a
+        layer thinner than one cell) is aliased in the values handed in and
+        cannot be seen from them: a profile whose samples happen to land on
+        one phase reads as uniform here however wrong the integral is.
+        """
+        if self.depths.size < 2:
+            return
+        c_min = float(np.min(c_arr))
+        if not np.isfinite(c_min) or c_min <= 0.0:
+            return
+        ratio = a_neper / c_arr
+        if np.allclose(ratio, ratio.flat[0], rtol=1e-12, atol=0.0):
+            return
+        kz_sq = (omega / c_min) ** 2 - np.real(kr) ** 2
+        if not np.any(kz_sq > 0.0):
+            return
+        lambda_z = 2.0 * np.pi / float(np.sqrt(np.max(kz_sq)))
+        wanted = lambda_z / self._SAMPLES_PER_VERTICAL_WAVELENGTH
+        spacing = float(np.max(np.diff(self.depths)))
+        if spacing <= wanted:
+            return
+        warnings.warn(
+            f"Modes.with_attenuation: alpha(z)/c(z) varies with depth, but "
+            f"the mode tabulation samples every {spacing:g} m — the shortest "
+            f"vertical wavelength in this set is {lambda_z:g} m, so psi² is "
+            f"carried by {lambda_z / spacing:.1f} samples per wavelength "
+            f"where {self._SAMPLES_PER_VERTICAL_WAVELENGTH:g} are wanted "
+            f"({wanted:g} m spacing). The numerator and denominator "
+            f"trapezoids no longer cancel at this spacing: a step alpha(z) "
+            f"measured 6-19 % off at 9 depths and up to 104 % at 5. Tabulate "
+            f"the modes on a finer depth grid (Kraken takes it from the "
+            f"Receiver depths) before reading Im(k).",
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
 
     def with_attenuation(
         self,
@@ -162,6 +265,33 @@ class Modes(Result):
         replacing any prior ``k.imag``. The ``1/ρ``-weighted denominator
         matches the Kraken-class normalisation ``∫|ψ|²/ρ dz = 1``.
 
+        Both integrals run ``0 → ∞`` (JKPS Eq. 5.169, and the text after
+        Eq. 5.176, which extends the interval into the bottom so the
+        half-space evanescent tail is counted). The tabulated ``ψ`` stops
+        at the seabed, so the tail is added in closed form —
+        ``ψ(D)²/(2 γ_m ρ_b)`` for a trapped mode — which needs ``γ_m`` and
+        ``ρ_b`` and therefore needs ``bottom=``. **Without ``bottom=`` the
+        normalisation stops at the seabed and every returned ``Im(k)`` is
+        an upper bound**: the omitted term is positive and only ever lowers
+        ``α_m``. Measured on an analytic Pekeris guide (D = 100 m, c
+        1500/1800 m/s, ρ 1.0/1.8 g/cm³, 50 Hz, uniform α in the water) the
+        water-only normalisation returns 0.7 %, 2.4 %, 5.1 % and 17 % high
+        for modes 1-4 — the near-cutoff mode, which dominates at long
+        range, is over-attenuated the most because its shallow ``γ_m``
+        pushes the most energy into the bottom.
+
+        **A barely trapped mode is warned about**, because the same ``γ_m``
+        that makes its tail term large also makes that term rest on the part
+        of ``kr`` a mode solver resolves least well. The trigger is a ratio
+        of the two normalisation integrals — the seabed tail against the
+        water column — and it fires where a converged KRAKEN mesh moved the
+        total modal TL by 0.67-1.98 dB at 200-500 m on a 100 m Pekeris guide
+        and by 7.07 dB at 10 km, against 0.41 dB at the first frequency above
+        the trigger. Near a modal cutoff the mesh also decides *which side*
+        of ``k_b`` the mode lands on, and a mode reported as leaky there gets
+        no bottom term at all; the leaky warning names ``k_b`` so the margin
+        can be read off.
+
         Parameters
         ----------
         alpha_db_per_m : float or ndarray
@@ -169,6 +299,21 @@ class Modes(Result):
             :attr:`depths`. Scalar broadcasts to every depth. Build one
             from an :class:`~uacpy.core.absorption.Absorption` via
             ``absorption.alpha_db_per_m(modes.f0, modes.depths)``.
+
+            A **depth-varying** alpha needs a depth axis fine enough to
+            carry ``psi²``: the two trapezoids below cancel exactly while
+            ``alpha(z)/c(z)`` is constant, so a scalar alpha is right on any
+            grid, and a structured one is only as good as the sampling.
+            :attr:`depths` is the merged source/receiver vector, which is
+            often 8-20 points, so this is checked against the shortest
+            vertical wavelength in the set and a coarse axis raises a
+            ``UserWarning`` naming the measured and wanted spacing. It
+            *warns* rather than raises: the error is continuous in the
+            spacing (1-3 % at 51 depths, up to 104 % at 5 on a step alpha),
+            the threshold is a calibration rather than a physical boundary,
+            and the integrals still return the best value the given samples
+            support — unlike the ``seafloor_depth`` mismatch below, which
+            reads ``psi(D)`` at a depth that is simply not the seabed.
         sound_speed_z : float or ndarray
             ``c(z)`` in m/s. Defaults to 1500.
         density_z : float or ndarray
@@ -177,7 +322,9 @@ class Modes(Result):
         bottom : BoundaryProperties, optional
             Half-space below the water column. When supplied, adds an
             evanescent-tail bottom-attenuation contribution proportional
-            to ``ψ²(D)``; ``bottom.attenuation`` is read in dB/λ_p and
+            to ``ψ²(D)`` **and** completes the ``0 → ∞`` normalisation with
+            the matching tail term, so numerator and denominator span the
+            same domain; ``bottom.attenuation`` is read in dB/λ_p and
             ``bottom.density`` in g/cm³.
 
             ``ψ(D)`` is read at the **deepest tabulated depth**
@@ -247,15 +394,13 @@ class Modes(Result):
         # so the error is second-order in the loss being computed.
         phi_re = np.asarray(self.phi).real
         weight = phi_re ** 2
+        # JKPS 5.169 normalises int_0^D psi²/rho dz = 1 for the ideal
+        # waveguide; the text after 5.176 extends the interval into the
+        # bottom for a penetrable seabed, giving 0->inf. This trapezoid
+        # over the tabulated water column is only the first half of it; the
+        # half-space evanescent tail is added below, inside the `bottom`
+        # block, which is the only place gamma_m and rho_b exist.
         norm = np.trapezoid(weight / rho_arr[:, None], self.depths, axis=0)
-        if np.any(norm <= 0):
-            warnings.warn(
-                f"Modes.with_attenuation: {int(np.count_nonzero(norm <= 0))} "
-                f"mode(s) have a non-positive shape normalisation "
-                f"∫psi²/rho dz; their attenuation is computed with the "
-                f"normalisation clamped to 1 and is not meaningful.",
-                UserWarning, stacklevel=2)
-        norm = np.where(norm > 0, norm, 1.0)
         integrand = (a_neper / (c_arr * rho_arr))[:, None] * weight
         kr = np.real(self.k)
         if np.any(kr <= 0):
@@ -265,7 +410,9 @@ class Modes(Result):
                 f"with k clamped to 1 m⁻¹ and is not meaningful.",
                 UserWarning, stacklevel=2)
         kr_safe = np.where(kr > 0, kr, 1.0)
-        alpha_m = (omega / kr_safe) * np.trapezoid(integrand, self.depths, axis=0) / norm
+        self._warn_if_depth_axis_underresolves(a_neper, kr, omega, c_arr)
+        water_term = (omega / kr_safe) * np.trapezoid(integrand, self.depths, axis=0)
+        bottom_term = np.zeros_like(water_term)
         # A truncated span shorts the water-column integrals too (measured
         # 0.5-0.7x on a half-column tabulation), so the check runs whenever
         # the caller names the seafloor, bottom term or not.
@@ -281,6 +428,46 @@ class Modes(Result):
                     f"column (a half-column tabulation measured 0.5-0.7x "
                     f"the true value)."
                 )
+        if bottom is None:
+            # The tail psi(D)²/(2 gamma_m rho_b) that carries the
+            # normalisation from JKPS 5.169's 0->D out to the 0->inf the
+            # text after 5.176 calls for needs a half-space gamma_m and rho_b, and
+            # neither exists here, so `norm` stays a water-column integral
+            # while the true denominator is larger. The omitted term is
+            # positive, so alpha_m comes back high: an upper bound, measured
+            # 0.7 % / 2.4 % / 5.1 % / 17 % over the exact perturbation
+            # integral for modes 1-4 of an analytic 100 m Pekeris guide.
+            # A seabed that psi vanishes at (rigid or pressure-release) has
+            # no tail and no error, so the amplitude at the deepest
+            # tabulated depth is what decides whether to say so.
+            psi_end_sq = weight[-1, :]
+            column_mean = np.mean(weight, axis=0)
+            if np.any(psi_end_sq > 1e-6 * column_mean):
+                warnings.warn(
+                    f"Modes.with_attenuation: the mode shapes are non-zero at "
+                    f"the deepest tabulated depth "
+                    f"({float(self.depths[-1]):g} m), so they continue as an "
+                    f"evanescent tail into the seabed, but without bottom= "
+                    f"there is no half-space gamma or density from which to "
+                    f"form it. The ∫psi²/rho dz normalisation therefore stops "
+                    f"at the seabed while the text after JKPS Eq. 5.176 "
+                    f"extends it into the bottom, "
+                    f"and the returned Im(k) is an UPPER BOUND on the true "
+                    f"attenuation (measured 0.7-17 % high across the four "
+                    f"modes of a 100 m Pekeris guide, worst for the "
+                    f"near-cutoff mode that dominates at long range).",
+                    UserWarning, stacklevel=2)
+        # A vacuum / rigid / file / precalc boundary carries no seabed
+        # geoacoustics: its cp, rho and attenuation are the placeholders
+        # __post_init__ resolved (1600 m/s, 1.5 g/cm3, 0.5 dB/lambda), and
+        # reading them as a half-space fabricates an absorption the seabed does
+        # not have. `Bottom.all_sound_speeds` states the same rule for the same
+        # data. Measured on an ideal 100 m guide at 50 Hz with a RIGID seabed,
+        # passing bottom=BoundaryProperties('rigid') added 0.40 / 0.51 dB of
+        # loss at 1 km and 7.99 / 10.22 dB at 20 km on modes 1 / 2, and warned
+        # that two modes were "leaky" against a 1600 m/s half-space that does
+        # not exist. Runs BEFORE the bottom block so a dropped boundary takes
+        # the water-only path rather than falling into it with bottom = None.
         if bottom is not None:
             from uacpy.core.environment import BoundaryProperties as _BP
             if not isinstance(bottom, _BP):
@@ -288,6 +475,28 @@ class Modes(Result):
                     "Modes.with_attenuation: bottom must be a "
                     f"BoundaryProperties; got {type(bottom).__name__}"
                 )
+            from uacpy.core.bottom import _NON_GEOACOUSTIC_TYPES
+            _btype = str(getattr(bottom, 'acoustic_type', '')).lower()
+            if _btype in _NON_GEOACOUSTIC_TYPES:
+                if _btype in ('vacuum', 'rigid'):
+                    # No energy enters the bottom, so the first-order
+                    # bottom-absorption term is exactly zero and the
+                    # water-column integral alone is the right answer.
+                    bottom = None
+                else:
+                    raise ConfigurationError(
+                        f"Modes.with_attenuation: a {_btype!r} seabed carries "
+                        f"its loss in a reflection-coefficient table, not in "
+                        f"cp/rho/attenuation — those are placeholders, so "
+                        f"no first-order bottom-absorption term can be formed "
+                        f"from them.",
+                        remediation="Drop bottom= to get the water-column "
+                                    "term alone (reported as an upper bound), "
+                                    "or pass a BoundaryProperties carrying "
+                                    "real geoacoustics.",
+                    )
+
+        if bottom is not None:
             # The closed-form tail below reads psi at depths[-1] as psi(D);
             # a tabulation stopping above the seafloor mis-evaluates it (a
             # 10-80 m grid in a 100 m guide measured 2-4x too much bottom
@@ -341,6 +550,21 @@ class Modes(Result):
             kb = omega / cb
             gamma_m = np.sqrt(np.maximum(kr ** 2 - kb ** 2, 0.0))
             trapped = gamma_m > 0
+            gamma_safe = np.where(trapped, gamma_m, 1.0)
+            # The same int_D^inf psi(D)²exp(-2 gamma (z-D)) dz, without the
+            # attenuation weight, is the piece of the 0->inf normalisation
+            # (JKPS 5.169 extended per the text after 5.176) that lies
+            # below the seabed, and adding it here is
+            # what puts the denominator over the domain the numerator's
+            # bottom term already spans. Stopping the denominator at the
+            # seabed instead measured 0.7 % (mode 1) to 17 % (near-cutoff
+            # mode 4) above the exact perturbation integral on an analytic
+            # Pekeris guide. A leaky mode has no convergent tail on either
+            # side, so its normalisation is the water column alone.
+            tail_norm = np.where(
+                trapped, psi_D ** 2 / (2.0 * gamma_safe * rho_b), 0.0)
+            water_norm = norm
+            norm = norm + tail_norm
             # A leaky mode gets no term, as the comment above already says.
             # Substituting gamma = 1 put a bare number carrying units of 1/m
             # into the denominator, so the invented loss scaled with the
@@ -348,12 +572,55 @@ class Modes(Result):
             # back 1000x different. There is no finite first-order bottom-
             # absorption perturbation for a radiating mode: the tail integral
             # diverges, so the closed form this line specialises does not exist.
-            alpha_bottom = np.where(
+            bottom_term = np.where(
                 trapped,
                 psi_D ** 2 * ab_neper_per_m * omega
-                / (2.0 * kr_safe * np.where(trapped, gamma_m, 1.0) * cb * rho_b),
+                / (2.0 * kr_safe * gamma_safe * cb * rho_b),
                 0.0,
             )
+            # gamma at which the seabed tail carries exactly as much of the
+            # normalisation as the whole water column — psi(D)²/(2 gamma rho_b)
+            # == int psi²/rho dz — so the comparison below is a ratio of two
+            # tabulated integrals and carries no absolute epsilon and no unit.
+            # Below it the mode is bound so weakly that its bottom term rests
+            # on the part of kr the mode solver resolves least well. Sweeping
+            # a 100 m Pekeris guide across a modal cutoff with kraken.exe and
+            # differencing the default mesh against a converged one: the
+            # frequencies under this line moved the total modal TL by
+            # 0.67-1.98 dB at 200-500 m (TL 43-52 dB there) and by 7.07 dB at
+            # 10 km, and the smallest gamma of them changed side of the
+            # branch point entirely — leaky on the default mesh, trapped on
+            # the converged one. Just above the line the movement is 0.41 dB
+            # and it falls under 0.04 dB within 0.7 Hz.
+            gamma_equal = np.where(
+                water_norm > 0,
+                psi_D ** 2 / (2.0 * rho_b * np.where(water_norm > 0,
+                                                     water_norm, 1.0)),
+                0.0)
+            barely_trapped = trapped & (gamma_m < gamma_equal)
+            if barely_trapped.any():
+                j = int(np.argmin(np.where(barely_trapped, gamma_m, np.inf)))
+                warnings.warn(
+                    f"Modes.with_attenuation: {int(barely_trapped.sum())} of "
+                    f"{gamma_m.size} mode(s) are barely trapped — their "
+                    f"evanescent tail into the seabed carries more of the "
+                    f"∫psi²/rho dz normalisation than the whole water column "
+                    f"does ({100.0 * tail_norm[j] / norm[j]:.0f} % of it for "
+                    f"mode {j + 1}, whose gamma = sqrt(kr²-kb²) = "
+                    f"{gamma_m[j]:.3g} 1/m spreads the tail over "
+                    f"{0.5 / gamma_m[j]:.4g} m of seabed against a "
+                    f"{float(self.depths[-1]):g} m water column). The bottom "
+                    f"term is then set by the part of kr the mode solver "
+                    f"resolves least well, and near a modal cutoff the mesh "
+                    f"decides which side of kb = {kb:g} 1/m the mode lands "
+                    f"on: on a 100 m Pekeris guide a converged mesh moved the "
+                    f"total modal TL by 1.7 dB at 200 m and 7 dB at 10 km, "
+                    f"and put the same mode on the leaky side, where it gets "
+                    f"no bottom term at all. "
+                    f"Re-run with a finer mesh (Kraken(n_mesh=...)) and "
+                    f"compare before reading a level off this frequency.",
+                    UserWarning, stacklevel=2,
+                )
             if not trapped.all():
                 warnings.warn(
                     f"Modes.with_attenuation: {int((~trapped).sum())} of "
@@ -366,7 +633,15 @@ class Modes(Result):
                     "method replaces.",
                     UserWarning, stacklevel=2,
                 )
-            alpha_m = alpha_m + alpha_bottom / norm
+        if np.any(norm <= 0):
+            warnings.warn(
+                f"Modes.with_attenuation: {int(np.count_nonzero(norm <= 0))} "
+                f"mode(s) have a non-positive shape normalisation "
+                f"∫psi²/rho dz; their attenuation is computed with the "
+                f"normalisation clamped to 1 and is not meaningful.",
+                UserWarning, stacklevel=2)
+        norm = np.where(norm > 0, norm, 1.0)
+        alpha_m = (water_term + bottom_term) / norm
         new_k = kr + 1j * alpha_m
         return Modes(
             k=new_k, phi=self.phi, depths=self.depths,
@@ -422,6 +697,30 @@ class Modes(Result):
         Field
             Complex narrowband ``Field`` with
             ``coords={'depth': receiver_depths, 'range': ranges_m}``.
+
+        Notes
+        -----
+        **The bottom of an interference null is where a complex64 ``k``
+        shows**, which is how a ``.mod`` file stores it. The float32 spacing of
+        ``k`` is 3e-8 rad/m, so the *phase* error ``3e-8·r`` reaches one radian
+        only near r = 3e4 km — but this sum is itself a cancellation, and where
+        the modes cancel the relative error of the total is not bounded by the
+        phase error of a term. Measured on a 7-mode 100 Hz Pekeris guide
+        (D = 100 m, c 1500/1800 m/s, ρ 1.0/1.8) with exact longdouble roots
+        stored both ways, over 1-50 km at ``z_s`` = 20 m, ``z_r`` = 50 m:
+
+        * median 6.9e-04 dB, 0.050 dB at the 99.9th percentile, and 0.004 dB
+          over the brightest half of the field. Each of these is stable to
+          three digits across range steps from 0.49 m down to 0.024 m; at
+          ``z_r`` = 35 m they are 8.5e-04, 0.065 and 0.004 dB.
+        * the interference *structure* is unaffected: no null moved by more
+          than 0.25 m, at any of those range steps.
+        * **the depth of the deepest null does not converge.** It is of order
+          1 dB and grows as the range grid is refined — 1.11 dB at a 0.49 m
+          step, 1.25 dB at 0.245 m and at 0.122 m, 3.00 dB at 0.024 m —
+          because a finer grid samples closer to the bottom of the
+          cancellation. Read it as "the deepest nulls are worth about a dB and
+          their floor is not determined", not as a number.
         """
         if self.n_modes == 0:
             raise ConfigurationError(
@@ -499,8 +798,11 @@ class Modes(Result):
         inv_sqrt_k = 1.0 / np.sqrt(k.astype(np.complex128))
         weights = phi_zs * inv_sqrt_k
         expikr = np.exp(-1j * k[:, None] * r[None, :])
-        contribution = (phi_zr * weights)[:, :, None] * expikr[None, :, :]
-        P = contribution.sum(axis=1)
+        # Contract the mode axis directly. Forming the (depth, mode, range)
+        # product first and summing it afterwards asks for one complex128
+        # temporary of n_depth·n_mode·n_range — 1.28 GB at 200 depths, 200
+        # modes and 2000 ranges — for a result of n_depth·n_range.
+        P = np.einsum('zm,mr->zr', phi_zr * weights, expikr, optimize=True)
         # The asymptotic modal sum is a far-field form, singular at r = 0;
         # clamping sqrt(r) to 1 there returns a finite number that is NOT
         # the field at the source range - treat r = 0 samples as

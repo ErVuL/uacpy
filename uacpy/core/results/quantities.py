@@ -6,9 +6,10 @@ This module is the registry behind the first two: it names every quantity the
 package produces, the units each may be expressed in, and how each pairing is
 labelled.
 
-The registry exists because those facts were previously re-derived by each
-consumer, and every consumer got a different one wrong: the axis label was a
-hardcoded string and the colour limits a test on the render mode. Registering
+The registry exists so those facts have one home. Re-derived per consumer they
+diverge, and each consumer gets a different one wrong: the axis label becomes a
+hardcoded string in one plotter, the colour limits a test on the render mode in
+the next, and nothing reconciles them. Registering
 a quantity here is what makes a new Field kind a *data* edit rather than a
 hunt through the plotters.
 

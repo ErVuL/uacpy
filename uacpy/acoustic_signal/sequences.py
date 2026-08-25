@@ -4,6 +4,10 @@
 import numpy as np
 
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.acoustic_signal._signal_validate import (
+    require_below_nyquist,
+    require_positive_finite_scalar,
+)
 
 
 def bpsk_modulate(
@@ -39,6 +43,10 @@ def bpsk_modulate(
     integer multiple of ``chips_per_sec``; otherwise each boundary carries a
     phase step that widens the transmitted spectrum.
 
+    Chip values outside {-1, +1} (a 0-valued chip emits silence — on-off
+    keying, not BPSK) and a carrier at or above ``sample_rate/2`` raise
+    :class:`~uacpy.core.exceptions.ConfigurationError`.
+
     Examples
     --------
     >>> # Binary sequence
@@ -54,15 +62,29 @@ def bpsk_modulate(
     ----------
     Original MATLAB code by Michael B. Porter, April 2000
     """
-    if sample_rate <= 0 or chips_per_sec <= 0:
-        raise ConfigurationError(
-            f"bpsk_modulate: sample_rate ({sample_rate}) and chips_per_sec "
-            f"({chips_per_sec}) must both be > 0 — the chip length is "
-            "sample_rate / chips_per_sec samples.")
+    sample_rate = require_positive_finite_scalar(
+        sample_rate, "bpsk_modulate", "sample_rate", " Hz")
+    chips_per_sec = require_positive_finite_scalar(
+        chips_per_sec, "bpsk_modulate", "chips_per_sec", " chips/s")
     samples_per_chip = int(sample_rate / chips_per_sec)
 
     if sample_rate / chips_per_sec != samples_per_chip:
-        raise ConfigurationError("samples_per_chip must be an integer")
+        raise ConfigurationError(
+            "bpsk_modulate: samples_per_chip must be an integer; got "
+            f"sample_rate/chips_per_sec = {sample_rate:g}/{chips_per_sec:g} "
+            f"= {sample_rate / chips_per_sec:g}")
+
+    require_below_nyquist(fc, sample_rate, "bpsk_modulate", "fc",
+                          "the sampled carrier aliases")
+
+    chips = np.asarray(s_bipolar)
+    invalid = chips[~np.isin(chips, (-1, 1))]
+    if invalid.size:
+        raise ConfigurationError(
+            f"bpsk_modulate: s_bipolar must contain only +1/-1 chips; got "
+            f"{np.unique(invalid)[:5]}. A 0-valued chip emits silence, "
+            f"turning BPSK into on-off keying — map bits first with "
+            f"s = 1 - 2*bits.")
 
     deltat = 1 / sample_rate
     t_chip = np.arange(samples_per_chip) * deltat
@@ -105,9 +127,14 @@ def mseq(m: int) -> np.ndarray:
       so the sequence sums to -1 rather than 0
 
     Chips use the standard BPSK mapping ``s = 1 - 2*bit`` (bit 0 → +1,
-    bit 1 → -1), the same polarity as
-    :func:`uacpy.comms.dsss.m_sequence` — despreading either function's
-    output with the other's sequence keeps its sign.
+    bit 1 → -1), the same polarity as :func:`uacpy.comms.dsss.m_sequence`.
+    The two are **not interchangeable across a spread/despread pair**: they
+    start from different register seeds (``[1, 0, 0, 0, 0]`` here,
+    ``(1,) * n`` there), so even the tap sets that generate the same cycle
+    produce a shift of it. Despreading one function's output with the other's
+    sequence lands on the m-sequence's off-peak correlation ``-1/N`` — sign
+    inverted and collapsed by a factor of ``N`` (measured ``-0.032`` against
+    ``1.0`` at ``n = 5``). Use the same generator at both ends.
 
     Translated from ``third_party/Acoustics-Toolbox/Matlab/waveforms/mseq.m``
     (Michael B. Porter, April 2000); the feedback-coefficient table and the
@@ -121,13 +148,15 @@ def mseq(m: int) -> np.ndarray:
     >>> # Generate m-sequence of order 5
     >>> s = mseq(5)
     >>> print(f"Length: {len(s)} (should be 2^5-1 = 31)")
+    Length: 31 (should be 2^5-1 = 31)
 
     >>> # Check autocorrelation
     >>> shat = np.fft.fft(s)
     >>> scorr = np.real(np.fft.ifft(shat * np.conj(shat)))
     """
     if m < 2 or m > 15 or m != int(m):
-        raise ConfigurationError("m must be an integer between 2 and 15")
+        raise ConfigurationError(
+            f"mseq: m must be an integer between 2 and 15; got {m!r}")
 
     m = int(m)
 
@@ -222,12 +251,24 @@ def make_mseq_probe(fmin: float, fmax: float, sample_rate: float, T_tot: float) 
     >>> # Generate 10-second probe, 1-2 kHz
     >>> probe = make_mseq_probe(1000, 2000, 10000, 10.0)
     >>> print(f"Probe length: {len(probe)} samples")
+    Probe length: 100000 samples
     """
     lead_time = 0.2  # seconds
 
     # M-sequence parameters
     fc = 0.5 * (fmin + fmax)  # center frequency
     chips_per_sec = 0.5 * (fmax - fmin)
+
+    # The BPSK main lobe spans fc +/- chips_per_sec, i.e. exactly
+    # [fmin, fmax], so its upper edge fc + chips_per_sec = fmax must sit
+    # below Nyquist.
+    if fc + chips_per_sec >= sample_rate / 2:
+        raise ConfigurationError(
+            f"make_mseq_probe: the carrier (fmin + fmax)/2 = {fc:g} Hz plus "
+            f"the chip-rate bandwidth (fmax - fmin)/2 = {chips_per_sec:g} Hz "
+            f"reaches {fc + chips_per_sec:g} Hz (= fmax), at or above the "
+            f"Nyquist frequency sample_rate/2 = {sample_rate / 2:g} Hz, so "
+            f"the sampled probe aliases.")
 
     # Generate base m-sequence (order 10 → length 1023)
     s_m = mseq(10)

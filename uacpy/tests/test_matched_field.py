@@ -171,7 +171,8 @@ def test_mvdr_peaks_at_true_source(pekeris):
     iz, ir = 22, 30
     d = bank[:, iz, ir]
     K = csdm(d[:, None])
-    surf = mvdr(K, bank, loading=1e-2)         # loading needed for rank-1 K
+    # Loading is needed for a rank-1 K.
+    surf = mvdr(K, bank, diagonal_loading=1e-2)
     peak = np.unravel_index(np.argmax(surf), surf.shape)
     assert peak == (iz, ir)
 
@@ -198,7 +199,8 @@ def test_localizes_offgrid_source_from_noisy_snapshots(pekeris, processor):
     cand_z = np.linspace(5, 95, 91)
     cand_r = np.linspace(500, 5000, 91)
     bank = replica_bank(modes, z_arr, cand_z, cand_r)
-    surf = bartlett(K, bank) if processor == "bartlett" else mvdr(K, bank, loading=1e-2)
+    surf = (bartlett(K, bank) if processor == "bartlett"
+            else mvdr(K, bank, diagonal_loading=1e-2))
 
     iz, ir = np.unravel_index(np.argmax(surf), surf.shape)
     # nearest grid node to truth
@@ -254,3 +256,91 @@ def test_replica_carries_the_per_mode_hankel_weight():
         p = synthesize_replica(modes, 25.0, r, z_r)
         amps.append(np.abs(np.asarray(p).ravel()[0]))
     assert amps[0] / amps[1] == pytest.approx(np.sqrt(k[1] / k[0]), rel=1e-9)
+
+
+class TestTheTwoBeamformingSurfacesDifferAsDocumented:
+    """``sonar`` and ``acoustic_signal.arrays`` run the same two processors
+    and differ in four stated ways. The differences are pinned so the
+    ``matched_field`` module docstring's table cannot drift from them, and so
+    the loading defaults are not "tidied" into agreement — that would silently
+    change every existing call on one side."""
+
+    N, L = 8, 50
+
+    def _snapshots(self):
+        rng = np.random.default_rng(0)
+        return (rng.standard_normal((self.N, self.L))
+                + 1j * rng.standard_normal((self.N, self.L)))
+
+    def test_the_two_covariance_names_are_one_estimate(self):
+        from uacpy.acoustic_signal.arrays import sample_covariance
+        d = self._snapshots()
+        np.testing.assert_array_equal(csdm(d), sample_covariance(d))
+
+    def test_the_bartlett_surfaces_differ_by_the_trace(self):
+        from uacpy.acoustic_signal.arrays import bartlett_spectrum
+        d = self._snapshots()
+        K = csdm(d)
+        w = np.linalg.qr(np.random.default_rng(3).standard_normal((self.N, 1))
+                         + 0j)[0]                       # one unit-norm weight
+        surface = bartlett(K, w.reshape(self.N, 1))
+        spectrum = bartlett_spectrum(K, w.T)
+        np.testing.assert_allclose(spectrum, surface.ravel()
+                                   * float(np.trace(K).real), rtol=1e-10)
+
+    def test_the_mvdr_surfaces_differ_by_a_single_scale(self):
+        from uacpy.acoustic_signal.arrays import mvdr_spectrum
+        d = self._snapshots()
+        K = csdm(d)
+        rng = np.random.default_rng(4)
+        w = rng.standard_normal((self.N, 3)) + 1j * rng.standard_normal(
+            (self.N, 3))
+        w = w / np.linalg.norm(w, axis=0)
+        # Same loading on both sides, so only the output scaling differs.
+        surface = mvdr(K, w.reshape(self.N, 3), diagonal_loading=1e-6).ravel()
+        spectrum = mvdr_spectrum(K, w.T, diagonal_loading=1e-6)
+        ratio = spectrum / surface
+        assert np.ptp(ratio) / ratio.mean() < 1e-9
+        assert surface.max() == pytest.approx(1.0)
+
+    def test_the_weight_banks_are_transposes_of_each_other(self):
+        rng = np.random.default_rng(5)
+        w = rng.standard_normal((self.N, 3)) + 1j * rng.standard_normal(
+            (self.N, 3))
+        # sonar takes one column per candidate and passes E.T to the shared
+        # core; arrays takes one row per angle. The bank is transposed, not
+        # conjugate-transposed — passing conj(w).T instead scores the
+        # conjugate quadratic form and the two surfaces stop matching.
+        assert w.shape == (self.N, 3)
+        assert w.T.shape == (3, self.N)
+
+    def test_every_mvdr_surface_names_its_loading_diagonal_loading(self):
+        """All three Bartlett/MVDR surfaces spell the diagonal-loading knob
+        ``diagonal_loading``, so a value moves between them by keyword. The
+        parameter stays positional-or-keyword on each, so a caller may also
+        pass it third and positionally."""
+        import inspect
+        from uacpy.acoustic_signal.arrays import mvdr_spectrum
+        from uacpy.core.results import Covariance
+
+        for fn in (mvdr, mvdr_spectrum, Covariance.mvdr):
+            par = inspect.signature(fn).parameters
+            assert 'diagonal_loading' in par, f"{fn.__qualname__}: {list(par)}"
+
+        assert (inspect.signature(mvdr).parameters['diagonal_loading'].kind
+                is inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        K = np.eye(4, dtype=complex)
+        bank = np.eye(4, dtype=complex)[:, :2]
+        np.testing.assert_allclose(mvdr(K, bank, 1e-2),
+                                   mvdr(K, bank, diagonal_loading=1e-2))
+
+    def test_the_loading_defaults_are_deliberately_different(self):
+        import inspect
+        from uacpy.acoustic_signal.arrays import mvdr_spectrum
+        sonar_default = inspect.signature(
+            mvdr).parameters['diagonal_loading'].default
+        arrays_default = inspect.signature(
+            mvdr_spectrum).parameters['diagonal_loading'].default
+        assert sonar_default == 1e-2
+        assert arrays_default == 1e-6
+        assert sonar_default / arrays_default == pytest.approx(1e4)

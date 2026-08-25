@@ -47,8 +47,10 @@ than left blank under a working-looking title.
 
 import sys
 import textwrap
+import os
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Repo root, so ``import uacpy`` resolves from a source checkout.
+sys.path.insert(0, str(Path(__file__).parents[2]))
 
 import numpy as np  # noqa: E402
 import uacpy  # noqa: E402
@@ -390,8 +392,9 @@ def main():
         cbar_bot = fig.add_axes([0.945, 0.06, 0.010, 0.24])
         fig.colorbar(diff_im, cax=cbar_bot, label='Δ TL (dB)')
 
-    out_dir = Path(__file__).parent / 'output'
-    out_dir.mkdir(exist_ok=True)
+    out_dir = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
+                   or Path(__file__).parent / 'output')
+    out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / 'example_18_rd_krakenfield_vs_ram.png'
     fig.savefig(out_path, dpi=150)
     print(f"\n  ✓ Saved: {out_path}")
