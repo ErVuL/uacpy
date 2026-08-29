@@ -242,7 +242,7 @@ _TRANSECT_HELPERS = [
 @pytest.mark.parametrize('module_name,func_name,kwargs', _TRANSECT_HELPERS,
                          ids=[m.rsplit('.', 1)[-1]
                               for m, _f, _k in _TRANSECT_HELPERS])
-def test_a_single_point_transect_is_rejected_like_the_primary_paths(
+def test_a_single_point_transect_is_rejected_with_the_typed_error(
         module_name, func_name, kwargs):
     mod = importlib.import_module(module_name)
     with pytest.raises(ConfigurationError, match='n_points must be >= 2'):

@@ -664,7 +664,7 @@ Markers (registered in `pyproject.toml`):
   signals doc/convention drift, not a runtime defect.
 
 The composed dev tier `-m "not requires_binary and not slow"` is the fast
-pure-Python loop: 3,849 of 5,232 test functions, ≥5,172 collected cases
+pure-Python loop: 3,941 of 5,339 test functions, ≥5,280 collected cases
 (static AST count as of 2026-08-29; `requires_oases` tests count as
 `requires_binary` because `conftest.pytest_collection_modifyitems`
 auto-attaches that marker, which is also what makes the conjunction

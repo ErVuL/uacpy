@@ -212,7 +212,7 @@ Options:
                          cxx     — Fortran + C++ Bellhop (CPU, requires CMake)
                          cuda    — Fortran + CUDA Bellhop (GPU, needs nvcc + CMake)
   --oases [yes|no]     Download and build OASES (MIT, distributed separately):
-                         yes — Download from MIT and build OAST/OASN/OASR/OASP
+                         yes — Download from MIT and build OAST/OASN/OASR/OASP/OASS/OASSP
                          no  — Skip OASES entirely
   --data [LIST]        Download public datasets for uacpy.data's offline backend
                        into ./data_cache (gitignored). LIST is a comma list of:
@@ -499,7 +499,7 @@ choose_oases() {
         return 0
     fi
 
-    echo -e "${BLUE}Install OASES (OAST, OASN, OASR, OASP)?${NC}"
+    echo -e "${BLUE}Install OASES (OAST, OASN, OASR, OASP, OASS, OASSP)?${NC}"
     echo "  OASES is distributed separately by MIT and is not bundled with UACPY."
     echo "  Saying yes will download the source from acoustics.mit.edu and build it."
     echo ""

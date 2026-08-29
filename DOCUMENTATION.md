@@ -49,7 +49,7 @@ What it covers:
 
 - **Propagation models** — ray (Bellhop), normal modes (Kraken),
   wavenumber-integration (Scooter/OASES), parabolic equation (RAM),
-  time-domain FDTD (SPARC), and plane-wave reflection (Bounce/OASR).
+  time-marched FFP (SPARC), and plane-wave reflection (Bounce/OASR).
 - **DSP & sonar** (`acoustic_signal`, `sonar`) — waveforms, beamforming,
   matched filtering, the sonar equation, matched-field localization.
 - **Communications** (`comms`) — modems including a bit-exact NATO JANUS.

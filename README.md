@@ -66,7 +66,7 @@ models — consistent `Environment` / `Source` / `Receiver` construction and
 |-------------------|--------------------------------------------------------------------|
 | **Bellhop**       | Ray / beam tracing                                                 |
 | **Kraken**        | Normal modes                                                       |
-| **Scooter**       | Finite elements for range independent env                          |
+| **Scooter**       | Wavenumber integration for range independent env                   |
 | **SPARC**         | Experimental time-marched FFP for pulses in range independent env  |
 | **RAM**           | Parabolic equation                                                 |
 | **OASES**         | OAST (TL) · OASN (covariance / MFP replicas) · OASR (reflection) · OASP (broadband TRF) · OASS (reverberation) · OASSP (scattered pulse) |
@@ -165,7 +165,7 @@ What `install.sh` builds:
 | `python3`                | Driving `install.sh` and importing uacpy (always) |
 | `gfortran`, `make`       | OALIB, mpiramS, ramsurf (`rams0.5` elastic + `ramsurf1.5` rough surface), ramgeo (`ramgeo1.5` layered fluid), OASES (Fortran models — always) |
 | `git`                    | Cloning uacpy + submodules (always)               |
-| `tar`                    | Submodule unpacking + OASES archive (always)      |
+| `tar`                    | OASES source archive (`--oases yes`)              |
 | `cmake`, `g++`/`clang++` | C++ Bellhop variant (`--bellhop cxx`)             |
 | CUDA toolkit (`nvcc`)    | GPU Bellhop variant (`--bellhop cuda`) — **required** when `--bellhop cuda` is passed; the installer hard-errors if `nvcc` is absent (no silent downgrade to cxx) |
 | `curl`                   | OASES archive download (`--oases yes`)            |
@@ -264,7 +264,7 @@ on macOS.)
 **uacpy on Windows runs inside WSL2 (Windows Subsystem for Linux),
 following the Linux instructions above.**
 
-WSL2 needs CPU virtualization extensions. Some computer ship with this
+WSL2 needs CPU virtualization extensions. Some computers ship with this
 **disabled by default**, so first of all enable hardware virtualization 
 in your BIOS/UEFI.
 
@@ -353,8 +353,8 @@ of each one.
 
 UACPY uses **pytest** with custom markers for categorizing tests.
 
-`pytest` and `pytest-xdist` are no longer pulled in by the runtime
-dependency set — install the `test` extra to get them, or the `dev` extra
+`pytest` and `pytest-xdist` are not part of the runtime dependency
+set — install the `test` extra to get them, or the `dev` extra
 for the additional formatting / linting / coverage tooling:
 
 ``` bash
@@ -410,7 +410,7 @@ pytest uacpy/tests/ -m requires_network
 ```
 
 The composed dev tier `-m "not requires_binary and not slow"` selects
-3,849 of the suite's 5,232 test functions (≥5,172 collected cases; static
+3,941 of the suite's 5,339 test functions (≥5,280 collected cases; static
 AST count as of 2026-08-29, counting `requires_oases` tests as
 `requires_binary` — the conftest attaches that marker automatically). It
 is the fast development loop; the full suite (default `pytest` invocation)
@@ -542,7 +542,7 @@ redistributed by UACPY); all are permissive and GPL-3.0-compatible.
 | **pyproj** | map projections (sea-ice / Diesing reprojection) | MIT |
 | **tifffile** | NSIDC sea-ice / lithology raster reads | BSD-3-Clause |
 | **pillow** | image encode/decode behind the map and animation writers | HPND (MIT-style) |
-| **copernicusmarine** | Copernicus operational sound speed | EUPL-1.2 (lists GPL-3.0 as compatible) |
+| **copernicusmarine** | Copernicus operational sound speed — the optional `[copernicus]` extra, not installed by default | EUPL-1.2 (lists GPL-3.0 as compatible) |
 
 Test/development tooling (`pytest`, `pytest-xdist`, `setuptools` — the
 `[test]` extra — plus `pytest-cov`, `black`, `flake8`, `mypy` in `[dev]`) is

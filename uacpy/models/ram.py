@@ -4630,7 +4630,7 @@ class RAM(PropagationModel):
         # define the grid, otherwise the (fc, Q, T) sweep itself. mpiramS
         # marches every bin of it on ONE grid (deltaz/deltar are read once,
         # peramx.f90:78-79, and the depth grid is sized at :382 before the
-        # frequency loop opens at :404), so the grid is sized at the band
+        # frequency loop opens at :408), so the grid is sized at the band
         # EDGES, not at fc: both steps at f_max, where the wavelength is
         # shortest and the Padé error per step largest, and the absorbing
         # layer at f_min, where it is longest.

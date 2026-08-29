@@ -133,7 +133,7 @@ python docs/check_structure.py
 
 ## Conventions
 
-- **Units are SI throughout**: metres, m/s, g/cm³, Hz, dB re 1 µPa.
+- **Units**: metres, m/s, g/cm³, Hz, dB re 1 µPa.
   Range and depth are metres — kilometres appear only on plot axes and inside
   the native file formats.
 - **Depth is positive down**; sea-surface altimetry is positive up.

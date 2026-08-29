@@ -1490,7 +1490,9 @@ class ResultStack:
     def tl(self) -> np.ndarray:
         """Every slab's transmission loss stacked along the coordinate
         axis — :attr:`db` restricted to pressure slabs, mirroring
-        :attr:`Field.tl`."""
+        :attr:`Field.tl` in values. The refusal type follows each class's
+        own accessors: ``Field`` accessors raise :class:`AttributeError`,
+        stack accessors raise ConfigurationError."""
         first = self.slabs[0]
         if isinstance(first, Field) and first.kind != 'pressure':
             raise ConfigurationError(
