@@ -146,7 +146,14 @@ def download_seaice_db(cache_dir=None, *, years=None, timeout=120.0,
                     f"month {m + 1} over {years}.",
                     remediation="Retry, or pass a different `years` range.",
                 )
-            with np.errstate(invalid='ignore'):
+            # Land and pole-hole cells are NaN in every monthly grid, so
+            # their climatology is NaN; numpy reports that case through
+            # warnings.warn ("Mean of empty slice"), which np.errstate does
+            # not cover, so both channels are silenced here.
+            with np.errstate(invalid='ignore'), warnings.catch_warnings():
+                warnings.filterwarnings(
+                    'ignore', message='Mean of empty slice',
+                    category=RuntimeWarning)
                 months.append(np.nanmean(np.stack(stacks[m]), axis=0))
         climo[hemi] = np.stack(months).astype(np.float32)    # (12, H, W)
         log_message('seaice', f"hemisphere {hemi}: {climo[hemi].shape}",
