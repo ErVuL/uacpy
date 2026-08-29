@@ -112,10 +112,15 @@ def test_no_forbidden_tree_is_discovered():
 
 def test_the_forbidden_trees_actually_exist():
     """The exclusion assertions above are only meaningful while the trees
-    they guard against are present to be swept."""
-    for present in ("uacpy_venv", "uacpy/third_party", "uacpy/bin",
-                    "uacpy/examples", "uacpy/tests"):
-        assert (_REPO_ROOT / present).is_dir(), present
+    they guard against are present to be swept.
+
+    Only git-tracked trees are asserted: ``uacpy_venv`` and ``uacpy/bin``
+    exist where a developer or CI's build step has created them, a fresh
+    clone has neither, and discovery has nothing to sweep in an absent
+    tree — so their exclusions are exercised on every machine that has
+    them and vacuous on the machines that do not."""
+    for tracked in ("uacpy/third_party", "uacpy/examples", "uacpy/tests"):
+        assert (_REPO_ROOT / tracked).is_dir(), tracked
 
 
 def test_the_config_carries_the_load_bearing_keys():
@@ -769,8 +774,10 @@ def test_the_citation_walk_reads_the_projects_own_markdown():
     ``DOCUMENTATION.md`` is the parameter reference, the pages under ``docs/``
     are the guide and the per-model notes, ``MODIFICATIONS.md`` records the
     local patches address by address, and the working notes under
-    ``docs/superpowers`` argue from the Fortran the same way. Vendored
-    Markdown is excluded — it is not uacpy's citation.
+    ``docs/superpowers`` argue from the Fortran the same way — that tree is
+    an untracked dev-checkout companion, so its participation is asserted
+    only where it exists. Vendored Markdown is excluded — it is not uacpy's
+    citation.
     """
     sources = _citing_sources()
     relative = {str(path.relative_to(_REPO_ROOT)) for path in sources}
@@ -778,7 +785,9 @@ def test_the_citation_walk_reads_the_projects_own_markdown():
     assert "DOCUMENTATION.md" in relative
     assert "uacpy/third_party/MODIFICATIONS.md" in relative
     assert "docs/models/kraken.md" in relative
-    assert any(name.startswith("docs/superpowers/") for name in relative)
+    if (_REPO_ROOT / "docs" / "superpowers").is_dir():
+        assert any(name.startswith("docs/superpowers/")
+                   for name in relative)
     assert "uacpy/models/ram.py" in relative
 
     vendored = [path for path in sources

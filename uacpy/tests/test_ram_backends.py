@@ -3564,6 +3564,23 @@ class TestNzsFloor:
 
 
 class TestShippedSampleDeck:
+
+    @staticmethod
+    def _tracked_or_no_git(name):
+        """True when git metadata is absent, or when git tracks the file.
+
+        A checkout without ``.git`` (tarball, export) cannot distinguish
+        tracked from untracked; there the on-disk existence check above is
+        the whole test and CI's fresh clone is the backstop."""
+        import subprocess
+        repo = _MPIRAMS.parents[2]
+        if not (repo / '.git').exists():
+            return True
+        proc = subprocess.run(
+            ['git', '-C', str(repo), 'ls-files', '--error-unmatch',
+             str((_MPIRAMS / name).relative_to(repo))],
+            capture_output=True, text=True)
+        return proc.returncode == 0
     """The vendored ``mpiramS/in.pe`` is a current-format deck: one value
     record per line in the order ``peramx.f90:74-105`` consumes them, with
     bare filename lines (the ``(a)`` reads take the whole record)."""
@@ -3594,6 +3611,9 @@ class TestShippedSampleDeck:
                 f"line {idx + 1} is read with (a): a trailing comment would "
                 f"become part of the filename {name!r}")
             assert (_MPIRAMS / name).exists(), f"{name} not shipped"
+            assert self._tracked_or_no_git(name), (
+                f"{name} exists here but is not tracked by git, so a fresh "
+                f"clone ships a deck naming a file it does not contain")
 
     def test_sample_deck_sediment_block_matches_its_nzs(self):
         lines = self._deck_lines()

@@ -109,6 +109,45 @@ def test_no_broken_relative_links() -> None:
 
 
 @requires_docs
+def test_every_linked_doc_target_is_tracked_by_git() -> None:
+    """A link target that exists on disk but not in git resolves in the
+    checkout that wrote it and 404s in every fresh clone — the local suite
+    stays green on a tree CI fails. Needs git metadata: a tarball or
+    exported checkout skips, and CI's fresh clone is the backstop there."""
+    import subprocess
+
+    checker = _load("check_links")
+    repo = checker.REPO_ROOT
+    if not (repo / ".git").exists():
+        pytest.skip("no git metadata in this checkout")
+    proc = subprocess.run(["git", "-C", str(repo), "ls-files"],
+                          capture_output=True, text=True)
+    if proc.returncode != 0:
+        pytest.skip("git unavailable")
+    tracked = set(proc.stdout.splitlines())
+
+    untracked = []
+    for path in _gate_pages(checker):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for line, target in checker.link_targets(text):
+            from urllib.parse import unquote
+            file_part = unquote(target.split("#", 1)[0])
+            if not file_part:
+                continue
+            resolved = (path.parent / file_part).resolve()
+            if not resolved.exists() or resolved.is_dir():
+                continue
+            rel = str(resolved.relative_to(repo))
+            if rel not in tracked:
+                untracked.append(
+                    f"{path.relative_to(repo)}:{line}: -> {target}")
+    assert not untracked, (
+        "doc link target(s) present on disk but not tracked by git — "
+        "`git add` them or the linking page breaks in every fresh clone:\n"
+        + "\n".join(untracked))
+
+
+@requires_docs
 def test_every_section_cross_reference_names_a_real_heading() -> None:
     """Every ``#fragment`` in the docs resolves to a heading in the file it
     points at.
