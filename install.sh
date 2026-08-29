@@ -1606,7 +1606,7 @@ download_gebco() {
     local dir="${DATA_CACHE_DIR}/gebco"
     mkdir -p "$dir"
     if [[ "$FORCE" != "1" ]] && ls "$dir"/*.nc >/dev/null 2>&1; then
-        echo -e "${GREEN}✓ GEBCO grid already present${NC}"; return 0
+        echo -e "${GREEN}✓ GEBCO grid already cached → ${dir}${NC}"; return 0
     fi
     echo -e "${BLUE}Downloading GEBCO 2025 grid (~7.5 GB) — this is large...${NC}"
     # Download to a temp name and rename only on success (atomic; a partial file
@@ -1645,20 +1645,23 @@ download_gebco() {
         fi
     fi
     mv -f "$tmp" "${dir}/GEBCO_2025.nc"
-    echo -e "${GREEN}✓ GEBCO grid ready${NC}"; return 0
+    echo -e "${GREEN}✓ GEBCO grid ready → ${dir}${NC}"; return 0
 }
 
 download_woa23() {
     local dir="${DATA_CACHE_DIR}/woa23"; mkdir -p "$dir"
     local base="https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA"
-    local ok=1 var folder p fname url
-    echo -e "${BLUE}Downloading WOA23 ${WOA_RESOLUTION}° T/S grids (annual + 12 months)...${NC}"
+    local ok=1 var folder p fname url header_shown=0
     for var in t s; do
         if [[ "$var" == "t" ]]; then folder="temperature"; else folder="salinity"; fi
         for p in 00 01 02 03 04 05 06 07 08 09 10 11 12; do
             fname="woa23_${WOA_DECADE}_${var}${p}_${WOA_CODE}.nc"
             if [[ "$FORCE" != "1" && -s "${dir}/${fname}" ]]; then continue; fi
             url="${base}/${folder}/netcdf/${WOA_DECADE}/${WOA_RESOLUTION}/${fname}"
+            if [[ "$header_shown" == "0" ]]; then
+                echo -e "${BLUE}Downloading WOA23 ${WOA_RESOLUTION}° T/S grids (annual + 12 months)...${NC}"
+                header_shown=1
+            fi
             # Fetch to .part and move into place only on success: an
             # interrupted transfer must never leave a truncated file the
             # -s re-run guard above would accept as complete.
@@ -1670,7 +1673,12 @@ download_woa23() {
         done
     done
     if [[ "$ok" == "1" ]]; then
-        echo -e "${GREEN}✓ WOA23 grids ready${NC}"; return 0
+        if [[ "$header_shown" == "0" ]]; then
+            echo -e "${GREEN}✓ WOA23 grids already cached → ${dir}${NC}"
+        else
+            echo -e "${GREEN}✓ WOA23 grids ready → ${dir}${NC}"
+        fi
+        return 0
     fi
     echo -e "${YELLOW}◐ WOA23 partially downloaded${NC}"; NOTE_DATA="${NOTE_DATA} woa23:partial"; return 1
 }
@@ -1678,7 +1686,7 @@ download_woa23() {
 download_sediment() {
     local dir="${DATA_CACHE_DIR}/sediment"; mkdir -p "$dir"
     if [[ "$FORCE" != "1" && ( -s "${dir}/grainsize.csv" || -s "${dir}/deck41.csv" ) ]]; then
-        echo -e "${GREEN}✓ Sediment samples present in ${dir}${NC}"; return 0
+        echo -e "${GREEN}✓ Sediment samples already cached → ${dir}${NC}"; return 0
     fi
     # Automatic: the NCEI grain-size DB (G00127, public domain) is downloaded and
     # normalized to grainsize.csv by uacpy.data.download_sediment_db — if uacpy is
@@ -1686,7 +1694,7 @@ download_sediment() {
     if python3 -c "import uacpy.data" >/dev/null 2>&1; then
         echo -e "${BLUE}Downloading + normalizing NCEI grain-size DB (~3 MB)...${NC}"
         if UACPY_INSTALL_CACHE_DIR="$dir" python3 -c "import os; import uacpy.data as d; d.download_sediment_db(cache_dir=os.environ['UACPY_INSTALL_CACHE_DIR'], verbose=True)"; then
-            echo -e "${GREEN}✓ Sediment grain-size DB ready${NC}"; return 0
+            echo -e "${GREEN}✓ Sediment grain-size DB ready → ${dir}${NC}"; return 0
         fi
         echo -e "${YELLOW}◐ Automatic sediment download failed.${NC}"
     else
@@ -1705,14 +1713,14 @@ download_emodnet() {
     # which runs whatever code the file contains. A cache still holding the .pkl
     # must fall through and rebuild — emodnet_local refuses to read it.
     if [[ "$FORCE" != "1" && -s "${dir}/seabed_substrate.npz" ]]; then
-        echo -e "${GREEN}✓ EMODnet seabed substrate present in ${dir}${NC}"; return 0
+        echo -e "${GREEN}✓ EMODnet seabed substrate already cached → ${dir}${NC}"; return 0
     fi
     # EMODnet Geology seabed substrate (Folk 5cl, 1:1M, CC-BY) is paged from the
     # public WFS and stored as a local polygon index by emodnet_local.
     if python3 -c "import uacpy.data.emodnet_local" >/dev/null 2>&1; then
         echo -e "${BLUE}Downloading EMODnet seabed substrate (European seas)...${NC}"
         if UACPY_INSTALL_CACHE_DIR="$dir" python3 -c "import os; from uacpy.data import emodnet_local; emodnet_local.download_emodnet_db(cache_dir=os.environ['UACPY_INSTALL_CACHE_DIR'], verbose=True)"; then
-            echo -e "${GREEN}✓ EMODnet seabed substrate ready${NC}"; return 0
+            echo -e "${GREEN}✓ EMODnet seabed substrate ready → ${dir}${NC}"; return 0
         fi
         echo -e "${YELLOW}◐ Automatic EMODnet download failed.${NC}"
     else
@@ -1727,12 +1735,12 @@ download_emodnet() {
 download_coastline() {
     local dir="${DATA_CACHE_DIR}/coastline"; mkdir -p "$dir"
     if [[ "$FORCE" != "1" && -s "${dir}/ne_50m_land.geojson" ]]; then
-        echo -e "${GREEN}✓ Coastline polygons present in ${dir}${NC}"; return 0
+        echo -e "${GREEN}✓ Coastline polygons already cached → ${dir}${NC}"; return 0
     fi
     if python3 -c "import uacpy.visualization.basemap" >/dev/null 2>&1; then
         echo -e "${BLUE}Downloading Natural Earth coastline (public domain)...${NC}"
         if UACPY_INSTALL_CACHE_DIR="$dir" python3 -c "import os; from uacpy.visualization.basemap import download_coastline; download_coastline(cache_dir=os.environ['UACPY_INSTALL_CACHE_DIR'], verbose=True)"; then
-            echo -e "${GREEN}✓ Coastline polygons ready${NC}"; return 0
+            echo -e "${GREEN}✓ Coastline polygons ready → ${dir}${NC}"; return 0
         fi
         echo -e "${YELLOW}◐ Automatic coastline download failed.${NC}"
     else
@@ -1747,7 +1755,7 @@ download_coastline() {
 download_globsed() {
     local dir="${DATA_CACHE_DIR}/globsed"; mkdir -p "$dir"
     if [[ "$FORCE" != "1" && -s "${dir}/GlobSed-v3.nc" ]]; then
-        echo -e "${GREEN}✓ GlobSed grid present in ${dir}${NC}"; return 0
+        echo -e "${GREEN}✓ GlobSed grid already cached → ${dir}${NC}"; return 0
     fi
     # curl, not python: NCEI throttles urllib to a trickle but serves curl fast.
     echo -e "${BLUE}Downloading GlobSed v3 sediment thickness (~11 MB)...${NC}"
@@ -1757,18 +1765,18 @@ download_globsed() {
         NOTE_DATA="${NOTE_DATA} globsed:failed"; return 1
     fi
     mv -f "$tmp" "${dir}/GlobSed-v3.nc"
-    echo -e "${GREEN}✓ GlobSed grid ready${NC}"; return 0
+    echo -e "${GREEN}✓ GlobSed grid ready → ${dir}${NC}"; return 0
 }
 
 download_crust1() {
     local dir="${DATA_CACHE_DIR}/crust1"; mkdir -p "$dir"
     if [[ "$FORCE" != "1" && -s "${dir}/crust1.bnds" ]]; then
-        echo -e "${GREEN}✓ CRUST1.0 grids present in ${dir}${NC}"; return 0
+        echo -e "${GREEN}✓ CRUST1.0 grids already cached → ${dir}${NC}"; return 0
     fi
     if python3 -c "import uacpy.data.crust1_local" >/dev/null 2>&1; then
         echo -e "${BLUE}Downloading CRUST1.0 layered crustal model (~1 MB, no formal licence)...${NC}"
         if UACPY_INSTALL_CACHE_DIR="$dir" python3 -c "import os; from uacpy.data import crust1_local; crust1_local.download_crust1_db(cache_dir=os.environ['UACPY_INSTALL_CACHE_DIR'], verbose=True)"; then
-            echo -e "${GREEN}✓ CRUST1.0 grids ready${NC}"; return 0
+            echo -e "${GREEN}✓ CRUST1.0 grids ready → ${dir}${NC}"; return 0
         fi
         echo -e "${YELLOW}◐ Automatic CRUST1.0 download failed.${NC}"
     else
@@ -1783,14 +1791,14 @@ download_crust1() {
 download_diesing() {
     local dir="${DATA_CACHE_DIR}/diesing"; mkdir -p "$dir"
     if [[ "$FORCE" != "1" && -s "${dir}/lithology_classes.tif" ]]; then
-        echo -e "${GREEN}✓ Diesing lithology map present in ${dir}${NC}"; return 0
+        echo -e "${GREEN}✓ Diesing lithology map already cached → ${dir}${NC}"; return 0
     fi
     # Diesing 2020 global deep-sea seafloor lithology (CC-BY); zip downloaded and
     # the lithology raster extracted by diesing_local (PANGAEA serves urllib fast).
     if python3 -c "import uacpy.data.diesing_local" >/dev/null 2>&1; then
         echo -e "${BLUE}Downloading Diesing 2020 deep-sea lithology (CC-BY, ~40 MB)...${NC}"
         if UACPY_INSTALL_CACHE_DIR="$dir" python3 -c "import os; from uacpy.data import diesing_local; diesing_local.download_diesing_db(cache_dir=os.environ['UACPY_INSTALL_CACHE_DIR'], verbose=True)"; then
-            echo -e "${GREEN}✓ Diesing lithology map ready${NC}"; return 0
+            echo -e "${GREEN}✓ Diesing lithology map ready → ${dir}${NC}"; return 0
         fi
         echo -e "${YELLOW}◐ Automatic Diesing download failed.${NC}"
     else
@@ -1807,13 +1815,13 @@ download_seaice() {
     local dir="${DATA_CACHE_DIR}/seaice"; mkdir -p "$dir"
     # .npz, not the .pkl this used to be — see download_emodnet.
     if [[ "$FORCE" != "1" && -s "${dir}/seaice_climatology.npz" ]]; then
-        echo -e "${GREEN}✓ Sea-ice climatology present in ${dir}${NC}"; return 0
+        echo -e "${GREEN}✓ Sea-ice climatology already cached → ${dir}${NC}"; return 0
     fi
     # Builds a monthly climatology from NSIDC Sea Ice Index grids (needs tifffile).
     if python3 -c "import uacpy.data.seaice_local, tifffile" >/dev/null 2>&1; then
         echo -e "${BLUE}Building NSIDC sea-ice monthly climatology (downloads ~120 grids; a few minutes)...${NC}"
         if UACPY_INSTALL_CACHE_DIR="$dir" python3 -c "import os; from uacpy.data import seaice_local; seaice_local.download_seaice_db(cache_dir=os.environ['UACPY_INSTALL_CACHE_DIR'], verbose=True)"; then
-            echo -e "${GREEN}✓ Sea-ice climatology ready${NC}"; return 0
+            echo -e "${GREEN}✓ Sea-ice climatology ready → ${dir}${NC}"; return 0
         fi
         echo -e "${YELLOW}◐ Automatic sea-ice build failed.${NC}"
     else
@@ -1828,14 +1836,14 @@ download_seaice() {
 download_glodap() {
     local dir="${DATA_CACHE_DIR}/glodap"; mkdir -p "$dir"
     if [[ "$FORCE" != "1" && -s "${dir}/GLODAPv2.2016b.pHtsinsitutp.nc" ]]; then
-        echo -e "${GREEN}✓ GLODAP pH grid present in ${dir}${NC}"; return 0
+        echo -e "${GREEN}✓ GLODAP pH grid already cached → ${dir}${NC}"; return 0
     fi
     # GLODAPv2.2016b mapped seawater pH (CC-BY); the ~211 MB product tarball is
     # downloaded and only the in-situ pH grid extracted by glodap_local.
     if python3 -c "import uacpy.data.glodap_local" >/dev/null 2>&1; then
         echo -e "${BLUE}Downloading GLODAPv2.2016b mapped pH (CC-BY, ~211 MB tarball)...${NC}"
         if UACPY_INSTALL_CACHE_DIR="$dir" python3 -c "import os; from uacpy.data import glodap_local; glodap_local.download_glodap_db(cache_dir=os.environ['UACPY_INSTALL_CACHE_DIR'], verbose=True)"; then
-            echo -e "${GREEN}✓ GLODAP pH grid ready${NC}"; return 0
+            echo -e "${GREEN}✓ GLODAP pH grid ready → ${dir}${NC}"; return 0
         fi
         echo -e "${YELLOW}◐ Automatic GLODAP download failed.${NC}"
     else
@@ -1850,14 +1858,14 @@ download_glodap() {
 download_wind() {
     local dir="${DATA_CACHE_DIR}/wind"; mkdir -p "$dir"
     if [[ "$FORCE" != "1" && -s "${dir}/wind_climatology.npz" ]]; then
-        echo -e "${GREEN}✓ NBS wind climatology present in ${dir}${NC}"; return 0
+        echo -e "${GREEN}✓ NBS wind climatology already cached → ${dir}${NC}"; return 0
     fi
     # Builds a monthly NBS 10 m wind-speed climatology from the CoastWatch ERDDAP
     # monthly grids (needs netCDF4). Public domain.
     if python3 -c "import uacpy.data.wind_local, netCDF4" >/dev/null 2>&1; then
         echo -e "${BLUE}Building NBS wind monthly climatology (downloads ERDDAP grids; a few minutes)...${NC}"
         if UACPY_INSTALL_CACHE_DIR="$dir" python3 -c "import os; from uacpy.data import wind_local; wind_local.download_wind_db(cache_dir=os.environ['UACPY_INSTALL_CACHE_DIR'], verbose=True)"; then
-            echo -e "${GREEN}✓ NBS wind climatology ready${NC}"; return 0
+            echo -e "${GREEN}✓ NBS wind climatology ready → ${dir}${NC}"; return 0
         fi
         echo -e "${YELLOW}◐ Automatic wind build failed.${NC}"
     else
@@ -1873,7 +1881,7 @@ download_graw() {
     local dir="${DATA_CACHE_DIR}/graw"; mkdir -p "$dir"
     local out="${dir}/Dataset_S2.nc"
     if [[ "$FORCE" != "1" && -s "$out" ]]; then
-        echo -e "${GREEN}✓ Graw density grid present in ${dir}${NC}"; return 0
+        echo -e "${GREEN}✓ Graw density grid already cached → ${dir}${NC}"; return 0
     fi
     # Graw 2021 predicted global seabed bulk density (Zenodo, CC-BY 4.0, ~37 MB).
     echo -e "${BLUE}Downloading Graw 2021 seabed density grid (~37 MB)...${NC}"
@@ -1881,7 +1889,7 @@ download_graw() {
     # final file would pass the -s guard above on every later run.
     if robust_curl "https://zenodo.org/records/3762390/files/Dataset_S2.nc" "${out}.part"; then
         mv -f "${out}.part" "$out"
-        echo -e "${GREEN}✓ Graw density grid ready${NC}"; return 0
+        echo -e "${GREEN}✓ Graw density grid ready → ${dir}${NC}"; return 0
     fi
     rm -f "${out}.part"
     echo "    Fetch it from Python once uacpy is installed:"
