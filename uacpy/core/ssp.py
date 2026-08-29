@@ -256,10 +256,15 @@ class SoundSpeedProfile:
                 raise IndexError(
                     f"SoundSpeedProfile.isel: range index {ridx} out of range "
                     f"for {self.data.shape[1]} column(s)")
+            # Picking the only column keeps a single-node ``ranges`` — a
+            # coordinate at that range, read by ``env.max_range`` (the
+            # ``Bottom.select_range`` rule); picking one of several columns
+            # collapses the axis and drops it.
             sliced = SoundSpeedProfile(
                 depths=self.depths.copy(),
-                data=self.data[:, [ridx]].copy(), ranges=None, shape=self.shape,
-                data_sources=self.data_sources)
+                data=self.data[:, [ridx]].copy(),
+                ranges=self.ranges if self.data.shape[1] == 1 else None,
+                shape=self.shape, data_sources=self.data_sources)
         if depth is not None:
             didx = int(depth)
             if not -sliced.depths.size <= didx < sliced.depths.size:
@@ -268,7 +273,7 @@ class SoundSpeedProfile:
                     f"for {sliced.depths.size} depth(s)")
             sliced = SoundSpeedProfile(
                 depths=np.array([float(sliced.depths[didx])]),
-                data=sliced.data[[didx], :].copy(), ranges=None,
+                data=sliced.data[[didx], :].copy(), ranges=sliced.ranges,
                 shape=sliced.shape, data_sources=self.data_sources)
         return sliced
 
@@ -285,6 +290,12 @@ class SoundSpeedProfile:
         if depth is not None and range is None:
             self._require_pinned_range('at' if interp == 'nearest' else 'eval')
         data = self.data
+        # A single-node ``ranges`` is a coordinate at that range
+        # (``env.max_range`` reads it, environment.py), so it travels with
+        # the column instead of being dropped here — the rule
+        # ``Bottom.select_range`` states for the same case. Collapsing the
+        # range axis of a range-dependent profile at a label drops it.
+        out_ranges = self.ranges
         if range is not None:
             if not self.is_range_dependent:
                 # Any range reads the single column, but the label contract
@@ -295,18 +306,21 @@ class SoundSpeedProfile:
             else:
                 col, _ = collapse_axis(data, self.ranges, range, interp,
                                        axis=1, name='range')
+                out_ranges = None
             data = col.reshape(-1, 1)
         if depth is None:
             if range is None:
                 return self
             return SoundSpeedProfile(
                 depths=self.depths.copy(), data=data.copy(),
-                ranges=None, shape=self.shape, data_sources=self.data_sources)
+                ranges=out_ranges, shape=self.shape,
+                data_sources=self.data_sources)
         c, dv = collapse_axis(data[:, 0], self.depths, depth, interp,
                               axis=0, name='depth')
         return SoundSpeedProfile(
             depths=np.array([float(dv)]), data=np.array([[float(c)]]),
-            ranges=None, shape=self.shape, data_sources=self.data_sources)
+            ranges=out_ranges, shape=self.shape,
+            data_sources=self.data_sources)
 
     @property
     def value(self) -> float:

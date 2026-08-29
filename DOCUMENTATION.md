@@ -1604,8 +1604,13 @@ TS, RL. The `*_field` helpers map the equation over a model TL
 | Field maps | `passive_signal_excess_field`, `active_signal_excess_field`, `probability_of_detection_field` |
 | Detection theory | `albersheim_snr`, `probability_of_detection`, `roc_curve`, `detection_index`, `deflection_coefficient`, `detection_threshold_energy` |
 | Target strength | `ts_sphere`, `ts_cylinder`, `ts_plate`, `ts_ellipsoid`, `ts_convex` |
-| Scattering / reverb | `lambert_bottom`, `chapman_harris_surface`, `column_scattering_strength`, `boundary_reverberation`, `volume_reverberation`, `total_reverberation` |
-| Matched-field localization | `synthesize_replica`, `replica_bank`, `csdm`, `bartlett`, `mvdr` |
+| Scattering / reverb | `lambert_bottom`, `LAMBERT_MU_DB`, `chapman_harris_surface`, `column_scattering_strength`, `boundary_reverberation`, `volume_reverberation`, `total_reverberation` |
+| Matched-field localization | `synthesize_replica`, `replica_bank`, `replica_bank_from_field`, `csdm`, `bartlett`, `mvdr` |
+
+`LAMBERT_MU_DB` (float, −27.0) is `lambert_bottom`'s default backscattering
+constant 10·log10(μ) in dB — Mackenzie's (1961) deep-water value; pass
+`mu_db=` to `lambert_bottom` to pick another point in the empirical −25 to
+−35 dB spread for unconsolidated sediments.
 
 ```python
 from uacpy.sonar import figure_of_merit, albersheim_snr
@@ -1623,6 +1628,13 @@ from a KRAKEN `Modes` set (the far-field modal sum, validated against
 `field.exe` to a normalized correlation of 1.0), so the modes are computed once
 and every grid point is a cheap re-sum. This path is self-contained (KRAKEN +
 numpy); it does not require OASES/OASN.
+
+`replica_bank_from_field(field, array_depths=...)` is the model-agnostic
+counterpart of `replica_bank`: it assembles the same `(N, nz, nr)` bank from a
+coherent pressure `Field` (or a `ResultStack` over `source_depth`) produced by
+*any* forward model — run with the receivers at the array element depths and
+the source swept over the candidate grid — so PE or ray replicas drop into the
+same `bartlett` / `mvdr` processors.
 
 ```python
 import numpy as np

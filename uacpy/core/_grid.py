@@ -48,6 +48,26 @@ def _as_finite_scalar_label(value, name):
     return v
 
 
+def _reject_label_absorbing_axis(axis, label, name):
+    """Refuse a finite label so far outside ``axis`` that argmin cannot rank.
+
+    Outside a spread axis the distances ``|axis - label|`` are strictly
+    ordered, so a dead tie means the subtraction lost the axis to the label's
+    exponent (every ``|z - 1e300|`` rounds to 1e300) and argmin falls to
+    index 0 — a real sample, which is why the slice would read as successful.
+    Raises the same ``ConfigurationError`` ``Field.at`` raises on its own
+    argmin path; in-span labels and genuine midpoint ties pass through.
+    """
+    span_low, span_high = float(np.min(axis)), float(np.max(axis))
+    if (span_high > span_low and not span_low <= label <= span_high
+            and float(np.ptp(np.abs(axis - label))) == 0.0):
+        raise ConfigurationError(
+            f"{name}={label:g} is so far outside the {name!r} axis "
+            f"([{span_low:g}, {span_high:g}]) that every sample rounds to "
+            f"the same distance from it; no sample is nearer than another "
+            f"and index 0 would be returned.")
+
+
 def _nearest_index_on_axis(axis_values, value, name='range'):
     """Index of the sample in ``axis_values`` nearest to the label ``value``.
 
@@ -56,12 +76,16 @@ def _nearest_index_on_axis(axis_values, value, name='range'):
     read-only counterparts all land on a stored index. The label goes through
     :func:`_as_finite_scalar_label` first, and *before* the single-entry
     shortcut — a carrier with no axis still refuses a NaN/inf or array-valued
-    label rather than answering 0 to a query it never examined.
+    label rather than answering 0 to a query it never examined. A finite
+    label large enough to absorb the whole axis is refused by
+    :func:`_reject_label_absorbing_axis`.
     """
     label = _as_finite_scalar_label(value, name)
     if axis_values is None:
         return 0
-    return int(np.argmin(np.abs(axis_values - label)))
+    axis = np.asarray(axis_values, dtype=float)
+    _reject_label_absorbing_axis(axis, label, name)
+    return int(np.argmin(np.abs(axis - label)))
 
 
 def collapse_axis(arr, axis_values, value, method='linear', *, axis=0,
@@ -72,7 +96,9 @@ def collapse_axis(arr, axis_values, value, method='linear', *, axis=0,
     removed and ``coord`` is the coordinate the slice sits at (the nearest
     stored value for ``'nearest'``, else the requested value clamped into
     range). ``value`` must be a finite scalar; a NaN/inf or array-valued
-    label raises ``ConfigurationError``. ``axis_values`` is the 1-D
+    label raises ``ConfigurationError``, and so does a ``'nearest'`` label
+    large enough to absorb the whole axis
+    (:func:`_reject_label_absorbing_axis`). ``axis_values`` is the 1-D
     coordinate vector, ascending or descending; a non-monotonic axis raises
     ``ConfigurationError`` for the interpolating methods, and ``name`` labels
     the axis in these errors. Values outside the axis ends use constant
@@ -89,6 +115,7 @@ def collapse_axis(arr, axis_values, value, method='linear', *, axis=0,
     if n <= 1:
         return np.take(arr, 0, axis=axis), float(x[0])
     if method == 'nearest':
+        _reject_label_absorbing_axis(x, label, name)
         i = int(np.argmin(np.abs(x - label)))
         return np.take(arr, i, axis=axis), float(x[i])
 

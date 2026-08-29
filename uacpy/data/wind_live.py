@@ -109,6 +109,10 @@ def fetch_wind_transect(start, end, *, date, n_points=6, source='erddap',
                         timeout=60.0, verbose=False):
     """``(ranges_m, wind_speed_mps)`` sampled along ``start`` → ``end``."""
     from uacpy.data._geo import geodesic_waypoints
+    if int(n_points) < 2:
+        raise ConfigurationError(
+            f"fetch_wind_transect: n_points must be >= 2, got {n_points}.",
+            remediation="Pass n_points>=2 to define a transect.")
     _check_source(source)
     lats, lons, ranges_m = geodesic_waypoints(start, end, n_points)
     speeds = np.array([

@@ -53,15 +53,16 @@ _COLUMNS = ('platform_number', 'cycle_number', 'direction', 'time', 'latitude',
 
 def _abs_days(time_str, when):
     """``|days|`` between an ERDDAP ISO time string and ``when`` (a
-    ``datetime64[D]``). Returns ``0.0`` (neutral in the cost) when the time is
-    missing or unparseable — ERDDAP times are well-formed, this is just a guard.
+    ``datetime64[D]``). Returns ``inf`` (maximally unattractive in the cost,
+    so a dated profile always beats an undated one) when the time is missing
+    or unparseable — ERDDAP times are well-formed, this is just a guard.
     """
     if not time_str:
-        return 0.0
+        return float('inf')
     try:
         day = np.datetime64(str(time_str)[:10])
     except (ValueError, TypeError):
-        return 0.0
+        return float('inf')
     return abs(float((day - when) / np.timedelta64(1, 'D')))
 
 
@@ -72,7 +73,10 @@ def _query_url(point, when, max_distance_km, max_days, base_url):
     la0, la1 = lat - dlat, lat + dlat
     lo_lo, lo_hi = normalize_lon(lon) - dlon, normalize_lon(lon) + dlon
     t0 = (when - np.timedelta64(max_days, 'D'))
-    t1 = (when + np.timedelta64(max_days, 'D'))
+    # Exclusive upper bound at the first instant AFTER day ``when + max_days``,
+    # so the last tolerated day is included whole — symmetric with the lower
+    # bound, and consistent with the cost function tolerating dt == max_days.
+    t1 = (when + np.timedelta64(max_days + 1, 'D'))
     # A box straddling the antimeridian can't be expressed as a single
     # longitude>=A & longitude<=B clause (it would invert to ~the whole globe);
     # drop the longitude clause there and let the haversine distance filter in
@@ -83,7 +87,7 @@ def _query_url(point, when, max_distance_km, max_days, base_url):
         lon_clause = f"&longitude%3E={lo_lo:.4f}&longitude%3C={lo_hi:.4f}"
     return (
         f"{base_url}?{','.join(_COLUMNS)}"
-        f"&time%3E={t0}T00:00:00Z&time%3C={t1}T00:00:00Z"
+        f"&time%3E={t0}T00:00:00Z&time%3C{t1}T00:00:00Z"
         f"&latitude%3E={la0:.4f}&latitude%3C={la1:.4f}"
         f"{lon_clause}"
     )

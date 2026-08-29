@@ -1,19 +1,22 @@
-                    !  input file to PE - CAUTION:  formatted input!
-75   2.0            !  center frequency (Hz), fc, and Q value; bandwidth=fc/Q
-10.0                !  time window width (s) - expected arrival pattern duration
-1000.0              !  source depth (m) - N.B. Formatted, requires one decimal place!
-3000000.00000       !  receiver range (m)
-0.50                !  deltaz - an accuracy parameter (m)  (0.5 is liberal)
-250.0               !  deltar - an accuracy parameter (m)  (250 is liberal)
-4 1                 !  np-# pade coefficients, ns-#stability terms
-10000.0             !  rs - stability range (m); ns=0 for shorter ranges 
-50                  !  output depth  decimation (integer) (decrease if you get ripples in your matlab plots)
-test.ssp            !  Input the soundspeed filename (for single processor, use "munk" for munk canonical)
-1                   !  Flat earth transformation: 0=no, 1=yes
-1                   !  Horizontal linear interpolation flag: 0=no, 1=yes
-0                   !  Enable ocean bottom? 0=no, 1=yes (yes turns on reading the file)
-test.bth            !  Input the bathymetry filename (not used if ocean bottom = 0 above)
-1                   !  Flag for node weighting.  Set to 0 to evenly weight.
-nodewts.dat         !  File name for node weights (not used if flag is 0).
-
-
+0.0                 ! title line, read and discarded (must start with a number)
+75.0  75.0          ! center frequency fc (Hz) and Q; bandwidth = fc/Q
+1.0                 ! time window width T (s); frequency spacing df = 1/T
+500.0               ! source depth (m)
+1.0                 ! deltaz - depth accuracy parameter (m)
+100.0               ! deltar - range accuracy parameter (m)
+4 1                 ! np - # pade coefficients, ns - # stability terms
+1000.0              ! rs - stability range (m)
+10                  ! output depth decimation (integer)
+1500.0              ! c0_user - PE reference speed (m/s); must be positive
+test.ssp
+0                   ! flat earth transform: 0=no, 1=yes
+0                   ! horizontal linear interpolation: 0=no, 1=yes
+1                   ! ocean bottom: 0=no, 1=read the bathymetry file
+test.bth
+ranges.dat
+300.0               ! sedlayer - sediment layer thickness (m)
+4                   ! nzs - sediment depth control points (minimum 4)
+0                   ! isedrd: 0=range-independent, 1=range-dependent from file
+0.0 0.0 200.0 200.0 ! cs - sediment speed offset vs water (m/s), nzs values
+1.2 1.2 1.2 1.2     ! rho - sediment density (g/cm^3), nzs values
+0.5 0.5 5.0 5.0     ! attn - sediment attenuation (dB/wavelength), nzs values

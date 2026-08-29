@@ -443,3 +443,37 @@ class TestArrayCapableHelpersAnnotateArrayReturns:
         assert float in returns, (
             f"{name} returns a scalar for scalar input but annotates "
             f"{returns}")
+
+
+class TestPressureFloorLevelsMatchTheirDocstrings:
+    """``spl`` floors rms pressure in its µPa working unit (silent signal:
+    -300 dB re 1 µPa at ``ref=1``); ``power_to_db`` floors ``power`` in
+    ``ref**2`` units (silent signal: -180 dB re 1 µPa at its Pa-based
+    default). Both docstrings state the split; neither claims the two
+    floors coincide at the defaults."""
+
+    def test_spl_floors_a_silent_signal_at_minus_300_db(self):
+        assert spl(np.zeros(16)) == pytest.approx(-300.0, rel=1e-12)
+
+    def test_power_to_db_default_ref_floors_at_minus_180_db(self):
+        assert float(power_to_db(0.0)) == pytest.approx(-180.0, rel=1e-12)
+
+    def test_the_two_floors_coincide_only_at_unit_ref(self):
+        assert float(power_to_db(0.0, ref=1)) == pytest.approx(-300.0,
+                                                               rel=1e-12)
+
+    def test_spl_docstring_states_both_floor_levels(self):
+        assert '-300 dB' in spl.__doc__
+        assert '-180 dB' in spl.__doc__
+        assert 'same -300 dB' not in spl.__doc__
+
+    def test_power_to_db_docstring_states_its_own_floor_level(self):
+        assert '-180' in power_to_db.__doc__
+
+
+def test_unesco_reproduces_the_canonical_high_pressure_check_value():
+    """Fofonoff & Millard (UNESCO 1983) check value: c = 1731.995 m/s at
+    S = 40 PSU, T = 40 °C on the IPTS-68 scale, P = 10000 dbar (1000 bar).
+    The temperature argument is ITS-90, so T68 = 40 enters as 40/1.00024."""
+    c = soundspeed_unesco(40.0 / 1.00024, 40.0, 10000.0)
+    assert float(c) == pytest.approx(1731.995, rel=1e-6)

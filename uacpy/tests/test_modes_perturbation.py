@@ -860,3 +860,46 @@ class TestGroupVelocityReportsWhatTheStoredWavenumbersResolve:
         with warnings.catch_warnings():
             warnings.simplefilter("error")
             assert np.isfinite(lo.compute_group_velocity(hi)).all()
+
+
+def _rigid_guide_modes(n_modes=3, water_depth=100.0, c0=1500.0, freq=50.0):
+    """Pressure-release surface, rigid bottom: psi_m = sin((m+1/2)pi z/D),
+    so psi'(D) = 0 and psi(D) is at a maximum."""
+    depths = np.linspace(0.0, water_depth, 51)
+    phi = np.zeros((depths.size, n_modes))
+    k = np.empty(n_modes, dtype=complex)
+    omega = 2.0 * np.pi * freq
+    for m in range(n_modes):
+        kz = (m + 0.5) * np.pi / water_depth
+        phi[:, m] = np.sin(kz * depths)
+        k[m] = np.sqrt((omega / c0) ** 2 - kz ** 2 + 0j)
+    return Modes(k=k, phi=phi, depths=depths, model='Test',
+                 frequencies=freq)
+
+
+class TestUpperBoundWarningStatesRigidExactness:
+    """``Modes`` carries no boundary metadata, so the psi(D)² trigger fires
+    for a rigid-seabed mode set too; the warning keeps its UPPER BOUND
+    statement for penetrable sets and states that a rigid set's value is
+    exact, naming the ``bottom=`` declaration that silences it."""
+
+    def test_warning_scopes_the_bound_and_names_the_rigid_exact_case(self):
+        with pytest.warns(UserWarning, match='UPPER BOUND') as rec:
+            _rigid_guide_modes().with_attenuation(0.01)
+        msg = next(str(w.message) for w in rec
+                   if 'UPPER BOUND' in str(w.message))
+        assert 'RIGID' in msg
+        assert 'exact' in msg
+        assert "acoustic_type='rigid'" in msg
+        assert 'so they continue as an evanescent tail' not in msg
+
+    def test_declaring_the_rigid_boundary_is_silent_and_identical(self):
+        modes = _rigid_guide_modes()
+        with pytest.warns(UserWarning, match='UPPER BOUND'):
+            water_only = modes.with_attenuation(0.01)
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            declared = modes.with_attenuation(
+                0.01, bottom=BoundaryProperties(acoustic_type='rigid'))
+        np.testing.assert_allclose(declared.k.imag, water_only.k.imag,
+                                   rtol=1e-12)

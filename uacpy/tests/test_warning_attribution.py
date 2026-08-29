@@ -328,7 +328,7 @@ def test_grn_zero_range_warning_names_the_callers_file():
 CONVERTED_SITES = [
     ('acoustic_signal/analysis.py', '_warn_two_sided', 1),
     ('acoustic_signal/arrays.py', '_powerless_covariance', 1),
-    ('acoustic_signal/channel.py', 'impulse_response', 1),
+    ('acoustic_signal/channel.py', 'impulse_response', 2),
     ('acoustic_signal/constant_q.py', '_cq_setup', 2),
     ('acoustic_signal/system_id.py', '_etfe_divide', 1),
     ('comms/channel_models.py', 'awgn', 1),

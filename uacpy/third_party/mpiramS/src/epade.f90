@@ -52,7 +52,8 @@ fact(1)=1.0_wp2
   end do
 
 allocate(bin(n+1,n+1))
-bin=0.0_wp2*bin
+! zero by assignment: allocate does not initialise, and 0*NaN=NaN
+bin=0.0_wp2
 ! The binomial coefficients.
   do ii=1,(n+1)
     bin(ii,1)=1.0_wp2
@@ -71,8 +72,8 @@ bin=0.0_wp2*bin
   allocate(b(n))
   b(1:n)=dg(2:(n+1))
  
-  ! zero a!
-  a=0.0_wp2*a
+  ! zero a by assignment (gauss reads the entries the fills below skip)
+  a=(0.0_wp2,0.0_wp2)
 
   do ii=1,n
     if ((2*ii-1)<=n) a(ii,2*ii-1)=fact(ii)

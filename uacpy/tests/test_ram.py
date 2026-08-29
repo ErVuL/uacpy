@@ -51,7 +51,7 @@ class TestRAMAdvancedParameters:
     @staticmethod
     def _inpe_pade_line(work_dir):
         """``in.pe`` is positional: line index 6 carries ``np_pade nss``
-        (peramx.f90:74-97, order pinned by ``write_inpe``)."""
+        (peramx.f90:74-105, order pinned by ``write_inpe``)."""
         decks = sorted(work_dir.rglob('in.pe'))
         assert decks, f"no in.pe under {work_dir}"
         return decks[0].read_text().splitlines()[6].split()
@@ -138,7 +138,7 @@ class TestRAMRangeDependentSSPShortRange:
 
     mpiramS's horizontal-interpolation branch (``ihorz=1``) sizes its SSP
     resample grid as ``nrp = nint(maxval(rmax)/10000)``
-    (``third_party/mpiramS/src/peramx.f90:245``). That rounds to 0 for any max
+    (``third_party/mpiramS/src/peramx.f90:253``). That rounds to 0 for any max
     receiver range below 5 km — a zero-length allocation, an all-NaN field and
     a SIGABRT (exit -6) — and to 1 below 15 km, which resamples the whole run
     onto a single profile. uacpy therefore drives mpiramS with ``ihorz=0``, so

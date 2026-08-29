@@ -460,7 +460,9 @@ def fetch_bottom_local_transect(start, end, *, n_points=6, max_points=None,
     name, and the one exported at package level as
     ``uacpy.data.fetch_bottom_local_transect``. ``water_sound_speed`` also
     takes a ``(lat, lon) -> m/s`` callable, so each column scales to the
-    water over its own seafloor.
+    water over its own seafloor. ``timeout``/``verbose`` are
+    accepted (and ignored — this backend is offline) for signature
+    uniformity with the network bottom fetchers.
 
     An unreadable cache is reported as itself: the sample indices are built
     once here, before any waypoint, so a corrupt or absent CSV raises its own

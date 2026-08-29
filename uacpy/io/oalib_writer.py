@@ -73,7 +73,11 @@ from uacpy.core.constants import (
     C_LOW_FACTOR, C_HIGH_FACTOR, DEFAULT_C_MAX_UNBOUNDED,
     DECK_AXIS_DECIMALS, DECK_DEPTH_RESOLUTION_M, DECK_RANGE_RESOLUTION_M,
 )
-from uacpy.io.utils import equally_spaced, reject_unknown_kwargs
+from uacpy.io.utils import (
+    _collapsed_pair_index,
+    equally_spaced,
+    reject_unknown_kwargs,
+)
 from uacpy.io.units import m_to_km
 from uacpy.io.refl_io import stage_reflection_file
 from uacpy.core._carrier_validate import _sanitize_title
@@ -1271,9 +1275,8 @@ def write_receiver_ranges(f: TextIO, receiver: Receiver) -> None:
     """
     n_rr = len(receiver.ranges)
     tokens = [f"{float(m_to_km(r)):.6f}" for r in receiver.ranges]
-    written = np.array([float(t) for t in tokens])
-    if written.size > 1 and not np.all(np.diff(written) > 0):
-        bad = int(np.argmin(np.diff(written)))
+    bad = _collapsed_pair_index(tokens)
+    if bad is not None:
         raise ConfigurationError(
             f"receiver ranges {receiver.ranges[bad]:g} m and "
             f"{receiver.ranges[bad + 1]:g} m both write as "
@@ -1563,9 +1566,8 @@ def write_fieldflp(
         # functions, and nothing in AT reports it: the caller gets a partly-NaN
         # field with no error and no warning.
         tokens = [f"{float(r):.6f}" for r in profile_ranges_km]
-        written = np.array([float(t) for t in tokens])
-        if written.size > 1 and not np.all(np.diff(written) > 0):
-            bad = int(np.argmin(np.diff(written)))
+        bad = _collapsed_pair_index(tokens)
+        if bad is not None:
             raise ConfigurationError(
                 f"profile ranges {profile_ranges_m[bad]:g} m and "
                 f"{profile_ranges_m[bad + 1]:g} m both write as "

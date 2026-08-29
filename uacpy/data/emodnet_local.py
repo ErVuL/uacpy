@@ -222,7 +222,9 @@ def fetch_bottom_local_transect(start: Coordinate, end: Coordinate, *,
     the package-level ``uacpy.data.fetch_bottom_local_transect`` is
     :mod:`uacpy.data.sediment_db`'s. ``water_sound_speed`` also takes a
     ``(lat, lon) -> m/s`` callable, so each column scales to the water over
-    its own seafloor.
+    its own seafloor. ``timeout``/``verbose`` are accepted (and ignored —
+    this backend is offline) for signature uniformity with the network
+    bottom fetchers.
     """
     return range_dependent_bottom_along(
         lambda la, lo: fetch_bottom_local(

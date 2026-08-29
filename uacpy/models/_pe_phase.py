@@ -136,7 +136,7 @@ def psi_to_travelling_wave(
 
     if convention == MPIRAMS:
         # peramx already applies the full 3-D / Hankel-asymptotic output scaling
-        # scl = exp(+i(ω/c₀·r + π/4))/(4π) (peramx.f90:412); the Collins PE
+        # scl = exp(+i(ω/c₀·r + π/4))/(4π) (peramx.f90:420); the Collins PE
         # self-starter is itself a far-field Hankel approximation (Collins 1993;
         # JKPS), so the π/4 is the cylindrical-spreading phase, already baked in.
         # The wrapper must therefore ONLY conjugate (peramx marches the conjugate
@@ -148,8 +148,8 @@ def psi_to_travelling_wave(
     elif convention == RAMS:
         # rams0.5 marches its own carrier in, one g₀ = exp(+i k₀ Δr rot₀) per
         # range step (``rams0.5.f:849-850``), so conj recovers the carrier —
-        # but the code writes no Hankel π/4 (``rams0.5.f:270`` factors out
-        # ``exp(+i k₀ r)`` only), so it is applied here. ``rot₀`` is the
+        # but the code writes no Hankel π/4 (the dump at ``rams0.5.f:270``
+        # divides by ``sqrt(r+eps)`` only), so it is applied here. ``rot₀`` is the
         # rotated-Padé scalar (``rams0.5.f:865-888``; exactly 1 when the
         # rotation is off, ``:909``) and is left in — it belongs to the
         # operator, not to the phase convention.

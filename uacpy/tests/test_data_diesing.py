@@ -96,3 +96,17 @@ def test_the_antimeridian_reads_alike_from_either_side(monkeypatch):
     # An interior miss is still a miss — the retry is edge-only.
     arr[:] = -3.4e38
     assert diesing_local._class_code(0.0, 0.0) is None
+
+
+def test_the_diesing_transformer_delegates_to_the_seaice_builder(monkeypatch):
+    from uacpy.data import diesing_local, seaice_local
+    calls = {}
+
+    def fake_builder(epsg, *, backend='sea-ice'):
+        calls['epsg'], calls['backend'] = epsg, backend
+        return 'sentinel-transformer'
+
+    monkeypatch.setattr(seaice_local, '_pyproj_transformer', fake_builder)
+    assert diesing_local._pyproj_transformer() == 'sentinel-transformer'
+    assert calls['epsg'] == diesing_local.WAGNER4_PROJ
+    assert 'Diesing' in calls['backend']

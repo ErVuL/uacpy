@@ -22,17 +22,19 @@ import uacpy
 from uacpy.core.absorption import convert_attenuation_units
 from uacpy.core.altimetry import Altimetry
 from uacpy.core.bathymetry import Bathymetry
-from uacpy.core.bottom import BoundaryProperties
+from uacpy.core.bottom import Bottom, BoundaryProperties
 from uacpy.core.constants import (
     AttenuationUnits, BoundaryType, SBP_ANGLE_RESOLUTION_DEG,
 )
 from uacpy.core.environment import Environment
 from uacpy.core.exceptions import ConfigurationError
-from uacpy.core.results import Field, PhaseReference, ReflectionCoefficient
+from uacpy.core.results import (Arrivals, Field, PhaseReference,
+                                ReflectionCoefficient)
 from uacpy.core.results._base import Result
 from uacpy.core.results.field import ResultStack
 from uacpy.core.source import Source
 from uacpy.core.ssp import SoundSpeedProfile
+from uacpy.core.surface import Surface
 
 
 class TestEnvironment:
@@ -3822,3 +3824,139 @@ def test_the_constructor_declares_the_input_union_the_docstring_documents(
     assert annotations.get(field) == constructor_annotation, (
         f"{cls.__name__}.__init__ annotates {field} as "
         f"{annotations.get(field)!r}, not {constructor_annotation!r}")
+
+
+def _nearest_probe_field():
+    return Field(data=np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]),
+                 coords={'depth': [0.0, 50.0],
+                         'range': [0.0, 500.0, 1000.0]},
+                 model='Test')
+
+
+def _bottom():
+    return Bottom.from_halfspaces([0.0, 1000.0, 2000.0],
+                                  sound_speed=[1600.0, 1700.0, 1800.0],
+                                  density=1.8, attenuation=0.5)
+
+
+class TestSharedNearestPathRefusesAnAxisAbsorbingLabel:
+    """``_grid.py``'s argmin-based nearest lookups refuse a finite label so
+    far outside the axis that every ``|axis - label|`` rounds to the same
+    value — the refusal ``Field.at`` makes on its own argmin path. A label
+    that still ranks (1e9 against a metre-scale axis) answers with the
+    correct end node."""
+
+    def test_bottom_at_refuses_the_absorbing_label(self):
+        with pytest.raises(ConfigurationError, match='same distance'):
+            _bottom().at(range=1e300)
+
+    def test_bottom_at_answers_a_rankable_out_of_span_label(self):
+        assert _bottom().at(range=1e9).halfspace.sound_speed == \
+            pytest.approx(1800.0, rel=1e-12)
+
+    def test_bottom_at_matches_field_at_on_the_absorbing_label(self):
+        with pytest.raises(ConfigurationError) as exc_field:
+            _nearest_probe_field().at(depth=1e300)
+        with pytest.raises(ConfigurationError) as exc_bottom:
+            _bottom().at(range=1e300)
+        assert 'same distance' in str(exc_field.value)
+        assert 'same distance' in str(exc_bottom.value)
+
+    def test_surface_at_refuses_the_absorbing_label(self):
+        s = Surface.coerce(
+            [(0.0, BoundaryProperties(acoustic_type='vacuum')),
+             (1000.0, BoundaryProperties(acoustic_type='half-space',
+                                         sound_speed=340.0, density=0.0012,
+                                         attenuation=0.0))])
+        with pytest.raises(ConfigurationError, match='same distance'):
+            s.at(range=1e300)
+
+    def test_ssp_at_refuses_the_absorbing_depth_label(self):
+        ssp = SoundSpeedProfile(depths=[0.0, 50.0, 100.0],
+                                data=[1500.0, 1490.0, 1495.0])
+        with pytest.raises(ConfigurationError, match='same distance'):
+            ssp.at(depth=1e300)
+
+    def test_field_eval_nearest_matches_field_at_refusal(self):
+        with pytest.raises(ConfigurationError, match='same distance'):
+            _nearest_probe_field().eval(depth=1e300, method='nearest')
+
+    def test_bathymetry_searchsorted_path_answers_the_far_node(self):
+        """``Bathymetry.at`` brackets by searchsorted + midpoint compare,
+        which is cancellation-immune: the huge label resolves to the correct
+        end node on both sides."""
+        bath = Bathymetry(ranges=[0.0, 1000.0, 2000.0],
+                          depths=[100.0, 200.0, 300.0])
+        assert bath.at(range=1e300) == pytest.approx(300.0, rel=1e-12)
+        assert bath.at(range=-1e300) == pytest.approx(100.0, rel=1e-12)
+
+    def test_a_single_node_axis_takes_any_finite_label(self):
+        """One node cannot tie with another, so there is nothing to lose."""
+        b1 = Bottom.from_halfspaces([5000.0], sound_speed=[1600.0],
+                                    density=1.8, attenuation=0.5)
+        assert b1.at(range=1e300).halfspace.sound_speed == \
+            pytest.approx(1600.0, rel=1e-12)
+
+
+class TestSingleNodeRangesTravelsThroughSspSlicing:
+    """A single-node ``ranges`` is a coordinate at that range —
+    ``env.max_range`` reads it — so every SSP slice of a single-column
+    profile carries it, the rule ``Bottom.select_range`` states for the
+    same case."""
+
+    def _ssp(self):
+        return SoundSpeedProfile(depths=[0.0, 50.0, 100.0],
+                                 data=[[1500.0], [1490.0], [1495.0]],
+                                 ranges=[5000.0])
+
+    def test_a_depth_only_slice_keeps_env_max_range(self):
+        env = Environment(ssp=self._ssp().at(depth=50.0), bathymetry=100.0)
+        assert env.max_range == pytest.approx(5000.0, rel=1e-12)
+
+    @pytest.mark.parametrize('slicer', [
+        lambda s: s.at(depth=50.0),
+        lambda s: s.at(range=5000.0),
+        lambda s: s.eval(depth=25.0),
+        lambda s: s.isel(depth=0),
+        lambda s: s.isel(range=0),
+    ], ids=['at_depth', 'at_range', 'eval_depth', 'isel_depth',
+            'isel_range'])
+    def test_each_slice_keeps_the_single_node_ranges(self, slicer):
+        out = slicer(self._ssp())
+        assert out.ranges is not None
+        assert float(out.ranges[0]) == pytest.approx(5000.0, rel=1e-12)
+
+    def test_collapsing_a_range_dependent_profile_drops_ranges(self):
+        """Pinning the range axis of a multi-column profile collapses it, so
+        the result carries no ranges — the ``Bottom.select_range('r0')``
+        counterpart."""
+        rd = SoundSpeedProfile(depths=[0.0, 100.0],
+                               data=[[1500.0, 1510.0], [1490.0, 1505.0]],
+                               ranges=[0.0, 5000.0])
+        assert rd.at(range=5000.0).ranges is None
+        assert rd.isel(range=1).ranges is None
+
+
+class TestArrivalDictPhaseUnit:
+    """The per-arrival dict carries ``'phase'`` in degrees (the ``.arr``
+    reader's unit, preserved for ``by_receiver`` parity); the class
+    docstring key list says so, and the ``phases`` accessor converts to
+    radians."""
+
+    def _arrivals(self):
+        cell = {'delays': [0.1], 'amplitudes': [1.0], 'phases': [180.0],
+                'n_top_bounces': [0], 'n_bot_bounces': [0],
+                'src_angles': [0.0], 'rcv_angles': [0.0]}
+        return Arrivals(by_receiver=[[[cell]]], receiver_depths=[10.0],
+                        receiver_ranges=[100.0], model='Test',
+                        frequencies=100.0)
+
+    def test_dict_phase_is_degrees_and_accessor_radians(self):
+        arr = self._arrivals()
+        assert arr.arrivals[0]['phase'] == pytest.approx(180.0, rel=1e-12)
+        assert arr.phases[0] == pytest.approx(np.pi, rel=1e-12)
+
+    def test_class_docstring_names_the_degree_unit_for_phase(self):
+        doc = Arrivals.__doc__
+        segment = doc.split('``phase``', 1)[1].split('``n_top_bounces``')[0]
+        assert 'degrees' in segment

@@ -32,7 +32,9 @@ so restoring the old body is caught as well as deleting the new one.
 """
 
 import inspect
+import io
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -49,6 +51,7 @@ from uacpy.io.oalib_reader import (
 )
 from uacpy.io.oalib_writer import write_field3dflp
 from uacpy.io.ramsurf_reader import read_tl_line
+from uacpy.io.utils import _collapsed_pair_index
 from uacpy.io.refl_io import (
     read_reflection_coefficient, write_reflection_coefficient,
 )
@@ -688,3 +691,103 @@ class TestCollinsTlLine:
     def test_a_missing_file_is_a_format_error(self, tmp_path):
         with pytest.raises(FileFormatError, match='not found'):
             read_tl_line(tmp_path / 'absent.line')
+
+
+class TestWrittenTokenCollisionGuardsShareOneDetector:
+    """Each of the six deck-column guards raises its own site-specific
+    ``ConfigurationError``, and all six locate the offending pair through
+    ``uacpy.io.utils._collapsed_pair_index``."""
+
+    def test_receiver_ranges_that_collide_in_the_km_column_are_refused(self):
+        from uacpy.io.oalib_writer import write_receiver_ranges
+        # A bare namespace stands in for the carrier: Receiver's own 1 mm
+        # step floor refuses this pair before the writer ever sees it, so
+        # the writer's token check is exercised directly.
+        carrier = SimpleNamespace(ranges=np.array([1000.0, 1000.0004]))
+        with pytest.raises(ConfigurationError, match='1 mm resolution'):
+            write_receiver_ranges(io.StringIO(), carrier)
+
+    def test_fieldflp_profile_ranges_that_collide_are_refused(self, tmp_path):
+        from uacpy.io.oalib_writer import write_fieldflp
+        with pytest.raises(ConfigurationError,
+                           match='profile axis non-increasing'):
+            write_fieldflp(
+                tmp_path / 'bad.flp', 'RA',
+                {'r': {'r': np.array([1000.0]), 'z': np.array([50.0])},
+                 's': {'z': np.array([25.0])}},
+                n_profiles=2, profile_ranges_m=np.array([0.0, 0.0004]))
+
+    def test_valid_profile_ranges_write(self, tmp_path):
+        from uacpy.io.oalib_writer import write_fieldflp
+        out = tmp_path / 'ok.flp'
+        write_fieldflp(
+            out, 'RA',
+            {'r': {'r': np.array([1000.0]), 'z': np.array([50.0])},
+             's': {'z': np.array([25.0])}},
+            n_profiles=2, profile_ranges_m=np.array([0.0, 5000.0]))
+        assert out.exists()
+
+    def test_bty_ranges_that_collide_in_the_km_column_are_refused(
+            self, tmp_path):
+        from uacpy.io.bathy_io import write_bty_file
+        with pytest.raises(ConfigurationError, match='5.000000 km'):
+            write_bty_file(
+                tmp_path / 'bad.bty',
+                np.array([[0.0, 200.0], [5000.0, 190.0],
+                          [5000.0004, 180.0], [10000.0, 200.0]]))
+
+    def test_oases_receiver_depth_tokens_that_collide_are_refused(self):
+        from uacpy.io.oases_writer import _check_receiver_depth_tokens
+        with pytest.raises(ConfigurationError, match='0.01 m resolution'):
+            _check_receiver_depth_tokens(
+                [50.0, 50.001], ['50.00', '50.00'], what='receiver depths')
+
+    def test_distinct_brc_angles_that_collide_when_rounded_are_refused(
+            self, tmp_path):
+        from uacpy.io.refl_io import write_reflection_coefficient
+        with pytest.raises(ConfigurationError, match='both write 10.000000'):
+            write_reflection_coefficient(
+                tmp_path / 'bad.brc', np.array([10.0, 10.0000004]),
+                np.array([0.5 + 0.0j, 0.6 + 0.0j]))
+
+    def test_a_deliberately_repeated_brc_angle_is_not_a_collision(
+            self, tmp_path):
+        from uacpy.io.refl_io import write_reflection_coefficient
+        out = tmp_path / 'ok.brc'
+        write_reflection_coefficient(
+            out, np.array([10.0, 10.0, 20.0]),
+            np.array([0.5 + 0.0j, 0.5 + 0.0j, 0.6 + 0.0j]))
+        assert out.exists()
+
+    def test_sbp_angles_closer_than_the_column_resolution_are_refused(
+            self, tmp_path):
+        from uacpy.io.refl_io import write_source_beam_pattern
+        with pytest.raises(ConfigurationError, match='angle resolution'):
+            write_source_beam_pattern(
+                tmp_path / 'bad.sbp', np.array([0.0, 5e-7]),
+                np.array([0.0, -3.0]))
+
+    def test_an_sbp_step_exactly_at_the_resolution_is_accepted(
+            self, tmp_path):
+        from uacpy.io.refl_io import write_source_beam_pattern
+        out = tmp_path / 'ok.sbp'
+        write_source_beam_pattern(
+            out, np.array([0.0, 1e-6]), np.array([0.0, -3.0]))
+        assert out.exists()
+
+    def test_the_detector_reports_the_collapsed_token_pair(self):
+        assert _collapsed_pair_index(['1.000000', '1.000000']) == 0
+        assert _collapsed_pair_index(['1.000000', '2.000000']) is None
+        assert _collapsed_pair_index(['1.000000']) is None
+
+    def test_the_detector_ignores_a_repeat_the_raw_axis_carries(self):
+        written = np.array([10.0, 10.0, 20.0])
+        assert _collapsed_pair_index(written, raw=written) is None
+        assert _collapsed_pair_index(
+            np.array([10.0, 10.0]), raw=np.array([10.0, 10.0000004])) == 0
+
+    def test_the_detector_bounds_step_size_in_min_step_mode(self):
+        assert _collapsed_pair_index(
+            np.array([0.0, 1e-6]), min_step=1e-6) is None
+        assert _collapsed_pair_index(
+            np.array([0.0, 5e-7]), min_step=1e-6) == 0

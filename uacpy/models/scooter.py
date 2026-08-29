@@ -75,6 +75,14 @@ def _deck_nk(rmax_m: float, f_max: float, c_low: float, c_high: float) -> int:
     return int(4000.0 * rmax_km * float(f_max) * (1.0 / cl - 1.0 / ch))
 
 
+#: Ceiling on the complex64 Green's-function cube a Scooter run commits
+#: ``read_grn_file`` to allocating whole (``grn_reader.py``:
+#: ``np.zeros((nfreq, nsd, nrd, nk), dtype=np.complex64)``): the same 2 GiB
+#: budget SPARC's snapshot cap puts on its own Green cube
+#: (``sparc._MAX_SNAPSHOT_GREEN_BYTES``).
+_MAX_GREEN_CUBE_BYTES = 2 * 1024 ** 3
+
+
 class Scooter(PropagationModel):
     """
     Scooter finite element FFP (Fast Field Program) model
@@ -643,6 +651,21 @@ class Scooter(PropagationModel):
                 ),
             )
 
+        # The deck writes the frequency vector only when it holds more than
+        # one entry (``write_broadband_freqs``); otherwise the ``.grn``
+        # carries the single header frequency — the same branch
+        # ``_deck_max_frequency`` mirrors.
+        freqs_deck = (np.atleast_1d(frequencies)
+                      if frequencies is not None else None)
+        n_freqs = (len(freqs_deck)
+                   if freqs_deck is not None and len(freqs_deck) > 1 else 1)
+        self._reject_oversized_green_cube(
+            nk, n_freqs,
+            int(np.atleast_1d(np.asarray(source.depths)).size),
+            int(np.atleast_1d(np.asarray(receiver.depths)).size),
+            rmax_m=rmax_m, f_deck=f_deck, c_low=cl, c_high=ch,
+        )
+
         write_scooter_env_file(
             filepath, env, source, receiver,
             ssp_topopt=ssp_topopt,
@@ -670,6 +693,49 @@ class Scooter(PropagationModel):
             if len(freqs) > 1:
                 return float(freqs[-1])
         return float(source.frequencies[0])
+
+    def _reject_oversized_green_cube(
+        self, nk: int, n_freqs: int, n_source_depths: int,
+        n_receiver_depths: int, *, rmax_m: float, f_deck: float,
+        c_low: float, c_high: float,
+    ) -> None:
+        """Cap the Green's-function cube this deck commits uacpy to reading.
+
+        ``scooter.exe`` holds one frequency's ``Green(NSz, NRz, Nk)`` at a
+        time, but the ``.grn`` accumulates every frequency and
+        ``read_grn_file`` allocates the whole ``(nfreq, nsd, nrd, nk)``
+        complex64 cube in one ``np.zeros`` — the Python process, not the
+        binary, takes the full hit. ``Nk`` grows linearly with RMax
+        (``receiver.ranges.max() × rmax_multiplier``), the top deck
+        frequency and the phase-speed span, so a plausible broadband deck
+        reaches tens of GB with no single knob looking unreasonable. The
+        budget is the 2 GiB SPARC's snapshot cap applies to its own Green
+        cube (``sparc.py`` ``_MAX_SNAPSHOT_GREEN_BYTES``), against the same
+        8-byte complex64 element the reader allocates.
+        """
+        n_bytes = (8 * int(n_freqs) * int(n_source_depths)
+                   * int(n_receiver_depths) * int(nk))
+        if n_bytes <= _MAX_GREEN_CUBE_BYTES:
+            return
+        raise ConfigurationError(
+            f"This deck asks Scooter for Nk = {int(nk)} wavenumber samples: "
+            f"a {n_bytes / 1024 ** 3:.1f} GiB complex64 Green's-function "
+            f"cube ({int(n_freqs)} frequencies × {int(n_source_depths)} "
+            f"source depth(s) × {int(n_receiver_depths)} receiver depth(s) × "
+            f"Nk × 8 B), over the {_MAX_GREEN_CUBE_BYTES / 1024 ** 3:.1f} "
+            f"GiB cap uacpy reads a .grn under. scooter.f90:69 derives "
+            f"Nk = INT(2000 * RMax_km * (kMax - kMin) / pi) from "
+            f"RMax = {rmax_m:g} m at {f_deck:.6g} Hz with "
+            f"c_low = {c_low:.1f} and c_high = {c_high:.1f} m/s.",
+            remediation=(
+                "Nk scales with RMax = receiver.ranges.max() x "
+                "rmax_multiplier, with the top deck frequency, and with the "
+                "width of the c_low/c_high phase-speed window: lower "
+                "rmax_multiplier or the receiver ranges, lower f_max, or "
+                "narrow the window. Fewer deck frequencies or receiver "
+                "depths shrink the cube too."
+            ),
+        )
 
     def _run_scooter(self, base_name: str, work_dir: Path):
         """Execute Scooter via the shared binary-launch helper."""

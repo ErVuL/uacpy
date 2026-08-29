@@ -550,7 +550,9 @@ the four private renderers means editing its `core` caller in the same change
 otherwise). And `core` cannot be read, split or vendored without the plotting
 stack, even though nothing else in `core` needs matplotlib. Removing the eight
 edges would make `core` a sink but would *not* make the package graph acyclic:
-a 19-module SCC inside `uacpy.data` and a 3-module one across
+a 22-module SCC inside `uacpy.data` (counting every import edge, function-local
+imports included — the same edge definition as the eight edges above; on
+top-level imports alone it is 11 modules) and a 3-module one across
 `core.results` / `core.results.field` / `core.results.modes` remain either
 way.
 
@@ -644,6 +646,7 @@ runtime `UserWarning` whenever fetched, so they are never returned silently.
 pytest                         # full suite, -n logical via xdist (pyproject default)
 pytest -n 0                    # single-process for debugging
 pytest -m "not slow"           # fast subset
+pytest -m "not requires_binary and not slow"   # pure-Python dev tier
 pytest uacpy/tests/test_bellhop.py::TestX::test_y -v
 ```
 
@@ -656,6 +659,40 @@ Markers (registered in `pyproject.toml`):
   fetchers); deselected by default via `addopts`.
 - `benchmark` — validates output against a closed-form analytic or
   canonical published reference.
+- `convention` — pins repo conventions rather than runtime behaviour
+  (docstring prose, source-convention sweeps, repr snapshots); a failure
+  signals doc/convention drift, not a runtime defect.
+
+The composed dev tier `-m "not requires_binary and not slow"` is the fast
+pure-Python loop: 3,849 of 5,232 test functions, ≥5,172 collected cases
+(static AST count as of 2026-08-29; `requires_oases` tests count as
+`requires_binary` because `conftest.pytest_collection_modifyitems`
+auto-attaches that marker, which is also what makes the conjunction
+exclude OASES tests). It is a development loop, not a gate: the full
+suite (default `pytest` invocation) must pass before a change lands.
+Gate runs pass `-rs --durations=50` so every skip is identified in the
+summary — a missing binary degrades marker-less guarded tests to skips,
+and only the `-rs` report makes that visible — and the 50 slowest tests
+are recorded for the next audit to measure against.
+
+**`match=` anchoring.** Tests that pin error or warning wording via
+`pytest.raises(..., match=...)` / `pytest.warns(..., match=...)` match
+the load-bearing fragment only — the clause that carries the contract
+(the offending name, the limit, the unit), never the full sentence.
+`match=` is an unanchored `re.search`, so a fragment pattern survives
+rewording around it, while a fully anchored pattern turns every wording
+change into edits across hundreds of tests. Escape any regex
+metacharacters inside the fragment (`re.escape` or `\(`-style escapes).
+
+Future maintenance: the mechanical sibling clusters — 139–185 test
+functions (2.7–3.5% of the suite, same-file siblings identical once
+constants are masked, concentrated in `test_io_functions.py` and
+`test_oass.py`) — are `@pytest.mark.parametrize` candidates, to be
+folded file-by-file with per-file collected-case parity as the gate.
+The `convention` marker is registered but not yet applied to the
+meta/convention tests scattered through the mixed test modules
+(doc-prose, source-sweep and repr-snapshot pins); marking those
+class-by-class is the other standing maintenance item.
 
 `test_documentation.py` is the docs gate. It imports `docs/check_links.py` and
 `docs/check_structure.py` and runs them over `docs/` — dead link, dead section

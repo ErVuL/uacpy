@@ -1,5 +1,6 @@
 """Tests for the RAM multi-backend dispatcher and the Collins-style I/O."""
 
+import re
 import warnings
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from uacpy.core.environment import (
 from uacpy import Field
 from uacpy.core.receiver import Receiver
 from uacpy.core.source import Source
+from uacpy.io.mpirams_writer import write_inpe
 from uacpy.io.ramsurf_writer import write_ramin
 from uacpy.models import RAM, RunMode
 from uacpy.core.exceptions import (
@@ -503,7 +505,7 @@ class TestRamInWriter:
 class TestMpiramsDeckUnits:
     """The units split of the mpiramS decks (docs/guide/io.md §'What
     converts'): the SSP file's profile-header range axis is km
-    (``peramx.f90:232`` multiplies it back by 1000), while the bathymetry
+    (``peramx.f90:240`` multiplies it back by 1000), while the bathymetry
     and output-range files are read unscaled in metres. Deck-level, no
     binary."""
 
@@ -1554,7 +1556,7 @@ class TestEnvelopePhaseSurvivesResampling:
 @pytest.mark.requires_binary
 class TestBroadbandDepthGridIsNonUniform:
     """``flat_earth=True`` (the default) makes peramx un-transform its output
-    depth axis with ``zg/(1 + eps/2 + eps²/3)`` (peramx.f90:427-432) — a
+    depth axis with ``zg/(1 + eps/2 + eps²/3)`` (peramx.f90:435-440) — a
     quadratic map, so ``_run_broadband`` cannot bracket receiver depths with
     the uniform ``(z - zg[0]) / (zg[1] - zg[0])``."""
 
@@ -2236,7 +2238,7 @@ class TestRangeSegmentMarkersAreMidpoints:
 
 
 class TestBroadbandBandStaysPositive:
-    """``peramx.f90:345-362`` builds ``frq(1) = fc - nf1/T`` with no
+    """``peramx.f90:353-370`` builds ``frq(1) = fc - nf1/T`` with no
     positivity guard in the serial driver uacpy builds; its MPI sibling stops
     on exactly this test and names ``Q``
     (``mpiramS/src/peramx_mpi.f90:417-423``)."""
@@ -2263,22 +2265,66 @@ class TestBroadbandBandStaysPositive:
                 env, src, rcv, run_mode=RunMode.BROADBAND)
 
 
+@pytest.mark.requires_binary
+class TestRamNamesTheRealFcConstraintAtTheBandEdge:
+    """``_broadband_frequencies`` marches ``fc ± nf1·Δf``, so the marchable
+    condition is ``fc > nf1·Δf``. With ``nf1`` floored at 1 — the collapsed
+    COHERENT_TL sweep (Q=1e6, T=1) included — Q no longer enters and the
+    binding knob is ``Δf = 1/T``; the error's advice names the knob for the
+    regime it is in. The coherent-TL path runs the same check before the
+    file manager, so a deck whose derived ``fc − Δf`` bin is not positive
+    is never written for the guardless serial binary."""
+
+    def test_fc_equal_to_the_step_is_refused_naming_the_constraint(self):
+        with pytest.raises(ConfigurationError,
+                           match='lower band edge') as exc:
+            RAM._broadband_frequencies(1.0, 1e6, 1.0)
+        msg = str(exc.value)
+        assert 'must exceed' in msg
+        assert 'Lengthen T' in msg
+        assert 'shorten T' not in msg
+
+    def test_fc_just_above_the_step_marches_three_positive_bins(self):
+        frq = RAM._broadband_frequencies(1.000001, 1e6, 1.0)
+        assert len(frq) == 3
+        assert frq[0] > 0.0
+
+    def test_a_small_q_band_is_refused_naming_q(self):
+        with pytest.raises(ConfigurationError, match='Raise Q'):
+            RAM._broadband_frequencies(100.0, 0.5, 0.2)
+
+    def test_coherent_tl_refuses_fc_at_the_step_before_any_file_exists(
+            self, monkeypatch):
+        m = RAM(verbose=False)
+        monkeypatch.setattr(
+            m, '_setup_file_manager',
+            lambda: pytest.fail('file manager reached before the fc check'))
+        with pytest.raises(ConfigurationError, match='lower band edge'):
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                m._run_tl(
+                    Environment(name='flat', bathymetry=100.0, ssp=1500.0),
+                    Source(depths=25.0, frequencies=1.0),
+                    Receiver(depths=np.array([50.0]),
+                             ranges=np.array([1000.0])))
+
+
 # ─── Regression: the mpiramS depth grid really is deltaz-spaced ──────────
 
 
 @pytest.mark.requires_binary
 @pytest.mark.parametrize('flat_earth', [True, False])
 def test_mpirams_zmax_is_an_exact_multiple_of_deltaz(tmp_path, flat_earth):
-    """``peramx.f90:374,387`` builds the depth grid as
+    """``peramx.f90:382,395`` builds the depth grid as
     ``linspace(0, zmax, floor(zmax/deltaz - 0.5) + 2)``, whose spacing is
     ``zmax/(icount-1)``, while the depth operator (``ram.f90:51``, consumed at
     ``matrc.f90:60-62``) and the seafloor index (``ram.f90:101``) use
     ``deltaz``. They coincide only for a ``zmax`` that is a multiple of
     ``deltaz``.
 
-    The depth that matters is the one ``peramx.f90:371`` reads
+    The depth that matters is the one ``peramx.f90:379`` reads
     (``zmax = maxval(zw)``), which under the default ``flat_earth`` is the
-    written column *after* ``peramx.f90:264-266`` rescales it — so the check
+    written column *after* ``peramx.f90:272-274`` rescales it — so the check
     has to apply that map, not re-use the written value.
     """
     env = _env(bottom=_fluid_bottom())
@@ -2622,7 +2668,7 @@ class TestCollinsHankelPhase:
     """The Collins codes factor out only ``exp(+i k0 r)`` (ramgeo1.5.f:436,
     ramsurf1.5.f:445, rams0.5.f:270), so ``psi_to_travelling_wave`` supplies
     the Hankel ``exp(-iπ/4)`` itself; mpiramS bakes it into psif
-    (peramx.f90:412) so its branch must not."""
+    (peramx.f90:420) so its branch must not."""
 
     def test_ramsurf_and_rams_carry_exp_minus_i_pi_4(self):
         from uacpy.models._pe_phase import psi_to_travelling_wave
@@ -2815,7 +2861,7 @@ class TestSurfaceNodeReportsTlFloor:
 class TestMpiramsBroadbandGridSpansTheBand:
     """mpiramS reads ``deltaz``/``deltar`` once (``peramx.f90:78-79``) and
     sizes its depth grid once (``icount = floor(zmax/deltaz - 0.5) + 2``,
-    ``:374``) *before* the frequency loop opens at ``:404``, so a single grid
+    ``:382``) *before* the frequency loop opens at ``:408``, so a single grid
     marches every bin of the band. Sizing that grid at the band centre leaves
     the top of the band under-sampled in depth and the absorbing layer short
     of ``absorbing_layer_width`` wavelengths at the bottom of it, and nothing
@@ -2839,7 +2885,7 @@ class TestMpiramsBroadbandGridSpansTheBand:
 
         Returns ``(deltar, deltaz, zmax)`` — the two grid steps ``in.pe``
         carries and the domain depth mpiramS reads back off the SSP as
-        ``zmax = maxval(zw)`` (``peramx.f90:371``).
+        ``zmax = maxval(zw)`` (``peramx.f90:379``).
         """
         def stop(model_self, *args, **kwargs):
             raise _SolverStopped()
@@ -3077,7 +3123,7 @@ def _write_psif(work_dir, *, nf=1, nzo=2, nr=1, record_extra=()):
 
 
 class TestMpiramsSspRejectsDecksThePeramxCounterMisreads:
-    """``peramx.f90:220-224`` derives both counts from the sign of each
+    """``peramx.f90:228-232`` derives both counts from the sign of each
     record's first token: a negative one is a ``-1 range`` profile header, and
     only the non-negative tokens inside the first profile are counted as
     depths. A negative depth is therefore counted as a profile *and* missed as
@@ -3115,7 +3161,7 @@ class TestMpiramsSspRejectsDecksThePeramxCounterMisreads:
 
 
 class TestMpiramsSedimentRowsMustMatchNzsExactly:
-    """``peramx.f90:133-145`` reads every sediment row as
+    """``peramx.f90:141-153`` reads every sediment row as
     ``read (nunit,*) (cs(jj,1), jj=1,nzs)``, a list-directed read of exactly
     ``nzs`` values. A row longer than ``nzs`` is truncated with no diagnostic,
     taking the absorbing-layer values at its end with it; a shorter one runs
@@ -3128,8 +3174,8 @@ class TestMpiramsSedimentRowsMustMatchNzsExactly:
         kwargs = dict(
             fc=100.0, Q=1.0, T=1.0, zsrc=10.0, deltaz=0.5, deltar=10.0,
             np_pade=6, nss=1, rs=0.0, dzm=1, ssp_filename='S.ssp',
-            iflat=0, ihorz=0, ibot=1, bth_filename='B.bth', nzs=3,
-            cs=np.zeros(3), rho=np.full(3, 1.2), attn=np.full(3, 0.5),
+            iflat=0, ihorz=0, ibot=1, bth_filename='B.bth', nzs=4,
+            cs=np.zeros(4), rho=np.full(4, 1.2), attn=np.full(4, 0.5),
             c0_user=1500.0,
         )
         kwargs.update(overrides)
@@ -3137,18 +3183,18 @@ class TestMpiramsSedimentRowsMustMatchNzsExactly:
 
     def test_an_inpe_row_longer_than_nzs_raises_configurationerror(
             self, tmp_path):
-        with pytest.raises(ConfigurationError, match=r'nzs=3.*4 value'):
-            self._write_deck(tmp_path, attn=np.full(4, 0.5))
+        with pytest.raises(ConfigurationError, match=r'nzs=4.*5 value'):
+            self._write_deck(tmp_path, attn=np.full(5, 0.5))
 
     def test_an_inpe_row_shorter_than_nzs_raises_configurationerror(
             self, tmp_path):
-        with pytest.raises(ConfigurationError, match=r'nzs=3.*2 value'):
-            self._write_deck(tmp_path, cs=np.zeros(2))
+        with pytest.raises(ConfigurationError, match=r'nzs=4.*3 value'):
+            self._write_deck(tmp_path, cs=np.zeros(3))
 
-    def test_matched_inpe_rows_write_three_nzs_value_records(self, tmp_path):
+    def test_matched_inpe_rows_write_nzs_values_per_record(self, tmp_path):
         self._write_deck(tmp_path)
         lines = (tmp_path / 'in.pe').read_text().splitlines()
-        assert [len(ln.split()) for ln in lines[-3:]] == [3, 3, 3]
+        assert [len(ln.split()) for ln in lines[-3:]] == [4, 4, 4]
 
     @staticmethod
     def _write_sed(tmp_path, n_depths):
@@ -3394,3 +3440,202 @@ class TestTlDoesNotDependOnTheOutputGrid:
             f"TL at the {int(shared.sum())} shared ranges moved by up to "
             f"{np.max(d):.4f} dB (median {np.median(d):.4f}) when the output "
             f"grid was refined from 50 m to 25 m")
+
+
+_THIRD_PARTY = Path(__file__).resolve().parents[1] / 'third_party'
+_MPIRAMS = _THIRD_PARTY / 'mpiramS'
+_MPIRAMS_SRC = _MPIRAMS / 'src'
+
+
+def _vendored_text(path: Path) -> str:
+    if not path.exists():
+        pytest.skip(f"{path.name} not vendored here")
+    return path.read_text(errors='ignore')
+
+
+def _write_inpe_kwargs(nzs: int) -> dict:
+    return dict(
+        fc=75.0, Q=75.0, T=1.0, zsrc=500.0, deltaz=1.0, deltar=100.0,
+        np_pade=4, nss=1, rs=1000.0, dzm=10, ssp_filename='test.ssp',
+        iflat=0, ihorz=0, ibot=1, bth_filename='test.bth', sedlayer=300.0,
+        nzs=nzs, cs=np.zeros(nzs), rho=np.full(nzs, 1.2),
+        attn=np.full(nzs, 0.5), c0_user=1500.0,
+    )
+
+
+class TestIntervHasNoSharedState:
+    """``interv`` runs concurrently under the ``peramx.f90`` OpenMP
+    frequency loop (``ram`` -> ``profl`` -> ``gorp2`` -> ``ppvalu`` ->
+    ``interv``) and ``splnlib.f90`` carries no OpenMP directive, so any
+    SAVE variable in it is process-shared across threads. ``ilo`` is a
+    per-call local (third_party/MODIFICATIONS.md, splnlib entry)."""
+
+    def _interv_body(self) -> str:
+        text = _vendored_text(_MPIRAMS_SRC / 'splnlib.f90')
+        m = re.search(r'subroutine interv\b(.*?)\nend\s*\n', text,
+                      re.DOTALL | re.IGNORECASE)
+        assert m, "no interv subroutine found in splnlib.f90"
+        return m.group(1)
+
+    def test_interv_declares_no_save_variable(self):
+        code_lines = [ln for ln in self._interv_body().splitlines()
+                      if ln.strip() and not ln.lstrip().startswith('!')]
+        offenders = [ln for ln in code_lines
+                     if re.search(r'\bsave\b', ln, re.IGNORECASE)]
+        assert not offenders, (
+            f"interv holds SAVE state, shared across OpenMP threads: "
+            f"{offenders}")
+        # an initialised declaration (``integer :: ilo = 1``) implies SAVE
+        implied = [ln for ln in code_lines if re.search(r'::\s*ilo\s*=', ln)]
+        assert not implied, (
+            f"initialised declaration gives ilo the SAVE attribute: "
+            f"{implied}")
+
+    def test_interv_starts_its_search_from_one_on_every_call(self):
+        assert re.search(r'\n\s*ilo\s*=\s*1\s*\n\s*ihi\s*=\s*ilo\s*\+\s*1',
+                         self._interv_body()), (
+            "interv does not initialise ilo to 1 before its first use")
+
+    def test_built_mpirams_sources_hold_no_save_state_at_all(self):
+        """The state the design intends as per-thread sits under
+        ``!$OMP THREADPRIVATE`` in the modules; SAVE anywhere else in the
+        built sources is shared under ``-fopenmp``. ``peramx_mpi.f90`` is
+        excluded: never built (MODIFICATIONS.md)."""
+        offenders = []
+        for path in sorted(_MPIRAMS_SRC.glob('*.f90')):
+            if path.name == 'peramx_mpi.f90':
+                continue
+            for i, ln in enumerate(path.read_text(errors='ignore')
+                                   .splitlines(), 1):
+                if ln.strip() and not ln.lstrip().startswith('!') \
+                        and re.search(r'\bsave\b', ln, re.IGNORECASE):
+                    offenders.append(f"{path.name}:{i}: {ln.strip()}")
+        assert not offenders, f"SAVE state in built sources: {offenders}"
+
+
+class TestZeroInitIsByAssignment:
+    def test_built_mpirams_sources_zero_arrays_by_assignment(self):
+        """``0.0*x`` on a freshly allocated array keeps NaN/Inf heap
+        residue (``0*NaN = NaN``); the built sources zero by assignment
+        (MODIFICATIONS.md: matrc / solvetri / ram / gorp / epade entries).
+        ``peramx_mpi.f90`` is excluded: never built."""
+        pattern = re.compile(r'[=+(]\s*0\.0_wp2?\s*\*')
+        offenders = []
+        for path in sorted(_MPIRAMS_SRC.glob('*.f90')):
+            if path.name == 'peramx_mpi.f90':
+                continue
+            for i, ln in enumerate(path.read_text(errors='ignore')
+                                   .splitlines(), 1):
+                if pattern.search(ln):
+                    offenders.append(f"{path.name}:{i}: {ln.strip()}")
+        assert not offenders, (
+            f"multiply-by-zero initialisation in built sources: {offenders}")
+
+
+class TestNzsFloor:
+    """``profl`` lays the sediment control points out as [surface,
+    seafloor, nzs-3 interior, domain floor] and stores ``zwork(2)``
+    unconditionally (``mpiramS/src/ram.f90:334-342``), so ``nzs=1`` writes
+    past the end of a 1-element allocation. Both the deck writer and the
+    binary reject nzs < 4."""
+
+    @pytest.mark.parametrize('nzs', [1, 3])
+    def test_write_inpe_rejects_nzs_below_four(self, tmp_path, nzs):
+        with pytest.raises(ConfigurationError,
+                           match="nzs must be at least 4"):
+            write_inpe(tmp_path / 'in.pe', **_write_inpe_kwargs(nzs))
+
+    def test_write_inpe_writes_a_deck_at_the_nzs_floor(self, tmp_path):
+        write_inpe(tmp_path / 'in.pe', **_write_inpe_kwargs(4))
+        lines = (tmp_path / 'in.pe').read_text().splitlines()
+        assert lines[17].split()[0] == '4'
+        for row in lines[19:22]:
+            assert len(row.split()) == 4
+
+    def test_peramx_stops_on_nzs_below_four_at_read_time(self):
+        text = _vendored_text(_MPIRAMS_SRC / 'peramx.f90')
+        read_nzs = text.index('read (nunit,*) nzs')
+        read_isedrd = text.index('read (nunit,*) isedrd')
+        guard = text.index('if (nzs < 4) then')
+        assert read_nzs < guard < read_isedrd, (
+            "the nzs guard must sit between the nzs and isedrd reads, "
+            "before any nzs-sized allocation")
+        assert 'nzs must be at least 4' in text
+
+
+class TestShippedSampleDeck:
+    """The vendored ``mpiramS/in.pe`` is a current-format deck: one value
+    record per line in the order ``peramx.f90:74-105`` consumes them, with
+    bare filename lines (the ``(a)`` reads take the whole record)."""
+
+    def _deck_lines(self):
+        return _vendored_text(_MPIRAMS / 'in.pe').splitlines()
+
+    def test_sample_deck_scalar_lines_parse_in_reader_order(self):
+        lines = self._deck_lines()
+        float(lines[0].split()[0])                    # title: readable number
+        fc, q = (float(t) for t in lines[1].split()[:2])
+        assert fc > 0 and q > 0
+        for idx in (2, 3, 4, 5, 7):                   # T zsrc deltaz deltar rs
+            assert float(lines[idx].split()[0]) > 0
+        np_pade, nss = (int(t) for t in lines[6].split()[:2])
+        assert np_pade >= 2 and nss >= 0
+        assert int(lines[8].split()[0]) >= 1          # dzm
+        assert float(lines[9].split()[0]) > 0         # c0_user must be positive
+        for idx in (11, 12, 13):                      # iflat ihorz ibot flags
+            assert int(lines[idx].split()[0]) in (0, 1)
+        assert float(lines[16].split()[0]) > 0        # sedlayer
+
+    def test_sample_deck_filename_lines_are_bare_and_resolve(self):
+        lines = self._deck_lines()
+        for idx in (10, 14, 15):
+            name = lines[idx].strip()
+            assert '!' not in name, (
+                f"line {idx + 1} is read with (a): a trailing comment would "
+                f"become part of the filename {name!r}")
+            assert (_MPIRAMS / name).exists(), f"{name} not shipped"
+
+    def test_sample_deck_sediment_block_matches_its_nzs(self):
+        lines = self._deck_lines()
+        nzs = int(lines[17].split()[0])
+        assert nzs >= 4
+        assert int(lines[18].split()[0]) == 0         # isedrd: rows follow
+        for row in lines[19:22]:
+            values = []
+            for token in row.split():
+                try:
+                    values.append(float(token))
+                except ValueError:
+                    break
+            assert len(values) >= nzs, (
+                f"row {row!r} holds {len(values)} readable value(s); the "
+                f"reader consumes exactly nzs={nzs}")
+
+    def test_sample_ranges_file_holds_positive_ranges(self):
+        ranges = [float(ln.split()[0]) for ln
+                  in _vendored_text(_MPIRAMS / 'ranges.dat').splitlines()
+                  if ln.strip()]
+        assert ranges and all(r > 0 for r in ranges)
+
+
+class TestRamsCarrierStatements:
+    """rams0.5's ``g0`` march step bakes the carrier into ``u``
+    (``rams0.5.f:849-850``); the wrapper's rams branch applies ``conj``
+    and ``exp(-i pi/4)`` only (the rams branch of
+    ``psi_to_travelling_wave`` in ``models/_pe_phase.py``). The
+    comments at both dump sites state that convention."""
+
+    def test_rams05_dump_comment_states_the_baked_in_carrier(self):
+        text = _vendored_text(_THIRD_PARTY / 'ramsurf' / 'rams0.5.f')
+        start = text.index('UACPY: same envelope')
+        block = text[start:text.index('urg(j)=', start)]
+        assert 'factored out' not in block, (
+            "the dump comment claims a factored-out carrier; rams0.5's g0 "
+            "march bakes it in")
+        assert 'bakes the carrier' in block
+
+    def test_pcomplex_reader_docstring_states_the_per_backend_carrier(self):
+        from uacpy.io.ramsurf_reader import read_pcomplex_grid
+        doc = read_pcomplex_grid.__doc__
+        assert 'carrier differs per backend' in doc
+        assert 'rams0.5' in doc

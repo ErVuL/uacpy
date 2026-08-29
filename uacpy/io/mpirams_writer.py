@@ -90,7 +90,9 @@ def write_inpe(
     sedlayer : float, optional
         Sediment layer thickness (m). Default: 300.0
     nzs : int, optional
-        Number of sediment depth control points. Default: 50.
+        Number of sediment depth control points. Default: 50. Must be at
+        least 4: ``profl`` lays the points out as [surface, seafloor,
+        nzs-3 interior, domain floor] (``mpiramS/src/ram.f90:334-342``).
     cs : ndarray, optional
         Sediment sound speed perturbation relative to water, shape (nzs,).
     rho : ndarray, optional
@@ -112,18 +114,32 @@ def write_inpe(
 
     Notes
     -----
-    ``in.pe`` is positional: ``mpiramS/src/peramx.f90:74-97`` consumes one
+    ``in.pe`` is positional: ``mpiramS/src/peramx.f90:74-105`` consumes one
     record per line in exactly the order written here — a dummy line (``:74``),
     then ``fc Q``, ``T``, ``zsrc``, ``deltaz``, ``deltar``, ``np_pade nss``,
     ``rs``, ``dzm``, ``c0_user``, ``ssp_filename``, ``iflat``, ``ihorz``,
     ``ibot``, ``bth_filename``, the output-ranges filename (``:91``),
-    ``sedlayer``, ``nzs``, ``isedrd`` (``:97``). ``isedrd = 1`` is followed by
-    the sediment filename (``:101``); otherwise by three ``nzs``-value
-    records — ``cs``, ``rho``, ``attn`` (``:143-145``).
+    ``sedlayer``, ``nzs``, ``isedrd`` (``:105``). ``isedrd = 1`` is followed by
+    the sediment filename (``:109``); otherwise by three ``nzs``-value
+    records — ``cs``, ``rho``, ``attn`` (``:151-153``).
 
     That order comes from uacpy's own I/O rewrite of ``peramx.f90`` (see the
     module docstring): authority on the file format, none on the physics.
     """
+    # profl lays the sediment control points out as [surface, seafloor,
+    # nzs-3 interior, domain floor] (mpiramS/src/ram.f90:334-342): fewer
+    # than 4 points cannot express that layout, and the binary stops on
+    # nzs < 4 (peramx.f90:101-104) because nzs=1 would write zwork(2)
+    # past the end of a 1-element array.
+    if int(nzs) < 4:
+        raise ConfigurationError(
+            f"write_inpe: nzs must be at least 4 (got {int(nzs)}). profl "
+            f"builds the sub-bottom from [surface, seafloor, nzs-3 interior, "
+            f"domain floor] control points (mpiramS/src/ram.f90:334-342), so "
+            f"a deck with nzs < 4 cannot express the layout and is rejected "
+            f"by the binary (peramx.f90:101-104)."
+        )
+
     # Placeholder sediment column for a caller that supplies none — uacpy's
     # RAM wrapper always passes arrays built from env.bottom. ``profl`` puts
     # control point 1 at the sea surface, point 2 at the seafloor, points
@@ -149,7 +165,7 @@ def write_inpe(
             if n_row != int(nzs):
                 raise ConfigurationError(
                     f"write_inpe: nzs={int(nzs)} but the {name} row holds "
-                    f"{n_row} value(s). peramx.f90:143-145 reads exactly "
+                    f"{n_row} value(s). peramx.f90:151-153 reads exactly "
                     f"nzs values per row, so a longer row is truncated "
                     f"without a diagnostic and a shorter one runs the "
                     f"read off the end of the deck."
@@ -178,7 +194,7 @@ def write_inpe(
         # so this writer is what pins it to 'ranges.dat'. Keep in sync with
         # :func:`write_ranges_file`.
         f.write("ranges.dat\n")
-        # Bottom properties. ``peramx.f90:143-145`` reads the three sediment
+        # Bottom properties. ``peramx.f90:151-153`` reads the three sediment
         # rows as ``read (nunit,*) (cs(jj,1), jj=1,nzs)`` — a list-directed
         # read of exactly ``nzs`` values, which stops mid-record and discards
         # the rest. A row longer than ``nzs`` is therefore truncated in
@@ -216,8 +232,8 @@ def write_sediment_file(
 
     Same format as SSP: each profile starts with ``-1 range_km``,
     followed by 3 lines of nzs values each (cs, rho, attn). The negative
-    first column is the profile-header sentinel ``peramx.f90:121-122``
-    counts on; ``:132`` multiplies the second column by 1000 to get metres.
+    first column is the profile-header sentinel ``peramx.f90:129-130``
+    counts on; ``:140`` multiplies the second column by 1000 to get metres.
 
     Parameters
     ----------
@@ -235,7 +251,7 @@ def write_sediment_file(
     nzs : int, optional
         The ``nzs`` written into the ``.inpe`` deck by :func:`write_inpe`.
         When given, every profile row is checked against it: ``peramx.f90:
-        133-135`` reads each row as ``read (nunit,*) (cs(jj,1), jj=1,nzs)``, a
+        141-143`` reads each row as ``read (nunit,*) (cs(jj,1), jj=1,nzs)``, a
         list-directed read of exactly ``nzs`` values, so a longer row is
         truncated with no diagnostic. Omitting it trusts the caller to keep
         the two decks consistent, which is what ``models/ram.py`` does by
@@ -252,11 +268,11 @@ def write_sediment_file(
                 raise ConfigurationError(
                     f"write_sediment_file: the deck declares nzs={int(nzs)} "
                     f"but {name}_profiles holds {n_row} depth point(s). "
-                    f"peramx.f90:133-135 reads exactly nzs values per row, so "
+                    f"peramx.f90:141-143 reads exactly nzs values per row, so "
                     f"a longer row is truncated without a diagnostic."
                 )
 
-    # peramx.f90:120-123 counts profiles by testing the first token of every
+    # peramx.f90:128-131 counts profiles by testing the first token of every
     # record for < 0 (the "-1 range" header sentinel); a data row whose first
     # value is negative is miscounted as a header and the second read pass
     # aborts on EOF. cs is a signed offset (cp - surface water speed), so a
@@ -269,7 +285,7 @@ def write_sediment_file(
                 f"mpiramS sediment file: {name} profile(s) start with a "
                 f"negative value (min {float(first_row.min()):g}), which the "
                 f"binary's profile counter reads as a '-1 range' header "
-                f"sentinel (peramx.f90:120-123) — the deck cannot express "
+                f"sentinel (peramx.f90:128-131) — the deck cannot express "
                 f"it.",
                 remediation="Use a Collins backend (RAM(backend='ramgeo' or "
                             "'ramsurf')), which writes sediment speeds "
@@ -295,9 +311,9 @@ def write_ssp_file(
 
     Format: Each profile starts with a header line ``-1 range_km``,
     followed by ``depth speed`` pairs. The negative first column is the
-    profile-header sentinel ``peramx.f90:220-224`` counts on, and it takes
+    profile-header sentinel ``peramx.f90:228-232`` counts on, and it takes
     the depth count from the first profile alone — hence all profiles must
-    have the same number of depth points. ``:232`` multiplies the second
+    have the same number of depth points. ``:240`` multiplies the second
     column by 1000 to get metres.
 
     Parameters
@@ -337,7 +353,7 @@ def write_ssp_file(
             )
         ranges_km = m_to_km(ranges_m)
 
-    # peramx.f90:220-224 makes both counts from the sign of each record's first
+    # peramx.f90:228-232 makes both counts from the sign of each record's first
     # token: a first token < 0 is the "-1 range" profile header, and only the
     # non-negative ones inside the first profile are counted as depths. A
     # negative depth is therefore counted as a profile AND missed as a depth,
@@ -349,7 +365,7 @@ def write_ssp_file(
             f"{depth_values.size} depth point(s) are negative (min "
             f"{float(depth_values.min()):g}), and the binary's counter reads a "
             f"negative first column as a '-1 range' profile-header sentinel "
-            f"(peramx.f90:220-224) — inflating the profile count and deflating "
+            f"(peramx.f90:228-232) — inflating the profile count and deflating "
             f"the depth count. The deck cannot express it.",
             remediation="Give depths as non-negative metres below the surface.",
         )
@@ -370,7 +386,7 @@ def write_bth_file(
     Write bathymetry file for mpiramS.
 
     Format: ``range(m) depth(m)`` pairs, one per line. Metres, not the km
-    the ``.ssp`` / ``.sed`` range headers use — ``peramx.f90:315`` reads
+    the ``.ssp`` / ``.sed`` range headers use — ``peramx.f90:323`` reads
     this file with no scaling and marches ``rb`` against ``r`` in metres.
 
     Parameters
@@ -402,8 +418,8 @@ def write_ranges_file(
     """
     Write output ranges file for mpiramS.
 
-    One range per line, in metres (``peramx.f90:160-162`` reads them
-    unscaled). There is no count header: ``:152-156`` reads to EOF to size
+    One range per line, in metres (``peramx.f90:168-170`` reads them
+    unscaled). There is no count header: ``:160-164`` reads to EOF to size
     the array first, then rewinds and fills it.
 
     Parameters

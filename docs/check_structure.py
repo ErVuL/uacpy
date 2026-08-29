@@ -45,7 +45,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 _HEADING = re.compile(r"^(#{1,6}) \S")
 _TABLE_SEP = re.compile(r"^\s*\|[-: |]+\|\s*$")
 _IMAGE = re.compile(r"!\[[^\]]*\]\(([^)\s]+)\)")
-_CODE_BLOCK = re.compile(r"```(?:python|py)\n(.*?)```", re.S)
+# CommonMark trims the info string, so "``` python" is a python block on
+# GitHub; the optional whitespace keeps spaced fences inside the gate.
+_CODE_BLOCK = re.compile(r"```[ \t]*(?:python|py)[ \t]*\n(.*?)```", re.S)
 _PLACEHOLDER = re.compile(r"\bTODO\b|\bFIXME\b|\bTBD\b|XXX|<placeholder")
 _SIGNATURE = re.compile(r"^\s*\w+\([^)]*\*")
 _TRACEBACK = re.compile(r"^\w*Error:")

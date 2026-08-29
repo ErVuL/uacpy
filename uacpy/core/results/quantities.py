@@ -45,10 +45,6 @@ class Quantity:
     name: str
     units: Mapping[str, str]
 
-    @property
-    def default_unit(self) -> str:
-        return next(iter(self.units))
-
 
 #: Every quantity a Field may carry. The first unit listed is the default.
 QUANTITIES: Mapping[str, Quantity] = {

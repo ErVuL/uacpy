@@ -1549,7 +1549,8 @@ class Bellhop(PropagationModel):
         if run_mode in (RunMode.TIME_SERIES, RunMode.BROADBAND):
             # Both routes go through the arrivals → H(f) pipeline. Without
             # source_waveform → Field; with it → Field (1×1 grid).
-            self._require_timeseries_signal(run_mode, source_waveform, sample_rate)
+            source_waveform = self._require_timeseries_signal(
+                run_mode, source_waveform, sample_rate)
             return self._run_broadband(
                 env, source, receiver,
                 run_mode=run_mode,

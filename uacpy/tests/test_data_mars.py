@@ -277,3 +277,38 @@ def test_capped_response_warns_not_nearest(monkeypatch):
     with pytest.warns(UserWarning, match='nearest'):
         s = mars.fetch_mars_sediment(_P)
     assert s['phi'] == pytest.approx(1.0)
+
+
+def _mars_payload(properties):
+    return json.dumps({'type': 'FeatureCollection', 'numberMatched': 1,
+                       'features': [{
+                           'type': 'Feature',
+                           'geometry': {'type': 'Point',
+                                        'coordinates': [151.4, -33.9]},
+                           'properties': properties}]})
+
+
+def _patch_mars_http(monkeypatch, properties):
+    _install(monkeypatch, _mars_payload(properties))
+    return mars
+
+
+@pytest.mark.parametrize('properties', [
+    {'MEAN_GRAIN_SIZE': 'N/A'},
+    {'SAND_PERCENT': 'trace'},
+    {'MEAN_GRAIN_SIZE': [125.0]},
+], ids=['string-grain-size', 'string-percent', 'list-grain-size'])
+def test_a_malformed_mars_property_raises_the_typed_fetch_error(
+        monkeypatch, properties):
+    mars = _patch_mars_http(monkeypatch, properties)
+    with pytest.raises(DataFetchError, match='non-numeric'):
+        mars.fetch_mars_sediment((-33.9, 151.5))
+
+
+def test_the_bottom_chain_falls_through_a_malformed_mars_sample(monkeypatch):
+    from uacpy.data import environment as env_mod
+    _patch_mars_http(monkeypatch, {'MEAN_GRAIN_SIZE': 'N/A'})
+    _bottom, source = env_mod._fetch_bottom(
+        ('mars', 'pelagic'), (-33.9, 151.5), transect=False,
+        max_distance_km=100.0, depth=1000.0, timeout=5.0, verbose=False)
+    assert source == 'pelagic'

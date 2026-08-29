@@ -1,6 +1,6 @@
 """Example-side report scaffolding.
 
-Two helpers:
+Three helpers:
 
 * :func:`plot_model_statistics` — bar chart (mean / std TL per model) +
   RMS-error matrix across models. Unique to the report flow; not part
@@ -11,6 +11,8 @@ Two helpers:
   :func:`compare_models`, :func:`compare`, plus
   :func:`plot_model_statistics` above) and saves them under a common
   prefix.
+* :func:`_plot_tl_difference` — TL(a) − TL(b) diverging heatmap, shared by
+  the model-comparison examples (05, 16, 18).
 
 Everything else lives in :mod:`uacpy.visualization` — TL heatmaps,
 bathymetry overlays, range / depth cuts, etc.
@@ -31,6 +33,24 @@ from uacpy.visualization import (
 # UACPY_EXAMPLE_OUTPUT names a different destination.
 DEFAULT_OUTPUT_DIR = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
                           or Path(__file__).parent / 'output')
+
+
+def _plot_tl_difference(a, b, env=None, *, ax=None, title=None,
+                         vmin=-10.0, vmax=10.0, diff_vmax=None, **kw):
+    """Plot TL(a) - TL(b) as a diverging-colourmap heatmap.
+
+    ``diff_vmax`` is a symmetric range shortcut: ``vmin = -diff_vmax``,
+    ``vmax = +diff_vmax``.
+    """
+    from uacpy import Field
+    from uacpy.visualization import plot_field
+    if diff_vmax is not None:
+        vmin, vmax = -abs(diff_vmax), abs(diff_vmax)
+    diff = Field(data=a.db - b.db, coords=dict(a.coords))
+    return plot_field(
+        diff, env=env, ax=ax, vmin=vmin, vmax=vmax,
+        cmap='RdBu_r', title=title, **kw,
+    )
 
 
 def plot_model_statistics(results: Dict, source_depth: float):

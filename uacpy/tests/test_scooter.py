@@ -5,6 +5,8 @@ import numpy as np
 
 from uacpy.core.results import Field
 from uacpy.models import Scooter
+from uacpy.models.scooter import _MAX_GREEN_CUBE_BYTES
+from uacpy.models.sparc import _MAX_SNAPSHOT_GREEN_BYTES
 from uacpy.models.base import RunMode
 from uacpy.core import Environment, Source, Receiver
 from uacpy.core.exceptions import ConfigurationError
@@ -690,3 +692,59 @@ def _halfspace(sound_speed, **kwargs):
         acoustic_type='half-space', sound_speed=sound_speed,
         density=kwargs.pop('density', 1.8),
         attenuation=kwargs.pop('attenuation', 0.3), **kwargs)
+
+
+class TestScooterRefusesAGreenCubeOverTheReaderBudget:
+    """``read_grn_file`` allocates the whole ``(nfreq, nsd, nrd, nk)``
+    complex64 cube in one ``np.zeros``, and nothing above bounded ``Nk``:
+    64 frequencies x 100 receiver depths at the Nk a 25 km receiver grid
+    derives is a 12 GiB allocation behind an ordinary-looking broadband
+    call. The deck writer now refuses a cube over the 2 GiB budget SPARC's
+    snapshot cap uses, before any file is written."""
+
+    @staticmethod
+    def _model():
+        return Scooter(verbose=False, c_low=1406.0, c_high=3436.0)
+
+    # Bytes per wavenumber sample at 64 frequencies x 1 source depth x
+    # 100 receiver depths; floor division puts _NK_AT_CAP within one sample
+    # under the budget (2 GiB % _PER_NK = 2048 B), so the pair below
+    # brackets the threshold: _NK_AT_CAP fits, _NK_AT_CAP + 1 exceeds it.
+    _PER_NK = 8 * 64 * 1 * 100
+    _NK_AT_CAP = _MAX_GREEN_CUBE_BYTES // _PER_NK
+
+    def test_the_budget_matches_the_sparc_snapshot_cap(self):
+        assert _MAX_GREEN_CUBE_BYTES == _MAX_SNAPSHOT_GREEN_BYTES
+
+    def test_the_largest_cube_under_the_cap_is_accepted(self):
+        self._model()._reject_oversized_green_cube(
+            self._NK_AT_CAP, 64, 1, 100,
+            rmax_m=5e4, f_deck=2e3, c_low=1406.0, c_high=3436.0)
+
+    def test_one_wavenumber_sample_over_the_cap_is_refused(self):
+        with pytest.raises(ConfigurationError, match='GiB'):
+            self._model()._reject_oversized_green_cube(
+                self._NK_AT_CAP + 1, 64, 1, 100,
+                rmax_m=5e4, f_deck=2e3, c_low=1406.0, c_high=3436.0)
+
+    def test_an_over_budget_broadband_deck_is_refused_before_writing(
+            self, tmp_path):
+        out = tmp_path / 'over.env'
+        with pytest.raises(ConfigurationError, match='Nk'):
+            self._model()._write_scooter_env(
+                out,
+                Environment(name='deep', bathymetry=5000.0, ssp=1480.0),
+                Source(depths=100.0, frequencies=500.0),
+                Receiver(depths=np.linspace(10.0, 4900.0, 100),
+                         ranges=np.array([25000.0])),
+                frequencies=np.linspace(500.0, 2000.0, 64),
+                run_mode=RunMode.BROADBAND)
+        assert not out.exists()
+
+    def test_a_small_narrowband_deck_writes(self, tmp_path):
+        out = tmp_path / 'ok.env'
+        Scooter(verbose=False)._write_scooter_env(
+            out, Environment(name='flat', bathymetry=100.0, ssp=1500.0),
+            Source(depths=25.0, frequencies=200.0),
+            Receiver(depths=np.array([50.0]), ranges=np.array([1000.0])))
+        assert out.exists()

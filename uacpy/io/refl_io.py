@@ -31,6 +31,7 @@ from uacpy.core.constants import SBP_ANGLE_RESOLUTION_DEG
 from uacpy.core.exceptions import ConfigurationError, FileFormatError
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.io._fortran_helpers import _bound_counts
+from uacpy.io.utils import _collapsed_pair_index
 from uacpy.io._fortran_helpers import (
     fortran_float, list_directed_int, read_list_directed_values,
     typed_format_error,
@@ -389,9 +390,8 @@ def write_reflection_coefficient(
         )
     # Distinct angles that collide once rounded into the written column.
     written = np.round(angles, 6)
-    collision = (steps > 0.0) & (np.diff(written) == 0.0)
-    if collision.any():
-        i = int(np.argmax(collision))
+    i = _collapsed_pair_index(written, raw=angles)
+    if i is not None:
         raise ConfigurationError(
             f"write_reflection_coefficient: angles[{i}]={angles[i]!r} and "
             f"angles[{i + 1}]={angles[i + 1]!r} are distinct but both write "
@@ -483,9 +483,8 @@ def write_source_beam_pattern(
             remediation="Give at least two angles spanning the launch fan, or "
                         "omit the beam pattern for an omnidirectional source.",
         )
-    steps = np.diff(angles)
-    if steps.min() < SBP_ANGLE_RESOLUTION_DEG:
-        i = int(np.argmin(steps))
+    i = _collapsed_pair_index(angles, min_step=SBP_ANGLE_RESOLUTION_DEG)
+    if i is not None:
         raise ConfigurationError(
             f"write_source_beam_pattern: angles[{i}]={angles[i]!r} and "
             f"angles[{i + 1}]={angles[i + 1]!r} are closer than the file's "

@@ -30,6 +30,7 @@ from uacpy.core.receiver import Receiver
 from uacpy.core.exceptions import ConfigurationError, UnsupportedFeatureError
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.io.utils import (
+    _collapsed_pair_index,
     equally_spaced,
     # Shared with the Bellhop and multi-profile writers; the module-private
     # alias keeps the six OASES writers' call sites unchanged.
@@ -853,10 +854,9 @@ def _check_receiver_depth_tokens(depths, tokens, *, what: str) -> None:
     for the reason ``oalib_writer.write_receiver_ranges`` gives for the AT
     decks: OASES reads the file, not the array.
     """
-    written = np.array([float(t) for t in tokens])
-    if written.size <= 1 or np.all(np.diff(written) > 0):
+    bad = _collapsed_pair_index(tokens)
+    if bad is None:
         return
-    bad = int(np.argmin(np.diff(written)))
     raise ConfigurationError(
         f"{what} {float(depths[bad]):g} m and {float(depths[bad + 1]):g} m "
         f"both write as {tokens[bad]} m at the deck's "

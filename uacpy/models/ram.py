@@ -942,7 +942,7 @@ class RAM(PropagationModel):
         # actual array bin (the upper-middle one) rather than the band
         # midpoint — an even-length array's midpoint sits half a bin
         # off-grid, which would drop one bin and shift every other by
-        # Δf/2. The half-band (n//2 + 1/2)·Δf puts peramx.f90:353's
+        # Δf/2. The half-band (n//2 + 1/2)·Δf puts peramx.f90:361's
         # nf1 = int((bw-df)/df)+1 mid-interval (robust to float noise):
         # an odd count round-trips exactly, an even count marches one
         # extra bin at f_max + Δf — a superset of the request that
@@ -973,28 +973,46 @@ class RAM(PropagationModel):
     def _broadband_frequencies(fc: float, Q: float, T: float) -> np.ndarray:
         """The symmetric frequency vector a ``(fc, Q, T)`` sweep marches.
 
-        Reproduces ``peramx.f90:345-362``: half-bandwidth ``bw = fc/Q``,
+        Reproduces ``peramx.f90:353-370``: half-bandwidth ``bw = fc/Q``,
         ``df = fs/Nsam = 1/T``, ``nf1 = int((bw - df)/df) + 1`` and
         ``frq(ii) = -(nf1 - (ii-1))·df + fc`` for ``ii = 1..2·nf1+1``. Every
         backend sweeps this same vector — mpiramS inside the Fortran loop, the
         Collins backends one subprocess per element.
 
-        ``frq(1) = fc - nf1·df`` goes non-positive for small ``Q``, which no
-        PE can march. The serial driver uacpy builds has no guard and writes
-        NaN bins at zero and negative frequency; its MPI sibling stops on
-        exactly this test and names ``Q`` (``peramx_mpi.f90:417-423``).
+        ``frq(1) = fc - nf1·df`` goes non-positive whenever
+        ``fc <= nf1·df`` — a small ``Q`` (half-bandwidth at or above fc),
+        or an ``fc`` at or below ``Δf = 1/T`` once ``nf1`` floors at 1 (the
+        collapsed COHERENT_TL sweep included) — which no PE can march. The
+        serial driver uacpy builds has no guard and writes NaN bins at zero
+        and negative frequency; its MPI sibling stops on exactly this test
+        and names ``Q`` (``peramx_mpi.f90:417-423``).
         """
         bw = float(fc) / float(Q)
         df = 1.0 / float(T)
         nf1 = max(1, int((bw - df) / df) + 1)
         frq = (np.arange(2 * nf1 + 1, dtype=float) - nf1) * df + float(fc)
         if frq[0] <= 0.0:
+            # The advice names the knob that actually moves this edge:
+            # with nf1 floored at 1 the binding constraint is fc > Δf = 1/T
+            # (Q no longer enters), and with nf1 bandwidth-driven it is the
+            # half-bandwidth fc/Q.
+            if float(fc) <= 0.0:
+                advice = ("fc itself is not positive; no (Q, T) admits a "
+                          "non-positive centre frequency.")
+            elif nf1 == 1:
+                advice = (f"Lengthen T so Δf = 1/T falls below fc "
+                          f"(T > {1.0 / float(fc):.4g} s), or raise fc "
+                          f"above Δf = {df:.4g} Hz.")
+            else:
+                advice = (f"Raise Q (= {Q:g}) so the half-bandwidth "
+                          f"fc/Q = {bw:.4g} Hz falls below fc.")
             raise ConfigurationError(
-                f"RAM broadband: Q={Q:g} and T={T:g} s put the lower band edge "
-                f"at {frq[0]:.4g} Hz (fc={fc:g} Hz, half-bandwidth fc/Q="
-                f"{bw:.4g} Hz, Δf=1/T={df:.4g} Hz, {2 * nf1 + 1} bins). A PE "
-                f"cannot march zero or negative frequencies. Use Q > 1 so the "
-                f"half-bandwidth stays below fc, or shorten T so Δf is coarser."
+                f"RAM broadband: the (fc, Q, T) sweep marches "
+                f"{2 * nf1 + 1} bins at fc ± nf1·Δf with nf1 = {nf1} and "
+                f"Δf = 1/T = {df:.4g} Hz, so fc = {fc:g} Hz must exceed "
+                f"nf1·Δf = {nf1 * df:.4g} Hz; its lower band edge sits at "
+                f"{frq[0]:.4g} Hz and a PE cannot march zero or negative "
+                f"frequencies. {advice}"
             )
         return frq
 
@@ -1107,7 +1125,7 @@ class RAM(PropagationModel):
 
     @staticmethod
     def _flat_earth_depth(z: float) -> float:
-        """``peramx.f90:264-266``'s depth map, ``eps = z/Re``,
+        """``peramx.f90:272-274``'s depth map, ``eps = z/Re``,
         ``z' = z(1 + eps/2 + eps²/3)`` with ``Re`` from ``param.f90:10``."""
         eps = float(z) / _EARTH_RADIUS_M
         return float(z) * (1.0 + eps / 2.0 + eps * eps / 3.0)
@@ -1129,7 +1147,7 @@ class RAM(PropagationModel):
         """PE domain depth for an mpiramS march, snapped onto the ``deltaz``
         grid.
 
-        ``peramx.f90:374,387`` sizes the depth grid as
+        ``peramx.f90:382,395`` sizes the depth grid as
         ``icount = floor(zmax/deltaz - 0.5) + 2`` and then fills it with
         ``linspace(zg, 0, zmax, icount)``, so its actual spacing is
         ``zmax/(icount-1)`` while the depth operator (``ram.f90:51``
@@ -1138,8 +1156,8 @@ class RAM(PropagationModel):
         assume ``deltaz``. The two agree only when ``zmax`` is an exact
         multiple of ``deltaz``.
 
-        The value snapped has to be the one ``:371`` actually reads. Under
-        ``flat_earth`` (the default) ``:260-266`` rescales the whole depth axis
+        The value snapped has to be the one ``:379`` actually reads. Under
+        ``flat_earth`` (the default) ``:268-274`` rescales the whole depth axis
         *before* ``zmax = maxval(zw)``, so snapping the geometric depth leaves
         the transformed grid off the multiple again. Snapping in the
         transformed frame and mapping back is what makes the spacing exact on
@@ -1164,7 +1182,7 @@ class RAM(PropagationModel):
         Write SSP file from environment. Returns filename.
 
         The SSP is extended to ``_mpirams_zmax``, which is what mpiramS reads
-        back as its domain depth (``zmax = maxval(zw)``, ``peramx.f90:371``).
+        back as its domain depth (``zmax = maxval(zw)``, ``peramx.f90:379``).
 
         The column carries the user's true profile at every depth, sub-bottom
         included. ``matrc.f90:43-55`` reads ``cwg`` as a water property only
@@ -1272,7 +1290,7 @@ class RAM(PropagationModel):
         # (``mpiramS/src/matrc.f90:43-55``), so its value never enters the
         # field. It is clamped non-negative because it is also the first
         # token of a ``.sed`` record, which the profile counter tests for
-        # ``< 0`` as the ``-1 range`` header sentinel (``peramx.f90:120-123``)
+        # ``< 0`` as the ``-1 range`` header sentinel (``peramx.f90:128-131``)
         # — a seabed slower than the surface water would otherwise be
         # unwritable. Points at and below the seafloor keep their signed
         # offsets.
@@ -4296,7 +4314,7 @@ class RAM(PropagationModel):
 
         mpiramS reads ``deltaz``/``deltar`` once (``peramx.f90:78-79``) and
         sizes its depth grid once (``icount = floor(zmax/deltaz - 0.5) + 2``,
-        ``:374``) *before* the frequency loop opens at ``:404``, so the one
+        ``:382``) *before* the frequency loop opens at ``:408``, so the one
         grid this returns marches every bin of a broadband band. Broadband
         callers therefore pass the band's **highest** frequency: both steps
         have to resolve the shortest wavelength in the band, and a step sized
@@ -4363,7 +4381,7 @@ class RAM(PropagationModel):
 
         # mpiramS's horizontal-interpolation branch (ihorz=1) resamples the
         # SSP onto a uniform grid of nrp=nint(rmax/10000) points
-        # (peramx.f90:245). For rmax < 5 km that rounds to nrp=0 -> a
+        # (peramx.f90:253). For rmax < 5 km that rounds to nrp=0 -> a
         # zero-length allocate, an all-NaN sound-speed field, IEEE
         # divide-by-zero and a SIGABRT (exit -6); for rmax < 15 km it
         # collapses range dependence to 1-2 coarse 10-km samples. Always use
@@ -4418,6 +4436,11 @@ class RAM(PropagationModel):
         # (Q→∞, T=1) unless the user widened it via Q=/T=.
         Q_tl = 1e6 if self.Q is None else float(self.Q)
         T_tl = 1.0 if self.T is None else float(self.T)
+        # The deck carries (fc, Q, T) and the serial binary derives the
+        # marched bins from it with no positivity guard of its own; the
+        # same check the broadband path runs refuses the deck here, before
+        # any file exists.
+        self._broadband_frequencies(freq, Q_tl, T_tl)
         self._log(
             f"mpiramS (TL mode): freq={freq:.1f} Hz, zs={zsrc:.1f} m, "
             f"dr={dr:.1f} m, dz={dz:.3f} m, Q={Q_tl:g}, T={T_tl:g}s"
@@ -4606,7 +4629,7 @@ class RAM(PropagationModel):
         # The band the result will carry: the caller's own bins when they
         # define the grid, otherwise the (fc, Q, T) sweep itself. mpiramS
         # marches every bin of it on ONE grid (deltaz/deltar are read once,
-        # peramx.f90:78-79, and the depth grid is sized at :374 before the
+        # peramx.f90:78-79, and the depth grid is sized at :382 before the
         # frequency loop opens at :404), so the grid is sized at the band
         # EDGES, not at fc: both steps at f_max, where the wavelength is
         # shortest and the Padé error per step largest, and the absorbing
@@ -4671,7 +4694,7 @@ class RAM(PropagationModel):
         # sign and turns the baked-in exp(+iπ/4) into exp(-iπ/4) — and
         # then applies exactly two factors, 4π and 1/√r. It applies no
         # π/4 of its own; doing so would double-count the one
-        # peramx.f90:412 already wrote. The result is Collins' p(f,r,z)
+        # peramx.f90:420 already wrote. The result is Collins' p(f,r,z)
         # in the engineering travelling-wave form
         # p ∝ ψ̄·exp(-ik0 r)·exp(-iπ/4)/√r.
         psif = result['psif']  # (nzo, nf, nr)
@@ -4712,7 +4735,7 @@ class RAM(PropagationModel):
         if not np.array_equal(zg, out_depths):
             # zg is monotone but NOT uniform: with flat_earth=1 peramx
             # un-transforms it by zg/(1 + eps/2 + eps²/3), eps = zg/Re
-            # (peramx.f90:427-432), a quadratic map that stretches by
+            # (peramx.f90:435-440), a quadratic map that stretches by
             # metres over a deep column. Bracket against the real axis.
             idx_lo = np.clip(
                 np.searchsorted(zg, out_depths, side='right') - 1,

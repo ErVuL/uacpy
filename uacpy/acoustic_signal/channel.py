@@ -67,7 +67,10 @@ def impulse_response(amplitudes, delays_s, sample_rate: float, *,
     n_samples : int, optional
         Length of the IR. Default: just past the latest arrival; defaults
         above ``2**26`` taps (1 GiB as complex128) raise rather than
-        allocate.
+        allocate. An explicit ``n_samples`` can end before an arrival: any
+        arrival falling entirely outside the window is dropped from ``h``,
+        with a ``UserWarning`` counting the drops (on both placement
+        paths).
     fractional : bool
         Windowed-sinc fractional-delay placement. ``False`` quantises the
         delay to the nearest sample (+/- 0.5 sample of timing error).
@@ -118,11 +121,14 @@ def impulse_response(amplitudes, delays_s, sample_rate: float, *,
     dtype = complex if np.iscomplexobj(a) else float
     h = np.zeros(n_samples, dtype=dtype)
     n_clipped = 0
+    n_dropped = 0
     for amp, p in zip(a, pos):
         if not fractional:
             i0 = int(np.round(p))
             if 0 <= i0 < n_samples:
                 h[i0] += amp
+            else:
+                n_dropped += 1
             continue
         i0 = int(np.floor(p))
         k = np.arange(i0 - L + 1, i0 + L + 1)
@@ -138,24 +144,43 @@ def impulse_response(amplitudes, delays_s, sample_rate: float, *,
         if gsum:
             g = g / gsum
         ok = (k >= 0) & (k < n_samples)
-        # A truncated kernel changes the arrival's amplitude; say so rather
-        # than silently dumping the whole arrival on one sample, which is what
-        # falling back to the nearest sample does (an arrival at 10.9 samples
-        # lands entirely at 10). The change is not one-directional: the sinc tail can
-        # sum either way, and the worst case is a GAIN — measured DC gain
-        # 1.1274 (+1.04 dB) for an arrival 0.5 samples from the start against
+        # An integer-delay arrival lives entirely on sample i0 (every other
+        # tap is sinc(integer) = 0), so clipping its zero taps loses nothing
+        # and it is dropped only when i0 itself falls outside the window. A
+        # non-integer arrival with no tap in the window is likewise dropped
+        # whole. One with only some taps clipped keeps a truncated kernel —
+        # its amplitude changes rather than the whole arrival landing on one
+        # sample (an arrival at 10.9 samples would land entirely at 10) —
+        # and the change is not one-directional: the sinc tail can sum
+        # either way, and the worst case is a GAIN — measured DC gain 1.1274
+        # (+1.04 dB) for an arrival 0.5 samples from the start against
         # 0.9862 at 3.5 samples, at fs = 20 kHz over 128 samples.
-        if not ok.all() and p != i0:
+        if p == i0:
+            if not 0 <= i0 < n_samples:
+                n_dropped += 1
+        elif not ok.any():
+            n_dropped += 1
+        elif not ok.all():
             n_clipped += 1
         h[k[ok]] += amp * g[ok]
+    if n_dropped:
+        warnings.warn(
+            f"impulse_response: {n_dropped} arrival(s) lie entirely outside "
+            f"the {n_samples}-sample response window ({n_samples / fs:g} s "
+            f"at {fs:g} Hz) and are dropped from h. Lengthen n_samples, or "
+            f"leave it None to size the response just past the latest "
+            f"arrival.",
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
     if n_clipped:
         warnings.warn(
             f"impulse_response: {n_clipped} fractional arrival(s) sit within "
             f"{L} samples of the ends of an {n_samples}-sample response, so "
             f"their interpolation kernel is truncated, so their amplitude "
             f"is wrong in either direction (measured +1.04 dB for an arrival "
-            f"half a sample from the end). "
-            f"Lengthen n_samples, or use fractional=False to quantise instead.",
+            f"half a sample from the end). Lengthen n_samples, or use "
+            f"fractional=False to put each such arrival wholly on its "
+            f"nearest sample (a ±0.5-sample timing error; a nearest sample "
+            f"outside the window is a dropped arrival, which warns).",
             UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
     t = np.arange(n_samples) / fs
     return t, h

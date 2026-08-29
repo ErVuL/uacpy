@@ -2564,3 +2564,27 @@ def test_no_example_reaches_into_the_private_cache_module():
                  or 'from uacpy.data import _cache' in path.read_text(encoding='utf-8')]
     assert offenders == []
 
+
+@requires_docs
+def test_a_broken_spaced_language_fence_fails_the_structure_gate(tmp_path):
+    gate = _load("check_structure")
+    page = tmp_path / 'page.md'
+    page.write_text('# Title\n\n``` python\ndef broken(:\n```\n',
+                    encoding='utf-8')
+    assert any(kind == 'SYNTAX_BLOCK' for kind, _ in gate.check_page(page))
+
+
+@requires_docs
+def test_a_valid_spaced_language_fence_passes_the_structure_gate(tmp_path):
+    gate = _load("check_structure")
+    page = tmp_path / 'page.md'
+    page.write_text('# Title\n\n``` python\nx = 1\n```\n', encoding='utf-8')
+
+
+def test_every_public_sonar_name_appears_in_the_reference_manual():
+    import uacpy.sonar as sonar
+    text = _documentation_text()
+    missing = [name for name in sonar.__all__
+               if not inspect.ismodule(getattr(sonar, name))
+               and not re.search(rf'\b{re.escape(name)}\b', text)]
+    assert missing == []

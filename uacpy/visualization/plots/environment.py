@@ -759,6 +759,11 @@ def plot_absorption(frequencies, absorption=None, ax=None, *, model=None,
     """
     frequencies = np.asarray(frequencies, dtype=float)
     mk = mpl_kw.pop('model_kwargs', None)
+    if absorption is not None and model is not None:
+        raise ConfigurationError(
+            "plot_absorption: model= selects the computed curve and has no "
+            "effect on a pre-computed absorption= array. Drop one of the "
+            "two.")
     if absorption is not None and mk:
         raise ConfigurationError(
             "plot_absorption: model_kwargs= configures the model= computation "

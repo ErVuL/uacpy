@@ -163,12 +163,15 @@ def download_seaice_db(cache_dir=None, *, years=None, timeout=120.0,
     return out
 
 
-def _pyproj_transformer(epsg):
+def _pyproj_transformer(epsg, *, backend='sea-ice'):
+    """EPSG:4326 → ``epsg`` transformer; ``backend`` names the caller in the
+    missing-pyproj error. Also serves :mod:`uacpy.data.diesing_local`'s
+    Wagner IV projection."""
     try:
         from pyproj import Transformer
     except ImportError as exc:                                  # pragma: no cover
         raise ConfigurationError(
-            "The offline sea-ice backend needs 'pyproj'.",
+            f"The offline {backend} backend needs 'pyproj'.",
             remediation="pyproj ships with the default uacpy install; reinstall "
                         "with `pip install -e .`, or `pip install pyproj`.",
         ) from exc
@@ -417,6 +420,11 @@ def fetch_sea_ice_concentration_transect(start: Coordinate, end: Coordinate, *,
                                          n_points: int = 6):
     """``(ranges_m, concentration)`` (0-1) sampled along ``start`` → ``end``."""
     from uacpy.data._geo import geodesic_waypoints
+    if int(n_points) < 2:
+        raise ConfigurationError(
+            f"fetch_sea_ice_concentration_transect: n_points must be >= 2, "
+            f"got {n_points}.",
+            remediation="Pass n_points>=2 to define a transect.")
     lats, lons, ranges_m = geodesic_waypoints(start, end, n_points)
     out = []
     for la, lo in zip(lats, lons):

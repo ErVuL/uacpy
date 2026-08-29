@@ -376,8 +376,13 @@ def invalidate_grids() -> None:
     :func:`register_cache`. A backend that has not been imported has nothing
     memoised, so an unregistered module is not a gap.
 
-    Runs under :func:`memo_lock`, so it cannot interleave with a memo fill and
-    close a handle a :func:`memoize` call is about to hand back.
+    Runs under :func:`memo_lock`, so it cannot interleave with a memo *fill*
+    (the miss path re-checks under the lock). The warm :func:`memoize` read is
+    lock-free, so a concurrent reader can still be handed a handle while this
+    is closing it; the ``_netcdf`` process lock keeps that from segfaulting a
+    read already in flight, and the reader's *next* use of the stale handle
+    raises netCDF4's closed-handle error rather than crashing. Invalidate
+    between fetch batches, not under concurrent readers.
     """
     with _MEMO_LOCK:
         for grid in _GRIDS.values():

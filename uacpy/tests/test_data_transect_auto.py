@@ -2,6 +2,8 @@
 monotonic ranges, and the max_points cap. All offline — the SSP/bathy *plans*
 are analytic, and the fetch paths are stubbed."""
 
+import importlib
+
 import numpy as np
 import pytest
 
@@ -224,3 +226,50 @@ def test_range_dependent_bottom_refuses_a_one_point_budget():
         range_dependent_bottom_along(
             lambda lat, lon: BoundaryProperties.from_grain_size(3.0),
             (0.0, 0.0), (1.0, 0.0), max_points=1, source_label='test')
+
+
+_TRANSECT_HELPERS = [
+    ('uacpy.data.graw_local', 'fetch_seabed_density_transect', {}),
+    ('uacpy.data.globsed_local', 'fetch_sediment_thickness_transect', {}),
+    ('uacpy.data.wind_live', 'fetch_wind_transect', {'date': '2026-08-15'}),
+    ('uacpy.data.seaice_local', 'fetch_sea_ice_concentration_transect',
+     {'month': 3}),
+    ('uacpy.data.copernicus', 'fetch_ssp_transect_operational',
+     {'date': '2026-08-15'}),
+]
+
+
+@pytest.mark.parametrize('module_name,func_name,kwargs', _TRANSECT_HELPERS,
+                         ids=[m.rsplit('.', 1)[-1]
+                              for m, _f, _k in _TRANSECT_HELPERS])
+def test_a_single_point_transect_is_rejected_like_the_primary_paths(
+        module_name, func_name, kwargs):
+    mod = importlib.import_module(module_name)
+    with pytest.raises(ConfigurationError, match='n_points must be >= 2'):
+        getattr(mod, func_name)((45.0, -30.0), (46.0, -30.0),
+                                n_points=1, **kwargs)
+
+
+class _ReachedDownstream(Exception):
+    """Sentinel raised by a stubbed downstream call, marking the guard passed."""
+
+
+def _raise_downstream(*_args, **_kwargs):
+    raise _ReachedDownstream
+
+
+def test_a_two_point_transect_reaches_the_waypoint_sampler(monkeypatch):
+    from uacpy.data import _geo, graw_local
+    monkeypatch.setattr(_geo, 'geodesic_waypoints', _raise_downstream)
+    with pytest.raises(_ReachedDownstream):
+        graw_local.fetch_seabed_density_transect((45.0, -30.0), (46.0, -30.0),
+                                                 n_points=2)
+
+
+def test_the_copernicus_guard_sits_before_the_dataset_open(monkeypatch):
+    from uacpy.data import copernicus
+    monkeypatch.setattr(copernicus, '_import_copernicusmarine',
+                        _raise_downstream)
+    with pytest.raises(_ReachedDownstream):
+        copernicus.fetch_ssp_transect_operational(
+            (45.0, -30.0), (46.0, -30.0), date='2026-08-15', n_points=2)

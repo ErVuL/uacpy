@@ -124,6 +124,18 @@ def decidecade_band_levels(psd, frequencies, ref=REFERENCE_PRESSURE_WATER):
             f"span a band; got {frequencies.size}. A single point has no "
             f"width, so no decidecade band covers it.")
     pos = frequencies > 0
+    # Tested after the DC bin is dropped: a two-sample rfftfreq grid passes
+    # the size guard above yet leaves a single positive frequency, which has
+    # no width for a band and would reach decidecade_bands as f_low == f_high
+    # — an error naming two arguments this caller never passed.
+    if int(np.count_nonzero(pos)) < 2:
+        raise ConfigurationError(
+            f"decidecade_band_levels: frequencies "
+            f"[{frequencies[0]:g}, {frequencies[-1]:g}] Hz holds "
+            f"{int(np.count_nonzero(pos))} positive sample(s) once the DC "
+            f"bin is dropped, so the grid spans no decidecade band. Use a "
+            f"longer FFT so the one-sided grid holds at least two positive "
+            f"frequencies.")
     f_min = frequencies[pos].min()
     f_max = frequencies[pos].max()
     lower, centers, upper = decidecade_bands(f_min, f_max)

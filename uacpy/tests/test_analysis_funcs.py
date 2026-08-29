@@ -418,3 +418,59 @@ class TestSilentZerosAreAnnounced:
         with warnings.catch_warnings():
             warnings.simplefilter("error")
             estimator(x, 1000.0, nperseg=128)
+
+
+class TestPpsdOutOfWindowLevels:
+    """When no PSD level lands inside ``[lvlmin, lvlmax]`` the pdf is
+    all-NaN by construction; ``ppsd`` suppresses numpy's per-column 0/0
+    RuntimeWarnings and says so once, naming the window and the measured
+    level span."""
+
+    def _signal(self):
+        return np.sin(2 * np.pi * 100.0 * np.arange(4000) / 1000.0) * 1e9
+
+    def test_out_of_window_levels_warn_once_and_raise_no_runtime(self):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            res = ppsd(self._signal(), 1000.0, seg_duration=0.5,
+                       nperseg=256)
+        assert not [w for w in caught
+                    if issubclass(w.category, RuntimeWarning)]
+        typed = [str(w.message) for w in caught
+                 if 'histogram window' in str(w.message)]
+        assert len(typed) == 1
+        assert 'lvlmin=0' in typed[0] and 'lvlmax=150' in typed[0]
+        assert 'dB re ref²' in typed[0]
+        assert np.all(np.isnan(res.pdf))
+        assert np.all(np.isfinite(res.mean_db))
+
+    def test_levels_inside_the_window_produce_no_warning(self):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            res = ppsd(self._signal(), 1000.0, seg_duration=0.5,
+                       nperseg=256, lvlmin=100, lvlmax=250)
+        assert not [w for w in caught
+                    if issubclass(w.category, RuntimeWarning)]
+        assert not [w for w in caught
+                    if 'histogram window' in str(w.message)]
+        assert not np.all(np.isnan(res.pdf))
+
+
+class TestDecidecadeSinglePositiveFrequencyGrid:
+    """A grid whose only band support is one positive frequency (the
+    two-sample rfftfreq grid) is reported in terms of the caller's
+    ``frequencies`` argument, not the ``f_low``/``f_high`` arguments of the
+    band helper it never called."""
+
+    def test_error_names_the_callers_grid(self):
+        with pytest.raises(ConfigurationError,
+                           match='spans no decidecade band') as exc:
+            decidecade_band_levels(np.ones(2), np.fft.rfftfreq(2))
+        assert 'f_low' not in str(exc.value)
+
+    def test_two_positive_frequencies_pass_the_guard(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', UserWarning)
+            centers, levels = decidecade_band_levels(
+                np.ones(3), np.fft.rfftfreq(4, d=1e-3))
+        assert centers.size > 0

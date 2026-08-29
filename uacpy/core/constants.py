@@ -91,7 +91,6 @@ C_LOW_FACTOR = 0.95
 C_HIGH_FACTOR = 1.05
 
 DEFAULT_C_MIN = 1400.0   # below slowest expected water-column speed
-DEFAULT_C_MAX = 10000.0  # above fastest expected compressional speed
 
 # "No upper phase-speed limit" for the AT family. A vacuum / rigid boundary
 # traps every mode, so the mode search must not be capped on a half-space

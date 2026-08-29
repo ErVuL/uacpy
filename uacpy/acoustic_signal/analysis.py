@@ -197,10 +197,28 @@ def ppsd(data, sample_rate, *, seg_duration=1.0, overlap_pct=50, ddB=1.0,
 
     pdf_matrix = np.zeros((len(level_edges) - 1, len(freqs)))
     for i in range(len(freqs)):
-        hist, _ = np.histogram(psd_segments_dB[:, i], bins=level_edges,
-                               density=True)
+        # density=True over a frequency column with no level inside
+        # [lvlmin, lvlmax] normalises an all-zero count by its zero sum
+        # (0/0): the NaN column is the intended "nothing observed" answer,
+        # so numpy's RuntimeWarning is suppressed here the way
+        # probabilistic_constant_q suppresses it, and the all-NaN case gets
+        # the one named diagnostic below instead.
+        with np.errstate(invalid="ignore", divide="ignore"):
+            hist, _ = np.histogram(psd_segments_dB[:, i], bins=level_edges,
+                                   density=True)
         pdf_matrix[:, i] = hist
     pdf_matrix[pdf_matrix == 0] = np.nan
+    if np.all(np.isnan(pdf_matrix)):
+        warnings.warn(
+            f"ppsd: no PSD level falls inside the histogram window "
+            f"[lvlmin={lvlmin:g}, lvlmax={lvlmax:g}] dB — the segments span "
+            f"{float(np.min(psd_segments_dB)):.1f} to "
+            f"{float(np.max(psd_segments_dB)):.1f} dB re ref² — so pdf is "
+            f"all-NaN (mean_db/std_db still cover every segment). Widen "
+            f"lvlmin/lvlmax to cover that span, or pass ref in the data's "
+            f"own pressure unit (µPa-scaled samples against the default "
+            f"Pa-based ref read 120 dB high).",
+            UserWarning, stacklevel=2)
 
     return PPSDResult(freqs, level_edges, pdf_matrix, mean_psd, std_psd, ddB,
                       seg_duration)

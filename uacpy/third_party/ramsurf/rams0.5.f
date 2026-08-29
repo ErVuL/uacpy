@@ -264,9 +264,9 @@ c
       j=j+1
       tlg(j)=-20.0*alog10(cabs(ur)+eps)+10.0*alog10(r+eps)
 c     UACPY: same envelope as tlg uses, with cylindrical-spreading
-c     factor included. Carrier exp(+i k0 r) is still factored out
-c     here; the Python wrapper bakes the engineering travelling-wave
-c     carrier exp(-i k0 r) in before tagging.
+c     factor included. The g0 factor at the end of each solve step
+c     bakes the carrier exp(+i k0 r*rot0) into u, so u carries it
+c     here; the Python wrapper applies conj and exp(-i pi/4) only.
       urg(j)=ur/sqrt(r+eps)
 c
 c     Mark the ocean bottom.

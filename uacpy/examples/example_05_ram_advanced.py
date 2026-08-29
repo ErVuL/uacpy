@@ -55,22 +55,7 @@ from uacpy.visualization.plots import (  # noqa: E402
 )
 
 
-def _plot_tl_difference(a, b, env=None, *, ax=None, title=None,
-                         vmin=-10.0, vmax=10.0, diff_vmax=None, **kw):
-    """Plot TL(a) - TL(b) as a diverging-colourmap heatmap.
-
-    ``diff_vmax`` is a symmetric range shortcut: ``vmin = -diff_vmax``,
-    ``vmax = +diff_vmax``.
-    """
-    from uacpy import Field
-    from uacpy.visualization import plot_field
-    if diff_vmax is not None:
-        vmin, vmax = -abs(diff_vmax), abs(diff_vmax)
-    diff = Field(data=a.db - b.db, coords=dict(a.coords))
-    return plot_field(
-        diff, env=env, ax=ax, vmin=vmin, vmax=vmax,
-        cmap='RdBu_r', title=title, **kw,
-    )
+from plotting_utils import _plot_tl_difference  # noqa: E402
 
 
 def _print_tl_summary(label, field):

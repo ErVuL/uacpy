@@ -276,7 +276,7 @@ class TestRAM:
         assert result.data.shape[0] > 0  # depth
         assert result.data.shape[1] > 0  # range
         # mpiramS builds its grid as frq = fc + [-nf1..nf1]·df with
-        # df = 1/T and nf1 = int((fc/Q - df)/df) + 1 (peramx.f90:345-366):
+        # df = 1/T and nf1 = int((fc/Q - df)/df) + 1 (peramx.f90:353-374):
         # fc=100, Q=2, T=2 → df=0.5, nf1=100, nf=201 spanning 50-150 Hz.
         f = np.asarray(result.coords['frequency'], dtype=float)
         assert result.data.shape[2] == 201

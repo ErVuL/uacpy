@@ -2743,3 +2743,39 @@ def test_a_spectrogram_pinned_off_its_own_band_says_the_panel_is_empty():
         fig, _ = plot_spectrogram(*_flat_spectrogram(140.0),
                                   ymin=800.0, ymax=900.0)
     plt.close(fig)
+
+
+def test_a_precomputed_absorption_array_rejects_the_model_knobs():
+    from uacpy.visualization.plots.environment import plot_absorption
+    frequencies = np.array([100.0, 1000.0, 10000.0])
+    absorption = np.array([0.001, 0.06, 1.0])
+    with pytest.raises(ConfigurationError,
+                       match='has no effect on a pre-computed'):
+        plot_absorption(frequencies, absorption, model='thorp')
+    with pytest.raises(ConfigurationError,
+                       match='has no effect on a pre-computed'):
+        plot_absorption(frequencies, absorption,
+                        model_kwargs={'temperature': 10.0})
+
+
+def test_a_precomputed_absorption_array_alone_plots():
+    from uacpy.visualization.plots.environment import plot_absorption
+    frequencies = np.array([100.0, 1000.0, 10000.0])
+    absorption = np.array([0.001, 0.06, 1.0])
+    _fig, ax = plot_absorption(frequencies, absorption)
+    assert ax.get_ylabel() == 'Absorption (dB/km)'
+
+
+def test_a_source_depth_heatmap_plots_positive_down_like_depth():
+    from uacpy.core.results.field import Field
+    from uacpy.visualization.plots.fields import plot_field
+    depths = np.array([5.0, 20.0, 50.0])
+    ranges = np.linspace(100.0, 5000.0, 12)
+    data = np.arange(depths.size * ranges.size,
+                     dtype=float).reshape(depths.size, ranges.size)
+    inverted = {}
+    for axis in ('source_depth', 'depth'):
+        _fig, ax = plot_field(Field(data=data,
+                                    coords={axis: depths, 'range': ranges}))
+        inverted[axis] = ax.yaxis_inverted()
+    assert inverted == {'source_depth': True, 'depth': True}

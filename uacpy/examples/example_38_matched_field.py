@@ -55,6 +55,17 @@ from uacpy.sonar import (  # noqa: E402
 )
 
 
+def _imshow_extent(cand_r, cand_z):
+    """``imshow`` extent (outer cell EDGES, range in km, depth down) for an
+    ambiguity surface on candidate-grid CENTRES ``cand_r`` (m) / ``cand_z``
+    (m) — each edge sits half a cell beyond its end centre, so every pixel
+    centre lands on its grid point."""
+    half_r = 0.5 * (cand_r[1] - cand_r[0])
+    half_z = 0.5 * (cand_z[1] - cand_z[0])
+    return [(cand_r[0] - half_r) / 1e3, (cand_r[-1] + half_r) / 1e3,
+            cand_z[-1] + half_z, cand_z[0] - half_z]
+
+
 def main():
     print("\n" + "═" * 80)
     print("EXAMPLE 38: Matched-field localization with KRAKEN replicas")
@@ -115,7 +126,7 @@ def main():
     # ── Plot ───────────────────────────────────────────────────────────────
     print("\n[4/4] Plotting ambiguity surfaces...")
     fig, axes = plt.subplots(1, 2, figsize=(13, 5), sharey=True)
-    extent = [cand_r[0] / 1e3, cand_r[-1] / 1e3, cand_z[-1], cand_z[0]]
+    extent = _imshow_extent(cand_r, cand_z)
     for ax, name, surf in [(axes[0], "Bartlett", surf_b), (axes[1], "MVDR", surf_m)]:
         db = 10 * np.log10(np.clip(surf / surf.max(), 1e-3, None))
         im = ax.imshow(db, aspect='auto', extent=extent, cmap='turbo',

@@ -702,14 +702,17 @@ class WenzNoise:
         reference as :attr:`total` (dB re 1 µPa²/Hz), so the linear and dB
         views stay harmonised::
 
-            10 * np.log10(w.as_psd()) == w.total      # exactly
+            10 * np.log10(w.as_psd()) == w.total      # to ~1e-14 dB
 
+        The round trip through the linear domain is float64 arithmetic, so
+        most bins come back bit-exact and the rest within ~1e-14 dB.
         ``ref`` rescales the output to another pressure unit and is the value
         of the dB reference (1 µPa) expressed in that unit, so ``ref=1e-6``
         (1 µPa in Pa) returns SI **Pa²/Hz** — ready for
         :func:`uacpy.acoustic_signal.synthesize_noise_from_psd`, which expects
         a linear PSD in the signal's own pressure units. For any ``ref``,
-        ``10 * np.log10(as_psd(ref) / ref**2) == total``.
+        ``10 * np.log10(as_psd(ref) / ref**2)`` recovers ``total`` to the
+        same ~1e-14 dB.
         """
         return 10 ** (self.total / 10) * ref ** 2
 

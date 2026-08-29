@@ -339,6 +339,11 @@ def fetch_bottom_crust1_transect(start, end, *, n_points=6, max_points=None,
     transect bottom fetchers); CRUST1.0 is a cached 1° grid, so the sole effect
     is clamping ``n_points``.
 
+    ``timeout``/``verbose`` are accepted (and ignored — this backend is
+    offline) for signature parity with the network bottom fetchers;
+    ``water_sound_speed`` is likewise accepted and ignored (CRUST1.0 yields
+    absolute Vp/Vs/ρ, not water-referenced ratios).
+
     ``roughness`` is the RMS roughness (m) of the seafloor interface at every
     waypoint, as in :func:`fetch_bottom_crust1`.
     """

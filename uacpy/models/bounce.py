@@ -609,6 +609,12 @@ class Bounce(PropagationModel):
 
         frequency = float(src_freqs[0])
         n_ktab = self._n_ktab(rmax, frequency, c_low)
+        # NkTab is bounded below only. No upper cap: the binary holds four
+        # NkTab-length tables (xTab/fTab/gTab/ITab, bounce.f90:52) — tens of
+        # bytes per tabulated angle, ~5 MB at a count whose Green's-function
+        # cube costs Scooter gigabytes (the sibling Scooter guards with
+        # ``_reject_oversized_green_cube``) — and refuses a failed
+        # allocation itself through its IAllocStat test.
         if n_ktab < 2:
             consequence = (
                 "BOUNCE would write an empty reflection-coefficient table"

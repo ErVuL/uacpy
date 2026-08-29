@@ -63,11 +63,13 @@ def _bounce_predicate(kind, top, bot):
 class Arrivals(Result):
     """Ray arrivals from Bellhop — a flat list of arrival events.
 
-    Each arrival is a dict with: ``delay``, ``amplitude``, ``phase``,
-    ``n_top_bounces``, ``n_bot_bounces``, ``src_angle``, ``rcv_angle``,
-    ``kind`` ('direct' / 'surface' / 'bottom' / 'both'), plus the cell
-    of origin (``src_idx``, ``depth_idx``, ``range_idx``) so multi-cell
-    runs can be filtered back to one cell if needed.
+    Each arrival is a dict with: ``delay`` (s), ``amplitude``, ``phase``
+    (**degrees** — the unit the ``.arr`` reader stores; the :attr:`phases`
+    accessor converts to radians), ``n_top_bounces``, ``n_bot_bounces``,
+    ``src_angle``, ``rcv_angle``, ``kind`` ('direct' / 'surface' /
+    'bottom' / 'both'), plus the cell of origin (``src_idx``,
+    ``depth_idx``, ``range_idx``) so multi-cell runs can be filtered back
+    to one cell if needed.
 
     Mirrors the :class:`Rays` API surface: filter / chain / sort.
     """

@@ -309,3 +309,53 @@ class TestTransferFunctionIRGridSpacing:
             np.ones(3, dtype=complex), f, 1e6, n_samples=64)
         assert h.size == 64
         assert _MAX_DEFAULT_IR_SAMPLES > 0
+
+
+class TestImpulseResponseDropWarnings:
+    """Every path that drops an arrival in its entirety says so: the
+    quantised (``fractional=False``) path, the fractional path with an
+    integer delay, and the fractional path with no kernel tap in the
+    window. In-window arrivals are placed silently."""
+
+    FS, N = 1000.0, 10
+
+    def _run(self, delay_samples, fractional):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            _t, h = impulse_response([1.0], [delay_samples / self.FS],
+                                     self.FS, n_samples=self.N,
+                                     fractional=fractional)
+        return h, [str(w.message) for w in caught]
+
+    def test_quantised_path_out_of_window_arrival_warns(self):
+        h, msgs = self._run(20.0, fractional=False)
+        assert any('lie entirely outside' in m for m in msgs)
+        assert float(np.sum(np.abs(h))) == 0.0
+
+    def test_fractional_path_integer_delay_out_of_window_warns(self):
+        h, msgs = self._run(20.0, fractional=True)
+        assert any('lie entirely outside' in m for m in msgs)
+        assert float(np.sum(np.abs(h))) == 0.0
+
+    def test_fractional_arrival_with_no_tap_in_window_reports_a_drop(self):
+        _h, msgs = self._run(20.5, fractional=True)
+        assert any('lie entirely outside' in m for m in msgs)
+        assert not any('truncated' in m for m in msgs)
+
+    @pytest.mark.parametrize('fractional', [True, False])
+    def test_in_window_arrivals_are_silent(self, fractional):
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            _t, h = impulse_response([1.0], [5.0 / self.FS], self.FS,
+                                     n_samples=self.N,
+                                     fractional=fractional)
+        assert float(np.sum(np.abs(h))) == pytest.approx(1.0, rel=1e-9)
+
+    def test_truncation_advice_pairs_fractional_false_with_its_drop_warning(self):
+        """The clipped-kernel warning's alternative (``fractional=False``)
+        is described together with its own drop warning, so following the
+        advice cannot silence a dropped arrival."""
+        _h, msgs = self._run(9.9, fractional=True)
+        clipped = next(m for m in msgs if 'truncated' in m)
+        assert 'quantise instead' not in clipped
+        assert 'dropped arrival' in clipped

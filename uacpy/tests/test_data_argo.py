@@ -134,3 +134,42 @@ def test_pressure_to_depth_inverts():
     p = depth_to_pressure_dbar(z, 30.0)
     z_back = pressure_dbar_to_depth(p, 30.0)
     assert np.allclose(z, z_back, atol=0.1)
+
+
+def _argo_csv(rows):
+    from uacpy.data import argo
+    header = ','.join(argo._COLUMNS)
+    units = ','.join([''] * len(argo._COLUMNS))
+    return '\n'.join([header, units] + rows)
+
+
+def test_a_dated_argo_profile_beats_an_undated_one_at_equal_distance(
+        monkeypatch):
+    from uacpy.data import argo
+
+    def _row(platform, time_str, pres):
+        return f"{platform},1,A,{time_str},45.0,-30.0,{pres},10.0,35.0,1,1"
+
+    body = _argo_csv([_row('1', '', 10.0), _row('1', '', 20.0),
+                      _row('2', '2026-08-14T00:00:00Z', 10.0),
+                      _row('2', '2026-08-14T00:00:00Z', 20.0)])
+    monkeypatch.setattr(
+        argo, 'http_get',
+        lambda url, timeout=None, verbose=False, source=None: body)
+    profile = argo.fetch_argo_profile((45.0, -30.0), date='2026-08-15')
+    assert profile['platform'] == '2'
+
+
+def test_an_unparseable_argo_time_costs_more_than_any_real_one():
+    from uacpy.data import argo
+    when = np.datetime64('2026-08-15', 'D')
+    assert argo._abs_days(None, when) == float('inf')
+    assert argo._abs_days('garbage', when) == float('inf')
+
+
+def test_the_argo_query_window_includes_the_whole_last_tolerated_day():
+    from uacpy.data import argo
+    when = np.datetime64('2026-08-15', 'D')
+    url = argo._query_url((45.0, -30.0), when, 300.0, 10, 'http://x')
+    assert 'time%3E=2026-08-05T00:00:00Z' in url
+    assert 'time%3C2026-08-26T00:00:00Z' in url

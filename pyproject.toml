@@ -232,4 +232,5 @@ markers = [
     "requires_oases: requires OASES binaries (download separately, see uacpy/install.sh)",
     "requires_network: hits a live external service (uacpy.data fetchers); auto-skipped offline",
     "benchmark: validates model output against a closed-form analytic / canonical reference",
+    "convention: pins repo conventions rather than runtime behaviour (docstring prose, source-convention sweeps, repr snapshots); failure signals doc/convention drift",
 ]

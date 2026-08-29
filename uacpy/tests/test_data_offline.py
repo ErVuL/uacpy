@@ -7,6 +7,7 @@ cache with no network. Skipped where netCDF4 is unavailable (the grids need it).
 """
 
 import datetime as _dt
+import importlib
 import os
 import pickle
 import re
@@ -831,3 +832,15 @@ class TestCorruptNetcdfCacheRaisesTheTypedError:
         with pytest.raises(DataFetchError, match='unreadable'):
             _cache.cached_grid_at(bad, factory, 'test-grid')
         _cache.invalidate_grids()
+
+
+@pytest.mark.parametrize('module_name,func_name', [
+    ('uacpy.data.crust1_local', 'fetch_bottom_crust1_transect'),
+    ('uacpy.data.diesing_local', 'fetch_bottom_diesing_transect'),
+    ('uacpy.data.emodnet_local', 'fetch_bottom_local_transect'),
+    ('uacpy.data.sediment_db', 'fetch_bottom_local_transect'),
+], ids=['crust1', 'diesing', 'emodnet', 'sediment_db'])
+def test_offline_transect_fetchers_document_their_ignored_parameters(
+        module_name, func_name):
+    mod = importlib.import_module(module_name)
+    assert 'accepted (and ignored' in getattr(mod, func_name).__doc__

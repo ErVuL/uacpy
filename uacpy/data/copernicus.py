@@ -178,6 +178,11 @@ def fetch_ssp_transect_operational(
             f"fetch_ssp_transect_operational: unknown formula={formula!r}.",
             remediation=f"Use one of {sorted(_FORMULAS)}.",
         )
+    if int(n_points) < 2:
+        raise ConfigurationError(
+            f"fetch_ssp_transect_operational: n_points must be >= 2, "
+            f"got {n_points}.",
+            remediation="Pass n_points>=2 to define a transect.")
     when = parse_date(date).isoformat()
     marine = _import_copernicusmarine()
     ds = _open_dataset(

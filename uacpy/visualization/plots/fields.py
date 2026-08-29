@@ -491,7 +491,9 @@ def _plot_field_2d(
     )
     ax.set_xlabel(x_label)
     ax.set_ylabel(y_label)
-    if y_name == 'depth':
+    # Any depth-denoting y axis (depth, source_depth) is positive-down
+    # (core/results/field.py documents both in metres below the surface).
+    if y_name.endswith('depth'):
         invert_yaxis_once(ax)
     if contours:
         cs = ax.contour(

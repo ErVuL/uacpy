@@ -94,6 +94,14 @@ name3=trim(adjustl(name3))
 ! Read bottom properties (sedlayer, nzs, cs, rho, attn)
 read (nunit,*) sedlayer
 read (nunit,*) nzs
+! profl lays the sediment control points out as [surface, seafloor,
+! nzs-3 interior, domain floor] and stores zwork(2) unconditionally
+! (ram.f90:334-342), so nzs below 4 cannot express the layout and
+! nzs=1 would write past the end of a 1-element array.
+if (nzs < 4) then
+   print *, 'ERROR: nzs must be at least 4 in in.pe (got ', nzs, ')'
+   stop 1
+end if
 read (nunit,*) isedrd
 
 if (isedrd==1) then

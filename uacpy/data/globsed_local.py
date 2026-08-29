@@ -15,7 +15,7 @@ from pathlib import Path
 import numpy as np
 
 from uacpy._log import log_message
-from uacpy.core.exceptions import DataFetchError
+from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.data import _cache
 from uacpy.data._geo import as_coordinate
 from uacpy.data._http import curl_download, http_get
@@ -103,6 +103,11 @@ def fetch_sediment_thickness_transect(start, end, n_points=6):
 
     ``thickness_m`` is ``NaN`` at any waypoint GlobSed does not cover.
     """
+    if int(n_points) < 2:
+        raise ConfigurationError(
+            f"fetch_sediment_thickness_transect: n_points must be >= 2, "
+            f"got {n_points}.",
+            remediation="Pass n_points>=2 to define a transect.")
     from uacpy.data._geo import geodesic_waypoints
     lats, lons, ranges_m = geodesic_waypoints(start, end, n_points)
     g = _grid()

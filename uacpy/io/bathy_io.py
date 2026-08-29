@@ -32,6 +32,7 @@ from uacpy.core.exceptions import (
 )
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.io.units import km_to_m, m_to_km
+from uacpy.io.utils import _collapsed_pair_index
 from uacpy.io._fortran_helpers import (
     list_directed_int, read_list_directed_values, read_vector,
     strip_fortran_quotes, typed_format_error,
@@ -561,8 +562,8 @@ def _check_km_column_resolves(label: str, ranges_km, *,
     :func:`write_bty_3d` reaches ``bdry3DMod.f90:324,328``.
     """
     written = np.round(np.asarray(ranges_km, dtype=float), 6)
-    if written.size > 1 and np.diff(written).min() <= 0.0:
-        i = int(np.argmin(np.diff(written)))
+    i = _collapsed_pair_index(written)
+    if i is not None:
         raise ConfigurationError(
             f"{label}: ranges {km_to_m(written[i]):.6g} m and "
             f"{km_to_m(written[i + 1]):.6g} m both write {written[i]:.6f} km, "

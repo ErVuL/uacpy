@@ -31,6 +31,7 @@ from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.io._fortran_helpers import (
     PARSE_ERRORS,
     _bound_counts,
+    fortran_float,
     read_fortran_record as _read_fortran_record,
     detect_endian,
 )
@@ -1423,9 +1424,12 @@ def read_oasr_reflection_coefficients(
             header_line = f.readline().strip()
             header_parts = header_line.split()
 
+            # fortran_float, not float(): every value column is a Fortran
+            # real write, which can spell an exponent as D+00 or drop the
+            # letter entirely when it needs three digits.
             if len(header_parts) >= 4:
-                freq_min = float(header_parts[0])
-                freq_max = float(header_parts[1])
+                freq_min = fortran_float(header_parts[0])
+                freq_max = fortran_float(header_parts[1])
                 n_freq = int(header_parts[2])
                 sampling_type_code = int(header_parts[3])
 
@@ -1451,7 +1455,7 @@ def read_oasr_reflection_coefficients(
                     # header's own (1h ,f12.3,i6) layout (oasjun21.f:27-30)
                     # before giving up.
                     try:
-                        freq = float(raw_header[1:13])
+                        freq = fortran_float(raw_header[1:13])
                         n_samples = int(raw_header[13:19])
                     except (ValueError, IndexError):
                         raise FileFormatError(
@@ -1461,7 +1465,7 @@ def read_oasr_reflection_coefficients(
                             f"truncated or not a valid OASR "
                             f"{filepath.suffix or '.rco/.trc'} table.")
                 else:
-                    freq = float(freq_header[0])
+                    freq = fortran_float(freq_header[0])
                     n_samples = int(freq_header[1])
 
                 # Read samples
@@ -1477,9 +1481,9 @@ def read_oasr_reflection_coefficients(
                             f"{n_samples} at {freq:g} Hz is short or missing "
                             f"— oasjun21.f:103-104 writes exactly NWVNO "
                             f"(3f15.6) rows, so the run died mid-write.")
-                    angles_or_slowness.append(float(parts[0]))
-                    magnitude.append(float(parts[1]))
-                    phase.append(float(parts[2]))
+                    angles_or_slowness.append(fortran_float(parts[0]))
+                    magnitude.append(fortran_float(parts[1]))
+                    phase.append(fortran_float(parts[2]))
 
                 frequencies.append(freq)
                 angles_or_slowness_list.append(np.array(angles_or_slowness))

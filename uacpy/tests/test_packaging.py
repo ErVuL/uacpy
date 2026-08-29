@@ -42,6 +42,7 @@ from uacpy.tests._doc_gate import (            # noqa: E402
     _resolve_markdown,
     _section_span,
 )
+from uacpy.tests import conftest  # noqa: E402
 
 
 # The complete importable surface the wheel ships. A new subpackage must be
@@ -2402,6 +2403,29 @@ def test_every_physical_state_exemption_names_a_live_definition():
         f"{stale}. Drop them, or fix the name they were meant to cover.")
 
 
+_EVENT_NAMED_TEST_FILE = re.compile(r"audit|20\d{6}|round\d|batch",
+                                    re.IGNORECASE)
+
+
+@pytest.mark.convention
+def test_no_test_file_is_named_after_the_work_session_that_produced_it():
+    """Test files are named by the module or behaviour they pin, never by
+    the audit, date, round, or batch that produced them: an event name says
+    nothing about what breaks when the file goes red, and the tests inside
+    it drift away from the per-module file the next reader searches.
+
+    ``round\\d`` rather than ``round`` keeps roundtrip names out of the
+    sweep."""
+    tests_dir = Path(__file__).resolve().parent
+    offenders = sorted(
+        path.name for path in tests_dir.glob("test_*.py")
+        if _EVENT_NAMED_TEST_FILE.search(path.name))
+    assert not offenders, (
+        f"test file(s) named after a work session rather than what they "
+        f"pin: {offenders}. Move each test into the per-module file that "
+        f"covers the same code.")
+
+
 # ── the py.typed promise, held where it is already kept ─────────────────────
 
 #: Subpackages held at zero type-checker errors. ``uacpy/noise`` is the one
@@ -2634,3 +2658,82 @@ def test_no_parameter_defaults_to_none_under_an_annotation_that_refuses_it():
     assert not _NONE_DEFAULTS, (
         f"{len(_NONE_DEFAULTS)} parameter(s) default to None under an "
         f"annotation that does not admit it:\n" + "\n".join(_NONE_DEFAULTS))
+
+
+class _CollectedItem:
+    """Stand-in for a collected pytest item: a bag of marker names exposing
+    the two methods ``pytest_collection_modifyitems`` calls."""
+
+    def __init__(self, *marker_names):
+        self.marker_names = set(marker_names)
+
+    def get_closest_marker(self, name):
+        return name if name in self.marker_names else None
+
+    def add_marker(self, marker):
+        self.marker_names.add(marker.name)
+
+
+def _registered_marker_names():
+    cfg = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text())
+    markers = cfg["tool"]["pytest"]["ini_options"]["markers"]
+    return {entry.split(":", 1)[0].strip() for entry in markers}
+
+
+@pytest.mark.convention
+class TestConventionMarkerIsRegistered:
+    """``convention`` is a registered marker, so ``-m convention`` /
+    ``-m "not convention"`` select without ``--strict-markers`` warnings."""
+
+    def test_convention_is_a_registered_marker(self):
+        assert "convention" in _registered_marker_names()
+
+    def test_the_prior_markers_are_registered_beside_it(self):
+        assert {"slow", "requires_binary", "requires_oases",
+                "requires_network", "benchmark"} <= _registered_marker_names()
+
+
+@pytest.mark.convention
+class TestRequiresOasesImpliesRequiresBinary:
+    """The conftest collection hook attaches ``requires_binary`` to every
+    ``requires_oases`` item — the wiring that makes
+    ``-m "not requires_binary and not slow"`` exclude OASES tests."""
+
+    def test_an_oases_item_gains_the_binary_marker(self):
+        item = _CollectedItem("requires_oases")
+        conftest.pytest_collection_modifyitems([item])
+        assert "requires_binary" in item.marker_names
+
+    def test_an_unmarked_item_gains_no_markers(self):
+        item = _CollectedItem()
+        conftest.pytest_collection_modifyitems([item])
+        assert item.marker_names == set()
+
+
+@pytest.mark.convention
+class TestTheComposedDevTierIsDocumented:
+    """README.md and docs/DEV.md both name the composed pure-Python tier
+    command, and DEV.md names the gate reporting flags that keep skips
+    identifiable."""
+
+    def test_the_readme_names_the_composed_tier_command(self):
+        text = (_REPO_ROOT / "README.md").read_text()
+        assert '-m "not requires_binary and not slow"' in text
+
+    def test_dev_md_names_the_composed_tier_command(self):
+        text = (_REPO_ROOT / "docs" / "DEV.md").read_text()
+        assert '-m "not requires_binary and not slow"' in text
+
+    def test_dev_md_names_the_gate_reporting_flags(self):
+        text = (_REPO_ROOT / "docs" / "DEV.md").read_text()
+        assert "-rs --durations=50" in text
+
+
+@pytest.mark.convention
+class TestDevMdStatesTheMatchAnchoringRule:
+    """docs/DEV.md states the ``match=`` convention: patterns cover the
+    load-bearing fragment of a message, not the full sentence."""
+
+    def test_the_rule_names_the_load_bearing_fragment(self):
+        text = (_REPO_ROOT / "docs" / "DEV.md").read_text()
+        assert "load-bearing fragment" in text

@@ -1093,12 +1093,25 @@ class PropagationModel(ABC):
         run_mode: 'RunMode',
         source_waveform,
         sample_rate,
-    ) -> None:
-        """Raise :class:`ConfigurationError` when the caller asked for a
+    ):
+        """Validate the TIME_SERIES signal pair and return the waveform the
+        run should carry.
+
+        Raises :class:`ConfigurationError` when the caller asked for a
         :attr:`RunMode.TIME_SERIES` result but did not supply both
         ``source_waveform`` and ``sample_rate``, when the waveform is not a
         real finite pressure pulse, or when ``sample_rate`` is not a
         positive finite number.
+
+        Returns ``source_waveform`` itself, except that an accepted complex
+        waveform — one whose imaginary part is everywhere ~0, which the
+        realness check deliberately admits — comes back as its ``float64``
+        real part. Every downstream consumer casts with ``dtype=float``
+        (``_pad_waveform_to_duration``, ``_resolve_time_series_frequencies``,
+        Bellhop's delay-and-sum), a cast that raises ``TypeError`` on a
+        complex Python list and emits ``ComplexWarning`` on a complex
+        ndarray; callers therefore run with the returned waveform, never the
+        one they passed in.
 
         Used by every wrapper that synthesises p(t) from a broadband
         transfer function (Bellhop, RAM, Scooter, Kraken, OASP).
@@ -1139,12 +1152,15 @@ class PropagationModel(ABC):
                     f"{self.model_name}.run(run_mode=TIME_SERIES): "
                     "source_waveform contains non-finite values (NaN/inf)."
                 )
-            if np.iscomplexobj(wf) and not np.allclose(wf.imag, 0.0):
-                raise ConfigurationError(
-                    f"{self.model_name}.run(run_mode=TIME_SERIES): "
-                    "source_waveform must be a real pressure pulse; got a "
-                    "complex array with a non-zero imaginary part."
-                )
+            if np.iscomplexobj(wf):
+                if not np.allclose(wf.imag, 0.0):
+                    raise ConfigurationError(
+                        f"{self.model_name}.run(run_mode=TIME_SERIES): "
+                        "source_waveform must be a real pressure pulse; got a "
+                        "complex array with a non-zero imaginary part."
+                    )
+                return wf.real.astype(np.float64)
+        return source_waveform
 
     def _require_run_triple(self, env, source, receiver, *,
                             allow_none_receiver=False) -> None:
@@ -1390,7 +1406,8 @@ class PropagationModel(ABC):
                 sample_rate=sample_rate,
                 output_duration=output_duration,
             )
-        self._require_timeseries_signal(run_mode, source_waveform, sample_rate)
+        source_waveform = self._require_timeseries_signal(
+            run_mode, source_waveform, sample_rate)
         source_waveform = self._pad_waveform_to_duration(
             source_waveform, sample_rate, output_duration,
         )
@@ -2763,6 +2780,11 @@ class PropagationModel(ABC):
         ``<base>.prt`` tail to a :class:`ModelExecutionError` on failure and
         logging stdout when verbose. Returns the ``CompletedProcess``. Shared
         by every model's binary-launch wrapper.
+
+        The AT engines hold the file root in ``CHARACTER(LEN=80)`` buffers,
+        so a root longer than 80 characters is silently truncated; launching
+        with ``work_dir`` as cwd and a short relative ``base_name`` keeps
+        every root far inside that limit.
 
         ``stale_outputs`` lists the suffixes (``'.shd'``, ``'.arr'``, …) this
         binary may write under ``base_name``. They are removed before launch

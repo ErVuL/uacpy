@@ -384,6 +384,9 @@ Tests use custom markers to allow selective execution:
   fetchers); **deselected by default** by `addopts` in `pyproject.toml`
 - `benchmark` -- Tests that validate model output against a closed-form
   analytic or canonical published reference
+- `convention` -- Tests that pin repo conventions rather than runtime
+  behaviour (docstring prose, source-convention sweeps, repr snapshots);
+  a failure signals doc/convention drift, not a runtime defect
 
 ``` bash
 
@@ -393,6 +396,9 @@ pytest uacpy/tests/ -m "not slow"
 # Run only tests that don't need compiled binaries
 pytest uacpy/tests/ -m "not requires_binary"
 
+# Fast pure-Python dev tier: no binaries and no slow tests
+pytest uacpy/tests/ -m "not requires_binary and not slow"
+
 # Skip OASES tests (if OASES is not installed)
 pytest uacpy/tests/ -m "not requires_oases"
 
@@ -400,6 +406,13 @@ pytest uacpy/tests/ -m "not requires_oases"
 pytest uacpy/tests/ -m requires_network
 
 ```
+
+The composed dev tier `-m "not requires_binary and not slow"` selects
+3,849 of the suite's 5,232 test functions (≥5,172 collected cases; static
+AST count as of 2026-08-29, counting `requires_oases` tests as
+`requires_binary` — the conftest attaches that marker automatically). It
+is the fast development loop; the full suite (default `pytest` invocation)
+must still pass before a change lands.
 
 ## 🗺️ Roadmap
 
@@ -529,9 +542,9 @@ redistributed by UACPY); all are permissive and GPL-3.0-compatible.
 | **pillow** | image encode/decode behind the map and animation writers | HPND (MIT-style) |
 | **copernicusmarine** | Copernicus operational sound speed | EUPL-1.2 (lists GPL-3.0 as compatible) |
 
-Test/development tooling (`pytest`, `pytest-xdist`, `pytest-cov`, `black`,
-`flake8` — the `[test]` / `[dev]` extras) is MIT-licensed and not required at
-runtime.
+Test/development tooling (`pytest`, `pytest-xdist`, `setuptools` — the
+`[test]` extra — plus `pytest-cov`, `black`, `flake8`, `mypy` in `[dev]`) is
+MIT-licensed and not required at runtime.
 
 
 ### External data sources

@@ -502,3 +502,45 @@ class TestOasrSlownessSamplingIsRefused:
         from uacpy.core.exceptions import UnsupportedFeatureError
         with pytest.raises(UnsupportedFeatureError, match='slowness'):
             OASR(options='N p')
+
+
+class TestOasrTablesAcceptFortranRealSpellings:
+    """The ``.rco``/``.trc`` value columns are Fortran real writes; a
+    double-precision OASR built elsewhere can emit ``1.0D+00`` and any value
+    below ~1e-99 drops the exponent letter. ``fortran_float`` reads both;
+    ``float()`` reads neither."""
+
+    @staticmethod
+    def _write(tmp_path, magnitude_token):
+        p = tmp_path / 'table.trc'
+        p.write_text(
+            "      10.000     100.000   1   2\n"
+            "      10.000      2  # Frequency, # of angles\n"
+            f"      10.000000    {magnitude_token}      5.000000\n"
+            "      30.000000       0.900000     15.000000\n"
+        )
+        return p
+
+    def test_a_letterless_three_digit_exponent_parses(self, tmp_path):
+        from uacpy.io.oases_reader import read_oasr_reflection_coefficients
+        data = read_oasr_reflection_coefficients(
+            self._write(tmp_path, '0.123457-118'))
+        assert data['magnitude'][0][0] == pytest.approx(
+            1.23457e-119, rel=1e-6)
+
+    def test_a_d_exponent_parses(self, tmp_path):
+        from uacpy.io.oases_reader import read_oasr_reflection_coefficients
+        data = read_oasr_reflection_coefficients(
+            self._write(tmp_path, '     1.5D+00'))
+        assert data['magnitude'][0][0] == pytest.approx(1.5, rel=1e-12)
+
+    def test_a_d_exponent_header_frequency_parses(self, tmp_path):
+        from uacpy.io.oases_reader import read_oasr_reflection_coefficients
+        p = tmp_path / 'hdr.trc'
+        p.write_text(
+            "     1.0D+01     100.000   1   2\n"
+            "      10.000      1  # Frequency, # of angles\n"
+            "      10.000000       0.500000      5.000000\n"
+        )
+        data = read_oasr_reflection_coefficients(p)
+        assert data['freq_min'] == pytest.approx(10.0, rel=1e-12)

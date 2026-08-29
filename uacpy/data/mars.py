@@ -86,20 +86,41 @@ _FOLK_TO_PHI = {
 }
 
 
+def _property_as_float(name: str, value) -> float:
+    """``float(value)`` for a MARS server property, or ``DataFetchError``.
+
+    A property the server populated with something non-numeric raises the
+    typed error the source-fallback chains catch, so the ``'auto'`` bottom
+    chain falls through to its next source instead of aborting.
+    """
+    try:
+        return float(value)
+    except (TypeError, ValueError) as exc:
+        raise DataFetchError(
+            f"AusSeabed MARS returned a non-numeric {name}: {value!r}.",
+            remediation="Use another bottom source, or let the 'auto' bottom "
+                        "chain fall through.",
+        ) from exc
+
+
 def _phi_from_properties(p: Dict) -> Optional[Dict]:
     """First usable ϕ from a MARS feature's properties, or ``None``.
 
     Returns ``{'phi', 'via'}`` — the conversion chain is grain size (µm) →
-    mud/sand/gravel percentages → Folk class.
+    mud/sand/gravel percentages → Folk class. A property populated with a
+    non-numeric value raises ``DataFetchError`` (:func:`_property_as_float`).
     """
     grain_um = p.get('MEAN_GRAIN_SIZE')
-    if grain_um is not None and float(grain_um) > 0.0:
-        return {'phi': -math.log2(float(grain_um) / 1000.0),
-                'via': 'grain_size'}
-    fracs = [p.get('GRAVEL_PERCENT'), p.get('SAND_PERCENT'),
-             p.get('MUD_PERCENT')]
+    if grain_um is not None:
+        grain_um = _property_as_float('MEAN_GRAIN_SIZE', grain_um)
+        if grain_um > 0.0:
+            return {'phi': -math.log2(grain_um / 1000.0),
+                    'via': 'grain_size'}
+    names = ('GRAVEL_PERCENT', 'SAND_PERCENT', 'MUD_PERCENT')
+    fracs = [p.get(n) for n in names]
     if any(f is not None for f in fracs):
-        g, s, m = (0.0 if f is None else max(float(f), 0.0) for f in fracs)
+        g, s, m = (0.0 if f is None else max(_property_as_float(n, f), 0.0)
+                   for n, f in zip(names, fracs))
         total = g + s + m
         if total > 0.0:
             phi = (g * _GRAVEL_PHI + s * _SAND_PHI + m * _MUD_PHI) / total

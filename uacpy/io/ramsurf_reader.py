@@ -247,9 +247,15 @@ def read_pcomplex_grid(
     ``u·f3`` for the fluid codes (``ramsurf1.5.f:438``, ``ramgeo1.5.f:430``)
     and the odd-indexed elastic component ``u(2i-1)`` for RAMS
     (``rams0.5.f:263``), so the two grids stay consistent per backend.
-    The carrier ``exp(+i k0 r)`` has been factored out by the PE march;
-    the RAM wrapper bakes the engineering travelling-wave carrier
-    ``exp(-i k0 r)`` back in before tagging the result.
+    The travelling-wave carrier differs per backend. The fluid codes
+    (ramsurf1.5 / ramgeo1.5) absorb it into the operator function, so
+    their envelope carries no ``exp(+i k0 r)`` and the RAM wrapper
+    multiplies ``exp(-i k0 r)`` back in; rams0.5's ``g0`` march step
+    bakes ``exp(+i k0 r*rot0)`` into ``u``, so its envelope arrives
+    with the carrier and the wrapper adds none. The wrapper conjugates
+    both and applies the shared ``exp(-i pi/4)`` Hankel phase
+    (``psi_to_travelling_wave`` in ``models/_pe_phase.py``) before tagging
+    the result.
 
     Parameters
     ----------

@@ -26,7 +26,7 @@ import numpy as np
 
 from uacpy._log import log_message
 from uacpy.core.environment import BoundaryProperties, Bottom
-from uacpy.core.exceptions import ConfigurationError, DataFetchError
+from uacpy.core.exceptions import DataFetchError
 from uacpy.data import _cache
 from uacpy.data._geo import Coordinate, as_coordinate
 from uacpy.data._http import http_get, checked_member_size
@@ -62,15 +62,11 @@ _cache.register_cache(_MODEL.clear)
 
 
 def _pyproj_transformer():
-    try:
-        from pyproj import Transformer
-    except ImportError as exc:                                  # pragma: no cover
-        raise ConfigurationError(
-            "The offline Diesing seafloor-lithology backend needs 'pyproj'.",
-            remediation="pyproj ships with the default uacpy install; reinstall "
-                        "with `pip install -e .`, or `pip install pyproj`.",
-        ) from exc
-    return Transformer.from_crs("EPSG:4326", WAGNER4_PROJ, always_xy=True)
+    """EPSG:4326 → Wagner IV transformer, through
+    :func:`uacpy.data.seaice_local._pyproj_transformer` (which raises
+    ``ConfigurationError`` naming this backend when pyproj is missing)."""
+    from uacpy.data.seaice_local import _pyproj_transformer as epsg_transformer
+    return epsg_transformer(WAGNER4_PROJ, backend='Diesing seafloor-lithology')
 
 
 def download_diesing_db(cache_dir=None, *, timeout=300.0, verbose=False):
@@ -228,6 +224,8 @@ def fetch_bottom_diesing_transect(start: Coordinate, end: Coordinate, *,
 
     ``water_sound_speed`` also takes a ``(lat, lon) -> m/s`` callable,
     so each column scales to the water over its own seafloor.
+    ``timeout``/``verbose`` are accepted (and ignored — this backend is
+    offline) for signature parity with the network bottom fetchers.
     """
     return range_dependent_bottom_along(
         lambda la, lo: fetch_bottom_diesing(

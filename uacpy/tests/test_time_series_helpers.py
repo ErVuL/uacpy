@@ -31,7 +31,9 @@ import pytest
 
 from uacpy.core.environment import BoundaryProperties
 from uacpy.core.exceptions import ConfigurationError
+from uacpy import Source
 from uacpy.models.base import RunMode
+from uacpy.models.bellhop import Bellhop
 import uacpy
 
 
@@ -1335,3 +1337,73 @@ class TestBatchedSynthesisMatchesPerCellTraces:
                 np.testing.assert_allclose(
                     out.data[di, ri], tr.data, rtol=0.0, atol=1e-12)
         assert np.max(np.abs(out.data)) > 0.0
+
+
+def _waveform():
+    return np.sin(2.0 * np.pi * 100.0 * np.arange(64) / 1000.0)
+
+
+@pytest.mark.requires_binary
+class TestTimeSeriesGuardReturnsARealFloatWaveform:
+    """``_require_timeseries_signal`` admits a complex waveform whose
+    imaginary part is ~0 on purpose, and every downstream consumer casts
+    with ``dtype=float`` — a cast that raises a bare ``TypeError`` on a
+    complex Python list and emits ``ComplexWarning`` on a complex ndarray.
+    The guard therefore returns the waveform to run with: the float64 real
+    part for accepted complex input, the caller's object otherwise."""
+
+    @pytest.mark.parametrize('kind', ['list', 'ndarray'])
+    def test_an_accepted_complex_waveform_comes_back_as_float64_real(
+            self, kind):
+        wf = [complex(v, 0.0) for v in _waveform()]
+        if kind == 'ndarray':
+            wf = np.asarray(wf)
+        m = Bellhop(verbose=False)
+        ret = m._require_timeseries_signal(RunMode.TIME_SERIES, wf, 1000.0)
+        assert isinstance(ret, np.ndarray)
+        assert ret.dtype == np.float64
+        assert np.array_equal(ret, _waveform())
+
+    @pytest.mark.parametrize('kind', ['list', 'ndarray'])
+    def test_downstream_casts_of_the_returned_waveform_stay_silent(
+            self, kind):
+        wf = [complex(v, 0.0) for v in _waveform()]
+        if kind == 'ndarray':
+            wf = np.asarray(wf)
+        m = Bellhop(verbose=False)
+        ret = m._require_timeseries_signal(RunMode.TIME_SERIES, wf, 1000.0)
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            padded = m._pad_waveform_to_duration(ret, 1000.0, 0.1)
+            freqs = m._resolve_time_series_frequencies(
+                RunMode.TIME_SERIES, np.array([50.0, 100.0]), ret, 1000.0)
+        assert np.asarray(padded).dtype == np.float64
+        assert freqs is not None
+
+    def test_prepare_timeseries_hands_downstream_the_coerced_waveform(self):
+        m = Bellhop(verbose=False)
+        wf, freqs = m._prepare_timeseries(
+            RunMode.TIME_SERIES, Source(depths=25.0, frequencies=100.0),
+            np.array([50.0, 100.0]), [complex(v, 0.0) for v in _waveform()],
+            1000.0)
+        assert np.asarray(wf).dtype == np.float64
+
+    @pytest.mark.parametrize('kind', ['list', 'ndarray'])
+    def test_a_significant_imaginary_part_is_refused(self, kind):
+        wf = [v + 0.5j for v in _waveform()]
+        if kind == 'ndarray':
+            wf = np.asarray(wf)
+        with pytest.raises(ConfigurationError, match='imaginary'):
+            Bellhop(verbose=False)._require_timeseries_signal(
+                RunMode.TIME_SERIES, wf, 1000.0)
+
+    def test_a_real_waveform_passes_through_as_the_same_object(self):
+        wf = _waveform()
+        ret = Bellhop(verbose=False)._require_timeseries_signal(
+            RunMode.TIME_SERIES, wf, 1000.0)
+        assert ret is wf
+
+    def test_broadband_with_no_waveform_returns_none(self):
+        ret = Bellhop(verbose=False)._require_timeseries_signal(
+            RunMode.BROADBAND, None, None)
+        assert ret is None

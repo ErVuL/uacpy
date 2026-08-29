@@ -15,6 +15,8 @@ example's actual dependencies.
 from __future__ import annotations
 
 import ast
+import importlib
+import importlib.util
 import os
 import re
 import subprocess
@@ -22,6 +24,7 @@ import sys
 from pathlib import Path
 from typing import Set
 
+import numpy as np
 import pytest
 
 import uacpy
@@ -326,7 +329,7 @@ _OLD_SWALLOWED_STDOUT = """\
 2. Running RAM (parabolic equation)...
   RAM error: mpiramS sediment file: cs profile(s) start with a negative \
 value (min -21.32), which the binary's profile counter reads as a '-1 \
-range' header sentinel (peramx.f90:120-123) — the deck cannot express it.
+range' header sentinel (peramx.f90:128-131) — the deck cannot express it.
 3. Running Kraken for comparison...
   ✓ Kraken completed (using range-independent approximation)
 ✓ Example 05 complete
@@ -340,7 +343,7 @@ Traceback (most recent call last):
     return self._run_tl(env, source, receiver)
 uacpy.core.exceptions.ConfigurationError: mpiramS sediment file: cs \
 profile(s) start with a negative value (min -21.32), which the binary's \
-profile counter reads as a '-1 range' header sentinel (peramx.f90:120-123) \
+profile counter reads as a '-1 range' header sentinel (peramx.f90:128-131) \
 — the deck cannot express it.
 """
 
@@ -761,3 +764,38 @@ def test_example_04_saves_through_the_figure_it_bound():
     assert [getattr(node.func.value, "id", None) for node in saves] == [
         "fig1", "fig2", "fig3", "fig4", "fig5"]
 
+
+def _load_example(stem):
+    spec = importlib.util.spec_from_file_location(
+        f'_examples_{stem}', EXAMPLES_DIR / f'{stem}.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_example_38_extent_pads_half_a_cell_beyond_the_grid_centres(
+        monkeypatch, tmp_path):
+    monkeypatch.setenv('UACPY_EXAMPLE_OUTPUT', str(tmp_path))
+    ex38 = _load_example('example_38_matched_field')
+    extent = ex38._imshow_extent(np.linspace(500.0, 5000.0, 121),
+                                 np.linspace(5.0, 95.0, 91))
+    assert extent == pytest.approx([0.48125, 5.01875, 95.5, 4.5])
+
+
+def test_the_three_comparison_examples_share_one_tl_difference_renderer(
+        monkeypatch, tmp_path):
+    monkeypatch.setenv('UACPY_EXAMPLE_OUTPUT', str(tmp_path))
+    monkeypatch.syspath_prepend(str(EXAMPLES_DIR))
+    fresh = 'plotting_utils' not in sys.modules
+    try:
+        plotting_utils = importlib.import_module('plotting_utils')
+        renderers = [
+            _load_example(stem)._plot_tl_difference
+            for stem in ('example_05_ram_advanced',
+                         'example_16_bellhop_bounce_integration',
+                         'example_18_rd_bottom_krakenfield_vs_ram')]
+        assert all(fn is plotting_utils._plot_tl_difference
+                   for fn in renderers)
+    finally:
+        if fresh:
+            sys.modules.pop('plotting_utils', None)

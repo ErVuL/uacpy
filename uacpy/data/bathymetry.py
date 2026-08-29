@@ -248,18 +248,17 @@ def bathy_transect_plan(
     if n_points == 'auto':
         n = min(native, max_points)
     else:
+        msg = (f"bathy_transect_plan: n_points={n_points!r} is not a "
+               f"sample count. Valid forms: an integer >= 2, or 'auto' "
+               f"for GEBCO native resolution.")
+        remediation = ("Pass n_points as an int (e.g. n_points=50) "
+                       "or n_points='auto'.")
         try:
             n_requested = int(n_points)
-            if n_requested != n_points:
-                raise ValueError
         except (TypeError, ValueError) as exc:
-            raise ConfigurationError(
-                f"bathy_transect_plan: n_points={n_points!r} is not a "
-                f"sample count. Valid forms: an integer >= 2, or 'auto' "
-                f"for GEBCO native resolution.",
-                remediation="Pass n_points as an int (e.g. n_points=50) "
-                            "or n_points='auto'.",
-            ) from exc
+            raise ConfigurationError(msg, remediation=remediation) from exc
+        if n_requested != n_points:
+            raise ConfigurationError(msg, remediation=remediation)
         if n_requested < 2:
             raise ConfigurationError(
                 f"bathy_transect_plan: n_points must be >= 2, got {n_points}.",

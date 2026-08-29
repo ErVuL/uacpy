@@ -919,9 +919,14 @@ def spl(x: np.ndarray, ref: float = 1) -> float:
     >>> print(f"SPL: {spl_db:.2f} dB re 1 µPa")
     SPL: 39.81 dB re 1 µPa
 
-    The rms pressure is floored at ``sqrt(PRESSURE_FLOOR)`` before the log —
-    the amplitude-domain twin of :func:`power_to_db`'s power floor, giving the
-    same -300 dB re 1 µPa for a silent (all-zero) signal instead of ``-inf``.
+    The rms pressure is floored at ``sqrt(PRESSURE_FLOOR)`` before the log,
+    so a silent (all-zero) signal returns a finite
+    ``20*log10(sqrt(PRESSURE_FLOOR)/ref)`` — -300 dB re 1 µPa at the default
+    ``ref=1`` — instead of ``-inf``. The floor is read in this function's µPa
+    working unit, while :func:`power_to_db` applies the same named constant
+    to its ``power`` argument in the units of ``ref**2`` (Pa² at its
+    default), where a silent signal floors at -180 dB re 1 µPa; the two
+    silent-signal levels coincide only when both are called with ``ref=1``.
     """
     rmsx = np.sqrt(np.mean(np.abs(x) ** 2))
     return 20 * np.log10(np.maximum(rmsx, np.sqrt(PRESSURE_FLOOR)) / ref)
@@ -948,7 +953,11 @@ def power_to_db(power, ref: float = REFERENCE_PRESSURE_WATER, *,
         ``REFERENCE_PRESSURE_AIR`` for air.
     floor : float, optional
         Lower bound applied to ``power`` before the log (default
-        :data:`PRESSURE_FLOOR`), guarding ``log10(0)``.
+        :data:`PRESSURE_FLOOR`), guarding ``log10(0)``. Read in ``power``'s
+        own units (``ref**2``), so the level a fully-silent input floors at
+        depends on ``ref``: ``10*log10(1e-30 / 1e-12) = -180`` dB re 1 µPa
+        at the default ``ref``, against the -300 dB re 1 µPa :func:`spl`
+        floors a silent signal at under its µPa default.
 
     Returns
     -------

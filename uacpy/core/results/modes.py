@@ -437,25 +437,34 @@ class Modes(Result):
             # positive, so alpha_m comes back high: an upper bound, measured
             # 0.7 % / 2.4 % / 5.1 % / 17 % over the exact perturbation
             # integral for modes 1-4 of an analytic 100 m Pekeris guide.
-            # A seabed that psi vanishes at (rigid or pressure-release) has
-            # no tail and no error, so the amplitude at the deepest
-            # tabulated depth is what decides whether to say so.
+            # A pressure-release seabed zeroes psi(D): no tail, no error.
+            # A rigid one zeroes psi'(D) with psi(D) at a maximum, and no
+            # energy enters it either, so the water-column integral is
+            # already exact there (the bottom= vacuum/rigid branch below
+            # states the same rule). Modes carries no boundary metadata,
+            # so psi(D)² is the only available trigger and a rigid-seabed
+            # mode set fires this warning even though its value is exact.
             psi_end_sq = weight[-1, :]
             column_mean = np.mean(weight, axis=0)
             if np.any(psi_end_sq > 1e-6 * column_mean):
                 warnings.warn(
-                    f"Modes.with_attenuation: the mode shapes are non-zero at "
-                    f"the deepest tabulated depth "
-                    f"({float(self.depths[-1]):g} m), so they continue as an "
+                    f"Modes.with_attenuation: the mode shapes are non-zero "
+                    f"at the deepest tabulated depth "
+                    f"({float(self.depths[-1]):g} m). For a penetrable "
+                    f"(lossy-boundary) mode set they continue as an "
                     f"evanescent tail into the seabed, but without bottom= "
                     f"there is no half-space gamma or density from which to "
-                    f"form it. The ∫psi²/rho dz normalisation therefore stops "
-                    f"at the seabed while the text after JKPS Eq. 5.176 "
-                    f"extends it into the bottom, "
-                    f"and the returned Im(k) is an UPPER BOUND on the true "
-                    f"attenuation (measured 0.7-17 % high across the four "
-                    f"modes of a 100 m Pekeris guide, worst for the "
-                    f"near-cutoff mode that dominates at long range).",
+                    f"form it: the ∫psi²/rho dz normalisation stops at the "
+                    f"seabed while the text after JKPS Eq. 5.176 extends it "
+                    f"into the bottom, and the returned Im(k) is an UPPER "
+                    f"BOUND on the true attenuation for such sets (measured "
+                    f"0.7-17 % high across the four modes of a 100 m "
+                    f"Pekeris guide, worst for the near-cutoff mode that "
+                    f"dominates at long range). A RIGID-seabed mode set "
+                    f"(psi'(D)=0, psi(D) at a maximum) has no tail and its "
+                    f"returned Im(k) is exact; pass "
+                    f"bottom=BoundaryProperties(acoustic_type='rigid') to "
+                    f"state that boundary and silence this warning.",
                     UserWarning, stacklevel=2)
         # A vacuum / rigid / file / precalc boundary carries no seabed
         # geoacoustics: its cp, rho and attenuation are the placeholders

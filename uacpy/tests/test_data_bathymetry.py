@@ -268,3 +268,10 @@ class TestBathyTransectNPointsForms:
             (0.0, 0.0), (1.0, 0.0), n_points=5)['n_points'] == 5
         assert bathy_transect_plan(
             (0.0, 0.0), (1.0, 0.0), n_points='auto')['n_points'] >= 2
+
+
+@pytest.mark.parametrize('bad', [2.5, 'x'], ids=['non-integral', 'non-numeric'])
+def test_a_bad_sample_count_raises_the_typed_configuration_error(bad):
+    from uacpy.data.bathymetry import bathy_transect_plan
+    with pytest.raises(ConfigurationError, match='is not a sample count'):
+        bathy_transect_plan((45.0, -30.0), (46.0, -30.0), n_points=bad)

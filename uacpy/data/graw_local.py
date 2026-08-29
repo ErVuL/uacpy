@@ -19,7 +19,7 @@ import numpy as np
 
 from uacpy._log import log_message
 from uacpy.core.environment import BoundaryProperties
-from uacpy.core.exceptions import DataFetchError
+from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.core.sediment import _HB_PHI, _HB_RHO, grain_size_to_geoacoustics
 from uacpy.data import _cache
 from uacpy.data._geo import as_coordinate
@@ -121,6 +121,11 @@ def fetch_seabed_density_transect(start, end, n_points=6):
 
     ``density_gcm3`` is ``NaN`` at any waypoint without a finite grid value.
     """
+    if int(n_points) < 2:
+        raise ConfigurationError(
+            f"fetch_seabed_density_transect: n_points must be >= 2, "
+            f"got {n_points}.",
+            remediation="Pass n_points>=2 to define a transect.")
     from uacpy.data._geo import geodesic_waypoints
     lats, lons, ranges_m = geodesic_waypoints(start, end, n_points)
     g = _grid()
