@@ -3564,6 +3564,9 @@ class TestNzsFloor:
 
 
 class TestShippedSampleDeck:
+    """The vendored ``mpiramS/in.pe`` is a current-format deck: one value
+    record per line in the order ``peramx.f90:74-105`` consumes them, with
+    bare filename lines (the ``(a)`` reads take the whole record)."""
 
     @staticmethod
     def _tracked_or_no_git(name):
@@ -3581,9 +3584,6 @@ class TestShippedSampleDeck:
              str((_MPIRAMS / name).relative_to(repo))],
             capture_output=True, text=True)
         return proc.returncode == 0
-    """The vendored ``mpiramS/in.pe`` is a current-format deck: one value
-    record per line in the order ``peramx.f90:74-105`` consumes them, with
-    bare filename lines (the ``(a)`` reads take the whole record)."""
 
     def _deck_lines(self):
         return _vendored_text(_MPIRAMS / 'in.pe').splitlines()

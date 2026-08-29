@@ -102,7 +102,9 @@ class Field(Result):
     :attr:`data` is the payload, and it is **writeable**: the attribute is
     the stored array itself, so ``field.data *= k`` rescales the result in
     place. The derived views refuse that — :attr:`p` and the real branch of
-    :attr:`db` hand back arrays with ``writeable=False`` — but ``.p`` is a
+    :attr:`db` (and of :attr:`tl`, which is ``.db`` under the quantity's
+    name on pressure fields) hand back arrays with ``writeable=False`` —
+    but ``.p`` is a
     view of *this same buffer*, so its read-only flag protects the accessor
     rather than the field: a write through ``.data`` changes what ``.p`` and
     ``.db`` return afterwards. What the copy-on-ingest in the constructor
@@ -372,6 +374,28 @@ class Field(Result):
         view = self.data.view()
         view.flags.writeable = False
         return view
+
+    @property
+    def tl(self) -> np.ndarray:
+        """Transmission loss in dB — :attr:`db` restricted to pressure fields.
+
+        The values are exactly :attr:`db`'s (``-20·log10(|data|)`` for
+        complex pressure; the same read-only view for a real dB pressure
+        field), under the name the quantity carries in the literature, so
+        a reader of ``result.tl`` knows the field is pressure-derived
+        without consulting :attr:`kind`.
+
+        Raises :class:`AttributeError` for any other ``kind``: a
+        reverberation or detection field has a level view in :attr:`db`,
+        and returning it here would label that quantity a transmission
+        loss."""
+        if self.kind != 'pressure':
+            raise AttributeError(
+                f"Field.tl: this field's kind is {self.kind!r}, not "
+                f"'pressure', so its values are not a transmission loss; "
+                f"its level view is .db."
+            )
+        return self.db
 
     @property
     def p(self) -> np.ndarray:
@@ -1461,6 +1485,20 @@ class ResultStack:
                 f"result unit='dB'."
             )
         return np.stack([s.db for s in self.slabs], axis=0)
+
+    @property
+    def tl(self) -> np.ndarray:
+        """Every slab's transmission loss stacked along the coordinate
+        axis — :attr:`db` restricted to pressure slabs, mirroring
+        :attr:`Field.tl`."""
+        first = self.slabs[0]
+        if isinstance(first, Field) and first.kind != 'pressure':
+            raise ConfigurationError(
+                f"ResultStack.tl: the slabs' kind is {first.kind!r}, not "
+                f"'pressure', so their values are not a transmission loss; "
+                f"their level view is stack.db."
+            )
+        return self.db
 
     def plot(self, **kwargs):
         """Plot every slab as a labelled panel grid (Field stacks), delegating

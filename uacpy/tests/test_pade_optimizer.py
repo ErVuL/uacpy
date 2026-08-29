@@ -391,21 +391,20 @@ class TestOptimizerReturnsItsRecordedGrids:
 
     @pytest.mark.parametrize('kwargs,expected', _CASES)
     def test_recorded_grid(self, kwargs, expected):
-        """The grid decisions (``p``, ``dr``, ``dz``, the xi bounds) are
-        integer/dyadic arithmetic and reproduce bit-for-bit on every
-        machine, so they are pinned by exact ``repr``. ``predicted_error``
-        runs through libm/SIMD paths that differ across CPUs at the ~1e-8
-        relative level, so it is pinned at rel 1e-6 — noise passes, while a
-        predictor regression (the 0.0-scores-everything class) still fails
-        by orders of magnitude."""
+        """``p``, ``dr``, ``dz`` and ``xi_max`` are integer/dyadic/rational
+        arithmetic and reproduce bit-for-bit on every machine, so they are
+        pinned by exact ``repr``. ``xi_min`` (through ``np.sin``) and
+        ``predicted_error`` run through libm/SIMD paths that differ across
+        CPUs at the ~1e-8 relative level, so they are pinned at rel 1e-6 —
+        cross-machine noise passes, while a formulation regression (the
+        0.0-scores-everything class) still fails by orders of magnitude."""
         result = optimize_grid(**kwargs)
         rendered = {k: repr(v) for k, v in sorted(result.items())}
-        predicted = float(rendered.pop('predicted_error'))
-        stable = {k: v for k, v in expected.items()
-                  if k != 'predicted_error'}
+        stable = dict(expected)
+        for key in ('predicted_error', 'xi_min'):
+            assert float(rendered.pop(key)) == pytest.approx(
+                float(stable.pop(key)), rel=1e-6)
         assert rendered == stable
-        assert predicted == pytest.approx(
-            float(expected['predicted_error']), rel=1e-6)
 
 
 class TestTauMemoAcrossTheRelaxationLadder:
@@ -451,14 +450,15 @@ class TestTauMemoAcrossTheRelaxationLadder:
         assert repr(theta_used) == '20.0'
         assert repr(eps_used) == '0.21869999999999998'
         rendered = self._rendered(result)
-        predicted = float(rendered.pop('predicted_error'))
+        assert float(rendered.pop('predicted_error')) == pytest.approx(
+            0.1981215757911043, rel=1e-6)
+        assert float(rendered.pop('xi_min')) == pytest.approx(
+            -0.23116462965158358, rel=1e-6)
         assert rendered == {
             'alpha': '0.0', 'c0': '1600.0', 'dr': '5.6953125', 'dz': '0.01',
             'p': '6',
             'xi_max': '0.13777777777777778',
-            'xi_min': '-0.23116462965158358',
         }
-        assert predicted == pytest.approx(0.1981215757911043, rel=1e-6)
 
 
 def _spectrum(c_min, c_max, theta_max_deg=30.0, freq=100.0):

@@ -576,7 +576,14 @@ def _draw_sea_ice(ax, sea_ice):
         conc = np.array([float(sea_ice)] * 2, dtype=float)
     else:
         rngs, conc = (np.asarray(a, dtype=float) for a in sea_ice)
-    if rngs.size < 2 or not np.isfinite(np.nanmean(conc)) or np.nanmean(conc) <= 0:
+    # An all-NaN concentration track means no drawable ice; numpy reports
+    # that nanmean through warnings.warn ("Mean of empty slice"), which the
+    # isfinite guard already converts into the no-op return below.
+    with warnings.catch_warnings():
+        warnings.filterwarnings('ignore', message='Mean of empty slice',
+                                category=RuntimeWarning)
+        mean_conc = np.nanmean(conc)
+    if rngs.size < 2 or not np.isfinite(mean_conc) or mean_conc <= 0:
         return
     lo, hi = ax.get_ylim()                             # inverted: surface = hi
     ax.set_ylim(lo, hi - 0.06 * (lo - hi))             # headroom for the line

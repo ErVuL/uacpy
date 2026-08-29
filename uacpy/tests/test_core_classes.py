@@ -3960,3 +3960,56 @@ class TestArrivalDictPhaseUnit:
         doc = Arrivals.__doc__
         segment = doc.split('``phase``', 1)[1].split('``n_top_bounces``')[0]
         assert 'degrees' in segment
+
+
+class TestTlIsTheDbViewRestrictedToPressureFields:
+    """``Field.tl`` answers with exactly ``Field.db``'s values on a
+    pressure-kind field — the quantity's literature name for the same
+    array — and refuses any other kind, whose level view stays ``.db``."""
+
+    @staticmethod
+    def _pressure_field():
+        from uacpy.core.results.field import Field
+        return Field(data=np.array([[0.01 + 0.001j, 0.002 + 0.0j]]),
+                     coords={'depth': [10.0], 'range': [100.0, 200.0]},
+                     model='Test')
+
+    @staticmethod
+    def _reverberation_field():
+        from uacpy.core.results.field import Field
+        return Field(data=np.array([[35.0, 30.0]]),
+                     coords={'depth': [10.0], 'range': [100.0, 200.0]},
+                     model='Test',
+                     metadata={'kind': 'reverberation', 'unit': 'dB'})
+
+    def test_tl_of_complex_pressure_equals_db_and_is_a_positive_loss(self):
+        f = self._pressure_field()
+        assert np.array_equal(f.tl, f.db)
+        assert (f.tl > 0).all()
+
+    def test_tl_of_a_real_db_pressure_field_is_the_same_readonly_view(self):
+        f = self._pressure_field()
+        real = f.to_db()
+        assert real.tl.base is real.data or np.shares_memory(real.tl,
+                                                             real.data)
+        assert not real.tl.flags.writeable
+
+    def test_tl_of_a_reverberation_field_refuses_and_names_db(self):
+        with pytest.raises(AttributeError, match="'reverberation'.*\\.db"):
+            self._reverberation_field().tl
+
+    def test_stack_tl_matches_stack_db_on_pressure_slabs(self):
+        from uacpy.core.results.field import ResultStack
+        f = self._pressure_field()
+        st = ResultStack(slabs=[f, f], coordinate=np.array([10.0, 20.0]),
+                         coordinate_name='source_depth')
+        assert np.array_equal(st.tl, st.db)
+        assert st.tl.shape == (2, 1, 2)
+
+    def test_stack_tl_of_reverberation_slabs_refuses_and_names_stack_db(self):
+        from uacpy.core.results.field import ResultStack
+        rl = self._reverberation_field()
+        st = ResultStack(slabs=[rl, rl], coordinate=np.array([10.0, 20.0]),
+                         coordinate_name='source_depth')
+        with pytest.raises(ConfigurationError, match='stack\\.db'):
+            st.tl

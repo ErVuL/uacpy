@@ -122,7 +122,8 @@ uacpy.plot_field(field, env=env)
 plt.show()
 
 # field is a Field of COMPLEX PRESSURE in Pa, on a (depth × range) grid.
-# .db is what turns it into transmission loss; .p keeps the phase.
+# .db is what turns it into transmission loss (.tl is the same view,
+# defined only on pressure fields); .p keeps the phase.
 print(field.db.shape)                 # (101, 200)
 print(field.at(depth=50.0).db.shape)  # (200,) — TL vs range at source depth
 ```
@@ -268,7 +269,8 @@ engines (Acoustics Toolbox; the Collins RAM family) stay quiet.
 Every `run()` returns a typed `Result` subclass chosen by the run mode:
 `Field` (TL / H(f) / p(t) — one unified array type whose physical meaning
 follows from its dtype and coordinate axes), `Rays`, `Modes`, `Arrivals`,
-`Covariance`/`Replicas`, `ReflectionCoefficient`. `Field` exposes `.db`,
+`Covariance`/`Replicas`, `ReflectionCoefficient`. `Field` exposes `.db` (and
+`.tl`, the same values under the quantity's name, pressure fields only),
 the `.depths`/`.ranges` axes, and `.at(...)`/`.isel(...)`/`.max(...)` to
 slice a dimension away. Details are in the Results section.
 

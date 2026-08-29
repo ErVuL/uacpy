@@ -107,7 +107,9 @@ tl.plot(env=env, source=source)
 ```
 
 Three carriers in, one result out, and the result plots itself — every model in
-the package has that shape. Walk it line by line in the
+the package has that shape. The values are one accessor away: `tl.tl` (or the
+general `tl.db`) is the transmission-loss array in dB, positive loss, no sign
+juggling. Walk it line by line in the
 [documentation](./docs/README.md).
 
 <div align="center">

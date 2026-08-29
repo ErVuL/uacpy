@@ -294,6 +294,7 @@ None of these mutate the field; each returns a fresh array or a fresh `Field`.
 | Accessor | Returns | Notes |
 |---|---|---|
 | `.db` | ndarray, dB | `-20·log10\|data\|` for complex data; a **read-only view** when data is already dB. Raises for a time-domain field. |
+| `.tl` | ndarray, dB | transmission loss: exactly `.db`, on **pressure-kind fields only** — any other kind raises and points at `.db` |
 | `.p` | ndarray, complex | read-only view; raises when data is real (the phase is gone) |
 | `.magnitude` | ndarray | `\|data\|`, complex only |
 | `.phase` | ndarray, radians | `angle(data)`, complex only |
@@ -350,6 +351,7 @@ validates that at construction rather than letting a mismatched bundle through.
 | `for depth, slab in stack:` | `(coordinate, slab)` pairs |
 | `len(stack)`, `stack.n_slabs` | slab count |
 | `stack.db` | one dense array, shape `(n_slabs, *slab.db.shape)` |
+| `stack.tl` | `stack.db` for pressure slabs; any other kind raises |
 | `stack.model`, `.backend`, `.frequencies`, `.source_depths` | the identity every slab agrees on |
 
 `stack.db` exists so generic code can read `result.db` whether one or many
