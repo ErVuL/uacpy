@@ -1990,7 +1990,7 @@ the per-model tables below.
 | `verbose` | — | `False` | Status-logging gate: `False`/`'silent'` → warnings+errors only; `True`/`'info'`; `'debug'`. |
 | `work_dir` | path | `None` | Fixed scratch directory; `None` → a fresh temp dir per run. |
 | `cleanup` | — | `None` | Delete scratch after the run; `None` → `True` unless `work_dir` is pinned. |
-| `timeout` | s | `600.0` | Per-subprocess wall-clock limit (SPARC default `180.0`). |
+| `timeout` | s | `600.0` | Per-subprocess wall-clock limit (every model, SPARC included). |
 | `collapse` | dict | `None` | Per-feature range/layer collapse-policy overrides (see §7, "Environment feature support and collapse"). |
 
 ### `run()` call arguments (every model)

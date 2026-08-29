@@ -272,7 +272,7 @@ The position-4 filter is applied **per wavenumber** at `k·c_low/2π` and
 | Name | Default | Meaning |
 |---|---|---|
 | `executable` | `None` | Path to `sparc.exe`; auto-detected. |
-| `timeout` | `180.0` | Subprocess timeout **per run** (s) — and `'R'`/`'D'` make several. |
+| `timeout` | `600.0` | Subprocess timeout **per run** (s) — and `'R'`/`'D'` make several. |
 | `work_dir` | `None` | Pin the scratch dir to keep `.env` / `.rts` / `.grn` / `.prt`. |
 | `cleanup` | `None` | Defaults to *keep* when `work_dir` is pinned. |
 | `verbose` | `False` | `True` / `'info'` / `'debug'`. |
@@ -503,7 +503,7 @@ current limit is max_depths=20)
 ```
 
 Choose the geometry that makes your dense axis the free one, or use `'S'`.
-Note too that `timeout` (180 s) is **per run**, so an `'R'` sweep over 20
+Note too that `timeout` (600 s) is **per run**, so an `'R'` sweep over 20
 depths can legitimately take twenty times that.
 
 **Only `source.frequencies[0]` is used.** It is the pulse's nominal centre

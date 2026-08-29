@@ -56,17 +56,24 @@ def _elevation(lat, lon, dataset, *, timeout, verbose):
 
 
 def _elevation_any(lat, lon, *, timeout, verbose):
-    """First finite elevation across the DTM tiles, or raise if none covers."""
+    """First finite elevation across the DTM tiles, or raise naming what
+    each tile answered — a land/unsurveyed cell (the service returns NaN
+    there), an out-of-range rejection, and a transport failure are three
+    different situations, and the caller's error reports which occurred."""
+    outcomes = []
     for dataset in DATASETS:
         try:
             elev = _elevation(lat, lon, dataset, timeout=timeout, verbose=verbose)
-        except DataFetchError:
-            continue                        # out of this tile's range — try next
+        except DataFetchError as exc:
+            outcomes.append(f"{dataset}: {exc.message}")
+            continue
         if np.isfinite(elev):
             return elev
+        outcomes.append(
+            f"{dataset}: no value at the nearest cell (land, or unsurveyed)")
     raise DataFetchError(
-        f"EMODnet DTM has no coverage at ({lat:.4f}, {lon:.4f}) "
-        "(European seas + Caribbean only).",
+        f"EMODnet DTM has no depth for ({lat:.4f}, {lon:.4f}) — no coverage "
+        f"or no value there ({'; '.join(outcomes)}).",
         remediation="Use bathymetry_sources='gmrt' or 'gebco' for global "
                     "coverage.",
     )

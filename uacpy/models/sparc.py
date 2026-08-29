@@ -247,7 +247,10 @@ class SPARC(PropagationModel):
         ``sparc.f90:153-155`` rejects the run outright when the largest
         receiver range exceeds ``RMax``.
     timeout : float, optional
-        Subprocess timeout per run (s). Default ``180.0``.
+        Subprocess timeout per run (s). Default ``600.0`` — sized so the
+        suite's longest SPARC runs survive a fully loaded CPU (an
+        oversubscribed 8-worker pytest session slows an ~85 s march past
+        3x), while a hung binary still dies.
     use_tmpfs, verbose, work_dir, cleanup, collapse : optional
         Standard plumbing (see :class:`PropagationModel`).
 
@@ -318,7 +321,7 @@ class SPARC(PropagationModel):
         f_min: Optional[float] = None,
         f_max: Optional[float] = None,
         sound_speed: Optional[float] = None,
-        timeout: float = 180.0,
+        timeout: float = 600.0,
         use_tmpfs: bool = False,
         verbose: Union[bool, str] = False,
         work_dir: Optional[Path] = None,
@@ -396,7 +399,7 @@ class SPARC(PropagationModel):
             inside the window; :data:`DEFAULT_SOUND_SPEED` only when the
             profile carries none.
         timeout : float, optional
-            Subprocess timeout (s) for each SPARC run. Default: 180.0.
+            Subprocess timeout (s) for each SPARC run. Default: 600.0.
         """
         super().__init__(
             use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir,
