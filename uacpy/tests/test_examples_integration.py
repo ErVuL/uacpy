@@ -51,14 +51,16 @@ _OASES_MODEL_CLASSES = frozenset({
 _LONG_TIMEOUT_STEMS = {
     "example_02_sound_speed_profiles",
     "example_17_boundary_conditions_layered",
-    "example_19_broadband_comparison",
     "example_22_ram_lytaev_grid",
     "example_37_realworld_environment",
 }
 
-# Encoding five per-solver GIFs is the heaviest example by far — give it lots
-# of headroom so a slow runner doesn't time out mid-render.
+# The heaviest examples: GIF encoding across five solvers, and a broadband
+# three-model comparison measured at ~133 s NOMINAL on an idle 2-worker run —
+# under a fully loaded `-n logical` session (~3x contention) that already
+# overruns the 360 s tier, so the tier assignment follows the measurement.
 _EXTRA_LONG_TIMEOUT_STEMS = {
+    "example_19_broadband_comparison",
     "example_26_wave_propagation",
 }
 

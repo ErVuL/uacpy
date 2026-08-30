@@ -39,6 +39,8 @@ from pathlib import Path
 
 import pytest
 
+from uacpy.tests._doc_gate import package_python_files
+
 import uacpy
 from uacpy.comms import awgn, ber_sweep, fading_taps, simulate_link
 
@@ -82,7 +84,7 @@ _EXCLUDED_PARTS = ("tests", "third_party")
 def _scanned_sources():
     """Every ``.py`` file this gate holds: the shipped package minus the
     excluded subtrees, plus the figure scripts that draw the docs' figures."""
-    for path in sorted(PKG_DIR.rglob("*.py")):
+    for path in package_python_files(PKG_DIR):
         if not any(part in _EXCLUDED_PARTS for part in path.parts):
             yield path
     if DOCS_DIR.is_dir():

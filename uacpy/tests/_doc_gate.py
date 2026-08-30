@@ -67,6 +67,23 @@ _NOT_DOCUMENTATION = frozenset({
 })
 
 
+def package_python_files(root):
+    """Every ``.py`` under ``root`` that is package source, sorted.
+
+    A virtualenv created inside the tree — its ``pyvenv.cfg`` is the
+    structural marker, whatever the directory is called — is an
+    environment, not source: sweeping it hands every source-convention
+    gate pip's vendored code to fail on. The repo layout doubles the
+    ``uacpy`` name, so a venv slips inside the package directory easily.
+    """
+    root = Path(root)
+    venvs = [cfg.parent for cfg in root.rglob('pyvenv.cfg')]
+    return sorted(
+        path for path in root.rglob('*.py')
+        if not any(venv in path.parents for venv in venvs)
+    )
+
+
 def _repo_markdown() -> dict:
     """Every Markdown file in the repo, indexed by basename."""
     by_name: dict = {}

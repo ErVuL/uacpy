@@ -115,7 +115,7 @@ jobs:
       - name: Lint (flake8 — real bugs only)
         run: |
           flake8 uacpy/ \
-            --exclude=uacpy/third_party,uacpy/uacpy/third_party \
+            --exclude=uacpy/third_party,uacpy/uacpy/third_party,uacpy_venv,.venv,venv \
             --count --select=E9,F63,F7,F82,F401,F811 \
             --show-source --statistics
 

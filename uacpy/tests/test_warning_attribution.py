@@ -33,6 +33,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from uacpy.tests._doc_gate import package_python_files
+
 import uacpy
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.acoustic_signal.constant_q import constant_q_transform
@@ -464,7 +466,7 @@ def test_hand_counted_stacklevel_is_two_except_inside_a_post_init():
     in-package caller, and by nothing else. A green run here is not evidence
     that attribution is right."""
     offenders = []
-    for path in sorted(_PACKAGE_DIR.rglob('*.py')):
+    for path in package_python_files(_PACKAGE_DIR):
         if 'tests' in path.parts or 'examples' in path.parts:
             continue
 
@@ -505,7 +507,7 @@ def test_no_site_combines_the_skip_walk_with_a_raised_stacklevel():
 
     No site combines them today. This keeps it that way."""
     offenders = []
-    for path in sorted(_PACKAGE_DIR.rglob('*.py')):
+    for path in package_python_files(_PACKAGE_DIR):
         if 'tests' in path.parts or 'examples' in path.parts:
             continue
         for node in ast.walk(ast.parse(path.read_text(encoding='utf-8'))):
@@ -573,7 +575,7 @@ def test_no_hand_counted_site_has_grown_a_second_in_package_caller():
     import_index = {}
     site_files = {}
 
-    package_files = [p for p in sorted(_PACKAGE_DIR.rglob('*.py'))
+    package_files = [p for p in package_python_files(_PACKAGE_DIR)
                      if 'tests' not in p.parts and 'examples' not in p.parts]
     for path in package_files:
         tree = ast.parse(path.read_text(encoding='utf-8'))
@@ -640,7 +642,7 @@ def test_every_warn_site_names_the_users_line_by_one_of_the_two_forms():
     site's call depth. That is the site table earlier in this module."""
     offenders = []
     attributed = 0
-    for path in sorted(_PACKAGE_DIR.rglob('*.py')):
+    for path in package_python_files(_PACKAGE_DIR):
         if {'tests', 'examples', 'third_party'} & set(path.parts):
             continue
         for node in ast.walk(ast.parse(path.read_text(encoding='utf-8'))):
@@ -678,7 +680,7 @@ def test_dev_md_lists_the_module_every_warn_site_imports():
     ``core/``, and DEV.md §5's core list is where a contributor looks for what
     is in that package."""
     importers = [
-        path for path in _PACKAGE_DIR.rglob('*.py')
+        path for path in package_python_files(_PACKAGE_DIR)
         if 'tests' not in path.parts
         and 'core._warn_frames' in path.read_text(encoding='utf-8')]
     assert len(importers) > 20, len(importers)      # the premise of the claim

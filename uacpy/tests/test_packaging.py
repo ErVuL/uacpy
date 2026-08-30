@@ -30,7 +30,8 @@ setuptools = pytest.importorskip(
 )
 
 # The Markdown-citation machinery is shared with test_documentation.py.
-from uacpy.tests._doc_gate import (            # noqa: E402
+from uacpy.tests._doc_gate import (
+    package_python_files,            # noqa: E402
     _DOC_ANCHOR,
     _MIN_DOC_ANCHORS_RESOLVED,
     _MIN_QUOTED_DOC_ANCHORS,
@@ -446,7 +447,7 @@ def test_no_comment_pins_a_line_number_in_another_python_file():
     """
     package = Path(_REPO_ROOT) / "uacpy"
     offenders = []
-    for path in sorted(package.rglob("*.py")):
+    for path in package_python_files(package):
         parts = set(path.parts)
         if "third_party" in parts:
             continue
@@ -546,7 +547,7 @@ def _citing_sources():
     vendored Python — it is not uacpy's citation.
     """
     package = Path(_REPO_ROOT) / "uacpy"
-    paths = [path for path in sorted(package.rglob("*.py"))
+    paths = [path for path in package_python_files(package)
              if "third_party" not in path.parts]
     markdown = [Path(_REPO_ROOT) / "DOCUMENTATION.md",
                 Path(_REPO_ROOT) / "README.md",
@@ -1051,7 +1052,7 @@ def test_no_comment_pins_a_line_number_in_the_projects_own_docs():
     assert by_name, "no Markdown found in the repo — the walk is broken"
 
     offenders = []
-    for path in sorted(package.rglob("*.py")):
+    for path in package_python_files(package):
         if "third_party" in path.parts:
             continue
         for lineno, line in enumerate(
@@ -1127,7 +1128,7 @@ def test_every_doc_section_anchor_resolves_and_carries_its_quote():
     resolved = quoted = 0
     unresolved, offenders = [], []
 
-    for path in sorted(package.rglob("*.py")):
+    for path in package_python_files(package):
         if "third_party" in path.parts:
             continue
         for lineno, line in enumerate(
@@ -1894,7 +1895,7 @@ def test_no_module_hides_its_docstring_behind_an_import():
     would fork the tree.
     """
     offenders, scanned = [], 0
-    for path in sorted((_REPO_ROOT / "uacpy").rglob("*.py")):
+    for path in package_python_files(_REPO_ROOT / "uacpy"):
         if "third_party" in path.parts:
             continue
         scanned += 1
@@ -2002,7 +2003,7 @@ def _cross_package_private_imports():
         return head if '/' in relative else '<top>'
 
     found = set()
-    for path in sorted(package.rglob('*.py')):
+    for path in package_python_files(package):
         relative = path.relative_to(package).as_posix()
         if relative.split('/')[0] in ('third_party', 'tests', 'examples'):
             continue
@@ -2304,7 +2305,7 @@ def _defined_names():
     ``uacpy/``, vendored sources excluded."""
     package = _REPO_ROOT / "uacpy"
     found = []
-    for path in sorted(package.rglob("*.py")):
+    for path in package_python_files(package):
         if "third_party" in path.parts:
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -2410,6 +2411,22 @@ def test_every_physical_state_exemption_names_a_live_definition():
     assert not stale, (
         f"exemption(s) in _PHYSICAL_STATE_NAMES name nothing in the tree: "
         f"{stale}. Drop them, or fix the name they were meant to cover.")
+
+
+def test_a_virtualenv_inside_the_package_is_not_swept_as_source(tmp_path):
+    """``package_python_files`` drops anything under a directory carrying
+    ``pyvenv.cfg``, whatever it is named: the repo layout doubles the
+    ``uacpy`` name, so a venv created one directory too deep lands inside
+    the package and would hand every source-convention gate pip's vendored
+    code to fail on."""
+    (tmp_path / "mod.py").write_text("x = 1\n", encoding="utf-8")
+    env = tmp_path / "oddly-named-env"
+    (env / "lib").mkdir(parents=True)
+    (env / "pyvenv.cfg").write_text("home = /usr\n", encoding="utf-8")
+    (env / "lib" / "vendored.py").write_text("import random\n",
+                                             encoding="utf-8")
+    swept = package_python_files(tmp_path)
+    assert [p.name for p in swept] == ["mod.py"]
 
 
 def test_the_shared_download_helper_is_defined_before_any_flow():
@@ -2537,7 +2554,7 @@ def _typed_dict_returns():
     ``TypedDict`` defined in the same module."""
     package = _REPO_ROOT / "uacpy"
     found = []
-    for path in sorted(package.rglob("*.py")):
+    for path in package_python_files(package):
         if set(path.relative_to(package).parts) & _UNSHIPPED_DIRS:
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -2652,7 +2669,7 @@ def _parameters_defaulted_to_none():
     and whose annotation does not admit ``None``."""
     package = _REPO_ROOT / "uacpy"
     offenders, annotated, files = [], 0, 0
-    for path in sorted(package.rglob("*.py")):
+    for path in package_python_files(package):
         if set(path.relative_to(package).parts) & _UNSHIPPED_DIRS:
             continue
         files += 1
