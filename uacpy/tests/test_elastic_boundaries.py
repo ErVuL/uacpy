@@ -2,14 +2,32 @@
 Tests for Elastic Boundary Handling
 
 Tests both workflows for elastic boundaries:
-1. KrakenField Auto-Detection (→ KrakenC)
+1. Kraken auto-detection of elastic media (→ backend='krakenc')
 2. BOUNCE → Reflection Files → BELLHOP/SCOOTER/KRAKEN
 
-According to Acoustics Toolbox documentation:
-- BOUNCE generates .brc (bottom reflection coef) and .irc (internal reflection coef)
-- BELLHOP, SCOOTER, KRAKENC: Use .brc files
-- KRAKEN: Uses .irc files (NOT .brc)
-- SPARC: Does not support reflection files
+``Kraken/bounce.f90:225-236`` writes both tables: ``.irc`` carries the raw
+``f(k), g(k), iPower`` triples and ``.brc`` carries ``R(theta)``. Which one a
+run consumes is set by the deck's ``BotOpt(1:1)`` — ``misc/RefCoef.f90:35``
+opens ``.brc`` on ``'F'`` and ``:92`` opens ``.irc`` on ``'P'``, and
+kraken.f90, krakenc.f90, scooter.f90, bellhop.f90 and krakel.f90 all call that
+same ``ReadReflectionCoefficient``. uacpy selects between them through
+``BoundaryProperties.acoustic_type``: ``'file'`` → 'F', ``'precalc'`` → 'P'.
+
+**KRAKEN nonetheless accepts only ``.irc``.** ``Kraken/kraken.f90:47-48``
+rejects a deck before any reflection machinery is reached::
+
+    IF ( HSBot%BC == 'F' .OR. HSTop%BC == 'P' ) &
+       CALL ERROUT( 'KRAKEN', 'The option to read a file for the reflection loss is not implemented in KRAKEN' )
+
+so a ``.brc`` never reaches the solver on ``backend='kraken'``. That error
+string occurs nowhere else in the tree: ``krakenc.f90`` carries no such guard,
+which is why KRAKENC accepts both formats (``Kraken/BCImpedancecMod.f90:88``
+``CASE ( 'F' )``, ``:105`` ``CASE ( 'P' )``). The restriction is KRAKEN's, not
+the format's — ``doc/bounce.htm`` separately prefers ``.irc`` as working
+"better with the KRAKEN root finder".
+
+SPARC calls ``ReadReflectionCoefficient`` nowhere and takes no reflection file
+at all.
 """
 
 import pytest
@@ -22,7 +40,7 @@ from uacpy.core.exceptions import UnsupportedFeatureError
 from uacpy import Field
 from uacpy.models import Kraken, Bounce, Scooter
 
-# Tests in this module spawn KrakenField/Bounce/Scooter/Bellhop/Kraken/KrakenC binaries
+# Tests in this module spawn the kraken/krakenc/bounce/scooter/bellhop binaries
 pytestmark = pytest.mark.requires_binary
 
 
@@ -51,8 +69,8 @@ def elastic_env():
 class TestElasticOverFluidHalfspaceGuard:
     """`krakenc.exe` spins forever in setup on a solid-over-liquid bottom
     interface (an elastic ``SeabedColumn`` layer over a fluid halfspace).
-    `_KrakenBase` rejects it up front so all three Kraken-family models fail
-    fast with a typed error instead of hanging for ``timeout`` seconds."""
+    `Kraken` rejects it up front so the run fails fast with a typed error
+    instead of hanging for ``timeout`` seconds."""
 
     @staticmethod
     def _src_rcv():
@@ -99,7 +117,7 @@ class TestElasticOverFluidHalfspaceGuard:
         assert modes.k.shape[0] > 0
 
     def test_receiver_in_elastic_subbottom_returns_nan(self):
-        """KrakenField: where the modes solve succeeds (elastic-over-elastic),
+        """Where the modes solve succeeds (elastic-over-elastic),
         receivers below the water column — which field.exe cannot evaluate in
         elastic media — are returned as NaN, the water-column receivers as
         finite values. No raise (the harmonized below-domain policy)."""
@@ -109,14 +127,14 @@ class TestElasticOverFluidHalfspaceGuard:
                        ranges=np.linspace(100, 3000, 20))
         with pytest.warns(UserWarning, match='sub-bottom'):
             field = Kraken().run(self._elastic_over_elastic(), src, rcv)
-        tl = field.tl
+        tl = field.db
         assert np.isfinite(tl[0]).any()          # water column: real values
         assert not np.isfinite(tl[1]).any()      # in elastic layer: all NaN
         assert not np.isfinite(tl[2]).any()      # in elastic halfspace: all NaN
 
 
 class TestElasticBoundaryAutoDetection:
-    """Test automatic elastic boundary detection in KrakenField."""
+    """Test automatic elastic boundary detection in Kraken."""
 
     @pytest.fixture
     def fluid_env(self):
@@ -142,45 +160,65 @@ class TestElasticBoundaryAutoDetection:
             ranges=np.linspace(1000, 5000, 10)
         )
 
-    def test_krakenfield_detects_elastic_bottom(self, elastic_env, source, receiver_small):
-        """Test that KrakenField detects elastic bottom and uses KrakenC."""
-        krakenfield = Kraken(verbose=False)
-
-        # This should automatically detect elastic boundary and use KrakenC
-        result = krakenfield.compute_tl(elastic_env, source, receiver_small)
+    def test_kraken_detects_elastic_bottom(self, elastic_env, source, receiver_small):
+        """Test that Kraken detects an elastic bottom and dispatches to krakenc."""
+        kraken = Kraken(verbose=False)
+        result = kraken.compute_tl(elastic_env, source, receiver_small)
 
         assert result is not None
         assert result.data.shape == (len(receiver_small.depths), len(receiver_small.ranges))
         assert np.all(np.isfinite(result.data))
         assert isinstance(result, Field)
 
-        # TL should be reasonable (not all zeros, not all inf)
-        assert np.any(result.tl > 0)
-        assert np.all(result.tl < 200)  # Reasonable TL range
+        # Finiteness above only rules out inf/NaN pressure. TL < 200 dB is
+        # |p| > 1e-10, which additionally rules out a field that collapsed to
+        # numerical zero — a real 100 m guide at 1-5 km sits near 50-90 dB.
+        assert np.any(result.db > 0)
+        assert np.all(result.db < 200)
 
-    def test_krakenfield_fluid_bottom(self, fluid_env, source, receiver_small):
-        """Test that KrakenField works with fluid bottom (uses regular Kraken)."""
-        krakenfield = Kraken(verbose=False)
+    def test_kraken_fluid_bottom(self, fluid_env, source, receiver_small):
+        """Test that Kraken works with a fluid bottom (dispatches to kraken.exe)."""
+        kraken = Kraken(verbose=False)
 
-        result = krakenfield.compute_tl(fluid_env, source, receiver_small)
+        result = kraken.compute_tl(fluid_env, source, receiver_small)
 
         assert result is not None
         assert result.data.shape == (len(receiver_small.depths), len(receiver_small.ranges))
         assert np.all(np.isfinite(result.data))
+        # Same bands as the elastic sibling: TL < 200 dB rules out a field
+        # collapsed to numerical zero, and this 100 m guide at 1-5 km sits
+        # near 50-90 dB, so the grid mean has a physical window too.
+        assert np.any(result.db > 0)
+        assert np.all(result.db < 200)
+        assert 30.0 < float(np.nanmean(result.db)) < 120.0
+
+    def test_elastic_env_resolves_to_the_krakenc_backend(self, fluid_env,
+                                                         elastic_env):
+        """environment.md ('Models and shear'): shear auto-routes Kraken to
+        ``backend='krakenc'``; the shear-free sibling stays on kraken.exe."""
+        m = Kraken(verbose=False)
+        assert m.select_backend(elastic_env) == 'krakenc'
+        assert m.select_backend(fluid_env) == 'kraken'
 
     def test_elastic_vs_fluid_difference(self, elastic_env, fluid_env, source, receiver_small):
-        """Test that elastic and fluid bottoms produce different results."""
-        krakenfield = Kraken(verbose=False)
+        """A shear-supporting seabed must move the field.
 
-        result_elastic = krakenfield.compute_tl(elastic_env, source, receiver_small)
-        result_fluid = krakenfield.compute_tl(fluid_env, source, receiver_small)
+        The two environments differ only in ``shear_speed`` (400 vs 0 m/s),
+        which opens the shear-conversion loss channel at the seafloor and also
+        routes the run to krakenc rather than kraken. Both effects are
+        physical, so any difference at all is real; 0.5 dB averaged over the
+        whole grid simply sits far above solver round-off, and a shear
+        parameter that never reached the deck would land at 0.
+        """
+        kraken = Kraken(verbose=False)
 
-        # Should have different TL values (compare in dB; .tl works regardless
-        # of underlying units storage)
-        diff = np.abs(result_elastic.tl - result_fluid.tl)
+        result_elastic = kraken.compute_tl(elastic_env, source, receiver_small)
+        result_fluid = kraken.compute_tl(fluid_env, source, receiver_small)
+
+        # .db is the dB view regardless of how the Field stores its data.
+        diff = np.abs(result_elastic.db - result_fluid.db)
         mean_diff = np.nanmean(diff)
 
-        # Elastic bottom should have some different loss characteristics
         assert mean_diff > 0.5, "Elastic and fluid bottoms should produce different results"
 
 
@@ -192,20 +230,6 @@ class TestBounceReflectionCoefficients:
         # BOUNCE doesn't need spatial receivers, just placeholder
         return Receiver(depths=np.array([50.0]), ranges=np.array([1000.0]))
 
-    def test_bounce_basic(self, elastic_env, source, receiver_bounce, tmp_path):
-        """Test basic BOUNCE execution."""
-        bounce = Bounce(verbose=False, c_low=1400.0, c_high=10000.0, rmax=10000.0, work_dir=tmp_path)
-
-        result = bounce.run(
-            env=elastic_env,
-            source=source,
-            receiver=receiver_bounce,
-        )
-
-        assert result is not None
-        assert 'brc_file' in result.metadata
-        assert Path(result.metadata['brc_file']).exists()
-
     def test_bounce_output_files(self, elastic_env, source, receiver_bounce, tmp_path):
         """Test that BOUNCE creates both .brc and .irc files."""
         bounce = Bounce(verbose=False, c_low=1400.0, c_high=10000.0, rmax=10000.0, work_dir=tmp_path)
@@ -216,13 +240,11 @@ class TestBounceReflectionCoefficients:
             receiver=receiver_bounce,
         )
 
-        # Check .brc file exists
         assert 'brc_file' in result.metadata
         brc_file = Path(result.metadata['brc_file'])
         assert brc_file.exists()
         assert brc_file.suffix == '.brc'
 
-        # Check .irc file exists
         assert 'irc_file' in result.metadata
         irc_file = Path(result.metadata['irc_file'])
         assert irc_file.exists()
@@ -248,13 +270,28 @@ class TestBounceReflectionCoefficients:
         assert len(R_mag) == len(angles)
         assert len(phases) == len(angles)
 
-        # Check magnitudes are in valid range [0, 1]
+        # A passive seabed cannot amplify, and BOUNCE tabulates grazing angle
+        # over the propagating quadrant only.
         assert np.all(R_mag >= 0)
         assert np.all(R_mag <= 1.0)
 
-        # Check angles are in valid range [0, 90]
         assert np.all(angles >= 0)
         assert np.all(angles <= 90)
+
+        # Closed-form fluid-solid coefficient for this seabed (cp=1600,
+        # cs=400, rho=1.8, alpha_p=0.2, alpha_s=0.5 under 1500 m/s water):
+        # below the compressional critical angle arccos(1500/1600) = 20.4 deg
+        # the reflection is near-total (0.91-0.98 — shear conversion and
+        # attenuation sag it slightly below 1), and well above it the p-wave
+        # radiates and |R| falls to 0.30-0.43.
+        theta = np.asarray(angles, dtype=float)
+        r = np.asarray(R_mag, dtype=float)
+        below = r[theta <= 15.0]
+        above = r[theta >= 30.0]
+        assert below.size and above.size
+        assert np.all(below > 0.85)
+        assert float(below.mean()) > 0.90
+        assert np.all(above < 0.6)
 
 
 class TestBounceToScooterWorkflow:
@@ -272,7 +309,21 @@ class TestBounceToScooterWorkflow:
         return Receiver(depths=np.array([50.0]), ranges=np.array([1000.0]))
 
     def test_bounce_scooter_vs_direct_elastic(self, elastic_env, source, receiver_small, receiver_bounce, tmp_path):
-        """Test that BOUNCE→SCOOTER gives similar results to direct elastic."""
+        """A tabulated ``.brc`` must reproduce the elastic half-space it came from.
+
+        Both runs are Scooter on the same waveguide; the only difference is
+        whether the seafloor is the elastic half-space itself or the
+        ``R(theta)`` table BOUNCE computed from it. The bounds are in dB, so
+        the comparison is on ``.db`` — ``Field.db`` makes that
+        the ``-20*log10(|data|)`` view, while ``.data`` is complex pressure and
+        differences there are bounded by ``|p| < 1`` no matter how badly the
+        two disagree.
+
+        Measured on this grid: mean 0.38 dB, max 0.77 dB (bit-reproducible
+        across runs). The bounds sit a factor of ~2.5 above that, which is
+        loose enough for a different compiler and tight enough that a
+        table/half-space mismatch shows up.
+        """
         # Workflow 1: BOUNCE → SCOOTER
         bounce = Bounce(verbose=False, c_low=1400.0, c_high=10000.0, rmax=10000.0, work_dir=tmp_path)
         bounce_result = bounce.run(
@@ -302,18 +353,16 @@ class TestBounceToScooterWorkflow:
         # Workflow 2: Direct elastic
         result_direct = scooter.compute_tl(elastic_env, source, receiver_small)
 
-        # Compare results
-        diff = np.abs(result_with_file.data - result_direct.data)
+        diff = np.abs(result_with_file.db - result_direct.db)
         mean_diff = np.nanmean(diff)
         max_diff = np.nanmax(diff)
 
-        # Should be similar (within 10 dB tolerance, ideally much closer)
-        assert mean_diff < 10.0, f"Mean difference {mean_diff:.2f} dB is too large"
-        assert max_diff < 50.0, f"Max difference {max_diff:.2f} dB is too large"
+        assert mean_diff < 1.0, f"Mean difference {mean_diff:.2f} dB is too large"
+        assert max_diff < 2.0, f"Max difference {max_diff:.2f} dB is too large"
 
 
 class TestWorkflowComparison:
-    """Compare KrakenField auto-detection vs BOUNCE→SCOOTER workflows."""
+    """Compare Kraken auto-detection vs BOUNCE→SCOOTER workflows."""
 
     @pytest.fixture
     def receiver_small(self):
@@ -322,11 +371,20 @@ class TestWorkflowComparison:
             ranges=np.linspace(1000, 5000, 10)
         )
 
-    def test_krakenfield_vs_bounce_scooter(self, elastic_env, source, receiver_small, tmp_path):
-        """Compare results from both elastic boundary workflows."""
-        # Approach 1: KrakenField auto-detection
-        krakenfield = Kraken(verbose=False)
-        result_krakenfield = krakenfield.compute_tl(elastic_env, source, receiver_small)
+    def test_kraken_vs_bounce_scooter(self, elastic_env, source, receiver_small, tmp_path):
+        """The two elastic-boundary routes must land on the same field.
+
+        krakenc's normal-mode sum against Scooter's wavenumber integration
+        over a BOUNCE ``.brc`` — different solvers, different seafloor
+        representations. The bound is in dB, so the comparison is on ``.db``
+        (``Field.db``); ``.data`` is complex pressure, where
+        ``|p| < 1`` caps any difference at ~2 regardless of agreement.
+
+        Measured on this grid: mean 0.40 dB, max 0.78 dB (bit-reproducible).
+        """
+        # Approach 1: Kraken auto-detection
+        kraken = Kraken(verbose=False)
+        result_kraken = kraken.compute_tl(elastic_env, source, receiver_small)
 
         # Approach 2: BOUNCE → SCOOTER
         bounce = Bounce(verbose=False, c_low=1400.0, c_high=10000.0, rmax=10000.0, work_dir=tmp_path)
@@ -357,15 +415,12 @@ class TestWorkflowComparison:
         result_scooter = scooter.compute_tl(env_with_rc, source, receiver_small)
 
         # Both should produce valid results
-        assert result_krakenfield is not None
+        assert result_kraken is not None
         assert result_scooter is not None
-        assert np.all(np.isfinite(result_krakenfield.data))
+        assert np.all(np.isfinite(result_kraken.data))
         assert np.all(np.isfinite(result_scooter.data))
 
-        # Compare - different numerical methods, so allow some difference
-        diff = np.abs(result_krakenfield.data - result_scooter.data)
+        diff = np.abs(result_kraken.db - result_scooter.db)
         mean_diff = np.nanmean(diff)
 
-        # Both workflows should produce reasonable TL fields
-        # Allow larger tolerance since methods are fundamentally different
-        assert mean_diff < 15.0, f"Mean difference {mean_diff:.2f} dB between workflows"
+        assert mean_diff < 1.0, f"Mean difference {mean_diff:.2f} dB between workflows"

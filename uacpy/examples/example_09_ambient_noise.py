@@ -10,13 +10,13 @@ Pipeline:
      :func:`uacpy.acoustic_signal.synthesize_noise_from_psd`
      (spectral synthesis of random processes).
   3. Visualise the time–frequency content with
-     :class:`uacpy.acoustic_signal.Spectrogram` — a stationary process should show
+     :func:`uacpy.acoustic_signal.spectrogram` — a stationary process should show
      a uniform spectral pattern across time.
-  4. Round-trip the realisation through :class:`uacpy.acoustic_signal.PPSD` to
+  4. Round-trip the realisation through :func:`uacpy.acoustic_signal.ppsd` to
      verify the synthesis recovers the input spectrum and to visualise
      the level distribution across time segments.
   5. Integrate the realisation into a per-band Sound Exposure Level (SEL)
-     with :class:`uacpy.acoustic_signal.SEL` (ISO 18405) — the cumulative
+     with :func:`uacpy.acoustic_signal.sel` (ISO 18405) — the cumulative
      energy dose of the synthesised dataset, third-octave band by band.
 
 Outputs
@@ -28,19 +28,22 @@ output/example_09_ppsd.png             — PPSD with analytic Wenz overlay.
 output/example_09_sel.png              — per-band SEL of the realisation.
 """
 
+import os
 from pathlib import Path
 import sys
 
 import matplotlib.pyplot as plt
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Repo root, so ``import uacpy`` resolves from a source checkout.
+sys.path.insert(0, str(Path(__file__).parents[2]))
 
 import uacpy  # noqa: E402
 from uacpy.noise import WenzNoise  # noqa: E402
 
-OUTPUT_DIR = Path(__file__).parent / 'output'
-OUTPUT_DIR.mkdir(exist_ok=True)
+OUTPUT_DIR = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
+                  or Path(__file__).parent / 'output')
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # 1 µPa = 10⁻⁶ Pa (water-acoustics dB reference).
 UPA = 1e-6
@@ -55,14 +58,14 @@ def main():
     f_plot = np.linspace(1.0, 1e5, int(1e5 - 1))
     wenz_plot = WenzNoise(
         f_plot,
-        wind_speed=24,                  # knots (Beaufort 6)
+        wind_speed_kn=24,                  # knots (Beaufort 6)
         water_depth='deep',
         shipping_level='high',
         rain_rate='heavy',
     )
     fig, _ = uacpy.visualization.plot_wenz(
         wenz_plot,
-        title=(f'{wenz_plot.wind_speed:g} kn / '
+        title=(f'{wenz_plot.wind_speed_kn:g} kn / '
                f'{wenz_plot.shipping_level} shipping / '
                f'{wenz_plot.rain_rate} rain'),
     )
@@ -72,11 +75,18 @@ def main():
     print("  ✓ Saved: output/example_09_wenz_components.png")
 
     # ── 2. ssrp time-domain realisation of the Wenz total ───────────────
-    n_fft = 1
+    # n_fft is the IFFT chunk size, and it sets the synthesis bin width
+    # df = sample_rate / n_fft. The Wenz target starts at 1 Hz, so the chunk
+    # has to be long enough for the low-frequency shape to survive resampling
+    # onto the FFT-native grid: 96 kHz / 65536 gives df = 1.46 Hz.
+    # (The library clamps n_fft to [16, 262144]; anything below the floor is
+    # raised, so a token value like 1 would silently become the 65536 default.)
+    sample_rate = 96000
+    n_fft = 65536
     f_ssrp = np.linspace(1.0, 5e4, 10000)
     wenz_ssrp = WenzNoise(
         f_ssrp,
-        wind_speed=wenz_plot.wind_speed,
+        wind_speed_kn=wenz_plot.wind_speed_kn,
         water_depth=wenz_plot.water_depth,
         shipping_level=wenz_plot.shipping_level,
         rain_rate=wenz_plot.rain_rate,
@@ -85,10 +95,11 @@ def main():
 
     duration = 30.0                                    # seconds
     t, x, fs = uacpy.acoustic_signal.synthesize_noise_from_psd(
-        Pxx, f_ssrp, sample_rate=96000,
+        Pxx, f_ssrp, sample_rate=sample_rate,
         duration=duration, scale=1.0, n_fft=n_fft)
     print(f"  noise synthesis: {duration:.1f} s @ fs = {fs/1e3:.1f} kHz "
           f"({len(x):,} samples)")
+    print(f"  n_fft = {n_fft:,} → synthesis bin width df = {fs / n_fft:.2f} Hz")
 
     # Snapshot of the waveform (first 0.2 s).
     n_show = int(0.2 * fs)
@@ -110,7 +121,7 @@ def main():
         x, fs, nperseg=4096, noverlap=2048)
     fig, ax = uacpy.visualization.plot_spectrogram(
         sf, st, sSxx, ref=UPA,
-        title=(f'Wenz @ {wenz_ssrp.wind_speed:g} kn / '
+        title=(f'Wenz @ {wenz_ssrp.wind_speed_kn:g} kn / '
                f'{wenz_ssrp.shipping_level} shipping / '
                f'{wenz_ssrp.rain_rate} rain'),
         ymin=10, ymax=fs / 2,
@@ -118,7 +129,6 @@ def main():
     )
     fig.savefig(OUTPUT_DIR / 'example_09_ssrp_spectrogram.png',
                 dpi=150, bbox_inches='tight')
-    # plt.close(fig)
     print("  ✓ Saved: output/example_09_ssrp_spectrogram.png")
 
     # ── 4. PPSD of the synthesised noise ────────────────────────────────
@@ -128,7 +138,7 @@ def main():
     )
     fig, ax = uacpy.visualization.plot_ppsd(
         ppsd_result,
-        title=(f'Wenz @ {wenz_ssrp.wind_speed:g} kn / '
+        title=(f'Wenz @ {wenz_ssrp.wind_speed_kn:g} kn / '
                f'{wenz_ssrp.shipping_level} shipping / '
                f'{wenz_ssrp.rain_rate} rain'),
         ymin=20, ymax=120,
@@ -140,7 +150,6 @@ def main():
     ax.legend(loc='upper right', fontsize=9, framealpha=0.85)
     fig.savefig(OUTPUT_DIR / 'example_09_ppsd.png',
                 dpi=150, bbox_inches='tight')
-    # plt.close(fig)
     print("  ✓ Saved: output/example_09_ppsd.png")
 
     # ── 5. Sound Exposure Level (SEL) of the synthesised realisation ─────
@@ -158,7 +167,7 @@ def main():
     fig, ax = uacpy.visualization.plot_sel(
         sel_vals, sel_bands, ref=UPA, duration=sel_dur,
         band_type='third_octave',
-        title=(f'Wenz @ {wenz_ssrp.wind_speed:g} kn / '
+        title=(f'Wenz @ {wenz_ssrp.wind_speed_kn:g} kn / '
                f'{wenz_ssrp.shipping_level} shipping / '
                f'{wenz_ssrp.rain_rate} rain'),
     )

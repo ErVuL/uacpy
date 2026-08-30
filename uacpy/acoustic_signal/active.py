@@ -18,10 +18,10 @@ from __future__ import annotations
 from collections import namedtuple
 
 import numpy as np
-import scipy.signal as _sig
 from scipy.signal import fftconvolve
 
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.acoustic_signal._signal_validate import require_positive_finite_scalar
 
 
 AmbiguityResult = namedtuple("AmbiguityResult", "delays_s doppler_hz amplitude")
@@ -53,12 +53,21 @@ def matched_filter(received, replica, *, mode: str = "full", normalize: bool = T
     r = np.asarray(received)
     h = np.asarray(replica)
     if r.ndim != 1 or h.ndim != 1:
-        raise ConfigurationError("matched_filter: received and replica must be 1-D")
+        raise ConfigurationError(
+            "matched_filter: received and replica must be 1-D; got received "
+            f"shape {r.shape} and replica shape {h.shape}")
     if h.size == 0:
         raise ConfigurationError("matched_filter: replica must be non-empty")
+    energy = float(np.sum(np.abs(h) ** 2))
+    if normalize and energy == 0.0:
+        raise ConfigurationError(
+            "matched_filter: replica carries no energy, so the unit-peak "
+            "normalisation divides by zero and every output sample is nan. "
+            "Pass the transmitted waveform as the replica, or normalize=False "
+            "for the un-normalised correlation.")
     y = fftconvolve(r, np.conj(h[::-1]), mode=mode)
     if normalize:
-        y = y / np.sum(np.abs(h) ** 2)
+        y = y / energy
     return y
 
 
@@ -70,8 +79,10 @@ def pulse_compression(received, replica, sample_rate: float, *, normalize: bool 
     """
     r = np.asarray(received)
     h = np.asarray(replica)
+    fs = require_positive_finite_scalar(
+        sample_rate, "pulse_compression", "sample_rate", " Hz")
     comp = matched_filter(r, h, mode="full", normalize=normalize)
-    lags = (np.arange(comp.size) - (h.size - 1)) / float(sample_rate)
+    lags = (np.arange(comp.size) - (h.size - 1)) / fs
     return lags, comp
 
 
@@ -79,8 +90,20 @@ def processing_gain(bandwidth_hz: float, duration_s: float) -> float:
     """Matched-filter processing gain (dB) = ``10*log10(B*T)``."""
     bt = float(bandwidth_hz) * float(duration_s)
     if bt <= 0.0:
-        raise ConfigurationError("processing_gain: B*T must be > 0")
+        raise ConfigurationError(
+            f"processing_gain: B*T must be > 0; got bandwidth_hz="
+            f"{bandwidth_hz!r} x duration_s={duration_s!r} = {bt:g}")
     return float(10.0 * np.log10(bt))
+
+
+# Largest ambiguity surface ``ambiguity_function`` will allocate:
+# n_doppler x (2N-1) float64 cells. 2**27 cells is 1 GiB, matching the 1 GiB
+# ceiling ``channel._MAX_DEFAULT_TAPS`` sets for the same reason. A 10 s pulse
+# at 96 kHz on the default 101-Doppler grid asks for 1.44 GiB, and the Python
+# loop of full-length fftconvolves over it runs for minutes, so past this the
+# caller decimates or narrows the grid rather than having one long waveform
+# allocate that much silently.
+_MAX_AMBIGUITY_CELLS = 1 << 27
 
 
 def ambiguity_function(waveform, sample_rate: float, *, doppler_hz=None,
@@ -111,15 +134,34 @@ def ambiguity_function(waveform, sample_rate: float, *, doppler_hz=None,
     """
     s = np.asarray(waveform, dtype=complex)
     if s.ndim != 1 or s.size == 0:
-        raise ConfigurationError("ambiguity_function: waveform must be 1-D non-empty")
+        raise ConfigurationError(
+            "ambiguity_function: waveform must be 1-D non-empty; "
+            f"got shape {s.shape}")
     n = s.size
-    fs = float(sample_rate)
+    fs = require_positive_finite_scalar(
+        sample_rate, "ambiguity_function", "sample_rate", " Hz")
     t = np.arange(n) / fs
     if doppler_hz is None:
         fmax = fs / 20.0
         doppler_hz = np.linspace(-fmax, fmax, int(n_doppler))
     doppler_hz = np.atleast_1d(np.asarray(doppler_hz, dtype=float))
-    energy = np.sum(np.abs(s) ** 2)
+    cells = int(doppler_hz.size) * (2 * n - 1)
+    if cells > _MAX_AMBIGUITY_CELLS:
+        raise ConfigurationError(
+            f"ambiguity_function: the surface would be "
+            f"{doppler_hz.size} x {2 * n - 1} = {cells} float64 cells "
+            f"({cells * 8 / 2 ** 30:.2f} GiB), past the "
+            f"{_MAX_AMBIGUITY_CELLS} cell cap "
+            f"({_MAX_AMBIGUITY_CELLS * 8 / 2 ** 30:.2f} GiB). It also runs "
+            f"one full-length FFT convolution per Doppler row. Shorten the "
+            f"waveform, decimate it, or pass fewer n_doppler / doppler_hz "
+            f"candidates.")
+    energy = float(np.sum(np.abs(s) ** 2))
+    if energy == 0.0:
+        raise ConfigurationError(
+            "ambiguity_function: waveform carries no energy, so normalising "
+            "the (0, 0) peak to 1 divides by zero and the whole surface is "
+            "nan. Pass the transmit waveform.")
     rev = np.conj(s[::-1])
     amp = np.empty((doppler_hz.size, 2 * n - 1))
     for i, nu in enumerate(doppler_hz):
@@ -128,41 +170,3 @@ def ambiguity_function(waveform, sample_rate: float, *, doppler_hz=None,
     amp /= energy
     lags = (np.arange(2 * n - 1) - (n - 1)) / fs
     return AmbiguityResult(lags, doppler_hz, amp)
-
-
-def shift_to_max_correlation(x, y):
-    """
-    Shift two signals based on the maximum cross-correlation.
-
-    Computes the cross-correlation between the signals `x` and `y`,
-    extracts the lag that maximizes the correlation, and shifts one of
-    the signals accordingly.
-
-    Parameters
-    ----------
-    x : ndarray
-        First signal to be shifted.
-    y : ndarray
-        Second signal to be shifted.
-
-    Returns
-    -------
-    x : ndarray
-        Shifted first signal.
-    y : ndarray
-        Shifted second signal.
-    """
-
-    correlation = _sig.correlate(x, y, mode="full")
-    lags = _sig.correlation_lags(x.size, y.size, mode="full")
-    lag = lags[np.argmax(correlation)]
-
-    if lag < 0:
-        y = y[-lag:]
-        x = x[:lag]
-    elif lag > 0:
-        x = x[lag:]
-        y = y[:-lag]
-    # lag == 0: signals already aligned, no trimming (y[:-0] would empty y).
-
-    return x, y

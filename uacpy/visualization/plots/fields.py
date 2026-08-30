@@ -2,24 +2,59 @@
 
 from __future__ import annotations
 
-import warnings
-
 import numpy as np
+import matplotlib.collections as _mcoll
 import matplotlib.pyplot as plt
 from typing import Optional, Sequence, Tuple
 
 from uacpy.core.environment import Environment
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.results import Field
-from uacpy.visualization.style import get_cmap_for_field
-from uacpy.visualization.plots._common import _value_array, _coord_label, _coord_axis, _TL_LIMITS, _overlay_seafloor, _pinned_subtitle, _draw_result_credit
+from uacpy.visualization.style import cmap_for_field
+from uacpy.visualization.plots._common import _value_array, _value_label, _default_value, _coord_label, _coord_axis, _TL_LIMITS, _is_transmission_loss, _overlay_seafloor, _pinned_subtitle, _draw_result_credit, fig_ax, invert_yaxis_once, _draw_geometry, typed_plot_error, _plot_warn
 
 
+# Which of ``plot_field``'s knobs each of its three render branches reads.
+# Anything a branch does not read is rejected instead of silently dropped.
+_HEATMAP_ONLY = ('vmin', 'vmax', 'cmap', 'show_colorbar', 'contours')
+# The environment and the run geometry can only be drawn over a physical
+# (depth, range) cross-section, so they key on the axes, not just the branch.
+_CROSS_SECTION_ONLY = ('env', 'source', 'receiver')
+_BRANCH_UNUSED = {
+    'heatmap': ('label', 'stack_offset'),
+    'line': _HEATMAP_ONLY + _CROSS_SECTION_ONLY + ('stack_offset',),
+    'stacked': _HEATMAP_ONLY + _CROSS_SECTION_ONLY + ('label',),
+}
+_BRANCH_DESCRIPTION = {
+    'heatmap': 'a 2-D heatmap',
+    'line': 'a 1-D line cut',
+    'stacked': 'the stacked-traces view',
+    'other_heatmap': 'a heatmap that is not a (depth, range) cross-section',
+}
+
+# Contour-label unit, keyed by ``value``. Linear pressure ('mag', 'real',
+# 'imag') carries no unit, so its labels are bare numbers.
+_CONTOUR_FMT = {'db': '%g dB', 'mag_db': '%g dB', 'phase': '%g rad'}
+
+# ``value`` modes that render a dB view of the quantity, and so take its dB
+# colormap (``cmap_for_field(kind, db=True)``). Every other mode is a linear
+# view and shares one signed colormap — see ``style.LINEAR_VIEW_COLORMAP``.
+# ``plot_field`` and ``compare_models`` both key on this, so one field renders
+# the same through either entry point.
+_DB_VALUES = ('db', 'mag_db')
+
+# Fraction of its reference span that a length-1 axis's heatmap band occupies.
+_SINGLETON_BAND_FRACTION = 0.02
+
+
+@typed_plot_error
 def plot_field(
     field: Field,
     ax=None,
     *,
     env: Optional[Environment] = None,
+    source=None,
+    receiver=None,
     value: Optional[str] = None,
     vmin: Optional[float] = None,
     vmax: Optional[float] = None,
@@ -29,7 +64,7 @@ def plot_field(
     figsize: Tuple[float, float] = (10, 5),
     stacked: bool = False,
     stack_offset: Optional[float] = None,
-    show_colorbar: bool = True,
+    show_colorbar: Optional[bool] = None,
     contours: Optional[Sequence[float]] = None,
     **mpl_kw,
 ):
@@ -51,14 +86,28 @@ def plot_field(
         Existing axes; a new figure is made when omitted.
     env : Environment, optional
         Overlays the seafloor on a 2-D ``(depth, range)`` heatmap.
+    source, receiver : Source / Receiver, optional
+        Draw the run geometry over a 2-D ``(depth, range)`` heatmap — same
+        markers ``Environment.plot`` and the ray plotter use.
+
+        Any of these three keeps the ``(depth, range)`` plane a heatmap even
+        where one axis holds a single sample (a single-receiver-depth run),
+        rather than reducing it to the line cut it would otherwise become;
+        that row is drawn as a band at its own coordinate.
     value : str
-        ``'tl'`` (default, dB), ``'mag_db'`` (``20·log10|H|``), ``'mag'``,
-        ``'phase'``, ``'real'``, ``'imag'``.
+        ``'db'``, ``'mag_db'`` (``20·log10|H|``), ``'mag'``, ``'phase'``,
+        ``'real'``, ``'imag'``. Defaults to ``'real'`` for a time-series
+        field and ``'db'`` otherwise.
     vmin, vmax : float, optional
-        Colour limits. ``None`` picks an auto-clip for TL.
+        Colour limits (2-D heatmap only). For ``value='db'`` an unset limit
+        takes the fixed 20–120 dB TL scale (``_TL_LIMITS``), never an
+        autoscale: TL panels are meant to stay directly comparable across
+        models, frequencies and runs.
     cmap : str, optional
-        Override the default colormap.
-    title, label : str, optional
+        Override the default colormap (2-D heatmap only).
+    title : str, optional
+    label : str, optional
+        Legend label for the 1-D line cut.
     figsize : tuple
     stacked : bool
         Only valid on a 2-D field that carries a ``'time'`` axis. Plots
@@ -67,14 +116,48 @@ def plot_field(
     stack_offset : float, optional
         Vertical offset between stacked traces. ``None`` picks
         ``2 × max|data|`` for visual separation.
+    show_colorbar : bool, optional
+        Draw the value colorbar (2-D heatmap only). Default ``True``.
+    contours : sequence of float, optional
+        Contour levels drawn over the 2-D heatmap.
+
+    Knobs that the selected branch cannot use are rejected with a
+    :class:`~uacpy.core.exceptions.ConfigurationError` rather than silently
+    dropped — e.g. ``vmin=`` on a field that reduced to one axis.
     """
     if not isinstance(field, Field):
         raise ConfigurationError(
             f"plot_field: expected Field, got {type(field).__name__}"
         )
 
+    if not stacked:
+        # A length-1 axis has no neighbours for ``shading='nearest'`` to build
+        # cell edges from, so every heatmap quad collapses to zero extent and the
+        # panel renders empty — indistinguishable from an all-NaN field. Models
+        # pass the receiver axes through verbatim and ``Receiver`` keeps a scalar
+        # as a length-1 array, so a single-receiver-depth run reaches this. Drop
+        # singleton axes onto ``.pinned`` (the reduction ``_reduce_to_spectrum``
+        # already performs) so a ``(1, n)`` field plots as the 1-D cut it is.
+        # At least one axis is always kept.
+        #
+        # ``env`` / ``source`` / ``receiver`` draw over the physical
+        # (depth, range) plane, so a caller who supplies one keeps that plane:
+        # a single-receiver-depth run reduced to a line cut leaves the overlay
+        # nowhere to go, and the knob check below then rejects the call.
+        # ``_plot_field_2d`` gives the surviving length-1 axis an explicit cell
+        # band so the row still renders.
+        keep_cross_section = (env is not None or source is not None
+                              or receiver is not None)
+        for axis in ('source_depth', 'frequency', 'depth', 'range', 'time'):
+            if len(field.coords) <= 1:
+                break
+            if keep_cross_section and list(field.coords) == ['depth', 'range']:
+                break
+            if axis in field.coords and field.coords[axis].size == 1:
+                field = field.isel(**{axis: 0})
+
     if value is None:
-        value = 'real' if field.kind == 'time_series' else 'tl'
+        value = _default_value(field)
     arr, value_label = _value_array(field, value)
     axes_present = list(field.coords)
     n_axes = len(axes_present)
@@ -85,28 +168,66 @@ def plot_field(
                 "plot_field(stacked=True): requires a 2-D field with a "
                 f"'time' axis; got coords {axes_present}"
             )
-        fig, ax_out = _plot_field_stacked(
-            field, arr, axes_present, ax=ax, title=title,
-            figsize=figsize, offset=stack_offset, **mpl_kw,
-        )
+        branch = 'stacked'
     elif n_axes == 1:
-        fig, ax_out = _plot_field_1d(
-            field, arr, value_label, axes_present[0],
-            ax=ax, title=title, label=label, figsize=figsize, **mpl_kw,
-        )
+        branch = 'line'
     elif n_axes == 2:
-        fig, ax_out = _plot_field_2d(
-            field, arr, value_label, axes_present,
-            ax=ax, env=env,
-            vmin=vmin, vmax=vmax, cmap=cmap, value=value, title=title,
-            figsize=figsize, show_colorbar=show_colorbar,
-            contours=contours, **mpl_kw,
-        )
+        branch = 'heatmap'
     else:
         raise ConfigurationError(
             f"plot_field: cannot plot a {n_axes}-axis field (coords "
             f"{axes_present}); slice it first with .at(...) / .isel(...) "
             "so 1 or 2 axes remain."
+        )
+
+    supplied = {'vmin': vmin, 'vmax': vmax, 'cmap': cmap, 'label': label,
+                'show_colorbar': show_colorbar, 'contours': contours,
+                'stack_offset': stack_offset, 'env': env, 'source': source,
+                'receiver': receiver}
+    reject_branch = branch
+    unused = list(_BRANCH_UNUSED[branch])
+    if branch == 'heatmap' and axes_present != ['depth', 'range']:
+        reject_branch = 'other_heatmap'
+        unused += list(_CROSS_SECTION_ONLY)
+    unused = [k for k in unused if supplied[k] is not None]
+    if unused:
+        raise ConfigurationError(
+            f"plot_field: {', '.join(f'{k}=' for k in unused)} has no effect on "
+            f"{_BRANCH_DESCRIPTION[reject_branch]} (coords {axes_present}). "
+            f"{', '.join(f'{k}=' for k in _HEATMAP_ONLY)} apply to the 2-D "
+            f"heatmap, {', '.join(f'{k}=' for k in _CROSS_SECTION_ONLY)} to a "
+            "(depth, range) cross-section, label= to the 1-D line "
+            "cut, stack_offset= to stacked=True."
+        )
+    if (branch == 'heatmap' and contours
+            and min(field.coords[a].size for a in axes_present) < 2):
+        # A contour is interpolated between neighbouring samples, so an axis
+        # held at one sample (a cross-section kept for its overlay) has nothing
+        # to trace a level along.
+        sizes = ', '.join(f"{a}={field.coords[a].size}" for a in axes_present)
+        raise ConfigurationError(
+            "plot_field: contours= needs at least 2 samples on both axes; "
+            f"got {sizes}."
+        )
+
+    if branch == 'stacked':
+        fig, ax_out = _plot_field_stacked(
+            field, arr, axes_present, ax=ax, title=title,
+            figsize=figsize, offset=stack_offset, **mpl_kw,
+        )
+    elif branch == 'line':
+        fig, ax_out = _plot_field_1d(
+            field, arr, value_label, axes_present[0], value,
+            ax=ax, title=title, label=label, figsize=figsize, **mpl_kw,
+        )
+    else:
+        fig, ax_out = _plot_field_2d(
+            field, arr, value_label, axes_present,
+            ax=ax, env=env, source=source, receiver=receiver,
+            vmin=vmin, vmax=vmax, cmap=cmap, value=value, title=title,
+            figsize=figsize,
+            show_colorbar=True if show_colorbar is None else show_colorbar,
+            contours=contours, **mpl_kw,
         )
     if ax is None:                       # credit only a figure we own
         _draw_result_credit(fig, field, env=env)
@@ -123,23 +244,27 @@ def _plot_field_stacked(
         traces = arr.T  # (n_other, n_t)
     else:
         traces = arr  # already (n_other, n_t)
-    other_coord = field.coords[other_axis]
+    # Through _coord_axis so a range axis reads in km here too — every other
+    # view of the same axis is labelled that way.
+    other_coord, other_label = _coord_axis(field.coords[other_axis], other_axis)
     time = field.coords['time']
 
     if offset is None:
         peak = float(np.max(np.abs(traces))) if traces.size else 1.0
         offset = 2.0 * peak if peak > 0 else 1.0
 
-    if ax is None:
-        fig, ax = plt.subplots(figsize=figsize)
-    else:
-        fig = ax.figure
+    fig, ax = fig_ax(ax, figsize)
+    # setdefault, not a positional style: passing linewidth= through **mpl_kw
+    # would otherwise collide with the hardcoded one and raise a raw TypeError.
+    mpl_kw.setdefault('linewidth', 0.8)
     for i, c in enumerate(other_coord):
-        ax.plot(time, traces[i] + i * offset, linewidth=0.8, **mpl_kw)
+        ax.plot(time, traces[i] + i * offset, **mpl_kw)
     ax.set_xlabel(_coord_label('time'))
-    ax.set_ylabel(_coord_label(other_axis) + ' (stacked)')
+    ax.set_ylabel(other_label + ' (stacked)')
     ax.set_yticks([i * offset for i in range(len(other_coord))])
-    ax.set_yticklabels([f"{float(c):.1f}" for c in other_coord])
+    # Significant digits, not fixed decimals: a range axis in km spans values
+    # a single decimal place would round to the same label.
+    ax.set_yticklabels([f"{float(c):.4g}" for c in other_coord])
     ax.grid(True, alpha=0.3)
     if title:
         ax.set_title(title)
@@ -147,22 +272,23 @@ def _plot_field_stacked(
 
 
 def _plot_field_1d(
-    field, arr, value_label, axis_name,
+    field, arr, value_label, axis_name, value,
     *, ax, title, label, figsize, **mpl_kw,
 ):
-    if ax is None:
-        fig, ax = plt.subplots(figsize=figsize)
-    else:
-        fig = ax.figure
+    fig, ax = fig_ax(ax, figsize)
     coord = field.coords[axis_name]
     vals = np.asarray(arr).ravel()
+    # A line through one sample has nothing to join, so it draws nothing at all.
+    # Give a single-sample cut a marker so the value is visible.
+    if vals.size == 1:
+        mpl_kw.setdefault('marker', 'o')
     if axis_name == 'depth':
         # Depth cut: depth on the Y axis increasing downward (oceanographic
         # convention, consistent with the 2-D views), value on X.
         line, = ax.plot(vals, coord, label=label, **mpl_kw)
         ax.set_xlabel(value_label)
         ax.set_ylabel(_coord_label('depth'))
-        ax.invert_yaxis()
+        invert_yaxis_once(ax)
     else:
         # Range / frequency cut: coordinate on X, value on Y. For TL, put the
         # louder (smaller-dB) end at the top.
@@ -170,8 +296,8 @@ def _plot_field_1d(
         line, = ax.plot(x_plot, vals, label=label, **mpl_kw)
         ax.set_xlabel(x_label)
         ax.set_ylabel(value_label)
-        if value_label == 'TL (dB)':
-            ax.invert_yaxis()
+        if _is_transmission_loss(field, value):
+            invert_yaxis_once(ax)
     ax.grid(True, alpha=0.3)
     if title:
         ax.set_title(title)
@@ -183,85 +309,200 @@ def _plot_field_1d(
     return fig, ax
 
 
+def _cell_edges(coord, half):
+    """Cell edges for a centre-sampled coordinate axis.
+
+    Interior edges are the sample midpoints, the outer two mirror the first and
+    last interval. A length-1 axis has no interval to mirror, so it gets a band
+    of ``±half`` around its single sample."""
+    c = np.asarray(coord, dtype=float)
+    if c.size == 1:
+        return np.array([c[0] - half, c[0] + half])
+    mid = 0.5 * (c[:-1] + c[1:])
+    return np.concatenate(([2 * c[0] - mid[0]], mid, [2 * c[-1] - mid[-1]]))
+
+
+def _band_half(name, coord, env):
+    """Half-thickness of the band a length-1 ``name`` axis is drawn as.
+
+    The panel autoscales to whatever is drawn, so the thickness is purely
+    presentational — except on ``depth``, where the seafloor overlay stretches
+    the axis down to the seabed and a band sized against the sample's own depth
+    would vanish in a deep water column. Size that one against the water column
+    instead."""
+    c = abs(float(np.ravel(coord)[0])) or 1.0
+    if name == 'depth' and env is not None:
+        if env.has_range_dependent_bathymetry:
+            c = max(c, float(np.max(env.bathymetry.depths)))
+        else:
+            c = max(c, float(env.depth))
+    return _SINGLETON_BAND_FRACTION * c
+
+
+def _mesh_with_singleton_bands(ax, x_plot, x_name, y_plot, y_name, Z, env,
+                               **kw):
+    """``pcolormesh`` that also renders an axis held at a single sample.
+
+    ``shading='nearest'`` builds each cell's edges from the neighbouring
+    samples, so a length-1 axis collapses every quad to zero extent and the
+    panel comes out empty — indistinguishable from an all-NaN field. Hand such
+    an axis explicit edges instead and draw its samples as a band centred on
+    their own coordinate.
+
+    ``'nearest'`` (not ``'auto'``) on the ordinary path: it centres each cell on
+    its coordinate and errors loudly if the coords are ever the wrong length,
+    where ``'auto'`` would silently switch to edge (``'flat'``) mode and
+    half-cell-shift the field."""
+    if np.size(x_plot) == 1 or np.size(y_plot) == 1:
+        return ax.pcolormesh(
+            _cell_edges(x_plot, _band_half(x_name, x_plot, env)),
+            _cell_edges(y_plot, _band_half(y_name, y_plot, env)),
+            Z, shading='flat', **kw,
+        )
+    return ax.pcolormesh(x_plot, y_plot, Z, shading='nearest', **kw)
+
+
+def _symmetric_span(datasets):
+    """``(-max|x|, +max|x|)`` pooled over every array in ``datasets``, or
+    ``(None, None)`` when none of them holds a finite non-zero sample.
+
+    ``np.abs()`` rather than a float cast: a signal-excess field is normally
+    real dB, but the cast warns and discards the imaginary part on the complex
+    case, and the magnitude is what the symmetric window needs either way."""
+    span = 0.0
+    for data in datasets:
+        mag = np.abs(np.asarray(data))
+        if np.isfinite(mag).any():
+            span = max(span, float(np.nanmax(mag)))
+    return (-span, span) if span > 0.0 else (None, None)
+
+
+def _is_time_domain(field) -> bool:
+    """Whether ``field`` holds real time-domain pressure — a wavefield to be
+    read as a moveout, not a level."""
+    return 'time' in field.coords and not field.is_complex
+
+
+def _value_style(field, value):
+    """``(cmap, vmin, vmax)`` — the colormap and any **fixed** colour limits the
+    2-D view of ``value`` carries, ``None`` where the mode leaves the choice to
+    the data.
+
+    ``plot_field`` and ``compare_models`` both read this, so one field renders
+    in the same colours through either entry point. Choosing a figure-level
+    colormap independently is a real error and a quiet one: ``'phase'`` is
+    cyclic and takes ``twilight``, and on a non-cyclic map -π and +π — the same
+    phase — land at opposite ends of the scale, so the wrap where the phase
+    rolls over reads as a discontinuity in the field."""
+    if _is_time_domain(field):
+        # Real time-domain pressure → diverging map centred at 0. Its limits
+        # come from the record's own RMS, so they are not fixed here.
+        return 'seismic', None, None
+    if value == 'db':
+        # The fixed scale is a *transmission-loss* convention, so it applies
+        # only to a pressure field. Another dB quantity — signal excess spans
+        # roughly -20..+40 dB — renders as one flat block against 20..120.
+        if field.kind == 'pressure':
+            lo, hi = _TL_LIMITS
+        elif field.kind == 'signal_excess':
+            # A diverging colormap carries its meaning in the NEUTRAL colour,
+            # and for signal excess that colour is the SE = 0 dB detection
+            # boundary (style.py says so where 'RdBu_r' is chosen). Leaving the
+            # window to matplotlib's asymmetric autoscale put the neutral
+            # wherever the data happened to centre: measured on a field
+            # spanning -20..+40 dB, white landed at SE = +10 dB, so a 10 dB
+            # band of genuinely detectable water was painted the colour the map
+            # reserves for "not detectable". Symmetric limits put 0 dB on the
+            # neutral, which is what the dedicated plot_signal_excess already
+            # does. ``compare_models`` pools the same window over its panels.
+            lo, hi = _symmetric_span([field.data])
+        else:
+            lo, hi = (None, None)
+        return cmap_for_field(field.kind, db=True), lo, hi
+    if value == 'phase':
+        return 'twilight', -np.pi, np.pi
+    # 'mag_db' is a dB view of |H|; 'mag' / 'real' / 'imag' are linear views,
+    # which share one signed colormap whatever the quantity.
+    return cmap_for_field(field.kind, db=value in _DB_VALUES), None, None
+
+
 def _plot_field_2d(
     field, arr, value_label, axes_present,
-    *, ax, env, vmin, vmax, cmap, value, title, figsize,
+    *, ax, env, vmin, vmax, cmap, value, title, figsize, source=None,
+    receiver=None,
     show_colorbar=True, contours=None, **mpl_kw,
 ):
-    if axes_present == ['depth', 'range']:
-        x_name, y_name = 'range', 'depth'
-        Z = arr
-    else:
-        # General two-axis case: first axis on Y, second on X.
-        y_name, x_name = axes_present[0], axes_present[1]
-        Z = arr
+    # First coord axis on Y, second on X — which for the canonical
+    # ['depth', 'range'] field is the usual depth-vs-range cross-section.
+    y_name, x_name = axes_present
+    Z = arr
 
     x_coord = field.coords[x_name]
     y_coord = field.coords[y_name]
 
     # Auto-defaults for value-specific styling.
-    is_time_domain = 'time' in axes_present and not field.is_complex
+    is_time_domain = _is_time_domain(field)
+    style_cmap, style_vmin, style_vmax = _value_style(field, value)
+    if cmap is None:
+        cmap = style_cmap
+    if vmin is None:
+        vmin = style_vmin
+    if vmax is None:
+        vmax = style_vmax
     if is_time_domain:
-        # Real time-domain pressure → diverging seismic colormap centred
-        # at 0. Clip to ±RMS so silence between arrivals doesn't wash
-        # out the wavefront — peaks saturate, which is exactly what we
-        # want for a moveout reading.
-        finite = np.abs(Z[np.isfinite(Z)])
-        if finite.size:
-            rms = float(np.sqrt(np.mean(finite ** 2)))
-            peak = rms if rms > 0 else float(finite.max())
-        else:
-            peak = 1.0
-        if vmin is None:
-            vmin = -peak
-        if vmax is None:
-            vmax = peak
-        if cmap is None:
-            cmap = 'seismic'
-        value_label = 'p(t)'
-    elif value == 'tl':
+        # Clip to ±RMS so silence between arrivals doesn't wash out the
+        # wavefront — peaks saturate, which is exactly what we want for a
+        # moveout reading.
         if vmin is None or vmax is None:
-            v_lo, v_hi = _TL_LIMITS
-            vmin = v_lo if vmin is None else vmin
-            vmax = v_hi if vmax is None else vmax
-        if cmap is None:
-            cmap = get_cmap_for_field('tl')
-    elif value == 'phase':
-        if vmin is None:
-            vmin = -np.pi
-        if vmax is None:
-            vmax = np.pi
-        if cmap is None:
-            cmap = 'twilight'
-    else:
-        if cmap is None:
-            cmap = get_cmap_for_field('tl')
+            finite = np.abs(Z[np.isfinite(Z)])
+            if finite.size:
+                rms = float(np.sqrt(np.mean(finite ** 2)))
+                peak = rms if rms > 0 else float(finite.max())
+            else:
+                peak = 1.0
+            vmin = -peak if vmin is None else vmin
+            vmax = peak if vmax is None else vmax
+        value_label = 'p(t)'
+    elif value in ('mag', 'real', 'imag') and (vmin is None or vmax is None):
+        # Zero has to land on the diverging map's neutral colour, so the
+        # signed views take symmetric limits and the non-negative modulus
+        # starts at 0 — the same reading of "white = silence" across all
+        # three. An autoscale puts zero at an arbitrary colour instead.
+        finite = np.abs(Z[np.isfinite(Z)])
+        span = float(finite.max()) if finite.size else 1.0
+        if span <= 0:
+            span = 1.0
+        lo = 0.0 if value == 'mag' else -span
+        vmin = lo if vmin is None else vmin
+        vmax = span if vmax is None else vmax
 
-    if ax is None:
-        fig, ax = plt.subplots(figsize=figsize)
-    else:
-        fig = ax.figure
+    fig, ax = fig_ax(ax, figsize)
 
+    # Both axes go through _coord_axis, so a range axis reads in km whether it
+    # lands on x or on y — same scale as every other view of that axis.
     x_plot, x_label = _coord_axis(x_coord, x_name)
+    y_plot, y_label = _coord_axis(y_coord, y_name)
 
-    im = ax.pcolormesh(
-        x_plot, y_coord, Z, vmin=vmin, vmax=vmax, cmap=cmap,
-        # 'nearest' (not 'auto') centers each cell on its coordinate and errors
-        # loudly if coords are ever the wrong length — 'auto' would silently
-        # switch to edge ('flat') mode and half-cell-shift the field.
-        shading='nearest', **mpl_kw,
+    # ``plot_field`` keeps a length-1 axis only for a cross-section overlay;
+    # the helper draws it as a band so the row still renders.
+    im = _mesh_with_singleton_bands(
+        ax, x_plot, x_name, y_plot, y_name, Z, env,
+        vmin=vmin, vmax=vmax, cmap=cmap, **mpl_kw,
     )
     ax.set_xlabel(x_label)
-    ax.set_ylabel(_coord_label(y_name))
-    if y_name == 'depth':
-        ax.invert_yaxis()
+    ax.set_ylabel(y_label)
+    # Any depth-denoting y axis (depth, source_depth) is positive-down
+    # (core/results/field.py documents both in metres below the surface).
+    if y_name.endswith('depth'):
+        invert_yaxis_once(ax)
     if contours:
         cs = ax.contour(
-            x_plot, y_coord, Z, levels=list(contours),
+            x_plot, y_plot, Z, levels=list(contours),
             colors='black', linewidths=1.5, alpha=0.8,
             linestyles='solid',
         )
-        ax.clabel(cs, inline=True, fontsize=9, fmt='%g dB')
+        ax.clabel(cs, inline=True, fontsize=9,
+                  fmt=_CONTOUR_FMT.get(value, '%g'))
     if show_colorbar:
         fig.colorbar(im, ax=ax, label=value_label,
                      fraction=0.046, pad=0.02)
@@ -272,11 +513,21 @@ def _plot_field_2d(
         pin = _pinned_subtitle(field)
         if pin:
             ax.set_title(pin)
-    if axes_present == ['depth', 'range'] and env is not None:
-        _overlay_seafloor(ax, env, x_coord)
+    # env / source / receiver are rejected before the figure exists (see
+    # _CROSS_SECTION_ONLY), so reaching here with them set means this really
+    # is a (depth, range) cross-section.
+    if axes_present == ['depth', 'range']:
+        if env is not None:
+            _overlay_seafloor(ax, env, x_coord)
+        if source is not None or receiver is not None:
+            # Range is measured from the source, so the source sits at r = 0
+            # even when the field's own grid starts further out.
+            _draw_geometry(ax, source, receiver, max_markersize=6,
+                           source_range_m=0.0)
     return fig, ax
 
 
+@typed_plot_error
 def plot_signal_excess(
     field: Field,
     ax=None,
@@ -340,32 +591,41 @@ def plot_signal_excess(
             vmax = 1.0
 
     _owns_fig = ax is None
-    if ax is None:
-        fig, ax = plt.subplots(figsize=figsize)
-    else:
-        fig = ax.figure
+    fig, ax = fig_ax(ax, figsize)
 
-    r_km = field.coords['range'] / 1000.0
+    r_km, x_label = _coord_axis(field.coords['range'], 'range')
     depths = field.coords['depth']
-    im = ax.pcolormesh(
-        r_km, depths, Z, vmin=-vmax, vmax=vmax, cmap=cmap,
-        shading='nearest', **mpl_kw,
+    # A single-receiver-depth run (or a single range) reaches here as a
+    # length-1 axis, which the helper draws as a band rather than the
+    # zero-extent — empty — mesh 'nearest' shading would build.
+    im = _mesh_with_singleton_bands(
+        ax, r_km, 'range', depths, 'depth', Z, env,
+        vmin=-vmax, vmax=vmax, cmap=cmap, **mpl_kw,
     )
     if show_boundary and np.isfinite(Z).any():
         finite_z = Z[np.isfinite(Z)]
         if finite_z.min() < 0.0 < finite_z.max():
-            cs = ax.contour(
-                r_km, depths, Z, levels=[0.0],
-                colors='black', linewidths=1.5, linestyles='solid',
-            )
-            ax.clabel(cs, inline=True, fontsize=9,
-                      fmt=lambda _: 'SE = 0 dB')
+            if min(Z.shape) < 2:
+                # A contour is interpolated between neighbouring samples, so a
+                # field held at one depth (or one range) has nothing to trace
+                # the boundary along. The heatmap itself still renders.
+                _plot_warn(
+                    "plot_signal_excess: the SE = 0 boundary needs at least 2 "
+                    f"samples on both axes; got depth={Z.shape[0]}, "
+                    f"range={Z.shape[1]}, so no boundary contour is drawn.")
+            else:
+                cs = ax.contour(
+                    r_km, depths, Z, levels=[0.0],
+                    colors='black', linewidths=1.5, linestyles='solid',
+                )
+                ax.clabel(cs, inline=True, fontsize=9,
+                          fmt=lambda _: 'SE = 0 dB')
     if show_colorbar:
         fig.colorbar(im, ax=ax, label='Signal excess (dB)',
                      fraction=0.046, pad=0.02)
-    ax.set_xlabel('Range (km)')
+    ax.set_xlabel(x_label)
     ax.set_ylabel(_coord_label('depth'))
-    ax.invert_yaxis()
+    invert_yaxis_once(ax)
     ax.grid(True, alpha=0.3, zorder=0)
     if title:
         ax.set_title(title)
@@ -382,6 +642,7 @@ def plot_signal_excess(
     return fig, ax
 
 
+@typed_plot_error
 def plot_detection_probability(
     field: Field,
     ax=None,
@@ -434,16 +695,15 @@ def plot_detection_probability(
 
     Z = np.asarray(field.data, dtype=float)
     _owns_fig = ax is None
-    if ax is None:
-        fig, ax = plt.subplots(figsize=figsize)
-    else:
-        fig = ax.figure
+    fig, ax = fig_ax(ax, figsize)
 
-    r_km = field.coords['range'] / 1000.0
+    r_km, x_label = _coord_axis(field.coords['range'], 'range')
     depths = field.coords['depth']
-    im = ax.pcolormesh(
-        r_km, depths, Z, vmin=0.0, vmax=1.0, cmap=cmap,
-        shading='nearest', **mpl_kw,
+    # As in plot_signal_excess: a length-1 depth or range axis is drawn as a
+    # band, not as the zero-extent mesh 'nearest' shading would build.
+    im = _mesh_with_singleton_bands(
+        ax, r_km, 'range', depths, 'depth', Z, env,
+        vmin=0.0, vmax=1.0, cmap=cmap, **mpl_kw,
     )
     finite = Z[np.isfinite(Z)]
     if contour_levels and finite.size:
@@ -451,7 +711,14 @@ def plot_detection_probability(
             lv for lv in sorted(contour_levels)
             if finite.min() < lv < finite.max()
         ]
-        if levels:
+        if levels and min(Z.shape) < 2:
+            # Nothing to interpolate a level along on an axis held at one
+            # sample; the heatmap itself still renders.
+            _plot_warn(
+                "plot_detection_probability: contour_levels= needs at least 2 "
+                f"samples on both axes; got depth={Z.shape[0]}, "
+                f"range={Z.shape[1]}, so no contours are drawn.")
+        elif levels:
             cs = ax.contour(
                 r_km, depths, Z, levels=levels,
                 colors='black', linewidths=1.2, linestyles='solid',
@@ -460,9 +727,9 @@ def plot_detection_probability(
     if show_colorbar:
         fig.colorbar(im, ax=ax, label='Probability of detection',
                      fraction=0.046, pad=0.02)
-    ax.set_xlabel('Range (km)')
+    ax.set_xlabel(x_label)
     ax.set_ylabel(_coord_label('depth'))
-    ax.invert_yaxis()
+    invert_yaxis_once(ax)
     ax.grid(True, alpha=0.3, zorder=0)
     if title:
         ax.set_title(title)
@@ -480,12 +747,13 @@ def plot_detection_probability(
     return fig, ax
 
 
+@typed_plot_error
 def compare(
     fields: Sequence[Field],
     labels: Optional[Sequence[str]] = None,
     ax=None,
     *,
-    value: str = 'tl',
+    value: str = 'db',
     figsize: Tuple[float, float] = (10, 5),
     title: Optional[str] = None,
     **mpl_kw,
@@ -496,19 +764,23 @@ def compare(
     axis across all). Caller slices them first::
 
         compare([f1.at(depth=20), f2.at(depth=20)], labels=['Bellhop', 'RAM'])
+
+    Axes follow :func:`plot_field`, so one field cuts the same way through
+    either: depth increases downward, and so does the value axis of a
+    transmission-loss cut (see :func:`_is_transmission_loss`) — but not that of
+    any other dB quantity, which is a level and reads upward.
     """
     if not fields:
-        raise ConfigurationError("compare: empty fields list")
+        raise ConfigurationError(
+            "compare: empty fields list — pass the Fields to overlay, each "
+            "already cut to one surviving axis (field.at(...)).")
     if labels is not None and len(labels) != len(fields):
         raise ConfigurationError(
             f"compare: labels ({len(labels)}) must match fields "
             f"({len(fields)})"
         )
     _owns_fig = ax is None
-    if ax is None:
-        fig, ax = plt.subplots(figsize=figsize)
-    else:
-        fig = ax.figure
+    fig, ax = fig_ax(ax, figsize)
     if labels is None:
         labels = [getattr(f, 'model', '') or f"#{i}" for i, f in enumerate(fields)]
     common_axis = None
@@ -518,6 +790,17 @@ def compare(
             raise ConfigurationError(
                 f"compare: expected Field, got {type(f).__name__}"
             )
+        # Compare the QUANTITY, exactly as compare_models does: overlaying a
+        # reverberation level on a TL cut puts two different physical
+        # quantities on one value axis, with one shared label and one axis
+        # direction that cannot describe both.
+        if f.kind != fields[0].kind:
+            raise ConfigurationError(
+                f"compare: {lbl!r} is a {f.kind!r} field but "
+                f"{labels[0]!r} is {fields[0].kind!r} — these are different "
+                f"physical quantities and share no value axis.",
+                remediation="Compare like with like, or plot them separately "
+                            "with plot_field.")
         axes = list(f.coords)
         if len(axes) != 1:
             raise ConfigurationError(
@@ -531,7 +814,7 @@ def compare(
                 f"compare: axis mismatch — {labels[0]!r} on {common_axis!r}, "
                 f"{lbl!r} on {axes[0]!r}"
             )
-        arr, vlabel = _value_array(f, value)
+        arr, _ = _value_array(f, value)
         if common_axis == 'depth':
             # Depth-cut overlays follow plot_field's convention:
             # depth on Y, increasing downward.
@@ -540,15 +823,20 @@ def compare(
         else:
             x_plot, x_label = _coord_axis(f.coords[common_axis], common_axis)
             ax.plot(x_plot, np.asarray(arr).ravel(), label=lbl, **mpl_kw)
+    # The kind check above makes the first field representative of them all,
+    # so it settles the shared value-axis label and — for a transmission-loss
+    # cut — the direction that axis runs.
+    vlabel = _value_label(fields[0], value)
+    value_is_tl = _is_transmission_loss(fields[0], value)
     if common_axis == 'depth':
         ax.set_ylabel(_coord_label(common_axis))
         ax.set_xlabel(vlabel)
-        ax.invert_yaxis()
+        invert_yaxis_once(ax)
     else:
         ax.set_xlabel(x_label)
         ax.set_ylabel(vlabel)
-        if value == 'tl':
-            ax.invert_yaxis()
+        if value_is_tl:
+            invert_yaxis_once(ax)
     ax.grid(True, alpha=0.3)
     ax.legend()
     if title:
@@ -573,17 +861,18 @@ def _draw_multi_model_credit(fig, fields):
         _draw_credit(fig, (), model=attrs)
 
 
+@typed_plot_error
 def compare_models(
     fields,
     labels: Optional[Sequence[str]] = None,
     *,
     env: Optional[Environment] = None,
-    value: str = 'tl',
+    value: str = 'db',
     vmin: Optional[float] = None,
     vmax: Optional[float] = None,
     cmap: Optional[str] = None,
     figsize: Optional[Tuple[float, float]] = None,
-    suptitle: Optional[str] = None,
+    title: Optional[str] = None,
     ncols: Optional[int] = None,
     contours: Optional[Sequence[float]] = None,
 ):
@@ -593,8 +882,16 @@ def compare_models(
     used as the per-axes title), or a ``{label: Field}`` dict. Shared
     colour scale; one colorbar per axes.
 
-    ``ncols`` controls the grid width — defaults to ``n`` (single row).
-    ``contours`` adds dB-level contour lines to every panel.
+    ``title`` titles the whole figure; the per-panel titles come from
+    ``labels``. ``ncols`` controls the grid width — defaults to ``n`` (single
+    row). ``contours`` adds dB-level contour lines to every panel.
+
+    Returns
+    -------
+    fig, axes : Figure, ndarray of Axes
+        ``axes`` is the 2-D ``(nrows, ncols)`` array ``plt.subplots``
+        produced (unused cells are turned off) — the same shape every
+        grid-of-panels helper on this surface returns.
     """
     if isinstance(fields, dict):
         if labels is None:
@@ -602,7 +899,9 @@ def compare_models(
         fields = list(fields.values())
     n = len(fields)
     if n == 0:
-        raise ConfigurationError("compare_models: empty fields list")
+        raise ConfigurationError(
+            "compare_models: empty fields list — pass one Field per model, "
+            "as a list or as a {label: field} dict.")
     if labels is None:
         labels = [getattr(f, 'model', '') or f"#{i}" for i, f in enumerate(fields)]
     elif len(labels) != n:
@@ -615,6 +914,18 @@ def compare_models(
 
     ref = fields[0]
     for f, lbl in zip(fields[1:], labels[1:]):
+        # Compare the QUANTITY, not the kind: a complex pressure field and a
+        # real TL field are the same quantity written two ways, and comparing
+        # them is the ordinary case. A reverberation level shares TL's
+        # representation exactly but is a different quantity, and putting the
+        # two on one colour scale asserts an equivalence that does not hold.
+        if f.kind != ref.kind:
+            raise ConfigurationError(
+                f"compare_models: {lbl!r} is a {f.kind!r} field but "
+                f"{labels[0]!r} is {ref.kind!r} — these are different "
+                f"physical quantities and share no colour scale.",
+                remediation="Compare like with like, or plot them separately "
+                            "with plot_field.")
         for axis in ('depth', 'range'):
             if axis not in ref.coords or axis not in f.coords:
                 continue
@@ -623,20 +934,68 @@ def compare_models(
             if ca.shape != cb.shape or not np.allclose(
                 ca, cb, rtol=1e-6, atol=1e-6
             ):
-                warnings.warn(
+                _plot_warn(
                     f"compare_models: {lbl!r} {axis} axis differs from "
                     f"{labels[0]!r}; the shared colourbar mixes "
                     "different sample grids.",
-                    UserWarning, stacklevel=2,
                 )
                 break
 
-    if value == 'tl' and (vmin is None or vmax is None):
-        v_lo, v_hi = _TL_LIMITS
-        vmin = v_lo if vmin is None else vmin
-        vmax = v_hi if vmax is None else vmax
+    # Every panel here shares one kind already, so ``ref`` settles the styling
+    # for the whole figure — and it is read from the same table plot_field
+    # reads, so a panel is coloured as if it had been plotted on its own.
+    style_cmap, style_vmin, style_vmax = _value_style(ref, value)
+    if (value == 'db' and ref.kind == 'signal_excess'
+            and not _is_time_domain(ref)):
+        # _value_style sizes the symmetric signal-excess window from the one
+        # field it is handed, which here is panel 1: measured on a second panel
+        # spanning four times as wide, 70% of its samples saturated, and
+        # reversing the list changed the shared limits. Pool the magnitude over
+        # every panel instead — still SYMMETRIC, so SE = 0 keeps the diverging
+        # map's neutral colour. The generic pooled branch below cannot do this
+        # job: its asymmetric min/max would put the neutral wherever the data
+        # happen to centre.
+        style_vmin, style_vmax = _symmetric_span([f.data for f in fields])
     if cmap is None:
-        cmap = get_cmap_for_field('tl' if value == 'tl' else 'pressure')
+        cmap = style_cmap
+    if vmin is None:
+        vmin = style_vmin
+    if vmax is None:
+        vmax = style_vmax
+    if vmin is None or vmax is None:
+        # A view with no fixed scale pools the panels: left to autoscale, each
+        # ``plot_field`` would map its own panel's range and the single
+        # figure-level colorbar below would then annotate the figure with only
+        # the last panel's limits — two fields differing by 100x would render
+        # identically. Signed quantities get a symmetric range so zero stays the
+        # neutral colour; a *level* (a dB view — signal excess, |H|) is not
+        # signed however negative it reads, and forcing -80..-20 dB out to ±80
+        # would leave it occupying half the colormap.
+        pooled = [np.asarray(_value_array(f, value)[0], dtype=float).ravel()
+                  for f in fields]
+        finite = np.concatenate([p[np.isfinite(p)] for p in pooled]) \
+            if any(np.isfinite(p).any() for p in pooled) else np.array([0.0])
+        if _is_time_domain(ref):
+            # As in plot_field: a wavefield is clipped to ±RMS so silence
+            # between arrivals does not wash out the wavefront. Taken over the
+            # pooled samples, so every panel saturates at one shared level.
+            mag = np.abs(finite)
+            rms = float(np.sqrt(np.mean(mag ** 2)))
+            span = rms if rms > 0 else float(mag.max())
+            lo, hi = -span, span
+        elif value in ('real', 'imag'):
+            span = float(np.max(np.abs(finite))) or 1.0
+            lo, hi = -span, span
+        elif value == 'mag':
+            # As in plot_field: the modulus is non-negative and starts at 0, so
+            # zero keeps the linear colormap's neutral colour.
+            lo, hi = 0.0, float(np.max(finite)) or 1.0
+        else:
+            lo, hi = float(np.min(finite)), float(np.max(finite))
+            if hi <= lo:                       # a constant field has no range
+                lo, hi = lo - 0.5, hi + 0.5
+        vmin = lo if vmin is None else vmin
+        vmax = hi if vmax is None else vmax
 
     if figsize is None:
         figsize = (6.0 * ncols + 1.6, 5.0 * nrows + 1.2)
@@ -649,32 +1008,49 @@ def compare_models(
             vmin=vmin, vmax=vmax, cmap=cmap, title=label,
             contours=contours, show_colorbar=False,
         )
-        if ax.collections:
-            im_last = ax.collections[0]
+        # Every panel was drawn with the same vmin/vmax/cmap, so any one mesh
+        # maps the shared scale — keep the last panel's mesh for the single
+        # figure-level colorbar. Picked by TYPE, not by position: the panel also
+        # carries the contour set (a Collection since matplotlib 3.8) and the
+        # seafloor fills, and the mesh sits first only because it is drawn
+        # first. A panel that drew no mesh contributes nothing, so a figure
+        # where none did keeps its colorbar suppressed below rather than
+        # captioning the shared scale with whatever else the axes holds.
+        mesh = next((c for c in ax.collections
+                     if isinstance(c, _mcoll.QuadMesh)), None)
+        if mesh is not None:
+            im_last = mesh
     for ax in axes_flat[n:]:
         ax.axis('off')
 
-    top = 0.90 if suptitle else 0.95
+    top = 0.90 if title else 0.95
     fig.subplots_adjust(left=0.05, right=0.88, top=top, bottom=0.08,
                         wspace=0.22, hspace=0.30)
     if im_last is not None:
-        cbar_label = 'TL (dB)' if value == 'tl' else value
-        cbar_ax = fig.add_axes([0.905, 0.08, 0.015, top - 0.08])
+        # The label the panels would carry if each had drawn its own colorbar:
+        # the raw ``value`` string is the knob's name, not the quantity's.
+        cbar_label = 'p(t)' if _is_time_domain(ref) else _value_label(ref, value)
+        cbar_ax = fig.add_axes((0.905, 0.08, 0.015, top - 0.08))
         fig.colorbar(im_last, cax=cbar_ax, label=cbar_label)
-    if suptitle:
-        fig.suptitle(suptitle, fontsize=14, fontweight='bold', y=0.97)
+    if title:
+        fig.suptitle(title, fontsize=14, fontweight='bold', y=0.97)
     _draw_multi_model_credit(fig, fields)
-    return fig, axes_flat
+    # One shape for every grid-of-panels return on this surface: the 2-D
+    # axes array, matching _plot_field_stack (documented in the Returns
+    # section above).
+    return fig, axes
 
 
-def plot_field_stack(stack, env: Optional[Environment] = None, *,
-                     ncols: Optional[int] = None,
-                     figsize: Optional[Tuple[float, float]] = None, **kwargs):
+@typed_plot_error
+def _plot_field_stack(stack, env: Optional[Environment] = None, *,
+                      ncols: Optional[int] = None,
+                      title: Optional[str] = None,
+                      figsize: Optional[Tuple[float, float]] = None, **kwargs):
     """Grid of TL panels, one per slab of a Field :class:`ResultStack`.
 
     Each panel is a :func:`plot_field` heatmap titled by the slab's stacking
-    coordinate (e.g. ``source_depth=20``). Extra kwargs forward to
-    :func:`plot_field`.
+    coordinate (e.g. ``source_depth=20``); ``title`` titles the whole figure.
+    Extra kwargs forward to :func:`plot_field`.
     """
     n = len(stack)
     ncols = ncols or min(n, 3)
@@ -688,5 +1064,7 @@ def plot_field_stack(stack, env: Optional[Environment] = None, *,
     for j in range(n, len(flat)):
         flat[j].axis('off')
     fig.tight_layout()
+    if title:
+        fig.suptitle(title, fontweight='bold')
     _draw_result_credit(fig, stack.slabs[0], env=env)
     return fig, axes

@@ -1,19 +1,54 @@
+"""Tests that apply to every uacpy propagation model, not to one of them.
+
+The shared surface in ``uacpy.models.base``: what ``run()`` accepts and the
+order it accepts it in, how the speed bounds and ``c_max`` are derived from
+the environment rather than guessed, backend selection as pure
+introspection, the broadband frequency guard, and the time-series entry
+points.
+
+Per-model behaviour lives in that model's own file (``test_kraken.py``,
+``test_ram.py``, ...); what is here is the contract they are all held to,
+usually parametrised across every wrapper so a new model cannot quietly
+opt out of it.
 """
-Tests for all UACPY propagation models
-"""
+
+import types
+import warnings
 
 import pytest
 
 import numpy as np
 from uacpy.models import (
     Bellhop, RAM, Kraken,
-    Bounce, Scooter,
+    Bounce, Scooter, SPARC, OAST, OASN, OASP, OASR, OASS, OASSP,
 )
+from uacpy.models.base import PropagationModel, _smooth_surface
+from uacpy.core import Environment, Source
+from uacpy.core.bottom import (
+    Bottom, BoundaryProperties, SeabedColumn, SedimentLayer,
+)
+from uacpy.core.surface import Surface
 from uacpy.models.base import RunMode
 from uacpy.core.receiver import Receiver
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.results import Field, Modes, ReflectionCoefficient
 
+
+def _halfspace(sound_speed, **kwargs):
+    return BoundaryProperties(
+        acoustic_type='half-space', sound_speed=sound_speed,
+        density=kwargs.pop('density', 1.8),
+        attenuation=kwargs.pop('attenuation', 0.3), **kwargs)
+
+
+ALL_WRAPPERS = [Bellhop, Bounce, Kraken, RAM, Scooter, SPARC,
+                OAST, OASN, OASR, OASP, OASSP, OASS]
+
+
+TIMESERIES_WRAPPERS = [Bellhop, Kraken, RAM, Scooter, OASP, OASSP]
+
+
+BAD_SAMPLE_RATES = [0.0, -10000.0, float('nan'), float('inf')]
 
 @pytest.mark.requires_binary
 class TestBellhop:
@@ -21,7 +56,7 @@ class TestBellhop:
     in ``test_simplified_api.TestComputeAPI`` and ``test_bellhop`` —
     only model-specific scenarios live here."""
 
-    def test_bellhop_range_dependent(self, range_dependent_env, source, receiver_small):
+    def test_range_dependent_env_returns_full_receiver_grid(self, range_dependent_env, source, receiver_small):
         """Test Bellhop with range-dependent environment."""
         bellhop = Bellhop(verbose=False)
         result = bellhop.compute_tl(
@@ -52,10 +87,10 @@ class TestKraken:
     """Tests for Kraken model."""
 
     def test_kraken_compute_modes(self, simple_env, source):
-        """Test Kraken mode computation.
+        """``compute_modes`` with no cap returns every mode kraken.exe found.
 
-        Note: standalone Kraken does not accept ``n_modes``; that knob
-        lives on ``KrakenField.run`` (MLimit in the FLP file).
+        The capped case is the next test: ``n_modes`` is optional and maps to
+        the FLP ``MLimit`` field.exe honours.
         """
         kraken = Kraken(verbose=False)
         modes = kraken.compute_modes(env=simple_env, source=source)
@@ -66,10 +101,16 @@ class TestKraken:
         assert len(modes.k) > 0
 
     def test_kraken_n_modes_clips_output(self, simple_env, source):
-        """``n_modes`` caps the number of returned modes from Kraken."""
+        """``n_modes`` caps the number of returned modes from Kraken.
+
+        The 100 m / 100 Hz guide carries well over 3 propagating modes, so
+        the cap must deliver exactly 3 while the uncapped run returns more —
+        a ``<= 3`` alone is satisfied by a solver that found nothing."""
         kraken = Kraken(verbose=False)
+        uncapped = kraken.compute_modes(env=simple_env, source=source)
         capped = kraken.compute_modes(env=simple_env, source=source, n_modes=3)
-        assert len(capped.k) <= 3
+        assert len(uncapped.k) > 3
+        assert len(capped.k) == 3
         assert capped.metadata.get('n_modes_requested') == 3
 
     def test_kraken_modes_have_wavenumbers(self, simple_env, source):
@@ -89,11 +130,13 @@ class TestKraken:
 
 
 @pytest.mark.requires_binary
-class TestKrakenField:
-    """Tests for KrakenField model."""
+class TestKrakenInFieldMode:
+    """``Kraken`` in its field mode: a single class covers both binaries, so
+    asking it for TL (rather than modes) is what makes it run field.exe after
+    kraken.exe."""
 
-    def test_krakenfield_compute_tl(self, simple_env, source, receiver_small):
-        """Test KrakenField TL computation."""
+    def test_kraken_field_mode_compute_tl(self, simple_env, source, receiver_small):
+        """``compute_tl`` returns a full depth x range grid, not a mode set."""
         kf = Kraken(verbose=False)
         result = kf.compute_tl(env=simple_env, source=source, receiver=receiver_small)
 
@@ -150,12 +193,22 @@ class TestBounce:
         assert result.theta is not None
         assert len(result.R) > 0
         assert len(result.theta) > 0
+        # |R| is a passive-boundary amplitude ratio, and the table is a
+        # strictly increasing grazing-angle grid on [0, 90].
+        R = np.asarray(result.R, dtype=float)
+        theta = np.asarray(result.theta, dtype=float)
+        assert np.all(R >= 0.0) and np.all(R <= 1.0 + 1e-6)
+        assert theta.min() >= 0.0 and theta.max() <= 90.0 + 1e-9
+        assert np.all(np.diff(theta) > 0)
 
     def test_bounce_empty_table_raises(self, simple_env, source, tmp_path):
         """A degenerate RMax (sub-metre receiver range) makes BOUNCE emit a
         reflection table with no angle rows; the wrapper must raise a clear
         ConfigurationError, not silently return an empty ReflectionCoefficient
-        (manual-test finding)."""
+        (manual-test finding). Caught by the deck-level ``NkTab`` guard before
+        the binary runs — the post-run empty-table check is a
+        ModelExecutionError, since by then the binary has produced the table.
+        """
         from uacpy.core import Environment, BoundaryProperties, Receiver
         bottom = BoundaryProperties(
             acoustic_type='half-space', sound_speed=1600, shear_speed=400,
@@ -195,7 +248,7 @@ class TestBounce:
 class TestRAM:
     """Tests for RAM model (mpiramS backend)."""
 
-    def test_ram_compute_tl(self, simple_env, source, receiver_small):
+    def test_ram_returns_finite_tl_grid(self, simple_env, source, receiver_small):
         """Test RAM TL computation."""
         ram = RAM(verbose=False, dr=20.0, dz=2.0)
         result = ram.compute_tl(env=simple_env, source=source, receiver=receiver_small)
@@ -222,7 +275,15 @@ class TestRAM:
         # variable dimension (frequency, here).
         assert result.data.shape[0] > 0  # depth
         assert result.data.shape[1] > 0  # range
-        assert result.data.shape[2] > 0  # frequency
+        # mpiramS builds its grid as frq = fc + [-nf1..nf1]·df with
+        # df = 1/T and nf1 = int((fc/Q - df)/df) + 1 (peramx.f90:353-374):
+        # fc=100, Q=2, T=2 → df=0.5, nf1=100, nf=201 spanning 50-150 Hz.
+        f = np.asarray(result.coords['frequency'], dtype=float)
+        assert result.data.shape[2] == 201
+        assert f[0] == pytest.approx(50.0)
+        assert f[-1] == pytest.approx(150.0)
+        assert np.allclose(np.diff(f), 0.5, atol=1e-6)
+        assert f[100] == pytest.approx(100.0)
 
     def test_ram_time_series_requires_waveform(self, simple_env, source):
         """TIME_SERIES without source_waveform must raise."""
@@ -285,14 +346,54 @@ class TestRAM:
 
 
 # OASES instantiation/supported-mode tests live in test_oases_comprehensive.py;
-# the cross-model workflow tests below cover Bounce → {Bellhop, Scooter, KrakenC}.
+# the cross-model workflow tests below cover Bounce → {Bellhop, Scooter,
+# Kraken(backend='krakenc')}.
 
 
 @pytest.mark.requires_binary
+class TestBasePlumbing:
+    """Shared ``PropagationModel`` behaviour that no single wrapper owns."""
+
+    def test_use_tmpfs_with_pinned_work_dir_warns(self, tmp_path):
+        """An ignored user knob is user-facing: it warns, it does not vanish
+        into a debug log line the default verbosity never prints."""
+        model = Bellhop(verbose=False, work_dir=tmp_path / 'pinned',
+                        use_tmpfs=True)
+        with pytest.warns(UserWarning, match='use_tmpfs=True'):
+            model._setup_file_manager()
+
+    def test_use_tmpfs_without_work_dir_is_silent(self):
+        """Dual: the knob is honoured when uacpy owns the directory."""
+        import warnings as _warnings
+        model = Bellhop(verbose=False, use_tmpfs=True)
+        with _warnings.catch_warnings(record=True) as caught:
+            _warnings.simplefilter('always')
+            fm = model._setup_file_manager()
+        fm.cleanup_work_dir()
+        assert not any('use_tmpfs' in str(w.message) for w in caught)
+
+    def test_default_backend_is_the_lowercase_binary_name(self, simple_env,
+                                                          source,
+                                                          receiver_small):
+        """``result.backend`` names the binary that ran, lowercase across the
+        package; a model passing no explicit value must not report the
+        capitalised class name."""
+        from uacpy.core import Environment, BoundaryProperties
+        env = Environment(
+            name='elastic', bathymetry=simple_env.depth,
+            ssp=float(simple_env.ssp.data[0, 0]),
+            bottom=BoundaryProperties(
+                acoustic_type='half-space', sound_speed=1600, density=1.8,
+                attenuation=0.2, shear_speed=400, shear_attenuation=0.5),
+        )
+        result = Bounce(verbose=False).run(env, source, receiver_small)
+        assert result.backend == 'bounce'
+
+
 class TestModelConsistency:
     """Tests for consistency between different models."""
 
-    # Bellhop ↔ KrakenField TL agreement is covered with tighter
+    # Bellhop ↔ Kraken TL agreement is covered with tighter
     # tolerance in test_cross_model_agreement.py.
 
     @pytest.mark.slow
@@ -301,7 +402,7 @@ class TestModelConsistency:
         [
             pytest.param("Bellhop", id="bellhop"),
             pytest.param(
-                "KrakenC",
+                "Kraken",
                 id="krakenc",
                 marks=pytest.mark.xfail(
                     reason=(
@@ -322,8 +423,8 @@ class TestModelConsistency:
 
         Step 1 computes reflection coefficients on an elastic half-space with
         BOUNCE, persisting the .brc file to ``tmp_path``. Step 2 feeds the
-        .brc back into the downstream model (Bellhop / KrakenC / Scooter)
-        and verifies it produces a valid result.
+        .brc back into the downstream model (Bellhop / Kraken on its krakenc
+        backend / Scooter) and verifies it produces a valid result.
         """
         import os
 
@@ -369,7 +470,7 @@ class TestModelConsistency:
         c_low_brc = bounce_result.metadata['c_low']
         c_high_brc = bounce_result.metadata['c_high']
 
-        if downstream == "KrakenC":
+        if downstream == "Kraken":
             modes = Kraken(backend='krakenc',
                 verbose=False, c_low=c_low_brc, c_high=c_high_brc,
             ).compute_modes(env=env_with_rc, source=source, receiver=receiver_small)
@@ -393,3 +494,566 @@ class TestModelConsistency:
                 len(receiver_small.depths), len(receiver_small.ranges)
             )
             assert np.all(np.isfinite(result.data))
+
+
+class TestUserFrameSkipSpansTheLibrary:
+    """``skip_file_prefixes=USER_FRAME_SKIP`` must skip every library frame —
+    a warning raised in an io reader a model delegates to still points at the
+    user's call — while ``tests`` and ``examples`` stay reportable (their
+    files play the caller role the attribution points at)."""
+
+    def test_prefixes_cover_library_subpackages_but_not_tests(self):
+        import os
+        import uacpy
+        from uacpy.models.base import USER_FRAME_SKIP
+
+        pkg = os.path.dirname(os.path.abspath(uacpy.__file__)) + os.sep
+        assert USER_FRAME_SKIP
+        assert all(p.startswith(pkg) for p in USER_FRAME_SKIP)
+        tops = {os.path.relpath(p, pkg).split(os.sep)[0]
+                for p in USER_FRAME_SKIP}
+        for sub in ('models', 'io', 'core', 'acoustic_signal', 'data'):
+            assert sub in tops, f"{sub} missing from USER_FRAME_SKIP"
+        assert 'tests' not in tops
+        assert 'examples' not in tops
+
+
+class TestSmoothSurfaceWritesNodesSilently:
+    """``_smooth_surface`` zeroes roughness on every node without the
+    multi-node broadcast warning the ``Surface`` delegated write emits."""
+
+    def _three_node_surface(self):
+        return Surface(
+            properties=[
+                BoundaryProperties(acoustic_type='vacuum', roughness=r)
+                for r in (0.5, 1.0, 1.5)
+            ],
+            ranges=[0.0, 5000.0, 10000.0],
+        )
+
+    def test_every_node_is_zeroed_without_a_warning(self):
+        surface = self._three_node_surface()
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            smoothed = _smooth_surface(surface)
+        assert [node.roughness for node in smoothed.properties] == [0, 0, 0]
+
+    def test_the_input_surface_keeps_its_roughness(self):
+        surface = self._three_node_surface()
+        _smooth_surface(surface)
+        assert [node.roughness
+                for node in surface.properties] == [0.5, 1.0, 1.5]
+
+
+class TestSpeedBoundsFindThePhysicalExtremes:
+    """``PropagationModel._speed_bounds`` spans the water column plus every
+    geoacoustic seabed speed — the physical bracket the ``c_max`` stamp is
+    taken from."""
+
+    def test_the_halfspace_sets_the_maximum_when_fastest(self):
+        env = Environment(name='hs', bathymetry=100.0, ssp=1500.0,
+                          bottom=_halfspace(3000.0))
+        assert PropagationModel._speed_bounds(env) == (1500.0, 3000.0)
+
+    def test_a_sediment_layer_faster_than_the_halfspace_sets_the_maximum(self):
+        bottom = Bottom([SeabedColumn(
+            layers=[SedimentLayer(thickness=20.0, sound_speed=1700.0,
+                                  density=1.6, attenuation=0.3)],
+            halfspace=_halfspace(1600.0))])
+        env = Environment(name='layered', bathymetry=100.0, ssp=1500.0,
+                          bottom=bottom)
+        assert PropagationModel._speed_bounds(env)[1] == 1700.0
+
+    def test_a_rigid_halfspace_contributes_no_speed(self):
+        env = Environment(
+            name='rigid', bathymetry=100.0,
+            ssp=[(0.0, 1500.0), (100.0, 1520.0)],
+            bottom=BoundaryProperties(acoustic_type='rigid'))
+        assert PropagationModel._speed_bounds(env) == (1500.0, 1520.0)
+
+
+@pytest.mark.requires_binary
+class TestResolveCMaxIsThePhysicalMaximum:
+    """``_resolve_c_max`` returns the fastest compressional speed anywhere
+    in the environment — the anchor speed ``Field.to_time_trace`` needs,
+    never an algorithmic reference."""
+
+    def test_the_seabed_speed_wins_over_the_water_column(self):
+        env = Environment(name='cmax', bathymetry=100.0, ssp=1500.0,
+                          bottom=_halfspace(3000.0))
+        assert Kraken(verbose=False)._resolve_c_max(env) == 3000.0
+
+    def test_the_water_column_wins_under_a_rigid_bottom(self):
+        env = Environment(
+            name='cmax_rigid', bathymetry=100.0,
+            ssp=[(0.0, 1500.0), (100.0, 1520.0)],
+            bottom=BoundaryProperties(acoustic_type='rigid'))
+        assert Kraken(verbose=False)._resolve_c_max(env) == 1520.0
+
+
+@pytest.mark.requires_binary
+class TestBroadbandNFreqsGuard:
+    """``_resolve_broadband_frequencies`` refuses an expansion that cannot
+    span the band: ``np.linspace`` with one point returns the lower band
+    edge alone and with zero an empty grid."""
+
+    _SRC = Source(depths=50.0, frequencies=100.0)
+
+    def test_n_freqs_one_is_a_configuration_error(self):
+        model = Bellhop(verbose=False, n_freqs=1)
+        with pytest.raises(ConfigurationError, match=r'n_freqs = 1'):
+            model._resolve_broadband_frequencies(
+                self._SRC, None,
+                n_freqs=model.n_freqs,
+                bandwidth_factor=model.bandwidth_factor)
+
+    def test_n_freqs_zero_is_a_configuration_error(self):
+        model = Bellhop(verbose=False, n_freqs=0)
+        with pytest.raises(ConfigurationError, match=r'n_freqs = 0'):
+            model._resolve_broadband_frequencies(
+                self._SRC, None,
+                n_freqs=model.n_freqs,
+                bandwidth_factor=model.bandwidth_factor)
+
+    def test_an_explicit_grid_bypasses_the_guard(self):
+        model = Bellhop(verbose=False, n_freqs=0)
+        got = model._resolve_broadband_frequencies(
+            self._SRC, [90.0, 100.0], n_freqs=model.n_freqs)
+        np.testing.assert_allclose(got, [90.0, 100.0])
+
+
+@pytest.mark.requires_binary
+class TestSelectBackendIsPureIntrospection:
+    """``Kraken.select_backend`` decides the backend name from the
+    environment alone; executable lookup and the ``.irc`` header read live
+    on the run path (``_select_kraken_exe``)."""
+
+    @staticmethod
+    def _env(bottom):
+        return Environment(name='sb', bathymetry=200.0,
+                           ssp=[(0.0, 1500.0), (200.0, 1500.0)],
+                           bottom=bottom)
+
+    @staticmethod
+    def _no_disk(*args, **kwargs):
+        raise AssertionError('select_backend touched the executable lookup')
+
+    def test_the_name_decision_reads_no_disk(self, monkeypatch):
+        model = Kraken(verbose=False)
+        monkeypatch.setattr(model, '_find_executable_in_paths', self._no_disk)
+        elastic = self._env(_halfspace(1800.0, shear_speed=400.0,
+                                       shear_attenuation=0.5))
+        fluid = self._env(_halfspace(1800.0))
+        assert model.select_backend(elastic) == 'krakenc'
+        assert model.select_backend(fluid) == 'kraken'
+
+    def test_forcing_kraken_on_elastic_media_raises_without_disk(
+            self, monkeypatch):
+        model = Kraken(verbose=False, backend='kraken')
+        monkeypatch.setattr(model, '_find_executable_in_paths', self._no_disk)
+        elastic = self._env(_halfspace(1800.0, shear_speed=400.0,
+                                       shear_attenuation=0.5))
+        with pytest.raises(ConfigurationError, match='elastic media'):
+            model.select_backend(elastic)
+
+    def test_a_malformed_irc_bottom_raises_on_the_run_path_only(
+            self, tmp_path):
+        table = tmp_path / 'bot.irc'
+        table.write_text('3\n0.0 1.0 180.0\n45.0 1.0 180.0\n')
+        env = self._env(BoundaryProperties(acoustic_type='precalc',
+                                           reflection_file=str(table)))
+        model = Kraken(verbose=False)
+        assert model.select_backend(env) == 'krakenc'
+        with pytest.raises(ConfigurationError, match=r'\.irc'):
+            model._select_kraken_exe(env)
+
+
+@pytest.mark.requires_binary
+class TestFieldPrtAttach:
+    """``_attach_field_prt_path`` records field.exe's hard-coded
+    ``field.prt`` under its own metadata key, existence-checked, iff the
+    scratch survives — ``_attach_output_paths`` only ever sees the modes
+    binary's ``kfield.prt``."""
+
+    @staticmethod
+    def _fm(tmp_path):
+        return types.SimpleNamespace(get_path=lambda name: tmp_path / name)
+
+    def test_field_prt_is_attached_when_the_scratch_survives(self, tmp_path):
+        (tmp_path / 'field.prt').write_text('Field completed successfully\n')
+        result = types.SimpleNamespace(metadata={})
+        Kraken(verbose=False, cleanup=False)._attach_field_prt_path(
+            result, self._fm(tmp_path))
+        assert result.metadata['field_prt_file'] == str(tmp_path / 'field.prt')
+
+    def test_a_missing_field_prt_leaves_no_key(self, tmp_path):
+        result = types.SimpleNamespace(metadata={})
+        Kraken(verbose=False, cleanup=False)._attach_field_prt_path(
+            result, self._fm(tmp_path))
+        assert 'field_prt_file' not in result.metadata
+
+    def test_cleanup_true_leaves_no_key(self, tmp_path):
+        (tmp_path / 'field.prt').write_text('Field completed successfully\n')
+        result = types.SimpleNamespace(metadata={})
+        Kraken(verbose=False, cleanup=True)._attach_field_prt_path(
+            result, self._fm(tmp_path))
+        assert 'field_prt_file' not in result.metadata
+
+
+def _env():
+    return Environment(name='triple', bathymetry=100.0, ssp=1500.0)
+
+
+def _source():
+    return Source(depths=25.0, frequencies=200.0)
+
+
+def _receiver():
+    return Receiver(depths=np.array([50.0]), ranges=np.array([1000.0]))
+
+
+def _model(cls):
+    # OASSP/OASS refuse construction without the roughness spectrum's
+    # correlation length; every other wrapper constructs bare.
+    extra = ({'correlation_length': 5.0} if cls in (OASSP, OASS) else {})
+    return cls(verbose=False, **extra)
+
+
+@pytest.mark.requires_binary
+class TestRunRejectsSwappedCarriers:
+    """Every wrapper's ``run()`` opens with
+    ``PropagationModel._require_run_triple``: the (env, source, receiver)
+    argument order is checked before run-mode resolution or deck assembly,
+    so a swapped pair raises one typed error instead of a raw
+    ``AttributeError`` from deep inside the writer."""
+
+    @pytest.mark.parametrize('cls', ALL_WRAPPERS)
+    def test_source_passed_in_the_env_slot_raises_naming_the_order(self, cls):
+        with pytest.raises(ConfigurationError, match='in that order'):
+            _model(cls).run(_source(), _env(), _receiver())
+
+    @pytest.mark.parametrize('cls', ALL_WRAPPERS)
+    def test_receiver_and_source_swapped_raises_naming_the_order(self, cls):
+        with pytest.raises(ConfigurationError, match='in that order'):
+            _model(cls).run(_env(), _receiver(), _source())
+
+    def test_the_error_names_each_wrong_slot_with_the_received_type(self):
+        with pytest.raises(ConfigurationError,
+                           match='env=Source, source=Environment'):
+            _model(Bellhop).run(_source(), _env(), _receiver())
+
+    def test_a_correct_triple_passes_the_validator(self):
+        _model(Bellhop)._require_run_triple(_env(), _source(), _receiver())
+
+    def test_carrier_subclasses_pass_the_validator(self):
+        class _TaggedSource(Source):
+            pass
+
+        tagged = _TaggedSource(depths=25.0, frequencies=200.0)
+        _model(Bellhop)._require_run_triple(_env(), tagged, _receiver())
+
+
+def _waveform(n=256, rate=1000.0, freq=100.0):
+    return np.sin(2.0 * np.pi * freq * np.arange(n) / rate)
+
+
+@pytest.mark.requires_binary
+class TestTimeSeriesRequiresAPositiveFiniteSampleRate:
+    """``_require_timeseries_signal`` is the one gate every IFFT-based
+    TIME_SERIES wrapper passes its ``sample_rate`` through, so the check
+    belongs there rather than in six wrappers.
+
+    The test is NaN-closed on purpose: written as ``sample_rate <= 0`` the
+    guard admits nan, which compares False against both bounds. Measured
+    before the fix on Bellhop, an accepted rate produced a ZeroDivisionError
+    at 0 Hz, a raw ValueError at -10 kHz with long delays, and — with short
+    delays — a 419-sample trace on a descending time axis, i.e. a
+    silently wrong answer at exit 0.
+    """
+
+    @pytest.mark.parametrize('cls', TIMESERIES_WRAPPERS,
+                             ids=[c.__name__ for c in TIMESERIES_WRAPPERS])
+    @pytest.mark.parametrize('rate', BAD_SAMPLE_RATES)
+    def test_every_timeseries_wrapper_names_the_bad_rate(self, cls, rate):
+        with pytest.raises(ConfigurationError, match='sample_rate'):
+            _model(cls)._require_timeseries_signal(
+                RunMode.TIME_SERIES, _waveform(), rate)
+
+    def test_a_positive_finite_rate_is_accepted(self):
+        _model(Bellhop)._require_timeseries_signal(
+            RunMode.TIME_SERIES, _waveform(), 1000.0)
+
+    def test_a_non_numeric_rate_raises_the_typed_error(self):
+        with pytest.raises(ConfigurationError, match='sample_rate'):
+            _model(Bellhop)._require_timeseries_signal(
+                RunMode.TIME_SERIES, _waveform(), 'fast')
+
+    @pytest.mark.parametrize('rate', BAD_SAMPLE_RATES)
+    def test_bellhop_run_refuses_the_rate_before_it_traces_rays(self, rate):
+        # ``run()`` reaches the guard before _run_broadband, so no deck is
+        # written and no binary is spawned.
+        with pytest.raises(ConfigurationError, match='sample_rate'):
+            _model(Bellhop).run(
+                Environment(name='flat', bathymetry=100.0, ssp=1500.0),
+                Source(depths=25.0, frequencies=200.0),
+                Receiver(depths=np.array([50.0]), ranges=np.array([1000.0])),
+                run_mode=RunMode.TIME_SERIES,
+                source_waveform=_waveform(), sample_rate=rate)
+
+
+class TestSynthesizeTimeSeriesRequiresAPositiveFiniteSampleRate:
+    """The deep guard in ``core/results/field.py`` backs the wrapper-level one
+    for callers that reach ``Field.synthesize_time_series`` directly. It was
+    NaN-open: nan slipped past ``sample_rate <= 0`` into the ``int(nfft)``
+    sizing and surfaced as ``ValueError: cannot convert float NaN to
+    integer``, and inf as an OverflowError.
+    """
+
+    @staticmethod
+    def _broadband_field():
+        freqs = np.linspace(80.0, 120.0, 21)
+        return Field(
+            data=np.ones((2, 3, freqs.size), dtype=complex),
+            coords={'depth': np.array([10.0, 20.0]),
+                    'range': np.array([100.0, 200.0, 300.0]),
+                    'frequency': freqs},
+            metadata={'kind': 'pressure', 'unit': 'Pa'})
+
+    @pytest.mark.parametrize('rate', BAD_SAMPLE_RATES)
+    def test_the_typed_error_names_the_rate(self, rate):
+        with pytest.raises(ConfigurationError, match='sample_rate'):
+            self._broadband_field().synthesize_time_series(_waveform(), rate)
+
+    def test_a_positive_finite_rate_yields_an_ascending_time_axis(self):
+        out = self._broadband_field().synthesize_time_series(
+            _waveform(), 1000.0)
+        t = np.asarray(out.coords['time'])
+        assert t.size > 1
+        assert np.all(np.diff(t) > 0)
+
+
+@pytest.mark.requires_binary
+class TestComputeModesRequiresAWholeModeCount:
+    """``compute_modes`` applies the cap as ``int(n_modes)`` — the copy
+    ``Kraken._compute_modes_impl`` runs — which truncates toward zero, so a
+    fractional request would run a different cap than the caller asked for.
+    ``True`` is refused for the same reason ``Bellhop(n_beams=True)`` is: bool
+    is an int subclass and would silently mean 1.
+    """
+
+    @staticmethod
+    def _compute(n_modes):
+        Kraken(verbose=False).compute_modes(
+            Environment(name='flat', bathymetry=100.0, ssp=1500.0),
+            Source(depths=25.0, frequencies=200.0),
+            n_modes=n_modes)
+
+    @pytest.mark.parametrize('n_modes', [50.5, -0.5, float('nan'),
+                                         float('inf'), np.float64(3.25)])
+    def test_a_fractional_or_non_finite_cap_is_refused(self, n_modes):
+        with pytest.raises(ConfigurationError, match='whole number'):
+            self._compute(n_modes)
+
+    def test_a_bool_cap_is_refused(self):
+        with pytest.raises(ConfigurationError, match='must be an int'):
+            self._compute(True)
+
+    def test_a_receiver_in_the_third_slot_is_named(self):
+        with pytest.raises(ConfigurationError, match='takes no receiver'):
+            self._compute(Receiver(depths=np.array([50.0]),
+                                   ranges=np.array([1000.0])))
+
+
+@pytest.mark.requires_binary
+class TestIrregularReceiverGridIsCheckedPairwise:
+    """``grid_type='I'`` writes RunType(5:5)='I', where BELLHOP walks the
+    depth and range arrays together — receiver *i* is (depths[i], ranges[i]).
+    Scoring the below-seafloor check on the Cartesian product therefore
+    reports pairs the deck never evaluates: on the 50 m → 200 m slope below,
+    both real receivers clear their local seafloor while the cross term
+    (100 m at r = 1000 m, floor 50 m) does not.
+    """
+
+    @staticmethod
+    def _env():
+        return Environment(
+            name='slope', ssp=1500.0,
+            bathymetry=[(0.0, 50.0), (1000.0, 50.0), (5000.0, 200.0)])
+
+    @staticmethod
+    def _receiver():
+        return Receiver(depths=np.array([20.0, 100.0]),
+                        ranges=np.array([1000.0, 5000.0]))
+
+    def test_a_paired_grid_clear_of_its_own_seafloor_is_silent(self):
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            Bellhop(grid_type='I', verbose=False)._check_per_range_receiver_depth(
+                self._env(), self._receiver())
+
+    def test_a_rectilinear_grid_reports_the_cross_term(self):
+        with pytest.warns(UserWarning, match='below the local seafloor'):
+            Bellhop(grid_type='R', verbose=False)._check_per_range_receiver_depth(
+                self._env(), self._receiver())
+
+    def test_a_paired_grid_reports_a_receiver_below_its_own_seafloor(self):
+        deep = Receiver(depths=np.array([80.0, 100.0]),
+                        ranges=np.array([1000.0, 5000.0]))
+        with pytest.warns(UserWarning, match=r'range=1000\.0 m, depth=80\.0 m'):
+            Bellhop(grid_type='I', verbose=False)._check_per_range_receiver_depth(
+                self._env(), deep)
+
+    def test_a_non_bellhop_wrapper_spans_the_product(self):
+        with pytest.warns(UserWarning, match='below the local seafloor'):
+            Kraken(verbose=False)._check_per_range_receiver_depth(
+                self._env(), self._receiver())
+
+
+# The six wrappers that synthesise p(t) from a broadband transfer function and
+# so route their TIME_SERIES arguments through
+# ``PropagationModel._require_timeseries_signal``. SPARC also declares
+# TIME_SERIES but computes p(t) from its own ``pulse_type`` and never calls
+# the helper.
+
+
+# Rates that are not a positive finite number of Hz. 0 divided by zero in the
+# delay-and-sum, -10000 produced a descending time axis, and nan/inf reached
+# ``int()`` as a raw ValueError/OverflowError.
+
+
+# ── what run() can hand back, and what it says it hands back ────────────────
+
+def _result_stack_producers():
+    """``{module path: [line numbers]}`` for every ``return ResultStack(…)``
+    in shipped code — the producer half of the union the wrappers declare,
+    read by AST so the annotations cannot drift away from the code that fills
+    them."""
+    import ast
+    import pathlib
+
+    import uacpy
+
+    package = pathlib.Path(uacpy.__file__).resolve().parent
+    found = {}
+    for path in sorted(package.rglob('*.py')):
+        if set(path.relative_to(package).parts) & {'tests', 'examples',
+                                                   'third_party', 'bin',
+                                                   '__pycache__'}:
+            continue
+        tree = ast.parse(path.read_text(encoding='utf-8'))
+        lines = [node.lineno for node in ast.walk(tree)
+                 if isinstance(node, ast.Return)
+                 and isinstance(node.value, ast.Call)
+                 and getattr(node.value.func, 'id', '') == 'ResultStack']
+        if lines:
+            found[str(path.relative_to(package.parent))] = lines
+    return found
+
+
+#: Entry points measured to hand back a ``ResultStack``. Driven, not read: a
+#: 200 m guide, a 2-depth ``Source`` and the real binaries, over all 12
+#: concrete wrappers × all 10 ``compute_*`` × {1, 2} source depths. Bellhop's
+#: TL / RAYS / ARRIVALS / EIGENRAYS returned ``ResultStack`` at 2 depths and a
+#: plain ``Result`` at 1.
+_STACKING_ENTRY_POINTS = [
+    ('PropagationModel', 'run'), ('Bellhop', 'run'),
+    ('Bellhop', 'run_with_bounce'),
+    ('PropagationModel', 'compute_tl'),
+    ('PropagationModel', 'compute_rays'),
+    ('PropagationModel', 'compute_arrivals'),
+    ('PropagationModel', 'compute_eigenrays'),
+]
+
+#: The rest of ``compute_*``. In the same sweep every model that declares
+#: these modes **refused** a multi-depth ``Source`` outright with a
+#: ``ConfigurationError`` ("<model> takes a single source depth per run", and
+#: for Bellhop's broadband pair "runs a single source depth"), so their
+#: ``-> Result`` is total. Pinned so widening one needs the measurement
+#: repeated rather than assumed.
+_SINGLE_RESULT_ENTRY_POINTS = [
+    ('PropagationModel', 'compute_modes'),
+    ('PropagationModel', 'compute_reflection'),
+    ('PropagationModel', 'compute_time_series'),
+    ('PropagationModel', 'compute_transfer_function'),
+    ('PropagationModel', 'compute_covariance'),
+    ('PropagationModel', 'compute_replicas'),
+]
+
+_OWNERS = {'PropagationModel': PropagationModel, 'Bellhop': Bellhop}
+
+
+def test_the_result_stack_producers_are_where_the_annotations_say():
+    """The sweep behind the two gates below, so neither can pass against an
+    empty set. Stacking happens in **two** places, and the second is the one a
+    reader misses: ``Bellhop._run_eigenrays_multi_depth`` builds a stack in
+    Python, and the OALIB readers build one whenever a ``.shd`` / ``.arr`` /
+    ``.ray`` carries more than one source depth — which is why TL, RAYS and
+    ARRIVALS stack too, without any wrapper looking as though they do."""
+    producers = _result_stack_producers()
+    assert 'uacpy/models/bellhop.py' in producers, producers
+    assert 'uacpy/io/oalib_reader.py' in producers, (
+        "no OALIB reader builds a ResultStack any more; if the readers stopped "
+        "stacking, re-measure which compute_* can return one and narrow the "
+        "annotations with it — do not assume\n" + repr(producers))
+    assert len(producers['uacpy/io/oalib_reader.py']) >= 3, (
+        "the OALIB readers build fewer ResultStacks than the three "
+        "(TL, ARRIVALS, RAYS) the wrapper annotations are sized for: "
+        + repr(producers))
+
+
+@pytest.mark.parametrize('owner_name,method_name', _STACKING_ENTRY_POINTS,
+                         ids=[f'{o}.{m}' for o, m in _STACKING_ENTRY_POINTS])
+def test_an_entry_point_that_can_stack_declares_both_shapes(owner_name,
+                                                            method_name):
+    """``ResultStack`` is not a ``Result`` subclass — its MRO is
+    ``(ResultStack, object)`` — so ``-> Result`` told a caller that
+    ``res: Result = model.compute_tl(...)`` was correct while handing them an
+    object with a different attribute surface.
+
+    Each of these was driven with a 2-depth ``Source`` and the real binaries
+    and returned a ``ResultStack``. The stacking is not visible at the call
+    site: for TL, RAYS and ARRIVALS it happens inside the OALIB readers, which
+    split a multi-source-depth file into one slab per depth."""
+    import typing
+
+    from uacpy.core.results import Result
+    from uacpy.core.results.field import ResultStack
+
+    assert not issubclass(ResultStack, Result), (
+        "ResultStack is a Result subclass now, so `-> Result` covers it: "
+        "narrow the unions and this gate together")
+    method = getattr(_OWNERS[owner_name], method_name)
+    annotation = typing.get_type_hints(method)['return']
+    assert set(typing.get_args(annotation)) == {Result, ResultStack}, (
+        f"{owner_name}.{method_name} declares {annotation!r}; driven over a "
+        f"multi-depth Source it hands back a ResultStack, which is not a "
+        f"Result")
+    assert 'ResultStack' in (method.__doc__ or ''), (
+        f"{owner_name}.{method_name}'s docstring Returns section does not "
+        f"name ResultStack, so a reader who trusts the prose over the "
+        f"annotation is told the wrong type")
+
+
+@pytest.mark.parametrize('owner_name,method_name',
+                         _SINGLE_RESULT_ENTRY_POINTS,
+                         ids=[f'{o}.{m}' for o, m in
+                              _SINGLE_RESULT_ENTRY_POINTS])
+def test_an_entry_point_that_refuses_multiple_depths_declares_one_shape(
+        owner_name, method_name):
+    """The other side, pinned so it cannot be widened on a hunch either.
+
+    Every model declaring these modes raises ``ConfigurationError`` on a
+    ``Source`` with more than one depth, so the stack shape is unreachable
+    through them and ``-> Result`` is total. Widening one of these means the
+    sweep has to be re-run, not re-argued."""
+    import typing
+
+    from uacpy.core.results import Result
+
+    method = getattr(_OWNERS[owner_name], method_name)
+    annotation = typing.get_type_hints(method)['return']
+    assert annotation is Result, (
+        f"{owner_name}.{method_name} declares {annotation!r}; every model "
+        f"that supports this mode refuses a multi-depth Source, so the "
+        f"stack shape is unreachable here")

@@ -10,11 +10,15 @@ is unavailable; one ``requires_network`` test hits the live Zenodo grid.
 import numpy as np
 import pytest
 
+from uacpy.data import _cache
+
 netCDF4 = pytest.importorskip('netCDF4')
 
 import uacpy.data as data
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
-from uacpy.data import gebco_local, graw_local, woa23_local
+from uacpy.data import graw_local, woa23_local
+from uacpy.data import _http
+from uacpy.tests._cache_builders import _write_gebco, _write_woa
 
 
 def _write_graw(cache, *, value=1.962):
@@ -34,44 +38,12 @@ def _write_graw(cache, *, value=1.962):
     ds.close()
 
 
-def _write_gebco(cache, *, deep=-1500.0):
-    gdir = cache / 'gebco'; gdir.mkdir(parents=True)
-    lat = np.arange(-90, 91, 1.0)
-    lon = np.arange(-180, 180, 1.0)
-    ds = netCDF4.Dataset(gdir / 'GEBCO_2025.nc', 'w')
-    ds.createDimension('lat', lat.size); ds.createDimension('lon', lon.size)
-    ds.createVariable('lat', 'f8', ('lat',))[:] = lat
-    ds.createVariable('lon', 'f8', ('lon',))[:] = lon
-    ds.createVariable('elevation', 'f4', ('lat', 'lon'))[:] = deep
-    ds.close()
-
-
-_FILL = 9.96921e36
-
-
-def _write_woa(cache):
-    wdir = cache / 'woa23'; wdir.mkdir(parents=True)
-    depth = np.array([0, 50, 100, 500, 1000.0])
-    def mk(var, vals):
-        arr = np.full((1, depth.size, 180, 360), _FILL)
-        arr[0, :, 120, 139] = vals                  # grid_index(30.5, -40.5)
-        ds = netCDF4.Dataset(wdir / f'woa23_decav_{var}_01.nc', 'w')
-        for d, n in [('time', 1), ('depth', depth.size), ('lat', 180), ('lon', 360)]:
-            ds.createDimension(d, n)
-        ds.createVariable('depth', 'f4', ('depth',))[:] = depth
-        name = 't_an' if var[0] == 't' else 's_an'
-        ds.createVariable(name, 'f4', ('time', 'depth', 'lat', 'lon'))[:] = arr
-        ds.close()
-    mk('t00', [18, 16, 13, 8, 5.0])
-    mk('s00', [36, 36.1, 36.2, 35.5, 35.0])
-
-
 @pytest.fixture
 def graw_cache(tmp_path, monkeypatch):
     """Cache holding only the synthetic Graw density grid."""
     root = tmp_path / 'graw_cache'
     monkeypatch.setenv('UACPY_DATA_CACHE', str(root))
-    graw_local._GRID.clear()
+    _cache.invalidate_grids()
     _write_graw(root)
     return root
 
@@ -81,9 +53,9 @@ def full_cache(tmp_path, monkeypatch):
     """GEBCO + WOA23 + Graw — a fully offline bottom_sources='graw' run."""
     root = tmp_path / 'full_cache'
     monkeypatch.setenv('UACPY_DATA_CACHE', str(root))
-    gebco_local._GRID.clear()
+    _cache.invalidate_grids()
     woa23_local._DATASETS.clear()
-    graw_local._GRID.clear()
+    _cache.invalidate_grids()
     _write_gebco(root)
     _write_woa(root)
     _write_graw(root)
@@ -111,7 +83,7 @@ def test_density_transect(graw_cache):
 
 def test_missing_cache_names_install_flag(tmp_path, monkeypatch):
     monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path / 'empty'))
-    graw_local._GRID.clear()
+    _cache.invalidate_grids()
     with pytest.raises(ConfigurationError, match='install.sh --data graw'):
         graw_local.fetch_seabed_density((30.5, -40.5))
 
@@ -119,12 +91,12 @@ def test_missing_cache_names_install_flag(tmp_path, monkeypatch):
 # ── density → bottom ────────────────────────────────────────────────────────
 
 def test_bottom_uses_measured_density(graw_cache):
-    # 1.962 g/cm³ is exactly Hamilton's fine sand row (ϕ = 2.5, ratio 1.152):
+    # 1.962 g/cm³ is exactly Hamilton's fine sand row (ϕ = 2.61, ratio 1.152):
     # the bottom carries the *measured* density and the ϕ-derived speed.
     bp = graw_local.fetch_bottom_graw((30.5, -40.5))
     assert bp.acoustic_type == 'half-space'
     assert bp.density == pytest.approx(1.962, abs=1e-3)
-    assert bp.grain_size_phi == pytest.approx(2.5, abs=0.05)
+    assert bp.grain_size_phi == pytest.approx(2.61, abs=0.05)
     assert bp.sound_speed == pytest.approx(1.152 * 1510.0, rel=0.01)
     assert bp.attenuation > 0.0
 
@@ -142,10 +114,10 @@ def test_density_clamped_to_table(tmp_path, monkeypatch):
     # extrapolating to unphysical grain sizes.
     root = tmp_path / 'clamp_cache'
     monkeypatch.setenv('UACPY_DATA_CACHE', str(root))
-    graw_local._GRID.clear()
+    _cache.invalidate_grids()
     _write_graw(root, value=2.4)                       # denser than coarse sand
     bp = graw_local.fetch_bottom_graw((30.5, -40.5))
-    assert bp.grain_size_phi == pytest.approx(0.5)     # coarse-sand end member
+    assert bp.grain_size_phi == pytest.approx(0.92)    # coarse-sand end member
     assert bp.density == pytest.approx(2.4, abs=1e-3)
 
 
@@ -169,7 +141,7 @@ def test_fetch_environment_bottom_sources_graw(full_cache):
 @pytest.mark.requires_network
 def test_live_graw_download(tmp_path, monkeypatch):
     monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path / 'live'))
-    graw_local._GRID.clear()
+    _cache.invalidate_grids()
     try:
         graw_local.download_graw_db(timeout=300.0)
     except DataFetchError as exc:
@@ -184,15 +156,14 @@ def test_graw_interrupted_curl_no_final_file(tmp_path, monkeypatch):
     """A curl killed mid-transfer must not poison the cache with a truncated
     grid at the final path."""
     from pathlib import Path
-    from uacpy.data import globsed_local
     dest = tmp_path / 'o'
 
     def fake_run(cmd, **kw):
         Path(cmd[cmd.index('-o') + 1]).write_bytes(b'truncated')
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(globsed_local.shutil, 'which', lambda n: '/usr/bin/curl')
-    monkeypatch.setattr(globsed_local.subprocess, 'run', fake_run)
+    monkeypatch.setattr(_http.shutil, 'which', lambda n: '/usr/bin/curl')
+    monkeypatch.setattr(_http.subprocess, 'run', fake_run)
     with pytest.raises(KeyboardInterrupt):
         graw_local.download_graw_db(cache_dir=str(dest))
     assert not (dest / graw_local.GRAW_FILE).exists()

@@ -6,7 +6,7 @@ historical date, not just recent ones. Served live from the NOAA CoastWatch
 **ERDDAP** griddap service (no auth), like the Argo / EMODnet fetchers.
 
 The 10 m wind speed feeds two consumers: the Wenz ambient-noise wind term
-(:class:`uacpy.WenzNoise`, whose ``wind_speed`` is in **knots** — multiply the
+(:class:`uacpy.noise.WenzNoise`, whose ``wind_speed_kn`` is in **knots** — multiply the
 m/s returned here by ``1.9438``) and the Pierson-Moskowitz sea surface
 (:func:`uacpy.data.fetch_sea_surface`, when no wave source is available).
 
@@ -17,7 +17,8 @@ import numpy as np
 
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.data._geo import as_coordinate
-from uacpy.data._http import http_get
+from uacpy.data._http import (erddap_griddap_url, erddap_last_value,
+                              http_get)
 from uacpy.data._time import parse_date
 
 __all__ = ['fetch_wind', 'fetch_wind_transect', 'ERDDAP_URL', 'WIND_SOURCES']
@@ -43,35 +44,15 @@ def _check_source(source):
 
 
 def _griddap_url(var, when, lat, lon):
-    """ERDDAP griddap CSV URL for ``var`` at the nearest time/lat/lon cell.
-
-    NBS carries a singleton 10 m ``zlev`` axis between time and latitude; the
-    ``[(...)]`` value selectors snap each axis to its nearest node. The
-    longitude axis is [0, 360).
-    """
-    import urllib.parse
-    iso = f"{parse_date(when)}T00:00:00Z"
-    constraint = (f"{var}[({iso})][(10.0)][({lat})][({lon % 360.0})]")
-    query = urllib.parse.quote(constraint, safe='[]():.,-TZ')
-    return f"{ERDDAP_URL}/{DATASET}.csv?{query}"
-
-
-def _last_value(body):
-    """Last numeric field of an ERDDAP griddap ``.csv`` point response."""
-    rows = [ln for ln in body.splitlines() if ln.strip()]
-    if len(rows) < 3:
-        return np.nan
-    try:
-        return float(rows[-1].split(',')[-1])
-    except (ValueError, IndexError):
-        return np.nan
+    return erddap_griddap_url(ERDDAP_URL, DATASET, var, when, lat, lon,
+                              level=10.0)
 
 
 def _fetch_var(var, when, lat, lon, *, timeout, verbose):
     url = _griddap_url(var, when, lat, lon)
     body = http_get(url, timeout=timeout, verbose=verbose, source='wind',
                     user_agent=_USER_AGENT).decode('utf-8', 'replace')
-    return _last_value(body)
+    return erddap_last_value(body)
 
 
 def _wind_speed(lat, lon, when, *, timeout, verbose):
@@ -126,8 +107,12 @@ def fetch_wind(point, *, date, source='erddap', timeout=60.0, verbose=False):
 
 def fetch_wind_transect(start, end, *, date, n_points=6, source='erddap',
                         timeout=60.0, verbose=False):
-    """``(ranges_m, wind_speed_ms)`` sampled along ``start`` → ``end``."""
+    """``(ranges_m, wind_speed_mps)`` sampled along ``start`` → ``end``."""
     from uacpy.data._geo import geodesic_waypoints
+    if int(n_points) < 2:
+        raise ConfigurationError(
+            f"fetch_wind_transect: n_points must be >= 2, got {n_points}.",
+            remediation="Pass n_points>=2 to define a transect.")
     _check_source(source)
     lats, lons, ranges_m = geodesic_waypoints(start, end, n_points)
     speeds = np.array([

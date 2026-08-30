@@ -14,8 +14,10 @@ ENVIRONMENT
 """
 
 import sys
+import os
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Repo root, so ``import uacpy`` resolves from a source checkout.
+sys.path.insert(0, str(Path(__file__).parents[2]))
 
 import numpy as np  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
@@ -24,8 +26,9 @@ import uacpy  # noqa: E402
 from uacpy.core.environment import BoundaryProperties  # noqa: E402
 from uacpy.models import Bellhop, RunMode  # noqa: E402
 
-OUTPUT_DIR = Path(__file__).parent / 'output'
-OUTPUT_DIR.mkdir(exist_ok=True)
+OUTPUT_DIR = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
+                  or Path(__file__).parent / 'output')
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def main():
@@ -77,8 +80,8 @@ def main():
     # 4. Plot
     fig, axes = plt.subplots(2, 1, figsize=(10, 7))
 
-    tl_at_pt = H.at(depth=target_depth_m, range=target_range_m).to_tl()
-    axes[0].plot(tl_at_pt.frequencies, tl_at_pt.tl, 'C0-', lw=1.2)
+    tl_at_pt = H.at(depth=target_depth_m, range=target_range_m).to_db()
+    axes[0].plot(tl_at_pt.frequencies, tl_at_pt.db, 'C0-', lw=1.2)
     axes[0].invert_yaxis()
     axes[0].set_xlabel('Frequency (Hz)')
     axes[0].set_ylabel('TL(f)  (dB)')

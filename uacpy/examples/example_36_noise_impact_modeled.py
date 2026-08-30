@@ -22,11 +22,14 @@ NOTE: requires the Bellhop binary (install.sh).
 """
 
 import sys
+import os
 from pathlib import Path
 
-OUTPUT_DIR = Path(__file__).parent / 'output'
-OUTPUT_DIR.mkdir(exist_ok=True)
-sys.path.insert(0, str(Path(__file__).parent.parent))
+OUTPUT_DIR = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
+                  or Path(__file__).parent / 'output')
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+# Repo root, so ``import uacpy`` resolves from a source checkout.
+sys.path.insert(0, str(Path(__file__).parents[2]))
 
 import numpy as np  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
@@ -63,7 +66,9 @@ def main():
     _, fbands, _ = decidecade_bands(50, 1000)
     draught = 8.0
     d_s = nominal_source_depth(draught)
-    rx_spl = 128.0 - 16.0 * np.log10(fbands / 50.0)       # a measured RNL spectrum
+    # Stand-in for a measured received SPL at the 150 m slant range below;
+    # radiated_noise_level turns it into an RNL, monopole_source_level into MSL.
+    rx_spl = 128.0 - 16.0 * np.log10(fbands / 50.0)
     msl = monopole_source_level(radiated_noise_level(rx_spl, 150.0), fbands, d_s,
                                 sound_speed=float(cz[0]))
     print(f"  ship d_s={d_s} m, {fbands.size} decidecade bands {fbands[0]:.0f}-{fbands[-1]:.0f} Hz")
@@ -77,7 +82,7 @@ def main():
     for i, f in enumerate(fbands):
         src = uacpy.Source(depths=d_s, frequencies=float(f))
         field = bellhop.run(env, src, receiver)
-        tl[i] = float(np.asarray(field.tl).squeeze())
+        tl[i] = float(np.asarray(field.db).squeeze())
     print("done")
 
     # --- (4) received + auditory-weighted levels ---

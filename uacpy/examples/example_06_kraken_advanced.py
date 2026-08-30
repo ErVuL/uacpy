@@ -1,17 +1,22 @@
 """
 ═══════════════════════════════════════════════════════════════════════════════
-ADVANCED EXAMPLE: Kraken/Kraken - Coupled Mode Theory
+ADVANCED EXAMPLE: Kraken - Adiabatic Modes over a Continental Shelf
 ═══════════════════════════════════════════════════════════════════════════════
 
 OBJECTIVE:
     Demonstrate Kraken's capabilities with range-dependent environments:
     - Normal mode computation
     - Adiabatic mode theory for range-dependent problems
-    - Mode coupling for continental shelf
+    - Range segmentation across a continental shelf
     - Volume attenuation in modal propagation
 
+    ``mode_coupling='adiabatic'`` maps to field.exe's 'A' option, which
+    propagates each mode independently and transfers no energy between them.
+    Its counterpart is ``mode_coupling='coupled'`` ('C'), which does solve for
+    the inter-mode transfer at each segment boundary at a much higher cost.
+
 SCENARIO:
-    Continental Shelf with Mode Coupling
+    Continental Shelf, segmented for the adiabatic solver
     - Shallow water (100m) transitioning to deep water (400m)
     - Range-dependent bottom properties (sand → rock)
     - Francois-Garrison volume attenuation
@@ -19,7 +24,7 @@ SCENARIO:
 FEATURES DEMONSTRATED:
     ✓ Kraken mode computation with volume attenuation
     ✓ Kraken with adiabatic mode theory
-    ✓ Range segmentation for coupled modes
+    ✓ Range segmentation of a range-dependent guide
     ✓ Range-dependent bottom in mode propagation
     ✓ Mode shape visualization
     ✓ Dispersion curve analysis
@@ -28,11 +33,14 @@ FEATURES DEMONSTRATED:
 """
 
 import sys
+import os
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Repo root, so ``import uacpy`` resolves from a source checkout.
+sys.path.insert(0, str(Path(__file__).parents[2]))
 
-OUTPUT_DIR = Path(__file__).parent / 'output'
-OUTPUT_DIR.mkdir(exist_ok=True)
+OUTPUT_DIR = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
+                  or Path(__file__).parent / 'output')
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 import numpy as np  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
@@ -46,10 +54,15 @@ from uacpy.visualization.plots import (  # noqa: E402
     plot_modes_heatmap,
 )
 
+# Number of range segments the adiabatic solver splits the shelf into.
+# The model call, the summary line and the segment markers on the TL plot
+# all read this one value.
+N_SEGMENTS = 5
+
 
 def main():
     print("\n" + "═" * 80)
-    print("EXAMPLE 06: Kraken advanced features - Coupled Mode Theory")
+    print("EXAMPLE 06: Kraken advanced features - Adiabatic Mode Theory")
     print("═" * 80)
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -157,18 +170,21 @@ def main():
     print(f"  ✓ Computed {n_modes_deep} modes for deep water")
 
     # ═══════════════════════════════════════════════════════════════════════
-    # RUN 2: Kraken with Adiabatic Mode Coupling
+    # RUN 2: Kraken with Adiabatic Modes
     # ═══════════════════════════════════════════════════════════════════════
 
-    print("[2/4] Running Kraken with adiabatic mode coupling...")
+    print("[2/4] Running Kraken with adiabatic modes...")
 
     try:
-        krakenfield = Kraken(verbose=False, mode_coupling='adiabatic', n_segments=5)
-        result = krakenfield.run(
+        kraken_adiabatic = Kraken(verbose=False, mode_coupling='adiabatic',
+                                  n_segments=N_SEGMENTS)
+        result = kraken_adiabatic.run(
             env, source, receiver
         )
-        print(f"  ✓ Kraken completed with {krakenfield.n_segments} segments")
-        print(f"  ✓ TL range: {result.data.min():.1f} to {result.data.max():.1f} dB")
+        print(f"  ✓ Kraken completed with {kraken_adiabatic.n_segments} segments")
+        # ``result.data`` is complex pressure; min/max on complex is numpy's
+        # lexicographic order, not a TL bound. Read TL off ``result.db``.
+        print(f"  ✓ TL range: {np.nanmin(result.db):.1f} to {np.nanmax(result.db):.1f} dB")
     except Exception as e:
         print(f"  ✗ Kraken error: {e}")
         import traceback
@@ -186,11 +202,18 @@ def main():
             verbose=False,
         )
 
-        # Use environment with elastic bottom for complex mode computation
-        modes_complex = krakenc.compute_modes(env_shallow, source)
+        # The elastic bottom is the slope one: bottom_rd's shear column is
+        # [0, 0, 400, 600] over ranges [0, 6000, 12000, 18000], so only
+        # env_deep (sampled at r = 20 km) carries shear. env_shallow, taken
+        # at r = 0, has cs = 0 and exercises nothing elastic.
+        cs_deep = env_deep.bottom.halfspace_at(range=0.0).shear_speed
+        cs_shallow = env_shallow.bottom.halfspace_at(range=0.0).shear_speed
+        modes_complex = krakenc.compute_modes(env_deep, source)
         n_complex = len(modes_complex.k)
-        print(f"  ✓ Computed {n_complex} complex modes")
-        print("  ✓ Supports elastic bottom with shear waves")
+        print(f"  ✓ Computed {n_complex} complex modes on the slope bottom"
+              f" (cs = {cs_deep:.0f} m/s)")
+        print(f"  ✓ Shear support is what krakenc adds here; the shelf bottom"
+              f" has cs = {cs_shallow:.0f} m/s")
     except Exception as e:
         print(f"  ✗ krakenc error: {e}")
         modes_complex = None
@@ -270,11 +293,7 @@ def main():
             modes_field = modes_shallow
 
             # plot_mode_wavenumbers - complex k-plane scatter plot
-            fig2b, ax2b = plot_mode_wavenumbers(
-                modes_field,
-                annotate_modes=True,
-                max_annotations=15
-            )
+            fig2b, ax2b = plot_mode_wavenumbers(modes_field)
             ax2b.set_title('Mode Wavenumbers in Complex k-Plane\n' +
                            f'Shallow Water - {M_s} modes',
                            fontsize=14, fontweight='bold')
@@ -287,10 +306,8 @@ def main():
 
         # Use plot_modes with show_imaginary=True
         try:
-            fig2c, (ax_modes, ax_k) = modes_field.plot(
-                show_imaginary=True  # Show imaginary parts as dashed lines
-            )
-            fig2c.suptitle('Mode Shapes with Imaginary Parts\n' +
+            fig2c, ax2c = modes_field.plot(show_imaginary=True)
+            ax2c.set_title('Mode Shapes with Imaginary Parts\n'
                            'Shallow Water (solid=real, dashed=imaginary)',
                            fontsize=14, fontweight='bold')
             plt.savefig(OUTPUT_DIR / 'example_06_mode_shapes.png', dpi=150, bbox_inches='tight')
@@ -318,18 +335,17 @@ def main():
         except Exception as e:
             print(f"\n  ! Warning: Could not create mode heatmap: {e}")
 
-    # Plot 3: Coupled mode TL field
-    # Using auto TL limits and contour overlays
+    # Plot 3: Coupled mode TL field, fixed 20-120 dB scale + contour overlays
     if result is not None:
         fig3, ax3 = plot_field(
             result, env=env, contours=[70, 85, 100],  # Add labeled contours
             show_colorbar=True
         )
-        ax3.set_title('Kraken: Adiabatic Mode Coupling\nContinental Shelf Transition\n' +
-                      '(auto TL limits + contour overlays)')
+        ax3.set_title('Kraken: Adiabatic Modes\nContinental Shelf Transition\n' +
+                      f'({N_SEGMENTS} segments, contour overlays)')
 
-        # Add segment indicators
-        seg_ranges = np.linspace(0, 20, 11)
+        # Segment boundaries: N_SEGMENTS segments have N_SEGMENTS+1 edges.
+        seg_ranges = np.linspace(0, 20, N_SEGMENTS + 1)
         for r in seg_ranges[1:-1]:
             ax3.axvline(r, color='white', linestyle='--', alpha=0.3, linewidth=0.5, zorder=8)
 
@@ -339,16 +355,16 @@ def main():
     print("\nFeatures demonstrated:")
     print("  ✓ Volume attenuation (Francois-Garrison)")
     print("  ✓ Range-dependent bottom properties")
-    print("  ✓ Adiabatic mode coupling (10 segments)")
+    print(f"  ✓ Adiabatic mode theory ({N_SEGMENTS} segments)")
     print("  ✓ Mode evolution (shelf → slope)")
     print("  ✓ Continental shelf propagation")
     print("\nPlotting features demonstrated:")
     print("  ✓ plot_mode_wavenumbers() - Complex k-plane visualization")
     print("  ✓ plot_modes_heatmap() - All modes as 2D heatmap")
     print("  ✓ Mode imaginary parts (show_imaginary=True)")
-    print("  ✓ Auto TL limits (median + 0.75σ)")
+    print("  ✓ Fixed TL limits, 20 to 120 dB")
     print("  ✓ Contour overlays on TL plots")
-    print("  ✓ jet_r colormap (blue=good, red=poor)")
+    print("  ✓ jet_r colormap (red=low TL/loud, blue=high TL/quiet)")
 
     print("\n✓ Example 06 complete\n")
 

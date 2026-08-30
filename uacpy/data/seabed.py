@@ -1,11 +1,11 @@
 """EMODnet seabed-substrate fetch (European seas) → ``BoundaryProperties``.
 
-Audit follow-up to :mod:`uacpy.data.sediment`. There is no clean *global*
-no-auth point service for seabed geoacoustics — the canonical reference
-(WOSS) bundles the global **DECK41** sample database and looks it up locally.
-EMODnet Geology, however, serves harmonised seabed substrate (Folk
-classification) for **European seas** through a public OGC **WFS**, which *is*
-lat/lon-queryable. This module turns that into a model-ready bottom.
+There is no clean *global* no-auth point service for seabed geoacoustics — the
+canonical reference (WOSS) bundles the global **DECK41** sample database and
+looks it up locally. EMODnet Geology, however, serves harmonised seabed
+substrate (Folk classification) for **European seas** through a public OGC
+**WFS**, which *is* lat/lon-queryable. This module turns that into a
+model-ready bottom.
 
 Coverage is regional: outside the European-seas footprint the fetch raises
 ``DataFetchError`` and the caller should supply an explicit grain size (ϕ) or
@@ -27,6 +27,7 @@ from uacpy.data._geo import Coordinate, as_coordinate, normalize_lon
 from uacpy.data._http import http_get
 from uacpy.data.sediment import (
     bottom_from_class, bottom_from_grain_size, range_dependent_bottom_along,
+    water_sound_speed_at,
 )
 from uacpy._log import log_message
 
@@ -45,13 +46,54 @@ _FOLK5_TO_BOTTOM = {
     4: ('phi', 3.0),     # Mixed sediment
     5: ('class', 'limestone'),  # Rock or other hard substrata
 }
+#: A sixth code the harmonised layer carries that the Folk 5-class legend does
+#: not define. It is not an oddity of one response: the cached 1:1M layer holds
+#: 70 such polygons — slivers in the North Sea, the Gulf of Finland and the
+#: Caspian totalling 0.8 deg², against class 5's 10 622 polygons and 89 deg² —
+#: so they read as gaps in the harmonisation rather than a substrate type.
+#: There is nothing to convert, so a point inside one is refused the way a
+#: point outside coverage is, and an 'auto' bottom chain falls through to the
+#: global grain-size DB. Refused with its own message so a real-data gap is not
+#: reported as a schema change.
+_FOLK5_UNCLASSIFIED = 6
+
+
+def _bottom_from_folk5(code, lat, lon, *, roughness, water_sound_speed=None):
+    """``BoundaryProperties`` for one Folk 5-class code, or a typed refusal.
+
+    Shared by the live WFS backend and the offline polygon backend
+    (:mod:`uacpy.data.emodnet_local`) so both convert a class — and refuse one
+    they cannot convert — identically.
+    """
+    if code not in _FOLK5_TO_BOTTOM:
+        message = (
+            f"The EMODnet polygon at {lat:.3f}, {lon:.3f} carries "
+            f"folk_5cl={_FOLK5_UNCLASSIFIED}, a code the Folk 5-class legend "
+            f"(1-5) does not define, so it names no substrate to convert."
+            if code == _FOLK5_UNCLASSIFIED else
+            f"EMODnet returned an unrecognised Folk-5 class {code!r} at "
+            f"{lat:.3f}, {lon:.3f}; refusing to fabricate a default bottom.")
+        raise DataFetchError(
+            message,
+            remediation="Pass an explicit grain size (ϕ) or sediment class, or "
+                        "let the 'auto' bottom chain fall through to another "
+                        "source.",
+        )
+    kind, value = _FOLK5_TO_BOTTOM[code]
+    if kind == 'phi':
+        return bottom_from_grain_size(value, roughness=roughness,
+                                      water_sound_speed=water_sound_speed)
+    return bottom_from_class(value, roughness=roughness)
 
 
 def _to_web_mercator(lat: float, lon: float):
     """(lat, lon) degrees → (x, y) metres in EPSG:3857 (the EMODnet CRS)."""
-    r = 6378137.0
+    # EPSG:3857 projects WGS84 coordinates onto a *sphere* of the WGS84
+    # semi-major axis, so this single radius is the whole datum.
+    radius_m = 6378137.0
     lon = normalize_lon(lon)
-    return r * math.radians(lon), r * math.log(math.tan(math.pi / 4 + math.radians(lat) / 2))
+    return (radius_m * math.radians(lon),
+            radius_m * math.log(math.tan(math.pi / 4 + math.radians(lat) / 2)))
 
 
 def fetch_seabed_substrate(
@@ -126,21 +168,8 @@ def fetch_bottom(
     lat, lon = as_coordinate(point)
     sub = fetch_seabed_substrate(point, layer=layer, base_url=base_url,
                                  timeout=timeout, verbose=verbose)
-    if sub['folk_5cl'] not in _FOLK5_TO_BOTTOM:
-        raise DataFetchError(
-            f"EMODnet returned an unrecognised Folk-5 class "
-            f"{sub['folk_5cl']!r} at {lat:.3f}, {lon:.3f}; "
-            "refusing to fabricate a default bottom.",
-            remediation="Pass an explicit grain size (ϕ) or sediment class, or "
-                        "let the 'auto' bottom chain fall through to another "
-                        "source.",
-        )
-    kind, value = _FOLK5_TO_BOTTOM[sub['folk_5cl']]
-    if kind == 'phi':
-        bottom = bottom_from_grain_size(
-            value, roughness=roughness, water_sound_speed=water_sound_speed)
-    else:
-        bottom = bottom_from_class(value, roughness=roughness)
+    bottom = _bottom_from_folk5(sub['folk_5cl'], lat, lon, roughness=roughness,
+                                water_sound_speed=water_sound_speed)
     log_message(
         'seabed', f"EMODnet '{sub['folk_5cl_txt']}' at {lat:.3f}, {lon:.3f} → "
         f"{bottom.acoustic_type} c_p={bottom.sound_speed:.0f} m/s",
@@ -170,10 +199,13 @@ def fetch_bottom_transect(
 
     Points outside EMODnet coverage hold the nearest covered value; the call
     raises only if *no* point along the transect is covered.
+    ``water_sound_speed`` also takes a ``(lat, lon) -> m/s`` callable, so each
+    column scales to the water over its own seafloor.
     """
     return range_dependent_bottom_along(
         lambda la, lo: fetch_bottom((la, lo), roughness=roughness,
-                                    water_sound_speed=water_sound_speed,
+                                    water_sound_speed=water_sound_speed_at(
+                                        water_sound_speed, la, lo),
                                     layer=layer, base_url=base_url,
                                     timeout=timeout, verbose=verbose),
         start, end, n_points, source_label='EMODnet', max_points=max_points,

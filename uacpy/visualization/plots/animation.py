@@ -10,10 +10,12 @@ from typing import Optional, Sequence, Tuple
 from uacpy.core.environment import Environment
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.results import Field, ResultStack
+from uacpy.core.units import m_to_km
 from uacpy.visualization.style import SOURCE_MARKER_STYLE
-from uacpy.visualization.plots._common import ZORDER_SOURCE, _imshow_extent, _overlay_seafloor
+from uacpy.visualization.plots._common import ZORDER_SOURCE, _imshow_extent, _overlay_seafloor, typed_plot_error
 
 
+@typed_plot_error
 def animate_field(
     field: 'Field',
     *,
@@ -35,7 +37,7 @@ def animate_field(
     Parameters
     ----------
     field : Field
-        Must have ``kind='time_series'`` and ``coords={'depth', 'range',
+        Must have ``coords={'depth', 'range',
         'time'}``. Data is real-valued p(d, r, t).
     env : Environment, optional
         When supplied, the seafloor (and surface, if elastic) overlay is
@@ -62,7 +64,8 @@ def animate_field(
     show_seafloor : bool, optional
         Overlay env.bathymetry (or env.depth) on every frame.
     show_time : bool, optional
-        Append the current frame time to the title.
+        Draw the current frame time (ms) in a boxed label in the top-right
+        corner of the axes.
     title : str, optional
         Custom title prefix. ``None`` uses ``f"{field.model} — p(d, r, t)"``.
     aspect : str or float, optional
@@ -83,11 +86,10 @@ def animate_field(
     from matplotlib.animation import FuncAnimation
     from uacpy.core.results import Field  # local import to avoid cycle
 
-    if not isinstance(field, Field) or field.kind != 'time_series':
+    if not isinstance(field, Field) or 'time' not in getattr(field, 'coords', {}):
         raise ConfigurationError(
-            "animate_field: needs a Field with kind='time_series' "
-            "(real-valued, ``coords`` containing a 'time' axis). "
-            f"Got kind={getattr(field, 'kind', None)!r}."
+            "animate_field: needs a Field carrying a 'time' axis. "
+            f"Got coords={tuple(getattr(field, 'coords', ()))!r}."
         )
     expected_axes = {'depth', 'range', 'time'}
     if expected_axes - set(field.coords):
@@ -111,6 +113,15 @@ def animate_field(
 
     if frame_stride is None:
         frame_stride = max(1, n_t // 300)
+    # A stride of 0 divides by zero inside `np.arange`, and a negative one
+    # yields an empty frame index that fails later as an IndexError blaming the
+    # caller's arrays. The test is numeric, not `isinstance(int)`, so the
+    # numpy integers a `range`/`shape` expression produces keep working.
+    if frame_stride < 1:
+        raise ConfigurationError(
+            f"animate_field: frame_stride must be at least 1, got "
+            f"{frame_stride!r}. It sub-samples the time axis — 1 renders every "
+            f"sample, and None caps the animation at ~300 frames.")
     frame_idx = np.arange(0, n_t, frame_stride)
     n_frames = frame_idx.size
 
@@ -179,6 +190,7 @@ def animate_field(
     return ani
 
 
+@typed_plot_error
 def save_animation(
     field: 'Field',
     path,
@@ -199,7 +211,7 @@ def save_animation(
     Parameters
     ----------
     field : Field
-        Time-series field (``kind='time_series'``).
+        Time-domain field (carrying a ``'time'`` axis).
     path : str or Path
         Output file. ``.gif`` → :class:`PillowWriter`; ``.mp4`` →
         ``'ffmpeg'`` (requires ffmpeg installed).
@@ -239,6 +251,7 @@ def save_animation(
     return out
 
 
+@typed_plot_error
 def plot_time_snapshots(
     fields,
     times_s: Sequence[float],
@@ -308,7 +321,23 @@ def plot_time_snapshots(
     n_models = len(rows)
     n_times = len(times_s)
     if n_models == 0 or n_times == 0:
-        raise ConfigurationError("plot_time_snapshots: empty fields or times_s.")
+        raise ConfigurationError(
+            f"plot_time_snapshots: empty fields or times_s. Got "
+            f"{n_models} field(s) and {n_times} snapshot time(s); both must "
+            f"be non-empty — the grid is one row per field, one column per "
+            f"time.")
+
+    required_axes = {'depth', 'range', 'time'}
+    for name, field in rows:
+        coords = getattr(field, 'coords', {})
+        missing = required_axes - set(coords)
+        if missing:
+            raise ConfigurationError(
+                f"plot_time_snapshots: field "
+                f"{(name or type(field).__name__)!r} is missing coord axes "
+                f"{sorted(missing)}. Need depth, range, and time — got "
+                f"{list(coords)}."
+            )
 
     fig, axes = plt.subplots(
         n_models, n_times,
@@ -327,7 +356,7 @@ def plot_time_snapshots(
                 if finite.size else 1.0
             )
     elif np.isscalar(p_max):
-        p_max_per_row = [float(p_max)] * n_models
+        p_max_per_row = [float(np.asarray(p_max).item())] * n_models
     else:
         p_max_per_row = [float(v) for v in p_max]
         if len(p_max_per_row) != n_models:
@@ -347,7 +376,9 @@ def plot_time_snapshots(
         data3 = np.moveaxis(
             np.asarray(field.data), [d_ax, r_ax, t_ax], [0, 1, 2],
         )
-        # Decide aspect ratio once per row from the data extent.
+        # Decide aspect ratio once per row from the data extent. The imshow
+        # extent is km in x and m in y, so aspect = 1/1000 displays 1 m of
+        # depth as long as 1 m of range — isotropic, wavefronts stay round.
         if aspect is None:
             range_span = float(ranges[-1] - ranges[0])
             depth_span = float(depths[-1] - depths[0])
@@ -377,8 +408,8 @@ def plot_time_snapshots(
                 ax.set_ylim(depths[-1], depths[0])
             if field.source_depths is not None and len(field.source_depths):
                 ax.plot([0.0], [float(field.source_depths[0])],
-                        zorder=6, **SOURCE_MARKER_STYLE)
-            ax.set_xlim(0, ranges[-1] / 1000)
+                        zorder=ZORDER_SOURCE, **SOURCE_MARKER_STYLE)
+            ax.set_xlim(0, float(m_to_km(ranges[-1])))
             if i == 0:
                 ax.set_title(f"t = {times[k] * 1000:.0f} ms", fontsize=10)
             if j == 0:

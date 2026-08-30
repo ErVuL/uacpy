@@ -24,9 +24,11 @@ import numpy as np
 from uacpy._log import log_message
 from uacpy.core.acoustics import soundspeed_delgrosso, soundspeed_unesco
 from uacpy.core.environment import SoundSpeedProfile
-from uacpy.core.exceptions import ConfigurationError, DataFetchError
+from uacpy.core.exceptions import (ConfigurationError, DataFetchError,
+                                   FileFormatError)
 from uacpy.data._geo import (
     Coordinate, as_coordinate, normalize_lon, great_circle_km,
+    pressure_dbar_to_depth,
 )
 from uacpy.data._http import http_get
 from uacpy.data._time import parse_date
@@ -43,43 +45,38 @@ DEFAULT_MAX_DISTANCE_KM = 250.0
 DEFAULT_MAX_DAYS = 15
 _FORMULAS = {'unesco': soundspeed_unesco, 'delgrosso': soundspeed_delgrosso}
 _GOOD_QC = {'1', '2'}                       # good / probably-good Argo QC flags
+# ERDDAP returns columns in the order requested, and the rows below are unpacked
+# positionally, so the header is checked against this list before it is trusted.
+_COLUMNS = ('platform_number', 'cycle_number', 'direction', 'time', 'latitude',
+            'longitude', 'pres', 'temp', 'psal', 'temp_qc', 'psal_qc')
 
 
 def _abs_days(time_str, when):
     """``|days|`` between an ERDDAP ISO time string and ``when`` (a
-    ``datetime64[D]``). Returns ``0.0`` (neutral in the cost) when the time is
-    missing or unparseable — ERDDAP times are well-formed, this is just a guard.
+    ``datetime64[D]``). Returns ``inf`` (maximally unattractive in the cost,
+    so a dated profile always beats an undated one) when the time is missing
+    or unparseable — ERDDAP times are well-formed, this is just a guard.
     """
     if not time_str:
-        return 0.0
+        return float('inf')
     try:
         day = np.datetime64(str(time_str)[:10])
     except (ValueError, TypeError):
-        return 0.0
+        return float('inf')
     return abs(float((day - when) / np.timedelta64(1, 'D')))
-
-
-def _pressure_dbar_to_depth(pres_dbar, lat):
-    """Pressure (dbar) → depth (m): Newton inversion of the depth→pressure law."""
-    from uacpy.data._geo import depth_to_pressure_dbar
-    p = np.asarray(pres_dbar, dtype=float)
-    z = p * 0.9905                                   # ~1 m per dbar initial guess
-    for _ in range(5):
-        f = depth_to_pressure_dbar(z, lat) - p
-        df = (depth_to_pressure_dbar(z + 1.0, lat)
-              - depth_to_pressure_dbar(z - 1.0, lat)) / 2.0
-        z = z - f / df
-    return z
 
 
 def _query_url(point, when, max_distance_km, max_days, base_url):
     lat, lon = point
-    dlat = max_distance_km / 111.0
+    dlat = max_distance_km / 111.0          # ~111 km per degree of latitude
     dlon = dlat / max(np.cos(np.radians(lat)), 1e-3)
     la0, la1 = lat - dlat, lat + dlat
     lo_lo, lo_hi = normalize_lon(lon) - dlon, normalize_lon(lon) + dlon
     t0 = (when - np.timedelta64(max_days, 'D'))
-    t1 = (when + np.timedelta64(max_days, 'D'))
+    # Exclusive upper bound at the first instant AFTER day ``when + max_days``,
+    # so the last tolerated day is included whole — symmetric with the lower
+    # bound, and consistent with the cost function tolerating dt == max_days.
+    t1 = (when + np.timedelta64(max_days + 1, 'D'))
     # A box straddling the antimeridian can't be expressed as a single
     # longitude>=A & longitude<=B clause (it would invert to ~the whole globe);
     # drop the longitude clause there and let the haversine distance filter in
@@ -89,9 +86,8 @@ def _query_url(point, when, max_distance_km, max_days, base_url):
     else:
         lon_clause = f"&longitude%3E={lo_lo:.4f}&longitude%3C={lo_hi:.4f}"
     return (
-        f"{base_url}?platform_number,cycle_number,time,latitude,longitude,"
-        f"pres,temp,psal,temp_qc,psal_qc"
-        f"&time%3E={t0}T00:00:00Z&time%3C={t1}T00:00:00Z"
+        f"{base_url}?{','.join(_COLUMNS)}"
+        f"&time%3E={t0}T00:00:00Z&time%3C{t1}T00:00:00Z"
         f"&latitude%3E={la0:.4f}&latitude%3C={la1:.4f}"
         f"{lon_clause}"
     )
@@ -125,11 +121,25 @@ def fetch_argo_profile(
     text = body.decode() if isinstance(body, (bytes, bytearray)) else body
     rows = list(csv.reader(io.StringIO(text)))
     # rows[0] = header, rows[1] = units, rows[2:] = data.
-    profiles = {}      # (platform, cycle) -> dict(lat, lon, levels=[(p,t,s)])
+    if not rows or tuple(c.strip() for c in rows[0][:len(_COLUMNS)]) != _COLUMNS:
+        raise FileFormatError(
+            f"Argo ERDDAP returned columns {rows[0] if rows else []} rather "
+            f"than {list(_COLUMNS)}; the rows are unpacked positionally.",
+            remediation="Report this: the ArgoFloats table layout has changed.",
+        )
+    # A cycle can carry two stations — ERDDAP's own ``direction`` conventions are
+    # "A: ascending profiles, D: descending profiles" and its
+    # ``cdm_profile_variables`` lists ``direction`` — so the cast identity is
+    # (platform, cycle, direction), matching the Argo file naming
+    # ``<R|D><float>_<cycle>[D].nc``. Keyed on (platform, cycle) alone, the
+    # descent and ascent casts of one cycle interleave into a single column:
+    # float 3902110 cycle 463 merges casts 4 days and 22 km apart.
+    profiles = {}      # (platform, cycle, direction) -> dict(lat, lon, lev)
     for r in rows[2:]:
-        if len(r) < 10:
+        if len(r) < len(_COLUMNS):
             continue
-        plat, cyc, _t, rlat, rlon, pres, temp, psal, tqc, sqc = r[:10]
+        plat, cyc, dirn, _t, rlat, rlon, pres, temp, psal, tqc, sqc = \
+            r[:len(_COLUMNS)]
         if tqc not in _GOOD_QC or sqc not in _GOOD_QC:
             continue
         try:
@@ -137,7 +147,7 @@ def fetch_argo_profile(
                     float(psal))
         except ValueError:
             continue
-        prof = profiles.setdefault((plat, cyc),
+        prof = profiles.setdefault((plat, cyc, dirn),
                                    {'lat': vals[0], 'lon': vals[1],
                                     'time': _t, 'lev': []})
         prof['lev'].append(vals[2:])
@@ -172,11 +182,11 @@ def fetch_argo_profile(
         dt_days = _abs_days(p.get('time'), when)
         return (d_km / max_distance_km) ** 2 + (dt_days / max_days) ** 2
 
-    (plat, cyc), prof, dist = min(within, key=_spacetime_cost)
+    (plat, cyc, dirn), prof, dist = min(within, key=_spacetime_cost)
     lev = np.array(sorted(prof['lev']), dtype=float)        # sort by pressure
-    return {'platform': plat, 'cycle': cyc, 'lat': prof['lat'],
-            'lon': prof['lon'], 'distance_km': float(dist),
-            'time': prof.get('time'),
+    return {'platform': plat, 'cycle': cyc, 'direction': dirn,
+            'lat': prof['lat'], 'lon': prof['lon'],
+            'distance_km': float(dist), 'time': prof.get('time'),
             'pres': lev[:, 0], 'temp': lev[:, 1], 'psal': lev[:, 2]}
 
 
@@ -204,13 +214,14 @@ def fetch_ssp_argo(
                               max_days=max_days, base_url=base_url,
                               timeout=timeout, verbose=verbose)
     speed_fn = _FORMULAS[formula]
-    depths = _pressure_dbar_to_depth(prof['pres'], prof['lat'])
+    depths = pressure_dbar_to_depth(prof['pres'], prof['lat'])
     c = np.array([speed_fn(t, s, p)
                   for t, s, p in zip(prof['temp'], prof['psal'], prof['pres'])])
     log_message(
-        'sound_speed', f"Argo SSP from float {prof['platform']} "
-        f"({prof['distance_km']:.0f} km away): {depths.size} levels, "
-        f"c=[{c.min():.1f}, {c.max():.1f}] m/s", verbose=verbose)
+        'sound_speed', f"Argo SSP from float {prof['platform']} cycle "
+        f"{prof['cycle']}{prof['direction']} ({prof['distance_km']:.0f} km "
+        f"away): {depths.size} levels, c=[{c.min():.1f}, {c.max():.1f}] m/s",
+        verbose=verbose)
     lat, lon = as_coordinate(point)
     prov = DataProvenance(
         source=SOURCES['argo'],

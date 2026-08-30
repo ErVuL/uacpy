@@ -188,7 +188,8 @@ def test_adapter_bank_localizes_planted_source(processor):
     iz, ir = 9, 13
     d = bank[:, iz, ir]                       # noise-free data = that replica
     K = csdm(d[:, None])
-    surf = bartlett(K, bank) if processor == "bartlett" else mvdr(K, bank, loading=1e-2)
+    surf = (bartlett(K, bank) if processor == "bartlett"
+            else mvdr(K, bank, diagonal_loading=1e-2))
     assert surf.shape == (cand_z.size, cand_r.size)
     assert np.unravel_index(np.argmax(surf), surf.shape) == (iz, ir)
 
@@ -285,6 +286,10 @@ def _assert_adapter_matches_oasn_processor(rep, *, rtol=1e-9, atol=1e-12):
     iz0, ix0 = R.shape[1] // 3, R.shape[2] // 2
     w = oasn_bank[:, iz0, ix0]
     sig = np.outer(w, w.conj())
+    # A bare rank-1 outer product is singular, so MVDR would depend entirely on
+    # its diagonal loading. The 5 %-of-mean-eigenvalue white floor makes K
+    # invertible on its own, leaving `loading` to act identically on both
+    # processors rather than being the only thing keeping the inverse finite.
     K = sig + 0.05 * (np.trace(sig).real / N) * np.eye(N)
     cov = Covariance(covariance=K[None])
 
@@ -298,7 +303,7 @@ def _assert_adapter_matches_oasn_processor(rep, *, rtol=1e-9, atol=1e-12):
     # 4. MVDR (same loading): peaks coincide; ours == ref normalised to max 1.
     L = 1e-2
     ref_m = cov.mvdr(rep, diagonal_loading=L)[0, :, :, 0]
-    our_m = mvdr(K, our_bank, loading=L)
+    our_m = mvdr(K, our_bank, diagonal_loading=L)
     assert np.unravel_index(np.argmax(our_m), our_m.shape) == (iz0, ix0)
     np.testing.assert_allclose(
         our_m, ref_m / np.nanmax(ref_m), rtol=max(rtol, 1e-6), atol=max(atol, 1e-9))

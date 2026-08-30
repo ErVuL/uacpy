@@ -40,23 +40,25 @@ SCENARIOS:
     - dB/km → Nepers/m
     - Demonstrate convert_attenuation_units()
 
-ATTENUATION MECHANISMS:
+ATTENUATION MECHANISMS (the three terms of Francois-Garrison 1982):
 
-    1. Viscosity (low freq, < 1 kHz):
-       - Due to shear and bulk viscosity
-       - Proportional to f²
+    1. Boric acid relaxation (dominant below ~1 kHz):
+       - Chemical relaxation, relaxation frequency ~1 kHz
+       - Temperature, salinity and pH dependent
+       - There is no low-frequency viscous mechanism: viscosity is the
+         high-frequency term, item 3.
 
-    2. Boric acid relaxation (1-10 kHz):
-       - Chemical relaxation
-       - Temperature and pH dependent
+    2. Magnesium sulfate relaxation (dominant ~10-500 kHz):
+       - Chemical relaxation at f2 = 8.17·10^(8 - 1990/T_K) kHz, i.e. 76 kHz
+         at the 10 °C used below and rising steeply with temperature
+       - Temperature, salinity and depth dependent
+       - Carries the temperature behaviour seen in Scenario B: its A2*P2
+         coefficient falls as temperature rises, so at 10 kHz attenuation
+         *decreases* with warming
 
-    3. Magnesium sulfate relaxation (10-500 kHz):
-       - Chemical relaxation
-       - Temperature and salinity dependent
-
-    4. Pure water absorption (> 100 kHz):
-       - Molecular processes
-       - Temperature dependent
+    3. Pure-water viscous absorption (dominant above ~500 kHz):
+       - Shear and bulk viscosity of water itself
+       - Proportional to f**2, temperature and depth dependent
 
 LEARNING OUTCOMES:
     - Which formula to use for your application
@@ -68,11 +70,14 @@ LEARNING OUTCOMES:
 """
 
 import sys
+import os
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Repo root, so ``import uacpy`` resolves from a source checkout.
+sys.path.insert(0, str(Path(__file__).parents[2]))
 
-OUTPUT_DIR = Path(__file__).parent / 'output'
-OUTPUT_DIR.mkdir(exist_ok=True)
+OUTPUT_DIR = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
+                  or Path(__file__).parent / 'output')
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 import numpy as np  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
@@ -191,7 +196,8 @@ def scenario_a_model_comparison():
     summary_text += "Thorp (1967):\n"
     summary_text += "  • Simple empirical formula\n"
     summary_text += "  • Good for quick estimates\n"
-    summary_text += "  • Valid: all frequencies\n\n"
+    summary_text += "  • Fitted over 100 Hz - 10 kHz; extrapolates poorly\n"
+    summary_text += "    outside that band (see the 100 Hz row above)\n\n"
 
     summary_text += "Francois-Garrison (1982):\n"
     summary_text += "  • Physically-based\n"
@@ -454,14 +460,21 @@ def main():
     print("\nKey Takeaways:")
     print("  ✓ Attenuation increases with frequency (roughly f²)")
     print("  ✓ Francois-Garrison most accurate for 1 Hz - 1 MHz")
-    print("  ✓ Thorp simpler, good for quick estimates")
+    print("  ✓ Thorp simpler, fitted over 100 Hz - 10 kHz")
     print("  ✓ Temperature has strong effect on attenuation")
     print("  ✓ Multiple unit representations available")
+
+    # Recomputed here rather than asserted, because the sign is the thing
+    # people get wrong: at 10 kHz the MgSO4 term dominates and its A2*P2
+    # coefficient falls with temperature, so warming *reduces* attenuation.
+    a10 = float(francois_garrison_db_per_km(1e4, 10.0, 35.0, 8.0, 100.0))
+    a20 = float(francois_garrison_db_per_km(1e4, 20.0, 35.0, 8.0, 100.0))
     print("\nPractical rules of thumb:")
     print("  → Low freq (< 1 kHz): Very low loss, long range")
     print("  → Mid freq (1-10 kHz): Moderate loss, medium range")
     print("  → High freq (> 100 kHz): High loss, short range")
-    print("  → Attenuation doubles temperature: ~30% increase")
+    print(f"  → Warming 10 → 20 °C at 10 kHz: {a10:.3f} → {a20:.3f} dB/km"
+          f" = {100 * (a20 / a10 - 1):+.0f}% (a decrease, not an increase)")
 
     print("\n✓ Example 12 complete\n")
 

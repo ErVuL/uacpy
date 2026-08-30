@@ -6,18 +6,17 @@ sea level), so a crest is positive and a trough negative. Re-exported from
 :mod:`uacpy.core.environment` for stable import paths.
 """
 
-import copy as _copy
 import numpy as np
 from dataclasses import dataclass
 
 from uacpy.core.exceptions import ConfigurationError
-from uacpy.core._carrier_validate import (
-    _require_finite, _require_non_negative, _require_strictly_increasing,
-)
+from uacpy.core._grid import _RangeProfile
+from uacpy.core._carrier_validate import _require_finite, _coerce_data_sources
 
 
-@dataclass
-class Altimetry:
+# eq=False: a dataclass __eq__ over ndarray fields raises; compare by identity.
+@dataclass(eq=False, repr=False)
+class Altimetry(_RangeProfile):
     """Sea-surface height (m, positive up) as a function of range (m).
 
     A 1-D grid library carrier mirroring :class:`Bathymetry`: select a height
@@ -32,24 +31,25 @@ class Altimetry:
         Range axis in metres, monotonically increasing.
     heights : ndarray, shape (N,)
         Surface height in metres at each range (positive up; any sign).
+    data_sources : tuple
+        Provenance of a fetched surface (tuple of ``DataProvenance``); empty
+        for a literal/hand-built one. Aggregated by ``env.data_sources``.
     """
 
     ranges: np.ndarray
     heights: np.ndarray
+    data_sources: tuple = ()
+
+    _VALUE_FIELD = 'heights'
+    _VALUE_LABEL = 'sea-surface height'
 
     def __post_init__(self):
-        self.ranges = np.array(self.ranges, dtype=float).reshape(-1)
-        self.heights = np.array(self.heights, dtype=float).reshape(-1)
-        if self.ranges.size != self.heights.size:
-            raise ConfigurationError(
-                f"Altimetry: ranges ({self.ranges.size}) and heights "
-                f"({self.heights.size}) must have the same length.")
-        if self.ranges.size == 0:
-            raise ConfigurationError("Altimetry: needs at least one point.")
-        _require_non_negative(self.ranges, "Altimetry ranges", hint="metres")
-        _require_finite(self.heights, "Altimetry heights", hint="metres, positive up")
-        if self.ranges.size > 1:
-            _require_strictly_increasing(self.ranges, "Altimetry.ranges")
+        self.data_sources = _coerce_data_sources(self.data_sources, "Altimetry")
+        self._init_range_profile()
+
+    def _validate_values(self) -> None:
+        _require_finite(self.heights, "Altimetry heights",
+                        hint="metres, positive up")
 
     # ── constructors ────────────────────────────────────────────────────────
     @classmethod
@@ -70,57 +70,3 @@ class Altimetry:
                 f"Altimetry: must have shape (N, 2) as [(range, height_m), "
                 f"...]; got shape {arr.shape}.")
         return cls(ranges=arr[:, 0], heights=arr[:, 1])
-
-    def to_pairs(self) -> np.ndarray:
-        """``(N, 2)`` ``(range, height)`` view."""
-        return np.column_stack([self.ranges, self.heights])
-
-    def copy(self) -> 'Altimetry':
-        """Deep copy (symmetric with the other carriers)."""
-        return _copy.deepcopy(self)
-
-    # ── derived ─────────────────────────────────────────────────────────────
-    @property
-    def n_ranges(self) -> int:
-        return int(self.ranges.size)
-
-    @property
-    def range_max(self) -> float:
-        return float(np.max(self.ranges))
-
-    @property
-    def is_range_dependent(self) -> bool:
-        """True when the surface height varies with range."""
-        return self.ranges.size > 1 and bool(np.ptp(self.heights) > 0)
-
-    # ── grid-library selectors ──────────────────────────────────────────────
-    def at(self, *, range):
-        """Nearest surface height to ``range`` (m) — never fabricates. Float
-        for a scalar range, array for an array. See :meth:`eval` (interpolate)
-        and :meth:`isel` (positional)."""
-        return self._query(range, 'nearest')
-
-    def eval(self, *, range, method: str = 'linear'):
-        """Interpolated surface height at ``range`` (m). ``method`` is
-        ``'linear'`` (default), ``'nearest'`` or ``'cubic'``; constant
-        extrapolation past the ends. The interpolating counterpart of
-        :meth:`at`."""
-        return self._query(range, method)
-
-    def isel(self, *, range):
-        """Surface height at integer index ``range`` — the positional
-        counterpart of :meth:`at`."""
-        idx = np.asarray(range)
-        n = self.heights.size
-        if idx.ndim == 0:
-            i = int(idx)
-            if not -n <= i < n:
-                raise IndexError(
-                    f"Altimetry.isel: range index {i} out of range for "
-                    f"{n} point(s)")
-        out = self.heights[idx.astype(int)]
-        return float(out) if idx.ndim == 0 else out
-
-    def _query(self, range, method):
-        from uacpy.core._grid import query_profile
-        return query_profile(self.ranges, self.heights, range, method)

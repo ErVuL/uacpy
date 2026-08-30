@@ -1,19 +1,129 @@
 """
-Low-level Fortran-record helpers shared by the AT/Bellhop output readers.
+Low-level Fortran helpers shared by the AT/Bellhop readers.
 
-These functions read fragments of the binary ``.shd``/``.mod`` formats —
-record-length-prefixed vectors, source/receiver depth blocks, bearing/angle
-arrays. They are private to ``uacpy.io`` and not part of the public surface.
+Two families, both private to ``uacpy.io`` and outside the public surface:
+
+* binary record framing for the ``.shd``/``.mod`` formats — endianness
+  detection and record-length-prefixed payload reads;
+* list-directed text parsing for the ``.env``/``.flp``/``.bty`` decks —
+  :func:`read_vector` and :func:`strip_fortran_comment`.
+
+:func:`typed_format_error` and :data:`PARSE_ERRORS` give both families one
+typed failure mode.
 """
 
 import functools
+import re
 import struct
 import warnings
-from typing import Tuple
+from pathlib import Path
+from typing import Optional, Tuple
 
 import numpy as np
 
 from uacpy.core.exceptions import FileFormatError
+from uacpy.core._warn_frames import USER_FRAME_SKIP
+
+
+#: Exceptions a malformed or truncated file can legitimately raise out of a
+#: reader's ``int()``/``float()``/``struct``/indexing operations. Deliberately
+#: excludes ``AttributeError``/``TypeError``/``NameError``: those signal a uacpy
+#: defect, and rewrapping them as :class:`FileFormatError` sends users to debug
+#: a file that is fine.
+PARSE_ERRORS = (ValueError, IndexError, KeyError, StopIteration, EOFError,
+                ZeroDivisionError, OverflowError, struct.error)
+
+
+def _bound_counts(filepath, file_size, min_item_bytes, **counts):
+    """Reject header counts that cannot be satisfied by ``file_size``.
+
+    Binary OASES readers size NumPy allocations directly off integer
+    header fields (``n_rcv``, ``n_freq``, grid extents). A corrupt or
+    hostile file with a garbage count (e.g. ``n_rcv = 0x7fffffff``) would
+    otherwise drive a multi-GB/TB ``np.zeros`` before any data record is
+    validated. The smallest a single data item can occupy on disk is
+    ``min_item_bytes``, so no count — nor their product — can exceed
+    ``file_size // min_item_bytes``. Raise :class:`FileFormatError` on
+    overflow rather than attempting the allocation.
+    """
+    max_items = file_size // max(min_item_bytes, 1)
+    product = 1
+    for name, val in counts.items():
+        if val < 0:
+            raise FileFormatError(
+                f"{filepath}: negative header count {name}={val}."
+            )
+        if val > max_items:
+            raise FileFormatError(
+                f"{filepath}: header count {name}={val} is implausible for "
+                f"a {file_size}-byte file (max {max_items} items)."
+            )
+        product *= val
+    if product > max_items:
+        raise FileFormatError(
+            f"{filepath}: header counts {dict(counts)} imply {product} data "
+            f"items, implausible for a {file_size}-byte file "
+            f"(max {max_items})."
+        )
+
+
+def list_directed_int(line: str) -> int:
+    """First value of a list-directed integer READ.
+
+    A list-directed scalar READ consumes the first separator-delimited token
+    (separators: whitespace and commas) and ignores the record's remainder,
+    so ``'9999,\t! M'`` (AT tests/sduct/sductK.flp:3) and
+    ``'727  NUMBER OF ELEMENTS'`` (tests/3DAtlantic/lant.flp:414) are both
+    valid records. ``int()`` on the raw line rejects both.
+    """
+    tokens = strip_fortran_comment(line).replace(',', ' ').split()
+    if not tokens:
+        raise FileFormatError(
+            f"list-directed integer read on an empty record: {line!r}")
+    return int(tokens[0])
+
+
+#: Mantissa followed by a *signed* exponent with no ``E``/``D`` letter —
+#: ``'0.123457-118'``, ``'1.5+7'``, ``'.5+2'``, ``'1.-3'``. The sign is what
+#: makes it unambiguous: without one, ``1 7`` would be two values.
+_LETTERLESS_EXPONENT = re.compile(
+    r'^([+-]?(?:\d+\.?\d*|\.\d+))([+-]\d+)$')
+
+
+def fortran_float(token) -> float:
+    """``float()`` accepting the real spellings a list-directed READ accepts.
+
+    Two forms Python's ``float()`` rejects:
+
+    * **'D' exponents** (``'1.0D+00'``) — list-directed WRITEs emit them for
+      double precision and list-directed READs accept them (RefCoef.f90:53,
+      bdryMod.f90:195).
+    * **Letterless exponents** (``'0.123457-118'`` = 1.23457e-119). A ``Gw.d``
+      / ``Ew.d`` WRITE drops the ``E`` when the exponent needs three digits,
+      so any value below ~1e-99 comes back in this form. It is a *foreign*
+      file that carries one: uacpy's own OALIB build writes ``.rts`` from
+      default-``REAL`` arrays (``Scooter/sparc.f90:40``, written
+      ``'( 12G15.6 )'`` at ``:294``) and ``install.sh:999`` passes no
+      ``-fdefault-real-8``, so single precision caps the exponent at the two
+      digits of its ±38 range. The three-digit form therefore comes from a
+      double-precision SPARC built elsewhere — or from a local build whose
+      ``UACPY_FORTRAN_ARCH_FLAGS`` override widened the default real.
+      gfortran's list-directed READ accepts it at any exponent width
+      (``'1.5+7'`` reads as 1.5e7), so the sign alone marks the exponent and
+      this does too.
+    """
+    text = str(token)
+    try:
+        return float(text)
+    except ValueError:
+        pass
+    try:
+        return float(text.replace('D', 'E').replace('d', 'e'))
+    except ValueError:
+        match = _LETTERLESS_EXPONENT.match(text.strip())
+        if match is None:
+            raise
+        return float(f"{match.group(1)}E{match.group(2)}")
 
 
 def typed_format_error(reader):
@@ -24,15 +134,24 @@ def typed_format_error(reader):
     line iterators, and index binary records — so a malformed or truncated file
     leaks a bare ``ValueError``/``IndexError``/``StopIteration``/``struct.error``
     instead of the typed, remediated error the rest of ``io`` raises. This
-    converts those (and only those) while letting an already-typed
-    ``FileFormatError``/``ConfigurationError`` pass through unchanged.
+    converts :data:`PARSE_ERRORS` (and only those) while letting an
+    already-typed ``FileFormatError``/``ConfigurationError`` pass through
+    unchanged.
+
+    An *absent* file is not in that set. Which exception a missing path
+    deserves depends on who was supposed to produce it — ``ConfigurationError``
+    when the user named it, ``FileFormatError`` when a model should have
+    written it (:class:`~uacpy.core.exceptions.FileFormatError` states the
+    rule) — and a decorator wrapped around fourteen readers of both kinds
+    knows neither. Each reader therefore states its own provenance:
+    :func:`require_model_output` for the readers of model output, an explicit
+    ``ConfigurationError`` for the readers of user-authored decks.
     """
     @functools.wraps(reader)
     def wrapper(*args, **kwargs):
         try:
             return reader(*args, **kwargs)
-        except (ValueError, IndexError, KeyError, StopIteration,
-                struct.error) as exc:
+        except PARSE_ERRORS as exc:
             target = args[0] if args else '<stream>'
             raise FileFormatError(
                 f"{reader.__name__}: could not parse {target} — the file is "
@@ -43,6 +162,121 @@ def typed_format_error(reader):
                             "file or a wrong format triggers this.",
             ) from exc
     return wrapper
+
+
+def require_model_output(filepath, reader: str) -> None:
+    """Raise :class:`FileFormatError` when a model output file is absent.
+
+    The counterpart to the explicit ``ConfigurationError`` the readers of
+    user-authored decks raise: this is the provenance statement for the
+    readers whose file is one a model should have written, so an absent path
+    means the run failed before writing it rather than that the caller named
+    the wrong file.
+    """
+    if not Path(filepath).exists():
+        raise FileFormatError(
+            f"{reader}: file not found: {filepath}.",
+            remediation="Check the path; for a model output, the run "
+                        "may have failed before writing this file.",
+        )
+
+
+def strip_fortran_comment(line: str) -> str:
+    """Drop a Fortran trailing comment (``! …``) and surrounding whitespace.
+
+    A list-directed ``READ`` ignores the rest of a record once its I/O list is
+    satisfied, so AT's example decks and uacpy's writers annotate scalar lines
+    (``999999   ! Mlimit``); ``int()``/``float()`` do not. ``!`` is not a
+    terminator to the Fortran runtime — reached while values are still
+    expected it is a read error; only ``/`` ends a read early
+    (see :func:`read_vector`).
+    """
+    return line.split('!', 1)[0].strip()
+
+
+def strip_fortran_quotes(line: str) -> str:
+    """Return the contents of a Fortran quoted string, or the bare line.
+
+    AT writes titles and option words as ``'…'`` character literals, but its
+    list-directed ``READ`` also accepts an unquoted token — so readers must
+    handle both. Inside a literal, Fortran escapes an apostrophe by doubling
+    it: ``'It''s'`` reads as ``It's``, and the doubled pair does not end the
+    literal. Falls back to :func:`strip_fortran_comment` when the line
+    carries no quotes or the literal never closes.
+    """
+    line = line.strip()
+    start = line.find("'")
+    if start >= 0:
+        chars = []
+        i = start + 1
+        while i < len(line):
+            if line[i] == "'":
+                if i + 1 < len(line) and line[i + 1] == "'":
+                    chars.append("'")
+                    i += 2
+                    continue
+                return ''.join(chars)
+            chars.append(line[i])
+            i += 1
+    return strip_fortran_comment(line)
+
+
+def take_tokens(tokens, cursor: int, n: int, what: str, source) -> Tuple[list, int]:
+    """Consume ``n`` tokens of a flat token stream starting at ``cursor``.
+
+    The reader for a free ``fscanf``-style token stream (MATLAB's
+    ``read_ts.m``, the ``.rts`` payload): line breaks carry no meaning at
+    all, so the caller tokenises the whole file once and this walks it.
+    Returns ``(tokens[cursor:cursor + n], cursor + n)`` and raises
+    :class:`FileFormatError` when the stream is too short.
+    """
+    end = cursor + n
+    if end > len(tokens):
+        raise FileFormatError(
+            f"{source}: token stream ended while reading {what} — needed "
+            f"{n} values, found {len(tokens) - cursor}.",
+            remediation="The file is truncated or not the expected format; "
+                        "verify it was written completely.",
+        )
+    return tokens[cursor:end], end
+
+
+def read_list_directed_values(fid, n: int, what: str, source,
+                              first_line: Optional[str] = None) -> np.ndarray:
+    """Consume the ``n`` values of one list-directed ``READ(unit, *) x(1:n)``.
+
+    A whole-vector list-directed READ keeps consuming records until ``n``
+    values have been read, then skips the remainder of the final record —
+    the next READ starts on a fresh record. Values may therefore wrap
+    across any number of lines (``Bellhop/sspMod.f90:417,428``,
+    ``misc/RefCoef.f90:53``), and several may share one line. Separators
+    are whitespace and commas; ``D`` exponents are accepted; a trailing
+    ``! …`` comment ends a record's values.
+
+    ``what`` and ``source`` name the record and file for the
+    :class:`FileFormatError` raised when the file ends short of ``n``.
+    ``first_line`` is a record the caller already read from ``fid`` (to
+    detect EOF or a count); it is consumed before any further ``readline``.
+    """
+    values: list = []
+    pending = first_line
+    while len(values) < n:
+        if pending is not None:
+            line, pending = pending, None
+        else:
+            line = fid.readline()
+        if line == '':
+            raise FileFormatError(
+                f"{source}: file ended while reading {what} — expected "
+                f"{n} values, found {len(values)}.",
+                remediation="The file is truncated or not the expected "
+                            "format; verify it was written completely.",
+            )
+        for tok in strip_fortran_comment(line).replace(',', ' ').split():
+            if len(values) >= n:
+                break
+            values.append(fortran_float(tok))
+    return np.array(values, dtype=float)
 
 
 _ENDIAN_WARN_EMITTED = False
@@ -57,7 +291,7 @@ def _warn_non_little_endian(detected: str, source: str) -> None:
         warnings.warn(
             f"{source}: detected big-endian Fortran record framing; uacpy "
             "decodes it correctly but this byte order is not validated by CI.",
-            UserWarning, stacklevel=2,
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
         )
         _ENDIAN_WARN_EMITTED = True
 
@@ -68,9 +302,10 @@ def detect_endian(first4: bytes, source: str = '_fortran_helpers') -> str:
     The Fortran framing puts a 4-byte record-length prefix at the head of
     every record. On a well-formed file that integer is much smaller than
     ``2**31`` in the correct endianness and absurdly large in the wrong
-    one. We pick the byte order that yields the smaller positive integer
-    (with a sanity cap of ``2**28``) and log a one-shot notice if it isn't
-    little-endian.
+    one: reading a marker byte-reversed multiplies a short length by
+    ``2**24``, so the smaller of the two candidates is the right one. The
+    ``2**28`` cap (256 MiB) sits far above any record these formats write,
+    and a one-shot notice is logged when the choice isn't little-endian.
 
     Returns ``'<'`` (little-endian) or ``'>'`` (big-endian).
     """
@@ -96,26 +331,6 @@ def detect_endian(first4: bytes, source: str = '_fortran_helpers') -> str:
     return chosen
 
 
-def read_fortran_record_marker(f, endian: str = '<') -> int:
-    """Read a 4-byte Fortran unformatted record-length marker.
-
-    Used by Fortran sequential-unformatted record framing
-    ``[len][payload][len]``.
-
-    Parameters
-    ----------
-    f : file object (binary mode)
-    endian : str, optional
-        '<' (little-endian, default) or '>' (big-endian). Pass the
-        value returned by :func:`detect_endian` after a one-time probe
-        of the file head.
-    """
-    marker_bytes = f.read(4)
-    if len(marker_bytes) < 4:
-        raise FileFormatError("Unexpected end of file while reading record marker")
-    return struct.unpack(endian + 'i', marker_bytes)[0]
-
-
 def read_fortran_record(f, fmt=None, raw=False, endian='<'):
     """Read a single Fortran UNFORMATTED sequential record.
 
@@ -125,6 +340,12 @@ def read_fortran_record(f, fmt=None, raw=False, endian='<'):
 
     Both length markers must match; mismatch indicates file corruption or
     wrong endianness and raises :class:`~uacpy.core.exceptions.FileFormatError`.
+    The markers are signed int32 of the compiler's default width — a file
+    written with 8-byte record markers does not parse here — and the
+    ``2**28``-byte cap rejects the inflated length a wrong-endianness read
+    produces before it reaches ``f.read`` (see :func:`detect_endian`). A
+    payload shorter than its own marker announces is a truncated file, and
+    also raises.
 
     Parameters
     ----------
@@ -143,7 +364,11 @@ def read_fortran_record(f, fmt=None, raw=False, endian='<'):
     """
     head = f.read(4)
     if len(head) < 4:
-        raise FileFormatError("Unexpected EOF reading Fortran record head")
+        raise FileFormatError(
+            f"Unexpected EOF reading Fortran record head: "
+            f"{getattr(f, 'name', '<stream>')} ended at byte {f.tell()} with "
+            f"{len(head)} of the 4 marker bytes available. The file is "
+            f"truncated: re-run the model and check it exited 0.")
     (nbytes,) = struct.unpack(endian + 'i', head)
     if nbytes < 0 or nbytes > (1 << 28):
         raise FileFormatError(
@@ -156,7 +381,12 @@ def read_fortran_record(f, fmt=None, raw=False, endian='<'):
         )
     tail = f.read(4)
     if len(tail) < 4:
-        raise FileFormatError("Unexpected EOF reading Fortran record tail")
+        raise FileFormatError(
+            f"Unexpected EOF reading Fortran record tail: "
+            f"{getattr(f, 'name', '<stream>')} ended at byte {f.tell()} with "
+            f"{len(tail)} of the 4 marker bytes available, after a complete "
+            f"{nbytes}-byte payload. The file is truncated: re-run the model "
+            f"and check it exited 0.")
     (ntail,) = struct.unpack(endian + 'i', tail)
     if ntail != nbytes:
         raise FileFormatError(
@@ -173,16 +403,100 @@ def read_fortran_record(f, fmt=None, raw=False, endian='<'):
     return struct.unpack(endian + fmt, payload)
 
 
+def _read_vector_values(fid, Nx: int) -> Tuple[np.ndarray, bool]:
+    """Collect the value tokens of one AT ``ReadVector`` record.
+
+    ``READ( ENVFile, * ) x( 1 : Nx )`` is list-directed: it keeps consuming
+    records until ``Nx`` values have been read, or until a ``/`` terminates the
+    read early. Returns the values collected and whether a ``/`` ended them.
+    """
+    def _take(dest, text):
+        # Commas are value separators to a list-directed READ, and tokens
+        # past the Nx-th are the record remainder the READ never looks at.
+        for tok in text.replace(',', ' ').split():
+            if len(dest) >= Nx:
+                break
+            dest.append(fortran_float(tok))
+
+    values = []
+    while len(values) < Nx:
+        line = fid.readline()
+        if line == '':
+            break
+        line = strip_fortran_comment(line)
+        if '/' in line:
+            _take(values, line.split('/', 1)[0])
+            return np.array(values, dtype=float), True
+        _take(values, line)
+    return np.array(values, dtype=float), False
+
+
+#: Ceiling on a *generated* vector length (``80`` MB as float64).
+#:
+#: The generated branches are the only place a small record can demand a large
+#: array: ``5`` then ``0 1000 /`` is five values, and the same two records with
+#: ``999999999`` are a billion — so :func:`_bound_counts`' file-size test is the
+#: wrong instrument here, since the shorthand exists precisely to break the
+#: relation between file size and item count. AT itself just allocates and
+#: reports failure (``ALLOCATE( x( MAX( 3, Nx ) ), Stat = IAllocStat )`` /
+#: ``ERROUT( 'ReadVector', 'Too many ' … )``,
+#: ``misc/SourceReceiverPositions.f90:215-216``), which on a large-memory
+#: machine means a corrupt count succeeds in taking 8 GB before anything
+#: notices. The largest generated vector in any deck the toolbox itself ships
+#: is **10001** (``tests/Noise/ATOC/aet_VLA_C.flp:6``, ``10001`` then
+#: ``0.0 500.0 /``), so this sits three orders of magnitude above real usage
+#: while still bounding a hostile or truncated file.
+_MAX_GENERATED_VECTOR = 10_000_000
+
+
+def _generate(build, Nx: int) -> np.ndarray:
+    """Run one of SubTab's generator branches under :data:`_MAX_GENERATED_VECTOR`.
+
+    ``MemoryError`` is caught as well: it is not in :data:`PARSE_ERRORS` (it
+    says nothing about the file in general), so without this a deck that is
+    merely too large for *this* machine surfaces raw instead of typed.
+    """
+    if Nx > _MAX_GENERATED_VECTOR:
+        raise FileFormatError(
+            f"read_vector: the record asks for {Nx} generated values "
+            f"({8 * Nx / 1e9:.2f} GB as float64), past the "
+            f"{_MAX_GENERATED_VECTOR} ceiling on a generated vector.",
+            remediation="Check the count line above the vector — a corrupt or "
+                        "truncated deck reads a data value as the count. The "
+                        "largest generated vector in any deck the "
+                        "Acoustics Toolbox ships is 10001 values.",
+        )
+    try:
+        return build()
+    except MemoryError as exc:
+        raise FileFormatError(
+            f"read_vector: the record asks for {Nx} generated values "
+            f"({8 * Nx / 1e9:.2f} GB as float64), which does not fit in "
+            f"memory.",
+            remediation="Check the count line above the vector — a corrupt or "
+                        "truncated deck reads a data value as the count. AT "
+                        "reports this as ERROUT('ReadVector', 'Too many …').",
+        ) from exc
+
+
 def read_vector(fid) -> Tuple[np.ndarray, int]:
     """
-    Read a vector from BELLHOP environment file with Fortran-style input.
+    Read a vector from an Acoustics Toolbox / Bellhop input file.
 
-    This routine emulates Fortran capability that allows '/' to terminate input
-    and create equally-spaced vectors. Supports three input formats:
-
-    1. Explicit values: N / v1 v2 v3 ... vN
-    2. Linear spacing: N / v_start v_end / (creates N points between start and end)
-    3. Replicate value: N / v / (creates N copies of v)
+    Mirrors AT's ``ReadVector`` (``misc/SourceReceiverPositions.f90:221``)
+    followed by ``SubTab`` (``misc/subtabulate.f90``): a list-directed
+    ``READ`` of ``Nx`` values that continues across records until ``Nx`` are
+    consumed, with ``/`` terminating early to trigger a generated vector.
+    AT then calls ``Sort`` on the result
+    (``SourceReceiverPositions.f90:224,268``), so the solver always computes
+    on an ascending axis whatever order the deck listed. This function does
+    **not** sort — callers that mirror an AT axis apply ``np.sort``
+    themselves (see ``oalib_reader``'s position readers).
+    ``ReadVector`` pre-fills ``x(2)`` and ``x(3)`` with ``-999.9``
+    (``SourceReceiverPositions.f90:219-220``) and ``SubTab`` generates only
+    where those sentinels survive the read — never for ``Nx < 3``, and never
+    once three values have been given (``subtabulate.f90:3-5,24-28``), which
+    is what separates the branches below.
 
     Parameters
     ----------
@@ -198,130 +512,103 @@ def read_vector(fid) -> Tuple[np.ndarray, int]:
 
     Notes
     -----
-    Examples of input formats:
+    Format 1 (linear spacing) — two values then ``/``::
 
-    Format 1 (linear spacing):
         5
         0 1000 /
+
     Creates: [0, 250, 500, 750, 1000]
 
-    Format 2 (explicit values):
+    Format 2 (explicit values) — ``Nx`` values, on one record or wrapped
+    across several::
+
         5
-        0 100 300 700 1000
+        0 100 300
+        700 1000
+
     Creates: [0, 100, 300, 700, 1000]
 
-    Format 3 (replicate):
+    Format 3 (replicate) — one value then ``/``::
+
         501
         0.0 /
-    Creates: [0, 0, ..., 0] (501 zeros)
 
-    The '/' character terminates reading and triggers vector generation.
-
-    Translated from OALIB readvector.m
+    Creates: [0, 0, ..., 0] (501 zeros). ``SubTab`` reaches this through
+    ``x(2) == x(1)``, so the generated spacing is zero.
 
     Examples
     --------
-    >>> # Create test file
-    >>> with open('test_vec.txt', 'w') as f:
-    ...     f.write('5\\n0 1000 /\\n')
-    >>> with open('test_vec.txt', 'r') as f:
-    ...     x, Nx = read_vector(f)
+    The AT shorthand ``N`` then ``first last /`` expands to ``N`` evenly
+    spaced values. Written to a temporary directory so running the example
+    leaves nothing behind:
+
+    >>> import tempfile, os
+    >>> with tempfile.TemporaryDirectory() as d:
+    ...     path = os.path.join(d, 'vec.txt')
+    ...     with open(path, 'w') as fh:
+    ...         _ = fh.write('5\\n0 1000 /\\n')
+    ...     with open(path) as fh:
+    ...         x, Nx = read_vector(fh)
     >>> print(x)
     [   0.  250.  500.  750. 1000.]
+    >>> Nx
+    5
     """
-    # Read number of values
-    line = fid.readline()
-    Nx = int(line.strip())
+    Nx = list_directed_int(fid.readline())
+    if Nx <= 0:
+        return np.array([]), Nx
 
-    # Read values line
-    line = fid.readline()
+    values, slash_terminated = _read_vector_values(fid, Nx)
 
-    if "/" in line:
-        # Extract numbers before '/'
-        nums_str = line.split("/")[0].strip()
-        if nums_str:
-            values = np.array(nums_str.split(), dtype=float)
-        else:
-            values = np.array([])
+    # Every call site hands the result to a caller as a geometry axis
+    # (oalib_reader's read_flp position/offset vectors), and axis coordinates
+    # must be finite — the same contract bathy_io enforces on its axes. A
+    # non-finite value here poisons all three branches below: explicit values
+    # return it as-is, and both SubTab generator branches spread it across
+    # the whole vector (np.linspace(0, inf, N) is [0, inf, …, nan]). Checking
+    # the parsed values, not the returned x, catches all three the same way.
+    n_non_finite = int(values.size - np.count_nonzero(np.isfinite(values)))
+    if n_non_finite:
+        raise FileFormatError(
+            f"read_vector: {n_non_finite} of {values.size} parsed values are "
+            f"not finite (NaN or infinite); vector values must be finite "
+            f"numbers.",
+            remediation="Look for 'NaN'/'Infinity' tokens in the record, or "
+                        "an exponent outside float64 range (a list-directed "
+                        "READ parses 1e999 as Infinity, and gfortran does "
+                        "the same).",
+        )
 
-        if Nx == 1:
-            if len(values) < 1:
-                warnings.warn(
-                    "read_vector: Nx=1 record had no values; using 0.0.",
-                    UserWarning, stacklevel=2,
-                )
-                x = 0.0
-            else:
-                x = values[0]
-        elif Nx == 2:
-            if len(values) >= 2:
-                x = values[:2]
-            elif len(values) == 1:
-                warnings.warn(
-                    f"read_vector: Nx=2 record had 1 value; broadcasting "
-                    f"{values[0]} to both slots.",
-                    UserWarning, stacklevel=2,
-                )
-                x = np.array([values[0], values[0]])
-            else:
-                warnings.warn(
-                    "read_vector: Nx=2 record had no values; using zeros.",
-                    UserWarning, stacklevel=2,
-                )
-                x = np.zeros(2)
-        elif Nx > 2:
-            # AT semantics: either exactly 2 values (linspace shorthand)
-            # or exactly Nx values (explicit list). Other lengths fall back
-            # with a warning rather than silently producing wrong numbers.
-            if len(values) == Nx:
-                x = values
-            elif len(values) == 2:
-                x = np.linspace(values[0], values[1], Nx)
-            elif len(values) > 1:
-                warnings.warn(
-                    f"read_vector: Nx={Nx} record had {len(values)} values "
-                    f"(expected 2 or {Nx}); falling back to linspace "
-                    f"between {values[0]} and {values[-1]}.",
-                    UserWarning, stacklevel=2,
-                )
-                x = np.linspace(values[0], values[-1], Nx)
-            elif len(values) == 1:
-                warnings.warn(
-                    f"read_vector: Nx={Nx} record had 1 value; broadcasting "
-                    f"{values[0]} to all slots.",
-                    UserWarning, stacklevel=2,
-                )
-                x = np.full(Nx, values[0])
-            else:
-                warnings.warn(
-                    f"read_vector: Nx={Nx} record had no values; using zeros.",
-                    UserWarning, stacklevel=2,
-                )
-                x = np.zeros(Nx)
-        else:
-            x = np.array([])
+    if len(values) == Nx:
+        x = values
+    elif not slash_terminated:
+        # No '/' and the file ran out before Nx values: the record is truncated.
+        raise FileFormatError(
+            f"read_vector: expected {Nx} values but the file ended after "
+            f"{len(values)}.",
+            remediation="Verify the file was written completely by the "
+                        "matching model/writer.",
+        )
+    elif Nx >= 3 and len(values) == 2:
+        # SubTab's two-value branch: equally spaced from x(1) to x(2).
+        x = _generate(lambda: np.linspace(values[0], values[1], Nx), Nx)
+    elif Nx >= 3 and len(values) == 1:
+        # SubTab's replicate branch (x(2) defaults to x(1) ⇒ zero spacing).
+        x = _generate(lambda: np.full(Nx, values[0]), Nx)
     else:
-        # Read explicit values (no '/' terminator → the record should carry all
-        # Nx values; a short record is malformed). Warn + pad rather than
-        # silently returning a length-mismatched array (mirrors the '/' branch).
-        values = np.array(line.split(), dtype=float)
-        if values.size >= Nx:
-            x = values[:Nx]
-        else:
-            warnings.warn(
-                f"read_vector: explicit record had {values.size} value(s) "
-                f"(expected Nx={Nx}); padding to {Nx}.",
-                UserWarning, stacklevel=2,
-            )
-            if values.size == 0:
-                x = np.zeros(Nx)
-            elif values.size == 1:
-                x = np.full(Nx, values[0])
-            else:
-                x = np.concatenate(
-                    [values, np.full(Nx - values.size, values[-1])])
+        # A '/' short of Nx values that SubTab cannot generate from. SubTab
+        # only generates for Nx >= 3 with 1 or 2 values given
+        # (subtabulate.f90:3-5,24-28); every other slash-terminated shortfall
+        # leaves AT slots at ReadVector's -999.9 pre-fill (x(2)/x(3),
+        # SourceReceiverPositions.f90:219-220) or uninitialised (x(1),
+        # x(4:Nx)), so there is no correct reading to recover.
+        raise FileFormatError(
+            f"read_vector: Nx={Nx} record was terminated by '/' after "
+            f"{len(values)} values; only a 1-value (replicate) or 2-value "
+            f"(equally spaced) record generates a vector, and only for "
+            f"Nx >= 3.",
+            remediation=f"Give all {Nx} values, or (for Nx >= 3) give 1 or 2 "
+                        f"values before the '/'.",
+        )
 
-    # Ensure x is a 1D array
-    x = np.atleast_1d(x)
-
-    return x, Nx
+    return np.atleast_1d(x), Nx

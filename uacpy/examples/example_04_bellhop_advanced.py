@@ -5,7 +5,7 @@ ADVANCED EXAMPLE: Bellhop - All Features Showcase
 
 OBJECTIVE:
     Demonstrate ALL Bellhop features including new 2D options:
-    - Advanced RunType control (source_type, grid_type, beam_shift)
+    - Advanced RunType control (grid_type, beam_shift) + Source geometry
     - Cerveny Gaussian beam parameters
     - Volume attenuation (Thorp formula)
     - Grain size boundary conditions
@@ -13,7 +13,9 @@ OBJECTIVE:
 
 ENVIRONMENT:
     - Continental shelf (100m → 500m over 30km)
-    - Munk-like SSP (deep ocean sound channel)
+    - The top 500 m of the Munk profile. Munk's c_min axis is at 1300 m, below
+      this domain, so over 0-500 m the profile is monotonically decreasing
+      (1548.5 → 1513.2 m/s): downward refraction, no sound channel.
     - Grain size bottom transitioning to hard bottom
 
 FEATURES DEMONSTRATED:
@@ -21,7 +23,7 @@ FEATURES DEMONSTRATED:
     ✓ Cerveny beam parameters (eps_multiplier, beam_width_type, etc.)
     ✓ Thorp volume attenuation
     ✓ Line source (Cartesian coordinates)
-    ✓ Irregular receiver grid
+    ✓ Rectilinear receiver grid (RunType position 5 = 'R')
     ✓ Beam shift on reflection
     ✓ Grain size boundary conditions
     ✓ Multiple run comparisons
@@ -30,11 +32,14 @@ FEATURES DEMONSTRATED:
 """
 
 import sys
+import os
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Repo root, so ``import uacpy`` resolves from a source checkout.
+sys.path.insert(0, str(Path(__file__).parents[2]))
 
 import numpy as np  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
+from matplotlib.collections import QuadMesh  # noqa: E402
 import uacpy  # noqa: E402
 from uacpy.core.environment import SoundSpeedProfile  # noqa: E402
 from uacpy import Bottom  # noqa: E402
@@ -42,8 +47,19 @@ from uacpy.models import Bellhop  # noqa: E402
 from uacpy.visualization.plots import plot_field  # noqa: E402
 from uacpy.models import RunMode  # noqa: E402
 
-OUTPUT_DIR = Path(__file__).parent / 'output'
-OUTPUT_DIR.mkdir(exist_ok=True)
+OUTPUT_DIR = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
+                  or Path(__file__).parent / 'output')
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _tl_mappable(ax):
+    """Return the TL QuadMesh ``plot_field`` drew on ``ax``.
+
+    Feeding this to ``fig.colorbar`` ties a shared colorbar to the panels'
+    own colour scale (``_TL_LIMITS``, 20-120 dB) instead of restating it.
+    Contour overlays also live in ``ax.collections``, hence the type filter.
+    """
+    return next(c for c in ax.collections if isinstance(c, QuadMesh))
 
 
 def main():
@@ -73,9 +89,10 @@ def main():
         acoustic_type='half-space'
     )
 
-    # Munk-like SSP (deep ocean channel)
+    # Top 500 m of the Munk profile: monotonically decreasing over this
+    # domain, so the water column refracts downward throughout.
     env = uacpy.Environment(
-        name="Continental Shelf - Munk Profile",
+        name="Continental Shelf - Munk Profile (upper 500 m)",
         ssp=SoundSpeedProfile.from_munk(500.0),
         bathymetry=bathymetry,
         bottom=bottom_rd,
@@ -100,10 +117,10 @@ def main():
     # RUN 1: Standard Gaussian Beams with Thorp Attenuation
     # ═══════════════════════════════════════════════════════════════════════
 
-    print("\n[1/4] Running Bellhop with Thorp volume attenuation...")
+    print("\n[1/5] Running Bellhop with Thorp volume attenuation...")
     bellhop_thorp = Bellhop(
         verbose=False,
-        beam_type='B', source_type='R', grid_type='R',
+        beam_type='B', grid_type='R',
         n_beams=500, alpha=(-85, 85),
     )
 
@@ -120,11 +137,11 @@ def main():
     # RUN 2: Cerveny Beams with Advanced Control
     # ═══════════════════════════════════════════════════════════════════════
 
-    print("[2/4] Running Bellhop with Cerveny beams...")
+    print("[2/5] Running Bellhop with Cerveny beams...")
 
     bellhop_cerveny = Bellhop(
         verbose=False,
-        beam_type='C', source_type='R', grid_type='R',
+        beam_type='C', grid_type='R',
         n_beams=500, alpha=(-85, 85),
         beam_width_type='M', beam_curvature='Z',
         eps_multiplier=0.7, r_loop=10000.0, n_image=2, ib_win=4,
@@ -144,17 +161,25 @@ def main():
     # RUN 3: Line Source (Cartesian Coordinates)
     # ═══════════════════════════════════════════════════════════════════════
 
-    print("[3/4] Running Bellhop with line source...")
+    print("[3/5] Running Bellhop with line source...")
 
     bellhop_line = Bellhop(
         verbose=False,
-        beam_type='B', source_type='X', grid_type='R',
+        beam_type='B', grid_type='R',
         n_beams=500,
+    )
+
+    # Geometry lives on the Source, not the model: same Bellhop, different
+    # source. 'line' is an infinite coherent line source (Cartesian
+    # spreading) rather than a point source (cylindrical).
+    source_line = uacpy.Source(
+        depths=source.depths, frequencies=source.frequencies,
+        source_type='line',
     )
 
     try:
         result_line = bellhop_line.run(
-            env, source, receiver, run_mode=RunMode.COHERENT_TL,
+            env, source_line, receiver, run_mode=RunMode.COHERENT_TL,
         )
         print("  ✓ Success")
     except Exception as e:
@@ -177,16 +202,16 @@ def main():
         )
         # ``stack`` is a ResultStack of Field slabs. Iterate to walk
         # (source_depth, slab) pairs, or stack.at(source_depth=z) to
-        # pick a single 2-D Field by label. Slab accessors (.tl, .p,
+        # pick a single 2-D Field by label. Slab accessors (.db, .p,
         # .at(depth=, range=)) live on the Field, not on the stack.
         print(f"  ✓ Success — ResultStack of {stack.slab_type.__name__} "
               f"with {stack.n_slabs} source-depth slabs")
         for sd_value, slab in stack:
-            tl = np.asarray(slab.tl)
-            real = tl[(tl > 0) & (tl < 500)]
+            tl = np.asarray(slab.db)
+            real = tl[np.isfinite(tl)]        # NaN = no-data (no ray reached)
             if real.size:
                 print(f"      sd={sd_value:6.1f} m  →  median TL "
-                      f"{np.nanmedian(real):.1f} dB")
+                      f"{np.median(real):.1f} dB")
     except Exception as e:
         print(f"  ✗ Error: {e}")
         stack = None
@@ -199,7 +224,7 @@ def main():
 
     bellhop_rays = Bellhop(
         verbose=False,
-        beam_type='g', source_type='R', grid_type='R',
+        beam_type='g', grid_type='R',
         n_beams=50, alpha=(-80, 80),
         beam_shift=True,
     )
@@ -221,7 +246,9 @@ def main():
 
     # Plot 1: Environment setup with range-dependent bottom
     fig1, axes1 = env.plot()
-    plt.savefig(OUTPUT_DIR / 'example_04_environment.png', dpi=150, bbox_inches='tight')
+    fig1.savefig(OUTPUT_DIR / 'example_04_environment.png', dpi=150,
+                 bbox_inches='tight')
+    plt.close(fig1)
     print("  ✓ Saved: example_04_environment.png")
 
     # Plot 2: Compare standard vs Cerveny beams
@@ -240,43 +267,41 @@ def main():
                                       contours=[70, 85, 100])
         ax2.set_title('Cerveny Beams (Minimum Width)\n(with beam shift)')
 
-        # Add single shared colorbar
-        import matplotlib as mpl
+        # Single shared colorbar, taken from a panel's own mappable so its
+        # scale cannot disagree with the images it labels.
         cbar_ax = fig2.add_axes([0.92, 0.15, 0.02, 0.7])
-        norm = mpl.colors.Normalize(vmin=50, vmax=110)
-        cmap = plt.get_cmap('jet_r')
-        cb = mpl.colorbar.ColorbarBase(cbar_ax, cmap=cmap, norm=norm, orientation='vertical')
+        cb = fig2.colorbar(_tl_mappable(ax1), cax=cbar_ax, orientation='vertical')
         cb.set_label('TL (dB)', fontsize=12, fontweight='bold')
 
-        plt.suptitle('Bellhop: Gaussian vs Cerveny Beams (contour overlays + shared colorbar)',
-                     fontsize=16, fontweight='bold')
-        plt.savefig(OUTPUT_DIR / 'example_04_beam_comparison.png', dpi=150, bbox_inches='tight')
+        fig2.suptitle('Bellhop: Gaussian vs Cerveny Beams (contour overlays '
+                      '+ shared colorbar)', fontsize=16, fontweight='bold')
+        fig2.savefig(OUTPUT_DIR / 'example_04_beam_comparison.png', dpi=150,
+                     bbox_inches='tight')
+        plt.close(fig2)
         print("  ✓ Saved: example_04_beam_comparison.png")
 
     # Plot 3: Point source vs Line source
-    # Using auto TL limits (median + 0.75σ, rounded)
     if result_thorp is not None and result_line is not None:
         fig3, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
 
         _, _ = plot_field(result_thorp, env=env, ax=ax1,
                                       show_colorbar=False)
-        ax1.set_title('Point Source (Cylindrical)\nRunType: CB R2')
+        ax1.set_title("Point Source (Cylindrical)\nRunType: 'CB RR2 '")
 
         _, _ = plot_field(result_line, env=env, ax=ax2,
                                       show_colorbar=False)
-        ax2.set_title('Line Source (Cartesian)\nRunType: CB X2')
+        ax2.set_title("Line Source (Cartesian)\nRunType: 'CB XR2 '")
 
-        # Shared colorbar
-        import matplotlib as mpl
+        # Shared colorbar, taken from a panel's own mappable.
         cbar_ax = fig3.add_axes([0.92, 0.15, 0.02, 0.7])
-        norm = mpl.colors.Normalize(vmin=50, vmax=110)
-        cmap = plt.get_cmap('jet_r')
-        cb = mpl.colorbar.ColorbarBase(cbar_ax, cmap=cmap, norm=norm, orientation='vertical')
+        cb = fig3.colorbar(_tl_mappable(ax1), cax=cbar_ax, orientation='vertical')
         cb.set_label('TL (dB)', fontsize=12, fontweight='bold')
 
-        plt.suptitle('Bellhop: Point vs Line Source (auto TL limits — AT standard)',
-                     fontsize=16, fontweight='bold')
-        plt.savefig(OUTPUT_DIR / 'example_04_source_comparison.png', dpi=150, bbox_inches='tight')
+        fig3.suptitle('Bellhop: Point vs Line Source (fixed 20-120 dB TL scale)',
+                      fontsize=16, fontweight='bold')
+        fig3.savefig(OUTPUT_DIR / 'example_04_source_comparison.png', dpi=150,
+                     bbox_inches='tight')
+        plt.close(fig3)
         print("  ✓ Saved: example_04_source_comparison.png")
 
     # Plot 4: Ray trace
@@ -284,9 +309,11 @@ def main():
     if result_rays is not None:
         fig4, ax4 = result_rays.plot(env=env,
                                      color_by="bounces")  # Color-code rays by bounce type
-        ax4.set_title('Ray Trace with Beam Shift\nRunType: Rg R2S\n' +
+        ax4.set_title("Ray Trace with Beam Shift\nRunType: 'Rg RR2S'\n" +
                       '(rays colored by bounce type - R/G/B/K)')
-        plt.savefig(OUTPUT_DIR / 'example_04_rays.png', dpi=150, bbox_inches='tight')
+        fig4.savefig(OUTPUT_DIR / 'example_04_rays.png', dpi=150,
+                     bbox_inches='tight')
+        plt.close(fig4)
         print("  ✓ Saved: example_04_rays.png")
 
     # Plot 5: Multi-source-depth — one TL panel per source slab.
@@ -296,7 +323,7 @@ def main():
         if n_sd == 1:
             axes5 = [axes5]
         for ax, (sd_value, slab) in zip(axes5, stack):
-            plot_field(slab.to_tl(), env=env, ax=ax,
+            plot_field(slab.to_db(), env=env, ax=ax,
                                    show_colorbar=False)
             # Mark the source location (r = 0 km, z = source depth)
             # — TL plots use km on x and m on y.
@@ -304,20 +331,18 @@ def main():
                     color='white', markeredgecolor='black',
                     markeredgewidth=1.2, zorder=10, clip_on=False)
             ax.set_title(f'Source depth = {sd_value:.0f} m')
-        import matplotlib as mpl
         cbar_ax = fig5.add_axes([0.92, 0.15, 0.015, 0.7])
-        norm = mpl.colors.Normalize(vmin=50, vmax=110)
-        cmap = plt.get_cmap('jet_r')
-        cb = mpl.colorbar.ColorbarBase(cbar_ax, cmap=cmap,
-                                       norm=norm, orientation='vertical')
+        cb = fig5.colorbar(_tl_mappable(axes5[0]), cax=cbar_ax,
+                           orientation='vertical')
         cb.set_label('TL (dB)', fontsize=12, fontweight='bold')
-        plt.suptitle(
+        fig5.suptitle(
             'Bellhop multi-source-depth: one binary call, '
             'ResultStack[Field] slabs',
             fontsize=15, fontweight='bold',
         )
-        plt.savefig(OUTPUT_DIR / 'example_04_multi_source.png',
-                    dpi=150, bbox_inches='tight')
+        fig5.savefig(OUTPUT_DIR / 'example_04_multi_source.png',
+                     dpi=150, bbox_inches='tight')
+        plt.close(fig5)
         print("  ✓ Saved: example_04_multi_source.png")
 
     print("\nFeatures demonstrated:")
@@ -332,9 +357,9 @@ def main():
     print("\nPlotting features demonstrated:")
     print("  ✓ Ray color-coding by bounce type (red/green/blue/black)")
     print("  ✓ Contour overlays on TL plots (labeled contours)")
-    print("  ✓ Auto TL limits (median + 0.75σ, rounded to 10 dB)")
-    print("  ✓ Subplot colorbar control (shared colorbar)")
-    print("  ✓ jet_r colormap (blue=good, red=poor)")
+    print("  ✓ Fixed TL limits, 20 to 120 dB, shared by every panel")
+    print("  ✓ Subplot colorbar control (shared colorbar off a panel's mappable)")
+    print("  ✓ jet_r colormap (red=low TL/loud, blue=high TL/quiet)")
 
     print("\n✓ Example 04 complete\n")
 

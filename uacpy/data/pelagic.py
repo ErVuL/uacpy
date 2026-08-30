@@ -21,19 +21,25 @@ this rule where a reprojection dependency is acceptable.
 
 Provinces (dominant surficial lithology → representative mean grain size ϕ):
 
-* ``|lat| ≥ 50°``        → **diatom (siliceous) ooze** — sub-polar belts
+* ``lat ≤ −50°``, or ``lat ≥ 50°`` in the subarctic **Pacific** sector
+                         → **diatom (siliceous) ooze** — the belts of Berger
+                           (1974): Southern Ocean + subarctic Pacific (the
+                           subpolar North Atlantic is carbonate-dominated)
 * depth ``≥`` CCD        → **pelagic (red/brown) clay** — abyssal, carbonate-free
 * otherwise (above CCD)  → **calcareous ooze** — low-to-mid latitude
 """
 
+import warnings
 from typing import Optional, Union
 
 from uacpy._log import log_message
 from uacpy.core.environment import BoundaryProperties, Bottom
 from uacpy.core.exceptions import ConfigurationError
-from uacpy.data._geo import Coordinate, as_coordinate
+from uacpy.core._warn_frames import USER_FRAME_SKIP
+from uacpy.data._geo import Coordinate, as_coordinate, normalize_lon
 from uacpy.data.sediment import (
     bottom_from_grain_size, range_dependent_bottom_along,
+    water_sound_speed_at,
 )
 
 __all__ = ['pelagic_lithology', 'pelagic_grain_size', 'fetch_bottom_pelagic',
@@ -46,6 +52,12 @@ CCD_DEPTH = 4500.0
 # Latitude (deg) poleward of which siliceous (diatom) ooze dominates the
 # high-productivity belts (Southern Ocean, sub-arctic Pacific).
 SILICEOUS_LATITUDE = 50.0
+# Longitude bounds (deg E, crossing the antimeridian) of the subarctic Pacific
+# sector — Sea of Okhotsk, Bering Sea, Gulf of Alaska. Berger (1974; see the
+# module docstring) places the *northern* siliceous belt in the Pacific only,
+# the subpolar North Atlantic being carbonate-dominated, so latitudes at or
+# above SILICEOUS_LATITUDE are diatom ooze only inside this sector.
+SILICEOUS_PACIFIC_LON = (140.0, -120.0)
 
 # Representative mean grain size ϕ per lithology (matching the lithology→ϕ values
 # used by the local sediment DB), fed to the grain-size → geoacoustics relations.
@@ -56,18 +68,73 @@ _LITHOLOGY_PHI = {
 }
 
 
-def pelagic_lithology(depth_m: float, lat: float) -> str:
-    """Dominant deep-sea surficial lithology from water depth (m) and latitude."""
-    if abs(lat) >= SILICEOUS_LATITUDE:
+#: Conventional shelf break; below it the deep-sea facies model applies.
+SHELF_BREAK_DEPTH = 200.0
+
+
+def _in_siliceous_belt(lat: float, lon: Optional[float]) -> bool:
+    """Whether a point lies in a high-latitude siliceous (diatom) belt.
+
+    South of −``SILICEOUS_LATITUDE`` the Southern Ocean belt is circumglobal.
+    At or north of +``SILICEOUS_LATITUDE`` the belt is the subarctic Pacific
+    sector only (:data:`SILICEOUS_PACIFIC_LON`); a call with no longitude
+    keeps the latitude-only classification and counts every such point as
+    in the belt.
+    """
+    if lat <= -SILICEOUS_LATITUDE:
+        return True
+    if lat >= SILICEOUS_LATITUDE:
+        if lon is None:
+            return True
+        west, east = SILICEOUS_PACIFIC_LON
+        lon = normalize_lon(lon)
+        return lon >= west or lon <= east
+    return False
+
+
+def pelagic_lithology(depth_m: float, lat: float,
+                      lon: Optional[float] = None) -> str:
+    """Dominant deep-sea surficial lithology from water depth (m) and position.
+
+    Both facies this returns are **deep-sea**: the siliceous belts and the
+    carbonate compensation depth are open-ocean features. Shelf sediment is
+    terrigenous and this model does not describe it, so a depth above the
+    conventional shelf break warns — the belt test fires first and
+    unconditionally, so without it a 80 m shelf point at 60 deg came back as
+    diatom ooze (phi 9.0), identical to a 4800 m abyssal one.
+
+    ``lon`` restricts the *northern* siliceous belt to the subarctic Pacific
+    sector (see :data:`SILICEOUS_PACIFIC_LON`; the Southern Ocean belt is
+    circumglobal). Omitting it classifies on latitude alone, which counts the
+    carbonate-dominated subpolar North Atlantic as siliceous — pass the
+    longitude whenever the point has one.
+
+    It still returns a value: :func:`fetch_bottom_pelagic` is the last
+    fallback in the ``'auto'`` chain and is documented as never failing.
+    """
+    if depth_m < SHELF_BREAK_DEPTH:
+        warnings.warn(
+            f"pelagic_lithology: {depth_m:g} m is above the {SHELF_BREAK_DEPTH:g} m "
+            f"shelf break, and this model describes deep-sea facies only "
+            f"(siliceous belt / carbonate compensation depth). Shelf sediment "
+            f"is terrigenous. The value returned is a first-principles "
+            f"fallback, not a shelf estimate.",
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
+    if _in_siliceous_belt(lat, lon):
         return 'diatom ooze'               # high-latitude siliceous belt
     if depth_m >= CCD_DEPTH:
         return 'pelagic clay'              # below the carbonate compensation depth
     return 'calcareous ooze'               # above the CCD, low-to-mid latitude
 
 
-def pelagic_grain_size(depth_m: float, lat: float) -> float:
-    """Representative mean grain size ϕ for the pelagic lithology at a point."""
-    return _LITHOLOGY_PHI[pelagic_lithology(depth_m, lat)]
+def pelagic_grain_size(depth_m: float, lat: float,
+                       lon: Optional[float] = None) -> float:
+    """Representative mean grain size ϕ for the pelagic lithology at a point.
+
+    ``lon`` is forwarded to :func:`pelagic_lithology` (Pacific-sector test of
+    the northern siliceous belt).
+    """
+    return _LITHOLOGY_PHI[pelagic_lithology(depth_m, lat, lon)]
 
 
 def _water_depth(point, timeout, verbose, cache_only):
@@ -80,7 +147,7 @@ def _water_depth(point, timeout, verbose, cache_only):
         if cache_only:
             raise
         return fetch_bathy(point, source='api', timeout=timeout,
-                                 verbose=verbose)
+                           verbose=verbose)
 
 
 def fetch_bottom_pelagic(point: Coordinate, *, roughness: float = 0.0,
@@ -89,6 +156,11 @@ def fetch_bottom_pelagic(point: Coordinate, *, roughness: float = 0.0,
                          timeout=None,
                          verbose: Union[bool, str] = False) -> BoundaryProperties:
     """Model-ready bottom from the pelagic depth/latitude model at ``(lat, lon)``.
+
+    Provenance is catalogue-level: the value is computed from depth and
+    latitude, and no per-cell ``data_point``/``offset_km`` is recorded —
+    unlike the sample sources (``grainsize``, ``mars``), which record the
+    sample the value came from.
 
     The water depth is taken from ``depth`` if given, else fetched from GEBCO
     (local cache, falling back to the live API unless ``cache_only``). The
@@ -100,7 +172,7 @@ def fetch_bottom_pelagic(point: Coordinate, *, roughness: float = 0.0,
     lat, lon = as_coordinate(point)
     d = depth if depth is not None else _water_depth(point, timeout, verbose,
                                                      cache_only)
-    litho = pelagic_lithology(d, lat)
+    litho = pelagic_lithology(d, lat, lon)
     bottom = bottom_from_grain_size(
         _LITHOLOGY_PHI[litho], roughness=roughness,
         water_sound_speed=water_sound_speed)
@@ -114,15 +186,23 @@ def fetch_bottom_pelagic_transect(start: Coordinate, end: Coordinate, *,
                                   n_points=6, max_points=None,
                                   roughness: float = 0.0,
                                   water_sound_speed: Optional[float] = None,
-                                  cache_only: bool = False, timeout=None,
+                                  depth=None, cache_only: bool = False,
+                                  timeout=None,
                                   verbose: Union[bool, str] = False
                                   ) -> Bottom:
-    """Range-dependent bottom from the pelagic model along ``start`` → ``end``."""
+    """Range-dependent bottom from the pelagic model along ``start`` → ``end``.
+
+    ``water_sound_speed`` also takes a ``(lat, lon) -> m/s`` callable, so each
+    column scales to the water over its own seafloor. ``depth`` likewise takes
+    a ``(lat, lon) -> m`` callable, so a caller holding the transect's
+    bathymetry supplies it instead of paying for a second fetch per waypoint.
+    """
     return range_dependent_bottom_along(
         lambda la, lo: fetch_bottom_pelagic(
             (la, lo), roughness=roughness,
-            water_sound_speed=water_sound_speed,
-            cache_only=cache_only, timeout=timeout),
+            water_sound_speed=water_sound_speed_at(water_sound_speed, la, lo),
+            depth=depth(la, lo) if callable(depth) else depth,
+            cache_only=cache_only, timeout=timeout, verbose=verbose),
         start, end, n_points, source_label='pelagic model',
         max_points=max_points,
     )

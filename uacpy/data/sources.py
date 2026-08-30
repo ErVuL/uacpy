@@ -89,7 +89,7 @@ class DataProvenance:
             off = (f", {off_km:.0f} km from requested"
                    if off_km is not None else "")
             bits.append(f"at {la:.3f}, {lo:.3f}{off}")
-        return "  Fetched:     " + "; ".join(bits) if bits else None
+        return ("  Fetched:     " + "; ".join(bits)) if bits else None
 
 
 SOURCES: Dict[str, DataSource] = {
@@ -322,6 +322,18 @@ SOURCES: Dict[str, DataSource] = {
                  'regressor machine learning algorithm. J. Geophys. Res. Solid '
                  'Earth 126. Data: Zenodo doi:10.5281/zenodo.3762390.',
         url='https://doi.org/10.5281/zenodo.3762390',
+        commercial_use=True,
+    ),
+    'deck41': DataSource(
+        id='deck41',
+        name='DECK41 Surficial Seafloor Sediment Description Database (NOAA)',
+        used_for='sediment (global, dominant-lithology descriptions)',
+        license='U.S. Government work — public domain',
+        attribution='NOAA NCEI DECK41 Surficial Seafloor Sediment Descriptions',
+        citation='Jenkins, C. (2011): Dominant Bottom Types and Habitats In '
+                 'World Ocean Circulation Experiment. NOAA NCEI. '
+                 'doi:10.7289/V5VD6WCT',
+        url='https://www.ngdc.noaa.gov/mgg/geology/deck41.html',
         commercial_use=True,
     ),
     'grainsize': DataSource(

@@ -4,16 +4,16 @@ from __future__ import annotations
 
 
 import numpy as np
-import matplotlib.pyplot as plt
 from typing import Optional, Tuple
 
 from uacpy.core.environment import Environment
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.results import Arrivals, Rays, Modes, Covariance, Replicas, ReflectionCoefficient
-from uacpy.visualization.style import RECEIVER_MARKER_STYLE, SOURCE_MARKER_STYLE
-from uacpy.visualization.plots._common import ZORDER_RAYS, ZORDER_SURFACE, ZORDER_RECEIVERS, ZORDER_SOURCE, _overlay_seafloor, _draw_result_credit, typed_plot_error
+from uacpy.core.units import m_to_km
+from uacpy.visualization.plots._common import ZORDER_RAYS, ZORDER_SURFACE, _overlay_seafloor, _draw_geometry, _draw_receiver_grid, _draw_result_credit, fig_ax, typed_plot_error, invert_yaxis_once
 
 
+@typed_plot_error
 def _plot_rays(
     rays: Rays,
     ax=None,
@@ -37,11 +37,16 @@ def _plot_rays(
     """
     if not isinstance(rays, Rays):
         raise ConfigurationError(f"_plot_rays: expected Rays, got {type(rays).__name__}")
+    if color_by not in ('bounces', None):
+        # A typo'd mode falling through to the monochrome branch would also
+        # drop the per-class legend, so the fan would look like a deliberate
+        # color_by=None call.
+        raise ConfigurationError(
+            f"_plot_rays: color_by={color_by!r} is not a colouring mode; pass "
+            "'bounces' (colour by multipath class) or None (one colour)."
+        )
     _owns_fig = ax is None
-    if _owns_fig:
-        fig, ax = plt.subplots(figsize=figsize)
-    else:
-        fig = ax.figure
+    fig, ax = fig_ax(ax, figsize)
 
     color_map = {
         'direct': '#e53935',
@@ -57,7 +62,7 @@ def _plot_rays(
         z = np.asarray(ray.get('z', []))
         if r.size == 0:
             continue
-        max_r_km = max(max_r_km, float(np.max(r)) / 1000.0)
+        max_r_km = max(max_r_km, m_to_km(float(np.max(r))))
         max_z = max(max_z, float(np.max(z)))
         n_top = int(ray.get('n_top_bounces', 0) or 0)
         n_bot = int(ray.get('n_bot_bounces', 0) or 0)
@@ -70,16 +75,21 @@ def _plot_rays(
         else:
             kind = 'direct'
         bounce_counts[kind] += 1
+        # color_by=None paints the whole fan one colour; the bottom-class blue
+        # doubles as that neutral colour.
         color = color_map[kind] if color_by == 'bounces' else color_map['bottom']
-        ax.plot(r / 1000.0, z, color=color, alpha=alpha,
+        ax.plot(m_to_km(r), z, color=color, alpha=alpha,
                 linewidth=linewidth, solid_capstyle='round',
                 zorder=ZORDER_RAYS, **mpl_kw)
 
-    ax.invert_yaxis()
+    invert_yaxis_once(ax)
     depth_for_lim = max_z
     if env is not None:
         depth_for_lim = max(depth_for_lim, float(env.depth))
     if depth_for_lim > 0:
+        # Depth increases downward, so bottom > top. The negative top leaves a
+        # sliver of headroom above z = 0 for the surface line and surface-bounce
+        # turning points, which otherwise sit exactly on the spine.
         ax.set_ylim(depth_for_lim * 1.08, -depth_for_lim * 0.04)
 
     if env is not None:
@@ -97,37 +107,18 @@ def _plot_rays(
         _overlay_seafloor(ax, env, ranges_for_overlay)
 
     if show_receivers and rays.receiver_ranges is not None and rays.receiver_depths is not None:
-        rr_full = np.atleast_1d(rays.receiver_ranges) / 1000.0
-        rd_full = np.atleast_1d(rays.receiver_depths)
-        # Dense receiver grids drown out the rays — decimate each axis
-        # independently to keep the lattice visible (10 down × 20 across
-        # max, matching the env cross-section).
-        max_range_dots = 20
-        max_depth_dots = 10
-        step_r = max(1, rr_full.size // max_range_dots)
-        step_d = max(1, rd_full.size // max_depth_dots)
-        rr = rr_full[::step_r]
-        rd = rd_full[::step_d]
-        RR, RD = np.meshgrid(rr, rd)
-        # Slightly shrink the marker for ray-fan plots — receivers are
-        # sampling points, not the visual focus — but keep them clearly
-        # readable against the ray fan.
-        rcv_style = dict(RECEIVER_MARKER_STYLE)
-        rcv_style['markersize'] = min(rcv_style.get('markersize', 8), 7)
-        ax.plot(RR.ravel(), RD.ravel(),
-                zorder=ZORDER_RECEIVERS, **rcv_style)
+        # Markers are slightly smaller than on the env cross-section —
+        # receivers are sampling points here, not the visual focus.
+        rr_km = _draw_receiver_grid(ax, rays.receiver_ranges,
+                                    rays.receiver_depths, max_markersize=7)
         # x-axis spans the receiver extent with a small right margin so a
         # receiver sitting at the max range isn't clipped to the spine.
-        # Markers keep default clipping (clip_on=True) so a later user zoom
-        # (e.g. ax.set_xlim(...)) correctly hides out-of-view receivers rather
-        # than painting them across the whole figure.
-        r_max = float(np.max(rr_full))
+        r_max = float(np.max(rr_km))
         ax.set_xlim(0.0, r_max * 1.03 if r_max > 0 else 1.0)
     if show_source and rays.source_depths is not None and rays.source_depths.size:
-        src_style = dict(SOURCE_MARKER_STYLE)
-        src_style['markersize'] = src_style.get('markersize', 15) + 2
-        for sd in rays.source_depths:
-            ax.plot([0.0], [float(sd)], zorder=ZORDER_SOURCE, **src_style)
+        # Slightly larger star than the other panels — it has to read against
+        # a dense ray fan.
+        _draw_geometry(ax, rays.source_depths, source_markersize_bonus=2)
 
     if show_legend and color_by == 'bounces':
         import matplotlib.lines as mlines
@@ -150,6 +141,7 @@ def _plot_rays(
     return fig, ax
 
 
+@typed_plot_error
 def _plot_arrivals(
     arrivals: Arrivals,
     ax=None,
@@ -167,10 +159,7 @@ def _plot_arrivals(
             f"_plot_arrivals: expected Arrivals, got {type(arrivals).__name__}"
         )
     _owns_fig = ax is None
-    if _owns_fig:
-        fig, ax = plt.subplots(figsize=figsize)
-    else:
-        fig = ax.figure
+    fig, ax = fig_ax(ax, figsize)
     color_map = {
         'direct': '#e53935',
         'surface': '#43a047',
@@ -217,6 +206,7 @@ def _plot_arrivals(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+@typed_plot_error
 def _plot_mode_functions(
     modes: Modes,
     n_modes: Optional[int] = None,
@@ -224,26 +214,35 @@ def _plot_mode_functions(
     *,
     figsize: Tuple[float, float] = (8, 6),
     title: Optional[str] = None,
+    show_imaginary: bool = False,
 ):
-    """Plot the first ``n_modes`` mode shapes ``ψ_m(z)`` as overlaid 1-D curves."""
+    """Plot the first ``n_modes`` mode shapes ``ψ_m(z)`` as overlaid 1-D curves.
+
+    ``show_imaginary`` overlays ``Im(ψ_m)`` as a dashed line in the matching
+    colour — meaningful only for a complex-arithmetic solve (``backend=
+    'krakenc'``), where leaky modes carry a non-zero imaginary part."""
     if not isinstance(modes, Modes):
         raise ConfigurationError(
             f"_plot_mode_functions: expected Modes, got {type(modes).__name__}"
         )
+    if show_imaginary and not np.iscomplexobj(modes.phi):
+        raise ConfigurationError(
+            "_plot_mode_functions: show_imaginary=True needs complex mode "
+            "functions; this Modes result is real (use backend='krakenc')."
+        )
     _owns_fig = ax is None
-    if _owns_fig:
-        fig, ax = plt.subplots(figsize=figsize)
-    else:
-        fig = ax.figure
+    fig, ax = fig_ax(ax, figsize)
     n_modes = modes.n_modes if n_modes is None else min(int(n_modes), modes.n_modes)
     for m in range(n_modes):
         psi = np.asarray(modes.phi[:, m])
-        if np.iscomplexobj(psi):
-            psi = psi.real
-        ax.plot(psi, modes.depths, label=f"m={m+1}", linewidth=1.0)
+        line, = ax.plot(psi.real if np.iscomplexobj(psi) else psi,
+                        modes.depths, label=f"m={m+1}", linewidth=1.0)
+        if show_imaginary:
+            ax.plot(psi.imag, modes.depths, linestyle='--', linewidth=0.9,
+                    color=line.get_color())
     ax.set_xlabel(r'$\psi_m(z)$')
     ax.set_ylabel('Depth (m)')
-    ax.invert_yaxis()
+    invert_yaxis_once(ax)
     ax.grid(True, alpha=0.3)
     if n_modes <= 12:
         ax.legend(fontsize=8, loc='best')
@@ -253,6 +252,7 @@ def _plot_mode_functions(
     return fig, ax
 
 
+@typed_plot_error
 def plot_mode_wavenumbers(
     modes: Modes,
     ax=None,
@@ -266,16 +266,13 @@ def plot_mode_wavenumbers(
             f"plot_mode_wavenumbers: expected Modes, got {type(modes).__name__}"
         )
     _owns_fig = ax is None
-    if _owns_fig:
-        fig, ax = plt.subplots(figsize=figsize)
-    else:
-        fig = ax.figure
+    fig, ax = fig_ax(ax, figsize)
     idx = np.arange(1, modes.n_modes + 1)
     k = np.asarray(modes.k)
-    ax.plot(idx, k.real, 'o-', label=r'$\mathrm{Re}(k_m)$')
+    ax.plot(idx, k.real, 'o-')
     if np.any(np.abs(k.imag) > 0):
         ax2 = ax.twinx()
-        ax2.plot(idx, k.imag, 's--', color='C1', label=r'$\mathrm{Im}(k_m)$')
+        ax2.plot(idx, k.imag, 's--', color='C1')
         ax2.set_ylabel(r'$\mathrm{Im}(k_m)$ (1/m)')
     ax.set_xlabel('Mode index')
     ax.set_ylabel(r'$\mathrm{Re}(k_m)$ (1/m)')
@@ -300,7 +297,10 @@ def plot_modes_heatmap(
 ):
     """Heatmap of ``ψ_m(z)`` over (depth, mode index).
 
-    ``mode_range=(start, stop)`` selects a half-open mode-index slice.
+    ``mode_range=(start, stop)`` selects a half-open mode-index slice with
+    ``0 <= start < stop`` (``stop`` past the last mode simply clamps), and is
+    an alternative to ``n_modes``, not a modifier of it — passing both is a
+    :class:`~uacpy.core.exceptions.ConfigurationError`.
     ``normalize=True`` (default) rescales each column to peak ``±1`` so
     high-order modes don't disappear next to the dominant low-order ones.
     """
@@ -308,15 +308,34 @@ def plot_modes_heatmap(
         raise ConfigurationError(
             f"plot_modes_heatmap: expected Modes, got {type(modes).__name__}"
         )
-    _owns_fig = ax is None
-    if _owns_fig:
-        fig, ax = plt.subplots(figsize=figsize)
-    else:
-        fig = ax.figure
     if mode_range is not None:
+        if n_modes is not None:
+            # mode_range takes the slice wholesale, so a call passing both used
+            # to plot the range and drop n_modes without saying so.
+            raise ConfigurationError(
+                f"plot_modes_heatmap: got both n_modes={n_modes!r} and "
+                f"mode_range={mode_range!r}; pass one — n_modes for the first "
+                "N modes, mode_range=(start, stop) for a slice."
+            )
         start, stop = mode_range
+        start, stop = int(start), int(stop)
+        if not 0 <= start < stop:
+            # A negative start wraps under numpy slicing and start >= stop
+            # selects nothing, both of which reach pcolormesh as a shape
+            # mismatch rather than as an error about the range.
+            raise ConfigurationError(
+                f"plot_modes_heatmap: mode_range={mode_range!r} must be a "
+                "half-open (start, stop) with 0 <= start < stop."
+            )
+        if start >= modes.n_modes:
+            raise ConfigurationError(
+                f"plot_modes_heatmap: mode_range={mode_range!r} starts past "
+                f"the {modes.n_modes} mode(s) this result carries."
+            )
         stop = min(stop, modes.n_modes)
-    else:
+    _owns_fig = ax is None
+    fig, ax = fig_ax(ax, figsize)
+    if mode_range is None:
         start = 0
         stop = (modes.n_modes if n_modes is None
                 else min(int(n_modes), modes.n_modes))
@@ -335,8 +354,8 @@ def plot_modes_heatmap(
         vabs = float(np.max(np.abs(phi))) if phi.size else 1.0
         vmin, vmax = -vabs, vabs
     idx = np.arange(start + 1, stop + 1)
-    # ``shading='nearest'`` puts each column at the integer mode index
-    # without needing a +1 edges array — matches matlab pcolor.
+    # ``shading='nearest'`` centres each column on its integer mode index,
+    # so no (n+1)-long edge array is needed.
     im = ax.pcolormesh(idx, modes.depths, phi, cmap=cmap,
                        shading='nearest', vmin=vmin, vmax=vmax)
     fig.colorbar(
@@ -345,11 +364,12 @@ def plot_modes_heatmap(
     )
     ax.set_xlabel('Mode index')
     ax.set_ylabel('Depth (m)')
-    ax.invert_yaxis()
-    f0 = modes.f0 if modes.f0 is not None else 0.0
-    ax.set_title(
-        title or f'Mode shapes — {n_plot} modes @ {f0:.1f} Hz',
-    )
+    invert_yaxis_once(ax)
+    # A Modes carrying no f0 gets no frequency in the title rather than a
+    # fabricated '@ 0.0 Hz', which a published figure would assert as fact.
+    auto = (f'Mode shapes — {n_plot} modes @ {modes.f0:.1f} Hz'
+            if modes.f0 is not None else f'Mode shapes — {n_plot} modes')
+    ax.set_title(title or auto)
     if _owns_fig:
         _draw_result_credit(fig, modes, env=None)
     return fig, ax
@@ -360,6 +380,7 @@ def plot_modes_heatmap(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+@typed_plot_error
 def _plot_reflection_coefficient(
     rc: ReflectionCoefficient,
     ax=None,
@@ -379,12 +400,10 @@ def _plot_reflection_coefficient(
         )
     if rc.is_broadband:
         _owns_fig = ax is None
-        if _owns_fig:
-            fig, ax = plt.subplots(figsize=figsize)
-        else:
-            fig = ax.figure
+        fig, ax = fig_ax(ax, figsize)
+        freqs = np.asarray(rc.frequencies, dtype=float)
         im = ax.pcolormesh(
-            rc.frequencies / 1000.0, rc.theta, rc.R,
+            freqs / 1000.0, rc.theta, rc.R,
             shading='nearest', cmap='viridis',
         )
         fig.colorbar(im, ax=ax, label='|R|')
@@ -396,10 +415,7 @@ def _plot_reflection_coefficient(
         return fig, ax
 
     _owns_fig = ax is None
-    if _owns_fig:
-        fig, ax = plt.subplots(figsize=figsize)
-    else:
-        fig = ax.figure
+    fig, ax = fig_ax(ax, figsize)
     ax.plot(rc.theta, rc.R, label='|R|', color='C0')
     ax.set_xlabel('Grazing angle (°)')
     ax.set_ylabel('|R|', color='C0')
@@ -437,10 +453,7 @@ def _plot_covariance(
             f"_plot_covariance: expected Covariance, got {type(cov).__name__}"
         )
     _owns_fig = ax is None
-    if _owns_fig:
-        fig, ax = plt.subplots(figsize=figsize)
-    else:
-        fig = ax.figure
+    fig, ax = fig_ax(ax, figsize)
     C = np.abs(cov.covariance[freq_idx])
     im = ax.imshow(C, cmap='viridis', aspect='auto', origin='upper')
     fig.colorbar(im, ax=ax, label='|C|')
@@ -466,16 +479,15 @@ def _plot_replicas(
     figsize: Tuple[float, float] = (8, 5),
     title: Optional[str] = None,
 ):
-    """Magnitude of replica response across (z, x) at fixed y=0."""
+    """Magnitude of replica response across (z, x) at the first y node."""
     if not isinstance(rep, Replicas):
         raise ConfigurationError(
             f"_plot_replicas: expected Replicas, got {type(rep).__name__}"
         )
     _owns_fig = ax is None
-    if _owns_fig:
-        fig, ax = plt.subplots(figsize=figsize)
-    else:
-        fig = ax.figure
+    fig, ax = fig_ax(ax, figsize)
+    # replicas is (n_freq, n_zr, n_xr, n_yr, n_rcv): take one frequency and one
+    # array element, and cut the candidate-source grid at its first y node.
     R = np.abs(rep.replicas[freq_idx, :, :, 0, sensor_idx])
     im = ax.pcolormesh(
         rep.replica_x, rep.replica_z, R,
@@ -484,7 +496,7 @@ def _plot_replicas(
     fig.colorbar(im, ax=ax, label='|R|')
     ax.set_xlabel('x (m)')
     ax.set_ylabel('z (m)')
-    ax.invert_yaxis()
+    invert_yaxis_once(ax)
     if title:
         ax.set_title(title)
     if _owns_fig:

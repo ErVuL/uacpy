@@ -1,19 +1,16 @@
 """
 Writer for the Collins-style ``ram.in`` text input shared by the RAM family
-binaries uacpy actually dispatches to:
+binaries uacpy dispatches to:
 
+- ``ramgeo``      — fluid PE, flat surface, range-dependent layered bottom
 - ``ramsurf1.5``  — fluid PE, *variable* surface (rough surface / beach)
 - ``rams0.5``     — *elastic* PE (RAMS), flat surface, layered elastic bottom
-
-uacpy doesn't build the original Collins ``ram1.5`` (mpiramS handles fluid
-+ flat with broadband and range-dependent layered bottom), so this writer
-only emits the two formats actually consumed.
 
 Format reference: ``third_party/ramsurf/readme.orig`` and the upstream
 ``setup`` subroutines. RAMS swaps row-5's ``ns, rs`` fields for ``irot,
 theta`` and adds two profile blocks per range (shear speed + shear
 attenuation). RAMSurf inserts a surface ``(range, depth)`` block right
-after row 5.
+after row 5; ``ramgeo`` uses the base layout.
 """
 
 from __future__ import annotations
@@ -23,6 +20,11 @@ from typing import Optional, Sequence, Tuple, Union
 from uacpy.core.exceptions import ConfigurationError
 
 
+#: Block terminator. Every RAM-family block reader stops on a negative first
+#: column and never on a count: ``zread`` loops until ``zi.lt.0.0``
+#: (``ramsurf/ramsurf1.5.f:205-206``) and the surface / bathymetry loops until
+#: ``rsrf(i).lt.0.0`` / ``rb(i).lt.0.0`` (``:83-84``, ``:91-92``). The second
+#: column is read but discarded on that row.
 _TERM = "-1 -1\n"
 
 
@@ -30,11 +32,25 @@ def _write_block(
     fh,
     pairs: Sequence[Tuple[float, float]],
 ) -> None:
-    """Write a ``(depth, value)`` block followed by the ``-1 -1`` terminator."""
-    if not pairs:
-        raise ConfigurationError("Cannot write empty profile block")
+    """Write a ``(depth, value)`` block followed by the ``-1 -1`` terminator.
+
+    ``zread`` pins each pair to the grid node ``i = int(1.5 + z/dz)`` and
+    linearly interpolates between pinned nodes (``ramsurf1.5.f:202-219``), so
+    the block is a control-point list on a ``dz`` grid, not a sampled curve.
+    Two pairs closer together than ``dz`` collide on one node; ``:208`` pushes
+    the second down a node rather than merging them, which shifts it by up to
+    ``dz``. Keep the pairs at least ``dz`` apart to place them exactly.
+    """
+    # len(), not truthiness: `pairs` may arrive as an ndarray, where
+    # `not pairs` raises numpy's "truth value of an array is ambiguous"
+    # ValueError instead of this module's typed error.
+    if len(pairs) == 0:
+        raise ConfigurationError(
+            "Cannot write empty profile block: RAM reads each block until "
+            "its terminator, so a block needs at least one (depth, value) "
+            "pair. Supply the profile, or drop the block from the deck.")
     for d, v in pairs:
-        fh.write(f"{float(d):.6f} {float(v):.6f}\n")
+        fh.write(f"{float(d):.12g} {float(v):.12g}\n")
     fh.write(_TERM)
 
 
@@ -64,13 +80,17 @@ def write_ramin(
     title: str = "uacpy ram.in",
 ) -> None:
     """
-    Write a Collins-style ``ram.in`` file.
+    Write a Collins-style ``ram.in``-format file.
 
     Parameters
     ----------
     filepath : str
-        Destination file path. Convention is ``ram.in`` in the working
-        directory of the binary.
+        Destination file path. The filename is fixed per binary — each
+        hardcodes its own OPEN: ``ramsurf1.5`` reads ``ram.in``
+        (``ramsurf1.5.f:31``), ``ramgeo`` reads ``ramgeo.in``
+        (``ramgeo1.5.f:62``) and ``rams0.5`` reads ``rams.in`` — so the
+        caller must pass the name its target binary opens, in that
+        binary's working directory.
     kind : {'rams', 'ramsurf', 'ramgeo'}
         Which binary the file is targeted at. ``'ramsurf'`` adds a
         surface block right after row 5; ``'rams'`` swaps row-5 from
@@ -90,7 +110,11 @@ def write_ramin(
     c0, np_pade : float, int
         Reference sound speed (m/s) and number of Padé coefficients.
     bathymetry : list of (range, depth)
-        Seafloor profile vs range. Linearly interpolated by the binary.
+        Seafloor profile vs range, in metres. Linearly interpolated by the
+        binary, which self-extends past the last point by repeating its
+        depth out to ``2*rmax`` (``ramsurf1.5.f:95-96``,
+        ``ramgeo1.5.f:115-116``) or ``rmax + 2*dr`` (``rams0.5.f:116-117``),
+        so the profile need not reach ``rmax``.
     range_segments : list of dict
         One entry per range section, in order. The first entry's
         ``range`` is ignored (initial profile); subsequent entries write
@@ -106,7 +130,8 @@ def write_ramin(
     surface : list of (range, depth), optional
         Surface profile (only used / required when ``kind='ramsurf'``).
         ``depth`` ≥ 0 means how far below z=0 the pressure-release
-        surface sits at that range.
+        surface sits at that range. Self-extends to ``2*rmax`` like the
+        bathymetry (``ramsurf1.5.f:87-88``).
     ns_stab, rs_stab : int, float
         Row-5 stability fields (``ramsurf`` only).
     irot, theta : int, float
@@ -120,7 +145,8 @@ def write_ramin(
         raise ConfigurationError(
             f"kind must be 'rams', 'ramsurf' or 'ramgeo'; got {kind!r}"
         )
-    if kind == 'ramsurf' and not surface:
+    # Same reason as the profile-block guard: `surface` may be an ndarray.
+    if kind == 'ramsurf' and (surface is None or len(surface) == 0):
         raise ConfigurationError("kind='ramsurf' requires a surface profile")
     if kind == 'rams':
         for seg in range_segments:
@@ -132,19 +158,30 @@ def write_ramin(
 
     Path(filepath).parent.mkdir(parents=True, exist_ok=True)
     with open(filepath, 'w') as fh:
+        # Rows 1-5 go to ``setup``: title, (freq zs zr), (rmax dr ndr),
+        # (zmax dz ndz zmplt), then row 5 — (c0 np ns rs) for the fluid
+        # codes (``ramsurf1.5.f:76-80``, ``ramgeo1.5.f:104-108``) or
+        # (c0 np irot theta) for RAMS (``rams0.5.f:105-109``).
+        #
+        # Every float is written at 12 significant digits (list-directed
+        # Fortran reads take any real spelling). ``dz`` is the critical one:
+        # the binaries place the seafloor at ``iz = int(1 + zb/dz)``
+        # (``ramgeo1.5.f:133``, ``ramsurf1.5.f:118``, ``rams0.5.f:135``), a
+        # truncation with a cliff exactly at integer ``zb/dz`` — a deck value
+        # rounded above ``h/n`` moves the seafloor node a whole cell up.
         fh.write(f"{title}\n")
-        fh.write(f"{float(fc):.6f} {float(zs):.6f} {float(zr_line):.6f}\n")
-        fh.write(f"{float(rmax):.6f} {float(dr):.6f} {int(ndr)}\n")
+        fh.write(f"{float(fc):.12g} {float(zs):.12g} {float(zr_line):.12g}\n")
+        fh.write(f"{float(rmax):.12g} {float(dr):.12g} {int(ndr)}\n")
         fh.write(
-            f"{float(zmax):.6f} {float(dz):.6f} {int(ndz)} {float(zmplt):.6f}\n"
+            f"{float(zmax):.12g} {float(dz):.12g} {int(ndz)} {float(zmplt):.12g}\n"
         )
         if kind == 'rams':
             fh.write(
-                f"{float(c0):.6f} {int(np_pade)} {int(irot)} {float(theta):.6f}\n"
+                f"{float(c0):.12g} {int(np_pade)} {int(irot)} {float(theta):.12g}\n"
             )
         else:
             fh.write(
-                f"{float(c0):.6f} {int(np_pade)} {int(ns_stab)} {float(rs_stab):.6f}\n"
+                f"{float(c0):.12g} {int(np_pade)} {int(ns_stab)} {float(rs_stab):.12g}\n"
             )
 
         if kind == 'ramsurf':
@@ -152,9 +189,14 @@ def write_ramin(
 
         _write_block(fh, bathymetry)
 
+        # ``profl`` reads a segment's profile blocks first and only then the
+        # range at which the *next* segment starts (``rams0.5.f:198``,
+        # ``ramsurf1.5.f:180``), defaulting it to ``2*rmax`` at EOF. On disk
+        # that puts each range line between the blocks it separates, which is
+        # what writing it ahead of every segment but the first produces.
         for i, seg in enumerate(range_segments):
             if i > 0:
-                fh.write(f"{float(seg['range']):.6f}\n")
+                fh.write(f"{float(seg['range']):.12g}\n")
             _write_block(fh, seg['water_ssp'])
             _write_block(fh, seg['bottom_c'])
             if kind == 'rams':

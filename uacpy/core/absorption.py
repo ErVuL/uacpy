@@ -36,10 +36,14 @@ import warnings
 
 import numpy as np
 from dataclasses import dataclass, field
-from typing import List, Tuple, Union
+from typing import List, Optional, Tuple, Union
 
-from uacpy.core.constants import NEPER_TO_DB
+from uacpy.core.constants import (
+    DEFAULT_SOUND_SPEED, MAX_ATTENUATION_DB_PER_WAVELENGTH, NEPER_TO_DB,
+)
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.core._carrier_validate import _require_attenuation_in_range
+from uacpy.core._warn_frames import USER_FRAME_SKIP
 
 
 _ArrayLike = Union[float, np.ndarray]
@@ -53,22 +57,49 @@ _ArrayLike = Union[float, np.ndarray]
 def thorp_db_per_km(frequency: _ArrayLike) -> np.ndarray:
     """Thorp seawater volume attenuation in dB/km.
 
-    Uses the JKPS Eq. 1.34 coefficients, which match the AT
-    ``AttenMod.f90:94`` formula used internally by the Acoustics-Toolbox
-    binaries.
+    Uses the JKPS Eq. (1.47) coefficients, which match the AT
+    ``AttenMod.f90:93`` formula used internally by the Acoustics-Toolbox
+    binaries character for character. Note AT's own comment there labels it
+    "JKPS Eq. 1.34" — 1st-edition numbering for the same expression, which the
+    2nd edition prints as (1.47). The two are not different formulas.
+
+    **Conditions the coefficients were measured under.** JKPS states them
+    immediately after the equation: "The above expression applies for a
+    temperature of 4 deg C, a salinity of 35 ppt, a pH of 8.0, and a depth of
+    about 1000 m, where most of the measurements on which it is based were
+    made." Nothing here checks them, and the sensitivity is not small — JKPS
+    goes on: "the low-frequency (< 1 kHz) attenuation in the North Pacific
+    (pH = 7.7) is only about half that in the North Atlantic (pH = 8.0)", and
+    "high-frequency (> 1 kHz) attenuation in, e.g., the Baltic (S = 8 ppt) is
+    less than half that in open oceans". For a basin far from those nominal
+    values, use Francois-Garrison instead (JKPS cites an overall accuracy of
+    5 % for it; AT provides it as ``CASE ( 'F' )`` in the same routine).
+
+    **Frequency band.** The 3.3e-3 dB/km constant term is not an absorption
+    mechanism — JKPS attributes that regime to leakage out of the deep sound
+    channel — so below ~50 Hz this and Francois-Garrison diverge hard (at 10 Hz
+    3.3e-3 dB/km against FG's 1.2e-5, and only FG is modelling absorption).
+    ``docs/guide/environment.md §6 "Two things the curve does not tell you"``
+    works the comparison through.
 
     Parameters
     ----------
     frequency : float or array
         Frequency in Hz.
 
+    Returns
+    -------
+    ndarray, same shape as ``frequency``
+        0-d for a scalar input; an array input keeps its shape (a
+        1-element array stays 1-D).
+
     References
     ----------
     Thorp, W. H. (1967). JASA 42(1), 270 (original).
     Jensen, Kuperman, Porter, Schmidt — *Computational Ocean
-    Acoustics*, 2nd ed., Eq. 1.34.
+    Acoustics*, 2nd ed., Eq. (1.47).
     """
-    f = np.atleast_1d(np.asarray(frequency, dtype=float)) / 1000.0
+    f = np.asarray(frequency, dtype=float) / 1000.0
     f2 = f * f
     a = (
         3.3e-3
@@ -76,7 +107,7 @@ def thorp_db_per_km(frequency: _ArrayLike) -> np.ndarray:
         + 44.0 * f2 / (4100.0 + f2)
         + 3.0e-4 * f2
     )
-    return np.squeeze(a)
+    return a
 
 
 def francois_garrison_db_per_km(
@@ -101,15 +132,27 @@ def francois_garrison_db_per_km(
     depth : float or array
         Depth (m). Default 1000.
 
+    Returns
+    -------
+    ndarray, the broadcast shape of the inputs
+        0-d when every input is scalar; array inputs keep their
+        broadcast shape (a 1-element array stays 1-D).
+
     Notes
     -----
     Implementation follows the Acoustics Toolbox ``AttenMod.f90``.
+
+    Inputs the formula has no value for — a negative salinity under the
+    ``sqrt(S/35)`` of the boric-acid relaxation, a temperature at or below
+    ``-273`` °C — return NaN here rather than raising; ``AttenMod.f90``
+    states units and no validity range, and checks neither.
+    :class:`FrancoisGarrison` refuses them at construction instead.
 
     References
     ----------
     Francois & Garrison (1982). JASA 72(6), 1879–1890.
     """
-    f = np.atleast_1d(np.asarray(frequency, dtype=float)) / 1000.0
+    f = np.asarray(frequency, dtype=float) / 1000.0
     T = np.asarray(temperature, dtype=float)
     S = np.asarray(salinity, dtype=float)
     z = np.asarray(depth, dtype=float)
@@ -117,14 +160,29 @@ def francois_garrison_db_per_km(
 
     c = 1412.0 + 3.21 * T + 1.19 * S + 0.0167 * z
 
+    # Three additive mechanisms, each ``A * P * f_relax * f^2 / (f_relax^2 +
+    # f^2)``: two chemical relaxations plus pure-water viscosity. ``A`` is the
+    # strength, ``P`` the pressure (depth) correction, ``f1``/``f2`` the
+    # relaxation frequencies in kHz.
+
+    # Boric acid B(OH)3, relaxing near 1 kHz — the only pH-dependent term.
     A1 = 8.86 / c * 10.0 ** (0.78 * pH - 5.0)
     P1 = 1.0
-    f1 = 2.8 * np.sqrt(S / 35.0) * 10.0 ** (4.0 - 1245.0 / (T + 273.0))
+    # A negative salinity makes the root NaN, which numpy reports as a raw
+    # ``RuntimeWarning`` — the one warning category uacpy would emit that is
+    # not a ``UserWarning``. :class:`FrancoisGarrison` rejects S < 0 at
+    # construction; this bare function is documented to answer out-of-domain
+    # input with NaN, so the invalid flag is silenced and the NaN carried.
+    with np.errstate(invalid='ignore'):
+        f1 = 2.8 * np.sqrt(S / 35.0) * 10.0 ** (4.0 - 1245.0 / (T + 273.0))
 
+    # Magnesium sulphate MgSO4, relaxing near 65 kHz.
     A2 = 21.44 * S / c * (1.0 + 0.025 * T)
     P2 = 1.0 - 1.37e-4 * z + 6.2e-9 * z * z
     f2 = 8.17 * 10.0 ** (8.0 - 1990.0 / (T + 273.0)) / (1.0 + 0.0018 * (S - 35.0))
 
+    # Viscosity of pure water: no relaxation frequency, so it enters as plain
+    # f^2. Francois & Garrison fit A3 piecewise about 20 degC.
     P3 = 1.0 - 3.83e-5 * z + 4.9e-10 * z * z
     A3_cold = 4.937e-4 - 2.59e-5 * T + 9.11e-7 * T * T - 1.5e-8 * T * T * T
     A3_warm = 3.964e-4 - 1.146e-5 * T + 1.45e-7 * T * T - 6.5e-10 * T * T * T
@@ -135,7 +193,13 @@ def francois_garrison_db_per_km(
         + A2 * P2 * (f2 * f * f) / (f2 * f2 + f * f)
         + A3 * P3 * f * f
     )
-    return np.squeeze(a)
+    return a
+
+
+# The units of :func:`convert_attenuation_units` whose definition carries a
+# frequency: dB per wavelength lambda = c/f, and Q and L, both written against
+# omega = 2*pi*f.
+_FREQUENCY_DEPENDENT_UNITS = frozenset({'dB/wavelength', 'Q', 'L'})
 
 
 def convert_attenuation_units(
@@ -143,13 +207,33 @@ def convert_attenuation_units(
     frequency: float,
     from_unit: str,
     to_unit: str,
-    sound_speed: float = 1500.0,
+    sound_speed: float = DEFAULT_SOUND_SPEED,
 ) -> np.ndarray:
     """Convert volume attenuation between unit conventions.
 
-    Supported units: ``dB/km``, ``dB/m``, ``dB/wavelength``, ``Nepers/m``,
-    ``Q`` (quality factor), ``L`` (loss tangent). ``sound_speed`` is
-    required for the wavelength / Q / L paths.
+    Every path goes through dB/m, so each unit needs only its own definition
+    against the nepers/m attenuation ``a`` of ``exp(-a·x)``, at angular
+    frequency ``omega = 2·pi·f`` and sound speed ``c`` (the same definitions
+    Acoustics-Toolbox ``AttenMod.f90:57-80`` applies):
+
+    - ``Nepers/m`` — ``a`` itself.
+    - ``dB/m`` — ``a · 20/ln(10)``; the pivot every path converts through.
+    - ``dB/km`` — dB of amplitude loss per 1000 m.
+    - ``dB/wavelength`` — dB per ``lambda = c/f``, hence frequency-independent.
+    - ``Q`` — quality factor, ``a = omega/(2·c·Q)``. Q divides, so a
+      conversion *from* ``'Q'`` requires ``alpha > 0`` and raises
+      :class:`ConfigurationError` otherwise. Going *to* ``'Q'`` from a zero
+      attenuation returns ``inf`` — the lossless limit, which converts back
+      to zero — rather than raising.
+    - ``L`` — loss tangent, ``a = L·omega/c``.
+
+    ``sound_speed`` is therefore required for the wavelength / Q / L paths and
+    ignored for the rest, and ``frequency`` the same way: those three paths
+    need a positive finite one and raise :class:`ConfigurationError` without
+    it, while ``dB/km`` ↔ ``dB/m`` ↔ ``Nepers/m`` convert at any frequency.
+
+    Returns an ndarray shaped like ``alpha``: 0-d for a scalar input; an
+    array input keeps its shape (a 1-element array stays 1-D).
 
     Notes
     -----
@@ -167,7 +251,34 @@ def convert_attenuation_units(
     Pass through Acoustics-Toolbox directly (set ``TopOpt`` position 4
     to ``'m'`` or ``'F'``) if you need those formulas.
     """
-    alpha = np.atleast_1d(np.asarray(alpha, dtype=float))
+    alpha = np.asarray(alpha, dtype=float)
+
+    # lambda = c/f, Q = omega/(2 c a) and L = a c/omega all divide by the
+    # frequency, so f = 0 reaches the arithmetic as a bare ZeroDivisionError
+    # on the wavelength paths and as a silent 0 or inf on the Q and L ones.
+    # The rest of the table is a pure scaling and converts at any frequency.
+    needs_frequency = {from_unit, to_unit} & _FREQUENCY_DEPENDENT_UNITS
+    if needs_frequency and not (np.isfinite(frequency) and frequency > 0.0):
+        raise ConfigurationError(
+            f"convert_attenuation_units: {sorted(needs_frequency)} is defined "
+            f"per wavelength or per cycle, so it needs a positive finite "
+            f"frequency; got frequency={frequency!r}.",
+            remediation="Pass the frequency the attenuation was measured at, "
+                        "or convert between dB/km, dB/m and Nepers/m, which "
+                        "carry no frequency.")
+    # The same three units carry a sound speed, and it divides on every one of
+    # them, so it needs the same guard as the frequency. Unguarded,
+    # ``sound_speed=0`` returned 0.0 dB/wavelength from a real dB/km loss — a
+    # lossless medium — and a negative speed returned a negative, i.e.
+    # amplifying, attenuation, both silently.
+    if needs_frequency and not (np.isfinite(sound_speed) and sound_speed > 0.0):
+        raise ConfigurationError(
+            f"convert_attenuation_units: {sorted(needs_frequency)} is defined "
+            f"per wavelength or per cycle, so it needs a positive finite "
+            f"sound speed; got sound_speed={sound_speed!r}.",
+            remediation="Pass the sound speed of the medium the attenuation "
+                        "was measured in, or convert between dB/km, dB/m and "
+                        "Nepers/m, which carry no sound speed.")
 
     if from_unit == 'dB/km':
         alpha_db_m = alpha / 1000.0
@@ -179,7 +290,15 @@ def convert_attenuation_units(
     elif from_unit == 'Nepers/m':
         alpha_db_m = alpha * NEPER_TO_DB
     elif from_unit == 'Q':
-        # alphaT = omega / (2 * c * Q)
+        # Q sits in the denominator of alphaT = omega / (2 * c * Q), so a
+        # non-positive Q has no attenuation to convert (Q -> inf is the
+        # lossless limit).
+        if np.any(alpha <= 0):
+            raise ConfigurationError(
+                f"convert_attenuation_units: from_unit='Q' requires a "
+                f"positive quality factor (alphaT = omega / (2*c*Q)); "
+                f"got {float(np.min(alpha)):g}."
+            )
         alpha_nepers_m = np.pi * frequency / (alpha * sound_speed)
         alpha_db_m = alpha_nepers_m * NEPER_TO_DB
     elif from_unit == 'L':
@@ -200,14 +319,20 @@ def convert_attenuation_units(
         result = alpha_db_m / NEPER_TO_DB
     elif to_unit == 'Q':
         alpha_nepers_m = alpha_db_m / NEPER_TO_DB
-        result = np.pi * frequency / (alpha_nepers_m * sound_speed)
+        # A zero attenuation is the lossless limit and ``Q = omega/(2*c*a)``
+        # -> inf is its exact value, so the division is answered rather than
+        # trapped: ``inf`` converts back through ``from_unit='Q'`` to a = 0.
+        # The mirror direction raises because Q = 0 is not the limit of
+        # anything representable — it is a -> inf.
+        with np.errstate(divide='ignore', invalid='ignore'):
+            result = np.pi * frequency / (alpha_nepers_m * sound_speed)
     elif to_unit == 'L':
         alpha_nepers_m = alpha_db_m / NEPER_TO_DB
         result = alpha_nepers_m * sound_speed / (2.0 * np.pi * frequency)
     else:
         raise ConfigurationError(f"Unknown unit: {to_unit}")
 
-    return np.squeeze(result)
+    return result
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -222,10 +347,11 @@ class Absorption:
     :class:`FrancoisGarrison`, :class:`Biological`,
     :class:`ConstantAbsorption`.
 
-    Subclasses implement :meth:`alpha_db_per_m`, which evaluates
+    Subclasses implement :meth:`_alpha_db_per_m`, which evaluates
     ``α(f, z)`` at the depths a model needs (used by the Kraken-class
     modal perturbation kernel; the Acoustics-Toolbox writers read
-    :meth:`topopt_code` and the per-class fields instead).
+    :meth:`topopt_code` and the per-class fields instead). The public
+    :meth:`alpha_db_per_m` checks the frequency and delegates to it.
     """
 
     def __post_init__(self):
@@ -249,25 +375,52 @@ class Absorption:
         Parameters
         ----------
         frequency : float
-            Frequency in Hz.
+            Frequency in Hz. Must be strictly positive — every model here is
+            a formula in ``f`` (or in the wavelength ``c/f``) that has no
+            value at or below zero. The check sits on this side of the
+            dispatch so all four models share one rule: Thorp and
+            Francois-Garrison are polynomials that evaluate happily at
+            ``f <= 0`` and hand back a *positive* attenuation for a negative
+            frequency. ``NaN`` is rejected here too.
         depths : float or 1-D array
             Depths (m).
 
         Returns
         -------
-        ndarray, same shape as ``depths``
+        ndarray, the shape of ``depths`` — a scalar depth comes back as a
+        1-element array of shape ``(1,)``.
         """
+        f = float(frequency)
+        if not f > 0.0:
+            raise ConfigurationError(
+                f"{type(self).__name__}.alpha_db_per_m: frequency must be "
+                f"> 0 Hz; got {frequency}"
+            )
+        return self._alpha_db_per_m(f, depths)
+
+    def _alpha_db_per_m(
+        self,
+        frequency: float,
+        depths: _ArrayLike,
+    ) -> np.ndarray:
+        """Model-specific ``α(f, z)`` in dB/m, reached through
+        :meth:`alpha_db_per_m` with ``frequency`` already checked positive."""
         raise NotImplementedError
 
-    def plot(self, frequencies, *, depth: float = 0.0, **kwargs):
+    def plot(self, frequencies, *, depth: float = 0.0, ax=None, **kwargs):
         """Plot this model's volume absorption ``α(f)`` (dB/km, log-log).
 
         Dispatches to :func:`uacpy.visualization.plot_absorption` — the carrier
         counterpart of :meth:`Result.plot`. ``frequencies`` (Hz) is required
         because absorption *is* a function of frequency; ``depth`` (m) is the
         evaluation depth (matters for depth-dependent models such as
-        Francois-Garrison; Thorp is depth-invariant). ``kwargs`` are
-        forwarded."""
+        Francois-Garrison; Thorp is depth-invariant). ``ax`` draws into an
+        existing Axes, spelled the way every other uacpy plot method spells
+        it; the remaining ``kwargs`` are forwarded."""
+        # Deferred into the body: ``uacpy.visualization`` imports
+        # ``uacpy.core`` at module scope, so this line at file scope makes
+        # ``import uacpy`` raise ImportError. docs/DEV.md section 7 records
+        # the inversion.
         from uacpy.visualization import plot_absorption
         freqs = np.atleast_1d(np.asarray(frequencies, dtype=float))
         alpha_km = np.array([
@@ -279,7 +432,7 @@ class Absorption:
                 f"{depth:g} m, so the log-log plot will be blank. For layered "
                 f"models (e.g. Biological) pick a depth inside a layer.",
                 UserWarning, stacklevel=2)
-        return plot_absorption(freqs, absorption=alpha_km, **kwargs)
+        return plot_absorption(freqs, absorption=alpha_km, ax=ax, **kwargs)
 
 
 @dataclass
@@ -292,7 +445,7 @@ class Thorp(Absorption):
     def topopt_code(self) -> str:
         return 'T'
 
-    def alpha_db_per_m(
+    def _alpha_db_per_m(
         self,
         frequency: float,
         depths: _ArrayLike,
@@ -311,11 +464,52 @@ class FrancoisGarrison(Absorption):
     :meth:`alpha_db_per_m` is called for a modal perturbation, the
     depth axis the caller provides overrides ``z_bar_m`` so the formula
     is evaluated per depth (pressure-corrected).
+
+    Notes
+    -----
+    The four fields are checked only where the formula itself has no
+    value there (see :func:`francois_garrison_db_per_km`): the
+    boric-acid relaxation takes ``sqrt(S/35)``, its temperature factor
+    is ``10**(4 - 1245/(T + 273))``, and all three mechanisms divide by
+    the sound speed ``c = 1412 + 3.21·T + 1.19·S + 0.0167·z``. Nothing
+    here narrows the inputs to a published validity envelope: neither
+    ``misc/AttenMod.f90`` (``Franc_Garr``) nor ``Matlab/Misc/franc_garr.m``
+    — the two implementations this one follows — states one.
     """
     temperature_c: float
     salinity_psu: float
     pH: float
     z_bar_m: float
+
+    def __post_init__(self):
+        Absorption.__post_init__(self)
+        if not (self.salinity_psu >= 0):
+            raise ConfigurationError(
+                f"FrancoisGarrison: salinity_psu must be non-negative (PSU); "
+                f"got {self.salinity_psu}. The boric-acid relaxation "
+                f"frequency carries sqrt(S/35), which has no value below 0."
+            )
+        if not (self.temperature_c > -273.0):
+            raise ConfigurationError(
+                f"FrancoisGarrison: temperature_c must be above -273 (°C, "
+                f"not kelvin); got {self.temperature_c}. The relaxation "
+                f"frequencies carry 10**(4 - 1245/(T + 273)), which is "
+                f"singular at -273 °C."
+            )
+        if not (self.pH >= 0):
+            raise ConfigurationError(
+                f"FrancoisGarrison: pH must be non-negative; got {self.pH}."
+            )
+        sound_speed = (1412.0 + 3.21 * self.temperature_c
+                       + 1.19 * self.salinity_psu + 0.0167 * self.z_bar_m)
+        if not (sound_speed > 0):
+            raise ConfigurationError(
+                f"FrancoisGarrison: the T/S/z row gives a sound speed of "
+                f"{sound_speed:g} m/s (c = 1412 + 3.21·T + 1.19·S + "
+                f"0.0167·z, with T={self.temperature_c}, "
+                f"S={self.salinity_psu}, z={self.z_bar_m}); every absorption "
+                f"mechanism divides by it, so it must be positive."
+            )
 
     def topopt_code(self) -> str:
         return 'F'
@@ -327,7 +521,7 @@ class FrancoisGarrison(Absorption):
             float(self.pH), float(self.z_bar_m),
         )
 
-    def alpha_db_per_m(
+    def _alpha_db_per_m(
         self,
         frequency: float,
         depths: _ArrayLike,
@@ -340,10 +534,10 @@ class FrancoisGarrison(Absorption):
             pH=self.pH,
             depth=z,
         )
-        return np.atleast_1d(a_km) / 1000.0
+        return a_km / 1000.0
 
 
-@dataclass
+@dataclass(init=False)
 class BiologicalLayer:
     """Single fish-bladder resonance layer for :class:`Biological`.
 
@@ -359,6 +553,33 @@ class BiologicalLayer:
         Acoustics-Toolbox resonance coefficient (dB/km): the absorption is
         ``a0 / ((1 - f0²/f²)² + 1/Q²)``, so the peak at ``f = f0`` is
         ``a0·Q²`` (see AttenMod.f90).
+
+    Notes
+    -----
+    ``a0·Q²`` is checked against the AT solvers' ``CRCI`` ceiling and a
+    ``UserWarning`` names the limit when it is over. ``AttenMod.f90``'s
+    ``'B'`` branch (:105-106) adds ``a/8685.8896`` Nepers/m to ``alphaT``,
+    :113 scales by ``c²/ω`` and :116 aborts the run when the result exceeds
+    ``c`` — so a layer aborts once its dB/km absorption passes
+    ``8685.8896·2πf/c``, which is 3638 dB/km at 100 Hz in 1500 m/s water
+    (``a0 = 1, Q = 61`` clears it). This warns rather than raises because
+    the peak is only reached when the run frequency sits on ``f0``, and the
+    ceiling scales with the true ``c(z)`` over the layer, which a layer on
+    its own does not carry — the check uses
+    :data:`~uacpy.core.constants.DEFAULT_SOUND_SPEED`.
+
+    The ``__init__`` is written out rather than generated (``init=False``)
+    so that the ceiling warning can name the line the *user* wrote. A
+    generated ``__init__`` lives in the pseudo-file ``<string>``, which the
+    attribution walk cannot step over — it matches no package prefix, so the
+    walk stops there — and which a hand-counted ``stacklevel`` can only count
+    past for one nesting depth. :class:`Biological` builds layers from tuples
+    inside its own constructor, so there are two depths and no single count
+    covers both. Written out, every frame between the warning and the user is
+    an ordinary ``absorption.py`` frame that :data:`USER_FRAME_SKIP` steps
+    over, and both entry points land on the caller. ``@dataclass`` still
+    supplies ``__repr__`` / ``__eq__`` / ``fields()`` from the annotations
+    below; a test pins the signature against them.
     """
     z_top_m: float
     z_bottom_m: float
@@ -366,7 +587,13 @@ class BiologicalLayer:
     Q: float
     a0: float
 
-    def __post_init__(self):
+    def __init__(self, z_top_m: float, z_bottom_m: float, f0_hz: float,
+                 Q: float, a0: float):
+        self.z_top_m = z_top_m
+        self.z_bottom_m = z_bottom_m
+        self.f0_hz = f0_hz
+        self.Q = Q
+        self.a0 = a0
         if self.z_bottom_m <= self.z_top_m:
             raise ConfigurationError(
                 "BiologicalLayer: z_bottom_m must be strictly greater than "
@@ -385,9 +612,39 @@ class BiologicalLayer:
             raise ConfigurationError(
                 f"BiologicalLayer: a0 must be positive (dB/km); got {self.a0}"
             )
+        # The Lorentzian peaks at f = f0, where the denominator is 1/Q², so
+        # a0*Q² is the most absorption this layer can present to CRCI. Taken
+        # to dB/wavelength at f0 it meets the same package-wide ceiling the
+        # seabed and surface carriers are held to.
+        peak_db_km = float(self.a0) * float(self.Q) ** 2
+        peak_db_lambda = float(convert_attenuation_units(
+            peak_db_km, float(self.f0_hz), 'dB/km', 'dB/wavelength',
+            sound_speed=DEFAULT_SOUND_SPEED))
+        if peak_db_lambda > MAX_ATTENUATION_DB_PER_WAVELENGTH:
+            ceiling_db_km = peak_db_km * (
+                MAX_ATTENUATION_DB_PER_WAVELENGTH / peak_db_lambda)
+            warnings.warn(
+                f"BiologicalLayer: the on-resonance peak a0*Q² = "
+                f"{peak_db_km:g} dB/km is {peak_db_lambda:g} dB/wavelength at "
+                f"f0={self.f0_hz:g} Hz in {DEFAULT_SOUND_SPEED:g} m/s water, "
+                f"over the {MAX_ATTENUATION_DB_PER_WAVELENGTH:.4f} above which "
+                f"misc/AttenMod.f90's CRCI (:116) finds an imaginary sound "
+                f"speed larger than the real part and aborts. A run at or near "
+                f"f0 will fail in every AT solver; the ceiling here is "
+                f"{ceiling_db_km:g} dB/km, and scales with the water sound "
+                f"speed over the layer.",
+                # The walk, not a count: this constructor is reached from a
+                # user's ``BiologicalLayer(...)`` and from the normalising
+                # loop in ``Biological.__init__`` one frame further down, and
+                # a hand count is right for only one of the two. Naming a
+                # uacpy line is not merely untidy — ``warnings`` keys its
+                # once-per-location registry on the attributed file and line,
+                # so every ``Biological(...)`` in a program would collapse
+                # onto the loop's line and only the first would be shown.
+                UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
 
 
-@dataclass
+@dataclass(init=False)
 class Biological(Absorption):
     """Layered biological volume attenuation (fish-bladder resonance).
 
@@ -396,13 +653,23 @@ class Biological(Absorption):
     layers : list of BiologicalLayer or tuples
         Each entry can be a :class:`BiologicalLayer` or a 5-tuple
         ``(z_top, z_bottom, f0, Q, a0)``.
+
+    Notes
+    -----
+    The ``__init__`` is written out for the reason :class:`BiologicalLayer`
+    gives: a tuple entry is turned into a layer *here*, so a generated
+    ``__init__`` would put its un-attributable ``<string>`` frame between that
+    layer's ceiling warning and the user, and stop the attribution walk on it.
     """
     layers: List[BiologicalLayer] = field(default_factory=list)
 
-    def __post_init__(self):
+    def __init__(self,
+                 layers: Optional[List[Union[BiologicalLayer, Tuple]]] = None):
+        # Called directly rather than through a generated ``__init__``; it is
+        # the abstract-base guard every ``Absorption`` subclass runs.
         Absorption.__post_init__(self)
         normalized: List[BiologicalLayer] = []
-        for entry in self.layers:
+        for entry in layers or []:
             if isinstance(entry, BiologicalLayer):
                 normalized.append(entry)
             else:
@@ -427,7 +694,7 @@ class Biological(Absorption):
             for layer in self.layers
         ]
 
-    def alpha_db_per_m(
+    def _alpha_db_per_m(
         self,
         frequency: float,
         depths: _ArrayLike,
@@ -435,12 +702,13 @@ class Biological(Absorption):
         # Sum each layer's Lorentzian resonance over the depths it spans.
         # Matches AttenMod.f90: a = a0 / ((1 - f0²/f²)² + 1/Q²) in dB/km.
         f = float(frequency)
-        if f <= 0:
-            raise ConfigurationError(
-                f"alpha_db_per_m: frequency must be > 0 Hz; got {frequency}"
-            )
         z = np.atleast_1d(np.asarray(depths, dtype=float))
         a_km = np.zeros(z.shape, dtype=float)
+        # Each layer spans the closed interval [z_top, z_bottom] and is
+        # tested independently, exactly as the AttenMod.f90:102-109 loop
+        # tests ``z >= Z1 .AND. z <= Z2`` per layer and sums — so a depth
+        # exactly on a boundary two stacked layers share receives both
+        # layers' contributions.
         for layer in self.layers:
             in_layer = (z >= layer.z_top_m) & (z <= layer.z_bottom_m)
             denom = (1.0 - layer.f0_hz ** 2 / f ** 2) ** 2 + 1.0 / layer.Q ** 2
@@ -467,19 +735,18 @@ class ConstantAbsorption(Absorption):
                 f"ConstantAbsorption.value_db_per_wavelength must be "
                 f"non-negative; got {self.value_db_per_wavelength}."
             )
+        _require_attenuation_in_range(
+            self.value_db_per_wavelength,
+            "ConstantAbsorption.value_db_per_wavelength")
 
     def topopt_code(self) -> str:
         return ' '
 
-    def alpha_db_per_m(
+    def _alpha_db_per_m(
         self,
         frequency: float,
         depths: _ArrayLike,
     ) -> np.ndarray:
-        if frequency <= 0:
-            raise ConfigurationError(
-                f"alpha_db_per_m: frequency must be > 0 Hz; got {frequency}"
-            )
         depths = np.atleast_1d(np.asarray(depths, dtype=float))
         # dB/wavelength → dB/m at this frequency (flat in depth). No SSP is
         # carried here, so the conversion uses the reference sound speed.

@@ -3,13 +3,58 @@
 This document summarizes all changes applied to the original Fortran/C source
 code shipped with uacpy, with exact diffs.
 
+Patching a vendored file shifts the line numbers uacpy's comments cite into
+it. See `docs/DEV.md` §9.1 for what a patch owes those citations.
+
 ---
+
+## Collins RAM family — double-precision build
+
+`ramgeo1.5.f`, `ramsurf1.5.f` and `rams0.5.f` are built with
+`-fdefault-real-8 -fdefault-double-8` (their `Makefile`s), and the six explicit
+kind-declaration lines at the three `epade` interfaces are promoted to match:
+
+| file | was | now |
+|---|---|---|
+| `ramgeo1.5.f:451,453` | `complex*8 pd1,pd2` / `real*4 k0,c0,dr` | `complex*16` / `real*8` |
+| `ramsurf1.5.f:461,463` | same | same |
+| `rams0.5.f:900,901` | `complex*8 ci8,g0,pd1,pd2,nu8` / `real*4 k0,c0,dr,theta` | `complex*16` / `real*8` |
+
+**Why.** Collins' own guide (`mpiramS/doc/ram.pdf` §3) states the stock policy —
+*"The subroutines that compute the coefficients of the rational approximation are
+written in double precision. Everything else is written in single precision"* —
+and its limit: *"Double precision is required for both ram.f and ramp.f when the
+number of depth grid points is large."* `matrc` scales its discretisation terms
+as `1/dz**2` while the physical terms stay O(0.1), so on a fine grid each matrix
+entry becomes a small difference of large numbers. Measured on a 250 Hz Pekeris
+guide against KrakenC, refining `dz` made the answer **worse**:
+
+| `dz` (m) | single build | double build |
+|---|---|---|
+| 0.1 | 0.192 dB | 0.163 dB |
+| 0.025 | 0.486 dB | 0.116 dB |
+| 0.0125 | **2.186 dB** | **0.106 dB** |
+
+i.e. the convergence test both manuals prescribe returned a *diverging* sequence.
+uacpy's own array widening (below) had raised the reachable grid size into that
+regime. mpiramS was already double via its `kinds.f90` patch; this brings the
+Collins trio in line.
+
+**The promotions are required, not cosmetic.** `-fdefault-real-8` does not touch
+an explicit `complex*8`/`real*4`, so without them the caller passes `complex*16`
+to an `epade` still expecting `complex*8` and the run produces NaN from the first
+range step — it does not degrade quietly.
+
+**Consequence for readers.** `tl.grid` and `pcomplex.bin` are now 8-byte records;
+`io/ramsurf_reader.py` reads `'f8'`/`'c16'` accordingly. Every RAM number moves
+slightly.
+
 
 ## Acoustics Toolbox (Bellhop, Kraken, Scooter, Bounce, SPARC)
 
 Vendored from https://github.com/oalib-acoustics/Acoustics-Toolbox at commit
-`8b4682b` ("sync with 2024_12_25 sources" plus repo housekeeping). One source
-patch is applied:
+`8b4682b` ("sync with 2024_12_25 sources" plus repo housekeeping). Two source
+patches are applied:
 
 ### `KrakenField/field.f90` -- out-of-bounds sentinel fix
 
@@ -19,8 +64,13 @@ patch is applied:
 `.AND.` does not short-circuit).  However, `ReadVector` (in
 `misc/SourceReceiverPositions.f90`) only allocates `MAX(3, NProf)` elements,
 so for `NProf >= 3` the access to `rProf(NProf + 1)` goes past the end of
-the array.  Every range-dependent KrakenField run (coupled or adiabatic,
-`n_segments >= 3`) hits this.  Submitted upstream from the ErVuL fork as
+the array.  The adiabatic path hits it unconditionally: `EvaluateADMod.f90:43`
+writes the sentinel at initialization on every `NProf >= 3` run.  The coupled
+path (`EvaluateCMMod.f90:68,86`) reads `rProf(NProf + 1)` only once a
+receiver range lies beyond the last profile interface — though passing the
+`NProf`-element actual to the `NProf + 1` explicit-shape dummy is
+non-conforming on every coupled call (a bounds-checked build flags the call
+itself).  Submitted upstream from the ErVuL fork as
 branch `fix-field-rprof-out-of-bounds`.
 
 **Fix:** after `ReadVector` returns, reallocate `rProf` with `NProf + 1`
@@ -48,6 +98,81 @@ elements and set `rProf(NProf + 1) = HUGE(rProf(1))`.
    ELSE
 ```
 
+### `misc/interpolation.f90` -- non-terminating segment search
+
+`interp1` walks a segment index `iseg` over the tabulated abscissa `x(1:N)`.
+Valid segments are `1 : N-1`, but the right-hand search clamps at `N-2`:
+
+```fortran
+DO WHILE ( xi( I ) > x( iseg + 1 ) )
+   IF ( iseg < N - 2 ) THEN
+      iseg = iseg + 1
+   END IF
+END DO
+```
+
+Once `iseg` is clamped the `IF` stops incrementing while the `DO WHILE`
+keeps testing the same condition, so **any query point in the final segment
+`[x(N-1), x(N)]` loops forever**.  The left-hand search has the same defect
+at `iseg == 1` for any query below `x(1)`.  Neither hangs on typical input:
+a finely sampled table makes the final segment a narrow sliver, and the
+callers query well inside the range.  It is reachable from
+`KrakenField/field.f90:198`, which shades modes by a `.sbp` source beam
+pattern at angles `RadDeg*ATAN(SQRT(kz2)/k)` — bounded by the critical
+angle, so a *coarse* pattern (e.g. the three points `-90, 0, 90`) puts
+`x(N-1)` at `0` deg and every mode angle then spins.  Reproduced standalone:
+with `x = [-90,-45,0,45,90]`, `xi = 30` returns, `xi = 70` never does.
+`Bellhop` is unaffected — `bellhop.f90:267-274` does its own `maxloc`
+bracket search and never calls `interp1`.
+
+**Fix:** move the clamp into the loop condition, so each search stops when
+`iseg` can no longer move, making the last segment reachable.  Out-of-table
+queries are handled by the separate `R` clamp described below.  Other callers:
+`Scooter/fields.f90`,
+`KrakenField/EvaluatepdqMod.f90`, `KrakenField/Evaluate3DMod.f90`.
+
+**Why `N-1` is the intended bound, not `N-2`.**  `Bellhop/bellhop.f90:265-274`
+performs the same operation — bracket a beam-pattern angle, then interpolate
+linearly — but hand-rolled rather than via `interp1`, and clamps its segment
+index explicitly:
+
+```fortran
+IBP = MAX( IBP, 1 )               ! don't go before beginning of table
+IBP = MIN( IBP, NSBPPts - 1 )     ! don't go past end of table
+```
+
+Same codebase, same author, same task, bound `N-1`, with the comment stating
+the intent.  Bellhop's own out-of-range behaviour is to extrapolate: with `IBP`
+pinned at `NSBPPts-1` and an angle past the table its `s` exceeds 1, and below
+the table `s` goes negative.
+
+Note that extrapolating a beam pattern can yield a negative shading factor
+(a query past the table on a decaying pattern gives e.g. `-0.167`).  That is
+pre-existing AT behaviour.  The interpolation parameter is therefore clamped to
+`[0, 1]` here, so an out-of-table query holds the end value instead of
+extrapolating:
+
+```diff
+-       R       = ( xi( I ) - x( iseg ) ) / ( x( iseg + 1 ) - x( iseg ) )
++       R       = ( xi( I ) - x( iseg ) ) / ( x( iseg + 1 ) - x( iseg ) )
++       R       = MIN( MAX( R, 0.0D0 ), 1.0D0 )
+        yi( I ) = ( 1.0 - R ) * y( iseg ) + R * y( iseg + 1 )
+```
+
+The clamp is inert for in-range queries — verified bit-identical before and
+after (`xi = 30` on `x = [-90,-45,0,45,90]` gives `0.66666666666666674` either
+way); it only changes queries outside `[ x(1), x(N) ]`.
+
+The equivalent inline interpolation in `Bellhop/bellhop.f90:273` and
+`Bellhop/bellhop3D.f90` is **deliberately left unclamped**.  Bellhop has three
+implementations — the Fortran binary plus `bellhopcxx` / `bellhopcuda`, and
+`Bellhop(backend=None)` selects CUDA first — and the port extrapolates too:
+`bellhopcuda/src/common_run.hpp:61-80` returns `0` below the table and `n-1`
+above, `trace.hpp:139` clamps only that *index* to `n-2`, and `trace.hpp:144`
+uses `s` unclamped.  Clamping one of three back ends would make the same input
+shade differently depending on `backend=`, which is worse than the uniform
+pre-existing behaviour.  `interp1` has no such counterpart.
+
 ### Root `Makefile` -- intentionally unpatched
 
 The upstream root `Makefile` bakes a CPU-specific flag into its default
@@ -72,7 +197,9 @@ Fortran solvers actually built by `install.sh` are:
 
 `ram1.5.f` (Collins's original fluid PE) is also vendored as a
 reference but is not built — uacpy's RAM dispatcher uses mpiramS for
-that regime. `ramclr.f` (PostScript plotter) and the autotools
+that regime. The file is byte-identical to quiet-oceans upstream; its
+`parameter (mr=505,mz=8000,mp=10)` (`ram1.5.f:53`) is upstream stock, not
+a uacpy patch. `ramclr.f` (PostScript plotter) and the autotools
 artefacts (`configure.ac`, `Makefile.am`) are kept untouched alongside
 a plain top-level `Makefile` actually used for the build. LICENSE is
 kept verbatim.
@@ -88,7 +215,8 @@ writes `u·f3 / sqrt(r)`, while `rams0.5.f` writes `u / sqrt(r)` (its
 `outpt` takes no `f3` argument). They also differ in the travelling-wave
 carrier `exp(+i k0 r)` — baked into `u` in `rams0.5.f` (via the `g0`
 march step), factored out in `ramsurf1.5.f` — so the RAM Python wrapper
-applies a per-backend correction (conjugate ψ for both; an extra
+applies a per-backend correction (conjugate ψ and the Hankel phase
+`exp(-iπ/4)` for both, `models/_pe_phase.py:135,156,175`; an extra
 `exp(-i k0 r)` for ramsurf only) before tagging the result
 `phase_reference='travelling_wave'`, so every broadband-capable model
 presents the same shape of H(f) to the IFFT pipeline. See the per-binary
@@ -139,33 +267,122 @@ discussion below for the full derivation.
 
 Same shape as `ramsurf1.5.f` — open unit 11 in the main, mirror `lz`
 header into it, declare a local complex `urg(mz)` in `outpt`, store
-`ur/sqrt(r+eps)`, write the array per range step, close unit 11.
+`ur/sqrt(r+eps)`, write the array per range step, close unit 11. Its
+in-source `UACPY:` comment states rams0.5's own carrier convention —
+the `g0` factor at the end of each `solve` step bakes
+`exp(+i k0 r·rot0)` into `u`, and the wrapper applies `conj` and
+`exp(-iπ/4)` only — where ramsurf's comment describes the
+factored-out-carrier convention that holds for the fluid codes.
 
-The driver `uacpy.models.ram._run_collins_broadband` consumes
-`pcomplex.bin` via `read_pcomplex_grid` and assembles
-`Field(field_type='transfer_function')` by looping the binary over the
-Q/T-derived frequency vector. The complex envelope is bit-exact w.r.t.
-the existing `tl.grid` magnitude (`-20·log10(|pcomplex|)` reproduces
-`tl.grid` to 0.0000 dB on a Pekeris reference run).
+Both Collins drivers consume `pcomplex.bin` via `read_pcomplex_grid`:
+`uacpy.models.ram.RAM._run_collins` for narrowband `COHERENT_TL`, and
+`RAM._run_collins_broadband` for `BROADBAND` / `TIME_SERIES`, which loops
+the binary over the Q/T-derived frequency vector and assembles a
+broadband `Field` (complex `data` over `coords={depth, range,
+frequency}`). Every Collins-backend
+run returns complex pressure, so a binary built from unpatched sources
+does not degrade to real TL — it fails outright, with the wrapper
+naming `pcomplex.bin` and telling the user to rebuild. The complex
+envelope is bit-exact w.r.t. the existing `tl.grid` magnitude
+(`-20·log10(|pcomplex|)` reproduces `tl.grid` to 0.0000 dB on a Pekeris
+reference run).
 
 `rams0.5.f` and `ramsurf1.5.f` store *different* envelopes despite the
 identical-looking `outpt` patch: rams0.5's `solve(... g0)` multiplies
-the field by `g0 = exp(i k₀ Δr)` at every range step (`rams0.5.f:830-831`),
+the field by `g0 = exp(i k₀ Δr)` at every range step (`rams0.5.f:849-850`),
 so its `u` accumulates the full `exp(+i k₀ r)` carrier — same
 convention as mpiramS' `psif`. ramsurf1.5's `solve` has no `g0`
 argument (`ramsurf1.5.f:310`); the carrier is absorbed into the
 matrix coefficients by the operator function
-`g(x) = (1−νx)²·exp(α·log(1+x) + i σ (√(1+x)−1))` (`ramsurf1.5.f:564`),
+`g(x) = (1−νx)²·exp(α·log(1+x) + i σ (√(1+x)−1))` (`ramsurf1.5.f:566-567`),
 so its `u` carries no `exp(+i k₀ r)`. ramsurf1.5 stores
 `u · f3 / sqrt(r+eps)` (the density-jump-rescaled, range-rescaled
 envelope; matches what `tlg` is computed from). Since `f3 ∈ ℝ`, the
 wrapper's `conj(H) · exp(−i k₀ r)` post-multiply still recovers the
 engineering travelling-wave convention.
 `_run_collins_broadband` therefore branches on `kind`: rams gets
-`np.conj(H)` only, ramsurf gets `np.conj(H) · exp(−i k₀(ω) r)`. After this convention bookkeeping all
+`np.conj(H) · exp(−iπ/4)`, ramsurf gets
+`np.conj(H) · exp(−i k₀(ω) r) · exp(−iπ/4)` — the `exp(−iπ/4)` is the
+Hankel-asymptotic cylindrical-spreading phase both Collins branches
+apply (`models/_pe_phase.py:135,156,175`; mpiramS bakes it into `psif`
+itself). After this convention bookkeeping all
 three RAM backends land the IFFT peak at `r/c₀` (matching JKPS
 *Computational Ocean Acoustics* §8.2 eq. 8.1–8.4 within real
 waveguide modal dispersion ~20 ms).
+
+### `ramsurf1.5.f` — array dimensions (upstream stock)
+
+The declaration reads:
+
+```fortran
+      parameter (mr=505,mz=20002,mp=10)   ! ramsurf1.5.f:24
+```
+
+These are quiet-oceans upstream's stock values — uacpy applies no dimension
+change to this file (the full vendored-vs-upstream diff holds only the
+`outpt` patch above and the two `epade` kind promotions). They give a usable
+depth grid of `nz ≤ 20000` (the code indexes to `nz+2`, as the other fluid
+backends do), and they are the size ramgeo's genuine enlargement (see the
+ramgeo section) was matched *to*. Of the three files vendored from
+quiet-oceans, only `rams0.5.f` (below) carries a uacpy dimension patch.
+
+Upstream's own bounds checks (`Need to increase parameter …`,
+`ramsurf1.5.f:124-132`) are left as they are: their conditions are written
+against `nz+2` / `np` / `i`, so they keep working at the larger dimensions and
+still stop the run rather than overrun. `uacpy.models.ram._COLLINS_ARRAY_LIMITS`
+carries the matching per-backend limit and `tests/test_ram_backends.py` asserts
+the two agree by parsing these guard expressions out of the source.
+
+### `rams0.5.f` — enlarged array dimensions and bounds checks
+
+Stock RAMS dimensions `parameter (mr=100,mz=10000,mp=10)` are too small for
+uacpy's Lytaev grids, and unlike its siblings rams0.5 shipped with **no
+bounds checks at all**, so an overrun corrupted memory instead of failing.
+Both are fixed:
+
+```diff
+-      parameter (mr=100,mz=10000,mp=10)
++      parameter (mr=505,mz=40004,mp=10)
+```
+
+```diff
++      if(2*nz+4.gt.mz)then
++      write(*,*)'   Need to increase parameter mz to ',2*nz+4
++      stop
++      end if
++      if(np.gt.mp)then
++      write(*,*)'   Need to increase parameter mp to ',np
++      stop
++      end if
++      if(i.gt.mr)then
++      write(*,*)'   Need to increase parameter mr to ',i
++      stop
++      end if
+       do 3 i=1,2*nz+4
+```
+
+**Why `mz` is 40004 here but 20002 for the fluid codes.** rams0.5 is elastic
+and interleaves the field vector, so it indexes the depth arrays to `2*nz+4`
+(the stock field-init loop `do 3 i=1,2*nz+4` at `rams0.5.f:154`, and `2*nz`
+at `:690-692`, `:795-842`) where ramgeo/ramsurf index `nz+2`. `mz=40004`
+therefore gives all three the same usable depth grid, `nz ≤ 20000`. Cost in
+the double-precision build uacpy ships is ~95 MB of static arrays (measured:
+`size rams0.5` reports 94 729 504 B of BSS, of which the 14 `(mz,mp)`
+`complex*16` arrays account for ~90 MB) — about 4× the stock `mz=10000`
+footprint; single-precision accounting would halve both figures.
+
+The bounds-check condition is `2*nz+4`, not the `nz+2` its siblings use —
+copying theirs would have understated rams' capacity by 2×.
+`uacpy.models.ram._COLLINS_ARRAY_LIMITS` carries the same per-backend rate,
+and `tests/test_ram_backends.py` asserts the two agree by parsing these
+guard expressions out of the sources.
+
+Verified inert: on an input that fits the stock dimensions, builds from the
+pre-patch and post-patch sources produce **byte-identical** `tl.grid` and
+`pcomplex.bin`. (Note separately that a rebuild on a newer gfortran than the
+one that produced a given binary shifts TL by ~0.005 dB — `mz` is the leading
+dimension of the `(mz,mp)` arrays, so it also changes column stride and hence
+vectorisation. Both effects are far below any physical tolerance.)
 
 ### Build system
 
@@ -227,8 +444,9 @@ envelope `u·f3 / sqrt(r)` to a parallel `pcomplex.bin`, mirroring
 `tl.grid`'s record geometry — **the identical envelope and convention as
 `ramsurf1.5.f`** (carrier `exp(+i k0 r)` factored out; the Python wrapper
 applies the same `'ramsurf'` correction in `psi_to_travelling_wave`). This
-is what lets a forced `RAM(backend='ramgeo')` serve `BROADBAND` /
-`TIME_SERIES`, not just `COHERENT_TL`.
+is what lets `RAM(backend='ramgeo')` return complex pressure for
+`COHERENT_TL` and serve `BROADBAND` / `TIME_SERIES` — every mode reads
+`pcomplex.bin`, so an unpatched binary fails all three.
 
 ```diff
        open(unit=3,status='unknown',file='tl.grid',form='unformatted')
@@ -264,7 +482,7 @@ build works on any machine with gfortran installed.
  ###########################################
  # Gnu g77/gfortran options (64 bit)
 -FC = /usr/bin/gfortran-13
-+FC = gfortran
++FC ?= gfortran
  
  #FFLAGS = -march=native -mtune=native -fopenmp -m64 -mfpmath=sse -I $(MODDIR) -Wall -finline-functions -ffast-math -fno-strength-reduce -falign-functions=2  -O3 -fomit-frame-pointer 
  #FFLAGS = -g -pg -march=native -fopenmp -m64 -mfpmath=sse -I $(MODDIR) -Wall 
@@ -353,6 +571,67 @@ Same `0 * NaN` fix as `matrc.f90`.
    nz1=nz+1
 ```
 
+### `src/epade.f90` -- safe zero initialization
+
+Same `0 * NaN` hazard as `matrc.f90` / `solvetri.f90`, in the Padé work
+arrays (allocated and deallocated on every `epade` call, so they land on
+recycled heap). `bin` is fully rewritten by the explicit fills below it,
+but `a`'s fills set only the odd column `2*ii-1` and the even columns
+`2*jj (jj<=ii)` of each row — the remaining entries hold their initial
+value, and `gauss`/`pivot` read the full active submatrix. With the
+multiply form, NaN/Inf residue on the heap lands in the Padé
+coefficients (measured: a NaN-poisoned heap turns all `pdu`/`pdl`
+entries NaN with the multiply form, none with the assignment form).
+
+```diff
+ allocate(bin(n+1,n+1))
+-bin=0.0_wp2*bin
++! zero by assignment: allocate does not initialise, and 0*NaN=NaN
++bin=0.0_wp2
+```
+
+```diff
+-  ! zero a!
+-  a=0.0_wp2*a
++  ! zero a by assignment (gauss reads the entries the fills below skip)
++  a=(0.0_wp2,0.0_wp2)
+```
+
+### `src/splnlib.f90` -- per-call bisection start in `interv`
+
+De Boor's PPPACK `interv` keeps its bracket start `ilo` in `SAVE` as a
+warm-start hint from the previous call. The build is `-fopenmp` and
+`splnlib.f90` carries no OpenMP directive, so under the `peramx.f90`
+frequency loop (`!$OMP PARALLEL` … `call ram` → `profl` → `gorp2` →
+`ppvalu` → `interv`) that single `ilo` is process-shared and written
+concurrently by every thread. Between `ilo = ihi - istep` and the
+`ilo = 1` clamp the shared value is transiently non-positive, so a
+concurrent reader can index `xt(ilo)` out of bounds, and a concurrent
+write inside the bisection loop can return the wrong interval with no
+diagnostic — silently wrong interpolated sound speed on any
+`OMP_NUM_THREADS > 1` run. The bracketing result never depended on the
+hint (every path re-brackets from whatever `ilo` holds), so `ilo` is a
+per-call local initialised to 1; the `interv` header comment describes
+the per-call behaviour.
+
+```diff
+-  integer, save :: ilo = 1
++  integer ilo
+   integer istep
+ ...
+   real ( kind = wp2 ) xt(lxt)
+ 
++  ilo = 1
+   ihi = ilo + 1
+```
+
+Verified: single-thread output of the rebuilt binary is bit-identical to
+a pre-fix build of the same sources on the same deck — the hint only
+ever shortened the search, never changed the bracket. This was the only
+`SAVE` variable in the built sources (the module state that *is* shared
+by design sits under `!$OMP THREADPRIVATE` in `param.f90`,
+`profiles.f90`, `fld.f90`, `mattri.f90`).
+
 ### `src/envdata.f90` -- data module for new sediment variables
 
 Added module-level variables to support the extended sediment model:
@@ -377,7 +656,7 @@ Added module-level variables to support the extended sediment model:
 -                           ! bottom properties are simple and range independent - four values.
 +
 +! Bottom sediment properties.
-+! When isedrd==0 (range-independent): cs(nzs,1), rho(nzs,1), attn(nzs,1) -- single profile.
++! When isedrd==0 (range-independent): cs(nzs,1), rho(nzs,1), attn(nzs,1) — single profile.
 +! When isedrd==1 (range-dependent):   cs(nzs,nrp_sed), rho(nzs,nrp_sed), attn(nzs,nrp_sed)
 +!   with rp_sed(nrp_sed) giving the range points (in metres).
 +integer :: isedrd                                          ! 0=range-indep, 1=range-dep sediment
@@ -390,7 +669,55 @@ Added module-level variables to support the extended sediment model:
 
 ### `src/ram.f90` -- bug fixes and range-dependent sediment
 
-#### NaN-safe initialisation (same pattern as matrc/solvetri)
+#### Sub-bottom refresh on every bathymetry change (upslope staleness)
+
+Upstream deferred rebuilding the sub-bottom arrays until the water depth had
+moved more than 20 m, with an explicitly uncertain comment:
+
+```fortran
+if (abs(izll-iz)*deltaz > 20.0_wp) then
+! The depth has changed by more than 20 m; update the bottom profiles
+! This is mainly for attenuation and density.
+! Don't need to call this for EVERY depth change! (I don't think...)
+```
+
+But `profl` fills `cw`/`cb`/`rhob`/`attn` at **absolute** depth indices and
+`matrc.f90:50-55` reads them at the current `iz`
+(`forall (id=(iz+1):(nz+2)) f1(id)=rhob(id)/alpb(id) … ksq(id)=ksqb(id)`), so
+between rebuilds up to 20 m of seabed immediately below a **rising** seafloor
+still carries **water** sound speed while being treated as bottom. Downslope is
+unaffected: there the stale band lands *above* `iz`, where `matrc` uses the
+water arrays anyway — which is why the defect is one-sided.
+
+**Fix:** rebuild whenever `iz` changes, matching what the SSP branch twenty
+lines below already does (`if (ir/=irl) … iflag=iflag+2`, no threshold).
+
+```diff
+ if (iz/=izl)  then
+      upd=1
+-     if (abs(izll-iz)*deltaz > 20.0_wp) then
+-        iflag=iflag+1
+-        izll=iz
+-     end if
++     iflag=iflag+1
++     izll=iz
+  end if
+```
+
+Measured on a 200 → 100 m wedge over 6 km, 100 Hz, `dr=10 dz=0.5 zmax=500`,
+against ramgeo on the identical grid:
+
+| | median | p90 | max |
+|---|---|---|---|
+| upslope, before | 4.38 dB | 13.58 | 29.59 |
+| upslope, after | **0.17 dB** | 0.39 | 1.11 |
+| downslope (control), after | 0.19 dB | 0.49 | 1.10 |
+
+Upslope and downslope now agree to 0.02 dB median — the asymmetry that
+identified the bug is gone. Cost is one extra `profl` call per range step where
+the seafloor index moves.
+
+#### NaN-safe initialisation and self-starter coefficient value fix
 
 ```diff
 @@ -96,8 +104,8 @@
@@ -399,7 +726,7 @@ Added module-level variables to support the extended sediment model:
      allocate(uu(nz+2))
 -    ! zero uu
 -    uu=0.0_wp*uu
-+    ! zero uu (use assignment, not multiply -- 0*NaN=NaN on uninitialized memory)
++    ! zero uu (use assignment, not multiply — 0*NaN=NaN on uninitialized memory)
 +    uu=cmplx(0.0_wp,0.0_wp,wp)
      ! Conditions for the delta function.
      zsc=1.0_wp+zsrc(1)/deltaz
@@ -426,6 +753,15 @@ Added module-level variables to support the extended sediment model:
 +    rout=0.0_wp
 ```
 
+The zeroing lines are the same `0 * NaN` hygiene as matrc/solvetri. The
+`pdu(1)`/`pdl(1)` lines are a **value fix**, not hygiene: upstream's
+two-argument `cmplx(-1.0_wp,wp)` passes the kind constant `wp = 8` as the
+*imaginary part*, so the self-starter's `(1-X)**2` smoothing coefficients
+were `(0, 8)` and `(-1, 8)` — a spurious `+8i` in the starter field. Collins'
+original sets them purely real (`doc/RAM.ORIG/ram1.5.f:440-441`:
+`pd1(1)=0.0`, `pd2(1)=-1.0`); the three-argument form restores those values
+with `wp` back in the kind slot.
+
 #### Variable declarations for range-dependent sediment
 
 ```diff
@@ -447,6 +783,16 @@ Added module-level variables to support the extended sediment model:
 The original set `rnow = rg(1)` (first output range), which skipped PE
 self-starter propagation from range zero.  The modified version keeps
 `rnow = 0` so the field is correctly marched from the source.
+
+Side effect, recorded because nothing else states it: `rnow` is read four
+lines later by `rsc = abs(rend - rnow) - rs` (`ram.f90:68`), so on a
+multi-range output grid `rsc` becomes `rg(nr) - rs` where upstream it was
+`rg(nr) - rg(1) - rs`. That makes the `ram.f90:251` stability-constraint
+branch fire slightly earlier. It fires within the first output segment
+either way — the branch compares the distance left to the *current* output
+range rather than the absolute range marched, which is what makes
+`rs_stability` largely inert on a multi-range grid (upstream behaviour;
+`RAM._warn_rs_stability_inert_on_a_multi_range_grid` warns about it).
 
 ```diff
 @@ -59,7 +59,6 @@
@@ -599,6 +945,129 @@ range when `isedrd == 1`.
    end if
 ```
 
+#### March step never restored after a partial step
+
+`dr` is set once, outside the march loop (`dr=deltar` at `:63`, with the sign
+flip at `:66`); the only other assignment is `dr=rend-rnow` inside the
+output-range loop. That branch shrinks the step to the remainder needed to land
+exactly on an output range — and nothing restores it. Every later output range
+therefore marched at that leftover step.
+
+Because uacpy writes **every receiver range** into `ranges.dat`, the cost of a
+march grew with the *number of output ranges* rather than with range. Measured
+on a 100 m Pekeris waveguide at 250 Hz over the same 10 km, `OMP_NUM_THREADS=1`:
+
+| output ranges | before | after |
+|---|---|---|
+| 1 | 0.576 s | 0.576 s |
+| 10 | 1.870 s (3.2x) | 0.669 s (1.2x) |
+| 50 | 8.700 s (15.1x) | 1.067 s (1.9x) |
+
+Left alone, this is a cost defect and not an accuracy one — the shrunken step
+is *smaller*, so TL moved by only ~2e-4 dB. But it also meant the marched `dr`
+was not the `dr` uacpy resolves and reports in the `Result` metadata.
+
+> **Correction.** Two claims first recorded here were wrong, and both are
+> measured below in *Remainder tested against the live step*.
+>
+> 1. "A cost defect, not an accuracy one" describes the *upstream* code. It
+>    does not describe this patch: restoring the step is what made an
+>    **overshoot** possible, because the test above it compared the remainder
+>    against the live `dr` rather than against `deltar`. Upstream, `dr` only
+>    ever shrinks, so the march can never pass its target at any grid. This
+>    patch is what put the accuracy defect there; the entry below is what
+>    closes it, and the two belong together.
+> 2. "After the fix TL at a given range is bit-identical however many other
+>    output ranges are requested" is false and stays false, though the
+>    magnitude is now negligible. mpiramS lands on each requested range, so
+>    the output grid decides how each leg is decomposed into Padé steps, and a
+>    rational approximant of `exp` does not compose exactly. At the 61 ranges
+>    common to a 25 m and a 50 m output grid over the same water — same
+>    source, same `dr=40` — the two runs disagreed by **3.585 dB median /
+>    20.755 dB max** with only this patch applied, and by **5.96e-6 dB median
+>    / 3.83e-5 dB max** with both. Pinned by
+>    `test_ram_backends.TestTlDoesNotDependOnTheOutputGrid`.
+
+**Fix:** restore the full step when it has been shrunk, as the `else` of the
+same test, reusing that branch's `upd=1` so `matrc` rebuilds the matrices for
+the restored `dre`.
+
+```diff
+       if (abs(rend-rnow)<abs(dr)) then
+         dr=rend-rnow
+         dre=abs(dr)
+         ip=1
+         call epade
+         upd=1
++      else if (abs(abs(dr)-abs(deltar))>tiny(deltar)) then
++        dr=sign(deltar,rend-rnow)
++        dre=abs(dr)
++        ip=1
++        call epade
++        upd=1
+       end if
+```
+
+#### Remainder tested against the live step, so the march overshot its target
+
+The shrink test above compares the remainder against `dr` — the loop's live,
+possibly already-shrunk step — rather than against `deltar`. On its own that is
+harmless, because upstream `dr` only ever shrinks and a remainder can never
+exceed it. Paired with the step restore added above it is not: after a shrink,
+an output range whose remainder is longer than that leftover step but shorter
+than `deltar` fails the test, falls into the restore branch, and is marched a
+full `deltar` **past** its own target. The next iteration shrinks to the
+*negative* remainder and walks "backward" onto the range it missed.
+
+Nothing conjugates the field for a backward step. `dre=abs(dr)` at `:189`,
+`:201` and `:255` strips the sign, and `epade` builds its coefficients from
+`dre`, so the backward step applies a **forward** propagator — the field is
+marched further away from the source, not back toward it, and is then written
+out under the label of a range it has already passed. That `epade` is sign-aware
+is not an inference: the self-starter's own deliberate backward step at `:134`
+writes `dre=-abs(dr)`. `grep -rn conjg src/` is empty.
+
+The misplacement accumulates over the march, so "roughly twice as far" — the
+step doubles — understates it badly. On uacpy's own 200 m / 25 Hz
+pressure-release fixture (121 output ranges at 25 m, auto `deltar` = 305.8 m),
+replaying this branch exactly: half the output ranges take a backward step, and
+the field written at the last range, labelled **3300 m**, has been propagated
+**37 020 m — 11.2x its own label**.
+
+Measured with a step counter compiled into `ram.f90` (`OMP_NUM_THREADS=1`):
+
+| fixture | backward steps | total steps | median &#124;ΔTL&#124; vs the closed-form modal sum |
+|---|---|---|---|
+| auto `deltar`=305.8, 121 ranges @ 25 m | 60 | 181 | 3.548 dB |
+| …after the fix | **0** | **121** | **2.127 dB** |
+| `dr`=40 pinned, 121 ranges @ 25 m | 120 | 248 | 3.868 dB |
+| …after the fix | **0** | **128** | **1.691 dB** |
+
+The correct march is also the cheaper one: an overshoot costs a forward *and* a
+backward step per output range.
+
+**Fix:** test the remainder against `deltar`. A remainder shorter than a full
+step then shrinks onto its target, and a longer one is marched at the restored
+`deltar`, so `rnow` can never pass `rend` — at any `deltar`, on any output grid.
+No cap on `deltar` and no knowledge of the receiver grid is needed for that,
+which is what let uacpy drop its Python-side `dr` cap (`_mpirams_dr_output_cap`,
+whose own floor-less `min` over the output gaps sized a 5 000 000-step march
+from a legal 2 mm receiver pair).
+
+```diff
+-      if (abs(rend-rnow)<abs(dr)) then
++      if (abs(rend-rnow)<abs(deltar)) then
+         dr=rend-rnow
+         dre=abs(dr)
+         ip=1
+         call epade
+         upd=1
+       else if (abs(abs(dr)-abs(deltar))>tiny(deltar)) then
+```
+
+The restore branch stays: without it, `dr` never returns to `deltar` and the
+upstream cost defect above comes back.
+
 ### `src/peramx.f90` -- I/O rewrite (largest change)
 
 #### Sequential unformatted output for `psif.dat`
@@ -706,7 +1175,7 @@ characters to accommodate full paths.
  integer :: nss
  
 -integer :: nb,nzp,nrp,nrp0,n,nf1,nf
-+integer :: nb,nzp,nrp,nrp0,n,nf1,nf,nr
++integer :: nb,nzp,nrp,nrp0,nf1,nf,nr
  real(kind=wp) :: bw, fs, Nsam, df, tmp
  real(kind=wp),dimension(:),allocatable :: frq
  
@@ -715,7 +1184,7 @@ characters to accommodate full paths.
  integer :: t1,t2,cr,cm
  
 -integer :: ii,jj,iff,length
-+integer :: ii,jj,iff,ir,length
++integer :: ii,jj,iff,ir
  
  integer, parameter :: nunit=2
 -complex(kind=wp), parameter :: j=cmplx(0.0_wp,1.0_wp)
@@ -755,6 +1224,7 @@ characters to accommodate full paths.
 +read (nunit,*) np, nss                ! np-# pade coefficients, ns-# stability terms
 +read (nunit,*) rs                     ! stability range (m)
 +read (nunit,*) dzm                    ! output depth decimation (integer)
++read (nunit,*) c0_user                ! PE reference speed (m/s); must be positive
 +read (nunit,'(a)') name1              ! sound speed filename
 +name1=trim(adjustl(name1))
 +read (nunit,*) iflat                  ! 0=no flat earth transform, 1=yes
@@ -774,12 +1244,26 @@ the input parsing block above -- it is replaced by the external ranges file
 
 `sedlayer`, `nzs`, `cs`, `rho`, `attn` and the range-dependent sediment flag
 `isedrd` are now read from `in.pe`.  Supports an optional external sediment
-profile file when `isedrd == 1`.
+profile file when `isedrd == 1`.  `nzs` is validated as it is read: values
+below 4 stop the run with an error naming the minimum (the same loud-stop
+pattern as `c0_user`), since `profl`'s layout needs at least [surface,
+seafloor, one interior point, domain floor] and `nzs = 1` would write
+`zwork(2)` past the end of a 1-element allocation.
+`uacpy.io.mpirams_writer.write_inpe` enforces the same bound before a deck
+is written.
 
 ```diff
 +! Read bottom properties (sedlayer, nzs, cs, rho, attn)
 +read (nunit,*) sedlayer
 +read (nunit,*) nzs
++! profl lays the sediment control points out as [surface, seafloor,
++! nzs-3 interior, domain floor] and stores zwork(2) unconditionally
++! (ram.f90:334-342), so nzs below 4 cannot express the layout and
++! nzs=1 would write past the end of a 1-element array.
++if (nzs < 4) then
++   print *, 'ERROR: nzs must be at least 4 in in.pe (got ', nzs, ')'
++   stop 1
++end if
 +read (nunit,*) isedrd
 +
 +if (isedrd==1) then
@@ -931,8 +1415,8 @@ sediment properties echoed.  Debug print for `c0`/`cmin` added.
 ```
 
 ```diff
-@@ -196,6 +277,7 @@
- c0=sum(cw)/n
+@@ (peramx.f90:293-296)
+ c0=c0_user
  ic0=1.0_wp/c0
  cmin=minval(cw)     ! minimum sound speed for calculating tdelay
 +print '(a,f10.2,a,f10.2)', 'c0=',c0,' cmin=',cmin
@@ -1031,66 +1515,33 @@ modified version wraps it in `if (iflat==1)`.
 +  end if
 ```
 
----
+### `src/peramx_mpi.f90` and `Makefile.mpi` -- unbuilt, kept verbatim-upstream
 
-## Wrapper-only patches (no vendored-source change) — 2026-05-08
+`install.sh` builds only the single-processor target (`make` →
+`s_mpiram`); nothing builds or ships the MPI variant. `peramx_mpi.f90` is
+kept byte-for-byte at its upstream state, and it no longer compiles
+against the patched modules: `envdata.f90` declares `cs`/`rho`/`attn`
+rank-2 (`(nzs, nrp_sed)`), while `peramx_mpi.f90` still carries
+upstream's hardcoded rank-1 4-point bottom block (`allocate(cs(4))` at
+`:372`, `rho(4)` at `:382`, `attn(4)` at `:391`), so
+`make -f Makefile.mpi` stops with rank-mismatch compile errors. It also
+still reads the upstream fixed-format `in.pe` (single receiver range,
+node-weighting lines) that the I/O rewrite above replaced. It is
+retained as an upstream reference only; making it buildable would mean
+porting the whole I/O rewrite onto a code path uacpy never invokes.
 
-The following landed in this session as compensations on the Python
-wrapper side; the Fortran/C in `third_party/` was unchanged. Logged
-here so the lineage is in one place.
+### `in.pe` / `ranges.dat` -- sample deck in the current input format
 
-### mpiramS dz floor (λ_p / 16) — runtime cap
-
-`models/ram.py:_compute_grid_lytaev` now applies the same `λ_p / 16`
-acoustic dz floor to mpiramS that already gated rams0.5 / ramsurf1.5.
-Unlike the Collins backends, mpiramS is numerically stable at any dz
-— the floor is a *runtime cost* cap, not a stability constraint.
-Lytaev's accuracy budget at default ε=1e-3 can demand dz ≈ λ_p/444 at
-100 Hz / 100 m / 5 km, which makes mpiramS unusably slow on small
-problems (>30 min wall-clock).
-
-- `models/ram.py:1712-1716` — `kind in ('mpiramS', 'rams', 'ramsurf')`
-- `models/ram.py:1836-1841` — warning string differentiates the
-  reason: `mpiramS runtime cap (λ_p / 16)` vs `acoustic stability
-  (λ_p / 16)` for Collins backends. The accuracy budget is no longer
-  honoured; users override via `dr=`/`dz=` for accuracy-sensitive runs.
-
-### `RAM(Q, T)` constructor defaults None → resolve-by-mode
-
-`models/ram.py` — `Q` and `T` now default to `None` on the
-constructor. The single-frequency TL path (`_run_tl`) resolves the
-sentinel to `Q=1e6, T=1.0` (single-bin, narrowband); the broadband
-paths (`_compute_qt_for_broadband`, `_run_broadband`) resolve to
-`Q=2.0, T=10.0`. Restores the documented "Ignored in COHERENT_TL mode
-(set internally to large value)" behaviour that had drifted away from
-the docstring. Hardcoded `Q=2.0, T=10.0` had silently forced mpiramS
-to sweep ~500 frequencies per COHERENT_TL call.
-
-- `models/ram.py:200-201` — constructor `Q=None, T=None`
-- `models/ram.py:1947-2002` — `_run_tl` resolves to (1e6, 1.0)
-- `models/ram.py:2180-2202` — broadband resolves to (2.0, 10.0)
-
-### Scooter BRC RMax — wrapper bug fix
-
-`models/scooter.py:_write_scooter_env` derives Scooter's spectral
-RMax from `receiver.ranges.max() * rmax_multiplier` for all bottom
-types, matching `ReadEnvironmentMod.f90:133-140`. Scooter's RMax
-sets the wavenumber-integration grid via `Δk = π / RMax`, so the
-value must reflect the receiver geometry, not any tabulation-side
-parameter.
-
-For `acoustic_type='file'` bottoms, the phase-velocity window
-(`c_low`, `c_high`) is set on the consuming model
-(`Scooter(c_low=…, c_high=…)`); it is independent of the BRC
-tabulation grid.
-
-- `models/scooter.py` — unconditional spectral RMax derivation
-- `tests/test_elastic_boundaries.py` — regression test gating this
-
-### `output_reader.py` shim removed
-
-`io/output_reader.py` was a backward-compat shim re-exporting symbols
-from `oalib_reader` / `modes_reader` / the auxiliary boundary I/O
-modules. Removed; four model wrappers (`bellhop.py`, `kraken.py`,
-`scooter.py`, `bounce.py`) now import directly from the topic modules
-(`oalib_reader`, `modes_reader`, `bathy_io`, `refl_io`).
+The vendored sample deck is written in the format the rewritten
+`peramx.f90` reader consumes: free-format values, the `c0_user` line,
+an output-ranges file (`ranges.dat`), and the sediment block. (Upstream's
+sample targeted the MPI driver's fixed-format reads and dies on the
+current reader's first `read (nunit,*)`.) The deck drives upstream's own
+`test.ssp` / `test.bth` (kept verbatim) with the 4-point bottom model
+upstream hardcoded — `cs = 0/0/200/200`, `rho = 1.2`, `attn =
+0.5/0.5/5/5`, `sedlayer = 300` m — three output ranges, and a
+3-frequency band (`fc = 75` Hz, `Q = 75`, `T = 1` s), sized to run in
+under a second. Verified: the installed `s_mpiram` runs it to completion
+and its `psif.dat` is bit-identical to the same deck written by
+`uacpy.io.mpirams_writer.write_inpe`. Filename lines carry no trailing
+comment — `read (nunit,'(a)')` takes the whole record as the filename.

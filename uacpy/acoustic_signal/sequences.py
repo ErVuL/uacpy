@@ -4,6 +4,10 @@
 import numpy as np
 
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.acoustic_signal._signal_validate import (
+    require_below_nyquist,
+    require_positive_finite_scalar,
+)
 
 
 def bpsk_modulate(
@@ -33,6 +37,16 @@ def bpsk_modulate(
     Each binary symbol (chip) is represented by a sinusoid of length
     samples_per_chip. The phase is 0 for +1, π for -1.
 
+    One chip-length carrier is built once and replicated, so the carrier phase
+    **restarts at zero in every chip** (as in the ``bpsk.m`` original). The
+    result is phase-continuous across chip boundaries only when ``fc`` is an
+    integer multiple of ``chips_per_sec``; otherwise each boundary carries a
+    phase step that widens the transmitted spectrum.
+
+    Chip values outside {-1, +1} (a 0-valued chip emits silence — on-off
+    keying, not BPSK) and a carrier at or above ``sample_rate/2`` raise
+    :class:`~uacpy.core.exceptions.ConfigurationError`.
+
     Examples
     --------
     >>> # Binary sequence
@@ -48,19 +62,37 @@ def bpsk_modulate(
     ----------
     Original MATLAB code by Michael B. Porter, April 2000
     """
+    sample_rate = require_positive_finite_scalar(
+        sample_rate, "bpsk_modulate", "sample_rate", " Hz")
+    chips_per_sec = require_positive_finite_scalar(
+        chips_per_sec, "bpsk_modulate", "chips_per_sec", " chips/s")
     samples_per_chip = int(sample_rate / chips_per_sec)
 
     if sample_rate / chips_per_sec != samples_per_chip:
-        raise ConfigurationError("samples_per_chip must be an integer")
+        raise ConfigurationError(
+            "bpsk_modulate: samples_per_chip must be an integer; got "
+            f"sample_rate/chips_per_sec = {sample_rate:g}/{chips_per_sec:g} "
+            f"= {sample_rate / chips_per_sec:g}")
+
+    require_below_nyquist(fc, sample_rate, "bpsk_modulate", "fc",
+                          "the sampled carrier aliases")
+
+    chips = np.asarray(s_bipolar)
+    invalid = chips[~np.isin(chips, (-1, 1))]
+    if invalid.size:
+        raise ConfigurationError(
+            f"bpsk_modulate: s_bipolar must contain only +1/-1 chips; got "
+            f"{np.unique(invalid)[:5]}. A 0-valued chip emits silence, "
+            f"turning BPSK into on-off keying — map bits first with "
+            f"s = 1 - 2*bits.")
 
     deltat = 1 / sample_rate
     t_chip = np.arange(samples_per_chip) * deltat
     sinwave = np.sin(2 * np.pi * fc * t_chip)
 
-    # Outer product: each column is one chip
+    # Outer product: each column is one chip, so a column-major (Fortran-order)
+    # flatten concatenates the chips in sequence order.
     s_matrix = np.outer(sinwave, s_bipolar)
-
-    # Flatten to 1D signal
     s = s_matrix.flatten(order="F")
 
     return s
@@ -89,25 +121,42 @@ def mseq(m: int) -> np.ndarray:
     Uses shift register with feedback based on primitive polynomials.
     The resulting sequence has:
     - Length N = 2^m - 1
-    - Nearly flat autocorrelation (ideal for matched filtering)
-    - Balanced +1/-1 symbols
+    - Two-valued periodic autocorrelation (N at zero lag, -1 at every other
+      lag) — ideal for matched filtering
+    - Balanced to within one symbol: 2^(m-1) chips of -1 and 2^(m-1)-1 of +1,
+      so the sequence sums to -1 rather than 0
 
-    Formulas from Proakis, Digital Communications
+    Chips use the standard BPSK mapping ``s = 1 - 2*bit`` (bit 0 → +1,
+    bit 1 → -1), the same polarity as :func:`uacpy.comms.dsss.m_sequence`.
+    The two are **not interchangeable across a spread/despread pair**: they
+    start from different register seeds (``[1, 0, 0, 0, 0]`` here,
+    ``(1,) * n`` there), so even the tap sets that generate the same cycle
+    produce a shift of it. Despreading one function's output with the other's
+    sequence lands on the m-sequence's off-peak correlation ``-1/N`` — sign
+    inverted and collapsed by a factor of ``N`` (measured ``-0.032`` against
+    ``1.0`` at ``n = 5``). Use the same generator at both ends.
 
-    Translated from OALIB mseq.m by Michael B. Porter
+    Translated from ``third_party/Acoustics-Toolbox/Matlab/waveforms/mseq.m``
+    (Michael B. Porter, April 2000); the feedback-coefficient table and the
+    shift recursion below are that file's, which credits Proakis, *Digital
+    Communications*, p. 433. The MATLAB original maps the opposite way
+    (``s(s == 0) = -1``, i.e. bit 1 → +1), so this sequence is the negative
+    of ``mseq.m``'s — the autocorrelation is unaffected.
 
     Examples
     --------
     >>> # Generate m-sequence of order 5
     >>> s = mseq(5)
     >>> print(f"Length: {len(s)} (should be 2^5-1 = 31)")
+    Length: 31 (should be 2^5-1 = 31)
 
     >>> # Check autocorrelation
     >>> shat = np.fft.fft(s)
     >>> scorr = np.real(np.fft.ifft(shat * np.conj(shat)))
     """
     if m < 2 or m > 15 or m != int(m):
-        raise ConfigurationError("m must be an integer between 2 and 15")
+        raise ConfigurationError(
+            f"mseq: m must be an integer between 2 and 15; got {m!r}")
 
     m = int(m)
 
@@ -132,9 +181,11 @@ def mseq(m: int) -> np.ndarray:
     c = np.array(coefficients[m])
     length = 2**m - 1
 
-    # Successive shifts with feedback (Proakis p. 433)
+    # Successive shifts with feedback. Any non-zero seed traverses the same
+    # cycle (differing only by a shift); all-zero is the LFSR's absorbing state
+    # and would emit zeros forever, so it is the one seed that is excluded.
     seed = np.zeros(m)
-    seed[0] = 1  # All zero except first element
+    seed[0] = 1
     s = np.zeros(length)
 
     for ii in range(length):
@@ -144,8 +195,8 @@ def mseq(m: int) -> np.ndarray:
         seed = out
         s[ii] = out[0]
 
-    # Convert 0/1 to -1/+1
-    s[s == 0] = -1
+    # Standard BPSK mapping: bit 0 -> +1, bit 1 -> -1.
+    s = 1.0 - 2.0 * s
 
     return s
 
@@ -182,8 +233,11 @@ def make_mseq_probe(fmin: float, fmax: float, sample_rate: float, T_tot: float) 
     3. BPSK modulation at center frequency fc = (fmin + fmax) / 2
     4. Zero-padding to T_tot
 
-    Chip rate is (fmax - fmin) / 2. Output is normalized to 0.95 of
-    full scale and is exactly ``round(T_tot * sample_rate)`` samples long.
+    Chip rate is (fmax - fmin) / 2: a rectangular chip of duration ``T_chip``
+    has a sinc spectrum whose first nulls sit at ``+/- 1/T_chip``, so a chip
+    rate of half the requested width fills ``[fmin, fmax]`` between those
+    nulls. Output is normalized to 0.95 of full scale and is exactly
+    ``round(T_tot * sample_rate)`` samples long.
 
     Raises :class:`~uacpy.core.exceptions.ConfigurationError` if ``T_tot`` is
     too short to hold the leader plus one full m-sequence period — a partial
@@ -197,6 +251,7 @@ def make_mseq_probe(fmin: float, fmax: float, sample_rate: float, T_tot: float) 
     >>> # Generate 10-second probe, 1-2 kHz
     >>> probe = make_mseq_probe(1000, 2000, 10000, 10.0)
     >>> print(f"Probe length: {len(probe)} samples")
+    Probe length: 100000 samples
     """
     lead_time = 0.2  # seconds
 
@@ -204,15 +259,25 @@ def make_mseq_probe(fmin: float, fmax: float, sample_rate: float, T_tot: float) 
     fc = 0.5 * (fmin + fmax)  # center frequency
     chips_per_sec = 0.5 * (fmax - fmin)
 
+    # The BPSK main lobe spans fc +/- chips_per_sec, i.e. exactly
+    # [fmin, fmax], so its upper edge fc + chips_per_sec = fmax must sit
+    # below Nyquist.
+    if fc + chips_per_sec >= sample_rate / 2:
+        raise ConfigurationError(
+            f"make_mseq_probe: the carrier (fmin + fmax)/2 = {fc:g} Hz plus "
+            f"the chip-rate bandwidth (fmax - fmin)/2 = {chips_per_sec:g} Hz "
+            f"reaches {fc + chips_per_sec:g} Hz (= fmax), at or above the "
+            f"Nyquist frequency sample_rate/2 = {sample_rate / 2:g} Hz, so "
+            f"the sampled probe aliases.")
+
     # Generate base m-sequence (order 10 → length 1023)
     s_m = mseq(10)
     s = bpsk_modulate(s_m, fc, sample_rate, chips_per_sec)
 
     # Whole m-sequence periods that fit after the leader, counted in samples so
-    # the probe lands at exactly target_n. Counting the leader (the previous
-    # rep-count ignored it) is what keeps the probe inside T_tot; a period is
-    # never truncated, since a partial m-sequence loses the two-valued
-    # autocorrelation the probe exists for.
+    # the probe lands at exactly target_n. Counting the leader is what keeps the
+    # probe inside T_tot; a period is never truncated, since a partial
+    # m-sequence loses the two-valued autocorrelation the probe exists for.
     leader = np.zeros(int(lead_time * sample_rate))
     target_n = int(round(T_tot * sample_rate))
     Nreps = (target_n - leader.size) // len(s)

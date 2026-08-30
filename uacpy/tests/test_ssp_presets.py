@@ -27,7 +27,12 @@ class TestIsovelocity:
 
 
 class TestMackenzie:
-    def test_pure_water_surface_value(self):
+    def test_seawater_surface_value_at_the_mackenzie_reference_point(self):
+        # T=15 °C, S=35 PSU, D=0 m is the reference point of Mackenzie (1981);
+        # the nine-term polynomial collapses to its first four terms there
+        # (every S-35 and D factor vanishes) and evaluates to 1506.692225 m/s.
+        # ``abs=0.05`` only buys room to write the expectation to two decimals
+        # — the closed form leaves no discretisation error to absorb.
         z = np.array([0.0])
         T = np.array([15.0])
         S = np.array([35.0])
@@ -48,3 +53,36 @@ class TestMackenzie:
                 temperature_c=np.array([15.0]),
                 salinity_psu=np.array([35.0, 35.0]),
             )
+
+
+class TestIsovelocityShapeMustBeTrue:
+    """``resolve_ssp_topopt`` turns ``shape='isovelocity'`` into AT
+    ``TopOpt(1)='C'`` on the grounds that any connection scheme over constant
+    data is constant. That reasoning only holds if the data *is* constant, so
+    the declaration is checked rather than trusted — otherwise the deck
+    silently flattens a gradient."""
+
+    def test_a_gradient_declared_isovelocity_is_rejected(self):
+        with pytest.raises(ConfigurationError, match='isovelocity'):
+            SoundSpeedProfile.from_pairs(
+                np.array([[0.0, 1500.0], [200.0, 1400.0]]),
+                shape='isovelocity')
+
+    def test_constant_data_is_accepted(self):
+        ssp = SoundSpeedProfile.from_pairs(
+            np.array([[0.0, 1500.0], [200.0, 1500.0]]), shape='isovelocity')
+        assert ssp.shape == 'isovelocity'
+
+    def test_the_shape_does_not_swallow_an_invalid_interp(self):
+        """``resolve_ssp_topopt`` validates the model's ``interp_ssp`` before
+        the ``shape='isovelocity'`` shortcut returns ``'C'``, so an
+        unrecognised scheme raises on an isovelocity env exactly as it does on
+        any other."""
+        from uacpy.core.environment import Environment
+        from uacpy.io.oalib_writer import resolve_ssp_topopt
+        env = Environment(bathymetry=200.0, ssp=SoundSpeedProfile.from_pairs(
+            np.array([[0.0, 1500.0], [200.0, 1500.0]]), shape='isovelocity'))
+        assert resolve_ssp_topopt(env, 'linear') == 'C'
+        for bad in ('analytic', 'bogus'):
+            with pytest.raises(ConfigurationError):
+                resolve_ssp_topopt(env, bad)

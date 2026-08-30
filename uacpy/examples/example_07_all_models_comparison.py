@@ -5,9 +5,9 @@ ADVANCED EXAMPLE: All Models - Comprehensive Comparison
 
 OBJECTIVE:
     Compare ALL propagation models with advanced features:
-    - Bellhop (with Cerveny beams)
+    - Bellhop (default geometric Gaussian beams)
     - RAM (with range-dependent SSP and bottom)
-    - Kraken (with mode coupling)
+    - Kraken (with adiabatic modes)
     - Scooter (with volume attenuation)
     - OAST (wavenumber integration)
 SCENARIO:
@@ -18,10 +18,14 @@ SCENARIO:
     - All models with volume attenuation
 
 FEATURES DEMONSTRATED:
-    ✓ All 6 propagation models (including OAST)
+    ✓ All 5 propagation models (Bellhop, RAM, Kraken, Scooter, OAST)
     ✓ 2D SSP (range-dependent sound speed)
     ✓ Range-dependent bottom properties
-    ✓ Volume attenuation (Thorp) in all models
+    ✓ Volume attenuation (Thorp) where the model honours it: Bellhop, Kraken
+      and Scooter apply env.absorption; RAM and OAST do not, and say so at
+      runtime. RAM has no backend that models water-column volume attenuation;
+      OASES applies its own internal Skretting-Leroy attenuation to AC=0 water
+      layers instead of the requested formula.
     ✓ Modal model comparison (Kraken, Scooter, OAST)
     ✓ Advanced plotting (2D SSP heatmap, bottom properties)
     ✓ Statistical model comparison
@@ -31,11 +35,14 @@ FEATURES DEMONSTRATED:
 """
 
 import sys
+import os
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Repo root, so ``import uacpy`` resolves from a source checkout.
+sys.path.insert(0, str(Path(__file__).parents[2]))
 
-OUTPUT_DIR = Path(__file__).parent / 'output'
-OUTPUT_DIR.mkdir(exist_ok=True)
+OUTPUT_DIR = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
+                  or Path(__file__).parent / 'output')
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 import numpy as np  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
@@ -74,7 +81,9 @@ def main():
         # Exponential stratification
         T_profile = T_bottom + (T_surface - T_bottom) * np.exp(-depths / 40)
 
-        # Mackenzie sound speed formula (simplified)
+        # Medwin's c(T, z) truncated to its linear terms: the T² and T³ terms
+        # and the salinity term are dropped, so this is a smooth stand-in for
+        # a frontal profile rather than a calibrated seawater equation.
         c = 1449 + 4.6 * T_profile + 0.016 * depths
 
         ssp_2d_matrix[:, i_range] = c
@@ -124,8 +133,8 @@ def main():
     )
 
     print(f"  ✓ is_range_dependent: {env.is_range_dependent}")
-    print(f"  ✓ has_range_dependent_ssp: {env.has_range_dependent_ssp()}")
-    print(f"  ✓ has_range_dependent_bottom: {env.has_range_dependent_bottom()}")
+    print(f"  ✓ has_range_dependent_ssp: {env.has_range_dependent_ssp}")
+    print(f"  ✓ has_range_dependent_bottom: {env.has_range_dependent_bottom}")
 
     source = uacpy.Source(depths=50.0, frequencies=100.0)
     receiver = uacpy.Receiver(
@@ -160,18 +169,19 @@ def main():
     except Exception as e:
         print(f"  ✗ {e}")
 
-    # Kraken with mode coupling
-    print("[3/5] Kraken (adiabatic mode coupling)...")
+    # Kraken with adiabatic modes: each mode propagates independently, so the
+    # range-dependent guide costs one mode solve per segment and no more.
+    print("[3/5] Kraken (adiabatic modes, 4 segments)...")
     try:
-        krakenfield = Kraken(verbose=False, mode_coupling='adiabatic', n_segments=4)
-        results['Kraken'] = krakenfield.run(
+        kraken = Kraken(verbose=False, mode_coupling='adiabatic', n_segments=4)
+        results['Kraken'] = kraken.run(
             env, source, receiver
         )
-        print("  ✓ Success - coupled modes with range-dependent bottom!")
+        print("  ✓ Success - adiabatic modes with range-dependent bottom!")
     except Exception as e:
         print(f"  ✗ {e}")
 
-    # Scooter with volume attenuation
+    # Scooter honours env.absorption
     print("[4/5] Scooter (volume attenuation)...")
     try:
         scooter = Scooter(verbose=False)
@@ -180,7 +190,7 @@ def main():
     except Exception as e:
         print(f"  ✗ {e}")
 
-    # OAST with volume attenuation
+    # OAST substitutes its own internal water attenuation for env.absorption
     print("[5/5] OAST (wavenumber integration)...")
     try:
         oast = OAST(verbose=False)
@@ -222,7 +232,7 @@ def main():
         fig3, _ = compare_models(
             results, env=env, ncols=3, vmin=50, vmax=110,
             contours=[70, 90],
-            suptitle='All Models — TL with 70/90 dB contours',
+            title='All Models — TL with 70/90 dB contours',
         )
         fig3.savefig(OUTPUT_DIR / 'example_07_models.png', dpi=150)
         plt.close(fig3)
@@ -242,9 +252,9 @@ def main():
             if result is not None:
                 # NaN-aware: RAM masks sub-seafloor cells with NaN, so plain
                 # min/max/mean would print nan for the RAM summary line.
-                tl_min = np.nanmin(result.tl)
-                tl_max = np.nanmax(result.tl)
-                tl_mean = np.nanmean(result.tl)
+                tl_min = np.nanmin(result.db)
+                tl_max = np.nanmax(result.db)
+                tl_mean = np.nanmean(result.db)
                 print(f"  {model_name:12s}: TL range [{tl_min:5.1f}, {tl_max:5.1f}] dB, mean = {tl_mean:5.1f} dB")
             else:
                 print(f"  {model_name:12s}: Failed")
@@ -252,15 +262,17 @@ def main():
     print("\nFeatures demonstrated across all models:")
     print("  ✓ 2D range-dependent SSP (thermal front)")
     print("  ✓ Range-dependent bottom properties")
-    print("  ✓ Volume attenuation (Thorp)")
+    print("  ✓ Volume attenuation (Thorp) — applied by Bellhop, Kraken, Scooter;")
+    print("    ignored by RAM and OAST, which warn at runtime (see stderr above)")
     print("  ✓ Continental margin scenario")
     print("  ✓ Model comparison and statistics")
     print("  ✓ Advanced visualization suite")
     print("\nPlotting features demonstrated:")
     print("  ✓ Shared colorbar for multi-panel comparisons (show_colorbar=False)")
-    print("  ✓ Auto TL limits (median + 0.75σ, rounded to 10 dB)")
+    print("  ✓ Fixed TL limits, 20 to 120 dB")
     print("  ✓ Contour overlays at 70, 90 dB")
-    print("  ✓ jet_r colormap (blue=good, red=poor) - AT standard")
+    print("  ✓ jet_r colormap (red=low TL/loud, blue=high TL/quiet)"
+          " - AT standard")
     print("\n  All models tested with realistic, complex environment!")
 
     print("\n✓ Example 07 complete\n")

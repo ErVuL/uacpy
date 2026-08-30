@@ -9,13 +9,15 @@ no network. Skipped where netCDF4 is unavailable (the grid needs it).
 import numpy as np
 import pytest
 
+from uacpy.data import _cache
+
 netCDF4 = pytest.importorskip('netCDF4')
 
 import uacpy.data as data
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
-from uacpy.data import gebco_local, glodap_local, sediment_db, woa23_local
-
-_FILL = 9.96921e36
+from uacpy.data import glodap_local, sediment_db, woa23_local
+from uacpy.data import _http
+from uacpy.tests._cache_builders import _write_gebco, _write_sediment, _write_woa
 
 
 def _write_glodap(cache):
@@ -43,47 +45,12 @@ def _write_glodap(cache):
     ds.close()
 
 
-def _write_gebco(cache, *, deep=-1500.0):
-    gdir = cache / 'gebco'; gdir.mkdir(parents=True)
-    lat = np.arange(-90, 91, 1.0)
-    lon = np.arange(-180, 180, 1.0)
-    ds = netCDF4.Dataset(gdir / 'GEBCO_2025.nc', 'w')
-    ds.createDimension('lat', lat.size); ds.createDimension('lon', lon.size)
-    ds.createVariable('lat', 'f8', ('lat',))[:] = lat
-    ds.createVariable('lon', 'f8', ('lon',))[:] = lon
-    ds.createVariable('elevation', 'f4', ('lat', 'lon'))[:] = deep
-    ds.close()
-
-
-def _write_woa(cache):
-    wdir = cache / 'woa23'; wdir.mkdir(parents=True)
-    depth = np.array([0, 50, 100, 500, 1000.0])
-    def mk(var, vals):
-        arr = np.full((1, depth.size, 180, 360), _FILL)
-        arr[0, :, 120, 139] = vals                  # grid_index(30.5, -40.5)
-        ds = netCDF4.Dataset(wdir / f'woa23_decav_{var}_01.nc', 'w')
-        for d, n in [('time', 1), ('depth', depth.size), ('lat', 180), ('lon', 360)]:
-            ds.createDimension(d, n)
-        ds.createVariable('depth', 'f4', ('depth',))[:] = depth
-        name = 't_an' if var[0] == 't' else 's_an'
-        ds.createVariable(name, 'f4', ('time', 'depth', 'lat', 'lon'))[:] = arr
-        ds.close()
-    mk('t00', [18, 16, 13, 8, 5.0])
-    mk('s00', [36, 36.1, 36.2, 35.5, 35.0])
-
-
-def _write_sediment(cache):
-    sdir = cache / 'sediment'; sdir.mkdir(parents=True)
-    (sdir / 'grainsize.csv').write_text(
-        'latitude,longitude,mean_phi\n30.5,-40.5,3.0\n')
-
-
 @pytest.fixture
 def glodap_cache(tmp_path, monkeypatch):
     """Cache holding only the synthetic GLODAP pH grid."""
     root = tmp_path / 'glodap_cache'
     monkeypatch.setenv('UACPY_DATA_CACHE', str(root))
-    glodap_local._GRID.clear()
+    _cache.invalidate_grids()
     _write_glodap(root)
     return root
 
@@ -93,13 +60,13 @@ def full_cache(tmp_path, monkeypatch):
     """GEBCO + WOA23 + grain-size + GLODAP — a fully offline absorption run."""
     root = tmp_path / 'full_cache'
     monkeypatch.setenv('UACPY_DATA_CACHE', str(root))
-    gebco_local._GRID.clear()
+    _cache.invalidate_grids()
     woa23_local._DATASETS.clear()
     sediment_db._SAMPLES.clear()
-    glodap_local._GRID.clear()
+    _cache.invalidate_grids()
     _write_gebco(root)
     _write_woa(root)
-    _write_sediment(root)
+    _write_sediment(root, deck41=False, ligurian=False)
     _write_glodap(root)
     return root
 
@@ -126,7 +93,7 @@ def test_ph_land_raises(glodap_cache):
 
 def test_ph_missing_cache_names_install_flag(tmp_path, monkeypatch):
     monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path / 'empty'))
-    glodap_local._GRID.clear()
+    _cache.invalidate_grids()
     with pytest.raises(ConfigurationError, match='install.sh --data glodap'):
         glodap_local.fetch_ph((30.5, -40.5))
 
@@ -134,12 +101,14 @@ def test_ph_missing_cache_names_install_flag(tmp_path, monkeypatch):
 # ── absorption integration ────────────────────────────────────────────────────
 
 def test_with_absorption_uses_glodap_ph(full_cache):
-    # A cached GLODAP grid replaces the default pH=8.1 with the real surface
-    # value (8.10 here) and stamps 'glodap' provenance.
+    # A cached GLODAP grid replaces the default pH=8.1 with the value at the
+    # Francois-Garrison nominal-row depth (the column mid-depth — the same
+    # level its T/S row comes from; 8.05 here), and stamps 'glodap'
+    # provenance.
     env = data.fetch_environment((30.5, -40.5), ssp_sources='local',
                                  bottom_sources='grainsize',
                                  with_absorption=True)
-    assert env.absorption.pH == pytest.approx(8.10)
+    assert env.absorption.pH == pytest.approx(8.05, abs=0.01)
     assert 'glodap' in [s.source.id for s in env.data_sources]
 
 
@@ -148,13 +117,13 @@ def test_with_absorption_no_glodap_keeps_default(tmp_path, monkeypatch):
     # and records no glodap provenance (cache-first, no hard failure).
     root = tmp_path / 'no_glodap'
     monkeypatch.setenv('UACPY_DATA_CACHE', str(root))
-    gebco_local._GRID.clear()
+    _cache.invalidate_grids()
     woa23_local._DATASETS.clear()
     sediment_db._SAMPLES.clear()
-    glodap_local._GRID.clear()
+    _cache.invalidate_grids()
     _write_gebco(root)
     _write_woa(root)
-    _write_sediment(root)
+    _write_sediment(root, deck41=False, ligurian=False)
     from uacpy.data.absorption import DEFAULT_OCEAN_PH
     env = data.fetch_environment((30.5, -40.5), ssp_sources='local',
                                  bottom_sources='grainsize',
@@ -175,10 +144,10 @@ def test_curl_interrupt_leaves_no_destination(tmp_path, monkeypatch):
         Path(cmd[cmd.index('-o') + 1]).write_bytes(b'partial')
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(glodap_local.shutil, 'which', lambda n: '/usr/bin/curl')
-    monkeypatch.setattr(glodap_local.subprocess, 'run', fake_run)
+    monkeypatch.setattr(_http.shutil, 'which', lambda n: '/usr/bin/curl')
+    monkeypatch.setattr(_http.subprocess, 'run', fake_run)
     with pytest.raises(KeyboardInterrupt):
-        glodap_local._curl_download('http://x', out, timeout=5.0, verbose=False)
+        _http.curl_download('http://x', out, timeout=5.0, verbose=False)
     assert not out.exists()
 
 
@@ -191,9 +160,9 @@ def test_curl_failure_leaves_no_destination(tmp_path, monkeypatch):
         Path(cmd[cmd.index('-o') + 1]).write_bytes(b'partial')
         raise subprocess.SubprocessError("curl died")
 
-    monkeypatch.setattr(glodap_local.shutil, 'which', lambda n: '/usr/bin/curl')
-    monkeypatch.setattr(glodap_local.subprocess, 'run', fake_run)
-    assert glodap_local._curl_download('http://x', out, timeout=5.0,
+    monkeypatch.setattr(_http.shutil, 'which', lambda n: '/usr/bin/curl')
+    monkeypatch.setattr(_http.subprocess, 'run', fake_run)
+    assert _http.curl_download('http://x', out, timeout=5.0,
                                        verbose=False) is False
     assert not out.exists()
 
@@ -223,3 +192,50 @@ def test_extract_ph_non_regular_member_raises(tmp_path):
         tf.addfile(info)
     with pytest.raises(DataFetchError, match='not a regular file'):
         glodap_local._extract_ph(tar_path, tmp_path / 'out.nc')
+
+
+def _write_glodap_fillvalue(cache, fill=-999.0):
+    """GLODAP grid whose sub-seafloor level uses a real ``_FillValue``.
+
+    The other fixture masks with NaN, which ``np.isfinite`` rejects anyway —
+    so it never exercised the masked-array path. netCDF4 returns a masked
+    array here, and ``np.asarray`` on it exposes the raw -999 as if it were
+    data.
+    """
+    gdir = cache / 'glodap'
+    gdir.mkdir(parents=True, exist_ok=True)
+    depth = np.array([0.0, 500.0, 2000.0])
+    lat = np.arange(-89.5, 90.5, 1.0)
+    lon = np.arange(20.5, 380.5, 1.0)
+    ds = netCDF4.Dataset(gdir / glodap_local.GLODAP_FILE, 'w')
+    ds.createDimension('depth', depth.size)
+    ds.createDimension('lat', lat.size)
+    ds.createDimension('lon', lon.size)
+    ds.createVariable('Depth', 'f8', ('depth',))[:] = depth
+    ds.createVariable('lat', 'f8', ('lat',))[:] = lat
+    ds.createVariable('lon', 'f8', ('lon',))[:] = lon
+    v = ds.createVariable('pHtsinsitutp', 'f4', ('depth', 'lat', 'lon'),
+                          fill_value=fill)
+    data = np.full((depth.size, lat.size, lon.size), fill, dtype='f4')
+    data[0, 120, 299] = 8.10
+    data[1, 120, 299] = 8.05
+    v[:] = data
+    ds.close()
+
+
+def test_fillvalue_levels_are_dropped_not_read_as_ph(tmp_path, monkeypatch):
+    """A ``_FillValue`` level must be trimmed, never returned as pH.
+
+    Reading it as data gives pH = -999, which propagates into
+    Francois-Garrison as a wildly wrong boric-acid term.
+    """
+    root = tmp_path / 'fv_cache'
+    monkeypatch.setenv('UACPY_DATA_CACHE', str(root))
+    _cache.invalidate_grids()
+    _write_glodap_fillvalue(root)
+
+    depths, ph = glodap_local.fetch_ph_profile((30.5, -40.5))
+    assert np.all(np.isfinite(ph)), f"non-finite pH survived: {ph}"
+    assert np.all((ph > 6.0) & (ph < 9.0)), f"implausible pH values: {ph}"
+    np.testing.assert_allclose(depths, [0.0, 500.0])
+    np.testing.assert_allclose(ph, [8.10, 8.05], rtol=1e-5)

@@ -58,19 +58,32 @@ def _entry(
     )
 
 
-# Wentworth ϕ midpoints used below: clay ≥ 8, silt 4–8, fine sand 2–3,
+# Wentworth classes, for orientation: clay ϕ ≥ 8, silt 4–8, fine sand 2–3,
 # medium sand 1–2, coarse sand 0–1, gravel −2..−1.
+# c_p, density, alpha_p, c_s, alpha_s and porosity for the eight rows clay …
+# basalt are Jensen, Kuperman, Porter & Schmidt, *Computational Ocean
+# Acoustics*, Table 1.3 (continental shelf and slope), which carries no grain
+# size. Table 1.3 gives clay's c_s as "< 100" and leaves silt / sand / gravel as
+# depth-dependent c_s(z̄); those four take a near-seabed value (see the module
+# docstring). ``granite`` has no row in Table 1.3 and its values carry no
+# recorded source.
+# The phi column comes from Hamilton & Bachman (1982) Table I — the row whose
+# Table II density and velocity ratio reproduce the JKPS row, within 2.4 %. Those
+# are per-class measured sample means, not class centres, hence 8.80 / 5.40 /
+# 3.34 rather than round numbers. Gravel and moraine are coarser than anything
+# in Hamilton's continental-terrace suite, so gravel falls back to a Wentworth
+# class midpoint and moraine has no phi at all.
 MATERIALS: Dict[str, Dict] = {
     # Fluid sediments (c_s tabulated at z = 1 m below the seabed)
     'clay':      _entry(sound_speed=1500.0, density=1.5, attenuation=0.2,
                         shear_speed=80.0, shear_attenuation=1.0,
-                        porosity=70.0, grain_size_phi=9.0),
+                        porosity=70.0, grain_size_phi=8.80),
     'silt':      _entry(sound_speed=1575.0, density=1.7, attenuation=1.0,
                         shear_speed=80.0, shear_attenuation=1.5,
-                        porosity=55.0, grain_size_phi=6.0),
+                        porosity=55.0, grain_size_phi=5.40),
     'sand':      _entry(sound_speed=1650.0, density=1.9, attenuation=0.8,
                         shear_speed=110.0, shear_attenuation=2.5,
-                        porosity=45.0, grain_size_phi=2.0),
+                        porosity=45.0, grain_size_phi=3.34),
     'gravel':    _entry(sound_speed=1800.0, density=2.0, attenuation=0.6,
                         shear_speed=180.0, shear_attenuation=1.5,
                         porosity=35.0, grain_size_phi=-1.5),

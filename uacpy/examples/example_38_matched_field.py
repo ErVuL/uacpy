@@ -34,12 +34,15 @@ FEATURES DEMONSTRATED:
 """
 
 import sys
+import os
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Repo root, so ``import uacpy`` resolves from a source checkout.
+sys.path.insert(0, str(Path(__file__).parents[2]))
 
-OUTPUT_DIR = Path(__file__).parent / 'output'
-OUTPUT_DIR.mkdir(exist_ok=True)
+OUTPUT_DIR = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
+                  or Path(__file__).parent / 'output')
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 import numpy as np  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
@@ -50,6 +53,17 @@ from uacpy.models import Kraken  # noqa: E402
 from uacpy.sonar import (  # noqa: E402
     synthesize_replica, replica_bank, csdm, bartlett, mvdr,
 )
+
+
+def _imshow_extent(cand_r, cand_z):
+    """``imshow`` extent (outer cell EDGES, range in km, depth down) for an
+    ambiguity surface on candidate-grid CENTRES ``cand_r`` (m) / ``cand_z``
+    (m) — each edge sits half a cell beyond its end centre, so every pixel
+    centre lands on its grid point."""
+    half_r = 0.5 * (cand_r[1] - cand_r[0])
+    half_z = 0.5 * (cand_z[1] - cand_z[0])
+    return [(cand_r[0] - half_r) / 1e3, (cand_r[-1] + half_r) / 1e3,
+            cand_z[-1] + half_z, cand_z[0] - half_z]
 
 
 def main():
@@ -98,7 +112,11 @@ def main():
     cand_r = np.linspace(500, 5000, 121)
     bank = replica_bank(modes, array_depths, cand_z, cand_r)
     surf_b = bartlett(K, bank)
-    surf_m = mvdr(K, bank, loading=1e-2)
+    # Diagonal loading as a fraction of the average eigenvalue (the mvdr
+    # default, stated here because it sets the trade-off): smaller sharpens the
+    # Capon peak but makes it brittle to environmental mismatch, larger relaxes
+    # the surface back toward Bartlett.
+    surf_m = mvdr(K, bank, diagonal_loading=1e-2)
 
     for name, surf in [("Bartlett", surf_b), ("MVDR", surf_m)]:
         iz, ir = np.unravel_index(np.argmax(surf), surf.shape)
@@ -108,7 +126,7 @@ def main():
     # ── Plot ───────────────────────────────────────────────────────────────
     print("\n[4/4] Plotting ambiguity surfaces...")
     fig, axes = plt.subplots(1, 2, figsize=(13, 5), sharey=True)
-    extent = [cand_r[0] / 1e3, cand_r[-1] / 1e3, cand_z[-1], cand_z[0]]
+    extent = _imshow_extent(cand_r, cand_z)
     for ax, name, surf in [(axes[0], "Bartlett", surf_b), (axes[1], "MVDR", surf_m)]:
         db = 10 * np.log10(np.clip(surf / surf.max(), 1e-3, None))
         im = ax.imshow(db, aspect='auto', extent=extent, cmap='turbo',

@@ -15,8 +15,10 @@ on every test run.
 """
 
 import sys
+import os
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Repo root, so ``import uacpy`` resolves from a source checkout.
+sys.path.insert(0, str(Path(__file__).parents[2]))
 
 import numpy as np  # noqa: E402
 import matplotlib  # noqa: E402
@@ -71,11 +73,11 @@ def main():
     res_bh = Bellhop(verbose=False).run(
         env, src, rcv, run_mode=RunMode.COHERENT_TL,
     )
-    tl_bh = res_bh.tl[0]
+    tl_bh = res_bh.db[0]
 
     print("Running RAM (dispatches to ramsurf1.5) ...")
     res_ram = RAM(verbose=False).run(env, src, rcv, run_mode=RunMode.COHERENT_TL)
-    tl_ram = res_ram.tl[0]
+    tl_ram = res_ram.db[0]
     print(f"  → backend: {res_ram.backend}")
     print()
 
@@ -129,6 +131,10 @@ def main():
     ax_bot.axhline(0, color='k', lw=0.5)
     ax_bot.plot(ranges / 1000, tl_ram - tl_bh, 'b-', lw=1.0,
                 label='RAM − Bellhop')
+    # 8 dB is the empirical bar the cross-model test holds this pair to over
+    # 1-5 km (tests/test_cross_model_agreement.py, tolerance_db=8.0): ray and
+    # PE diverge past ~3 km as surface multipaths accumulate, while a flipped
+    # altimetry sign would push the RMSE past 25 dB.
     ax_bot.fill_between(ranges / 1000, -8, 8, color='green', alpha=0.15,
                         label='±8 dB regression band')
     ax_bot.set_xlabel('Range (km)')
@@ -138,8 +144,10 @@ def main():
     ax_bot.legend(loc='upper right')
 
     fig.tight_layout()
-    out = Path(__file__).parent / 'output' / 'example_21_bellhop_vs_ramsurf.png'
-    out.parent.mkdir(exist_ok=True)
+    out_dir = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
+                   or Path(__file__).parent / 'output')
+    out = out_dir / 'example_21_bellhop_vs_ramsurf.png'
+    out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out, dpi=120)
     print(f"\n  ✓ Saved: {out}")
 

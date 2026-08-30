@@ -171,8 +171,33 @@ real(kind=wp),dimension(:),allocatable :: rb1, zb1
       upd=0
       iflag=0
 
-      if (abs(rend-rnow)<abs(dr)) then
+      ! UACPY: the remainder is tested against deltar, the march step, and NOT
+      ! against dr, which this branch may already have shrunk to a shorter
+      ! remainder. Against the shrunk dr, an output range whose remainder was
+      ! longer than that leftover step but shorter than deltar failed the test,
+      ! fell through to the restore branch below, and was marched a full deltar
+      ! PAST its own target; the next iteration then walked "backward" onto it
+      ! with a step epade builds from dre=abs(dr) at :189 — a FORWARD
+      ! propagator, since abs() strips the sign (the self-starter's deliberate
+      ! backward step at :134 writes dre=-abs(dr), so epade is sign-aware and
+      ! the sign carries meaning). Against deltar, a remainder shorter than a
+      ! full step shrinks onto its target and a longer one is marched at the
+      ! restored deltar, so rnow can never pass rend — at any deltar, on any
+      ! output grid.
+      if (abs(rend-rnow)<abs(deltar)) then
         dr=rend-rnow
+        dre=abs(dr)
+        ip=1
+        call epade
+        upd=1
+      else if (abs(abs(dr)-abs(deltar))>tiny(deltar)) then
+      ! UACPY: restore the full step. The branch above shrinks dr to the
+      ! remainder needed to land exactly on an output range and never restores
+      ! it, so every later output range marched at that leftover step — the
+      ! cost of a march grew with the NUMBER of output ranges rather than with
+      ! range. uacpy writes every receiver range into ranges.dat, so a 50-point
+      ! receiver grid cost 15x a 1-point one over the same 10 km.
+        dr=sign(deltar,rend-rnow)
         dre=abs(dr)
         ip=1
         call epade
@@ -188,15 +213,18 @@ real(kind=wp),dimension(:),allocatable :: rb1, zb1
       if (rint>maxrb1) zbc=zb1(nb+1)
       izl=iz; iz=floor(1.0_wp+zbc/deltaz); iz=max(2,iz); iz=min(nz,iz)
       if (iz/=izl)  then
-      ! bathymetry has changed; call matrc 
-          upd=1    
-          if (abs(izll-iz)*deltaz > 20.0_wp) then 
-          ! The depth has changed by more than 20 m; update the bottom profiles
-          ! This is mainly for attenuation and density.
-          ! Don't need to call this for EVERY depth change! (I don't think...)
+      ! bathymetry has changed; call matrc
+          upd=1
+      ! UACPY: the bottom profiles are rebuilt on every change of iz. Upstream
+      ! deferred this until the depth had moved more than 20 m ("Don't need to
+      ! call this for EVERY depth change! (I don't think...)"), but profl fills
+      ! cw/cb/rhob/attn at ABSOLUTE depth indices and matrc reads them at the
+      ! current iz, so between rebuilds up to 20 m of seabed immediately below
+      ! a RISING seafloor still holds water values. Measured on a 200->100 m
+      ! wedge: 4.38 dB median / 29.6 dB max against ramgeo, versus 0.51 dB
+      ! downslope (where the stale band lands above iz and is unused).
              iflag=iflag+1
              izll=iz
-          end if
       end if
 
       ! Varying profiles - using profile closest to present range.

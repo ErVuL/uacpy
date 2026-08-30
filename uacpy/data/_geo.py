@@ -10,8 +10,10 @@ from uacpy.core.exceptions import ConfigurationError
 __all__ = [
     'Coordinate', 'as_coordinate', 'normalize_lon', 'lon_linspace',
     'EARTH_RADIUS_KM', 'central_angle', 'great_circle_km', 'geodesic_waypoints',
-    'run_representative_indices', 'DEFAULT_MAX_TRANSECT_POINTS',
-    'depth_to_pressure_dbar',
+    'nearest_indices', 'ring_offsets', 'run_representative_indices',
+    'run_boundary_indices',
+    'DEFAULT_MAX_TRANSECT_POINTS', 'checked_max_points',
+    'depth_to_pressure_dbar', 'pressure_dbar_to_depth',
 ]
 
 #: Default ceiling on the number of points sampled along a transect *before*
@@ -23,6 +25,44 @@ __all__ = [
 DEFAULT_MAX_TRANSECT_POINTS = 1000
 
 Coordinate = Tuple[float, float]
+
+
+def checked_max_points(max_points, caller: str) -> int:
+    """Validate a transect fetch budget: an integer of at least 2.
+
+    ``n_points`` is guarded at >= 2 wherever it is accepted, but the cap it is
+    reduced against was not, and ``'auto'`` resolves straight to the cap:
+    ``max_points=1`` produced a one-waypoint "transect" with
+    ``ranges_m=[0.0]``, ``max_points=0`` an empty one, and a negative value an
+    untyped ``ValueError`` out of ``np.linspace``. Two points are the fewest
+    that define a path.
+    """
+    try:
+        value = int(max_points)
+    except (TypeError, ValueError):
+        raise ConfigurationError(
+            f"{caller}: max_points must be an integer >= 2, got "
+            f"{max_points!r}.",
+            remediation="Pass max_points>=2, the transect fetch budget.",
+        ) from None
+    if value < 2:
+        raise ConfigurationError(
+            f"{caller}: max_points must be >= 2, got {max_points}.",
+            remediation="Pass max_points>=2; fewer than two waypoints is not "
+                        "a transect.",
+        )
+    return value
+
+#: How close to antipodal (radians of central angle short of π) a pair of
+#: endpoints may be before :func:`geodesic_waypoints` refuses them. The slerp
+#: divides by ``sin(ang)``, and the haversine central angle saturates at
+#: exactly π once the endpoints are within ~0.1 m of antipodal, so past this
+#: point the waypoints stop lying on the path ``ranges_m`` reports. Measured
+#: disagreement between a waypoint's great-circle distance from ``start`` and
+#: its reported range: 0.13 m at π − ang = 1e-5, 142 m at 1e-6, 37 km at 1e-7
+#: and 1083 km at exactly π. 1e-6 rad is ~6 m of antipodal offset, so no real
+#: transect is refused.
+_ANTIPODAL_TOL_RAD = 1e-6
 
 #: Spherical-Earth radius in km, derived from the single source of truth in
 #: ``core.constants`` so every haversine in the data layer shares one value.
@@ -84,7 +124,13 @@ def lon_linspace(lon0: float, lon1: float, n: int) -> np.ndarray:
     if lon1 < lon0:
         lon1 += 360.0
     raw = np.linspace(lon0, lon1, int(n))
-    return ((raw + 180.0) % 360.0) - 180.0
+    wrapped = ((raw + 180.0) % 360.0) - 180.0
+    # Keep a node that lies exactly on +180 as +180: wrapping it to -180 made
+    # a full-globe axis non-monotonic with a duplicated first column. Exact
+    # equality is the right test — only an exact +180 wraps to exactly -180,
+    # while other multiples of 360 offset from it (-180, 540) stay -180.
+    wrapped[raw == 180.0] = 180.0
+    return wrapped
 
 
 def central_angle(start: Coordinate, end: Coordinate) -> float:
@@ -116,6 +162,11 @@ def geodesic_waypoints(
     point, total length at the last). Spherical-Earth slerp — accurate to a
     few parts in 10³ versus the WGS84 ellipsoid, ample for sampling a grid
     of ~450 m resolution.
+
+    Coincident endpoints, and endpoints antipodal to within
+    :data:`_ANTIPODAL_TOL_RAD` (where infinitely many great circles join them
+    and the slerp's ``1/sin(ang)`` returns waypoints that do not lie on the
+    reported ranges), raise :class:`ConfigurationError`.
     """
     lat1, lon1 = np.radians(as_coordinate(start))
     lat2, lon2 = np.radians(as_coordinate(end))
@@ -125,6 +176,15 @@ def geodesic_waypoints(
         raise ConfigurationError(
             "geodesic_waypoints: start and end coordinates coincide.",
             remediation="Use a single-point fetch, or pass distinct endpoints.",
+        )
+    if np.pi - ang < _ANTIPODAL_TOL_RAD:
+        raise ConfigurationError(
+            f"geodesic_waypoints: the endpoints are antipodal to within "
+            f"{(np.pi - ang) * EARTH_RADIUS_M:.1f} m, so no single great "
+            f"circle joins them.",
+            remediation="Split the path into two transects through an "
+                        "intermediate waypoint, or move an endpoint away from "
+                        "the other's antipode.",
         )
 
     f = np.linspace(0.0, 1.0, n_points)
@@ -141,13 +201,53 @@ def geodesic_waypoints(
     return lats, lons, ranges_m
 
 
+def nearest_indices(axis, queries) -> np.ndarray:
+    """Nearest-node index into ``axis`` for each query, any axis orientation.
+
+    A COARDS latitude axis is commonly stored **descending** (GMRT, EMODnet
+    DTM), so a plain ``searchsorted`` (ascending-only, and an insertion index
+    rather than the nearest node) is both biased and wrong. Sort once, bracket
+    with ``searchsorted``, then pick the closer of the two neighbours, and map
+    back to the original (possibly descending) ordering.
+    """
+    axis = np.asarray(axis, dtype=float)
+    order = np.argsort(axis)
+    sorted_axis = axis[order]
+    pos = np.searchsorted(sorted_axis, queries)
+    lo = np.clip(pos - 1, 0, sorted_axis.size - 1)
+    hi = np.clip(pos, 0, sorted_axis.size - 1)
+    pick_hi = np.abs(sorted_axis[hi] - queries) < np.abs(queries - sorted_axis[lo])
+    nearest_sorted = np.where(pick_hi, hi, lo)
+    return order[nearest_sorted]
+
+
+def ring_offsets(radius: int) -> 'list[tuple[int, int]]':
+    """``(d_row, d_col)`` offsets on the Chebyshev ring of the given radius,
+    ordered nearest-first by squared Euclidean distance in cells.
+
+    The expanding-ring neighbour search shared by the gridded climatology
+    readers (WOA23's nearest-wet-cell fallback, NSIDC sea ice's
+    nearest-observed-cell fallback): probe radius 1, then 2, … so the first
+    hit is the closest usable cell.
+    """
+    out = [(d_row, d_col)
+           for d_row in range(-radius, radius + 1)
+           for d_col in range(-radius, radius + 1)
+           if max(abs(d_row), abs(d_col)) == radius]
+    return sorted(out, key=lambda o: o[0] ** 2 + o[1] ** 2)
+
+
 def run_representative_indices(keys) -> 'list[int]':
     """Indices of one representative per maximal run of consecutive-equal keys.
 
-    The reduction behind ``'auto'`` transect sampling: probe a source's
-    sample *identity* (e.g. the grid cell, or the nearest sample) at a fine set
-    of waypoints, then keep one waypoint per distinct run. ``keys`` must be
-    ``==``-comparable (tuples, scalars, or dataclasses); do not pass raw arrays.
+    The reduction behind ``'auto'`` transect sampling for **interpolated**
+    columns (the WOA23 SSP): probe a source's sample *identity* (e.g. the grid
+    cell, or the nearest sample) at a fine set of waypoints, then keep one
+    waypoint per distinct run. ``keys`` must be ``==``-comparable (tuples,
+    scalars, or dataclasses); do not pass raw arrays. A carrier reconstructed
+    by **nearest-node** lookup (categorical Surface/Bottom) uses
+    :func:`run_boundary_indices` instead — a midpoint representative would
+    displace each reconstructed transition to midway between run centres.
 
     Interior runs are represented by their **midpoint** (the centre of the
     range interval that sample covers). The **first and last** runs are
@@ -176,11 +276,47 @@ def run_representative_indices(keys) -> 'list[int]':
     return reps
 
 
+def run_boundary_indices(keys) -> 'list[int]':
+    """Indices keeping both probe samples that bracket every change of key,
+    plus the two transect endpoints.
+
+    The reduction behind ``'auto'`` transect sampling for **categorical**
+    carriers reconstructed by nearest-node lookup (the ice-canopy/open-water
+    ``Surface``, the sediment-identity ``Bottom``): a nearest-node read places
+    each transition midway between adjacent kept samples, so keeping the last
+    sample of one run and the first of the next pins the reconstructed
+    transition to within half a probe step of the boundary the probe observed.
+    ``keys`` must be ``==``-comparable, as in
+    :func:`run_representative_indices`; a single run collapses to one
+    representative at the start (range-independent transect).
+    """
+    n = len(keys)
+    if n == 0:
+        return []
+    out = [0]
+    for i in range(1, n):
+        if not keys[i] == keys[i - 1]:
+            if out[-1] != i - 1:
+                out.append(i - 1)   # last sample of the run ending at i-1
+            out.append(i)           # first sample of the run starting at i
+    if len(out) == 1:
+        return out                  # single run: one representative (start)
+    if out[-1] != n - 1:
+        out.append(n - 1)           # anchor transect end (range L)
+    return out
+
+
 def depth_to_pressure_dbar(depth_m, latitude_deg) -> np.ndarray:
     """Depth (m) → pressure (dbar), Leroy & Parthiot (1998) standard ocean.
 
-    Latitude-dependent gravity correction; accurate to ~0.1 % for the open
-    ocean, well within the sound-speed budget. ``soundspeed_*`` expect dbar.
+    JASA 103(3), 1346-1352, eqs. (8)-(11) — ``h(Z,phi) = h(Z,45)·k(Z,phi)``
+    with ``Z`` in metres and ``h`` in MPa, hence the ×100 to dbar. The authors
+    give the fit as accurate to ±500 Pa over the whole depth/latitude range.
+
+    This is the standard ocean: the per-region geopotential corrective term
+    ``delta_h_i`` of their eq. (12) / Table II is not applied, so a basin with
+    a strongly non-standard T/S profile (Mediterranean, Baltic, Black Sea)
+    carries that residual. ``soundspeed_*`` expect dbar.
     """
     z = np.asarray(depth_m, dtype=float)
     phi = np.radians(latitude_deg)
@@ -189,3 +325,25 @@ def depth_to_pressure_dbar(depth_m, latitude_deg) -> np.ndarray:
            - 1.25e-13 * z ** 3 + 2.8e-19 * z ** 4)          # MPa
     k = (g_phi - 2e-5 * z) / (9.80612 - 2e-5 * z)
     return h45 * k * 100.0                                   # MPa → dbar
+
+
+def pressure_dbar_to_depth(pres_dbar, lat) -> np.ndarray:
+    """Pressure (dbar) → depth (m): Newton inversion of
+    :func:`depth_to_pressure_dbar`.
+
+    Pressure-indexed sources (Argo reports pressure) need depth for a
+    ``SoundSpeedProfile``, and only the depth → pressure direction has a
+    closed form. The derivative is taken as a central difference on
+    :func:`depth_to_pressure_dbar` rather than analytically, so the Leroy &
+    Parthiot coefficients live in exactly one place; a 1 m step is safe
+    because ``h(z)`` is a smooth quartic whose curvature over a metre is
+    negligible against its ~1 dbar/m slope.
+    """
+    p = np.asarray(pres_dbar, dtype=float)
+    z = p * 0.9905                                   # ~1 m per dbar initial guess
+    for _ in range(5):
+        f = depth_to_pressure_dbar(z, lat) - p
+        df = (depth_to_pressure_dbar(z + 1.0, lat)
+              - depth_to_pressure_dbar(z - 1.0, lat)) / 2.0
+        z = z - f / df
+    return z

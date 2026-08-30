@@ -66,10 +66,10 @@ models — consistent `Environment` / `Source` / `Receiver` construction and
 |-------------------|--------------------------------------------------------------------|
 | **Bellhop**       | Ray / beam tracing                                                 |
 | **Kraken**        | Normal modes                                                       |
-| **Scooter**       | Finite elements for range independent env                          |
+| **Scooter**       | Wavenumber integration for range independent env                   |
 | **SPARC**         | Experimental time-marched FFP for pulses in range independent env  |
 | **RAM**           | Parabolic equation                                                 |
-| **OASES**         | OAST (TL) · OASN (covariance / MFP replicas) · OASR (reflection) · OASP (broadband TRF) |
+| **OASES**         | OAST (TL) · OASN (covariance / MFP replicas) · OASR (reflection) · OASP (broadband TRF) · OASS (reverberation) · OASSP (scattered pulse) |
 | **Bounce**        | Reflection coefficients                                            |
 
 **Toolkits** — first‑class modules, not just glue around the models:
@@ -82,11 +82,46 @@ models — consistent `Environment` / `Source` / `Receiver` construction and
 - **Standards & metrics** — sound speed, decidecade bands, ship source level, marine‑mammal weighting.
 - **Visualization** — TL maps, rays, modes, fields, cross‑model comparisons.
 
+**Simplest example — 100 m of water, one model run, one plot.** Nothing but a
+finished [install](#-installation); no network, no downloads, no data cache:
+
+``` python
+import numpy as np
+import uacpy
+from uacpy.models import Bellhop, RunMode
+
+env = uacpy.Environment(
+    bathymetry=100.0,                                    # flat 100 m seabed
+    ssp=[(0.0, 1500.0), (100.0, 1490.0)],                # (depth m, speed m/s)
+    bottom=uacpy.BoundaryProperties(
+        acoustic_type='half-space',
+        sound_speed=1650.0, density=1.8, attenuation=0.6,
+    ),
+)
+source   = uacpy.Source(depths=25.0, frequencies=200.0)
+receiver = uacpy.Receiver(depths=np.linspace(1, 99, 100),
+                          ranges=np.linspace(50, 5000, 250))
+
+tl = Bellhop().run(env, source, receiver, run_mode=RunMode.COHERENT_TL)
+tl.plot(env=env, source=source)
+```
+
+Three carriers in, one result out, and the result plots itself — every model in
+the package has that shape. The values are one accessor away: `tl.tl` (or the
+general `tl.db`) is the transmission-loss array in dB, positive loss, no sign
+juggling. Walk it line by line in the
+[documentation](./docs/README.md).
+
 <div align="center">
   <img src="./docs/readme_realworld.png" alt="Real-world environment fetched from GPS, modelled, and plotted" width="820">
 </div>
 
-**Simplest example — from GPS to a modelled field, the code that produces the figure above:**
+**Real-world example — from GPS to a modelled field, the code that produces the
+figure above.** This one is a showcase rather than a starting point: the
+`data.fetch_*` calls reach out to public ocean databases, so it needs **network
+access**, or a local cache populated in advance with `./install.sh --data all`
+(the `--data` flag is in [Installation](#-installation)). It is also a 374 km
+transect at 800 Hz — minutes of Bellhop, not seconds.
 
 ``` python
 import numpy as np, matplotlib.pyplot as plt
@@ -130,7 +165,7 @@ What `install.sh` builds:
 | `python3`                | Driving `install.sh` and importing uacpy (always) |
 | `gfortran`, `make`       | OALIB, mpiramS, ramsurf (`rams0.5` elastic + `ramsurf1.5` rough surface), ramgeo (`ramgeo1.5` layered fluid), OASES (Fortran models — always) |
 | `git`                    | Cloning uacpy + submodules (always)               |
-| `tar`                    | Submodule unpacking + OASES archive (always)      |
+| `tar`                    | OASES source archive (`--oases yes`)              |
 | `cmake`, `g++`/`clang++` | C++ Bellhop variant (`--bellhop cxx`)             |
 | CUDA toolkit (`nvcc`)    | GPU Bellhop variant (`--bellhop cuda`) — **required** when `--bellhop cuda` is passed; the installer hard-errors if `nvcc` is absent (no silent downgrade to cxx) |
 | `curl`                   | OASES archive download (`--oases yes`)            |
@@ -229,7 +264,7 @@ on macOS.)
 **uacpy on Windows runs inside WSL2 (Windows Subsystem for Linux),
 following the Linux instructions above.**
 
-WSL2 needs CPU virtualization extensions. Some computer ship with this
+WSL2 needs CPU virtualization extensions. Some computers ship with this
 **disabled by default**, so first of all enable hardware virtualization 
 in your BIOS/UEFI.
 
@@ -281,25 +316,45 @@ rm -rf uacpy
 
 ## 📚 Documentation & Examples
 
-The full API reference lives in a single file:
-[`DOCUMENTATION.md`](./DOCUMENTATION.md) — quick start, environment setup,
-per-model signatures, visualization, signal processing, noise, units, and
-troubleshooting.
+Three entry points, depending on what you need:
 
-Inside `uacpy/uacpy/examples/` you will find 38 example scripts numbered
-sequentially (`example_01_*.py` through `example_38_*.py`) — from a first TL
+- **[`docs/`](./docs/README.md) — the guided documentation.** 20 pages (22
+  counting the two index READMEs) with 126
+  generated figures: one per model (Bellhop, Kraken, RAM, Scooter, SPARC,
+  Bounce, OASES), plus guides to environments, sources and receivers, results,
+  plotting, signal processing, arrays, communications, noise, sonar, external
+  data, I/O, utilities and reproducibility. Each page covers the physics, when
+  to reach for the model, its limits, and a worked example whose code is the
+  code that generates the page's figures.
+- **[`DOCUMENTATION.md`](./DOCUMENTATION.md) — the API reference.** Every
+  signature, keyword and unit in a single file, plus quick start, environment
+  setup and troubleshooting.
+- **[`docs/DEV.md`](./docs/DEV.md) — internals**, for extending the package or
+  adding a model wrapper.
+
+Inside `uacpy/examples/` you will find 39 example scripts numbered
+sequentially (`example_01_*.py` through `example_39_*.py`) — from a first TL
 field to communications modems, a standards-based noise-impact assessment, a
 GPS-to-modelled-field real-world pipeline, and matched-field source
-localization. See the
-[examples index](./DOCUMENTATION.md#12-examples-index) for a description
+localization. Run them **by script path** (the form
+`uacpy/examples/run_all_examples.py` and the test suite use):
+
+```bash
+python uacpy/examples/example_01_basic_shallow_water.py
+```
+
+not as modules — `python -m uacpy.examples.example_01_…` fails for the
+examples that import their sibling `plotting_utils` as a top-level module.
+See the
+[examples index](./DOCUMENTATION.md#17-examples-index) for a description
 of each one.
 
 ## 🧪 Testing
 
 UACPY uses **pytest** with custom markers for categorizing tests.
 
-`pytest` and `pytest-xdist` are no longer pulled in by the runtime
-dependency set — install the `test` extra to get them, or the `dev` extra
+`pytest` and `pytest-xdist` are not part of the runtime dependency
+set — install the `test` extra to get them, or the `dev` extra
 for the additional formatting / linting / coverage tooling:
 
 ``` bash
@@ -316,7 +371,6 @@ pip install -e ".[dev]"
 
 ``` bash
 
-cd uacpy
 pytest uacpy/tests/
 
 ```
@@ -329,7 +383,12 @@ Tests use custom markers to allow selective execution:
 - `requires_binary` -- Tests that need compiled native binaries (Fortran/C)
 - `requires_oases` -- Tests that need compiled OASES binaries
 - `requires_network` -- Tests that hit a live external service (the `uacpy.data`
-  fetchers); **auto-skipped when offline**
+  fetchers); **deselected by default** by `addopts` in `pyproject.toml`
+- `benchmark` -- Tests that validate model output against a closed-form
+  analytic or canonical published reference
+- `convention` -- Tests that pin repo conventions rather than runtime
+  behaviour (docstring prose, source-convention sweeps, repr snapshots);
+  a failure signals doc/convention drift, not a runtime defect
 
 ``` bash
 
@@ -339,13 +398,23 @@ pytest uacpy/tests/ -m "not slow"
 # Run only tests that don't need compiled binaries
 pytest uacpy/tests/ -m "not requires_binary"
 
+# Fast pure-Python dev tier: no binaries and no slow tests
+pytest uacpy/tests/ -m "not requires_binary and not slow"
+
 # Skip OASES tests (if OASES is not installed)
 pytest uacpy/tests/ -m "not requires_oases"
 
-# Skip all internet-dependent tests (also auto-skipped offline)
-pytest uacpy/tests/ -m "not requires_network"
+# Run the live-service tests (deselected by default)
+pytest uacpy/tests/ -m requires_network
 
 ```
+
+The composed dev tier `-m "not requires_binary and not slow"` selects
+3,941 of the suite's 5,339 test functions (≥5,280 collected cases; static
+AST count as of 2026-08-29, counting `requires_oases` tests as
+`requires_binary` — the conftest attaches that marker automatically). It
+is the fast development loop; the full suite (default `pytest` invocation)
+must still pass before a change lands.
 
 ## 🗺️ Roadmap
 
@@ -426,7 +495,7 @@ redistributes Collins' original.
 - Collins, *A split-step Padé solution for the parabolic equation method*, JASA 93, 1736–1742, 1993
 - Collins, *Users Guide for RAM versions 1.0 and 1.0p / RAMGeo*, NRL, 1999
 
-### OASES --- OAST, OASN, OASR, OASP
+### OASES --- OAST, OASN, OASR, OASP, OASS, OASSP
 
 Henrik Schmidt (Massachusetts Institute of Technology) --- https://acoustics.mit.edu/faculty/henrik/oases.html
 
@@ -449,13 +518,13 @@ when redistributing or modifying UACPY or its outputs.
 | Component                  | Location                           | How it ships                                     | License                                          |
 |----------------------------|------------------------------------|--------------------------------------------------|--------------------------------------------------|
 | UACPY wrapper              | this repository                    | source + Python package                          | GPL-3.0                                          |
-| Acoustics Toolbox (Porter) | `third_party/Acoustics-Toolbox/`   | vendored Fortran sources, **modified**           | GPL-3.0                                          |
-| bellhopcuda (Schmid et al.)| `third_party/bellhopcuda/`         | git submodule pinned to upstream `v1.5`, unmodified | GPL-3.0                                       |
-| mpiramS (Dushaw)           | `third_party/mpiramS/`             | vendored Fortran sources, **modified**           | Creative Commons Attribution 4.0 International   |
-| ramsurf (Calvo / Quiet Oceans) | `third_party/ramsurf/`         | vendored Fortran sources, **modified**           | BSD-3-Clause |
-| ramgeo (Collins, NRL)      | `third_party/ramgeo/`              | vendored Fortran source, **modified**            | Public domain (U.S. Government work, no explicit licence) |
+| Acoustics Toolbox (Porter) | `uacpy/third_party/Acoustics-Toolbox/`   | vendored Fortran sources, **modified**           | GPL-3.0                                          |
+| bellhopcuda (Schmid et al.)| `uacpy/third_party/bellhopcuda/`         | git submodule pinned to upstream `v1.5`, unmodified | GPL-3.0                                       |
+| mpiramS (Dushaw)           | `uacpy/third_party/mpiramS/`             | vendored Fortran sources, **modified**           | Creative Commons Attribution 4.0 International   |
+| ramsurf (Calvo / Quiet Oceans) | `uacpy/third_party/ramsurf/`         | vendored Fortran sources, **modified**           | BSD-3-Clause |
+| ramgeo (Collins, NRL)      | `uacpy/third_party/ramgeo/`              | vendored Fortran source, **modified**            | Public domain (U.S. Government work, no explicit licence) |
 | arlpy utilities (Chitre)   | `uacpy/core/`                      | adapted (ported into UACPY sources, unmodified scientifically) | BSD-3-Clause                    |
-| OASES (Schmidt, MIT)       | `third_party/oases/` (gitignored)  | **optional** download at install time, **not redistributed**| Academic license --- see Henrik Schmidt's terms  |
+| OASES (Schmidt, MIT)       | `uacpy/third_party/oases/` (gitignored)  | **optional** download at install time, **not redistributed**| Academic license --- see Henrik Schmidt's terms  |
 
 
 ### Python dependencies
@@ -472,11 +541,13 @@ redistributed by UACPY); all are permissive and GPL-3.0-compatible.
 | **shapely** | EMODnet seabed-substrate polygon lookups | BSD-3-Clause |
 | **pyproj** | map projections (sea-ice / Diesing reprojection) | MIT |
 | **tifffile** | NSIDC sea-ice / lithology raster reads | BSD-3-Clause |
-| **copernicusmarine** | Copernicus operational sound speed | EUPL-1.2 (lists GPL-3.0 as compatible) |
+| **pillow** | image encode/decode behind the map and animation writers | HPND (MIT-style) |
+| **copernicusmarine** | Copernicus operational sound speed — the optional `[copernicus]` extra, not installed by default | EUPL-1.2 (lists GPL-3.0 as compatible) |
 
-Test/development tooling (`pytest`, `pytest-xdist`, `pytest-cov`, `black`,
-`flake8` — the `[test]` / `[dev]` extras) is MIT-licensed and not required at
-runtime.
+Test/development tooling (`pytest`, `pytest-xdist`, `setuptools`, `xarray`
+— the `[test]` extra — plus `pytest-cov`, `black`, `flake8`, `mypy` in
+`[dev]`) is not required at runtime; all of it is MIT- or Apache-2.0-licensed
+(xarray is Apache-2.0).
 
 
 ### External data sources

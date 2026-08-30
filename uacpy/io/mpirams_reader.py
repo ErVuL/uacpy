@@ -20,7 +20,6 @@ Output records:
 import numpy as np
 from pathlib import Path
 from typing import Union, Dict
-from scipy.io import FortranFile
 from uacpy.core.exceptions import FileFormatError
 
 
@@ -52,13 +51,35 @@ def read_psif(work_dir: Union[str, Path]) -> Dict:
     psif_file = work_dir / 'psif.dat'
 
     if not psif_file.exists():
-        raise FileNotFoundError(f"mpiramS output not found: {psif_file}")
+        raise FileFormatError(f"mpiramS output not found: {psif_file}")
 
     # ``psif.dat`` is written by mpiramS on this host during the same run, so
     # its byte order is the host's; ``FortranFile`` reads native endianness,
     # which is therefore correct here. (Unlike the vendored/cross-host binaries
     # read elsewhere, this is never a foreign-endian file — so it does not go
     # through ``_fortran_helpers.detect_endian``.)
+    # Imported here rather than at module level so ``import uacpy.io`` does
+    # not pull scipy in; only this reader needs it.
+    from scipy.io import FortranEOFError, FortranFormattingError
+    try:
+        return _read_psif_records(psif_file)
+    except (FortranEOFError, FortranFormattingError, ValueError) as exc:
+        # scipy's FortranFile raises TypeError-derived FortranEOFError /
+        # FortranFormattingError on a truncated or mis-framed record, and
+        # ValueError on a garbage length marker; all mean the same thing
+        # here — psif.dat is not a complete mpiramS output.
+        raise FileFormatError(
+            f"{psif_file}: malformed or truncated mpiramS output "
+            f"({type(exc).__name__}: {exc}).",
+            remediation="The mpiramS run may have been killed mid-write; "
+                        "re-run it, or check the work_dir points at a "
+                        "completed run.",
+        ) from exc
+
+
+def _read_psif_records(psif_file: Path) -> Dict:
+    """Walk the sequential-unformatted records of one ``psif.dat``."""
+    from scipy.io import FortranFile
     with FortranFile(str(psif_file), 'r') as f:
         header = f.read_reals(dtype=np.float64)
         if header.size != 8:
@@ -82,8 +103,8 @@ def read_psif(work_dir: Union[str, Path]) -> Dict:
                 f"{frq.size}, rout.size={rout.size}."
             )
 
-        # ``nf`` and ``nr`` are now validated against the frq/rout records, but
-        # ``nzo`` is still a raw header field driving the (nzo, nf, nr) psif
+        # ``nf`` and ``nr`` are validated against the frq/rout records above;
+        # ``nzo`` is a raw header field driving the (nzo, nf, nr) psif
         # allocation. Each depth record holds 1 + 2*nf float64 (+ two Fortran
         # length markers), so nzo*nr records cannot occupy more than the file;
         # bound nzo against the remaining bytes before allocating to reject a
@@ -101,14 +122,28 @@ def read_psif(work_dir: Union[str, Path]) -> Dict:
             )
 
         # Depth records: 1 + 2*nf reals each, nzo records per range, nr ranges.
+        # Each record is [z, Re_1, Im_1, ..., Re_nf, Im_nf], so the real parts
+        # are the odd slots and the imaginary parts the even ones after z.
+        # The depth axis repeats across ranges; take it from the first only.
         zg = np.zeros(nzo, dtype=np.float64)
         psif = np.zeros((nzo, nf, nr), dtype=np.complex128)
         for ir in range(nr):
             for ii in range(nzo):
                 rec = f.read_reals(dtype=np.float64)
+                # Exact length, not a minimum: a record longer than the header
+                # implies is as much a header/file disagreement as a short one,
+                # and reading its first 1 + 2*nf reals would silently return a
+                # field built from a layout this reader has misidentified.
+                if rec.size != 1 + 2 * nf:
+                    raise FileFormatError(
+                        f"{psif_file}: depth record (ir={ir}, iz={ii}) holds "
+                        f"{rec.size} reals, expected {1 + 2 * nf} "
+                        f"(z + {nf} complex values); the file does not match "
+                        f"its own header."
+                    )
                 if ir == 0:
                     zg[ii] = rec[0]
-                psif[ii, :, ir] = rec[1::2][:nf] + 1j * rec[2::2][:nf]
+                psif[ii, :, ir] = rec[1::2] + 1j * rec[2::2]
 
     return {
         'n_samples': Nsam,

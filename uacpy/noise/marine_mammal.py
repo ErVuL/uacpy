@@ -25,7 +25,18 @@ import numpy as np
 from uacpy.core.exceptions import ConfigurationError
 
 # Southall et al. (2019) Table 5: a, b, f1 [kHz], f2 [kHz], C [dB] (weighting)
-# and K [dB] (TTS/PTS exposure-function position).
+# and K [dB]. Only a/b/f1/f2/C enter :func:`auditory_weighting`; K is carried
+# as published reference for callers setting their own exposure criteria.
+#
+# K positions the **non-impulsive TTS** exposure function only — Table 5 is
+# titled "auditory weighting function and TTS exposure function parameters",
+# and K was fitted to minimise the error against measured TTS onset. It is not
+# a PTS constant: Southall's PTS onset is uniformly TTS onset + 20 dB (their
+# Table 6, exactly +20 dB for all eight groups), so reading K as PTS is 20 dB
+# low. K is also non-impulsive; the impulsive exposure functions keep the same
+# shape with their own K, ~11 dB lower for the groups without impulsive data.
+# The published TTS threshold is the *minimum of the exposure function* rather
+# than K itself, so the two differ by a dB or so (HF: K = 177, threshold 178).
 WEIGHTING_PARAMS = {
     "LF":  {"a": 1.0, "b": 2, "f1": 0.20, "f2": 19.0,  "C": 0.13, "K": 179},
     "HF":  {"a": 1.6, "b": 2, "f1": 8.8,  "f2": 110.0, "C": 1.20, "K": 177},
@@ -62,6 +73,17 @@ def auditory_weighting(frequency, group):
             f"{sorted(WEIGHTING_PARAMS)}")
     p = WEIGHTING_PARAMS[g]
     f = np.asarray(frequency, dtype=float) / 1000.0        # Hz -> kHz
+    # Eq. (2) is even in f, so a negative frequency squares away and comes back
+    # as a plausible finite weighting; f = 0 gives -inf behind a bare numpy
+    # divide-by-zero warning. Both are input errors, rejected here the way
+    # WenzNoise rejects a non-positive frequency grid.
+    # ``~(f > 0)`` rather than ``f <= 0``: NaN passes every comparison and would
+    # return a NaN weighting silently.
+    if f.size == 0 or np.any(~(f > 0.0)):
+        raise ConfigurationError(
+            "auditory_weighting: frequency must be > 0 Hz and finite (the "
+            "weighting is a log10 of (f/f1)^2a); drop the DC bin, e.g. "
+            "f[f > 0].")
     r1 = (f / p["f1"]) ** 2
     r2 = (f / p["f2"]) ** 2
     return p["C"] + 10.0 * np.log10(

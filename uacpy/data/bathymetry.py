@@ -6,18 +6,21 @@ into a water depth (m, positive down) ready to hand to
 range-dependent ``(N, 2)`` ``[range_m, depth_m]`` transect sampled along the
 great-circle path between two points.
 
-Depths come from the GEBCO_2020 global grid (~450 m resolution), served as
-JSON by the public OpenTopoData API
+``source='api'`` (the default) serves depths from the GEBCO_2020 global grid
+(~450 m resolution) as JSON via the public OpenTopoData API
 (https://www.opentopodata.org/datasets/gebco2020/). No API key is needed;
 the public host is rate-limited (≤100 locations per request, ≤1 request/s,
 ≤1000 requests/day). Point a ``base_url`` at a self-hosted OpenTopoData
-instance to lift those limits.
+instance to lift those limits. The other backends are ``'local'`` (the
+install-time GEBCO 2025 grid, offline and unthrottled), ``'gmrt'`` and
+``'emodnet'`` (live, higher-resolution, regional coverage).
 
 Bathymetry is static in time, so these fetches take coordinates only — the
 ``date`` axis enters the data layer at the sound-speed stage, not here.
 """
 
 import json
+import threading
 import time
 import urllib.parse
 import warnings
@@ -27,16 +30,17 @@ import numpy as np
 
 from uacpy.core.constants import EARTH_RADIUS_M
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
+from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.data._geo import (
     Coordinate, as_coordinate, normalize_lon, lon_linspace,
     central_angle, geodesic_waypoints, EARTH_RADIUS_KM,
-    DEFAULT_MAX_TRANSECT_POINTS,
+    DEFAULT_MAX_TRANSECT_POINTS, checked_max_points,
 )
 from uacpy.data._http import http_get
 from uacpy._log import log_message
 
-__all__ = ['fetch_bathy', 'fetch_bathy_transect', 'fetch_bathy_grid',
-           'transect_length']
+__all__ = ['fetch_bathy', 'fetch_bathy_transect', 'bathy_transect_plan',
+           'fetch_bathy_grid', 'transect_length']
 
 DEFAULT_BASE_URL = 'https://api.opentopodata.org/v1'
 DEFAULT_DATASET = 'gebco2020'
@@ -56,7 +60,8 @@ OPENTOPODATA_MIN_INTERVAL_S = 1.0
 
 BATHY_SOURCES = ('api', 'gmrt', 'emodnet', 'local')
 
-_last_request_monotonic = 0.0    # wall-clock of the last public-host call
+_last_request_monotonic = 0.0    # time.monotonic() of the last public-host call
+_rate_limit_lock = threading.Lock()   # serializes the read-sleep-stamp above
 
 
 def _check_source(source):
@@ -144,24 +149,29 @@ def fetch_bathy_transect(
 ) -> np.ndarray:
     """Range-dependent bathymetry along the great-circle ``start``→``end``.
 
-    Samples ``n_points`` evenly spaced (in distance) along the geodesic and
-    returns an ``(n_points, 2)`` array of ``[range_m, depth_m]`` with
-    ``range`` measured from ``start`` — exactly the shape consumed by
-    ``Environment(bathymetry=...)`` for range-dependent runs.
+    Samples evenly spaced (in distance) along the geodesic and returns an
+    ``(n, 2)`` array of ``[range_m, depth_m]`` with ``range`` measured from
+    ``start`` — exactly the shape consumed by ``Environment(bathymetry=...)``
+    for range-dependent runs. :func:`bathy_transect_plan` resolves ``n``.
 
     Parameters
     ----------
     start, end : (lat, lon)
         Endpoint coordinates in decimal degrees (WGS84).
-    n_points : int, optional
-        Number of samples (≥2). Default 50.
-    dataset, base_url, timeout, verbose
+    n_points : int or 'auto', optional
+        Number of samples (≥2). Default 50. ``'auto'`` targets GEBCO native
+        resolution (see :func:`bathy_transect_plan`).
+    max_points : int, optional
+        Ceiling on the sample count; a larger ``n_points`` (or an ``'auto'``
+        native count above it) is capped to this, with a ``UserWarning``.
+    source, dataset, base_url, timeout, verbose
         See :func:`fetch_bathy`.
 
     Returns
     -------
     numpy.ndarray
-        Shape ``(n_points, 2)``: column 0 range (m), column 1 depth (m).
+        Shape ``(n, 2)``: column 0 range (m), column 1 depth (m), where ``n``
+        is the resolved sample count.
 
     Raises
     ------
@@ -171,35 +181,27 @@ def fetch_bathy_transect(
         The service fails, or any sampled point falls on land.
     """
     _check_source(source)
-    length_km = central_angle(start, end) * EARTH_RADIUS_KM
+    plan = bathy_transect_plan(start, end, n_points=n_points,
+                               max_points=max_points)
+    n = plan['n_points']
+    lats, lons, ranges_m = plan['lats'], plan['lons'], plan['ranges_m']
+    length_km = ranges_m[-1] / 1000.0
     if n_points == 'auto':
-        # Bathymetry is a continuous (bilinearly served) field — no duplicate
-        # samples to collapse — so 'auto' targets native resolution, bounded
-        # by max_points.
-        native = int(np.ceil(length_km / GEBCO_NATIVE_KM)) + 1
-        n = min(native, int(max_points))
-        if native > max_points:
+        if plan['native_points'] > max_points:
             warnings.warn(
                 f"fetch_bathy_transect: native GEBCO resolution over "
-                f"{length_km:.0f} km needs ~{native} points; capped to "
-                f"max_points={max_points} (~{length_km / max(max_points, 1):.1f}"
-                f" km spacing). Raise max_points, or use GMRT / a self-hosted "
-                f"OpenTopoData for finer sampling.",
-                UserWarning, stacklevel=2)
-    else:
-        if int(n_points) < 2:
-            raise ConfigurationError(
-                f"fetch_bathy_transect: n_points must be >= 2, got {n_points}.",
-                remediation="Pass n_points>=2 (or 'auto') to define a transect.",
-            )
-        n = min(int(n_points), int(max_points))
-        if int(n_points) > int(max_points):
-            warnings.warn(
-                f"fetch_bathy_transect: n_points={n_points} exceeds "
-                f"max_points={max_points}; sampling {max_points}.",
-                UserWarning, stacklevel=2)
+                f"{length_km:.0f} km needs ~{plan['native_points']} points; "
+                f"capped to max_points={max_points} "
+                f"(~{length_km / max(max_points, 1):.1f} km spacing). Raise "
+                f"max_points, or use GMRT / a self-hosted OpenTopoData for "
+                f"finer sampling.",
+                UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
+    elif int(n_points) > int(max_points):
+        warnings.warn(
+            f"fetch_bathy_transect: n_points={n_points} exceeds "
+            f"max_points={max_points}; sampling {max_points}.",
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
 
-    lats, lons, ranges_m = geodesic_waypoints(start, end, n)
     log_message(
         'bathymetry', f"sampling {n} GEBCO depths along "
         f"{ranges_m[-1] / 1000:.1f} km transect", verbose=verbose,
@@ -228,20 +230,44 @@ def bathy_transect_plan(
     max_points: int = DEFAULT_MAX_TRANSECT_POINTS,
 ) -> dict:
     """Resolve how many bathymetry samples a transect would take, and where,
-    without fetching. Returns ``{'n_points', 'lats', 'lons', 'ranges_m'}``.
+    without fetching. Returns ``{'n_points', 'native_points', 'lats', 'lons',
+    'ranges_m'}``; ``native_points`` is the uncapped native-resolution count,
+    which is what :func:`fetch_bathy_transect` warns about when ``max_points``
+    binds.
 
     Bathymetry is continuous, so ``'auto'`` targets GEBCO native resolution
     (``length / GEBCO_NATIVE_KM``) bounded by ``max_points`` — there is no
-    duplicate-collapse step (cf. :func:`ssp_transect_plan`).
+    duplicate-collapse step (cf. :func:`ssp_transect_plan`). This is where
+    :func:`fetch_bathy_transect` resolves its sampling, so the two can never
+    disagree.
     """
+    max_points = checked_max_points(max_points, 'bathy_transect_plan')
     length_km = central_angle(start, end) * EARTH_RADIUS_KM
+    # +1 closes the fencepost: n samples span n-1 native-resolution intervals.
+    native = int(np.ceil(length_km / GEBCO_NATIVE_KM)) + 1
     if n_points == 'auto':
-        n = min(int(np.ceil(length_km / GEBCO_NATIVE_KM)) + 1, int(max_points))
+        n = min(native, max_points)
     else:
-        n = max(2, min(int(n_points), int(max_points)))
+        msg = (f"bathy_transect_plan: n_points={n_points!r} is not a "
+               f"sample count. Valid forms: an integer >= 2, or 'auto' "
+               f"for GEBCO native resolution.")
+        remediation = ("Pass n_points as an int (e.g. n_points=50) "
+                       "or n_points='auto'.")
+        try:
+            n_requested = int(n_points)
+        except (TypeError, ValueError) as exc:
+            raise ConfigurationError(msg, remediation=remediation) from exc
+        if n_requested != n_points:
+            raise ConfigurationError(msg, remediation=remediation)
+        if n_requested < 2:
+            raise ConfigurationError(
+                f"bathy_transect_plan: n_points must be >= 2, got {n_points}.",
+                remediation="Pass n_points>=2 (or 'auto') to define a transect.",
+            )
+        n = min(n_requested, max_points)
     lats, lons, ranges_m = geodesic_waypoints(start, end, n)
-    return {'n_points': int(n), 'lats': lats, 'lons': lons,
-            'ranges_m': ranges_m}
+    return {'n_points': int(n), 'native_points': native, 'lats': lats,
+            'lons': lons, 'ranges_m': ranges_m}
 
 
 def fetch_bathy_grid(
@@ -263,6 +289,11 @@ def fetch_bathy_grid(
     array in metres (positive down). **Land cells are ``NaN``** (so coastlines
     map cleanly) — unlike the point/transect fetchers, which raise on land.
 
+    ``lats`` is **ascending** for every source, whatever order ``lat_range``
+    was given in; ``lons`` runs eastward from ``lon_range[0]`` (an end west of
+    the start crosses the antimeridian on the ``'api'``/``'local'`` paths,
+    while ``'gmrt'``/``'emodnet'`` reject such a range).
+
     With ``source='api'`` points are fetched in chunks of ≤100 (the OpenTopoData
     per-call cap), so a default 50×50 grid is 25 requests; the public host allows
     ≤1000 requests/day at ≤1/s, so very large grids need a self-hosted
@@ -278,6 +309,10 @@ def fetch_bathy_grid(
     if n_lat < 2 or n_lon < 2:
         raise ConfigurationError(
             f"fetch_bathy_grid: n_lat and n_lon must be >= 2; got {n_lat}, {n_lon}.")
+    # Ascending latitude for every source: gmrt/emodnet sort internally, so
+    # sort here too and all four backends share one axis order.
+    lat_range = (min(float(lat_range[0]), float(lat_range[1])),
+                 max(float(lat_range[0]), float(lat_range[1])))
     if source == 'local':
         from uacpy.data import gebco_local
         log_message('bathymetry', f"GEBCO grid (local) {n_lat}×{n_lon} over "
@@ -347,7 +382,7 @@ def _fetch_elevations(
     elevations: List[float] = []
     for i in range(0, len(coords), MAX_LOCATIONS_PER_REQUEST):
         if throttled:
-            _rate_limit(verbose=verbose)
+            _rate_limit()
         chunk = coords[i:i + MAX_LOCATIONS_PER_REQUEST]
         elevations.extend(
             _request_chunk(chunk, dataset=dataset, base_url=base_url,
@@ -356,16 +391,28 @@ def _fetch_elevations(
     return np.asarray(elevations, dtype=float)
 
 
-def _rate_limit(*, verbose: Union[bool, str]) -> None:
+def _rate_limit() -> None:
     """Block until at least ``OPENTOPODATA_MIN_INTERVAL_S`` has passed since the
-    last public-host call, so chunked fetches stay under the ≤1 req/s limit."""
+    last public-host call, so chunked fetches stay under the ≤1 req/s limit.
+
+    The lock spans the wait as well as the stamp, so concurrent callers queue
+    one interval apart instead of each reading the same stale timestamp and
+    firing together: eight threads at a 0.2 s interval left 0.2 ms between
+    their calls unguarded, against the 1.4 s the limit asks for.
+
+    The state is per-process, so a fan-out across :mod:`uacpy.parallel` (a
+    ``ProcessPoolExecutor``) still gets one budget *per worker*. Lower
+    ``OPENTOPODATA_MIN_INTERVAL_S``'s reciprocal by the worker count, or point
+    ``base_url`` at a self-hosted OpenTopoData, before fetching in parallel.
+    """
     global _last_request_monotonic
     interval = OPENTOPODATA_MIN_INTERVAL_S
-    if interval > 0.0:
-        wait = interval - (time.monotonic() - _last_request_monotonic)
-        if wait > 0.0:
-            time.sleep(wait)
-    _last_request_monotonic = time.monotonic()
+    with _rate_limit_lock:
+        if interval > 0.0:
+            wait = interval - (time.monotonic() - _last_request_monotonic)
+            if wait > 0.0:
+                time.sleep(wait)
+        _last_request_monotonic = time.monotonic()
 
 
 def _fetch_depths(

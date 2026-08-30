@@ -7,10 +7,12 @@ from typing import Tuple, Optional
 import numpy as np
 
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.acoustic_signal._signal_validate import require_below_nyquist
 
 
 def synthesize_noise_from_psd(Pxx, Fxx, duration=1, scale=1, *,
-                              n_fft=65536, sample_rate=None, interp='linear'):
+                              n_fft=65536, sample_rate=None, interp='linear',
+                              rng=None):
     """
     Spectral Synthesis of Random Processes.
 
@@ -30,14 +32,21 @@ def synthesize_noise_from_psd(Pxx, Fxx, duration=1, scale=1, *,
     scale : float
         Scale factor applied to the output signal.
     n_fft : int, optional
-        IFFT chunk size (must be even, ≥ 4). Defaults to 65536.
-    sample_rate : int, optional
-        Output sample rate in Hz. Defaults to 2*Fxx[-1]..
+        IFFT chunk size. Defaults to 65536; must be a power of two in
+        [16, 262144] — values below 16 are reset to 65536, values above
+        262144 are clamped, and non-powers of two are rounded to the
+        geometrically closest power of two (nearest in log2), each with a
+        warning.
+    sample_rate : float, optional
+        Output sample rate in Hz. Defaults to 2*Fxx[-1].
     interp : {'linear', 'log', 'pchip', 'nearest'}, optional
         How to resample ``Pxx(Fxx)`` onto the FFT-native grid. ``'log'``
         interpolates ``log10(Pxx)`` vs ``log10(f)`` — recommended for
         broadband PSDs spanning many decades. Frequencies outside
         ``[Fxx[0], Fxx[-1]]`` are set to zero.
+    rng : numpy.random.Generator, optional
+        Random generator for the spectral draw. Pass a seeded generator for a
+        reproducible realisation.
 
     Returns
     -------
@@ -45,8 +54,10 @@ def synthesize_noise_from_psd(Pxx, Fxx, duration=1, scale=1, *,
         Time array in seconds.
     x : ndarray
         Generated signal array.
-    sample_rate : int
-        Sampling frequency in Hz.
+    sample_rate : float
+        Sampling frequency in Hz — the rate the time axis is built from
+        (equal to the ``sample_rate`` argument, or ``2*Fxx[-1]`` when that
+        was omitted).
 
     Examples
     --------
@@ -70,7 +81,10 @@ def synthesize_noise_from_psd(Pxx, Fxx, duration=1, scale=1, *,
             f"synthesize_noise_from_psd: Pxx must have at least 2 points (got {Pxx.size})"
         )
     if not np.all(np.diff(Fxx) > 0):
-        raise ConfigurationError("synthesize_noise_from_psd: Fxx must be strictly increasing")
+        raise ConfigurationError(
+            "synthesize_noise_from_psd: Fxx must be strictly increasing; got "
+            f"{int(np.count_nonzero(np.diff(Fxx) <= 0))} non-increasing "
+            f"step(s), first at index {int(np.argmax(np.diff(Fxx) <= 0))}")
 
     if sample_rate is None:
         sample_rate = 2 * Fxx[-1]
@@ -79,7 +93,8 @@ def synthesize_noise_from_psd(Pxx, Fxx, duration=1, scale=1, *,
         n_fft = 65536
     elif n_fft < 16:
         warnings.warn(
-            f"synthesize_noise_from_psd: n_fft={n_fft} below minimum 16; raising to 65536.",
+            f"synthesize_noise_from_psd: n_fft={n_fft} is below the minimum "
+            f"16; using the default 65536 instead.",
             UserWarning, stacklevel=2,
         )
         n_fft = 65536
@@ -99,27 +114,48 @@ def synthesize_noise_from_psd(Pxx, Fxx, duration=1, scale=1, *,
         )
         n_fft = rounded
 
+    # Interior bins of the one-sided grid: an even n_fft has n_fft//2 + 1 rfft
+    # bins, of which DC and Nyquist must be real for a real signal. Drawing a
+    # complex value there would be wrong, so both are pinned to zero below and
+    # only the N = n_fft//2 - 1 interior bins are synthesised.
     N = n_fft // 2 - 1
     dF = sample_rate / n_fft
     f_grid = np.arange(1, N + 1) * dF
     Pxx_grid = _resample_psd(Pxx, Fxx, f_grid, interp)
+    # Per-bin variance of each complex draw below. The band power of a
+    # one-sided PSD is Pxx*dF, split evenly between +f and -f of the real
+    # signal, and w = (vi + i*vq)*sqrt(v) carries E|w|^2 = 2v — hence v =
+    # Pxx*dF/4. Synthesising a flat PSD and re-estimating it round-trips to
+    # within 0.3 %.
     v = Pxx_grid * dF / 4
 
     chunk_size = n_fft
     overlap_size = chunk_size // 4
     samples_needed = int(duration * sample_rate)
+    if samples_needed < 1:
+        raise ConfigurationError(
+            "synthesize_noise_from_psd: duration * sample_rate must cover at "
+            f"least one sample; got duration={duration}, "
+            f"sample_rate={sample_rate}.")
     num_chunks = int(np.ceil(samples_needed / (chunk_size - overlap_size)))
 
     x_total = np.zeros(samples_needed)
     t_total = np.arange(samples_needed) / sample_rate
+    rng = np.random.default_rng() if rng is None else rng
 
     for i in range(num_chunks):
-        vi = np.random.randn(N)
-        vq = np.random.randn(N)
+        vi = rng.standard_normal(N)
+        vq = rng.standard_normal(N)
         w = (vi + 1j * vq) * np.sqrt(v)
-        spectrum = np.concatenate(([0.0], w, [0.0]))
+        spectrum = np.concatenate(([0.0], w, [0.0]))   # DC, interior, Nyquist
+        # numpy's irfft carries a 1/n_fft; the *chunk_size undoes it, giving
+        # the unnormalised inverse DFT the v = Pxx*dF/4 calibration assumes.
         chunk = np.fft.irfft(spectrum, chunk_size) * chunk_size
 
+        # Sine/cosine crossfade rather than linear: the fade-in sin(pi/2 * u)
+        # and fade-out cos(pi/2 * u) are power-complementary (sin^2 + cos^2 =
+        # 1), so summing two independent chunks over the overlap reproduces the
+        # target variance. A linear fade would dip to half power mid-overlap.
         fade = np.ones(chunk_size)
         if i > 0:
             fade[:overlap_size] = np.sin(
@@ -137,7 +173,7 @@ def synthesize_noise_from_psd(Pxx, Fxx, duration=1, scale=1, *,
 
         x_total[start_idx:end_idx] += chunk[: end_idx - start_idx] * scale
 
-    return t_total, x_total, int(sample_rate)
+    return t_total, x_total, float(sample_rate)
 
 
 def _resample_psd(Pxx, Fxx, f_target, method):
@@ -152,7 +188,10 @@ def _resample_psd(Pxx, Fxx, f_target, method):
     if method == 'log':
         if Fxx[0] <= 0 or np.any(Pxx <= 0):
             raise ConfigurationError(
-                "synthesize_noise_from_psd: interp='log' requires strictly positive Pxx and Fxx"
+                "synthesize_noise_from_psd: interp='log' requires strictly "
+                f"positive Pxx and Fxx; got Fxx[0]={Fxx[0]:g} and "
+                f"{int(np.count_nonzero(Pxx <= 0))} non-positive Pxx value(s) "
+                f"(minimum {Pxx.min():g})"
             )
         out[in_range] = 10.0 ** np.interp(
             np.log10(f_target[in_range]),
@@ -183,12 +222,23 @@ def _is_power_of_two(x):
 
 
 def _closest_power_of_two(x):
+    """Power of two nearest to ``x`` in log2 (geometric) distance.
+
+    ``round(log2(x))`` splits at the geometric midpoint ``sqrt(2)*2**n``, not
+    the arithmetic one ``1.5*2**n``, so values between the two (e.g. 183)
+    round *up* even though the lower power is arithmetically closer.
+    """
     n = round(math.log2(x))
     return 2 ** n
 
 
 def make_noise_waveform(
-    fc: float, bandwidth_hz: float, T: float, sample_rate: float
+    fc: float,
+    bandwidth: float,
+    duration: float,
+    sample_rate: float,
+    *,
+    rng=None
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Generate bandpass-filtered Gaussian random noise waveform.
@@ -200,21 +250,26 @@ def make_noise_waveform(
     ----------
     fc : float
         Center frequency in Hz
-    bandwidth_hz : float
+    bandwidth : float
         Bandwidth in Hz
-    T : float
+    duration : float
         Duration in seconds
     sample_rate : float
         Sample rate in Hz
+    rng : numpy.random.Generator, optional
+        Random generator for the white-noise draw. Pass a seeded generator for
+        a reproducible realisation.
 
     Returns
     -------
-    nts : ndarray
-        Noise time series, 1-D of length ``int(T*sample_rate)``.
     time : ndarray
-        Sample times (s), ``np.arange(N)/sample_rate`` — same ``(signal, time)`` return
-        convention as the :mod:`uacpy.acoustic_signal` tonal generators
-        (``tone_burst``, ``lfm_chirp``, ``hfm_chirp``).
+        Sample times (s), ``np.arange(N)/sample_rate``.
+    nts : ndarray
+        Noise time series, 1-D of length ``int(duration*sample_rate)``.
+
+    The ``(time, signal)`` order is the package-wide convention, shared with
+    the tonal generators (``tone_burst``, ``lfm_chirp``, ``hfm_chirp``) and
+    the channel/synthesis helpers.
 
     Notes
     -----
@@ -230,17 +285,44 @@ def make_noise_waveform(
     Examples
     --------
     >>> # Generate 1 kHz noise, 200 Hz bandwidth, 1 second
-    >>> nts, t = make_noise_waveform(1000, 200, 1.0, 10000)
+    >>> t, nts = make_noise_waveform(1000, 200, 1.0, 10000)
     >>> print(f"Noise signal: {len(nts)} samples")
+    Noise signal: 10000 samples
     """
-    N = int(T * sample_rate)  # number of samples
+    N = int(duration * sample_rate)  # number of samples
     # Build the time axis from the same N used for resample so the carrier
-    # and the resampled noise always have matching length (np.arange(0, T,
-    # 1/sample_rate) can yield N±1 samples from float accumulation).
+    # and the resampled noise always have matching length (np.arange(0,
+    # duration, 1/sample_rate) can yield N±1 samples from float accumulation).
     time = np.arange(N) / sample_rate
-    N2 = int(T * bandwidth_hz)
+    N2 = int(duration * bandwidth)
+    if N < 1 or N2 < 1:
+        raise ConfigurationError(
+            f"make_noise_waveform: duration*sample_rate ({N}) and "
+            f"duration*bandwidth ({N2}) must each resolve to at least one "
+            f"sample; got duration={duration}, sample_rate={sample_rate}, "
+            f"bandwidth={bandwidth}")
 
-    nts = np.random.randn(N2)  # Gaussian white noise
+    # The generator side of the Nyquist split: the heterodyne below places
+    # the band at fc +/- bandwidth/2, and an edge at or above fs/2 folds
+    # back to fs - f, which returns a plausible-looking waveform centred
+    # somewhere else entirely. ``make_bandlimited_noise`` in this file refuses
+    # the same band through ``_bandpass_design``.
+    require_below_nyquist(fc + bandwidth / 2.0, sample_rate,
+                          "make_noise_waveform",
+                          "the upper band edge fc + bandwidth/2",
+                          "the band folds back to sample_rate - f and the "
+                          "noise comes out centred somewhere else")
+    require_below_nyquist(fc, sample_rate, "make_noise_waveform", "fc",
+                          "the carrier folds back to sample_rate - fc")
+    if not (fc - bandwidth / 2.0 > 0.0):
+        raise ConfigurationError(
+            f"make_noise_waveform: the lower band edge fc - bandwidth/2 "
+            f"({fc - bandwidth / 2.0:g} Hz) must be > 0 Hz; a band "
+            f"straddling DC is the mirror of the same fold. Got fc={fc!r}, "
+            f"bandwidth={bandwidth!r}.")
+
+    rng = np.random.default_rng() if rng is None else rng
+    nts = rng.standard_normal(N2)  # Gaussian white noise
 
     # Resample to sample_rate rate
     from scipy.signal import resample
@@ -249,7 +331,55 @@ def make_noise_waveform(
 
     # Heterodyne with carrier
     nts = np.sin(2 * np.pi * fc * time) * nts
-    return nts, time
+    return time, nts
+
+
+def _bandpass_design(fc: float, bandwidth: float, sample_rate: float):
+    """4th-order Butterworth bandpass, as second-order sections, for
+    ``fc +/- bandwidth/2``.
+
+    ``scipy.signal.butter`` requires only ``0 < Wn < 1``, so that is the sole
+    constraint applied. A band whose edges fall outside the sample rate is
+    refused rather than moved: substituting a different band silently returns
+    noise centred somewhere the caller did not ask for, while
+    ``_noise_equivalent_bandwidth`` scales the level from the *same* substituted
+    design — so the result is internally consistent and nothing downstream
+    notices.
+    """
+    from scipy.signal import butter
+    nyquist = sample_rate / 2.0
+    flow = fc - bandwidth / 2.0
+    fhigh = fc + bandwidth / 2.0
+    if not (0.0 < flow < fhigh < nyquist):
+        raise ConfigurationError(
+            f"band {flow:g}-{fhigh:g} Hz (fc={fc:g}, bandwidth={bandwidth:g}) "
+            f"is not realisable at sample_rate={sample_rate:g} Hz; it must sit "
+            f"strictly inside 0-{nyquist:g} Hz.",
+            remediation="Raise sample_rate, or move fc / narrow bandwidth so "
+                        "the whole band fits below Nyquist.",
+        )
+    # Second-order sections, not transfer-function coefficients: a narrow band
+    # at a high sample rate sits at a normalised frequency of order 1e-3, where
+    # the (b, a) form loses so much precision that the response collapses. That
+    # numerical failure is what the old 0.01/0.02 normalised-frequency clamps
+    # were hiding — they kept the design away from the unstable region by
+    # silently moving the band.
+    return butter(4, [flow / nyquist, fhigh / nyquist], btype='band',
+                  output='sos')
+
+
+def _noise_equivalent_bandwidth(sos, sample_rate: float, n_freq: int = 8192):
+    """One-sided noise-equivalent bandwidth (Hz) of ``sosfiltfilt(sos, ...)``.
+
+    ``sosfiltfilt`` applies the cascade twice, so the power response is ``|H|**4``
+    and the equivalent rectangular bandwidth is ``∫|H|**4 df / max|H|**4``. This
+    is what a unit-RMS band-limited realisation actually spreads its power over
+    — narrower than the nominal -3 dB ``bandwidth``.
+    """
+    from scipy.signal import sosfreqz
+    f, h = sosfreqz(sos, worN=int(n_freq), fs=float(sample_rate))
+    p = np.abs(h) ** 4
+    return float(np.trapezoid(p, f) / p.max())
 
 
 def add_noise(
@@ -258,7 +388,9 @@ def add_noise(
     source_level: float,
     noise_level: float,
     fc: float,
-    bandwidth: float
+    bandwidth: float,
+    *,
+    rng=None
 ) -> np.ndarray:
     """
     Incorporate source level and noise into existing time series.
@@ -281,6 +413,9 @@ def add_noise(
         Center frequency for band-limited noise in Hz
     bandwidth : float
         Bandwidth for band-limited noise in Hz
+    rng : numpy.random.Generator, optional
+        Random generator for the noise realisation(s). Pass a seeded generator
+        for a reproducible result.
 
     Returns
     -------
@@ -299,8 +434,9 @@ def add_noise(
 
     Examples
     --------
-    >>> # Clean signal (0 dB reference)
-    >>> clean_signal = np.random.randn(48000)
+    >>> # Clean signal (0 dB reference); seeded so the example repeats
+    >>> rng = np.random.default_rng(0)
+    >>> clean_signal = rng.standard_normal(48000)
     >>> clean_signal = clean_signal / np.max(np.abs(clean_signal))
     >>>
     >>> # Add 185 dB source level and 40 dB noise
@@ -310,31 +446,41 @@ def add_noise(
     ----------
     Original MATLAB code by mbp, 4/09
     """
+    timeseries = np.asarray(timeseries, dtype=float)
     SL = 10.0 ** (source_level / 20.0)
 
-    # Target noise RMS for a one-sided PSD level ``noise_level`` (dB
-    # re Pa²/Hz) over bandwidth ``bandwidth``:
-    #     P_total = S_target · BW = 10^(L/10) · BW   (Pa²)
-    #     RMS     = √P_total                          (Pa)
-    # ``make_bandlimited_noise`` returns unit-RMS noise, so multiplying
-    # by ``A = RMS`` gives a realisation with the requested PSD level.
-    flow = fc - bandwidth / 2
-    fhigh = fc + bandwidth / 2
-    bw = fhigh - flow
-    A = np.sqrt(bw * 10.0 ** (noise_level / 10.0))
+    # Target noise RMS for a one-sided in-band PSD level ``noise_level`` (dB
+    # re Pa²/Hz):
+    #     P_total = S_target · NEB = 10^(L/10) · NEB   (Pa²)
+    #     RMS     = √P_total                            (Pa)
+    # ``make_bandlimited_noise`` returns unit-RMS noise spread over the
+    # zero-phase filter's noise-equivalent bandwidth NEB (not the nominal -3 dB
+    # ``bandwidth``), so multiplying by ``A = RMS`` puts the in-band density at
+    # exactly the requested level.
+    neb = _noise_equivalent_bandwidth(
+        _bandpass_design(fc, bandwidth, sample_rate), sample_rate)
+    A = np.sqrt(neb * 10.0 ** (noise_level / 10.0))
 
     # Generate band-limited noise — independent realisation per receiver
     # so cross-channel correlation is zero (required for beamforming and
     # array-gain assertions).
-    T = len(timeseries) / sample_rate
+    # The noise is drawn by sample count, not by a duration: routing through
+    # seconds and back (`int((n/fs)*fs)`) returns n-1 samples for 4-7 % of
+    # lengths at every rate that is not a power of two, and the sum below
+    # would then raise a raw numpy broadcast error naming neither argument.
+    rng = np.random.default_rng() if rng is None else rng
+    n_samples = timeseries.shape[0]
 
     if timeseries.ndim == 1:
-        noise_ts = make_bandlimited_noise(fc, bandwidth, T, sample_rate)[0] * A
+        noise_ts = _bandlimited_noise_samples(
+            fc, bandwidth, n_samples, sample_rate, rng=rng,
+            caller="add_noise")[1] * A
         rts = timeseries * SL + noise_ts
     else:
         n_rcv = timeseries.shape[1]
         noise_block = np.column_stack([
-            make_bandlimited_noise(fc, bandwidth, T, sample_rate)[0]
+            _bandlimited_noise_samples(fc, bandwidth, n_samples, sample_rate,
+                                       rng=rng, caller="add_noise")[1]
             for _ in range(n_rcv)
         ]) * A
         rts = timeseries * SL + noise_block
@@ -346,7 +492,9 @@ def make_bandlimited_noise(
     fc: float,
     bandwidth: float,
     duration: float,
-    sample_rate: float
+    sample_rate: float,
+    *,
+    rng=None
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Generate band-limited Gaussian noise.
@@ -363,16 +511,17 @@ def make_bandlimited_noise(
         Duration in seconds
     sample_rate : float
         Sample rate in Hz
+    rng : numpy.random.Generator, optional
+        Random generator for the white-noise draw. Pass a seeded generator for
+        a reproducible realisation.
 
     Returns
     -------
+    time : ndarray
+        Sample times (s), ``np.arange(N)/sample_rate``.
     noise : ndarray
         Band-limited, unit-RMS noise time series, 1-D of length
         ``int(duration*sample_rate)``.
-    time : ndarray
-        Sample times (s), ``np.arange(N)/sample_rate`` — same ``(signal, time)``
-        return convention as the other :mod:`uacpy.acoustic_signal` generators
-        (``make_noise_waveform``, ``tone_burst``, ``lfm_chirp``, ``hfm_chirp``).
 
     Notes
     -----
@@ -381,32 +530,40 @@ def make_bandlimited_noise(
 
     Examples
     --------
-    >>> noise, t = make_bandlimited_noise(10000.0, 5000.0, 1.0, 48000.0)
+    >>> t, noise = make_bandlimited_noise(10000.0, 5000.0, 1.0, 48000.0)
     >>> print(f"Generated {len(noise)} samples")
+    Generated 48000 samples
     """
-    from scipy.signal import butter, filtfilt
-    n_samples = int(duration * sample_rate)
+    return _bandlimited_noise_samples(
+        fc, bandwidth, int(duration * sample_rate), sample_rate,
+        rng=rng, caller="make_bandlimited_noise")
+
+
+def _bandlimited_noise_samples(fc, bandwidth, n_samples, sample_rate, *,
+                               rng=None, caller):
+    """``(time, noise)`` of exactly ``n_samples`` band-limited unit-RMS samples.
+
+    The sample count is the argument rather than a duration because
+    ``int(duration*sample_rate)`` is one short of ``round(duration*sample_rate)``
+    for 4-7 % of record lengths at every rate that is not a power of two
+    (``int((n/fs)*fs) == n - 1``), and a caller adding this noise to a record
+    of its own then hits a raw numpy broadcast error.
+    """
+    from scipy.signal import sosfiltfilt
+    sos = _bandpass_design(fc, bandwidth, sample_rate)
+    # sosfiltfilt pads by 3*(2*n_sections+1) - 1 and refuses a shorter signal
+    # with a bare ValueError naming only `padlen`.
+    padlen = 3 * (2 * len(sos) + 1) - 1
+    if n_samples <= padlen:
+        raise ConfigurationError(
+            f"{caller}: {n_samples} sample(s) is too short for the "
+            f"zero-phase bandpass, which pads by {padlen} samples on each "
+            f"end; it needs more than {padlen}. Lengthen the record or "
+            f"raise the sample rate.")
     time = np.arange(n_samples) / sample_rate
-    noise = np.random.randn(n_samples)
-
-    # Design bandpass filter
-    flow = fc - bandwidth / 2
-    fhigh = fc + bandwidth / 2
-
-    # Ensure frequencies are valid
-    flow = max(flow, 1.0)  # At least 1 Hz
-    fhigh = min(fhigh, sample_rate / 2 - 1)  # Below Nyquist
-
-    # Normalize frequencies to Nyquist
-    nyquist = sample_rate / 2
-    low = flow / nyquist
-    high = fhigh / nyquist
-
-    # Ensure normalized frequencies are in valid range (0, 1)
-    low = max(min(low, 0.99), 0.01)
-    high = max(min(high, 0.99), 0.02)
-    b, a = butter(4, [low, high], btype='band')
-    filtered_noise = filtfilt(b, a, noise)
+    rng = np.random.default_rng() if rng is None else rng
+    noise = rng.standard_normal(n_samples)
+    filtered_noise = sosfiltfilt(sos, noise)
 
     # Normalise to unit RMS so callers can scale by the target RMS
     # directly (e.g. RMS = √(BW · 10^(PSD_dB/10)) for a target one-sided
@@ -416,7 +573,7 @@ def make_bandlimited_noise(
     if rms > 0:
         filtered_noise = filtered_noise / rms
 
-    return filtered_noise, time
+    return time, filtered_noise
 
 
 def fourier_synthesis(
@@ -450,11 +607,11 @@ def fourier_synthesis(
 
     Returns
     -------
+    time : ndarray
+        Time vector in seconds
     rmod : ndarray
         Time-domain received signal
         Shape matches input pressure_freq with frequency dim converted to time
-    time : ndarray
-        Time vector in seconds
 
     Notes
     -----
@@ -473,14 +630,16 @@ def fourier_synthesis(
     --------
     >>> # Generate frequency-domain transfer function
     >>> freqs = np.linspace(10, 1000, 100)
-    >>> H_freq = np.random.randn(100, 50, 20) + 1j*np.random.randn(100, 50, 20)
+    >>> rng = np.random.default_rng(0)
+    >>> H_freq = (rng.standard_normal((100, 50, 20))
+    ...           + 1j * rng.standard_normal((100, 50, 20)))
     >>>
     >>> # Convert to time domain (impulse response)
-    >>> h_time, t = fourier_synthesis(H_freq, freqs)
+    >>> t, h_time = fourier_synthesis(H_freq, freqs)
     >>>
     >>> # With source spectrum
     >>> s_hat = np.exp(-(freqs - 500)**2 / (2*100**2))  # Gaussian spectrum
-    >>> r_time, t = fourier_synthesis(H_freq, freqs, source_spectrum=s_hat)
+    >>> t, r_time = fourier_synthesis(H_freq, freqs, source_spectrum=s_hat)
 
     References
     ----------
@@ -493,11 +652,16 @@ def fourier_synthesis(
     # Reshape to (Nfreq, -1) for processing. ``.copy()`` so the in-place
     # multiplications below do not mutate the caller's input through the
     # reshape view.
+    # astype(complex) rather than .copy(): the in-place phase rotations
+    # below assign complex values, and on a real-dtype array numpy keeps
+    # only the real part (a ComplexWarning, not an error), silently
+    # discarding the rotation.
     if pressure_freq.ndim == 1:
-        pressure_work = pressure_freq.reshape(-1, 1).copy()
+        pressure_work = pressure_freq.reshape(-1, 1).astype(complex)
     else:
         n_receivers = np.prod(original_shape[1:])
-        pressure_work = pressure_freq.reshape(Nfreq, n_receivers).copy()
+        pressure_work = pressure_freq.reshape(
+            Nfreq, n_receivers).astype(complex)
     if Tstart != 0.0:
         for irec in range(pressure_work.shape[1]):
             pressure_work[:, irec] = (pressure_work[:, irec] *
@@ -512,19 +676,17 @@ def fourier_synthesis(
             UserWarning, stacklevel=2,
         )
 
-    # Weight by source spectrum if provided
     if source_spectrum is not None:
         for irec in range(pressure_work.shape[1]):
             pressure_work[:, irec] = pressure_work[:, irec] * source_spectrum
 
-    # Inverse FFT to get time series
     rmod_work = np.fft.ifft(pressure_work, n=Nfreq, axis=0)
 
-    # Since spectrum is conjugate symmetric, result should be real
-    # Factor of 2 accounts for negative frequencies being zeroed
+    # stack.m zeroes the negative half of the spectrum before this transform,
+    # so the conjugate-symmetric partner of every bin is missing: doubling the
+    # real part restores the full real signal.
     rmod_work = 2 * np.real(rmod_work)
 
-    # Reshape back to original shape (with freq dim → time dim)
     if pressure_freq.ndim == 1:
         rmod = rmod_work.flatten()
     else:
@@ -539,4 +701,4 @@ def fourier_synthesis(
     # source-local axis.
     time = Tstart + np.linspace(0.0, Tmax - deltat, Nfreq)
 
-    return rmod, time
+    return time, rmod

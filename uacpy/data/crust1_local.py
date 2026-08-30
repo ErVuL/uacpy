@@ -26,7 +26,6 @@ import io
 import tarfile
 from pathlib import Path
 
-import re
 import warnings
 
 import numpy as np
@@ -36,6 +35,7 @@ from uacpy.core.environment import (
     BoundaryProperties, SeabedColumn, Bottom, SedimentLayer,
 )
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
+from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.data import _cache
 from uacpy.data._geo import as_coordinate, normalize_lon
 from uacpy.data._http import http_get, checked_member_size
@@ -49,7 +49,7 @@ _NLAT, _NLON, _NLAYER = 180, 360, 9
 # 9 columns per cell: water, ice, upper/middle/lower sediment,
 # upper/middle/lower crystalline crust, mantle (below Moho).
 _UPPER_SED, _LOW_SED = 2, 4
-_UPPER_CRYST, _MID_CRYST = 5, 6
+_UPPER_CRYST, _MID_CRYST, _LOW_CRYST = 5, 6, 7
 
 # CRUST1.0 has no Q; nominal compressional attenuation (dB/λ) by default.
 DEFAULT_SEDIMENT_ATTENUATION = 0.5
@@ -67,7 +67,8 @@ _COMMERCIAL_WARNING = (
 
 
 def _warn_non_commercial():
-    warnings.warn(_COMMERCIAL_WARNING, UserWarning, stacklevel=3)
+    warnings.warn(_COMMERCIAL_WARNING, UserWarning,
+                  skip_file_prefixes=USER_FRAME_SKIP)
 
 # Below this total sediment thickness (m) the seabed is treated as bare rock —
 # a thinner column (e.g. at a spreading-ridge crest, or after a near-zero GlobSed
@@ -76,6 +77,7 @@ def _warn_non_commercial():
 _MIN_SEDIMENT_M = 1.0
 
 _MODEL = {}   # cache_root -> dict(bnds=, vp=, vs=, rho=) each (64800, 9)
+_cache.register_cache(_MODEL.clear)
 
 
 def download_crust1_db(cache_dir=None, *, timeout=180.0, verbose=False):
@@ -94,7 +96,8 @@ def download_crust1_db(cache_dir=None, *, timeout=180.0, verbose=False):
         name = Path(member.name).name
         if name in _FILES and not Path(member.name).name.startswith('._'):
             checked_member_size(member.size, name)
-            (dest / name).write_bytes(tf.extractfile(member).read())
+            with _cache.atomic_write(dest / name) as part:
+                part.write_bytes(tf.extractfile(member).read())
             written += 1
     if written < len(_FILES):
         raise DataFetchError(
@@ -106,27 +109,38 @@ def download_crust1_db(cache_dir=None, *, timeout=180.0, verbose=False):
     return dest
 
 
-def _model():
-    """Load (or reuse) the four CRUST1.0 grids as ``(64800, 9)`` arrays."""
-    root = str(_cache.cache_root())
-    if root in _MODEL:
-        return _MODEL[root]
+def _build_model():
+    """Read the four CRUST1.0 grids into ``(64800, 9)`` arrays."""
     grids = {}
     for fname in _FILES:
         path = _cache.require('crust1', fname)
-        arr = np.loadtxt(path)
+        with _cache.reading('crust1', path):
+            arr = np.loadtxt(path)
         if arr.shape != (_NLAT * _NLON, _NLAYER):
             raise DataFetchError(
                 f"CRUST1.0 file {fname} has unexpected shape {arr.shape}.",
                 remediation="Re-run ./install.sh --data crust1.",
             )
         grids[fname.split('.')[-1]] = arr      # 'bnds' / 'vp' / 'vs' / 'rho'
-    _MODEL[root] = grids
     return grids
 
 
+def _model():
+    """Load (or reuse) the four CRUST1.0 grids as ``(64800, 9)`` arrays.
+
+    Built through :func:`uacpy.data._cache.memoize`, so threads racing a cold
+    memo run np.loadtxt once between them rather than once each.
+    """
+    return _cache.memoize(_MODEL, str(_cache.cache_root()), _build_model)
+
+
 def _column(lat, lon):
-    """The 9-layer (bnds, vp, vs, rho) vectors at a point (nearest 1° cell)."""
+    """The 9-layer (bnds, vp, vs, rho) vectors at a point (nearest 1° cell).
+
+    ``bnds[i]`` is the **elevation of the top of layer i in km, positive up** —
+    so it is negative below sea level, and a layer thickness is the *downward*
+    difference ``bnds[i] - bnds[i+1]``. Vp/Vs are km/s and rho is g/cm³.
+    """
     # Grid: row 0 = 89.5°N → row 179 = −89.5°N; col 0 = −179.5° → col 359 = 179.5°.
     row = int(np.clip(89 - np.floor(lat), 0, _NLAT - 1))
     col = int(np.clip(np.floor(normalize_lon(lon)) + 180, 0, _NLON - 1))
@@ -155,24 +169,32 @@ def _halfspace(i, vp, vs, rho, atten, elastic):
 
 
 def _layered_from_column(bnds, vp, vs, rho, *, sediment_attenuation,
-                         basement_attenuation, elastic, sediment_thickness):
-    """Build a :class:`SeabedColumn`: sediment stack over crystalline basement."""
+                         basement_attenuation, elastic, sediment_thickness,
+                         roughness=0.0):
+    """Build a :class:`SeabedColumn`: sediment stack over crystalline basement.
+
+    ``roughness`` lands on the first layer, whose top interface is the seafloor
+    (:class:`~uacpy.core.bottom.SedimentLayer`), whichever of the two column
+    shapes below is built."""
+    # CRUST1.0 quantises every boundary to 0.01 km, so the thinnest layer it can
+    # express is 10 m and any sub-metre threshold separates "absent" from
+    # "present" identically — this one is in km, the one in
+    # fetch_crust1_profile is in m.
     sed = [i for i in range(_UPPER_SED, _LOW_SED + 1)
            if bnds[i] - bnds[i + 1] > 1e-3]
-    # Effective sediment thickness (the GlobSed override when given, else the
-    # CRUST1.0 column). Below ``_MIN_SEDIMENT_M`` the column is negligible and a
-    # real layer would only produce a sub-resolution medium, so emit bare rock.
+    # Effective sediment thickness (the GlobSed override when given — a real
+    # 0.0 means bare basement, not "no data" — else the CRUST1.0 column).
+    # Below ``_MIN_SEDIMENT_M`` the column is negligible and a real layer would
+    # only produce a sub-resolution medium, so emit bare rock.
     if sed:
-        crust1_total = sum((bnds[i] - bnds[i + 1]) * 1000.0 for i in sed)
-        eff_sed = (sediment_thickness
-                   if (sediment_thickness is not None and sediment_thickness > 0)
-                   else crust1_total)
+        eff_sed = (sum((bnds[i] - bnds[i + 1]) * 1000.0 for i in sed)
+                   if sediment_thickness is None else sediment_thickness)
     else:
         eff_sed = 0.0
     if sed and eff_sed >= _MIN_SEDIMENT_M:
         layers = [_layer(i, bnds, vp, vs, rho, sediment_attenuation, elastic)
                   for i in sed]
-        if sediment_thickness is not None and sediment_thickness > 0:
+        if sediment_thickness is not None:
             total = sum(layer.thickness for layer in layers)
             if total > 0:
                 scale = sediment_thickness / total
@@ -185,6 +207,7 @@ def _layered_from_column(bnds, vp, vs, rho, *, sediment_attenuation,
                          elastic)]
         halfspace = _halfspace(_MID_CRYST, vp, vs, rho, basement_attenuation,
                                elastic)
+    layers[0].roughness = float(roughness)
     return SeabedColumn(layers=layers, halfspace=halfspace)
 
 
@@ -210,25 +233,30 @@ def fetch_crust1_profile(point):
 
     Returns ``{'water_depth_m', 'sediment_thickness_m', 'layers'}`` where each
     layer is ``{'name', 'thickness_m', 'vp', 'vs', 'rho'}`` (m, m/s, m/s, g/cm³).
+
+    ``water_depth_m`` is the elevation of the base of the water layer, negated —
+    so on land or under an ice sheet, where CRUST1.0 puts no water, it comes back
+    **negative** and equals minus the ground/ice surface elevation.
     """
     lat, lon = as_coordinate(point)
     bnds, vp, vs, rho = _column(lat, lon)
     names = ['water', 'ice', 'upper_sed', 'mid_sed', 'low_sed',
              'upper_cryst', 'mid_cryst', 'low_cryst']
     layers = []
-    for i in range(_UPPER_SED, _MID_CRYST + 2):
+    for i in range(_UPPER_SED, _LOW_CRYST + 1):
         thk = (bnds[i] - bnds[i + 1]) * 1000.0
         if thk > 1e-3:
             layers.append({'name': names[i], 'thickness_m': float(thk),
                            'vp': float(vp[i] * 1000), 'vs': float(vs[i] * 1000),
                            'rho': float(rho[i])})
-    sed_thk = sum(l['thickness_m'] for l in layers
-                  if l['name'].endswith('sed'))
+    sed_thk = sum(layer['thickness_m'] for layer in layers
+                  if layer['name'].endswith('sed'))
     return {'water_depth_m': float(-bnds[1] * 1000.0),
             'sediment_thickness_m': float(sed_thk), 'layers': layers}
 
 
-def fetch_bottom_crust1(point, *, sediment_attenuation=DEFAULT_SEDIMENT_ATTENUATION,
+def fetch_bottom_crust1(point, *, roughness=0.0,
+                        sediment_attenuation=DEFAULT_SEDIMENT_ATTENUATION,
                         basement_attenuation=DEFAULT_BASEMENT_ATTENUATION,
                         elastic=True, sediment_thickness=None, use_globsed=True,
                         water_sound_speed=None,
@@ -243,13 +271,39 @@ def fetch_bottom_crust1(point, *, sediment_attenuation=DEFAULT_SEDIMENT_ATTENUAT
     **GlobSed** total thickness by default (``use_globsed=True``); pass an
     explicit ``sediment_thickness`` (m) to override, or ``use_globsed=False`` to
     keep CRUST1.0's own column. Where GlobSed is not cached or has no value at
-    the point, CRUST1.0's native thickness is kept. The returned bottom carries
+    the point, CRUST1.0's native thickness is kept; a genuine GlobSed 0.0
+    (bare basement) is honoured and yields the bare-rock column. The returned
+    bottom carries
     ``.sediment_thickness_source`` (``'globsed'`` or ``None``) recording which
     was used. ``timeout`` is ignored (offline) for signature parity with the
     network bottom fetchers; ``water_sound_speed`` is likewise accepted and
     ignored (CRUST1.0 yields absolute Vp/Vs/ρ, not water-referenced ratios).
+
+    ``roughness`` is the RMS roughness (m) of the seafloor interface — the top
+    of the first returned layer, which is where
+    :class:`~uacpy.core.bottom.SedimentLayer` puts the water/seabed interface.
+    CRUST1.0 tabulates no roughness, so the default 0.0 is a smooth seafloor;
+    give a site value to model interface scattering.
     """
     _warn_non_commercial()
+    return _bottom_at_point(
+        point, roughness=roughness, sediment_attenuation=sediment_attenuation,
+        basement_attenuation=basement_attenuation, elastic=elastic,
+        sediment_thickness=sediment_thickness, use_globsed=use_globsed,
+        verbose=verbose)
+
+
+def _bottom_at_point(point, *, sediment_attenuation, basement_attenuation,
+                     elastic, roughness=0.0, sediment_thickness=None,
+                     use_globsed=True, verbose=False):
+    """One CRUST1.0 column, without the commercial notice.
+
+    The notice belongs to a whole fetch, not to each point of one, so the
+    transect emits it once and builds its waypoints through here. Suppressing
+    it instead by wrapping the loop in ``warnings.catch_warnings()`` would edit
+    the process-global filter list, and so also swallow an identical notice
+    another thread raised while the loop was open.
+    """
     lat, lon = as_coordinate(point)
     bnds, vp, vs, rho = _column(lat, lon)
     globsed_applied = False
@@ -259,7 +313,7 @@ def fetch_bottom_crust1(point, *, sediment_attenuation=DEFAULT_SEDIMENT_ATTENUAT
     bottom = _layered_from_column(
         bnds, vp, vs, rho, sediment_attenuation=sediment_attenuation,
         basement_attenuation=basement_attenuation, elastic=elastic,
-        sediment_thickness=sediment_thickness)
+        roughness=roughness, sediment_thickness=sediment_thickness)
     bottom.sediment_thickness_source = 'globsed' if globsed_applied else None
     log_message('crust1', f"CRUST1.0 at {lat:.2f}, {lon:.2f} → {bottom!r}",
                 verbose=verbose)
@@ -267,6 +321,7 @@ def fetch_bottom_crust1(point, *, sediment_attenuation=DEFAULT_SEDIMENT_ATTENUAT
 
 
 def fetch_bottom_crust1_transect(start, end, *, n_points=6, max_points=None,
+                                 roughness=0.0,
                                  sediment_attenuation=DEFAULT_SEDIMENT_ATTENUATION,
                                  basement_attenuation=DEFAULT_BASEMENT_ATTENUATION,
                                  elastic=True, use_globsed=True,
@@ -277,26 +332,41 @@ def fetch_bottom_crust1_transect(start, end, *, n_points=6, max_points=None,
     Each profile rescales its CRUST1.0 sediment column to the local GlobSed
     thickness by default (``use_globsed``); the result carries
     ``.sediment_thickness_source`` (``'globsed'`` if any waypoint used it).
+    ``n_points='auto'`` targets roughly one waypoint per degree of arc —
+    CRUST1.0's native 1° resolution — unlike the probe-and-collapse ``'auto'``
+    of the sample-database bottom fetchers.
     ``max_points`` caps the waypoint count (signature parity with the other
     transect bottom fetchers); CRUST1.0 is a cached 1° grid, so the sole effect
     is clamping ``n_points``.
+
+    ``timeout``/``verbose`` are accepted (and ignored — this backend is
+    offline) for signature parity with the network bottom fetchers;
+    ``water_sound_speed`` is likewise accepted and ignored (CRUST1.0 yields
+    absolute Vp/Vs/ρ, not water-referenced ratios).
+
+    ``roughness`` is the RMS roughness (m) of the seafloor interface at every
+    waypoint, as in :func:`fetch_bottom_crust1`.
     """
     from uacpy.data._geo import geodesic_waypoints
+    # 'auto': CRUST1.0 is a 1-degree cached grid, so target roughly one
+    # waypoint per degree of arc, clamped like the siblings.
+    if n_points == 'auto':
+        from uacpy.data._geo import central_angle
+        n_points = max(2, int(np.degrees(central_angle(start, end))) + 1)
     if max_points is not None:
         n_points = max(2, min(int(n_points), int(max_points)))
     _warn_non_commercial()
     lats, lons, ranges_m = geodesic_waypoints(start, end, n_points)
-    with warnings.catch_warnings():
-        # The per-waypoint fetches would each re-warn; emit once at the transect
-        # level above instead (filter only the commercial notice, not others).
-        warnings.filterwarnings('ignore', message=re.escape(_COMMERCIAL_WARNING),
-                                category=UserWarning)
-        profiles = [
-            fetch_bottom_crust1((la, lo), sediment_attenuation=sediment_attenuation,
-                                basement_attenuation=basement_attenuation,
-                                elastic=elastic, use_globsed=use_globsed)
-            for la, lo in zip(lats, lons)
-        ]
+    # The notice is emitted once above, for the transect as a whole; the
+    # waypoints go through the builder that does not raise it, so no filter
+    # window has to be opened over the loop to keep it quiet.
+    profiles = [
+        _bottom_at_point((la, lo), roughness=roughness,
+                         sediment_attenuation=sediment_attenuation,
+                         basement_attenuation=basement_attenuation,
+                         elastic=elastic, use_globsed=use_globsed)
+        for la, lo in zip(lats, lons)
+    ]
     rdl = Bottom.from_columns(profiles, ranges=np.asarray(ranges_m))
     rdl.sediment_thickness_source = (
         'globsed' if any(getattr(p, 'sediment_thickness_source', None) == 'globsed'

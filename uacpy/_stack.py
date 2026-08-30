@@ -4,10 +4,22 @@ Fortran-binary models load.
 SPARC-class binaries can blow an 8 MiB default stack on the first large
 allocation; raising RLIMIT_STACK to the hard limit at import time means
 every subprocess spawned later inherits the larger value.
+
+The change is process-global (an unlimited RLIMIT_STACK also switches
+Linux to the legacy bottom-up mmap layout) — set ``UACPY_NO_STACK_RAISE=1``
+to keep the inherited limit; SPARC-class models may then segfault on
+large problems.
 """
+
+import os
 
 
 def raise_stack_limit() -> None:
+    # Truthy opt-out only: '0'/'false'/'no' keep the default behaviour
+    # (raising), since someone setting 0 means "do not disable".
+    if os.environ.get('UACPY_NO_STACK_RAISE', '').strip().lower() not in (
+            '', '0', 'false', 'no'):
+        return
     try:
         import resource
         _soft, hard = resource.getrlimit(resource.RLIMIT_STACK)

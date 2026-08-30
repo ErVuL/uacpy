@@ -29,11 +29,14 @@ NOTE:
 """
 
 import sys
+import os
 from pathlib import Path
 
-OUTPUT_DIR = Path(__file__).parent / 'output'
-OUTPUT_DIR.mkdir(exist_ok=True)
-sys.path.insert(0, str(Path(__file__).parent.parent))
+OUTPUT_DIR = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
+                  or Path(__file__).parent / 'output')
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+# Repo root, so ``import uacpy`` resolves from a source checkout.
+sys.path.insert(0, str(Path(__file__).parents[2]))
 
 import numpy as np  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
@@ -49,6 +52,15 @@ from uacpy.visualization.plots import (  # noqa: E402
 
 
 def thorp_db_per_km(freq_hz):
+    """Thorp volume absorption, dB/km, with f in Hz.
+
+    The two small terms differ from ``uacpy.core.absorption.thorp_db_per_km``,
+    which carries the (3.0e-4, 3.3e-3) pair rather than (2.75e-4, 0.003). That
+    pair is JKPS 2nd ed. Eq. (1.47); AT's ``AttenMod.f90:93`` labels the same
+    expression "JKPS Eq. 1.34" using 1st-edition numbering. The gap is
+    4e-4 dB/km at the 2 kHz used here, i.e. under 0.03 dB over the whole 60 km
+    sweep.
+    """
     f = freq_hz / 1000.0
     return (0.11 * f**2 / (1 + f**2) + 44 * f**2 / (4100 + f**2)
             + 2.75e-4 * f**2 + 0.003)
@@ -60,7 +72,11 @@ def main():
     print("═" * 80)
 
     freq = 2000.0
-    ranges = np.linspace(100.0, 30000.0, 600)
+    # The range vector has to extend past the SE = 0 crossing or
+    # ``detection_range`` has nothing to bracket and returns inf. With
+    # SL=140, NL-DI=45 and DT=-4.3 the passive curve crosses near 45 km, so
+    # 30 km would stop short of the very quantity this example is about.
+    ranges = np.linspace(100.0, 60000.0, 600)
     tl = 20.0 * np.log10(ranges) + thorp_db_per_km(freq) * ranges / 1000.0
 
     # Detection threshold for Pd=0.5, Pf=1e-4 over a 100 Hz / 1 s integration.
@@ -100,11 +116,14 @@ def main():
     ax.invert_yaxis(); ax.grid(True, alpha=0.3)
 
     ax = axes[0, 1]
-    ax.plot(ranges / 1000, passive_se, 'g-')
+    ax.plot(ranges / 1000, passive_se, 'g-', label='Passive SE')
     ax.axhline(0, color='k', lw=0.8)
     if np.isfinite(passive_range):
         ax.axvline(passive_range / 1000, color='r', ls='--',
-                   label=f'{passive_range/1000:.1f} km')
+                   label=f'Detection range {passive_range/1000:.1f} km')
+    else:
+        ax.axhline(np.nan, color='r', ls='--',
+                   label='SE never reaches 0 in this range span')
     ax.set_title('Passive Signal Excess', fontweight='bold')
     ax.set_xlabel('Range (km)'); ax.set_ylabel('SE (dB)')
     ax.legend(); ax.grid(True, alpha=0.3)
@@ -117,11 +136,14 @@ def main():
     ax.legend(); ax.grid(True, alpha=0.3)
 
     ax = axes[1, 1]
-    ax.plot(ranges / 1000, active_se, 'r-')
+    ax.plot(ranges / 1000, active_se, 'r-', label='Active SE')
     ax.axhline(0, color='k', lw=0.8)
     if np.isfinite(active_range):
         ax.axvline(active_range / 1000, color='b', ls='--',
-                   label=f'{active_range/1000:.1f} km')
+                   label=f'Detection range {active_range/1000:.1f} km')
+    else:
+        ax.axhline(np.nan, color='b', ls='--',
+                   label='SE never reaches 0 in this range span')
     ax.set_title('Active Signal Excess', fontweight='bold')
     ax.set_xlabel('Range (km)'); ax.set_ylabel('SE (dB)')
     ax.legend(); ax.grid(True, alpha=0.3)
@@ -135,7 +157,9 @@ def main():
     # ── Part 2: signal-excess map over a model TL grid ───────────────────
     # The TL comes from Bellhop on a 200 m waveguide at 2 kHz. Ray theory is
     # valid here: D/λ ≈ 267, comfortably above the D/λ ≳ 100 ray-regime rule
-    # of thumb (modes take over below D/λ ≈ 30; see DOCUMENTATION.md §5). A
+    # of thumb (modes take over below D/λ ≈ 30 — Stergiopoulos, Advanced
+    # Signal Processing Handbook, §10.2.2; docs/models/bellhop.md brackets the
+    # same transition more loosely, at 5-20). A
     # mild surface duct (sound-speed maximum near 30 m) traps the near-surface
     # source energy and refracts the rest downward, so the SE map shows real
     # propagation structure — a low-loss surface channel over a weaker
@@ -176,10 +200,12 @@ def main():
     )
     # Reverberation uses the same modeled TL as the echo — evaluated at the
     # seafloor depth, where the scattering patch sits.
-    tl_at_bottom = tl_field.at(depth=float(env.depth)).tl
+    tl_at_bottom = tl_field.at(depth=float(env.depth)).db
     rl_grid = sonar.boundary_reverberation(
         rcv.ranges, 190.0,
-        sonar.lambert_bottom(np.rad2deg(np.arctan2(100.0, rcv.ranges))),
+        # Grazing angle at the seafloor patch in THIS scene: the 18 m source
+        # sits 200 - 18 = 182 m above the 200 m bottom.
+        sonar.lambert_bottom(np.rad2deg(np.arctan2(182.0, rcv.ranges))),
         pulse_length_s=0.05, horizontal_beamwidth_rad=0.1,
         tl_db=tl_at_bottom,
     )

@@ -8,9 +8,10 @@
   absorption helper.
 - **Bottom**: a grain-size (ϕ) / sediment-class → ``BoundaryProperties``
   conversion, *or* a fetched seafloor — EMODnet substrate (European seas), the
-  NCEI grain-size DB, the Diesing 2020 deep-sea map, a pelagic depth/latitude
-  fallback (all surficial), or GlobSed thickness + CRUST1.0 → a layered elastic
-  bottom for low-frequency work.
+  NCEI grain-size DB, the AusSeabed MARS samples (Australian margin), the
+  Diesing 2020 deep-sea map, the Graw 2021 seabed-density grid, a pelagic
+  depth/latitude fallback (all surficial), or GlobSed thickness + CRUST1.0 → a
+  layered elastic bottom for low-frequency work.
 - **Surface**: NSIDC sea-ice concentration → an elastic ice-canopy
   ``BoundaryProperties`` (:func:`fetch_sea_ice_surface`), so an ice-covered
   point replaces the free surface with a pack-ice boundary.
@@ -90,8 +91,18 @@ from uacpy.data.seaice_local import (
 )
 from uacpy.data.environment import fetch_environment
 from uacpy.data.sources import DataSource, DataProvenance, SOURCES, citations
+# The cache's own introspection: where it lives and what is in it. The rest of
+# `_cache` (staging writes, grid memos, the DATASETS registry) is machinery a
+# contributor uses, documented in DEV.md; these three answer questions a *user*
+# asks — "where is my cache?", "is dataset X installed?" — and are the only
+# part of it a guide page or an example should have to reach for.
+from uacpy.data._cache import cache_root, dataset_root, is_installed
 
 __all__ = [
+    # offline cache
+    'cache_root',
+    'dataset_root',
+    'is_installed',
     # bathymetry
     'fetch_bathy',
     'fetch_bathy_transect',
@@ -166,4 +177,30 @@ __all__ = [
     'DataSource',
     'DataProvenance',
     'citations',
+    # submodules (the eager public surface; the live/local grid loaders —
+    # emodnet_bathy_live, gebco_local, gmrt_live, woa23_local, ww3_live —
+    # are loaded on demand by their fetch wrappers and stay unlisted)
+    'absorption',
+    'argo',
+    'bathymetry',
+    'copernicus',
+    'crust1_local',
+    'diesing_local',
+    'emodnet_local',
+    'environment',
+    'globsed_local',
+    'glodap_local',
+    'graw_local',
+    'mars',
+    'pelagic',
+    'sea_surface',
+    'seabed',
+    'seaice_local',
+    'sediment',
+    'sediment_db',
+    'sound_speed',
+    'sources',
+    'waves',
+    'wind_live',
+    'wind_local',
 ]

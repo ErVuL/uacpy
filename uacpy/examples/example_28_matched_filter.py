@@ -16,11 +16,14 @@ FEATURES DEMONSTRATED:
 """
 
 import sys
+import os
 from pathlib import Path
 
-OUTPUT_DIR = Path(__file__).parent / 'output'
-OUTPUT_DIR.mkdir(exist_ok=True)
-sys.path.insert(0, str(Path(__file__).parent.parent))
+OUTPUT_DIR = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
+                  or Path(__file__).parent / 'output')
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+# Repo root, so ``import uacpy`` resolves from a source checkout.
+sys.path.insert(0, str(Path(__file__).parents[2]))
 
 import numpy as np  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
@@ -39,16 +42,19 @@ def main():
     print("EXAMPLE 28: Matched Filtering & Ambiguity Function")
     print("═" * 80)
 
+    rng = np.random.default_rng(0xACED)
     fs = 20000.0
     fmin, fmax, T = 1000.0, 5000.0, 0.02
-    tx, t_tx = lfm_chirp(fmin, fmax, T, fs)
+    t_tx, tx = lfm_chirp(fmin, fmax, T, fs)
     bandwidth = fmax - fmin
 
     # Two echoes at 0.05 s and 0.075 s, second weaker.
     amplitudes = [1.0, 0.5]
     delays = [0.05, 0.075]
     t_rx, rx = simulate_reception(tx, amplitudes, delays, fs)
-    rx = rx + 0.1 * np.random.randn(rx.size)
+    # Draws the noise from the seeded generator above, so the figure this
+    # script writes is byte-identical run to run.
+    rx = rx + 0.1 * rng.standard_normal(rx.size)
 
     lags, comp = pulse_compression(rx, tx, fs)
     pg = processing_gain(bandwidth, T)

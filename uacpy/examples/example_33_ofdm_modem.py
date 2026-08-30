@@ -25,11 +25,14 @@ FEATURES DEMONSTRATED:
 
 import sys
 import wave
+import os
 from pathlib import Path
 
-OUTPUT_DIR = Path(__file__).parent / 'output'
-OUTPUT_DIR.mkdir(exist_ok=True)
-sys.path.insert(0, str(Path(__file__).parent.parent))
+OUTPUT_DIR = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
+                  or Path(__file__).parent / 'output')
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+# Repo root, so ``import uacpy`` resolves from a source checkout.
+sys.path.insert(0, str(Path(__file__).parents[2]))
 
 import numpy as np  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
@@ -37,7 +40,12 @@ from scipy.signal import resample_poly  # noqa: E402
 
 from uacpy import comms  # noqa: E402
 from uacpy.visualization import plot_scatter  # noqa: E402
-from uacpy.comms.ofdm import schmidl_cox_sync, apply_cfo  # noqa: E402
+from uacpy.comms.ofdm import (  # noqa: E402
+    apply_cfo,
+    estimate_channel,
+    ofdm_demodulate,
+    schmidl_cox_sync,
+)
 
 
 def _write_wav(path, signal, fs):
@@ -92,26 +100,49 @@ def main():
     print(f"  recovered  : {payload[:60]!r}{'...' if len(payload) > 60 else ''}")
     print(f"  MATCH      : {payload == message}")
 
-    # recompute internals for the figure
+    # Recompute internals for the figure. Everything the public API returns is
+    # taken from it; only the two quantities it does not hand back — the timing
+    # metric and the per-block phase-corrected symbols — are rebuilt here.
     bb = rxr.from_passband(rx, fs, fc, oversample=os, doppler_scale=scale)
-    start, cfo = schmidl_cox_sync(bb, nsc, cp)
+    start, cfo = schmidl_cox_sync(bb, nsc)
+    # schmidl_cox_sync returns only (start, cfo), so the metric it searched is
+    # rebuilt to plot it: P(d) and R(d) are the length-L sliding sums of
+    # Schmidl & Cox eqs. (5) and (7), and M(d) = |P(d)|^2 / R(d)^2 is eq. (8).
     L = nsc // 2
     a = np.conj(bb[:-L]) * bb[L:]
     p = np.array([a[d:d + L].sum() for d in range(bb.size - 2 * L)])
     energy = np.abs(bb[L:]) ** 2
     rr = np.array([energy[d:d + L].sum() for d in range(bb.size - 2 * L)])
-    metric = np.abs(p) ** 2 / (rr ** 2 + 1e-12)
-    metric[rr < 0.25 * rr.max()] = 0.0
+    # The metric is a normalised ratio, so in the noise-only lead-in (tiny rr)
+    # it takes arbitrary values that would dwarf the real plateau on the plot.
+    # Divide only where the received energy clears a quarter of peak and leave
+    # the rest at zero. Gating first is also what keeps M(d) itself exact: R(d)
+    # is an energy sum, so R^2 goes as amplitude^4 and adding any fixed epsilon
+    # to it would tie the metric to the amplitude the record happens to be held
+    # in — the plateau here collapses from 1.02 to 0.0003 by a scale of 1e-5.
+    loud = rr >= 0.25 * rr.max()
+    metric = np.zeros(rr.size)
+    metric[loud] = np.abs(p[loud]) ** 2 / rr[loud] ** 2
     blk = nsc + cp
     x = apply_cfo(bb[start:], cfo)
-    pilot_spec = np.fft.fft(x[blk + cp: blk + cp + nsc]) / np.sqrt(nsc)
-    H = pilot_spec / (rxr.pilot_freq + 1e-12)
-    dat = []
+    # Block 0 is the Schmidl-Cox preamble and block 1 the pilot, so the payload
+    # blocks start at index 2. The pilot channel estimate and the one-tap
+    # equalization are the library's own; ofdm_demodulate takes the channel as
+    # an impulse response, so the estimated H(f) goes back through an inverse
+    # FFT (it re-transforms to exactly this H).
+    H = estimate_channel(x[blk:2 * blk], rxr.pilot_freq, nsc, cp)
+    nblocks = x.size // blk
     cst = rxr.modulator.constellation
-    for b in range(2, x.size // blk):
-        d = np.fft.fft(x[b * blk + cp: b * blk + cp + nsc]) / np.sqrt(nsc) / (H + 1e-12)
-        dec = cst[np.argmin(np.abs(d[:, None] - cst[None, :]), axis=1)]
-        dat.append(d * np.exp(-1j * np.angle(np.vdot(dec, d))))
+    dat = []
+    if nblocks > 2:
+        eq = ofdm_demodulate(x[2 * blk: nblocks * blk], nsc, cp,
+                             channel=np.fft.ifft(H))
+        # The decision-directed common-phase correction is per block and
+        # OFDMReceiver.receive returns decoded bits, not the symbols this panel
+        # plots, so this last step is the one thing still rebuilt by hand.
+        for d in eq.reshape(-1, nsc):
+            dec = cst[np.argmin(np.abs(d[:, None] - cst[None, :]), axis=1)]
+            dat.append(d * np.exp(-1j * np.angle(np.vdot(dec, d))))
     data_syms = np.concatenate(dat) if dat else np.array([])
 
     # ----------------------------------------------------------------------

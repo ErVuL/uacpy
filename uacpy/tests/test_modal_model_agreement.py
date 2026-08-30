@@ -1,8 +1,15 @@
 """
 Test that modal models (Kraken, Scooter, OAST) produce similar results.
 
-Modal models should agree well for range-independent environments since they
-use the same underlying physics (normal mode theory).
+They do not share a method — Kraken sums normal modes while Scooter and OAST
+integrate the wavenumber spectrum. They agree because on a range-independent
+environment the modal sum is the residue series of that same integral, closed
+in the upper half-plane. The equivalence is not perfect: the contour also
+carries a branch-line integral for the components radiating into the bottom,
+which a normal-mode code drops, so the two diverge in the near field and
+converge as that contribution dies away with range. Range dependence breaks the
+equivalence outright, which is why these comparisons are confined to a
+range-independent Pekeris guide sampled from 1 km out.
 """
 
 import pytest
@@ -22,11 +29,11 @@ class TestModalModelAgreement:
     def simple_environment(self):
         """Pekeris waveguide with a fluid half-space bottom.
 
-        Modal solvers (KrakenField, Scooter, OAST) share the same
-        wavenumber-integration/normal-mode physics on a true Pekeris
-        configuration and should agree within ~1 dB; a vacuum-bottom env
-        has no halfspace leakage channel and the inter-model spread is
-        larger.
+        A fluid half-space rather than the simpler vacuum bottom: the leaky
+        branch-line contribution that Kraken drops decays with range only if
+        there is a bottom to radiate into. Against a vacuum bottom the trapped
+        modes are lossless, nothing damps the disagreement, and the inter-model
+        spread stays wide at every range.
         """
         env = uacpy.Environment(
             name='Pekeris',
@@ -79,46 +86,64 @@ class TestModalModelAgreement:
         # Count valid modes (non-zero with non-positive imaginary part)
         n_valid = sum(1 for k_val in k if np.abs(k_val) >= 1e-10 and np.imag(k_val) <= 0)
 
-        # For 100 Hz in 100m water, expect approximately 6 modes
+        # An ideal (doubly pressure-release) guide holds 2*f*D/c1 half
+        # wavelengths across the water column — 13.3 at 100 Hz in 100 m, which
+        # Abraham (*Underwater Acoustic Signal Processing*, §3) quotes as 13 for
+        # exactly these numbers. A Pekeris bottom traps only the modes steeper
+        # than the critical angle, scaling that by
+        # sqrt(1 - (c1/c2)^2) = sqrt(1 - (1500/1700)^2) = 0.471, so 6 modes.
+        # The +/-1 band admits the marginally-trapped mode nearest cutoff,
+        # whose capture depends on the mesh.
         assert n_valid >= 5, f"Expected at least 5 valid modes, got {n_valid}"
         assert n_valid <= 7, f"Expected at most 7 valid modes, got {n_valid}"
 
-    def test_krakenfield_vs_scooter_single_point(
+    def test_kraken_vs_scooter_single_point(
         self, simple_environment, simple_source, single_receiver
     ):
-        """Test KrakenField vs Scooter at a single point."""
-        # KrakenField
+        """Kraken vs Scooter at a single point.
+
+        These are smoke bounds, not accuracy statements. The two solve the same
+        range-independent problem exactly and agree to ~0.1 dB in practice
+        (``test_cross_model_agreement.py`` carries the tight RMSE numbers); 5 dB
+        here is roughly fifty times looser, sized to survive one solver landing
+        on the far side of a deep interference null while still catching a
+        wrong deck, a dropped mode set or a units error.
+        """
         kf = Kraken(verbose=False)
         kf_result = kf.run(simple_environment, simple_source, single_receiver)
-        kf_tl = kf_result.tl[0, 0]
+        kf_tl = kf_result.db[0, 0]
 
         # Scooter
         scooter = Scooter(verbose=False)
         scooter_result = scooter.run(simple_environment, simple_source, single_receiver)
-        scooter_tl = scooter_result.tl[0, 0]
+        scooter_tl = scooter_result.db[0, 0]
 
         # Check agreement
         diff = np.abs(kf_tl - scooter_tl)
 
         assert diff < 5.0, (
-            f"KrakenField and Scooter disagree by {diff:.2f} dB "
+            f"Kraken and Scooter disagree by {diff:.2f} dB "
             f"(KF={kf_tl:.2f}, Scooter={scooter_tl:.2f}). "
             "Modal models should agree within 5 dB."
         )
 
-    def test_krakenfield_vs_scooter_multiple_ranges(
+    def test_kraken_vs_scooter_multiple_ranges(
         self, simple_environment, simple_source, multi_range_receiver
     ):
-        """Test KrakenField vs Scooter across multiple ranges."""
-        # KrakenField
+        """Kraken vs Scooter across multiple ranges.
+
+        Averaging over six ranges dilutes any single null misalignment, so the
+        mean bound tightens to 2 dB while the per-range peak keeps the 5 dB of
+        the single-point check.
+        """
         kf = Kraken(verbose=False)
         kf_result = kf.run(simple_environment, simple_source, multi_range_receiver)
-        kf_tl = kf_result.tl[0, :]
+        kf_tl = kf_result.db[0, :]
 
         # Scooter
         scooter = Scooter(verbose=False)
         scooter_result = scooter.run(simple_environment, simple_source, multi_range_receiver)
-        scooter_tl = scooter_result.tl[0, :]
+        scooter_tl = scooter_result.db[0, :]
 
         # Check agreement at each range
         diffs = np.abs(kf_tl - scooter_tl)
@@ -126,12 +151,12 @@ class TestModalModelAgreement:
         max_diff = np.max(diffs)
 
         assert mean_diff < 2.0, (
-            f"KrakenField and Scooter mean difference is {mean_diff:.2f} dB. "
+            f"Kraken and Scooter mean difference is {mean_diff:.2f} dB. "
             "Modal models should agree with mean difference < 2 dB."
         )
 
         assert max_diff < 5.0, (
-            f"KrakenField and Scooter max difference is {max_diff:.2f} dB. "
+            f"Kraken and Scooter max difference is {max_diff:.2f} dB. "
             "Modal models should agree with max difference < 5 dB."
         )
 
@@ -145,15 +170,15 @@ class TestModalModelAgreement:
         # Run all models
         kf = Kraken(verbose=False)
         kf_result = kf.run(simple_environment, simple_source, single_receiver)
-        kf_tl = kf_result.tl[0, 0]
+        kf_tl = kf_result.db[0, 0]
 
         scooter = Scooter(verbose=False)
         scooter_result = scooter.run(simple_environment, simple_source, single_receiver)
-        scooter_tl = scooter_result.tl[0, 0]
+        scooter_tl = scooter_result.db[0, 0]
 
         oast = OAST(verbose=False)
         oast_result = oast.run(simple_environment, simple_source, single_receiver)
-        oast_tl = oast_result.tl[0, 0]
+        oast_tl = oast_result.db[0, 0]
 
         # Compute pairwise differences
         kf_scooter_diff = np.abs(kf_tl - scooter_tl)
@@ -165,7 +190,7 @@ class TestModalModelAgreement:
 
         assert max_diff < 2.0, (
             f"Modal models disagree on Pekeris waveguide:\n"
-            f"  KrakenField: {kf_tl:.2f} dB\n"
+            f"  Kraken:      {kf_tl:.2f} dB\n"
             f"  Scooter:     {scooter_tl:.2f} dB\n"
             f"  OAST:        {oast_tl:.2f} dB\n"
             f"  Max difference: {max_diff:.2f} dB\n"
@@ -174,12 +199,19 @@ class TestModalModelAgreement:
         )
 
     def test_mode_count_consistency(self, simple_environment, simple_source):
-        """Test that mode count is consistent for the environment."""
-        # Compute modes with different resolutions
+        """Test that mode count is consistent for the environment.
+
+        ``mode_depth_grid`` is only where the eigenfunctions get tabulated —
+        the eigenvalue search runs on Kraken's own internal mesh — so the count
+        it returns must not move with the output resolution.
+        """
         resolutions = [100, 150, 200]
         mode_counts = []
 
         for n_points in resolutions:
+            # 0.999 keeps the deepest tabulation point strictly inside the water
+            # column; landing exactly on the seafloor puts it on the interface,
+            # where the mode shape is continuous but the medium is not.
             mode_depths = np.linspace(0, simple_environment.depth * 0.999, n_points)
             kraken = Kraken(mode_depth_grid=mode_depths, verbose=False)
             result = kraken.compute_modes(simple_environment, simple_source)
@@ -195,3 +227,62 @@ class TestModalModelAgreement:
             f"Mode count varies more than ±1 across resolutions: {mode_counts}. "
             "Should be stable to within one marginally-trapped mode."
         )
+
+
+class TestDocumentedModeCounts:
+    """kraken.md pins exact mode counts for its three worked decks: 14 for
+    the shallow-water channel at 200 Hz (§6.1), 28 over the sand-on-granite
+    layered seabed (§6.2), and 27 with ``leaky_modes=True`` on the channel
+    (§6.5 — the 14 trapped plus 13 leaky). The counts are deterministic
+    functions of the decks, so they pin the docs and the solver to each
+    other: a vendored-solver refresh, a changed auto ``c_high``, or a doc
+    edit that drifts from the code fails here by an exact integer."""
+
+    @staticmethod
+    def _shallow_channel():
+        # docs/figure_scripts/_common.py shallow_water(), verbatim.
+        return uacpy.Environment(
+            name='Shallow-water channel',
+            bathymetry=100.0,
+            ssp=[(0.0, 1500.0), (30.0, 1495.0), (100.0, 1490.0)],
+            bottom=uacpy.BoundaryProperties(
+                acoustic_type='half-space',
+                sound_speed=1650.0, density=1.8, attenuation=0.6,
+            ),
+        )
+
+    _SRC = staticmethod(lambda: uacpy.Source(depths=25.0, frequencies=200.0))
+
+    def test_shallow_channel_has_14_modes(self):
+        # kraken.md §6.1 "Fourteen modes at 200 Hz" — in 100 m of water,
+        # eleven trapped plus three the default ceiling's 5% overshoot
+        # keeps past the 1650 m/s bottom speed.
+        modes = Kraken(verbose=False).compute_modes(
+            self._shallow_channel(), self._SRC())
+        assert modes.n_modes == 14
+
+    def test_sand_over_granite_deck_has_28_modes(self):
+        # kraken.md §6.2 "28 modes here against 14 for the same water column";
+        # the env below is docs/figure_scripts/_common.py
+        # layered_elastic(), verbatim. ``from_presets`` fluid-approximates
+        # by default, so the count rides on granite's 5500 m/s
+        # *compressional* speed lifting the auto c_high to 5775 m/s — the
+        # extra steep modes only exist because the basement supports them.
+        env = uacpy.Environment(
+            name='Layered elastic seabed',
+            bathymetry=100.0,
+            ssp=[(0.0, 1500.0), (100.0, 1490.0)],
+            bottom=uacpy.SeabedColumn.from_presets(
+                layers=[('sand', 8.0)], halfspace='granite',
+            ),
+        )
+        modes = Kraken(verbose=False).compute_modes(env, self._SRC())
+        assert modes.n_modes == 28
+
+    def test_leaky_modes_deck_has_27_modes(self):
+        # kraken.md §6.5 "finds 14 modes; asking for leaky ones finds 27"
+        # — the 13 extra all sit past the bottom-speed
+        # line with |Im(k)| one to three orders above the trapped set.
+        modes = Kraken(verbose=False, leaky_modes=True).compute_modes(
+            self._shallow_channel(), self._SRC())
+        assert modes.n_modes == 27

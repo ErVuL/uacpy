@@ -13,6 +13,7 @@ import pytest
 from uacpy.core.environment import BoundaryProperties, Bottom
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.data import diesing_local
+from uacpy.data.sediment import bottom_from_grain_size
 
 
 @pytest.mark.parametrize('code, litho, phi', [
@@ -37,13 +38,25 @@ def test_no_coverage_raises(monkeypatch):
         diesing_local.fetch_seafloor_lithology((56.0, 3.0))         # shelf
 
 
-def test_transect(monkeypatch):
-    codes = iter([1, 2, 3])
-    monkeypatch.setattr(diesing_local, '_class_code', lambda lat, lon: next(codes))
+def test_transect_classifies_each_waypoint_from_its_own_cell(monkeypatch):
+    # Latitude-banded class raster: calcareous sediment (1, ϕ 7.5) south of
+    # 0.5°N, radiolarian ooze (5, ϕ 8.0) to 1.5°N, clay (2, ϕ 9.0) beyond.
+    # The waypoints at 0°, 1°, 2°N each read their own band.
+    def code_at(lat, lon):
+        if lat < 0.5:
+            return 1
+        return 5 if lat < 1.5 else 2
+
+    monkeypatch.setattr(diesing_local, '_class_code', code_at)
     rdb = diesing_local.fetch_bottom_diesing_transect((0.0, 0.0), (2.0, 0.0),
                                                       n_points=3)
     assert isinstance(rdb, Bottom)
-    assert rdb.halfspace_sound_speed.shape == (3,) and np.all(np.isfinite(rdb.halfspace_sound_speed))
+    assert rdb.ranges.shape == (3,) and rdb.ranges[0] == 0.0
+    expected = [bottom_from_grain_size(phi).sound_speed
+                for phi in (7.5, 8.0, 9.0)]
+    assert rdb.halfspace_sound_speed.tolist() == pytest.approx(expected)
+    # Hamilton c_p falls with ϕ: 1513.71 > 1506.47 > 1494.90 m/s.
+    assert np.all(np.diff(rdb.halfspace_sound_speed) < 0)
 
 
 def test_download_extracts_raster(tmp_path, monkeypatch):
@@ -62,3 +75,38 @@ def test_missing_cache_names_flag(tmp_path, monkeypatch):
     diesing_local._MODEL.clear()
     with pytest.raises(ConfigurationError, match='install.sh --data diesing'):
         diesing_local.fetch_bottom_diesing((0.0, -150.0))
+
+
+def test_the_antimeridian_reads_alike_from_either_side(monkeypatch):
+    """Wagner IV sends +180 and −180 to opposite ends of the same parallel, and
+    the rasterized nodata margin covers one end without covering the other."""
+    pytest.importorskip('pyproj')
+    from uacpy.data import diesing_local
+    tf = diesing_local._pyproj_transformer()
+    sx = 1.0e6
+    x_edge = abs(tf.transform(180.0, 0.0)[0])
+    width = int(np.ceil(2 * x_edge / sx)) + 4
+    arr = np.full((8, width), 2.0, dtype=np.float32)    # class 2 = clay
+    arr[:, :4] = -3.4e38                               # west margin: nodata
+    monkeypatch.setattr(diesing_local, '_model', lambda: {
+        'arr': arr, 'x0': -x_edge - 2 * sx, 'y0': 4 * sx, 'sx': sx, 'sy': sx,
+        'tf': tf, 'H': arr.shape[0], 'W': width})
+    assert diesing_local._class_code(0.0, 180.0) == 2
+    assert diesing_local._class_code(0.0, -180.0) == 2
+    # An interior miss is still a miss — the retry is edge-only.
+    arr[:] = -3.4e38
+    assert diesing_local._class_code(0.0, 0.0) is None
+
+
+def test_the_diesing_transformer_delegates_to_the_seaice_builder(monkeypatch):
+    from uacpy.data import diesing_local, seaice_local
+    calls = {}
+
+    def fake_builder(epsg, *, backend='sea-ice'):
+        calls['epsg'], calls['backend'] = epsg, backend
+        return 'sentinel-transformer'
+
+    monkeypatch.setattr(seaice_local, '_pyproj_transformer', fake_builder)
+    assert diesing_local._pyproj_transformer() == 'sentinel-transformer'
+    assert calls['epsg'] == diesing_local.WAGNER4_PROJ
+    assert 'Diesing' in calls['backend']

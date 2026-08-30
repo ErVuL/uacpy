@@ -275,17 +275,12 @@ subroutine interv ( xt, lxt, x, left, mflag )
 !    The XT array is a set of increasing values.  The goal of the routine
 !    is to determine the largest index I so that XT(I) <= X.
 !
-!    The routine is designed to be efficient in the common situation
-!    that it is called repeatedly, with X taken from an increasing
-!    or decreasing sequence.
+!    ILO is a per-call local, set to 1 on entry, so every call starts
+!    its search from the first interval.  The bracketing result does
+!    not depend on ILO's starting value: the steps below move ILO and
+!    IHI until XT(ILO) <= X < XT(IHI) before bisecting.
 !
-!    This will happen when a piecewise polynomial is to be graphed.
-!    The first guess for LEFT is therefore taken to be the value
-!    returned at the previous call and stored in the local variable ILO.
-!
-!    A first check ascertains that ILO < LXT.  This is necessary
-!    since the present call may have nothing to do with the previous
-!    call.  Then, if 
+!    A first check ascertains that ILO < LXT.  Then, if
 !
 !      XT(ILO) <= X < XT(ILO+1), 
 !
@@ -342,12 +337,13 @@ subroutine interv ( xt, lxt, x, left, mflag )
   integer left
   integer mflag
   integer ihi
-  integer, save :: ilo = 1
+  integer ilo
   integer istep
   integer middle
   real ( kind = wp2 ) x
   real ( kind = wp2 ) xt(lxt)
 
+  ilo = 1
   ihi = ilo + 1
 
   if ( lxt <= ihi ) then

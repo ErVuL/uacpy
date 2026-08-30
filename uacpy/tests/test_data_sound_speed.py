@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 
 import uacpy
-from uacpy.core.environment import SoundSpeedProfile
+from uacpy.core.environment import Bathymetry, SoundSpeedProfile
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.data import sound_speed as ss
 
@@ -80,6 +80,38 @@ def test_unesco_vs_delgrosso_close(annual_http):
     cu = ss.fetch_ssp((30.5, -40.5), formula='unesco').data[:, 0]
     cd = ss.fetch_ssp((30.5, -40.5), formula='delgrosso').data[:, 0]
     assert np.allclose(cu, cd, atol=1.0)  # standard formulas agree ~1 m/s
+
+
+def test_wet_cell_fallback_stamps_the_cell_actually_used(monkeypatch):
+    # The requested cell (30.5, -40.5) is dry and the column comes from its
+    # eastern neighbour; provenance must carry that neighbour's centre so
+    # offset_km measures the real hop, not 0 to the dry cell.
+    wet = (120, 140)                              # cell centre (30.5, -39.5)
+
+    def fake_get_column(source, period, lat_idx, lon_idx, **kw):
+        if (lat_idx, lon_idx) == wet:
+            return (np.asarray(_Z), np.asarray([18.0, 16.0, 13.0, 8.0, 5.0]),
+                    np.asarray([36.0, 36.1, 36.2, 35.5, 35.0]))
+        return np.array([]), np.array([]), np.array([])
+
+    monkeypatch.setattr(ss, '_get_column', fake_get_column)
+    with pytest.warns(UserWarning, match='closest wet cell'):
+        profile = ss.fetch_ssp((30.5, -40.5))
+    prov = profile.data_sources[0]
+    assert prov.requested_point == (30.5, -40.5)
+    assert prov.data_point == (30.5, -39.5)
+    assert prov.offset_km == pytest.approx(95.8, abs=0.5)  # 1 deg lon at 30.5N
+
+
+def test_on_centre_request_stamps_zero_offset(monkeypatch):
+    def fake_get_column(source, period, lat_idx, lon_idx, **kw):
+        return (np.asarray(_Z), np.asarray([18.0, 16.0, 13.0, 8.0, 5.0]),
+                np.asarray([36.0, 36.1, 36.2, 35.5, 35.0]))
+
+    monkeypatch.setattr(ss, '_get_column', fake_get_column)
+    prov = ss.fetch_ssp((30.5, -40.5)).data_sources[0]
+    assert prov.data_point == (30.5, -40.5)
+    assert prov.offset_km == 0.0
 
 
 def test_land_cell_raises(monkeypatch):
@@ -215,6 +247,89 @@ def test_assemble_range_dependent_reorders_unsorted_ranges():
     assert ssp.data[0, 2] == 1500.0              # the 2000 m column
 
 
+def _provenance_columns():
+    """Four columns whose provenance overlaps: two share ``copernicus``, one
+    carries no records at all, and the last repeats a record already seen."""
+    from uacpy.data.sources import SOURCES, DataProvenance
+    p_c1 = DataProvenance(source=SOURCES['copernicus'],
+                          requested_point=(30.0, -40.0))
+    p_c2 = DataProvenance(source=SOURCES['copernicus'],
+                          requested_point=(31.0, -40.0))
+    p_w = DataProvenance(source=SOURCES['woa23'], requested_point=(32.0, -40.0))
+    p_g = DataProvenance(source=SOURCES['gebco'])
+    return [
+        SoundSpeedProfile(depths=[0.0, 50.0, 100.0],
+                          data=[1500.0, 1495.0, 1490.0],
+                          data_sources=(p_c1, p_w)),
+        SoundSpeedProfile(depths=[0.0, 120.0], data=[1501.0, 1488.0],
+                          data_sources=(p_c2,)),
+        SoundSpeedProfile(depths=[0.0, 80.0], data=[1502.0, 1492.0],
+                          data_sources=()),
+        SoundSpeedProfile(depths=[0.0, 90.0], data=[1503.0, 1491.0],
+                          data_sources=(p_g, p_c1)),
+    ]
+
+
+def test_assemble_range_dependent_aggregates_through_the_carrier_deduper(
+        monkeypatch):
+    """The assembly reaches ``_carrier_validate._dedupe_provenance`` — the
+    module that declares itself the single home for this union — rather than
+    re-deriving first-seen-order dedupe-by-source-id beside it.
+
+    Monkeypatching the helper is what distinguishes delegation from a local
+    copy: a re-implementation ignores the patch and returns the real union.
+    """
+    from uacpy.core import _carrier_validate
+    from uacpy.data.sources import SOURCES, DataProvenance
+    # A record no column carries, so the real union can never return it.
+    sentinel = (DataProvenance(source=SOURCES['gmrt'],
+                               requested_point=(89.0, 179.0)),)
+    seen = {}
+
+    def _spy(carriers):
+        seen['carriers'] = list(carriers)
+        return sentinel
+
+    monkeypatch.setattr(_carrier_validate, '_dedupe_provenance', _spy)
+    monkeypatch.setattr(ss, '_dedupe_provenance', _spy)
+    out = ss.assemble_range_dependent(_provenance_columns(),
+                                      [3000.0, 0.0, 2000.0, 1000.0])
+    assert tuple(out.data_sources) == sentinel
+    # It is handed the columns in assembled (ascending-range) order, so the
+    # first-seen record is the one from the nearest column.
+    assert [c.depths.max() for c in seen['carriers']] == [120.0, 90.0, 80.0,
+                                                          100.0]
+
+
+def test_assemble_range_dependent_dedupes_provenance_by_source_id():
+    """One record survives per dataset, in first-seen order over the columns
+    sorted by range, and a column without ``data_sources`` contributes none."""
+    cols = _provenance_columns()
+    out = ss.assemble_range_dependent(cols, [3000.0, 0.0, 2000.0, 1000.0])
+    assert isinstance(out.data_sources, tuple)
+    assert [p.source.id for p in out.data_sources] == ['copernicus', 'gebco',
+                                                       'woa23']
+    # The surviving copernicus record is the 1000 m column's, not the 3000 m
+    # column's: the union runs over the reordered columns.
+    assert out.data_sources[0].requested_point == (31.0, -40.0)
+    assert out.data_sources[2].requested_point == (32.0, -40.0)
+    # The records are the very objects the columns carried, not copies.
+    assert out.data_sources[0] is cols[1].data_sources[0]
+    assert out.data_sources[2] is cols[0].data_sources[1]
+
+
+def test_assemble_range_dependent_tolerates_a_column_without_provenance():
+    """A carrier lacking the attribute entirely is skipped, not an error."""
+    class _NoProvenance:
+        depths = np.array([0.0, 10.0])
+        data = np.array([[1500.0], [1499.0]])
+
+    cols = _provenance_columns()
+    out = ss.assemble_range_dependent([cols[0], _NoProvenance()],
+                                      [0.0, 100.0])
+    assert [p.source.id for p in out.data_sources] == ['copernicus', 'woa23']
+
+
 @pytest.mark.requires_network
 def test_live_woa23_profile():
     try:
@@ -224,3 +339,98 @@ def test_live_woa23_profile():
     assert profile.depths[0] == 0.0
     assert profile.depths[-1] > 3000.0           # deep open ocean
     assert np.all((1440 < profile.data) & (profile.data < 1560))
+
+
+def _column(depths, speeds):
+    return SoundSpeedProfile(depths=np.asarray(depths, dtype=float),
+                             data=np.asarray(speeds, dtype=float))
+
+
+def _bathy(pairs):
+    return Bathymetry.coerce(np.asarray(pairs, dtype=float))
+
+
+def test_column_keeps_its_analysed_levels_under_a_shallower_seafloor():
+    """A column reaching below its waypoint's seafloor comes back whole.
+
+    Bathymetry is sampled far more finely than the SSP columns, so the
+    seafloor between two waypoints is routinely deeper than at either: a
+    column cut back to its own waypoint has lost samples the assembled field
+    still interpolates through at those intermediate ranges.
+    """
+    col = _column([0.0, 1000.0, 3000.0, 4800.0],
+                  [1540.0, 1484.0, 1516.0, 1540.8])
+    out = ss.extend_column_to_seafloor(col, _bathy([[0.0, 3381.0],
+                                                    [1.0e5, 3381.0]]), 0.0)
+    assert out is col
+    assert float(out.depths[-1]) == 4800.0
+    assert float(out.data[-1, 0]) == pytest.approx(1540.8)
+
+
+def test_column_extends_under_a_deeper_seafloor():
+    col = _column([0.0, 1000.0, 5500.0], [1540.0, 1484.0, 1551.05])
+    with pytest.warns(UserWarning, match='extrapolated'):
+        out = ss.extend_column_to_seafloor(
+            col, _bathy([[0.0, 8801.0], [1.0e5, 8801.0]]), 0.0, latitude=29.78)
+    assert float(out.depths[-1]) == pytest.approx(8801.0)
+    # UNESCO at 8801 m holding the column's own deepest T/S: 1611.93 m/s.
+    assert float(out.data[-1, 0]) == pytest.approx(1611.93, abs=0.05)
+
+
+def test_transect_holds_no_cut_value_inside_the_water_column(monkeypatch):
+    """On a ridge whose crest falls between two SSP waypoints, the assembled
+    field must still carry the analysed deep sample there.
+
+    The waypoint seafloors (3000 m) sit above the columns' deepest analysed
+    level (4500 m) while the seafloor between them reaches 5200 m. Cutting
+    each column at its waypoint leaves 1497 m/s flat-held from 3000 m down;
+    the analysed value at 4500 m is 1530 m/s.
+    """
+    deep_z = np.array([0.0, 1000.0, 3000.0, 4500.0])
+    deep_c = np.array([1540.0, 1484.0, 1497.0, 1530.0])
+    monkeypatch.setattr(ss, 'fetch_ssp',
+                        lambda point, **kw: _column(deep_z, deep_c))
+    length = 111_195.0                       # 1 degree of latitude
+    seafloor = _bathy([[0.0, 3000.0], [length / 2, 5200.0], [length, 3000.0]])
+    prof = ss.fetch_ssp_transect((0.0, 0.0), (1.0, 0.0), n_points=2,
+                                 seafloor=seafloor)
+    assert float(prof.depths[-1]) == pytest.approx(4500.0)
+    mid = prof.eval(range=length / 2)
+    c_4500 = float(np.interp(4500.0, mid.depths, mid.data[:, 0]))
+    assert c_4500 == pytest.approx(1530.0, abs=1e-6), (
+        f"{c_4500:.1f} m/s at 4500 m over a 5200 m seafloor — the analysed "
+        f"1530.0 was cut and 1497.0 held in its place")
+
+
+def test_operational_transect_keeps_its_levels_too(monkeypatch):
+    """The Copernicus transect fetcher carries the same rule: a 3000 m column
+    over a 500 m waypoint seafloor keeps all four of its levels."""
+    import sys
+    import types
+    from uacpy.data import copernicus
+
+    depths = [0.0, 100.0, 1000.0, 3000.0]
+
+    class _DA:                       # minimal xarray.DataArray stand-in
+        def __init__(self, values):
+            self.values = np.asarray(values, dtype=float)
+
+        def sel(self, **kwargs):
+            return self
+
+    class _DS:
+        def __init__(self):
+            self._vars = {'depth': _DA(depths),
+                          'thetao': _DA([22.0, 15.0, 5.0, 3.0]),
+                          'so': _DA([36.0, 36.2, 35.0, 34.9])}
+
+        def __getitem__(self, key):
+            return self._vars[key]
+
+    fake = types.ModuleType('copernicusmarine')
+    fake.open_dataset = lambda **kwargs: _DS()
+    monkeypatch.setitem(sys.modules, 'copernicusmarine', fake)
+    ssp = copernicus.fetch_ssp_transect_operational(
+        (30.0, -40.0), (31.0, -40.0), date='2020-06-15', n_points=4,
+        seafloor=_bathy([[0.0, 500.0], [2.0e5, 500.0]]))
+    assert ssp.depths.tolist() == depths

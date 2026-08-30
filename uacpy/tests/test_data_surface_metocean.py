@@ -17,6 +17,7 @@ from uacpy.data import (
     environment as env_mod, sea_surface, waves as waves_mod, wind_live,
     wind_local, ww3_live,
 )
+from uacpy.tests._cache_builders import _skip_or_fail
 
 _WIND_CSV = ("time,zlev,latitude,longitude,{var}\n"
              "UTC,m,degrees_north,degrees_east,m s-1\n"
@@ -203,8 +204,12 @@ def test_fetch_waves_bad_source_raises():
 # ── sea surface ───────────────────────────────────────────────────────────────
 
 def test_hs_to_pm_wind():
-    # Hs = 0.021·U² → U = sqrt(Hs/0.021); Hs=2.1 → ~10 m/s.
-    assert sea_surface.hs_to_pm_wind(2.1) == pytest.approx(10.0, rel=1e-3)
+    # Inverts the Pierson-Moskowitz Hs = coeff·U², so it must round-trip
+    # against whatever coefficient the module carries.
+    for u in (5.0, 10.0, 18.0):
+        hs = sea_surface._PM_HS_COEFF * u ** 2
+        assert sea_surface.hs_to_pm_wind(hs) == pytest.approx(u)
+    assert sea_surface.hs_to_pm_wind(-1.0) == 0.0        # clamped, not NaN
 
 
 def test_fetch_sea_surface_from_waves(monkeypatch):
@@ -227,6 +232,47 @@ def test_fetch_sea_surface_wind_fallback(monkeypatch):
     assert src == 'nbs' and alt.shape == (32, 2)
 
 
+def test_fetch_sea_surface_local_reads_the_cached_climatology(wind_cache,
+                                                              monkeypatch):
+    """source='local' must reach the installed wind grid without the network."""
+    def boom(url, **kw):
+        raise AssertionError(f"network call in a local sea-state fetch: {url}")
+
+    monkeypatch.setattr(wind_live, 'http_get', boom)
+    alt, src = sea_surface.fetch_sea_surface(
+        (0.6, 0.6), date='2021-03-15', max_range=5000.0, n_points=32, seed=3,
+        source='local')
+    assert src == 'nbs' and alt.shape == (32, 2)
+
+
+def test_fetch_sea_surface_auto_falls_back_to_the_climatology(wind_cache,
+                                                              monkeypatch):
+    """'auto' ends on the cached climatology when waves and live wind fail."""
+    monkeypatch.setattr(waves_mod, 'fetch_waves',
+                        lambda point, **kw: (_ for _ in ()).throw(DataFetchError("no waves")))
+    monkeypatch.setattr(
+        wind_live, '_wind_speed',
+        lambda *a, **kw: (_ for _ in ()).throw(DataFetchError("erddap down")))
+    alt, src = sea_surface.fetch_sea_surface(
+        (0.6, 0.6), date='2021-03-15', max_range=5000.0, n_points=32, seed=4,
+        source='auto')
+    assert src == 'nbs' and alt.shape == (32, 2)
+
+
+def test_fetch_environment_altimetry_local(wind_cache, monkeypatch):
+    """The installed wind climatology is reachable through fetch_environment."""
+    def boom(url, **kw):
+        raise AssertionError(f"network call in a local sea-state fetch: {url}")
+
+    monkeypatch.setattr(wind_live, 'http_get', boom)
+    env = env_mod.fetch_environment(
+        (0.6, 0.6), bathymetry=2000.0, ssp=1500.0, date='2021-03-15',
+        transect_to=(0.9, 0.9), altimetry_sources='local',
+        sea_surface_n_points=32, sea_surface_seed=5)
+    assert env.altimetry is not None
+    assert 'nbs' in [s.source.id for s in env.data_sources]
+
+
 # ── fetch_environment altimetry integration ───────────────────────────────────
 
 def test_altimetry_requires_transect():
@@ -241,6 +287,16 @@ def test_altimetry_requires_date():
                                   transect_to=(50.5, 0.5), altimetry_sources='waves')
 
 
+def test_altimetry_guard_falls_back_to_literal():
+    # altimetry= is the documented fallback when the sea-state fetch cannot
+    # run; a missing date= must reach that fallback, not raise past it.
+    alt = np.column_stack([np.linspace(0.0, 5000.0, 10), np.zeros(10)])
+    env = env_mod.fetch_environment(
+        (50.0, 0.0), bathymetry=2000.0, ssp=1500.0, transect_to=(50.5, 0.5),
+        altimetry_sources='waves', altimetry=alt)
+    assert env.altimetry is not None
+
+
 def test_fetch_environment_altimetry(monkeypatch):
     # Literal bathy/ssp keep it offline; the sea-surface fetch is stubbed and its
     # provenance id must land in env.data_sources.
@@ -252,18 +308,6 @@ def test_fetch_environment_altimetry(monkeypatch):
         date='2020-01-01', altimetry_sources='waves')
     assert env.altimetry is not None
     assert 'waverys' in [s.source.id for s in env.data_sources]
-
-
-_NETWORK_DOWN_TOKENS = ('could not reach', 'timed out', 'timeout', 'connection',
-                        'unreachable', 'http 502', 'http 503', 'http 504')
-
-
-def _skip_or_fail(exc, service):
-    """Skip only on network-level failure; a structured server rejection
-    (bad variable / constraint / axis) is a real bug and must fail."""
-    if any(tok in exc.message.lower() for tok in _NETWORK_DOWN_TOKENS):
-        pytest.skip(f"{service} unreachable: {exc.message}")
-    pytest.fail(f"{service} rejected the query: {exc.message}")
 
 
 @pytest.mark.requires_network
@@ -284,3 +328,149 @@ def test_live_ww3_hs():
     except DataFetchError as exc:
         _skip_or_fail(exc, 'WaveWatch III')
     assert 0.0 <= hs < 30.0
+
+
+def _stub_waves(monkeypatch, hs):
+    monkeypatch.setattr(
+        waves_mod, 'fetch_waves',
+        lambda point, **kw: {'hs': hs, 'tp': 8.0, 'source': 'waverys'})
+
+
+@pytest.mark.parametrize('max_range', [1e3, 1e4, 5e4, 1e5, 4.27e5])
+def test_sea_surface_holds_its_wave_height_at_every_transect_length(
+        max_range, monkeypatch):
+    """The realization is sized from the sea state, so its significant wave
+    height tracks the fetched one however long the transect is.
+
+    With a fixed 500 samples the range step outgrows the Pierson-Moskowitz
+    peak wavelength (64 m at U = 10 m/s) and the whole spectrum falls above
+    Nyquist: the realized Hs was 86 % of the requested one over 10 km, 2.7 %
+    over 50 km and numerically zero over 427 km — a silently flat sea.
+    """
+    hs = 2.1
+    _stub_waves(monkeypatch, hs)
+    alt, src = sea_surface.fetch_sea_surface(
+        (50.0, 0.0), date='2020-01-01', max_range=max_range, seed=7)
+    assert src == 'waverys'
+    assert alt[0, 0] == 0.0 and alt[-1, 0] == pytest.approx(max_range)
+    # Hs = 4·rms for a Gaussian sea surface.
+    assert 4.0 * np.std(alt[:, 1]) == pytest.approx(hs, rel=0.1)
+    # The step resolves the peak wavelength lambda_p = 2*pi*U^2/g.
+    u = sea_surface.hs_to_pm_wind(hs)
+    dx = max_range / (len(alt) - 1)
+    assert dx <= 2 * np.pi * u ** 2 / sea_surface._G / sea_surface._SAMPLES_PER_PEAK
+
+
+def test_sea_surface_keeps_the_historical_floor_on_a_short_transect(monkeypatch):
+    # 1 km at U = 10 m/s needs only ~130 samples to resolve the peak; the
+    # realization keeps the old fixed default as a floor so a short transect
+    # does not come back coarser than it used to.
+    _stub_waves(monkeypatch, 2.1)
+    alt, _ = sea_surface.fetch_sea_surface(
+        (50.0, 0.0), date='2020-01-01', max_range=1000.0, seed=1)
+    assert len(alt) == sea_surface._MIN_SURFACE_POINTS
+
+
+def test_pinned_n_points_too_coarse_to_resolve_the_peak_warns(monkeypatch):
+    """A caller-pinned count that aliases the spectrum away warns, naming the
+    step it produces and the count that would resolve the peak, instead of
+    returning a flat surface silently."""
+    _stub_waves(monkeypatch, 2.1)
+    with pytest.warns(UserWarning, match=r'dx = 100\.2 m.*n_points >= 6\d{3}'):
+        alt, _ = sea_surface.fetch_sea_surface(
+            (50.0, 0.0), date='2020-01-01', max_range=50000.0, n_points=500,
+            seed=1)
+    assert alt.shape == (500, 2)              # the pinned count is still honoured
+
+
+def test_sea_surface_sizing_is_capped_and_warned_for_a_calm_long_transect(
+        monkeypatch):
+    # A near-calm sea has a short peak wavelength, so resolving it over a long
+    # transect would ask for millions of samples: the count is capped and the
+    # shortfall reported rather than allocated.
+    _stub_waves(monkeypatch, 0.09)                       # U ~ 2 m/s
+    with pytest.warns(UserWarning, match='cap'):
+        alt, _ = sea_surface.fetch_sea_surface(
+            (50.0, 0.0), date='2020-01-01', max_range=4.27e5, seed=1)
+    assert len(alt) == sea_surface._MAX_SURFACE_POINTS
+
+
+def test_empty_wave_source_raises_a_typed_error():
+    with pytest.raises(ConfigurationError, match='No data source was tried'):
+        waves_mod.fetch_waves((50.0, 0.0), date='2020-01-01', source=())
+
+
+def test_nbs_monthly_grid_maps_a_filled_cell_to_nan(monkeypatch, tmp_path):
+    """Same hazard on the wind climatology build: a masked cell must not enter
+    the monthly mean as a real wind speed."""
+    netCDF4 = pytest.importorskip('netCDF4')
+    path = tmp_path / 'wind.nc'
+    ds = netCDF4.Dataset(path, 'w')
+    for name, size in (('time', 1), ('altitude', 1),
+                       ('latitude', 2), ('longitude', 2)):
+        ds.createDimension(name, size)
+    ds.createVariable('latitude', 'f8', ('latitude',))[:] = [0.5, 1.5]
+    ds.createVariable('longitude', 'f8', ('longitude',))[:] = [0.5, 1.5]
+    w = ds.createVariable('wind_speed', 'f4',
+                          ('time', 'altitude', 'latitude', 'longitude'),
+                          fill_value=-9999.0)
+    field = np.ma.masked_array(np.full((1, 1, 2, 2), 7.0))
+    field[0, 0, 0, 1] = np.ma.masked
+    w[:] = field
+    ds.close()
+    blob = path.read_bytes()
+    monkeypatch.setattr(wind_local, 'http_get', lambda url, **kw: blob)
+
+    _, _, speed = wind_local._fetch_monthly_grid(2020, 3, timeout=1.0,
+                                                 verbose=False)
+    assert np.isnan(speed[0, 1])
+    assert speed[0, 0] == pytest.approx(7.0)
+
+
+class _RecordingDataset:
+    """netCDF stand-in with no data variable, so the reader raises mid-read."""
+
+    def __init__(self):
+        self.closed = False
+        self.variables = {'latitude': np.array([0.5, 1.5]),
+                          'longitude': np.array([0.5, 1.5]),
+                          'lat': np.array([0.5, 1.5]),
+                          'lon': np.array([0.5, 1.5])}
+
+    def close(self):
+        self.closed = True
+
+
+def test_wind_climatology_closes_its_handle_when_a_variable_is_missing(
+        monkeypatch):
+    from uacpy.data import _netcdf, wind_local
+    opened = []
+
+    def fake_open(path):
+        ds = _RecordingDataset()
+        opened.append(ds)
+        return ds
+
+    monkeypatch.setattr(_netcdf, 'open_netcdf', fake_open)
+    monkeypatch.setattr(wind_local, 'http_get', lambda url, **kw: b'not-a-grid')
+    assert wind_local._fetch_monthly_grid(2000, 1, timeout=1.0,
+                                          verbose=False) is None
+    assert opened and all(ds.closed for ds in opened), (
+        "the handle leaks once per month a 120-grid climatology build cannot "
+        "name a variable in")
+
+
+def test_two_empty_month_sweeps_stop_the_wind_climatology_build(
+        monkeypatch, tmp_path):
+    """Zero grids across the first two month sweeps raise the typed error
+    before the remaining ten months retry their way to the same place."""
+    import uacpy.data.wind_local as wl
+    calls = []
+    def nothing(year, month, *, timeout, verbose):
+        calls.append((year, month))
+        return None
+    monkeypatch.setattr(wl, '_fetch_monthly_grid', nothing)
+    with pytest.raises(DataFetchError,
+                       match='stopping before the remaining ten months'):
+        wl.download_wind_db(cache_dir=tmp_path, years=range(2013, 2023))
+    assert len(calls) == 20

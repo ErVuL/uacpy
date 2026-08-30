@@ -3,7 +3,7 @@
 # Scope: Linux (ubuntu-latest), Python 3.12, --bellhop cxx, --oases yes.
 # What this DOES test: native Fortran/C builds + the python package against
 # the standard test markers.
-# What this does NOT test: macOS, Windows/WSL, Python 3.10/3.11/3.13, the
+# What this does NOT test: macOS, Windows/WSL, Python 3.13, the
 # CUDA build, the fortran-only Bellhop fallback, the no-OASES partial
 # install. Those configurations are advertised as supported but exercised
 # by users, not by this workflow. Expand this matrix if any of the above
@@ -21,6 +21,14 @@ on:
   push:
     branches: [main, master]
   pull_request:
+  # Manual re-run. `pip install -e ".[dev]"` is unpinned, so every run resolves
+  # the newest releases its caps allow — a red run caused by a dependency, not
+  # by the diff, can be re-tried against a fixed upstream without a dummy
+  # commit. Deliberately NOT a cron `--pre` job: pre-releases of pytest / black
+  # / flake8 / setuptools would go red for reasons nobody here can act on, and
+  # the numpy<3.0 / scipy<2.0 / matplotlib<4.0 caps already exclude the major
+  # bumps that a nightly would be watching for.
+  workflow_dispatch:
 
 # Least-privilege default token: the workflow only builds + tests (no PR
 # comments, releases, or pushes), so a read-only token caps the blast radius
@@ -38,8 +46,10 @@ jobs:
     name: Build native binaries + run tests
     runs-on: ubuntu-latest
     # Per-job wall-clock cap so a hung Fortran process can't burn 6h of
-    # CI minutes on a stuck build.
-    timeout-minutes: 30
+    # CI minutes on a stuck build. Sized for the cold-cache worst case: an
+    # OASES source download + full native build (~15 min) plus the test
+    # suite (~17 min); a cache-hit run finishes far inside it.
+    timeout-minutes: 50
 
     # Actions below are pinned to floating major tags (e.g. @v5). For full
     # supply-chain integrity they could be pinned to commit SHAs with a
@@ -51,11 +61,11 @@ jobs:
         # bellhopcuda is a git submodule pinned to BELLHOPCUDA_COMMIT_SHA
         # in install.sh. pin_bellhopcuda_tag fetches the SHA from origin on
         # demand if it is not reachable from the submodule's shallow clone.
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           submodules: recursive
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -73,14 +83,27 @@ jobs:
       # of failure for the `--oases yes` path). Key is hashed on
       # install.sh, so any change to the install logic — including the
       # OASES URL or a future SHA pin — invalidates the cache.
+      # The key hashes only the OASES-relevant install logic (URL/SHA pins
+      # and the build section), not the whole script: keying on all of
+      # install.sh rotated the cache — and forced a fresh MIT download and
+      # rebuild — for every unrelated edit, message wording included.
+      - name: Compute OASES cache key
+        id: oases-key
+        run: |
+          # The OASES logic is top-level flow, not a function: everything
+          # from the URL/SHA pins to the next section divider is the build
+          # recipe the cached artifact depends on.
+          key=$(awk '/^OASES_URL=/{on=1} on{print} on && /^# -------------------------$/ && NR>1100{exit}' install.sh | sha256sum | cut -c1-16)
+          echo "key=${key}" >> "$GITHUB_OUTPUT"
+
       - name: Cache OASES build
         id: cache-oases
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             uacpy/third_party/oases
             uacpy/bin/oases
-          key: oases-${{ runner.os }}-${{ hashFiles('install.sh') }}
+          key: oases-${{ runner.os }}-${{ steps.oases-key.outputs.key }}
 
       # Builds oalib + bellhopcxx + mpiramS + ramsurf locally. OASES is
       # downloaded from MIT (acoustics.mit.edu) and built only on cache
@@ -92,7 +115,7 @@ jobs:
       - name: Lint (flake8 — real bugs only)
         run: |
           flake8 uacpy/ \
-            --exclude=uacpy/third_party,uacpy/uacpy/third_party \
+            --exclude=uacpy/third_party,uacpy/uacpy/third_party,uacpy_venv,.venv,venv \
             --count --select=E9,F63,F7,F82,F401,F811 \
             --show-source --statistics
 
@@ -107,4 +130,6 @@ jobs:
           TMPDIR: ${{ runner.temp }}
         # Exclude live-service integration tests so CI is deterministic; the
         # cache/data layer is still covered via synthetic $UACPY_DATA_CACHE.
-        run: pytest -n logical --dist=worksteal -m "not requires_network" uacpy/tests/
+        # -rs names every skip's reason in the log: an anonymous skip count is
+        # quietly reduced coverage nobody can audit.
+        run: pytest -n logical --dist=worksteal -rs -m "not requires_network" uacpy/tests/

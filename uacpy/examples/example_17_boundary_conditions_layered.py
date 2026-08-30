@@ -12,8 +12,10 @@ Models exercised: RAM (bottom scenarios), Bellhop (surface scenarios)
 """
 
 import sys
+import os
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Repo root, so ``import uacpy`` resolves from a source checkout.
+sys.path.insert(0, str(Path(__file__).parents[2]))
 
 import numpy as np  # noqa: E402
 import uacpy  # noqa: E402
@@ -54,7 +56,7 @@ def example_rough_surface():
     """Rough sea surface from Pierson-Moskowitz spectrum (15 m/s wind)."""
     source, receiver = make_source_receiver()
     surface = generate_sea_surface(
-        max_range=10000, wind_speed_ms=15, n_points=300, seed=42,
+        max_range=10000, wind_speed_mps=15, n_points=300, seed=42,
     )
     env = uacpy.Environment(
         name='rough_surface',
@@ -72,10 +74,28 @@ def example_rough_surface():
 def example_ice_surface():
     """Elastic (ice) surface — half-space upper boundary.
 
-    Note: ice cp (3500 m/s) >> water c (1480 m/s), so the critical angle
-    is only ~25 deg. Most shallow-water modes propagate below critical and
-    reflect perfectly, producing TL similar to vacuum. The main difference
-    is in the interference pattern phase, not overall loss level.
+    Angles here follow the ocean-acoustics / Acoustics-Toolbox convention:
+    theta is measured from the *horizontal* (grazing), so the critical angle
+    is ``arccos(c1/c2)``, not ``arcsin``. Jensen, Kuperman, Porter & Schmidt,
+    *Computational Ocean Acoustics* 2nd ed., section 1.4.
+
+    Ice cp (3500 m/s) >> water c (1480 m/s), giving a compressional critical
+    grazing angle of ``arccos(1480/3500)`` = 65.0 deg. Shallow-water modes sit
+    at small grazing angles, so they are well below it and would reflect
+    without compressional leakage.
+
+    But ice also has shear, and here cs = 1800 m/s > c_water, so the binding
+    constraint is the *shear* critical grazing angle ``arccos(1480/1800)``
+    = 34.7 deg. Lossless reflection therefore holds only below 34.7 deg
+    grazing, not below 65 deg.
+
+    (The same two numbers in the from-normal convention are 25.0 deg and
+    55.3 deg. Mixing the conventions is what makes "below critical" and
+    "~25 deg" sound compatible when they are not.)
+
+    Net effect: TL stays close to the vacuum case for the low-grazing modes;
+    the main difference is in the interference-pattern phase rather than the
+    overall loss level.
     """
     source, receiver = make_source_receiver()
     ice = BoundaryProperties(
@@ -240,7 +260,7 @@ def main():
         model = model_cls(verbose=False, **kwargs)
         try:
             field = model.run(env, source, receiver)
-            tl = field.tl
+            tl = field.db
             print(f"  {label:40s}  TL: [{np.nanmin(tl):5.1f}, {np.nanmax(tl):5.1f}] dB")
             fields.append(field)
             envs_out.append(env)
@@ -249,7 +269,7 @@ def main():
             fields.append(None)
             envs_out.append(env)
 
-    all_tl = [f.tl for f in fields if f is not None]
+    all_tl = [f.db for f in fields if f is not None]
     if all_tl:
         vmin = max(30, np.nanpercentile(np.concatenate([a.ravel() for a in all_tl]), 5))
         vmax = min(140, np.nanpercentile(np.concatenate([a.ravel() for a in all_tl]), 95))
@@ -286,14 +306,15 @@ def main():
         cbar_ax = fig.add_axes([0.945, 0.07, 0.012, 0.83])
         fig.colorbar(tl_im, cax=cbar_ax, label='TL (dB)')
 
-    out_dir = Path(__file__).parent / 'output'
-    out_dir.mkdir(exist_ok=True)
+    out_dir = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
+                   or Path(__file__).parent / 'output')
+    out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / 'example_17_boundary_conditions.png'
     fig.savefig(out_path, dpi=150)
     print(f"\n  ✓ Saved: {out_path}")
 
     for label, env in zip([s[0] for s in scenarios], envs_out):
-        if env.has_range_dependent_layered_bottom():
+        if env.has_range_dependent_layered_bottom:
             fig_b, _ = env.plot()
             path = out_dir / 'example_17_rd_layered_structure.png'
             fig_b.savefig(path, dpi=150, bbox_inches='tight')

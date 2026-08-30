@@ -107,3 +107,23 @@ def test_live_emodnet_north_sea():
         pytest.skip(f"EMODnet unreachable: {exc.message}")
     assert isinstance(bp, BoundaryProperties)
     assert bp.sound_speed > 1500.0
+
+
+def test_undefined_folk_class_is_refused_as_a_data_gap():
+    # folk_5cl = 6 is real: 70 polygons carry it in the cached 1:1M layer, so
+    # its refusal must read as a coverage gap, not as a schema change.
+    with pytest.raises(DataFetchError, match='does not define'):
+        seabed._bottom_from_folk5(seabed._FOLK5_UNCLASSIFIED, 54.6, 5.3,
+                                  roughness=0.0)
+
+
+def test_out_of_legend_folk_class_is_refused_as_unrecognised():
+    with pytest.raises(DataFetchError, match='unrecognised Folk-5'):
+        seabed._bottom_from_folk5(99, 54.6, 5.3, roughness=0.0)
+
+
+def test_folk_class_5_keeps_the_rock_shear_pair():
+    # Hard substrata route to the limestone preset; both shear fields travel.
+    bottom = seabed._bottom_from_folk5(5, 54.6, 5.3, roughness=0.0)
+    assert bottom.shear_speed == pytest.approx(1500.0)
+    assert bottom.shear_attenuation == pytest.approx(0.2)

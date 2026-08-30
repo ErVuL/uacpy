@@ -12,12 +12,12 @@ COMPLEXITY LEVEL: ⭐⭐ (2/5) - Foundational
 FEATURES DEMONSTRATED:
     ✓ Munk canonical profile (SOFAR channel, deep ocean)
     ✓ Pekeris waveguide (isovelocity with elastic bottom)
-    ✓ Bilinear thermocline profile (surface duct)
+    ✓ Bilinear mixed-layer / thermocline profile
     ✓ SSP interpolation types (munk, linear, bilinear)
     ✓ Elastic bottom properties (compressional + shear waves)
     ✓ Deep water convergence zones
     ✓ Modal propagation in waveguides
-    ✓ Six propagation models comparison
+    ✓ Four propagation models compared
 
 SCENARIOS:
 
@@ -25,9 +25,10 @@ SCENARIOS:
     ────────────────────────────────────────────────────
     - Water depth: 5000m (deep ocean)
     - SSP type: Munk canonical profile
-    - Sound channel axis: ~1000m depth
+    - Sound channel axis: 1300m depth (``SoundSpeedProfile.from_munk`` puts the
+      c_min = 1500 m/s axis at 1300 m; c(1000 m) = 1501.4 m/s)
     - Physics: SOFAR channel trapping, convergence zones, long-range propagation
-    - Expected: Strong channel trapping, very low propagation loss
+    - Expected: Channel trapping, low propagation loss
 
     Scenario B: Pekeris Waveguide - Elastic Bottom
     ───────────────────────────────────────────────
@@ -37,34 +38,46 @@ SCENARIOS:
     - Physics: Modal propagation with bottom loss, shear wave conversion
     - Expected: Fewer modes than rigid bottom, increased attenuation
 
-    Scenario C: Thermocline - Surface Duct
-    ───────────────────────────────────────
+    Scenario C: Mixed Layer over a Thermocline
+    ───────────────────────────────────────────
     - Water depth: 200m (coastal/shelf)
-    - SSP type: Bilinear (surface duct + thermocline)
-    - Surface duct: 0-50m (isothermal layer)
-    - Thermocline: 50-200m (negative gradient)
-    - Physics: Surface duct trapping, thermocline refraction
-    - Expected: Strong surface duct at source depth, downward refraction below
+    - SSP type: Bilinear (zero-gradient mixed layer + thermocline)
+    - Mixed layer: 0-50m, dc/dz = 0 exactly
+    - Thermocline: 50-200m, dc/dz = -0.27 (m/s)/m
+    - Physics: downward refraction below the layer base; no surface duct
+    - This layer does NOT duct, on two independent counts, and the scenario is
+      here to make both explicit:
+        1. Trapping needs dc/dz > 0. In a genuinely isothermal layer the
+           pressure term alone gives about +0.017 (m/s)/m (Etter, *Underwater
+           Acoustic Modeling and Simulation*, §3.7); a flat 1520 m/s layer has
+           zero gradient, so the trapped launch-angle half-width
+           sqrt(2*g*H/c) is exactly 0.
+        2. Even a real 50 m duct has a low-frequency cutoff. Etter §3.7.3 gives
+           lambda_max = 8.51e-3 * H**1.5 = 3.01 m, i.e. f_cutoff ~ 505 Hz; this
+           scenario runs at 100 Hz, five times below it. (Jensen, Kuperman,
+           Porter & Schmidt, *Computational Ocean Acoustics* 2nd ed. §1.4: "a
+           50-m mixed layer acts as a sound channel only for frequencies above
+           530 Hz.")
+      For a duct that does trap, see example_27 Part 2: a sound-speed maximum
+      at 30 m run at 2 kHz, above its own ~1073 Hz cutoff.
 
 SOURCE:
-    - Scenario A: 1000m (channel axis)
+    - Scenario A: 1000m (inside the channel, 300m above the 1300m axis)
     - Scenario B: 50m (mid-depth)
-    - Scenario C: 30m (in surface duct)
+    - Scenario C: 30m (in the mixed layer)
     - Frequencies: 25 Hz (deep water), 50 Hz (shallow), 100 Hz (coastal)
 
 MODELS COMPARED:
-    1. Bellhop      - Ray tracing
-    2. RAM          - Parabolic equation
-    3. Kraken  - Normal modes
-    4. Scooter      - Wavenumber integration
-    5. SPARC        - Seismo-acoustic PE
-    6. OAST         - OASES wavenumber integration
+    1. Bellhop      - Ray tracing            (all three scenarios)
+    2. RAM          - Parabolic equation     (scenarios B and C)
+    3. Kraken       - Normal modes           (all three scenarios)
+    4. Scooter      - Wavenumber integration (scenarios B and C)
 
 LEARNING OUTCOMES:
     - How SSP shape affects propagation
     - Sound channel trapping mechanisms
     - Elastic bottom effects on modes
-    - Thermocline and surface duct physics
+    - What a mixed layer does, and what it takes for one to duct
     - When to use each SSP type
 
 ═══════════════════════════════════════════════════════════════════════════════
@@ -72,7 +85,8 @@ LEARNING OUTCOMES:
 
 import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Repo root, so ``import uacpy`` resolves from a source checkout.
+sys.path.insert(0, str(Path(__file__).parents[2]))
 
 import numpy as np  # noqa: E402
 import uacpy  # noqa: E402
@@ -111,10 +125,10 @@ def scenario_a_munk_profile():
     )
 
     # ═══════════════════════════════════════════════════════════════════════
-    # SOURCE CONFIGURATION - At channel axis
+    # SOURCE CONFIGURATION - Inside the sound channel
     # ═══════════════════════════════════════════════════════════════════════
     source = uacpy.Source(
-        depths=1000.0,       # Near channel axis (~1000m for Munk profile)
+        depths=1000.0,       # Inside the channel, 300 m above the 1300 m Munk axis
         frequencies=25.0,     # Low frequency for long range
         source_type='point'
     )
@@ -156,7 +170,8 @@ def scenario_a_munk_profile():
             title="Sound Speed Profiles - Munk Deep Ocean",
             description="Deep water sound channel with Munk canonical profile. Demonstrates "
             "SOFAR channel trapping, convergence zones, and ultra-long-range propagation. "
-            "Channel axis at ~1000m depth provides optimal trapping.",
+            "The Munk axis (c_min = 1500 m/s) sits at 1300 m; the source at 1000 m is "
+            "300 m above it, still well inside the channel.",
             env=env,
             source=source, receiver=receiver,
             results=results,
@@ -243,6 +258,21 @@ def scenario_b_pekeris_waveguide():
             results[name] = None
 
     # ═══════════════════════════════════════════════════════════════════════
+    # MODE COUNT: elastic seabed vs a rigid reference
+    # ═══════════════════════════════════════════════════════════════════════
+    env_rigid = uacpy.Environment(
+        name="Pekeris Waveguide - Rigid Bottom",
+        bathymetry=100.0,
+        ssp=1500.0,
+        surface=uacpy.BoundaryProperties(acoustic_type='vacuum'),
+        bottom=uacpy.BoundaryProperties(acoustic_type='rigid')
+    )
+    n_elastic = Kraken(verbose=False, backend='krakenc').compute_modes(env, source).n_modes
+    n_rigid = Kraken(verbose=False, backend='kraken').compute_modes(env_rigid, source).n_modes
+    print(f"\n  Trapped modes at {source.frequencies[0]:.0f} Hz:"
+          f" elastic seabed {n_elastic}, rigid reference {n_rigid}")
+
+    # ═══════════════════════════════════════════════════════════════════════
     # GENERATE COMPREHENSIVE REPORT
     # ═══════════════════════════════════════════════════════════════════════
     if any(r is not None for r in results.values()):
@@ -250,8 +280,9 @@ def scenario_b_pekeris_waveguide():
             example_num="2B",
             title="Sound Speed Profiles - Pekeris Elastic Bottom",
             description="Classic Pekeris waveguide with elastic seafloor. Demonstrates modal "
-            "propagation with bottom loss, shear wave conversion at interface, and "
-            "reduced mode count compared to rigid bottom.",
+            "propagation with bottom loss and shear wave conversion at the interface. "
+            f"Kraken finds {n_elastic} modes here against {n_rigid} for the same guide "
+            "closed by a rigid bottom.",
             env=env,
             source=source, receiver=receiver,
             results=results,
@@ -266,27 +297,27 @@ def scenario_b_pekeris_waveguide():
 
 def scenario_c_thermocline():
     """
-    Scenario C: Thermocline with surface duct.
+    Scenario C: Mixed layer over a thermocline.
 
-    Coastal/shelf environment with bilinear SSP demonstrating
-    surface duct trapping and thermocline refraction effects.
+    Coastal/shelf environment with a bilinear SSP. The upper layer has zero
+    gradient, so it does not duct; the lesson is the thermocline's downward
+    refraction plus the two conditions a real duct would have to satisfy.
     """
     print("\n" + "="*80)
-    print("SCENARIO C: Thermocline - Surface Duct")
+    print("SCENARIO C: Mixed Layer over a Thermocline")
     print("="*80)
 
     # ═══════════════════════════════════════════════════════════════════════
-    # ENVIRONMENT SETUP - Bilinear thermocline profile
+    # ENVIRONMENT SETUP - Bilinear mixed-layer / thermocline profile
     # ═══════════════════════════════════════════════════════════════════════
-    # Create bilinear SSP: surface duct + thermocline
     ssp_data = [
         (0,   1520),      # Surface (warm, fast sound speed)
-        (50,  1520),      # Bottom of surface duct (isothermal layer)
+        (50,  1520),      # Base of the mixed layer: dc/dz = 0 through the layer
         (200, 1480)       # Bottom (cooler water, slower sound speed)
     ]
 
     env = uacpy.Environment(
-        name="Coastal - Thermocline with Surface Duct",
+        name="Coastal - Mixed Layer over Thermocline",
         bathymetry=200.0,
         ssp=SoundSpeedProfile.from_pairs(ssp_data),
         surface=uacpy.BoundaryProperties(
@@ -304,7 +335,7 @@ def scenario_c_thermocline():
     # SOURCE CONFIGURATION - In surface duct
     # ═══════════════════════════════════════════════════════════════════════
     source = uacpy.Source(
-        depths=30.0,         # Within surface duct (0-50m)
+        depths=30.0,         # Within the mixed layer (0-50m)
         frequencies=100.0,    # Higher frequency for coastal environment
         source_type='point'
     )
@@ -345,10 +376,12 @@ def scenario_c_thermocline():
     if any(r is not None for r in results.values()):
         create_example_report(
             example_num="2C",
-            title="Sound Speed Profiles - Thermocline Surface Duct",
-            description="Coastal environment with bilinear SSP creating surface duct. Source "
-            "within duct demonstrates strong trapping in isothermal layer (0-50m) with "
-            "downward refraction below thermocline.",
+            title="Sound Speed Profiles - Mixed Layer over Thermocline",
+            description="Coastal environment with a bilinear SSP: a zero-gradient mixed layer "
+            "(0-50m) over a -0.27 (m/s)/m thermocline. The layer does not duct - trapping "
+            "needs dc/dz > 0, and a 50m duct would in any case cut off near 505 Hz, five "
+            "times this scenario's 100 Hz. What the fields show is the thermocline "
+            "refracting energy downward below 50m.",
             env=env,
             source=source, receiver=receiver,
             results=results,
@@ -369,9 +402,9 @@ def main():
     print("EXAMPLE 02: Sound Speed Profiles - Munk, Pekeris, Thermocline")
     print("═" * 80)
     print("\nThis example demonstrates:")
-    print("  • Munk canonical profile (SOFAR channel)")
+    print("  • Munk canonical profile (SOFAR channel, axis at 1300 m)")
     print("  • Pekeris waveguide (elastic bottom)")
-    print("  • Bilinear thermocline (surface duct)")
+    print("  • Bilinear mixed layer over a thermocline")
     print("  • SSP interpolation types (munk, isovelocity, bilinear)")
     print("  • Elastic bottom properties")
     print("  • Deep vs shallow vs coastal acoustics")
@@ -385,7 +418,8 @@ def main():
     print("\nKey Takeaways:")
     print("  ✓ Munk profile: Deep water sound channel, convergence zones, ultra-long range")
     print("  ✓ Pekeris: Elastic bottom reduces mode count, increases bottom loss")
-    print("  ✓ Thermocline: Surface duct traps energy when source is in duct")
+    print("  ✓ Mixed layer: a zero-gradient layer does not duct - trapping needs dc/dz > 0,")
+    print("    and a duct of thickness H cuts off below c / (8.51e-3 * H**1.5)")
     print("  ✓ SSP shape profoundly affects propagation physics")
     print("\nNext Steps:")
     print("  → Example 03: Multi-frequency / broadband")

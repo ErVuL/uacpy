@@ -1,11 +1,23 @@
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402
-import numpy as np  # noqa: E402
-from uacpy.acoustic_signal.transforms import (  # noqa: E402
+"""Smoke tests for the f-k / Radon / tau-p plotters, plus a documented-
+signature + minimal-call sweep of the other ``plots.signal`` free plotters.
+
+Each transform is fed a synthetic array-record and its plotter checked for an
+image artist and for honouring ``ax=``. The transforms' own numerics live in
+``test_transforms.py`` / ``test_transforms_fk.py``; nothing here asserts on
+the values drawn.
+"""
+
+import inspect
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pytest
+from uacpy.acoustic_signal.transforms import (
     fk_transform, radon_transform, taup_transform)
-from uacpy.visualization.plots.signal import (  # noqa: E402
-    plot_fk, plot_radon, plot_taup)
+from uacpy.visualization.plots.signal import (
+    plot_fk, plot_radon, plot_taup,
+    plot_angular_spectrum, plot_band_levels, plot_coherence, plot_frf,
+    plot_impulse_response_info, plot_psd)
 
 
 def test_plot_fk_returns_fig_ax():
@@ -37,3 +49,72 @@ def test_plot_taup():
     fig, ax = plot_taup(p, taus, tp, sound_speed=1500.0)
     assert ax.images
     plt.close(fig)
+
+
+_FREQS3 = np.array([10.0, 100.0, 1000.0])
+
+
+@pytest.mark.parametrize('fn, params, args', [
+    (plot_band_levels, ('centers', 'levels', 'ax'),
+     (np.array([63.0, 80.0, 100.0]), np.array([90.0, 95.0, 92.0]))),
+    (plot_angular_spectrum, ('angles_deg', 'spectrum', 'ax', 'db'),
+     (np.linspace(-90.0, 90.0, 7), np.linspace(1.0, 2.0, 7))),
+    (plot_frf, ('frequencies', 'tf', 'ax', 'tag'),
+     (_FREQS3, np.array([1.0 + 1.0j, 2.0 + 0.0j, 0.5 - 0.5j]))),
+    (plot_coherence, ('frequencies', 'coh', 'ax'),
+     (_FREQS3, np.array([0.9, 0.95, 0.99]))),
+    (plot_impulse_response_info, ('Minfo', 'Vinfo', 'g'),
+     (np.eye(3), np.arange(3.0), np.linspace(0.0, 1.0, 4))),
+])
+def test_signal_plotter_signature_and_smoke(fn, params, args):
+    # Each plotter exposes its documented parameters and draws from a
+    # minimal call; plot_frf returns a 2-tuple of axes and
+    # plot_impulse_response_info a 3-panel list, so axes are flattened.
+    sig = inspect.signature(fn)
+    assert all(p in sig.parameters for p in params)
+    fig, axes = fn(*args)
+    for ax in (axes if isinstance(axes, (list, tuple)) else [axes]):
+        assert ax.has_data()
+    plt.close(fig)
+
+
+def test_plot_impulse_response_info_is_figure_level():
+    # It builds its own three-panel figure and takes no ax=.
+    assert 'ax' not in inspect.signature(plot_impulse_response_info).parameters
+
+
+class TestFixedYWindowsAreEscapable:
+    """``plot_coherence`` and ``plot_psd`` pin the ordinate to the band their
+    quantity normally occupies, which keeps panels comparable — and renders a
+    record outside that band as an empty panel. The window has to be reachable,
+    and a record that falls entirely outside it has to say so rather than look
+    like "no data"."""
+
+    _F = np.array([10.0, 100.0, 1000.0])
+
+    def test_plot_coherence_takes_a_ylim(self):
+        assert 'ylim' in inspect.signature(plot_coherence).parameters
+        fig, ax = plot_coherence(self._F, np.full(3, 0.2), ylim=(0.0, 1.01))
+        assert ax.get_ylim() == pytest.approx((0.0, 1.01))
+        plt.close(fig)
+
+    def test_low_coherence_outside_the_default_window_warns(self):
+        with pytest.warns(UserWarning, match=r"outside the plotted y range"):
+            fig, ax = plot_coherence(self._F, np.full(3, 0.2))
+        plt.close(fig)
+
+    def test_a_quiet_psd_outside_the_default_window_warns(self):
+        # 1e-14 Pa²/Hz is -20 dB re 1 µPa²/Hz — entirely below the 0-150 dB
+        # default axes.
+        with pytest.warns(UserWarning, match=r"Pass ymin=/ymax="):
+            fig, ax = plot_psd(self._F, np.full(3, 1e-14))
+        plt.close(fig)
+
+    def test_an_ordinary_record_warns_about_nothing(self):
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            fig, ax = plot_psd(self._F, np.full(3, 1.0))
+            plt.close(fig)
+            fig, ax = plot_coherence(self._F, np.full(3, 0.98))
+            plt.close(fig)

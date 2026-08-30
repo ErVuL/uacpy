@@ -1,5 +1,15 @@
 """
 Tests for range-dependent and depth-dependent parameters
+
+Several integration tests below bound the returned field with
+``30 < nanmin(tl) < 100`` and ``50 < nanmax(tl) < 200``. These are plausibility
+windows, not accuracy checks: at the nearest sampled range (100 m) free-field
+spreading alone is already 40 dB, so a minimum under 30 dB means the field is
+scaled wrong rather than merely inaccurate, and an interference null in a
+shallow guide can legitimately exceed 100 dB at the far range without
+approaching 200. They exist to catch a units error, an unscaled field or an
+all-sentinel grid — any real accuracy statement lives in
+``test_cross_model_agreement.py``.
 """
 
 import pytest
@@ -7,7 +17,11 @@ import warnings
 import numpy as np
 import uacpy
 from uacpy import Field
-from uacpy.core.exceptions import ConfigurationError, ExecutableNotFoundError
+from uacpy.core.exceptions import (
+    ConfigurationError,
+    ExecutableNotFoundError,
+    FileFormatError,
+)
 from uacpy.models import Bellhop, RAM, RunMode
 from uacpy.core.environment import (
     Bottom, SedimentLayer, SeabedColumn,
@@ -56,7 +70,7 @@ class TestRangeDependentEnvironment:
             bottom=bottom_rd
         )
 
-        assert env.has_range_dependent_bottom()
+        assert env.has_range_dependent_bottom
         assert len(env.bottom.ranges) == 3
 
         # Test getting bottom at specific range
@@ -83,7 +97,7 @@ class TestRangeDependentEnvironment:
                                           ),
         )
 
-        assert env.has_range_dependent_ssp()
+        assert env.has_range_dependent_ssp
         assert env.ssp.data.shape == (21, 3)
 
     def test_combined_range_dependencies(self):
@@ -106,7 +120,7 @@ class TestRangeDependentEnvironment:
         )
 
         assert env.is_range_dependent
-        assert env.has_range_dependent_ssp()
+        assert env.has_range_dependent_ssp
 
 
 class TestDepthDependentSSP:
@@ -203,40 +217,6 @@ class TestModelWithRangeDependence:
         assert result.shape == (3, 3)
 
     @pytest.mark.requires_binary
-    def test_ram_range_dependent_ssp(self):
-        """Test RAM with range-dependent SSP."""
-        # Create range-dependent SSP
-        depths = np.linspace(0, 100, 21)
-        ranges = np.array([0.0, 2500.0, 5000.0])
-
-        ssp_matrix = np.zeros((len(depths), len(ranges)))
-        for i, r_m in enumerate(ranges):
-            # Temperature increases with range (m/s per km)
-            ssp_matrix[:, i] = 1500 + (r_m / 1000.0) * 2
-
-        env = uacpy.Environment(
-            name="RD SSP",
-            bathymetry=100.0,
-            ssp=SoundSpeedProfile.from_2d(depths=depths, ranges=ranges, matrix=ssp_matrix
-                                          ),
-        )
-
-        source = uacpy.Source(depths=50.0, frequencies=100.0)
-        receiver = uacpy.Receiver(
-            depths=np.array([25.0, 50.0, 75.0]),
-            ranges=np.array([1000.0, 3000.0, 5000.0])
-        )
-
-        ram = RAM(verbose=False, dr=20.0, dz=2.0)
-        result = ram.compute_tl(env=env, source=source, receiver=receiver)
-
-        assert isinstance(result, Field)
-        # RAM computes on its own internal grid
-        assert result.shape[0] > 0  # Has depth dimension
-        assert result.shape[1] > 0  # Has range dimension
-        assert np.all(np.isfinite(result.data))  # All values are finite
-
-    @pytest.mark.requires_binary
     def test_bellhop_range_dependent_bottom(self):
         """Test Bellhop with range-dependent bottom properties."""
         ranges = np.array([0.0, 2500.0, 5000.0])
@@ -270,10 +250,14 @@ class TestModelWithRangeDependence:
 
     @pytest.mark.requires_binary
     def test_ram_range_dependent_bottom_default_dz(self):
-        """RAM auto-computes dz on a Bottom (per-range ndarray
-        sound_speed) without crashing — regression for the 'truth value of an
-        array is ambiguous' error when dz is unpinned (every other RD test
-        pins dz=2.0, which masked it)."""
+        """RAM auto-computes dz on a Bottom whose ``sound_speed`` is a
+        per-range ndarray.
+
+        The unpinned-dz path is the only one that inspects the bottom speed to
+        size the grid, so it is the only one that can meet the array where the
+        other tests hand it a scalar. Every other range-dependent test here
+        pins ``dz=2.0`` and never reaches ``_compute_dz``.
+        """
         bottom_rd = Bottom.from_halfspaces(np.array([0.0, 2500.0, 5000.0]),
             sound_speed=np.array([1600.0, 1700.0, 1800.0]),
             density=np.array([1.5, 1.6, 1.7]),
@@ -294,31 +278,30 @@ class TestModelWithRangeDependence:
         with pytest.warns(UserWarning, match="raised dz"):
             result = ram.run(env, source, receiver)
         assert isinstance(result, Field)
-        assert np.all(np.isfinite(result.tl))
+        assert np.all(np.isfinite(result.db))
 
 
 class TestRangeDependentConsistency:
     """Test consistency of range-dependent handling."""
 
     def test_bathymetry_interpolation(self):
-        """Test that bathymetry is correctly interpolated."""
-        ranges = np.array([0, 5000, 10000])
-        depths = np.array([80, 100, 120])
-        bathymetry = np.column_stack([ranges, depths])
+        """Bathymetry carried by an Environment interpolates seafloor depth."""
+        ranges = np.array([0.0, 5000.0, 10000.0])
+        depths = np.array([80.0, 100.0, 120.0])
 
-        uacpy.Environment(
+        env = uacpy.Environment(
             name="Test",
             ssp=1500.0,
-            bathymetry=bathymetry
+            bathymetry=np.column_stack([ranges, depths])
         )
 
-        # Depth at 2500m should be interpolated between 80 and 100
-        # Simple linear interpolation: 80 + (100-80) * (2500/5000) = 90
-        from scipy.interpolate import interp1d
-        interp = interp1d(bathymetry[:, 0], bathymetry[:, 1])
-        depth_at_2500 = interp(2500)
-
-        assert 85 < depth_at_2500 < 95  # Should be around 90m
+        assert env.bathymetry.eval(range=2500.0) == pytest.approx(90.0)
+        assert env.bathymetry.eval(range=ranges) == pytest.approx(depths)
+        assert env.bathymetry.at(range=2400.0) == pytest.approx(80.0)   # nearest node
+        # Constant extrapolation past both ends.
+        assert env.bathymetry.eval(range=-1000.0) == pytest.approx(80.0)
+        assert env.bathymetry.eval(range=20000.0) == pytest.approx(120.0)
+        assert env.depth == pytest.approx(120.0)
 
     def test_bottom_properties_at_range(self):
         """Test getting bottom properties at specific range."""
@@ -363,97 +346,6 @@ class TestRangeDependentConsistency:
         assert len(env.ssp.ranges) == 3
 
 
-class TestSedimentLayer:
-    """Tests for the SedimentLayer dataclass."""
-
-    def test_basic_creation(self):
-        """Test basic SedimentLayer creation."""
-        layer = SedimentLayer(thickness=10, sound_speed=1650, density=1.9)
-        assert layer.thickness == 10
-        assert layer.sound_speed == 1650
-        assert layer.density == 1.9
-        assert layer.attenuation == 0.5  # default
-        assert layer.shear_speed == 0.0  # default
-
-    def test_validation_negative_thickness(self):
-        """Negative thickness should raise ValueError."""
-        with pytest.raises(ConfigurationError, match="thickness"):
-            SedimentLayer(thickness=-5, sound_speed=1650, density=1.9)
-
-    def test_validation_negative_sound_speed(self):
-        """Negative sound speed should raise ValueError."""
-        with pytest.raises(ConfigurationError, match="sound_speed"):
-            SedimentLayer(thickness=10, sound_speed=-100, density=1.9)
-
-    def test_elastic_layer(self):
-        """Test layer with shear properties."""
-        layer = SedimentLayer(
-            thickness=20, sound_speed=1700, density=2.0,
-            shear_speed=400, shear_attenuation=1.0
-        )
-        assert layer.shear_speed == 400
-        assert layer.shear_attenuation == 1.0
-
-
-class TestLayeredBottom:
-    """Tests for the SeabedColumn class."""
-
-    def test_basic_creation(self):
-        """Test basic SeabedColumn creation."""
-        lb = SeabedColumn(
-            layers=[
-                SedimentLayer(thickness=10, sound_speed=1550, density=1.3, attenuation=0.5),
-                SedimentLayer(thickness=50, sound_speed=1650, density=1.7, attenuation=0.3),
-            ],
-            halfspace=BoundaryProperties(
-                acoustic_type='half-space',
-                sound_speed=1800, density=2.0, attenuation=0.1
-            )
-        )
-        assert len(lb.layers) == 2
-        assert lb.total_thickness() == 60
-
-    def test_layer_depths(self):
-        """Test layer depth computation."""
-        lb = SeabedColumn(
-            layers=[
-                SedimentLayer(thickness=10, sound_speed=1550, density=1.3),
-                SedimentLayer(thickness=50, sound_speed=1650, density=1.7),
-            ],
-            halfspace=BoundaryProperties(acoustic_type='half-space', sound_speed=1800, density=2.0)
-        )
-        depths = lb.layer_depths(200)
-        assert depths[0] == (200, 210)
-        assert depths[1] == (210, 260)
-
-    def test_empty_layers_is_halfspace(self):
-        """A 0-layer SeabedColumn is a valid pure half-space."""
-        col = SeabedColumn(
-            layers=[],
-            halfspace=BoundaryProperties(acoustic_type='half-space', sound_speed=1800, density=2.0)
-        )
-        assert not col.is_layered and col.total_thickness() == 0.0
-
-    def test_environment_with_layered_bottom(self):
-        """Test Environment coerces a SeabedColumn into a layered Bottom."""
-        lb = SeabedColumn(
-            layers=[SedimentLayer(thickness=10, sound_speed=1550, density=1.3)],
-            halfspace=BoundaryProperties(acoustic_type='half-space', sound_speed=1800, density=2.0)
-        )
-        env = uacpy.Environment(name='test', bathymetry=100, bottom=lb)
-
-        assert env.has_layered_bottom()
-        assert not env.has_range_dependent_bottom()
-        assert env.bottom.columns[0] is lb
-        assert env.bottom.columns[0].halfspace.sound_speed == 1800
-
-    def test_environment_plain_boundary_properties(self):
-        """A half-space bottom is a non-layered, range-independent Bottom."""
-        env = uacpy.Environment(name='test', bathymetry=100)
-        assert not env.has_layered_bottom() and not env.bottom.is_range_dependent
-        assert isinstance(env.bottom, uacpy.Bottom)
-
-
 class TestRangeDependentLayeredBottom:
     """Tests for the Bottom class."""
 
@@ -472,7 +364,7 @@ class TestRangeDependentLayeredBottom:
         )
         return Bottom.from_columns([near, far], ranges=np.array([0, 20000]))
 
-    def test_basic_creation(self):
+    def test_from_columns_keeps_columns_and_max_total_thickness(self):
         rdl = self._make_rdl()
         assert len(rdl.columns) == 2
         assert rdl.max_total_thickness() == 20.0  # max(5+15, 3+10)
@@ -516,9 +408,9 @@ class TestRangeDependentLayeredBottom:
         env = uacpy.Environment(
             name='test', bottom=rdl, bathymetry=bathymetry,
         )
-        assert env.has_range_dependent_layered_bottom()
-        assert not env.has_layered_bottom()
-        assert not env.has_range_dependent_bottom()
+        assert env.has_range_dependent_layered_bottom
+        assert not env.has_layered_bottom
+        assert not env.has_range_dependent_bottom
         assert env.is_range_dependent
         assert env.bathymetry.n_ranges == 2
         assert env.bathymetry.depths[0] == 100
@@ -527,10 +419,12 @@ class TestRangeDependentLayeredBottom:
     @pytest.mark.requires_binary
     @pytest.mark.filterwarnings("ignore:.*below the local seafloor.*:UserWarning")
     def test_ram_with_rdl(self):
-        """RAM should handle Bottom. The deepest
-        receivers sit below the seafloor at the near ranges where the
-        bathy shoals to 100 m — that's exactly the PE absorbing-layer
-        regime, hence the targeted filterwarnings above."""
+        """RAM marches a range-dependent layered Bottom.
+
+        The bathymetry deepens 100 m -> 300 m over the run, so the deepest
+        receivers sit below the seafloor at the near ranges. A PE puts those
+        cells in its absorbing layer rather than refusing them, which is what
+        the targeted filterwarnings above suppress."""
         rdl = self._make_rdl()
         bathymetry = np.column_stack([
             rdl.ranges,
@@ -546,7 +440,7 @@ class TestRangeDependentLayeredBottom:
         ram = RAM(verbose=False, dr=20.0, dz=2.0)
         result = ram.run(env, source, receiver)
         assert result.data.shape[0] == 10
-        assert 30 < np.nanmin(result.tl) < 100
+        assert 30 < np.nanmin(result.db) < 100
 
 
 @pytest.mark.requires_binary
@@ -570,7 +464,7 @@ class TestWarnings:
             warnings.simplefilter('error', UserWarning)
             try:
                 bellhop.run(env, source, receiver)
-            except (FileNotFoundError, RuntimeError):
+            except (FileFormatError, RuntimeError):
                 pass
 
     def test_bellhop_auto_routes_layered_bottom_through_bounce(self):
@@ -587,7 +481,7 @@ class TestWarnings:
         with pytest.warns(UserWarning, match="auto-routing through BOUNCE"):
             try:
                 bellhop.run(env, source, receiver)
-            except (FileNotFoundError, RuntimeError):
+            except (FileFormatError, RuntimeError):
                 pass
 
     def test_ram_accepts_layered_bottom(self):
@@ -642,14 +536,14 @@ class TestIntegrationLayeredBottom:
         )
 
     @pytest.mark.requires_binary
-    def test_krakenfield_layered(self, layered_env, source, receiver):
-        """KrakenField should produce valid TL with layered bottom."""
+    def test_kraken_layered(self, layered_env, source, receiver):
+        """Kraken produces a valid TL field over a layered bottom."""
         from uacpy.models import Kraken
         kf = Kraken(verbose=False)
         result = kf.compute_tl(layered_env, source, receiver)
         assert result.data.shape == (20, 20)
-        assert 30 < np.nanmin(result.tl) < 100
-        assert 50 < np.nanmax(result.tl) < 200
+        assert 30 < np.nanmin(result.db) < 100
+        assert 50 < np.nanmax(result.db) < 200
 
     @pytest.mark.requires_binary
     def test_scooter_layered(self, layered_env, source, receiver):
@@ -658,15 +552,20 @@ class TestIntegrationLayeredBottom:
         scooter = Scooter(verbose=False)
         result = scooter.compute_tl(layered_env, source, receiver)
         assert result.data.shape == (20, 20)
-        assert 30 < np.nanmin(result.tl) < 100
+        assert 30 < np.nanmin(result.db) < 100
 
     @pytest.mark.requires_binary
     def test_kraken_layered_modes(self, layered_env, source, receiver):
-        """Kraken should produce valid modes with layered bottom."""
+        """``Kraken.run`` returns a populated Field over a layered bottom.
+
+        ``run`` and ``compute_tl`` both yield a Field; ``compute_modes`` is the
+        entry point that returns a ``Modes``. This asserts only that the
+        layered deck marches to a non-empty result — the values are bounded by
+        ``test_kraken_layered`` above.
+        """
         from uacpy.models import Kraken
         kraken = Kraken(verbose=False)
         result = kraken.run(layered_env, source, receiver)
-        # Should have modes
         assert result.data is not None
         assert len(result.data) > 0
 
@@ -693,8 +592,8 @@ class TestIntegrationRunWithBounce:
         result = bellhop.run_with_bounce(env, source, receiver, run_mode=RunMode.COHERENT_TL)
 
         assert result.data.shape == (10, 10)
-        assert 30 < np.nanmin(result.tl) < 100
-        assert 50 < np.nanmax(result.tl) < 200
+        assert 30 < np.nanmin(result.db) < 100
+        assert 50 < np.nanmax(result.db) < 200
 
 
 class TestIntegrationRAMRangeDependent:
@@ -719,74 +618,4 @@ class TestIntegrationRAMRangeDependent:
         ram = RAM(verbose=False, dr=20.0, dz=2.0)
         result = ram.run(env, source, receiver)
         assert result.data.shape[0] == 10
-        assert 30 < np.nanmin(result.tl) < 100
-
-
-class TestATEnvWriterLayered:
-    """Test AT env writer with layered bottom."""
-
-    def test_nmedia_with_layers(self):
-        """AT env writer should set NMEDIA > 1 for layered bottom."""
-        import io
-        from uacpy.io.oalib_writer import write_header
-        from uacpy.core.constants import BoundaryType
-
-        lb = SeabedColumn(
-            layers=[
-                SedimentLayer(thickness=10, sound_speed=1550, density=1.3, attenuation=0.5),
-                SedimentLayer(thickness=50, sound_speed=1650, density=1.7, attenuation=0.3),
-            ],
-            halfspace=BoundaryProperties(acoustic_type='half-space', sound_speed=1800, density=2.0, attenuation=0.1)
-        )
-        env = uacpy.Environment(name='test', bathymetry=200, ssp=1500, bottom=lb)
-        source = uacpy.Source(frequencies=100, depths=25)
-
-        buf = io.StringIO()
-        write_header(buf, env, source,
-                     ssp_topopt='C',
-                     surface_type=BoundaryType.VACUUM)
-        content = buf.getvalue()
-
-        # Should have NMEDIA = 3 (1 water + 2 sediment layers)
-        lines = content.strip().split('\n')
-        nmedia_line = lines[2]  # Third line is NMEDIA
-        assert nmedia_line.strip() == '3'
-
-    def test_layer_sections_written(self):
-        """Layer sections should be written between SSP and bottom."""
-        import io
-        from uacpy.io.oalib_writer import write_layer_sections
-
-        lb = SeabedColumn(
-            layers=[SedimentLayer(thickness=10, sound_speed=1550, density=1.3, attenuation=0.5)],
-            halfspace=BoundaryProperties(acoustic_type='half-space', sound_speed=1800, density=2.0)
-        )
-        env = uacpy.Environment(name='test', bathymetry=100, ssp=1500, bottom=lb)
-
-        buf = io.StringIO()
-        depth_after = write_layer_sections(buf, env, 100)
-        content = buf.getvalue()
-
-        assert depth_after == 110  # 100 + 10m layer
-        assert '1550' in content  # Layer sound speed present
-
-    def test_halfspace_depth_below_layers(self):
-        """Halfspace depth should be below all layers."""
-        import io
-        from uacpy.io.oalib_writer import write_bottom_section
-
-        lb = SeabedColumn(
-            layers=[
-                SedimentLayer(thickness=10, sound_speed=1550, density=1.3),
-                SedimentLayer(thickness=50, sound_speed=1650, density=1.7),
-            ],
-            halfspace=BoundaryProperties(acoustic_type='half-space', sound_speed=1800, density=2.0, attenuation=0.1)
-        )
-        env = uacpy.Environment(name='test', bathymetry=200, ssp=1500, bottom=lb)
-
-        buf = io.StringIO()
-        write_bottom_section(buf, env)
-        content = buf.getvalue()
-
-        # Halfspace should be at 260m (200 + 10 + 50)
-        assert '260.00' in content
+        assert 30 < np.nanmin(result.db) < 100

@@ -34,12 +34,10 @@ Canonical surface
 * :func:`plot_absorption` — volume absorption α(f) from a raw dB/km array or a
   model string (``absorption.plot(frequencies)`` is the object-oriented form).
 
-Stylesheet (``apply_professional_style``) is opt-in — importing this
-module does not mutate ``matplotlib.rcParams``.
+Importing this module does not mutate ``matplotlib.rcParams``.
 """
 
 from uacpy.visualization import style
-from uacpy.visualization.style import apply_professional_style
 
 from uacpy.visualization.plots import (
     plot_result,
@@ -146,5 +144,4 @@ __all__ = [
     'plot_source_level',
     'plot_roc',
     'style',
-    'apply_professional_style',
 ]

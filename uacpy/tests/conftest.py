@@ -1,4 +1,25 @@
-"""Pytest configuration and fixtures for UACPY tests."""
+"""Pytest configuration and fixtures for UACPY tests.
+
+Three **autouse** fixtures below apply to every test in the suite whether or
+not the test names them, so a test file cannot see them from its own source:
+
+* ``_seed_numpy`` reseeds ``numpy.random`` before each test. Under
+  ``-n logical --dist=worksteal`` (the ``addopts`` in ``pyproject.toml``)
+  tests do not run in file order, so any fixture built from ``numpy.random``
+  would otherwise draw different data depending on which worker picked it up.
+* ``_release_matplotlib_figures`` closes all figures afterwards, so a test
+  that plots without closing does not leak them into the next test's
+  ``plt.gcf()`` or exhaust the figure limit over a long session.
+* ``_redirect_tempdir`` points ``tempfile.tempdir`` at the per-test
+  ``tmp_path``. Models built with ``work_dir=None`` allocate their scratch
+  directory through ``tempfile``, so this is what makes pytest reap them.
+
+Those three, and the module-private helpers, have no textual callers: pytest
+registers a fixture from its decorator, so a static "unused symbol" scan will
+flag them. They are all live — do not delete them.
+
+Fixtures used by name across the suite start at ``simple_env``.
+"""
 
 # Lock matplotlib to a non-interactive backend before any test imports it.
 # Must run before any other matplotlib import in the test session.
@@ -37,8 +58,9 @@ def pytest_collection_modifyitems(items):
       subset ``-m 'not requires_binary'`` excludes OASES tests too).
     * ``requires_network`` tests hit live external services (the ``uacpy.data``
       fetchers); auto-skip them when there is no internet so an offline
-      ``pytest`` run stays green. Run only the network tests with
-      ``-m requires_network``; exclude them with ``-m 'not requires_network'``.
+      ``pytest`` run stays green. The ``addopts`` in ``pyproject.toml`` already
+      deselect them, so this fires only for a run that asked for them back with
+      ``-m requires_network``.
     """
     offline_skip = pytest.mark.skip(reason="no network (requires_network)")
     offline = not _has_network()
@@ -70,6 +92,60 @@ def _redirect_tempdir(tmp_path, monkeypatch):
     ``FileManager`` scratch dir is reaped by pytest (xdist-safe, no
     /dev/shm leakage)."""
     monkeypatch.setattr(tempfile, 'tempdir', str(tmp_path))
+
+
+#: Keyword names ``make_pekeris`` routes to the bottom half-space rather than
+#: to the Environment.
+_PEKERIS_BOTTOM_KEYS = frozenset((
+    'acoustic_type', 'sound_speed', 'density', 'attenuation', 'roughness',
+    'shear_speed', 'shear_attenuation'))
+
+
+def make_pekeris(**overrides):
+    """Build the canonical 100-m Pekeris waveguide: 1500 m/s isovelocity water
+    over a 1700 m/s fluid half-space (density 1.8, attenuation 0.5).
+
+    A plain function rather than a fixture, so test files can call it from
+    module-level helpers and constants (``from uacpy.tests.conftest import
+    make_pekeris``). Keywords named in ``_PEKERIS_BOTTOM_KEYS`` override the
+    bottom half-space; every other keyword goes to :class:`uacpy.Environment`
+    (``name=``, ``bathymetry=``, ``ssp=``, ``surface=``, or a wholesale
+    ``bottom=``).
+    """
+    bottom_kw = dict(acoustic_type='half-space', sound_speed=1700.0,
+                     density=1.8, attenuation=0.5)
+    bottom_kw.update({k: overrides.pop(k) for k in list(overrides)
+                      if k in _PEKERIS_BOTTOM_KEYS})
+    env_kw = dict(bathymetry=100.0, ssp=1500.0,
+                  bottom=uacpy.BoundaryProperties(**bottom_kw))
+    env_kw.update(overrides)
+    return uacpy.Environment(**env_kw)
+
+
+def concrete_model_classes() -> dict:
+    """Every concrete ``PropagationModel`` wrapper on ``uacpy.models``'s
+    public surface, ``{name: class}``.
+
+    Derived rather than listed, and a plain function rather than a fixture so
+    module-level helpers can call it (``from uacpy.tests.conftest import
+    concrete_model_classes``). Every gate over "the set of models" that keeps
+    its own copy of the list is blind to the model it does not know about: a
+    thirteenth wrapper enters ``uacpy.models.__all__`` and the hand-written
+    twelve never notices. ``PropagationModel`` and ``OASES`` are abstract
+    bases, not wrappers, and drop out on ``inspect.isabstract``.
+    """
+    import inspect
+
+    import uacpy.models as models
+    from uacpy.models.base import PropagationModel
+
+    found = {}
+    for name in models.__all__:
+        obj = getattr(models, name, None)
+        if (isinstance(obj, type) and issubclass(obj, PropagationModel)
+                and not inspect.isabstract(obj)):
+            found[name] = obj
+    return found
 
 
 @pytest.fixture
@@ -168,12 +244,9 @@ def receiver_small():
 
 
 @pytest.fixture
-def receiver():
+def receiver(receiver_grid):
     """Default receiver grid (alias for ``receiver_grid``)."""
-    return uacpy.Receiver(
-        depths=np.linspace(10, 90, 9),
-        ranges=np.linspace(100, 5000, 11),
-    )
+    return receiver_grid
 
 
 @pytest.fixture
@@ -205,12 +278,7 @@ def elastic_bottom():
 @pytest.fixture
 def pekeris_env(halfspace_bottom):
     """Classic 100-m Pekeris waveguide with a fluid half-space bottom."""
-    return uacpy.Environment(
-        name="Pekeris (fluid bottom)",
-        bathymetry=100.0,
-        ssp=1500.0,
-        bottom=halfspace_bottom,
-    )
+    return make_pekeris(name="Pekeris (fluid bottom)", bottom=halfspace_bottom)
 
 
 @pytest.fixture

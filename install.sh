@@ -20,6 +20,16 @@
 #
 set -euo pipefail
 
+# Per-run build logs live under a mktemp dir (fixed /tmp names collide
+# between users on a shared machine and can be pre-created as symlinks);
+# allocated after argument parsing so --help leaves nothing behind.
+BUILD_LOG_DIR=""
+
+# What the durable build record actually managed to leave on disk. Empty means
+# it could not be written; the summary reads these rather than asserting.
+BUILD_RECORD_WRITTEN=""
+BUILD_LOGS_COPIED=""
+
 # -------------------------
 # Colors for pretty output
 # -------------------------
@@ -56,8 +66,10 @@ WOA_RESOLUTION="1.00"
 WOA_CODE="01"
 WOA_DECADE="decav"
 # GEBCO 2025 ice-surface elevation grid, direct NetCDF from CEDA (no auth,
-# ~7.5 GB). md5 cd18ddc4162134465af310f714d50f01.
+# ~7.5 GB). The digest is checked before the download is promoted into the
+# cache; clear it to disable that check.
 GEBCO_NC_URL="https://dap.ceda.ac.uk/bodc/gebco/global/gebco_2025/ice_surface_elevation/netcdf/GEBCO_2025.nc?download=1"
+GEBCO_MD5="cd18ddc4162134465af310f714d50f01"
 
 # GlobSed v3 total sediment thickness NetCDF (NOAA NCEI archive). Fetched with
 # curl: NCEI/Akamai throttles Python urllib to a trickle, but serves curl fast.
@@ -75,7 +87,10 @@ AUTO_YES=0         # 0 = interactive (prompt the user); 1 = assume "yes"
 FORCE=0
 BELLHOP_VERSION="" # "fortran", "cxx", or "cuda" (empty => prompt/auto)
 INSTALL_OASES=""   # "yes" or "no" (empty => prompt/auto)
-INSTALL_DATA=""    # comma list of gebco,woa23,sediment,emodnet,coastline,globsed,crust1,diesing,seaice,glodap,wind,graw | "all" | "no" (empty => skip)
+INSTALL_DATA=""    # comma list of $DATA_IDS | "all" | "no" (empty => skip)
+# Every dataset id a download_* function below implements — the one source of
+# truth for both --data validation and the "all" expansion.
+DATA_IDS="gebco woa23 sediment emodnet coastline globsed crust1 diesing seaice glodap wind graw"
 BUILD_MODELS=1     # 0 with --no-models: skip all native builds (data-only install)
 
 # -------------------------
@@ -176,6 +191,67 @@ hint_for() {
     esac
 }
 
+# One resilient-download policy shared by EVERY curl fetch (OASES + each data
+# grid). For multi-GB single streams this matters:
+#   --http1.1          HTTP/2 mid-stream CANCELs (curl exit 92) on long transfers
+#   -C -               resume the partial `-o` file from its current size
+#   --retry-all-errors plain --retry ignores transport errors like exit 92 / 18
+#   --retry 3 / delay  quick in-process retries for transient blips
+#   --connect-timeout  bound the connect phase so a dead host fails fast
+# Curl's *internal* --retry does not reliably resume mid-stream (it restarts from
+# the launch offset), so a flaky server that closes the connection early (curl
+# exit 18, "bytes missing") makes no forward progress. We therefore wrap it in an
+# outer loop that RE-INVOKES curl: each fresh call resumes from the partial via
+# `-C -`, and because these hosts (CEDA/NCEI/WOA) answer a Range request with
+# `206 Partial Content`, the file grows monotonically across a flaky link instead
+# of restarting a 7.5 GB download from zero. Bounded so a no-range / dead host
+# still terminates.
+# Usage: robust_curl <url> <output-path> [extra curl args…]  (extras precede URL).
+robust_curl() {
+    local url="$1" out="$2"; shift 2
+    local attempt=0 max_attempts=20 rc http_code
+    while :; do
+        http_code=$(curl -fL --http1.1 --retry 3 --retry-delay 5 --retry-all-errors \
+                --connect-timeout 30 -C - -o "$out" -w '%{http_code}' "$@" "$url")
+        rc=$?
+        if (( rc == 0 )); then
+            return 0
+        fi
+        # Exit 22 means the server answered with an HTTP error (>= 400, since
+        # -f). Those are permanent apart from the rate-limit codes, and
+        # --retry-all-errors already re-sent each one 4 times inside curl, so
+        # continuing the outer loop just burns the budget: a renamed URL would
+        # cost ~80 requests before the caller heard about it, and a 26-file
+        # download loop hours. Report it now.
+        if (( rc == 22 )) && [[ "$http_code" != "429" && "$http_code" != "408" ]]; then
+            echo -e "  ${RED}HTTP ${http_code} for ${url} — permanent, not retrying${NC}" >&2
+            return 1
+        fi
+        # Exit 7 is "could not connect": the host answers instantly with a
+        # rejection, or nothing listens at all. curl's internal --retry has
+        # already re-sent it; one more invocation covers a balancer blip,
+        # and further rounds only multiply sleeps against a down host —
+        # the same policy the python fetchers apply to ECONNREFUSED.
+        if (( rc == 7 )); then
+            if (( attempt >= 1 )); then
+                echo -e "  ${RED}cannot connect for ${url} — host down or refusing; not retrying further${NC}" >&2
+                return 1
+            fi
+            attempt=$((attempt + 1))
+            continue
+        fi
+        attempt=$((attempt + 1))
+        if (( attempt >= max_attempts )); then
+            return 1
+        fi
+        local have=0; [ -f "$out" ] && have=$(wc -c < "$out" 2>/dev/null || echo 0)
+        echo -e "  ${YELLOW}download interrupted (outer retry ${attempt}/${max_attempts}," \
+                "have ${have} bytes) — resuming in 5s...${NC}" >&2
+        sleep 5
+    done
+}
+
+
 # -------------------------
 # Parse CLI args
 # -------------------------
@@ -197,7 +273,7 @@ Options:
                          cxx     — Fortran + C++ Bellhop (CPU, requires CMake)
                          cuda    — Fortran + CUDA Bellhop (GPU, needs nvcc + CMake)
   --oases [yes|no]     Download and build OASES (MIT, distributed separately):
-                         yes — Download from MIT and build OAST/OASN/OASR/OASP
+                         yes — Download from MIT and build OAST/OASN/OASR/OASP/OASS/OASSP
                          no  — Skip OASES entirely
   --data [LIST]        Download public datasets for uacpy.data's offline backend
                        into ./data_cache (gitignored). LIST is a comma list of:
@@ -239,6 +315,19 @@ Examples:
 EOF
 }
 
+# Guard the value of a flag that takes one.
+# Args: $1 flag, $2 the next token (may be absent), $3 the accepted spellings.
+# An option-shaped token is never a value: `--data --yes` would otherwise set
+# INSTALL_DATA='--yes' and drop the -y the user did pass, committing a
+# multi-hour run to choices they never made.
+require_value() {
+    if [[ -z "${2:-}" || "$2" == -* ]]; then
+        echo -e "${RED}$1 requires an argument: $3${NC}" >&2
+        echo "Run '$0 --help' for the accepted values." >&2
+        exit 1
+    fi
+}
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -y|--yes)
@@ -250,34 +339,19 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --bellhop)
-            shift
-            if [[ $# -gt 0 ]]; then
-                BELLHOP_VERSION="$1"
-                shift
-            else
-                echo -e "${RED}--bellhop requires an argument: fortran|cxx|cuda${NC}"
-                exit 1
-            fi
+            require_value --bellhop "${2:-}" 'fortran|cxx|cuda'
+            BELLHOP_VERSION="$2"
+            shift 2
             ;;
         --oases)
-            shift
-            if [[ $# -gt 0 ]]; then
-                INSTALL_OASES="$1"
-                shift
-            else
-                echo -e "${RED}--oases requires an argument: yes|no${NC}"
-                exit 1
-            fi
+            require_value --oases "${2:-}" 'yes|no'
+            INSTALL_OASES="$2"
+            shift 2
             ;;
         --data)
-            shift
-            if [[ $# -gt 0 ]]; then
-                INSTALL_DATA="$1"
-                shift
-            else
-                echo -e "${RED}--data requires an argument: gebco,woa23,sediment,emodnet,coastline,globsed,crust1,diesing,seaice,glodap,wind,graw|all|no${NC}"
-                exit 1
-            fi
+            require_value --data "${2:-}" 'gebco,woa23,sediment,emodnet,coastline,globsed,crust1,diesing,seaice,glodap,wind,graw|all|no'
+            INSTALL_DATA="$2"
+            shift 2
             ;;
         --no-models|--data-only)
             BUILD_MODELS=0
@@ -288,11 +362,18 @@ while [[ $# -gt 0 ]]; do
             exit 0
             ;;
         *)
-            echo -e "${YELLOW}Warning: Unknown argument: $1${NC}"
-            shift
+            # Stop rather than warn and continue: the run that follows is hours
+            # long, and a misspelt flag means it is not the run that was asked
+            # for.
+            echo -e "${RED}Unknown argument: $1${NC}" >&2
+            echo "Run '$0 --help' for the accepted flags." >&2
+            exit 1
             ;;
     esac
 done
+
+# Per-run build logs (kept after the run for post-mortem reading).
+BUILD_LOG_DIR="$(mktemp -d -t uacpy_build_logs.XXXXXX)"
 
 # -------------------------
 # OS detection
@@ -396,8 +477,12 @@ choose_bellhop() {
         case "$BELLHOP_VERSION" in
             fortran|cxx|cuda) return 0 ;;
             *)
-                echo -e "${YELLOW}Invalid --bellhop argument: ${BELLHOP_VERSION}. Ignoring.${NC}"
-                BELLHOP_VERSION=""
+                # Stop rather than fall through to the default, as above: a
+                # misspelt value otherwise silently selects a different -- and
+                # more expensive -- backend than the one asked for.
+                echo -e "${RED}Invalid --bellhop argument: ${BELLHOP_VERSION}${NC}" >&2
+                echo "Expected 'fortran', 'cxx' or 'cuda' (lowercase)." >&2
+                exit 1
                 ;;
         esac
     fi
@@ -455,8 +540,15 @@ choose_oases() {
         case "$INSTALL_OASES" in
             yes|no) return 0 ;;
             *)
-                echo -e "${YELLOW}Invalid --oases argument: ${INSTALL_OASES}. Ignoring.${NC}"
-                INSTALL_OASES=""
+                # Stop, for the same reason an unknown FLAG stops the run: the
+                # build that follows is hours long. Warning and clearing the
+                # value handed the run to the AUTO_YES default below, so
+                # `--oases NO` (a plausible typo for `no`) downloaded ~100 MB
+                # from acoustics.mit.edu and built the whole OASES suite --
+                # the exact opposite of the request, at exit 0.
+                echo -e "${RED}Invalid --oases argument: ${INSTALL_OASES}${NC}" >&2
+                echo "Expected 'yes' or 'no' (lowercase)." >&2
+                exit 1
                 ;;
         esac
     fi
@@ -468,7 +560,7 @@ choose_oases() {
         return 0
     fi
 
-    echo -e "${BLUE}Install OASES (OAST, OASN, OASR, OASP)?${NC}"
+    echo -e "${BLUE}Install OASES (OAST, OASN, OASR, OASP, OASS, OASSP)?${NC}"
     echo "  OASES is distributed separately by MIT and is not bundled with UACPY."
     echo "  Saying yes will download the source from acoustics.mit.edu and build it."
     echo ""
@@ -493,8 +585,44 @@ fi
 # backend. Mirrors choose_oases: respects an explicit --data flag, otherwise
 # prompts interactively. Because the grids are large (GEBCO ~4 GB), -y does NOT
 # auto-download — the user must opt in via --data or the prompt.
+validate_data_selection() {
+    # Drop unknown ids from a --data list, the way choose_bellhop / choose_oases
+    # reject their flags. Unvalidated, a typo matches no ``data_requested``
+    # below, short-circuits every download, and still reports the cache as
+    # installed — a green summary row for a directory that was never filled.
+    local kept="" dropped="" tok
+    local IFS=','
+    for tok in $INSTALL_DATA; do
+        [[ -z "$tok" ]] && continue
+        if [[ " $DATA_IDS " == *" $tok "* ]]; then
+            kept="${kept}${tok},"
+        else
+            dropped="${dropped}${tok} "
+        fi
+    done
+    dropped="${dropped% }"
+    if [[ -n "$dropped" ]]; then
+        echo -e "${YELLOW}Unknown --data dataset(s): ${dropped}${NC}"
+        echo -e "${YELLOW}Valid ids: ${DATA_IDS// /, } (or 'all' / 'no').${NC}"
+        NOTE_DATA="${NOTE_DATA} unknown:${dropped// /,}"
+    fi
+    INSTALL_DATA="${kept%,}"
+    if [[ -z "$INSTALL_DATA" ]]; then
+        # Nothing recognised: the request cannot be honoured at all, so the
+        # summary says failed rather than skipped or ok.
+        INSTALL_DATA="no"
+        [[ -n "$dropped" ]] && STATUS_DATA="failed"
+        return 1
+    fi
+    return 0
+}
+
 choose_data() {
     if [[ -n "$INSTALL_DATA" ]]; then
+        case "$INSTALL_DATA" in
+            all|no) ;;
+            *) validate_data_selection || true ;;
+        esac
         return 0
     fi
     if [[ $AUTO_YES -eq 1 ]]; then
@@ -619,40 +747,6 @@ check_curl() {
     fail_missing "curl" "$(hint_for curl curl curl curl)"
 }
 
-# One resilient-download policy shared by EVERY curl fetch (OASES + each data
-# grid). For multi-GB single streams this matters:
-#   --http1.1          HTTP/2 mid-stream CANCELs (curl exit 92) on long transfers
-#   -C -               resume the partial `-o` file from its current size
-#   --retry-all-errors plain --retry ignores transport errors like exit 92 / 18
-#   --retry 3 / delay  quick in-process retries for transient blips
-#   --connect-timeout  bound the connect phase so a dead host fails fast
-# Curl's *internal* --retry does not reliably resume mid-stream (it restarts from
-# the launch offset), so a flaky server that closes the connection early (curl
-# exit 18, "bytes missing") makes no forward progress. We therefore wrap it in an
-# outer loop that RE-INVOKES curl: each fresh call resumes from the partial via
-# `-C -`, and because these hosts (CEDA/NCEI/WOA) answer a Range request with
-# `206 Partial Content`, the file grows monotonically across a flaky link instead
-# of restarting a 7.5 GB download from zero. Bounded so a no-range / dead host
-# still terminates.
-# Usage: robust_curl <url> <output-path> [extra curl args…]  (extras precede URL).
-robust_curl() {
-    local url="$1" out="$2"; shift 2
-    local attempt=0 max_attempts=20
-    while :; do
-        if curl -fL --http1.1 --retry 3 --retry-delay 5 --retry-all-errors \
-                --connect-timeout 30 -C - -o "$out" "$@" "$url"; then
-            return 0
-        fi
-        attempt=$((attempt + 1))
-        if (( attempt >= max_attempts )); then
-            return 1
-        fi
-        local have=0; [ -f "$out" ] && have=$(wc -c < "$out" 2>/dev/null || echo 0)
-        echo -e "  ${YELLOW}download interrupted (outer retry ${attempt}/${max_attempts}," \
-                "have ${have} bytes) — resuming in 5s...${NC}" >&2
-        sleep 5
-    done
-}
 
 # tar (required only when extracting the OASES tarball)
 check_tar() {
@@ -946,7 +1040,7 @@ make -k all \
     FC=gfortran \
     FFLAGS="$OALIB_FFLAGS" \
     MAKEFLAGS= \
-    2>&1 | tee /tmp/oalib_build.log
+    2>&1 | tee "${BUILD_LOG_DIR}"/oalib_build.log
 OALIB_STATUS=${PIPESTATUS[0]:-1}
 set -e
 
@@ -955,10 +1049,10 @@ if [[ $OALIB_STATUS -eq 0 ]]; then
     STATUS_OALIB="ok"
     NOTE_OALIB="$BIN_DIR_OALIB"
 else
-    echo -e "${YELLOW}⚠ OALIB build had issues (exit $OALIB_STATUS). See /tmp/oalib_build.log${NC}"
+    echo -e "${YELLOW}⚠ OALIB build had issues (exit $OALIB_STATUS). See ${BUILD_LOG_DIR}/oalib_build.log${NC}"
     echo -e "${YELLOW}  Continuing — any binaries that built will still be installed.${NC}"
     STATUS_OALIB="partial"
-    NOTE_OALIB="see /tmp/oalib_build.log"
+    NOTE_OALIB="see ${BUILD_LOG_DIR}/oalib_build.log"
 fi
 echo ""
 
@@ -987,6 +1081,10 @@ if [ ! -d "$OASES_DIR" ]; then
     check_tar
     echo -e "${BLUE}Downloading OASES from $OASES_URL ...${NC}"
     OASES_TMP="$(mktemp -d)"
+    # An abort between here and the rm at the end of this function must not
+    # leak the scratch dir (plus its ~100 MB tarball).
+    trap 'rm -rf "$OASES_TMP"' EXIT
+    trap 'rm -rf "$OASES_TMP"; exit 130' INT TERM
     OASES_TARBALL="$OASES_TMP/oases.tar.gz"
 
     # --proto-redir =https blocks a redirect from downgrading to HTTP (kept as an
@@ -1120,7 +1218,7 @@ if [ -d "$OASES_DIR" ]; then
     OASES_FFLAGS="-O2"
     OASES_CFLAGS="-O2"
 
-    echo -e "${BLUE}Starting OASES make (log -> /tmp/oases_build.log)${NC}"
+    echo -e "${BLUE}Starting OASES make (log -> ${BUILD_LOG_DIR}/oases_build.log)${NC}"
     echo -e "  - HOSTTYPE=${OASES_HOSTTYPE}  OSTYPE=${OASES_OSTYPE}"
     echo -e "  - FC_STMNT='${OASES_FC}'  FFLAGS=${OASES_FFLAGS}"
 
@@ -1142,14 +1240,14 @@ if [ -d "$OASES_DIR" ]; then
         CFLAGS="$OASES_CFLAGS" \
         LFLAGS="" \
         RANLB=ranlib \
-        oases 2>&1 | tee /tmp/oases_build.log
+        oases 2>&1 | tee "${BUILD_LOG_DIR}"/oases_build.log
     OASES_STATUS=${PIPESTATUS[0]:-1}
     set -e
 
     if [[ $OASES_STATUS -eq 0 ]]; then
         echo -e "${GREEN}✓ OASES build completed${NC}"
     else
-        echo -e "${YELLOW}⚠ OASES build had issues. See /tmp/oases_build.log${NC}"
+        echo -e "${YELLOW}⚠ OASES build had issues. See ${BUILD_LOG_DIR}/oases_build.log${NC}"
     fi
 
     # Try to copy installed binaries (if any)
@@ -1174,9 +1272,9 @@ if [ -d "$OASES_DIR" ]; then
     ) || true
 
     if [[ $OASES_INSTALLED -eq 0 ]]; then
-        echo -e "${YELLOW}No OASES executables installed. Check /tmp/oases_build.log${NC}"
+        echo -e "${YELLOW}No OASES executables installed. Check ${BUILD_LOG_DIR}/oases_build.log${NC}"
         STATUS_OASES="failed"
-        NOTE_OASES="see /tmp/oases_build.log"
+        NOTE_OASES="see ${BUILD_LOG_DIR}/oases_build.log"
     else
         echo -e "${GREEN}✓ Installed $OASES_INSTALLED OASES components${NC}"
         STATUS_OASES="ok"
@@ -1214,7 +1312,7 @@ if [ -d "$MPIRAMS_DIR" ]; then
     # Ubuntu the f77 symlink resolves to gfortran; on macOS no such alias
     # exists and the build fails with "f77: No such file or directory".
     set +e
-    make FC=gfortran FFLAGS="$MPIRAMS_FFLAGS" LDFLAGS="$MPIRAMS_LDFLAGS" 2>&1 | tee /tmp/mpirams_build.log
+    make FC=gfortran FFLAGS="$MPIRAMS_FFLAGS" LDFLAGS="$MPIRAMS_LDFLAGS" 2>&1 | tee "${BUILD_LOG_DIR}"/mpirams_build.log
     MPIRAMS_STATUS=${PIPESTATUS[0]:-1}
     set -e
 
@@ -1225,9 +1323,9 @@ if [ -d "$MPIRAMS_DIR" ]; then
         STATUS_MPIRAMS="ok"
         NOTE_MPIRAMS="$BIN_DIR_MPIRAMS"
     else
-        echo -e "${YELLOW}⚠ mpiramS build failed. See /tmp/mpirams_build.log${NC}"
+        echo -e "${YELLOW}⚠ mpiramS build failed. See ${BUILD_LOG_DIR}/mpirams_build.log${NC}"
         STATUS_MPIRAMS="failed"
-        NOTE_MPIRAMS="see /tmp/mpirams_build.log"
+        NOTE_MPIRAMS="see ${BUILD_LOG_DIR}/mpirams_build.log"
     fi
 else
     echo -e "${YELLOW}mpiramS source not found at: $MPIRAMS_DIR. Skipping.${NC}"
@@ -1253,11 +1351,19 @@ if [ -d "$RAMSURF_DIR" ]; then
     # too sensitive to reassociation, reciprocal approximations, and
     # -ffinite-math-only for unsafe-math to be acceptable. `-std=legacy -w`
     # accepts the F77-era idioms in Calvo's sources.
-    RAMSURF_FFLAGS="-O2 ${FORTRAN_ARCH_FLAGS} -std=legacy -w"
+    # -fdefault-real-8 -fdefault-double-8: the Collins march outside epade is
+    # single precision in stock (ram.pdf section 3), which makes refining dz past
+    # ~lambda/120 lose more to round-off than the finer grid gains — measured
+    # 2.19 dB against KrakenC at dz=0.0125 m, against 0.11 dB in double. The
+    # epade interface declarations are promoted in the sources to match
+    # (third_party/MODIFICATIONS.md). These flags are REQUIRED, not optional:
+    # io/ramsurf_reader.py reads tl.grid / pcomplex.bin as 8-byte records, so a
+    # single-precision build produces files uacpy cannot parse.
+    RAMSURF_FFLAGS="-O2 ${FORTRAN_ARCH_FLAGS} -std=legacy -w -fdefault-real-8 -fdefault-double-8"
     # FC=gfortran: same reason as mpiramS — make's built-in FC=f77 wins
     # over the Makefile's `FC ?= gfortran`, and no f77 alias exists on macOS.
     set +e
-    make FC=gfortran FFLAGS="$RAMSURF_FFLAGS" 2>&1 | tee /tmp/ramsurf_build.log
+    make FC=gfortran FFLAGS="$RAMSURF_FFLAGS" 2>&1 | tee "${BUILD_LOG_DIR}"/ramsurf_build.log
     RAMSURF_STATUS=${PIPESTATUS[0]:-1}
     set -e
 
@@ -1281,12 +1387,12 @@ if [ -d "$RAMSURF_DIR" ]; then
             NOTE_RAMSURF="$RAMSURF_INSTALLED/2 binaries → $BIN_DIR_RAMSURF"
         else
             STATUS_RAMSURF="failed"
-            NOTE_RAMSURF="see /tmp/ramsurf_build.log"
+            NOTE_RAMSURF="see ${BUILD_LOG_DIR}/ramsurf_build.log"
         fi
     else
-        echo -e "${YELLOW}⚠ ramsurf build failed. See /tmp/ramsurf_build.log${NC}"
+        echo -e "${YELLOW}⚠ ramsurf build failed. See ${BUILD_LOG_DIR}/ramsurf_build.log${NC}"
         STATUS_RAMSURF="failed"
-        NOTE_RAMSURF="see /tmp/ramsurf_build.log"
+        NOTE_RAMSURF="see ${BUILD_LOG_DIR}/ramsurf_build.log"
     fi
 else
     echo -e "${YELLOW}ramsurf source not found at: $RAMSURF_DIR. Skipping.${NC}"
@@ -1310,13 +1416,21 @@ if [ -d "$RAMGEO_DIR" ]; then
     echo -e "${BLUE}Compiling ramgeo (Collins layered fluid PE)...${NC}"
     # Same numerics rationale as ramsurf: -O2 (no -ffast-math) for the
     # complex Padé recursion, -std=legacy -w for the F77-era source.
-    RAMGEO_FFLAGS="-O2 ${FORTRAN_ARCH_FLAGS} -std=legacy -w"
+    # -fdefault-real-8 -fdefault-double-8: the Collins march outside epade is
+    # single precision in stock (ram.pdf section 3), which makes refining dz past
+    # ~lambda/120 lose more to round-off than the finer grid gains — measured
+    # 2.19 dB against KrakenC at dz=0.0125 m, against 0.11 dB in double. The
+    # epade interface declarations are promoted in the sources to match
+    # (third_party/MODIFICATIONS.md). These flags are REQUIRED, not optional:
+    # io/ramsurf_reader.py reads tl.grid / pcomplex.bin as 8-byte records, so a
+    # single-precision build produces files uacpy cannot parse.
+    RAMGEO_FFLAGS="-O2 ${FORTRAN_ARCH_FLAGS} -std=legacy -w -fdefault-real-8 -fdefault-double-8"
     # FC=gfortran: make's built-in FC=f77 would otherwise win over the
     # Makefile's `FC ?= gfortran`, and no f77 alias exists on macOS
     # (gfortran ships via the Homebrew `gcc` formula). No OpenMP — RAMGEO is
     # single-threaded, like ramsurf.
     set +e
-    make FC=gfortran FFLAGS="$RAMGEO_FFLAGS" 2>&1 | tee /tmp/ramgeo_build.log
+    make FC=gfortran FFLAGS="$RAMGEO_FFLAGS" 2>&1 | tee "${BUILD_LOG_DIR}"/ramgeo_build.log
     RAMGEO_STATUS=${PIPESTATUS[0]:-1}
     set -e
 
@@ -1327,9 +1441,9 @@ if [ -d "$RAMGEO_DIR" ]; then
         STATUS_RAMGEO="ok"
         NOTE_RAMGEO="$BIN_DIR_RAMGEO"
     else
-        echo -e "${YELLOW}⚠ RAMGEO build failed. See /tmp/ramgeo_build.log${NC}"
+        echo -e "${YELLOW}⚠ RAMGEO build failed. See ${BUILD_LOG_DIR}/ramgeo_build.log${NC}"
         STATUS_RAMGEO="failed"
-        NOTE_RAMGEO="see /tmp/ramgeo_build.log"
+        NOTE_RAMGEO="see ${BUILD_LOG_DIR}/ramgeo_build.log"
     fi
 else
     echo -e "${YELLOW}RAMGEO source not found at: $RAMGEO_DIR. Skipping.${NC}"
@@ -1425,7 +1539,7 @@ if [ ${#OALIB_MISSING[@]} -gt 0 ]; then
     OALIB_MISSING_LIST="$(IFS=,; echo "${OALIB_MISSING[*]}")"
     echo -e "${RED}✗ OALIB build is missing required binaries: ${OALIB_MISSING_LIST}${NC}"
     STATUS_OALIB="failed"
-    NOTE_OALIB="missing: ${OALIB_MISSING_LIST} (see /tmp/oalib_build.log)"
+    NOTE_OALIB="missing: ${OALIB_MISSING_LIST} (see ${BUILD_LOG_DIR}/oalib_build.log)"
 fi
 echo ""
 
@@ -1443,7 +1557,7 @@ fi
 echo -e "${BLUE}=== Running quick executable sanity checks ===${NC}"
 
 test_runnable() {
-    exe="$1"
+    local exe="$1"
     if [ -x "$exe" ]; then
         # Acoustics-Toolbox binaries read CLI args as env-file roots; do
         # not invoke them here.
@@ -1507,7 +1621,7 @@ download_gebco() {
     local dir="${DATA_CACHE_DIR}/gebco"
     mkdir -p "$dir"
     if [[ "$FORCE" != "1" ]] && ls "$dir"/*.nc >/dev/null 2>&1; then
-        echo -e "${GREEN}✓ GEBCO grid already present${NC}"; return 0
+        echo -e "${GREEN}✓ GEBCO grid already cached → ${dir}${NC}"; return 0
     fi
     echo -e "${BLUE}Downloading GEBCO 2025 grid (~7.5 GB) — this is large...${NC}"
     # Download to a temp name and rename only on success (atomic; a partial file
@@ -1519,28 +1633,72 @@ download_gebco() {
         echo -e "${RED}✗ GEBCO download failed — re-run --data gebco to resume from the partial file${NC}"
         NOTE_DATA="${NOTE_DATA} gebco:failed"; return 1
     fi
+    # Verify the digest before the file is promoted to the cache, the way the
+    # OASES tarball is pinned. ``-C -`` resumes onto whatever ``.part`` a
+    # previous run left, so a remote file that changed between runs would
+    # otherwise be spliced together from two versions and installed as a valid
+    # grid. A mismatch drops the .part: resuming it again could only reproduce
+    # the same bad file.
+    if [[ -n "$GEBCO_MD5" ]]; then
+        local md5_cmd="" actual_md5=""
+        if command_exists md5sum; then
+            md5_cmd="md5sum"
+        elif command_exists md5; then       # macOS
+            md5_cmd="md5 -q"
+        fi
+        if [[ -n "$md5_cmd" ]]; then
+            actual_md5=$($md5_cmd "$tmp" | awk '{print $1}')
+            if [[ "$actual_md5" != "$GEBCO_MD5" ]]; then
+                echo -e "${RED}✗ GEBCO grid md5 mismatch — refusing to install it.${NC}"
+                echo -e "${RED}    expected: ${GEBCO_MD5}${NC}"
+                echo -e "${RED}    got:      ${actual_md5}${NC}"
+                rm -f "$tmp"
+                NOTE_DATA="${NOTE_DATA} gebco:md5-mismatch"; return 1
+            fi
+        else
+            echo -e "${YELLOW}Neither md5sum nor md5 found; cannot verify the GEBCO grid.${NC}"
+        fi
+    fi
     mv -f "$tmp" "${dir}/GEBCO_2025.nc"
-    echo -e "${GREEN}✓ GEBCO grid ready${NC}"; return 0
+    echo -e "${GREEN}✓ GEBCO grid ready → ${dir}${NC}"; return 0
 }
 
 download_woa23() {
     local dir="${DATA_CACHE_DIR}/woa23"; mkdir -p "$dir"
     local base="https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA"
-    local ok=1 var folder p fname url
-    echo -e "${BLUE}Downloading WOA23 ${WOA_RESOLUTION}° T/S grids (annual + 12 months)...${NC}"
+    local ok=1 var folder p fname url header_shown=0 got=0
     for var in t s; do
         if [[ "$var" == "t" ]]; then folder="temperature"; else folder="salinity"; fi
         for p in 00 01 02 03 04 05 06 07 08 09 10 11 12; do
             fname="woa23_${WOA_DECADE}_${var}${p}_${WOA_CODE}.nc"
             if [[ "$FORCE" != "1" && -s "${dir}/${fname}" ]]; then continue; fi
             url="${base}/${folder}/netcdf/${WOA_DECADE}/${WOA_RESOLUTION}/${fname}"
-            if ! robust_curl "$url" "${dir}/${fname}"; then
-                echo -e "${RED}  ✗ ${fname}${NC}"; rm -f "${dir}/${fname}"; ok=0
+            if [[ "$header_shown" == "0" ]]; then
+                echo -e "${BLUE}Downloading WOA23 ${WOA_RESOLUTION}° T/S grids (annual + 12 months)...${NC}"
+                header_shown=1
+            fi
+            # Fetch to .part and move into place only on success: an
+            # interrupted transfer must never leave a truncated file the
+            # -s re-run guard above would accept as complete.
+            if robust_curl "$url" "${dir}/${fname}.part"; then
+                mv -f "${dir}/${fname}.part" "${dir}/${fname}"
+                got=1
+            else
+                echo -e "${RED}  ✗ ${fname}${NC}"; rm -f "${dir}/${fname}.part"; ok=0
+                if [[ "${got:-0}" == "0" ]]; then
+                    echo -e "${YELLOW}◐ WOA23: the first grid failed with none fetched — the server looks unreachable; stopping before the remaining files. Re-run --data woa23 when it answers.${NC}"
+                    NOTE_DATA="${NOTE_DATA} woa23:unreachable"; return 1
+                fi
             fi
         done
     done
     if [[ "$ok" == "1" ]]; then
-        echo -e "${GREEN}✓ WOA23 grids ready${NC}"; return 0
+        if [[ "$header_shown" == "0" ]]; then
+            echo -e "${GREEN}✓ WOA23 grids already cached → ${dir}${NC}"
+        else
+            echo -e "${GREEN}✓ WOA23 grids ready → ${dir}${NC}"
+        fi
+        return 0
     fi
     echo -e "${YELLOW}◐ WOA23 partially downloaded${NC}"; NOTE_DATA="${NOTE_DATA} woa23:partial"; return 1
 }
@@ -1548,15 +1706,15 @@ download_woa23() {
 download_sediment() {
     local dir="${DATA_CACHE_DIR}/sediment"; mkdir -p "$dir"
     if [[ "$FORCE" != "1" && ( -s "${dir}/grainsize.csv" || -s "${dir}/deck41.csv" ) ]]; then
-        echo -e "${GREEN}✓ Sediment samples present in ${dir}${NC}"; return 0
+        echo -e "${GREEN}✓ Sediment samples already cached → ${dir}${NC}"; return 0
     fi
     # Automatic: the NCEI grain-size DB (G00127, public domain) is downloaded and
     # normalized to grainsize.csv by uacpy.data.download_sediment_db — if uacpy is
     # importable in this Python. Otherwise fall back to a manual-placement note.
     if python3 -c "import uacpy.data" >/dev/null 2>&1; then
         echo -e "${BLUE}Downloading + normalizing NCEI grain-size DB (~3 MB)...${NC}"
-        if python3 -c "import uacpy.data as d; d.download_sediment_db(cache_dir='${dir}', verbose=True)"; then
-            echo -e "${GREEN}✓ Sediment grain-size DB ready${NC}"; return 0
+        if UACPY_INSTALL_CACHE_DIR="$dir" python3 -c "import os; import uacpy.data as d; d.download_sediment_db(cache_dir=os.environ['UACPY_INSTALL_CACHE_DIR'], verbose=True)"; then
+            echo -e "${GREEN}✓ Sediment grain-size DB ready → ${dir}${NC}"; return 0
         fi
         echo -e "${YELLOW}◐ Automatic sediment download failed.${NC}"
     else
@@ -1571,15 +1729,18 @@ download_sediment() {
 
 download_emodnet() {
     local dir="${DATA_CACHE_DIR}/emodnet"; mkdir -p "$dir"
-    if [[ "$FORCE" != "1" && -s "${dir}/seabed_substrate.pkl" ]]; then
-        echo -e "${GREEN}✓ EMODnet seabed substrate present in ${dir}${NC}"; return 0
+    # .npz, not the .pkl this used to be: the index was unpickled on every read,
+    # which runs whatever code the file contains. A cache still holding the .pkl
+    # must fall through and rebuild — emodnet_local refuses to read it.
+    if [[ "$FORCE" != "1" && -s "${dir}/seabed_substrate.npz" ]]; then
+        echo -e "${GREEN}✓ EMODnet seabed substrate already cached → ${dir}${NC}"; return 0
     fi
     # EMODnet Geology seabed substrate (Folk 5cl, 1:1M, CC-BY) is paged from the
     # public WFS and stored as a local polygon index by emodnet_local.
     if python3 -c "import uacpy.data.emodnet_local" >/dev/null 2>&1; then
         echo -e "${BLUE}Downloading EMODnet seabed substrate (European seas)...${NC}"
-        if python3 -c "from uacpy.data import emodnet_local; emodnet_local.download_emodnet_db(cache_dir='${dir}', verbose=True)"; then
-            echo -e "${GREEN}✓ EMODnet seabed substrate ready${NC}"; return 0
+        if UACPY_INSTALL_CACHE_DIR="$dir" python3 -c "import os; from uacpy.data import emodnet_local; emodnet_local.download_emodnet_db(cache_dir=os.environ['UACPY_INSTALL_CACHE_DIR'], verbose=True)"; then
+            echo -e "${GREEN}✓ EMODnet seabed substrate ready → ${dir}${NC}"; return 0
         fi
         echo -e "${YELLOW}◐ Automatic EMODnet download failed.${NC}"
     else
@@ -1593,13 +1754,18 @@ download_emodnet() {
 
 download_coastline() {
     local dir="${DATA_CACHE_DIR}/coastline"; mkdir -p "$dir"
-    if [[ "$FORCE" != "1" && -s "${dir}/ne_50m_land.geojson" ]]; then
-        echo -e "${GREEN}✓ Coastline polygons present in ${dir}${NC}"; return 0
+    # All three resolutions, or the component rebuilds: an interrupted run
+    # can leave one file of the set, and a one-file check would accept that
+    # partial set as cached on every later install.
+    if [[ "$FORCE" != "1" && -s "${dir}/ne_110m_land.geojson" \
+          && -s "${dir}/ne_50m_land.geojson" \
+          && -s "${dir}/ne_10m_land.geojson" ]]; then
+        echo -e "${GREEN}✓ Coastline polygons already cached → ${dir}${NC}"; return 0
     fi
     if python3 -c "import uacpy.visualization.basemap" >/dev/null 2>&1; then
         echo -e "${BLUE}Downloading Natural Earth coastline (public domain)...${NC}"
-        if python3 -c "from uacpy.visualization.basemap import download_coastline; download_coastline(cache_dir='${dir}', verbose=True)"; then
-            echo -e "${GREEN}✓ Coastline polygons ready${NC}"; return 0
+        if UACPY_INSTALL_CACHE_DIR="$dir" python3 -c "import os; from uacpy.visualization.basemap import download_coastline; download_coastline(cache_dir=os.environ['UACPY_INSTALL_CACHE_DIR'], verbose=True)"; then
+            echo -e "${GREEN}✓ Coastline polygons ready → ${dir}${NC}"; return 0
         fi
         echo -e "${YELLOW}◐ Automatic coastline download failed.${NC}"
     else
@@ -1614,7 +1780,7 @@ download_coastline() {
 download_globsed() {
     local dir="${DATA_CACHE_DIR}/globsed"; mkdir -p "$dir"
     if [[ "$FORCE" != "1" && -s "${dir}/GlobSed-v3.nc" ]]; then
-        echo -e "${GREEN}✓ GlobSed grid present in ${dir}${NC}"; return 0
+        echo -e "${GREEN}✓ GlobSed grid already cached → ${dir}${NC}"; return 0
     fi
     # curl, not python: NCEI throttles urllib to a trickle but serves curl fast.
     echo -e "${BLUE}Downloading GlobSed v3 sediment thickness (~11 MB)...${NC}"
@@ -1624,18 +1790,23 @@ download_globsed() {
         NOTE_DATA="${NOTE_DATA} globsed:failed"; return 1
     fi
     mv -f "$tmp" "${dir}/GlobSed-v3.nc"
-    echo -e "${GREEN}✓ GlobSed grid ready${NC}"; return 0
+    echo -e "${GREEN}✓ GlobSed grid ready → ${dir}${NC}"; return 0
 }
 
 download_crust1() {
     local dir="${DATA_CACHE_DIR}/crust1"; mkdir -p "$dir"
-    if [[ "$FORCE" != "1" && -s "${dir}/crust1.bnds" ]]; then
-        echo -e "${GREEN}✓ CRUST1.0 grids present in ${dir}${NC}"; return 0
+    # All four grids, or the component rebuilds: extraction writes them
+    # one by one, so an interrupted run can leave a partial set that a
+    # one-file check would accept as cached forever.
+    if [[ "$FORCE" != "1" && -s "${dir}/crust1.bnds" \
+          && -s "${dir}/crust1.vp" && -s "${dir}/crust1.vs" \
+          && -s "${dir}/crust1.rho" ]]; then
+        echo -e "${GREEN}✓ CRUST1.0 grids already cached → ${dir}${NC}"; return 0
     fi
     if python3 -c "import uacpy.data.crust1_local" >/dev/null 2>&1; then
         echo -e "${BLUE}Downloading CRUST1.0 layered crustal model (~1 MB, no formal licence)...${NC}"
-        if python3 -c "from uacpy.data import crust1_local; crust1_local.download_crust1_db(cache_dir='${dir}', verbose=True)"; then
-            echo -e "${GREEN}✓ CRUST1.0 grids ready${NC}"; return 0
+        if UACPY_INSTALL_CACHE_DIR="$dir" python3 -c "import os; from uacpy.data import crust1_local; crust1_local.download_crust1_db(cache_dir=os.environ['UACPY_INSTALL_CACHE_DIR'], verbose=True)"; then
+            echo -e "${GREEN}✓ CRUST1.0 grids ready → ${dir}${NC}"; return 0
         fi
         echo -e "${YELLOW}◐ Automatic CRUST1.0 download failed.${NC}"
     else
@@ -1650,14 +1821,14 @@ download_crust1() {
 download_diesing() {
     local dir="${DATA_CACHE_DIR}/diesing"; mkdir -p "$dir"
     if [[ "$FORCE" != "1" && -s "${dir}/lithology_classes.tif" ]]; then
-        echo -e "${GREEN}✓ Diesing lithology map present in ${dir}${NC}"; return 0
+        echo -e "${GREEN}✓ Diesing lithology map already cached → ${dir}${NC}"; return 0
     fi
     # Diesing 2020 global deep-sea seafloor lithology (CC-BY); zip downloaded and
     # the lithology raster extracted by diesing_local (PANGAEA serves urllib fast).
     if python3 -c "import uacpy.data.diesing_local" >/dev/null 2>&1; then
         echo -e "${BLUE}Downloading Diesing 2020 deep-sea lithology (CC-BY, ~40 MB)...${NC}"
-        if python3 -c "from uacpy.data import diesing_local; diesing_local.download_diesing_db(cache_dir='${dir}', verbose=True)"; then
-            echo -e "${GREEN}✓ Diesing lithology map ready${NC}"; return 0
+        if UACPY_INSTALL_CACHE_DIR="$dir" python3 -c "import os; from uacpy.data import diesing_local; diesing_local.download_diesing_db(cache_dir=os.environ['UACPY_INSTALL_CACHE_DIR'], verbose=True)"; then
+            echo -e "${GREEN}✓ Diesing lithology map ready → ${dir}${NC}"; return 0
         fi
         echo -e "${YELLOW}◐ Automatic Diesing download failed.${NC}"
     else
@@ -1672,14 +1843,15 @@ download_diesing() {
 
 download_seaice() {
     local dir="${DATA_CACHE_DIR}/seaice"; mkdir -p "$dir"
-    if [[ "$FORCE" != "1" && -s "${dir}/seaice_climatology.pkl" ]]; then
-        echo -e "${GREEN}✓ Sea-ice climatology present in ${dir}${NC}"; return 0
+    # .npz, not the .pkl this used to be — see download_emodnet.
+    if [[ "$FORCE" != "1" && -s "${dir}/seaice_climatology.npz" ]]; then
+        echo -e "${GREEN}✓ Sea-ice climatology already cached → ${dir}${NC}"; return 0
     fi
     # Builds a monthly climatology from NSIDC Sea Ice Index grids (needs tifffile).
     if python3 -c "import uacpy.data.seaice_local, tifffile" >/dev/null 2>&1; then
         echo -e "${BLUE}Building NSIDC sea-ice monthly climatology (downloads ~120 grids; a few minutes)...${NC}"
-        if python3 -c "from uacpy.data import seaice_local; seaice_local.download_seaice_db(cache_dir='${dir}', verbose=True)"; then
-            echo -e "${GREEN}✓ Sea-ice climatology ready${NC}"; return 0
+        if UACPY_INSTALL_CACHE_DIR="$dir" python3 -c "import os; from uacpy.data import seaice_local; seaice_local.download_seaice_db(cache_dir=os.environ['UACPY_INSTALL_CACHE_DIR'], verbose=True)"; then
+            echo -e "${GREEN}✓ Sea-ice climatology ready → ${dir}${NC}"; return 0
         fi
         echo -e "${YELLOW}◐ Automatic sea-ice build failed.${NC}"
     else
@@ -1694,14 +1866,14 @@ download_seaice() {
 download_glodap() {
     local dir="${DATA_CACHE_DIR}/glodap"; mkdir -p "$dir"
     if [[ "$FORCE" != "1" && -s "${dir}/GLODAPv2.2016b.pHtsinsitutp.nc" ]]; then
-        echo -e "${GREEN}✓ GLODAP pH grid present in ${dir}${NC}"; return 0
+        echo -e "${GREEN}✓ GLODAP pH grid already cached → ${dir}${NC}"; return 0
     fi
     # GLODAPv2.2016b mapped seawater pH (CC-BY); the ~211 MB product tarball is
     # downloaded and only the in-situ pH grid extracted by glodap_local.
     if python3 -c "import uacpy.data.glodap_local" >/dev/null 2>&1; then
         echo -e "${BLUE}Downloading GLODAPv2.2016b mapped pH (CC-BY, ~211 MB tarball)...${NC}"
-        if python3 -c "from uacpy.data import glodap_local; glodap_local.download_glodap_db(cache_dir='${dir}', verbose=True)"; then
-            echo -e "${GREEN}✓ GLODAP pH grid ready${NC}"; return 0
+        if UACPY_INSTALL_CACHE_DIR="$dir" python3 -c "import os; from uacpy.data import glodap_local; glodap_local.download_glodap_db(cache_dir=os.environ['UACPY_INSTALL_CACHE_DIR'], verbose=True)"; then
+            echo -e "${GREEN}✓ GLODAP pH grid ready → ${dir}${NC}"; return 0
         fi
         echo -e "${YELLOW}◐ Automatic GLODAP download failed.${NC}"
     else
@@ -1716,14 +1888,14 @@ download_glodap() {
 download_wind() {
     local dir="${DATA_CACHE_DIR}/wind"; mkdir -p "$dir"
     if [[ "$FORCE" != "1" && -s "${dir}/wind_climatology.npz" ]]; then
-        echo -e "${GREEN}✓ NBS wind climatology present in ${dir}${NC}"; return 0
+        echo -e "${GREEN}✓ NBS wind climatology already cached → ${dir}${NC}"; return 0
     fi
     # Builds a monthly NBS 10 m wind-speed climatology from the CoastWatch ERDDAP
     # monthly grids (needs netCDF4). Public domain.
     if python3 -c "import uacpy.data.wind_local, netCDF4" >/dev/null 2>&1; then
         echo -e "${BLUE}Building NBS wind monthly climatology (downloads ERDDAP grids; a few minutes)...${NC}"
-        if python3 -c "from uacpy.data import wind_local; wind_local.download_wind_db(cache_dir='${dir}', verbose=True)"; then
-            echo -e "${GREEN}✓ NBS wind climatology ready${NC}"; return 0
+        if UACPY_INSTALL_CACHE_DIR="$dir" python3 -c "import os; from uacpy.data import wind_local; wind_local.download_wind_db(cache_dir=os.environ['UACPY_INSTALL_CACHE_DIR'], verbose=True)"; then
+            echo -e "${GREEN}✓ NBS wind climatology ready → ${dir}${NC}"; return 0
         fi
         echo -e "${YELLOW}◐ Automatic wind build failed.${NC}"
     else
@@ -1739,14 +1911,17 @@ download_graw() {
     local dir="${DATA_CACHE_DIR}/graw"; mkdir -p "$dir"
     local out="${dir}/Dataset_S2.nc"
     if [[ "$FORCE" != "1" && -s "$out" ]]; then
-        echo -e "${GREEN}✓ Graw density grid present in ${dir}${NC}"; return 0
+        echo -e "${GREEN}✓ Graw density grid already cached → ${dir}${NC}"; return 0
     fi
     # Graw 2021 predicted global seabed bulk density (Zenodo, CC-BY 4.0, ~37 MB).
     echo -e "${BLUE}Downloading Graw 2021 seabed density grid (~37 MB)...${NC}"
-    if curl -fL --retry 3 -o "$out" "https://zenodo.org/records/3762390/files/Dataset_S2.nc"; then
-        echo -e "${GREEN}✓ Graw density grid ready${NC}"; return 0
+    # Staged .part + robust_curl (the shared download policy): a truncated
+    # final file would pass the -s guard above on every later run.
+    if robust_curl "https://zenodo.org/records/3762390/files/Dataset_S2.nc" "${out}.part"; then
+        mv -f "${out}.part" "$out"
+        echo -e "${GREEN}✓ Graw density grid ready → ${dir}${NC}"; return 0
     fi
-    rm -f "$out"
+    rm -f "${out}.part"
     echo "    Fetch it from Python once uacpy is installed:"
     echo "      python -c \"from uacpy.data import graw_local; graw_local.download_graw_db()\""
     NOTE_DATA="${NOTE_DATA} graw:manual"
@@ -1754,8 +1929,9 @@ download_graw() {
 }
 
 case "$INSTALL_DATA" in
-    all) INSTALL_DATA_NORM="gebco,woa23,sediment,emodnet,coastline,globsed,crust1,diesing,seaice,glodap,wind,graw" ;;
+    all) INSTALL_DATA_NORM="${DATA_IDS// /,}" ;;
     no|"") INSTALL_DATA_NORM="" ;;
+    # Already reduced to known ids by validate_data_selection.
     *) INSTALL_DATA_NORM="$INSTALL_DATA" ;;
 esac
 
@@ -1792,23 +1968,143 @@ if [[ "$BUILD_MODELS" == "1" && "$BELLHOP_VERSION" == "fortran" ]]; then
     NOTE_BELLHOPCUDA="not selected (rerun with --bellhop cxx|cuda)"
 fi
 
-# Decide overall outcome: any "failed" row → failed, otherwise ok.
+# Decide overall outcome: any "failed" row → failed, else any "partial" row →
+# partial, otherwise ok. A component that failed outright is not a warning.
 OVERALL="ok"
 for s in "$STATUS_OALIB" "$STATUS_BELLHOPCUDA" "$STATUS_OASES" \
-         "$STATUS_MPIRAMS" "$STATUS_RAMSURF" "$STATUS_DATA"; do
-    if [[ "$s" == "failed" || "$s" == "partial" ]]; then
+         "$STATUS_MPIRAMS" "$STATUS_RAMSURF" "$STATUS_RAMGEO" \
+         "$STATUS_DATA"; do
+    if [[ "$s" == "failed" ]]; then
+        OVERALL="failed"
+        break
+    elif [[ "$s" == "partial" ]]; then
         OVERALL="partial"
     fi
 done
+
+# -------------------------------------------------------------------
+# Durable build record
+# -------------------------------------------------------------------
+# uacpy/bin/ is gitignored and machine-specific, and the per-run logs live
+# under the mktemp dir allocated at the top of this file — deliberately, since
+# a fixed /tmp name collides between users on a shared machine and can be
+# pre-created as a symlink — which $TMPDIR clears on reboot. So "which
+# compiler, which flags, which commit produced these binaries" has no on-disk
+# answer the next morning, and that is the question a numerical result that
+# will not reproduce on another machine asks first. Write the answer next to
+# the binaries and copy the logs alongside it.
+tool_version() {
+    local tool="$1"
+    if command_exists "$tool"; then
+        "$tool" --version 2>/dev/null | head -1 || true
+    else
+        echo "not installed"
+    fi
+}
+
+# Best-effort throughout, and called with `|| true`: the record is strictly
+# less important than the build it records. Under `set -e` an unwritable
+# BIN_ROOT — a root-owned uacpy/bin/ left by an earlier `sudo ./install.sh`, a
+# read-only checkout, a full disk — would otherwise abort a run in which every
+# component built, skipping the summary and exiting non-zero on a complete
+# install.
+write_build_record() {
+    local info="${BIN_ROOT}/BUILD_INFO.txt"
+    local rc=0
+    ensure_dir "$BIN_ROOT" 2>/dev/null || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        echo -e "${YELLOW}Cannot create ${BIN_ROOT}; build record skipped${NC}"
+        return 0
+    fi
+    # `2>/dev/null` precedes `> "$info"` so a refused output redirect is silent
+    # here and reported by the line below instead of as a bare "Permission
+    # denied"; and the status is captured with `|| rc=$?` rather than tested by
+    # `if !`, which does not see a failed redirect on a compound command.
+    {
+        echo "uacpy build record — written by install.sh"
+        echo "written        : $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+        echo "host           : $(uname -srm)"
+        echo "checkout       : ${SCRIPT_DIR}"
+        echo "outcome        : ${OVERALL}"
+        echo ""
+        echo "[toolchain]"
+        echo "gfortran       : $(tool_version gfortran)"
+        echo "gcc            : $(tool_version gcc)"
+        echo "g++            : $(tool_version g++)"
+        echo "cmake          : $(tool_version cmake)"
+        echo "make           : $(tool_version make)"
+        echo "nvcc           : $(tool_version nvcc)"
+        echo ""
+        echo "[flags]"
+        echo "arch           : ${FORTRAN_ARCH_FLAGS:-<unset>}"
+        echo "OALIB FFLAGS   : ${OALIB_FFLAGS:-<not built>}"
+        echo "mpiramS FFLAGS : ${MPIRAMS_FFLAGS:-<not built>}"
+        echo "ramsurf FFLAGS : ${RAMSURF_FFLAGS:-<not built>}"
+        echo "ramgeo FFLAGS  : ${RAMGEO_FFLAGS:-<not built>}"
+        echo ""
+        echo "[components]"
+        echo "OALIB          : ${STATUS_OALIB}"
+        echo "bellhopcuda    : ${STATUS_BELLHOPCUDA} (${BELLHOP_VERSION:-<unset>})"
+        echo "mpiramS        : ${STATUS_MPIRAMS}"
+        echo "ramsurf        : ${STATUS_RAMSURF}"
+        echo "ramgeo         : ${STATUS_RAMGEO}"
+        echo "OASES          : ${STATUS_OASES}"
+        echo "data cache     : ${STATUS_DATA}"
+        echo ""
+        echo "[provenance]"
+        echo "OASES tarball sha256 (expected): ${OASES_EXPECTED_SHA256:-<not fetched>}"
+        echo "submodules:"
+        if command_exists git && [ -d "${SCRIPT_DIR}/.git" ]; then
+            echo "  HEAD $(git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
+            git -C "$SCRIPT_DIR" submodule status --recursive 2>/dev/null \
+                | sed 's/^/  /' || echo "  (submodule status unavailable)"
+        else
+            echo "  (not a git checkout, or git is not installed)"
+        fi
+        echo ""
+        echo "Vendored-source modifications and their rationale:"
+        echo "  uacpy/third_party/MODIFICATIONS.md"
+    } 2>/dev/null > "$info" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        echo -e "${YELLOW}Cannot write ${info}; build record skipped${NC}"
+        return 0
+    fi
+    BUILD_RECORD_WRITTEN="$info"
+    echo -e "${BLUE}Build record: ${info}${NC}"
+
+    # The logs themselves, copied out of the mktemp dir that a reboot clears.
+    # Staged and swapped: removing the previous copy before a `cp` that is
+    # allowed to fail would leave the user with neither.
+    if [ -d "$BUILD_LOG_DIR" ]; then
+        local staged="${BIN_ROOT}/build_logs.incoming"
+        rm -rf "$staged" 2>/dev/null || true
+        if cp -a "$BUILD_LOG_DIR" "$staged" 2>/dev/null; then
+            rm -rf "${BIN_ROOT}/build_logs" 2>/dev/null || true
+            if mv "$staged" "${BIN_ROOT}/build_logs" 2>/dev/null; then
+                BUILD_LOGS_COPIED="${BIN_ROOT}/build_logs"
+            else
+                BUILD_LOGS_COPIED="$staged"
+            fi
+        else
+            rm -rf "$staged" 2>/dev/null || true
+        fi
+    fi
+}
+
+write_build_record || true
 
 if [[ "$OVERALL" == "ok" ]]; then
     echo -e "${GREEN}============================================${NC}"
     echo -e "${GREEN}  UACPY installation completed${NC}"
     echo -e "${GREEN}============================================${NC}"
-else
+elif [[ "$OVERALL" == "partial" ]]; then
     echo -e "${YELLOW}============================================${NC}"
     echo -e "${YELLOW}  UACPY installation finished with warnings${NC}"
     echo -e "${YELLOW}============================================${NC}"
+else
+    echo -e "${RED}============================================${NC}"
+    echo -e "${RED}  UACPY installation FAILED${NC}"
+    echo -e "${RED}============================================${NC}"
 fi
 echo ""
 echo "Component summary:"
@@ -1822,7 +2118,17 @@ print_status_row "Offline data cache" "$STATUS_DATA"      "$NOTE_DATA"
 echo ""
 echo -e "${BLUE}Notes:${NC}"
 echo "  - OALIB row covers Bellhop (Fortran), Kraken, KrakenC, Bounce, Scooter, SPARC, KrakenField."
-echo "  - Per-build logs: /tmp/oalib_build.log /tmp/oases_build.log /tmp/mpirams_build.log /tmp/ramsurf_build.log"
+echo "  - Per-build logs (this run): ${BUILD_LOG_DIR}/{oalib,oases,mpirams,ramsurf,ramgeo}_build.log"
+if [[ -n "$BUILD_LOGS_COPIED" ]]; then
+    echo "  - Copied durably to: ${BUILD_LOGS_COPIED}/"
+else
+    echo "  - Not copied durably: \$TMPDIR above is cleared on reboot."
+fi
+if [[ -n "$BUILD_RECORD_WRITTEN" ]]; then
+    echo "  - Build record: ${BUILD_RECORD_WRITTEN}"
+else
+    echo "  - Build record: not written (${BIN_ROOT} is not writable)."
+fi
 echo ""
 echo "Quick test:"
 echo "  cd uacpy && python -c \"import uacpy; print(uacpy.__version__)\""
@@ -1830,7 +2136,7 @@ echo "  python uacpy/examples/example_01_basic_shallow_water.py"
 echo ""
 
 if [[ "$OVERALL" != "ok" ]]; then
-    echo -e "${RED}One or more components failed/partial. Exiting non-zero.${NC}"
+    echo -e "${RED}One or more components ${OVERALL}. Exiting non-zero.${NC}"
     exit 1
 fi
 exit 0

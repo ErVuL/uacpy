@@ -15,13 +15,23 @@ single `BoundaryProperties` was used.
 """
 
 import copy as _copy
+import warnings
+
 import numpy as np
 from typing import List, Optional
 from dataclasses import dataclass
 
 from uacpy.core.exceptions import ConfigurationError
-from uacpy.core._carrier_validate import _require_strictly_increasing
-from uacpy.core.bottom import BoundaryProperties
+from uacpy.core.constants import DECK_RANGE_RESOLUTION_M
+from uacpy.core._grid import _nearest_index_on_axis
+from uacpy.core._carrier_validate import (
+    _require_finite, _require_non_negative, _require_positive,
+    _require_strictly_increasing, _require_attenuation_in_range,
+    _dedupe_provenance,
+)
+from uacpy.core.bottom import (
+    BoundaryProperties, _reduce_boundaries, _PARAMETER_FREE_TYPES,
+)
 
 
 _SURFACE_DELEGATED = frozenset({
@@ -29,8 +39,15 @@ _SURFACE_DELEGATED = frozenset({
     'shear_speed', 'shear_attenuation', 'grain_size_phi', 'reflection_file',
 })
 
+# Delegated fields that define what kind of boundary a node is. A write to one
+# cannot be validated field-by-field (the construction rules couple it to the
+# other fields), so the proxy refuses it instead of storing an unvalidated
+# node.
+_SURFACE_TYPE_FIELDS = frozenset({'acoustic_type', 'reflection_file'})
 
-@dataclass
+
+# eq=False: a dataclass __eq__ over ndarray fields raises; compare by identity.
+@dataclass(eq=False)
 class Surface:
     """Surface acoustic properties, optionally range-dependent.
 
@@ -41,6 +58,27 @@ class Surface:
     ranges : ndarray, shape (N,), optional
         Range axis in metres for a range-dependent surface; ``None`` for a
         single uniform surface.
+
+    Notes
+    -----
+    `Surface` and :class:`~uacpy.core.bottom.Bottom` expose their nodes
+    through different mechanisms, by design. A surface node *is* a
+    :class:`BoundaryProperties`, so `Surface` delegates attribute access
+    (``surface.roughness`` and the other ``BoundaryProperties`` fields)
+    through ``__getattr__`` / ``__setattr__`` — a uniform `Surface` is a
+    drop-in for a single ``BoundaryProperties``. A `Bottom`
+    node is a whole :class:`SeabedColumn` (layers over a half-space), for
+    which single-attribute delegation is ill-defined, so `Bottom` instead
+    exposes explicit aggregate views (``halfspace_sound_speed``,
+    ``acoustic_type``, …).
+
+    :meth:`at` and :meth:`isel` return a **copy**, matching `Bottom`: a
+    result is always safe to mutate and never writes back through to the
+    carrier. Delegation is asymmetric: a delegated read comes from the
+    r = 0 node, while a delegated write propagates to **every** node — a
+    uniform broadcast that flattens any range dependence, and warns when
+    the surface carries more than one node. ``.properties[i]`` addresses
+    a single node in place.
     """
 
     properties: List[BoundaryProperties]
@@ -61,33 +99,37 @@ class Surface:
                 raise ConfigurationError(
                     f"Surface: ranges ({self.ranges.size}) and properties "
                     f"({len(self.properties)}) must have the same length.")
-            if np.any(self.ranges < 0):
-                raise ConfigurationError(
-                    f"Surface: ranges must be non-negative (m); got "
-                    f"{self.ranges.tolist()}")
+            _require_non_negative(self.ranges, "Surface.ranges", hint="metres")
             if self.ranges.size > 1:
-                _require_strictly_increasing(self.ranges, "Surface.ranges")
+                _require_strictly_increasing(
+                    self.ranges, "Surface.ranges", min_step=DECK_RANGE_RESOLUTION_M)
         elif len(self.properties) != 1:
             raise ConfigurationError(
                 "Surface: multiple boundaries require a matching ranges= axis.")
+
+    def __repr__(self) -> str:
+        if not self.is_range_dependent:
+            return f"Surface({self.properties[0]!r})"
+        r_lo = float(self.ranges[0]) / 1000
+        r_hi = float(self.ranges[-1]) / 1000
+        types = sorted({p.acoustic_type for p in self.properties})
+        return (f"Surface(range-dependent, n={len(self.properties)}, "
+                f"range=[{r_lo:g}, {r_hi:g}] km, types={types})")
 
     @property
     def data_sources(self) -> tuple:
         """Aggregated provenance across surface nodes, de-duplicated by source
         id (harmonised with the leaf carriers and ``env.data_sources``)."""
-        seen, out = set(), []
-        for p in self.properties:
-            for r in getattr(p, 'data_sources', ()) or ():
-                if r.source.id not in seen:
-                    seen.add(r.source.id)
-                    out.append(r)
-        return tuple(out)
+        return _dedupe_provenance(self.properties)
 
     # ── constructors ────────────────────────────────────────────────────────
     @classmethod
     def coerce(cls, value) -> 'Surface':
         """Coerce ``None`` (→ vacuum) / ``BoundaryProperties`` / ``Surface`` /
-        ``[(range, BoundaryProperties), ...]`` into a :class:`Surface`."""
+        ``[(range, BoundaryProperties), ...]`` into a :class:`Surface`.
+
+        ``None`` policy: a uniform pressure-release (vacuum) surface — the
+        physical default for open water."""
         if isinstance(value, Surface):
             return value
         if value is None:
@@ -119,7 +161,13 @@ class Surface:
 
     @property
     def is_range_dependent(self) -> bool:
-        """True when the surface boundary varies with range."""
+        """True when the surface carries more than one range node.
+
+        A structural test (node count on the ranged axis), like
+        ``SoundSpeedProfile`` / ``Bottom``: nodes with identical properties
+        still count as range-dependent. Contrast
+        ``Bathymetry.is_range_dependent`` / ``Altimetry.is_range_dependent``,
+        which test whether the *values* actually vary with range."""
         return self.ranges is not None and len(self.properties) > 1
 
     @property
@@ -129,38 +177,46 @@ class Surface:
         return any((getattr(p, 'shear_speed', 0.0) or 0.0) > 0
                    for p in self.properties)
 
-    # ── grid-library selectors ──────────────────────────────────────────────
+    # ── slicing ─────────────────────────────────────────────────────────────
     def _nearest_index(self, range: float) -> int:
-        if self.ranges is None:
-            return 0
-        return int(np.argmin(np.abs(self.ranges - float(range))))
+        return _nearest_index_on_axis(self.ranges, range)
 
     def at(self, *, range: float) -> BoundaryProperties:
-        """Nearest surface :class:`BoundaryProperties` to ``range`` (m).
+        """Copy of the nearest surface :class:`BoundaryProperties` to ``range``
+        (m).
 
         Always nearest — boundary types cannot be blended, so a `Surface` has
         no ``eval`` (the surface *shape* interpolates via ``Altimetry``).
         Positional counterpart: :meth:`isel`.
+
+        ``range`` must be a finite scalar — a NaN/inf or array-valued label
+        raises ``ConfigurationError``, the same contract ``Field.at`` applies.
         """
-        return self.properties[self._nearest_index(range)]
+        return _copy.deepcopy(self.properties[self._nearest_index(range)])
 
     def isel(self, *, range: int) -> BoundaryProperties:
-        """Surface :class:`BoundaryProperties` at integer index ``range`` — the
-        positional counterpart of :meth:`at`."""
+        """Copy of the surface :class:`BoundaryProperties` at integer index
+        ``range`` — the positional counterpart of :meth:`at`."""
         i = int(range)
         n = len(self.properties)
         if not -n <= i < n:
             raise IndexError(
                 f"Surface.isel: range index {i} out of range for {n} node(s)")
-        return self.properties[i]
+        return _copy.deepcopy(self.properties[i])
 
     def collapse(self, method: str = 'r0') -> 'Surface':
         """Collapse a range-dependent surface to a single uniform boundary.
 
+        Returns ``self`` (not a copy) when the surface is already uniform.
+
         ``'r0'`` / ``'rmax'`` keep the first / last node. ``'mean'`` /
         ``'median'`` numerically average the boundary properties across nodes
         (keeping the r = 0 ``acoustic_type``) — only physical when the nodes
-        share a type, mirroring :meth:`Bottom.select_range` for half-spaces."""
+        share a type, mirroring :meth:`Bottom.select_range` for half-spaces.
+        Uniform ``'file'``/``'precalc'`` nodes collapse to their shared
+        reflection file with only the roughness reduced, and raise when the
+        files differ (tables cannot be blended), again mirroring
+        :meth:`Bottom.select_range`."""
         if not self.is_range_dependent:
             return self
         if method == 'r0':
@@ -181,19 +237,26 @@ class Surface:
                 f"average; got {sorted(types)}. Boundary types cannot be "
                 f"blended — use 'r0' or 'rmax' (e.g. for a marginal ice zone).")
         reduce = np.mean if method == 'mean' else np.median
-
-        def _pull(attr):
-            return float(reduce([getattr(p, attr) for p in self.properties]))
-        p0 = self.properties[0]
-        return Surface(properties=[BoundaryProperties(
-            acoustic_type=p0.acoustic_type,
-            sound_speed=_pull('sound_speed'),
-            density=_pull('density'),
-            attenuation=_pull('attenuation'),
-            shear_speed=_pull('shear_speed'),
-            shear_attenuation=_pull('shear_attenuation'),
-            roughness=_pull('roughness'),
-        )])
+        # A uniform 'file'/'precalc' surface carries no real numbers to
+        # reduce — each node is its reflection-coefficient table. Nodes
+        # sharing one table collapse to that shared spec (roughness, the one
+        # genuine number they carry, is still reduced); distinct tables
+        # cannot be averaged into anything.
+        (the_type,) = types
+        if the_type in ('file', 'precalc'):
+            specs = {p.reflection_file for p in self.properties}
+            if len(specs) > 1:
+                raise ConfigurationError(
+                    f"Surface.collapse({method!r}) cannot average "
+                    f"'{the_type}' nodes with different reflection files "
+                    f"({sorted(specs, key=str)}). Reflection-coefficient "
+                    f"tables cannot be blended — use 'r0' or 'rmax'.")
+            shared = _copy.deepcopy(self.properties[0])
+            shared.roughness = float(
+                reduce([p.roughness for p in self.properties]))
+            return Surface(properties=[shared])
+        return Surface(properties=[
+            _reduce_boundaries(self.properties, reduce)])
 
     def __getattr__(self, name):
         # Uniform-surface compatibility: forward BoundaryProperties reads to the
@@ -202,6 +265,77 @@ class Surface:
             return getattr(self.properties[0], name)
         raise AttributeError(
             f"{type(self).__name__!r} object has no attribute {name!r}")
+
+    def __setattr__(self, name, value):
+        # Writes must follow reads through to the nodes. A plain assignment
+        # would create an instance attribute shadowing ``__getattr__``, so
+        # ``surface.roughness`` would report the new value while ``at()``,
+        # ``collapse()``, the repr and every writer — all of which read
+        # ``properties`` — would keep the previous one.
+        if name in _SURFACE_DELEGATED and 'properties' in self.__dict__:
+            value = self._validate_delegated_write(name, value)
+            if len(self.properties) > 1:
+                warnings.warn(
+                    f"Surface.{name} = {value!r} sets all "
+                    f"{len(self.properties)} range nodes to the same value, "
+                    f"flattening any range dependence. Assign to "
+                    f".properties[i].{name} to write a single node.",
+                    UserWarning, stacklevel=2)
+            for node in self.properties:
+                setattr(node, name, value)
+            return
+        super().__setattr__(name, value)
+
+    def _validate_delegated_write(self, name, value):
+        """Apply the ``BoundaryProperties`` construction rules to a delegated
+        write, so the proxy cannot store a value on the nodes that their
+        constructor would refuse. Returns the value coerced to float."""
+        if name in _SURFACE_TYPE_FIELDS:
+            raise ConfigurationError(
+                f"Surface.{name} cannot be assigned in place: it defines what "
+                f"kind of boundary each node is, and the construction rules "
+                f"couple it to the other fields. Build new "
+                f"BoundaryProperties node(s) (and a Surface from them) "
+                f"instead.")
+        # vacuum/rigid nodes carry no half-space acoustic parameters, so a
+        # delegated write of one is the same conflict the constructor's
+        # explicit-conflict guard rejects. ``roughness`` stays writable — an
+        # interface property every boundary type carries.
+        if name != 'roughness':
+            bare = sorted({p.acoustic_type for p in self.properties
+                           if p.acoustic_type in _PARAMETER_FREE_TYPES})
+            if bare:
+                raise ConfigurationError(
+                    f"Surface.{name} = {value!r}: this surface has "
+                    f"{'/'.join(bare)} node(s), which ignore half-space "
+                    f"acoustic parameters. Build half-space "
+                    f"BoundaryProperties node(s) to give the surface "
+                    f"geoacoustics.")
+        if name == 'grain_size_phi':
+            # ϕ = −log₂(d/mm) is signed (gravel is negative), so the
+            # non-negative rule the other fields take does not apply — but
+            # ``None`` is the field's own unset value and has to survive
+            # ``float()``, and a NaN/inf ϕ propagates into
+            # ``grain_size_to_geoacoustics`` as a NaN density or a silent
+            # clamp. Range is left to that converter, which warns naming the
+            # model's valid interval.
+            if value is None:
+                return None
+            value = float(value)
+            _require_finite(value, "Surface grain_size_phi", hint="ϕ units")
+            return value
+        value = float(value)
+        if name == 'density':
+            _require_positive(value, "Surface density", hint="g/cm^3")
+        elif name == 'sound_speed' and any(
+                p.acoustic_type == 'half-space' for p in self.properties):
+            _require_positive(value, "Surface sound_speed on a half-space",
+                              hint="m/s")
+        else:
+            _require_non_negative(value, f"Surface {name}")
+        if name in ('attenuation', 'shear_attenuation'):
+            _require_attenuation_in_range(value, f"Surface {name}")
+        return value
 
     def copy(self) -> 'Surface':
         """Deep copy (symmetric with ``Source`` / ``Receiver`` / the other

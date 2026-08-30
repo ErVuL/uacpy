@@ -11,11 +11,14 @@ FEATURES: ✓ Signal generation  ✓ Chirps and wavelets
 """
 
 import sys
+import os
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Repo root, so ``import uacpy`` resolves from a source checkout.
+sys.path.insert(0, str(Path(__file__).parents[2]))
 
-OUTPUT_DIR = Path(__file__).parent / 'output'
-OUTPUT_DIR.mkdir(exist_ok=True)
+OUTPUT_DIR = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
+                  or Path(__file__).parent / 'output')
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 import numpy as np  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
@@ -42,10 +45,10 @@ def main():
     # LFM chirp
     fs = 10000
     duration = 0.5
-    lfm_sig, t_lfm = lfm_chirp(fmin=100, fmax=1000, duration=duration, sample_rate=fs)
+    t_lfm, lfm_sig = lfm_chirp(fmin=100, fmax=1000, duration=duration, sample_rate=fs)
 
     # HFM chirp
-    hfm_sig, t_hfm = hfm_chirp(fmin=100, fmax=1000, duration=duration, sample_rate=fs)
+    t_hfm, hfm_sig = hfm_chirp(fmin=100, fmax=1000, duration=duration, sample_rate=fs)
 
     # Ricker wavelet
     t_ricker = np.linspace(0, duration, int(fs * duration))
@@ -74,7 +77,7 @@ def main():
     # HFM chirp
     ax = axes[0, 1]
     ax.plot(t_hfm[:500], hfm_sig[:500], 'r-', linewidth=1)
-    ax.set_title('HFM Chirp (1000-100 Hz)', fontweight='bold')
+    ax.set_title('HFM Chirp (100-1000 Hz)', fontweight='bold')
     ax.set_xlabel('Time (s)')
     ax.set_ylabel('Amplitude')
     ax.grid(True, alpha=0.3)
@@ -112,7 +115,8 @@ def main():
     ax.set_xlabel('Frequency (Hz)')
     ax.set_ylabel('Magnitude (dB)')
     ax.grid(True, alpha=0.3)
-    # Set xlim to show relevant frequency range (2x chirp bandwidth)
+    # Twice the sweep's top frequency: shows the 100-1000 Hz band the chirp
+    # occupies plus the roll-off on either side of it.
     ax.set_xlim([0, min(2000, freqs[-1])])
 
     # Constant-Q spectrogram of the LFM chirp (log-frequency, Brown 1991): the

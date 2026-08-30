@@ -17,9 +17,19 @@ from __future__ import annotations
 import numpy as np
 
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.acoustic_signal._signal_validate import require_below_nyquist
 
 _PSK = {"bpsk": 2, "qpsk": 4, "8psk": 8, "16psk": 16}
 _QAM = {"16qam": 16, "64qam": 64, "256qam": 256}
+
+# Symbols per Modulator.demodulate block: the pairwise distance matrix is
+# (block, M) instead of (N, M), so its size is bounded whatever the record
+# length. The peak is 385 MiB for 256-QAM at this block size (measured with
+# tracemalloc), not the 128 MiB of the distance matrix alone: the complex128
+# `block[:, None] - constellation[None, :]` difference is 256 MiB and is live
+# at the same time as the 128 MiB float64 `np.abs` result. 16-QAM peaks at
+# 25 MiB.
+_DEMOD_CHUNK = 1 << 16
 
 
 def _gray(n):
@@ -70,6 +80,40 @@ def constellation(scheme):
     )
 
 
+def _require_binary_bits(caller: str, bits):
+    """Return ``bits`` as a validated 1-D array of 0/1 integers.
+
+    The bit-label arithmetic downstream (``groups @ weights``, trellis column
+    lookup) indexes tables by value, so a -1 bit selects an entry from the
+    END of its table — a silently wrong symbol, not an error. The package's
+    own :func:`~uacpy.acoustic_signal.sequences.mseq` / ``m_sequence`` chips
+    are bipolar ±1 exactly like that; map them back with
+    ``bits = (1 - chips) // 2``. Strings are rejected rather than parsed as
+    numbers.
+    """
+    if isinstance(bits, (str, bytes, bytearray)):
+        raise ConfigurationError(
+            f"{caller}: bits must be a sequence of 0/1 integers, got "
+            f"{type(bits).__name__} {bits!r:.60}; convert text with "
+            f"uacpy.comms.bytes_to_bits(text.encode()) or "
+            f"[int(ch) for ch in bit_string].")
+    try:
+        b = np.asarray(bits, dtype=int).ravel()
+    except (TypeError, ValueError) as exc:
+        raise ConfigurationError(
+            f"{caller}: bits must be a sequence of 0/1 integers "
+            f"({exc}).") from exc
+    bad = b[(b != 0) & (b != 1)]
+    if bad.size:
+        raise ConfigurationError(
+            f"{caller}: bits must be 0/1, got value(s) "
+            f"{np.unique(bad)[:8].tolist()}. A bipolar ±1 sequence (the "
+            f"mseq()/m_sequence() chip convention) must be mapped back "
+            f"first — bits = (1 - chips) // 2 — a -1 label would select "
+            f"a symbol from the wrong end of the table.")
+    return b
+
+
 class Modulator:
     """Bit<->symbol mapper for a Gray-coded constellation.
 
@@ -87,7 +131,7 @@ class Modulator:
 
     def modulate(self, bits):
         """Map a 1-D 0/1 bit array to complex symbols (zero-padded to a whole symbol)."""
-        b = np.asarray(bits, dtype=int).ravel()
+        b = _require_binary_bits("Modulator.modulate", bits)
         bps = self.bits_per_symbol
         if b.size % bps:
             b = np.concatenate([b, np.zeros(bps - b.size % bps, dtype=int)])
@@ -97,26 +141,55 @@ class Modulator:
         return self.constellation[labels]
 
     def demodulate(self, symbols):
-        """Hard minimum-distance decision: complex symbols -> 1-D bit array."""
+        """Hard minimum-distance decision: complex symbols -> 1-D bit array.
+
+        Symbols are processed in blocks of ``_DEMOD_CHUNK``, so the pairwise
+        distance matrix stays a bounded ``(block, M)`` whatever the record
+        length. Each symbol's decision is independent, so the result is
+        identical to the one-shot computation.
+        """
         s = np.asarray(symbols, dtype=complex).ravel()
-        d = np.abs(s[:, None] - self.constellation[None, :])
-        labels = np.argmin(d, axis=1)
+        labels = np.empty(s.size, dtype=np.intp)
+        for i in range(0, s.size, _DEMOD_CHUNK):
+            block = s[i:i + _DEMOD_CHUNK]
+            d = np.abs(block[:, None] - self.constellation[None, :])
+            labels[i:i + _DEMOD_CHUNK] = np.argmin(d, axis=1)
         bps = self.bits_per_symbol
         bits = ((labels[:, None] >> np.arange(bps - 1, -1, -1)) & 1)
         return bits.ravel()
+
+def _require_power_of_two_m(caller: str, M):
+    """Reject an M-ary order that is not a power of two >= 2.
+
+    ``bits_per_symbol`` is ``floor(log2(M))``, so a non-power-of-two M silently
+    modulates onto only ``2**floor(log2(M))`` of the M phase points — M = 12
+    uses 8 phases spaced 2*pi/12, covering two thirds of the circle at a
+    smaller minimum distance than 8-DPSK, with no indication. M <= 1 divides by
+    a zero bits-per-symbol. :func:`fsk_modulate` makes the same check.
+    """
+    m = int(M)
+    if m < 2 or (m & (m - 1)):
+        raise ConfigurationError(
+            f"{caller}: M must be a power of two >= 2 (got {M!r})")
+
 
 def dpsk_modulate(bits, M: int = 2):
     """Differential M-PSK: encode phase *differences* (no carrier-phase reference).
 
     Robust to slow carrier-phase drift — common in non-coherent UW links.
+    ``M`` must be a power of two >= 2, as in :func:`fsk_modulate`.
     """
-    bits = np.asarray(bits, dtype=int).ravel()
+    bits = _require_binary_bits("dpsk_modulate", bits)
+    _require_power_of_two_m("dpsk_modulate", M)
     bps = int(np.log2(M))
     if bits.size % bps:
         bits = np.concatenate([bits, np.zeros(bps - bits.size % bps, dtype=int)])
     groups = bits.reshape(-1, bps)
     sym = (groups @ (1 << np.arange(bps - 1, -1, -1)))
-    dphi = 2 * np.pi * np.array([_gray(int(s)) for s in sym]) / M
+    # Gray constellation: bit-label `l` sits on phase point `p` with gray(p) = l,
+    # the same labelling as the coherent `_psk_lut`.
+    point = {_gray(p): p for p in range(M)}
+    dphi = 2 * np.pi * np.array([point[int(s)] for s in sym]) / M
     phase = np.cumsum(np.concatenate([[0.0], dphi]))
     return np.exp(1j * phase)  # length len(sym)+1 (incl. reference symbol)
 
@@ -124,13 +197,13 @@ def dpsk_modulate(bits, M: int = 2):
 def dpsk_demodulate(symbols, M: int = 2):
     """Inverse of :func:`dpsk_modulate` (differential phase detection)."""
     s = np.asarray(symbols, dtype=complex).ravel()
+    _require_power_of_two_m("dpsk_demodulate", M)
     if s.size < 2:
         return np.zeros(0, dtype=int)
     dphi = np.angle(s[1:] * np.conj(s[:-1])) % (2 * np.pi)
     sym = np.round(dphi / (2 * np.pi / M)).astype(int) % M
     bps = int(np.log2(M))
-    inv = np.array([_gray(i) for i in range(M)])
-    label = np.array([np.where(inv == v)[0][0] for v in sym])
+    label = np.array([_gray(int(p)) for p in sym])
     bits = ((label[:, None] >> np.arange(bps - 1, -1, -1)) & 1)
     return bits.ravel()
 
@@ -145,35 +218,76 @@ def fsk_modulate(bits, frequencies, symbol_dur_s: float, sample_rate: float):
     M = f.size
     if M < 2 or (M & (M - 1)):
         raise ConfigurationError(
-            "fsk_modulate: number of freqs must be a power of two >= 2"
+            f"fsk_modulate: number of freqs must be a power of two >= 2; "
+            f"got {M}"
         )
+    require_below_nyquist(f, sample_rate, "fsk_modulate", "tone(s)",
+                          "the sampled tones alias")
+    dur = float(symbol_dur_s)
+    if not (np.isfinite(dur) and dur > 0):
+        raise ConfigurationError(
+            f"fsk_modulate: symbol_dur_s must be > 0 s and finite "
+            f"(got {symbol_dur_s!r}).")
     bps = int(np.log2(M))
-    b = np.asarray(bits, dtype=int).ravel()
+    b = _require_binary_bits("fsk_modulate", bits)
     if b.size % bps:
         b = np.concatenate([b, np.zeros(bps - b.size % bps, dtype=int)])
     sym = b.reshape(-1, bps) @ (1 << np.arange(bps - 1, -1, -1))
     if sym.size == 0:
         return np.zeros(0, dtype=float)
-    n = int(round(symbol_dur_s * sample_rate))
+    n = int(round(dur * float(sample_rate)))
+    if n < 1:
+        raise ConfigurationError(
+            f"fsk_modulate: symbol_dur_s ({dur:g} s) x sample_rate "
+            f"({float(sample_rate):g} Hz) is {dur * float(sample_rate):g} "
+            f"samples per symbol, which rounds to zero samples; require "
+            f"symbol_dur_s >= 0.5/sample_rate.")
     t = np.arange(n) / float(sample_rate)
     return np.concatenate([np.cos(2 * np.pi * f[int(s)] * t) for s in sym])
 
 
 def fsk_demodulate(signal, frequencies, symbol_dur_s: float, sample_rate: float):
-    """Non-coherent M-FSK detection (per-symbol max tone energy) -> bit array."""
+    """Non-coherent M-FSK detection (per-symbol max tone energy) -> bit array.
+
+    A trailing partial symbol (fewer than one symbol period of samples) is
+    dropped, so a signal shorter than one symbol demodulates to an empty
+    bit array.
+    """
     f = np.atleast_1d(np.asarray(frequencies, dtype=float))
     M = f.size
     if M < 2 or (M & (M - 1)):
         raise ConfigurationError(
-            "fsk_demodulate: number of freqs must be a power of two >= 2"
+            f"fsk_demodulate: number of freqs must be a power of two >= 2; "
+            f"got {M}"
         )
+    # The detector builds its correlation bank from the same two quantities the
+    # modulator validates, so it carries the same two guards. Without them an
+    # above-Nyquist tone decodes its aliased image to plausible-looking bits,
+    # and a non-finite, negative or subsample symbol duration reaches the
+    # ``x.size // n`` below as NaN, a negative count (empty bit array) or zero
+    # (ZeroDivisionError).
+    require_below_nyquist(
+        f, sample_rate, "fsk_demodulate", "tone(s)",
+        "the correlation bank matches their aliased images rather than the "
+        "tones themselves")
+    dur = float(symbol_dur_s)
+    if not (np.isfinite(dur) and dur > 0):
+        raise ConfigurationError(
+            f"fsk_demodulate: symbol_dur_s must be > 0 s and finite "
+            f"(got {symbol_dur_s!r}).")
     bps = int(np.log2(M))
-    n = int(round(symbol_dur_s * sample_rate))
+    n = int(round(dur * float(sample_rate)))
+    if n < 1:
+        raise ConfigurationError(
+            f"fsk_demodulate: symbol_dur_s ({dur:g} s) x sample_rate "
+            f"({float(sample_rate):g} Hz) is {dur * float(sample_rate):g} "
+            f"samples per symbol, which rounds to zero samples; require "
+            f"symbol_dur_s >= 0.5/sample_rate.")
     x = np.asarray(signal, dtype=float)
     nsym = x.size // n
     t = np.arange(n) / float(sample_rate)
     bank = np.exp(-2j * np.pi * np.outer(f, t))  # (M, n)
-    bits = []
+    bits: list[int] = []
     for k in range(nsym):
         seg = x[k * n:(k + 1) * n]
         energy = np.abs(bank @ seg)

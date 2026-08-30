@@ -4,7 +4,7 @@ Every model writes its primary output paths (and ``prt_file``) into
 ``result.metadata`` only when the work dir survives the run, i.e. when
 ``cleanup=False``. With ``cleanup=True`` the work dir is wiped after
 the wrapper returns and the ``*_file`` keys are absent from metadata
-— the absence is the documented signal (DOCUMENTATION.md §6) that
+— the absence is the documented signal (DOCUMENTATION.md §8) that
 nothing is on disk to read.
 
 These tests use representative models that don't require multi-second
@@ -12,6 +12,8 @@ binary runs at slow scale.
 """
 
 import os
+import re
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -31,6 +33,21 @@ def _basic_setup():
         depths=np.linspace(10, 90, 3),
         ranges=np.linspace(500, 2500, 4),
     )
+    return env, src, rcv
+
+
+def _rough_setup():
+    """The geometry OASSP scatters in: a rough seabed, and a source whose
+    frequency sits inside the ``freq_min``/``freq_max`` band the realization
+    is synthesised over."""
+    from uacpy.tests.conftest import make_pekeris
+    env = make_pekeris(
+        bathymetry=128.0,
+        ssp=uacpy.SoundSpeedProfile(depths=[0, 128], data=[1500, 1500]),
+        sound_speed=2300.0, density=2.65, roughness=0.5)
+    src = uacpy.Source(depths=100.0, frequencies=500.0)
+    rcv = uacpy.Receiver(depths=np.linspace(60.0, 127.0, 2),
+                         ranges=np.array([500.0, 1000.0]))
     return env, src, rcv
 
 
@@ -70,28 +87,28 @@ def test_bellhop_paths_absent_when_cleanup_true():
 
 
 # ----------------------------------------------------------------------
-# Kraken (modes solver)
+# Kraken — the ``.mod`` the mode solver writes.
 # ----------------------------------------------------------------------
 
 @pytest.mark.requires_binary
 def test_kraken_paths_present_when_cleanup_false(tmp_path):
     env, src, rcv = _basic_setup()
     kr = Kraken(verbose=False, work_dir=tmp_path)
-    modes = kr.run(env, src, rcv)
-    assert 'mod_file' in modes.metadata
-    assert os.path.exists(modes.metadata['mod_file'])
+    field = kr.run(env, src, rcv)
+    assert 'mod_file' in field.metadata
+    assert os.path.exists(field.metadata['mod_file'])
 
 
 @pytest.mark.requires_binary
 def test_kraken_paths_absent_when_cleanup_true():
     env, src, rcv = _basic_setup()
     kr = Kraken(verbose=False)
-    modes = kr.run(env, src, rcv)
-    assert 'mod_file' not in modes.metadata
+    field = kr.run(env, src, rcv)
+    assert 'mod_file' not in field.metadata
 
 
 # ----------------------------------------------------------------------
-# Bounce (the original case)
+# Bounce (publishes a .brc rather than a field)
 # ----------------------------------------------------------------------
 
 @pytest.mark.requires_binary
@@ -118,11 +135,13 @@ def test_bounce_paths_absent_when_no_work_dir():
 
 
 # ----------------------------------------------------------------------
-# KrakenField (modes + field pipeline)
+# Kraken — the ``.shd`` field.exe writes. ``run()`` is the whole
+# modes-then-field pipeline, so it is the same call as above and one run
+# publishes both paths.
 # ----------------------------------------------------------------------
 
 @pytest.mark.requires_binary
-def test_krakenfield_paths_present_when_cleanup_false(tmp_path):
+def test_kraken_shd_paths_present_when_cleanup_false(tmp_path):
     env, src, rcv = _basic_setup()
     kf = Kraken(verbose=False, work_dir=tmp_path)
     field = kf.run(env, src, rcv)
@@ -131,7 +150,7 @@ def test_krakenfield_paths_present_when_cleanup_false(tmp_path):
 
 
 @pytest.mark.requires_binary
-def test_krakenfield_paths_absent_when_cleanup_true():
+def test_kraken_shd_paths_absent_when_cleanup_true():
     env, src, rcv = _basic_setup()
     kf = Kraken(verbose=False)
     field = kf.run(env, src, rcv)
@@ -162,16 +181,15 @@ def test_sparc_paths_present_when_cleanup_false(tmp_path):
                          ranges=np.linspace(500, 1500, 3))
     sp = SPARC(verbose=False, work_dir=tmp_path)
     field = sp.run(env, src, rcv)
-    # SPARC writes per-depth/.rts under base_name; one of grn/rts should
-    # be picked up by the helper at the wrapper base_name.
-    assert (
-        'rts_file' in field.metadata
-        or 'grn_file' in field.metadata
-        or 'prt_file' in field.metadata
-    ), (
-        f"Expected at least one SPARC output path in metadata; "
+    # output_mode='R' (the default) writes the received time series to the
+    # first run's ``.rts``; that is SPARC's primary output and must be the
+    # published path — an any-of-three OR here was satisfiable by a run
+    # that only attached the .prt diagnostics.
+    assert 'rts_file' in field.metadata, (
+        f"Expected the SPARC .rts path in metadata; "
         f"got keys: {list(field.metadata)}"
     )
+    assert os.path.exists(field.metadata['rts_file'])
 
 
 @pytest.mark.slow
@@ -248,6 +266,50 @@ def test_bounce_pinned_work_dir_with_cleanup_true_is_wiped(tmp_path):
 
 
 @pytest.mark.requires_binary
+def test_bellhop_second_run_does_not_inherit_first_output(tmp_path):
+    """Bellhop writes exactly one of .shd/.arr/.ray per run under a fixed
+    base name, so a second run into the same pinned work_dir must neither
+    advertise nor keep the first run's primary output."""
+    env, src, rcv = _basic_setup()
+    work = tmp_path / 'mode_switch'
+    bh = Bellhop(verbose=False, work_dir=work, cleanup=False)
+
+    field = bh.run(env, src, rcv)
+    assert 'shd_file' in field.metadata
+    shd_path = field.metadata['shd_file']
+
+    arrivals = bh.run(env, src, rcv, run_mode=uacpy.RunMode.ARRIVALS)
+    assert 'arr_file' in arrivals.metadata
+    assert 'shd_file' not in arrivals.metadata, (
+        "ARRIVALS result inherited the previous run's pressure-field path"
+    )
+    assert 'ray_file' not in arrivals.metadata
+    assert not os.path.exists(shd_path), (
+        "the previous run's .shd survived into this run's work_dir"
+    )
+
+
+@pytest.mark.requires_binary
+def test_bellhop_broadband_records_its_scratch(tmp_path):
+    """The broadband paths build the result from an inner ARRIVALS run; with
+    the scratch surviving (cleanup=False) that directory must stay reachable
+    from the returned Field, not leak unreferenced."""
+    env, src, rcv = _basic_setup()
+    bh = Bellhop(verbose=False, cleanup=False)
+    hf = bh.run(env, src, rcv, run_mode=uacpy.RunMode.BROADBAND)
+    assert 'arr_file' in hf.metadata
+    assert os.path.exists(hf.metadata['arr_file'])
+
+    ts = bh.run(
+        env, src, rcv, run_mode=uacpy.RunMode.TIME_SERIES,
+        source_waveform=np.sin(2 * np.pi * 50 * np.arange(256) / 1000.0),
+        sample_rate=1000.0,
+    )
+    assert 'arr_file' in ts.metadata
+    assert os.path.exists(ts.metadata['arr_file'])
+
+
+@pytest.mark.requires_binary
 def test_pinned_work_dir_cleanup_false_dir_persists(tmp_path):
     """Negative control: work_dir pinned + cleanup=False (default for
     pinned dir) ⇒ directory survives the call. Sanity-check the dual."""
@@ -274,13 +336,13 @@ def _registered_keys_for(model_name: str) -> set:
 # (model_cls, run_kwargs) — keep small fast runs; covers the path that
 # actually attaches metadata keys. ``work_dir`` is pinned so the
 # ``_attach_output_paths`` branch fires (cleanup=True suppresses it).
-_OASES_MODELS = {'OAST', 'OASN', 'OASR', 'OASP'}
+_OASES_MODELS = {'OAST', 'OASN', 'OASR', 'OASP', 'OASSP'}
 
 
 def _drift_cases():
     from uacpy.models import (
         Bellhop, Bounce, Kraken, RAM, Scooter, SPARC,
-        OAST, OASR, OASP,
+        OAST, OASN, OASR, OASP, OASSP,
     )
     raw = [
         ('Bellhop', Bellhop, {}, {}),
@@ -291,8 +353,15 @@ def _drift_cases():
         ('Scooter', Scooter, {}, {}),
         ('SPARC',   SPARC,   dict(n_t_out=256), {}),
         ('OAST',    OAST,    {}, {}),
+        ('OASN',    OASN,    dict(surface_noise_level=70.0),
+         dict(run_mode=uacpy.RunMode.COVARIANCE)),
         ('OASR',    OASR,    {}, dict(run_mode=uacpy.RunMode.REFLECTION)),
         ('OASP',    OASP,    {}, dict(run_mode=uacpy.RunMode.BROADBAND)),
+        ('OASSP',   OASSP,   dict(correlation_length=5.0,
+                                  spectral_exponent=2.5,
+                                  n_time_samples=256,
+                                  freq_min=400.0, freq_max=600.0),
+         dict(run_mode=uacpy.RunMode.BROADBAND)),
     ]
     # OASES models need their separately-licensed binaries; tag those params
     # so ``pytest -m 'not requires_oases'`` deselects them at collection.
@@ -303,6 +372,32 @@ def _drift_cases():
         )
         for name, cls, ce, re in raw
     ]
+
+
+#: The one wrapper whose drift gate lives elsewhere. OASS runs a two-binary
+#: chain (an OAST producer, then OASS), so its case is built from the OASS
+#: fixtures in ``test_oass.py`` (``test_every_metadata_key_is_documented``)
+#: rather than from ``_basic_setup``.
+_DRIFT_GATED_ELSEWHERE = {'OASS'}
+
+
+def test_every_wrapper_has_a_metadata_drift_gate():
+    """``_DOCUMENTED_METADATA`` is hand-maintained, so a wrapper with no case
+    here can attach any key it likes and nothing says so.
+
+    The model set is derived from ``uacpy.models.__all__`` rather than listed
+    again, because a list is exactly what a thirteenth wrapper walks past.
+    This runs without a binary: it compares names, not results."""
+    from uacpy.tests.conftest import concrete_model_classes
+
+    gated = {case.values[0] for case in _drift_cases()} | _DRIFT_GATED_ELSEWHERE
+    missing = sorted(set(concrete_model_classes()) - gated)
+    assert not missing, (
+        f"wrapper(s) {missing} attach result.metadata with no drift gate; add "
+        f"a case to _drift_cases() (or to _DRIFT_GATED_ELSEWHERE with the "
+        f"test that covers it)")
+    stale = sorted(gated - set(concrete_model_classes()))
+    assert not stale, f"gate names a model uacpy.models no longer exports: {stale}"
 
 
 @pytest.mark.requires_binary
@@ -326,6 +421,11 @@ def test_metadata_keys_are_all_documented(
     if name == 'OASR':
         # OASR needs an elastic bottom for a meaningful reflection result.
         env = _elastic_env()
+    if name == 'OASSP':
+        # OASSP scatters off a rough interface; a smooth seabed leaves it
+        # nothing to scatter from, and the source has to sit in the
+        # realization's own frequency band.
+        env, src, rcv = _rough_setup()
     work = tmp_path / f'{name.lower()}_drift'
     model = model_cls(work_dir=work, cleanup=False, verbose=False, **ctor_extras)
     result = model.run(env, src, rcv, **run_extras)
@@ -338,4 +438,41 @@ def test_metadata_keys_are_all_documented(
         f"that are not registered in _DOCUMENTED_METADATA. "
         f"Add an entry per (model, key) in uacpy/core/results.py or fix the "
         f"wrapper to drop the unregistered key."
+    )
+
+
+def test_documented_metadata_has_no_dead_rows():
+    """Reverse direction: every registered ``(model, key)`` must be written
+    somewhere in the source tree.
+
+    ``test_metadata_keys_are_all_documented`` only checks emitted → registered,
+    so a row for a key no wrapper writes any more is invisible to it. This
+    static scan closes that gap without needing a binary: it greps the emitters
+    (``uacpy/models``, ``uacpy/io``, ``uacpy/core``, ``uacpy/sonar``) for the
+    two forms a key is written in — ``key=value`` (most keys reach metadata as
+    keyword arguments to ``_result_kwargs``) and a quoted ``'key'`` (dict
+    literals, ``metadata['key'] = …``, ``primary_files``).
+    """
+    from uacpy.core.results import _DOCUMENTED_METADATA, _UNIVERSAL_METADATA
+
+    root = Path(uacpy.__file__).parent
+    registry = root / 'core' / 'results' / '_base.py'
+    sources = [
+        p for sub in ('models', 'io', 'core', 'sonar')
+        for p in (root / sub).rglob('*.py')
+        if p != registry
+    ]
+    blob = '\n'.join(p.read_text(encoding='utf-8') for p in sources)
+
+    def _written(key: str) -> bool:
+        k = re.escape(key)
+        return bool(re.search(rf'\b{k}\s*=', blob)
+                    or re.search(rf'''['"]{k}['"]''', blob))
+
+    keys = {k for (_m, k) in _DOCUMENTED_METADATA} | set(_UNIVERSAL_METADATA)
+    dead = sorted(k for k in keys if not _written(k))
+    assert not dead, (
+        f"_DOCUMENTED_METADATA registers key(s) {dead} that nothing in "
+        f"uacpy/{{models,io,core,sonar}} writes. Delete the stale row(s), or "
+        f"fix the emitter that was supposed to attach them."
     )

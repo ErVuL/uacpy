@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.core._warn_frames import USER_FRAME_SKIP
 
 from uacpy.core.results._base import Result
 
@@ -143,14 +146,35 @@ class ReflectionCoefficient(Result):
                 f"ReflectionCoefficient.{who}: frequency= requires a broadband "
                 f"(2-D) reflection coefficient"
             )
+        # Holding the end value matches every other carrier's eval, but it is
+        # not what a solver reading the same table does: RefCoef.f90 sets
+        # R = 0 and phi = 0 both below the table (``:139-140``) and above it
+        # (``:146-147``), killing the ray.
+        # Warn rather than return 0 — a lone carrier with a different
+        # extrapolation rule would be a worse trap, and 0 is AT's kill
+        # convention, not a claim about R at that angle.
+        # ``isel``'s angle is a positional index, not degrees, so the
+        # comparison below is meaningless there.
+        if who != 'isel' and angle is not None and np.size(self.theta):
+            lo, hi = float(np.min(self.theta)), float(np.max(self.theta))
+            a = np.asarray(angle, dtype=float)
+            if np.any(a < lo) or np.any(a > hi):
+                warnings.warn(
+                    f"ReflectionCoefficient.{who}: angle {angle} is outside the "
+                    f"tabulated range {lo:g}-{hi:g} deg; the end value is held "
+                    f"(the returned .theta records the angle actually used). "
+                    f"Acoustics-Toolbox does not hold — "
+                    f"misc/RefCoef.f90:139-140,146-147 sets R = 0 and phi = 0 "
+                    f"outside the table, so a ray at this angle is killed by "
+                    f"the solver rather than given the end value.",
+                    UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+                )
         return angle, frequency
 
     def _build(self, theta, R, phi, freqs) -> "ReflectionCoefficient":
         return ReflectionCoefficient(
             theta=theta, R=R, phi=phi,
-            model=self.model, backend=self.backend,
-            source_depths=self.source_depths,
-            frequencies=freqs, metadata=dict(self.metadata),
+            **dict(self.id_kwargs(), frequencies=freqs),
         )
 
     def _select(self, angle, frequency, *, method) -> "ReflectionCoefficient":
@@ -158,12 +182,16 @@ class ReflectionCoefficient(Result):
         R, phi, theta = self.R, self.phi, self.theta
         freqs = self.frequencies
         if angle is not None:
-            R, av = collapse_axis(R, self.theta, angle, method, axis=0)
-            phi, _ = collapse_axis(phi, self.theta, angle, method, axis=0)
+            R, av = collapse_axis(R, self.theta, angle, method, axis=0,
+                                  name='angle')
+            phi, _ = collapse_axis(phi, self.theta, angle, method, axis=0,
+                                   name='angle')
             R, phi, theta = R[None, ...], phi[None, ...], np.array([av])
         if frequency is not None:
-            R, fv = collapse_axis(R, self.frequencies, frequency, method, axis=1)
-            phi, _ = collapse_axis(phi, self.frequencies, frequency, method, axis=1)
+            R, fv = collapse_axis(R, self.frequencies, frequency, method,
+                                  axis=1, name='frequency')
+            phi, _ = collapse_axis(phi, self.frequencies, frequency, method,
+                                   axis=1, name='frequency')
             freqs = float(fv)
         return self._build(theta, R, phi, freqs)
 
@@ -180,15 +208,3 @@ class ReflectionCoefficient(Result):
             R, phi = R[:, fi], phi[:, fi]
             freqs = float(self.frequencies[fi])
         return self._build(theta, R, phi, freqs)
-
-    @property
-    def data(self) -> np.ndarray:
-        return self.R
-
-    @property
-    def ranges(self) -> np.ndarray:   # convenience alias — angles double as the abscissa for plot helpers
-        return self.theta
-
-    @property
-    def depths(self) -> np.ndarray:
-        return np.array([0.0])

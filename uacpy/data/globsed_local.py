@@ -10,18 +10,15 @@ reaches basement (and how thick the column is) matters more than the top-cm
 texture. Pair it with :mod:`uacpy.data.crust1_local` for a layered bottom.
 """
 
-import os
-import shutil
-import subprocess
 from pathlib import Path
 
 import numpy as np
 
 from uacpy._log import log_message
-from uacpy.core.exceptions import DataFetchError
+from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.data import _cache
 from uacpy.data._geo import as_coordinate
-from uacpy.data._http import http_get
+from uacpy.data._http import curl_download, http_get
 from uacpy.data._netcdf import NetcdfGrid
 
 __all__ = ['download_globsed_db', 'fetch_sediment_thickness',
@@ -31,33 +28,6 @@ GLOBSED_FILE = 'GlobSed-v3.nc'
 GLOBSED_URL = ('https://www.ncei.noaa.gov/data/oceans/archive/arc0231/0305030/'
                '1.1/data/0-data/GlobSed/GlobSed_package3/GlobSed-v3.nc')
 
-_GRID = {}   # path -> _GlobSedGrid
-
-
-def _curl_download(url, out, *, timeout, verbose):
-    """Fetch ``url`` → ``out`` with curl; ``True`` on success, ``False`` if curl
-    is absent or fails. NCEI/Akamai throttles Python urllib to a trickle but
-    serves curl at full speed, so this is the preferred path for the grid.
-    Downloads to ``<out>.part`` and moves it into place only on success, so an
-    interrupted transfer never leaves a truncated ``out`` for the cache to
-    accept."""
-    curl = shutil.which('curl')
-    if not curl:
-        return False
-    part = Path(str(out) + '.part')
-    try:
-        subprocess.run(
-            [curl, '-fL', '--retry', '3', '--max-time', str(int(timeout)),
-             '-o', str(part), url],
-            check=True, capture_output=not verbose)
-    except (subprocess.SubprocessError, OSError):
-        part.unlink(missing_ok=True)
-        return False
-    if not (part.exists() and part.stat().st_size > 0):
-        part.unlink(missing_ok=True)
-        return False
-    os.replace(part, out)
-    return True
 
 
 def download_globsed_db(cache_dir=None, *, timeout=300.0, verbose=False):
@@ -71,18 +41,27 @@ def download_globsed_db(cache_dir=None, *, timeout=300.0, verbose=False):
     out = dest / GLOBSED_FILE
     log_message('globsed', "downloading GlobSed v3 sediment thickness (~11 MB)",
                 verbose=verbose)
-    if not _curl_download(GLOBSED_URL, out, timeout=timeout, verbose=verbose):
-        part = Path(str(out) + '.part')
-        part.write_bytes(http_get(GLOBSED_URL, timeout=timeout, verbose=verbose,
-                                  source='globsed'))
-        os.replace(part, out)
-    _GRID.clear()
+    if not curl_download(GLOBSED_URL, out, timeout=timeout, verbose=verbose):
+        with _cache.atomic_write(out) as part:
+            part.write_bytes(http_get(GLOBSED_URL, timeout=timeout,
+                                      verbose=verbose, source='globsed'))
+    _cache.invalidate_grids()
     log_message('globsed', f"GlobSed grid cached → {out}", verbose=verbose)
     return out
 
 
 class _GlobSedGrid(NetcdfGrid):
-    """Nearest-cell accessor over the GlobSed ``z(lat, lon)`` thickness grid."""
+    """Nearest-cell accessor over the GlobSed ``z(lat, lon)`` thickness grid.
+
+    GlobSed is **gridline**-registered, not cell-centre: its 5′ axes are nodes
+    at exact degrees, latitude south-up over −90 → 90 (2161 nodes) and longitude
+    over −180 → 180 (4321). Both meridian ends are therefore stored, and a query
+    at +180° wraps to the −180° column — harmless, since the two columns hold
+    identical values. Land and unmapped cells are ``NaN``, not zero, so a real
+    zero means "no sediment", not "no data".
+    """
+
+    dataset_name = 'globsed'
 
     def __init__(self, path):
         try:
@@ -100,11 +79,7 @@ class _GlobSedGrid(NetcdfGrid):
 
 
 def _grid():
-    path = _cache.require('globsed', GLOBSED_FILE)
-    key = str(path)
-    if key not in _GRID:
-        _GRID[key] = _GlobSedGrid(path)
-    return _GRID[key]
+    return _cache.cached_grid('globsed', GLOBSED_FILE, _GlobSedGrid)
 
 
 def fetch_sediment_thickness(point):
@@ -128,6 +103,11 @@ def fetch_sediment_thickness_transect(start, end, n_points=6):
 
     ``thickness_m`` is ``NaN`` at any waypoint GlobSed does not cover.
     """
+    if int(n_points) < 2:
+        raise ConfigurationError(
+            f"fetch_sediment_thickness_transect: n_points must be >= 2, "
+            f"got {n_points}.",
+            remediation="Pass n_points>=2 to define a transect.")
     from uacpy.data._geo import geodesic_waypoints
     lats, lons, ranges_m = geodesic_waypoints(start, end, n_points)
     g = _grid()

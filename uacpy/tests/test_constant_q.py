@@ -126,6 +126,11 @@ def test_density_scaling_matches_welch_white_noise():
     # one-sided white PSD level (scipy welch density, and analytic 2*var/fs)
     fw, pw = welch(x, FS, nperseg=2048, scaling="density")
     welch_level = float(np.median(pw[(fw > 200) & (fw < 3000)]))
+    # Order-of-magnitude bounds only: on this seed the constant-Q median sits
+    # 0.2 % from the Welch median and 1 % from the analytic level, so the
+    # factor-2 window and rel=0.5 are ~50x looser than the observed spread.
+    # They catch a scaling blunder (a missing 2, a per-bin bandwidth) and
+    # nothing finer.
     assert 0.5 * welch_level < cq_level < 2.0 * welch_level
     assert cq_level == pytest.approx(2.0 * np.var(x) / FS, rel=0.5)
 
@@ -155,6 +160,31 @@ def test_spectrum_and_density_differ():
     de = constant_q_psd(x, FS, fmin=100, fmax=2000, bins_per_octave=12,
                         scaling="density")
     assert not np.allclose(sp.power, de.power)
+
+
+def test_default_scaling_is_spectrum_where_linear_psd_is_density():
+    """The constant-Q family defaults to scaling='spectrum' (Pa² per bin)
+    where the linear estimators default to 'density' (Pa²/Hz): pinned by
+    signature and by the default output matching the explicit spelling."""
+    import inspect
+    from uacpy.acoustic_signal import psd, spectrogram
+    for fn in (constant_q_psd, constant_q_spectrogram,
+               probabilistic_constant_q):
+        assert inspect.signature(fn).parameters["scaling"].default == "spectrum"
+    for fn in (psd, spectrogram):
+        assert inspect.signature(fn).parameters["scaling"].default == "density"
+    x = _tone(440.0, dur=1.0)
+    d = constant_q_psd(x, FS, fmin=200, fmax=2000, bins_per_octave=12)
+    s = constant_q_psd(x, FS, fmin=200, fmax=2000, bins_per_octave=12,
+                       scaling="spectrum")
+    np.testing.assert_array_equal(np.nan_to_num(d.power),
+                                  np.nan_to_num(s.power))
+    de = constant_q_psd(x, FS, fmin=200, fmax=2000, bins_per_octave=12,
+                        scaling="density")
+    assert not np.allclose(np.nan_to_num(d.power), np.nan_to_num(de.power))
+    _, p_default = psd(x, FS, nperseg=1024)
+    _, p_density = psd(x, FS, nperseg=1024, scaling="density")
+    np.testing.assert_array_equal(p_default, p_density)
 
 
 def test_scaling_validation():
@@ -202,3 +232,176 @@ def test_plotter_unit_label_switches_with_scaling():
     lbl = ax.get_ylabel()
     assert "Pa²" in lbl and "/Hz" not in lbl
     plt.close("all")
+
+
+def test_spectrum_calibration_is_exact_on_a_bin_centre():
+    """The 'spectrum' scaling promises a tone of amplitude A peaks at A**2/2.
+    That holds on a bin centre; between centres the filterbank scallops, by at
+    most the ~1.4 dB the module docstring quotes."""
+    from uacpy.acoustic_signal.constant_q import _cq_frequencies
+    B, fs, A, fmin = 24, 48000.0, 1.7, 100.0
+    f = _cq_frequencies(fmin, 4000.0, B)
+    k = int(np.argmin(np.abs(f - 500.0)))
+    t = np.arange(int(fs)) / fs
+
+    on = A * np.cos(2 * np.pi * f[k] * t)
+    freqs, X = constant_q_transform(on, fs, fmin=fmin, fmax=4000.0,
+                                    bins_per_octave=B)
+    assert abs(X[k]) == pytest.approx(A / 2, rel=1e-3)
+    _, power = constant_q_psd(on, fs, fmin=fmin, fmax=4000.0,
+                              bins_per_octave=B, scaling='spectrum')
+    assert power.max() == pytest.approx(A ** 2 / 2, rel=1e-3)
+
+    mid = float(np.sqrt(f[k] * f[k + 1]))            # midway between centres
+    off = A * np.cos(2 * np.pi * mid * t)
+    _, pm = constant_q_psd(off, fs, fmin=fmin, fmax=4000.0, bins_per_octave=B,
+                           scaling='spectrum')
+    assert 0.0 < -10 * np.log10(pm.max() / (A ** 2 / 2)) < 1.5
+
+
+def test_kernel_analyses_at_bin_centre_up_to_nyquist():
+    """Every bin correlates at exactly f_k, so a tone on ANY bin centre —
+    including the short-window bins near Nyquist, where the ceil in
+    N_k = ceil(Q*fs/f_k) quantises hardest — reads its A**2/2 band power to
+    within a few hundredths of a dB."""
+    fs = 8000.0
+    f = _cq_frequencies(20.0, fs / 2, 24)
+    t = np.arange(int(4 * fs)) / fs
+    # skip bins above 0.48*fs: there the short window's mainlobe spans the
+    # tone's negative-frequency image and the one-sided power reads high for
+    # a real tone regardless of the analysis frequency.
+    top = f[-40:]
+    for f0 in top[top < 0.48 * fs]:                   # top ~1.7 octaves
+        x = np.cos(2 * np.pi * f0 * t)
+        r = constant_q_psd(x, fs, fmin=20.0, bins_per_octave=24)
+        k = int(np.argmin(np.abs(r.frequencies - f0)))
+        err_db = 10 * np.log10(r.power[k] / 0.5)
+        assert abs(err_db) < 0.05, f"{err_db:.3f} dB at f0={f0:.1f} Hz"
+
+
+@pytest.mark.parametrize("B,expected_db", [(6, 1.20), (12, 1.31), (24, 1.37),
+                                           (48, 1.39)])
+def test_scalloping_loss_matches_the_documented_figure(B, expected_db):
+    """Worst-case scalloping is ~1.4 dB, not the ~1.3 dB once documented.
+
+    A tone midway (geometrically) between two centres is read low by both
+    neighbouring bins; the deficit of the better of the two is the scallop
+    loss. It grows slowly with ``bins_per_octave`` towards the Hann window's
+    1.42 dB, because narrower bins put the midpoint further out on a mainlobe
+    whose shape Q holds fixed.
+    """
+    fs, fk = 2000.0, 100.0
+    Q = _cq_quality(B)
+    losses = []
+    for centre, offset in ((fk, 0.5), (fk * 2.0 ** (1.0 / B), -0.5)):
+        Nk = max(1, int(np.ceil(Q * fs / centre)))
+        n = np.arange(Nk)
+        w = np.hanning(Nk + 1)[:-1]                  # get_window('hann', fftbins)
+        kernel = (w * np.exp(-2j * np.pi * centre * n / fs)) / w.sum()
+        tone = np.cos(2 * np.pi * centre * 2.0 ** (offset / B) * n / fs)
+        losses.append(2 * abs(np.sum(tone * kernel)) ** 2)
+    loss_db = -10 * np.log10(max(losses) / 0.5)
+    assert loss_db == pytest.approx(expected_db, abs=0.02)
+    assert loss_db < 1.42
+
+
+# ── near-Nyquist image leak ──────────────────────────────────────────────────
+class TestNearNyquistBinsReadAToneHigh:
+    """A real tone at ``f_k`` carries a ``-f_k`` component that the kernel
+    demodulates to ``-2 f_k``; as ``f_k`` approaches ``fs/2`` the window stops
+    rejecting it and the one-sided band power reads ``1 + |W(2f_k)/sum(w)|**2``
+    times the tone's mean-square power.
+
+    The bias rises smoothly through the region rather than switching on at a
+    single frequency, so both sides of the 0.01 dB warning threshold are
+    checked against the measured curve.
+    """
+
+    B = 24
+
+    @staticmethod
+    def _one_bin_power(u, fs=FS, amp=1.0, dur=8.0):
+        """Band power a single constant-Q bin at ``f_k = u*fs`` reads for a
+        cosine of amplitude ``amp`` sitting exactly on it. Truth: ``amp**2/2``."""
+        fk = u * fs
+        x = amp * np.cos(2 * np.pi * fk * np.arange(int(dur * fs)) / fs)
+        import warnings as _w
+        with _w.catch_warnings():
+            _w.simplefilter("ignore")
+            _, power = constant_q_psd(x, fs, fmin=fk / 1.0000001,
+                                      fmax=fk * 1.0000001,
+                                      bins_per_octave=TestNearNyquistBinsReadAToneHigh.B)
+        return float(power[0])
+
+    @staticmethod
+    def _warns(u, fs=FS):
+        import warnings as _w
+        fk = u * fs
+        x = np.cos(2 * np.pi * fk * np.arange(int(2.0 * fs)) / fs)
+        with _w.catch_warnings(record=True) as caught:
+            _w.simplefilter("always")
+            constant_q_psd(x, fs, fmin=fk / 1.0000001, fmax=fk * 1.0000001,
+                           bins_per_octave=TestNearNyquistBinsReadAToneHigh.B)
+        return [str(c.message) for c in caught
+                if 'negative-frequency image' in str(c.message)]
+
+    @pytest.mark.parametrize("u, expected_db", [
+        (0.4000, 0.0003), (0.4600, 0.0000), (0.4835, 0.0031), (0.4860, 0.0000),
+        (0.4875, 0.0128), (0.4920, 0.6791), (0.4935, 1.2130), (0.4990, 2.9525),
+    ])
+    def test_the_over_read_follows_the_measured_bias_curve(self, u, expected_db):
+        got_db = 10 * np.log10(self._one_bin_power(u) / 0.5)
+        assert got_db == pytest.approx(expected_db, abs=2e-3)
+
+    def test_the_curve_has_a_null_inside_the_rising_region(self):
+        """``u = Q/(2(Q+1)) = 0.48577`` is a null of the bias, not its onset:
+        the bias at 0.4835, below it, is larger than the bias at 0.4860."""
+        below = 10 * np.log10(self._one_bin_power(0.4835) / 0.5)
+        at_null = 10 * np.log10(self._one_bin_power(0.4860) / 0.5)
+        assert at_null < below
+        assert at_null < 1e-4
+
+    def test_the_warning_threshold_is_crossed_between_0_4872_and_0_4874(self):
+        assert self._warns(0.4872) == []
+        assert len(self._warns(0.4874)) == 1
+
+    def test_a_bin_well_below_the_region_does_not_warn(self):
+        assert self._warns(0.30) == []
+
+    @pytest.mark.parametrize("fs", [2000.0, 8000.0, 32000.0])
+    def test_the_bias_tracks_f_over_fs_and_not_the_sample_rate(self, fs):
+        got_db = 10 * np.log10(self._one_bin_power(0.4935, fs=fs) / 0.5)
+        assert got_db == pytest.approx(1.2130, abs=5e-3)
+
+    @pytest.mark.parametrize("amp", [1e-3, 1.0, 1e3])
+    def test_the_bias_is_the_same_fraction_at_every_amplitude(self, amp):
+        got_db = 10 * np.log10(
+            self._one_bin_power(0.4935, amp=amp) / (0.5 * amp ** 2))
+        assert got_db == pytest.approx(1.2130, abs=5e-3)
+
+    def test_broadband_noise_in_the_same_bin_is_unbiased(self):
+        """The reason the bias is reported rather than divided out: white
+        noise reads ``sigma**2 sum(w**2)/sum(w)**2`` at every bin, so a
+        correction sized for a tone would push the noise case off."""
+        import warnings as _w
+        rng = np.random.default_rng(0)
+        x = rng.standard_normal(int(60 * FS))
+        with _w.catch_warnings():
+            _w.simplefilter("ignore")
+            freqs, power = constant_q_psd(x, FS, scaling="density")
+        db = 10 * np.log10(power / (2.0 / FS))
+        assert abs(db[-1]) < 0.4
+        assert freqs[-1] / FS > 0.49
+
+    def test_every_estimator_warns_on_the_default_call(self):
+        import warnings as _w
+        x = np.cos(2 * np.pi * 3948.0 * np.arange(int(2 * FS)) / FS)
+        for call in (lambda: constant_q_transform(x, FS),
+                     lambda: constant_q_psd(x, FS),
+                     lambda: constant_q_spectrogram(x, FS),
+                     lambda: probabilistic_constant_q(x, FS)):
+            with _w.catch_warnings(record=True) as caught:
+                _w.simplefilter("always")
+                call()
+            assert any('negative-frequency image' in str(c.message)
+                       for c in caught)

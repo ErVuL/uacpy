@@ -20,21 +20,22 @@ CONTAINS
 
     ! loop over the interpolation points
     DO I = 1, Ni
-       ! search for the bracketing pair of tabulated values
-       DO WHILE ( xi( I ) > x( iseg + 1 ) )  ! is the xi point to the right of the current segment?
-          IF ( iseg < N - 2 ) THEN
-             iseg = iseg + 1
-          END IF
+       ! search for the bracketing pair of tabulated values. The segment
+       ! index runs 1 : N-1, and each loop must stop once iseg is clamped
+       ! or a query outside [ x(1), x(N) ] spins forever.
+       DO WHILE ( xi( I ) > x( iseg + 1 ) .AND. iseg < N - 1 )  ! to the right of the current segment?
+          iseg = iseg + 1
        END DO
 
-       DO WHILE ( xi( I ) < x( iseg     ) )  ! is the xi point to the left  of the current segment?
-          IF ( iseg > 1 ) THEN
-             iseg = iseg - 1
-          END IF
+       DO WHILE ( xi( I ) < x( iseg     ) .AND. iseg > 1     )  ! to the left  of the current segment?
+          iseg = iseg - 1
        END DO
 
-       ! proportional distance between points
+       ! proportional distance between points, clamped so a query outside
+       ! [ x(1), x(N) ] holds the end value instead of extrapolating off
+       ! the table (extrapolating a level table can go negative)
        R       = ( xi( I ) - x( iseg ) ) / ( x( iseg + 1 ) - x( iseg ) )
+       R       = MIN( MAX( R, 0.0D0 ), 1.0D0 )
        yi( I ) = ( 1.0 - R ) * y( iseg ) + R * y( iseg + 1 )
     END DO
 

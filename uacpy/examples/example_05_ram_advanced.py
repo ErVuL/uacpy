@@ -4,38 +4,45 @@ ADVANCED EXAMPLE: RAM (mpiramS) - Range-Dependent SSP and Bottom
 ===============================================================================
 
 OBJECTIVE:
-    Demonstrate RAM's full range-dependent capabilities using the mpiramS
+    Demonstrate RAM's range-dependent capabilities using the mpiramS
     Fortran PE backend:
-    - 2D range-dependent SSP (thermal front/eddy)
     - Range-dependent bottom properties (sediment transition)
-    - Parabolic equation accuracy for complex environments
-    - Broadband (time-series) mode for time-domain analysis
+    - Sloping-shelf bathymetry
+    - Parabolic equation accuracy control
 
 SCENARIO:
-    Thermal Front - Warm water meets cold water with sediment change
+    Sediment transition over a sloping shelf.
 
-    Range progression (0 -> 20 km):
-    - SSP: Warm stratified -> Cold well-mixed
+    Range progression (0 -> 3 km):
+    - SSP: single warm stratified profile, range-independent
+      (``env.has_range_dependent_ssp`` prints False below)
     - Bottom: Soft mud -> Hard sand
-    - Depth: Shallow shelf -> Deeper slope
+    - Depth: 100 m shelf -> 150 m slope
 
 FEATURES DEMONSTRATED:
-    - 2D SSP matrix (sound speed varies with depth AND range)
     - Range-dependent bottom properties
-    - Thermal front modeling
     - Continental shelf transition
     - COHERENT_TL mode (narrowband TL over range-depth grid)
-    - TIME_SERIES mode (broadband complex field for IFFT)
+    - Reading a TL field that is partly below the seafloor
+
+NOTE ON COVERAGE:
+    The receiver grid spans 5-145 m while the seafloor runs 100 m (r=0) to
+    150 m (r=3 km), so the shallow-range columns place receivers inside the
+    sub-bottom. Those cells come back NaN. Every summary below is therefore
+    NaN-aware and reports how much of the grid is actually water.
 
 ===============================================================================
 """
 
 import sys
+import os
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Repo root, so ``import uacpy`` resolves from a source checkout.
+sys.path.insert(0, str(Path(__file__).parents[2]))
 
-OUTPUT_DIR = Path(__file__).parent / 'output'
-OUTPUT_DIR.mkdir(exist_ok=True)
+OUTPUT_DIR = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
+                  or Path(__file__).parent / 'output')
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 import numpy as np  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
@@ -48,27 +55,25 @@ from uacpy.visualization.plots import (  # noqa: E402
 )
 
 
-def _plot_tl_difference(a, b, env=None, *, ax=None, title=None,
-                         vmin=-10.0, vmax=10.0, diff_vmax=None, **kw):
-    """Plot TL(a) - TL(b) as a diverging-colourmap heatmap.
+from plotting_utils import _plot_tl_difference  # noqa: E402
 
-    ``diff_vmax`` is a symmetric range shortcut: ``vmin = -diff_vmax``,
-    ``vmax = +diff_vmax``.
+
+def _print_tl_summary(label, field):
+    """NaN-aware TL summary that also states how much of the grid is water.
+
+    Receivers below the local seafloor come back NaN; a bare ``.min()``/
+    ``.max()`` on such a grid returns ``nan`` and hides the gap.
     """
-    from uacpy import Field
-    from uacpy.visualization import plot_field
-    if diff_vmax is not None:
-        vmin, vmax = -abs(diff_vmax), abs(diff_vmax)
-    diff = Field(data=a.tl - b.tl, coords=dict(a.coords))
-    return plot_field(
-        diff, env=env, ax=ax, vmin=vmin, vmax=vmax,
-        cmap='RdBu_r', title=title, **kw,
-    )
+    tl = np.asarray(field.db)
+    n_water = int(np.isfinite(tl).sum())
+    print(f"  ✓ {label}: TL range {np.nanmin(tl):.1f} to {np.nanmax(tl):.1f} dB"
+          f"  [{n_water}/{tl.size} cells in water,"
+          f" {tl.size - n_water} below seafloor]")
 
 
 def main():
     print("\n" + "═" * 80)
-    print("EXAMPLE 05: RAM advanced features - Range-Dependent SSP & Bottom")
+    print("EXAMPLE 05: RAM advanced features - Range-Dependent Bottom")
     print("═" * 80)
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -79,6 +84,9 @@ def main():
 
     depths = np.array([0., 25, 50, 75, 100, 120, 150])
     T = 8 + 12 * np.exp(-depths / 50)  # 20 °C surface, ~8 °C deep
+    # Medwin's simplified c(T, z), lead constant rounded from 1449.2 and the
+    # salinity term dropped at its S = 35 PSU reference value (Stergiopoulos,
+    # Advanced Signal Processing Handbook, Table 10.1).
     ssp_c = 1449 + 4.6*T - 0.055*T**2 + 0.00029*T**3 + 0.016*depths
     ssp_1d = np.column_stack([depths, ssp_c])
     print(f"  ✓ SSP range: {ssp_c.min():.1f} to {ssp_c.max():.1f} m/s")
@@ -122,8 +130,8 @@ def main():
 
     print("\n✓ Environment created:")
     print(f"    - is_range_dependent: {env.is_range_dependent}")
-    print(f"    - has_range_dependent_ssp: {env.has_range_dependent_ssp()}")
-    print(f"    - has_range_dependent_bottom: {env.has_range_dependent_bottom()}")
+    print(f"    - has_range_dependent_ssp: {env.has_range_dependent_ssp}")
+    print(f"    - has_range_dependent_bottom: {env.has_range_dependent_bottom}")
 
     # ═══════════════════════════════════════════════════════════════════════
     # SOURCE & RECEIVER
@@ -142,16 +150,15 @@ def main():
     print("\n[Run] RAM (mpiramS) with range-dependent SSP and bottom...")
     print("  Mode: COHERENT_TL (narrowband, range-depth TL grid)")
 
-    try:
-        ram = RAM(verbose=True, accuracy=1e-1)
-        result = ram.run(env, source, receiver)
-        print("  RAM TL completed successfully")
-        print(f"  TL range: {np.nanmin(result.tl):.1f} to {np.nanmax(result.tl):.1f} dB")
-    except Exception as e:
-        print(f"  RAM error: {e}")
-        import traceback
-        traceback.print_exc()
-        result = None
+    # accuracy is the Lytaev optimiser's per-run Padé error budget; 1e-1
+    # is 100x looser than the 1e-3 default, so the optimiser picks a
+    # coarser dr/dz and the example runs quickly. Leave it at the default
+    # for production work. A RAM failure propagates: this run is the
+    # example's subject, so there is nothing useful to show without it.
+    ram = RAM(verbose=True, accuracy=1e-1)
+    result = ram.run(env, source, receiver)
+    print("  ✓ RAM TL completed successfully")
+    _print_tl_summary("RAM", result)
 
     # ═══════════════════════════════════════════════════════════════════════
     # COMPARISON: Kraken with Range-Independent Approximation
@@ -166,13 +173,13 @@ def main():
 
     # Run Kraken
     try:
-        krakenfield = Kraken(verbose=False)
-        result_krakenfield = krakenfield.compute_tl(env, source, receiver)
+        kraken = Kraken(verbose=False)
+        result_kraken = kraken.compute_tl(env, source, receiver)
         print("  ✓ Kraken completed (using range-independent approximation)")
-        print(f"  ✓ TL range: {result_krakenfield.tl.min():.1f} to {result_krakenfield.tl.max():.1f} dB")
+        _print_tl_summary("Kraken", result_kraken)
     except Exception as e:
         print(f"  ✗ Kraken: {e}")
-        result_krakenfield = None
+        result_kraken = None
 
     # Run Bellhop (supports range-dependent natively)
     print("\n  Running Bellhop (native range-dependent support)...")
@@ -180,22 +187,32 @@ def main():
         bellhop = Bellhop(verbose=False)
         result_bellhop = bellhop.compute_tl(env, source, receiver)
         print("  ✓ Bellhop completed (full range-dependent capability)")
-        print(f"  ✓ TL range: {result_bellhop.tl.min():.1f} to {result_bellhop.tl.max():.1f} dB")
+        _print_tl_summary("Bellhop", result_bellhop)
     except Exception as e:
         print(f"  ✗ Bellhop: {e}")
         result_bellhop = None
 
     # Comparisons (use nanmean because RAM masks sub-bottom cells as NaN)
-    if result is not None and result_krakenfield is not None:
-        diff_kf = np.abs(result.tl - result_krakenfield.tl)
-        print(f"\n  RAM vs Kraken: Mean diff = {np.nanmean(diff_kf):.1f} dB (range-dependent effects)")
+    if result is not None and result_kraken is not None:
+        diff_kraken = np.abs(result.db - result_kraken.db)
+        print(f"\n  RAM vs Kraken: Mean diff = {np.nanmean(diff_kraken):.1f} dB (range-dependent effects)")
 
     if result is not None and result_bellhop is not None:
-        diff_bh = np.abs(result.tl - result_bellhop.tl)
+        diff_bh = np.abs(result.db - result_bellhop.db)
         print(f"  RAM vs Bellhop: Mean diff = {np.nanmean(diff_bh):.1f} dB (PE vs ray methods)")
+        lam = 1500.0 / source.frequencies[0]
+        d_lo, d_hi = env.bathymetry.depths.min(), env.bathymetry.depths.max()
+        print(f"    Read that difference with care: at {source.frequencies[0]:.0f} Hz the"
+              f" guide is only D/lambda = {d_lo / lam:.0f}-{d_hi / lam:.0f}")
+        print("    wavelengths deep. Stergiopoulos, Advanced Signal Processing"
+              " Handbook section 10.2.2,")
+        print("    puts ray methods at D/lambda >~ 100 and mode/PE methods below"
+              " ~30, so Bellhop is")
+        print("    outside its regime here and RAM is the reference, not the other"
+              " way round.")
 
-    if result_bellhop is not None and result_krakenfield is not None:
-        diff_bk = np.abs(result_bellhop.tl - result_krakenfield.tl)
+    if result_bellhop is not None and result_kraken is not None:
+        diff_bk = np.abs(result_bellhop.db - result_kraken.db)
         print(f"  Bellhop vs Kraken: Mean diff = {np.nanmean(diff_bk):.1f} dB")
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -225,12 +242,12 @@ def main():
         print("  ✓ Saved: example_05_result.png")
 
     # Plot 5: Three-Model Comparison (RAM, Bellhop, Kraken)
-    if result is not None and result_bellhop is not None and result_krakenfield is not None:
+    if result is not None and result_bellhop is not None and result_kraken is not None:
         from uacpy.visualization.plots import compare_models
         fig5, _ = compare_models(
-            {'RAM': result, 'Bellhop': result_bellhop, 'Kraken': result_krakenfield},
+            {'RAM': result, 'Bellhop': result_bellhop, 'Kraken': result_kraken},
             env=env, vmin=40, vmax=100,
-            suptitle='Three-Model Comparison — Sediment Transition + Sloping Shelf',
+            title='Three-Model Comparison — Sediment Transition + Sloping Shelf',
         )
         fig5.savefig(OUTPUT_DIR / 'example_05_comparison.png', dpi=150)
         plt.close(fig5)
@@ -238,11 +255,11 @@ def main():
 
         fig6, axes6 = plt.subplots(1, 3, figsize=(20, 5))
         _plot_tl_difference(result, result_bellhop, env, ax=axes6[0],
-                           label='RAM − Bellhop', show_colorbar=True)
-        _plot_tl_difference(result, result_krakenfield, env, ax=axes6[1],
-                           label='RAM − Kraken', show_colorbar=True)
-        _plot_tl_difference(result_bellhop, result_krakenfield, env,
-                           ax=axes6[2], label='Bellhop − Kraken',
+                           title='RAM − Bellhop', show_colorbar=True)
+        _plot_tl_difference(result, result_kraken, env, ax=axes6[1],
+                           title='RAM − Kraken', show_colorbar=True)
+        _plot_tl_difference(result_bellhop, result_kraken, env,
+                           ax=axes6[2], title='Bellhop − Kraken',
                            show_colorbar=True)
         fig6.suptitle('Pairwise Differences (signed, dB)',
                       fontsize=13, fontweight='bold')

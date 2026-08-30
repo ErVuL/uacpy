@@ -40,8 +40,8 @@ _IGNORED_FREQ_CASES = [
                  id='kraken-modes'),
     pytest.param('Scooter', RunMode.COHERENT_TL, '_project_environment',
                  id='scooter-coherent_tl'),
-    pytest.param('SPARC', RunMode.COHERENT_TL, '_project_environment',
-                 id='sparc-coherent_tl'),
+    pytest.param('SPARC', RunMode.TIME_SERIES, '_project_environment',
+                 id='sparc-time_series'),
     pytest.param('Bellhop', RunMode.COHERENT_TL, '_project_environment',
                  id='bellhop-coherent_tl'),
     pytest.param('Bellhop', RunMode.RAYS, '_project_environment',
@@ -78,7 +78,7 @@ def test_bellhop_coherent_tl_lists_all_ignored_kwargs(pekeris, monkeypatch):
 
 
 @pytest.mark.requires_binary
-def test_sparc_waveform_kwargs_still_warn(pekeris, monkeypatch):
+def test_sparc_waveform_kwargs_warn(pekeris, monkeypatch):
     """SPARC drives its pulse via the constructor pulse_type; the waveform
     kwargs must keep warning through the shared helper."""
     from uacpy.models import SPARC
@@ -106,6 +106,97 @@ def test_bellhop_broadband_consumes_frequencies_no_warning(pekeris,
             model.run(env, source, receiver, run_mode=RunMode.BROADBAND,
                       frequencies=np.array([90.0, 100.0, 110.0]))
     assert not any('ignoring' in str(w.message) for w in caught)
+
+
+# (model class name, method to short-circuit after the BROADBAND warn
+# checkpoint). Bellhop resolves its own grid inside _run_broadband; the IFFT
+# synthesizers funnel through the shared _prepare_timeseries.
+_BROADBAND_TIME_AXIS_CASES = [
+    pytest.param('Bellhop', '_arrivals_to_tf', id='bellhop'),
+    pytest.param('Scooter', '_project_environment', id='scooter'),
+    pytest.param('RAM', '_project_environment', id='ram'),
+]
+
+
+@pytest.mark.requires_binary
+@pytest.mark.parametrize('cls_name,cutoff', _BROADBAND_TIME_AXIS_CASES)
+def test_broadband_warns_on_time_axis_kwargs(cls_name, cutoff, pekeris,
+                                             monkeypatch):
+    """BROADBAND returns H(f) and builds no time axis, so ``sample_rate=`` /
+    ``output_duration=`` are consumed by nothing and must warn."""
+    cls = getattr(models, cls_name)
+    model = cls(verbose=False)
+    monkeypatch.setattr(cls, cutoff, _boom)
+    env, source, receiver = pekeris
+    with pytest.warns(UserWarning,
+                      match='ignoring sample_rate=, output_duration='):
+        with pytest.raises(_ShortCircuit):
+            model.run(env, source, receiver, run_mode=RunMode.BROADBAND,
+                      sample_rate=4000.0, output_duration=1.0)
+
+
+@pytest.mark.requires_binary
+def test_time_series_consumes_time_axis_kwargs_no_warning(pekeris,
+                                                          monkeypatch):
+    """Dual of the above: TIME_SERIES does build the time axis from them, so
+    the consuming path must stay free of the 'ignoring' warning."""
+    from uacpy.models import Scooter
+    model = Scooter(verbose=False)
+    monkeypatch.setattr(Scooter, '_project_environment', _boom)
+    env, source, receiver = pekeris
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        with pytest.raises(_ShortCircuit):
+            model.run(env, source, receiver, run_mode=RunMode.TIME_SERIES,
+                      source_waveform=np.sin(np.linspace(0, 20, 512)),
+                      sample_rate=4000.0, output_duration=0.2)
+    assert not any('ignoring' in str(w.message) for w in caught)
+
+
+# The IFFT synthesizers that route through ``_prepare_timeseries``: it warns
+# on the BROADBAND branch only, so each model warns for itself on the
+# narrowband one. Exactly one warning either way.
+_COHERENT_TL_TIME_AXIS_CASES = [
+    pytest.param('RAM', '_project_environment', id='ram'),
+    pytest.param('Scooter', '_project_environment', id='scooter'),
+]
+
+
+@pytest.mark.requires_binary
+@pytest.mark.parametrize('cls_name,cutoff', _COHERENT_TL_TIME_AXIS_CASES)
+def test_coherent_tl_warns_once_on_time_axis_kwargs(cls_name, cutoff, pekeris,
+                                                    monkeypatch):
+    """COHERENT_TL consumes neither keyword, so it warns — and the model's own
+    guard must not double up with ``_prepare_timeseries``' BROADBAND one."""
+    cls = getattr(models, cls_name)
+    model = cls(verbose=False)
+    monkeypatch.setattr(cls, cutoff, _boom)
+    env, source, receiver = pekeris
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        with pytest.raises(_ShortCircuit):
+            model.run(env, source, receiver, run_mode=RunMode.COHERENT_TL,
+                      sample_rate=4000.0, output_duration=1.0)
+    hits = [w for w in caught
+            if 'ignoring sample_rate=, output_duration=' in str(w.message)]
+    assert len(hits) == 1, f'{cls_name}: expected 1 warning, got {len(hits)}'
+
+
+@pytest.mark.requires_binary
+def test_oasp_broadband_warns_once_on_time_axis_kwargs(pekeris, monkeypatch):
+    """OASP reaches the same checkpoint from the OASES side."""
+    from uacpy.models.oases import OASP
+    model = OASP(verbose=False)
+    monkeypatch.setattr(OASP, '_project_environment', _boom)
+    env, source, receiver = pekeris
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        with pytest.raises(_ShortCircuit):
+            model.run(env, source, receiver, run_mode=RunMode.BROADBAND,
+                      sample_rate=4000.0, output_duration=1.0)
+    hits = [w for w in caught
+            if 'ignoring sample_rate=, output_duration=' in str(w.message)]
+    assert len(hits) == 1, f'expected 1 warning, got {len(hits)}'
 
 
 def test_oasr_run_signature_accepts_full_contract():

@@ -70,6 +70,8 @@ from .janus import (
     janus_detect,
     janus_encode,
     janus_modulate,
+    janus_receive,
+    janus_transmit,
 )
 from .channel_est import ls_estimate, omp_estimate
 from .ofdm import (
@@ -87,13 +89,14 @@ from .coding import (
     interleave,
     viterbi_decode,
 )
-from .spread import despread, m_sequence, processing_gain_db, spread
+from .dsss import despread, m_sequence, processing_gain_db, spread
 
 from . import (
     channel_est,
     channel_models,
     coding,
     doppler,
+    dsss,
     equalization,
     framing,
     janus,
@@ -114,11 +117,14 @@ __all__ = [
     "bit_error_rate", "symbol_error_rate", "evm", "ber_theory",
     # channel models
     "awgn", "multipath_channel", "apply_channel", "fading_taps",
-    "apply_fading_channel", # equalization
-    "DFE", "lms_equalizer", "rls_equalizer", "mmse_equalizer", # doppler
+    "apply_fading_channel",
+    # equalization
+    "DFE", "lms_equalizer", "rls_equalizer", "mmse_equalizer",
+    # doppler
     "doppler_from_speed", "compensate_doppler", "estimate_doppler_scale",
     # sync
-    "matched_filter_metric", "detect_preamble", "detect_frames", # link
+    "matched_filter_metric", "detect_preamble", "detect_frames",
+    # link
     "simulate_link", "ber_sweep", "LinkResult",
     # framing (real payloads)
     "bytes_to_bits", "bits_to_bytes", "pack_frame", "unpack_frame",
@@ -129,17 +135,18 @@ __all__ = [
     "Transmitter", "CommsReceiver", "OFDMTransmitter", "OFDMReceiver",
     # JANUS (STANAG 4748)
     "JanusPacket", "janus_encode", "janus_decode", "janus_modulate",
-    "janus_demodulate", "janus_detect",
+    "janus_demodulate", "janus_detect", "janus_transmit", "janus_receive",
     # channel estimation
     "ls_estimate", "omp_estimate",
     # ofdm
-    "ofdm_modulate", "ofdm_demodulate", "schmidl_cox_preamble", "schmidl_cox_sync", "apply_cfo", "estimate_channel",
+    "ofdm_modulate", "ofdm_demodulate", "schmidl_cox_preamble",
+    "schmidl_cox_sync", "apply_cfo", "estimate_channel",
     # coding
     "ConvCode", "conv_encode", "viterbi_decode", "interleave", "deinterleave",
-    # spread
+    # DSSS
     "m_sequence", "spread", "despread", "processing_gain_db",
     # submodules
     "modulation", "metrics", "channel_models", "equalization", "doppler",
     "sync", "link", "channel_est", "ofdm", "coding",
-    "framing", "phy", "transceiver", "janus",
+    "framing", "phy", "transceiver", "janus", "dsss",
 ]

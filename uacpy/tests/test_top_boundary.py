@@ -10,8 +10,9 @@ import numpy as np
 import pytest
 
 import uacpy
+from uacpy.core.constants import parse_boundary_type
 from uacpy.core.environment import BoundaryProperties, SoundSpeedProfile
-from uacpy.io.oalib_writer import _BOUNDARY_TYPE_MAP, get_top_bc_code
+from uacpy.io.oalib_writer import get_top_bc_code
 from uacpy.io.bellhop_writer import write_bellhop_env_file
 from uacpy.io.oases_writer import (
     _format_upper_halfspace,
@@ -54,8 +55,11 @@ def src_rcv():
     (_ice(),                                     'A'),
 ])
 def test_get_top_bc_code_routes_each_acoustic_type(surface, expected_code):
-    """Pin the BOUNDARY_TYPE_MAP routing for every model that consumes env.surface."""
-    assert _BOUNDARY_TYPE_MAP['half-space'] == 'A'  # source-of-truth dict
+    """Pin the boundary-code routing for every model that consumes env.surface."""
+    # parse_boundary_type -> to_acoustics_toolbox_code is the single lookup
+    # path every writer takes.
+    assert parse_boundary_type(
+        'half-space').to_acoustics_toolbox_code() == 'A'
     assert get_top_bc_code(_basic_env(surface)) == expected_code
 
 
@@ -74,8 +78,11 @@ def test_bellhop_env_writes_top_bc_and_surface_props(tmp_path, src_rcv):
     assert '3500' in text and '1800' in text
 
 
+#: An OASES layer record is ``D CC CS AC AS RO RG [IG]``, so column 2 is the
+#: compressional speed, 3 the shear speed and 6 the density; a vacuum halfspace
+#: zeroes them all. Column 7 (RG) is roughness, which uacpy formats ``.4f``.
 @pytest.mark.parametrize("surface,expected", [
-    (BoundaryProperties(acoustic_type='vacuum'), '0 0 0 0 0 0 0 0'),
+    (BoundaryProperties(acoustic_type='vacuum'), '0 0 0 0 0 0 0.0000 0'),
     (_ice(),                                     None),  # ice props checked
 ])
 def test_oases_format_upper_halfspace(surface, expected):
@@ -143,7 +150,14 @@ def test_ram_drops_surface_shear_with_warning():
 @pytest.mark.requires_binary
 @pytest.mark.slow
 def test_bellhop_top_bc_changes_tl():
-    """Vacuum vs ice surface → measurable TL difference at long range."""
+    """Vacuum vs ice surface → measurable TL difference at long range.
+
+    A 20 m source in a 100 m guide out to 8 km makes many surface bounces, and
+    an ice halfspace absorbs at each one where a vacuum reflects perfectly, so
+    a working top BC separates the two fields by far more than 1 dB. The bound
+    is deliberately near zero: this asserts that ``env.surface`` reaches the
+    binary at all, not how much loss it produces.
+    """
     src = uacpy.Source(depths=20.0, frequencies=200.0)
     rcv = uacpy.Receiver(
         depths=np.array([50.0]),
@@ -154,7 +168,7 @@ def test_bellhop_top_bc_changes_tl():
         _basic_env(BoundaryProperties(acoustic_type='vacuum')), src, rcv,
     )
     tl_ice = bellhop.compute_tl(_basic_env(_ice()), src, rcv)
-    diff = np.abs(tl_vac.tl - tl_ice.tl)
+    diff = np.abs(tl_vac.db - tl_ice.db)
     finite = np.isfinite(diff)
     assert finite.any() and diff[finite].max() >= 1.0, (
         "TL identical for vacuum vs ice surface — env.surface may not "

@@ -39,6 +39,9 @@ Potter, Alves, Green, Zappa, Nissen & McCoy (2014), *The JANUS Underwater
     implementation (GPLv3, janus-c 3.0.5): packet.c / crc.c / trellis.c / convolve.c /
     interleave.c / hop_index.c / primitive.c / modulator.c (encoder); chips_alignment.c /
     go_cfar.c / doppler.c (receiver detection, CFAR and Doppler).
+
+    That tree is not vendored here, so line citations into it carry the
+    ``external:`` prefix DEV.md §10 defines and no gate can check them.
 """
 
 from __future__ import annotations
@@ -50,6 +53,8 @@ from numpy.lib.stride_tricks import sliding_window_view
 
 from uacpy.core.constants import DEFAULT_SOUND_SPEED
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.core._warn_frames import USER_FRAME_SKIP
+from uacpy.comms.modulation import _require_binary_bits
 
 JANUS_VERSION = 3
 
@@ -60,6 +65,9 @@ BW_INITIAL = 4160.0         # bandwidth [Hz]
 # Convolutional code: rate 1/2, constraint length 9. The CMRE reference applies
 # the generators (g1=0o657, g2=0o435) in reversed register bit-order, i.e. the
 # output masks below (verified bit-exact against the reference trellis tables).
+# The reversed pair is also the K=9 rate-1/2 maximum-free-distance code of
+# Proakis & Salehi Table 8.3-1 (d_free = 12), an independent check on the
+# bit-order convention.
 _CONV_K = 9
 _G_HI = 0o753               # = bit-reversed g1 (0o657)
 _G_LO = 0o561               # = bit-reversed g2 (0o435)
@@ -74,13 +82,26 @@ _N_TOTAL_CHIPS = _PREAMBLE_CHIPS + _N_CODED   # 176: 32 preamble + 144 data
 WAKEUP_GAP = 0.4                   # s silence after wake-up tones (CMRE JANUS_WUT_GAP)
 DEFAULT_DOPPLER_MAX_SPEED = 5.0    # m/s search half-range (CMRE reference default)
 _DOPPLER_FIT_POINTS = 9            # CMRE DOPPLER_INT_NPOINT: quadratic peak interpolation
-_DOPPLER_C0 = 1540.0               # m/s reference speed in CMRE chips_alignment/doppler
+# m/s: the reference sound speed both external:doppler.c:108 and
+# external:chips_alignment.c:143 hard-code.
+_DOPPLER_C0 = 1540.0
 
-# GO-CFAR preamble detector (CMRE chips_alignment + go_cfar, batch form).
-_CHIP_OVERSAMPLING = 4             # CMRE JANUS_PREAMBLE_CHIP_OVERSAMPLING
-_CFAR_THRESHOLD = 2.5             # CMRE default detection_threshold
-_CFAR_WINDOW_CORRECTION = 0.1538   # CMRE window_correction factor
-_CFAR_CHANNEL_SPREAD = 64          # chips searched for the peak past first detection
+# GO-CFAR preamble detector (CMRE chips_alignment + go_cfar, batch form). Values
+# read from the janus-c reference: external:defaults.h:63,
+# external:parameters.c:65, external:rx.c:301, external:rx.c:407,
+# external:rx.c:413.
+_CHIP_OVERSAMPLING = 4             # JANUS_PREAMBLE_CHIP_OVERSAMPLING
+_CFAR_THRESHOLD = 2.5              # params->detection_threshold
+_CFAR_WINDOW_CORRECTION = 0.1538   # window_correction leading factor
+# 116 chips, not the C implementation's 64. Two terms set the minimum:
+# janus_modulate(wakeup=True) emits 12 wake-up chips + a 0.4 s gap (64
+# chips at the initial band) = 76 chips BEFORE the preamble, and the
+# 32-chip alignment sum reaches forward, so the statistic ramps up — and
+# the CFAR threshold can trip — as much as 31 chips BEFORE the first
+# wake-up sample. The argmax window past the first crossing must therefore
+# cover 76 + 31 = 107 chips (+9 margin), or the preamble peak sits beyond
+# the window and the round trip fails with crc_ok=False.
+_CFAR_CHANNEL_SPREAD = 116         # chips past first detection (x oversampling in C)
 _CFAR_MOV_AVG_TIME = 0.150         # s training-window length floor
 
 
@@ -139,7 +160,7 @@ def _crc8(bits):
     return np.array(out, dtype=int)
 
 
-@dataclass
+@dataclass(eq=False)
 class JanusPacket:
     """A baseline 64-bit JANUS packet (STANAG 4748 Table I).
 
@@ -156,15 +177,49 @@ class JanusPacket:
     tx_rx: int = 1
     forward: int = 0
 
+    def __eq__(self, other):
+        """Field-wise equality, with ``app_data`` compared element-wise.
+
+        Hand-written because ``app_data`` is an ndarray: the generated
+        ``__eq__`` compares the field tuples, which puts an array inside a
+        ``bool()`` and raises "The truth value of an array with more than one
+        element is ambiguous" — so the first assertion a codec user writes,
+        ``JanusPacket.from_bits(p.to_bits())[0] == p``, could not be written
+        at all. Field-wise rather than ``to_bits()``-based so two packets
+        differing only outside the 64 encoded bits still compare unequal.
+
+        Defining ``__eq__`` in a class body is also what makes the class
+        unhashable — Python sets ``__hash__`` to ``None`` for it — which is
+        the contract wanted here, since the packet is mutable and
+        ``app_data`` is an ndarray. No explicit ``__hash__ = None`` is needed;
+        adding a real one would make a mutable object usable as a dict key.
+        """
+        if not isinstance(other, JanusPacket):
+            return NotImplemented
+        return (
+            self.class_id == other.class_id
+            and self.app_type == other.app_type
+            and self.mobility == other.mobility
+            and self.schedule == other.schedule
+            and self.tx_rx == other.tx_rx
+            and self.forward == other.forward
+            and np.array_equal(np.asarray(self.app_data),
+                               np.asarray(other.app_data))
+        )
+
+
     def to_bits(self):
         """Encode to the 64-bit packet (56 payload bits + 8-bit CRC)."""
         if not 0 <= self.class_id < 256:
-            raise ConfigurationError("JanusPacket: class_id must be 0..255")
+            raise ConfigurationError(
+                f"JanusPacket: class_id must be 0..255; got {self.class_id!r}")
         if not 0 <= self.app_type < 64:
-            raise ConfigurationError("JanusPacket: app_type must be 0..63")
+            raise ConfigurationError(
+                f"JanusPacket: app_type must be 0..63; got {self.app_type!r}")
         adb = np.asarray(self.app_data, dtype=int).ravel()
         if adb.size != 34:
-            raise ConfigurationError("JanusPacket: app_data must be 34 bits")
+            raise ConfigurationError(
+                f"JanusPacket: app_data must be 34 bits; got {adb.size}")
         bits = np.concatenate([
             _int_bits(JANUS_VERSION, 4),
             [self.mobility & 1, self.schedule & 1, self.tx_rx & 1, self.forward & 1],
@@ -179,17 +234,22 @@ class JanusPacket:
         """Decode a 64-bit packet. Returns ``(packet, crc_ok)``."""
         b = np.asarray(bits64, dtype=int).ravel()
         if b.size != 64:
-            raise ConfigurationError("JanusPacket.from_bits: need exactly 64 bits")
+            raise ConfigurationError(
+                f"JanusPacket.from_bits: need exactly 64 bits; got {b.size}")
         version = _bits_int(b[0:4])
-        if version != 3:
+        crc_ok = np.array_equal(_crc8(b[:56]), b[56:64])
+        if version != 3 and crc_ok:
+            # The warning fires only when the CRC vouches for the bits: on a
+            # failed decode the version field is as garbled as the rest, and
+            # a version-mismatch claim would point away from the real failure
+            # (crc_ok=False already reports it).
             import warnings
             warnings.warn(
                 f"JanusPacket.from_bits: packet version {version} != 3 "
                 f"(the only version this codec implements); field layout "
                 f"may not match.",
-                UserWarning, stacklevel=2,
+                UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
             )
-        crc_ok = np.array_equal(_crc8(b[:56]), b[56:64])
         pkt = cls(
             class_id=_bits_int(b[8:16]),
             app_type=_bits_int(b[16:22]),
@@ -218,9 +278,10 @@ def _interleave_perm():
 
 def janus_encode(bits64):
     """Baseline packet bits (64) -> 144 coded+interleaved channel symbols."""
-    b = np.asarray(bits64, dtype=int).ravel()
+    b = _require_binary_bits("janus_encode", bits64)
     if b.size != 64:
-        raise ConfigurationError("janus_encode: need exactly 64 packet bits")
+        raise ConfigurationError(
+            f"janus_encode: need exactly 64 packet bits; got {b.size}")
     inp = np.concatenate([b, np.zeros(_CONV_K - 1, dtype=int)])   # 64 + 8 flush = 72
     conv = np.empty(_N_CODED, dtype=int)
     state = 0
@@ -234,36 +295,46 @@ def janus_encode(bits64):
 
 def janus_decode(symbols144):
     """Inverse of :func:`janus_encode`: 144 symbols -> 64 packet bits (Viterbi)."""
+    # Deliberately specialised twin of uacpy.comms.coding.viterbi_decode:
+    # this core hard-codes the K=9 rate-1/2 JANUS code with precomputed
+    # trellis words where that one stays generic over (polys, K). Any change
+    # to the add-compare-select or traceback logic here must be mirrored
+    # there.
     y = np.asarray(symbols144, dtype=int).ravel()
     if y.size != _N_CODED:
-        raise ConfigurationError(f"janus_decode: need exactly {_N_CODED} symbols")
+        raise ConfigurationError(
+            f"janus_decode: need exactly {_N_CODED} symbols; got {y.size}")
     conv = np.empty(_N_CODED, dtype=int)
     conv[_interleave_perm()] = y                       # de-interleave
     nsteps = _N_CODED // 2
-    inf = float("inf")
-    pm = [inf] * _N_STATES
+    # Butterfly structure: the transition (s, b) -> ((b << 7) | (s >> 1))
+    # means state t is reached from exactly two predecessors, 2t and 2t+1
+    # (mod 256), both on input bit = the top bit of t.
+    states = np.arange(_N_STATES)
+    prev0 = (states << 1) & (_N_STATES - 1)
+    prev1 = prev0 | 1
+    bit_in = states >> 7
+    out0 = _TRELLIS_OUT[prev0, bit_in]                 # (256, 2) words into t
+    out1 = _TRELLIS_OUT[prev1, bit_in]
+    rx = conv.reshape(nsteps, 2)
+    # Branch metrics (r0 ^ hi) + (r1 ^ lo) per step for both transitions.
+    bm0 = np.sum(out0[None, :, :] ^ rx[:, None, :], axis=2)
+    bm1 = np.sum(out1[None, :, :] ^ rx[:, None, :], axis=2)
+    pm = np.full(_N_STATES, np.inf)
     pm[0] = 0.0
     prev = np.zeros((nsteps, _N_STATES), dtype=np.int32)
-    pbit = np.zeros((nsteps, _N_STATES), dtype=np.int8)
     for k in range(nsteps):
-        r0, r1 = conv[2 * k], conv[2 * k + 1]
-        npm = [inf] * _N_STATES
-        for s in range(_N_STATES):
-            if pm[s] == inf:
-                continue
-            for bit in (0, 1):
-                hi, lo = _TRELLIS_OUT[s, bit]
-                ns = _TRELLIS_NXT[s, bit]
-                m = pm[s] + (r0 ^ hi) + (r1 ^ lo)
-                if m < npm[ns]:
-                    npm[ns] = m
-                    prev[k, ns] = s
-                    pbit[k, ns] = bit
-        pm = npm
+        cand0 = pm[prev0] + bm0[k]
+        cand1 = pm[prev1] + bm1[k]
+        # Strict < keeps the even predecessor on a tie — the same survivor a
+        # state-ascending scan that replaces only on improvement selects.
+        take1 = cand1 < cand0
+        pm = np.where(take1, cand1, cand0)
+        prev[k] = np.where(take1, prev1, prev0)
     state = 0                                          # tail-flushed to state 0
     bits = np.zeros(nsteps, dtype=int)
     for k in range(nsteps - 1, -1, -1):
-        bits[k] = pbit[k, state]
+        bits[k] = state >> 7        # the input bit is the arriving state's top bit
         state = prev[k, state]
     return bits[:_N_INFO]
 
@@ -290,6 +361,41 @@ def _tone_freq(fh_index, bit, f_low, fsw):
     return f_low + (2 * int(fh_index) + int(bit)) * fsw
 
 
+def _require_hop_sequence(fh_seq, caller):
+    """Validate a hop sequence and return it as an int array.
+
+    A JANUS band holds ``_N_SLOTS`` = 13 slot pairs, so a hop index outside
+    ``0..12`` places its chip at ``f_low + (2*fh + bit)*FSw``, outside the band
+    the receiver searches — the waveform comes back the documented length and
+    the tones are simply somewhere else. The modulator reads
+    ``_N_TOTAL_CHIPS`` = 176 entries, so a shorter sequence indexes past its
+    own end.
+    """
+    fh = np.asarray(fh_seq, dtype=int)
+    if fh.ndim != 1 or fh.size < _N_TOTAL_CHIPS:
+        raise ConfigurationError(
+            f"{caller}: fh_seq must be a 1-D sequence of at least "
+            f"{_N_TOTAL_CHIPS} hop indices ({_PREAMBLE_CHIPS} preamble + "
+            f"{_N_CODED} data chips); got shape {fh.shape}.")
+    bad = (fh[:_N_TOTAL_CHIPS] < 0) | (fh[:_N_TOTAL_CHIPS] >= _N_SLOTS)
+    if np.any(bad):
+        raise ConfigurationError(
+            f"{caller}: fh_seq hop indices must be in 0..{_N_SLOTS - 1} — a "
+            f"JANUS band holds {_N_SLOTS} slot pairs and index k transmits at "
+            f"f_low + (2k + bit)*FSw, so a larger index puts the chip outside "
+            f"the band. Got {int(np.count_nonzero(bad))} out-of-range "
+            f"value(s) of {_N_TOTAL_CHIPS}, first "
+            f"{int(fh[:_N_TOTAL_CHIPS][bad][0])} at index "
+            f"{int(np.flatnonzero(bad)[0])}.")
+    return fh
+
+
+def _preamble_tones(fh, f_low, fsw):
+    """The 32 tone frequencies the preamble actually transmits, in chip order."""
+    return np.array([_tone_freq(fh[k], FH_PREAMBLE_BITS[k], f_low, fsw)
+                     for k in range(_PREAMBLE_CHIPS)])
+
+
 def janus_modulate(bits64, sample_rate=48000.0, fc=FC_INITIAL, bw=BW_INITIAL,
                    cd=None, fh_seq=None, tukey=True, wakeup=False):
     """Generate the real FH-BFSK JANUS waveform for a 64-bit packet.
@@ -298,13 +404,36 @@ def janus_modulate(bits64, sample_rate=48000.0, fc=FC_INITIAL, bw=BW_INITIAL,
     each chip is a CW tone (duration ``cd``, default ``1/FSw`` = 6.25 ms in the
     initial band) at the frequency selected by the hop index and the bit value.
 
+    ``tukey`` tapers each chip with a tapered cosine over 5 % of its length
+    (2.5 % at each end), softening the edge transient a rectangular chip would
+    radiate; ``tukey=False`` emits the plain rectangular CW chip. The CMRE
+    reference tapers too, but differently — external:modulator.c:78-90 puts a
+    Hamming half-taper over ``lt/16`` samples (6.25 %) at each end, from 0.08
+    rather than from 0 — so neither setting is sample-identical to it, and the
+    two differ only over the outer few percent of each chip. ``wakeup``
+    prepends the three wake-up tones, ``cd`` overrides the chip duration and
+    ``fh_seq`` the hop sequence.
+
     Returns the real-valued passband waveform (the tones already sit in the
     acoustic band, so no separate up-conversion is needed).
+
+    ``sample_rate`` must be at least ``2*(fc + bw/2)`` — twice the upper band
+    edge — or a :class:`~uacpy.core.exceptions.ConfigurationError` is raised:
+    an aliased waveform is undetectable downstream, because the loopback
+    demodulator correlates with the same aliased tone kernels and decodes it
+    cleanly.
     """
+    if sample_rate < 2 * (fc + bw / 2):
+        raise ConfigurationError(
+            f"janus_modulate: the band edge fc + bw/2 = {fc + bw / 2:g} Hz "
+            f"is above the Nyquist frequency sample_rate/2 = "
+            f"{sample_rate / 2:g} Hz, so the tones alias; require "
+            f"sample_rate >= {2 * (fc + bw / 2):g} Hz.")
     sym = janus_encode(bits64)
     f_low, fsw = _band_params(fc, bw)
     cd = 1.0 / fsw if cd is None else float(cd)
-    fh = FH_SEQUENCE if fh_seq is None else np.asarray(fh_seq, dtype=int)
+    fh = (FH_SEQUENCE if fh_seq is None else
+          _require_hop_sequence(fh_seq, "janus_modulate"))
     fs = float(sample_rate)
     bounds = _chip_bounds(_N_TOTAL_CHIPS, cd, fs)
 
@@ -327,7 +456,8 @@ def janus_modulate(bits64, sample_rate=48000.0, fc=FC_INITIAL, bw=BW_INITIAL,
 
 
 def _tukey(n, alpha):
-    """Tukey (tapered-cosine) window, ``alpha`` fraction tapered each end."""
+    """Tukey (tapered-cosine) window; ``alpha`` is the **total** tapered
+    fraction, so each end gets ``alpha/2`` of the length."""
     if alpha <= 0:
         return np.ones(n)
     w = np.ones(n)
@@ -376,8 +506,13 @@ def _chips_alignment(x, fs, f_low, fsw, fh, cd, max_speed):
     """
     chip = cd * fs
     hstep = int(round(chip / _CHIP_OVERSAMPLING))
-    tones = np.array([_tone_freq(fh[k], FH_PREAMBLE_BITS[k], f_low, fsw)
-                      for k in range(_PREAMBLE_CHIPS)])
+    tones = _preamble_tones(fh, f_low, fsw)
+    # Goertzel window length, from CMRE external:chips_alignment.c:143-144
+    # (``_DOPPLER_C0`` is that file's hard-coded 1540 m/s). At
+    # ``max_speed = 0`` it reduces to exactly one chip, ``cd*fs``; widening the
+    # Doppler search, or moving to a band with higher tones, shortens it below
+    # a chip so the window still fits within one Doppler-scaled chip. The floor
+    # holds it at 3/4 chip, the reference's lower bound on the DFT length.
     gf = int(np.floor(fs * (_DOPPLER_C0 * cd)
                       / ((cd * float(tones.max()) + 1) * max_speed + _DOPPLER_C0)))
     gf = max(gf, int(0.75 * chip))
@@ -385,6 +520,9 @@ def _chips_alignment(x, fs, f_low, fsw, fh, cd, max_speed):
         return None, hstep
     ref = np.hamming(gf)[:, None] * np.exp(
         -2j * np.pi * np.outer(np.arange(gf), tones) / fs)
+    # Per-column normalisation applied before the max filter and the sum, as in
+    # external:chips_alignment.c:276, so ``stat`` is the mean per-chip tone
+    # magnitude.
     mag = np.abs(sliding_window_view(x, gf)[::hstep] @ ref) / _PREAMBLE_CHIPS
     mag = np.maximum(mag[:-1], mag[1:])                       # 2-point max filter
     nstat = mag.shape[0] - _CHIP_OVERSAMPLING * (_PREAMBLE_CHIPS - 1)
@@ -394,6 +532,18 @@ def _chips_alignment(x, fs, f_low, fsw, fh, cd, max_speed):
             + _CHIP_OVERSAMPLING * np.arange(_PREAMBLE_CHIPS)[None, :])
     stat = mag[cols, np.arange(_PREAMBLE_CHIPS)[None, :]].sum(axis=1)
     return stat, hstep
+
+
+def _cfar_window_correction(m):
+    """Right-window self-contamination weight ``w`` for a training window of ``m`` cells.
+
+    ``external:rx.c:413`` passes
+    ``0.1538 * fmin((n_chips + dmod_chip_count) / (step_length // 4), 1)`` to
+    ``janus_go_cfar_new``, whose ``external:go_cfar.c:327`` scales it by the
+    training-window length ``hn - hg == step_length``. The weight is therefore
+    proportional to ``m``: 16.0 at the initial band, not 0.1538.
+    """
+    return _CFAR_WINDOW_CORRECTION * m * min(_N_TOTAL_CHIPS / (m // 4), 1.0)
 
 
 def _go_cfar(stat, cd):
@@ -411,19 +561,28 @@ def _go_cfar(stat, cd):
     m = int(np.floor(_CHIP_OVERSAMPLING * mov_avg / cd))      # training half (cols)
     hg = _CHIP_OVERSAMPLING                                   # half guard
     hn = m + hg
+    w = _cfar_window_correction(m)
     n = stat.size
     # Reflect-pad the statistic so edge cells get a representative (not zero-biased)
     # training background, preserving CFAR's constant-false-alarm behaviour near the
     # clip boundaries; the streaming reference always has real stream context here.
     csum = np.concatenate([[0.0], np.cumsum(np.pad(stat, hn, mode="reflect"))])
     spread = _CFAR_CHANNEL_SPREAD * _CHIP_OVERSAMPLING
+    # Detection floor relative to the statistic's own peak (an absolute floor
+    # made crossing depend on the recording's amplitude scale: a quiet but
+    # clean packet fell to the argmax fallback while a loud noise floor
+    # crossed). All-zero statistic -> floor 0, nothing crosses, argmax below.
+    z_floor = 1e-9 * float(np.max(stat))
     first = None
     for i in range(n):
+        # The +hn offsets map stat index i onto the reflect-padded csum. In stat
+        # coordinates the two training windows are [i-hn, i-hg) and [i+hg, i+hn):
+        # m cells each, held off the cell under test by the hg-wide guard.
         z = stat[i]
         left = csum[(i - hg) + hn] - csum[(i - hn) + hn]
         right = csum[(i + hn) + hn] - csum[(i + hg) + hn]
-        z_go = max(left, right - z * _CFAR_WINDOW_CORRECTION) * _CFAR_THRESHOLD / m
-        if z > z_go and z > 1e-9:
+        z_go = max(left, right - z * w) * _CFAR_THRESHOLD / m
+        if z > z_go and z > z_floor:
             first = i
             break
     if first is None:
@@ -440,8 +599,7 @@ def _detect(x, fs, f_low, fsw, fh, cd, max_speed):
     if m0 is None:
         return None, stat
     coarse = m0 * hstep
-    tones = np.array([_tone_freq(fh[k], FH_PREAMBLE_BITS[k], f_low, fsw)
-                      for k in range(_PREAMBLE_CHIPS)])
+    tones = _preamble_tones(fh, f_low, fsw)
     rel = _chip_bounds(_PREAMBLE_CHIPS, cd, fs)
     best, start = -1.0, coarse
     for s in range(max(coarse - 2 * hstep, 0), coarse + 2 * hstep):
@@ -460,12 +618,22 @@ def janus_detect(waveform, sample_rate=48000.0, fc=FC_INITIAL, bw=BW_INITIAL,
 
     The recording is resampled once to a canonical rate (integer samples/chip)
     before the Goertzel-bank + GO-CFAR detector runs; ``start`` is mapped back to a
-    sample index in the original ``waveform`` (``None`` if no packet is found).
+    sample index in the original ``waveform``.
     ``statistic`` is the chips-alignment statistic over quarter-chip columns.
+
+    ``start`` is ``None`` only when the recording is too short for the
+    detector to run at all (shorter than one Goertzel frame, or than the
+    32-chip alignment span). On any longer recording a start is **always**
+    returned — when nothing crosses the GO-CFAR threshold the detector falls
+    back to the argmax of the alignment statistic, so a noise-only recording
+    yields the best-looking (spurious) candidate, not ``None``. Deciding
+    whether a packet is really present is the caller's job (e.g. decode it:
+    :func:`janus_demodulate` CRC-checks the baseline packet).
     """
     f_low, fsw = _band_params(fc, bw)
     cd = 1.0 / fsw if cd is None else float(cd)
-    fh = FH_SEQUENCE if fh_seq is None else np.asarray(fh_seq, dtype=int)
+    fh = (FH_SEQUENCE if fh_seq is None else
+          _require_hop_sequence(fh_seq, "janus_detect"))
     fs = float(sample_rate)
     _, fs_c = _canonical_fs(cd, fs)
     xc = _resample(np.asarray(waveform, dtype=float), fs_c / fs)
@@ -529,11 +697,12 @@ def janus_demodulate(waveform, sample_rate=48000.0, fc=FC_INITIAL, bw=BW_INITIAL
     the Doppler compensation — use it only for clean, Doppler-free
     recordings. The 144 data chips are detected non-coherently
     and decoded. Parse the 64 bits with :meth:`JanusPacket.from_bits`, or use
-    :func:`receive`.
+    :func:`janus_receive`.
     """
     f_low, fsw = _band_params(fc, bw)
     cd = 1.0 / fsw if cd is None else float(cd)
-    fh = FH_SEQUENCE if fh_seq is None else np.asarray(fh_seq, dtype=int)
+    fh = (FH_SEQUENCE if fh_seq is None else
+          _require_hop_sequence(fh_seq, "janus_demodulate"))
     fs = float(sample_rate)
     _, fs_c = _canonical_fs(cd, fs)
     x = _resample(np.asarray(waveform, dtype=float), fs_c / fs)
@@ -544,14 +713,26 @@ def janus_demodulate(waveform, sample_rate=48000.0, fc=FC_INITIAL, bw=BW_INITIAL
     if start is None:
         start, _ = _detect(x, fs, f_low, fsw, fh, cd, doppler_max_speed)
         if start is None:
-            raise ConfigurationError("janus_demodulate: preamble not found")
+            raise ConfigurationError(
+                f"janus_demodulate: preamble not found — no window of the "
+                f"{x.size / fs:.3f} s waveform cleared the detector at "
+                f"f_low={f_low} Hz. Check the recording carries a JANUS "
+                f"packet on that band, or pass start= to skip detection.")
         if doppler_max_speed > 0:
             gamma = _estimate_doppler(x, start, f_low, fsw, fh, cd, fs,
                                       doppler_max_speed, sound_speed)
             x = _resample(x, gamma)
             start, _ = _detect(x, fs, f_low, fsw, fh, cd, doppler_max_speed)
             if start is None:
-                raise ConfigurationError("janus_demodulate: preamble not found")
+                # The preamble cleared the detector before resampling and not
+                # after, so the Doppler stage is what lost it -- say which
+                # stage failed, or the two raises read as the same failure.
+                raise ConfigurationError(
+                    f"janus_demodulate: preamble not found after Doppler "
+                    f"correction (gamma={gamma:.6f}, estimated under "
+                    f"doppler_max_speed={doppler_max_speed} m/s), though it "
+                    f"was found before. Lower doppler_max_speed, set it to 0 "
+                    f"to skip the correction, or pass start= directly.")
 
     bounds = start + _chip_bounds(_N_TOTAL_CHIPS, cd, fs)
     sym = np.empty(_N_CODED, dtype=int)
@@ -563,16 +744,19 @@ def janus_demodulate(waveform, sample_rate=48000.0, fc=FC_INITIAL, bw=BW_INITIAL
         f1 = _tone_freq(fh[_PREAMBLE_CHIPS + i], 1, f_low, fsw)
         sym[i] = 1 if _chip_energy(seg, f1, fs) > _chip_energy(seg, f0, fs) else 0
     bits64 = janus_decode(sym)
-    _, crc_ok = JanusPacket.from_bits(bits64)
+    # CRC checked directly rather than via JanusPacket.from_bits: demodulate
+    # returns bits + crc_ok only, and parsing the fields here would emit any
+    # packet warning a second time when janus_receive parses the same bits.
+    crc_ok = bool(np.array_equal(_crc8(bits64[:56]), bits64[56:64]))
     return bits64, crc_ok
 
 
-def transmit(packet: JanusPacket, sample_rate=48000.0, **kwargs):
+def janus_transmit(packet: JanusPacket, sample_rate=48000.0, **kwargs):
     """Convenience: a :class:`JanusPacket` -> real JANUS waveform."""
     return janus_modulate(packet.to_bits(), sample_rate, **kwargs)
 
 
-def receive(waveform, sample_rate=48000.0, **kwargs):
+def janus_receive(waveform, sample_rate=48000.0, **kwargs):
     """Convenience: a JANUS waveform -> ``(JanusPacket, crc_ok)``."""
     bits64, crc_ok = janus_demodulate(waveform, sample_rate, **kwargs)
     pkt, _ = JanusPacket.from_bits(bits64)

@@ -1,23 +1,21 @@
 """Bathymetry shape carrier: seafloor depth as a function of range.
 
 A 1-D profile (``depth`` vs ``range``), the seafloor analogue of
-:class:`uacpy.core.ssp.SoundSpeedProfile`. Split out of
-:mod:`uacpy.core.environment`; re-exported from there for stable import paths.
+:class:`uacpy.core.ssp.SoundSpeedProfile`. Re-exported from
+:mod:`uacpy.core.environment` for stable import paths.
 """
 
-import copy as _copy
 import numpy as np
 from dataclasses import dataclass
 
 from uacpy.core.exceptions import ConfigurationError
-from uacpy.core._carrier_validate import (
-    _require_positive, _require_non_negative, _require_strictly_increasing,
-    _coerce_data_sources,
-)
+from uacpy.core._grid import _RangeProfile
+from uacpy.core._carrier_validate import _require_positive, _coerce_data_sources
 
 
-@dataclass
-class Bathymetry:
+# eq=False: a dataclass __eq__ over ndarray fields raises; compare by identity.
+@dataclass(eq=False, repr=False)
+class Bathymetry(_RangeProfile):
     """Seafloor depth (m, positive down) as a function of range (m).
 
     A 1-D grid library carrier mirroring :class:`SoundSpeedProfile`: select a
@@ -39,28 +37,33 @@ class Bathymetry:
     depths: np.ndarray
     data_sources: tuple = ()
 
+    _VALUE_FIELD = 'depths'
+    _VALUE_LABEL = 'depth'
+    _AXIS_DOWN = True
+
     def __post_init__(self):
-        self.ranges = np.array(self.ranges, dtype=float).reshape(-1)
-        self.depths = np.array(self.depths, dtype=float).reshape(-1)
         self.data_sources = _coerce_data_sources(self.data_sources, "Bathymetry")
-        if self.ranges.size != self.depths.size:
-            raise ConfigurationError(
-                f"Bathymetry: ranges ({self.ranges.size}) and depths "
-                f"({self.depths.size}) must have the same length.")
-        if self.ranges.size == 0:
-            raise ConfigurationError("Bathymetry: needs at least one point.")
-        _require_non_negative(self.ranges, "Bathymetry ranges", hint="metres")
+        self._init_range_profile()
+
+    def _validate_values(self) -> None:
         _require_positive(self.depths, "Bathymetry depths", hint="metres, down")
-        if self.ranges.size > 1:
-            _require_strictly_increasing(self.ranges, "Bathymetry.ranges")
 
     # ── constructors ────────────────────────────────────────────────────────
     @classmethod
     def coerce(cls, value) -> 'Bathymetry':
         """Coerce ``Bathymetry`` / scalar depth / ``(N, 2)`` ``(range, depth)``
-        pairs into a :class:`Bathymetry`."""
+        pairs into a :class:`Bathymetry`.
+
+        ``None`` is rejected (bathymetry is required; there is no default
+        seafloor).
+        """
         if isinstance(value, Bathymetry):
             return value
+        if isinstance(value, (bool, np.bool_)):
+            raise ConfigurationError(
+                f"Bathymetry: {value!r} is a bool, not a depth — as a scalar "
+                f"it would mean a {float(value):g} m deep seafloor."
+            )
         try:
             if np.ndim(value) == 0:
                 return cls(ranges=np.array([0.0]),
@@ -77,61 +80,8 @@ class Bathymetry:
                 f"(example: [(0, 100), (5000, 200)]).")
         return cls(ranges=arr[:, 0], depths=arr[:, 1])
 
-    def to_pairs(self) -> np.ndarray:
-        """``(N, 2)`` ``(range, depth)`` view."""
-        return np.column_stack([self.ranges, self.depths])
-
-    def copy(self) -> 'Bathymetry':
-        """Deep copy (symmetric with the other carriers)."""
-        return _copy.deepcopy(self)
-
     # ── derived ─────────────────────────────────────────────────────────────
-    @property
-    def n_ranges(self) -> int:
-        return int(self.ranges.size)
-
     @property
     def depth(self) -> float:
         """Maximum seafloor depth (m) — the deepest point of the profile."""
         return float(np.max(self.depths))
-
-    @property
-    def range_max(self) -> float:
-        return float(np.max(self.ranges))
-
-    @property
-    def is_range_dependent(self) -> bool:
-        """True when the seafloor depth varies with range."""
-        return self.ranges.size > 1 and bool(np.ptp(self.depths) > 0)
-
-    # ── grid-library selectors ──────────────────────────────────────────────
-    def at(self, *, range):
-        """Nearest seafloor depth to ``range`` (m) — never fabricates. Returns
-        a float for a scalar range, an array for an array of ranges. See
-        :meth:`eval` (interpolate) and :meth:`isel` (positional)."""
-        return self._query(range, 'nearest')
-
-    def eval(self, *, range, method: str = 'linear'):
-        """Interpolated seafloor depth at ``range`` (m). ``method`` is
-        ``'linear'`` (default), ``'nearest'`` or ``'cubic'``; constant
-        extrapolation past the ends. The interpolating counterpart of
-        :meth:`at`."""
-        return self._query(range, method)
-
-    def isel(self, *, range):
-        """Seafloor depth at integer index ``range`` — the positional
-        counterpart of :meth:`at`."""
-        idx = np.asarray(range)
-        n = self.depths.size
-        if idx.ndim == 0:
-            i = int(idx)
-            if not -n <= i < n:
-                raise IndexError(
-                    f"Bathymetry.isel: range index {i} out of range for "
-                    f"{n} point(s)")
-        out = self.depths[idx.astype(int)]
-        return float(out) if idx.ndim == 0 else out
-
-    def _query(self, range, method):
-        from uacpy.core._grid import query_profile
-        return query_profile(self.ranges, self.depths, range, method)

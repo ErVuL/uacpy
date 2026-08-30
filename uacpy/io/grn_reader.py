@@ -13,8 +13,8 @@ Convention summary
   ``k(f) = 2π·f/cVec``.
 * SPARC snapshot — the wavenumber grid is **frequency-independent** so
   ``cVec`` is mapped using the source frequency ``freq0`` from the GRN
-  header (``fieldsco.m:97-100``); ``freqVec`` actually stores the output
-  *time* vector (``sparc.f90:319``), not frequencies.
+  header (``fieldsco.m:100-102``); ``freqVec`` actually stores the output
+  *time* vector (``sparc.f90:320``), not frequencies.
 
 We detect SPARC by the ``'SPARC'`` prefix in the title (set at
 ``sparc.f90:84``).
@@ -27,7 +27,10 @@ from pathlib import Path
 from typing import Union, Dict, Any, Optional
 
 from uacpy.core.results import Field
-from uacpy.io._fortran_helpers import detect_endian, typed_format_error
+from uacpy.core._warn_frames import USER_FRAME_SKIP
+from uacpy.io._fortran_helpers import (
+    detect_endian, require_model_output, typed_format_error,
+)
 from uacpy.core.exceptions import ConfigurationError, FileFormatError
 
 
@@ -62,6 +65,7 @@ def read_grn_file(filepath: Union[str, Path]) -> Dict[str, Any]:
         ``is_sparc``     : bool — True iff ``title`` starts with ``'SPARC'``.
     """
     filepath = Path(filepath)
+    require_model_output(filepath, 'read_grn_file')
 
     with open(filepath, "rb") as f:
         head = f.read(4)
@@ -122,21 +126,53 @@ def read_grn_file(filepath: Union[str, Path]) -> Dict[str, Any]:
         # Records 5-7: theta / sx / sy — skipped
         f.seek(7 * 4 * recl, 0)
 
-        # Record 8: Source depths (float32)
+        # Records 8-10 hold Pos%Sz, Pos%Rz and Pos%Rr (RWSHDFile.f90:111-114).
+        # The depth vectors are REAL(KIND=4) and the range vector — whose slot
+        # the phase speeds occupy — is REAL(KIND=8)
+        # (SourceReceiverPositions.f90:23-25); the record-length formula counts
+        # them the same way, ``Pos%NSz, Pos%NRz, 2 * Pos%NRr`` words
+        # (RWSHDFile.f90:100).
+
+        # Record 8: Source depths
         sd = np.fromfile(f, dtype=f4, count=nsd)
 
         f.seek(8 * 4 * recl, 0)
 
-        # Record 9: Receiver depths (float32)
+        # Record 9: Receiver depths
         rd = np.fromfile(f, dtype=f4, count=nrd)
 
         f.seek(9 * 4 * recl, 0)
 
-        # Record 10: phase-speed vector (float64), Nk entries.
+        # Record 10: phase-speed vector, Nk entries
         cVec = np.fromfile(f, dtype=f8, count=nk)
 
         # Records 11+: complex Green's function, one record per
-        # (freq, source_depth, receiver_depth) tuple.
+        # (freq, source_depth, receiver_depth) tuple, receiver depth fastest —
+        # ``REC = 10 + (ifreq-1)*NSz*NRz + (iS-1)*NRz + iR`` (scooter.f90:588).
+        # ``irec`` is the 0-based record index used by every seek above
+        # (``irec * 4 * recl`` is the head of record ``irec + 1``), so starting
+        # at 9 and incrementing before the first seek lands the first slab on
+        # record 11.
+        #
+        # SPARC's snapshot indexes ``iG = (Itout-1)*Pos%NRz + ir``
+        # (sparc.f90:286-287) — output time stands in for the frequency axis
+        # (``WriteHeaderSparc`` sets ``Nfreq = Ntout``, sparc.f90:318-320) and
+        # there is NO source-depth factor, because ``Green`` carries no
+        # source-depth axis in a snapshot run. That matches the sequential walk
+        # below only while ``NSz == 1``. ``WriteHeaderSparc`` never rewrites
+        # ``Pos%NSz``, so a snapshot header still reports whatever the deck
+        # asked for: were a deck to carry two source depths, the walk would
+        # read time slot 2's slabs into slot 1's second source and run off the
+        # end of the file. `SPARC.run` refuses a multi-depth Source for exactly
+        # this reason, so the case is unreachable from the public API — this
+        # check states that coupling here, where the layout assumption lives.
+        if title.upper().startswith('SPARC') and nsd != 1:
+            raise FileFormatError(
+                f"read_grn_file: SPARC snapshot header reports NSz={nsd}, but "
+                f"sparc.f90:286-287 writes its records with no source-depth "
+                f"factor, so only NSz=1 is readable. The Green's function of a "
+                f"snapshot run carries no source-depth axis.",
+            )
         G = np.zeros((nfreq, nsd, nrd, nk), dtype=np.complex64)
         irec = 9
         for ifreq in range(nfreq):
@@ -192,17 +228,34 @@ def _wavenumbers_for_frequency(grn_data: Dict[str, Any], freq: float) -> np.ndar
 def _stab_attenuation(grn_data: Dict[str, Any], k: np.ndarray) -> float:
     """Stabilising attenuation to use in the integrand.
 
-    ``fieldsco.m:110-112`` overrides ``atten = Δk`` for SCOOTER (the solver
-    only writes one ``atten`` value to the header; for broadband each
-    frequency has its own ``Δk`` so we recompute). For SPARC this is 0.
-    For other titles we trust the value stored in the header.
+    SCOOTER evaluates the FE solve on the contour ``k + i*Atten``
+    (``scooter.f90:581``), so the inverse transform has to undo that offset with
+    ``exp(+Atten*r)`` — which means using the ``Atten`` the solver actually used.
+
+    ``scooter.f90:122-125`` recomputes ``Deltak = (kMax - kMin)/(Nk - 1)`` inside
+    the frequency loop from ``kMin = omega/cHigh``, so ``Deltak`` — and hence
+    ``Atten`` — scales with frequency, while ``scooter.f90:133`` writes the header
+    only for ``ifreq == 1``. That is why ``fieldsco.m:113-115`` re-derives
+    ``Atten`` from the file's own per-frequency ``k`` vector instead of reading
+    the header, and it is right to for a broadband run.
+
+    But ``scooter.f90:130`` zeroes ``Atten`` for every frequency when
+    ``TopOpt(7:7) == '0'``, and a zero header is therefore valid at every
+    frequency. Re-deriving ``Δk`` there multiplies a Green's function computed on
+    the real axis by ``exp(+Δk*r)``, biasing TL by ``8.686*Δk*r`` dB — 6.8 dB at
+    the far receiver on the default ``rmax_multiplier = 2.0``. ``fieldsco.m`` has
+    no way to know the flag was set; uacpy wrote it, and the value the solver used
+    is in the header, so use it.
+
+    For SPARC this is 0.  For other titles the header is taken as given.
     """
     if grn_data["is_sparc"]:
         return 0.0
     title = grn_data["title"].upper()
-    if title.startswith('SCOOTER'):
-        return float(k[1] - k[0]) if len(k) > 1 else float(grn_data["atten"])
-    return float(grn_data["atten"])
+    header_atten = float(grn_data["atten"])
+    if title.startswith('SCOOTER') and header_atten != 0.0 and len(k) > 1:
+        return float(k[1] - k[0])
+    return header_atten
 
 
 def _hanning_taper(k: np.ndarray, freq: float,
@@ -211,17 +264,45 @@ def _hanning_taper(k: np.ndarray, freq: float,
 
     Mirrors ``fieldsco.m:taper`` — symmetric Hanning roll-offs at the
     spectrum edges, ones in the middle. Returns ``ones`` when both bounds
-    are inactive.
+    are inactive. Raises :class:`ConfigurationError` when the requested
+    phase-speed band has no overlap with the file's wavenumber grid —
+    the taper would zero the entire spectrum.
     """
     Nk = len(k)
     win = np.ones(Nk, dtype=float)
-    if Nk < 4:
+    if Nk == 0:
         return win
 
     omega = 2.0 * np.pi * freq
     k_left = omega / cmax if (cmax is not None and cmax > 0) else None
     k_right = omega / cmin if (cmin is not None and cmin > 0) else None
 
+    # The pass band is [ω/cmax, ω/cmin]; the grid spans phase speeds
+    # [ω/k[-1], ω/k[0]]. A band that misses the grid entirely would taper
+    # every sample to zero (and the roll-off construction below would build
+    # a window longer than the grid).
+    c_grid_lo = omega / float(k[-1])
+    c_grid_hi = omega / float(k[0])
+    if k_left is not None and k_right is not None and k_left > k_right:
+        raise ConfigurationError(
+            f"phase-speed taper: cmin ({cmin:g} m/s) exceeds cmax "
+            f"({cmax:g} m/s); the pass band [ω/cmax, ω/cmin] is empty."
+        )
+    if (k_left is not None and k_left > k[-1]) or \
+            (k_right is not None and k_right < k[0]):
+        raise ConfigurationError(
+            f"phase-speed taper: the requested band "
+            f"(cmin={cmin!r}, cmax={cmax!r} m/s) has no overlap with the "
+            f"file's phase-speed grid [{c_grid_lo:.1f}, {c_grid_hi:.1f}] m/s "
+            f"at {freq:g} Hz — the taper would zero the entire spectrum. "
+            f"Widen or drop cmin/cmax."
+        )
+    if Nk < 4:
+        return win
+
+    # np.hanning includes the window's zero endpoints where MATLAB's
+    # hanning() drops them, so each roll-off differs from fieldsco.m's by a
+    # one-sample shift of the taper — sub-0.1% of the pass band.
     if k_left is not None and k_left > k[0]:
         n = 2 * round((k_left - k[0]) / (k[-1] - k[0]) * Nk) + 1
         han = np.hanning(n)
@@ -237,6 +318,37 @@ def _hanning_taper(k: np.ndarray, freq: float,
     return win
 
 
+def _zero_range_mask(ranges: np.ndarray) -> np.ndarray:
+    """Ranges at which the point-source ``1/√r`` spreading factor is singular.
+
+    Mirrors the ``abs( Rr ) < realmin`` test of ``fieldsco.m:69``.
+    """
+    return np.abs(np.asarray(ranges, dtype=float)) < np.finfo(float).tiny
+
+
+def _warn_zero_ranges(ranges: np.ndarray, source_type: str,
+                      context: str = '') -> None:
+    """Warn once per transform that ``r = 0`` cells come back as no-data.
+
+    ``skip_file_prefixes`` pins the warning on the first frame outside the
+    uacpy package — the caller's own code — whatever chain of model/reader
+    frames sits in between. ``context`` names the producing ``.grn`` (its
+    title line) in the message.
+    """
+    if source_type != 'R':
+        return
+    n_zero = int(np.count_nonzero(_zero_range_mask(ranges)))
+    if n_zero:
+        origin = f" (grn title {context!r})" if context else ""
+        warnings.warn(
+            f"grn_reader: {n_zero} receiver range(s) at r = 0{origin}: the "
+            "point-source Hankel transform carries a 1/sqrt(r) "
+            "cylindrical-spreading factor that is singular there, so those "
+            "cells are returned as NaN (no data). Move the receiver off the "
+            "source axis (e.g. r = 1 m) to get a field value.",
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
+
+
 def _hankel_transform(
     G_src: np.ndarray,
     k: np.ndarray,
@@ -248,13 +360,20 @@ def _hankel_transform(
 ) -> np.ndarray:
     """Wavenumber → range transform for one (source_depth, frequency) slab.
 
-    Implements the four ``fieldsco.m`` branches we expose:
+    A direct (trapezoidal-rule) DFT over the uniform ``k`` grid — the matrix
+    product ``-G_scaled @ X`` below — not an FFT, matching ``fieldsco.m:5``
+    ("This version uses the trapezoidal rule directly to do a DFT, rather
+    than an FFT").
+
+    Implements three of ``fieldsco.m``'s four source branches (its ``'H'``
+    exact-Bessel branch, ``fieldsco.m:139-144``, is not exposed):
 
     ============  ==================================================
     source_type   Geometry
     ------------  --------------------------------------------------
     ``'R'``       cylindrical / point source (3-D), ``√(2πr)`` denom
     ``'X'``       Cartesian / line source (2-D), ``√(2π)`` denom
+    ``'S'``       point source, cylindrical spreading removed, ``√(2π)`` denom
     ============  ==================================================
 
     ============  ==================================================
@@ -273,29 +392,55 @@ def _hankel_transform(
     atten : stabilising attenuation (added to k along the +i axis)
     source_type, spectrum : see table above
     """
-    if source_type not in ('R', 'X'):
-        raise ConfigurationError(f"source_type must be 'R' or 'X', got {source_type!r}")
+    if source_type not in ('R', 'X', 'S'):
+        raise ConfigurationError(
+            f"source_type must be 'R', 'X', or 'S', got {source_type!r}")
     if spectrum not in ('P', 'N', 'B'):
         raise ConfigurationError(f"spectrum must be 'P', 'N', or 'B', got {spectrum!r}")
 
     dk = float(k[1] - k[0]) if len(k) > 1 else 1.0
+    # fieldsco.m:109-111's own guard: the uniform-dk DFT is periodic in range
+    # with period 2*pi/dk, and beyond ~10/dk the wrapped tail is amplified
+    # exponentially by the exp(+atten*r) stabilisation compensation (+70 dB
+    # measured one alias period out) — refuse rather than return garbage.
+    r_max = float(np.max(np.abs(ranges))) if np.size(ranges) else 0.0
+    if r_max * dk > 10.0:
+        raise ConfigurationError(
+            f"Hankel transform: max range {r_max:g} m x wavenumber step "
+            f"dk = {dk:g} 1/m = {r_max * dk:.3g} > 10 — the range axis "
+            f"extends past the transform's alias period 2*pi/dk = "
+            f"{2.0 * np.pi / dk:g} m (fieldsco.m:109-111 stops here too).",
+            remediation="Increase the spectral RMax (rmax_multiplier on "
+                        "Scooter/SPARC) so dk shrinks, or shorten the "
+                        "receiver ranges.")
     ck = k + 1j * atten
     abs_r = np.abs(ranges)
+    x = np.outer(ck, abs_r)
 
-    if source_type == 'R':
-        # Point source: phase factor exp(±i(kr - π/4)), √k weighting,
-        # 1/√(2πr) cylindrical spreading.
-        x = np.outer(ck, abs_r)
-        factor1 = np.sqrt(ck)
-        factor2 = dk / np.sqrt(2.0 * np.pi * np.maximum(abs_r, np.finfo(float).tiny))
-        X_pos = np.exp(-1j * (x - np.pi / 4.0))
-        X_neg = np.exp(+1j * (x - np.pi / 4.0))
-    else:  # 'X' — line source
-        x = np.outer(ck, abs_r)
+    if source_type == 'X':
+        # Line source: no √k weighting, no phase shift, 1/√(2π).
         factor1 = np.ones_like(ck)
         factor2 = dk / np.sqrt(2.0 * np.pi) * np.ones_like(abs_r)
         X_pos = np.exp(-1j * x)
         X_neg = np.exp(+1j * x)
+    else:
+        # Point source: phase factor exp(±i(kr - π/4)) and √k weighting.
+        # 'R' adds 1/√(2πr) cylindrical spreading; 'S' omits it.
+        factor1 = np.sqrt(ck)
+        if source_type == 'R':
+            # 1/√r diverges at r=0. ``fieldsco.m:69`` moves a zero range to
+            # 1 m; uacpy reports no-data instead, so a cell is never labelled
+            # with a range the field was not evaluated at. Kraken's modal sum
+            # skips the same division (``EvaluateMod.f90:71-73``), leaving a
+            # bare mode sum there — masking keeps the two models' grids
+            # comparable cell by cell.
+            with np.errstate(divide='ignore'):
+                factor2 = dk / np.sqrt(2.0 * np.pi * abs_r)
+            factor2 = np.where(_zero_range_mask(abs_r), np.nan, factor2)
+        else:
+            factor2 = dk / np.sqrt(2.0 * np.pi) * np.ones_like(abs_r)
+        X_pos = np.exp(-1j * (x - np.pi / 4.0))
+        X_neg = np.exp(+1j * (x - np.pi / 4.0))
 
     G_scaled = G_src * factor1[np.newaxis, :]
 
@@ -345,7 +490,7 @@ def grn_to_field(
     grn_data: Dict[str, Any],
     ranges: np.ndarray,
     *,
-    method: str = "fft_hankel",
+    method: str = "direct_dft",
     source_type: str = 'R',
     spectrum: str = 'P',
     source_depth_idx: int = 0,
@@ -360,20 +505,25 @@ def grn_to_field(
 
     Parameters
     ----------
+    method : str
+        Only ``'direct_dft'`` — the trapezoidal-rule matrix-product DFT of
+        :func:`_hankel_transform`.
     source_depth_idx : int
         Index into the source-depth axis when ``nsd > 1``. Defaults to the
         first source.
     source_type, spectrum : see :func:`_hankel_transform`.
     cmin, cmax : optional phase-speed taper bounds (m/s).
     """
-    if method != "fft_hankel":
-        raise ConfigurationError(f"Unknown method: {method!r}. Use 'fft_hankel'.")
+    if method != "direct_dft":
+        raise ConfigurationError(f"Unknown method: {method!r}. Use 'direct_dft'.")
 
     nsd = grn_data["nsd"]
     if not (0 <= source_depth_idx < nsd):
         raise ConfigurationError(
             f"source_depth_idx={source_depth_idx} out of range for nsd={nsd}"
         )
+    _warn_zero_ranges(ranges, source_type,
+                      context=grn_data.get('title', ''))
 
     p_out = _grn_pressure_slice(
         grn_data, ranges, ifreq=0, isd=source_depth_idx,
@@ -384,8 +534,18 @@ def grn_to_field(
         data=p_out,
         coords={'depth': grn_data["rd"], 'range': ranges},
         model='', backend='',
-        source_depths=np.atleast_1d(np.asarray(grn_data['sd'], dtype=float)),
-        frequencies=float(grn_data["freq"]),
+        # The slab holds one source depth — the one ``source_depth_idx``
+        # selected — so it carries that depth alone.
+        source_depths=np.atleast_1d(
+            np.asarray(grn_data['sd'], dtype=float)[source_depth_idx]),
+        # Label with the frequency of the slab actually transformed (this
+        # function always takes slice 0), not the header's nominal freq0 —
+        # they differ for multi-frequency SCOOTER runs (RWSHDFile.f90:105-106
+        # keeps them independent). SPARC keeps freq: its freqVec holds the
+        # OUTPUT TIMES (sparc.f90:320), not frequencies.
+        frequencies=(float(grn_data["freqVec"][0])
+                     if grn_data["nfreq"] > 0 and not grn_data["is_sparc"]
+                     else float(grn_data["freq"])),
         phase_reference='travelling_wave',
         metadata={
             "transform_method": method,
@@ -393,6 +553,45 @@ def grn_to_field(
             "spectrum": spectrum,
         },
     )
+
+
+def _dft_row(G: np.ndarray, f_idx: int,
+             win: Optional[np.ndarray] = None) -> np.ndarray:
+    """Row ``f_idx`` of ``np.fft.fft(G, axis=0)``, without the other rows.
+
+    ``np.fft.fft(cube, axis=0)[f_idx]`` transforms all ``nt`` frequencies and
+    keeps one — measured 5.1x the cube in peak RSS, which is ~17 GB on a
+    512 x 200 x 4096 snapshot, to produce an (nrd, nk) slab. That row is a
+    contraction of ``G`` against ``exp(-2i pi f_idx n / nt)``, so it costs the
+    slab plus one pass over the cube instead.
+
+    ``win`` (a real per-sample taper) folds into the kernel. Mind what numpy
+    does with it today: ``G * win[:, None, None]`` promotes a complex64 cube
+    to complex128, so that FFT runs in DOUBLE precision and the windowed
+    branch is accurate to ~1e-16 rather than the ~1e-7 of a single-precision
+    transform. Contracting a complex128 kernel against the whole cube would
+    promote it the same way and hand most of the memory back (3.2x the cube
+    against 1.6x), so the windowed path casts and accumulates in complex128
+    over chunks of the last axis: same accuracy, bounded scratch.
+    """
+    nt = G.shape[0]
+    phase = np.exp(-2j * np.pi * float(f_idx) * np.arange(nt) / nt)
+    if win is None:
+        # Mirror numpy's own FFT precision rule so the row keeps the dtype the
+        # full transform gave it: single in, single out; anything else double.
+        single = np.result_type(G.dtype, np.complex64) == np.complex64
+        return np.tensordot(
+            phase.astype(np.complex64 if single else np.complex128), G, axes=1)
+    kernel = phase * np.asarray(win, dtype=np.float64)
+    out = np.empty(G.shape[1:], dtype=np.complex128)
+    # ~4e6 complex128 elements (64 MB) of cast cube per block — the scratch
+    # budget the synthesis chunking in core/results/field.py works to.
+    per_column = max(int(np.prod(G.shape[:-1])), 1)
+    step = max(1, 4_000_000 // per_column)
+    for a in range(0, G.shape[-1], step):
+        out[..., a:a + step] = np.tensordot(
+            kernel, G[..., a:a + step].astype(np.complex128), axes=1)
+    return out
 
 
 def sparc_snapshot_to_field(
@@ -419,9 +618,13 @@ def sparc_snapshot_to_field(
     divides it out, recovering ``g`` — i.e. **absolute TL re 1 m**, directly
     comparable to Kraken/Scooter. Requires ``pulse_type`` (the SPARC pulse
     alphabet; the ``SPARC`` wrapper passes it). The window and ``2/Σwin`` factor
-    cancel exactly; a residual remains only if the run applied an extra band-pass
-    (``fMin``/``fMax``) that ``sparc_pulse`` does not replicate. ``'none'``
-    returns the raw (uncalibrated) field and warns.
+    cancel exactly; a residual remains only from the source high cut
+    ``fHiCut`` (``sparc.f90:397-401``), which ``sparc_pulse`` does not
+    replicate — ``rkT·cHigh/2π`` for ``Pulse(4:4)`` in ``'HB'`` and ``10·fMax``
+    otherwise. ``fMin``/``fMax`` themselves are **not** a band-pass on the
+    output: they set the wavenumber integration limits
+    ``kMin = 2π·fMin/cHigh`` and ``kMax = 2π·fMax/cLow`` (``sparc.f90:111-112``).
+    ``'none'`` returns the raw (uncalibrated) field and warns.
 
     SPARC's snapshot mode (``output_mode='S'``) writes the *time evolution*
     of the wavenumber-domain Green's function (``Green(itout, irz, ik)``,
@@ -433,7 +636,7 @@ def sparc_snapshot_to_field(
     3. Hankel-transform :math:`G(k, z)` to range.
 
     Returns a complex narrowband :class:`Field` (``coords={'depth',
-    'range'}``); use ``.tl`` or ``.to_tl()`` for transmission loss in dB.
+    'range'}``); use ``.db`` or ``.to_db()`` for transmission loss in dB.
     """
     if not grn_data["is_sparc"]:
         raise ConfigurationError(
@@ -466,6 +669,8 @@ def sparc_snapshot_to_field(
             f"source_depth_idx={source_depth_idx} out of range for nsd={nsd}"
         )
 
+    _warn_zero_ranges(ranges, source_type,
+                      context=grn_data.get('title', ''))
     G = grn_data["G"][:, source_depth_idx, :, :]   # (nt, nrd, nk)
     tout = grn_data["freqVec"]                      # actually the time vector
     nt = len(tout)
@@ -476,11 +681,6 @@ def sparc_snapshot_to_field(
         )
     dt = float(tout[1] - tout[0])
 
-    # Steady-tone amplitude estimator 2·X_k/Σwin (mirrors rts_to_pressure for
-    # the 'R'/'D' modes). This yields S(w0)·g; normalize='source' (default)
-    # divides out the source spectrum S(w0) below to recover calibrated g.
-    win = np.hanning(nt)
-    G_freq = np.fft.fft(G * win[:, np.newaxis, np.newaxis], axis=0)
     fft_freqs = np.fft.fftfreq(nt, dt)
     nyquist = 0.5 / dt
     if frequency > nyquist:
@@ -499,6 +699,8 @@ def sparc_snapshot_to_field(
         # both: a taper would break the convolution theorem and would null the
         # transient source pulse (which lives in the first few samples, where a
         # Hann window is ~0). uacpy generated the pulse, so s(t) is known.
+        # Imported here rather than at module level: sparc_pulse pulls scipy
+        # in, and only this deconvolution path needs it.
         from uacpy.acoustic_signal.waveforms import sparc_pulse
         s_t, _ = sparc_pulse(tout, 2.0 * np.pi * frequency, pulse_type[0])
         S_at_f0 = np.fft.fft(s_t)[f_idx]
@@ -507,37 +709,44 @@ def sparc_snapshot_to_field(
                 "sparc_snapshot_to_field: source spectrum is zero at "
                 f"{frequency} Hz for pulse_type={pulse_type!r}; cannot "
                 "deconvolve (check pulse / frequency).")
-        G_at_f0 = np.fft.fft(G, axis=0)[f_idx, :, :] / S_at_f0
+        G_at_f0 = _dft_row(G, f_idx) / S_at_f0
     else:
-        G_at_f0 = 2.0 * G_freq[f_idx, :, :] / np.sum(win)   # (nrd, nk) = S·g
+        # Steady-tone amplitude estimator 2·X_k/Σwin (mirrors rts_to_pressure
+        # for the 'R'/'D' modes). This yields S(w0)·g — the raw, uncalibrated
+        # field this branch returns.
+        win = np.hanning(nt)
+        G_at_f0 = 2.0 * _dft_row(G, f_idx, win) / np.sum(win)  # (nrd,nk) = S·g
 
     # Wavenumber grid — SPARC's k vector is independent of frequency.
     k = _wavenumbers_for_frequency(grn_data, frequency)
     atten = _stab_attenuation(grn_data, k)          # 0 for SPARC
 
     if cmin is not None or cmax is not None:
-        win = _hanning_taper(k, frequency, cmin, cmax)
-        G_at_f0 = G_at_f0 * win[np.newaxis, :]
+        taper = _hanning_taper(k, frequency, cmin, cmax)
+        G_at_f0 = G_at_f0 * taper[np.newaxis, :]
 
     p_out = _hankel_transform(
         G_at_f0, k, ranges,
         atten=atten, source_type=source_type, spectrum=spectrum,
     )
     if normalize == 'none':
-        # Align the RAW field with sparc.exe's native 'R'-mode range synthesis
-        # (sparc.f90 EXTRACT: √2·Δk·√k·e^{i(−kr+π/4)}/√r) — the fieldsco-style
-        # Hankel above carries 1/√(2πr) and the Scooter −1 prefactor instead, a
-        # constant −√(4π) between the two. The calibrated path SKIPS this:
-        # after deconvolution G_at_f0 is the Scooter unit-source Green's
-        # function, so the bare Hankel (as in _grn_pressure_slice) already
-        # matches Scooter/Kraken — applying −√(4π) would add a spurious ~11 dB.
-        p_out = p_out * (-np.sqrt(4.0 * np.pi))
+        # Put the RAW field on the full inverse-Hankel weight
+        # Δk·√(2k/(πr)) that sparc.f90's 'D' branch carries (:595 kernel with
+        # the 1/√(π·Rr) write scale at :292) — the fieldsco-style Hankel above
+        # carries 1/√(2πr) and the Scooter −1 prefactor instead, a constant −2
+        # between the two. The calibrated path SKIPS this: after deconvolution
+        # G_at_f0 is the Scooter unit-source Green's function, so the bare
+        # Hankel (as in _grn_pressure_slice) already matches Scooter/Kraken.
+        p_out = p_out * (-2.0)
 
     return Field(
         data=p_out,
         coords={'depth': grn_data["rd"], 'range': ranges},
         model='', backend='',
-        source_depths=np.atleast_1d(np.asarray(grn_data['sd'], dtype=float)),
+        # The slab holds one source depth — the one ``source_depth_idx``
+        # selected — so it carries that depth alone.
+        source_depths=np.atleast_1d(
+            np.asarray(grn_data['sd'], dtype=float)[source_depth_idx]),
         frequencies=float(frequency),
         phase_reference='travelling_wave',
         metadata={
@@ -547,6 +756,95 @@ def sparc_snapshot_to_field(
             "snapshot_freq_bin": float(fft_freqs[f_idx]),
             "snapshot_dt": dt,
             "snapshot_nt": nt,
+            "source_type": source_type,
+            "spectrum": spectrum,
+        },
+    )
+
+
+def sparc_snapshot_to_time_field(
+    grn_data: Dict[str, Any],
+    ranges: np.ndarray,
+    frequency: float,
+    *,
+    source_type: str = 'R',
+    spectrum: str = 'P',
+    source_depth_idx: int = 0,
+) -> Field:
+    """Range-domain time evolution of a SPARC snapshot (``output_mode='S'``).
+
+    ``sparc.f90:580-591`` writes ``Green(Itout, irz, ik)`` — the
+    *wavenumber-domain* field at each output time — and ``WriteHeaderSparc``
+    (``:317-327``) stores the time vector in the ``.grn``'s frequency slot and
+    the phase-speed vector ``sqrt(omega2)/k`` in its range slot.
+    ``doc/sparc.htm`` prescribes running FIELDS afterwards "to convert the
+    '.GRN' file to a '.SHD' file containing the pressure field"; this is that
+    step done in-tree.
+
+    Simpler than :func:`sparc_snapshot_to_field`, which recovers a *CW*
+    component: the snapshot already is the propagated pulse, so one inverse
+    Hankel transform per output time gives ``p(z, r, t)`` directly — no
+    time-FFT, no frequency selection, and no source deconvolution (exactly as
+    the ``'R'``/``'D'`` modes return their raw received time series).
+
+    The wavenumber grid is taken at the source frequency and is **constant
+    across the time axis** — SPARC's ``k`` does not scale with the ``.grn``'s
+    nominal frequency axis, because that axis holds times.
+
+    Returns a real :class:`Field` with ``coords={'depth', 'range', 'time'}``.
+    """
+    if not grn_data["is_sparc"]:
+        raise ConfigurationError(
+            "sparc_snapshot_to_time_field expects a SPARC GRN; got title "
+            f"{grn_data['title']!r} (no 'SPARC' prefix)."
+        )
+    nsd = grn_data["nsd"]
+    if not (0 <= source_depth_idx < nsd):
+        raise ConfigurationError(
+            f"source_depth_idx={source_depth_idx} out of range for nsd={nsd}"
+        )
+
+    _warn_zero_ranges(ranges, source_type,
+                      context=grn_data.get('title', ''))
+    G = grn_data["G"][:, source_depth_idx, :, :]   # (nt, nrd, nk)
+    tout = np.asarray(grn_data["freqVec"], dtype=float)   # times, not freqs
+    k = _wavenumbers_for_frequency(grn_data, frequency)
+    atten = _stab_attenuation(grn_data, k)                # 0 for SPARC
+    ranges = np.atleast_1d(np.asarray(ranges, dtype=float))
+
+    # (nrd, n_ranges) per output time -> (nrd, n_ranges, nt).
+    p_t = np.stack(
+        [_hankel_transform(G[it], k, ranges, atten=atten,
+                           source_type=source_type, spectrum=spectrum)
+         for it in range(G.shape[0])],
+        axis=-1,
+    )
+    # Put the snapshot on the same inverse-Hankel weight the 'D' branch uses,
+    # dk*sqrt(2k/(pi*r)) (sparc.f90:595 with the 1/sqrt(pi*Rr) write scale at
+    # :292). The fieldsco-style Hankel above carries 1/sqrt(2*pi*r) and the
+    # Scooter -1 prefactor instead; the constant between the two is -2.
+    p_t = p_t * (-2.0)
+
+    # The snapshot is a real transient field; the Hankel transform carries the
+    # analytic-signal convention, so the physical pressure is its real part.
+    dt = float(tout[1] - tout[0]) if tout.size > 1 else float('nan')
+
+    return Field(
+        data=np.real(p_t),
+        coords={'depth': grn_data["rd"], 'range': ranges, 'time': tout},
+        model='', backend='',
+        # The slab holds one source depth — the one ``source_depth_idx``
+        # selected — so it carries that depth alone.
+        source_depths=np.atleast_1d(
+            np.asarray(grn_data['sd'], dtype=float)[source_depth_idx]),
+        frequencies=float(frequency),
+        phase_reference='time_domain_native',
+        metadata={
+            "transform_method": "hankel_per_snapshot_time",
+            "dt": dt,
+            "fs": (1.0 / dt) if dt == dt and dt else float('nan'),
+            "nt": int(tout.size),
+            "t_start": float(tout[0]) if tout.size else 0.0,
             "source_type": source_type,
             "spectrum": spectrum,
         },
@@ -567,7 +865,21 @@ def grn_to_transfer_function(
 
     Output: complex ``Field`` with ``coords={'depth', 'range',
     'frequency'}``, shape ``(n_d, n_r, n_f)``.
+
+    Rejects a SPARC snapshot: its frequency slot holds output *times*.
     """
+    if grn_data["is_sparc"]:
+        raise ConfigurationError(
+            "grn_to_transfer_function expects a multi-frequency Green's "
+            f"function; got a SPARC snapshot (title {grn_data['title']!r}). "
+            "SPARC stores its output TIME vector in the .grn's frequency slot "
+            "(sparc.f90:317-319), so the returned Field would carry seconds "
+            "on a 'frequency' axis and a center_frequency that is a time.",
+            remediation="Use sparc_snapshot_to_field for the steady-state "
+                        "field at one frequency, or "
+                        "sparc_snapshot_to_time_field for p(z, r, t).",
+        )
+
     nfreq = grn_data["nfreq"]
     nrd = grn_data["nrd"]
     nsd = grn_data["nsd"]
@@ -576,6 +888,8 @@ def grn_to_transfer_function(
             f"source_depth_idx={source_depth_idx} out of range for nsd={nsd}"
         )
 
+    _warn_zero_ranges(ranges, source_type,
+                      context=grn_data.get('title', ''))
     pressure = np.zeros((nrd, len(ranges), nfreq), dtype=np.complex128)
     for ifreq in range(nfreq):
         pressure[:, :, ifreq] = _grn_pressure_slice(
@@ -593,7 +907,10 @@ def grn_to_transfer_function(
         },
         phase_reference='travelling_wave',
         model='', backend='',
-        source_depths=np.atleast_1d(np.asarray(grn_data['sd'], dtype=float)),
+        # The slab holds one source depth — the one ``source_depth_idx``
+        # selected — so it carries that depth alone.
+        source_depths=np.atleast_1d(
+            np.asarray(grn_data['sd'], dtype=float)[source_depth_idx]),
         frequencies=freqVec,
         metadata={
             'center_frequency': float(freqVec[len(freqVec) // 2]),

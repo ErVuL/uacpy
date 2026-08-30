@@ -24,8 +24,11 @@ FEATURES DEMONSTRATED:
 """
 
 import sys
+import time
+import os
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Repo root, so ``import uacpy`` resolves from a source checkout.
+sys.path.insert(0, str(Path(__file__).parents[2]))
 
 import numpy as np  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
@@ -35,8 +38,9 @@ from uacpy.core.environment import BoundaryProperties  # noqa: E402
 from uacpy.visualization.plots import plot_field  # noqa: E402
 from uacpy.models import RunMode  # noqa: E402
 
-OUTPUT_DIR = Path(__file__).parent / 'output'
-OUTPUT_DIR.mkdir(exist_ok=True)
+OUTPUT_DIR = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
+                  or Path(__file__).parent / 'output')
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def main():
@@ -113,10 +117,12 @@ def main():
     bellhop = Bellhop(verbose=False, beam_type='B', n_beams=300, alpha=(-80, 80))
 
     try:
+        t_start = time.perf_counter()
         result = bellhop.run(
             env, source, receiver,
             run_mode=RunMode.COHERENT_TL,        # Coherent TL
         )
+        elapsed = time.perf_counter() - t_start
         print("  ✓ Propagation complete!")
 
     except Exception as e:
@@ -134,12 +140,12 @@ def main():
     # Plot 1: TL field
     ax = axes[0, 0]
     _, _ = plot_field(result, ax=ax, env=env)
-    ax.set_title('Transmission Loss Field (auto TL limits, jet_r colormap)',
+    ax.set_title('Transmission Loss Field (fixed 20-120 dB scale, jet_r colormap)',
                  fontweight='bold', fontsize=12)
 
     # Plot 2: TL vs Range (at source depth)
     ax = axes[0, 1]
-    tl_vs_range = result.at(depth=source.depths[0]).tl
+    tl_vs_range = result.at(depth=source.depths[0]).db
     ax.plot(result.ranges/1000, tl_vs_range, 'b-', linewidth=2)
     ax.set_xlabel('Range (km)', fontweight='bold')
     ax.set_ylabel('Transmission Loss (dB)', fontweight='bold')
@@ -154,7 +160,7 @@ def main():
     # Plot 3: TL vs Depth (at mid-range)
     ax = axes[1, 0]
     mid_range_km = np.median(result.ranges) / 1000
-    tl_vs_depth = result.at(range=mid_range_km * 1000.0).tl
+    tl_vs_depth = result.at(range=mid_range_km * 1000.0).db
     ax.plot(tl_vs_depth, result.depths, 'r-', linewidth=2)
     ax.invert_yaxis()
     ax.axhline(source.depths[0], color='gray', linestyle='--', linewidth=1, alpha=0.5, label='Source depth')
@@ -225,9 +231,9 @@ def main():
     # ═══════════════════════════════════════════════════════════════════════
 
     print("\nResults:")
-    print(f"  • TL range: {np.nanmin(result.tl):.1f} to {np.nanmax(result.tl):.1f} dB")
+    print(f"  • TL range: {np.nanmin(result.db):.1f} to {np.nanmax(result.db):.1f} dB")
     print(f"  • Max range: {result.ranges[-1]/1000:.1f} km")
-    print("  • Computation time: < 1 second")
+    print(f"  • Bellhop run time: {elapsed:.2f} s")
 
     print("\nWhat you learned:")
     print("  ✓ How to create a basic Environment")
@@ -236,9 +242,10 @@ def main():
     print("  ✓ How to visualize transmission loss")
 
     print("\nPlotting features used:")
-    print("  ✓ plot_field() with auto TL limits")
-    print("  ✓ jet_r colormap (blue=good, red=poor) - Acoustic Toolbox standard")
-    print("  ✓ Auto TL limits (median + 0.75σ, rounded to 10 dB)")
+    print("  ✓ plot_field() with the fixed TL colour scale")
+    print("  ✓ jet_r colormap (red=low TL/loud, blue=high TL/quiet)"
+          " - Acoustic Toolbox standard")
+    print("  ✓ Fixed TL limits, 20 to 120 dB, identical across every figure")
 
     print("\nNext steps:")
     print("  • Try example_02 for different sound speed profiles")

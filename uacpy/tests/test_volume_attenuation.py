@@ -14,7 +14,12 @@ pytestmark = pytest.mark.requires_binary
 
 
 class TestVolumeAttenuation:
-    """Tests for volume attenuation models (Priority 1 gap)."""
+    """``env.absorption`` reaches the solvers and adds loss.
+
+    Only :func:`test_bellhop_thorp_attenuation` checks a magnitude; the
+    Kraken / Scooter cases are reachability smoke tests (the model accepts an
+    absorbing environment and returns a finite result).
+    """
 
     @pytest.fixture
     def shallow_env(self):
@@ -54,11 +59,10 @@ class TestVolumeAttenuation:
                                        high_freq_source, receiver):
         """Test Bellhop with Thorp attenuation formula.
 
-        At 10 kHz, Thorp absorption ≈ 0.6 dB/km; over the test ranges
-        the extra TL should be on the order of the predicted Thorp value.
-        We assert the depth-mean difference at the longest range is within
-        the predicted-times-[0.1, 10] band — a sign-error or unit
-        confusion would not satisfy that band.
+        At 10 kHz, Thorp absorption is 1.19 dB/km, i.e. 5.9 dB of extra
+        one-way loss over the 5 km longest range. We assert the depth-mean
+        difference there is within the predicted-times-[0.1, 10] band — a
+        sign-error or unit confusion would not satisfy that band.
         """
         bellhop = Bellhop(verbose=False)
 
@@ -86,7 +90,7 @@ class TestVolumeAttenuation:
 
         assert isinstance(result_thorp, Field)
         observed_extra = (
-            np.mean(result_thorp.tl[:, -1]) - np.mean(result_no_atten.tl[:, -1])
+            np.mean(result_thorp.db[:, -1]) - np.mean(result_no_atten.db[:, -1])
         )
         # Sign must be right (Thorp adds loss, never reduces it).
         assert observed_extra > 0, (
@@ -102,9 +106,12 @@ class TestVolumeAttenuation:
         )
 
     @pytest.mark.requires_binary
-    def test_kraken_thorp_attenuation(self, shallow_env_thorp,
+    def test_kraken_thorp_attenuation(self, shallow_env, shallow_env_thorp,
                                       high_freq_source, receiver):
-        """Test Kraken with Thorp attenuation formula (modes path)."""
+        """An absorbing environment reaches the modes path and adds modal
+        loss: at 10 kHz Thorp is ~1.19 dB/km ≈ 1.4e-4 nepers/m of extra
+        Im(k) on every mode, so the Thorp run's mean Im(k) must sit above
+        the no-absorption run's (the bottom's own loss is present in both)."""
         kraken = Kraken(verbose=False)
         result = kraken.compute_modes(
             env=shallow_env_thorp,
@@ -112,12 +119,44 @@ class TestVolumeAttenuation:
         )
         assert isinstance(result, Modes)
         assert result.k is not None
+        plain = kraken.compute_modes(env=shallow_env,
+                                     source=high_freq_source)
+        im_thorp = np.imag(np.asarray(result.k))
+        im_plain = np.imag(np.asarray(plain.k))
+        assert im_thorp.size and im_plain.size
+        # Im(k) <= 0 in the decaying convention: more absorption pushes it
+        # further NEGATIVE, so the comparison is on magnitudes.
+        assert float(np.abs(im_thorp).mean()) > float(np.abs(im_plain).mean()), (
+            "Thorp volume absorption did not increase the modal Im(k)")
+
+    def test_ram_warns_that_absorption_is_ignored(self, shallow_env,
+                                                  shallow_env_thorp):
+        """No RAM backend consumes water-column volume attenuation
+        (ram.md §7); an absorbing env warns instead of silently running a
+        lossless water column. Unit-tests the helper — no binary runs."""
+        import warnings as _w
+        from uacpy.models import RAM
+        from uacpy.core.absorption import ConstantAbsorption
+        m = RAM(verbose=False)
+        with pytest.warns(UserWarning, match='env.absorption'):
+            m._warn_on_dropped_absorption(shallow_env_thorp)
+        with _w.catch_warnings(record=True) as caught:
+            _w.simplefilter('always')
+            m._warn_on_dropped_absorption(shallow_env)
+            m._warn_on_dropped_absorption(Environment(
+                name='zero', bathymetry=100.0, ssp=1500.0,
+                absorption=ConstantAbsorption(0.0)))
+        assert not [w for w in caught
+                    if 'env.absorption' in str(w.message)]
 
     @pytest.mark.requires_binary
     def test_frequency_dependent_attenuation(self, shallow_env_thorp,
                                              low_freq_source, high_freq_source,
                                              receiver):
-        """Test that attenuation increases with frequency."""
+        """The same absorbing environment runs at 100 Hz and 10 kHz and both
+        fields are finite. Thorp spans four orders of magnitude in alpha across
+        that pair, so an alpha that overflowed or went NaN at one end shows up
+        here; the ordering of the two losses is not asserted."""
         bellhop = Bellhop(verbose=False)
 
         result_low = bellhop.run(
@@ -143,7 +182,8 @@ class TestVolumeAttenuation:
     @pytest.mark.slow
     def test_attenuation_with_scooter(self, shallow_env_thorp,
                                       high_freq_source, receiver):
-        """Test Scooter with volume attenuation."""
+        """The spectral-integral path also accepts an absorbing environment and
+        returns a finite field. The size of the added loss is not asserted."""
         scooter = Scooter(verbose=False)
         result = scooter.run(
             env=shallow_env_thorp,

@@ -52,9 +52,9 @@ def test_caribbean_tile_fallback(monkeypatch):
     assert emo.point_depth((15.0, -70.0)) == pytest.approx(1500.0)
 
 
-def test_nan_cell_is_no_coverage(monkeypatch):
+def test_a_nan_cell_raises_naming_the_valueless_cell(monkeypatch):
     monkeypatch.setattr(emo, 'http_get', _stub_point('NaN'))
-    with pytest.raises(DataFetchError, match='no coverage'):
+    with pytest.raises(DataFetchError, match='no value at the nearest cell'):
         emo.point_depth((50.0, 0.0))
 
 
@@ -98,7 +98,8 @@ def test_fetch_environment_records_emodnet_provenance(monkeypatch):
 @pytest.mark.requires_network
 def test_live_emodnet_point():
     try:
-        d = emo.point_depth((51.0, 2.5))               # southern North Sea
+        d = emo.point_depth((51.5, 2.5))               # southern North Sea,
+        #   ~50 km off both coasts; the live DTM cell holds ~34 m of water
     except DataFetchError as exc:
         pytest.skip(f"EMODnet DTM unreachable: {exc.message}")
     assert 0.0 < d < 200.0

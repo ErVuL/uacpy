@@ -26,7 +26,10 @@ FEATURES DEMONSTRATED:
     ✓ uacpy.data.seaice_local (NSIDC sea-ice concentration, high-lat int'l waters)
     ✓ Range-dependent LAYERED bottom modelled end-to-end: a fluid sediment
       column (grain-size surficial over a consolidated half-space) that varies
-      along range, run through RAM → mpiramS for a clean low-frequency TL
+      along range, run through RAM. The dispatcher picks **ramgeo** for this
+      env — a layered, range-varying fluid seabed is ramgeo's case, not
+      mpiramS's — and the script prints the backend it actually selected
+      rather than naming one here.
     ✓ Seabed model comparison — grain-size half-space vs CRUST1.0 layered
       elastic bottom (uacpy.data.crust1_local), the low-frequency description
     ✓ uacpy.data.citations (attribution for every source used)
@@ -40,19 +43,22 @@ NOTE: runs from the offline cache when installed (no network); otherwise hits
 """
 
 import sys
+import os
 from pathlib import Path
 
-OUTPUT_DIR = Path(__file__).parent / 'output'
-OUTPUT_DIR.mkdir(exist_ok=True)
-sys.path.insert(0, str(Path(__file__).parent.parent))
+OUTPUT_DIR = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
+                  or Path(__file__).parent / 'output')
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+# Repo root, so ``import uacpy`` resolves from a source checkout.
+sys.path.insert(0, str(Path(__file__).parents[2]))
 
 import datetime as _dt  # noqa: E402
+import warnings  # noqa: E402
 import numpy as np  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
 
 import uacpy  # noqa: E402
 from uacpy import data  # noqa: E402
-from uacpy.data import _cache  # noqa: E402
 from uacpy.models import Bellhop, RAM, RunMode  # noqa: E402
 from uacpy.core.environment import (  # noqa: E402
     SoundSpeedProfile, Bottom, SeabedColumn,
@@ -63,11 +69,7 @@ from uacpy.core.exceptions import UACPYError  # noqa: E402
 
 def _have(dataset):
     """True if a local dataset (./data_cache/<dataset>) is installed."""
-    try:
-        _cache.require(dataset)
-        return True
-    except UACPYError:
-        return False
+    return data.is_installed(dataset)
 
 # ── USER SETTINGS — tune everything here ─────────────────────────────────────
 REGION_LAT, REGION_LON = (56.5, 62.0), (-2.0, 9.0)   # North Sea / Norwegian Trench
@@ -157,7 +159,7 @@ def _run_tl(env):
     try:
         tl = Bellhop(verbose=False).run(env, source, receiver,
                                         run_mode=RunMode.COHERENT_TL)
-        print(f"  TL: ok  ({tl.tl.shape} grid, {FREQ_HZ:g} Hz, "
+        print(f"  TL: ok  ({tl.db.shape} grid, {FREQ_HZ:g} Hz, "
               f"source {SOURCE_DEPTH:g} m)")
     except Exception as exc:                       # model not built / run failed
         print(f"  TL: [skipped] {str(exc).splitlines()[0]}")
@@ -234,7 +236,7 @@ def _sea_ice_overview(plt):
         rng_m, conc = seaice_local.fetch_sea_ice_concentration_transect(
             A, B, month=month, n_points=BOTTOM_POINTS)
         ice_grid = seaice_local.sea_ice_grid(month, hemi='N')
-    except (UACPYError, Exception) as exc:           # noqa: BLE001 — robust demo
+    except Exception as exc:                         # noqa: BLE001 — robust demo
         print(f"  sea-ice overview: [skipped] {str(exc).splitlines()[0]}")
         return
 
@@ -248,7 +250,7 @@ def _sea_ice_overview(plt):
         map_title="Arctic sea ice (NSIDC climatology)",
         tl_title=f"Transmission loss (Bellhop, {FREQ_HZ:g} Hz)",
         env_title=f"Under-ice environment A→B ({int(np.nanmean(conc) * 100)}% ice)",
-        suptitle="uacpy — under-ice environment, central Arctic (international waters)")
+        title="uacpy — under-ice environment, central Arctic (international waters)")
     out = OUTPUT_DIR / 'example_37_sea_ice.png'
     fig.savefig(out, dpi=130, bbox_inches='tight')
     plt.close(fig)
@@ -260,13 +262,14 @@ def _fluid_rdlb_from_grain(grain):
     surficial sediment: a sediment layer (grain-size c_p/ρ/α) over a faster
     consolidated half-space, varying along range.
 
-    Fluid (no shear) → RAM dispatches to mpiramS, whose PE models a
-    range-dependent layered *fluid* bottom robustly. The elastic backend
-    rams0.5 is deliberately not used here: Collins' rotated elastic PE is
-    only accurate for *weak* range variation of the seismoacoustic
-    parameters (Collins 1991); a strongly range-dependent elastic seabed
-    (e.g. CRUST1.0) needs RAMGEO, which uacpy does not vendor — so the
-    elastic CRUST1.0 column is shown as a plot in ``_compare_bottoms``."""
+    Fluid (no shear) + layered + range-varying → the RAM dispatcher selects
+    ramgeo, whose bathymetry-parallel layering models this seabed robustly.
+    The elastic backend rams0.5 is deliberately not used here: Collins'
+    rotated elastic PE is only accurate for *weak* range variation of the
+    seismoacoustic parameters (Collins 1991), and a strongly range-dependent
+    *elastic* seabed (e.g. CRUST1.0) is outside every RAM backend uacpy
+    vendors — so the elastic CRUST1.0 column is shown as a plot in
+    ``_compare_bottoms`` rather than propagated."""
     profiles = []
     for r in grain.ranges:
         bp = grain.halfspace_at(range=float(r))
@@ -286,8 +289,13 @@ def _fluid_rdlb_from_grain(grain):
 def _rdlb_overview(env, grid, plt):
     """Composite for a MODELLED range-dependent layered bottom: build a fluid
     range-dependent layered seabed from the real surficial sediment and run
-    RAM (→ mpiramS) for a clean low-frequency TL through the layered, range-
-    varying bottom — map · TL · environment, same layout as the main figure."""
+    RAM (the dispatcher selects ramgeo) for a low-frequency TL through the
+    layered, range-varying bottom — map · TL · environment, same layout as
+    the main figure.
+
+    The grid RAM ends up on does not meet the requested Lytaev accuracy
+    budget at this frequency; the run captures that warning and reports it
+    rather than presenting the TL as converged."""
     if not _have('sediment'):
         print("  RDLB overview: [skipped] needs ./install.sh --data sediment")
         return
@@ -307,12 +315,22 @@ def _rdlb_overview(env, grid, plt):
     source = uacpy.Source(depths=SOURCE_DEPTH, frequencies=RDLB_FREQ_HZ)
     receiver = uacpy.Receiver(depths=np.linspace(1, zmax, 100),
                               ranges=np.linspace(100.0, rmax, 200))
+    backend = 'unknown'
     try:
         model = RAM(verbose=False, accuracy=1e-1)
         backend = model.select_backend(env_rdlb)
-        tl = model.run(env_rdlb, source, receiver, run_mode=RunMode.COHERENT_TL)
-        print(f"  RDLB TL: ok  ({tl.tl.shape} grid, {RDLB_FREQ_HZ:g} Hz, "
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            tl = model.run(env_rdlb, source, receiver,
+                           run_mode=RunMode.COHERENT_TL)
+        print(f"  RDLB TL: ok  ({tl.db.shape} grid, {RDLB_FREQ_HZ:g} Hz, "
               f"RAM→{backend}, range-dependent fluid layered bottom)")
+        # Surface any grid/accuracy compromise rather than presenting the
+        # field as if it met the requested budget.
+        for w in caught:
+            text = ' '.join(str(w.message).split())
+            if 'accuracy budget' in text or 'not met' in text:
+                print(f"  RDLB TL: ACCURACY CAVEAT — {text}")
     except Exception as exc:                       # model not built / run failed
         print(f"  RDLB TL: [skipped] {str(exc).splitlines()[0]}")
         tl = None
@@ -320,9 +338,9 @@ def _rdlb_overview(env, grid, plt):
     fig, _ = uacpy.plot.plot_overview(
         env_rdlb, grid, transect=(A, B), tl=tl, source=source, receiver=receiver,
         map_title="North Sea — Norwegian Trench (GEBCO)",
-        tl_title=f"TL · range-dependent layered seabed (RAM→mpiramS, {RDLB_FREQ_HZ:g} Hz)",
+        tl_title=f"TL · range-dependent layered seabed (RAM→{backend}, {RDLB_FREQ_HZ:g} Hz)",
         env_title="Range-dependent LAYERED bottom A→B",
-        suptitle="uacpy — modelled range-dependent layered bottom",
+        title="uacpy — modelled range-dependent layered bottom",
         map_kwargs=dict(contours=True, aspect=1, coastline_resolution=COASTLINE_RES,
                         graticule=GRATICULE_DEG, graticule_minor=GRATICULE_MINOR_DEG))
     out = OUTPUT_DIR / 'example_37_rdlb.png'
@@ -422,7 +440,7 @@ def main():
         map_title="North Sea — Norwegian Trench (GEBCO)",
         tl_title=f"Transmission loss (Bellhop, {FREQ_HZ:g} Hz)",
         env_title="Range-dependent environment A→B",
-        suptitle="uacpy — real-world environment from GPS, modelled & plotted",
+        title="uacpy — real-world environment from GPS, modelled & plotted",
         map_kwargs=dict(contours=True, aspect=1, coastline_resolution=COASTLINE_RES,
                         graticule=GRATICULE_DEG, graticule_minor=GRATICULE_MINOR_DEG))
     # plot_overview annotates the data provenance (Bathy/SSP/Seabed) by default.
@@ -432,13 +450,13 @@ def main():
     plt.close(fig)
     print(f"\n  Composite figure saved → {out}")
 
-    # ── Modelled range-dependent layered bottom (fluid column → mpiramS) ──────
+    # ── Modelled range-dependent layered bottom (fluid column → ramgeo) ───────
     _rdlb_overview(env, (lats, lons, depth), plt)
 
     # ── Seabed model comparison: grain-size half-space vs CRUST1.0 layers ─────
     _compare_bottoms(env, plt)
 
-    # ── Second composite: an under-ice Fram Strait scenario (international) ────
+    # ── Second composite: an under-ice central-Arctic scenario (international) ─
     _sea_ice_overview(plt)
 
     # ── Attribution for every source used ────────────────────────────────────

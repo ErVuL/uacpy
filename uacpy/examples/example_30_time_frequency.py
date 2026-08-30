@@ -19,11 +19,14 @@ FEATURES DEMONSTRATED:
 """
 
 import sys
+import os
 from pathlib import Path
 
-OUTPUT_DIR = Path(__file__).parent / 'output'
-OUTPUT_DIR.mkdir(exist_ok=True)
-sys.path.insert(0, str(Path(__file__).parent.parent))
+OUTPUT_DIR = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
+                  or Path(__file__).parent / 'output')
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+# Repo root, so ``import uacpy`` resolves from a source checkout.
+sys.path.insert(0, str(Path(__file__).parents[2]))
 
 import numpy as np  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
@@ -77,7 +80,7 @@ def main():
     sig = (np.sin(2 * np.pi * 150 * t) * np.exp(-0.5 * ((t - 0.20) / 0.03) ** 2)
            + np.sin(2 * np.pi * 500 * t) * np.exp(-0.5 * ((t - 0.40) / 0.03) ** 2))
     freqs, W = cwt(sig, fs, wavelet='morlet', n_freqs=140)
-    tvw, fvw, Wv = wigner_ville(sig, fs)
+    fvw, tvw, Wv = wigner_ville(sig, fs)
 
     # --- (E) broadband pulse + echo for the cepstrum ---
     t0, width, fc = 0.06, 0.004, 250.0
@@ -88,6 +91,9 @@ def main():
     xe[d:] += 0.7 * pulse[:-d]
     cep = cepstrum(xe)
     quef = np.arange(cep.size) / fs
+    # Search 8-100 ms of quefrency. Below ~8 ms the cepstrum is dominated by
+    # the pulse's own spectral envelope (its 4 ms Gaussian width), which would
+    # outrank the echo rahmonic the peak search is after.
     lo, hi = int(0.008 * fs), int(0.1 * fs)
 
     # --- (F) hyperbolic (NMO) gather for the Radon transform ---
@@ -98,6 +104,8 @@ def main():
     vels = np.linspace(1200.0, 2000.0, 121)
     _, tauh, Rh = radon_transform(ghyp, gfs, gdx, vels, kind='hyperbolic')
 
+    # U and Rh are (slowness/velocity, tau); a flat argmax floor-divided by the
+    # column count recovers the first-axis index, i.e. the winning p or v.
     print(f"\n  tau-p strongest event ≈ {1/abs(pax[np.argmax(np.abs(U)) // U.shape[1]]):.0f} m/s")
     print(f"  cepstrum peak: {quef[lo + np.argmax(cep[lo:hi])]*1e3:.1f} ms "
           f"(echo {echo_delay*1e3:.0f} ms)")
@@ -113,7 +121,7 @@ def main():
                    vmin=-40, vmax=0, cmap='jet')
     draw_sound_cone(ax, fkf[-1], fkk[-1], 1500)
     ax.set_title('f-k transform + 1500 m/s cone', fontweight='bold')
-    ax.set_xlabel('Spatial frequency [cycles/m]'); ax.set_ylabel('Frequency [Hz]')
+    ax.set_xlabel('Wavenumber k (rad/m)'); ax.set_ylabel('Frequency [Hz]')
     ax.set_ylim(0, 400)
     fig.colorbar(im, ax=ax, label='Relative power [dB]')
 

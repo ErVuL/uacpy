@@ -6,14 +6,24 @@ Copernicus Marine Service gives *date-specific* conditions: reanalysis for
 past dates, analysis/forecast for recent/near-future ones. Same output
 contract — a :class:`~uacpy.core.environment.SoundSpeedProfile`.
 
-The ``copernicusmarine`` toolbox ships with uacpy (a core dependency); this
-source only additionally needs a free Copernicus Marine account:
+The ``copernicusmarine`` toolbox is an optional extra rather than a core
+dependency — it is credential-gated, imported at the point of use, and pulls
+xarray/dask/zarr/boto3 in behind it. This source therefore needs both the
+extra and a free Copernicus Marine account:
 
-    copernicusmarine login        # one-time, stores credentials
+    pip install "uacpy[copernicus]"   # or: pip install -e ".[copernicus]"
+    copernicusmarine login            # one-time, stores credentials
 
 Temperature comes back as potential temperature (``thetao``); it is used as a
 close proxy for in-situ temperature in the sound-speed equation (sub-m/s
 effect over typical profiles).
+
+Unlike every other network source in this layer, these fetchers take no
+``timeout``: the transport is the ``copernicusmarine`` session, which exposes
+no per-call knob and reads its timeout and retry policy from the environment
+(``COPERNICUSMARINE_HTTPS_TIMEOUT``, default 60 s;
+``COPERNICUSMARINE_HTTPS_RETRIES``, default 5) when the toolbox is imported.
+Set those to bound a call.
 """
 
 import datetime as _dt
@@ -53,7 +63,7 @@ WAVE_TP_VAR = 'VTPK'                 # wave peak period (s)
 DEFAULT_BGC_DATASET_ID = 'cmems_mod_glo_bgc_my_0.25deg_P1M-m'
 BGC_PH_VAR = 'ph'                    # sea-water pH (total scale)
 # Max days the nearest available time step may sit from the requested date
-# before we treat it as out-of-coverage and raise (shared tolerance contract
+# before it counts as out-of-coverage and raises (shared tolerance contract
 # with the other dated SSP sources — cf. argo.DEFAULT_MAX_DAYS=15). Looser than
 # Argo's by design: this is daily-mean *model* output (smooth, persistent — and
 # in-coverage the nearest step is sub-day, so this is really a coverage-edge
@@ -70,7 +80,6 @@ def fetch_ssp_operational(
     formula: str = 'unesco',
     max_days: int = DEFAULT_MAX_DAYS,
     dataset_id: str = DEFAULT_DATASET_ID,
-    timeout: float = 120.0,
     verbose: Union[bool, str] = False,
 ) -> SoundSpeedProfile:
     """Date-specific sound-speed profile from Copernicus Marine.
@@ -92,8 +101,8 @@ def fetch_ssp_operational(
         Copernicus Marine dataset. Default is the global physics reanalysis;
         for recent dates use an analysis/forecast id, e.g.
         ``'cmems_mod_glo_phy_anfc_0.083deg_P1D-m'``.
-    timeout, verbose
-        Network timeout (s) and logging gate.
+    verbose : bool or str, optional
+        Logging gate.
 
     Returns
     -------
@@ -114,9 +123,9 @@ def fetch_ssp_operational(
             remediation=f"Use one of {sorted(_FORMULAS)}.",
         )
     lat, lon = as_coordinate(point)
-    depths, temp, sal = fetch_ts_profile_operational(
+    depths, temp, sal, actual = _ts_column(
         point, date=date, max_days=max_days, dataset_id=dataset_id,
-        timeout=timeout, verbose=verbose,
+        verbose=verbose,
     )
     pressure = depth_to_pressure_dbar(depths, lat)
     speed_fn = _FORMULAS[formula]
@@ -128,6 +137,8 @@ def fetch_ssp_operational(
     )
     prov = DataProvenance(
         source=SOURCES['copernicus'],
+        data_date=actual['date'],
+        data_point=actual['point'],
         requested_point=(lat, lon),
         requested_date=str(parse_date(date)),
     )
@@ -144,10 +155,15 @@ def fetch_ssp_transect_operational(
     formula: str = 'unesco',
     max_days: int = DEFAULT_MAX_DAYS,
     dataset_id: str = DEFAULT_DATASET_ID,
-    timeout: float = 120.0,
     verbose: Union[bool, str] = False,
+    seafloor=None,
 ) -> SoundSpeedProfile:
     """Range-dependent operational SSP along ``start`` → ``end`` (Copernicus).
+
+    ``seafloor`` (a :class:`~uacpy.core.environment.Bathymetry`, optional)
+    supplies the local seafloor: a column stopping short of its own local
+    depth is extended down to it before stacking, and one already reaching
+    past it is left whole (see :func:`uacpy.data.fetch_ssp_transect`).
 
     The Copernicus counterpart of :func:`uacpy.data.fetch_ssp_transect`: opens
     the dataset once, samples ``n_points`` columns along the great-circle path,
@@ -162,21 +178,23 @@ def fetch_ssp_transect_operational(
             f"fetch_ssp_transect_operational: unknown formula={formula!r}.",
             remediation=f"Use one of {sorted(_FORMULAS)}.",
         )
+    if int(n_points) < 2:
+        raise ConfigurationError(
+            f"fetch_ssp_transect_operational: n_points must be >= 2, "
+            f"got {n_points}.",
+            remediation="Pass n_points>=2 to define a transect.")
     when = parse_date(date).isoformat()
     marine = _import_copernicusmarine()
-    try:
-        ds = marine.open_dataset(dataset_id=dataset_id)
-    except Exception as exc:
-        raise DataFetchError(
-            f"Copernicus Marine open_dataset failed: {exc}",
-            remediation="Run `copernicusmarine login` and check the dataset_id.",
-        ) from exc
+    ds = _open_dataset(
+        marine, dataset_id,
+        remediation="Run `copernicusmarine login` and check the dataset_id.")
 
     lats, lons, ranges_m = geodesic_waypoints(start, end, n_points)
     speed_fn = _FORMULAS[formula]
     columns = []
     for la, lo in zip(lats, lons):
-        depths, temp, sal = _extract_ts(ds, la, lo, when, max_days=max_days)
+        depths, temp, sal, actual = _extract_ts(ds, la, lo, when,
+                                                max_days=max_days)
         if depths.size == 0:
             raise DataFetchError(
                 f"No Copernicus profile at {la:.3f}, {lo:.3f} on {when}.",
@@ -185,6 +203,8 @@ def fetch_ssp_transect_operational(
         pressure = depth_to_pressure_dbar(depths, la)
         c = np.array([speed_fn(t, s, p) for t, s, p in zip(temp, sal, pressure)])
         prov = DataProvenance(source=SOURCES['copernicus'],
+                              data_date=actual['date'],
+                              data_point=actual['point'],
                               requested_point=(float(la), float(lo)),
                               requested_date=when)
         columns.append(SoundSpeedProfile(depths=depths, data=c, shape='measured',
@@ -194,6 +214,14 @@ def fetch_ssp_transect_operational(
         'copernicus', f"operational range-dependent SSP: {n_points} columns "
         f"over {ranges_m[-1] / 1000:.1f} km", verbose=verbose,
     )
+    if seafloor is not None:
+        from uacpy.data.sound_speed import extend_column_to_seafloor
+        # Same per-column extension as fetch_ssp_transect: never flat-hold a
+        # shallower column inside its used water column.
+        columns = [
+            extend_column_to_seafloor(col, seafloor, r, latitude=la)
+            for col, r, la in zip(columns, ranges_m, lats)
+        ]
     return assemble_range_dependent(columns, ranges_m)
 
 
@@ -203,7 +231,6 @@ def fetch_ts_profile_operational(
     date: Union[str, _dt.date],
     max_days: int = DEFAULT_MAX_DAYS,
     dataset_id: str = DEFAULT_DATASET_ID,
-    timeout: float = 120.0,
     verbose: Union[bool, str] = False,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Raw ``(depths_m, temperature_degC, salinity_psu)`` from Copernicus.
@@ -211,64 +238,157 @@ def fetch_ts_profile_operational(
     Truncated at the seafloor (first non-finite level). See
     :func:`fetch_ssp_operational` for parameters and exceptions.
     """
+    return _ts_column(point, date=date, max_days=max_days,
+                      dataset_id=dataset_id, verbose=verbose)[:3]
+
+
+def _ts_column(point, *, date, max_days, dataset_id, verbose):
+    """Open the dataset and pull one T/S column, with the snapped date/point.
+
+    Returns ``(depths, temperature, salinity, actual)`` — the provenance-bearing
+    form :func:`fetch_ts_profile_operational` narrows to its first three.
+    """
     lat, lon = as_coordinate(point)
     when = parse_date(date).isoformat()
     marine = _import_copernicusmarine()
 
     log_message('copernicus', f"opening {dataset_id} for {lat:.3f}, {lon:.3f}",
                 verbose=verbose, level='debug')
-    try:
-        ds = marine.open_dataset(dataset_id=dataset_id)
-    except Exception as exc:  # toolbox raises a variety of auth/network errors
-        raise DataFetchError(
-            f"Copernicus Marine open_dataset failed: {exc}",
-            remediation="Run `copernicusmarine login` (free account) and check "
-                        "the dataset_id and network connectivity.",
-        ) from exc
+    ds = _open_dataset(marine, dataset_id)
 
-    depths, temp, sal = _extract_ts(ds, lat, lon, when, max_days=max_days)
+    depths, temp, sal, actual = _extract_ts(ds, lat, lon, when,
+                                            max_days=max_days)
     if depths.size == 0:
         raise DataFetchError(
             f"No Copernicus profile at {lat:.3f}, {lon:.3f} on {when} "
             "(on land or outside the dataset domain).",
             remediation="Pick an ocean location/date within the dataset.",
         )
-    return depths, temp, sal
+    return depths, temp, sal, actual
+
+
+def _snapped_date(da, when: Optional[str], max_days: int) -> Optional[str]:
+    """The time step ``sel(method='nearest')`` landed on, or ``None``.
+
+    ``method='nearest'`` snaps silently to the dataset edge for an out-of-range
+    date; raise rather than substitute an edge value so the tolerance is
+    honoured the same way the other dated sources honour it.
+    """
+    if when is None or 'time' not in getattr(da, 'coords', {}):
+        return None
+    actual = np.datetime64(np.asarray(da['time'].values).reshape(-1)[0], 'D')
+    gap = abs((actual - np.datetime64(when, 'D')) / np.timedelta64(1, 'D'))
+    if gap > max_days:
+        raise DataFetchError(
+            f"Copernicus: nearest available time is {actual} "
+            f"({gap:.0f} days from requested {when}, > max_days={max_days}) "
+            "— the date is outside the dataset's range.",
+            remediation="Pass a date within range, a forecast dataset_id, "
+                        "raise max_days, or use ssp_sources='woa23'.",
+        )
+    return str(actual)
+
+
+def _snapped_point(da) -> Optional[Coordinate]:
+    """The grid cell centre ``sel(method='nearest')`` landed on, or ``None``."""
+    coords = getattr(da, 'coords', {})
+    if 'latitude' not in coords or 'longitude' not in coords:
+        return None
+    return (float(np.asarray(da['latitude'].values).reshape(-1)[0]),
+            normalize_lon(float(np.asarray(da['longitude'].values).reshape(-1)[0])))
+
+
+#: Spatial snap tolerance, as a multiple of the local grid spacing. A point
+#: inside the domain lands at most half a cell from its nearest node, so a
+#: hop beyond this many cells means the request fell outside the dataset's
+#: lat/lon coverage and snapped to its edge.
+_MAX_SNAP_CELLS = 1.5
+
+
+def _axis_spacing(axis: np.ndarray, value: float) -> Optional[float]:
+    """Node spacing (deg) of a 1-D coordinate axis at the node nearest
+    ``value`` (the larger of the two adjacent gaps), or ``None`` for an axis
+    with fewer than two nodes."""
+    axis = np.asarray(axis, dtype=float).reshape(-1)
+    if axis.size < 2:
+        return None
+    i = int(np.argmin(np.abs(axis - value)))
+    gaps = np.abs(np.diff(axis))
+    return float(max(gaps[max(i - 1, 0)], gaps[min(i, gaps.size - 1)]))
+
+
+def _check_snapped_point(ds, lat: float, lon: float,
+                         snapped: Optional[Coordinate]) -> None:
+    """Reject a spatial snap larger than ``_MAX_SNAP_CELLS`` × grid spacing.
+
+    ``sel(method='nearest')`` carries no spatial tolerance: a point outside
+    the dataset's lat/lon domain snaps silently to the edge cell — the hazard
+    :func:`_snapped_date` guards on the time axis. ``lon`` must already be
+    normalized to the convention handed to ``sel``. A dataset that exposes no
+    1-D ``latitude``/``longitude`` axes offers no spacing to derive, so it is
+    left unchecked.
+    """
+    if snapped is None:
+        return
+    try:
+        lat_axis = np.asarray(ds['latitude'].values, dtype=float).reshape(-1)
+        lon_axis = np.asarray(ds['longitude'].values, dtype=float).reshape(-1)
+    except (KeyError, AttributeError, TypeError):
+        return
+    s_lat, s_lon = snapped
+    d_lon = abs((lon - s_lon + 180.0) % 360.0 - 180.0)
+    for name, off, axis, s_val in (
+            ('latitude', abs(lat - s_lat), lat_axis, s_lat),
+            ('longitude', d_lon, lon_axis, s_lon)):
+        spacing = _axis_spacing(axis, s_val)
+        if not spacing:
+            continue
+        if off > _MAX_SNAP_CELLS * spacing:
+            raise DataFetchError(
+                f"Copernicus: nearest available cell is {s_lat:.4f}, "
+                f"{s_lon:.4f} ({off:.3f} deg from the requested {name}, "
+                f"> {_MAX_SNAP_CELLS} x the {spacing:.3f} deg grid spacing) "
+                "— the point is outside the dataset's spatial domain.",
+                remediation="Pick a point inside the dataset's coverage, or "
+                            "use a global dataset_id.",
+            )
 
 
 def _extract_ts(
     ds, lat: float, lon: float, when: Optional[str],
     *, temp_var: str = TEMPERATURE_VAR, sal_var: str = SALINITY_VAR,
     max_days: int = DEFAULT_MAX_DAYS,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Pull a single seafloor-truncated water column from an xarray dataset."""
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
+    """Pull a single seafloor-truncated water column from an xarray dataset.
+
+    Returns ``(depths, temperature, salinity, actual)``; ``actual`` is the
+    ``{'date', 'point'}`` the nearest-neighbour selection landed on (either may
+    be ``None`` when the dataset does not expose that coordinate), which the
+    callers stamp into their :class:`DataProvenance`.
+    """
     depth = np.asarray(ds['depth'].values, dtype=float).reshape(-1)
+    # sel(method='nearest') carries no tolerance: an out-of-range coordinate
+    # snaps silently to the axis edge — _snapped_date guards the time axis and
+    # _check_snapped_point the two spatial ones. A caller may give longitude
+    # in [0, 360), so it is wrapped into one convention here rather than
+    # handed to sel as supplied.
     sel = {'latitude': lat, 'longitude': normalize_lon(lon)}
     if when is not None:
         sel['time'] = when
     t_da = ds[temp_var].sel(method='nearest', **sel)
-    if when is not None and 'time' in getattr(t_da, 'coords', {}):
-        # ``method='nearest'`` snaps silently to the dataset edge for an
-        # out-of-range date; raise rather than substitute an edge value so the
-        # tolerance is honoured the same way the other dated sources honour it.
-        actual = np.datetime64(np.asarray(t_da['time'].values).reshape(-1)[0], 'D')
-        gap = abs((actual - np.datetime64(when, 'D')) / np.timedelta64(1, 'D'))
-        if gap > max_days:
-            raise DataFetchError(
-                f"Copernicus: nearest available time is {actual} "
-                f"({gap:.0f} days from requested {when}, > max_days={max_days}) "
-                "— the date is outside the dataset's range.",
-                remediation="Pass a date within range, a forecast dataset_id, "
-                            "raise max_days, or use ssp_sources='woa23'.",
-            )
+    actual = {'date': _snapped_date(t_da, when, max_days),
+              'point': _snapped_point(t_da)}
+    _check_snapped_point(ds, lat, sel['longitude'], actual['point'])
     t = np.asarray(t_da.values, float).reshape(-1)
     s = np.asarray(ds[sal_var].sel(method='nearest', **sel).values, float).reshape(-1)
 
     n = min(depth.size, t.size, s.size)
     depth, t, s = depth[:n], t[:n], s[:n]
+    # Levels below the seafloor come back masked/non-finite, so the first
+    # invalid level is the seafloor cut (index 0 = the cell is on land).
     valid = np.isfinite(t) & np.isfinite(s)
     cut = valid.size if valid.all() else int(np.argmax(~valid))
-    return depth[:cut], t[:cut], s[:cut]
+    return depth[:cut], t[:cut], s[:cut], actual
 
 
 def fetch_waves_operational(
@@ -277,7 +397,6 @@ def fetch_waves_operational(
     date: Union[str, _dt.date],
     max_days: int = DEFAULT_MAX_DAYS,
     dataset_id: str = DEFAULT_WAVE_DATASET_ID,
-    timeout: float = 120.0,
     verbose: Union[bool, str] = False,
 ) -> dict:
     """Significant wave height (m) and peak period (s) from Copernicus WAVERYS.
@@ -292,17 +411,11 @@ def fetch_waves_operational(
     marine = _import_copernicusmarine()
     log_message('waves', f"opening {dataset_id} for {lat:.3f}, {lon:.3f}",
                 verbose=verbose, level='debug')
-    try:
-        ds = marine.open_dataset(dataset_id=dataset_id)
-    except Exception as exc:  # toolbox raises a variety of auth/network errors
-        raise DataFetchError(
-            f"Copernicus Marine open_dataset failed: {exc}",
-            remediation="Run `copernicusmarine login` (free account) and check "
-                        "the dataset_id and network connectivity.",
-        ) from exc
+    ds = _open_dataset(marine, dataset_id)
 
     sel = {'latitude': lat, 'longitude': normalize_lon(lon), 'time': when}
     hs_da = ds[WAVE_HS_VAR].sel(method='nearest', **sel)
+    _check_snapped_point(ds, lat, sel['longitude'], _snapped_point(hs_da))
     if 'time' in getattr(hs_da, 'coords', {}):
         actual = np.datetime64(np.asarray(hs_da['time'].values).reshape(-1)[0], 'D')
         gap = abs((actual - np.datetime64(when, 'D')) / np.timedelta64(1, 'D'))
@@ -335,7 +448,6 @@ def fetch_ph_operational(
     reference_depth: Optional[float] = None,
     max_days: int = DEFAULT_MAX_DAYS,
     dataset_id: str = DEFAULT_BGC_DATASET_ID,
-    timeout: float = 120.0,
     verbose: Union[bool, str] = False,
 ) -> float:
     """Date-specific seawater pH from Copernicus Marine biogeochemistry.
@@ -354,17 +466,11 @@ def fetch_ph_operational(
     marine = _import_copernicusmarine()
     log_message('copernicus', f"opening {dataset_id} (pH) for {lat:.3f}, "
                 f"{lon:.3f}", verbose=verbose, level='debug')
-    try:
-        ds = marine.open_dataset(dataset_id=dataset_id)
-    except Exception as exc:  # toolbox raises a variety of auth/network errors
-        raise DataFetchError(
-            f"Copernicus Marine open_dataset failed: {exc}",
-            remediation="Run `copernicusmarine login` (free account) and check "
-                        "the dataset_id and network connectivity.",
-        ) from exc
+    ds = _open_dataset(marine, dataset_id)
 
     sel = {'latitude': lat, 'longitude': normalize_lon(lon), 'time': when}
     ph_da = ds[BGC_PH_VAR].sel(method='nearest', **sel)
+    _check_snapped_point(ds, lat, sel['longitude'], _snapped_point(ph_da))
     if 'time' in getattr(ph_da, 'coords', {}):
         actual = np.datetime64(np.asarray(ph_da['time'].values).reshape(-1)[0], 'D')
         gap = abs((actual - np.datetime64(when, 'D')) / np.timedelta64(1, 'D'))
@@ -393,6 +499,22 @@ def fetch_ph_operational(
     return float(ph[i])
 
 
+_LOGIN_HINT = ("Run `copernicusmarine login` (free account) and check "
+               "the dataset_id and network connectivity.")
+
+
+def _open_dataset(marine, dataset_id, *, remediation=_LOGIN_HINT):
+    """Open a Copernicus Marine dataset, wrapping the toolbox's assorted
+    auth/network failure modes in one typed :class:`DataFetchError`."""
+    try:
+        return marine.open_dataset(dataset_id=dataset_id)
+    except Exception as exc:
+        raise DataFetchError(
+            f"Copernicus Marine open_dataset failed: {exc}",
+            remediation=remediation,
+        ) from exc
+
+
 def _import_copernicusmarine():
     try:
         import copernicusmarine
@@ -401,7 +523,9 @@ def _import_copernicusmarine():
         raise DataFetchError(
             "The 'copernicusmarine' toolbox is required for operational SSP "
             "but is not installed.",
-            remediation="`copernicusmarine` ships with uacpy; reinstall with "
-                        "`pip install -e .`, then run `copernicusmarine login` "
-                        "(free Copernicus account).",
+            remediation="`copernicusmarine` is an optional extra: install it "
+                        "with `pip install \"uacpy[copernicus]\"` (or "
+                        "`pip install -e \".[copernicus]\"` from a checkout), "
+                        "then run `copernicusmarine login` (free Copernicus "
+                        "account).",
         ) from exc

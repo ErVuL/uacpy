@@ -81,12 +81,12 @@ def test_copy_preserves_collapse(cls):
 
 @pytest.mark.requires_binary
 def test_copy_preserves_parent_class_knobs():
-    """KrakenField inherits its spectral knobs from ``_KrakenBase``; ``copy``
-    must carry them (and ``field_executable``), not reset them to defaults."""
+    """``copy`` must carry Kraken's spectral knobs (and ``field_executable``),
+    not reset them to defaults."""
     try:
         model = Kraken(verbose=False, c_high=2000.0, n_mesh=30)
     except ExecutableNotFoundError:
-        pytest.skip("KrakenField binary not installed")
+        pytest.skip("Kraken binary not installed")
     twin = model.copy()
     assert twin.c_high == 2000.0
     assert twin.n_mesh == 30
@@ -99,10 +99,10 @@ def test_copy_preserves_parent_class_knobs():
 def test_bellhop_copy_preserves_and_overrides_backend():
     """Regression: ``Bellhop.copy()`` must not re-pin the *resolved* binary.
 
-    A no-op copy keeps the resolved ``version`` (the old bug flipped it to
-    'custom' and dropped the cxx/cuda ``--<dim>`` flag); a copy with a
-    ``backend=`` override re-resolves the binary instead of carrying the
-    previously resolved path back in."""
+    A no-op copy keeps the resolved ``version`` — flipping it to 'custom'
+    would drop the cxx/cuda ``--<dim>`` flag — while a copy with a
+    ``backend=`` override re-resolves the binary rather than carrying the
+    already-resolved path back in."""
     bh = Bellhop(verbose=False)                 # auto-resolved (cuda > cxx > fortran)
     assert bh.version != 'custom'
     twin = bh.copy(beam_type='G')               # no backend override

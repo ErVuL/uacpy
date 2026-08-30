@@ -24,7 +24,10 @@ def bit_error_rate(tx_bits, rx_bits):
     b = np.asarray(rx_bits, dtype=int).ravel()
     n = min(a.size, b.size)
     if n == 0:
-        raise ConfigurationError("bit_error_rate: empty input")
+        raise ConfigurationError(
+            f"bit_error_rate: empty input — tx_bits carries {a.size} bits, "
+            f"rx_bits {b.size}. The BER is taken over the overlap of the two "
+            f"streams, so both must be non-empty.")
     return float(np.mean(a[:n] != b[:n]))
 
 
@@ -34,7 +37,10 @@ def symbol_error_rate(tx_symbols_or_labels, rx_symbols_or_labels):
     b = np.asarray(rx_symbols_or_labels).ravel()
     n = min(a.size, b.size)
     if n == 0:
-        raise ConfigurationError("symbol_error_rate: empty input")
+        raise ConfigurationError(
+            f"symbol_error_rate: empty input — tx carries {a.size} symbols, "
+            f"rx {b.size}. The SER is taken over the overlap of the two "
+            f"streams, so both must be non-empty.")
     return float(np.mean(a[:n] != b[:n]))
 
 
@@ -46,28 +52,57 @@ def evm(rx_symbols, ref_symbols):
     r = np.asarray(rx_symbols, dtype=complex).ravel()
     s = np.asarray(ref_symbols, dtype=complex).ravel()
     n = min(r.size, s.size)
+    if n == 0:
+        raise ConfigurationError(
+            f"evm: empty input — rx_symbols carries {r.size} symbols, "
+            f"ref_symbols {s.size}. The EVM is taken over the overlap of the "
+            f"two streams, so both must be non-empty.")
     err = np.mean(np.abs(r[:n] - s[:n]) ** 2)
     ref = np.mean(np.abs(s[:n]) ** 2)
+    if ref == 0.0:
+        # EVM is a ratio to the reference power, so a zero-energy reference
+        # leaves it undefined; returning inf behind a numpy divide warning
+        # reads as "infinitely bad", not "not defined".
+        raise ConfigurationError(
+            "evm: reference symbols carry no energy, so the error vector has "
+            "nothing to be relative to. Pass the transmitted constellation "
+            "symbols as ref_symbols.")
     return float(np.sqrt(err / ref))
+
+
+_BER_PSK_ORDERS = {"8psk": 8, "16psk": 16}
+_BER_QAM_ORDERS = {"16qam": 16, "64qam": 64, "256qam": 256}
 
 
 def ber_theory(scheme, ebn0_db):
     """Theoretical AWGN BER vs Eb/N0 (dB) for a Gray-mapped scheme.
 
     Exact for BPSK/QPSK; standard nearest-neighbour approximations for higher
-    M-PSK and square M-QAM (Proakis).
+    M-PSK and square M-QAM (Proakis & Salehi):
+
+    * M-PSK symbol error ``P_M = 2 Q(sqrt(2 k Eb/N0) sin(pi/M))``, eq. (4.3-17).
+    * square M-QAM ``P_M ~= 4 (1 - 1/sqrt(M)) Q(sqrt(3 k Eb/N0 / (M-1)))``,
+      eqs. (4.3-29) into (4.3-27), dropping the second-order term.
+
+    Both are **symbol** error rates; the ``1/k`` factor that converts them to a
+    bit error rate is only valid under Gray mapping (eq. 4.3-20): adjacent
+    constellation points then differ in a single bit, so the dominant
+    nearest-neighbour symbol error costs exactly one of the ``k`` bits.
+    :func:`uacpy.comms.constellation` is Gray-mapped throughout.
     """
     ebn0 = 10.0 ** (np.asarray(ebn0_db, dtype=float) / 10.0)
     s = scheme.lower()
     if s in ("bpsk", "qpsk"):
         return _q(np.sqrt(2.0 * ebn0))
-    if s.endswith("psk"):
-        M = {"8psk": 8, "16psk": 16}[s]
+    if s in _BER_PSK_ORDERS:
+        M = _BER_PSK_ORDERS[s]
         k = np.log2(M)
         return (2.0 / k) * _q(np.sqrt(2.0 * k * ebn0) * np.sin(np.pi / M))
-    if s.endswith("qam"):
-        M = {"16qam": 16, "64qam": 64, "256qam": 256}[s]
+    if s in _BER_QAM_ORDERS:
+        M = _BER_QAM_ORDERS[s]
         k = np.log2(M)
         c = 4.0 / k * (1.0 - 1.0 / np.sqrt(M))
         return c * _q(np.sqrt(3.0 * k / (M - 1.0) * ebn0))
-    raise ConfigurationError(f"ber_theory: unsupported scheme {scheme!r}")
+    valid = ("bpsk", "qpsk", *_BER_PSK_ORDERS, *_BER_QAM_ORDERS)
+    raise ConfigurationError(
+        f"ber_theory: unsupported scheme {scheme!r}; valid: {', '.join(valid)}")

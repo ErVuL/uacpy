@@ -17,9 +17,11 @@ import urllib.parse
 
 import numpy as np
 
-from uacpy.core.exceptions import DataFetchError
-from uacpy.data._geo import as_coordinate, normalize_lon
-from uacpy.data._http import http_get
+from uacpy.core.exceptions import ConfigurationError, DataFetchError
+from uacpy.data._geo import (
+    as_coordinate, nearest_indices, normalize_lon,
+)
+from uacpy.data._http import erddap_last_value, http_get
 
 __all__ = ['point_depth', 'depths_along', 'region_grid', 'ERDDAP_URL',
            'DATASETS']
@@ -50,36 +52,28 @@ def _elevation(lat, lon, dataset, *, timeout, verbose):
     url = _griddap_url(dataset, f"[({lat})][({normalize_lon(lon)})]")
     body = http_get(url, timeout=timeout, verbose=verbose, source='bathymetry',
                     user_agent=_USER_AGENT).decode('utf-8', 'replace')
-    return _parse_point_csv(body)
-
-
-def _parse_point_csv(body):
-    """Last elevation value from an ERDDAP griddap ``.csv`` point response.
-
-    The body is ``latitude,longitude,elevation`` then a units row then one data
-    row; return the elevation, or ``NaN`` if it is missing / ``NaN``.
-    """
-    rows = [ln for ln in body.splitlines() if ln.strip()]
-    if len(rows) < 3:
-        return np.nan
-    try:
-        return float(rows[-1].split(',')[-1])
-    except (ValueError, IndexError):
-        return np.nan
+    return erddap_last_value(body)
 
 
 def _elevation_any(lat, lon, *, timeout, verbose):
-    """First finite elevation across the DTM tiles, or raise if none covers."""
+    """First finite elevation across the DTM tiles, or raise naming what
+    each tile answered — a land/unsurveyed cell (the service returns NaN
+    there), an out-of-range rejection, and a transport failure are three
+    different situations, and the caller's error reports which occurred."""
+    outcomes = []
     for dataset in DATASETS:
         try:
             elev = _elevation(lat, lon, dataset, timeout=timeout, verbose=verbose)
-        except DataFetchError:
-            continue                        # out of this tile's range — try next
+        except DataFetchError as exc:
+            outcomes.append(f"{dataset}: {exc.message}")
+            continue
         if np.isfinite(elev):
             return elev
+        outcomes.append(
+            f"{dataset}: no value at the nearest cell (land, or unsurveyed)")
     raise DataFetchError(
-        f"EMODnet DTM has no coverage at ({lat:.4f}, {lon:.4f}) "
-        "(European seas + Caribbean only).",
+        f"EMODnet DTM has no depth for ({lat:.4f}, {lon:.4f}) — no coverage "
+        f"or no value there ({'; '.join(outcomes)}).",
         remediation="Use bathymetry_sources='gmrt' or 'gebco' for global "
                     "coverage.",
     )
@@ -121,6 +115,14 @@ def region_grid(lat_range, lon_range, n_lat, n_lon, *, timeout=120.0,
     :func:`uacpy.data.fetch_bathy_grid`.
     """
     la0, la1 = sorted((float(lat_range[0]), float(lat_range[1])))
+    if normalize_lon(lon_range[1]) < normalize_lon(lon_range[0]):
+        raise ConfigurationError(
+            f"emodnet_bathy_live: lon_range {lon_range} crosses the antimeridian "
+            f"(end < start means an eastward crossing on the GEBCO/local "
+            f"path), but this service takes plain min<max boxes — the "
+            f"sorted request would silently sweep the long way around.",
+            remediation="Use bathymetry source 'local'/'gebco', or split "
+                        "the request at 180 deg.")
     lo0, lo1 = sorted((normalize_lon(lon_range[0]), normalize_lon(lon_range[1])))
     stride_lat = _stride(la1 - la0, n_lat)
     stride_lon = _stride(lo1 - lo0, n_lon)
@@ -130,8 +132,8 @@ def region_grid(lat_range, lon_range, n_lat, n_lon, *, timeout=120.0,
 
     lats = np.linspace(la0, la1, n_lat)
     lons = np.linspace(lo0, lo1, n_lon)
-    ri = _nearest_indices(glat, lats)
-    ci = _nearest_indices(glon, lons)
+    ri = nearest_indices(glat, lats)
+    ci = nearest_indices(glon, lons)
     block = gz[np.ix_(ri, ci)]
     depth = np.where(block < 0.0, -block, np.nan)
     return lats, lons, depth
@@ -198,16 +200,3 @@ def _parse_grid_csv(body):
     for la, lo, elev in lat_lon_z:
         z[lat_idx[la], lon_idx[lo]] = elev
     return lats, lons, z
-
-
-def _nearest_indices(axis, queries):
-    """Nearest-node index into ``axis`` for each query, any axis orientation."""
-    axis = np.asarray(axis, dtype=float)
-    order = np.argsort(axis)
-    sorted_axis = axis[order]
-    pos = np.searchsorted(sorted_axis, queries)
-    lo = np.clip(pos - 1, 0, sorted_axis.size - 1)
-    hi = np.clip(pos, 0, sorted_axis.size - 1)
-    pick_hi = np.abs(sorted_axis[hi] - queries) < np.abs(queries - sorted_axis[lo])
-    nearest_sorted = np.where(pick_hi, hi, lo)
-    return order[nearest_sorted]

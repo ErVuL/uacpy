@@ -60,6 +60,12 @@ def run_one(path: Path, timeout: float):
             (proc.stderr.strip().splitlines() or ["(no stderr)"])[-1])
     except subprocess.TimeoutExpired:
         ok, detail = False, f"timeout after {timeout:.0f}s"
+    except OSError as exc:
+        # Launch failure, not script failure: the interpreter or the
+        # examples directory is unavailable (e.g. the tree or venv is being
+        # rewritten by a concurrent install/clone). Reported per example so
+        # the run continues and the summary names every affected script.
+        ok, detail = False, f"could not launch: {exc}"
     return ok, time.time() - t0, detail
 
 

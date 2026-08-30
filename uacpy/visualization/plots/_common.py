@@ -4,39 +4,82 @@ from __future__ import annotations
 
 
 import functools
+import warnings
 import numpy as np
 from typing import Tuple
 
 from uacpy.core.environment import Environment
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core.results import Field
-from uacpy.io.units import m_to_km
-from uacpy.visualization.style import BOTTOM_FILL_STYLE_SOLID, BOTTOM_LINE_STYLE, BOTTOM_LINE_STYLE_FLAT
+from uacpy.core.results.quantities import label as quantity_label
+from uacpy.core.units import m_to_km
+from uacpy.visualization.style import (
+    BOTTOM_FILL_STYLE_SOLID, BOTTOM_LINE_STYLE, BOTTOM_LINE_STYLE_FLAT,
+    RECEIVER_MARKER_STYLE,
+)
+
+
+def _close_figures_since(before) -> None:
+    """Close every pyplot figure opened after the ``before`` snapshot."""
+    import matplotlib.pyplot as plt
+    for num in set(plt.get_fignums()) - before:
+        plt.close(num)
 
 
 def typed_plot_error(plotter):
     """Decorator: surface a plotter's raw degenerate-input exceptions as a typed
-    :class:`~uacpy.core.exceptions.ConfigurationError`.
+    :class:`~uacpy.core.exceptions.ConfigurationError`, leaving no figure behind.
 
     Many plotters pass arrays straight to matplotlib (or index ``[0]``/``[-1]``
-    for axis limits, or reduce with ``.max()``), so empty / mismatched-length /
-    out-of-range / wrong-shape input leaks a bare ``IndexError``/``ValueError``
-    instead of the typed error the result-consuming plotters raise. This
-    converts those (and only those) into a clear ``ConfigurationError`` while
-    letting an already-typed ``ConfigurationError`` pass through unchanged.
-    ``TypeError`` is deliberately not caught — a genuine wrong-type call should
-    surface as itself, not be relabelled an input error."""
+    for axis limits, subscript result dicts like an arrival's ``['delay']``,
+    or reduce with ``.max()``), so empty / mismatched-length / out-of-range /
+    wrong-shape / missing-key input leaks a bare
+    ``IndexError``/``KeyError``/``ValueError`` instead of the typed error the
+    result-consuming plotters raise. This converts those (and only those) into
+    a clear ``ConfigurationError`` while letting an already-typed
+    ``ConfigurationError`` pass through unchanged. ``TypeError`` is
+    deliberately not caught — a genuine wrong-type call should surface as
+    itself, not be relabelled an input error.
+
+    Several plotters build their figure before the operation that can raise, so
+    any figure opened during a failed call is closed before the exception
+    propagates — a rejected call leaves pyplot's registry exactly as it found
+    it."""
     @functools.wraps(plotter)
     def wrapper(*args, **kwargs):
+        import matplotlib.pyplot as plt
+        before = set(plt.get_fignums())
         try:
             return plotter(*args, **kwargs)
-        except (IndexError, ValueError) as exc:
+        except (IndexError, KeyError, ValueError) as exc:
+            _close_figures_since(before)
             raise ConfigurationError(
                 f"{plotter.__name__}: invalid plot input "
                 f"({type(exc).__name__}: {exc}). Check the arrays are non-empty "
                 f"and their lengths/shapes match the plotter's expected inputs."
             ) from exc
+        except Exception:
+            _close_figures_since(before)
+            raise
     return wrapper
+
+
+def _plot_warn(message, category=UserWarning) -> None:
+    """Warn from inside a plotter, attributed to the **user's** call line.
+
+    Every plotter is decorated, so a raw ``warnings.warn`` lands one frame
+    short and blames this module: the user is told to change a knob and handed
+    a line in uacpy, and a ``-W`` filter keyed on their own module never
+    matches.
+
+    Attribution walks out to the first frame outside the package rather than
+    counting frames, so a plotter, a helper the plotter calls, and a public
+    function reached without any plotter at all (:func:`land_polygons`) all
+    name the user's own line. Counting could not cover the last of those: the
+    count that suited the decorated plotter chain overshot the direct call by
+    the two frames the chain contributes (measured)."""
+    warnings.warn(message, category, skip_file_prefixes=USER_FRAME_SKIP)
 
 
 def fig_ax(ax, figsize):
@@ -47,6 +90,16 @@ def fig_ax(ax, figsize):
     if ax is None:
         return plt.subplots(figsize=figsize)
     return ax.figure, ax
+
+
+def invert_yaxis_once(ax) -> None:
+    """Point the y axis downward (depth, or TL in dB), idempotently.
+
+    ``Axes.invert_yaxis`` toggles, so calling a plotter twice into the same
+    ``ax=`` would flip the axis back to increasing-upward. Every plotter goes
+    through here so overlays compose."""
+    if not ax.yaxis_inverted():
+        ax.invert_yaxis()
 
 
 ZORDER_SEDIMENT = 2
@@ -66,6 +119,84 @@ ZORDER_RECEIVERS = 11
 ZORDER_SOURCE = 12
 
 
+# Dense receiver grids render as solid bars — decimate each axis independently
+# so the lattice stays readable. Range typically spans ~10x more samples than
+# depth in a survey, so the two axes are capped differently. These are the caps
+# for a full-page panel; a smaller one gets fewer dots (see
+# :func:`_receiver_dot_caps`).
+_MAX_RECEIVER_RANGE_DOTS = 20
+_MAX_RECEIVER_DEPTH_DOTS = 10
+
+# Marker widths kept between neighbouring lattice dots.
+_RECEIVER_DOT_PITCH = 3.0
+
+
+def _receiver_dot_caps(ax, markersize):
+    """Per-axis dot caps for the receiver lattice drawn on ``ax``.
+
+    A count-only cap is blind to how much room the panel actually has: 20 x 10
+    dots read as a lattice on a full-page figure and as a wall of markers over
+    the heatmap of a composite panel a fifth the size. Cap by the panel's own
+    width and height instead, keeping neighbouring dots ``_RECEIVER_DOT_PITCH``
+    marker widths apart, and never above the full-page counts."""
+    bbox = ax.get_window_extent()
+    px_per_point = ax.figure.dpi / 72.0
+    pitch = max(markersize * _RECEIVER_DOT_PITCH * px_per_point, 1.0)
+    return (
+        max(2, min(_MAX_RECEIVER_RANGE_DOTS, int(bbox.width / pitch))),
+        max(2, min(_MAX_RECEIVER_DEPTH_DOTS, int(bbox.height / pitch))),
+    )
+
+
+def _draw_geometry(ax, source=None, receiver=None, *, source_range_m=0.0,
+                   max_markersize=8, source_markersize_bonus=0):
+    """Draw the source and receiver markers on a (depth, range) cross-section.
+
+    Shared by the environment, ray and field plotters so the geometry reads
+    identically wherever it is shown. ``source`` is a :class:`Source` (or any
+    object exposing ``depths``) or a bare array of source depths;
+    ``source_range_m`` is where the source sits — 0 by the package convention
+    that range is measured from it. ``receiver`` is decimated by
+    :func:`_draw_receiver_grid`."""
+    from uacpy.visualization.style import SOURCE_MARKER_STYLE
+    if receiver is not None and getattr(receiver, 'depths', None) is not None:
+        _draw_receiver_grid(ax, receiver.ranges, receiver.depths,
+                            max_markersize=max_markersize)
+    source_depths = getattr(source, 'depths', source)
+    if source_depths is not None and np.size(source_depths):
+        style = dict(SOURCE_MARKER_STYLE)
+        if source_markersize_bonus:
+            style['markersize'] = (style.get('markersize', 15)
+                                   + source_markersize_bonus)
+        x = m_to_km(np.atleast_1d(source_range_m))[0]
+        for sd in np.atleast_1d(source_depths):
+            ax.plot([x], [float(sd)], zorder=ZORDER_SOURCE, **style)
+        # Models exclude the singular near field, so a TL grid usually starts
+        # beyond r = 0 while the source sits at it. Widen the axis to keep the
+        # marker on screen rather than clipping it to the spine.
+        x_lo, x_hi = ax.get_xlim()
+        if not (min(x_lo, x_hi) <= x <= max(x_lo, x_hi)):
+            ax.set_xlim(min(x_lo, x_hi, x), max(x_lo, x_hi, x))
+
+
+def _draw_receiver_grid(ax, ranges_m, depths, *, max_markersize,
+                        zorder=ZORDER_RECEIVERS):
+    """Draw the decimated receiver lattice; return the full range axis in km.
+
+    Markers keep default clipping so a later user zoom hides out-of-view
+    receivers instead of painting them across the figure."""
+    rr_km = m_to_km(np.atleast_1d(ranges_m))
+    rd = np.atleast_1d(depths)
+    style = dict(RECEIVER_MARKER_STYLE)
+    style['markersize'] = min(style.get('markersize', 8), max_markersize)
+    max_r, max_d = _receiver_dot_caps(ax, style['markersize'])
+    step_r = max(1, rr_km.size // max_r)
+    step_d = max(1, rd.size // max_d)
+    RR, RD = np.meshgrid(rr_km[::step_r], rd[::step_d])
+    ax.plot(RR.ravel(), RD.ravel(), zorder=zorder, **style)
+    return rr_km
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Result dispatcher (used by Result.plot)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -80,28 +211,75 @@ _AXIS_LABELS = {
 }
 
 
+def _db_label(field: Field) -> str:
+    """Axis label for the ``value='db'`` view of ``field``.
+
+    ``value`` is the caller's choice of *view*; ``field.kind`` is what the data
+    *is*. They are independent — one complex field renders every view — but the
+    label has to come from the field, or the dB view of a signal-excess grid
+    announces itself as transmission loss. Split out from :func:`_value_array`
+    so a caller that wants only the label does not build the array to get it."""
+    return quantity_label(field.kind, 'dB' if field.is_complex else field.unit)
+
+
+# Axis / colorbar label per ``value`` view, for the views whose label is fixed.
+# ``'db'`` is missing on purpose: its label comes from the field (see
+# :func:`_db_label`), because the dB view of a signal-excess grid is not TL.
+_VALUE_LABELS = {
+    'mag_db': '|H| (dB)',
+    'mag': '|p|',
+    'phase': 'Phase (rad)',
+    'real': 'Re(p)',
+    'imag': 'Im(p)',
+}
+
+
+def _default_value(field: Field) -> str:
+    """The ``value`` view rendered when the caller names none.
+
+    A time trace is linear pressure, not a level, so it defaults to the raw
+    samples; everything else defaults to its dB view. Shared so a panel drawn
+    inside a composite figure labels itself with the same view ``plot_field``
+    would have picked on its own."""
+    return 'real' if 'time' in field.coords else 'db'
+
+
+def _value_label(field: Field, value: str) -> str:
+    """Axis / colorbar label for the ``value`` view of ``field``.
+
+    Split from :func:`_value_array` for callers that label a panel someone else
+    drew (a composite figure's shared colorbar) and so must not build the array
+    a second time to read its label."""
+    if value == 'db':
+        return _db_label(field)
+    try:
+        return _VALUE_LABELS[value]
+    except KeyError:
+        raise ConfigurationError(
+            f"plot_field: unknown value={value!r}; "
+            "valid: 'db', 'mag_db', 'mag', 'phase', 'real', 'imag'"
+        ) from None
+
+
 def _value_array(field: Field, value: str) -> Tuple[np.ndarray, str]:
-    """Return ``(array, axis_label)`` for ``value`` ∈ ``{'tl', 'mag_db',
+    """Return ``(array, axis_label)`` for ``value`` ∈ ``{'db', 'mag_db',
     'mag', 'phase', 'real', 'imag'}``."""
-    if value == 'tl':
-        return field.tl, 'TL (dB)'
+    label = _value_label(field, value)
+    if value == 'db':
+        return field.db, label
     if value == 'mag_db':
         # Modulus in dB: 20·log10|H| = −TL (shares the floored dB conversion).
-        return -field.tl, '|H| (dB)'
-    if value == 'mag':
-        return field.magnitude, '|p|'
-    if value == 'phase':
-        return field.phase, 'Phase (rad)'
-    if value == 'real':
-        return field.data.real if field.is_complex else field.data, 'Re(p)'
-    if value == 'imag':
+        return -field.db, label
+    if value in ('mag', 'phase'):
         if not field.is_complex:
-            raise ConfigurationError("plot_field: value='imag' requires complex data")
-        return field.data.imag, 'Im(p)'
-    raise ConfigurationError(
-        f"plot_field: unknown value={value!r}; "
-        "valid: 'tl', 'mag_db', 'mag', 'phase', 'real', 'imag'"
-    )
+            raise ConfigurationError(
+                f"plot_field: value={value!r} requires complex data")
+        return (field.magnitude if value == 'mag' else field.phase), label
+    if value == 'real':
+        return (field.data.real if field.is_complex else field.data), label
+    if not field.is_complex:
+        raise ConfigurationError("plot_field: value='imag' requires complex data")
+    return field.data.imag, label
 
 
 def _coord_label(name: str) -> str:
@@ -120,9 +298,57 @@ def _coord_axis(coord: np.ndarray, name: str) -> Tuple[np.ndarray, str]:
 
 # Fixed TL colour scale used everywhere TL is drawn: ``vmin = 20 dB`` →
 # ``vmax = 120 dB``. A fixed scale keeps TL panels directly comparable across
-# models / frequencies / runs (and the 600 dB no-data sentinel some AT binaries
-# emit clips harmlessly to the top).
+# models / frequencies / runs. No-data cells (e.g. Bellhop cells no ray
+# reached) are NaN and render as the axes background.
 _TL_LIMITS: Tuple[float, float] = (20.0, 120.0)
+
+
+def _is_transmission_loss(field: Field, value: str) -> bool:
+    """Whether the ``value`` view of ``field`` is transmission loss.
+
+    TL is the one quantity that runs backwards — it is a *loss*, so the least
+    of it is the loudest arrival — which is why a 1-D TL cut is drawn with its
+    value axis increasing DOWNWARD, putting the loud end at the top. Every
+    other dB view is a **level** (signal excess, reverberation, ``mag_db``) and
+    more of a level is more, so it reads upward like any other quantity.
+
+    Identifying TL takes both the field and the view, exactly as
+    :meth:`Field.max` documents: the dB view of a *pressure* field, whether
+    stored as a real dB grid or derived from complex pressure. Every entry
+    point that draws a value axis asks here, so one field cuts the same way
+    through :func:`plot_field` and :func:`compare` alike."""
+    return (value == 'db' and field.kind == 'pressure'
+            and (field.is_complex or field.unit == 'dB'))
+
+
+def _cell_edge_extent(x: np.ndarray, y: np.ndarray):
+    """Edge-aligned ``imshow`` extent for centre-sampled ``x``/``y`` axes.
+
+    ``imshow`` stretches the array onto the OUTER edges of ``extent``, so
+    passing the first and last *centres* contracts the field by ``(N-1)/N``
+    about its middle — zero error at the centre, half a rendered pixel at the
+    edges, which is where every overlay (graticule, contours, markers) then
+    disagrees with the data. Pad by half a cell on each side instead.
+
+    Returns ``(left, right, bottom, top)`` for ``origin='lower'``, always
+    ASCENDING: the axes are canonicalised via min/max, so the caller must
+    flip its data rows/columns to ascending order to match — exactly what
+    ``maps.py`` does before calling (its ``[::-1]`` flips). Handing a
+    descending axis here WITHOUT flipping the data mirrors the image.
+    Assumes a uniform grid, which is ``imshow``'s own assumption anyway.
+    """
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    hx = abs(x[1] - x[0]) / 2.0 if x.size > 1 else 0.5
+    hy = abs(y[1] - y[0]) / 2.0 if y.size > 1 else 0.5
+    return (x.min() - hx, x.max() + hx, y.min() - hy, y.max() + hy)
+
+
+def _flip_y(extent):
+    """Swap an extent's y bounds, for an ``origin='upper'`` axis whose ordinate
+    increases downward (intercept time, depth)."""
+    left, right, bottom, top = extent
+    return (left, right, top, bottom)
 
 
 def _imshow_extent(ranges_m: np.ndarray, depths: np.ndarray):
@@ -148,9 +374,9 @@ def _overlay_seafloor(ax, env: Environment, ranges_m: np.ndarray) -> None:
 
     Uses high z-orders (sediment + 5, line + 6) so the bathymetry sits
     above contour lines and TL data — matches the original AT-style
-    rendering. Bathymetry is clipped to the data x-range, and the y-axis
-    is extended downward when the seafloor dips below the data extent so
-    the sediment fill stays visible."""
+    rendering. Bathymetry is clipped to the data x-range and anchored at both
+    ends, and the y-axis is extended downward when the seafloor dips below the
+    data extent so the sediment fill stays visible."""
     if env is None:
         return
     data_r_km = m_to_km(ranges_m)
@@ -162,10 +388,18 @@ def _overlay_seafloor(ax, env: Environment, ranges_m: np.ndarray) -> None:
         return  # nothing to overlay on a zero-width axis
     ax.set_xlim(x_lo, x_hi)
 
-    if env.has_range_dependent_bathymetry():
+    if env.has_range_dependent_bathymetry:
         r_km = m_to_km(env.bathymetry.ranges)
         z = env.bathymetry.depths
-        if r_km.size >= 2 and (r_km.min() < x_lo or r_km.max() > x_hi):
+        # Runs whichever way the two spans differ. A bathymetry NARROWER than
+        # the field needs the end anchors just as much as a wider one needs the
+        # clip: without them the fill stops at the last bathymetry sample and
+        # the panel shows a water column with no seabed under it, while the
+        # model held that depth out to the end of the field. ``np.interp``
+        # clamps outside the profile, so the anchors continue the end value —
+        # the same constant extension the models apply. A no-op when the
+        # bathymetry already spans the field exactly.
+        if r_km.size >= 2:
             mask = (r_km >= x_lo) & (r_km <= x_hi)
             r_clip = list(r_km[mask])
             z_clip = list(z[mask])
@@ -203,7 +437,11 @@ def _pinned_subtitle(field: Field) -> str:
     parts = []
     for name, v in field.pinned.items():
         label, unit = _AXIS_LABELS.get(name, (name, ''))
-        if unit == 'Hz' and abs(v) >= 1000:
+        if name == 'range':
+            # Range axes are drawn in km everywhere (see _coord_axis), so a
+            # range pin reads in km too.
+            parts.append(f"{label} = {m_to_km(v):.3g} km")
+        elif unit == 'Hz' and abs(v) >= 1000:
             parts.append(f"{label} = {v / 1000.0:.2f} kHz")
         else:
             parts.append(f"{label} = {v:.3g} {unit}".strip())
@@ -338,7 +576,14 @@ def _draw_sea_ice(ax, sea_ice):
         conc = np.array([float(sea_ice)] * 2, dtype=float)
     else:
         rngs, conc = (np.asarray(a, dtype=float) for a in sea_ice)
-    if rngs.size < 2 or not np.isfinite(np.nanmean(conc)) or np.nanmean(conc) <= 0:
+    # An all-NaN concentration track means no drawable ice; numpy reports
+    # that nanmean through warnings.warn ("Mean of empty slice"), which the
+    # isfinite guard already converts into the no-op return below.
+    with warnings.catch_warnings():
+        warnings.filterwarnings('ignore', message='Mean of empty slice',
+                                category=RuntimeWarning)
+        mean_conc = np.nanmean(conc)
+    if rngs.size < 2 or not np.isfinite(mean_conc) or mean_conc <= 0:
         return
     lo, hi = ax.get_ylim()                             # inverted: surface = hi
     ax.set_ylim(lo, hi - 0.06 * (lo - hi))             # headroom for the line

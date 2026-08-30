@@ -45,7 +45,7 @@ c
 c
 c     mr=bathymetry points, mz=depth grid, mp=pade terms.
 c
-      parameter (mr=100,mz=10000,mp=10)
+      parameter (mr=505,mz=40004,mp=10)
       dimension rb(mr),zb(mr),cw(mz),cp(mz),cs(mz),rhob(mz),attnp(mz),
      >   attns(mz),lamw(mz),lamb(mz),mub(mz),u(mz),v(mz),tlg(mz),
      >   r1(mz,mp),r2(mz,mp),r3(mz,mp),r4(mz,mp),r5(mz,mp),r6(mz,mp),
@@ -133,6 +133,23 @@ c
       nzplt=zmplt/dz-0.5
       z=zb(1)
       iz=z/dz
+c
+c     UACPY: array bounds checks, matching ramgeo1.5.f/ramsurf1.5.f. The
+c     elastic field vector is interleaved, so the depth arrays are indexed to
+c     2*nz+4 here rather than the fluid codes' nz+2.
+c
+      if(2*nz+4.gt.mz)then
+      write(*,*)'   Need to increase parameter mz to ',2*nz+4
+      stop
+      end if
+      if(np.gt.mp)then
+      write(*,*)'   Need to increase parameter mp to ',np
+      stop
+      end if
+      if(i.gt.mr)then
+      write(*,*)'   Need to increase parameter mr to ',i
+      stop
+      end if
 c
       do 3 i=1,2*nz+4
       u(i)=0.0
@@ -247,9 +264,9 @@ c
       j=j+1
       tlg(j)=-20.0*alog10(cabs(ur)+eps)+10.0*alog10(r+eps)
 c     UACPY: same envelope as tlg uses, with cylindrical-spreading
-c     factor included. Carrier exp(+i k0 r) is still factored out
-c     here; the Python wrapper bakes the engineering travelling-wave
-c     carrier exp(-i k0 r) in before tagging.
+c     factor included. The g0 factor at the end of each solve step
+c     bakes the carrier exp(+i k0 r*rot0) into u, so u carries it
+c     here; the Python wrapper applies conj and exp(-i pi/4) only.
       urg(j)=ur/sqrt(r+eps)
 c
 c     Mark the ocean bottom.
@@ -880,8 +897,8 @@ c
 c
       implicit real*8 (a-h,o-z)
       complex*16 ci,z1,z2,g,dg,dh1,dh2,dh3,a,b,nu
-      complex*8 ci8,g0,pd1(mp),pd2(mp),nu8
-      real*4 k0,c0,dr,theta
+      complex*16 ci8,g0,pd1(mp),pd2(mp),nu8
+      real*8 k0,c0,dr,theta
       parameter (m=40)
       dimension bin(m,m),a(m,m),b(m),dg(m),dh1(m),dh2(m),dh3(m),fact(m)
       pi=4.0d0*datan(1.0d0)

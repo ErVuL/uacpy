@@ -15,6 +15,7 @@ import uacpy.data as data
 from uacpy.core.exceptions import DataFetchError
 from uacpy.data import mars
 from uacpy.data.environment import _AUTO_BOTTOM_ORDER
+from uacpy.tests._cache_builders import _skip_or_fail
 
 
 def _feature(lat, lon, *, grain_um=None, mud=None, sand=None, gravel=None,
@@ -133,20 +134,76 @@ def test_bottom_from_mars(monkeypatch):
     assert bp.sound_speed > 1510.0                       # coarse sand: faster
 
 
+def test_bottom_from_mars_stamps_sample_provenance(monkeypatch):
+    """Regression: a MARS hit can be up to max_distance_km from the request,
+    so the bottom must carry a ``DataProvenance`` with the sample's own
+    coordinates — the stamp the local grain-size DB already carries —
+    rather than a bare ``BoundaryProperties``."""
+    _install(monkeypatch, _collection(_feature(-34.4, 151.31, grain_um=500.0)))
+    bp = mars.fetch_bottom_mars(_P)
+    assert [p.source.id for p in bp.data_sources] == ['mars']
+    prov = bp.data_sources[0]
+    assert prov.data_point == (-34.4, 151.31)
+    assert prov.requested_point == _P
+    assert prov.offset_km == pytest.approx(44.5, abs=0.5)
+
+
 def test_bottom_transect(monkeypatch):
     _install(monkeypatch, _collection(_feature(-34.0, 151.31, grain_um=500.0)))
     bottom = mars.fetch_bottom_mars_transect(
         (-34.0, 151.3), (-34.0, 151.8), n_points=3)
     assert np.allclose(bottom.halfspace_sound_speed,
                        bottom.halfspace_sound_speed[0])
+    # Each rebuilt column carries the sample's provenance stamp.
+    for col in bottom.columns:
+        assert [p.source.id for p in col.data_sources] == ['mars']
 
 
 # ── registry wiring ─────────────────────────────────────────────────────────
 
-def test_mars_in_auto_chain_before_diesing():
+def test_mars_in_auto_chain_after_diesing():
+    """MARS is live-only, so the installed Diesing raster is consulted first."""
     order = list(_AUTO_BOTTOM_ORDER)
     assert 'mars' in order
-    assert order.index('emodnet') < order.index('mars') < order.index('diesing')
+    assert order.index('diesing') < order.index('mars') < order.index('pelagic')
+
+
+# ── coverage guard ──────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize('point', [
+    (43.2, 7.5),            # Ligurian Sea
+    (36.0, -70.0),          # North Atlantic
+    (26.0, -90.0),          # Gulf of Mexico shelf
+    (60.0, 150.0),          # Sea of Okhotsk (right longitude, wrong hemisphere)
+])
+def test_out_of_coverage_never_hits_the_network(monkeypatch, point):
+    def boom(url, **kw):
+        raise AssertionError(f"MARS issued a request for {point}: {url}")
+
+    monkeypatch.setattr(mars, 'http_get', boom)
+    with pytest.raises(DataFetchError, match='does not cover'):
+        mars.fetch_mars_sediment(point)
+
+
+def test_auto_chain_reaches_no_mars_request_outside_australia(monkeypatch,
+                                                              tmp_path):
+    """The 'auto' bottom chain must not call AusSeabed for a Ligurian point."""
+    monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path / 'empty'))
+    import uacpy.data.pelagic as pelagic_mod
+    import uacpy.data.seabed as seabed_mod
+
+    def no_emodnet(point, **kw):
+        raise DataFetchError("European seas only")
+
+    def boom(url, **kw):
+        raise AssertionError(f"MARS issued a request: {url}")
+
+    monkeypatch.setattr(seabed_mod, 'fetch_bottom', no_emodnet)
+    monkeypatch.setattr(pelagic_mod, '_water_depth', lambda *a, **k: 5000.0)
+    monkeypatch.setattr(mars, 'http_get', boom)
+    env = data.fetch_environment((43.2, 7.5), bathymetry=2000.0, ssp=1500.0,
+                                 bottom_sources='auto')
+    assert env.data_sources[-1].source.id == 'pelagic'
 
 
 def test_fetch_environment_bottom_sources_mars(monkeypatch, tmp_path):
@@ -160,18 +217,12 @@ def test_fetch_environment_bottom_sources_mars(monkeypatch, tmp_path):
 
 # ── live ────────────────────────────────────────────────────────────────────
 
-_NETWORK_DOWN_TOKENS = ('could not reach', 'timed out', 'timeout', 'connection',
-                        'unreachable', 'http 502', 'http 503', 'http 504')
-
-
 @pytest.mark.requires_network
 def test_live_mars_point():
     try:
         s = mars.fetch_mars_sediment((-34.0, 151.5))     # off Sydney
     except DataFetchError as exc:
-        if any(tok in exc.message.lower() for tok in _NETWORK_DOWN_TOKENS):
-            pytest.skip(f"AusSeabed WFS unreachable: {exc.message}")
-        pytest.fail(f"AusSeabed WFS rejected the query: {exc.message}")
+        _skip_or_fail(exc, 'AusSeabed WFS')
     assert -5.0 < s['phi'] < 13.0
 
 
@@ -226,3 +277,38 @@ def test_capped_response_warns_not_nearest(monkeypatch):
     with pytest.warns(UserWarning, match='nearest'):
         s = mars.fetch_mars_sediment(_P)
     assert s['phi'] == pytest.approx(1.0)
+
+
+def _mars_payload(properties):
+    return json.dumps({'type': 'FeatureCollection', 'numberMatched': 1,
+                       'features': [{
+                           'type': 'Feature',
+                           'geometry': {'type': 'Point',
+                                        'coordinates': [151.4, -33.9]},
+                           'properties': properties}]})
+
+
+def _patch_mars_http(monkeypatch, properties):
+    _install(monkeypatch, _mars_payload(properties))
+    return mars
+
+
+@pytest.mark.parametrize('properties', [
+    {'MEAN_GRAIN_SIZE': 'N/A'},
+    {'SAND_PERCENT': 'trace'},
+    {'MEAN_GRAIN_SIZE': [125.0]},
+], ids=['string-grain-size', 'string-percent', 'list-grain-size'])
+def test_a_malformed_mars_property_raises_the_typed_fetch_error(
+        monkeypatch, properties):
+    mars = _patch_mars_http(monkeypatch, properties)
+    with pytest.raises(DataFetchError, match='non-numeric'):
+        mars.fetch_mars_sediment((-33.9, 151.5))
+
+
+def test_the_bottom_chain_falls_through_a_malformed_mars_sample(monkeypatch):
+    from uacpy.data import environment as env_mod
+    _patch_mars_http(monkeypatch, {'MEAN_GRAIN_SIZE': 'N/A'})
+    _bottom, source = env_mod._fetch_bottom(
+        ('mars', 'pelagic'), (-33.9, 151.5), transect=False,
+        max_distance_km=100.0, depth=1000.0, timeout=5.0, verbose=False)
+    assert source == 'pelagic'

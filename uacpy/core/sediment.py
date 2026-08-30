@@ -17,7 +17,7 @@ Two models are provided:
   CC-BY ESAB supplement of Fonseca, Lurton, Fezzani & Roche (2025).
 - ``'apl-uw'`` — APL-UW TR 9407 (1994) §IV.A.4 grain-size relations (the
   **high-frequency** ρ, ν polynomials + α₂/f). These are the same formulas the
-  AT ``'G'`` bottom used internally.
+  AT ``'G'`` bottom uses internally.
 
 Sediment sound speed and density are computed as **ratios to the overlying
 seawater**, scaled by the in-situ water properties (so fine muds correctly come
@@ -31,34 +31,56 @@ from typing import Dict, Optional
 import numpy as np
 
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.core._warn_frames import USER_FRAME_SKIP
 
 __all__ = ['GRAIN_SIZE_MODELS', 'grain_size_to_geoacoustics']
 
-# Hamilton & Bachman (1982) "Continental Terrace (Shelf and Slope)" granular
-# sediments — bulk density (g/cm³) and sound-speed ratio (sediment/seawater) for
-# the representative classes, referenced to seawater c_w = 1510 m/s, ρ_w = 1.030
-# g/cm³. Tabulated in the open-access ESAB supplement (Fonseca et al. 2025); the
-# Mz values are the Wentworth class centres of Hamilton's named classes.
 _HB_REF_CW = 1510.0      # m/s   reference seawater sound speed
 _HB_REF_RHOW = 1.030     # g/cm³ reference seawater density
+# Hamilton & Bachman (1982), JASA 72(6), "Continental Terrace (Shelf and Slope)"
+# granular sediments: mean grain size from their Table I, bulk density (g/cm³)
+# and sound-speed ratio (sediment/seawater) from their Table II. Their Table II
+# footnote recommends the *median* rather than the mean when predicting clayey
+# silt, so that row carries 1.484 / 1.006.
+# The ϕ axis is irregularly spaced because each value is the measured mean over
+# that class's samples (Table I lists n = 2, 28, 16, 40, 47, 19, 29, 105, 54),
+# not a Wentworth class boundary or centre. ``np.interp`` handles the uneven
+# spacing; do not "regularise" it.
 _HB_TABLE = (
     # (Mz_phi, density_gcm3, velocity_ratio)   coarse → fine
-    (0.5, 2.034, 1.201),    # coarse sand
-    (2.5, 1.962, 1.152),    # fine sand
-    (3.5, 1.878, 1.120),    # very fine sand
-    (4.5, 1.783, 1.086),    # silty sand
-    (5.0, 1.769, 1.076),    # sandy silt
-    (6.0, 1.575, 1.036),    # sand-silt-clay
-    (7.5, 1.489, 1.012),    # clayey silt
-    (8.5, 1.480, 0.990),    # silty clay  (ratio < 1: slower than seawater)
+    (0.92, 2.034, 1.201),   # coarse sand
+    (2.61, 1.962, 1.152),   # fine sand
+    (3.34, 1.878, 1.120),   # very fine sand
+    (4.24, 1.783, 1.086),   # silty sand
+    (4.88, 1.769, 1.076),   # sandy silt
+    (5.40, 1.740, 1.057),   # silt
+    (5.82, 1.575, 1.036),   # sand-silt-clay
+    (7.13, 1.484, 1.006),   # clayey silt (median, per their Table II footnote)
+    (8.80, 1.480, 0.990),   # silty clay  (ratio < 1: slower than seawater)
 )
 _HB_PHI = np.array([r[0] for r in _HB_TABLE])
 _HB_RHO = np.array([r[1] for r in _HB_TABLE])      # g/cm³ at the reference water
 _HB_VRATIO = np.array([r[2] for r in _HB_TABLE])
 
 GRAIN_SIZE_MODELS = ('hamilton', 'apl-uw')
-# Valid ϕ range per model; outside it ϕ is clamped, and a UserWarning fires only
-# for genuine extrapolation (≳ 1 ϕ beyond).
+# Seawater each model's ratios are referenced to, used when the caller gives no
+# in-situ values. These are uacpy's in-situ defaults, not the conditions the
+# tables were measured at: Hamilton & Bachman's ratios are laboratory values at
+# 23 degC / 1 atm (their Table II footnote a), whose implied reference water is
+# ~1527 m/s — Table II velocity divided by velocity ratio spans 1524.9 to 1532.3
+# m/s over the nine rows, with a median of 1527.0 and both extremes at the fine
+# end (clayey silt, silty clay). A ratio is tabulated precisely so it can be
+# re-applied at in-situ conditions, which is what happens here;
+# APL-UW's ratios are applied against 1500 m/s and a unit density ratio by the
+# Acoustics-Toolbox 'G' bottom (Bellhop/ReadEnvironmentBell.f90:526
+# `alphaR = vr * 1500.0`, and :531 `HS%rho = rhoR` — the ratio used directly as
+# g/cm³).
+_MODEL_WATER_REFERENCE = {'hamilton': (_HB_REF_CW, _HB_REF_RHOW),
+                          'apl-uw': (1500.0, 1.0)}
+# Valid ϕ range per model; outside it ϕ is clamped. The clamp is silent
+# wherever it changes nothing — on 'hamilton' it never can, because that model
+# is an np.interp lookup that already flat-extrapolates past the table ends —
+# and warns whenever it moves the returned values, which is 'apl-uw' only.
 _MODEL_RANGE = {'hamilton': (float(_HB_PHI[0]), float(_HB_PHI[-1])),
                 'apl-uw': (-1.0, 9.0)}
 
@@ -69,6 +91,10 @@ def _hamilton_kp(impedance: float) -> float:
     ``α(dB/m) = k_p · f(kHz)``; ``impedance`` is ρ·c in 10³ kg m⁻² s⁻¹. The
     piecewise fit (ESAB supplement, after Fig. 18 of Hamilton 1980) peaks
     (~0.78) in medium sand and tails to ~0.46 for coarse / ~0.07 for fine.
+
+    The first and last branches are unreachable through
+    :func:`grain_size_to_geoacoustics` (ϕ clamped to ``_MODEL_RANGE`` maps to
+    z ∈ ≈[2212, 3689]); they are kept for fidelity to the published curve.
     """
     z = impedance
     if z < 1784.0:
@@ -99,7 +125,29 @@ def _hamilton_geoacoustics(phi, water_sound_speed, water_density):
 # APL-UW TR 9407 (1994), §IV.A.4 "Model Input Parameters Using Grain Size"
 # (valid −1 ≤ Mz ≤ 9): density ratio ρ₂/ρ₁ and sound-speed ratio c₂/c₁ as
 # piecewise polynomials in Mz, plus the attenuation α₂/f (dB m⁻¹ kHz⁻¹). These
-# are the formulas the AT ``'G'`` bottom used internally (ReadEnvironmentBell).
+# are the formulas the AT ``'G'`` bottom uses internally
+# (Bellhop/ReadEnvironmentBell.f90:488 `CASE ( 'G' )`).
+# Verified against that Fortran: the velocity-ratio, density-ratio and
+# alpha2_f branches reproduce ``ReadEnvironmentBell.f90:497-520`` to 0.0e+00
+# over Mz in [-1, 9], and the dB/wavelength attenuation below is AT's 'L' loss
+# parameter times exactly 40*pi/ln(10) = 54.575054 (``AttenMod.f90:79-80``).
+# One deliberate difference: AT guards its first branch with ``Mz >= -1``, so
+# below -1 it falls through to the LINEAR branch, whereas the ratios here keep
+# the quadratic. ``_MODEL_RANGE['apl-uw']`` clamps to [-1, 9] before either is
+# called, so the public API never reaches that region.
+# A second, equally deliberate difference, at the other end: AT does not clamp
+# at all. ``ReadEnvironmentBell.f90``'s velocity ratio ends in a bare
+# ``ELSE vr = -0.0024324*Mz + 1.0019`` that keeps running above Mz = 9 with no
+# upper limit, and its ``alpha2_f`` takes 0.0601 above 9.5. uacpy holds the fit
+# flat at the Wentworth bounds instead — ϕ = -1 is 2 mm gravel, ϕ = 9 is ~2 µm
+# clay — because a cubic left to run past its last fitted point diverges
+# (the -0.0165406 Mz³ density term turns over), whereas a flat endpoint stays
+# physical. ``grain_size_to_geoacoustics`` warns when that clamp moves the
+# answer, so the divergence is visible at the call site rather than only here.
+# Stated honestly: TR 9407's own validity range could not be checked against a
+# copy of the report, so the "valid -1 <= Mz <= 9" above restates uacpy's own
+# docstring rather than a verified source. The clamp is justified by the
+# Wentworth bounds and by the fits' behaviour outside them, not by TR 9407.
 def _apl_density_ratio(mz: float) -> float:
     if mz < 1.0:
         return 0.007797 * mz ** 2 - 0.17057 * mz + 2.3139
@@ -119,7 +167,12 @@ def _apl_velocity_ratio(mz: float) -> float:
 
 
 def _apl_alpha_over_f(mz: float) -> float:
-    """APL-UW attenuation ``α₂/f`` in dB m⁻¹ kHz⁻¹ (peaks in fine sand)."""
+    """APL-UW attenuation ``α₂/f`` in dB m⁻¹ kHz⁻¹ (peaks in fine sand).
+
+    The final branch is unreachable through :func:`grain_size_to_geoacoustics`
+    (ϕ is clamped to ≤ 9.0 by ``_MODEL_RANGE``); it is kept for fidelity to
+    TR 9407 §IV.A.4.
+    """
     if mz < 0.0:
         return 0.4556
     if mz < 2.6:
@@ -169,29 +222,51 @@ def grain_size_to_geoacoustics(
         APL-UW TR 9407 (1994) grain-size relations (ρ, ν polynomials + α₂/f).
     water_sound_speed, water_density : float, optional
         In-situ seawater sound speed (m/s) and density (g/cm³) the ratios are
-        scaled by. ``None`` (default) uses Hamilton's reference
-        (1510 m/s, 1.030 g/cm³).
+        scaled by. ``None`` (default) uses the reference the chosen ``model``
+        was tabulated against — Hamilton's 1510 m/s / 1.030 g/cm³, or APL-UW's
+        1500 m/s / 1.0 g/cm³, which reproduces the Acoustics-Toolbox ``'G'``
+        bottom exactly.
 
-    A ``UserWarning`` is emitted when ``grain_size_phi`` is well outside the
-    model's valid range (ϕ is then clamped).
+    ``grain_size_phi`` outside the model's ϕ range is clamped to it. A
+    ``UserWarning`` is emitted exactly when that clamp changes the returned
+    values, so the warning marks a real substitution rather than a boundary
+    crossing. It never fires for ``'hamilton'``: that model interpolates a
+    table, and ``np.interp`` already holds the end rows flat, so the clamp
+    cannot move the result. It fires for ``'apl-uw'`` at any ϕ outside
+    ``[-1, 9]``, whose polynomials do keep extrapolating (ϕ = 9.5 differs by
+    1.8 m/s, ϕ = -1.5 by 47 m/s).
     """
     if model not in _GEOACOUSTIC_MODELS:
         raise ConfigurationError(
             f"grain_size_to_geoacoustics: unknown model {model!r}.",
             remediation=f"Use one of {GRAIN_SIZE_MODELS}.",
         )
+    ref_cw, ref_rhow = _MODEL_WATER_REFERENCE[model]
     if water_sound_speed is None:
-        water_sound_speed = _HB_REF_CW
+        water_sound_speed = ref_cw
     if water_density is None:
-        water_density = _HB_REF_RHOW
+        water_density = ref_rhow
     lo, hi = _MODEL_RANGE[model]
     phi = float(np.clip(grain_size_phi, lo, hi))
-    if grain_size_phi < lo - 1.0 or grain_size_phi > hi + 1.0:
-        warnings.warn(
-            f"grain_size_to_geoacoustics: ϕ={grain_size_phi:g} is well outside "
-            f"the {model} valid range [{lo:g}, {hi:g}]; clamped.",
-            UserWarning, stacklevel=2,
-        )
     cp, density, attenuation = _GEOACOUSTIC_MODELS[model](
         phi, water_sound_speed, water_density)
+    # Warn on the substitution, not on the boundary crossing. The previous
+    # +-1 phi deadband warned for neither model in the band just outside the
+    # range, and for 'hamilton' the clamp is a provable no-op at any phi
+    # (np.interp flat-extrapolates), so a deadband keyed on phi alone either
+    # cried wolf or stayed silent on a real change. Evaluating the fit at the
+    # raw phi and comparing is the direct test, and it costs one extra call
+    # only when the clamp actually engaged.
+    if phi != grain_size_phi and np.isfinite(grain_size_phi):
+        raw = _GEOACOUSTIC_MODELS[model](
+            float(grain_size_phi), water_sound_speed, water_density)
+        if raw != (cp, density, attenuation):
+            warnings.warn(
+                f"grain_size_to_geoacoustics: ϕ={grain_size_phi:g} is outside "
+                f"the {model} valid range [{lo:g}, {hi:g}] and was clamped to "
+                f"ϕ={phi:g}; the unclamped fit gives "
+                f"sound_speed={raw[0]:.4f} m/s, density={raw[1]:.4f} g/cm³, "
+                f"attenuation={raw[2]:.4f} dB/λ.",
+                UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+            )
     return {'sound_speed': cp, 'density': density, 'attenuation': attenuation}

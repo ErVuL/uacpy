@@ -5,46 +5,60 @@ optionally, a calendar date/month) into a depth-vs-sound-speed profile
 ready for ``Environment(ssp=...)``.
 
 Temperature and salinity come from the NOAA/NCEI **World Ocean Atlas 2023**
-objectively-analyzed climatology (``t_an`` / ``s_an``), read remotely from
-the NCEI THREDDS OPeNDAP server. We request a single ``(lat, lon)`` water
-column via the DAP ``.ascii`` response — stdlib text, no NetCDF dependency.
-Sound speed is then computed from T, S and pressure with the UNESCO
+objectively-analyzed climatology (``t_an`` / ``s_an``). ``source='opendap'``
+reads a single ``(lat, lon)`` water column from the NCEI THREDDS server via the
+DAP ``.ascii`` response — stdlib text, no NetCDF dependency; ``source='local'``
+reads the same fields from the install-time NetCDF grids (``install.sh --data
+woa23``). Sound speed is then computed from T, S and pressure with the UNESCO
 (Chen-Millero) or Del Grosso equation already in :mod:`uacpy.core.acoustics`.
 
 Time handling
 -------------
 WOA23 is a *climatology*, not a forecast: ``date``/``month`` select a monthly
-or seasonal climatological mean, never a specific year's conditions. Monthly
-and seasonal fields only resolve the upper 1500 m; below that the annual mean
+climatological mean (pass neither for the annual mean), never a specific
+year's conditions. WOA's own *seasonal* periods (winter…autumn) are not
+reachable from here — a month inside the season is the closest equivalent.
+The monthly fields only resolve the upper 1500 m; below that the annual mean
 is spliced on, giving a full-depth, season-aware profile. For true
-date-specific conditions use the (planned) Copernicus Marine source.
+date-specific conditions use the Copernicus Marine source
+(:mod:`uacpy.data.copernicus`).
 """
 
 import datetime as _dt
 import re
+import warnings
 from typing import List, Optional, Tuple, Union
 
 import numpy as np
+from scipy.optimize import brentq
 
 from uacpy.core.acoustics import soundspeed_unesco, soundspeed_delgrosso
+from uacpy.core._carrier_validate import _dedupe_provenance
 from uacpy.core.environment import SoundSpeedProfile
 from uacpy.data._geo import (
     Coordinate, as_coordinate, normalize_lon, depth_to_pressure_dbar,
-    geodesic_waypoints, run_representative_indices, DEFAULT_MAX_TRANSECT_POINTS,
+    geodesic_waypoints, ring_offsets, run_representative_indices,
+    DEFAULT_MAX_TRANSECT_POINTS, checked_max_points,
 )
 from uacpy.data._time import parse_date
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
+from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.data._http import http_get
 from uacpy.data.sources import SOURCES, DataProvenance
 from uacpy._log import log_message
 
-__all__ = ['fetch_ssp', 'fetch_ssp_transect', 'fetch_ts_profile']
+__all__ = ['fetch_ssp', 'fetch_ssp_transect', 'ssp_transect_plan',
+           'fetch_ts_profile', 'assemble_range_dependent',
+           'extend_ssp_below_data', 'extend_column_to_seafloor']
 
 DEFAULT_BASE_URL = 'https://www.ncei.noaa.gov/thredds-ocean/dodsC/woa23/DATA'
 DEFAULT_DECADE = 'decav'              # 1955-2022 average of all decades
 WOA_FILL_THRESHOLD = 1e30             # _FillValue is 9.96921e36
 
-# Regular grids: (n_lat, n_lon, file_resolution_code, first_center, step).
+# Regular cell-centred grids: (n_lat, n_lon, file_resolution_code,
+# first_lat_center, step_deg). Both axes are cell-centred — the first centre
+# sits half a step inside the -90 / -180 edge — so the longitude origin is
+# derived as -180 + step/2 rather than tabulated (see _cell_center).
 _GRIDS = {
     '1.00': (180, 360, '01', -89.5, 1.0),
     '0.25': (720, 1440, '04', -89.875, 0.25),
@@ -113,7 +127,7 @@ def fetch_ssp(
             remediation=f"Use one of {sorted(_FORMULAS)}.",
         )
     lat, lon = as_coordinate(point)
-    depths, temp, sal = fetch_ts_profile(
+    depths, temp, sal, lat_idx, lon_idx = _ts_profile_with_cell(
         point, date=date, month=month, resolution=resolution, source=source,
         decade=decade, base_url=base_url, timeout=timeout, verbose=verbose,
     )
@@ -125,10 +139,12 @@ def fetch_ssp(
         f"levels, c=[{c.min():.1f}, {c.max():.1f}] m/s", verbose=verbose,
     )
     # Provenance: WOA23 is a climatology snapped to a grid cell — the actual
-    # "date" is a month/annual period, and the actual coordinates are the cell
-    # centre (which can be tens of km from the requested point, even on land).
+    # "date" is a month/annual period, and the actual coordinates are the
+    # centre of the cell the column was read from: the nearest cell, or the
+    # closest wet neighbour when the nearest is dry, so ``offset_km`` measures
+    # the real hop.
     period = _resolve_period(date, month)
-    _, _, lat_c, lon_c = _grid_index(lat, lon, resolution)
+    lat_c, lon_c = _cell_center(lat_idx, lon_idx, resolution)
     prov = DataProvenance(
         source=SOURCES['woa23'],
         data_date=(f"month {period:02d} (climatology)" if period
@@ -154,20 +170,28 @@ def ssp_transect_plan(
     plan reflects the **distinct WOA cells** the great-circle crosses (the
     grid cell is the sample identity, computed analytically — no network), so
     you can see how many independent columns are actually available before
-    paying to fetch them. ``max_points`` caps the probe (and thus the result).
+    paying to fetch them. ``max_points`` caps the probe (and thus the result);
+    an explicit ``n_points`` above it is capped to it with a ``UserWarning``
+    (the same cap warning :func:`fetch_bathy_transect` emits).
     """
     if resolution not in _GRIDS:
         raise ConfigurationError(
             f"ssp_transect_plan: unknown resolution={resolution!r}.",
             remediation=f"Use one of {sorted(_GRIDS)}.")
+    max_points = checked_max_points(max_points, 'ssp_transect_plan')
     if n_points == 'auto':
-        probe_n = int(max_points)
+        probe_n = max_points
     else:
         if int(n_points) < 2:
             raise ConfigurationError(
                 f"ssp_transect_plan: n_points must be >= 2, got {n_points}.",
                 remediation="Pass n_points>=2 or 'auto'.")
-        probe_n = min(int(n_points), int(max_points))
+        if int(n_points) > max_points:
+            warnings.warn(
+                f"ssp_transect_plan: n_points={n_points} exceeds "
+                f"max_points={max_points}; sampling {max_points}.",
+                UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
+        probe_n = min(int(n_points), max_points)
     lats, lons, ranges_m = geodesic_waypoints(start, end, probe_n)
     if n_points == 'auto':
         # Identity = WOA grid cell (analytic, no fetch). Collapse runs that
@@ -197,8 +221,18 @@ def fetch_ssp_transect(
     base_url: str = DEFAULT_BASE_URL,
     timeout: float = 60.0,
     verbose: Union[bool, str] = False,
+    seafloor=None,
 ) -> SoundSpeedProfile:
     """Range-dependent sound-speed profile along ``start`` → ``end``.
+
+    ``seafloor`` (a :class:`~uacpy.core.environment.Bathymetry`, optional)
+    supplies the local seafloor along the transect: a column that stops short
+    of *its own* seafloor is extended down to it (deep-gradient
+    extrapolation, :func:`extend_column_to_seafloor`) before the columns are
+    stacked, so a shallower column is never flat-held inside its used water
+    column. A column that already reaches past its seafloor is left whole —
+    the transect's own reconciliation to the bathymetry happens once, on the
+    assembled profile, in :func:`uacpy.data.fetch_environment`.
 
     With ``n_points='auto'`` (default) the transect is sampled at the
     **distinct WOA23 cells** the great-circle crosses: the grid cell is the
@@ -211,10 +245,10 @@ def fetch_ssp_transect(
     ``max_points`` caps the number of waypoints probed *before* the reduction
     (the fetch budget); the result is never larger.
 
-    Columns are placed on a common depth axis (the deepest sampled column);
-    shallower columns hold their deepest value below their own seafloor
-    (constant extrapolation, the usual SSP convention). Parameters otherwise
-    mirror :func:`fetch_ssp`; ``start``/``end`` are ``(lat, lon)``.
+    Columns are placed on a common depth axis (the union of every sampled
+    column's own nodes); shallower columns hold their deepest value below their
+    own seafloor (constant extrapolation, the usual SSP convention). Parameters
+    otherwise mirror :func:`fetch_ssp`; ``start``/``end`` are ``(lat, lon)``.
     """
     plan = ssp_transect_plan(start, end, n_points=n_points,
                              max_points=max_points, resolution=resolution)
@@ -225,6 +259,16 @@ def fetch_ssp_transect(
                   base_url=base_url, timeout=timeout, verbose=verbose)
         for la, lo in zip(lats, lons)
     ]
+    # Extend each column to its own local seafloor BEFORE stacking: the
+    # common-axis assembly flat-holds a shallower column below its deepest
+    # analysed level, and a single post-assembly extension repairs only the
+    # segment below the common axis — measured -24 to -68 m/s inside the
+    # used water column on a 3-column transect.
+    if seafloor is not None:
+        columns = [
+            extend_column_to_seafloor(col, seafloor, r, latitude=la)
+            for col, r, la in zip(columns, ranges_m, lats)
+        ]
     log_message(
         'sound_speed',
         f"WOA23 range-dependent SSP: {len(columns)} columns "
@@ -237,30 +281,39 @@ def fetch_ssp_transect(
 def assemble_range_dependent(columns, ranges_m) -> SoundSpeedProfile:
     """Stack 1-D ``SoundSpeedProfile`` columns into a 2-D range-dependent one.
 
-    The common depth axis is the deepest column's; shallower columns hold their
-    deepest value below their own seafloor (``np.interp`` constant-edge fill).
+    The common depth axis is the union of every column's depth nodes (see the
+    comment on the assembly for why an axis taken from one column loses the
+    others' nodes); shallower columns hold their deepest value below their own
+    seafloor (``np.interp`` constant-edge fill).
     Shared by the WOA23 and Copernicus transect fetchers. Columns are reordered
     to strictly increasing range, so a caller that supplies them out of order
     still gets a correctly-ordered range axis (the carriers assume ascending
     range). The columns' provenance is aggregated onto the assembled profile,
-    de-duplicated by source id.
+    de-duplicated by source id: one record survives per dataset, carrying the
+    **first** column's cell/date specifics — the per-column cells are not
+    enumerated on the assembled profile.
     """
     ranges = np.asarray(ranges_m, dtype=float)
     order = np.argsort(ranges, kind='stable')
     ranges = ranges[order]
     columns = [columns[i] for i in order]
-    z = max(columns, key=lambda p: p.depths[-1]).depths
+    # The union of every column's depth nodes: an axis taken from any ONE
+    # column drops the others' own nodes (their seafloor-extension samples
+    # included), and np.interp across the gaps re-flattens what the
+    # extension just fixed — measured -11 to -31 m/s. The union reproduces
+    # every column exactly (residual 0.0 across 68 real transects).
+    z = np.unique(np.concatenate([np.asarray(c.depths, dtype=float)
+                                  for c in columns]))
     data = np.column_stack([
         np.interp(z, col.depths, col.data[:, 0]) for col in columns
     ])
-    seen, provs = set(), []
-    for col in columns:
-        for prov in getattr(col, 'data_sources', ()) or ():
-            if prov.source.id not in seen:
-                seen.add(prov.source.id)
-                provs.append(prov)
+    # Union the columns' provenance through the carriers' own aggregator, so
+    # an assembled profile de-duplicates by source id exactly as ``Bottom``,
+    # ``Surface`` and ``Environment`` do (first-seen order, one record per
+    # dataset, a column without ``data_sources`` contributing nothing).
+    sources = _dedupe_provenance(columns)
     return SoundSpeedProfile(depths=z, data=data, ranges=ranges,
-                             shape='measured', data_sources=tuple(provs))
+                             shape='measured', data_sources=sources)
 
 
 def fetch_ts_profile(
@@ -284,6 +337,32 @@ def fetch_ts_profile(
 
     See :func:`fetch_ssp` for the parameters; raises identically.
     """
+    depths, temp, sal, _lat_idx, _lon_idx = _ts_profile_with_cell(
+        point, date=date, month=month, resolution=resolution, source=source,
+        decade=decade, base_url=base_url, timeout=timeout, verbose=verbose,
+    )
+    return depths, temp, sal
+
+
+def _ts_profile_with_cell(
+    point: Coordinate,
+    *,
+    date: Union[str, _dt.date, None] = None,
+    month: Optional[int] = None,
+    resolution: str = '1.00',
+    source: str = 'opendap',
+    decade: str = DEFAULT_DECADE,
+    base_url: str = DEFAULT_BASE_URL,
+    timeout: float = 60.0,
+    verbose: Union[bool, str] = False,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, int, int]:
+    """:func:`fetch_ts_profile` plus the grid cell the column actually came
+    from: ``(depths, temp, sal, lat_idx, lon_idx)``.
+
+    The returned indices are the wet cell the ring search settled on, which
+    differs from the nearest cell when a coastal request snapped onto land —
+    provenance stamping reads them so ``offset_km`` reports the real cell.
+    """
     if resolution not in _GRIDS:
         raise ConfigurationError(
             f"fetch_ts_profile: unknown resolution={resolution!r}.",
@@ -294,15 +373,29 @@ def fetch_ts_profile(
     period = _resolve_period(date, month)
     lat_idx, lon_idx, lat_c, lon_c = _grid_index(lat, lon, resolution)
 
-    depths, temp, sal = _get_column(
-        source, period, lat_idx, lon_idx, resolution=resolution, decade=decade,
-        base_url=base_url, timeout=timeout, verbose=verbose,
+    # A coastal request often snaps onto a land cell even though the point is
+    # at sea, so fall back to the nearest wet neighbour rather than refusing.
+    nearest_idx = (lat_idx, lon_idx)
+    depths, temp, sal, lat_idx, lon_idx = _nearest_wet_column(
+        lambda i, j: _get_column(
+            source, period, i, j, resolution=resolution, decade=decade,
+            base_url=base_url, timeout=timeout, verbose=verbose,
+        ),
+        lat_idx, lon_idx, resolution,
     )
     if depths.size == 0:
         raise DataFetchError(
             f"WOA23 has no water-column data at {lat_c:.3f}, {lon_c:.3f} "
+            f"or within {_WET_CELL_SEARCH_RINGS} grid cells "
             "(on land or outside the analyzed domain).",
             remediation="Pick an ocean location, or a coarser resolution.",
+        )
+    if (lat_idx, lon_idx) != nearest_idx:
+        wet_lat, wet_lon = _cell_center(lat_idx, lon_idx, resolution)
+        warnings.warn(
+            f"WOA23: nearest cell ({lat_c:.3f}, {lon_c:.3f}) is dry; using the "
+            f"closest wet cell ({wet_lat:.3f}, {wet_lon:.3f}).",
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
         )
 
     # Monthly/seasonal fields cap at 1500 m. If this column reached that cap
@@ -318,7 +411,7 @@ def fetch_ts_profile(
         temp = np.concatenate([temp, t_a[below]])
         sal = np.concatenate([sal, s_a[below]])
 
-    return depths, temp, sal
+    return depths, temp, sal, lat_idx, lon_idx
 
 
 _MONTHLY_MAX_DEPTH = 1500.0  # deepest level in WOA monthly/seasonal fields
@@ -341,17 +434,53 @@ def _resolve_period(date, month) -> int:
     return int(month)
 
 
+# How far the wet-cell search may wander from the nearest cell, in grid cells.
+# A coastal point can snap onto a land cell whose column is entirely fill; the
+# neighbouring cell is usually the same water mass. Kept small so a genuinely
+# land-locked request still fails instead of silently sampling a distant sea.
+_WET_CELL_SEARCH_RINGS = 2
+
+
+def _nearest_wet_column(fetch, lat_idx, lon_idx, resolution):
+    """``(depths, temp, sal, lat_idx, lon_idx)`` for the closest wet cell.
+
+    ``fetch(lat_idx, lon_idx)`` returns one column; an empty depth axis means a
+    dry (land / unanalysed) cell. Searches the nearest cell first, then outward
+    by Chebyshev ring: longitude wraps, while a row past either pole is skipped
+    (clamping it would re-probe the same cell).
+    """
+    n_lat, n_lon, _code, _first, _step = _GRIDS[resolution]
+    depths, temp, sal = fetch(lat_idx, lon_idx)
+    if depths.size:
+        return depths, temp, sal, lat_idx, lon_idx
+
+    for radius in range(1, _WET_CELL_SEARCH_RINGS + 1):
+        for d_lat, d_lon in ring_offsets(radius):
+            i = lat_idx + d_lat
+            if not 0 <= i < n_lat:
+                continue
+            j = (lon_idx + d_lon) % n_lon          # longitude wraps
+            depths, temp, sal = fetch(i, j)
+            if depths.size:
+                return depths, temp, sal, i, j
+    return depths, temp, sal, lat_idx, lon_idx
+
+
+def _cell_center(lat_idx, lon_idx, resolution) -> Tuple[float, float]:
+    """Centre ``(lat, lon)`` in degrees of one WOA grid cell."""
+    _n_lat, _n_lon, _code, first_lat, step = _GRIDS[resolution]
+    return first_lat + lat_idx * step, (-180.0 + step / 2) + lon_idx * step
+
+
 def _grid_index(lat, lon, resolution) -> Tuple[int, int, float, float]:
     """Nearest WOA grid-cell indices and snapped centre coordinates."""
     if not -90.0 <= lat <= 90.0:
         raise ConfigurationError(f"fetch_ssp: lat must be in [-90, 90], got {lat}.")
     lon = normalize_lon(lon)
-    n_lat, n_lon, _code, first, step = _GRIDS[resolution]
-    lat_idx = int(np.clip(round((lat - first) / step), 0, n_lat - 1))
+    n_lat, n_lon, _code, first_lat, step = _GRIDS[resolution]
+    lat_idx = int(np.clip(round((lat - first_lat) / step), 0, n_lat - 1))
     lon_idx = int(np.clip(round((lon - (-180.0 + step / 2)) / step), 0, n_lon - 1))
-    lat_c = first + lat_idx * step
-    lon_c = (-180.0 + step / 2) + lon_idx * step
-    return lat_idx, lon_idx, lat_c, lon_c
+    return (lat_idx, lon_idx) + _cell_center(lat_idx, lon_idx, resolution)
 
 
 def _fetch_column(
@@ -383,12 +512,16 @@ def _truncate_column(z, t, s) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Trim a raw WOA column to its valid (surface-to-seafloor) extent.
 
     WOA columns are valid from the surface to the seafloor, then fill-valued;
-    truncate at the first fill (``cut == 0`` means the cell is on land).
+    truncate at the first fill (``cut == 0`` means the cell is on land). A
+    level is invalid either as a raw above-threshold fill (the OPeNDAP ASCII
+    path, which has no mask to read) or as ``NaN`` (the local reader, which
+    resolves ``_FillValue`` through the netCDF mask).
     """
     z, t, s = np.asarray(z, float), np.asarray(t, float), np.asarray(s, float)
     n = min(z.size, t.size, s.size)
     z, t, s = z[:n], t[:n], s[:n]
-    valid = (t < WOA_FILL_THRESHOLD) & (s < WOA_FILL_THRESHOLD)
+    valid = (np.isfinite(t) & np.isfinite(s)
+             & (t < WOA_FILL_THRESHOLD) & (s < WOA_FILL_THRESHOLD))
     cut = valid.size if valid.all() else int(np.argmax(~valid))
     return z[:cut], t[:cut], s[:cut]
 
@@ -437,14 +570,20 @@ def _fetch_axis(file_url, name, *, timeout, verbose) -> np.ndarray:
 
 
 def _fetch_data(file_url, var, last, lat_idx, lon_idx, *, timeout, verbose) -> np.ndarray:
-    """Read a single ``var`` water column ``[0][0:last][lat][lon]``."""
+    """Read a single ``var`` water column ``[0][0:last][lat][lon]``.
+
+    WOA fields are stored ``(time, depth, lat, lon)`` with a singleton time
+    axis, hence the leading ``[0]``. DAP hyperslab bounds are **inclusive**, so
+    the whole depth axis is ``0:n_depth-1`` — what the caller passes as ``last``.
+    """
     query = f"{var}[0][0:{last}][{lat_idx}][{lon_idx}]"
     text = http_get(f"{file_url}.ascii?{query}", timeout=timeout,
                     verbose=verbose, source='sound_speed').decode('utf-8', 'replace')
-    values, _ = _parse_dods_ascii(text)
-    return np.asarray(values, dtype=float)
+    return np.asarray(_parse_dods_ascii(text), dtype=float)
 
 
+# A DAP .ascii data row is an index tuple, a comma, then the value:
+# ``[0][17][130][188], 3.4512``.
 _DATA_ROW = re.compile(r'^\[[\d\]\[]*\],\s*(\S+)')
 
 
@@ -457,12 +596,11 @@ def _parse_dods_axis(text: str, name: str) -> Optional[List[float]]:
     return None
 
 
-def _parse_dods_ascii(text: str) -> Tuple[List[float], Optional[List[float]]]:
-    """Parse a DAP ``.ascii`` body into ``(values, depths)``.
+def _parse_dods_ascii(text: str) -> List[float]:
+    """Parse a DAP ``.ascii`` body into the variable's values.
 
-    Collects the variable's array rows (``[i][j][k], value``) in order and the
-    ``*.depth[...]`` coordinate map. Returns ``depths=None`` if no depth map
-    is present.
+    Collects the variable's array rows (``[i][j][k], value``) in order. The
+    depth axis is fetched separately (see :func:`_parse_dods_axis`).
     """
     lines = text.splitlines()
     start = 0
@@ -472,15 +610,134 @@ def _parse_dods_ascii(text: str) -> Tuple[List[float], Optional[List[float]]]:
             break
 
     values: List[float] = []
-    depths: Optional[List[float]] = None
-    j = start
-    while j < len(lines):
-        s = lines[j].strip()
-        m = _DATA_ROW.match(s)
+    for line in lines[start:]:
+        m = _DATA_ROW.match(line.strip())
         if m:
             values.append(float(m.group(1)))
-        elif '.depth[' in s and j + 1 < len(lines):
-            depths = [float(x) for x in lines[j + 1].split(',') if x.strip()]
-            j += 1
-        j += 1
-    return values, depths
+    return values
+
+
+# Reference salinity for the extrapolation below. Medwin & Clay (Fundamentals
+# of Acoustical Oceanography 3.3.5) and Jensen et al. (Computational Ocean
+# Acoustics, prob. 1.1) both take S = 35 for the deep ocean. The extrapolated
+# increment moves by under 0.05 m/s over a 3.3 km span across S_ref in
+# 33..36, because the inversion absorbs the difference into the temperature.
+_DEEP_REFERENCE_SALINITY = 35.0
+# Effective-temperature search bracket, wider than any ocean water mass:
+# UNESCO spans 1435-1555 m/s across it at the surface. Sub-zero temperatures
+# are in range because polar deep water reaches -1.9 C and the profiles being
+# extended were themselves built by evaluating UNESCO at those temperatures.
+_EFFECTIVE_T_BRACKET_DEGC = (-3.0, 35.0)
+# Leroy & Parthiot's own reference latitude, for callers that have none. The
+# pressure conversion is the only latitude-dependent step and the increment
+# moves 0.33 m/s over a 3.3 km span from equator to pole.
+_REFERENCE_LATITUDE_DEG = 45.0
+# Below this, holding the last value is close enough to be not worth a warning:
+# 50 m at the deep gradient is 0.9 m/s.
+_EXTRAPOLATION_WARN_M = 50.0
+
+
+def _deep_increment(c_deepest: float, z_from: float, z_to: float,
+                    latitude: float) -> float:
+    """UNESCO sound-speed increment from ``z_from`` down to ``z_to``.
+
+    Extrapolation only ever happens below the deepest analysed level, so in the
+    deep isothermal layer, where temperature is nearly constant and sound speed
+    rises almost linearly under the pressure term alone (Stergiopoulos,
+    *Advanced Signal Processing Handbook* 10.2). The increment is therefore
+    UNESCO at fixed T/S. The temperature is not assumed: it is inverted from the
+    column's own deepest sound speed, which holds the increment to 0.07 m/s over
+    a 3.3 km span against UNESCO at the true T/S (worst case over T in -1..6 C,
+    S in 33..35.5, z in 1..8 km). Any single gradient is 7.3 m/s out over that
+    span, because dc/dz is itself a function of depth: 0.0168 s^-1 at 1 km
+    against 0.0189 s^-1 at 8 km.
+    """
+    p_from = float(depth_to_pressure_dbar(z_from, latitude))
+    p_to = float(depth_to_pressure_dbar(z_to, latitude))
+    t_lo, t_hi = _EFFECTIVE_T_BRACKET_DEGC
+    salinity = _DEEP_REFERENCE_SALINITY
+    if c_deepest <= soundspeed_unesco(t_lo, salinity, p_from):
+        t_eff = t_lo                     # unphysical column: clamp, stay finite
+    elif c_deepest >= soundspeed_unesco(t_hi, salinity, p_from):
+        t_eff = t_hi
+    else:
+        t_eff = brentq(
+            lambda t: soundspeed_unesco(t, salinity, p_from) - c_deepest,
+            t_lo, t_hi, xtol=1e-8)
+    return float(soundspeed_unesco(t_eff, salinity, p_to)
+                 - soundspeed_unesco(t_eff, salinity, p_from))
+
+
+def extend_ssp_below_data(ssp, depth_max: float,
+                          latitude: float = _REFERENCE_LATITUDE_DEG):
+    """Extend ``ssp`` down to ``depth_max`` along its own deep gradient.
+
+    Bathymetry (GEBCO, 15 arc-sec) and analysed T/S (WOA23, 1 deg) come from
+    independent products, so the seafloor routinely sits below the deepest
+    analysed level — by more than 200 m at ~15% of ocean points, and by 3.3 km
+    in a trench. The carrier's generic ``extend_to`` holds the last value,
+    which drops the entire pressure term: at (29.78, 142.77) WOA ends at
+    5500 m / 1551.05 m/s while UNESCO at the 8801 m seafloor gives 1611.93,
+    so a held profile is 61 m/s (3.9%) slow over the bottom 3.3 km — enough to
+    move ray turning depths and convergence-zone structure.
+
+    The increment is :func:`_deep_increment`, evaluated per column from that
+    column's own deepest sound speed, so it carries the depth dependence of the
+    pressure term rather than a single gradient. At the trench point above it
+    reproduces the 1611.93 m/s reference to 0.01 m/s.
+    """
+    depths = np.asarray(ssp.depths, dtype=float)
+    last = float(depths[-1])
+    if depth_max <= last or np.isclose(depth_max, last, rtol=1e-9, atol=1e-9):
+        return ssp.extend_to(depth_max)      # trimming is the carrier's job
+
+    data = np.asarray(ssp.data, dtype=float)
+    span = depth_max - last
+    new_row = np.empty(data.shape[1], dtype=float)
+    for j in range(data.shape[1]):
+        new_row[j] = data[-1, j] + _deep_increment(
+            float(data[-1, j]), last, depth_max, latitude)
+
+    if span > _EXTRAPOLATION_WARN_M:
+        warnings.warn(
+            f"sound-speed profile ends at {last:.0f} m but the seafloor is at "
+            f"{depth_max:.0f} m; extrapolated the last {span:.0f} m along the "
+            f"profile's deep gradient to {new_row[0]:.1f} m/s. Analysed T/S "
+            f"products are shallower than bathymetry over much of the deep "
+            f"ocean — supply a measured profile if the deep column matters.",
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+        )
+
+    return type(ssp)(
+        depths=np.append(depths, depth_max),
+        data=np.vstack([data, new_row[None, :]]),
+        ranges=(ssp.ranges.copy() if ssp.ranges is not None else None),
+        shape=ssp.shape,
+        data_sources=ssp.data_sources,
+    )
+
+
+def extend_column_to_seafloor(column, seafloor, range_m: float,
+                              latitude: float = _REFERENCE_LATITUDE_DEG):
+    """One transect column, extended down to the seafloor under ``range_m``.
+
+    Extension only: a column that already reaches past its local seafloor is
+    returned unchanged. :func:`extend_ssp_below_data` delegates the shallower
+    case to ``SoundSpeedProfile.extend_to``, which *truncates* — right for a
+    single profile being reconciled to one water column, wrong per column
+    along a transect. Bathymetry is sampled far more finely (50-60 points)
+    than the SSP columns (7-35), so the seafloor *between* two column
+    waypoints is routinely deeper than at either; a column cut back to its own
+    waypoint's seafloor has lost analysed levels that the assembled field
+    still interpolates through at those intermediate ranges, and the cut value
+    is flat-held where real data existed. Sampling only inside the genuine
+    water column, the cut costs 3.97 / 13.22 / 29.08 m/s on Biscay / North
+    Atlantic / Hawaii-ridge transects against 1.64 / 1.96 / 9.63 m/s without
+    it. Nothing downstream needs the cut here: ``fetch_environment``
+    reconciles the assembled profile to the bathymetry afterwards, and each
+    solver masks below its own local seafloor.
+    """
+    depth = float(np.asarray(seafloor.eval(range=range_m)).flat[0])
+    if depth <= float(np.asarray(column.depths)[-1]):
+        return column
+    return extend_ssp_below_data(column, depth, latitude=latitude)

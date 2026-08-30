@@ -13,8 +13,10 @@ Endpoints (no auth):
 
 import numpy as np
 
-from uacpy.core.exceptions import DataFetchError
-from uacpy.data._geo import as_coordinate, normalize_lon
+from uacpy.core.exceptions import ConfigurationError, DataFetchError
+from uacpy.data._geo import (
+    as_coordinate, nearest_indices, normalize_lon,
+)
 from uacpy.data._http import http_get
 
 __all__ = ['point_depth', 'depths_along', 'region_grid',
@@ -72,11 +74,20 @@ def region_grid(lat_range, lon_range, n_lat, n_lon, *, timeout=120.0, verbose=Fa
     the requested ``n_lat × n_lon`` mesh so the return shape matches
     :func:`uacpy.data.fetch_bathy_grid`.
     """
+    import contextlib
     import tempfile
     from pathlib import Path
 
-    from uacpy.data._netcdf import open_netcdf
+    from uacpy.data._netcdf import netcdf_lock, open_netcdf
 
+    if normalize_lon(lon_range[1]) < normalize_lon(lon_range[0]):
+        raise ConfigurationError(
+            f"gmrt_live: lon_range {lon_range} crosses the antimeridian "
+            f"(end < start means an eastward crossing on the GEBCO/local "
+            f"path), but this service takes plain min<max boxes — the "
+            f"sorted request would silently sweep the long way around.",
+            remediation="Use bathymetry source 'local'/'gebco', or split "
+                        "the request at 180 deg.")
     lo0, lo1 = sorted((normalize_lon(lon_range[0]), normalize_lon(lon_range[1])))
     la0, la1 = sorted((float(lat_range[0]), float(lat_range[1])))
     url = (f"{GRID_URL}?minlongitude={lo0}&maxlongitude={lo1}"
@@ -90,40 +101,46 @@ def region_grid(lat_range, lon_range, n_lat, n_lon, *, timeout=120.0, verbose=Fa
         fh.write(blob)
         tmp = Path(fh.name)
     try:
-        ds = open_netcdf(tmp)
-        names = {n.lower(): n for n in ds.variables}
-        glon = np.asarray(ds.variables[names['lon']][:], dtype=float)
-        glat = np.asarray(ds.variables[names['lat']][:], dtype=float)
-        alt = names.get('altitude') or names.get('z') or 'altitude'
-        gz = np.asarray(ds.variables[names.get(alt, alt)][:], dtype=float)
-        ds.close()
+        # closing(), not a bare close() after the reads: a grid whose variable
+        # names do not match raises between the two and would leave the handle
+        # open on the file the finally is about to unlink.
+        #
+        # netcdf_lock spans the whole statement, so the slices below and the
+        # close() that ends it are inside it as well as the open — netCDF4 is
+        # not thread-safe here, and a live download on one thread would
+        # otherwise read and close alongside another thread's grid read.
+        with netcdf_lock, contextlib.closing(open_netcdf(tmp)) as ds:
+            names = {n.lower(): n for n in ds.variables}
+            try:
+                glon = np.asarray(ds.variables[names['lon']][:], dtype=float)
+                glat = np.asarray(ds.variables[names['lat']][:], dtype=float)
+                elev_var = names.get('altitude') or names.get('z') or 'altitude'
+                # netCDF4 returns a masked array where the grid declares a
+                # _FillValue; np.asarray would drop the mask and expose the raw
+                # fill as a real elevation (a large positive one reads as land,
+                # a large negative one as a kilometres-deep basin). Fill
+                # *through* the mask to NaN, the no-data value the rest of this
+                # module already uses.
+                gz = np.ma.filled(
+                    np.ma.asarray(ds.variables[elev_var][:], dtype=float),
+                    np.nan)
+            except KeyError as exc:
+                raise DataFetchError(
+                    f"GMRT COARDS grid is missing an expected variable "
+                    f"({exc}): the schema is 'lon'/'lat' axes with an "
+                    f"'altitude' (or 'z') elevation; this file has "
+                    f"{sorted(names)}. The GridServer response format may "
+                    f"have changed.",
+                    remediation="Retry, or use bathymetry source "
+                                "'gebco'/'local'.",
+                ) from exc
     finally:
         tmp.unlink(missing_ok=True)
 
     lats = np.linspace(la0, la1, n_lat)
     lons = np.linspace(lo0, lo1, n_lon)
-    ri = _nearest_indices(glat, lats)
-    ci = _nearest_indices(glon, lons)
+    ri = nearest_indices(glat, lats)
+    ci = nearest_indices(glon, lons)
     block = gz[np.ix_(ri, ci)]
     depth = np.where(block < 0.0, -block, np.nan)
     return lats, lons, depth
-
-
-def _nearest_indices(axis, queries):
-    """Nearest-node index into ``axis`` for each query, any axis orientation.
-
-    GMRT COARDS latitude is commonly stored descending, so a plain
-    ``searchsorted`` (ascending-only, and an insertion index rather than the
-    nearest node) is both biased and wrong on a descending axis. Sort once,
-    bracket with ``searchsorted``, then pick the closer of the two neighbours,
-    and map back to the original (possibly descending) ordering.
-    """
-    axis = np.asarray(axis, dtype=float)
-    order = np.argsort(axis)
-    sorted_axis = axis[order]
-    pos = np.searchsorted(sorted_axis, queries)
-    lo = np.clip(pos - 1, 0, sorted_axis.size - 1)
-    hi = np.clip(pos, 0, sorted_axis.size - 1)
-    pick_hi = np.abs(sorted_axis[hi] - queries) < np.abs(queries - sorted_axis[lo])
-    nearest_sorted = np.where(pick_hi, hi, lo)
-    return order[nearest_sorted]

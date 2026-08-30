@@ -86,9 +86,12 @@ def test_animate_field_default_frame_stride_caps_at_300():
 
 
 def test_animate_field_frame_updates_track_pulse_position():
-    """Update the animation at three frames and verify the heatmap's
-    argmax(|p|) range index moves outward — sanity check on the
-    set_array calls."""
+    """Stepping the update callback re-fills the heatmap with real data.
+
+    The three frame indices are chosen to span the pulse crossing the
+    receiver array, so a ``set_array`` that never fired (or that wrote the
+    wrong time slice) leaves at least one of them identically zero.
+    """
     import matplotlib
     matplotlib.use('Agg')
     from uacpy.visualization.plots import animate_field
@@ -119,8 +122,8 @@ def test_animate_field_rejects_non_timeseries():
         coords={'depth': np.arange(4.0), 'range': np.arange(5.0)},
         model='TL',
     )
-    assert field.kind != 'time_series'
-    with pytest.raises(ConfigurationError, match="kind=.time_series."):
+    assert 'time' not in field.coords
+    with pytest.raises(ConfigurationError, match="'time' axis"):
         animate_field(field)
 
 
@@ -236,6 +239,29 @@ def test_plot_time_snapshots_empty_raises():
 
     with pytest.raises(ConfigurationError, match='empty'):
         plot_time_snapshots({}, times_s=(0.1,))
+
+
+@pytest.mark.parametrize("frame_stride, accepted", [
+    (0, False),         # divides by zero inside np.arange
+    (1, True),          # the documented "render every sample" value
+    (-1, False),
+    (np.int64(2), True),   # a numpy integer, which a type test would reject
+])
+def test_a_frame_stride_below_one_is_refused_by_name(frame_stride, accepted):
+    """Both sides of the smallest usable stride. A stride of 0 escaped as a raw
+    ``ZeroDivisionError`` and a negative one as a typed message about the
+    caller's arrays, neither of which names the knob that is wrong."""
+    from uacpy.visualization.plots import animate_field
+    import matplotlib.pyplot as plt
+
+    field = _make_synthetic_field(n_t=20, t_max=0.5)
+    if accepted:
+        assert animate_field(field, frame_stride=frame_stride) is not None
+        plt.close('all')
+        return
+    with pytest.raises(ConfigurationError, match='frame_stride must be at least 1'):
+        animate_field(field, frame_stride=frame_stride)
+    plt.close('all')
 
 
 def test_plot_time_snapshots_global_pmax():

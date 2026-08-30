@@ -12,11 +12,14 @@ FEATURES: ✓ OAST transmission loss
 """
 
 import sys
+import os
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Repo root, so ``import uacpy`` resolves from a source checkout.
+sys.path.insert(0, str(Path(__file__).parents[2]))
 
-OUTPUT_DIR = Path(__file__).parent / 'output'
-OUTPUT_DIR.mkdir(exist_ok=True)
+OUTPUT_DIR = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
+                  or Path(__file__).parent / 'output')
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 import numpy as np  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
@@ -100,10 +103,15 @@ def main():
 
     print("[4/4] Running OASP (Pulse / Wideband TRF)...", end=" ", flush=True)
     try:
-        oasp = OASP(verbose=False, n_time_samples=256, freq_max=120)
+        # The pulse synthesis further down is a DFT over the frequency grid,
+        # so its time window is 1/df = n_time_samples/2 / freq_max. Every
+        # receiver's travel time must fit inside that window or far-range
+        # arrivals wrap into early bins. Here 1024/2 / 120 Hz = 4.27 s of
+        # window against a 4500 m span = 3.0 s of travel, so it fits.
+        oasp = OASP(verbose=False, n_time_samples=1024, freq_max=120)
         receiver_small = uacpy.Receiver(
             depths=np.linspace(5, 95, 20),
-            ranges=np.linspace(500, 15000, 30),
+            ranges=np.linspace(500, 5000, 30),
         )
         result_oasp = oasp.run(
             env, source, receiver_small,
@@ -215,12 +223,14 @@ def main():
     print("\n✓ OASES suite examples complete")
     print("\nAll 4 OASES Models Demonstrated:")
     print("  • OAST: Fast wavenumber integration for TL")
-    print("  • OASN: Normal mode analysis with eigenfunctions")
+    print("  • OASN: Noise field and array cross-spectral (covariance) matrix")
     print("  • OASR: Reflection coefficients (P-P, P-SV)")
     print("  • OASP: Pulse / wideband transfer-function propagation")
     print("\nKey Capabilities:")
     print("  • Complete elastic modeling (compression + shear)")
-    print("  • Range-independent and range-dependent scenarios")
+    print("  • Range-independent: OASES is a wavenumber-integration / global-matrix")
+    print("    suite, so all four modules solve a horizontally stratified medium;")
+    print("    uacpy collapses any range-dependent env and warns")
     print("  • Broadband and narrowband analysis")
     print("\n✓ Example 13 complete\n")
     return 0

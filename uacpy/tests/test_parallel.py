@@ -126,6 +126,24 @@ def test_run_parallel_empty_raises():
         run_parallel([])
 
 
+def test_run_parallel_shared_pinned_work_dir_raises(tmp_path):
+    """One work_dir pinned on two jobs is rejected up front, before any pool
+    or worker exists. The guard resolves paths, so a str spelling and a Path
+    spelling of the same directory collide."""
+    class _PinnedModel:
+        def __init__(self, work_dir):
+            self.work_dir = work_dir
+
+    shared = tmp_path / 'shared_scratch'
+    jobs = [
+        Job(model=_PinnedModel(str(shared)), env='e', source='s', receiver='r'),
+        Job(model=_PinnedModel(shared), env='e', source='s', receiver='r'),
+    ]
+    with pytest.raises(uacpy.ConfigurationError,
+                       match="pinned on more than one job"):
+        run_parallel(jobs)
+
+
 def test_main_is_importable_helper(monkeypatch, tmp_path):
     """The spawn-safety probe: True only when __main__ is a real file."""
     import sys, types
@@ -160,10 +178,64 @@ def test_run_parallel_broken_pool_interactive_message(monkeypatch):
     with pytest.raises(uacpy.ConfigurationError, match="interactive session"):
         P.run_parallel([job], start_method='spawn')
 
+    # Importable __main__ (a real .py script) and the pool dies before any job
+    # completes: that is a *startup* death, and for a script the usual cause is
+    # a module-level run_parallel with no `if __name__ == "__main__":` guard,
+    # so the message must name the guard rather than blame a segfault.
     monkeypatch.setattr(P, '_main_is_importable', lambda: True)    # real script
-    with pytest.raises(uacpy.ConfigurationError, match="died mid-run") as ei:
+    with pytest.raises(uacpy.ConfigurationError, match="__main__") as ei:
         P.run_parallel([job], start_method='spawn')
     assert isinstance(ei.value.__cause__, BrokenProcessPool)       # original kept
+
+
+def test_run_parallel_broken_pool_after_a_job_completes_says_mid_run(monkeypatch):
+    """Once a job has completed, a dead pool really is a mid-run crash."""
+    import uacpy.parallel as P
+    from concurrent.futures.process import BrokenProcessPool
+
+    class _OneThenDead:
+        """First future succeeds; the pool then breaks."""
+        def __init__(self, *a, **k):
+            self._n = 0
+            # Emulate one worker booting: the real pool runs the initializer
+            # in each worker, and run_parallel's bootstrap-vs-mid-run
+            # discriminator counts those runs.
+            if k.get('initializer') is not None:
+                # _worker_init sets the process-global tempfile.tempdir (in
+                # a REAL pool that happens inside the worker process);
+                # emulating it in-process must restore the global, or every
+                # later temp-file user in this pytest process points at a
+                # directory run_parallel deletes.
+                import tempfile as _tf
+                _saved = _tf.tempdir
+                try:
+                    k['initializer'](*k.get('initargs', ()))
+                finally:
+                    _tf.tempdir = _saved
+
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+        def submit(self, fn, *a, **k):
+            self._n += 1
+            f = _Fut(self._n == 1)
+            return f
+
+    class _Fut:
+        def __init__(self, ok): self._ok = ok
+        def cancel(self): return True
+        def result(self, *a, **k):
+            if self._ok:
+                return 'result-object'
+            raise BrokenProcessPool("pool died")
+
+    monkeypatch.setattr(P, 'ProcessPoolExecutor', _OneThenDead)
+    monkeypatch.setattr(P, 'as_completed', lambda m: list(m))
+    monkeypatch.setattr(P, '_main_is_importable', lambda: True)
+    jobs = [Job(model=object(), env='e', source='s', receiver='r'),
+            Job(model=object(), env='e', source='s', receiver='r')]
+    with pytest.raises(uacpy.ConfigurationError, match="died mid-run"):
+        P.run_parallel(jobs, start_method='spawn')
 
 
 def test_job_defaults():
@@ -173,10 +245,16 @@ def test_job_defaults():
 
 @pytest.mark.requires_binary
 def test_run_parallel_knob_sweep(pekeris_env):
-    """Sweep one model's knob by building jobs with ``model.copy()``."""
+    """Sweep one model's knob by building jobs with ``model.copy()``.
+
+    Each parallel result must equal the same job run serially in-process:
+    the worker executes the identical model/scenario/run_mode, so the data,
+    grid coordinates and shape all agree element-wise."""
     src = uacpy.Source(depths=25.0, frequencies=200.0)
     rcv = uacpy.Receiver(depths=np.linspace(10, 90, 9), ranges=np.linspace(100, 5000, 21))
-    base = uacpy.models.Bellhop()
+    # bellhopcuda's GPU reductions are nondeterministic at ~1e-7 relative;
+    # the fortran backend reruns bit-identically, which the equality needs.
+    base = uacpy.models.Bellhop(backend='fortran')
     jobs = [
         Job(base.copy(n_beams=n), pekeris_env, src, rcv,
             run_mode=uacpy.RunMode.COHERENT_TL, label=n)
@@ -184,10 +262,19 @@ def test_run_parallel_knob_sweep(pekeris_env):
     ]
     batch = run_parallel(jobs, n_workers=3, coordinate_name='n_beams')
     assert batch.ok and len(batch) == 3
-    assert all(np.isfinite(np.nanmax(r.tl)) for r in batch)
+    assert all(np.isfinite(np.nanmax(r.db)) for r in batch)
     stack = batch.stack()
     assert len(stack) == 3
     assert np.array_equal(stack.coordinate, np.array([200.0, 400.0, 800.0]))
+
+    for job, par in zip(jobs, batch):
+        ser = job.model.run(job.env, job.source, job.receiver,
+                            run_mode=job.run_mode, **job.run_kwargs)
+        assert type(par) is type(ser)
+        assert par.shape == ser.shape
+        assert np.array_equal(par.data, ser.data, equal_nan=True)
+        for name in ('depth', 'range'):
+            assert np.array_equal(par.coords[name], ser.coords[name])
 
 
 @pytest.mark.requires_binary
@@ -195,7 +282,9 @@ def test_run_parallel_scenario_sweep(pekeris_env):
     """Same model, a different source per job."""
     rcv = uacpy.Receiver(depths=np.linspace(10, 90, 9), ranges=np.linspace(100, 5000, 21))
     depths = [10.0, 50.0, 90.0]
-    base = uacpy.models.Bellhop()
+    # bellhopcuda's GPU reductions are nondeterministic at ~1e-7 relative;
+    # the fortran backend reruns bit-identically, which the equality needs.
+    base = uacpy.models.Bellhop(backend='fortran')
     jobs = [
         Job(base.copy(), pekeris_env, uacpy.Source(depths=d, frequencies=200.0), rcv,
             run_mode=uacpy.RunMode.COHERENT_TL, label=d)
@@ -203,7 +292,7 @@ def test_run_parallel_scenario_sweep(pekeris_env):
     ]
     batch = run_parallel(jobs, n_workers=3, coordinate_name='source_depth')
     assert batch.ok and len(batch) == 3
-    maxes = [float(np.nanmax(r.tl)) for r in batch]
+    maxes = [float(np.nanmax(r.db)) for r in batch]
     assert len(set(np.round(maxes, 3))) > 1
 
 
@@ -229,7 +318,7 @@ def test_run_parallel_cross_model(pekeris_env):
     assert batch.labels == ['bellhop', 'kraken', 'ram']
     for res in batch:
         assert isinstance(res, uacpy.Field)
-        assert np.isfinite(np.nanmax(res.tl))
+        assert np.isfinite(np.nanmax(res.db))
 
 
 @pytest.mark.requires_binary
@@ -238,7 +327,9 @@ def test_run_parallel_preserves_rays_and_eigenrays(pekeris_env):
     wipes its scratch .ray file."""
     src = uacpy.Source(depths=25.0, frequencies=200.0)
     rcv = uacpy.Receiver(depths=np.array([50.0]), ranges=np.array([2000.0]))
-    base = uacpy.models.Bellhop()
+    # bellhopcuda's GPU reductions are nondeterministic at ~1e-7 relative;
+    # the fortran backend reruns bit-identically, which the equality needs.
+    base = uacpy.models.Bellhop(backend='fortran')
     jobs = [
         Job(base.copy(n_beams=n), pekeris_env, src, rcv, run_mode=uacpy.RunMode.RAYS)
         for n in (21, 41)
@@ -297,7 +388,9 @@ def test_run_parallel_collects_errors(pekeris_env):
     # RAYS with a multi-frequency source is rejected in run() before the binary
     # launches — a deterministic per-job failure.
     bad = uacpy.Source(depths=25.0, frequencies=np.array([150.0, 200.0, 250.0]))
-    base = uacpy.models.Bellhop()
+    # bellhopcuda's GPU reductions are nondeterministic at ~1e-7 relative;
+    # the fortran backend reruns bit-identically, which the equality needs.
+    base = uacpy.models.Bellhop(backend='fortran')
     jobs = [
         Job(base.copy(), pekeris_env, good, rcv, run_mode=uacpy.RunMode.RAYS),
         Job(base.copy(), pekeris_env, bad, rcv, run_mode=uacpy.RunMode.RAYS),
@@ -307,3 +400,188 @@ def test_run_parallel_collects_errors(pekeris_env):
     assert batch[0] is not None
     assert 1 in batch.errors
     assert len(batch.stack()) == 1
+
+
+def test_copy_onto_a_user_work_dir_does_not_inherit_cleanup(tmp_path):
+    """``copy(work_dir=...)`` must not wipe the caller's directory.
+
+    ``cleanup`` resolves to ``work_dir is None`` at construction, so a plain
+    ``Bellhop()`` carries ``cleanup=True``. ``copy()`` rebuilds from the
+    *resolved* attributes, so re-pointing the clone at a user directory has to
+    re-resolve ``cleanup`` too — carrying the parent's ``True`` across would
+    rmtree that directory after ``run()``.
+    """
+    d = tmp_path / 'user_outputs'
+    d.mkdir()
+    keep = d / 'precious.txt'
+    keep.write_text('do not delete')
+
+    # bellhopcuda's GPU reductions are nondeterministic at ~1e-7 relative;
+    # the fortran backend reruns bit-identically, which the equality needs.
+    base = uacpy.models.Bellhop(backend='fortran')
+    assert base.cleanup is True, "unpinned model should own its temp dir"
+
+    clone = base.copy(work_dir=d)
+    assert clone.cleanup is False, (
+        "copy() inherited cleanup=True onto a caller-supplied work_dir; "
+        "run() would rmtree it")
+
+    # cleanup_work_dir() wipes unconditionally; the flag gates whether it is
+    # reached (FileManager.__exit__), so exercise that path.
+    fm = clone._setup_file_manager()
+    assert fm.cleanup is False
+    with fm:
+        pass
+    assert keep.exists(), "caller's work_dir was wiped by an inherited cleanup"
+
+
+def test_copy_preserves_an_explicit_cleanup_choice(tmp_path):
+    """An explicitly requested cleanup=True still survives copy()."""
+    d = tmp_path / 'scratch'
+    base = uacpy.models.Bellhop(cleanup=True)
+    assert base.copy(work_dir=d).cleanup is True
+    base2 = uacpy.models.Bellhop(work_dir=tmp_path / 'a', cleanup=False)
+    assert base2.copy(work_dir=tmp_path / 'b').cleanup is False
+
+
+def test_pool_death_before_any_job_names_the_main_guard(monkeypatch):
+    """A pool that dies before any job completes must blame the __main__ guard.
+
+    An unguarded module-level ``run_parallel`` in a .py script leaves
+    ``__main__`` importable, so the interactive-session check does not fire.
+    Dying before any job completes is a *startup* death, and for a script the
+    usual cause is the missing guard — not the segfault/OOM that a mid-run
+    death would indicate.
+    """
+    from concurrent.futures.process import BrokenProcessPool
+    import uacpy.parallel as par
+    from uacpy.core.exceptions import ConfigurationError
+
+    class _DeadPool:
+        def __init__(self, *a, **k): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def submit(self, *a, **k): raise BrokenProcessPool("pool died")
+
+    monkeypatch.setattr(par, 'ProcessPoolExecutor', _DeadPool)
+    env = uacpy.Environment(bathymetry=100.0, ssp=1500.0)
+    job = par.Job(uacpy.models.Bellhop(), env,
+                  uacpy.Source(depths=50.0, frequencies=100.0),
+                  uacpy.Receiver(depths=50.0, ranges=[1000.0]))
+    with pytest.raises(ConfigurationError, match="__main__"):
+        par.run_parallel([job], n_workers=1)
+
+
+class TestScratchRootIsReaped:
+    """``run_parallel`` points every worker's ``tempfile`` at one parent-owned
+    scratch root so a SIGKILLed worker's model tempdirs are reaped instead of
+    leaking. What survives there is only the caller's when a job asked to keep
+    it — ``cleanup=False`` with an unpinned ``work_dir``. Debris from a failed
+    job (which ``raise_on_error=False`` collects and then returns normally from)
+    reads identically on disk, so a leftover-count-only test kept it forever."""
+
+    class _Model:
+        def __init__(self, cleanup=True, work_dir=None):
+            self.cleanup = cleanup
+            self.work_dir = work_dir
+
+    def _job(self, **kw):
+        return Job(self._Model(**kw), None, None, None)
+
+    @staticmethod
+    def _root_with_debris(tmp_path, name):
+        root = tmp_path / name
+        (root / 'uacpy_bellhop_abc').mkdir(parents=True)
+        return root
+
+    def test_debris_from_a_cleanup_true_job_is_removed(self, tmp_path):
+        from uacpy.parallel import _reap_scratch_root
+        root = self._root_with_debris(tmp_path, 'failed')
+        assert _reap_scratch_root(str(root), [self._job()]) is True
+        assert not root.exists()
+
+    def test_a_kept_work_dir_survives_with_a_warning(self, tmp_path):
+        from uacpy.parallel import _reap_scratch_root
+        root = self._root_with_debris(tmp_path, 'kept')
+        jobs = [self._job(cleanup=False)]
+        with pytest.warns(UserWarning, match=r"work dir\(s\) were kept"):
+            assert _reap_scratch_root(str(root), jobs) is False
+        assert root.exists()
+
+    def test_a_pinned_work_dir_does_not_keep_the_root(self, tmp_path):
+        """A pinned ``work_dir`` lives outside the scratch root, so a job using
+        one cannot be what left anything inside it."""
+        from uacpy.parallel import _reap_scratch_root
+        root = self._root_with_debris(tmp_path, 'pinned')
+        jobs = [self._job(cleanup=False, work_dir=str(tmp_path / 'mine'))]
+        assert _reap_scratch_root(str(root), jobs) is True
+        assert not root.exists()
+
+    def test_a_kept_work_dir_survives_a_broken_pool(self, tmp_path,
+                                                    monkeypatch):
+        """The reap hangs off ``run_parallel``'s ``finally``, so it runs on the
+        path where a leak actually happens — the pool dying and the batch
+        aborting. The keep decision there is still the jobs' configuration
+        alone: a job that asked to keep its work dir keeps the root, because
+        deleting would drop files the caller asked for."""
+        from concurrent.futures.process import BrokenProcessPool
+        import uacpy.parallel as par
+        from uacpy.core.exceptions import ConfigurationError
+
+        root = tmp_path / 'scratch'
+        root.mkdir()
+        monkeypatch.setattr(par.tempfile, 'mkdtemp', lambda **kw: str(root))
+
+        class _DeadPool:
+            def __init__(self, *a, **k): pass
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+            def submit(self, *a, **k):
+                # The model tempdir a worker allocated under the root before
+                # it was killed — indistinguishable on disk from a work dir
+                # a job asked to keep.
+                (root / 'uacpy_bellhop_abc').mkdir(exist_ok=True)
+                raise BrokenProcessPool("pool died")
+
+        monkeypatch.setattr(par, 'ProcessPoolExecutor', _DeadPool)
+        job = par.Job(self._Model(cleanup=False), None, None, None)
+        with pytest.warns(UserWarning, match=r"work dir\(s\) were kept"):
+            with pytest.raises(ConfigurationError):
+                par.run_parallel([job], n_workers=1)
+        assert root.exists()
+
+    def test_a_broken_pool_reaps_debris_from_cleanup_true_jobs(
+            self, tmp_path, monkeypatch):
+        """The other half of the same ``finally``: with no job asking to keep
+        anything, the dead pool's leftovers are debris by elimination and the
+        root goes, rather than leaking for the life of the machine."""
+        from concurrent.futures.process import BrokenProcessPool
+        import uacpy.parallel as par
+        from uacpy.core.exceptions import ConfigurationError
+
+        root = tmp_path / 'scratch'
+        root.mkdir()
+        monkeypatch.setattr(par.tempfile, 'mkdtemp', lambda **kw: str(root))
+
+        class _DeadPool:
+            def __init__(self, *a, **k): pass
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+            def submit(self, *a, **k):
+                (root / 'uacpy_bellhop_abc').mkdir(exist_ok=True)
+                raise BrokenProcessPool("pool died")
+
+        monkeypatch.setattr(par, 'ProcessPoolExecutor', _DeadPool)
+        job = par.Job(self._Model(), None, None, None)
+        with pytest.raises(ConfigurationError):
+            par.run_parallel([job], n_workers=1)
+        assert not root.exists()
+
+    def test_an_empty_root_is_removed(self, tmp_path):
+        from uacpy.parallel import _reap_scratch_root
+        root = tmp_path / 'empty'
+        root.mkdir()
+        assert _reap_scratch_root(str(root), [self._job()]) is True
+        assert not root.exists()

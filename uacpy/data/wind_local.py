@@ -11,6 +11,7 @@ mean-state fallback, so it understates day-to-day sea state; the live
 NBS is a U.S. Government work — **public domain**.
 """
 
+import contextlib
 import tempfile
 from pathlib import Path
 
@@ -33,6 +34,7 @@ _DEFAULT_YEARS = tuple(range(2013, 2023))            # a recent decade
 _USER_AGENT = 'uacpy (+https://github.com/ErVuL/uacpy)'
 
 _CLIM = {}   # path -> _Climatology
+_cache.register_cache(_CLIM.clear)
 
 
 def download_wind_db(cache_dir=None, *, years=_DEFAULT_YEARS, timeout=120.0,
@@ -65,6 +67,17 @@ def download_wind_db(cache_dir=None, *, years=_DEFAULT_YEARS, timeout=120.0,
             valid = np.isfinite(speed)
             accum[month - 1][valid] += speed[valid]
             count[month - 1][valid] += 1
+        # Two full month sweeps with nothing fetched is the
+        # unreachable-server signature; the remaining ten months would
+        # retry their way to the same place, so the build stops here.
+        if month == 2 and accum is None:
+            raise DataFetchError(
+                f"NBS wind climatology fetched nothing in the first two "
+                f"month sweeps ({2 * len(years)} fetches); stopping "
+                f"before the remaining ten months.",
+                remediation="Check network / the CoastWatch ERDDAP "
+                            "dataset id, then retry.",
+            )
     if accum is None:
         raise DataFetchError(
             "NBS wind climatology build fetched no monthly grids.",
@@ -72,7 +85,11 @@ def download_wind_db(cache_dir=None, *, years=_DEFAULT_YEARS, timeout=120.0,
         )
     with np.errstate(invalid='ignore'):
         speed = np.where(count > 0, accum / np.maximum(count, 1), np.nan)
-    np.savez_compressed(out, lat=lat, lon=lon, speed=speed)
+    with _cache.atomic_write(out) as part:
+        # A file object, not the path: np.savez_compressed appends '.npz' to a
+        # name that lacks it, which would write '<out>.part.npz'.
+        with open(part, 'wb') as fh:
+            np.savez_compressed(fh, lat=lat, lon=lon, speed=speed)
     _CLIM.clear()
     log_message('wind', f"wind climatology cached → {out}", verbose=verbose)
     return out
@@ -81,7 +98,7 @@ def download_wind_db(cache_dir=None, *, years=_DEFAULT_YEARS, timeout=120.0,
 def _fetch_monthly_grid(year, month, *, timeout, verbose):
     """One NBS monthly-mean global wind-speed field, or ``None`` on failure."""
     import urllib.parse
-    from uacpy.data._netcdf import open_netcdf
+    from uacpy.data._netcdf import netcdf_lock, open_netcdf
     iso = f"{year}-{month:02d}-01T00:00:00Z"
     for var in _SPEED_VARS:
         constraint = f"{var}[({iso})][(10.0)][][]"
@@ -97,13 +114,27 @@ def _fetch_monthly_grid(year, month, *, timeout, verbose):
             fh.write(blob)
             tmp = Path(fh.name)
         try:
-            ds = open_netcdf(tmp)
-            names = {n.lower(): n for n in ds.variables}
-            lat = np.asarray(ds.variables[names['latitude']][:], float)
-            lon = np.asarray(ds.variables[names['longitude']][:], float)
-            speed = np.ma.filled(np.asarray(
-                ds.variables[names[var.lower()]][:], float).squeeze(), np.nan)
-            ds.close()
+            # closing(), not a bare close() after the reads: the KeyError the
+            # next clause catches is raised between the two, once per month a
+            # 120-grid climatology build cannot name a variable in — each one
+            # leaking a handle on the file the finally is about to unlink.
+            #
+            # netcdf_lock spans the whole statement, so the slices below and
+            # the close() that ends it are inside it as well as the open —
+            # netCDF4 is not thread-safe here, and a 120-file climatology
+            # build would otherwise read and close alongside another thread's
+            # grid read.
+            with netcdf_lock, contextlib.closing(open_netcdf(tmp)) as ds:
+                names = {n.lower(): n for n in ds.variables}
+                lat = np.asarray(ds.variables[names['latitude']][:], float)
+                lon = np.asarray(ds.variables[names['longitude']][:], float)
+                # np.asarray() first would strip the netCDF4 mask before
+                # filled() ever sees it, letting a _FillValue cell (land / no
+                # retrieval) into the monthly mean as a real wind speed.
+                # Convert *as* a masked array, then fill through the mask.
+                speed = np.ma.filled(np.ma.asarray(
+                    ds.variables[names[var.lower()]][:], float).squeeze(),
+                    np.nan)
         except (KeyError, OSError):
             continue
         finally:
@@ -116,30 +147,46 @@ class _Climatology:
     """Nearest-cell accessor over the cached ``speed(12, lat, lon)`` grid."""
 
     def __init__(self, path):
-        data = np.load(path)
-        self.lat = data['lat']
-        self.lon = data['lon']
-        self.speed = data['speed']
+        with _cache.reading('wind', path):
+            # ``with``, like every sibling reader: each member access can
+            # raise on a damaged cache file, and the error's own remediation
+            # invites a retry — so an unclosed NpzFile leaks one descriptor
+            # per attempt. allow_pickle=False is passed rather than left to
+            # numpy's default: this file is read straight out of the cache
+            # directory, and under allow_pickle an object array in it would
+            # execute on load.
+            with np.load(path, allow_pickle=False) as data:
+                self.lat = data['lat']
+                self.lon = data['lon']
+                self.speed = data['speed']
         self._lat0 = float(self.lat[0])
         self._lon0 = float(self.lon[0])
         self._dlat = float(self.lat[1] - self.lat[0])
         self._dlon = float(self.lon[1] - self.lon[0])
 
     def at(self, lat, lon, month):
-        r = int(np.clip(round((lat - self._lat0) / self._dlat),
-                        0, self.lat.size - 1))
+        """Climatological speed (m/s) at the nearest cell for ``month`` (1-12)."""
+        row = int(np.clip(round((lat - self._lat0) / self._dlat),
+                          0, self.lat.size - 1))
+        # NBS serves longitude on [0, 360) (0 → 359.75 at 0.25°) and the cache
+        # keeps that axis, so wrap the query into it before indexing (the same
+        # modulo _netcdf.NetcdfGrid.col applies). Latitude is south-up.
         lon = self._lon0 + ((normalize_lon(lon) - self._lon0) % 360.0)
-        c = int(np.clip(round((lon - self._lon0) / self._dlon),
-                        0, self.lon.size - 1))
-        return float(self.speed[month - 1, r, c])
+        # The axis spans a full 360 deg, so the index wraps: the half-cell
+        # west of the origin belongs to column 0, not the last column
+        # (same rule as _netcdf.NetcdfGrid.col).
+        col = int(round((lon - self._lon0) / self._dlon)) % self.lon.size
+        return float(self.speed[month - 1, row, col])
 
 
 def _clim():
+    """Load (or reuse) the monthly climatology.
+
+    Built through :func:`uacpy.data._cache.memoize`, so threads racing a cold
+    memo read the ``.npz`` once between them rather than once each.
+    """
     path = _cache.require('wind', WIND_FILE)
-    key = str(path)
-    if key not in _CLIM:
-        _CLIM[key] = _Climatology(path)
-    return _CLIM[key]
+    return _cache.memoize(_CLIM, str(path), lambda: _Climatology(path))
 
 
 def wind_speed(point, *, date):

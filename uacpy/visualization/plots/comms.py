@@ -8,7 +8,6 @@ do not import matplotlib. Each function consumes plain arrays, takes the target
 import numpy as np
 import matplotlib.pyplot as plt
 
-from uacpy.comms.metrics import ber_theory
 from uacpy.visualization.plots._common import fig_ax, typed_plot_error
 
 
@@ -27,7 +26,7 @@ def plot_channel(h, sample_rate, ax=None, *, title=None, figsize=(12, 4),
         fig = ax[0].figure
     t = np.arange(h.size) / fs * 1e3
     ax[0].stem(t, np.abs(h))
-    ax[0].set_xlabel("Delay [ms]")
+    ax[0].set_xlabel("Delay (ms)")
     ax[0].set_ylabel("|h|")
     ax[0].set_title(title or "Channel impulse response", loc="left")
     ax[0].grid(alpha=0.3)
@@ -37,8 +36,8 @@ def plot_channel(h, sample_rate, ax=None, *, title=None, figsize=(12, 4),
     f = np.fft.fftshift(np.fft.fftfreq(nfft, d=1.0 / fs))
     H = 20 * np.log10(np.abs(np.fft.fftshift(np.fft.fft(h, nfft))) + 1e-12)
     ax[1].plot(f, H, **mpl_kw)
-    ax[1].set_xlabel("Frequency [Hz]")
-    ax[1].set_ylabel("|H(f)| [dB]")
+    ax[1].set_xlabel("Frequency (Hz)")
+    ax[1].set_ylabel("|H(f)| (dB)")
     ax[1].set_title("Frequency response", loc="left")
     ax[1].grid(alpha=0.3)
     return fig, ax
@@ -54,7 +53,7 @@ def plot_doppler_ambiguity(scales, peak_metric, ax=None, *, title=None,
     ax.plot(s * 1e3, p / (p.max() + 1e-12), **mpl_kw)
     best = s[int(np.argmax(p))] * 1e3
     ax.axvline(best, color="r", ls="--", lw=1, label=f"a = {best:.2f} e-3")
-    ax.set_xlabel("Doppler scale a [×10⁻³]")
+    ax.set_xlabel("Doppler scale a (×10⁻³)")
     ax.set_ylabel("Norm. peak correlation")
     ax.set_title(title or "Doppler ambiguity", loc="left")
     ax.grid(alpha=0.3)
@@ -62,6 +61,7 @@ def plot_doppler_ambiguity(scales, peak_metric, ax=None, *, title=None,
     return fig, ax
 
 
+@typed_plot_error
 def plot_convergence(mse, ax=None, *, label=None, title=None, figsize=(7, 4),
                      **mpl_kw):
     """Equalizer learning curve (MSE vs symbol index, dB)."""
@@ -69,7 +69,7 @@ def plot_convergence(mse, ax=None, *, label=None, title=None, figsize=(7, 4),
     fig, ax = fig_ax(ax, figsize)
     ax.plot(10 * np.log10(np.maximum(m, 1e-12)), label=label, **mpl_kw)
     ax.set_xlabel("Symbol index")
-    ax.set_ylabel("MSE [dB]")
+    ax.set_ylabel("MSE (dB)")
     ax.set_title(title or "Equalizer convergence", loc="left")
     ax.grid(alpha=0.3)
     if label:
@@ -77,6 +77,7 @@ def plot_convergence(mse, ax=None, *, label=None, title=None, figsize=(7, 4),
     return fig, ax
 
 
+@typed_plot_error
 def plot_sync_metric(metric, ax=None, *, threshold=None, title=None,
                      figsize=(8, 3.5), **mpl_kw):
     """Synchronization metric vs sample index."""
@@ -94,21 +95,25 @@ def plot_sync_metric(metric, ax=None, *, threshold=None, title=None,
     return fig, ax
 
 
+@typed_plot_error
 def plot_subcarriers(channel, n_subcarriers, ax=None, *, title=None,
                      figsize=(8, 3.5), **mpl_kw):
     """Channel magnitude across the OFDM subcarriers."""
     nsc = int(n_subcarriers)
     H = np.fft.fft(np.asarray(channel, dtype=complex), nsc)
     fig, ax = fig_ax(ax, figsize)
+    # Unshifted, so index k is the subcarrier ``ofdm_modulate`` /
+    # ``ofdm_demodulate`` address as k.
     ax.plot(np.arange(nsc),
-            20 * np.log10(np.abs(np.fft.fftshift(H)) + 1e-12), **mpl_kw)
+            20 * np.log10(np.abs(H) + 1e-12), **mpl_kw)
     ax.set_xlabel("Subcarrier index")
-    ax.set_ylabel("|H| [dB]")
+    ax.set_ylabel("|H| (dB)")
     ax.set_title(title or "OFDM subcarrier response", loc="left")
     ax.grid(alpha=0.3)
     return fig, ax
 
 
+@typed_plot_error
 def plot_scatter(symbols, ax=None, *, ideal=None, title=None, figsize=(5, 5),
                  **mpl_kw):
     """Constellation/scatter plot of received ``symbols``; optional ``ideal``
@@ -133,6 +138,7 @@ def plot_scatter(symbols, ax=None, *, ideal=None, title=None, figsize=(5, 5),
     return fig, ax
 
 
+@typed_plot_error
 def plot_constellation(constellation, ax=None, *, scheme="", annotate=True,
                        title=None, figsize=(5, 5), **mpl_kw):
     """Plot an ideal Gray-labeled constellation."""
@@ -154,6 +160,7 @@ def plot_constellation(constellation, ax=None, *, scheme="", annotate=True,
     return fig, ax
 
 
+@typed_plot_error
 def plot_eye_diagram(signal, samples_per_symbol, ax=None, *, n_symbols=2,
                      title=None, figsize=(7, 4), **mpl_kw):
     """Eye diagram: overlay ``n_symbols``-wide windows of the real signal."""
@@ -175,6 +182,7 @@ def plot_eye_diagram(signal, samples_per_symbol, ax=None, *, n_symbols=2,
     return fig, ax
 
 
+@typed_plot_error
 def plot_ber_curve(ebn0_db, ber_measured, ax=None, *, scheme=None,
                    label="measured", title=None, figsize=(7, 5), **mpl_kw):
     """Measured BER vs Eb/N0 (semilog-y) with optional theory overlay."""
@@ -182,12 +190,18 @@ def plot_ber_curve(ebn0_db, ber_measured, ax=None, *, scheme=None,
     ber = np.atleast_1d(np.asarray(ber_measured, dtype=float))
     fig, ax = fig_ax(ax, figsize)
     mpl_kw.setdefault("marker", "o")
+    # A run with zero observed errors gives BER = 0, which a log axis drops
+    # silently; floor it so the point stays visible at the bottom of the plot.
     ax.semilogy(ebn0, np.maximum(ber, 1e-12), label=label, **mpl_kw)
     if scheme is not None:
+        # In-function so importing the plotting surface does not drag the whole
+        # comms toolkit (and scipy.signal) in behind it — the same rule
+        # signal.py and noise.py follow for their compute imports.
+        from uacpy.comms.metrics import ber_theory
         fine = np.linspace(ebn0.min(), ebn0.max(), 100)
         ax.semilogy(fine, ber_theory(scheme, fine), "k--",
                     label=f"{scheme} theory")
-    ax.set_xlabel("Eb/N0 [dB]")
+    ax.set_xlabel("Eb/N0 (dB)")
     ax.set_ylabel("BER")
     ax.set_title(title or "Bit error rate", loc="left")
     ax.grid(which="both", alpha=0.3)

@@ -6,10 +6,11 @@ These tests validate qualitative physical behavior on canonical scenarios
 modes are positive, mode count scales with frequency, etc. They do NOT
 compare against stored reference numbers.
 
-For *quantitative* benchmarks against canonical waveguides (Pekeris,
-Munk, layered fluids), see the roadmap item in README.md ("add
-reference-case regressions"). That work is tracked separately and will
-live in benchmark_data/ + test_benchmarks.py when added.
+*Quantitative* benchmarks against closed-form references live elsewhere:
+``test_benchmarks_analytic.py`` (Pekeris modal sum, Rayleigh reflection,
+ideal wedge, Lloyd mirror) and ``test_benchmarks_physics.py`` (published
+sound-speed equations). A change that shifts the numbers but keeps the
+qualitative behaviour is caught there, not here.
 """
 
 import pytest
@@ -35,8 +36,9 @@ class TestPekerisWaveguide:
     """
 
     @pytest.fixture
-    def pekeris_env(self):
-        """Standard Pekeris waveguide environment."""
+    def pekeris_env_soft_bottom(self):
+        """Pekeris waveguide with a softer bottom (1600 m/s, density 1.5)
+        than conftest's ``pekeris_env`` (1700 m/s, density 1.8)."""
         bottom = BoundaryProperties(
             acoustic_type='half-space',
             sound_speed=1600.0,  # Slightly faster sediment
@@ -66,17 +68,19 @@ class TestPekerisWaveguide:
         )
 
     @pytest.mark.requires_binary
-    def test_bellhop_pekeris_tl_range(self, pekeris_env, pekeris_source, pekeris_receiver):
+    def test_bellhop_pekeris_tl_range(self, pekeris_env_soft_bottom, pekeris_source, pekeris_receiver):
         """
-        Bellhop TL should follow expected range-dependent decay
+        Bellhop TL grows with range in a Pekeris waveguide.
 
-        Expected behavior:
-        - TL increases with range (conservation of energy)
-        - Lloyd mirror interference pattern visible
-        - TL at 5km should be ~70-90 dB for 100 Hz
+        The bounds are gross-error guards, not a calibration: this
+        scenario lands at ~56 dB at 1 km and ~65 dB at 5 km, so the
+        60-100 dB window at 5 km leaves room for beam-sampling jitter
+        while still catching a missing spreading law or a TL sign flip.
+        The tight quantitative version is
+        ``test_benchmarks_analytic.py::test_bellhop_lloyd_mirror``.
         """
         bellhop = Bellhop(verbose=False)
-        result = bellhop.compute_tl(pekeris_env, pekeris_source, pekeris_receiver)
+        result = bellhop.compute_tl(pekeris_env_soft_bottom, pekeris_source, pekeris_receiver)
 
         # Basic validation
         assert isinstance(result, Field)
@@ -84,23 +88,23 @@ class TestPekerisWaveguide:
 
         # Physics validation
         # 1. TL increases with range (monotonic in mean)
-        tl_vs_range = result.tl.mean(axis=0)  # Average over depths
+        tl_vs_range = result.db.mean(axis=0)  # Average over depths
         assert tl_vs_range[-1] > tl_vs_range[0], "TL should increase with range"
 
-        # 2. TL at 5km should be reasonable (70-90 dB typical for 100 Hz)
-        tl_at_5km = result.tl[:, -1].mean()
-        assert 60 < tl_at_5km < 100, f"TL at 5km should be ~70-90 dB, got {tl_at_5km:.1f} dB"
+        # 2. TL at 5km sits in the plausible band for 100 Hz in 100 m water
+        tl_at_5km = result.db[:, -1].mean()
+        assert 60 < tl_at_5km < 100, f"TL at 5km outside 60-100 dB: {tl_at_5km:.1f} dB"
 
         # 3. TL at 1km should be less than at 5km
-        tl_at_1km = result.tl[:, 0].mean()
+        tl_at_1km = result.db[:, 0].mean()
         assert tl_at_1km < tl_at_5km, "TL at 1km should be less than at 5km"
 
         # 4. No NaN or inf values
-        assert np.all(result.tl > 0), "All TL values should be positive"
-        assert np.all(result.tl < 200), "TL should not exceed 200 dB (sanity check)"
+        assert np.all(result.db > 0), "All TL values should be positive"
+        assert np.all(result.db < 200), "TL should not exceed 200 dB (sanity check)"
 
     @pytest.mark.requires_binary
-    def test_bellhop_pekeris_depth_structure(self, pekeris_env, pekeris_source, pekeris_receiver):
+    def test_bellhop_pekeris_depth_structure(self, pekeris_env_soft_bottom, pekeris_source, pekeris_receiver):
         """
         Bellhop should show Lloyd mirror interference pattern
 
@@ -109,26 +113,29 @@ class TestPekerisWaveguide:
         - Pattern depends on source/receiver geometry
         """
         bellhop = Bellhop(verbose=False)
-        result = bellhop.compute_tl(pekeris_env, pekeris_source, pekeris_receiver)
+        result = bellhop.compute_tl(pekeris_env_soft_bottom, pekeris_source, pekeris_receiver)
 
         # Check depth variation exists (not constant)
-        tl_vs_depth_at_1km = result.tl[:, 0]
+        tl_vs_depth_at_1km = result.db[:, 0]
         depth_std = np.std(tl_vs_depth_at_1km)
         assert depth_std > 1.0, "Should see >1 dB variation in TL vs depth (Lloyd mirror pattern)"
 
     @pytest.mark.requires_binary
     @pytest.mark.slow
-    def test_kraken_pekeris_modes(self, pekeris_env, pekeris_source):
+    def test_kraken_pekeris_modes(self, pekeris_env_soft_bottom, pekeris_source):
         """
-        Kraken should compute physically reasonable modes
+        Kraken computes physically reasonable modes on a Pekeris waveguide.
 
-        Expected behavior:
-        - Mode count increases with frequency * depth
-        - First mode has no zero-crossings
-        - Mode wavenumbers are real and positive (for hard bottom)
+        This bottom is a *lossy* fluid half-space (0.5 dB/wavelength), so
+        the eigenvalues are complex: modal attenuation shows up as a small
+        ``k.imag`` (AT's convention makes it negative — see
+        ``test_modes_perturbation.py::test_decays_under_raw_kraken_imag_sign``).
+        At 100 Hz here it spans 1e-5 to 2e-3 1/m across the six trapped
+        modes, so the ``|k.imag| < 0.1`` bound only catches a garbage
+        eigenvalue, not a change in the loss model.
         """
         kraken = Kraken(verbose=False)
-        modes = kraken.compute_modes(pekeris_env, pekeris_source, n_modes=20)
+        modes = kraken.compute_modes(pekeris_env_soft_bottom, pekeris_source, n_modes=20)
 
         assert isinstance(modes, Modes)
         assert modes.k is not None, "Should have wavenumber data"
@@ -141,13 +148,13 @@ class TestPekerisWaveguide:
         assert len(k) > 0, "Should compute at least one mode"
         assert len(k) <= 20, "Should not exceed requested mode count"
 
-        # Wavenumbers should be real and positive (lossless half-space)
+        # Trapped modes propagate, so Re(k) > 0; Im(k) carries only the
+        # bottom-loss perturbation and stays orders below it.
         if np.iscomplexobj(k):
             k_real = np.real(k)
             k_imag = np.imag(k)
             assert np.all(k_real > 0), "Mode wavenumbers (real part) should be positive"
-            # Allow small imaginary parts (numerical error or slight attenuation)
-            assert np.all(np.abs(k_imag) < 0.1), "Imaginary parts should be small for lossless case"
+            assert np.all(np.abs(k_imag) < 0.1), "Imaginary parts should be small"
         else:
             assert np.all(k > 0), "Mode wavenumbers should be positive"
 
@@ -185,7 +192,6 @@ class TestRangeDependentPhysicalSanity:
 
         env = uacpy.Environment(
             name='Sloping Bottom',
-            # Initial depth
             ssp=1500.0,
             bathymetry=bathymetry,
             bottom=bottom
@@ -214,8 +220,8 @@ class TestRangeDependentPhysicalSanity:
         assert result.shape == (len(slope_receiver.depths), len(slope_receiver.ranges))
 
         # TL should be reasonable
-        assert np.all(result.tl > 0)
-        assert np.all(result.tl < 150)
+        assert np.all(result.db > 0)
+        assert np.all(result.db < 150)
 
     @pytest.mark.requires_binary
     @pytest.mark.slow
@@ -232,8 +238,8 @@ class TestRangeDependentPhysicalSanity:
         assert np.all(np.isfinite(result.data))
 
         # TL should be physically reasonable
-        assert np.all(result.tl > 0)
-        assert np.all(result.tl < 150)
+        assert np.all(result.db > 0)
+        assert np.all(result.db < 150)
 
 
 class TestMunkProfile:
@@ -263,17 +269,17 @@ class TestMunkProfile:
         self, munk_env, munk_source, munk_receiver,
     ):
         """Bellhop on a canonical Munk profile must trap refracted energy
-        in the sound channel. Measured ~9 dB surface-vs-channel and
-        ~5 dB bottom-vs-channel; thresholds half those values catch
-        gross errors (lost channel, inverted gradient) while leaving
-        margin for beam-sampling jitter.
+        in the sound channel. At 50 km this scenario measures 6.0 dB
+        surface-vs-channel and 6.8 dB bottom-vs-channel; the 4 dB / 2 dB
+        thresholds sit below both so a lost channel or an inverted
+        gradient fails while beam-sampling jitter does not.
         """
         bellhop = Bellhop(verbose=False, n_beams=500, alpha=(-25, 25))
         result = bellhop.run(
             munk_env, munk_source, munk_receiver,
             run_mode=RunMode.COHERENT_TL,
         )
-        tl = np.asarray(result.tl).reshape(-1)
+        tl = np.asarray(result.db).reshape(-1)
         z = np.asarray(munk_receiver.depths)
 
         tl_surface = float(np.median(tl[z < 200.0]))
@@ -318,7 +324,12 @@ class TestInterpolationAccuracy:
             assert np.abs(c_interp - c) < 1e-6, f"At depth {d}, expected {c}, got {c_interp}"
 
     def test_environment_ssp_interpolation_bounds(self):
-        """Interpolated SSP values should stay within bounds."""
+        """Interpolated SSP values stay within the tabulated range.
+
+        ``Environment.get_sound_speed`` is linear (``np.interp``), so an
+        interpolant can never overshoot its two bracketing samples; the
+        ±1 m/s slack is float noise, not headroom for a spline.
+        """
         depths = np.array([0, 50, 100])
         speeds = np.array([1520, 1500, 1480])
         ssp_data = np.column_stack([depths, speeds])
@@ -343,7 +354,12 @@ class TestSoundSpeedEquations:
 
     def test_unesco_reference_check_value(self):
         from uacpy.core.acoustics import soundspeed_unesco
-        # UNESCO 1983 check value: c(S=35, T=0 ITS-90, P=0) ≈ 1449.14 m/s
+        # c(T=0 °C, S=35, P=0) = 1449.139 m/s. At P=0 the Chen-Millero
+        # polynomial collapses to C0 + (A0 + B0*sqrt(S) + D0*S)*S, which the
+        # independent AT transcription (Acoustics-Toolbox/Matlab/soundspeed.m:
+        # 85-101) evaluates to that value from the same published
+        # coefficients. abs=0.02 is the rounding of the quoted 2-dp figure;
+        # T=0 needs no ITS-90/IPTS-68 care because the scales meet there.
         assert soundspeed_unesco(0.0, 35.0, 0.0) == pytest.approx(1449.14, abs=0.02)
 
     def test_unesco_agrees_with_mackenzie_at_surface(self):
@@ -371,12 +387,16 @@ class TestSoundSpeedEquations:
 
 
 class TestPekerisRoot:
-    """Branch selection matches Acoustics-Toolbox PekerisRoot.m."""
+    """Branch selection matches ``Acoustics-Toolbox/Matlab/Kraken/
+    PekerisRoot.m``."""
 
     def test_matches_at_reference_branch(self):
         from uacpy.core.acoustics import pekeris_root
+        # z spans both branches, the branch cut itself (real z <= 0), and
+        # 1e-12+1j just inside the Re >= 0 side of it.
         z = np.array([4 + 0j, -4 + 0j, -4 + 1j, -4 - 1j, 1j, -1j,
                       1e-12 + 1j, 4 + 1j, 4 - 1j, 0j])
+        # PekerisRoot.m: sqrt(z) where real(z) >= 0, else 1i*sqrt(-z).
         expected = np.where(z.real >= 0, np.sqrt(z), 1j * np.sqrt(-z))
         assert np.allclose(pekeris_root(z), expected)
 
@@ -450,5 +470,6 @@ class TestNumericalStability:
         bellhop = Bellhop(verbose=False)
         result = bellhop.compute_tl(env, source, receiver)
         assert np.all(np.isfinite(result.data))
-        # High frequency should have higher TL due to absorption
-        assert np.all(result.tl > 20)  # Expect significant loss
+        # Geometric spreading alone exceeds 20 dB at the nearest range
+        # (100 m), so this only catches a TL that came back near zero.
+        assert np.all(result.db > 20)

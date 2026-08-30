@@ -6,12 +6,17 @@ factor). Downstream broadband synthesis (``Field.synthesize_time_series``
 and ``Field.to_time_trace``) expects a single canonical form: the
 **engineering travelling-wave** pressure
 
-    p̄(r, z, f)  ∝  ψ̄(r, z, f) · exp(-i k₀ r) / √r
+    p̄(r, z, f)  ∝  ψ̄(r, z, f) · exp(-i k₀ r) · exp(-iπ/4) / √r
 
 where ψ is the slow PE envelope, k₀ = ω/c₀ is the reference wavenumber,
-and the bar denotes complex conjugation (the conjugate flips the
+``exp(-iπ/4)`` is the Hankel-asymptotic cylindrical-spreading phase of
+``H₀⁽¹⁾(k₀r) ≈ √(2/(π k₀ r))·exp(+i(k₀r - π/4))`` under the conjugated
+carrier, and the bar denotes complex conjugation (the conjugate flips the
 mpiramS / Collins carrier from the ``exp(+iωt)`` to the ``exp(-iωt)``
-sign uacpy uses everywhere else).
+sign uacpy uses everywhere else). mpiramS bakes the π/4 into what it
+writes; the Collins codes factor out only ``exp(+i k₀ r)``
+(``ramgeo1.5.f:436``, ``ramsurf1.5.f:445``, ``rams0.5.f:270``), so their
+branches apply it here.
 
 Three convention strings cover the three vendored binaries:
 
@@ -19,8 +24,8 @@ Three convention strings cover the three vendored binaries:
 convention    What the backend writes                                Fortran source
 ============  ====================================================  =======================================
 ``'mpiramS'`` ``psif = ψ · exp(+i(k₀ r + π/4)) / (4π)``              ``third_party/mpiramS/`` patched output
-``'rams'``    ``ψ · exp(+i k₀ r)``  (carrier baked in via g₀)        ``rams0.5.f:830-831``
-``'ramsurf'`` ``ψ``                  (bare envelope, no carrier)     ``ramsurf1.5.f:310``
+``'rams'``    ``ψ · exp(+i k₀ r rot₀)`` (carrier baked in via g₀)    ``rams0.5.f:848-851`` (g₀ at ``:889``)
+``'ramsurf'`` ``ψ``                  (bare envelope, no carrier)     ``ramsurf1.5.f``: no ``g0`` anywhere
 ============  ====================================================  =======================================
 
 Adding a fourth backend amounts to one new branch here plus declaring
@@ -124,20 +129,31 @@ def psi_to_travelling_wave(
         psi.shape, range_axis, None, ranges_m, None,
     )[0]
 
+    # The Hankel-asymptotic cylindrical-spreading phase under the conjugated
+    # carrier (see the module docstring). mpiramS bakes it into psif; the
+    # Collins codes do not write it, so the RAMS / RAMSURF branches apply it.
+    hankel = np.exp(-1j * np.pi / 4.0)
+
     if convention == MPIRAMS:
         # peramx already applies the full 3-D / Hankel-asymptotic output scaling
-        # scl = exp(+i(ω/c₀·r + π/4))/(4π) (peramx.f90:412); the Collins PE
+        # scl = exp(+i(ω/c₀·r + π/4))/(4π) (peramx.f90:420); the Collins PE
         # self-starter is itself a far-field Hankel approximation (Collins 1993;
         # JKPS), so the π/4 is the cylindrical-spreading phase, already baked in.
         # The wrapper must therefore ONLY conjugate (peramx marches the conjugate
         # time convention) and restore the 4π — applying any extra exp(±iπ/4)
-        # double-counts that phase. Verified: conj(psif)·4π matches the exact
-        # wavenumber-integration field (Scooter) to ~1° over 1–7 km, whereas an
-        # extra exp(-iπ/4) (or +iπ/4) sits ~45° off. |TL| is unaffected.
+        # here would double-count that phase. Verified: conj(psif)·4π matches
+        # the exact wavenumber-integration field (Scooter) to ~2° over 1–3 km.
+        # |TL| is unaffected.
         out = psi_bar * (4.0 * np.pi)
     elif convention == RAMS:
-        # rams0.5 already multiplies by g₀ = exp(+i k₀ r); conj suffices.
-        out = psi_bar
+        # rams0.5 marches its own carrier in, one g₀ = exp(+i k₀ Δr rot₀) per
+        # range step (``rams0.5.f:849-850``), so conj recovers the carrier —
+        # but the code writes no Hankel π/4 (the dump at ``rams0.5.f:270``
+        # divides by ``sqrt(r+eps)`` only), so it is applied here. ``rot₀`` is the
+        # rotated-Padé scalar (``rams0.5.f:865-888``; exactly 1 when the
+        # rotation is off, ``:909``) and is left in — it belongs to the
+        # operator, not to the phase convention.
+        out = psi_bar * hankel
     else:  # RAMSURF — needs explicit carrier
         if k0 is None or freq_axis is None:
             # Narrowband ramsurf: a scalar k0 with no freq_axis is OK.
@@ -154,7 +170,9 @@ def psi_to_travelling_wave(
             carrier = np.exp(
                 -1j * k0_arr.reshape(k0_shape) * ranges_m.reshape(rng_shape)
             )
-        out = psi_bar * carrier
+        # ramsurf1.5 / ramgeo write the bare envelope: the carrier at :445 /
+        # :436 carries no π/4, so the Hankel phase is applied here as well.
+        out = psi_bar * carrier * hankel
 
     if apply_radial:
         radial = (1.0 / np.sqrt(ranges_m)).reshape(rng_shape_only)

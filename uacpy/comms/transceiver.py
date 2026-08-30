@@ -26,15 +26,20 @@ Schmidl & Cox (1997); Li, Stojanovic et al. (2007). Proakis & Salehi.
 
 from __future__ import annotations
 
+import warnings
+from typing import Optional
+
 import numpy as np
 
+from uacpy.comms._equalizer_core import regularizer
 from uacpy.comms.coding import ConvCode
 from uacpy.comms.doppler import compensate_doppler, estimate_doppler_scale
-from uacpy.comms.equalization import DFE
+from uacpy.comms.equalization import DFE, slicer
 from uacpy.comms.modulation import Modulator
 from uacpy.comms.ofdm import (
-    _ofdm_symbol,
+    ofdm_symbol,
     apply_cfo,
+    estimate_channel,
     schmidl_cox_preamble,
     schmidl_cox_sync,
 )
@@ -47,6 +52,33 @@ from uacpy.comms.phy import (
 )
 from uacpy.comms.sync import detect_preamble
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.core._warn_frames import USER_FRAME_SKIP
+
+
+def _require_passband_fits(sample_rate, fc, sps, rolloff, where):
+    """Raise unless the RRC band sits clear of DC and of Nyquist at ``fc``.
+
+    The occupied bandwidth is ``Rs·(1+rolloff)`` for symbol rate
+    ``Rs = sample_rate/sps``. Synchronous demodulation needs the whole band
+    above DC and its image at ``-2·fc`` clear of it, so ``fc`` has to keep
+    half a bandwidth from both edges; ``fc < sample_rate/2`` alone lets a
+    sideband fold back onto the signal.
+    """
+    fs = float(sample_rate)
+    bw = fs * (1.0 + float(rolloff)) / float(sps)
+    lo, hi = bw / 2.0, fs / 2.0 - bw / 2.0
+    if lo >= hi:
+        raise ConfigurationError(
+            f"{where}: the RRC band (Rs*(1+rolloff) = {bw:g} Hz) does not fit "
+            f"below Nyquist ({fs / 2:g} Hz) at any carrier.",
+            remediation="Raise sample_rate, raise sps, or lower rolloff.")
+    if not lo < float(fc) < hi:
+        raise ConfigurationError(
+            f"{where}: fc ({float(fc):g} Hz) must lie in ({lo:g}, {hi:g}) Hz so "
+            f"the RRC band (Rs*(1+rolloff) = {bw:g} Hz) and its image at -2*fc "
+            f"do not fold onto the signal.",
+            remediation=f"Use a carrier inside ({lo:g}, {hi:g}) Hz, or change "
+                        f"sample_rate/sps/rolloff to narrow the band.")
 
 
 def _default_preamble(n_symbols, scheme, seed=0xC0FFEE):
@@ -70,12 +102,13 @@ class Transmitter:
         "generate this many" (matched by :class:`CommsReceiver` with the same count).
     """
 
-    def __init__(self, modulation: str, code: ConvCode = None, preamble=None):
+    def __init__(self, modulation: str, code: Optional[ConvCode] = None,
+                 preamble=None):
         self.modulation = modulation
         self.modulator = Modulator(modulation)
         self.code = code
         if preamble is None or np.isscalar(preamble):
-            n = 64 if preamble is None else int(preamble)
+            n = 64 if preamble is None else int(np.asarray(preamble).item())
             self.preamble = _default_preamble(n, modulation)
         else:
             self.preamble = np.asarray(preamble, dtype=complex)
@@ -88,8 +121,7 @@ class Transmitter:
 
     def to_passband(self, symbols, sample_rate, fc, sps=8, rolloff=0.25, span=8):
         """Pulse-shape and up-convert symbols to a real passband signal at ``fc``."""
-        if fc >= sample_rate / 2:
-            raise ConfigurationError("to_passband: need fc < sample_rate/2")
+        _require_passband_fits(sample_rate, fc, sps, rolloff, 'to_passband')
         return upconvert(pulse_shape(symbols, sps, rolloff, span), sample_rate, fc)
 
     def transmit_passband(self, bits, sample_rate, fc, sps=8, rolloff=0.25, span=8):
@@ -105,14 +137,14 @@ class CommsReceiver:
     tracking residual carrier offset). ``preamble`` must match the transmitter's.
     """
 
-    def __init__(self, modulation: str, code: ConvCode = None,
-                 equalizer: DFE = None, preamble=None):
+    def __init__(self, modulation: str, code: Optional[ConvCode] = None,
+                 equalizer: Optional[DFE] = None, preamble=None):
         self.modulation = modulation
         self.modulator = Modulator(modulation)
         self.code = code
         self.equalizer = equalizer
         if preamble is None or np.isscalar(preamble):
-            n = 64 if preamble is None else int(preamble)
+            n = 64 if preamble is None else int(np.asarray(preamble).item())
             self.preamble = _default_preamble(n, modulation)
         else:
             self.preamble = np.asarray(preamble, dtype=complex)
@@ -120,6 +152,7 @@ class CommsReceiver:
     def from_passband(self, samples, sample_rate, fc, sps=8, rolloff=0.25, span=8,
                       loop_bw=0.005):
         """Down-convert, matched-filter, and timing-recover to symbol-rate samples."""
+        _require_passband_fits(sample_rate, fc, sps, rolloff, 'from_passband')
         bb = downconvert(np.asarray(samples, dtype=float), sample_rate, fc)
         mf = matched_filter(bb, sps, rolloff, span)
         return symbol_sync(mf, sps, loop_bw=loop_bw, start=span * sps)
@@ -135,9 +168,16 @@ class CommsReceiver:
         """
         sym = np.asarray(symbols, dtype=complex).ravel()
         start = 0
-        k, _ = detect_preamble(sym, self.preamble, threshold=threshold)
+        k, metric = detect_preamble(sym, self.preamble, threshold=threshold)
         if k is not None:
             start = k
+        else:
+            warnings.warn(
+                f"CommsReceiver.receive: preamble not detected (best metric "
+                f"{float(np.max(metric)):.3f} < threshold {float(threshold):.3f}); "
+                f"decoding from sample 0. The returned bits are not frame-aligned "
+                f"and carry no indication of that.",
+                UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
         sym = sym[start:]
         pre = self.preamble
         if self.equalizer is not None:
@@ -183,7 +223,7 @@ class OFDMTransmitter:
     """
 
     def __init__(self, modulation: str, n_subcarriers: int = 256,
-                 cp_len: int = 32, code: ConvCode = None):
+                 cp_len: int = 32, code: Optional[ConvCode] = None):
         self.modulation = modulation
         self.modulator = Modulator(modulation)
         self.n_subcarriers = int(n_subcarriers)
@@ -199,9 +239,9 @@ class OFDMTransmitter:
         nsc = self.n_subcarriers
         if sym.size % nsc:
             sym = np.concatenate([sym, np.zeros(nsc - sym.size % nsc, dtype=complex)])
-        data = [_ofdm_symbol(sym[i:i + nsc], nsc, self.cp_len)
+        data = [ofdm_symbol(sym[i:i + nsc], nsc, self.cp_len)
                 for i in range(0, sym.size, nsc)]
-        pilot = _ofdm_symbol(self.pilot_freq, nsc, self.cp_len)
+        pilot = ofdm_symbol(self.pilot_freq, nsc, self.cp_len)
         guard = np.zeros(nsc + self.cp_len, dtype=complex)   # protects the last block
         return np.concatenate([self.preamble, pilot] + data + [guard])
 
@@ -216,7 +256,13 @@ class OFDMTransmitter:
         os = int(oversample)
         if fc - sample_rate / (2 * os) <= 0 or fc + sample_rate / (2 * os) >= sample_rate / 2:
             raise ConfigurationError(
-                "to_passband: OFDM band fc +/- sample_rate/(2*oversample) must lie in (0, sample_rate/2)")
+                "to_passband: OFDM band fc +/- sample_rate/(2*oversample) "
+                "must lie in (0, sample_rate/2); got fc="
+                f"{float(fc):g} Hz, sample_rate={float(sample_rate):g} Hz, "
+                f"oversample={os} — band "
+                f"{fc - sample_rate / (2 * os):g}-"
+                f"{fc + sample_rate / (2 * os):g} Hz against Nyquist "
+                f"{sample_rate / 2:g} Hz")
         up = resample_poly(baseband, os, 1)
         return upconvert(up, sample_rate, fc)
 
@@ -237,7 +283,8 @@ class OFDMReceiver:
     """
 
     def __init__(self, modulation: str, n_subcarriers: int = 256,
-                 cp_len: int = 32, code: ConvCode = None, snr_linear=None):
+                 cp_len: int = 32, code: Optional[ConvCode] = None,
+                 snr_linear=None):
         self.modulation = modulation
         self.modulator = Modulator(modulation)
         self.n_subcarriers = int(n_subcarriers)
@@ -248,35 +295,64 @@ class OFDMReceiver:
         self.pilot_freq = _pilot_spectrum(self.n_subcarriers, modulation)
 
     def _equalize(self, freq, h):
-        if self.snr_linear is None:
-            return freq / (h + 1e-12)
-        return freq * np.conj(h) / (np.abs(h) ** 2 + 1.0 / float(self.snr_linear))
+        """One-tap-per-subcarrier ZF (or MMSE) division by the channel estimate.
+
+        Both branches take the ``conj(h)/(|h|^2 + eps)`` form of
+        :func:`~uacpy.comms.ofdm.ofdm_demodulate`, with ``eps`` scaled to the
+        estimate's own power. ``h`` here comes from the received pilot, so its
+        magnitude is the receive amplitude: against a fixed offset the estimate
+        stopped being used at all once the record fell near it — measured,
+        16-QAM over a 4-tap channel ran at BER 0.24 at a receive amplitude of
+        1e-12, and MMSE at 1e-9. A subcarrier the estimate calls silent comes
+        back as zero.
+        """
+        h2 = np.abs(h) ** 2
+        eps = regularizer(h2, self.snr_linear)
+        if eps <= 0.0:
+            return np.zeros_like(freq)
+        return freq * np.conj(h) / (h2 + eps)
 
     def receive(self, baseband):
-        """Baseband OFDM frame -> information bits (sync, channel est, equalize)."""
+        """Baseband OFDM frame -> information bits (sync, channel est, equalize).
+
+        Every whole block after the pilot is decoded as data — the
+        transmitter's trailing zero guard block and any extra captured
+        samples included — so the returned stream runs past the payload (the
+        guard alone contributes ``n_subcarriers * bits_per_symbol`` coded
+        bits of noise). Slice the result to the known payload length.
+        """
         nsc, cp = self.n_subcarriers, self.cp_len
         blk = nsc + cp
         x = np.asarray(baseband, dtype=complex).ravel()
-        start, cfo = schmidl_cox_sync(x, nsc, cp)
+        start, cfo = schmidl_cox_sync(x, nsc)
         if start is None:
+            warnings.warn(
+                "OFDMReceiver.receive: Schmidl-Cox timing metric never reached "
+                "the 0.5 plateau threshold, so no preamble was found; decoding "
+                "from sample 0 with cfo=0. The returned bits are not frame-"
+                "aligned and carry no indication of that.",
+                UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
             start = 0
         x = apply_cfo(x[start:], cfo)
         nblocks = x.size // blk
         if nblocks < 3:
-            raise ConfigurationError("OFDMReceiver: frame too short (need preamble+pilot+data)")
+            raise ConfigurationError(
+                "OFDMReceiver: frame too short (need preamble+pilot+data); "
+                f"got {nblocks} block(s) of {blk} samples from {x.size} "
+                f"samples, need >= 3")
 
         def block_spectrum(b):
             """FFT of OFDM block ``b`` (cyclic prefix removed)."""
             seg = x[b * blk + cp: b * blk + cp + nsc]
             return np.fft.fft(seg) / np.sqrt(nsc)
 
-        h = block_spectrum(1) / (self.pilot_freq + 1e-12)   # pilot channel estimate
+        h = estimate_channel(x[blk:2 * blk], self.pilot_freq, nsc, cp)
         c = self.modulator.constellation
         data = []
         for b in range(2, nblocks):
             d = self._equalize(block_spectrum(b), h)
             # decision-directed common-phase-error correction (residual CFO drift)
-            dec = c[np.argmin(np.abs(d[:, None] - c[None, :]), axis=1)]
+            dec = slicer(d, c)
             d *= np.exp(-1j * np.angle(np.vdot(dec, d)))
             data.append(d)
         syms = np.concatenate(data) if data else np.array([], dtype=complex)

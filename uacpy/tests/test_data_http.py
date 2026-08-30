@@ -4,8 +4,9 @@ import urllib.error
 
 import pytest
 
-from uacpy.core.exceptions import DataFetchError
+from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.data import _http
+from uacpy.data._http import raise_substantive
 
 
 class _FakeResp:
@@ -115,3 +116,23 @@ def test_checked_member_size_caps_bomb():
         _http.checked_member_size(2000, 'a.tif', max_bytes=1000)
     with pytest.raises(DataFetchError, match='decompression bomb'):
         _http.checked_member_size(-1, 'a.tif', max_bytes=1000)
+
+
+def test_raise_substantive_rejects_an_empty_error_list():
+    # errors[-1] on an empty chain raised IndexError with no remediation.
+    with pytest.raises(ConfigurationError, match='No data source was tried'):
+        raise_substantive([])
+
+
+def test_a_refused_connection_gets_one_quick_retry_not_the_ladder():
+    """ECONNREFUSED is the remote answering instantly with a rejection, so
+    the fetch makes one quick second attempt and raises — the exponential
+    ladder is for flakes that need time (resets, timeouts, 5xx), and
+    against a down host its sleeps multiply across every grid of a
+    multi-file build. Port 9 (discard) is closed on any test host, so the
+    refusal is local and immediate."""
+    import time as _time
+    t0 = _time.monotonic()
+    with pytest.raises(DataFetchError, match='after 1 retries'):
+        _http.http_get('http://127.0.0.1:9/grid.tif', timeout=10.0)
+    assert _time.monotonic() - t0 < 5.0

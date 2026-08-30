@@ -22,15 +22,50 @@ Typical use::
     bank  = replica_bank(modes, array_depths, cand_depths, cand_ranges)
     K     = csdm(measured_snapshots)          # (n_rcv, n_snap) -> (n_rcv, n_rcv)
     surf  = bartlett(K, bank)                 # (n_cand_depths, n_cand_ranges)
+
+Against ``acoustic_signal.arrays``
+----------------------------------
+:mod:`uacpy.acoustic_signal.arrays` runs the same two processors over a
+plane-wave steering bank. They share the numerical core
+(``core/_beamforming``) and differ in four stated ways, so a number carried
+from one to the other needs converting:
+
+=====================  ============================  ==========================
+                       ``sonar`` (this module)       ``acoustic_signal.arrays``
+=====================  ============================  ==========================
+covariance             :func:`csdm`                  ``sample_covariance``
+                                                     (identical estimate; this
+                                                     one adds
+                                                     ``diagonal_loading``)
+weight bank            ``replicas`` ``(N, *grid)``   ``steering``
+                       — column-major, one column    ``(n_angles, N)`` —
+                       per candidate                 row-major, one row per
+                                                     angle
+Bartlett scaling       normalised to ``[0, 1]``:     unnormalised
+                       divided by ``tr K``           ``e^H R e``
+MVDR scaling           max-scaled to 1               unscaled ``1/(w^H R^-1 w)``
+MVDR loading default   ``diagonal_loading=0.01``     ``diagonal_loading=1e-06``
+=====================  ============================  ==========================
+
+The loading defaults differ on purpose and are **not** aligned: a replica bank
+over a dense candidate grid is routinely rank-deficient against a short
+snapshot record, which is why ``1e-2`` is the default here (see
+:func:`mvdr`); the array-processing surface assumes a full-rank sample
+covariance and only needs a numerical floor. ``core/_beamforming``'s docstring
+states that each surface keeps its own loading, normalisation and NaN policy.
 """
 
 from __future__ import annotations
 
 from typing import Tuple, Union
 
+import warnings
+
 import numpy as np
 
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.core._beamforming import (
+    loaded_inverse, quadratic_form, snapshot_covariance)
 
 __all__ = [
     "synthesize_replica",
@@ -53,6 +88,18 @@ def _interp_modes(modes, z: np.ndarray) -> np.ndarray:
     z = np.atleast_1d(np.asarray(z, dtype=float))
     phi = modes.phi  # (n_depth, n_modes)
     zp = modes.depths
+    # np.interp end-clamps outside [zp[0], zp[-1]], returning a flat
+    # plateau that looks like physics; the modal sum in
+    # Modes.modal_propagation_loss raises for the same condition, so this
+    # path does too.
+    if float(np.min(z)) < float(zp[0]) or float(np.max(z)) > float(zp[-1]):
+        raise ConfigurationError(
+            f"matched_field: depth(s) [{float(np.min(z)):g}, "
+            f"{float(np.max(z)):g}] m fall outside the mode tabulation "
+            f"[{float(zp[0]):g}, {float(zp[-1]):g}] m — the mode shapes are "
+            f"unknown there (a clamped value would be a flat, wrong "
+            f"replica). Tabulate the modes over the full source/receiver "
+            f"span (Kraken().compute_modes does).")
     if np.iscomplexobj(phi):
         out = np.empty((z.size, phi.shape[1]), dtype=np.complex128)
         for m in range(phi.shape[1]):
@@ -102,15 +149,23 @@ def synthesize_replica(
     """
     r = np.atleast_1d(np.asarray(ranges, dtype=float))
     if np.any(r <= 0):
-        raise ConfigurationError("synthesize_replica: ranges must be > 0")
+        raise ConfigurationError(
+            f"synthesize_replica: ranges must be > 0; got "
+            f"{int(np.count_nonzero(r <= 0))} value(s) <= 0, first at index "
+            f"{int(np.argmax(r <= 0))} ({r[r <= 0][0]:g} m)")
     z = np.atleast_1d(np.asarray(array_depths, dtype=float))
 
     k = np.asarray(modes.k, dtype=np.complex128)            # (M,)
-    phi_s = _interp_modes(modes, src_depth)[0]              # (M,)
+    phi_s = _interp_modes(modes, np.atleast_1d(
+        np.asarray(src_depth, dtype=float)))[0]             # (M,)
     phi_r = _interp_modes(modes, z)                          # (N, M)
 
     # (M, R): per-mode range term, far-field (asymptotic Hankel) convention.
-    # KRAKEN stores Im(k) < 0, so exp(-i k r) decays — outgoing, attenuated.
+    # Under exp(-i k r) a mode decays for Im(k) <= 0. Raw Kraken eigenvalues
+    # already carry that sign while Modes.with_attenuation builds Im(k) > 0;
+    # a passive medium can only attenuate, so the sign is forced and either
+    # input synthesises a decaying replica.
+    k = k.real - 1j * np.abs(k.imag)
     rng_term = np.exp(-1j * np.outer(k, r)) / np.sqrt(k)[:, None]
     p = (phi_r * phi_s[None, :]) @ rng_term                 # (N, R)
     p = p / np.sqrt(r)[None, :]
@@ -156,10 +211,15 @@ def _slab_pressure(slab, array_depths) -> np.ndarray:
     ``depth`` is the array (receiver) axis. Optionally verifies the depth axis
     against ``array_depths``.
     """
-    if getattr(slab, "kind", None) != "pressure":
+    # Matched-field processing correlates phase, so the requirement is on the
+    # dtype axis, not the quantity: a real TL slab is the same ``kind`` and
+    # would pass a kind check having already thrown its phase away.
+    if getattr(slab, "kind", None) != "pressure" or not slab.is_complex:
         raise ConfigurationError(
             "replica_bank_from_field: slab must be complex narrowband pressure "
-            f"(kind='pressure'); got kind={getattr(slab, 'kind', None)!r}"
+            f"(kind='pressure', complex dtype); got "
+            f"kind={getattr(slab, 'kind', None)!r}, unit={slab.unit!r}, "
+            f"dtype={slab.data.dtype}"
         )
     coords = list(slab.coords)
     if coords != ["depth", "range"]:
@@ -174,7 +234,9 @@ def _slab_pressure(slab, array_depths) -> np.ndarray:
             raise ConfigurationError(
                 "replica_bank_from_field: slab 'depth' axis does not match "
                 "array_depths — resample receivers to the element depths first "
-                "(field.eval / field.resample_to)."
+                "(field.eval / field.resample_to). Got a slab 'depth' axis of "
+                f"shape {got.shape} against array_depths of shape "
+                f"{want.shape}."
             )
     return np.asarray(slab.p, dtype=np.complex128)
 
@@ -215,7 +277,8 @@ def replica_bank_from_field(field, *, array_depths=None) -> np.ndarray:
 
     Caveat: opening MFP to range-dependent (PE/ray) replicas invites exactly the
     regime where Capon/MVDR mismatch sensitivity is worst — small environmental
-    or model error collapses the MVDR peak (COA §10.6). Raise ``mvdr(loading=…)``
+    or model error collapses the MVDR peak (COA §10.6). Raise
+    ``mvdr(diagonal_loading=…)``
     toward Bartlett for robustness; Bartlett is comparatively forgiving.
 
     Parameters
@@ -257,15 +320,22 @@ def replica_bank_from_field(field, *, array_depths=None) -> np.ndarray:
                 raise ConfigurationError(
                     "replica_bank_from_field: every slab must share the same "
                     "depth (array) and range (candidate) axes — the stack mixes "
-                    "different receiver geometries or range grids."
+                    "different receiver geometries or range grids. Got slab "
+                    f"{len(cols) - 1} on a "
+                    f"{slab.coords['depth'].size}-depth x "
+                    f"{slab.coords['range'].size}-range grid against slab 0 "
+                    f"on {ref.coords['depth'].size} x "
+                    f"{ref.coords['range'].size}."
                 )
         return np.ascontiguousarray(np.stack(cols, axis=1), dtype=np.complex128)
 
     # Single Field.
-    if getattr(field, "kind", None) != "pressure":
+    if getattr(field, "kind", None) != "pressure" or not field.is_complex:
         raise ConfigurationError(
             "replica_bank_from_field: needs complex narrowband pressure "
-            f"(kind='pressure'); got kind={getattr(field, 'kind', None)!r}. "
+            f"(kind='pressure', complex dtype); got "
+            f"kind={getattr(field, 'kind', None)!r}, unit={field.unit!r}, "
+            f"dtype={field.data.dtype}. "
             "Slice one frequency with field.at(frequency=…) and ensure the "
             "field is coherent (complex), not TL."
         )
@@ -289,7 +359,9 @@ def replica_bank_from_field(field, *, array_depths=None) -> np.ndarray:
             raise ConfigurationError(
                 "replica_bank_from_field: field 'depth' axis does not match "
                 "array_depths — resample receivers to the element depths first "
-                "(field.eval / field.resample_to)."
+                "(field.eval / field.resample_to). Got a field 'depth' axis "
+                f"of shape {got.shape} against array_depths of shape "
+                f"{want.shape}."
             )
     sensor_pos = coords.index("depth")
     # np.array (copy) — field.p is a read-only view; without copying, a
@@ -311,13 +383,24 @@ def csdm(snapshots: np.ndarray) -> np.ndarray:
     -------
     ndarray, shape ``(N, N)``
         ``K = (1/L) sum_l d_l d_l^H`` (Hermitian).
+
+    Raises
+    ------
+    ConfigurationError
+        If ``snapshots`` is not 2-D, carries no snapshot column, or holds a
+        NaN/Inf. A single non-finite sample makes every entry of ``K`` NaN
+        and :func:`bartlett` then returns an all-NaN ambiguity surface with
+        no diagnostic — engines NaN their ``r <= 0`` columns and Bellhop NaNs
+        shadow-zone cells, so snapshots assembled from modelled fields reach
+        here non-finite.
+
+    Notes
+    -----
+    :func:`uacpy.acoustic_signal.sample_covariance` is the same estimate
+    under the array-processing name; both call
+    ``core._beamforming.snapshot_covariance``.
     """
-    d = np.atleast_2d(np.asarray(snapshots, dtype=np.complex128))
-    if d.ndim != 2:
-        raise ConfigurationError(
-            f"csdm: snapshots must be 2-D (N, L); got shape {d.shape}"
-        )
-    return (d @ d.conj().T) / d.shape[1]
+    return snapshot_covariance(snapshots, "csdm")
 
 
 def _flatten_bank(replicas: np.ndarray) -> Tuple[np.ndarray, Tuple[int, ...]]:
@@ -326,6 +409,12 @@ def _flatten_bank(replicas: np.ndarray) -> Tuple[np.ndarray, Tuple[int, ...]]:
     grid_shape = replicas.shape[1:]
     E = replicas.reshape(N, -1)
     norms = np.linalg.norm(E, axis=0)
+    # An identically-zero replica column is a candidate position the forward
+    # model put no energy at (a shadow-zone cell from a ray/PE bank, or a
+    # source depth on a pressure-release boundary where every mode shape
+    # vanishes). Dividing it by 1 leaves it zero, which :func:`bartlett` scores
+    # as a genuine zero ("nothing matches here"); the unguarded 0/0 would put a
+    # NaN in the surface and raise a RuntimeWarning instead.
     norms[norms == 0] = 1.0
     return E / norms[None, :], grid_shape
 
@@ -335,6 +424,10 @@ def bartlett(K: np.ndarray, replicas: np.ndarray) -> np.ndarray:
 
     ``P_B = e^H K e / (e^H e * tr K)`` with unit-norm replicas. Equals 1 where a
     replica matches a rank-one CSDM exactly; robust but broad-lobed.
+
+    :meth:`uacpy.core.results.Covariance.bartlett` is the same processor over
+    an OASN ``.xsm`` covariance: multi-frequency, replica-index-last, and left
+    unnormalised, so its surface is this one times ``tr K``.
 
     Parameters
     ----------
@@ -351,19 +444,33 @@ def bartlett(K: np.ndarray, replicas: np.ndarray) -> np.ndarray:
     E, grid_shape = _flatten_bank(replicas)
     K = np.asarray(K, dtype=np.complex128)
     trK = np.real(np.trace(K))
-    num = np.real(np.einsum("ng,nm,mg->g", E.conj(), K, E))
+    # The shared Bartlett/MVDR core (core/_beamforming); E is column-major
+    # (N, G), the kernel takes row-major weights.
+    num = quadratic_form(K, E.T)
+    # A CSDM with zero trace is a positive-semidefinite matrix of zeros, so the
+    # numerator is zero too: divide by 1 to return an all-zero surface rather
+    # than 0/0. :func:`mvdr` warns on the same condition because there the
+    # matrix has to be inverted.
     surf = num / (trK if trK != 0 else 1.0)
     return surf.reshape(grid_shape)
 
 
-def mvdr(K: np.ndarray, replicas: np.ndarray, loading: float = 1e-2) -> np.ndarray:
+def mvdr(
+    K: np.ndarray, replicas: np.ndarray, diagonal_loading: float = 1e-2
+) -> np.ndarray:
     """Minimum-variance (Capon/MVDR) ambiguity surface, normalized to max 1.
 
     ``P_MV = 1 / (e^H Kinv e)`` for unit-norm replicas, with diagonal loading
-    ``K + loading * tr(K)/N * I``. Small loading gives sharp Capon peaks but is
+    ``K + diagonal_loading * tr(K)/N * I``. Small loading gives sharp Capon
+    peaks but is
     sensitive to environmental mismatch; larger loading flattens the surface
     toward Bartlett for robustness. Loading is required when ``K`` is
-    rank-deficient (e.g. a single snapshot).
+    rank-deficient (e.g. a single snapshot) — hence the 1e-2 default here,
+    where ``K`` comes from :func:`csdm` over measured snapshots.
+    :meth:`uacpy.core.results.Covariance.mvdr` is the same processor over
+    OASN's full-rank ``.xsm`` covariance and defaults to 1e-6; at equal
+    loading the two agree up to the max-scaling applied below, and both
+    return NaN for a degenerate candidate point.
 
     Parameters
     ----------
@@ -371,7 +478,7 @@ def mvdr(K: np.ndarray, replicas: np.ndarray, loading: float = 1e-2) -> np.ndarr
         CSDM.
     replicas : ndarray, shape ``(N, *grid)``
         Replica bank.
-    loading : float, optional
+    diagonal_loading : float, optional
         Diagonal-loading fraction of the average eigenvalue. Default 1e-2.
 
     Returns
@@ -381,11 +488,21 @@ def mvdr(K: np.ndarray, replicas: np.ndarray, loading: float = 1e-2) -> np.ndarr
     """
     E, grid_shape = _flatten_bank(replicas)
     K = np.asarray(K, dtype=np.complex128)
-    N = K.shape[0]
-    if loading:
-        K = K + loading * (np.real(np.trace(K)) / N) * np.eye(N)
-    Kinv = np.linalg.inv(K)
-    denom = np.real(np.einsum("ng,nm,mg->g", E.conj(), Kinv, E))
+    # Loading is a *fraction of* tr(K)/N, so it vanishes with the trace: it
+    # rescues a rank-deficient CSDM that still carries power, but a CSDM with
+    # no power at all (silent snapshots) leaves K singular and every candidate
+    # point undefined.
+    if np.real(np.trace(K)) <= 0.0:
+        warnings.warn(
+            "mvdr: the CSDM carries no power, so the ambiguity surface is "
+            "undefined; returning NaN.", UserWarning, stacklevel=2)
+        return np.full(grid_shape, np.nan)
+    denom = quadratic_form(loaded_inverse(K, diagonal_loading), E.T)
+    # e^H Kinv e is strictly positive for a positive-definite K and a non-zero
+    # replica. A non-positive value therefore means the loaded CSDM inverted
+    # without staying positive-definite, or the replica column was zero — mark
+    # that candidate undefined instead of emitting a negative or infinite
+    # "peak" that the max-scaling below would then normalise the surface to.
     denom[denom <= 0] = np.nan
     surf = 1.0 / denom
     m = np.nanmax(surf)

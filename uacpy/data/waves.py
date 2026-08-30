@@ -11,17 +11,19 @@ The wave height drives the Pierson-Moskowitz sea surface in
 
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.data._geo import as_coordinate
+from uacpy.data._http import raise_substantive
 
 __all__ = ['fetch_waves', 'WAVE_SOURCES']
 
+#: Valid wave sources, in the order ``'auto'`` tries them: Copernicus WAVERYS
+#: (full history, needs the login) before WaveWatch III (no auth, recent).
 WAVE_SOURCES = ('copernicus', 'ww3')
-_AUTO_ORDER = ('copernicus', 'ww3')
 _SOURCE_ID = {'copernicus': 'waverys', 'ww3': 'ww3'}
 
 
 def _resolve_order(source):
     if source == 'auto':
-        return _AUTO_ORDER
+        return WAVE_SOURCES
     order = (source,) if isinstance(source, str) else tuple(source)
     for name in order:
         if name not in WAVE_SOURCES:
@@ -39,9 +41,10 @@ def fetch_waves(point, *, date, source='auto', max_days=None, timeout=120.0,
     Returns ``{'hs', 'tp', 'source'}`` (``tp`` may be ``None``; ``source`` is the
     catalogue id that answered). ``source='auto'`` tries Copernicus WAVERYS
     (full history) then WaveWatch III (recent). Raises ``DataFetchError`` when no
-    source yields a value.
+    source yields a value. ``timeout`` bounds the WaveWatch III request; the
+    Copernicus session owns its own (see :mod:`uacpy.data.copernicus`).
     """
-    lat, lon = as_coordinate(point)
+    as_coordinate(point)                       # validate before any request
     order = _resolve_order(source)
     errors = []
     for name in order:
@@ -49,7 +52,7 @@ def fetch_waves(point, *, date, source='auto', max_days=None, timeout=120.0,
             if name == 'copernicus':
                 from uacpy.data.copernicus import fetch_waves_operational
                 extra = {} if max_days is None else {'max_days': max_days}
-                out = fetch_waves_operational(point, date=date, timeout=timeout,
+                out = fetch_waves_operational(point, date=date,
                                               verbose=verbose, **extra)
             else:
                 from uacpy.data.ww3_live import fetch_hs
@@ -60,5 +63,4 @@ def fetch_waves(point, *, date, source='auto', max_days=None, timeout=120.0,
             continue
         out['source'] = _SOURCE_ID[name]
         return out
-    data_errs = [e for e in errors if isinstance(e, DataFetchError)]
-    raise (data_errs[0] if data_errs else errors[-1])
+    raise_substantive(errors)

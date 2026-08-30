@@ -7,10 +7,11 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.colors as _mcolors
 import matplotlib.collections as _mcoll
+import matplotlib.ticker as _mticker
 from typing import Optional, Tuple
 
 from uacpy.visualization.style import SOURCE_MARKER_STYLE
-from uacpy.visualization.plots._common import ZORDER_SOURCE, _credit_attributions, _draw_credit, _draw_sea_ice, _model_attribution
+from uacpy.visualization.plots._common import _cell_edge_extent, _credit_attributions, _default_value, _draw_credit, _draw_sea_ice, _model_attribution, _value_label, typed_plot_error
 # plot_overview composes a map panel with the TL field and the environment
 # cross-section, so it reaches across to those plotters.
 from uacpy.visualization.plots.fields import plot_field
@@ -23,6 +24,51 @@ BATHYMETRY_CMAP = _mcolors.LinearSegmentedColormap.from_list('uacpy_bathy', [
 ])
 
 
+def _unwrap_lon_axis(lons):
+    """``(lons, wrapped)`` — a longitude axis made monotone over the antimeridian.
+
+    :func:`uacpy.data.fetch_bathy_grid` returns an axis that runs eastward but
+    is wrapped into [-180, 180), so a range crossing the antimeridian arrives as
+    ``[178 … 179.9, -179.9 … -178]``. Read literally that is a full-globe span in
+    the wrong order: ``min``/``max`` inflate the window to the whole world, and
+    the descending-axis test in :func:`_draw_depth` fires on the wrap and mirrors
+    the relief east–west. Adding a turn at each wrap restores the real 4°
+    eastward span (``[178 … 182]``), which the extent, the graticule, the
+    contours and the hillshade cell size then all read correctly.
+
+    An axis with no wrap comes back untouched, so a plainly ascending or plainly
+    descending input keeps its own handling. A step of exactly 360° is two
+    samples on the same meridian — the two ends of a full-globe axis — and is a
+    real span rather than a wrap, so it is left alone as well.
+    """
+    lons = np.asarray(lons, dtype=float)
+    d = np.diff(lons)
+    turn = np.where((-360.0 < d) & (d < -180.0), 360.0,
+                    np.where((180.0 < d) & (d < 360.0), -360.0, 0.0))
+    if not turn.any():
+        return lons, False
+    return np.concatenate(([lons[0]], lons[0] + np.cumsum(d + turn))), True
+
+
+def _lon_label_value(lon):
+    """A tick's longitude folded into [-180, 180] for its label, so a tick at
+    182° in an unwrapped antimeridian window reads 178°W. A tick already in
+    range keeps its own value, sign included at the antimeridian itself."""
+    lon = float(lon)
+    if -180.0 <= lon <= 180.0:
+        return lon
+    folded = (lon + 180.0) % 360.0 - 180.0
+    return 180.0 if folded == -180.0 else folded
+
+
+def _lon_tick_label(lon):
+    """A longitude tick's label: folded into [-180, 180] and suffixed with its
+    hemisphere, so a tick at 182° reads 178°W."""
+    value = _lon_label_value(lon)
+    return f"{abs(value):g}°{'E' if value >= 0 else 'W'}"
+
+
+@typed_plot_error
 def plot_bathymetry_map(
     lats,
     lons,
@@ -31,7 +77,7 @@ def plot_bathymetry_map(
     transect=None,
     basemap: bool = True,
     coastline_resolution: str = '50m',
-    graticule: float = 1.0,
+    graticule: Optional[float] = 1.0,
     graticule_minor: Optional[float] = 0.5,
     cmap=BATHYMETRY_CMAP,
     relief: bool = True,
@@ -48,8 +94,10 @@ def plot_bathymetry_map(
 
     ``lats`` / ``lons`` are the 1-D axes and ``depth`` the ``(n_lat, n_lon)``
     array from :func:`uacpy.data.fetch_bathy_grid` (``NaN`` = land), with a labelled
-    lat/lon graticule (``graticule`` major spacing, ``graticule_minor`` fine
-    spacing — ``None`` to disable) and an optional A→B ``transect``.
+    lat/lon graticule (``graticule`` labelled spacing, ``graticule_minor`` fine
+    unlabelled spacing — ``None`` on either disables that layer, and ``None`` on
+    ``graticule`` leaves the map with no tick labels) and an optional A→B
+    ``transect``.
 
     With ``basemap=True`` (default) the coastline is drawn from **Natural Earth**
     land polygons — *public domain*: no licence, no attribution, no usage limits.
@@ -77,7 +125,7 @@ def plot_bathymetry_map(
     from uacpy.visualization.basemap import land_polygons
 
     lats = np.asarray(lats, dtype=float)
-    lons = np.asarray(lons, dtype=float)
+    lons, lon_wrapped = _unwrap_lon_axis(lons)
     dm = np.ma.masked_invalid(depth)
     lon_rng, lat_rng = (lons.min(), lons.max()), (lats.min(), lats.max())
     own_fig = ax is None
@@ -86,27 +134,59 @@ def plot_bathymetry_map(
     else:
         fig = ax.figure
     cm = plt.get_cmap(cmap)
-    proj = (lambda la, lo: (lo, la))
+    # Plate carrée: degrees are plotted raw as (x, y) = (lon, lat), no
+    # coordinate transform. The latitude foreshortening is applied to the axes
+    # instead, via set_aspect below, so tick values stay in real degrees.
+    # Over an unwrapped antimeridian window an overlay handed a raw longitude
+    # (a transect end at -178) belongs beside the grid it annotates (182), so it
+    # is moved to the turn nearest the window's own centre. A window that does
+    # not cross leaves every coordinate exactly as it was given.
+    if lon_wrapped:
+        lon_mid = 0.5 * (lon_rng[0] + lon_rng[1])
+        proj = (lambda la, lo: (lon_mid + (float(lo) - lon_mid + 180.0) % 360.0
+                                - 180.0, la))
+    else:
+        proj = (lambda la, lo: (lo, la))
 
     if basemap:
         rings = land_polygons(resolution=coastline_resolution)
         cm = cm.with_extremes(bad='none')                  # transparent: sea shows through
         ax.set_facecolor('#d7ebf7')                        # sea
         pc = _draw_depth(ax, lons, lats, depth, cm, relief, relief_exag, 1)
+        # Natural Earth cuts its rings at ±180, so an unwrapped window reaching
+        # past the antimeridian is covered by a second copy of the land a turn
+        # away — without it the half of the window over the dateline draws as
+        # open sea. Both turns are laid down and the axes clip to the window.
+        turns = (-360.0, 0.0, 360.0) if lon_wrapped else (0.0,)
         if rings is not None:                              # land OVER the depth: covers
             for ring in rings:                             # coastal grid-cell bleed + crisp border
-                ax.fill(ring[:, 0], ring[:, 1], facecolor='#e9e3d4',
-                        edgecolor='0.3', lw=0.6, zorder=2)
+                for turn in turns:
+                    ax.fill(ring[:, 0] + turn, ring[:, 1], facecolor='#e9e3d4',
+                            edgecolor='0.3', lw=0.6, zorder=2)
         ax.set_xlim(*lon_rng)
         ax.set_ylim(*lat_rng)
         _draw_graticule(ax, lon_rng, lat_rng, graticule, graticule_minor, proj)
+        # Equirectangular: on the ground 1° of longitude is cos(lat) as long as
+        # 1° of latitude, so stretching the y axis by 1/cos(lat) makes the panel
+        # distance-isotropic at the mid-latitude of the window.
         ax.set_aspect(aspect if aspect is not None
-                      else 1.0 / np.cos(np.radians(np.mean(lat_rng))))  # equirectangular
+                      else 1.0 / np.cos(np.radians(np.mean(lat_rng))))
     else:
         cm = cm.with_extremes(bad='#d9cdb8')
         pc = _draw_depth(ax, lons, lats, depth, cm, relief, relief_exag, 1)
-        ax.set_xlabel("Longitude [°E]")
-        ax.set_ylabel("Latitude [°N]")
+        if lon_wrapped:
+            # This branch draws no graticule, so its ticks are matplotlib's own
+            # numbers. An unwrapped window runs past 180, where a plain number
+            # reads 182 for a map that is at 178°W — so name the hemisphere on
+            # the tick, as the graticule branch does, and drop it from the axis
+            # label. A window that does not cross keeps the plain degrees-east
+            # numbering it has always had.
+            ax.xaxis.set_major_formatter(
+                _mticker.FuncFormatter(lambda v, _pos: _lon_tick_label(v)))
+            ax.set_xlabel("Longitude")
+        else:
+            ax.set_xlabel("Longitude (°E)")
+        ax.set_ylabel("Latitude (°N)")
         ax.set_aspect(aspect if aspect is not None else 'equal')
 
     if contours is not None and contours is not False and dm.count() > 1:
@@ -131,7 +211,7 @@ def plot_bathymetry_map(
         sp = proj(s_lat, s_lon)
         ax.plot(sp[0], sp[1], zorder=7, **SOURCE_MARKER_STYLE)
 
-    fig.colorbar(pc, ax=ax, label="Water depth [m]")
+    fig.colorbar(pc, ax=ax, label="Water depth (m)")
     ax.set_title(title or "Bathymetry", loc='left', fontsize=11, fontweight='bold')
     if own_fig:
         credit = _credit_attributions(data_source)
@@ -140,6 +220,7 @@ def plot_bathymetry_map(
     return fig, ax
 
 
+@typed_plot_error
 def plot_overview(
     env,
     map_args,
@@ -153,7 +234,7 @@ def plot_overview(
     map_title: str = "Map",
     tl_title: str = "Transmission loss",
     env_title: str = "Environment",
-    suptitle: Optional[str] = None,
+    title: Optional[str] = None,
     data_source=True,
     sea_ice=None,
     map_kwargs: Optional[dict] = None,
@@ -185,8 +266,10 @@ def plot_overview(
         A transmission-loss result; if ``None`` the TL panel is left blank.
     source, receiver : optional
         Marked on the environment panel (and the source on the TL panel).
-    map_title, tl_title, env_title, suptitle : str, optional
-        Panel titles and an optional figure suptitle.
+    map_title, tl_title, env_title : str, optional
+        Per-panel titles.
+    title : str, optional
+        Figure-level title over all three panels.
     data_source : default ``True``
         Data-source credit shown as a footnote under the map. ``True`` uses
         ``env.data_sources``; ``None`` / ``False`` hides it; or pass an explicit
@@ -227,17 +310,18 @@ def plot_overview(
         # both panels keep the full gridspec cell and line up.
         tl_kw = dict(tl_kwargs or {})
         tl_kw.pop('show_colorbar', None)
-        plot_field(tl, ax=ax_tl, env=env, title=tl_title, show_colorbar=False,
-                   **tl_kw)
+        plot_field(tl, ax=ax_tl, env=env, source=source, receiver=receiver,
+                   title=tl_title, show_colorbar=False, **tl_kw)
         tl_mappable = next(c for c in ax_tl.collections
                            if isinstance(c, _mcoll.QuadMesh))
-        tl_cax = ax_tl.inset_axes([1.04, 0.0, 0.03, 1.0])
-        fig.colorbar(tl_mappable, cax=tl_cax, label='TL (dB)')
+        tl_cax = ax_tl.inset_axes((1.04, 0.0, 0.03, 1.0))
+        # The bar annotates whatever view tl_kwargs asked plot_field for, so it
+        # is labelled from the field and that view — a hardcoded 'TL (dB)'
+        # would caption linear |p| as a loss in dB.
+        tl_value = tl_kw.get('value') or _default_value(tl)
+        fig.colorbar(tl_mappable, cax=tl_cax, label=_value_label(tl, tl_value))
         if sea_ice is not None:
             _draw_sea_ice(ax_tl, sea_ice)
-        if source is not None and getattr(source, 'depths', None) is not None:
-            ax_tl.plot(0.0, float(np.atleast_1d(source.depths)[0]), marker='*',
-                       ms=13, color='red', mec='k', zorder=ZORDER_SOURCE)
     else:
         ax_tl.text(0.5, 0.5, "no TL result", ha='center', va='center',
                    transform=ax_tl.transAxes)
@@ -260,11 +344,12 @@ def plot_overview(
                  model=_model_attribution(tl) if tl is not None else None,
                  center_ax=ax_map)
 
-    if suptitle:
-        fig.suptitle(suptitle, fontsize=13, fontweight='bold')
+    if title:
+        fig.suptitle(title, fontsize=13, fontweight='bold')
     return fig, (ax_map, ax_tl, ax_env)
 
 
+@typed_plot_error
 def plot_sea_ice_map(grid, *, hemi: str = 'N', transect=None, source=None,
                      cmap='Blues_r', graticule: float = 5.0, zoom: bool = True,
                      concentration_label='Sea-ice concentration (fraction)',
@@ -368,6 +453,10 @@ def _draw_depth(ax, lons, lats, depth, cmap, relief, exag, zorder):
     """
     dm = np.ma.masked_invalid(depth)
     finite = np.asarray(depth, dtype=float)[np.isfinite(depth)]
+    # Hillshading takes ``np.gradient`` of the grid (matplotlib
+    # ``LightSource.hillshade``), which needs at least two samples along each
+    # axis and something to differentiate. Fall back to the flat mesh for a
+    # grid too small or too flat to shade, rather than shading a degenerate one.
     if (not relief or finite.size < 4 or min(np.shape(depth)) < 3
             or np.ptp(finite) < 1e-9):
         return ax.pcolormesh(lons, lats, dm, cmap=cmap, shading='auto',
@@ -376,10 +465,16 @@ def _draw_depth(ax, lons, lats, depth, cmap, relief, exag, zorder):
     from matplotlib.colors import LightSource, Normalize
     base = plt.get_cmap(cmap)
     norm = Normalize(float(finite.min()), float(finite.max()))
-    dy = (lats.max() - lats.min()) / lats.size * 111320.0
-    dx = ((lons.max() - lons.min()) / lons.size * 111320.0
+    # Cell size in metres, which the hillshade needs to turn ``vert_exag`` into
+    # a real slope: n samples span n-1 intervals. 111320 m is one degree of arc
+    # at the equator (40 075 km / 360); longitude degrees shrink by cos(lat).
+    dy = (lats.max() - lats.min()) / (lats.size - 1) * 111320.0
+    dx = ((lons.max() - lons.min()) / (lons.size - 1) * 111320.0
           * np.cos(np.radians(float(lats.mean()))))
-    filled = np.where(np.isnan(depth), norm.vmax, depth)
+    # Land holes take the shallowest depth, so they are the high ground of the
+    # relief and the coastline does not shade as a chasm. Their colour is
+    # irrelevant — they end up transparent.
+    filled = np.where(np.isnan(depth), norm.vmin, depth)
     nan_mask = np.isnan(depth)
     # imshow's extent below is anchored to (min-lat, min-lon) with
     # origin='lower', so the array must run south→north / west→east. Flip
@@ -392,29 +487,53 @@ def _draw_depth(ax, lons, lats, depth, cmap, relief, exag, zorder):
     if lons.size > 1 and lons[-1] < lons[0]:
         filled = filled[:, ::-1]
         nan_mask = nan_mask[:, ::-1]
-    rgb = LightSource(azdeg=315, altdeg=45).shade(
-        filled, cmap=base, blend_mode='soft', vert_exag=exag,
-        dx=dx, dy=dy, norm=norm)
+    # Colour by depth, but light the *relief*: the surface handed to the shader
+    # is seafloor height (-depth), or a seamount reads as a pit. And
+    # ``LightSource.hillshade`` negates dy ("dy is implicitly negative",
+    # matplotlib ``colors.py``) because it assumes row 0 is the top of the
+    # image, while ``filled`` runs south→north under origin='lower' — so -dy
+    # cancels that and azdeg means what it says. Measured on a Gaussian
+    # seamount, azdeg=315 now lights the flank bearing 315 deg.
+    rgb = base(norm(filled))
+    shaded = LightSource(azdeg=315, altdeg=45).shade_rgb(
+        rgb, -filled, blend_mode='soft', vert_exag=exag, dx=dx, dy=-dy)
+    rgb[..., :3] = shaded[..., :3]
     rgb[nan_mask, 3] = 0.0                              # land → transparent
-    ax.imshow(rgb, extent=[lons.min(), lons.max(), lats.min(), lats.max()],
+    # Pad to the cell EDGES: imshow stretches the array onto the outer edges of
+    # extent, so passing the first/last centres contracts the relief by
+    # (N-1)/N about the grid centre and it stops registering with the
+    # graticule, the contours, the coastline and the markers — all of which use
+    # the true coordinates, as does the flat pcolormesh branch above.
+    ax.imshow(rgb, extent=_cell_edge_extent(lons, lats),
               origin='lower', zorder=zorder, interpolation='nearest',
               aspect='auto')
     return plt.cm.ScalarMappable(norm=norm, cmap=base)
 
 
 def _draw_graticule(ax, lon_range, lat_range, major, minor, proj):
-    """Labelled lat/lon graticule on a (possibly projected) map axis."""
+    """Labelled lat/lon graticule on a (possibly projected) map axis.
+
+    ``major`` is the labelled spacing and ``minor`` the fine unlabelled one.
+    ``None`` on either drops that layer; ``None`` on ``major`` also drops the
+    tick labels, since they are the major ticks' own.
+    """
     def seq(rng, step):
         return np.arange(np.ceil(rng[0] / step) * step, rng[1] + 1e-6, step)
 
     def fmt(v, pos_hemi, neg_hemi):
         return f"{abs(v):g}°{pos_hemi if v >= 0 else neg_hemi}"
 
-    lon_maj, lat_maj = seq(lon_range, major), seq(lat_range, major)
-    ax.set_xticks([proj(0.0, lo)[0] for lo in lon_maj])
-    ax.set_xticklabels([fmt(lo, 'E', 'W') for lo in lon_maj])
-    ax.set_yticks([proj(la, 0.0)[1] for la in lat_maj])
-    ax.set_yticklabels([fmt(la, 'N', 'S') for la in lat_maj])
+    if major:
+        lon_maj, lat_maj = seq(lon_range, major), seq(lat_range, major)
+        ax.set_xticks([proj(0.0, lo)[0] for lo in lon_maj])
+        ax.set_xticklabels([_lon_tick_label(lo) for lo in lon_maj])
+        ax.set_yticks([proj(la, 0.0)[1] for la in lat_maj])
+        ax.set_yticklabels([fmt(la, 'N', 'S') for la in lat_maj])
+    else:
+        # Matplotlib's own auto-ticks would put unlabelled plain degrees where
+        # the caller asked for no graticule, so clear them instead.
+        ax.set_xticks([])
+        ax.set_yticks([])
     ax.set_axisbelow(False)                             # graticule on top of the map
     if minor:
         ax.set_xticks([proj(0.0, lo)[0] for lo in seq(lon_range, minor)], minor=True)

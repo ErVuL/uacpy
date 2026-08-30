@@ -22,11 +22,14 @@ FEATURES DEMONSTRATED:
 """
 
 import sys
+import os
 from pathlib import Path
 
-OUTPUT_DIR = Path(__file__).parent / 'output'
-OUTPUT_DIR.mkdir(exist_ok=True)
-sys.path.insert(0, str(Path(__file__).parent.parent))
+OUTPUT_DIR = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
+                  or Path(__file__).parent / 'output')
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+# Repo root, so ``import uacpy`` resolves from a source checkout.
+sys.path.insert(0, str(Path(__file__).parents[2]))
 
 import numpy as np  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
@@ -48,7 +51,7 @@ def main():
     ber_qam = comms.ber_sweep("16qam", ebn0, 200000, rng=rng)
 
     # --- (B,C) 3-tap ISI channel equalized by a DFE ---
-    chan = comms.multipath_channel([0.0, 1 / fs, 2 / fs], [1.0, 0.6, 0.3], fs)
+    chan = comms.multipath_channel([1.0, 0.6, 0.3], [0.0, 1 / fs, 2 / fs], fs)
     raw = comms.simulate_link("qpsk", 16.0, 40000, channel=chan, rng=rng)
     dfe = comms.DFE(n_ff=12, n_fb=6, forget=0.995)
     eq = comms.simulate_link("qpsk", 16.0, 40000, channel=chan,

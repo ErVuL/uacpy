@@ -5,12 +5,16 @@ The unit tests stub the HTTP layer so they run fully offline; one
 (auto-skipped offline).
 """
 
+import threading
+import time
+
 import numpy as np
 import pytest
 
 import uacpy
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.data import bathymetry
+from uacpy.data.bathymetry import bathy_transect_plan, fetch_bathy_transect
 
 
 def _ok(elevations):
@@ -103,7 +107,7 @@ def test_transect_shape_and_range_axis(stub_http):
     np.testing.assert_allclose(bathy[:, 1], [-e for e in elevs])
     # Directly consumable as range-dependent bathymetry.
     env = uacpy.Environment(name='slope', bathymetry=bathy, ssp=1500)
-    assert env.has_range_dependent_bathymetry()
+    assert env.has_range_dependent_bathymetry
 
 
 def test_transect_range_matches_known_distance(stub_http):
@@ -148,6 +152,19 @@ def test_fetch_bathy_grid(stub_http):
     assert lats.shape == (3,) and lons.shape == (3,) and depth.shape == (3, 3)
     assert depth[0, 0] == 1000.0
     assert np.isnan(depth[1, 1])       # land cell → NaN (point fetchers would raise)
+
+
+def test_fetch_bathy_grid_latitudes_ascend_for_descending_range(stub_http):
+    # A (max, min) lat_range yields the same ascending latitude axis as
+    # (min, max) — all four sources share that order.
+    stub_http['elevations'] = [-1000, -1100, -1200,
+                               -900, -950, -1300,
+                               -800, -850, -975]
+    lats, lons, depth = bathymetry.fetch_bathy_grid((42, 40), (7, 9),
+                                                    n_lat=3, n_lon=3)
+    assert np.all(np.diff(lats) > 0)
+    assert lats[0] == 40.0 and lats[-1] == 42.0
+    assert depth[0, 0] == 1000.0          # first fetched row = southernmost
 
 
 def test_fetch_grid_too_small_raises():
@@ -201,3 +218,60 @@ def test_live_opentopodata_point():
         pytest.skip(f"OpenTopoData unreachable: {exc.message}")
     # Ligurian Sea abyssal plain — a few thousand metres deep.
     assert 1000.0 < depth < 4000.0
+
+
+def test_the_rate_limiter_serializes_concurrent_callers(monkeypatch):
+    """Unguarded, every thread read the same stale timestamp and fired at once:
+    eight calls at a 0.2 s interval left 0.2 ms between them."""
+    from uacpy.data import bathymetry
+    monkeypatch.setattr(bathymetry, 'OPENTOPODATA_MIN_INTERVAL_S', 0.05)
+    monkeypatch.setattr(bathymetry, '_last_request_monotonic', 0.0)
+    stamps, guard = [], threading.Lock()
+
+    def worker():
+        bathymetry._rate_limit()
+        with guard:
+            stamps.append(time.monotonic())
+
+    threads = [threading.Thread(target=worker) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    stamps.sort()
+    gaps = np.diff(stamps)
+    assert gaps.min() >= 0.045, f"calls {gaps.min() * 1e3:.1f} ms apart"
+
+
+class TestBathyTransectNPointsForms:
+    """``n_points`` has exactly the two documented forms — an integer
+    >= 2, or ``'auto'`` — and any other string raises a typed error
+    naming them, before any fetch happens (previously a raw
+    ``ValueError`` from ``int('lots')``)."""
+
+    def test_a_non_auto_string_raises_naming_the_valid_forms(self):
+        with pytest.raises(ConfigurationError,
+                           match=r"n_points='lots' is not a sample count"):
+            bathy_transect_plan((0.0, 0.0), (1.0, 0.0), n_points='lots')
+
+    def test_fetch_bathy_transect_raises_the_same_error_before_fetching(self):
+        with pytest.raises(ConfigurationError, match=r"'auto'"):
+            fetch_bathy_transect((0.0, 0.0), (1.0, 0.0), n_points='lots')
+
+    def test_none_raises_a_typed_error(self):
+        with pytest.raises(ConfigurationError,
+                           match="is not a sample count"):
+            bathy_transect_plan((0.0, 0.0), (1.0, 0.0), n_points=None)
+
+    def test_integer_and_auto_forms_resolve_the_plan(self):
+        assert bathy_transect_plan(
+            (0.0, 0.0), (1.0, 0.0), n_points=5)['n_points'] == 5
+        assert bathy_transect_plan(
+            (0.0, 0.0), (1.0, 0.0), n_points='auto')['n_points'] >= 2
+
+
+@pytest.mark.parametrize('bad', [2.5, 'x'], ids=['non-integral', 'non-numeric'])
+def test_a_bad_sample_count_raises_the_typed_configuration_error(bad):
+    from uacpy.data.bathymetry import bathy_transect_plan
+    with pytest.raises(ConfigurationError, match='is not a sample count'):
+        bathy_transect_plan((45.0, -30.0), (46.0, -30.0), n_points=bad)

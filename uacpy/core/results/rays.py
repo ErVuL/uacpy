@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 import numpy as np
 from typing import Optional, Dict, Any, List, Tuple, Union
 
@@ -62,13 +63,15 @@ def _bounce_predicate(kind, top, bot):
 class Arrivals(Result):
     """Ray arrivals from Bellhop — a flat list of arrival events.
 
-    Each arrival is a dict with: ``delay``, ``amplitude``, ``phase``,
-    ``n_top_bounces``, ``n_bot_bounces``, ``src_angle``, ``rcv_angle``,
-    ``kind`` ('direct' / 'surface' / 'bottom' / 'both'), plus the cell
-    of origin (``src_idx``, ``depth_idx``, ``range_idx``) so multi-cell
-    runs can be filtered back to one cell if needed.
+    Each arrival is a dict with: ``delay`` (s), ``amplitude``, ``phase``
+    (**degrees** — the unit the ``.arr`` reader stores; the :attr:`phases`
+    accessor converts to radians), ``n_top_bounces``, ``n_bot_bounces``,
+    ``src_angle``, ``rcv_angle``, ``kind`` ('direct' / 'surface' /
+    'bottom' / 'both'), plus the cell of origin (``src_idx``,
+    ``depth_idx``, ``range_idx``) so multi-cell runs can be filtered back
+    to one cell if needed.
 
-    Mirrors the :class:`Rays` API surface: filter / chain / table.
+    Mirrors the :class:`Rays` API surface: filter / chain / sort.
     """
     field_type = "arrivals"
 
@@ -114,10 +117,16 @@ class Arrivals(Result):
                     nb = np.asarray(cell.get('n_bot_bounces', np.zeros(len(delays), int)))
                     sa = np.asarray(cell.get('src_angles', np.zeros_like(delays)))
                     ra = np.asarray(cell.get('rcv_angles', np.zeros_like(delays)))
+                    # Im(delay) carries Bellhop's volume-attenuation loss as a
+                    # separate multiplicative term exp(omega * Im(delay))
+                    # (ArrMod.f90:118-125 writes it as its own field), so it
+                    # travels with the flat records too.
+                    di = np.asarray(cell.get('delays_imag', np.zeros_like(delays)))
                     for i in range(len(delays)):
                         n_top, n_bot = int(nt[i]), int(nb[i])
                         out.append({
                             'delay': float(delays[i]),
+                            'delay_imag': float(di[i]),
                             'amplitude': float(amps[i]),
                             'phase': float(phs[i]),
                             'n_top_bounces': n_top,
@@ -130,15 +139,6 @@ class Arrivals(Result):
                             'range_idx': r_idx,
                         })
         return out
-
-    # Plot helpers — :func:`uacpy.visualization.plots._plot_arrivals` uses these.
-    @property
-    def depths(self) -> np.ndarray:
-        return self.receiver_depths
-
-    @property
-    def ranges(self) -> np.ndarray:
-        return self.receiver_ranges
 
     def __len__(self) -> int:
         return len(self.arrivals)
@@ -175,18 +175,70 @@ class Arrivals(Result):
     # Filter / chain / sort --------------------------------------------------
 
     def _spawn(self, arrivals: List[Dict[str, Any]]) -> 'Arrivals':
+        """Build a filtered/sorted ``Arrivals`` from a subset of the flat list.
+
+        ``by_receiver`` is rebuilt from the surviving records so the nested
+        and flat views never disagree — Bellhop's broadband delay-and-sum
+        reads the nested form, and a subset that kept the parent's full
+        nesting would re-introduce the arrivals the caller filtered out.
+        """
         return Arrivals(
             arrivals=arrivals,
+            by_receiver=self._rebuild_by_receiver(arrivals),
             receiver_depths=self.receiver_depths,
             receiver_ranges=self.receiver_ranges,
-            model=self.model,
-            backend=self.backend,
-            source_depths=self.source_depths,
-            frequencies=self.frequencies,
-            model_source=self.model_source,
-            metadata={k: v for k, v in self.metadata.items()
-                      if k != 'arrivals_by_receiver'},
+            **self.id_kwargs(),
         )
+
+    def _rebuild_by_receiver(self, arrivals: List[Dict[str, Any]]):
+        """Regroup flat arrival records into ``[src][depth][range] -> dict``.
+
+        ``None`` when the parent carried no nested view; otherwise the parent's
+        cell grid with only ``arrivals`` present in each cell.
+        """
+        if self.by_receiver is None:
+            return None
+        shape = (len(self.by_receiver),
+                 len(self.by_receiver[0]) if self.by_receiver else 0,
+                 len(self.by_receiver[0][0]) if self.by_receiver
+                 and self.by_receiver[0] else 0)
+        # The per-cell record ``io/oalib_reader.py`` builds when it parses a
+        # ``.arr``, key for key and dtype for dtype. A rebuilt cell that
+        # differs in either is one a consumer of ``by_receiver`` — e.g.
+        # ``models.bellhop.delayandsum``, which reads ``cell['n_arrivals']``
+        # and indexes the columns — handles on the freshly-read path and not
+        # on the filtered/sorted one.
+        keys = {'delays': 'float64', 'delays_imag': 'float64',
+                'amplitudes': 'float64', 'phases': 'float64',
+                'n_top_bounces': 'int32', 'n_bot_bounces': 'int32',
+                'src_angles': 'float64', 'rcv_angles': 'float64'}
+        cells = [[[{k: [] for k in keys} for _ in range(shape[2])]
+                  for _ in range(shape[1])] for _ in range(shape[0])]
+        for a in arrivals:
+            s, d, r = a['src_idx'], a['depth_idx'], a['range_idx']
+            if not (s < shape[0] and d < shape[1] and r < shape[2]):
+                continue
+            cell = cells[s][d][r]
+            cell['delays'].append(a['delay'])
+            cell['delays_imag'].append(a['delay_imag'])
+            cell['amplitudes'].append(a['amplitude'])
+            cell['phases'].append(a['phase'])
+            cell['n_top_bounces'].append(a['n_top_bounces'])
+            cell['n_bot_bounces'].append(a['n_bot_bounces'])
+            cell['src_angles'].append(a['src_angle'])
+            cell['rcv_angles'].append(a['rcv_angle'])
+        def _finish(cell):
+            # ``n_arrivals`` is a Python ``int`` on the reader's cell, so it
+            # is written after the array pass: inside it, ``np.asarray`` would
+            # make it a 0-d array and the key sets would agree while the value
+            # types did not.
+            out = {k: np.asarray(cell[k], dtype=dtype)
+                   for k, dtype in keys.items()}
+            out['n_arrivals'] = int(len(out['delays']))
+            return out
+
+        return [[[_finish(cell) for cell in by_depth] for by_depth in by_src]
+                for by_src in cells]
 
     def filter(self, predicate) -> 'Arrivals':
         """Return a new ``Arrivals`` keeping arrivals for which
@@ -252,9 +304,11 @@ class Rays(Result):
         Ray dicts with ``r``, ``z``, ``alpha``, ``n_top_bounces``,
         ``n_bot_bounces``. **Polyline coordinates ``r`` (range) and
         ``z`` (depth) are in metres**; ``alpha`` is the launch angle
-        in degrees. The Bellhop reader
-        (:func:`uacpy.io.oalib_reader.read_ray_file`) preserves
-        Bellhop's native metre output, so downstream helpers such as
+        in degrees. Bellhop writes the polyline as ``ray2D%x`` in metres
+        (``Bellhop/WriteRay.f90:45``) behind a take-off angle already
+        converted to degrees (``Bellhop/bellhop.f90:263``), and the reader
+        (:func:`uacpy.io.oalib_reader.read_ray_file`) passes both through
+        unconverted — so downstream helpers such as
         :meth:`filter_by_miss_distance` work in metres without any
         unit detection.
     is_eigen : bool
@@ -329,12 +383,11 @@ class Rays(Result):
         if self.rays and not any(
             'n_top_bounces' in r or 'n_bot_bounces' in r for r in self.rays
         ):
-            import warnings
             warnings.warn(
-                "Rays.filter_by_bounces: rays carry no bounce counts "
-                "(binary .ray files don't store them) — every ray "
-                "classifies as 'direct'. Re-run with the ASCII ray "
-                "format to filter by bounces.",
+                "Rays.filter_by_bounces: rays carry no bounce counts, so "
+                "every ray classifies as 'direct'. A .ray file read through "
+                "uacpy.io.read_ray_file always supplies them; a hand-built "
+                "Rays must set 'n_top_bounces' / 'n_bot_bounces' per ray.",
                 UserWarning, stacklevel=2,
             )
         pred = _bounce_predicate(kind, top, bot)
@@ -352,12 +405,11 @@ class Rays(Result):
     ) -> 'Rays':
         """Keep rays whose launch angle ``alpha`` is within ``[min_deg, max_deg]``."""
         if self.rays and not any('alpha' in r for r in self.rays):
-            import warnings
             warnings.warn(
-                "Rays.filter_by_launch_angle: rays carry no launch "
-                "angles (binary .ray files don't store them) — the "
-                "filter drops every ray. Re-run with the ASCII ray "
-                "format to filter by angle.",
+                "Rays.filter_by_launch_angle: rays carry no launch angles, "
+                "so the filter drops every ray. A .ray file read through "
+                "uacpy.io.read_ray_file always supplies 'alpha'; a "
+                "hand-built Rays must set it per ray.",
                 UserWarning, stacklevel=2,
             )
         def pred(ray):
@@ -510,10 +562,5 @@ class Rays(Result):
             is_eigen=self.is_eigen,
             receiver_depths=self.receiver_depths,
             receiver_ranges=self.receiver_ranges,
-            model=self.model,
-            backend=self.backend,
-            source_depths=self.source_depths,
-            frequencies=self.frequencies,
-            model_source=self.model_source,
-            metadata=dict(self.metadata),
+            **self.id_kwargs(),
         )

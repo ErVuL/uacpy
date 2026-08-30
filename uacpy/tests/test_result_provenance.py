@@ -7,24 +7,17 @@ synthesizing a time series, subsetting modes — has to carry it across, or the
 derived result silently plots without attribution.
 """
 
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
 import numpy as np
 import pytest
 
+from uacpy.core.exceptions import ConfigurationError
+
 import uacpy
 from uacpy.core.results import Arrivals, Field, Modes, PhaseReference, Rays
-from uacpy.models.sources import model_source
+from uacpy.models.sources import MODEL_SOURCES, model_source
 
 _SRC = model_source('acoustics_toolbox')
 _FREQS = np.linspace(100.0, 300.0, 32)
-
-
-@pytest.fixture(autouse=True)
-def _close_figs():
-    yield
-    plt.close('all')
 
 
 def _broadband():
@@ -130,7 +123,7 @@ def test_filtered_arrivals_plot_shows_credit():
     assert _credits(fig)
 
 
-# ── single-result plotters that were missing the credit ─────────────────────
+# ── plotters that take a single result still draw the credit ────────────────
 
 def _se_field():
     d = np.linspace(5, 95, 8)
@@ -152,3 +145,64 @@ def test_plot_detection_probability_shows_credit():
     pd.data = np.clip(pd.data / 40.0 + 0.5, 0.0, 1.0)
     fig, _ = uacpy.plot.plot_detection_probability(pd)
     assert _credits(fig)
+
+
+# ── the identity surface itself ──────────────────────────────────────────────
+
+_ID_FIELDS = ('model', 'backend', 'source_depths', 'frequencies',
+              'phase_reference', 'model_source', 'metadata')
+
+
+def test_id_kwargs_lives_on_result_and_covers_every_identity_field():
+    """``id_kwargs`` is defined once on ``Result``, so a field added to
+    ``Result.__init__`` reaches every derived-result spawn path at once."""
+    from uacpy.core.results import Result
+    assert 'id_kwargs' in vars(Result)
+    for cls in (Field, Modes, Rays, Arrivals):
+        assert 'id_kwargs' not in vars(cls), f"{cls.__name__} re-declares it"
+    assert set(_broadband().id_kwargs()) == set(_ID_FIELDS)
+
+
+@pytest.mark.parametrize('spawn', [
+    lambda: _rays().filter(lambda r: True),
+    lambda: _arrivals().filter(lambda a: True),
+    lambda: _broadband().at(depth=25.0),
+    lambda: _modes().first_n(1),
+])
+def test_every_spawn_path_carries_the_whole_identity_surface(spawn):
+    derived = spawn()
+    assert derived.model_source is _SRC
+    assert derived.phase_reference is not None or derived.model
+    assert set(derived.id_kwargs()) == set(_ID_FIELDS)
+
+
+def test_synthesize_time_series_stamps_source_model():
+    """``to_time_trace`` and ``synthesize_time_series`` both produce p(t) from
+    an H(f), so both record which model produced that H(f)."""
+    H = _broadband()
+    wf = np.zeros(64)
+    wf[0] = 1.0
+    ts = H.synthesize_time_series(wf, sample_rate=4000.0)
+    assert ts.metadata['source_model'] == H.model
+    assert H.to_time_trace().metadata['source_model'] == H.model
+
+
+class TestModelSourceLookup:
+    """``model_source`` maps an id to its catalogue entry, keeps the
+    None-if-unset convention, and refuses an unknown id with a
+    :class:`ConfigurationError` that names it and the catalogued ids."""
+
+    def test_none_returns_none(self):
+        assert model_source(None) is None
+
+    def test_each_catalogued_id_returns_its_entry(self):
+        for source_id, entry in MODEL_SOURCES.items():
+            assert model_source(source_id) is entry
+
+    def test_an_unknown_id_is_a_configuration_error_naming_the_ids(self):
+        with pytest.raises(ConfigurationError) as excinfo:
+            model_source('not_a_catalogued_engine')
+        message = str(excinfo.value)
+        assert 'not_a_catalogued_engine' in message
+        for source_id in MODEL_SOURCES:
+            assert source_id in message

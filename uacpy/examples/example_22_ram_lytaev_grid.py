@@ -20,8 +20,10 @@ Output: ``output/example_22_ram_lytaev_grid.png``.
 """
 
 import sys
+import os
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Repo root, so ``import uacpy`` resolves from a source checkout.
+sys.path.insert(0, str(Path(__file__).parents[2]))
 
 import numpy as np  # noqa: E402
 import matplotlib  # noqa: E402
@@ -77,12 +79,12 @@ def main():
         fields[label] = field
         meta = field.metadata
         print(
-            f"  {label:8s}  c₀={meta.get('c0'):6.1f} m/s  "
+            f"  {label:8s}  c₀={meta.get('pe_reference_speed'):6.1f} m/s  "
             f"dr={meta.get('dr'):7.2f} m  "
             f"dz={meta.get('dz'):6.3f} m"
         )
 
-    diff = np.abs(fields['c1500'].tl - fields['c_eq15'].tl)
+    diff = np.abs(fields['c1500'].db - fields['c_eq15'].db)
     rms = float(np.sqrt(np.nanmean(diff ** 2)))
     print(f"\n  RMS |TL_c1500 - TL_c_eq15| = {rms:.2f} dB")
 
@@ -99,12 +101,12 @@ def main():
         f = fields[label]
         meta = f.metadata
         im = ax.imshow(
-            f.tl, aspect='auto', origin='upper', extent=extent,
+            f.db, aspect='auto', origin='upper', extent=extent,
             cmap='jet_r', vmin=40, vmax=100,
         )
         ax.set_title(
             f"{title}\n"
-            f"c₀={meta.get('c0'):.1f} m/s, "
+            f"c₀={meta.get('pe_reference_speed'):.1f} m/s, "
             f"dr={meta.get('dr'):.2f} m, dz={meta.get('dz'):.3f} m"
         )
         ax.set_xlabel('Range (km)')
@@ -127,8 +129,10 @@ def main():
     )
     fig.tight_layout()
 
-    out = Path(__file__).parent / 'output' / 'example_22_ram_lytaev_grid.png'
-    out.parent.mkdir(exist_ok=True)
+    out_dir = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
+                   or Path(__file__).parent / 'output')
+    out = out_dir / 'example_22_ram_lytaev_grid.png'
+    out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out, dpi=120, bbox_inches='tight')
     print(f"\n  ✓ Saved: {out}")
 

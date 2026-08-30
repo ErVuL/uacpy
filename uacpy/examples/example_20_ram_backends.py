@@ -20,8 +20,10 @@ and overlays the TL maps so you can see the dispatch in action.
 """
 
 import sys
+import os
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Repo root, so ``import uacpy`` resolves from a source checkout.
+sys.path.insert(0, str(Path(__file__).parents[2]))
 
 import numpy as np  # noqa: E402
 import matplotlib  # noqa: E402
@@ -34,7 +36,10 @@ from uacpy.core.environment import (  # noqa: E402
 from uacpy.core.receiver import Receiver  # noqa: E402
 from uacpy.core.source import Source  # noqa: E402
 from uacpy.models import RAM, RunMode  # noqa: E402
-from uacpy.core.exceptions import UnsupportedFeatureError  # noqa: E402
+from uacpy.core.exceptions import (  # noqa: E402
+    FileFormatError,
+    UnsupportedFeatureError,
+)
 
 
 def main():
@@ -71,8 +76,19 @@ def main():
         ),
     )
 
-    surface = [(r, 1.5 * np.sin(2 * np.pi * r / 2000.0))
+    # ramsurf1.5 can only place the pressure-release surface at or below mean
+    # sea level; any node with height > 0 is clamped to 0. A zero-mean
+    # sinusoid would therefore arrive half-wave rectified, with 29 of these
+    # 50 nodes flattened and the panel still labelled "rough". Bias the
+    # corrugation down so the whole 3 m peak-to-peak profile is representable
+    # — the same all-negative convention example_21 uses for its ice keels.
+    surface = [(r, -1.6 + 1.5 * np.sin(2 * np.pi * r / 2000.0))
                for r in np.linspace(0.0, rmax, 50)]
+    surface_heights = np.array([z for _, z in surface])
+    print(f"Surface corrugation: {surface_heights.min():.2f} to "
+          f"{surface_heights.max():.2f} m relative to mean sea level, "
+          f"{int((surface_heights > 0).sum())}/{surface_heights.size} nodes "
+          f"above 0 (any such node would be clamped by ramsurf1.5)")
 
     cases = [
         ('mpiramS (fluid + flat)', Environment(
@@ -108,7 +124,7 @@ def main():
         try:
             field = ram.run(env, src, rcv, run_mode=RunMode.COHERENT_TL)
             im = ax.pcolormesh(
-                field.ranges / 1000.0, field.depths, field.tl,
+                field.ranges / 1000.0, field.depths, field.db,
                 shading='auto', cmap='jet_r', vmin=30, vmax=110,
             )
             ax.invert_yaxis()
@@ -117,12 +133,14 @@ def main():
             if ax is axes[0]:
                 ax.set_ylabel("Depth (m)")
             fig.colorbar(im, ax=ax, label='TL (dB)')
-        except FileNotFoundError as exc:
+        except FileFormatError as exc:
             ax.set_title(f"{label}\n(skipped: {exc})")
 
     fig.tight_layout()
-    out = Path(__file__).parent / 'output' / 'example_20_ram_backends.png'
-    out.parent.mkdir(exist_ok=True)
+    out_dir = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
+                   or Path(__file__).parent / 'output')
+    out = out_dir / 'example_20_ram_backends.png'
+    out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out, dpi=120)
     print(f"\n  ✓ Saved: {out}")
 

@@ -19,6 +19,7 @@ like RAM or Kraken *honour* RD bathymetry and SSP natively, so
 their collapse kwargs would be no-ops on this env.
 """
 
+import os
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -26,12 +27,14 @@ import numpy as np
 
 import uacpy
 from uacpy import SoundSpeedProfile
+from uacpy.core.exceptions import FileFormatError
 from uacpy.models import Scooter
 from uacpy.visualization.plots import compare_models
 
 
-OUTPUT_DIR = Path(__file__).parent / 'output'
-OUTPUT_DIR.mkdir(exist_ok=True)
+OUTPUT_DIR = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
+                  or Path(__file__).parent / 'output')
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def build_rd_environment() -> uacpy.Environment:
@@ -39,8 +42,10 @@ def build_rd_environment() -> uacpy.Environment:
 
     The SSP at the near range is a downward-refracting summer thermocline
     (warm surface, cool below). The far range is upward-refracting / nearly
-    isothermal. This contrast makes the four 1-D collapses (r0, rmax, mean,
-    median) produce visibly different profiles.
+    isothermal. That contrast is what makes the SSP collapses below (``r0``,
+    ``rmax``, ``mean``) land on visibly different profiles. ``median`` is not
+    exercised: the middle profile is defined as the half-sum of the outer two,
+    so over three ranges it coincides with ``mean`` exactly.
     """
     bathy_ranges_m = np.linspace(0.0, 20_000.0, 11)
     bathy_depths_m = np.linspace(80.0, 200.0, 11)
@@ -102,7 +107,7 @@ def main() -> None:
         label = f"bathy={bathy_m!r}, ssp={ssp_m!r}"
         try:
             results[label] = sc.compute_tl(env, source, receiver)
-        except (FileNotFoundError, RuntimeError) as exc:
+        except (FileFormatError, RuntimeError) as exc:
             print(f"  · {label} skipped: {exc.__class__.__name__}")
 
     if not results:
@@ -111,7 +116,7 @@ def main() -> None:
 
     fig_cmp, _ = compare_models(
         results, env=env, ncols=2, vmin=40, vmax=110, contours=[60, 80],
-        suptitle='Same RD env collapsed four ways via collapse={…}',
+        title='Same RD env collapsed four ways via collapse={…}',
     )
     out_cmp = OUTPUT_DIR / 'example_23_collapse_methods.png'
     fig_cmp.savefig(out_cmp, dpi=150, bbox_inches='tight')

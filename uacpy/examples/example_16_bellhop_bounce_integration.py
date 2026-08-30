@@ -9,7 +9,7 @@ OBJECTIVE:
        bottoms. (Bellhop.run() already auto-routes through BOUNCE for
        elastic / layered bottoms with a UserWarning; use
        run_with_bounce when you need to pin c_low / c_high / rmax.)
-    2. SeabedColumn — multi-layer sediment with Kraken
+    2. SeabedColumn — multi-layer sediment with Scooter
     3. Range-dependent bottom properties — with RAM and visualization
 
 FEATURES DEMONSTRATED:
@@ -22,8 +22,10 @@ FEATURES DEMONSTRATED:
 """
 
 import sys
+import os
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Repo root, so ``import uacpy`` resolves from a source checkout.
+sys.path.insert(0, str(Path(__file__).parents[2]))
 
 import numpy as np  # noqa: E402
 import matplotlib  # noqa: E402
@@ -39,26 +41,12 @@ from uacpy import (  # noqa: E402
 from uacpy.models import Bellhop, RAM, RunMode  # noqa: E402
 from uacpy.visualization.plots import plot_field  # noqa: E402
 
-OUTPUT_DIR = Path(__file__).parent / 'output'
-OUTPUT_DIR.mkdir(exist_ok=True)
+OUTPUT_DIR = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
+                  or Path(__file__).parent / 'output')
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def _plot_tl_difference(a, b, env=None, *, ax=None, title=None,
-                         vmin=-10.0, vmax=10.0, diff_vmax=None, **kw):
-    """Plot TL(a) - TL(b) as a diverging-colourmap heatmap.
-
-    ``diff_vmax`` is a symmetric range shortcut: ``vmin = -diff_vmax``,
-    ``vmax = +diff_vmax``.
-    """
-    from uacpy import Field
-    from uacpy.visualization import plot_field
-    if diff_vmax is not None:
-        vmin, vmax = -abs(diff_vmax), abs(diff_vmax)
-    diff = Field(data=a.tl - b.tl, coords=dict(a.coords))
-    return plot_field(
-        diff, env=env, ax=ax, vmin=vmin, vmax=vmax,
-        cmap='RdBu_r', title=title, **kw,
-    )
+from plotting_utils import _plot_tl_difference  # noqa: E402
 
 
 def demo_bellhop_bounce():
@@ -92,11 +80,13 @@ def demo_bellhop_bounce():
 
     bellhop = Bellhop(verbose=True)
 
-    # No-shear baseline: auto_bounce=False, else the elastic bottom
-    # auto-routes through BOUNCE and matches Method 2 exactly.
-    print("\n--- Standard Bellhop (half-space, no shear) ---")
-    bellhop_fluid = Bellhop(verbose=True, auto_bounce=False)
-    result_hs = bellhop_fluid.run(env, source, receiver, run_mode=RunMode.COHERENT_TL)
+    # Baseline: only *layered* bottoms auto-route through BOUNCE, so this
+    # elastic half-space runs natively either way — bellhop.f90 applies its
+    # exact acousto-elastic reflection coefficient (shear included);
+    # auto_bounce=False just makes that explicit.
+    print("\n--- Standard Bellhop (native elastic half-space) ---")
+    bellhop_native = Bellhop(verbose=True, auto_bounce=False)
+    result_hs = bellhop_native.run(env, source, receiver, run_mode=RunMode.COHERENT_TL)
 
     # Method 2: With BOUNCE (accounts for shear)
     print("\n--- Bellhop with BOUNCE reflection coefficients ---")
@@ -107,8 +97,8 @@ def demo_bellhop_bounce():
     )
 
     # Compare
-    tl_hs = result_hs.tl
-    tl_bn = result_bounce.tl
+    tl_hs = result_hs.db
+    tl_bn = result_bounce.db
     diff = tl_bn - tl_hs
     print(f"\nHalf-space TL: {np.nanmin(tl_hs):.1f} to {np.nanmax(tl_hs):.1f} dB")
     print(f"BOUNCE TL:     {np.nanmin(tl_bn):.1f} to {np.nanmax(tl_bn):.1f} dB")
@@ -117,13 +107,12 @@ def demo_bellhop_bounce():
     vmin, vmax = 40, 90
     plot_field(result_hs, env=env, ax=axes[0],
                            show_colorbar=False, vmin=vmin, vmax=vmax)
-    axes[0].set_title('Half-space (no shear)', fontsize=11, fontweight='bold')
+    axes[0].set_title('Native elastic half-space', fontsize=11, fontweight='bold')
     plot_field(result_bounce, env=env, ax=axes[1],
                            show_colorbar=False, vmin=vmin, vmax=vmax)
     axes[1].set_title('BOUNCE (with shear)', fontsize=11, fontweight='bold')
     axes[1].set_ylabel('')
     _plot_tl_difference(result_bounce, result_hs, env, ax=axes[2],
-                       label='BOUNCE − half-space',
                        diff_vmax=10, show_colorbar=False)
     axes[2].set_title('BOUNCE − half-space', fontsize=11, fontweight='bold')
     axes[2].set_ylabel('')
@@ -155,9 +144,9 @@ def demo_bellhop_bounce():
 
 
 def demo_layered_bottom():
-    """Part 2: Layered bottom with Kraken."""
+    """Part 2: Layered bottom with Scooter."""
     print("\n" + "=" * 70)
-    print("PART 2: Layered Bottom (Multi-Layer Sediment) with Kraken")
+    print("PART 2: Layered Bottom (Multi-Layer Sediment) with Scooter")
     print("=" * 70)
 
     # Define sediment layers
@@ -184,7 +173,7 @@ def demo_layered_bottom():
         ssp=1500.0,
         bottom=layered,
     )
-    print(f"has_layered_bottom: {env.has_layered_bottom()}")
+    print(f"has_layered_bottom: {env.has_layered_bottom}")
 
     source = uacpy.Source(frequencies=100.0, depths=50.0)
     receiver = uacpy.Receiver(
@@ -198,7 +187,7 @@ def demo_layered_bottom():
         from uacpy.models import Scooter
         scooter = Scooter(verbose=True)
         result = scooter.compute_tl(env, source, receiver)
-        print(f"Scooter TL: {np.nanmin(result.tl):.1f} to {np.nanmax(result.tl):.1f} dB")
+        print(f"Scooter TL: {np.nanmin(result.db):.1f} to {np.nanmax(result.db):.1f} dB")
 
         # Plot TL
         fig1, ax1 = plot_field(result, env=env, contours=[70, 80, 90])
@@ -247,6 +236,9 @@ def demo_range_dependent_bottom():
     depths_ssp = np.array([0, 25, 50, 100, 150, 200, 250])
     ranges_ssp = np.array([0, 5, 10, 15])
     ssp_2d = np.zeros((len(depths_ssp), len(ranges_ssp)))
+    # ranges_ssp is in km here (the front gradients below are per km); the
+    # Environment gets it in metres. c(T, z) is Medwin's equation truncated
+    # after the T^2 term, with salinity fixed at its S = 35 PSU reference.
     for i, r in enumerate(ranges_ssp):
         t_surf = 18 - r * 0.4
         t_bot = 8 - r * 0.1
@@ -269,21 +261,18 @@ def demo_range_dependent_bottom():
         ranges=np.linspace(100, 5000, 40),
     )
 
-    # Run RAM with true RD bottom (via modified Fortran)
+    # Run RAM with true RD bottom (via modified Fortran). A RAM failure
+    # propagates: this run is the part's subject, so there is nothing
+    # useful to show without it.
     print("\n--- Running RAM with range-dependent bottom ---")
-    try:
-        ram = RAM(verbose=True, accuracy=1e-1)
-        result = ram.run(env, source, receiver)
-        print(f"RAM TL: {np.nanmin(result.tl):.1f} to {np.nanmax(result.tl):.1f} dB")
+    ram = RAM(verbose=True, accuracy=1e-1)
+    result = ram.run(env, source, receiver)
+    print(f"RAM TL: {np.nanmin(result.db):.1f} to {np.nanmax(result.db):.1f} dB")
 
-        fig1, ax1 = plot_field(result, env=env, contours=[70, 85, 100])
-        ax1.set_title('RAM TL — Range-Dependent Bottom (Mud to Sand)')
-        plt.savefig(OUTPUT_DIR / 'example_16_rd_bottom_tl.png', dpi=150, bbox_inches='tight')
-        print("  ✓ Saved: output/example_16_rd_bottom_tl.png")
-    except Exception as e:
-        print(f"  RAM error: {e}")
-        import traceback
-        traceback.print_exc()
+    fig1, ax1 = plot_field(result, env=env, contours=[70, 85, 100])
+    ax1.set_title('RAM TL — Range-Dependent Bottom (Mud to Sand)')
+    plt.savefig(OUTPUT_DIR / 'example_16_rd_bottom_tl.png', dpi=150, bbox_inches='tight')
+    print("  ✓ Saved: output/example_16_rd_bottom_tl.png")
 
     # Plot RD bottom properties
     fig2, _ = env.plot()
@@ -371,7 +360,7 @@ def demo_rd_layered_bottom():
     )
 
     print(f"has_range_dependent_layered_bottom: "
-          f"{env.has_range_dependent_layered_bottom()}")
+          f"{env.has_range_dependent_layered_bottom}")
 
     source = uacpy.Source(frequencies=100.0, depths=30.0)
     receiver = uacpy.Receiver(
@@ -379,23 +368,20 @@ def demo_rd_layered_bottom():
         ranges=np.linspace(100, 8000, 40),
     )
 
-    # Run RAM (supports RD layered via Fortran sediment file)
+    # Run RAM (supports RD layered via Fortran sediment file). A RAM
+    # failure propagates: this run is the part's subject, so there is
+    # nothing useful to show without it.
     print("\n--- Running RAM with range-dependent layered bottom ---")
-    try:
-        ram = RAM(verbose=True, accuracy=1e-1)
-        result = ram.run(env, source, receiver)
-        print(f"RAM TL: {np.nanmin(result.tl):.1f} to "
-              f"{np.nanmax(result.tl):.1f} dB")
+    ram = RAM(verbose=True, accuracy=1e-1)
+    result = ram.run(env, source, receiver)
+    print(f"RAM TL: {np.nanmin(result.db):.1f} to "
+          f"{np.nanmax(result.db):.1f} dB")
 
-        fig1, ax1 = plot_field(result, env=env, contours=[70, 85, 100])
-        ax1.set_title('RAM TL — Range-Dependent Layered Bottom')
-        plt.savefig(OUTPUT_DIR / 'example_16_rdl_tl.png', dpi=150,
-                    bbox_inches='tight')
-        print("  ✓ Saved: output/example_16_rdl_tl.png")
-    except Exception as e:
-        print(f"  RAM error: {e}")
-        import traceback
-        traceback.print_exc()
+    fig1, ax1 = plot_field(result, env=env, contours=[70, 85, 100])
+    ax1.set_title('RAM TL — Range-Dependent Layered Bottom')
+    plt.savefig(OUTPUT_DIR / 'example_16_rdl_tl.png', dpi=150,
+                bbox_inches='tight')
+    print("  ✓ Saved: output/example_16_rdl_tl.png")
 
     # Plot the RD layered structure
     fig2, axes2 = env.plot()

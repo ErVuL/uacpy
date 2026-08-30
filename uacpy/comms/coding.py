@@ -14,7 +14,11 @@ from __future__ import annotations
 
 import numpy as np
 
-# Standard rate-1/2, constraint length K=7 generator polynomials (octal 171, 133).
+from uacpy.core.exceptions import ConfigurationError
+
+# Rate-1/2 maximum-free-distance generator pair for K=7 (Proakis & Salehi
+# Table 8.3-1, after Odenwalder 1970 / Larsen 1973): d_free = 10, which meets
+# that table's upper bound, so no other K=7 rate-1/2 code does better.
 DEFAULT_POLYS = (0o171, 0o133)
 DEFAULT_K = 7
 
@@ -45,6 +49,10 @@ def viterbi_decode(coded, polys=DEFAULT_POLYS, K=DEFAULT_K):
 
     Returns the decoded information bits (tail removed).
     """
+    # Deliberately generic twin of uacpy.comms.janus.janus_decode: this core
+    # takes any (polys, K) where that one hard-codes the K=9 rate-1/2 JANUS
+    # code with precomputed trellis words. Any change to the
+    # add-compare-select or traceback logic here must be mirrored there.
     n = len(polys)
     c = np.asarray(coded, dtype=int).ravel()
     c = c[: (c.size // n) * n]            # drop a trailing partial symbol (garbage)
@@ -56,32 +64,37 @@ def viterbi_decode(coded, polys=DEFAULT_POLYS, K=DEFAULT_K):
         reg = [bit] + [(state >> (K - 2 - i)) & 1 for i in range(K - 1)]
         return [sum(r & g for r, g in zip(reg, t)) & 1 for t in taps]
 
-    # precompute transitions: from_state + bit -> (to_state, output word)
-    trans = {}
-    for st in range(n_states):
-        for bit in (0, 1):
-            nxt = ((bit << (K - 2)) | (st >> 1)) & (n_states - 1)
-            trans[(st, bit)] = (nxt, outputs(st, bit))
+    # Butterfly structure: the transition (st, bit) -> ((bit << (K-2)) |
+    # (st >> 1)) means state s is reached from exactly two predecessors,
+    # 2s and 2s+1 (mod n_states), both on input bit = the top bit of s.
+    states = np.arange(n_states)
+    prev0 = (states << 1) & (n_states - 1)
+    prev1 = prev0 | 1
+    bit_in = states >> (K - 2)
+    # branch[st, b] = encoder output word (n bits) leaving state st on bit b
+    branch = np.array([[outputs(st, b) for b in (0, 1)]
+                       for st in range(n_states)], dtype=int)
 
     nsteps = c.size // n
-    INF = float("inf")
-    pm = [0.0] + [INF] * (n_states - 1)
+    rx = c.reshape(nsteps, n)
+    # Hamming branch metrics per step for the two transitions into each state:
+    # bm0[k, s] = distance of rx[k] from the word on prev0[s] -> s.
+    bm_all = np.count_nonzero(branch[None, :, :, :] ^ rx[:, None, None, :],
+                              axis=3)
+    bm0 = bm_all[:, prev0, bit_in]
+    bm1 = bm_all[:, prev1, bit_in]
+
+    pm = np.full(n_states, np.inf)
+    pm[0] = 0.0
     back = np.zeros((nsteps, n_states), dtype=np.int32)   # holds prev-state index
     for k in range(nsteps):
-        rx = c[k * n:(k + 1) * n]
-        npm = [INF] * n_states
-        nbit = np.zeros(n_states, dtype=np.int8)
-        for st in range(n_states):
-            if pm[st] == INF:
-                continue
-            for bit in (0, 1):
-                nxt, ow = trans[(st, bit)]
-                metric = pm[st] + int(np.count_nonzero(rx ^ ow))
-                if metric < npm[nxt]:
-                    npm[nxt] = metric
-                    nbit[nxt] = bit
-                    back[k, nxt] = st
-        pm = npm
+        cand0 = pm[prev0] + bm0[k]
+        cand1 = pm[prev1] + bm1[k]
+        # Strict < keeps the even predecessor on a tie — the same survivor a
+        # state-ascending scan that replaces only on improvement selects.
+        take1 = cand1 < cand0
+        pm = np.where(take1, cand1, cand0)
+        back[k] = np.where(take1, prev1, prev0)
     # The K-1 zero flush bits force the encoder to end in state 0, so the
     # traceback starts there; argmin(pm) could pick a different state on
     # noisy input and lose the tail constraint.
@@ -112,8 +125,12 @@ class ConvCode:
 
     Examples
     --------
+    >>> import numpy as np
+    >>> bits = np.random.default_rng(0).integers(0, 2, 64)
     >>> code = ConvCode(interleave_depth=16)
     >>> rx = code.decode(code.encode(bits))
+    >>> bool(np.array_equal(np.asarray(rx)[:bits.size], bits))
+    True
     """
 
     def __init__(self, polys=DEFAULT_POLYS, K: int = DEFAULT_K,
@@ -163,6 +180,21 @@ class ConvCode:
         return bits
 
 
+def _require_depth(caller: str, depth) -> int:
+    """Reject an interleaver depth below 1.
+
+    The block size is ``depth*depth``, so depth 0 divides by zero and a
+    negative depth reaches the reshape as an unknown dimension — both bare
+    numpy/Python errors with nothing naming the argument.
+    """
+    d = int(depth)
+    if d < 1:
+        raise ConfigurationError(
+            f"{caller}: depth must be >= 1 (it is the side of the "
+            f"depth x depth interleaver block); got {depth!r}")
+    return d
+
+
 def interleave(bits, depth):
     """Block-local ``depth x depth`` interleaver (transpose per square block).
 
@@ -174,7 +206,7 @@ def interleave(bits, depth):
     length so :meth:`ConvCode.decode` can strip the resulting tail exactly.
     """
     b = np.asarray(bits, dtype=int).ravel()
-    d = int(depth)
+    d = _require_depth("interleave", depth)
     block = d * d
     nblk = int(np.ceil(b.size / block))
     pad = np.zeros(nblk * block, dtype=int)
@@ -185,7 +217,7 @@ def interleave(bits, depth):
 def deinterleave(bits, depth):
     """Inverse of :func:`interleave`; drops a trailing partial (garbage) block."""
     b = np.asarray(bits, dtype=int).ravel()
-    d = int(depth)
+    d = _require_depth("deinterleave", depth)
     block = d * d
     nblk = b.size // block
     b = b[: nblk * block]
