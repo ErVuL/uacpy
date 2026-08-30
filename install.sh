@@ -191,6 +191,54 @@ hint_for() {
     esac
 }
 
+# One resilient-download policy shared by EVERY curl fetch (OASES + each data
+# grid). For multi-GB single streams this matters:
+#   --http1.1          HTTP/2 mid-stream CANCELs (curl exit 92) on long transfers
+#   -C -               resume the partial `-o` file from its current size
+#   --retry-all-errors plain --retry ignores transport errors like exit 92 / 18
+#   --retry 3 / delay  quick in-process retries for transient blips
+#   --connect-timeout  bound the connect phase so a dead host fails fast
+# Curl's *internal* --retry does not reliably resume mid-stream (it restarts from
+# the launch offset), so a flaky server that closes the connection early (curl
+# exit 18, "bytes missing") makes no forward progress. We therefore wrap it in an
+# outer loop that RE-INVOKES curl: each fresh call resumes from the partial via
+# `-C -`, and because these hosts (CEDA/NCEI/WOA) answer a Range request with
+# `206 Partial Content`, the file grows monotonically across a flaky link instead
+# of restarting a 7.5 GB download from zero. Bounded so a no-range / dead host
+# still terminates.
+# Usage: robust_curl <url> <output-path> [extra curl args…]  (extras precede URL).
+robust_curl() {
+    local url="$1" out="$2"; shift 2
+    local attempt=0 max_attempts=20 rc http_code
+    while :; do
+        http_code=$(curl -fL --http1.1 --retry 3 --retry-delay 5 --retry-all-errors \
+                --connect-timeout 30 -C - -o "$out" -w '%{http_code}' "$@" "$url")
+        rc=$?
+        if (( rc == 0 )); then
+            return 0
+        fi
+        # Exit 22 means the server answered with an HTTP error (>= 400, since
+        # -f). Those are permanent apart from the rate-limit codes, and
+        # --retry-all-errors already re-sent each one 4 times inside curl, so
+        # continuing the outer loop just burns the budget: a renamed URL would
+        # cost ~80 requests before the caller heard about it, and a 26-file
+        # download loop hours. Report it now.
+        if (( rc == 22 )) && [[ "$http_code" != "429" && "$http_code" != "408" ]]; then
+            echo -e "  ${RED}HTTP ${http_code} for ${url} — permanent, not retrying${NC}" >&2
+            return 1
+        fi
+        attempt=$((attempt + 1))
+        if (( attempt >= max_attempts )); then
+            return 1
+        fi
+        local have=0; [ -f "$out" ] && have=$(wc -c < "$out" 2>/dev/null || echo 0)
+        echo -e "  ${YELLOW}download interrupted (outer retry ${attempt}/${max_attempts}," \
+                "have ${have} bytes) — resuming in 5s...${NC}" >&2
+        sleep 5
+    done
+}
+
+
 # -------------------------
 # Parse CLI args
 # -------------------------
@@ -686,52 +734,6 @@ check_curl() {
     fail_missing "curl" "$(hint_for curl curl curl curl)"
 }
 
-# One resilient-download policy shared by EVERY curl fetch (OASES + each data
-# grid). For multi-GB single streams this matters:
-#   --http1.1          HTTP/2 mid-stream CANCELs (curl exit 92) on long transfers
-#   -C -               resume the partial `-o` file from its current size
-#   --retry-all-errors plain --retry ignores transport errors like exit 92 / 18
-#   --retry 3 / delay  quick in-process retries for transient blips
-#   --connect-timeout  bound the connect phase so a dead host fails fast
-# Curl's *internal* --retry does not reliably resume mid-stream (it restarts from
-# the launch offset), so a flaky server that closes the connection early (curl
-# exit 18, "bytes missing") makes no forward progress. We therefore wrap it in an
-# outer loop that RE-INVOKES curl: each fresh call resumes from the partial via
-# `-C -`, and because these hosts (CEDA/NCEI/WOA) answer a Range request with
-# `206 Partial Content`, the file grows monotonically across a flaky link instead
-# of restarting a 7.5 GB download from zero. Bounded so a no-range / dead host
-# still terminates.
-# Usage: robust_curl <url> <output-path> [extra curl args…]  (extras precede URL).
-robust_curl() {
-    local url="$1" out="$2"; shift 2
-    local attempt=0 max_attempts=20 rc http_code
-    while :; do
-        http_code=$(curl -fL --http1.1 --retry 3 --retry-delay 5 --retry-all-errors \
-                --connect-timeout 30 -C - -o "$out" -w '%{http_code}' "$@" "$url")
-        rc=$?
-        if (( rc == 0 )); then
-            return 0
-        fi
-        # Exit 22 means the server answered with an HTTP error (>= 400, since
-        # -f). Those are permanent apart from the rate-limit codes, and
-        # --retry-all-errors already re-sent each one 4 times inside curl, so
-        # continuing the outer loop just burns the budget: a renamed URL would
-        # cost ~80 requests before the caller heard about it, and a 26-file
-        # download loop hours. Report it now.
-        if (( rc == 22 )) && [[ "$http_code" != "429" && "$http_code" != "408" ]]; then
-            echo -e "  ${RED}HTTP ${http_code} for ${url} — permanent, not retrying${NC}" >&2
-            return 1
-        fi
-        attempt=$((attempt + 1))
-        if (( attempt >= max_attempts )); then
-            return 1
-        fi
-        local have=0; [ -f "$out" ] && have=$(wc -c < "$out" 2>/dev/null || echo 0)
-        echo -e "  ${YELLOW}download interrupted (outer retry ${attempt}/${max_attempts}," \
-                "have ${have} bytes) — resuming in 5s...${NC}" >&2
-        sleep 5
-    done
-}
 
 # tar (required only when extracting the OASES tarball)
 check_tar() {

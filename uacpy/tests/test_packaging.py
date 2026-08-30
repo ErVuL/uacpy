@@ -2412,6 +2412,25 @@ def test_every_physical_state_exemption_names_a_live_definition():
         f"{stale}. Drop them, or fix the name they were meant to cover.")
 
 
+def test_the_shared_download_helper_is_defined_before_any_flow():
+    """``robust_curl`` serves both install paths, so its definition must
+    precede the first top-level conditional: a data-only run
+    (``--no-models``) executes none of the model branch, and a definition
+    inside it leaves every curl-backed dataset failing with
+    ``command not found`` — which is how a data-only install actually
+    broke while every models-build install passed."""
+    text = (Path(_REPO_ROOT) / "install.sh").read_text(encoding="utf-8")
+    lines = text.splitlines()
+    define = next(i for i, l in enumerate(lines)
+                  if l.startswith("robust_curl()"))
+    first_flow = next(i for i, l in enumerate(lines) if l.startswith("if "))
+    assert define < first_flow, (
+        f"robust_curl() is defined at line {define + 1}, after top-level "
+        f"flow begins at line {first_flow + 1}; a branch skipped by one "
+        f"install mode would skip the definition too."
+    )
+
+
 _EVENT_NAMED_TEST_FILE = re.compile(r"audit|20\d{6}|round\d|batch",
                                     re.IGNORECASE)
 
