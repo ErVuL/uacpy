@@ -122,3 +122,17 @@ def test_raise_substantive_rejects_an_empty_error_list():
     # errors[-1] on an empty chain raised IndexError with no remediation.
     with pytest.raises(ConfigurationError, match='No data source was tried'):
         raise_substantive([])
+
+
+def test_a_refused_connection_gets_one_quick_retry_not_the_ladder():
+    """ECONNREFUSED is the remote answering instantly with a rejection, so
+    the fetch makes one quick second attempt and raises — the exponential
+    ladder is for flakes that need time (resets, timeouts, 5xx), and
+    against a down host its sleeps multiply across every grid of a
+    multi-file build. Port 9 (discard) is closed on any test host, so the
+    refusal is local and immediate."""
+    import time as _time
+    t0 = _time.monotonic()
+    with pytest.raises(DataFetchError, match='after 1 retries'):
+        _http.http_get('http://127.0.0.1:9/grid.tif', timeout=10.0)
+    assert _time.monotonic() - t0 < 5.0

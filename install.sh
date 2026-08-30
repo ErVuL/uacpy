@@ -227,6 +227,19 @@ robust_curl() {
             echo -e "  ${RED}HTTP ${http_code} for ${url} — permanent, not retrying${NC}" >&2
             return 1
         fi
+        # Exit 7 is "could not connect": the host answers instantly with a
+        # rejection, or nothing listens at all. curl's internal --retry has
+        # already re-sent it; one more invocation covers a balancer blip,
+        # and further rounds only multiply sleeps against a down host —
+        # the same policy the python fetchers apply to ECONNREFUSED.
+        if (( rc == 7 )); then
+            if (( attempt >= 1 )); then
+                echo -e "  ${RED}cannot connect for ${url} — host down or refusing; not retrying further${NC}" >&2
+                return 1
+            fi
+            attempt=$((attempt + 1))
+            continue
+        fi
         attempt=$((attempt + 1))
         if (( attempt >= max_attempts )); then
             return 1

@@ -5,6 +5,7 @@ so each data source (bathymetry, sound speed, …) parses bytes without
 re-implementing network error handling. No third-party HTTP dependency.
 """
 
+import errno
 import http.client
 import os
 import shutil
@@ -60,6 +61,24 @@ _TRANSIENT_EXC = (
     http.client.IncompleteRead, http.client.RemoteDisconnected,
 )
 _MAX_RETRIES = 4
+#: A refused TCP connection is the remote answering instantly with a
+#: rejection, so the exponential ladder buys nothing over one quick second
+#: attempt — and against a down host every sleep multiplies across every
+#: grid of a multi-file build.
+_REFUSED_RETRIES = 1
+_REFUSED_WAIT_S = 1.0
+
+
+def _is_connection_refused(exc) -> bool:
+    """True when the transport failure chain ends in ECONNREFUSED."""
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        if isinstance(exc, ConnectionRefusedError) or \
+                getattr(exc, 'errno', None) == errno.ECONNREFUSED:
+            return True
+        exc = getattr(exc, 'reason', None) or exc.__cause__
+    return False
 _MAX_BACKOFF_S = 8.0
 # Only network schemes — never ``file://`` / ``ftp://`` (which urlopen honours),
 # so a user-supplied ``base_url=`` cannot turn into local-file disclosure / SSRF.
@@ -147,15 +166,18 @@ def http_get(
             # transient transport flakes (the Python-side analogue of an HTTP/2
             # stream cancel). Retry with exponential backoff before giving up.
             reason = getattr(exc, 'reason', None) or exc
-            if attempt < _MAX_RETRIES:
-                wait = min(_MAX_BACKOFF_S, 1.5 * (2 ** attempt))
+            refused = _is_connection_refused(exc)
+            retries = _REFUSED_RETRIES if refused else _MAX_RETRIES
+            if attempt < retries:
+                wait = (_REFUSED_WAIT_S if refused
+                        else min(_MAX_BACKOFF_S, 1.5 * (2 ** attempt)))
                 log_message(source, f"transport error ({reason}); retrying in "
-                            f"{wait:.1f}s (attempt {attempt + 1}/{_MAX_RETRIES})",
+                            f"{wait:.1f}s (attempt {attempt + 1}/{retries})",
                             verbose=verbose, level='warning')
                 time.sleep(wait)
                 continue
             raise DataFetchError(
-                f"Could not reach {url}: {reason} (after {_MAX_RETRIES} retries).",
+                f"Could not reach {url}: {reason} (after {retries} retries).",
                 remediation="Check network connectivity, or pass base_url= for "
                             "a reachable service instance.",
             ) from exc

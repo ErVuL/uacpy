@@ -2431,6 +2431,22 @@ def test_the_shared_download_helper_is_defined_before_any_flow():
     )
 
 
+def test_the_shared_download_helper_fails_fast_on_a_refused_connection():
+    """``robust_curl`` gives curl exit 7 (could not connect) one extra
+    invocation and then stops, mirroring the python fetchers' one-quick-
+    retry policy for ECONNREFUSED: a refusing host answers instantly, so
+    every further round only multiplies sleeps — 20 outer attempts cost
+    ~6 minutes per file against a down server."""
+    text = (Path(_REPO_ROOT) / "install.sh").read_text(encoding="utf-8")
+    fn = text[text.index("robust_curl()"):]
+    fn = fn[:fn.index("\n}\n")]
+    assert "(( rc == 7 ))" in fn, "the exit-7 branch is gone"
+    branch = fn[fn.index("(( rc == 7 ))"):]
+    assert "attempt >= 1" in branch.split("attempt=$((attempt + 1))")[0], (
+        "exit 7 no longer stops after the second invocation"
+    )
+
+
 _EVENT_NAMED_TEST_FILE = re.compile(r"audit|20\d{6}|round\d|batch",
                                     re.IGNORECASE)
 
