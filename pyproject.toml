@@ -234,3 +234,15 @@ markers = [
     "benchmark: validates model output against a closed-form analytic / canonical reference",
     "convention: pins repo conventions rather than runtime behaviour (docstring prose, source-convention sweeps, repr snapshots); failure signals doc/convention drift",
 ]
+
+
+[tool.mypy]
+# No global strictness knobs: the type-contract gate in test_packaging.py
+# holds the _TYPE_CLEAN_SUBPACKAGES islands at zero errors under mypy's
+# defaults, and the overrides below only silence third-party libraries
+# that publish no type stubs (their absence is their maintainers' choice,
+# not an annotation defect in uacpy).
+
+[[tool.mypy.overrides]]
+module = ["scipy.*"]
+ignore_missing_imports = true

@@ -2437,16 +2437,22 @@ def test_no_test_file_is_named_after_the_work_session_that_produced_it():
 
 # ── the py.typed promise, held where it is already kept ─────────────────────
 
-#: Subpackages held at zero type-checker errors. ``uacpy/noise`` is the one
-#: that is already there, so gating it costs nothing and stops it drifting
-#: back. The rest of the package is deliberately ungated: a frozen count over
-#: the whole tree is a number nobody reads and a rubber stamp on every bump,
-#: and the errors it would freeze are mostly inference friction rather than
-#: wrong annotations. What the contract actually promises is measured by the
-#: gates on the public surface — the lazy-import static mirror
-#: (test_lazy_imports.py) and the carrier field annotations
-#: (test_core_classes.py) — not by a total.
-_TYPE_CLEAN_SUBPACKAGES = ("uacpy/noise",)
+#: Subpackages held at zero type-checker errors — the ratchet: bring a
+#: subpackage to zero, add it here, and it can never regress. The heavy
+#: numeric packages (models, core, io, acoustic_signal, data) are
+#: deliberately ungated: a frozen count over them is a number nobody reads
+#: and a rubber stamp on every bump, and their errors are mostly
+#: numpy-union inference friction rather than wrong annotations. What the
+#: contract actually promises is measured by the gates on the public
+#: surface — the lazy-import static mirror (test_lazy_imports.py) and the
+#: carrier field annotations (test_core_classes.py) — not by a total.
+_TYPE_CLEAN_SUBPACKAGES = (
+    "uacpy/noise",
+    "uacpy/parallel.py",
+    "uacpy/sonar",
+    "uacpy/comms",
+    "uacpy/visualization",
+)
 
 
 @pytest.mark.parametrize("subpackage", _TYPE_CLEAN_SUBPACKAGES)

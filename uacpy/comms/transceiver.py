@@ -108,7 +108,7 @@ class Transmitter:
         self.modulator = Modulator(modulation)
         self.code = code
         if preamble is None or np.isscalar(preamble):
-            n = 64 if preamble is None else int(preamble)
+            n = 64 if preamble is None else int(np.asarray(preamble).item())
             self.preamble = _default_preamble(n, modulation)
         else:
             self.preamble = np.asarray(preamble, dtype=complex)
@@ -144,7 +144,7 @@ class CommsReceiver:
         self.code = code
         self.equalizer = equalizer
         if preamble is None or np.isscalar(preamble):
-            n = 64 if preamble is None else int(preamble)
+            n = 64 if preamble is None else int(np.asarray(preamble).item())
             self.preamble = _default_preamble(n, modulation)
         else:
             self.preamble = np.asarray(preamble, dtype=complex)

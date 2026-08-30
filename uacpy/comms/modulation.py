@@ -287,7 +287,7 @@ def fsk_demodulate(signal, frequencies, symbol_dur_s: float, sample_rate: float)
     nsym = x.size // n
     t = np.arange(n) / float(sample_rate)
     bank = np.exp(-2j * np.pi * np.outer(f, t))  # (M, n)
-    bits = []
+    bits: list[int] = []
     for k in range(nsym):
         seg = x[k * n:(k + 1) * n]
         energy = np.abs(bank @ seg)

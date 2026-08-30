@@ -314,7 +314,7 @@ def plot_overview(
                    title=tl_title, show_colorbar=False, **tl_kw)
         tl_mappable = next(c for c in ax_tl.collections
                            if isinstance(c, _mcoll.QuadMesh))
-        tl_cax = ax_tl.inset_axes([1.04, 0.0, 0.03, 1.0])
+        tl_cax = ax_tl.inset_axes((1.04, 0.0, 0.03, 1.0))
         # The bar annotates whatever view tl_kwargs asked plot_field for, so it
         # is labelled from the field and that view — a hardcoded 'TL (dB)'
         # would caption linear |p| as a loss in dB.

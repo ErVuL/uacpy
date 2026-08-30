@@ -1030,7 +1030,7 @@ def compare_models(
         # The label the panels would carry if each had drawn its own colorbar:
         # the raw ``value`` string is the knob's name, not the quantity's.
         cbar_label = 'p(t)' if _is_time_domain(ref) else _value_label(ref, value)
-        cbar_ax = fig.add_axes([0.905, 0.08, 0.015, top - 0.08])
+        cbar_ax = fig.add_axes((0.905, 0.08, 0.015, top - 0.08))
         fig.colorbar(im_last, cax=cbar_ax, label=cbar_label)
     if title:
         fig.suptitle(title, fontsize=14, fontweight='bold', y=0.97)

@@ -326,7 +326,8 @@ def _plot_environment(
     if env.has_range_dependent_bathymetry:
         candidate_rmaxes_km.append(m_to_km(float(env.bathymetry.ranges[-1])))
     if bottom.is_range_dependent:
-        candidate_rmaxes_km.append(m_to_km(float(np.max(bottom.ranges))))
+        candidate_rmaxes_km.append(
+            m_to_km(float(np.max(np.asarray(bottom.ranges, dtype=float)))))
     if (receiver is not None and getattr(receiver, 'ranges', None) is not None
             and len(receiver.ranges) > 0):
         candidate_rmaxes_km.append(m_to_km(float(np.max(receiver.ranges))))

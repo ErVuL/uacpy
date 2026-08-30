@@ -356,7 +356,7 @@ def plot_time_snapshots(
                 if finite.size else 1.0
             )
     elif np.isscalar(p_max):
-        p_max_per_row = [float(p_max)] * n_models
+        p_max_per_row = [float(np.asarray(p_max).item())] * n_models
     else:
         p_max_per_row = [float(v) for v in p_max]
         if len(p_max_per_row) != n_models:

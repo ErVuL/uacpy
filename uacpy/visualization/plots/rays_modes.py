@@ -401,8 +401,9 @@ def _plot_reflection_coefficient(
     if rc.is_broadband:
         _owns_fig = ax is None
         fig, ax = fig_ax(ax, figsize)
+        freqs = np.asarray(rc.frequencies, dtype=float)
         im = ax.pcolormesh(
-            rc.frequencies / 1000.0, rc.theta, rc.R,
+            freqs / 1000.0, rc.theta, rc.R,
             shading='nearest', cmap='viridis',
         )
         fig.colorbar(im, ax=ax, label='|R|')

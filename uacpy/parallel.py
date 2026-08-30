@@ -226,7 +226,8 @@ class ParallelResult:
         ``backend`` — so this is for single-model sweeps. For a cross-model
         batch, iterate ``results`` instead of stacking.
         """
-        keep = [i for i, r in enumerate(self.results) if r is not None]
+        kept = [(i, r) for i, r in enumerate(self.results) if r is not None]
+        keep = [i for i, _ in kept]
         if not keep:
             raise ConfigurationError(
                 f"stack: no successful results to stack ({len(self.errors)} failed)."
@@ -242,7 +243,7 @@ class ParallelResult:
             )
             coord = np.array(keep, dtype=float)
         return ResultStack(
-            [self.results[i] for i in keep],
+            [r for _, r in kept],
             coord,
             coordinate_name=coordinate_name or self.coordinate_name,
         )
@@ -267,7 +268,7 @@ def _main_is_importable() -> bool:
     workers crash on import with a cryptic ``BrokenProcessPool``.
     """
     f = getattr(sys.modules.get('__main__'), '__file__', None)
-    return bool(f) and os.path.isfile(f)
+    return isinstance(f, str) and bool(f) and os.path.isfile(f)
 
 
 def run_parallel(

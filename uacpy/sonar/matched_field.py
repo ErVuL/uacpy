@@ -156,7 +156,8 @@ def synthesize_replica(
     z = np.atleast_1d(np.asarray(array_depths, dtype=float))
 
     k = np.asarray(modes.k, dtype=np.complex128)            # (M,)
-    phi_s = _interp_modes(modes, src_depth)[0]              # (M,)
+    phi_s = _interp_modes(modes, np.atleast_1d(
+        np.asarray(src_depth, dtype=float)))[0]             # (M,)
     phi_r = _interp_modes(modes, z)                          # (N, M)
 
     # (M, R): per-mode range term, far-field (asymptotic Hankel) convention.
