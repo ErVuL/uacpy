@@ -61,11 +61,11 @@ jobs:
         # bellhopcuda is a git submodule pinned to BELLHOPCUDA_COMMIT_SHA
         # in install.sh. pin_bellhopcuda_tag fetches the SHA from origin on
         # demand if it is not reachable from the submodule's shallow clone.
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           submodules: recursive
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -98,7 +98,7 @@ jobs:
 
       - name: Cache OASES build
         id: cache-oases
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             uacpy/third_party/oases
@@ -130,4 +130,6 @@ jobs:
           TMPDIR: ${{ runner.temp }}
         # Exclude live-service integration tests so CI is deterministic; the
         # cache/data layer is still covered via synthetic $UACPY_DATA_CACHE.
-        run: pytest -n logical --dist=worksteal -m "not requires_network" uacpy/tests/
+        # -rs names every skip's reason in the log: an anonymous skip count is
+        # quietly reduced coverage nobody can audit.
+        run: pytest -n logical --dist=worksteal -rs -m "not requires_network" uacpy/tests/
