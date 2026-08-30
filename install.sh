@@ -1651,7 +1651,7 @@ download_gebco() {
 download_woa23() {
     local dir="${DATA_CACHE_DIR}/woa23"; mkdir -p "$dir"
     local base="https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA"
-    local ok=1 var folder p fname url header_shown=0
+    local ok=1 var folder p fname url header_shown=0 got=0
     for var in t s; do
         if [[ "$var" == "t" ]]; then folder="temperature"; else folder="salinity"; fi
         for p in 00 01 02 03 04 05 06 07 08 09 10 11 12; do
@@ -1667,8 +1667,13 @@ download_woa23() {
             # -s re-run guard above would accept as complete.
             if robust_curl "$url" "${dir}/${fname}.part"; then
                 mv -f "${dir}/${fname}.part" "${dir}/${fname}"
+                got=1
             else
                 echo -e "${RED}  ✗ ${fname}${NC}"; rm -f "${dir}/${fname}.part"; ok=0
+                if [[ "${got:-0}" == "0" ]]; then
+                    echo -e "${YELLOW}◐ WOA23: the first grid failed with none fetched — the server looks unreachable; stopping before the remaining files. Re-run --data woa23 when it answers.${NC}"
+                    NOTE_DATA="${NOTE_DATA} woa23:unreachable"; return 1
+                fi
             fi
         done
     done
@@ -1734,7 +1739,12 @@ download_emodnet() {
 
 download_coastline() {
     local dir="${DATA_CACHE_DIR}/coastline"; mkdir -p "$dir"
-    if [[ "$FORCE" != "1" && -s "${dir}/ne_50m_land.geojson" ]]; then
+    # All three resolutions, or the component rebuilds: an interrupted run
+    # can leave one file of the set, and a one-file check would accept that
+    # partial set as cached on every later install.
+    if [[ "$FORCE" != "1" && -s "${dir}/ne_110m_land.geojson" \
+          && -s "${dir}/ne_50m_land.geojson" \
+          && -s "${dir}/ne_10m_land.geojson" ]]; then
         echo -e "${GREEN}✓ Coastline polygons already cached → ${dir}${NC}"; return 0
     fi
     if python3 -c "import uacpy.visualization.basemap" >/dev/null 2>&1; then
@@ -1770,7 +1780,12 @@ download_globsed() {
 
 download_crust1() {
     local dir="${DATA_CACHE_DIR}/crust1"; mkdir -p "$dir"
-    if [[ "$FORCE" != "1" && -s "${dir}/crust1.bnds" ]]; then
+    # All four grids, or the component rebuilds: extraction writes them
+    # one by one, so an interrupted run can leave a partial set that a
+    # one-file check would accept as cached forever.
+    if [[ "$FORCE" != "1" && -s "${dir}/crust1.bnds" \
+          && -s "${dir}/crust1.vp" && -s "${dir}/crust1.vs" \
+          && -s "${dir}/crust1.rho" ]]; then
         echo -e "${GREEN}✓ CRUST1.0 grids already cached → ${dir}${NC}"; return 0
     fi
     if python3 -c "import uacpy.data.crust1_local" >/dev/null 2>&1; then

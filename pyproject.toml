@@ -101,6 +101,12 @@ test = [
     # this floor all of those guards skip and the run is green having gated
     # nothing.
     "setuptools>=77",
+    # Builds the synthetic copernicusmarine payloads the offline Copernicus
+    # tests feed uacpy's parsers. The library itself never imports xarray —
+    # it reads the Dataset objects copernicusmarine hands back — so this is
+    # test tooling, not a runtime dependency; without it those seven tests
+    # skip everywhere the `copernicus` extra is absent, CI included.
+    "xarray>=2024.1",
 ]
 
 dev = [

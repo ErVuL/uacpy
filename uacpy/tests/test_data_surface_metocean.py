@@ -458,3 +458,19 @@ def test_wind_climatology_closes_its_handle_when_a_variable_is_missing(
     assert opened and all(ds.closed for ds in opened), (
         "the handle leaks once per month a 120-grid climatology build cannot "
         "name a variable in")
+
+
+def test_two_empty_month_sweeps_stop_the_wind_climatology_build(
+        monkeypatch, tmp_path):
+    """Zero grids across the first two month sweeps raise the typed error
+    before the remaining ten months retry their way to the same place."""
+    import uacpy.data.wind_local as wl
+    calls = []
+    def nothing(year, month, *, timeout, verbose):
+        calls.append((year, month))
+        return None
+    monkeypatch.setattr(wl, '_fetch_monthly_grid', nothing)
+    with pytest.raises(DataFetchError,
+                       match='stopping before the remaining ten months'):
+        wl.download_wind_db(cache_dir=tmp_path, years=range(2013, 2023))
+    assert len(calls) == 20

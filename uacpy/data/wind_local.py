@@ -67,6 +67,17 @@ def download_wind_db(cache_dir=None, *, years=_DEFAULT_YEARS, timeout=120.0,
             valid = np.isfinite(speed)
             accum[month - 1][valid] += speed[valid]
             count[month - 1][valid] += 1
+        # Two full month sweeps with nothing fetched is the
+        # unreachable-server signature; the remaining ten months would
+        # retry their way to the same place, so the build stops here.
+        if month == 2 and accum is None:
+            raise DataFetchError(
+                f"NBS wind climatology fetched nothing in the first two "
+                f"month sweeps ({2 * len(years)} fetches); stopping "
+                f"before the remaining ten months.",
+                remediation="Check network / the CoastWatch ERDDAP "
+                            "dataset id, then retry.",
+            )
     if accum is None:
         raise DataFetchError(
             "NBS wind climatology build fetched no monthly grids.",

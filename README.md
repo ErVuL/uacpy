@@ -544,9 +544,10 @@ redistributed by UACPY); all are permissive and GPL-3.0-compatible.
 | **pillow** | image encode/decode behind the map and animation writers | HPND (MIT-style) |
 | **copernicusmarine** | Copernicus operational sound speed — the optional `[copernicus]` extra, not installed by default | EUPL-1.2 (lists GPL-3.0 as compatible) |
 
-Test/development tooling (`pytest`, `pytest-xdist`, `setuptools` — the
-`[test]` extra — plus `pytest-cov`, `black`, `flake8`, `mypy` in `[dev]`) is
-MIT-licensed and not required at runtime.
+Test/development tooling (`pytest`, `pytest-xdist`, `setuptools`, `xarray`
+— the `[test]` extra — plus `pytest-cov`, `black`, `flake8`, `mypy` in
+`[dev]`) is not required at runtime; all of it is MIT- or Apache-2.0-licensed
+(xarray is Apache-2.0).
 
 
 ### External data sources

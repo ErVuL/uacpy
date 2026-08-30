@@ -356,3 +356,20 @@ def test_sea_ice_canopy_roughness_is_opt_in():
     for field in ('sound_speed', 'shear_speed', 'density', 'attenuation',
                   'shear_attenuation'):
         assert getattr(smooth, field) == getattr(rough, field)
+
+
+def test_an_all_failing_first_year_sweep_stops_the_climatology_build(
+        monkeypatch, tmp_path):
+    """12 of 12 fetch failures in the first year sweep raise the typed
+    error before any later year is attempted, so an unreachable server
+    costs one sweep of retries, not five."""
+    import uacpy.data.seaice_local as si
+    calls = []
+    def refused(url, **kwargs):
+        calls.append(url)
+        raise DataFetchError('connection refused')
+    monkeypatch.setattr(si, 'http_get', refused)
+    with pytest.raises(DataFetchError,
+                       match=r'stopping before the remaining 4 year'):
+        si.download_seaice_db(cache_dir=tmp_path, years=range(2021, 2026))
+    assert len(calls) == 12

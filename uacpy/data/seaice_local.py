@@ -113,7 +113,7 @@ def download_seaice_db(cache_dir=None, *, years=None, timeout=120.0,
     climo = {}
     for hemi in ('N', 'S'):
         stacks = [[] for _ in range(12)]
-        for year in years:
+        for iy, year in enumerate(years):
             for m in range(1, 13):
                 try:
                     blob = http_get(_monthly_url(hemi, year, m), timeout=timeout,
@@ -122,6 +122,20 @@ def download_seaice_db(cache_dir=None, *, years=None, timeout=120.0,
                 except Exception:               # noqa: BLE001 — skip missing
                     continue
                 stacks[m - 1].append(_to_fraction(arr))
+            # An entire year sweep with nothing fetched (12 of 12 failures)
+            # is the unreachable-server signature; the remaining years would
+            # spend ~4 retries per grid reaching the same place, so the
+            # build stops here and says so.
+            if iy == 0 and not any(stacks):
+                raise DataFetchError(
+                    f"No NSIDC sea-ice grids for hemisphere {hemi} in the "
+                    f"whole {year} sweep (12 of 12 fetches failed); "
+                    f"stopping before the remaining {len(years) - 1} "
+                    f"year(s).",
+                    remediation="Retry when noaadata.apps.nsidc.org "
+                                "answers, or pass a `years` range that "
+                                "starts on an available year.",
+                )
         # The download loop above skips a grid it cannot fetch or decode, so a
         # month can be averaged over fewer years than were asked for. Only a
         # month with nothing at all raises; a partial month is a valid but
