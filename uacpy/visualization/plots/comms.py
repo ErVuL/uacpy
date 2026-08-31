@@ -172,7 +172,8 @@ def plot_eye_diagram(signal, samples_per_symbol, ax=None, *, n_symbols=2,
     mpl_kw.setdefault("alpha", 0.15)
     mpl_kw.setdefault("lw", 0.7)
     t = np.arange(span) / sps
-    n = (x.size - span) // sps
+    # Floor division keeps n <= 0 for signals shorter than one window.
+    n = (x.size - span) // sps + 1
     for k in range(max(n, 0)):
         ax.plot(t, x[k * sps: k * sps + span], **mpl_kw)
     ax.set_xlabel("Symbol intervals")
