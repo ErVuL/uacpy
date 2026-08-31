@@ -273,6 +273,7 @@ def _beam_pattern(half_width=15.0, floor=-30.0):
 def _beamed_source(pattern):
     return uacpy.Source(depths=25.0, frequencies=200.0, beam_pattern=pattern)
 
+
 def test_source_method_draws_its_own_beam_pattern():
     pattern = _beam_pattern()
     fig, ax = _beamed_source(pattern).plot_beam_pattern()

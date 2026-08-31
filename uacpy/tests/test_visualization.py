@@ -2806,10 +2806,6 @@ def _beam_half():
                             np.where(np.abs(angles - 30.0) <= 12.0, 0.0, -35.0)])
 
 
-def _source(pattern):
-    return uacpy.Source(depths=25.0, frequencies=200.0, beam_pattern=pattern)
-
-
 # ── shape of the returned axes ───────────────────────────────────────────────
 
 def test_returns_polar_axes_by_default():
@@ -2946,8 +2942,16 @@ def test_a_peak_outside_the_view_warns():
         plot_beam_pattern(np.column_stack([angles, levels]))
 
 
+def test_a_peak_outside_the_view_warns_on_the_cartesian_axes_too():
+    """``view=`` clips the angle axis in both renderings, so a main lobe the
+    xlim hides has to be reported exactly as the polar wedge reports it."""
+    angles = np.linspace(-180.0, 180.0, 361)
+    levels = np.where(np.abs(angles) >= 150.0, 0.0, -30.0)
+    with pytest.warns(UserWarning, match='strongest'):
+        plot_beam_pattern(np.column_stack([angles, levels]), polar=False)
+
+
 def test_a_peak_inside_the_view_draws_without_warning():
-    import warnings
     with warnings.catch_warnings():
         warnings.simplefilter('error', UserWarning)
         plot_beam_pattern(_beam_full())
@@ -3108,7 +3112,6 @@ def test_mirror_reflects_the_level_about_zero_degrees():
 
 
 def test_mirror_does_not_warn_about_the_gap_it_filled():
-    import warnings
     angles = np.linspace(0.0, 180.0, 181)
     pattern = np.column_stack([angles, np.zeros_like(angles)])
     with warnings.catch_warnings():
@@ -3130,7 +3133,6 @@ def test_mirror_warns_when_the_reflection_falls_short_of_the_fan():
 
 def test_mirror_to_the_full_fan_does_not_warn():
     """+/-90° covers every launch angle that propagates, so it is complete."""
-    import warnings
     angles = np.linspace(0.0, 90.0, 91)
     pattern = np.column_stack([angles, np.zeros_like(angles)])
     with warnings.catch_warnings():

@@ -297,7 +297,7 @@ evaluates.
 
 The beam is 30° wide between its −3 dB points, so it covers about what a
 hand-drawn "±15°" table would — but with a skirt instead of a cliff: −10 dB at
-25°, a first null at 33.5°, and sidelobes no higher than −13.3 dB. The steep
+25°, a first null at 33.9°, and sidelobes no higher than −13.3 dB. The steep
 launch angles are suppressed rather than deleted, and the near-source field
 thins accordingly. Counting cells louder than 50 dB TL, the omni panel lights
 63% of the water column at 500 m range against the beamed panel's 35%, and 84%

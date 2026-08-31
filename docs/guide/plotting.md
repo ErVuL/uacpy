@@ -542,7 +542,8 @@ horizon there is no range for the energy to travel into.
 interpolates with the index clamped but the weight unclamped, so the angles a
 0-180° table omits are *extrapolated*, not reflected. A table that does not
 cover ±90° warns, and `mirror=True` reflects it through 0° when you know it is
-symmetric. `example_04_bellhop_advanced.py` runs one against an omni source.
+symmetric. `example_04_bellhop_advanced.py` runs a directional source
+against an omni one.
 
 ### Environment
 

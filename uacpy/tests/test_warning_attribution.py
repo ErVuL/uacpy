@@ -698,3 +698,22 @@ def test_dev_md_states_the_convention_every_warn_site_follows():
     for phrase in ('skip_file_prefixes', 'USER_FRAME_SKIP', 'stacklevel'):
         assert phrase in section, phrase
 
+
+def test_beam_pattern_plot_warnings_name_the_callers_file():
+    """``plot_beam_pattern`` runs under ``typed_plot_error``, so a hand-counted
+    ``stacklevel=2`` lands on the decorator's own frame in ``_common.py`` — the
+    user is told to widen a table and handed a line in uacpy. Both doors, the
+    free function and ``Source.plot_beam_pattern``, must walk out to the caller
+    like every other plotter's warning does."""
+    import numpy as np
+    import uacpy
+    from uacpy.visualization import plot_beam_pattern
+    half = np.column_stack([np.linspace(0.0, 90.0, 91), np.zeros(91)])
+    for call in (lambda: plot_beam_pattern(half),
+                 lambda: uacpy.Source(depths=25.0, frequencies=200.0,
+                                      beam_pattern=half).plot_beam_pattern()):
+        with warnings.catch_warnings(record=True) as record:
+            warnings.simplefilter('always')
+            call()
+        warning = _only_warning(record)
+        assert Path(warning.filename).resolve() == _THIS_FILE, warning.filename

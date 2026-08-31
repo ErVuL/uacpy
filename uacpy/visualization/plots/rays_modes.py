@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 
-import warnings
-
 import numpy as np
 from typing import Optional, Tuple
 
@@ -12,7 +10,7 @@ from uacpy.core.environment import Environment
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.results import Arrivals, Rays, Modes, Covariance, Replicas, ReflectionCoefficient
 from uacpy.core.units import m_to_km
-from uacpy.visualization.plots._common import ZORDER_RAYS, ZORDER_SURFACE, _overlay_seafloor, _draw_geometry, _draw_receiver_grid, _draw_result_credit, fig_ax, typed_plot_error, invert_yaxis_once
+from uacpy.visualization.plots._common import ZORDER_RAYS, ZORDER_SURFACE, _overlay_seafloor, _draw_geometry, _draw_receiver_grid, _draw_result_credit, _plot_warn, fig_ax, typed_plot_error, invert_yaxis_once
 
 
 @typed_plot_error
@@ -534,7 +532,7 @@ def _resolve_beam_pattern(pattern) -> np.ndarray:
     Accepts what :attr:`uacpy.Source.beam_pattern` accepts — an array, a
     ``.sbp`` path, or ``None`` — so plotting a source and plotting a file on
     disk go through one code path. ``None`` becomes the flat table
-    ``ReadPat`` synthesises for an omni source (``misc/beampattern.f90:50-52``
+    ``ReadPat`` synthesises for an omni source (``misc/beampattern.f90:52-53``
     writes exactly ``[-180, 0], [180, 0]``), which keeps "no pattern" a
     drawable answer rather than an error."""
     from pathlib import Path
@@ -689,7 +687,7 @@ def plot_beam_pattern(
     mirror : bool, default False
         Reflect a one-sided table through 0° before drawing. Off by default
         because no engine mirrors: ``ReadPat``
-        (``misc/beampattern.f90:36-42``) reads the table verbatim, and
+        (``misc/beampattern.f90:43-46``) reads the table verbatim, and
         ``bellhop.f90:269-274`` interpolates it with the index clamped but the
         weight unclamped, so the angles a half table omits are extrapolated
         rather than reflected.
@@ -731,7 +729,7 @@ def plot_beam_pattern(
 
     lo, hi = float(angles.min()), float(angles.max())
     if lo > -90.0 + 1e-9 or hi < 90.0 - 1e-9:
-        warnings.warn(
+        _plot_warn(
             f"plot_beam_pattern: the pattern spans [{lo:g}, {hi:g}]° and so "
             f"does not cover the [-90, 90]° a launch fan can reach. Bellhop "
             f"neither mirrors nor wraps a partial table — it extrapolates "
@@ -739,8 +737,7 @@ def plot_beam_pattern(
             f"uncovered angles are undefined, not symmetric, and "
             f"Bellhop._check_beam_pattern_spans_the_fan rejects any alpha "
             f"reaching into them. Pass mirror=True to reflect the table "
-            f"through 0°.",
-            UserWarning, stacklevel=2)
+            f"through 0°.")
 
     level_span = float(levels.max() - levels.min())
     floor = (levels.min() - 0.05 * level_span if level_span > 1e-9
@@ -749,6 +746,17 @@ def plot_beam_pattern(
                      if pattern is None else 'Source beam pattern')
 
     view_lo, view_hi = _beam_pattern_view(view, lo, hi)
+    # Both renderings clip to the view — the wedge and the xlim alike — so a
+    # main lobe the view hides is reported before the branch, not inside one.
+    drawn = (angles >= view_lo - 1e-9) & (angles <= view_hi + 1e-9)
+    hidden = ~drawn
+    if hidden.any() and drawn.any() and levels[hidden].max() > levels[drawn].max() + 1e-9:
+        _plot_warn(
+            f"plot_beam_pattern: the strongest level in the table "
+            f"({levels[hidden].max():g} dB at "
+            f"{angles[hidden][np.argmax(levels[hidden])]:g}°) lies outside the "
+            f"drawn [{view_lo:g}, {view_hi:g}]° view, so the main lobe is not "
+            f"on this plot. Pass view='full' to draw the whole table.")
 
     if not polar:
         fig, ax = fig_ax(ax, figsize)
@@ -783,17 +791,6 @@ def plot_beam_pattern(
     # widens the view sees data rather than a redrawn plot.
     ax.set_thetamin(view_lo)
     ax.set_thetamax(view_hi)
-
-    drawn = (angles >= view_lo - 1e-9) & (angles <= view_hi + 1e-9)
-    hidden = ~drawn
-    if hidden.any() and drawn.any() and levels[hidden].max() > levels[drawn].max() + 1e-9:
-        warnings.warn(
-            f"plot_beam_pattern: the strongest level in the table "
-            f"({levels[hidden].max():g} dB at "
-            f"{angles[hidden][np.argmax(levels[hidden])]:g}°) lies outside the "
-            f"drawn [{view_lo:g}, {view_hi:g}]° view, so the main lobe is not "
-            f"on this plot. Pass view='full' to draw the whole circle.",
-            UserWarning, stacklevel=2)
 
     ticks, tick_labels = _beam_pattern_ticks(view_lo, view_hi)
     ax.set_thetagrids(ticks, labels=tick_labels)

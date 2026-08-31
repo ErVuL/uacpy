@@ -251,6 +251,7 @@ def main():
     # (ray2D(1)%t = [COS(alpha), SIN(alpha)]/c, bellhop.f90:453, over a depth
     # axis that increases downward): this is a beam tilted below the
     # horizontal, aimed down the shelf.
+    #
     # A projector is specified by its beamwidth, and beam_pattern is just an
     # angular weighting on this point source's launch amplitude — so the table
     # is a main lobe BEAMWIDTH_DEG wide between its -3 dB points, aimed at

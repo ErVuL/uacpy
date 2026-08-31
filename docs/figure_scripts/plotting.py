@@ -230,7 +230,7 @@ def beam_pattern_views():
     """``view=`` picks the drawn sector; the line always carries every row."""
     # Defined over the horizon-to-horizon fan and no further: past +/-90 a
     # launch traces to negative range, so a table has nothing to say there.
-    # One array throughout, so an angular difference between panels can only
+    # One table throughout, so an angular difference between panels can only
     # come from the view. Two panels steered differently would invite the
     # reading that the plotter, not the table, moved the lobe.
     steered = source_beam_pattern(np.linspace(-90.0, 90.0, 721),
