@@ -256,3 +256,51 @@ class TestEveryPlotMethodSpellsTheAxesArgumentAx:
         with pytest.raises(ConfigurationError, match='not both'):
             field.plot_transfer_function(ax=tuple(pair), axes=tuple(pair))
         plt.close(fig)
+
+
+# ── Source.plot_beam_pattern ─────────────────────────────────────────────────
+#
+# Named rather than spelled ``plot()``: a Source's other rendering is the marker
+# ``env.plot(source=...)`` draws, which needs an environment to sit in, so the
+# bare name would not say which view was meant.
+
+def _beam_pattern(half_width=15.0, floor=-30.0):
+    angles = np.linspace(-180.0, 180.0, 361)
+    levels = np.where(np.abs(angles) <= half_width, 0.0, floor)
+    return np.column_stack([angles, levels])
+
+
+def _beamed_source(pattern):
+    return uacpy.Source(depths=25.0, frequencies=200.0, beam_pattern=pattern)
+
+def test_source_method_draws_its_own_beam_pattern():
+    pattern = _beam_pattern()
+    fig, ax = _beamed_source(pattern).plot_beam_pattern()
+    assert np.allclose(np.rad2deg(ax.lines[0].get_xdata()), pattern[:, 0])
+
+
+def test_source_method_forwards_kwargs():
+    fig, ax = _beamed_source(_beam_pattern()).plot_beam_pattern(title='Projector')
+    assert ax.get_title() == 'Projector'
+
+
+def test_source_method_on_omni_source_draws_the_flat_circle():
+    fig, ax = uacpy.Source(depths=25.0, frequencies=200.0).plot_beam_pattern()
+    assert np.allclose(ax.lines[0].get_ydata(), 0.0)
+
+
+def test_source_method_resolves_a_path_pattern(tmp_path):
+    from uacpy.io import write_source_beam_pattern
+    pattern = _beam_pattern()
+    sbp = tmp_path / 'src.sbp'
+    write_source_beam_pattern(sbp, pattern[:, 0], pattern[:, 1])
+    fig, ax = _beamed_source(sbp).plot_beam_pattern()
+    assert np.allclose(np.rad2deg(ax.lines[0].get_xdata()), pattern[:, 0])
+
+
+def test_source_method_accepts_an_existing_axis():
+    fig = plt.figure()
+    ax = fig.add_subplot(projection='polar')
+    out_fig, out_ax = _beamed_source(_beam_pattern()).plot_beam_pattern(ax=ax)
+    assert out_ax is ax
+    assert out_fig is fig

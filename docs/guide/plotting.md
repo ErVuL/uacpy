@@ -92,6 +92,11 @@ instead, which gives you a small-multiples panel per geoacoustic property
 to be drawn *over* something. Pass them as `source=` / `receiver=` to a plotter
 that has a cross-section (§3).
 
+A source's *directivity*, though, does stand on its own — it is a table, not a
+position — so it gets a named method rather than the bare one:
+`source.plot_beam_pattern()`. The name says which of the two views you asked
+for, which `.plot()` could not.
+
 ---
 
 ## 2. `plot_field` in depth
@@ -502,6 +507,42 @@ yours) and the two `draw_*` overlays; every entry takes
 Ray fans, arrival stems, mode functions, covariance, replicas and reflection
 coefficients have no public free plotter — they are reached through
 `result.plot()` (§1).
+
+### Source
+
+| Plotter | ax | Draws |
+|---|---|---|
+| `plot_beam_pattern(pattern=None, ax=None, polar=True, view='forward', mirror=False, fill=True, rmin=None)` | ✓ | the `.sbp` directivity table, on polar axes oriented like the field: 0° along increasing range, positive angles downward. `source.plot_beam_pattern()` is the object form; `None` draws the flat 0 dB circle Bellhop substitutes for an omni source |
+
+The polar orientation is not cosmetic. The `.sbp` angle axis *is* Bellhop's
+launch declination `alpha` — `Bellhop._check_beam_pattern_spans_the_fan`
+compares the two directly — and `ray2D(1)%t = [COS(alpha), SIN(alpha)]/c`
+(`Bellhop/bellhop.f90:453`) over a depth axis that is positive downward sends
+`alpha > 0` deeper. A lobe drawn below the horizontal is therefore a lobe that
+ensonifies the water below the source in the TL image beside it.
+
+**`view=` picks the sector, and defaults to the half that propagates.** A
+launch steeper than ±90° has `COS(alpha) < 0`, so it traces to *negative* range
+and never enters the `r > 0` the field is evaluated on — traced directly,
+`alpha = ±127.5°` gives `r` in `[-6000, 0]` while `alpha = ±42.5°` reaches
+`+6000`. `view='forward'` therefore draws the right half-plane, clipped to the
+table's own support (a 0-180° table draws as the 0-90° quarter). `'support'`
+draws the table's whole span, `'full'` the whole circle, and `polar=False`
+takes the same view as its `xlim` rather than always spanning the table. The
+choice moves the axes limits only — the line always carries every row — and a
+table whose strongest level falls outside the drawn sector says so.
+
+A `.sbp` is worth defining only over `[-90, 90]` for the same reason: past the
+horizon there is no range for the energy to travel into.
+
+![Polar and rectilinear share one view](figures/plot_beam_pattern.png)
+
+`mirror=` is **off** by default: no engine mirrors a half-defined table.
+`ReadPat` (`misc/beampattern.f90`) reads it verbatim, and `bellhop.f90:269-274`
+interpolates with the index clamped but the weight unclamped, so the angles a
+0-180° table omits are *extrapolated*, not reflected. A table that does not
+cover ±90° warns, and `mirror=True` reflects it through 0° when you know it is
+symmetric. `example_04_bellhop_advanced.py` runs one against an omni source.
 
 ### Environment
 

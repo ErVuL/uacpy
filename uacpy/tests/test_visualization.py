@@ -32,7 +32,7 @@ from uacpy.acoustic_signal.analysis import PPSDResult
 from uacpy.acoustic_signal.constant_q import CQPPSDResult
 from uacpy.noise import WenzNoise
 from uacpy.visualization import plots
-from uacpy.visualization.plots import plot_field
+from uacpy.visualization.plots import plot_beam_pattern, plot_field
 from uacpy.visualization.plots import fields as _fields
 from uacpy.visualization.plots.fields import (compare,
                                               plot_detection_probability,
@@ -2779,3 +2779,397 @@ def test_a_source_depth_heatmap_plots_positive_down_like_depth():
                                     coords={axis: depths, 'range': ranges}))
         inverted[axis] = ax.yaxis_inverted()
     assert inverted == {'source_depth': True, 'depth': True}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# plot_beam_pattern — the .sbp source-directivity table
+#
+# The orientation tests are the load-bearing ones: the polar axes must place a
+# positive angle where the *field* plots put it, because the .sbp angle axis is
+# Bellhop's launch declination ``alpha`` and ``alpha > 0`` launches downward.
+# ``test_bellhop.py`` pins that engine convention itself; these pin that the
+# plot follows it.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _beam_full(half_width=15.0, floor=-30.0):
+    """A ±``half_width``° main lobe at 0 dB, ``floor`` dB outside."""
+    angles = np.linspace(-180.0, 180.0, 361)
+    levels = np.where(np.abs(angles) <= half_width, 0.0, floor)
+    return np.column_stack([angles, levels])
+
+
+def _beam_half():
+    """A 0-180° table — support that the forward view clips to a quarter."""
+    angles = np.linspace(0.0, 180.0, 181)
+    return np.column_stack([angles,
+                            np.where(np.abs(angles - 30.0) <= 12.0, 0.0, -35.0)])
+
+
+def _source(pattern):
+    return uacpy.Source(depths=25.0, frequencies=200.0, beam_pattern=pattern)
+
+
+# ── shape of the returned axes ───────────────────────────────────────────────
+
+def test_returns_polar_axes_by_default():
+    fig, ax = plot_beam_pattern(_beam_full())
+    assert isinstance(fig, plt.Figure)
+    assert ax.name == 'polar'
+
+
+def test_polar_false_returns_rectilinear_axes():
+    fig, ax = plot_beam_pattern(_beam_full(), polar=False)
+    assert ax.name == 'rectilinear'
+
+
+# ── orientation: must match the field's axes ─────────────────────────────────
+
+def test_positive_angle_points_downward_like_the_field():
+    """+90° draws straight down, because +alpha launches downward in Bellhop
+    and the field plots depth positive downward."""
+    fig, ax = plot_beam_pattern(_beam_full())
+    r = ax.get_rmax()
+    down = ax.transData.transform((np.pi / 2, r))
+    up = ax.transData.transform((-np.pi / 2, r))
+    # Display y grows upward, so "down" must sit lower on the canvas.
+    assert down[1] < up[1]
+
+
+def test_zero_degrees_points_along_increasing_range():
+    fig, ax = plot_beam_pattern(_beam_full())
+    r = ax.get_rmax()
+    forward = ax.transData.transform((0.0, r))
+    down = ax.transData.transform((np.pi / 2, r))
+    up = ax.transData.transform((-np.pi / 2, r))
+    assert forward[0] > down[0] and forward[0] > up[0]
+
+
+def test_cartesian_puts_angle_on_x_and_level_on_y():
+    fig, ax = plot_beam_pattern(_beam_full(), polar=False)
+    assert 'ngle' in ax.get_xlabel()
+    assert 'dB' in ax.get_ylabel()
+    x, y = ax.lines[0].get_xdata(), ax.lines[0].get_ydata()
+    assert np.allclose(x, _beam_full()[:, 0])
+    assert np.allclose(y, _beam_full()[:, 1])
+
+
+# ── the angle axis is labelled in the table's own convention ─────────────────
+
+def test_theta_labels_are_signed_like_the_sbp_table():
+    """The upper half reads -90, not 270: a .sbp angle column and a Bellhop
+    alpha fan are both spelled signed, so the plot must be too."""
+    fig, ax = plot_beam_pattern(_beam_full())
+    labels = [t.get_text() for t in ax.get_xticklabels()]
+    assert any(l.startswith('-90') for l in labels)
+    assert any(l.startswith('90') for l in labels)
+    assert not any('270' in l for l in labels)
+
+
+def test_signed_labels_do_not_narrow_the_drawn_circle():
+    """Signed tick *labels* must not become signed tick *positions*: a negative
+    position widens thetamin to -180, and matplotlib then draws a 540-degree
+    sweep as a distorted part-disc with the pattern squeezed out of it."""
+    fig, ax = plot_beam_pattern(_beam_full(), view='full')
+    assert ax.get_thetamax() - ax.get_thetamin() == 360.0
+
+
+def test_theta_labels_stay_within_plus_minus_180():
+    fig, ax = plot_beam_pattern(_beam_full())
+    shown = [float(t.get_text().rstrip('\u00b0')) for t in ax.get_xticklabels()
+             if t.get_text()]
+    assert min(shown) >= -180.0 and max(shown) <= 180.0
+
+
+# ── the lobe reads as a lobe ─────────────────────────────────────────────────
+
+def test_polar_lobe_is_filled_by_default():
+    """A top-hat pattern whose sidelobes sit at the radial floor draws as bare
+    radial spokes without a fill."""
+    fig, ax = plot_beam_pattern(_beam_full())
+    assert len(ax.collections) >= 1
+
+
+def test_fill_false_leaves_the_outline_alone():
+    fig, ax = plot_beam_pattern(_beam_full(), fill=False)
+    assert len(ax.collections) == 0
+    assert len(ax.lines) == 1
+
+
+# ── the drawn sector ─────────────────────────────────────────────────────────
+
+def test_default_view_is_the_forward_half_plane():
+    """Only |alpha| <= 90 propagates into r > 0 — a steeper launch traces to
+    negative range and never enters the field — so that is what is drawn."""
+    fig, ax = plot_beam_pattern(_beam_full())
+    assert (ax.get_thetamin(), ax.get_thetamax()) == (-90.0, 90.0)
+
+
+def test_forward_view_clips_to_the_table_support():
+    angles = np.linspace(0.0, 180.0, 181)
+    pattern = np.column_stack([angles, np.zeros_like(angles)])
+    fig, ax = plot_beam_pattern(pattern)
+    assert (ax.get_thetamin(), ax.get_thetamax()) == (0.0, 90.0)
+
+
+def test_support_view_follows_the_table():
+    angles = np.linspace(0.0, 180.0, 181)
+    pattern = np.column_stack([angles, np.zeros_like(angles)])
+    fig, ax = plot_beam_pattern(pattern, view='support')
+    assert (ax.get_thetamin(), ax.get_thetamax()) == (0.0, 180.0)
+
+
+def test_full_view_draws_the_back_half_too():
+    fig, ax = plot_beam_pattern(_beam_full(), view='full')
+    assert (ax.get_thetamin(), ax.get_thetamax()) == (-180.0, 180.0)
+
+
+def test_unknown_view_raises_configuration_error():
+    with pytest.raises(ConfigurationError):
+        plot_beam_pattern(_beam_full(), view='sideways')
+
+
+def test_clipping_the_view_does_not_clip_the_drawn_data():
+    """The wedge is an axes limit, not a filter: mirror= and the table tests
+    keep seeing the whole table."""
+    pattern = _beam_full()
+    fig, ax = plot_beam_pattern(pattern)
+    assert np.allclose(np.rad2deg(ax.lines[0].get_xdata()), pattern[:, 0])
+
+
+def test_a_peak_outside_the_view_warns():
+    """A back lobe stronger than anything drawn is the one case where the
+    forward half-plane misleads."""
+    angles = np.linspace(-180.0, 180.0, 361)
+    levels = np.where(np.abs(angles) >= 150.0, 0.0, -30.0)
+    with pytest.warns(UserWarning, match='strongest'):
+        plot_beam_pattern(np.column_stack([angles, levels]))
+
+
+def test_a_peak_inside_the_view_draws_without_warning():
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter('error', UserWarning)
+        plot_beam_pattern(_beam_full())
+
+
+def _beam_downward():
+    """A 0-90° table — a downward-looking projector, defined only where a
+    launch angle propagates."""
+    angles = np.linspace(0.0, 90.0, 181)
+    return np.column_stack([angles,
+                            np.where(np.abs(angles - 30.0) <= 12.0, 0.0, -35.0)])
+
+
+def test_radial_labels_prefer_a_bearing_the_pattern_leaves_empty():
+    """On a full circle a 0-90° table leaves three quadrants bare — that is
+    where the labels belong, and picking the quietest *table row* never finds
+    it because no row is there to nominate it."""
+    fig, ax = plot_beam_pattern(_beam_downward(), view='full')
+    bearing = (ax.get_rlabel_position() + 180.0) % 360.0 - 180.0
+    assert not 0.0 <= bearing <= 90.0, f"labels at {bearing:g}°, over the table"
+
+
+def test_radial_labels_avoid_the_angle_tick_spokes():
+    """On a full circle the radial labels are placed by bearing, and a bearing
+    that lands on a labelled spoke prints the dB value on top of the degree
+    one."""
+    fig, ax = plot_beam_pattern(_beam_half(), view='full')
+    spokes = np.rad2deg(ax.get_xticks())
+    offset = np.abs((spokes - ax.get_rlabel_position() + 180.0) % 360.0 - 180.0)
+    assert offset.min() >= 10.0, (
+        f"radial labels at {ax.get_rlabel_position():g}°, spokes at {spokes}")
+
+
+def test_the_radial_axis_is_not_over_ticked():
+    """A polar radius is short and its labels all sit on one spoke, so the
+    ~9 ticks a linear dB axis defaults to overprint each other."""
+    fig, ax = plot_beam_pattern(_beam_full())
+    lo, hi = ax.get_ylim()
+    on_axis = [t for t in ax.get_yticks() if lo - 1e-9 <= t <= hi + 1e-9]
+    assert len(on_axis) <= 6, f"{len(on_axis)} radial ticks: {on_axis}"
+
+
+def test_radial_labels_do_not_collide_with_the_title():
+    """Measured on the rendered figure, not on ``get_rlabel_position``: once
+    the axes is a wedge, matplotlib pins the radial labels to the thetamin
+    spoke and ignores that setting entirely, so only the drawn geometry can
+    say whether the labels clear the title."""
+    for pattern in (_beam_full(), _beam_half()):
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', UserWarning)
+            fig, ax = plot_beam_pattern(pattern)
+        fig.canvas.draw()
+        title = ax.title.get_window_extent()
+        for label in ax.yaxis.get_ticklabels():
+            box = label.get_window_extent()
+            if np.isnan(box.x0) or not label.get_text():
+                continue
+            assert not title.overlaps(box), (
+                f"radial label {label.get_text()!r} overlaps the title")
+
+
+def test_a_narrow_wedge_is_labelled_more_finely_than_45_degrees():
+    angles = np.linspace(0.0, 20.0, 41)
+    pattern = np.column_stack([angles, np.zeros_like(angles)])
+    with pytest.warns(UserWarning):
+        fig, ax = plot_beam_pattern(pattern)
+    assert len([t for t in ax.get_xticklabels() if t.get_text()]) >= 3
+
+
+def test_cartesian_limits_the_angle_axis_to_the_same_view():
+    """``view=`` is about which launch angles are worth looking at, not about
+    polar geometry, so both renderings answer it the same way."""
+    fig, ax = plot_beam_pattern(_beam_full(), polar=False)
+    assert ax.get_xlim() == (-90.0, 90.0)
+
+
+def test_cartesian_full_view_spans_the_whole_table():
+    fig, ax = plot_beam_pattern(_beam_full(), polar=False, view='full')
+    assert ax.get_xlim() == (-180.0, 180.0)
+
+
+def test_cartesian_view_clips_to_the_table_support():
+    fig, ax = plot_beam_pattern(_beam_half(), polar=False, view='support')
+    assert ax.get_xlim() == (0.0, 180.0)
+
+
+# ── the data actually drawn ──────────────────────────────────────────────────
+
+def test_polar_theta_is_the_table_angle_in_radians():
+    pattern = _beam_full()
+    fig, ax = plot_beam_pattern(pattern)
+    theta = ax.lines[0].get_xdata()
+    assert np.allclose(theta, np.deg2rad(pattern[:, 0]))
+
+
+def test_peak_of_the_main_lobe_reaches_the_radial_maximum():
+    fig, ax = plot_beam_pattern(_beam_full())
+    levels = ax.lines[0].get_ydata()
+    assert np.isclose(levels.max(), 0.0)
+    assert np.isclose(levels.min(), -30.0)
+
+
+# ── omnidirectional ──────────────────────────────────────────────────────────
+
+def test_none_draws_a_flat_zero_db_circle():
+    fig, ax = plot_beam_pattern(None)
+    levels = ax.lines[0].get_ydata()
+    assert np.allclose(levels, 0.0)
+    theta = np.rad2deg(ax.lines[0].get_xdata())
+    assert np.isclose(theta.min(), -180.0)
+    assert np.isclose(theta.max(), 180.0)
+
+
+def test_none_says_omnidirectional_in_the_title():
+    fig, ax = plot_beam_pattern(None)
+    assert 'mnidirectional' in ax.get_title()
+
+
+# ── a half-defined table is not silently completed ───────────────────────────
+
+def test_half_defined_pattern_keeps_its_own_support():
+    """0-180° stays 0-180°: Bellhop's ``ReadPat`` (``misc/beampattern.f90``)
+    mirrors nothing, so neither does the plot."""
+    angles = np.linspace(0.0, 180.0, 181)
+    pattern = np.column_stack([angles, np.where(angles <= 15.0, 0.0, -30.0)])
+    fig, ax = plot_beam_pattern(pattern)
+    theta = np.rad2deg(ax.lines[0].get_xdata())
+    assert np.isclose(theta.min(), 0.0)
+    assert np.isclose(theta.max(), 180.0)
+
+
+def test_half_defined_pattern_warns_that_it_leaves_the_fan_uncovered():
+    angles = np.linspace(0.0, 180.0, 181)
+    pattern = np.column_stack([angles, np.zeros_like(angles)])
+    with pytest.warns(UserWarning, match='does not cover'):
+        plot_beam_pattern(pattern)
+
+
+def test_mirror_completes_a_half_defined_pattern():
+    angles = np.linspace(0.0, 180.0, 181)
+    levels = np.where(angles <= 15.0, 0.0, -30.0)
+    fig, ax = plot_beam_pattern(np.column_stack([angles, levels]), mirror=True)
+    theta = np.rad2deg(ax.lines[0].get_xdata())
+    assert np.isclose(theta.min(), -180.0)
+    assert np.isclose(theta.max(), 180.0)
+
+
+def test_mirror_reflects_the_level_about_zero_degrees():
+    angles = np.linspace(0.0, 180.0, 181)
+    levels = np.where(angles <= 15.0, 0.0, -30.0)
+    fig, ax = plot_beam_pattern(np.column_stack([angles, levels]), mirror=True)
+    theta = np.rad2deg(ax.lines[0].get_xdata())
+    drawn = ax.lines[0].get_ydata()
+    for probe in (10.0, 40.0, 120.0):
+        at_plus = drawn[np.argmin(np.abs(theta - probe))]
+        at_minus = drawn[np.argmin(np.abs(theta + probe))]
+        assert np.isclose(at_plus, at_minus)
+
+
+def test_mirror_does_not_warn_about_the_gap_it_filled():
+    import warnings
+    angles = np.linspace(0.0, 180.0, 181)
+    pattern = np.column_stack([angles, np.zeros_like(angles)])
+    with warnings.catch_warnings():
+        warnings.simplefilter('error', UserWarning)
+        plot_beam_pattern(pattern, mirror=True)
+
+
+def test_mirror_warns_when_the_reflection_falls_short_of_the_fan():
+    """0-45° mirrors to +/-45°, still short of the +/-90° a launch fan can
+    reach, so mirroring does not retire the warning."""
+    angles = np.linspace(0.0, 45.0, 46)
+    pattern = np.column_stack([angles, np.zeros_like(angles)])
+    with pytest.warns(UserWarning, match='does not cover'):
+        fig, ax = plot_beam_pattern(pattern, mirror=True)
+    theta = np.rad2deg(ax.lines[0].get_xdata())
+    assert np.isclose(theta.min(), -45.0)
+    assert np.isclose(theta.max(), 45.0)
+
+
+def test_mirror_to_the_full_fan_does_not_warn():
+    """+/-90° covers every launch angle that propagates, so it is complete."""
+    import warnings
+    angles = np.linspace(0.0, 90.0, 91)
+    pattern = np.column_stack([angles, np.zeros_like(angles)])
+    with warnings.catch_warnings():
+        warnings.simplefilter('error', UserWarning)
+        plot_beam_pattern(pattern, mirror=True)
+
+
+def test_mirror_leaves_a_full_pattern_untouched():
+    pattern = _beam_full()
+    fig, ax = plot_beam_pattern(pattern, mirror=True)
+    theta = np.rad2deg(ax.lines[0].get_xdata())
+    assert np.allclose(theta, pattern[:, 0])
+
+
+# ── reading a .sbp path ──────────────────────────────────────────────────────
+
+def test_accepts_a_sbp_path(tmp_path):
+    from uacpy.io import write_source_beam_pattern
+    pattern = _beam_full()
+    sbp = tmp_path / 'src.sbp'
+    write_source_beam_pattern(sbp, pattern[:, 0], pattern[:, 1])
+    fig, ax = plot_beam_pattern(sbp)
+    assert np.allclose(np.rad2deg(ax.lines[0].get_xdata()), pattern[:, 0])
+
+
+# ── degenerate input ─────────────────────────────────────────────────────────
+
+def test_empty_table_raises_configuration_error():
+    with pytest.raises(ConfigurationError):
+        plot_beam_pattern(np.empty((0, 2)))
+
+
+def test_wrong_width_raises_configuration_error():
+    with pytest.raises(ConfigurationError):
+        plot_beam_pattern(np.zeros((10, 3)))
+
+
+def test_rejected_call_leaves_no_figure_behind():
+    before = set(plt.get_fignums())
+    with pytest.raises(ConfigurationError):
+        plot_beam_pattern(np.empty((0, 2)))
+    assert set(plt.get_fignums()) == before

@@ -11,7 +11,8 @@ import warnings
 import matplotlib.pyplot as plt
 import numpy as np
 
-from figure_scripts._common import deep_water, shallow_water
+from figure_scripts._common import (deep_water, shallow_water,
+                                    source_beam_pattern)
 
 import uacpy
 from uacpy.acoustic_signal import lfm_chirp, psd, spectrogram
@@ -225,6 +226,40 @@ def dsp_plotters():
     return fig
 
 
+def beam_pattern_views():
+    """``view=`` picks the drawn sector; the line always carries every row."""
+    # Defined over the horizon-to-horizon fan and no further: past +/-90 a
+    # launch traces to negative range, so a table has nothing to say there.
+    # One array throughout, so an angular difference between panels can only
+    # come from the view. Two panels steered differently would invite the
+    # reading that the plotter, not the table, moved the lobe.
+    steered = source_beam_pattern(np.linspace(-90.0, 90.0, 721),
+                                  beamwidth_deg=24.0, tilt_deg=20.0)
+    downward = source_beam_pattern(np.linspace(0.0, 90.0, 361),
+                                   beamwidth_deg=24.0, tilt_deg=20.0)
+
+    panels = ((steered, dict(), "-90-90° table · view='forward' (default)"),
+              (steered, dict(polar=False), '-90-90° table · polar=False'),
+              (downward, dict(), "0-90° table · view='forward'"),
+              (downward, dict(view='full'), "0-90° table · view='full'"))
+    # 2x2 rather than 1x4: a quarter-disc panel squeezed into a quarter of the
+    # width runs its radial labels into one another.
+    fig = plt.figure(figsize=(10.5, 8.6))
+    for index, (pattern, kwargs, label) in enumerate(panels):
+        projection = None if kwargs.get('polar') is False else 'polar'
+        ax = fig.add_subplot(2, 2, index + 1, projection=projection)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            uacpy.plot.plot_beam_pattern(pattern, ax=ax, title=label, **kwargs)
+        ax.title.set_fontsize(9)
+    # The plotter pads its title clear of the radial labels, which lands it
+    # under an unreserved suptitle; rect keeps the top strip for the suptitle.
+    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.94))
+    fig.suptitle('plot_beam_pattern — one 24°-wide beam at +20°, four ways',
+                 fontweight='bold', fontsize=13)
+    return fig
+
+
 FIGURES = {
     'plot_dispatch': dispatch,
     'plot_branches': render_branches,
@@ -233,4 +268,5 @@ FIGURES = {
     'plot_tl_scale': tl_scale,
     'plot_composition': composition,
     'plot_dsp': dsp_plotters,
+    'plot_beam_pattern': beam_pattern_views,
 }

@@ -2711,3 +2711,51 @@ class TestFanMissReportEqualsTheDenseAngleGrid:
         steepest = float(
             re.search(r'steepest is (-?[\d.]+) deg', msg).group(1))
         assert steepest == pytest.approx(round(worst, 1), abs=1e-9)
+
+
+# ── the launch-angle sign convention ─────────────────────────────────────────
+#
+# Which way ``alpha`` points is a contract other code reads: it is why
+# ``uacpy.plot.plot_beam_pattern`` runs its polar axes clockwise from due east,
+# so a .sbp lobe is drawn over the water it ensonifies. If the sign ever
+# flipped, that plot would silently mirror against the field beside it.
+
+@pytest.mark.convention
+def test_positive_launch_angle_traces_a_downward_ray():
+    """``alpha > 0`` goes deeper — ``ray2D(1)%t = [COS(alpha), SIN(alpha)]/c``
+    over a depth axis that is positive downward."""
+    env = uacpy.Environment(bathymetry=2000.0, ssp=1500.0)
+    src = uacpy.Source(depths=1000.0, frequencies=200.0)
+    rcv = uacpy.Receiver(depths=np.linspace(0.0, 2000.0, 21),
+                         ranges=np.linspace(0.0, 5000.0, 11))
+    rays = Bellhop(verbose=False, alpha=(-10.0, 10.0), n_beams=3).run(
+        env, src, rcv, run_mode='rays')
+
+    by_angle = {round(ray['alpha']): np.asarray(ray['z']) for ray in rays.rays}
+    assert by_angle[10][1] > by_angle[10][0]      # +10° dives
+    assert by_angle[-10][1] < by_angle[-10][0]    # -10° climbs
+
+
+@pytest.mark.convention
+def test_downward_only_pattern_ensonifies_below_the_source():
+    """A ``.sbp`` passing only positive angles moves energy to the deeper
+    receiver, which is what the polar plot claims when it draws that lobe
+    below the horizontal."""
+    env = uacpy.Environment(bathymetry=2000.0, ssp=1500.0)
+    rcv = uacpy.Receiver(depths=np.array([500.0, 1500.0]),
+                         ranges=np.array([2000.0]))
+    downward = np.array([[-180.0, -40.0], [-0.001, -40.0],
+                         [0.0, 0.0], [180.0, 0.0]])
+    model = Bellhop(verbose=False, alpha=(-80.0, 80.0), n_beams=2001)
+
+    def below_minus_above(beam_pattern):
+        src = uacpy.Source(depths=1000.0, frequencies=200.0,
+                           beam_pattern=beam_pattern)
+        tl = np.squeeze(np.asarray(model.run(env, src, rcv).tl))
+        return float(tl[1] - tl[0])          # TL, so lower = louder
+
+    # Against the omni control, because the bare sign of the difference is an
+    # interference detail of these two points, not a directivity effect.
+    swing = below_minus_above(downward) - below_minus_above(None)
+    assert swing < -10.0, f"downward pattern shifted below-above by {swing:+.2f} dB"
+    assert below_minus_above(downward) < 0.0   # below is the louder one

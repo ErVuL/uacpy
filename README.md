@@ -82,8 +82,11 @@ models — consistent `Environment` / `Source` / `Receiver` construction and
 - **Standards & metrics** — sound speed, decidecade bands, ship source level, marine‑mammal weighting.
 - **Visualization** — TL maps, rays, modes, fields, cross‑model comparisons.
 
-**Simplest example — 100 m of water, one model run, one plot.** Nothing but a
-finished [install](#-installation); no network, no downloads, no data cache:
+**Simplest example — 100 m of water, one model run, one plot.** Needs the
+native models built — an [install](#-installation) that answered yes to
+"Build propagation models" (the pure-Python, data-only install cannot run a
+propagation model). Beyond that, nothing: no network, no downloads, no data
+cache:
 
 ``` python
 import numpy as np

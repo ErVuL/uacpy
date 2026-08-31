@@ -270,24 +270,48 @@ of `[angle_deg, level_dB]` with **strictly increasing** angles, or a path to an
 existing `.sbp` file. uacpy stages it into the run's working directory as
 `<case>.sbp` and flips the engine's beam-pattern switch.
 
+Give the lobe the shape a projector has rather than a rectangle. A beam
+pattern is specified the way a projector is — by its **beamwidth** — and that
+is all this table is: an angular weighting on a point source's launch
+amplitude. No aperture or element spacing enters; that geometry belongs to a
+receiving [array](arrays.md), and the engine's model has none of it.
+
 ```python
-angles = np.linspace(-180.0, 180.0, 721)
-levels = np.where(np.abs(angles) <= 15.0, 0.0, -30.0)
-pattern = np.column_stack([angles, levels])
+angles = np.linspace(-90.0, 90.0, 721)
+beamwidth = 30.0                                  # degrees between -3 dB points
+lobe = 0.442946 * angles / (0.5 * beamwidth)      # sinc is -3 dB at 0.442946
+level = 20.0 * np.log10(np.maximum(np.abs(np.sinc(lobe)), 10.0 ** (-40.0 / 20.0)))
+pattern = np.column_stack([angles, level])
 
 beamed = uacpy.Source(depths=25.0, frequencies=200.0, beam_pattern=pattern)
+beamed.plot_beam_pattern()                        # the pattern itself
 Bellhop(n_beams=3000).run(env, beamed, receiver).plot(env=env, source=beamed)
 ```
 
-![Omnidirectional vs a ±15° beam](figures/srcrcv_beam_pattern.png)
+The levels are floored because the nulls are true zeros and the table has to
+stay finite, and the table stops at ±90° because a steeper launch has
+`COS(alpha) < 0` and travels to negative range, which a 2-D run never
+evaluates.
 
-The steep launch angles are gone. The near-source field collapses into a
-wedge with a sharp edge — the −15° ray, running from the source to the seabed
-at about 300 m — and the dense interference that filled the first kilometre
-gives way to a few broad lobes, because the steep multipaths that produced it
-are 30 dB down. Past ~2 km the two panels converge, since only shallow-angle
-paths survive to that range anyway. That convergence is the physical point: a
-beam pattern buys you near-field control, not far-field gain.
+![A 30° beam against an omnidirectional source](figures/srcrcv_beam_pattern.png)
+
+The beam is 30° wide between its −3 dB points, so it covers about what a
+hand-drawn "±15°" table would — but with a skirt instead of a cliff: −10 dB at
+25°, a first null at 33.5°, and sidelobes no higher than −13.3 dB. The steep
+launch angles are suppressed rather than deleted, and the near-source field
+thins accordingly. Counting cells louder than 50 dB TL, the omni panel lights
+63% of the water column at 500 m range against the beamed panel's 35%, and 84%
+against 63% at 200 m. The beam's −3 dB edge reaches the seabed at about 280 m.
+
+Past that the two panels converge, and that convergence is the physical point:
+a beam pattern buys near-field control, not far-field gain. Averaged over
+range the beamed source is 3.7 dB quieter than the omni one inside 500 m but
+only 1.2 dB quieter over 3.5–5 km, because the paths that survive to 5 km in a
+100 m channel are shallow ones sitting on the main lobe, which this pattern
+passes at full level. The residual 1.2 dB is the skirt still costing a little
+on the steeper multipaths — a rectangular table, which passes everything
+inside ±15° flat and kills everything outside, converges harder still, to
++0.5 dB.
 
 **Only two models read a pattern**: [Bellhop](../models/bellhop.md) and
 [Kraken](../models/kraken.md). Anything else refuses rather than ignoring it:

@@ -17,7 +17,8 @@ import warnings
 import matplotlib.pyplot as plt
 import numpy as np
 
-from figure_scripts._common import deep_water, shallow_water
+from figure_scripts._common import (deep_water, shallow_water,
+                                    source_beam_pattern)
 
 import uacpy
 from uacpy.models import Bellhop, Kraken, RAM, RunMode
@@ -160,23 +161,30 @@ def below_the_domain():
 def beam_pattern():
     """A directional source, staged as an .sbp and read by Bellhop."""
     env, _, receiver = shallow_water()
-    angles = np.linspace(-180.0, 180.0, 721)
-    levels = np.where(np.abs(angles) <= 15.0, 0.0, -30.0)
-    pattern = np.column_stack([angles, levels])
+    # 30 deg wide between its -3 dB points, so the beam covers about what a
+    # hand-drawn "+/-15 deg" table would, but with the skirt and the -13.3 dB
+    # sidelobes a smooth main lobe implies rather than a cliff.
+    pattern = source_beam_pattern(np.linspace(-90.0, 90.0, 721),
+                                  beamwidth_deg=30.0)
 
     omni = uacpy.Source(depths=25.0, frequencies=200.0)
     beamed = uacpy.Source(depths=25.0, frequencies=200.0, beam_pattern=pattern)
 
     model = Bellhop(n_beams=3000)
-    panels = [(omni, 'beam_pattern=None (omni)'),
-              (beamed, 'beam_pattern=±15°, −30 dB outside')]
-    fig, axes = plt.subplots(2, 1, figsize=(9.0, 7.0), sharex=True, sharey=True)
-    for ax, (src, label) in zip(axes, panels):
+    fig = plt.figure(figsize=(12.5, 6.6))
+    grid = fig.add_gridspec(2, 2, width_ratios=(1.0, 2.3))
+    ax_pattern = fig.add_subplot(grid[:, 0], projection='polar')
+    beamed.plot_beam_pattern(ax=ax_pattern, title='30° beam, aimed level')
+    ax_pattern.title.set_fontsize(11)
+
+    ax_omni = fig.add_subplot(grid[0, 1])
+    ax_beam = fig.add_subplot(grid[1, 1], sharex=ax_omni, sharey=ax_omni)
+    for ax, src, label in ((ax_omni, omni, 'beam_pattern=None (omni)'),
+                           (ax_beam, beamed, 'beam_pattern=30° beam')):
         model.run(env, src, receiver).plot(
-            env=env, source=src, ax=ax, show_colorbar=(ax is axes[0]))
+            env=env, source=src, ax=ax, show_colorbar=(ax is ax_omni))
         ax.set_title(label, fontweight='bold', fontsize=11)
-        if ax is not axes[-1]:
-            ax.set_xlabel('')
+    ax_omni.set_xlabel('')
     fig.suptitle('Source directivity — Bellhop, 200 Hz',
                  fontweight='bold', fontsize=13)
     fig.tight_layout()

@@ -181,6 +181,26 @@ class Source:
                     min_step=SBP_ANGLE_RESOLUTION_DEG, unit='deg')
                 self.beam_pattern = pattern
 
+    def plot_beam_pattern(self, ax=None, **kwargs):
+        """Plot this source's directivity — the ``.sbp`` beam pattern.
+
+        Dispatches to :func:`uacpy.visualization.plot_beam_pattern`. Named for
+        the attribute it draws rather than spelled ``plot()`` like the other
+        carriers, because a source's other rendering is the marker
+        ``env.plot(source=...)`` / ``field.plot(source=...)`` draw, which needs
+        an environment to sit in; ``.plot()`` would not say which of the two
+        was meant. ``beam_pattern=None`` draws the flat 0 dB circle rather
+        than raising, so the method answers "is this source directional?" for
+        every source. ``ax`` draws into an existing Axes — a polar one unless
+        ``polar=False`` — spelled the way every other uacpy plot method spells
+        it; the remaining ``kwargs`` are forwarded."""
+        # Deferred into the body: ``uacpy.visualization`` imports
+        # ``uacpy.core`` at module scope, so this line at file scope makes
+        # ``import uacpy`` raise ImportError. docs/DEV.md section 7 records
+        # the inversion.
+        from uacpy.visualization import plot_beam_pattern
+        return plot_beam_pattern(self.beam_pattern, ax=ax, **kwargs)
+
     @property
     def n_sources(self) -> int:
         """Number of sources."""

@@ -762,9 +762,9 @@ def test_example_04_saves_through_the_figure_it_bound():
              if isinstance(node, ast.Call)
              and isinstance(node.func, ast.Attribute)
              and node.func.attr == "savefig"]
-    assert len(saves) == 5, len(saves)
+    assert len(saves) == 6, len(saves)
     assert [getattr(node.func.value, "id", None) for node in saves] == [
-        "fig1", "fig2", "fig3", "fig4", "fig5"]
+        "fig1", "fig2", "fig3", "fig4", "fig5", "fig6"]
 
 
 def _load_example(stem):

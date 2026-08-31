@@ -1,7 +1,9 @@
-"""Ray fans, arrival stems, mode functions/wavenumbers/heatmaps, reflection coefficients and OASN covariance/replica plots."""
+"""Ray fans, arrival stems, mode functions/wavenumbers/heatmaps, reflection coefficients, source beam patterns and OASN covariance/replica plots."""
 
 from __future__ import annotations
 
+
+import warnings
 
 import numpy as np
 from typing import Optional, Tuple
@@ -501,4 +503,314 @@ def _plot_replicas(
         ax.set_title(title)
     if _owns_fig:
         _draw_result_credit(fig, rep, env=None)
+    return fig, ax
+
+
+def _polar_fig_ax(ax, figsize):
+    """``fig_ax`` for a polar plotter: a fresh polar axes when ``ax is None``.
+
+    ``fig_ax`` builds a rectilinear subplot, which silently ignores ``theta``
+    as an angle, so a polar plotter needs its own constructor. A supplied
+    rectilinear ``ax`` is refused rather than drawn into, because the result
+    would be a line of radians against dB that still looks like a plot."""
+    import matplotlib.pyplot as plt
+    if ax is None:
+        fig = plt.figure(figsize=figsize)
+        return fig, fig.add_subplot(projection='polar')
+    if ax.name != 'polar':
+        raise ConfigurationError(
+            f"plot_beam_pattern: polar=True needs a polar axes, but ax= is "
+            f"a '{ax.name}' axes.",
+            remediation="Build it with "
+                        "fig.add_subplot(projection='polar'), or pass "
+                        "polar=False to draw level against angle instead.",
+        )
+    return ax.figure, ax
+
+
+def _resolve_beam_pattern(pattern) -> np.ndarray:
+    """Return the ``(N, 2)`` ``[angle_deg, level_dB]`` table ``pattern`` names.
+
+    Accepts what :attr:`uacpy.Source.beam_pattern` accepts — an array, a
+    ``.sbp`` path, or ``None`` — so plotting a source and plotting a file on
+    disk go through one code path. ``None`` becomes the flat table
+    ``ReadPat`` synthesises for an omni source (``misc/beampattern.f90:50-52``
+    writes exactly ``[-180, 0], [180, 0]``), which keeps "no pattern" a
+    drawable answer rather than an error."""
+    from pathlib import Path
+
+    if pattern is None:
+        return np.array([[-180.0, 0.0], [180.0, 0.0]])
+    if isinstance(pattern, (str, Path)):
+        from uacpy.io.refl_io import read_source_beam_pattern
+        return np.asarray(read_source_beam_pattern(pattern), dtype=float)
+    table = np.asarray(pattern, dtype=float)
+    if table.ndim != 2 or table.shape[1] != 2:
+        raise ConfigurationError(
+            f"plot_beam_pattern: a beam pattern is an (N, 2) "
+            f"[angle_deg, level_dB] table; got shape {table.shape}.",
+            remediation="Stack the two columns with "
+                        "np.column_stack([angles_deg, levels_db]).",
+        )
+    if len(table) < 2:
+        raise ConfigurationError(
+            f"plot_beam_pattern: a beam pattern needs at least 2 "
+            f"(angle, level) rows to draw; got {len(table)}.",
+            remediation="Pass None for an omnidirectional source.",
+        )
+    return table
+
+
+def _mirror_about_zero(angles: np.ndarray,
+                       levels: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Complete a one-sided table by reflecting it through 0°.
+
+    Only a table that stays on one side of 0° is completed; one that already
+    straddles it is returned untouched, so ``mirror=True`` is a no-op on a
+    full -180…180 pattern rather than a second reflection."""
+    if angles.min() < 0.0 < angles.max():
+        return angles, levels
+    if angles.min() >= 0.0:
+        off_axis = angles > 0.0
+        other_angles = -angles[off_axis][::-1]
+        other_levels = levels[off_axis][::-1]
+        return (np.concatenate([other_angles, angles]),
+                np.concatenate([other_levels, levels]))
+    off_axis = angles < 0.0
+    other_angles = -angles[off_axis][::-1]
+    other_levels = levels[off_axis][::-1]
+    return (np.concatenate([angles, other_angles]),
+            np.concatenate([levels, other_levels]))
+
+
+_BEAM_PATTERN_VIEWS = ('forward', 'support', 'full')
+
+
+def _beam_pattern_view(view: str, lo: float, hi: float) -> Tuple[float, float]:
+    """Angular limits of the drawn sector, in signed degrees.
+
+    ``'forward'`` keeps the half-plane that reaches the field: a launch
+    steeper than +/-90° has ``COS(alpha) < 0`` in ``ray2D(1)%t``
+    (``Bellhop/bellhop.f90:453``) and traces to *negative* range only, so it
+    never enters ``r > 0`` where the field is evaluated. A table lying
+    entirely outside that half-plane falls back to its own support rather
+    than to an empty wedge."""
+    if view == 'full':
+        return -180.0, 180.0
+    if view == 'support':
+        return lo, hi
+    forward_lo, forward_hi = max(lo, -90.0), min(hi, 90.0)
+    if forward_hi <= forward_lo:
+        return lo, hi
+    return forward_lo, forward_hi
+
+
+def _beam_pattern_rlabel_bearing(angles, levels, ticks, view_lo, view_hi,
+                                 floor: float) -> float:
+    """Bearing for the radial labels on a full circle: quietest, and off the
+    labelled spokes.
+
+    Sampled on a regular grid rather than at the table's own rows, because the
+    best place for the labels is usually where the table has nothing at all —
+    a 0-90° pattern drawn on a full circle leaves three quadrants bare — and no
+    row sits there to nominate it. Angles within 12° of a labelled spoke are
+    dropped: a bearing that lands on one prints the dB value over the degree
+    value."""
+    grid = np.arange(view_lo, view_hi + 1e-9, 5.0)
+    if not grid.size:
+        return float(view_lo)
+    separation = np.abs(
+        (grid[:, None] - angles[None, :] + 180.0) % 360.0 - 180.0)
+    loudest = np.max(np.where(separation <= 10.0, levels[None, :], floor),
+                     axis=1)
+    gap = np.abs(
+        (grid[:, None] - ticks[None, :] + 180.0) % 360.0 - 180.0).min(axis=1)
+    clear = gap >= 12.0
+    if clear.any():
+        grid, loudest = grid[clear], loudest[clear]
+    return float(grid[np.argmin(loudest)])
+
+
+def _beam_pattern_ticks(view_lo: float, view_hi: float):
+    """``(positions, labels)`` for the angle axis, signed and stepped to suit
+    the drawn span — 45° across a half-plane leaves a 20° wedge with a single
+    label, which names neither end of what it draws."""
+    span = view_hi - view_lo
+    step = (45.0 if span >= 180.0 else 30.0 if span >= 90.0
+            else 15.0 if span >= 45.0 else 5.0)
+    ticks = np.arange(np.ceil(view_lo / step) * step, view_hi + 1e-9, step)
+    if span >= 360.0 - 1e-9 and len(ticks) > 1:
+        ticks = ticks[:-1]          # +180 lands on the -180 spoke
+    return ticks, [f'{t:g}\u00b0' for t in ticks]
+
+
+@typed_plot_error
+def plot_beam_pattern(
+    pattern=None,
+    ax=None,
+    *,
+    polar: bool = True,
+    view: str = 'forward',
+    mirror: bool = False,
+    fill: bool = True,
+    figsize: Tuple[float, float] = (6.5, 6.5),
+    title: Optional[str] = None,
+    rmin: Optional[float] = None,
+    **kwargs,
+):
+    """Plot a source beam pattern — the ``.sbp`` directivity table.
+
+    Parameters
+    ----------
+    pattern : ndarray or path-like or None
+        What :attr:`uacpy.Source.beam_pattern` holds: an ``(N, 2)``
+        ``[angle_deg, level_dB]`` table, a ``.sbp`` file, or ``None`` for an
+        omnidirectional source (drawn as the flat 0 dB circle Bellhop itself
+        substitutes).
+    polar : bool, default True
+        Draw on polar axes oriented like the field: 0° along increasing
+        range, positive angles downward. ``False`` draws level against angle
+        on rectilinear axes, which reads the table's endpoints and its dB
+        floor more precisely.
+    view : {'forward', 'support', 'full'}, default 'forward'
+        Which sector the axes spans, in both renderings — for ``polar=False``
+        it is the angle axis's ``xlim``, because the question is which launch
+        angles are worth looking at, not how they are drawn.
+        ``'forward'`` draws the launches
+        that reach the field — the right half-plane, clipped to the table's
+        own support — because a launch steeper than +/-90° traces to negative
+        range only and never enters ``r > 0`` (measured: ``alpha = +/-127.5°``
+        gives ``r`` in ``[-6000, 0]``). ``'support'`` draws the table's whole
+        span, ``'full'`` the whole circle. The choice moves the axes limits
+        only; the line always carries every row of the table, and a table
+        whose strongest level falls outside the drawn sector warns. A table is
+        worth defining only over ``[-90, 90]`` for the same reason the default
+        stops there.
+    mirror : bool, default False
+        Reflect a one-sided table through 0° before drawing. Off by default
+        because no engine mirrors: ``ReadPat``
+        (``misc/beampattern.f90:36-42``) reads the table verbatim, and
+        ``bellhop.f90:269-274`` interpolates it with the index clamped but the
+        weight unclamped, so the angles a half table omits are extrapolated
+        rather than reflected.
+    fill : bool, default True
+        Shade the area between the curve and the radial floor, so a lobe reads
+        as a lobe rather than as the spokes a top-hat pattern degenerates to.
+        Polar only.
+    rmin : float, optional
+        Inner radius of the polar axes in dB. Defaults to just below the
+        table's own minimum, so the whole pattern is visible.
+
+    Notes
+    -----
+    The angle axis is Bellhop's launch declination ``alpha``, in degrees —
+    the same convention and the same units the fan is spelled in, which is
+    why :meth:`Bellhop._check_beam_pattern_spans_the_fan` can compare the two
+    directly. ``ray2D(1)%t = [COS(alpha), SIN(alpha)]/c``
+    (``Bellhop/bellhop.f90:453``) over a depth axis that is positive downward
+    sends ``alpha > 0`` deeper, so the polar axes run clockwise from due east
+    and a lobe drawn below the horizontal is a lobe that ensonifies the
+    depths below the source in the field plot.
+
+    Levels are dB re peak. Bellhop applies them as an *amplitude* factor,
+    ``10**(dB/20)`` (``misc/beampattern.f90:59``), despite its print header
+    calling the column "Power".
+    """
+    table = _resolve_beam_pattern(pattern)
+    angles, levels = table[:, 0], table[:, 1]
+    if mirror:
+        angles, levels = _mirror_about_zero(angles, levels)
+
+    if view not in _BEAM_PATTERN_VIEWS:
+        raise ConfigurationError(
+            f"plot_beam_pattern: view={view!r} is not one of "
+            f"{_BEAM_PATTERN_VIEWS}.",
+            remediation="'forward' draws the half-plane that propagates, "
+                        "'support' the table's own span, 'full' the circle.",
+        )
+
+    lo, hi = float(angles.min()), float(angles.max())
+    if lo > -90.0 + 1e-9 or hi < 90.0 - 1e-9:
+        warnings.warn(
+            f"plot_beam_pattern: the pattern spans [{lo:g}, {hi:g}]° and so "
+            f"does not cover the [-90, 90]° a launch fan can reach. Bellhop "
+            f"neither mirrors nor wraps a partial table — it extrapolates "
+            f"past both ends on linear amplitude (bellhop.f90:273) — so the "
+            f"uncovered angles are undefined, not symmetric, and "
+            f"Bellhop._check_beam_pattern_spans_the_fan rejects any alpha "
+            f"reaching into them. Pass mirror=True to reflect the table "
+            f"through 0°.",
+            UserWarning, stacklevel=2)
+
+    level_span = float(levels.max() - levels.min())
+    floor = (levels.min() - 0.05 * level_span if level_span > 1e-9
+             else levels.max() - 10.0)
+    default_title = ('Source beam pattern — omnidirectional'
+                     if pattern is None else 'Source beam pattern')
+
+    view_lo, view_hi = _beam_pattern_view(view, lo, hi)
+
+    if not polar:
+        fig, ax = fig_ax(ax, figsize)
+        ax.plot(angles, levels, **kwargs)
+        ax.set_xlabel('Launch angle (°)')
+        ax.set_ylabel('Level (dB re peak)')
+        # The same limit the polar axes takes: view= is a statement about which
+        # launch angles are worth looking at, not about polar geometry.
+        ax.set_xlim(view_lo, view_hi)
+        ax.grid(True, alpha=0.3)
+        ax.set_title(title or default_title)
+        return fig, ax
+
+    fig, ax = _polar_fig_ax(ax, figsize)
+    theta = np.deg2rad(angles)
+    inner = floor if rmin is None else rmin
+    line, = ax.plot(theta, levels, **kwargs)
+    if fill:
+        # A pattern whose sidelobes sit near the radial floor draws as bare
+        # spokes: the floor is the origin, so everything but the main lobe has
+        # zero radius. Shading the area under the curve gives the lobe back the
+        # width the table gave it.
+        ax.fill_between(theta, inner, levels,
+                        color=line.get_color(), alpha=0.15, linewidth=0)
+    # Due east = 0° = increasing range, then clockwise so a positive angle
+    # falls below the horizontal — the orientation the field plots use, where
+    # the depth axis is inverted and range grows to the right.
+    ax.set_theta_zero_location('E')
+    ax.set_theta_direction(-1)
+
+    # A limit, not a filter: the whole table stays in the line, so a reader who
+    # widens the view sees data rather than a redrawn plot.
+    ax.set_thetamin(view_lo)
+    ax.set_thetamax(view_hi)
+
+    drawn = (angles >= view_lo - 1e-9) & (angles <= view_hi + 1e-9)
+    hidden = ~drawn
+    if hidden.any() and drawn.any() and levels[hidden].max() > levels[drawn].max() + 1e-9:
+        warnings.warn(
+            f"plot_beam_pattern: the strongest level in the table "
+            f"({levels[hidden].max():g} dB at "
+            f"{angles[hidden][np.argmax(levels[hidden])]:g}°) lies outside the "
+            f"drawn [{view_lo:g}, {view_hi:g}]° view, so the main lobe is not "
+            f"on this plot. Pass view='full' to draw the whole circle.",
+            UserWarning, stacklevel=2)
+
+    ticks, tick_labels = _beam_pattern_ticks(view_lo, view_hi)
+    ax.set_thetagrids(ticks, labels=tick_labels)
+    drawn_idx = np.flatnonzero(drawn)
+    if view_hi - view_lo >= 360.0 - 1e-9 and drawn_idx.size:
+        # Only a full circle honours this. Once thetamin/thetamax make the axes
+        # a wedge, matplotlib parks the radial labels on the thetamin spoke and
+        # ignores the setting — two different positions render byte-identical
+        # label extents — so on a wedge this would be decoration, not placement.
+        ax.set_rlabel_position(_beam_pattern_rlabel_bearing(
+            angles, levels, ticks, view_lo, view_hi, inner))
+    ax.set_rlim(inner, levels.max())
+    # A polar radius is short and every radial label sits on the one spoke, so
+    # the ~9 ticks a linear dB axis defaults to overprint one another.
+    from matplotlib.ticker import MaxNLocator
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=4))
+    # Clear of that thetamin spoke, which runs along the top edge — and through
+    # an unpadded title — whenever the wedge opens forward.
+    ax.set_title(title or default_title, pad=28.0)
     return fig, ax

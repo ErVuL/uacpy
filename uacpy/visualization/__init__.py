@@ -31,6 +31,9 @@ Canonical surface
   ``env.plot()`` (cp-only) does not.
 * :func:`plot_mode_wavenumbers`, :func:`plot_modes_heatmap` — the two
   alternate mode views (the default ``modes.plot()`` is the mode functions).
+* :func:`plot_beam_pattern` — source directivity from a ``.sbp`` table or
+  an ``(N, 2)`` array, on polar axes oriented like the field
+  (``source.plot_beam_pattern()`` is the object-oriented form).
 * :func:`plot_absorption` — volume absorption α(f) from a raw dB/km array or a
   model string (``absorption.plot(frequencies)`` is the object-oriented form).
 
@@ -56,6 +59,7 @@ from uacpy.visualization.plots import (
     plot_sea_ice_map,
     plot_mode_wavenumbers,
     plot_modes_heatmap,
+    plot_beam_pattern,
     plot_fk,
     plot_radon,
     plot_taup,
@@ -109,6 +113,7 @@ __all__ = [
     'plot_sea_ice_map',
     'plot_mode_wavenumbers',
     'plot_modes_heatmap',
+    'plot_beam_pattern',
     'plot_fk',
     'plot_radon',
     'plot_taup',

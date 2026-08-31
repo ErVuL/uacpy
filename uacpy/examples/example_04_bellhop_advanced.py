@@ -6,6 +6,7 @@ ADVANCED EXAMPLE: Bellhop - All Features Showcase
 OBJECTIVE:
     Demonstrate ALL Bellhop features including new 2D options:
     - Advanced RunType control (grid_type, beam_shift) + Source geometry
+    - Source directivity from a .sbp beam pattern
     - Cerveny Gaussian beam parameters
     - Volume attenuation (Thorp formula)
     - Grain size boundary conditions
@@ -23,6 +24,7 @@ FEATURES DEMONSTRATED:
     ✓ Cerveny beam parameters (eps_multiplier, beam_width_type, etc.)
     ✓ Thorp volume attenuation
     ✓ Line source (Cartesian coordinates)
+    ✓ Source directivity (.sbp beam pattern) + its polar plot
     ✓ Rectilinear receiver grid (RunType position 5 = 'R')
     ✓ Beam shift on reflection
     ✓ Grain size boundary conditions
@@ -117,7 +119,7 @@ def main():
     # RUN 1: Standard Gaussian Beams with Thorp Attenuation
     # ═══════════════════════════════════════════════════════════════════════
 
-    print("\n[1/5] Running Bellhop with Thorp volume attenuation...")
+    print("\n[1/6] Running Bellhop with Thorp volume attenuation...")
     bellhop_thorp = Bellhop(
         verbose=False,
         beam_type='B', grid_type='R',
@@ -137,7 +139,7 @@ def main():
     # RUN 2: Cerveny Beams with Advanced Control
     # ═══════════════════════════════════════════════════════════════════════
 
-    print("[2/5] Running Bellhop with Cerveny beams...")
+    print("[2/6] Running Bellhop with Cerveny beams...")
 
     bellhop_cerveny = Bellhop(
         verbose=False,
@@ -161,7 +163,7 @@ def main():
     # RUN 3: Line Source (Cartesian Coordinates)
     # ═══════════════════════════════════════════════════════════════════════
 
-    print("[3/5] Running Bellhop with line source...")
+    print("[3/6] Running Bellhop with line source...")
 
     bellhop_line = Bellhop(
         verbose=False,
@@ -190,7 +192,7 @@ def main():
     # RUN 4: Multi-source-depth (Bellhop binary loops source axis natively)
     # ═══════════════════════════════════════════════════════════════════════
 
-    print("[4/5] Running Bellhop with three source depths in one binary call...")
+    print("[4/6] Running Bellhop with three source depths in one binary call...")
     # The shelf depth at r=0 is 100 m, so every source must sit in
     # the water column at the launch point (z < 100 m).
     source_multi = uacpy.Source(depths=[20.0, 50.0, 80.0],
@@ -220,7 +222,7 @@ def main():
     # RUN 5: Ray Trace with Beam Shift
     # ═══════════════════════════════════════════════════════════════════════
 
-    print("[5/5] Running ray trace with beam shift...")
+    print("[5/6] Running ray trace with beam shift...")
 
     bellhop_rays = Bellhop(
         verbose=False,
@@ -237,6 +239,56 @@ def main():
     except Exception as e:
         print(f"  ✗ Error: {e}")
         result_rays = None
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # RUN 6: Directional Source (.sbp Beam Pattern)
+    # ═══════════════════════════════════════════════════════════════════════
+
+    print("[6/6] Running Bellhop with a directional source...")
+
+    # A beam pattern is an (angle_deg, level_dB re peak) table. The angle axis
+    # is Bellhop's launch declination alpha, so POSITIVE IS DOWNWARD
+    # (ray2D(1)%t = [COS(alpha), SIN(alpha)]/c, bellhop.f90:453, over a depth
+    # axis that increases downward): this is a beam tilted below the
+    # horizontal, aimed down the shelf.
+    # A projector is specified by its beamwidth, and beam_pattern is just an
+    # angular weighting on this point source's launch amplitude — so the table
+    # is a main lobe BEAMWIDTH_DEG wide between its -3 dB points, aimed at
+    # TILT_DEG, with the nulls and sidelobes a smooth lobe implies rather than
+    # the rectangular on/off a hand-drawn table suggests. (No aperture or
+    # element spacing enters: that is receiving-array geometry, not this.)
+    # sinc is -3 dB at 0.442946, so that constant sets the width; the nulls
+    # are true zeros, so the levels are floored to keep the table finite.
+    TILT_DEG, BEAMWIDTH_DEG, FLOOR_DB = 20.0, 24.0, -40.0
+    pattern_angles = np.linspace(-90.0, 90.0, 721)
+    lobe = 0.442946 * (pattern_angles - TILT_DEG) / (0.5 * BEAMWIDTH_DEG)
+    pattern_levels = 20.0 * np.log10(
+        np.maximum(np.abs(np.sinc(lobe)), 10.0 ** (FLOOR_DB / 20.0)))
+
+    # The table has to cover every launch angle alpha spans. Bellhop clamps the
+    # table index but not the interpolation weight (bellhop.f90:269-274), so a
+    # table that stops short is EXTRAPOLATED on linear amplitude — the outer
+    # beams come back louder than declared and phase-inverted — and uacpy
+    # refuses the run rather than let that reach the field.
+    source_directional = uacpy.Source(
+        depths=source.depths, frequencies=source.frequencies,
+        beam_pattern=np.column_stack([pattern_angles, pattern_levels]),
+    )
+
+    bellhop_directional = Bellhop(
+        verbose=False,
+        beam_type='B', grid_type='R',
+        n_beams=500, alpha=(-85, 85),
+    )
+
+    try:
+        result_directional = bellhop_directional.run(
+            env, source_directional, receiver, run_mode=RunMode.COHERENT_TL,
+        )
+        print("  ✓ Success")
+    except Exception as e:
+        print(f"  ✗ Error: {e}")
+        result_directional = None
 
     # ═══════════════════════════════════════════════════════════════════════
     # PLOTTING
@@ -345,16 +397,53 @@ def main():
         plt.close(fig5)
         print("  ✓ Saved: example_04_multi_source.png")
 
+    # Plot 6: the directivity beside the field it produces. The polar axes are
+    # oriented like the TL panels next to them — 0 deg along increasing range,
+    # positive angles downward — so the lobe points at the water it ensonifies.
+    if result_directional is not None and result_thorp is not None:
+        fig6 = plt.figure(figsize=(18, 5.5))
+
+        ax_pattern = fig6.add_subplot(1, 3, 1, projection='polar')
+        source_directional.plot_beam_pattern(
+            ax=ax_pattern,
+            title=f'Source directivity\n{BEAMWIDTH_DEG:.0f}° beam aimed at {TILT_DEG:.0f}°')
+
+        ax_omni = fig6.add_subplot(1, 3, 2)
+        plot_field(result_thorp, env=env, ax=ax_omni, show_colorbar=False)
+        ax_omni.set_title('Omnidirectional source\n(beam_pattern=None)')
+
+        ax_dir = fig6.add_subplot(1, 3, 3)
+        plot_field(result_directional, env=env, ax=ax_dir, show_colorbar=False)
+        ax_dir.set_title('Directional source\n(.sbp, RunType(3:3) = \'*\')')
+
+        cbar_ax = fig6.add_axes([0.92, 0.15, 0.015, 0.7])
+        cb = fig6.colorbar(_tl_mappable(ax_omni), cax=cbar_ax,
+                           orientation='vertical')
+        cb.set_label('TL (dB)', fontsize=12, fontweight='bold')
+
+        # Room for a two-line panel title under the suptitle: add_subplot fills
+        # more of the figure than plt.subplots leaves, so the default top
+        # margin puts the suptitle through the titles.
+        fig6.subplots_adjust(top=0.74)
+        fig6.suptitle('Bellhop: source directivity shapes the field',
+                      fontsize=15, fontweight='bold')
+        fig6.savefig(OUTPUT_DIR / 'example_04_beam_pattern.png', dpi=150,
+                     bbox_inches='tight')
+        plt.close(fig6)
+        print("  ✓ Saved: example_04_beam_pattern.png")
+
     print("\nFeatures demonstrated:")
     print("  ✓ Advanced RunType (7 positions)")
     print("  ✓ Cerveny beam parameters")
     print("  ✓ Thorp volume attenuation")
     print("  ✓ Point vs Line sources")
+    print("  ✓ Directional source from a .sbp beam pattern")
     print("  ✓ Multi-source-depth → ResultStack[Field] (.at(source_depth=z))")
     print("  ✓ Beam shift on reflection")
     print("  ✓ Range-dependent bottom properties")
     print("  ✓ Continental shelf scenario")
     print("\nPlotting features demonstrated:")
+    print("  ✓ Polar beam pattern, oriented like the field it produced")
     print("  ✓ Ray color-coding by bounce type (red/green/blue/black)")
     print("  ✓ Contour overlays on TL plots (labeled contours)")
     print("  ✓ Fixed TL limits, 20 to 120 dB, shared by every panel")

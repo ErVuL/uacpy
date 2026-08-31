@@ -40,6 +40,36 @@ def save(fig, stem: str, *, guide: bool = False) -> Path:
     return path
 
 
+def source_beam_pattern(angles_deg, *, beamwidth_deg=30.0, tilt_deg=0.0,
+                        floor_db=-40.0):
+    """``(N, 2)`` ``[angle_deg, level_dB]`` directivity for a point source.
+
+    A main lobe ``beamwidth_deg`` wide between its -3 dB points, centred on
+    ``tilt_deg``, with the nulls and sidelobes a smooth lobe implies — the
+    shape a real projector has, where a hand-drawn table tends to say "0 dB
+    inside the beam, -30 dB outside", a rectangle nothing radiates.
+
+    Parameterised by beamwidth because that is how a projector is specified,
+    and because that is all ``Source(beam_pattern=...)`` is: an angular
+    weighting on a **point** source's launch amplitude, applied per launch
+    angle (``misc/beampattern.f90:59``). No aperture, element spacing or
+    steering geometry enters — those belong to a receiving array
+    (``docs/guide/arrays.md``), and importing them here would bring artifacts,
+    such as a front/back ambiguity, that the engine's model does not have.
+
+    ``sinc`` is -3 dB at 0.442946, so that constant maps the requested
+    beamwidth onto the lobe. Levels are floored because the nulls are true
+    zeros and the table has to stay finite. Call it over ``[-90, 90]``: past
+    the horizon a launch angle has ``COS(alpha) < 0`` and traces to negative
+    range, so a table has nothing to say there.
+    """
+    angles = np.asarray(angles_deg, dtype=float)
+    x = 0.442946 * (angles - tilt_deg) / (0.5 * beamwidth_deg)
+    amplitude = np.abs(np.sinc(x))
+    level = 20.0 * np.log10(np.maximum(amplitude, 10.0 ** (floor_db / 20.0)))
+    return np.column_stack([angles, level])
+
+
 # ── Canonical scenarios ──────────────────────────────────────────────────────
 # Kept small enough that regenerating every figure stays a couple of minutes,
 # and physically ordinary so the plots show real structure rather than
