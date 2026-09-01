@@ -227,7 +227,7 @@ def main():
     # Plot 1: Environment with bottom properties
     fig1, _ = env.plot()
     plt.savefig(OUTPUT_DIR / 'example_06_bottom.png', dpi=150, bbox_inches='tight')
-    print("  ✓ Saved: example_06_bottom.png")
+    print(f"  ✓ Saved: {OUTPUT_DIR / 'example_06_bottom.png'}")
 
     # Plot 2: Mode comparison (shallow vs deep)
     if modes_shallow is not None and modes_deep is not None:
@@ -281,7 +281,7 @@ def main():
         plt.suptitle('Mode Evolution: Shelf to Slope', fontsize=16, fontweight='bold')
         plt.tight_layout()
         plt.savefig(OUTPUT_DIR / 'example_06_modes.png', dpi=150, bbox_inches='tight')
-        print("  ✓ Saved: example_06_modes.png")
+        print(f"  ✓ Saved: {OUTPUT_DIR / 'example_06_modes.png'}")
 
     # Plot 2b: Wavenumber plot using plot_mode_wavenumbers
     if modes_shallow is not None:
@@ -299,7 +299,7 @@ def main():
                            fontsize=14, fontweight='bold')
             plt.savefig(OUTPUT_DIR / 'example_06_wavenumbers.png', dpi=150, bbox_inches='tight')
             plt.close(fig2b)
-            print("  ✓ Saved: example_06_wavenumbers.png (plot_mode_wavenumbers)")
+            print(f"  ✓ Saved: {OUTPUT_DIR / 'example_06_wavenumbers.png'} (plot_mode_wavenumbers)")
 
         except Exception as e:
             print(f"  ! Warning: Could not create wavenumber plot: {e}")
@@ -312,7 +312,7 @@ def main():
                            fontsize=14, fontweight='bold')
             plt.savefig(OUTPUT_DIR / 'example_06_mode_shapes.png', dpi=150, bbox_inches='tight')
             plt.close(fig2c)
-            print("  ✓ Saved: example_06_mode_shapes.png (show_imaginary)")
+            print(f"  ✓ Saved: {OUTPUT_DIR / 'example_06_mode_shapes.png'} (show_imaginary)")
 
         except Exception as e:
             print(f"  ! Warning: Could not create mode shapes plot: {e}")
@@ -331,7 +331,7 @@ def main():
             plt.savefig(OUTPUT_DIR / 'example_06_modes_heatmap.png', dpi=150, bbox_inches='tight')
             plt.close(fig_heatmap)
             print("✓")
-            print("  ✓ Saved: example_06_modes_heatmap.png (plot_modes_heatmap)")
+            print(f"  ✓ Saved: {OUTPUT_DIR / 'example_06_modes_heatmap.png'} (plot_modes_heatmap)")
         except Exception as e:
             print(f"\n  ! Warning: Could not create mode heatmap: {e}")
 
@@ -350,7 +350,7 @@ def main():
             ax3.axvline(r, color='white', linestyle='--', alpha=0.3, linewidth=0.5, zorder=8)
 
         plt.savefig(OUTPUT_DIR / 'example_06_result.png', dpi=150, bbox_inches='tight')
-        print("  ✓ Saved: example_06_result.png")
+        print(f"  ✓ Saved: {OUTPUT_DIR / 'example_06_result.png'}")
 
     print("\nFeatures demonstrated:")
     print("  ✓ Volume attenuation (Francois-Garrison)")

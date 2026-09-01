@@ -31,6 +31,7 @@ vendored Fortran as ground truth where the two disagree):
 import re
 import struct
 import subprocess
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -198,9 +199,10 @@ class TestRcoTableFollowsTheManual:
              (79.665359, 0.342714, -15.640528),
              (77.948311, 0.346415, -15.196492)]
 
-    def _table(self, tmp_path, code):
-        # Extension .dat so nothing but the header code can pick the type.
-        path = tmp_path / 'refl.dat'
+    def _table(self, tmp_path, code, name='refl.dat'):
+        # Default extension .dat so nothing but the header code can pick
+        # the type; a caller-given name exercises the extension paths.
+        path = tmp_path / name
         lines = [f"      50.000      50.000   1   {code}",
                  "       50.000     3  # Frequency, # of angles"]
         lines += [f"      {a:.6f}       {m:.6f}     {p:.6f}"
@@ -222,6 +224,29 @@ class TestRcoTableFollowsTheManual:
     def test_code_one_reads_as_a_slowness_table(self, tmp_path):
         data = read_oasr_reflection_coefficients(self._table(tmp_path, 1))
         assert data['sampling_type'] == 'slowness'
+
+    def test_the_header_code_decides_under_any_file_name(self, tmp_path):
+        """A byte-identical slowness table parses as slowness whatever it
+        was saved as: the header's fourth field is the code OASR itself
+        stamps (unoasr21.f:204-205), while the extension is only the name.
+        The matching .rco and a neutral name parse silently."""
+        for name in ('t.rco', 't.dat'):
+            with warnings.catch_warnings():
+                warnings.simplefilter('error')
+                data = read_oasr_reflection_coefficients(
+                    self._table(tmp_path, 1, name))
+            assert data['sampling_type'] == 'slowness', name
+
+    def test_a_disagreeing_extension_warns_and_follows_the_header(
+            self, tmp_path):
+        """A slowness table renamed .trc keeps its abscissa, with a warning
+        naming both the extension and the header code."""
+        with pytest.warns(UserWarning, match=r"\.trc.*slowness"):
+            data = read_oasr_reflection_coefficients(
+                self._table(tmp_path, 1, 't.trc'))
+        assert data['sampling_type'] == 'slowness'
+        assert np.allclose(data['angles_or_slowness'][0],
+                           [r[0] for r in self._ROWS])
 
 
 class TestXsmLayoutFollowsTheManual:

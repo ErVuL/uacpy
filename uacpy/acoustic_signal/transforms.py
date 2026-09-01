@@ -248,11 +248,31 @@ def taup_transform(data, sample_rate, dx, slownesses=None, n_slowness=201,
 
     ``x0`` is the reference offset (m) subtracted from the sensor positions, as
     in :func:`radon_transform` — it walks the same moveout curve
-    ``t = tau + p*(x - x0)``, so the two agree only when both are given the
-    same ``x0``. ``window`` is a temporal :func:`scipy.signal.get_window` spec
-    (name or ``(name, *params)`` tuple) applied down each trace before the time
-    FFT to curb leakage; ``None`` is rectangular. ``nfft`` zero-pads the time
-    FFT to ``NT >= nt`` samples (finer ``tau`` spacing); ``None`` keeps ``nt``.
+    ``t = tau + p*(x - x0)``.
+
+    Built from FFT products, the transform is **circular in tau**: each trace
+    is read at ``(tau + p*(x - x0)) mod (NT/fs)``, ``NT`` being the time-FFT
+    length. An intercept ``t0 - p*(x - x0)`` outside the ``[0, NT/fs)`` window
+    (either sign) therefore stacks at full amplitude at that intercept
+    **modulo** ``NT/fs`` — a tau where :func:`radon_transform`
+    (``kind='linear'``, same ``x0``), which drops out-of-window samples, is
+    exactly zero.
+
+    An in-window intercept is necessary for the two to agree but not
+    sufficient: the shift here is a spectral phase ramp (band-limited) while
+    the Radon panel interpolates each trace linearly, so a moveout of a
+    non-integer number of samples per trace separates them even in-window —
+    measured 9.1% of the peak at ``p*dx*fs = 2.5``. Expect exact agreement
+    only for a whole-sample moveout.
+
+    ``window`` is a temporal :func:`scipy.signal.get_window` spec (name or
+    ``(name, *params)`` tuple) applied down each trace before the time FFT to
+    curb leakage; ``None`` is rectangular. ``nfft`` zero-pads the time FFT to
+    ``NT >= nt`` samples; ``None`` keeps ``nt``. The ``tau`` spacing is
+    ``1/fs`` either way — zero-padding does not refine it, it **lengthens**
+    the tau axis into a guard band: an intercept up to ``(NT - nt)/fs`` s
+    outside the record lands in the padded ``[nt/fs, NT/fs)`` rows instead of
+    aliasing in among the physical taus.
     """
     d = np.asarray(data, dtype=float)
     if d.ndim != 2:

@@ -155,6 +155,99 @@ class TestBoundaryFilesAreListDirected:
             read_source_beam_pattern(p)
 
 
+class TestRepeatCountsReadAsRepeatedValues:
+    """A list-directed READ accepts ``r*c`` as ``r`` copies of the constant
+    ``c``. gfortran's own list-directed WRITEs never emit the form, but
+    ifort's do for consecutive equal values — and ``misc/RefCoef.f90:53``
+    reads the .brc, ``Bellhop/ArrMod.f90:99-118`` writes the .arr, and
+    SPARC's .rts payload is read as one token stream, so a file from an
+    ifort-built engine can carry it. The readers must parse it to the
+    values Fortran READ produces; malformed spellings stay typed errors."""
+
+    def test_brc_repeat_count_reads_as_repeated_values(self, tmp_path):
+        from uacpy.io.refl_io import read_reflection_coefficient
+        p = tmp_path / 'rep.brc'
+        # 2*0.0 covers theta and R of the first point (total absorption at
+        # grazing), exactly what an ifort WRITE compresses.
+        p.write_text("2\n2*0.0 180.0\n10.0 0.9 170.0\n")
+        d = read_reflection_coefficient(p)
+        assert d['theta'].tolist() == [0.0, 10.0]
+        assert d['R'].tolist() == [0.0, 0.9]
+
+    def test_rts_repeat_count_reads_as_repeated_values(self, tmp_path):
+        from uacpy.io.oalib_reader import read_rts_file
+        p = tmp_path / 'rep.rts'
+        p.write_text("'run'\n2 5000.0 10000.0\n0.0 2*0.5\n")
+        d = read_rts_file(p)
+        assert d['ranges'].tolist() == [5000.0, 10000.0]
+        assert d['p'].tolist() == [[0.5, 0.5]]
+
+    def test_ts_repeat_count_reads_as_repeated_values(self, tmp_path):
+        from uacpy.io.oalib_reader import read_ts
+        p = tmp_path / 'rep.ts'
+        p.write_text("t\n2 10.0 20.0\n0.0 2*1.5\n0.1 3.0 4.0\n")
+        d = read_ts(p)
+        assert d['RTS'].tolist() == [[1.5, 1.5], [3.0, 4.0]]
+
+    @pytest.mark.parametrize('token', [
+        '2*',      # Fortran's null-value form: stands for values NOT assigned
+        'x*0.5',   # no repeat count
+        '2*junk',  # constant is not a number
+    ])
+    def test_a_malformed_repeat_spelling_is_a_typed_error(
+            self, token, tmp_path):
+        from uacpy.io.refl_io import read_reflection_coefficient
+        p = tmp_path / 'bad.brc'
+        p.write_text(f"2\n0.0 1.0 180.0\n10.0 {token} 170.0\n")
+        with pytest.raises(FileFormatError):
+            read_reflection_coefficient(p)
+
+    def test_many_small_repeat_groups_stop_at_the_expansion_ceiling(self):
+        """A repeat count is a compression device, so a short record can ask
+        for an enormous stream: each group here sits under the per-token
+        ceiling while their sum runs far past it. The running total is what
+        bounds the memory a reader that materialises the stream spends on a
+        tiny file."""
+        from uacpy.io._fortran_helpers import (
+            expand_repeat_counts, _MAX_GENERATED_VECTOR)
+        under = _MAX_GENERATED_VECTOR // 2
+        stream = expand_repeat_counts([f'{under}*1.0'] * 4)
+        with pytest.raises(FileFormatError, match='ceiling'):
+            for _ in stream:
+                pass
+
+    def test_expansion_under_the_ceiling_is_yielded_in_full(self):
+        from uacpy.io._fortran_helpers import expand_repeat_counts
+        assert list(expand_repeat_counts(['3*1.5', '2.0'])) == [
+            '1.5', '1.5', '1.5', '2.0']
+
+    def test_ray_counts_record_reads_a_repeat_count(self, tmp_path):
+        """``WriteRay.f90:41-46`` writes every ray record list-directed, and
+        the counts record is ``N2, NumTopBnc, NumBotBnc`` — ``0 0`` for every
+        direct path, which is exactly what a writer compresses to ``2*0``."""
+        from uacpy.io.oalib_reader import read_ray_file
+        p = tmp_path / 'r.ray'
+        p.write_text(
+            "'title'\n50.0\n1 1 1\n1 1\n0.0\n100.0\n'rz'\n"
+            "-15.0\n3 2*0\n0.0 10.0\n500.0 40.0\n1000.0 10.0\n")
+        one = read_ray_file(p).rays[0]
+        assert one['n_top_bounces'] == 0 and one['n_bot_bounces'] == 0
+        assert len(one['r']) == 3
+
+    def test_dedupe_accepts_the_repeat_counts_the_reader_accepts(
+            self, tmp_path):
+        """``dedupe_reflection_file`` and ``read_reflection_coefficient``
+        parse the same table under the same ``RefCoef.f90:53`` list-directed
+        READ, so a ``.brc`` one accepts cannot be truncated to the other."""
+        from uacpy.io.refl_io import (dedupe_reflection_file,
+                                      read_reflection_coefficient)
+        p = tmp_path / 'd.brc'
+        p.write_text("3\n0.0 1.0 180.0\n10.0 2*0.5\n20.0 0.25 90.0\n")
+        assert read_reflection_coefficient(p)['n_pts'] == 3
+        dedupe_reflection_file(p)
+        assert read_reflection_coefficient(p)['n_pts'] == 3
+
+
 class TestSspRecordsSpanLines:
     """``Bellhop/sspMod.f90:417,428`` read the range vector and each depth
     row with whole-vector list-directed READs, which consume as many lines

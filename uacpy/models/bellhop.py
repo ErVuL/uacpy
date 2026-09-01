@@ -2284,7 +2284,7 @@ class Bellhop(PropagationModel):
             n_freqs=self.n_freqs, bandwidth_factor=self.bandwidth_factor,
         )
         n_freq = len(frequencies)
-        self._warn_if_attenuation_extrapolates(env, frequencies)
+        self._warn_if_attenuation_extrapolates(env, frequencies, fc)
 
         # Build H(d, r, f) for each (receiver_depth, receiver_range).
         # Use first source depth (most common case). Trailing-axis convention.
@@ -2351,7 +2351,8 @@ class Bellhop(PropagationModel):
         field.data = data
         return field
 
-    def _warn_if_attenuation_extrapolates(self, env, frequencies) -> None:
+    def _warn_if_attenuation_extrapolates(self, env, frequencies,
+                                          fc: float) -> None:
         """Report the volume-attenuation error the single-trace band incurs.
 
         The arrival set comes from one trace at ``fc``, so ``Im(tau)`` is
@@ -2372,12 +2373,16 @@ class Bellhop(PropagationModel):
         freqs = np.atleast_1d(np.asarray(frequencies, dtype=float))
         if freqs.size < 2 or freqs[0] <= 0.0:
             return
-        # The band centre the single trace was run at.
-        # `_resolve_broadband_frequencies` spans [fc(1-bw/2), fc(1+bw/2)], so
-        # the ARITHMETIC mean of the end points recovers fc exactly; the
-        # geometric mean does not (7500-12500 Hz would report 9682, not
-        # 10000, and mis-site the straight line the error is measured against).
-        fc = 0.5 * (float(freqs[0]) + float(freqs[-1]))
+        # ``fc`` is the carrier the single trace was run at, taken from the
+        # source. Re-deriving it as the band's midpoint holds only for a band
+        # `_resolve_broadband_frequencies` built around that carrier: an
+        # explicit off-centre ``frequencies=`` moves the midpoint away from it
+        # (8-16 kHz around a 10 kHz source reads 12 kHz), which names a
+        # frequency no ray was traced at and sites the straight line the error
+        # is measured against in the wrong place.
+        fc = float(fc)
+        if not np.isfinite(fc) or fc <= 0.0:
+            return
 
         def alpha_at(f: float) -> float:
             """Volume attenuation (dB/m) at the surface, at one frequency.

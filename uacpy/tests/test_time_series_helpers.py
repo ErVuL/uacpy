@@ -1280,14 +1280,18 @@ class TestAllNaNCellPropagatesNaN:
             trace = tf.to_time_trace()
         assert np.all(np.isnan(trace.data))
 
-    def test_isolated_nan_bins_stay_no_energy(self):
+    def test_isolated_unsolved_bins_make_the_trace_no_data(self):
+        """Reversed policy: a NaN bin used to be zero-filled and the trace
+        came back finite, which put a notch the model never produced into a
+        waveform that looked ordinary. An unsolved bin is no data, and a
+        trace cannot be synthesised from a spectrum with a hole in it."""
         rng = np.random.default_rng(0)
         H = (rng.standard_normal((1, 1, 16))
              + 1j * rng.standard_normal((1, 1, 16)))
         H[0, 0, 3] = np.nan
-        trace = self._tf(H).to_time_trace()
-        assert np.all(np.isfinite(trace.data))
-        assert np.any(trace.data != 0.0)
+        with pytest.warns(UserWarning, match='did not solve'):
+            trace = self._tf(H).to_time_trace()
+        assert np.all(np.isnan(trace.data))
 
     def test_synthesize_keeps_valid_cells_and_nans_the_dead_one(self):
         rng = np.random.default_rng(1)
@@ -1407,3 +1411,57 @@ class TestTimeSeriesGuardReturnsARealFloatWaveform:
         ret = Bellhop(verbose=False)._require_timeseries_signal(
             RunMode.BROADBAND, None, None)
         assert ret is None
+
+
+class TestUnsolvedBinsDoNotBecomeSilence:
+    """A NaN bin in H(f) is a frequency the model did not solve, not a
+    frequency carrying no energy. Zero-filling it synthesises a spectral
+    notch into an otherwise finite-looking waveform, so the trace built from
+    an incomplete spectrum is no data — and the gap is named."""
+
+    @staticmethod
+    def _tf_with_one_unsolved_bin():
+        from uacpy.core.results import Field, PhaseReference
+        freqs = np.linspace(100.0, 500.0, 9)
+        data = np.ones((1, 1, freqs.size), dtype=complex)
+        data[0, 0, 4] = np.nan          # one frequency failed to solve
+        return Field(
+            data=data,
+            coords={'depth': np.array([20.0]),
+                    'range': np.array([1000.0]),
+                    'frequency': freqs},
+            model='Synthetic', source_depths=np.array([5.0]),
+            frequencies=freqs,
+            phase_reference=PhaseReference.TRAVELLING_WAVE,
+        )
+
+    def test_a_single_unsolved_bin_makes_the_trace_no_data(self):
+        with pytest.warns(UserWarning, match='did not solve'):
+            trace = self._tf_with_one_unsolved_bin().to_time_trace(
+                depth=20.0, range=1000.0)
+        assert np.isnan(np.asarray(trace.data)).all()
+
+    def test_the_warning_counts_the_unsolved_bins(self):
+        with warnings.catch_warnings(record=True) as record:
+            warnings.simplefilter('always')
+            self._tf_with_one_unsolved_bin().to_time_trace(
+                depth=20.0, range=1000.0)
+        msgs = [str(w.message) for w in record if 'did not solve' in str(w.message)]
+        assert msgs and '1 of 9' in msgs[0], msgs
+
+    def test_a_fully_solved_spectrum_synthesises_a_finite_trace(self):
+        from uacpy.core.results import Field, PhaseReference
+        freqs = np.linspace(100.0, 500.0, 9)
+        f = Field(
+            data=np.ones((1, 1, freqs.size), dtype=complex),
+            coords={'depth': np.array([20.0]),
+                    'range': np.array([1000.0]),
+                    'frequency': freqs},
+            model='Synthetic', source_depths=np.array([5.0]),
+            frequencies=freqs,
+            phase_reference=PhaseReference.TRAVELLING_WAVE,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            trace = f.to_time_trace(depth=20.0, range=1000.0)
+        assert np.isfinite(np.asarray(trace.data)).all()

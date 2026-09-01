@@ -200,7 +200,7 @@ The four rules, all `ConfigurationError`:
 | `mpiramS` / `ramgeo` / `ramsurf` | elastic seabed | fluid PEs; shear would be dropped |
 | `mpiramS` / `ramgeo` / `rams` | `env.altimetry` set | they model a flat pressure-release surface |
 | `ramsurf` | flat surface | its defining feature is absent |
-| `rams` | fluid seabed | its shear machinery degenerates and it returns a **null field** — 200 dB everywhere — rather than failing |
+| `rams` | fluid seabed | its shear machinery degenerates and it returns a **null field** — no energy anywhere — rather than failing |
 
 That last one is the reason the rule exists in both directions: a backend
 whose defining feature is missing does not fall back gracefully.
@@ -579,7 +579,7 @@ from the source, so the inshore half of the picture is simply empty. Check
 
 **`rams` diverges when the grid is too coarse for the elastic waves.** Sand over
 granite (`c_s = 3000 m/s`) at 200 Hz on the automatic grid comes back with 94%
-of its samples clamped to the 200 dB floor. The cause is the gotcha above rather
+of its samples marked no-data. The cause is the gotcha above rather
 than the shear speed itself: the fast basement drives the optimiser to
 `dz = 5 m`, which the elastic march cannot carry. Pin `dz` and the divergence
 goes away — the same case is clean from `dz = 1 m` down, and `ramgeo` on the
@@ -588,10 +588,12 @@ elastic solver rather than to the environment. Stability is not convergence,
 though: successive halvings from 1 m still move the median field by 10.0, 4.1
 and 1.4 dB, so budget about a thirtieth of the water-column wavelength — 0.25 m
 in this case — for an answer you mean to trust. uacpy does
-catch the blow-up — divergent samples are NaN, infinite or at an unphysically
-*negative* TL, so it clamps them and emits a `UserWarning` counting them and
-naming the instability — but you have to read the warning, because what lands
-in the `Field` is a finite number.
+catch the blow-up — a divergent sample is NaN, infinite, or at a TL below what
+its range allows (past the 1 m reference radius nothing below 0 dB is
+physical; inside it free-field spreading sets the bound) — and returns those
+samples as **NaN** with a `UserWarning` counting them and naming the
+instability. uacpy never writes a level of its own over the march's: what
+lands in the `Field` is either the number the model produced or no data.
 
 **`ramsurf` only models surfaces at or below mean sea level.** The Fortran
 takes a surface depression, so wave *crests* (`altimetry` height > 0) are

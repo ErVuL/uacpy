@@ -308,12 +308,21 @@ class Environment:
             return Bottom.from_column(bottom)
         if isinstance(bottom, BoundaryProperties):
             return Bottom.from_halfspace(bottom)
-        if isinstance(bottom, (bool, np.bool_)):
+        # A 0-d ndarray is a scalar in every respect except ``isinstance``, so
+        # both the bool guard and the numeric branch see through it, the way
+        # ``ssp=`` and ``bathymetry=`` do — the docstring promises ``ssp=``'s
+        # spellings, and ``np.array(1600.0)`` used to fall through to the
+        # closing type error instead.
+        zero_d = isinstance(bottom, np.ndarray) and bottom.ndim == 0
+        if (isinstance(bottom, (bool, np.bool_))
+                or (zero_d and bottom.dtype == np.bool_)):
             raise ConfigurationError(
                 f"Environment: bottom={bottom!r} is a bool, not a scalar "
                 f"sound speed — as a scalar it would mean a {float(bottom):g} "
                 f"m/s half-space."
             )
+        if zero_d and np.issubdtype(bottom.dtype, np.number):
+            bottom = bottom.item()
         if isinstance(bottom, (int, float, np.integer, np.floating)):
             # Explicit type: a scalar always means "half-space at this cp" —
             # never let inference see it (a bare 1600.0 equals the resolved

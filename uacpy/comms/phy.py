@@ -32,15 +32,39 @@ import numpy as np
 from uacpy.core.exceptions import ConfigurationError
 
 
+def _require_integer_sps(caller, sps):
+    """Return ``sps`` as an ``int``, accepting exactly-integral floats.
+
+    ``fs / baud`` naturally produces a float (``4.0``, ``np.float64(4.0)``)
+    that names the same sample grid as the integer, so it coerces. A
+    fractional value names no grid at all: the upsampler's ``up[::sps]``
+    stride and the RRC time axis ``arange(span*sps + 1) / sps`` are defined
+    only for a whole number of samples per symbol.
+    """
+    try:
+        i = int(sps)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ConfigurationError(
+            f"{caller}: sps must be a whole number of samples per symbol; "
+            f"got {sps!r} ({exc}).") from exc
+    if i != sps:
+        raise ConfigurationError(
+            f"{caller}: sps must be a whole number of samples per symbol; "
+            f"got {sps!r}. If fs/baud is fractional, pick a sample rate the "
+            f"baud rate divides evenly.")
+    return i
+
+
 def rrc_filter(sps, rolloff, span):
     """Root-raised-cosine taps: ``span`` symbols, ``sps`` samples/symbol, unit energy."""
     if not 0.0 <= rolloff <= 1.0:
         raise ConfigurationError(
             f"rrc_filter: rolloff must be in [0, 1]; got {rolloff!r}")
+    sps = _require_integer_sps("rrc_filter", sps)
     # sps is the divisor of the symbol-period axis: 0 makes every tap NaN and
     # returns a length-1 filter, a negative value makes `span*sps` negative
     # and returns an empty one — both convolve without complaint.
-    if int(sps) < 1:
+    if sps < 1:
         raise ConfigurationError(
             f"rrc_filter: sps must be >= 1 (samples per symbol); got "
             f"{sps!r}. It sets the taps' time axis (arange(span*sps + 1) "
@@ -73,6 +97,7 @@ def rrc_filter(sps, rolloff, span):
 
 def pulse_shape(symbols, sps, rolloff=0.25, span=8):
     """Upsample symbols by ``sps`` and root-raised-cosine filter -> baseband samples."""
+    sps = _require_integer_sps("pulse_shape", sps)
     if sps < 1:
         raise ConfigurationError(
             f"pulse_shape: need sps >= 1 (samples per symbol); got {sps!r}")
@@ -142,6 +167,7 @@ def symbol_sync(samples, sps, loop_bw=0.005, damping=1.0, start=0):
         (``span*sps``) for clean lock from the first symbol.
     """
     x = np.asarray(samples, dtype=complex).ravel()
+    sps = _require_integer_sps("symbol_sync", sps)
     if sps < 2:
         raise ConfigurationError(
             f"symbol_sync: need sps >= 2 for Gardner; got {sps!r}")

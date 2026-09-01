@@ -240,9 +240,9 @@ modal sum gives for free where a ray fan has to be converged into it. **The
 sonar equation does not notice the change**: swap the model and the same
 `passive_signal_excess_field` call takes its output.
 
-**Left:** the FOM as a horizontal line on a TL plot. TL climbs from 43 dB near
-the source through the 57.8 dB FOM at 3.14 km. Everything to the left of the
-crossing is detectable; everything to the right is not. That picture is the
+**Left:** the FOM as a horizontal line on a TL plot. TL climbs from 37 dB at
+the first sampled range through the 57.8 dB FOM at 3.14 km. Everything to the
+left of the crossing is detectable; everything to the right is not. That picture is the
 entire passive budget, and it is why `figure_of_merit` is worth having as its
 own call — one number, comparable across sonars, that you can cross with any
 model's TL.
@@ -279,16 +279,17 @@ is simply your `receiver.ranges[-1]` wearing a detection range's clothes.
 
 It is a **lower bound**, not an answer, and the bound can be far below the
 truth. On the deep-water budget of [§2](#2-signal-excess-over-a-modelled-tl-field)
-(`FOM = 82.8 dB`), at the 2731 m receiver depth:
+(`FOM = 82.8 dB`), at the 462 m receiver depth:
 
 | `receiver.ranges` out to | `detection_range` returns |
 |---|--:|
-| 20 km | `20000.0 m` — *exactly the last sample* |
-| 60 km | `45893.2 m` |
+| 60 km | `60000.0 m` — *exactly the last sample* |
+| 100 km | `99183.2 m` |
 
-The 20 km run is not wrong about its own grid: `SE` really is `+0.9 dB` at
-20 km. It just never saw the crossing, because the crossing is at 46 km. A
-2.3× understatement, reported as a clean finite number.
+The 60 km run is not wrong about its own grid: `SE` goes negative at 10 km,
+resurfaces in the convergence-zone lobes, and really is `+0.7 dB` at 60 km.
+It just never saw the outermost crossing, which sits at 99.2 km. A 1.65×
+understatement, reported as a clean finite number.
 
 So `np.isfinite` needs a second test beside it — but **not** the obvious
 `r < ranges[-1]`. That comparison is right only while every range cell carries
@@ -742,7 +743,7 @@ ratio **stops improving with range altogether**. Pass `tl_db=` a modelled TL, as
 your having to know which regime you are in.
 
 So the ordering **inverts with range**. Volume overtakes bottom at 914 m and
-surface at 2.47 km, and by 8 km the grey total is within 0.2 dB of the volume
+surface at 2.47 km, and by 8 km the grey total is within 0.22 dB of the volume
 term alone: the two boundary components have stopped mattering. Bottom
 reverberation crosses below the `NL − DI` line at 5.13 km (6.85 s) — past that
 it is quieter than the ambient noise and there is no point modelling it.
@@ -1050,7 +1051,7 @@ and testing it against `ranges[-1] = 20000.0` passes a lower bound off as a
 crossing. Catching the `UserWarning` the function raises is the guard that does
 not depend on the outer cells being filled.
 [§3](#3-figure-of-merit-and-detection-range) has both guards, measures one such
-case at 20 km where the answer is 46 km, and covers `detection_range_by_depth`,
+case at 60 km where the answer is 99 km, and covers `detection_range_by_depth`,
 where each depth row masks independently and there is no single edge range to
 compare a whole profile against.
 

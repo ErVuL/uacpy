@@ -89,14 +89,14 @@ def demo_stacked_time_series():
     out = OUTPUT_DIR / 'example_14_time_series_stacked.png'
     fig.savefig(out, dpi=150, bbox_inches='tight')
     plt.close(fig)
-    print(f"  ✓ Saved: output/{out.name}")
+    print(f"  ✓ Saved: {out}")
 
     # ``stacked=False`` falls back to a 2-D (range, time) heatmap.
     fig, _ = plot_field(ts_2d, title='Time-series heatmap (range × time)')
     out = OUTPUT_DIR / 'example_14_time_series_overlaid.png'
     fig.savefig(out, dpi=150, bbox_inches='tight')
     plt.close(fig)
-    print(f"  ✓ Saved: output/{out.name}")
+    print(f"  ✓ Saved: {out}")
 
 
 def demo_modes_heatmap():
@@ -134,14 +134,14 @@ def demo_modes_heatmap():
     out = OUTPUT_DIR / 'example_14_modes_heatmap_all.png'
     fig.savefig(out, dpi=150, bbox_inches='tight')
     plt.close(fig)
-    print(f"  ✓ Saved: output/{out.name}")
+    print(f"  ✓ Saved: {out}")
 
     fig, _ = plot_modes_heatmap(modes, mode_range=(0, 20),
                                 normalize=True, figsize=(12, 8))
     out = OUTPUT_DIR / 'example_14_modes_heatmap_subset.png'
     fig.savefig(out, dpi=150, bbox_inches='tight')
     plt.close(fig)
-    print(f"  ✓ Saved: output/{out.name}")
+    print(f"  ✓ Saved: {out}")
 
 
 def main():

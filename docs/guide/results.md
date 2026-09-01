@@ -623,8 +623,15 @@ complex `.shd` container, so it stays complex with an **identically zero**
 imaginary part. The phase is meaningless in both cases; only the dtype
 differs.
 
-**No-data cells are `NaN`, not zero.** Where no ray reached, TL is `NaN`.
-`.max()` skips them; your own reductions should use `np.nanmedian` and friends.
+**No-data cells are `NaN`, not zero.** Where no ray reached, TL is `NaN`, and
+so is a cell the solver could not solve — a diverged PE march, a mode whose
+attenuation has no answer, a trace synthesised from a spectrum with unsolved
+bins. uacpy never writes a level over a sample the model did not produce, so
+`NaN` means *no data* and is never a quiet result you could mistake for one; a
+cell that genuinely carries **no energy** is a different thing and reports the
+600 dB `PRESSURE_FLOOR`, past anything a real field reaches. Each case is
+announced by a `UserWarning`. `.max()` skips NaNs; your own reductions should
+use `np.nanmedian` and friends.
 
 **Slicing narrows identity.** After `H.at(frequency=300)` the result's
 `frequencies` is `[299.2]`, not the original 192-element grid. That is the point

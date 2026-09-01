@@ -58,6 +58,28 @@ def _require_subcarrier_count(n_subcarriers, caller: str) -> int:
     return nsc
 
 
+def _require_cp_len(cp_len, nsc: int, caller: str) -> int:
+    """Validate ``0 <= cp_len <= n_subcarriers`` and return it as ``int``.
+
+    A negative cp_len is as wrong as an over-long one and quieter: the
+    modulator's ``time[:, nsc - cp:]`` slice returns fewer samples than a
+    block, so the emitted signal carries no cyclic prefix and every later
+    block is mis-framed by the demodulator's nsc + cp_len stride; the
+    demodulator's ``[:, cp:]`` slice keeps the last ``|cp|`` columns of every
+    mis-framed block and returns the wrong number of garbage symbols; and
+    ``estimate_channel``'s ``rx[cp:cp + nsc]`` slice goes empty and reaches
+    ``np.fft`` as a zero-point-FFT ValueError naming nothing the caller
+    passed.
+    """
+    cp = int(cp_len)
+    if not 0 <= cp <= nsc:
+        raise ConfigurationError(
+            f"{caller}: cp_len ({cp_len}) must satisfy "
+            f"0 <= cp_len <= n_subcarriers ({nsc})"
+        )
+    return cp
+
+
 def ofdm_modulate(symbols, n_subcarriers, cp_len):
     """Map symbols onto ``n_subcarriers`` and prepend a cyclic prefix.
 
@@ -66,20 +88,12 @@ def ofdm_modulate(symbols, n_subcarriers, cp_len):
     """
     s = np.asarray(symbols, dtype=complex).ravel()
     nsc = _require_subcarrier_count(n_subcarriers, "ofdm_modulate")
-    # A negative cp_len is as wrong as an over-long one and quieter: the
-    # `time[:, nsc - cp:]` slice just returns fewer samples than a block, so
-    # the emitted signal carries no cyclic prefix and every later block is
-    # mis-framed by the demodulator's nsc + cp_len stride.
-    if not 0 <= int(cp_len) <= nsc:
-        raise ConfigurationError(
-            f"ofdm_modulate: cp_len ({cp_len}) must satisfy "
-            f"0 <= cp_len <= n_subcarriers ({nsc})"
-        )
+    cp_len = _require_cp_len(cp_len, nsc, "ofdm_modulate")
     if s.size % nsc:
         s = np.concatenate([s, np.zeros(nsc - s.size % nsc, dtype=complex)])
     blocks = s.reshape(-1, nsc)
     time = np.fft.ifft(blocks, axis=1) * np.sqrt(nsc)   # unit-energy per subcarrier
-    cp = time[:, nsc - int(cp_len):]
+    cp = time[:, nsc - cp_len:]
     return np.concatenate([cp, time], axis=1).ravel()
 
 
@@ -109,7 +123,7 @@ def ofdm_demodulate(rx, n_subcarriers, cp_len, channel=None, snr_linear=None):
     plain ``1e-12`` / ``1/snr_linear`` offsets exactly.
     """
     nsc = _require_subcarrier_count(n_subcarriers, "ofdm_demodulate")
-    cp = int(cp_len)
+    cp = _require_cp_len(cp_len, nsc, "ofdm_demodulate")
     r = np.asarray(rx, dtype=complex).ravel()
     blk = nsc + cp
     nblocks = r.size // blk
@@ -157,6 +171,8 @@ def ofdm_demodulate(rx, n_subcarriers, cp_len, channel=None, snr_linear=None):
 
 def ofdm_symbol(freq, n_sc, cp):
     """One CP-prefixed OFDM time-domain symbol from a length-``n_sc`` spectrum."""
+    n_sc = _require_subcarrier_count(n_sc, "ofdm_symbol")
+    cp = _require_cp_len(cp, n_sc, "ofdm_symbol")
     t = np.fft.ifft(freq) * np.sqrt(n_sc)
     return np.concatenate([t[n_sc - cp:], t])
 
@@ -169,6 +185,7 @@ def schmidl_cox_preamble(n_subcarriers, cp_len, seed=0x5C0FFEE):
     CP-prefixed complex time-domain preamble.
     """
     nsc = _require_subcarrier_count(n_subcarriers, "schmidl_cox_preamble")
+    cp_len = _require_cp_len(cp_len, nsc, "schmidl_cox_preamble")
     if nsc % 2:
         # Loading only the even subcarriers of an odd-length FFT does not
         # produce two identical time-domain halves, so schmidl_cox_sync's
@@ -183,7 +200,7 @@ def schmidl_cox_preamble(n_subcarriers, cp_len, seed=0x5C0FFEE):
     # loading only the even subcarriers, so the block carries the same total
     # energy (nsc) as a fully loaded one.
     freq[even] = np.exp(1j * np.pi / 2 * rng.integers(0, 4, even.size)) * np.sqrt(2)
-    return ofdm_symbol(freq, nsc, int(cp_len))
+    return ofdm_symbol(freq, nsc, cp_len)
 
 
 def schmidl_cox_sync(rx, n_subcarriers):
@@ -269,7 +286,7 @@ def estimate_channel(rx_pilot_symbol, pilot_freq, n_subcarriers, cp_len):
     means the same thing whatever amplitude the pilot constellation is in.
     """
     nsc = _require_subcarrier_count(n_subcarriers, "estimate_channel")
-    cp = int(cp_len)
+    cp = _require_cp_len(cp_len, nsc, "estimate_channel")
     rx = np.asarray(rx_pilot_symbol, dtype=complex)
     # A short block slices to fewer than nsc samples and reaches the division
     # by ``pilot`` as a broadcast ValueError naming only the two lengths. The

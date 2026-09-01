@@ -112,7 +112,7 @@ def _write_globsed(cache, *, marked_cells=False):
     ds.close()
 
 
-def _write_crust1(cache):
+def _write_crust1(cache, *, marked_cells=False):
     cdir = cache / 'crust1'; cdir.mkdir(parents=True, exist_ok=True)
     n = 180 * 360                                  # one whitespace row per 1° cell
     # Nine columns per row, in CRUST1.0's layer order: water, ice, upper/middle/
@@ -125,11 +125,27 @@ def _write_crust1(cache):
         'crust1.vs':   [0, 1.9, 0.6, 0, 0, 2.7, 3.7, 4.0, 4.5],
         'crust1.rho':  [1.02, 0.9, 1.9, 0, 0, 2.6, 2.8, 3.0, 3.3],
     }
-    # Every cell is identical, so repeat one formatted line — far cheaper than
-    # np.savetxt over the full 64800×9 grid in this per-test fixture.
+    # ``marked_cells`` gives (82.5, -56.5) — the real product's Baffin Bay
+    # zero-sediment column — 4 km of water directly on crystalline crust, with
+    # no sediment Vp/Vs/ρ, while GlobSed still reports 500 m there. Row 7
+    # (89 − ⌊82.5⌋), column 123 (⌊−56.5⌋ + 180).
+    bare = {
+        'crust1.bnds': [0, -4, -4, -4, -4, -4, -10, -20, -30],
+        'crust1.vp':   [1.5, 3.8, 0, 0, 0, 5.0, 6.5, 7.1, 8.1],
+        'crust1.vs':   [0, 1.9, 0, 0, 0, 2.7, 3.7, 4.0, 4.5],
+        'crust1.rho':  [1.02, 0.9, 0, 0, 0, 2.6, 2.8, 3.0, 3.3],
+    }
+    bare_idx = 7 * 360 + 123
+    # Every other cell is identical, so repeat one formatted line — far cheaper
+    # than np.savetxt over the full 64800×9 grid in this per-test fixture.
     for name, row in rows.items():
         line = ' '.join('%g' % v for v in row) + '\n'
-        (cdir / name).write_text(line * n)
+        if marked_cells:
+            bare_line = ' '.join('%g' % v for v in bare[name]) + '\n'
+            text = line * bare_idx + bare_line + line * (n - bare_idx - 1)
+        else:
+            text = line * n
+        (cdir / name).write_text(text)
 
 
 _NETWORK_DOWN_TOKENS = ('could not reach', 'timed out', 'timeout', 'connection',

@@ -86,6 +86,12 @@ def _plot_rays(
     depth_for_lim = max_z
     if env is not None:
         depth_for_lim = max(depth_for_lim, float(env.depth))
+    if (show_receivers and rays.receiver_ranges is not None
+            and rays.receiver_depths is not None and rays.receiver_depths.size):
+        # Drawn receiver markers below the deepest ray stay inside the depth
+        # axis, matching the x-limit margin that keeps an at-max-range
+        # receiver visible.
+        depth_for_lim = max(depth_for_lim, float(np.max(rays.receiver_depths)))
     if depth_for_lim > 0:
         # Depth increases downward, so bottom > top. The negative top leaves a
         # sliver of headroom above z = 0 for the surface line and surface-bounce

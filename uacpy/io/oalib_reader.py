@@ -46,6 +46,7 @@ from uacpy.io._fortran_helpers import (
     read_vector as _read_vector, detect_endian, require_model_output,
     typed_format_error,
     fortran_float,
+    expand_repeat_counts,
     list_directed_int,
     read_list_directed_values, take_tokens,
     strip_fortran_comment as _strip_fortran_comment,
@@ -666,7 +667,8 @@ def read_shd_asc(filepath: Union[str, Path]) -> Dict[str, Any]:
         # Everything after the two title lines is one ``fscanf`` stream in the
         # reference reader, so record boundaries carry no meaning: tokenise
         # the remainder and walk it.
-        tokens = fid.read().replace(',', ' ').split()
+        tokens = list(expand_repeat_counts(
+            fid.read().replace(',', ' ').split()))
 
     cursor = 0
     header, cursor = take_tokens(tokens, cursor, 7,
@@ -927,7 +929,7 @@ def read_arr_file(filepath: Union[str, Path], *, grid_type: str = 'R',
         # Some writers emit counts as floats; tolerate either.
         return int(float(next(t_iter)))
 
-    t_iter = iter(tokens)
+    t_iter = expand_repeat_counts(tokens)
     freq = float(next(t_iter))
     # AddArr's delay tolerance scales with omega = 2π·freq (ArrMod.f90:44);
     # the .arr header carries the run frequency this rule used.
@@ -1187,7 +1189,7 @@ def read_ray_file(filepath: Union[str, Path]):
             # take-off angle, then ``N2, NumTopBnc, NumBotBnc``, then N2 rows of
             # the coordinate pair. N2 counts the points kept after WriteRay2D's
             # subsampling, not the full step count.
-            counts = counts_line.split()
+            counts = list(expand_repeat_counts(counts_line.split()))
             n_points = int(counts[0])
             n_top_bounces = int(counts[1]) if len(counts) > 1 else 0
             n_bot_bounces = int(counts[2]) if len(counts) > 2 else 0
@@ -1823,7 +1825,7 @@ def read_flp3d(fileroot: Union[str, Path]) -> Dict[str, Any]:
                         remediation="The deck is truncated; verify it was "
                                     "written completely.",
                     )
-                tokens.extend(line.split())
+                tokens.extend(expand_repeat_counts(line.split()))
             node_x.append(fortran_float(tokens[0]))
             node_y.append(fortran_float(tokens[1]))
             mode_files.append(tokens[2].strip("'\""))
@@ -1926,7 +1928,7 @@ def read_rts_file(filepath: Union[str, Path]) -> Dict[str, Any]:
         title = _strip_fortran_quotes(f.readline())
         raw_tokens = []
         for line in f:
-            raw_tokens.extend(line.strip().split())
+            raw_tokens.extend(expand_repeat_counts(line.strip().split()))
 
     if not raw_tokens:
         raise FileFormatError(f"RTS file {filepath} appears empty after the title line")
@@ -2149,7 +2151,7 @@ def read_ts(filepath: Union[str, Path]) -> Dict[str, Any]:
     # (read_ts.m:33-35): line breaks carry no meaning at all.
     with open(filepath, 'r') as f:
         plot_title = f.readline().strip()
-        tokens = f.read().split()
+        tokens = list(expand_repeat_counts(f.read().split()))
 
     if not tokens:
         raise FileFormatError(

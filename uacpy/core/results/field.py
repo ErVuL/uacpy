@@ -497,21 +497,33 @@ class Field(Result):
         if 'frequency' not in tuple(wanted):
             return
         freqs = self.coords.get('frequency')
+        # After ``.at(range=…)`` the axis is gone and the cell's own range sits
+        # in ``pinned`` — the single-cell spectrum interpolates the identical
+        # carrier, so the coord spelling and the pinned one both feed the
+        # limit. The pinned value is the cell's own range, which is the right
+        # one for it: reading the collapsed axis instead would judge every cell
+        # by the far end of the field.
         ranges = self.coords.get('range')
+        if ranges is None and 'range' in self.pinned:
+            ranges = np.asarray([self.pinned['range']], dtype=float)
         if freqs is None or np.size(freqs) < 2 or ranges is None \
                 or not np.size(ranges):
             return
-        df = float(np.max(np.diff(np.asarray(freqs, dtype=float))))
+        # |diff|: a descending axis stores the same bins and ``eval`` returns
+        # the same values, so the spacing it is judged by is the same too.
+        df = float(np.max(np.abs(np.diff(np.asarray(freqs, dtype=float)))))
         r_max = float(np.max(np.abs(np.asarray(ranges, dtype=float))))
         if r_max <= 0.0 or df <= 0.0:
             return
         df_limit = DEFAULT_SOUND_SPEED / (4.0 * r_max)
         if df <= df_limit:
             return
+        where_r = ("this cell's range" if 'range' not in self.coords
+                   else "the field's farthest range")
         warnings.warn(
             f"{where}: frequency samples are {df:g} Hz apart, over the "
-            f"{df_limit:.3g} Hz quarter-cycle limit c/(4r) at the field's "
-            f"farthest range r = {r_max:g} m (nominal "
+            f"{df_limit:.3g} Hz quarter-cycle limit c/(4r) at {where_r} "
+            f"r = {r_max:g} m (nominal "
             f"c={DEFAULT_SOUND_SPEED:g} m/s), so the carrier turns "
             f"{df * r_max / DEFAULT_SOUND_SPEED:.2f} cycles between stored "
             f"bins. Interpolating across it cuts the carrier: the level and "
@@ -850,8 +862,11 @@ class Field(Result):
                 UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
             return
         quarter = DEFAULT_SOUND_SPEED / (4.0 * float(f_hi))
-        coarse = [(name, float(np.max(np.diff(a)))) for name, a in axes
-                  if float(np.max(np.diff(a))) > quarter]
+        # |diff|: a descending axis is the same physical grid stored the other
+        # way round, and ``eval`` walks it in reverse for the same values, so
+        # the spacing it is judged by must not depend on the orientation.
+        coarse = [(name, float(np.max(np.abs(np.diff(a))))) for name, a in axes
+                  if float(np.max(np.abs(np.diff(a)))) > quarter]
         if not coarse:
             return
         detail = ' and '.join(f"{name} samples are {d:g} m apart"
@@ -1655,27 +1670,36 @@ def _clean_cell_spectra(
 ) -> np.ndarray:
     """NaN policy for a batch of cell spectra ``(M, n_f)``, one row per cell.
 
-    Isolated NaN bins (a model failure at single frequencies) are treated as
-    carrying no energy and zeroed. An all-NaN cell has no valid output at all
-    — e.g. a cell masked below the seafloor — so its NaNs are kept and
-    propagate to the trace, with a warning, rather than synthesising silence
-    that reads as a real quiet arrival. ``cell_depths`` / ``cell_ranges`` give
-    each row's coordinates for the warning text. ``who`` is the public entry
-    point's name and prefixes the diagnostic (like :func:`_synthesis_plan` and
-    :func:`_taper`), since both entry points share this path.
+    A NaN bin is a frequency the model did not solve, not one carrying no
+    energy, so it is never zeroed: filling it would put a spectral notch the
+    model never produced into a trace that then looks finite and ordinary.
+    The NaNs are kept and propagate through the IFFT, which makes the whole
+    trace no-data — a trace cannot be synthesised from a spectrum with holes
+    in it — and each affected cell is named. An all-NaN cell (one masked
+    below the seafloor, say) gets its own wording, since nothing about it was
+    solved. ``cell_depths`` / ``cell_ranges`` give each row's coordinates for
+    the warning text. ``who`` is the public entry point's name and prefixes
+    the diagnostic (like :func:`_synthesis_plan` and :func:`_taper`), since
+    both entry points share this path.
     """
-    all_nan = np.all(np.isnan(spectra), axis=1)
-    for i in np.flatnonzero(all_nan):
-        warnings.warn(
-            f"{who}: H(f) at depth {float(cell_depths[i]):g} m, range "
-            f"{float(cell_ranges[i]):g} m is entirely NaN (no valid model "
-            f"output at this cell); the synthesised trace is NaN, not "
-            f"silence.",
-            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
-        )
-    cleaned = np.nan_to_num(spectra, nan=0.0)
-    cleaned[all_nan] = spectra[all_nan]
-    return cleaned
+    nan_bins = np.isnan(spectra)
+    all_nan = np.all(nan_bins, axis=1)
+    n_f = spectra.shape[1]
+    for i in np.flatnonzero(np.any(nan_bins, axis=1)):
+        where = (f"H(f) at depth {float(cell_depths[i]):g} m, range "
+                 f"{float(cell_ranges[i]):g} m")
+        if all_nan[i]:
+            detail = ("is entirely NaN (no valid model output at this "
+                      "cell); the synthesised trace is NaN, not silence.")
+        else:
+            detail = (f"has {int(np.count_nonzero(nan_bins[i]))} of {n_f} "
+                      f"bins the model did not solve; the synthesised trace "
+                      f"is NaN rather than carrying a notch at those "
+                      f"frequencies. Re-run them, or narrow the band to the "
+                      f"bins that solved.")
+        warnings.warn(f"{who}: {where} {detail}",
+                      UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
+    return spectra
 
 
 def _synthesize_traces(

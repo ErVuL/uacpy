@@ -72,7 +72,7 @@ def main():
     fig.savefig(OUTPUT_DIR / 'example_09_wenz_components.png',
                 dpi=150, bbox_inches='tight')
     plt.close(fig)
-    print("  ✓ Saved: output/example_09_wenz_components.png")
+    print(f"  ✓ Saved: {OUTPUT_DIR / 'example_09_wenz_components.png'}")
 
     # ── 2. ssrp time-domain realisation of the Wenz total ───────────────
     # n_fft is the IFFT chunk size, and it sets the synthesis bin width
@@ -114,7 +114,7 @@ def main():
     fig.savefig(OUTPUT_DIR / 'example_09_ssrp_timeseries.png',
                 dpi=150, bbox_inches='tight')
     plt.close(fig)
-    print("  ✓ Saved: output/example_09_ssrp_timeseries.png")
+    print(f"  ✓ Saved: {OUTPUT_DIR / 'example_09_ssrp_timeseries.png'}")
 
     # ── 3. Spectrogram of the synthesised noise ─────────────────────────
     sf, st, sSxx = uacpy.acoustic_signal.spectrogram(
@@ -129,7 +129,7 @@ def main():
     )
     fig.savefig(OUTPUT_DIR / 'example_09_ssrp_spectrogram.png',
                 dpi=150, bbox_inches='tight')
-    print("  ✓ Saved: output/example_09_ssrp_spectrogram.png")
+    print(f"  ✓ Saved: {OUTPUT_DIR / 'example_09_ssrp_spectrogram.png'}")
 
     # ── 4. PPSD of the synthesised noise ────────────────────────────────
     ppsd_result = uacpy.acoustic_signal.ppsd(
@@ -150,7 +150,7 @@ def main():
     ax.legend(loc='upper right', fontsize=9, framealpha=0.85)
     fig.savefig(OUTPUT_DIR / 'example_09_ppsd.png',
                 dpi=150, bbox_inches='tight')
-    print("  ✓ Saved: output/example_09_ppsd.png")
+    print(f"  ✓ Saved: {OUTPUT_DIR / 'example_09_ppsd.png'}")
 
     # ── 5. Sound Exposure Level (SEL) of the synthesised realisation ─────
     # SEL is the time-integral of p²(t) (ISO 18405) — the cumulative energy
@@ -174,7 +174,7 @@ def main():
     fig.savefig(OUTPUT_DIR / 'example_09_sel.png',
                 dpi=150, bbox_inches='tight')
     plt.close(fig)
-    print("  ✓ Saved: output/example_09_sel.png")
+    print(f"  ✓ Saved: {OUTPUT_DIR / 'example_09_sel.png'}")
 
     print("\n✓ Example 09 complete\n")
     return 0

@@ -1785,6 +1785,42 @@ class TestSmallCommsGuards:
         # give a 4 + 9 - 1 = 12-sample full convolution.
         assert comms.pulse_shape(np.ones(4, dtype=complex), 1).size == 12
 
+    def test_pulse_shape_integral_float_sps_matches_int(self):
+        # fs / baud naturally lands a float (4.0, np.float64(4.0)) that
+        # names the same sample grid as int 4, so it must shape
+        # identically instead of crashing in the up[::sps] stride.
+        sym = np.arange(1, 5, dtype=complex)
+        ref = comms.pulse_shape(sym, 4)
+        np.testing.assert_array_equal(comms.pulse_shape(sym, 4.0), ref)
+        np.testing.assert_array_equal(
+            comms.pulse_shape(sym, np.float64(4.0)), ref)
+
+    def test_pulse_shape_fractional_sps_raises_naming_sps(self):
+        with pytest.raises(ConfigurationError, match="sps.*whole number"):
+            comms.pulse_shape(np.ones(4, dtype=complex), 2.5)
+
+    def test_rrc_filter_integral_float_sps_matches_int(self):
+        np.testing.assert_array_equal(comms.rrc_filter(4.0, 0.25, 8),
+                                      comms.rrc_filter(4, 0.25, 8))
+
+    def test_rrc_filter_fractional_sps_raises_naming_sps(self):
+        # 2.5 silently built 21 taps on a time axis no integer symbol
+        # stride matches.
+        with pytest.raises(ConfigurationError, match="sps.*whole number"):
+            comms.rrc_filter(2.5, 0.25, 8)
+
+    def test_symbol_sync_fractional_sps_raises_naming_sps(self):
+        # Same receive chain, same documented ``sps : int``: the Gardner
+        # loop's integer stride is defined only on a whole sample grid.
+        with pytest.raises(ConfigurationError, match="sps.*whole number"):
+            comms.symbol_sync(np.ones(64, dtype=complex), 2.5)
+
+    def test_symbol_sync_integral_float_sps_matches_int(self):
+        rng = np.random.default_rng(0)
+        x = (rng.standard_normal(128) + 1j * rng.standard_normal(128))
+        np.testing.assert_array_equal(comms.symbol_sync(x, 4.0),
+                                      comms.symbol_sync(x, 4))
+
     def test_apply_channel_empty_taps_raise(self):
         with pytest.raises(ConfigurationError, match="empty channel h"):
             comms.apply_channel(np.ones(8), [])
@@ -1898,6 +1934,40 @@ class TestOFDMArgumentValidation:
         with pytest.raises(ConfigurationError, match="cp_len"):
             ofdm_modulate(np.ones(16, complex), 8, -4)
         assert ofdm_modulate(np.ones(16, complex), 8, 0).size == 16
+
+    def test_demodulate_negative_cp_len_is_rejected(self):
+        # A negative cp reframes the record on an nsc + cp stride and the
+        # [:, cp:] slice keeps the last |cp| columns of every block, so
+        # demodulation returned the wrong number of garbage symbols where
+        # ofdm_modulate already raised for the same value.
+        rx = ofdm_modulate(np.ones(16, complex), 8, 2)
+        with pytest.raises(ConfigurationError, match="cp_len"):
+            ofdm_demodulate(rx, 8, -2)
+        assert ofdm_demodulate(rx, 8, 2).size == 16
+
+    def test_estimate_channel_negative_cp_len_is_rejected(self):
+        # A negative cp shrinks the frame-length guard and empties the
+        # rx[cp:cp + nsc] slice, which reached np.fft as a bare
+        # zero-point-FFT ValueError naming nothing the caller passed.
+        pilot = np.ones(8, dtype=complex)
+        block = ofdm_modulate(pilot, 8, 0)
+        with pytest.raises(ConfigurationError, match="cp_len"):
+            comms.estimate_channel(block, pilot, 8, -4)
+        assert comms.estimate_channel(block, pilot, 8, 0).size == 8
+
+    def test_preamble_negative_cp_len_is_rejected(self):
+        # A negative cp makes ofdm_symbol's t[n_sc - cp:] slice empty, so
+        # the training symbol went out with no cyclic prefix, silently.
+        with pytest.raises(ConfigurationError, match="cp_len"):
+            schmidl_cox_preamble(8, -4)
+        assert schmidl_cox_preamble(8, 2).size == 10
+
+    def test_ofdm_symbol_negative_cp_len_is_rejected(self):
+        from uacpy.comms.ofdm import ofdm_symbol
+        freq = np.ones(8, dtype=complex)
+        with pytest.raises(ConfigurationError, match="cp_len"):
+            ofdm_symbol(freq, 8, -4)
+        assert ofdm_symbol(freq, 8, 2).size == 10
 
     def test_channel_longer_than_the_transform_is_rejected(self):
         x = ofdm_modulate(np.ones(16, complex), 8, 2)

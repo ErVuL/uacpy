@@ -13,9 +13,11 @@ from uacpy.core.exceptions import ConfigurationError
 
 DEFAULT_SOUND_SPEED = 1500.0  # m/s — typical ocean value
 
-# dB — the level a wrapper reports for a cell carrying no energy: RAM pins both
-# a diverged Padé sample and its synthetic pressure-release surface row here,
-# and converts back to a magnitude with ``10**(-TL_MAX_DB/20)``.
+# dB — the ceiling a run's own TL is compared against (a level this deep is
+# past anything a model resolves usefully). It is NOT a marker: a cell
+# carrying no energy is reported through PRESSURE_FLOOR like every other
+# model's, and a sample the solver failed on is NaN. Writing this value over
+# a result would read as a real deep shadow, which is what it looks like.
 TL_MAX_DB = 200.0
 
 # Mean Earth radius (IUGG R1) for spherical great-circle geodesy when
@@ -115,9 +117,11 @@ SEA_ICE_SHEAR_ATTENUATION = 1.0            # dB/wavelength
 # NSIDC standard ice-edge definition: ≥15 % concentration counts as ice-covered.
 SEA_ICE_EDGE_CONCENTRATION = 0.15
 
-# Floor applied whenever we take 20*log10(|p|). 1e-30 lands at 600 dB of loss,
-# three times past the ``TL_MAX_DB`` no-energy sentinel, so a floored cell and a
-# clamped one stay distinguishable in the output.
+# Floor applied whenever we take 20*log10(|p|), and the single no-energy level
+# uacpy reports: 1e-30 lands at 600 dB of loss, three times past ``TL_MAX_DB``
+# and far past anything a real field reaches, so a cell carrying no energy is
+# never mistakable for one that does. Wrappers leave such a sample at zero and
+# let this floor speak for it rather than writing a level of their own.
 PRESSURE_FLOOR = 1e-30
 
 # SPL reference pressures for dB conversion (levels are dB re ref²).

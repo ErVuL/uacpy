@@ -302,7 +302,7 @@ def main():
     fig1.savefig(OUTPUT_DIR / 'example_04_environment.png', dpi=150,
                  bbox_inches='tight')
     plt.close(fig1)
-    print("  ✓ Saved: example_04_environment.png")
+    print(f"  ✓ Saved: {OUTPUT_DIR / 'example_04_environment.png'}")
 
     # Plot 2: Compare standard vs Cerveny beams
     # Using show_colorbar=False for subplots with shared colorbar
@@ -331,7 +331,7 @@ def main():
         fig2.savefig(OUTPUT_DIR / 'example_04_beam_comparison.png', dpi=150,
                      bbox_inches='tight')
         plt.close(fig2)
-        print("  ✓ Saved: example_04_beam_comparison.png")
+        print(f"  ✓ Saved: {OUTPUT_DIR / 'example_04_beam_comparison.png'}")
 
     # Plot 3: Point source vs Line source
     if result_thorp is not None and result_line is not None:
@@ -355,7 +355,7 @@ def main():
         fig3.savefig(OUTPUT_DIR / 'example_04_source_comparison.png', dpi=150,
                      bbox_inches='tight')
         plt.close(fig3)
-        print("  ✓ Saved: example_04_source_comparison.png")
+        print(f"  ✓ Saved: {OUTPUT_DIR / 'example_04_source_comparison.png'}")
 
     # Plot 4: Ray trace
     # Using color_by="bounces" for ray color-coding
@@ -367,7 +367,7 @@ def main():
         fig4.savefig(OUTPUT_DIR / 'example_04_rays.png', dpi=150,
                      bbox_inches='tight')
         plt.close(fig4)
-        print("  ✓ Saved: example_04_rays.png")
+        print(f"  ✓ Saved: {OUTPUT_DIR / 'example_04_rays.png'}")
 
     # Plot 5: Multi-source-depth — one TL panel per source slab.
     if stack is not None:
@@ -396,7 +396,7 @@ def main():
         fig5.savefig(OUTPUT_DIR / 'example_04_multi_source.png',
                      dpi=150, bbox_inches='tight')
         plt.close(fig5)
-        print("  ✓ Saved: example_04_multi_source.png")
+        print(f"  ✓ Saved: {OUTPUT_DIR / 'example_04_multi_source.png'}")
 
     # Plot 6: the directivity beside the field it produces. The polar axes are
     # oriented like the TL panels next to them — 0 deg along increasing range,
@@ -431,7 +431,7 @@ def main():
         fig6.savefig(OUTPUT_DIR / 'example_04_beam_pattern.png', dpi=150,
                      bbox_inches='tight')
         plt.close(fig6)
-        print("  ✓ Saved: example_04_beam_pattern.png")
+        print(f"  ✓ Saved: {OUTPUT_DIR / 'example_04_beam_pattern.png'}")
 
     print("\nFeatures demonstrated:")
     print("  ✓ Advanced RunType (7 positions)")

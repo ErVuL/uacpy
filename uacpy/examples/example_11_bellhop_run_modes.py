@@ -301,7 +301,7 @@ def scenario_a_tl_modes():
     print(f"    • Coherent {dt_coherent:.2f} s   • Incoherent {dt_incoherent:.2f} s"
           f"   • Semi-coherent {dt_semicoherent:.2f} s")
 
-    print("\n  ✓ Saved: output/example_11a_tl_modes.png")
+    print(f"\n  ✓ Saved: {OUTPUT_DIR / 'example_11a_tl_modes.png'}")
 
 
 def scenario_b_ray_tracing():
@@ -367,7 +367,7 @@ def scenario_b_ray_tracing():
           f" (inside the channel; Munk axis is at 1300 m)")
     print("    • Maximum range: 100 km")
 
-    print("\n  ✓ Saved: output/example_11b_ray_tracing.png")
+    print(f"\n  ✓ Saved: {OUTPUT_DIR / 'example_11b_ray_tracing.png'}")
 
 
 def scenario_c_eigenrays_arrivals():
@@ -479,7 +479,7 @@ def scenario_c_eigenrays_arrivals():
             print(f"    • Arrivals detected: {len(rec)}")
             print(f"    • Time spread: {max(delays) - min(delays):.4f} s")
 
-    print("\n  ✓ Saved: output/example_11c_eigenrays_arrivals.png")
+    print(f"\n  ✓ Saved: {OUTPUT_DIR / 'example_11c_eigenrays_arrivals.png'}")
 
 
 def scenario_d_compute_eigenrays_pekeris():
@@ -532,7 +532,7 @@ def scenario_d_compute_eigenrays_pekeris():
     fig.savefig(OUTPUT_DIR / 'example_11d_compute_eigenrays_pekeris.png',
                 dpi=150, bbox_inches='tight')
     plt.close(fig)
-    print("\n  ✓ Saved: output/example_11d_compute_eigenrays_pekeris.png")
+    print(f"\n  ✓ Saved: {OUTPUT_DIR / 'example_11d_compute_eigenrays_pekeris.png'}")
 
 
 def main():

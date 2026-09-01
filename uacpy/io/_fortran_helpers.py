@@ -80,7 +80,9 @@ def list_directed_int(line: str) -> int:
     if not tokens:
         raise FileFormatError(
             f"list-directed integer read on an empty record: {line!r}")
-    return int(tokens[0])
+    # A scalar READ takes the first value of an ``r*c`` repeat group too
+    # (``'2*5'`` reads as 5); see :func:`expand_repeat_counts`.
+    return int(next(expand_repeat_counts(tokens)))
 
 
 #: Mantissa followed by a *signed* exponent with no ``E``/``D`` letter —
@@ -124,6 +126,75 @@ def fortran_float(token) -> float:
         if match is None:
             raise
         return float(f"{match.group(1)}E{match.group(2)}")
+
+
+#: Ceiling on the values one token stream's ``r*c`` groups may add. Lower
+#: than :data:`_MAX_GENERATED_VECTOR`, which bounds a *numeric array*: these
+#: are Python strings at ~50 bytes each, and the readers that index their
+#: stream hold the whole expansion at once, so a short record must not be
+#: able to claim hundreds of megabytes. No engine record repeats a value a
+#: million times — a count that large is a corrupt file, not a compressed one.
+_MAX_REPEAT_EXPANSION = 1_000_000
+
+#: An unsigned nonzero-leading repeat count, a ``*``, and the constant —
+#: the list-directed ``r*c`` form (``'2*0.5'`` = two 0.5s). The constant is
+#: kept as text for the caller's own value parse, so ``'2*junk'`` expands
+#: and then raises exactly where a bare ``'junk'`` token would.
+_REPEAT_COUNT_TOKEN = re.compile(r'^(\d+)\*(.+)$')
+
+
+def expand_repeat_counts(tokens):
+    """Yield list-directed tokens with ``r*c`` repeat counts expanded.
+
+    A list-directed READ accepts ``r*c`` as ``r`` copies of the constant
+    ``c``. gfortran's own list-directed WRITEs never emit the form, but
+    ifort's do for consecutive equal values — and RefCoef.f90:53 reads the
+    ``.brc``, ArrMod.f90:99-118 writes the ``.arr``, list-directed, so a
+    file from an ifort-built engine can carry it.
+
+    Tokens the form does not cover pass through unchanged, so the caller's
+    own ``int()``/``fortran_float`` raises for them: a zero repeat, a
+    non-numeric constant, and Fortran's null-value form ``r*`` (which
+    stands for ``r`` values *not* assigned — there is no value to hand a
+    caller for it).
+
+    Two ceilings raise :class:`FileFormatError`, both
+    :data:`_MAX_REPEAT_EXPANSION`: one repeat count may not exceed it, and
+    neither may the running total of copies one stream has added. A repeat
+    count breaks the relation between file size and item count that
+    :func:`_bound_counts` relies on — as SubTab's generated vectors do —
+    and a per-token ceiling alone does not restore it, because a record may
+    hold arbitrarily many groups just under the bar. The cumulative ceiling
+    is what bounds the memory a caller that materialises the stream can be
+    made to spend on a short file.
+
+    The generator itself is lazy on both axes — tokens are consumed one at
+    a time and each expansion is yielded copy by copy — so a consumer that
+    walks it (``read_arr_file``, ``read_vector``,
+    ``read_list_directed_values``) never materialises more than it asks
+    for. The readers that index their token stream build a list from it,
+    and for those the cumulative ceiling is the bound.
+    """
+    added = 0
+    for tok in tokens:
+        match = _REPEAT_COUNT_TOKEN.match(tok)
+        if match is None or int(match.group(1)) == 0:
+            yield tok
+            continue
+        count = int(match.group(1))
+        added += count - 1
+        if count > _MAX_REPEAT_EXPANSION or added > _MAX_REPEAT_EXPANSION:
+            raise FileFormatError(
+                f"list-directed repeat count {tok!r} asks for {count} "
+                f"copies, taking this record's expansion to {added} values "
+                f"past the {_MAX_REPEAT_EXPANSION} ceiling on one record's "
+                f"repeat groups.",
+                remediation="Check the record — a corrupt file can read a "
+                            "data value into the repeat count. No real "
+                            "engine output repeats a value this often.",
+            )
+        for _ in range(count):
+            yield match.group(2)
 
 
 def typed_format_error(reader):
@@ -272,7 +343,8 @@ def read_list_directed_values(fid, n: int, what: str, source,
                 remediation="The file is truncated or not the expected "
                             "format; verify it was written completely.",
             )
-        for tok in strip_fortran_comment(line).replace(',', ' ').split():
+        for tok in expand_repeat_counts(
+                strip_fortran_comment(line).replace(',', ' ').split()):
             if len(values) >= n:
                 break
             values.append(fortran_float(tok))
@@ -413,7 +485,7 @@ def _read_vector_values(fid, Nx: int) -> Tuple[np.ndarray, bool]:
     def _take(dest, text):
         # Commas are value separators to a list-directed READ, and tokens
         # past the Nx-th are the record remainder the READ never looks at.
-        for tok in text.replace(',', ' ').split():
+        for tok in expand_repeat_counts(text.replace(',', ' ').split()):
             if len(dest) >= Nx:
                 break
             dest.append(fortran_float(tok))

@@ -106,10 +106,24 @@ def weighted_level(psd_db, frequency, group):
     Integrating — rather than summing the samples — makes the result
     **independent of the frequency-grid spacing** (a bare sum is not: it scales
     with the number of bins). Mirrors how :func:`uacpy.acoustic_signal.bands`
-    and SEL integrate a PSD. ``frequency`` need not be pre-sorted.
+    and SEL integrate a PSD. ``frequency`` need not be pre-sorted, but it needs
+    at least two entries to span a bandwidth; the level of a single frequency
+    is :func:`apply_weighting`.
     """
-    w = np.asarray(apply_weighting(psd_db, frequency, group), dtype=float)
-    f = np.asarray(frequency, dtype=float)
+    f = np.atleast_1d(np.asarray(frequency, dtype=float))
+    # Fewer than two samples span zero bandwidth, so the trapezoid integral is
+    # 0 and the returned level would be the 10·log10(float-tiny) floor
+    # (-3076.5 dB) — refused the way compute_windnoise(band_integrate=True)
+    # refuses a single frequency. A scalar is normalised to shape (1,) first,
+    # so it is refused with the same message rather than crashing on indexing.
+    if f.size < 2:
+        raise ConfigurationError(
+            f"weighted_level: integrating the weighted density over frequency "
+            f"needs at least two frequencies to span a bandwidth; got "
+            f"{f.size}. For the weighted level at a single frequency use "
+            f"apply_weighting(psd_db, frequency, group).")
+    w = np.atleast_1d(
+        np.asarray(apply_weighting(psd_db, frequency, group), dtype=float))
     order = np.argsort(f)
     integral = np.trapezoid(10.0 ** (w[order] / 10.0), f[order])
     return float(10.0 * np.log10(max(float(integral), np.finfo(float).tiny)))

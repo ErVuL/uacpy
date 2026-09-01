@@ -403,12 +403,16 @@ class Modes(Result):
         norm = np.trapezoid(weight / rho_arr[:, None], self.depths, axis=0)
         integrand = (a_neper / (c_arr * rho_arr))[:, None] * weight
         kr = np.real(self.k)
-        if np.any(kr <= 0):
+        unsolvable = kr <= 0
+        if np.any(unsolvable):
             warnings.warn(
-                f"Modes.with_attenuation: {int(np.count_nonzero(kr <= 0))} "
-                f"mode(s) have Re(k) <= 0; their attenuation is computed "
-                f"with k clamped to 1 m⁻¹ and is not meaningful.",
+                f"Modes.with_attenuation: {int(np.count_nonzero(unsolvable))} "
+                f"mode(s) have Re(k) <= 0, which the perturbation divides by; "
+                f"their attenuation is returned as NaN. A number here would "
+                f"sit among the valid modes' and propagate as physics.",
                 UserWarning, stacklevel=2)
+        # Clamped only to keep the array arithmetic finite; every entry it
+        # covers is marked no-data before the result is returned.
         kr_safe = np.where(kr > 0, kr, 1.0)
         self._warn_if_depth_axis_underresolves(a_neper, kr, omega, c_arr)
         water_term = (omega / kr_safe) * np.trapezoid(integrand, self.depths, axis=0)
@@ -646,11 +650,18 @@ class Modes(Result):
             warnings.warn(
                 f"Modes.with_attenuation: {int(np.count_nonzero(norm <= 0))} "
                 f"mode(s) have a non-positive shape normalisation "
-                f"∫psi²/rho dz; their attenuation is computed with the "
-                f"normalisation clamped to 1 and is not meaningful.",
+                f"∫psi²/rho dz, which the perturbation divides by; their "
+                f"attenuation is returned as NaN. Clamping it produced a "
+                f"LOSSLESS mode, which a range-marched sum propagates "
+                f"undamped and which can dominate the far field.",
                 UserWarning, stacklevel=2)
+        unsolvable = unsolvable | (norm <= 0)
         norm = np.where(norm > 0, norm, 1.0)
         alpha_m = (water_term + bottom_term) / norm
+        # The perturbation had no answer for these modes: report no data
+        # rather than a level that participates in every field built from
+        # this mode set.
+        alpha_m = np.where(unsolvable, np.nan, alpha_m)
         new_k = kr + 1j * alpha_m
         return Modes(
             k=new_k, phi=self.phi, depths=self.depths,
@@ -812,10 +823,11 @@ class Modes(Result):
         # temporary of n_depth·n_mode·n_range — 1.28 GB at 200 depths, 200
         # modes and 2000 ranges — for a result of n_depth·n_range.
         P = np.einsum('zm,mr->zr', phi_zr * weights, expikr, optimize=True)
-        # The asymptotic modal sum is a far-field form, singular at r = 0;
-        # clamping sqrt(r) to 1 there returns a finite number that is NOT
-        # the field at the source range - treat r = 0 samples as
-        # placeholders, not physics.
+        # The asymptotic modal sum is a far-field form, singular at r <= 0.
+        # sqrt(r) is held at 1 there only to keep the division finite; those
+        # columns are marked no-data below rather than returned, since the
+        # number the substitution produces sits within a few dB of the 1 m
+        # answer and would read as the field at the source.
         with np.errstate(divide='ignore', invalid='ignore'):
             sqrt_r = np.sqrt(r)
             sqrt_r = np.where(sqrt_r > 0, sqrt_r, 1.0)
@@ -828,6 +840,10 @@ class Modes(Result):
         pref = -1j * np.exp(1j * np.pi / 4.0) * np.sqrt(2.0 * np.pi) / rho_s
         P = pref * P / sqrt_r[None, :]
         P[outside, :] = np.nan
+        # r <= 0 is outside the form's domain, not a quiet spot in it — the
+        # same no-data marking every other range-zero path in the package
+        # applies.
+        P[:, r <= 0.0] = np.nan
         id_kwargs = self.id_kwargs()
         id_kwargs['backend'] = 'modal_sum'
         id_kwargs['source_depths'] = np.array([z_s])

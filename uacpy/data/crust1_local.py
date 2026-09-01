@@ -168,6 +168,17 @@ def _halfspace(i, vp, vs, rho, atten, elastic):
     )
 
 
+def _sediment_layer_indices(bnds):
+    """Indices of the CRUST1.0 sediment layers with non-zero thickness.
+
+    CRUST1.0 quantises every boundary to 0.01 km, so the thinnest layer it can
+    express is 10 m and any sub-metre threshold separates "absent" from
+    "present" identically — this one is in km, the one in
+    fetch_crust1_profile is in m."""
+    return [i for i in range(_UPPER_SED, _LOW_SED + 1)
+            if bnds[i] - bnds[i + 1] > 1e-3]
+
+
 def _layered_from_column(bnds, vp, vs, rho, *, sediment_attenuation,
                          basement_attenuation, elastic, sediment_thickness,
                          roughness=0.0):
@@ -175,13 +186,13 @@ def _layered_from_column(bnds, vp, vs, rho, *, sediment_attenuation,
 
     ``roughness`` lands on the first layer, whose top interface is the seafloor
     (:class:`~uacpy.core.bottom.SedimentLayer`), whichever of the two column
-    shapes below is built."""
-    # CRUST1.0 quantises every boundary to 0.01 km, so the thinnest layer it can
-    # express is 10 m and any sub-metre threshold separates "absent" from
-    # "present" identically — this one is in km, the one in
-    # fetch_crust1_profile is in m.
-    sed = [i for i in range(_UPPER_SED, _LOW_SED + 1)
-           if bnds[i] - bnds[i + 1] > 1e-3]
+    shapes below is built.
+
+    A ``sediment_thickness`` can only **rescale** sediment layers the column
+    already has: on a zero-sediment column there are no sediment Vp/Vs/ρ to
+    build a layer from, so the thickness is discarded and the bare-rock shape
+    is emitted regardless — the caller (``_bottom_at_point``) owns saying so."""
+    sed = _sediment_layer_indices(bnds)
     # Effective sediment thickness (the GlobSed override when given — a real
     # 0.0 means bare basement, not "no data" — else the CRUST1.0 column).
     # Below ``_MIN_SEDIMENT_M`` the column is negligible and a real layer would
@@ -273,9 +284,18 @@ def fetch_bottom_crust1(point, *, roughness=0.0,
     keep CRUST1.0's own column. Where GlobSed is not cached or has no value at
     the point, CRUST1.0's native thickness is kept; a genuine GlobSed 0.0
     (bare basement) is honoured and yields the bare-rock column. The returned
-    bottom carries
-    ``.sediment_thickness_source`` (``'globsed'`` or ``None``) recording which
-    was used. ``timeout`` is ignored (offline) for signature parity with the
+    bottom carries ``.sediment_thickness_source`` (``'globsed'``,
+    ``'globsed-ignored'`` or ``None``) recording which was used.
+
+    The rescaling is **asymmetric**: a thickness can shrink or stretch
+    sediment layers CRUST1.0 already has, but on a column with zero sediment
+    layers (4.4% of ocean cells) CRUST1.0 carries no sediment Vp/Vs/density,
+    so there is nothing to build a layer from — a positive GlobSed or explicit
+    ``sediment_thickness`` is then discarded with a :class:`UserWarning`, the
+    bottom is bare rock, and the stamp reads ``'globsed-ignored'`` (GlobSed
+    consulted but unusable) or ``None`` (explicit value).
+
+    ``timeout`` is ignored (offline) for signature parity with the
     network bottom fetchers; ``water_sound_speed`` is likewise accepted and
     ignored (CRUST1.0 yields absolute Vp/Vs/ρ, not water-referenced ratios).
 
@@ -310,11 +330,35 @@ def _bottom_at_point(point, *, sediment_attenuation, basement_attenuation,
     if sediment_thickness is None and use_globsed:
         sediment_thickness = _globsed_thickness(point, verbose=verbose)
         globsed_applied = sediment_thickness is not None
+    # A thickness can only rescale sediment layers CRUST1.0 already has; on a
+    # zero-sediment column (4.4% of ocean cells) there are no sediment Vp/Vs/ρ
+    # to build a layer from, so a positive requested thickness is discarded and
+    # the bottom is bare rock. Below _MIN_SEDIMENT_M the outcome is bare rock
+    # on any column, so nothing is discarded and the notice stays quiet.
+    thickness_discarded = (
+        not _sediment_layer_indices(bnds) and sediment_thickness is not None
+        and sediment_thickness >= _MIN_SEDIMENT_M)
+    if thickness_discarded:
+        origin = ("the GlobSed total thickness" if globsed_applied
+                  else "the requested sediment_thickness")
+        warnings.warn(
+            f"CRUST1.0 at ({lat:.2f}, {lon:.2f}) has no sediment layers, so "
+            f"there are no sediment Vp/Vs/density values to build a column "
+            f"from: {origin} of {sediment_thickness:g} m is discarded and the "
+            f"bottom is bare crystalline rock. If the sediment column matters "
+            f"here, build the layers from another source (e.g. "
+            f"uacpy.data.sediment's grain-size backends).",
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
     bottom = _layered_from_column(
         bnds, vp, vs, rho, sediment_attenuation=sediment_attenuation,
         basement_attenuation=basement_attenuation, elastic=elastic,
         roughness=roughness, sediment_thickness=sediment_thickness)
-    bottom.sediment_thickness_source = 'globsed' if globsed_applied else None
+    # 'globsed' only when the GlobSed value shaped the column; a consulted but
+    # discarded value is stamped 'globsed-ignored' so provenance never lists a
+    # dataset the result does not contain.
+    bottom.sediment_thickness_source = (
+        'globsed-ignored' if (globsed_applied and thickness_discarded)
+        else 'globsed' if globsed_applied else None)
     log_message('crust1', f"CRUST1.0 at {lat:.2f}, {lon:.2f} → {bottom!r}",
                 verbose=verbose)
     return bottom

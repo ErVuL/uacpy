@@ -23,7 +23,8 @@ from uacpy.core.units import km_to_m, m_to_km
 # The scale spans realistic *surficial* seabeds (clay ≈1450 → coarse/cemented
 # ≈2300 m/s) so ordinary sediments spread across the ramp instead of clustering
 # at the soft end; harder bottoms (rock basements) simply saturate at the dark
-# end. The exact cp is always in the property card.
+# end. The right-margin 'Bottom cp' colorbar spans exactly this scale, so the
+# fill reads back to a cp value.
 _HALFSPACE_CP_LO, _HALFSPACE_CP_HI = 1450.0, 2300.0
 
 
@@ -82,8 +83,9 @@ def _layered_halfspace_style(hs, cmap, cs_min, cs_range) -> dict:
 def _draw_layered_bottom(ax_bathy, column, r_km, seafloor, z_max_layer,
                         _layer_cmap_and_norm):
     # Per-layer fills (earthy BOTTOM_CMAP by sound speed) + dashed inter-layer
-    # edges + hatched half-space + side legend card. Same visual
-    # template as the range-dependent layered branch below.
+    # edges + hatched half-space, keyed by the caller's right-margin
+    # 'Bottom cp' colorbar. Same visual template as the range-dependent
+    # layered branch below.
     cmap, cs_min, cs_max, _ = _layer_cmap_and_norm()
     cs_range = max(1e-9, cs_max - cs_min)
     # Every layer rides the seafloor, as in the range-dependent layered branch.

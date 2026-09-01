@@ -33,6 +33,7 @@ from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.io._fortran_helpers import _bound_counts
 from uacpy.io.utils import _collapsed_pair_index
 from uacpy.io._fortran_helpers import (
+    expand_repeat_counts,
     fortran_float, list_directed_int, read_list_directed_values,
     typed_format_error,
 )
@@ -756,7 +757,7 @@ def dedupe_reflection_file(filepath: Union[str, Path]) -> None:
     # after the first on a packed line.
     tokens = []
     for line in lines[1:]:
-        tokens.extend(line.replace(',', ' ').split())
+        tokens.extend(expand_repeat_counts(line.replace(',', ' ').split()))
     # A short file is a truncated file, never a shorter table. Rewriting the
     # header down to what survived would hand Bellhop a table it reads without
     # complaint, and every grazing angle past the cut then falls outside the

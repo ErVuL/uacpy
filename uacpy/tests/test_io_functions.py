@@ -276,6 +276,25 @@ class TestArrivalsReaderTokenStream:
         assert a1['amplitudes'][0] == pytest.approx(0.3)
         assert a1['n_bot_bounces'][0] == 2
 
+    def test_repeat_count_records_read_as_repeated_values(self, tmp_path):
+        """ArrMod.f90:99-118 writes the .arr list-directed, and an
+        ifort-built engine compresses consecutive equal values to ``r*c``
+        (``3*0.0`` = three zeros); the token stream must expand it."""
+        from uacpy.io.oalib_reader import read_arr_file
+        lines = self._expected_arr_lines()
+        # phase, delay_r, delay_i all zero, as ifort would emit them.
+        lines[6] = "0.5 3*0.0 -5.0 5.0 0 1"
+        path = tmp_path / "repeat.arr"
+        self._write_arr(path, lines)
+        result = read_arr_file(path)
+        a0 = result.by_receiver[0][0][0]
+        assert a0['amplitudes'][0] == pytest.approx(0.5)
+        assert a0['phases'][0] == 0.0
+        assert a0['delays'][0] == 0.0
+        assert a0['delays_imag'][0] == 0.0
+        assert a0['src_angles'][0] == pytest.approx(-5.0)
+        assert a0['n_bot_bounces'][0] == 1
+
     def test_read_arr_file_with_wrapped_records(self, tmp_path):
         """Simulates an Intel-Fortran-style wrap: the 8-token arrival record
         spans two text lines. The parser must still recover the record."""
@@ -1213,6 +1232,39 @@ class TestReadVectorFortranSemantics:
         from uacpy.core.exceptions import FileFormatError
         with pytest.raises(FileFormatError):
             self._read(text)
+
+
+class TestReadVectorRepeatCounts:
+    """``r*c`` is ``r`` copies of the constant ``c`` to a list-directed
+    READ, so an AT vector record may carry it; the expansion is bounded
+    by its own ceiling, since a repeat count breaks the
+    file-size-to-item-count relation the way SubTab's generated vectors
+    do."""
+
+    @staticmethod
+    def _read(text):
+        import io as _io
+        from uacpy.io._fortran_helpers import read_vector
+        return read_vector(_io.StringIO(text))
+
+    def test_repeat_counts_expand_in_a_vector_record(self):
+        x, nx = self._read("5\n2*0.0 3*1.5\n")
+        assert nx == 5
+        assert np.allclose(x, [0.0, 0.0, 1.5, 1.5, 1.5])
+
+    def test_a_repeat_count_at_the_ceiling_expands_lazily(self):
+        from uacpy.io._fortran_helpers import (
+            _MAX_REPEAT_EXPANSION, expand_repeat_counts)
+        first = next(expand_repeat_counts([f"{_MAX_REPEAT_EXPANSION}*0.25"]))
+        assert first == "0.25"
+
+    def test_a_repeat_count_over_the_ceiling_is_a_typed_error(self):
+        from uacpy.core.exceptions import FileFormatError
+        from uacpy.io._fortran_helpers import (
+            _MAX_REPEAT_EXPANSION, expand_repeat_counts)
+        with pytest.raises(FileFormatError):
+            next(expand_repeat_counts(
+                [f"{_MAX_REPEAT_EXPANSION + 1}*0.25"]))
 
 
 class TestMultiProfileEnvKeepsLayerThickness:

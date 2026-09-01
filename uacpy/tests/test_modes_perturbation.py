@@ -903,3 +903,75 @@ class TestUpperBoundWarningStatesRigidExactness:
                 0.01, bottom=BoundaryProperties(acoustic_type='rigid'))
         np.testing.assert_allclose(declared.k.imag, water_only.k.imag,
                                    rtol=1e-12)
+
+
+class TestModalSumMarksTheSingularRangeNoData:
+    """The asymptotic modal sum carries a 1/sqrt(r) that is singular at the
+    source range, so there is no field to report there. Substituting
+    sqrt(r) = 1 returns a level a few dB from the 1 m answer — close enough
+    to read as physics — where every sibling path (``base.py``,
+    ``oases.py``, ``ram.py``, ``grn_reader.py``, ``reverberation.py``)
+    returns NaN for r <= 0."""
+
+    @staticmethod
+    def _loss_at(ranges):
+        return _pekeris_modes().modal_propagation_loss(
+            source_depth=25.0,
+            receiver_depths=np.array([25.0, 50.0]),
+            ranges_m=np.asarray(ranges, dtype=float),
+        )
+
+    def test_the_source_range_comes_back_as_no_data(self):
+        f = self._loss_at([0.0, 100.0, 1000.0])
+        data = np.asarray(f.data)
+        assert np.isnan(data[:, 0]).all(), "r = 0 returned a level"
+
+    def test_ranges_past_the_source_keep_their_field(self):
+        f = self._loss_at([0.0, 100.0, 1000.0])
+        data = np.asarray(f.data)
+        assert np.isfinite(data[:, 1:]).all()
+
+    def test_a_negative_range_is_no_data_too(self):
+        data = np.asarray(self._loss_at([-10.0, 500.0]).data)
+        assert np.isnan(data[:, 0]).all()
+        assert np.isfinite(data[:, 1]).all()
+
+
+class TestUnsolvableModesGetNoAttenuation:
+    """``with_attenuation`` computes a perturbation that needs Re(k) > 0 and a
+    positive shape normalisation. Where either fails the perturbation has no
+    answer, and substituting one puts a fabricated number into ``k``: a
+    clamped wavenumber yields an attenuation that sits between its valid
+    neighbours, and a clamped normalisation yielded a *lossless* mode, which
+    propagates undamped and can dominate the far field of a modal sum. Those
+    modes come back with Im(k) = NaN, so a field built from them is visibly
+    no-data instead of quietly wrong."""
+
+    def test_a_non_positive_wavenumber_gives_nan_attenuation(self):
+        modes = _pekeris_modes(n_modes=3)
+        k = np.array(modes.k, dtype=complex)
+        k[1] = -0.5 + 0j                      # the solver returned Re(k) <= 0
+        broken = Modes(k=k, phi=modes.phi, depths=modes.depths,
+                       model='Test', frequencies=modes.f0)
+        with pytest.warns(UserWarning, match='Re[(]k[)] <= 0'):
+            out = broken.with_attenuation(0.01, sound_speed_z=1500.0,
+                                          density_z=1.0)
+        assert np.isnan(out.k.imag[1])
+        assert np.isfinite(out.k.imag[[0, 2]]).all()
+
+    def test_a_non_positive_normalisation_gives_nan_attenuation(self):
+        modes = _pekeris_modes(n_modes=3)
+        phi = np.array(modes.phi, dtype=float)
+        phi[:, 1] = 0.0                       # shape integrates to zero
+        broken = Modes(k=modes.k, phi=phi, depths=modes.depths,
+                       model='Test', frequencies=modes.f0)
+        with pytest.warns(UserWarning, match='normalisation'):
+            out = broken.with_attenuation(0.01, sound_speed_z=1500.0,
+                                          density_z=1.0)
+        assert np.isnan(out.k.imag[1]), "a failed mode came back lossless"
+        assert np.isfinite(out.k.imag[[0, 2]]).all()
+
+    def test_a_healthy_mode_set_carries_no_nan(self):
+        out = _pekeris_modes(n_modes=3).with_attenuation(
+            0.01, sound_speed_z=1500.0, density_z=1.0)
+        assert np.isfinite(out.k.imag).all()

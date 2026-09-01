@@ -2275,6 +2275,38 @@ class TestReflectionFileDedupe:
         assert [float(r[0]) for r in rows[1:]] == [0.0, 30.0, 60.0]
 
 
+class TestZeroDimensionalArraysCoerceLikeTheirScalars:
+    """A 0-d ndarray is a scalar in every respect except ``isinstance``, so
+    the carriers have to see through it the way ``ssp=`` already does:
+    ``np.array(True)`` is the bool a depth guard exists to refuse, and
+    ``np.array(1600.0)`` is the scalar sound speed ``bottom=`` documents
+    itself as taking."""
+
+    def test_a_zero_dimensional_bool_is_refused_as_a_depth(self):
+        for spelling in (True, np.bool_(True), np.array(True)):
+            with pytest.raises(ConfigurationError, match='is a bool'):
+                Bathymetry.coerce(spelling)
+
+    def test_a_zero_dimensional_bool_is_refused_through_the_environment(self):
+        with pytest.raises(ConfigurationError, match='is a bool'):
+            Environment(bathymetry=np.array(True), ssp=1500.0)
+
+    def test_a_zero_dimensional_depth_coerces_to_that_depth(self):
+        assert float(Bathymetry.coerce(np.array(100.0)).depths[0]) == 100.0
+
+    def test_a_zero_dimensional_sound_speed_builds_the_same_bottom(self):
+        flat = Environment(bathymetry=100.0, ssp=1500.0, bottom=1600.0)
+        zero_d = Environment(bathymetry=100.0, ssp=1500.0,
+                             bottom=np.array(1600.0))
+        assert (zero_d.bottom.halfspace_at(range=0.0).sound_speed
+                == flat.bottom.halfspace_at(range=0.0).sound_speed)
+
+    def test_a_zero_dimensional_bool_is_refused_as_a_sound_speed(self):
+        with pytest.raises(ConfigurationError, match='is a bool'):
+            Environment(bathymetry=100.0, ssp=1500.0,
+                        bottom=np.array(True))
+
+
 class TestFieldEvalSamplingGuard:
     """``Field.eval`` interpolates the same coherent field as
     ``resample_to`` and carried the same +2.3 dB level bias with no warning:
@@ -2335,6 +2367,92 @@ class TestFieldEvalSamplingGuard:
         with pytest.warns(UserWarning, match='samples are'):
             field.resample_to(depths=field.coords['depth'],
                               ranges=field.coords['range'], method='linear')
+
+    @staticmethod
+    def _descending(field):
+        """The same field with its range axis (and data) reversed — the
+        identical physical grid, stored high-to-low."""
+        return Field(data=field.data[:, ::-1],
+                     coords={'depth': field.coords['depth'],
+                             'range': field.coords['range'][::-1]},
+                     model='Test', frequencies=field.frequencies)
+
+    def test_a_descending_range_axis_warns_like_ascending(self):
+        # ``eval`` walks a descending axis in reverse and returns the same
+        # values, so the spacing check must see the same |diff| too.
+        down = self._descending(self._field(dr=25.0, dz=1.0))
+        with pytest.warns(UserWarning, match='range samples are'):
+            down.eval(range=1050.0)
+
+    def test_orientation_leaves_the_eval_values_bit_identical(self):
+        up = self._field(dr=25.0, dz=1.0)
+        down = self._descending(up)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            a = up.eval(range=1050.0)
+            b = down.eval(range=1050.0)
+        np.testing.assert_array_equal(a.data, b.data)
+
+
+class TestFrequencyUndersamplingGuardCoversBothRangeSpellings:
+    """The frequency guard's quarter-cycle limit c/(4r) needs the field's
+    range, which lives on the ``'range'`` coord for a full-grid eval but in
+    ``pinned`` after ``.at(depth=…, range=…)`` collapses the axis — the
+    canonical single-cell spectrum interpolates the identical carrier, so
+    both spellings must warn. A descending frequency axis stores the same
+    bins as an ascending one and returns the same values, so orientation
+    must not silence the guard either."""
+
+    @staticmethod
+    def _transfer_field(ascending=True):
+        depths = np.array([40.0, 50.0])
+        ranges = np.array([5.0, 5000.0])
+        freqs = np.arange(100.0, 111.0, 1.0)     # 1 Hz bins
+        if not ascending:
+            freqs = freqs[::-1]
+        f = freqs[None, None, :]
+        r = ranges[None, :, None]
+        data = np.exp(-2j * np.pi * f * r / 1500.0) / r
+        return Field(data=np.repeat(data, depths.size, axis=0),
+                     coords={'depth': depths, 'range': ranges,
+                             'frequency': freqs},
+                     model='Test', frequencies=np.sort(freqs))
+
+    def test_full_grid_eval_warns_on_a_coarse_frequency_axis(self):
+        # 1 Hz bins against c/(4·5000 m) = 0.075 Hz.
+        field = self._transfer_field()
+        with pytest.warns(UserWarning, match='frequency samples are'):
+            field.eval(frequency=105.5)
+
+    def test_a_range_collapsed_cell_warns_like_the_full_grid(self):
+        cell = self._transfer_field().at(depth=45.0, range=5000.0)
+        assert 'range' not in cell.coords
+        assert cell.pinned['range'] == pytest.approx(5000.0)
+        with pytest.warns(UserWarning, match='frequency samples are'):
+            cell.eval(frequency=105.5)
+
+    def test_a_collapsed_cell_at_close_range_stays_silent(self):
+        # The discriminating half: at the cell's own r = 5 m the limit is
+        # c/(4·5 m) = 75 Hz, so 1 Hz bins are finely sampled — the far end
+        # of the collapsed axis must not decide for this cell.
+        cell = self._transfer_field().at(depth=45.0, range=5.0)
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            cell.eval(frequency=105.5)
+
+    def test_a_descending_frequency_axis_warns_like_ascending(self):
+        field = self._transfer_field(ascending=False)
+        with pytest.warns(UserWarning, match='frequency samples are'):
+            field.eval(frequency=105.5)
+
+    def test_orientation_leaves_the_spectrum_values_bit_identical(self):
+        up = self._transfer_field()
+        down = self._transfer_field(ascending=False)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            a = up.eval(frequency=105.5)
+            b = down.eval(frequency=105.5)
+        np.testing.assert_array_equal(a.data, b.data)
 
 
 class TestReflectionCoefficientExtrapolationIsAnnounced:

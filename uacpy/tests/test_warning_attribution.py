@@ -535,6 +535,12 @@ HAND_COUNTS_WITH_AN_IN_PACKAGE_CALLER = {
     # ``_wind_merklinger`` passes three positional arguments, so
     # ``band_integrate`` is always False on that path and the branch is dead.
     ('noise/noise.py', 'compute_windnoise'),
+    # The in-package caller is ``SeabedColumn.__setattr__``'s
+    # ``super().__setattr__`` — the same name reaching ``object``, not this
+    # method, so it cannot carry the warning. No package code assigns a
+    # delegated half-space field on a multi-column ``Bottom``, and the
+    # measured warning names the user's own file.
+    ('core/bottom.py', 'Bottom.__setattr__'),
 }
 
 

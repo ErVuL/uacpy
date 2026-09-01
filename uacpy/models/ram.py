@@ -53,7 +53,7 @@ from uacpy.core.bottom import _NON_GEOACOUSTIC_TYPES
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
 from uacpy.core.results import Result, Field
-from uacpy.core.constants import DEFAULT_SOUND_SPEED, TL_MAX_DB
+from uacpy.core.constants import DEFAULT_SOUND_SPEED, PRESSURE_FLOOR
 from uacpy.core.exceptions import (
     ConfigurationError,
     ExecutableNotFoundError,
@@ -218,11 +218,18 @@ def _interp_envelope_to_receiver_grid(src_depths, src_ranges, psi,
 
 
 def _interp_to_receiver_grid(src_depths, src_ranges, values,
-                             rcv_depths, rcv_ranges, *, sanitize=False):
+                             rcv_depths, rcv_ranges):
     """Bilinear-interpolate a PE-grid ``(depth, range)`` field onto the
     receiver grid. Real or complex ``values`` (complex via independent re/im);
-    out-of-grid samples become NaN. ``sanitize`` zeroes NaN/inf first (the
-    mpiramS pressure path). Returns ``(len(rcv_depths), len(rcv_ranges))``."""
+    out-of-grid samples become NaN.
+
+    A NaN in the source grid propagates into every receiver cell whose
+    stencil touches it. That is the point: a sample the march failed to
+    solve is no data, and substituting a zero for it would make it a real
+    pressure the interpolator averages against its neighbours, so cells
+    around a failure would come back finite and credible.
+
+    Returns ``(len(rcv_depths), len(rcv_ranges))``."""
     rd = np.atleast_1d(np.asarray(rcv_depths, dtype=float))
     rr = np.atleast_1d(np.asarray(rcv_ranges, dtype=float))
     grid = (np.asarray(src_depths, dtype=float), np.asarray(src_ranges, dtype=float))
@@ -231,8 +238,6 @@ def _interp_to_receiver_grid(src_depths, src_ranges, values,
 
     def _one(v):
         v = np.asarray(v)
-        if sanitize:
-            v = np.nan_to_num(v)
         rgi = RegularGridInterpolator(grid, v.astype(np.float64),
                                       bounds_error=False, fill_value=np.nan)
         return rgi(pts).reshape(DD.shape)
@@ -2384,7 +2389,7 @@ class RAM(PropagationModel):
             env, source, receiver, kind=kind, freq=fc, theta=theta
         )
 
-        psi_clamped = self._clamp_collins_envelope(raw, env, kind)
+        psi_marked = self._mark_diverged_collins_samples(raw, env, kind)
 
         # Receivers outside the PE output grid get NaN so pcolormesh and
         # downstream consumers render them transparent rather than as a
@@ -2393,7 +2398,7 @@ class RAM(PropagationModel):
         rcv_r = np.atleast_1d(receiver.ranges).astype(float)
 
         psi_out = _interp_envelope_to_receiver_grid(
-            raw['depths'], raw['ranges'], psi_clamped, rcv_d, rcv_r,
+            raw['depths'], raw['ranges'], psi_marked, rcv_d, rcv_r,
             carrier_rate=self._collins_carrier_rate(env, kind, fc, theta))
 
         # Same per-backend phase bookkeeping as the broadband loop; the
@@ -2433,28 +2438,48 @@ class RAM(PropagationModel):
         )
         return field
 
-    def _clamp_collins_envelope(self, raw: dict, env: Environment,
-                                kind: str) -> np.ndarray:
-        """Sanitise one Collins run's complex envelope, warning on divergence.
+    def _mark_diverged_collins_samples(self, raw: dict, env: Environment,
+                                       kind: str) -> np.ndarray:
+        """Return one Collins run's envelope with diverged samples marked
+        no-data, warning on what was marked.
 
-        Invalid samples are NaN/inf or an unphysically negative TL. A
-        negative TL implies ``|p/p0| > 1`` (field gain), impossible for a
-        passive medium, so it is rotated-Padé elastic divergence (rams0.5
-        on a fast-shear seabed) rather than a real value — folded into the
-        same clamp-and-warn path so the failure is visible instead of a
-        plausible-but-wrong number. A tiny negative near the source
-        (``|TL| < NEG_TL_TOL``) is numerical noise around 0 and is clamped
-        up to 0, not flagged.
-
-        The clamp acts on the envelope so phase is preserved: an invalid
-        sample's level is pinned to the ``TL_MAX_DB`` floor, its direction
-        kept.
+        A sample is no-data when it is NaN/inf, or when its TL is below what
+        the range allows — the rotated-Padé march on a fast-shear seabed
+        diverges into finite but hugely negative values. Those samples come
+        back as NaN, the marker the wrapper already uses for receivers
+        outside the output grid and below the seafloor, so they read as
+        absent rather than as a deep shadow zone. Every other sample is the
+        engine's own number: uacpy does not substitute a level for one the
+        model produced.
         """
-        NEG_TL_TOL = 1.0  # dB
+        # How negative a TL may legitimately be is set by the RANGE, not by a
+        # constant: TL is referenced to 1 m, so beyond that radius a passive
+        # medium cannot return more pressure than the source put out and TL
+        # cannot go below 0, while inside it the sample is closer than the
+        # reference and free-field spreading gives 20*log10(r) — -2.5 dB at
+        # dr = 0.75 m, but -44.7 dB where the lambda cap drives dr to 5.8 mm
+        # at 50 kHz. Measured on a 1 kHz ramgeo march, the minimum TL at each
+        # range tracks that bound to 0.06 dB. The allowance below it is one
+        # coherent boundary image, which doubles the pressure.
+        #
+        # Only the inside-1 m branch is a spreading law: past 1 m the bound
+        # stays at 0 dB rather than following 20*log10(r), because a
+        # waveguide spreads cylindrically and a real field at 10 km sits
+        # ~40 dB below the spherical value — bounding on spreading there
+        # would reject the whole far field.
+        IMAGE_GAIN_DB = 6.02
         tl_raw = np.asarray(raw['tl'], dtype=float)
-        invalid = ~np.isfinite(tl_raw) | (tl_raw < -NEG_TL_TOL)
+        ranges = np.asarray(raw['ranges'], dtype=float)
+        with np.errstate(divide='ignore'):
+            floor_db = 20.0 * np.log10(
+                np.minimum(np.maximum(ranges, np.finfo(float).tiny), 1.0)
+            ) - IMAGE_GAIN_DB
+        # A blow-up cannot be found by a NaN test: rams0.5.f:265 takes TL from
+        # ``alog10(cabs(ur))``, so a march that overflows the field but stays
+        # under the float32 ceiling writes finite, hugely negative samples.
+        invalid = ~np.isfinite(tl_raw) | (tl_raw < floor_db)
         n_invalid = int(np.count_nonzero(invalid))
-        if n_invalid > 0:
+        if n_invalid:
             note = ""
             if env.bottom.is_elastic and kind == 'rams':
                 note = (" The Collins rams0.5 elastic PE is numerically "
@@ -2462,27 +2487,25 @@ class RAM(PropagationModel):
                         "for an elastic seabed.")
             warnings.warn(
                 f"RAM:{kind}: {n_invalid}/{tl_raw.size} TL samples at "
-                f"f={float(raw['frequency']):.2f} Hz are NaN/inf or "
-                f"unphysically negative (Padé instability or PE divergence) "
-                f"and have been clamped to {TL_MAX_DB} dB. Try a smaller dr "
-                f"or larger np_pade.{note}",
+                f"f={float(raw['frequency']):.2f} Hz are NaN/inf or below the "
+                f"level their range allows (Padé instability or PE "
+                f"divergence) and are returned as NaN — no data there, not a "
+                f"shadow zone. Every other sample is the march's own value. "
+                f"Try a larger np_pade or a finer dz.{note}",
                 UserWarning, skip_file_prefixes=USER_FRAME_SKIP
             )
         psi_raw = np.asarray(raw['pcomplex'], dtype=np.complex128)
-        floor_mag = 10.0 ** (-TL_MAX_DB / 20.0)
         mag = np.abs(psi_raw)
         with np.errstate(invalid='ignore', divide='ignore'):
             unit = np.where(mag > 0.0, psi_raw / mag, 1.0 + 0.0j)
-        # TL < 0 means |p/p0| > 1; cap the magnitude at unity to match the
-        # ``np.maximum(tl_raw, 0.0)`` the dB path applies. An exactly-zero
-        # sample — the pressure-release surface node the fluid codes emit at
-        # z = 0 when ndz = 1 — is a valid boundary value, not divergence: it
-        # is raised to the ``TL_MAX_DB`` floor (the same spelling
-        # ``_prepend_surface_node`` writes) rather than left to read as
-        # 600 dB through the global PRESSURE_FLOOR clamp, and it is not
-        # counted in the divergence warning above.
-        mag = np.where(invalid | (mag == 0.0), floor_mag, np.minimum(mag, 1.0))
-        return mag * unit
+        # An exactly-zero sample — the pressure-release surface node the
+        # fluid codes emit at z = 0 when ndz = 1 — is a valid boundary value,
+        # not divergence, and it stays zero: the shared ``_complex_to_db``
+        # floor reports it as the one no-energy level, and it is not counted
+        # in the warning above. Every surviving magnitude is likewise the
+        # engine's own, uncapped: inside the 1 m reference radius
+        # |p/p0| > 1 is what the field is.
+        return np.where(invalid, complex(np.nan, np.nan), mag * unit)
 
     def _run_collins_one_freq(
         self,
@@ -2693,7 +2716,7 @@ class RAM(PropagationModel):
             # The same ``outpt`` call writes both files on one (z, r) grid, so
             # unequal shapes mean one is truncated. Left to itself the
             # mismatch first bites as a numpy broadcast error inside
-            # ``_clamp_collins_envelope``, naming neither file.
+            # ``_mark_diverged_collins_samples``, naming neither file.
             if tl.shape != pcomplex.shape:
                 raise FileFormatError(
                     f"RAM:{kind}: {tlgrid} decodes to a {tl.shape} grid but "
@@ -2798,19 +2821,21 @@ class RAM(PropagationModel):
         stored sample sits at ``ndz·dz`` / ``(ndz-1)·dz`` and a receiver at
         the sea surface falls outside the interpolator's grid. The surface is
         pressure-release in every Collins backend, so the node carries no
-        energy — an exact boundary value, not an extrapolation. It is written
-        at the ``TL_MAX_DB`` deep-shadow floor rather than a literal zero so
-        the row reads like every other no-energy sample uacpy returns.
+        energy — an exact boundary value, not an extrapolation. The pressure
+        is written as a literal zero and the TL as what the shared
+        ``_complex_to_db`` floor turns that zero into, so this row reports
+        the same no-energy level as every other model's, and no wrapper
+        invents one of its own.
         """
         depths = np.asarray(depths, dtype=float)
         if depths.size == 0 or depths[0] <= 0.0:
             return depths, tl, pcomplex
         n_r = np.asarray(tl).shape[1]
-        floor_mag = 10.0 ** (-TL_MAX_DB / 20.0)
+        no_energy_db = -20.0 * np.log10(PRESSURE_FLOOR)
         return (
             np.concatenate([[0.0], depths]),
-            np.vstack([np.full((1, n_r), float(TL_MAX_DB)), np.asarray(tl)]),
-            np.vstack([np.full((1, n_r), floor_mag, dtype=np.complex128),
+            np.vstack([np.full((1, n_r), no_energy_db), np.asarray(tl)]),
+            np.vstack([np.zeros((1, n_r), dtype=np.complex128),
                        np.asarray(pcomplex)]),
         )
 
@@ -3148,7 +3173,7 @@ class RAM(PropagationModel):
 
         The result is a field that is identically zero — TL ``inf``
         everywhere — with nothing to flag it:
-        :meth:`_clamp_collins_envelope` cannot fire because ``|u| = 0`` gives
+        :meth:`_mark_diverged_collins_samples` cannot fire because ``|u| = 0`` gives
         a large POSITIVE TL, not a negative or NaN one.
 
         Two cases, deliberately handled differently:
@@ -3378,7 +3403,7 @@ class RAM(PropagationModel):
                 # TL_MAX_DB and saturates the heatmap edges).
                 H[:, :, k] = _interp_envelope_to_receiver_grid(
                     raw['depths'], raw['ranges'],
-                    self._clamp_collins_envelope(raw, env, kind),
+                    self._mark_diverged_collins_samples(raw, env, kind),
                     rcv_d, rcv_r,
                     carrier_rate=self._collins_carrier_rate(
                         env, kind, float(freq), theta_k))
@@ -4530,25 +4555,25 @@ class RAM(PropagationModel):
         rcv_ranges = np.where(np.logical_and(~beyond, rcv_ranges > rout[-1]),
                               rout[-1], rcv_ranges)
 
-        # Interpolate real and imaginary parts separately. NaN samples
-        # in the centre-frequency slice (PE divergence, or a depth the
-        # march did not resolve) are zeroed before interpolation; warn if
-        # any are present so the user knows the field is not fully
-        # converged.
+        # Interpolate real and imaginary parts separately. A NaN sample in
+        # the centre-frequency slice (PE divergence, or a depth the march did
+        # not resolve) stays NaN through the interpolation and reaches the
+        # user as no data, together with the receiver cells that read it.
         n_nan_p = int(np.count_nonzero(~np.isfinite(pressure)))
         if n_nan_p > 0:
             # expected; not in filterwarnings — emerges to user
             warnings.warn(
-                f"RAM:mpiramS: {n_nan_p}/{pressure.size} "
-                f"complex samples are NaN/inf and have been zeroed "
-                f"for interpolation. Inspect the result before use.",
+                f"RAM:mpiramS: {n_nan_p}/{pressure.size} complex samples are "
+                f"NaN/inf — the march did not solve there. They are returned "
+                f"as no data, along with every receiver cell that "
+                f"interpolates one, rather than as a level.",
                 UserWarning, skip_file_prefixes=USER_FRAME_SKIP
             )
         # Receivers outside the PE output domain return NaN pressure
         # so the resulting TL row is NaN (transparent in pcolormesh)
         # instead of saturating to ``TL_MAX_DB`` via PRESSURE_FLOOR.
         pressure_rcv = _interp_to_receiver_grid(
-            zg, rout, pressure, rcv_depths, rcv_ranges, sanitize=True)
+            zg, rout, pressure, rcv_depths, rcv_ranges)
 
         # Compute TL from interpolated pressure.
         #
@@ -4581,11 +4606,9 @@ class RAM(PropagationModel):
                 range_axis=1,
             ).astype(np.complex128)
         # An exactly-zero sample is the pressure-release surface node (z = 0,
-        # where mpiramS's field is identically zero): report it at the
-        # ``TL_MAX_DB`` no-energy floor — the same spelling the Collins path
-        # uses — instead of the 600 dB the global PRESSURE_FLOOR clamp would
-        # produce.
-        pressure_field[pressure_field == 0.0] = 10.0 ** (-TL_MAX_DB / 20.0)
+        # where mpiramS's field is identically zero). It is left at zero: the
+        # shared ``_complex_to_db`` floors it to the one no-energy level every
+        # model reports, rather than this wrapper writing a level of its own.
         # NaN the r <= 0 columns — announced once by run()'s shared r=0
         # warning: the value computed at the substituted range belongs to no
         # receiver position.
@@ -4719,11 +4742,9 @@ class RAM(PropagationModel):
             range_axis=2,
         )
         # An exactly-zero sample is the pressure-release surface node
-        # (z = 0, where mpiramS's field is identically zero): report it
-        # at the ``TL_MAX_DB`` no-energy floor — the same spelling the
-        # Collins path uses — instead of the 600 dB the global
-        # PRESSURE_FLOOR clamp would produce.
-        pressure[pressure == 0.0] = 10.0 ** (-TL_MAX_DB / 20.0)
+        # (z = 0, where mpiramS's field is identically zero). It is left at
+        # zero for the shared ``_complex_to_db`` floor to report, so no
+        # wrapper writes a no-energy level of its own.
         # NaN the r <= 0 columns — announced once by run()'s shared r=0
         # warning: the value computed at the substituted range belongs
         # to no receiver position.

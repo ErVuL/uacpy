@@ -1357,8 +1357,9 @@ def read_oasr_reflection_coefficients(
     filepath : str or Path
         Path to .rco (slowness) or .trc (angle) file
     format_type : str, optional
-        'slowness' for .rco files, 'angle' for .trc files, or 'auto' to detect
-        from file extension or content (default: 'auto')
+        'slowness' or 'angle' to declare the abscissa, overriding whatever the
+        file says; 'auto' (default) reads the sampling-type code OASR stamps
+        into the header and warns if the file's extension disagrees with it.
 
     Returns
     -------
@@ -1408,15 +1409,18 @@ def read_oasr_reflection_coefficients(
                         "files only under that letter.",
         )
 
-    # Auto-detect format from extension
+    # Auto-detect from the file's own content: the header's fourth field is
+    # the sampling-type code OASR stamps as it writes (unoasr21.f:204-205),
+    # while the extension is only what the file is called. The extension is
+    # kept as a hint so a disagreement can be reported rather than followed —
+    # a renamed table used to come back with its abscissa relabelled.
+    extension_hint = None
     if format_type == 'auto':
         if filepath.suffix == '.rco':
-            format_type = 'slowness'
+            extension_hint = 'slowness'
         elif filepath.suffix == '.trc':
-            format_type = 'angle'
-        else:
-            # Will be detected from file content
-            format_type = None
+            extension_hint = 'angle'
+        format_type = None
 
     try:
         with open(filepath, 'r') as f:
@@ -1435,7 +1439,18 @@ def read_oasr_reflection_coefficients(
 
                 # Decode sampling type
                 if format_type is None:
-                    format_type = 'slowness' if sampling_type_code == 1 else 'angle'
+                    format_type = ('slowness' if sampling_type_code == 1
+                                   else 'angle')
+                    if extension_hint not in (None, format_type):
+                        warnings.warn(
+                            f"read_oasr_reflection_coefficients: "
+                            f"{filepath.name} is named {filepath.suffix} "
+                            f"(OASR writes {extension_hint} tables there), "
+                            f"but its header code {sampling_type_code} says "
+                            f"{format_type} — following the header, so the "
+                            f"abscissa is read as {format_type}. Pass "
+                            f"format_type='{extension_hint}' to override.",
+                            UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
 
                 sampling_type = format_type
             else:

@@ -1,6 +1,6 @@
 # Plotting — one convention, one workhorse
 
-> `uacpy.plot` · 50 public plotters · every result and every drawable carrier
+> `uacpy.plot` · 51 public plotters · every result and every drawable carrier
 > renders itself with `.plot()`
 
 There are two halves to the plotting surface. Anything that is a uacpy object
@@ -476,7 +476,7 @@ detection probability and the ROC.
 
 ## 7. Reference — every public plotter
 
-All 50 plotters in `uacpy.plot.__all__` — the 8 remaining names in `__all__`
+All 51 plotters in `uacpy.plot.__all__` — the 8 remaining names in `__all__`
 are the submodules themselves. **ax** marks a single-axes plotter you can
 compose with. Every entry takes `title=` except `plot_result` (it forwards
 yours) and the two `draw_*` overlays; every entry takes

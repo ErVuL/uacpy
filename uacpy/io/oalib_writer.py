@@ -902,7 +902,7 @@ def resolve_phase_speed_bounds(
     Precedence (same logic used by :func:`write_phase_speed_and_rmax`):
       1. Explicit caller values win.
       2. Otherwise: ``c_low = c_min · C_LOW_FACTOR`` and
-         ``c_high = max(c_max, env.bottom.sound_speed) · C_HIGH_FACTOR``.
+         ``c_high = max(c_max, env.bottom.halfspace_at(range=0).sound_speed) · C_HIGH_FACTOR``.
 
     A **non-geoacoustic** bottom (vacuum, rigid, or a reflection table —
     'file'/'precalc') carries no physical sound speed — modes above the
@@ -948,7 +948,8 @@ def write_phase_speed_and_rmax(
     cLow/cHigh resolve in this order:
       1. Explicit ``c_low`` / ``c_high`` (caller-supplied user override).
       2. SSP-derived: ``c_min·C_LOW_FACTOR`` and
-         ``max(c_max, env.bottom.sound_speed)·C_HIGH_FACTOR``.
+         ``max(c_max, env.bottom.halfspace_at(range=0).sound_speed)``
+         ``·C_HIGH_FACTOR``.
 
     ``rmax_m`` is converted to the km the deck expects and written at
     millimetre resolution. RMax is the range at which KRAKEN enforces

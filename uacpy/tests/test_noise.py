@@ -120,6 +120,23 @@ def test_compute_windnoise_band_integrate(freqs):
     assert band[2] == pytest.approx(spec[2] + 10 * np.log10(300.0), abs=1e-9)
 
 
+def test_compute_windnoise_band_integrate_descending_equals_ascending():
+    """Band widths come from the sorted grid and each level is returned at its
+    frequency's own position, so a descending vector gives exactly the
+    ascending band levels reversed — not the all-NaN spectrum that negative
+    bandwidths produced. The absolute anchor keeps the equality off a
+    degenerate pair: ``np.array_equal`` is False on NaN, but not on a wrong
+    finite spectrum shared by both orderings."""
+    f5 = np.array([100.0, 200.0, 400.0, 800.0, 1600.0])
+    asc = compute_windnoise(f5, u=10, water_depth='deep', band_integrate=True)
+    desc = compute_windnoise(f5[::-1], u=10, water_depth='deep',
+                             band_integrate=True)
+    assert np.array_equal(desc, asc[::-1])
+    # The 400 Hz octave band spans 300-600 Hz: spectral level + 10·log10(300)
+    # at u = 10 kn deep is 86.3316 dB re 1 µPa².
+    assert asc[2] == pytest.approx(86.33157913459968, abs=1e-6)
+
+
 def test_compute_windnoise_pinned_anchors():
     """Pin the wind-noise spectral level at four (wind, frequency) anchors.
 
@@ -476,6 +493,28 @@ class TestMarineMammalWeighting:
         # is 120 + 10·log10(∫ 10^(W/10) df) = 160.9719 dB re 1 µPa² on the
         # 500-point grid (the Southall closed form trapezoid-integrated).
         assert wl_fine == pytest.approx(160.9719, abs=1e-3)
+
+    def test_weighted_level_refuses_fewer_than_two_frequencies(self):
+        """The integral over frequency spans no bandwidth on fewer than two
+        samples, so a scalar and a one-element spectrum both raise the typed
+        error naming ``apply_weighting`` as the single-frequency form — not a
+        bare IndexError (the scalar) or a silent
+        10·log10(float-tiny) = -3076.5 dB (the one-element array)."""
+        from uacpy.noise import weighted_level
+        with pytest.raises(ConfigurationError, match='apply_weighting'):
+            weighted_level(120.0, 1000.0, "LF")
+        with pytest.raises(ConfigurationError, match='at least two'):
+            weighted_level(np.array([120.0]), np.array([1000.0]), "LF")
+
+    def test_weighted_level_accepts_the_two_frequency_boundary(self):
+        """n = 2 — a single trapezoid interval — is the smallest valid grid:
+        flat 120 dB/Hz LF-weighted over 1-2 kHz integrates to
+        149.9634 dB re 1 µPa² (120 + W(f) trapezoid-integrated by hand)."""
+        from uacpy.noise import weighted_level
+        f = np.array([1000.0, 2000.0])
+        lvl = np.array([120.0, 120.0])
+        assert weighted_level(lvl, f, "LF") == pytest.approx(
+            149.9634445674845, abs=1e-9)
 
 
 class TestWindNoiseRollOffAnchor:

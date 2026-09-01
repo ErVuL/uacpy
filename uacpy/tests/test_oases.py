@@ -2041,6 +2041,30 @@ class TestOasesDeckTitleFitsTheBinarysBuffer:
         assert line == "a b"
 
 
+class TestOasesDeckTitleIsTheEnvironmentName:
+    """Block I carries ``env.name`` itself. ``Environment`` coerces an
+    absent or falsy constructor name to ``'unnamed'`` (``_sanitize_title``),
+    so every deck a constructor-built environment produces is titled by the
+    environment — no writer holds a fallback title of its own."""
+
+    @staticmethod
+    def _title_line(tmp_path, **env_kwargs):
+        import uacpy
+        from uacpy.io.oases_writer import write_oasr_input
+        env = uacpy.Environment(bathymetry=100.0, ssp=1500.0, **env_kwargs)
+        path = tmp_path / 'deck.dat'
+        write_oasr_input(path, env,
+                         uacpy.Source(depths=50.0, frequencies=100.0),
+                         uacpy.Receiver(depths=[10.0], ranges=[1000.0]))
+        return path.read_text().splitlines()[0]
+
+    def test_an_unnamed_environments_deck_is_titled_unnamed(self, tmp_path):
+        assert self._title_line(tmp_path) == 'unnamed'
+
+    def test_a_named_environments_deck_carries_the_name(self, tmp_path):
+        assert self._title_line(tmp_path, name='wedge trial') == 'wedge trial'
+
+
 @pytest.mark.requires_binary
 class TestOaspBroadbandStampsThePhysicalCMax:
     """OASP writes the stamp on its transfer-function result (``oases.py``,

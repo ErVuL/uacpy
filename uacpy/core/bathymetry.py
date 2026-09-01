@@ -59,7 +59,13 @@ class Bathymetry(_RangeProfile):
         """
         if isinstance(value, Bathymetry):
             return value
-        if isinstance(value, (bool, np.bool_)):
+        # A 0-d ndarray is a scalar in every respect except ``isinstance``, so
+        # the bool guard has to see through it — ``np.array(True)`` otherwise
+        # walks past and builds a 1 m seafloor. ``SoundSpeedProfile.coerce``
+        # admits the same spelling.
+        if (isinstance(value, (bool, np.bool_))
+                or (isinstance(value, np.ndarray) and value.ndim == 0
+                    and value.dtype == np.bool_)):
             raise ConfigurationError(
                 f"Bathymetry: {value!r} is a bool, not a depth — as a scalar "
                 f"it would mean a {float(value):g} m deep seafloor."

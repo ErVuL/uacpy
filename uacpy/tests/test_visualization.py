@@ -472,6 +472,55 @@ class TestPlotRays:
         assert ax.get_xlim() == pytest.approx((0.0, 2.0 * 1.03))
         plt.close(fig)
 
+    @staticmethod
+    def _shallow_fan_deep_receiver():
+        # Ray fan bottoms out at 80 m; the receiver hangs at 150 m.
+        return Rays(
+            rays=[{'r': np.linspace(0, 1500, 10),
+                   'z': np.linspace(10, 80, 10),
+                   'alpha': 0.0, 'n_top_bounces': 0, 'n_bot_bounces': 0}],
+            receiver_depths=np.array([150.0]),
+            receiver_ranges=np.array([2000.0]),
+            model='Bellhop',
+        )
+
+    def test_ylim_reaches_a_receiver_below_the_ray_fan(self):
+        # With show_receivers on and no env=, drawn receiver markers below
+        # the deepest ray must sit inside the depth axis — the same
+        # guarantee the x-limit gives an at-max-range receiver.
+        fig, ax = self._shallow_fan_deep_receiver().plot()
+        assert ax.get_ylim() == pytest.approx((150.0 * 1.08, -150.0 * 0.04))
+        plt.close(fig)
+
+    def test_ylim_ignores_receivers_when_not_drawn(self):
+        # show_receivers=False draws no markers, so the depth axis spans
+        # only the fan itself.
+        fig, ax = self._shallow_fan_deep_receiver().plot(show_receivers=False)
+        assert ax.get_ylim() == pytest.approx((80.0 * 1.08, -80.0 * 0.04))
+        plt.close(fig)
+
+    def test_ylim_with_env_spans_the_water_column(self, env):
+        # env= keeps sizing the axis from env.depth when the receivers sit
+        # inside the water column.
+        rays = Rays(
+            rays=[{'r': np.linspace(0, 1500, 10),
+                   'z': np.linspace(10, 80, 10),
+                   'alpha': 0.0, 'n_top_bounces': 0, 'n_bot_bounces': 0}],
+            receiver_depths=np.array([50.0]),
+            receiver_ranges=np.array([2000.0]),
+            model='Bellhop',
+        )
+        fig, ax = rays.plot(env=env)
+        assert ax.get_ylim() == pytest.approx((100.0 * 1.08, -100.0 * 0.04))
+        plt.close(fig)
+
+    def test_ylim_reaches_a_receiver_below_the_seafloor(self, env):
+        # A receiver deeper than env.depth is still a drawn marker, so the
+        # axis reaches it rather than sizing on the water column alone.
+        fig, ax = self._shallow_fan_deep_receiver().plot(env=env)
+        assert ax.get_ylim() == pytest.approx((150.0 * 1.08, -150.0 * 0.04))
+        plt.close(fig)
+
 
 class TestPlotArrivals:
     def test_stem_plot(self):

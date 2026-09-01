@@ -318,6 +318,33 @@ class TestBellhopRunModes:
             [100.0, 200.0, 300.0])
 
 
+class TestBroadbandAttenuationWarningNamesTheTracedCarrier:
+    """The volume-attenuation warning is anchored at the carrier the single
+    ray trace actually ran at — the source-derived fc — not the resolved
+    band's midpoint: an explicit off-centre ``frequencies=`` band moves the
+    midpoint away from the traced carrier, and a bound anchored there
+    understates the true band-edge error."""
+
+    def test_off_centre_explicit_band_reports_the_traced_fc_bound(self):
+        from uacpy.core.absorption import Thorp
+        env = Environment(
+            name='thorp', bathymetry=100.0, ssp=1500.0, absorption=Thorp(),
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=1700.0, density=1.8,
+                                      attenuation=0.5))
+        source = Source(depths=50.0, frequencies=10000.0)
+        receiver = Receiver(depths=[50.0], ranges=[200.0])
+        # Traced carrier 10 kHz; band midpoint 12 kHz. Anchored at the
+        # midpoint the Thorp bound reads 0.577 dB/km; at the traced
+        # carrier it is 0.872 dB/km.
+        with pytest.warns(UserWarning,
+                          match=r'traced once at 1e\+04 Hz'
+                                r'(?s:.*)0\.872 dB/km'):
+            Bellhop(verbose=False).run(
+                env, source, receiver, run_mode=RunMode.BROADBAND,
+                frequencies=np.array([8000.0, 16000.0]))
+
+
 class TestRunWithBounceConstructorPlumbing:
     """Verify Bellhop.run_with_bounce passes through volume-attenuation /
     c_low / c_high to the spawned Bounce instance."""

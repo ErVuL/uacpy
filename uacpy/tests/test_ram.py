@@ -619,7 +619,7 @@ class TestSourceAgainstTheDepressedSurface:
     """``matrc`` zeroes every row down to ``izsrf``
     (``ramsurf1.5.f:281-290``) while ``selfs`` plants the source without
     consulting it (``:396-400``), so a source inside the depression yields an
-    identically-zero field. ``_clamp_collins_envelope`` cannot catch it:
+    identically-zero field. ``_mark_diverged_collins_samples`` cannot catch it:
     ``|u| = 0`` is a large POSITIVE TL, not a negative or NaN one."""
 
     @staticmethod
@@ -659,6 +659,116 @@ class TestSourceAgainstTheDepressedSurface:
             warnings.simplefilter('error')
             self._model()._check_source_below_depressed_surface(
                 self._surface(30.0), 100.0, 2.0)
+
+
+class TestCollinsDivergenceIsMarkedNoDataNotOverwritten:
+    """A diverged Collins march is reported, never repaired: the samples come
+    back as NaN — the marker the wrapper already uses for receivers off the
+    grid — instead of a level uacpy invented, which would read as a deep
+    shadow zone. What separates divergence from a loud near field is the
+    RANGE, not a fixed number of dB: TL is referenced to 1 m, so beyond that
+    radius TL cannot go below 0, while inside it free-field spreading gives
+    20*log10(r) — -2.5 dB at dr = 0.75 m and -44.7 dB where the lambda cap
+    drives dr to 5.8 mm at 50 kHz. And it cannot be a NaN test, since
+    ``rams0.5.f:265`` takes TL from ``alog10(cabs(ur))``: a blow-up under the
+    float32 ceiling stays finite."""
+
+    @staticmethod
+    def _fluid_env():
+        return Environment(
+            name='short', bathymetry=100.0, ssp=1500.0,
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=1700.0, density=1.8,
+                                      attenuation=0.5))
+
+    def test_a_finite_near_source_sample_keeps_its_value(self):
+        src = Source(depths=50.0, frequencies=1000.0)
+        rcv = Receiver(depths=[50.0], ranges=[0.75, 7.5, 30.0])
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            field = RAM(verbose=False, backend='ramgeo',
+                        dr=0.75).compute_tl(self._fluid_env(), src, rcv)
+        noise = [str(w.message) for w in caught
+                 if 'divergence' in str(w.message)]
+        assert not noise, noise
+        db = np.asarray(field.db).ravel()
+        assert np.isfinite(db).all()
+        # r = 0.75 m sits inside the 1 m reference radius, so its TL is
+        # legitimately negative and is the march's own number.
+        assert db[0] < 0.0, f"near-source TL {db[0]:.2f} dB"
+
+    def test_a_nonfinite_grid_is_marked_no_data_and_warned(self):
+        raw = {
+            'tl': np.array([[60.0, np.inf, -50.0],
+                            [70.0, 80.0, 90.0]]),
+            'pcomplex': np.array([[1e-3, 1e6, 3e2],
+                                  [1e-3, 1e-4, 1e-5]], dtype=complex),
+            'ranges': np.array([10.0, 20.0, 30.0]),
+            'frequency': 100.0,
+        }
+        with pytest.warns(UserWarning, match='returned as NaN') as caught:
+            psi = RAM(verbose=False)._mark_diverged_collins_samples(
+                raw, self._fluid_env(), 'ramgeo')
+        msgs = [str(w.message) for w in caught if 'NaN' in str(w.message)]
+        # The non-finite sample and the -50 dB one at 30 m are both counted;
+        # the advice must not name the measured-harmful remedy.
+        assert any('2/6' in m for m in msgs), msgs
+        assert all('smaller dr' not in m for m in msgs), msgs
+        assert np.isnan(psi[0, 1]) and np.isnan(psi[0, 2])
+        assert np.abs(psi[0, 0]) == pytest.approx(1e-3)
+
+    def test_a_finite_but_diverged_grid_is_marked_no_data(self):
+        """The regression a NaN gate introduces: rams0.5 writes TL through
+        ``alog10``, so an elastic march that blows up without overflowing
+        delivers finite samples hundreds of dB negative. Nothing in the grid
+        is non-finite, and every such sample must still be caught."""
+        raw = {
+            'tl': np.array([[60.0, -2587.0, -900.0],
+                            [70.0, 80.0, 90.0]]),
+            'pcomplex': np.array([[1e-3, 1e30, 1e20],
+                                  [1e-3, 1e-4, 1e-5]], dtype=complex),
+            'ranges': np.array([100.0, 200.0, 300.0]),
+            'frequency': 500.0,
+        }
+        with pytest.warns(UserWarning, match='returned as NaN') as caught:
+            psi = RAM(verbose=False)._mark_diverged_collins_samples(
+                raw, self._fluid_env(), 'rams')
+        assert any('2/6' in str(w.message) for w in caught)
+        assert np.isnan(psi[0, 1]) and np.isnan(psi[0, 2])
+
+    def test_the_allowed_level_follows_the_range(self):
+        """Both sides of the rule at once: -30 dB is the march diverging at
+        30 m, where TL cannot go below 0, and an ordinary value at 5.8 mm —
+        the lambda-capped first step at 50 kHz, where free-field spreading
+        alone gives -44.7 dB. A fixed dB threshold cannot separate these."""
+        raw = {
+            'tl': np.array([[-30.0, -44.0]]),
+            'pcomplex': np.array([[31.6, 158.0]], dtype=complex),
+            'ranges': np.array([30.0, 0.0058]),
+            'frequency': 50000.0,
+        }
+        with pytest.warns(UserWarning, match='returned as NaN') as caught:
+            psi = RAM(verbose=False)._mark_diverged_collins_samples(
+                raw, self._fluid_env(), 'ramgeo')
+        assert any('1/2' in str(w.message) for w in caught)
+        assert np.isnan(psi[0, 0])
+        assert np.abs(psi[0, 1]) == pytest.approx(158.0)
+
+    def test_a_few_dB_of_near_field_gain_is_not_divergence(self):
+        """The deepest legitimate negative at dr = 0.75 m is -2.49 dB, and it
+        is the engine's own number: no warning, magnitude uncapped."""
+        raw = {
+            'tl': np.array([[-2.49, 40.0]]),
+            'pcomplex': np.array([[1.33, 1e-2]], dtype=complex),
+            'ranges': np.array([0.75, 100.0]),
+            'frequency': 1000.0,
+        }
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            psi = RAM(verbose=False)._mark_diverged_collins_samples(
+                raw, self._fluid_env(), 'ramgeo')
+        assert not [w for w in caught if 'NaN' in str(w.message)]
+        assert np.abs(psi)[0, 0] == pytest.approx(1.33)
 
 
 class TestSeafloorGuardCoversEveryBackend:
@@ -1128,12 +1238,12 @@ class TestConstructorGuards:
                     if 'absorbing_layer_attn' in str(w.message)]
 
 
-class TestClampCollinsEnvelope:
-    """``_clamp_collins_envelope`` sanitises one Collins run: NaN/inf TL and
-    unphysically negative TL (|p/p0| > 1, impossible for a passive medium)
-    are clamped to the TL_MAX_DB floor with a counting UserWarning, phase
-    preserved; a small negative near 0 and the z = 0 surface node are valid
-    values, clamped without being counted."""
+class TestMarkDivergedCollinsSamples:
+    """``_mark_diverged_collins_samples`` reports one Collins run without
+    repairing it: NaN/inf, and any TL below what its range allows, come back
+    as NaN with a counting UserWarning; every other sample is the engine's
+    own number, phase and magnitude untouched — including the exact zero at
+    the z = 0 pressure-release node, which the shared dB conversion floors."""
 
     FLOOR = 10.0 ** (-200.0 / 20.0)
 
@@ -1141,14 +1251,19 @@ class TestClampCollinsEnvelope:
     def _raw():
         pcomplex = np.array([
             0.3 * np.exp(0.7j),      # valid sample
-            2.0 * np.exp(0.3j),      # TL = -6 dB: divergence
+            2e30 * np.exp(0.3j),     # TL = -600 dB: divergence
             np.nan + 1j * np.nan,    # NaN
             5.0 + 0.0j,              # TL = +inf marker below
-            1.06 * np.exp(-0.2j),    # TL = -0.5 dB: noise around 0
+            1.06 * np.exp(-0.2j),    # TL = -0.5 dB, read at 0.75 m
             0.0 + 0.0j,              # surface node
         ])
-        tl = np.array([10.46, -6.0, np.nan, np.inf, -0.5, 200.0])
-        return {'tl': tl, 'pcomplex': pcomplex, 'frequency': 100.0}
+        tl = np.array([10.46, -600.0, np.nan, np.inf, -0.5, 200.0])
+        # The -0.5 dB sample sits inside the 1 m reference radius, where
+        # free-field spreading allows -2.5 dB; the rest are past it, where
+        # nothing below 0 dB is physical.
+        ranges = np.array([10.0, 100.0, 200.0, 300.0, 0.75, 500.0])
+        return {'tl': tl, 'pcomplex': pcomplex, 'ranges': ranges,
+                'frequency': 100.0}
 
     @staticmethod
     def _envs():
@@ -1161,45 +1276,45 @@ class TestClampCollinsEnvelope:
                               bottom=_elastic_halfspace())
         return fluid, elastic
 
-    def test_divergent_samples_are_floored_with_a_counting_warning(self):
+    def test_diverged_samples_come_back_as_no_data(self):
         fluid, _ = self._envs()
         m = RAM(verbose=False)
         with pytest.warns(UserWarning, match=r'3/6 TL samples') as rec:
-            out = m._clamp_collins_envelope(self._raw(), fluid, 'ramgeo')
-        assert '200' in str(rec[0].message)
-        # Divergent magnitudes pinned to the 200 dB floor, phase kept.
-        assert out[1] == pytest.approx(self.FLOOR * np.exp(0.3j))
-        assert out[2] == pytest.approx(self.FLOOR + 0.0j)
-        assert out[3] == pytest.approx(self.FLOOR + 0.0j)
+            out = m._mark_diverged_collins_samples(self._raw(), fluid, 'ramgeo')
+        assert 'returned as NaN' in str(rec[0].message)
+        assert np.isnan(out[1]) and np.isnan(out[2]) and np.isnan(out[3])
 
     def test_valid_samples_pass_through_unchanged(self):
         fluid, _ = self._envs()
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
-            out = RAM(verbose=False)._clamp_collins_envelope(
+            out = RAM(verbose=False)._mark_diverged_collins_samples(
                 self._raw(), fluid, 'ramgeo')
         assert out[0] == pytest.approx(0.3 * np.exp(0.7j))
 
-    def test_noise_and_surface_node_are_not_counted_as_divergence(self):
+    def test_near_field_gain_and_surface_node_are_not_divergence(self):
         fluid, _ = self._envs()
         raw = self._raw()
-        # Keep only the three uncounted kinds: valid, small negative, zero.
-        for key in ('tl', 'pcomplex'):
+        # Keep only the three uncounted kinds: valid, near-field gain, zero.
+        for key in ('tl', 'pcomplex', 'ranges'):
             raw[key] = raw[key][[0, 4, 5]]
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter('always')
-            out = RAM(verbose=False)._clamp_collins_envelope(
+            out = RAM(verbose=False)._mark_diverged_collins_samples(
                 raw, fluid, 'ramgeo')
         assert not [w for w in caught if 'TL samples' in str(w.message)]
-        # |p/p0| slightly above 1 is capped to 1, phase kept.
-        assert out[1] == pytest.approx(1.0 * np.exp(-0.2j))
-        # The z = 0 pressure-release node is raised to the floor, not 600 dB.
-        assert out[2] == pytest.approx(self.FLOOR + 0.0j)
+        # |p/p0| above 1 read inside the 1 m reference radius is the field,
+        # and comes back as computed.
+        assert out[1] == pytest.approx(1.06 * np.exp(-0.2j))
+        # The z = 0 pressure-release node keeps its literal zero: the shared
+        # dB conversion floors it to the one no-energy level uacpy reports,
+        # rather than this wrapper writing a second one.
+        assert out[2] == 0.0 + 0.0j
 
     def test_rams_elastic_divergence_names_the_stable_alternatives(self):
         _, elastic = self._envs()
         with pytest.warns(UserWarning, match='OAST / Scooter'):
-            RAM(verbose=False)._clamp_collins_envelope(
+            RAM(verbose=False)._mark_diverged_collins_samples(
                 self._raw(), elastic, 'rams')
 
 

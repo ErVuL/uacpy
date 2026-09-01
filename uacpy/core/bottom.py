@@ -32,6 +32,69 @@ _NON_GEOACOUSTIC_TYPES = frozenset({'vacuum', 'rigid', 'file', 'precalc'})
 # the interfacial ``roughness`` is meaningful on them.
 _PARAMETER_FREE_TYPES = frozenset({'vacuum', 'rigid'})
 
+# Half-space fields a ``SeabedColumn`` / ``Bottom`` write follows through to
+# the stored boundaries, mirroring ``Surface``'s delegated set.
+_HALFSPACE_DELEGATED = frozenset({
+    'acoustic_type', 'density', 'sound_speed', 'attenuation', 'roughness',
+    'shear_speed', 'shear_attenuation', 'grain_size_phi', 'reflection_file',
+})
+
+# Delegated fields that define what kind of boundary a half-space is. A write
+# to one cannot be validated field-by-field (the construction rules couple it
+# to the other fields), so the write is refused rather than stored unvalidated.
+_HALFSPACE_TYPE_FIELDS = frozenset({'acoustic_type', 'reflection_file'})
+
+
+def _validate_halfspace_write(owner: str, name, value, halfspaces, layered):
+    """Apply the ``BoundaryProperties`` construction rules to a write
+    delegated to ``halfspaces``, so the carrier cannot store a value its
+    constructor would refuse. Returns the value coerced to float."""
+    if name in _HALFSPACE_TYPE_FIELDS:
+        raise ConfigurationError(
+            f"{owner}.{name} cannot be assigned in place: it defines what "
+            f"kind of boundary the half-space is, and the construction rules "
+            f"couple it to the other fields. Build a new BoundaryProperties "
+            f"(and a bottom from it) instead.")
+    # A layered seabed carries the same field on every layer, so a flat write
+    # cannot say which depth the caller means.
+    if layered:
+        raise ConfigurationError(
+            f"{owner}.{name} = {value!r}: this seabed has sediment layers, so "
+            f"a flat write cannot say whether you mean a layer or the "
+            f"half-space below them. Assign to the layer "
+            f"(``.layers[j].{name}``) or to the half-space "
+            f"(``.halfspace.{name}``) you mean.")
+    # vacuum/rigid half-spaces carry no acoustic parameters, so a delegated
+    # write of one is the conflict the constructor's explicit-conflict guard
+    # rejects. ``roughness`` stays writable — every boundary type has an
+    # interface.
+    if name != 'roughness':
+        bare = sorted({h.acoustic_type for h in halfspaces
+                       if h.acoustic_type in _PARAMETER_FREE_TYPES})
+        if bare:
+            raise ConfigurationError(
+                f"{owner}.{name} = {value!r}: this seabed has "
+                f"{'/'.join(bare)} half-space(s), which ignore half-space "
+                f"acoustic parameters. Build a half-space BoundaryProperties "
+                f"to give the seabed geoacoustics.")
+    if name == 'grain_size_phi':
+        # ϕ = −log₂(d/mm) is signed (gravel is negative), so the non-negative
+        # rule the other fields take does not apply, and ``None`` is the
+        # field's own unset value.
+        return None if value is None else float(value)
+    value = float(value)
+    if name == 'density':
+        _require_positive(value, f"{owner} density", hint="g/cm^3")
+    elif name == 'sound_speed' and any(h.acoustic_type == 'half-space'
+                                       for h in halfspaces):
+        _require_positive(value, f"{owner} sound_speed on a half-space",
+                          hint="m/s")
+    else:
+        _require_non_negative(value, f"{owner} {name}")
+    if name in ('attenuation', 'shear_attenuation'):
+        _require_attenuation_in_range(value, f"{owner} {name}")
+    return value
+
 
 @dataclass
 class SedimentLayer:
@@ -598,6 +661,19 @@ class SeabedColumn:
     def copy(self) -> 'SeabedColumn':
         """Deep copy (symmetric with the other carriers)."""
         return _copy.deepcopy(self)
+
+    def __setattr__(self, name, value):
+        # Writes to a half-space field follow through to ``halfspace``. A plain
+        # assignment would create an instance attribute that echoes the new
+        # value back while ``at()``, ``sample_at_depths()``, the repr and every
+        # writer — all of which read ``halfspace`` — keep the previous one.
+        if name in _HALFSPACE_DELEGATED and 'halfspace' in self.__dict__:
+            value = _validate_halfspace_write(
+                type(self).__name__, name, value, [self.halfspace],
+                bool(self.layers))
+            setattr(self.halfspace, name, value)
+            return
+        super().__setattr__(name, value)
 
     def _layer_at(self, depth: float) -> Optional[SedimentLayer]:
         """Internal: the :class:`SedimentLayer` containing sub-bottom ``depth``
@@ -1204,6 +1280,28 @@ class Bottom:
     def copy(self) -> 'Bottom':
         """Deep copy (symmetric with the other carriers)."""
         return _copy.deepcopy(self)
+
+    def __setattr__(self, name, value):
+        # Writes to a half-space field follow through to every column. A plain
+        # assignment would create an instance attribute that echoes the new
+        # value back while ``halfspace_at()`` — and every writer and model
+        # reading it — kept the stored half-spaces.
+        if name in _HALFSPACE_DELEGATED and 'columns' in self.__dict__:
+            halfspaces = [c.halfspace for c in self.columns]
+            value = _validate_halfspace_write(
+                type(self).__name__, name, value, halfspaces,
+                any(c.layers for c in self.columns))
+            if len(self.columns) > 1:
+                warnings.warn(
+                    f"Bottom.{name} = {value!r} sets all {len(self.columns)} "
+                    f"range columns to the same value, flattening any range "
+                    f"dependence. Assign to .columns[i].halfspace.{name} to "
+                    f"write a single column.",
+                    UserWarning, stacklevel=2)
+            for halfspace in halfspaces:
+                setattr(halfspace, name, value)
+            return
+        super().__setattr__(name, value)
 
     # ── factories (mirror SoundSpeedProfile.from_*) ─────────────────────────
     @classmethod

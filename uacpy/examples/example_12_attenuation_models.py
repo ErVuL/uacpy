@@ -326,7 +326,7 @@ def scenario_b_environmental_sensitivity():
     print(f"    • Depth (0-6000m): {min(atten_vs_depth):.3f} to {max(atten_vs_depth):.3f} dB/km "
           f"(range: {max(atten_vs_depth)-min(atten_vs_depth):.3f} dB/km)")
 
-    print("  ✓ Saved: output/example_12b_environmental_sensitivity.png")
+    print(f"  ✓ Saved: {OUTPUT_DIR / 'example_12b_environmental_sensitivity.png'}")
 
 
 def scenario_c_unit_conversions():
@@ -412,7 +412,7 @@ def scenario_c_unit_conversions():
     plt.savefig(OUTPUT_DIR / 'example_12c_unit_conversions.png', dpi=150, bbox_inches='tight')
     plt.close()
 
-    print("  ✓ Saved: output/example_12c_unit_conversions.png")
+    print(f"  ✓ Saved: {OUTPUT_DIR / 'example_12c_unit_conversions.png'}")
 
 
 def scenario_d_plot_absorption_feature():

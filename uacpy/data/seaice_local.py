@@ -160,7 +160,8 @@ def download_seaice_db(cache_dir=None, *, years=None, timeout=120.0,
                     f"month {m + 1} over {years}.",
                     remediation="Retry, or pass a different `years` range.",
                 )
-            # Land and pole-hole cells are NaN in every monthly grid, so
+            # Land and coast cells are NaN in every monthly grid (the
+            # pole hole is not: it is filled at 1.0, see _to_fraction), so
             # their climatology is NaN; numpy reports that case through
             # warnings.warn ("Mean of empty slice"), which np.errstate does
             # not cover, so both channels are silenced here.

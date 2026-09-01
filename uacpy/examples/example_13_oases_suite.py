@@ -136,7 +136,7 @@ def main():
     fig1.savefig(OUTPUT_DIR / 'example_13_oast_tl.png',
                  dpi=150, bbox_inches='tight')
     plt.close(fig1)
-    print("  ✓ Saved: output/example_13_oast_tl.png")
+    print(f"  ✓ Saved: {OUTPUT_DIR / 'example_13_oast_tl.png'}")
 
     # Plot 2: OASR reflection coefficient (1-D R(θ) and phase).
     if oasr_success and result_oasr is not None:
@@ -154,7 +154,7 @@ def main():
         fig2.savefig(OUTPUT_DIR / 'example_13_oasr_reflection.png',
                      dpi=150, bbox_inches='tight')
         plt.close(fig2)
-        print("  ✓ Saved: output/example_13_oasr_reflection.png")
+        print(f"  ✓ Saved: {OUTPUT_DIR / 'example_13_oasr_reflection.png'}")
 
         # Broadband: also save a |R(θ, f)| heatmap (no helper for this yet).
         if result_oasr.is_broadband:
@@ -174,7 +174,7 @@ def main():
             fig2b.savefig(OUTPUT_DIR / 'example_13_oasr_broadband.png',
                           dpi=150, bbox_inches='tight')
             plt.close(fig2b)
-            print("  ✓ Saved: output/example_13_oasr_broadband.png")
+            print(f"  ✓ Saved: {OUTPUT_DIR / 'example_13_oasr_broadband.png'}")
 
     # Plot 3: OASN spatial covariance heatmap (Covariance → cov.plot()).
     if oasn_success and result_oasn is not None:
@@ -182,7 +182,7 @@ def main():
         fig3.savefig(OUTPUT_DIR / 'example_13_oasn_covariance.png',
                      dpi=150, bbox_inches='tight')
         plt.close(fig3)
-        print("  ✓ Saved: output/example_13_oasn_covariance.png")
+        print(f"  ✓ Saved: {OUTPUT_DIR / 'example_13_oasn_covariance.png'}")
 
     # Plot 4: OASP — broadband transfer function. Slice the broadband
     # Field at the centre frequency to get a 2-D narrowband Field, then
@@ -196,7 +196,7 @@ def main():
         fig4.savefig(OUTPUT_DIR / 'example_13_oasp_tl.png',
                      dpi=150, bbox_inches='tight')
         plt.close(fig4)
-        print("  ✓ Saved: output/example_13_oasp_tl.png")
+        print(f"  ✓ Saved: {OUTPUT_DIR / 'example_13_oasp_tl.png'}")
 
         # Synthesized time trace at one (depth, range) using a Gaussian pulse.
         d_pick = float(source.depths[0])
@@ -216,7 +216,7 @@ def main():
             fig5.savefig(OUTPUT_DIR / 'example_13_oasp_trace.png',
                          dpi=150, bbox_inches='tight')
             plt.close(fig5)
-            print("  ✓ Saved: output/example_13_oasp_trace.png")
+            print(f"  ✓ Saved: {OUTPUT_DIR / 'example_13_oasp_trace.png'}")
         except Exception as e:
             print(f"  ! Skipped time-series synthesis: {e}")
 

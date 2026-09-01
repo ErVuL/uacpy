@@ -1632,6 +1632,53 @@ class TestElasticSeaSurfaceRunsUnderTheCompressionalFloor:
             f"Scholte-mode solve reads as several hundred dB")
 
 
+class TestElasticSurfaceFloorIncludesTheFluidSeabed:
+    """The derived ``c_low`` under an elastic surface reads the fluid seabed's
+    compressional speeds, not just the water column: ``krakenc.f90:230`` only
+    ever *raises* the written floor (``cLow = MAX( cLow, cMin )``), so a floor
+    at the water minimum deletes every mode ducted in a sediment layer slower
+    than the water."""
+
+    @staticmethod
+    def _ice_over_slow_mud_env():
+        from uacpy.core.surface import Surface
+        return Environment(
+            name='canopy-mud', bathymetry=100.0, ssp=1500.0,
+            bottom=SeabedColumn(
+                layers=[SedimentLayer(thickness=20.0, sound_speed=1450.0,
+                                      density=1.5, attenuation=0.1)],
+                halfspace=BoundaryProperties(
+                    acoustic_type='half-space', sound_speed=1700.0,
+                    density=1.8, attenuation=0.5)),
+            surface=Surface(properties=[BoundaryProperties(
+                acoustic_type='half-space', sound_speed=3500.0,
+                shear_speed=1800.0, density=0.9, attenuation=1.0,
+                shear_attenuation=2.0)]))
+
+    def test_derived_floor_is_the_slowest_seabed_speed(self):
+        # water 1500, mud layer 1450, halfspace 1700 -> 1450
+        assert Kraken()._c_low_for(self._ice_over_slow_mud_env()) == \
+            pytest.approx(1450.0)
+
+    @pytest.mark.requires_binary
+    def test_slow_sediment_modes_survive_the_derived_floor(self):
+        env = self._ice_over_slow_mud_env()
+        source = Source(depths=50.0, frequencies=200.0)
+        receiver = Receiver(depths=[30.0, 60.0, 90.0],
+                            ranges=[2000.0, 5000.0])
+        k_default = Kraken(verbose=False).compute_modes(env, source).k
+        k_explicit = Kraken(c_low=1450.0, verbose=False).compute_modes(
+            env, source).k
+        assert len(k_default) == len(k_explicit), (
+            f"the derived floor lost {len(k_explicit) - len(k_default)} of "
+            f"{len(k_explicit)} modes")
+        db_default = np.asarray(Kraken(verbose=False).compute_tl(
+            env, source, receiver).db)
+        db_explicit = np.asarray(Kraken(c_low=1450.0, verbose=False)
+                                 .compute_tl(env, source, receiver).db)
+        np.testing.assert_allclose(db_default, db_explicit, rtol=0, atol=0.01)
+
+
 class TestSurfaceRoughnessOnATabulatedTop:
     """A tabulated top boundary cannot carry the sea-surface roughness.
 

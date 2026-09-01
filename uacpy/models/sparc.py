@@ -1284,7 +1284,7 @@ class SPARC(PropagationModel):
 
     def _run_sparc(self, base_name: str, work_dir: Path):
         """
-        Run SPARC as a subprocess (180 s timeout by default).
+        Run SPARC as a subprocess (600 s timeout by default).
 
         Delegates to ``PropagationModel._run_subprocess`` (which raises the
         child stack limit — required because ``MARCH`` declares twelve

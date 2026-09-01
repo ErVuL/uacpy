@@ -322,7 +322,7 @@ rm -rf uacpy
 Three entry points, depending on what you need:
 
 - **[`docs/`](./docs/README.md) — the guided documentation.** 20 pages (22
-  counting the two index READMEs) with 126
+  counting the two index READMEs) with 127
   generated figures: one per model (Bellhop, Kraken, RAM, Scooter, SPARC,
   Bounce, OASES), plus guides to environments, sources and receivers, results,
   plotting, signal processing, arrays, communications, noise, sonar, external

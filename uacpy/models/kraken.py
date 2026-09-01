@@ -399,6 +399,13 @@ class Kraken(PropagationModel):
         (``core/constants.py``'s ``SEA_ICE_*`` presets and
         ``data/seaice_local.py``), for a mechanism that is not the cause.
 
+        The seabed term sweeps every compressional speed the deck carries
+        (``Bottom.all_sound_speeds``) whichever medium set ``ElasticFlag``:
+        a fluid sediment layer slower than the water — mud under an ice
+        canopy — ducts modes of its own, and since ``krakenc.f90:230`` only
+        ever raises the written floor, a floor at the water minimum would
+        silently delete them.
+
         The water term reads ``env.ssp.data``, not
         :meth:`~uacpy.core.ssp.SoundSpeedProfile.to_pairs`: that method returns
         the **range-0 column** of a range-dependent profile by contract, while
@@ -455,8 +462,7 @@ class Kraken(PropagationModel):
             # choice for a fluid environment.
             return 0.0
         speeds = [float(env.ssp.data.min())]
-        if env.has_elastic_bottom:
-            speeds.extend(env.bottom.all_sound_speeds())
+        speeds.extend(env.bottom.all_sound_speeds())
         return min(speeds)
 
     def _has_elastic_surface(self, env) -> bool:

@@ -7,6 +7,7 @@ to any other carrier type).
 import pytest
 
 import copy
+import warnings
 
 import numpy as np
 
@@ -1106,3 +1107,110 @@ class TestAtAndIselReturnCopies:
         before = float(bottom.columns[2].layers[0].thickness)
         bottom.isel(range=2).layers[0].thickness = 999.0
         assert float(bottom.columns[2].layers[0].thickness) == before
+
+
+class TestBottomDelegatedWritesReachTheHalfspaces:
+    """``bottom.sound_speed = 1610`` used to land in ``__dict__`` where
+    nothing reads it: ``halfspace_at`` — and every writer and model behind
+    it — reads ``columns``, so the attribute echoed 1610 back while every
+    engine kept the stored half-spaces. The write now follows
+    ``Surface.__setattr__``'s contract: it is validated, propagates to
+    every column's half-space, and warns on a multi-column bottom that the
+    broadcast flattens range dependence."""
+
+    def test_a_write_lands_where_halfspace_at_reads(self):
+        b = Bottom.from_halfspace(_hs())
+        b.sound_speed = 1610.0
+        assert b.columns[0].halfspace.sound_speed == pytest.approx(1610.0)
+        assert b.halfspace_at(range=0.0).sound_speed == pytest.approx(1610.0)
+        assert 'sound_speed' not in vars(b)
+
+    def test_a_multi_column_write_warns_and_reaches_every_column(self):
+        b = Bottom.from_halfspaces([0.0, 5000.0],
+                                   sound_speed=[1600.0, 1700.0],
+                                   density=1.8, attenuation=0.4)
+        with pytest.warns(UserWarning, match=r"sets all 2 range columns"):
+            b.sound_speed = 1650.0
+        assert [c.halfspace.sound_speed for c in b.columns] == [1650.0, 1650.0]
+        assert b.halfspace_at(
+            range=5000.0).sound_speed == pytest.approx(1650.0)
+
+    def test_the_multi_column_warning_points_at_columns(self):
+        b = Bottom.from_halfspaces([0.0, 5000.0],
+                                   sound_speed=[1600.0, 1700.0],
+                                   density=1.8, attenuation=0.4)
+        with pytest.warns(UserWarning, match=r"\.columns\[i\]\.halfspace"):
+            b.roughness = 0.3
+
+    def test_a_single_column_write_is_silent(self):
+        b = Bottom.from_halfspace(_hs())
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            b.roughness = 0.5
+        assert not [w for w in caught if issubclass(w.category, UserWarning)]
+        assert b.halfspace_at(range=0.0).roughness == pytest.approx(0.5)
+
+    def test_type_fields_are_not_assignable(self):
+        b = Bottom.from_halfspace(_hs())
+        for name, value in (('acoustic_type', 'rigid'),
+                            ('reflection_file', 'bottom.brc')):
+            with pytest.raises(ConfigurationError, match='cannot be assigned'):
+                setattr(b, name, value)
+
+    def test_numeric_rules_mirror_the_constructor(self):
+        b = Bottom.from_halfspace(_hs())
+        with pytest.raises(ConfigurationError, match='must be positive'):
+            b.density = -3.0
+        with pytest.raises(ConfigurationError, match='must be positive'):
+            b.sound_speed = 0.0
+        with pytest.raises(ConfigurationError, match='exceeds'):
+            b.attenuation = 500.0
+        with pytest.raises(ConfigurationError, match='non-negative'):
+            b.roughness = -1.0
+        assert b.columns[0].halfspace.sound_speed == pytest.approx(1800.0)
+        assert b.columns[0].halfspace.density == pytest.approx(1.9)
+
+    def test_grain_size_phi_keeps_its_sign_and_its_unset_value(self):
+        # phi = -log2(d/mm) is signed (gravel is negative), so the
+        # non-negative rule the other fields take must not reach it, and
+        # None is the field's own unset value.
+        b = Bottom.from_halfspace(_hs())
+        b.grain_size_phi = -1.5
+        assert b.halfspace_at(range=0.0).grain_size_phi == pytest.approx(-1.5)
+        b.grain_size_phi = None
+        assert b.halfspace_at(range=0.0).grain_size_phi is None
+
+    def test_a_layered_bottom_refuses_the_flat_write(self):
+        b = Bottom.from_column(SeabedColumn(layers=_layers(), halfspace=_hs()))
+        with pytest.raises(ConfigurationError, match='layer'):
+            b.sound_speed = 1610.0
+        assert b.columns[0].halfspace.sound_speed == pytest.approx(1800.0)
+        assert 'sound_speed' not in vars(b)
+
+    def test_a_rigid_bottom_rejects_halfspace_params_but_takes_roughness(self):
+        b = Bottom.from_halfspace(BoundaryProperties(acoustic_type='rigid'))
+        with pytest.raises(ConfigurationError, match='rigid'):
+            b.sound_speed = 1700.0
+        b.roughness = 0.5
+        assert b.halfspace_at(range=0.0).roughness == pytest.approx(0.5)
+
+
+class TestSeabedColumnDelegatedWritesReachTheHalfspace:
+    """The same shadow-write hazard one level down: ``at`` / ``collapse`` /
+    ``sample_at_depths`` read ``layers`` / ``halfspace``, never a flat
+    instance attribute, so ``column.sound_speed = …`` delegates to the
+    half-space under the same rules as the ``Bottom`` write."""
+
+    def test_a_pure_halfspace_column_write_reaches_its_halfspace(self):
+        col = SeabedColumn(layers=[], halfspace=_hs())
+        col.sound_speed = 1610.0
+        assert col.halfspace.sound_speed == pytest.approx(1610.0)
+        assert col.at(depth=0.0).sound_speed == pytest.approx(1610.0)
+        assert 'sound_speed' not in vars(col)
+
+    def test_a_layered_column_refuses_the_flat_write(self):
+        col = SeabedColumn(layers=_layers(), halfspace=_hs())
+        with pytest.raises(ConfigurationError, match='layer'):
+            col.sound_speed = 1610.0
+        assert col.halfspace.sound_speed == pytest.approx(1800.0)
+        assert 'sound_speed' not in vars(col)

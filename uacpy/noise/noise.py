@@ -105,7 +105,9 @@ def compute_windnoise(frequencies, u, water_depth='deep', band_integrate=False):
     band_integrate : bool
         If True, return the band-integrated SPL (dB re 1 µPa²) where each
         band's bandwidth is set by the midpoints between consecutive
-        input frequencies. Default False — return the spectral level
+        input frequencies in ascending order — ``frequencies`` need not be
+        pre-sorted, and each level comes back at its frequency's own position
+        in the input. Default False — return the spectral level
         (dB re 1 µPa²/Hz). Use the band form to pair wind noise with a
         band-integrated source level; :class:`WenzNoise` is spectral-only.
 
@@ -220,13 +222,22 @@ def compute_windnoise(frequencies, u, water_depth='deep', band_integrate=False):
                     f"band_integrate=False for the spectral level.",
                     UserWarning, stacklevel=2,
                 )
-            # Band edges at the midpoints between consecutive frequencies; the
-            # two outer bands span only the half-spacing to their single
-            # neighbour (df[0]=(f[1]-f[0])/2, df[-1]=(f[-1]-f[-2])/2). A leading
-            # 0 / symmetric extrapolation would over-weight the end bands.
-            mids = (f[1:] + f[:-1]) / 2
-            edges = np.concatenate(([f[0]], mids, [f[-1]]))
-            df = edges[1:] - edges[:-1]
+            # Band edges at the midpoints between consecutive frequencies in
+            # ascending order; the two outer bands span only the half-spacing
+            # to their single neighbour (df[0]=(f[1]-f[0])/2,
+            # df[-1]=(f[-1]-f[-2])/2). A leading 0 / symmetric extrapolation
+            # would over-weight the end bands. The widths are computed on the
+            # sorted grid and scattered back through the argsort, so each
+            # frequency keeps its own bandwidth at the caller's ordering — a
+            # descending vector returns the ascending band levels reversed,
+            # where edges taken from the raw vector gave negative widths and an
+            # all-NaN spectrum.
+            order = np.argsort(f)
+            f_sorted = f[order]
+            mids = (f_sorted[1:] + f_sorted[:-1]) / 2
+            edges = np.concatenate(([f_sorted[0]], mids, [f_sorted[-1]]))
+            df = np.empty_like(f)
+            df[order] = edges[1:] - edges[:-1]
         else:
             df = np.ones_like(f)
 

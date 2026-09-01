@@ -28,7 +28,7 @@ from uacpy.tests._cache_builders import _write_crust1, _write_globsed
 def _seis_root(tmp_path_factory):
     root = tmp_path_factory.mktemp('seis_cache')
     _write_globsed(root, marked_cells=True)
-    _write_crust1(root)
+    _write_crust1(root, marked_cells=True)
     return root
 
 
@@ -117,6 +117,58 @@ def test_crust1_globsed_zero_thickness_yields_bare_rock(cache):
     assert b.sediment_thickness_source == 'globsed'
     assert all(layer.sound_speed >= 5000.0 for layer in b.layers)  # crust, not sediment
     assert b.halfspace.sound_speed == 6500.0        # middle crystalline crust
+
+
+def test_crust1_zero_sediment_column_warns_and_is_not_stamped_globsed(cache):
+    """On a column where CRUST1.0 has no sediment layers there are no sediment
+    Vp/Vs/ρ to rescale, so a positive GlobSed thickness cannot be applied: the
+    discard is said out loud — naming the thickness, the cell and the reason —
+    and the stamp reads ``'globsed-ignored'``, not the ``'globsed'`` it used to
+    claim while ignoring GlobSed."""
+    with pytest.warns(UserWarning, match='no sediment layers') as rec:
+        b = crust1_local.fetch_bottom_crust1((82.5, -56.5))
+    assert b.sediment_thickness_source == 'globsed-ignored'
+    assert b.layers[0].sound_speed == 5000.0        # upper crystalline crust
+    assert b.halfspace.sound_speed == 6500.0        # middle crystalline crust
+    msg = next(str(w.message) for w in rec
+               if 'no sediment layers' in str(w.message))
+    assert '500' in msg and '82.50' in msg and '-56.50' in msg
+
+
+def test_crust1_zero_sediment_column_warns_on_an_explicit_thickness_too(cache):
+    """An explicit ``sediment_thickness`` is discarded on a zero-sediment
+    column for the same reason as a GlobSed value, and just as audibly; the
+    stamp stays ``None`` (the value never came from GlobSed)."""
+    with pytest.warns(UserWarning, match='no sediment layers') as rec:
+        b = crust1_local.fetch_bottom_crust1((82.5, -56.5),
+                                             sediment_thickness=200.0)
+    assert b.sediment_thickness_source is None
+    assert b.layers[0].sound_speed == 5000.0
+    assert '200' in next(str(w.message) for w in rec
+                         if 'no sediment layers' in str(w.message))
+
+
+def test_crust1_zero_sediment_column_is_quiet_below_the_layer_threshold(cache):
+    """Below ``_MIN_SEDIMENT_M`` the answer is bare rock on any column, so
+    nothing is discarded by the zero-sediment branch and the notice stays
+    quiet — the far side of the threshold the warning fires on."""
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter('always')
+        b = crust1_local.fetch_bottom_crust1(
+            (82.5, -56.5), sediment_thickness=crust1_local._MIN_SEDIMENT_M / 2)
+    assert not [w for w in rec if 'no sediment layers' in str(w.message)]
+    assert b.layers[0].sound_speed == 5000.0
+
+
+def test_crust1_sediment_bearing_column_does_not_warn_about_discards(cache):
+    """The discard notice belongs to zero-sediment columns only: a normal cell
+    rescales to GlobSed silently (bar the licence notice) and keeps the
+    ``'globsed'`` stamp."""
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter('always')
+        b = crust1_local.fetch_bottom_crust1((30.0, -40.0))
+    assert b.sediment_thickness_source == 'globsed'
+    assert not [w for w in rec if 'no sediment layers' in str(w.message)]
 
 
 def test_crust1_globsed_fallback_keeps_native(cache):

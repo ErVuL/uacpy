@@ -132,13 +132,13 @@ def demo_bellhop_bounce():
         cax_dif = fig.add_axes([0.918, 0.51, 0.010, 0.35])
         fig.colorbar(diff_im, cax=cax_dif, label='Δ TL (dB)')
     fig.savefig(OUTPUT_DIR / 'example_16_bounce_comparison.png', dpi=150)
-    print("  ✓ Saved: output/example_16_bounce_comparison.png")
+    print(f"  ✓ Saved: {OUTPUT_DIR / 'example_16_bounce_comparison.png'}")
 
     # Also plot TL with contours using the plot function
     fig2, ax2 = plot_field(result_bounce, env=env, contours=[60, 70, 80])
     ax2.set_title('Bellhop + BOUNCE TL with Contours')
     plt.savefig(OUTPUT_DIR / 'example_16_bounce_tl.png', dpi=150, bbox_inches='tight')
-    print("  ✓ Saved: output/example_16_bounce_tl.png")
+    print(f"  ✓ Saved: {OUTPUT_DIR / 'example_16_bounce_tl.png'}")
 
     plt.close('all')
 
@@ -193,7 +193,7 @@ def demo_layered_bottom():
         fig1, ax1 = plot_field(result, env=env, contours=[70, 80, 90])
         ax1.set_title('Scooter TL — Layered Sediment (3 layers + halfspace)')
         plt.savefig(OUTPUT_DIR / 'example_16_layered_tl.png', dpi=150, bbox_inches='tight')
-        print("  ✓ Saved: output/example_16_layered_tl.png")
+        print(f"  ✓ Saved: {OUTPUT_DIR / 'example_16_layered_tl.png'}")
     except Exception as e:
         print(f"  Scooter error: {e}")
         import traceback
@@ -202,12 +202,12 @@ def demo_layered_bottom():
     # Plot layered bottom structure
     fig2, ax2 = env.plot()
     plt.savefig(OUTPUT_DIR / 'example_16_layered_structure.png', dpi=150, bbox_inches='tight')
-    print("  ✓ Saved: output/example_16_layered_structure.png")
+    print(f"  ✓ Saved: {OUTPUT_DIR / 'example_16_layered_structure.png'}")
 
     # Plot environment overview
     fig3, axes3 = env.plot()
     plt.savefig(OUTPUT_DIR / 'example_16_layered_env.png', dpi=150, bbox_inches='tight')
-    print("  ✓ Saved: output/example_16_layered_env.png")
+    print(f"  ✓ Saved: {OUTPUT_DIR / 'example_16_layered_env.png'}")
 
     plt.close('all')
 
@@ -272,22 +272,22 @@ def demo_range_dependent_bottom():
     fig1, ax1 = plot_field(result, env=env, contours=[70, 85, 100])
     ax1.set_title('RAM TL — Range-Dependent Bottom (Mud to Sand)')
     plt.savefig(OUTPUT_DIR / 'example_16_rd_bottom_tl.png', dpi=150, bbox_inches='tight')
-    print("  ✓ Saved: output/example_16_rd_bottom_tl.png")
+    print(f"  ✓ Saved: {OUTPUT_DIR / 'example_16_rd_bottom_tl.png'}")
 
     # Plot RD bottom properties
     fig2, _ = env.plot()
     plt.savefig(OUTPUT_DIR / 'example_16_rd_bottom_props.png', dpi=150, bbox_inches='tight')
-    print("  ✓ Saved: output/example_16_rd_bottom_props.png")
+    print(f"  ✓ Saved: {OUTPUT_DIR / 'example_16_rd_bottom_props.png'}")
 
     # Plot 2D SSP
     fig3, ax3 = env.plot()
     plt.savefig(OUTPUT_DIR / 'example_16_rd_ssp.png', dpi=150, bbox_inches='tight')
-    print("  ✓ Saved: output/example_16_rd_ssp.png")
+    print(f"  ✓ Saved: {OUTPUT_DIR / 'example_16_rd_ssp.png'}")
 
     # Plot full environment
     fig4, axes4 = env.plot()
     plt.savefig(OUTPUT_DIR / 'example_16_rd_env.png', dpi=150, bbox_inches='tight')
-    print("  ✓ Saved: output/example_16_rd_env.png")
+    print(f"  ✓ Saved: {OUTPUT_DIR / 'example_16_rd_env.png'}")
 
     plt.close('all')
 
@@ -381,13 +381,13 @@ def demo_rd_layered_bottom():
     ax1.set_title('RAM TL — Range-Dependent Layered Bottom')
     plt.savefig(OUTPUT_DIR / 'example_16_rdl_tl.png', dpi=150,
                 bbox_inches='tight')
-    print("  ✓ Saved: output/example_16_rdl_tl.png")
+    print(f"  ✓ Saved: {OUTPUT_DIR / 'example_16_rdl_tl.png'}")
 
     # Plot the RD layered structure
     fig2, axes2 = env.plot()
     plt.savefig(OUTPUT_DIR / 'example_16_rdl_structure.png', dpi=150,
                 bbox_inches='tight')
-    print("  ✓ Saved: output/example_16_rdl_structure.png")
+    print(f"  ✓ Saved: {OUTPUT_DIR / 'example_16_rdl_structure.png'}")
 
     plt.close('all')
 

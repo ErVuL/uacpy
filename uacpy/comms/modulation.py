@@ -143,6 +143,12 @@ class Modulator:
     def demodulate(self, symbols):
         """Hard minimum-distance decision: complex symbols -> 1-D bit array.
 
+        Slicing is against the constellation at its native unit average
+        energy: an amplitude-scaled QAM input decodes to the wrong rings
+        silently, so the caller must restore scale first — the package's
+        equalizer and OFDM chains already do; constant-modulus PSK is
+        unaffected by a common gain.
+
         Symbols are processed in blocks of ``_DEMOD_CHUNK``, so the pairwise
         distance matrix stays a bounded ``(block, M)`` whatever the record
         length. Each symbol's decision is independent, so the result is

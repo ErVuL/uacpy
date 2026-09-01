@@ -224,7 +224,7 @@ def main():
     # Plot 1: Advanced environment overview
     fig1, axes1 = env.plot()
     plt.savefig(OUTPUT_DIR / 'example_05_environment.png', dpi=150, bbox_inches='tight')
-    print("  ✓ Saved: example_05_environment.png")
+    print(f"  ✓ Saved: {OUTPUT_DIR / 'example_05_environment.png'}")
 
     # ``env.plot()`` already renders SSP and bottom in two panels;
     # the previous SSP-only and bottom-only plots are subsumed.
@@ -239,7 +239,7 @@ def main():
         ax4.set_title('RAM: Sediment Transition with Sloping Shelf')
 
         plt.savefig(OUTPUT_DIR / 'example_05_result.png', dpi=150, bbox_inches='tight')
-        print("  ✓ Saved: example_05_result.png")
+        print(f"  ✓ Saved: {OUTPUT_DIR / 'example_05_result.png'}")
 
     # Plot 5: Three-Model Comparison (RAM, Bellhop, Kraken)
     if result is not None and result_bellhop is not None and result_kraken is not None:
@@ -251,7 +251,7 @@ def main():
         )
         fig5.savefig(OUTPUT_DIR / 'example_05_comparison.png', dpi=150)
         plt.close(fig5)
-        print("  ✓ Saved: example_05_comparison.png")
+        print(f"  ✓ Saved: {OUTPUT_DIR / 'example_05_comparison.png'}")
 
         fig6, axes6 = plt.subplots(1, 3, figsize=(20, 5))
         _plot_tl_difference(result, result_bellhop, env, ax=axes6[0],
@@ -266,7 +266,7 @@ def main():
         fig6.tight_layout()
         fig6.savefig(OUTPUT_DIR / 'example_05_differences.png', dpi=150)
         plt.close(fig6)
-        print("  ✓ Saved: example_05_differences.png")
+        print(f"  ✓ Saved: {OUTPUT_DIR / 'example_05_differences.png'}")
 
     print("\nFeatures demonstrated:")
     print("  ✓ Range-dependent bottom properties (mud → sand)")

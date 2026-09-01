@@ -1234,6 +1234,40 @@ class TestBackendIndependentResultShape:
         assert abs(float(np.median(got[ok] - native[ok]))) < 0.15
 
 
+class TestDivergedSamplesDoNotContaminateNeighbours:
+    """A PE sample the march failed to solve is no data, and interpolating
+    it as a zero is worse than dropping it: the zero is a real pressure,
+    so every receiver cell whose stencil touches one comes back finite and
+    credible. ``_interp_to_receiver_grid`` therefore lets NaN propagate,
+    the way the Collins path does."""
+
+    @staticmethod
+    def _grid_with_a_diverged_patch():
+        depths = np.linspace(0.0, 100.0, 5)
+        ranges = np.linspace(100.0, 500.0, 5)
+        field = np.full((5, 5), 1e-3)
+        field[2, 2] = np.nan          # the march failed here
+        return depths, ranges, field
+
+    def test_a_diverged_sample_marks_its_neighbours_no_data(self):
+        from uacpy.models.ram import _interp_to_receiver_grid
+        depths, ranges, field = self._grid_with_a_diverged_patch()
+        out = _interp_to_receiver_grid(
+            depths, ranges, field,
+            np.array([50.0]), np.array([300.0]))
+        assert np.isnan(out).all(), (
+            "a receiver reading the failed sample came back finite")
+
+    def test_cells_away_from_the_failure_keep_their_value(self):
+        from uacpy.models.ram import _interp_to_receiver_grid
+        depths, ranges, field = self._grid_with_a_diverged_patch()
+        out = _interp_to_receiver_grid(
+            depths, ranges, field,
+            np.array([0.0]), np.array([100.0]))
+        assert np.isfinite(out).all()
+        assert out.ravel()[0] == pytest.approx(1e-3)
+
+
 @pytest.mark.requires_binary
 class TestCollinsBroadbandLevel:
     """The BROADBAND sweep resamples the same envelope as COHERENT_TL.
@@ -1461,7 +1495,8 @@ class TestSurfaceDepthIsResolvable:
     """``rams0.5``'s ``outpt`` loops ``do 1 i=1+ndz,nzplt,ndz``, so its
     shallowest stored sample sits at ``ndz·dz`` and a receiver at z=0 lies
     outside the interpolation grid. The surface is pressure-release in every
-    Collins backend, so the z=0 node is prepended at the deep-shadow floor."""
+    Collins backend, so the z=0 node is prepended carrying no energy — a
+    literal zero, reported at the shared no-energy level."""
 
     def test_rams_receiver_at_the_surface_is_not_nan(self):
         env = _env(bottom=_elastic_bottom())
@@ -1473,8 +1508,10 @@ class TestSurfaceDepthIsResolvable:
         d = field.data
         assert [i for i in range(d.shape[0])
                 if np.all(~np.isfinite(d[i, :]))] == []
-        # z=0 carries no energy: the pressure-release boundary value.
-        assert np.allclose(field.db[0, :], TL_MAX_DB)
+        # z=0 carries no energy: the pressure-release boundary value, floored
+        # by the shared dB conversion like every other model's zero.
+        from uacpy.core.constants import PRESSURE_FLOOR
+        assert np.allclose(field.db[0, :], -20.0 * np.log10(PRESSURE_FLOOR))
         assert np.all(field.db[1, :] < TL_MAX_DB)
 
     def test_prepended_node_is_skipped_when_the_grid_starts_at_zero(self):
@@ -2837,10 +2874,15 @@ class TestBroadbandGridRoundTrips:
 
 
 @pytest.mark.requires_binary
-class TestSurfaceNodeReportsTlFloor:
+class TestSurfaceNodeReportsTheSharedNoEnergyLevel:
+    """The pressure-release surface carries no energy, and the wrapper reports
+    that by leaving the sample at zero: the shared ``_complex_to_db`` floor
+    turns it into the one no-energy level every model reports, instead of RAM
+    writing ``TL_MAX_DB`` — a level a real deep shadow can reach."""
 
     @pytest.mark.parametrize('backend,ndz', [('ramgeo', 1), ('mpiramS', 1)])
-    def test_z0_receiver_reads_tl_max_db(self, backend, ndz):
+    def test_z0_receiver_reads_the_no_energy_floor(self, backend, ndz):
+        from uacpy.core.constants import PRESSURE_FLOOR
         env = _env(bottom=_fluid_bottom())
         src = Source(depths=25.0, frequencies=250.0)
         rcv = Receiver(depths=np.array([0.0, 50.0]),
@@ -2850,7 +2892,7 @@ class TestSurfaceNodeReportsTlFloor:
             f = RAM(backend=backend, dr=20.0, dz=0.25,
                     depth_decimation=ndz).run(env, src, rcv)
         tl = np.asarray(f.db)
-        assert tl[0, 0] == pytest.approx(TL_MAX_DB)
+        assert tl[0, 0] == pytest.approx(-20.0 * np.log10(PRESSURE_FLOOR))
         assert tl[1, 0] < TL_MAX_DB
 
 
