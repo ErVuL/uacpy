@@ -227,23 +227,23 @@ def dsp_plotters():
 
 
 def beam_pattern_views():
-    """``view=`` picks the drawn sector; the line always carries every row."""
+    """Two renderings of one table, on the sector a launch fan can reach."""
     # Defined over the horizon-to-horizon fan and no further: past +/-90 a
-    # launch traces to negative range, so a table has nothing to say there.
-    # One table throughout, so an angular difference between panels can only
-    # come from the view. Two panels steered differently would invite the
-    # reading that the plotter, not the table, moved the lobe.
+    # launch traces to negative range, so a table has nothing to say there —
+    # and that same fan is the axes, for every pattern. One table across the
+    # top row and one across the bottom, so a difference within a row can
+    # only be the rendering and a difference down a column only the table.
     steered = source_beam_pattern(np.linspace(-90.0, 90.0, 721),
                                   beamwidth_deg=24.0, tilt_deg=20.0)
     downward = source_beam_pattern(np.linspace(0.0, 90.0, 361),
                                    beamwidth_deg=24.0, tilt_deg=20.0)
 
-    panels = ((steered, dict(), "-90-90° table · view='forward' (default)"),
+    panels = ((steered, dict(), '-90-90° table · polar (default)'),
               (steered, dict(polar=False), '-90-90° table · polar=False'),
-              (downward, dict(), "0-90° table · view='forward'"),
-              (downward, dict(view='full'), "0-90° table · view='full'"))
-    # 2x2 rather than 1x4: a quarter-disc panel squeezed into a quarter of the
-    # width runs its radial labels into one another.
+              (downward, dict(), '0-90° table · polar'),
+              (downward, dict(polar=False), '0-90° table · polar=False'))
+    # 2x2 rather than 1x4: a polar panel squeezed into a quarter of the width
+    # runs its radial labels into one another.
     fig = plt.figure(figsize=(10.5, 8.6))
     for index, (pattern, kwargs, label) in enumerate(panels):
         projection = None if kwargs.get('polar') is False else 'polar'
@@ -255,7 +255,8 @@ def beam_pattern_views():
     # The plotter pads its title clear of the radial labels, which lands it
     # under an unreserved suptitle; rect keeps the top strip for the suptitle.
     fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.94))
-    fig.suptitle('plot_beam_pattern — one 24°-wide beam at +20°, four ways',
+    fig.suptitle('plot_beam_pattern — a 24°-wide beam at +20°, two tables in both '
+                 'renderings',
                  fontweight='bold', fontsize=13)
     return fig
 

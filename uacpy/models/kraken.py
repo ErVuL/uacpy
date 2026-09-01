@@ -355,6 +355,9 @@ class Kraken(PropagationModel):
     >>> tl = kraken.compute_tl(env_rd, source, receiver)
     """
 
+    # TopOpt position 4 carries env.absorption to the engine.
+    _consumes_volume_absorption = True
+
     def _max_receiver_depth(self, env) -> float:
         # The Kraken family meshes through fluid sediment layers, so it
         # resolves receivers down to the deepest interface, not just the

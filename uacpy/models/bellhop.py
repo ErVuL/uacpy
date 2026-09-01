@@ -20,6 +20,8 @@ from typing import Dict, Optional, Tuple, Union
 
 from scipy.signal import hilbert
 
+from uacpy.acoustic_signal.channel import fractional_delay_taps
+
 from uacpy.models.base import (
     PropagationModel, RunMode, ModelSpec, USER_FRAME_SKIP,
 )
@@ -75,6 +77,59 @@ _WARNED_RAY_VALIDITY: set = set()
 _EMPTY_TRACE_SECONDS = 0.1
 
 
+def _echo_window_counts(starts, ends, powers, n_samples: int) -> dict:
+    """Count the placed echoes a ``[0, n_samples)`` record omits or clips.
+
+    ``starts``/``ends`` are each echo's first and one-past-last sample on
+    the record, ``powers`` the received power each carries. An echo with no
+    sample inside the record is omitted outright — a delay-and-sum drops an
+    echo, it does not fold it the way an inverse FFT does — and one that
+    straddles an edge is clipped there: at the start it loses its leading
+    edge, the first samples of the waveform, so a chirp arrives as a
+    different signal; at the end it loses its tail.
+    """
+    starts = np.asarray(starts, dtype=int)
+    ends = np.asarray(ends, dtype=int)
+    powers = np.asarray(powers, dtype=float)
+    omitted = (ends <= 0) | (starts >= n_samples)
+    return {
+        'omitted': int(omitted.sum()),
+        'clipped_start': int((~omitted & (starts < 0)).sum()),
+        'clipped_end': int((~omitted & (ends > n_samples)).sum()),
+        'omitted_power': float(powers[omitted].sum()),
+        'total_power': float(powers.sum()),
+    }
+
+
+def _echo_window_notice(counts: dict, t_start: float, time_window: float,
+                        who: str) -> Optional[str]:
+    """The text for a window that does not hold every echo, or ``None``."""
+    if not (counts.get('omitted') or counts.get('clipped_start')
+            or counts.get('clipped_end')):
+        return None
+    parts = []
+    if counts['omitted']:
+        total = counts['total_power']
+        share = counts['omitted_power'] / total if total > 0.0 else 0.0
+        level = (f"{10.0 * np.log10(share):.0f} dB of the received energy"
+                 if share > 0.0 else "no measurable energy")
+        parts.append(f"{counts['omitted']} echo(es) fall entirely outside it "
+                     f"and are omitted — a delay-and-sum drops an echo rather "
+                     f"than folding it — carrying {level}")
+    if counts['clipped_start']:
+        parts.append(f"{counts['clipped_start']} echo(es) begin before it and "
+                     f"lose their leading edge, the first samples of the "
+                     f"waveform, so a chirp arrives as a different signal")
+    if counts['clipped_end']:
+        parts.append(f"{counts['clipped_end']} echo(es) run past its end and "
+                     f"lose their tail")
+    return (f"{who}: the [{t_start:g}, {t_start + time_window:g}] s window "
+            f"does not hold every echo: " + "; ".join(parts) + ". Widen "
+            f"time_window= or move t_start= (on run(): output_duration= and "
+            f"t_start=), or leave both unset to size the window from the "
+            f"arrivals.")
+
+
 def delayandsum(
     rcv_arrivals: dict,
     source_timeseries: np.ndarray,
@@ -83,6 +138,8 @@ def delayandsum(
     time_window: Optional[float] = None,
     t_start: Optional[float] = None,
     phase_offset: float = 0.0,
+    fractional: bool = True,
+    report: Optional[dict] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Convolve source waveform with channel impulse response from Bellhop arrivals.
@@ -114,6 +171,22 @@ def delayandsum(
         Constant phase (radians) added to every arrival, applied on the
         analytic signal. Carries the line-source ``exp(-i*pi/4)``; ``0.0``
         (default) for a point source.
+    fractional : bool, optional
+        Place each echo at its exact delay with a windowed-sinc kernel
+        (default). ``False`` rounds every delay to the nearest sample, which
+        is what this did before: an error up to half a sample, which is tens
+        of degrees of carrier phase at any frequency a modem uses, summed
+        coherently into the interference pattern. Continuous placement is
+        what the formulation asks for — COA eq. 8.30 shifts the waveform by
+        ``t - tau(s)``, not by a whole number of samples.
+    report : dict, optional
+        Collect, instead of warning, what the window omits or clips: the
+        counts from :func:`_echo_window_counts` are ADDED into it, so one
+        dict passed across every receiver cell of a run totals the grid and
+        the run says it once. Left ``None``, this warns itself when an echo
+        falls outside the window or straddles one of its edges — a
+        delay-and-sum drops such an echo silently otherwise, and the record
+        reads as complete.
 
     Returns
     -------
@@ -169,6 +242,9 @@ def delayandsum(
     rts = np.zeros(nrts)
 
     omega_c = 2.0 * np.pi * fc
+    # Where each echo's waveform copy lands on the record — first sample and
+    # one past its last — and the power it carries, for the window report.
+    starts, ends, powers = [], [], []
     for ia in range(n_arr):
         phase_rad = np.deg2rad(phases_deg[ia]) + phase_offset
         phase_factor = np.exp(1j * phase_rad)
@@ -180,15 +256,46 @@ def delayandsum(
         scaled_amp = amps[ia] * atten
 
         delay_samples = (delays[ia] - t_start) / deltat
-        i_start = int(np.round(delay_samples))
 
         # Add this arrival's shifted, scaled copy of the source signal as a
         # single clipped slice-add (vectorised over the source samples).
         contrib = scaled_amp * np.real(sts_analytic * phase_factor)
+        if fractional:
+            # Resolve the sub-sample part of the delay with the same
+            # windowed-sinc kernel channel.impulse_response uses. Convolving
+            # by taps centred on offset 0 delays by (half_len - 1) + frac
+            # samples, so the placement index backs off by that integer part
+            # and the echo lands at delay_samples exactly.
+            i_start = int(np.floor(delay_samples))
+            nominal_start = i_start
+            taps = fractional_delay_taps(delay_samples - i_start)
+            placed = np.convolve(contrib, taps)
+            i_start -= taps.size // 2 - 1
+        else:
+            i_start = int(np.round(delay_samples))
+            nominal_start = i_start
+            placed = contrib
         lo = max(0, i_start)
-        hi = min(nrts, i_start + nsts)
+        hi = min(nrts, i_start + placed.size)
         if lo < hi:
-            rts[lo:hi] += contrib[lo - i_start:hi - i_start]
+            rts[lo:hi] += placed[lo - i_start:hi - i_start]
+        # The report reads the WAVEFORM's extent, not the kernel's: the
+        # sinc taps ring a few samples ahead of the echo, and losing that
+        # pre-ring at the window's start is not a cut leading edge.
+        starts.append(nominal_start)
+        ends.append(nominal_start + nsts)
+        powers.append(float(scaled_amp) ** 2)
+
+    counts = _echo_window_counts(starts, ends, powers, nrts)
+    if report is not None:
+        for key, value in counts.items():
+            report[key] = report.get(key, 0) + value
+    else:
+        notice = _echo_window_notice(counts, t_start, time_window,
+                                     who="delayandsum")
+        if notice is not None:
+            warnings.warn(notice, UserWarning,
+                          skip_file_prefixes=USER_FRAME_SKIP)
 
     time_vector = t_start + np.arange(nrts) * deltat
     return rts, time_vector
@@ -549,6 +656,9 @@ class Bellhop(PropagationModel):
     >>> bellhop = Bellhop(backend='fortran')
     >>> bellhop_gpu = Bellhop(backend='cuda')
     """
+
+    # TopOpt position 4 carries env.absorption to the engine.
+    _consumes_volume_absorption = True
 
     # Declarative metadata (see PropagationModel / ModelSpec). Bellhop is the
     # ray engine: honours altimetry, range-dependent bathymetry/bottom,
@@ -1466,7 +1576,13 @@ class Bellhop(PropagationModel):
             over ``[fc*(1 - bw/2), fc*(1 + bw/2)]`` (clipped to [1, ∞))
             with ``bw = DEFAULT_BROADBAND_BANDWIDTH_FACTOR`` (0.5 →
             half-octave band). Pass ``frequencies=`` explicitly to
-            override.
+            override. That default sets the spacing from the carrier
+            alone — ``Δf = fc/254``, a synthesised record ``254/fc`` s
+            long, with no reference to how long the channel rings — so a
+            BROADBAND run on it measures the arrivals against that record
+            and warns with how many fold back and at what level.
+            ``Arrivals.synthesis_band`` builds a grid sized from the
+            channel instead.
         source_waveform : ndarray, optional
             Time-domain source waveform for delay-and-sum synthesis
             (``RunMode.TIME_SERIES``). Requires ``sample_rate``.
@@ -2225,6 +2341,9 @@ class Bellhop(PropagationModel):
             n_t = len(t_vec)
 
             data = np.zeros((nrd, nrr, n_t), dtype=float)
+            # One report for the grid: the window is shared, so the cells'
+            # omitted and clipped echoes are totalled and said once below.
+            clip_report: dict = {}
             for ird in range(nrd):
                 for irr in range(nrr):
                     cell = arrivals_by_rcv[0][ird][irr]
@@ -2244,11 +2363,19 @@ class Bellhop(PropagationModel):
                         time_window=time_window_locked,
                         t_start=t_start_locked,
                         phase_offset=arr_phase,
+                        report=clip_report,
                     )
                     # delayandsum may return a slightly different length —
                     # pad/truncate to n_t.
                     m = min(len(rts), n_t)
                     data[ird, irr, :m] = np.asarray(rts[:m], dtype=float)
+
+            notice = _echo_window_notice(
+                clip_report, t_start_locked, time_window_locked,
+                who=f"{self.model_name}.run(run_mode=TIME_SERIES)")
+            if notice is not None:
+                warnings.warn(notice, UserWarning,
+                              skip_file_prefixes=USER_FRAME_SKIP)
 
             data, coords, extra = _emit(data, 'time', t_vec)
             # The stamped frequency axis is the band the synthesised p(t)
@@ -2279,12 +2406,21 @@ class Bellhop(PropagationModel):
             return field
 
         # ── Path B: frequency-domain transfer function ──
+        # A grid the package expands from a lone carrier is the package's
+        # choice; one passed in, or a multi-frequency Source that IS the
+        # band, is the caller's.
+        grid_was_derived = (
+            frequencies is None
+            and np.atleast_1d(np.asarray(source.frequencies)).size == 1)
         frequencies = self._resolve_broadband_frequencies(
             source, frequencies,
             n_freqs=self.n_freqs, bandwidth_factor=self.bandwidth_factor,
         )
         n_freq = len(frequencies)
         self._warn_if_attenuation_extrapolates(env, frequencies, fc)
+        if grid_was_derived:
+            self._warn_if_default_grid_folds(
+                arrivals_by_rcv, nrd, nrr, frequencies, fc)
 
         # Build H(d, r, f) for each (receiver_depth, receiver_range).
         # Use first source depth (most common case). Trailing-axis convention.
@@ -2482,6 +2618,61 @@ class Bellhop(PropagationModel):
         omega_taui = np.outer(delays_imag, omega)                    # (n_arr, n_freq)
         contrib = A_complex[:, None] * np.exp(omega_taui - 1j * omega_tau)
         return contrib.sum(axis=0)
+
+    def _warn_if_default_grid_folds(self, arrivals_by_rcv, nrd: int,
+                                    nrr: int, frequencies, fc: float) -> None:
+        """Say what the package-chosen broadband grid folds, per these arrivals.
+
+        A transfer function sampled every Δf synthesises to a record 1/Δf
+        long, and the default grid — ``DEFAULT_BROADBAND_N_FREQS`` bins over
+        ``fc·(1 ± bw/2)`` — sets Δf from the carrier alone: ``fc/254`` for the
+        default band, a record ``254/fc`` s long with no reference to how long
+        this channel rings. The arrivals are in hand here, so the fold is
+        measured rather than presumed, with the yardstick
+        ``Arrivals.synthesis_band`` uses: an arrival later than its own cell's
+        first by more than the record lands back on the early trace. Only for
+        a grid the package chose — a caller who passed ``frequencies=`` made
+        that decision, and ``Arrivals.synthesis_band`` reports on the grid it
+        builds already.
+        """
+        from uacpy.core.results.rays import _fold_notice
+        frequencies = np.asarray(frequencies, dtype=float)
+        if frequencies.size < 2:
+            return
+        record = 1.0 / float(np.mean(np.diff(frequencies)))
+        omega_c = 2.0 * np.pi * float(fc)
+        delays, power, first = [], [], []
+        for ird in range(nrd):
+            for irr in range(nrr):
+                cell = arrivals_by_rcv[0][ird][irr]
+                if int(cell.get('n_arrivals', 0)) == 0:
+                    continue
+                d = np.asarray(cell['delays'], dtype=float)
+                # Received amplitude: the column times the volume-attenuation
+                # factor Bellhop keeps in the imaginary travel time.
+                a = (np.abs(np.asarray(cell['amplitudes'], dtype=float))
+                     * np.exp(omega_c * np.asarray(cell['delays_imag'],
+                                                   dtype=float)))
+                delays.append(d)
+                power.append(a ** 2)
+                first.append(np.full(d.size, float(d.min())))
+        if not delays:
+            return
+        notice = _fold_notice(
+            np.concatenate(delays), np.concatenate(power), record,
+            first=np.concatenate(first),
+            who=f"{self.model_name}.run(run_mode=BROADBAND)",
+            remedy=(f"The grid was the default — {frequencies.size} bins over "
+                    f"the band, Δf = {1.0 / record:.4g} Hz — chosen from the "
+                    f"carrier alone. Pass frequencies= to set it from the "
+                    f"channel: Arrivals.synthesis_band(bandwidth=..., "
+                    f"centre=...) on an ARRIVALS run of this geometry sizes "
+                    f"the record to hold the energy, and in_delay_window / "
+                    f"top_n_by_amplitude drop the tail outright instead of "
+                    f"folding it."))
+        if notice is not None:
+            warnings.warn(notice, UserWarning,
+                          skip_file_prefixes=USER_FRAME_SKIP)
 
     def _check_beam_pattern_spans_the_fan(self, pattern) -> None:
         """Require the beam pattern to cover every launch angle in ``alpha``.

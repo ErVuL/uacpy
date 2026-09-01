@@ -114,6 +114,17 @@ RECEIVER_MARKER_STYLE = {
 }
 
 
+def reversed_cmap(name: str) -> str:
+    """The mirror of a named colormap — ``'jet_r'`` <-> ``'jet'``.
+
+    A dB view carrying a LEVEL runs the opposite way to one carrying a LOSS:
+    ``mag_db`` is ``-field.db``, the same water with the sign flipped. It
+    therefore needs the same colours in the opposite order, or the loud end
+    of one view is painted the colour the other reserves for silence.
+    """
+    return name[:-2] if name.endswith('_r') else name + '_r'
+
+
 def cmap_for_field(kind: str, *, db: bool) -> str:
     """Colormap for a :class:`~uacpy.core.results.Field` heatmap.
 

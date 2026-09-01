@@ -1151,6 +1151,284 @@ class TestArrivalsFilterChain:
         assert len(mid) == 2
         assert all(0.15 <= x['delay'] <= 0.35 for x in mid.arrivals)
 
+    @staticmethod
+    def _two_arrivals(*, delays, amplitudes):
+        from uacpy.core.results import Arrivals
+        cell = {
+            "delays": np.asarray(delays, dtype=float),
+            "amplitudes": np.asarray(amplitudes, dtype=float),
+            "phases": np.zeros(len(delays)),
+            "n_top_bounces": np.zeros(len(delays), dtype=int),
+            "n_bot_bounces": np.zeros(len(delays), dtype=int),
+            "src_angles": np.zeros(len(delays)),
+            "rcv_angles": np.zeros(len(delays)),
+        }
+        return Arrivals(by_receiver=[[[cell]]],
+                        receiver_depths=np.array([50.0]),
+                        receiver_ranges=np.array([1000.0]),
+                        model='Test', frequencies=100.0)
+
+    def test_the_spread_weighs_arrivals_by_the_energy_that_reaches_the_receiver(
+            self):
+        """Bellhop carries volume absorption in the IMAGINARY travel time, not
+        in the amplitude column (``exp(w*Im tau)`` — the convention
+        ``read_arr_file`` documents for ``delays_imag`` and
+        ``Bellhop._arrivals_to_tf`` applies). Weighting on amplitude alone
+        scores a late, heavily absorbed path as if the water were lossless —
+        and it is exactly the late paths that set a delay spread."""
+        from uacpy.core.results import Arrivals
+        cell = {
+            "delays": np.array([0.10, 0.30]),
+            "amplitudes": np.array([1.0, 1.0]),
+            "phases": np.zeros(2),
+            "n_top_bounces": np.zeros(2, dtype=int),
+            "n_bot_bounces": np.zeros(2, dtype=int),
+            "src_angles": np.zeros(2), "rcv_angles": np.zeros(2),
+            # the late arrival loses ~40 dB to absorption on its longer path
+            "delays_imag": np.array([0.0, -np.log(10 ** (40 / 20.0))
+                                     / (2 * np.pi * 100.0)]),
+        }
+        a = Arrivals(by_receiver=[[[cell]]],
+                     receiver_depths=np.array([50.0]),
+                     receiver_ranges=np.array([1000.0]),
+                     model='Test', frequencies=100.0)
+        # Equal amplitudes would put the spread at dtau/2 = 0.1 s; the
+        # absorbed arrival carries 1e-4 of the energy, so it barely counts.
+        assert a.rms_delay_spread() < 0.01
+
+    def test_rms_delay_spread_is_weighted_by_energy(self):
+        """Two equal arrivals dtau apart sit +-dtau/2 about their mean, so the
+        energy-weighted spread is dtau/2 exactly."""
+        a = self._two_arrivals(delays=(0.10, 0.30), amplitudes=(1.0, 1.0))
+        assert a.rms_delay_spread() == pytest.approx(0.1)
+
+    def test_a_faint_late_arrival_moves_the_spread_far_less_than_the_range(
+            self):
+        """Weighting by energy is what keeps a negligible path from deciding
+        the number — but it does not make it irrelevant, since the second
+        moment squares the lever arm. A path 60 dB down arriving 500x later
+        stretches the peak-to-peak range by 500x and this by under 2x."""
+        loud = self._two_arrivals(delays=(0.10, 0.11), amplitudes=(1.0, 1.0))
+        with_tail = self._two_arrivals(delays=(0.10, 0.11, 5.0),
+                                       amplitudes=(1.0, 1.0, 1e-3))
+        ptp_growth = (float(np.ptp(with_tail.delays))
+                      / float(np.ptp(loud.delays)))
+        rms_growth = (with_tail.rms_delay_spread()
+                      / loud.rms_delay_spread())
+        assert ptp_growth > 400.0
+        assert rms_growth < 2.0
+
+    def test_a_single_arrival_has_no_spread(self):
+        a = self._two_arrivals(delays=(0.2,), amplitudes=(1.0,))
+        assert a.rms_delay_spread() == 0.0
+
+    def test_the_spread_ignores_a_common_time_offset(self):
+        """A second central moment about the mean: moving the whole arrival
+        set later changes the delays but not the dispersion."""
+        early = self._two_arrivals(delays=(0.10, 0.30), amplitudes=(1.0, 2.0))
+        late = self._two_arrivals(delays=(5.10, 5.30), amplitudes=(1.0, 2.0))
+        assert late.rms_delay_spread() == pytest.approx(
+            early.rms_delay_spread())
+
+    def test_synthesis_band_outlasts_the_delay_spread(self):
+        """A synthesised record is 1/df long, so a grid chosen without
+        reference to the arrivals wraps the late ones onto the early ones.
+        The spacing comes from the spread these arrivals actually have."""
+        band = self._arrivals().synthesis_band(bandwidth=100.0)
+        record = 1.0 / float(band[1] - band[0])
+        spread = float(np.ptp(self._arrivals().delays))
+        assert record > spread, f"record {record:g} s vs spread {spread:g} s"
+
+    def test_synthesis_band_is_centred_on_the_result_frequency(self):
+        band = self._arrivals().synthesis_band(bandwidth=100.0)
+        assert float(band[0]) == pytest.approx(50.0)
+        assert float(band[-1]) == pytest.approx(150.0)
+
+    def test_a_band_reaching_below_zero_is_refused(self):
+        """A band wider than twice its centre runs through 0 Hz into negative
+        frequency. ``Source`` rejects those, but a model run accepts them and
+        returns an H that is not conjugate-symmetric, which the IFFT then
+        turns into a complex trace — so the band is refused where it is
+        built, not left for the reader to notice."""
+        with pytest.raises(ConfigurationError, match='below 0 Hz'):
+            self._arrivals().synthesis_band(bandwidth=8e3)
+
+    def test_a_band_reaching_exactly_zero_is_refused(self):
+        with pytest.raises(ConfigurationError, match='below 0 Hz'):
+            self._arrivals().synthesis_band(bandwidth=200.0)
+
+    def test_margin_is_the_number_of_frequency_samples_per_fringe(self):
+        """Two equal paths dtau apart beat in |H(f)| with period 1/dtau. The
+        derived record is margin x dtau, so the grid spacing 1/record puts
+        ``margin`` samples on each fringe — to within the one bin the band
+        is rounded up to. 1.2 is critically sampled for viewing; 8 draws
+        the fringe."""
+        dtau, bandwidth = 0.25, 1000.0
+        a = self._two_arrivals(delays=(0.10, 0.10 + dtau),
+                               amplitudes=(1.0, 1.0))
+        for margin in (1.2, 8.0):
+            band = a.synthesis_band(bandwidth=bandwidth, centre=2000.0,
+                                    margin=margin)
+            per_fringe = (1.0 / dtau) / float(band[1] - band[0])
+            assert per_fringe == pytest.approx(
+                margin, abs=1.0 / (bandwidth * dtau))
+
+    def test_a_shared_record_folds_each_cell_from_its_own_first_arrival(self):
+        """Cells sharing one record each start it at their own first
+        arrival, so an arrival 0.7 s into the far cell's record folds even
+        though, measured from the near cell's first, it would not stand out
+        from its neighbour; against the global first both far arrivals
+        fold."""
+        from uacpy.core.results.rays import _fold_notice
+        delays = np.array([0.10, 0.20, 1.00, 1.70])      # near cell, far cell
+        first = np.array([0.10, 0.10, 1.00, 1.00])
+        power = np.ones(4)
+        per_cell = _fold_notice(delays, power, 0.5, who="t", remedy="r",
+                                first=first)
+        assert per_cell is not None
+        assert "1 arrival(s) past its end" in per_cell and "-6 dB" in per_cell
+        global_first = _fold_notice(delays, power, 0.5, who="t", remedy="r")
+        assert "2 arrival(s) past its end" in global_first
+        assert _fold_notice(delays, power, 2.0, who="t", remedy="r") is None
+
+    def test_synthesis_band_takes_an_explicit_centre(self):
+        band = self._arrivals().synthesis_band(bandwidth=2e3, centre=40e3)
+        assert float(band[0]) == pytest.approx(39e3)
+        assert float(band[-1]) == pytest.approx(41e3)
+
+    def test_a_wider_delay_spread_buys_a_finer_grid(self):
+        narrow = self._arrivals().in_delay_window(0.1, 0.2)
+        assert narrow.synthesis_band(bandwidth=100.0).size < \
+            self._arrivals().synthesis_band(bandwidth=100.0).size
+
+    def test_a_single_arrival_yields_a_two_point_grid(self):
+        one = self._arrivals().top_n_by_amplitude(1)
+        band = one.synthesis_band(bandwidth=100.0)
+        assert band.size >= 2 and np.all(np.diff(band) > 0)
+
+    def test_the_loudest_arrival_is_the_one_that_arrives_loudest(self):
+        """Ranking reads the amplitude COLUMN, but the column is not what
+        reaches the receiver: Bellhop carries volume absorption in the
+        imaginary travel time, so a long path can carry a larger geometric
+        amplitude and still arrive far quieter. At 40 kHz a 6 km bounce path
+        with three times the direct's amplitude lands 55 dB below it."""
+        from uacpy.core.results import Arrivals
+        f0, alpha_db_per_km = 40e3, 12.90        # Thorp at 40 kHz
+        def dimag(arc_km):
+            return -(alpha_db_per_km * arc_km / 8.6858896) / (2 * np.pi * f0)
+        cell = {
+            "delays": np.array([1000 / 1500.0, 6000 / 1500.0]),
+            "amplitudes": np.array([1.0e-3, 3.0e-3]),
+            "phases": np.zeros(2),
+            "n_top_bounces": np.array([0, 2]),
+            "n_bot_bounces": np.array([0, 3]),
+            "src_angles": np.zeros(2), "rcv_angles": np.zeros(2),
+            "delays_imag": np.array([dimag(1.0), dimag(6.0)]),
+        }
+        a = Arrivals(by_receiver=[[[cell]]],
+                     receiver_depths=np.array([50.0]),
+                     receiver_ranges=np.array([1000.0]),
+                     model='Test', frequencies=f0)
+        loudest = a.top_n_by_amplitude(1).arrivals[0]
+        assert loudest['delay'] == pytest.approx(1000 / 1500.0), (
+            "the absorbed bounce path was ranked above the direct one")
+        order = [x['delay'] for x in a.sorted_by_amplitude().arrivals]
+        assert order[0] < order[1], order
+
+    def test_the_energy_support_is_not_moved_by_a_faint_straggler(self):
+        """The span the energy occupies, not the span between the first and
+        last ray. A path 100 dB down arriving 40x later stretches the
+        peak-to-peak range by 40x and leaves this one where it was."""
+        loud = self._two_arrivals(delays=(0.10, 0.12), amplitudes=(1.0, 1.0))
+        with_tail = self._two_arrivals(delays=(0.10, 0.12, 5.0),
+                                       amplitudes=(1.0, 1.0, 1e-5))
+        assert with_tail.energy_support() == pytest.approx(
+            loud.energy_support())
+        assert (float(np.ptp(with_tail.delays))
+                > 40.0 * float(np.ptp(loud.delays)))
+
+    def test_the_energy_support_spans_every_arrival_at_fraction_one(self):
+        """fraction=1 asks for all of the energy, which is the peak-to-peak
+        span — the measure the default exists to avoid, still available to a
+        caller who wants every arrival inside the window."""
+        a = self._two_arrivals(delays=(0.10, 0.12, 5.0),
+                               amplitudes=(1.0, 1.0, 1e-5))
+        assert a.energy_support(1.0) == pytest.approx(float(np.ptp(a.delays)))
+
+    def test_the_energy_support_counts_absorbed_paths_as_the_energy_they_carry(
+            self):
+        """Absorption rides in the imaginary delay, not the amplitude column,
+        so a late path can have a full-size amplitude and carry nothing. The
+        window must not be stretched to reach one."""
+        from uacpy.core.results import Arrivals
+        cell = {
+            "delays": np.array([0.10, 0.12, 5.0]),
+            "amplitudes": np.array([1.0, 1.0, 1.0]),
+            "phases": np.zeros(3),
+            "n_top_bounces": np.zeros(3, dtype=int),
+            "n_bot_bounces": np.zeros(3, dtype=int),
+            "src_angles": np.zeros(3), "rcv_angles": np.zeros(3),
+            # the last arrival loses 80 dB to absorption on its longer path
+            "delays_imag": np.array(
+                [0.0, 0.0, -np.log(10 ** (80 / 20.0)) / (2 * np.pi * 100.0)]),
+        }
+        a = Arrivals(by_receiver=[[[cell]]],
+                     receiver_depths=np.array([50.0]),
+                     receiver_ranges=np.array([1000.0]),
+                     model='Test', frequencies=100.0)
+        assert a.energy_support() == pytest.approx(0.02)
+
+    def test_an_energy_fraction_outside_the_unit_interval_is_refused(self):
+        a = self._two_arrivals(delays=(0.1, 0.2), amplitudes=(1.0, 1.0))
+        for bad in (0.0, -0.5, 1.5):
+            with pytest.raises(ConfigurationError, match='fraction'):
+                a.energy_support(bad)
+
+    def test_a_stated_record_sets_the_frequency_spacing(self):
+        """The window is the primitive and the spacing follows from it, so a
+        caller who knows the window states it and gets 1/df back."""
+        band = self._arrivals().synthesis_band(bandwidth=100.0, record=2.0)
+        assert 1.0 / float(band[1] - band[0]) >= 2.0
+
+    def test_a_stated_record_and_an_energy_fraction_together_are_refused(self):
+        """Two answers to one question — how long the record has to be."""
+        with pytest.raises(ConfigurationError, match='record'):
+            self._arrivals().synthesis_band(bandwidth=100.0, record=2.0,
+                                            energy_fraction=0.99)
+
+    def test_the_derived_grid_is_sized_by_energy_not_by_the_last_arrival(self):
+        """The cost of the grid is bins, and sizing on the peak-to-peak span
+        spends them holding a ray that carries nothing: here the straggler is
+        100 dB down and 400x later, and paying for it would cost 400x the
+        bins."""
+        a = self._two_arrivals(delays=(0.10, 0.12, 5.0),
+                               amplitudes=(1.0, 1.0, 1e-5))
+        with pytest.warns(UserWarning, match='fold back'):
+            derived = a.synthesis_band(bandwidth=1e3, centre=2e3)
+        every = a.synthesis_band(bandwidth=1e3, centre=2e3,
+                                 energy_fraction=1.0)
+        assert derived.size * 100 < every.size
+
+    def test_a_record_that_leaves_arrivals_out_reports_what_wraps(self):
+        """Trading the tail for a shorter record is a choice, not an
+        approximation: the arrivals past the end do not vanish, they fold
+        onto the early trace, so the level they fold in at is stated."""
+        a = self._two_arrivals(delays=(0.10, 0.12, 5.0),
+                               amplitudes=(1.0, 1.0, 1e-5))
+        with pytest.warns(UserWarning, match=r'-103 dB'):
+            a.synthesis_band(bandwidth=1e3, centre=2e3, record=0.05)
+
+    def test_a_record_holding_every_arrival_says_nothing(self):
+        a = self._two_arrivals(delays=(0.10, 0.12), amplitudes=(1.0, 1.0))
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            a.synthesis_band(bandwidth=1e3, centre=2e3, record=1.0)
+
+    def test_a_record_at_or_below_zero_is_refused(self):
+        for bad in (0.0, -1.0):
+            with pytest.raises(ConfigurationError):
+                self._arrivals().synthesis_band(bandwidth=100.0, record=bad)
+
     def test_top_n_by_amplitude(self):
         a = self._arrivals()
         top2 = a.top_n_by_amplitude(2)

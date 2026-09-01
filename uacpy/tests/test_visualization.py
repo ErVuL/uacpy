@@ -448,7 +448,66 @@ class TestPlotRays:
             'direct (1)', 'surface (1)', 'bottom (1)', 'both (1)']
         plt.close(fig)
 
-    def test_legend_lists_only_the_classes_present(self):
+    def test_rays_draw_over_the_seafloor_fill_and_line(self, env):
+        # A ray 0.5 m above a 100 m seabed lies inside the seafloor line's
+        # own drawn width, so it shows only if it is painted after that line
+        # and the sediment fill; it must still sit under the receiver marker.
+        rays = Rays(
+            rays=[{'r': np.linspace(0, 1500, 10),
+                   'z': np.full(10, 99.5),
+                   'alpha': 0.0, 'n_top_bounces': 0, 'n_bot_bounces': 0}],
+            receiver_depths=np.array([99.5]),
+            receiver_ranges=np.array([1500.0]),
+            model='Bellhop',
+        )
+        fig, ax = rays.plot(env=env)
+        ray = next(ln for ln in ax.lines
+                   if len(ln.get_ydata()) == 10
+                   and np.all(np.asarray(ln.get_ydata()) == 99.5))
+        seafloor_line = next(ln for ln in ax.lines
+                             if np.array_equal(ln.get_ydata(), [100.0, 100.0]))
+        seafloor_fill = next(c for c in ax.collections
+                             if isinstance(c, mcoll.PolyCollection))
+        receiver = next(ln for ln in ax.lines if len(ln.get_ydata()) == 1)
+        assert ray.get_zorder() > seafloor_fill.get_zorder()
+        assert ray.get_zorder() > seafloor_line.get_zorder()
+        assert ray.get_zorder() < receiver.get_zorder()
+        plt.close(fig)
+
+    def test_the_seafloor_stroke_lies_in_the_sediment_not_the_water(self, env):
+        # The boundary line is 2 pt wide. Centred on the seabed, 1 pt of it
+        # would lie in the water and cover a ray 0.5 m above a 100 m bottom
+        # even when the ray is drawn on top. The stroke's upper edge must be
+        # the boundary itself, so the ray's stroke clears it entirely.
+        rays = Rays(
+            rays=[{'r': np.linspace(0, 1500, 10),
+                   'z': np.full(10, 99.5),
+                   'alpha': 0.0, 'n_top_bounces': 0, 'n_bot_bounces': 0}],
+            receiver_depths=np.array([99.5]),
+            receiver_ranges=np.array([1500.0]),
+            model='Bellhop',
+        )
+        fig, ax = rays.plot(env=env)
+        fig.canvas.draw()
+        px_per_pt = fig.dpi / 72.0
+        ray = next(ln for ln in ax.lines
+                   if len(ln.get_ydata()) == 10
+                   and np.all(np.asarray(ln.get_ydata()) == 99.5))
+        floor = next(ln for ln in ax.lines
+                     if np.array_equal(ln.get_ydata(), [100.0, 100.0]))
+        boundary_px = ax.transData.transform((0.0, 100.0))[1]
+        # axhline: x in axes fraction, y in data — evaluate the line's own
+        # transform at its own y to find where the stroke centre lands.
+        floor_centre_px = floor.get_transform().transform((0.5, 100.0))[1]
+        floor_top_px = floor_centre_px + floor.get_linewidth() / 2 * px_per_pt
+        assert floor_top_px == pytest.approx(boundary_px, abs=1e-6)
+        ray_px = ray.get_transform().transform((0.0, 99.5))[1]
+        ray_bottom_px = ray_px - ray.get_linewidth() / 2 * px_per_pt
+        # Display y grows upward: the ray's lower edge sits on or above the
+        # seafloor stroke's upper edge.
+        assert ray_bottom_px >= floor_top_px
+        plt.close(fig)
+
         rays = self._classed_rays(['direct', 'surface'])
         fig, ax = rays.plot()
         assert [t.get_text() for t in ax.get_legend().get_texts()] == [
@@ -1637,7 +1696,13 @@ class TestLinearViewsGetTheLinearColormap:
     """``style.LINEAR_VIEW_COLORMAP`` covers every linear view of any quantity;
     only a dB view takes the quantity's own dB map. Signed pressure on the
     transmission-loss ``jet_r`` with an asymmetric autoscale puts zero at an
-    arbitrary colour."""
+    arbitrary colour.
+
+    ``mag_db`` takes that map MIRRORED, because it carries the negated
+    quantity (``-field.db``): larger is louder there and larger is quieter
+    on the loss view, so sharing one map unmirrored paints the same water
+    two different colours — see
+    ``test_the_loud_end_is_the_same_colour_in_both_db_views``."""
 
     @staticmethod
     def _field():
@@ -1649,7 +1714,7 @@ class TestLinearViewsGetTheLinearColormap:
                      model='Synth', frequencies=100.0)
 
     @pytest.mark.parametrize('value, expected', [
-        ('db', 'jet_r'), ('mag_db', 'jet_r'),
+        ('db', 'jet_r'), ('mag_db', 'jet'),
         ('mag', 'seismic'), ('real', 'seismic'), ('imag', 'seismic'),
     ])
     def test_colormap_per_value_mode(self, value, expected):
@@ -2086,6 +2151,203 @@ def test_rays_plot_with_mismatched_ray_arrays_raises_typed_error_and_closes_figu
     with pytest.raises(ConfigurationError, match="invalid plot input"):
         rays.plot()
     assert not plt.get_fignums()
+
+
+def _field_with_a_no_energy_cell():
+    """A 1/r field carrying one no-energy cell and one genuine deep null.
+
+    The two must be treated differently: ``PRESSURE_FLOOR`` marks a cell the
+    model reported no energy for, while the -70 dB null is a real
+    interference minimum the field computed.
+    """
+    from uacpy.core.results import Field, PhaseReference
+    from uacpy.core.constants import PRESSURE_FLOOR
+    depths = np.linspace(0.0, 200.0, 40)
+    ranges = np.linspace(10.0, 10000.0, 60)
+    R, _ = np.meshgrid(ranges, depths)
+    p = (1.0 / R).astype(complex)
+    p[5, 5] = PRESSURE_FLOOR
+    p[20, 30] = np.abs(p).max() * 10 ** (-70 / 20)
+    return Field(data=p, coords={'depth': depths, 'range': ranges},
+                 model='Synthetic', source_depths=np.array([50.0]),
+                 frequencies=1000.0,
+                 phase_reference=PhaseReference.TRAVELLING_WAVE)
+
+
+def _clim(ax):
+    for child in ax.get_children():
+        if hasattr(child, 'get_clim') and child.get_clim()[0] is not None:
+            return child.get_clim()
+    raise AssertionError('no mappable on the axes')
+
+
+def test_a_no_energy_cell_does_not_set_the_db_colour_limit():
+    """600 dB is the marker for "no energy here", not a level the model
+    computed, so it must not decide the scale: letting it in stretches the
+    bar to 580 dB and paints every real level into the top sixth of it."""
+    fig, ax = _field_with_a_no_energy_cell().plot(value='mag_db')
+    lo, hi = _clim(ax)
+    assert hi - lo < 120.0, f"colour bar spans {hi - lo:.0f} dB"
+    plt.close(fig)
+
+
+def _real_signal_excess_field():
+    """A real, already-in-dB field: signal excess, where the SIGN is the
+    meaning — SE > 0 is detectable, SE < 0 is not."""
+    from uacpy.core.results import Field
+    depths = np.linspace(0.0, 200.0, 5)
+    ranges = np.linspace(10.0, 1000.0, 6)
+    se = np.linspace(-20.0, 40.0, 30).reshape(5, 6)
+    return Field(data=se, coords={'depth': depths, 'range': ranges},
+                 model='Synth', source_depths=np.array([50.0]),
+                 frequencies=1000.0, metadata={'kind': 'signal_excess'})
+
+
+@pytest.mark.parametrize('value', ['mag', 'mag_db', 'phase', 'imag'])
+def test_the_views_of_a_complex_field_are_refused_on_a_real_one(value):
+    """``.db`` returns ``-20*log10|data|`` for complex data but the data
+    ITSELF for real data, which is already a level. A view derived from the
+    complex payload therefore has nothing to read on a real field, and
+    ``mag_db`` negating that level silently inverted it: -20 dB of signal
+    excess, meaning undetectable, plotted as +20."""
+    with pytest.raises(ConfigurationError, match='complex'):
+        _real_signal_excess_field().plot(value=value)
+
+
+def test_the_loud_end_is_the_same_colour_in_both_db_views():
+    """``mag_db`` is ``-field.db``: the same water, the opposite sign. The
+    colours have to run the opposite way with it, or the two dB views paint
+    one cell two different colours — measured, the loudest water came out
+    dark red under ``db`` and dark blue under ``mag_db``, while style.py
+    states the convention as "LOW TL (loud, near) is red"."""
+    from uacpy.core.results import Field, PhaseReference
+    depths = np.linspace(0.0, 200.0, 20)
+    ranges = np.linspace(10.0, 5000.0, 30)
+    R, _ = np.meshgrid(ranges, depths)
+    field = Field(data=(1.0 / R).astype(complex),
+                  coords={'depth': depths, 'range': ranges},
+                  model='Synthetic', source_depths=np.array([50.0]),
+                  frequencies=1000.0,
+                  phase_reference=PhaseReference.TRAVELLING_WAVE)
+
+    def loud_colour(value):
+        fig, ax = field.plot(value=value)
+        im = [c for c in ax.get_children()
+              if hasattr(c, 'get_clim') and c.get_clim()[0] is not None][0]
+        arr = im.get_array().reshape(len(depths), len(ranges))
+        rgba = im.cmap(im.norm(arr[10, 0]))       # nearest range = loudest
+        plt.close(fig)
+        return np.asarray(rgba[:3])
+
+    assert np.allclose(loud_colour('db'), loud_colour('mag_db'), atol=0.1), (
+        f"db paints the loudest cell {loud_colour('db')} and mag_db paints "
+        f"it {loud_colour('mag_db')}")
+
+
+def test_the_marker_is_dropped_whichever_sign_the_db_view_carries():
+    """``db`` and ``mag_db`` are the same numbers with opposite signs —
+    ``mag_db`` is literally ``-field.db`` — so the no-energy marker is -600
+    on one and +600 on the other. A filter written for one direction leaves
+    the other setting the limit: a loss view then runs to 600 dB and packs
+    the real levels into the bottom tenth of the bar."""
+    from uacpy.core.results import Field, PhaseReference
+    from uacpy.core.constants import PRESSURE_FLOOR
+    depths = np.linspace(0.0, 200.0, 20)
+    ranges = np.linspace(10.0, 5000.0, 30)
+    R, _ = np.meshgrid(ranges, depths)
+    p = (1.0 / R).astype(complex)
+    p[3, 3] = PRESSURE_FLOOR
+    # A kind whose dB view is not transmission loss, so it carries no fixed
+    # limits and the auto-limit branch is the one under test.
+    field = Field(data=p, coords={'depth': depths, 'range': ranges},
+                  model='Synthetic', source_depths=np.array([50.0]),
+                  frequencies=1000.0,
+                  phase_reference=PhaseReference.TRAVELLING_WAVE,
+                  metadata={'kind': 'reverberation'})
+    fig, ax = field.plot(value='db')
+    lo, hi = _clim(ax)
+    assert hi - lo < 120.0, f"loss colour bar spans {hi - lo:.0f} dB"
+    plt.close(fig)
+
+
+def test_a_genuine_deep_null_keeps_its_colour():
+    """The remedy has to distinguish a marker from data. A percentile does
+    not: the 1st percentile of this field lands at -80 dB and clips the real
+    -70 dB interference null, which is exactly the feature the view is for."""
+    field = _field_with_a_no_energy_cell()
+    fig, ax = field.plot(value='mag_db')
+    lo, _ = _clim(ax)
+    db = 20 * np.log10(np.abs(np.asarray(field.data)))
+    null = np.sort(db.ravel())[1]          # deepest real level, past the marker
+    assert lo <= null + 1e-6, (
+        f"colour floor {lo:.1f} dB clips the genuine null at {null:.1f} dB")
+    plt.close(fig)
+
+
+def _absorbing_arrivals():
+    """A 40 kHz link whose second cluster is heavily absorbed.
+
+    The amplitude COLUMN says the two clusters are within a factor of 1.5;
+    the received level says the second is 16 dB down, because Bellhop keeps
+    volume absorption in the imaginary travel time and the second path is
+    1.24 km longer.
+    """
+    f0, alpha_db_per_km = 40e3, 12.90
+    def dimag(arc_km):
+        return -(alpha_db_per_km * arc_km / 8.6858896) / (2 * np.pi * f0)
+    cell = {
+        "delays": np.array([0.669, 1.496, 8.06]),
+        "amplitudes": np.array([2.23e-4, 1.49e-4, 1.0e-8]),
+        "phases": np.zeros(3),
+        "n_top_bounces": np.array([0, 1, 9]),
+        "n_bot_bounces": np.array([0, 1, 9]),
+        "src_angles": np.zeros(3), "rcv_angles": np.zeros(3),
+        "delays_imag": np.array([dimag(1.0), dimag(2.24), dimag(12.0)]),
+    }
+    return Arrivals(by_receiver=[[[cell]]],
+                    receiver_depths=np.array([999.0]),
+                    receiver_ranges=np.array([1000.0]),
+                    model='Bellhop', frequencies=f0)
+
+
+def test_the_stems_are_drawn_at_the_level_that_reaches_the_receiver():
+    """Drawing the amplitude column alone puts an absorbed path at its
+    lossless height: on this set the second cluster is 16 dB down and would
+    be drawn within a factor 1.5 of the direct one."""
+    arr = _absorbing_arrivals()
+    fig, ax = arr.plot()
+    heads = [ln.get_ydata()[0] for ln in ax.lines if ln.get_marker() == 'o']
+    heads = sorted(heads, reverse=True)
+    assert heads[1] / heads[0] < 0.25, (
+        f"second cluster drawn at {heads[1] / heads[0]:.2f} of the direct; "
+        f"the received ratio is about 0.16")
+    plt.close(fig)
+
+
+def test_the_delay_axis_follows_the_energy_not_the_last_arrival():
+    """The peak-to-peak span is set by whichever ray arrives last however
+    faint. Here that is 8.06 s against an energy span under 0.9 s, so a
+    peak-to-peak axis spends 90% of its width on arrivals carrying
+    nothing."""
+    arr = _absorbing_arrivals()
+    fig, ax = arr.plot()
+    lo, hi = ax.get_xlim()
+    assert hi - lo < 2000.0, f"axis spans {hi - lo:.0f} ms"
+    assert hi > 1496.0, "the second cluster must stay on the axis"
+    plt.close(fig)
+
+
+def test_arrivals_left_off_the_axis_are_declared():
+    """An arrival outside the drawn span vanishes off-axis entirely, unlike
+    an outlier on a colour scale, so the plot has to say it is there."""
+    arr = _absorbing_arrivals()
+    fig, ax = arr.plot()
+    text = ' '.join(t.get_text() for t in ax.texts)
+    text += ' '.join(t.get_text() for t in ax.get_legend().get_texts()) \
+        if ax.get_legend() else ''
+    assert '1' in text and ('beyond' in text or 'outside' in text
+                            or 'off' in text), text
+    plt.close(fig)
 
 
 def test_arrivals_plot_with_missing_delay_key_raises_typed_error_and_closes_figures():
@@ -2855,6 +3117,191 @@ def _beam_half():
                             np.where(np.abs(angles - 30.0) <= 12.0, 0.0, -35.0)])
 
 
+# ── the chart is covered to its own edges ────────────────────────────────────
+
+def _rays_to_receiver():
+    from uacpy.core.results import Rays
+    # Carries a SOURCE as well: the source marker is the highest-z-order
+    # artist these plots draw, so a fixture without one cannot detect a
+    # legend that sits below it.
+    return Rays(
+        rays=[{'r': np.linspace(0, 1000, 20),
+               'z': np.linspace(10, 90, 20),
+               'alpha': 0.0, 'n_top_bounces': 0, 'n_bot_bounces': 0}],
+        receiver_depths=np.array([50.0]),
+        receiver_ranges=np.array([1000.0]),
+        source_depths=np.array([10.0]),
+        model='Bellhop',
+    )
+
+
+def _fill_extent(ax):
+    xs = [np.vstack([pth.vertices for pth in c.get_paths()])[:, 0]
+          for c in ax.collections if c.get_paths()]
+    return (min(x.min() for x in xs), max(x.max() for x in xs)) if xs else None
+
+
+def test_the_seafloor_fill_reaches_the_right_spine(env):
+    """The fill is anchored on the receiver extent while the x-limit is set
+    a margin wider, so the seabed stopped short of the spine and left a bare
+    strip under the rays past the receiver — the sliver the anchoring exists
+    to avoid."""
+    fig, ax = _rays_to_receiver().plot(env=env)
+    lo, hi = _fill_extent(ax)
+    x_lo, x_hi = ax.get_xlim()
+    assert hi >= x_hi - 1e-9, f"fill stops at {hi:g} km, axis ends at {x_hi:g}"
+    assert lo <= x_lo + 1e-9
+    plt.close(fig)
+
+
+def test_the_receiver_margin_keeps_the_marker_on_the_axis(env):
+    """The margin the fill is anchored to exists to keep a receiver at the
+    maximum range off the spine. Without pinning that, the margin could be
+    set to anything — including a value that clips the receiver away — and
+    the fill tests would still pass, since they only compare the fill against
+    whatever limit the margin produced."""
+    fig, ax = _rays_to_receiver().plot(env=env)
+    rr_km = 1.0
+    assert ax.get_xlim()[1] > rr_km, "the receiver sits on or past the spine"
+    plt.close(fig)
+
+
+def test_the_legend_does_not_cover_the_receiver(env):
+    """Raising the legend over the geometry is only half the job: the
+    receiver sits at the maximum range, which is where a lower-right legend
+    lands, so a fixed corner hides the marker it is meant to explain."""
+    # A bottom-mounted receiver: at the maximum range AND near the seabed,
+    # which is the corner a lower-right legend occupies.
+    from uacpy.core.results import Rays
+    # All three bounce classes, so the legend is the size a real eigenray
+    # plot gives it — a one-entry key is too small to reach the corner.
+    rays = Rays(
+        rays=[{'r': np.linspace(0, 1000, 20),
+               'z': np.linspace(95, 99, 20), 'alpha': float(a),
+               'n_top_bounces': top, 'n_bot_bounces': bot}
+              for a, top, bot in ((0.0, 0, 0), (1.0, 1, 0), (2.0, 1, 1))],
+        receiver_depths=np.array([99.0]),
+        receiver_ranges=np.array([1000.0]),
+        model='Bellhop')
+    fig, ax = rays.plot(env=env)
+    fig.canvas.draw()
+    legend_box = ax.get_legend().get_window_extent()
+    rr, rd = 1.0, 99.0                      # the receiver, in data coords
+    x, y = ax.transData.transform((rr, rd))
+    assert not (legend_box.x0 <= x <= legend_box.x1
+                and legend_box.y0 <= y <= legend_box.y1), \
+        "the legend covers the receiver marker"
+    plt.close(fig)
+
+
+def test_the_legend_sits_above_the_geometry(env):
+    """Legends default to zorder 5, below this package's own ladder — the
+    seabed fill, the seafloor line, the receivers and the source all draw
+    over it, so the key ends up underneath the picture it explains."""
+    fig, ax = _rays_to_receiver().plot(env=env)
+    legend = ax.get_legend()
+    assert legend is not None
+    over = [type(a).__name__ for a in ax.get_children()
+            if hasattr(a, 'get_zorder')
+            and a.get_zorder() > legend.get_zorder()]
+    assert not over, f"drawn over the legend: {sorted(set(over))}"
+    plt.close(fig)
+
+
+# ── the drawn curve is the table the engine reads ────────────────────────────
+
+def test_a_sparsely_sampled_table_is_drawn_along_its_angles():
+    """``interp1`` (misc/interpolation.f90:37-39) reads the table linearly in
+    ANGLE, so a two-row 0 dB table is omnidirectional. Handing those two
+    samples to a polar axes draws a straight screen chord between them —
+    through the origin — which renders an omni source as a deep broadside
+    null. The curve has to be sampled along the angle axis instead."""
+    omni = np.array([[-90.0, 0.0], [90.0, 0.0]])
+    fig, ax = plot_beam_pattern(omni)
+    r = np.asarray(ax.lines[0].get_ydata())
+    assert r.size > 2, "the pattern was drawn as a chord between two samples"
+    np.testing.assert_allclose(r, 0.0, atol=1e-9)
+    plt.close(fig)
+
+
+def test_a_coarse_table_keeps_its_corners_when_densified():
+    """The previous check used a 1-degree table, which comes back byte
+    identical — it never exercised the resampling at all. A coarse table with
+    a real corner does: every tabulated node must keep its own level, and the
+    inserted points must interpolate linearly between them rather than round
+    the corner off."""
+    table = np.array([[-90.0, -30.0], [-20.0, 0.0],
+                      [20.0, 0.0], [90.0, -30.0]])
+    fig, ax = plot_beam_pattern(table)
+    theta = np.degrees(np.asarray(ax.lines[0].get_xdata()))
+    level = np.asarray(ax.lines[0].get_ydata())
+    assert theta.size > table.shape[0], "a coarse table was not resampled"
+    for angle, expected in table:
+        assert level[np.argmin(np.abs(theta - angle))] == pytest.approx(
+            expected), f"node {angle}deg lost its level"
+    # Between nodes the curve must follow the engine, which interpolates the
+    # table AFTER converting it to amplitude (``10**(dB/20)``,
+    # misc/beampattern.f90:59; Bellhop does it inline at
+    # bellhop.f90:267-274). Interpolating in dB instead bows the flank the
+    # wrong way — 14.7 dB out at worst on a 0/-35 dB segment.
+    mid = level[np.argmin(np.abs(theta - (-55.0)))]
+    amp = 0.5 * (10 ** (-30.0 / 20.0) + 10 ** (0.0 / 20.0))
+    assert mid == pytest.approx(20.0 * np.log10(amp), abs=0.05)
+    plt.close(fig)
+
+
+def test_both_renderings_draw_the_same_curve():
+    """Whichever axes it is drawn on, the reader is looking at one pattern.
+    The interpolation is the engine's reading of the table, so it belongs to
+    the curve rather than to either axes: applied to one branch only, the two
+    views disagreed by more than 11 dB between the tabulated angles."""
+    table = np.array([[-90.0, -30.0], [-20.0, 0.0], [20.0, 0.0], [90.0, -30.0]])
+    fig_p, ax_p = plot_beam_pattern(table)
+    fig_c, ax_c = plot_beam_pattern(table, polar=False)
+    angles_p = np.degrees(np.asarray(ax_p.lines[0].get_xdata()))
+    angles_c = np.asarray(ax_c.lines[0].get_xdata())
+    assert np.allclose(angles_p, angles_c), "the views sample different angles"
+    assert np.allclose(ax_p.lines[0].get_ydata(), ax_c.lines[0].get_ydata())
+    plt.close(fig_p)
+    plt.close(fig_c)
+
+
+def test_a_degenerate_table_is_refused_on_rectilinear_axes_too():
+    """A table that spans no angle cannot be drawn as a pattern in either
+    view, so the refusal belongs to the curve, not to the polar axes."""
+    with pytest.raises(ConfigurationError, match='spans no angle'):
+        plot_beam_pattern(np.array([[0.0, -3.0], [0.0, -40.0]]), polar=False)
+
+
+def test_a_notch_between_display_samples_keeps_its_depth():
+    """Resampling must not round a corner off. A notch tabulated between two
+    display samples is the case that would be lost by resampling onto a plain
+    grid: the tabulated angles are carried into the grid so the notch keeps
+    the depth the table gave it, rather than the shallower value a straight
+    line across it would draw."""
+    table = np.array([[-90.0, 0.0], [15.4, 0.0], [15.5, -40.0],
+                      [15.6, 0.0], [90.0, 0.0]])
+    fig, ax = plot_beam_pattern(table)
+    drawn = np.degrees(np.asarray(ax.lines[0].get_xdata()))
+    levels = np.asarray(ax.lines[0].get_ydata())
+    notch = levels[np.isclose(drawn, 15.5, atol=1e-9)]
+    assert notch.size == 1, "the tabulated notch angle was dropped"
+    assert np.isclose(notch[0], -40.0), f"notch drawn at {notch[0]:.1f} dB"
+    plt.close(fig)
+
+
+def test_a_table_finer_than_the_display_step_keeps_every_row():
+    """The rows a caller supplied must survive: a table sampled finer than
+    the display step keeps all of them and gains only points between."""
+    angles = np.linspace(-90.0, 90.0, 361)          # 0.5 deg
+    table = np.column_stack([angles, -20.0 * np.abs(angles) / 90.0])
+    fig, ax = plot_beam_pattern(table)
+    drawn = np.degrees(np.asarray(ax.lines[0].get_xdata()))
+    for angle in angles:
+        assert np.isclose(drawn, angle, atol=1e-9).any(), f"{angle} lost"
+    plt.close(fig)
+
+
 # ── shape of the returned axes ───────────────────────────────────────────────
 
 def test_returns_polar_axes_by_default():
@@ -2911,12 +3358,12 @@ def test_theta_labels_are_signed_like_the_sbp_table():
     assert not any('270' in l for l in labels)
 
 
-def test_signed_labels_do_not_narrow_the_drawn_circle():
-    """Signed tick *labels* must not become signed tick *positions*: a negative
-    position widens thetamin to -180, and matplotlib then draws a 540-degree
-    sweep as a distorted part-disc with the pattern squeezed out of it."""
-    fig, ax = plot_beam_pattern(_beam_full(), view='full')
-    assert ax.get_thetamax() - ax.get_thetamin() == 360.0
+def test_signed_labels_do_not_widen_the_drawn_wedge():
+    """Signed tick *labels* must not become signed tick *positions*: a
+    negative position drags thetamin to -180, and matplotlib then sweeps 540
+    degrees as a distorted part-disc with the pattern squeezed out of it."""
+    fig, ax = plot_beam_pattern(_beam_full())
+    assert ax.get_thetamax() - ax.get_thetamin() == 180.0
 
 
 def test_theta_labels_stay_within_plus_minus_180():
@@ -2943,38 +3390,27 @@ def test_fill_false_leaves_the_outline_alone():
 
 # ── the drawn sector ─────────────────────────────────────────────────────────
 
-def test_default_view_is_the_forward_half_plane():
+def test_the_axes_span_the_launch_fan():
     """Only |alpha| <= 90 propagates into r > 0 — a steeper launch traces to
-    negative range and never enters the field — so that is what is drawn."""
+    negative range and never enters the field — so that is the sector, for
+    every table. Fixed rather than fitted to the table, so two patterns drawn
+    side by side are drawn on the same axes and can be compared by eye."""
     fig, ax = plot_beam_pattern(_beam_full())
     assert (ax.get_thetamin(), ax.get_thetamax()) == (-90.0, 90.0)
 
 
-def test_forward_view_clips_to_the_table_support():
+def test_a_table_reaching_past_the_fan_draws_only_the_fan():
+    """A 0-180° table is not a reason to draw a sector half of which no
+    launch reaches."""
     angles = np.linspace(0.0, 180.0, 181)
     pattern = np.column_stack([angles, np.zeros_like(angles)])
-    fig, ax = plot_beam_pattern(pattern)
-    assert (ax.get_thetamin(), ax.get_thetamax()) == (0.0, 90.0)
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', UserWarning)
+        fig, ax = plot_beam_pattern(pattern)
+    assert (ax.get_thetamin(), ax.get_thetamax()) == (-90.0, 90.0)
 
 
-def test_support_view_follows_the_table():
-    angles = np.linspace(0.0, 180.0, 181)
-    pattern = np.column_stack([angles, np.zeros_like(angles)])
-    fig, ax = plot_beam_pattern(pattern, view='support')
-    assert (ax.get_thetamin(), ax.get_thetamax()) == (0.0, 180.0)
-
-
-def test_full_view_draws_the_back_half_too():
-    fig, ax = plot_beam_pattern(_beam_full(), view='full')
-    assert (ax.get_thetamin(), ax.get_thetamax()) == (-180.0, 180.0)
-
-
-def test_unknown_view_raises_configuration_error():
-    with pytest.raises(ConfigurationError):
-        plot_beam_pattern(_beam_full(), view='sideways')
-
-
-def test_clipping_the_view_does_not_clip_the_drawn_data():
+def test_clipping_to_the_fan_does_not_clip_the_drawn_data():
     """The wedge is an axes limit, not a filter: mirror= and the table tests
     keep seeing the whole table."""
     pattern = _beam_full()
@@ -2982,17 +3418,17 @@ def test_clipping_the_view_does_not_clip_the_drawn_data():
     assert np.allclose(np.rad2deg(ax.lines[0].get_xdata()), pattern[:, 0])
 
 
-def test_a_peak_outside_the_view_warns():
+def test_a_peak_outside_the_fan_warns():
     """A back lobe stronger than anything drawn is the one case where the
-    forward half-plane misleads."""
+    launch fan misleads — and it is also a table Bellhop could not use."""
     angles = np.linspace(-180.0, 180.0, 361)
     levels = np.where(np.abs(angles) >= 150.0, 0.0, -30.0)
     with pytest.warns(UserWarning, match='strongest'):
         plot_beam_pattern(np.column_stack([angles, levels]))
 
 
-def test_a_peak_outside_the_view_warns_on_the_cartesian_axes_too():
-    """``view=`` clips the angle axis in both renderings, so a main lobe the
+def test_a_peak_outside_the_fan_warns_on_the_cartesian_axes_too():
+    """The fan clips the angle axis in both renderings, so a main lobe the
     xlim hides has to be reported exactly as the polar wedge reports it."""
     angles = np.linspace(-180.0, 180.0, 361)
     levels = np.where(np.abs(angles) >= 150.0, 0.0, -30.0)
@@ -3000,7 +3436,7 @@ def test_a_peak_outside_the_view_warns_on_the_cartesian_axes_too():
         plot_beam_pattern(np.column_stack([angles, levels]), polar=False)
 
 
-def test_a_peak_inside_the_view_draws_without_warning():
+def test_a_peak_inside_the_fan_draws_without_warning():
     with warnings.catch_warnings():
         warnings.simplefilter('error', UserWarning)
         plot_beam_pattern(_beam_full())
@@ -3012,26 +3448,6 @@ def _beam_downward():
     angles = np.linspace(0.0, 90.0, 181)
     return np.column_stack([angles,
                             np.where(np.abs(angles - 30.0) <= 12.0, 0.0, -35.0)])
-
-
-def test_radial_labels_prefer_a_bearing_the_pattern_leaves_empty():
-    """On a full circle a 0-90° table leaves three quadrants bare — that is
-    where the labels belong, and picking the quietest *table row* never finds
-    it because no row is there to nominate it."""
-    fig, ax = plot_beam_pattern(_beam_downward(), view='full')
-    bearing = (ax.get_rlabel_position() + 180.0) % 360.0 - 180.0
-    assert not 0.0 <= bearing <= 90.0, f"labels at {bearing:g}°, over the table"
-
-
-def test_radial_labels_avoid_the_angle_tick_spokes():
-    """On a full circle the radial labels are placed by bearing, and a bearing
-    that lands on a labelled spoke prints the dB value on top of the degree
-    one."""
-    fig, ax = plot_beam_pattern(_beam_half(), view='full')
-    spokes = np.rad2deg(ax.get_xticks())
-    offset = np.abs((spokes - ax.get_rlabel_position() + 180.0) % 360.0 - 180.0)
-    assert offset.min() >= 10.0, (
-        f"radial labels at {ax.get_rlabel_position():g}°, spokes at {spokes}")
 
 
 def test_the_radial_axis_is_not_over_ticked():
@@ -3062,29 +3478,21 @@ def test_radial_labels_do_not_collide_with_the_title():
                 f"radial label {label.get_text()!r} overlaps the title")
 
 
-def test_a_narrow_wedge_is_labelled_more_finely_than_45_degrees():
-    angles = np.linspace(0.0, 20.0, 41)
-    pattern = np.column_stack([angles, np.zeros_like(angles)])
-    with pytest.warns(UserWarning):
-        fig, ax = plot_beam_pattern(pattern)
-    assert len([t for t in ax.get_xticklabels() if t.get_text()]) >= 3
+def test_both_ends_of_the_fan_are_labelled():
+    """+/-90 are the two angles a reader checks first — whether the table
+    reaches the horizontal and whether it reaches straight down — and a 45°
+    step across 180° labels neither."""
+    fig, ax = plot_beam_pattern(_beam_full())
+    shown = {t.get_text().rstrip('\u00b0') for t in ax.get_xticklabels()
+             if t.get_text()}
+    assert {'-90', '90'} <= shown, shown
 
 
-def test_cartesian_limits_the_angle_axis_to_the_same_view():
-    """``view=`` is about which launch angles are worth looking at, not about
-    polar geometry, so both renderings answer it the same way."""
+def test_the_cartesian_angle_axis_spans_the_same_fan():
+    """Which launch angles exist is a fact about the fan, not about how the
+    response is drawn, so both renderings limit the axis the same way."""
     fig, ax = plot_beam_pattern(_beam_full(), polar=False)
     assert ax.get_xlim() == (-90.0, 90.0)
-
-
-def test_cartesian_full_view_spans_the_whole_table():
-    fig, ax = plot_beam_pattern(_beam_full(), polar=False, view='full')
-    assert ax.get_xlim() == (-180.0, 180.0)
-
-
-def test_cartesian_view_clips_to_the_table_support():
-    fig, ax = plot_beam_pattern(_beam_half(), polar=False, view='support')
-    assert ax.get_xlim() == (0.0, 180.0)
 
 
 # ── the data actually drawn ──────────────────────────────────────────────────

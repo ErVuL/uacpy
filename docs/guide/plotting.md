@@ -512,7 +512,7 @@ coefficients have no public free plotter — they are reached through
 
 | Plotter | ax | Draws |
 |---|---|---|
-| `plot_beam_pattern(pattern=None, ax=None, polar=True, view='forward', mirror=False, fill=True, rmin=None)` | ✓ | the `.sbp` directivity table, on polar axes oriented like the field: 0° along increasing range, positive angles downward. `source.plot_beam_pattern()` is the object form; `None` draws the flat 0 dB circle Bellhop substitutes for an omni source |
+| `plot_beam_pattern(pattern=None, ax=None, polar=True, mirror=False, fill=True, rmin=None)` | ✓ | the `.sbp` directivity table, on polar axes oriented like the field: 0° along increasing range, positive angles downward. `source.plot_beam_pattern()` is the object form; `None` draws the flat 0 dB circle Bellhop substitutes for an omni source |
 
 The polar orientation is not cosmetic. The `.sbp` angle axis *is* Bellhop's
 launch declination `alpha` — `Bellhop._check_beam_pattern_spans_the_fan`
@@ -521,21 +521,19 @@ compares the two directly — and `ray2D(1)%t = [COS(alpha), SIN(alpha)]/c`
 `alpha > 0` deeper. A lobe drawn below the horizontal is therefore a lobe that
 ensonifies the water below the source in the TL image beside it.
 
-**`view=` picks the sector, and defaults to the half that propagates.** A
-launch steeper than ±90° has `COS(alpha) < 0`, so it traces to *negative* range
-and never enters the `r > 0` the field is evaluated on — traced directly,
-`alpha = ±127.5°` gives `r` in `[-6000, 0]` while `alpha = ±42.5°` reaches
-`+6000`. `view='forward'` therefore draws the right half-plane, clipped to the
-table's own support (a 0-180° table draws as the 0-90° quarter). `'support'`
-draws the table's whole span, `'full'` the whole circle, and `polar=False`
-takes the same view as its `xlim` rather than always spanning the table. The
-choice moves the axes limits only — the line always carries every row — and a
-table whose strongest level falls outside the drawn sector says so.
+**The sector is always ±90°, in both renderings.** A launch steeper than
+±90° has `COS(alpha) < 0`, so it traces to *negative* range and never enters
+the `r > 0` the field is evaluated on — traced directly, `alpha = ±127.5°`
+gives `r` in `[-6000, 0]` while `alpha = ±42.5°` reaches `+6000`. That makes
+`[-90, 90]` the whole of what a `.sbp` has to say, so there is nothing to
+choose between: every pattern lands on the same axes, and two of them can be
+compared by eye. `polar=False` takes the identical limit as its `xlim`.
 
-A `.sbp` is worth defining only over `[-90, 90]` for the same reason: past the
-horizon there is no range for the energy to travel into.
+It is an axes limit, not a filter — the line always carries every row of the
+table — and a table whose strongest level falls outside the fan says so,
+because Bellhop would not launch into it either.
 
-![Polar and rectilinear share one view](figures/plot_beam_pattern.png)
+![Polar and rectilinear share one sector](figures/plot_beam_pattern.png)
 
 `mirror=` is **off** by default: no engine mirrors a half-defined table.
 `ReadPat` (`misc/beampattern.f90`) reads it verbatim, and `bellhop.f90:269-274`

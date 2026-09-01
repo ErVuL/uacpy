@@ -92,6 +92,19 @@ def test_ir_single_receiver_no_at_needed():
     assert len(ax.lines) == 1
 
 
+def test_ir_forwards_t_start_to_the_synthesis():
+    """``to_time_trace`` takes ``t_start``, and the sampling warning tells the
+    caller to pass it — so it has to reach the synthesis rather than the line
+    being drawn."""
+    fig, ax = _broadband().plot_impulse_response(t_start=0.5)
+    assert float(ax.lines[0].get_xdata()[0]) == pytest.approx(0.5)
+
+
+def test_ir_forwards_nfft_to_the_synthesis():
+    fig, ax = _broadband().plot_impulse_response(nfft=4096)
+    assert ax.lines[0].get_xdata().size == 4096
+
+
 def test_ir_after_at_on_grid():
     H = _broadband(n_depth=3, n_range=4)
     fig, ax = H.at(depth=25.0, range=1000.0).plot_impulse_response()

@@ -226,6 +226,12 @@ class Bounce(PropagationModel):
     - Acoustics Toolbox: http://oalib.hlsresearch.com/
     """
 
+    # Left at the default False even though TopOpt position 4 does reach the
+    # engine: BOUNCE tabulates R(theta) at an interface, and its `receiver` is
+    # read only for `range_max`, which sizes the table's angular resolution
+    # rather than describing a path. The notice would quote that knob as a
+    # propagation distance.
+
     # Declarative metadata read and validated by PropagationModel. BOUNCE
     # emits only plane-wave reflection coefficients; it consumes layered and
     # elastic seabed columns natively (so those env shapes are *not*

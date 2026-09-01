@@ -920,6 +920,89 @@ def test_time_series_every_range_cell_carries_energy():
     assert energy[0] > energy[-1]
 
 
+class TestEchoesLandAtTheDelayTheyWereGiven:
+    """COA eq. 8.30 places each echo at ``S[t - tau]`` — a CONTINUOUS shift.
+
+    Rounding tau to the nearest sample is a numerical convenience the
+    formulation does not license: it moves every echo by up to half a
+    sample, which is a phase error of tens of degrees at any carrier a
+    modem would use, and ``delayandsum`` sums the echoes coherently, so
+    that error lands in the interference pattern.
+    """
+
+    FS = 200000.0
+    FC = 20000.0
+
+    def _cell(self, delay):
+        return dict(n_arrivals=1,
+                    amplitudes=np.array([1.0]),
+                    phases=np.array([0.0]),
+                    delays=np.array([float(delay)]),
+                    delays_imag=np.array([0.0]),
+                    n_top_bounces=np.array([0]),
+                    n_bot_bounces=np.array([0]),
+                    src_angles=np.array([0.0]),
+                    rcv_angles=np.array([0.0]))
+
+    @staticmethod
+    def _waveform(fs, fc, n=256):
+        k = np.arange(n)
+        return np.hanning(n) * np.sin(2 * np.pi * fc * k / fs)
+
+    def _trace(self, delay, **kw):
+        from uacpy.models.bellhop import delayandsum
+        rts, _ = delayandsum(
+            rcv_arrivals=self._cell(delay),
+            source_timeseries=self._waveform(self.FS, self.FC),
+            sample_rate=self.FS, fc=self.FC,
+            t_start=0.0, time_window=0.02, **kw)
+        return rts
+
+    def test_a_half_sample_echo_is_not_snapped_onto_a_sample(self):
+        """An echo half a sample late must land between the two samples, not
+        on one of them. Rounding makes the half-sample trace bit-identical
+        to a whole-sample one, which is how the error hides."""
+        dt = 1.0 / self.FS
+        base = 1000 * dt
+        half = self._trace(base + 0.5 * dt)
+        assert not np.allclose(half, self._trace(base), atol=1e-12), (
+            "the half-sample echo was snapped back onto sample 1000")
+        assert not np.allclose(half, self._trace(base + dt), atol=1e-12), (
+            "the half-sample echo was snapped forward onto sample 1001")
+
+    def test_the_echo_arrives_where_it_was_told_to(self):
+        """Measured as the energy centroid of the trace, which reads the
+        group delay whatever the waveform. Rounding quantises it to the
+        sample grid; the requested delay does not sit on that grid."""
+        dt = 1.0 / self.FS
+        for frac in (0.25, 0.5, 0.75):
+            want = (1000 + frac) * dt
+            rts = self._trace(want)
+            power = np.abs(rts) ** 2
+            centroid = float((power * np.arange(power.size)).sum()
+                             / power.sum()) * dt
+            reference = self._trace(1000 * dt)
+            p0 = np.abs(reference) ** 2
+            c0 = float((p0 * np.arange(p0.size)).sum() / p0.sum()) * dt
+            shift_samples = (centroid - c0) / dt
+            assert shift_samples == pytest.approx(frac, abs=0.02), (
+                f"asked for +{frac} samples, the trace moved "
+                f"{shift_samples:.3f}")
+
+    def test_nearest_sample_placement_stays_available(self):
+        """The old behaviour is a keyword, not a removal: a caller who wants
+        every echo on a sample boundary can still have it. 0.6 rather than
+        0.5 of a sample, because numpy rounds a half to the nearest EVEN
+        sample, so 1000.5 snaps down to 1000 and would not show the move."""
+        dt = 1.0 / self.FS
+        snapped = self._trace(1000.6 * dt, fractional=False)
+        assert np.allclose(snapped, self._trace(1001 * dt, fractional=False),
+                           atol=1e-12)
+        assert not np.allclose(snapped, self._trace(1000 * dt,
+                                                   fractional=False),
+                               atol=1e-12)
+
+
 class TestVolumeAttenuationFromImaginaryDelay:
     """``Im(tau)`` is the only carrier of Bellhop's volume attenuation.
 
@@ -2786,3 +2869,112 @@ def test_downward_only_pattern_ensonifies_below_the_source():
     swing = below_minus_above(downward) - below_minus_above(None)
     assert swing < -10.0, f"downward pattern shifted below-above by {swing:+.2f} dB"
     assert below_minus_above(downward) < 0.0   # below is the louder one
+
+
+class TestDelayAndSumSaysWhatTheWindowLeavesOut:
+    """A delay-and-sum drops an echo the window does not hold — it never
+    folds — so the record looks complete whatever it left out. The window
+    report names the omitted and clipped echoes and the energy they carried."""
+
+    FS = 100000.0
+    FC = 10000.0
+
+    def _cell(self, *delays):
+        n = len(delays)
+        return dict(n_arrivals=n,
+                    amplitudes=np.ones(n), phases=np.zeros(n),
+                    delays=np.asarray(delays, dtype=float),
+                    delays_imag=np.zeros(n),
+                    n_top_bounces=np.zeros(n, dtype=int),
+                    n_bot_bounces=np.zeros(n, dtype=int),
+                    src_angles=np.zeros(n), rcv_angles=np.zeros(n))
+
+    def _waveform(self, n=200):
+        # 2 ms hann-windowed tone burst
+        k = np.arange(n)
+        return np.hanning(n) * np.sin(2 * np.pi * self.FC * k / self.FS)
+
+    def _run(self, cell, **kw):
+        from uacpy.models.bellhop import delayandsum
+        return _messages(lambda: delayandsum(
+            rcv_arrivals=cell, source_timeseries=self._waveform(),
+            sample_rate=self.FS, fc=self.FC, **kw),
+            "does not hold every echo")
+
+    def test_an_echo_beyond_the_window_is_counted_with_its_energy(self):
+        # Two equal echoes; the window closes before the second begins, so
+        # it is omitted and takes half the energy with it: -3 dB.
+        msgs = self._run(self._cell(0.010, 0.050),
+                         t_start=0.0, time_window=0.030)
+        assert len(msgs) == 1, msgs
+        assert "1 echo(es) fall entirely outside" in msgs[0]
+        assert "-3 dB of the received energy" in msgs[0]
+
+    def test_a_window_holding_every_echo_says_nothing(self):
+        assert self._run(self._cell(0.010, 0.020),
+                         t_start=0.0, time_window=0.040) == []
+
+    def test_the_auto_window_holds_everything(self):
+        assert self._run(self._cell(0.010, 0.050)) == []
+
+    def test_a_cut_leading_edge_is_named_as_such(self):
+        # The window opens 1 ms into the first echo's 2 ms waveform.
+        msgs = self._run(self._cell(0.010, 0.020),
+                         t_start=0.011, time_window=0.040)
+        assert len(msgs) == 1, msgs
+        assert "1 echo(es) begin before it and lose their leading edge" in msgs[0]
+
+    def test_an_echo_running_past_the_end_loses_its_tail(self):
+        # The second echo starts 1 ms before a window that ends at 30 ms.
+        msgs = self._run(self._cell(0.010, 0.029),
+                         t_start=0.0, time_window=0.030)
+        assert len(msgs) == 1 and "run past its end" in msgs[0], msgs
+
+    def test_a_report_dict_totals_the_cells_and_stays_silent(self):
+        from uacpy.models.bellhop import delayandsum
+        report = {}
+        with warnings.catch_warnings(record=True) as rec:
+            warnings.simplefilter('always')
+            for cell in (self._cell(0.010, 0.050), self._cell(0.012, 0.060)):
+                delayandsum(rcv_arrivals=cell,
+                            source_timeseries=self._waveform(),
+                            sample_rate=self.FS, fc=self.FC,
+                            t_start=0.0, time_window=0.030, report=report)
+        assert not [w for w in rec if "does not hold every echo"
+                    in str(w.message)]
+        assert report['omitted'] == 2
+        assert report['omitted_power'] == pytest.approx(2.0)
+        assert report['total_power'] == pytest.approx(4.0)
+
+
+@pytest.mark.requires_binary
+class TestTheDefaultBroadbandGridReportsWhatItFolds:
+    """The default BROADBAND grid — 128 bins over fc·(1 ± 0.25) — sets Δf
+    from the carrier alone, a record 254/fc s long. The arrivals are in hand
+    when H(f) is built, so the run measures them against that record."""
+
+    def _geometry(self):
+        # 300 m of water, source and receiver mid-column 1 km apart: the
+        # surface and bottom bounces arrive ~29 ms after the direct path,
+        # against a 254/40e3 = 6.35 ms default record.
+        env = uacpy.Environment(name='fold', bathymetry=300.0, ssp=1500.0)
+        source = Source(depths=150.0, frequencies=40e3)
+        receiver = Receiver(depths=[150.0], ranges=[1000.0])
+        return env, source, receiver
+
+    def test_the_default_grid_names_the_arrivals_it_folds(self):
+        env, source, receiver = self._geometry()
+        msgs = _messages(lambda: Bellhop(verbose=False).run(
+            env, source, receiver, run_mode=RunMode.BROADBAND),
+            "fold back onto the early trace")
+        assert len(msgs) == 1, msgs
+        assert msgs[0].startswith(
+            "Bellhop.run(run_mode=BROADBAND): a 0.00635 s record"), msgs[0]
+        assert "Arrivals.synthesis_band" in msgs[0]
+
+    def test_a_grid_the_caller_chose_is_not_second_guessed(self):
+        env, source, receiver = self._geometry()
+        grid = np.linspace(30e3, 50e3, 128)     # the same spacing, chosen
+        assert _messages(lambda: Bellhop(verbose=False).run(
+            env, source, receiver, run_mode=RunMode.BROADBAND,
+            frequencies=grid), "fold back onto the early trace") == []

@@ -495,6 +495,76 @@ class ModelSpec:
                 )
 
 
+#: dB of volume absorption that may go unmentioned. Below a decibel over the
+#: whole track the omission cannot change a level anyone acts on, and warning
+#: about it would only teach users to ignore the notice.
+_ABSORPTION_NOTICE_DB = 1.0
+
+
+def _warn_if_volume_absorption_is_missing(env, source, receiver) -> None:
+    """Say so when a run is about to propagate through lossless water.
+
+    The Acoustics Toolbox adds volume attenuation only when asked:
+    ``misc/AttenMod.f90:35-38`` makes the second attenuation-unit letter
+    (``T`` Thorp, ``F`` Francois-Garrison, ``B`` biological) the one that
+    adds it, and the ``SELECT CASE`` at ``:84`` has no default branch. So
+    ``Environment(absorption=None)`` is lossless water in every model, not
+    just in one — which is the right default (it is what the analytic
+    benchmarks compare against, and it keeps a uacpy run reproducing the
+    engine's own answer for the same deck) but is easy to leave in place by
+    accident. At 40 kHz over a kilometre Thorp puts it at 12.9 dB, comparable
+    to the whole bottom-loss budget of such a link.
+
+    Thorp is the yardstick because it takes no parameters, so the size of
+    what is being dropped can be estimated without inventing a water column.
+    """
+    if getattr(env, 'absorption', None) is not None:
+        return
+    # Say it once for the run the caller asked for. A wrapper re-runs itself
+    # internally — a broadband Bellhop re-runs ARRIVALS at its carrier, the
+    # routing path spawns a Bounce, a multi-depth eigenray run loops over
+    # source depths — and each of those calls back through here with a
+    # different frequency or range. Marking the environment the user handed in
+    # keeps the second notice, which quotes a band the caller never asked for,
+    # from contradicting the first.
+    if getattr(env, '_absorption_notice_given', False):
+        return
+    frequencies = np.atleast_1d(np.asarray(
+        getattr(source, 'frequencies', ()), dtype=float))
+    ranges = np.atleast_1d(np.asarray(
+        getattr(receiver, 'ranges', ()), dtype=float)) if receiver is not None \
+        else np.array([])
+    if not frequencies.size or not ranges.size:
+        return
+    f_max = float(np.max(frequencies))
+    r_max = float(np.max(np.abs(ranges)))
+    if not (np.isfinite(f_max) and np.isfinite(r_max)) or f_max <= 0.0 \
+            or r_max <= 0.0:
+        return
+    from uacpy.core.absorption import Thorp
+    alpha = float(np.atleast_1d(Thorp().alpha_db_per_m(f_max, 0.0))[0])
+    omitted = alpha * r_max
+    if not np.isfinite(omitted) or omitted < _ABSORPTION_NOTICE_DB:
+        return
+    try:
+        env._absorption_notice_given = True
+    except AttributeError:          # a carrier that refuses stray attributes
+        pass
+    # "Valid at frequencies below 50 kHz": Etter, Underwater Acoustic
+    # Modeling and Simulation, on absorption — which also puts the field
+    # measurements these laws rest on at 20 Hz-60 kHz.
+    warnings.warn(
+        f"env.absorption is None, so the water column is lossless: this run "
+        f"drops about {omitted:.1f} dB of volume absorption at "
+        f"{f_max:g} Hz over {r_max:g} m (Thorp's estimate). That is "
+        f"deliberate for a benchmark against a lossless solution, and wrong "
+        f"for anything meant to be realistic — pass absorption=Thorp() (no "
+        f"parameters, valid below 50 kHz) or "
+        f"absorption=FrancoisGarrison(temperature_c=..., salinity_psu=..., "
+        f"pH=..., z_bar_m=...) for the general case.",
+        UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
+
+
 class PropagationModel(ABC):
     """
     Abstract base class for acoustic propagation models.
@@ -531,6 +601,14 @@ class PropagationModel(ABC):
     verbose : bool or str
         Verbose-output gate (see constructor).
     """
+
+    #: Whether this wrapper carries ``env.absorption`` through to its engine.
+    #: Off by default so a wrapper that ignores volume attenuation cannot
+    #: advise a user to set it — RAM models none at all
+    #: (``_warn_on_dropped_absorption``) and the OASES family substitutes its
+    #: own empirical law instead (``oaseun31.f:1516-1521``), so for those the
+    #: advice would contradict the warning they already emit.
+    _consumes_volume_absorption: bool = False
 
     # The leading positional run() parameters every wrapper must carry, in
     # order. Anything a wrapper adds beyond these must be keyword-only (after
@@ -1192,6 +1270,12 @@ class PropagationModel(ABC):
                 f"source: Source, receiver: Receiver, ...) in that "
                 f"order; got {', '.join(wrong)}."
             )
+        # Every wrapper opens with this call, so hanging the absorption
+        # notice here is what makes it model-independent — but only the
+        # wrappers that actually carry ``env.absorption`` to their engine may
+        # advise setting it.
+        if self._consumes_volume_absorption:
+            _warn_if_volume_absorption_is_missing(env, source, receiver)
 
     def _pad_waveform_to_duration(
         self, source_waveform, sample_rate, output_duration,
@@ -1370,12 +1454,23 @@ class PropagationModel(ABC):
             note = (f" (waveform Δf = {df:.4g} Hz subdivided so the "
                     f"{n_freqs}-bin band resolves an arrival)")
         if announce:
+            # Name the record as well as the spacing. They are one number
+            # written two ways — a synthesised trace is 1/Δf long — but the
+            # spacing alone leaves the consequence to be derived: this Δf
+            # comes from the SOURCE pulse, and a channel whose multipath
+            # outlasts it folds the tail onto the early trace, where it reads
+            # as extra early arrivals rather than as a mistake.
+            record = 1.0 / df_grid if df_grid > 0 else float('inf')
             warnings.warn(
                 f"{self.model_name}.run(run_mode=TIME_SERIES): no "
                 f"`frequencies=` passed; auto-derived {refined} freqs from "
                 f"the source waveform ({f_min:.2f}-{f_max:.2f} Hz, "
                 f"Δf={df_grid:.4g} Hz, threshold {threshold_db:.0f} dB){note}. "
-                f"Pass `frequencies=` to silence.",
+                f"That Δf makes the record {record:.4g} s long, and it is set "
+                f"by the pulse, not by the channel: any arrival later than "
+                f"{record:.4g} s after the first folds back onto the early "
+                f"trace. Pass `output_duration=` to buy a longer record, or "
+                f"`frequencies=` to set the grid yourself and silence this.",
                 UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
             )
         return derived

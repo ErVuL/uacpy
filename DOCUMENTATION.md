@@ -1332,6 +1332,8 @@ arr.filter_by_bounces(kind='surface')        # Arrivals: by multipath class
 arr.in_delay_window(t_min=2.0).top_n_by_amplitude(5)
 arr.sorted_by_amplitude()                    # loudest first
 arr.delays, arr.amplitudes, arr.phases       # the ray-arrival triple
+arr.rms_delay_spread()                       # pulse smearing, energy-weighted
+arr.synthesis_band(bandwidth=8e3)            # grid that holds this multipath
 rays.filter_by_launch_angle(-10, 10)         # Rays: pure data subsets
 rays.top_n_by_miss(20, target_range_m=5000, target_depth_m=50)
 rays.filter_by_miss_distance(50.0, target_range_m=5000, target_depth_m=50)

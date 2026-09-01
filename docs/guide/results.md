@@ -461,6 +461,9 @@ a single point.
 | `.delays`, `.amplitudes`, `.phases` | bulk ndarray views — `phases` is converted to **radians** |
 | `.filter_by_bounces(…)`, `.in_delay_window(t_min, t_max)`, `.filter(predicate)` | subsets |
 | `.sorted_by_amplitude()`, `.top_n_by_amplitude(n)` | rank by strength |
+| `.rms_delay_spread()` | energy-weighted width of the arrival pattern (s) — how much the multipath smears a pulse, and far less tail-driven than `ptp(delays)` |
+| `.energy_support(fraction=0.999)` | delay span holding that share of the energy (s) — the span a synthesis window has to cover, unmoved by a faint straggler the way `ptp(delays)` is |
+| `.synthesis_band(bandwidth=…, record=…)` | frequency grid to synthesise these arrivals on — a record is `1/Δf` long, so the window, not the bandwidth, decides the spacing. State `record` (seconds) or let it come from `energy_support`; anything left outside folds back onto the early trace, and it says so |
 | `len(arr)`, `for a in arr:` | count and iterate |
 
 `Arrivals` is the channel impulse response that

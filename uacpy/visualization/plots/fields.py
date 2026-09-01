@@ -10,7 +10,7 @@ from typing import Optional, Sequence, Tuple
 from uacpy.core.environment import Environment
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.results import Field
-from uacpy.visualization.style import cmap_for_field
+from uacpy.visualization.style import cmap_for_field, reversed_cmap
 from uacpy.visualization.plots._common import _value_array, _value_label, _default_value, _coord_label, _coord_axis, _TL_LIMITS, _is_transmission_loss, _overlay_seafloor, _pinned_subtitle, _draw_result_credit, fig_ax, invert_yaxis_once, _draw_geometry, typed_plot_error, _plot_warn
 
 
@@ -41,7 +41,18 @@ _CONTOUR_FMT = {'db': '%g dB', 'mag_db': '%g dB', 'phase': '%g rad'}
 # view and shares one signed colormap — see ``style.LINEAR_VIEW_COLORMAP``.
 # ``plot_field`` and ``compare_models`` both key on this, so one field renders
 # the same through either entry point.
+from uacpy.core.constants import PRESSURE_FLOOR
+
 _DB_VALUES = ('db', 'mag_db')
+
+#: Magnitude of the no-energy marker on a dB axis, 600. ``PRESSURE_FLOOR``
+#: is what the package writes where a model reported no energy at all (as
+#: against NaN, which is no data), so a sample of this size is a marker
+#: rather than a level and takes no part in a colour limit. Its SIGN depends
+#: on the view: ``db`` is a loss and puts it at +600, ``mag_db`` is
+#: ``-field.db`` and puts the same cell at -600, so the two are read by
+#: magnitude and nothing real reaches it from either side.
+_NO_ENERGY_DB = abs(20.0 * np.log10(PRESSURE_FLOOR))
 
 # Fraction of its reference span that a length-1 axis's heatmap band occupies.
 _SINGLETON_BAND_FRACTION = 0.02
@@ -421,9 +432,17 @@ def _value_style(field, value):
         return cmap_for_field(field.kind, db=True), lo, hi
     if value == 'phase':
         return 'twilight', -np.pi, np.pi
-    # 'mag_db' is a dB view of |H|; 'mag' / 'real' / 'imag' are linear views,
-    # which share one signed colormap whatever the quantity.
-    return cmap_for_field(field.kind, db=value in _DB_VALUES), None, None
+    if value == 'mag_db':
+        # A dB view of |H|, so larger is LOUDER — the opposite of the loss
+        # the dB colormap is built for. Measured under the unreversed map:
+        # the loudest water came out dark blue at -20 dB while the same cell
+        # reads dark red through ``db``, against style.py's stated
+        # convention that low TL (loud, near) is red.
+        return (reversed_cmap(cmap_for_field(field.kind, db=True)),
+                None, None)
+    # 'mag' / 'real' / 'imag' are linear views, which share one signed
+    # colormap whatever the quantity.
+    return cmap_for_field(field.kind, db=False), None, None
 
 
 def _plot_field_2d(
@@ -463,11 +482,35 @@ def _plot_field_2d(
             vmin = -peak if vmin is None else vmin
             vmax = peak if vmax is None else vmax
         value_label = 'p(t)'
+    elif value in _DB_VALUES and (vmin is None or vmax is None):
+        # A no-energy cell is a MARKER, not a level: the package writes
+        # ``PRESSURE_FLOOR`` where the model reported no energy, so it lands
+        # 600 dB out and drags the bar with it — measured, ``mag_db`` ran
+        # -600..-20 and a loss view 20..600, each packing every real level
+        # into a tenth of the scale. Reading it by MAGNITUDE covers both
+        # views, which carry the same cell at opposite signs. Nothing the
+        # model computed reaches that far, so this needs no threshold and no
+        # percentile — and unlike a percentile it keeps a genuine deep null,
+        # which is the feature the view exists to show: on a 1/r field with
+        # one marked cell and a real -70 dB null, 580 dB of bar becomes 70,
+        # where the 1st percentile would have cut the null off at -80 dB.
+        finite = Z[np.isfinite(Z)]
+        levels = finite[np.abs(finite) < _NO_ENERGY_DB]
+        if levels.size:
+            vmin = float(levels.min()) if vmin is None else vmin
+            vmax = float(levels.max()) if vmax is None else vmax
     elif value in ('mag', 'real', 'imag') and (vmin is None or vmax is None):
         # Zero has to land on the diverging map's neutral colour, so the
         # signed views take symmetric limits and the non-negative modulus
         # starts at 0 — the same reading of "white = silence" across all
         # three. An autoscale puts zero at an arbitrary colour instead.
+        # The top is the maximum, deliberately. A linear view compresses
+        # everything under its loudest cell — that is what a linear scale
+        # is — and no robust statistic helps: on a 1/r field the 99th
+        # percentile IS the maximum (measured), and a lower one clips the
+        # near field the view exists to show. The no-energy marker cannot
+        # reach here: it is ``PRESSURE_FLOOR`` (1e-30), a tiny number, so it
+        # never sets ``span``. For dynamic range, read the dB views.
         finite = np.abs(Z[np.isfinite(Z)])
         span = float(finite.max()) if finite.size else 1.0
         if span <= 0:

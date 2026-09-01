@@ -1011,6 +1011,14 @@ class Field(Result):
 
         Requires ``coords == {'depth', 'range', 'frequency'}``.
 
+        The record is ``1/Δf`` long and circular: an arrival later than
+        that after the record's start lands back on its early part, at a
+        fixed place, with nothing at the record's end to show for it — so
+        whether the grid holds the channel is knowable only from the
+        arrivals (:meth:`Arrivals.synthesis_band`, or the notice a Bellhop
+        BROADBAND run gives on its default grid). This checks only that the
+        record holds the source pulse.
+
         Parameters
         ----------
         source_waveform : ndarray
@@ -1087,7 +1095,18 @@ class Field(Result):
         other uacpy plot method uses — to draw into existing axes. This one
         draws two panels, so either name takes a **pair**: anything that
         unpacks into two Axes, including the ndarray ``plt.subplots(2, 1)``
-        returns. Returns ``(fig, (ax_mag, ax_phase))``."""
+        returns. Returns ``(fig, (ax_mag, ax_phase))``.
+
+        What the panels show depends on the frequency grid. Each pair of
+        paths ``dtau`` apart puts a fringe of period ``1/dtau`` on
+        ``|H(f)|``, and a grid from ``Arrivals.synthesis_band`` places
+        ``margin`` samples on it — 1.2 by default, so the modulus is drawn
+        critically sampled: a dense oscillation under a beat envelope, real
+        multipath interference but interpolated by the plotter between
+        samples. Raise ``margin`` to see the fringes. The phase is drawn
+        wrapped, and a bulk delay ``tau`` turns it once every ``1/tau`` Hz,
+        so over a band far wider than that it fills the panel; take the
+        delay out (``H * exp(2j*pi*f*tau)``) to see what remains."""
         import matplotlib.pyplot as plt
         # ``ax`` is the name every sibling uses, and left to ``**kwargs`` it
         # reached ``spec.plot(..., ax=ax_mag, **kwargs)`` below as a duplicate
@@ -1153,6 +1172,7 @@ class Field(Result):
 
     def plot_impulse_response(
         self, *, ax=None, title=None, window: str = 'hann',
+        nfft: Optional[int] = None, t_start: Optional[float] = None,
         figsize=(8, 4), **kwargs,
     ):
         """Plot the band-limited impulse response ``p(t)`` at one receiver cell.
@@ -1182,7 +1202,11 @@ class Field(Result):
                     if k not in ('depth', 'range')},
             **spec.id_kwargs(),
         )
-        trace = grid.to_time_trace(window=window)
+        # ``nfft``/``t_start`` belong to the synthesis, not to the line:
+        # the sampling warning tells the caller to pass ``t_start=``, so
+        # it has to arrive here rather than at matplotlib.
+        trace = grid.to_time_trace(window=window, nfft=nfft,
+                                   t_start=t_start)
         owns_fig = ax is None
         if owns_fig:
             fig, ax = plt.subplots(figsize=figsize)
@@ -2005,9 +2029,17 @@ def _synthesize_time_series(
         df_tf = float(np.diff(tf_freqs).mean())
         t_dft = 1.0 / df_tf if df_tf > 0 else float('inf')
         t_dur = n_src / float(sample_rate)
-        # One-sample tolerance: float roundoff in Δf can make t_dft and
-        # t_dur evaluate as < when they should be ==. Real wraparound
-        # has t_dft short by *many* samples.
+        # Catches a caller-supplied grid coarser than the pulse itself: the
+        # record 1/Δf then cannot even hold the source waveform. It cannot
+        # fire on a grid derived from the waveform (Δf = fs/n makes 1/Δf the
+        # pulse length exactly), and it says nothing about the CHANNEL: how
+        # long the arrivals ring is not visible in H(f) sampled every Δf,
+        # and a late arrival folds to a fixed place mid-record, leaving the
+        # record's end silent — so that check lives where the arrivals are
+        # (``Arrivals.synthesis_band``; Bellhop's BROADBAND run on its
+        # default grid), by count and level. One-sample tolerance: float
+        # roundoff in Δf can make t_dft and t_dur evaluate as < when they
+        # should be ==.
         if t_dft < t_dur - 1.0 / float(sample_rate):
             warnings.warn(
                 f"synthesize_time_series: DFT period 1/Δf = {t_dft:.4f}s "

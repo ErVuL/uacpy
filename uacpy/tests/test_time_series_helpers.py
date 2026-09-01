@@ -1024,6 +1024,33 @@ class TestNarrowBandWindowDoesNotAnnihilate:
 
 
 @pytest.mark.requires_binary
+def test_the_auto_derived_grid_says_how_long_a_record_it_bought():
+    """The derived grid sets the record, and the record comes from the SOURCE
+    pulse — not from the channel. A pulse shorter than the multipath spread
+    therefore folds the tail onto the early trace, and the announcement has
+    to say so: quoting only the band and the spacing leaves the reader to
+    work out that 1/df is the whole record they are getting. The number to
+    quote is 1/df of the grid actually returned, which subdivision can make
+    longer than the pulse — here 1/12.5 Hz = 0.08 s from a 0.02 s burst."""
+    import warnings as _w
+    from uacpy.models.bellhop import Bellhop
+    from uacpy.models.base import RunMode
+
+    fs, dur = 20000.0, 0.020            # 20 ms pulse -> a 20 ms record
+    t = np.arange(0.0, dur, 1.0 / fs)
+    wf = np.hanning(t.size) * np.sin(2 * np.pi * 500.0 * t)
+    with _w.catch_warnings(record=True) as record:
+        _w.simplefilter('always')
+        Bellhop()._resolve_time_series_frequencies(
+            RunMode.TIME_SERIES, None, wf, fs)
+    messages = [str(w.message) for w in record]
+    assert messages, "the derivation announced nothing"
+    text = ' '.join(messages)
+    assert 'record' in text, text
+    assert '0.08' in text, f"the 0.08 s record is not named: {text}"
+    assert 'output_duration' in text, text
+
+
 def test_auto_derived_timeseries_grid_resolves_the_band():
     """A 20 ms burst gives Delta f = 50 Hz, so a 450-550 Hz band derives only
     3 bins — which the frequency-axis taper then collapses to a CW tone. The
@@ -1465,3 +1492,4 @@ class TestUnsolvedBinsDoNotBecomeSilence:
             warnings.simplefilter('ignore')
             trace = f.to_time_trace(depth=20.0, range=1000.0)
         assert np.isfinite(np.asarray(trace.data)).all()
+

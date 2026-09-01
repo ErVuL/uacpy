@@ -105,18 +105,29 @@ def invert_yaxis_once(ax) -> None:
 ZORDER_SEDIMENT = 2
 
 
-ZORDER_RAYS = 2.5
-
-
 ZORDER_SURFACE = 4
-# Above the bottom rendering (fill/markers ≤ 7, seafloor line = 10) so the
-# source/receiver geometry is never occluded by the seabed.
 
 
+# Rays draw over the seafloor fill (ZORDER_SEDIMENT + 5 = 7) and its line
+# (+ 6 = 8): the direct eigenray of a bottom-mounted link runs a few metres
+# above the seabed, inside the drawn line's own width, and is painted over
+# when it sits below that line. They stay under the receiver/source markers.
+ZORDER_RAYS = 9
+
+
+# Above the bottom rendering (fill/markers ≤ 7, seafloor line 8 in the
+# ray/field overlay and 10 in the bathymetry panel) and the rays, so the
+# source/receiver geometry is never occluded.
 ZORDER_RECEIVERS = 11
 
 
 ZORDER_SOURCE = 12
+
+
+# Above every drawn artist: a legend explains the picture, so nothing in
+# it may cover the key. Matplotlib's own default is 5, which sits under
+# the seabed fill, the seafloor line, the receivers and the source.
+ZORDER_LEGEND = 13
 
 
 # Dense receiver grids render as solid bars — decimate each axis independently
@@ -269,6 +280,16 @@ def _value_array(field: Field, value: str) -> Tuple[np.ndarray, str]:
         return field.db, label
     if value == 'mag_db':
         # Modulus in dB: 20·log10|H| = −TL (shares the floored dB conversion).
+        # Complex only, for the same reason 'mag' is: ``.db`` negates the
+        # modulus of COMPLEX data, but hands back real data untouched
+        # because it is already a level — so negating that flips a level
+        # rather than converting one. On signal excess, where the sign is
+        # the meaning, -20 dB (undetectable) plotted as +20.
+        if not field.is_complex:
+            raise ConfigurationError(
+                f"plot_field: value={value!r} requires complex data; this "
+                f"field is real and already a level, so its dB view is "
+                f"value='db'.")
         return -field.db, label
     if value in ('mag', 'phase'):
         if not field.is_complex:
@@ -369,6 +390,23 @@ def _imshow_extent(ranges_m: np.ndarray, depths: np.ndarray):
     return (r_km[0] - dr, r_km[-1] + dr, z[-1] + dz, z[0] - dz)
 
 
+def _sink_line_into_sediment(line) -> None:
+    """Shift a seafloor line down by half its own width, in screen points,
+    so the whole stroke lies on the sediment side of the boundary and its
+    upper edge IS the boundary.
+
+    A stroke centred on the seabed puts half its width into the water: 2 pt
+    on a 1 km depth axis covers the bottom 3 m of the water column, which is
+    where a bottom-mounted link's direct path runs, whatever z-order the rays
+    are drawn at. Depth axes point downward, so "into the sediment" is
+    screen-down, a negative display-y offset; fixed in points, it follows the
+    line width through a zoom."""
+    from matplotlib.transforms import ScaledTranslation
+    half_inch = line.get_linewidth() / 2.0 / 72.0
+    line.set_transform(line.get_transform() + ScaledTranslation(
+        0.0, -half_inch, line.axes.figure.dpi_scale_trans))
+
+
 def _overlay_seafloor(ax, env: Environment, ranges_m: np.ndarray) -> None:
     """Draw the seafloor on top of a (depth, range) heatmap.
 
@@ -376,7 +414,10 @@ def _overlay_seafloor(ax, env: Environment, ranges_m: np.ndarray) -> None:
     above contour lines and TL data — matches the original AT-style
     rendering. Bathymetry is clipped to the data x-range and anchored at both
     ends, and the y-axis is extended downward when the seafloor dips below the
-    data extent so the sediment fill stays visible."""
+    data extent so the sediment fill stays visible. The boundary stroke is
+    sunk into the sediment (:func:`_sink_line_into_sediment`) so nothing in
+    the water column — a ray skimming the bottom, the lowest field row — is
+    covered by it."""
     if env is None:
         return
     data_r_km = m_to_km(ranges_m)
@@ -417,7 +458,9 @@ def _overlay_seafloor(ax, env: Environment, ranges_m: np.ndarray) -> None:
             ax.set_ylim(depth_max, min(ax.get_ylim()))
         ax.fill_between(r_km, z, depth_max,
                         zorder=ZORDER_SEDIMENT + 5, **BOTTOM_FILL_STYLE_SOLID)
-        ax.plot(r_km, z, zorder=ZORDER_SEDIMENT + 6, **BOTTOM_LINE_STYLE)
+        (line,) = ax.plot(r_km, z, zorder=ZORDER_SEDIMENT + 6,
+                          **BOTTOM_LINE_STYLE)
+        _sink_line_into_sediment(line)
     else:
         depth_max = max(max(ax.get_ylim()), env.depth * 1.05)
         if depth_max > max(ax.get_ylim()):
@@ -426,8 +469,9 @@ def _overlay_seafloor(ax, env: Environment, ranges_m: np.ndarray) -> None:
             data_r_km, env.depth, depth_max,
             zorder=ZORDER_SEDIMENT + 5, **BOTTOM_FILL_STYLE_SOLID,
         )
-        ax.axhline(env.depth, zorder=ZORDER_SEDIMENT + 6,
-                   **BOTTOM_LINE_STYLE_FLAT)
+        line = ax.axhline(env.depth, zorder=ZORDER_SEDIMENT + 6,
+                          **BOTTOM_LINE_STYLE_FLAT)
+        _sink_line_into_sediment(line)
     ax.set_xlim(x_lo, x_hi)
 
 

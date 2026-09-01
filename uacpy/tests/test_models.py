@@ -1057,3 +1057,119 @@ def test_an_entry_point_that_refuses_multiple_depths_declares_one_shape(
         f"{owner_name}.{method_name} declares {annotation!r}; every model "
         f"that supports this mode refuses a multi-depth Source, so the "
         f"stack shape is unreachable here")
+
+
+class TestMissingVolumeAbsorptionIsAnnounced:
+    """The Acoustics Toolbox adds volume attenuation only when the option
+    string asks for it — ``misc/AttenMod.f90:35-38`` makes ``T``/``F``/``B``
+    the letters that add Thorp, Francois-Garrison or biological loss, and the
+    SELECT CASE at ``:84`` has no default branch. So an environment with no
+    absorption model runs through lossless water, in every model. That is a
+    legitimate choice (the analytic benchmarks depend on it), but at high
+    frequency it silently discards most of the loss, so it is said out loud
+    whenever the omission is worth more than a decibel over the track."""
+
+    @staticmethod
+    def _triple(frequency, range_m):
+        from uacpy.core.bottom import BoundaryProperties
+        env = Environment(
+            bathymetry=1000.0, ssp=1500.0,
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=1650.0, density=1.9,
+                                      attenuation=0.8))
+        return (env, Source(depths=100.0, frequencies=frequency),
+                Receiver(depths=[200.0], ranges=[range_m]))
+
+    def _warnings_for(self, env, source, receiver):
+        from uacpy.models.base import _warn_if_volume_absorption_is_missing
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            _warn_if_volume_absorption_is_missing(env, source, receiver)
+        return [str(w.message) for w in caught if 'absorption' in
+                str(w.message)]
+
+    def test_a_high_frequency_link_says_what_it_is_leaving_out(self):
+        env, src, rcv = self._triple(40e3, 1000.0)
+        msgs = self._warnings_for(env, src, rcv)
+        assert msgs, "lossless water at 40 kHz was not announced"
+        assert 'Thorp' in msgs[0] and 'FrancoisGarrison' in msgs[0]
+
+    def test_a_low_frequency_run_stays_quiet(self):
+        # 100 Hz over 1 km omits 4.5e-3 dB: below anything that could change
+        # a decision, so warning about it would only train users to ignore it.
+        env, src, rcv = self._triple(100.0, 1000.0)
+        assert not self._warnings_for(env, src, rcv)
+
+    def test_an_environment_that_names_a_model_stays_quiet(self):
+        from uacpy.core.absorption import Thorp
+        env, src, rcv = self._triple(40e3, 1000.0)
+        env.absorption = Thorp()
+        assert not self._warnings_for(env, src, rcv)
+
+    def test_the_notice_quantifies_the_loss_it_is_dropping(self):
+        from uacpy.core.absorption import Thorp
+        env, src, rcv = self._triple(40e3, 1000.0)
+        alpha = float(np.atleast_1d(
+            Thorp().alpha_db_per_m(40e3, 0.0))[0])
+        expected = alpha * 1000.0
+        msg = self._warnings_for(env, src, rcv)[0]
+        assert f"{expected:.1f}" in msg, msg
+
+    def test_every_model_reaches_the_check(self):
+        """It hangs off ``_require_run_triple``, which every wrapper calls, so
+        no model can omit absorption quietly. Asserted by CALLING that hook on
+        a stand-in model rather than by reading the source, which would stay
+        green if the call were disabled."""
+        from uacpy.models.base import PropagationModel
+
+        class _AnyModel:
+            """Stands in for a wrapper: the hook only reads these two."""
+            model_name = 'Stub'
+            _consumes_volume_absorption = True
+
+        env, src, rcv = self._triple(40e3, 1000.0)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            PropagationModel._require_run_triple(_AnyModel(), env, src, rcv)
+        assert [w for w in caught if 'absorption' in str(w.message)]
+
+    def test_only_models_that_carry_absorption_advise_setting_it(self):
+        """A wrapper that ignores ``env.absorption`` must not tell anyone to
+        set it: RAM models no water-column attenuation at all and the OASES
+        family substitutes its own empirical law, and both already warn when
+        one IS set. Advising it there would contradict their own diagnostic."""
+        from uacpy.models import Bellhop, Kraken, Scooter, SPARC, Bounce, RAM
+        from uacpy.models.oases import OAST, OASN, OASP, OASR
+        for model in (Bellhop, Kraken, Scooter, SPARC):
+            assert model._consumes_volume_absorption, model.__name__
+        # Bounce reaches the engine's TopOpt(4) too, but it tabulates R(theta)
+        # at an interface: its `receiver` sizes the table's resolution rather
+        # than describing a path, so the notice would quote that knob as a
+        # propagation distance.
+        for model in (Bounce, RAM, OAST, OASN, OASP, OASR):
+            assert not model._consumes_volume_absorption, model.__name__
+
+    def test_one_user_run_gives_one_notice(self):
+        """The notice hangs off ``_require_run_triple``, which the internal
+        re-runs call too — a broadband Bellhop run re-runs ARRIVALS at its
+        carrier, and the routing path spawns a Bounce. Left alone that hands a
+        user two notices quoting two different amounts of dropped loss at two
+        different frequencies, one of which they never asked for."""
+        from uacpy.models.base import _warn_if_volume_absorption_is_missing
+        env, src, rcv = self._triple(40e3, 1000.0)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            _warn_if_volume_absorption_is_missing(env, src, rcv)
+            # the inner re-run: same environment, the carrier instead of the
+            # band, so the message differs and would not be deduped
+            inner = Source(depths=100.0, frequencies=20e3)
+            _warn_if_volume_absorption_is_missing(env, inner, rcv)
+        said = [str(w.message) for w in caught if 'absorption' in
+                str(w.message)]
+        assert len(said) == 1, said
+
+    def test_the_default_is_not_to_advise(self):
+        """Off by default, so a wrapper added later cannot inherit advice it
+        does not honour — it has to say that it carries the model."""
+        from uacpy.models.base import PropagationModel
+        assert PropagationModel._consumes_volume_absorption is False

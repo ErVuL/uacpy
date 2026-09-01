@@ -152,6 +152,9 @@ class Scooter(PropagationModel):
     >>> result = scooter.run(env, source, receiver)
     """
 
+    # TopOpt position 4 carries env.absorption to the engine.
+    _consumes_volume_absorption = True
+
     # Declarative metadata (see PropagationModel / ModelSpec). Scooter:
     # range-independent wavenumber integration. Honours multi-layer
     # fluid/elastic bottom natively; range dependence in any form is

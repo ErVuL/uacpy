@@ -574,6 +574,25 @@ column absorbs the same energy whichever model runs over it. So it lives on
 `env.absorption`, and each model writer reads it to emit the right native
 parameters.
 
+**There is no default, and the models that can use one now say so.** The
+Acoustics Toolbox adds volume attenuation only when the option string asks
+for it (`misc/AttenMod.f90:35-38`; the `SELECT CASE` at `:84` has no default
+branch), so `absorption=None` is lossless water. That is the right default —
+it is what the analytic benchmarks compare against, and it keeps a uacpy run
+reproducing the engine's own answer for the same deck — but it is easy to
+leave in place by accident: at 40 kHz over a kilometre Thorp puts the
+omission at 12.9 dB, and at 20 kHz over 5 km a Kraken run measured 21.3 dB
+against Francois-Garrison. Bellhop,
+Kraken, Scooter and SPARC therefore warn when the omission is worth more
+than a decibel over the track. Bounce does not, although the option letter
+reaches its engine: it tabulates a reflection coefficient at an interface,
+and its `receiver` is read only for `range_max`, which sizes the table's
+angular resolution, so the notice would quote that knob as a propagation
+distance. RAM and the OASES family do not warn either, because they do not
+carry `env.absorption` at all — RAM models no water-column attenuation and
+OASES substitutes its own empirical law — and both already say so when one
+is set.
+
 | Class | Parameters | Depth-dependent |
 |---|---|---|
 | `Thorp()` | none | no |

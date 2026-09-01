@@ -1987,6 +1987,10 @@ _CROSS_PACKAGE_PRIVATES = {
     # The verbosity-threshold resolver behind ``verbose=``, shared so a model
     # and the logger agree on what a level means.
     ('models/base.py', 'uacpy._log', '_resolve_threshold'),
+    # The one statement of what a too-short synthesis record folds — count
+    # and level — shared so ``Arrivals.synthesis_band`` and a Bellhop
+    # BROADBAND run on the default grid describe the same fold the same way.
+    ('models/bellhop.py', 'uacpy.core.results.rays', '_fold_notice'),
     # The on-demand dataset cache, read by the basemap renderer to draw from
     # what is already downloaded rather than fetching again.
     ('visualization/basemap.py', 'uacpy.data', '_cache'),

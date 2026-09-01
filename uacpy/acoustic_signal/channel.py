@@ -39,6 +39,31 @@ _MAX_DEFAULT_TAPS = 1 << 26
 _MAX_DEFAULT_IR_SAMPLES = 1 << 22
 
 
+def fractional_delay_taps(frac: float, half_len: int = _FRAC_DELAY_HALF_LEN,
+                          beta: float = _FRAC_DELAY_KAISER_BETA):
+    """Kaiser-windowed sinc taps that delay a signal by ``frac`` samples.
+
+    Returns ``2*half_len`` taps for offsets ``-half_len+1 .. half_len``
+    relative to the sample the delay floors to, normalised to unit DC gain
+    (windowing truncates the sinc, so the raw taps sum to a little under
+    one — 0.9999784 at worst over ``frac``, 0.99999579 at half a sample —
+    and an unnormalised constant would lose up to 1.9e-4 dB).
+
+    Shared with :func:`uacpy.models.bellhop.delayandsum`, which places whole
+    waveforms rather than single taps but needs the identical kernel: a
+    two-tap linear split is NOT a fractional delay — its response
+    ``|(1-frac) + frac*e^{-jw}|`` is a lowpass whose attenuation depends on
+    ``frac``, with a full null at Nyquist for ``frac = 0.5``. The windowed
+    sinc is flat to ~0.01 dB below ``f/fs = 0.35``.
+    """
+    offsets = np.arange(-half_len + 1, half_len + 1) - float(frac)
+    u = offsets / half_len
+    win = (np.i0(beta * np.sqrt(np.maximum(0.0, 1.0 - u * u))) / np.i0(beta))
+    taps = np.sinc(offsets) * win
+    total = taps.sum()
+    return taps / total if total else taps
+
+
 def impulse_response(amplitudes, delays_s, sample_rate: float, *,
                      n_samples: Optional[int] = None, fractional: bool = True):
     """Channel impulse response from discrete arrivals.

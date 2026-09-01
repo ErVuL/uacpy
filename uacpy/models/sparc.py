@@ -288,6 +288,9 @@ class SPARC(PropagationModel):
     >>> result = sparc.run(env, source, receiver)
     """
 
+    # TopOpt position 4 carries env.absorption to the engine.
+    _consumes_volume_absorption = True
+
     # Declarative metadata (see PropagationModel / ModelSpec). SPARC:
     # range-independent time-marched FFP. Honours a multi-layer fluid
     # bottom; elastic_media is False because run() auto-rigidifies a

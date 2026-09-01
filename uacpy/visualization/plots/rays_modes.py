@@ -10,7 +10,7 @@ from uacpy.core.environment import Environment
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.results import Arrivals, Rays, Modes, Covariance, Replicas, ReflectionCoefficient
 from uacpy.core.units import m_to_km
-from uacpy.visualization.plots._common import ZORDER_RAYS, ZORDER_SURFACE, _overlay_seafloor, _draw_geometry, _draw_receiver_grid, _draw_result_credit, _plot_warn, fig_ax, typed_plot_error, invert_yaxis_once
+from uacpy.visualization.plots._common import ZORDER_LEGEND, ZORDER_RAYS, ZORDER_SURFACE, _overlay_seafloor, _draw_geometry, _draw_receiver_grid, _draw_result_credit, _plot_warn, fig_ax, typed_plot_error, invert_yaxis_once
 
 
 @typed_plot_error
@@ -102,11 +102,14 @@ def _plot_rays(
         # Surface line styled to match the AT convention.
         ax.axhline(0, color='steelblue', linewidth=1.5, alpha=0.55,
                    zorder=ZORDER_SURFACE)
-        # Anchor the seafloor overlay from x=0 (source range) to the
-        # furthest receiver, so the bathy fill flush-spans the chart and
-        # leaves no white sliver under the rays at small ranges.
+        # Anchor the seafloor overlay from x=0 (source range) out to where
+        # the x-axis will END, not to the furthest receiver: the limit below
+        # adds a margin so an at-max-range receiver is not clipped to the
+        # spine, and a fill anchored on the receiver alone stops short of it,
+        # leaving bare chart under the rays past the receiver — the sliver
+        # this anchoring exists to avoid.
         if rays.receiver_ranges is not None and len(rays.receiver_ranges):
-            r_hi = float(np.max(rays.receiver_ranges))
+            r_hi = float(np.max(rays.receiver_ranges)) * _RECEIVER_EDGE_MARGIN
         else:
             r_hi = max_r_km * 1000.0
         ranges_for_overlay = np.array([0.0, r_hi])
@@ -118,9 +121,11 @@ def _plot_rays(
         rr_km = _draw_receiver_grid(ax, rays.receiver_ranges,
                                     rays.receiver_depths, max_markersize=7)
         # x-axis spans the receiver extent with a small right margin so a
-        # receiver sitting at the max range isn't clipped to the spine.
+        # receiver sitting at the max range isn't clipped to the spine. The
+        # seafloor overlay above is anchored to the same margin.
         r_max = float(np.max(rr_km))
-        ax.set_xlim(0.0, r_max * 1.03 if r_max > 0 else 1.0)
+        ax.set_xlim(0.0,
+                    r_max * _RECEIVER_EDGE_MARGIN if r_max > 0 else 1.0)
     if show_source and rays.source_depths is not None and rays.source_depths.size:
         # Slightly larger star than the other panels — it has to read against
         # a dense ray fan.
@@ -135,8 +140,15 @@ def _plot_rays(
             if bounce_counts[kind] > 0
         ]
         if handles:
-            ax.legend(handles=handles, loc='lower right',
-                      fontsize=9, framealpha=0.85)
+            # 'best', not a fixed corner: the receiver sits at the maximum
+            # range, and on a bottom-mounted geometry at the seabed too, so
+            # 'lower right' lands exactly on the marker the key explains.
+            legend = ax.legend(handles=handles, loc='best',
+                               fontsize=9, framealpha=0.85)
+            # Matplotlib defaults a legend to zorder 5, under this package's
+            # seabed fill, seafloor line, receivers and source: the key ends
+            # up drawn beneath the picture it explains.
+            legend.set_zorder(ZORDER_LEGEND)
 
     ax.set_xlabel('Range (km)')
     ax.set_ylabel('Depth (m)')
@@ -155,11 +167,21 @@ def _plot_arrivals(
     figsize: Tuple[float, float] = (10, 4),
     title: Optional[str] = None,
 ):
-    """Stem plot of arrivals: amplitude vs delay, coloured by multipath class.
+    """Stem plot of arrivals: received level vs delay, by multipath class.
 
     Colour palette matches :func:`_plot_rays`: direct = red,
     surface = green, bottom = blue, both = black. Each arrival is drawn
-    as a vertical stem plus a head marker."""
+    as a vertical stem plus a head marker.
+
+    Stem height is the level that reaches the receiver, absorption
+    included: Bellhop keeps the volume loss in the imaginary travel time,
+    so the amplitude column alone stands an absorbed path at its lossless
+    height. The delay axis spans the energy
+    (:meth:`Arrivals.energy_support`), which one faint straggler cannot
+    stretch the way it stretches the first-to-last range, and the legend
+    counts the arrivals past the end and names how far they run — off the
+    axis they leave no sign of themselves, where an outlier on a colour
+    scale at least still paints a pixel."""
     if not isinstance(arrivals, Arrivals):
         raise ConfigurationError(
             f"_plot_arrivals: expected Arrivals, got {type(arrivals).__name__}"
@@ -174,21 +196,41 @@ def _plot_arrivals(
     }
     counts = {k: 0 for k in color_map}
     delays_ms = []
-    for a in arrivals.arrivals:
+    beyond = []
+    hi = 0.0
+    # Stem heights are what REACHES the receiver. Bellhop keeps volume
+    # absorption in the imaginary travel time, not in the amplitude column
+    # (``Arrivals._arrival_power``), so drawing the column alone stands a
+    # heavily absorbed late path at its lossless height — on a 1 km 40 kHz
+    # link the second bounce cluster draws five times taller than it arrives.
+    levels = np.sqrt(arrivals._arrival_power()) if arrivals.arrivals else None
+    for index, a in enumerate(arrivals.arrivals):
         kind = a.get('kind', 'direct')
         col = color_map.get(kind, '#1e88e5')
         d_ms = a['delay'] * 1000.0
         delays_ms.append(d_ms)
-        ax.vlines(d_ms, 0, a['amplitude'], colors=col, lw=1.5, alpha=0.85)
-        ax.plot(d_ms, a['amplitude'], 'o', color=col, markersize=4,
+        level = float(levels[index]) if levels is not None else a['amplitude']
+        ax.vlines(d_ms, 0, level, colors=col, lw=1.5, alpha=0.85)
+        ax.plot(d_ms, level, 'o', color=col, markersize=4,
                 markeredgecolor='black', markeredgewidth=0.4)
         counts[kind] += 1
     if delays_ms:
-        span = max(delays_ms) - min(delays_ms)
-        ax.set_xlim(min(delays_ms) - 0.05 * (span or 1),
-                    max(delays_ms) + 0.05 * (span or 1))
+        # The axis follows the ENERGY, not the last ray. A peak-to-peak span
+        # is an extremum: one faint straggler stretches it without bound —
+        # 8.06 s against a 0.9 s energy span on that same link — and squeezes
+        # every arrival that carries something into a few pixels. What falls
+        # outside is named below rather than dropped in silence, because an
+        # arrival off the end of the axis leaves no trace of itself the way
+        # an outlier on a colour scale still does.
+        first = min(delays_ms)
+        support_ms = arrivals.energy_support() * 1000.0
+        span = support_ms if support_ms > 0 else (max(delays_ms) - first)
+        lo = first - 0.05 * (span or 1)
+        hi = first + span + 0.05 * (span or 1)
+        ax.set_xlim(lo, hi)
+        beyond = [d for d in delays_ms if d > hi]
     ax.set_xlabel('Delay (ms)')
-    ax.set_ylabel('Amplitude')
+    ax.set_ylabel('Received amplitude')
     ax.grid(True, alpha=0.3)
     # Legend with per-class counts (skip empty classes).
     import matplotlib.lines as mlines
@@ -197,6 +239,11 @@ def _plot_arrivals(
                       label=f"{kind} ({counts[kind]})")
         for kind, col in color_map.items() if counts[kind] > 0
     ]
+    if beyond:
+        handles.append(mlines.Line2D(
+            [], [], linestyle='none', marker='',
+            label=f"+{len(beyond)} beyond {hi / 1000.0:.2f} s "
+                  f"(to {max(beyond) / 1000.0:.2f} s)"))
     if handles:
         ax.legend(handles=handles, loc='upper right', fontsize=9,
                   framealpha=0.85)
@@ -587,65 +634,67 @@ def _mirror_about_zero(angles: np.ndarray,
             np.concatenate([levels, other_levels]))
 
 
-_BEAM_PATTERN_VIEWS = ('forward', 'support', 'full')
+#: The sector both renderings span, in signed degrees. It is the whole of
+#: what a launch fan can reach and nothing else: a launch steeper than +/-90°
+#: has ``COS(alpha) < 0`` in ``ray2D(1)%t`` (``Bellhop/bellhop.f90:453``) and
+#: traces to NEGATIVE range only, so it never enters the ``r > 0`` the field
+#: is evaluated on — measured, ``alpha = +/-127.5°`` gives ``r`` in
+#: ``[-6000, 0]`` while ``alpha = +/-42.5°`` reaches ``+6000``. Outside it
+#: there is no launch for a response to describe, so there is nothing to
+#: choose between: every pattern draws on the same axes and two of them can
+#: be compared by eye.
+_LAUNCH_FAN_DEG = (-90.0, 90.0)
 
 
-def _beam_pattern_view(view: str, lo: float, hi: float) -> Tuple[float, float]:
-    """Angular limits of the drawn sector, in signed degrees.
-
-    ``'forward'`` keeps the half-plane that reaches the field: a launch
-    steeper than +/-90° has ``COS(alpha) < 0`` in ``ray2D(1)%t``
-    (``Bellhop/bellhop.f90:453``) and traces to *negative* range only, so it
-    never enters ``r > 0`` where the field is evaluated. A table lying
-    entirely outside that half-plane falls back to its own support rather
-    than to an empty wedge."""
-    if view == 'full':
-        return -180.0, 180.0
-    if view == 'support':
-        return lo, hi
-    forward_lo, forward_hi = max(lo, -90.0), min(hi, 90.0)
-    if forward_hi <= forward_lo:
-        return lo, hi
-    return forward_lo, forward_hi
+#: Angle ticks across the fan. 30°, not the 45° a linear axis would pick:
+#: 45 divides 180 into four and so labels neither +/-90, and those two ends
+#: are what a reader checks first — whether the table reaches the horizontal
+#: and whether it reaches straight down.
+_BEAM_PATTERN_TICKS = np.arange(_LAUNCH_FAN_DEG[0], _LAUNCH_FAN_DEG[1] + 1e-9,
+                                30.0)
+_BEAM_PATTERN_TICK_LABELS = [f'{t:g}\u00b0' for t in _BEAM_PATTERN_TICKS]
 
 
-def _beam_pattern_rlabel_bearing(angles, levels, ticks, view_lo, view_hi,
-                                 floor: float) -> float:
-    """Bearing for the radial labels on a full circle: quietest, and off the
-    labelled spokes.
-
-    Sampled on a regular grid rather than at the table's own rows, because the
-    best place for the labels is usually where the table has nothing at all —
-    a 0-90° pattern drawn on a full circle leaves three quadrants bare — and no
-    row sits there to nominate it. Angles within 12° of a labelled spoke are
-    dropped: a bearing that lands on one prints the dB value over the degree
-    value."""
-    grid = np.arange(view_lo, view_hi + 1e-9, 5.0)
-    if not grid.size:
-        return float(view_lo)
-    separation = np.abs(
-        (grid[:, None] - angles[None, :] + 180.0) % 360.0 - 180.0)
-    loudest = np.max(np.where(separation <= 10.0, levels[None, :], floor),
-                     axis=1)
-    gap = np.abs(
-        (grid[:, None] - ticks[None, :] + 180.0) % 360.0 - 180.0).min(axis=1)
-    clear = gap >= 12.0
-    if clear.any():
-        grid, loudest = grid[clear], loudest[clear]
-    return float(grid[np.argmin(loudest)])
+#: Right-hand margin on the receiver extent, so a receiver at the maximum
+#: range is not clipped to the spine. The seafloor overlay and the x-limit
+#: both use it — anchoring them differently is what left a bare strip.
+_RECEIVER_EDGE_MARGIN = 1.03
 
 
-def _beam_pattern_ticks(view_lo: float, view_hi: float):
-    """``(positions, labels)`` for the angle axis, signed and stepped to suit
-    the drawn span — 45° across a half-plane leaves a 20° wedge with a single
-    label, which names neither end of what it draws."""
-    span = view_hi - view_lo
-    step = (45.0 if span >= 180.0 else 30.0 if span >= 90.0
-            else 15.0 if span >= 45.0 else 5.0)
-    ticks = np.arange(np.ceil(view_lo / step) * step, view_hi + 1e-9, step)
-    if span >= 360.0 - 1e-9 and len(ticks) > 1:
-        ticks = ticks[:-1]          # +180 lands on the -180 spoke
-    return ticks, [f'{t:g}\u00b0' for t in ticks]
+def _densify_in_angle(angles, levels, step_deg: float = 1.0):
+    """Resample a beam-pattern table onto a ``step_deg`` angle grid.
+
+    Keeps every tabulated angle, and interpolates between them the way the
+    engine does: the table is converted to an amplitude factor
+    ``10**(dB/20)`` before it is read (``misc/beampattern.f90:59``), so the
+    engine is piecewise-linear in AMPLITUDE, not in dB. Interpolating the dB
+    column directly would bow each flank the wrong way — 14.7 dB out at worst
+    on a 0/-35 dB segment. A table whose own step divides ``step_deg`` comes
+    back untouched; one sampled finer but off that grid keeps every row and
+    gains collinear points between them, which changes the vertex count and
+    not the curve.
+
+    Angles are sorted, so a table listed out of order draws as the curve its
+    rows describe. Note that ``ReadPat`` (``misc/beampattern.f90:56``)
+    REFUSES such a table — the engine requires strictly increasing angles —
+    so a file that draws here may not run.
+    """
+    angles = np.asarray(angles, dtype=float)
+    levels = np.asarray(levels, dtype=float)
+    if angles.size < 2:
+        return angles, levels
+    order = np.argsort(angles)
+    angles, levels = angles[order], levels[order]
+    if angles[-1] <= angles[0]:
+        raise ConfigurationError(
+            f"plot_beam_pattern: the table's angles are all "
+            f"{angles[0]:g}°, so it spans no angle and there is no pattern to "
+            f"draw. Give at least two distinct angles.")
+    n = int(np.ceil((angles[-1] - angles[0]) / float(step_deg))) + 1
+    grid = np.union1d(angles, np.linspace(angles[0], angles[-1], max(n, 2)))
+    amplitude = np.interp(grid, angles, 10.0 ** (levels / 20.0))
+    with np.errstate(divide='ignore'):
+        return grid, 20.0 * np.log10(amplitude)
 
 
 @typed_plot_error
@@ -654,7 +703,6 @@ def plot_beam_pattern(
     ax=None,
     *,
     polar: bool = True,
-    view: str = 'forward',
     mirror: bool = False,
     fill: bool = True,
     figsize: Tuple[float, float] = (6.5, 6.5),
@@ -674,22 +722,9 @@ def plot_beam_pattern(
     polar : bool, default True
         Draw on polar axes oriented like the field: 0° along increasing
         range, positive angles downward. ``False`` draws level against angle
-        on rectilinear axes, which reads the table's endpoints and its dB
-        floor more precisely.
-    view : {'forward', 'support', 'full'}, default 'forward'
-        Which sector the axes spans, in both renderings — for ``polar=False``
-        it is the angle axis's ``xlim``, because the question is which launch
-        angles are worth looking at, not how they are drawn.
-        ``'forward'`` draws the launches
-        that reach the field — the right half-plane, clipped to the table's
-        own support — because a launch steeper than +/-90° traces to negative
-        range only and never enters ``r > 0`` (measured: ``alpha = +/-127.5°``
-        gives ``r`` in ``[-6000, 0]``). ``'support'`` draws the table's whole
-        span, ``'full'`` the whole circle. The choice moves the axes limits
-        only; the line always carries every row of the table, and a table
-        whose strongest level falls outside the drawn sector warns. A table is
-        worth defining only over ``[-90, 90]`` for the same reason the default
-        stops there.
+        on rectilinear axes, where a dB scale is linear and so the deep end
+        of the pattern is easier to read off. Both renderings draw the same
+        curve — the table interpolated the way the engine reads it.
     mirror : bool, default False
         Reflect a one-sided table through 0° before drawing. Off by default
         because no engine mirrors: ``ReadPat``
@@ -725,14 +760,6 @@ def plot_beam_pattern(
     if mirror:
         angles, levels = _mirror_about_zero(angles, levels)
 
-    if view not in _BEAM_PATTERN_VIEWS:
-        raise ConfigurationError(
-            f"plot_beam_pattern: view={view!r} is not one of "
-            f"{_BEAM_PATTERN_VIEWS}.",
-            remediation="'forward' draws the half-plane that propagates, "
-                        "'support' the table's own span, 'full' the circle.",
-        )
-
     lo, hi = float(angles.min()), float(angles.max())
     if lo > -90.0 + 1e-9 or hi < 90.0 - 1e-9:
         _plot_warn(
@@ -751,27 +778,41 @@ def plot_beam_pattern(
     default_title = ('Source beam pattern — omnidirectional'
                      if pattern is None else 'Source beam pattern')
 
-    view_lo, view_hi = _beam_pattern_view(view, lo, hi)
-    # Both renderings clip to the view — the wedge and the xlim alike — so a
-    # main lobe the view hides is reported before the branch, not inside one.
-    drawn = (angles >= view_lo - 1e-9) & (angles <= view_hi + 1e-9)
+    fan_lo, fan_hi = _LAUNCH_FAN_DEG
+    # Reported before the branch, not inside one: both renderings limit the
+    # angle axis to the fan, so both hide the same rows.
+    drawn = (angles >= fan_lo - 1e-9) & (angles <= fan_hi + 1e-9)
     hidden = ~drawn
     if hidden.any() and drawn.any() and levels[hidden].max() > levels[drawn].max() + 1e-9:
         _plot_warn(
             f"plot_beam_pattern: the strongest level in the table "
             f"({levels[hidden].max():g} dB at "
-            f"{angles[hidden][np.argmax(levels[hidden])]:g}°) lies outside the "
-            f"drawn [{view_lo:g}, {view_hi:g}]° view, so the main lobe is not "
-            f"on this plot. Pass view='full' to draw the whole table.")
+            f"{angles[hidden][np.argmax(levels[hidden])]:g}°) lies outside "
+            f"the [{fan_lo:g}, {fan_hi:g}]° a launch fan can reach, so the "
+            f"main lobe is not on this plot — and Bellhop would never launch "
+            f"into it either. Aim the table into the fan, or pass "
+            f"mirror=True if it was written for the other side of 0°.")
+
+    # Sample the curve ALONG the angle axis before either branch draws it.
+    # Both renderings join consecutive samples with a straight line in the
+    # coordinates they draw in, and neither is what the engine reads: the
+    # table is converted to an amplitude factor first
+    # (``misc/beampattern.f90:59``; Bellhop interpolates it inline at
+    # ``bellhop.f90:267-274``). On a polar axes a straight screen segment
+    # also cuts a chord across the arc — a two-row 0 dB table, omnidirectional
+    # to Bellhop, drew as a chord through the origin, i.e. a deep broadside
+    # null. Densifying here keeps the two views showing the same curve;
+    # doing it in one branch only left them 11.2 dB apart.
+    angles, levels = _densify_in_angle(angles, levels)
 
     if not polar:
         fig, ax = fig_ax(ax, figsize)
         ax.plot(angles, levels, **kwargs)
         ax.set_xlabel('Launch angle (°)')
         ax.set_ylabel('Level (dB re peak)')
-        # The same limit the polar axes takes: view= is a statement about which
-        # launch angles are worth looking at, not about polar geometry.
-        ax.set_xlim(view_lo, view_hi)
+        # The same limit the polar axes takes. Which launch angles exist is a
+        # fact about the fan, not about how the response is drawn.
+        ax.set_xlim(fan_lo, fan_hi)
         ax.grid(True, alpha=0.3)
         ax.set_title(title or default_title)
         return fig, ax
@@ -793,21 +834,11 @@ def plot_beam_pattern(
     ax.set_theta_zero_location('E')
     ax.set_theta_direction(-1)
 
-    # A limit, not a filter: the whole table stays in the line, so a reader who
-    # widens the view sees data rather than a redrawn plot.
-    ax.set_thetamin(view_lo)
-    ax.set_thetamax(view_hi)
-
-    ticks, tick_labels = _beam_pattern_ticks(view_lo, view_hi)
-    ax.set_thetagrids(ticks, labels=tick_labels)
-    drawn_idx = np.flatnonzero(drawn)
-    if view_hi - view_lo >= 360.0 - 1e-9 and drawn_idx.size:
-        # Only a full circle honours this. Once thetamin/thetamax make the axes
-        # a wedge, matplotlib parks the radial labels on the thetamin spoke and
-        # ignores the setting — two different positions render byte-identical
-        # label extents — so on a wedge this would be decoration, not placement.
-        ax.set_rlabel_position(_beam_pattern_rlabel_bearing(
-            angles, levels, ticks, view_lo, view_hi, inner))
+    # A limit, not a filter: the whole table stays in the line, so a reader
+    # who widens the wedge by hand sees data rather than an empty sector.
+    ax.set_thetamin(fan_lo)
+    ax.set_thetamax(fan_hi)
+    ax.set_thetagrids(_BEAM_PATTERN_TICKS, labels=_BEAM_PATTERN_TICK_LABELS)
     ax.set_rlim(inner, levels.max())
     # A polar radius is short and every radial label sits on the one spoke, so
     # the ~9 ticks a linear dB axis defaults to overprint one another.

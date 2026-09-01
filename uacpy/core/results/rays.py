@@ -7,6 +7,7 @@ import numpy as np
 from typing import Optional, Dict, Any, List, Tuple, Union
 
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.core._carrier_validate import _require_positive
 
 from uacpy.core.results._base import Result
 
@@ -58,6 +59,39 @@ def _bounce_predicate(kind, top, bot):
                 and _bounce_in_bounds(n_bot, bot))
 
     return predicate
+
+
+def _fold_notice(delays, power, record: float, *, who: str, remedy: str,
+                 first=None) -> Optional[str]:
+    """What a ``record``-second record folds, as text, or ``None``.
+
+    ``delays`` and ``power`` are per arrival. ``first`` is where each
+    arrival's record starts — one value, or one per arrival when several
+    receiver cells share a record and each starts at its own earliest
+    arrival — and defaults to the earliest delay. An inverse FFT is
+    circular, so an arrival later than ``first + record`` is not dropped:
+    it lands back on the early part of the trace, where it reads as an
+    extra early path. The level it returns at is the one number that says
+    whether that matters, so it is stated rather than left to be discovered
+    in the trace; ``who`` names the caller and ``remedy`` its way out.
+    """
+    delays = np.asarray(delays, dtype=float).ravel()
+    power = np.asarray(power, dtype=float).ravel()
+    if delays.size < 2 or not np.all(np.isfinite(delays)):
+        return None
+    start = (float(delays.min()) if first is None
+             else np.asarray(first, dtype=float))
+    folded = delays > start + record
+    if not folded.any():
+        return None
+    total = float(power.sum())
+    share = float(power[folded].sum()) / total if total > 0.0 else 0.0
+    level = (f"{10.0 * np.log10(share):.0f} dB" if share > 0.0
+             else "no measurable level")
+    return (f"{who}: a {record:g} s record does not reach the last arrival "
+            f"at {float(delays.max()):g} s, so the {int(folded.sum())} "
+            f"arrival(s) past its end fold back onto the early trace at "
+            f"{level} relative to the whole. {remedy}")
 
 
 class Arrivals(Result):
@@ -278,15 +312,337 @@ class Arrivals(Result):
         return self.filter(pred)
 
     def sorted_by_amplitude(self, descending: bool = True) -> 'Arrivals':
-        """Return a copy sorted by ``amplitude`` (descending by default)."""
-        return self._spawn(sorted(self.arrivals,
-                                  key=lambda a: a['amplitude'],
-                                  reverse=bool(descending)))
+        """Return a copy sorted by received amplitude (descending by default).
+
+        Ranked on what reaches the receiver, not on the ``amplitude`` column
+        alone: Bellhop keeps volume absorption in the imaginary travel time
+        (see :meth:`_arrival_power`), so a long path can carry the larger
+        geometric amplitude and still arrive far quieter. At 40 kHz a 6 km
+        bounce path with three times the direct path's amplitude lands 55 dB
+        below it, and ranking on the column alone puts it first.
+
+        With no frequency on the result the absorption factor is 1 and this
+        is the column order, unchanged.
+        """
+        # argsort on power: monotone in received amplitude, so it orders the
+        # same way without the square root, and it is the same quantity
+        # ``rms_delay_spread`` and ``energy_support`` weigh by.
+        order = np.argsort(self._arrival_power(), kind='stable')
+        if descending:
+            order = order[::-1]
+        return self._spawn([self.arrivals[int(i)] for i in order])
 
     def top_n_by_amplitude(self, n: int) -> 'Arrivals':
-        """Keep the ``n`` loudest arrivals."""
+        """Keep the ``n`` arrivals that reach the receiver loudest.
+
+        "Loudest" is the received level, absorption included — see
+        :meth:`sorted_by_amplitude` for why the amplitude column alone
+        answers a different question.
+        """
         return self._spawn(self.sorted_by_amplitude(descending=True)
                            .arrivals[:int(n)])
+
+    def _arrival_power(self) -> np.ndarray:
+        """Power each arrival delivers to the receiver, absorption included.
+
+        Volume absorption does not live in the amplitude column: Bellhop
+        carries it in the IMAGINARY travel time, so the received amplitude is
+        ``A * exp(w * Im tau)`` — the convention ``read_arr_file`` documents
+        for ``delays_imag`` and ``Bellhop._arrivals_to_tf`` applies. Scoring
+        on ``A`` alone treats a late, heavily absorbed path as though the
+        water were lossless, and the late paths are the ones every caller of
+        this is weighing.
+        """
+        amplitudes = np.abs(np.asarray(self.amplitudes, dtype=float).ravel())
+        delays_imag = np.asarray(
+            [a.get('delay_imag', 0.0) for a in self.arrivals], dtype=float)
+        omega = 2.0 * np.pi * self.f0 if self.f0 else 0.0
+        with np.errstate(over='ignore'):
+            return (amplitudes * np.exp(omega * delays_imag)) ** 2
+
+    def rms_delay_spread(self) -> float:
+        """Energy-weighted spread of the arrival delays, in seconds.
+
+        The second central moment of the power delay profile: delays weighted
+        by ``amplitude**2``, about their weighted mean. It measures how much
+        the arrival pattern smears a pulse in time — the width the multipath
+        gives an impulse — so it bounds the time resolution any processing of
+        this channel can have, whatever the processing is for: the smearing
+        of a transmitted pulse, the length a replica or matched filter has to
+        cover, the interval a symbol would have to exceed to avoid
+        overlapping its neighbour.
+
+        Prefer it to the peak-to-peak spread ``ptp(delays)``, which is set by
+        whichever ray arrives last no matter how faint: on a 1 km
+        bottom-to-bottom path in 1000 m of water at 40 kHz the two differ by
+        more than two orders of magnitude, because a path tens of dB down
+        lands seconds late while almost all the energy arrives within a
+        millisecond of the first.
+
+        Returns ``0.0`` for a single arrival, and for arrivals carrying no
+        energy at all. A non-finite delay or amplitude propagates: the result
+        is ``nan``, not a spread computed from whatever else was finite.
+
+        Notes
+        -----
+        Its reciprocal is the frequency scale over which the transfer
+        function decorrelates: a widely dispersed arrival pattern fades over
+        a narrow band, which is why a broadband view of such a channel shows
+        structure far finer than the band. The constant relating the two is a
+        correlation-threshold convention rather than a law, so it is left to
+        the caller to state.
+        """
+        delays = np.asarray(self.delays, dtype=float).ravel()
+        power = self._arrival_power()
+        total = float(power.sum())
+        if delays.size < 2 or total <= 0.0:
+            return 0.0
+        weights = power / total
+        mean = float((weights * delays).sum())
+        return float(np.sqrt((weights * (delays - mean) ** 2).sum()))
+
+    def energy_support(self, fraction: float = 0.999) -> float:
+        """Delay span holding ``fraction`` of the arrival energy, in seconds.
+
+        Measured from the first arrival to the one by which ``fraction`` of
+        the received energy has arrived. It answers the question a synthesis
+        window asks — how long does the response have to be? — which neither
+        of the other two measures does: ``ptp(delays)`` is an extremum, moved
+        by one faint straggler however little it carries, and
+        :meth:`rms_delay_spread` is a second moment, a width rather than a
+        span the energy fits inside.
+
+        Parameters
+        ----------
+        fraction : float, default 0.999
+            Share of the total energy the span must hold, in ``(0, 1]``.
+            ``1.0`` is the peak-to-peak span. The default leaves a thousandth
+            of the energy — 30 dB down — outside.
+
+        Returns
+        -------
+        float
+            Seconds. ``0.0`` for a single arrival and for arrivals carrying
+            no energy at all; ``nan`` if a delay or amplitude is non-finite,
+            rather than a span computed from whatever else was finite.
+        """
+        fraction = float(fraction)
+        if not 0.0 < fraction <= 1.0:
+            raise ConfigurationError(
+                f"Arrivals.energy_support: fraction={fraction:g} is not a "
+                f"share of the energy. Pass 0 < fraction <= 1 (1.0 spans "
+                f"every arrival, i.e. the peak-to-peak delay).")
+        delays = np.asarray(self.delays, dtype=float).ravel()
+        power = self._arrival_power()
+        if delays.size < 2:
+            return 0.0
+        if not (np.all(np.isfinite(delays)) and np.all(np.isfinite(power))):
+            return float('nan')
+        total = float(power.sum())
+        if total <= 0.0:
+            return 0.0
+        order = np.argsort(delays)
+        delays = delays[order]
+        # The cumulative share is monotone, so the first entry at or above
+        # the target is the last arrival that has to fit. Rounding can leave
+        # the final entry a hair under 1.0, which would put the index one
+        # past the end, so clamp it.
+        cumulative = np.cumsum(power[order]) / total
+        cut = min(int(np.searchsorted(cumulative, fraction, side='left')),
+                  delays.size - 1)
+        return float(delays[cut] - delays[0])
+
+    def _record_fold_notice(self, record: float) -> Optional[str]:
+        """What a record shorter than the arrival span costs, or ``None``.
+
+        Arrivals past the end of the record are not dropped — an inverse FFT
+        is circular, so they land back on the early part of the trace, where
+        they read as extra early paths. The level they return at is the one
+        number that says whether that matters, so it is stated rather than
+        left to be discovered in the trace.
+
+        Returns the text rather than raising it: a hand-counted
+        ``stacklevel`` has to be 2, which means the warning belongs in the
+        method the caller actually called, not in a helper below it.
+        """
+        delays = np.asarray(self.delays, dtype=float).ravel()
+        if delays.size < 2 or not np.all(np.isfinite(delays)):
+            return None
+        span = float(delays.max() - delays.min())
+        # The fold itself is measured by the shared helper, which Bellhop's
+        # BROADBAND run also uses on its default grid.
+        return _fold_notice(
+            delays, self._arrival_power(), record,
+            who="Arrivals.synthesis_band",
+            remedy=(f"Pass energy_fraction=1.0 (or record={span:g}) to hold "
+                    f"every arrival, or drop the tail outright with "
+                    f"in_delay_window / top_n_by_amplitude rather than "
+                    f"folding it."))
+
+    def synthesis_band(
+        self,
+        *,
+        bandwidth: float,
+        centre: Optional[float] = None,
+        record: Optional[float] = None,
+        energy_fraction: Optional[float] = None,
+        margin: float = 1.2,
+    ) -> np.ndarray:
+        """Frequency grid wide enough to synthesise these arrivals un-aliased.
+
+        A record built by an inverse FFT is ``1/df`` long, so the frequency
+        spacing — not the bandwidth — decides how much multipath the trace
+        can hold. Choose it without looking at the arrivals and the late
+        paths wrap onto the early ones, which reads as extra arrivals rather
+        than as a mistake.
+
+        The window is the primitive here and the spacing follows from it, the
+        way the textbook formulation puts it: "it is convenient to properly
+        select the time windowing T and sampling dt needed to represent the
+        response at all the receivers. This, in turn, constrains the
+        frequency sampling" (Jensen, Kuperman, Porter and Schmidt,
+        *Computational Ocean Acoustics*, sect. 8.2). Pass ``record`` to state
+        that window. Leave it out and it is derived from the arrivals: the
+        span holding ``energy_fraction`` of their energy
+        (:meth:`energy_support`), times ``margin``.
+
+        Parameters
+        ----------
+        bandwidth : float
+            Width of the band to synthesise (Hz), centred on ``centre``.
+        centre : float, optional
+            Band centre (Hz); defaults to this result's own frequency.
+        record : float, optional
+            Length of the record to synthesise (s), stated rather than
+            derived. Passing it with ``energy_fraction`` is refused — they
+            are two answers to one question.
+        energy_fraction : float, optional
+            Share of the arrival energy the derived window must hold
+            (default 0.999). Lower it for a shorter record and a coarser
+            grid; whatever falls outside wraps, at a level this reports.
+        margin : float, optional
+            Headroom on the derived span (default 1.2), so the last arrival
+            inside it lands within the record rather than on its final
+            sample. It is also the number of frequency samples per
+            interference fringe: two paths ``dtau`` apart beat in ``|H(f)|``
+            with period ``1/dtau``, and a record ``margin * dtau`` long
+            samples that at ``df = 1/(margin * dtau)`` — ``margin`` points
+            per fringe. 1.2 is enough for the inverse FFT, which needs only
+            that the record hold the arrivals; it is not enough to LOOK at
+            the transfer function, whose curve between samples is then the
+            plotter's, not the model's. Raise it to 8 or so for a drawn
+            ``|H(f)|``. Not used when ``record`` is given.
+
+        Returns
+        -------
+        ndarray
+            Ascending frequencies to hand to a broadband run.
+
+        Warns
+        -----
+        UserWarning
+            When the record does not reach the last arrival, giving how many
+            arrivals fold back and the level they fold in at.
+
+        Notes
+        -----
+        Sizing the window to the last arrival however faint is what makes
+        this expensive, because the peak-to-peak span is an extremum: on a
+        1 km bottom-mounted link at 40 kHz it asks for some 440 000 bins to
+        hold one ray around 200 dB down, where 0.999 of the energy is spanned
+        by a few milliseconds. Trading that tail for a shorter record is a
+        choice rather than an approximation, so it is made explicitly and its
+        cost is reported instead of absorbed. Filtering the arrivals first
+        (:meth:`in_delay_window`, :meth:`top_n_by_amplitude`) drops the tail
+        outright rather than folding it.
+
+        Folding is a property of the FREQUENCY route, not of the model.
+        Sampling ``H(f)`` every ``df`` and inverse-transforming reproduces the
+        true response repeated every ``1/df``, so whatever does not fit lands
+        back at the wrong time. A ray model does not have to take that route:
+        "the ray/beam process calculates the amplitudes and travel-times of
+        all the echoes and can therefore calculate the received timeseries by
+        simply summing up the echoes" (Bellhop User Guide sect. 9). That is
+        ``RunMode.TIME_SERIES`` (:func:`uacpy.models.bellhop.delayandsum`),
+        where an echo past the window is omitted rather than folded — the
+        honest truncation, at the cost of giving up the transfer function.
+
+        There is a third way, which keeps the whole arrival set on the
+        frequency route and makes the wrap-around harmless instead: displace the
+        frequency contour to ``w + i*delta``, which damps the synthesised
+        trace by ``exp(-delta*t)``, so energy that wraps a full record length
+        returns ``exp(-delta*T)`` down and the damping is undone on the trace
+        afterwards. Mallick and Frazer put ``delta = log(50)/T`` — a factor of
+        50 — and warn against more, which invents arrivals; the vendored
+        OASES does exactly that (``third_party/oases/src/unoasp22.f``,
+        ``OMEGIM``). It is not what this does, because it needs the transfer
+        function evaluated at COMPLEX frequency and Bellhop takes a real one.
+        Note also that the contour MAGNIFIES aliasing from earlier windows,
+        so it additionally requires the record to start before the first
+        arrival.
+        """
+        bandwidth = float(bandwidth)
+        _require_positive(bandwidth, "Arrivals.synthesis_band bandwidth",
+                          hint="Hz")
+        if centre is None:
+            centre = self.f0
+            if centre is None:
+                raise ConfigurationError(
+                    "Arrivals.synthesis_band: this result carries no "
+                    "frequency, so the band has no centre. Pass centre= (Hz).")
+        centre = float(centre)
+        _require_positive(centre, "Arrivals.synthesis_band centre", hint="Hz")
+        # A positive centre and a positive width still describe a band that
+        # runs through 0 Hz into negative frequency when the width exceeds
+        # twice the centre. ``Source`` refuses those, but a model run accepts
+        # them and returns an H that is not conjugate-symmetric, which an IFFT
+        # then turns into a complex trace — so refuse the band where it is
+        # built rather than leave it to be noticed downstream.
+        if centre - bandwidth / 2.0 <= 0.0:
+            raise ConfigurationError(
+                f"Arrivals.synthesis_band: a {bandwidth:g} Hz band centred on "
+                f"{centre:g} Hz starts at "
+                f"{centre - bandwidth / 2.0:g} Hz, at or below 0 Hz — there "
+                f"is no field to synthesise there. Narrow bandwidth= below "
+                f"{2.0 * centre:g} Hz, or pass centre= high enough to carry "
+                f"the band.")
+        if record is not None and energy_fraction is not None:
+            raise ConfigurationError(
+                "Arrivals.synthesis_band: record= and energy_fraction= are "
+                "two answers to one question — how long the record has to "
+                "be. Pass record= (s) to state the window, or "
+                "energy_fraction= to derive it from these arrivals.")
+        if record is not None:
+            record = float(record)
+            _require_positive(record, "Arrivals.synthesis_band record",
+                              hint="s")
+        else:
+            margin = float(margin)
+            if margin < 1.0:
+                raise ConfigurationError(
+                    f"Arrivals.synthesis_band: margin={margin:g} would size "
+                    f"the record SHORTER than the span it has to hold, which "
+                    f"is the aliasing this method exists to prevent. Pass "
+                    f"margin >= 1 (1.2 leaves the last arrival inside the "
+                    f"window off the final sample).")
+            support = self.energy_support(
+                0.999 if energy_fraction is None else energy_fraction)
+            if not np.isfinite(support):
+                raise ConfigurationError(
+                    "Arrivals.synthesis_band: these arrivals carry a "
+                    "non-finite delay or amplitude, so the span they occupy "
+                    "is undefined and no window can be derived from them. "
+                    "Pass record= (s) to state one.")
+            # A single arrival spans no time, and a grid still needs two
+            # points to define a spacing: fall back to the shortest record
+            # that holds it.
+            record = max(margin * support, 1.0 / bandwidth)
+        notice = self._record_fold_notice(record)
+        if notice is not None:
+            warnings.warn(notice, UserWarning, stacklevel=2)
+        n_freq = max(int(np.ceil(bandwidth * record)) + 1, 2)
+        return np.linspace(centre - bandwidth / 2.0,
+                           centre + bandwidth / 2.0, n_freq)
 
 
 class Rays(Result):
