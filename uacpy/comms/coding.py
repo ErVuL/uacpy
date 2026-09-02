@@ -84,9 +84,26 @@ def viterbi_decode(coded, polys=DEFAULT_POLYS, K=DEFAULT_K):
     bm0 = bm_all[:, prev0, bit_in]
     bm1 = bm_all[:, prev1, bit_in]
 
+    bits = viterbi_hard(bm0, bm1, prev0, prev1, n_states,
+                        lambda state: (state >> (K - 2)) & 1)
+    return bits[: nsteps - (K - 1)]
+
+
+def viterbi_hard(bm0, bm1, prev0, prev1, n_states, bit_of_state):
+    """Hard-decision Viterbi over a rate-1/2 butterfly trellis.
+
+    ``bm0[k]``/``bm1[k]`` are the branch metrics into every state at step
+    ``k`` from its two predecessors ``prev0``/``prev1``; ``bit_of_state``
+    reads the input bit off the arriving state. Starts and ends in state 0
+    (the tail flush), so the traceback begins there rather than at the
+    survivor with the smallest metric, which noisy input could move.
+    Shared by :class:`ConvCode` and the JANUS decoder, whose trellises differ
+    only in these tables.
+    """
+    nsteps = len(bm0)
     pm = np.full(n_states, np.inf)
     pm[0] = 0.0
-    back = np.zeros((nsteps, n_states), dtype=np.int32)   # holds prev-state index
+    back = np.zeros((nsteps, n_states), dtype=np.int32)   # prev-state index
     for k in range(nsteps):
         cand0 = pm[prev0] + bm0[k]
         cand1 = pm[prev1] + bm1[k]
@@ -95,16 +112,12 @@ def viterbi_decode(coded, polys=DEFAULT_POLYS, K=DEFAULT_K):
         take1 = cand1 < cand0
         pm = np.where(take1, cand1, cand0)
         back[k] = np.where(take1, prev1, prev0)
-    # The K-1 zero flush bits force the encoder to end in state 0, so the
-    # traceback starts there; argmin(pm) could pick a different state on
-    # noisy input and lose the tail constraint.
     state = 0
     bits = np.zeros(nsteps, dtype=int)
     for k in range(nsteps - 1, -1, -1):
-        prev = back[k, state]
-        bits[k] = (state >> (K - 2)) & 1
-        state = prev
-    return bits[: nsteps - (K - 1)]
+        bits[k] = bit_of_state(state)
+        state = back[k, state]
+    return bits
 
 
 class ConvCode:

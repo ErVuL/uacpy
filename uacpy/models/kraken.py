@@ -51,6 +51,7 @@ from pathlib import Path
 from typing import Optional, Dict, Union
 
 from uacpy.models.base import (
+    _line_source_unit_at_1m, _source_sound_speed,
     PropagationModel, RunMode, ModelSpec, USER_FRAME_SKIP,
     _max_roughness, _smooth_surface,
 )
@@ -358,104 +359,29 @@ class Kraken(PropagationModel):
     # TopOpt position 4 carries env.absorption to the engine.
     _consumes_volume_absorption = True
 
-    def _max_receiver_depth(self, env) -> float:
-        # The Kraken family meshes through fluid sediment layers, so it
-        # resolves receivers down to the deepest interface, not just the
-        # seafloor. Equals env.depth when there are no sediment layers.
-        return self._total_media_depth(env)
+    # Meshes through fluid sediment layers: receivers resolve down to the
+    # deepest interface, not just the seafloor.
+    _receivers_reach_sediment = True
 
     def _c_low_for(self, env) -> float:
-        """Resolved KRAKEN cLow for ``env``.
+        """Resolved KRAKEN cLow for ``env``: an explicit ``c_low``; else 0.0
+        (KRAKEN's own choice) for a fluid environment; else, once any medium
+        carries shear, the minimum compressional speed the deck carries.
 
-        An explicit ``c_low`` always wins. Otherwise ``0.0`` hands the choice
-        to KRAKEN, which is right for a fluid environment.
-
-        It is *not* right once any medium carries shear. ``krakenc.f90:189``
-        folds the shear speeds into ``cMin``, then ``:228-230`` applies
-        ``IF ( ElasticFlag ) cMin = 0.85 * cMin`` and
-        ``cLow = MAX( cLow, 0.99 * cMin )`` — so with cLow=0 the search floor
-        lands near 0.84x the slowest *shear* speed and the solver returns
-        interfacial (Scholte / Stoneley) modes instead of the waterborne
-        field, for a TL of several hundred dB. KRAKEN's own documentation
-        prescribes the minimum compressional speed here, which is what
-        ``_modes_error_message`` already tells the user on the failure path.
-
-        An elastic SURFACE counts for exactly the same reason as an elastic
-        bottom: ``krakenc.f90:220-222`` folds ``HSTop%cS`` into ``cMin``
-        symmetrically with ``HSBot%cS`` at ``:210-212``, so an ice canopy sets
-        ``ElasticFlag`` and drags the search floor down to 0.84x its shear
-        speed just as a seabed would. Measured on a 300 m water column under a
-        3500/1800 m/s ice canopy: with the floor left to KRAKEN the run fails
-        at 1 kHz and 2 kHz ("No modes for given phase speed interval", a
-        640-byte .mod that then crashes field.exe), while the minimum
-        compressional speed — 1500 m/s here — returns 58.17 and 60.24 dB.
-
-        This floor is what makes an elastic sea surface usable at all, and it
-        is why ``Kraken`` refuses one nowhere — a refuted claim, kept here so
-        it is not re-derived. The claim was that krakenc.exe heap-corrupts
-        (``free(): invalid pointer``) on the interfacial (Scholte) modes of a
-        solid-over-liquid interface. That abort does not reproduce on the
-        binaries this repository ships: the same ice canopy returns finite,
-        physical TL at 50, 120, 200 and 400 Hz (64.82 / 65.03 / 82.09 /
-        56.70 dB), sensible against a vacuum top. Refusing on it costs every
-        Arctic environment the package's own data layer builds
-        (``core/constants.py``'s ``SEA_ICE_*`` presets and
-        ``data/seaice_local.py``), for a mechanism that is not the cause.
-
-        The seabed term sweeps every compressional speed the deck carries
-        (``Bottom.all_sound_speeds``) whichever medium set ``ElasticFlag``:
-        a fluid sediment layer slower than the water — mud under an ice
-        canopy — ducts modes of its own, and since ``krakenc.f90:230`` only
-        ever raises the written floor, a floor at the water minimum would
-        silently delete them.
-
-        The water term reads ``env.ssp.data``, not
-        :meth:`~uacpy.core.ssp.SoundSpeedProfile.to_pairs`: that method returns
-        the **range-0 column** of a range-dependent profile by contract, while
-        the value returned here is stamped into *every* profile block of the
-        multi-profile deck (``write_multi_profile_env``). ``kraken.f90:230``
-        and ``krakenc.f90:230`` only ever raise the written floor —
-        ``cLow = MAX( cLow, cMin )`` against that profile's own ``cMin`` — so a
-        floor above a profile's slowest water is never corrected downward and
-        simply deletes every mode below it. Measured on a 200 m guide whose
-        water runs 1500 m/s at r=0 to 1450 m/s at 10 km over a 1600/400 m/s
-        elastic half-space at 200 Hz, four profiles: the range-0 column gives
-        cLow = 1500 and 24/14/12/3 modes per profile, the block minimum gives
-        cLow = 1450 and 24/26/28/31, a mean 8.1 dB / max 28.4 dB TL difference
-        over the receiver grid (the counts include leaky modes, so they move by
-        one or two with the receiver grid and the auto RMax; the *ratio* is the
-        finding). Left to the default automatic segmentation, which puts 16
-        profiles on that track instead of 4, the range-0 floor does not degrade
-        the answer but destroys it: a profile whose whole water column sits
-        below the written floor aborts the run with ``RootFinderSecant:
-        Failure to converge`` followed by ``*** FATAL ERROR *** KRAKENC: No
-        modes for given phase speed interval``.
-
-        Too *low* a floor is the harmless direction, but not because of that
-        ``MAX``: a derived floor is written only when something carries shear,
-        and there ``krakenc.f90:229-230`` applies ``cMin = 0.85 * cMin`` first,
-        so for a 400 m/s shear speed the clamp sits at 0.99 x 0.85 x 400 =
-        336.6 m/s and never binds — a written 1300 passes through untouched.
-        What makes it harmless is the physics: no eigenvalue exists below the
-        minimum water sound speed, so ``min(SSP)`` *is* the mode floor and
-        widening the interval below it finds nothing. Measured as a convergence
-        ladder on the environment above, 1450 / 1400 / 1350 / 1300 agree to
-        ~1e-7 dB (float32 deck round-off) at a fixed 109 modes with the slowest
-        mode phase speed identical at 1450.19 m/s on every rung.
-
-        The block minimum is a lower bound on every profile the deck carries
-        because ``segment_environment_by_range`` builds each column with linear
-        ``ssp.eval(range=)``, which cannot undershoot its own samples (measured
-        over 4005 slices across six segmentations, including both
-        extrapolation flanks: zero undershoot). One residual it cannot see,
-        pre-existing and second-order: ``interp_ssp='cubic'`` / ``'pchip'``
-        writes AT's ``'S'`` / ``'P'`` code and KRAKEN's own ``EvaluateSSP``
-        can then dip below the tabulated samples *inside* a layer, which no
-        Python-side bound over stored samples can bound. The auto default for
-        a range-dependent SSP is C-linear, which cannot dip.
-
-        The two readings agree for a 1-D profile, which is what the
-        single-profile and modes paths already carry.
+        With cLow = 0 and ``ElasticFlag`` set, ``krakenc.f90:189,228-230``
+        fold the shear speeds into ``cMin`` and floor the search at
+        ``0.99 * 0.85 * cMin`` — near 0.84x the slowest SHEAR speed — so the
+        solver returns interfacial (Scholte/Stoneley) modes instead of the
+        waterborne field. An elastic SURFACE (an ice canopy) counts exactly
+        like an elastic bottom (``:220-222`` vs ``:210-212``). The floor
+        sweeps every compressional speed of the seabed
+        (``Bottom.all_sound_speeds``: a mud layer slower than the water ducts
+        modes of its own, and ``:230`` only ever raises the written floor) and
+        the minimum of ``env.ssp.data`` over EVERY profile column, since the
+        value is stamped into every block of a multi-profile deck and a floor
+        above a profile's slowest water deletes its modes. Too low is
+        harmless: no eigenvalue exists below the minimum water sound speed.
+        The measurements behind each rule are pinned in ``test_kraken.py``.
         """
         if self.c_low is not None:
             return float(self.c_low)
@@ -901,7 +827,16 @@ class Kraken(PropagationModel):
         if self.mode_depth_grid is not None:
             mode_depths = self.mode_depth_grid
         else:
-            total_depth = self._total_media_depth(env)
+            # The modes are solved on the r = 0 profile, so the grid spans
+            # THAT water column plus the sediment stack — not the deepest
+            # point of a range-dependent bathymetry, which would ask KRAKEN
+            # for receivers below the profile it solves (it clamps them and
+            # warns about a grid this wrapper built).
+            bathy = env.bathymetry
+            water = float(np.interp(0.0, np.asarray(bathy.ranges, dtype=float),
+                                    np.asarray(bathy.depths, dtype=float)))
+            total_depth = water + (env.bottom.max_total_thickness()
+                                   if env.bottom.is_layered else 0.0)
             ppm = self._resolve_mode_points_per_meter(env, source.frequencies)
             n_pts = max(100, int(round(float(total_depth) * ppm)))
             mode_depths = np.linspace(0.0, float(total_depth), n_pts)
@@ -1759,12 +1694,8 @@ class Kraken(PropagationModel):
                 frequencies=frequencies, n_modes=self.n_modes, exe=kraken_exe,
             )
             tf = self._reinsert_nan_depths(tf, receiver, keep)
-            if run_mode == RunMode.TIME_SERIES:
-                return tf.synthesize_time_series(
-                    source_waveform=source_waveform,
-                    sample_rate=sample_rate,
-                )
-            return tf
+            return self._finish_broadband(
+                tf, run_mode, source_waveform, sample_rate)
 
         env = self._project_environment(env)
         self.validate_inputs(env, source, rcv, run_mode=run_mode)
@@ -2009,28 +1940,6 @@ class Kraken(PropagationModel):
             depths=compute_depths, ranges=receiver.ranges,
         )
         return compute_receiver, keep
-
-    def _mask_zero_range(self, field, receiver, source):
-        """NaN the ``r = 0`` column of a point-source field.
-
-        ``EvaluateMod.f90:71-73`` guards the ``1/√(r + ro)`` cylindrical
-        spreading with a ``TINY`` test, so at ``r = 0`` field.exe returns the
-        bare modal sum — a number that belongs to no range. Scooter's
-        wavenumber transform masks the same cells
-        (``grn_reader._hankel_transform``); masking here keeps the two models'
-        grids comparable cell by cell. ``'line'`` / ``'scaled'`` sources carry
-        no ``1/√r`` and are left alone, as they are in both codes. Column
-        masking and the warning come from the shared
-        :meth:`PropagationModel._mask_zero_range_columns`.
-        """
-        if source.source_type != 'point':
-            return field
-        masked = self._mask_zero_range_columns(
-            field.data, receiver.ranges,
-            'the point-source cylindrical-spreading factor 1/sqrt(r)')
-        if masked is not field.data:
-            field.data = masked
-        return field
 
     def _reinsert_nan_depths(self, field, receiver, keep):
         """Map ``field`` (computed on the water-column receivers) back onto the
@@ -2421,7 +2330,8 @@ class Kraken(PropagationModel):
 
     def _assemble_field_from_shd(self, shd_file, source, receiver, is_rd,
                                  n_profiles, broadband, freq_vec, return_pressure,
-                                 fm, base_name, run_mode, bounds):
+                                 fm, base_name, run_mode, bounds,
+                                 line_c_source=None):
         """Build the result Field from field.exe's ``.shd``: native-broadband
         ``(n_d, n_r, n_f)``, single-frequency complex pressure
         (``return_pressure``), or narrowband TL. field.exe's modal sum differs
@@ -2442,6 +2352,14 @@ class Kraken(PropagationModel):
         phase_corr = np.complex128(-1.0)
         if source.source_type == 'line':
             phase_corr = -np.exp(-1j * np.pi / 4.0)
+
+        def line_level(freqs):
+            # field.exe's line field is Σ ψψ e^{ikx}/k_x (EvaluateMod.f90:36):
+            # ×√k0 puts it at unit amplitude at 1 m, the package's convention
+            # (base._line_source_unit_at_1m); 1 for a point/scaled source.
+            if line_c_source is None:
+                return np.ones(np.atleast_1d(np.asarray(freqs, dtype=float)).size)
+            return _line_source_unit_at_1m(line_c_source, freqs)
         if broadband:
             shd0 = read_shd_bin(str(shd_file))
             freqs_read = np.asarray(shd0['freqVec'], dtype=float)
@@ -2483,7 +2401,8 @@ class Kraken(PropagationModel):
                 # -1 (times e^{iπ/4} for a line source), so ``phase_corr``
                 # aligns the two; conjugating instead would flip the
                 # already-correct carrier sign.
-                p_stack[:, :, i_freq] = phase_corr * shd_i['pressure'][0, 0, :, :]
+                p_stack[:, :, i_freq] = (phase_corr * line_level(fr)[0]
+                                         * shd_i['pressure'][0, 0, :, :])
             field = Field(
                 data=p_stack,
                 coords={
@@ -2506,8 +2425,8 @@ class Kraken(PropagationModel):
             shd_data = read_shd_bin(str(shd_file))
             # (Ntheta, Nsz, Nrz, Nrr) -> (nrz, nrr) at the deck's single
             # bearing and source depth; complex128 like every other engine.
-            p = phase_corr * np.asarray(
-                shd_data['pressure'][0, 0, :, :], dtype=np.complex128)
+            p = (phase_corr * line_level(np.atleast_1d(source.frequencies)[0])[0]
+                 * np.asarray(shd_data['pressure'][0, 0, :, :], dtype=np.complex128))
             field = Field(
                 data=p,
                 coords={'depth': receiver.depths, 'range': receiver.ranges},
@@ -2723,7 +2642,9 @@ class Kraken(PropagationModel):
             field = self._assemble_field_from_shd(
                 shd_file, source, receiver, is_rd, n_profiles,
                 broadband, freq_vec, return_pressure, fm, base_name, run_mode,
-                bounds)
+                bounds,
+                line_c_source=(_source_sound_speed(env, source)
+                               if source.source_type == 'line' else None))
 
             # Physical fastest compressional speed in the waveguide (water
             # column + sediment + half-space) on the complex-spectrum
@@ -2759,7 +2680,7 @@ class Kraken(PropagationModel):
             # After the guard above: the guard reads the whole TL grid, and a
             # single-range r=0 request would otherwise look like an empty
             # modal sum.
-            field = self._mask_zero_range(field, receiver, source)
+            field = self._mask_source_axis(field, source)
 
             self._attach_output_paths(
                 field, fm.work_dir, base_name,

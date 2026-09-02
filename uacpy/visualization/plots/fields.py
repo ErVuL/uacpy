@@ -373,6 +373,17 @@ def _mesh_with_singleton_bands(ax, x_plot, x_name, y_plot, y_name, Z, env,
     return ax.pcolormesh(x_plot, y_plot, Z, shading='nearest', **kw)
 
 
+def _signal_excess_title(field) -> str:
+    """The auto-title a signal-excess field carries through either plotter:
+    the quantity, the budget mode when the field records one, the pinned
+    coordinates when it has any."""
+    budget = field.metadata.get('sonar_budget') or {}
+    mode = budget.get('mode')
+    pin = _pinned_subtitle(field)
+    auto = 'Signal excess' + (f' ({mode})' if mode else '')
+    return f"{auto} — {pin}" if pin else auto
+
+
 def _symmetric_span(datasets):
     """``(-max|x|, +max|x|)`` pooled over every array in ``datasets``, or
     ``(None, None)`` when none of them holds a finite non-zero sample.
@@ -552,6 +563,8 @@ def _plot_field_2d(
     ax.grid(True, alpha=0.3, zorder=0)
     if title:
         ax.set_title(title)
+    elif field.kind == 'signal_excess':
+        ax.set_title(_signal_excess_title(field))      # as plot_signal_excess does
     else:
         pin = _pinned_subtitle(field)
         if pin:
@@ -628,9 +641,11 @@ def plot_signal_excess(
 
     Z = np.asarray(field.data, dtype=float)
     if vmax is None:
-        finite = np.abs(Z[np.isfinite(Z)])
-        vmax = float(np.percentile(finite, 99.0)) if finite.size else 1.0
-        if vmax <= 0:
+        # The same symmetric window ``field.plot()`` takes for this kind
+        # (``_value_style``), so the two doors paint one field alike and 0 dB
+        # sits on the diverging map's neutral colour.
+        _lo, vmax = _symmetric_span([Z])
+        if not vmax or vmax <= 0:
             vmax = 1.0
 
     _owns_fig = ax is None
@@ -673,11 +688,7 @@ def plot_signal_excess(
     if title:
         ax.set_title(title)
     else:
-        budget = field.metadata.get('sonar_budget') or {}
-        mode = budget.get('mode')
-        pin = _pinned_subtitle(field)
-        auto = 'Signal excess' + (f' ({mode})' if mode else '')
-        ax.set_title(f"{auto} — {pin}" if pin else auto)
+        ax.set_title(_signal_excess_title(field))
     if env is not None:
         _overlay_seafloor(ax, env, field.coords['range'])
     if _owns_fig:                        # credit only a figure we own
@@ -1067,13 +1078,15 @@ def compare_models(
         ax.axis('off')
 
     top = 0.90 if title else 0.95
-    fig.subplots_adjust(left=0.05, right=0.88, top=top, bottom=0.08,
+    # One credit line per model sits under the panels; leave it room.
+    bottom = 0.08 + 0.025 * max(0, len(fields) - 1)
+    fig.subplots_adjust(left=0.05, right=0.88, top=top, bottom=bottom,
                         wspace=0.22, hspace=0.30)
     if im_last is not None:
         # The label the panels would carry if each had drawn its own colorbar:
         # the raw ``value`` string is the knob's name, not the quantity's.
         cbar_label = 'p(t)' if _is_time_domain(ref) else _value_label(ref, value)
-        cbar_ax = fig.add_axes((0.905, 0.08, 0.015, top - 0.08))
+        cbar_ax = fig.add_axes((0.905, bottom, 0.015, top - bottom))
         fig.colorbar(im_last, cax=cbar_ax, label=cbar_label)
     if title:
         fig.suptitle(title, fontsize=14, fontweight='bold', y=0.97)
@@ -1106,8 +1119,10 @@ def _plot_field_stack(stack, env: Optional[Environment] = None, *,
         flat[i].set_title(f"{stack.coordinate_name}={coord:g}")
     for j in range(n, len(flat)):
         flat[j].axis('off')
-    fig.tight_layout()
     if title:
         fig.suptitle(title, fontweight='bold')
+    # After the suptitle, and leaving it room: tight_layout before it let the
+    # figure title overprint the middle panel's title on three or more slabs.
+    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.95 if title else 1.0))
     _draw_result_credit(fig, stack.slabs[0], env=env)
     return fig, axes

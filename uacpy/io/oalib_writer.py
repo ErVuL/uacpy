@@ -78,7 +78,7 @@ from uacpy.io.utils import (
     equally_spaced,
     reject_unknown_kwargs,
 )
-from uacpy.io.units import m_to_km
+from uacpy.core.units import m_to_km
 from uacpy.io.refl_io import stage_reflection_file
 from uacpy.core._carrier_validate import _sanitize_title
 from uacpy.core.exceptions import ConfigurationError, UnsupportedFeatureError
@@ -996,7 +996,7 @@ def write_ssp_section(
     # Cumulative across every medium: sspMod.f90 indexes one shared array, so
     # the water rows and each sediment layer's rows share the MaxSSP budget.
     n_layers = 0
-    bottom = getattr(env, 'bottom', None)
+    bottom = env.bottom
     if bottom is not None:
         for col in (getattr(bottom, 'columns', None) or []):
             n_layers = max(n_layers, len(getattr(col, 'layers', ()) or ()))
@@ -1144,10 +1144,6 @@ def write_bottom_section(
     f: TextIO,
     env: Environment,
     bottom_type: Optional[BoundaryType] = None,
-    cp_bottom: Optional[float] = None,
-    cs_bottom: Optional[float] = None,
-    rho_bottom: Optional[float] = None,
-    alpha_bottom: Optional[float] = None,
     filepath: Optional[Path] = None,
     verbose: bool = False,
     halfspace_depth: Optional[float] = None,
@@ -1163,8 +1159,6 @@ def write_bottom_section(
         Environment configuration
     bottom_type : BoundaryType, optional
         Bottom boundary type (uses env.bottom.acoustic_type if None)
-    cp_bottom, cs_bottom, rho_bottom, alpha_bottom : float, optional
-        Halfspace overrides; default to ``env.bottom`` values.
     filepath : Path, optional
         Path to the ENV file being written; required for a ``'file'``
         (``.brc``) or ``'precalc'`` (``.irc``) seabed so the table can be
@@ -1179,10 +1173,10 @@ def write_bottom_section(
     if bottom_type is None:
         bottom_type = parse_boundary_type(hs.acoustic_type)
 
-    cp = cp_bottom if cp_bottom is not None else hs.sound_speed
-    cs = cs_bottom if cs_bottom is not None else getattr(hs, 'shear_speed', 0.0)
-    rho = rho_bottom if rho_bottom is not None else hs.density
-    alpha = alpha_bottom if alpha_bottom is not None else hs.attenuation
+    cp = hs.sound_speed
+    cs = getattr(hs, 'shear_speed', 0.0)
+    rho = hs.density
+    alpha = hs.attenuation
 
     bottom_code = bottom_type.to_acoustics_toolbox_code()
     sigma = getattr(hs, 'roughness', 0.0)
@@ -1244,12 +1238,18 @@ def write_bottom_section(
                 f"{rho:.6f}  {alpha:.6f}  {alpha_s:.6f} /\n")
 
 
+def write_vector_record(f: TextIO, values) -> None:
+    """Write an Acoustics Toolbox vector record: the count on one line, the
+    values and the ``/`` terminator on the next (``ReadVector`` in
+    ``misc/SourceReceiverPositions.f90``)."""
+    values = np.asarray(values, dtype=float).ravel()
+    f.write(f"{len(values)}\n")
+    f.write(" ".join(f"{v:.6f}" for v in values) + " /\n")
+
+
 def write_source_depths(f: TextIO, source: Source) -> None:
     """Write the source-depth section of an Acoustics Toolbox ``.env`` file."""
-    n_sources = len(source.depths)
-    f.write(f"{n_sources}\n")
-    depths_str = " ".join([f"{d:.6f}" for d in source.depths])
-    f.write(f"{depths_str} /\n")
+    write_vector_record(f, source.depths)
 
 
 def write_receiver_depths(f: TextIO, receiver_or_depths) -> None:
@@ -1259,11 +1259,9 @@ def write_receiver_depths(f: TextIO, receiver_or_depths) -> None:
     """
     depths = (
         receiver_or_depths.depths if isinstance(receiver_or_depths, Receiver)
-        else np.asarray(receiver_or_depths, dtype=float)
+        else receiver_or_depths
     )
-    f.write(f"{len(depths)}\n")
-    depths_str = " ".join([f"{d:.6f}" for d in depths])
-    f.write(f"{depths_str} /\n")
+    write_vector_record(f, depths)
 
 
 def write_receiver_ranges(f: TextIO, receiver: Receiver) -> None:
@@ -1466,6 +1464,19 @@ def _validate_flp_option(option: str, n_profiles: int = 1) -> None:
         )
 
 
+def _write_flp_axis(f: TextIO, values, count_label: str, label: str) -> None:
+    """One ``.flp`` axis: the count, then either the ``first last /``
+    shortcut FIELD subtabulates (``misc/subtabulate.f90:24,40``, taken only
+    for more than two equally spaced values) or every value in full."""
+    f.write(f"{len(values):5d} \t \t \t \t ! {count_label} \n")
+    if len(values) > 2 and equally_spaced(values):
+        f.write(f"    {values[0]:.6f}  {values[-1]:.6f} ")
+    else:
+        for v in values:
+            f.write(f"    {v:.6f}  ")
+    f.write(f"/ \t ! {label} \n")
+
+
 def write_fieldflp(
     filepath: Union[str, Path],
     option: str,
@@ -1602,31 +1613,9 @@ def write_fieldflp(
         # SubTab expanding the record, which it only does for Nx >= 3
         # (misc/subtabulate.f90:24,40) — hence the ``> 2`` gate on this and the
         # two depth blocks; shorter vectors are written out in full.
-        f.write(f"{len(r_ranges):5d} \t \t \t \t ! NRr \n")
-        if len(r_ranges) > 2 and equally_spaced(r_ranges):
-            f.write(f"    {r_ranges[0]:.6f}  {r_ranges[-1]:.6f} ")
-        else:
-            for r in r_ranges:
-                f.write(f"    {r:.6f}  ")
-        f.write("/ \t ! Rr(1)  ... (km) \n")
-
-        # Source depths
-        f.write(f"{len(s_depths):5d} \t \t \t \t ! NSz \n")
-        if len(s_depths) > 2 and equally_spaced(s_depths):
-            f.write(f"    {s_depths[0]:.6f}  {s_depths[-1]:.6f} ")
-        else:
-            for z in s_depths:
-                f.write(f"    {z:.6f}  ")
-        f.write("/ \t ! Sz(1)  ... (m) \n")
-
-        # Receiver depths
-        f.write(f"{len(r_depths):5d} \t \t \t \t ! NRz \n")
-        if len(r_depths) > 2 and equally_spaced(r_depths):
-            f.write(f"    {r_depths[0]:.6f}  {r_depths[-1]:.6f} ")
-        else:
-            for z in r_depths:
-                f.write(f"    {z:.6f}  ")
-        f.write("/ \t ! Rz(1)  ... (m) \n")
+        _write_flp_axis(f, r_ranges, 'NRr', 'Rr(1)  ... (km)')
+        _write_flp_axis(f, s_depths, 'NSz', 'Sz(1)  ... (m)')
+        _write_flp_axis(f, r_depths, 'NRz', 'Rz(1)  ... (m)')
 
         # Receiver range offsets (array tilt) - default to zeros for every
         # receiver. field.exe ERROUTs unless ``NRro == NRz``
@@ -1992,6 +1981,29 @@ def write_sparc_env_file(
     line to ``TopBot``. Pulse band, RMax and the time window are resolved by
     the caller; this only formats.
     """
+    # sparc.f90:177 stops on a non-zero roughness in the SSP block —
+    # "Rough interfaces not allowed" — for the surface and every sediment
+    # layer; the half-space's, on the BotOpt line, it reads and ignores.
+    rough = [('surface', float(getattr(env.surface, 'roughness', 0.0) or 0.0))]
+    rough += [(f'sediment layer {i}', float(layer.roughness))
+              for column in env.bottom.columns
+              for i, layer in enumerate(column.layers)]
+    offenders = [f"{what} ({sigma:g} m)" for what, sigma in rough if sigma]
+    if offenders:
+        raise UnsupportedFeatureError(
+            'SPARC',
+            f"a rough {', '.join(offenders)} — GETPAR stops with 'Rough "
+            f"interfaces not allowed' (sparc.f90:177) at exit 0. Set the "
+            f"roughness to 0 for SPARC (the SPARC wrapper does so, with a "
+            f"warning).")
+    hs_sigma = float(getattr(env.bottom.halfspace_at(range=0.0), 'roughness',
+                             0.0) or 0.0)
+    if hs_sigma:
+        warnings.warn(
+            f"write_sparc_env_file: the half-space roughness ({hs_sigma:g} m) "
+            f"goes on the BotOpt line, which SPARC reads and ignores — the "
+            f"deck is valid but the seabed is smooth to SPARC.",
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
     surface_code = surface_type.to_acoustics_toolbox_code()
     bottom_code = bottom_type.to_acoustics_toolbox_code()
     for code, boundary, carrier in ((surface_code, 'surface', env.surface),

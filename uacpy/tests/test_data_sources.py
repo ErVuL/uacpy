@@ -113,3 +113,25 @@ def test_argo_defaults_pin_search_radius_and_time_window():
         params = inspect.signature(fn).parameters
         assert params['max_distance_km'].default == 250.0
         assert params['max_days'].default == 15
+
+
+class TestBathymetryProvenanceNamesBackendAndVintage:
+    def test_the_gebco_record_is_not_the_service_that_may_serve_it(self):
+        from uacpy.data.sources import SOURCES
+        assert SOURCES['gebco'].name == 'GEBCO grid'
+        assert 'OpenTopoData' not in SOURCES['gebco'].name
+
+    def test_the_vintage_says_which_backend_answered(self):
+        from uacpy.data.environment import _bathymetry_vintage
+        assert _bathymetry_vintage('gebco', 'api') == 'gebco2020 via OpenTopoData'
+        assert _bathymetry_vintage('gmrt', 'gmrt') == 'gmrt (live)'
+        assert _bathymetry_vintage('gebco', None) is None
+
+    def test_the_local_grid_is_cited_by_its_release(self):
+        from uacpy.data import gebco_local
+        from uacpy.core.exceptions import ConfigurationError, DataFetchError
+        try:
+            name = gebco_local.grid_name()
+        except (ConfigurationError, DataFetchError, FileNotFoundError):
+            pytest.skip("no local GEBCO grid cached")
+        assert name.startswith('GEBCO_')

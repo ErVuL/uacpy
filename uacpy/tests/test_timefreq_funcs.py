@@ -184,3 +184,16 @@ def test_inverse_cwt_warns_off_log2_uniform_scale_grid():
         xr = inverse_cwt(log.coefficients, log.frequencies, fs)
     mid = slice(256, 1792)
     assert abs(np.std(xr[mid]) / np.std(x[mid]) - 1.0) < 0.05
+
+
+class TestTheCepstrumDelayIsTheDelay:
+    def test_a_late_signal_reports_a_positive_delay_and_round_trips(self):
+        from uacpy.acoustic_signal.timefreq import complex_cepstrum, inverse_complex_cepstrum
+        rng = np.random.default_rng(0)
+        n = 256
+        base = np.zeros(n); base[10:40] = rng.standard_normal(30)
+        c0 = complex_cepstrum(base)
+        c7 = complex_cepstrum(np.roll(base, 7))
+        assert c7.delay - c0.delay == 7
+        np.testing.assert_allclose(inverse_complex_cepstrum(c7), np.roll(base, 7), atol=1e-8)
+

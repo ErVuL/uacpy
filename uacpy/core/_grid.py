@@ -27,7 +27,7 @@ INTERP_METHODS = ('linear', 'nearest', 'cubic')
 def _as_finite_scalar_label(value, name):
     """Coerce a slice label to ``float``, raising ``ConfigurationError`` for
     array-valued and non-finite labels — the shared ``at``/``eval`` label
-    contract (the guard ``Field.at`` applies on its own path).
+    contract ``Field.at`` included.
     """
     try:
         v = float(value)

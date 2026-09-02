@@ -4,8 +4,11 @@ Hz, radians) and the ones other layers need.
 Three pure array operations with no dependency beyond numpy, so every layer —
 ``io`` at the file-format boundary, ``visualization`` at the axis-label
 boundary — can reach them without importing a sibling package for arithmetic.
-:mod:`uacpy.io.units` re-exports all three under their own names and states
-the file-format mandate that governs the writers and readers.
+The io writers and readers import them from here: every writer that emits
+a km-on-disk axis goes through ``m_to_km``, every reader that returns a
+metres-API axis through ``km_to_m``, and phase columns through
+``deg_to_rad`` / ``rad_to_deg``, so the "did I convert?" question stays
+grep-able.
 """
 
 from __future__ import annotations

@@ -289,7 +289,7 @@ def test_importing_the_plotting_surface_leaves_the_io_layer_unloaded():
     """The plotters label axes in km, and ``km_to_m``/``m_to_km``/``deg_to_rad``
     live in :mod:`uacpy.core.units` precisely so a layer above ``io`` can reach
     them without importing a sibling package for arithmetic. Four plot modules
-    spelling those three lines ``from uacpy.io.units import ...`` pulled all 18
+    spelling those three lines ``from uacpy.core.units import ...`` pulled all 18
     ``uacpy.io`` modules — every reader and writer in the tree — into every
     ``import uacpy.visualization``."""
     result = _run_python(
@@ -339,20 +339,6 @@ def test_no_visualization_module_imports_the_io_layer_at_module_scope():
         "module-scope uacpy.io imports under uacpy/visualization (each one "
         "loads all 18 io modules into import uacpy.visualization): "
         + '; '.join(f'{p}:{n} imports {m}' for p, n, m in offenders))
-
-
-def test_both_unit_helper_spellings_reach_the_same_functions():
-    """Moving the plotters' import does not retire ``uacpy.io.units``: it
-    re-exports the three names for the writers and readers, and both spellings
-    must keep resolving to the one definition."""
-    from uacpy.core.units import deg_to_rad, km_to_m, m_to_km
-    from uacpy.io.units import deg_to_rad as io_deg, km_to_m as io_km
-    from uacpy.io.units import m_to_km as io_m
-    assert (io_deg, io_km, io_m) == (deg_to_rad, km_to_m, m_to_km)
-    import uacpy.core.units as core_units
-    import uacpy.io.units as io_units
-    for name in ('km_to_m', 'm_to_km', 'deg_to_rad'):
-        assert getattr(io_units, name) is getattr(core_units, name)
 
 
 def test_the_comms_plotter_draws_its_theory_overlay():
@@ -447,3 +433,30 @@ def test_each_core_import_of_visualization_says_why_it_is_deferred(
     assert any(_DEFERRAL_MARKER in ln.lower() for ln in comments), (
         f"{relative_path}:{lineno} has no comment saying the import is "
         f"deferred to break the cycle; comments above it: {comments}")
+
+
+def test_the_restated_export_lists_stay_in_sync():
+    """``uacpy.visualization`` restates ``uacpy.visualization.plots``'s public
+    surface and ``uacpy`` restates ``uacpy.core``'s — deliberately, so the
+    short spellings work. A restatement can drift; this pins that every
+    plotter the plots package exports is exported by visualization too, and
+    that every core name the top level exports is the core object."""
+    import uacpy
+    import uacpy.core as core
+    import uacpy.visualization as viz
+    import uacpy.visualization.plots as plots
+    missing = [n for n in plots.__all__
+               if callable(getattr(plots, n, None)) and n not in viz.__all__]
+    assert missing == [], f"plots exports not restated by visualization: {missing}"
+    drifted = [n for n in viz.__all__
+               if n in plots.__all__ and getattr(viz, n) is not getattr(plots, n)]
+    assert drifted == [], f"visualization re-exports a different object: {drifted}"
+    import types
+    # ``uacpy.metrics`` is the root shim MODULE over ``uacpy.core.metrics``:
+    # two module objects with one content, not a drift — compare objects only.
+    core_drift = [n for n in core.__all__
+                  if n in uacpy.__all__
+                  and not isinstance(getattr(core, n), types.ModuleType)
+                  and getattr(uacpy, n) is not getattr(core, n)]
+    assert core_drift == [], f"uacpy re-exports a different core object: {core_drift}"
+

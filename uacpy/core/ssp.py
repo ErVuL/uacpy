@@ -16,6 +16,7 @@ from uacpy.core.constants import (DEFAULT_SOUND_SPEED,
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core._carrier_validate import (
+    _scalar_or_none,
     _reject_complex,
     _require_positive, _require_non_negative, _require_strictly_increasing,
     _coerce_data_sources,
@@ -67,6 +68,9 @@ class SoundSpeedProfile:
     ranges: Optional[np.ndarray] = None
     shape: str = 'measured'
     data_sources: tuple = ()
+    #: Sound-speed formula that built ``data`` from T/S ('unesco', 'delgrosso');
+    #: ``None`` for a literal or hand-built profile. Read by the deep extension.
+    formula: Optional[str] = None
 
     def __post_init__(self):
         # Provenance of a fetched profile (tuple of DataProvenance); empty for a
@@ -373,6 +377,7 @@ class SoundSpeedProfile:
             ranges=None,
             shape=self.shape,
             data_sources=self.data_sources,
+            formula=self.formula,
         )
 
     def extend_to(self, depth_max: float) -> 'SoundSpeedProfile':
@@ -439,6 +444,7 @@ class SoundSpeedProfile:
                         else None),
                 shape=self.shape,
                 data_sources=self.data_sources,
+                formula=self.formula,
             )
         first = float(self.depths[0])
         if depth_max <= first:
@@ -484,6 +490,7 @@ class SoundSpeedProfile:
             ranges=(self.ranges.copy() if self.ranges is not None else None),
             shape=self.shape,
             data_sources=self.data_sources,
+            formula=self.formula,
         )
 
     @classmethod
@@ -511,33 +518,19 @@ class SoundSpeedProfile:
             return cls.from_isovelocity(depth_max, DEFAULT_SOUND_SPEED)
         if isinstance(value, SoundSpeedProfile):
             return value
-        # A 0-d ndarray is a scalar in every respect except ``isinstance``,
-        # so both the bool guard and the numeric branch have to see through
-        # it — otherwise ``np.array(1500.0)`` reaches ``from_pairs`` and the
-        # error names an ``(N, 2)`` shape the caller never asked for, and
-        # ``np.array(True)`` walks past the bool guard entirely.
-        # ``Bathymetry.coerce`` admits the same spelling.
-        zero_d = isinstance(value, np.ndarray) and value.ndim == 0
-        if (isinstance(value, (bool, np.bool_))
-                or (zero_d and value.dtype == np.bool_)):
-            raise ConfigurationError(
-                f"Environment: ssp={value!r} is a bool, not a sound speed — "
-                f"as a scalar it would mean a {float(value):g} m/s ocean."
-            )
-        if isinstance(value, (int, float, np.integer, np.floating)):
-            return cls.from_isovelocity(depth_max, float(value))
-        if zero_d:
-            # Guarded because a 0-d array can hold a string or an object,
-            # which ``float`` refuses with an untyped error.
-            try:
-                sound_speed = float(value)
-            except (TypeError, ValueError):
-                raise ConfigurationError(
-                    f"Environment: ssp must be a scalar (m/s), a list of "
-                    f"(depth, sound_speed) pairs, or a SoundSpeedProfile; got "
-                    f"a 0-d array of dtype {value.dtype}."
-                ) from None
+        # A scalar (a 0-d array included) is an isovelocity ocean; a bool is
+        # refused as one — the shared guard says why.
+        sound_speed = _scalar_or_none(value, lambda v: (
+            f"Environment: ssp={v!r} is a bool, not a sound speed — as a "
+            f"scalar it would mean a {float(v):g} m/s ocean."))
+        if sound_speed is not None:
             return cls.from_isovelocity(depth_max, sound_speed)
+        if isinstance(value, np.ndarray) and value.ndim == 0:
+            # A 0-d array holding a string or an object.
+            raise ConfigurationError(
+                f"Environment: ssp must be a scalar (m/s), a list of "
+                f"(depth, sound_speed) pairs, or a SoundSpeedProfile; got "
+                f"a 0-d array of dtype {value.dtype}.")
         if isinstance(value, (list, tuple, np.ndarray)):
             return cls.from_pairs(value)
         raise ConfigurationError(

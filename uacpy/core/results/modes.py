@@ -246,6 +246,18 @@ class Modes(Result):
             f"Receiver depths) before reading Im(k).",
             UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
 
+    def _on_depths(self, values, name: str) -> np.ndarray:
+        """``values`` as one entry per tabulated depth: a scalar is spread
+        over the tabulation, an array must already match it."""
+        arr = np.asarray(values, dtype=float).ravel()
+        if arr.size == 1:
+            return np.full_like(self.depths, float(arr.item()))
+        if arr.shape != self.depths.shape:
+            raise ConfigurationError(
+                f"Modes.with_attenuation: {name} shape {arr.shape} must match "
+                f"depths {self.depths.shape} (or be a scalar).")
+        return arr
+
     def with_attenuation(
         self,
         alpha_db_per_m: Union[float, np.ndarray],
@@ -362,30 +374,11 @@ class Modes(Result):
             raise ConfigurationError(
                 "Modes.with_attenuation: requires Modes.f0 to be set."
             )
-        a = np.asarray(alpha_db_per_m, dtype=float).ravel()
-        if a.size == 1:
-            a = np.full_like(self.depths, float(a.item()))
-        elif a.shape != self.depths.shape:
-            raise ConfigurationError(
-                f"Modes.with_attenuation: alpha shape {a.shape} "
-                f"must match depths {self.depths.shape} (or scalar)."
-            )
-        c_arr = np.asarray(sound_speed_z, dtype=float).ravel()
-        if c_arr.size == 1:
-            c_arr = np.full_like(self.depths, float(c_arr.item()))
-        elif c_arr.shape != self.depths.shape:
-            raise ConfigurationError(
-                f"Modes.with_attenuation: sound_speed_z shape "
-                f"{c_arr.shape} must match depths {self.depths.shape}"
-            )
-        rho_g = np.asarray(density_z, dtype=float).ravel()
-        if rho_g.size == 1:
-            rho_g = np.full_like(self.depths, float(rho_g.item()))
-        elif rho_g.shape != self.depths.shape:
-            raise ConfigurationError(
-                f"Modes.with_attenuation: density_z shape "
-                f"{rho_g.shape} must match depths {self.depths.shape}"
-            )
+        # Each depth-tabulated input is a scalar (spread over the
+        # tabulation) or one value per tabulated depth.
+        a = self._on_depths(alpha_db_per_m, 'alpha')
+        c_arr = self._on_depths(sound_speed_z, 'sound_speed_z')
+        rho_g = self._on_depths(density_z, 'density_z')
         rho_arr = rho_g * 1000.0  # g/cm³ → kg/m³
         a_neper = a * (np.log(10.0) / 20.0)
         # Perturbation on Re(psi)**2: for krakenc's complex modes this is

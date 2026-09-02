@@ -944,7 +944,7 @@ class TestAxesMustSurviveTheDeckPrintResolution:
                                           DECK_DEPTH_RESOLUTION_M,
                                           DECK_RANGE_RESOLUTION_M)
         from uacpy.io.oalib_writer import _DECK_DEPTH_FMT, DECK_RANGE_QUANTUM_M
-        from uacpy.io.units import m_to_km
+        from uacpy.core.units import m_to_km
 
         def token(value, fmt):
             return format(value, fmt)

@@ -18,6 +18,7 @@ from uacpy.core.exceptions import (
     ConfigurationError, ModelExecutionError,
 )
 from uacpy.models.base import (
+    _line_source_unit_at_1m, _source_sound_speed,
     PropagationModel, RunMode, ModelSpec, USER_FRAME_SKIP,
     _max_roughness, _smooth_surface,
 )
@@ -408,6 +409,16 @@ class Scooter(PropagationModel):
             grn_data = self._run_and_read_grn(fm, base_name)
             result = self._assemble_field_from_grn(
                 grn_data, source, receiver, broadband_mode)
+            if source.source_type == 'line':
+                # The 'X' Hankel path returns 1/√(k0·R) in free space
+                # (grn_reader: no √k weighting, 1/√(2π)); ×√k0 is unit
+                # amplitude at 1 m, the package's line-source level.
+                freqs_out = (np.asarray(result.coords['frequency'], dtype=float)
+                             if 'frequency' in result.coords
+                             else np.atleast_1d(source.frequencies)[0])
+                level = _line_source_unit_at_1m(_source_sound_speed(env, source),
+                                                freqs_out)
+                result.data = result.data * (level if level.size == 1 else level[None, None, :])
 
             freqs = broadband_freqs if broadband_mode else float(source.frequencies[0])
             self._stamp_result(result, source, backend='scooter',
@@ -426,11 +437,8 @@ class Scooter(PropagationModel):
             )
 
             self._log("Simulation complete")
-            if run_mode == RunMode.TIME_SERIES:
-                result = result.synthesize_time_series(
-                    source_waveform=source_waveform,
-                    sample_rate=sample_rate,
-                )
+            result = self._finish_broadband(
+                result, run_mode, source_waveform, sample_rate)
             return self._mask_unresolvable_depths(
                 result, receiver, media_depth)
 
@@ -468,8 +476,7 @@ class Scooter(PropagationModel):
         )
         return env
 
-    def _max_receiver_depth(self, env) -> float:
-        return self._total_media_depth(env)
+    _receivers_reach_sediment = True    # meshes through the sediment stack
 
     def _run_and_read_grn(self, fm, base_name):
         """Run the binary and read back its Green's function.

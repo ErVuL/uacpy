@@ -4409,3 +4409,32 @@ class TestTlIsTheDbViewRestrictedToPressureFields:
                          coordinate_name='source_depth')
         with pytest.raises(ConfigurationError, match='stack\\.db'):
             st.tl
+
+
+class TestScalarSpellingsAreSharedByTheThreeCoercers:
+    """``ssp=``, ``bathymetry=`` and ``bottom=`` accept a Python number and a
+    numeric 0-d array as the same scalar, and refuse a bool (bare or 0-d)
+    through one guard."""
+
+    @pytest.mark.parametrize('spelling', [1500.0, np.array(1500.0), np.float32(1500.0)])
+    def test_a_scalar_ssp_is_isovelocity(self, spelling):
+        env = uacpy.Environment(name='t', bathymetry=100.0, ssp=spelling)
+        assert np.allclose(env.ssp.data, 1500.0)
+
+    @pytest.mark.parametrize('spelling', [100.0, np.array(100.0)])
+    def test_a_scalar_bathymetry_is_flat(self, spelling):
+        env = uacpy.Environment(name='t', bathymetry=spelling, ssp=1500.0)
+        assert float(env.depth) == 100.0
+
+    def test_a_zero_d_bottom_is_a_half_space(self):
+        env = uacpy.Environment(name='t', bathymetry=100.0, ssp=1500.0,
+                                bottom=np.array(1650.0))
+        assert env.bottom.halfspace_at(range=0.0).sound_speed == 1650.0
+
+    @pytest.mark.parametrize('kw', ['ssp', 'bathymetry', 'bottom'])
+    @pytest.mark.parametrize('bad', [True, np.array(True)])
+    def test_a_bool_is_refused_by_all_three(self, kw, bad):
+        base = dict(name='t', bathymetry=100.0, ssp=1500.0)
+        base[kw] = bad
+        with pytest.raises(ConfigurationError, match='is a bool'):
+            uacpy.Environment(**base)

@@ -33,7 +33,7 @@ import warnings
 import numpy as np
 
 from uacpy.core.constants import DEFAULT_SOUND_SPEED
-from uacpy.core.exceptions import ConfigurationError
+from uacpy.acoustic_signal._signal_validate import require_positive_finite_scalar
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 
 # Geometric-scattering validity bounds. Sphere-family: the rigid-sphere
@@ -55,35 +55,9 @@ _KA_MIN_PLATE = 2.0 * np.pi
 
 def _require_positive(value, label: str) -> float:
     """Validate a scalar dimension / frequency / sound speed and return it as
-    ``float``. Sibling of
-    :func:`uacpy.acoustic_signal._signal_validate.require_positive_finite_scalar`,
-    kept local only for the ``"target strength: "`` prefix and so ``sonar``
-    keeps importing from ``core`` alone; the *behaviour* is deliberately
-    identical and is pinned that way.
-    :func:`uacpy.core._carrier_validate._require_positive` carries the note on
-    why three of these exist.
-    """
-    try:
-        v = float(value)
-    except (TypeError, ValueError) as exc:
-        # Typed rather than the raw ``TypeError`` ``float()`` raises, which
-        # names neither the function nor the parameter: a list of radii passed
-        # to ts_sphere reported only "only length-1 arrays can be converted".
-        raise ConfigurationError(
-            f"target strength: {label} must be a scalar number "
-            f"(got {value!r})."
-        ) from exc
-    # ``isfinite`` as well as the sign, and the sign as a negated admissible
-    # condition. Either half alone leaks a value the message promises to
-    # refuse: ``nan <= 0`` is False, and ``inf > 0`` is True — an infinite
-    # dimension or frequency was accepted here and returned an infinite target
-    # strength, unflagged, from every ts_* function, exactly as the private
-    # copy in ``acoustic_signal/waveforms.py`` did before it was consolidated.
-    if not np.isfinite(v) or not (v > 0.0):
-        raise ConfigurationError(
-            f"target strength: {label} must be positive and finite; got {value}"
-        )
-    return v
+    ``float`` — the package's one positive-finite-scalar guard, under the
+    ``"target strength"`` prefix."""
+    return require_positive_finite_scalar(value, "target strength", label)
 
 
 def _warn_below_geometric(scale_m: float, frequency_hz, sound_speed,

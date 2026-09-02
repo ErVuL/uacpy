@@ -511,7 +511,7 @@ class TestSynthesisErrorsNameTheEntryPoint:
         """A Field that trips both shared synthesis warnings at once.
 
         The second range cell is entirely NaN, and the metadata carries no
-        ``c_max``/``c0``, so ``_clean_cell_spectra`` and the window-anchor
+        ``c_max``/``c0``, so ``_warn_unsolved_bins`` and the window-anchor
         branch of ``_ifft_to_trace`` both fire on either entry point."""
         from uacpy.core.results import Field, PhaseReference
         freqs = np.linspace(100.0, 500.0, 9)
@@ -605,6 +605,63 @@ class TestDFTWraparoundWarning:
         wf[: int(0.005 * FS)] = 1.0  # short non-zero burst
         with pytest.warns(UserWarning, match=r"wraps back"):
             tf.synthesize_time_series(source_waveform=wf, sample_rate=FS)
+
+
+class TestTheSynthesisWindowAnchorsOnTheStampedSpeed:
+    """The window opens at the estimated first arrival r/c_fast. A model that
+    stamps a c_max BELOW the 1500 m/s default (cold or fresh water) must
+    anchor on it: anchored on 1500 the window opens early by
+    r·(1/c_max − 1/1500), the arrival wraps a whole record and the time axis
+    labels it one record early, with nothing to show for it."""
+
+    R = 100_000.0
+
+    def _tf(self, metadata):
+        from uacpy.core.results import Field, PhaseReference
+        freqs = np.arange(100.0, 150.0 + 1e-9, 0.5)          # Δf = 0.5 Hz: a 2 s record
+        H = np.exp(-2j * np.pi * freqs * self.R / 1450.0)
+        return Field(
+            data=H[None, None, :],
+            coords={'depth': np.array([50.0]), 'range': np.array([self.R]),
+                    'frequency': freqs},
+            model='Synthetic', source_depths=np.array([50.0]),
+            frequencies=freqs,
+            phase_reference=PhaseReference.TRAVELLING_WAVE,
+            metadata=metadata,
+        )
+
+    def _peak_time(self, tf):
+        with warnings.catch_warnings(record=True) as rec:
+            warnings.simplefilter('always')
+            trace = tf.to_time_trace(window='none')
+        t = np.asarray(trace.coords['time'])
+        p = np.abs(np.asarray(trace.data))
+        return t, float(t[np.argmax(p)]), [str(w.message) for w in rec]
+
+    def test_a_stamped_speed_below_the_default_anchors_the_window(self):
+        t, peak, msgs = self._peak_time(self._tf({'c_max': 1450.0}))
+        truth = self.R / 1450.0                                  # 68.966 s
+        assert t[0] <= truth <= t[-1], (t[0], truth, t[-1])
+        assert abs(peak - truth) < 0.005, (peak, truth)          # half a 125 Hz cycle
+        assert not any('stamped no sound speed' in m for m in msgs)
+
+    def test_with_nothing_stamped_the_default_anchors_and_warns(self):
+        t, peak, msgs = self._peak_time(self._tf({}))
+        truth = self.R / 1450.0
+        # Anchored on 1500 the 2 s window opens at 65.67 s and closes before
+        # 68.97 s: the wrap is the pre-existing, WARNED behaviour.
+        assert any('stamped no sound speed' in m for m in msgs)
+        assert not (t[0] <= truth <= t[-1])
+
+    def test_a_shared_window_uses_the_same_anchor(self):
+        tf = self._tf({'c_max': 1450.0})
+        fs = 1000.0
+        wf = np.zeros(int(0.05 * fs)); wf[0] = 1.0
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            out = tf.synthesize_time_series(source_waveform=wf, sample_rate=fs)
+        t = np.asarray(out.coords['time'])
+        assert t[0] <= self.R / 1450.0 <= t[-1]
 
 
 class TestSynthesisRangeSpanWarning:

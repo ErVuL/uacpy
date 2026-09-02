@@ -3,6 +3,7 @@
 """
 
 import numpy as np
+from typing import Optional
 
 from uacpy.core.exceptions import ConfigurationError
 
@@ -90,54 +91,37 @@ def _require_finite(values, label: str, *, hint: str = "") -> None:
             f"got {flat[bad]} at flat index {bad} of {flat.size} value(s)")
 
 
+def _scalar_or_none(value, describe_bool) -> Optional[float]:
+    """``float(value)`` for a Python/NumPy number or a numeric 0-d array,
+    ``None`` for anything else (a sequence, an array, a carrier). A bool —
+    Python or NumPy, bare or as a 0-d array — is refused with the
+    ``ConfigurationError`` text ``describe_bool(value)`` composes: read as
+    a scalar it would silently mean 0 or 1. A 0-d array is a scalar in every
+    respect except ``isinstance``, so both branches see through it."""
+    zero_d = isinstance(value, np.ndarray) and value.ndim == 0
+    if (isinstance(value, (bool, np.bool_))
+            or (zero_d and value.dtype == np.bool_)):
+        raise ConfigurationError(describe_bool(value))
+    if isinstance(value, (int, float, np.integer, np.floating)):
+        return float(value)
+    if zero_d and np.issubdtype(value.dtype, np.number):
+        return float(value)
+    return None
+
+
 def _require_positive(values, label: str, *, hint: str = "") -> None:
     """Raise ``ConfigurationError`` unless every element is finite and ``> 0``.
 
     Finiteness is checked first (NaN/inf pass every plain ``<= 0`` test) and
     reported separately, so the sign message stays the contiguous phrase
-    ``"<label> must be positive"`` that callers relied on.
-
-    Why three of these exist
-    -----------------------
-    The canonical note for the whole package, so the split is not re-derived
-    each audit. Three "reject a non-positive scalar" guards are shipped on
-    purpose: this one,
-    :func:`uacpy.acoustic_signal._signal_validate.require_positive_finite_scalar`
-    and ``uacpy.sonar.target_strength._require_positive``. They were compared
-    on *behaviour*, not shape, and reach the same accept/reject verdict on
-    every scalar — ``0``, negatives, ``nan``, ``inf``, ``-inf``, numpy
-    scalars, 0-d arrays, ``Decimal``, ``Fraction``, ``bool``, numeric strings,
-    and non-numeric objects. What differs is what each names, and each is
-    right for its layer:
-
-    * this one takes an **array** and reports the offending flat index and the
-      element count, because a carrier validates a whole depth or range axis
-      and "which sample" is the question a user has;
-    * the ``acoustic_signal`` one takes a single argument and reports the
-      calling estimator, the parameter and its unit, because there the
-      question is which argument of which function;
-    * the ``sonar`` one is that same contract behind a fixed
-      ``"target strength: "`` prefix, kept local so ``sonar`` — which today
-      imports only from ``core`` — does not reach into a private module of a
-      sibling package for it.
-
-    One measured difference is *not* wording and is left standing on purpose:
-    for a non-numeric argument the two scalar guards raise
-    ``ConfigurationError`` naming the parameter, while this one lets the
-    ``TypeError`` / ``ValueError`` out of ``np.asarray(..., dtype=float)``
-    through. A failure there is a dtype or ragged-shape problem rather than a
-    positivity verdict, and a carrier test pins that ``ValueError`` for a
-    non-numeric ``SedimentLayer`` field, so typing it is a breaking change and
-    a decision of its own.
-
-    Consolidating them would cost the first two of those messages, so they
-    stay. What the split costs instead is drift, and it has been paid twice: a
-    fourth copy in ``acoustic_signal/waveforms.py`` was folded into the second
-    and found to be silently accepting ``inf``, and the ``sonar`` one was
-    later measured doing the same, against its own message. The agreement
-    above is therefore pinned by a test — see
-    ``TestThePositiveScalarGuardsAgreeAcrossLayers`` in ``test_sonar.py`` —
-    rather than left to the next reader to re-measure.
+    ``"<label> must be positive"`` callers rely on. Takes an ARRAY and names
+    the offending flat index, because a carrier validates a whole axis. The
+    scalar counterpart that names a function argument and its unit is
+    :func:`uacpy.acoustic_signal._signal_validate.require_positive_finite_scalar`;
+    the two reach the same verdict on every scalar, which
+    ``TestThePositiveScalarGuardsAgreeAcrossLayers`` (test_sonar.py) pins. A
+    non-numeric input raises numpy's own error here — a dtype problem, not a
+    sign verdict — and a carrier test pins that too.
     """
     arr = np.asarray(values, dtype=float)
     _require_finite(arr, label, hint=hint)
@@ -206,17 +190,12 @@ def _require_strictly_increasing(values: np.ndarray, label: str, *,
     ``unit`` naming what the step is measured in — the axes guarded this way
     are not all spatial (``SBP_ANGLE_RESOLUTION_DEG`` guards a degree axis).
 
-    A zero-length axis is refused here as well. Monotonicity is vacuous on it,
-    but every consumer reads the axis positionally — a deck writer takes
-    element 0, ``np.interp`` refuses an empty ``xp``, and ``min``/``max`` over
-    it is a zero-size reduction — so an empty axis that passes construction
-    surfaces much later as a bare ``IndexError`` or ``ValueError`` from inside
-    a writer, naming no input the caller supplied. A one-sample axis is a
-    legitimate carrier (a single receiver depth, one profile range) and is
-    accepted. This is the only ``_require_*`` guard here that rejects an empty
-    array: the value predicates above are also applied to ``Field.coords``,
-    where an axis sliced to nothing is a supported state (``Field.max`` reports
-    it in those terms).
+    A zero-length axis is refused here as well: every consumer reads the axis
+    positionally (deck writers, ``np.interp``, ``min``/``max``), so an empty
+    one would surface later as a bare IndexError naming no input. This is the
+    only ``_require_*`` guard that rejects an empty array — the value
+    predicates above also serve ``Field.coords``, where an axis sliced to
+    nothing is a supported state.
     """
     arr = np.asarray(values, dtype=float).ravel()
     if arr.size == 0:

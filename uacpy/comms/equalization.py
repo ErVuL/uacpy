@@ -148,20 +148,12 @@ def _dfe_core(rx, constellation, n_ff, n_fb, step, forget, pll_bw, train):
             f"{forget!r}. The inverse-correlation update divides by it, so 0 "
             f"or a negative value makes the taps non-finite."
         )
-    # Bring the record to unit mean power before adapting. Everything below
-    # carries an absolute scale — LMS's stability bound is step < 2/(ntaps*P),
-    # RLS's P(0) = I/1e-2 is an inverse-power, the center-spike init is 1.0,
-    # and the slicer compares against a unit-energy constellation — so the
-    # answer depended on the units the caller held the signal in. Measured on
-    # a 16-QAM passband link through CommsReceiver, BER was 0.0000 at unit
-    # amplitude but 0.2375 at 0.3x, 0.3600 at 3x and ~0.48 at 1e-9 or 1e9:
-    # silent below the window, and above it only a raw numpy overflow from
-    # abs(e)**2. Normalising here rather than tap-by-tap is what actually
-    # works: the register is mixed-scale by construction (feedforward samples
-    # at the record's amplitude, feedback decisions at constellation
-    # amplitude), so a single normalised-LMS divisor over-corrects one half
-    # and starves the other. At unit input power this is a no-op, so an
-    # already-calibrated record is bit-identical.
+    # Bring the record to unit mean power before adapting: the LMS step
+    # bound, RLS's P(0), the centre-spike init and the unit-energy slicer all
+    # carry an absolute scale, so unnormalised the answer depended on the
+    # caller's units (test_equalization pins the amplitude ladder). Done here
+    # rather than tap-by-tap because the register mixes record-scale samples
+    # with constellation-scale decisions; a no-op at unit input power.
     p_in = float(np.mean(np.abs(rx) ** 2)) if rx.size else 0.0
     if np.isfinite(p_in) and p_in > 0.0:
         rx = rx / np.sqrt(p_in)

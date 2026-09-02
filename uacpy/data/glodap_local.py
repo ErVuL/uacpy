@@ -50,7 +50,9 @@ def download_glodap_db(cache_dir=None, *, timeout=600.0, verbose=False):
     out = dest / GLODAP_FILE
     log_message('glodap', "downloading GLODAPv2.2016b mapped product (~211 MB)",
                 verbose=verbose)
-    with tempfile.TemporaryDirectory() as tmp:
+    # Staged beside its destination: the 211 MB tarball must not land in a
+    # tmpfs /tmp (RAM) the way the system temp dir can.
+    with tempfile.TemporaryDirectory(dir=dest) as tmp:
         tar_path = Path(tmp) / GLODAP_TARBALL
         if not curl_download(GLODAP_URL, tar_path, timeout=timeout,
                              verbose=verbose):

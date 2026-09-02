@@ -3371,3 +3371,27 @@ class TestSegmentationSeesTheProfileNotJustTheSeafloor:
                                       sound_speed=1700.0, density=1.7,
                                       attenuation=0.5))
         assert len(segment_environment_by_range(env, freq=800.0)) == 1
+
+
+@pytest.mark.requires_binary
+class TestTheModeGridSpansTheProfileKrakenSolves:
+    """compute_modes solves the r = 0 profile. Sizing its depth grid from the
+    deepest point of a range-dependent bathymetry asked KRAKEN for receivers
+    below that profile, which it clamped — and the wrapper then warned about
+    a grid it had built itself."""
+
+    def test_a_deepening_bathymetry_gives_a_grid_of_the_first_column(self):
+        import warnings
+        from uacpy.core.source import Source
+        from uacpy.models.kraken import Kraken
+        env = uacpy.Environment(name='rd', ssp=1500.0,
+                                bathymetry=[(0.0, 100.0), (5000.0, 200.0)])
+        source = Source(depths=50.0, frequencies=100.0)
+        with warnings.catch_warnings(record=True) as rec:
+            warnings.simplefilter('always')
+            modes = Kraken(verbose=False).compute_modes(env, source)
+        assert float(np.max(np.asarray(modes.depths))) == pytest.approx(100.0)
+        spurious = [str(w.message) for w in rec
+                    if 'resolvable depth' in str(w.message)
+                    or 'moved up' in str(w.message)]
+        assert spurious == [], spurious

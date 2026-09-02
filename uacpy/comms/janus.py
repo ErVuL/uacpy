@@ -49,6 +49,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 import numpy as np
+
+from uacpy.comms.coding import viterbi_hard
 from numpy.lib.stride_tricks import sliding_window_view
 
 from uacpy.core.constants import DEFAULT_SOUND_SPEED
@@ -320,22 +322,9 @@ def janus_decode(symbols144):
     # Branch metrics (r0 ^ hi) + (r1 ^ lo) per step for both transitions.
     bm0 = np.sum(out0[None, :, :] ^ rx[:, None, :], axis=2)
     bm1 = np.sum(out1[None, :, :] ^ rx[:, None, :], axis=2)
-    pm = np.full(_N_STATES, np.inf)
-    pm[0] = 0.0
-    prev = np.zeros((nsteps, _N_STATES), dtype=np.int32)
-    for k in range(nsteps):
-        cand0 = pm[prev0] + bm0[k]
-        cand1 = pm[prev1] + bm1[k]
-        # Strict < keeps the even predecessor on a tie — the same survivor a
-        # state-ascending scan that replaces only on improvement selects.
-        take1 = cand1 < cand0
-        pm = np.where(take1, cand1, cand0)
-        prev[k] = np.where(take1, prev1, prev0)
-    state = 0                                          # tail-flushed to state 0
-    bits = np.zeros(nsteps, dtype=int)
-    for k in range(nsteps - 1, -1, -1):
-        bits[k] = state >> 7        # the input bit is the arriving state's top bit
-        state = prev[k, state]
+    # The input bit is the arriving state's top bit.
+    bits = viterbi_hard(bm0, bm1, prev0, prev1, _N_STATES,
+                        lambda state: state >> 7)
     return bits[:_N_INFO]
 
 

@@ -312,7 +312,7 @@ utils.py                            misc reader/writer-shared utilities
 - **Units at boundaries.** Public API is metres everywhere except
   attributes carrying an explicit suffix (`_km`, `_cm`). OASES /
   Acoustics-Toolbox formats want km on disk — every writer that hits
-  a km-using format converts via `m_to_km(...)` from `io/units.py`.
+  a km-using format converts via `m_to_km(...)` from `core/units.py`.
   Same for radians vs degrees.
 - **Endian detection.** Fortran unformatted binary files (`.shd`,
   `.mod`, `.grn`) can be either-endian. Use `detect_endian(...)` from

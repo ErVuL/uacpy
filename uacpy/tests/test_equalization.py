@@ -328,13 +328,15 @@ class TestTheEqualiserDenominatorIsOneImplementation:
     ``comms._equalizer_core`` so none of the three owns it and none imports
     another to reach it."""
 
-    def test_all_three_consumers_reach_the_same_object(self):
+    def test_all_consumers_reach_the_same_object(self):
         from uacpy.comms import _equalizer_core, equalization, ofdm
         from uacpy.comms import transceiver
+        # The OFDM receiver reaches the denominator through the one
+        # per-subcarrier equaliser it shares with ofdm_demodulate.
         assert (ofdm.regularizer
                 is equalization.regularizer
-                is transceiver.regularizer
                 is _equalizer_core.regularizer)
+        assert transceiver.equalize_subcarriers is ofdm.equalize_subcarriers
 
     def test_the_zero_forcing_floor_has_one_definition(self):
         import uacpy.comms.ofdm as ofdm_module

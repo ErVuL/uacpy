@@ -25,12 +25,10 @@ from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.constants import DECK_RANGE_RESOLUTION_M
 from uacpy.core._grid import _nearest_index_on_axis
 from uacpy.core._carrier_validate import (
-    _require_finite, _require_non_negative, _require_positive,
-    _require_strictly_increasing, _require_attenuation_in_range,
-    _dedupe_provenance,
+    _require_non_negative, _require_strictly_increasing, _dedupe_provenance,
 )
 from uacpy.core.bottom import (
-    BoundaryProperties, _reduce_boundaries, _PARAMETER_FREE_TYPES,
+    _validate_boundary_write, BoundaryProperties, _reduce_boundaries,
 )
 
 
@@ -39,11 +37,6 @@ _SURFACE_DELEGATED = frozenset({
     'shear_speed', 'shear_attenuation', 'grain_size_phi', 'reflection_file',
 })
 
-# Delegated fields that define what kind of boundary a node is. A write to one
-# cannot be validated field-by-field (the construction rules couple it to the
-# other fields), so the proxy refuses it instead of storing an unvalidated
-# node.
-_SURFACE_TYPE_FIELDS = frozenset({'acoustic_type', 'reflection_file'})
 
 
 # eq=False: a dataclass __eq__ over ndarray fields raises; compare by identity.
@@ -287,55 +280,9 @@ class Surface:
         super().__setattr__(name, value)
 
     def _validate_delegated_write(self, name, value):
-        """Apply the ``BoundaryProperties`` construction rules to a delegated
-        write, so the proxy cannot store a value on the nodes that their
-        constructor would refuse. Returns the value coerced to float."""
-        if name in _SURFACE_TYPE_FIELDS:
-            raise ConfigurationError(
-                f"Surface.{name} cannot be assigned in place: it defines what "
-                f"kind of boundary each node is, and the construction rules "
-                f"couple it to the other fields. Build new "
-                f"BoundaryProperties node(s) (and a Surface from them) "
-                f"instead.")
-        # vacuum/rigid nodes carry no half-space acoustic parameters, so a
-        # delegated write of one is the same conflict the constructor's
-        # explicit-conflict guard rejects. ``roughness`` stays writable — an
-        # interface property every boundary type carries.
-        if name != 'roughness':
-            bare = sorted({p.acoustic_type for p in self.properties
-                           if p.acoustic_type in _PARAMETER_FREE_TYPES})
-            if bare:
-                raise ConfigurationError(
-                    f"Surface.{name} = {value!r}: this surface has "
-                    f"{'/'.join(bare)} node(s), which ignore half-space "
-                    f"acoustic parameters. Build half-space "
-                    f"BoundaryProperties node(s) to give the surface "
-                    f"geoacoustics.")
-        if name == 'grain_size_phi':
-            # ϕ = −log₂(d/mm) is signed (gravel is negative), so the
-            # non-negative rule the other fields take does not apply — but
-            # ``None`` is the field's own unset value and has to survive
-            # ``float()``, and a NaN/inf ϕ propagates into
-            # ``grain_size_to_geoacoustics`` as a NaN density or a silent
-            # clamp. Range is left to that converter, which warns naming the
-            # model's valid interval.
-            if value is None:
-                return None
-            value = float(value)
-            _require_finite(value, "Surface grain_size_phi", hint="ϕ units")
-            return value
-        value = float(value)
-        if name == 'density':
-            _require_positive(value, "Surface density", hint="g/cm^3")
-        elif name == 'sound_speed' and any(
-                p.acoustic_type == 'half-space' for p in self.properties):
-            _require_positive(value, "Surface sound_speed on a half-space",
-                              hint="m/s")
-        else:
-            _require_non_negative(value, f"Surface {name}")
-        if name in ('attenuation', 'shear_attenuation'):
-            _require_attenuation_in_range(value, f"Surface {name}")
-        return value
+        """The ``BoundaryProperties`` construction rules applied to a write
+        delegated to the nodes — the validator the seabed carriers share."""
+        return _validate_boundary_write('Surface', name, value, self.properties)
 
     def copy(self) -> 'Surface':
         """Deep copy (symmetric with ``Source`` / ``Receiver`` / the other

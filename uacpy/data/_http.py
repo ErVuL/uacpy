@@ -69,6 +69,21 @@ _REFUSED_RETRIES = 1
 _REFUSED_WAIT_S = 1.0
 
 
+def _is_permanent_dns_failure(exc) -> bool:
+    """True when the failure chain ends in a resolver saying the name does
+    not exist (``EAI_NONAME``) or failed for good (``EAI_FAIL``) — a typo in
+    ``base_url`` or an offline host, which no retry ladder cures. A
+    temporary resolver failure (``EAI_AGAIN``) stays transient."""
+    seen = set()
+    permanent = {getattr(socket, 'EAI_NONAME', -2), getattr(socket, 'EAI_FAIL', -4)}
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        if isinstance(exc, socket.gaierror) and exc.errno in permanent:
+            return True
+        exc = getattr(exc, 'reason', None) or exc.__cause__
+    return False
+
+
 def _is_connection_refused(exc) -> bool:
     """True when the transport failure chain ends in ECONNREFUSED."""
     seen = set()
@@ -166,6 +181,14 @@ def http_get(
             # transient transport flakes (the Python-side analogue of an HTTP/2
             # stream cancel). Retry with exponential backoff before giving up.
             reason = getattr(exc, 'reason', None) or exc
+            if _is_permanent_dns_failure(exc):
+                raise DataFetchError(
+                    f"Could not resolve the host of {url}: {reason}. The name "
+                    f"does not exist to this machine's resolver, so retrying "
+                    f"cannot help.",
+                    remediation="Check base_url= for a typo, or the network "
+                                "(offline hosts resolve nothing).",
+                ) from exc
             refused = _is_connection_refused(exc)
             retries = _REFUSED_RETRIES if refused else _MAX_RETRIES
             if attempt < retries:

@@ -35,7 +35,7 @@ from uacpy.io._fortran_helpers import (
     read_fortran_record as _read_fortran_record,
     detect_endian,
 )
-from uacpy.io.units import km_to_m
+from uacpy.core.units import km_to_m
 
 
 def _decode_fortran_title(raw: bytes) -> str:

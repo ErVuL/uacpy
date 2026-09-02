@@ -1040,12 +1040,14 @@ class TestComplexCepstrumDelayEstimator:
         x = np.zeros(31)
         x[3] = 1.0
         r = complex_cepstrum(x)
-        assert r.delay == -3
+        assert r.delay == 3            # three samples LATE: positive
         assert np.isfinite(r.cepstrum).all()
 
     def test_two_sample_signal_computes_the_ramp(self):
         from uacpy.acoustic_signal.timefreq import complex_cepstrum
-        assert complex_cepstrum(np.array([0.0, 1.0])).delay == 1
+        # Two samples: the one-sample delay sits at Nyquist, where +1 and -1
+        # are the same ramp — only its magnitude is determined.
+        assert abs(complex_cepstrum(np.array([0.0, 1.0])).delay) == 1
 
     def test_single_sample_signal_is_zero_delay(self):
         from uacpy.acoustic_signal.timefreq import complex_cepstrum

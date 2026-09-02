@@ -406,9 +406,9 @@ class TestArrayCapableHelpersAnnotateArrayReturns:
         ('bubble_resonance',
          dict(radius=np.array([1e-3, 2e-3])), dict(radius=1e-3)),
         ('reflection_coeff',
-         dict(angle=np.array([10.0, 20.0]), rho1=2000.0, c1=1800.0,
+         dict(angle=np.array([0.2, 0.4]), rho1=2000.0, c1=1800.0,
               rho=1000.0, c=1500.0),
-         dict(angle=10.0, rho1=2000.0, c1=1800.0, rho=1000.0, c=1500.0)),
+         dict(angle=0.3, rho1=2000.0, c1=1800.0, rho=1000.0, c=1500.0)),
     ]
 
     @staticmethod

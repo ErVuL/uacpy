@@ -196,7 +196,7 @@ Everything is configured on the constructor; `run()` has a fixed signature.
 
 | Name | Default | Meaning |
 |---|---|---|
-| `grid_type` | `'R'` | Receiver grid: `'R'` rectilinear, `'I'` irregular (paired depth/range). |
+| `grid_type` | `'R'` | Receiver grid: `'R'` rectilinear (every depth × every range); `'I'` irregular — the i-th depth pairs with the i-th range (equal lengths). BELLHOP sorts both lists before pairing (`SourceReceiverPositions.f90:224`), so an `'I'` grid is always a monotone diagonal, shallow-near to deep-far; for arbitrary (depth, range) points run `'R'` and sample with `Field.at`. |
 | `interp_ssp` | `None` | SSP connection scheme: `'linear'`, `'pchip'`, `'cubic'`, `'quad'`, `'n2linear'`, `'analytic'`. `None` auto-picks `'quad'` for a range-dependent `env.ssp`, `'linear'` otherwise. |
 | `interp_bathymetry` | `'linear'` | `'linear'` or `'curvilinear'`. |
 | `interp_altimetry` | `'linear'` | as above, for the sea surface. |

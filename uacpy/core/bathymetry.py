@@ -10,7 +10,9 @@ from dataclasses import dataclass
 
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core._grid import _RangeProfile
-from uacpy.core._carrier_validate import _require_positive, _coerce_data_sources
+from uacpy.core._carrier_validate import (
+    _require_positive, _coerce_data_sources, _scalar_or_none,
+)
 
 
 # eq=False: a dataclass __eq__ over ndarray fields raises; compare by identity.
@@ -59,17 +61,13 @@ class Bathymetry(_RangeProfile):
         """
         if isinstance(value, Bathymetry):
             return value
-        # A 0-d ndarray is a scalar in every respect except ``isinstance``, so
-        # the bool guard has to see through it — ``np.array(True)`` otherwise
-        # walks past and builds a 1 m seafloor. ``SoundSpeedProfile.coerce``
-        # admits the same spelling.
-        if (isinstance(value, (bool, np.bool_))
-                or (isinstance(value, np.ndarray) and value.ndim == 0
-                    and value.dtype == np.bool_)):
-            raise ConfigurationError(
-                f"Bathymetry: {value!r} is a bool, not a depth — as a scalar "
-                f"it would mean a {float(value):g} m deep seafloor."
-            )
+        # A scalar (a 0-d array included) is a flat seafloor; a bool is
+        # refused as one — the shared guard says why.
+        depth = _scalar_or_none(value, lambda v: (
+            f"Bathymetry: {v!r} is a bool, not a depth — as a scalar it "
+            f"would mean a {float(v):g} m deep seafloor."))
+        if depth is not None:
+            return cls(ranges=np.array([0.0]), depths=np.array([depth]))
         try:
             if np.ndim(value) == 0:
                 return cls(ranges=np.array([0.0]),

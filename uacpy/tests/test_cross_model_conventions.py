@@ -536,3 +536,23 @@ class TestWaveEnginesAreReciprocal:
         model = Bellhop(beam_type='B', n_beams=2001, verbose=False)
         assert abs(self._tl(model, self.Z1, self.Z2)
                    - self._tl(model, self.Z2, self.Z1)) > 0.3
+
+
+@pytest.mark.requires_binary
+def test_every_engine_reports_one_line_source_level():
+    """Bellhop (4√π/√R raw), Kraken and Scooter (1/√(k0·R) raw) disagreed by
+    4√(πk0) — 13 dB at 100 Hz — on ``source_type='line'``. All three now
+    report unit amplitude at 1 m; the residual is ray-vs-wave physics."""
+    env, point = _pekeris(), _source()
+    src = Source(depths=point.depths, frequencies=point.frequencies,
+                 source_type='line')
+    rcv = _receiver()
+    levels = {}
+    for name, model in (('bellhop', Bellhop(verbose=False)),
+                        ('kraken', Kraken(verbose=False)),
+                        ('scooter', Scooter(verbose=False))):
+        tl = np.asarray(model.run(env, src, rcv).db, dtype=float)
+        levels[name] = float(np.nanmean(tl))
+    spread = max(levels.values()) - min(levels.values())
+    assert spread < 2.0, levels
+

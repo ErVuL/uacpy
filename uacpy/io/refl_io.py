@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Optional, TypedDict, Union
 
 from uacpy._log import log_message
-from uacpy.io.units import deg_to_rad, rad_to_deg
+from uacpy.core.units import deg_to_rad, rad_to_deg
 from uacpy.core.constants import SBP_ANGLE_RESOLUTION_DEG
 from uacpy.core.exceptions import ConfigurationError, FileFormatError
 from uacpy.core._warn_frames import USER_FRAME_SKIP

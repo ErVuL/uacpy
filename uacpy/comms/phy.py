@@ -164,7 +164,10 @@ def symbol_sync(samples, sps, loop_bw=0.005, damping=1.0, start=0):
         Loop damping factor (~1.0 critically damped).
     start : int
         Initial sample index — pass the matched-filter group delay
-        (``span*sps``) for clean lock from the first symbol.
+        (``span*sps``) so the loop starts on the symbol grid. From a
+        quarter-symbol offset it locks within ~50 symbols, from half a
+        symbol within ~300; a preamble at least that long absorbs the
+        pull-in.
     """
     x = np.asarray(samples, dtype=complex).ravel()
     sps = _require_integer_sps("symbol_sync", sps)
@@ -223,14 +226,20 @@ def symbol_sync(samples, sps, loop_bw=0.005, damping=1.0, start=0):
         # Three heuristic bounds on the normalized error scale (``power``
         # divides the TED down to O(1)): the first caps one outlier sample's
         # contribution, the second is integrator anti-windup, and the third
-        # holds the per-symbol timing correction to half a sample so the
+        # holds the per-symbol timing correction to half a symbol so the
         # interpolator cannot step past the crossing it is tracking.
         e = float(np.clip(e, -2.0, 2.0))
         vi = float(np.clip(vi + ki * e, -0.25, 0.25))
         adj = float(np.clip(kp * e + vi, -0.5, 0.5))
         out.append(y_on)
         prev_on = y_on
-        mu += adj
+        # ``adj`` is in SYMBOLS — the loop constants are normalised to the
+        # symbol period — and ``mu`` is in samples, so the correction scales
+        # by ``sps``. Applied unscaled it was ``sps`` times too small (the
+        # TED slope, ~0.7 per symbol, made the effective bandwidth
+        # loop_bw/11): pull-in from a quarter-symbol offset took ~380
+        # symbols instead of ~50, well past a 64-symbol preamble.
+        mu += adj * sps
         idx += sps + int(np.floor(mu))
         mu -= np.floor(mu)
     return np.array(out, dtype=complex)

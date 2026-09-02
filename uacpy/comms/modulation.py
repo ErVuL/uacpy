@@ -222,11 +222,7 @@ def fsk_modulate(bits, frequencies, symbol_dur_s: float, sample_rate: float):
     """
     f = np.atleast_1d(np.asarray(frequencies, dtype=float))
     M = f.size
-    if M < 2 or (M & (M - 1)):
-        raise ConfigurationError(
-            f"fsk_modulate: number of freqs must be a power of two >= 2; "
-            f"got {M}"
-        )
+    _require_power_of_two_m("fsk_modulate", M)
     require_below_nyquist(f, sample_rate, "fsk_modulate", "tone(s)",
                           "the sampled tones alias")
     dur = float(symbol_dur_s)
@@ -261,11 +257,7 @@ def fsk_demodulate(signal, frequencies, symbol_dur_s: float, sample_rate: float)
     """
     f = np.atleast_1d(np.asarray(frequencies, dtype=float))
     M = f.size
-    if M < 2 or (M & (M - 1)):
-        raise ConfigurationError(
-            f"fsk_demodulate: number of freqs must be a power of two >= 2; "
-            f"got {M}"
-        )
+    _require_power_of_two_m("fsk_demodulate", M)
     # The detector builds its correlation bank from the same two quantities the
     # modulator validates, so it carries the same two guards. Without them an
     # above-Nyquist tone decodes its aliased image to plausible-looking bits,

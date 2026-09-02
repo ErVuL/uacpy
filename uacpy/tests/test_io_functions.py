@@ -3560,6 +3560,13 @@ def _cell(result):
     return result.by_receiver[0][0][0]
 
 
+def _read_merged(path, merge=True):
+    """Read a ``.arr`` with the AddArr merge applied — these tests exercise the
+    merge machinery itself, which the reader no longer applies by default."""
+    from uacpy.io.oalib_reader import read_arr_file
+    return read_arr_file(path, merge=merge)
+
+
 class TestAddArrPostMerge:
 
     def test_within_tolerance_pair_merges_amplitude_add_weighted_delay(
@@ -3570,13 +3577,12 @@ class TestAddArrPostMerge:
         amplitude-weighted, and whose phase and bounce counts come from the
         record that is first in (src_angle, delay) order — here the record
         listed SECOND in the file."""
-        from uacpy.io.oalib_reader import read_arr_file
         first_by_angle = (0.3, 0.0, 0.001, 0.0, -5.0, 5.0, 0, 1)
         second_by_angle = (0.1, 2.0, 0.00105, -4e-6, -4.9, 5.1, 2, 3)
         path = _write_arr(tmp_path / 'pair.arr',
                           [second_by_angle, first_by_angle])
 
-        cell = _cell(read_arr_file(path))
+        cell = _cell(_read_merged(path))
         assert cell['n_arrivals'] == 1
         assert cell['amplitudes'][0] == pytest.approx(0.4)
         assert cell['delays'][0] == pytest.approx(
@@ -3593,12 +3599,11 @@ class TestAddArrPostMerge:
     def test_beyond_delay_tolerance_pair_stays_two_arrivals(self, tmp_path):
         """omega·|Δdelay| = 0.31 exceeds the 0.05 tolerance: both records
         survive, sorted by delay."""
-        from uacpy.io.oalib_reader import read_arr_file
         path = _write_arr(tmp_path / 'far.arr', [
             (0.1, 0.0, 0.0015, 0.0, -4.9, 5.1, 2, 3),
             (0.3, 0.0, 0.001, 0.0, -5.0, 5.0, 0, 1),
         ])
-        cell = _cell(read_arr_file(path))
+        cell = _cell(_read_merged(path))
         assert cell['n_arrivals'] == 2
         assert cell['delays'].tolist() == [0.001, 0.0015]
         assert cell['amplitudes'].tolist() == [0.3, 0.1]
@@ -3607,12 +3612,11 @@ class TestAddArrPostMerge:
         """|Δphase| = π/2 exceeds the 0.05 rad tolerance — AddArr's phase
         test exists to keep surface-reflected and direct paths apart even
         at equal delay (ArrMod.f90:41)."""
-        from uacpy.io.oalib_reader import read_arr_file
         path = _write_arr(tmp_path / 'phase.arr', [
             (0.3, 0.0, 0.001, 0.0, -5.0, 5.0, 0, 1),
             (0.1, 90.0, 0.001, 0.0, -4.9, 5.1, 1, 1),
         ])
-        cell = _cell(read_arr_file(path))
+        cell = _cell(_read_merged(path))
         assert cell['n_arrivals'] == 2
         assert sorted(cell['phases'].tolist()) == [0.0, 90.0]
 
@@ -3620,14 +3624,13 @@ class TestAddArrPostMerge:
             self, tmp_path):
         """The raw escape hatch: a within-tolerance pair stays two records
         and the out-of-delay-order file listing is preserved."""
-        from uacpy.io.oalib_reader import read_arr_file
         records = [
             (0.2, 0.0, 0.003, 0.0, 10.0, -10.0, 1, 1),
             (0.3, 0.0, 0.001, 0.0, -5.0, 5.0, 0, 1),
             (0.1, 2.0, 0.00105, -4e-6, -4.9, 5.1, 2, 3),
         ]
         path = _write_arr(tmp_path / 'raw.arr', records)
-        cell = _cell(read_arr_file(path, merge=False))
+        cell = _cell(_read_merged(path, merge=False))
         assert cell['n_arrivals'] == 3
         expected = np.array(records)
         for col, key in enumerate(_FIELD_KEYS):
@@ -3648,14 +3651,13 @@ class TestTotalKeyRecordSort:
         return recs
 
     def test_shuffled_file_order_reads_identically(self, tmp_path):
-        from uacpy.io.oalib_reader import read_arr_file
         recs = self._records()
         shuffled = [recs[i] for i in
                     np.random.default_rng(0x19F2).permutation(len(recs))]
         assert shuffled != recs
 
-        cell_a = _cell(read_arr_file(_write_arr(tmp_path / 'a.arr', recs)))
-        cell_b = _cell(read_arr_file(
+        cell_a = _cell(_read_merged(_write_arr(tmp_path / 'a.arr', recs)))
+        cell_b = _cell(_read_merged(
             _write_arr(tmp_path / 'b.arr', shuffled)))
 
         assert cell_a['n_arrivals'] == cell_b['n_arrivals'] == 6
@@ -3665,13 +3667,12 @@ class TestTotalKeyRecordSort:
     def test_merging_an_already_merged_set_is_identity(self, tmp_path):
         """Re-reading a file that lists exactly the merged, sorted records
         reproduces them bit-for-bit — the merge pass is idempotent."""
-        from uacpy.io.oalib_reader import read_arr_file
-        cell_a = _cell(read_arr_file(
+        cell_a = _cell(_read_merged(
             _write_arr(tmp_path / 'a.arr', self._records())))
 
         remerged = [tuple(cell_a[key][i] for key in _FIELD_KEYS)
                     for i in range(cell_a['n_arrivals'])]
-        cell_b = _cell(read_arr_file(
+        cell_b = _cell(_read_merged(
             _write_arr(tmp_path / 'b.arr', remerged)))
 
         assert cell_b['n_arrivals'] == cell_a['n_arrivals']
@@ -4391,11 +4392,11 @@ class TestFileManagerReportsWorkDirMisuseTypedly:
 class TestUnitHelpersHaveOneDefinition:
     """``km_to_m`` / ``m_to_km`` / ``deg_to_rad`` are pure arithmetic with no
     file format in them, so they live in :mod:`uacpy.core.units`;
-    :mod:`uacpy.io.units` re-exports them under the same names and carries the
+    :mod:`uacpy.core.units` re-exports them under the same names and carries the
     file-format mandate.
 
     Two things have to hold for that split to be free: every existing
-    ``from uacpy.io.units import ...`` still resolves, and the two module
+    ``from uacpy.core.units import ...`` still resolves, and the two module
     attributes are one object rather than two definitions free to drift."""
 
     NAMES = ('km_to_m', 'm_to_km', 'deg_to_rad')
@@ -4403,7 +4404,7 @@ class TestUnitHelpersHaveOneDefinition:
     @pytest.mark.parametrize('name', NAMES)
     def test_the_io_name_is_the_core_object(self, name):
         import uacpy.core.units as core_units
-        import uacpy.io.units as io_units
+        import uacpy.core.units as io_units
         assert getattr(io_units, name) is getattr(core_units, name)
 
     @pytest.mark.parametrize('name', NAMES)
@@ -4420,7 +4421,7 @@ class TestUnitHelpersHaveOneDefinition:
         assert sites == [str(Path('core') / 'units.py')], sites
 
     def test_the_conversions_round_trip(self):
-        from uacpy.io.units import deg_to_rad, km_to_m, m_to_km
+        from uacpy.core.units import deg_to_rad, km_to_m, m_to_km
         assert float(m_to_km(2000.0)) == 2.0
         assert float(km_to_m(2.0)) == 2000.0
         assert float(km_to_m(m_to_km(1234.5))) == pytest.approx(1234.5)
@@ -4430,3 +4431,41 @@ class TestUnitHelpersHaveOneDefinition:
         # They were never exported; the move must not add them.
         import uacpy.io as io_package
         assert not (set(self.NAMES) & set(io_package.__all__))
+
+
+class TestTheSparcDeckRefusesRoughInterfaces:
+    """sparc.f90:177 stops with 'Rough interfaces not allowed' at exit 0 on a
+    non-zero surface or layer roughness; the deck refuses it where it is
+    written, with the same reason."""
+
+    def _write(self, tmp_path, env):
+        from uacpy.core.source import Source
+        from uacpy.core.receiver import Receiver
+        from uacpy.core.constants import BoundaryType
+        from uacpy.io.oalib_writer import write_sparc_env_file
+        write_sparc_env_file(
+            tmp_path / 's.env', env, Source(depths=50.0, frequencies=100.0),
+            Receiver(depths=[50.0], ranges=[1000.0]),
+            ssp_code='C', surface_type=BoundaryType.VACUUM,
+            bottom_type=BoundaryType.RIGID, output_mode='R', n_mesh=200,
+            rmax_m=2000.0, c_low=1400.0, c_high=1700.0, pulse_type='P',
+            f_min=50.0, f_max=200.0, n_t_out=256, t_max=2.0, t_start=0.0,
+            t_mult=1.0)
+
+    def test_a_rough_surface_is_refused(self, tmp_path):
+        import uacpy
+        from uacpy.core.bottom import BoundaryProperties
+        from uacpy.core.surface import Surface
+        from uacpy.core.exceptions import UnsupportedFeatureError
+        env = uacpy.Environment(
+            name='r', bathymetry=100.0, ssp=1500.0,
+            surface=Surface(properties=[BoundaryProperties(
+                acoustic_type='vacuum', roughness=0.5)]))
+        with pytest.raises(UnsupportedFeatureError, match='Rough interfaces'):
+            self._write(tmp_path, env)
+
+    def test_a_smooth_deck_is_written(self, tmp_path):
+        import uacpy
+        self._write(tmp_path, uacpy.Environment(name='s', bathymetry=100.0,
+                                                ssp=1500.0))
+        assert (tmp_path / 's.env').exists()

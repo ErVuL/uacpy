@@ -373,3 +373,21 @@ class TestShearLossMagnitude:
         band = (self.G >= 20.0) & (self.G <= 30.0)
         assert np.degrees(np.arccos(1500.0 / cs)) > 50.0
         assert np.max(np.abs(self._extra_loss(name)[band])) < 0.1
+
+
+class TestReflectionCoeffRefusesAnAngleOutsideItsConvention:
+    """The angle is the incidence angle from the normal in radians. A grazing
+    angle in DEGREES — the carriers' convention — lands far outside [0, pi/2]
+    and used to return |R| = 1.0 without a word."""
+
+    def test_degrees_are_refused_and_the_message_names_the_convention(self):
+        from uacpy.core.acoustics import reflection_coeff
+        from uacpy.core.exceptions import ConfigurationError
+        with pytest.raises(ConfigurationError, match='radians'):
+            reflection_coeff(30.0, 1800.0, 1700.0, c=1500.0, rho=1000.0)
+
+    def test_the_whole_radian_range_is_accepted(self):
+        from uacpy.core.acoustics import reflection_coeff
+        for angle in (0.0, np.pi / 4.0, np.pi / 2.0):
+            R = reflection_coeff(angle, 1800.0, 1700.0, c=1500.0, rho=1000.0)
+            assert np.isfinite(np.abs(R))

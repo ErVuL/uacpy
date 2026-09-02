@@ -43,7 +43,8 @@ def compensate_doppler(signal, scale):
 
     ``scale = a = v/c``. A closing geometry (``a > 0``) compresses the received
     waveform; resampling to ``(1+a)*N`` samples stretches it back to the
-    transmit time base. Returns the resampled (complex) signal.
+    transmit time base. Returns the resampled signal of the input's own kind:
+    a real record comes back real (float), a complex one complex.
     ``|scale| > 0.1`` raises: no underwater platform reaches a tenth of the
     sound speed, and the output length scales as ``(1+scale)*N``.
     """

@@ -351,6 +351,75 @@ class TestRAM:
 
 
 @pytest.mark.requires_binary
+class TestTheSourceAxisIsMaskedByOneMethod:
+    """``_mask_source_axis`` NaNs the ``r = 0`` column of a point-source field
+    and warns once with one text for every engine; a line or scaled source
+    carries no ``1/sqrt(r)`` and keeps its column; a grid clear of the axis is
+    returned untouched and silent."""
+
+    @staticmethod
+    def _field(ranges):
+        return Field(data=np.ones((2, len(ranges))),
+                     coords={'depth': np.array([10.0, 20.0]),
+                             'range': np.asarray(ranges, dtype=float)})
+
+    @pytest.mark.parametrize("make", [
+        lambda: Kraken(verbose=False), lambda: OASP(verbose=False),
+        lambda: OASS(verbose=False, correlation_length=10.0),
+        lambda: RAM(verbose=False), lambda: Scooter(verbose=False),
+    ], ids=['Kraken', 'OASP', 'OASS', 'RAM', 'Scooter'])
+    def test_a_point_source_column_is_no_data_with_one_warning(self, make):
+        wrapper = make()
+        source = Source(depths=10.0, frequencies=100.0)
+        with pytest.warns(UserWarning) as record:
+            out = wrapper._mask_source_axis(self._field([0.0, 100.0, 500.0]),
+                                            source)
+        texts = [str(w.message) for w in record if 'r = 0' in str(w.message)]
+        assert len(texts) == 1 and texts[0].startswith(
+            f"{wrapper.model_name}: 1 receiver range(s) at r = 0, where the "
+            "point-source cylindrical-spreading factor 1/sqrt(r) is singular")
+        assert np.isnan(out.data[:, 0]).all()
+        assert np.isfinite(out.data[:, 1:]).all()
+
+    @pytest.mark.parametrize("source_type", ['line', 'scaled'])
+    def test_line_and_scaled_sources_keep_the_column(self, source_type):
+        field = self._field([0.0, 100.0])
+        source = Source(depths=10.0, frequencies=100.0, source_type=source_type)
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            out = Kraken(verbose=False)._mask_source_axis(field, source)
+        assert out is field and np.isfinite(out.data).all()
+
+    def test_a_grid_clear_of_the_axis_is_untouched_and_silent(self):
+        field = self._field([1.0, 100.0])
+        data_before = field.data
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            out = Kraken(verbose=False)._mask_source_axis(
+                field, Source(depths=10.0, frequencies=100.0))
+        assert out is field and out.data is data_before
+
+
+class TestTheBroadbandTailIsShared:
+    """``_finish_broadband`` returns the BROADBAND transfer function as is and
+    synthesises TIME_SERIES with the prepared pulse — the one tail every
+    IFFT-based wrapper ends its broadband route with."""
+
+    def test_broadband_returns_the_transfer_function_itself(self):
+        tf = object()
+        assert Kraken(verbose=False)._finish_broadband(
+            tf, RunMode.BROADBAND, None, None) is tf
+
+    def test_time_series_synthesises_with_the_prepared_pulse(self):
+        calls = []
+        tf = types.SimpleNamespace(
+            synthesize_time_series=lambda **kw: calls.append(kw) or 'series')
+        out = Kraken(verbose=False)._finish_broadband(
+            tf, RunMode.TIME_SERIES, 'pulse', 8000.0)
+        assert out == 'series'
+        assert calls == [dict(source_waveform='pulse', sample_rate=8000.0)]
+
+
 class TestBasePlumbing:
     """Shared ``PropagationModel`` behaviour that no single wrapper owns."""
 

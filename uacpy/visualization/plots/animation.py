@@ -379,14 +379,21 @@ def plot_time_snapshots(
         # Decide aspect ratio once per row from the data extent. The imshow
         # extent is km in x and m in y, so aspect = 1/1000 displays 1 m of
         # depth as long as 1 m of range — isotropic, wavefronts stay round.
+        row_aspect: 'float | str'
         if aspect is None:
             range_span = float(ranges[-1] - ranges[0])
             depth_span = float(depths[-1] - depths[0])
-            row_aspect = (
-                1.0 / 1000.0
-                if range_span > 10.0 * depth_span
-                else 'auto'
-            )
+            # Isotropic (1 m of depth as long as 1 m of range) while the panel
+            # stays at least a quarter as tall as it is wide; a shallow, long
+            # case — 100 m by 3 km — otherwise renders as a sliver, so it is
+            # stretched to that 4:1 floor instead.
+            ratio = depth_span / range_span if range_span > 0 else 1.0
+            if range_span > 10.0 * depth_span and ratio >= 0.25:
+                row_aspect = 1.0 / 1000.0
+            elif range_span > 10.0 * depth_span:
+                row_aspect = 0.25 / ratio / 1000.0
+            else:
+                row_aspect = 'auto'
         else:
             row_aspect = aspect
 

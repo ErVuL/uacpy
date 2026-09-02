@@ -12,6 +12,7 @@ from typing import Optional, Dict, Any, List, Tuple, Union
 from uacpy.core._carrier_validate import _require_finite
 from uacpy.core.constants import DEFAULT_SOUND_SPEED
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.core._grid import _nearest_index_on_axis
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 
 from uacpy.core.results import quantities as _quantities
@@ -574,31 +575,10 @@ class Field(Result):
         way; all three land on index 0, which is a real sample and so reads
         as a successful slice."""
         self._check_axes(kwargs)
-        labels = {}
-        for name, v in kwargs.items():
-            value = float(v)
-            axis = np.asarray(self.coords[name], dtype=float)
-            if not np.isfinite(value):
-                raise ConfigurationError(
-                    f"Field.at: {name}={v!r} is not a finite label. Every "
-                    f"|{name} - {v!r}| is NaN or inf, so argmin ranks nothing "
-                    f"and falls to index 0 — a real sample "
-                    f"({float(axis[0]):g}), which is why this reads as a "
-                    f"successful slice.")
-            distance = np.abs(axis - value)
-            span_low, span_high = float(np.min(axis)), float(np.max(axis))
-            # Outside a spread axis the distances are strictly ordered, so a
-            # dead tie means the subtraction lost the axis to the label's
-            # exponent (every |z - 1e300| rounds to 1e300) and argmin is back
-            # at index 0.
-            if (span_high > span_low and not span_low <= value <= span_high
-                    and float(np.ptp(distance)) == 0.0):
-                raise ConfigurationError(
-                    f"Field.at: {name}={value:g} is so far outside the "
-                    f"{name!r} axis ([{span_low:g}, {span_high:g}]) that every "
-                    f"sample rounds to the same distance from it; no sample is "
-                    f"nearer than another and index 0 would be returned.")
-            labels[name] = int(np.argmin(distance))
+        # The label guards (finite, not axis-absorbing) and the nearest rule
+        # are the ones every non-blendable carrier shares.
+        labels = {name: _nearest_index_on_axis(self.coords[name], v, name)
+                  for name, v in kwargs.items()}
         return self._slice(labels)
 
     def isel(self, **kwargs) -> "Field":
@@ -1685,14 +1665,14 @@ def _synthesis_plan(
     return freqs, df, bin_indices, bin_offset_hz, int(nfft), win
 
 
-def _clean_cell_spectra(
+def _warn_unsolved_bins(
     spectra: np.ndarray,
     *,
     cell_depths: np.ndarray,
     cell_ranges: np.ndarray,
     who: str,
-) -> np.ndarray:
-    """NaN policy for a batch of cell spectra ``(M, n_f)``, one row per cell.
+) -> None:
+    """Warn, per cell, about NaN bins in a batch of cell spectra ``(M, n_f)``.
 
     A NaN bin is a frequency the model did not solve, not one carrying no
     energy, so it is never zeroed: filling it would put a spectral notch the
@@ -1723,7 +1703,6 @@ def _clean_cell_spectra(
                       f"bins that solved.")
         warnings.warn(f"{who}: {where} {detail}",
                       UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
-    return spectra
 
 
 def _synthesize_traces(
@@ -1765,6 +1744,75 @@ def _synthesize_traces(
     if bin_offset_hz != 0.0:
         analytic = analytic * np.exp(-2j * np.pi * bin_offset_hz * elapsed)
     return 2.0 * np.real(analytic), t_start + elapsed
+
+
+def _estimate_t_start(tf: "Field", actual_range: float, T_window: float,
+                      who: str) -> float:
+    """Start of a synthesis window ``T_window`` seconds long for a cell at
+    ``actual_range``: the estimated first arrival, centred in the record.
+
+    Half a window of lead absorbs an arrival earlier than the estimate, the
+    other half holds the multipath tail. The estimate anchors on the fastest
+    PHYSICAL speed the producing model stamped; it warns when the model
+    stamped none, or only a surface speed while the window is short against
+    the travel time. Shared by :func:`_ifft_to_trace` (one cell) and
+    :func:`_synthesize_time_series` (one window for every cell).
+    """
+    # The earliest arrival travels at the FASTEST speed in the waveguide,
+    # so r/c_fast bounds it from below. Candidates are the physical
+    # speeds producers stamp: 'c_max' (Kraken, Scooter, RAM, OASES: the fastest speed anywhere
+    # in the waveguide) and 'c0' (Bellhop, the sea-surface water speed).
+    # Anchoring on a speed above c_fast opens the window too early: once
+    # the excess lead exceeds the half-window margin, the late multipath
+    # tail falls past the end of the record and wraps to the beginning
+    # — so no algorithmic speed (e.g. a PE expansion point) may enter
+    # this max, and c_min never binds it.
+    c_max = float(tf.metadata.get('c_max') or 0.0)
+    c0 = float(tf.metadata.get('c0') or 0.0)
+    # The 1500 m/s default is a fallback for when nothing physical was
+    # stamped, never a candidate beside a stamped speed: a stamped speed
+    # BELOW it (cold or fresh water) must win, or the window opens early by
+    # r·(1/c − 1/1500) and the arrival wraps a whole record with the time
+    # axis mislabelled and nothing to show for it.
+    stamped = [speed for speed in (c_max, c0) if speed > 0.0]
+    anchor_speed = max(stamped) if stamped else DEFAULT_SOUND_SPEED
+    travel = actual_range / anchor_speed
+    # Centre the estimated first arrival in the record: half a window of
+    # lead absorbs an arrival earlier than the estimate, the other half
+    # holds the multipath tail behind it.
+    lead = 0.5 * T_window
+    t_start = max(0.0, travel - lead)
+    if not c_max and not c0 and t_start > 0.0:
+        # With no stamped speed at all the anchor is the 1500 m/s
+        # default, which bounds nothing: a fast seabed (head waves at
+        # 2-6 km/s) puts the earliest arrival well before r/1500, past
+        # any lead the window can offer.
+        warnings.warn(
+            f"{who}: the model stamped no sound speed ('c_max'/"
+            f"'c0' absent from metadata), so the window is anchored on "
+            f"the {DEFAULT_SOUND_SPEED:g} m/s default at t_start="
+            f"{t_start:.3g}s. Any path faster than that (e.g. a head "
+            f"wave in a fast seabed) arrives before the window and "
+            f"wraps to the end of the record. Pass t_start= to pin the "
+            f"window start.",
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+        )
+    # With only a c0 the anchor carries the fast/slow path spread as
+    # error. A 5 % spread is representative of an ocean waveguide; when
+    # it exceeds the lead the first arrival can fall before the window
+    # and wrap to the end of the record.
+    elif not c_max and t_start > 0.0 and 0.05 * travel > lead:
+        warnings.warn(
+            f"{who}: the {T_window:.3g}s synthesis window is "
+            f"short against the {travel:.3g}s travel time at "
+            f"{actual_range:.0f} m, and the model reported no maximum "
+            f"sound speed, so the window start is an estimate — the "
+            f"earliest arrival may fall before it and wrap to the end of "
+            f"the record. Pass t_start= to pin it, or refine the "
+            f"frequency grid (the window is 1/Δf).",
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+        )
+    return t_start
 
 
 def _ifft_to_trace(
@@ -1822,65 +1870,14 @@ def _ifft_to_trace(
     actual_depth = float(depths[d_idx])
     actual_range = float(ranges[r_idx])
 
-    spectra = _clean_cell_spectra(
-        data[d_idx, r_idx, :][None, :].copy(),
-        cell_depths=np.array([actual_depth]),
-        cell_ranges=np.array([actual_range]),
-        who=who,
-    )
+    spectra = data[d_idx, r_idx, :][None, :]
+    _warn_unsolved_bins(spectra, cell_depths=np.array([actual_depth]),
+                        cell_ranges=np.array([actual_range]), who=who)
 
     dt = 1.0 / (nfft * df)
 
     if t_start is None:
-        T_window = nfft * dt
-        # The earliest arrival travels at the FASTEST speed in the waveguide,
-        # so r/c_fast bounds it from below. Candidates are the physical
-        # speeds producers stamp: 'c_max' (RAM, the fastest speed anywhere
-        # in the waveguide) and 'c0' (Bellhop, the sea-surface water speed).
-        # Anchoring on a speed above c_fast opens the window too early: once
-        # the excess lead exceeds the half-window margin, the late multipath
-        # tail falls past the end of the record and wraps to the beginning
-        # — so no algorithmic speed (e.g. a PE expansion point) may enter
-        # this max, and c_min never binds it.
-        c_max = float(tf.metadata.get('c_max') or 0.0)
-        c0 = float(tf.metadata.get('c0') or 0.0)
-        anchor_speed = max(c_max, c0, DEFAULT_SOUND_SPEED)
-        travel = actual_range / anchor_speed
-        # Centre the estimated first arrival in the record: half a window of
-        # lead absorbs an arrival earlier than the estimate, the other half
-        # holds the multipath tail behind it.
-        lead = 0.5 * T_window
-        t_start = max(0.0, travel - lead)
-        if not c_max and not c0 and t_start > 0.0:
-            # With no stamped speed at all the anchor is the 1500 m/s
-            # default, which bounds nothing: a fast seabed (head waves at
-            # 2-6 km/s) puts the earliest arrival well before r/1500, past
-            # any lead the window can offer.
-            warnings.warn(
-                f"{who}: the model stamped no sound speed ('c_max'/"
-                f"'c0' absent from metadata), so the window is anchored on "
-                f"the {DEFAULT_SOUND_SPEED:g} m/s default at t_start="
-                f"{t_start:.3g}s. Any path faster than that (e.g. a head "
-                f"wave in a fast seabed) arrives before the window and "
-                f"wraps to the end of the record. Pass t_start= to pin the "
-                f"window start.",
-                UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
-            )
-        # With only a c0 the anchor carries the fast/slow path spread as
-        # error. A 5 % spread is representative of an ocean waveguide; when
-        # it exceeds the lead the first arrival can fall before the window
-        # and wrap to the end of the record.
-        elif not c_max and t_start > 0.0 and 0.05 * travel > lead:
-            warnings.warn(
-                f"{who}: the {T_window:.3g}s synthesis window is "
-                f"short against the {travel:.3g}s travel time at "
-                f"{actual_range:.0f} m, and the model reported no maximum "
-                f"sound speed, so the window start is an estimate — the "
-                f"earliest arrival may fall before it and wrap to the end of "
-                f"the record. Pass t_start= to pin it, or refine the "
-                f"frequency grid (the window is 1/Δf).",
-                UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
-            )
+        t_start = _estimate_t_start(tf, actual_range, nfft * dt, who)
 
     traces, time = _synthesize_traces(
         spectra, freqs=freqs, win=win, source_spectrum=source_spectrum,
@@ -2065,18 +2062,15 @@ def _synthesize_time_series(
     depths = np.asarray(tf.coords['depth'])
     ranges = np.asarray(tf.coords['range'])
 
-    if t_start is None:
-        t0_trace = _ifft_to_trace(
-            tf, depth=float(depths[0]), range=float(ranges[0]),
-            source_spectrum=source_spectrum,
-            window=window, nfft=nfft, t_start=None,
-            sample_rate=sample_rate, who='synthesize_time_series',
-        )
-        t_start = float(t0_trace.coords['time'][0]) if t0_trace.n_times else 0.0
-
     plan_freqs, df, bin_indices, bin_offset_hz, nfft, win = _synthesis_plan(
         tf, window=window, nfft=nfft, sample_rate=sample_rate,
         who='synthesize_time_series')
+
+    if t_start is None:
+        # One window for every cell, anchored on the nearest cell's range;
+        # the record is 1/Δf long whatever nfft is.
+        t_start = _estimate_t_start(tf, float(ranges[0]), 1.0 / df,
+                                    'synthesize_time_series')
 
     # Every cell shares one synthesis grid, so one batched ifft per chunk of
     # cells replaces a per-cell transform. Chunk over the flattened
@@ -2089,14 +2083,14 @@ def _synthesize_time_series(
     chunk = max(1, 4_000_000 // nfft)
     for a in range(0, n_cells, chunk):
         idx = np.arange(a, min(a + chunk, n_cells))
-        cleaned = _clean_cell_spectra(
-            spectra[idx].copy(),
+        _warn_unsolved_bins(
+            spectra[idx],
             cell_depths=depths[idx // n_r],
             cell_ranges=ranges[idx % n_r],
             who='synthesize_time_series',
         )
         traces, time_vec = _synthesize_traces(
-            cleaned, freqs=plan_freqs, win=win,
+            spectra[idx], freqs=plan_freqs, win=win,
             source_spectrum=source_spectrum, bin_indices=bin_indices,
             bin_offset_hz=bin_offset_hz, nfft=nfft, df=df, t_start=t_start)
         out[idx] = traces

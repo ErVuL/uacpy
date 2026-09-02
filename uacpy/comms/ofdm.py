@@ -101,7 +101,13 @@ def ofdm_demodulate(rx, n_subcarriers, cp_len, channel=None, snr_linear=None):
     """Recover symbols: strip CP, FFT, and optionally equalize per subcarrier.
 
     With ``channel`` given, divides each subcarrier by the channel frequency
-    response ``H(f)`` (zero-forcing), or applies MMSE when ``snr_linear`` is also
+    response ``H(f)`` (zero-forcing), or the MMSE weight when ``snr_linear`` is
+    also set. Note that with the hard-decision slicer this package decodes with,
+    the per-subcarrier MMSE output is the zero-forcing output times a positive
+    real factor ``|H|^2 / (|H|^2 + N/S)``: every PSK decision is identical and
+    QAM decisions are slightly WORSE (the estimate is biased toward zero, so
+    outer points fall inward). It earns its keep only with soft decisions or
+    bias removal, which this receiver does not do. The response ``H(f)``
     set. Returns the flat complex symbol array.
 
     A channel longer than ``n_subcarriers`` raises. One carrying more than
@@ -158,15 +164,22 @@ def ofdm_demodulate(rx, n_subcarriers, cp_len, channel=None, snr_linear=None):
                 f"each block's convolution tail outlives the prefix and "
                 f"leaks inter-block interference into the next block.",
                 UserWarning, stacklevel=2)
-        H = np.fft.fft(hc, nsc)
-        h2 = np.abs(H) ** 2
-        eps = regularizer(h2, snr_linear)
-        if eps <= 0.0:
-            # A channel with no power anywhere: every subcarrier is
-            # unrecoverable, which is the zero the epsilon form would give.
-            return np.zeros_like(freq).ravel()
-        freq = freq * (np.conj(H) / (h2 + eps))[None, :]
+        freq = equalize_subcarriers(freq, np.fft.fft(hc, nsc), snr_linear)
     return freq.ravel()
+
+
+def equalize_subcarriers(freq, H, snr_linear=None):
+    """One-tap-per-subcarrier equalisation of block spectra ``freq``
+    (``(..., n_subcarriers)``) by the channel response ``H``: the
+    ``conj(H)/(|H|^2 + eps)`` form with ``eps`` from :func:`regularizer` —
+    zero-forcing with a floor, or the MMSE weight when ``snr_linear`` is
+    given. A channel with no power anywhere returns zeros: every subcarrier
+    is unrecoverable, which is what the epsilon form tends to."""
+    h2 = np.abs(H) ** 2
+    eps = regularizer(h2, snr_linear)
+    if eps <= 0.0:
+        return np.zeros_like(freq)
+    return freq * (np.conj(H) / (h2 + eps))
 
 
 def ofdm_symbol(freq, n_sc, cp):

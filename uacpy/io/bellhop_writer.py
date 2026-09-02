@@ -35,7 +35,7 @@ from uacpy.io.oalib_writer import (
     write_surface_halfspace,
 )
 from uacpy.io.refl_io import stage_reflection_file
-from uacpy.io.units import m_to_km
+from uacpy.core.units import m_to_km
 from uacpy.io.utils import reject_unknown_kwargs
 
 
@@ -389,6 +389,15 @@ def write_bellhop_env_file(
             f"(:54) and the beam loop (bellhop.f90:262) then traces nothing, "
             f"leaving an all-zero field."
         )
+    if n_beams == 1 and str(run_type)[:1] in ('C', 'I', 'S', 'A', 'E'):
+        raise ConfigurationError(
+            f"write_bellhop_env_file(n_beams=1, run_type={run_type!r}): a "
+            f"single beam cannot carry an influence calculation — "
+            f"bellhop.f90:176-178 leaves Dalpha = 0, so every beam has zero "
+            f"width and the field, arrivals or eigenrays come back empty at "
+            f"exit 0 (the .prt says 'Too few beams' only for RunType 'C'). "
+            f"Use n_beams >= 2, or 0 to let Bellhop choose; one beam is "
+            f"meaningful only for run_type 'R'.")
 
     if z_box is None:
         z_box = 1.2 * env.depth
@@ -483,7 +492,7 @@ def write_bellhop_env_file(
         atten_unit = f"{atten_unit_char}{vol_atten_char}"
 
         # Position 5: Altimetry flag ('~' = read .ati file, ' ' = flat surface)
-        has_altimetry = (getattr(env, 'altimetry', None) is not None
+        has_altimetry = (env.altimetry is not None
                          and env.altimetry.n_ranges >= 1)
         alti_char = '~' if has_altimetry else ' '
 
@@ -555,17 +564,10 @@ def write_bellhop_env_file(
             if ssp_ranges.size and ssp_max <= r_box:
                 ssp_ranges = np.append(ssp_ranges, 1.1 * r_box)
                 ssp_data = np.column_stack([ssp_data, ssp_data[:, -1]])
-            # Warn only where RECEIVERS sit beyond the last profile, i.e. where
-            # the held-constant column is the sound speed a returned TL value
-            # was computed in. Padding out to the box alone is not a modelling
-            # choice the caller made: no receiver lies in the 20% margin r_box
-            # adds past receiver.range_max, and a ray that has passed the
-            # outermost receiver cannot come back to contribute to one. The
-            # old ``ssp_max <= r_box`` test therefore fired on every
-            # environment whose SSP stopped exactly at the receiver range it
-            # was built for — README's own front-page transect among them —
-            # and answered it by asking for profiles "out to the receiver
-            # range", which was already true.
+            # Warn only where RECEIVERS sit beyond the last profile: there
+            # the held-constant column is the sound speed a returned value
+            # was computed in. The padding out to r_box above is not such a
+            # choice — no receiver lies in that margin.
             if ssp_ranges.size and ssp_max < receiver.range_max:
                 warnings.warn(
                     f"Bellhop: the range-dependent SSP spans to {ssp_max:.0f} m "

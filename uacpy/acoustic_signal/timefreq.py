@@ -524,7 +524,8 @@ def complex_cepstrum(data):
     """Complex cepstrum with the linear-phase (rotation) term removed.
 
     Returns ``ComplexCepstrum(cepstrum, delay)``. ``delay`` is the integer
-    number of samples of linear phase taken out;
+    number of samples of linear phase taken out — the signal's delay, positive
+    for a late signal;
     :func:`inverse_complex_cepstrum` needs it to reconstruct ``data``.
 
     Without the removal the unwrapped phase carries a ramp whose inverse
@@ -553,8 +554,11 @@ def complex_cepstrum(data):
     # Remove the linear-phase term: round the end-to-end ramp to a whole
     # number of samples and subtract it, so the residual phase carries only
     # the echo structure.
-    delay = int(np.round(phase[n // 2] * n / (2.0 * np.pi * (n // 2)))) if n > 1 else 0
-    phase = phase - 2.0 * np.pi * delay * np.arange(n) / n
+    # A delay of d samples is the phase ramp -2*pi*d*k/n, so the ramp's
+    # coefficient is -d: negate it, and ``delay`` is the delay in samples
+    # (positive for a late signal), as the docstring says.
+    delay = -int(np.round(phase[n // 2] * n / (2.0 * np.pi * (n // 2)))) if n > 1 else 0
+    phase = phase + 2.0 * np.pi * delay * np.arange(n) / n
     log_spectrum = np.log(mag) + 1j * phase
     return ComplexCepstrum(np.fft.ifft(log_spectrum), delay)
 
@@ -585,7 +589,7 @@ def inverse_complex_cepstrum(c):
     n = cr.size
     log_spectrum = np.fft.fft(cr)
     # Restore the linear-phase term complex_cepstrum took out.
-    log_spectrum = log_spectrum + 1j * 2.0 * np.pi * delay * np.arange(n) / n
+    log_spectrum = log_spectrum - 1j * 2.0 * np.pi * delay * np.arange(n) / n
     return np.real(np.fft.ifft(np.exp(log_spectrum)))
 
 

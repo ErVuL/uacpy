@@ -84,7 +84,8 @@ class _GebcoGrid(NetcdfGrid):
         return lats, lons, np.hstack(blocks)
 
 
-def _grid():
+def _grid_path():
+    """The cached GEBCO ``.nc`` this process samples: the newest by name."""
     path = _cache.require('gebco')
     # Newest grid first: the files are named GEBCO_<year>.nc, so descending
     # name order ranks releases; names are unique within the directory, and
@@ -106,7 +107,17 @@ def _grid():
             remediation=f"Run `{ds.install_flag}` to download it, or set "
                         f"$UACPY_DATA_CACHE to a directory that has it.",
         )
-    return _cache.cached_grid_at(nc, _GebcoGrid, 'gebco')
+    return nc
+
+
+def grid_name() -> str:
+    """Vintage of the local grid, from its file name (``'GEBCO_2025'``) — what
+    a provenance record cites, since the grid DOI is per release."""
+    return _grid_path().stem
+
+
+def _grid():
+    return _cache.cached_grid_at(_grid_path(), _GebcoGrid, 'gebco')
 
 
 def _depth_from_elevation(elev, lat, lon):

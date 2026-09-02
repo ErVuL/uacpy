@@ -31,7 +31,7 @@ from uacpy.core.exceptions import (
     ConfigurationError, FileFormatError,
 )
 from uacpy.core._warn_frames import USER_FRAME_SKIP
-from uacpy.io.units import km_to_m, m_to_km
+from uacpy.core.units import km_to_m, m_to_km
 from uacpy.io.utils import _collapsed_pair_index
 from uacpy.io._fortran_helpers import (
     list_directed_int, read_list_directed_values, read_vector,

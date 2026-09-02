@@ -373,3 +373,21 @@ def test_an_all_failing_first_year_sweep_stops_the_climatology_build(
                        match=r'stopping before the remaining 4 year'):
         si.download_seaice_db(cache_dir=tmp_path, years=range(2021, 2026))
     assert len(calls) == 12
+
+
+class TestTheObservedNeighbourNearestTheRequestIsTaken:
+    def test_rank_orders_the_candidates(self):
+        from uacpy.data.seaice_local import _observed_at
+        grid = np.full((5, 5), np.nan)
+        grid[1, 2] = 0.3            # ring-1 meridional neighbour, first in ring order
+        grid[2, 3] = 0.7            # ring-1 zonal neighbour, nearer to a request at col 2.9
+        value, cell = _observed_at(grid, 2, 2)
+        assert cell == (1, 2)       # ring order: the file-order tie
+        value, cell = _observed_at(grid, 2, 2, rank=lambda r, c: (r - 2.0) ** 2 + (c - 2.9) ** 2)
+        assert cell == (2, 3) and value == 0.7
+
+    def test_a_fractional_month_is_refused(self):
+        from uacpy.data.seaice_local import fetch_sea_ice_concentration
+        from uacpy.core.exceptions import ConfigurationError
+        with pytest.raises(ConfigurationError, match='integer month'):
+            fetch_sea_ice_concentration((72.0, -150.0), month=6.7)

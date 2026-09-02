@@ -100,7 +100,7 @@ def demo_stacked_time_series():
 
 
 def demo_modes_heatmap():
-    """plot_modes_heatmap() on Kraken mode shapes — full set + first 20 only."""
+    """plot_modes_heatmap() on Kraken mode shapes — full set + first 4 only."""
     print("\n" + "─" * 70)
     print("DEMO 2: Mode-shape heatmap (Kraken)")
     print("─" * 70)
@@ -136,7 +136,7 @@ def demo_modes_heatmap():
     plt.close(fig)
     print(f"  ✓ Saved: {out}")
 
-    fig, _ = plot_modes_heatmap(modes, mode_range=(0, 20),
+    fig, _ = plot_modes_heatmap(modes, mode_range=(0, 4),
                                 normalize=True, figsize=(12, 8))
     out = OUTPUT_DIR / 'example_14_modes_heatmap_subset.png'
     fig.savefig(out, dpi=150, bbox_inches='tight')

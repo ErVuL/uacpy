@@ -53,7 +53,7 @@ from uacpy.core.bottom import _NON_GEOACOUSTIC_TYPES
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
 from uacpy.core.results import Result, Field
-from uacpy.core.constants import DEFAULT_SOUND_SPEED, PRESSURE_FLOOR
+from uacpy.core.constants import PRESSURE_FLOOR
 from uacpy.core.exceptions import (
     ConfigurationError,
     ExecutableNotFoundError,
@@ -327,7 +327,7 @@ class RAM(PropagationModel):
 
     BROADBAND:
         Broadband complex pressure field. Returns ``Field`` with ψ(depth,
-        frequency, range) for downstream IFFT to time domain. Available on
+        range, frequency) for downstream IFFT to time domain. Available on
         every backend: mpiramS sweeps the (fc, Q, T) band inside the Fortran
         loop, the Collins backends run one subprocess per band frequency and
         read the patched ``pcomplex.bin``.
@@ -335,8 +335,8 @@ class RAM(PropagationModel):
     TIME_SERIES:
         Real pressure p(t) at each receiver. Internally runs BROADBAND
         and convolves with ``source_waveform`` (sampled at ``sample_rate``).
-        Returns ``Field`` / ``Field`` with shape (n_d, n_t, n_r). Available
-        on every backend, same split as BROADBAND.
+        Returns ``Field`` with shape (n_d, n_r, n_t). Available on every
+        backend, same split as BROADBAND.
 
     Some constructor kwargs are backend-specific. The list below tags each
     one with the backends that consume it; settings tagged ``[mpiramS]``
@@ -772,7 +772,7 @@ class RAM(PropagationModel):
         speed (vacuum / rigid, or a shape this wrapper cannot read) falls back
         to the PE reference speed, which keeps the pad finite and positive.
         """
-        bottom = getattr(env, 'bottom', None)
+        bottom = env.bottom
         # ``Bottom`` exposes ``all_sound_speeds`` (every modelled sub-bottom
         # speed) and ``halfspace_sound_speed``; it has no plain
         # ``sound_speed``, so reading one silently returns the water value and
@@ -822,8 +822,6 @@ class RAM(PropagationModel):
             return float(self.c0)
         from uacpy.models._pade_optimizer import optimal_c0
         bounds = self._speed_bounds(env)
-        if bounds is None:
-            return DEFAULT_SOUND_SPEED
         c_min, c_max = bounds
         return float(optimal_c0(c_min, c_max, self._resolve_theta_max(env)))
 
@@ -840,7 +838,7 @@ class RAM(PropagationModel):
         undefined at grazing.
         """
         theta = float(self.theta_max)
-        bathy = getattr(env, 'bathymetry', None)
+        bathy = env.bathymetry
         if bathy is None or bathy.n_ranges < 2:
             return theta
         r = np.asarray(bathy.ranges, dtype=float)
@@ -1122,7 +1120,7 @@ class RAM(PropagationModel):
         # error for a small absorber one. A bare half-space has no internal
         # structure to lose, which is exactly the case whose evanescent tails
         # this pad is here to hold.
-        if getattr(getattr(env, 'bottom', None), 'is_layered', False):
+        if getattr(env.bottom, 'is_layered', False):
             return env.depth + dz_for_pad + absorbing_width
         c_bottom = self._seabed_sound_speed(env, c0)
         seabed_pad = _SEABED_WAVELENGTHS_BEFORE_ABSORBER * c_bottom / max(freq, 1.0)
@@ -1337,7 +1335,7 @@ class RAM(PropagationModel):
         SSP breaks, then decimated to ``_MAX_SED_PROFILES``.
         """
         breaks = {0.0}
-        bathy = getattr(env, 'bathymetry', None)
+        bathy = env.bathymetry
         if bathy is not None and bathy.n_ranges > 1:
             breaks.update(float(r) for r in bathy.ranges)
             r = np.asarray(bathy.ranges, dtype=float)
@@ -1741,47 +1739,18 @@ class RAM(PropagationModel):
 
         backend = self.select_backend(env, run_mode)
         elastic = self._env_has_elastic_bottom(env)
-        rough = getattr(env, 'altimetry', None) is not None
+        rough = env.altimetry is not None
         self._log(
             f"Dispatching to {backend} backend "
             f"(elastic_bottom={elastic}, altimetry={rough})"
         )
         self._warn_on_mpirams_only_overrides(backend)
 
-        # RAM writes no r=0 column on ANY backend: the self-starter sets
-        # ``r=dr`` before its only ``outpt`` call (``ramgeo1.5.f:124,172``)
-        # and the march loop advances ``r=r+dr`` at ``:82`` BEFORE ``outpt``
-        # at ``:83``, so the first record is at dr. The Collins near-range
-        # guard cannot see this — it filters ``near[near > 0.0]`` to keep its
-        # "pin a smaller dr" advice honest, and that advice is exactly what
-        # does NOT apply at zero — so r=0 fell through every check and came
-        # back as bare NaN. Bellhop warns on the same geometry
-        # (the r=0 branch of ``Bellhop.run``); matching its cadence keeps
-        # ``np.linspace(0, R, N)`` from silently costing a column on one
-        # engine while warning on another. Checked here rather than per
-        # backend so the mpiramS and Collins families share one wording, and
-        # ahead of the dispatch so the broadband loops warn once, not once
-        # per frequency.
-        _rcv_r = np.atleast_1d(np.asarray(receiver.ranges, dtype=float))
-        if _rcv_r.size and float(_rcv_r[0]) == 0.0:
-            warnings.warn(
-                f"RAM:{backend}: receiver.ranges starts at r=0 m. The PE "
-                f"marches outward from the source, so no output range is "
-                f"written there and that column is NaN. Start ranges at a "
-                f"small positive value (e.g. ``np.linspace(eps, R, N)``) to "
-                f"avoid surprise.",
-                UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
-            )
-
         if backend == 'mpiramS':
-            if run_mode == RunMode.BROADBAND:
-                return self._run_broadband(env, source, receiver)
-            if run_mode == RunMode.TIME_SERIES:
-                tf = self._run_broadband(env, source, receiver)
-                return tf.synthesize_time_series(
-                    source_waveform=source_waveform,
-                    sample_rate=sample_rate
-                )
+            if run_mode in (RunMode.BROADBAND, RunMode.TIME_SERIES):
+                return self._finish_broadband(
+                    self._run_broadband(env, source, receiver),
+                    run_mode, source_waveform, sample_rate)
             return self._run_tl(env, source, receiver)
 
         # Collins backends: rams0.5 / ramsurf1.5 / ramgeo are single-frequency
@@ -1791,18 +1760,11 @@ class RAM(PropagationModel):
         # builds on top of that via Field.synthesize_time_series.
         if run_mode == RunMode.COHERENT_TL:
             return self._run_collins(env, source, receiver, kind=backend)
-        if run_mode == RunMode.BROADBAND:
-            return self._run_collins_broadband(
-                env, source, receiver, kind=backend
-            )
-        if run_mode == RunMode.TIME_SERIES:
-            tf = self._run_collins_broadband(
-                env, source, receiver, kind=backend
-            )
-            return tf.synthesize_time_series(
-                source_waveform=source_waveform,
-                sample_rate=sample_rate
-            )
+        if run_mode in (RunMode.BROADBAND, RunMode.TIME_SERIES):
+            return self._finish_broadband(
+                self._run_collins_broadband(
+                    env, source, receiver, kind=backend),
+                run_mode, source_waveform, sample_rate)
         raise UnsupportedFeatureError(
             f"RAM:{backend}", str(run_mode),
             alternatives=[str(m) for m in self._supported_modes],
@@ -2027,7 +1989,7 @@ class RAM(PropagationModel):
             self._validate_forced_backend(self.backend, env)
             return self.backend
         elastic = self._env_has_elastic_bottom(env)
-        rough = getattr(env, 'altimetry', None) is not None
+        rough = env.altimetry is not None
         if elastic and rough:
             raise UnsupportedFeatureError(
                 'RAM',
@@ -2064,7 +2026,7 @@ class RAM(PropagationModel):
     def _validate_forced_backend(self, backend: str, env: Environment) -> None:
         """Reject a forced ``backend=`` that cannot represent ``env``."""
         elastic = self._env_has_elastic_bottom(env)
-        rough = getattr(env, 'altimetry', None) is not None
+        rough = env.altimetry is not None
         if backend in ('mpiramS', 'ramgeo', 'ramsurf') and elastic:
             raise ConfigurationError(
                 f"RAM(backend={backend!r}) is a fluid PE and cannot model the "
@@ -2428,6 +2390,7 @@ class RAM(PropagationModel):
                 c_max=self._resolve_c_max(env),
             )
         )
+        field = self._mask_source_axis(field, source)
         self._attach_output_paths(
             field, raw['work_dir'], '',
             primary_files=(
@@ -3442,10 +3405,11 @@ class RAM(PropagationModel):
                     bandwidth_hz=2.0 * bw, df_hz=df,
                     dr=dr_first, dz=dz_first, zmax=zmax_used,
                     pe_reference_speed=c0,
-                    c_min=(self._speed_bounds(env) or (c0, c0))[0],
+                    c_min=self._speed_bounds(env)[0],
                     c_max=self._resolve_c_max(env),
                 )
             )
+            field = self._mask_source_axis(field, source)
             # Every frequency ran in ``band_fm``'s directory, so the paths
             # describe the sweep as a whole rather than any one iteration.
             self._attach_output_paths(
@@ -3823,7 +3787,7 @@ class RAM(PropagationModel):
 
     def _drop_unsupported_surface_shear(self, env: Environment) -> Environment:
         """No RAM backend reads surface shear properties; warn and zero them."""
-        s = getattr(env, 'surface', None)
+        s = env.surface
         cs = getattr(s, 'shear_speed', None) if s is not None else None
         if cs is None or float(cs) <= 0.0:
             return env
@@ -3873,7 +3837,7 @@ class RAM(PropagationModel):
     def _warn_on_dropped_absorption(self, env: Environment) -> None:
         """No RAM backend consumes water-column volume attenuation; warn
         loudly rather than silently producing a lossless water column."""
-        absorption = getattr(env, 'absorption', None)
+        absorption = env.absorption
         if absorption is None:
             return
         from uacpy.core.absorption import ConstantAbsorption
@@ -4007,19 +3971,15 @@ class RAM(PropagationModel):
 
     @staticmethod
     def _seafloor_snap_depth(env: 'Environment') -> float:
-        """The water depth the depth grid is aligned to, ``0.0`` when the env
-        carries none.
-
-        The shallowest bathymetry point when there is one: a range-dependent
-        grid cannot be aligned at every range at once, and the shallowest
-        column is the most demanding (fewest points in the water, so the
-        largest relative interface displacement when the seafloor sits
-        off-node).
+        """The water depth the depth grid is aligned to: the shallowest
+        bathymetry point. A range-dependent grid cannot be aligned at every
+        range at once, and the shallowest column is the most demanding
+        (fewest points in the water, so the largest relative interface
+        displacement when the seafloor sits off-node). Every Environment
+        carries a Bathymetry with at least one positive depth, so this is
+        always > 0.
         """
-        bathy = getattr(env, 'bathymetry', None)
-        if bathy is not None and bathy.n_ranges > 0:
-            return float(np.min(bathy.depths))
-        return float(getattr(env, 'depth', None) or 0.0)
+        return float(np.min(env.bathymetry.depths))
 
     def _align_dz_with_seafloor(self, env: 'Environment', dz: float, *,
                                 coarsen: bool = False) -> float:
@@ -4036,7 +3996,7 @@ class RAM(PropagationModel):
         smears the interface by up to a whole cell.
         """
         h = self._seafloor_snap_depth(env)
-        if not (h > 0.0 and float(dz) > 0.0):
+        if not float(dz) > 0.0:
             return float(dz)
         ratio = h / float(dz)
         # The 1e-9 keeps a ratio that is integral up to round-off from buying
@@ -4082,7 +4042,7 @@ class RAM(PropagationModel):
         # Spectrum bounds: slowest / fastest acoustic speeds in the env,
         # widened to contain c₀ so [ξ_min, ξ_max] brackets the expansion
         # point even when the caller pinned an out-of-range c0.
-        bounds = self._speed_bounds(env) or (c0_pe, c0_pe)
+        bounds = self._speed_bounds(env)
         c_min = min(bounds[0], c0_pe)
         c_max = max(bounds[1], c0_pe)
 
@@ -4146,14 +4106,9 @@ class RAM(PropagationModel):
         # Snap dz to a depth-grid-aligned value so the seafloor lands on
         # a node (PE accuracy degrades sharply otherwise). The snap goes
         # through _snap_dz_to_seafloor so it survives the deck round-trip.
-        bathy = getattr(env, 'bathymetry', None)
-        if bathy is not None and bathy.n_ranges > 0:
-            h = float(np.min(bathy.depths))
-        else:
-            h = float(getattr(env, 'depth', None) or 0.0)
-        if h > 0:
-            n_layers = max(1, int(round(h / dz_opt)))
-            dz_opt = self._snap_dz_to_seafloor(h, n_layers)
+        h = self._seafloor_snap_depth(env)
+        n_layers = max(1, int(round(h / dz_opt)))
+        dz_opt = self._snap_dz_to_seafloor(h, n_layers)
 
         # Practical depth-grid cap. Pure runtime safety — Lytaev's
         # optimizer at very low freq / deep ocean / wide θ_max can
@@ -4323,15 +4278,9 @@ class RAM(PropagationModel):
         # interface displacement when off-grid). The deeper ranges
         # then have the seafloor between grid points by at most one
         # dz, which is small relative to their thicker water columns.
-        bathy = getattr(env, 'bathymetry', None)
-        if bathy is not None and bathy.n_ranges > 0:
-            h = float(np.min(bathy.depths))
-        else:
-            h = float(getattr(env, 'depth', None) or 0.0)
-        if h > 0:
-            n_layers = max(1, int(round(h / target)))
-            return self._snap_dz_to_seafloor(h, n_layers)
-        return target
+        h = self._seafloor_snap_depth(env)
+        n_layers = max(1, int(round(h / target)))
+        return self._snap_dz_to_seafloor(h, n_layers)
 
     def _resolve_mpirams_grid(self, env, freq: float, rmax: float):
         """``(dr, dz)`` for an mpiramS march: user values where pinned, the
@@ -4584,13 +4533,8 @@ class RAM(PropagationModel):
         # In mpiramS, psif = psi * exp(i*(k0*r + pi/4)) / (4*pi),
         # so |psi| = |psif| * 4*pi.
         #
-        # Receivers at r <= 0 sit on the source axis, where the cylindrical
-        # 1/sqrt(r) spreading is singular — those columns are NaN'd below
-        # (the convention every model shares; Kraken masks the same cells in
-        # ``_mask_zero_range``). Substitute dr in the scaling so the rest of
-        # the row still computes.
-        zero_range = np.atleast_1d(
-            np.asarray(receiver.ranges, dtype=float)) <= 0.0
+        # A receiver at r = 0 is scaled at dr so the rest of the row still
+        # computes; _mask_source_axis NaNs that column after assembly.
         log_ranges = rcv_ranges.astype(np.float64).copy()
         log_ranges[log_ranges <= 0.0] = dr
 
@@ -4609,10 +4553,6 @@ class RAM(PropagationModel):
         # where mpiramS's field is identically zero). It is left at zero: the
         # shared ``_complex_to_db`` floors it to the one no-energy level every
         # model reports, rather than this wrapper writing a level of its own.
-        # NaN the r <= 0 columns — announced once by run()'s shared r=0
-        # warning: the value computed at the substituted range belongs to no
-        # receiver position.
-        pressure_field[:, zero_range] = np.nan
 
         elapsed = time.time() - start_time
         self._log(f"TL completed in {elapsed:.2f}s")
@@ -4630,6 +4570,7 @@ class RAM(PropagationModel):
                 c_max=self._resolve_c_max(env),
             )
         )
+        field = self._mask_source_axis(field, source)
         field = field.mask_below_seafloor(env.bathymetry)
         self._attach_output_paths(
             field, fm.work_dir, '',
@@ -4723,16 +4664,10 @@ class RAM(PropagationModel):
         psif = result['psif']  # (nzo, nf, nr)
         rout = np.asarray(result['rout'], dtype=np.float64)  # (nr,)
         zg = result['zg']
-        # Receivers at r <= 0 sit on the source axis, where the
-        # cylindrical 1/sqrt(r) spreading is singular — those columns
-        # are NaN'd below while keeping the requested range coordinate,
-        # the same convention as _run_tl. A substitute range is used only
-        # so the scaling of the rest of the row still computes.
-        zero_range = rout <= 0.0
+        # A receiver at r = 0 is scaled at dr so the rest of the row still
+        # computes; _mask_source_axis NaNs that column after assembly.
         rout_safe = rout.copy()
-        if np.any(zero_range):
-            clip_to = float(dr) if dr and dr > 0 else 1.0
-            rout_safe[zero_range] = clip_to
+        rout_safe[rout_safe <= 0.0] = float(dr) if dr and dr > 0 else 1.0
         # psif shape: (nzo, nf, nr) — convert to engineering
         # travelling-wave pressure via models/_pe_phase.py.
         pressure = psi_to_travelling_wave(
@@ -4745,10 +4680,6 @@ class RAM(PropagationModel):
         # (z = 0, where mpiramS's field is identically zero). It is left at
         # zero for the shared ``_complex_to_db`` floor to report, so no
         # wrapper writes a no-energy level of its own.
-        # NaN the r <= 0 columns — announced once by run()'s shared r=0
-        # warning: the value computed at the substituted range belongs
-        # to no receiver position.
-        pressure[:, :, zero_range] = np.nan
 
         # Map to receiver depth grid. PE domain extends below the
         # seafloor; output only the requested receiver depths.
@@ -4829,6 +4760,7 @@ class RAM(PropagationModel):
                 c_max=self._resolve_c_max(env),
             )
         )
+        tf = self._mask_source_axis(tf, source)
         # Mask sub-seafloor samples with NaN (same semantics as every
         # backend), against the ranges the Field advertises.
         _mask_below_seafloor(tf.data, out_depths, rout, env.bathymetry)

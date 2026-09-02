@@ -844,3 +844,27 @@ class TestBounceReflectsTheSeabedNotTheOcean:
         assert np.median(phase_err) < 10.0, (
             f"median phase error {np.median(phase_err):.1f} deg vs analytic "
             f"Rayleigh at c_w={self.C_W_ALT} m/s")
+
+
+@pytest.mark.requires_binary
+def test_bellhop_line_source_level_is_unit_amplitude_at_one_metre():
+    """The exact 2-D field of a unit-at-1 m line source is
+    ``√(8πk)·(i/4)[H0(kR1) − H0(kR2)]`` (|(i/4)H0(k·1 m)| = 1/√(8πk)). Bellhop
+    raw is 4√π above it; the wrapper brings it onto the reference to within
+    the beam approximation (Kraken/Scooter are brought there by ×√k0)."""
+    c, z_s, z_r, f = C_W, 25.0, 100.0, 100.0
+    ranges = np.array([1000.0, 1500.0, 2000.0, 3000.0, 4000.0])
+    env = Environment(
+        bathymetry=4000.0,
+        ssp=SoundSpeedProfile.from_pairs([(0.0, c), (4000.0, c)]),
+        bottom=BoundaryProperties(acoustic_type='half-space',
+                                  sound_speed=c, density=RHO_WATER,
+                                  attenuation=0.0))
+    rcv = Receiver(depths=[z_r], ranges=ranges)
+    p_ln = np.asarray(Bellhop(timeout=120).run(
+        env, Source(depths=z_s, frequencies=f, source_type='line'), rcv).data).ravel()
+    k = 2 * np.pi * f / c
+    exact = np.sqrt(8 * np.pi * k) * lloyd_mirror_pressure_2d(ranges, z_s, z_r, f, c)
+    level_db = 20 * np.log10(np.abs(p_ln) / np.abs(exact))
+    assert abs(float(np.mean(level_db))) < 1.0, level_db
+

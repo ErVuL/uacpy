@@ -434,3 +434,56 @@ def test_operational_transect_keeps_its_levels_too(monkeypatch):
         (30.0, -40.0), (31.0, -40.0), date='2020-06-15', n_points=4,
         seafloor=_bathy([[0.0, 500.0], [2.0e5, 500.0]]))
     assert ssp.depths.tolist() == depths
+
+
+class TestTheWetCellHopIsTheNearestToTheRequest:
+    """A coastal request snaps to a dry WOA cell; the fallback must take the
+    wet cell nearest the REQUESTED point. Ring order ties at d² = 1 break in
+    file order and probe the meridional neighbour (111 km away at 44°N)
+    before the zonal one (80 km), and never look at where inside the cell
+    the request fell."""
+
+    def test_the_zonal_neighbour_wins_when_it_is_nearer(self):
+        from uacpy.data.sound_speed import _nearest_wet_column, _grid_index
+        lat, lon = 43.8, 7.5
+        lat_idx, lon_idx, _c_lat, _c_lon = _grid_index(lat, lon, '1.00')
+        wet = {(lat_idx, lon_idx + 1), (lat_idx - 1, lon_idx)}   # (43.5, 8.5) and (42.5, 7.5)
+        empty = np.array([])
+
+        def fetch(i, j):
+            if (i, j) in wet:
+                return np.array([0.0, 10.0]), np.array([10.0, 9.0]), np.array([35.0, 35.0])
+            return empty, empty, empty
+
+        *_cols, i, j = _nearest_wet_column(fetch, lat_idx, lon_idx, '1.00',
+                                           lat=lat, lon=lon)
+        assert (i, j) == (lat_idx, lon_idx + 1)
+
+    def test_a_fractional_month_is_refused_not_truncated(self):
+        from uacpy.data.sound_speed import _resolve_period
+        from uacpy.core.exceptions import ConfigurationError
+        with pytest.raises(ConfigurationError, match='integer month'):
+            _resolve_period(None, 6.7)
+        with pytest.raises(ConfigurationError, match='bool'):
+            _resolve_period(None, True)
+        assert _resolve_period(None, 6.0) == 6
+
+
+class TestTheDeepExtensionUsesTheProfilesOwnFormula:
+    def _profile(self, formula):
+        from uacpy.core.ssp import SoundSpeedProfile
+        return SoundSpeedProfile(depths=np.array([0.0, 5500.0]),
+                                 data=np.array([1500.0, 1551.05]),
+                                 formula=formula)
+
+    def test_delgrosso_and_unesco_extend_differently_and_none_means_unesco(self):
+        from uacpy.data.sound_speed import extend_ssp_below_data
+        deep = {f: float(np.asarray(extend_ssp_below_data(self._profile(f), 8800.0).data)[-1, 0])
+                for f in ('unesco', 'delgrosso', None)}
+        assert deep[None] == deep['unesco']
+        assert abs(deep['delgrosso'] - deep['unesco']) > 0.1     # verifier: +0.33 m/s at 8.8 km
+
+    def test_the_formula_survives_the_carrier_copies(self):
+        ssp = self._profile('delgrosso')
+        assert ssp.extend_to(6000.0).formula == 'delgrosso'
+        assert ssp.copy().formula == 'delgrosso'

@@ -1214,3 +1214,36 @@ class TestSeabedColumnDelegatedWritesReachTheHalfspace:
             col.sound_speed = 1610.0
         assert col.halfspace.sound_speed == pytest.approx(1800.0)
         assert 'sound_speed' not in vars(col)
+
+
+class TestGrainSizeMustBeAFiniteNumberEverywhere:
+    """ϕ is signed metadata, so it has no sign rule — but every carrier must
+    agree that it is a finite NUMBER: a NaN/inf/str ϕ stored on one carrier and
+    refused by another reads back as a measurement on the first."""
+
+    @pytest.mark.parametrize('bad', [float('nan'), float('inf'), 'abc'])
+    def test_the_constructor_refuses_it(self, bad):
+        from uacpy.core.bottom import BoundaryProperties
+        with pytest.raises((ConfigurationError, ValueError)):
+            BoundaryProperties(acoustic_type='half-space', sound_speed=1600.0,
+                               grain_size_phi=bad)
+
+    def test_the_shared_delegated_write_validator_refuses_it(self):
+        # The one validator behind the SeabedColumn/Bottom/Surface writes.
+        from uacpy.core.bottom import BoundaryProperties, _validate_boundary_write
+        node = BoundaryProperties(acoustic_type='half-space', sound_speed=1600.0)
+        with pytest.raises(ConfigurationError, match='grain_size_phi'):
+            _validate_boundary_write('Bottom', 'grain_size_phi', float('nan'),
+                                     [node])
+        assert _validate_boundary_write('Bottom', 'grain_size_phi', 2.5,
+                                        [node]) == 2.5
+        assert _validate_boundary_write('Surface', 'grain_size_phi', None,
+                                        [node]) is None
+
+    def test_a_surface_node_refuses_it_at_construction(self):
+        from uacpy.core.bottom import BoundaryProperties
+        from uacpy.core.surface import Surface
+        with pytest.raises(ConfigurationError, match='grain_size_phi'):
+            Surface(properties=[BoundaryProperties(
+                acoustic_type='half-space', sound_speed=1600.0,
+                grain_size_phi=float('inf'))])

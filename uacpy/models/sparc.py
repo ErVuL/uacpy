@@ -947,8 +947,7 @@ class SPARC(PropagationModel):
         result.metadata['output_mode'] = 'S'
         return self._finalize_sparc_result(result, fm, [base_name])
 
-    def _max_receiver_depth(self, env: Environment) -> float:
-        return self._total_media_depth(env)
+    _receivers_reach_sediment = True    # meshes through the sediment stack
 
     def _sparc_rigidify_halfspace(self, env: Environment) -> Environment:
         """Rewrite an env's halfspace bottom to 'rigid' so SPARC's

@@ -231,8 +231,25 @@ for kind in ('point', 'line', 'scaled'):
 
 The lower panel is the whole story. `point − scaled` is `10·log₁₀ r` to within
 10⁻⁵ dB — that is the definition of `'scaled'`, not an approximation.
-`point − line` tracks the same curve about 0.9 dB above it, because a line
-source also reweights the modes slightly, not just the spreading.
+`point − line` tracks the same curve to within a decibel — 0.3 dB at 500 m
+rising to 0.9 dB at 5 km on this case. Both
+sources are normalised to **unit amplitude at 1 m in free space** — the point
+source's `TL(1 m) = 0`, and for the line source the `p/p₀(1)` reference of
+JKPS §5.2.2 (which notes that no line-source normalisation is otherwise
+established) — so the residual is the modes' reweighting (`1/k_m` against
+`1/√k_m`), not a level offset. Every engine reports this level: Bellhop's raw
+line field (`4√π/√R`, `influence.f90:784`) is divided by `4√π`, Kraken's and
+Scooter's (`1/√(k₀R)`, `EvaluateMod.f90:36`, `TransformG.f90`) are multiplied
+by `√k₀` with `k₀ = 2πf/c(z_s)`; before this the three disagreed by
+`4√(πk₀)` — 13 dB at 100 Hz, 19 dB at 400 Hz — on the same source.
+
+One consequence JKPS spells out: the line-source factor is frequency
+dependent, so a broadband `'line'` run synthesised from Kraken or Scooter
+describes a source whose pressure spectrum is flat **at 1 m** — the same
+definition the point-source route uses for `source_waveform`. A source
+specified by its strength rather than by its 1-m pressure carries a `1/√k₀`
+tilt relative to this; divide it out before synthesis if that is the source
+you mean.
 
 Which model honours which:
 

@@ -19,6 +19,7 @@ from uacpy.core._carrier_validate import (
     _validate_acoustic_type, _require_strictly_increasing,
     _require_attenuation_in_range,
     _require_positive, _require_non_negative, _coerce_data_sources,
+    _require_finite,
     _dedupe_provenance,
 )
 
@@ -45,16 +46,18 @@ _HALFSPACE_DELEGATED = frozenset({
 _HALFSPACE_TYPE_FIELDS = frozenset({'acoustic_type', 'reflection_file'})
 
 
-def _validate_halfspace_write(owner: str, name, value, halfspaces, layered):
-    """Apply the ``BoundaryProperties`` construction rules to a write
-    delegated to ``halfspaces``, so the carrier cannot store a value its
-    constructor would refuse. Returns the value coerced to float."""
+def _validate_boundary_write(owner: str, name, value, nodes, layered=False):
+    """Apply the ``BoundaryProperties`` construction rules to a write delegated
+    to a carrier's boundary node(s) — a seabed's half-space(s) or a surface's
+    nodes — so the carrier cannot store a value its constructor would refuse.
+    Returns the value coerced to float (``None`` stays ``None`` for
+    ``grain_size_phi``, the field's own unset value)."""
     if name in _HALFSPACE_TYPE_FIELDS:
         raise ConfigurationError(
             f"{owner}.{name} cannot be assigned in place: it defines what "
-            f"kind of boundary the half-space is, and the construction rules "
-            f"couple it to the other fields. Build a new BoundaryProperties "
-            f"(and a bottom from it) instead.")
+            f"kind of boundary this is, and the construction rules couple it "
+            f"to the other fields. Build new BoundaryProperties (and a new "
+            f"{owner} from them) instead.")
     # A layered seabed carries the same field on every layer, so a flat write
     # cannot say which depth the caller means.
     if layered:
@@ -64,29 +67,33 @@ def _validate_halfspace_write(owner: str, name, value, halfspaces, layered):
             f"half-space below them. Assign to the layer "
             f"(``.layers[j].{name}``) or to the half-space "
             f"(``.halfspace.{name}``) you mean.")
-    # vacuum/rigid half-spaces carry no acoustic parameters, so a delegated
+    # vacuum/rigid boundaries carry no acoustic parameters, so a delegated
     # write of one is the conflict the constructor's explicit-conflict guard
     # rejects. ``roughness`` stays writable — every boundary type has an
     # interface.
     if name != 'roughness':
-        bare = sorted({h.acoustic_type for h in halfspaces
-                       if h.acoustic_type in _PARAMETER_FREE_TYPES})
+        bare = sorted({n.acoustic_type for n in nodes
+                       if n.acoustic_type in _PARAMETER_FREE_TYPES})
         if bare:
             raise ConfigurationError(
-                f"{owner}.{name} = {value!r}: this seabed has "
-                f"{'/'.join(bare)} half-space(s), which ignore half-space "
-                f"acoustic parameters. Build a half-space BoundaryProperties "
-                f"to give the seabed geoacoustics.")
+                f"{owner}.{name} = {value!r}: this {owner} has "
+                f"{'/'.join(bare)} boundary node(s), which ignore half-space "
+                f"acoustic parameters. Build half-space BoundaryProperties "
+                f"(and a new {owner} from them) to give it geoacoustics.")
     if name == 'grain_size_phi':
-        # ϕ = −log₂(d/mm) is signed (gravel is negative), so the non-negative
-        # rule the other fields take does not apply, and ``None`` is the
-        # field's own unset value.
-        return None if value is None else float(value)
+        # ϕ = −log₂(d/mm) is signed (gravel is negative), so no sign rule
+        # applies; but it must be a finite number — a NaN/inf ϕ stored as
+        # metadata reads back looking like a measurement.
+        if value is None:
+            return None
+        value = float(value)
+        _require_finite(value, f"{owner} grain_size_phi", hint="ϕ units")
+        return value
     value = float(value)
     if name == 'density':
         _require_positive(value, f"{owner} density", hint="g/cm^3")
-    elif name == 'sound_speed' and any(h.acoustic_type == 'half-space'
-                                       for h in halfspaces):
+    elif name == 'sound_speed' and any(n.acoustic_type == 'half-space'
+                                       for n in nodes):
         _require_positive(value, f"{owner} sound_speed on a half-space",
                           hint="m/s")
     else:
@@ -94,7 +101,6 @@ def _validate_halfspace_write(owner: str, name, value, halfspaces, layered):
     if name in ('attenuation', 'shear_attenuation'):
         _require_attenuation_in_range(value, f"{owner} {name}")
     return value
-
 
 @dataclass
 class SedimentLayer:
@@ -334,6 +340,12 @@ class BoundaryProperties:
     def __post_init__(self):
         self.data_sources = _coerce_data_sources(
             self.data_sources, "BoundaryProperties")
+        if self.grain_size_phi is not None:
+            # Signed (gravel is negative), so no sign rule; a finite number
+            # all the same — NaN/inf/str stored here reads back as data.
+            self.grain_size_phi = float(self.grain_size_phi)
+            _require_finite(self.grain_size_phi,
+                            "BoundaryProperties grain_size_phi", hint="ϕ units")
 
         explicit = {
             name for name in self._ACOUSTIC_DEFAULTS
@@ -668,7 +680,7 @@ class SeabedColumn:
         # value back while ``at()``, ``sample_at_depths()``, the repr and every
         # writer — all of which read ``halfspace`` — keep the previous one.
         if name in _HALFSPACE_DELEGATED and 'halfspace' in self.__dict__:
-            value = _validate_halfspace_write(
+            value = _validate_boundary_write(
                 type(self).__name__, name, value, [self.halfspace],
                 bool(self.layers))
             setattr(self.halfspace, name, value)
@@ -762,7 +774,7 @@ class SeabedColumn:
         depths = self.layer_depths(seafloor_depth)
         for (top, bottom), layer in zip(depths, self.layers):
             for prop in properties:
-                value = float(getattr(layer, prop, 0.0) or 0.0)
+                value = float(getattr(layer, prop))
                 out[prop].append((float(top), value))
                 out[prop].append((float(bottom), value))
 
@@ -1288,7 +1300,7 @@ class Bottom:
         # reading it — kept the stored half-spaces.
         if name in _HALFSPACE_DELEGATED and 'columns' in self.__dict__:
             halfspaces = [c.halfspace for c in self.columns]
-            value = _validate_halfspace_write(
+            value = _validate_boundary_write(
                 type(self).__name__, name, value, halfspaces,
                 any(c.layers for c in self.columns))
             if len(self.columns) > 1:

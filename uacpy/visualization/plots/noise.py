@@ -6,7 +6,7 @@ positional argument (a new figure is made when it is ``None``) and returns
 ``(fig, ax)`` — the same convention as :func:`plot_field`.
 """
 import numpy as np
-from uacpy.visualization.plots._common import fig_ax, typed_plot_error
+from uacpy.visualization.plots._common import fig_ax, typed_plot_error, _require_nonempty
 from uacpy.core.exceptions import ConfigurationError
 
 
@@ -18,6 +18,10 @@ def plot_wenz(wenz, ax=None, *, show_components=True, title=None, ymin=6,
     """Plot a Wenz ambient-noise spectrum. Consumes a :class:`WenzNoise`
     result object (reads ``frequencies``/``total``/component arrays).
     ``**mpl_kw`` styles the total-noise line."""
+    if not hasattr(wenz, 'frequencies') or not hasattr(wenz, 'total'):
+        raise ConfigurationError(
+            f"plot_wenz: expected a WenzNoise result (with .frequencies and "
+            f".total); got {type(wenz).__name__}.")
     f = wenz.frequencies
     fig, ax = fig_ax(ax, figsize)
     # The total-noise line names every condition it sums when it is the only
@@ -79,6 +83,7 @@ def plot_weighting(group, ax=None, *, frequency=None, title=None,
 def plot_source_level(frequency, level_db, ax=None, *, label=None, title=None,
                       figsize=(8, 4), **mpl_kw):
     """Plot a ship source-level spectrum (dB re 1 µPa·m vs band centre)."""
+    _require_nonempty('plot_source_level', frequency=frequency, level_db=level_db)
     f = np.asarray(frequency, dtype=float)
     lv = np.asarray(level_db, dtype=float)
     fig, ax = fig_ax(ax, figsize)

@@ -245,14 +245,28 @@ _VALUE_LABELS = {
 }
 
 
+def _require_nonempty(caller: str, **arrays) -> None:
+    """Refuse an empty input array by name: an empty panel with axes and a
+    title reads as a result, and the guide promises degenerate input raises."""
+    for name, value in arrays.items():
+        if np.size(value) == 0:
+            raise ConfigurationError(
+                f"{caller}: {name} is empty; there is nothing to draw.")
+
+
 def _default_value(field: Field) -> str:
     """The ``value`` view rendered when the caller names none.
 
     A time trace is linear pressure, not a level, so it defaults to the raw
-    samples; everything else defaults to its dB view. Shared so a panel drawn
-    inside a composite figure labels itself with the same view ``plot_field``
-    would have picked on its own."""
-    return 'real' if 'time' in field.coords else 'db'
+    samples; so does a real-valued field that is not a level and has no dB
+    view (a detection probability, unit '1'). Everything else defaults to its
+    dB view. Shared so a panel drawn inside a composite figure labels itself
+    with the same view ``plot_field`` would have picked on its own."""
+    if 'time' in field.coords:
+        return 'real'
+    if not field.is_complex and getattr(field, 'unit', None) == '1':
+        return 'real'
+    return 'db'
 
 
 def _value_label(field: Field, value: str) -> str:
@@ -263,6 +277,16 @@ def _value_label(field: Field, value: str) -> str:
     a second time to read its label."""
     if value == 'db':
         return _db_label(field)
+    if value == 'real':
+        # A time trace is p(t); a real field that is not pressure (a
+        # probability, a signal excess) is named by what it is — 'Re(p)'
+        # belongs to the real part of a complex pressure only.
+        if 'time' in field.coords:
+            return 'p(t)'
+        if not field.is_complex and getattr(field, 'kind', 'pressure') != 'pressure':
+            unit = getattr(field, 'unit', None)
+            name = str(field.kind).replace('_', ' ')
+            return name if unit in (None, '1', '') else f"{name} ({unit})"
     try:
         return _VALUE_LABELS[value]
     except KeyError:
@@ -373,21 +397,10 @@ def _flip_y(extent):
 
 
 def _imshow_extent(ranges_m: np.ndarray, depths: np.ndarray):
-    """Edge-aligned ``imshow`` extent for center-sampled (range, depth) data.
-
-    ``imshow`` stretches the array onto the OUTER edges of ``extent``, but
-    model ranges/depths are cell CENTERS. Pad by half a cell on each side so
-    every pixel centers on its coordinate — i.e. no half-cell shift versus the
-    model grid, the ``pcolormesh`` field views, or the seafloor overlay.
-    Returns ``(left_km, right_km, bottom, top)`` for ``origin='upper'`` (depth
-    increasing downward). Assumes a uniform grid, which is ``imshow``'s own
-    assumption anyway.
-    """
-    r_km = m_to_km(ranges_m)
-    z = np.asarray(depths, dtype=float)
-    dr = (r_km[1] - r_km[0]) / 2.0 if r_km.size > 1 else 0.5
-    dz = (z[1] - z[0]) / 2.0 if z.size > 1 else 0.5
-    return (r_km[0] - dr, r_km[-1] + dr, z[-1] + dz, z[0] - dz)
+    """``imshow`` extent for a (depth, range) field: cell edges, range in km,
+    depth increasing downward — :func:`_cell_edge_extent` flipped."""
+    return _flip_y(_cell_edge_extent(m_to_km(np.asarray(ranges_m, dtype=float)),
+                                     np.asarray(depths, dtype=float)))
 
 
 def _sink_line_into_sediment(line) -> None:
@@ -575,22 +588,39 @@ def _draw_credit(fig, data_attributions=(), *, model=None,
     Draws the licence-**required attribution** for the data **and** the model
     that produced the figure — the way a scientific figure credits its sources.
     Centred under ``center_ax`` when given (e.g. the map panel), else
-    bottom-left. ``reserve`` adds bottom margin (set ``False`` when the caller
+    bottom-left. ``reserve`` raises the subplot bottom until every axes'
+    tick and axis labels clear the footnote (set ``False`` when the caller
     already reserved space via ``tight_layout``).
     """
     lines = _credit_lines(data_attributions, model)
     if not lines:
         return
-    if reserve:                                        # one line reserved per row
-        fig.subplots_adjust(bottom=max(0.06 + 0.025 * len(lines),
-                                       fig.subplotpars.bottom))
     if center_ax is not None:
         pos = center_ax.get_position()
         x, ha = pos.x0 + pos.width / 2.0, 'center'
     else:
         x, ha = 0.012, 'left'
-    fig.text(x, 0.012, "\n".join(lines), ha=ha, va='bottom',
-             fontsize=7, color='0.45', linespacing=1.5)
+    credit = fig.text(x, 0.012, "\n".join(lines), ha=ha, va='bottom',
+                      fontsize=7, color='0.45', linespacing=1.5)
+    if reserve:
+        _reserve_credit_margin(fig, credit)
+
+
+def _reserve_credit_margin(fig, credit, pad_px=4.0):
+    """Raise the subplot bottom by the measured overlap between the credit
+    and the lowest axis label, so the footnote never runs into an x-label.
+
+    Measured, not a per-line constant: a fixed ``0.06 + 0.025/line`` margin
+    left a one-line credit 7 px inside plot_overview's longitude label and a
+    two-line one 22 px inside it.
+    """
+    renderer = fig.canvas.get_renderer()
+    top = credit.get_window_extent(renderer).y1 + pad_px
+    boxes = [ax.get_tightbbox(renderer) for ax in fig.axes if ax.get_visible()]
+    lowest = min((b.y0 for b in boxes if b is not None), default=top)
+    if top > lowest:
+        fig.subplots_adjust(
+            bottom=fig.subplotpars.bottom + (top - lowest) / fig.bbox.height)
 
 
 def _draw_result_credit(fig, result, *, env=None, data_source=True, **draw_kw):
@@ -636,11 +666,14 @@ def _draw_sea_ice(ax, sea_ice):
     ice_cmap = LinearSegmentedColormap.from_list('ice',
                                                  ['#05051a', '#3a0d63', '#7a2da8'])
     lc = LineCollection(segs, cmap=ice_cmap, norm=Normalize(0.0, 1.0),
-                        linewidths=4.5, capstyle='round', zorder=ZORDER_SURFACE)
+                        linewidths=4.5, capstyle='round',
+                        zorder=ZORDER_SURFACE + 0.5)   # over the ice band
     lc.set_array(0.5 * (conc[:-1] + conc[1:]))
     ax.add_collection(lc)
-    ax.text(0.985, 0.93, "ice", transform=ax.transAxes, ha='right', va='top',
-            fontsize=8, style='italic', color='#5b1a8b', zorder=ZORDER_SOURCE)
+    # Its own label, below the ice-band's "ice", so the two never overprint.
+    ax.text(0.985, 0.86, "sea-ice concentration", transform=ax.transAxes,
+            ha='right', va='top', fontsize=8, style='italic', color='#5b1a8b',
+            zorder=ZORDER_SOURCE)
 
 
 def _draw_surface_boundary(ax, env):
@@ -651,7 +684,7 @@ def _draw_surface_boundary(ax, env):
     leaves the plain free surface untouched. A range-dependent surface (a
     marginal ice zone) is drawn as per-range zones, mirroring the bottom.
     """
-    surface = getattr(env, 'surface', None)
+    surface = env.surface
     props = getattr(surface, 'properties', None)
     if not props:
         return
@@ -693,7 +726,7 @@ def _draw_altimetry(ax, env):
     (heights positive up → above z = 0). A flat / absent altimetry leaves the
     plain free surface.
     """
-    alti = getattr(env, 'altimetry', None)
+    alti = env.altimetry
     ranges = getattr(alti, 'ranges', None)
     heights = getattr(alti, 'heights', None)
     if ranges is None or heights is None or np.asarray(ranges).size < 2:

@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Optional, Union
 
 from uacpy.core.exceptions import ConfigurationError
-from uacpy.io.units import m_to_km
+from uacpy.core.units import m_to_km
 
 
 def write_inpe(

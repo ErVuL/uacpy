@@ -57,6 +57,12 @@ def _hatched_fill(facecolor) -> dict:
             'edgecolor': _blend('black', facecolor, 0.4), 'linewidth': 0.4}
 
 
+def _speeds_read_absolute(colorbar):
+    """Print a sound-speed colorbar's ticks as absolute m/s: a nearly constant
+    profile otherwise draws 0.0/0.4/0.8 over a "+1.5e3" offset."""
+    colorbar.ax.yaxis.get_major_formatter().set_useOffset(False)
+
+
 def _halfspace_fill_style(cp) -> dict:
     """Absolute-scale half-space fill — used for a *single* half-space (no
     per-plot bottom colorbar): flat tan when ``cp`` is ``None`` (vacuum / rigid
@@ -377,11 +383,14 @@ def _plot_environment(
         pool = list(cs_values) if len(cs_values) else [1500.0]
         cs_min = float(min(pool))
         cs_max = float(max(pool))
-        sm = ScalarMappable(
-            cmap=cmap,
-            norm=Normalize(vmin=cs_min,
-                           vmax=cs_max if cs_max > cs_min else cs_min + 1.0),
-        )
+        if cs_max <= cs_min:
+            # A constant profile gets a window centred on its value.
+            # Relative, not +1 m/s absolute: ticks over 1500–1501 need six
+            # significant digits, which the colorbar printed as 0.0/0.4/0.8
+            # over a "+1.5e3" offset.
+            pad = 0.05 * abs(cs_min) if cs_min else 0.5
+            cs_min, cs_max = cs_min - pad, cs_max + pad
+        sm = ScalarMappable(cmap=cmap, norm=Normalize(vmin=cs_min, vmax=cs_max))
         sm.set_array([])
         return cs_min, cs_max, sm
 
@@ -441,7 +450,10 @@ def _plot_environment(
             ssp_r_km_b, ssp.depths, ssp_grid,
             cmap=water_cmap,
             vmin=water_cs_min, vmax=water_cs_max,
-            shading='nearest', zorder=0,
+            # Linear between the profile's samples, in depth and range —
+            # what every model does with the SSP. 'nearest' painted a
+            # 3-sample profile as flat blocks stepping at depths it never has.
+            shading='gouraud', zorder=0,
         )
     else:
         ssp_1d = np.asarray(ssp.data, dtype=float).reshape(-1, 1)
@@ -451,7 +463,10 @@ def _plot_environment(
             x_water, ssp.depths, np.tile(ssp_1d, (1, 2)),
             cmap=water_cmap,
             vmin=water_cs_min, vmax=water_cs_max,
-            shading='nearest', zorder=0,
+            # Linear between the profile's samples, in depth and range —
+            # what every model does with the SSP. 'nearest' painted a
+            # 3-sample profile as flat blocks stepping at depths it never has.
+            shading='gouraud', zorder=0,
         )
 
     if bottom.is_range_dependent and bottom.is_layered:
@@ -492,12 +507,13 @@ def _plot_environment(
             cb.ax.tick_params(labelsize=6)
             cb.ax.yaxis.label.set_size(7)
             cb.ax.yaxis.set_major_locator(MaxNLocator(3))
+            _speeds_read_absolute(cb)
     else:
         # Also an inset, so a composite (``ax=``) layout keeps the caller's
         # full axes width and stays aligned with its neighbours.
-        fig.colorbar(water_sm,
-                     cax=ax_bathy.inset_axes([1.04, 0.01, 0.03, 0.98]),
-                     label='Water c (m/s)')
+        _speeds_read_absolute(fig.colorbar(
+            water_sm, cax=ax_bathy.inset_axes([1.04, 0.01, 0.03, 0.98]),
+            label='Water c (m/s)'))
 
     # Seafloor line on top of the bottom rendering.
     if env.has_range_dependent_bathymetry:
@@ -722,7 +738,10 @@ def plot_bottom_properties(env, *, properties=None, title: Optional[str] = None,
         finite = grid[np.isfinite(grid)]
         vmin, vmax = float(np.min(finite)), float(np.max(finite))
         if vmin == vmax:
-            vmin, vmax = vmin - 0.5, vmax + 0.5
+            # Relative, not ±0.5 absolute: on a 1650 m/s value an absolute
+            # half-unit window makes the colorbar print offset ticks.
+            pad = 0.05 * abs(vmin) if vmin else 0.5
+            vmin, vmax = vmin - pad, vmax + pad
         pcm = ax_p.pcolormesh(r_km, z, grid, cmap=cmap,
                               vmin=vmin, vmax=vmax, shading='auto')
         ax_p.plot(r_km, seafloor_r, color='black', linewidth=1.2, zorder=5)

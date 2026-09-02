@@ -43,7 +43,7 @@ from uacpy.core.exceptions import (
 )
 from uacpy.io.refl_io import read_reflection_coefficient, dedupe_reflection_file
 from uacpy.io.oalib_writer import write_bounce_input_file, writable_layers
-from uacpy.io.units import m_to_km
+from uacpy.core.units import m_to_km
 
 # bounce.f90 zeroes kMin (drops the 1/cHigh term in NkTab) once cHigh > 1e6.
 _KMIN_CUTOFF_CHIGH = 1.0e6

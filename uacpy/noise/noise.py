@@ -110,6 +110,9 @@ def compute_windnoise(frequencies, u, water_depth='deep', band_integrate=False):
         in the input. Default False — return the spectral level
         (dB re 1 µPa²/Hz). Use the band form to pair wind noise with a
         band-integrated source level; :class:`WenzNoise` is spectral-only.
+        The first and last entries are half-bands — their outer edge is the
+        vector's own end — and so sit 2.5-3.5 dB below a full band; see the
+        noise guide for the band-edge rule.
 
         Because the widths come from the vector's own spacing,
         ``frequencies`` has to be a set of analysis-band **centres** for the
@@ -407,7 +410,11 @@ def _shipping_wenz(frequencies, *, shipping_level, water_depth, **_):
         # dtype=float, not full_like: an integer frequency vector casts -inf
         # to INT64_MIN, and these registries are public entry points.
         return np.full(np.shape(f), -np.inf, dtype=float)
-    c2 = _SHIPPING_C2[shipping_level]
+    try:
+        c2 = _SHIPPING_C2[shipping_level]
+    except KeyError:
+        raise ConfigurationError(
+            f"shipping_level={shipping_level!r} is not one of {sorted(_SHIPPING_C2)}.") from None
     return 76 - 20 * (np.log10(f) - np.log10(c1)) ** 2 + 5 * (c2 - 4)
 
 
@@ -419,7 +426,11 @@ def _shipping_coates(frequencies, *, shipping_level, **_):
     ``40 + 20(s − 0.5) + 26·log10(f) − 60·log10(f + 0.03)`` with ``f`` in kHz
     and ``s`` the shipping-activity factor in [0, 1] (low/medium/high →
     0/0.5/1; ``'no'`` is silent)."""
-    s = _COATES_SHIP_ACTIVITY[shipping_level]
+    try:
+        s = _COATES_SHIP_ACTIVITY[shipping_level]
+    except KeyError:
+        raise ConfigurationError(
+            f"shipping_level={shipping_level!r} is not one of {sorted(_COATES_SHIP_ACTIVITY)}.") from None
     fk = _as_frequency_array(frequencies, "_shipping_coates") / 1000.0
     if s is None:
         return np.full(fk.shape, -np.inf, dtype=float)
@@ -457,7 +468,11 @@ def _rain_torres_costa(frequencies, *, rain_rate, **_):
     f = _as_frequency_array(frequencies, "_rain_torres_costa")
     if rain_rate == 'no':
         return np.full(np.shape(f), -np.inf, dtype=float)
-    ir = _RAIN_INDEX[rain_rate]
+    try:
+        ir = _RAIN_INDEX[rain_rate]
+    except KeyError:
+        raise ConfigurationError(
+            f"rain_rate={rain_rate!r} is not one of {sorted(_RAIN_INDEX)}.") from None
 
     def cubic(f_khz):
         return (_RAIN_R0[ir] + _RAIN_R1[ir] * f_khz

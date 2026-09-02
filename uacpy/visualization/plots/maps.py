@@ -7,6 +7,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.colors as _mcolors
 import matplotlib.collections as _mcoll
+import matplotlib.patheffects as _patheffects
 import matplotlib.ticker as _mticker
 from typing import Optional, Tuple
 
@@ -66,6 +67,33 @@ def _lon_tick_label(lon):
     hemisphere, so a tick at 182° reads 178°W."""
     value = _lon_label_value(lon)
     return f"{abs(value):g}°{'E' if value >= 0 else 'W'}"
+
+
+_LABEL_OFFSET_PT = 6.0
+
+
+def _endpoint_label_offset(ax, here, other):
+    """Offset (points) of a transect end label: inside the axes, beside the
+    line.
+
+    Of the four diagonal offsets, those that would carry the label out of the
+    axes are dropped first — a transect starting at the window's corner
+    otherwise pushed its label over the title — and the survivor closest to
+    perpendicular to the line wins, so the label sits beside the line rather
+    than on it.
+    """
+    to_px = ax.figure.dpi / 72.0
+    p, q = ax.transData.transform([here, other])
+    along = (q - p) / (np.hypot(*(q - p)) or 1.0)
+
+    def label_stays_inside(offset):                # 2.5 offsets ~ the label's extent
+        x, y = p + np.asarray(offset) * to_px * 2.5
+        return ax.bbox.x0 < x < ax.bbox.x1 and ax.bbox.y0 < y < ax.bbox.y1
+    candidates = [(sx * _LABEL_OFFSET_PT, sy * _LABEL_OFFSET_PT)
+                  for sx in (1, -1) for sy in (1, -1)]
+    kept = [c for c in candidates if label_stays_inside(c)] or candidates
+    return min(kept, key=lambda c: abs(np.dot(np.asarray(c) / np.hypot(*c),
+                                              along)))
 
 
 @typed_plot_error
@@ -202,10 +230,17 @@ def plot_bathymetry_map(
         # (zorder 4, drawn on top of the map), so 'B' isn't crossed out by gridlines.
         ax.plot([pa[0], pb[0]], [pa[1], pb[1]], '-', color='crimson', lw=2.5,
                 marker='o', mec='k', zorder=5, label='transect')
-        for lbl, (la, lo) in (('A', (a_lat, a_lon)), ('B', (b_lat, b_lon))):
-            ax.annotate(lbl, proj(la, lo), color='crimson', fontweight='bold',
-                        xytext=(6, 6), textcoords='offset points', zorder=6)
-        ax.legend(loc='upper left')
+        for lbl, here, other in (('A', pa, pb), ('B', pb, pa)):
+            dx, dy = _endpoint_label_offset(ax, here, other)
+            ax.annotate(lbl, here, color='crimson', fontweight='bold',
+                        xytext=(dx, dy), textcoords='offset points',
+                        ha='left' if dx > 0 else 'right',
+                        va='bottom' if dy > 0 else 'top', zorder=6,
+                        path_effects=[_patheffects.withStroke(
+                            linewidth=2.5, foreground='white')])
+        # 'best' keeps the legend off the transect line and its end markers;
+        # 'upper left' sat on the start marker of a transect from that corner.
+        ax.legend(loc='best')
     if source is not None:
         s_lat, s_lon = source
         sp = proj(s_lat, s_lon)

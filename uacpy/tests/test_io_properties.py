@@ -267,7 +267,7 @@ class TestWriterReaderRoundTrips:
         list-directed READ, so packed and wrapped layouts are the same
         table; the values must come back exactly as spelled."""
         from uacpy.io.refl_io import read_reflection_coefficient
-        from uacpy.io.units import deg_to_rad
+        from uacpy.core.units import deg_to_rad
         rng = np.random.default_rng(0x5EED06)
         for case in range(12):
             n = int(rng.integers(1, 30))

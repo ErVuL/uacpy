@@ -13,6 +13,16 @@ from uacpy.core.units import m_to_km
 from uacpy.visualization.plots._common import ZORDER_LEGEND, ZORDER_RAYS, ZORDER_SURFACE, _overlay_seafloor, _draw_geometry, _draw_receiver_grid, _draw_result_credit, _plot_warn, fig_ax, typed_plot_error, invert_yaxis_once
 
 
+#: Multipath class -> colour, for the ray fan and the arrival stems alike:
+#: direct red, surface-reflected green, bottom-reflected blue, both black.
+RAY_CLASS_COLOURS = {
+    'direct': '#e53935',
+    'surface': '#43a047',
+    'bottom': '#1e88e5',
+    'both': '#000000',
+}
+
+
 @typed_plot_error
 def _plot_rays(
     rays: Rays,
@@ -48,12 +58,7 @@ def _plot_rays(
     _owns_fig = ax is None
     fig, ax = fig_ax(ax, figsize)
 
-    color_map = {
-        'direct': '#e53935',
-        'surface': '#43a047',
-        'bottom': '#1e88e5',
-        'both': '#000000',
-    }
+    color_map = RAY_CLASS_COLOURS
     bounce_counts = {'direct': 0, 'surface': 0, 'bottom': 0, 'both': 0}
     max_r_km = 0.0
     max_z = 0.0
@@ -188,12 +193,7 @@ def _plot_arrivals(
         )
     _owns_fig = ax is None
     fig, ax = fig_ax(ax, figsize)
-    color_map = {
-        'direct': '#e53935',
-        'surface': '#43a047',
-        'bottom': '#1e88e5',
-        'both': '#000000',
-    }
+    color_map = RAY_CLASS_COLOURS
     counts = {k: 0 for k in color_map}
     delays_ms = []
     beyond = []
@@ -230,7 +230,7 @@ def _plot_arrivals(
         ax.set_xlim(lo, hi)
         beyond = [d for d in delays_ms if d > hi]
     ax.set_xlabel('Delay (ms)')
-    ax.set_ylabel('Received amplitude')
+    ax.set_ylabel('Received amplitude (re unit source)')
     ax.grid(True, alpha=0.3)
     # Legend with per-class counts (skip empty classes).
     import matplotlib.lines as mlines
@@ -840,6 +840,7 @@ def plot_beam_pattern(
     ax.set_thetamax(fan_hi)
     ax.set_thetagrids(_BEAM_PATTERN_TICKS, labels=_BEAM_PATTERN_TICK_LABELS)
     ax.set_rlim(inner, levels.max())
+    ax.set_ylabel('Level (dB re peak)', labelpad=22)   # the rectilinear view's label
     # A polar radius is short and every radial label sits on the one spoke, so
     # the ~9 ticks a linear dB axis defaults to overprint one another.
     from matplotlib.ticker import MaxNLocator

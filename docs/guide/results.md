@@ -224,7 +224,7 @@ tl.at(range=3000.0).plot()          # coords = {depth}         → depth cut
 ```
 
 The two cut panels were given **no** title. The titles you see — `Depth =
-60.4 m` and `Range = 2.99e+03 m` — are the plotter rendering `field.pinned`,
+60.4 m` and `Range = 2.99 km` — are the plotter rendering `field.pinned`,
 and they are the honest answer to "what did I actually get?":
 
 ```python

@@ -1148,13 +1148,13 @@ class TestZeroRangeReceiverIsNaN:
 
     def test_mpirams_tl_r0_column_is_nan_and_warns_once(self):
         env, src, rcv = self._setup()
-        with pytest.warns(UserWarning, match=r"starts at r=0 m") as record:
+        with pytest.warns(UserWarning, match=r"RAM: 1 receiver range\(s\) at r = 0") as record:
             field = RAM(verbose=False).run(env, src, rcv,
                                            run_mode=RunMode.COHERENT_TL)
         r0_warnings = [w for w in record
-                       if 'r=0' in str(w.message) or 'r <= 0' in str(w.message)]
+                       if 'r = 0' in str(w.message)]
         assert len(r0_warnings) == 1, (
-            f"expected the shared run() warning alone, got "
+            f"expected the shared source-axis warning once, got "
             f"{[str(w.message) for w in r0_warnings]}")
         assert np.isnan(field.data[:, 0]).all()
         assert np.isfinite(field.data[:, 1:]).all()
@@ -2147,13 +2147,10 @@ class TestCollinsBroadbandSizesItsRangeStepAtTheBandTop:
 class TestRamWarnsWhenReceiverRangesStartAtZero:
     """RAM writes no r=0 column on any backend: the self-starter sets ``r=dr``
     before its only ``outpt`` call (``ramgeo1.5.f:124,172``) and the march loop
-    advances ``r=r+dr`` at ``:82`` BEFORE ``outpt`` at ``:83``.
-
-    The Collins near-range guard filters ``near[near > 0.0]`` — deliberately,
-    so its "pin a smaller dr" advice stays honest, since that advice is exactly
-    what cannot fix zero — so r=0 fell through every check and returned bare
-    NaN. Bellhop warns on identical geometry, so ``np.linspace(0, R, N)`` cost
-    a silent column on one engine and a warning on another.
+    advances ``r=r+dr`` at ``:82`` BEFORE ``outpt`` at ``:83``. Every backend
+    hands its assembled field to the shared ``_mask_source_axis``, which NaNs
+    that column and warns once per run with the family's one wording — so
+    ``np.linspace(0, R, N)`` reads the same on RAM as on Kraken or OASES.
     """
 
     @staticmethod
@@ -2166,7 +2163,7 @@ class TestRamWarnsWhenReceiverRangesStartAtZero:
 
     @staticmethod
     def _zero_range_warnings(record):
-        return [w for w in record if 'r=0 m' in str(w.message)]
+        return [w for w in record if 'at r = 0, where' in str(w.message)]
 
     def test_a_zero_first_range_warns_and_the_column_is_nan(self):
         import warnings
@@ -2195,8 +2192,8 @@ class TestRamWarnsWhenReceiverRangesStartAtZero:
         assert self._zero_range_warnings(rec) == []
 
     def test_a_broadband_sweep_warns_once_not_once_per_frequency(self):
-        # The check sits ahead of the backend dispatch precisely so the
-        # frequency loop does not repeat it.
+        # The mask runs once on the assembled broadband field, not inside
+        # the frequency loop.
         import warnings
         import numpy as np
         from uacpy.core import Receiver, Source
@@ -2212,8 +2209,8 @@ class TestRamWarnsWhenReceiverRangesStartAtZero:
         assert len(self._zero_range_warnings(rec)) == 1
 
     def test_the_collins_family_warns_on_the_same_geometry(self):
-        # mpiramS and the Collins backends reach the guard by different
-        # dispatch arms; one wording covers both.
+        # mpiramS and the Collins backends assemble their fields in different
+        # methods; each hands its field to the same mask.
         import warnings
         import numpy as np
         from uacpy.core import Receiver, Source
@@ -2225,7 +2222,8 @@ class TestRamWarnsWhenReceiverRangesStartAtZero:
                 self._env(), Source(depths=25.0, frequencies=100.0), rcv)
         hits = self._zero_range_warnings(rec)
         assert len(hits) == 1
-        assert 'ramgeo' in str(hits[0].message)
+        assert str(hits[0].message).startswith(
+            'RAM: 1 receiver range(s) at r = 0, where the point-source')
 
 
 class TestRamLeavesRealSeabedBeforeTheAbsorber:

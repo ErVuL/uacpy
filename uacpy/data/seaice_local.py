@@ -39,6 +39,7 @@ from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.data import _cache
 from uacpy.data._geo import (
+    require_month,
     Coordinate, as_coordinate, normalize_lon, ring_offsets,
 )
 from uacpy.data._http import http_get
@@ -251,12 +252,14 @@ def _rowcol(model, hemi, lat, lon):
 _OBSERVED_CELL_SEARCH_RINGS = 2
 
 
-def _observed_at(grid, row, col):
+def _observed_at(grid, row, col, rank=None):
     """``(concentration, cell)`` at ``(row, col)`` or its nearest observed
     neighbour.
 
     ``cell`` is the ``(row, col)`` the value actually came from, so the caller
-    can tell a substitution from a direct hit. Returns ``(NaN, None)`` when no
+    can tell a substitution from a direct hit. ``rank(row, col)`` orders the
+    candidate cells — the projected distance from the requested point, from
+    :func:`_concentration`. Returns ``(NaN, None)`` when no
     cell within :data:`_OBSERVED_CELL_SEARCH_RINGS` carries a value, which is
     the signature of genuine land.
     """
@@ -264,13 +267,18 @@ def _observed_at(grid, row, col):
     if np.isfinite(value):
         return float(value), (row, col)
     height, width = grid.shape
-    for radius in range(1, _OBSERVED_CELL_SEARCH_RINGS + 1):
-        for dr, dc in ring_offsets(radius):
-            r, c = row + dr, col + dc
-            if 0 <= r < height and 0 <= c < width:
-                candidate = grid[r, c]
-                if np.isfinite(candidate):
-                    return float(candidate), (r, c)
+    cells = [(row + dr, col + dc)
+             for radius in range(1, _OBSERVED_CELL_SEARCH_RINGS + 1)
+             for dr, dc in ring_offsets(radius)
+             if 0 <= row + dr < height and 0 <= col + dc < width]
+    # Nearest to the REQUEST point when the caller says where that is; ring
+    # order otherwise (its ties break in file order).
+    if rank is not None:
+        cells.sort(key=lambda rc: rank(*rc))
+    for r, c in cells:
+        candidate = grid[r, c]
+        if np.isfinite(candidate):
+            return float(candidate), (r, c)
     return float('nan'), None
 
 
@@ -293,18 +301,27 @@ def _concentration(lat, lon, month):
     rc = _rowcol(m, hemi, lat, lon)
     if rc is None:
         return 0.0                              # outside the polar grid → ice-free
-    value, cell = _observed_at(m[hemi][month - 1], *rc)
+    # Squared projected distance from the requested point to a cell centre,
+    # so the substitute is the observed cell nearest the REQUEST, not the
+    # first in ring order.
+    g = _GRID[hemi]
+    x, y = m['tf'][hemi].transform(normalize_lon(lon), lat)
+
+    def rank(r, c):
+        return ((g['x0'] + (c + 0.5) * g['px'] - x) ** 2
+                + (g['y0'] - (r + 0.5) * g['px'] - y) ** 2)
+
+    value, cell = _observed_at(m[hemi][month - 1], *rc, rank=rank)
     if cell is not None and cell != rc:
         # Name the cell the value came from, as `sound_speed._nearest_wet_column`
         # does for its dry-cell hop: the substitution is up to
         # _OBSERVED_CELL_SEARCH_RINGS cells (50 km) and changes the answer.
         sub_lat, sub_lon = _cell_center(m, hemi, *cell)
-        rings = max(abs(cell[0] - rc[0]), abs(cell[1] - rc[1]))
         warnings.warn(
             f"NSIDC sea ice: the cell at ({lat:.3f}, {lon:.3f}) is unobserved "
             f"(coastal land spillover); using the nearest observed cell "
-            f"({sub_lat:.3f}, {sub_lon:.3f}), {rings} cell(s) — "
-            f"{rings * _GRID[hemi]['px'] / 1000:.0f} km — away.",
+            f"({sub_lat:.3f}, {sub_lon:.3f}), {np.sqrt(rank(*cell)) / 1000:.0f} "
+            f"km from the requested point.",
             UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
         )
     return value
@@ -326,10 +343,10 @@ def fetch_sea_ice_concentration(point: Coordinate, *, date=None,
             "fetch_sea_ice_concentration: pass either date= or month=, not both.")
     if date is not None:
         month = parse_date(date).month
-    if month is None or not 1 <= int(month) <= 12:
+    if month is None:
         raise ConfigurationError(
             "fetch_sea_ice_concentration: a date= or month= (1-12) is required.")
-    conc = _concentration(lat, lon, int(month))
+    conc = _concentration(lat, lon, require_month(month, "fetch_sea_ice_concentration"))
     if not np.isfinite(conc):
         raise DataFetchError(
             f"NSIDC sea ice has no ocean value at {lat:.3f}, {lon:.3f}, nor "
@@ -419,7 +436,7 @@ def sea_ice_grid(month: int, *, hemi: str = 'N') -> np.ndarray:
     ``hemi`` is ``'N'`` / ``'S'``; the array is on the NSIDC polar-stereographic
     grid (North EPSG:3411, South EPSG:3412, 25 km).
     """
-    if hemi not in _GRID or not 1 <= int(month) <= 12:
+    if hemi not in _GRID or not 1 <= require_month(month, 'sea_ice_grid') <= 12:
         raise ConfigurationError(
             "sea_ice_grid: hemi must be 'N'/'S' and month 1-12.")
     return _model()[hemi][int(month) - 1]

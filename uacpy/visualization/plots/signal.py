@@ -14,6 +14,7 @@ from uacpy.core.constants import (REFERENCE_PRESSURE_AIR,
 from uacpy.core.acoustics import power_to_db
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.visualization.plots._common import (_cell_edge_extent, _flip_y,
+                                               _require_nonempty,
                                                fig_ax, typed_plot_error,
                                                _plot_warn)
 
@@ -31,8 +32,9 @@ def _require_image_grid(arr, n0, n1, caller, name0, name1):
         raise ConfigurationError(
             f"{caller}: data array shape {a.shape} does not match the "
             f"coordinate lengths ({name0}={n0}, {name1}={n1}). Pass the "
-            f"transform's own output unmodified — a mismatch would silently "
-            f"render a wrong image.")
+            f"transform's own output unmodified — a mismatch would render a "
+            f"wrong image (imshow) or raise matplotlib's own shading error "
+            f"(pcolormesh).")
     return a
 
 
@@ -280,6 +282,10 @@ def plot_ppsd(result, ax=None, *, ymin=0, ymax=200, vmin=0, vmax=None,
               cmap="jet", title=None, figsize=(10, 6), show_colorbar=True,
               **mpl_kw):
     """2-D histogram of PSD levels. Consumes a ``PPSDResult``."""
+    if not hasattr(result, 'frequencies') or not hasattr(result, 'level_edges'):
+        raise ConfigurationError(
+            f"plot_ppsd: expected a ppsd() result (with .frequencies and "
+            f".level_edges); got {type(result).__name__}.")
     if vmax is None:
         # Each frequency column integrates to 1 over the level axis, so the
         # largest attainable density is 1/binwidth (all mass in one bin) —
@@ -356,7 +362,9 @@ def plot_spectrogram(frequencies, times, Sxx, ax=None, *,
     the 1 Hz clamp the default applies. A clamp that sits above the record's
     whole band would reverse the axis, so such a band starts at its own first
     positive bin instead."""
-    Sxx_db = power_to_db(np.asarray(Sxx), ref)
+    Sxx_db = _require_image_grid(power_to_db(np.asarray(Sxx), ref),
+                                 len(frequencies), len(times),
+                                 'plot_spectrogram', 'frequencies', 'times')
     fig, ax = fig_ax(ax, figsize)
     pcm = ax.pcolormesh(times, frequencies, Sxx_db, cmap=cmap, shading="auto",
                         vmin=vmin, vmax=vmax, **mpl_kw)
@@ -386,7 +394,10 @@ def plot_constant_q_spectrogram(frequencies, times, power, ax=None, *,
     the same ``scaling`` used there so the unit reads ``Pa²`` (band power) or
     ``Pa²/Hz`` (density)."""
     unit = f"{_ref_label(ref)}Pa²" + ("/Hz" if scaling == "density" else "")
-    power_db = power_to_db(np.asarray(power), ref)
+    power_db = _require_image_grid(power_to_db(np.asarray(power), ref),
+                                   len(frequencies), len(times),
+                                   'plot_constant_q_spectrogram',
+                                   'frequencies', 'times')
     fig, ax = fig_ax(ax, figsize)
     pcm = ax.pcolormesh(times, frequencies, power_db, cmap=cmap, shading="auto",
                         vmin=vmin, vmax=vmax, **mpl_kw)
@@ -474,6 +485,10 @@ def plot_cwt(frequencies, W, sample_rate, ax=None, *, cmap="jet", title=None,
     """Scalogram ``|W|`` (time on x, frequency on y). Consumes :func:`cwt`
     output ``(frequencies, W)``."""
     amp = np.abs(np.asarray(W))
+    if amp.ndim != 2 or amp.shape[0] != len(frequencies):
+        raise ConfigurationError(
+            f"plot_cwt: W has shape {amp.shape}; expected (len(frequencies)="
+            f"{len(frequencies)}, n_samples) — pass cwt()'s own output.")
     t = np.arange(amp.shape[1]) / float(sample_rate)
     fig, ax = fig_ax(ax, figsize)
     pcm = ax.pcolormesh(t, frequencies, amp, cmap=cmap, shading="auto", **mpl_kw)
@@ -490,8 +505,11 @@ def plot_wigner_ville(frequencies, times, W, ax=None, *, cmap="jet", title=None,
                       figsize=(10, 6), show_colorbar=True, **mpl_kw):
     """Wigner-Ville distribution image. Consumes :func:`wigner_ville` output
     ``(frequencies, times, W)``."""
+    W_real = _require_image_grid(np.real(np.asarray(W)), len(frequencies),
+                                 len(times), 'plot_wigner_ville',
+                                 'frequencies', 'times')
     fig, ax = fig_ax(ax, figsize)
-    pcm = ax.pcolormesh(times, frequencies, np.real(np.asarray(W)), cmap=cmap,
+    pcm = ax.pcolormesh(times, frequencies, W_real, cmap=cmap,
                         shading="auto", **mpl_kw)
     if show_colorbar:
         fig.colorbar(pcm, ax=ax, label="WVD")
@@ -505,6 +523,7 @@ def plot_wigner_ville(frequencies, times, W, ax=None, *, cmap="jet", title=None,
 def plot_cepstrum(c, ax=None, *, sample_rate=None, title=None, figsize=(9, 4),
                   **mpl_kw):
     """Line plot of a cepstrum vs quefrency. Consumes :func:`cepstrum` output."""
+    _require_nonempty('plot_cepstrum', c=c)
     c = np.real(np.asarray(c))
     fig, ax = fig_ax(ax, figsize)
     if sample_rate is not None:
@@ -527,6 +546,7 @@ def plot_band_levels(centers, levels, ax=None, *, title=None, width=0.8,
                      ref_label="1 µPa²", figsize=(9, 4), **mpl_kw):
     """Bar plot of decidecade band levels vs centre frequency. Consumes
     :func:`decidecade_band_levels` output."""
+    _require_nonempty('plot_band_levels', centers=centers, levels=levels)
     c = np.asarray(centers, dtype=float)
     lv = np.asarray(levels, dtype=float)
     fig, ax = fig_ax(ax, figsize)

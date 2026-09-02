@@ -1386,6 +1386,18 @@ class TestIrregularGridBroadband:
         assert list(result.coords) == ['range', 'time']
         assert result.data.shape[0] == 3
 
+    def test_the_mismatch_error_names_the_sorted_diagonal_pairing(self, tmp_path):
+        """BELLHOP sorts both receiver lists before pairing them
+        (``SourceReceiverPositions.f90:224``), so the error says what an
+        irregular grid can express instead of leaving the user to guess."""
+        env = Environment(bathymetry=100.0, ssp=1500.0)
+        src = Source(depths=10.0, frequencies=100.0)
+        rcv = Receiver(depths=[10.0, 20.0, 30.0], ranges=[100.0, 200.0])
+        with pytest.raises(ConfigurationError,
+                           match=r"sorts both lists.*monotone diagonal"):
+            Bellhop(verbose=False, grid_type='I', work_dir=tmp_path).run(
+                env, src, rcv, RunMode.COHERENT_TL)
+
     def test_the_writer_refuses_a_mismatched_irregular_grid(self, tmp_path):
         """``ReadEnvironmentBell.f90:414`` ERROUTs on ``NRz != NRr``; the
         public writer must refuse it rather than emit a rejected deck."""
@@ -2606,10 +2618,13 @@ class TestBellhopMinimumBeamFan:
         Bellhop(n_beams=2, verbose=False)._check_beam_count_supports_run_mode(
             RunMode.COHERENT_TL)
 
-    def test_a_single_ray_trace_is_allowed(self):
-        for mode in (RunMode.RAYS, RunMode.EIGENRAYS):
-            Bellhop(n_beams=1,
-                    verbose=False)._check_beam_count_supports_run_mode(mode)
+    def test_a_single_ray_trace_is_allowed_but_not_a_single_beam_eigenray_search(self):
+        # bellhop.f90:288 skips influence for RAYS only; EIGENRAYS detect
+        # receiver hits inside the influence step, where one beam has no width.
+        Bellhop(n_beams=1, verbose=False)._check_beam_count_supports_run_mode(RunMode.RAYS)
+        with pytest.raises(ConfigurationError, match='single beam'):
+            Bellhop(n_beams=1, verbose=False)._check_beam_count_supports_run_mode(
+                RunMode.EIGENRAYS)
 
 
 @pytest.mark.requires_binary
@@ -2978,3 +2993,106 @@ class TestTheDefaultBroadbandGridReportsWhatItFolds:
         assert _messages(lambda: Bellhop(verbose=False).run(
             env, source, receiver, run_mode=RunMode.BROADBAND,
             frequencies=grid), "fold back onto the early trace") == []
+
+
+@pytest.mark.requires_binary
+class TestRayCentredBeamsFillEveryRequestedRangeColumn:
+    """influence.f90 clamps the range index to 1 and steps from irA + 1 for
+    'C', 'R' and 'g' ('C' also returns before the last range), so without help
+    the first (and last) requested column comes back NaN with no notice. The
+    wrapper writes one extra range at each end and trims them off."""
+
+    def _run(self, beam_type, ranges):
+        env = uacpy.Environment(name='pad', bathymetry=100.0, ssp=1500.0)
+        source = Source(depths=50.0, frequencies=200.0)
+        receiver = Receiver(depths=[30.0, 60.0], ranges=ranges)
+        return Bellhop(verbose=False, beam_type=beam_type, n_beams=200).run(
+            env, source, receiver, run_mode=RunMode.COHERENT_TL)
+
+    @pytest.mark.parametrize('beam_type', ['C', 'R', 'g'])
+    def test_first_and_last_columns_are_finite(self, beam_type):
+        ranges = np.linspace(400.0, 1200.0, 5)
+        field = self._run(beam_type, ranges)
+        assert np.allclose(np.asarray(field.coords['range']), ranges)
+        data = np.asarray(field.data)
+        assert data.shape[-1] == ranges.size
+        assert np.all(np.isfinite(data[:, 0])), data[:, 0]
+        assert np.all(np.isfinite(data[:, -1])), data[:, -1]
+
+    def test_the_padding_does_not_move_the_interior(self):
+        ranges = np.linspace(400.0, 1200.0, 5)
+        a = np.asarray(self._run('R', ranges).data)
+        b = np.asarray(self._run('R', np.linspace(200.0, 1400.0, 7)).data)
+        np.testing.assert_allclose(a, b[:, 1:-1], rtol=1e-5, atol=1e-9)
+
+    def test_a_first_range_within_one_step_of_the_source_is_declared(self):
+        msgs = _messages(lambda: self._run('R', np.linspace(100.0, 500.0, 5)),
+                         "never fills the first receiver-range column")
+        assert len(msgs) == 1, msgs
+
+
+@pytest.mark.requires_binary
+class TestTheTimeSeriesEchoNoticeIsSaidOnce:
+    def test_a_window_that_drops_every_echo_is_reported_once_as_all(self):
+        env = uacpy.Environment(name='once', bathymetry=300.0, ssp=1500.0)
+        source = Source(depths=150.0, frequencies=2e3)
+        receiver = Receiver(depths=[150.0], ranges=[1000.0])
+        fs = 8e3
+        t = np.arange(int(0.005 * fs)) / fs
+        wf = np.hanning(t.size) * np.sin(2 * np.pi * 2e3 * t)
+        # Anchored at emission, a 0.3 s window closes before the first echo
+        # at ~0.67 s: every echo is dropped.
+        msgs = _messages(lambda: Bellhop(verbose=False).run(
+            env, source, receiver, run_mode=RunMode.TIME_SERIES,
+            source_waveform=wf, sample_rate=fs, output_duration=0.3),
+            "does not hold every echo")
+        assert len(msgs) == 1, msgs
+        assert "all of the received energy" in msgs[0]
+
+
+class TestArrivalsAreMergedExactlyOnce:
+    """Sequential Fortran Bellhop merges bracketing pairs as it accumulates;
+    the multithreaded C++ engine leaves them for the reader. Re-merging a
+    merged file is not a no-op, so the reader reads as written by default and
+    the wrapper asks for the merge only where the engine skipped it."""
+
+    def test_the_reader_reads_as_written_by_default(self):
+        import inspect
+        from uacpy.io.oalib_reader import read_arr_file
+        assert inspect.signature(read_arr_file).parameters['merge'].default is False
+
+    def test_the_wrapper_keys_the_merge_on_the_engine(self):
+        model = Bellhop(verbose=False)
+        model.version = 'fortran'
+        assert model._arrivals_need_merge() is False
+        model.version = 'cuda'
+        assert model._arrivals_need_merge() is True
+
+    @pytest.mark.requires_binary
+    def test_both_backends_return_the_same_arrivals(self):
+        env = uacpy.Environment(name='inv', bathymetry=100.0, ssp=1500.0)
+        source = Source(depths=50.0, frequencies=200.0)
+        receiver = Receiver(depths=[30.0, 70.0], ranges=[3000.0])
+        results = {}
+        for backend in ('fortran', 'cxx'):
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                model = Bellhop(verbose=False, backend=backend, n_beams=300)
+            if model.version != backend:
+                pytest.skip(f"{backend} binary not installed")
+            results[backend] = model.run(env, source, receiver,
+                                         run_mode=RunMode.ARRIVALS)
+        f, c = results['fortran'], results['cxx']
+        assert len(f.arrivals) == len(c.arrivals)
+        np.testing.assert_allclose(np.sort(f.delays), np.sort(c.delays),
+                                   atol=2e-6, rtol=0)
+
+
+class TestASingleBeamCannotCarryEigenrays:
+    def test_eigenrays_with_one_beam_are_refused_before_the_run(self):
+        env = uacpy.Environment(name='one', bathymetry=100.0, ssp=1500.0)
+        source = Source(depths=50.0, frequencies=200.0)
+        receiver = Receiver(depths=[50.0], ranges=[1000.0])
+        with pytest.raises(ConfigurationError, match='single beam'):
+            Bellhop(verbose=False, n_beams=1).run(
+                env, source, receiver, run_mode=RunMode.EIGENRAYS)

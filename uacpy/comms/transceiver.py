@@ -31,12 +31,11 @@ from typing import Optional
 
 import numpy as np
 
-from uacpy.comms._equalizer_core import regularizer
 from uacpy.comms.coding import ConvCode
 from uacpy.comms.doppler import compensate_doppler, estimate_doppler_scale
 from uacpy.comms.equalization import DFE, slicer
 from uacpy.comms.modulation import Modulator
-from uacpy.comms.ofdm import (
+from uacpy.comms.ofdm import (equalize_subcarriers,
     ofdm_symbol,
     apply_cfo,
     estimate_channel,
@@ -148,6 +147,23 @@ class CommsReceiver:
             self.preamble = _default_preamble(n, modulation)
         else:
             self.preamble = np.asarray(preamble, dtype=complex)
+        if equalizer is not None and getattr(equalizer, 'forget', None) is None:
+            # LMS converges in ~20 N symbols against RLS's ~2 N (Istepanian &
+            # Stojanovic); a preamble shorter than that leaves the taps
+            # half-trained when the payload starts — measured, 16-QAM at
+            # step 0.01 with 64 training symbols decoded at BER 0.22 from a
+            # 0.8 rad carrier offset, while 256 symbols or RLS gave 0.
+            n_taps = int(getattr(equalizer, 'n_ff', 0)) + int(getattr(equalizer, 'n_fb', 0))
+            needed = 20 * n_taps
+            if self.preamble.size < needed:
+                warnings.warn(
+                    f"CommsReceiver: the equalizer adapts by LMS, which needs "
+                    f"about 20 x {n_taps} = {needed} training symbols to "
+                    f"converge, and the preamble has {self.preamble.size}. "
+                    f"Higher-order constellations may decode wrongly after a "
+                    f"carrier-phase offset. Pass preamble={needed} or more, or "
+                    f"DFE(forget=0.99...) for RLS, which converges in ~2 N.",
+                    UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
 
     def from_passband(self, samples, sample_rate, fc, sps=8, rolloff=0.25, span=8,
                       loop_bw=0.005):
@@ -162,9 +178,13 @@ class CommsReceiver:
 
         Detects the preamble (frame sync), trains the equalizer on it, then
         equalizes/demodulates/decodes the payload. Without an equalizer the
-        payload is assumed to start exactly ``len(preamble)`` symbols after
-        the detected start — residual channel delay spread leaks preamble
-        ISI into the first payload symbols.
+        known preamble still sets the carrier phase and gain — one complex
+        least-squares scalar ``<pre, rx_pre> / <pre, pre>`` divides the
+        payload — and the payload is assumed to start exactly
+        ``len(preamble)`` symbols after the detected start: residual channel
+        delay spread leaks preamble ISI into the first payload symbols, and
+        nothing here tracks a phase that drifts through the frame (an
+        equalizer with ``pll_bandwidth`` does).
         """
         sym = np.asarray(symbols, dtype=complex).ravel()
         start = 0
@@ -186,7 +206,18 @@ class CommsReceiver:
             eq, _ = self.equalizer.equalize(sym, self.modulator.constellation, train=ref)
             payload = eq[delay + pre.size:]
         else:
+            # A passband record delayed by a fraction of a sample arrives
+            # with tens of degrees of carrier phase, and any gain moves the
+            # QAM decision rings: measured, QPSK decoded at BER 0.50 and
+            # 16-QAM at 0.44 with the preamble detected and no warning. The
+            # preamble is known, so its least-squares complex gain is one
+            # vdot away.
+            rx_pre = sym[:pre.size]
+            denom = np.vdot(pre, pre)
+            gain = np.vdot(pre, rx_pre) / denom if denom else 1.0
             payload = sym[pre.size:]
+            if gain and np.isfinite(gain):
+                payload = payload / gain
         bits = self.modulator.demodulate(payload)
         if self.code is not None:
             bits = self.code.decode(bits)
@@ -306,11 +337,7 @@ class OFDMReceiver:
         1e-12, and MMSE at 1e-9. A subcarrier the estimate calls silent comes
         back as zero.
         """
-        h2 = np.abs(h) ** 2
-        eps = regularizer(h2, self.snr_linear)
-        if eps <= 0.0:
-            return np.zeros_like(freq)
-        return freq * np.conj(h) / (h2 + eps)
+        return equalize_subcarriers(freq, h, self.snr_linear)
 
     def receive(self, baseband):
         """Baseband OFDM frame -> information bits (sync, channel est, equalize).

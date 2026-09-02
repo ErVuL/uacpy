@@ -13,6 +13,7 @@ single run, since ray travel times are frequency-independent (geometric).
 """
 
 import copy
+import os
 import warnings
 import numpy as np
 from pathlib import Path
@@ -53,6 +54,13 @@ from uacpy.io.oalib_writer import SOURCE_TYPE_CODE as _SOURCE_TYPE_CODE
 # (ArrMod.f90:103-104, factor = 4*sqrt(pi)). Applying it on every path keeps
 # COHERENT_TL, BROADBAND and TIME_SERIES on one phase reference.
 _LINE_SOURCE_PHASE = -np.pi / 4.0
+# The same 4*sqrt(pi) sets the LEVEL: Bellhop's free-space line field is
+# 4*sqrt(pi)/sqrt(R), Kraken's and Scooter's 1/sqrt(k0*R) — a 4*sqrt(pi*k0)
+# gap on one supported source type. The package normalises every engine's
+# line source to unit amplitude at 1 m (JKPS §5.2.2's p/p0(1); see
+# ``base._line_source_unit_at_1m``): here that is dividing by 4*sqrt(pi),
+# on the .shd field and on every arrival amplitude the arrivals routes use.
+_LINE_SOURCE_LEVEL = 1.0 / (4.0 * np.sqrt(np.pi))
 
 #: Water depths per wavelength below which uacpy's own model-validity table
 #: (``docs/models/README.md``, ``docs/models/bellhop.md``) marks ray theory ✗ —
@@ -111,8 +119,12 @@ def _echo_window_notice(counts: dict, t_start: float, time_window: float,
     if counts['omitted']:
         total = counts['total_power']
         share = counts['omitted_power'] / total if total > 0.0 else 0.0
-        level = (f"{10.0 * np.log10(share):.0f} dB of the received energy"
-                 if share > 0.0 else "no measurable energy")
+        if share >= 1.0 - 1e-12:
+            level = "all of the received energy"
+        elif share > 0.0:
+            level = f"{10.0 * np.log10(share):.0f} dB of the received energy"
+        else:
+            level = "no measurable energy"
         parts.append(f"{counts['omitted']} echo(es) fall entirely outside it "
                      f"and are omitted — a delay-and-sum drops an echo rather "
                      f"than folding it — carrying {level}")
@@ -482,60 +494,30 @@ class Bellhop(PropagationModel):
         ray-centered | ``C`` Cerveny Cartesian | ``g``/``G`` geometric hat,
         ray-centered / Cartesian | ``S`` Bucker's simple Gaussian, Cartesian
         (``influence.f90:658``). Each letter selects one influence routine at
-        ``bellhop.f90:296-311``; ``G`` is the ``CASE DEFAULT`` there rather
-        than a case of its own, so an unrecognised letter would also run
-        geometric-hat Cartesian — :func:`validate_beam_type` refuses one
-        instead.
+        ``bellhop.f90:296-311``; ``G`` is the ``CASE DEFAULT`` there, so an
+        unrecognised letter would also run geometric-hat Cartesian —
+        :func:`validate_beam_type` refuses one instead.
 
         **These letters are RunType(2:2) and share their alphabet with
-        RunType(1:1), where the same characters mean something else entirely:**
-        ``C`` is coherent TL in position 1 and Cerveny-Cartesian in position 2,
-        ``S`` is semi-coherent TL against Bucker's simple Gaussian, and ``R``
-        is a ray trace against Cerveny ray-centred. ``run_mode`` sets position
-        1 and ``beam_type`` position 2; they are never interchangeable.
+        RunType(1:1), where the same characters mean something else:** ``C``
+        is coherent TL in position 1 and Cerveny-Cartesian in position 2,
+        ``S`` semi-coherent TL against Bucker's Gaussian, ``R`` a ray trace
+        against Cerveny ray-centred. ``run_mode`` sets position 1 and
+        ``beam_type`` position 2; they are never interchangeable.
 
-        ``B`` and ``G`` trade places by scenario, so neither is right
-        everywhere; measured against Kraken as the wave-theoretic reference:
-
-        * 200 m Pekeris guide, 150 Hz, five source/receiver pairs over
-          2-20 km — ``G`` 1.36 dB rms, ``B`` 2.26 dB. Boundary-dominated
-          guides with few strong eigenrays favour the hat beam.
-        * Munk 5000 m, 50 and 150 Hz, 10-100 km — ``B`` 2.70 dB rms,
-          ``G`` 3.22 dB. Shadow zones and caustics favour the Gaussian beam,
-          which is why it is the default.
-
-        Only ``G`` is exactly reciprocal. Measured on the Pekeris case above
-        (30 m / 150 m, 5 km): ``G`` matched to 0.000 dB while ``B`` differed
-        by 0.9-1.0 dB. That is not a discretisation error: over 73 ranges
-        from 2-20 km the gap is 1.42 dB rms / 3.44 dB max and holds across an
-        80x refinement of the ray step (4 m, 1 m, 0.25 m, 0.05 m) and across
-        beam counts from 201 to 4001, while ``G`` on the same sweep converges
-        to 0.000 dB. The wave engines are reciprocal to <= 0.004 dB.
-
-        What the sources establish, and nothing beyond it:
-
-        * Ray theory preserves reciprocity. JKPS Sect. 3.6.8 ('Reciprocity') proves the
-          spreading function is symmetric under exchange of endpoints,
-          ``q(s2; s1) = q(s1; s2)``, from the constancy of the Wronskian
-          ``W(s)/c(s)``.
-        * ``B`` and ``G`` are both GEOMETRIC beams. ``bellhop.f90:308-311``
-          sends ``B`` to ``InfluenceGeoGaussianCart`` and ``G`` to
-          ``InfluenceGeoHatCart``; the Cerveny routines are ``R`` (``:299``)
-          and ``C`` (``:303``).
-        * ``B`` replaces the hat shape function with a Gaussian of the same
-          fan-derived width (JKPS Sect. 3.3.5.5, 'Geometric Beams'). Those beams "serve simply to
-          interpolate the field and are not intended to approximate the
-          physics of a true Gaussian beam".
-        * The hat vanishes at the neighbouring rays, so its width is set by
-          the ray-fan density (JKPS Sect. 3.3.5.5). The Gaussian "has an
-          influence at any distance from the central ray", cut off where it is
-          negligible (Bellhop user guide), so neighbouring beams overlap.
-
-        The corpus does not state whether ``B`` is reciprocal, and no
-        mechanism linking the above to the measurement is asserted here.
-
-        Use ``G`` when a reciprocal field matters (e.g. filling a
-        source-receiver matrix from one half).
+        ``B`` and ``G`` are both GEOMETRIC beams (JKPS Sect. 3.3.5.5: the
+        Gaussian replaces the hat shape function at the same fan-derived
+        width and "serves simply to interpolate the field"). Neither is right
+        everywhere — measured against Kraken, ``G`` wins on a
+        boundary-dominated Pekeris guide (1.4 vs 2.3 dB rms) and ``B`` on the
+        Munk profile's shadow zones and caustics (2.7 vs 3.2 dB), which is
+        why ``B`` is the default. Only ``G`` is exactly reciprocal (``B``
+        differs by ~1 dB under source/receiver exchange, at every ray step and
+        beam count tried); use ``G`` when a reciprocal field matters, e.g. to
+        fill a source-receiver matrix from one half. The measurements are
+        pinned in ``test_bellhop.py``; ``C``, ``R`` and ``g`` never write the
+        first receiver-range column, which the wrapper pads for (see
+        :meth:`_pad_receiver_ranges`).
     n_beams : int, optional
         Number of beams; ``0`` lets Bellhop auto-pick. Default ``0``.
     alpha : tuple, optional
@@ -551,7 +533,11 @@ class Bellhop(PropagationModel):
         captures arrivals at the outer receivers; do not enlarge it past a
         range-dependent SSP's defined extent.
     grid_type : str, optional
-        ``'R'`` rectilinear (default) | ``'I'`` irregular (paired depth/range).
+        ``'R'`` rectilinear (default) | ``'I'`` irregular: the i-th depth
+        pairs with the i-th range after BELLHOP sorts both lists
+        (``SourceReceiverPositions.f90:224``), so the pairs always run
+        shallow-near to deep-far. Arbitrary (depth, range) points: run
+        ``'R'`` and sample with ``Field.at``.
     beam_width_type : str, optional
         Cerveny only (``bellhop.f90:373-390``). ``'F'`` space filling |
         ``'M'`` minimum width | ``'W'`` WKB.
@@ -772,7 +758,8 @@ class Bellhop(PropagationModel):
         r_box : float, optional
             Maximum range for ray box. None = 1.2 * max range. Default: None.
         grid_type : str
-            Receiver grid: 'R' (rectilinear), 'I' (irregular). Default: 'R'.
+            Receiver grid: 'R' (rectilinear), 'I' (irregular: sorted depth i
+            pairs with sorted range i). Default: 'R'.
         interp_ssp : str, optional
             SSP connection scheme. ``None`` (default) auto-picks
             ``'quad'`` for a range-dependent ``env.ssp`` and ``'linear'``
@@ -1166,7 +1153,9 @@ class Bellhop(PropagationModel):
         """``grid_type='I'`` writes RunType(5:5)='I', where BELLHOP walks the
         depth and range arrays together (one receiver per index) rather than
         over their Cartesian product — the pairing the ``'I'`` deck also
-        enforces by requiring equal lengths (see ``run``).
+        enforces by requiring equal lengths (see ``run``). BELLHOP sorts each
+        array on read (``SourceReceiverPositions.f90:224``), so the pairs are
+        always a monotone diagonal.
         """
         return str(self.grid_type).upper() == 'I'
 
@@ -1330,10 +1319,12 @@ class Bellhop(PropagationModel):
         :data:`_MIN_INFLUENCE_BEAMS`); it is under-resolved, not degenerate,
         and an under-resolved fan is the caller's choice to make.
 
-        Ray and eigenray runs are unaffected — ``bellhop.f90:288`` skips the
-        influence step, and a single traced ray is a legitimate request.
+        Ray runs are unaffected — ``bellhop.f90:288`` skips the influence
+        step, and a single traced ray is a legitimate request. Eigenray runs
+        are not: they detect receiver hits inside that influence step, so a
+        single beam finds them only by beam-type accident.
         """
-        if run_mode in (RunMode.RAYS, RunMode.EIGENRAYS):
+        if run_mode == RunMode.RAYS:
             return
         n = self.n_beams
         if n is None or n == 0 or n >= _MIN_INFLUENCE_BEAMS:
@@ -1558,7 +1549,8 @@ class Bellhop(PropagationModel):
         run_mode : RunMode, optional
             Which Bellhop mode to run. One of ``RunMode.COHERENT_TL``,
             ``INCOHERENT_TL``, ``SEMICOHERENT_TL``, ``RAYS``, ``EIGENRAYS``,
-            ``ARRIVALS``, ``TIME_SERIES``. Defaults to ``COHERENT_TL``.
+            ``ARRIVALS``, ``BROADBAND``, ``TIME_SERIES``. Defaults to
+            ``COHERENT_TL``.
 
             For ``INCOHERENT_TL`` / ``SEMICOHERENT_TL`` the returned
             ``Field.data`` holds complex pressure (Pa re 1 m) as read from
@@ -1757,9 +1749,10 @@ class Bellhop(PropagationModel):
 
         # Irregular receiver grid ('I' in RunType position 5) requires the
         # receiver.depths and receiver.ranges arrays to have the same
-        # length (they are paired point-by-point).  Rectilinear ('R')
-        # takes the Cartesian product.  Catch the mismatch here so users
-        # see a clear error instead of a confusing Bellhop .prt message.
+        # length (they are paired point-by-point, after BELLHOP sorts each
+        # list).  Rectilinear ('R') takes the Cartesian product.  Catch the
+        # mismatch here so users see a clear error instead of a confusing
+        # Bellhop .prt message.
         if (
             self.grid_type is not None
             and str(self.grid_type).upper() == 'I'
@@ -1769,9 +1762,12 @@ class Bellhop(PropagationModel):
                 f"Bellhop grid_type='I' (irregular) requires "
                 f"len(receiver.depths) == len(receiver.ranges); got "
                 f"{len(receiver.depths)} depths and "
-                f"{len(receiver.ranges)} ranges. Use grid_type='R' for "
-                f"a rectilinear (Cartesian-product) grid, or rebuild the "
-                f"Receiver with matched arrays."
+                f"{len(receiver.ranges)} ranges. BELLHOP sorts both lists "
+                f"before pairing (SourceReceiverPositions.f90:224), so an 'I' "
+                f"grid is always a monotone diagonal, shallow-near to "
+                f"deep-far. Use grid_type='R' for a rectilinear "
+                f"(Cartesian-product) grid — and Field.at for arbitrary "
+                f"points — or rebuild the Receiver with matched arrays."
             )
         # ── Write the deck, run the binary, read the one output it wrote ──
         fm = self._setup_file_manager()
@@ -1795,11 +1791,23 @@ class Bellhop(PropagationModel):
                 stage_source_beam_pattern(source.beam_pattern, sbp_dest)
                 self._log(f"Wrote source beam pattern: {sbp_dest}")
 
+            # Cerveny and ray-centred beams never fill the first receiver-range
+            # column, and 'C' not the last (influence.f90:216,223-228 clamp
+            # the range index to 1 and start the loop past it). The sample
+            # ranges do not enter the ray trace, so the deck carries one extra
+            # range at each end and those columns come off after reading.
+            deck_receiver, trim = self._pad_receiver_ranges(receiver, run_type)
+            # The ray box is sized from the CALLER's receiver, so a padded deck
+            # traces the same rays as an unpadded one (the writer's default is
+            # 1.2 x range_max, which the padding would otherwise move).
+            r_box = self.r_box
+            if trim is not None and r_box is None:
+                r_box = 1.2 * receiver.range_max if receiver.range_max > 0 else 10000
             write_bellhop_env_file(
                 filepath=env_file,
                 env=env,
                 source=source,
-                receiver=receiver,
+                receiver=deck_receiver,
                 run_type=run_type,
                 beam_type=self.beam_type,
                 # Letter lands in RunType(4:4), ReadEnvironmentBell.f90:398-
@@ -1811,7 +1819,7 @@ class Bellhop(PropagationModel):
                 alpha=self.alpha,
                 step=self._resolve_step(env),
                 z_box=self.z_box,
-                r_box=self.r_box,
+                r_box=r_box,
                 source_beam_pattern=use_sbp,
                 beam_width_type=self.beam_width_type,
                 beam_curvature=self.beam_curvature,
@@ -1829,13 +1837,91 @@ class Bellhop(PropagationModel):
             self._run_bellhop(base_name, fm.work_dir)
 
             return self._read_and_assemble(
-                env, source, receiver, fm, base_name, run_type)
+                env, source, receiver, fm, base_name, run_type, trim=trim)
 
         finally:
             fm.finish()
 
+    def _arrivals_need_merge(self) -> bool:
+        """Whether the ``.arr`` this run wrote still needs Bellhop's
+        ``AddArr`` pair-merge applied on reading.
+
+        The Fortran engine merges as it accumulates, so its file is read as
+        written; bellhopcxx merges only when it runs single-threaded
+        (``bellhopcuda/src/mode/arr.hpp:79``; the CLI takes no thread count,
+        only ``--singlethread``, and defaults to every core), so its file
+        is unmerged on any multi-core host; bellhopcuda's GPU run is always
+        unmerged. Re-merging a merged file is not a no-op (see
+        :func:`uacpy.io.oalib_reader.read_arr_file`), so the two cases must
+        not be confused.
+        """
+        if self.version == 'cuda':
+            return True
+        if self.version == 'cxx':
+            return (os.cpu_count() or 1) > 1
+        return False
+
+    def _pad_receiver_ranges(self, receiver, run_type):
+        """The receiver to write for this run, and the ``(lo, hi)`` slice that
+        recovers the caller's range axis from what the engine wrote —
+        ``(receiver, None)`` when nothing needs padding.
+
+        ``_UNIFORM_RANGE_BEAM_TYPES`` index the receiver range by division
+        and clamp the result to ``[1, NRr]`` (``influence.f90:223-224``, with
+        Porter's own ``! should be ", 0 )" ?`` beside it), then step from
+        ``irA + 1``: the first column is never written, and ``'C'`` returns
+        before the last (``:216``). One extra range at each end, one step
+        away so the grid stays uniform, gives the engine somewhere to skip.
+        A first range within one step of the source cannot be padded ahead
+        of — that column stays NaN and the run says so.
+        """
+        ranges = np.atleast_1d(np.asarray(receiver.ranges, dtype=float))
+        if (self.beam_type not in _UNIFORM_RANGE_BEAM_TYPES
+                or run_type not in ('C', 'I', 'S', 'A')
+                or str(self.grid_type).upper() != 'R'
+                or ranges.size < 2):
+            return receiver, None
+        dr = float(ranges[1] - ranges[0])
+        lead = ranges[0] - dr > 0.0
+        if not lead:
+            warnings.warn(
+                f"{self.model_name}(beam_type={self.beam_type!r}): "
+                f"{_INFLUENCE_ROUTINE[self.beam_type]} never fills the first "
+                f"receiver-range column (influence.f90:223-228), and "
+                f"receiver.ranges starts at {ranges[0]:g} m, within one range "
+                f"step ({dr:g} m) of the source, so no column can be written "
+                f"ahead of it: the {ranges[0]:g} m column comes back NaN. "
+                f"Start receiver.ranges more than one step from the source "
+                f"to have it filled.",
+                UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
+        # Only 'C' also drops the LAST column (influence.f90:216).
+        trail = [ranges[-1] + dr] if self.beam_type == 'C' else []
+        padded = ([ranges[0] - dr] if lead else []) + list(ranges) + trail
+        lo = 1 if lead else 0
+        return (Receiver(depths=receiver.depths, ranges=np.asarray(padded)),
+                (lo, lo + ranges.size))
+
+    @staticmethod
+    def _trim_padded_ranges(result, run_type, lo, hi):
+        """Drop the range columns ``_pad_receiver_ranges`` added — on the raw
+        result, before any assembly reads its axes."""
+        if run_type == 'A':
+            by_receiver = [[cells[lo:hi] for cells in by_depth]
+                           for by_depth in result.by_receiver]
+            result.by_receiver = by_receiver
+            result.receiver_ranges = np.asarray(result.receiver_ranges)[lo:hi]
+            result.arrivals = result._flatten_by_receiver(by_receiver)
+            return result
+        slabs = result.slabs if isinstance(result, ResultStack) else [result]
+        for slab in slabs:
+            if 'range' in slab.coords:
+                axis = list(slab.coords).index('range')
+                slab.data = np.take(slab.data, np.arange(lo, hi), axis=axis)
+                slab.coords['range'] = np.asarray(slab.coords['range'])[lo:hi]
+        return result
+
     def _read_and_assemble(self, env, source, receiver, fm, base_name,
-                           run_type):
+                           run_type, trim=None):
         """Read the output ``_BELLHOP_OUTPUT[run_type]`` names and turn it into
         the tagged :class:`Result` the caller gets.
 
@@ -1857,8 +1943,21 @@ class Bellhop(PropagationModel):
         # ``NRz_per_range`` depth blocks — 1 for an irregular grid
         # (``bellhop.f90:202-206,329``, ``ArrMod.f90:101-102``). Nothing in
         # the file distinguishes the two, so the reader has to be told.
-        result = (reader(output_file, grid_type=self.grid_type)
+        result = (reader(output_file, grid_type=self.grid_type,
+                         merge=self._arrivals_need_merge())
                   if run_type == 'A' else reader(output_file))
+        if trim is not None:
+            result = self._trim_padded_ranges(result, run_type, *trim)
+        if run_type == 'A' and source.source_type == 'line':
+            # The .arr amplitudes carry ArrMod.f90:104's 4*sqrt(pi); bring
+            # them to the package's unit-at-1 m line-source level so the
+            # arrivals, broadband and time-series routes agree with the field.
+            for by_depth in result.by_receiver:
+                for cells in by_depth:
+                    for cell in cells:
+                        cell['amplitudes'] = (np.asarray(cell['amplitudes'], dtype=float)
+                                              * _LINE_SOURCE_LEVEL)
+            result.arrivals = result._flatten_by_receiver(result.by_receiver)
 
         # AT's ScalePressure (influence.f90:757-795) carries const = -1
         # into the point-source branch (factor = const/sqrt(r)), so the
@@ -1873,7 +1972,7 @@ class Bellhop(PropagationModel):
         # to 0.01 deg, and once applied the line-source residual equals
         # the point-source beam bias exactly (4.78 deg vs 4.79 deg).
         _shd_phase = {'point': -1.0 + 0j,
-                      'line': np.exp(1j * _LINE_SOURCE_PHASE)}
+                      'line': _LINE_SOURCE_LEVEL * np.exp(1j * _LINE_SOURCE_PHASE)}
         if run_type in ('C', 'I', 'S'):
             _corr = _shd_phase[source.source_type]
             for _slab in (result.slabs
@@ -2258,11 +2357,13 @@ class Bellhop(PropagationModel):
         )
         arr_field = self.run(env, arr_source, receiver, run_mode=RunMode.ARRIVALS)
         # The synthesised result is built entirely from this inner run, so it
-        # inherits its file paths: they are the only handle on the scratch dir
-        # that survives when ``cleanup=False``.
+        # inherits its file paths — the only handle on the scratch dir that
+        # survives when ``cleanup=False`` — and the in-memory Bounce table an
+        # auto-Bounce run attached, which the constructor docstring promises
+        # on ``result.metadata['bounce_result']``.
         arr_paths = {
             key: value for key, value in arr_field.metadata.items()
-            if key.endswith('_file')
+            if key.endswith('_file') or key == 'bounce_result'
         }
 
         arrivals_by_rcv = arr_field.by_receiver
@@ -2335,6 +2436,7 @@ class Bellhop(PropagationModel):
                 time_window=effective_time_window,
                 t_start=effective_t_start,
                 phase_offset=arr_phase,
+                report={},          # the grid loop below totals and says it once
             )
             t_start_locked = float(t_vec[0])
             time_window_locked = float(t_vec[-1] - t_vec[0]) + 1.0 / sample_rate
@@ -2503,7 +2605,7 @@ class Bellhop(PropagationModel):
         -1.69 dB at 10 km, +5.76 / -3.38 at 20 km, +11.51 / -6.75 at 40 km,
         against an ARRIVALS run at the band-edge frequency itself.
         """
-        absorption = getattr(env, 'absorption', None)
+        absorption = env.absorption
         if absorption is None:
             return
         freqs = np.atleast_1d(np.asarray(frequencies, dtype=float))

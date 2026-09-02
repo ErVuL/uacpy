@@ -157,17 +157,7 @@ def impulse_response(amplitudes, delays_s, sample_rate: float, *,
             continue
         i0 = int(np.floor(p))
         k = np.arange(i0 - L + 1, i0 + L + 1)
-        u = (k - p) / L
-        win = (np.i0(_FRAC_DELAY_KAISER_BETA
-                     * np.sqrt(np.maximum(0.0, 1.0 - u * u)))
-               / np.i0(_FRAC_DELAY_KAISER_BETA))
-        g = np.sinc(k - p) * win
-        # Normalise to unit DC gain: windowing truncates the sinc, so the
-        # raw taps sum to 0.99999579 and a constant signal would lose
-        # 3.7e-5 dB. Standard for an interpolation kernel.
-        gsum = g.sum()
-        if gsum:
-            g = g / gsum
+        g = fractional_delay_taps(p - i0, half_len=L)       # taps on k
         ok = (k >= 0) & (k < n_samples)
         # An integer-delay arrival lives entirely on sample i0 (every other
         # tap is sinc(integer) = 0), so clipping its zero taps loses nothing

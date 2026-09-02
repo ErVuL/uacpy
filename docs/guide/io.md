@@ -27,7 +27,7 @@ uacpy.io.read_shd_file('run/model.shd')
 ## 1. The one rule: metres in Python, kilometres on disk
 
 Every public reader returns metres. Every public writer accepts metres. The
-conversion happens inside, in [`uacpy/io/units.py`](../../uacpy/io/units.py),
+conversion happens inside, in [`uacpy/core/units.py`](../../uacpy/core/units.py),
 which exists so that "did I convert?" is a grep and not an audit.
 
 Write a bathymetry and read it back:
@@ -72,7 +72,7 @@ what the `1:-1` trims.)
 | Range | metres | **metres** for `ram.in` / `rams.in` / `ramgeo.in`, mpiramS' bathymetry and output-range files, and inside `.shd` (AT converts before writing the header) | — |
 | Depth, thickness | metres | **metres** everywhere — the decks above convert their *range* axes only, so `.env` SSP depths and layer thicknesses, `.bty` / `.ati` depth columns and source/receiver depths all stay in metres | — |
 | Frequency | Hz | Hz | — |
-| Reflection **phase** | radians | degrees | `deg_to_rad` (in `uacpy.io.units`) |
+| Reflection **phase** | radians | degrees | `deg_to_rad` (in `uacpy.core.units`) |
 | Grazing **angle** | degrees | degrees | — |
 
 The two that catch people: the RAM family keeps even its *range* axes in

@@ -35,7 +35,10 @@ from scipy.optimize import brentq
 from uacpy.core.acoustics import soundspeed_unesco, soundspeed_delgrosso
 from uacpy.core._carrier_validate import _dedupe_provenance
 from uacpy.core.environment import SoundSpeedProfile
+from uacpy.data import _cache
 from uacpy.data._geo import (
+    require_month,
+    great_circle_km,
     Coordinate, as_coordinate, normalize_lon, depth_to_pressure_dbar,
     geodesic_waypoints, ring_offsets, run_representative_indices,
     DEFAULT_MAX_TRANSECT_POINTS, checked_max_points,
@@ -154,7 +157,7 @@ def fetch_ssp(
         requested_date=(str(parse_date(date)) if date is not None else None),
     )
     return SoundSpeedProfile(depths=depths, data=c, shape='measured',
-                             data_sources=(prov,))
+                             data_sources=(prov,), formula=formula)
 
 
 def ssp_transect_plan(
@@ -381,7 +384,7 @@ def _ts_profile_with_cell(
             source, period, i, j, resolution=resolution, decade=decade,
             base_url=base_url, timeout=timeout, verbose=verbose,
         ),
-        lat_idx, lon_idx, resolution,
+        lat_idx, lon_idx, resolution, lat=lat, lon=lon,
     )
     if depths.size == 0:
         raise DataFetchError(
@@ -392,9 +395,11 @@ def _ts_profile_with_cell(
         )
     if (lat_idx, lon_idx) != nearest_idx:
         wet_lat, wet_lon = _cell_center(lat_idx, lon_idx, resolution)
+        hop_km = float(great_circle_km(lat, lon, wet_lat, wet_lon))
         warnings.warn(
             f"WOA23: nearest cell ({lat_c:.3f}, {lon_c:.3f}) is dry; using the "
-            f"closest wet cell ({wet_lat:.3f}, {wet_lon:.3f}).",
+            f"closest wet cell ({wet_lat:.3f}, {wet_lon:.3f}), {hop_km:.0f} km "
+            f"from the requested point.",
             UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
         )
 
@@ -427,11 +432,7 @@ def _resolve_period(date, month) -> int:
         month = parse_date(date).month
     if month is None:
         return 0
-    if not 1 <= int(month) <= 12:
-        raise ConfigurationError(
-            f"WOA23: month must be 1-12, got {month}.",
-        )
-    return int(month)
+    return require_month(month, "WOA23")
 
 
 # How far the wet-cell search may wander from the nearest cell, in grid cells.
@@ -441,28 +442,37 @@ def _resolve_period(date, month) -> int:
 _WET_CELL_SEARCH_RINGS = 2
 
 
-def _nearest_wet_column(fetch, lat_idx, lon_idx, resolution):
+def _nearest_wet_column(fetch, lat_idx, lon_idx, resolution, lat=None, lon=None):
     """``(depths, temp, sal, lat_idx, lon_idx)`` for the closest wet cell.
 
     ``fetch(lat_idx, lon_idx)`` returns one column; an empty depth axis means a
-    dry (land / unanalysed) cell. Searches the nearest cell first, then outward
-    by Chebyshev ring: longitude wraps, while a row past either pole is skipped
-    (clamping it would re-probe the same cell).
+    dry (land / unanalysed) cell. The nearest cell is probed first; if it is
+    dry, the cells within :data:`_WET_CELL_SEARCH_RINGS` rings are probed in
+    order of great-circle distance from the REQUESTED point (``lat``, ``lon``;
+    the nearest cell's centre when not given) — not in ring order, whose ties
+    break in file order and whose distance ignores where inside the cell the
+    request falls (a meridional neighbour is 111 km away, a zonal one 80 km at
+    44°N). Longitude wraps; a row past either pole is skipped.
     """
     n_lat, n_lon, _code, _first, _step = _GRIDS[resolution]
     depths, temp, sal = fetch(lat_idx, lon_idx)
     if depths.size:
         return depths, temp, sal, lat_idx, lon_idx
-
+    if lat is None or lon is None:
+        lat, lon = _cell_center(lat_idx, lon_idx, resolution)
+    candidates = []
     for radius in range(1, _WET_CELL_SEARCH_RINGS + 1):
         for d_lat, d_lon in ring_offsets(radius):
             i = lat_idx + d_lat
             if not 0 <= i < n_lat:
                 continue
             j = (lon_idx + d_lon) % n_lon          # longitude wraps
-            depths, temp, sal = fetch(i, j)
-            if depths.size:
-                return depths, temp, sal, i, j
+            c_lat, c_lon = _cell_center(i, j, resolution)
+            candidates.append((float(great_circle_km(lat, lon, c_lat, c_lon)), i, j))
+    for _km, i, j in sorted(candidates):
+        depths, temp, sal = fetch(i, j)
+        if depths.size:
+            return depths, temp, sal, i, j
     return depths, temp, sal, lat_idx, lon_idx
 
 
@@ -537,6 +547,16 @@ def _check_woa_source(source):
         )
 
 
+#: Network columns already fetched in this process, keyed on everything
+#: that selects one: ``fetch_environment(with_absorption=True)`` reads the
+#: same T/S column twice (sound speed, then absorption), and a coastal ring
+#: search probes the same dry cells each time. Bounded; a climatology column
+#: does not change under a running process.
+_COLUMN_MEMO: dict = {}
+_COLUMN_MEMO_MAX = 64
+_cache.register_cache(_COLUMN_MEMO.clear)
+
+
 def _get_column(source, period, lat_idx, lon_idx, *, resolution, decade,
                 base_url, timeout, verbose):
     """One ``(z, t, s)`` column from the selected WOA23 backend."""
@@ -544,10 +564,22 @@ def _get_column(source, period, lat_idx, lon_idx, *, resolution, decade,
         from uacpy.data import woa23_local
         return woa23_local.column(period, lat_idx, lon_idx,
                                   resolution=resolution, decade=decade)
-    return _fetch_column(
-        period, lat_idx, lon_idx, resolution=resolution, decade=decade,
-        base_url=base_url, timeout=timeout, verbose=verbose,
-    )
+    # The fetch stack in use is stored beside the column and compared by
+    # identity: a caller that swaps ``_fetch_column`` or ``http_get`` for a
+    # stub is never answered from a previous one (``id()`` alone is reused
+    # once a stub is garbage-collected). In production both are the module's
+    # own functions.
+    key = (period, int(lat_idx), int(lon_idx), resolution, decade, base_url)
+    hit = _COLUMN_MEMO.get(key)
+    if hit is None or hit[0] is not _fetch_column or hit[1] is not http_get:
+        if len(_COLUMN_MEMO) >= _COLUMN_MEMO_MAX:
+            _COLUMN_MEMO.clear()
+        hit = (_fetch_column, http_get, _fetch_column(
+            period, lat_idx, lon_idx, resolution=resolution, decade=decade,
+            base_url=base_url, timeout=timeout, verbose=verbose,
+        ))
+        _COLUMN_MEMO[key] = hit
+    return tuple(np.array(a, copy=True) for a in hit[2])
 
 
 def _file_url(folder, var, period, code, resolution, decade, base_url) -> str:
@@ -638,8 +670,9 @@ _EXTRAPOLATION_WARN_M = 50.0
 
 
 def _deep_increment(c_deepest: float, z_from: float, z_to: float,
-                    latitude: float) -> float:
-    """UNESCO sound-speed increment from ``z_from`` down to ``z_to``.
+                    latitude: float, speed_fn=soundspeed_unesco) -> float:
+    """Sound-speed increment from ``z_from`` down to ``z_to`` under the
+    formula ``speed_fn(t, s, p)`` that built the column (UNESCO by default).
 
     Extrapolation only ever happens below the deepest analysed level, so in the
     deep isothermal layer, where temperature is nearly constant and sound speed
@@ -656,16 +689,16 @@ def _deep_increment(c_deepest: float, z_from: float, z_to: float,
     p_to = float(depth_to_pressure_dbar(z_to, latitude))
     t_lo, t_hi = _EFFECTIVE_T_BRACKET_DEGC
     salinity = _DEEP_REFERENCE_SALINITY
-    if c_deepest <= soundspeed_unesco(t_lo, salinity, p_from):
+    if c_deepest <= speed_fn(t_lo, salinity, p_from):
         t_eff = t_lo                     # unphysical column: clamp, stay finite
-    elif c_deepest >= soundspeed_unesco(t_hi, salinity, p_from):
+    elif c_deepest >= speed_fn(t_hi, salinity, p_from):
         t_eff = t_hi
     else:
         t_eff = brentq(
-            lambda t: soundspeed_unesco(t, salinity, p_from) - c_deepest,
+            lambda t: speed_fn(t, salinity, p_from) - c_deepest,
             t_lo, t_hi, xtol=1e-8)
-    return float(soundspeed_unesco(t_eff, salinity, p_to)
-                 - soundspeed_unesco(t_eff, salinity, p_from))
+    return float(speed_fn(t_eff, salinity, p_to)
+                 - speed_fn(t_eff, salinity, p_from))
 
 
 def extend_ssp_below_data(ssp, depth_max: float,
@@ -693,10 +726,15 @@ def extend_ssp_below_data(ssp, depth_max: float,
 
     data = np.asarray(ssp.data, dtype=float)
     span = depth_max - last
+    # The extension continues the column under the formula that built it (a
+    # Del Grosso column extended with UNESCO is 0.33 m/s off at 8.8 km); a
+    # literal profile carries no formula and takes UNESCO.
+    speed_fn = _FORMULAS.get(getattr(ssp, 'formula', None) or 'unesco',
+                             soundspeed_unesco)
     new_row = np.empty(data.shape[1], dtype=float)
     for j in range(data.shape[1]):
         new_row[j] = data[-1, j] + _deep_increment(
-            float(data[-1, j]), last, depth_max, latitude)
+            float(data[-1, j]), last, depth_max, latitude, speed_fn)
 
     if span > _EXTRAPOLATION_WARN_M:
         warnings.warn(

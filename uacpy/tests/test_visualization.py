@@ -2898,6 +2898,66 @@ def test_the_shared_colorbar_names_the_quantity_not_transmission_loss():
     assert 'Signal excess (dB)' in labels
 
 
+def _corner_overview(credits):
+    """A transect that starts at the map window's top-left corner: the place
+    where the left-aligned title, an 'upper left' legend and the 'A' label
+    all used to meet."""
+    lats, lons = np.linspace(58.0, 61.0, 40), np.linspace(2.0, 5.0, 50)
+    LON, LAT = np.meshgrid(lons, lats)
+    depth = 100 + 300 * (LAT - 58) / 3 + 20 * np.sin(LON * 3)
+    env = uacpy.Environment(bathymetry=200.0, ssp=1500.0)
+    fig, axes = plot_overview(env, (lats, lons, depth),
+                              transect=((61.0, 2.0), (58.0, 5.0)),
+                              map_kwargs=dict(basemap=False), title='overview',
+                              data_source=credits)
+    fig.canvas.draw()
+    return fig, axes, fig.canvas.get_renderer()
+
+
+def _end_labels(ax_map):
+    return [t for t in ax_map.texts if t.get_text() in ('A', 'B')]
+
+
+def test_the_transect_labels_stay_inside_the_map():
+    """A label outside the axes lands on the title; both ends stay inside."""
+    fig, (ax_map, _, _), r = _corner_overview(['GEBCO 2024 Grid'])
+    labels = _end_labels(ax_map)
+    assert len(labels) == 2
+    for label in labels:
+        bb = label.get_window_extent(r)
+        assert ax_map.bbox.contains(bb.x0, bb.y0), label.get_text()
+        assert ax_map.bbox.contains(bb.x1, bb.y1), label.get_text()
+    plt.close(fig)
+
+
+def test_the_legend_leaves_the_transect_ends_clear():
+    """Neither end marker (padded by its own radius) nor end label sits under
+    the legend box."""
+    fig, (ax_map, _, _), r = _corner_overview(['GEBCO 2024 Grid'])
+    legend = ax_map.get_legend().get_window_extent(r).padded(8.0)
+    line = next(ln for ln in ax_map.lines if ln.get_label() == 'transect')
+    for x, y in ax_map.transData.transform(np.column_stack(line.get_data())):
+        assert not legend.contains(x, y), (x, y)
+    for label in _end_labels(ax_map):
+        assert not legend.overlaps(label.get_window_extent(r)), label.get_text()
+    plt.close(fig)
+
+
+@pytest.mark.parametrize("credits", [
+    ['GEBCO 2024 Grid'],
+    ['GEBCO 2024 Grid', 'World Ocean Atlas 2023, NOAA NCEI'],
+])
+def test_the_credit_clears_every_axis_label(credits):
+    """The footnote's top sits below the lowest tick or axis label, for one
+    credit line and for two."""
+    fig, axes, r = _corner_overview(credits)
+    credit = next(t for t in fig.texts if t.get_text().startswith('Data:'))
+    top = credit.get_window_extent(r).y1
+    for ax in fig.axes:
+        assert ax.get_tightbbox(r).y0 >= top, ax.get_title()
+    plt.close(fig)
+
+
 def _overview(**kwargs):
     env = uacpy.Environment(bathymetry=200.0, ssp=1500.0)
     tl = _grid()
@@ -3632,3 +3692,156 @@ def test_rejected_call_leaves_no_figure_behind():
     with pytest.raises(ConfigurationError):
         plot_beam_pattern(np.empty((0, 2)))
     assert set(plt.get_fignums()) == before
+
+
+class TestThePlottersRefuseAndLabelWhatTheAuditFound:
+    """Pins for the visualization findings: the SSP heatmap interpolates like
+    the models, a probability defaults to its linear view, empty input and
+    mismatched grids are refused with typed errors, one field draws alike
+    through either signal-excess door, and snapshot panels keep a readable
+    height."""
+
+    def _rgb_at(self, fig, ax, r_km, depth_m):
+        fig.canvas.draw()
+        buf = np.asarray(fig.canvas.buffer_rgba())
+        x, y = ax.transData.transform((r_km, depth_m))
+        h = buf.shape[0]
+        return tuple(int(v) for v in buf[int(round(h - y)), int(round(x)), :3])
+
+    def test_a_two_sample_profile_is_painted_as_a_gradient_not_two_blocks(self):
+        # c(0) = 1500, c(100) = 1520: linear between the two samples, as the
+        # models read it. 'nearest' painted one flat block per sample, so 25 m
+        # and 45 m shared a colour and 55 m jumped.
+        env = uacpy.Environment(name='ssp', bathymetry=100.0,
+                                ssp=[(0.0, 1500.0), (100.0, 1520.0)])
+        fig, ax = env.plot()[:2] if isinstance(env.plot(), tuple) else (None, None)
+        out = env.plot()
+        fig = out[0] if isinstance(out, tuple) else out
+        ax = next(a for a in fig.axes if a.get_ylabel().startswith('Depth'))
+        r = 0.5 * float(ax.get_xlim()[1])
+        a, b, c = (self._rgb_at(fig, ax, r, z) for z in (25.0, 45.0, 75.0))
+        assert a != b, (a, b)                    # varies inside the old block
+        assert b != c, (b, c)
+        plt.close('all')
+
+    def test_a_probability_field_defaults_to_its_linear_view_named_by_kind(self):
+        from uacpy.visualization.plots._common import _default_value, _value_label
+
+        class Prob:
+            coords = {'depth': np.array([1.0]), 'range': np.array([1.0])}
+            is_complex = False
+            unit = '1'
+            kind = 'detection_probability'
+
+        assert _default_value(Prob()) == 'real'
+        assert _value_label(Prob(), 'real') == 'detection probability'
+
+    def test_empty_input_is_refused_by_name(self):
+        from uacpy.visualization.plots.comms import plot_constellation
+        from uacpy.visualization.plots.signal import plot_cepstrum
+        from uacpy.visualization.plots.noise import plot_source_level
+        with pytest.raises(ConfigurationError, match='constellation is empty'):
+            plot_constellation(np.array([]))
+        with pytest.raises(ConfigurationError, match='c is empty'):
+            plot_cepstrum(np.array([]))
+        with pytest.raises(ConfigurationError, match='level_db is empty'):
+            plot_source_level(np.array([100.0]), np.array([]))
+
+    def test_a_mismatched_spectrogram_grid_is_a_typed_error(self):
+        from uacpy.visualization.plots.signal import plot_spectrogram
+        with pytest.raises(ConfigurationError, match='does not match'):
+            plot_spectrogram(np.linspace(0, 1, 5), np.linspace(0, 1, 7),
+                             np.ones((7, 5)))
+        plt.close('all')
+
+    def test_a_bare_array_is_not_a_wenz_result(self):
+        from uacpy.visualization.plots.noise import plot_wenz
+        with pytest.raises(ConfigurationError, match='WenzNoise'):
+            plot_wenz(np.ones(10))
+
+    def test_signal_excess_draws_alike_through_either_door(self):
+        from uacpy.visualization.plots.fields import plot_signal_excess
+        from uacpy.sonar.sonar_equation import passive_signal_excess_field
+        d = np.linspace(5, 95, 10); r = np.linspace(100, 5000, 40)
+        tl = Field(data=np.broadcast_to(50.0 + 10.0 * np.log10(r)[None, :], (10, 40)).copy(),
+                   coords={'depth': d, 'range': r}, model='Synth',
+                   frequencies=100.0)
+        se = passive_signal_excess_field(tl, source_level=180.0, noise_level=60.0)
+        fig_a, ax_a = plot_signal_excess(se)
+        fig_b, ax_b = se.plot()
+        mesh_a = next(c for c in ax_a.collections if hasattr(c, 'get_clim'))
+        mesh_b = next(c for c in ax_b.collections if hasattr(c, 'get_clim'))
+        assert mesh_a.get_clim() == mesh_b.get_clim()
+        assert ax_a.get_title() == ax_b.get_title()
+        plt.close('all')
+
+    def test_shallow_long_snapshots_keep_a_readable_panel_height(self):
+        from uacpy.visualization.plots.animation import plot_time_snapshots
+        d = np.linspace(0, 100, 11); r = np.linspace(0, 3000, 61); t = np.linspace(0, 1, 5)
+        f = Field(data=np.random.default_rng(0).normal(size=(11, 61, 5)),
+                  coords={'depth': d, 'range': r, 'time': t}, model='Synth',
+                  frequencies=100.0)
+        fig, axes = plot_time_snapshots({'a': f}, [0.5])
+        ax = np.asarray(axes).ravel()[0]
+        # 100 m over 3 km: isotropic would be a 1:30 sliver; the floor is 4:1.
+        assert ax.get_aspect() == pytest.approx(0.25 / (100.0 / 3000.0) / 1000.0)
+        plt.close('all')
+
+    def test_a_uniform_bottom_property_gets_a_relative_window(self):
+        from uacpy.visualization.plots.environment import plot_bottom_properties
+        env = uacpy.Environment(name='u', bathymetry=100.0, ssp=1500.0, bottom=1650.0)
+        fig, axes = plot_bottom_properties(env)
+        ax = np.asarray(axes).ravel()[0]
+        mesh = next(c for c in ax.collections if hasattr(c, 'get_clim'))
+        lo, hi = mesh.get_clim()
+        assert lo == pytest.approx(1650.0 * 0.95) and hi == pytest.approx(1650.0 * 1.05)
+        plt.close('all')
+
+    def test_the_imshow_extent_is_the_flipped_cell_edge_extent(self):
+        from uacpy.visualization.plots._common import _imshow_extent
+        r = np.array([1000.0, 2000.0, 3000.0]); z = np.array([10.0, 30.0, 50.0])
+        assert _imshow_extent(r, z) == pytest.approx((0.5, 3.5, 60.0, 0.0))
+
+
+def _water_colorbar(fig):
+    """The inset colorbar axes are children of the panel, not of the figure."""
+    insets = [child for ax in fig.axes for child in ax.child_axes]
+    return next(c for c in insets if c.get_ylabel() == 'Water c (m/s)')
+
+
+def _bottom(kind):
+    from uacpy.core import BoundaryProperties
+    return None if kind == 'water only' else BoundaryProperties(
+        acoustic_type='half-space', sound_speed=1600.0, density=1.5,
+        attenuation=0.5)
+
+
+@pytest.mark.parametrize("bottom", ['water only', 'half-space'])
+@pytest.mark.parametrize("ssp", [
+    1500.0,
+    uacpy.SoundSpeedProfile.from_pairs([(0.0, 1500.0), (100.0, 1500.4)]),
+], ids=['constant', 'nearly constant'])
+def test_a_near_constant_water_colorbar_prints_absolute_speeds(ssp, bottom):
+    """No "+1.5e3" offset over 0.0/0.4/0.8: every tick reads in metres per
+    second, on the water-only bar and on the stacked water/bottom pair."""
+    env = uacpy.Environment(bathymetry=100.0, ssp=ssp, bottom=_bottom(bottom))
+    fig, _ = env.plot()
+    fig.canvas.draw()
+    cax = _water_colorbar(fig)
+    assert cax.yaxis.get_offset_text().get_text() == ''
+    labels = [t.get_text() for t in cax.get_yticklabels() if t.get_text()]
+    assert labels
+    assert all(float(label.replace('\u2212', '-')) > 1000.0 for label in labels)
+    plt.close(fig)
+
+
+@pytest.mark.parametrize("bottom", ['water only', 'half-space'])
+def test_a_constant_profile_sits_at_the_centre_of_its_water_colorbar(bottom):
+    """The window around a constant value is symmetric, so the one speed the
+    water has is the bar's middle tick, not its bottom edge."""
+    env = uacpy.Environment(bathymetry=100.0, ssp=1500.0, bottom=_bottom(bottom))
+    fig, _ = env.plot()
+    lo, hi = _water_colorbar(fig).get_ylim()
+    assert lo < 1500.0 < hi
+    assert (lo + hi) / 2.0 == pytest.approx(1500.0)
+    plt.close(fig)

@@ -136,3 +136,20 @@ def test_a_refused_connection_gets_one_quick_retry_not_the_ladder():
     with pytest.raises(DataFetchError, match='after 1 retries'):
         _http.http_get('http://127.0.0.1:9/grid.tif', timeout=10.0)
     assert _time.monotonic() - t0 < 5.0
+
+
+class TestAHostThatDoesNotResolveFailsAtOnce:
+    def test_no_retry_ladder_on_a_permanent_dns_failure(self):
+        import time
+        from uacpy.data._http import http_get
+        from uacpy.core.exceptions import DataFetchError
+        t0 = time.monotonic()
+        with pytest.raises(DataFetchError) as info:
+            http_get('http://no-such-host.invalid/grid.nc', timeout=5.0,
+                     source='test')
+        elapsed = time.monotonic() - t0
+        if 'retries' in str(info.value):
+            pytest.skip("resolver reported a temporary failure (offline?), "
+                        "which stays on the retry ladder")
+        assert 'resolve' in str(info.value)
+        assert elapsed < 5.0, elapsed

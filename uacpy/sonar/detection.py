@@ -199,35 +199,13 @@ def detection_threshold_energy(
     dB re Hz). The two differ by ``10*log10(w)``, which is 20 dB at a 100 Hz
     bandwidth, so the choice matters.
 
-    **Validity envelope.** This is Abraham's eq. (2.77), the large-``M``
-    limit of eq. (2.76): the second line "assumes ``sqrt(M)`` is large
-    relative to ``phi_d``", and Abraham adds that "unless ``Pd ~ 0.5``, ``M``
-    needs to be quite large for (2.77) to be highly accurate: the error is
-    generally more than 1 dB for ``M = 10`` and on the order of 0.5 dB for
-    ``M = 100``". Benchmarked against the exact noise-normalised energy
-    detector (``H0: T ~ Gamma(M, 1)``, ``H1: T ~ (1+S)·Gamma(M, 1)``, so
-    ``S = Ginv(1-Pf; M)/Ginv(1-Pd; M) - 1``) the shipped value is
-    **optimistic at every operating point** — it asks for less SNR than the
-    detector needs, so it reports signal excess that is not there. Measured
-    at ``Pf = 1e-6``: ``-1.07 dB`` at ``(Pd=0.9, M=100)``, ``-3.49 dB`` at
-    ``M=10``, ``-13.34 dB`` at ``M=1``, and ``-22.88 dB`` at
-    ``(Pd=0.99, M=1)``.
-
-    The envelope is policed **at the operating point you asked for**, not by
-    a bound fitted over the ``(Pd, Pf, M)`` space: the exact threshold above
-    costs two Gamma quantiles (~100 us), so the value is compared against it
-    directly and a ``UserWarning`` is issued when the approximation is off by
-    more than the ``1 dB`` it claims — naming the actual error and the exact
-    threshold. It therefore cannot warn on a value that is inside the promise
-    or stay silent on one that is not. Where the quantiles do not resolve, a
-    fitted fallback (``M >= max(10, 7*d)``, measured leak-free over ``Pd`` in
-    ``[0.05, 0.9995]`` x ``Pf`` in ``[1e-9, 5e-2]`` x ``M`` in ``[1, 3e4]``)
-    keeps the check alive rather than letting it disappear.
-
-    For scale: at ``Pd = 0.5, Pf = 1e-4`` the error is ``-0.53 dB`` at
-    ``M = 100`` and ``-0.24 dB`` at ``M = 500`` — both inside the promise and
-    both silent — while ``M = 10`` and ``M = 1`` are ``-3.5 dB`` and
-    ``-13.3 dB`` at ``Pd = 0.9, Pf = 1e-6`` and both warn.
+    **Validity envelope.** This is Abraham's eq. (2.77), the large-``M`` limit
+    of eq. (2.76), accurate to ~1 dB only for ``M`` of order 100 and above
+    unless ``Pd ~ 0.5``; it is optimistic (asks for less SNR than the exact
+    noise-normalised energy detector needs) at every operating point. The
+    exact threshold ``S = Ginv(1-Pf; M)/Ginv(1-Pd; M) - 1`` is evaluated at
+    the requested ``(Pd, Pf, M)`` and a ``UserWarning`` names the error when
+    it exceeds 1 dB; the measured error ladder lives in ``test_sonar.py``.
     """
     # Negated admissible condition so NaN is refused: a NaN bandwidth or
     # integration time otherwise returned a silent NaN threshold.

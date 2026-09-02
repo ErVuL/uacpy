@@ -505,3 +505,31 @@ class TestTheOptionLetterAndTheAuxiliaryFileAreDecidedTogether:
         assert _write_bathymetry_beside(target, env, rcv, z_max=200.0,
                                         interp_code='L') is False
         assert not target.with_suffix('.bty').exists()
+
+
+class TestTheWriterRefusesASingleBeamForInfluenceRuns:
+    """bellhop.f90:176-178 leaves Dalpha = 0 for one beam: an empty field,
+    empty arrivals or empty eigenrays at exit 0. The deck refuses it for every
+    run type that evaluates influence; one beam is a ray-trace request."""
+
+    def _write(self, tmp_path, n_beams, run_type):
+        import uacpy
+        from uacpy.core.source import Source
+        from uacpy.core.receiver import Receiver
+        from uacpy.io.bellhop_writer import write_bellhop_env_file
+        env = uacpy.Environment(name='w', bathymetry=100.0, ssp=1500.0)
+        write_bellhop_env_file(
+            filepath=tmp_path / 'w.env', env=env,
+            source=Source(depths=50.0, frequencies=200.0),
+            receiver=Receiver(depths=[50.0], ranges=[1000.0]),
+            run_type=run_type, n_beams=n_beams)
+
+    @pytest.mark.parametrize('run_type', ['C', 'A', 'E'])
+    def test_one_beam_is_refused(self, tmp_path, run_type):
+        from uacpy.core.exceptions import ConfigurationError
+        with pytest.raises(ConfigurationError, match='single beam'):
+            self._write(tmp_path, 1, run_type)
+
+    def test_one_beam_is_allowed_for_a_ray_trace(self, tmp_path):
+        self._write(tmp_path, 1, 'R')
+        assert (tmp_path / 'w.env').exists()

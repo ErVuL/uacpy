@@ -1053,7 +1053,7 @@ results. And across the complex-pressure engines the **phase convention is
 uniform**: every coherent complex `Field` is tagged
 `metadata['phase_reference'] = 'travelling_wave'` — the outgoing
 travelling-wave convention, verified engine-by-engine against Scooter — with
-a line source additionally carrying the 2-D Green's function's `e^{−iπ/4}`.
+a line source additionally carrying the 2-D Green's function's `e^{−iπ/4}` and, like the point source, normalised to unit amplitude at 1 m in free space on every engine (see the source-receiver guide).
 
 ### Running in parallel
 
@@ -1389,7 +1389,7 @@ the outputs a pinned `work_dir` left behind. `import uacpy` exposes them as
 
 One rule governs the whole subpackage: **every public reader and writer speaks
 metres, Hz and radians at the Python boundary.** The km and degree axes the
-on-disk formats want are converted inside, in `io/units.py`. So
+on-disk formats want are converted inside, in `core/units.py`. So
 `write_ssp(path, ranges_m, c)` takes metres even though the `.ssp` format stores
 km, and `read_ssp_2d` hands `r_prof` back in metres.
 
@@ -1450,7 +1450,7 @@ in a `from … import` statement use the real modules
 | `bathymetry.plot()` / `altimetry.plot()` | seafloor depth / sea-surface height vs range — the shape carriers |
 | `absorption.plot(frequencies)` | volume absorption `α(f)` (dB/km, log-log) |
 | `plot_bottom_properties(env)` | seabed `c` / `ρ` / `α` vs depth, per layer stack |
-| `source.plot_beam_pattern()` / `plot_beam_pattern(pattern)` | source directivity from a `.sbp` table or an `(N, 2)` array; polar by default, oriented like the field (0° = increasing range, +angle downward) and spanning the propagating half-plane. `view='support'`/`'full'` widen the sector, `polar=False` gives level-vs-angle, `mirror=True` reflects a half-defined table |
+| `source.plot_beam_pattern()` / `plot_beam_pattern(pattern)` | source directivity from a `.sbp` table or an `(N, 2)` array; polar by default, oriented like the field (0° = increasing range, +angle downward) and spanning the propagating half-plane. `polar=False` gives level-vs-angle, `mirror=True` reflects a half-defined table |
 | `plot_mode_wavenumbers(modes)` / `plot_modes_heatmap(modes)` | modal `k` plane · mode shapes as a heatmap |
 | `plot_signal_excess(field)` / `plot_detection_probability(field)` / `plot_roc(deflection)` | `uacpy.sonar` field maps and the ROC curve |
 | `plot_bathymetry_map(lats, lons, depth)` / `plot_sea_ice_map(grid)` | geographic maps (also the pluggable `map_fn=` of `plot_overview`) |
@@ -2042,7 +2042,7 @@ with a warning naming the value it dropped.
 | `step` | m | `0.0` | Ray step size; `0` = automatic. |
 | `z_box` | m | `None` | Max depth of the ray box; `None` = 1.2 × max depth. |
 | `r_box` | m | `None` | Max range of the ray box; `None` = 1.2 × max range. |
-| `grid_type` | — | `'R'` | Receiver grid: `'R'` rectilinear, `'I'` irregular. |
+| `grid_type` | — | `'R'` | Receiver grid: `'R'` rectilinear, `'I'` irregular (sorted depth *i* pairs with sorted range *i*: a monotone diagonal, never arbitrary points — see `docs/models/bellhop.md`). |
 | `interp_ssp` | — | `None` | SSP scheme; `None` auto (`'quad'` if RD-SSP else `'linear'`); also `'linear'`/`'pchip'`/`'cubic'`/`'quad'`/`'n2linear'`/`'analytic'`. |
 | `interp_bathymetry` | — | `'linear'` | `.bty` interpolation: `'linear'` or `'curvilinear'`. |
 | `interp_altimetry` | — | `'linear'` | `.ati` interpolation: `'linear'` or `'curvilinear'`. |

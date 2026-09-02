@@ -472,6 +472,7 @@ def fetch_environment(
     else:
         bathy_srcs = None                           # literal only
     bathy_src = None
+    bathy_backend = None
     if bathy_srcs is not None:
         bathy_order = _axis_attempts(bathy_srcs, _BATHY_BACKENDS,
                                      axis='bathymetry',
@@ -488,7 +489,7 @@ def fetch_environment(
                                         verbose=verbose)
 
         try:
-            bathymetry, (bathy_src, _) = _resolve_cached(
+            bathymetry, (bathy_src, bathy_backend) = _resolve_cached(
                 _bathy_call, bathy_order, axis='bathymetry')
         except (DataFetchError, ConfigurationError) as exc:
             if bathymetry is None:
@@ -610,6 +611,14 @@ def fetch_environment(
     # against the water *at the interface*, so the reference sound speed has to
     # come from the reconciled profile, not from the deepest analysed level.
     seafloor = Bathymetry.coerce(bathymetry)
+    if bathy_src is not None and not seafloor.data_sources:
+        # Say which backend and vintage answered: the GEBCO DOI is per
+        # release, and a local GEBCO_2025.nc is not the OpenTopoData service.
+        seafloor.data_sources = (DataProvenance(
+            source=SOURCES[bathy_src],
+            data_date=_bathymetry_vintage(bathy_src, bathy_backend),
+            requested_point=tuple(float(v) for v in as_coordinate(point)),
+        ),)
     # Deepest point anywhere along the transect: the profile columns share one
     # depth axis, so it has to reach the deepest seafloor the run touches.
     depth_max = float(np.max(seafloor.depths))
@@ -747,7 +756,7 @@ def fetch_environment(
     # ── Assemble ──
     kwargs = dict(
         name=name or f"{lat:.3f}, {lon:.3f}",
-        bathymetry=bathymetry,
+        bathymetry=seafloor,          # the coerced carrier, provenance stamped
         ssp=ssp,
         # Stamp the geolocation + time so the fetched env carries its
         # provenance (survives env.copy()): the great-circle transect endpoints
@@ -807,7 +816,7 @@ def _record_provenance(env, bathy_src, ssp_src, bottom_kw, bottom_props,
     records = (layer(env.bathymetry, bathy_src)
                + layer(env.ssp, ssp_src)
                + layer(bottom_props, bottom_kw, extra)
-               + layer(getattr(env, 'surface', None), surface_src)
+               + layer(env.surface, surface_src)
                + layer(None, ph_src)
                + layer(None, altimetry_src))
     seen, dedup = set(), []
@@ -827,6 +836,21 @@ def _record_provenance(env, bathy_src, ssp_src, bottom_kw, bottom_props,
                 f"not permit commercial use without verification — see "
                 f"uacpy.data.citations(env) for its licence/attribution.",
                 UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
+
+
+def _bathymetry_vintage(src_id, backend):
+    """What a bathymetry provenance record cites for its ``data_date``: the
+    local grid's release (its file name), or the live service and dataset."""
+    if backend == 'local' and src_id == 'gebco':
+        from uacpy.data import gebco_local
+        try:
+            return gebco_local.grid_name()
+        except (ConfigurationError, DataFetchError, FileNotFoundError):
+            return 'local'          # a stubbed backend: no grid to name
+    if backend == 'api' and src_id == 'gebco':
+        from uacpy.data.bathymetry import DEFAULT_DATASET
+        return f"{DEFAULT_DATASET} via OpenTopoData"
+    return f"{backend} (live)" if backend else None
 
 
 def _fetch_absorption(point, *, date, ssp_source, ssp_backend, cache_only,

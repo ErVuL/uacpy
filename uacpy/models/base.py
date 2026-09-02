@@ -501,6 +501,28 @@ class ModelSpec:
 _ABSORPTION_NOTICE_DB = 1.0
 
 
+def _line_source_unit_at_1m(c_source: float, frequencies) -> np.ndarray:
+    """Factor ``√k0``, ``k0 = 2πf / c(z_s)``, per frequency, that brings an
+    engine's 2-D line-source field normalised as ``Σ ψψ e^{ikx} / k_x``
+    (Kraken ``KrakenField/EvaluateMod.f90:36``, Scooter's ``'X'`` branch of
+    ``TransformG.f90``) to UNIT AMPLITUDE AT 1 m in free space — JKPS
+    §5.2.2's ``p/p0(1)`` reference, the same convention the package uses for
+    a point source (``TL(1 m) = 0``). JKPS states that no line-source
+    normalisation is established; this one is chosen so every engine reports
+    one level. Bellhop's raw line field is ``4√π/√R`` (``influence.f90:784``,
+    ``ArrMod.f90:104``) and takes ``1/(4√π)`` instead (:data:`Bellhop
+    ._LINE_SOURCE_LEVEL`)."""
+    f = np.atleast_1d(np.asarray(frequencies, dtype=float))
+    return np.sqrt(2.0 * np.pi * f / float(c_source))
+
+
+def _source_sound_speed(env, source) -> float:
+    """Sound speed at the (first) source depth — the ``c(z_s)`` in the
+    line-source reference wavenumber ``k0 = 2πf / c(z_s)``."""
+    depth = float(np.atleast_1d(np.asarray(source.depths, dtype=float))[0])
+    return float(np.atleast_1d(env.get_sound_speed(depth))[0])
+
+
 def _warn_if_volume_absorption_is_missing(env, source, receiver) -> None:
     """Say so when a run is about to propagate through lossless water.
 
@@ -518,7 +540,7 @@ def _warn_if_volume_absorption_is_missing(env, source, receiver) -> None:
     Thorp is the yardstick because it takes no parameters, so the size of
     what is being dropped can be estimated without inventing a water column.
     """
-    if getattr(env, 'absorption', None) is not None:
+    if env.absorption is not None:
         return
     # Say it once for the run the caller asked for. A wrapper re-runs itself
     # internally — a broadband Bellhop re-runs ARRIVALS at its carrier, the
@@ -1510,6 +1532,17 @@ class PropagationModel(ABC):
             run_mode, frequencies, source_waveform, sample_rate,
         )
         return source_waveform, frequencies
+
+    def _finish_broadband(self, result, run_mode, source_waveform,
+                          sample_rate):
+        """Return the BROADBAND transfer function as computed or, for
+        TIME_SERIES, its synthesis with the pulse ``_prepare_timeseries``
+        validated. Every IFFT-based wrapper ends its broadband route here.
+        """
+        if run_mode == RunMode.TIME_SERIES:
+            return result.synthesize_time_series(
+                source_waveform=source_waveform, sample_rate=sample_rate)
+        return result
 
     def _setup_file_manager(self) -> FileManager:
         """Build the FileManager. ``self.work_dir`` is used as-is (not a
@@ -3004,22 +3037,19 @@ class PropagationModel(ABC):
         """Slowest / fastest compressional speeds (m/s) anywhere in ``env``.
 
         Water column plus every bottom layer and half-space that carries
-        geoacoustics. Returns ``None`` when the environment declares no
-        speeds at all.
+        geoacoustics. An Environment always carries an SSP (``ssp=None``
+        resolves to the isovelocity default), so the list is never empty.
         """
         # Every profile, not just the one at r=0: a range-dependent SSP can
         # hold its extremes in any column.
         speeds = [float(c) for c in np.asarray(env.ssp.data).ravel()
                   if np.isfinite(c)]
         speeds.extend(c for c in env.bottom.all_sound_speeds() if c)
-        if not speeds:
-            return None
         return float(min(speeds)), float(max(speeds))
 
     def _resolve_c_max(self, env: 'Environment') -> Optional[float]:
         """Fastest compressional speed (m/s) anywhere in ``env`` — water
-        column plus sediment layers and geoacoustic half-spaces — or
-        ``None`` when the environment declares no speeds.
+        column plus sediment layers and geoacoustic half-spaces.
 
         Wrappers stamp it on broadband / complex-pressure results as
         ``c_max``: at long range the earliest arrival is the
@@ -3032,21 +3062,26 @@ class PropagationModel(ABC):
         bounds = self._speed_bounds(env)
         return float(bounds[1]) if bounds else None
 
-    def _max_receiver_depth(self, env: 'Environment') -> float:
-        """Deepest receiver depth this model can resolve the field at.
+    #: Whether the engine resolves the field THROUGH the sediment layers it
+    #: is given (Kraken, Scooter, SPARC, OASES mesh them as media), so a
+    #: receiver — or a buried source — inside the seabed is a supported
+    #: geometry down to the deepest interface. Ray models stop at the
+    #: seafloor; RAM keeps the seafloor by its own override even though its
+    #: PE marches deeper (see :meth:`RAM._max_receiver_depth`).
+    _receivers_reach_sediment: bool = False
 
-        Ray models stop at the seafloor; full-waveguide spectral solvers
-        override this to include the sediment layers they mesh through (see
-        :meth:`_total_media_depth`). RAM keeps the seafloor by an explicit
-        override even though its PE marches deeper — see
-        :meth:`RAM._max_receiver_depth` for why — so the default is not
-        derivable from ``_supports_layered_bottom``.
+    def _max_receiver_depth(self, env: 'Environment') -> float:
+        """Deepest receiver depth this model can resolve the field at: the
+        seafloor, or the deepest modelled interface when
+        ``_receivers_reach_sediment`` (see :meth:`_total_media_depth`).
 
         The value gates source and receiver depths asymmetrically in
         :meth:`_validate_geometry`: a source below it raises, a receiver
-        below it only warns. Overriding this therefore changes which source
+        below it only warns. Changing it therefore changes which source
         placements are legal, not just which receivers warn.
         """
+        if self._receivers_reach_sediment:
+            return self._total_media_depth(env)
         return float(env.depth)
 
     def _source_below_domain_note(self, env: 'Environment',
@@ -3098,9 +3133,9 @@ class PropagationModel(ABC):
         ``singular_term`` names the 1/√r-type factor that has no value there
         (it completes "... at r = 0, where <singular_term> is singular").
         ``data`` is returned unchanged — and no warning is emitted — when no
-        column sits on the source axis. Used by the wrappers whose engine
-        returns a number there that belongs to no range (Kraken's field.exe,
-        SPARC's 'R'/'D' branches); every masked engine warns on every run.
+        column sits on the source axis. :meth:`_mask_source_axis` applies it
+        to a point-source field; SPARC's 'R'/'D' branches call it with
+        their own singular term. Every masked engine warns on every run.
         """
         ranges = np.atleast_1d(np.asarray(ranges, dtype=float))
         zero = np.abs(ranges) < np.finfo(float).tiny
@@ -3118,6 +3153,30 @@ class PropagationModel(ABC):
             masked = masked.astype(float)
         masked[:, zero, ...] = np.nan
         return masked
+
+    def _mask_source_axis(self, field, source):
+        """NaN the ``r = 0`` column of a point-source ``field`` and warn once.
+
+        Every engine that evaluates ``1/sqrt(r)`` cylindrical spreading
+        returns a number on the source axis that belongs to no range —
+        Kraken's field.exe (``EvaluateMod.f90:71-73`` skips the factor under
+        a ``TINY`` test), OASES's asymptotic Hankel carrier (measured on a
+        100 m Pekeris case: OASP |p| = 1.23 at r = 0 against 5e-3 at 500 m),
+        RAM's PE (``psi/sqrt(r)``, scaled at a substitute range) — so each
+        wrapper hands its assembled field here and the family's grids stay
+        comparable cell by cell. ``'line'`` and ``'scaled'`` sources carry
+        no ``1/sqrt(r)`` and are returned as they are. Column masking and
+        the warning come from :meth:`_mask_zero_range_columns`, reading the
+        field's own range axis.
+        """
+        if source.source_type != 'point':
+            return field
+        masked = self._mask_zero_range_columns(
+            field.data, field.coords['range'],
+            'the point-source cylindrical-spreading factor 1/sqrt(r)')
+        if masked is not field.data:
+            field.data = masked
+        return field
 
     def _reject_malformed_irc_bottom(self, env: 'Environment') -> None:
         """Refuse a ``'precalc'`` seabed whose table is not in ``.irc`` layout.

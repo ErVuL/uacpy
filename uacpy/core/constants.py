@@ -188,12 +188,11 @@ class BoundaryType(Enum):
         if value_lower in at_codes:
             return at_codes[value_lower]
 
+        # Every member's value upper-cased with '-' -> '_' IS its name, so
+        # the name lookup resolves every spelling the values could match.
         try:
             return cls[value.upper().replace('-', '_')]
         except KeyError:
-            for bt in cls:
-                if bt.value == value_lower:
-                    return bt
             raise ConfigurationError(
                 f"invalid boundary type: {value!r}",
                 remediation=f"Use one of {[bt.value for bt in cls]}.")

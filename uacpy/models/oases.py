@@ -72,7 +72,7 @@ from uacpy.io.oases_writer import (
     write_oass_input, write_oassp_input, oases_wavenumber_bounds,
     oass_bottom_interfaces, bottom_interface_roughness,
 )
-from uacpy.io.units import m_to_km
+from uacpy.core.units import m_to_km
 from uacpy.io.oases_reader import (
     read_oast_tl,
     read_oasn_covariance,
@@ -217,47 +217,6 @@ def _warn_if_trf_grid_replaced_request(requested, produced) -> None:
         f"you need exactly the frequencies you name.",
         UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
     )
-
-
-def _mask_zero_range(field, source, model_name: str):
-    """NaN the ``r <= 0`` column(s) of a point-source OASES field.
-
-    OASES evaluates its wavenumber integral under the asymptotic Hankel
-    carrier, whose ``1/sqrt(r)`` cylindrical spreading is singular on the
-    source axis, so the number it returns at ``r = 0`` belongs to no range
-    (measured on a 100-m Pekeris case: OASP |p| = 1.23 at r = 0 against
-    5e-3 at 500 m; OASS 56.3 dB at r = 0). Kraken (``_mask_zero_range``),
-    Scooter and RAM mask the same cells, which keeps the family's grids
-    comparable cell by cell. Line/scaled sources carry no ``1/sqrt(r)``
-    and are left alone, as they are in the sibling models.
-
-    The line/scaled branch is unreachable through any OASES ``run()``: all six
-    classes declare ``source_types = ('point',)`` and ``validate_inputs``
-    raises ``UnsupportedFeatureError`` on anything else before every call
-    site. It is kept as the behaviour a widened ``spec.source_types`` would
-    need — without it, an OASES line source would have its ``r = 0`` column
-    NaN'd for a spreading factor it does not carry. ``test_oases.py`` drives
-    it directly.
-    """
-    if getattr(source, 'source_type', 'point') != 'point':
-        return field
-    ranges = np.atleast_1d(np.asarray(field.coords['range'], dtype=float))
-    zero = ranges <= 0.0
-    if not zero.any():
-        return field
-    warnings.warn(
-        f"{model_name}: {int(zero.sum())} receiver range(s) at r <= 0, "
-        "where the point-source cylindrical-spreading factor 1/sqrt(r) is "
-        "singular; those columns are returned as NaN (no data). Move the "
-        "receiver off the source axis (e.g. r = 1 m) to get a field value.",
-        UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
-    )
-    data = np.array(field.data)
-    if not np.issubdtype(data.dtype, np.inexact):
-        data = data.astype(float)
-    data[:, zero, ...] = np.nan
-    field.data = data
-    return field
 
 
 def _stack_oasr_data(data: dict):
@@ -601,15 +560,11 @@ class OASES(PropagationModel):
             )
         return target(**kwargs)
 
-    def _max_receiver_depth(self, env: Environment) -> float:
-        """Deepest depth OASES resolves the field at: the full media stack.
-
-        OASES meshes the sediment layers as media in their own right, so the
-        field is defined through them and a source or receiver inside the
-        seabed is a supported geometry — buried and sub-bottom sources are a
-        large part of what the seismo-acoustic family is for.
-        """
-        return self._total_media_depth(env)
+    # OASES meshes the sediment layers as media in their own right, so a
+    # source or receiver inside the seabed is a supported geometry — buried
+    # and sub-bottom sources are much of what the seismo-acoustic family is
+    # for.
+    _receivers_reach_sediment = True
 
     def _wavenumber_echo_scale(self) -> int:
         """Factor between the echoed wavenumber count and the count actually
@@ -2669,12 +2624,9 @@ class OASP(OASES):
             c_max = self._resolve_c_max(env)
             if c_max is not None:
                 result.metadata['c_max'] = c_max
-            result = _mask_zero_range(result, source, 'OASP')
-            if run_mode == RunMode.TIME_SERIES:
-                result = result.synthesize_time_series(
-                    source_waveform=source_waveform,
-                    sample_rate=sample_rate,
-                )
+            result = self._mask_source_axis(result, source)
+            result = self._finish_broadband(
+                result, run_mode, source_waveform, sample_rate)
         else:
             # COHERENT_TL: pick the bin nearest the requested frequency
             # and return the complex narrowband pressure (transposed
@@ -2718,7 +2670,7 @@ class OASP(OASES):
                     freq_max=freq_max,
                 ),
             )
-            result = _mask_zero_range(result, source, 'OASP')
+            result = self._mask_source_axis(result, source)
 
         self._attach_output_paths(
             result, fm.work_dir, base_name,
@@ -3464,12 +3416,9 @@ class OASSP(OASES):
                     mean_field_result=mean_result,
                 ),
             )
-            result = _mask_zero_range(result, source, 'OASSP')
-            if run_mode == RunMode.TIME_SERIES:
-                result = result.synthesize_time_series(
-                    source_waveform=source_waveform,
-                    sample_rate=sample_rate,
-                )
+            result = self._mask_source_axis(result, source)
+            result = self._finish_broadband(
+                result, run_mode, source_waveform, sample_rate)
 
             self._attach_output_paths(
                 result, fm.work_dir, base_name,
@@ -4230,7 +4179,7 @@ class OASS(OASES):
                                         depths=receiver_depths)
             result.metadata['oass_native_ranges'] = native_ranges
             result.metadata['interpolated'] = True
-        result = _mask_zero_range(result, source, 'OASS')
+        result = self._mask_source_axis(result, source)
         self._attach_output_paths(
             result, fm.work_dir, base_name,
             primary_files=(('plt_file', '.plt'),),

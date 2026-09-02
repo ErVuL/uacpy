@@ -8,7 +8,7 @@ do not import matplotlib. Each function consumes plain arrays, takes the target
 import numpy as np
 import matplotlib.pyplot as plt
 
-from uacpy.visualization.plots._common import fig_ax, typed_plot_error
+from uacpy.visualization.plots._common import fig_ax, typed_plot_error, _require_nonempty
 
 
 
@@ -65,6 +65,7 @@ def plot_doppler_ambiguity(scales, peak_metric, ax=None, *, title=None,
 def plot_convergence(mse, ax=None, *, label=None, title=None, figsize=(7, 4),
                      **mpl_kw):
     """Equalizer learning curve (MSE vs symbol index, dB)."""
+    _require_nonempty('plot_convergence', mse=mse)
     m = np.asarray(mse, dtype=float)
     fig, ax = fig_ax(ax, figsize)
     ax.plot(10 * np.log10(np.maximum(m, 1e-12)), label=label, **mpl_kw)
@@ -81,6 +82,7 @@ def plot_convergence(mse, ax=None, *, label=None, title=None, figsize=(7, 4),
 def plot_sync_metric(metric, ax=None, *, threshold=None, title=None,
                      figsize=(8, 3.5), **mpl_kw):
     """Synchronization metric vs sample index."""
+    _require_nonempty('plot_sync_metric', metric=metric)
     m = np.asarray(metric, dtype=float)
     fig, ax = fig_ax(ax, figsize)
     ax.plot(m, **mpl_kw)
@@ -105,7 +107,7 @@ def plot_subcarriers(channel, n_subcarriers, ax=None, *, title=None,
     # Unshifted, so index k is the subcarrier ``ofdm_modulate`` /
     # ``ofdm_demodulate`` address as k.
     ax.plot(np.arange(nsc),
-            20 * np.log10(np.abs(H) + 1e-12), **mpl_kw)
+            20 * np.log10(np.abs(H)), **mpl_kw)      # a zero bin is -inf, not -240 dB
     ax.set_xlabel("Subcarrier index")
     ax.set_ylabel("|H| (dB)")
     ax.set_title(title or "OFDM subcarrier response", loc="left")
@@ -142,6 +144,7 @@ def plot_scatter(symbols, ax=None, *, ideal=None, title=None, figsize=(5, 5),
 def plot_constellation(constellation, ax=None, *, scheme="", annotate=True,
                        title=None, figsize=(5, 5), **mpl_kw):
     """Plot an ideal Gray-labeled constellation."""
+    _require_nonempty('plot_constellation', constellation=constellation)
     c = np.asarray(constellation, dtype=complex)
     fig, ax = fig_ax(ax, figsize)
     ax.scatter(c.real, c.imag, marker="o", s=60, **mpl_kw)
@@ -164,6 +167,7 @@ def plot_constellation(constellation, ax=None, *, scheme="", annotate=True,
 def plot_eye_diagram(signal, samples_per_symbol, ax=None, *, n_symbols=2,
                      title=None, figsize=(7, 4), **mpl_kw):
     """Eye diagram: overlay ``n_symbols``-wide windows of the real signal."""
+    _require_nonempty('plot_eye_diagram', signal=signal)
     x = np.real(np.asarray(signal)).ravel()
     sps = int(samples_per_symbol)
     span = sps * int(n_symbols)
@@ -187,6 +191,7 @@ def plot_eye_diagram(signal, samples_per_symbol, ax=None, *, n_symbols=2,
 def plot_ber_curve(ebn0_db, ber_measured, ax=None, *, scheme=None,
                    label="measured", title=None, figsize=(7, 5), **mpl_kw):
     """Measured BER vs Eb/N0 (semilog-y) with optional theory overlay."""
+    _require_nonempty('plot_ber_curve', ebn0_db=ebn0_db, ber_measured=ber_measured)
     ebn0 = np.atleast_1d(np.asarray(ebn0_db, dtype=float))
     ber = np.atleast_1d(np.asarray(ber_measured, dtype=float))
     fig, ax = fig_ax(ax, figsize)

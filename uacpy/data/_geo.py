@@ -135,12 +135,28 @@ def lon_linspace(lon0: float, lon1: float, n: int) -> np.ndarray:
 
 def central_angle(start: Coordinate, end: Coordinate) -> float:
     """Great-circle central angle (radians) between two ``(lat, lon)`` points
-    (haversine; numerically stable for small separations)."""
-    lat1, lon1 = np.radians(as_coordinate(start))
-    lat2, lon2 = np.radians(as_coordinate(end))
-    dlat, dlon = lat2 - lat1, lon2 - lon1
-    a = np.sin(dlat / 2) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2) ** 2
-    return float(2 * np.arcsin(np.sqrt(a)))
+    — :func:`great_circle_km` in radians, with the scalar coordinate checks."""
+    lat1, lon1 = as_coordinate(start)
+    lat2, lon2 = as_coordinate(end)
+    return float(great_circle_km(lat1, lon1, lat2, lon2) / EARTH_RADIUS_KM)
+
+
+def require_month(month, who: str) -> int:
+    """``month`` as an int in 1-12, or ``ConfigurationError``: a bool, a
+    fraction (``6.7``) or a non-number is refused rather than truncated to a
+    month the caller never asked for."""
+    if isinstance(month, (bool, np.bool_)):
+        raise ConfigurationError(f"{who}: month={month!r} is a bool, not a month (1-12).")
+    try:
+        value = float(month)
+    except (TypeError, ValueError):
+        raise ConfigurationError(
+            f"{who}: month={month!r} is not a number; pass an integer 1-12.") from None
+    if not value.is_integer() or not 1 <= value <= 12:
+        raise ConfigurationError(
+            f"{who}: month={month!r} is not an integer month 1-12; a fraction "
+            f"would be truncated to a month you did not ask for.")
+    return int(value)
 
 
 def great_circle_km(lat0, lon0, lat, lon):

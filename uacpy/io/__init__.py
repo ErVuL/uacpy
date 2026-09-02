@@ -20,8 +20,6 @@ Layout:
 * ``ramsurf_writer`` / ``ramsurf_reader`` — Collins rams0.5 / ramsurf1.5.
 * ``grn_reader`` — Scooter / SPARC Green's-function with post-processing.
 * ``utils`` — shared helpers (``equally_spaced``).
-* ``units`` — unit-conversion helpers (km↔m, deg↔rad) shared by readers
-  and writers.
 * ``file_manager`` — temp-dir / tmpfs management.
 * ``_fortran_helpers`` — private low-level Fortran-record helpers.
 
@@ -161,9 +159,7 @@ __all__ = [
     "write_ramin",
     # Utilities
     "equally_spaced",
-    # Submodules (importing uacpy.io makes each reachable as an attribute;
-    # ``units`` stays unlisted — it is an internal conversion helper shared by
-    # readers and writers, not part of the public io surface)
+    # Submodules (importing uacpy.io makes each reachable as an attribute)
     "bathy_io", "bellhop_writer", "file_manager", "grn_reader",
     "modes_reader", "mpirams_reader", "mpirams_writer",
     "oalib_reader", "oalib_writer", "oases_reader", "oases_writer",

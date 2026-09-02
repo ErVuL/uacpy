@@ -522,6 +522,17 @@ def reflection_coeff(
     √(n² − sin²θ))`` with ``m = ρ1/ρ``, ``n = c/c1``; §3.1 gives the lossy
     convention ``n = n0(1 + iα), α > 0``.
     """
+    angle_arr = np.asarray(angle, dtype=float)
+    # The convention here is the incidence angle from the NORMAL in radians;
+    # the carriers speak grazing degrees, and a grazing angle in degrees is
+    # larger than pi/2 for anything but the steepest rays — refused rather
+    # than folded into a coefficient of exactly 1.
+    if np.any(angle_arr < 0.0) or np.any(angle_arr > np.pi / 2.0 + 1e-9):
+        raise ConfigurationError(
+            f"reflection_coeff: angle is the incidence angle from the normal, "
+            f"in radians within [0, pi/2]; got {angle!r}. For a grazing angle "
+            f"in degrees pass np.pi/2 - np.deg2rad(grazing_deg), or use "
+            f"bottom_loss_curve, which takes grazing degrees and g/cm^3.")
     global _DEFAULT_WATER_COLUMN_WARN_EMITTED
 
     if rho is None:

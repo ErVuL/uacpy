@@ -381,3 +381,16 @@ class TestEveryRegistryEntryTakesTheSameFrequencyArgument:
                         wind_speed_kn=10.0).as_psd()
         assert np.shape(np.asarray(got)) == (3,)
         assert np.all(np.isfinite(np.asarray(got)))
+
+
+class TestAMisspeltRegistryKeyIsATypedError:
+    def test_shipping_and_rain_levels(self):
+        from uacpy.noise.noise import _shipping_wenz, _shipping_coates, _rain_torres_costa
+        from uacpy.core.exceptions import ConfigurationError
+        f = np.array([100.0, 1000.0])
+        with pytest.raises(ConfigurationError, match='shipping_level'):
+            _shipping_wenz(f, shipping_level='moderat', water_depth='deep')
+        with pytest.raises(ConfigurationError, match='shipping_level'):
+            _shipping_coates(f, shipping_level='moderat')
+        with pytest.raises(ConfigurationError, match='rain_rate'):
+            _rain_torres_costa(f, rain_rate='heavvy')

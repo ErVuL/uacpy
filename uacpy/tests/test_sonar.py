@@ -1493,7 +1493,7 @@ class TestSonarPositivityGuardsRefuseNaN:
         lambda: ts.ts_ellipsoid(2.0, 1.0, NAN),
     ])
     def test_target_strength_nan_dimension_or_frequency_raises(self, call):
-        with pytest.raises(ConfigurationError, match="must be positive and finite"):
+        with pytest.raises(ConfigurationError, match="must be > 0 and finite"):
             call()
 
     @pytest.mark.parametrize("call", [
@@ -1509,7 +1509,7 @@ class TestSonarPositivityGuardsRefuseNaN:
         infinite target strength with no warning. NaN was refused because
         ``nan > 0`` is False — one negated comparison closed one hole and not
         the other."""
-        with pytest.raises(ConfigurationError, match="must be positive and finite"):
+        with pytest.raises(ConfigurationError, match="must be > 0 and finite"):
             call()
 
     @pytest.mark.parametrize("bad", [None, [1.0, 2.0], np.array([1.0, 2.0]),

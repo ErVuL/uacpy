@@ -95,7 +95,7 @@ class DataProvenance:
 SOURCES: Dict[str, DataSource] = {
     'gebco': DataSource(
         id='gebco',
-        name='GEBCO grid (served via OpenTopoData)',
+        name='GEBCO grid',
         used_for='bathymetry',
         license='Public domain (attribution requested)',
         attribution='GEBCO Compilation Group, GEBCO Grid',

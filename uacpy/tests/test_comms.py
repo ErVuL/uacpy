@@ -2313,3 +2313,66 @@ class TestTheTwoViterbiDecodersAgree:
         forward = comms.viterbi_decode(deinterleaved, [0o657, 0o435],
                                        _CONV_K)[:64]
         assert not np.array_equal(forward, bits)
+
+
+class TestTheDefaultReceiverRecoversPhaseGainAndTiming:
+    """Without an equaliser the known preamble still fixes carrier phase and
+    gain, and the timing loop pulls in within the preamble: a record delayed
+    by a fraction of a sample at 2.5x amplitude decoded 16-QAM at BER 0.44 /
+    0.25 with the preamble detected and no warning."""
+
+    FS, FC, SPS = 96000.0, 24000.0, 8
+
+    def _roundtrip(self, delay_samples, amplitude, modulation='16qam', n_bits=4 * 400):
+        from uacpy.acoustic_signal.channel import fractional_delay_taps
+        rng = np.random.default_rng(3)
+        bits = rng.integers(0, 2, n_bits)
+        tx = comms.Transmitter(modulation, preamble=64)
+        wav = tx.transmit_passband(bits, self.FS, self.FC, sps=self.SPS)
+        whole, frac = int(np.floor(delay_samples)), delay_samples - int(np.floor(delay_samples))
+        rxsig = amplitude * np.convolve(np.concatenate([np.zeros(whole), wav]),
+                                        fractional_delay_taps(frac))
+        rx = comms.CommsReceiver(modulation, preamble=64)
+        out = rx.receive_passband(rxsig, self.FS, self.FC, sps=self.SPS)
+        n = min(out.size, bits.size)
+        return float(np.mean(out[:n] != bits[:n]))
+
+    def test_a_fractional_sample_delay_and_a_gain_decode_cleanly(self):
+        assert self._roundtrip(0.7, 2.5) == 0.0
+        assert self._roundtrip(0.7, 0.5, modulation='qpsk') == 0.0
+
+    def test_the_timing_loop_pulls_in_from_a_quarter_symbol_within_the_preamble(self):
+        """Measured on the loop itself: 16-QAM symbols pulse-shaped, shifted a
+        quarter symbol (2 of 8 samples), matched-filtered and re-synchronised.
+        The loop constants are per symbol; applying the correction in samples
+        unscaled left the gain sps times too small, and pull-in took ~380
+        symbols — far past a 64-symbol preamble. Scaled, ~50."""
+        from uacpy.comms.phy import pulse_shape, matched_filter, symbol_sync
+        from uacpy.comms.equalization import slicer
+        rng = np.random.default_rng(7)
+        mod = comms.Modulator('16qam')
+        bits = rng.integers(0, 2, 4 * 600)
+        symbols = mod.modulate(bits)
+        sps, span = 8, 8
+        bb = pulse_shape(symbols, sps, 0.25, span)
+        bb = np.concatenate([np.zeros(2, dtype=complex), bb])       # quarter-symbol late
+        mf = matched_filter(bb, sps, 0.25, span)
+        rec = symbol_sync(mf, sps, loop_bw=0.005, start=span * sps)
+        n = min(rec.size, symbols.size)
+        gain = np.vdot(symbols[300:n], rec[300:n]) / np.vdot(symbols[300:n], symbols[300:n])
+        wrong = slicer(rec[:n] / gain, mod.constellation) != symbols[:n]
+        settled = int(np.flatnonzero(wrong).max()) + 1 if wrong.any() else 0
+        assert settled < 100, f"loop still wrong at symbol {settled}"
+
+    def test_an_lms_equalizer_with_a_short_preamble_is_announced(self):
+        with warnings.catch_warnings(record=True) as rec:
+            warnings.simplefilter('always')
+            comms.CommsReceiver('16qam', equalizer=comms.DFE(n_ff=12, n_fb=6), preamble=64)
+        msgs = [str(w.message) for w in rec if 'training symbols' in str(w.message)]
+        assert len(msgs) == 1 and '360' in msgs[0], msgs
+        with warnings.catch_warnings(record=True) as rec:
+            warnings.simplefilter('always')
+            comms.CommsReceiver('16qam', equalizer=comms.DFE(n_ff=12, n_fb=6, forget=0.997),
+                                preamble=64)
+        assert not [w for w in rec if 'training symbols' in str(w.message)]
+

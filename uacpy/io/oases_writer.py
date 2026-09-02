@@ -36,7 +36,7 @@ from uacpy.io.utils import (
     # alias keeps the six OASES writers' call sites unchanged.
     reject_unknown_kwargs as _reject_unknown_kwargs,
 )
-from uacpy.io.units import m_to_km
+from uacpy.core.units import m_to_km
 from uacpy.io.oalib_writer import writable_layers
 
 
@@ -132,7 +132,7 @@ def _warn_volume_attenuation_ignored(
     sub-model-specific meanings, so the Acoustics-Toolbox ``TopOpt``
     absorption codes cannot be injected into the options string.)
     """
-    if getattr(env, 'absorption', None) is None:
+    if env.absorption is None:
         return
     kind = type(env.absorption).__name__
     if lossless_water:

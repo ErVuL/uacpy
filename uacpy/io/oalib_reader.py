@@ -51,7 +51,7 @@ from uacpy.io._fortran_helpers import (
     read_list_directed_values, take_tokens,
     strip_fortran_comment as _strip_fortran_comment,
     strip_fortran_quotes as _strip_fortran_quotes)
-from uacpy.io.units import km_to_m
+from uacpy.core.units import km_to_m
 
 
 def read_shd_file(filepath: Union[str, Path]):
@@ -791,7 +791,7 @@ def _merge_bracketing_pairs(omega, amps, phases, delays_r, delays_i,
 
 @typed_format_error
 def read_arr_file(filepath: Union[str, Path], *, grid_type: str = 'R',
-                  merge: bool = True):
+                  merge: bool = False):
     """
     Read arrivals file (.arr) from Bellhop
 
@@ -809,27 +809,27 @@ def read_arr_file(filepath: Union[str, Path], *, grid_type: str = 'R',
         ``Bellhop/ArrMod.f90:101-102``). The file records nothing that
         distinguishes the two, so the caller must say which it is.
     merge : bool, optional
-        ``True`` (default): apply sequential Bellhop's ``AddArr``
-        bracketing-pair merge to each receiver cell, then sort its arrivals
-        on the total key ``(delay, amplitude, phase, src_angle, rcv_angle,
-        n_top_bounces, n_bot_bounces)``. Two records merge iff
+        ``False`` (default): return the records exactly as the file lists
+        them — unmerged, unsorted, in file order. This is the right reading
+        of a file the ENGINE has already merged: sequential Fortran Bellhop
+        applies its ``AddArr`` bracketing-pair merge itself, and so do
+        bellhopcxx / bellhopcuda when they run single-threaded
+        (``bellhopcuda/src/mode/arr.hpp:79``). The rule is not idempotent —
+        the engine tests each raw contribution against the running
+        aggregate of the last record (``Bellhop/ArrMod.f90:43-46,74-81``),
+        so re-running it on the file tests aggregate against aggregate and
+        merges neighbours the engine refused to.
+        ``True``: apply that merge to each receiver cell, then sort its
+        arrivals on the total key ``(delay, amplitude, phase, src_angle,
+        rcv_angle, n_top_bounces, n_bot_bounces)``. Two records merge iff
         ``omega·|Δdelay| < 0.05`` (complex delay) and ``|Δphase| < 0.05``
         rad, with ``omega = 2π·freq`` from the file header
-        (``Bellhop/ArrMod.f90:8`` ``PhaseTol = 0.05``, ``:44-45`` the test,
-        ``:74-81`` the merge math: amplitudes add, delay and angles are
-        amplitude-weighted, phase keeps the first record's value).
-        Sequential Fortran Bellhop applies this merge itself; bellhopcuda
-        vendors the identical rule (``src/arrivals.hpp:35-38``) gated
-        **off** for multithread/GPU runs (``src/arrivals.hpp:113-118``),
-        and its record order is thread/GPU completion order — so the raw
-        file's arrival count and order are backend-dependent while the
-        merged, sorted read result is backend-invariant, with sequential
-        Fortran as the reference. Limits: ``MaxNArr`` weakest-replacement
-        (``ArrMod.f90:49-59``) is not emulated, and a merged arrival's
-        phase keeps the first record's value, exactly as ``AddArr``'s
-        does.
-        ``False``: return the records exactly as the file lists them —
-        unmerged, unsorted, in file order.
+        (``ArrMod.f90:8`` ``PhaseTol = 0.05``; amplitudes add, delay and
+        angles are amplitude-weighted, phase keeps the first record's).
+        For a MULTITHREADED bellhopcxx / GPU bellhopcuda file, which the
+        engine leaves unmerged and in completion order, this reproduces the
+        sequential Fortran file record for record. Limits: ``MaxNArr``
+        weakest-replacement (``ArrMod.f90:49-59``) is not emulated.
 
     Returns
     -------

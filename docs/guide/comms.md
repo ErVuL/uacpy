@@ -190,8 +190,10 @@ equaliser will.
 
 `symbol_sync` recovers the sampling clock from the data itself with a Gardner
 timing-error detector. Pass `start=span*sps` — the group delay of the transmit
-and receive RRC pair together, `span*sps/2` samples each — so the loop locks
-from the first symbol instead of dragging itself in.
+and receive RRC pair together, `span*sps/2` samples each — so the loop starts
+on the symbol grid. It is not instantaneous: from a quarter-symbol timing
+offset the loop locks within ~50 symbols, from half a symbol within ~300, so a
+preamble at least that long absorbs the pull-in before the payload.
 
 ---
 
@@ -523,9 +525,13 @@ runs past the payload — every block after the pilot is decoded as data, the
 transmitter's trailing zero guard included — so slice it to the known payload
 length. Handing `receive` a baseband frame
 yourself skips the resampling, which is right only when the platform is
-stationary. Set `snr_linear` — the same input-referred linear SNR defined for
-`mmse_equalizer` above — for MMSE per-subcarrier equalisation instead of
-zero-forcing; it damps exactly the null-carrier noise amplification above.
+stationary. `snr_linear` — the same input-referred linear SNR defined for
+`mmse_equalizer` above — switches the per-subcarrier weight from zero-forcing
+to MMSE. With the hard-decision slicer this receiver uses that is a positive
+real rescale of the zero-forcing output: PSK decisions are unchanged and QAM
+decisions are slightly worse (biased inward). It only pays off with soft
+decisions or bias removal; measured, 16-QAM at 10 dB went from BER 0.106 (ZF)
+to 0.112 (MMSE).
 
 **Why the resampling has to come first.** A Doppler scale `a` shifts subcarrier
 `k` by `a·f_k`, so the shift grows across the band and no single frequency

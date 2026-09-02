@@ -16,7 +16,6 @@ import uacpy
 from uacpy.core import BoundaryProperties, Environment, Receiver, Source
 from uacpy.core.results import Field
 from uacpy.models import Bellhop, OASN, OASP, OASR
-from uacpy.models.oases import _mask_zero_range
 from uacpy.models.base import RunMode
 from uacpy.models.oases import _oases_resample_frequencies
 from uacpy.core.environment import SoundSpeedProfile
@@ -2068,7 +2067,7 @@ class TestOasesDeckTitleIsTheEnvironmentName:
 @pytest.mark.requires_binary
 class TestOaspBroadbandStampsThePhysicalCMax:
     """OASP writes the stamp on its transfer-function result (``oases.py``,
-    beside ``_mask_zero_range``). Its frequency axis is the ``.trf``'s own
+    beside ``_mask_source_axis``). Its frequency axis is the ``.trf``'s own
     FFT ladder rather than the frequencies asked for, so the stamp is
     asserted on its own here."""
 
@@ -2203,8 +2202,8 @@ class TestOasesMasksTheSourceAxis:
     carrier, whose ``1/sqrt(r)`` cylindrical spreading is singular at ``r = 0``,
     so the number it returns there belongs to no range: measured on a 100 m
     Pekeris case, OASP ``|p|`` = 1.23 at ``r = 0`` against 5e-3 at 500 m, and
-    OASS 56.3 dB. Kraken, Scooter and RAM already NaN those cells, so masking
-    them here keeps the family's grids comparable cell by cell.
+    OASS 56.3 dB. The shared ``_mask_source_axis`` NaNs those cells for every
+    engine, so the family's grids stay comparable cell by cell.
 
     A line or scaled source carries no ``1/sqrt(r)`` and is left alone, as it
     is in the sibling models.
@@ -2219,8 +2218,8 @@ class TestOasesMasksTheSourceAxis:
     def test_a_point_source_returns_its_axis_column_as_no_data(self):
         field = self._field([0.0, 100.0, 500.0])
         source = Source(depths=10.0, frequencies=100.0)
-        with pytest.warns(UserWarning, match=r'r <= 0'):
-            out = _mask_zero_range(field, source, 'OASP')
+        with pytest.warns(UserWarning, match=r'OASP: 1 receiver range\(s\) at r = 0'):
+            out = OASP(verbose=False)._mask_source_axis(field, source)
         assert np.isnan(out.data[:, 0]).all()
         assert np.isfinite(out.data[:, 1:]).all()
 
@@ -2229,7 +2228,7 @@ class TestOasesMasksTheSourceAxis:
         source = Source(depths=10.0, frequencies=100.0)
         with warnings.catch_warnings():
             warnings.simplefilter('error')       # the warning must not fire
-            out = _mask_zero_range(field, source, 'OASP')
+            out = OASP(verbose=False)._mask_source_axis(field, source)
         assert np.isfinite(out.data).all()
 
     def test_a_line_source_keeps_its_axis_column(self):
@@ -2237,7 +2236,7 @@ class TestOasesMasksTheSourceAxis:
         source = Source(depths=10.0, frequencies=100.0, source_type='line')
         with warnings.catch_warnings():
             warnings.simplefilter('error')
-            out = _mask_zero_range(field, source, 'OASP')
+            out = OASP(verbose=False)._mask_source_axis(field, source)
         assert np.isfinite(out.data).all()
 
 
