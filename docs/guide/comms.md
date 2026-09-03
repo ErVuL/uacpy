@@ -625,7 +625,7 @@ point = uacpy.Receiver(depths=60.0, ranges=3000.0)
 arrivals = Bellhop(n_beams=4000, alpha=(-10.0, 10.0)).run(
     env, source, point, run_mode=RunMode.ARRIVALS)
 
-gains = arrivals.amplitudes * np.exp(1j * arrivals.phases)
+gains = arrivals.received_amplitudes
 delays = arrivals.delays - arrivals.delays.min()
 channel = comms.multipath_channel(gains, delays, BAUD)
 channel /= np.abs(channel).max()
@@ -638,10 +638,16 @@ link = comms.simulate_link('qpsk', 20.0, 20000, channel=channel, n_train=2000,
 ![A QPSK link over a Bellhop-modelled channel](figures/comms_bellhop_channel.png)
 
 Three lines convert a propagation result into a modem channel:
-`arrivals.amplitudes * exp(1j * arrivals.phases)` are the complex path gains
-(`.phases` is already in radians), `arrivals.delays` are absolute travel
-times, so subtracting the earliest re-references the impulse response to the
-first arrival. `multipath_channel` then bins the arrivals onto a tap grid at
+`arrivals.received_amplitudes` are the complex path gains, `arrivals.delays`
+are absolute travel times, so subtracting the earliest re-references the
+impulse response to the first arrival. Use `received_amplitudes` rather than
+building the gains yourself from `amplitudes * exp(1j * phases)`: those two
+agree here only because this 200 Hz channel carries no volume absorption, and
+BELLHOP keeps absorption in the imaginary travel time rather than in the
+amplitude column. At a modem's frequency the difference is not subtle — 13 dB
+per kilometre of path at 40 kHz — and because it grows with path length it
+reweights the taps against each other, which normalising the channel does not
+undo. `multipath_channel` then bins the arrivals onto a tap grid at
 whatever rate you pass — 1 kBd here, giving a symbol-spaced channel.
 
 The result is not a textbook three-tap channel. It is 33 ms of structure — 33

@@ -431,7 +431,7 @@ def bellhop_channel():
     arrivals = Bellhop(n_beams=4000, alpha=(-10.0, 10.0)).run(
         env, source, point, run_mode=RunMode.ARRIVALS)
 
-    gains = arrivals.amplitudes * np.exp(1j * arrivals.phases)
+    gains = arrivals.received_amplitudes
     delays = arrivals.delays - arrivals.delays.min()
     channel = comms.multipath_channel(gains, delays, BAUD)
     channel /= np.abs(channel).max()

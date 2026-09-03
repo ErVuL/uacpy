@@ -1341,6 +1341,7 @@ arr.filter_by_bounces(kind='surface')        # Arrivals: by multipath class
 arr.in_delay_window(t_min=2.0).top_n_by_amplitude(5)
 arr.sorted_by_amplitude()                    # loudest first
 arr.delays, arr.amplitudes, arr.phases       # the ray-arrival triple
+arr.received_amplitudes                      # what ARRIVES: absorption + phase
 arr.rms_delay_spread()                       # pulse smearing, energy-weighted
 arr.synthesis_band(bandwidth=8e3)            # grid that holds this multipath
 rays.filter_by_launch_angle(-10, 10)         # Rays: pure data subsets
@@ -1455,7 +1456,7 @@ in a `from … import` statement use the real modules
 | `plot.compare(fields, labels)` | overlay several 1-D sliced fields on one axes (`uacpy.plot.compare`) |
 | `compare_models(fields, labels, env=…, title=…)` | side-by-side heatmaps, one shared colourbar; `title=` sets the figure title above the panels |
 | `env.plot()` | SSP + seafloor cross-section, optional `source=`/`receiver=` markers |
-| `ssp.plot()` / `env.ssp.plot()` | sound-speed profile `c(z)` as a depth-down line (one per range if range-dependent) |
+| `ssp.plot()` / `env.ssp.plot()` | sound-speed profile `c(z)` as a depth-down line (one per range if range-dependent). `label=` / `color=` overlay several profiles on one `ax=`: an explicit colour draws the whole profile in it and drops the range colourbar, and the label names the profile rather than each column. `legend=` forces the legend on or off |
 | `bathymetry.plot()` / `altimetry.plot()` | seafloor depth / sea-surface height vs range — the shape carriers |
 | `absorption.plot(frequencies)` | volume absorption `α(f)` (dB/km, log-log) |
 | `plot_bottom_properties(env)` | seabed `c` / `ρ` / `α` vs depth, per layer stack |

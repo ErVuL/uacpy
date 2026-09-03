@@ -327,6 +327,18 @@ get one arrival per path; that is what the BELLHOP user guide prescribes for
 arrivals and eigenrays. Either way this is the channel impulse response, and it
 is what [`uacpy.comms`](../guide/comms.md) uses to simulate a modem link.
 
+**Read the level off `received_amplitudes`, not `amplitudes`.** BELLHOP keeps
+volume absorption in the **imaginary travel time**, not in the amplitude
+column, so `Arrivals.amplitudes` is the *geometric* amplitude and stands a
+long, heavily absorbed path at its lossless height. `received_amplitudes`
+applies `exp(ω·Im τ)` and the phase and is the value that arrives; the plot
+above, `sorted_by_amplitude`, `rms_delay_spread`, `energy_support` and
+`synthesis_band` all use it already. The difference grows with frequency and
+path length, and it is large enough to reorder the multipath: on a 1 km link
+with source and receiver 1 m off the seabed at 40 kHz, a 3161 m surface-bounce
+path reads 20 dB *stronger* than a 1000 m bottom bounce on `amplitudes`, and
+7.5 dB *weaker* once its 40.9 dB of absorption is applied.
+
 One caveat if you read the `.arr` file itself: its record count and order are
 backend- and threading-dependent. The serial Fortran binary merges
 contributions that land within its delay/phase tolerance as it accumulates

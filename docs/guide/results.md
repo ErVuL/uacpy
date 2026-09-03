@@ -450,7 +450,7 @@ back into a solver, so they chain freely:
 | `.is_eigen` | `True` for an eigenray solve, set from the run type |
 | `.filter_by_bounces(kind=…, top=…, bot=…)` | `'direct'` / `'surface'` / `'bottom'` / `'both'`, or exact counts / `(lo, hi)` ranges |
 | `.filter_by_launch_angle(min_deg, max_deg)`, `.filter_nfirst(n)`, `.filter(predicate)` | subsets |
-| `.sorted_by_miss()`, `.top_n_by_miss(n)`, `.filter_by_miss_distance(max_miss)` | closest approach to the receiver; each kept ray gains `miss_distance_m` |
+| `.sorted_by_miss()`, `.top_n_by_miss(n)`, `.filter_by_miss_distance(max_miss)` | closest approach to the receiver; each kept ray gains `miss_distance_m`. Measured to the polyline's **segments**, not its vertices, so the number is the ray's geometry and not the ray step — a ray passing through the receiver misses by zero however coarsely it was sampled |
 | `.truncate_at_receiver()` | clip each polyline at its closest approach |
 
 `Rays`'s miss-distance helpers default their target to the receiver the run
@@ -461,6 +461,7 @@ a single point.
 |---|---|
 | `.arrivals` | list of dicts: `delay`, `amplitude`, `phase`, bounce counts, `src_angle`, `rcv_angle`, `kind`, cell indices |
 | `.delays`, `.amplitudes`, `.phases` | bulk ndarray views — `phases` is converted to **radians** |
+| `.received_amplitudes` | complex amplitude that actually **arrives**: `A·exp(ω·Im τ)·exp(i·phase)`. Use this to compare, sum or synthesise. `.amplitudes` is Bellhop's *geometric* column and carries no volume absorption — Bellhop keeps that in the imaginary travel time, so on that column a long absorbed path stands at its lossless height |
 | `.filter_by_bounces(…)`, `.in_delay_window(t_min, t_max)`, `.filter(predicate)` | subsets |
 | `.sorted_by_amplitude()`, `.top_n_by_amplitude(n)` | rank by strength |
 | `.rms_delay_spread()` | energy-weighted width of the arrival pattern (s) — how much the multipath smears a pulse, and far less tail-driven than `ptp(delays)` |
