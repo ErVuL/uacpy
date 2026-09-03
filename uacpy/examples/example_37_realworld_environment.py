@@ -87,10 +87,13 @@ FREQ_HZ = 800.0                                      # Bellhop TL frequency
 RDLB_FREQ_HZ = 50.0                                  # low-freq RAM TL through the layered seabed
 DATE = '2026-01-15'                                  # for the WOA climatology month
 FORCE_ONLINE = False                                 # True ⇒ ignore ./data_cache
-# fetch_environment is cache-first by default: it uses the install-time cache
-# (./install.sh --data all) when present — no network, no rate limits — and
-# falls back to the live APIs for whatever isn't installed. (Passing
-# *_sources='local' pins an axis to local data only, forbidding the network.)
+# fetch_environment is cache-first WITHIN EACH SOURCE: an installed dataset
+# (./install.sh --data all) is sampled before that source's own network call —
+# no network, no rate limits — and the live API serves whatever is not
+# installed. It is NOT cache-first across the chain: 'auto' is ordered by data
+# quality, not by what is installed, so it can reach the network for a better
+# source before falling through to an installed global grid. (Passing
+# *_sources='local' keeps only the cached backends, forbidding the network.)
 BATHY_SOURCE = 'gebco'      # bathymetry source: 'gebco' (global) or 'gmrt'
 GRID_SOURCE = 'local' if (not FORCE_ONLINE and _have('gebco')) else 'api'
 # Map resolution: the local GEBCO grid has no rate limit, so go fine; the online

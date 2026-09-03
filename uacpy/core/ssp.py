@@ -741,12 +741,22 @@ def generate_sea_surface(
     # The variance sits around the spectral peak, so a grid whose Nyquist
     # wavenumber falls at or below it captures only the tail and returns a
     # surface far flatter than the Pierson-Moskowitz Hs for this wind.
+    #
+    # ``k_peak`` here is ``omega_p = g/W`` carried into wavenumber, which is
+    # M&C's NOMINAL peak (13.1.11) and not where the spectrum is largest:
+    # ``S ~ omega^-5 exp(-beta (omega_p/omega)^4)`` is stationary at
+    # ``omega = (4*beta/5)^(1/4) * omega_p``, so the true maximum sits below
+    # the nominal one and the 2x factor below is a wider margin than it
+    # looks. The factor is a calibration of "enough grid to carry the
+    # variance", not a physical boundary, so it stays where it is and the
+    # message names the quantity for what it is.
     k_peak = omega_p ** 2 / (2.0 * np.pi * g)          # cycles/m
     k_nyquist = k[-1]
     if k_nyquist < 2.0 * k_peak:
         warnings.warn(
             f"generate_sea_surface: the range grid resolves wavenumbers only "
-            f"to {k_nyquist:.4g} cycles/m, below 2x the Pierson-Moskowitz peak "
+            f"to {k_nyquist:.4g} cycles/m, below 2x the *nominal* "
+            f"Pierson-Moskowitz peak (omega_p = g/W, M&C 13.1.11) "
             f"at {k_peak:.4g} cycles/m for wind_speed_mps={wind_speed_mps:g}. The "
             f"realisation captures only the spectral tail and its significant "
             f"wave height will fall short of the fully developed "

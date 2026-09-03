@@ -14,10 +14,22 @@ a quantity here is what makes a new Field kind a *data* edit rather than a
 hunt through the plotters.
 
 Deliberately **not** modelled: unit conversion, dimensional analysis, or a
-per-unit "which way is louder" flag. Transmission loss is the only inverted
-quantity in underwater acoustics — it is a *loss*, so less of it is louder —
-and one documented special case (see :meth:`Field.max`) is cheaper than a
-field that would read ``+1`` in every row but one.
+per-unit "which way is louder" flag. Two of the four quantities are inverted —
+transmission loss (``pressure`` in dB) and OASS reverberation, both *losses*,
+so less of either is louder — and the two documented cases in
+:meth:`Field.max` are cheaper than a field that would read ``+1`` in every row
+but two.
+
+The reverberation direction is not a convention uacpy chose. OASES writes
+``-10·log10 E[|p_scat|²]`` in ``REVINT`` (``oassun26.f:853-858``): ``CVMAGS``
+squares an accumulator that is already an intensity, ``VALG10`` takes log10,
+and ``VSMUL(-5E0)`` scales it. The leading minus is what makes it a loss, and
+uacpy's reader applies no sign change, so a larger stored number is a *weaker*
+scattered field. Reverberation level is recovered as ``RL = SL - this``.
+
+``REVRAN``'s block at ``oassun26.f:633-638`` is byte-identical arithmetic on a
+cross-range covariance and is **not** the source of these numbers — it feeds
+the contour branch, not the ``.plt`` uacpy reads. Cite ``REVINT``.
 """
 
 from __future__ import annotations
@@ -34,7 +46,7 @@ class Quantity:
 
     ``units`` maps a unit symbol to the axis / colorbar label for that
     pairing. A quantity with a single entry has no representational choice —
-    reverberation is always a level in dB — while ``pressure`` carries two,
+    reverberation is always a loss in dB — while ``pressure`` carries two,
     because ``-20·log10|p|`` is the same field written differently.
 
     Labels are domain vocabulary, so they live here. The **colormap** does
@@ -54,8 +66,18 @@ QUANTITIES: Mapping[str, Quantity] = {
         # transmission loss. They are one quantity, which is why a RAM TL
         # field and a Kraken complex field share a colour scale.
         Quantity('pressure', {'Pa': 'Pressure (Pa)', 'dB': 'TL (dB)'}),
-        Quantity('reverberation', {'dB': 'Reverberation level (dB)'}),
+        # A loss, not a level: OASES writes -10·log10 E[|p_scat|²], so the
+        # axis rises as the scattered field weakens. Labelled for what the
+        # numbers are, since the plot is where the direction is read off.
+        Quantity('reverberation',
+                 {'dB': 'Reverberation loss (dB re unit source)'}),
         Quantity('signal_excess', {'dB': 'Signal excess (dB)'}),
+        # A signed RESIDUAL between two dB fields, not a level and not a loss:
+        # zero means the two agree, and the sign says which way they differ.
+        # It exists so a difference stops inheriting 'pressure', which would
+        # caption it "TL (dB)" and invert a 1-D cut through it — both wrong
+        # for a quantity whose zero is the meaningful value.
+        Quantity('difference', {'dB': 'Difference (dB)'}),
         Quantity('probability_of_detection', {'1': 'Probability of detection'}),
     )
 }

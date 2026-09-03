@@ -50,7 +50,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from uacpy.comms.coding import viterbi_hard
+from uacpy.comms.coding import conv_encode, viterbi_decode
 from numpy.lib.stride_tricks import sliding_window_view
 
 from uacpy.core.constants import DEFAULT_SOUND_SPEED
@@ -66,10 +66,13 @@ BW_INITIAL = 4160.0         # bandwidth [Hz]
 
 # Convolutional code: rate 1/2, constraint length 9. The CMRE reference applies
 # the generators (g1=0o657, g2=0o435) in reversed register bit-order, i.e. the
-# output masks below (verified bit-exact against the reference trellis tables).
-# The reversed pair is also the K=9 rate-1/2 maximum-free-distance code of
-# Proakis & Salehi Table 8.3-1 (d_free = 12), an independent check on the
-# bit-order convention.
+# reversed pair below (verified bit-exact against the reference trellis
+# tables). The reversed pair is also the K=9 rate-1/2 maximum-free-distance
+# code of Proakis & Salehi Table 8.3-1 (d_free = 12), an independent check on
+# the bit-order convention. Fed in that order to the package's own
+# ``coding.conv_encode`` / ``coding.viterbi_decode``, which take the generators
+# per call, they reproduce the CMRE code exactly — so JANUS carries only its
+# own interleaver, not its own codec.
 _CONV_K = 9
 _G_HI = 0o753               # = bit-reversed g1 (0o657)
 _G_LO = 0o561               # = bit-reversed g2 (0o435)
@@ -106,24 +109,6 @@ _CFAR_WINDOW_CORRECTION = 0.1538   # window_correction leading factor
 _CFAR_CHANNEL_SPREAD = 116         # chips past first detection (x oversampling in C)
 _CFAR_MOV_AVG_TIME = 0.150         # s training-window length floor
 
-
-def _parity(x):
-    return bin(x).count("1") & 1
-
-
-def _build_trellis():
-    """JANUS rate-1/2 K=9 trellis: ``(out_hi, out_lo)`` and next state per (state, bit)."""
-    out = np.zeros((_N_STATES, 2, 2), dtype=int)
-    nxt = np.zeros((_N_STATES, 2), dtype=int)
-    for s in range(_N_STATES):
-        for b in (0, 1):
-            r = (b << 8) | s
-            out[s, b] = (_parity(r & _G_HI), _parity(r & _G_LO))
-            nxt[s, b] = ((b << 7) | (s >> 1)) & 0xFF
-    return out, nxt
-
-
-_TRELLIS_OUT, _TRELLIS_NXT = _build_trellis()
 
 # Frequency-hop generator (CMRE reference: primitives table entry for 13 slots).
 # nblock = Bw / (FSw * 2) = 13 for every JANUS band, so alpha/q are universal.
@@ -284,48 +269,32 @@ def janus_encode(bits64):
     if b.size != 64:
         raise ConfigurationError(
             f"janus_encode: need exactly 64 packet bits; got {b.size}")
-    inp = np.concatenate([b, np.zeros(_CONV_K - 1, dtype=int)])   # 64 + 8 flush = 72
-    conv = np.empty(_N_CODED, dtype=int)
-    state = 0
-    for n, bit in enumerate(inp):
-        hi, lo = _TRELLIS_OUT[state, bit]
-        conv[2 * n] = hi
-        conv[2 * n + 1] = lo
-        state = _TRELLIS_NXT[state, bit]
+    # The package's own rate-1/2 encoder with the reversed CMRE generators is
+    # the JANUS code: ``conv_encode`` zero-flushes K-1 bits, so 64 + 8 input
+    # bits give 2*72 = 144 coded symbols. Verified bit-exact against the
+    # hand-rolled trellis encoder this replaced on 300 random packets. Only the
+    # depth-13 interleaver below is JANUS's own.
+    conv = conv_encode(b, polys=(_G_HI, _G_LO), K=_CONV_K)
     return conv[_interleave_perm()]
 
 
 def janus_decode(symbols144):
     """Inverse of :func:`janus_encode`: 144 symbols -> 64 packet bits (Viterbi)."""
-    # Deliberately specialised twin of uacpy.comms.coding.viterbi_decode:
-    # this core hard-codes the K=9 rate-1/2 JANUS code with precomputed
-    # trellis words where that one stays generic over (polys, K). Any change
-    # to the add-compare-select or traceback logic here must be mirrored
-    # there.
     y = np.asarray(symbols144, dtype=int).ravel()
     if y.size != _N_CODED:
         raise ConfigurationError(
             f"janus_decode: need exactly {_N_CODED} symbols; got {y.size}")
     conv = np.empty(_N_CODED, dtype=int)
     conv[_interleave_perm()] = y                       # de-interleave
-    nsteps = _N_CODED // 2
-    # Butterfly structure: the transition (s, b) -> ((b << 7) | (s >> 1))
-    # means state t is reached from exactly two predecessors, 2t and 2t+1
-    # (mod 256), both on input bit = the top bit of t.
-    states = np.arange(_N_STATES)
-    prev0 = (states << 1) & (_N_STATES - 1)
-    prev1 = prev0 | 1
-    bit_in = states >> 7
-    out0 = _TRELLIS_OUT[prev0, bit_in]                 # (256, 2) words into t
-    out1 = _TRELLIS_OUT[prev1, bit_in]
-    rx = conv.reshape(nsteps, 2)
-    # Branch metrics (r0 ^ hi) + (r1 ^ lo) per step for both transitions.
-    bm0 = np.sum(out0[None, :, :] ^ rx[:, None, :], axis=2)
-    bm1 = np.sum(out1[None, :, :] ^ rx[:, None, :], axis=2)
-    # The input bit is the arriving state's top bit.
-    bits = viterbi_hard(bm0, bm1, prev0, prev1, _N_STATES,
-                        lambda state: state >> 7)
-    return bits[:_N_INFO]
+    # The package's own Viterbi decoder, given the same reversed generators the
+    # encoder used. It replaced a hand-rolled K=9 core that precomputed the
+    # trellis words; the two agreed bit-for-bit on 300 random packets, clean
+    # and with 1-12 chip flips, including tie-breaks (both already shared
+    # ``coding.viterbi_hard``, so the survivor selection was never duplicated).
+    # It costs ~1.6 ms more per packet (2.1 -> 3.8 ms), because the generic
+    # decoder rebuilds its branch table per call; janus_decode is called once
+    # per packet, not per candidate alignment.
+    return viterbi_decode(conv, polys=(_G_HI, _G_LO), K=_CONV_K)[:_N_INFO]
 
 
 def _band_params(fc, bw):

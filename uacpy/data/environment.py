@@ -278,7 +278,8 @@ def fetch_environment(
         for that case.
     bottom_sources : str or sequence of str, optional
         Seafloor source(s) to **fetch**, tried in order, or a preset: ``'auto'``
-        (best-available, cached-first: EMODnet → Diesing → MARS → pelagic — the
+        (best-available, cached-first: EMODnet → grain-size → Diesing → MARS
+        → pelagic — measured samples precede the modelled maps, and the
         installed Diesing raster is consulted before the live AusSeabed service,
         which then covers the Australian shelf Diesing's deep-sea map misses) or
         ``'local'`` (network-free: EMODnet-local → grain-size → Diesing →
@@ -806,9 +807,12 @@ def _record_provenance(env, bathy_src, ssp_src, bottom_kw, bottom_props,
             return prov
         # Un-stamped layer: wrap the bare catalogue id in a DataProvenance so
         # env.data_sources is uniformly DataProvenance — no date/coords, just
-        # the source. Keeps one record type in the tuple.
+        # the source (plus the climatology vintage where the cache records it).
+        # Keeps one record type in the tuple.
         ids = ([src_id] if src_id is not None else []) + list(extra_ids)
-        return tuple(DataProvenance(source=SOURCES[i]) for i in ids)
+        return tuple(DataProvenance(source=SOURCES[i],
+                                    data_date=_climatology_vintage(i))
+                     for i in ids)
 
     extra = (('globsed',)
              if getattr(bottom_props, 'sediment_thickness_source', None) == 'globsed'
@@ -836,6 +840,36 @@ def _record_provenance(env, bathy_src, ssp_src, bottom_kw, bottom_props,
                 f"not permit commercial use without verification — see "
                 f"uacpy.data.citations(env) for its licence/attribution.",
                 UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
+
+
+#: Cached monthly climatologies whose reference period is recorded in the
+#: ``.npz`` itself (see each module's ``climatology_period``). Everything else
+#: is either dated per fetch or has no period to state.
+_CLIMATOLOGY_PERIOD_SOURCES = {
+    'seaice': 'uacpy.data.seaice_local',
+    'wind': 'uacpy.data.wind_local',
+}
+
+
+def _climatology_vintage(src_id):
+    """Reference period of a cached climatology, for the provenance
+    ``data_date``, or ``None``.
+
+    The sea-ice and wind caches derive their default ``years`` from
+    ``date.today()`` (sea ice) or a module constant (wind) at BUILD time, so
+    the vintage differs per build and used to be unrecoverable from the file.
+    They now record it, and this reads it back. ``None`` covers every other
+    source, a cache written before the key existed, and any read failure — an
+    unstated vintage must never turn a working fetch into an error.
+    """
+    module_name = _CLIMATOLOGY_PERIOD_SOURCES.get(src_id)
+    if module_name is None:
+        return None
+    import importlib
+    try:
+        return importlib.import_module(module_name).climatology_period()
+    except Exception:              # no cache installed, or unreadable
+        return None
 
 
 def _bathymetry_vintage(src_id, backend):
@@ -1060,8 +1094,12 @@ def _pelagic_pair(cached):
 _BOTTOM_PROVIDERS = (
     _BottomProvider('emodnet', _emodnet_pair, has_cached_variant=True,
                     in_auto=True, in_cache_auto=True),
-    _BottomProvider('grainsize', _grainsize_pair, in_cache_auto=True,
-                    accepts_max_distance=True),
+    # A measured sample beats a modelled or interpolated map, so the
+    # grain-size database sits directly behind EMODnet's polygons in 'auto'
+    # too, not only in 'local'. Omitting it there returned pelagic ooze
+    # (rho*c 2245) at 36 N 75 W where a sand sample 124 km away gives 3608.
+    _BottomProvider('grainsize', _grainsize_pair, in_auto=True,
+                    in_cache_auto=True, accepts_max_distance=True),
     _BottomProvider('crust1', _crust1_pair),
     _BottomProvider('graw', _graw_pair),
     _BottomProvider('diesing', _diesing_pair, in_auto=True, in_cache_auto=True),
@@ -1081,8 +1119,8 @@ _CACHE_BOTTOM_ORDER = tuple(p.id for p in _BOTTOM_PROVIDERS if p.in_cache_auto)
 
 def _bottom_order(bottom_source):
     """Ordered bottom source keywords + a ``cache_only`` flag from the user
-    spec. ``'auto'`` → the best-available chain (EMODnet → Diesing → MARS →
-    pelagic); ``'local'`` → the network-free chain (EMODnet local → grain-size →
+    spec. ``'auto'`` → the best-available chain (EMODnet → grain-size →
+    Diesing → MARS → pelagic); ``'local'`` → the network-free chain (EMODnet local → grain-size →
     Diesing → pelagic, cached backends only); a str/sequence of keywords is used
     as-is. Validates each keyword."""
     if bottom_source == 'local':

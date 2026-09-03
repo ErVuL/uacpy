@@ -2181,3 +2181,75 @@ class TestOasesReceiverAxisKeepsItsDepths:
         z = np.linspace(10.0, 90.0, 9)
         lines = _receiver_block_lines(Receiver(depths=z, ranges=[1000.0]))
         assert len(lines) == 1
+
+
+class TestOasesDummyIsovelocityLayerAboveTheSeabed:
+    """The deepest water record is the dummy isovelocity layer OASES demands.
+
+    Every deck built from a sampled SSP ends its water block with a record
+    whose top depth equals the seabed record's top, so the layer has zero
+    thickness and reads as droppable. It is not droppable. Its ``CS = 0``
+    makes it LAYTYP 1 (``oaseun31.f:181-182,152``), and INENVI walks every
+    interface ``M = 2 .. NUML`` at ``oaseun31.f:381-388`` refusing
+    roughness whose layer above or below is LAYTYP 2, the n²-linear
+    gradient type set at ``:189``: '*** SURFACE ROUGHNESS NOT ALLOWED
+    BETWEEN LAYERS WITH SOUND SPEED GRADIENT. INSERT A DUMMY ISOVELOCITY
+    LAYER ***'. Remove the record and a rough seabed under any
+    non-isovelocity water column butts onto a LAYTYP 2 layer and trips
+    that rejection.
+
+    An earlier dead-code reading called the record superfluous. These
+    tests are what that reading has to get past.
+    """
+
+    @staticmethod
+    def _water_and_seabed(roughness=1.0):
+        import tempfile
+        import pathlib
+        from uacpy.io.oases_writer import write_oast_input
+        env = Environment(
+            bathymetry=100.0,
+            ssp=[(0.0, 1500.0), (50.0, 1490.0), (100.0, 1480.0)],
+            bottom=BoundaryProperties(
+                acoustic_type='half-space', sound_speed=1800.0,
+                density=2.0, attenuation=0.1, roughness=roughness))
+        path = pathlib.Path(tempfile.mkdtemp()) / 'dummy.dat'
+        write_oast_input(path, env, Source(frequencies=100.0, depths=25.0),
+                         Receiver(depths=[50.0], ranges=[1000.0]))
+        lines = path.read_text().splitlines()
+        # title, options, frequency/range, NUML, then NUML layer records.
+        n_layers = int(lines[3])
+        block = lines[4:4 + n_layers]
+        assert len(block) == n_layers
+        # block[0] is the vacuum upper half-space; the seabed is last.
+        return block[1:-1], block[-1]
+
+    def test_the_last_water_record_is_isovelocity(self):
+        water, _ = self._water_and_seabed()
+        assert float(water[-1].split()[2]) == 0.0, (
+            "the deepest water record must carry CS = 0 so INENVI types it "
+            "LAYTYP 1")
+
+    def test_it_shares_the_seabed_record_top_so_it_is_zero_thickness(self):
+        water, seabed = self._water_and_seabed()
+        assert float(water[-1].split()[0]) == float(seabed.split()[0])
+
+    def test_the_record_it_shields_carries_a_gradient(self):
+        """The layer that would abut the seabed without it is LAYTYP 2.
+
+        Without this discriminator the pin above would pass on an
+        isovelocity column, where the dummy layer is not needed and its
+        removal would be harmless.
+        """
+        water, _ = self._water_and_seabed()
+        cs = float(water[-2].split()[2])
+        cc = float(water[-2].split()[1])
+        assert cs < 0.0, "not an n²-linear layer"
+        assert abs(cc + cs) >= 1e-2, (
+            "|CS| == CC would be folded back to isovelocity at "
+            "oaseun31.f:181-182")
+
+    def test_the_seabed_interface_is_the_one_carrying_roughness(self):
+        """RG on the seabed record is what makes the LAYTYP test bite."""
+        _, seabed = self._water_and_seabed(roughness=1.0)
+        assert float(seabed.split()[6]) ** 2 > 1e-10

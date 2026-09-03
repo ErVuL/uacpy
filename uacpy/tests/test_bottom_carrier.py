@@ -1247,3 +1247,101 @@ class TestGrainSizeMustBeAFiniteNumberEverywhere:
             Surface(properties=[BoundaryProperties(
                 acoustic_type='half-space', sound_speed=1600.0,
                 grain_size_phi=float('inf'))])
+
+
+class TestTheAttenuationCeilingAdvisesShearOnItsOwnScale:
+    """The ceiling is one number for both attenuations; the advice is not.
+
+    ``_require_attenuation_in_range`` guards ``attenuation`` and
+    ``shear_attenuation`` against the same 54.5751 dB/wavelength ``CRCI``
+    abort, and told both "Real seabeds are well under 2 dB/wavelength". JKPS
+    Table 1.3 gives α_p from 0.1 (basalt) to 1.0 (silt) but α_s from 0.2 to
+    2.5, and uacpy ships that 2.5 as its own ``sand`` preset — so on the shear
+    field the sentence contradicted a value the package hands the user. The
+    guard's threshold is unchanged; only which sentence is printed."""
+
+    @staticmethod
+    def _remediation(field):
+        from uacpy.core._carrier_validate import _require_attenuation_in_range
+        with pytest.raises(ConfigurationError) as exc:
+            _require_attenuation_in_range(1000.0, f"BoundaryProperties {field}")
+        return exc.value.remediation
+
+    def test_the_shipped_sand_preset_carries_the_shear_value_the_advice_denied(self):
+        assert get_material('sand')['shear_attenuation'] == 2.5
+
+    def test_the_shear_advice_does_not_claim_seabeds_are_under_two(self):
+        assert 'well under 2 dB/wavelength' not in self._remediation(
+            'shear_attenuation')
+
+    def test_the_shear_advice_names_the_table_range_that_covers_sand(self):
+        remediation = self._remediation('shear_attenuation')
+        assert '0.2-2.5 dB/wavelength' in remediation
+        assert 'sand' in remediation
+
+    def test_the_compressional_advice_keeps_its_own_sentence(self):
+        # Unchanged where it was already right: no compressional entry in
+        # Table 1.3 reaches 2 dB/wavelength.
+        assert 'well under 2 dB/wavelength' in self._remediation('attenuation')
+
+    def test_both_fields_refuse_the_same_value_at_the_same_bound(self):
+        # The remedy text branched; the threshold did not.
+        from uacpy.core.constants import MAX_ATTENUATION_DB_PER_WAVELENGTH
+        from uacpy.core._carrier_validate import _require_attenuation_in_range
+        for field in ('attenuation', 'shear_attenuation'):
+            label = f"BoundaryProperties {field}"
+            _require_attenuation_in_range(
+                MAX_ATTENUATION_DB_PER_WAVELENGTH, label)
+            with pytest.raises(ConfigurationError):
+                _require_attenuation_in_range(
+                    float(np.nextafter(MAX_ATTENUATION_DB_PER_WAVELENGTH,
+                                       np.inf)),
+                    label)
+
+    def test_a_sand_halfspace_constructs_without_tripping_the_guard(self):
+        # The end-to-end statement: the preset the advice contradicted is a
+        # legal boundary.
+        sand = get_material('sand')
+        hs = BoundaryProperties(
+            acoustic_type='half-space',
+            **{k: v for k, v in sand.items()
+               if k in ('sound_speed', 'density', 'attenuation',
+                        'shear_speed', 'shear_attenuation')})
+        assert hs.shear_attenuation == 2.5
+
+
+class TestTheAcousticTypeGuardCatchesOnlyWhatFromStringRaises:
+    """``_validate_acoustic_type`` wraps ``BoundaryType.from_string`` to turn a
+    typo into a message naming the carrier. Its ``except`` listed
+    ``ValueError``, ``KeyError`` and ``AttributeError`` alongside
+    ``ConfigurationError``, none of which ``from_string`` can produce: it
+    type-checks its argument before calling ``.lower()`` (so no
+    AttributeError), and catches its own name-lookup ``KeyError`` internally.
+    The three extra names could only ever have caught an unrelated failure
+    inside the enum and mislabelled it a bad ``acoustic_type``."""
+
+    _BAD = ['halfspace!', '', 'HALFSPACE ', 42, None, 3.7, [], {}, b'v', True]
+
+    @pytest.mark.parametrize('value', _BAD, ids=[repr(v) for v in _BAD])
+    def test_from_string_refuses_it_as_a_configuration_error(self, value):
+        from uacpy.core.constants import BoundaryType
+        # The narrow clause is only correct while this is the sole type that
+        # escapes, so the sweep is the pin, not the narrowing itself.
+        with pytest.raises(ConfigurationError):
+            BoundaryType.from_string(value)
+
+    @pytest.mark.parametrize('value', _BAD, ids=[repr(v) for v in _BAD])
+    def test_the_wrapper_relabels_every_one_of_them(self, value):
+        from uacpy.core._carrier_validate import _validate_acoustic_type
+        with pytest.raises(ConfigurationError,
+                           match='is not recognized') as exc:
+            _validate_acoustic_type(value, 'BoundaryProperties')
+        # The wrapper's whole job: the carrier's name, and the original
+        # verdict kept as the cause.
+        assert 'BoundaryProperties' in str(exc.value)
+        assert isinstance(exc.value.__cause__, ConfigurationError)
+
+    def test_a_valid_type_passes_through_silently(self):
+        from uacpy.core._carrier_validate import _validate_acoustic_type
+        for value in ('half-space', 'halfspace', 'vacuum', 'V', 'file'):
+            assert _validate_acoustic_type(value, 'BoundaryProperties') is None

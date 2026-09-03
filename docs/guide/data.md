@@ -158,13 +158,15 @@ you:
 
 | Preset | Bathymetry | SSP | Bottom |
 |---|---|---|---|
-| `'auto'` | `emodnet_dtm` → `gmrt` → `gebco` | `argo` → `copernicus` → `woa23` | `emodnet` → `diesing` → `mars` → `pelagic` |
+| `'auto'` | `emodnet_dtm` → `gmrt` → `gebco` | `argo` → `copernicus` → `woa23` | `emodnet` → `grainsize` → `diesing` → `mars` → `pelagic` |
 | `'local'` | `gebco` (cached) | `woa23` (cached) | `emodnet` → `grainsize` → `diesing` → `pelagic` (cached) |
 
 `'auto'` means *best available*: the finest regional product first, falling
 back to the global one. For sound speed it means real float → model →
 climatology, so `ssp_sources='auto'` without a `date=` or a Copernicus login
-falls through to WOA23 by itself.
+falls through to WOA23 by itself. For the bottom it means measured before
+modelled: EMODnet's mapped polygons, then the nearest NCEI grain-size sample,
+then the Diesing lithology map, then MARS, and only then the pelagic model.
 
 **Fetching is cache-first.** Within each source, an installed local dataset is
 sampled before any network call. `'local'` keeps *only* the cached backends —

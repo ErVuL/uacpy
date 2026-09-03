@@ -487,3 +487,68 @@ class TestTheDeepExtensionUsesTheProfilesOwnFormula:
         ssp = self._profile('delgrosso')
         assert ssp.extend_to(6000.0).formula == 'delgrosso'
         assert ssp.copy().formula == 'delgrosso'
+
+
+@pytest.mark.parametrize('formula', ['unesco', 'delgrosso'])
+def test_extending_a_profile_keeps_its_formula(formula):
+    """``extend_ssp_below_data`` rebuilds the carrier and has to restate
+    ``formula``; dropping it made the *next* extension revert to UNESCO."""
+    import warnings
+    from uacpy.core.environment import SoundSpeedProfile
+    from uacpy.data.sound_speed import extend_ssp_below_data
+    ssp = SoundSpeedProfile(depths=[0.0, 1000.0, 5500.0],
+                            data=[1540.0, 1485.0, 1551.05],
+                            shape='measured', formula=formula)
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        assert extend_ssp_below_data(ssp, 8800.0).formula == formula
+
+
+def test_a_twice_extended_profile_stays_on_its_own_equation():
+    """Two hops (column to seafloor, then assembled field to bathymetry) are
+    routine. The rebuild dropped ``formula``, so hop two ran UNESCO over a Del
+    Grosso column. The control re-stamps hop one's own output by hand, which is
+    exactly what carrying the attribute does -- so the chained result has to
+    equal it, and did not."""
+    import warnings
+    from uacpy.core.environment import SoundSpeedProfile
+    from uacpy.data.sound_speed import extend_ssp_below_data
+    ssp = SoundSpeedProfile(depths=[0.0, 1000.0, 5500.0],
+                            data=[1540.0, 1485.0, 1551.05],
+                            shape='measured', formula='delgrosso')
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        once = extend_ssp_below_data(ssp, 8000.0)
+        chained = extend_ssp_below_data(once, 9500.0)
+        restamped = SoundSpeedProfile(depths=once.depths, data=once.data,
+                                      shape='measured', formula='delgrosso')
+        control = extend_ssp_below_data(restamped, 9500.0)
+        stripped = SoundSpeedProfile(depths=once.depths, data=once.data,
+                                     shape='measured', formula=None)
+        unesco = extend_ssp_below_data(stripped, 9500.0)
+    assert chained.formula == 'delgrosso'
+    assert float(np.asarray(chained.data)[-1, 0]) == pytest.approx(
+        float(np.asarray(control.data)[-1, 0]), abs=1e-9)
+    # and the two equations really do disagree over this hop
+    assert float(np.asarray(control.data)[-1, 0]) != pytest.approx(
+        float(np.asarray(unesco.data)[-1, 0]), abs=1e-6)
+
+
+def test_assembling_columns_keeps_a_formula_they_all_agree_on():
+    from uacpy.core.environment import SoundSpeedProfile
+    from uacpy.data.sound_speed import assemble_range_dependent
+    cols = [SoundSpeedProfile(depths=[0.0, 100.0], data=[1500.0, 1490.0],
+                              shape='measured', formula='delgrosso')
+            for _ in range(3)]
+    assert assemble_range_dependent(cols, [0.0, 1e3, 2e3]).formula == 'delgrosso'
+
+
+def test_assembling_mixed_columns_keeps_no_formula():
+    """A stack whose columns disagree has no single equation, so the assembled
+    field carries none and a later extension falls back to UNESCO."""
+    from uacpy.core.environment import SoundSpeedProfile
+    from uacpy.data.sound_speed import assemble_range_dependent
+    cols = [SoundSpeedProfile(depths=[0.0, 100.0], data=[1500.0, 1490.0],
+                              shape='measured', formula=f)
+            for f in ('delgrosso', 'unesco', 'delgrosso')]
+    assert assemble_range_dependent(cols, [0.0, 1e3, 2e3]).formula is None

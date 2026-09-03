@@ -582,6 +582,48 @@ class TestSPARCHankelNormalisation:
 
     @pytest.mark.requires_binary
     @pytest.mark.slow
+    def test_the_looped_modes_stack_onto_their_own_axis(self, tmp_path):
+        """``'R'`` and ``'D'`` are one looped helper over transposed axes
+        (``SPARC._LOOPED_TIME_SERIES_MODES``): each loops the axis
+        ``sparc.f90`` cannot write in one run, then stacks onto that axis of
+        the shared (depth, range, time) contract. This pins the half the two
+        modes do NOT share — which axis is looped, the run count each stamps,
+        and the single output time grid every vertical run is written against.
+        """
+        from uacpy.io.oalib_reader import read_rts_file
+        env, source, _rig_receiver = self._rig()
+        # Deliberately NOT square: with equal depth and range counts the
+        # stacked shape is the same whichever axis was stacked onto, so a
+        # transposed stack would pass unnoticed.
+        receiver = Receiver(depths=np.array([20.0, 40.0, 60.0]),
+                            ranges=np.array([500.0, 1000.0]))
+        n_d = len(receiver.depths)
+        n_r = len(receiver.ranges)
+        assert n_d != n_r and n_d > 1 and n_r > 1
+
+        for mode, key, n_runs, tag in (('R', 'n_depth_runs', n_d, '_d'),
+                                       ('D', 'n_range_runs', n_r, '_r')):
+            work = tmp_path / mode
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                result = SPARC(output_mode=mode, verbose=False, cleanup=False,
+                               work_dir=work).run(env, source, receiver)
+            assert result.metadata[key] == n_runs
+            data = np.asarray(result.data)
+            assert data.shape[0] == n_d and data.shape[1] == n_r
+            decks = sorted(work.rglob('*.env'))
+            assert len(decks) == n_runs
+            assert all(tag in d.stem for d in decks), [d.stem for d in decks]
+            # Every run is written against the FULL receiver extent, so the
+            # per-run traces share one time grid and can be stacked at all.
+            times = [np.asarray(read_rts_file(f)['time'], dtype=float)
+                     for f in sorted(work.rglob('*.rts'))]
+            assert len(times) == n_runs
+            for t in times[1:]:
+                np.testing.assert_allclose(t, times[0], rtol=0, atol=0)
+
+    @pytest.mark.requires_binary
+    @pytest.mark.slow
     def test_vertical_array_passes_the_raw_rts_through_unscaled(self, tmp_path):
         """The 'D' branch already carries the full weight, so nothing is applied."""
         from uacpy.io.oalib_reader import read_rts_file

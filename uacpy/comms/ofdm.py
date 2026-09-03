@@ -107,8 +107,8 @@ def ofdm_demodulate(rx, n_subcarriers, cp_len, channel=None, snr_linear=None):
     real factor ``|H|^2 / (|H|^2 + N/S)``: every PSK decision is identical and
     QAM decisions are slightly WORSE (the estimate is biased toward zero, so
     outer points fall inward). It earns its keep only with soft decisions or
-    bias removal, which this receiver does not do. The response ``H(f)``
-    set. Returns the flat complex symbol array.
+    bias removal, which this receiver does not do. Returns the flat complex
+    symbol array.
 
     A channel longer than ``n_subcarriers`` raises. One carrying more than
     1 % of its energy in the taps beyond the cyclic prefix (ISI-to-signal

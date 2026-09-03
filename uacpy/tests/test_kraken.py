@@ -7,7 +7,9 @@ dispatch premise the vendored Fortran either supports or contradicts.
 """
 
 import math
+import re
 import warnings
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -2053,6 +2055,47 @@ class TestModesErrorMessageReadsTheRealPrtStrings:
             tmp_path, ' No modes for given phase speed interval\n')
         assert 'c_low' in msg and 'c_high' in msg
 
+    def test_a_fluid_half_space_is_not_diagnosed_as_elastic(self, tmp_path):
+        """``misc/ReadEnvironmentMod.f90:260-266`` echoes 'ACOUSTO-ELASTIC
+        half-space' for every ``HS%BC == 'A'`` — the letter a plain FLUID
+        Pekeris bottom uses — so the marker cannot separate a fluid seabed
+        from an elastic one. Diagnosing on it sent every unrecognised
+        fluid-seabed failure to "try backend='krakenc'"."""
+        msg = self._message(
+            tmp_path,
+            '     ACOUSTO-ELASTIC half-space\n'
+            ' Some other failure the .prt does not name\n')
+        assert 'krakenc' not in msg, msg
+        assert 'elastic' not in msg.lower(), msg
+        assert 'run.prt' in msg, msg          # the generic pointer instead
+
+    def test_the_marker_is_what_a_fluid_pekeris_deck_really_writes(self):
+        """The premise above, taken from the vendored source rather than
+        from a hand-written .prt: the CASE('A') branch that prints the
+        marker is the same one a fluid half-space takes."""
+        src = (Path(uacpy.__file__).parent / 'third_party'
+               / 'Acoustics-Toolbox' / 'misc' / 'ReadEnvironmentMod.f90')
+        text = src.read_text(errors='replace')
+        assert "CASE ( 'A' )" in text
+        head = text[:text.index('ACOUSTO-ELASTIC half-space')]
+        # The CASE selecting that WRITE is the bare 'A' boundary-condition
+        # letter, with no shear test between the two: a fluid half-space and
+        # an elastic one both land on it.
+        last_case = re.findall(r"CASE\s*\(\s*'([A-Z])'\s*\)", head)[-1]
+        assert last_case == 'A', last_case
+        between = head[head.rindex("CASE"):]
+        assert 'cS' not in between and 'shear' not in between.lower(), between
+
+    def test_a_named_failure_beats_the_generic_pointer(self, tmp_path):
+        """Dropping the elastic branch must not swallow the two diagnoses
+        that do carry information, including on a deck that also printed the
+        half-space marker."""
+        msg = self._message(
+            tmp_path,
+            '     ACOUSTO-ELASTIC half-space\n'
+            ' No modes for given phase speed interval\n')
+        assert 'c_low' in msg and 'c_high' in msg
+
 
 class TestBeamPatternOnMultipleFrequencies:
     """``KrakenField/field.f90:191`` allocates ``kz2``/``thetaT``/``S`` inside
@@ -2119,6 +2162,106 @@ class TestBeamPatternOnMultipleFrequencies:
         assert model._field_reached_completion(tmp_path)
         prt.write_text(' some output\n At line 191 of file field.f90\n')
         assert not model._field_reached_completion(tmp_path)
+
+
+class TestKrakenSourceBeamPatternRestrictions:
+    """``field.exe`` shades MODE amplitudes, not launch angles
+    (``KrakenField/field.f90:190-200``), and the three limits that follow
+    from that are invisible in the ``.sbp`` file itself. The class docstring
+    documents them; these read them back out of the vendored source, so a
+    vendored update that lifts one of them shows up as a red test rather
+    than as documentation nobody rechecked."""
+
+    PATTERN = np.array([[-90.0, 0.0], [90.0, 0.0]])
+
+    @staticmethod
+    def _field_f90():
+        return (Path(uacpy.__file__).parent / 'third_party'
+                / 'Acoustics-Toolbox' / 'KrakenField'
+                / 'field.f90').read_text(errors='replace').splitlines()
+
+    def test_the_shading_is_gated_on_the_first_source_depth(self):
+        lines = self._field_f90()
+        assert "SBPFlag == '*'" in lines[189] and 'iS == 1' in lines[189], (
+            lines[189])
+        # ... and that gate sits INSIDE the source-depth loop, which is what
+        # makes it a first-depth-only shading rather than a run-once setup.
+        assert 'SourceDepths: DO iS = 1, Pos%Nsz' in lines[183], lines[183]
+
+    def test_the_reference_speed_is_hard_coded_not_the_source_speed(self):
+        lines = self._field_f90()
+        assert 'c0' in lines[191] and '1500' in lines[191], lines[191]
+        # Porter's own note that this is the wrong speed.
+        assert 'should be speed at the source depth' in lines[191], lines[191]
+
+    def test_slow_modes_are_clamped_into_the_zero_degree_bin(self):
+        lines = self._field_f90()
+        assert 'WHERE ( kz2 < 0 ) kz2 = 0' in lines[194], lines[194]
+        # ATAN of a non-negative root over a positive k: [0, 90) only, so the
+        # negative half of the pattern table is unreachable.
+        assert 'ATAN( SQRT( kz2 )' in lines[196], lines[196]
+
+    def test_bellhop_shades_the_signed_launch_angle_instead(self):
+        """Why the same .sbp is not portable: Bellhop interpolates the table
+        at SrcDeclAngle, the signed take-off angle in degrees."""
+        text = (Path(uacpy.__file__).parent / 'third_party'
+                / 'Acoustics-Toolbox' / 'Bellhop'
+                / 'bellhop.f90').read_text(errors='replace')
+        assert 'SrcDeclAngle = RadDeg * Angles%alpha( ialpha )' in text
+        assert ('s    = ( SrcDeclAngle  - SrcBmPat( IBP, 1 ) )' in text)
+
+    def test_more_than_one_source_depth_is_declared(self, tmp_path,
+                                                    monkeypatch):
+        """The first restriction is the one a caller can trip without
+        noticing, so it warns as well as being documented."""
+        model = Kraken(work_dir=tmp_path, cleanup=False, verbose=False)
+        monkeypatch.setattr(
+            model, '_run_and_attach_prt',
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError('stop here')))
+        with warnings.catch_warnings(record=True) as rec:
+            warnings.simplefilter('always')
+            with pytest.raises(Exception):
+                model._compute_field_via_exe(
+                    _pekeris(depth=100.0),
+                    Source(depths=[25.0, 60.0], frequencies=[200.0],
+                           beam_pattern=self.PATTERN),
+                    Receiver(depths=[50.0], ranges=[1000.0]))
+        said = [str(w.message) for w in rec
+                if 'source.depths[0] only' in str(w.message)]
+        assert len(said) == 1, [str(w.message) for w in rec]
+        assert 'field.f90:190' in said[0], said[0]
+
+    def test_one_source_depth_is_quiet(self, tmp_path, monkeypatch):
+        model = Kraken(work_dir=tmp_path, cleanup=False, verbose=False)
+        monkeypatch.setattr(
+            model, '_run_and_attach_prt',
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError('stop here')))
+        with warnings.catch_warnings(record=True) as rec:
+            warnings.simplefilter('always')
+            with pytest.raises(Exception):
+                model._compute_field_via_exe(
+                    _pekeris(depth=100.0),
+                    Source(depths=[25.0], frequencies=[200.0],
+                           beam_pattern=self.PATTERN),
+                    Receiver(depths=[50.0], ranges=[1000.0]))
+        assert [str(w.message) for w in rec
+                if 'source.depths[0] only' in str(w.message)] == []
+
+    def test_no_pattern_is_quiet_on_many_source_depths(self, tmp_path,
+                                                       monkeypatch):
+        model = Kraken(work_dir=tmp_path, cleanup=False, verbose=False)
+        monkeypatch.setattr(
+            model, '_run_and_attach_prt',
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError('stop here')))
+        with warnings.catch_warnings(record=True) as rec:
+            warnings.simplefilter('always')
+            with pytest.raises(Exception):
+                model._compute_field_via_exe(
+                    _pekeris(depth=100.0),
+                    Source(depths=[25.0, 60.0], frequencies=[200.0]),
+                    Receiver(depths=[50.0], ranges=[1000.0]))
+        assert [str(w.message) for w in rec
+                if 'source.depths[0] only' in str(w.message)] == []
 
 
 class TestAutoSegmentationIsWritableAtDeckResolution:
@@ -3122,7 +3265,7 @@ class TestKrakenRejectsAcousticBelowElastic:
 
 
 class TestKrakenRoughElasticInterface:
-    """``kraken.f90:169`` / ``krakenc.f90:182`` stop with 'Rough elastic
+    """``kraken.f90:178`` / ``krakenc.f90:182`` stop with 'Rough elastic
     interfaces are not allowed' for any elastic medium whose ``SSP%sigma`` is
     non-zero, and the writer takes that sigma from the layer's own
     ``roughness``. A rough elastic *half-space* is fine — its sigma sits on
@@ -3145,6 +3288,28 @@ class TestKrakenRoughElasticInterface:
                        halfspace_shear=600.0)
         Kraken(verbose=False)._reject_rough_elastic_layer(
             env, RunMode.COHERENT_TL)
+
+    @pytest.mark.parametrize('stem,line', [('kraken', 178), ('krakenc', 182)])
+    def test_the_cited_line_is_the_stop_and_not_its_neighbour(self, stem, line):
+        """The address in the docstring above and in the raised message has
+        to name the ERROUT itself.
+
+        ``kraken.f90:169`` was cited for years and is
+        ``IF ( FirstAcoustic == 0 ) FirstAcoustic = Medium`` — a line about
+        which medium is first, nine lines from the stop and unrelated to it.
+        The packaging citation walk cannot see that: it checks a cited line
+        resolves and is not blank, and :169 is both.
+        """
+        src = (Path(uacpy.__file__).parent / 'third_party'
+               / 'Acoustics-Toolbox' / 'Kraken' / f'{stem}.f90')
+        lines = src.read_text(errors='replace').splitlines()
+        assert 'Rough elastic interfaces are not allowed' in lines[line - 1], (
+            line, lines[line - 1])
+        assert "ERROUT" in lines[line - 1]
+        # The single line the whole tree cites for this stop.
+        hits = [i + 1 for i, ln in enumerate(lines)
+                if 'Rough elastic interfaces are not allowed' in ln]
+        assert hits == [line], hits
 
 
 class TestKrakenConstructorBounds:
@@ -3173,11 +3338,15 @@ class TestKrakenConstructorBounds:
         assert (model.c_low, model.c_high) == (1400.0, 1800.0)
 
 
-def test_kraken_mode_grid_meshes_at_the_shear_wavelength():
-    """AT meshes an elastic medium at ``c_s/(20 f)``
-    (``ReadEnvironmentMod.f90:101-103``), and the mode-tabulation grid carries
-    the mode shapes and the coupling integrals — sizing it on compressional
-    speeds alone under-samples an elastic sediment by ``c_p/c_s``."""
+def test_an_elastic_layers_shear_speed_densifies_the_mode_grid():
+    """A layer's shear speed enters the mode-grid minimum, so an elastic
+    seabed gets a denser tabulation grid than the same seabed without shear.
+
+    NOT because anything is sampled inside the elastic medium — see
+    :func:`test_the_mode_grid_never_reaches_inside_an_elastic_medium` for
+    why it cannot be — but because ``c_s`` is the slowest speed in the
+    problem and the density it sets applies to the water column, which is
+    where the grid lives."""
     model = Kraken(verbose=False)
     elastic = _layered(_layer(shear=300.0), halfspace_shear=600.0)
     fluid = _layered(_layer(shear=0.0))
@@ -3186,6 +3355,60 @@ def test_kraken_mode_grid_meshes_at_the_shear_wavelength():
     assert ppm_elastic > ppm_fluid
     # 10 points per shear wavelength at 100 Hz over c_s = 300 m/s.
     assert ppm_elastic == pytest.approx(10.0 * 100.0 / 300.0, rel=1e-9)
+
+
+def test_the_mode_grid_never_reaches_inside_an_elastic_medium():
+    """The reason the docstring above used to give was wrong, and the
+    vendored source is where that shows.
+
+    ``kraken.f90:266`` sizes the tabulation vector over
+    ``FirstAcoustic : LastAcoustic`` and ``kraken.f90:560-565`` lays the
+    depths out over that same span, so the grid stops at the last ACOUSTIC
+    medium and no sample is ever placed in an elastic layer. Any rationale
+    phrased as "resolving the mode shape inside the elastic sediment" is
+    describing something the solver does not do."""
+    lines = (Path(uacpy.__file__).parent / 'third_party'
+             / 'Acoustics-Toolbox' / 'Kraken'
+             / 'kraken.f90').read_text(errors='replace').splitlines()
+    assert 'NTotal  = SUM( N( FirstAcoustic : LastAcoustic ) )' in lines[265]
+    assert 'DO Medium = FirstAcoustic, LastAcoustic' in lines[559]
+    # The line that writes the depth coordinates, inside that acoustic loop.
+    assert 'z( j + 1 : j + N( Medium ) )' in lines[564], lines[564]
+
+
+@pytest.mark.requires_binary
+def test_the_shear_term_changes_the_field_it_is_kept_for():
+    """The term stays because it is not value-neutral, so this measures the
+    thing that justifies keeping it rather than the code path that reaches
+    it. A 20 m elastic layer at 200 Hz: 5.0 pts/m with the shear speed in
+    the minimum against the 1.5 pts/m floor without it."""
+    bottom = Bottom([SeabedColumn(
+        layers=[SedimentLayer(thickness=20.0, sound_speed=1800.0,
+                              shear_speed=400.0, density=1.8,
+                              attenuation=0.2)],
+        halfspace=BoundaryProperties(acoustic_type='half-space',
+                                     sound_speed=2000.0, shear_speed=600.0,
+                                     density=2.0, attenuation=0.5))])
+    env = Environment(name='elastic-grid', bathymetry=100.0, ssp=1500.0,
+                      bottom=bottom)
+    src = Source(depths=50.0, frequencies=200.0)
+    rcv = Receiver(depths=np.array([30.0, 60.0]),
+                   ranges=np.linspace(500.0, 3000.0, 6))
+    from uacpy.models.kraken import MODE_POINTS_PER_METER_FLOOR
+    with_shear = Kraken(verbose=False)._resolve_mode_points_per_meter(
+        env, 200.0)
+    assert with_shear == pytest.approx(10.0 * 200.0 / 400.0, rel=1e-9)
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        fields = [
+            np.asarray(Kraken(verbose=False,
+                              mode_points_per_meter=ppm).run(env, src, rcv).db,
+                       dtype=float)
+            for ppm in (with_shear, MODE_POINTS_PER_METER_FLOOR)
+        ]
+    diff = np.abs(fields[0] - fields[1])
+    assert np.nanmax(diff) > 0.005, np.nanmax(diff)   # not value-neutral
+    assert np.nanmax(diff) < 1.0, np.nanmax(diff)     # nor a large effect
 
 
 def test_kraken_mode_cutoff_probe_reraises_a_real_failure(monkeypatch):
@@ -3395,3 +3618,164 @@ class TestTheModeGridSpansTheProfileKrakenSolves:
                     if 'resolvable depth' in str(w.message)
                     or 'moved up' in str(w.message)]
         assert spurious == [], spurious
+
+
+@pytest.mark.requires_binary
+class TestNarrowbandLineSourceCarriesTheSameLevelAsBroadband:
+    """The ×√k0 line-source level (``base._line_source_unit_at_1m``, the
+    package's unit-amplitude-at-1-m convention) has to reach the NARROWBAND
+    branch of ``_assemble_field_from_shd``, not just its broadband and
+    ``return_pressure`` siblings.
+
+    It once reached only those two, so a ``source_type='line'`` COHERENT_TL
+    sat 10·log10(k0) dB from this same wrapper's own single-bin broadband run
+    — 3.8 dB at 100 Hz, 10.8 dB at 20 Hz, and the OTHER WAY above
+    f = c(z_s)/2π, so it never looked like a fixed convention offset.
+    INCOHERENT_TL carried it too: ``field.exe``'s magnitude sum lands in the
+    same payload.
+
+    The duct is driven at 20 Hz, where it traps exactly ONE mode. A one-term
+    magnitude sum equals the modulus of the one-term coherent sum, so a
+    single broadband reference pins BOTH narrowband branches: the level is a
+    real positive scalar and multiplies each of them identically.
+    """
+
+    #: 100-m Pekeris, 20 Hz: mode 2 cuts on at 1.5·1500/(2·100·√(1-(15/17)²))
+    #: = 33 Hz, so the sum has one term. k0 = 2π·20/1500 = 0.084, i.e. a
+    #: missing √k0 is a 10.8 dB error — far outside any tolerance here.
+    FREQ = 20.0
+
+    @staticmethod
+    def _rig(source_type):
+        env = Environment(
+            name='line-level', bathymetry=100.0, ssp=C_WATER,
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=C_BOTTOM, density=1.8,
+                                      attenuation=0.5))
+        src = Source(
+            depths=50.0,
+            frequencies=TestNarrowbandLineSourceCarriesTheSameLevelAsBroadband.FREQ,
+            source_type=source_type)
+        rcv = Receiver(depths=np.array([50.0]),
+                       ranges=np.array([500.0, 1000.0]))
+        return env, src, rcv
+
+    @staticmethod
+    def _tl(run_mode, source_type, **kw):
+        env, src, rcv = (
+            TestNarrowbandLineSourceCarriesTheSameLevelAsBroadband._rig(
+                source_type))
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            field = Kraken(verbose=False).run(env, src, rcv,
+                                              run_mode=run_mode, **kw)
+        return np.asarray(field.db, dtype=float).ravel()
+
+    def _broadband(self, source_type):
+        return self._tl(RunMode.BROADBAND, source_type,
+                        frequencies=np.array([self.FREQ]))
+
+    @pytest.mark.parametrize('source_type', ['line', 'point'])
+    def test_coherent_tl_equals_the_single_bin_broadband(self, source_type):
+        coherent = self._tl(RunMode.COHERENT_TL, source_type)
+        broadband = self._broadband(source_type)
+        # Same modes, same evaluator, same level: the two branches only
+        # differ in how they read the .shd back, so this is cell-for-cell.
+        assert np.allclose(coherent, broadband, rtol=0, atol=1e-9), (
+            coherent, broadband)
+
+    @pytest.mark.parametrize('source_type', ['line', 'point'])
+    def test_incoherent_tl_equals_the_single_bin_broadband(self, source_type):
+        incoherent = self._tl(RunMode.INCOHERENT_TL, source_type)
+        broadband = self._broadband(source_type)
+        # One trapped mode, so SQRT(SUM(z**2)) is |z| — the magnitude of the
+        # coherent sum. The residual is field.exe's own single-precision
+        # .shd, not a level difference.
+        assert np.allclose(incoherent, broadband, rtol=0, atol=1e-4), (
+            incoherent, broadband)
+
+    def test_the_line_source_is_actually_scaled_relative_to_the_point_one(self):
+        # A control on the two tests above: they would both pass if the level
+        # were dropped from EVERY branch. It is not — the line and point
+        # levels differ, and by more than the 10.8 dB the bug removed.
+        line = self._tl(RunMode.COHERENT_TL, 'line')
+        point = self._tl(RunMode.COHERENT_TL, 'point')
+        assert np.all(np.abs(line - point) > 1.0), (line, point)
+
+    def test_the_level_factor_equals_sqrt_k0_against_the_raw_shd(self):
+        """The FACTOR itself, derived here instead of borrowed.
+
+        Every other test in this class compares two code paths that both call
+        ``base._line_source_unit_at_1m``, so a wrong constant *inside* that
+        helper — √(4πf/c) for √(2πf/c), or c read at the surface instead of at
+        the source — moves both sides together and is invisible to all of
+        them. This one divides the returned pressure by the engine's own
+        unscaled ``.shd`` and recomputes the expected ratio from f and c(z_s),
+        never calling the helper.
+
+        A line-to-point COMPARISON cannot do this job: ``EvaluateMod.f90:36-39``
+        weights the line sum by ``C/k`` and the point sum by ``C/√k``, so the
+        two differ per mode, not by one global factor.
+        """
+        from uacpy.io import read_shd_bin
+
+        env, src, rcv = self._rig('line')
+        with tempfile.TemporaryDirectory() as work:
+            field = Kraken(verbose=False, work_dir=work, cleanup=False).run(
+                env, src, rcv, run_mode=RunMode.COHERENT_TL)
+            shd = next(Path(work).rglob('*.shd'))
+            raw = read_shd_bin(shd)
+
+        # Both sides as amplitudes: the wrapper reports a loss, the .shd holds
+        # the complex field field.exe wrote before the wrapper touched it.
+        got = np.power(10.0, -np.asarray(field.tl, dtype=float).ravel() / 20.0)
+        unscaled = np.abs(np.asarray(raw['pressure'], dtype=complex)).ravel()
+        keep = np.isfinite(got) & (unscaled > 0)
+        assert keep.any(), "the .shd carried no non-zero cell to divide by"
+
+        c_source = float(np.atleast_1d(env.get_sound_speed(50.0))[0])
+        expected = np.sqrt(2.0 * np.pi * self.FREQ / c_source)
+        ratio = got[keep] / unscaled[keep]
+        assert np.allclose(ratio, expected, rtol=2e-4, atol=0), (
+            f"the wrapper scaled the .shd by {ratio}, but the line-source "
+            f"convention is sqrt(k0) = sqrt(2*pi*{self.FREQ}/{c_source}) = "
+            f"{expected:.6f}")
+
+    def test_the_reference_speed_is_read_at_the_source_depth(self):
+        """c in k0 = 2πf/c is c(z_s), not a global or surface value.
+
+        On an isovelocity duct every candidate speed coincides, so the test
+        above cannot separate them. Here the column has a 100 m/s gradient and
+        two source depths sit in different water: the offsets they produce
+        must differ by 10·log10(c_shallow/c_deep), which is zero for any
+        implementation that reads one speed for the whole column.
+        """
+        from uacpy.core.ssp import SoundSpeedProfile
+        ssp = SoundSpeedProfile(depths=np.array([0.0, 100.0]),
+                                data=np.array([1450.0, 1550.0]))
+        offsets = []
+        for z_s in (20.0, 80.0):
+            env = Environment(
+                name='line-level-gradient', bathymetry=100.0, ssp=ssp,
+                bottom=BoundaryProperties(acoustic_type='half-space',
+                                          sound_speed=C_BOTTOM, density=1.8,
+                                          attenuation=0.5))
+            rcv = Receiver(depths=np.array([50.0]),
+                           ranges=np.array([1000.0]))
+            levels = {}
+            for kind in ('line', 'point'):
+                src = Source(depths=z_s, frequencies=self.FREQ,
+                             source_type=kind)
+                levels[kind] = np.asarray(
+                    Kraken(verbose=False).run(
+                        env, src, rcv, run_mode=RunMode.COHERENT_TL).tl
+                ).ravel()[0]
+            offsets.append(levels['point'] - levels['line'])
+
+        c_shallow = float(np.atleast_1d(env.get_sound_speed(20.0))[0])
+        c_deep = float(np.atleast_1d(env.get_sound_speed(80.0))[0])
+        expected = 10.0 * np.log10(c_deep / c_shallow)
+        assert abs((offsets[0] - offsets[1]) - expected) < 2e-3, (
+            f"offsets {offsets} differ by {offsets[0] - offsets[1]:.4f} dB; "
+            f"c(z_s) read at the source depth predicts {expected:.4f} dB "
+            f"(c={c_shallow} vs {c_deep}). A column-wide speed gives 0.")

@@ -24,7 +24,9 @@ class ReflectionCoefficient(Result):
     theta : ndarray, shape ``(n_angles,)``  — grazing angles in degrees
     R     : ndarray, shape ``(n_angles,)`` or ``(n_angles, n_frequencies)``
             — magnitude in [0, 1]
-    phi   : ndarray, same shape as ``R`` — phase in radians
+    phi   : ndarray, same shape as ``R`` — phase in radians, assumed
+            **unwrapped**; see :meth:`eval` for what a table carrying the
+            ±π branch cut interpolates to.
     frequencies : ndarray, optional, shape ``(n_frequencies,)`` — Hz
         Required when ``R`` is 2-D.
     is_broadband : bool — True iff ``R.ndim == 2``.
@@ -121,7 +123,27 @@ class ReflectionCoefficient(Result):
         """Interpolated slice — the interpolating counterpart of :meth:`at`.
 
         ``method=`` picks the scheme (``'linear'`` default, ``'nearest'``,
-        ``'cubic'``); constant extrapolation past the ends."""
+        ``'cubic'``); constant extrapolation past the ends.
+
+        **:attr:`phi` must already be unwrapped.** The phase column is
+        interpolated as a plain real column, exactly as Acoustics-Toolbox
+        does (``misc/RefCoef.f90:167`` is the same
+        ``(1-alpha)*phi_left + alpha*phi_right``), and AT states the
+        precondition that goes with it: "Assumes phi has been unwrapped so
+        that it varies smoothly" (``misc/RefCoef.f90:119``). uacpy holds the
+        same assumption, so a table that steps across the ±π branch cut
+        interpolates *through* the short way rather than around it. On
+        ``theta = [10, 20, 30]`` with ``phi = [2.5, 3.0, -3.0]`` radians,
+        ``eval(angle=25)`` returns 0.0 where the unwrapped table returns
+        3.1416 — a phase reversal reported as no phase shift at all.
+
+        Nothing here unwraps for you, and that is deliberate: silently
+        unwrapping would make this method disagree with every AT solver
+        reading the same file. Call ``np.unwrap`` on the phase column when
+        you build the table from a source that wraps it.
+
+        :meth:`at` and ``method='nearest'`` return a tabulated sample rather
+        than a blend, so neither is affected."""
         method = kwargs.pop('method', 'linear')
         angle, frequency = self._resolve_axes(kwargs, 'eval')
         return self._select(angle, frequency, method=method)

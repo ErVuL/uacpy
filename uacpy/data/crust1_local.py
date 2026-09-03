@@ -54,6 +54,23 @@ _UPPER_CRYST, _MID_CRYST, _LOW_CRYST = 5, 6, 7
 # CRUST1.0 has no Q; nominal compressional attenuation (dB/λ) by default.
 DEFAULT_SEDIMENT_ATTENUATION = 0.5
 DEFAULT_BASEMENT_ATTENUATION = 0.1
+# Shear loss is NOT the compressional value. Computational Ocean Acoustics
+# (Jensen, Kuperman, Porter & Schmidt) Table 1.3 tabulates α_p / α_s in dB per
+# wavelength for the continental shelf and slope materials: clay 0.2 / 1.0,
+# silt 1.0 / 1.5, sand 0.8 / 2.5, gravel 0.6 / 1.5, moraine 0.4 / 1.0 — shear
+# loss runs 1.5 to 5 times the compressional value in every unconsolidated
+# sediment. 1.5 is the median of that column (and silt's and gravel's own
+# value). For the crystalline basement the table gives basalt 0.1 / 0.2 and
+# limestone 0.1 / 0.2, hence 0.2.
+#
+# COA §1.6.2 notes that α_s "can be shown to have negligible effect on bottom
+# loss for low-shear-speed sediments (c_s < c_w)", so on a soft column these
+# defaults barely move the answer; they matter where CRUST1.0's Vs exceeds the
+# water speed, which is most of the crystalline crust and the stiffer
+# sediments, and there the old sediment 0.5 / basement 0.1 understated the
+# loss by factors of 3 and 2.
+DEFAULT_SEDIMENT_SHEAR_ATTENUATION = 1.5
+DEFAULT_BASEMENT_SHEAR_ATTENUATION = 0.2
 
 # CRUST1.0 is the catalogue's only commercial_use=False source and ships with no
 # formal licence. Direct callers of the low-level fetcher bypass the orchestrator
@@ -85,10 +102,9 @@ def download_crust1_db(cache_dir=None, *, timeout=180.0, verbose=False):
 
     Writes the four ASCII grids into ``<cache>/crust1/`` and returns that dir.
     """
-    dest = Path(cache_dir) if cache_dir else _cache.dataset_root('crust1')
-    dest.mkdir(parents=True, exist_ok=True)
-    log_message('crust1', "downloading CRUST1.0 (Laske et al. 2013, ~1 MB)",
-                verbose=verbose)
+    dest = _cache.prepare_download(
+        'crust1', "downloading CRUST1.0 (Laske et al. 2013, ~1 MB)",
+        cache_dir=cache_dir, verbose=verbose)
     blob = http_get(CRUST1_URL, timeout=timeout, verbose=verbose, source='crust1')
     tf = tarfile.open(fileobj=io.BytesIO(blob))
     written = 0
@@ -149,22 +165,22 @@ def _column(lat, lon):
     return g['bnds'][idx], g['vp'][idx], g['vs'][idx], g['rho'][idx]
 
 
-def _layer(i, bnds, vp, vs, rho, atten, elastic):
+def _layer(i, bnds, vp, vs, rho, atten, shear_atten, elastic):
     """A :class:`SedimentLayer` for CRUST1.0 layer ``i`` (km/s → m/s, km → m)."""
     cs = vs[i] * 1000.0 if elastic else 0.0
     return SedimentLayer(
         thickness=(bnds[i] - bnds[i + 1]) * 1000.0,
         sound_speed=vp[i] * 1000.0, density=float(rho[i]), attenuation=atten,
-        shear_speed=cs, shear_attenuation=(atten if cs > 0 else 0.0),
+        shear_speed=cs, shear_attenuation=(shear_atten if cs > 0 else 0.0),
     )
 
 
-def _halfspace(i, vp, vs, rho, atten, elastic):
+def _halfspace(i, vp, vs, rho, atten, shear_atten, elastic):
     cs = vs[i] * 1000.0 if elastic else 0.0
     return BoundaryProperties(
         acoustic_type='half-space', sound_speed=vp[i] * 1000.0,
         density=float(rho[i]), attenuation=atten,
-        shear_speed=cs, shear_attenuation=(atten if cs > 0 else 0.0),
+        shear_speed=cs, shear_attenuation=(shear_atten if cs > 0 else 0.0),
     )
 
 
@@ -181,6 +197,10 @@ def _sediment_layer_indices(bnds):
 
 def _layered_from_column(bnds, vp, vs, rho, *, sediment_attenuation,
                          basement_attenuation, elastic, sediment_thickness,
+                         sediment_shear_attenuation=(
+                             DEFAULT_SEDIMENT_SHEAR_ATTENUATION),
+                         basement_shear_attenuation=(
+                             DEFAULT_BASEMENT_SHEAR_ATTENUATION),
                          roughness=0.0):
     """Build a :class:`SeabedColumn`: sediment stack over crystalline basement.
 
@@ -203,7 +223,8 @@ def _layered_from_column(bnds, vp, vs, rho, *, sediment_attenuation,
     else:
         eff_sed = 0.0
     if sed and eff_sed >= _MIN_SEDIMENT_M:
-        layers = [_layer(i, bnds, vp, vs, rho, sediment_attenuation, elastic)
+        layers = [_layer(i, bnds, vp, vs, rho, sediment_attenuation,
+                         sediment_shear_attenuation, elastic)
                   for i in sed]
         if sediment_thickness is not None:
             total = sum(layer.thickness for layer in layers)
@@ -212,12 +233,12 @@ def _layered_from_column(bnds, vp, vs, rho, *, sediment_attenuation,
                 for layer in layers:
                     layer.thickness *= scale
         halfspace = _halfspace(_UPPER_CRYST, vp, vs, rho, basement_attenuation,
-                               elastic)
+                               basement_shear_attenuation, elastic)
     else:           # bare rock / negligible sediment: crust over crust
         layers = [_layer(_UPPER_CRYST, bnds, vp, vs, rho, basement_attenuation,
-                         elastic)]
+                         basement_shear_attenuation, elastic)]
         halfspace = _halfspace(_MID_CRYST, vp, vs, rho, basement_attenuation,
-                               elastic)
+                               basement_shear_attenuation, elastic)
     layers[0].roughness = float(roughness)
     return SeabedColumn(layers=layers, halfspace=halfspace)
 
@@ -269,6 +290,10 @@ def fetch_crust1_profile(point):
 def fetch_bottom_crust1(point, *, roughness=0.0,
                         sediment_attenuation=DEFAULT_SEDIMENT_ATTENUATION,
                         basement_attenuation=DEFAULT_BASEMENT_ATTENUATION,
+                        sediment_shear_attenuation=(
+                            DEFAULT_SEDIMENT_SHEAR_ATTENUATION),
+                        basement_shear_attenuation=(
+                            DEFAULT_BASEMENT_SHEAR_ATTENUATION),
                         elastic=True, sediment_thickness=None, use_globsed=True,
                         water_sound_speed=None,
                         timeout=None, verbose=False):
@@ -276,7 +301,16 @@ def fetch_bottom_crust1(point, *, roughness=0.0,
 
     The CRUST1.0 sediment layers over the crystalline-crust half-space, with
     ``Vs`` retained (``elastic=True``). ``sediment_attenuation`` /
-    ``basement_attenuation`` set the (nominal) dB/λ losses CRUST1.0 lacks.
+    ``basement_attenuation`` set the (nominal) dB/λ compressional losses
+    CRUST1.0 lacks, and ``sediment_shear_attenuation`` /
+    ``basement_shear_attenuation`` the shear ones. Shear loss is not the
+    compressional value: Computational Ocean Acoustics Table 1.3 puts it at
+    1.5 to 5 times the compressional figure in unconsolidated sediments (clay
+    0.2/1.0, silt 1.0/1.5, sand 0.8/2.5, gravel 0.6/1.5 dB/λ), hence the
+    defaults 1.5 (sediment) and 0.2 (basalt/limestone basement). COA §1.6.2
+    notes shear attenuation has little effect on bottom loss while the shear
+    speed stays below the water speed, so on a soft column the choice barely
+    moves the answer.
 
     The coarse 1° CRUST1.0 sediment column is rescaled to a higher-resolution
     **GlobSed** total thickness by default (``use_globsed=True``); pass an
@@ -308,13 +342,19 @@ def fetch_bottom_crust1(point, *, roughness=0.0,
     _warn_non_commercial()
     return _bottom_at_point(
         point, roughness=roughness, sediment_attenuation=sediment_attenuation,
-        basement_attenuation=basement_attenuation, elastic=elastic,
+        basement_attenuation=basement_attenuation,
+        sediment_shear_attenuation=sediment_shear_attenuation,
+        basement_shear_attenuation=basement_shear_attenuation, elastic=elastic,
         sediment_thickness=sediment_thickness, use_globsed=use_globsed,
         verbose=verbose)
 
 
 def _bottom_at_point(point, *, sediment_attenuation, basement_attenuation,
-                     elastic, roughness=0.0, sediment_thickness=None,
+                     elastic, sediment_shear_attenuation=(
+                         DEFAULT_SEDIMENT_SHEAR_ATTENUATION),
+                     basement_shear_attenuation=(
+                         DEFAULT_BASEMENT_SHEAR_ATTENUATION),
+                     roughness=0.0, sediment_thickness=None,
                      use_globsed=True, verbose=False):
     """One CRUST1.0 column, without the commercial notice.
 
@@ -351,7 +391,9 @@ def _bottom_at_point(point, *, sediment_attenuation, basement_attenuation,
             UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
     bottom = _layered_from_column(
         bnds, vp, vs, rho, sediment_attenuation=sediment_attenuation,
-        basement_attenuation=basement_attenuation, elastic=elastic,
+        basement_attenuation=basement_attenuation,
+        sediment_shear_attenuation=sediment_shear_attenuation,
+        basement_shear_attenuation=basement_shear_attenuation, elastic=elastic,
         roughness=roughness, sediment_thickness=sediment_thickness)
     # 'globsed' only when the GlobSed value shaped the column; a consulted but
     # discarded value is stamped 'globsed-ignored' so provenance never lists a
@@ -368,6 +410,10 @@ def fetch_bottom_crust1_transect(start, end, *, n_points=6, max_points=None,
                                  roughness=0.0,
                                  sediment_attenuation=DEFAULT_SEDIMENT_ATTENUATION,
                                  basement_attenuation=DEFAULT_BASEMENT_ATTENUATION,
+                                 sediment_shear_attenuation=(
+                                     DEFAULT_SEDIMENT_SHEAR_ATTENUATION),
+                                 basement_shear_attenuation=(
+                                     DEFAULT_BASEMENT_SHEAR_ATTENUATION),
                                  elastic=True, use_globsed=True,
                                  water_sound_speed=None,
                                  timeout=None, verbose=False):
@@ -388,17 +434,19 @@ def fetch_bottom_crust1_transect(start, end, *, n_points=6, max_points=None,
     ``water_sound_speed`` is likewise accepted and ignored (CRUST1.0 yields
     absolute Vp/Vs/ρ, not water-referenced ratios).
 
-    ``roughness`` is the RMS roughness (m) of the seafloor interface at every
-    waypoint, as in :func:`fetch_bottom_crust1`.
+    ``roughness`` and the four attenuation keywords are as in
+    :func:`fetch_bottom_crust1`, applied at every waypoint.
     """
-    from uacpy.data._geo import geodesic_waypoints
+    from uacpy.data._geo import checked_n_points, geodesic_waypoints
+    n_points = checked_n_points(n_points, 'fetch_bottom_crust1_transect',
+                                allow_auto=True)
     # 'auto': CRUST1.0 is a 1-degree cached grid, so target roughly one
     # waypoint per degree of arc, clamped like the siblings.
     if n_points == 'auto':
         from uacpy.data._geo import central_angle
         n_points = max(2, int(np.degrees(central_angle(start, end))) + 1)
     if max_points is not None:
-        n_points = max(2, min(int(n_points), int(max_points)))
+        n_points = max(2, min(n_points, int(max_points)))
     _warn_non_commercial()
     lats, lons, ranges_m = geodesic_waypoints(start, end, n_points)
     # The notice is emitted once above, for the transect as a whole; the
@@ -408,6 +456,8 @@ def fetch_bottom_crust1_transect(start, end, *, n_points=6, max_points=None,
         _bottom_at_point((la, lo), roughness=roughness,
                          sediment_attenuation=sediment_attenuation,
                          basement_attenuation=basement_attenuation,
+                         sediment_shear_attenuation=sediment_shear_attenuation,
+                         basement_shear_attenuation=basement_shear_attenuation,
                          elastic=elastic, use_globsed=use_globsed)
         for la, lo in zip(lats, lons)
     ]

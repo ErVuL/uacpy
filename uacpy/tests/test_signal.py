@@ -644,6 +644,56 @@ class TestBandLimitedNoiseLandsInTheRequestedBand:
         with pytest.raises(ConfigurationError, match='not realisable'):
             make_bandlimited_noise(fc, bw, 0.5, fs)
 
+    @pytest.mark.parametrize('fc,bw,fs', [(12_000.0, 5.0, 96_000.0),
+                                          (12_002.9, 5.0, 96_000.0),
+                                          (3_000.0, 2.0, 96_000.0)])
+    def test_the_neb_of_a_narrow_band_matches_a_converged_grid(self, fc, bw, fs):
+        """The noise-equivalent bandwidth sets ``add_noise``'s level, so a
+        quadrature error in it is a level error of the same size in dB.
+
+        A uniform ``n_freq``-point grid over the whole ``[0, Nyquist]`` samples
+        a ``bw/fs = 5e-5`` band with a handful of points and reads it wrong by
+        an amount that depends on where the passband falls between two grid
+        points: +1.16 dB at ``fc=12000`` Hz and +3.65 dB at ``fc=12002.9`` Hz
+        for the same 5 Hz band, +5.14 dB at 2 Hz. A band-focused grid of the
+        same size is converged.
+        """
+        from scipy.signal import sosfreqz
+        from uacpy.acoustic_signal.noise_synthesis import (
+            _bandpass_design, _noise_equivalent_bandwidth)
+
+        sos = _bandpass_design(fc, bw, fs)
+        # Reference: 2e6 points over fifty bandwidths of skirt each side.
+        w = np.linspace(max(0.0, fc - bw / 2 - 50 * bw),
+                        min(fs / 2, fc + bw / 2 + 50 * bw), 2_000_001)
+        f, h = sosfreqz(sos, worN=w, fs=fs)
+        power = np.abs(h) ** 4
+        reference = float(np.trapezoid(power, f) / power.max())
+
+        neb = _noise_equivalent_bandwidth(sos, fs, fc, bw)
+        error_db = 10 * np.log10(neb / reference)
+        assert abs(error_db) < 0.05, (
+            f"NEB of the {bw:g} Hz band at fc={fc:g} Hz, fs={fs:g} Hz is "
+            f"{neb:.6g} Hz against a converged {reference:.6g} Hz: "
+            f"{error_db:+.3f} dB, which ``add_noise`` turns into the same "
+            f"level error")
+
+    def test_a_wide_band_neb_is_unchanged_by_the_focused_grid(self):
+        """The focused window must not cost accuracy where the full-band grid
+        was already converged: ten bandwidths of skirt puts the window edge
+        below 1e-18 of the peak, so the two agree to rounding."""
+        from scipy.signal import sosfreqz
+        from uacpy.acoustic_signal.noise_synthesis import (
+            _bandpass_design, _noise_equivalent_bandwidth)
+
+        fs, fc, bw = 96_000.0, 12_000.0, 1_000.0
+        sos = _bandpass_design(fc, bw, fs)
+        f, h = sosfreqz(sos, worN=8192, fs=fs)
+        power = np.abs(h) ** 4
+        full_band = float(np.trapezoid(power, f) / power.max())
+        assert _noise_equivalent_bandwidth(sos, fs, fc, bw) == \
+            pytest.approx(full_band, rel=1e-9)
+
 
 class TestDecidecadePartialBandsAreNaN:
     """A band the supplied grid does not fully cover was returned as the
@@ -998,8 +1048,16 @@ class TestMakeMseqProbe:
 
 class TestFourierSynthesis:
     """AT ``stack.m`` translation: raw-DFT synthesis on the input frequency
-    grid with the one-sided spectrum doubled, plus the ``Tstart`` phase-ramp
-    warning (docs/guide/signal.md §9)."""
+    grid with the one-sided spectrum doubled, plus the baseband warning a
+    grid starting above DC earns (docs/guide/signal.md §9).
+
+    The warning used to say an offset band start "introduces a phase ramp"
+    and to advise passing ``Tstart``. Neither is what happens: the IFFT puts
+    bin 0 at DC, so the trace is the complex envelope demodulated by
+    ``frequencies[0]``, and ``Tstart`` is a time-origin shift that leaves the
+    spectrum exactly where it is. Because the branch was an ``elif`` on
+    ``Tstart``, following the advice only silenced the warning.
+    """
 
     def test_single_bin_synthesises_the_expected_cosine(self):
         N, df = 64, 10.0
@@ -1015,20 +1073,61 @@ class TestFourierSynthesis:
         np.testing.assert_allclose(
             x, (2.0 * 3.0 / N) * np.cos(2 * np.pi * 80.0 * t), atol=1e-12)
 
-    def test_offset_band_without_tstart_warns_of_phase_ramp(self):
-        freqs = np.arange(10.0, 100.0, 10.0)     # frequencies[0] > 0
-        H = np.ones(freqs.size, dtype=complex)
-        with pytest.warns(UserWarning, match='phase ramp'):
-            fourier_synthesis(H, freqs)
+    @staticmethod
+    def _offset_gaussian_band():
+        """A 100-300 Hz grid carrying a Gaussian centred at 150 Hz.
 
-    def test_tstart_silences_the_warning_and_anchors_the_time_axis(self):
-        freqs = np.arange(10.0, 100.0, 10.0)
-        H = np.ones(freqs.size, dtype=complex)
-        with warnings.catch_warnings():
-            warnings.simplefilter('error', UserWarning)
+        The grid is twice as wide as it needs to be so that the demodulated
+        carrier (150 - 100 = 50 Hz) sits well inside the output Nyquist of
+        ``Nfreq*df/2`` = 100.5 Hz. On a 100-200 Hz grid the same carrier lands
+        on the last rfft bin, where the reading depends on the carrier's phase
+        rather than its amplitude, so ``Tstart=0.5`` alone reads 40 Hz there.
+        """
+        freqs = np.arange(100.0, 300.5, 1.0)
+        return freqs, np.exp(-(freqs - 150.0) ** 2 / (2 * 10.0 ** 2)).astype(complex)
+
+    def test_offset_band_warns_that_the_output_is_demodulated_to_baseband(self):
+        """The warning must name the effect that is actually there. The raw
+        IFFT places bin 0 at DC, so the 150 Hz peak of this band comes back at
+        150 - 100 = 50 Hz: the trace is the complex envelope, not a phase-ramped
+        passband waveform."""
+        freqs, H = self._offset_gaussian_band()
+        with pytest.warns(UserWarning, match='demodulated by frequencies'):
+            t, x = fourier_synthesis(H, freqs)
+        spectrum = np.abs(np.fft.rfft(x))
+        peak = np.fft.rfftfreq(x.size, t[1] - t[0])[np.argmax(spectrum)]
+        assert peak == pytest.approx(50.0, abs=1.0), (
+            f"band peaks at 150 Hz on a grid starting at 100 Hz; the output "
+            f"peaks at {peak:.3g} Hz, so it is not demodulated by "
+            f"frequencies[0] as the warning states")
+        # And the rate is the grid's own, Nfreq*df, not the input Nyquist.
+        assert 1.0 / (t[1] - t[0]) == pytest.approx(freqs.size * 1.0)
+
+    def test_tstart_anchors_the_time_axis_without_moving_the_spectrum(self):
+        """``Tstart`` is a time-origin shift: it anchors ``t[0]`` and rotates
+        the phase, and the trace stays demodulated by ``frequencies[0]``. So it
+        cannot be the remedy the old message advised, and it must not switch
+        the warning off."""
+        freqs, H = self._offset_gaussian_band()
+        with pytest.warns(UserWarning, match='demodulated by frequencies'):
             t, x = fourier_synthesis(H, freqs, Tstart=0.5)
         assert t[0] == pytest.approx(0.5)
         assert x.shape == freqs.shape
+        peak = np.fft.rfftfreq(x.size, t[1] - t[0])[
+            np.argmax(np.abs(np.fft.rfft(x)))]
+        assert peak == pytest.approx(50.0, abs=1.0), (
+            f"Tstart moved the spectral peak to {peak:.3g} Hz; it is a "
+            f"time-origin shift and must not re-modulate")
+
+    def test_a_grid_starting_at_dc_stays_silent(self):
+        """Only an offset grid earns the warning — a grid that starts at DC
+        needs no demodulation caveat."""
+        freqs = np.arange(0.0, 100.0, 10.0)
+        H = np.ones(freqs.size, dtype=complex)
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', UserWarning)
+            fourier_synthesis(H, freqs, Tstart=0.5)
+            fourier_synthesis(H, freqs)
 
 
 class TestLsFirCpReferenceFitReportsDegenerateInput:
@@ -1849,6 +1948,48 @@ class TestSignalAxisGuardsRefuseAnEmptyAxis:
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
             assert calls['decidecade_band_levels'](f, 64) is not None
+
+
+class TestTransferFunctionImpulseResponseValidatesItsSampleRate:
+    """Every sibling entry point routes ``sample_rate`` through the shared
+    positive-finite-scalar guard; this one did ``float(sample_rate)``.
+
+    Measured before the fix, with ``frequencies`` spanning 0-500 Hz: a rate of
+    0 raised a bare ``ZeroDivisionError``, NaN a ``ValueError`` about
+    converting NaN to an integer, Inf an ``OverflowError``, a non-number a
+    ``ValueError`` from ``float()`` — and a negative rate reached the Nyquist
+    check and raised a ``ConfigurationError`` announcing "the Nyquist
+    frequency -500 Hz", a true statement about the wrong argument.
+    """
+
+    @staticmethod
+    def _call(rate):
+        from uacpy.acoustic_signal.channel import (
+            impulse_response_from_transfer_function)
+        f = np.arange(0.0, 501.0, 1.0)
+        return impulse_response_from_transfer_function(
+            np.ones(f.size, dtype=complex), f, rate)
+
+    @pytest.mark.parametrize('rate', [0.0, -1000.0, float('nan'),
+                                      float('inf'), -float('inf')])
+    def test_a_non_positive_or_non_finite_rate_names_sample_rate(self, rate):
+        with pytest.raises(ConfigurationError) as exc:
+            self._call(rate)
+        message = str(exc.value)
+        assert 'impulse_response_from_transfer_function' in message
+        assert 'sample_rate' in message and '> 0 Hz' in message
+        assert 'Nyquist' not in message, (
+            f"a bad sample_rate must not be reported as a statement about the "
+            f"frequency axis: {message}")
+
+    def test_a_non_numeric_rate_names_sample_rate_too(self):
+        with pytest.raises(ConfigurationError, match='sample_rate must be a '
+                                                     'scalar number'):
+            self._call('fast')
+
+    def test_a_positive_finite_rate_returns_a_finite_response(self):
+        t, h = self._call(2000.0)
+        assert t.size == h.size > 0 and np.all(np.isfinite(h))
 
 
 class TestMseqAndDsssSequencesAreNotInterchangeable:

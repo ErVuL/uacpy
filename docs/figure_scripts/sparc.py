@@ -40,7 +40,10 @@ def record_section():
     fig, ax = Field.from_dict(section).plot(
         stacked=True, figsize=TALL,
         title='SPARC — horizontal array at 50 m, gained by √r')
-    ax.set_ylabel('Range (m, stacked)')
+    # km, not m: the stacked view reads a range axis in km, as every
+    # other view of a range axis does. The override said metres over
+    # ticks reading 0.2 to 1.157 for an array spanning 200 to 1200 m.
+    ax.set_ylabel('Range (km, stacked)')
     return fig
 
 

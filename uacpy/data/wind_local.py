@@ -24,7 +24,7 @@ from uacpy.data._geo import as_coordinate, normalize_lon
 from uacpy.data._http import http_get
 from uacpy.data._time import parse_date
 
-__all__ = ['download_wind_db', 'wind_speed']
+__all__ = ['download_wind_db', 'wind_speed', 'climatology_period']
 
 WIND_FILE = 'wind_climatology.npz'
 _MONTHLY_DATASET = 'noaacwBlendedWindsMonthly'
@@ -46,11 +46,11 @@ def download_wind_db(cache_dir=None, *, years=_DEFAULT_YEARS, timeout=120.0,
     ``lon``, ``speed`` of shape ``(12, nlat, nlon)``). Missing months are
     skipped. Returns the path.
     """
-    dest = Path(cache_dir) if cache_dir else _cache.dataset_root('wind')
-    dest.mkdir(parents=True, exist_ok=True)
+    dest = _cache.prepare_download(
+        'wind', f"building NBS wind climatology over {years[0]}-"
+        f"{years[-1]} (~{len(years) * 12} monthly grids)",
+        cache_dir=cache_dir, verbose=verbose)
     out = dest / WIND_FILE
-    log_message('wind', f"building NBS wind climatology over {years[0]}-"
-                f"{years[-1]} (~{len(years) * 12} monthly grids)", verbose=verbose)
     lat = lon = None
     accum, count = None, None
     for month in range(1, 13):
@@ -89,7 +89,11 @@ def download_wind_db(cache_dir=None, *, years=_DEFAULT_YEARS, timeout=120.0,
         # A file object, not the path: np.savez_compressed appends '.npz' to a
         # name that lacks it, which would write '<out>.part.npz'.
         with open(part, 'wb') as fh:
-            np.savez_compressed(fh, lat=lat, lon=lon, speed=speed)
+            # ``years`` records the reference period, so a cache's vintage
+            # can be recovered from the file rather than assumed to be the
+            # module default it may not have been built with.
+            np.savez_compressed(fh, lat=lat, lon=lon, speed=speed,
+                                years=np.asarray(years, dtype=np.int32))
     _CLIM.clear()
     log_message('wind', f"wind climatology cached → {out}", verbose=verbose)
     return out
@@ -159,6 +163,11 @@ class _Climatology:
                 self.lat = data['lat']
                 self.lon = data['lon']
                 self.speed = data['speed']
+                # Optional: caches built before the key existed, and the
+                # synthetic ones the tests write, carry no reference period.
+                # Absent is not an error — the vintage is simply unstated.
+                self.years = ([int(y) for y in data['years']]
+                              if 'years' in data.files else None)
         self._lat0 = float(self.lat[0])
         self._lon0 = float(self.lon[0])
         self._dlat = float(self.lat[1] - self.lat[0])
@@ -187,6 +196,20 @@ def _clim():
     """
     path = _cache.require('wind', WIND_FILE)
     return _cache.memoize(_CLIM, str(path), lambda: _Climatology(path))
+
+
+def climatology_period():
+    """Reference period of the installed climatology, or ``None``.
+
+    A string such as ``'2013-2022 (climatology)'`` for the provenance
+    ``data_date``. ``None`` where the cache predates the ``years`` key or was
+    written without one — the grid is still usable, its vintage is simply not
+    recorded.
+    """
+    years = _clim().years
+    if not years:
+        return None
+    return f"{min(years)}-{max(years)} (climatology)"
 
 
 def wind_speed(point, *, date):

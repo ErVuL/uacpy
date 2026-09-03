@@ -132,7 +132,13 @@ def oasp_field():
 def oass_field():
     # OASS scatters from a rough seabed, so its Pekeris variant carries a
     # non-zero bottom roughness; the returned Field is a real dB
-    # reverberation level on the same (depth, range) grid.
+    # reverberation LOSS on the same (depth, range) grid — not a level.
+    # OASES writes -10·log10 E[|p_scat|²] in REVINT
+    # (oases/src/oassun26.f:853-858: CVMAGS squares, VALG10 takes log10,
+    # VSMUL scales by -5E0) and uacpy's reader applies no sign change, so a
+    # LARGER number is a WEAKER scattered field — the same direction as
+    # transmission loss, which is why this grid shares TL's colour scale.
+    # A reverberation level is recovered as RL = SL - this.
     return _run_recorded(
         'oass_field',
         lambda: OASS(correlation_length=10.0, verbose=False).run(
@@ -147,7 +153,7 @@ ALL_ENGINES = [
     pytest.param('oast_field', marks=pytest.mark.requires_oases),
 ]
 # The r = 0 contract is also asserted for OASP (complex .trf pressure) and
-# OASS (reverberation level) — both singular on the source axis like every
+# OASS (reverberation loss) — both singular on the source axis like every
 # point-source field, and both once returned finite numbers there.
 R0_ENGINES = ALL_ENGINES + [
     pytest.param('oasp_field', marks=pytest.mark.requires_oases),
@@ -542,17 +548,32 @@ class TestWaveEnginesAreReciprocal:
 def test_every_engine_reports_one_line_source_level():
     """Bellhop (4√π/√R raw), Kraken and Scooter (1/√(k0·R) raw) disagreed by
     4√(πk0) — 13 dB at 100 Hz — on ``source_type='line'``. All three now
-    report unit amplitude at 1 m; the residual is ray-vs-wave physics."""
+    report unit amplitude at 1 m; the residual is ray-vs-wave physics.
+
+    The levels are averaged over the cells finite in EVERY engine, not over
+    each engine's own finite cells. This grid deliberately includes r = 0 and
+    a sub-seafloor depth, where Kraken alone returns a value (contract 2
+    above), so a per-engine ``nanmean`` would average three different cell
+    sets and compare an in-water mean against one diluted by the much
+    quieter transmitted field — a difference of grid, not of level
+    convention. That artefact once masked a real 10·log10(k0) offset in
+    Kraken's narrowband line-source branch: the as-written spread read
+    1.8 dB while the two cells all three engines resolve differed by 4.5 dB.
+    """
     env, point = _pekeris(), _source()
     src = Source(depths=point.depths, frequencies=point.frequencies,
                  source_type='line')
     rcv = _receiver()
-    levels = {}
+    grids = {}
     for name, model in (('bellhop', Bellhop(verbose=False)),
                         ('kraken', Kraken(verbose=False)),
                         ('scooter', Scooter(verbose=False))):
-        tl = np.asarray(model.run(env, src, rcv).db, dtype=float)
-        levels[name] = float(np.nanmean(tl))
+        grids[name] = np.asarray(model.run(env, src, rcv).db, dtype=float)
+    common = np.all([np.isfinite(tl) for tl in grids.values()], axis=0)
+    # The r > 0 in-water cells: enough of them that the mean is not one
+    # sample, and the same cells for every engine.
+    assert common.sum() >= 2, common
+    levels = {name: float(np.mean(tl[common])) for name, tl in grids.items()}
     spread = max(levels.values()) - min(levels.values())
     assert spread < 2.0, levels
 

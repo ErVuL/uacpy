@@ -173,3 +173,34 @@ def test_the_argo_query_window_includes_the_whole_last_tolerated_day():
     url = argo._query_url((45.0, -30.0), when, 300.0, 10, 'http://x')
     assert 'time%3E=2026-08-05T00:00:00Z' in url
     assert 'time%3C2026-08-26T00:00:00Z' in url
+
+
+@pytest.mark.parametrize('formula', ['unesco', 'delgrosso'])
+def test_argo_profile_records_the_formula_that_built_it(monkeypatch, formula):
+    """The profile has to carry its own equation: a float ending at 1000 m over
+    a deep seafloor is extended, and the extension continues under whatever
+    ``formula`` says (UNESCO when it says nothing)."""
+    monkeypatch.setattr(argo, 'http_get', lambda url, **kw: _csv(_ROWS))
+    ssp = argo.fetch_ssp_argo((30.0, -40.0), date='2024-06-04', formula=formula)
+    assert ssp.formula == formula
+
+
+def test_an_argo_profile_extends_under_its_own_equation(monkeypatch):
+    """A float ending at 1000 m over a deep seafloor is extended. Without the
+    stamp the extension always ran UNESCO. Both branches below extend the very
+    same numbers, so the stamp is the only variable."""
+    import warnings
+    from uacpy.core.environment import SoundSpeedProfile
+    from uacpy.data.sound_speed import extend_ssp_below_data
+    monkeypatch.setattr(argo, 'http_get', lambda url, **kw: _csv(_ROWS))
+    ssp = argo.fetch_ssp_argo((30.0, -40.0), date='2024-06-04',
+                              formula='delgrosso')
+    stripped = SoundSpeedProfile(depths=ssp.depths, data=ssp.data,
+                                 shape='measured', formula=None)
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        stamped = float(np.asarray(
+            extend_ssp_below_data(ssp, 5000.0).data)[-1, 0])
+        unesco = float(np.asarray(
+            extend_ssp_below_data(stripped, 5000.0).data)[-1, 0])
+    assert abs(stamped - unesco) > 0.05

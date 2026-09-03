@@ -363,8 +363,9 @@ def _plot_environment(
     seafloor_depth = z_max_layer  # remember the *actual* deepest seafloor
                                   # — branches mutate z_max_layer with a
                                   # hs_floor padding for the half-space
-                                  # rendering, but the final ylim should
-                                  # not stretch the panel that far.
+                                  # rendering, so the two are compared at
+                                  # the ylim rather than one replacing the
+                                  # other.
 
     # Independent cmaps + colorbars for water vs bottom. Each is
     # normalized to its own cs range so neither is washed out by the
@@ -413,7 +414,16 @@ def _plot_environment(
     # / range-dependent bottoms span their own (relative) cp range.
     bottom_has_cp = bool(bottom_cs_pool)
     is_single_halfspace = not bottom.is_range_dependent and not bottom.is_layered
-    if is_single_halfspace and bottom_has_cp:
+    if not bottom_has_cp:
+        # Vacuum / rigid / file half-space, no layers: nothing down there has
+        # a cp to normalize against. Neither reader runs — ``has_bottom_cbar``
+        # below is False, and ``_layer_cmap_and_norm`` is called only by the
+        # layered branches, which cannot be reached with an empty pool because
+        # every layer carries a sound speed. Normalizing the bottom map to the
+        # WATER speeds as a stand-in built a mappable nothing ever drew.
+        bot_cs_min = bot_cs_max = None
+        bottom_sm = None
+    elif is_single_halfspace:
         from matplotlib.colors import Normalize
         from matplotlib.cm import ScalarMappable
         bot_cs_min, bot_cs_max = _HALFSPACE_CP_LO, _HALFSPACE_CP_HI
@@ -422,7 +432,7 @@ def _plot_environment(
         bottom_sm.set_array([])
     else:
         bot_cs_min, bot_cs_max, bottom_sm = _make_sm(
-            bottom_cs_pool or water_cs_pool, bottom_cmap_truncated,
+            bottom_cs_pool, bottom_cmap_truncated,
         )
 
     def _layer_cmap_and_norm():
@@ -526,11 +536,13 @@ def _plot_environment(
                    source_range_m=km_to_m(x_range[0]))
 
     ax_bathy.set_xlim(*x_range)
-    # Tight ylim — surface to a small margin past the deepest seafloor.
-    # Bottom rendering may extend below the seafloor visually (hatched
-    # half-space / PML-like padding) but the displayed extent stays
-    # close to the physical water column.
-    ax_bathy.set_ylim(0, seafloor_depth * 1.20)
+    # Tight ylim — surface to a small margin past the deepest seafloor, but
+    # never above what the bottom branch actually painted. Every branch
+    # returns ``z_max_layer``, the floor of its own rendering (layer stack +
+    # hatched half-space extension); taking the max keeps a thick sediment
+    # column on-panel instead of clipping its lower layers away, and leaves
+    # the 20 % water-column margin in charge whenever the bottom is thin.
+    ax_bathy.set_ylim(0, max(seafloor_depth * 1.20, z_max_layer))
     if not ax_bathy.get_xlabel():
         ax_bathy.set_xlabel('Range (km)')
     ax_bathy.set_ylabel('Depth (m)')

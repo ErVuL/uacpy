@@ -14,10 +14,19 @@ DB_VIEW_COLORMAPS = {
                                # Matches Acoustic Toolbox standard: flipud(jet)
     'reverberation': 'jet_r',
     'signal_excess': 'RdBu_r',  # diverging: the SE = 0 dB detection boundary is the midpoint
+    'difference': 'RdBu_r',     # diverging: zero difference is the midpoint
 }
 
-# Every linear view (magnitude, real, imaginary part) of any quantity.
+# Every linear view (magnitude, real, imaginary part) of a SIGNED quantity.
 LINEAR_VIEW_COLORMAP = 'seismic'
+
+# A probability is bounded [0, 1] and unsigned, so the signed diverging map
+# above cannot describe it: half of that map is unreachable and its neutral
+# midpoint lands on P_D = 0. Red = lost, green = detected, on a fixed [0, 1]
+# window. Shared with ``plot_detection_probability`` so a P_D field renders
+# the same through the dedicated plotter and through ``Field.plot``.
+PROBABILITY_COLORMAP = 'RdYlGn'
+PROBABILITY_LIMITS = (0.0, 1.0)
 
 
 # ── Sediment colour — single source of truth ─────────────────────────────

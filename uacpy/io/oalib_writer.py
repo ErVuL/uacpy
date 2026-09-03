@@ -139,8 +139,19 @@ WATER_DENSITY_G_CM3 = 1.0
 _MAX_BIO_LAYERS = 200
 
 # Compiled media bound shared by kraken/krakenc/scooter/sparc:
-# misc/ReadEnvironmentMod.f90 ERROUTs when NMedia exceeds MaxMedium = 500
-# (misc/sspMod.f90:11) — a bare Fortran fatal, so the writers refuse first.
+# misc/ReadEnvironmentMod.f90:63-66 ERROUTs 'Too many Media' when the deck's
+# NMedia exceeds MaxMedium — a bare Fortran fatal, so the writers refuse
+# first.  MaxMedium is a dummy argument of that subroutine
+# (ReadEnvironmentMod.f90:12,21); its value 500 is a PARAMETER declared
+# separately by each calling program — Kraken/KrakenMod.f90:6,
+# Kraken/KrakencMod.f90:6, Scooter/scooter.f90:32, Scooter/sparc.f90:31 —
+# and they all agree on 500.
+# NOT misc/sspMod.f90:11: that line declares ``MaxSSP = 20001,
+# MaxMedia = 501``, a different name that nothing tests here.  (Upstream
+# knows: ReadEnvironmentMod.f90:16 is a FIXME saying "MaxMedium and
+# MaxMedia are essentially the same thing".)  sspMod.f90:11 IS the right
+# address for the other bound taken from that line, MaxSSP = 20001, which
+# ``write_ssp_section`` enforces.
 _AT_MAX_MEDIA = 500
 
 
@@ -151,7 +162,9 @@ def _reject_media_overrun(n_media) -> None:
     raise ConfigurationError(
         f"AT deck: NMedia = {int(n_media)} (water column + sediment layers) "
         f"exceeds the compiled bound MaxMedium = {_AT_MAX_MEDIA} "
-        f"(Acoustics-Toolbox misc/sspMod.f90; ReadEnvironmentMod ERROUTs).",
+        f"(Acoustics-Toolbox misc/ReadEnvironmentMod.f90:63-66 ERROUTs "
+        f"'Too many Media'; the 500 is each program's own PARAMETER, "
+        f"e.g. Kraken/KrakenMod.f90:6).",
         remediation="Collapse the layered seabed below "
                     f"{_AT_MAX_MEDIA} media, e.g. merge thin layers.",
     )
@@ -254,7 +267,7 @@ def at_env_media(env):
         top = seafloor
         for layer in writable_layers(env.bottom):
             bot = deck_depth(top + layer.thickness)
-            shear = float(getattr(layer, 'shear_speed', 0.0) or 0.0)
+            shear = float(layer.shear_speed)
             media.append((bot - top,
                           shear if shear > 0.0 else float(layer.sound_speed)))
             top = bot
@@ -363,7 +376,7 @@ def _profile_media(env_seg) -> List[Tuple]:
             media.append((top, current, layer.sound_speed,
                           layer.shear_speed, layer.density,
                           layer.attenuation,
-                          getattr(layer, 'shear_attenuation', 0.0),
+                          layer.shear_attenuation,
                           layer.roughness))
     return media
 
@@ -460,8 +473,8 @@ def plan_multi_profile_media(segments) -> Tuple[int, float, List[List[Tuple]]]:
         media = _profile_media(env_seg)
         current = media[-1][1] if media else deck_depth(env_seg.depth)
 
-        hs_cs = getattr(hs, 'shear_speed', 0.0) or 0.0
-        hs_as = getattr(hs, 'shear_attenuation', 0.0) or 0.0
+        hs_cs = hs.shear_speed
+        hs_as = hs.shear_attenuation
         for _ in range(n_media - 1 - len(media)):
             top = current
             current = deck_depth(current + _PAD_MEDIUM_THICKNESS_M)
@@ -582,9 +595,9 @@ def write_surface_halfspace(f, env: Environment, code: Optional[str] = None) -> 
         return
     s = env.surface
     f.write(
-        f" 0.00  {s.sound_speed:.6f} {getattr(s, 'shear_speed', 0.0) or 0.0:.6f}"
+        f" 0.00  {s.sound_speed:.6f} {s.shear_speed:.6f}"
         f" {s.density:.6f}"
-        f" {s.attenuation:.6f} {getattr(s, 'shear_attenuation', 0.0) or 0.0:.6f} /\n"
+        f" {s.attenuation:.6f} {s.shear_attenuation:.6f} /\n"
     )
 
 
@@ -1012,7 +1025,7 @@ def write_ssp_section(
     # of its own medium, so the seafloor is sigma(2) when a sediment layer
     # follows (write_layer_sections) and sigma(NMedia+1) on the bottom half-space
     # line when none does. Take each from its own carrier so none is mislabelled.
-    surface_roughness = float(getattr(env.surface, 'roughness', 0.0) or 0.0)
+    surface_roughness = float(env.surface.roughness)
     f.write(f"{int(n_mesh)}  {surface_roughness:.6f}  {bottom_depth_rounded:{_DECK_DEPTH_FMT}}\n")
 
     baseline = (
@@ -1127,7 +1140,7 @@ def write_layer_sections(
         # sediment layer's value is the seafloor and the half-space's own
         # roughness stays on the BotOpt line at the base of the stack.
         f.write(f"{n_layer_mesh}  {layer.roughness:.6f}  {bottom_depth:{zfmt}}\n")
-        alpha_s = getattr(layer, 'shear_attenuation', 0.0)
+        alpha_s = layer.shear_attenuation
         f.write(f"  {top_depth:{zfmt}} {layer.sound_speed:.6f} "
                 f"{layer.shear_speed:.6f} {layer.density:.6f} "
                 f"{layer.attenuation:.6f} {alpha_s:.6f} /\n")
@@ -1174,12 +1187,12 @@ def write_bottom_section(
         bottom_type = parse_boundary_type(hs.acoustic_type)
 
     cp = hs.sound_speed
-    cs = getattr(hs, 'shear_speed', 0.0)
+    cs = hs.shear_speed
     rho = hs.density
     alpha = hs.attenuation
 
     bottom_code = bottom_type.to_acoustics_toolbox_code()
-    sigma = getattr(hs, 'roughness', 0.0)
+    sigma = hs.roughness
 
     # misc/ReadEnvironmentMod.f90:121-129 reads only BotOpt(1:1); a bathymetry
     # flag in position 2 is Bellhop's alone, and Bellhop has its own writer.
@@ -1233,7 +1246,7 @@ def write_bottom_section(
         # reads an elastic half-space uses it: krakenc and bounce apply it, and
         # real kraken.exe accepts the column and ignores it, so the
         # environment's value is written unconditionally.
-        alpha_s = getattr(hs, 'shear_attenuation', 0.0)
+        alpha_s = hs.shear_attenuation
         f.write(f"  {z_bottom:.6f}  {cp:.6f}  {cs:.6f}  "
                 f"{rho:.6f}  {alpha:.6f}  {alpha_s:.6f} /\n")
 
@@ -1808,8 +1821,18 @@ def write_field3dflp(
             f.write(" ".join(f"{v:.6f}" for v in values) + f" /{trailer}\n")
 
     with open(filepath, "w") as f:
-        f.write(f"'{title}' ! TITLE\n")
-        f.write(f"'{option}' ! OPT\n")
+        # Both records are Fortran character literals read list-directed
+        # (field3d.f90:163 into CHARACTER(LEN=80), :166 into
+        # CHARACTER(LEN=7)), so an apostrophe interpolated raw closes the
+        # literal early and truncates the value. Route the title through
+        # the same sanitizer every 2-D deck writer uses, and strip the
+        # same character from the option word — losing an apostrophe from
+        # a cosmetic title is harmless, while a truncated option word
+        # shifts the columns the evaluator, tesselation-check and
+        # beam-pattern flags live in.
+        opt_literal = str(option).replace("'", "")
+        f.write(f"{quote_fortran_title(title)} ! TITLE\n")
+        f.write(f"'{opt_literal}' ! OPT\n")
         f.write(f"{M_limit} ! MLIMIT\n")
 
         _write_axis(f, s_x, Nsx, " ! Sx (km)")
@@ -1984,7 +2007,7 @@ def write_sparc_env_file(
     # sparc.f90:177 stops on a non-zero roughness in the SSP block —
     # "Rough interfaces not allowed" — for the surface and every sediment
     # layer; the half-space's, on the BotOpt line, it reads and ignores.
-    rough = [('surface', float(getattr(env.surface, 'roughness', 0.0) or 0.0))]
+    rough = [('surface', float(env.surface.roughness))]
     rough += [(f'sediment layer {i}', float(layer.roughness))
               for column in env.bottom.columns
               for i, layer in enumerate(column.layers)]
@@ -1996,8 +2019,7 @@ def write_sparc_env_file(
             f"interfaces not allowed' (sparc.f90:177) at exit 0. Set the "
             f"roughness to 0 for SPARC (the SPARC wrapper does so, with a "
             f"warning).")
-    hs_sigma = float(getattr(env.bottom.halfspace_at(range=0.0), 'roughness',
-                             0.0) or 0.0)
+    hs_sigma = float(env.bottom.halfspace_at(range=0.0).roughness)
     if hs_sigma:
         warnings.warn(
             f"write_sparc_env_file: the half-space roughness ({hs_sigma:g} m) "
@@ -2061,7 +2083,7 @@ def write_sparc_env_file(
             write_layer_sections(f, env, env.depth, n_mesh=n_mesh)
 
         # Bottom section (V or R only, so no halfspace params follow).
-        sigma = getattr(env.bottom.halfspace_at(range=0.0), 'roughness', 0.0)
+        sigma = env.bottom.halfspace_at(range=0.0).roughness
         f.write(f"'{bottom_code}' {sigma:.6f}\n")
 
         write_phase_speed_and_rmax(

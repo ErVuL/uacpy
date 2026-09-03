@@ -138,11 +138,12 @@ class TestDoppler:
         received = comms.compensate_doppler(template, -a_true)
         best, scales, peak = comms.estimate_doppler_scale(
             received, template, np.linspace(0, 4e-3, 41))
-        # estimate returns +v/c; compensate_doppler(received, best) recovers template
-        # estimate_doppler_scale returns a scan node verbatim (no sub-grid
-        # interpolation), so the resolution is the 1e-4 spacing of this
-        # 41-point 0..4e-3 scan; a_true sits exactly on a node and abs=2e-4
-        # allows a two-node miss.
+        # estimate returns +v/c; compensate_doppler(received, best) recovers
+        # template. estimate_doppler_scale returns the centre of the winning
+        # metric plateau — a node when the plateau's run has odd length, a
+        # midpoint between two nodes otherwise — so the resolution is the 1e-4
+        # spacing of this 41-point 0..4e-3 scan; a_true sits exactly on a node
+        # and abs=2e-4 allows a two-node miss.
         assert best == pytest.approx(a_true, abs=2e-4)
 
     def test_doppler_from_speed_is_the_v_over_c_scale(self):
@@ -1282,6 +1283,73 @@ class TestDopplerTwoStageMatchesFullScan:
             comms.estimate_doppler_scale(np.zeros(100), np.ones(500))
 
 
+class TestDopplerReturnsThePlateauCentreNotItsLowEdge:
+    """``compensate_doppler`` resamples to ``int(round(N*(1 + a)))`` samples,
+    so every candidate inside a ``1/N``-wide interval of ``a`` produces a
+    bit-identical record and a bit-identical score. ``np.argmax`` returns the
+    first index of that run — the plateau's LOW EDGE — which is a one-sided
+    bias of up to one plateau width. On the 2800-sample fixture below ``1/N``
+    is 3.57e-4 in ``a``, i.e. 0.54 m/s at c = 1500.
+
+    Both routes must carry the fix: ``TestDopplerTwoStageMatchesFullScan``
+    asserts the two-stage and full-scan answers are equal, so correcting one
+    alone turns those red.
+    """
+
+    FS, DUR = 12000.0, 0.2
+
+    def _undoppler_shifted_record(self):
+        """A chirp with NO Doppler at all, so the true answer is exactly 0."""
+        t = np.arange(int(self.DUR * self.FS)) / self.FS
+        template = np.sin(2 * np.pi * (2000 * t + 3000 / self.DUR * t ** 2 / 2))
+        rng = np.random.default_rng(3)
+        rx = np.concatenate([np.zeros(200), template, np.zeros(200)])
+        return rx + rng.standard_normal(rx.size) * 0.3, template
+
+    def test_the_fixture_really_does_sit_on_a_plateau(self):
+        """Without a run of tied maxima there is nothing for the fix to
+        correct, so the premise is measured rather than assumed."""
+        rx, template = self._undoppler_shifted_record()
+        assert rx.size == 2800
+        _best, scales, peak = comms.estimate_doppler_scale(
+            rx, template, scales=np.linspace(-5e-3, 5e-3, 601))
+        top = int(np.argmax(peak))
+        run = np.flatnonzero(peak == peak[top])
+        assert run.size == 21 and run[0] == top, (
+            f"expected a 21-candidate plateau with argmax on its low edge; "
+            f"got {run.size} tied candidates, argmax at offset "
+            f"{top - run[0]}")
+        assert scales[top] == pytest.approx(-1.6667e-4, rel=1e-3)
+
+    @pytest.mark.parametrize('route', ['explicit', 'two_stage'])
+    def test_both_routes_return_the_centre_of_the_winning_plateau(self, route):
+        rx, template = self._undoppler_shifted_record()
+        if route == 'explicit':
+            best, _, _ = comms.estimate_doppler_scale(
+                rx, template, scales=np.linspace(-5e-3, 5e-3, 601))
+        else:
+            best, _, _ = comms.estimate_doppler_scale(rx, template)
+        assert best == pytest.approx(0.0, abs=1e-9), (
+            f"record carries no Doppler, so the plateau centre is 0; the "
+            f"{route} route returned {best:.6e}, which is the plateau's low "
+            f"edge (a bias of {abs(best) * 1500:.2f} m/s at c = 1500)")
+
+    def test_a_synthetic_staircase_resolves_to_its_run_midpoint(self):
+        """Including a run truncated by the end of the scan: the answer is the
+        midpoint of the part that was scanned, and never leaves the range the
+        caller asked for."""
+        from uacpy.comms.doppler import _plateau_centre
+        scales = np.arange(10, dtype=float)
+        interior = np.array([0., 1., 2., 9., 9., 9., 9., 9., 3., 1.])
+        assert _plateau_centre(scales, interior) == 5.0      # run 3..7
+        top_edge = np.array([0., 1., 2., 3., 1., 0., 0., 9., 9., 9.])
+        assert _plateau_centre(scales, top_edge) == 8.0      # run 7..9
+        bottom_edge = np.array([9., 9., 4., 3., 1., 0., 0., 0., 0., 0.])
+        assert _plateau_centre(scales, bottom_edge) == 0.5   # run 0..1
+        single = np.array([0., 1., 2., 9., 2., 1., 0., 0., 0., 0.])
+        assert _plateau_centre(scales, single) == 3.0
+
+
 def test_detect_frames_finds_every_frame_and_suppresses_neighbours():
     rng = np.random.default_rng(40)
     preamble = comms.Modulator("qpsk").modulate(rng.integers(0, 2, 256))
@@ -1730,8 +1798,9 @@ class TestModulateBitValidation:
                                       bits)
 
     def test_janus_encode_rejects_bipolar_bits(self):
-        # bit = -1 wrapped the _TRELLIS_OUT column index, emitting a valid
-        # looking but wrong 144-symbol codeword.
+        # A bipolar chip (-1) is not a bit. Before the guard it indexed the
+        # encoder's trellis table from the wrong end and emitted a
+        # valid-looking but wrong 144-symbol codeword.
         chips = 1 - 2 * np.tile([0, 1], 32)
         with pytest.raises(ConfigurationError, match="bits must be 0/1"):
             comms.janus_encode(chips)
@@ -2252,15 +2321,18 @@ class TestPacketAndLinkResultCompareByValue:
 
 
 class TestTheTwoViterbiDecodersAgree:
-    """``coding.viterbi_decode`` and ``janus.janus_decode`` carry mirror
-    comments obliging each to follow the other's add-compare-select and
-    traceback changes, and nothing enforced it. This does.
+    """``janus.janus_decode`` reaches the packet bits through
+    ``coding.viterbi_decode``, and these pin the parameters that make that
+    the right decoder for the JANUS code.
 
-    The equivalence is a measured property of the JANUS parameters, not a
-    proof: ``janus``'s ``_TRELLIS_OUT`` / ``_TRELLIS_NXT`` are built from
-    *reversed* generator masks while ``viterbi_decode`` derives its branch
-    words from ``polys`` per call. Handing the generic decoder the reversed
-    generators is what lines the two trellises up.
+    They were written when ``janus`` carried a specialised K=9 twin with its
+    own precomputed trellis, and the two implementations agreed bit-for-bit
+    here; that agreement is why the twin could be replaced by a call. What is
+    left to pin is the wiring, and it is a real constraint rather than a
+    tautology: the CMRE reference applies its generators in *reversed*
+    register bit-order, so it is the reversed pair — not ``(0o657, 0o435)`` —
+    that lines the generic trellis up with JANUS, and the companion test below
+    shows the forward pair decoding to different bits.
     """
 
     @staticmethod
@@ -2271,6 +2343,42 @@ class TestTheTwoViterbiDecodersAgree:
         deinterleaved = np.empty(_N_CODED, dtype=int)
         deinterleaved[perm] = np.asarray(symbols144, dtype=int).ravel()
         return comms.viterbi_decode(deinterleaved, [_G_HI, _G_LO], _CONV_K)
+
+    @staticmethod
+    def _generic_encode(bits64, polys=None):
+        from uacpy.comms.janus import (_CONV_K, _G_HI, _G_LO,
+                                       _interleave_perm)
+        if polys is None:
+            polys = (_G_HI, _G_LO)
+        return comms.conv_encode(np.asarray(bits64, dtype=int).ravel(),
+                                 polys, _CONV_K)[_interleave_perm()]
+
+    def test_the_generic_encoder_matches_janus_encode(self):
+        """The encode side of the same wiring. ``janus_encode`` is
+        ``conv_encode`` at K=9 with the reversed generators, followed by the
+        depth-13 JANUS interleaver; nothing pinned that before, and the
+        interleaver is the one piece JANUS does not share."""
+        rng = np.random.default_rng(4242)
+        for _ in range(50):
+            bits = rng.integers(0, 2, 64)
+            np.testing.assert_array_equal(comms.janus_encode(bits),
+                                          self._generic_encode(bits))
+
+    def test_the_forward_generators_do_not_reproduce_janus_encode(self):
+        """Negative control for the encode side: the bit-order convention is
+        load-bearing, so the forward CMRE pair must NOT agree."""
+        bits = np.random.default_rng(5).integers(0, 2, 64)
+        forward = self._generic_encode(bits, polys=(0o657, 0o435))
+        assert not np.array_equal(comms.janus_encode(bits), forward)
+
+    def test_the_interleaver_is_load_bearing_on_the_encode_side(self):
+        """Without the depth-13 permutation the coded stream is a different
+        144-symbol word, so the agreement above is not an artefact of the
+        interleaver being a no-op."""
+        from uacpy.comms.janus import _CONV_K, _G_HI, _G_LO
+        bits = np.random.default_rng(6).integers(0, 2, 64)
+        unpermuted = comms.conv_encode(bits, (_G_HI, _G_LO), _CONV_K)
+        assert not np.array_equal(comms.janus_encode(bits), unpermuted)
 
     @pytest.mark.parametrize('n_errors', [0, 1, 3, 6, 10, 18])
     def test_the_generic_decoder_matches_janus_decode(self, n_errors):
@@ -2363,6 +2471,51 @@ class TestTheDefaultReceiverRecoversPhaseGainAndTiming:
         wrong = slicer(rec[:n] / gain, mod.constellation) != symbols[:n]
         settled = int(np.flatnonzero(wrong).max()) + 1 if wrong.any() else 0
         assert settled < 100, f"loop still wrong at symbol {settled}"
+
+    def test_the_locked_loop_sits_a_fraction_of_a_sample_late(self):
+        """The docstring's steady-state claim, measured. The Gardner detector
+        driving a 2-point linear interpolator settles slightly LATE — about
+        0.06-0.11 sample at sps=8 — and this is there even when the loop
+        starts exactly on the symbol grid, so it is not a pull-in residual.
+        The docstring used to promise only a pull-in figure and nothing about
+        where the loop comes to rest."""
+        import uacpy.comms.phy as phy
+        from uacpy.comms.phy import pulse_shape, matched_filter, symbol_sync
+        sps, span, rolloff = 8, 8, 0.25
+        rng = np.random.default_rng(7)
+        mod = comms.Modulator('16qam')
+        symbols = mod.modulate(rng.integers(0, 2, 4 * 1500))
+        mf = matched_filter(pulse_shape(symbols, sps, rolloff, span),
+                            sps, rolloff, span)
+
+        # Record the on-time interpolation instant of every symbol. The loop
+        # calls _interp twice per symbol, on-time first then mid-symbol.
+        positions, call = [], [0]
+        real_interp = phy._interp
+
+        def spy(x, idx):
+            if call[0] % 2 == 0:
+                positions.append(float(idx))
+            call[0] += 1
+            return real_interp(x, idx)
+
+        phy._interp = spy
+        try:
+            symbol_sync(mf, sps, loop_bw=0.005, start=span * sps)
+        finally:
+            phy._interp = real_interp
+        assert positions, "the loop no longer routes through phy._interp"
+
+        pos = np.asarray(positions)
+        residual = pos - (span * sps + np.arange(pos.size) * sps)
+        assert abs(residual[0]) < 1e-12          # started on the grid
+        tail = residual[1000:1400]
+        assert 0.02 < tail.mean() < 0.25, (
+            f"steady-state timing offset is {tail.mean():+.4f} sample; the "
+            f"docstring states the locked loop sits ~0.06-0.11 sample late")
+        assert tail.std() < 0.15, (
+            f"steady-state jitter is {tail.std():.4f} sample rms; the "
+            f"docstring states ~0.07")
 
     def test_an_lms_equalizer_with_a_short_preamble_is_announced(self):
         with warnings.catch_warnings(record=True) as rec:

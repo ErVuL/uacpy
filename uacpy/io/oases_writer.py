@@ -273,6 +273,22 @@ def _emit_water_layers(
     record below it terminates the column, and a layer whose |CS| equals
     its CC is folded back to isovelocity by INENVI (oaseun31.f:181-182).
 
+    **That deepest record is REQUIRED, not superfluous.** Its top depth
+    equals the seabed record's top, so it is a zero-thickness layer and
+    looks droppable; it is not. It is the *dummy isovelocity layer* that
+    oaseun31.f:381-388 demands. INENVI walks every interface ``M = 2 ..
+    NUML`` and, where ``ROUGH2(M) > 1e-10``, refuses roughness if the
+    layer above OR below is LAYTYP 2 — the n²-linear gradient type set at
+    :189 — printing '*** SURFACE ROUGHNESS NOT ALLOWED BETWEEN LAYERS
+    WITH SOUND SPEED GRADIENT. INSERT A DUMMY ISOVELOCITY LAYER ***'.
+    With the CS = 0 record present, the layer above the seabed interface
+    is LAYTYP 1 and the pairing is legal. Drop it and the seabed
+    interface would butt straight onto the last gradient layer, so every
+    rough-seafloor deck under a non-isovelocity water column would trip
+    that rejection. See :func:`_warn_rough_gradient_surface` for the same
+    rule at the sea surface, where uacpy has no such spare record and
+    warns instead.
+
     The fixed ``0.0 0 1.0`` are AC, AS and RO. AC = 0 is not "lossless": it
     is what hands the water column to OASES' own Skretting-Leroy attenuation
     (oaseun31.f:1516-1521) — see :func:`_warn_volume_attenuation_ignored`.
@@ -315,6 +331,10 @@ def _emit_water_layers(
     n_rows = len(ssp_rows)
     for i in range(n_rows):
         d, c = ssp_rows[i]
+        # The last row's CS = 0 makes it isovelocity (LAYTYP 1), which is
+        # what keeps a rough seabed legal above a gradient column —
+        # oaseun31.f:381-388, see the docstring. Do not drop this record
+        # for being zero-thickness.
         cs = -abs(float(ssp_rows[i + 1][1])) if i < n_rows - 1 else 0.0
         rg = float(surface_roughness) if i == 0 else 0.0
         if i == 0:
@@ -385,7 +405,7 @@ def _surface_roughness(env: Environment) -> float:
     """RMS roughness (m) of the sea surface, i.e. OASES' ROUGH(2)."""
     return _check_roughness_sign(
         "env.surface.roughness",
-        float(getattr(env.surface, 'roughness', 0.0) or 0.0))
+        float(env.surface.roughness))
 
 
 def _emit_bottom_layers(
@@ -451,7 +471,7 @@ def _emit_bottom_layers(
         lb = env.bottom.columns[0]
         current_depth = water_depth
         for layer in writable_layers(lb):
-            layer_as = getattr(layer, 'shear_attenuation', 0.0)
+            layer_as = layer.shear_attenuation
             f.write(f"{current_depth:.2f} {layer.sound_speed:.2f} "
                     f"{layer.shear_speed:.2f} {layer.attenuation:.3f} "
                     f"{layer_as:.3f} {layer.density:.2f}{suffix_fn(iface)}\n")
@@ -518,7 +538,7 @@ def bottom_interface_roughness(env: Environment) -> List[float]:
     if not env.has_layered_bottom:
         hs = env.bottom.halfspace_at(range=0.0)
         return [_check_roughness_sign("env.bottom halfspace roughness",
-                                      getattr(hs, 'roughness', 0.0) or 0.0)]
+                                      hs.roughness)]
     column = env.bottom.columns[0]
     rgs = [_check_roughness_sign(f"env.bottom layer {i} roughness",
                                  layer.roughness)
@@ -1356,12 +1376,12 @@ def _upper_halfspace_sound_speed(env: Environment) -> float:
     gates that depend on the layer-1 speed can be evaluated up front.
     """
     surface = env.surface
-    atype = str(getattr(surface, 'acoustic_type', 'vacuum')).lower()
+    atype = str(surface.acoustic_type).lower()
     if 'vacuum' in atype:
         return 0.0
     if 'rigid' in atype:
         return _OASES_RIGID_SURFACE_CP
-    return float(getattr(surface, 'sound_speed', 0.0) or 0.0)
+    return float(surface.sound_speed)
 
 
 def _format_upper_halfspace(env: Environment) -> str:
@@ -1381,7 +1401,7 @@ def _format_upper_halfspace(env: Environment) -> str:
     layer's RG (:func:`_emit_water_layers`).
     """
     surface = env.surface
-    acoustic_type = getattr(surface, 'acoustic_type', 'vacuum')
+    acoustic_type = surface.acoustic_type
     if isinstance(acoustic_type, str):
         atype = acoustic_type.lower()
     else:
@@ -1415,11 +1435,11 @@ def _format_upper_halfspace(env: Environment) -> str:
             alternatives_label='surfaces',
         )
 
-    c_p = getattr(surface, 'sound_speed', 0.0) or 0.0
-    c_s = getattr(surface, 'shear_speed', 0.0) or 0.0
-    alpha_p = getattr(surface, 'attenuation', 0.0) or 0.0
-    alpha_s = getattr(surface, 'shear_attenuation', 0.0) or 0.0
-    rho = getattr(surface, 'density', 0.0) or 0.0
+    c_p = surface.sound_speed
+    c_s = surface.shear_speed
+    alpha_p = surface.attenuation
+    alpha_s = surface.shear_attenuation
+    rho = surface.density
 
     if 'rigid' in atype:
         warnings.warn(
@@ -2159,7 +2179,7 @@ def write_oasn_input(
     # SNLEVDB >= 0.01. Name the surface here rather than let the binary die.
     surface_c_p = _upper_halfspace_sound_speed(env)
     if surface_noise_level >= 0.01 and surface_c_p > 500.0:
-        surface_kind = getattr(env.surface, 'acoustic_type', 'vacuum')
+        surface_kind = env.surface.acoustic_type
         raise ConfigurationError(
             f"OASN surface noise requires a vacuum or air upper halfspace, "
             f"but env.surface (acoustic_type={surface_kind!r}) writes "

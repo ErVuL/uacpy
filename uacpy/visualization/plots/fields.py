@@ -10,8 +10,10 @@ from typing import Optional, Sequence, Tuple
 from uacpy.core.environment import Environment
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.results import Field
-from uacpy.visualization.style import cmap_for_field, reversed_cmap
-from uacpy.visualization.plots._common import _value_array, _value_label, _default_value, _coord_label, _coord_axis, _TL_LIMITS, _is_transmission_loss, _overlay_seafloor, _pinned_subtitle, _draw_result_credit, fig_ax, invert_yaxis_once, _draw_geometry, typed_plot_error, _plot_warn
+from uacpy.visualization.style import (cmap_for_field, reversed_cmap,
+                                      PROBABILITY_COLORMAP,
+                                      PROBABILITY_LIMITS)
+from uacpy.visualization.plots._common import _value_array, _value_label, _default_value, _coord_label, _coord_axis, _TL_LIMITS, _is_loss_view, _overlay_seafloor, _pinned_subtitle, _draw_result_credit, fig_ax, invert_yaxis_once, _draw_geometry, typed_plot_error, _plot_warn
 
 
 # Which of ``plot_field``'s knobs each of its three render branches reads.
@@ -110,10 +112,14 @@ def plot_field(
         ``'real'``, ``'imag'``. Defaults to ``'real'`` for a time-series
         field and ``'db'`` otherwise.
     vmin, vmax : float, optional
-        Colour limits (2-D heatmap only). For ``value='db'`` an unset limit
-        takes the fixed 20–120 dB TL scale (``_TL_LIMITS``), never an
-        autoscale: TL panels are meant to stay directly comparable across
-        models, frequencies and runs.
+        Colour limits (2-D heatmap only). What an unset limit falls back to
+        depends on the quantity, since only some of them have a window that
+        means something: a **pressure** field's ``value='db'`` view takes the
+        fixed 20–120 dB TL scale (``_TL_LIMITS``), so TL panels stay directly
+        comparable across models, frequencies and runs; **signal excess**
+        takes a window symmetric about its 0 dB detection boundary; a
+        **probability** takes a fixed [0, 1]; and everything else, including
+        reverberation and ``value='mag_db'``, autoscales.
     cmap : str, optional
         Override the default colormap (2-D heatmap only).
     title : str, optional
@@ -272,10 +278,18 @@ def _plot_field_stacked(
         ax.plot(time, traces[i] + i * offset, **mpl_kw)
     ax.set_xlabel(_coord_label('time'))
     ax.set_ylabel(other_label + ' (stacked)')
-    ax.set_yticks([i * offset for i in range(len(other_coord))])
+    # One tick per trace is unreadable the moment a stack is more than a
+    # couple of dozen deep: at 60 ranges the labels overprint into a solid
+    # black smear down the axis, and a documented receiver grid runs to
+    # hundreds. Label every ``step``-th trace instead, the same ~12-label
+    # stride ``plot_decidecade_levels`` uses on its band axis. Every trace is
+    # still drawn; only the labelling is thinned.
+    step = max(1, len(other_coord) // 12)
+    shown = range(0, len(other_coord), step)
+    ax.set_yticks([i * offset for i in shown])
     # Significant digits, not fixed decimals: a range axis in km spans values
     # a single decimal place would round to the same label.
-    ax.set_yticklabels([f"{float(c):.4g}" for c in other_coord])
+    ax.set_yticklabels([f"{float(other_coord[i]):.4g}" for i in shown])
     ax.grid(True, alpha=0.3)
     if title:
         ax.set_title(title)
@@ -301,13 +315,13 @@ def _plot_field_1d(
         ax.set_ylabel(_coord_label('depth'))
         invert_yaxis_once(ax)
     else:
-        # Range / frequency cut: coordinate on X, value on Y. For TL, put the
-        # louder (smaller-dB) end at the top.
+        # Range / frequency cut: coordinate on X, value on Y. For a loss
+        # (TL, reverberation), put the louder (smaller-dB) end at the top.
         x_plot, x_label = _coord_axis(coord, axis_name)
         line, = ax.plot(x_plot, vals, label=label, **mpl_kw)
         ax.set_xlabel(x_label)
         ax.set_ylabel(value_label)
-        if _is_transmission_loss(field, value):
+        if _is_loss_view(field, value):
             invert_yaxis_once(ax)
     ax.grid(True, alpha=0.3)
     if title:
@@ -426,7 +440,7 @@ def _value_style(field, value):
         # roughly -20..+40 dB — renders as one flat block against 20..120.
         if field.kind == 'pressure':
             lo, hi = _TL_LIMITS
-        elif field.kind == 'signal_excess':
+        elif field.kind in ('signal_excess', 'difference'):
             # A diverging colormap carries its meaning in the NEUTRAL colour,
             # and for signal excess that colour is the SE = 0 dB detection
             # boundary (style.py says so where 'RdBu_r' is chosen). Leaving the
@@ -451,6 +465,14 @@ def _value_style(field, value):
         # convention that low TL (loud, near) is red.
         return (reversed_cmap(cmap_for_field(field.kind, db=True)),
                 None, None)
+    if not field.is_complex and field.unit == '1':
+        # A real, dimensionless quantity is a probability: bounded [0, 1] and
+        # unsigned. The signed linear map below put the whole field in shades
+        # of red on an autoscaled (-1, 1) — the blue half unreachable, its
+        # neutral white sitting at P_D = 0 — while the dedicated
+        # plot_detection_probability drew the same field green-to-red on a
+        # fixed [0, 1]. Same field, two doors, two pictures.
+        return PROBABILITY_COLORMAP, *PROBABILITY_LIMITS
     # 'mag' / 'real' / 'imag' are linear views, which share one signed
     # colormap whatever the quantity.
     return cmap_for_field(field.kind, db=False), None, None
@@ -583,6 +605,53 @@ def _plot_field_2d(
     return fig, ax
 
 
+def _begin_sonar_heatmap(field, ax, *, env, figsize, vmin, vmax, cmap,
+                         **mpl_kw):
+    """Open a ``(depth, range)`` panel for a sonar-equation field and draw its
+    mesh. Shared by :func:`plot_signal_excess` and
+    :func:`plot_detection_probability`, which differ here only in the colour
+    window they hand in.
+
+    Returns ``(fig, ax, im, Z, r_km, x_label, depths, owns_fig)`` — the pieces
+    each caller's own overlay (an SE = 0 contour, labelled P_D contours) needs
+    before :func:`_finish_sonar_heatmap` closes the panel."""
+    Z = np.asarray(field.data, dtype=float)
+    owns_fig = ax is None
+    fig, ax = fig_ax(ax, figsize)
+    r_km, x_label = _coord_axis(field.coords['range'], 'range')
+    depths = field.coords['depth']
+    # A single-receiver-depth run (or a single range) reaches here as a
+    # length-1 axis, which the helper draws as a band rather than the
+    # zero-extent — empty — mesh 'nearest' shading would build.
+    im = _mesh_with_singleton_bands(
+        ax, r_km, 'range', depths, 'depth', Z, env,
+        vmin=vmin, vmax=vmax, cmap=cmap, **mpl_kw,
+    )
+    return fig, ax, im, Z, r_km, x_label, depths, owns_fig
+
+
+def _finish_sonar_heatmap(fig, ax, im, field, *, env, x_label, colorbar_label,
+                          show_colorbar, title, auto_title, owns_fig):
+    """Close a ``(depth, range)`` sonar panel: colorbar, axis labels, depth
+    downward, title, seafloor overlay and the data credit.
+
+    The colorbar label and the automatic title are the caller's, because each
+    plotter is the dedicated view of one quantity and names it itself."""
+    if show_colorbar:
+        fig.colorbar(im, ax=ax, label=colorbar_label,
+                     fraction=0.046, pad=0.02)
+    ax.set_xlabel(x_label)
+    ax.set_ylabel(_coord_label('depth'))
+    invert_yaxis_once(ax)
+    ax.grid(True, alpha=0.3, zorder=0)
+    ax.set_title(title if title else auto_title)
+    if env is not None:
+        _overlay_seafloor(ax, env, field.coords['range'])
+    if owns_fig:                         # credit only a figure we own
+        _draw_result_credit(fig, field, env=env)
+    return fig, ax
+
+
 @typed_plot_error
 def plot_signal_excess(
     field: Field,
@@ -615,9 +684,10 @@ def plot_signal_excess(
     env : Environment, optional
         Overlays the seafloor, as in :func:`plot_field`.
     vmax : float, optional
-        Symmetric colour limit ``[-vmax, +vmax]``. ``None`` uses the
-        99th percentile of ``|SE|`` so outliers don't wash out the
-        boundary region.
+        Symmetric colour limit ``[-vmax, +vmax]``. ``None`` uses
+        ``max|SE|``, the same symmetric window ``field.plot()`` picks for this
+        kind, so the two doors paint one field alike and SE = 0 dB lands on
+        the diverging map's neutral colour.
     cmap : str, optional
         Diverging colormap. Default ``'RdBu_r'``.
     show_boundary : bool, optional
@@ -648,18 +718,9 @@ def plot_signal_excess(
         if not vmax or vmax <= 0:
             vmax = 1.0
 
-    _owns_fig = ax is None
-    fig, ax = fig_ax(ax, figsize)
-
-    r_km, x_label = _coord_axis(field.coords['range'], 'range')
-    depths = field.coords['depth']
-    # A single-receiver-depth run (or a single range) reaches here as a
-    # length-1 axis, which the helper draws as a band rather than the
-    # zero-extent — empty — mesh 'nearest' shading would build.
-    im = _mesh_with_singleton_bands(
-        ax, r_km, 'range', depths, 'depth', Z, env,
-        vmin=-vmax, vmax=vmax, cmap=cmap, **mpl_kw,
-    )
+    fig, ax, im, Z, r_km, x_label, depths, _owns_fig = _begin_sonar_heatmap(
+        field, ax, env=env, figsize=figsize, vmin=-vmax, vmax=vmax, cmap=cmap,
+        **mpl_kw)
     if show_boundary and np.isfinite(Z).any():
         finite_z = Z[np.isfinite(Z)]
         if finite_z.min() < 0.0 < finite_z.max():
@@ -678,22 +739,11 @@ def plot_signal_excess(
                 )
                 ax.clabel(cs, inline=True, fontsize=9,
                           fmt=lambda _: 'SE = 0 dB')
-    if show_colorbar:
-        fig.colorbar(im, ax=ax, label='Signal excess (dB)',
-                     fraction=0.046, pad=0.02)
-    ax.set_xlabel(x_label)
-    ax.set_ylabel(_coord_label('depth'))
-    invert_yaxis_once(ax)
-    ax.grid(True, alpha=0.3, zorder=0)
-    if title:
-        ax.set_title(title)
-    else:
-        ax.set_title(_signal_excess_title(field))
-    if env is not None:
-        _overlay_seafloor(ax, env, field.coords['range'])
-    if _owns_fig:                        # credit only a figure we own
-        _draw_result_credit(fig, field, env=env)
-    return fig, ax
+    return _finish_sonar_heatmap(
+        fig, ax, im, field, env=env, x_label=x_label,
+        colorbar_label='Signal excess (dB)', show_colorbar=show_colorbar,
+        title=title, auto_title=_signal_excess_title(field),
+        owns_fig=_owns_fig)
 
 
 @typed_plot_error
@@ -702,7 +752,7 @@ def plot_detection_probability(
     ax=None,
     *,
     env: Optional[Environment] = None,
-    cmap: str = 'RdYlGn',
+    cmap: str = PROBABILITY_COLORMAP,
     contour_levels: Sequence[float] = (0.1, 0.5, 0.9),
     show_colorbar: bool = True,
     title: Optional[str] = None,
@@ -747,18 +797,9 @@ def plot_detection_probability(
             "slice with .at(...) first."
         )
 
-    Z = np.asarray(field.data, dtype=float)
-    _owns_fig = ax is None
-    fig, ax = fig_ax(ax, figsize)
-
-    r_km, x_label = _coord_axis(field.coords['range'], 'range')
-    depths = field.coords['depth']
-    # As in plot_signal_excess: a length-1 depth or range axis is drawn as a
-    # band, not as the zero-extent mesh 'nearest' shading would build.
-    im = _mesh_with_singleton_bands(
-        ax, r_km, 'range', depths, 'depth', Z, env,
-        vmin=0.0, vmax=1.0, cmap=cmap, **mpl_kw,
-    )
+    fig, ax, im, Z, r_km, x_label, depths, _owns_fig = _begin_sonar_heatmap(
+        field, ax, env=env, figsize=figsize, vmin=PROBABILITY_LIMITS[0],
+        vmax=PROBABILITY_LIMITS[1], cmap=cmap, **mpl_kw)
     finite = Z[np.isfinite(Z)]
     if contour_levels and finite.size:
         levels = [
@@ -778,27 +819,16 @@ def plot_detection_probability(
                 colors='black', linewidths=1.2, linestyles='solid',
             )
             ax.clabel(cs, inline=True, fontsize=9, fmt='%.1f')
-    if show_colorbar:
-        fig.colorbar(im, ax=ax, label='Probability of detection',
-                     fraction=0.046, pad=0.02)
-    ax.set_xlabel(x_label)
-    ax.set_ylabel(_coord_label('depth'))
-    invert_yaxis_once(ax)
-    ax.grid(True, alpha=0.3, zorder=0)
-    if title:
-        ax.set_title(title)
-    else:
-        sigma = field.metadata.get('sigma_db')
-        pin = _pinned_subtitle(field)
-        auto = 'Detection probability'
-        if sigma is not None:
-            auto += f' (σ = {sigma:g} dB)'
-        ax.set_title(f"{auto} — {pin}" if pin else auto)
-    if env is not None:
-        _overlay_seafloor(ax, env, field.coords['range'])
-    if _owns_fig:                        # credit only a figure we own
-        _draw_result_credit(fig, field, env=env)
-    return fig, ax
+    sigma = field.metadata.get('sigma_db')
+    pin = _pinned_subtitle(field)
+    auto = 'Detection probability'
+    if sigma is not None:
+        auto += f' (σ = {sigma:g} dB)'
+    return _finish_sonar_heatmap(
+        fig, ax, im, field, env=env, x_label=x_label,
+        colorbar_label='Probability of detection',
+        show_colorbar=show_colorbar, title=title,
+        auto_title=f"{auto} — {pin}" if pin else auto, owns_fig=_owns_fig)
 
 
 @typed_plot_error
@@ -820,9 +850,9 @@ def compare(
         compare([f1.at(depth=20), f2.at(depth=20)], labels=['Bellhop', 'RAM'])
 
     Axes follow :func:`plot_field`, so one field cuts the same way through
-    either: depth increases downward, and so does the value axis of a
-    transmission-loss cut (see :func:`_is_transmission_loss`) — but not that of
-    any other dB quantity, which is a level and reads upward.
+    either: depth increases downward, and so does the value axis of a loss
+    cut — transmission loss or reverberation, see :func:`_is_loss_view` — but
+    not that of any other dB quantity, which is a level and reads upward.
     """
     if not fields:
         raise ConfigurationError(
@@ -845,9 +875,9 @@ def compare(
                 f"compare: expected Field, got {type(f).__name__}"
             )
         # Compare the QUANTITY, exactly as compare_models does: overlaying a
-        # reverberation level on a TL cut puts two different physical
-        # quantities on one value axis, with one shared label and one axis
-        # direction that cannot describe both.
+        # reverberation loss on a TL cut puts two different physical
+        # quantities on one value axis, with one shared label — even though
+        # both now run in the same direction.
         if f.kind != fields[0].kind:
             raise ConfigurationError(
                 f"compare: {lbl!r} is a {f.kind!r} field but "
@@ -878,10 +908,10 @@ def compare(
             x_plot, x_label = _coord_axis(f.coords[common_axis], common_axis)
             ax.plot(x_plot, np.asarray(arr).ravel(), label=lbl, **mpl_kw)
     # The kind check above makes the first field representative of them all,
-    # so it settles the shared value-axis label and — for a transmission-loss
-    # cut — the direction that axis runs.
+    # so it settles the shared value-axis label and — for a loss cut — the
+    # direction that axis runs.
     vlabel = _value_label(fields[0], value)
-    value_is_tl = _is_transmission_loss(fields[0], value)
+    value_is_loss = _is_loss_view(fields[0], value)
     if common_axis == 'depth':
         ax.set_ylabel(_coord_label(common_axis))
         ax.set_xlabel(vlabel)
@@ -889,7 +919,7 @@ def compare(
     else:
         ax.set_xlabel(x_label)
         ax.set_ylabel(vlabel)
-        if value_is_tl:
+        if value_is_loss:
             invert_yaxis_once(ax)
     ax.grid(True, alpha=0.3)
     ax.legend()
@@ -970,7 +1000,7 @@ def compare_models(
     for f, lbl in zip(fields[1:], labels[1:]):
         # Compare the QUANTITY, not the kind: a complex pressure field and a
         # real TL field are the same quantity written two ways, and comparing
-        # them is the ordinary case. A reverberation level shares TL's
+        # them is the ordinary case. A reverberation loss shares TL's
         # representation exactly but is a different quantity, and putting the
         # two on one colour scale asserts an equivalence that does not hold.
         if f.kind != ref.kind:
@@ -1082,15 +1112,19 @@ def compare_models(
     bottom = 0.08 + 0.025 * max(0, len(fields) - 1)
     fig.subplots_adjust(left=0.05, right=0.88, top=top, bottom=bottom,
                         wspace=0.22, hspace=0.30)
+    if title:
+        fig.suptitle(title, fontsize=14, fontweight='bold', y=0.97)
+    _draw_multi_model_credit(fig, fields)
     if im_last is not None:
         # The label the panels would carry if each had drawn its own colorbar:
         # the raw ``value`` string is the knob's name, not the quantity's.
         cbar_label = 'p(t)' if _is_time_domain(ref) else _value_label(ref, value)
-        cbar_ax = fig.add_axes((0.905, bottom, 0.015, top - bottom))
+        # Added AFTER the credit: _draw_multi_model_credit reserves its own
+        # margin with a second subplots_adjust, and an axes placed at the
+        # earlier ``bottom`` does not follow it. Read the panels' final bottom.
+        cbar_bottom = fig.subplotpars.bottom
+        cbar_ax = fig.add_axes((0.905, cbar_bottom, 0.015, top - cbar_bottom))
         fig.colorbar(im_last, cax=cbar_ax, label=cbar_label)
-    if title:
-        fig.suptitle(title, fontsize=14, fontweight='bold', y=0.97)
-    _draw_multi_model_credit(fig, fields)
     # One shape for every grid-of-panels return on this surface: the 2-D
     # axes array, matching _plot_field_stack (documented in the Returns
     # section above).

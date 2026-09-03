@@ -214,7 +214,7 @@ eigenfunctions). Calling a wrapper a model doesn't support raises
 | `BROADBAND` | complex transfer function H(f) |
 | `TIME_SERIES` | time-domain pressure p(t) |
 | `COVARIANCE` / `REPLICA` | OASN array covariance / matched-field replicas |
-| `REVERBERATION` | OASS reverberation level scattered from a rough interface |
+| `REVERBERATION` | OASS reverberation loss scattered from a rough interface (a loss: `-10·log10 E[\|p_scat\|²]`) |
 | `REFLECTION` | plane-wave reflection coefficients |
 
 A model advertises what it supports via `model.supported_modes` /
@@ -298,8 +298,12 @@ family with one `except`. The typed subclasses are
 `InvalidDepthError` (source below the resolvable depth),
 `UnsupportedFeatureError` (mode/feature the model lacks),
 `ConfigurationError` (bad parameter value), `FileFormatError` (I/O parse
-failure), and `DataFetchError` (the data layer). uacpy never raises a bare
-`ValueError` for its own checks.
+failure), and `DataFetchError` (the data layer). One method raises a bare
+`ValueError` instead: `supports_feature` on an unregistered capability name
+(`models/base.py:1023`), documented on the method itself. `UACPYError` does not
+derive from `ValueError`, so changing it would break a caller catching
+`ValueError` around that call. Everywhere else, a uacpy check raises a uacpy
+error.
 
 ### Status output, logging & parallelism
 
@@ -596,8 +600,13 @@ Each axis can be a **literal** (`ssp=`, `bathymetry=`, `bottom=`, exactly as
 order. `transect_to=(lat, lon)` samples bathymetry (and optionally SSP/bottom)
 along a great-circle path for a range-dependent environment;
 `with_absorption=True` attaches a site-specific Francois–Garrison model.
-Fetching is cache-first; an offline install (`install.sh --data`) lets
-`*_sources='local'` run with no network. See `help(data.fetch_environment)` and
+Fetching is cache-first **within each source**: an installed local dataset is
+sampled before that source's own network call. It is not cache-first across the
+chain — `'auto'` is ordered by data quality, not by what happens to be
+installed, so it can reach the network for a better source before falling
+through to an installed global grid. `*_sources='local'` keeps only the cached
+backends and never touches the network, which is what an offline install
+(`install.sh --data`) is for. See `help(data.fetch_environment)` and
 `example_37` for the long tail of options.
 
 **Per-layer fetchers.** `fetch_environment` is the capstone; every layer it
@@ -1104,7 +1113,7 @@ produces, plus the slicing and convenience methods that make sense for it.
 | `COVARIANCE` | `Covariance` | OASN hydrophone covariance |
 | `REPLICA` | `Replicas` | OASN MFP replica field |
 | `REFLECTION` | `ReflectionCoefficient` | R(θ[, f]) |
-| `REVERBERATION` | `Field` | OASS reverberation level (`kind='reverberation'`, dB) |
+| `REVERBERATION` | `Field` | OASS reverberation loss (`kind='reverberation'`, dB) |
 
 All of them subclass `Result`, so every result carries the same identification
 fields: `result.model`, `result.backend`, `result.source_depths`,
@@ -1654,7 +1663,7 @@ amb_m = mvdr(K, bank, diagonal_loading=1e-2)     # Capon: sharp, mismatch-sensit
 iz, ir = np.unravel_index(np.argmax(amb_m), amb_m.shape)   # localization peak
 ```
 
-`mvdr`'s `loading` trades resolution for robustness: small values give sharp
+`mvdr`'s `diagonal_loading` trades resolution for robustness: small values give sharp
 Capon peaks, larger values flatten the surface toward Bartlett under
 environmental mismatch — the dominant error source in MFP.
 
@@ -2052,7 +2061,7 @@ with a warning naming the value it dropped.
 | `r_loop` | m | `1000.0` | Range at which the beam width is chosen. |
 | `n_image` | count | `1` | Number of images. |
 | `ib_win` | — | `4` | Beam-windowing parameter. |
-| `component` | — | `'P'` | Displacement-receiver output: `'P'` pressure, `'D'` displacement. |
+| `component` | — | `'P'` | Cerveny ray-centred **field component**: `'P'` pressure, `'V'` vertical, `'H'` horizontal (`influence.f90:120-130`); anything else raises (`io/bellhop_writer.py:70`). Written into the deck for the two Cerveny beam types `'R'` and `'C'`, but only `beam_type='R'` reads it — `InfluenceCervenyRayCen` is the sole `Beam%Component` site, so `'C'` ignores the letter it was handed. |
 | `beam_shift` | — | `False` | Enable beam-shift on boundary reflections. |
 | `n_freqs` | count | `128` | Frequency bins for BROADBAND/TIME_SERIES synthesis from a single centre frequency. |
 | `bandwidth_factor` | factor | `0.5` | Fractional bandwidth of the synthesised band around the centre frequency. |
@@ -2156,6 +2165,7 @@ with a warning naming the value it dropped.
 | `options` | — | `None` | Raw OASES options string, written verbatim; `None` derives it from the three flags above. The string replaces the whole option line, so passing it **together with** any of those flags raises `ConfigurationError` rather than discarding them — that is why the three default to `None` and not to their effective values. |
 | `integration_offset` | dB/λ | `0.0` | Wavenumber-integration contour offset. |
 | `nw_samples` | count | `-1` | Number of wavenumber samples; `-1` = OASES auto. |
+| `c_low` / `c_high` | m/s | `None` | `CMIN`/`CMAX`, Block VII's phase-speed window (`unoast31.f:213`); `None` derives the pair from the water column alone, which an elastic seabed needs widening — its shear and interface branches sit below the slowest water speed and so fall outside the derived `k_max`. |
 | `plot_rmin` | m | `None` | TL plot range-axis min; `None` → 0. |
 | `plot_rmax` | m | `None` | TL plot range-axis max; `None` → `receiver.range_max`. |
 | `vrec` | m/s | `0.0` | Vertical receiver velocity for the `'d'` Doppler option (VREC). |
@@ -2174,6 +2184,7 @@ with a warning naming the value it dropped.
 | `range_start` | m | `None` | First receiver range; `None` → `receiver.ranges.min()`. |
 | `integration_offset` | dB/λ | `0.0` | Wavenumber-contour offset. |
 | `nw_samples` | count | `-1` | Wavenumber sample count; `-1` = auto. |
+| `c_low` / `c_high` | m/s | `None` | `CMIN`/`CMAX`, Block VII's phase-speed window; `None` derives the pair from the water column alone, leaving an elastic seabed's shear and interface branches outside `k_max`. Same knob and same reason as OAST. |
 | `dip_angle` | deg | `None` | Fault dip angle of the dip-slip moment source that option `'4'` selects, as OAST. |
 
 ### OASES — OASR (reflection coefficients)

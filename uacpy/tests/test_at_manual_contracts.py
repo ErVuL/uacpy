@@ -305,9 +305,24 @@ class TestBellhopDeckGrammar:
         assert (tmp_path / 'bh.ati').exists()
 
     def test_run_type_is_seven_characters_and_box_units_split(self, tmp_path):
+        """Position 6 is blank, not '2'.
+
+        Position 6 is the dimensionality.  A blank means 2-D to both
+        engines: ``ReadEnvironmentBell.f90:422-429`` maps every character
+        other than '2'/'3' onto the 2-D/Nx2D branch, and bellhopcxx's
+        2-D default is ``"CG RR  "`` (``bellhopcuda/src/module/
+        runtype.hpp:36-41``).  A literal '2' does NOT mean the same thing
+        to bellhopcxx: it reads '2' as Nx2D, warns ``"Environment file
+        specifies dimensionality 2, which usually means Nx2D, but you
+        are running ... in 2D mode"`` and rewrites the character to ' '
+        (``runtype.hpp:92-100``).  That warning reaches stdout only
+        (``EXTWARN`` -> ``src/util/errors.cpp:26-36`` printf) and uacpy
+        logs the child's stdout at debug level, so the user never sees
+        it.  Writing ' ' says 2-D to both engines with no warning.
+        """
         lines = self._write(tmp_path, _measured_env())
         run_type = next(ln for ln in lines if ln.startswith("'CB"))
-        assert run_type == "'CB RR2 '"
+        assert run_type == "'CB RR  '"
         idx = lines.index(run_type)
         assert int(lines[idx + 1]) == 0
         assert _floats(lines[idx + 2]) == [-80.0, 80.0]
@@ -494,10 +509,20 @@ class TestFortranTitleQuoting:
 
 
 class TestMediaCountBound:
-    """kraken/krakenc/scooter/sparc compile MaxMedium = 500
-    (misc/sspMod.f90); a deck with more media dies as a bare Fortran fatal,
-    so the env writers refuse first. 500 media (water + 499 layers) is the
-    densest legal deck."""
+    """kraken/krakenc/scooter/sparc compile MaxMedium = 500; a deck with
+    more media dies as a bare Fortran fatal, so the env writers refuse
+    first. 500 media (water + 499 layers) is the densest legal deck.
+
+    The bound is NOT misc/sspMod.f90:11 — that line declares
+    ``MaxSSP = 20001, MaxMedia = 501``, a different (unenforced) name.
+    The bound actually enforced is ``MaxMedium``, a dummy argument of
+    ``misc/ReadEnvironmentMod.f90:12``, tested at ``:63-66``; the value
+    500 is a PARAMETER in each calling program -- ``Kraken/KrakenMod.f90
+    :6``, ``Kraken/KrakencMod.f90:6``, ``Scooter/scooter.f90:32``,
+    ``Scooter/sparc.f90:31``.  ``ReadEnvironmentMod.f90:16`` carries an
+    upstream FIXME noting the two names are essentially the same thing,
+    which is how the wrong citation got written down here.
+    """
 
     def _env(self, n_layers):
         from uacpy.core.environment import SeabedColumn, SedimentLayer
@@ -527,3 +552,17 @@ class TestMediaCountBound:
     def test_501_media_raises_before_any_deck_is_written(self):
         with pytest.raises(ConfigurationError, match='MaxMedium = 500'):
             self._write(500)
+
+    def test_the_refusal_cites_the_line_that_enforces_the_bound(self):
+        """The message must address ReadEnvironmentMod, not sspMod.
+
+        sspMod.f90:11 declares ``MaxMedia = 501`` and nothing reads it for
+        this check, so a reader sent there finds the wrong name and the
+        wrong number.  ``ReadEnvironmentMod.f90:63-66`` is the ERROUT the
+        writer is pre-empting.
+        """
+        with pytest.raises(ConfigurationError) as exc:
+            self._write(500)
+        text = str(exc.value)
+        assert 'ReadEnvironmentMod.f90:63-66' in text
+        assert 'sspMod' not in text

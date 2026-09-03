@@ -425,8 +425,21 @@ _DOCUMENTED_METADATA: Dict[Tuple[str, str], Tuple[type, str]] = {
     ),
     ('OASS', 'kind'): (
         str, "Field quantity tag: 'reverberation'. The data is "
-        "-10*log10 E[|p_scat|^2] (oassun26.f:876-880), not transmission "
-        "loss, so it does not compare against a TL field."
+        "-10*log10 E[|p_scat|^2] — REVINT's dB conversion at "
+        "oassun26.f:853-858, where CVMAGS squares an accumulator that is "
+        "already an intensity, VCLIP floors it at 1e-30, and VALG10 then "
+        "VSMUL by -5E0 give the -10*log10 on that intensity. The leading "
+        "minus makes it a LOSS: a larger value is a weaker scattered field, "
+        "and RL = SL - this. Not transmission loss, though, so it does not "
+        "compare against a TL field. REVRAN's block at oassun26.f:633-638 is "
+        "byte-identical arithmetic and is NOT this: it accumulates a "
+        "cross-range covariance and writes CFF(1,1), while REVINT writes "
+        "CFFs, the array unoass21.f:38 equivalences to the XS that PLTLOS "
+        "plots into the .plt read here. Option 'r' reaches REVINT; REVRAN "
+        "belongs to the capital-'C' CCONTU contour branch "
+        "(unoass21.f:626-628). OASES option letters are case-sensitive: "
+        "lowercase 'c' sets ICONTU, the depth-integrand contours "
+        "(unoass21.f:602-604), which reach neither routine."
     ),
     ('OASS', 'oass_quantity'): (
         str, "Long name of the quantity on the Field: "
@@ -450,7 +463,7 @@ _DOCUMENTED_METADATA: Dict[Tuple[str, str], Tuple[type, str]] = {
         'wrapper resampled onto a non-equispaced receiver.ranges.'
     ),
     ('OASS', 'interpolated'): (
-        bool, 'True when the reverberation level was interpolated onto the '
+        bool, 'True when the reverberation loss was interpolated onto the '
         'user receiver grid; False / absent when the native grid was kept.'
     ),
     ('OASS', 'n_receivers'): (

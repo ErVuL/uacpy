@@ -41,7 +41,7 @@ from uacpy.data._geo import (
     great_circle_km,
     Coordinate, as_coordinate, normalize_lon, depth_to_pressure_dbar,
     geodesic_waypoints, ring_offsets, run_representative_indices,
-    DEFAULT_MAX_TRANSECT_POINTS, checked_max_points,
+    DEFAULT_MAX_TRANSECT_POINTS, checked_max_points, checked_n_points,
 )
 from uacpy.data._time import parse_date
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
@@ -182,14 +182,11 @@ def ssp_transect_plan(
             f"ssp_transect_plan: unknown resolution={resolution!r}.",
             remediation=f"Use one of {sorted(_GRIDS)}.")
     max_points = checked_max_points(max_points, 'ssp_transect_plan')
+    n_points = checked_n_points(n_points, 'ssp_transect_plan', allow_auto=True)
     if n_points == 'auto':
         probe_n = max_points
     else:
-        if int(n_points) < 2:
-            raise ConfigurationError(
-                f"ssp_transect_plan: n_points must be >= 2, got {n_points}.",
-                remediation="Pass n_points>=2 or 'auto'.")
-        if int(n_points) > max_points:
+        if n_points > max_points:
             warnings.warn(
                 f"ssp_transect_plan: n_points={n_points} exceeds "
                 f"max_points={max_points}; sampling {max_points}.",
@@ -294,7 +291,9 @@ def assemble_range_dependent(columns, ranges_m) -> SoundSpeedProfile:
     range). The columns' provenance is aggregated onto the assembled profile,
     de-duplicated by source id: one record survives per dataset, carrying the
     **first** column's cell/date specifics — the per-column cells are not
-    enumerated on the assembled profile.
+    enumerated on the assembled profile. ``formula`` travels with them when
+    every column agrees on it, so a later seafloor extension continues the
+    assembled field under the equation that built it.
     """
     ranges = np.asarray(ranges_m, dtype=float)
     order = np.argsort(ranges, kind='stable')
@@ -315,8 +314,14 @@ def assemble_range_dependent(columns, ranges_m) -> SoundSpeedProfile:
     # ``Surface`` and ``Environment`` do (first-seen order, one record per
     # dataset, a column without ``data_sources`` contributing nothing).
     sources = _dedupe_provenance(columns)
+    # One formula for the assembled field only if every column agrees on it;
+    # a mixed stack has none, and the extension then falls back to UNESCO
+    # rather than picking an arbitrary column's equation.
+    formulas = {getattr(c, 'formula', None) for c in columns}
+    formula = formulas.pop() if len(formulas) == 1 else None
     return SoundSpeedProfile(depths=z, data=data, ranges=ranges,
-                             shape='measured', data_sources=sources)
+                             shape='measured', data_sources=sources,
+                             formula=formula)
 
 
 def fetch_ts_profile(
@@ -729,7 +734,7 @@ def extend_ssp_below_data(ssp, depth_max: float,
     # The extension continues the column under the formula that built it (a
     # Del Grosso column extended with UNESCO is 0.33 m/s off at 8.8 km); a
     # literal profile carries no formula and takes UNESCO.
-    speed_fn = _FORMULAS.get(getattr(ssp, 'formula', None) or 'unesco',
+    speed_fn = _FORMULAS.get(ssp.formula or 'unesco',
                              soundspeed_unesco)
     new_row = np.empty(data.shape[1], dtype=float)
     for j in range(data.shape[1]):
@@ -752,6 +757,12 @@ def extend_ssp_below_data(ssp, depth_max: float,
         ranges=(ssp.ranges.copy() if ssp.ranges is not None else None),
         shape=ssp.shape,
         data_sources=ssp.data_sources,
+        # The rebuild has to restate ``formula``; dropping it made the result
+        # look literal, so a *second* extension (transect column, then the
+        # assembled profile against the bathymetry) silently reverted to
+        # UNESCO. The carrier's own copies keep it (``SoundSpeedProfile``
+        # ``extend_to``/``subset``/``copy``), so this is the only gap.
+        formula=ssp.formula,
     )
 
 

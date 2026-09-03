@@ -1796,12 +1796,17 @@ def test_the_bellhop_page_denies_that_arrivals_match_across_backends() -> None:
     """``docs/models/bellhop.md`` says the ``.arr`` merge rule normalises the
     record *set* and not the values in it.
 
-    Measured with ``beam_type='G'``, fortran against cuda: the record count
-    matched at 52, and amplitude differed in 52 of 52 (max 2.09e-08), delay in
-    39 of 52 (max 1.05e-06 s), receiver angle in 25 of 52 (max 7.28e-05 deg),
-    source angle in 8 of 52 and phase in 1 of 52. The page previously closed
-    the paragraph by promising the opposite, which is the claim a
-    reproducibility statement would rest on.
+    Measured with ``beam_type='G'`` on the page's own run, fortran against
+    cuda: the record count matched at 31 on fortran, cxx and cuda alike, but
+    the two orders are a permutation of each other (fortran's first delay is
+    2.3029 s against cuda's 2.0136 s), so the records must be aligned on
+    ``delay`` before they can be compared at all. Aligned that way, amplitude
+    differed in 31 of 31 (max 1.0e-07), delay in 24 of 31 (max 9.6e-07 s),
+    receiver angle in 30 of 31 (max 5.7e-05 deg) and source angle in 30 of 31
+    (max 4.6e-05 deg); phase, the bounce counts and the receiver indices
+    agreed exactly. The count is not backend-proof for the default Gaussian
+    beams either: 554 records on fortran against 555 on cxx and cuda. The page
+    has to say all of that, because a reproducibility statement rests on it.
     """
     text = _normalised(DOCS_DIR / "models" / "bellhop.md")
 
@@ -1817,6 +1822,36 @@ def test_the_bellhop_page_denies_that_arrivals_match_across_backends() -> None:
             f"the .arr paragraph no longer states {phrase!r} — the page has "
             f"to say what the merge rule does and does not normalise"
         )
+
+
+@requires_docs
+@_needs_docs
+def test_the_bellhop_page_quotes_one_arrival_count_for_one_run() -> None:
+    """The ``beam_type='G'`` arrival count is stated twice on the page — once
+    where the run is introduced, once in the backend caveat that compares
+    record against record — and the two have to be the same number. They
+    disagreed (61 against 52) in a paragraph whose whole point is that the
+    count does not move between backends, so the contradiction read as the
+    very instability the paragraph denies. Re-measured: 31, on fortran, cxx
+    and cuda alike."""
+    import re
+
+    text = _normalised(DOCS_DIR / "models" / "bellhop.md")
+    intro = re.search(r"against (\d+) for the same run with", text)
+    caveat = re.search(r"returns (\d+) records on", text)
+    assert intro and caveat, (
+        "the page no longer states the beam_type='G' arrival count in both "
+        "places; the caveat paragraph's per-field counts are read against it")
+    assert intro.group(1) == caveat.group(1), (
+        f"the page quotes {intro.group(1)} arrivals where the run is "
+        f"introduced and {caveat.group(1)} in the backend caveat, for one run")
+    # The per-field disagreement counts are "N of <count>", so they move with
+    # it; a stale denominator is how the two numbers drifted apart before.
+    per_field = set(re.findall(r"\d+ of (\d+) records", text)
+                    + re.findall(r"in \d+ of (\d+) \(max", text))
+    assert per_field <= {caveat.group(1)}, (
+        f"per-field arrival comparisons are counted against {sorted(per_field)}"
+        f" but the run has {caveat.group(1)} records")
 
 
 @requires_docs
@@ -2628,3 +2663,21 @@ def test_every_public_sonar_name_appears_in_the_reference_manual():
                if not inspect.ismodule(getattr(sonar, name))
                and not re.search(rf'\b{re.escape(name)}\b', text)]
     assert missing == []
+
+
+def test_the_data_package_scopes_its_cache_first_claim_to_one_source():
+    """``uacpy.data``'s docstring promised "cache-first (a locally installed
+    dataset is sampled before any network call)", which ``fetch_environment``'s
+    own docstring contradicts: the chain order is quality-first, so an 'auto'
+    run reaches Argo/Copernicus/EMODnet-DTM before any installed grid. The
+    guide (``docs/guide/data.md``) already scoped it correctly."""
+    import uacpy.data as data_pkg
+    doc = inspect.getdoc(data_pkg) or ''
+    assert 'cache-first' in doc, "the cache-first behaviour is still documented"
+    assert 'within each source' in doc.lower(), (
+        "the cache-first claim must say it holds within a source, not across "
+        "the chain")
+    assert 'sampled\n  before any network call' not in doc
+    # and the claim it contradicted is still on fetch_environment
+    env_doc = inspect.getdoc(data_pkg.fetch_environment) or ''
+    assert 'cache' in env_doc.lower()

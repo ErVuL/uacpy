@@ -44,9 +44,19 @@ def _warn_two_sided(caller: str, data):
 
 PSDResult = namedtuple("PSDResult", "frequencies power")
 SELResult = namedtuple("SELResult", "sel_pa2s bands")
+# ``ref`` is the dB reference the levels in ``pdf`` / ``mean_db`` / ``std_db``
+# are stated against — the value ``ppsd`` was called with, carried forward so a
+# consumer does not have to guess it. Without it every downstream label had to
+# assume the default, and a caller who passed a Pa-based reference to µPa data
+# got a plot axis 120 dB out with nothing to catch it. Appended last so the
+# existing positional fields keep their indices, and defaulted so a synthetic
+# result can still be built from the fields a fixture actually has; the
+# estimator itself always passes the caller's value explicitly.
 PPSDResult = namedtuple(
     "PPSDResult",
-    "frequencies level_edges pdf mean_db std_db binwidth_db seg_duration")
+    "frequencies level_edges pdf mean_db std_db binwidth_db seg_duration ref "
+    "scaling",
+    defaults=(REFERENCE_PRESSURE_WATER, "density"))
 
 
 def psd(data, sample_rate, *, window="hann", nperseg=8192, noverlap=None,
@@ -111,6 +121,11 @@ def ppsd(data, sample_rate, *, seg_duration=1.0, overlap_pct=50, ddB=1.0,
     ``mean_db`` and ``std_db`` are taken over *all* segments, so they are not
     clipped by ``lvlmin`` / ``lvlmax`` the way the histogram is; if levels fall
     outside that window the two stop describing the same population.
+
+    Every level in the result is dB re ``ref**2`` (per Hz, since the default
+    ``scaling='density'``), and the result carries ``ref`` back so a consumer
+    does not have to assume it. A plot axis or a report that hardcodes the
+    package default instead is 120 dB out whenever the caller works in µPa.
 
     **Complex input** is accepted but returns a two-sided spectrum on an
     unsorted frequency axis, as in :func:`psd`; a ``UserWarning`` says so.
@@ -220,8 +235,13 @@ def ppsd(data, sample_rate, *, seg_duration=1.0, overlap_pct=50, ddB=1.0,
             f"Pa-based ref read 120 dB high).",
             UserWarning, stacklevel=2)
 
+    # ``ref`` and ``scaling`` ride along because the levels mean nothing
+    # without them: the same signal read against a Pascal reference sits
+    # 120 dB from these numbers, and 'spectrum' levels are per band where
+    # 'density' levels are per hertz. A consumer that has to be told them
+    # separately is a consumer that can be told the wrong ones.
     return PPSDResult(freqs, level_edges, pdf_matrix, mean_psd, std_psd, ddB,
-                      seg_duration)
+                      seg_duration, float(ref), str(scaling))
 
 
 # IEC 61260-1 anchors both band systems at 1 kHz; the step is the band width
@@ -273,20 +293,22 @@ def _sel_bands(fmin, fmax, band_type, num_bands, sample_rate):
     if band_type in ("octave", "third_octave"):
         fmin, fmax = _sel_adjust_fmin_fmax(fmin, fmax, band_type, sample_rate)
     bands = []
-    if band_type == "octave":
-        base = math.sqrt(2)
+    if band_type in ("octave", "third_octave"):
+        # One loop for both: the centres advance by a whole octave or a third
+        # of one, and each band's edges sit half that step either side of its
+        # centre. ``math.pow``, not ``math.sqrt``: the merged form reproduces
+        # the two former branches BIT-FOR-BIT only because ``(1/3)/2 == 1/6``
+        # exactly in binary floating point (halving is exact), so
+        # ``math.pow(2, step/2)`` returns the identical double the
+        # third-octave branch's ``math.pow(2, 1/6)`` did, and the identical
+        # ``math.sqrt(2)`` for step 1.
+        step = 1.0 if band_type == "octave" else 1.0 / 3.0
+        base = math.pow(2, step / 2)
+        factor = math.pow(2, step)
         f_center = fmin
         while f_center < fmax:
             bands.append((f_center / base, f_center, f_center * base))
-            f_center *= 2
-        if bands and bands[-1][2] > fmax:
-            bands[-1] = (bands[-1][0], bands[-1][1], fmax)
-    elif band_type == "third_octave":
-        base = math.pow(2, 1 / 6)
-        f_center = fmin
-        while f_center < fmax:
-            bands.append((f_center / base, f_center, f_center * base))
-            f_center *= math.pow(2, 1 / 3)
+            f_center *= factor
         if bands and bands[-1][2] > fmax:
             bands[-1] = (bands[-1][0], bands[-1][1], fmax)
     elif band_type == "linear":

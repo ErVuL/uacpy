@@ -103,10 +103,9 @@ def download_sediment_db(cache_dir=None, *, timeout=180.0, verbose=False):
 
     ``cache_dir`` defaults to the offline cache's ``sediment`` directory.
     """
-    dest = Path(cache_dir) if cache_dir else _cache.dataset_root('sediment')
-    dest.mkdir(parents=True, exist_ok=True)
-    log_message('sediment', "downloading NCEI grain-size DB (G00127, ~3 MB)",
-                verbose=verbose)
+    dest = _cache.prepare_download(
+        'sediment', "downloading NCEI grain-size DB (G00127, ~3 MB)",
+        cache_dir=cache_dir, verbose=verbose)
     blob = http_get(GRAINSIZE_TARBALL_URL, timeout=timeout, verbose=verbose,
                     source='sediment')
     tf = tarfile.open(fileobj=io.BytesIO(blob))

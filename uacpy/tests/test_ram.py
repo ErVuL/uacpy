@@ -604,6 +604,34 @@ class TestSeafloorOutsideTheGrid:
             warnings.simplefilter('error')
             self._model(700.0)._warn_if_seafloor_outside_grid(700.0, self.ENV)
 
+    def test_the_seafloor_index_follows_the_backend_that_will_run(self):
+        """The seafloor INDEX formula is not shared across the family.
+
+        rams0.5 writes ``iz = z/dz`` (``rams0.5.f:135``); the fluid codes and
+        mpiramS write ``iz = 1 + z/dz`` and then clamp
+        (``ramgeo1.5.f:133-135``, ``ramsurf1.5.f:118-120``,
+        ``mpiramS/src/ram.f90:101``). On a 220 m seabed with dz=2 m and
+        zmax=222 m, nz = int(222/2 - 0.5) = 110: rams' index is 110 and sits
+        inside the grid, while the other three index 111 and sit one cell
+        outside it. Reading rams' formula for all four called that case
+        'inside' on three backends.
+        """
+        m = self._model(222.0)
+        for kind in ('ramgeo', 'ramsurf', 'mpiramS'):
+            with pytest.warns(UserWarning, match='outside the PE grid'):
+                m._warn_if_seafloor_outside_grid(222.0, self.ENV, dz=2.0,
+                                                 kind=kind, freq=50.0)
+        # rams' own index is inside, so it gets the thin-margin diagnosis
+        # instead — a different warning, not silence.
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            m._warn_if_seafloor_outside_grid(222.0, self.ENV, dz=2.0,
+                                             kind='rams', freq=50.0)
+        messages = [str(w.message) for w in caught]
+        assert messages and not any('outside the PE grid' in t
+                                    for t in messages)
+        assert any('no room for the absorbing layer' in t for t in messages)
+
     def test_an_auto_zmax_is_never_flagged(self):
         # _compute_zmax clears the seafloor by construction, so only a pinned
         # value can reach the guard.
@@ -2287,17 +2315,125 @@ class TestRamLeavesRealSeabedBeforeTheAbsorber:
         assert model._seabed_sound_speed(self._half_space(), 1500.0) == \
             pytest.approx(1800.0)
 
-    def test_a_layered_bottom_keeps_the_tight_span(self):
-        # The same quantity sets the span mpiramS distributes a FIXED number
-        # of sediment control points over, so widening it on a modelled stack
-        # smears the layer contrasts the deck exists to represent.
+    def test_a_layered_bottom_pads_below_the_whole_stack(self):
+        # The pad sits BELOW the modelled stack, never inside it. This used to
+        # return one depth cell on a layered bottom so that the span mpiramS
+        # spreads its sediment control points over would stay tight — which
+        # left the stack itself outside the grid (measured 16.15 dB max on
+        # ramgeo). The control-point interval is now held to one depth cell by
+        # ``nzs`` instead, so the span is free to hold the seabed.
         from uacpy.models import RAM
         model = RAM(verbose=False)
         env = self._layered()
+        stack = env.bottom.max_total_thickness()
+        assert stack == pytest.approx(5.0)
         got = self._real_seabed(model, env, 100.0)
-        assert got < 2.0 * 2800.0 / 100.0
-        assert got == pytest.approx(model._compute_dz(env, 100.0,
-                                                      model._resolve_c0(env)))
+        assert got == pytest.approx(stack + 2.0 * 2800.0 / 100.0)
+
+
+class TestRamGridHoldsTheWholeSedimentStack:
+    """The automatic PE domain has to end BELOW the deepest modelled layer.
+
+    ``_adequate_zmax`` used to size the layered grid as
+    ``depth + dz + absorbing_width``, with no term for the sediment stack, and
+    nothing downstream clips to it: ``Bottom.to_piecewise_breakpoints`` takes
+    ``zmax`` only to give the half-space a non-zero depth extent and emits
+    every layer step regardless, so the block runs past the grid floor, and
+    ``zread``
+    interpolates it onto the shorter grid, and on rams0.5 the fill loop
+    replaces the layer with a linear gradient to the half-space value. The
+    absorbing ramp disappears with it, because ``_ramp_absorbing_attenuation``
+    returns the block unchanged once ``z_abs >= z_bottom``.
+
+    Measured on 100 m of water over a 60 m layer (1600 m/s, 1.6, 0.05
+    dB/lambda) on an 1800 / 2.0 / 0.1 half-space at 800 Hz, source 50 m, over
+    200 m-2 km and 9 receiver depths: the automatic grid ended at 143.33 m
+    against a layer base at 160 m and sat 2.75 dB rms / 15.77 dB max from a
+    converged zmax=400 m on ramgeo, with no warning. An independent pass put
+    the same defect at 3.37 / 16.15 on ramgeo over a wider sweep, 3.65 / 11.89
+    on mpiramS and 3.65 / 9.13 on rams (200 Hz, 200 m layer) — silent on all
+    three.
+    """
+
+    FREQ = 800.0
+
+    @staticmethod
+    def _stacked():
+        return Environment(
+            name='stack', bathymetry=100.0, ssp=1500.0,
+            bottom=SeabedColumn(
+                layers=[SedimentLayer(thickness=60.0, sound_speed=1600.0,
+                                      density=1.6, attenuation=0.05)],
+                halfspace=BoundaryProperties(
+                    acoustic_type='half-space', sound_speed=1800.0,
+                    density=2.0, attenuation=0.1)))
+
+    def _absorbing_width(self, model, env):
+        return (model.absorbing_layer_width * model._resolve_c0(env)
+                / self.FREQ)
+
+    def test_the_automatic_grid_ends_below_the_deepest_layer_base(self):
+        model = RAM(backend='ramgeo', verbose=False)
+        env = self._stacked()
+        base = env.depth + env.bottom.max_total_thickness()
+        assert base == pytest.approx(160.0)
+        assert model._compute_zmax(env, self.FREQ) > base
+
+    def test_the_absorbing_layer_starts_below_the_stack(self):
+        # ram.pdf p.7 puts the ramp over "the lower few wavelengths of the
+        # grid", not over the seabed: the whole stack has to sit above it.
+        model = RAM(backend='ramgeo', verbose=False)
+        env = self._stacked()
+        zmax = model._compute_zmax(env, self.FREQ)
+        ramp_start = zmax - self._absorbing_width(model, env)
+        assert ramp_start > env.depth + env.bottom.max_total_thickness()
+
+    def test_a_range_dependent_stack_is_sized_by_its_deepest_column(self):
+        # ``max_total_thickness`` reduces over columns, so a stack that
+        # thickens with range still ends inside the grid at its deepest point.
+        env = self._stacked()
+        thick = SeabedColumn(
+            layers=[SedimentLayer(thickness=140.0, sound_speed=1600.0,
+                                  density=1.6, attenuation=0.05)],
+            halfspace=env.bottom.columns[0].halfspace)
+        rd = Environment(
+            name='rd-stack', bathymetry=100.0, ssp=1500.0,
+            bottom=Bottom(columns=[env.bottom.columns[0], thick],
+                          ranges=[0.0, 5000.0]))
+        model = RAM(backend='ramgeo', verbose=False)
+        assert model._compute_zmax(rd, self.FREQ) > 100.0 + 140.0
+
+    def test_a_pinned_zmax_inside_the_stack_names_the_layer_base(self):
+        model = RAM(backend='ramgeo', verbose=False, zmax=150.0)
+        with pytest.warns(UserWarning, match='inside the sediment stack'):
+            model._compute_zmax(self._stacked(), self.FREQ)
+
+    def test_a_pinned_zmax_below_the_stack_is_silent_about_it(self):
+        model = RAM(backend='ramgeo', verbose=False, zmax=400.0)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            model._compute_zmax(self._stacked(), self.FREQ)
+        assert not any('sediment stack' in str(w.message) for w in caught)
+
+    def test_the_mpirams_grid_holds_its_synthetic_sediment_layer(self):
+        """A bare half-space is modelled as a synthetic layer 10 % of the
+        water depth thick (``_prepare_bottom_properties``), which in deep
+        water is far thicker than the two-bottom-wavelength pad. The domain
+        has to hold it, or control point ``nzs-1`` lands past ``zmax``."""
+        model = RAM(backend='ramgeo', verbose=False)
+        env = Environment(
+            name='deep-halfspace', bathymetry=3000.0, ssp=1500.0,
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=1800.0, density=2.0,
+                                      attenuation=0.1))
+        synthetic = model._synthetic_sediment_thickness(env)
+        assert synthetic == pytest.approx(300.0)
+        deck = model._compute_zmax(env, self.FREQ, kind='mpiramS')
+        assert deck - env.depth - self._absorbing_width(model, env) >= \
+            synthetic - 1e-9
+        # The Collins path wraps no synthetic layer, so it is not paying for
+        # one: the two grids differ, which is what makes the kind meaningful.
+        assert model._compute_zmax(env, self.FREQ) < deck
 
 
 def _mpirams_model():

@@ -474,3 +474,66 @@ def test_two_empty_month_sweeps_stop_the_wind_climatology_build(
                        match='stopping before the remaining ten months'):
         wl.download_wind_db(cache_dir=tmp_path, years=range(2013, 2023))
     assert len(calls) == 20
+
+
+# ── climatology vintage (the reference period the cache records) ─────────────
+
+@pytest.fixture
+def dated_wind_cache(tmp_path, monkeypatch):
+    """A wind cache that records its reference period."""
+    root = tmp_path / 'dated_wind_cache'
+    monkeypatch.setenv('UACPY_DATA_CACHE', str(root))
+    wind_local._CLIM.clear()
+    wdir = root / 'wind'
+    wdir.mkdir(parents=True)
+    lat = np.linspace(-89.5, 89.5, 12)
+    lon = np.linspace(-179.5, 179.5, 24)
+    speed = np.full((12, lat.size, lon.size), 8.5)
+    np.savez_compressed(wdir / wind_local.WIND_FILE, lat=lat, lon=lon,
+                        speed=speed,
+                        years=np.arange(2013, 2023, dtype=np.int32))
+    return root
+
+
+def test_the_wind_cache_reports_the_period_it_was_built_over(dated_wind_cache):
+    """The cache used to store lat/lon/speed only, so a build's reference
+    period was unrecoverable from the file."""
+    assert wind_local.climatology_period() == '2013-2022 (climatology)'
+
+
+def test_a_wind_cache_without_a_period_loads_its_grid(wind_cache):
+    """Old caches and the synthetic ones the tests build carry no ``years``.
+    Absent is not an error: the grid still reads, the vintage is unstated."""
+    assert wind_local.climatology_period() is None
+    assert wind_local.wind_speed((0.6, 0.6), date='2021-03-15') == pytest.approx(8.5)
+
+
+def test_a_built_wind_cache_records_its_years(tmp_path, monkeypatch):
+    """``download_wind_db`` writes the period it averaged. The per-month grid
+    fetch is stubbed, so this never touches the network."""
+    root = tmp_path / 'built_wind'
+    monkeypatch.setenv('UACPY_DATA_CACHE', str(root))
+    wind_local._CLIM.clear()
+    lat = np.linspace(-89.875, 89.875, 8)
+    lon = np.linspace(0.0, 359.75, 8)
+    calls = []
+
+    def _stub_grid(year, month, **_kwargs):
+        calls.append((year, month))
+        return lat, lon, np.full((lat.size, lon.size), 6.25)
+
+    monkeypatch.setattr(wind_local, '_fetch_monthly_grid', _stub_grid)
+    out = wind_local.download_wind_db(years=(2019, 2020, 2021))
+    assert calls, 'the stubbed month fetch was never reached'
+    with np.load(out, allow_pickle=False) as data:
+        assert [int(y) for y in data['years']] == [2019, 2020, 2021]
+    assert wind_local.climatology_period() == '2019-2021 (climatology)'
+
+
+def test_the_environment_provenance_carries_the_wind_vintage(dated_wind_cache):
+    """``_climatology_vintage`` is what puts the period on the provenance
+    record; every other source and every period-less cache yield None."""
+    from uacpy.data.environment import _climatology_vintage
+    assert _climatology_vintage('wind') == '2013-2022 (climatology)'
+    assert _climatology_vintage('gebco') is None
+    assert _climatology_vintage('woa23') is None

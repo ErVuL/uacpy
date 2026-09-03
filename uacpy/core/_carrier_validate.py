@@ -17,7 +17,13 @@ def _validate_acoustic_type(value, label: str) -> None:
     from uacpy.core.constants import BoundaryType
     try:
         BoundaryType.from_string(value)
-    except (ConfigurationError, ValueError, KeyError, AttributeError) as exc:
+    # ConfigurationError alone: ``BoundaryType.from_string`` type-checks its
+    # argument before touching it, so a non-string raises no AttributeError off
+    # ``.lower()``, and the one internal KeyError from its enum-name lookup is
+    # caught and re-raised there as a ConfigurationError too. A broader clause
+    # here would swallow an unrelated failure inside the enum and report it as
+    # a bad ``acoustic_type``.
+    except ConfigurationError as exc:
         valid = sorted({bt.value for bt in BoundaryType})
         raise ConfigurationError(
             f"{label}: acoustic_type={value!r} is not recognized. "
@@ -161,16 +167,46 @@ def _require_attenuation_in_range(value, label: str) -> None:
         return
     alpha = float(value)
     if alpha > MAX_ATTENUATION_DB_PER_WAVELENGTH:
-        raise ConfigurationError(
+        # The two attenuations this guard serves sit at different scales, and
+        # one sentence for both was wrong about the shear one. JKPS Table 1.3
+        # runs α_p from 0.1 (basalt) to 1.0 dB/wavelength (silt) but α_s from
+        # 0.2 to 2.5, and uacpy ships that 2.5 as the ``sand`` preset
+        # (core/materials.py) — so "well under 2" named a real seabed the
+        # package itself hands out.
+        #
+        # Both branches raise with the remediation written out at the
+        # ``raise`` rather than sharing one built above: a
+        # ``remediation=<name>`` hides its text from
+        # ``test_error_actionability.py``'s content check, which counts such
+        # sites precisely so the blind spot cannot grow.
+        message = (
             f"{label} = {alpha:g} dB/wavelength exceeds "
             f"{MAX_ATTENUATION_DB_PER_WAVELENGTH:.4f}, above which the imaginary "
             f"part of the complex sound speed exceeds the real part and every AT "
             f"solver aborts in misc/AttenMod.f90's CRCI (:116). The bound is "
             f"independent of frequency and sound speed because uacpy writes "
-            f"AttenUnit 'W' (dB/wavelength).",
-            remediation="Real seabeds are well under 2 dB/wavelength. To model a "
-                        "strongly absorbing bottom use a reflection-coefficient "
-                        "table (acoustic_type='file') instead.",
+            f"AttenUnit 'W' (dB/wavelength)."
+        )
+        if 'shear_attenuation' in label:
+            raise ConfigurationError(
+                message,
+                remediation="Shear attenuation runs higher than "
+                            "compressional: JKPS Table 1.3 gives 0.2-2.5 "
+                            "dB/wavelength across seafloor types (sand is "
+                            "2.5, which uacpy ships as the 'sand' preset), so "
+                            "a value of a few dB/wavelength is ordinary and "
+                            "only a value orders of magnitude above the table "
+                            "is not. To model a strongly absorbing bottom use "
+                            "a reflection-coefficient table "
+                            "(acoustic_type='file') instead.",
+            )
+        raise ConfigurationError(
+            message,
+            remediation="Real seabeds are well under 2 dB/wavelength "
+                        "(JKPS Table 1.3 tops out at 1.0, for silt). To model "
+                        "a strongly absorbing bottom use a "
+                        "reflection-coefficient table (acoustic_type='file') "
+                        "instead.",
         )
 
 

@@ -206,8 +206,7 @@ _MIN_TIMESERIES_FREQS = 9
 def _max_roughness(boundaries) -> float:
     """Largest interfacial sigma over a list of ``BoundaryProperties``."""
     return max(
-        (float(getattr(b, 'roughness', 0.0) or 0.0)
-         for b in boundaries if b is not None),
+        (float(b.roughness) for b in boundaries if b is not None),
         default=0.0,
     )
 
@@ -234,7 +233,7 @@ def _smooth_bottom(bottom):
     smoothed = _copy.deepcopy(bottom)
     for column in smoothed.columns:
         column.halfspace.roughness = 0.0
-        for layer in getattr(column, 'layers', ()) or ():
+        for layer in column.layers:
             layer.roughness = 0.0
     return smoothed
 
@@ -250,7 +249,7 @@ def _bottom_roughness(bottom) -> float:
     boundaries = []
     for column in bottom.columns:
         boundaries.append(column.halfspace)
-        boundaries.extend(getattr(column, 'layers', ()) or ())
+        boundaries.extend(column.layers)
     return _max_roughness(boundaries)
 
 
@@ -1158,7 +1157,11 @@ class PropagationModel(ABC):
             Keyword-only. Sample rate (Hz) of ``source_waveform``.
         output_duration : float, optional
             Keyword-only. Desired output time-window length (s); IFFT-based
-            wrappers zero-pad so ``Δf = 1/output_duration``.
+            wrappers zero-pad so ``Δf = 1/output_duration``. A TIME_SERIES
+            result's ``frequencies`` stamp is that same grid, so it changes
+            when ``output_duration`` does — it records the frequencies the
+            engine actually propagated for this call, not a property of the
+            environment.
 
         Returns
         -------
@@ -2537,10 +2540,8 @@ class PropagationModel(ABC):
         from uacpy.core.surface import Surface
 
         def _zero_shear(b):
-            if hasattr(b, 'shear_speed'):
-                b.shear_speed = 0.0
-            if hasattr(b, 'shear_attenuation'):
-                b.shear_attenuation = 0.0
+            b.shear_speed = 0.0
+            b.shear_attenuation = 0.0
 
         if method not in ('fluid', 'vacuum'):
             raise ConfigurationError(
@@ -3058,9 +3059,14 @@ class PropagationModel(ABC):
         ``r / c_max``, ahead of that arrival. The anchor contract there
         admits only physical speeds — never an algorithmic reference such
         as a PE expansion point.
+
+        Always a speed, never ``None``: :meth:`_speed_bounds` returns a
+        2-tuple on every path, and its own docstring records why the list it
+        reduces is never empty (an Environment always carries an SSP). The
+        return type stays ``Optional`` for subclasses — ``RAM`` overrides
+        this and keeps a fallback of its own.
         """
-        bounds = self._speed_bounds(env)
-        return float(bounds[1]) if bounds else None
+        return float(self._speed_bounds(env)[1])
 
     #: Whether the engine resolves the field THROUGH the sediment layers it
     #: is given (Kraken, Scooter, SPARC, OASES mesh them as media), so a

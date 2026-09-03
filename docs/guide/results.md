@@ -150,7 +150,7 @@ Every quantity is registered once, in
 the units it may carry and the label for each pairing:
 
 ```python
-Quantity('reverberation', {'dB': 'Reverberation level (dB)'}),
+Quantity('reverberation', {'dB': 'Reverberation loss (dB re unit source)'}),
 ```
 
 A model then tags it — `metadata['kind'] = 'reverberation'` — and the label,
@@ -163,9 +163,11 @@ Colormaps are deliberately *not* in that registry — they are a rendering
 choice and live in `visualization/style.py`, which `core/` must not depend on.
 
 Two things it deliberately does not model: unit conversion, and a per-unit
-"which way is louder" flag. Transmission loss is the only inverted quantity in
-underwater acoustics, so one documented special case in `Field.max` beats a
-field that would read `+1` in every row but one.
+"which way is louder" flag. Two quantities are inverted — transmission loss,
+and OASS reverberation, which OASES writes as `-10·log10 E[|p_scat|²]` — so
+two documented special cases in `Field.max` beat a field that would read `+1`
+in every row but two. Both read as losses everywhere: `Field.max` returns the
+smallest cell, and a 1-D cut of either draws its value axis downward.
 
 The consequence worth internalising: **operations that change the dtype or the
 axes change what the field is**. `pressure.to_db()` moves `Pa` to `dB`.

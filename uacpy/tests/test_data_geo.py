@@ -134,3 +134,49 @@ def test_parse_date_rejects_bad(bad):
     from uacpy.data._time import parse_date
     with pytest.raises(ConfigurationError):
         parse_date(bad)
+
+
+def test_adiabatic_gradient_matches_the_unesco_check_value():
+    """UNESCO 44 (Fofonoff & Millard 1983) publishes ATG(40, 40, 10000)."""
+    from uacpy.data._geo import _adiabatic_gradient
+    assert float(_adiabatic_gradient(40.0, 40.0, 10000.0)) == pytest.approx(
+        3.255976e-4, rel=1e-6)
+
+
+def test_potential_temperature_matches_the_unesco_check_value():
+    """UNESCO 44 publishes THETA(S=40, T=40, P=10000, Pr=0) = 36.89073 degC."""
+    from uacpy.data._geo import _shift_adiabatically
+    assert float(_shift_adiabatically(40.0, 40.0, 10000.0, 0.0)) == pytest.approx(
+        36.89073, abs=1e-5)
+
+
+def test_insitu_from_potential_round_trips_over_the_ocean_range():
+    from uacpy.data._geo import _shift_adiabatically, insitu_from_potential
+    sal = np.array([33.0, 34.7, 35.5, 37.0])
+    for theta in (-1.5, 1.2, 2.5, 10.0, 30.0):
+        for pres in (500.0, 2000.0, 5000.0, 11000.0):
+            insitu = insitu_from_potential(sal, theta, pres)
+            back = _shift_adiabatically(sal, insitu, pres, 0.0)
+            assert np.allclose(back, theta, atol=2e-4)
+
+
+def test_insitu_from_potential_is_warmer_and_grows_with_pressure():
+    """Compression warms a parcel, so in-situ exceeds potential below 0 dbar."""
+    from uacpy.data._geo import insitu_from_potential
+    pres = np.array([0.0, 1000.0, 5000.0, 10000.0])
+    excess = insitu_from_potential(34.7, 1.5, pres) - 1.5
+    assert excess[0] == pytest.approx(0.0, abs=1e-12)
+    assert np.all(np.diff(excess) > 0.0)
+    assert excess[2] == pytest.approx(0.450, abs=0.01)
+
+
+def test_potential_temperature_costs_about_two_m_per_s_at_5000_dbar():
+    """The sound-speed error the P1 fix removes, at the audit's fixture point."""
+    from uacpy.data._geo import insitu_from_potential
+    from uacpy.data.sound_speed import _FORMULAS
+    sal, theta, pres = 34.7, 1.5, 5000.0
+    insitu = float(insitu_from_potential(sal, theta, pres))
+    for name in ('unesco', 'delgrosso'):
+        speed_fn = _FORMULAS[name]
+        delta = speed_fn(insitu, sal, pres) - speed_fn(theta, sal, pres)
+        assert 1.8 < delta < 2.0, (name, delta)

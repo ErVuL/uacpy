@@ -339,11 +339,11 @@ def main():
 
         _, _ = plot_field(result_thorp, env=env, ax=ax1,
                                       show_colorbar=False)
-        ax1.set_title("Point Source (Cylindrical)\nRunType: 'CB RR2 '")
+        ax1.set_title("Point Source (Cylindrical)\nRunType: 'CB RR  '")
 
         _, _ = plot_field(result_line, env=env, ax=ax2,
                                       show_colorbar=False)
-        ax2.set_title("Line Source (Cartesian)\nRunType: 'CB XR2 '")
+        ax2.set_title("Line Source (Cartesian)\nRunType: 'CB XR  '")
 
         # Shared colorbar, taken from a panel's own mappable.
         cbar_ax = fig3.add_axes([0.92, 0.15, 0.02, 0.7])
@@ -362,7 +362,7 @@ def main():
     if result_rays is not None:
         fig4, ax4 = result_rays.plot(env=env,
                                      color_by="bounces")  # Color-code rays by bounce type
-        ax4.set_title("Ray Trace with Beam Shift\nRunType: 'Rg RR2S'\n" +
+        ax4.set_title("Ray Trace with Beam Shift\nRunType: 'Rg RR S'\n" +
                       '(rays colored by bounce type - R/G/B/K)')
         fig4.savefig(OUTPUT_DIR / 'example_04_rays.png', dpi=150,
                      bbox_inches='tight')

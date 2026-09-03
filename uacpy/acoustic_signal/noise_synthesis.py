@@ -368,16 +368,37 @@ def _bandpass_design(fc: float, bandwidth: float, sample_rate: float):
                   output='sos')
 
 
-def _noise_equivalent_bandwidth(sos, sample_rate: float, n_freq: int = 8192):
+def _noise_equivalent_bandwidth(sos, sample_rate: float, fc: float,
+                                bandwidth: float, n_freq: int = 8192):
     """One-sided noise-equivalent bandwidth (Hz) of ``sosfiltfilt(sos, ...)``.
 
     ``sosfiltfilt`` applies the cascade twice, so the power response is ``|H|**4``
     and the equivalent rectangular bandwidth is ``∫|H|**4 df / max|H|**4``. This
     is what a unit-RMS band-limited realisation actually spreads its power over
     — narrower than the nominal -3 dB ``bandwidth``.
+
+    The integration grid is centred on ``fc ± bandwidth/2`` rather than spread
+    over the whole ``[0, Nyquist]``: a uniform grid of ``n_freq`` points over
+    the full band gives a spacing of ``sample_rate / (2 n_freq)`` (5.9 Hz at
+    96 kHz), so a narrow band is sampled by a handful of points and the
+    quadrature error is unbounded — once the passband falls between two grid
+    points the integral collapses to a single grid step. Measured at
+    ``sample_rate=96 kHz``: +5.14 dB at ``bandwidth=2`` Hz, +1.16 dB at 5 Hz,
+    -1.45 dB at 10 Hz, and (because the error is set by where the band happens
+    to land between grid points) +3.65 dB at 5 Hz for ``fc=12002.9`` Hz where
+    the same band at ``fc=12000`` Hz reads +1.16 dB. Ten bandwidths out the
+    double-pass 4th-order Butterworth is below 1e-18 of its peak, so nothing
+    outside the focused window contributes; bands already wide enough for the
+    old grid move by < 1e-13 relative.
     """
     from scipy.signal import sosfreqz
-    f, h = sosfreqz(sos, worN=int(n_freq), fs=float(sample_rate))
+    nyquist = float(sample_rate) / 2.0
+    # Ten bandwidths of skirt on each side, clipped to the real axis: for a
+    # wide band this reduces to the full [0, Nyquist] the old grid used.
+    worN = np.linspace(max(0.0, fc - bandwidth / 2.0 - 10.0 * bandwidth),
+                       min(nyquist, fc + bandwidth / 2.0 + 10.0 * bandwidth),
+                       int(n_freq))
+    f, h = sosfreqz(sos, worN=worN, fs=float(sample_rate))
     p = np.abs(h) ** 4
     return float(np.trapezoid(p, f) / p.max())
 
@@ -458,7 +479,8 @@ def add_noise(
     # ``bandwidth``), so multiplying by ``A = RMS`` puts the in-band density at
     # exactly the requested level.
     neb = _noise_equivalent_bandwidth(
-        _bandpass_design(fc, bandwidth, sample_rate), sample_rate)
+        _bandpass_design(fc, bandwidth, sample_rate), sample_rate,
+        fc, bandwidth)
     A = np.sqrt(neb * 10.0 ** (noise_level / 10.0))
 
     # Generate band-limited noise — independent realisation per receiver
@@ -626,6 +648,16 @@ def fourier_synthesis(
     - Tmax = 1 / deltaf
     - deltat = Tmax / Nfreq
 
+    The output is a *baseband* trace when the grid starts above DC. The IFFT
+    runs over the supplied bins with bin 0 at DC, so a band starting at
+    ``frequencies[0]`` comes back demodulated by ``frequencies[0]`` at a rate
+    of ``Nfreq * deltaf``: a Gaussian centred at 150 Hz on a 100-200 Hz grid
+    peaks at 50 Hz in the output spectrum. ``stack.m`` leaves its heterodyne
+    back to the base frequency commented out, and this translation follows it.
+    ``Tstart`` is a time-origin shift only — it rotates the phase and relabels
+    the axis, and does not move the spectrum — so for a passband waveform use
+    ``Field.synthesize_time_series`` / ``Field.to_time_trace`` instead.
+
     Examples
     --------
     >>> # Generate frequency-domain transfer function
@@ -666,13 +698,18 @@ def fourier_synthesis(
         for irec in range(pressure_work.shape[1]):
             pressure_work[:, irec] = (pressure_work[:, irec] *
                                       np.exp(1j * 2 * np.pi * Tstart * frequencies))
-    elif len(frequencies) > 0 and frequencies[0] > 0:
+    if len(frequencies) > 0 and frequencies[0] > 0:
         warnings.warn(
-            f"fourier_synthesis: frequencies[0]={frequencies[0]:.3g} Hz > 0 with "
-            "Tstart=0. The IFFT treats input as starting from DC, which "
-            "introduces a phase ramp in the synthesised time series. Pass "
-            "Tstart matching the physical arrival time (e.g. r/c0) to align "
-            "the trace with travel time.",
+            f"fourier_synthesis: frequencies[0]={frequencies[0]:.3g} Hz > 0. "
+            "The IFFT places bin 0 at DC, so the returned trace is the "
+            "complex envelope demodulated by frequencies[0] — a "
+            f"{frequencies[0]:.3g} Hz band start puts a component at f back "
+            f"at f-{frequencies[0]:.3g} Hz — sampled at Nfreq*df, not the "
+            "passband waveform. This is stack.m's behaviour (its heterodyne "
+            "back to the base frequency is commented out) and is what the "
+            "raw-DFT route returns; Tstart only moves the time origin and "
+            "does not re-modulate. For a passband trace use "
+            "Field.synthesize_time_series / Field.to_time_trace.",
             UserWarning, stacklevel=2,
         )
 

@@ -543,6 +543,89 @@ class TestGuardsThatFireBeforeAnyBinaryRuns:
             model.run(_env(), _CLASS_SRC, _CLASS_RCV)
 
 
+class TestTheReverberationCitationNamesTheRoutineOnOptionRsPath:
+    """``_read_reverberation`` explains the reverberation quantity by citing
+    the OASES lines that convert it to dB. Two routines in ``oassun26.f``
+    carry a byte-identical "CONVERT TO dB" block — ``REVRAN`` at :633-638 and
+    ``REVINT`` at :853-858 — so a content check alone cannot tell them apart,
+    and an address that names the wrong one reads as correct. Only the DATA
+    PATH separates them, and that is what this pins.
+
+    ``REVINT`` writes ``CFFs``, which ``unoass21.f:38`` equivalences to the
+    ``XS`` that ``PLTLOS`` plots into the ``.plt`` this model reads.
+    ``REVRAN`` writes ``CFF(1,1)`` (equivalenced to ``X``) and is reached only
+    from the ``CCONTU`` contour branch, which option ``'r'`` does not enable.
+    """
+
+    @staticmethod
+    def _src(name):
+        from pathlib import Path
+        path = (Path(__file__).resolve().parent.parent / 'third_party' /
+                'oases' / 'src' / name)
+        return path.read_text().splitlines()
+
+    @staticmethod
+    def _docstring():
+        from uacpy.models.oases import OASS
+        return inspect.getdoc(OASS._read_reverberation)
+
+    def test_the_cited_block_converts_to_db(self):
+        cited = '\n'.join(self._src('oassun26.f')[853 - 1:858])
+        assert 'CONVERT TO dB' in cited
+        assert 'CVMAGS' in cited          # magnitude squared
+        assert 'VCLIP' in cited           # floored before the log
+        assert 'VALG10' in cited          # log10
+        assert '-5E0' in cited            # times -5 on an already-squared term
+
+    def test_the_cited_block_writes_the_array_pltlos_plots(self):
+        # The discriminating half. REVRAN's block passes every assertion
+        # above and still cannot be the source of these curves, because it
+        # writes CFF(1,1) rather than CFFs.
+        cited = '\n'.join(self._src('oassun26.f')[853 - 1:858])
+        other = '\n'.join(self._src('oassun26.f')[633 - 1:638])
+        assert 'CFFs(1)' in cited and 'CFFs(1)' not in other
+        assert 'CFF(1,1),1,-5E0' in other
+        driver = '\n'.join(self._src('unoass21.f'))
+        assert '(XS(1),CFFS(1))' in driver      # so CFFs IS the plotted XS
+        assert '(X(1,1),CFF(1,1))' in driver    # while CFF(1,1) is X
+
+    def test_the_cited_lines_sit_inside_revint_not_revran(self):
+        lines = self._src('oassun26.f')
+        starts = {}
+        for i, ln in enumerate(lines, 1):
+            up = ln.strip().upper()
+            for name in ('REVRAN', 'REVINT', 'REVCOV'):
+                if up.startswith(f'SUBROUTINE {name}('):
+                    starts[name] = i
+        assert set(starts) == {'REVRAN', 'REVINT', 'REVCOV'}
+        assert starts['REVRAN'] < 638 < starts['REVINT']
+        assert starts['REVINT'] < 853 and 858 < starts['REVCOV']
+
+    def test_option_r_reaches_revint_and_not_the_contour_branch(self):
+        driver = self._src('unoass21.f')
+        # option 'r' sets PLTL (and REVERB); it never sets CCONTU.
+        i = next(k for k, ln in enumerate(driver)
+                 if "OPT(I).EQ.'r'" in ln)
+        branch = '\n'.join(driver[i:i + 8])
+        assert 'PLTL=.TRUE.' in branch.replace(' ', '')
+        assert 'CCONTU' not in branch
+        # and the PLTL branch is the one that calls REVINT then PLTLOS.
+        j = next(k for k, ln in enumerate(driver) if 'CALL REVINT(' in ln)
+        assert any('PLTL' in ln for ln in driver[j - 5:j])
+        assert any('CALL PLTLOS(' in ln for ln in driver[j:j + 30])
+        # REVRAN sits under CCONTU instead.
+        k = next(n for n, ln in enumerate(driver) if 'CALL REVRAN(' in ln)
+        assert any('CCONTU' in ln for ln in driver[k - 5:k])
+
+    def test_the_docstring_carries_the_corrected_address(self):
+        doc = self._docstring()
+        assert 'oassun26.f:853-858' in doc
+        assert '876-880' not in doc
+        # It must also say why the other block is not this one, or the next
+        # reader re-derives the same wrong answer from a content match.
+        assert 'REVRAN' in doc and '633-638' in doc
+
+
 @pytest.mark.requires_oases
 class TestTwoBinaryRoundTrip:
     """Driven through the real oast2 → oass2 chain."""
@@ -551,8 +634,12 @@ class TestTwoBinaryRoundTrip:
         result = _oass(work_dir=tmp_path, cleanup=False).run(
             _env(), _CLASS_SRC, _CLASS_RCV)
         assert isinstance(result, Field)
-        # -10*log10 E[|p_scat|^2] (oassun26.f:876-880) is a reverberation
-        # level, not transmission loss, so it must not read as pressure/dB.
+        # -10*log10 E[|p_scat|^2] — REVINT's "CONVERT TO dB" block
+        # (oassun26.f:853-858), reached because option 'r' sets PLTL
+        # (unoass21.f:607-609) — is a reverberation LOSS: the leading minus
+        # from VSMUL(-5E0) at :858 means a larger value is a weaker scattered
+        # field. Same direction as transmission loss, different quantity, so
+        # it must not read as pressure/dB.
         assert result.kind == 'reverberation' and result.unit == 'dB'
         assert result.shape == (len(_CLASS_RCV.depths),
                                 len(_CLASS_RCV.ranges))
@@ -565,6 +652,64 @@ class TestTwoBinaryRoundTrip:
         assert 'interpolated' not in result.metadata
         # work_dir survives, so the curve file is reachable (DOCUMENTATION §8).
         assert result.metadata['plt_file'] == str(tmp_path / 'oass_run.plt')
+
+    def test_field_max_is_the_smallest_stored_loss_not_the_largest(
+            self, tmp_path):
+        """``Field.max()`` slices the LOUDEST cell, and on a reverberation
+        grid that is the SMALLEST stored number — driven through the real
+        oast2 → oass2 chain rather than a hand-written array.
+
+        This is the end-to-end half of the loss convention, and it is what
+        the two existing direction tests do not cover:
+
+        * ``test_multiple_scattering_lowers_the_reverberation_level``
+          compares two real runs against each other (``oass.tex:163-166``), so
+          it pins a RELATIVE bound between two kernels. A reader that negated
+          every value would flip both runs together and keep the inequality.
+        * ``test_reverberation_field`` above checks the near/far endpoints of
+          one real run, but nothing downstream of the Field.
+        * ``test_core_classes.py`` pins ``Field.max()``, ``.db`` and the axis
+          label on Fields built from hand-written arrays, so it pins the
+          CONSUMERS against a direction the test itself supplies.
+
+        Nothing joined the two, so a reader that negated the payload would
+        leave every consumer pin green. The direction is not uacpy's choice:
+        ``REVINT``'s "CONVERT TO dB" block applies ``CVMAGS`` (square),
+        ``VCLIP``, ``VALG10`` and then ``VSMUL(…, -5E0, …)``
+        (``oassun26.f:855-858``), and that leading minus is what makes the
+        stored quantity a loss.
+
+        The ``max()`` assertion comes FIRST on purpose. Negating the reader
+        breaks the range direction too, so an assertion order that checked
+        growth first would never reach — and so never prove — the consumer
+        this test exists for.
+        """
+        result = _oass(work_dir=tmp_path).run(_env(), _CLASS_SRC, _CLASS_RCV)
+        data = np.asarray(result.data, dtype=float)
+        assert result.kind == 'reverberation'
+
+        peak = result.max()
+        # A loss: least loss is loudest, so max() takes the global MINIMUM
+        # branch. This is what fails if ``Field.max`` stops counting
+        # reverberation among the inverted kinds — it then returns the other
+        # end of a 15.5 dB spread (measured on this case), which the next
+        # assertion pins as a real gap rather than a degenerate one.
+        assert float(peak.data) == pytest.approx(float(data.min()))
+        assert float(data.max()) - float(data.min()) > 10.0
+        # The loudest scattering is the cell nearest the source. This is the
+        # assertion that carries the SIGN: negating the whole payload flips
+        # which value is smallest along with the values, so the comparison
+        # above survives it, and only the cell the answer lands in moves
+        # (measured: 200 m → 1742.9 m under a negated reader).
+        assert peak.pinned['range'] == pytest.approx(
+            float(result.coords['range'][0]))
+
+        # The premise that makes those the same cell: the scattered field
+        # weakens with range, so the stored LOSS grows. Every range beyond the
+        # nearest is a larger number, at both receiver depths. The growth is
+        # not monotone cell to cell (a 2.9 dB dip at 1.5 km here), so this is
+        # stated against the nearest range rather than as a strict diff.
+        assert (data[:, 1:] > data[:, :1]).all()
 
     def test_wavenumber_count_comes_from_the_rhs_not_the_deck(self, tmp_path):
         # The deck carries 2048 (write_oass_input's explicit value); the
@@ -1229,7 +1374,7 @@ class TestSeaSurfaceIsALegalScatteringInterface:
         data = np.asarray(result.data)
         assert data.shape == (len(_CLASS_RCV.depths), len(_CLASS_RCV.ranges))
         assert np.isfinite(data).all()
-        # A reverberation level, not a saturated sentinel.
+        # A real reverberation loss, not a saturated sentinel.
         assert 0.0 < float(np.min(data)) < 200.0
 
 

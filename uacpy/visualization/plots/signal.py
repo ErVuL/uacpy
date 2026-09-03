@@ -171,7 +171,10 @@ def plot_fk(frequencies, wavenumbers, power, ax=None, *, ref=REFERENCE_PRESSURE_
     ax.set_ylabel("Frequency (Hz)")
     ax.grid(alpha=0.3)
     if show_colorbar:
-        fig.colorbar(im, ax=ax, label="Power (dB)")
+        # With the reference: `power_to_db(power, ref)` above makes this an
+        # ABSOLUTE level, so the number is meaningless without saying what it
+        # is referred to — as every sibling axis in this module does.
+        fig.colorbar(im, ax=ax, label=f"Power (dB re {_ref_label(ref)}Pa²)")
     return fig, ax
 
 
@@ -277,15 +280,18 @@ def plot_psd(frequencies, psd_linear, ax=None, *, ref=REFERENCE_PRESSURE_WATER,
     return fig, ax
 
 
-@typed_plot_error
-def plot_ppsd(result, ax=None, *, ymin=0, ymax=200, vmin=0, vmax=None,
-              cmap="jet", title=None, figsize=(10, 6), show_colorbar=True,
-              **mpl_kw):
-    """2-D histogram of PSD levels. Consumes a ``PPSDResult``."""
-    if not hasattr(result, 'frequencies') or not hasattr(result, 'level_edges'):
-        raise ConfigurationError(
-            f"plot_ppsd: expected a ppsd() result (with .frequencies and "
-            f".level_edges); got {type(result).__name__}.")
+def _plot_level_histogram(result, ax, *, y_label, default_title, caller,
+                          ymin, ymax, vmin, vmax, cmap, title, figsize,
+                          show_colorbar, **mpl_kw):
+    """Render one PPSD-style level histogram: the density mesh, the mean and
+    ±1 STD lines over it, and a log frequency axis.
+
+    Shared by :func:`plot_ppsd` and :func:`plot_constant_q_ppsd`, which differ
+    only in the level axis label, the default title and the name they report
+    in an off-screen warning. Any result carrying ``frequencies``,
+    ``level_edges``, ``pdf``, ``mean_db``, ``std_db`` and ``binwidth_db``
+    renders here; a caller's own shape guards run before it, so nothing that
+    would raise gets a figure allocated first."""
     if vmax is None:
         # Each frequency column integrates to 1 over the level axis, so the
         # largest attainable density is 1/binwidth (all mass in one bin) —
@@ -306,21 +312,47 @@ def plot_ppsd(result, ax=None, *, ymin=0, ymax=200, vmin=0, vmax=None,
     ax.plot(result.frequencies, result.mean_db + result.std_db, "k--",
             label="Mean level ± STD")
     ax.plot(result.frequencies, result.mean_db - result.std_db, "k--")
-    ax.set_title(title or f"PPSD ({result.seg_duration}s)", loc="left")
+    ax.set_title(title or default_title, loc="left")
     ax.set_xlabel("Frequency (Hz)")
-    # ppsd fixes ref=1e-6 and defaults to scaling='density', so the axis
-    # is dB re 1 uPa^2/Hz. The constant-Q twin already names its reference;
-    # a dB axis without one is an incomplete unit on a published figure.
-    ax.set_ylabel("Level (dB re µPa²/Hz)")
+    ax.set_ylabel(y_label)
     ax.set_xscale("log")
     ax.set_xlim(_log_freq_xlim(result.frequencies))
     ax.set_ylim((ymin, ymax))
     # The level axis carries the histogram, not the density: level_edges spans
     # every row the mesh draws.
-    _warn_if_offscreen(ax, result.level_edges, "plot_ppsd", "ymin=/ymax")
+    _warn_if_offscreen(ax, result.level_edges, caller, "ymin=/ymax")
     ax.grid(which="both", alpha=0.5)
     ax.legend(loc="upper right")
     return fig, ax
+
+
+@typed_plot_error
+def plot_ppsd(result, ax=None, *, ymin=0, ymax=200, vmin=0, vmax=None,
+              cmap="jet", title=None, figsize=(10, 6), show_colorbar=True,
+              **mpl_kw):
+    """2-D histogram of PSD levels. Consumes a ``PPSDResult``.
+
+    The level axis is named from the reference the result carries, so a caller
+    who ran :func:`uacpy.acoustic_signal.ppsd` against a Pascal reference is
+    not handed a µPa axis 120 dB out."""
+    if not hasattr(result, 'frequencies') or not hasattr(result, 'level_edges'):
+        raise ConfigurationError(
+            f"plot_ppsd: expected a ppsd() result (with .frequencies and "
+            f".level_edges); got {type(result).__name__}.")
+    # ``ppsd`` takes ``ref=`` and carries it on the result, so the axis names
+    # the caller's reference rather than assuming the package default; a
+    # hardcoded "µPa²" was 120 dB out for anyone working in Pa. A dB axis
+    # without a reference is an incomplete unit on a published figure.
+    # ``ppsd`` also takes ``scaling=``, and the result carries which was used:
+    # 'density' levels are per hertz, 'spectrum' levels are per band, so the
+    # axis cannot claim /Hz over a spectrum.
+    ref = getattr(result, 'ref', REFERENCE_PRESSURE_WATER)
+    per_hz = "/Hz" if getattr(result, 'scaling', 'density') == 'density' else ""
+    return _plot_level_histogram(
+        result, ax, y_label=f"Level (dB re {_ref_label(ref)}Pa²{per_hz})",
+        default_title=f"PPSD ({result.seg_duration}s)", caller="plot_ppsd",
+        ymin=ymin, ymax=ymax, vmin=vmin, vmax=vmax, cmap=cmap, title=title,
+        figsize=figsize, show_colorbar=show_colorbar, **mpl_kw)
 
 
 @typed_plot_error
@@ -446,37 +478,21 @@ def plot_constant_q_ppsd(result, ax=None, *, scaling="spectrum", ymin=0,
                          figsize=(10, 6), show_colorbar=True, **mpl_kw):
     """2-D histogram of constant-Q power levels. Consumes a ``CQPPSDResult``.
     The dB reference is fixed at compute time by
-    :func:`probabilistic_constant_q` (default 1 µPa); pass the same ``scaling``
-    used there so the level axis reads ``dB re µPa²`` (band power) or
-    ``dB re µPa²/Hz`` (density)."""
-    unit = "µPa²" + ("/Hz" if scaling == "density" else "")
-    if vmax is None:
-        vmax = 1 / result.binwidth_db          # density ceiling, as in plot_ppsd
-    fig, ax = fig_ax(ax, figsize)
-    align = result.binwidth_db / 2             # bin edges → bin centres
-    pcm = ax.pcolormesh(result.frequencies, result.level_edges[:-1] + align,
-                        result.pdf, cmap=cmap, shading="auto",
-                        vmin=vmin, vmax=vmax, **mpl_kw)
-    if show_colorbar:
-        fig.colorbar(pcm, ax=ax,
-                     label=f"Probability Density ({result.binwidth_db:.1f} dB/bin)")
-    ax.plot(result.frequencies, result.mean_db, "k-", label="Mean level", lw=1.5)
-    ax.plot(result.frequencies, result.mean_db + result.std_db, "k--",
-            label="Mean level ± STD")
-    ax.plot(result.frequencies, result.mean_db - result.std_db, "k--")
-    ax.set_title(title or "Constant-Q PPSD", loc="left")
-    ax.set_xlabel("Frequency (Hz)")
-    ax.set_ylabel(f"Level (dB re {unit})")
-    ax.set_xscale("log")
-    ax.set_xlim(_log_freq_xlim(result.frequencies))
-    ax.set_ylim((ymin, ymax))
-    # The level axis carries the histogram, not the density: level_edges spans
-    # every row the mesh draws.
-    _warn_if_offscreen(ax, result.level_edges, "plot_constant_q_ppsd",
-                       "ymin=/ymax")
-    ax.grid(which="both", alpha=0.5)
-    ax.legend(loc="upper right")
-    return fig, ax
+    :func:`probabilistic_constant_q` (default 1 µPa) and read off the result,
+    so the level axis names whatever reference was used; pass the same
+    ``scaling`` used there so it reads band power or a density."""
+    # From the result, not assumed: a hardcoded "µPa²" was 120 dB out for a
+    # caller who computed against a Pascal reference.
+    ref = getattr(result, 'ref', REFERENCE_PRESSURE_WATER)
+    # The result carries the scaling it was computed with; the keyword
+    # stays as an override for a hand-built result that has none.
+    scaling = getattr(result, 'scaling', None) or scaling
+    unit = f"{_ref_label(ref)}Pa²" + ("/Hz" if scaling == "density" else "")
+    return _plot_level_histogram(
+        result, ax, y_label=f"Level (dB re {unit})",
+        default_title="Constant-Q PPSD", caller="plot_constant_q_ppsd",
+        ymin=ymin, ymax=ymax, vmin=vmin, vmax=vmax, cmap=cmap, title=title,
+        figsize=figsize, show_colorbar=show_colorbar, **mpl_kw)
 
 
 @typed_plot_error

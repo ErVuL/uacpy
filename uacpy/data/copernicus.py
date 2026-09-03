@@ -14,9 +14,14 @@ extra and a free Copernicus Marine account:
     pip install "uacpy[copernicus]"   # or: pip install -e ".[copernicus]"
     copernicusmarine login            # one-time, stores credentials
 
-Temperature comes back as potential temperature (``thetao``); it is used as a
-close proxy for in-situ temperature in the sound-speed equation (sub-m/s
-effect over typical profiles).
+Temperature comes back as potential temperature (``thetao``), which the
+sound-speed equations do not take: they want in-situ temperature. Every
+column is therefore converted with
+:func:`uacpy.data._geo.insitu_from_potential` (UNESCO 44 adiabatic gradient)
+before the sound-speed call. The correction is small in the upper ocean and
+not negligible below it — at S=34.7 it is +0.64 m/s at 2000 m, +1.97 m/s at
+5000 m and +4.98 m/s at 10000 m. WOA23 and Argo report in-situ temperature
+already, so all three SSP routes now agree on the deep column.
 
 Unlike every other network source in this layer, these fetchers take no
 ``timeout``: the transport is the ``copernicusmarine`` session, which exposes
@@ -35,6 +40,7 @@ from uacpy.core.environment import SoundSpeedProfile
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.data._geo import (
     Coordinate, as_coordinate, normalize_lon, depth_to_pressure_dbar,
+    insitu_from_potential, checked_n_points,
 )
 from uacpy.data._time import parse_date
 from uacpy.data.sound_speed import (
@@ -128,8 +134,11 @@ def fetch_ssp_operational(
         verbose=verbose,
     )
     pressure = depth_to_pressure_dbar(depths, lat)
+    # thetao is potential temperature; the sound-speed equations want in-situ.
+    t_insitu = insitu_from_potential(sal, temp, pressure)
     speed_fn = _FORMULAS[formula]
-    c = np.array([speed_fn(t, s, p) for t, s, p in zip(temp, sal, pressure)])
+    c = np.array([speed_fn(t, s, p)
+                  for t, s, p in zip(t_insitu, sal, pressure)])
     log_message(
         'copernicus', f"operational SSP at {lat:.3f}, {lon:.3f} ({date}): "
         f"{depths.size} levels, c=[{c.min():.1f}, {c.max():.1f}] m/s",
@@ -143,7 +152,7 @@ def fetch_ssp_operational(
         requested_date=str(parse_date(date)),
     )
     return SoundSpeedProfile(depths=depths, data=c, shape='measured',
-                             data_sources=(prov,))
+                             data_sources=(prov,), formula=formula)
 
 
 def fetch_ssp_transect_operational(
@@ -178,11 +187,7 @@ def fetch_ssp_transect_operational(
             f"fetch_ssp_transect_operational: unknown formula={formula!r}.",
             remediation=f"Use one of {sorted(_FORMULAS)}.",
         )
-    if int(n_points) < 2:
-        raise ConfigurationError(
-            f"fetch_ssp_transect_operational: n_points must be >= 2, "
-            f"got {n_points}.",
-            remediation="Pass n_points>=2 to define a transect.")
+    n_points = checked_n_points(n_points, 'fetch_ssp_transect_operational')
     when = parse_date(date).isoformat()
     marine = _import_copernicusmarine()
     ds = _open_dataset(
@@ -201,14 +206,17 @@ def fetch_ssp_transect_operational(
                 remediation="Keep the transect within the dataset's wet domain.",
             )
         pressure = depth_to_pressure_dbar(depths, la)
-        c = np.array([speed_fn(t, s, p) for t, s, p in zip(temp, sal, pressure)])
+        t_insitu = insitu_from_potential(sal, temp, pressure)
+        c = np.array([speed_fn(t, s, p)
+                      for t, s, p in zip(t_insitu, sal, pressure)])
         prov = DataProvenance(source=SOURCES['copernicus'],
                               data_date=actual['date'],
                               data_point=actual['point'],
                               requested_point=(float(la), float(lo)),
                               requested_date=when)
-        columns.append(SoundSpeedProfile(depths=depths, data=c, shape='measured',
-                                         data_sources=(prov,)))
+        columns.append(SoundSpeedProfile(
+            depths=depths, data=c, shape='measured', data_sources=(prov,),
+            formula=formula))
 
     log_message(
         'copernicus', f"operational range-dependent SSP: {n_points} columns "
@@ -237,6 +245,11 @@ def fetch_ts_profile_operational(
 
     Truncated at the seafloor (first non-finite level). See
     :func:`fetch_ssp_operational` for parameters and exceptions.
+
+    The temperature is the dataset's own ``thetao`` — *potential* temperature,
+    unconverted, because this is the raw-column accessor. Feed it through
+    :func:`uacpy.data._geo.insitu_from_potential` before any sound-speed
+    equation, as :func:`fetch_ssp_operational` does.
     """
     return _ts_column(point, date=date, max_days=max_days,
                       dataset_id=dataset_id, verbose=verbose)[:3]
@@ -267,25 +280,53 @@ def _ts_column(point, *, date, max_days, dataset_id, verbose):
     return depths, temp, sal, actual
 
 
-def _snapped_date(da, when: Optional[str], max_days: int) -> Optional[str]:
+#: Per-fetcher wording for :func:`_snapped_date`'s out-of-coverage error:
+#: ``(message(actual, gap, when, max_days), remediation)``. The three fetchers
+#: word the same failure differently and point at different alternatives, so
+#: the wording is data rather than three copies of the guard.
+_DATE_GAP_MESSAGES = {
+    'ssp': (
+        lambda actual, gap, when, max_days:
+            f"Copernicus: nearest available time is {actual} "
+            f"({gap:.0f} days from requested {when}, > max_days={max_days}) "
+            "— the date is outside the dataset's range.",
+        "Pass a date within range, a forecast dataset_id, "
+        "raise max_days, or use ssp_sources='woa23'."),
+    'waves': (
+        lambda actual, gap, when, max_days:
+            f"Copernicus waves: nearest time is {actual} ({gap:.0f} days "
+            f"from {when}, > max_days={max_days}).",
+        "Pass a date within range, raise max_days, or use "
+        "the WaveWatch III source."),
+    'ph': (
+        lambda actual, gap, when, max_days:
+            f"Copernicus pH: nearest time is {actual} ({gap:.0f} days from "
+            f"{when}, > max_days={max_days}) — outside the dataset's range.",
+        "Pass a date within range, raise max_days, or rely "
+        "on the GLODAP climatology / model default."),
+}
+
+
+def _snapped_date(da, when: Optional[str], max_days: int,
+                  kind: str = 'ssp') -> Optional[str]:
     """The time step ``sel(method='nearest')`` landed on, or ``None``.
 
     ``method='nearest'`` snaps silently to the dataset edge for an out-of-range
     date; raise rather than substitute an edge value so the tolerance is
     honoured the same way the other dated sources honour it.
+
+    ``kind`` selects the wording in :data:`_DATE_GAP_MESSAGES` — the waves and
+    pH fetchers ran their own copies of this guard, differing only in the
+    message and the alternative source it recommends.
     """
     if when is None or 'time' not in getattr(da, 'coords', {}):
         return None
     actual = np.datetime64(np.asarray(da['time'].values).reshape(-1)[0], 'D')
     gap = abs((actual - np.datetime64(when, 'D')) / np.timedelta64(1, 'D'))
     if gap > max_days:
-        raise DataFetchError(
-            f"Copernicus: nearest available time is {actual} "
-            f"({gap:.0f} days from requested {when}, > max_days={max_days}) "
-            "— the date is outside the dataset's range.",
-            remediation="Pass a date within range, a forecast dataset_id, "
-                        "raise max_days, or use ssp_sources='woa23'.",
-        )
+        message, remediation = _DATE_GAP_MESSAGES[kind]
+        raise DataFetchError(message(actual, gap, when, max_days),
+                             remediation=remediation)
     return str(actual)
 
 
@@ -416,16 +457,7 @@ def fetch_waves_operational(
     sel = {'latitude': lat, 'longitude': normalize_lon(lon), 'time': when}
     hs_da = ds[WAVE_HS_VAR].sel(method='nearest', **sel)
     _check_snapped_point(ds, lat, sel['longitude'], _snapped_point(hs_da))
-    if 'time' in getattr(hs_da, 'coords', {}):
-        actual = np.datetime64(np.asarray(hs_da['time'].values).reshape(-1)[0], 'D')
-        gap = abs((actual - np.datetime64(when, 'D')) / np.timedelta64(1, 'D'))
-        if gap > max_days:
-            raise DataFetchError(
-                f"Copernicus waves: nearest time is {actual} ({gap:.0f} days "
-                f"from {when}, > max_days={max_days}).",
-                remediation="Pass a date within range, raise max_days, or use "
-                            "the WaveWatch III source.",
-            )
+    _snapped_date(hs_da, when, max_days, 'waves')
     hs = float(np.asarray(hs_da.values, float).reshape(-1)[0])
     if not np.isfinite(hs):
         raise DataFetchError(
@@ -471,16 +503,7 @@ def fetch_ph_operational(
     sel = {'latitude': lat, 'longitude': normalize_lon(lon), 'time': when}
     ph_da = ds[BGC_PH_VAR].sel(method='nearest', **sel)
     _check_snapped_point(ds, lat, sel['longitude'], _snapped_point(ph_da))
-    if 'time' in getattr(ph_da, 'coords', {}):
-        actual = np.datetime64(np.asarray(ph_da['time'].values).reshape(-1)[0], 'D')
-        gap = abs((actual - np.datetime64(when, 'D')) / np.timedelta64(1, 'D'))
-        if gap > max_days:
-            raise DataFetchError(
-                f"Copernicus pH: nearest time is {actual} ({gap:.0f} days from "
-                f"{when}, > max_days={max_days}) — outside the dataset's range.",
-                remediation="Pass a date within range, raise max_days, or rely "
-                            "on the GLODAP climatology / model default.",
-            )
+    _snapped_date(ph_da, when, max_days, 'ph')
     depth = np.asarray(ds['depth'].values, float).reshape(-1)
     ph = np.asarray(ph_da.values, float).reshape(-1)
     n = min(depth.size, ph.size)

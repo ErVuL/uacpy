@@ -469,3 +469,93 @@ def test_extract_ts_rejects_a_longitude_outside_the_domain():
     ds = _regional_xr_dataset()
     with pytest.raises(DataFetchError, match='longitude'):
         copernicus._extract_ts(ds, 30.4, -10.0, None)
+
+
+_DEEP_DEPTH = [0.0, 1000.0, 5000.0]
+_DEEP_THETA = [18.0, 4.0, 1.5]
+_DEEP_S = [36.0, 34.9, 34.7]
+
+
+def test_deep_ssp_converts_potential_temperature_to_in_situ(monkeypatch):
+    """``thetao`` is potential temperature; the sound-speed equations want
+    in-situ, which is warmer under pressure. Feeding theta straight in cost
+    about 2 m/s at 5000 m — this pins the conversion at the deep level and
+    pins that it leaves the surface (0 dbar) alone."""
+    from uacpy.data._geo import depth_to_pressure_dbar
+    from uacpy.data.sound_speed import _FORMULAS
+
+    _install_fake_toolbox(monkeypatch, _DSStub(_DEEP_DEPTH, _DEEP_THETA, _DEEP_S))
+    ssp = copernicus.fetch_ssp_operational((30.0, -40.0), date='2020-06-15')
+
+    pressure = depth_to_pressure_dbar(np.array(_DEEP_DEPTH), 30.0)
+    raw = np.array([_FORMULAS['unesco'](t, s, p)
+                    for t, s, p in zip(_DEEP_THETA, _DEEP_S, pressure)])
+    excess = ssp.data.ravel() - raw
+    assert excess[0] == pytest.approx(0.0, abs=1e-9)     # surface: no shift
+    assert 0.2 < excess[1] < 0.4                          # 1000 m
+    assert 1.8 < excess[2] < 2.1                          # 5000 m
+
+
+def test_deep_transect_ssp_converts_potential_temperature(monkeypatch):
+    """The transect fetcher carries the same conversion as the single point."""
+    _install_fake_toolbox(monkeypatch, _DSStub(_DEEP_DEPTH, _DEEP_THETA, _DEEP_S))
+    point = copernicus.fetch_ssp_operational((30.0, -40.0), date='2020-06-15')
+    transect = copernicus.fetch_ssp_transect_operational(
+        (30.0, -40.0), (30.0, -40.5), date='2020-06-15', n_points=2)
+    assert transect.data[-1, 0] == pytest.approx(point.data[-1], abs=0.05)
+
+
+def test_raw_ts_profile_stays_potential_temperature(monkeypatch):
+    """The raw-column accessor is documented as raw and must not convert."""
+    _install_fake_toolbox(monkeypatch, _DSStub(_DEEP_DEPTH, _DEEP_THETA, _DEEP_S))
+    _z, t, _s = copernicus.fetch_ts_profile_operational(
+        (30.0, -40.0), date='2020-06-15')
+    assert t.tolist() == _DEEP_THETA
+
+
+@pytest.mark.parametrize('formula', ['unesco', 'delgrosso'])
+def test_copernicus_profiles_record_the_formula_that_built_them(monkeypatch,
+                                                                formula):
+    """Both fetchers stamp ``formula``, so a later seafloor extension continues
+    the column under its own equation rather than defaulting to UNESCO."""
+    _install_fake_toolbox(monkeypatch, _DSStub(_DEPTH, _T, _S))
+    point = copernicus.fetch_ssp_operational((30.0, -40.0), date='2020-06-15',
+                                             formula=formula)
+    assert point.formula == formula
+    transect = copernicus.fetch_ssp_transect_operational(
+        (30.0, -40.0), (31.0, -40.0), date='2020-06-15', n_points=3,
+        formula=formula)
+    assert transect.formula == formula
+
+
+@pytest.mark.parametrize('kind,fetcher,var,needle,remedy', [
+    ('waves', 'fetch_waves_operational', copernicus.WAVE_HS_VAR,
+     'Copernicus waves: nearest time is', 'WaveWatch III'),
+    ('ph', 'fetch_ph_operational', copernicus.BGC_PH_VAR,
+     'Copernicus pH: nearest time is', 'GLODAP'),
+])
+def test_the_waves_and_ph_fetchers_keep_their_own_date_gap_wording(
+        monkeypatch, kind, fetcher, var, needle, remedy):
+    """Both ran a verbatim copy of ``_snapped_date``'s guard. They call the
+    helper now, and each keeps the wording and the alternative source it
+    recommends."""
+    class _VarDSStub(_DSStub):
+        def __init__(self):
+            super().__init__([0.0, 10.0], [20.0, 19.0], [35.0, 35.0],
+                             time='1990-01-01')
+            self._vars[var] = _TimeDAStub([1.5, 1.5], '1990-01-01')
+
+    _install_fake_toolbox(monkeypatch, _VarDSStub())
+    with pytest.raises(DataFetchError) as excinfo:
+        getattr(copernicus, fetcher)((30.0, -40.0), date='2020-06-15')
+    assert needle in str(excinfo.value)
+    assert remedy in (excinfo.value.remediation or '')
+
+
+def test_the_ssp_date_gap_keeps_its_own_wording(monkeypatch):
+    _install_fake_toolbox(monkeypatch,
+                          _DSStub(_DEPTH, _T, _S, time='1990-01-01'))
+    with pytest.raises(DataFetchError) as excinfo:
+        copernicus.fetch_ssp_operational((30.0, -40.0), date='2020-06-15')
+    assert 'nearest available time is' in str(excinfo.value)
+    assert "ssp_sources='woa23'" in (excinfo.value.remediation or '')

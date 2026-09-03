@@ -78,6 +78,54 @@ def test_spectrogram_shape_and_finite():
 
 
 # ── probabilistic constant-Q ─────────────────────────────────────────────────
+class TestConstantQPPSDCarriesTheReferenceItsLevelsAreStatedAgainst:
+    """``probabilistic_constant_q`` takes ``ref`` and reports every level as
+    dB re ``ref**2``, but the result used not to carry that value, so every
+    consumer had to guess it and the plotter hardcoded the package default —
+    a 120 dB error for anyone working in µPa. Same fix, and same reasoning, as
+    ``ppsd`` / ``PPSDResult``.
+    """
+
+    def _run(self, **kw):
+        return probabilistic_constant_q(_tone(440.0), FS, fmin=100, fmax=2000,
+                                        bins_per_octave=12, ddB=1.0, **kw)
+
+    def test_the_default_reference_is_reported(self):
+        from uacpy.core.constants import REFERENCE_PRESSURE_WATER
+        assert self._run().ref == REFERENCE_PRESSURE_WATER
+
+    @pytest.mark.parametrize('ref', [1.0, 1e-5, 20e-6])
+    def test_a_non_default_reference_is_reported(self, ref):
+        assert self._run(ref=ref).ref == ref
+
+    def test_the_reference_tracks_a_real_120_db_move_in_the_levels(self):
+        default = self._run()
+        pascals = self._run(ref=1.0)
+        shift = np.nanmean(pascals.mean_db - default.mean_db)
+        assert shift == pytest.approx(-120.0, abs=1e-9)
+        assert default.ref != pascals.ref
+
+    def test_the_existing_fields_keep_their_positions(self):
+        """Fields carrying what the levels MEAN are appended, never inserted.
+
+        ``ref`` and ``scaling`` both came later, and both went on the end with
+        defaults, so a result another suite builds by hand from the six
+        original fields still constructs and reports both defaults. The
+        assertion is on the PREFIX rather than the whole list: freezing the
+        full tuple would fail the next honest append while catching nothing a
+        prefix check misses, since a reorder moves one of the six.
+        """
+        r = self._run()
+        original_six = ('frequencies', 'level_edges', 'pdf', 'mean_db',
+                        'std_db', 'binwidth_db')
+        assert r._fields[:len(original_six)] == original_six
+        assert set(r._fields) >= {'ref', 'scaling'}
+        built = CQPPSDResult(r.frequencies, r.level_edges, r.pdf, r.mean_db,
+                             r.std_db, r.binwidth_db)
+        assert built.ref == r.ref
+        assert built.scaling == 'spectrum'
+
+
 def test_probabilistic_constant_q():
     pp = probabilistic_constant_q(_tone(440.0), FS, fmin=100, fmax=2000,
                                   bins_per_octave=12, ddB=1.0)
@@ -405,3 +453,53 @@ class TestNearNyquistBinsReadAToneHigh:
                 call()
             assert any('negative-frequency image' in str(c.message)
                        for c in caught)
+
+    @staticmethod
+    def _one_bin_power_at_phase(u, phase_deg, fs=FS, dur=8.0):
+        """Same as ``_one_bin_power`` but with the tone's phase as an argument
+        and the bin placed exactly on ``fmax``, so ``u = 0.5`` is reachable."""
+        import warnings as _w
+        fk = u * fs
+        n = np.arange(int(dur * fs))
+        x = np.cos(2 * np.pi * fk * n / fs + np.deg2rad(phase_deg))
+        with _w.catch_warnings():
+            _w.simplefilter("ignore")
+            _, power = constant_q_psd(
+                x, fs, fmin=fk / 1.0000001, fmax=fk,
+                bins_per_octave=TestNearNyquistBinsReadAToneHigh.B)
+        return float(power[-1])
+
+    @pytest.mark.parametrize("phase_deg", [0.0, 30.0, 45.0, 60.0, 90.0])
+    def test_below_nyquist_the_frame_average_makes_the_bias_phase_free(
+            self, phase_deg):
+        """The 0.005 / 0.68 / 1.21 dB figures are averages over frame phase,
+        and below fs/2 the image sits at a non-zero -2 f_k so successive frames
+        really do see it at different phases. Any tone phase therefore reads
+        the same."""
+        got = 10 * np.log10(
+            self._one_bin_power_at_phase(0.4990, phase_deg) / 0.5)
+        assert got == pytest.approx(2.965, abs=0.02)
+
+    @pytest.mark.parametrize("phase_deg, expected_db", [
+        (0.0, 6.0206), (30.0, 4.7712), (45.0, 3.0103), (60.0, 0.0),
+    ])
+    def test_at_exactly_nyquist_the_reading_follows_the_tone_s_own_phase(
+            self, phase_deg, expected_db):
+        """At ``f_k = fs/2`` the image lands on DC, where its phase no longer
+        turns with the frame, so the frame average that produces the 3.01 dB
+        figure does not apply. The reading is ``10*log10(4 cos**2 phi)``: a
+        COSINE reads 6.02 dB, twice the 3.01 the module used to state flatly
+        for this frequency, and 3.01 is the mean over phase rather than a
+        bound."""
+        got = 10 * np.log10(
+            self._one_bin_power_at_phase(0.5, phase_deg) / 0.5)
+        assert got == pytest.approx(expected_db, abs=5e-3), (
+            f"a tone at exactly fs/2 with phase {phase_deg:g} deg reads "
+            f"{got:+.4f} dB; 10*log10(4 cos**2 phi) is {expected_db:+.4f}")
+
+    def test_a_sine_at_exactly_nyquist_is_identically_zero_on_the_grid(self):
+        """The other end of the same phase dependence: sin(pi n) is zero at
+        every sample, so the bin reads no power at all rather than 3.01 dB
+        of excess."""
+        power = self._one_bin_power_at_phase(0.5, 90.0)
+        assert power < 1e-20 * 0.5, f"read {power:g}, expected ~0"

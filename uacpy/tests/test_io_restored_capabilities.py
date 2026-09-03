@@ -8,7 +8,7 @@ the maintainer. Five of them — ``read_boundary_3d``, ``write_bty_3d``,
 and FIELD3D file layer. **They are deliberately retained for planned 3-D
 support and are not dead code.** They are unreachable from the 2-D public
 API *by design*: no uacpy model runs ``bellhop3d`` or ``field3d`` yet
-(Bellhop's RunType position 6 is hardwired ``'2'`` and
+(Bellhop's RunType position 6 is hardwired to the 2-D blank and
 ``Bellhop(dimensionality='3D')`` raises), so a call-graph sweep finds no
 caller and never will until 3-D is wired up. Zero callers is the expected
 state, not evidence of rot: they are the foundation the 3-D work starts
@@ -332,6 +332,59 @@ class TestThreeDFieldParameterDeck:
         assert deck['method'] == 'STD'
         assert deck['tesselation_check'] is True
         assert deck['sbp_flag'] == '*'
+
+    def test_an_apostrophe_in_the_title_is_sanitized_not_truncated(self,
+                                                                   tmp_path):
+        """The title goes out as a Fortran literal, so it must be quoted.
+
+        ``field3d.f90:163`` READs Title list-directed into
+        ``CHARACTER(LEN=80)``.  Interpolating the caller's string raw put
+        an unescaped apostrophe inside the delimiters, which closes the
+        literal early: ``Don't`` was written as ``'Don't'`` and read
+        back as ``Don``.  ``quote_fortran_title`` applies the same
+        ``_sanitize_title`` the 2-D writers use — apostrophes are removed
+        rather than doubled, because bellhopcxx's title parser rejects the
+        Fortran ``''`` escape.
+        """
+        deck = self._deck(tmp_path, title="O'Brien ridge")
+        assert deck['title'] == 'OBrien ridge'
+
+    def test_an_empty_title_becomes_the_shared_default(self, tmp_path):
+        """``_sanitize_title`` maps a blank name to ``unnamed``, which is
+        what every other uacpy deck writes; the raw interpolation wrote an
+        empty literal instead."""
+        deck = self._deck(tmp_path)
+        assert deck['title'] == 'unnamed'
+
+    def test_a_mode_file_name_containing_a_space_survives(self, tmp_path):
+        """``field3d.f90:192`` READs the node record list-directed.
+
+        ``READ x( I ), y( I ), ModeFileName( I )`` takes the whole
+        delimited literal for the third item, so ``'my modes'`` is one
+        value.  Splitting the record on whitespace broke it in two and
+        discarded the tail, leaving the node pointing at a mode file
+        called ``my``.
+        """
+        deck = self._deck(tmp_path, mod_file_pattern="'my modes'")
+        assert deck['nodes']['mode_file'][0] == 'my modes'
+        assert set(deck['nodes']['mode_file']) == {'my modes'}
+
+    def test_a_quoted_mode_file_name_comes_back_undelimited(self, tmp_path):
+        """The quote-aware split keeps the literal whole; the value handed
+        back is still the undelimited name, as ``DUMMY`` already was."""
+        deck = self._deck(tmp_path, mod_file_pattern="'lant'")
+        assert deck['nodes']['mode_file'][0] == 'lant'
+
+    def test_an_apostrophe_in_the_option_word_cannot_close_it(self, tmp_path):
+        """``field3d.f90:166`` READs Option the same way, into
+        ``CHARACTER(LEN=7)``; a stray apostrophe would truncate it and
+        shift every column the evaluator, tesselation and beam-pattern
+        flags live in."""
+        path = tmp_path / 'opt2.flp'
+        write_field3dflp(path, "ST'D", self.POS, self.BATHY)
+        deck = read_flp3d(path)
+        assert deck['opt'] == 'STD'
+        assert deck['method'] == 'STD'
 
     def test_a_grid_too_small_to_triangulate_is_refused(self, tmp_path):
         with pytest.raises(ConfigurationError, match='2 x 2'):

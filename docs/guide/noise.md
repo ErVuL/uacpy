@@ -329,9 +329,10 @@ coat_ship = WenzNoise(f, wind_speed_kn=10.0, shipping_level='high',
 ![Component model registries](figures/noise_component_models.png)
 
 The wind pair agrees to within a couple of dB in the mid-band and separates at
-the ends: Coates is up to 4.8 dB louder at 10 kHz and 25 kn, and its
-low-frequency roll-off is much steeper. The shipping pair differs more — Coates
-has no real hump, just a shallow maximum and a monotone roll-off, so at the
+the ends: at 25 kn Coates is 4.77 dB louder at 10 kHz, and louder still around
+4.3 kHz where the gap peaks at 5.14 dB; its low-frequency roll-off is much
+steeper, so below about 65 Hz Coates is the quieter of the two, by 10.1 dB at
+10 Hz. The shipping pair differs more — Coates has no real hump, just a shallow maximum and a monotone roll-off, so at the
 Wenz peak (30 Hz, `high`) the two disagree by 7.3 dB, and by tens of dB above
 1 kHz where both are far below the wind term anyway.
 

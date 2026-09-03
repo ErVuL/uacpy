@@ -44,8 +44,18 @@ which the window rejects while ``2 f_k`` clears its main lobe and admits as
 ``f_k`` approaches ``fs/2``. Averaged over frame phase the band power is
 inflated by ``1 + |W(2 f_k)/sum(w)|**2``: measured on the default Hann window
 at ``bins_per_octave=24`` that is under 0.005 dB for ``f_k/fs <= 0.4865``,
-0.68 dB at 0.4920, 1.21 dB at 0.4935, and 3.01 dB at ``f_k = fs/2``. It rises
-smoothly rather than switching on, and ``fmax=None`` resolves to ``fs/2``, so
+0.68 dB at 0.4920, 1.21 dB at 0.4935, and 3.01 dB at ``f_k = fs/2``. Those are
+*phase-averaged* figures, and the average is over frame phase: below Nyquist
+the image sits at a non-zero ``-2 f_k``, so successive frames see it at
+different phases and the average is what a record delivers (measured +2.94 to
++2.98 dB at ``f_k/fs = 0.4990``, whatever the tone's own phase). At exactly
+``f_k = fs/2`` the image lands on DC, its phase no longer turns with the
+frame, and the reading is set by the tone's own phase instead:
+``10*log10(4 cos**2 phi)``, i.e. **+6.02 dB for a cosine**, +3.01 dB at 45
+degrees, 0.00 dB at 60 degrees and ``-inf`` for a sine (which is identically
+zero on the sample grid at fs/2). The 3.01 dB is the mean of that over phase,
+not a bound. It rises smoothly rather than switching on, and ``fmax=None``
+resolves to ``fs/2``, so
 every default call has bins in the region and all four estimators warn when
 any bin's inflation exceeds 0.01 dB. **Broadband noise is not affected** — its
 band power is ``sigma**2 sum(w**2)/sum(w)**2`` at every bin, independent of
@@ -75,8 +85,17 @@ from uacpy.acoustic_signal._signal_validate import (
 CQTResult = namedtuple("CQTResult", "frequencies coefficients")
 CQPSDResult = namedtuple("CQPSDResult", "frequencies power")
 CQSpectrogramResult = namedtuple("CQSpectrogramResult", "frequencies times power")
+# ``ref`` is the dB reference the levels in ``pdf`` / ``mean_db`` / ``std_db``
+# are stated against — the value ``probabilistic_constant_q`` was called with,
+# carried forward so a consumer does not have to guess it. See the same field
+# on ``analysis.PPSDResult`` for why: a label that assumes the package default
+# is 120 dB out for a caller working in µPa. Appended last so the existing
+# positional fields keep their indices, and defaulted so a synthetic result is
+# still constructible; the estimator always passes the caller's value.
 CQPPSDResult = namedtuple(
-    "CQPPSDResult", "frequencies level_edges pdf mean_db std_db binwidth_db")
+    "CQPPSDResult",
+    "frequencies level_edges pdf mean_db std_db binwidth_db ref scaling",
+    defaults=(REFERENCE_PRESSURE_WATER, "spectrum"))
 
 _SCALINGS = ("spectrum", "density")
 
@@ -126,6 +145,9 @@ def _cq_kernels(frequencies, Q, fs, window):
 # The bias is 10*log10(1 + ratio**2) and rises smoothly with f_k/fs: measured
 # on a Hann window at B=24 it is under 0.005 dB for every f_k/fs <= 0.4865,
 # first crosses 0.01 dB at f_k/fs ~ 0.4875, and reaches 3.01 dB at f_k = fs/2.
+# 3.01 dB is the phase average, not a bound: at exactly fs/2 the image lands on
+# DC and the reading follows the tone's own phase as 10*log10(4 cos**2 phi),
+# so a cosine reads +6.02 dB and a sine is identically zero on the grid.
 _CQ_IMAGE_BIAS_WARN_DB = 0.01
 
 
@@ -139,7 +161,11 @@ def _cq_image_ratio(frequencies, fs, kernels):
     ``1 + ratio**2`` averaged over frame phase, so the estimators read a
     coherent tone high by that factor. The ratio is negligible while
     ``2 f_k`` sits well outside the window's main lobe and rises to 1 at
-    ``f_k = fs/2``, where the image lands on DC.
+    ``f_k = fs/2``, where the image lands on DC. That last point is the one
+    place the frame average does not apply: an image on DC keeps the same
+    phase in every frame, so the reading there is ``10*log10(4 cos**2 phi)``
+    in the tone's own phase (+6.02 dB for a cosine) rather than the 3.01 dB
+    the ``1 + ratio**2`` average gives.
 
     Broadband noise is untouched: its band power is ``sigma**2 * sum(w**2) /
     sum(w)**2`` at every bin, independent of ``f_k``, so the correct remedy is
@@ -259,6 +285,8 @@ def _cq_setup(data, sample_rate, fmin, fmax, bins_per_octave, window, caller):
             f"close enough to Nyquist that the tone's negative-frequency "
             f"image leaks through the analysis window: a coherent tone in "
             f"those bins reads high by up to {bias_db[hot].max():.2f} dB "
+            f"averaged over frame phase (a bin at exactly fs/2 follows the "
+            f"tone's own phase instead: +6.02 dB for a cosine) "
             f"(highest bin {freqs[-1]:.4g} Hz, f/fs = {freqs[-1] / fs:.4f}). "
             f"Broadband noise in the same bins is unaffected. Lower fmax to "
             f"read tone levels there.",
@@ -342,10 +370,13 @@ def probabilistic_constant_q(data, sample_rate, *, fmin=20.0, fmax=None,
     whereas ``ppsd`` histograms Welch averages over ``seg_duration`` chunks,
     so the level spread here is wider for the same signal. Only frames whose
     window lay fully inside the signal contribute (per bin). Returns a :class:`CQPPSDResult`
-    ``(frequencies, level_edges, pdf, mean_db, std_db, binwidth_db)``; ``pdf`` is
-    shaped ``(n_levels, n_freqs)`` and density-normalised per frequency column
-    (empty bins are ``NaN``). With ``scaling='density'`` the levels are PSD
-    levels (dB re ref²/Hz) rather than band-power levels (dB re ref²).
+    ``(frequencies, level_edges, pdf, mean_db, std_db, binwidth_db, ref)``;
+    ``pdf`` is shaped ``(n_levels, n_freqs)`` and density-normalised per
+    frequency column (empty bins are ``NaN``). With ``scaling='density'`` the
+    levels are PSD levels (dB re ref²/Hz) rather than band-power levels
+    (dB re ref²). The ``ref`` those levels are stated against comes back in the
+    result rather than having to be assumed downstream — a consumer that
+    hardcodes the package default is 120 dB out for a caller working in µPa.
     """
     _check_scaling(scaling, "probabilistic_constant_q")
     x, fs, freqs, kernels = _cq_setup(
@@ -370,4 +401,8 @@ def probabilistic_constant_q(data, sample_rate, *, fmin=20.0, fmax=None,
         mean_db[i] = vals.mean()
         std_db[i] = vals.std()
     pdf[pdf == 0] = np.nan
-    return CQPPSDResult(freqs, level_edges, pdf, mean_db, std_db, ddB)
+    # See PPSDResult: the reference and the scaling are part of what the
+    # levels MEAN, so they travel with them rather than being restated by
+    # every consumer.
+    return CQPPSDResult(freqs, level_edges, pdf, mean_db, std_db, ddB,
+                        float(ref), str(scaling))

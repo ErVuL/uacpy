@@ -19,7 +19,7 @@ from uacpy.core._carrier_validate import (
     _validate_acoustic_type, _require_strictly_increasing,
     _require_attenuation_in_range,
     _require_positive, _require_non_negative, _coerce_data_sources,
-    _require_finite,
+    _require_finite, _reject_complex,
     _dedupe_provenance,
 )
 
@@ -34,7 +34,10 @@ _NON_GEOACOUSTIC_TYPES = frozenset({'vacuum', 'rigid', 'file', 'precalc'})
 _PARAMETER_FREE_TYPES = frozenset({'vacuum', 'rigid'})
 
 # Half-space fields a ``SeabedColumn`` / ``Bottom`` write follows through to
-# the stored boundaries, mirroring ``Surface``'s delegated set.
+# the stored boundaries. ``Surface`` delegates the same nine names and imports
+# this set as ``_SURFACE_DELEGATED`` rather than restating it — both carriers
+# hold their nodes in ``BoundaryProperties``, so the field lists cannot
+# legitimately differ, and two copies drifted apart in silence.
 _HALFSPACE_DELEGATED = frozenset({
     'acoustic_type', 'density', 'sound_speed', 'attenuation', 'roughness',
     'shear_speed', 'shear_attenuation', 'grain_size_phi', 'reflection_file',
@@ -996,6 +999,9 @@ class Bottom:
                     "Bottom: range-independent bottom (ranges=None) needs "
                     f"exactly one column; got {len(self.columns)}")
         else:
+            # Ahead of the float64 cast below, which discards an imaginary
+            # part — see _reject_complex for the two ways it does it.
+            _reject_complex(self.ranges, "Bottom.ranges")
             self.ranges = np.array(self.ranges, dtype=float).ravel()
             _require_non_negative(self.ranges, "Bottom.ranges", hint="metres")
             _require_strictly_increasing(

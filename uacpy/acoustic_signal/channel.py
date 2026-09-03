@@ -258,7 +258,15 @@ def impulse_response_from_transfer_function(H, frequencies, sample_rate: float,
             f"Sort the axis and drop duplicates before calling.")
     require_increasing_axis(
         f, "impulse_response_from_transfer_function: frequencies")
-    fs = float(sample_rate)
+    # The shared guard rather than a bare float(): every check below divides by
+    # fs or by fs/2, so an unvalidated rate escaped as an untyped error about
+    # the wrong thing — sample_rate=0 with frequencies[0]=0 raised a bare
+    # ZeroDivisionError, NaN a "cannot convert float NaN to integer", Inf an
+    # OverflowError, and a negative rate a ConfigurationError announcing "the
+    # Nyquist frequency -500 Hz", a true statement about the wrong argument.
+    fs = require_positive_finite_scalar(
+        sample_rate, "impulse_response_from_transfer_function",
+        "sample_rate", " Hz")
     # The DFT grid stops at fs/2, and out-of-grid bins are zero (see above), so
     # a band sitting above Nyquist contributes nothing: it came back as an
     # all-zero h with no diagnostic. Partial overlap is legitimate but lossy —

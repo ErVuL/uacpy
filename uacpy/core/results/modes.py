@@ -312,6 +312,33 @@ class Modes(Result):
             from an :class:`~uacpy.core.absorption.Absorption` via
             ``absorption.alpha_db_per_m(modes.f0, modes.depths)``.
 
+            **This is not the same number the solver used.** The Python
+            accessor and the Acoustics-Toolbox deck evaluate the same model
+            at different arguments, so a perturbation built here is applied
+            on top of a run that already absorbed a slightly different
+            alpha. Both routes are correct for what they are; the divergence
+            is worth knowing before the two are differenced.
+
+            For :class:`~uacpy.core.absorption.FrancoisGarrison`, the
+            accessor evaluates the formula at each depth you pass, while the
+            deck carries one module-level ``z_bar`` and applies the single
+            resulting alpha at every depth (``misc/AttenMod.f90:148-160``).
+            On ``FrancoisGarrison(10, 35, 8, z_bar_m=1000)`` the accessor at
+            the surface runs +3.0 % over the deck at 1 kHz, +13.9 % at
+            10 kHz, +15.5 % at 30 kHz and +15.0 % at 100 kHz, crossing zero
+            at ``z_bar_m`` and running as far the other way at the bottom of
+            a 2 km column.
+
+            For :class:`~uacpy.core.absorption.ConstantAbsorption`, the
+            accessor converts dB/wavelength at
+            :data:`~uacpy.core.constants.DEFAULT_SOUND_SPEED`, while the
+            deck converts at each SSP row's own ``c`` (``AttenMod.f90:73``),
+            a spread of ±3.3 % across sound speeds of 1450-1550 m/s.
+
+            To make the two agree, pass a scalar alpha you computed at the
+            same argument the deck used: ``z_bar_m`` for Francois-Garrison,
+            the SSP's own sound speed for a constant absorption.
+
             A **depth-varying** alpha needs a depth axis fine enough to
             carry ``psi²``: the two trapezoids below cancel exactly while
             ``alpha(z)/c(z)`` is constant, so a scalar alpha is right on any

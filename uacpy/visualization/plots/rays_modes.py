@@ -416,6 +416,11 @@ def plot_modes_heatmap(
         label='Normalised amplitude' if normalize else r'$\psi_m(z)$',
     )
     ax.set_xlabel('Mode index')
+    # A mode index is an integer — mode 4.5 does not exist. On a short span the
+    # default locator subdivides: mode_range=(3, 7) drew 3.5, 4.5, 5.5, 6.5 and
+    # 7.5, five of nine ticks naming modes the field does not contain.
+    from matplotlib.ticker import MaxNLocator
+    ax.xaxis.set_major_locator(MaxNLocator(integer=True))
     ax.set_ylabel('Depth (m)')
     invert_yaxis_once(ax)
     # A Modes carrying no f0 gets no frequency in the title rather than a

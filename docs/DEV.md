@@ -95,7 +95,7 @@ COVARIANCE / REPLICA                   # OASN frequency-domain array products
 TIME_SERIES                            # p(t) at receivers
 BROADBAND                              # H(f) complex transfer function
 REFLECTION                             # Plane-wave coefficients (Bounce, OASR)
-REVERBERATION                          # Reverberation level vs range (OASS)
+REVERBERATION                          # Reverberation loss vs range (OASS)
 ```
 
 A model declares its supported subset in `spec.modes` (§2.3); the base copies

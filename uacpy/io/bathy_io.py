@@ -14,8 +14,8 @@ Reflection coefficients (`.brc`, `.irc`, `.trc`) and source beam patterns
 **The two 3-D entry points are deliberately retained and are not dead
 code.** :func:`read_boundary_3d` and :func:`write_bty_3d` read and write the
 BELLHOP3D boundary grid (``bdry3DMod.f90:216-330``). No uacpy model runs
-``bellhop3d`` yet — Bellhop's RunType position 6 is hardwired ``'2'`` and
-``Bellhop(dimensionality='3D')`` raises — so nothing in the 2-D public API
+``bellhop3d`` yet — Bellhop's RunType position 6 is hardwired to the 2-D
+blank and ``Bellhop(dimensionality='3D')`` raises — so nothing in the 2-D public API
 calls them. They are the foundation a future 3-D implementer builds on, and
 ``uacpy/tests/test_io_restored_capabilities.py`` pins them against a
 dead-code sweep proposing their removal a second time.

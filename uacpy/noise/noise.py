@@ -131,7 +131,7 @@ def compute_windnoise(frequencies, u, water_depth='deep', band_integrate=False):
     Notes
     -----
     Translated from the IDL implementation by Dan Hutt, rewritten by Vic
-    Young, and packaged in Tollefsen & Pecknold (2018).
+    Young, and packaged in Tollefsen & Pecknold (2022).
     """
     # Normalise ``frequencies`` up-front so scalars (the docstring promises
     # they work) don't crash at ``.size`` / ``.flatten()`` below.
@@ -332,7 +332,7 @@ _RAIN_R3 = [0, 0.0335,  0.0277,  0.0251,  0.0277]
 
 
 # ── Component submodels (registry of swappable formulas) ────────────────────
-# Built-ins are the Canadian/DRDC composite (Tollefsen & Pecknold 2018;
+# Built-ins are the Canadian/DRDC composite (Tollefsen & Pecknold 2022;
 # DRDC-RDDC-2022-D051 "WenzCurves"). Each submodel takes the full parameter
 # bundle and ignores what it does not need via **_. Returns dB re 1 µPa²/Hz —
 # the real (possibly sub-0-dB) spectral level at every band; -inf is reserved
@@ -550,7 +550,7 @@ class WenzNoise:
     thermal, and turbulence — into the total incoherent ambient spectrum.
     Each component is chosen via a ``*_model`` argument; ``None`` selects the
     default. The **defaults** are the Canadian/DRDC composite (Tollefsen &
-    Pecknold 2018; DRDC "WenzCurves"): ``shipping='wenz'``,
+    Pecknold 2022; DRDC "WenzCurves"): ``shipping='wenz'``,
     ``wind='merklinger'``, ``rain='torres_costa'``, ``thermal='mellen'``,
     ``turbulence='wenz'`` (DRDC §2.1 eq. 4, ``107 − 33.2·log10(f_Hz)``).
     Built-in alternatives include the Coates/Stojanović (2007) ``'coates'``

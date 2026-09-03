@@ -33,7 +33,7 @@ from uacpy.core.materials import MATERIALS, list_materials
 from uacpy.core.sediment import GRAIN_SIZE_MODELS, grain_size_to_geoacoustics
 from uacpy.data._geo import (
     geodesic_waypoints, run_boundary_indices, DEFAULT_MAX_TRANSECT_POINTS,
-    checked_max_points,
+    checked_max_points, checked_n_points,
 )
 
 __all__ = [
@@ -143,8 +143,9 @@ def range_dependent_bottom_along(
     if max_points is None:
         max_points = DEFAULT_MAX_TRANSECT_POINTS
     max_points = checked_max_points(max_points, source_label)
+    n_points = checked_n_points(n_points, source_label, allow_auto=True)
     probe_n = (max_points if n_points == 'auto'
-               else max(2, min(int(n_points), max_points)))
+               else min(n_points, max_points))
     lats, lons, ranges_m = geodesic_waypoints(start, end, probe_n)
     props: List = []
     for la, lo in zip(lats, lons):
@@ -202,8 +203,10 @@ def range_dependent_bottom_along(
     # because it does not define geoacoustics on its own — it is set after the
     # conversion has, exactly as ``from_grain_size`` retains it.
     for column, source_props in zip(bottom.columns, props):
-        column.halfspace.data_sources = tuple(
-            getattr(source_props, 'data_sources', ()) or ())
+        # ``BoundaryProperties.data_sources`` is a declared field that
+        # ``__post_init__`` coerces to a tuple (None -> ()), so it always
+        # exists here — as the bare ``grain_size_phi`` read below assumes.
+        column.halfspace.data_sources = tuple(source_props.data_sources)
         column.halfspace.grain_size_phi = source_props.grain_size_phi
     return bottom
 

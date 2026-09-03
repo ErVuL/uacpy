@@ -14,11 +14,10 @@ from pathlib import Path
 
 import numpy as np
 
-from uacpy._log import log_message
-from uacpy.core.exceptions import ConfigurationError, DataFetchError
+from uacpy.core.exceptions import DataFetchError
 from uacpy.data import _cache
 from uacpy.data._geo import as_coordinate
-from uacpy.data._http import curl_download, http_get
+from uacpy.data._http import download_grid_file
 from uacpy.data._netcdf import NetcdfGrid
 
 __all__ = ['download_globsed_db', 'fetch_sediment_thickness',
@@ -36,18 +35,11 @@ def download_globsed_db(cache_dir=None, *, timeout=300.0, verbose=False):
     Writes ``<cache>/globsed/GlobSed-v3.nc`` and returns the path. Uses curl when
     available (NCEI throttles Python urllib), falling back to the urllib fetcher.
     """
-    dest = Path(cache_dir) if cache_dir else _cache.dataset_root('globsed')
-    dest.mkdir(parents=True, exist_ok=True)
-    out = dest / GLOBSED_FILE
-    log_message('globsed', "downloading GlobSed v3 sediment thickness (~11 MB)",
-                verbose=verbose)
-    if not curl_download(GLOBSED_URL, out, timeout=timeout, verbose=verbose):
-        with _cache.atomic_write(out) as part:
-            part.write_bytes(http_get(GLOBSED_URL, timeout=timeout,
-                                      verbose=verbose, source='globsed'))
-    _cache.invalidate_grids()
-    log_message('globsed', f"GlobSed grid cached → {out}", verbose=verbose)
-    return out
+    return download_grid_file(
+        'globsed', GLOBSED_URL, GLOBSED_FILE,
+        "downloading GlobSed v3 sediment thickness (~11 MB)",
+        "GlobSed grid cached", cache_dir=cache_dir, timeout=timeout,
+        verbose=verbose)
 
 
 class _GlobSedGrid(NetcdfGrid):
@@ -103,12 +95,8 @@ def fetch_sediment_thickness_transect(start, end, n_points=6):
 
     ``thickness_m`` is ``NaN`` at any waypoint GlobSed does not cover.
     """
-    if int(n_points) < 2:
-        raise ConfigurationError(
-            f"fetch_sediment_thickness_transect: n_points must be >= 2, "
-            f"got {n_points}.",
-            remediation="Pass n_points>=2 to define a transect.")
-    from uacpy.data._geo import geodesic_waypoints
+    from uacpy.data._geo import checked_n_points, geodesic_waypoints
+    n_points = checked_n_points(n_points, 'fetch_sediment_thickness_transect')
     lats, lons, ranges_m = geodesic_waypoints(start, end, n_points)
     g = _grid()
     thk = np.array([g.thickness(la, lo) for la, lo in zip(lats, lons)])

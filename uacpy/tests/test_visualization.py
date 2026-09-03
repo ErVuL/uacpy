@@ -1325,6 +1325,108 @@ class TestSeaIce:
         plt.close(fig)
 
 
+def test_a_difference_field_is_drawn_as_a_signed_residual_not_a_loss():
+    """A dB difference is neither a level nor a loss, and must not be either.
+
+    Subtracting one TL field from another gives a signed residual whose ZERO is
+    the meaningful value. Built untagged it inherits ``kind='pressure'``, and
+    then three things are wrong at once: the colourbar says "TL (dB)", the
+    fixed 20-120 dB transmission-loss window swallows a residual that lives
+    near zero, and the loss predicate runs a 1-D cut's value axis downward.
+    The registered ``difference`` quantity gives it the diverging map and the
+    symmetric window instead, the same treatment signal excess gets.
+    """
+    from uacpy.core.results import quantities as _q
+    from uacpy.core.results import Field
+    from uacpy.visualization.plots._common import _TL_LIMITS, _is_loss_view
+    from uacpy.visualization.plots.fields import _value_style
+
+    depths = np.linspace(5, 95, 12)
+    ranges = np.linspace(100, 5000, 40)
+    base = np.broadcast_to(
+        50.0 + 10.0 * np.log10(ranges)[None, :], (12, 40)).copy()
+    resid = Field(data=base - (base + 2.0),
+                  coords={'depth': depths, 'range': ranges})
+
+    # Untagged, it is claimed by the transmission-loss treatment.
+    assert resid.kind == 'pressure'
+    assert _is_loss_view(resid, 'db') is True
+
+    resid.metadata['kind'] = 'difference'
+    assert resid.kind == 'difference'
+    assert _is_loss_view(resid, 'db') is False, (
+        "a signed residual must not be drawn with its value axis inverted")
+    cmap, lo, hi = _value_style(resid, 'db')
+    assert (lo, hi) != _TL_LIMITS, "the fixed TL window swallows a residual"
+    assert lo == -hi, f"a residual needs a window symmetric about 0, got {lo, hi}"
+    assert 'TL' not in _q.label('difference', 'dB')
+
+
+def test_the_ppsd_level_axis_follows_the_results_own_scaling():
+    """The "/Hz" is a claim about the quantity, not decoration.
+
+    ``ppsd`` computes a density or a spectrum; the first is per hertz and the
+    second is per band. The plotter used to caption both "/Hz", so a spectrum
+    was published under a density's unit. It now reads the scaling the result
+    carries.
+    """
+    from uacpy.acoustic_signal.analysis import ppsd as _ppsd
+    from uacpy.visualization.plots.signal import plot_ppsd
+
+    rng = np.random.default_rng(0)
+    x = rng.standard_normal(48000)
+
+    fig, ax = plot_ppsd(_ppsd(x, 48000.0, scaling='density', nperseg=1024))
+    assert ax.get_ylabel().endswith('Pa²/Hz)'), ax.get_ylabel()
+    plt.close(fig)
+
+    fig, ax = plot_ppsd(_ppsd(x, 48000.0, scaling='spectrum', nperseg=1024))
+    label = ax.get_ylabel()
+    assert label.endswith('Pa²)'), label
+    assert '/Hz' not in label, label
+    plt.close(fig)
+
+
+def test_the_compare_models_colourbar_follows_the_credit_margin(tl_field):
+    """The figure-level colourbar is placed from the panels' FINAL bottom.
+
+    ``compare_models`` reserves a bottom margin by formula, draws the panels,
+    then adds the colourbar as a free axes at that coordinate. The model credit
+    is drawn afterwards and reserves its own margin with a second
+    ``subplots_adjust``, which moves the panels but not an axes already placed
+    at an absolute figure coordinate — so the bar used to hang below the panels,
+    level with the x tick labels, whenever a credit was drawn.
+
+    The reserve depends on font metrics, so it is forced here rather than
+    conjured with real text: any credit that raises the bottom must carry the
+    colourbar with it.
+    """
+    from uacpy.visualization.plots import fields as _fields
+
+    real = _fields._draw_multi_model_credit
+
+    def reserving(fig, flds):
+        real(fig, flds)
+        fig.subplots_adjust(bottom=fig.subplotpars.bottom + 0.05)
+
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(_fields, '_draw_multi_model_credit', reserving)
+    try:
+        fig, axes = _fields.compare_models([tl_field, tl_field, tl_field])
+    finally:
+        monkey.undo()
+    panel_axes = list(np.ravel(axes))
+    panel_bottom = min(a.get_position().y0
+                       for a in panel_axes if a.get_visible())
+    bars = [a.get_position() for a in fig.axes if a not in panel_axes]
+    assert bars, "compare_models drew no figure-level colourbar"
+    assert bars[0].y0 == pytest.approx(panel_bottom, abs=1e-6), (
+        f"colourbar bottom {bars[0].y0:.4f} does not sit at the panels' final "
+        f"bottom {panel_bottom:.4f}; it was placed before the credit moved them"
+    )
+    plt.close(fig)
+
+
 def test_compare_models_label_length_validation(tl_field):
     with pytest.raises(ConfigurationError, match="match"):
         uacpy.plot.compare_models([tl_field, tl_field, tl_field],
@@ -1566,6 +1668,325 @@ class TestLayeredSeabedFollowsTheBathymetry:
         plt.close(fig)
 
 
+class TestAnExampleTitleQuotesTheDeckThatRan:
+    """``example_04`` prints the 7-character RunType string in three panel
+    titles. Position 6 is the dimensionality: blank is plain 2-D, and a
+    literal '2' means Nx2D, which the C++ port warns about and rewrites. The
+    titles were quoting a '2' the writer no longer emits, so a reader
+    comparing the figure against the deck would find them disagreeing."""
+
+    @staticmethod
+    def _titles_in_example():
+        import re
+        from pathlib import Path
+        src = (Path(uacpy.__file__).parent / 'examples'
+               / 'example_04_bellhop_advanced.py').read_text(encoding='utf-8')
+        return re.findall(r"RunType: '(.{7})'", src)
+
+    @staticmethod
+    def _written_run_type(**kwargs):
+        """The RunType line the deck writer actually emits for ``kwargs``."""
+        import re
+        import tempfile
+        from pathlib import Path
+        from uacpy.io.bellhop_writer import write_bellhop_env_file
+        env = uacpy.Environment(bathymetry=100.0, ssp=1500.0, bottom=1650.0)
+        src = uacpy.Source(depths=[25.0], frequencies=200.0)
+        rcv = uacpy.Receiver(depths=np.linspace(1.0, 99.0, 20),
+                             ranges=np.linspace(100.0, 5000.0, 50))
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / 'probe.env'
+            write_bellhop_env_file(str(path), env, src, rcv, **kwargs)
+            lines = [ln.strip()[1:-1]
+                     for ln in path.read_text(encoding='utf-8').splitlines()
+                     if re.fullmatch(r"'[A-Za-z].{6}'", ln.strip())]
+        assert lines, "no RunType line in the deck"
+        return lines[-1]
+
+    def test_all_three_titles_match_the_written_deck(self):
+        titles = self._titles_in_example()
+        assert len(titles) == 3, titles
+        written = [
+            self._written_run_type(run_type='C', beam_type='B',
+                                   source_type='R', grid_type='R'),
+            self._written_run_type(run_type='C', beam_type='B',
+                                   source_type='X', grid_type='R'),
+            self._written_run_type(run_type='R', beam_type='g',
+                                   source_type='R', grid_type='R',
+                                   beam_shift=True),
+        ]
+        assert titles == written, (titles, written)
+
+    def test_no_title_claims_the_nx2d_dimensionality(self):
+        """Position 6 read on its own, so the check does not depend on the
+        other six characters staying put."""
+        for title in self._titles_in_example():
+            assert title[5] == ' ', (title, title[5])
+
+
+class TestATLDifferenceIsNotLabelledAsALevel:
+    """``_plot_tl_difference`` builds its residual as a bare ``Field``, which
+    inherits ``kind='pressure'``, so the colourbar came back reading 'TL (dB)'
+    over a signed difference — and the loss predicate reads the same tag, which
+    would run a 1-D cut's value axis downward. Neither is true of a residual."""
+
+    @staticmethod
+    def _plotting_utils():
+        """``uacpy/examples`` carries no ``__init__.py``, so the shared helper
+        is loaded from its path rather than imported by package name."""
+        import importlib.util
+        from pathlib import Path
+        path = (Path(uacpy.__file__).parent / 'examples' / 'plotting_utils.py')
+        spec = importlib.util.spec_from_file_location(
+            'uacpy_examples_plotting_utils_for_tests', path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    @staticmethod
+    def _pair():
+        d = np.linspace(5.0, 95.0, 6)
+        r = np.linspace(100.0, 3000.0, 9)
+        mk = lambda amp: Field(data=np.full((6, 9), amp, dtype=complex),
+                               coords={'depth': d, 'range': r},
+                               model='Synth', frequencies=100.0)
+        return mk(1e-3), mk(2e-3)
+
+    def test_the_colourbar_names_the_residual_and_its_sign(self):
+        a, b = self._pair()
+        fig, ax = self._plotting_utils()._plot_tl_difference(a, b)
+        label = fig.axes[-1].get_ylabel()
+        assert label.startswith('ΔTL (dB)'), label
+        assert 'quieter' in label, label
+        plt.close(fig)
+
+
+class TestOnlySomeViewsCarryAFixedColourWindow:
+    """The docstring and the guide both said the dB view is "never an
+    autoscale". It is one for two of the four registered kinds, and
+    ``value='mag_db'`` takes the REVERSED TL map, not the TL map. This table
+    is what the prose now describes, so the two cannot drift apart silently."""
+
+    @staticmethod
+    def _field(data, metadata=None):
+        return Field(data=data,
+                     coords={'depth': np.linspace(5.0, 95.0, 4),
+                             'range': np.linspace(100.0, 3000.0, 5)},
+                     model='Synth', frequencies=100.0, metadata=metadata)
+
+    @pytest.mark.parametrize('kind, unit, value, expected', [
+        ('pressure', None, 'db', ('jet_r', 20.0, 120.0)),
+        ('signal_excess', 'dB', 'db', ('RdBu_r', -40.0, 40.0)),
+        ('reverberation', 'dB', 'db', ('jet_r', None, None)),
+        ('probability_of_detection', '1', 'real', ('RdYlGn', 0.0, 1.0)),
+        ('pressure', None, 'mag_db', ('jet', None, None)),
+    ])
+    def test_the_colour_window_each_view_actually_takes(self, kind, unit,
+                                                        value, expected):
+        from uacpy.visualization.plots.fields import _value_style
+        if kind == 'pressure':
+            field = self._field(np.ones((4, 5), dtype=complex))
+        elif kind == 'signal_excess':
+            field = self._field(np.linspace(-40.0, 40.0, 20).reshape(4, 5),
+                                {'kind': kind, 'unit': unit})
+        elif kind == 'reverberation':
+            field = self._field(np.linspace(40.0, 90.0, 20).reshape(4, 5),
+                                {'kind': kind, 'unit': unit})
+        else:
+            field = self._field(np.linspace(0.0, 1.0, 20).reshape(4, 5),
+                                {'kind': kind, 'unit': unit})
+        assert _value_style(field, value) == expected
+
+
+class TestTheSourceMarkerClearsTheAxisEdge:
+    """Models exclude the singular near field, so a TL grid starts past r = 0
+    while the source sits at it, and the plotters widen the x limit to bring
+    the marker back on screen. Widening to EXACTLY the marker's x centres it on
+    the spine, and markers keep default clipping (a later zoom must hide
+    out-of-view receivers), so half the star was cut away."""
+
+    @staticmethod
+    def _panel(fig_width, source_range_m):
+        import uacpy
+        d = np.linspace(1.0, 60.0, 40)
+        r = np.linspace(50.0, 5000.0, 120)
+        tl = Field(data=np.tile((40.0 + 20 * np.log10(r))[None, :], (40, 1)),
+                   coords={'depth': d, 'range': r}, model='Synth',
+                   frequencies=200.0,
+                   metadata={'kind': 'pressure', 'unit': 'dB'})
+        env = uacpy.Environment(bathymetry=100.0, ssp=1500.0, bottom=1650.0)
+        rcv = uacpy.Receiver(depths=d, ranges=r)
+        fig, ax = plt.subplots(figsize=(fig_width, 2.4))
+        tl.plot(env=env, receiver=rcv, ax=ax, show_colorbar=False)
+        from uacpy.visualization.plots._common import _draw_geometry
+        _draw_geometry(ax, uacpy.Source(depths=[30.0], frequencies=200.0),
+                       source_range_m=source_range_m)
+        return fig, ax
+
+    @staticmethod
+    def _red_pixel_count(fig):
+        """Count the star's own pixels on the RENDERED figure. A limit that is
+        merely left of the marker's centre still says nothing about whether
+        the glyph was drawn whole, which is what the reader sees."""
+        fig.canvas.draw()
+        rgb = np.asarray(fig.canvas.buffer_rgba())[..., :3].astype(int)
+        red = ((rgb[:, :, 0] > 170) & (rgb[:, :, 1] < 90)
+               & (rgb[:, :, 2] < 90))
+        return int(red.sum())
+
+    @pytest.mark.parametrize('fig_width', [3.0, 4.5, 8.6])
+    def test_a_source_at_range_zero_is_drawn_whole(self, fig_width):
+        """Against a source placed INSIDE the data, which needs no widening at
+        all and so is necessarily unclipped."""
+        fig_in, _ = self._panel(fig_width, 2500.0)
+        whole = self._red_pixel_count(fig_in)
+        plt.close(fig_in)
+        fig_edge, _ = self._panel(fig_width, 0.0)
+        assert self._red_pixel_count(fig_edge) == whole
+        plt.close(fig_edge)
+
+    def test_the_pad_is_the_markers_own_size_not_a_share_of_the_span(self):
+        """A fixed fraction of the data span is a different number of points
+        on every figure size: 1 % cleared the star on a wide panel and still
+        clipped it on a 3-inch one."""
+        pads = []
+        for fig_width in (3.0, 8.6):
+            fig, ax = self._panel(fig_width, 0.0)
+            lo, hi = sorted(ax.get_xlim())
+            pads.append(-lo / (hi - lo))          # pad as a share of the span
+            plt.close(fig)
+        assert pads[0] > 2.0 * pads[1], pads
+
+
+class TestAStackedViewLabelsOnlyAsManyTracesAsFit:
+    """One tick per trace made the y axis a solid black smear the moment the
+    stack was more than a couple of dozen deep — 60 ranges gave 60 overlapping
+    labels, and documented receiver grids run to hundreds. The labels are
+    strided; every trace is still drawn."""
+
+    @staticmethod
+    def _stack(n_other):
+        r = np.linspace(100.0, 8000.0, n_other)
+        t = np.linspace(0.0, 0.5, 40)
+        rng = np.random.default_rng(0)
+        f = Field(data=rng.standard_normal((n_other, 40)),
+                  coords={'range': r, 'time': t}, model='Synth',
+                  frequencies=200.0)
+        fig, ax = plot_field(f, stacked=True)
+        # The stacked view labels a range axis in km, as every other view of
+        # a range axis does, so the expected labels are the km values.
+        return fig, ax, r / 1000.0
+
+    @pytest.mark.parametrize('n_other', [1, 5, 12, 23, 24, 60, 137, 250, 600])
+    def test_the_tick_count_stays_readable_at_every_stack_depth(self, n_other):
+        """23 is the worst case the ~12-label stride admits: below 24 traces
+        the stride is 1, so the count is the trace count itself."""
+        fig, ax, _ = self._stack(n_other)
+        assert len(ax.get_yticks()) <= 23, len(ax.get_yticks())
+        plt.close(fig)
+
+    @pytest.mark.parametrize('n_other', [60, 250])
+    def test_a_deep_stack_gets_about_a_dozen_labels(self, n_other):
+        fig, ax, _ = self._stack(n_other)
+        assert 8 <= len(ax.get_yticks()) <= 13, len(ax.get_yticks())
+        plt.close(fig)
+
+    def test_a_stack_of_nine_labels_all_nine(self):
+        """The stride exists for crowded axes; it must not thin an axis that
+        was legible already."""
+        fig, ax, r = self._stack(9)
+        assert len(ax.get_yticks()) == 9
+        assert [t.get_text() for t in ax.get_yticklabels()] == [
+            f"{v:.4g}" for v in r]
+        plt.close(fig)
+
+    def test_every_label_names_the_trace_it_sits_on(self):
+        """Ticks and labels are taken on ONE stride. Striding the positions
+        while labelling from the unstrided coordinate renumbers the axis, and
+        a renumbered axis reads as perfectly correct."""
+        fig, ax, r = self._stack(60)
+        assert len(ax.get_lines()) == 60, "every trace is still drawn"
+        # Each trace's own offset is the mean of its plotted samples, since
+        # the traces are zero-mean noise riding on i * offset.
+        trace_offsets = np.array([ln.get_ydata().mean()
+                                  for ln in ax.get_lines()])
+        for pos, tick in zip(ax.get_yticks(), ax.get_yticklabels()):
+            i = int(np.argmin(np.abs(trace_offsets - pos)))
+            assert tick.get_text() == f"{r[i]:.4g}", (pos, tick.get_text())
+        plt.close(fig)
+
+
+class TestOnlyABottomWithACpGetsABottomColourbar:
+    """A vacuum / rigid / file half-space carries no compressional speed, so
+    there is nothing for a 'Bottom cp' bar to show and none is drawn. The
+    mappable for it was still built, normalized to the WATER speeds as a
+    stand-in — a colour scale for a quantity the panel does not contain."""
+
+    @staticmethod
+    def _inset_labels(fig):
+        return {c.get_ylabel()
+                for ax in fig.axes for c in ax.child_axes}
+
+    @pytest.mark.parametrize('acoustic_type', ['vacuum', 'rigid'])
+    def test_a_bottom_without_a_cp_shows_the_water_bar_alone(self,
+                                                             acoustic_type):
+        from uacpy.core import BoundaryProperties
+        from uacpy.visualization.plots.environment import _plot_environment
+        env = uacpy.Environment(
+            bathymetry=100.0,
+            bottom=BoundaryProperties(acoustic_type=acoustic_type))
+        fig, _ = _plot_environment(env)
+        labels = self._inset_labels(fig)
+        assert 'Water c (m/s)' in labels
+        assert 'Bottom cp (m/s)' not in labels, labels
+        plt.close(fig)
+
+    def test_a_bottom_with_a_cp_gets_both_bars(self):
+        from uacpy.visualization.plots.environment import _plot_environment
+        fig, _ = _plot_environment(
+            uacpy.Environment(bathymetry=100.0, bottom=1650.0))
+        assert {'Water c (m/s)', 'Bottom cp (m/s)'} <= self._inset_labels(fig)
+        plt.close(fig)
+
+
+class TestTheEnvironmentPanelShowsTheWholeSeabed:
+    """The depth limit is a margin past the deepest seafloor OR the floor of
+    what the bottom branch actually painted, whichever is deeper. A 40 m
+    sediment stack under 100 m of water needs 152 m of panel; the water-column
+    margin alone gives 120 m and clips the second layer, the layer boundary
+    and the half-space off the bottom edge."""
+
+    @staticmethod
+    def _thick_layered_env():
+        import uacpy
+        from uacpy.core.environment import (SeabedColumn, SedimentLayer,
+                                            BoundaryProperties)
+        col = SeabedColumn(
+            layers=[SedimentLayer(thickness=10.0, sound_speed=1600.0,
+                                  density=1.7, attenuation=0.8),
+                    SedimentLayer(thickness=30.0, sound_speed=1750.0,
+                                  density=2.0, attenuation=0.5)],
+            halfspace=BoundaryProperties.from_preset('limestone'))
+        return uacpy.Environment(bathymetry=100.0, bottom=col)
+
+    def test_a_thick_sediment_stack_stays_on_panel(self):
+        from uacpy.visualization.plots.environment import _plot_environment
+        fig, ax = _plot_environment(self._thick_layered_env())
+        deepest = max(ax.get_ylim())
+        # Layers end at 140 m; the hatched half-space extends past that.
+        assert deepest > 140.0, deepest
+        plt.close(fig)
+
+    def test_a_thin_bottom_keeps_the_water_column_margin(self):
+        """The seafloor margin still sets the limit whenever it is the deeper
+        of the two, so a thin bottom is not given a stretched panel."""
+        import uacpy
+        from uacpy.visualization.plots.environment import _plot_environment
+        fig, ax = _plot_environment(uacpy.Environment(bathymetry=100.0))
+        assert max(ax.get_ylim()) == pytest.approx(120.0)
+        plt.close(fig)
+
+
 class TestCompareModelsSharesItsColourScale:
     """``compare_models`` draws ONE figure-level colorbar, so every panel must
     map the same limits. Left to autoscale, each panel maps its own range and
@@ -1736,6 +2157,43 @@ class TestLinearViewsGetTheLinearColormap:
         lo, hi = ax.collections[0].get_clim()
         assert lo == 0.0 and hi > 0.0
         plt.close(fig)
+
+    @staticmethod
+    def _pd_field():
+        """A detection-probability field: real, dimensionless, in [0, 1]."""
+        d = np.linspace(10.0, 90.0, 6)
+        r = np.linspace(100.0, 3000.0, 9)
+        pd = np.linspace(0.0, 1.0, 54).reshape(6, 9)
+        return Field(data=pd, coords={'depth': d, 'range': r},
+                     model='Sonar',
+                     metadata={'kind': 'probability_of_detection',
+                               'unit': '1'})
+
+    def test_a_probability_gets_the_bounded_unsigned_map(self):
+        """The signed linear map has half its range below zero, which a
+        probability never reaches: the whole field came out in shades of red
+        on an autoscaled (-1, 1), with the map's neutral white on P_D = 0."""
+        fig, ax = plots.plot_field(self._pd_field())
+        mesh = ax.collections[0]
+        assert mesh.get_cmap().name == 'RdYlGn'
+        assert mesh.get_clim() == pytest.approx((0.0, 1.0))
+        plt.close(fig)
+
+    def test_a_probability_renders_alike_through_either_door(self):
+        """``Field.plot`` and ``plot_detection_probability`` draw one field, so
+        they must agree on the map, the window and the colorbar label."""
+        from uacpy.visualization.plots.fields import (
+            plot_detection_probability)
+        f = self._pd_field()
+        fig_a, ax_a = plots.plot_field(f)
+        fig_b, ax_b = plot_detection_probability(f)
+        mesh_a, mesh_b = ax_a.collections[0], ax_b.collections[0]
+        assert mesh_a.get_cmap().name == mesh_b.get_cmap().name
+        assert mesh_a.get_clim() == pytest.approx(mesh_b.get_clim())
+        assert (fig_a.axes[-1].get_ylabel()
+                == fig_b.axes[-1].get_ylabel()
+                == 'Probability of detection')
+        plt.close('all')
 
     @pytest.mark.parametrize('value', ['db', 'mag_db', 'mag', 'real'])
     def test_compare_models_picks_the_same_colormap(self, value):
@@ -2473,21 +2931,52 @@ def _contour_sets(ax):
     return [c for c in ax.collections if 'Contour' in type(c).__name__]
 
 
-def _ppsd_result(level_lo, level_hi):
+def _ppsd_result(level_lo, level_hi, ref=1e-6):
     """A ``PPSDResult`` whose histogram sits between ``level_lo`` and
-    ``level_hi`` dB."""
+    ``level_hi`` dB, stated against ``ref``."""
     frequencies = np.array([100.0, 200.0, 400.0])
     level_edges = np.linspace(level_lo, level_hi, 5)
     pdf = np.full((level_edges.size - 1, frequencies.size), 0.25)
     mean_db = np.full(frequencies.size, 0.5 * (level_lo + level_hi))
     return PPSDResult(frequencies, level_edges, pdf, mean_db,
-                      np.ones(frequencies.size), 1.0, 1.0)
+                      np.ones(frequencies.size), 1.0, 1.0, ref)
 
 
-def _cq_ppsd_result(level_lo, level_hi):
-    r = _ppsd_result(level_lo, level_hi)
+def _cq_ppsd_result(level_lo, level_hi, ref=1e-6):
+    r = _ppsd_result(level_lo, level_hi, ref)
     return CQPPSDResult(r.frequencies, r.level_edges, r.pdf, r.mean_db,
-                        r.std_db, r.binwidth_db)
+                        r.std_db, r.binwidth_db, ref)
+
+
+class TestALevelAxisNamesTheReferenceItWasComputedAgainst:
+    """These plotters hardcoded "µPa²" while the analyses behind them all take
+    ``ref=``. A caller working in Pascals got an axis labelled 120 dB away from
+    the numbers printed on it, and nothing anywhere could catch that."""
+
+    @pytest.mark.parametrize('ref, shown', [(1e-6, '1µ'), (1.0, '1'),
+                                            (20e-6, '20µ')])
+    def test_the_ppsd_level_axis_carries_the_result_reference(self, ref, shown):
+        fig, ax = plot_ppsd(_ppsd_result(60.0, 90.0, ref))
+        assert ax.get_ylabel() == f"Level (dB re {shown}Pa²/Hz)"
+        plt.close(fig)
+
+    @pytest.mark.parametrize('ref, shown', [(1e-6, '1µ'), (1.0, '1'),
+                                            (20e-6, '20µ')])
+    def test_the_constant_q_ppsd_level_axis_carries_it_too(self, ref, shown):
+        fig, ax = plot_constant_q_ppsd(_cq_ppsd_result(60.0, 90.0, ref))
+        assert ax.get_ylabel() == f"Level (dB re {shown}Pa²)"
+        plt.close(fig)
+
+    @pytest.mark.parametrize('ref, shown', [(1e-6, '1µ'), (1.0, '1')])
+    def test_the_fk_colourbar_carries_its_reference(self, ref, shown):
+        """``plot_fk`` converts with ``power_to_db(power, ref)``, so its
+        colourbar is an absolute level, not a relative one."""
+        from uacpy.visualization.plots.signal import plot_fk
+        f = np.linspace(0.0, 500.0, 8)
+        k = np.linspace(-1.0, 1.0, 9)
+        fig, ax = plot_fk(f, k, np.ones((8, 9)), ref=ref)
+        assert fig.axes[-1].get_ylabel() == f"Power (dB re {shown}Pa²)"
+        plt.close(fig)
 
 
 def _bands():
@@ -2753,6 +3242,22 @@ def test_mode_heatmap_clamps_a_range_reaching_past_the_last_mode():
     plt.close(fig)
 
 
+@pytest.mark.parametrize('kwargs', [
+    {'mode_range': (3, 7)}, {'n_modes': 4}, {'n_modes': 2}, {},
+])
+def test_the_mode_axis_is_ticked_on_whole_modes_only(kwargs):
+    """A mode index is an integer; mode 4.5 does not exist. Over a short span
+    the default locator subdivides, and ``mode_range=(3, 7)`` came back with
+    3.5, 4.5, 5.5, 6.5 and 7.5 — five of nine ticks naming modes the field
+    does not contain."""
+    fig, ax = plot_modes_heatmap(_modes(10), **kwargs)
+    lo, hi = ax.get_xlim()
+    on_axis = [t for t in ax.get_xticks() if lo <= t <= hi]
+    assert on_axis, "the mode axis lost every tick"
+    assert all(float(t).is_integer() for t in on_axis), on_axis
+    plt.close(fig)
+
+
 def test_mode_heatmap_rejects_n_modes_together_with_mode_range():
     """``mode_range`` took the slice wholesale, so ``n_modes`` was dropped
     without a word."""
@@ -2779,12 +3284,17 @@ def _ylim_direction(ax):
 @pytest.mark.parametrize("kind, expected", [
     ('pressure', 'down'),            # TL: a loss, so the loud end is the top
     ('signal_excess', 'up'),         # a level: more is more
-    ('reverberation', 'up'),
+    # OASES writes -10*log10 E[|p_scat|^2] (oassun26.f:633-637, :853-857), so
+    # reverberation is a LOSS like TL and its axis runs the same way.
+    ('reverberation', 'down'),
 ])
 def test_db_cut_points_the_same_way_through_either_entry_point(kind, expected):
     """``compare`` keyed the flip on ``value == 'db'`` and ``plot_field`` on the
     quantity, so every dB view except TL came out vertically mirrored between
-    the two — and the tick labels stayed truthful, so nothing looked wrong."""
+    the two — and the tick labels stayed truthful, so nothing looked wrong.
+
+    Direction follows the quantity, not the entry point: a loss reads downward
+    through both doors, a level upward through both."""
     field = _cut(kind)
     _, ax_single = plot_field(field, value='db')
     _, ax_overlay = compare([field], labels=['a'], value='db')
@@ -3724,17 +4234,37 @@ class TestThePlottersRefuseAndLabelWhatTheAuditFound:
         assert b != c, (b, c)
         plt.close('all')
 
-    def test_a_probability_field_defaults_to_its_linear_view_named_by_kind(self):
-        from uacpy.visualization.plots._common import _default_value, _value_label
+    def test_a_probability_field_defaults_to_its_linear_view(self):
+        """A real, dimensionless field has no dB view to fall back on, so the
+        default view is the raw samples."""
+        from uacpy.visualization.plots._common import _default_value
 
         class Prob:
             coords = {'depth': np.array([1.0]), 'range': np.array([1.0])}
             is_complex = False
             unit = '1'
-            kind = 'detection_probability'
+            kind = 'probability_of_detection'
 
         assert _default_value(Prob()) == 'real'
-        assert _value_label(Prob(), 'real') == 'detection probability'
+
+    @pytest.mark.parametrize('kind, unit, expected', [
+        ('probability_of_detection', '1', 'Probability of detection'),
+        ('signal_excess', 'dB', 'Signal excess (dB)'),
+    ])
+    def test_a_linear_view_is_labelled_from_the_registry(self, kind, unit,
+                                                         expected):
+        """The label comes from quantities.py, the same source the dB view
+        reads. Spelling one out of the ``kind`` tag instead gave a lowercase
+        'probability of detection' next to the registry's own capitalised
+        colorbar on the dedicated plotter."""
+        from uacpy.visualization.plots._common import _value_label
+
+        class Q:
+            coords = {'depth': np.array([1.0]), 'range': np.array([1.0])}
+            is_complex = False
+
+        q = Q(); q.unit = unit; q.kind = kind
+        assert _value_label(q, 'real') == expected
 
     def test_empty_input_is_refused_by_name(self):
         from uacpy.visualization.plots.comms import plot_constellation
@@ -3775,17 +4305,50 @@ class TestThePlottersRefuseAndLabelWhatTheAuditFound:
         assert ax_a.get_title() == ax_b.get_title()
         plt.close('all')
 
-    def test_shallow_long_snapshots_keep_a_readable_panel_height(self):
+    @staticmethod
+    def _snapshot_aspect(depth_m, range_m, *, n_depth=11):
         from uacpy.visualization.plots.animation import plot_time_snapshots
-        d = np.linspace(0, 100, 11); r = np.linspace(0, 3000, 61); t = np.linspace(0, 1, 5)
-        f = Field(data=np.random.default_rng(0).normal(size=(11, 61, 5)),
+        d = np.linspace(0, depth_m, n_depth); r = np.linspace(0, range_m, 61)
+        t = np.linspace(0, 1, 5)
+        f = Field(data=np.random.default_rng(0).normal(size=(n_depth, 61, 5)),
                   coords={'depth': d, 'range': r, 'time': t}, model='Synth',
                   frequencies=100.0)
         fig, axes = plot_time_snapshots({'a': f}, [0.5])
-        ax = np.asarray(axes).ravel()[0]
-        # 100 m over 3 km: isotropic would be a 1:30 sliver; the floor is 4:1.
-        assert ax.get_aspect() == pytest.approx(0.25 / (100.0 / 3000.0) / 1000.0)
+        aspect = np.asarray(axes).ravel()[0].get_aspect()
         plt.close('all')
+        return aspect
+
+    def test_shallow_long_snapshots_keep_a_readable_panel_height(self):
+        # 100 m over 3 km: isotropic would be a 1:30 sliver; the floor is 4:1.
+        assert self._snapshot_aspect(100.0, 3000.0) == pytest.approx(
+            0.25 / (100.0 / 3000.0) / 1000.0)
+
+    @pytest.mark.parametrize('depth_m, range_m', [
+        (100.0, 3000.0), (50.0, 20000.0), (5.0, 400.0), (1000.0, 60000.0),
+    ])
+    def test_every_long_panel_lands_on_the_same_4_to_1_floor(self, depth_m,
+                                                             range_m):
+        """The aspect is in km-per-metre, so the panel's rendered height over
+        its width is ``aspect * 1000 * depth_span / range_span``. Whatever the
+        spans, a long panel comes out a quarter as tall as it is wide."""
+        aspect = self._snapshot_aspect(depth_m, range_m)
+        rendered = aspect * 1000.0 * depth_m / range_m
+        assert rendered == pytest.approx(0.25)
+
+    def test_a_single_receiver_depth_gets_an_auto_aspect(self):
+        """A one-depth time series has no depth span to scale the aspect by.
+        Dividing the floor through it raised ZeroDivisionError out of the
+        plotter, so the whole figure was lost rather than one row's aspect."""
+        assert self._snapshot_aspect(0.0, 3000.0, n_depth=1) == 'auto'
+
+    @pytest.mark.parametrize('depth_m, range_m', [
+        (100.0, 900.0), (500.0, 3000.0), (2000.0, 5000.0),
+    ])
+    def test_a_panel_that_is_not_long_is_left_to_matplotlib(self, depth_m,
+                                                            range_m):
+        """The floor exists for slivers only; anything squarer keeps 'auto',
+        so the panel fills the space the figure gave it."""
+        assert self._snapshot_aspect(depth_m, range_m) == 'auto'
 
     def test_a_uniform_bottom_property_gets_a_relative_window(self):
         from uacpy.visualization.plots.environment import plot_bottom_properties

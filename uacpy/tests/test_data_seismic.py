@@ -367,10 +367,31 @@ def test_globsed_download(tmp_path, monkeypatch):
     ds.close()
     blob = src.read_bytes()
     # Force the urllib fallback (no real curl to NCEI) and mock the fetch.
-    monkeypatch.setattr(globsed_local, 'curl_download', lambda *a, **k: False)
-    monkeypatch.setattr(globsed_local, 'http_get', lambda url, **kw: blob)
+    # GlobSed and Graw share ``_http.download_grid_file``, so the transport
+    # seam is that module's, not the backend's.
+    monkeypatch.setattr(_http, 'curl_download', lambda *a, **k: False)
+    monkeypatch.setattr(_http, 'http_get', lambda url, **kw: blob)
     out = globsed_local.download_globsed_db(cache_dir=str(tmp_path / 'o'))
     assert out.exists() and out.name == 'GlobSed-v3.nc'
+
+
+def test_graw_download(tmp_path, monkeypatch):
+    """The Graw grid runs the same shared fetch flow as GlobSed, and keeps its
+    own file name and log wording."""
+    from uacpy.data import graw_local
+    src = tmp_path / 'graw_src.nc'
+    ds = netCDF4.Dataset(src, 'w')
+    ds.createDimension('lat', 2)
+    ds.createDimension('lon', 2)
+    ds.createVariable('lat', 'f8', ('lat',))[:] = [0, 1]
+    ds.createVariable('lon', 'f8', ('lon',))[:] = [0, 1]
+    ds.createVariable('z', 'f4', ('lat', 'lon'))[:] = 1.8
+    ds.close()
+    blob = src.read_bytes()
+    monkeypatch.setattr(_http, 'curl_download', lambda *a, **k: False)
+    monkeypatch.setattr(_http, 'http_get', lambda url, **kw: blob)
+    out = graw_local.download_graw_db(cache_dir=str(tmp_path / 'g'))
+    assert out.exists() and out.name == graw_local.GRAW_FILE
 
 
 def test_crust1_download(tmp_path, monkeypatch):
@@ -400,3 +421,49 @@ def test_globsed_interrupted_curl_no_final_file(tmp_path, monkeypatch):
     with pytest.raises(KeyboardInterrupt):
         globsed_local.download_globsed_db(cache_dir=str(dest))
     assert not (dest / globsed_local.GLOBSED_FILE).exists()
+
+
+def test_crust1_shear_attenuation_follows_coa_table_1_3(cache):
+    """Computational Ocean Acoustics Table 1.3 gives α_p / α_s in dB per
+    wavelength: clay 0.2/1.0, silt 1.0/1.5, sand 0.8/2.5, gravel 0.6/1.5,
+    basalt 0.1/0.2. Shear loss is 1.5 to 5 times the compressional value in
+    every unconsolidated sediment, so reusing the compressional default for
+    both understated it by a factor of 3 in the sediment and 2 in the
+    basement."""
+    assert crust1_local.DEFAULT_SEDIMENT_SHEAR_ATTENUATION == 1.5
+    assert crust1_local.DEFAULT_BASEMENT_SHEAR_ATTENUATION == 0.2
+    bottom = crust1_local.fetch_bottom_crust1((30.0, -40.0))
+    for layer in bottom.layers:
+        if layer.shear_speed > 0:
+            assert layer.shear_attenuation == pytest.approx(1.5)
+            assert layer.shear_attenuation > layer.attenuation
+    assert bottom.halfspace.shear_attenuation == pytest.approx(0.2)
+    assert (bottom.halfspace.shear_attenuation
+            > bottom.halfspace.attenuation)
+
+
+def test_crust1_shear_attenuation_is_a_public_keyword(cache):
+    """Both new defaults are overridable at the point and transect fetchers."""
+    bottom = crust1_local.fetch_bottom_crust1(
+        (30.0, -40.0), sediment_shear_attenuation=0.9,
+        basement_shear_attenuation=0.05)
+    assert bottom.layers[0].shear_attenuation == pytest.approx(0.9)
+    assert bottom.halfspace.shear_attenuation == pytest.approx(0.05)
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        rd = crust1_local.fetch_bottom_crust1_transect(
+            (30.0, -40.0), (30.5, -40.0), n_points=2,
+            sediment_shear_attenuation=0.9, basement_shear_attenuation=0.05)
+    column = rd.columns[0] if hasattr(rd, 'columns') else rd
+    layers = getattr(column, 'layers', None) or rd.layers
+    assert layers[0].shear_attenuation == pytest.approx(0.9)
+
+
+def test_a_non_elastic_crust1_column_carries_no_shear_loss(cache):
+    """``elastic=False`` drops Vs, and a fluid layer must carry no shear
+    attenuation whatever the default says."""
+    bottom = crust1_local.fetch_bottom_crust1((30.0, -40.0), elastic=False)
+    for layer in bottom.layers:
+        assert layer.shear_speed == 0.0
+        assert layer.shear_attenuation == 0.0
+    assert bottom.halfspace.shear_attenuation == 0.0

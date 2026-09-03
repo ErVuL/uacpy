@@ -1343,8 +1343,47 @@ class Bellhop(PropagationModel):
         run — see :data:`_BEAM_TYPE_RUN_TYPES` for the enumeration and its
         authority. Untrapped, the arrivals/eigenray pairs corrupt the heap
         (``bellhop.exe`` aborts with SIGABRT) and ``beam_type='S'`` with an
-        incoherent run returns a field that is mostly NaN."""
+        incoherent run returns a field that is mostly NaN.
+
+        ``beam_type='S'`` with EIGENRAYS is the one supported-but-misleading
+        pair and warns rather than raising — the rays it writes are real
+        rays, just not screened for passing near a receiver."""
         letter = _RUN_MODE_TO_INFLUENCE_LETTER.get(run_mode)
+        if letter == 'E' and self.beam_type == 'S':
+            # InfluenceSGB writes the ray from inside its RcvrDepths loop
+            # (influence.f90:696-703) with the proximity test COMMENTED OUT:
+            # `! Adeltaz = ABS( deltaz )` and `! IF ( Adeltaz < RadiusMax )`
+            # at :698-699, matched by the `! END IF` at :714. So every ray
+            # that crosses a receiver-range column is written once for EVERY
+            # receiver depth, however far it passes — the count scales with
+            # the depth count rather than with the number of rays that
+            # actually reach a receiver. The other beam types reach
+            # WriteRay2D only through ApplyContribution (:629-652), which
+            # the caller enters only inside its own `n < RadiusMax` test
+            # (:475 for 'G', :595 for 'B').
+            #
+            # Measured on a 100 m Pekeris at 200 Hz, 300 beams, receivers at
+            # 400/500/600 m: 736 rays against 132 for 'G' with one receiver
+            # depth, and 78 % of them pass more than 5 m from any receiver
+            # (median 12.7 m, worst 49 m — half the water column).
+            #
+            # This is a warning, not a rejection: the records are genuine
+            # ray trajectories and Rays.filter_by_miss_distance turns them
+            # back into eigenrays, so refusing the run would remove a usable
+            # capability. 'E' therefore stays in _BEAM_TYPE_RUN_TYPES['S'],
+            # which mirrors the Fortran's CASE branches and nothing else.
+            warnings.warn(
+                f"Bellhop(beam_type='S') EIGENRAYS are not screened for "
+                f"passing near a receiver: InfluenceSGB writes the ray from "
+                f"inside its receiver-depth loop with the proximity test "
+                f"commented out (influence.f90:698-699), so every ray "
+                f"crossing a receiver-range column is written once per "
+                f"receiver depth however far away it passes. Expect several "
+                f"times as many rays as beam_type='G' returns, many of them "
+                f"missing the receiver by a large fraction of the water "
+                f"depth. Use beam_type='G' or 'B' for true eigenrays, or "
+                f"filter the result with Rays.filter_by_miss_distance().",
+                UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
         if letter is None or letter in _BEAM_TYPE_RUN_TYPES[self.beam_type]:
             return
         usable = sorted(
@@ -1874,8 +1913,42 @@ class Bellhop(PropagationModel):
         away so the grid stays uniform, gives the engine somewhere to skip.
         A first range within one step of the source cannot be padded ahead
         of — that column stays NaN and the run says so.
+
+        EIGENRAYS ('E') skips the same first column but cannot be padded
+        around, so it warns instead — see below.
         """
         ranges = np.atleast_1d(np.asarray(receiver.ranges, dtype=float))
+        if (run_type == 'E'
+                and self.beam_type in _UNIFORM_RANGE_BEAM_TYPES
+                and str(self.grid_type).upper() == 'R'
+                and ranges.size >= 2):
+            # An eigenray run reaches the SAME RcvrRanges loop: 'g' steps from
+            # irA + 1 - II at influence.f90:373, after the clamps at :339
+            # and :351, and ApplyContribution (:629-652) only picks its
+            # CASE('E') branch (:632-636) once that loop has already chosen
+            # the column. So the first receiver range is skipped for
+            # eigenrays exactly as it is for a TL run — silently, with no
+            # NaN to show for it, because a missing eigenray is just an
+            # absent record.
+            #
+            # Padding cannot fix it here the way it does for the TL and
+            # arrivals branches: undoing the padding means trimming a range
+            # axis, and _BELLHOP_OUTPUT['E'] reads a .ray file, whose records
+            # are trajectories carrying no receiver index. An extra column
+            # would leave extra eigenrays in the result with nothing to
+            # identify them by. So the run says what it will not deliver.
+            warnings.warn(
+                f"{self.model_name}(beam_type={self.beam_type!r}): "
+                f"{_INFLUENCE_ROUTINE[self.beam_type]} never fills the first "
+                f"receiver-range column (influence.f90:373, after the clamps "
+                f"at :339 and :351), so an EIGENRAYS run returns no rays at "
+                f"receiver.ranges[0] = {ranges[0]:g} m. Unlike a TL run this "
+                f"cannot be padded around — a .ray record carries no receiver "
+                f"index, so the padding could not be trimmed off again. "
+                f"Use beam_type='G' or 'B', which walk the range index with a "
+                f"bracket test, or add a throwaway first range.",
+                UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
+            return receiver, None
         if (self.beam_type not in _UNIFORM_RANGE_BEAM_TYPES
                 or run_type not in ('C', 'I', 'S', 'A')
                 or str(self.grid_type).upper() != 'R'

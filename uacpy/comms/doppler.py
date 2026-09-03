@@ -79,6 +79,15 @@ def estimate_doppler_scale(rx, template, scales=None):
     a value in ``[0, 1]``); the best-scoring scale wins. Returns ``(best_scale,
     scales, peak_metric)`` — the last two for plotting the ambiguity curve.
 
+    ``best_scale`` is the CENTRE of the winning plateau, not the candidate
+    ``argmax`` picks out. The metric is a staircase (see below), so a whole run
+    of candidates shares the top score and ``argmax`` would return that run's
+    low edge — a one-sided bias of up to one plateau width. It is therefore a
+    midpoint of two scanned candidates rather than one of them verbatim, and
+    for a run of even length it falls between grid nodes. A run truncated by
+    the end of the scan gives the midpoint of the scanned part, so the answer
+    never leaves the range the caller asked for.
+
     The returned ``a`` follows the package convention (``doppler_from_speed`` /
     ``compensate_doppler``): ``a = v/c``, positive for a closing geometry. It is
     the value to feed straight back: ``compensate_doppler(rx, a)`` removes the
@@ -118,8 +127,7 @@ def estimate_doppler_scale(rx, template, scales=None):
         scales = np.asarray(scales, dtype=float)
         peak = _metric_scan(r, t, scales)
         _reject_all_zero_metric(peak, r, t, scales)
-        best = float(scales[int(np.argmax(peak))])
-        return best, scales, peak
+        return _plateau_centre(scales, peak), scales, peak
 
     grid = np.linspace(-5e-3, 5e-3, 601)
     stride = _coarse_stride(r.size, float(grid[1] - grid[0]))
@@ -136,15 +144,14 @@ def estimate_doppler_scale(rx, template, scales=None):
         # concluding the surface is all-zero.
         peak = _metric_scan(r, t, grid)
         _reject_all_zero_metric(peak, r, t, grid)
-        best = float(grid[int(np.argmax(peak))])
-        return best, grid, peak
+        return _plateau_centre(grid, peak), grid, peak
     centre = int(coarse_idx[int(np.argmax(coarse_peak))])
     fine_idx = np.arange(max(0, centre - (stride - 1)),
                          min(grid.size, centre + stride))
     fine_peak = _metric_scan(r, t, grid[fine_idx])
     # Merge the two stages onto one ascending candidate axis (the centre
-    # candidate appears in both; keep one copy) so the argmax resolves ties
-    # toward the lowest scale, as a full ascending scan does.
+    # candidate appears in both; keep one copy) so the winning plateau's run
+    # is contiguous and its midpoint is the one a full ascending scan finds.
     idx = np.concatenate([coarse_idx, fine_idx])
     vals = np.concatenate([coarse_peak, fine_peak])
     order = np.argsort(idx, kind="stable")
@@ -153,8 +160,7 @@ def estimate_doppler_scale(rx, template, scales=None):
     keep[1:] = idx[1:] != idx[:-1]
     idx, vals = idx[keep], vals[keep]
     scales_out = grid[idx]
-    best = float(scales_out[int(np.argmax(vals))])
-    return best, scales_out, vals
+    return _plateau_centre(scales_out, vals), scales_out, vals
 
 
 _MAX_COARSE_STRIDE = 15
@@ -180,6 +186,35 @@ def _coarse_stride(n_samples: int, grid_step: float) -> int:
     return int(min(float(_MAX_COARSE_STRIDE),
                    max(1.0, np.floor(1.0 / (max(int(n_samples), 1)
                                             * grid_step)))))
+
+
+def _plateau_centre(scales, peak):
+    """Centre of the contiguous run of maximal candidates around the argmax.
+
+    The metric is a plateau staircase, not a peaked curve: ``compensate_doppler``
+    resamples to ``int(round(N*(1 + a)))`` samples, so every candidate inside a
+    ``1/N``-wide interval of ``a`` produces the *same* resampled record and
+    therefore a bit-identical score. ``np.argmax`` returns the first index of
+    that run, i.e. the plateau's LOW EDGE, which is a one-sided bias of up to
+    one plateau width — measured 7/7 on the package's chirp fixture, where a
+    ``1/N`` of 1.72e-4 in ``a`` is 0.26 m/s at c = 1500. Returning the run's
+    midpoint puts the estimate where the metric actually stops distinguishing.
+
+    A run truncated by the end of the scan (the winning plateau straddling the
+    top or bottom candidate) gives the midpoint of the part that was scanned:
+    that is the best available, and unlike the analytic plateau centre
+    ``n_out/N - 1`` it never returns a scale outside the range the caller
+    asked for.
+    """
+    best_index = int(np.argmax(peak))
+    top = peak[best_index]
+    lo = best_index
+    while lo - 1 >= 0 and peak[lo - 1] == top:
+        lo -= 1
+    hi = best_index
+    while hi + 1 < peak.size and peak[hi + 1] == top:
+        hi += 1
+    return float(0.5 * (scales[lo] + scales[hi]))
 
 
 def _metric_scan(r, t, scales):

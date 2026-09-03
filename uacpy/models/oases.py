@@ -3193,8 +3193,13 @@ class OASSP(OASES):
         below ``ROUGH2 < 1e-10``, ``oaseun31.f:2310``), equally unusable.
         So exactly one interface may be rough, and it must be a bottom one.
         """
-        surface_rg = abs(float(
-            getattr(env.surface, 'roughness', 0.0) or 0.0))
+        # ``env.surface`` is always a ``Surface``: ``Environment.__init__``
+        # puts whatever it is given through ``Surface.coerce``, which turns
+        # ``None`` into a vacuum surface rather than passing it along. And
+        # ``roughness`` delegates to the r=0 ``BoundaryProperties``, whose
+        # ``__post_init__`` leaves it a concrete float on every boundary type
+        # — so no default and no ``or 0.0``.
+        surface_rg = abs(float(env.surface.roughness))
         rough_bottoms = [rg for rg in bottom_interface_roughness(env)
                          if abs(rg) > _OASS_MIN_MEAN_FIELD_ROUGHNESS]
         if surface_rg > _OASS_MIN_MEAN_FIELD_ROUGHNESS:
@@ -3456,9 +3461,14 @@ class OASS(OASES):
     OASS — OASES Scattering and Reverberation Module.
 
     Computes the spatial statistics of the field a rough interface scatters:
-    the reverberation level against range and receiver depth
+    the reverberation LOSS against range and receiver depth
     (``RunMode.REVERBERATION``, the default) or the reverberation covariance
     across the receiver array (``RunMode.COVARIANCE``).
+
+    A loss, not a level: OASES writes ``-10·log10 E[|p_scat|²]``, so a larger
+    number is a *weaker* scattered field — the same direction as transmission
+    loss, and ``RL = SL -`` this. See :meth:`_read_reverberation` for the
+    derivation from the vendored source.
 
     OASS is a **post-processor**. It consumes the mean-field boundary
     operators an OAST run writes with option ``'s'`` into a ``.rhs``
@@ -3494,9 +3504,13 @@ class OASS(OASES):
         (``unoass21.f:151``). ``None`` selects the seafloor, i.e. the first
         bottom record of the deck.
     multiple_scattering : bool
-        Option ``'p'`` (``rescat``): perturbed boundary operator. Yields a
-        lower bound on the reverberation level where the default single-
-        scattering kernel yields an upper bound (``oass.tex:163-166``).
+        Option ``'p'`` (``rescat``): perturbed boundary operator, i.e. the
+        loss through re-scattering is included. ``oass.tex:163-166`` states
+        the bound in LEVEL terms — this option "yields lower bound for reverb
+        levels", the default single-scattering kernel an upper bound. The
+        Field stores the negated quantity, so on the numbers you get back the
+        direction reverses: ``'p'`` returns the larger (weaker-field) losses
+        and the default the smaller ones.
     plane_geometry : bool
         Option ``'P'`` (``ICDR=1``): plane rather than cylindrical geometry.
     mean_field : OAST, optional
@@ -3844,7 +3858,7 @@ class OASS(OASES):
         interface = (first_bottom if self.interface is None
                      else int(self.interface))
         if interface == _OASS_SURFACE_INTERFACE:
-            rg = abs(float(getattr(env.surface, 'roughness', 0.0) or 0.0))
+            rg = abs(float(env.surface.roughness))
             named = "the sea surface (deck layer 2)"
             fix = ("Set the roughness on the surface, e.g. "
                    "BoundaryProperties(..., roughness=0.5) on env.surface. ")
@@ -4124,12 +4138,32 @@ class OASS(OASES):
                             proc, source: Source, extras: dict) -> Field:
         """Build the reverberation :class:`Field` from the ``.plt`` curves.
 
-        Option ``'r'`` calls ``PLTLOS`` (``unoass21.f:402``), the routine OAST
-        uses for TL, and ``oasfun22.f:322`` tags the curves ``…TLRAN`` — so
-        ``read_oast_tl`` reads them unchanged. What they carry is
-        ``-10·log10 E[|p_scat|²]`` (``oassun26.f:876-880``), a reverberation
-        level, which is why the Field is tagged ``kind='reverberation'``
-        rather than left as pressure in dB.
+        Option ``'r'`` sets ``PLTL`` (``unoass21.f:607-609``), whose branch
+        calls ``REVINT`` and then ``PLTLOS`` (``unoass21.f:381,402``) — the
+        routine OAST uses for TL — and ``oasfun22.f:322`` tags the curves
+        ``…TLRAN``, so ``read_oast_tl`` reads them unchanged. What they carry
+        is ``-10·log10 E[|p_scat|²]``: ``REVINT`` accumulates
+        ``cff(index,1) += facin·cff·conjg(cff)`` (``oassun26.f:843-844``), an
+        intensity, and its "CONVERT TO dB" block (``oassun26.f:853-858``)
+        applies ``CVMAGS → VCLIP → VALG10 → VSMUL(-5E0)`` into ``CFFs``, which
+        ``unoass21.f:38`` equivalences to the ``XS`` that ``PLTLOS`` plots.
+        The extra square from ``CVMAGS`` is what makes the ``-5`` a ``-10`` on
+        the intensity, and the leading minus makes it a **loss, not a level**:
+        a larger value is a WEAKER scattered field, the same direction as
+        transmission loss, with ``RL = SL -`` this. That direction is not a
+        convention uacpy chose — it is what ``VSMUL(…, -5E0, …)`` at
+        ``oassun26.f:858`` writes. It is why the Field is tagged
+        ``kind='reverberation'`` rather than left as pressure in dB: it shares
+        TL's representation but is a different quantity, so the two do not
+        compare.
+
+        ``REVRAN``'s own dB block (``oassun26.f:633-638``) is the same
+        arithmetic on a *cross-range covariance*
+        (``cff(inr+iof,2)·conjg(cff(index+iof,2))``, ``:623-624``) and feeds
+        the ``CCONTU`` contour branch (``unoass21.f:355-379``), which is
+        enabled by the **capital** option ``'C'`` (``unoass21.f:626-628``) —
+        lowercase ``'c'`` sets ``ICONTU``, the depth-integrand contours, which
+        is a third thing again. Neither feeds the ``.plt`` curves read here.
         """
         plt_path = self._require_output(
             [fm.get_path(f'{base_name}.plt')],

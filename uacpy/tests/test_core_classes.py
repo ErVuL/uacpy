@@ -13,6 +13,8 @@ both sides: the label that must be refused, and the legitimate one next to
 it that must still work.
 """
 
+import dataclasses
+import inspect
 import re
 import warnings
 
@@ -22,7 +24,7 @@ import uacpy
 from uacpy.core.absorption import convert_attenuation_units
 from uacpy.core.altimetry import Altimetry
 from uacpy.core.bathymetry import Bathymetry
-from uacpy.core.bottom import Bottom, BoundaryProperties
+from uacpy.core.bottom import Bottom, BoundaryProperties, SeabedColumn
 from uacpy.core.constants import (
     AttenuationUnits, BoundaryType, SBP_ANGLE_RESOLUTION_DEG,
 )
@@ -2781,6 +2783,12 @@ class TestKindUnitAndDtypeAreIndependentAxes:
       RAM-vs-Kraken comparison of one quantity written two ways.
     * ``replica_bank_from_field`` asked for a quantity when what matched-field
       processing actually needs is phase, i.e. the dtype.
+
+    A fourth axis is *not* modelled here and must be read off the producer:
+    which direction a dB quantity runs. ``kind='reverberation'`` sounds like a
+    level and is a loss, because OASES writes ``-10*log10 E[|p_scat|^2]``.
+    Reading the name instead of the engine made ``max()`` return the quietest
+    cell; the two losses are enumerated in :meth:`Field.max` for that reason.
     """
 
     Z = np.array([10.0, 20.0])
@@ -2806,20 +2814,63 @@ class TestKindUnitAndDtypeAreIndependentAxes:
             'reverberation'
 
     # ── unit: which way is louder ─────────────────────────────────────
-    def test_transmission_loss_is_the_one_quantity_that_inverts(self):
-        # TL is a *loss*, so the least of it is the loudest.
-        f = self._field()
-        assert (f.kind, f.unit) == ('pressure', 'dB')
-        assert float(f.max().data) == pytest.approx(40.0)
+    @pytest.mark.parametrize('kind, expected_max', [
+        (None, 40.0),               # pressure in dB: transmission loss
+        ('reverberation', 40.0),
+    ], ids=['transmission_loss', 'reverberation'])
+    def test_a_db_loss_inverts(self, kind, expected_max):
+        """Both dB *losses* run backwards, so the least of either is loudest.
 
-    @pytest.mark.parametrize('kind', ['reverberation', 'signal_excess'])
-    def test_a_db_level_is_not_inverted(self, kind):
-        # Reverberation and signal excess share TL's dB unit but are levels,
-        # not losses: more is more. Deciding direction from the unit alone
-        # reports the *weakest* cell of a level grid as the strongest.
-        f = self._field(metadata={'kind': kind})
+        Reverberation belongs here because that is what the vendored engine
+        writes. ``REVINT`` (``oassun26.f:853-858``, the routine option ``'r'``
+        reaches) builds an intensity, squares it with ``CVMAGS``, takes
+        ``VALG10`` and scales by ``VSMUL(-5E0)``, giving
+        ``-10*log10 E[|p_scat|^2]``. The leading minus is the whole point: a
+        larger stored number is a *weaker* scattered field, which is why the
+        model tags it ``oass_quantity='reverberation_loss_db'``. Read as a
+        level, ``max()`` returned the quietest cell of the grid.
+
+        **A bound stated on the level is the opposite bound on this array.**
+        ``oass.tex:163-166`` says option ``p`` (re-scattering included)
+        "Yields lower bound for reverb levels" and the default "yields upper
+        bound" — so on the stored loss those are the *upper* and *lower*
+        bounds respectively, which is why
+        ``test_oass.py::test_multiple_scattering_lowers_the_reverberation_level``
+        asserts ``multiple.data > single.data``. Any inequality about
+        reverberation has to be restated when it crosses this sign, and a
+        word swap from "level" to "loss" does not do that."""
+        f = self._field(metadata=None if kind is None else {'kind': kind})
+        assert f.unit == 'dB'
+        assert float(f.max().data) == pytest.approx(expected_max)
+
+    def test_a_db_level_is_not_inverted(self):
+        # Signal excess shares the dB unit but is a level, not a loss: more
+        # is more. Deciding direction from the unit alone reports the
+        # *weakest* cell of a level grid as the strongest.
+        f = self._field(metadata={'kind': 'signal_excess'})
         assert f.unit == 'dB'
         assert float(f.max().data) == pytest.approx(90.0)
+
+    def test_reverberation_max_returns_the_strongest_scattering_not_the_last_range(self):
+        """The shape the bug actually took, on a field shaped like an OASS
+        run: the loss grows monotonically with range, so reading it as a
+        level made ``max()`` a synonym for "the far end of the grid" — and
+        the method's own docstring says it slices at the loudest point."""
+        ranges = np.array([1000.0, 2000.0, 3000.0, 4000.0, 5000.0])
+        loss = np.array([40.0, 52.3, 62.1, 69.0, 73.98])
+        f = Field(data=loss, coords={'range': ranges}, model='Test',
+                  frequencies=100.0, metadata={'kind': 'reverberation'})
+        peak = f.max()
+        assert float(peak.data) == pytest.approx(loss.min())
+        assert peak.pinned['range'] == pytest.approx(1000.0)
+
+    def test_the_reverberation_axis_label_says_loss(self):
+        # The label is where a reader of the plot learns the direction, and
+        # it said 'level' while the numbers ran the other way.
+        from uacpy.core.results.quantities import quantity
+        label = quantity('reverberation').units['dB']
+        assert label == 'Reverberation loss (dB re unit source)'
+        assert 'level' not in label.lower()
 
     def test_a_time_trace_is_linear_not_db(self):
         # Real data alone does not mean dB — a time trace is Pa, and treating
@@ -3507,12 +3558,39 @@ class TestSliceLabelsMustBeFiniteScalars:
         assert ssp.eval(depth=50.0).value == pytest.approx(1495.0)
 
 
+def test_surface_and_bottom_delegate_the_same_boundary_field_set():
+    """``Surface`` and ``Bottom`` hold their nodes in the same
+    ``BoundaryProperties``, so the names each follows through on a delegated
+    write cannot legitimately differ. They were two separately written
+    frozensets of the same nine names; ``Surface`` now imports ``Bottom``'s,
+    which it already imported four other names from. Identity, not equality:
+    equality would still pass on two copies that had been edited in step and
+    then let drift."""
+    from uacpy.core.bottom import _HALFSPACE_DELEGATED
+    from uacpy.core.surface import _SURFACE_DELEGATED
+    assert _SURFACE_DELEGATED is _HALFSPACE_DELEGATED
+    # Every delegated name is a real BoundaryProperties field, which is what
+    # makes one shared set correct rather than a coincidence.
+    fields = {f.name for f in dataclasses.fields(BoundaryProperties)}
+    assert _SURFACE_DELEGATED <= fields
+
+
+def _two_vacuum_boundaries():
+    return [BoundaryProperties(acoustic_type='vacuum') for _ in range(2)]
+
+
+def _two_vacuum_columns():
+    return [SeabedColumn([], BoundaryProperties(acoustic_type='vacuum'))
+            for _ in range(2)]
+
+
 # Every coordinate array a core carrier casts with
 # ``np.array(..., dtype=float)``, as
 # ``(message label, ctor, field, complex samples, real samples, siblings)``.
-# The four carriers are ``Source``, ``Receiver``, ``SoundSpeedProfile`` and
+# The six carriers are ``Source``, ``Receiver``, ``SoundSpeedProfile``,
 # ``_RangeProfile`` — the last through both of its concrete subclasses, since
-# the guard reads ``_VALUE_FIELD`` and so builds a different label for each.
+# the guard reads ``_VALUE_FIELD`` and so builds a different label for each —
+# plus the two range-dependent boundary carriers ``Surface`` and ``Bottom``.
 _COMPLEX_COORDINATE_FIELDS = [
     ("source depths", uacpy.Source, 'depths',
      [50.0 + 2.0j], [50.0], dict(frequencies=100.0)),
@@ -3538,6 +3616,12 @@ _COMPLEX_COORDINATE_FIELDS = [
      [0.0 + 1.0j, 1000.0], [0.0, 1000.0], dict(heights=[0.5, -0.5])),
     ("Altimetry heights", Altimetry, 'heights',
      [0.5 + 1.0j, -0.5], [0.5, -0.5], dict(ranges=[0.0, 1000.0])),
+    ("Surface.ranges", Surface, 'ranges',
+     [0.0 + 1.0j, 1000.0], [0.0, 1000.0],
+     dict(properties=_two_vacuum_boundaries())),
+    ("Bottom.ranges", Bottom, 'ranges',
+     [0.0 + 1.0j, 1000.0], [0.0, 1000.0],
+     dict(columns=_two_vacuum_columns())),
 ]
 
 _COMPLEX_FIELD_IDS = [case[0] for case in _COMPLEX_COORDINATE_FIELDS]
@@ -3619,6 +3703,33 @@ class TestEveryCoreCarrierRejectsComplexCoordinates:
         with pytest.raises(ConfigurationError,
                            match="an empty array of dtype complex"):
             Source(depths=np.array([], dtype=complex), frequencies=100.0)
+
+    # ``Field.coords`` arrives as a dict rather than a named field, so it
+    # cannot ride the table above, but it casts the same way and is the one
+    # place where a complex *axis* is easy to confuse with the complex
+    # ``data`` a pressure field legitimately carries.
+    @pytest.mark.parametrize('axis', [np.array([0.0 + 1.0j, 10.0]),
+                                      [0.0 + 1.0j, 10.0],
+                                      np.array([0.0, 10.0], dtype=complex)],
+                             ids=['ndarray', 'list', 'zero_imaginary_dtype'])
+    def test_a_complex_field_coordinate_axis_is_refused_by_name(self, axis):
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            with pytest.raises(
+                    ConfigurationError,
+                    match=re.escape("Field.coords['range'] must be real")):
+                Field(data=np.zeros(2), coords={'range': axis})
+
+    def test_a_complex_field_data_array_is_accepted(self):
+        """The far side of the guard, and the reason it is on the coords and
+        not on the Field: pressure is complex on every frequency-domain
+        result, and only the axis is required to be a real distance."""
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            f = Field(data=np.array([1.0 + 2.0j, 3.0 - 1.0j]),
+                      coords={'range': [0.0, 10.0]})
+        assert np.iscomplexobj(f.data)
+        assert f.coords['range'].dtype == np.float64
 
 
 def _bathymetry():
@@ -4438,3 +4549,283 @@ class TestScalarSpellingsAreSharedByTheThreeCoercers:
         base[kw] = bad
         with pytest.raises(ConfigurationError, match='is a bool'):
             uacpy.Environment(**base)
+
+
+class TestTheOassReverberationCitationNamesTheRoutineOnOptionRsPath:
+    """``_DOCUMENTED_METADATA['OASS', 'kind']`` explains the reverberation
+    quantity by citing the OASES lines that convert it to dB. Getting that
+    address right takes the DATA PATH, not the block's contents.
+
+    ``oassun26.f`` carries two byte-identical "CONVERT TO dB" blocks —
+    ``REVRAN`` at :633-638 and ``REVINT`` at :853-858 — so every content
+    assertion passes on either, and a citation naming the wrong routine reads
+    as correct. The entry has been wrong twice: first ``:876-880``, which is a
+    comment, a PARAMETER and three INCLUDEs and converts nothing, then
+    ``:633-638``, which converts but is the wrong routine.
+
+    ``REVINT`` is the one. It writes ``CFFs``, which ``unoass21.f:38``
+    equivalences to the ``XS`` that ``PLTLOS`` plots into the ``.plt`` uacpy
+    reads, and option ``'r'`` sets ``PLTL`` (``unoass21.f:607-609``) which is
+    the branch that calls it. ``REVRAN`` writes ``CFF(1,1)`` (equivalenced to
+    ``X``), accumulates a cross-range covariance rather than an intensity, and
+    is reached only from the ``CCONTU`` contour branch that the **capital**
+    option ``'C'`` enables (``unoass21.f:626-628``). The letters are
+    case-sensitive and the lowercase one is a third output again: ``'c'`` sets
+    ``ICONTU``, the depth-integrand contours (``unoass21.f:602-604``), which
+    reach neither routine. The same shape of pin sits on the model side in
+    ``test_oass.py::TestTheReverberationCitationNamesTheRoutineOnOptionRsPath``;
+    the two must agree.
+    """
+
+    @staticmethod
+    def _src(name):
+        from pathlib import Path
+        path = (Path(__file__).resolve().parent.parent / 'third_party' /
+                'oases' / 'src' / name)
+        return path.read_text().splitlines()
+
+    @staticmethod
+    def _sentence():
+        from uacpy.core.results._base import _DOCUMENTED_METADATA
+        return _DOCUMENTED_METADATA[('OASS', 'kind')][1]
+
+    def test_the_cited_lines_convert_to_db(self):
+        # Necessary but NOT sufficient — this passes on REVRAN's block too,
+        # which is the whole reason the address drifted unnoticed.
+        cited = '\n'.join(self._src('oassun26.f')[853 - 1:858])
+        assert 'CONVERT TO dB' in cited
+        assert 'CVMAGS' in cited          # squares an already-intensity term
+        assert 'VCLIP' in cited           # floored before the log
+        assert 'VALG10' in cited          # log10
+        assert '-5E0' in cited            # -5 on the square, i.e. -10*log10
+
+    def test_the_cited_block_writes_the_array_that_reaches_the_plt_file(self):
+        # The discriminating half: the two blocks differ only in the array
+        # they write, and only one of those is plotted.
+        cited = '\n'.join(self._src('oassun26.f')[853 - 1:858])
+        other = '\n'.join(self._src('oassun26.f')[633 - 1:638])
+        assert 'CFFs(1)' in cited and 'CFFs(1)' not in other
+        assert 'CFF(1,1),1,-5E0' in other
+        driver = '\n'.join(self._src('unoass21.f'))
+        assert '(XS(1),CFFS(1))' in driver      # CFFs IS the plotted XS
+        assert '(X(1,1),CFF(1,1))' in driver    # CFF(1,1) is X, not plotted
+
+    def test_the_two_accumulators_are_different_quantities(self):
+        # Why the -5 is a -10 here and why the other block is not this one:
+        # REVINT multiplies one sample by its own conjugate (an intensity),
+        # REVRAN crosses two different range indices (a covariance).
+        lines = self._src('oassun26.f')
+        revint = '\n'.join(lines[844 - 1:845]).replace(' ', '')
+        revran = '\n'.join(lines[624 - 1:625]).replace(' ', '')
+        assert 'cff(index+iof,2)*conjg(cff(index+iof,2))' in revint
+        assert 'cff(inr+iof,2)*conjg(cff(index+iof,2))' in revran
+
+    def test_the_cited_lines_sit_inside_revint_not_revran(self):
+        lines = self._src('oassun26.f')
+        starts = {}
+        for i, ln in enumerate(lines, 1):
+            up = ln.strip().upper()
+            for name in ('REVRAN', 'REVINT', 'REVCOV'):
+                if up.startswith(f'SUBROUTINE {name}('):
+                    starts[name] = i
+        assert set(starts) == {'REVRAN', 'REVINT', 'REVCOV'}
+        assert starts['REVRAN'] < 638 < starts['REVINT']
+        assert starts['REVINT'] < 853 and 858 < starts['REVCOV']
+
+    def test_option_r_reaches_revint_and_never_the_contour_branch(self):
+        driver = self._src('unoass21.f')
+        i = next(k for k, ln in enumerate(driver) if "OPT(I).EQ.'r'" in ln)
+        branch = '\n'.join(driver[i:i + 8]).replace(' ', '')
+        assert 'PLTL=.TRUE.' in branch
+        assert 'CCONTU' not in branch
+        j = next(k for k, ln in enumerate(driver) if 'CALL REVINT(' in ln)
+        assert any('PLTL' in ln for ln in driver[j - 5:j])
+        assert any('CALL PLTLOS(' in ln for ln in driver[j:j + 30])
+        k = next(n for n, ln in enumerate(driver) if 'CALL REVRAN(' in ln)
+        assert any('CCONTU' in ln for ln in driver[k - 5:k])
+
+    def test_the_contour_option_letter_is_the_capital_one(self):
+        """OASES option letters are case-sensitive, and both cases exist here.
+        The citation named lowercase ``'c'``, which sets ``ICONTU`` — the
+        depth-integrand contours, a third output reaching neither REVRAN nor
+        REVINT — so a reader who followed it and passed ``'c'`` expecting
+        REVRAN would have got neither."""
+        driver = self._src('unoass21.f')
+        upper = next(k for k, ln in enumerate(driver) if 'OPT(I).EQ.\'C\'' in ln)
+        lower = next(k for k, ln in enumerate(driver) if 'OPT(I).EQ.\'c\'' in ln)
+        assert upper != lower
+        assert any('CCONTU=.TRUE.' in ln.replace(' ', '')
+                   for ln in driver[upper:upper + 4])
+        assert any('ICONTU=.TRUE.' in ln.replace(' ', '')
+                   for ln in driver[lower:lower + 4])
+        # Neither ICONTU nor the lowercase letter reaches a reverberation
+        # routine: REVRAN is guarded by CCONTU alone.
+        k = next(n for n, ln in enumerate(driver) if 'CALL REVRAN(' in ln)
+        assert not any('ICONTU' in ln for ln in driver[k - 5:k])
+
+    def test_the_sentence_names_the_capital_letter_and_distinguishes_the_other(self):
+        sentence = self._sentence()
+        assert 'CCONTU' in sentence and 'ICONTU' in sentence
+        assert 'case-sensitive' in sentence
+        assert 'CAPITAL' in sentence or 'capital' in sentence
+
+    def test_line_876_of_the_source_is_an_include_block_not_a_conversion(self):
+        # The first wrong address is real code, just not this code.
+        old = '\n'.join(self._src('oassun26.f')[876 - 1:880])
+        assert 'log10' not in old.lower()
+        assert 'INCLUDE' in old
+
+    def test_the_sentence_carries_the_address_and_rejects_both_wrong_ones(self):
+        sentence = self._sentence()
+        assert 'oassun26.f:853-858' in sentence
+        assert '876-880' not in sentence
+        # :633-638 may appear, but only as the block being ruled OUT — the
+        # sentence has to say why, or the next reader re-derives the same
+        # wrong answer from a content match.
+        assert 'oassun26.f:633-638 is' in sentence
+        assert 'REVINT' in sentence and 'REVRAN' in sentence
+        assert 'CFFs' in sentence
+
+    def test_the_core_and_model_citations_agree(self):
+        # Two homes for one fact; they were allowed to drift once already.
+        from uacpy.models.oases import OASS
+        model_doc = inspect.getdoc(OASS._read_reverberation)
+        assert 'oassun26.f:853-858' in model_doc
+        assert 'oassun26.f:853-858' in self._sentence()
+
+
+class TestReflectionEvalInterpolatesPhaseAsAtDoesAndSaysSo:
+    """``eval`` blends the phase column linearly, which is what
+    ``misc/RefCoef.f90:167`` does, and therefore inherits the precondition AT
+    states at ``misc/RefCoef.f90:119``: "Assumes phi has been unwrapped so
+    that it varies smoothly". uacpy documented the arithmetic and not the
+    assumption, so a table carrying the ±π branch cut interpolated through
+    zero and reported a phase reversal as no phase shift.
+
+    The behaviour is pinned as it is, not fixed: unwrapping here would put
+    uacpy's answer at odds with every solver reading the same table. What is
+    new is that :meth:`eval` now says so, and that the number in its docstring
+    is the number this measures."""
+
+    @staticmethod
+    def _rc(phi):
+        return ReflectionCoefficient(theta=np.array([10.0, 20.0, 30.0]),
+                                     R=np.array([0.9, 0.8, 0.7]),
+                                     phi=np.asarray(phi, dtype=float))
+
+    @staticmethod
+    def _phi_at(rc, angle):
+        return float(np.ravel(rc.eval(angle=angle).phi)[0])
+
+    def test_a_wrapped_table_interpolates_through_zero_across_the_cut(self):
+        # 3.0 and -3.0 are 0.283 rad apart the long way round; read as plain
+        # reals their midpoint is 0.
+        assert self._phi_at(self._rc([2.5, 3.0, -3.0]), 25.0) == 0.0
+
+    def test_the_unwrapped_table_returns_the_physical_phase_instead(self):
+        unwrapped = np.unwrap(np.array([2.5, 3.0, -3.0]))
+        assert self._phi_at(self._rc(unwrapped), 25.0) == pytest.approx(
+            np.pi, abs=1e-9)
+
+    def test_the_two_agree_away_from_the_cut(self):
+        # The discriminating half: the divergence is the branch cut, not
+        # interpolation in general.
+        wrapped, unwrapped = [2.5, 3.0, -3.0], np.unwrap([2.5, 3.0, -3.0])
+        assert self._phi_at(self._rc(wrapped), 15.0) == pytest.approx(2.75)
+        assert self._phi_at(self._rc(unwrapped), 15.0) == pytest.approx(2.75)
+
+    def test_the_blend_is_the_formula_the_toolbox_uses(self):
+        # RefCoef.f90:167, phi = (1-alpha)*phi_left + alpha*phi_right, with
+        # alpha the fractional position between the bracketing abscissas.
+        rc = self._rc([2.5, 3.0, -3.0])
+        alpha = (12.5 - 10.0) / (20.0 - 10.0)
+        assert self._phi_at(rc, 12.5) == pytest.approx(
+            (1 - alpha) * 2.5 + alpha * 3.0)
+
+    def test_nearest_and_at_are_untouched_by_the_cut(self):
+        rc = self._rc([2.5, 3.0, -3.0])
+        # Both return a tabulated sample, so neither can land between branches.
+        assert float(np.ravel(rc.eval(angle=25.0, method='nearest').phi)[0]) \
+            in (3.0, -3.0)
+        assert float(np.ravel(rc.at(angle=25.0).phi)[0]) in (3.0, -3.0)
+
+    def test_eval_documents_the_precondition_and_cites_the_toolbox_line(self):
+        doc = ' '.join(ReflectionCoefficient.eval.__doc__.split())
+        assert 'unwrapped' in doc
+        assert 'misc/RefCoef.f90:119' in doc
+        assert 'eval(angle=25)' in doc and '3.1416' in doc
+
+
+class TestTheSeaSurfaceUndersamplingWarningNamesTheNominalPeak:
+    """``generate_sea_surface`` compares the grid's Nyquist wavenumber against
+    ``2 * k0``, with ``k0`` built from M&C's nominal ``omega_p = g/W``
+    (13.1.11). The code comment says "nominal"; the warning text dropped the
+    word and called ``k0`` "the Pierson-Moskowitz peak", which it is not — the
+    spectrum ``S ~ omega^-5 exp(-beta (omega_p/omega)^4)`` peaks below it, so
+    the guard's margin is wider than the sentence implied. The threshold is a
+    calibration and is unchanged; only the sentence is."""
+
+    BETA = 0.74
+
+    def test_the_true_spectral_peak_sits_below_the_nominal_one(self):
+        # Stationary point of omega^-5 exp(-beta (w0/w)^4): w^4 = 4*beta/5*w0^4.
+        ratio = (4.0 * self.BETA / 5.0) ** 0.25
+        assert ratio == pytest.approx(0.8772, abs=5e-5)
+        # omega -> k goes as omega^2 under the deep-water dispersion.
+        assert ratio ** 2 == pytest.approx(0.7694, abs=5e-5)
+
+    def test_the_two_times_factor_is_really_two_point_six_true_peaks(self):
+        # The size of the overstatement, which is why the word matters.
+        assert 2.0 / (4.0 * self.BETA / 5.0) ** 0.5 == pytest.approx(2.599,
+                                                                     abs=5e-4)
+
+    def test_the_true_peak_is_a_maximum_of_the_spectrum(self):
+        # Not merely a stationary point: the discriminating check that the
+        # ratio above is the peak and the nominal omega_p is not.
+        w0 = 1.0
+
+        def S(w):
+            return w ** -5 * np.exp(-self.BETA * (w0 / w) ** 4)
+
+        w_true = (4.0 * self.BETA / 5.0) ** 0.25 * w0
+        assert S(w_true) > S(w0)
+        assert S(w_true) > S(w_true * 1.01)
+        assert S(w_true) > S(w_true * 0.99)
+
+    def test_the_warning_calls_the_threshold_quantity_nominal(self):
+        from uacpy.core.ssp import generate_sea_surface
+        # 32 samples over 4 km puts Nyquist at 0.0039 cycles/m, well under
+        # the 0.0139 the 15 m/s wind wants.
+        with pytest.warns(UserWarning, match='nominal') as rec:
+            generate_sea_surface(4000.0, wind_speed_mps=15.0, n_points=32,
+                                 seed=1)
+        message = str(rec[0].message)
+        assert 'omega_p = g/W' in message
+        assert 'below 2x the *nominal*' in message
+
+    def test_a_grid_that_resolves_the_peak_stays_silent(self):
+        # The far side of the unchanged threshold: the fix moved no boundary.
+        from uacpy.core.ssp import generate_sea_surface
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            generate_sea_surface(4000.0, wind_speed_mps=10.0, n_points=257,
+                                 seed=1)
+
+
+def test_the_db_docstring_contrasts_itself_against_tl_not_against_itself():
+    """``Field.db``'s closing paragraph explains why the property is named for
+    the unit: on a reverberation field it returns that level, and the
+    quantity-named spelling would have mislabelled it. The sentence named
+    ``.db`` — the property it is written on — so it read as saying its own
+    name was the misnomer. The property it means is ``.tl``, which exists and
+    refuses every non-pressure kind for exactly this reason."""
+    doc = ' '.join(Field.db.__doc__.split())
+    assert 'calling it ``.tl`` would have been the same misnomer' in doc
+    assert 'calling it ``.db``' not in doc
+    # The claim is only true because the sibling really does refuse: a
+    # reverberation field has a level in .db and no .tl at all.
+    rev = Field(data=np.array([60.0, 70.0]), coords={'range': [0.0, 10.0]},
+                metadata={'kind': 'reverberation', 'unit': 'dB'})
+    assert rev.db.tolist() == [60.0, 70.0]
+    with pytest.raises(AttributeError, match='not a transmission loss'):
+        rev.tl

@@ -359,6 +359,15 @@ df=fs/Nsam     ! 300/600 = 0.5 Hz frequency interval
 ! frequency set up
 tmp=(bw-df)/df
 nf1=int(tmp) + 1  ! (37.5-0.5)/0.5 + 1 = 75 frequencies, one half
+! UACPY: a bandwidth narrower than one bin marches ONE frequency, not three.
+! int() truncates toward zero, so for bw < df the negative tmp gives
+! int(tmp)=0 and nf1=1 -> nf=3: with Q=1e6, T=1 at fc=800 Hz (bw=8e-4 Hz,
+! df=1 Hz) the loop at :417 marched fc-1, fc and fc+1 Hz and psif.dat
+! recorded nf=3. uacpy keeps only the centre bin, so no reported number was
+! wrong — it cost 2.4x the wall time of the default fluid backend (measured
+! 0.0658 s against 0.0275 s single-threaded on a 100 m Pekeris deck). There is
+! no side bin to place when the band does not reach the first one.
+if (bw < df) nf1 = 0
 nf=2*nf1+1          ! including 0, 151 frequencies altogether.
 allocate(frq(nf))
 do ii=1,nf1

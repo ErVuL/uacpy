@@ -345,10 +345,17 @@ def test_no_inline_remediation_says_only_to_check_your_input():
     renders a "How to fix:" heading over advice the user cannot act on.
 
     Scope: remediations written *inline* at the raise site — see
-    ``_inline_remediations``. Five sites that build their text elsewhere are
-    out of this gate's reach rather than clean; it reports what it can see.
+    ``_inline_remediations``. Nine sites build their text elsewhere and are out
+    of that sweep's reach rather than clean; it reports what it can see, and
+    the tables it cannot are read directly below.
     """
     remediations, indirect = _inline_remediations()
+    # Copernicus keeps three per-fetcher wordings in a module-level table
+    # rather than at three copies of one raise, so read them from the table.
+    from uacpy.data.copernicus import _DATE_GAP_MESSAGES
+    remediations = list(remediations) + [
+        (f'data/copernicus.py:_DATE_GAP_MESSAGES[{kind!r}]', text)
+        for kind, (_message, text) in _DATE_GAP_MESSAGES.items()]
     empty = [f'{site}: {text!r}' for site, text in remediations
              if text.strip().lower().rstrip('.') in (
                  'check your input', 'check your inputs', 'check the input',
@@ -356,8 +363,10 @@ def test_no_inline_remediation_says_only_to_check_your_input():
     assert not empty, 'contentless remediation(s):\n' + '\n'.join(empty)
     # Pins the blind spot itself: if indirection spreads, this count moves and
     # the gate's coverage claim has to be restated rather than silently
-    # shrinking.
-    assert indirect <= 8, f'{indirect} remediations now built indirectly'
+    # shrinking. It moved 8 -> 9 when the three Copernicus date-gap guards
+    # collapsed into one helper reading _DATE_GAP_MESSAGES; that table is read
+    # above, so the gate sees those three remediations, not none.
+    assert indirect <= 9, f'{indirect} remediations now built indirectly'
 
 
 def test_no_remediation_offers_only_the_editable_install_command():

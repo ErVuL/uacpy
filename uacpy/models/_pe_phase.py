@@ -136,7 +136,7 @@ def psi_to_travelling_wave(
 
     if convention == MPIRAMS:
         # peramx already applies the full 3-D / Hankel-asymptotic output scaling
-        # scl = exp(+i(ω/c₀·r + π/4))/(4π) (peramx.f90:420); the Collins PE
+        # scl = exp(+i(ω/c₀·r + π/4))/(4π) (peramx.f90:429); the Collins PE
         # self-starter is itself a far-field Hankel approximation (Collins 1993;
         # JKPS), so the π/4 is the cylindrical-spreading phase, already baked in.
         # The wrapper must therefore ONLY conjugate (peramx marches the conjugate

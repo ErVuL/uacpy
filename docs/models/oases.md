@@ -101,7 +101,7 @@ physics, use [RAM](ram.md) or [Bellhop](bellhop.md).
 | `OASR` | `REFLECTION` | `ReflectionCoefficient` | `R(θ)` or `R(θ, f)` off the layer stack |
 | `OASN` | `COVARIANCE` | `Covariance` | `C(f, i, j)` across array elements |
 | `OASN` | `REPLICA` | `Replicas` | Array response per candidate source position |
-| `OASS` | `REVERBERATION` | `Field` (`kind='reverberation'`) | Reverberation level vs range off a rough interface |
+| `OASS` | `REVERBERATION` | `Field` (`kind='reverberation'`) | Reverberation loss vs range off a rough interface (larger = weaker scattered field, like TL) |
 | `OASS` | `COVARIANCE` | `Covariance` | Spatial covariance of the reverberant field |
 | `OASSP` | `BROADBAND` | `Field` (complex, `frequency` axis) | Scattered `H(d, r, f)` for one roughness realization |
 | `OASSP` | `TIME_SERIES` | `Field` (real, `time` axis) | Scattered `p(d, r, t)` |

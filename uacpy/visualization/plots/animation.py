@@ -283,10 +283,13 @@ def plot_time_snapshots(
     cmap : str, optional
         Diverging colormap for ±pressure. Default ``'RdBu_r'``.
     aspect : str or float, optional
-        Passed to ``ax.imshow``. ``None`` (default) picks ``1/1000.0``
-        when the range axis spans far more than the depth axis (so
-        wavefronts stay round when range is in km and depth in m),
-        otherwise ``'auto'``.
+        Passed to ``ax.imshow``. ``None`` (default) stretches a panel whose
+        range axis spans more than ten times its depth axis to a 4:1 floor —
+        at least a quarter as tall as it is wide — since drawn isotropically
+        (``1/1000.0``, 1 m of depth as long as 1 m of range, wavefronts round
+        with range in km and depth in m) such a panel is an unreadable sliver.
+        Every other panel gets ``'auto'``. Pass a number to override, e.g.
+        ``aspect=1/1000`` for a genuinely isotropic panel.
     p_max : float or sequence, optional
         Symmetric colour-scale ``[-p_max, +p_max]``. ``None`` (default)
         picks a per-row 99.5th-percentile of ``|data|`` so each model's
@@ -383,14 +386,20 @@ def plot_time_snapshots(
         if aspect is None:
             range_span = float(ranges[-1] - ranges[0])
             depth_span = float(depths[-1] - depths[0])
-            # Isotropic (1 m of depth as long as 1 m of range) while the panel
-            # stays at least a quarter as tall as it is wide; a shallow, long
-            # case — 100 m by 3 km — otherwise renders as a sliver, so it is
-            # stretched to that 4:1 floor instead.
+            # The gate admits only long, shallow panels — range_span more
+            # than ten times depth_span — so ratio < 0.1 throughout it, and an
+            # isotropic panel (aspect 1/1000: 1 m of depth as long as 1 m of
+            # range, so wavefronts stay round with range in km and depth in m)
+            # would be a sliver at most 1:10. Every panel the gate admits is
+            # therefore stretched to a 4:1 floor: a quarter as tall as it is
+            # wide. Isotropic is not offered inside the gate for exactly that
+            # reason — the former ``and ratio >= 0.25`` conjunct contradicted
+            # the gate and so selected nothing — but a caller who wants it can
+            # still pass ``aspect=1/1000`` explicitly.
+            # A single receiver depth has depth_span == 0 and so no ratio to
+            # scale by; it falls to 'auto' rather than dividing by zero.
             ratio = depth_span / range_span if range_span > 0 else 1.0
-            if range_span > 10.0 * depth_span and ratio >= 0.25:
-                row_aspect = 1.0 / 1000.0
-            elif range_span > 10.0 * depth_span:
+            if depth_span > 0 and range_span > 10.0 * depth_span:
                 row_aspect = 0.25 / ratio / 1000.0
             else:
                 row_aspect = 'auto'

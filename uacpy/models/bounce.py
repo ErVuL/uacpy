@@ -779,7 +779,7 @@ class Bounce(PropagationModel):
         counts = []
         for layer in writable_layers(env.bottom.at(range=0.0)):
             thickness = float(layer.thickness)
-            shear = float(getattr(layer, 'shear_speed', 0.0) or 0.0)
+            shear = float(layer.shear_speed)
             speed = shear if shear > 0.0 else float(layer.sound_speed)
             needed = _MESH_POINTS_PER_WAVELENGTH * thickness * frequency / speed
             # The binary's own requirement, and the floor it rejects below.

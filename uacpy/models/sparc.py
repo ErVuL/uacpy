@@ -2,10 +2,15 @@
 SPARC - Seismo-Acoustic Propagation in Realistic oCeans
 
 SPARC is a time-domain FFP (Fast Field Program) model using the same wavenumber
-integration approach as Scooter. The underlying ``sparc.f90`` reads shear and is
-elastic-capable, but the uacpy writer currently restricts the bottom boundary to
-vacuum / rigid (any halfspace is force-rigidified with a warning), so as wired
-uacpy's SPARC is a rigid/vacuum-bounded fluid model.
+integration approach as Scooter. The vacuum / rigid restriction is the BINARY's,
+not the wrapper's: ``Scooter/sparc.f90:100-103`` refuses any other boundary
+condition itself ("SPARC only allows Vacuum or Rigid boundary conditions"), and
+although the mesh tabulator declares a shear array and asks ``EvaluateSSP`` to
+fill it (``:193``, ``:211``), only ``cp`` ever enters the march — ``c2R`` /
+``c2I`` at ``:213-224`` are built from the compressional speed alone and ``cs``
+is read nowhere else in the file. So SPARC is a fluid model, and uacpy's writer
+force-rigidifying a halfspace (with a warning) reproduces the binary's own rule
+rather than adding a restriction of its own.
 """
 
 import warnings
@@ -579,15 +584,15 @@ class SPARC(PropagationModel):
             base_name = 'model'
             freq = self._resolve_pulse_frequency(source)
 
-            if self.output_mode == 'D':
-                result = self._run_vertical(fm, env, source, receiver,
-                                            base_name, freq)
-            elif self.output_mode == 'S':
+            if self.output_mode == 'S':
                 result = self._run_snapshot(fm, env, source, receiver,
                                             base_name, freq)
             else:
-                result = self._run_range_native(fm, env, source, receiver,
-                                                base_name, freq)
+                # 'R' (the default) and 'D' are the same looped procedure on
+                # transposed axes — see _LOOPED_TIME_SERIES_MODES.
+                result = self._run_looped_time_series(
+                    fm, env, source, receiver, base_name, freq,
+                    'D' if self.output_mode == 'D' else 'R')
             return self._mask_unresolvable_depths(
                 result, receiver, media_depth)
 
@@ -771,137 +776,152 @@ class SPARC(PropagationModel):
         self._attach_prt_tail(exc, fm.work_dir, run_base)
         raise exc
 
-    def _run_range_native(self, fm, env, source, receiver, base_name, freq):
-        """``output_mode='R'``: the horizontal (range-native) received time
-        series. ``sparc.f90`` writes one receiver depth per run, so the wrapper
-        loops over depths and stacks the traces."""
-        depths = np.atleast_1d(np.asarray(receiver.depths, dtype=float))
+    #: The two looped time-series modes, which differ only in the axis
+    #: ``sparc.f90`` cannot write in one run and therefore the wrapper loops
+    #: over. Everything else — the deck writer, the ``.rts`` read, the shared
+    #: time-grid check, the zero-range mask and the Field contract — is one
+    #: body in :meth:`_run_looped_time_series`. Per entry:
+    #:
+    #: ``loop_attr`` / ``held_attr``
+    #:     Receiver fields: the looped axis is passed one value at a time, the
+    #:     held one whole.
+    #: ``loop_coord`` / ``other_coord``
+    #:     Which Field coordinate the looped axis is, and which one the
+    #:     ``.rts`` file's own axis becomes. The ``.rts`` written in vertical
+    #:     mode stores the DEPTH axis in the slot the horizontal mode uses for
+    #:     ranges, which is why one reader field feeds both.
+    #: ``stack_axis``
+    #:     Where the looped axis lands in the (depth, range, time) contract.
+    #: ``scale``
+    #:     The far-field Hankel kernel is
+    #:     ``H0(kr) ~ sqrt(2/(pi·k·r))·e^{i(kr-pi/4)}``, so inverting it
+    #:     weights each wavenumber sample by
+    #:     ``dk·k·sqrt(2/(pi·k·r)) = dk·sqrt(2k/(pi·r))``. ``sparc.f90``'s 'D'
+    #:     branch carries exactly that (``sqrt(2)·dk·sqrt(k)`` at ``:595``
+    #:     times the ``1/sqrt(pi·Rr)`` write scale at ``:292``), so it needs no
+    #:     correction and is the convention the other modes are brought onto.
+    #:     The 'R' branch at ``:622-623`` applies ``sqrt(2)·dk·sqrt(k/r)`` and
+    #:     no write scale, i.e. the same weight without the ``1/sqrt(pi)`` — so
+    #:     it is ``sqrt(pi)`` hot and is divided back here.
+    #: ``pin_rmax``
+    #:     Vertical mode writes every run against the *full* receiver-range
+    #:     extent so all of them share one ``RMax`` and therefore one output
+    #:     time grid; without that each run would size its own window from its
+    #:     own single range and the stacked traces would carry mismatched
+    #:     times. Horizontal mode already passes the whole range axis.
+    #: ``mask_reason``
+    #:     Why ``r = 0`` columns are no-data. ``sparc.f90:622`` weights the
+    #:     'R' branch by ``SQRT( rkT / Pos%Rr )``, singular there — measured,
+    #:     it mixes NaN with exact zeros a caller would read as real, quiet
+    #:     samples. ``sparc.f90:292`` scales the 'D' branch by
+    #:     ``1 / SQRT( pi * Pos%Rr( 1 ) )``, also singular — measured, the
+    #:     whole trace comes back +Inf. The snapshot mode's in-tree Hankel
+    #:     transform masks the same cells, so all three output modes give one
+    #:     answer.
+    _LOOPED_TIME_SERIES_MODES = {
+        'R': dict(
+            loop_attr='depths', held_attr='ranges',
+            loop_coord='depth', other_coord='range',
+            # Spelled out, not built from loop_coord: a metadata key composed
+            # by an f-string is invisible to grep and to the registry gate
+            # that checks every documented key is actually written.
+            runs_key='n_depth_runs',
+            run_tag='d', stack_axis=0,
+            scale=1.0 / np.sqrt(np.pi), pin_rmax=False,
+            loop_axis_label='depths',
+            mode_label="horizontal-array mode (output_mode='R')",
+            opening='Computing {n} depth(s) (SPARC horizontal array mode)...',
+            step='  depth {i}/{n}: {value:.1f} m',
+            mask_reason=("output_mode='R''s 1/sqrt(r) cylindrical-spreading "
+                         "factor"),
+        ),
+        'D': dict(
+            loop_attr='ranges', held_attr='depths',
+            loop_coord='range', other_coord='depth',
+            runs_key='n_range_runs',
+            run_tag='r', stack_axis=1,
+            scale=1.0, pin_rmax=True,
+            loop_axis_label='ranges',
+            mode_label="vertical-array mode (output_mode='D')",
+            opening='Computing vertical array at {n} range(s)...',
+            step='  range {i}/{n}: {value:.1f} m',
+            mask_reason=("output_mode='D''s 1/sqrt(r) cylindrical-spreading "
+                         "factor"),
+        ),
+    }
+
+    def _run_looped_time_series(self, fm, env, source, receiver, base_name,
+                                freq, mode):
+        """The received time series for ``output_mode='R'`` and ``'D'``.
+
+        ``sparc.f90`` writes one slice per run — one receiver depth in
+        horizontal mode, one receiver range in vertical mode
+        (``sparc.f90:593-606`` accumulates ``RTSrz(ir, Itout)``, a time series
+        at each *depth* for a fixed range) — so the wrapper loops over that
+        axis and stacks the traces. The two modes are the same procedure on
+        transposed axes; :data:`_LOOPED_TIME_SERIES_MODES` carries every
+        difference between them.
+        """
+        spec = self._LOOPED_TIME_SERIES_MODES[mode]
+        loop_values = np.atleast_1d(np.asarray(
+            getattr(receiver, spec['loop_attr']), dtype=float))
+        n = len(loop_values)
         self._reject_oversized_loop_axis(
-            len(depths), 'depths', "horizontal-array mode (output_mode='R')")
-        self._log(f"Computing {len(depths)} depth(s) "
-                  f"(SPARC horizontal array mode)...")
+            n, spec['loop_axis_label'], spec['mode_label'])
+        self._log(spec['opening'].format(n=n))
+
+        # Vertical mode alone pins RMax across the runs (see the table).
+        write_kw = ({'rmax_reference_m': float(np.max(loop_values))}
+                    if spec['pin_rmax'] else {})
 
         traces, run_bases = [], []
-        ranges_out = time = dt = nt = None
+        other_axis = time = dt = nt = None
 
-        for idx, depth in enumerate(depths):
-            single = Receiver(depths=np.array([depth]), ranges=receiver.ranges)
-            run_base = base_name if len(depths) == 1 else f'{base_name}_d{idx}'
+        for idx, value in enumerate(loop_values):
+            single = Receiver(**{
+                spec['loop_attr']: np.array([value]),
+                spec['held_attr']: getattr(receiver, spec['held_attr']),
+            })
+            run_base = (base_name if n == 1
+                        else f"{base_name}_{spec['run_tag']}{idx}")
             run_bases.append(run_base)
             self._write_sparc_env(fm.get_path(f'{run_base}.env'), env, source,
-                                  single)
-            self._log(f"  depth {idx + 1}/{len(depths)}: {float(depth):.1f} m")
+                                  single, **write_kw)
+            self._log(spec['step'].format(i=idx + 1, n=n,
+                                          value=float(value)))
 
             rts_data = self._run_and_read_rts(fm, run_base)
             if time is None:
-                ranges_out = np.asarray(rts_data['ranges'], dtype=float)
+                # ``rts_data['ranges']`` is the file's own second axis: the
+                # output ranges in horizontal mode, the output DEPTHS in
+                # vertical mode (see ``other_coord`` in the table).
+                other_axis = np.asarray(rts_data['ranges'], dtype=float)
                 time = np.asarray(rts_data['time'], dtype=float)
                 dt, nt = rts_data['dt'], rts_data['nt']
             else:
                 self._require_shared_time_grid(rts_data, time, fm, run_base)
-            # rts_data['p'] is (nt, n_range) here; want (n_range, nt).
-            #
-            # The far-field Hankel kernel is H0(kr) ~ sqrt(2/(pi·k·r))·
-            # e^{i(kr-pi/4)}, so inverting it weights each wavenumber sample by
-            # dk·k·sqrt(2/(pi·k·r)) = dk·sqrt(2k/(pi·r)). sparc.f90's 'D' branch
-            # carries exactly that (sqrt(2)·dk·sqrt(k) at :595 times the
-            # 1/sqrt(pi·Rr) write scale at :292). The 'R' branch at :622-623
-            # applies sqrt(2)·dk·sqrt(k/r) and no write scale, i.e. the same
-            # weight without the 1/sqrt(pi) — so it is sqrt(pi) hot. Divide it
-            # back onto the kernel every other mode uses.
-            traces.append(np.asarray(rts_data['p']).T / np.sqrt(np.pi))
+            # rts_data['p'] is (nt, n_other) here; want (n_other, nt). The
+            # ``scale`` divides out the sqrt(pi) the 'R' branch is hot by.
+            traces.append(np.asarray(rts_data['p']).T * spec['scale'])
 
-        # (n_depth, n_range, n_time) — the shared Field contract. The range
-        # axis is SPARC's actual output grid; Field validates its length
-        # against the data shape. r = 0 columns are no-data:
-        # ``sparc.f90:622`` weights this branch by ``SQRT( rkT / Pos%Rr )``,
-        # singular there — measured, it mixes NaN with exact zeros a caller
-        # would read as real, quiet samples. The snapshot mode's in-tree
-        # Hankel transform masks the same cells, so all three output modes
-        # give one answer.
+        # (n_depth, n_range, n_time) — the shared Field contract, in that
+        # order whichever axis was looped. The range axis is SPARC's actual
+        # output grid; Field validates its length against the data shape.
+        axes = {spec['loop_coord']: loop_values,
+                spec['other_coord']: other_axis}
         result = Field(
             data=self._mask_zero_range_columns(
-                np.stack(traces, axis=0), ranges_out,
-                "output_mode='R''s 1/sqrt(r) cylindrical-spreading factor"),
-            coords={'depth': depths, 'range': ranges_out, 'time': time},
+                np.stack(traces, axis=spec['stack_axis']), axes['range'],
+                spec['mask_reason']),
+            coords={'depth': axes['depth'], 'range': axes['range'],
+                    'time': time},
             **self._result_kwargs(
                 source,
                 backend='sparc',
                 frequencies=freq,
                 phase_reference='time_domain_native',
-                output_mode='R',
-                n_depth_runs=len(depths),
-                dt=float(dt),
-                fs=(1.0 / float(dt)) if dt else float('nan'),
-                nt=int(nt),
-                t_start=float(time[0]) if len(time) else 0.0,
-            ),
-        )
-        return self._finalize_sparc_result(result, fm, run_bases)
-
-    def _run_vertical(self, fm, env, source, receiver, base_name, freq):
-        """``output_mode='D'``: the vertical-array received time series.
-
-        ``sparc.f90:593-606`` accumulates ``RTSrz(ir, Itout)`` — a time series
-        at each *depth* for a fixed range — the same kind of output as ``'R'``
-        sampled down a vertical array instead of along a horizontal one. SPARC
-        runs one range at a time, so the wrapper loops.
-
-        Every run is written against the *full* receiver-range extent so all of
-        them share one ``RMax`` and therefore one output time grid; without
-        that each run would size its own window from its own single range and
-        the stacked traces would carry mismatched times.
-
-        The ``.rts`` written in this mode stores the depth axis in the slot the
-        horizontal mode uses for ranges, which is why ``rts_data['ranges']``
-        is read as depths here.
-        """
-        ranges = np.atleast_1d(np.asarray(receiver.ranges, dtype=float))
-        self._reject_oversized_loop_axis(
-            len(ranges), 'ranges', "vertical-array mode (output_mode='D')")
-        self._log(f"Computing vertical array at {len(ranges)} range(s)...")
-
-        rmax_reference_m = float(np.max(ranges))
-        traces, run_bases, depths_out = [], [], None
-        time = dt = nt = None
-
-        for idx, rng in enumerate(ranges):
-            single = Receiver(depths=receiver.depths, ranges=np.array([rng]))
-            run_base = base_name if len(ranges) == 1 else f'{base_name}_r{idx}'
-            run_bases.append(run_base)
-            self._write_sparc_env(fm.get_path(f'{run_base}.env'), env, source,
-                                  single, rmax_reference_m=rmax_reference_m)
-            self._log(f"  range {idx + 1}/{len(ranges)}: {float(rng):.1f} m")
-
-            rts_data = self._run_and_read_rts(fm, run_base)
-            if time is None:
-                depths_out = np.asarray(rts_data['ranges'], dtype=float)
-                time = np.asarray(rts_data['time'], dtype=float)
-                dt, nt = rts_data['dt'], rts_data['nt']
-            else:
-                self._require_shared_time_grid(rts_data, time, fm, run_base)
-            # rts_data['p'] is (nt, n_depth) here; want (n_depth, nt).
-            # sparc.f90:595 + :292 give this branch the full inverse-Hankel
-            # weight dk·sqrt(2k/(pi·r)), so it needs no correction — it is the
-            # convention the other two modes are brought onto.
-            traces.append(np.asarray(rts_data['p']).T)
-
-        # (n_depth, n_range, n_time) — the shared Field contract. r = 0
-        # columns are no-data: ``sparc.f90:292`` scales this branch by
-        # ``1 / SQRT( pi * Pos%Rr( 1 ) )``, singular there — measured, the
-        # whole trace comes back +Inf.
-        result = Field(
-            data=self._mask_zero_range_columns(
-                np.stack(traces, axis=1), ranges,
-                "output_mode='D''s 1/sqrt(r) cylindrical-spreading factor"),
-            coords={'depth': depths_out, 'range': ranges, 'time': time},
-            **self._result_kwargs(
-                source,
-                backend='sparc',
-                frequencies=freq,
-                phase_reference='time_domain_native',
-                output_mode='D',
-                n_range_runs=len(ranges),
+                output_mode=mode,
+                **{spec['runs_key']: n},
                 dt=float(dt),
                 fs=(1.0 / float(dt)) if dt else float('nan'),
                 nt=int(nt),

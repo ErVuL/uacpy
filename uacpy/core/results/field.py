@@ -9,7 +9,7 @@ import warnings
 import numpy as np
 from typing import Optional, Dict, Any, List, Tuple, Union
 
-from uacpy.core._carrier_validate import _require_finite
+from uacpy.core._carrier_validate import _require_finite, _reject_complex
 from uacpy.core.constants import DEFAULT_SOUND_SPEED
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core._grid import _nearest_index_on_axis
@@ -156,6 +156,12 @@ class Field(Result):
             )
         normalised: Dict[str, np.ndarray] = {}
         for name, v in coords.items():
+            # Ahead of the float64 cast below, which discards an imaginary
+            # part — see _reject_complex for the two ways it does it. A
+            # complex coordinate is the axis, not the data: :attr:`data` is
+            # complex on every pressure field, but at() and the slicers read
+            # the coords as real distances.
+            _reject_complex(v, f"Field.coords[{name!r}]")
             # np.array (not asarray) so each Field owns its coord vectors —
             # slices/derived Fields never alias a parent's (or caller's) arrays.
             arr = np.atleast_1d(np.array(v, dtype=float))
@@ -336,8 +342,11 @@ class Field(Result):
         ``np.asarray(field.db, dtype=float)``.
 
         Named for the *unit*, not the quantity: on a reverberation or
-        signal-excess field this returns that level, and calling it ``.db``
-        would have been the same misnomer the ``kind`` axis removed.
+        signal-excess field this returns that quantity's dB values, and
+        calling it ``.tl`` would have been the same misnomer the ``kind``
+        axis removed. :attr:`tl` is the pressure-only spelling and refuses
+        every other ``kind``. Which **direction** those dB values run is a
+        separate question the unit cannot answer — see :meth:`max`.
 
         Raises :class:`AttributeError` for a time-domain field (one
         carrying a ``'time'`` axis) — a time trace is linear pressure, not a
@@ -387,9 +396,11 @@ class Field(Result):
         without consulting :attr:`kind`.
 
         Raises :class:`AttributeError` for any other ``kind``: a
-        reverberation or detection field has a level view in :attr:`db`,
+        reverberation or detection field has its own dB view in :attr:`db`,
         and returning it here would label that quantity a transmission
-        loss."""
+        loss. Reverberation is a loss too, and runs the same direction, but
+        it is a different loss — scattering, not one-way propagation — so
+        the two do not share a scale."""
         if self.kind != 'pressure':
             raise AttributeError(
                 f"Field.tl: this field's kind is {self.kind!r}, not "
@@ -632,11 +643,19 @@ class Field(Result):
 
         Linear data (``unit='Pa'``): global argmax of ``|data|``.
 
-        Exactly one quantity runs backwards, and it takes **both** axes to
-        identify it: transmission loss (``kind='pressure'`` in ``unit='dB'``)
-        is a *loss*, so the least of it is the loudest. Every other dB
-        quantity is a **level** — reverberation, signal excess — and more of
-        a level is more, so dB alone must not decide the direction.
+        Two quantities run backwards, and it takes **both** axes to identify
+        them: transmission loss (``kind='pressure'`` in ``unit='dB'``) and
+        OASS reverberation are *losses*, so the least of either is the
+        loudest. The remaining dB quantities are **levels** — signal excess,
+        and any future one — and more of a level is more, so dB alone must
+        not decide the direction.
+
+        Reverberation reads as a loss because that is what OASES writes:
+        ``-10·log10 E[|p_scat|²]``, from ``CVMAGS`` → ``VALG10`` →
+        ``VSMUL(-5E0)`` in ``REVINT`` (``oassun26.f:853-858``, the routine on
+        option ``'r'``'s path), which uacpy stores unchanged and tags
+        ``oass_quantity='reverberation_loss_db'``. Read as a level it made
+        this method return the *quietest* cell of a reverberation grid.
 
         ``NaN`` no-data cells (e.g. Bellhop cells no ray reached) are
         excluded. Every axis collapses to a pinned scalar; the returned
@@ -650,7 +669,7 @@ class Field(Result):
                 f"Field.")
         if self.is_complex:
             strength = np.abs(self.data)  # complex is linear: loudest |p|
-        elif self.kind == 'pressure' and self.unit == 'dB':
+        elif self.unit == 'dB' and self.kind in ('pressure', 'reverberation'):
             strength = -np.asarray(self.db, dtype=float)  # least loss = loudest
         elif self.unit == 'dB':
             strength = np.asarray(self.data, dtype=float)  # a level: more is more

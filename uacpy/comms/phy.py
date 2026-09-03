@@ -164,10 +164,26 @@ def symbol_sync(samples, sps, loop_bw=0.005, damping=1.0, start=0):
         Loop damping factor (~1.0 critically damped).
     start : int
         Initial sample index — pass the matched-filter group delay
-        (``span*sps``) so the loop starts on the symbol grid. From a
-        quarter-symbol offset it locks within ~50 symbols, from half a
-        symbol within ~300; a preamble at least that long absorbs the
-        pull-in.
+        (``span*sps``) so the loop starts on the symbol grid.
+
+    Notes
+    -----
+    Pull-in, measured noise-free on 16-QAM at ``sps=8``, ``rolloff=0.25``,
+    ``span=8``, ``loop_bw=0.005``, taking lock as a timing residual under 5 %
+    of a symbol: from a quarter-symbol offset the residual first crosses that
+    threshold at 91-160 symbols and stays under it from 420-560; from a half
+    symbol, 267-509 and 695-978. Half a symbol is the timing-error detector's
+    unstable equilibrium, which is why it costs several times more than the
+    larger-looking three-quarter case would suggest — pass ``start`` so the
+    loop begins near the grid rather than relying on a preamble to absorb a
+    half-symbol pull-in.
+
+    Locked, the loop sits a little late: about 0.06-0.11 sample (~1 % of a
+    symbol) with ~0.07 sample rms jitter and 0.3-0.4 sample peak-to-peak at
+    ``sps=8``. This is a steady-state property of the Gardner detector driving
+    the 2-point linear interpolator, not a pull-in residual — it is there even
+    when the loop starts exactly on the symbol grid — and it scales as a
+    fraction of a symbol (~0.013-0.016 symbol at ``sps`` 4 and 16).
     """
     x = np.asarray(samples, dtype=complex).ravel()
     sps = _require_integer_sps("symbol_sync", sps)

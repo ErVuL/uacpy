@@ -3354,6 +3354,59 @@ def test_read_flp_accepts_list_directed_records_and_sorts(tmp_path):
     assert np.all(np.diff(d['pos']['r']['z']) >= 0)
 
 
+class TestReadFlpBuildsItsDebugPreviewOnlyWhenItCanPrint:
+    """``read_flp``'s two axis previews exist solely for a debug message.
+
+    ``verbose`` is public and defaults off, and Python evaluates a call's
+    arguments before ``log_message`` can decline them — so an unguarded
+    preview is formatted on every read, for a line no one asked for. The
+    previews stay (``verbose`` is a documented switch, not dead code);
+    only the moment they are built moved.
+    """
+
+    DECK = ("'title'\n'R'\n9999,\t! M\n1\n0.0 /\n3\n20 1 5\n"
+            "2\n100 25 /\n3\n4000 0 2000 /\n1\n0.0 /\n")
+
+    def _deck(self, tmp_path):
+        path = tmp_path / 'preview.flp'
+        path.write_text(self.DECK)
+        return path
+
+    def _calls(self, tmp_path, **kwargs):
+        from unittest.mock import patch
+        from uacpy.io.oalib_reader import read_flp
+        with patch('uacpy.io.oalib_reader.log_message') as logger:
+            read_flp(str(self._deck(tmp_path)), **kwargs)
+        return [call.args[1] for call in logger.call_args_list]
+
+    def test_a_default_read_never_formats_a_preview(self, tmp_path):
+        messages = self._calls(tmp_path)
+        assert not [m for m in messages if 'rProf (km)' in m]
+        assert not [m for m in messages if 'Rro (m)' in m]
+
+    def test_a_verbose_read_gets_both_previews(self, tmp_path):
+        """The switch keeps working — this is a lazier preview, not a
+        removed one."""
+        messages = self._calls(tmp_path, verbose='debug')
+        assert [m for m in messages if 'rProf (km)' in m]
+        assert [m for m in messages if 'Rro (m)' in m]
+
+    def test_the_preview_lists_a_short_axis_value_by_value(self, tmp_path):
+        messages = self._calls(tmp_path, verbose='debug')
+        prof = next(m for m in messages if 'rProf (km)' in m)
+        assert prof.endswith('0.00')
+
+    def test_the_read_returns_the_same_deck_either_way(self, tmp_path):
+        from uacpy.io.oalib_reader import read_flp
+        path = str(self._deck(tmp_path))
+        quiet = read_flp(path)
+        loud = read_flp(path, verbose='debug')
+        assert quiet['title'] == loud['title']
+        assert np.array_equal(quiet['r_prof'], loud['r_prof'])
+        assert np.array_equal(quiet['pos']['r']['ro'],
+                              loud['pos']['r']['ro'])
+
+
 class TestPhaseSpeedBoundsStayContractedToRangeZero:
     """``resolve_phase_speed_bounds`` derives BOTH bounds from
     ``env.ssp.to_pairs()`` — the range-0 column. That is correct, and correct
@@ -3711,6 +3764,130 @@ class TestReadRtsFileRefusesNonPositiveReceiverCounts:
         assert data['nt'] == 2
         assert data['ranges'].tolist() == [10.0, 20.0]
         assert data['p'].shape == (2, 2)
+
+
+class TestAcousticFieldsAreAlwaysPresentOnTheirCarriers:
+    """The contract the io writers read half-space properties under.
+
+    The writers address ``hs.shear_speed``, ``layer.shear_attenuation``,
+    ``env.surface.roughness`` and their siblings directly. That is only
+    safe because every carrier fills all six acoustic fields at
+    construction, so there is nothing for a ``getattr`` default to catch:
+
+    * ``BoundaryProperties.__post_init__`` walks ``_ACOUSTIC_DEFAULTS``
+      (density, sound_speed, attenuation, roughness, shear_speed,
+      shear_attenuation) and either substitutes the default for a ``None``
+      or coerces the given value with ``float()``, then requires each to
+      be non-negative.
+    * ``SedimentLayer`` declares shear_speed / shear_attenuation /
+      roughness as plain floats defaulting to 0.0 and coerces them the
+      same way.
+    * ``Surface.__getattr__`` forwards each of those names to
+      ``properties[0]``, and ``Surface.__post_init__`` refuses an empty
+      node list and any node that is not a ``BoundaryProperties``.
+
+    If any of that changes, the writers raise ``AttributeError`` instead
+    of silently emitting a default into a deck — which is why this is
+    pinned rather than left implicit.
+    """
+
+    FIELDS = ('density', 'sound_speed', 'attenuation', 'roughness',
+              'shear_speed', 'shear_attenuation')
+
+    @pytest.mark.parametrize('kwargs', [
+        {},
+        {'acoustic_type': 'vacuum'},
+        {'acoustic_type': 'rigid'},
+        {'acoustic_type': 'half-space', 'sound_speed': 1800.0,
+         'density': 2.0, 'attenuation': 0.1},
+        {'acoustic_type': 'half-space', 'sound_speed': 2400.0,
+         'density': 2.5, 'attenuation': 0.2, 'shear_speed': 1000.0,
+         'shear_attenuation': 0.4, 'roughness': 0.6},
+    ])
+    def test_boundary_properties_fills_every_acoustic_field(self, kwargs):
+        bp = BoundaryProperties(**kwargs)
+        for name in self.FIELDS:
+            value = getattr(bp, name)
+            assert isinstance(value, float), name
+            assert value >= 0.0, name
+
+    def test_sediment_layer_fills_every_optional_field(self):
+        from uacpy.core.environment import SedimentLayer
+        layer = SedimentLayer(thickness=5.0, sound_speed=1550.0, density=1.5)
+        for name in ('attenuation', 'shear_speed', 'shear_attenuation',
+                     'roughness'):
+            value = getattr(layer, name)
+            assert isinstance(value, float), name
+            assert value >= 0.0, name
+
+    def test_a_surface_forwards_every_acoustic_field_to_its_first_node(self):
+        env = Environment(bathymetry=100.0, ssp=1500.0)
+        for name in self.FIELDS:
+            assert getattr(env.surface, name) == getattr(
+                env.surface.properties[0], name), name
+
+    def test_a_surface_cannot_be_built_without_a_node_to_forward_to(self):
+        from uacpy.core.surface import Surface
+        with pytest.raises(ConfigurationError, match='at least one'):
+            Surface(properties=[])
+
+    def test_a_halfspace_lookup_returns_a_boundary_properties(self):
+        """``halfspace_at`` is the other carrier the writers address
+        directly, and it must hand back the filled dataclass, not a
+        duck-typed stand-in."""
+        env = Environment(bathymetry=100.0, ssp=1500.0)
+        hs = env.bottom.halfspace_at(range=0.0)
+        assert isinstance(hs, BoundaryProperties)
+        for name in self.FIELDS:
+            assert isinstance(getattr(hs, name), float), name
+
+
+class TestSplitFortranTokensKeepsLiteralsWhole:
+    """``split_fortran_tokens`` is ``str.split`` for a list-directed record.
+
+    A list-directed READ takes a whole delimited literal as ONE value, so a
+    CHARACTER item may hold blanks. ``field3d.f90:192`` reads a mode-file
+    name that way. Whitespace splitting truncated such a name to its first
+    word and silently discarded the tail.
+    """
+
+    @staticmethod
+    def _split(line):
+        from uacpy.io._fortran_helpers import split_fortran_tokens
+        return split_fortran_tokens(line)
+
+    def test_a_quoted_item_holding_blanks_is_one_token(self):
+        assert self._split("0.0 1.0 'my modes'") == ["0.0", "1.0",
+                                                     "'my modes'"]
+
+    def test_a_doubled_delimiter_does_not_end_the_literal(self):
+        assert self._split("1.0 'a''b' z") == ["1.0", "'a''b'", "z"]
+
+    def test_double_quotes_delimit_too(self):
+        assert self._split('1.0 "d q" 2.0') == ["1.0", '"d q"', "2.0"]
+
+    def test_commas_and_tabs_separate_items(self):
+        assert self._split("1.0,\t2.0 ,3.0") == ["1.0", "2.0", "3.0"]
+
+    def test_delimiters_are_kept_so_numeric_items_are_unchanged(self):
+        """Items keep their quotes: that is what lets a caller tell a
+        literal from a bare word, and what keeps ``expand_repeat_counts``
+        and ``fortran_float`` seeing exactly what ``str.split`` gave
+        them for every non-CHARACTER item."""
+        assert self._split("3*1.0 2.0") == ["3*1.0", "2.0"]
+
+    def test_an_unterminated_literal_runs_to_the_end_of_the_record(self):
+        assert self._split("0.0 'unterminated") == ["0.0", "'unterminated"]
+
+    def test_a_blank_record_yields_no_tokens(self):
+        assert self._split("   \n") == []
+
+    def test_the_result_undelimits_through_strip_fortran_quotes(self):
+        """The two helpers compose: split into items, then undelimit the
+        CHARACTER one, honouring the doubled-quote escape."""
+        from uacpy.io._fortran_helpers import strip_fortran_quotes
+        tokens = self._split("0.0 1.0 'It''s a mode file'")
+        assert strip_fortran_quotes(tokens[2]) == "It's a mode file"
 
 
 class TestStripFortranQuotesDecodesDoubledApostrophes:

@@ -45,11 +45,10 @@ def download_glodap_db(cache_dir=None, *, timeout=600.0, verbose=False):
     urllib fetcher.
     """
     from uacpy.data._http import curl_download, http_get
-    dest = Path(cache_dir) if cache_dir else _cache.dataset_root('glodap')
-    dest.mkdir(parents=True, exist_ok=True)
+    dest = _cache.prepare_download(
+        'glodap', "downloading GLODAPv2.2016b mapped product (~211 MB)",
+        cache_dir=cache_dir, verbose=verbose)
     out = dest / GLODAP_FILE
-    log_message('glodap', "downloading GLODAPv2.2016b mapped product (~211 MB)",
-                verbose=verbose)
     # Staged beside its destination: the 211 MB tarball must not land in a
     # tmpfs /tmp (RAM) the way the system temp dir can.
     with tempfile.TemporaryDirectory(dir=dest) as tmp:

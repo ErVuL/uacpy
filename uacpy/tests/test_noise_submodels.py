@@ -277,7 +277,9 @@ def test_wind_model_pair_delta_at_10_khz():
     """Coates minus Merklinger wind at 10 kHz, 25 kn, deep water: the two
     closed forms give 56.2155 dB (Coates, ``w = 25/1.9438445`` m/s) and
     51.4501 dB (DRDC eq. 18-19 from the 2 kHz anchor), a +4.765 dB delta —
-    the guide §5's "up to 4.8 dB louder at 10 kHz and 25 kn"."""
+    the guide §5's "at 25 kn Coates is 4.77 dB louder at 10 kHz". 10 kHz is
+    not where the pair separates most; see
+    ``test_the_wind_pair_separates_most_near_4_khz``."""
     f = np.array([10000.0])
     coates = N.WIND_MODELS['coates'](f, wind_speed_kn=25.0)[0]
     merk = N.WIND_MODELS['merklinger'](f, wind_speed_kn=25.0,
@@ -394,3 +396,30 @@ class TestAMisspeltRegistryKeyIsATypedError:
             _shipping_coates(f, shipping_level='moderat')
         with pytest.raises(ConfigurationError, match='rain_rate'):
             _rain_torres_costa(f, rain_rate='heavvy')
+
+
+def test_the_wind_pair_separates_most_near_4_khz():
+    """The guide called 10 kHz the widest gap. Over its own 10 Hz - 100 kHz
+    grid the maximum is 5.14 dB near 4.3 kHz, and 10 kHz sits below it at
+    4.77 dB. Coates is also the *quieter* of the two below ~66 Hz, by 10.1 dB
+    at 10 Hz, which "up to 4.8 dB louder" did not say."""
+    f = np.logspace(1.0, 5.0, 800)
+    delta = (N.WIND_MODELS['coates'](f, wind_speed_kn=25.0)
+             - N.WIND_MODELS['merklinger'](f, wind_speed_kn=25.0,
+                                           water_depth='deep'))
+    peak = int(np.argmax(delta))
+    assert delta[peak] == pytest.approx(5.144, abs=5e-3)
+    assert 4.0e3 < f[peak] < 4.6e3
+    assert delta[peak] > np.interp(1.0e4, f, delta)      # 10 kHz is not the max
+    assert delta[0] == pytest.approx(-10.09, abs=0.01)   # Coates quieter at 10 Hz
+    assert f[delta < 0].max() == pytest.approx(66.0, rel=0.02)
+
+
+def test_the_drdc_report_is_cited_by_its_own_year():
+    """The module header and the report itself say DRDC-RDDC-2022-D051, May
+    2022; three sites cited it as 2018."""
+    import inspect
+    src = inspect.getsource(N)
+    assert 'Tollefsen & Pecknold (2018)' not in src
+    assert 'Tollefsen & Pecknold 2018' not in src
+    assert src.count('2022') >= 4

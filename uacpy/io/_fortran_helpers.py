@@ -292,6 +292,58 @@ def strip_fortran_quotes(line: str) -> str:
     return strip_fortran_comment(line)
 
 
+#: Value separators a list-directed READ recognises between items: blanks,
+#: tabs and commas. (A ``/`` terminates the whole list rather than one item
+#: and is handled by the callers that can see it — see
+#: :func:`read_list_directed_values`.)
+_FORTRAN_VALUE_SEPARATORS = " \t\r\n,"
+
+
+def split_fortran_tokens(line: str) -> list:
+    """Split one list-directed record into items, keeping literals whole.
+
+    ``str.split`` breaks ``'my modes'`` into two items, which silently
+    truncates a CHARACTER value to its first word. A list-directed READ
+    takes the whole delimited literal as one value — ``field3d.f90:192``
+    reads a mode-file name that way, ``READ x( I ), y( I ),
+    ModeFileName( I )`` — with a doubled delimiter standing for one
+    embedded delimiter.
+
+    Items keep their delimiters, so a caller can still tell a quoted
+    literal from a bare word and numeric items are handed on unchanged to
+    :func:`expand_repeat_counts` and :func:`fortran_float`. Use
+    :func:`strip_fortran_quotes` on an item to get its undelimited text.
+    An unterminated literal runs to the end of the record, which is where
+    a Fortran runtime would also stop looking within one record.
+    """
+    tokens: list = []
+    i, n = 0, len(line)
+    while i < n:
+        if line[i] in _FORTRAN_VALUE_SEPARATORS:
+            i += 1
+            continue
+        if line[i] in "'\"":
+            quote = line[i]
+            j = i + 1
+            while j < n:
+                if line[j] == quote:
+                    if j + 1 < n and line[j + 1] == quote:
+                        j += 2
+                        continue
+                    j += 1
+                    break
+                j += 1
+            tokens.append(line[i:j])
+            i = j
+            continue
+        j = i
+        while j < n and line[j] not in _FORTRAN_VALUE_SEPARATORS:
+            j += 1
+        tokens.append(line[i:j])
+        i = j
+    return tokens
+
+
 def take_tokens(tokens, cursor: int, n: int, what: str, source) -> Tuple[list, int]:
     """Consume ``n`` tokens of a flat token stream starting at ``cursor``.
 
@@ -323,6 +375,29 @@ def read_list_directed_values(fid, n: int, what: str, source,
     ``misc/RefCoef.f90:53``), and several may share one line. Separators
     are whitespace and commas; ``D`` exponents are accepted; a trailing
     ``! …`` comment ends a record's values.
+
+    Two deliberate departures from the Fortran runtime, both recorded here
+    because each has been re-filed as a defect once:
+
+    * **A trailing ``/`` is accepted, an early one is not.** Fortran's ``/``
+      terminates the whole READ, leaving every item not yet assigned
+      *undefined*. A record like ``0.0 100.0 /`` read with ``n = 2`` costs
+      nothing: the loop stops the moment it holds ``n`` values, so the
+      ``/`` is never converted — the ``.bty``/``.ati`` rows the AT decks
+      write in exactly that form read back fine. The ``/`` only reaches
+      :func:`fortran_float` when it arrives *before* the list is
+      satisfied, and there the Fortran would hand the caller undefined
+      values, so raising is the safer answer to a file uacpy cannot
+      reproduce the semantics of. (It raises out of ``fortran_float`` as a
+      ``ValueError``; every reader that calls this is wrapped in
+      :func:`typed_format_error`, which retypes it.)
+    * **``!`` leniency is a superset of gfortran.** ``!`` is a comment only
+      in free-form *source*; to a list-directed READ it is just another
+      token and would be a read error. Dropping it lets uacpy read the
+      annotated decks its own writers emit. Nothing a real engine writes
+      is rejected by the extra tolerance — but a record whose values are
+      truncated by a ``!`` still fails, as the count is short (see
+      :func:`strip_fortran_comment`).
 
     ``what`` and ``source`` name the record and file for the
     :class:`FileFormatError` raised when the file ends short of ``n``.

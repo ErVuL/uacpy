@@ -13,7 +13,9 @@ __all__ = [
     'nearest_indices', 'ring_offsets', 'run_representative_indices',
     'run_boundary_indices',
     'DEFAULT_MAX_TRANSECT_POINTS', 'checked_max_points',
+    'checked_n_points',
     'depth_to_pressure_dbar', 'pressure_dbar_to_depth',
+    'insitu_from_potential',
 ]
 
 #: Default ceiling on the number of points sampled along a transect *before*
@@ -52,6 +54,64 @@ def checked_max_points(max_points, caller: str) -> int:
                         "a transect.",
         )
     return value
+
+
+def checked_n_points(n_points, label: str, *, allow_auto: bool = False):
+    """Validate a transect sample count: an integer of at least 2.
+
+    The eight transect fetchers each rolled their own guard and behaved five
+    different ways on the same input. ``n_points=1`` was a typed
+    ``ConfigurationError`` at six sites and a silent coercion to 2 at
+    ``range_dependent_bottom_along``; ``n_points=2.7`` was silently truncated
+    to 2 at two sites, an untyped ``TypeError`` at four and typed only at
+    ``bathy_transect_plan``; ``n_points='x'`` was an untyped ``ValueError``
+    almost everywhere. Two waypoints are the fewest that define a path, and a
+    fractional or non-numeric count is a caller mistake rather than something
+    to round — so all of them come here now, and ``bathy_transect_plan``'s
+    behaviour (the one that was already right) is the behaviour they share.
+
+    Parameters
+    ----------
+    n_points : int or str
+        The caller's value, unvalidated.
+    label : str
+        Caller name for the message, e.g. ``'fetch_wind_transect'``.
+    allow_auto : bool, optional
+        Accept the string ``'auto'`` and return it unchanged, for the fetchers
+        that resolve a native sample count themselves. Default ``False``.
+
+    Returns
+    -------
+    int or str
+        The count as an ``int``, or ``'auto'`` when ``allow_auto`` admitted it.
+
+    Raises
+    ------
+    ConfigurationError
+        ``n_points`` is below 2, not a whole number, or not a number at all.
+    """
+    if allow_auto and isinstance(n_points, str) and n_points == 'auto':
+        return 'auto'
+    forms = ("an integer >= 2, or 'auto'" if allow_auto else "an integer >= 2")
+    remediation = ("Pass n_points as an int (e.g. n_points=50)"
+                   + (" or n_points='auto'." if allow_auto else "."))
+    msg = (f"{label}: n_points={n_points!r} is not a sample count. "
+           f"Valid forms: {forms}.")
+    try:
+        value = int(n_points)
+    except (TypeError, ValueError) as exc:
+        raise ConfigurationError(msg, remediation=remediation) from exc
+    if value != n_points:            # 2.7 was silently truncated to 2
+        raise ConfigurationError(msg, remediation=remediation)
+    if value < 2:
+        raise ConfigurationError(
+            f"{label}: n_points must be >= 2, got {n_points}.",
+            remediation="Pass n_points>=2"
+                        + (" or 'auto'; " if allow_auto else "; ")
+                        + "fewer than two waypoints is not a transect.",
+        )
+    return value
+
 
 #: How close to antipodal (radians of central angle short of π) a pair of
 #: endpoints may be before :func:`geodesic_waypoints` refuses them. The slerp
@@ -363,3 +423,93 @@ def pressure_dbar_to_depth(pres_dbar, lat) -> np.ndarray:
               - depth_to_pressure_dbar(z - 1.0, lat)) / 2.0
         z = z - f / df
     return z
+
+
+def _adiabatic_gradient(sal, temp, pres):
+    """Adiabatic temperature gradient (°C/dbar), Bryden (1973).
+
+    The polynomial as published in UNESCO Technical Papers in Marine Science
+    44 (1983), Fofonoff & Millard, routine ``ATG``. Salinity is practical
+    salinity (PSS-78), ``temp`` in-situ °C, ``pres`` in decibars. The paper's
+    check value ``ATG(S=40, T=40, P=10000) = 3.255976e-4 °C/dbar`` is pinned
+    in the tests.
+    """
+    ds = np.asarray(sal, dtype=float) - 35.0
+    t = np.asarray(temp, dtype=float)
+    p = np.asarray(pres, dtype=float)
+    return ((((-2.1687e-16 * t + 1.8676e-14) * t - 4.6206e-13) * p
+             + ((2.7759e-12 * t - 1.1351e-10) * ds
+                + ((-5.4481e-14 * t + 8.733e-12) * t - 6.7795e-10) * t
+                + 1.8741e-8)) * p
+            + (-4.2393e-8 * t + 1.8932e-6) * ds
+            + ((6.6228e-10 * t - 6.836e-8) * t + 8.5258e-6) * t + 3.5803e-5)
+
+
+def _shift_adiabatically(sal, temp, pres_from, pres_to):
+    """Move a water parcel adiabatically from ``pres_from`` to ``pres_to``.
+
+    Fourth-order Runge-Kutta integration of :func:`_adiabatic_gradient` over
+    the pressure interval, in the coefficient form of UNESCO 44's ``THETA``
+    (Fofonoff 1977). One RK4 step spans the whole interval, which is what the
+    reference routine does and what its check value
+    ``THETA(S=40, T=40, P=10000, Pr=0) = 36.89073 °C`` certifies; the gradient
+    is a slowly varying polynomial, so the round trip closes to better than
+    2e-4 °C over the full oceanic range (both pinned in the tests).
+    """
+    p = np.asarray(pres_from, dtype=float)
+    t = np.asarray(temp, dtype=float)
+    h = np.asarray(pres_to, dtype=float) - p
+    xk = h * _adiabatic_gradient(sal, t, p)
+    t = t + 0.5 * xk
+    q = xk
+    p = p + 0.5 * h
+    xk = h * _adiabatic_gradient(sal, t, p)
+    t = t + 0.29289322 * (xk - q)
+    q = 0.58578644 * xk + 0.121320344 * q
+    xk = h * _adiabatic_gradient(sal, t, p)
+    t = t + 1.707106781 * (xk - q)
+    q = 3.414213562 * xk - 4.121320344 * q
+    p = p + 0.5 * h
+    xk = h * _adiabatic_gradient(sal, t, p)
+    return t + (xk - 2.0 * q) / 6.0
+
+
+def insitu_from_potential(sal, theta, pres) -> np.ndarray:
+    """Potential temperature (°C, referenced to the surface) → in-situ °C.
+
+    Ocean models report ``thetao``, the temperature a parcel *would* have if
+    brought adiabatically to 0 dbar; the sound-speed equations (UNESCO,
+    Del Grosso) want the temperature the parcel actually has at depth. The two
+    are the same at the surface and diverge with pressure: a parcel is warmed
+    by compression, so in-situ is always the warmer of the pair below 0 dbar.
+
+    Ignoring the difference is a deep-water error, not a uniform one. At
+    S=34.7 the in-situ excess and the sound-speed error it costs are
+
+    ======  ==========  =======  ==============
+    depth   theta (°C)  ΔT (°C)  Δc (m/s)
+    ======  ==========  =======  ==============
+    2000 m         2.5    0.149  +0.64
+    5000 m         1.5    0.462  +1.97
+    10000 m        1.2    1.286  +4.98
+    ======  ==========  =======  ==============
+
+    (UNESCO; Del Grosso agrees within 0.2 m/s.) Climatology and float sources
+    are unaffected — WOA23's ``t_an`` and Argo's ``TEMP`` are already in-situ.
+
+    Parameters
+    ----------
+    sal : array_like
+        Practical salinity (PSS-78). Conserved by the adiabatic shift.
+    theta : array_like
+        Potential temperature (°C), referenced to 0 dbar.
+    pres : array_like
+        In-situ pressure (dbar).
+
+    Returns
+    -------
+    numpy.ndarray
+        In-situ temperature (°C).
+    """
+    return np.asarray(
+        _shift_adiabatically(sal, theta, 0.0, pres), dtype=float)

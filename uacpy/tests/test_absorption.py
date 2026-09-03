@@ -23,7 +23,7 @@ import pytest
 
 from uacpy.core.absorption import (
     Biological, BiologicalLayer, FrancoisGarrison,
-    francois_garrison_db_per_km,
+    convert_attenuation_units, francois_garrison_db_per_km,
 )
 from uacpy.core.constants import (
     DEFAULT_SOUND_SPEED, MAX_ATTENUATION_DB_PER_WAVELENGTH,
@@ -239,6 +239,18 @@ class TestBiologicalLayerMeetsTheCrciCeiling:
         with pytest.raises(ConfigurationError, match=match):
             self._layer(**kwargs)
 
+    def test_the_class_docstring_names_the_pair_that_straddles_the_ceiling(self):
+        """The docstring quotes a worked example either side of the 3638 dB/km
+        bound. It read ``Q = 61 clears it`` while 61 gives 3721 and warns —
+        the two tests above already had it the other way round. Pinned against
+        the computed ceiling so the prose cannot drift off the arithmetic
+        again."""
+        ceiling = self._ceiling_db_km(100.0)
+        assert 1.0 * 60.0 ** 2 < ceiling < 1.0 * 61.0 ** 2
+        doc = ' '.join(BiologicalLayer.__doc__.split())
+        assert '``a0 = 1, Q = 60`` gives 3600 and clears it' in doc
+        assert '``Q = 61`` gives 3721 and warns' in doc
+
     def test_a_layer_built_from_a_tuple_warns_once(self):
         """The nested path raises the same single warning the direct one
         does. Where that warning *lands* is pinned in
@@ -247,6 +259,71 @@ class TestBiologicalLayerMeetsTheCrciCeiling:
         with pytest.warns(UserWarning, match='CRCI') as rec:
             Biological(layers=[(0.0, 50.0, 100.0, 61.0, 1.0)])
         assert len(rec) == 1, [str(w.message) for w in rec]
+
+
+class TestBiologicalLayerRefusesNonFiniteAndNegativeDepths:
+    """Every one of the five fields is held to finiteness, and the two depths
+    additionally to ``>= 0``, before the ceiling arithmetic runs.
+
+    The sign tests further down are bare ``<=`` comparisons, which NaN answers
+    False to and which ``inf`` passes for ``a0`` and ``Q``. Unguarded, all six
+    of the inputs below constructed: the NaN ones silently, and the two
+    infinities with a ceiling warning that reported its own limit as
+    ``nan dB/km``. A layer that gets through reaches the Acoustics-Toolbox
+    deck via ``as_at_tuples``, where ``AttenMod.f90``'s band test
+    ``z >= Z1 .AND. z <= Z2`` (:104) is False at every depth for a NaN or a
+    negative bound — so the layer is written to the file and then contributes
+    nothing, which is the failure mode the typed refusal replaces."""
+
+    @staticmethod
+    def _layer(**kw):
+        args = {'z_top_m': 0.0, 'z_bottom_m': 50.0, 'f0_hz': 100.0,
+                'Q': 10.0, 'a0': 1.0}
+        args.update(kw)
+        return BiologicalLayer(**args)
+
+    @pytest.mark.parametrize('kwargs, match', [
+        (dict(z_top_m=float('nan')), 'z_top_m must be finite'),
+        (dict(z_bottom_m=float('nan')), 'z_bottom_m must be finite'),
+        (dict(z_top_m=-500.0, z_bottom_m=-100.0),
+         'z_top_m must be non-negative'),
+        (dict(a0=float('nan')), 'a0 must be finite'),
+        (dict(Q=float('nan')), 'Q must be finite'),
+        (dict(a0=float('inf')), 'a0 must be finite'),
+        (dict(Q=float('inf')), 'Q must be finite'),
+        (dict(f0_hz=float('nan')), r'BiologicalLayer\.f0_hz must be finite'),
+        (dict(f0_hz=float('inf')), r'BiologicalLayer\.f0_hz must be finite'),
+    ], ids=['z_top_nan', 'z_bottom_nan', 'negative_depths', 'a0_nan', 'Q_nan',
+            'a0_inf', 'Q_inf', 'f0_nan', 'f0_inf'])
+    def test_a_non_finite_or_negative_input_is_refused_by_name(self, kwargs,
+                                                               match):
+        with warnings.catch_warnings():
+            # An escaped warning would mean the ceiling arithmetic ran, which
+            # is exactly what these guards are placed in front of.
+            warnings.simplefilter('error')
+            with pytest.raises(ConfigurationError, match=match):
+                self._layer(**kwargs)
+
+    def test_a_non_finite_f0_is_named_by_the_layer_not_the_unit_converter(self):
+        """``f0_hz`` was the one field that already failed, but from inside
+        ``convert_attenuation_units`` in the ceiling formula — the message
+        named that function and its frequency argument, not the layer field
+        the user wrote."""
+        with pytest.raises(ConfigurationError) as excinfo:
+            self._layer(f0_hz=float('nan'))
+        assert 'convert_attenuation_units' not in str(excinfo.value)
+
+    def test_a_finite_zero_reaches_the_sign_check_not_the_finiteness_guard(self):
+        """The finiteness guards run first but do not take over the sign
+        verdicts: zero is finite, so ``f0_hz = 0`` still fails as a sign
+        error, keeping the ``"must be positive"`` phrase those refusals own."""
+        with pytest.raises(ConfigurationError, match='f0_hz must be positive'):
+            self._layer(f0_hz=0.0)
+
+    def test_a_layer_at_zero_depth_is_accepted(self):
+        """The depth bound is non-negative, not positive: a layer whose top
+        sits at the sea surface is an ordinary configuration."""
+        assert self._layer(z_top_m=0.0, z_bottom_m=50.0).z_top_m == 0.0
 
 
 @pytest.mark.parametrize('cls', [BiologicalLayer, Biological],
@@ -262,3 +339,77 @@ def test_the_written_out_init_takes_exactly_the_dataclass_fields(cls):
     ``as_at_tuples`` writes, which is the same order."""
     parameters = list(inspect.signature(cls.__init__).parameters)[1:]
     assert parameters == [f.name for f in dataclasses.fields(cls)]
+
+
+class TestTheTwoAbsorptionRoutesDivergeByTheDocumentedAmount:
+    """One absorption model, two documented routes, different answers.
+
+    The Python accessor and the Acoustics-Toolbox deck evaluate the same
+    formula at different arguments: Francois-Garrison per caller depth here
+    against one module-level ``z_bar`` there (``misc/AttenMod.f90:148-160``),
+    and a constant absorption converted at 1500 m/s here against each SSP
+    row's own ``c`` there (``AttenMod.f90:73``). Neither side is wrong and
+    neither is changed — ``test_absorption.py`` above and
+    ``test_modes_perturbation.py`` pin the per-depth behaviour deliberately.
+    What was missing is that ``Modes.with_attenuation`` sends the user from
+    one to the other without saying so. These are the numbers its
+    documentation now quotes."""
+
+    @staticmethod
+    def _fg():
+        return FrancoisGarrison(10, 35, 8, z_bar_m=1000)
+
+    @classmethod
+    def _percent_over_deck(cls, frequency, depth):
+        fg = cls._fg()
+        python = float(np.ravel(fg.alpha_db_per_m(frequency, [depth]))[0]) * 1000.0
+        deck = float(francois_garrison_db_per_km(
+            frequency, fg.temperature_c, fg.salinity_psu, fg.pH, fg.z_bar_m))
+        return 100.0 * (python - deck) / deck
+
+    @pytest.mark.parametrize('frequency, expected', [
+        (1e3, 3.0), (1e4, 13.9), (3e4, 15.5), (1e5, 15.0)])
+    def test_the_surface_gap_is_what_with_attenuation_documents(
+            self, frequency, expected):
+        assert self._percent_over_deck(frequency, 0.0) == pytest.approx(
+            expected, abs=0.05)
+
+    def test_the_two_routes_agree_exactly_at_z_bar(self):
+        # The pivot the whole divergence turns on, and the discriminating
+        # check that the gap is the depth argument and nothing else.
+        assert self._percent_over_deck(1e4, 1000.0) == pytest.approx(0.0,
+                                                                    abs=1e-9)
+
+    def test_the_gap_reverses_sign_below_z_bar(self):
+        # Not a bias: the accessor is under the deck as far as it is over it.
+        assert self._percent_over_deck(1e4, 2000.0) == pytest.approx(-12.4,
+                                                                     abs=0.05)
+
+    @pytest.mark.parametrize('sound_speed, expected', [
+        (1450.0, -3.33), (1500.0, 0.0), (1550.0, 3.33)])
+    def test_a_constant_absorption_diverges_with_the_ssp_sound_speed(
+            self, sound_speed, expected):
+        from uacpy.core.absorption import ConstantAbsorption
+        python = float(np.ravel(
+            ConstantAbsorption(0.5).alpha_db_per_m(1e3, [0.0]))[0])
+        deck = float(convert_attenuation_units(
+            0.5, 1e3, 'dB/wavelength', 'dB/m', sound_speed=sound_speed))
+        assert 100.0 * (python - deck) / deck == pytest.approx(expected,
+                                                               abs=0.01)
+
+    def test_with_attenuation_warns_the_reader_that_the_routes_differ(self):
+        from uacpy.core.results.modes import Modes
+        doc = ' '.join(Modes.with_attenuation.__doc__.split())
+        assert 'not the same number the solver used' in doc
+        assert 'misc/AttenMod.f90:148-160' in doc
+        assert 'AttenMod.f90:73' in doc
+        assert '+13.9 %' in doc and '±3.3 %' in doc
+
+    def test_both_absorption_classes_cross_reference_the_divergence(self):
+        from uacpy.core.absorption import ConstantAbsorption
+        fg_doc = ' '.join(FrancoisGarrison.__doc__.split())
+        assert 'The deck does not do what the accessor does' in fg_doc
+        assert 'misc/AttenMod.f90:148-160' in fg_doc
+        ca_doc = ' '.join(ConstantAbsorption.__doc__.split())
+        assert 'misc/AttenMod.f90:73' in ca_doc
+        assert '±3.3 %' in ca_doc

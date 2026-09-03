@@ -6,7 +6,7 @@ EXAMPLE 39: OASS Reverberation from a Rough Seabed
 OBJECTIVE: Compute the reverberant field scattered from a rough water/sediment
            interface, and show why it is not transmission loss.
 
-FEATURES: ✓ OASS reverberation level vs range
+FEATURES: ✓ OASS reverberation loss vs range
           ✓ The two-binary chain (mean field → scattered field) run by uacpy
           ✓ kind='reverberation' — a different quantity from TL, same dB unit
           ✓ c_low as a physical knob, not a numerical one
@@ -86,13 +86,14 @@ def main():
     for name in sorted(p.name for p in work_dir.iterdir()):
         print(f"    {name}")
 
-    # The quantity is TAGGED, not derived. A reverberation level shares TL's
-    # dB representation exactly, so nothing about the array distinguishes it —
-    # which is why putting the two on one colour scale is refused rather than
-    # silently allowed.
+    # The quantity is TAGGED, not derived. Reverberation is a LOSS, like TL:
+    # OASES writes -10*log10 E[|p_scat|^2], so a larger number is a weaker
+    # scattered field. It shares TL's dB representation exactly, and nothing
+    # about the array distinguishes the two — which is why putting them on one
+    # colour scale is refused rather than silently allowed.
     fig, ax = plt.subplots(figsize=(10, 5))
     reverb.plot(ax=ax, env=env,
-                title='OASS — reverberation level, 250 Hz over rough sand')
+                title='OASS — reverberation loss, 250 Hz over rough sand')
     out = OUTPUT_DIR / 'example_39_oass_reverberation.png'
     fig.savefig(out, dpi=150, bbox_inches='tight')
     plt.close(fig)

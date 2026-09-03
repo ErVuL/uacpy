@@ -391,3 +391,62 @@ class TestTheObservedNeighbourNearestTheRequestIsTaken:
         from uacpy.core.exceptions import ConfigurationError
         with pytest.raises(ConfigurationError, match='integer month'):
             fetch_sea_ice_concentration((72.0, -150.0), month=6.7)
+
+
+# ── climatology vintage (the reference period the cache records) ─────────────
+
+def test_a_built_seaice_cache_records_its_years(tmp_path, monkeypatch):
+    """The sea-ice default ``years`` is derived from ``date.today()`` at BUILD
+    time, so without this key a cache's vintage differs per build and cannot
+    be recovered from the file."""
+    pytest.importorskip('tifffile')
+    monkeypatch.setattr(seaice_local, 'http_get', lambda url, **kw: b'TIFF')
+    monkeypatch.setattr('tifffile.imread',
+                        lambda b: np.full((4, 4), 600, dtype=np.uint16))
+    out = seaice_local.download_seaice_db(cache_dir=str(tmp_path),
+                                          years=[2021, 2022, 2023])
+    with np.load(out, allow_pickle=False) as climo:
+        assert [int(y) for y in climo['years']] == [2021, 2022, 2023]
+        assert climo['N'].shape == (12, 4, 4)      # and the grids still land
+
+
+def test_the_seaice_period_is_read_back_from_the_cache(tmp_path, monkeypatch):
+    monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path))
+    seaice_local._MODEL.clear()
+    dest = tmp_path / 'seaice'
+    dest.mkdir(parents=True)
+    grids = {h: np.full((12, 4, 4), 0.6, dtype=np.float32) for h in ('N', 'S')}
+    np.savez_compressed(dest / seaice_local.INDEX_FILE,
+                        years=np.arange(2019, 2024, dtype=np.int32), **grids)
+    monkeypatch.setattr(seaice_local, '_pyproj_transformer',
+                        lambda epsg, **kw: _FakeTF(0.0, 0.0))
+    assert seaice_local.climatology_period() == '2019-2023 (climatology)'
+
+
+def test_a_seaice_cache_without_a_period_loads_its_grids(tmp_path, monkeypatch):
+    """Old caches carry no ``years``. Absent is not an error."""
+    monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path))
+    seaice_local._MODEL.clear()
+    dest = tmp_path / 'seaice'
+    dest.mkdir(parents=True)
+    grids = {h: np.full((12, 4, 4), 0.6, dtype=np.float32) for h in ('N', 'S')}
+    np.savez_compressed(dest / seaice_local.INDEX_FILE, **grids)
+    monkeypatch.setattr(seaice_local, '_pyproj_transformer',
+                        lambda epsg, **kw: _FakeTF(0.0, 0.0))
+    assert seaice_local.climatology_period() is None
+    assert seaice_local._model()['N'].shape == (12, 4, 4)   # grids still read
+
+
+def test_the_environment_provenance_carries_the_seaice_vintage(tmp_path,
+                                                               monkeypatch):
+    from uacpy.data.environment import _climatology_vintage
+    monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path))
+    seaice_local._MODEL.clear()
+    dest = tmp_path / 'seaice'
+    dest.mkdir(parents=True)
+    grids = {h: np.full((12, 4, 4), 0.6, dtype=np.float32) for h in ('N', 'S')}
+    np.savez_compressed(dest / seaice_local.INDEX_FILE,
+                        years=np.arange(2019, 2024, dtype=np.int32), **grids)
+    monkeypatch.setattr(seaice_local, '_pyproj_transformer',
+                        lambda epsg, **kw: _FakeTF(0.0, 0.0))
+    assert _climatology_vintage('seaice') == '2019-2023 (climatology)'

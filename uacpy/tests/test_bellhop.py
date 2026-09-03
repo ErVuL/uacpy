@@ -33,6 +33,30 @@ pytestmark = pytest.mark.requires_binary
 _D_OVER_LAMBDA = 'D/lambda'
 
 
+#: RunType(1:1) letters the writer can emit, and the source-geometry /
+#: grid-type letters that sit at positions 4 and 5. Together they identify the
+#: RunType record among the deck's quoted 7-character lines — position 6 does
+#: NOT, because it is blank: ``io/bellhop_writer.py`` writes ' ' there rather
+#: than '2', the one character that means plain 2-D to the Fortran engine AND
+#: to bellhopcxx/bellhopcuda (a literal '2' makes those two warn about Nx2D).
+#: The default title 'unnamed' is the other quoted 7-character line and is
+#: rejected by every one of the three tests.
+_RUN_TYPE_LETTERS = set('CSIEAaR')
+_SOURCE_TYPE_LETTERS = set('RXS')
+_GRID_TYPE_LETTERS = set('RI')
+
+
+def _run_type_record(lines):
+    """Index of the deck's RunType record, and its 7 characters."""
+    hits = [(i, ln[1:8]) for i, ln in enumerate(lines)
+            if len(ln) == 9 and ln[0] == ln[-1] == "'"
+            and ln[1] in _RUN_TYPE_LETTERS
+            and ln[4] in _SOURCE_TYPE_LETTERS
+            and ln[5] in _GRID_TYPE_LETTERS]
+    assert len(hits) == 1, (hits, lines)
+    return hits[0]
+
+
 def _messages(fn, needle):
     """Run ``fn`` and return the warning messages containing ``needle``."""
     with warnings.catch_warnings(record=True) as rec:
@@ -2100,13 +2124,7 @@ class TestBeamShiftRunTypePosition7:
             Receiver(depths=np.array([50.0]),
                      ranges=np.linspace(100.0, 2000.0, 5)),
             **kwargs)
-        # The RunType record is a 7-character quoted line whose position 6
-        # is the hard-coded dimension '2' — which is what tells it apart
-        # from a 7-character title (the default title 'unnamed' is one).
-        line = next(ln for ln in path.read_text().splitlines()
-                    if len(ln) == 9 and ln[0] == ln[-1] == "'"
-                    and ln[6] == '2')
-        return line[1:8]
+        return _run_type_record(path.read_text().splitlines())[1]
 
     def test_beam_shift_writes_S_in_position_7(self, tmp_path):
         assert self._run_type(tmp_path, beam_shift=True)[6] == 'S'
@@ -2271,12 +2289,9 @@ class TestRayBoxDefaults:
                      ranges=np.linspace(100.0, 5000.0, 5)),
             **kwargs)
         lines = path.read_text().splitlines()
-        # RunType record (position 6 holds the hard-coded dimension '2',
-        # distinguishing it from a 7-character title), then n_beams, alpha,
-        # step, box.
-        i = next(i for i, ln in enumerate(lines)
-                 if len(ln) == 9 and ln[0] == ln[-1] == "'"
-                 and ln[6] == '2')
+        # RunType record, then n_beams, alpha, step, box — the box is the
+        # fourth line after it.
+        i, _ = _run_type_record(lines)
         z_str, r_km_str = lines[i + 4].split()
         return float(z_str), float(r_km_str)
 
@@ -3029,6 +3044,123 @@ class TestRayCentredBeamsFillEveryRequestedRangeColumn:
         msgs = _messages(lambda: self._run('R', np.linspace(100.0, 500.0, 5)),
                          "never fills the first receiver-range column")
         assert len(msgs) == 1, msgs
+
+
+@pytest.mark.requires_binary
+class TestEigenraysDeclareWhatTheirBeamTypeCannotDeliver:
+    """Two run/beam pairs that Bellhop accepts and answers wrongly without
+    saying so. Both are EIGENRAYS: the output is a set of ray records, so
+    neither failure leaves a NaN behind for anyone to notice — a wrong
+    eigenray set just looks like a different eigenray set.
+    """
+
+    RANGES = np.array([400.0, 500.0, 600.0])
+
+    @staticmethod
+    def _rig(depths=(50.0,)):
+        env = uacpy.Environment(name='eig', bathymetry=100.0, ssp=1500.0)
+        return (env, Source(depths=50.0, frequencies=200.0),
+                Receiver(depths=np.array(depths, dtype=float),
+                         ranges=TestEigenraysDeclareWhatTheirBeamTypeCannotDeliver.RANGES))
+
+    @classmethod
+    def _eigenrays(cls, beam_type, depths=(50.0,)):
+        env, source, receiver = cls._rig(depths)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            return Bellhop(verbose=False, beam_type=beam_type,
+                           n_beams=300).run(env, source, receiver,
+                                            run_mode=RunMode.EIGENRAYS)
+
+    # --- 'g' skips the first receiver-range column -----------------------
+
+    def test_the_ray_centred_beam_says_it_returns_no_rays_at_the_first_range(self):
+        env, source, receiver = self._rig()
+        msgs = _messages(
+            lambda: Bellhop(verbose=False, beam_type='g', n_beams=300).run(
+                env, source, receiver, run_mode=RunMode.EIGENRAYS),
+            "no rays at receiver.ranges[0]")
+        assert len(msgs) == 1, msgs
+        # The remedy has to be in the message, not just the diagnosis.
+        assert "beam_type='G'" in msgs[0], msgs[0]
+
+    def test_that_warning_describes_a_real_hole(self):
+        # The claim the warning makes, measured: 'g' returns nothing at the
+        # first range where 'G' returns a full set. If the Fortran ever
+        # starts filling column 1, this fails and the warning comes out.
+        def ends_at_first_range(beam_type):
+            rays = self._eigenrays(beam_type).rays
+            ends = np.array([np.asarray(r['r'], float)[-1] for r in rays])
+            return int(np.sum(np.abs(ends - self.RANGES[0]) < 1.0))
+        assert ends_at_first_range('g') == 0
+        assert ends_at_first_range('G') > 0
+
+    @pytest.mark.parametrize('beam_type', ['G', 'B'])
+    def test_the_bracket_walking_beams_are_quiet(self, beam_type):
+        env, source, receiver = self._rig()
+        assert _messages(
+            lambda: Bellhop(verbose=False, beam_type=beam_type,
+                            n_beams=300).run(env, source, receiver,
+                                             run_mode=RunMode.EIGENRAYS),
+            "no rays at receiver.ranges[0]") == []
+
+    def test_a_ray_centred_tl_run_is_padded_rather_than_warned_about(self):
+        # The TL branch pads around the same hole, so it must NOT inherit
+        # the eigenray warning.
+        env, source, receiver = self._rig(depths=(30.0, 60.0))
+        assert _messages(
+            lambda: Bellhop(verbose=False, beam_type='g', n_beams=200).run(
+                env, source, receiver, run_mode=RunMode.COHERENT_TL),
+            "no rays at receiver.ranges[0]") == []
+
+    # --- 'S' writes every ray at every receiver depth --------------------
+
+    def test_the_simple_gaussian_beam_says_its_eigenrays_are_unscreened(self):
+        env, source, receiver = self._rig()
+        msgs = _messages(
+            lambda: Bellhop(verbose=False, beam_type='S', n_beams=300).run(
+                env, source, receiver, run_mode=RunMode.EIGENRAYS),
+            "not screened for passing near a receiver")
+        assert len(msgs) == 1, msgs
+        assert 'filter_by_miss_distance' in msgs[0], msgs[0]
+
+    def test_that_warning_describes_a_real_defect(self):
+        # influence.f90:698-699 has the proximity test commented out, so the
+        # written set is dominated by rays that miss. Measured against 'G',
+        # whose ApplyContribution is reached only inside `n < RadiusMax`.
+        def miss_profile(beam_type):
+            rays = self._eigenrays(beam_type).rays
+            worst = [min(np.min(np.hypot(np.asarray(ray['r'], float) - rr,
+                                         np.asarray(ray['z'], float) - 50.0))
+                         for rr in self.RANGES)
+                     for ray in rays]
+            return len(rays), float(np.median(worst))
+        n_sgb, miss_sgb = miss_profile('S')
+        n_hat, miss_hat = miss_profile('G')
+        assert n_sgb > 3 * n_hat, (n_sgb, n_hat)
+        assert miss_sgb > 3 * miss_hat, (miss_sgb, miss_hat)
+
+    def test_a_simple_gaussian_tl_run_is_quiet(self):
+        env, source, receiver = self._rig()
+        assert _messages(
+            lambda: Bellhop(verbose=False, beam_type='S', n_beams=300).run(
+                env, source, receiver, run_mode=RunMode.COHERENT_TL),
+            "not screened for passing near a receiver") == []
+
+    def test_the_run_completes_and_e_stays_in_the_table(self):
+        # The warning must not become a rejection by the back door: the
+        # records are real rays and filter_by_miss_distance recovers the
+        # eigenrays from them, so the capability stays. _BEAM_TYPE_RUN_TYPES
+        # mirrors the Fortran's CASE branches and nothing else — dropping
+        # 'E' from it would contradict influence.f90:700-703 and redden
+        # test_the_table_matches_the_vendored_source.
+        from uacpy.models.bellhop import _BEAM_TYPE_RUN_TYPES
+        assert 'E' in _BEAM_TYPE_RUN_TYPES['S']
+        rays = self._eigenrays('S')
+        assert isinstance(rays, Rays) and len(rays.rays) > 0
+        near = rays.filter_by_miss_distance(5.0, target_range_m=500.0,
+                                            target_depth_m=50.0)
+        assert 0 < len(near.rays) < len(rays.rays)
 
 
 @pytest.mark.requires_binary

@@ -145,6 +145,137 @@ def test_sel_third_octave_geometry_is_exact():
         assert centre / low == pytest.approx(2 ** (1 / 6))
 
 
+class TestBothOctaveLaddersComeFromOneLoop:
+    """The octave and third-octave branches were the same loop with a
+    different step, and merging them is bit-identical — over 560
+    ``(fmin, fmax, sample_rate, band_type)`` combinations, every edge
+    reproduced to the last bit — PROVIDED the half-step is written
+    ``math.pow(2, step/2)``.
+
+    That form is what makes the equality guaranteed rather than lucky:
+    ``(1/3)/2 == 1/6`` exactly in binary floating point (halving is exact), so
+    ``math.pow(2, step/2)`` returns the identical double the third-octave
+    branch's ``math.pow(2, 1/6)`` did. The tests above compare edges with
+    ``pytest.approx``, so they would not notice a rewrite that moved them by an
+    ULP; these assert equality.
+    """
+
+    FS = 48000.0
+
+    @staticmethod
+    def _bands(band_type):
+        from uacpy.acoustic_signal.analysis import _sel_bands
+        return _sel_bands(8.9125, 22387.0, band_type, 30,
+                          TestBothOctaveLaddersComeFromOneLoop.FS)
+
+    def test_the_exponent_identity_the_merge_rests_on_holds(self):
+        import math
+        assert (1.0 / 3.0) / 2 == 1.0 / 6.0
+        assert math.pow(2, (1.0 / 3.0) / 2) == math.pow(2, 1 / 6)
+        assert math.pow(2, 1.0 / 2) == math.sqrt(2)
+
+    @pytest.mark.parametrize('band_type, step', [('octave', 1.0),
+                                                 ('third_octave', 1.0 / 3.0)])
+    def test_every_edge_is_exactly_the_half_step_from_its_centre(
+            self, band_type, step):
+        import math
+        half = math.pow(2, step / 2)
+        bands = self._bands(band_type)
+        assert len(bands) > 3
+        for low, centre, high in bands[:-1]:      # last high is clipped to fmax
+            assert high == centre * half, (band_type, centre, high)
+            assert low == centre / half, (band_type, centre, low)
+
+    @pytest.mark.parametrize('band_type, step', [('octave', 1.0),
+                                                 ('third_octave', 1.0 / 3.0)])
+    def test_the_centres_advance_by_exactly_one_step(self, band_type, step):
+        import math
+        factor = math.pow(2, step)
+        bands = self._bands(band_type)
+        for lower, upper in zip(bands, bands[1:]):
+            assert upper[1] == lower[1] * factor, (band_type, lower, upper)
+
+
+class TestPPSDCarriesTheScalingItsLevelsAreStatedAgainst:
+    """``scaling`` travels with the levels for the same reason ``ref`` does.
+
+    ``ppsd`` takes ``scaling='density'|'spectrum'``, and the two mean different
+    physical things: a density is per hertz, a spectrum is per band. A consumer
+    that has to be told the scaling separately can be told the wrong one, which
+    is exactly how ``plot_ppsd`` came to caption every histogram "/Hz".
+    """
+
+    @staticmethod
+    def _x():
+        rng = np.random.default_rng(0)
+        return rng.standard_normal(48000), 48000.0
+
+    def test_the_result_reports_the_scaling_it_was_computed_with(self):
+        x, fs = self._x()
+        for scaling in ('density', 'spectrum'):
+            r = ppsd(x, fs, scaling=scaling, nperseg=1024)
+            assert r.scaling == scaling, (scaling, r.scaling)
+
+    def test_the_default_scaling_is_reported_not_left_blank(self):
+        x, fs = self._x()
+        assert ppsd(x, fs, nperseg=1024).scaling == 'density'
+
+    def test_the_two_scalings_give_different_levels(self):
+        # The control: if they were the same quantity there would be nothing
+        # to carry. A density and a spectrum differ by the bin width.
+        x, fs = self._x()
+        d = ppsd(x, fs, scaling='density', nperseg=1024).mean_db
+        sp = ppsd(x, fs, scaling='spectrum', nperseg=1024).mean_db
+        assert not np.allclose(d, sp, atol=0.5), (d[:3], sp[:3])
+
+
+class TestPPSDCarriesTheReferenceItsLevelsAreStatedAgainst:
+    """``ppsd`` takes ``ref`` and reports every level as dB re ``ref**2``, but
+    the result used not to carry that value, so every consumer had to guess it
+    and the plotter hardcoded the package default.
+
+    The gap is 120 dB wide: the same signal read against a Pa-based reference
+    sits 120 dB below its µPa levels, and nothing in the returned tuple
+    distinguished the two.
+    """
+
+    FS = 8000.0
+
+    def _run(self, **kw):
+        x = np.random.default_rng(0).standard_normal(int(4 * self.FS)) * 1e-3
+        return ppsd(x, self.FS, seg_duration=1.0, nperseg=1024, **kw)
+
+    def test_the_default_reference_is_reported(self):
+        from uacpy.core.constants import REFERENCE_PRESSURE_WATER
+        assert self._run().ref == REFERENCE_PRESSURE_WATER
+
+    @pytest.mark.parametrize('ref', [1.0, 1e-5, 20e-6])
+    def test_a_non_default_reference_is_reported(self, ref):
+        assert self._run(ref=ref).ref == ref
+
+    def test_the_reference_tracks_a_real_120_db_move_in_the_levels(self):
+        """Not a decorative field: the value it carries is what separates two
+        results whose levels differ by 120 dB."""
+        default = self._run()
+        pascals = self._run(ref=1.0)
+        shift = np.nanmean(pascals.mean_db - default.mean_db)
+        assert shift == pytest.approx(-120.0, abs=1e-9)
+        assert default.ref != pascals.ref
+
+    def test_the_existing_fields_keep_their_positions(self):
+        """``ref`` is appended, so anything indexing the tuple positionally —
+        including result objects other suites build by hand — is unaffected."""
+        r = self._run()
+        assert r._fields[:7] == ('frequencies', 'level_edges', 'pdf',
+                                 'mean_db', 'std_db', 'binwidth_db',
+                                 'seg_duration')
+        assert r._fields[7] == 'ref'
+        from uacpy.acoustic_signal.analysis import PPSDResult
+        built = PPSDResult(r.frequencies, r.level_edges, r.pdf, r.mean_db,
+                           r.std_db, r.binwidth_db, r.seg_duration)
+        assert built.ref == r.ref
+
+
 def test_ppsd_columns_are_densities_with_blank_bins_as_nan():
     """Each frequency column integrates to 1 over the level axis, and bins that
     were never observed are NaN so they plot blank — which is why the result

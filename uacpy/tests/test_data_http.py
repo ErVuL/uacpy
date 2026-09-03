@@ -153,3 +153,50 @@ class TestAHostThatDoesNotResolveFailsAtOnce:
                         "which stays on the retry ladder")
         assert 'resolve' in str(info.value)
         assert elapsed < 5.0, elapsed
+
+
+def test_chain_any_walks_reason_and_cause_and_survives_a_cycle():
+    """Both classifiers share one walker now. It follows ``URLError.reason``
+    and ``__cause__``, and the ``seen`` set stops a self-referential chain
+    from looping forever."""
+    import socket
+    import urllib.error
+    from uacpy.data._http import _chain_any
+
+    inner = socket.gaierror(socket.EAI_NONAME, 'Name or service not known')
+    via_reason = urllib.error.URLError(inner)
+    assert _chain_any(via_reason, lambda e: isinstance(e, socket.gaierror))
+
+    outer = RuntimeError('wrapped')
+    outer.__cause__ = inner
+    assert _chain_any(outer, lambda e: isinstance(e, socket.gaierror))
+    assert not _chain_any(outer, lambda e: isinstance(e, ZeroDivisionError))
+
+    loop = RuntimeError('self')
+    loop.__cause__ = loop
+    assert not _chain_any(loop, lambda e: isinstance(e, socket.gaierror))
+    assert _chain_any(loop, lambda e: isinstance(e, RuntimeError))
+
+
+def test_both_classifiers_discriminate_through_the_shared_walker():
+    """EAI_AGAIN stays transient; a non-refused errno stays non-refused."""
+    import errno as _errno
+    import socket
+    import urllib.error
+    from uacpy.data._http import (_is_connection_refused,
+                                  _is_permanent_dns_failure)
+
+    permanent = urllib.error.URLError(
+        socket.gaierror(socket.EAI_NONAME, 'no such host'))
+    transient = urllib.error.URLError(
+        socket.gaierror(socket.EAI_AGAIN, 'try again'))
+    assert _is_permanent_dns_failure(permanent)
+    assert not _is_permanent_dns_failure(transient)
+    assert not _is_connection_refused(permanent)
+
+    refused = urllib.error.URLError(ConnectionRefusedError(
+        _errno.ECONNREFUSED, 'refused'))
+    timed_out = urllib.error.URLError(OSError(_errno.ETIMEDOUT, 'timed out'))
+    assert _is_connection_refused(refused)
+    assert not _is_connection_refused(timed_out)
+    assert not _is_permanent_dns_failure(refused)

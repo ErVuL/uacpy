@@ -41,16 +41,33 @@ def _plot_tl_difference(a, b, env=None, *, ax=None, title=None,
 
     ``diff_vmax`` is a symmetric range shortcut: ``vmin = -diff_vmax``,
     ``vmax = +diff_vmax``.
+
+    The panel shows a signed RESIDUAL, not a level: positive means ``a`` gave
+    the higher loss, i.e. the quieter field. The axes are named here rather
+    than left to ``plot_field``, for the reason given at the call below.
     """
     from uacpy import Field
     from uacpy.visualization import plot_field
     if diff_vmax is not None:
         vmin, vmax = -abs(diff_vmax), abs(diff_vmax)
     diff = Field(data=a.db - b.db, coords=dict(a.coords))
-    return plot_field(
+    # Tag it for what it is. Untagged, a Field inherits ``kind='pressure'``,
+    # which would caption the bar 'TL (dB)' over a signed residual and let the
+    # loss predicate run a 1-D cut's value axis downward — meaningless for a
+    # difference, whose zero is the meaningful value. The 'difference' quantity
+    # carries the diverging map and the symmetric window instead.
+    diff.metadata['kind'] = 'difference'
+    fig, ax = plot_field(
         diff, env=env, ax=ax, vmin=vmin, vmax=vmax,
         cmap='RdBu_r', title=title, **kw,
     )
+    # The registry says 'Difference (dB)'; this panel knows the specific
+    # difference and its sign convention, so it says so.
+    for artist in ax.collections + ax.images:
+        cbar = getattr(artist, 'colorbar', None)
+        if cbar is not None:
+            cbar.set_label('ΔTL (dB) — positive: the first field is quieter')
+    return fig, ax
 
 
 def plot_model_statistics(results: Dict, source_depth: float):

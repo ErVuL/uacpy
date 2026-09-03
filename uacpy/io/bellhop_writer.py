@@ -626,7 +626,7 @@ def write_bellhop_env_file(
         hs = env.bottom.halfspace_at(range=0.0)
         bottom_type = parse_boundary_type(
             hs.acoustic_type).to_acoustics_toolbox_code()
-        roughness = getattr(hs, 'roughness', 0.0)
+        roughness = hs.roughness
 
         wrote_bty = _write_bathymetry_beside(
             filepath, env, receiver, z_max=z_max, interp_code=bty_code)
@@ -657,8 +657,8 @@ def write_bellhop_env_file(
             # at .2f a 1572.348 m/s / 112.607 m/s / 1.4449 g/cm3 halfspace
             # reaches Bellhop as 1572.35 / 112.61 / 1.44, moving |R| at 20 deg
             # grazing by 0.022 dB per bounce.
-            shear_speed = getattr(hs, 'shear_speed', 0.0)
-            shear_atten = getattr(hs, 'shear_attenuation', 0.0)
+            shear_speed = hs.shear_speed
+            shear_atten = hs.shear_attenuation
             f.write(
                 f" {z_max:{_DECK_DEPTH_FMT}}  {hs.sound_speed:.6f} "
                 f"{shear_speed:.6f} {hs.density:.6f} "
@@ -676,7 +676,8 @@ def write_bellhop_env_file(
         #   3 = reserved          ('*' for source beam pattern, else ' ')
         #   4 = source_type      (R/X) — uppercase
         #   5 = grid_type        (R/I) — uppercase
-        #   6 = dimension        (always '2' for 2D Bellhop)
+        #   6 = dimension        (' ' = 2-D, '2' = Nx2D, '3' = 3-D;
+        #                        uacpy writes ' ' — see Position 6 below)
         #   7 = beam shift       ('S' to enable, else ' ') per
         #       ReadEnvironmentBell.f90:159  Beam%Type(4:4) = pos 7.
         # IMPORTANT: do NOT uppercase run_type or beam_type.  'A' vs
@@ -692,7 +693,24 @@ def write_bellhop_env_file(
         # file opened.
         position_4 = source_type.upper()
         position_5 = grid_type.upper()
-        # Position 6: dimensionality. Hardcoded to '2' (2D Bellhop).
+        # Position 6: dimensionality.  Hardcoded to ' ' (2D Bellhop).
+        # Blank is the one character that means plain 2-D to BOTH engines:
+        #   * Fortran Bellhop is indifferent.  ReadEnvironmentBell.f90
+        #     :422-429 SELECTs on RunType(6:6): '2' prints "N x 2D
+        #     calculation", '3' prints "3D calculation", and the CASE
+        #     DEFAULT (which is where a blank lands) assigns '2'.  So ' '
+        #     and '2' are the same run there.
+        #   * bellhopcxx/bellhopcuda are NOT indifferent.  Their 2-D
+        #     default RunType is "CG RR  " with position 6 blank
+        #     (third_party/bellhopcuda/src/module/runtype.hpp:36-41),
+        #     and a literal '2' means Nx2D: runtype.hpp:92-100 warns
+        #     "Environment file specifies dimensionality 2, which usually
+        #     means Nx2D, but you are running <prog> in 2D mode" and then
+        #     rewrites the character to ' ' anyway.  That warning goes to
+        #     stdout via EXTWARN -> src/util/errors.cpp:26-36 printf, and
+        #     uacpy logs the child's stdout only at debug level, so a user
+        #     would never see it — the deck would just look wrong to
+        #     anyone reading it.
         # 3D support (BELLHOP3D) is not yet available; adding it sets this to
         # '3' and plugs into the ``--3D`` _build_command path, and also
         # changes several downstream blocks (bearings, 3D bty, beam fan).
@@ -700,7 +718,8 @@ def write_bellhop_env_file(
         # it: ``uacpy.io.write_bty_3d`` / ``read_boundary_3d`` for the 3-D
         # boundary grid, ``read_ssp_3d`` for the hexahedral SSP, and
         # ``write_field3dflp`` / ``read_flp3d`` for the FIELD3D deck.
-        position_6 = '2'
+        # Nx2D, if it is ever wired up, is the '2' this used to write.
+        position_6 = ' '
         # Position 7: 'S' for beam shift, otherwise blank.
         position_7 = 'S' if beam_shift else ' '
         full_run_type = (

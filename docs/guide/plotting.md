@@ -207,8 +207,8 @@ otherwise.
 
 | `value` | Draws | Auto colour treatment (heatmap) |
 |---|---|---|
-| `'db'` | the dB view (TL for a pressure field) | fixed 20–120 dB scale (§4) |
-| `'mag_db'` | 20·log10\|H\| = −TL, dB | TL colormap, autoscaled |
+| `'db'` | the dB view (TL for a pressure field) | depends on the quantity: fixed 20–120 dB (§4) for pressure, symmetric about 0 dB for signal excess, autoscaled for reverberation |
+| `'mag_db'` | 20·log10\|H\| = −TL, dB | the TL colormap REVERSED (`jet`), autoscaled |
 | `'mag'` | \|p\|, linear (complex fields only) | linear colormap (`seismic`), anchored at zero |
 | `'phase'` | arg(p), radians (complex fields only) | `twilight`, fixed ±π |
 | `'real'`, `'imag'` | Re(p) / Im(p) (`'imag'` complex only) | linear colormap (`seismic`), symmetric about zero; real time-domain data is clipped to ±RMS |

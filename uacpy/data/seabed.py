@@ -86,12 +86,29 @@ def _bottom_from_folk5(code, lat, lon, *, roughness, water_sound_speed=None):
     return bottom_from_class(value, roughness=roughness)
 
 
+#: EPSG:3857's own latitude limit: the Mercator ordinate diverges at the poles,
+#: and the projection is defined only where |y| <= pi*R, i.e. within this many
+#: degrees of the equator. ``as_coordinate`` admits the full +/-90, so a polar
+#: request reached ``log(tan(...))`` with an argument of 0 at -90 (an untyped
+#: ``ValueError: math domain error``) and produced y = 2.4e8 m at +90 -- an
+#: ordinate twelve times the world extent, which the WFS answers with an empty
+#: feature set rather than an error.
+WEB_MERCATOR_MAX_LAT_DEG = 85.05112877980659
+
+
 def _to_web_mercator(lat: float, lon: float):
-    """(lat, lon) degrees → (x, y) metres in EPSG:3857 (the EMODnet CRS)."""
+    """(lat, lon) degrees → (x, y) metres in EPSG:3857 (the EMODnet CRS).
+
+    Latitude is clamped to :data:`WEB_MERCATOR_MAX_LAT_DEG`, the projection's
+    own limit. EMODnet's coverage is European seas, so no clamped request was
+    ever going to return a substrate: the clamp keeps a polar point on the
+    typed "no seabed substrate" path instead of a bare ``ValueError``.
+    """
     # EPSG:3857 projects WGS84 coordinates onto a *sphere* of the WGS84
     # semi-major axis, so this single radius is the whole datum.
     radius_m = 6378137.0
     lon = normalize_lon(lon)
+    lat = max(-WEB_MERCATOR_MAX_LAT_DEG, min(WEB_MERCATOR_MAX_LAT_DEG, lat))
     return (radius_m * math.radians(lon),
             radius_m * math.log(math.tan(math.pi / 4 + math.radians(lat) / 2)))
 

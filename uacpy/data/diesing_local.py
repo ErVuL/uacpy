@@ -19,7 +19,6 @@ Reading the GeoTIFF (LZW-compressed, Wagner IV equal-area projection) needs
 
 import io
 import zipfile
-from pathlib import Path
 from typing import Optional, Union
 
 import numpy as np
@@ -75,10 +74,9 @@ def download_diesing_db(cache_dir=None, *, timeout=300.0, verbose=False):
     Fetches the CC-BY PANGAEA package and extracts ``lithology_classes.tif`` into
     ``<cache>/diesing/``. Returns the written raster path.
     """
-    dest = Path(cache_dir) if cache_dir else _cache.dataset_root('diesing')
-    dest.mkdir(parents=True, exist_ok=True)
-    log_message('diesing', "downloading Diesing 2020 seafloor lithology "
-                "(CC-BY, ~40 MB)", verbose=verbose)
+    dest = _cache.prepare_download(
+        'diesing', "downloading Diesing 2020 seafloor lithology (CC-BY, ~40 MB)",
+        cache_dir=cache_dir, verbose=verbose)
     blob = http_get(DIESING_URL, timeout=timeout, verbose=verbose,
                     source='diesing')
     with zipfile.ZipFile(io.BytesIO(blob)) as zf:

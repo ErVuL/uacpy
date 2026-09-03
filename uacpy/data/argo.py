@@ -231,4 +231,4 @@ def fetch_ssp_argo(
         requested_date=str(parse_date(date)),
     )
     return SoundSpeedProfile(depths=depths, data=c, shape='measured',
-                             data_sources=(prov,))
+                             data_sources=(prov,), formula=formula)

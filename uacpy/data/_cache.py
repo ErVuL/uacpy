@@ -18,10 +18,13 @@ import tempfile
 import threading
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
+from uacpy._log import log_message
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
 
-__all__ = ['cache_root', 'dataset_root', 'require', 'require_npz', 'cached_grid',
+__all__ = ['cache_root', 'dataset_root', 'prepare_download', 'require',
+           'require_npz', 'cached_grid',
            'cached_grid_at', 'register_cache', 'invalidate_grids', 'atomic_write',
            'staging_path', 'reading', 'memoize', 'memo_lock', 'DATASETS']
 
@@ -110,6 +113,22 @@ def cache_root() -> Path:
 def dataset_root(name: str) -> Path:
     """Directory a given dataset is expected to live in (may not exist yet)."""
     return cache_root() / DATASETS[name].subdir
+
+
+def prepare_download(name: str, banner: str, *, cache_dir=None, verbose=False,
+                     log_tag: Optional[str] = None) -> Path:
+    """Resolve, create and announce a dataset's cache directory.
+
+    ``cache_dir`` when given, else the dataset's own directory under the cache
+    root. Created if absent, announced with ``banner``, and returned. Raises
+    ``KeyError`` for a ``name`` the catalogue does not hold.
+    """
+    dest = Path(cache_dir) if cache_dir else dataset_root(name)
+    dest.mkdir(parents=True, exist_ok=True)
+    # ``log_tag`` where the channel differs from the dataset: the EMODnet
+    # substrate download reports on 'seabed', the channel its reader uses.
+    log_message(log_tag or name, banner, verbose=verbose)
+    return dest
 
 
 def require(name: str, *relative: str) -> Path:

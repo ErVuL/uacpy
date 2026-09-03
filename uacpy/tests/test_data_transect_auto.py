@@ -273,3 +273,56 @@ def test_the_copernicus_guard_sits_before_the_dataset_open(monkeypatch):
     with pytest.raises(_ReachedDownstream):
         copernicus.fetch_ssp_transect_operational(
             (45.0, -30.0), (46.0, -30.0), date='2026-08-15', n_points=2)
+
+
+# ── one n_points contract across every transect entry point ─────────────────
+
+_ALL_TRANSECT_ENTRY_POINTS = _TRANSECT_HELPERS + [
+    ('uacpy.data.sound_speed', 'ssp_transect_plan', {}),
+    ('uacpy.data.bathymetry', 'bathy_transect_plan', {}),
+    ('uacpy.data.crust1_local', 'fetch_bottom_crust1_transect', {}),
+    ('uacpy.data.seaice_local', 'sea_ice_surface_transect', {'month': 3}),
+]
+
+
+@pytest.mark.parametrize('bad', [1, 0, -3, 2.7, 'x', None])
+@pytest.mark.parametrize('module_name,func_name,kwargs',
+                         _ALL_TRANSECT_ENTRY_POINTS,
+                         ids=[f for _m, f, _k in _ALL_TRANSECT_ENTRY_POINTS])
+def test_every_transect_rejects_a_bad_n_points_the_same_way(
+        module_name, func_name, kwargs, bad):
+    """One contract, one exception type. These eight entry points behaved five
+    different ways on the same input: 1/0/-3 were silently coerced to 2 at
+    ``range_dependent_bottom_along``, 2.7 was silently truncated at two sites
+    and an untyped ``TypeError`` at four, and 'x' was an untyped ``ValueError``
+    at seven of them."""
+    mod = importlib.import_module(module_name)
+    with pytest.raises(ConfigurationError):
+        getattr(mod, func_name)((45.0, -30.0), (46.0, -30.0),
+                                n_points=bad, **kwargs)
+
+
+def test_range_dependent_bottom_rejects_a_bad_n_points():
+    """The one entry point whose first argument is the point fetcher."""
+    from uacpy.core.environment import BoundaryProperties
+    from uacpy.data.sediment import range_dependent_bottom_along
+    for bad in (1, 0, -3, 2.7, 'x', None):
+        with pytest.raises(ConfigurationError):
+            range_dependent_bottom_along(
+                lambda lat, lon: BoundaryProperties.from_grain_size(3.0),
+                (0.0, 0.0), (1.0, 0.0), bad, source_label='test')
+
+
+@pytest.mark.parametrize('good', [2, 7, 2.0])
+def test_a_whole_number_n_points_is_accepted_at_the_boundary(good):
+    """Two waypoints is the boundary and must pass; a float that is exactly a
+    whole number is a count, not a truncation."""
+    from uacpy.data._geo import checked_n_points
+    assert checked_n_points(good, 'probe') == int(good)
+
+
+def test_only_auto_capable_callers_accept_the_auto_keyword():
+    from uacpy.data._geo import checked_n_points
+    assert checked_n_points('auto', 'probe', allow_auto=True) == 'auto'
+    with pytest.raises(ConfigurationError, match='not a sample count'):
+        checked_n_points('auto', 'probe')

@@ -276,7 +276,7 @@ class TestRAM:
         assert result.data.shape[0] > 0  # depth
         assert result.data.shape[1] > 0  # range
         # mpiramS builds its grid as frq = fc + [-nf1..nf1]·df with
-        # df = 1/T and nf1 = int((fc/Q - df)/df) + 1 (peramx.f90:353-374):
+        # df = 1/T and nf1 = int((fc/Q - df)/df) + 1 (peramx.f90:353-383):
         # fc=100, Q=2, T=2 → df=0.5, nf1=100, nf=201 spanning 50-150 Hz.
         f = np.asarray(result.coords['frequency'], dtype=float)
         assert result.data.shape[2] == 201
@@ -640,6 +640,38 @@ class TestSpeedBoundsFindThePhysicalExtremes:
             bottom=BoundaryProperties(acoustic_type='rigid'))
         assert PropagationModel._speed_bounds(env) == (1500.0, 1520.0)
 
+    def test_it_always_returns_a_two_tuple_of_speeds(self):
+        """The premise ``_resolve_c_max`` is written against.
+
+        It used to guard its result with ``if bounds else None``, an arm no
+        environment can reach: there is one ``return`` here and it hands back
+        a 2-tuple, which is always truthy. The rigid bottom above is the
+        emptiest seabed on offer and the water column still fills both
+        slots, because an Environment always carries an SSP
+        (``ssp=None`` resolves to the isovelocity default).
+        """
+        for env in (
+            Environment(name='bare', bathymetry=100.0),
+            Environment(name='rigid', bathymetry=100.0, ssp=1500.0,
+                        bottom=BoundaryProperties(acoustic_type='rigid')),
+            Environment(name='vacuum', bathymetry=100.0, ssp=1500.0,
+                        bottom=BoundaryProperties(acoustic_type='vacuum')),
+        ):
+            bounds = PropagationModel._speed_bounds(env)
+            assert isinstance(bounds, tuple) and len(bounds) == 2, (
+                env.name, bounds)
+            assert all(np.isfinite(b) and b > 0 for b in bounds), (
+                env.name, bounds)
+            assert bounds, env.name       # never the falsy arm
+
+    def test_there_is_one_return_and_it_is_unconditional(self):
+        """Read from the source, so a second ``return`` added later — one
+        that could hand back ``None`` or a bare value — reopens the arm
+        ``_resolve_c_max`` no longer checks for."""
+        import inspect
+        body = inspect.getsource(PropagationModel._speed_bounds)
+        assert body.count('return') == 1, body
+
 
 @pytest.mark.requires_binary
 class TestResolveCMaxIsThePhysicalMaximum:
@@ -658,6 +690,21 @@ class TestResolveCMaxIsThePhysicalMaximum:
             ssp=[(0.0, 1500.0), (100.0, 1520.0)],
             bottom=BoundaryProperties(acoustic_type='rigid'))
         assert Kraken(verbose=False)._resolve_c_max(env) == 1520.0
+
+    def test_it_is_a_speed_on_every_environment_not_sometimes_none(self):
+        """``Field.to_time_trace`` anchors its window at ``r / c_max``, so a
+        ``None`` here would be a missing anchor, not a benign default. The
+        base method cannot produce one — see
+        ``TestSpeedBoundsFindThePhysicalExtremes`` for why — and the callers'
+        ``is not None`` guards stay only for subclasses."""
+        model = Kraken(verbose=False)
+        for env in (
+            Environment(name='bare', bathymetry=100.0),
+            Environment(name='rigid', bathymetry=100.0, ssp=1500.0,
+                        bottom=BoundaryProperties(acoustic_type='rigid')),
+        ):
+            c_max = model._resolve_c_max(env)
+            assert isinstance(c_max, float) and c_max > 0, (env.name, c_max)
 
 
 @pytest.mark.requires_binary
@@ -1242,3 +1289,107 @@ class TestMissingVolumeAbsorptionIsAnnounced:
         does not honour — it has to say that it carries the model."""
         from uacpy.models.base import PropagationModel
         assert PropagationModel._consumes_volume_absorption is False
+
+
+class TestTheBoundaryCarriersAlwaysDeclareTheFieldsModelsRead:
+    """``models/base.py``, ``kraken.py`` and ``bounce.py`` read
+    ``shear_speed`` / ``shear_attenuation`` / ``roughness`` / ``layers``
+    straight off their carriers, with no ``getattr`` default and no
+    ``or 0.0``. That is only sound while the carriers guarantee the field.
+
+    ``BoundaryProperties.__post_init__`` fills every key of
+    ``_ACOUSTIC_DEFAULTS`` unconditionally and then requires each
+    non-negative; ``SedimentLayer`` declares the three as non-Optional floats
+    defaulting to 0.0; ``SeabedColumn.__post_init__`` normalises ``layers`` to
+    a list. Make any of them Optional again and the model layer starts
+    comparing ``None > 0`` — which raises rather than reading as zero, so the
+    failure would be loud but far from its cause. This pins it at the cause.
+    """
+
+    FLOAT_FIELDS = ('shear_speed', 'shear_attenuation', 'roughness')
+
+    @pytest.mark.parametrize('boundary', [
+        BoundaryProperties(),
+        BoundaryProperties(acoustic_type='half-space', sound_speed=1600.0),
+        BoundaryProperties(acoustic_type='rigid'),
+        BoundaryProperties(acoustic_type='vacuum'),
+        BoundaryProperties(shear_speed=300.0, shear_attenuation=0.2,
+                           roughness=0.5),
+    ])
+    def test_a_boundary_carries_concrete_floats(self, boundary):
+        for name in self.FLOAT_FIELDS:
+            value = getattr(boundary, name)
+            assert isinstance(value, float), (name, type(value), value)
+            assert value >= 0.0, (name, value)
+
+    @pytest.mark.parametrize('layer', [
+        SedimentLayer(thickness=10.0, sound_speed=1600.0, density=1.6),
+        SedimentLayer(thickness=10.0, sound_speed=1600.0, density=1.6,
+                      shear_speed=300.0, shear_attenuation=0.2,
+                      roughness=0.5),
+    ])
+    def test_a_sediment_layer_carries_concrete_floats(self, layer):
+        for name in self.FLOAT_FIELDS:
+            value = getattr(layer, name)
+            assert isinstance(value, float), (name, type(value), value)
+            assert value >= 0.0, (name, value)
+
+    def test_a_pure_halfspace_column_has_an_empty_layers_list(self):
+        column = SeabedColumn(layers=[], halfspace=BoundaryProperties())
+        assert column.layers == []
+        assert isinstance(column.layers, list)
+
+    def test_the_readers_take_the_largest_roughness_off_the_carriers(self):
+        """The call sites, not just the carriers: each folded reader against
+        the value the old ``getattr(..., 0.0) or 0.0`` form would have
+        produced."""
+        from uacpy.models.base import _bottom_roughness, _max_roughness
+        layer = SedimentLayer(thickness=10.0, sound_speed=1600.0, density=1.6,
+                              shear_speed=300.0, roughness=0.7)
+        halfspace = BoundaryProperties(acoustic_type='half-space',
+                                       sound_speed=1800.0, roughness=0.2)
+        bottom = Bottom([SeabedColumn(layers=[layer], halfspace=halfspace)])
+        assert _max_roughness([layer, halfspace]) == pytest.approx(0.7)
+        assert _bottom_roughness(bottom) == pytest.approx(0.7)
+        # A pure half-space column: the layers list is empty, not absent.
+        bare = Bottom([SeabedColumn(layers=[], halfspace=halfspace)])
+        assert _bottom_roughness(bare) == pytest.approx(0.2)
+
+    def test_the_elastic_collapse_zeroes_both_shear_fields(self):
+        """``_zero_shear`` assigns unconditionally now, so it must still
+        reach a layer, a half-space and a surface node."""
+        layer = SedimentLayer(thickness=10.0, sound_speed=1600.0, density=1.6,
+                              shear_speed=300.0, shear_attenuation=0.2)
+        halfspace = BoundaryProperties(acoustic_type='half-space',
+                                       sound_speed=1800.0, shear_speed=600.0,
+                                       shear_attenuation=0.4)
+        bottom = Bottom([SeabedColumn(layers=[layer], halfspace=halfspace)])
+        collapsed = PropagationModel._collapse_elastic_boundary(bottom, 'fluid')
+        for column in collapsed.columns:
+            for carrier in (*column.layers, column.halfspace):
+                assert carrier.shear_speed == 0.0
+                assert carrier.shear_attenuation == 0.0
+        # ... and the original is untouched (it deep-copies).
+        assert bottom.columns[0].layers[0].shear_speed == 300.0
+
+        surface = Surface(properties=[
+            BoundaryProperties(shear_speed=200.0, shear_attenuation=0.1)])
+        smoothed = PropagationModel._collapse_elastic_boundary(
+            surface, 'fluid')
+        assert smoothed.properties[0].shear_speed == 0.0
+        assert smoothed.properties[0].shear_attenuation == 0.0
+
+    def test_has_shear_keeps_its_duck_typed_fall_through(self):
+        """``PropagationModel._has_shear``'s ``getattr`` is deliberately NOT
+        folded: it is reached only past the Bottom/Surface isinstance branch
+        and accepts a bare object that merely carries a shear speed. A sweep
+        that folds the idiom everywhere would break this one."""
+        class _JustAShearSpeed:
+            shear_speed = 400.0
+
+        class _NoShearAtAll:
+            pass
+
+        assert PropagationModel._has_shear(_JustAShearSpeed()) is True
+        assert PropagationModel._has_shear(_NoShearAtAll()) is False
+        assert PropagationModel._has_shear(None) is False

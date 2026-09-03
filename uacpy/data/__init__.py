@@ -20,8 +20,10 @@
   (``ssp=`` / ``bathymetry=`` / ``bottom=`` / ``surface=`` / ``altimetry=``)
   and/or fetched from ordered-fallback ``*_sources`` (source first, literal as
   fallback; ``'auto'`` = best available, ``'local'`` = local data only, no
-  network); fetching is cache-first (a locally installed dataset is sampled
-  before any network call).
+  network). Fetching is cache-first *within each source*: a source with a
+  locally installed twin samples it before its own live backend. The chain
+  order is quality-first, so an ``'auto'`` run can reach the network before
+  any cache — use ``'local'`` for an offline or reproducible run.
 
 Examples
 --------

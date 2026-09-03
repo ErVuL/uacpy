@@ -17,9 +17,8 @@ from pathlib import Path
 
 import numpy as np
 
-from uacpy._log import log_message
 from uacpy.core.environment import BoundaryProperties
-from uacpy.core.exceptions import ConfigurationError, DataFetchError
+from uacpy.core.exceptions import DataFetchError
 from uacpy.core.sediment import _HB_PHI, _HB_RHO, grain_size_to_geoacoustics
 from uacpy.data import _cache
 from uacpy.data._geo import as_coordinate
@@ -55,19 +54,12 @@ def download_graw_db(cache_dir=None, *, timeout=300.0, verbose=False):
     Writes ``<cache>/graw/Dataset_S2.nc`` (~37 MB, Zenodo) and returns the
     path. Uses curl when available, falling back to the urllib fetcher.
     """
-    from uacpy.data._http import curl_download, http_get
-    dest = Path(cache_dir) if cache_dir else _cache.dataset_root('graw')
-    dest.mkdir(parents=True, exist_ok=True)
-    out = dest / GRAW_FILE
-    log_message('graw', "downloading Graw 2021 seabed density grid (~37 MB)",
-                verbose=verbose)
-    if not curl_download(GRAW_URL, out, timeout=timeout, verbose=verbose):
-        with _cache.atomic_write(out) as part:
-            part.write_bytes(http_get(GRAW_URL, timeout=timeout, verbose=verbose,
-                                      source='graw'))
-    _cache.invalidate_grids()
-    log_message('graw', f"Graw density grid cached → {out}", verbose=verbose)
-    return out
+    from uacpy.data._http import download_grid_file
+    return download_grid_file(
+        'graw', GRAW_URL, GRAW_FILE,
+        "downloading Graw 2021 seabed density grid (~37 MB)",
+        "Graw density grid cached", cache_dir=cache_dir, timeout=timeout,
+        verbose=verbose)
 
 
 class _GrawGrid(NetcdfGrid):
@@ -121,12 +113,8 @@ def fetch_seabed_density_transect(start, end, n_points=6):
 
     ``density_gcm3`` is ``NaN`` at any waypoint without a finite grid value.
     """
-    if int(n_points) < 2:
-        raise ConfigurationError(
-            f"fetch_seabed_density_transect: n_points must be >= 2, "
-            f"got {n_points}.",
-            remediation="Pass n_points>=2 to define a transect.")
-    from uacpy.data._geo import geodesic_waypoints
+    from uacpy.data._geo import checked_n_points, geodesic_waypoints
+    n_points = checked_n_points(n_points, 'fetch_seabed_density_transect')
     lats, lons, ranges_m = geodesic_waypoints(start, end, n_points)
     g = _grid()
     rho = np.array([g.density(la, lo) for la, lo in zip(lats, lons)])

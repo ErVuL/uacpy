@@ -20,6 +20,7 @@ from typing import Union
 import numpy as np
 
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
+from uacpy.data import _cache
 from uacpy.data._cache import staging_path
 from uacpy._log import log_message
 
@@ -69,31 +70,67 @@ _REFUSED_RETRIES = 1
 _REFUSED_WAIT_S = 1.0
 
 
+def download_grid_file(name: str, url: str, filename: str, banner: str,
+                       done: str, *, cache_dir=None, timeout: float = 300.0,
+                       verbose=False):
+    """Fetch one self-contained grid file into a dataset's cache directory.
+
+    Returns the written path. Raises ``DataFetchError`` when neither transport
+    reaches the host. ``banner`` is logged before the fetch and ``done`` after
+    it, with the path appended — both the caller's own wording.
+    """
+    dest = _cache.prepare_download(name, banner, cache_dir=cache_dir,
+                                   verbose=verbose)
+    out = dest / filename
+    # curl first: NCEI and Zenodo both throttle Python's urllib. The urllib
+    # fallback stages, so an interrupt leaves no truncated grid at ``out``.
+    if not curl_download(url, out, timeout=timeout, verbose=verbose):
+        with _cache.atomic_write(out) as part:
+            part.write_bytes(http_get(url, timeout=timeout, verbose=verbose,
+                                      source=name))
+    _cache.invalidate_grids()          # the next read picks up the new file
+    log_message(name, f"{done} → {out}", verbose=verbose)
+    return out
+
+
+def _chain_any(exc, predicate) -> bool:
+    """True when ``predicate`` holds for any link of an exception chain.
+
+    A transport failure arrives wrapped: ``URLError.reason`` holds the socket
+    error, and ``__cause__`` holds whatever raised it. The walk follows both,
+    and ``seen`` guards the cycle a self-referential ``__cause__`` would make.
+    The two classifiers below differ only in their predicate.
+    """
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        if predicate(exc):
+            return True
+        exc = getattr(exc, 'reason', None) or exc.__cause__
+    return False
+
+
+#: Resolver codes that mean the name will not resolve however long you wait.
+#: ``EAI_AGAIN`` is deliberately absent — a temporary resolver failure stays
+#: transient and keeps its retry ladder.
+_PERMANENT_DNS_ERRNOS = frozenset(
+    {getattr(socket, 'EAI_NONAME', -2), getattr(socket, 'EAI_FAIL', -4)})
+
+
 def _is_permanent_dns_failure(exc) -> bool:
     """True when the failure chain ends in a resolver saying the name does
     not exist (``EAI_NONAME``) or failed for good (``EAI_FAIL``) — a typo in
     ``base_url`` or an offline host, which no retry ladder cures. A
     temporary resolver failure (``EAI_AGAIN``) stays transient."""
-    seen = set()
-    permanent = {getattr(socket, 'EAI_NONAME', -2), getattr(socket, 'EAI_FAIL', -4)}
-    while exc is not None and id(exc) not in seen:
-        seen.add(id(exc))
-        if isinstance(exc, socket.gaierror) and exc.errno in permanent:
-            return True
-        exc = getattr(exc, 'reason', None) or exc.__cause__
-    return False
+    return _chain_any(exc, lambda e: (isinstance(e, socket.gaierror)
+                                      and e.errno in _PERMANENT_DNS_ERRNOS))
 
 
 def _is_connection_refused(exc) -> bool:
     """True when the transport failure chain ends in ECONNREFUSED."""
-    seen = set()
-    while exc is not None and id(exc) not in seen:
-        seen.add(id(exc))
-        if isinstance(exc, ConnectionRefusedError) or \
-                getattr(exc, 'errno', None) == errno.ECONNREFUSED:
-            return True
-        exc = getattr(exc, 'reason', None) or exc.__cause__
-    return False
+    return _chain_any(exc, lambda e: (
+        isinstance(e, ConnectionRefusedError)
+        or getattr(e, 'errno', None) == errno.ECONNREFUSED))
 _MAX_BACKOFF_S = 8.0
 # Only network schemes — never ``file://`` / ``ftp://`` (which urlopen honours),
 # so a user-supplied ``base_url=`` cannot turn into local-file disclosure / SSRF.

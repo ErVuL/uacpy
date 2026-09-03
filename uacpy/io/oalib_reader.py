@@ -48,7 +48,7 @@ from uacpy.io._fortran_helpers import (
     fortran_float,
     expand_repeat_counts,
     list_directed_int,
-    read_list_directed_values, take_tokens,
+    read_list_directed_values, split_fortran_tokens, take_tokens,
     strip_fortran_comment as _strip_fortran_comment,
     strip_fortran_quotes as _strip_fortran_quotes)
 from uacpy.core.units import km_to_m
@@ -235,6 +235,16 @@ def _read_shd_pressure_rows(fid, filename, first_record, n_rows, recl,
     run is gap-free and one strided read replaces one seek per row. That read
     also moves the padding a per-row seek skips, so it is taken only while the
     extra bytes stay under :data:`_SHD_STRIDE_PADDING_BUDGET_BYTES`.
+
+    **The two paths are equivalent and neither is dead.** They decode the
+    same bytes into the same array; the budget picks between them on I/O
+    cost alone, never on correctness. A file with many receiver depths and
+    few ranges pads every record several times over, and there the seek
+    loop reads strictly less. Keep both:
+    ``uacpy/tests/test_reader_block_reads.py`` pins the equality by forcing
+    the budget to zero and comparing the two decodes of one file
+    (``test_shd_padding_beyond_the_stride_budget_reads_the_same_samples``),
+    so a sweep that finds the strided path sufficient meets that test.
     """
     rec_bytes = 4 * recl
     payload_bytes = 8 * n_range
@@ -1613,12 +1623,18 @@ def read_flp(fileroot: Union[str, Path], verbose: bool = False) -> Dict[str, Any
         r_prof = np.sort(r_prof)
         log_message('oalib_reader', f"Number of profiles, NProf = {N_prof}",
                     verbose=verbose)
-        if N_prof < 10:
-            preview = ", ".join(f"{r:.2f}" for r in r_prof)
-        else:
-            preview = f"{r_prof[0]:.2f} … {r_prof[-1]:.2f}"
-        log_message('oalib_reader', f"profile ranges rProf (km): {preview}",
-                    verbose=verbose, level='debug')
+        # `verbose` is public and off by default, so this preview is work
+        # every read would otherwise do for a message no one asked for.
+        # Python evaluates the argument before log_message can decline it,
+        # so the guard has to be here rather than inside the logger.
+        if verbose:
+            if N_prof < 10:
+                preview = ", ".join(f"{r:.2f}" for r in r_prof)
+            else:
+                preview = f"{r_prof[0]:.2f} … {r_prof[-1]:.2f}"
+            log_message('oalib_reader',
+                        f"profile ranges rProf (km): {preview}",
+                        verbose=verbose, level='debug')
 
         # Receiver ranges pass through Sort in the Fortran
         # (misc/SourceReceiverPositions.f90:268).
@@ -1634,13 +1650,15 @@ def read_flp(fileroot: Union[str, Path], verbose: bool = False) -> Dict[str, Any
         log_message('oalib_reader',
                     f"Number of receiver range offsets = {N_offsets}",
                     verbose=verbose)
-        if N_offsets < 10:
-            preview = ", ".join(f"{ro:.2f}" for ro in r_offsets)
-        else:
-            preview = f"{r_offsets[0]:.2f} … {r_offsets[-1]:.2f}"
-        log_message('oalib_reader',
-                    f"receiver range offsets Rro (m): {preview}",
-                    verbose=verbose, level='debug')
+        # Built only when it can print — see the rProf preview above.
+        if verbose:
+            if N_offsets < 10:
+                preview = ", ".join(f"{ro:.2f}" for ro in r_offsets)
+            else:
+                preview = f"{r_offsets[0]:.2f} … {r_offsets[-1]:.2f}"
+            log_message('oalib_reader',
+                        f"receiver range offsets Rro (m): {preview}",
+                        verbose=verbose, level='debug')
 
         if np.max(np.abs(r_offsets)) > 0.0:
             warnings.warn(
@@ -1815,6 +1833,10 @@ def read_flp3d(fileroot: Union[str, Path]) -> Dict[str, Any]:
             # list-directed, so it keeps consuming records until three values
             # are read and then discards the rest of the final one — which is
             # what lets the shipped decks carry trailing annotations.
+            # ModeFileName is a CHARACTER item, and a list-directed READ
+            # takes a whole delimited literal as ONE value: splitting the
+            # record on whitespace broke ``'my modes'`` in two and left the
+            # node pointing at a mode file called ``my``.
             tokens: list = []
             while len(tokens) < 3:
                 line = f.readline()
@@ -1825,10 +1847,13 @@ def read_flp3d(fileroot: Union[str, Path]) -> Dict[str, Any]:
                         remediation="The deck is truncated; verify it was "
                                     "written completely.",
                     )
-                tokens.extend(expand_repeat_counts(line.split()))
+                tokens.extend(
+                    expand_repeat_counts(split_fortran_tokens(line)))
             node_x.append(fortran_float(tokens[0]))
             node_y.append(fortran_float(tokens[1]))
-            mode_files.append(tokens[2].strip("'\""))
+            # Undelimit, honouring the doubled-quote escape; an unquoted
+            # name such as the writer's DUMMY passes through as itself.
+            mode_files.append(_strip_fortran_quotes(tokens[2]))
 
         n_elts = list_directed_int(f.readline())
         if n_elts <= 0:

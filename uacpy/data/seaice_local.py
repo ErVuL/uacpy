@@ -23,7 +23,6 @@ reprojection needs ``pyproj`` (both default uacpy dependencies).
 import datetime as _dt
 import io
 import warnings
-from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -48,7 +47,8 @@ from uacpy.data._time import parse_date
 __all__ = ['download_seaice_db', 'fetch_sea_ice_concentration',
            'fetch_sea_ice_concentration_transect', 'sea_ice_grid',
            'sea_ice_pixel', 'sea_ice_surface', 'fetch_sea_ice_surface',
-           'sea_ice_surface_transect', 'SEA_ICE_TYPICAL_ROUGHNESS_M']
+           'sea_ice_surface_transect', 'SEA_ICE_TYPICAL_ROUGHNESS_M',
+           'climatology_period']
 
 INDEX_FILE = 'seaice_climatology.npz'
 #: The pre-npz pickled climatology, refused by :func:`uacpy.data._cache.require_npz`.
@@ -102,14 +102,16 @@ def download_seaice_db(cache_dir=None, *, years=None, timeout=120.0,
     months are skipped.
     """
     import tifffile
-    dest = Path(cache_dir) if cache_dir else _cache.dataset_root('seaice')
-    dest.mkdir(parents=True, exist_ok=True)
     if years is None:
         end = _dt.date.today().year - 1
         years = range(end - 4, end + 1)
     years = list(years)
-    log_message('seaice', f"building NSIDC sea-ice climatology over {years[0]}-"
-                f"{years[-1]} (~{len(years) * 24} monthly grids)", verbose=verbose)
+    # The banner names the year span, so the reference period is resolved
+    # before the directory is announced.
+    dest = _cache.prepare_download(
+        'seaice', f"building NSIDC sea-ice climatology over {years[0]}-"
+        f"{years[-1]} (~{len(years) * 24} monthly grids)",
+        cache_dir=cache_dir, verbose=verbose)
 
     climo = {}
     for hemi in ('N', 'S'):
@@ -180,7 +182,11 @@ def download_seaice_db(cache_dir=None, *, years=None, timeout=120.0,
         # A file object, not the path: np.savez_compressed appends '.npz' to a
         # name that lacks it, and the staging name does not end in '.npz'.
         with open(part, 'wb') as fh:
-            np.savez_compressed(fh, **climo)
+            # ``years`` records the reference period. The default is derived
+            # from date.today() at BUILD time, so without it the vintage of a
+            # cache differs per build and cannot be recovered from the file.
+            np.savez_compressed(fh, years=np.asarray(years, dtype=np.int32),
+                                **climo)
     _MODEL.clear()
     log_message('seaice', f"sea-ice climatology cached → {out}", verbose=verbose)
     return out
@@ -210,9 +216,29 @@ def _build_model():
         # allow_pickle an object array in it would execute on load.
         with np.load(path, allow_pickle=False) as z:
             climo = {h: z[h] for h in ('N', 'S')}
+            # Optional: caches built before the key existed, and the synthetic
+            # ones the tests write, carry no reference period. Absent is not an
+            # error — it just leaves the vintage unstated.
+            years = ([int(y) for y in z['years']]
+                     if 'years' in z.files else None)
     result = {'tf': {h: _pyproj_transformer(_GRID[h]['epsg']) for h in ('N', 'S')}}
     result.update(climo)
+    result['years'] = years
     return result
+
+
+def climatology_period():
+    """Reference period of the installed climatology, or ``None``.
+
+    A string such as ``'2019-2023 (climatology)'`` for the provenance
+    ``data_date``. ``None`` where the cache predates the ``years`` key or was
+    written without one — the grids are still usable, their vintage is simply
+    not recorded.
+    """
+    years = _model().get('years')
+    if not years:
+        return None
+    return f"{min(years)}-{max(years)} (climatology)"
 
 
 def _model():
@@ -458,12 +484,9 @@ def fetch_sea_ice_concentration_transect(start: Coordinate, end: Coordinate, *,
                                          date=None, month: Optional[int] = None,
                                          n_points: int = 6):
     """``(ranges_m, concentration)`` (0-1) sampled along ``start`` → ``end``."""
-    from uacpy.data._geo import geodesic_waypoints
-    if int(n_points) < 2:
-        raise ConfigurationError(
-            f"fetch_sea_ice_concentration_transect: n_points must be >= 2, "
-            f"got {n_points}.",
-            remediation="Pass n_points>=2 to define a transect.")
+    from uacpy.data._geo import checked_n_points, geodesic_waypoints
+    n_points = checked_n_points(n_points,
+                                'fetch_sea_ice_concentration_transect')
     lats, lons, ranges_m = geodesic_waypoints(start, end, n_points)
     out = []
     for la, lo in zip(lats, lons):
@@ -506,12 +529,15 @@ def sea_ice_surface_transect(start: Coordinate, end: Coordinate, *,
     from uacpy.core.surface import Surface
     from uacpy.data._geo import (
         run_boundary_indices, DEFAULT_MAX_TRANSECT_POINTS, checked_max_points,
+        checked_n_points,
     )
     if max_points is None:
         max_points = DEFAULT_MAX_TRANSECT_POINTS
     max_points = checked_max_points(max_points, 'sea_ice_surface_transect')
+    n_points = checked_n_points(n_points, 'sea_ice_surface_transect',
+                                allow_auto=True)
     probe_n = (max_points if n_points == 'auto'
-               else max(2, min(int(n_points), max_points)))
+               else min(n_points, max_points))
     ranges_m, conc = fetch_sea_ice_concentration_transect(
         start, end, date=date, month=month, n_points=probe_n)
     n_no_data = int(np.count_nonzero(~np.isfinite(np.asarray(conc, float))))

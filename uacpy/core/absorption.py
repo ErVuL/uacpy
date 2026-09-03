@@ -42,7 +42,9 @@ from uacpy.core.constants import (
     DEFAULT_SOUND_SPEED, MAX_ATTENUATION_DB_PER_WAVELENGTH, NEPER_TO_DB,
 )
 from uacpy.core.exceptions import ConfigurationError
-from uacpy.core._carrier_validate import _require_attenuation_in_range
+from uacpy.core._carrier_validate import (
+    _require_attenuation_in_range, _require_finite, _require_non_negative,
+)
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 
 
@@ -475,6 +477,20 @@ class FrancoisGarrison(Absorption):
     here narrows the inputs to a published validity envelope: neither
     ``misc/AttenMod.f90`` (``Franc_Garr``) nor ``Matlab/Misc/franc_garr.m``
     — the two implementations this one follows — states one.
+
+    **The deck does not do what the accessor does.** Evaluating per depth is
+    a deliberate refinement over the single-row model AT writes: the solver's
+    ``Franc_Garr`` reads a module-level ``z_bar``
+    (``misc/AttenMod.f90:148-160``) and applies the one resulting alpha at
+    every depth. So an ``alpha_db_per_m`` sampled over a column and a run of
+    the same environment absorb different amounts. On
+    ``FrancoisGarrison(10, 35, 8, z_bar_m=1000)`` the accessor at the surface
+    is +3.0 % over the deck at 1 kHz, +13.9 % at 10 kHz, +15.5 % at 30 kHz
+    and +15.0 % at 100 kHz; it agrees exactly at ``z_bar_m`` and runs as far
+    below at the bottom of a 2 km column. This matters wherever the two are
+    combined rather than compared —
+    :meth:`uacpy.core.results.modes.Modes.with_attenuation` documents the
+    consequence for a modal perturbation.
     """
     temperature_c: float
     salinity_psu: float
@@ -562,7 +578,8 @@ class BiologicalLayer:
     :113 scales by ``c²/ω`` and :116 aborts the run when the result exceeds
     ``c`` — so a layer aborts once its dB/km absorption passes
     ``8685.8896·2πf/c``, which is 3638 dB/km at 100 Hz in 1500 m/s water
-    (``a0 = 1, Q = 61`` clears it). This warns rather than raises because
+    (``a0 = 1, Q = 60`` gives 3600 and clears it; ``Q = 61`` gives 3721 and
+    warns). This warns rather than raises because
     the peak is only reached when the run frequency sits on ``f0``, and the
     ceiling scales with the true ``c(z)`` over the layer, which a layer on
     its own does not carry — the check uses
@@ -594,6 +611,24 @@ class BiologicalLayer:
         self.f0_hz = f0_hz
         self.Q = Q
         self.a0 = a0
+        # Finiteness first, because every sign test below is a bare ``<=``
+        # that NaN answers False to and that inf passes for ``a0``/``Q``: a
+        # NaN layer reaches the AT deck through ``as_at_tuples`` and turns
+        # AttenMod.f90's band test ``z >= Z1 .AND. z <= Z2`` (:104) False at
+        # every depth, so it is written to the file and then contributes
+        # nothing, while an inf ``a0`` reaches the ceiling arithmetic below
+        # and reports its own limit as ``nan dB/km``. A negative depth is
+        # inert the same way — the band test compares against a water-column
+        # depth measured down from the surface — so the depths are held to
+        # ``>= 0`` here rather than only to their ordering. This is the same
+        # pair of guards every other core carrier routes through.
+        _require_non_negative(self.z_top_m, "BiologicalLayer.z_top_m",
+                              hint="metres below the surface")
+        _require_non_negative(self.z_bottom_m, "BiologicalLayer.z_bottom_m",
+                              hint="metres below the surface")
+        _require_finite(self.f0_hz, "BiologicalLayer.f0_hz", hint="Hz")
+        _require_finite(self.Q, "BiologicalLayer.Q", hint="dimensionless")
+        _require_finite(self.a0, "BiologicalLayer.a0", hint="dB/km")
         if self.z_bottom_m <= self.z_top_m:
             raise ConfigurationError(
                 "BiologicalLayer: z_bottom_m must be strictly greater than "
@@ -725,6 +760,21 @@ class ConstantAbsorption(Absorption):
     ----------
     value_db_per_wavelength : float
         Absorption coefficient (dB/wavelength). Non-negative.
+
+    Notes
+    -----
+    dB/wavelength is the unit the deck carries, so the value written to the
+    ``alphaI`` column is exact and the divergence is only in
+    :meth:`alpha_db_per_m`. That accessor holds no SSP, so it converts to
+    dB/m at :data:`~uacpy.core.constants.DEFAULT_SOUND_SPEED`, while the
+    solver converts at each SSP row's own ``c``
+    (``misc/AttenMod.f90:73``, the ``'W'`` branch: ``alphaT = alpha * freq /
+    (8.6858896 * c)``). Over sound speeds of 1450-1550 m/s that is a spread
+    of ±3.3 % between the two answers. Pass the SSP's own sound speed to
+    :func:`convert_attenuation_units` to reproduce the deck's number
+    exactly; see
+    :meth:`uacpy.core.results.modes.Modes.with_attenuation` for where the
+    difference is felt.
     """
     value_db_per_wavelength: float = 0.0
 

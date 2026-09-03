@@ -31,8 +31,8 @@ Five names here read and write the BELLHOP3D / FIELD3D formats:
 and ``read_flp3d`` (``oalib_reader``), ``write_field3dflp``
 (``oalib_writer``). **They are deliberately retained and are not dead
 code.** No uacpy model runs ``bellhop3d`` or ``field3d`` yet — Bellhop's
-RunType position 6 is hardwired ``'2'`` and ``Bellhop(dimensionality='3D')``
-raises — so nothing in the 2-D public API calls them; the 2-D readers refuse
+RunType position 6 is hardwired to the 2-D blank and
+``Bellhop(dimensionality='3D')`` raises — so nothing in the 2-D public API calls them; the 2-D readers refuse
 3-D input and name them as what a future implementer builds on.
 ``uacpy/tests/test_io_restored_capabilities.py`` pins all five, so a
 dead-code sweep meets that test before proposing their removal a second

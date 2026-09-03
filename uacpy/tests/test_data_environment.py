@@ -628,3 +628,38 @@ def test_a_preset_inside_a_source_sequence_says_presets_go_alone():
         env_mod._axis_attempts(('local', 'woa23'),
                                    env_mod._SSP_BACKENDS,
                                    axis='ssp', cache_only=False)
+
+
+def test_auto_bottom_chain_prefers_a_measured_grain_size_sample():
+    """'auto' must consult the cached NCEI grain-size database, and must do so
+    before the modelled/interpolated maps behind it."""
+    order, cache_only = env_mod._bottom_order('auto')
+    assert cache_only is False
+    assert 'grainsize' in order
+    assert (order.index('emodnet') < order.index('grainsize')
+            < order.index('diesing') < order.index('mars')
+            < order.index('pelagic'))
+
+
+@pytest.mark.parametrize('preset', ['auto', 'local'])
+def test_grain_size_sample_beats_pelagic_ooze_off_cape_hatteras(preset):
+    """At 36 N 75 W the grain-size database holds a sand sample 124 km away.
+    Leaving it out of 'auto' handed back the pelagic model's ooze instead --
+    rho*c 2245 against the sample's 3608, a 61 % error in the impedance that
+    sets the bottom reflection coefficient."""
+    import warnings
+    from uacpy.data import sediment_db
+    point = (36.0, -75.0)
+    try:                                   # skip only when the cache is absent
+        sample = sediment_db.fetch_bottom_local(point)
+    except Exception as exc:
+        pytest.skip(f'grain-size cache not installed: {exc}')
+    order, _ = env_mod._bottom_order(preset)
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        bottom, source = env_mod._fetch_bottom(
+            order, point, transect=False, cache_only=True, depth=40.0)
+    assert source == 'grainsize'
+    assert bottom.sound_speed == pytest.approx(sample.sound_speed, rel=1e-9)
+    assert bottom.sound_speed == pytest.approx(1792.1, abs=0.5)
+    assert bottom.density == pytest.approx(2.013, abs=0.01)

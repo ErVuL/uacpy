@@ -392,6 +392,15 @@ def optimize_grid(
     # among those inside the budget wins.
     dx_top = x_max * 0.5
     dx_candidates = _ladder(max(0.5, c0_use / freq / 8.0), dx_top)
+    # The ladder deliberately runs below any caller's own Δz floor. Floors are
+    # applied to the RESULT (RAM's ``c_min/(16 f)`` cost floor,
+    # ``_compute_grid_lytaev``), so a rung under the floor still selects a
+    # marchable grid once floored — and flooring the ladder instead was
+    # measured to make the marched field WORSE, because the extra ε relaxation
+    # it forces licenses a coarser Δx: 800 Hz over 2 km went from 1.93 dB rms
+    # to 3.40 dB rms against a converged grid. What the caller must not do is
+    # report this search's ε as the marched grid's accuracy; RAM recomputes
+    # that with :func:`grid_error` and reports both.
     dz_candidates = _ladder(DZ_MIN, DZ_MAX)
 
     cache = {} if tau_cache is None else tau_cache
@@ -436,7 +445,8 @@ def optimize_grid(
         raise RuntimeError(
             f"No (Δx, Δz) candidate satisfies ε={eps:.2e} for "
             f"f={freq:.1f} Hz, c₀={c0_use:.0f} m/s, θ_max={float(theta_max):.1f}°, "
-            f"x_max={x_max:.0f} m. Try a larger ε, higher Padé order p, "
+            f"x_max={x_max:.0f} m, Δz ladder [{DZ_MIN:g}, {DZ_MAX:g}] m. "
+            f"Try a larger ε, higher Padé order p, "
             f"smaller θ_max, or a finer dz/dx ladder."
         )
     return dict(

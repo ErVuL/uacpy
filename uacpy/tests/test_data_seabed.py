@@ -127,3 +127,37 @@ def test_folk_class_5_keeps_the_rock_shear_pair():
     bottom = seabed._bottom_from_folk5(5, 54.6, 5.3, roughness=0.0)
     assert bottom.shear_speed == pytest.approx(1500.0)
     assert bottom.shear_attenuation == pytest.approx(0.2)
+
+
+@pytest.mark.parametrize('lat', [-90.0, 90.0])
+def test_web_mercator_is_finite_at_both_poles(lat):
+    """Mercator's ordinate diverges at the poles: -90 raised an untyped
+    ``ValueError: math domain error`` out of ``log(0)`` and +90 returned
+    y = 2.4e8 m, twelve times the world extent. Clamped to EPSG:3857's own
+    limit, both land on the world edge +/- pi*R."""
+    import math
+    x, y = seabed._to_web_mercator(lat, 0.0)
+    assert math.isfinite(y)
+    assert abs(y) == pytest.approx(math.pi * 6378137.0, rel=1e-9)
+    assert math.copysign(1.0, y) == math.copysign(1.0, lat)
+    assert x == pytest.approx(0.0, abs=1e-3)
+
+
+def test_the_clamp_leaves_every_in_range_latitude_alone():
+    """The clamp must not move any latitude EMODnet actually covers."""
+    import math
+    for lat in (-85.0, -60.0, -1e-9, 0.0, 43.2, 56.0, 85.0):
+        _x, y = seabed._to_web_mercator(lat, 3.0)
+        expected = 6378137.0 * math.log(
+            math.tan(math.pi / 4 + math.radians(lat) / 2))
+        assert y == pytest.approx(expected, rel=1e-12, abs=1e-6)
+
+
+@pytest.mark.parametrize('lat', [-90.0, 90.0])
+def test_a_polar_request_gets_the_typed_no_coverage_error(monkeypatch, lat):
+    """A pole must reach the documented ``DataFetchError``, not a bare
+    ``ValueError`` from the projection."""
+    monkeypatch.setattr(seabed, 'http_get',
+                        lambda url, **kw: json.dumps({'features': []}).encode())
+    with pytest.raises(DataFetchError, match='no seabed substrate'):
+        seabed.fetch_seabed_substrate((lat, 0.0))

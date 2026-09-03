@@ -26,16 +26,20 @@ from uacpy.core.constants import DECK_RANGE_RESOLUTION_M
 from uacpy.core._grid import _nearest_index_on_axis
 from uacpy.core._carrier_validate import (
     _require_non_negative, _require_strictly_increasing, _dedupe_provenance,
+    _reject_complex,
 )
 from uacpy.core.bottom import (
     _validate_boundary_write, BoundaryProperties, _reduce_boundaries,
+    _HALFSPACE_DELEGATED,
 )
 
 
-_SURFACE_DELEGATED = frozenset({
-    'acoustic_type', 'density', 'sound_speed', 'attenuation', 'roughness',
-    'shear_speed', 'shear_attenuation', 'grain_size_phi', 'reflection_file',
-})
+# Half-space fields a ``Surface`` write follows through to the stored
+# boundaries. The same nine names ``Bottom`` delegates, and the same set
+# object: the two carriers hold their boundaries in the same
+# ``BoundaryProperties``, so a field added to one is a field added to both,
+# and restating the list here let them drift apart silently.
+_SURFACE_DELEGATED = _HALFSPACE_DELEGATED
 
 
 
@@ -87,6 +91,9 @@ class Surface:
                     f"Surface: every node must be a BoundaryProperties; got "
                     f"{type(p).__name__}")
         if self.ranges is not None:
+            # Ahead of the float64 cast below, which discards an imaginary
+            # part — see _reject_complex for the two ways it does it.
+            _reject_complex(self.ranges, "Surface.ranges")
             self.ranges = np.array(self.ranges, dtype=float).reshape(-1)
             if self.ranges.size != len(self.properties):
                 raise ConfigurationError(

@@ -220,6 +220,46 @@ class TestListDirectedRecovery:
             assert np.array_equal(got, np.array(denoted)), text
 
 
+class TestListDirectedSlashAndCommentTolerance:
+    """The two documented departures from a Fortran list-directed READ.
+
+    Both have been re-filed as defects once, so they are pinned here as
+    well as stated in ``read_list_directed_values``' docstring.
+    """
+
+    @staticmethod
+    def _read(text, n):
+        from uacpy.io._fortran_helpers import read_list_directed_values
+        return read_list_directed_values(io.StringIO(text), n, 'vals', 'gen')
+
+    def test_a_trailing_slash_on_a_satisfied_record_is_accepted(self):
+        """The form every AT ``.bty``/``.ati`` row is written in.
+
+        The loop stops the moment it holds ``n`` values, so the ``/`` is
+        never converted.
+        """
+        assert self._read('0.0 100.0 /\n', 2).tolist() == [0.0, 100.0]
+
+    def test_a_slash_before_the_list_is_satisfied_is_refused(self):
+        """Fortran would leave the unread items *undefined*; uacpy has no
+        value to hand the caller, so it raises rather than invent one."""
+        with pytest.raises(ValueError, match='/'):
+            self._read('0.0 100.0 /\n1.0 2.0\n', 3)
+
+    def test_a_trailing_comment_on_a_satisfied_record_is_accepted(self):
+        """``!`` is a comment in free-form source, not to a list-directed
+        READ — this leniency is a superset of gfortran, and is what lets
+        uacpy read the annotated decks its own writers emit."""
+        assert self._read('0.0 100.0 ! depth\n', 2).tolist() == [0.0, 100.0]
+
+    def test_a_comment_that_truncates_the_record_is_refused(self):
+        """The leniency does not invent missing values: the count is short
+        and the read runs on to the end of file."""
+        from uacpy.core.exceptions import FileFormatError
+        with pytest.raises(FileFormatError, match='found 1'):
+            self._read('0.0 ! the rest went missing\n', 2)
+
+
 class TestWriterReaderRoundTrips:
     """Writer->reader numeric round-trips on random physically-sane inputs:
     every numeric field must come back within the written format's own

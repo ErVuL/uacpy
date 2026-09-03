@@ -15,7 +15,6 @@ through to the global grain-size DB.
 """
 
 import json
-from pathlib import Path
 from typing import Optional, Union
 
 import numpy as np
@@ -75,10 +74,9 @@ def download_emodnet_db(cache_dir=None, *, timeout=300.0, verbose=False):
     ``cache_dir`` defaults to the offline cache's ``emodnet`` directory.
     """
     shapely = _shapely()
-    dest = Path(cache_dir) if cache_dir else _cache.dataset_root('emodnet')
-    dest.mkdir(parents=True, exist_ok=True)
-    log_message('seabed', "downloading EMODnet seabed substrate (Folk 5cl, 1:1M)",
-                verbose=verbose)
+    dest = _cache.prepare_download(
+        'emodnet', "downloading EMODnet seabed substrate (Folk 5cl, 1:1M)",
+        cache_dir=cache_dir, verbose=verbose, log_tag='seabed')
 
     codes, wkb = [], []
     start = 0

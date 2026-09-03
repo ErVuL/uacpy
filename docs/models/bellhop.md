@@ -319,8 +319,9 @@ fig, ax = arr.plot(figsize=WIDE,
 Each marker is one *beam* contribution: its delay is the travel time, its
 height the amplitude, its colour the multipath class. With the default Gaussian
 beams (`beam_type='B'`) every physical path is resolved into a picket of
-neighbouring beams that fall inside the beam window — 2639 entries here against
-61 for the same run with `beam_type='G'` — which is why the columns read solid
+neighbouring beams that fall inside the beam window — several hundred entries
+here (measured 554 on the Fortran binary, 555 on `cxx` and `cuda`) against 31
+for the same run with `beam_type='G'` — which is why the columns read solid
 rather than as individual stems. Use `beam_type='G'` (geometric hat beams) to
 get one arrival per path; that is what the BELLHOP user guide prescribes for
 arrivals and eigenrays. Either way this is the channel impulse response, and it
@@ -334,17 +335,32 @@ every contribution unmerged, in thread-completion order — the same run writes
 far more records there, and an incoherent energy sum taken directly over the
 raw records disagrees between backends. uacpy applies the Fortran merge rule
 on read (`read_arr_file`'s default; `merge=False` returns the raw records), so
-an `Arrivals` result holds the same *set* of records — the same count, in the
-same order — whichever backend produced the file. It does not hold the same
-*numbers*: the merge rule normalises the record structure, not the arithmetic
-that filled it, and the two binaries compute that arithmetic differently in
-float32. On the `beam_type='G'` run above, fortran and cuda agreed on all 52
-records but disagreed on amplitude in 52 of 52 (max 2.1e-08), delay in 39 of
-52 (max 1.1e-06 s), receiver angle in 25 of 52 (max 7.3e-05°), source angle in
-8 of 52 and phase in 1 of 52. So compare arrivals across backends with a
-float32-scale tolerance, never for equality, and expect anything that
-*thresholds* an arrival — a peak pick, a count above a cutoff — to be able to
-land on the other side of the threshold when the backend changes.
+an `Arrivals` result holds the same *set* of records whichever backend produced
+the file: the `beam_type='G'` run above returns 31 records on `fortran`, `cxx`
+and `cuda` alike.
+
+Three things that set does **not** guarantee:
+
+- **Not the same order.** The multithreaded binaries append in
+  thread-completion order, and the merge rule normalises the record structure,
+  not the sequence. On that same run, `fortran`'s first delay is 2.3029 s and
+  `cuda`'s is 2.0136 s — the same 31 delays, permuted. Align on `delay` before
+  comparing two backends record by record.
+- **Not a backend-proof count when the beam window admits a picket.** With the
+  default Gaussian beams the run measured 554 records on `fortran` against 555
+  on `cxx` and `cuda`, and that count moves with the thread count.
+- **It does not hold the same numbers.** The merge normalises the record
+  structure, not the arithmetic that filled it, and the two binaries compute
+  that arithmetic differently in float32. Aligned on delay, `fortran` and
+  `cuda` disagreed on amplitude in 31 of 31 records (max 1.0e-07), delay in
+  24 of 31 (max 9.6e-07 s), receiver angle in 30 of 31 (max 5.7e-05°) and
+  source angle in 30 of 31 (max 4.6e-05°). Phase, the bounce counts and the
+  receiver indices agreed exactly.
+
+So compare arrivals across backends with a float32-scale tolerance, never for
+equality, and expect anything that *thresholds* an arrival — a peak pick, a
+count above a cutoff — to be able to land on the other side of the threshold
+when the backend changes.
 
 ### Broadband transfer function
 

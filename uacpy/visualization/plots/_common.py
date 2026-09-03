@@ -159,6 +159,18 @@ def _receiver_dot_caps(ax, markersize):
     )
 
 
+def _marker_half_width_in_data(ax, markersize_pt):
+    """Half a marker's width, in the x data units of ``ax``.
+
+    ``markersize`` is in points, so how much room a marker needs at the edge of
+    an axes depends on the figure's size and dpi, not on the data span. Padding
+    an axis limit by a fixed fraction of the span therefore clips the marker on
+    a narrow panel and over-pads a wide one."""
+    half_px = 0.5 * float(markersize_pt) * ax.figure.dpi / 72.0
+    inv = ax.transData.inverted()
+    return abs(inv.transform((half_px, 0.0))[0] - inv.transform((0.0, 0.0))[0])
+
+
 def _draw_geometry(ax, source=None, receiver=None, *, source_range_m=0.0,
                    max_markersize=8, source_markersize_bonus=0):
     """Draw the source and receiver markers on a (depth, range) cross-section.
@@ -186,8 +198,25 @@ def _draw_geometry(ax, source=None, receiver=None, *, source_range_m=0.0,
         # beyond r = 0 while the source sits at it. Widen the axis to keep the
         # marker on screen rather than clipping it to the spine.
         x_lo, x_hi = ax.get_xlim()
-        if not (min(x_lo, x_hi) <= x <= max(x_lo, x_hi)):
-            ax.set_xlim(min(x_lo, x_hi, x), max(x_lo, x_hi, x))
+        lo, hi = min(x_lo, x_hi), max(x_lo, x_hi)
+        if not (lo <= x <= hi):
+            # Widening to EXACTLY the marker's x centres it ON the spine, and
+            # markers keep matplotlib's default clipping for the reason
+            # _draw_receiver_grid's docstring gives (a later zoom must hide
+            # out-of-view markers), so half the marker is cut away — visible
+            # on the source star of docs/guide/figures/plot_overlays.png.
+            # Pad the side that moved by the marker's own half width, which is
+            # what it actually needs: a fixed fraction of the span is a
+            # different number of points on every figure size, and 1 % still
+            # clipped the star on a 3-inch panel.
+            ax.set_xlim(min(lo, x), max(hi, x))
+            pad = _marker_half_width_in_data(ax, style.get('markersize', 15))
+            new_lo, new_hi = min(lo, x), max(hi, x)
+            if x < lo:
+                new_lo -= pad
+            if x > hi:
+                new_hi += pad
+            ax.set_xlim(new_lo, new_hi)
 
 
 def _draw_receiver_grid(ax, ranges_m, depths, *, max_markersize,
@@ -284,9 +313,11 @@ def _value_label(field: Field, value: str) -> str:
         if 'time' in field.coords:
             return 'p(t)'
         if not field.is_complex and getattr(field, 'kind', 'pressure') != 'pressure':
-            unit = getattr(field, 'unit', None)
-            name = str(field.kind).replace('_', ' ')
-            return name if unit in (None, '1', '') else f"{name} ({unit})"
+            # From the registry, the same source :func:`_db_label` reads, not
+            # from the tag spelling: mangling ``kind`` produced 'probability
+            # of detection' where the dedicated plotter's colorbar and the
+            # registry both say 'Probability of detection'.
+            return quantity_label(field.kind, field.unit)
     try:
         return _VALUE_LABELS[value]
     except KeyError:
@@ -348,21 +379,31 @@ def _coord_axis(coord: np.ndarray, name: str) -> Tuple[np.ndarray, str]:
 _TL_LIMITS: Tuple[float, float] = (20.0, 120.0)
 
 
-def _is_transmission_loss(field: Field, value: str) -> bool:
-    """Whether the ``value`` view of ``field`` is transmission loss.
+#: The kinds whose dB view is a LOSS rather than a level. Transmission loss
+#: (``pressure`` in dB) is ``-20·log10|p|``; OASS reverberation is
+#: ``-10·log10 E[|p_scat|²]`` (``third_party/oases/src/oassun26.f:633-637``
+#: and ``:853-857``). Both carry the leading minus, so for both the LEAST of
+#: the quantity is the loudest — the same pair :meth:`Field.max` documents.
+_LOSS_KINDS = ('pressure', 'reverberation')
 
-    TL is the one quantity that runs backwards — it is a *loss*, so the least
-    of it is the loudest arrival — which is why a 1-D TL cut is drawn with its
-    value axis increasing DOWNWARD, putting the loud end at the top. Every
-    other dB view is a **level** (signal excess, reverberation, ``mag_db``) and
-    more of a level is more, so it reads upward like any other quantity.
 
-    Identifying TL takes both the field and the view, exactly as
-    :meth:`Field.max` documents: the dB view of a *pressure* field, whether
-    stored as a real dB grid or derived from complex pressure. Every entry
-    point that draws a value axis asks here, so one field cuts the same way
-    through :func:`plot_field` and :func:`compare` alike."""
-    return (value == 'db' and field.kind == 'pressure'
+def _is_loss_view(field: Field, value: str) -> bool:
+    """Whether the ``value`` view of ``field`` is a loss rather than a level.
+
+    A loss runs backwards — the least of it is the loudest — which is why a
+    1-D loss cut is drawn with its value axis increasing DOWNWARD, putting the
+    loud end at the top. Two quantities read that way: transmission loss (the
+    dB view of a ``pressure`` field) and OASS reverberation, whose stored
+    numbers are a loss for the reason ``_LOSS_KINDS`` gives. Every other dB
+    view is a **level** (signal excess, ``mag_db``) and more of a level is
+    more, so it reads upward like any other quantity.
+
+    Identifying a loss takes both the field and the view, exactly as
+    :meth:`Field.max` documents: the dB view of a loss kind, whether stored as
+    a real dB grid or derived from complex pressure. Every entry point that
+    draws a value axis asks here, so one field cuts the same way through
+    :func:`plot_field` and :func:`compare` alike."""
+    return (value == 'db' and field.kind in _LOSS_KINDS
             and (field.is_complex or field.unit == 'dB'))
 
 
