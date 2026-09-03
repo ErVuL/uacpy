@@ -42,6 +42,65 @@ def test_ssp_plot_returns_fig_ax():
     assert ax.yaxis_inverted()
 
 
+def _profile(surface_c, seafloor_c, *, n_columns=1):
+    """Linear profile from ``surface_c`` to ``seafloor_c`` over 1500 m.
+
+    ``n_columns`` > 1 repeats it across a range axis, offsetting each column by
+    its index so the columns are distinguishable in the drawn data.
+    """
+    depths = np.array([0.0, 750.0, 1500.0])
+    column = np.linspace(surface_c, seafloor_c, depths.size)
+    data = np.column_stack([column + j for j in range(n_columns)])
+    ranges = None if n_columns == 1 else np.linspace(0.0, 1000.0, n_columns)
+    return uacpy.SoundSpeedProfile(depths=depths, data=data, ranges=ranges)
+
+
+def test_ssp_plot_overlays_labelled_profiles_on_one_axis():
+    """Several profiles share one axis, each keeping its own label and data."""
+    fig, ax = _profile(1500.0, 1500.0).plot(label='constant', color='C0')
+    _profile(1490.0, 1520.0).plot(ax=ax, label='increasing', color='C1')
+    _profile(1520.0, 1490.0).plot(ax=ax, label='decreasing', color='C2')
+
+    assert ax.get_legend_handles_labels()[1] == ['constant', 'increasing',
+                                                 'decreasing']
+    # Each line carries its OWN profile, so dropping or duplicating a call
+    # fails here rather than merely changing the legend.
+    assert [line.get_xdata()[-1] for line in ax.lines] == [1500.0, 1520.0, 1490.0]
+
+
+def test_ssp_plot_labels_a_range_dependent_profile_once_not_per_column():
+    """The label names the profile, so N columns still give one legend entry."""
+    fig, ax = _profile(1490.0, 1520.0, n_columns=4).plot(label='fetched',
+                                                         color='C0')
+    assert len(ax.lines) == 4
+    assert ax.get_legend_handles_labels()[1] == ['fetched']
+
+
+def test_ssp_plot_range_colorbar_yields_to_an_explicit_colour():
+    """Both sides of the branch: the colorbar describes one profile's range
+    axis, so it is drawn without ``color`` and suppressed with it."""
+    ranged = _profile(1490.0, 1520.0, n_columns=3)
+    fig_auto, ax_auto = ranged.plot()
+    assert len(fig_auto.axes) == 2                    # profile + colorbar
+    fig_overlay, ax_overlay = ranged.plot(color='C0')
+    assert len(fig_overlay.axes) == 1                 # profile only
+    # The colour is the one asked for, not the range colormap's.
+    assert all(line.get_color() == 'C0' for line in ax_overlay.lines)
+
+
+def test_ssp_plot_draws_a_legend_only_when_something_is_labelled():
+    assert _profile(1490.0, 1520.0).plot()[1].get_legend() is None
+    assert _profile(1490.0, 1520.0).plot(label='named')[1].get_legend() is not None
+    assert _profile(1490.0, 1520.0).plot(label='named',
+                                         legend=False)[1].get_legend() is None
+
+
+def test_ssp_plot_forwards_line_kwargs():
+    fig, ax = _profile(1490.0, 1520.0).plot(linestyle='--', alpha=0.5)
+    assert ax.lines[0].get_linestyle() == '--'
+    assert ax.lines[0].get_alpha() == 0.5
+
+
 # ── Absorption.plot ──────────────────────────────────────────────────────────
 
 _FREQS = np.logspace(2, 4, 20)          # 100 Hz – 10 kHz

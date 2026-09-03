@@ -1170,6 +1170,91 @@ class TestArrivalsFilterChain:
                         receiver_ranges=np.array([1000.0]),
                         model='Test', frequencies=100.0)
 
+    @staticmethod
+    def _absorbed_pair(loss_db, *, phases=(0.0, 0.0)):
+        """Two equal-amplitude arrivals; the second loses ``loss_db`` to
+        absorption, carried where Bellhop carries it — the imaginary delay."""
+        from uacpy.core.results import Arrivals
+        cell = {
+            "delays": np.array([0.10, 0.30]),
+            "amplitudes": np.array([1.0, 1.0]),
+            "phases": np.asarray(phases, dtype=float),
+            "n_top_bounces": np.zeros(2, dtype=int),
+            "n_bot_bounces": np.zeros(2, dtype=int),
+            "src_angles": np.zeros(2), "rcv_angles": np.zeros(2),
+            "delays_imag": np.array(
+                [0.0, -np.log(10 ** (loss_db / 20.0)) / (2 * np.pi * 100.0)]),
+        }
+        return Arrivals(by_receiver=[[[cell]]],
+                        receiver_depths=np.array([50.0]),
+                        receiver_ranges=np.array([1000.0]),
+                        model='Test', frequencies=100.0)
+
+    def test_received_amplitude_applies_the_absorption_in_the_imaginary_delay(
+            self):
+        """``amplitudes`` is geometric; the loss lives in ``delay_imag``."""
+        a = self._absorbed_pair(40.0)
+        assert np.allclose(np.abs(a.amplitudes), [1.0, 1.0])
+        received = np.abs(a.received_amplitudes)
+        # 40 dB down is a factor of exactly 1/100, and the near arrival is
+        # untouched — both sides of the exponent, so a sign error fails here.
+        assert np.allclose(received, [1.0, 0.01])
+
+    def test_received_amplitude_can_reverse_which_arrival_is_loudest(self):
+        """The trap this property exists to close.
+
+        Two arrivals whose geometric amplitudes rank one way and whose
+        received levels rank the other. Reading ``amplitudes`` picks the wrong
+        path, and the ordering is what a caller acts on."""
+        from uacpy.core.results import Arrivals
+        cell = {
+            "delays": np.array([0.10, 0.30]),
+            # The late path is 20 dB LOUDER geometrically ...
+            "amplitudes": np.array([1.0, 10.0]),
+            "phases": np.zeros(2),
+            "n_top_bounces": np.zeros(2, dtype=int),
+            "n_bot_bounces": np.zeros(2, dtype=int),
+            "src_angles": np.zeros(2), "rcv_angles": np.zeros(2),
+            # ... and loses 40 dB to absorption, so it arrives 20 dB quieter.
+            "delays_imag": np.array([0.0, -np.log(10 ** (40 / 20.0))
+                                     / (2 * np.pi * 100.0)]),
+        }
+        a = Arrivals(by_receiver=[[[cell]]],
+                     receiver_depths=np.array([50.0]),
+                     receiver_ranges=np.array([1000.0]),
+                     model='Test', frequencies=100.0)
+        assert np.argmax(np.abs(a.amplitudes)) == 1          # geometric
+        assert np.argmax(np.abs(a.received_amplitudes)) == 0  # what arrives
+
+    def test_received_amplitude_carries_the_arrival_phase(self):
+        """It is complex, so it drops straight into a coherent sum."""
+        a = self._absorbed_pair(0.0, phases=(0.0, 90.0))
+        assert np.isclose(a.received_amplitudes[0], 1.0 + 0.0j)
+        assert np.isclose(a.received_amplitudes[1], 1.0j)
+
+    def test_received_amplitude_works_without_a_phase_column(self):
+        """A magnitude does not need a phase, and ``_arrival_power`` routes
+        through this property, so a hand-built arrival set with no phase must
+        still report what reaches the receiver."""
+        from uacpy.core.results import Arrivals
+        cell = {
+            "delays": np.array([0.10]), "amplitudes": np.array([2.0]),
+            "n_top_bounces": np.zeros(1, dtype=int),
+            "n_bot_bounces": np.zeros(1, dtype=int),
+            "src_angles": np.zeros(1), "rcv_angles": np.zeros(1),
+        }
+        a = Arrivals(by_receiver=[[[cell]]],
+                     receiver_depths=np.array([50.0]),
+                     receiver_ranges=np.array([1000.0]),
+                     model='Test', frequencies=100.0)
+        assert np.allclose(np.abs(a.received_amplitudes), [2.0])
+        assert np.allclose(a._arrival_power(), [4.0])
+
+    def test_arrival_power_is_the_received_amplitude_squared(self):
+        a = self._absorbed_pair(40.0, phases=(0.0, 37.0))
+        assert np.allclose(a._arrival_power(),
+                           np.abs(a.received_amplitudes) ** 2)
+
     def test_the_spread_weighs_arrivals_by_the_energy_that_reaches_the_receiver(
             self):
         """Bellhop carries volume absorption in the IMAGINARY travel time, not
@@ -3137,9 +3222,11 @@ class TestRaysFilterAndSortHelpers:
     @staticmethod
     def _fan(**kwargs):
         from uacpy.core.results import Rays
-        # Each polyline has a vertex exactly at r=1000, so the closest
-        # approach to the (1000, 50) target is the plain depth offset:
-        # 3 m, 10 m and 30 m for alpha 1, 2 and 3 respectively.
+        # Each polyline has a vertex exactly at r=1000, so the depth offset
+        # at that vertex is 3 m, 10 m and 30 m for alpha 1, 2 and 3. The miss
+        # distance is measured to the SEGMENTS, so only alpha 1 equals its
+        # vertex offset: for the other two the final segment passes nearer to
+        # (1000, 50) than its own end point does.
         def ray(alpha, z_end):
             return {'r': np.array([0.0, 500.0, 1000.0]),
                     'z': np.array([10.0, 30.0, z_end]),
@@ -3156,6 +3243,51 @@ class TestRaysFilterAndSortHelpers:
         # The parent's ray dicts are not annotated in place.
         assert 'miss_distance_m' not in self._fan().rays[0]
 
+    def test_miss_distance_measures_segments_not_vertices(self):
+        """A ray passing exactly through the target misses it by zero, however
+        coarsely its polyline is sampled.
+
+        This is the property that makes ``filter_by_miss_distance`` a
+        geometric test rather than a report of the ray step: with vertex-only
+        distances the answer below would be 500 m, the half-step, and a
+        fine-tolerance filter would discard a ray that scores a direct hit.
+        """
+        from uacpy.core.results import Rays
+        through = {'r': np.array([0.0, 500.0, 1500.0]),
+                   'z': np.array([50.0, 50.0, 50.0]),
+                   'alpha': 0.0, 'n_top_bounces': 0, 'n_bot_bounces': 0}
+        fan = Rays(rays=[through], model='Bellhop', frequencies=100.0)
+        kept = fan.filter_by_miss_distance(1e-9, target_range_m=1000.0,
+                                           target_depth_m=50.0)
+        assert len(kept.rays) == 1
+        assert kept.rays[0]['miss_distance_m'] == pytest.approx(0.0, abs=1e-12)
+
+    def test_miss_distance_clips_to_the_segment_not_its_infinite_line(self):
+        """A target beyond the end of a ray measures to the END POINT.
+
+        Without the clip the foot of the perpendicular runs off the end of the
+        polyline and the distance collapses toward the infinite line the last
+        segment lies on, which would report a ray that stops short as though
+        it had carried on to the receiver."""
+        from uacpy.core.results import Rays
+        stops_short = {'r': np.array([0.0, 100.0]),
+                       'z': np.array([50.0, 50.0]),
+                       'alpha': 0.0, 'n_top_bounces': 0, 'n_bot_bounces': 0}
+        fan = Rays(rays=[stops_short], model='Bellhop', frequencies=100.0)
+        miss, index = fan._miss_distance_to(fan.rays[0], 1000.0, 50.0)
+        assert miss == pytest.approx(900.0)      # to the end point, not 0
+        assert index == 1                        # and it is a vertex index
+
+    def test_miss_distance_survives_a_repeated_vertex(self):
+        """A zero-length segment must not divide by zero."""
+        from uacpy.core.results import Rays
+        doubled = {'r': np.array([0.0, 500.0, 500.0, 1000.0]),
+                   'z': np.array([50.0, 50.0, 50.0, 50.0]),
+                   'alpha': 0.0, 'n_top_bounces': 0, 'n_bot_bounces': 0}
+        fan = Rays(rays=[doubled], model='Bellhop', frequencies=100.0)
+        miss, _ = fan._miss_distance_to(fan.rays[0], 700.0, 50.0)
+        assert miss == pytest.approx(0.0, abs=1e-12)
+
     def test_sorted_by_miss_orders_ascending(self):
         fan = self._fan()
         # Shuffle so the sort has work to do.
@@ -3163,9 +3295,13 @@ class TestRaysFilterAndSortHelpers:
         ordered = fan.sorted_by_miss(target_range_m=1000.0,
                                      target_depth_m=50.0)
         assert [r['alpha'] for r in ordered.rays] == [1.0, 2.0, 3.0]
+        # alpha 1: the perpendicular foot lands past the segment end, so the
+        # clip puts the closest approach ON the end point and the answer is
+        # the 3 m vertex offset exactly. alpha 2 and 3 slant past the target,
+        # so their segments pass closer than their end vertices do.
         np.testing.assert_allclose(
-            [r['miss_distance_m'] for r in ordered.rays], [3.0, 10.0, 30.0],
-            atol=1e-12)
+            [r['miss_distance_m'] for r in ordered.rays],
+            [3.0, 9.98204845465779, 29.851115706299673], rtol=1e-9)
 
     def test_sorted_by_miss_defaults_to_single_point_receiver_context(self):
         fan = self._fan(receiver_depths=np.array([50.0]),

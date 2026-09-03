@@ -196,6 +196,43 @@ class Arrivals(Result):
         return np.asarray([a['amplitude'] for a in self.arrivals], dtype=float)
 
     @property
+    def received_amplitudes(self) -> np.ndarray:
+        """Complex amplitude each arrival delivers to the receiver.
+
+        Use this, not :attr:`amplitudes`, whenever the numbers are going to be
+        compared or summed. ``amplitudes`` is the GEOMETRIC amplitude and
+        carries no volume absorption — Bellhop keeps that in the imaginary
+        travel time — so on that column a long, heavily absorbed path stands
+        at its lossless height. The error is not a detail: on a 1 km
+        near-bottom link at 40 kHz, a 3161 m surface-bounce path reads 20 dB
+        **stronger** than a 1000 m bottom bounce on ``amplitudes`` and 7.5 dB
+        **weaker** once the 41 dB it loses to absorption is applied, so the
+        two paths change places.
+
+        The value is ``A * exp(omega * Im tau) * exp(1j * phase)``, the
+        convention ``read_arr_file`` documents for ``delays_imag`` and
+        ``Bellhop._arrivals_to_tf`` applies, so it drops straight into a
+        coherent sum or into
+        :func:`~uacpy.acoustic_signal.channel.impulse_response`.
+        :meth:`_arrival_power` is its squared magnitude.
+        """
+        amplitude = np.abs(np.asarray(self.amplitudes, dtype=float).ravel())
+        delays_imag = np.asarray(
+            [a.get('delay_imag', 0.0) for a in self.arrivals], dtype=float)
+        # Both derived columns are read tolerantly, unlike the strict
+        # ``phases`` accessor. A magnitude does not depend on phase, so an
+        # arrival set assembled without one — Bellhop always writes it, but
+        # callers building Arrivals by hand need not — must still be able to
+        # ask what reaches the receiver, and :meth:`_arrival_power` goes
+        # through here.
+        phase = np.deg2rad(np.asarray(
+            [a.get('phase', 0.0) for a in self.arrivals], dtype=float))
+        omega = 2.0 * np.pi * self.f0 if self.f0 else 0.0
+        with np.errstate(over='ignore'):
+            received = amplitude * np.exp(omega * delays_imag)
+        return received * np.exp(1j * phase)
+
+    @property
     def phases(self) -> np.ndarray:
         """Phases (rad) of every arrival in the list.
 
@@ -353,12 +390,8 @@ class Arrivals(Result):
         water were lossless, and the late paths are the ones every caller of
         this is weighing.
         """
-        amplitudes = np.abs(np.asarray(self.amplitudes, dtype=float).ravel())
-        delays_imag = np.asarray(
-            [a.get('delay_imag', 0.0) for a in self.arrivals], dtype=float)
-        omega = 2.0 * np.pi * self.f0 if self.f0 else 0.0
         with np.errstate(over='ignore'):
-            return (amplitudes * np.exp(omega * delays_imag)) ** 2
+            return np.abs(self.received_amplitudes) ** 2
 
     def rms_delay_spread(self) -> float:
         """Energy-weighted spread of the arrival delays, in seconds.
@@ -789,20 +822,52 @@ class Rays(Result):
     def _miss_distance_to(
         self, ray, target_range_m: float, target_depth_m: float,
     ) -> Tuple[float, int]:
-        """Closest-approach miss distance and its index along the polyline.
+        """Closest approach of the ray to a point, and the vertex index there.
+
+        Measured to the polyline's SEGMENTS, not to its vertices. The
+        difference is the difference between geometry and sampling: a ray that
+        passes exactly through the receiver still has its nearest stored point
+        half a step away, so a vertex-only distance reports the ray step
+        rather than the miss. Measured on a flat 1500 m case at 40 kHz with a
+        0.5 m step, the single-surface-bounce eigenray came back 0.188 m from
+        a receiver it passes through, and a 10 cm
+        :meth:`filter_by_miss_distance` therefore discarded it as a miss while
+        keeping other classes whose vertices happened to fall closer. The
+        floor tracked the step (1.0 m at the 30 m default), which is the
+        signature of a sampling artefact rather than a real miss.
+
+        The returned index is still a VERTEX index — the one nearest the
+        closest approach — because :meth:`truncate_at_receiver` clips the
+        polyline there.
 
         Ray polylines are required to carry ``r`` / ``z`` in **metres**
         (see :class:`Rays` docstring). The Bellhop reader in
         :mod:`uacpy.io.oalib_reader` already preserves Bellhop's native
         metres, so no unit-detection heuristic is needed here.
         """
-        r = np.asarray(ray.get('r', []))
-        z = np.asarray(ray.get('z', []))
-        if len(r) == 0:
+        r = np.asarray(ray.get('r', []), dtype=float)
+        z = np.asarray(ray.get('z', []), dtype=float)
+        if r.size == 0:
             return float('inf'), 0
-        d2 = (r - target_range_m) ** 2 + (z - target_depth_m) ** 2
-        k = int(np.argmin(d2))
-        return float(np.sqrt(d2[k])), k
+        if r.size == 1:
+            return float(np.hypot(r[0] - target_range_m,
+                                  z[0] - target_depth_m)), 0
+        dr = r[1:] - r[:-1]
+        dz = z[1:] - z[:-1]
+        seg_sq = dr * dr + dz * dz
+        wr = target_range_m - r[:-1]
+        wz = target_depth_m - z[:-1]
+        # Position of the foot of the perpendicular along each segment.
+        # Clipped to [0, 1] so a target beyond an end measures to the END
+        # POINT, not to the infinite line the segment lies on. A repeated
+        # vertex gives a zero-length segment; it collapses to its start point.
+        with np.errstate(invalid='ignore', divide='ignore'):
+            u = np.where(seg_sq > 0.0, (wr * dr + wz * dz) / seg_sq, 0.0)
+        u = np.clip(u, 0.0, 1.0)
+        distances = np.hypot(wr - u * dr, wz - u * dz)
+        j = int(np.argmin(distances))
+        nearest_vertex = j + 1 if (u[j] > 0.5 and j + 1 < r.size) else j
+        return float(distances[j]), nearest_vertex
 
     def _resolve_target(
         self,

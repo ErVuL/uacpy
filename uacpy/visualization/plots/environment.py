@@ -568,7 +568,8 @@ def _plot_environment(
 
 @typed_plot_error
 def _plot_ssp(env_or_ssp, *, ax=None, title: Optional[str] = None,
-              figsize=(5, 6)):
+              figsize=(5, 6), label: Optional[str] = None, color=None,
+              legend: Optional[bool] = None, **line_kwargs):
     """Plot the sound-speed profile ``c(z)`` as a depth-down line.
 
     Accepts an :class:`~uacpy.core.environment.Environment` or a bare
@@ -576,6 +577,26 @@ def _plot_ssp(env_or_ssp, *, ax=None, title: Optional[str] = None,
     profile draws a single line; a range-dependent profile draws one line per
     range column, coloured by range with a colorbar. Depth increases downward.
     Pass ``ax=`` to draw into an existing axis; returns ``(fig, ax)``.
+
+    **Overlaying several profiles on one axis.** Pass the same ``ax=`` to
+    successive calls, each with its own ``label=`` and ``color=``, to compare
+    profiles from different sites or different model runs::
+
+        fig, ax = ligurian.ssp.plot(label='Ligurian', color='C0')
+        norwegian.ssp.plot(ax=ax, label='Norwegian', color='C1')
+
+    An explicit ``color`` selects overlay mode: every range column is drawn in
+    that one colour and the range colorbar is suppressed, because a colorbar
+    describes one profile's range axis and means nothing once a second profile
+    shares the axis. Without ``color`` a range-dependent profile keeps its
+    per-column viridis colouring and its colorbar, unchanged.
+
+    ``label`` names the profile as a whole, so on a range-dependent profile it
+    is attached to the first column only — one legend entry per profile rather
+    than one per range column. ``legend`` forces the legend on or off; the
+    default (``None``) draws one exactly when some artist on the axis carries a
+    label. Remaining ``line_kwargs`` (``linestyle``, ``alpha``, ``zorder`` ...)
+    are forwarded to ``ax.plot``.
     """
     from uacpy.core.environment import Environment
     from uacpy.core.ssp import SoundSpeedProfile
@@ -593,19 +614,32 @@ def _plot_ssp(env_or_ssp, *, ax=None, title: Optional[str] = None,
     data = np.asarray(ssp.data, dtype=float)           # (n_depth, n_range)
 
     if ssp.is_range_dependent:
-        from matplotlib.cm import ScalarMappable
-        from matplotlib.colors import Normalize
+        line_kwargs.setdefault('linewidth', 1.2)
         ranges_km = m_to_km(np.asarray(ssp.ranges, dtype=float))
-        cmap = plt.get_cmap('viridis')
-        norm = Normalize(vmin=float(ranges_km.min()),
-                         vmax=float(ranges_km.max()) or 1.0)
-        for j, r_km in enumerate(ranges_km):
-            ax.plot(data[:, j], depths, color=cmap(norm(r_km)), linewidth=1.2)
-        sm = ScalarMappable(cmap=cmap, norm=norm)
-        sm.set_array([])
-        fig.colorbar(sm, ax=ax, label='Range (km)')
+        if color is None:
+            from matplotlib.cm import ScalarMappable
+            from matplotlib.colors import Normalize
+            cmap = plt.get_cmap('viridis')
+            norm = Normalize(vmin=float(ranges_km.min()),
+                             vmax=float(ranges_km.max()) or 1.0)
+            colours = [cmap(norm(r_km)) for r_km in ranges_km]
+        else:
+            # Overlay mode: one colour for the whole profile, so a second
+            # profile on the same axis stays distinguishable from this one.
+            colours = [color] * len(ranges_km)
+        for j, _r_km in enumerate(ranges_km):
+            # Label the first column only: the label names the profile, and
+            # repeating it per column would fill the legend with duplicates.
+            ax.plot(data[:, j], depths, color=colours[j],
+                    label=label if j == 0 else None, **line_kwargs)
+        if color is None:
+            sm = ScalarMappable(cmap=cmap, norm=norm)
+            sm.set_array([])
+            fig.colorbar(sm, ax=ax, label='Range (km)')
     else:
-        ax.plot(data[:, 0], depths, color='C0', linewidth=1.5)
+        line_kwargs.setdefault('linewidth', 1.5)
+        ax.plot(data[:, 0], depths, color='C0' if color is None else color,
+                label=label, **line_kwargs)
 
     ax.set_xlabel('Sound speed (m/s)')
     ax.set_ylabel('Depth (m)')
@@ -613,6 +647,10 @@ def _plot_ssp(env_or_ssp, *, ax=None, title: Optional[str] = None,
     ax.grid(True, alpha=0.3)
     if title:
         ax.set_title(title)
+    # ``get_legend_handles_labels`` already drops matplotlib's '_'-prefixed
+    # placeholder labels, so this is empty exactly when nothing was named.
+    if legend or (legend is None and ax.get_legend_handles_labels()[1]):
+        ax.legend()
     return fig, ax
 
 
