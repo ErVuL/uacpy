@@ -27,6 +27,23 @@ from uacpy.core.units import km_to_m, m_to_km
 # fill reads back to a cp value.
 _HALFSPACE_CP_LO, _HALFSPACE_CP_HI = 1450.0, 2300.0
 
+# The panel shows the water column plus a margin below the deepest seafloor, so
+# the seabed reads as a band rather than a line. Every bottom branch paints down
+# to at least ``_panel_floor`` and the depth limit sits on it, so the margin is
+# the same whatever shape the bottom has. 10 % of the water depth, not 20 %: the
+# margin is dead space that a thin sediment stack has to share the panel with,
+# and at 20 % the layers were too few pixels to read. The 5 m floor keeps a
+# visible band under a shallow seabed, where 10 % is a couple of metres.
+_PANEL_MARGIN = 0.10
+_PANEL_MARGIN_MIN_M = 5.0
+
+
+def _panel_floor(seafloor_max) -> float:
+    """Depth the panel extends to under a seabed whose deepest point is
+    ``seafloor_max``."""
+    z = float(seafloor_max)
+    return z + max(_PANEL_MARGIN_MIN_M, _PANEL_MARGIN * z)
+
 
 def _bottom_kind(bottom) -> str:
     """Figure-title description of a ``Bottom``'s shape — the two axes a reader
@@ -114,7 +131,12 @@ def _draw_layered_bottom(ax_bathy, column, r_km, seafloor, z_max_layer,
                       zorder=ZORDER_SEDIMENT + 2)
         z_top = z_bot
     hs = column.halfspace
-    hs_display = z_top + max(10.0, column.total_thickness() * 0.3)
+    # The half-space reaches at least the panel floor, so no axis is left
+    # blank below the sediment. Extended by a margin taken from the stack
+    # alone, a 2 m seabed under 1500 m of water stopped at 1512 m on a 1650 m
+    # panel and the bottom read as absent.
+    hs_display = np.maximum(z_top + max(10.0, column.total_thickness() * 0.3),
+                            _panel_floor(z_max_layer))
     ax_bathy.fill_between(
         r_km, z_top, hs_display, zorder=ZORDER_SEDIMENT,
         **_layered_halfspace_style(hs, cmap, cs_min, cs_range),
@@ -148,8 +170,12 @@ def _draw_rdl_bottom(ax_bathy, bottom, r_km, seafloor, z_max_layer,
         (sum(layer.thickness for layer in prof.layers)
          for prof in bottom.columns), default=0.0,
     )
-    hs_extension = max(z_max_layer * 0.25, 20.0)
-    hs_floor = z_max_layer + max_thickness + hs_extension
+    # Band below the deepest column, sized like the range-independent layered
+    # sibling's, then held to the panel floor so the margin matches every other
+    # bottom shape.
+    hs_extension = max(10.0, max_thickness * 0.3)
+    hs_floor = max(z_max_layer + max_thickness + hs_extension,
+                   _panel_floor(z_max_layer))
 
     total_span = prof_ranges_km[-1] - prof_ranges_km[0]
     for i_r, (r_node, prof) in enumerate(zip(prof_ranges_km,
@@ -211,7 +237,7 @@ def _draw_rd_bottom(ax_bathy, bottom, r_km, seafloor, z_max_layer):
     cs_min, cs_max = float(cs.min()), float(cs.max())
     cs_range = max(1e-9, cs_max - cs_min)
     cmap = BOTTOM_CMAP
-    hs_floor = z_max_layer * 1.3 + max(z_max_layer * 0.18, 5.0)
+    hs_floor = _panel_floor(z_max_layer)
 
     # Voronoi cell edges: midpoints between consecutive nodes,
     # clamped to the bathymetry extent at the outer ends.
@@ -259,7 +285,7 @@ def _draw_rd_bottom(ax_bathy, bottom, r_km, seafloor, z_max_layer):
 
 
 def _draw_halfspace_bottom(ax_bathy, halfspace, r_km, seafloor, z_max_layer):
-    zmax_plot = z_max_layer * 1.2
+    zmax_plot = _panel_floor(z_max_layer)
     # Single half-space shaded by its sound speed (the '///' hatch keeps the
     # half-space signature); flat tan for vacuum / rigid / file (no cp value).
     cp = _halfspace_cp(halfspace)
@@ -541,8 +567,8 @@ def _plot_environment(
     # returns ``z_max_layer``, the floor of its own rendering (layer stack +
     # hatched half-space extension); taking the max keeps a thick sediment
     # column on-panel instead of clipping its lower layers away, and leaves
-    # the 20 % water-column margin in charge whenever the bottom is thin.
-    ax_bathy.set_ylim(0, max(seafloor_depth * 1.20, z_max_layer))
+    # the water-column margin in charge whenever the bottom is thin.
+    ax_bathy.set_ylim(0, max(_panel_floor(seafloor_depth), z_max_layer))
     if not ax_bathy.get_xlabel():
         ax_bathy.set_xlabel('Range (km)')
     ax_bathy.set_ylabel('Depth (m)')

@@ -1953,7 +1953,7 @@ class TestTheEnvironmentPanelShowsTheWholeSeabed:
     """The depth limit is a margin past the deepest seafloor OR the floor of
     what the bottom branch actually painted, whichever is deeper. A 40 m
     sediment stack under 100 m of water needs 152 m of panel; the water-column
-    margin alone gives 120 m and clips the second layer, the layer boundary
+    margin alone gives 110 m and clips the second layer, the layer boundary
     and the half-space off the bottom edge."""
 
     @staticmethod
@@ -1983,7 +1983,47 @@ class TestTheEnvironmentPanelShowsTheWholeSeabed:
         import uacpy
         from uacpy.visualization.plots.environment import _plot_environment
         fig, ax = _plot_environment(uacpy.Environment(bathymetry=100.0))
-        assert max(ax.get_ylim()) == pytest.approx(120.0)
+        assert max(ax.get_ylim()) == pytest.approx(110.0)
+        plt.close(fig)
+
+    def test_a_shallow_seabed_keeps_a_five_metre_margin(self):
+        """The margin is a fraction of the water depth, so in shallow water it
+        shrinks to nothing: 10 % of 20 m is 2 m, which draws the seabed as a
+        line. The 5 m floor keeps it a band."""
+        import uacpy
+        from uacpy.visualization.plots.environment import _plot_environment
+        fig, ax = _plot_environment(uacpy.Environment(bathymetry=20.0))
+        assert max(ax.get_ylim()) == pytest.approx(25.0)
+        plt.close(fig)
+
+    def test_a_thin_stack_under_deep_water_fills_the_panel_to_its_floor(self):
+        """The basement half-space is what covers the panel between the
+        sediment stack and the depth limit. Extended by a margin taken from the
+        stack (2 m -> 10 m) rather than from the water column, it stops at
+        1512 m on a 1650 m panel and leaves 138 m of blank axis under a seabed
+        the panel's own 'Bottom cp' colorbar says is there."""
+        import uacpy
+        from uacpy.core.environment import (SeabedColumn, SedimentLayer,
+                                            BoundaryProperties)
+        from uacpy.visualization.plots.environment import _plot_environment
+        col = SeabedColumn(
+            layers=[SedimentLayer(thickness=0.5, sound_speed=1575.0,
+                                  density=1.7, attenuation=1.0),
+                    SedimentLayer(thickness=1.5, sound_speed=1650.0,
+                                  density=1.9, attenuation=0.8)],
+            halfspace=BoundaryProperties(acoustic_type='half-space',
+                                         sound_speed=1950.0, density=2.1,
+                                         attenuation=0.4))
+        fig, ax = _plot_environment(
+            uacpy.Environment(bathymetry=1500.0, bottom=col))
+        # Mid-panel, halfway between the base of the stack and the depth limit.
+        z_probe = 0.5 * (1502.0 + max(ax.get_ylim()))
+        fills = [c for c in ax.collections
+                 if not isinstance(c, mcoll.QuadMesh)]
+        assert any(path.contains_point((0.5, z_probe))
+                   for c in fills for path in c.get_paths()), (
+            f"nothing painted at {z_probe:.0f} m on a "
+            f"{max(ax.get_ylim()):.0f} m panel")
         plt.close(fig)
 
 
