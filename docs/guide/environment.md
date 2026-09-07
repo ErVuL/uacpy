@@ -596,7 +596,7 @@ is set.
 | Class | Parameters | Depth-dependent |
 |---|---|---|
 | `Thorp()` | none | no |
-| `FrancoisGarrison(temperature_c, salinity_psu, pH, z_bar_m)` | four, all required | yes |
+| `FrancoisGarrison(temperature_c, salinity_psu, pH, z_bar_m, ph_scale='nbs')` | four required, plus the scale `pH` is on | yes |
 | `Biological(layers=[(z_top, z_bottom, f0, Q, a0), …])` | per-layer resonance | yes, by layer |
 | `ConstantAbsorption(value_db_per_wavelength)` | one | no |
 
@@ -641,7 +641,15 @@ Reading the curves:
   water the choice matters a lot. Of the four parameters `pH` is the one to get
   right at low frequency: it scales the boric-acid term, and moving 8.0 (North
   Atlantic) to 7.7 (North Pacific) takes about a third off the absorption below
-  1 kHz.
+  1 kHz. Get its **scale** right too: the equation was fitted on NBS-scale pH
+  (Brewer & Hester 2009), while GLODAP and the Copernicus BGC field report the
+  total scale, about 0.1 lower for the same water. Pass `ph_scale='total'` for
+  a measured value and it is moved to NBS with the Takahashi (1982) `fH` that
+  CO2SYS uses (+0.10 at 4 °C, +0.15 at 25 °C at S = 35), which raises the
+  absorption below 1 kHz by about 20 %; `fetch_environment(...,
+  with_absorption=True)` does this for the pH it fetches. A hand-typed
+  `pH=8.0` stays on NBS. `uacpy.core.absorption.ph_to_nbs` is the conversion
+  on its own.
 - **ConstantAbsorption** is flat in dB/**wavelength**, which is a slope-1 line
   in dB/km on log-log: `α[dB/m] = α[dB/λ]·f/c`. It is a calibration knob, not a
   physical model.

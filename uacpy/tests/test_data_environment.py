@@ -704,3 +704,35 @@ def test_grain_size_sample_beats_pelagic_ooze_off_cape_hatteras(preset):
     assert bottom.sound_speed == pytest.approx(sample.sound_speed, rel=1e-9)
     assert bottom.sound_speed == pytest.approx(1792.1, abs=0.5)
     assert bottom.density == pytest.approx(2.013, abs=0.01)
+
+
+def test_with_absorption_declares_a_fetched_ph_on_the_total_scale(
+        monkeypatch, stub_fetchers):
+    """GLODAP and the Copernicus BGC field report pH on the total scale;
+    Francois–Garrison was fitted on NBS. The environment builder has to say
+    which one it hands over, or the ~0.1 offset is silently lost."""
+    monkeypatch.setattr(env_mod, 'fetch_ts_profile',
+                        lambda point, **kw: (np.array([0.0, 50.0]),
+                                             np.array([18.0, 16.0]),
+                                             np.array([36.0, 36.1])))
+    monkeypatch.setattr(env_mod, '_fetch_ph', lambda point, **kw: (7.9, 'glodap'))
+    env = env_mod.fetch_environment((43.2, 7.5), with_absorption=True)
+    assert env.absorption.pH == 7.9
+    assert env.absorption.ph_scale == 'total'
+    assert env.absorption.ph_nbs > 7.9
+
+
+def test_with_absorption_without_a_ph_source_keeps_the_model_default_as_nbs(
+        monkeypatch, stub_fetchers):
+    """The 8.1 fallback is a model default, not a measurement on any scale;
+    it stays on the formula's own scale so a source-less run is unchanged."""
+    from uacpy.data.absorption import DEFAULT_OCEAN_PH
+    monkeypatch.setattr(env_mod, 'fetch_ts_profile',
+                        lambda point, **kw: (np.array([0.0, 50.0]),
+                                             np.array([18.0, 16.0]),
+                                             np.array([36.0, 36.1])))
+    monkeypatch.setattr(env_mod, '_fetch_ph',
+                        lambda point, **kw: (DEFAULT_OCEAN_PH, None))
+    env = env_mod.fetch_environment((43.2, 7.5), with_absorption=True)
+    assert env.absorption.ph_scale == 'nbs'
+    assert env.absorption.ph_nbs == DEFAULT_OCEAN_PH

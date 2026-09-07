@@ -554,7 +554,9 @@ from uacpy import Thorp, FrancoisGarrison, Biological, ConstantAbsorption
 
 Environment(bathymetry=100, absorption=Thorp())             # frequency-only
 Environment(bathymetry=100, absorption=FrancoisGarrison(    # T/S/pH/depth model
-    temperature_c=10, salinity_psu=35, pH=8, z_bar_m=1000))
+    temperature_c=10, salinity_psu=35, pH=8, z_bar_m=1000))   # pH on NBS scale
+Environment(bathymetry=100, absorption=FrancoisGarrison(    # a GLODAP / BGC pH
+    temperature_c=10, salinity_psu=35, pH=7.9, z_bar_m=1000, ph_scale='total'))
 Environment(bathymetry=100, absorption=ConstantAbsorption(0.1))   # flat dB/λ
 Environment(bathymetry=100, absorption=Biological(          # fish-bladder layers
     [(0, 50, 1000, 5, 0.5)]))   # (z_top, z_bottom, f0, Q, a0)
@@ -565,7 +567,9 @@ model from the site's fetched temperature/salinity column. Its pH is pH-source
 aware: on the Copernicus SSP branch (`ssp_sources='copernicus'`) it prefers the
 date-specific Copernicus biogeochemistry `ph` field, else the cached GLODAP
 climatology when installed (`install.sh --data glodap`), else the open-ocean
-default (8.1).
+default (8.1). Both sources report the total scale; the built model carries
+`ph_scale='total'` and converts to the NBS scale the equation was fitted on
+(about +0.1, +20 % absorption below 1 kHz). The 8.1 default stays on NBS.
 
 All four subclass `Absorption`, so `isinstance(env.absorption, Absorption)` is
 the type test. `Biological` takes its layers either as

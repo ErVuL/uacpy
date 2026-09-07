@@ -906,7 +906,9 @@ def _fetch_absorption(point, *, date, ssp_source, ssp_backend, cache_only,
     from one cell. ``cache_only`` (a ``*_sources='local'`` run) forces the local
     WOA23 grid so the T/S column never hits the network either — including when
     a cache-pinned SSP fell back to a literal. pH comes from the cached GLODAP
-    grid when installed (``ph_source='glodap'``), else the model default.
+    grid when installed (``ph_source='glodap'``), else the model default. A
+    fetched pH is declared ``ph_scale='total'`` so the absorption converts
+    it to the NBS scale the formula was fitted on.
     """
     from uacpy.data.absorption import build_francois_garrison
     if cache_only:
@@ -949,8 +951,12 @@ def _fetch_absorption(point, *, date, ssp_source, ssp_backend, cache_only,
     pH, ph_src = _fetch_ph(point, date=date, ssp_source=ssp_source,
                            cache_only=cache_only, timeout=timeout,
                            verbose=verbose, reference_depth=ref_depth)
-    return build_francois_garrison(depths, temp, sal, pH=pH,
-                                   reference_depth=ref_depth), ph_src
+    # GLODAP (pHtsinsitutp) and the Copernicus BGC ``ph`` field are on the
+    # total scale; the formula was fitted on NBS. The model default that
+    # stands in when neither is available is on the formula's own scale.
+    return build_francois_garrison(
+        depths, temp, sal, pH=pH, reference_depth=ref_depth,
+        ph_scale='nbs' if ph_src is None else 'total'), ph_src
 
 
 def _fetch_ph(point, *, date=None, ssp_source=None, cache_only=False,

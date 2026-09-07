@@ -113,6 +113,68 @@ def thorp_db_per_km(frequency: _ArrayLike) -> np.ndarray:
     return a
 
 
+PH_SCALES = ('nbs', 'total', 'seawater')
+
+
+def ph_to_nbs(pH, scale, *, temperature_c, salinity_psu):
+    """Move a seawater pH onto the NBS scale Francois–Garrison was fitted on.
+
+    Francois & Garrison (1982, Part II) took their pH from Lovett's (1980)
+    charts of the Gorshkov (1978) atlas, whose scale is not reported; Brewer
+    & Hester (Oceanography 22(4), 2009) judge it "probably" NBS and state
+    that "the sound absorption equations are based on the old NBS scale",
+    and Uzhansky et al. (JGR Oceans, 2025, §2) read the formulas the same
+    way. Modern data (GLODAP, the Copernicus BGC field) report pH on the
+    **total** hydrogen-ion scale, which sits about 0.1 below NBS for the
+    same water (Marion et al. 2011 via Uzhansky et al. 2025: NBS 8.332,
+    free 8.195, total 8.087, seawater 8.078 at S = 35, 25 °C). Fed
+    unconverted, the boric-acid term below 1 kHz comes out ~20 % low.
+
+    The conversion is the one CO2SYS applies: Takahashi et al. (1982,
+    GEOSECS Pacific Expedition vol. 3, p. 80) fitted the activity coefficient
+    an NBS-buffer-calibrated glass electrode sees in seawater,
+    ``fH(T, S) = 1.2948 − 0.002036·T_K + (0.0004607 − 1.475e-6·T_K)·S²``,
+    and ``pH_NBS = pH_SWS − log10(fH)``: +0.100 at 4 °C / 35, +0.147 at
+    25 °C / 35; the fit is stated valid for S in 20-40. That is exact for
+    the ``'seawater'`` scale. The ``'total'`` scale sits about 0.01 above
+    the seawater scale (the fluoride term; Marion et al. 2011: 8.087 vs
+    8.078), so a ``'total'`` input converts about 0.01 high — neglected,
+    well inside the 5 % the formula claims. It is chosen over
+    Marion's Pitzer-model offset (0.245) because the 1970s atlas data were
+    electrode readings against NBS buffers, which is what ``fH`` describes,
+    not a thermodynamic single-ion activity.
+
+    Parameters
+    ----------
+    pH : float or array
+        The measured pH.
+    scale : {'nbs', 'total', 'seawater'}
+        The scale ``pH`` is on. ``'nbs'`` returns it unchanged.
+    temperature_c, salinity_psu : float or array
+        In-situ temperature (°C) and Practical Salinity of the water the pH
+        was measured in; broadcast against ``pH``.
+
+    Returns
+    -------
+    float or ndarray
+        pH on the NBS scale.
+    """
+    if scale not in PH_SCALES:
+        raise ConfigurationError(
+            f"ph_to_nbs: unknown pH scale {scale!r}.",
+            remediation="Use 'nbs' (Francois-Garrison's own), 'total' "
+                        "(GLODAP, Copernicus BGC) or 'seawater'.",
+        )
+    p = np.asarray(pH, dtype=float)
+    if scale == 'nbs':
+        return float(p) if np.ndim(p) == 0 else p
+    t_k = np.asarray(temperature_c, dtype=float) + 273.15
+    s = np.asarray(salinity_psu, dtype=float)
+    f_h = 1.2948 - 0.002036 * t_k + (0.0004607 - 0.000001475 * t_k) * s * s
+    out = p - np.log10(f_h)
+    return float(out) if np.ndim(out) == 0 else out
+
+
 def francois_garrison_db_per_km(
     frequency: _ArrayLike,
     temperature: _ArrayLike = 10.0,
@@ -492,16 +554,33 @@ class FrancoisGarrison(Absorption):
     combined rather than compared —
     :meth:`uacpy.core.results.modes.Modes.with_attenuation` documents the
     consequence for a modal perturbation.
+
+    **pH scale.** ``pH`` is taken on ``ph_scale`` — ``'nbs'`` (default, the
+    scale the equation was fitted on, so the number is used as given),
+    ``'total'`` or ``'seawater'`` — and converted once by :func:`ph_to_nbs`;
+    :attr:`ph_nbs` is what both the in-Python formula and the AT deck row
+    (:meth:`as_at_tuple`) receive, so the two routes evaluate the same
+    equation on the same number. GLODAP and the Copernicus BGC field are on
+    the total scale, and the environment builder says so; a hand-typed
+    ``pH=8.0`` stays on NBS, as it always was.
     """
     temperature_c: float
     salinity_psu: float
     pH: float
     z_bar_m: float
+    ph_scale: str = 'nbs'
 
     def __post_init__(self):
         Absorption.__post_init__(self)
         for name in ('temperature_c', 'salinity_psu', 'pH', 'z_bar_m'):
             _require_finite(getattr(self, name), f"FrancoisGarrison: {name}")
+        if self.ph_scale not in PH_SCALES:
+            raise ConfigurationError(
+                f"FrancoisGarrison: ph_scale must be one of {PH_SCALES}; "
+                f"got {self.ph_scale!r}.",
+                remediation="GLODAP and Copernicus BGC pH are 'total'; a "
+                            "value typed for the formula itself is 'nbs'.",
+            )
         if not (self.salinity_psu >= 0):
             raise ConfigurationError(
                 f"FrancoisGarrison: salinity_psu must be non-negative (PSU); "
@@ -533,11 +612,20 @@ class FrancoisGarrison(Absorption):
     def topopt_code(self) -> str:
         return 'F'
 
+    @property
+    def ph_nbs(self) -> float:
+        """``pH`` on the NBS scale — the value the equation is evaluated on."""
+        return float(ph_to_nbs(self.pH, self.ph_scale,
+                               temperature_c=self.temperature_c,
+                               salinity_psu=self.salinity_psu))
+
     def as_at_tuple(self) -> Tuple[float, float, float, float]:
-        """Tuple in the order the AT ``write_fg_params`` writer expects."""
+        """Tuple in the order the AT ``write_fg_params`` writer expects;
+        the pH is :attr:`ph_nbs`, since the solver evaluates the same
+        equation on whatever number the deck carries."""
         return (
             float(self.temperature_c), float(self.salinity_psu),
-            float(self.pH), float(self.z_bar_m),
+            self.ph_nbs, float(self.z_bar_m),
         )
 
     def _alpha_db_per_m(
@@ -550,7 +638,7 @@ class FrancoisGarrison(Absorption):
             frequency=float(frequency),
             temperature=self.temperature_c,
             salinity=self.salinity_psu,
-            pH=self.pH,
+            pH=self.ph_nbs,
             depth=z,
         )
         return a_km / 1000.0

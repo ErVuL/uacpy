@@ -295,7 +295,8 @@ env.absorption      # FrancoisGarrison built from the T/S row nearest the
 
 One extra T/S request builds a site-specific `FrancoisGarrison` instead of the
 model-default Thorp, with pH from the cached GLODAP grid when installed and 8.1
-otherwise. The one row picked sets the temperature for the *whole* column (the
+otherwise (a fetched pH is declared `ph_scale='total'` and converted to the
+NBS scale the formula was fitted on; see [environment](environment.md)). The one row picked sets the temperature for the *whole* column (the
 models vary only depth), so the default reference is the T/S sample nearest the
 column mid-depth, and pH is read at that same depth — pairing a surface pH
 with a mid-column temperature would inflate the boric-acid relaxation term. The absorption is drawn from the same WOA23 cell and grid resolution

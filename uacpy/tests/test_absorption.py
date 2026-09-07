@@ -22,6 +22,7 @@ import numpy as np
 import pytest
 
 from uacpy.core.absorption import (
+    ph_to_nbs,
     Biological, BiologicalLayer, FrancoisGarrison,
     convert_attenuation_units, francois_garrison_db_per_km,
 )
@@ -429,3 +430,94 @@ class TestTheTwoAbsorptionRoutesDivergeByTheDocumentedAmount:
         ca_doc = ' '.join(ConstantAbsorption.__doc__.split())
         assert 'misc/AttenMod.f90:73' in ca_doc
         assert '±3.3 %' in ca_doc
+
+
+class TestPhToNbs:
+    """``ph_to_nbs`` moves a measured pH onto the NBS scale Francois–Garrison
+    was fitted on (Brewer & Hester 2009: "the sound absorption equations are
+    based on the old NBS scale"; Uzhansky et al. 2025 read it the same way).
+
+    The conversion is the Takahashi et al. (1982, GEOSECS) activity
+    coefficient ``fH(T, S)`` that CO2SYS uses: ``pH_NBS = pH_SWS −
+    log10(fH)``, exact for the seawater scale; the total scale differs from
+    the seawater scale by the fluoride term, ≈ 0.01, which is neglected.
+    Expected offsets are that formula: +0.100 at 4 °C / 35, +0.147 at 25 °C
+    / 35 (S = 35 — the fit's own quadratic in S makes it +0.133 at 10 °C /
+    20).
+    """
+
+    def test_seawater_scale_shifts_up_by_minus_log10_fH(self):
+        assert ph_to_nbs(8.0, 'seawater', temperature_c=4.0,
+                         salinity_psu=35.0) == pytest.approx(8.1001, abs=1e-3)
+        assert ph_to_nbs(8.0, 'seawater', temperature_c=25.0,
+                         salinity_psu=35.0) == pytest.approx(8.1467, abs=1e-3)
+
+    def test_total_scale_is_treated_as_the_seawater_scale(self):
+        assert ph_to_nbs(7.9, 'total', temperature_c=10.0, salinity_psu=20.0) \
+            == pytest.approx(8.0334, abs=1e-3)
+
+    def test_nbs_passes_through_unchanged(self):
+        assert ph_to_nbs(8.0, 'nbs', temperature_c=25.0, salinity_psu=35.0) \
+            == 8.0
+
+    def test_an_unknown_scale_is_refused_naming_the_choices(self):
+        with pytest.raises(ConfigurationError, match="'nbs'.*'total'.*'seawater'"):
+            ph_to_nbs(8.0, 'free', temperature_c=4.0, salinity_psu=35.0)
+
+    def test_broadcasts_over_arrays(self):
+        out = ph_to_nbs(np.array([7.8, 8.0]), 'total',
+                        temperature_c=np.array([4.0, 25.0]), salinity_psu=35.0)
+        assert out == pytest.approx([7.9001, 8.1467], abs=1e-3)
+
+
+class TestFrancoisGarrisonPhScale:
+    """``FrancoisGarrison`` takes the scale its ``pH`` is on and converts to
+    NBS once, for both the in-Python formula and the tuple the AT deck gets —
+    the solver evaluates the same equation on whatever number it is written,
+    so the two routes must be handed the same pH."""
+
+    def _pair(self, scale):
+        return FrancoisGarrison(temperature_c=4.0, salinity_psu=35.0, pH=8.0,
+                                z_bar_m=1000.0, ph_scale=scale)
+
+    def test_the_default_scale_is_nbs_and_leaves_every_number_alone(self):
+        fg = FrancoisGarrison(temperature_c=4.0, salinity_psu=35.0, pH=8.0,
+                              z_bar_m=1000.0)
+        assert fg.ph_scale == 'nbs'
+        assert fg.ph_nbs == 8.0
+        assert fg.as_at_tuple()[2] == 8.0
+
+    def test_total_scale_converts_before_the_boric_term_and_in_the_deck_tuple(self):
+        total = self._pair('total')
+        converted = ph_to_nbs(8.0, 'total', temperature_c=4.0, salinity_psu=35.0)
+        nbs = FrancoisGarrison(temperature_c=4.0, salinity_psu=35.0,
+                               pH=converted, z_bar_m=1000.0)
+        assert total.ph_nbs == pytest.approx(converted)
+        assert total.as_at_tuple()[2] == pytest.approx(converted)
+        for f in (100.0, 500.0, 1000.0, 10000.0):
+            assert total.alpha_db_per_m(f, [0.0, 1000.0]) == pytest.approx(
+                nbs.alpha_db_per_m(f, [0.0, 1000.0]))
+
+    def test_total_scale_raises_low_frequency_absorption_by_about_a_fifth(self):
+        """+0.10 on the boric term's ``10**(0.78·pH)`` is ×1.20; at 300 Hz
+        that term is nearly all of the absorption, at 10 kHz almost none."""
+        total, nbs = self._pair('total'), self._pair('nbs')
+        low = float(total.alpha_db_per_m(300.0, [1000.0])[0]
+                    / nbs.alpha_db_per_m(300.0, [1000.0])[0])
+        high = float(total.alpha_db_per_m(20000.0, [1000.0])[0]
+                     / nbs.alpha_db_per_m(20000.0, [1000.0])[0])
+        assert 1.15 < low < 1.22
+        assert 1.0 < high < 1.02
+
+    def test_an_unknown_scale_is_refused_at_construction(self):
+        with pytest.raises(ConfigurationError, match='ph_scale'):
+            self._pair('free')
+
+    def test_the_builder_forwards_the_scale(self):
+        fg = build_francois_garrison([0.0, 100.0], [10.0, 8.0], [35.0, 35.0],
+                                     pH=7.9, ph_scale='total')
+        assert fg.ph_scale == 'total'
+        assert fg.pH == 7.9
+        assert fg.ph_nbs > 7.9
+        assert build_francois_garrison([0.0, 100.0], [10.0, 8.0],
+                                       [35.0, 35.0]).ph_scale == 'nbs'
