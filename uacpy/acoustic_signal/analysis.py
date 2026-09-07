@@ -302,7 +302,7 @@ def _sel_bands(fmin, fmax, band_type, num_bands, sample_rate):
         # ``math.pow(2, step/2)`` returns the identical double the
         # third-octave branch's ``math.pow(2, 1/6)`` did, and the identical
         # ``math.sqrt(2)`` for step 1.
-        step = 1.0 if band_type == "octave" else 1.0 / 3.0
+        step = _SEL_OCTAVE_STEP[band_type]
         base = math.pow(2, step / 2)
         factor = math.pow(2, step)
         f_center = fmin

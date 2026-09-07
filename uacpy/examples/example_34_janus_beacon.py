@@ -21,7 +21,6 @@ FEATURES DEMONSTRATED:
 """
 
 import sys
-import wave
 import os
 from pathlib import Path
 
@@ -36,13 +35,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 
 from uacpy import comms  # noqa: E402
 from uacpy.comms import janus  # noqa: E402
-
-
-def _write_wav(path, signal, fs):
-    x = signal / (np.max(np.abs(signal)) + 1e-12)
-    with wave.open(str(path), 'wb') as w:
-        w.setnchannels(1); w.setsampwidth(2); w.setframerate(int(fs))
-        w.writeframes((x * 32767).astype(np.int16).tobytes())
+from plotting_utils import write_wav as _write_wav  # noqa: E402
 
 
 def main():

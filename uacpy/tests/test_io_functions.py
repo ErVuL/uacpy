@@ -1169,9 +1169,14 @@ class TestBathyIOTypedErrors:
         bty, bty_type = read_bathymetry(path)
         assert bty_type == 'L'
         assert bty.shape[0] == 7, "long format must return the geoacoustic rows"
-        assert np.allclose(bty[2, 1:-1], [1600.0, 1650.0, 1700.0])
-        assert np.allclose(bty[4, 1:-1], [1.7, 1.8, 1.9])
-        assert np.allclose(bty[5, 1:-1], [0.4, 0.5, 0.6])
+        # The seabed varies, so the writer fills the axis; read the node columns.
+        r = bty[0, 1:-1]
+        nodes = [0.0, 5000.0, 10000.0] if r.max() > 100.0 else [0.0, 5.0, 10.0]
+        idx = [1 + int(np.argmin(np.abs(r - v))) for v in nodes]
+        assert bty.shape[1] - 2 >= 128
+        assert np.allclose(bty[2, idx], [1600.0, 1650.0, 1700.0])
+        assert np.allclose(bty[4, idx], [1.7, 1.8, 1.9])
+        assert np.allclose(bty[5, idx], [0.4, 0.5, 0.6])
         # ±infinity extension holds every row constant.
         assert bty[0, 0] == -1e50 and bty[0, -1] == 1e50
         assert bty[2, 0] == bty[2, 1] and bty[2, -1] == bty[2, -2]
@@ -3513,7 +3518,7 @@ class TestPhaseSpeedBoundsStayContractedToRangeZero:
                                segments, max_total_depth, False, None)
             k._write_kraken_env(
                 tmp_path / 'ksingle.env', k._modes_single_profile(k_env), src,
-                receiver_obj=rcv, receiver_depths=rcv.depths)
+                receiver_obj=rcv)
 
             sc = uacpy.Scooter(verbose=False)
             sc._write_scooter_env(tmp_path / 'sc.env',
@@ -4646,3 +4651,72 @@ class TestTheSparcDeckRefusesRoughInterfaces:
         self._write(tmp_path, uacpy.Environment(name='s', bathymetry=100.0,
                                                 ssp=1500.0))
         assert (tmp_path / 's.env').exists()
+
+
+def test_read_arr_file_accepts_fortran_exponent_tokens(tmp_path):
+    """Every field of a ``.arr`` record is a list-directed Fortran REAL
+    (``Bellhop/ArrMod.f90:113-127``), so the reader takes the tokens a
+    Fortran ``WRITE`` may emit — a ``D`` exponent and a letterless
+    three-digit exponent — through ``fortran_float`` like the other AT text
+    readers, not through ``float()``."""
+    from uacpy.io.oalib_reader import read_arr_file
+    path = tmp_path / 'exp.arr'
+    path.write_text("'2D'\n2.0D2\n1 5.0E1\n1 75.0\n1 500.0\n1\n1\n"
+                    "1.0 0.0 5.0D-1 1.0-101 10.0 -10.0 1 0\n")
+    result = read_arr_file(path)
+    assert float(result.frequencies[0]) == 200.0
+    cell = result.by_receiver[0][0][0]
+    assert cell['delays'][0] == 0.5
+    assert cell['delays_imag'][0] == 1.0e-101
+
+
+class TestReadFlpPreviewSwitchesAtTenEntries:
+    """``read_flp`` lists an axis value by value while it has fewer than ten
+    entries and prints only its two ends from ten on; both branches format
+    each value with two decimals."""
+
+    @staticmethod
+    def _deck(tmp_path, n_prof):
+        path = tmp_path / f'preview{n_prof}.flp'
+        path.write_text(f"'title'\n'R'\n9999,\t! M\n{n_prof}\n0.0 {n_prof - 1}.0 /"
+                        "\n3\n20 1 5\n2\n100 25 /\n3\n4000 0 2000 /\n"
+                        f"{n_prof}\n0.0 0.0 /\n")
+        return path
+
+    def _previews(self, tmp_path, n_prof):
+        from unittest.mock import patch
+        from uacpy.io.oalib_reader import read_flp
+        with patch('uacpy.io.oalib_reader.log_message') as logger:
+            read_flp(str(self._deck(tmp_path, n_prof)), verbose='debug')
+        messages = [call.args[1] for call in logger.call_args_list]
+        return (next(m for m in messages if 'rProf (km)' in m),
+                next(m for m in messages if 'Rro (m)' in m))
+
+    def test_nine_entries_are_listed_one_by_one(self, tmp_path):
+        prof, offsets = self._previews(tmp_path, 9)
+        assert prof.endswith(', '.join(f'{k:.2f}' for k in range(9)))
+        assert offsets.endswith(', '.join(['0.00'] * 9))
+
+    def test_ten_entries_show_only_the_two_ends(self, tmp_path):
+        prof, offsets = self._previews(tmp_path, 10)
+        assert prof.endswith('0.00 … 9.00')
+        assert offsets.endswith('0.00 … 0.00')
+
+
+class TestScooterExtraTopOptCharacter:
+    """``write_scooter_env_file(topopt_extra=…)`` appends its character to the
+    TopOpt record, inside the quotes after the broadband slot, and nothing
+    else in the deck moves; ``write_kraken_env_file`` has no such keyword."""
+
+    def test_the_character_lands_at_the_end_of_the_topopt_record(self, tmp_path):
+        env = _top_block_env(_fg())
+        plain = _write_scooter(tmp_path / 'plain.env', env).read_text().splitlines()
+        extra = _write_scooter(tmp_path / 'extra.env', env,
+                               topopt_extra='0').read_text().splitlines()
+        assert extra[3] == plain[3][:-1] + "0'"
+        assert extra[:3] == plain[:3] and extra[4:] == plain[4:]
+
+    def test_the_kraken_writer_takes_no_extra_character(self, tmp_path):
+        with pytest.raises(TypeError, match='topopt_extra'):
+            _write_kraken(tmp_path / 'k.env', _top_block_env(_fg()),
+                          topopt_extra='0')

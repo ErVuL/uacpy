@@ -16,13 +16,13 @@ only OASES gives you is the rest of the seismo-acoustic toolkit built on that
 kernel — reflection coefficients that resolve `P-SV` conversion, per-interface
 roughness, and the array covariance and matched-field replicas of `OASN`.
 
-It is not one program but a suite, and uacpy wraps four of its executables —
+It is not one program but a suite, and uacpy wraps six of its executables —
 they share an engine and an environment description, and differ only in what
 they ask the engine for: [`OAST`](#5-oast--transmission-loss) for transmission loss,
 [`OASP`](#7-oasp--pulses-and-broadband) for pulses,
 [`OASR`](#6-oasr--reflection-coefficients) for reflection coefficients,
 [`OASN`](#8-oasn--array-covariance-and-mfp-replicas) for array covariance and
-matched-field replicas.
+matched-field replicas, and `OASS` / `OASSP` for rough-interface scattering.
 
 ---
 
@@ -204,7 +204,7 @@ not land on OAST's native FFT grid.
 
 ## 4. Environment support
 
-All four sub-models consume the same environment, and they all consume the
+All six sub-models consume the same environment, and they all consume the
 seabed the same way:
 
 | Feature | Native? | Note |
@@ -397,7 +397,9 @@ they do for [Bellhop](bellhop.md). See
 [broadband and time series](../guide/results.md) for how the two modes relate.
 
 **On frequency grids.** OASP expresses its band as `(fmin, fmax, N)`, so it
-always runs an *equispaced* sweep. In `TIME_SERIES` mode uacpy derives that
+always runs an *equispaced* sweep — and a single-frequency `COHERENT_TL` run
+integrates every bin of it (`n_time_samples/2` at the defaults) to return one;
+use [`OAST`](#5-oast--transmission-loss) for narrowband TL. In `TIME_SERIES` mode uacpy derives that
 band from the source waveform's own spectrum and tells you what it picked;
 pass `frequencies=` to pin it yourself. A non-equispaced `frequencies=` vector
 is resampled onto `linspace(fmin, fmax, N)` with a warning, because the file
@@ -529,7 +531,7 @@ finally `PATH`.
 
 Everything is configured on the constructor; `run()` has a fixed signature.
 
-**Shared by all four** — `executable`, `options`, `work_dir`, `cleanup`,
+**Shared by all six** — `executable`, `options`, `work_dir`, `cleanup`,
 `timeout`, `verbose`, `use_tmpfs`, `collapse`.
 
 `options` is the raw OASES option line. On `OAST` and `OASR` it *replaces* the

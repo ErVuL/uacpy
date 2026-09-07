@@ -27,7 +27,7 @@ from uacpy.core.exceptions import (
     ConfigurationError, FileFormatError,
 )
 from uacpy.io._fortran_helpers import (
-    PARSE_ERRORS, detect_endian, list_directed_int, typed_format_error,
+    detect_endian, list_directed_int, require_model_output, typed_format_error,
 )
 
 
@@ -360,33 +360,10 @@ def read_modes_asc(
     }
 
 
-
+@typed_format_error
 def read_modes_bin(
     filename: str,
     frequency: float = 0.0,
-    modes: Optional[Union[int, list, np.ndarray]] = None,
-    profile: int = 1,
-) -> Dict[str, Any]:
-    """Read a KRAKEN binary ``.mod`` file, converting any malformed-file
-    parse error into a typed :class:`FileFormatError` (a truncated/garbage
-    file otherwise surfaces as a bare ``IndexError`` / ``struct.error`` from
-    the record reads)."""
-    try:
-        return _read_modes_bin_impl(filename, freq=frequency, modes=modes,
-                                    profile=profile)
-    except FileFormatError:
-        raise
-    except FileNotFoundError as e:
-        raise FileFormatError(f"Mode file not found: {filename}") from e
-    except PARSE_ERRORS as e:
-        raise FileFormatError(
-            f"Malformed Kraken mode file {filename}: {e}"
-        ) from e
-
-
-def _read_modes_bin_impl(
-    filename: str,
-    freq: float = 0.0,
     modes: Optional[Union[int, list, np.ndarray]] = None,
     profile: int = 1,
 ) -> Dict[str, Any]:
@@ -403,9 +380,9 @@ def _read_modes_bin_impl(
         Mode file path. If no extension is given, ``.mod`` is appended
         (this is the extension that Kraken actually emit per
         ``Kraken/kraken.f90`` — ``OPEN(FILE=TRIM(FileRoot)//'.mod', ...)``).
-    freq : float, optional
+    frequency : float, optional
         Frequency in Hz for which to read modes. For broadband runs,
-        selects the closest frequency. Use freq=0 if only one frequency.
+        selects the closest frequency. Use frequency=0 if only one frequency.
         Default is 0.0.
     modes : int, list, or ndarray, optional
         Mode indices to read (1-indexed). If None, reads all modes.
@@ -450,6 +427,10 @@ def _read_modes_bin_impl(
     - The canonical extension is ``.mod`` (binary direct-access produced by
       Kraken). Any explicit extension on ``filename`` is honoured;
       otherwise ``.mod`` is appended.
+    - An absent file (after that resolution) and a malformed or truncated
+      one both raise a typed :class:`FileFormatError`
+      (``require_model_output`` / ``typed_format_error``) rather than a
+      bare ``FileNotFoundError`` / ``IndexError`` / ``struct.error``.
     - Modes are stored in Fortran unformatted direct-access binary.
     - Record length (lrecl) is determined from first 4 bytes.
     - Mode indices are 1-indexed (MATLAB/Fortran convention).
@@ -488,6 +469,7 @@ def _read_modes_bin_impl(
         )
     if not os.path.splitext(filename)[1]:
         filename = filename + ".mod"
+    require_model_output(filename, 'read_modes_bin')
 
     with open(filename, "rb") as fid:
         head = fid.read(4)
@@ -640,7 +622,7 @@ def _read_modes_bin_impl(
         freqVec = header["freqVec"]
         z = header["z"]
 
-        freq_diff = np.abs(freqVec - freq)
+        freq_diff = np.abs(freqVec - frequency)
         freq_index = int(np.argmin(freq_diff))
         # Records hdr+0..hdr+3: header, N/Mater, depth/rho, freqVec
         # Record hdr+4: z vector

@@ -75,7 +75,7 @@ def main():
     )
 
     env = uacpy.Environment(
-        name="Summer Thermocline - Multi-Frequency",
+        name="Summer Thermocline",
         bathymetry=200.0,
         ssp=SoundSpeedProfile.from_pairs(
             [(0, 1525), (25, 1525), (60, 1490), (200, 1490)]

@@ -332,7 +332,7 @@ def scenario_c_thermocline():
     )
 
     # ═══════════════════════════════════════════════════════════════════════
-    # SOURCE CONFIGURATION - In surface duct
+    # SOURCE CONFIGURATION - In the mixed layer
     # ═══════════════════════════════════════════════════════════════════════
     source = uacpy.Source(
         depths=30.0,         # Within the mixed layer (0-50m)

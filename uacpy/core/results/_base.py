@@ -3,13 +3,13 @@ by every result type."""
 
 from __future__ import annotations
 
-import copy as _copy
 from enum import Enum
 import numpy as np
 from typing import Optional, Dict, Any, Tuple, Union
 
 from uacpy.core.constants import PRESSURE_FLOOR
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.core._carrier_validate import _DeepCopyMixin
 
 
 def _complex_to_db(data: np.ndarray) -> np.ndarray:
@@ -521,7 +521,7 @@ _DOCUMENTED_METADATA: Dict[Tuple[str, str], Tuple[type, str]] = {
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-class Result:
+class Result(_DeepCopyMixin):
     """Common base for every model output.
 
     Carries identification (``model``, ``backend``), the source context
@@ -652,11 +652,6 @@ class Result:
             model_source=self.model_source,
             metadata=dict(self.metadata),
         )
-
-    def copy(self):
-        """Deep copy of the result (symmetric with the carriers / Source /
-        Receiver / Environment)."""
-        return _copy.deepcopy(self)
 
     def __repr__(self) -> str:
         cls = type(self).__name__

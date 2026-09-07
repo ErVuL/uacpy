@@ -8,6 +8,8 @@ engines' SELECT CASE option parsing is case-sensitive
 (``Bellhop/bdryMod.f90:162-165``).
 """
 
+import struct
+
 import numpy as np
 import pytest
 
@@ -868,3 +870,49 @@ class TestReadPsifFullContract:
             f.write_record(np.zeros(7))
         with pytest.raises(FileFormatError, match='expected 8'):
             read_psif(tmp_path)
+
+
+def test_an_empty_reflection_table_reads_as_three_empty_float_columns(tmp_path):
+    """``n_pts = 0`` goes through the same list-directed path as any other
+    count: ``read_list_directed_values`` reads nothing and the three columns
+    come back as empty float arrays with ``n_pts == 0``."""
+    from uacpy.io.refl_io import read_reflection_coefficient
+    path = tmp_path / 'empty.brc'
+    path.write_text('0\n')
+    table = read_reflection_coefficient(path)
+    assert table['n_pts'] == 0
+    for column in ('theta', 'R', 'phi'):
+        assert table[column].shape == (0,)
+        assert table[column].dtype == float
+
+
+@pytest.mark.parametrize('reader_name, content', [
+    # Record 5 (NRCV, NFREQ) is two int32 after a 32-byte title: a file that
+    # ends four bytes into it makes struct.unpack raise struct.error.
+    ('read_oasn_covariance', b'\x00' * 32 + struct.pack('<i', 12)),
+    # A well-framed first record whose decode the patched reader refuses.
+    ('read_oasn_replicas',
+     struct.pack('<i', 12) + b'\x00' * 12 + struct.pack('<i', 12)),
+    # A valid table header, then a per-frequency header whose sample count
+    # is not an integer: int() raises ValueError.
+    ('read_oasr_reflection_coefficients', b'100.0 200.0 1 1\n100.0 abc\n'),
+    ('read_oases_rhs_header',
+     struct.pack('<i', 12) + b'\x00' * 12 + struct.pack('<i', 12)),
+], ids=['oasn_covariance', 'oasn_replicas', 'oasr', 'rhs_header'])
+def test_oases_binary_readers_type_a_raw_parse_error(
+        reader_name, content, tmp_path, monkeypatch):
+    """A ``struct.error`` / ``ValueError`` / ``IndexError`` escaping a record
+    decode surfaces as the ``typed_format_error`` ``FileFormatError``
+    ("could not parse"), the same conversion every other ``io`` reader
+    applies."""
+    import struct
+    from uacpy.io import oases_reader
+
+    def short_record(*args, **kwargs):
+        raise struct.error('unpack requires a buffer of 12 bytes')
+
+    monkeypatch.setattr(oases_reader, '_read_fortran_record', short_record)
+    path = tmp_path / 'out.bin'
+    path.write_bytes(content)
+    with pytest.raises(FileFormatError, match='could not parse'):
+        getattr(oases_reader, reader_name)(path)

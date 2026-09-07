@@ -75,8 +75,8 @@ def main():
     for i_range, r_m in enumerate(ranges_m):
         r_km = r_m / 1000.0
         # Temperature decreases with range (frontal zone)
-        T_surface = 18 - r_km * 0.3  # 18°C → 10.5°C
-        T_bottom = 8 - r_km * 0.1    # 8°C → 5.5°C
+        T_surface = 18 - r_km * 0.3  # 18°C → 15.6°C at 8 km
+        T_bottom = 8 - r_km * 0.1    # 8°C → 7.2°C at 8 km
 
         # Exponential stratification
         T_profile = T_bottom + (T_surface - T_bottom) * np.exp(-depths / 40)

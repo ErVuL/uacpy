@@ -177,6 +177,16 @@ def _grid_axes(lz, n_ranges, dr, ndr, dz, ndz, depth_index_offset):
     return ranges, depths
 
 
+def _read_grid(filepath, reader, dtype, dr, ndr, dz, ndz, depth_index_offset):
+    """``(ranges, depths, field)`` of a ``tl.grid``-shaped file; the field is
+    native-endian ``dtype`` straight from :func:`_read_lz_records`."""
+    require_model_output(filepath, reader)
+    lz, field = _read_lz_records(filepath, dtype=dtype)
+    ranges, depths = _grid_axes(lz, field.shape[1], dr, ndr, dz, ndz,
+                                depth_index_offset)
+    return ranges, depths, field
+
+
 @typed_format_error
 def read_tl_grid(
     filepath: Union[str, Path],
@@ -217,12 +227,8 @@ def read_tl_grid(
         Range axis (m), depth axis (m), and TL field of shape
         ``(n_depths, n_ranges)``.
     """
-    require_model_output(filepath, 'read_tl_grid')
-    lz, tl = _read_lz_records(filepath, dtype='f8')
-    tl = tl.astype(float)
-    ranges, depths = _grid_axes(lz, tl.shape[1], dr, ndr, dz, ndz,
-                                depth_index_offset)
-    return ranges, depths, tl
+    return _read_grid(filepath, 'read_tl_grid', 'f8', dr, ndr, dz, ndz,
+                      depth_index_offset)
 
 
 @typed_format_error
@@ -269,9 +275,5 @@ def read_pcomplex_grid(
         Range axis (m), depth axis (m), complex envelope of shape
         ``(n_depths, n_ranges)``.
     """
-    require_model_output(filepath, 'read_pcomplex_grid')
-    lz, p = _read_lz_records(filepath, dtype='c16')
-    p = p.astype(complex)
-    ranges, depths = _grid_axes(lz, p.shape[1], dr, ndr, dz, ndz,
-                                depth_index_offset)
-    return ranges, depths, p
+    return _read_grid(filepath, 'read_pcomplex_grid', 'c16', dr, ndr, dz,
+                      ndz, depth_index_offset)

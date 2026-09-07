@@ -7,7 +7,10 @@ from typing import Tuple, Optional
 import numpy as np
 
 from uacpy.core.exceptions import ConfigurationError
-from uacpy.acoustic_signal._signal_validate import require_below_nyquist
+from uacpy.acoustic_signal._signal_validate import (
+    require_below_nyquist,
+    require_positive_finite_scalar,
+)
 
 
 def synthesize_noise_from_psd(Pxx, Fxx, duration=1, scale=1, *,
@@ -289,6 +292,12 @@ def make_noise_waveform(
     >>> print(f"Noise signal: {len(nts)} samples")
     Noise signal: 10000 samples
     """
+    bandwidth = require_positive_finite_scalar(
+        bandwidth, "make_noise_waveform", "bandwidth", " Hz")
+    duration = require_positive_finite_scalar(
+        duration, "make_noise_waveform", "duration", " s")
+    sample_rate = require_positive_finite_scalar(
+        sample_rate, "make_noise_waveform", "sample_rate", " Hz")
     N = int(duration * sample_rate)  # number of samples
     # Build the time axis from the same N used for resample so the carrier
     # and the resampled noise always have matching length (np.arange(0,
@@ -312,8 +321,6 @@ def make_noise_waveform(
                           "the upper band edge fc + bandwidth/2",
                           "the band folds back to sample_rate - f and the "
                           "noise comes out centred somewhere else")
-    require_below_nyquist(fc, sample_rate, "make_noise_waveform", "fc",
-                          "the carrier folds back to sample_rate - fc")
     if not (fc - bandwidth / 2.0 > 0.0):
         raise ConfigurationError(
             f"make_noise_waveform: the lower band edge fc - bandwidth/2 "

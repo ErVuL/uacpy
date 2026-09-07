@@ -113,14 +113,6 @@ def read_reflection_coefficient(
             # record.
             n_pts = list_directed_int(fid.readline())
 
-            if n_pts == 0:
-                return {
-                    "theta": np.array([]),
-                    "R": np.array([]),
-                    "phi": np.array([]),
-                    "n_pts": 0,
-                }
-
             # Each point is three numbers of at least 2 bytes each (value +
             # separator) on disk; a count beyond that is a malformed header,
             # not a huge table.

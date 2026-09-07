@@ -266,8 +266,8 @@ control and silence the warning (with both pinned, the sweep *is* the spec:
 a frequency array then contributes only its centre bin, and uacpy warns of
 that too); non-uniform spacing raises. Left unset, the defaults are `Q=1e6,
 T=1.0` for `COHERENT_TL` (which collapses the band to one bin, so a narrowband
-call does not sweep hundreds of frequencies) and `Q=2.0, T=10.0` for the
-broadband paths.
+call does not sweep hundreds of frequencies); on the broadband paths they are
+resolved from the source — see the `Q` and `T` rows of [§7](#7-constructor-knobs).
 
 ---
 
@@ -305,7 +305,7 @@ Leaving `c0` alone buys a 26.6 m step where pinning it to 1500 m/s gives 16.0 m
 Four constraints are applied *after* the optimiser has spoken, because its
 error model does not know about them:
 
-1. a **`dz` floor** of `λ_p/16` for acoustic stability — and on `rams` a
+1. a **`dz` floor** of `λ_p/16`, the depth-grid cost floor — and on `rams` a
    **`dz` cap** of `λ_s/14`, so the shear wavelength stays resolved;
 2. **seafloor-node snapping**, so `env.depth / dz` is an integer and the
    interface lands on a grid point;

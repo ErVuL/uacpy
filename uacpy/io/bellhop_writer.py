@@ -457,7 +457,7 @@ def write_bellhop_env_file(
     # ``ReadEnvironmentBell.f90:414`` ERROUTs an irregular grid whose
     # receiver-depth and receiver-range counts differ, so refuse it here
     # rather than emit a deck bellhop.exe rejects at READIN.
-    if (grid_type.upper() == 'I'
+    if (grid_type == 'I'
             and len(receiver.depths) != len(receiver.ranges)):
         raise ConfigurationError(
             f"grid_type='I' (irregular) requires len(receiver.depths) == "
@@ -688,11 +688,11 @@ def write_bellhop_env_file(
         # Position 3: bellhop.f90:137 copies it to SBPFlag and
         # misc/beampattern.f90:22 opens <base>.sbp only on '*'.
         position_3 = '*' if source_beam_pattern else ' '
-        # Position 4/5 use uppercase (only 'R'/'X' and 'R'/'I' accepted).
-        # The irregular-grid receiver-count pairing was validated before the
-        # file opened.
-        position_4 = source_type.upper()
-        position_5 = grid_type.upper()
+        # Positions 4/5: source_type and grid_type, each already checked to
+        # be exactly one of 'R'/'X' and 'R'/'I'. The irregular-grid
+        # receiver-count pairing was validated before the file opened.
+        position_4 = source_type
+        position_5 = grid_type
         # Position 6: dimensionality.  Hardcoded to ' ' (2D Bellhop).
         # Blank is the one character that means plain 2-D to BOTH engines:
         #   * Fortran Bellhop is indifferent.  ReadEnvironmentBell.f90

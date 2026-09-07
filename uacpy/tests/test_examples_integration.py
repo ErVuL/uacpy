@@ -236,8 +236,12 @@ _SWALLOW_MARKERS = ("! Warning: Could not", "✗ ", "Traceback (most recent call
 # "{label} ERROR: {e}" carry no ✗ marker at all. The lookbehind keeps
 # CamelCase exception-class names out — example 20 prints
 # "→ UnsupportedFeatureError: ..." every run as a deliberate gap
-# demonstration, and that must not read as a marker.
-_ERRORISH_LINE = re.compile(r"(?i)(?<![a-z0-9_])error\s*:|\[error\]")
+# demonstration, and that must not read as a marker. "skipped" is a marker
+# too: the "SKIPPED: {e}" / "{name} skipped: {e}" / "[skipped] {e}" handlers
+# of examples 19, 26 and 37 catch broad exceptions, and a precondition report
+# ("needs ./install.sh", "executable not found") carries no defect signature.
+_ERRORISH_LINE = re.compile(
+    r"(?i)(?<![a-z0-9_])error\s*:|\[error\]|\bskipped\b")
 
 _TRACEBACK_HEADER = "Traceback (most recent call last)"
 
@@ -434,6 +438,29 @@ def test_detector_fails_unmarked_error_lines_with_defect_signatures():
             "    KrakenField       ERROR: 'Field' object has no attribute "
             "'to_db'\n"
         )))
+
+
+@pytest.mark.parametrize("line", [
+    "  SKIPPED: 'Field' object has no attribute 'to_db'",        # example 19
+    "  Kraken skipped: run() got an unexpected keyword argument 'x'",  # ex 26
+    "  TL: [skipped] AttributeError: 'Bellhop' object has no attribute 'go'",
+])
+def test_detector_fails_a_skipped_line_carrying_a_defect_signature(line):
+    """'skipped' is a marker like 'error:': a handler that prints
+    'SKIPPED: {e}' / '{name} skipped: {e}' / '[skipped] {e}' (examples 19,
+    26, 37) is scanned for a defect signature like any other degradation
+    report, so a caught API drift fails the run."""
+    with pytest.raises(AssertionError, match="swallowed"):
+        _check_no_swallowed_failure(_EXAMPLE, _FakeResult(stdout=line + "\n"))
+
+
+def test_detector_accepts_a_skipped_precondition_report():
+    """Example 37's '[skipped] needs ./install.sh --data seaice' and a
+    'skipped: <binary> not found' line name a precondition, not a defect."""
+    _check_no_swallowed_failure(_EXAMPLE, _FakeResult(stdout=(
+        "  sea ice: [skipped] needs ./install.sh --data seaice\n"
+        "  Scooter skipped: scooter executable not found: install.sh\n"
+    )))
 
 
 # ---------------------------------------------------------------------------

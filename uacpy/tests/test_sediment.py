@@ -245,6 +245,14 @@ def test_auto_collapses_uniform_seabed_under_varying_water_speed(
     assert len(bottom.columns) == 1
 
 
+def test_an_explicit_count_above_max_points_is_capped_with_a_warning():
+    with pytest.warns(UserWarning, match=r'n_points=6 exceeds max_points=3'):
+        bottom = sediment.range_dependent_bottom_along(
+            _phi_bottom(5.0, 1500.0), (40.0, -30.0), (41.0, -30.0), 6,
+            source_label='test', max_points=3)
+    assert len(bottom.columns) == 3
+
+
 def test_auto_splits_on_a_real_sediment_change():
     """The collapse must not merge distinct sediments (ϕ 3 → ϕ 7): each run
     keeps the probe columns bracketing its edges plus the endpoints."""

@@ -672,16 +672,22 @@ class FRF:
                         break
 
                     if m == "AIC":  # AICF
-                        # Finite-sample AIC variant: log(sse) scaled by
-                        # (1 + m/(N-m))/(1 - m/(N-m)), not the textbook
-                        # log(sse) + 2m/N (they agree as N >> m).
+                        # Finite-sample AIC variant on the unbiased residual
+                        # variance sse = SSE/(N-m): log(sse) +
+                        # (1 + m/(N-m))/(1 - m/(N-m)). Textbook AIC scores
+                        # the ML variance SSE/N with penalty 2m/N; since
+                        # log(SSE/(N-m)) = log(SSE/N) + m/N + O(m²/N²), this
+                        # penalty is heavier by m/N (a mild bias toward
+                        # lower orders that vanishes as N >> m).
                         score = np.log(sse) + (1 + m_candidate / (N - m_candidate)) / (
                             1 - m_candidate / (N - m_candidate)
                         )
 
                     elif m == "FPE":  # FPEF
-                        # Finite-sample FPE: sse·(1 + m/(N-m))/(1 - m/(N-m))
-                        # (textbook uses m/N; same N >> m limit).
+                        # Finite-sample FPE on the same unbiased sse:
+                        # sse·(1 + m/(N-m))/(1 - m/(N-m)). Textbook FPE is
+                        # (SSE/N)·(1 + m/N)/(1 - m/N); the SSE/(N-m) inside
+                        # makes this penalty heavier by m/N, as for AIC.
                         score = (
                             sse
                             * (1 + m_candidate / (N - m_candidate))
@@ -694,6 +700,8 @@ class FRF:
                         )
 
                     elif m == "BIC":  # Bayesian Information Criterion
+                        # On the unbiased sse, so heavier than the ML-variance
+                        # form log(SSE/N) + m·log(N)/N by m/N, as for AIC.
                         score = np.log(sse) + (m_candidate * np.log(N)) / N
 
                     if score < best_score:

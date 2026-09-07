@@ -13,6 +13,8 @@ Three helpers:
   prefix.
 * :func:`_plot_tl_difference` — TL(a) − TL(b) diverging heatmap, shared by
   the model-comparison examples (05, 16, 18).
+* :func:`write_wav` — a real signal to a normalised 16-bit mono ``.wav``,
+  shared by the modem examples (32, 33, 34).
 
 Everything else lives in :mod:`uacpy.visualization` — TL heatmaps,
 bathymetry overlays, range / depth cuts, etc.
@@ -21,11 +23,13 @@ bathymetry overlays, range / depth cuts, etc.
 import numpy as np
 import matplotlib.pyplot as plt
 import os
+import wave
 from pathlib import Path
 from typing import Dict
 
+from uacpy import Field
 from uacpy.visualization import (
-    compare_models, compare,
+    compare_models, compare, plot_field,
 )
 
 # Default output directory: next to this file, so examples drop plots under
@@ -46,8 +50,6 @@ def _plot_tl_difference(a, b, env=None, *, ax=None, title=None,
     the higher loss, i.e. the quieter field. The axes are named here rather
     than left to ``plot_field``, for the reason given at the call below.
     """
-    from uacpy import Field
-    from uacpy.visualization import plot_field
     if diff_vmax is not None:
         vmin, vmax = -abs(diff_vmax), abs(diff_vmax)
     diff = Field(data=a.db - b.db, coords=dict(a.coords))
@@ -288,3 +290,11 @@ def create_example_report(example_num: int, title: str, description: str,
 
     print(f"\nExample {example_num} complete!")
     print("=" * 80 + "\n")
+
+
+def write_wav(path, signal, fs):
+    """Write a real signal to a 16-bit mono .wav, normalised to full scale."""
+    x = signal / (np.max(np.abs(signal)) + 1e-12)
+    with wave.open(str(path), 'wb') as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(int(fs))
+        w.writeframes((x * 32767).astype(np.int16).tobytes())

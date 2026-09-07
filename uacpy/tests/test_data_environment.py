@@ -224,6 +224,49 @@ def test_range_dependent_ssp_copernicus(monkeypatch, stub_fetchers):
     assert env.ssp.is_range_dependent
 
 
+def _spy_copernicus_transect(monkeypatch):
+    import uacpy.data.copernicus as cop_mod
+    seen = {}
+    rd = SoundSpeedProfile(depths=[0.0, 100.0], data=[[1500, 1502], [1490, 1492]],
+                           ranges=[0.0, 5000.0])
+
+    def fake(start, end, date, **kw):
+        seen.update(kw)
+        return rd
+    monkeypatch.setattr(cop_mod, 'fetch_ssp_transect_operational', fake)
+    return seen
+
+
+def test_range_dependent_ssp_copernicus_honours_a_numpy_integer_count(
+        monkeypatch, stub_fetchers):
+    seen = _spy_copernicus_transect(monkeypatch)
+    env_mod.fetch_environment((43.2, 7.5), transect_to=(42.8, 8.1),
+                              range_dependent_ssp=True, ssp_sources='copernicus',
+                              date='2026-01-01', ssp_n_points=np.int64(4))
+    assert seen['n_points'] == 4
+
+
+def test_range_dependent_ssp_copernicus_caps_the_count_with_a_warning(
+        monkeypatch, stub_fetchers):
+    seen = _spy_copernicus_transect(monkeypatch)
+    with pytest.warns(UserWarning, match=r'n_points=30 exceeds max_points=10'):
+        env_mod.fetch_environment((43.2, 7.5), transect_to=(42.8, 8.1),
+                                  range_dependent_ssp=True,
+                                  ssp_sources='copernicus', date='2026-01-01',
+                                  ssp_n_points=30, max_points=10)
+    assert seen['n_points'] == 10
+
+
+def test_range_dependent_ssp_copernicus_rejects_a_fractional_count(
+        monkeypatch, stub_fetchers):
+    _spy_copernicus_transect(monkeypatch)
+    with pytest.raises(ConfigurationError, match='n_points'):
+        env_mod.fetch_environment((43.2, 7.5), transect_to=(42.8, 8.1),
+                                  range_dependent_ssp=True,
+                                  ssp_sources='copernicus', date='2026-01-01',
+                                  ssp_n_points=2.5)
+
+
 def test_range_dependent_ssp_copernicus_requires_date(stub_fetchers):
     with pytest.raises(ConfigurationError, match='requires date'):
         env_mod.fetch_environment((43.2, 7.5), transect_to=(42.8, 8.1),
@@ -308,9 +351,8 @@ def test_range_dependent_bottom_requires_transect(stub_fetchers):
 
 
 def test_with_absorption(monkeypatch, stub_fetchers):
-    import uacpy.data.sound_speed as ss_mod
     from uacpy.core.absorption import FrancoisGarrison
-    monkeypatch.setattr(ss_mod, 'fetch_ts_profile',
+    monkeypatch.setattr(env_mod, 'fetch_ts_profile',
                         lambda point, **kw: (np.array([0.0, 50.0]),
                                                 np.array([18.0, 16.0]),
                                                 np.array([36.0, 36.1])))
@@ -327,7 +369,6 @@ def test_with_absorption_uses_the_requested_woa_grid(monkeypatch, stub_fetchers,
     A 0.25° SSP against a 1.00° absorption column is a different cell — up to
     ~50 km away at mid latitudes.
     """
-    import uacpy.data.sound_speed as ss_mod
     seen = {}
 
     def fake_ts(point, **kw):
@@ -335,7 +376,7 @@ def test_with_absorption_uses_the_requested_woa_grid(monkeypatch, stub_fetchers,
         return (np.array([0.0, 50.0]), np.array([18.0, 16.0]),
                 np.array([36.0, 36.1]))
 
-    monkeypatch.setattr(ss_mod, 'fetch_ts_profile', fake_ts)
+    monkeypatch.setattr(env_mod, 'fetch_ts_profile', fake_ts)
     env_mod.fetch_environment((43.2, 7.5), with_absorption=True,
                               resolution=resolution)
     assert seen['resolution'] == resolution

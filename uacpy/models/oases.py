@@ -70,7 +70,7 @@ from uacpy.core.exceptions import (
 from uacpy.io.oases_writer import (
     write_oast_input, write_oasn_input, write_oasp_input, write_oasr_input,
     write_oass_input, write_oassp_input, oases_wavenumber_bounds,
-    oass_bottom_interfaces, bottom_interface_roughness,
+    oass_bottom_interfaces, bottom_interface_roughness, REFL_TYPE_TO_OPTION,
 )
 from uacpy.core.units import m_to_km
 from uacpy.io.oases_reader import (
@@ -85,7 +85,7 @@ from uacpy.io.oases_reader import (
 
 def _oases_resample_frequencies(
     freqs: np.ndarray, model_name: str, log_spaced: bool = False,
-) -> tuple[float, float, int, bool]:
+) -> tuple[float, float, int]:
     """Convert an arbitrary user ``frequencies=`` vector to the
     ``(fmin, fmax, N)`` triple OASR/OASP write into the input file.
 
@@ -100,8 +100,6 @@ def _oases_resample_frequencies(
     fmin, fmax : float
     n : int
         Number of equispaced bins.
-    resampled : bool
-        True iff the user vector was non-equispaced and got resampled.
 
     Raises
     ------
@@ -113,7 +111,6 @@ def _oases_resample_frequencies(
     fmin = float(freqs.min())
     fmax = float(freqs.max())
     n = int(freqs.size)
-    resampled = False
     if n > 1 and log_spaced:
         # OASR option 'C' makes the kernel sweep LOGARITHMIC
         # (unoasr21.f:123-125, :243) — it is not a plot option. The
@@ -137,7 +134,6 @@ def _oases_resample_frequencies(
             ratios = freqs[1:] / freqs[:-1]
         target = (fmax / fmin) ** (1.0 / (n - 1))
         if not np.allclose(ratios, target, rtol=1e-6):
-            resampled = True
             grid = np.geomspace(fmin, fmax, n)
             warnings.warn(
                 f"{model_name}: option 'C' makes the frequency sweep "
@@ -150,14 +146,13 @@ def _oases_resample_frequencies(
                 f"'C' for a linear sweep.",
                 UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
             )
-        return fmin, fmax, n, resampled
+        return fmin, fmax, n
     if n > 1:
         diffs = np.diff(freqs)
         # Equispaced if all diffs match the mean diff within tolerance
         # (rtol scaled to the band; atol is a tiny absolute floor).
         target = (fmax - fmin) / (n - 1)
         if not np.allclose(diffs, target, rtol=1e-6, atol=1e-9):
-            resampled = True
             warnings.warn(
                 f"{model_name}: frequencies= vector is non-equispaced; "
                 f"OASES expresses the frequency axis as (fmin, fmax, N) "
@@ -168,7 +163,7 @@ def _oases_resample_frequencies(
                 f"freq_min/freq_max/n_frequencies) to suppress.",
                 UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
             )
-    return fmin, fmax, n, resampled
+    return fmin, fmax, n
 
 
 def _warn_if_trf_grid_replaced_request(requested, produced) -> None:
@@ -1931,7 +1926,6 @@ class OASR(OASES):
         """
         if self.options is None:
             return self.reflection_type or 'P-P'
-        from uacpy.io.oases_writer import REFL_TYPE_TO_OPTION
         opts = str(self.options)
         if REFL_TYPE_TO_OPTION['transmission'] in opts:
             return 'transmission'
@@ -1998,7 +1992,7 @@ class OASR(OASES):
                     "OASR.run(frequencies=…) requires at least one "
                     "positive frequency."
                 )
-            fmin, fmax, n_freq, _ = _oases_resample_frequencies(
+            fmin, fmax, n_freq = _oases_resample_frequencies(
                 freqs_arr, 'OASR', log_spaced=self._oasr_is_log_swept(),
             )
             writer_kwargs['freq_min'] = fmin
@@ -2142,8 +2136,12 @@ class OASP(OASES):
     :class:`Field`) and ``RunMode.TIME_SERIES`` (returns a
     :class:`Field` after ``synthesize_time_series``). For a
     single-cell trace use ``tf.to_time_trace(depth, range)``. Can be
-    expensive (reduce ``n_time_samples`` for speed). For range-dependent
-    problems, RAM is recommended.
+    expensive (reduce ``n_time_samples`` for speed): a single-frequency
+    ``COHERENT_TL`` run still integrates every bin of the
+    ``(freq_min, freq_max)`` sweep — ``n_time_samples/2`` of them at the
+    defaults (``DLFREQ = 1/(DT·NX)``, ``unoasp22.f:237``) — and returns one;
+    narrowband TL is OAST's job. For range-dependent problems, RAM is
+    recommended.
 
     **Collapse defaults (overrides of :data:`DEFAULT_COLLAPSE`).**
     Per-model: ``'ssp': 'mean'``, ``'bottom_range': 'median'`` (the
@@ -2410,7 +2408,7 @@ class OASP(OASES):
             # is OASP's internal language — warn if the user vector is
             # non-equispaced so they know the resulting bins won't match
             # their input one-to-one.
-            fmin_user, freq_max, n_user, _ = _oases_resample_frequencies(
+            fmin_user, freq_max, n_user = _oases_resample_frequencies(
                 freqs_arr, 'OASP',
             )
             # Deck fc: the centre of the requested band — the same centre

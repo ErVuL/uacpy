@@ -68,12 +68,14 @@ class Bathymetry(_RangeProfile):
             f"would mean a {float(v):g} m deep seafloor."))
         if depth is not None:
             return cls(ranges=np.array([0.0]), depths=np.array([depth]))
+        # ``_scalar_or_none`` returned for every numeric scalar, so a 0-d
+        # value here (None, a string, bytes, a 0-d string array) is not a
+        # depth: ``arr`` stays None for it, as for a non-numeric sequence.
         try:
-            if np.ndim(value) == 0:
-                return cls(ranges=np.array([0.0]),
-                           depths=np.array([float(value)]))
-            arr = np.asarray(value, dtype=float)
+            arr = np.asarray(value, dtype=float) if np.ndim(value) else None
         except (TypeError, ValueError):
+            arr = None
+        if arr is None:
             raise ConfigurationError(
                 f"Bathymetry: must be a positive scalar depth or shape (N, 2) "
                 f"as [(range, depth), ...]; got non-numeric {value!r}.")

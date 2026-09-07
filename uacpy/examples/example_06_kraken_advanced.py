@@ -103,11 +103,19 @@ def main():
         [400, 1485],
     ])
 
+    # Francois-Garrison: (T °C, S PSU, pH, z_bar m) lives on Environment, so
+    # the same volume attenuation acts in the mode computations below and in
+    # the segmented TL run.
+    fg = uacpy.FrancoisGarrison(
+        temperature_c=10.0, salinity_psu=35.0, pH=8.0, z_bar_m=50.0,
+    )
+
     env = uacpy.Environment(
         name="Continental Shelf - Mode Coupling",
         ssp=SoundSpeedProfile.from_pairs(ssp_data),
         bathymetry=bathymetry,
         bottom=bottom_rd,
+        absorption=fg,
     )
 
     print(f"  ✓ Range-dependent: {env.is_range_dependent}")
@@ -129,10 +137,6 @@ def main():
 
     print("\n[1/4] Computing modes with Francois-Garrison attenuation...")
 
-    # Francois-Garrison: (T °C, S PSU, pH, z_bar m) lives on Environment
-    fg = uacpy.FrancoisGarrison(
-        temperature_c=10.0, salinity_psu=35.0, pH=8.0, z_bar_m=50.0,
-    )
     kraken = Kraken(
         verbose=False,
     )
@@ -289,7 +293,7 @@ def main():
 
         # Use plot_mode_wavenumbers function for complex k-plane visualization
         try:
-            # compute_modes already returns a Field suitable for these plotters
+            # compute_modes returns a Modes result, which these plotters consume
             modes_field = modes_shallow
 
             # plot_mode_wavenumbers - complex k-plane scatter plot

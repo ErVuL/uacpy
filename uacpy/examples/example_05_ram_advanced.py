@@ -1,6 +1,6 @@
 """
 ===============================================================================
-ADVANCED EXAMPLE: RAM (mpiramS) - Range-Dependent SSP and Bottom
+ADVANCED EXAMPLE: RAM (mpiramS) - Range-Dependent Bottom and Bathymetry
 ===============================================================================
 
 OBJECTIVE:
@@ -49,9 +49,9 @@ import matplotlib.pyplot as plt  # noqa: E402
 import uacpy  # noqa: E402
 from uacpy.core.environment import SoundSpeedProfile  # noqa: E402
 from uacpy import Bottom  # noqa: E402
-from uacpy.models import RAM  # noqa: E402
+from uacpy.models import RAM, Kraken, Bellhop  # noqa: E402
 from uacpy.visualization.plots import (  # noqa: E402
-    plot_field,
+    plot_field, compare_models,
 )
 
 
@@ -77,7 +77,7 @@ def main():
     print("═" * 80)
 
     # ═══════════════════════════════════════════════════════════════════════
-    # CREATE 2D RANGE-DEPENDENT SSP (Thermal Front)
+    # CREATE THE SOUND-SPEED PROFILE (warm stratified water, one profile)
     # ═══════════════════════════════════════════════════════════════════════
 
     print("\n[Setup] Creating warm stratified SSP profile...")
@@ -147,7 +147,7 @@ def main():
     # RUN RAM with Range-Dependent Features
     # ═══════════════════════════════════════════════════════════════════════
 
-    print("\n[Run] RAM (mpiramS) with range-dependent SSP and bottom...")
+    print("\n[Run] RAM (mpiramS) with sloping bathymetry and range-dependent bottom...")
     print("  Mode: COHERENT_TL (narrowband, range-depth TL grid)")
 
     # accuracy is the Lytaev optimiser's per-run Padé error budget; 1e-1
@@ -168,8 +168,6 @@ def main():
     print("  Note: Kraken will use range-independent approximation for the bottom")
     print("  → Range-dependent bottom effects will not be fully captured")
     print("  → For full accuracy, use RAM or Bellhop\n")
-
-    from uacpy.models import Kraken, Bellhop
 
     # Run Kraken
     try:
@@ -243,7 +241,6 @@ def main():
 
     # Plot 5: Three-Model Comparison (RAM, Bellhop, Kraken)
     if result is not None and result_bellhop is not None and result_kraken is not None:
-        from uacpy.visualization.plots import compare_models
         fig5, _ = compare_models(
             {'RAM': result, 'Bellhop': result_bellhop, 'Kraken': result_kraken},
             env=env, vmin=40, vmax=100,

@@ -2,10 +2,15 @@
 (:mod:`uacpy.core.bottom`, :mod:`uacpy.core.ssp`, :mod:`uacpy.core.environment`).
 """
 
+import copy as _copy
+
 import numpy as np
-from typing import Optional
+from typing import Optional, Self
 
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.core.constants import (
+    BoundaryType, MAX_ATTENUATION_DB_PER_WAVELENGTH,
+)
 
 
 def _validate_acoustic_type(value, label: str) -> None:
@@ -14,7 +19,6 @@ def _validate_acoustic_type(value, label: str) -> None:
     instead of producing a wrong Acoustics-Toolbox bottom-type code
     deep inside a writer.
     """
-    from uacpy.core.constants import BoundaryType
     try:
         BoundaryType.from_string(value)
     # ConfigurationError alone: ``BoundaryType.from_string`` type-checks its
@@ -162,7 +166,6 @@ def _require_attenuation_in_range(value, label: str) -> None:
     build all abort in ``CRCI``, while ``bellhopcxx``/``bellhopcuda`` return a
     field with *less* loss than a low attenuation gives.
     """
-    from uacpy.core.constants import MAX_ATTENUATION_DB_PER_WAVELENGTH
     if value is None:
         return
     alpha = float(value)
@@ -329,3 +332,12 @@ def _sanitize_title(name: str) -> str:
     s = ''.join(ch if (ord(ch) >= 32 and ch != '\x7f') else ' ' for ch in s)
     s = s.replace("'", "")
     return s.strip() or 'unnamed'
+
+
+class _DeepCopyMixin:
+    """``copy()`` shared by the carriers and the results."""
+
+    def copy(self) -> Self:
+        """Deep copy: every field — nested carriers and arrays included — is
+        duplicated, with no aliasing back to the original instance."""
+        return _copy.deepcopy(self)

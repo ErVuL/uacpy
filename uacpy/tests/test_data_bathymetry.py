@@ -7,6 +7,7 @@ The unit tests stub the HTTP layer so they run fully offline; one
 
 import threading
 import time
+import warnings
 
 import numpy as np
 import pytest
@@ -152,6 +153,28 @@ def test_fetch_bathy_grid(stub_http):
     assert lats.shape == (3,) and lons.shape == (3,) and depth.shape == (3, 3)
     assert depth[0, 0] == 1000.0
     assert np.isnan(depth[1, 1])       # land cell → NaN (point fetchers would raise)
+
+
+def test_fetch_bathy_grid_warns_when_the_eastward_lon_span_exceeds_180(
+        stub_http):
+    stub_http['elevations'] = [-100.0] * 9
+    with pytest.warns(UserWarning, match=r'355° eastward'):
+        bathymetry.fetch_bathy_grid((40, 42), (10, 5), n_lat=3, n_lon=3)
+
+
+@pytest.mark.parametrize('lon_range', [(0, 180), (179, -179), (7, 9)])
+def test_fetch_bathy_grid_eastward_span_up_to_180_is_silent(stub_http,
+                                                            lon_range):
+    stub_http['elevations'] = [-100.0] * 9
+    with warnings.catch_warnings():
+        warnings.simplefilter('error', UserWarning)
+        bathymetry.fetch_bathy_grid((40, 42), lon_range, n_lat=3, n_lon=3)
+
+
+def test_fetch_bathy_grid_span_just_past_180_warns(stub_http):
+    stub_http['elevations'] = [-100.0] * 9
+    with pytest.warns(UserWarning, match='eastward'):
+        bathymetry.fetch_bathy_grid((40, 42), (0, -179), n_lat=3, n_lon=3)
 
 
 def test_fetch_bathy_grid_latitudes_ascend_for_descending_range(stub_http):

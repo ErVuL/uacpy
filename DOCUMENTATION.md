@@ -863,7 +863,7 @@ phase-velocity window belongs to the reflection table, not to Bellhop:
 
 ```python
 tl = bellhop.run_with_bounce(env, source, receiver,
-                             c_low=1400.0, c_high=6000.0, rmax=20_000.0)
+                             c_low=1400.0, rmax=20_000.0)
 ```
 
 Everything after `receiver` is keyword-only, `run_mode=` included; it otherwise
@@ -942,8 +942,10 @@ tl = ram.run(env, source, receiver)                         # COHERENT_TL -> Fie
 
 Broadband works on every backend (the Collins binaries loop in Python, mpiramS
 sweeps natively). The band is derived from `(fc, Q, T)`: `bandwidth = fc/Q`,
-`Δf = 1/T`. `Q`/`T` default to narrowband `(1e6, 1.0)` for `COHERENT_TL` and
-`(2.0, 10.0)` for broadband; pass a multi-element `frequencies=` array to set
+`Δf = 1/T`. `Q`/`T` default to narrowband `(1e6, 1.0)` for `COHERENT_TL`; on
+the broadband paths they are resolved from the source (a bare single frequency
+is one bin; see the knob table in `docs/models/ram.md` §7). Pass a
+multi-element `frequencies=` array to set
 the band explicitly — the returned `H(f)` carries exactly the requested bins
 (the internal sweep is trimmed onto them). On narrowband run modes a
 `frequencies=` argument is ignored with a warning:
@@ -991,7 +993,7 @@ import tempfile
 from uacpy import Bounce
 
 with tempfile.TemporaryDirectory() as work_dir:
-    bounce = Bounce(c_low=1400, c_high=10000, work_dir=work_dir, cleanup=False)
+    bounce = Bounce(c_low=1400, work_dir=work_dir, cleanup=False)
     rc = bounce.compute_reflection(env, source, receiver)   # ReflectionCoefficient
     brc_path = rc.metadata['brc_file']
 
@@ -1411,8 +1413,8 @@ km, and `read_ssp_2d` hands `r_prof` back in metres.
 | AT env building blocks | — | `write_header`, `write_ssp_section`, `write_layer_sections`, `write_bottom_section`, `writable_layers`, `write_source_depths`, `write_receiver_depths`, `write_receiver_ranges`, `write_phase_speed_and_rmax`, `write_absorption_block`, `write_fg_params`, `write_bio_layers`, `write_broadband_freqs`, `resolve_ssp_interp`, `resolve_ssp_topopt`, `resolve_phase_speed_bounds` |
 | Boundaries (`.bty`/`.ati`/`.ssp`/`.brc`/`.irc`/`.sbp`) | `read_bathymetry`, `read_altimetry`, `read_ssp_2d`, `read_reflection_coefficient`, `read_source_beam_pattern` | `write_bty_file`, `write_bty_long_format`, `write_ati_file`, `write_ssp`, `write_source_beam_pattern`, `stage_reflection_file`, `stage_source_beam_pattern`, `dedupe_reflection_file` |
 | Scooter / SPARC (`.grn`, `.rts`, `.ts`) | `read_grn_file`, `grn_to_field`, `grn_to_transfer_function`, `read_rts_file`, `rts_to_pressure`, `read_ts`, `sparc_snapshot_to_field`, `sparc_snapshot_to_time_field` | — |
-| OASES (`.dat`, `.trf`) | `read_oast_tl`, `read_oasp_trf`, `read_oasr_reflection_coefficients`, `read_oasn_covariance`, `read_oasn_replicas` | `write_oast_input`, `write_oasp_input`, `write_oasr_input`, `write_oasn_input` |
-| RAM (`in.pe`/`ram.in`, `psif.dat`, `tl.grid`, `pcomplex.bin`) | `read_psif`, `read_tl_grid`, `read_pcomplex_grid` | `write_inpe`, `write_ramin`, `write_ssp_file`, `write_bth_file`, `write_ranges_file`, `write_sediment_file` |
+| OASES (`.dat`, `.trf`, `.rhs`) | `read_oast_tl`, `read_oasp_trf`, `read_oasr_reflection_coefficients`, `read_oasn_covariance`, `read_oasn_replicas`, `read_oases_rhs_header` | `write_oast_input`, `write_oasp_input`, `write_oasr_input`, `write_oasn_input`, `write_oass_input`, `write_oassp_input` |
+| RAM (`in.pe`/`ram.in`, `psif.dat`, `tl.line`, `tl.grid`, `pcomplex.bin`) | `read_psif`, `read_tl_line`, `read_tl_grid`, `read_pcomplex_grid` | `write_inpe`, `write_ramin`, `write_ssp_file`, `write_bth_file`, `write_ranges_file`, `write_sediment_file` |
 | Plumbing | `FileManager` (the scratch-directory / cleanup handler behind `work_dir`), `equally_spaced` | |
 
 Anything malformed raises `FileFormatError` (§4), never a bare `ValueError`.
@@ -1438,9 +1440,11 @@ or `env.plot()` instead.
 
 The free `plot_*` functions below are the remaining public surface: the
 type-dispatcher, the grid/flexible renderers, alternate views, composition
-helpers, geographic maps, animation, and the raw-array DSP/comms plotters. They
-are exposed at top level (`uacpy.plot_field`, `uacpy.plot_result`, …) and, after
-`import uacpy`, as attributes of the `uacpy.plot` alias (`uacpy.plot.compare`).
+helpers, geographic maps, animation, and the raw-array DSP/comms plotters. Four
+are re-exported at top level (`uacpy.plot_result`, `uacpy.plot_field`,
+`uacpy.plot_overview`, `uacpy.compare_models`); every one of them is reachable,
+after `import uacpy`, as an attribute of the `uacpy.plot` alias
+(`uacpy.plot.compare`, `uacpy.plot.plot_psd`, …).
 `uacpy.plot` and `uacpy.materials` are attribute aliases, **not** import paths —
 in a `from … import` statement use the real modules
 (`from uacpy.visualization import compare`,
@@ -1461,7 +1465,7 @@ in a `from … import` statement use the real modules
 | `absorption.plot(frequencies)` | volume absorption `α(f)` (dB/km, log-log) |
 | `plot_bottom_properties(env)` | seabed `c` / `ρ` / `α` vs depth, per layer stack |
 | `source.plot_beam_pattern()` / `plot_beam_pattern(pattern)` | source directivity from a `.sbp` table or an `(N, 2)` array; polar by default, oriented like the field (0° = increasing range, +angle downward) and spanning the propagating half-plane. `polar=False` gives level-vs-angle, `mirror=True` reflects a half-defined table |
-| `plot_mode_wavenumbers(modes)` / `plot_modes_heatmap(modes)` | modal `k` plane · mode shapes as a heatmap |
+| `plot_mode_wavenumbers(modes)` / `plot_modes_heatmap(modes)` | Re and Im of the modal wavenumbers against mode index (twin axes) · mode shapes as a heatmap |
 | `plot_signal_excess(field)` / `plot_detection_probability(field)` / `plot_roc(deflection)` | `uacpy.sonar` field maps and the ROC curve |
 | `plot_bathymetry_map(lats, lons, depth)` / `plot_sea_ice_map(grid)` | geographic maps (also the pluggable `map_fn=` of `plot_overview`) |
 | `plot_overview(env, map_args, tl=…, title=…)` | three-panel map + TL + environment composite; `map_title`/`tl_title`/`env_title` name the panels, `title=` the figure |
@@ -1567,10 +1571,10 @@ fitted state). All plotting lives in `uacpy.visualization` (`plot_psd`,
 | Decidecade (ISO 18405) | `decidecade_bands`, `decidecade_band_levels` |
 | Arrays | `steering_vectors`, `beamform`, `sample_covariance`, `bartlett_spectrum`, `mvdr_spectrum`, `music_spectrum`, `shading_taper` |
 | Active / pulse compression | `matched_filter`, `pulse_compression`, `processing_gain`, `ambiguity_function` |
-| Time-frequency | `spectrogram`, `analytic_signal`, `envelope`, `instantaneous_frequency`, `wigner_ville`, `cwt` (→ `SpectrogramResult`/`WignerVilleResult`/`CWTResult`) |
+| Time-frequency | `spectrogram`, `analytic_signal`, `envelope`, `instantaneous_frequency`, `wigner_ville`, `cwt`, `inverse_cwt`, `cepstrum`, `complex_cepstrum`, `inverse_complex_cepstrum` (→ `SpectrogramResult`/`WignerVilleResult`/`CWTResult`/`ComplexCepstrum`) |
 | Constant-Q (Brown 1991) | `constant_q_transform`, `constant_q_psd`, `constant_q_spectrogram`, `probabilistic_constant_q` (→ `CQTResult`/`CQPSDResult`/`CQSpectrogramResult`/`CQPPSDResult`) |
 | Gather transforms | `fk_transform`, `taup_transform`, `radon_transform` (+ `inverse_*`; → `FKResult`/`TauPResult`/`RadonResult`) |
-| System ID / channel | `FRF`, `impulse_response`, `simulate_reception` |
+| System ID / channel | `FRF`, `impulse_response`, `impulse_response_from_transfer_function`, `simulate_reception` |
 | Modal / dispersion | `warp_signal`, `unwarp_signal`, `modal_group_velocity` |
 
 `FRF` is a class because it keeps the fit. `FRF(method=…, estimator=…, m=…)`
@@ -1689,7 +1693,7 @@ verified bit-exact against CMRE janus-c).
 | Metrics | `bit_error_rate`, `symbol_error_rate`, `evm`, `ber_theory` |
 | Coding / spread | `ConvCode`, `conv_encode`, `viterbi_decode`, `interleave`, `spread`, `despread` |
 | OFDM | `ofdm_modulate`, `ofdm_demodulate`, `schmidl_cox_sync`, `OFDMTransmitter`, `OFDMReceiver` |
-| JANUS | `janus_encode`, `janus_decode`, `janus_modulate`, `janus_detect`, `JanusPacket` |
+| JANUS | `janus_encode`, `janus_decode`, `janus_modulate`, `janus_demodulate`, `janus_detect`, `janus_transmit`, `janus_receive`, `JanusPacket` |
 
 `simulate_link` composes transmit → channel → receive and measures BER;
 `ber_theory` gives the AWGN bound for the same scheme:
@@ -2056,7 +2060,7 @@ with a warning naming the value it dropped.
 | `interp_ssp` | — | `None` | SSP scheme; `None` auto (`'quad'` if RD-SSP else `'linear'`); also `'linear'`/`'pchip'`/`'cubic'`/`'quad'`/`'n2linear'`/`'analytic'`. |
 | `interp_bathymetry` | — | `'linear'` | `.bty` interpolation: `'linear'` or `'curvilinear'`. |
 | `interp_altimetry` | — | `'linear'` | `.ati` interpolation: `'linear'` or `'curvilinear'`. |
-| `beam_width_type` | — | `'F'` | Cerveny width: `'F'` filling, `'M'` match, `'W'` waveguide (used for `beam_type` ∈ C/R). |
+| `beam_width_type` | — | `'F'` | Cerveny width (`ReadEnvironmentBell.f90:178-181`): `'F'` space-filling, `'M'` minimum width, `'W'` WKB (used for `beam_type` ∈ C/R). |
 | `beam_curvature` | — | `'D'` | `'D'` double, `'S'` single, `'Z'` zero. |
 | `eps_multiplier` | factor | `1.0` | Beam-width epsilon multiplier. |
 | `r_loop` | m | `1000.0` | Range at which the beam width is chosen. |

@@ -15,7 +15,6 @@ single `BoundaryProperties` was used.
 """
 
 import copy as _copy
-import warnings
 
 import numpy as np
 from typing import List, Optional
@@ -25,11 +24,12 @@ from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.constants import DECK_RANGE_RESOLUTION_M
 from uacpy.core._grid import _nearest_index_on_axis
 from uacpy.core._carrier_validate import (
+    _DeepCopyMixin,
     _require_non_negative, _require_strictly_increasing, _dedupe_provenance,
     _reject_complex,
 )
 from uacpy.core.bottom import (
-    _validate_boundary_write, BoundaryProperties, _reduce_boundaries,
+    BoundaryProperties, _delegate_write, _reduce_uniform_nodes,
     _HALFSPACE_DELEGATED,
 )
 
@@ -45,7 +45,7 @@ _SURFACE_DELEGATED = _HALFSPACE_DELEGATED
 
 # eq=False: a dataclass __eq__ over ndarray fields raises; compare by identity.
 @dataclass(eq=False)
-class Surface:
+class Surface(_DeepCopyMixin):
     """Surface acoustic properties, optionally range-dependent.
 
     Attributes
@@ -212,7 +212,8 @@ class Surface:
         ``'r0'`` / ``'rmax'`` keep the first / last node. ``'mean'`` /
         ``'median'`` numerically average the boundary properties across nodes
         (keeping the r = 0 ``acoustic_type``) — only physical when the nodes
-        share a type, mirroring :meth:`Bottom.select_range` for half-spaces.
+        share a type (a marginal ice zone, open water beside ice, takes
+        ``'r0'``/``'rmax'``), mirroring :meth:`Bottom.select_range`.
         Uniform ``'file'``/``'precalc'`` nodes collapse to their shared
         reflection file with only the roughness reduced, and raise when the
         files differ (tables cannot be blended), again mirroring
@@ -227,36 +228,8 @@ class Surface:
             raise ConfigurationError(
                 f"Surface.collapse: unknown method={method!r}; valid: 'r0', "
                 "'rmax', 'mean', 'median'")
-        # Averaging is only meaningful within one boundary type: blending an
-        # open-water (vacuum) node with an ice half-space would build an
-        # inconsistent boundary (e.g. a 'vacuum' card carrying a shear speed).
-        types = {p.acoustic_type for p in self.properties}
-        if len(types) > 1:
-            raise ConfigurationError(
-                f"Surface.collapse({method!r}) needs a single boundary type to "
-                f"average; got {sorted(types)}. Boundary types cannot be "
-                f"blended — use 'r0' or 'rmax' (e.g. for a marginal ice zone).")
-        reduce = np.mean if method == 'mean' else np.median
-        # A uniform 'file'/'precalc' surface carries no real numbers to
-        # reduce — each node is its reflection-coefficient table. Nodes
-        # sharing one table collapse to that shared spec (roughness, the one
-        # genuine number they carry, is still reduced); distinct tables
-        # cannot be averaged into anything.
-        (the_type,) = types
-        if the_type in ('file', 'precalc'):
-            specs = {p.reflection_file for p in self.properties}
-            if len(specs) > 1:
-                raise ConfigurationError(
-                    f"Surface.collapse({method!r}) cannot average "
-                    f"'{the_type}' nodes with different reflection files "
-                    f"({sorted(specs, key=str)}). Reflection-coefficient "
-                    f"tables cannot be blended — use 'r0' or 'rmax'.")
-            shared = _copy.deepcopy(self.properties[0])
-            shared.roughness = float(
-                reduce([p.roughness for p in self.properties]))
-            return Surface(properties=[shared])
-        return Surface(properties=[
-            _reduce_boundaries(self.properties, reduce)])
+        return Surface(properties=[_reduce_uniform_nodes(
+            self.properties, method, 'Surface.collapse', 'nodes')])
 
     def __getattr__(self, name):
         # Uniform-surface compatibility: forward BoundaryProperties reads to the
@@ -273,25 +246,7 @@ class Surface:
         # ``collapse()``, the repr and every writer — all of which read
         # ``properties`` — would keep the previous one.
         if name in _SURFACE_DELEGATED and 'properties' in self.__dict__:
-            value = self._validate_delegated_write(name, value)
-            if len(self.properties) > 1:
-                warnings.warn(
-                    f"Surface.{name} = {value!r} sets all "
-                    f"{len(self.properties)} range nodes to the same value, "
-                    f"flattening any range dependence. Assign to "
-                    f".properties[i].{name} to write a single node.",
-                    UserWarning, stacklevel=2)
-            for node in self.properties:
-                setattr(node, name, value)
+            _delegate_write('Surface', self.properties, name, value,
+                            noun='nodes', hint='.properties[i]')
             return
         super().__setattr__(name, value)
-
-    def _validate_delegated_write(self, name, value):
-        """The ``BoundaryProperties`` construction rules applied to a write
-        delegated to the nodes — the validator the seabed carriers share."""
-        return _validate_boundary_write('Surface', name, value, self.properties)
-
-    def copy(self) -> 'Surface':
-        """Deep copy (symmetric with ``Source`` / ``Receiver`` / the other
-        carriers)."""
-        return _copy.deepcopy(self)

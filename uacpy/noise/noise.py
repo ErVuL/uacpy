@@ -76,6 +76,25 @@ def _tightest_spacing_in_decades(f):
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def _positive_frequencies(frequencies, who):
+    """``frequencies`` as a flat float array (a scalar becomes one bin),
+    refused unless every bin is > 0 Hz and finite.
+
+    Every component is a log10(f) fit, so a DC (0 Hz) or negative bin — common
+    when a caller passes a raw rfft grid — would yield log10(0) = -inf/NaN
+    before the sentinel masks run. ``~(f > 0)`` rather than ``f <= 0`` so a
+    NaN bin is refused as well.
+    """
+    f = np.asarray(frequencies, dtype=float).flatten()
+    if f.size == 0 or np.any(~(f > 0)):
+        raise ConfigurationError(
+            f"{who}: frequencies must be > 0 Hz and finite (the "
+            "empirical fits are log10(f)); drop the DC bin, e.g. "
+            "frequencies[frequencies > 0]."
+        )
+    return f
+
+
 def compute_windnoise(frequencies, u, water_depth='deep', band_integrate=False):
     """
     Wind-driven ambient noise level (dB re 1 µPa²/Hz), with the
@@ -133,9 +152,7 @@ def compute_windnoise(frequencies, u, water_depth='deep', band_integrate=False):
     Translated from the IDL implementation by Dan Hutt, rewritten by Vic
     Young, and packaged in Tollefsen & Pecknold (2022).
     """
-    # Normalise ``frequencies`` up-front so scalars (the docstring promises
-    # they work) don't crash at ``.size`` / ``.flatten()`` below.
-    f = np.atleast_1d(np.asarray(frequencies, dtype=float)).flatten()
+    f = _positive_frequencies(frequencies, 'compute_windnoise')
 
     u = float(u)
     # Written as the negation of the admissible condition so NaN is refused
@@ -275,7 +292,8 @@ def compute_windnoise(frequencies, u, water_depth='deep', band_integrate=False):
         # With a < 0 the melding is a smooth minimum of the two branches: they
         # cross at f0w, so the rising L1w governs below it and the falling L2w
         # above, and the melding rounds off that corner (a few dB below the
-        # crossing, which is why the melded curve peaks a little under f0w).
+        # crossing); the melded curve's maximum sits about 25 % below f0w —
+        # 527 Hz against f0w = 700 Hz at 5 kn, 452 Hz against 640 Hz at 20 kn.
         # It raises ``1 + (L1w/L2w)**(-a)`` to a fractional power, which is real
         # only while that base is positive. Below about 0.01 kn the two
         # asymptotes fall through zero and the base goes negative — the same
@@ -653,17 +671,7 @@ class WenzNoise:
                 f"got {rain_rate!r}"
             )
 
-        self.frequencies = np.asarray(frequencies, dtype=float).flatten()
-        # Every component is a log10(f) fit; a DC (0 Hz) or negative bin — common
-        # when a user passes a raw rfft grid — would yield log10(0)=-inf/NaN
-        # before the sentinel masks run. Reject it up front with a clear message.
-        # ``~(f > 0)`` rather than ``f <= 0`` so a NaN bin is refused as well.
-        if self.frequencies.size == 0 or np.any(~(self.frequencies > 0)):
-            raise ConfigurationError(
-                "WenzNoise: frequencies must be > 0 Hz and finite (the "
-                "empirical fits are log10(f)); drop the DC bin, e.g. "
-                "frequencies[frequencies > 0]."
-            )
+        self.frequencies = _positive_frequencies(frequencies, 'WenzNoise')
         self.wind_speed_kn = float(wind_speed_kn)
         # ``not (w >= 0)`` rather than ``w < 0``: a NaN wind speed passes the
         # latter and then fails the ``> 0`` blend test inside the wind model,

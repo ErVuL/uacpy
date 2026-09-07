@@ -165,8 +165,8 @@ class TestBackendSelection:
     """Pure-Python dispatch logic — no native binaries required."""
 
     def test_fluid_flat_simple_selects_mpirams(self):
-        # A simple half-space fluid bottom auto-routes to mpiramS (native
-        # half-space, more accurate than ramgeo's synthetic-layer wrapping).
+        # A simple half-space fluid bottom auto-routes to mpiramS (no layer
+        # geometry for ramgeo to track).
         env = _env(bottom=_fluid_bottom())
         assert RAM(verbose=False, dr=20.0, dz=2.0).select_backend(env) == 'mpiramS'
 
@@ -184,8 +184,8 @@ class TestBackendSelection:
         assert ram.select_backend(env, RunMode.TIME_SERIES) == 'mpiramS'
 
     def test_ramgeo_accepts_forced_simple_bottom(self):
-        # ramgeo runs on a plain half-space when forced: the writer wraps it
-        # as a synthetic single layer.
+        # ramgeo runs on a plain half-space when forced: the writer emits its
+        # two breakpoints.
         env = _env(bottom=_fluid_bottom())
         assert RAM(verbose=False, dr=20.0, dz=2.0,
                    backend='ramgeo').select_backend(env) == 'ramgeo'
@@ -1369,7 +1369,7 @@ class TestCollinsBroadbandLevel:
         rmax = float(np.max(rcv.ranges))
         fc, Q, T = m._resolve_broadband_grid(src)
         bw, df = fc / Q, 1.0 / T
-        nf1 = max(1, int((bw - df) / df) + 1)
+        nf1 = 0 if bw < df else int((bw - df) / df) + 1   # peramx.f90:362-370
         freqs = np.array([(i - nf1) * df + fc for i in range(2 * nf1 + 1)])
         freqs = freqs[freqs > 0.0]
         dr_b, _ = m._compute_grid_lytaev(env, float(freqs[0]),
@@ -1916,7 +1916,7 @@ class TestTheAutomaticDomainHoldsTheSedimentStack:
         zmax_pe = model._mpirams_zmax(env, self.FREQ, dz)
         span = model._absorber_span(env, self.FREQ, zmax_pe)
         sedlayer, nzs = model._prepare_bottom_properties(
-            env, tmp_path, span, zmax_pe)[:2]
+            env, tmp_path, span, zmax_pe, dz=dz)[:2]
         cps = model._control_point_depths(env.depth, sedlayer, nzs, zmax_pe)
         assert cps[-2] <= zmax_pe
         assert cps[-2] >= env.depth + env.bottom.max_total_thickness()
@@ -2090,10 +2090,10 @@ class TestMpiramsSedimentControlPointsResolveTheDepthCell:
 def _bottom_props(model, env, work_dir, freq=100.0):
     """``_prepare_bottom_properties`` with the absorber geometry the deck
     writer derives, so tests see the same profile mpiramS is given."""
-    dz = model._effective_dz()
+    dz = 0.5
     zmax = model._mpirams_zmax(env, freq, dz)
     span = model._absorber_span(env, freq, zmax)
-    return model._prepare_bottom_properties(env, work_dir, span, zmax)
+    return model._prepare_bottom_properties(env, work_dir, span, zmax, dz=dz)
 
 
 class TestSedimentSpeedFollowsTheLocalSeafloor:
@@ -2117,7 +2117,7 @@ class TestSedimentSpeedFollowsTheLocalSeafloor:
         ``csg = cwg + cs`` (``ram.f90:345-346``) is what mpiramS rebuilds, so
         it is the quantity the deck has to get right — not the raw offset.
         """
-        dz = model._effective_dz()
+        dz = 0.5
         zmax = model._mpirams_zmax(env, freq, dz)
         sedlayer, nzs, _cs, _rho, _attn, isedrd, sed_name = _bottom_props(
             model, env, tmp_path, freq)
@@ -2538,21 +2538,19 @@ class TestMpiramsLayeredSubBottomIsNotSmeared:
         assert cs[nzs - 1] + cwg == pytest.approx(2800.0)
         assert rho[nzs - 2] == pytest.approx(2.5)
         assert rho[nzs - 1] == pytest.approx(2.5)
-        # ``sedlayer`` IS the absorbing layer's start (:meth:`_absorber_span`),
-        # floored by the synthetic half-space thickness (10 % of the water
-        # depth, at least 5 m — the same span the Collins synthetic layer
-        # gets). Since the automatic grid began holding the whole sediment
-        # stack, that span clears the modelled 5 m layer and the two-bottom-
-        # wavelength pad below it instead of collapsing onto the 10 m floor.
+        # ``sedlayer`` IS the absorbing layer's start (:meth:`_absorber_span`).
+        # The automatic grid holds the whole sediment stack, so that span
+        # clears the modelled 5 m layer and the two-bottom-wavelength pad
+        # below it.
         # The interior control points still resolve the layer/half-space step
         # at ``sedlayer/(nzs-3)`` rather than ramping it: the last point
         # inside the 5 m layer still carries the layer, the first point below
         # it already carries the half-space.
         span = model._absorber_span(
-            env, 100.0, model._mpirams_zmax(env, 100.0,
-                                            model._effective_dz()))
+            env, 100.0, model._mpirams_zmax(env, 100.0, 0.5))
         assert sedlayer == pytest.approx(span)
-        assert sedlayer >= max(0.10 * 100.0, 5.0)
+        # stack + two bottom wavelengths, snapped onto the 0.5 m grid
+        assert sedlayer == pytest.approx(5.0 + 2.0 * 2800.0 / 100.0, abs=0.5)
         assert sedlayer > env.bottom.max_total_thickness()
         z_sed = np.linspace(0.0, sedlayer, nzs - 2)
         last_in_layer = int(np.where(z_sed < 5.0)[0][-1])
@@ -2633,7 +2631,8 @@ class TestMpiramsAbsorbingLayerHasTheRequestedWidth:
     def _geometry(model, env, zmax, freq=100.0):
         """``(absorber_width, requested_width)`` for the deck as written."""
         sedlayer, *_ = model._prepare_bottom_properties(
-            env, Path('.'), model._absorber_span(env, freq, zmax), zmax)
+            env, Path('.'), model._absorber_span(env, freq, zmax), zmax,
+            dz=float(model.dz) if model.dz is not None else 0.5)
         requested = (model.absorbing_layer_width * model._resolve_c0(env)
                      / freq)
         return zmax - float(env.depth) - sedlayer, requested
@@ -2673,7 +2672,8 @@ class TestMpiramsAbsorbingLayerHasTheRequestedWidth:
                     density=2.0, attenuation=0.5)))
         model = RAM(backend='mpiramS', verbose=False, dz=0.25, zmax=400.0)
         sedlayer, *_ = model._prepare_bottom_properties(
-            env, Path('.'), model._absorber_span(env, 100.0, 400.0), 400.0)
+            env, Path('.'), model._absorber_span(env, 100.0, 400.0), 400.0,
+            dz=0.25)
         assert sedlayer >= 180.0
 
     @pytest.mark.slow
@@ -2765,7 +2765,7 @@ class TestBroadbandBandStaysPositive:
         with pytest.raises(ConfigurationError, match='lower band edge'):
             RAM._broadband_frequencies(100.0, 0.5, 0.2)
         with pytest.raises(ConfigurationError, match='lower band edge'):
-            RAM._broadband_frequencies(50.0, 50.0, 0.02)   # frq(1) == 0
+            RAM._broadband_frequencies(50.0, 1.0, 0.02)   # frq(1) == 0
 
     @pytest.mark.requires_binary
     @pytest.mark.parametrize('backend', ['mpiramS', 'ramgeo'])
@@ -2778,49 +2778,77 @@ class TestBroadbandBandStaysPositive:
                 env, src, rcv, run_mode=RunMode.BROADBAND)
 
 
-@pytest.mark.requires_binary
-class TestRamNamesTheRealFcConstraintAtTheBandEdge:
-    """``_broadband_frequencies`` marches ``fc ± nf1·Δf``, so the marchable
-    condition is ``fc > nf1·Δf``. With ``nf1`` floored at 1 — the collapsed
-    COHERENT_TL sweep (Q=1e6, T=1) included — Q no longer enters and the
-    binding knob is ``Δf = 1/T``; the error's advice names the knob for the
-    regime it is in. The coherent-TL path runs the same check before the
-    file manager, so a deck whose derived ``fc − Δf`` bin is not positive
-    is never written for the guardless serial binary."""
+class TestASubBinBandMarchesTheCentreFrequencyAlone:
+    """``peramx.f90:362-370``: a band narrower than one bin (``bw < df``)
+    sets ``nf1 = 0`` and marches ``fc`` alone; from one bin wide upwards
+    ``nf1 = int((bw - df)/df) + 1`` marches ``fc ± nf1·Δf``. Every backend
+    follows that one rule — mpiramS inside its loop, the Collins family
+    through :meth:`_broadband_frequencies` — so a COHERENT_TL collapse
+    (Q = 1e6, T = 1) is one march on all four, and the only band edge that
+    can go non-positive is the ``Q``-driven one."""
 
-    def test_fc_equal_to_the_step_is_refused_naming_the_constraint(self):
-        with pytest.raises(ConfigurationError,
-                           match='lower band edge') as exc:
-            RAM._broadband_frequencies(1.0, 1e6, 1.0)
-        msg = str(exc.value)
-        assert 'must exceed' in msg
-        assert 'Lengthen T' in msg
-        assert 'shorten T' not in msg
+    def test_a_sub_bin_band_marches_one_bin(self):
+        assert RAM._broadband_frequencies(800.0, 1e6, 1.0).tolist() == [800.0]
 
-    def test_fc_just_above_the_step_marches_three_positive_bins(self):
-        frq = RAM._broadband_frequencies(1.000001, 1e6, 1.0)
-        assert len(frq) == 3
-        assert frq[0] > 0.0
+    def test_a_band_exactly_one_bin_wide_marches_three(self):
+        # bw = fc/Q = 1 Hz == df = 1/T: nf1 = 1, the low side of the rule.
+        frq = RAM._broadband_frequencies(100.0, 100.0, 1.0)
+        assert frq == pytest.approx([99.0, 100.0, 101.0])
+
+    def test_a_band_just_under_one_bin_wide_marches_one(self):
+        assert RAM._broadband_frequencies(100.0, 100.0001, 1.0).tolist() == \
+            [100.0]
+
+    def test_fc_at_the_frequency_step_marches(self):
+        # fc == Δf is marchable: the single bin sits at fc itself.
+        assert RAM._broadband_frequencies(1.0, 1e6, 1.0).tolist() == [1.0]
 
     def test_a_small_q_band_is_refused_naming_q(self):
         with pytest.raises(ConfigurationError, match='Raise Q'):
             RAM._broadband_frequencies(100.0, 0.5, 0.2)
 
-    def test_coherent_tl_refuses_fc_at_the_step_before_any_file_exists(
+    @pytest.mark.requires_binary  # constructs RAM (resolves its binary)
+    def test_coherent_tl_refuses_a_small_q_before_any_file_exists(
             self, monkeypatch):
-        m = RAM(verbose=False)
+        m = RAM(verbose=False, Q=0.5, T=0.2)
         monkeypatch.setattr(
             m, '_setup_file_manager',
-            lambda: pytest.fail('file manager reached before the fc check'))
+            lambda: pytest.fail('file manager reached before the band check'))
         with pytest.raises(ConfigurationError, match='lower band edge'):
             with warnings.catch_warnings():
                 warnings.simplefilter('ignore')
                 m._run_tl(
                     Environment(name='flat', bathymetry=100.0, ssp=1500.0),
-                    Source(depths=25.0, frequencies=1.0),
+                    Source(depths=25.0, frequencies=100.0),
                     Receiver(depths=np.array([50.0]),
                              ranges=np.array([1000.0])))
 
+    @pytest.mark.requires_binary  # constructs RAM (resolves its binary)
+    def test_the_collins_loop_marches_one_bin_for_a_sub_bin_band(self):
+        """With Q and T pinned the sweep is the spec, so the loop marches
+        ``_broadband_frequencies`` itself: one subprocess, one H(f) bin."""
+        model = RAM(backend='ramgeo', verbose=False, dr=50.0, dz=0.5,
+                    zmax=400.0, Q=1e6, T=1.0)
+        env = _env(bottom=_fluid_bottom())
+        depths, ranges = np.array([30.0, 90.0]), np.array([500.0, 1500.0])
+        marched = []
+
+        def stub_one_freq(*args, **kwargs):
+            marched.append(kwargs['freq'])
+            return dict(tl=np.zeros((2, 2)),
+                        pcomplex=np.ones((2, 2), complex),
+                        depths=depths, ranges=ranges,
+                        dr=50.0, dz=0.5, zmax=400.0)
+
+        model._run_collins_one_freq = stub_one_freq
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            tf = model.run(env, Source(depths=25.0, frequencies=150.0),
+                           Receiver(depths=depths, ranges=ranges),
+                           run_mode=RunMode.BROADBAND)
+        assert marched == [150.0]
+        assert np.asarray(tf.frequencies).tolist() == [150.0]
+        assert tf.data.shape[-1] == 1
 
 # ─── Regression: the mpiramS depth grid really is deltaz-spaced ──────────
 
@@ -2942,7 +2970,8 @@ class TestSubBottomIsIndependentOfSspTabulationDepth:
         zmax = model._mpirams_zmax(env, 100.0, 0.25)
         sedlayer, nzs, cs, _rho, _attn, isedrd, _sed = \
             model._prepare_bottom_properties(
-                env, tmp_path, model._absorber_span(env, 100.0, zmax), zmax)
+                env, tmp_path, model._absorber_span(env, 100.0, zmax), zmax,
+                dz=0.25)
         assert isedrd == 0
         z_ctrl = model._control_point_depths(100.0, sedlayer, nzs, zmax)
         csg = model._ssp_column(env, 0.0, z_ctrl) + cs

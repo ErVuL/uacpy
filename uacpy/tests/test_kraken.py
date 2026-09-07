@@ -240,7 +240,6 @@ class TestKrakenAttenuationUnit:
         kraken._write_kraken_env(
             env_file, env, source,
             receiver_obj=receiver,
-            receiver_depths=receiver.depths,
         )
         text = env_file.read_text()
         topopt_line = text.splitlines()[3]
@@ -1333,13 +1332,14 @@ def test_zero_receiver_range_is_no_data(recwarn):
     assert np.all(np.isfinite(tl[:, 1:]))
 
 
-def test_mode_depth_grid_spans_the_thickest_bottom_column(monkeypatch):
-    """``compute_modes`` sizes its depth grid from the total media depth, which
-    must be summed over the THICKEST bottom column. ``bottom.columns[0]`` is
-    merely the first in storage order — neither the thickest nor necessarily
-    the r=0 one — so keying on it truncates the grid above the sediment of
-    every deeper column. Here column 1 is 80 m against column 0's 20 m, so the
-    grid has to reach 100 + 80 = 180 m."""
+def test_mode_depth_grid_spans_the_column_the_deck_carries(monkeypatch):
+    """``compute_modes`` writes the r = 0 column's stack into the MODES deck
+    (``_bottom_collapse_for(MODES) == 'r0'``) and KRAKEN clamps any receiver
+    below that deck onto it (``misc/SourceReceiverPositions.f90:136-139``),
+    so the depth grid spans the water column plus THAT column's sediment —
+    keyed on ``bottom.at(range=0.0)``, not on storage order and not on the
+    thickest column along the track. Here the r = 0 column is 20 m against
+    80 m at 5 km, so the grid reaches 100 + 20 = 120 m."""
     from uacpy.core.bottom import Bottom, SeabedColumn, SedimentLayer
 
     def _column(thickness):
@@ -1364,7 +1364,7 @@ def test_mode_depth_grid_spans_the_thickest_bottom_column(monkeypatch):
     Kraken(verbose=False)._compute_modes_impl(
         env, Source(depths=50.0, frequencies=100.0), None)
 
-    assert captured['depths'][-1] == pytest.approx(180.0)
+    assert captured['depths'][-1] == pytest.approx(120.0)
 
 
 # ── deck contract: what the vendored reader actually consumes ────────────
@@ -2210,59 +2210,6 @@ class TestKrakenSourceBeamPatternRestrictions:
         assert 'SrcDeclAngle = RadDeg * Angles%alpha( ialpha )' in text
         assert ('s    = ( SrcDeclAngle  - SrcBmPat( IBP, 1 ) )' in text)
 
-    def test_more_than_one_source_depth_is_declared(self, tmp_path,
-                                                    monkeypatch):
-        """The first restriction is the one a caller can trip without
-        noticing, so it warns as well as being documented."""
-        model = Kraken(work_dir=tmp_path, cleanup=False, verbose=False)
-        monkeypatch.setattr(
-            model, '_run_and_attach_prt',
-            lambda *a, **k: (_ for _ in ()).throw(RuntimeError('stop here')))
-        with warnings.catch_warnings(record=True) as rec:
-            warnings.simplefilter('always')
-            with pytest.raises(Exception):
-                model._compute_field_via_exe(
-                    _pekeris(depth=100.0),
-                    Source(depths=[25.0, 60.0], frequencies=[200.0],
-                           beam_pattern=self.PATTERN),
-                    Receiver(depths=[50.0], ranges=[1000.0]))
-        said = [str(w.message) for w in rec
-                if 'source.depths[0] only' in str(w.message)]
-        assert len(said) == 1, [str(w.message) for w in rec]
-        assert 'field.f90:190' in said[0], said[0]
-
-    def test_one_source_depth_is_quiet(self, tmp_path, monkeypatch):
-        model = Kraken(work_dir=tmp_path, cleanup=False, verbose=False)
-        monkeypatch.setattr(
-            model, '_run_and_attach_prt',
-            lambda *a, **k: (_ for _ in ()).throw(RuntimeError('stop here')))
-        with warnings.catch_warnings(record=True) as rec:
-            warnings.simplefilter('always')
-            with pytest.raises(Exception):
-                model._compute_field_via_exe(
-                    _pekeris(depth=100.0),
-                    Source(depths=[25.0], frequencies=[200.0],
-                           beam_pattern=self.PATTERN),
-                    Receiver(depths=[50.0], ranges=[1000.0]))
-        assert [str(w.message) for w in rec
-                if 'source.depths[0] only' in str(w.message)] == []
-
-    def test_no_pattern_is_quiet_on_many_source_depths(self, tmp_path,
-                                                       monkeypatch):
-        model = Kraken(work_dir=tmp_path, cleanup=False, verbose=False)
-        monkeypatch.setattr(
-            model, '_run_and_attach_prt',
-            lambda *a, **k: (_ for _ in ()).throw(RuntimeError('stop here')))
-        with warnings.catch_warnings(record=True) as rec:
-            warnings.simplefilter('always')
-            with pytest.raises(Exception):
-                model._compute_field_via_exe(
-                    _pekeris(depth=100.0),
-                    Source(depths=[25.0, 60.0], frequencies=[200.0]),
-                    Receiver(depths=[50.0], ranges=[1000.0]))
-        assert [str(w.message) for w in rec
-                if 'source.depths[0] only' in str(w.message)] == []
-
 
 class TestAutoSegmentationIsWritableAtDeckResolution:
     """``models/_segmentation.py`` unions the bathymetry / SSP / RD-bottom change
@@ -2773,13 +2720,13 @@ class TestRMaxAutoDefaults:
     def test_narrowband_deck_gets_1_05x(self, tmp_path):
         bounds = Kraken(verbose=False)._write_kraken_env(
             tmp_path / 'nb.env', _pekeris(), self._SRC(),
-            receiver_obj=self._RCV(), receiver_depths=self._RCV().depths)
+            receiver_obj=self._RCV())
         assert bounds['rmax'] == pytest.approx(1.05 * 4000.0)
 
     def test_broadband_deck_gets_3x(self, tmp_path):
         bounds = Kraken(verbose=False)._write_kraken_env(
             tmp_path / 'bb.env', _pekeris(), self._SRC(),
-            receiver_obj=self._RCV(), receiver_depths=self._RCV().depths,
+            receiver_obj=self._RCV(),
             frequencies=np.linspace(80.0, 120.0, 5))
         assert bounds['rmax'] == pytest.approx(3.0 * 4000.0)
 
@@ -2787,14 +2734,14 @@ class TestRMaxAutoDefaults:
         # The gate is len(frequencies) > 1, matching the run-mode promotion.
         bounds = Kraken(verbose=False)._write_kraken_env(
             tmp_path / 'one.env', _pekeris(), self._SRC(),
-            receiver_obj=self._RCV(), receiver_depths=self._RCV().depths,
+            receiver_obj=self._RCV(),
             frequencies=np.array([100.0]))
         assert bounds['rmax'] == pytest.approx(1.05 * 4000.0)
 
     def test_pinned_rmax_wins_everywhere(self, tmp_path):
         bounds = Kraken(verbose=False, rmax_m=9000.0)._write_kraken_env(
             tmp_path / 'pin.env', _pekeris(), self._SRC(),
-            receiver_obj=self._RCV(), receiver_depths=self._RCV().depths,
+            receiver_obj=self._RCV(),
             frequencies=np.linspace(80.0, 120.0, 5))
         assert bounds['rmax'] == 9000.0
 
@@ -3779,3 +3726,52 @@ class TestNarrowbandLineSourceCarriesTheSameLevelAsBroadband:
             f"offsets {offsets} differ by {offsets[0] - offsets[1]:.4f} dB; "
             f"c(z_s) read at the source depth predicts {expected:.4f} dB "
             f"(c={c_shallow} vs {c_deep}). A column-wide speed gives 0.")
+
+
+def test_field_exe_non_fatal_warnings_are_surfaced(tmp_path, monkeypatch):
+    """field.exe writes its non-fatal ``Warning in ...`` lines to
+    ``field.prt`` (``KrakenField/ReadModes.f90:90-111``); the launch reads
+    that log back and passes them on as a ``UserWarning``, as every other
+    AT launch does through ``_run_and_attach_prt``."""
+    model = Kraken(work_dir=tmp_path, cleanup=False)
+    fm = model._setup_file_manager()
+
+    def fake_run(cmd, **kwargs):
+        (fm.work_dir / 'field.prt').write_text(
+            "Warning in ReadModes : Receiver below depth of bottom\n"
+            "Field completed successfully\n")
+        (fm.work_dir / 'model.shd').write_bytes(b'\x00' * 8)
+
+    monkeypatch.setattr(model, '_run_subprocess', fake_run)
+    with pytest.warns(UserWarning, match='Receiver below depth of bottom'):
+        model._run_field_exe(fm, 'model', 'RC C')
+
+
+def test_the_mode_grid_is_sized_on_the_column_the_modes_are_solved_on():
+    """``compute_modes`` solves the r = 0 profile, so its default depth grid
+    spans that column's water plus THAT column's sediment stack — not the
+    thickest stack anywhere along the track, which would ask KRAKEN for
+    depths below the deck it wrote and draw its 'moved up' warning on a grid
+    the wrapper built itself."""
+    near = SeabedColumn(
+        layers=[SedimentLayer(5, 1650, 1.8, 0.3)],
+        halfspace=BoundaryProperties(acoustic_type='half-space',
+                                     sound_speed=1800, density=2.0,
+                                     attenuation=0.2))
+    far = SeabedColumn(
+        layers=[SedimentLayer(30, 1650, 1.8, 0.3)],
+        halfspace=BoundaryProperties(acoustic_type='half-space',
+                                     sound_speed=1800, density=2.0,
+                                     attenuation=0.2))
+    env = Environment(name='thickening-bed', bathymetry=50.0, ssp=1500.0,
+                      bottom=Bottom.from_columns([near, far],
+                                                 ranges=np.array([0.0, 5000.0])))
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter('always')
+        modes = Kraken(verbose=False).compute_modes(
+            env, Source(depths=25.0, frequencies=100.0))
+    said = [str(w.message) for w in rec
+            if 'resolvable depth' in str(w.message)
+            or 'moved up' in str(w.message)]
+    assert said == [], said
+    assert float(np.max(modes.depths)) <= 55.0 + 1e-9

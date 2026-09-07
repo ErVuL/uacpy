@@ -189,6 +189,22 @@ _RADON_AXIS = {
 }
 
 
+def _plot_tau_panel(x, taus, amp, ax, *, vmin, vmax, cmap, figsize,
+                    show_colorbar, **mpl_kw):
+    """Image a stack ``amp`` (x, tau) with the largest tau at the bottom, so
+    intercept time runs downward: the seismic gather convention."""
+    fig, ax = fig_ax(ax, figsize)
+    im = ax.imshow(amp.T, aspect="auto", origin="upper",
+                   extent=_flip_y(_cell_edge_extent(x, taus)),
+                   vmin=0.0 if vmin is None else vmin,
+                   vmax=amp.max() if vmax is None else vmax,
+                   cmap=cmap, **mpl_kw)
+    ax.set_ylabel("Intercept time tau (s)")
+    if show_colorbar:
+        fig.colorbar(im, ax=ax, label="Stack amplitude")
+    return fig, ax
+
+
 @typed_plot_error
 def plot_radon(moveout, taus, R, ax=None, *, kind="linear", vmin=None,
                vmax=None, cmap="jet", title=None, figsize=(8, 6),
@@ -198,21 +214,11 @@ def plot_radon(moveout, taus, R, ax=None, *, kind="linear", vmin=None,
     amp = _require_image_grid(np.abs(np.asarray(R)), len(moveout), len(taus),
                               "plot_radon", "moveout", "taus")
     xlabel, scale = _RADON_AXIS.get(kind, ("Moveout", 1.0))
-    m = np.asarray(moveout) * scale
-    vmax = amp.max() if vmax is None else vmax
-    vmin = 0.0 if vmin is None else vmin
-    fig, ax = fig_ax(ax, figsize)
-    # ``amp`` is (moveout, tau); transposed it is (tau, moveout) = (row, col).
-    # The extent puts the largest tau at the bottom, so intercept time runs
-    # downward — the seismic gather convention.
-    im = ax.imshow(amp.T, aspect="auto", origin="upper",
-                   extent=_flip_y(_cell_edge_extent(m, taus)),
-                   vmin=vmin, vmax=vmax, cmap=cmap, **mpl_kw)
+    fig, ax = _plot_tau_panel(np.asarray(moveout) * scale, taus, amp, ax,
+                              vmin=vmin, vmax=vmax, cmap=cmap, figsize=figsize,
+                              show_colorbar=show_colorbar, **mpl_kw)
     ax.set_title(title or f"Radon ({kind})", loc="left")
     ax.set_xlabel(xlabel)
-    ax.set_ylabel("Intercept time tau (s)")
-    if show_colorbar:
-        fig.colorbar(im, ax=ax, label="Stack amplitude")
     return fig, ax
 
 
@@ -236,21 +242,13 @@ def plot_taup(slownesses, taus, taup, ax=None, *, vmin=None, vmax=None,
     p_skm = np.asarray(slownesses) * 1000.0      # taup_transform returns s/m
     amp = _require_image_grid(np.abs(np.asarray(taup)), len(slownesses),
                               len(taus), "plot_taup", "slownesses", "taus")
-    vmax = amp.max() if vmax is None else vmax
-    vmin = 0.0 if vmin is None else vmin
-    fig, ax = fig_ax(ax, figsize)
-    # Transposed to (tau, slowness) with tau increasing downward, as in
-    # plot_radon.
-    im = ax.imshow(amp.T, aspect="auto", origin="upper",
-                   extent=_flip_y(_cell_edge_extent(p_skm, taus)),
-                   vmin=vmin, vmax=vmax, cmap=cmap, **mpl_kw)
+    fig, ax = _plot_tau_panel(p_skm, taus, amp, ax, vmin=vmin, vmax=vmax,
+                              cmap=cmap, figsize=figsize,
+                              show_colorbar=show_colorbar, **mpl_kw)
     if sound_speed is not None:
         draw_slowness_line(ax, taus[-1], sound_speed)
     ax.set_title(title or "tau-p", loc="left")
     ax.set_xlabel("Slowness p (s/km)")
-    ax.set_ylabel("Intercept time tau (s)")
-    if show_colorbar:
-        fig.colorbar(im, ax=ax, label="Stack amplitude")
     return fig, ax
 
 

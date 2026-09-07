@@ -234,7 +234,11 @@ def _resolve_hop(hop, kernels, n_samples, caller):
     return hop
 
 
-def _cq_setup(data, sample_rate, fmin, fmax, bins_per_octave, window, caller):
+def _cq_setup(data, sample_rate, fmin, fmax, bins_per_octave, window, caller,
+              drops_short_bins):
+    """Validate, build the kernel bank and warn about bins that never fit;
+    ``drops_short_bins`` says whether ``caller`` drops such a bin (the
+    averaging estimators) or evaluates it on a zero-padded window."""
     data = np.asarray(data)
     if np.iscomplexobj(data):
         raise ConfigurationError(
@@ -258,6 +262,8 @@ def _cq_setup(data, sample_rate, fmin, fmax, bins_per_octave, window, caller):
     kernels = _cq_kernels(freqs, Q, fs, window)
     n_lowest = kernels[0][0]
     if n_lowest > x.size:
+        fate = ("dropped from the average" if drops_short_bins else
+                "evaluated on a zero-padded window and read low there")
         # Every public constant-Q estimator funnels through this setup helper,
         # so the frame the user wrote is two deep here, not one: a
         # hand-counted ``stacklevel=2`` named this module's own call line for
@@ -267,8 +273,7 @@ def _cq_setup(data, sample_rate, fmin, fmax, bins_per_octave, window, caller):
         warnings.warn(
             f"{caller}: lowest bin needs {n_lowest} samples (Q·fs/fmin) but the "
             f"signal has {x.size}; low-frequency bins never fit a full window "
-            "and are dropped from the average. Raise fmin or lengthen the "
-            "signal.",
+            f"and are {fate}. Raise fmin or lengthen the signal.",
             UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
     bias_db = 10.0 * np.log10(1.0 + _cq_image_ratio(freqs, fs, kernels) ** 2)
     hot = np.flatnonzero(bias_db > _CQ_IMAGE_BIAS_WARN_DB)
@@ -306,7 +311,7 @@ def constant_q_transform(data, sample_rate, *, fmin=20.0, fmax=None,
     """
     x, fs, freqs, kernels = _cq_setup(
         data, sample_rate, fmin, fmax, bins_per_octave, window,
-        "constant_q_transform")
+        "constant_q_transform", drops_short_bins=False)
     coeffs, _ = _cq_frame(x, x.size // 2, kernels)
     return CQTResult(freqs, coeffs)
 
@@ -327,7 +332,7 @@ def constant_q_spectrogram(data, sample_rate, *, fmin=20.0, fmax=None,
     _check_scaling(scaling, "constant_q_spectrogram")
     x, fs, freqs, kernels = _cq_setup(
         data, sample_rate, fmin, fmax, bins_per_octave, window,
-        "constant_q_spectrogram")
+        "constant_q_spectrogram", drops_short_bins=False)
     hop = _resolve_hop(hop, kernels, x.size, "constant_q_spectrogram")
     times, power, _valid = _cq_power_frames(x, fs, kernels, hop, scaling)
     return CQSpectrogramResult(freqs, times, power)
@@ -348,7 +353,7 @@ def constant_q_psd(data, sample_rate, *, fmin=20.0, fmax=None,
     _check_scaling(scaling, "constant_q_psd")
     x, fs, freqs, kernels = _cq_setup(
         data, sample_rate, fmin, fmax, bins_per_octave, window,
-        "constant_q_psd")
+        "constant_q_psd", drops_short_bins=True)
     hop = _resolve_hop(hop, kernels, x.size, "constant_q_psd")
     _, power, valid = _cq_power_frames(x, fs, kernels, hop, scaling)
     avg = np.full(freqs.size, np.nan)
@@ -370,7 +375,7 @@ def probabilistic_constant_q(data, sample_rate, *, fmin=20.0, fmax=None,
     whereas ``ppsd`` histograms Welch averages over ``seg_duration`` chunks,
     so the level spread here is wider for the same signal. Only frames whose
     window lay fully inside the signal contribute (per bin). Returns a :class:`CQPPSDResult`
-    ``(frequencies, level_edges, pdf, mean_db, std_db, binwidth_db, ref)``;
+    ``(frequencies, level_edges, pdf, mean_db, std_db, binwidth_db, ref, scaling)``;
     ``pdf`` is shaped ``(n_levels, n_freqs)`` and density-normalised per
     frequency column (empty bins are ``NaN``). With ``scaling='density'`` the
     levels are PSD levels (dB re ref²/Hz) rather than band-power levels
@@ -381,7 +386,7 @@ def probabilistic_constant_q(data, sample_rate, *, fmin=20.0, fmax=None,
     _check_scaling(scaling, "probabilistic_constant_q")
     x, fs, freqs, kernels = _cq_setup(
         data, sample_rate, fmin, fmax, bins_per_octave, window,
-        "probabilistic_constant_q")
+        "probabilistic_constant_q", drops_short_bins=True)
     hop = _resolve_hop(hop, kernels, x.size, "probabilistic_constant_q")
     _, power, valid = _cq_power_frames(x, fs, kernels, hop, scaling)
     level_edges = np.arange(lvlmin, lvlmax + ddB, ddB)

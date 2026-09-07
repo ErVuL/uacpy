@@ -24,7 +24,6 @@ FEATURES DEMONSTRATED:
 """
 
 import sys
-import wave
 import os
 from pathlib import Path
 
@@ -46,13 +45,7 @@ from uacpy.comms.ofdm import (  # noqa: E402
     ofdm_demodulate,
     schmidl_cox_sync,
 )
-
-
-def _write_wav(path, signal, fs):
-    x = signal / (np.max(np.abs(signal)) + 1e-12)
-    with wave.open(str(path), 'wb') as w:
-        w.setnchannels(1); w.setsampwidth(2); w.setframerate(int(fs))
-        w.writeframes((x * 32767).astype(np.int16).tobytes())
+from plotting_utils import write_wav as _write_wav  # noqa: E402
 
 
 def main():
@@ -60,7 +53,7 @@ def main():
     print("EXAMPLE 33: OFDM Underwater Modem (text -> .wav -> text)")
     print("═" * 80)
     rng = np.random.default_rng(0xACED)
-    fs, fc, os = 96000.0, 24000.0, 4
+    fs, fc, oversampling = 96000.0, 24000.0, 4
     nsc, cp = 256, 32
 
     message = (b"OFDM underwater modem: a cyclic prefix turns long multipath into "
@@ -70,10 +63,10 @@ def main():
 
     code = comms.ConvCode(interleave_depth=16)
     tx = comms.OFDMTransmitter("qpsk", nsc, cp, code=code)
-    wav = tx.transmit_passband(frame_bits, fs, fc, oversample=os)
+    wav = tx.transmit_passband(frame_bits, fs, fc, oversample=oversampling)
     wav_path = OUTPUT_DIR / "example_33_ofdm.wav"
     _write_wav(wav_path, wav, fs)
-    band = fs / os
+    band = fs / oversampling
     print(f"  waveform   : {wav.size} real samples, {wav.size/fs*1e3:.0f} ms @ "
           f"{fs/1e3:.0f} kHz, band {(fc-band/2)/1e3:.0f}-{(fc+band/2)/1e3:.0f} kHz")
     print(f"  wrote      : {wav_path.name}")
@@ -91,9 +84,9 @@ def main():
     # --- receive ---
     rxr = comms.OFDMReceiver("qpsk", nsc, cp, code=code)
     scale, _, _ = comms.estimate_doppler_scale(
-        rx, comms.upconvert(resample_poly(rxr.preamble, os, 1), fs, fc),
+        rx, comms.upconvert(resample_poly(rxr.preamble, oversampling, 1), fs, fc),
         np.linspace(-3e-4, 3e-4, 31))
-    out_bits = rxr.receive_passband(rx, fs, fc, oversample=os, doppler_scale=scale)
+    out_bits = rxr.receive_passband(rx, fs, fc, oversample=oversampling, doppler_scale=scale)
     payload, crc_ok = comms.unpack_frame(out_bits)
     print(f"\n  Doppler est: {scale*1e3:+.2f}e-3  (resampled out)")
     print(f"  CRC        : {'OK' if crc_ok else 'FAIL'}")
@@ -103,7 +96,7 @@ def main():
     # Recompute internals for the figure. Everything the public API returns is
     # taken from it; only the two quantities it does not hand back — the timing
     # metric and the per-block phase-corrected symbols — are rebuilt here.
-    bb = rxr.from_passband(rx, fs, fc, oversample=os, doppler_scale=scale)
+    bb = rxr.from_passband(rx, fs, fc, oversample=oversampling, doppler_scale=scale)
     start, cfo = schmidl_cox_sync(bb, nsc)
     # schmidl_cox_sync returns only (start, cfo), so the metric it searched is
     # rebuilt to plot it: P(d) and R(d) are the length-L sliding sums of

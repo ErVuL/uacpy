@@ -319,7 +319,7 @@ class TestSedimentBlockIsResolvedByZread:
 
         The block is parsed out of ``ramgeo.in`` rather than rebuilt, because
         rebuilding it is exactly what went wrong once — the deck carries depths
-        *relative to the seafloor*, wraps a bare half-space as a synthetic layer,
+        *relative to the seafloor*, writes a bare half-space as two breakpoints,
         and has extra attenuation points from the absorbing ramp."""
         env = self._env(thickness)
         src, rcv = self._src_rcv()
@@ -397,8 +397,8 @@ class TestSedimentBlockIsResolvedByZread:
         dz_layered = float(RAM(verbose=False).run(env_layered, src, rcv)
                            .metadata['dz'])
         assert dz_plain > dz_layered
-        # The writer wraps a pure half-space as one synthetic layer, so the block
-        # is not empty — what matters is that its points do not collide.
+        # A pure half-space is two breakpoints plus the ramp's start, so the
+        # block is not empty — what matters is that its points do not collide.
         assert not RAM(verbose=False)._block_loses_a_point(
             env_plain, dz_plain, 800.0, 'ramgeo', 50.0)
 
@@ -469,6 +469,128 @@ class TestAbsorbingRampLeavesTheSedimentColumnAlone:
         assert out[-1] == (400.0, 10.0)
 
 
+class TestAbsorbingRampSpansTheAbsorbingWidthUnderAHalfSpace:
+    """On the automatic grid every backend ramps its attenuation over exactly
+    ``absorbing_layer_width`` wavelengths above the domain floor, and the ramp
+    starts ``_SEABED_WAVELENGTHS_BEFORE_ABSORBER`` bottom wavelengths below the
+    seafloor — one rule for the four backends. A bare half-space is written as
+    its two breakpoints, so nothing but the domain size decides where the
+    ramp starts (``RAM.md`` p.2: the attenuation is "increased over the lower
+    few wavelengths of the grid"). Without the ramp the grid floor is a
+    pressure-release reflector under a flat-attenuation seabed
+    (``ramgeo1.5.f:312-335`` updates ``u(2..nz+1)`` over a zeroed ``u``).
+    """
+
+    CASES = [(100.0, 3500.0), (1000.0, 300.0), (30.0, 2000.0)]
+    C_BOTTOM = 1600.0
+
+    @classmethod
+    def _half_space(cls, depth, attn=0.5):
+        return Environment(
+            bathymetry=depth, ssp=1500.0,
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=cls.C_BOTTOM, density=1.8,
+                                      attenuation=attn))
+
+    @staticmethod
+    def _absorbing_width(model, env, freq):
+        return model.absorbing_layer_width * model._resolve_c0(env) / freq
+
+    @pytest.mark.parametrize('kind', ['ramgeo', 'ramsurf', 'rams'])
+    @pytest.mark.parametrize('depth, freq', CASES)
+    def test_the_collins_ramp_is_the_absorbing_width_wide(self, kind, depth,
+                                                          freq):
+        model = RAM(verbose=False)
+        env = self._half_space(depth)
+        zmax = model._compute_zmax(env, freq)
+        (seg,) = model._collins_range_segments(env, kind, zmax, freq)
+        attn = seg['bottom_attn']
+        # ramgeo/ramsurf blocks are depth below the seafloor, rams absolute.
+        z_floor = zmax - depth if kind in ('ramgeo', 'ramsurf') else zmax
+        width = self._absorbing_width(model, env, freq)
+        assert attn[-1][0] == pytest.approx(z_floor)
+        assert attn[-1][1] == pytest.approx(model.absorbing_layer_attn)
+        z_start, attn_start = attn[-2]
+        assert z_start == pytest.approx(z_floor - width), (
+            f"{kind}: ramp {z_floor - z_start:.2f} m wide, "
+            f"absorbing width {width:.2f} m")
+        assert attn_start == pytest.approx(0.5)
+        # Everything above the ramp is the half-space itself.
+        assert all(a == pytest.approx(0.5) for _, a in attn[:-1])
+
+    @pytest.mark.parametrize('depth, freq', CASES)
+    def test_the_ramp_starts_two_bottom_wavelengths_below_the_seafloor(
+            self, depth, freq):
+        from uacpy.models.ram import _SEABED_WAVELENGTHS_BEFORE_ABSORBER
+        model = RAM(verbose=False)
+        env = self._half_space(depth)
+        zmax = model._compute_zmax(env, freq)
+        (seg,) = model._collins_range_segments(env, 'ramgeo', zmax, freq)
+        pad = _SEABED_WAVELENGTHS_BEFORE_ABSORBER * self.C_BOTTOM / freq
+        assert seg['bottom_attn'][-2][0] == pytest.approx(pad)
+
+    @pytest.mark.parametrize('depth, freq', CASES)
+    def test_the_mpirams_domain_and_ramp_follow_the_same_rule(self, depth,
+                                                              freq, tmp_path):
+        """mpiramS's ramp runs from control point ``nzs-1`` at
+        ``seafloor + sedlayer`` to ``zmax`` (``ram.f90:334-342``), so its
+        domain is sized by the same pad + absorbing width and ``sedlayer`` is
+        that pad — no depth-fraction floor on either."""
+        from uacpy.models.ram import _SEABED_WAVELENGTHS_BEFORE_ABSORBER
+        model = RAM(verbose=False)
+        env = self._half_space(depth)
+        dz = 0.1
+        pad = _SEABED_WAVELENGTHS_BEFORE_ABSORBER * self.C_BOTTOM / freq
+        width = self._absorbing_width(model, env, freq)
+        zmax = model._mpirams_zmax(env, freq, dz)
+        # Snapped onto the dz grid: within half a cell of the rule.
+        assert zmax == pytest.approx(depth + max(dz, pad) + width,
+                                     abs=0.5 * dz + 1e-3)
+        span = model._absorber_span(env, freq, zmax)
+        sedlayer = model._prepare_bottom_properties(
+            env, tmp_path, span, zmax, dz=dz)[0]
+        assert sedlayer == pytest.approx(span)
+        assert span == pytest.approx(max(dz, pad), abs=0.5 * dz + 1e-3)
+
+    def test_a_ramgeo_field_matches_a_grid_too_deep_for_its_floor_to_matter(
+            self, tmp_path):
+        """A lossless half-space returns everything the seabed does not
+        absorb, so a grid floor the ramp does not shield shows as a level
+        bias against a domain whose floor is far below the seabed. Levels
+        are compared intensity-averaged over 100 m windows so interference
+        fringes cannot be mistaken for a level error; ``dr``/``dz`` pinned
+        so only ``zmax`` moves between the two runs. The deep grid moves the
+        absorber itself, so coherent fringes still shift by ~0.8 dB rms even
+        with the ramp in place; a deck whose ramp is 0.3 m wide sits at
+        -0.5 dB mean / 1.7 dB max incoherent and 3.8 dB rms coherent."""
+        env = self._half_space(100.0, attn=0.0)
+        src = Source(depths=30.0, frequencies=3500.0)
+        rcv = Receiver(depths=[50.0, 90.0],
+                       ranges=np.arange(100.0, 1500.0, 10.0))
+
+        def tl(zmax):
+            kw = dict(backend='ramgeo', verbose=False, dr=1.0, dz=0.025,
+                      work_dir=str(tmp_path / f'zmax_{zmax}'))
+            if zmax is not None:
+                kw['zmax'] = zmax
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                return np.asarray(RAM(**kw).run(env, src, rcv).tl, dtype=float)
+
+        def incoherent(tl_db):
+            intensity = 10.0 ** (-tl_db / 10.0)
+            windows = intensity.reshape(intensity.shape[0], -1, 10)
+            return -10.0 * np.log10(windows.mean(axis=2))
+
+        auto, deep = tl(None), tl(160.0)
+        bias = incoherent(auto) - incoherent(deep)
+        assert abs(float(bias.mean())) < 0.1, (
+            f"incoherent level bias {bias.mean():+.2f} dB against 160 m")
+        assert float(np.max(np.abs(bias))) < 0.3
+        rms = float(np.sqrt(np.mean((auto - deep) ** 2)))
+        assert rms < 1.5, f"coherent rms {rms:.2f} dB against zmax = 160 m"
+
+
 class TestElasticLayerFollowsSlopingBathymetry:
     """``rams0.5.f:490-516`` reads ``lamb(i)``/``mub(i)``/``rhob(i)`` at the
     absolute depth index, unlike ``ramgeo1.5.f:262-268`` whose ``matrc``
@@ -488,7 +610,7 @@ class TestElasticLayerFollowsSlopingBathymetry:
                                   shear_speed=300.0, shear_attenuation=1.0)],
             halfspace=hs)
             if layered else
-            SeabedColumn.from_halfspace(hs, water_depth=100.0))
+            SeabedColumn.from_halfspace(hs))
         return Environment(bathymetry=[(0.0, 100.0), (10000.0, 300.0)],
                            ssp=1500.0, bottom=Bottom([col]))
 
@@ -502,8 +624,8 @@ class TestElasticLayerFollowsSlopingBathymetry:
         assert all(b >= a for a, b in zip(tops, tops[1:]))
 
     def test_half_space_column_gains_no_sections(self):
-        # from_halfspace(synthesize=True) gives every profile point the same
-        # value, so anchoring cannot matter and extra sections are pure cost.
+        # Both breakpoints of a half-space carry the same value, so anchoring
+        # cannot matter and extra sections are pure cost.
         segs = RAM()._collins_range_segments(
             self._env(layered=False), 'rams', zmax=700.0, freq=100.0)
         assert len(segs) == 1
@@ -1154,6 +1276,84 @@ class TestEveryPerRangeStreamBoundsDr:
                                         bathymetry_ranges=bathy)
 
 
+class TestSedimentOffsetsFollowTheSeafloorBetweenBottomBreaks:
+    """mpiramS rebuilds the seabed speed as ``csg = cwg + cs`` against the
+    LOCAL water column (``ram.f90:345-346``) and marches with the nearest
+    written profile (``:316-320``), so ``cs`` has to be re-referenced
+    wherever the water speed at the seafloor moves — the bathymetry samples
+    and SSP breaks of :meth:`_seafloor_speed_ranges` — on a range-dependent
+    bottom exactly as on a range-independent one. A profile written only at
+    the bottom's own breaks leaves every range between them referenced to a
+    seafloor that is not its own, drifting by ``|dc/dz|·Δseafloor``."""
+
+    @staticmethod
+    def _env():
+        # 100 → 200 m slope under a 0.1 s⁻¹ downward-refracting gradient, on
+        # a half-space that steps from 1600 to 1700 m/s at 3 km.
+        return Environment(
+            name='rd-halfspace-gradient',
+            bathymetry=Bathymetry(ranges=[0.0, 5000.0], depths=[100.0, 200.0]),
+            ssp=SoundSpeedProfile.from_pairs(
+                np.array([[0.0, 1520.0], [200.0, 1500.0]])),
+            bottom=Bottom.from_halfspaces(
+                np.array([0.0, 3000.0]),
+                sound_speed=np.array([1600.0, 1700.0]),
+                density=np.array([1.6, 1.8]),
+                attenuation=np.array([0.5, 0.3])))
+
+    def _profiles(self, tmp_path):
+        model = RAM(backend='mpiramS', verbose=False, dz=0.5)
+        env = self._env()
+        written = {}
+
+        def capture(work_dir, ranges, cs, rho, attn):
+            written.update(ranges=np.asarray(ranges, float), cs=cs,
+                           rho=rho, attn=attn)
+            return 'sediment.sed'
+
+        model._write_sediment_profiles = capture
+        zmax = model._mpirams_zmax(env, 100.0, 0.5)
+        span = model._absorber_span(env, 100.0, zmax)
+        sedlayer, nzs, *_rest, isedrd, _ = model._prepare_bottom_properties(
+            env, tmp_path, span, zmax, dz=0.5)
+        assert isedrd == 1
+        return model, env, written, sedlayer, nzs, zmax
+
+    def test_profiles_are_written_where_the_seafloor_speed_moves(
+            self, tmp_path):
+        model, env, written, *_ = self._profiles(tmp_path)
+        expected = set(model._seafloor_speed_ranges(env)) | {0.0, 3000.0}
+        assert expected <= set(written['ranges'].tolist())
+
+    def test_a_mid_break_profile_is_referenced_to_its_own_seafloor(
+            self, tmp_path):
+        model, env, written, sedlayer, nzs, zmax = self._profiles(tmp_path)
+        ranges = written['ranges']
+        # A written range strictly inside the first bottom column, away
+        # from both of its breaks.
+        inside = [r for r in ranges if 500.0 < r < 2500.0]
+        assert inside, ranges
+        r = inside[len(inside) // 2]
+        i = int(np.where(ranges == r)[0][0])
+        seafloor = float(np.asarray(env.bathymetry.eval(range=r)).flat[0])
+        z_ctrl = model._control_point_depths(seafloor, sedlayer, nzs, zmax)
+        rebuilt = model._ssp_column(env, r, z_ctrl) + written['cs'][:, i]
+        assert rebuilt[1:] == pytest.approx(1600.0)
+        assert written['rho'][1:, i] == pytest.approx(1.6)
+
+    def test_the_column_switch_stays_at_the_bottoms_own_midpoint(
+            self, tmp_path):
+        # ``Bottom.at`` is nearest, so the 1600 → 1700 m/s switch belongs
+        # midway between the 0 and 3 km breaks; mpiramS's nearest-profile
+        # rule over profiles ≤ span/127 apart moves it by at most half that.
+        model, env, written, *_ = self._profiles(tmp_path)
+        ranges, rho = written['ranges'], written['rho']
+        k = int(np.argmax(rho[-2, :] > 1.7))
+        assert k > 0
+        switch = 0.5 * (ranges[k - 1] + ranges[k])
+        assert switch == pytest.approx(1500.0, abs=5000.0 / 254.0)
+
+
 class TestZeroRangeReceiverIsNaN:
     """A receiver at r = 0 sits on the source axis, where the point-source
     cylindrical-spreading factor 1/sqrt(r) is singular: the column is
@@ -1344,6 +1544,24 @@ class TestMarkDivergedCollinsSamples:
         with pytest.warns(UserWarning, match='OAST / Scooter'):
             RAM(verbose=False)._mark_diverged_collins_samples(
                 self._raw(), elastic, 'rams')
+
+    def test_surviving_samples_are_the_engines_own_bits(self):
+        """Every valid sample is returned as read — equal to the input
+        bit for bit, not rebuilt from its magnitude and phase (which lands
+        one ULP off on a large share of samples)."""
+        fluid, _ = self._envs()
+        rng = np.random.default_rng(7)
+        n = 20000
+        psi = (10.0 ** rng.uniform(-6.0, 2.0, n)
+               * np.exp(1j * rng.uniform(-np.pi, np.pi, n)))
+        raw = {'tl': -20.0 * np.log10(np.abs(psi)) + 60.0,
+               'pcomplex': psi, 'ranges': np.full(n, 1000.0),
+               'frequency': 100.0}
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            out = RAM(verbose=False)._mark_diverged_collins_samples(
+                raw, fluid, 'ramgeo')
+        assert np.array_equal(out, psi)
 
 
 class TestGridResolverConstraints:
@@ -2046,14 +2264,11 @@ def test_ram_source_row_guard_runs_before_the_deck_is_written(tmp_path):
         "the refusal left a half-written deck behind")
 
 
-class TestRamHalfSpaceSedimentLayerIsFloored:
-    """A bare half-space contributes no layer thickness of its own, so without
-    a floor ``sedlayer`` collapses to one depth cell and the attenuation ramp
-    starts at the seabed itself — replacing the seabed's own attenuation over
-    the whole sub-bottom, which ``_absorber_span`` exists to prevent. The floor
-    is the same synthetic thickness the Collins path wraps a half-space in
-    (``SeabedColumn.from_halfspace``: 10 % of the water depth, at least 5 m),
-    so the ramp begins below genuinely modelled seabed.
+class TestRamHalfSpaceSedimentLayerIsTheAbsorberSpan:
+    """``sedlayer`` is where mpiramS's attenuation ramp starts below the
+    seafloor (:meth:`_absorber_span`), floored at one depth cell so control
+    point ``nzs-1`` sits below the seafloor point. A bare half-space adds no
+    layer thickness of its own: the span alone sets it, on every grid.
     """
 
     @staticmethod
@@ -2064,25 +2279,29 @@ class TestRamHalfSpaceSedimentLayerIsFloored:
                 acoustic_type='half-space', sound_speed=1800.0, density=1.8,
                 attenuation=0.5, shear_speed=800.0, shear_attenuation=0.2))
 
-    @pytest.mark.parametrize('depth, expected', [(100.0, 10.0), (30.0, 5.0)])
-    def test_the_floor_follows_the_synthetic_layer_thickness(self, depth,
-                                                             expected,
-                                                             tmp_path):
-        # 100 m -> 10 % of the water depth; 30 m -> the 5 m minimum, since
-        # 10 % of 30 m is under it.
-        sedlayer = RAM(backend='rams', verbose=False)._prepare_bottom_properties(
-            self._halfspace_env(depth), tmp_path,
-            1.0, depth * 2.0)[0]
-        assert sedlayer == pytest.approx(expected)
+    def _sedlayer(self, depth, span, zmax, dz, tmp_path):
+        return RAM(backend='rams', verbose=False)._prepare_bottom_properties(
+            self._halfspace_env(depth), tmp_path, span, zmax, dz=dz)[0]
+
+    @pytest.mark.parametrize('depth', [100.0, 30.0, 3000.0])
+    def test_the_span_sets_the_thickness_at_every_depth(self, depth,
+                                                        tmp_path):
+        # No depth-fraction floor: 1 m of span stays 1 m in 3 km of water.
+        assert self._sedlayer(depth, 1.0, depth * 2.0, 0.5, tmp_path) == \
+            pytest.approx(1.0)
+
+    def test_a_span_thinner_than_one_cell_is_floored_at_the_cell(self,
+                                                                 tmp_path):
+        assert self._sedlayer(100.0, 0.2, 200.0, 0.5, tmp_path) == \
+            pytest.approx(0.5)
+
+    def test_a_span_of_exactly_one_cell_is_the_cell(self, tmp_path):
+        assert self._sedlayer(100.0, 0.5, 200.0, 0.5, tmp_path) == \
+            pytest.approx(0.5)
 
     def test_a_deeper_absorber_span_sets_the_thickness(self, tmp_path):
-        # The floor is a minimum, not an override: every builder stretches
-        # sedlayer to the absorbing layer's start.
-        sedlayer = RAM(backend='rams', verbose=False)._prepare_bottom_properties(
-            self._halfspace_env(100.0), tmp_path,
-            250.0, 200.0)[0]
-        assert sedlayer == pytest.approx(250.0)
-
+        assert self._sedlayer(100.0, 250.0, 200.0, 0.5, tmp_path) == \
+            pytest.approx(250.0)
 
 class TestRamSectionSpacingWarnsOnlyForACallersOwnDr:
     """``dr`` is always bounded by the closest profile-section spacing, because
@@ -2415,26 +2634,26 @@ class TestRamGridHoldsTheWholeSedimentStack:
             model._compute_zmax(self._stacked(), self.FREQ)
         assert not any('sediment stack' in str(w.message) for w in caught)
 
-    def test_the_mpirams_grid_holds_its_synthetic_sediment_layer(self):
-        """A bare half-space is modelled as a synthetic layer 10 % of the
-        water depth thick (``_prepare_bottom_properties``), which in deep
-        water is far thicker than the two-bottom-wavelength pad. The domain
-        has to hold it, or control point ``nzs-1`` lands past ``zmax``."""
+    def test_a_deep_half_space_pads_two_bottom_wavelengths_on_every_backend(
+            self):
+        """The pad below a bare half-space is the calibrated
+        ``_SEABED_WAVELENGTHS_BEFORE_ABSORBER`` bottom wavelengths, not a
+        fraction of the water depth: 3 km of water pads 4.5 m at 800 Hz, and
+        the mpiramS domain is the Collins domain snapped onto its ``dz``."""
+        from uacpy.models.ram import _SEABED_WAVELENGTHS_BEFORE_ABSORBER
         model = RAM(backend='ramgeo', verbose=False)
         env = Environment(
             name='deep-halfspace', bathymetry=3000.0, ssp=1500.0,
             bottom=BoundaryProperties(acoustic_type='half-space',
                                       sound_speed=1800.0, density=2.0,
                                       attenuation=0.1))
-        synthetic = model._synthetic_sediment_thickness(env)
-        assert synthetic == pytest.approx(300.0)
-        deck = model._compute_zmax(env, self.FREQ, kind='mpiramS')
-        assert deck - env.depth - self._absorbing_width(model, env) >= \
-            synthetic - 1e-9
-        # The Collins path wraps no synthetic layer, so it is not paying for
-        # one: the two grids differ, which is what makes the kind meaningful.
-        assert model._compute_zmax(env, self.FREQ) < deck
-
+        pad = _SEABED_WAVELENGTHS_BEFORE_ABSORBER * 1800.0 / self.FREQ
+        collins = model._compute_zmax(env, self.FREQ)
+        assert collins - env.depth - self._absorbing_width(model, env) == \
+            pytest.approx(pad)
+        dz = 0.1
+        mpirams = model._mpirams_zmax(env, self.FREQ, dz)
+        assert mpirams == pytest.approx(collins, abs=0.5 * dz + 1e-2)
 
 def _mpirams_model():
     try:

@@ -54,6 +54,7 @@ def main():
     depths = np.array([0.0, 25.0, 50.0, 100.0, 200.0])
     temps = np.array([18.0, 16.0, 12.0, 8.0, 6.0])       # summer thermocline
     sal = 35.0
+    # soundspeed_unesco takes pressure in dbar; 1 dbar per metre of depth here
     cz = np.array([soundspeed_unesco(t, sal, z) for t, z in zip(temps, depths)])
     env = uacpy.Environment(
         name="UNESCO thermocline",

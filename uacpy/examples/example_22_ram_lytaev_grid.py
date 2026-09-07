@@ -26,14 +26,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parents[2]))
 
 import numpy as np  # noqa: E402
-import matplotlib  # noqa: E402
-matplotlib.use('Agg')
 import matplotlib.pyplot as plt  # noqa: E402
 
 from uacpy.core.environment import BoundaryProperties, Environment  # noqa: E402
 from uacpy.core.receiver import Receiver  # noqa: E402
 from uacpy.core.source import Source  # noqa: E402
 from uacpy.models import RAM, RunMode  # noqa: E402
+from uacpy.visualization import plot_field  # noqa: E402
+from plotting_utils import _plot_tl_difference  # noqa: E402
 
 
 def main():
@@ -90,37 +90,17 @@ def main():
 
     fig, axes = plt.subplots(1, 3, figsize=(16, 4.4), sharey=True)
 
-    extent = [
-        fields['c_eq15'].ranges[0] / 1000.0,
-        fields['c_eq15'].ranges[-1] / 1000.0,
-        fields['c_eq15'].depths[-1],
-        fields['c_eq15'].depths[0],
-    ]
-
     for ax, (label, _, title) in zip(axes[:2], cases):
-        f = fields[label]
-        meta = f.metadata
-        im = ax.imshow(
-            f.db, aspect='auto', origin='upper', extent=extent,
-            cmap='jet_r', vmin=40, vmax=100,
-        )
-        ax.set_title(
-            f"{title}\n"
-            f"c₀={meta.get('pe_reference_speed'):.1f} m/s, "
-            f"dr={meta.get('dr'):.2f} m, dz={meta.get('dz'):.3f} m"
-        )
-        ax.set_xlabel('Range (km)')
-        if ax is axes[0]:
-            ax.set_ylabel('Depth (m)')
-        fig.colorbar(im, ax=ax, label='TL (dB)')
+        meta = fields[label].metadata
+        plot_field(fields[label], ax=ax, env=env, vmin=40, vmax=100,
+                   title=(f"{title}\n"
+                          f"c₀={meta.get('pe_reference_speed'):.1f} m/s, "
+                          f"dr={meta.get('dr'):.2f} m, dz={meta.get('dz'):.3f} m"))
 
-    im = axes[2].imshow(
-        diff, aspect='auto', origin='upper', extent=extent,
-        cmap='magma', vmin=0, vmax=5,
-    )
-    axes[2].set_title(f'|TL_c1500 - TL_c_eq15|   RMS = {rms:.2f} dB')
-    axes[2].set_xlabel('Range (km)')
-    fig.colorbar(im, ax=axes[2], label='|ΔTL| (dB)')
+    # Signed residual on a ±5 dB diverging window (the RMS above is the same
+    # for the signed and the absolute difference).
+    _plot_tl_difference(fields['c1500'], fields['c_eq15'], ax=axes[2], diff_vmax=5,
+                        title=f'TL_c1500 - TL_c_eq15   RMS = {rms:.2f} dB')
 
     fig.suptitle(
         f'RAM Padé-error grid optimizer (Lytaev) — Pekeris {fc:.0f} Hz, '

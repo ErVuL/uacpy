@@ -335,6 +335,7 @@ CONVERTED_SITES = [
     ('acoustic_signal/system_id.py', '_etfe_divide', 1),
     ('comms/channel_models.py', 'awgn', 1),
     ('comms/janus.py', 'JanusPacket.from_bits', 1),
+    ('comms/ofdm.py', 'ofdm_demodulate', 1),
     ('comms/transceiver.py', 'CommsReceiver.receive', 1),
     ('comms/transceiver.py', 'OFDMReceiver.receive', 1),
     # Not a converted hand count but the same rule, and it belongs under the
@@ -359,8 +360,10 @@ CONVERTED_SITES = [
     ('core/results/reflection.py', 'ReflectionCoefficient._resolve_axes', 1),
     ('core/sediment.py', 'grain_size_to_geoacoustics', 1),
     ('core/ssp.py', 'generate_sea_surface', 1),
+    ('data/_geo.py', 'capped_n_points', 1),
     ('data/_netcdf.py', 'NetcdfGrid._bounded', 1),
-    ('data/bathymetry.py', 'fetch_bathy_transect', 2),
+    ('data/bathymetry.py', 'fetch_bathy_grid', 1),
+    ('data/bathymetry.py', 'fetch_bathy_transect', 1),
     ('data/crust1_local.py', '_warn_non_commercial', 1),
     ('data/environment.py', '_record_provenance', 1),
     ('data/gebco_local.py', '_grid_path', 1),
@@ -372,7 +375,6 @@ CONVERTED_SITES = [
     ('data/sediment.py', 'range_dependent_bottom_along', 1),
     ('data/sound_speed.py', '_ts_profile_with_cell', 1),
     ('data/sound_speed.py', 'extend_ssp_below_data', 1),
-    ('data/sound_speed.py', 'ssp_transect_plan', 1),
     ('io/_fortran_helpers.py', '_warn_non_little_endian', 1),
     ('io/bathy_io.py', 'write_bty_long_format', 1),
     ('io/bellhop_writer.py', 'write_bellhop_env_file', 1),
@@ -535,12 +537,6 @@ HAND_COUNTS_WITH_AN_IN_PACKAGE_CALLER = {
     # ``_wind_merklinger`` passes three positional arguments, so
     # ``band_integrate`` is always False on that path and the branch is dead.
     ('noise/noise.py', 'compute_windnoise'),
-    # The in-package caller is ``SeabedColumn.__setattr__``'s
-    # ``super().__setattr__`` — the same name reaching ``object``, not this
-    # method, so it cannot carry the warning. No package code assigns a
-    # delegated half-space field on a multi-column ``Bottom``, and the
-    # measured warning names the user's own file.
-    ('core/bottom.py', 'Bottom.__setattr__'),
 }
 
 

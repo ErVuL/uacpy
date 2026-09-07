@@ -177,6 +177,22 @@ def test_auto_transect_places_ice_edge_at_observed_boundary(monkeypatch):
     assert surf.at(range=edge_m + step_m).acoustic_type == 'vacuum'
 
 
+def test_an_explicit_count_above_max_points_is_capped_with_a_warning(
+        monkeypatch):
+    seen = {}
+
+    def fake_transect(start, end, *, date=None, month=None, n_points=6):
+        seen['n_points'] = n_points
+        return np.linspace(0.0, 1.0e6, n_points), np.full(n_points, 0.9)
+
+    monkeypatch.setattr(seaice_local, 'fetch_sea_ice_concentration_transect',
+                        fake_transect)
+    with pytest.warns(UserWarning, match=r'n_points=6 exceeds max_points=3'):
+        seaice_local.sea_ice_surface_transect(
+            (85.0, 0.0), (60.0, 0.0), month=3, n_points=6, max_points=3)
+    assert seen['n_points'] == 3
+
+
 def test_auto_transect_collapses_a_uniform_zone_to_one_node(monkeypatch):
     """A single run (ice everywhere) still collapses to one range-independent
     node — two identical columns would read as a range-dependent surface."""

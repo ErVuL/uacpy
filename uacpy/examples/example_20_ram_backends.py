@@ -26,8 +26,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parents[2]))
 
 import numpy as np  # noqa: E402
-import matplotlib  # noqa: E402
-matplotlib.use('Agg')
 import matplotlib.pyplot as plt  # noqa: E402
 
 from uacpy.core.environment import (  # noqa: E402
@@ -36,6 +34,7 @@ from uacpy.core.environment import (  # noqa: E402
 from uacpy.core.receiver import Receiver  # noqa: E402
 from uacpy.core.source import Source  # noqa: E402
 from uacpy.models import RAM, RunMode  # noqa: E402
+from uacpy.visualization import plot_field  # noqa: E402
 from uacpy.core.exceptions import (  # noqa: E402
     FileFormatError,
     UnsupportedFeatureError,
@@ -123,16 +122,8 @@ def main():
     for ax, (label, env) in zip(axes, cases):
         try:
             field = ram.run(env, src, rcv, run_mode=RunMode.COHERENT_TL)
-            im = ax.pcolormesh(
-                field.ranges / 1000.0, field.depths, field.db,
-                shading='auto', cmap='jet_r', vmin=30, vmax=110,
-            )
-            ax.invert_yaxis()
-            ax.set_title(f"{label}\nbackend={field.backend}")
-            ax.set_xlabel("Range (km)")
-            if ax is axes[0]:
-                ax.set_ylabel("Depth (m)")
-            fig.colorbar(im, ax=ax, label='TL (dB)')
+            plot_field(field, ax=ax, env=env, vmin=30, vmax=110,
+                       title=f"{label}\nbackend={field.backend}")
         except FileFormatError as exc:
             ax.set_title(f"{label}\n(skipped: {exc})")
 

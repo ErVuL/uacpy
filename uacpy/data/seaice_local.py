@@ -40,6 +40,8 @@ from uacpy.data import _cache
 from uacpy.data._geo import (
     require_month,
     Coordinate, as_coordinate, normalize_lon, ring_offsets,
+    run_boundary_indices, DEFAULT_MAX_TRANSECT_POINTS, checked_max_points,
+    checked_n_points, capped_n_points, geodesic_waypoints,
 )
 from uacpy.data._http import http_get
 from uacpy.data._time import parse_date
@@ -484,7 +486,6 @@ def fetch_sea_ice_concentration_transect(start: Coordinate, end: Coordinate, *,
                                          date=None, month: Optional[int] = None,
                                          n_points: int = 6):
     """``(ranges_m, concentration)`` (0-1) sampled along ``start`` → ``end``."""
-    from uacpy.data._geo import checked_n_points, geodesic_waypoints
     n_points = checked_n_points(n_points,
                                 'fetch_sea_ice_concentration_transect')
     lats, lons, ranges_m = geodesic_waypoints(start, end, n_points)
@@ -527,17 +528,14 @@ def sea_ice_surface_transect(start: Coordinate, end: Coordinate, *,
     measurement.
     """
     from uacpy.core.surface import Surface
-    from uacpy.data._geo import (
-        run_boundary_indices, DEFAULT_MAX_TRANSECT_POINTS, checked_max_points,
-        checked_n_points,
-    )
     if max_points is None:
         max_points = DEFAULT_MAX_TRANSECT_POINTS
     max_points = checked_max_points(max_points, 'sea_ice_surface_transect')
     n_points = checked_n_points(n_points, 'sea_ice_surface_transect',
                                 allow_auto=True)
     probe_n = (max_points if n_points == 'auto'
-               else min(n_points, max_points))
+               else capped_n_points(n_points, max_points,
+                                    'sea_ice_surface_transect'))
     ranges_m, conc = fetch_sea_ice_concentration_transect(
         start, end, date=date, month=month, n_points=probe_n)
     n_no_data = int(np.count_nonzero(~np.isfinite(np.asarray(conc, float))))

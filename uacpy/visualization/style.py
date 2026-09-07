@@ -53,16 +53,24 @@ def _blend(a, b, t):
 
 # Sandy-tan fill ≈ saddlebrown × 0.35 + white × 0.65
 BOTTOM_FILL_COLOR = _blend(BOTTOM_HALFSPACE_COLOR, 'white', 0.35)
-# Brownish-grey hatch ≈ black × 0.35 + fill × 0.65
-BOTTOM_HATCH_COLOR = _blend('black', BOTTOM_FILL_COLOR, 0.35)
-# facecolor (NOT color): a ``color=`` entry makes mpl draw the hatch in the
-# fill colour, hiding the '///'; ``facecolor`` leaves the hatch in ``edgecolor``.
-BOTTOM_FILL_STYLE = {
-    'facecolor': BOTTOM_FILL_COLOR,
-    'hatch': BOTTOM_FILL_HATCH,
-    'edgecolor': BOTTOM_HATCH_COLOR,
-    'linewidth': 0.4,
-}
+# Weight of black blended over a fill colour for the hatch strokes on it.
+_HATCH_BLEND = 0.4
+
+
+def hatched_fill(facecolor, linewidth=0.4) -> dict:
+    """``fill`` / ``fill_between`` kwargs for a half-space: a solid
+    ``facecolor`` under the '///' hatch, the hatch drawn in a darker blend of
+    the fill so it still reads as the semi-infinite half-space. ``facecolor``
+    (NOT ``color``): a ``color=`` entry makes mpl draw the hatch in the fill
+    colour, hiding it; ``facecolor`` leaves the hatch in ``edgecolor``."""
+    return {'facecolor': facecolor, 'hatch': BOTTOM_FILL_HATCH,
+            'edgecolor': _blend('black', facecolor, _HATCH_BLEND),
+            'linewidth': linewidth}
+
+
+BOTTOM_FILL_STYLE = hatched_fill(BOTTOM_FILL_COLOR)
+# Brownish-grey hatch: black blended over the fill.
+BOTTOM_HATCH_COLOR = BOTTOM_FILL_STYLE['edgecolor']
 # Plain (un-hatched) seabed fill for TL / ray data overlays — the '///'
 # half-space hatch is reserved for the environment cross-section, where it
 # reads as the semi-infinite substrate; over a TL heatmap it just clutters.

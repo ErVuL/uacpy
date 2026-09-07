@@ -31,7 +31,7 @@ from uacpy.models.base import (
 from uacpy.core.environment import Environment
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
-from uacpy.core.results import Result
+from uacpy.core.results import Result, ReflectionCoefficient
 from uacpy.core.constants import (
     DEFAULT_C_MIN, DEFAULT_C_MAX_UNBOUNDED,
     parse_boundary_type,
@@ -42,7 +42,9 @@ from uacpy.core.exceptions import (
     UnsupportedFeatureError,
 )
 from uacpy.io.refl_io import read_reflection_coefficient, dedupe_reflection_file
-from uacpy.io.oalib_writer import write_bounce_input_file, writable_layers
+from uacpy.io.oalib_writer import (
+    write_bounce_input_file, writable_layers, resolve_ssp_topopt,
+)
 from uacpy.core.units import m_to_km
 
 # bounce.f90 zeroes kMin (drops the 1/cHigh term in NkTab) once cHigh > 1e6.
@@ -52,8 +54,9 @@ _KMIN_CUTOFF_CHIGH = 1.0e6
 # tabulated seabed makes one of them an *input* too: write_bottom_section stages
 # the user's table there and misc/RefCoef.f90:39 ('F' -> .brc) / :92 ('P' ->
 # .irc) open it with STATUS='OLD' before ComputeReflectionCoefficient rewrites
-# it. That one must survive the pre-launch sweep.
-_STAGED_TABLE_SUFFIX = {'file': '.brc', 'precalc': '.irc'}
+# it. That one must survive the pre-launch sweep. A 'precalc' seabed (.irc) is
+# refused before the launch (see ``run``), so only the .brc is ever staged.
+_STAGED_TABLE_SUFFIX = {'file': '.brc'}
 _BOUNCE_OUTPUTS = ('.brc', '.irc')
 
 # Mesh density of each medium of the sediment stack: 20 points per wavelength,
@@ -206,7 +209,7 @@ class Bounce(PropagationModel):
     >>> import tempfile
     >>> from uacpy.models import Scooter
     >>> with tempfile.TemporaryDirectory() as d:
-    ...     bounce = Bounce(c_low=1400, c_high=10000, rmax=10000, work_dir=d)
+    ...     bounce = Bounce(c_low=1400, rmax=10000, work_dir=d)
     ...     result = bounce.run(env, source, receiver)
     ...     # Output files can be used by different models:
     ...     # - .brc file → BELLHOP, SCOOTER, KRAKENC (experimental)
@@ -594,7 +597,7 @@ class Bounce(PropagationModel):
             f_hz = float(np.atleast_1d(source.frequencies)[0])
             omega = 2.0 * np.pi * f_hz
             inv_c_diff = 1.0 / c_low
-            if self.c_high is not None and self.c_high <= _KMIN_CUTOFF_CHIGH:
+            if self.c_high <= _KMIN_CUTOFF_CHIGH:
                 inv_c_diff -= 1.0 / float(self.c_high)
             if omega * inv_c_diff <= 0:
                 raise ConfigurationError(
@@ -724,8 +727,6 @@ class Bounce(PropagationModel):
                 self._attach_prt_tail(exc, fm.work_dir, base_name)
                 raise exc
 
-            from uacpy.core.results import ReflectionCoefficient
-
             field = ReflectionCoefficient(
                 theta=result.get('theta', np.array([])),
                 R=result.get('R', np.array([])),
@@ -828,7 +829,6 @@ class Bounce(PropagationModel):
         TopOpt, SSP, BotOpt, cLow/cHigh, RMax. We therefore omit the
         source/receiver depth blocks.
         """
-        from uacpy.io.oalib_writer import resolve_ssp_topopt
         ssp_topopt = resolve_ssp_topopt(env, self.interp_ssp)
         bottom_type = parse_boundary_type(env.bottom.halfspace_at(range=0.0).acoustic_type)
 

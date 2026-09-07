@@ -48,8 +48,6 @@ FEATURES DEMONSTRATED:
 
 import sys
 import numpy as np
-import matplotlib
-matplotlib.use('Agg')
 import matplotlib.pyplot as plt  # noqa: E402
 
 import os  # noqa: E402
@@ -66,6 +64,7 @@ import uacpy  # noqa: E402
 from uacpy.core.environment import BoundaryProperties  # noqa: E402
 from uacpy.models import Bellhop, RAM, SPARC, Scooter, Kraken, OASP  # noqa: E402
 from uacpy.models.base import RunMode  # noqa: E402
+from uacpy.acoustic_signal.waveforms import lfm_chirp  # noqa: E402
 
 
 def main():
@@ -108,7 +107,7 @@ def main():
     # sampling produces when the IFFT window exceeds 1/df, and (b) resolve the
     # Pekeris dispersive modal coda consistently across every model.
     # Together with the single shared ``pekeris_bottom`` above, that makes the
-    # time-series comparison apples-to-apples for the six transfer-function
+    # time-series comparison apples-to-apples for the seven transfer-function
     # models. SPARC is the exception and says so where it runs: it accepts only
     # vacuum/rigid boundaries, so it solves a rigid-bottom guide.
     frequencies = np.arange(50.0, 150.0 + 0.5, 1.0)
@@ -274,7 +273,7 @@ def main():
     print("  NOTE: SPARC is the one model here that does NOT share the seabed.")
     print("  It supports only 'vacuum'/'rigid' boundaries, so uacpy converts the")
     print("  shared half-space to rigid and warns. SPARC therefore solves a")
-    print("  perfectly-reflecting guide, not the Pekeris guide the other six")
+    print("  perfectly-reflecting guide, not the Pekeris guide the other seven")
     print("  models solve; its trace is shown for the time-marching method, not")
     print("  as a same-physics comparison.")
     try:
@@ -310,9 +309,8 @@ def main():
         # Generate LFM chirp: 50-150 Hz over 100 ms
         fs = 2000.0  # sample rate
         chirp_duration = 0.1
-        t_chirp = np.arange(0, chirp_duration, 1.0 / fs)
         f0, f1 = 50.0, 150.0
-        chirp = np.sin(2 * np.pi * (f0 * t_chirp + (f1 - f0) / (2 * chirp_duration) * t_chirp**2))
+        t_chirp, chirp = lfm_chirp(f0, f1, chirp_duration, fs)
 
         # Receiver with target depth/range for arrivals computation
         receiver_das = uacpy.Receiver(

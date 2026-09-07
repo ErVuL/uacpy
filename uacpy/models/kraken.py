@@ -16,14 +16,17 @@ A single :class:`Kraken` wraps the AT Kraken pipeline, mirroring
 
 Note
 ----
-The Acoustics Toolbox also ships ``krakel.exe`` (true elastic normal
-modes with shear support using an FEM discretisation). It is bundled in
-``uacpy/uacpy/bin/oalib/`` but NOT wrapped by uacpy at this time. Users
+The Acoustics Toolbox also carries KRAKEL (true elastic normal modes with
+shear support using an FEM discretisation). Only its sources ship
+(``third_party/Acoustics-Toolbox/Krakel/``): ``install.sh`` does not build
+it (the AT Makefile leaves it out — it needs LAPACK), no ``krakel``
+binary sits in ``uacpy/bin/oalib/``, and uacpy does not wrap it. Users
 who need elastic modes can either:
 
 * drive ``Kraken(backend='krakenc')`` (which handles elastic half-spaces
   via complex wavenumbers), or
-* invoke ``krakel.exe`` manually with a Kraken-format .env file.
+* build ``krakel.exe`` from those sources and invoke it manually with a
+  Kraken-format .env file.
 
 Usage
 -----
@@ -55,10 +58,11 @@ from uacpy.models.base import (
     PropagationModel, RunMode, ModelSpec, USER_FRAME_SKIP,
     _max_roughness, _smooth_surface,
 )
-from uacpy.core.bottom import _NON_GEOACOUSTIC_TYPES
+from uacpy.core.bottom import _NON_GEOACOUSTIC_TYPES, BoundaryProperties
 from uacpy.core.environment import Environment
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
+from uacpy.core.surface import Surface
 from uacpy.core.results import Result, Modes, Field, PhaseReference
 from uacpy.core.constants import (
     parse_boundary_type,
@@ -73,9 +77,11 @@ from uacpy.io.oalib_writer import (
     write_multi_profile_env, write_fieldflp, write_kraken_env_file,
     resolve_phase_speed_bounds, plan_multi_profile_media,
     at_mesh_floor, reject_coarse_at_mesh, deck_depth, writable_layers,
+    reject_unsupported_ssp_interp, resolve_ssp_topopt,
     SOURCE_TYPE_CODE as _SOURCE_TYPE_CODE,
 )
 from uacpy.io.oalib_reader import read_shd_file, read_shd_bin, read_prt
+from uacpy.io.modes_reader import read_modes_bin
 from uacpy.io.refl_io import stage_source_beam_pattern
 from uacpy.models._segmentation import segment_environment_by_range
 
@@ -215,11 +221,13 @@ class Kraken(PropagationModel):
     (``KrakenField/field.f90:190-200``), which brings three restrictions the
     file format itself does not show:
 
-    1. **First source depth only.** The shading sits inside
+    1. **One source depth per run.** The shading sits inside
        ``SourceDepths: DO iS = 1, Pos%Nsz`` (``:184``) under
        ``IF ( SBPFlag == '*' .AND. iS == 1 )`` (``:190``), so a deck with
-       several source depths shades the first and leaves the rest
-       omnidirectional. :meth:`run` warns when that happens.
+       several source depths would shade the first and leave the rest
+       omnidirectional. Kraken refuses a multi-depth ``Source``
+       (``ConfigurationError`` from the geometry validation, before any
+       deck is written), so that deck is never produced.
     2. **The reference speed is hard-coded at 1500 m/s**, not the speed at
        the source: ``c0 = 1500`` at ``:192``, carrying Porter's own
        ``!!! ... should be speed at the source depth``. Every angle below is
@@ -268,9 +276,12 @@ class Kraken(PropagationModel):
         boundary), ``kraken.exe`` otherwise. Forcing ``'kraken'`` on either
         raises ``ConfigurationError``.
     c_low : float, optional
-        Lower phase speed limit (m/s). None ⇒ 0.0,
-        which makes KRAKEN compute cLow automatically — the modal-solver
-        default. A positive c_low skips slower modes and excludes interfacial
+        Lower phase speed limit (m/s). None ⇒ 0.0 when no medium carries
+        shear, which makes KRAKEN compute cLow automatically — the
+        modal-solver default; when any medium is elastic, None ⇒ the
+        minimum compressional speed in the problem (SSP and bottom), which
+        keeps the search off the interfacial branch (``_c_low_for``).
+        A positive c_low skips slower modes and excludes interfacial
         (Scholte / Stoneley) modes; set it to the minimum p-wave speed if KRAKEN
         fails to converge on those. (The 0.95·min-SSP rule is the Scooter/SPARC
         wavenumber-integration default, not Kraken's.) Must be non-negative and
@@ -358,7 +369,8 @@ class Kraken(PropagationModel):
 
     Defaults auto-derived at ``run()`` time (override only when tuning):
 
-    - ``c_low=None`` → ``0.0`` (KRAKEN computes cLow automatically)
+    - ``c_low=None`` → ``0.0`` (KRAKEN computes cLow automatically); with
+      shear anywhere in the problem → the minimum compressional speed
     - ``c_high=None`` → ``max(max(env.ssp), env.bottom.sound_speed) × 1.05``
     - ``n_mesh=0`` → Kraken picks mesh from frequency / wavelength.
     - TopOpt position 4 reads ``env.absorption`` (``Thorp`` / ``FrancoisGarrison``
@@ -563,34 +575,6 @@ class Kraken(PropagationModel):
                 f"c_high ({ch}) must be strictly greater than c_low ({cl})"
             )
 
-    def _reject_coarse_mesh(self, env, frequency: float) -> None:
-        """Reject a pinned ``n_mesh`` the AT reader will call too coarse."""
-        reject_coarse_at_mesh('Kraken', self.n_mesh, env, frequency)
-
-    def _check_kraken_ssp_type(self):
-        """Reject SSP interpolation choices kraken does not implement.
-
-        Per AT ``misc/sspMod.f90:61-89`` kraken accepts codes A (analytic),
-        N (N^2-linear), C (C-linear), P (PCHIP), S (spline). The 'Q'
-        quadrilateral code is Bellhop-only (see RangeDepSSPFile.htm).
-
-        Default ``self.interp_ssp=None`` resolves to 'linear' for
-        Kraken's env (auto-quad only applies to Bellhop), so the
-        rejection only fires on explicit 'quad'.
-        """
-        if self.interp_ssp is None:
-            return
-        if str(self.interp_ssp).lower() in ('q', 'quad', 'quadratic'):
-            raise UnsupportedFeatureError(
-                'Kraken',
-                "the 'quad' SSP interpolation — it is Bellhop-only, the "
-                "external 2-D .ssp scheme the shared EvaluateSSP has no "
-                "case for",
-                alternatives=["'linear' (C-linear)", "'n2linear'", "'pchip'",
-                              "'cubic' / 'spline'"],
-                alternatives_label='SSP interpolations',
-            )
-
     def _build_modes_field(self, modes, n_modes, source, *, backend_exe=None,
                            bounds=None):
         """Wrap a modes-reader payload as a :class:`Modes` Result.
@@ -654,8 +638,7 @@ class Kraken(PropagationModel):
         env,
         source,
         *,
-        receiver_obj: Optional[Receiver] = None,
-        receiver_depths=(100.0,),
+        receiver_obj: Receiver,
         frequencies: Optional[np.ndarray] = None,
     ) -> Dict[str, float]:
         """
@@ -669,8 +652,8 @@ class Kraken(PropagationModel):
         Returns the resolved ``{'c_low', 'c_high', 'rmax'}`` (m/s, m) the
         deck was written with, for the caller to stamp onto its result.
         """
-        # Reject 'quad' SSP interp (Bellhop-only)
-        self._check_kraken_ssp_type()
+        # 'quad' is Bellhop-only (misc/sspMod.f90:61-89 has no 'Q' case)
+        reject_unsupported_ssp_interp('Kraken', self.interp_ssp)
         # Re-validate in case caller mutated attributes after __init__
         self._validate_phase_speed_limits()
         # A pinned n_mesh is checked at the deck's freq0, which is where AT
@@ -680,11 +663,10 @@ class Kraken(PropagationModel):
         # frequency — so a mesh that clears the floor at freq0 stays
         # proportionally as fine across the whole sweep. Testing max(freq)
         # instead rejected meshes the binary would have run.
-        self._reject_coarse_mesh(
-            env, float(np.atleast_1d(
+        reject_coarse_at_mesh(
+            'Kraken', self.n_mesh, env, float(np.atleast_1d(
                 np.asarray(source.frequencies, dtype=float))[0]))
 
-        from uacpy.io.oalib_writer import resolve_ssp_topopt
         ssp_topopt = resolve_ssp_topopt(env, self.interp_ssp)
         surface_type = parse_boundary_type(env.surface.acoustic_type)
         bottom_acoustic_type = env.bottom.halfspace_at(range=0.0).acoustic_type
@@ -715,7 +697,7 @@ class Kraken(PropagationModel):
 
         write_kraken_env_file(
             filepath, env, source,
-            receiver_obj if receiver_obj is not None else receiver_depths,
+            receiver_obj,
             ssp_topopt=ssp_topopt,
             surface_type=surface_type,
             bottom_type=bottom_type,
@@ -871,20 +853,19 @@ class Kraken(PropagationModel):
         ----------
         env, source, n_modes : see PropagationModel.compute_modes
         """
-        from uacpy.core.receiver import Receiver as _Receiver
-
         if self.mode_depth_grid is not None:
             mode_depths = self.mode_depth_grid
         else:
             # The modes are solved on the r = 0 profile, so the grid spans
-            # THAT water column plus the sediment stack — not the deepest
-            # point of a range-dependent bathymetry, which would ask KRAKEN
-            # for receivers below the profile it solves (it clamps them and
+            # THAT water column plus THAT column's sediment stack — not the
+            # deepest point of a range-dependent bathymetry or the thickest
+            # bed along the track, either of which would ask KRAKEN for
+            # receivers below the profile it solves (it clamps them and
             # warns about a grid this wrapper built).
             bathy = env.bathymetry
             water = float(np.interp(0.0, np.asarray(bathy.ranges, dtype=float),
                                     np.asarray(bathy.depths, dtype=float)))
-            total_depth = water + (env.bottom.max_total_thickness()
+            total_depth = water + (env.bottom.at(range=0.0).total_thickness()
                                    if env.bottom.is_layered else 0.0)
             ppm = self._resolve_mode_points_per_meter(env, source.frequencies)
             n_pts = max(100, int(round(float(total_depth) * ppm)))
@@ -896,24 +877,17 @@ class Kraken(PropagationModel):
         # 100 km RMax, i.e. the tightest mesh-convergence tolerance
         # (``kraken.f90:80``, ``Error·1000·RMax < 1``) rather than one keyed
         # to a range the caller never gave. ``rmax_m=`` overrides it.
-        dense_receiver = _Receiver(depths=mode_depths, ranges=[0.0])
+        dense_receiver = Receiver(depths=mode_depths, ranges=[0.0])
         # ``n_modes`` is constructor state; a per-call cap is applied by
         # running a copy so ``run()`` keeps the fixed model-wide signature.
         model = self if n_modes is None else self.copy(n_modes=int(n_modes))
         return model.run(env, source, dense_receiver, run_mode=RunMode.MODES)
 
     def _read_modes_file(self, filepath: Path) -> Dict:
-        """Read a Kraken ``.mod`` file using the binary reader."""
-        from uacpy.io.modes_reader import read_modes_bin
-
-        # read_modes_bin expects the filename without extension and appends
-        # its own ('.mod'); strip '.mod' before handing it over.
-        filepath_str = str(filepath)
-        if filepath_str.endswith('.mod'):
-            basename = filepath_str[:-4]
-        else:
-            basename = filepath_str
-
+        """Read the Kraken ``.mod`` at ``<filepath>.mod`` using the binary
+        reader; ``filepath`` is the deck's base path without a suffix, which
+        is what ``read_modes_bin`` takes (it appends its own '.mod')."""
+        basename = str(filepath)
         mod_file = basename + '.mod'
 
         # A .mod with no bytes at all means the binary died before it opened
@@ -1077,8 +1051,6 @@ class Kraken(PropagationModel):
         already reported by the all-NaN guard further down
         :meth:`_compute_field_via_exe`, so a read failure here stays quiet.
         """
-        from uacpy.io.modes_reader import read_modes_bin
-
         try:
             modes_data = read_modes_bin(str(mod_base), frequency=0.0)
         except (FileFormatError, IndexError, OSError) as e:
@@ -1448,8 +1420,6 @@ class Kraken(PropagationModel):
         """
         env = super()._project_environment(env)
         if self.top_reflection_file is not None:
-            from uacpy.core.bottom import BoundaryProperties
-            from uacpy.core.surface import Surface
             if not self.top_reflection_file.exists():
                 raise ConfigurationError(
                     f"top_reflection_file not found: {self.top_reflection_file}"
@@ -1813,7 +1783,6 @@ class Kraken(PropagationModel):
             bounds = self._write_kraken_env(
                 env_file, env, source,
                 receiver_obj=receiver,
-                receiver_depths=receiver.depths,
             )
             self._log(f"Running {kraken_exe.name} (modes)...")
             self._run_kraken_executable(base_name, fm.work_dir, exe=kraken_exe)
@@ -2005,15 +1974,13 @@ class Kraken(PropagationModel):
         frequency is below the waveguide's modal cutoff" with the remediation
         "raise the frequency band", which would bury the real cause.
         """
-        from uacpy.core.source import Source as _Source
-        from uacpy.io.modes_reader import read_modes_bin
         fm = self._setup_file_manager()
         base = 'mcut'
         try:
             self._write_kraken_env(
                 fm.get_path(f'{base}.env'), env,
-                _Source(depths=source.depths, frequencies=float(freq)),
-                receiver_obj=receiver, receiver_depths=receiver.depths,
+                Source(depths=source.depths, frequencies=float(freq)),
+                receiver_obj=receiver,
             )
             self._run_kraken_executable(base, fm.work_dir, exe=exe)
             return int(read_modes_bin(str(fm.get_path(base)),
@@ -2126,8 +2093,6 @@ class Kraken(PropagationModel):
         the mesh bound is read off it rather than re-derived. The water column
         of each profile is medium 1.
         """
-        from uacpy.io.oalib_writer import deck_depth
-
         media = []
         for _range_km, seg in segments:
             seafloor = deck_depth(seg.depth)
@@ -2156,7 +2121,7 @@ class Kraken(PropagationModel):
         # writes the multi-profile deck itself instead of going through
         # _write_kraken_env, so the SSP-type and phase-speed checks are applied
         # here rather than inside the single-profile writer alone.
-        self._check_kraken_ssp_type()
+        reject_unsupported_ssp_interp('Kraken', self.interp_ssp)
         self._validate_phase_speed_limits()
 
         env_file = fm.get_path(f'{base_name}.env')
@@ -2222,7 +2187,6 @@ class Kraken(PropagationModel):
         return self._write_kraken_env(
             env_file, env, source,
             receiver_obj=receiver_for_modes,
-            receiver_depths=mode_depths,
             frequencies=freq_vec if broadband else None,
         )
 
@@ -2270,6 +2234,7 @@ class Kraken(PropagationModel):
             )
 
         self._raise_on_field_fatal(fm.work_dir)
+        self._warn_on_prt_warnings(fm.work_dir, _FIELD_PRT_ROOT)
 
         shd_file = fm.get_path(f'{base_name}.shd')
         if not shd_file.exists() or shd_file.stat().st_size == 0:
@@ -2600,24 +2565,6 @@ class Kraken(PropagationModel):
                 ["one frequency per call, which accepts the pattern",
                  "Source(beam_pattern=None) for a multi-frequency run"],
                 alternatives_label='options',
-            )
-        if (source.beam_pattern is not None
-                and np.atleast_1d(np.asarray(source.depths)).size > 1):
-            # field.f90:190 gates the shading on `iS == 1` inside the
-            # SourceDepths loop opened at :184, and the shaded amplitudes go
-            # into C(1:MSrc) which :186 overwrites from phiS(:, iS) at the
-            # top of every iteration. So depth 1 is shaded and every later
-            # source depth is evaluated omnidirectional — silently, since the
-            # .shd carries one record block per source depth either way.
-            warnings.warn(
-                f"{self.model_name}: the source beam pattern applies to "
-                f"source.depths[0] only. KrakenField/field.f90:190 gates the "
-                f"shading on `iS == 1` inside its source-depth loop, so the "
-                f"other "
-                f"{np.atleast_1d(np.asarray(source.depths)).size - 1} source "
-                f"depth(s) are evaluated as omnidirectional. Run one source "
-                f"depth per call to shade each of them.",
-                UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
             )
         if broadband and freq_vec.size > _FIELD_MAX_NFREQ:
             raise ConfigurationError(

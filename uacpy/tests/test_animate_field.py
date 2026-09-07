@@ -38,11 +38,13 @@ def _make_synthetic_field(
     n_r: int = 40,
     n_t: int = 200,
     t_max: float = 4.0,
+    r_min: float = 0.0,
 ) -> Field:
     """Outgoing pulse traveling at C_WATER. Independent of depth (so any
-    horizontal cut sees the same wavefront)."""
+    horizontal cut sees the same wavefront). ``r_min`` is the first range
+    sample: a model grid starts past r = 0, the source's own range."""
     depths = np.linspace(0.0, 100.0, n_d)
-    ranges = np.linspace(0.0, C_WATER * t_max, n_r)
+    ranges = np.linspace(r_min, C_WATER * t_max, n_r)
     times = np.linspace(0.0, t_max, n_t)
     DD, RR, TT = np.meshgrid(depths, ranges, times, indexing='ij')
     tau = TT - RR / C_WATER
@@ -275,4 +277,35 @@ def test_plot_time_snapshots_global_pmax():
     for ax in axes.flat:
         im = ax.get_images()[0]
         assert im.get_clim() == (-0.5, 0.5)
+    plt.close(fig)
+
+
+def test_the_animated_source_star_is_whole_under_the_seafloor_overlay(
+        marker_fraction_inside):
+    """``env=`` pins the x limits to the field's own range span, which starts
+    past r = 0 on every model grid, while the star is drawn at r = 0: the
+    axis has to widen by the marker's own half width or the documented marker
+    is not on the axes at all."""
+    import uacpy
+    import matplotlib.pyplot as plt
+    from uacpy.visualization.plots import animate_field
+
+    field = _make_synthetic_field(n_t=20, t_max=1.0, r_min=100.0)
+    env = uacpy.Environment(bathymetry=120.0, ssp=1500.0, bottom=1650.0)
+    fig, ax = plt.subplots()
+    animate_field(field, env=env, frame_stride=5, ax=ax)
+    assert marker_fraction_inside(ax) == pytest.approx(1.0)
+    plt.close(fig)
+
+
+def test_the_snapshot_source_star_is_whole_on_the_left_limit(
+        marker_fraction_inside):
+    """Each snapshot panel starts its axis at r = 0, exactly where the star
+    is drawn; a limit ON the marker's centre cuts half the glyph away."""
+    import matplotlib.pyplot as plt
+    from uacpy.visualization import plot_time_snapshots
+
+    fields = {'A': _make_synthetic_field(n_t=20, t_max=0.5)}
+    fig, axes = plot_time_snapshots(fields, times_s=(0.1,))
+    assert marker_fraction_inside(axes[0, 0]) == pytest.approx(1.0)
     plt.close(fig)

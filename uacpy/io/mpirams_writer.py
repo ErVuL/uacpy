@@ -70,7 +70,7 @@ def write_inpe(
     deltar : float
         Range accuracy parameter (m). Typical: 250.0
     np_pade : int
-        Number of Pade coefficients (2-8, typical: 4)
+        Number of Pade coefficients (2-10, typical: 4)
     nss : int
         Number of stability terms (0 for short range, 1-2 for long range)
     rs : float

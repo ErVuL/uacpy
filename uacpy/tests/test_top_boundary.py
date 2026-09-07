@@ -124,7 +124,7 @@ def test_kraken_family_env_writes_top_bc_for_halfspace_surface(
     out = tmp_path / f'{model_cls_name.lower()}_ice.env'
     model._write_kraken_env(
         out, _basic_env(_ice()), src,
-        receiver_depths=[50.0],
+        receiver_obj=uacpy.Receiver(depths=[50.0], ranges=[1000.0]),
     )
     text = out.read_text()
     quoted = [

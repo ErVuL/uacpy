@@ -16,7 +16,7 @@ import numpy as np
 
 from uacpy.core.exceptions import DataFetchError
 from uacpy.data import _cache
-from uacpy.data._geo import as_coordinate
+from uacpy.data._geo import as_coordinate, checked_n_points, geodesic_waypoints
 from uacpy.data._http import download_grid_file
 from uacpy.data._netcdf import NetcdfGrid
 
@@ -95,7 +95,6 @@ def fetch_sediment_thickness_transect(start, end, n_points=6):
 
     ``thickness_m`` is ``NaN`` at any waypoint GlobSed does not cover.
     """
-    from uacpy.data._geo import checked_n_points, geodesic_waypoints
     n_points = checked_n_points(n_points, 'fetch_sediment_thickness_transect')
     lats, lons, ranges_m = geodesic_waypoints(start, end, n_points)
     g = _grid()

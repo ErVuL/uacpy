@@ -94,6 +94,26 @@ def _redirect_tempdir(tmp_path, monkeypatch):
     monkeypatch.setattr(tempfile, 'tempdir', str(tmp_path))
 
 
+@pytest.fixture
+def marker_fraction_inside():
+    """``fn(ax, marker='*', side='left') -> float``: the share of a marker's
+    width that lies inside the x limits of ``ax``, by the same marker-size
+    rule the plotters pad the axis with. ``marker`` picks the line by its
+    marker glyph (``'*'`` the source star, ``'o'`` the receiver dots);
+    ``side`` picks the point that can be clipped on that spine — the
+    smallest x for ``'left'``, the largest for ``'right'``."""
+    from uacpy.visualization.plots._common import _marker_half_width_in_data
+
+    def fraction(ax, marker='*', side='left'):
+        line = next(ln for ln in ax.get_lines() if ln.get_marker() == marker)
+        xs = np.ravel(line.get_xdata())
+        x = float(xs.max() if side == 'right' else xs.min())
+        half = _marker_half_width_in_data(ax, line.get_markersize())
+        lo, hi = sorted(ax.get_xlim())
+        return (min(x + half, hi) - max(x - half, lo)) / (2.0 * half)
+    return fraction
+
+
 #: Keyword names ``make_pekeris`` routes to the bottom half-space rather than
 #: to the Environment.
 _PEKERIS_BOTTOM_KEYS = frozenset((

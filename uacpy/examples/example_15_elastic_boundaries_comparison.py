@@ -56,6 +56,8 @@ import matplotlib.pyplot as plt  # noqa: E402
 import uacpy  # noqa: E402
 from uacpy.models import Kraken, Bounce, Scooter  # noqa: E402
 from uacpy.core import BoundaryProperties  # noqa: E402
+from uacpy.visualization import plot_field, compare  # noqa: E402
+from plotting_utils import _plot_tl_difference  # noqa: E402
 import time  # noqa: E402
 
 # Timing repeats. One cold call mostly measures process and binary load,
@@ -276,41 +278,19 @@ def main():
     # ─────────────────────────────────────────────────────────────────────
     ax1 = fig.add_subplot(gs[0, 0])
 
+    # Both TL panels on one 50-100 dB window (plot_field's default 20-120 dB
+    # scale narrowed to where this 100 m guide lives).
     vmin, vmax = 50, 100
-    im1 = ax1.pcolormesh(
-        result_kraken.ranges / 1000,
-        result_kraken.depths,
-        result_kraken.db,
-        shading='auto',
-        cmap='jet_r',
-        vmin=vmin,
-        vmax=vmax
-    )
-    ax1.set_xlabel('Range (km)', fontweight='bold')
-    ax1.set_ylabel('Depth (m)', fontweight='bold')
-    ax1.set_title('APPROACH 1: Kraken (auto krakenc)', fontweight='bold', fontsize=11)
-    ax1.invert_yaxis()
-    plt.colorbar(im1, ax=ax1, label='TL (dB)')
+    plot_field(result_kraken, ax=ax1, vmin=vmin, vmax=vmax,
+               title='APPROACH 1: Kraken (auto krakenc)')
 
     # ─────────────────────────────────────────────────────────────────────
     # Plot 2: SCOOTER TL
     # ─────────────────────────────────────────────────────────────────────
     ax2 = fig.add_subplot(gs[0, 1])
 
-    im2 = ax2.pcolormesh(
-        result_scooter.ranges / 1000,
-        result_scooter.depths,
-        result_scooter.db,
-        shading='auto',
-        cmap='jet_r',
-        vmin=vmin,
-        vmax=vmax
-    )
-    ax2.set_xlabel('Range (km)', fontweight='bold')
-    ax2.set_ylabel('Depth (m)', fontweight='bold')
-    ax2.set_title('APPROACH 2: SCOOTER (BOUNCE .brc)', fontweight='bold', fontsize=11)
-    ax2.invert_yaxis()
-    plt.colorbar(im2, ax=ax2, label='TL (dB)')
+    plot_field(result_scooter, ax=ax2, vmin=vmin, vmax=vmax,
+               title='APPROACH 2: SCOOTER (BOUNCE .brc)')
 
     # ─────────────────────────────────────────────────────────────────────
     # Plot 3: Difference
@@ -318,21 +298,8 @@ def main():
     ax3 = fig.add_subplot(gs[0, 2])
 
     diff_max = max(5, max(abs(np.nanmin(tl_diff)), abs(np.nanmax(tl_diff))))
-    im3 = ax3.pcolormesh(
-        result_kraken.ranges / 1000,
-        result_kraken.depths,
-        tl_diff,
-        shading='auto',
-        cmap='RdBu_r',
-        vmin=-diff_max,
-        vmax=diff_max
-    )
-    ax3.set_xlabel('Range (km)', fontweight='bold')
-    ax3.set_ylabel('Depth (m)', fontweight='bold')
-    ax3.set_title(f'Difference (Kraken - SCOOTER)\nMean: {mean_diff:.2f} dB',
-                  fontweight='bold', fontsize=11)
-    ax3.invert_yaxis()
-    plt.colorbar(im3, ax=ax3, label='ΔTL (dB)')
+    _plot_tl_difference(result_kraken, result_scooter, ax=ax3, diff_vmax=diff_max,
+                        title=f'Difference (Kraken - SCOOTER)\nMean: {mean_diff:.2f} dB')
 
     # ─────────────────────────────────────────────────────────────────────
     # Plot 4: Reflection Coefficient
@@ -340,21 +307,17 @@ def main():
     ax4 = fig.add_subplot(gs[1, 0])
 
     if has_rc_data:
-        ax4.plot(angles, R_mag, 'b-', linewidth=2.5)
-        ax4.set_xlabel('Grazing Angle (degrees)', fontweight='bold')
-        ax4.set_ylabel('|R| - Magnitude', fontweight='bold')
+        # The result plots itself: |R| against grazing angle.
+        bounce_result.plot(ax=ax4)
         ax4.set_title('BOUNCE: Bottom Reflection Coefficient', fontweight='bold')
-        ax4.grid(True, alpha=0.3)
-        ax4.set_xlim([angles.min(), angles.max()])
-        ax4.set_ylim([0, 1.1])
 
-        # Mark critical angle
-        critical_idx = np.where(np.diff(R_mag) > 0.05)[0]
-        if len(critical_idx) > 0:
-            crit_angle = angles[critical_idx[0]]
-            ax4.axvline(crit_angle, color='r', linestyle='--', linewidth=1.5, alpha=0.7)
-            ax4.text(crit_angle + 2, 0.5, f'Critical\nangle\n≈{crit_angle:.1f}°',
-                     fontsize=9, color='red', ha='left')
+        # Mark the compressional critical angle, arccos(c_water / c_p): |R|
+        # is 1 below it and falls past it (the shear speed, 400 m/s, is below
+        # the water speed, so there is no shear critical angle).
+        crit_angle = np.degrees(np.arccos(env.ssp.data.min() / bottom_elastic.sound_speed))
+        ax4.axvline(crit_angle, color='r', linestyle='--', linewidth=1.5, alpha=0.7)
+        ax4.text(crit_angle + 2, 0.5, f'Critical\nangle\n≈{crit_angle:.1f}°',
+                 fontsize=9, color='red', ha='left')
     else:
         ax4.text(0.5, 0.5, 'Reflection coefficient\ndata not available',
                  ha='center', va='center', transform=ax4.transAxes, fontsize=11)
@@ -365,17 +328,11 @@ def main():
     # ─────────────────────────────────────────────────────────────────────
     ax5 = fig.add_subplot(gs[1, 1])
 
-    ax5.plot(result_kraken.ranges/1000, result_kraken.at(depth=source.depths[0]).db,
-             'b-', linewidth=2.5, label='Kraken (Auto)', alpha=0.8)
-    ax5.plot(result_scooter.ranges/1000, result_scooter.at(depth=source.depths[0]).db,
-             'r--', linewidth=2.5, label='SCOOTER (BOUNCE)', alpha=0.8)
-
-    ax5.set_xlabel('Range (km)', fontweight='bold')
-    ax5.set_ylabel('Transmission Loss (dB)', fontweight='bold')
-    ax5.set_title(f'TL Comparison at {source.depths[0]:.0f}m Depth', fontweight='bold')
-    ax5.legend(fontsize=10, framealpha=0.9)
-    ax5.grid(True, alpha=0.3)
-    ax5.invert_yaxis()
+    labels = ['Kraken (Auto)', 'SCOOTER (BOUNCE)']
+    compare([result_kraken.at(depth=source.depths[0]),
+             result_scooter.at(depth=source.depths[0])], labels, ax=ax5,
+            linewidth=2.5, alpha=0.8,
+            title=f'TL Comparison at {source.depths[0]:.0f}m Depth')
 
     # ─────────────────────────────────────────────────────────────────────
     # Plot 6: TL Comparison at Mid-Range
@@ -384,17 +341,10 @@ def main():
 
     mid_range_km = np.median(result_kraken.ranges) / 1000
 
-    ax6.plot(result_kraken.at(range=mid_range_km * 1000.0).db, result_kraken.depths,
-             'b-', linewidth=2.5, label='Kraken (Auto)', alpha=0.8)
-    ax6.plot(result_scooter.at(range=mid_range_km * 1000.0).db, result_scooter.depths,
-             'r--', linewidth=2.5, label='SCOOTER (BOUNCE)', alpha=0.8)
-
-    ax6.invert_yaxis()
-    ax6.set_xlabel('Transmission Loss (dB)', fontweight='bold')
-    ax6.set_ylabel('Depth (m)', fontweight='bold')
-    ax6.set_title(f'TL vs Depth at {mid_range_km:.1f}km Range', fontweight='bold')
-    ax6.legend(fontsize=10, framealpha=0.9)
-    ax6.grid(True, alpha=0.3)
+    compare([result_kraken.at(range=mid_range_km * 1000.0),
+             result_scooter.at(range=mid_range_km * 1000.0)], labels, ax=ax6,
+            linewidth=2.5, alpha=0.8,
+            title=f'TL vs Depth at {mid_range_km:.1f}km Range')
 
     # ─────────────────────────────────────────────────────────────────────
     # Plot 7: Workflow Diagram

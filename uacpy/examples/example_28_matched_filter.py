@@ -27,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).parents[2]))
 
 import numpy as np  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
+from matplotlib.colors import LogNorm  # noqa: E402
 
 from uacpy.acoustic_signal import (  # noqa: E402
     ambiguity_function,
@@ -35,6 +36,7 @@ from uacpy.acoustic_signal import (  # noqa: E402
     pulse_compression,
     simulate_reception,
 )
+from uacpy.visualization import plot_ambiguity  # noqa: E402
 
 
 def main():
@@ -87,11 +89,11 @@ def main():
     ax.set_xlim(0, 100); ax.set_ylim(-60, 5); ax.grid(True, alpha=0.3)
 
     ax = axes[1, 1]
-    extent = [lag_axis[0] * 1e3, lag_axis[-1] * 1e3, dop_axis[0], dop_axis[-1]]
-    ax.imshow(20 * np.log10(amb + 1e-3), aspect='auto', origin='lower',
-              extent=extent, vmin=-40, vmax=0, cmap='viridis')
-    ax.set_title('Ambiguity function |chi(tau, nu)| (dB)', fontweight='bold')
-    ax.set_xlabel('Delay (ms)'); ax.set_ylabel('Doppler (Hz)')
+    # Log colour scale over |chi| from 1e-2 to 1 — the -40..0 dB window that
+    # shows the sidelobe structure, not only the mainlobe.
+    plot_ambiguity(lag_axis, dop_axis, amb, ax=ax, cmap='viridis',
+                   norm=LogNorm(vmin=1e-2, vmax=1.0),
+                   title='Ambiguity function |chi(tau, nu)|')
     ax.set_xlim(-5, 5)
 
     plt.tight_layout()

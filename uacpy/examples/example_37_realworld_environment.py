@@ -99,10 +99,6 @@ GRID_SOURCE = 'local' if (not FORCE_ONLINE and _have('gebco')) else 'api'
 # Map resolution: the local GEBCO grid has no rate limit, so go fine; the online
 # OpenTopoData API is fair-use-capped, so stay coarse.
 N_LAT = N_LON = 400 if GRID_SOURCE == 'local' else 10
-_CACHED = [d for d in ('gebco', 'woa23', 'sediment', 'emodnet', 'coastline',
-                       'globsed', 'crust1', 'diesing', 'seaice') if _have(d)]
-print(f"  data source: cache-first ({BATHY_SOURCE})  ·  map grid {N_LAT}×{N_LON}")
-print(f"  offline cache installed: {', '.join(_CACHED) if _CACHED else 'none'}")
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -119,7 +115,10 @@ def _fetch_grid():
         lats = np.linspace(*REGION_LAT, N_LAT)
         lons = np.linspace(*REGION_LON, N_LON)
         lon_m, lat_m = np.meshgrid(lons, lats)
-        depth = 2800.0 * np.exp(-(((lat_m - 40) / 3) ** 2 + ((lon_m - 5) / 3) ** 2))
+        # A basin centred on the region, so the stand-in grid has sea cells.
+        lat_0, lon_0 = np.mean(REGION_LAT), np.mean(REGION_LON)
+        depth = 2800.0 * np.exp(-(((lat_m - lat_0) / 3) ** 2
+                                  + ((lon_m - lon_0) / 3) ** 2))
         depth[depth < 200] = np.nan
         return lats, lons, depth
 
@@ -429,6 +428,10 @@ def main():
     print("═" * 80)
     print(f"EXAMPLE 37: real-world environment → map · TL · section  ({DATE})")
     print("═" * 80)
+    cached = [d for d in ('gebco', 'woa23', 'sediment', 'emodnet', 'coastline',
+                          'globsed', 'crust1', 'diesing', 'seaice') if _have(d)]
+    print(f"  data source: cache-first ({BATHY_SOURCE})  ·  map grid {N_LAT}×{N_LON}")
+    print(f"  offline cache installed: {', '.join(cached) if cached else 'none'}")
     print("\nFetching:")
     lats, lons, depth = _fetch_grid()
     env = _fetch_env()

@@ -41,18 +41,23 @@ from uacpy.core.exceptions import (
 from uacpy.io.bellhop_writer import (
     validate_beam_shape, validate_beam_type, write_bellhop_env_file,
 )
-from uacpy.io.refl_io import stage_source_beam_pattern
+from uacpy.io.refl_io import read_source_beam_pattern, stage_source_beam_pattern
 from uacpy.io.file_manager import FileManager
 from uacpy.io.oalib_reader import read_shd_file, read_arr_file, read_ray_file
 from uacpy.io.utils import equally_spaced
-from uacpy.io.oalib_writer import SOURCE_TYPE_CODE as _SOURCE_TYPE_CODE
+from uacpy.io.oalib_writer import (
+    SOURCE_TYPE_CODE as _SOURCE_TYPE_CODE, resolve_ssp_interp,
+)
 
-# A line source carries the 2-D Green's function's exp(-i*pi/4): (i/4)*H0(kR)
-# ~ exp(i(kR + pi/4)) for large kR, while both AT scale factors are purely
-# real — ScalePressure's line branch (influence.f90:784,
+# A line source carries the 2-D Green's function's exp(-i*pi/4). In AT's
+# e^{+i*omega*t} convention (index.htm:801) the free-space line field is
+# (-i/4)*H0^(2)(kR) ~ (1/4)*sqrt(2/(pi*k*R))*exp(-i*(kR + pi/4)) for large
+# kR — a phase of -pi/4 against the e^{-ikR} carrier — while both AT scale
+# factors are purely real: ScalePressure's line branch (influence.f90:784,
 # factor = -4*sqrt(pi)*const with const = -1) and WriteArrivals' line branch
-# (ArrMod.f90:103-104, factor = 4*sqrt(pi)). Applying it on every path keeps
-# COHERENT_TL, BROADBAND and TIME_SERIES on one phase reference.
+# (ArrMod.f90:103-104, factor = 4*sqrt(pi)). Applied once, on the .shd field
+# and on every arrival read from the .arr, it keeps COHERENT_TL, ARRIVALS,
+# BROADBAND and TIME_SERIES on one phase reference.
 _LINE_SOURCE_PHASE = -np.pi / 4.0
 # The same 4*sqrt(pi) sets the LEVEL: Bellhop's free-space line field is
 # 4*sqrt(pi)/sqrt(R), Kraken's and Scooter's 1/sqrt(k0*R) — a 4*sqrt(pi*k0)
@@ -181,8 +186,9 @@ def delayandsum(
         earliest arrival.
     phase_offset : float, optional
         Constant phase (radians) added to every arrival, applied on the
-        analytic signal. Carries the line-source ``exp(-i*pi/4)``; ``0.0``
-        (default) for a point source.
+        analytic signal. ``0.0`` (default): a :class:`Bellhop` ARRIVALS
+        result already carries the line-source ``exp(-i*pi/4)`` in its
+        ``phases``.
     fractional : bool, optional
         Place each echo at its exact delay with a windowed-sinc kernel
         (default). ``False`` rounds every delay to the nearest sample, which
@@ -396,15 +402,20 @@ _BELLHOP_OUTPUT = {
 _BELLHOP_OUTPUT_SUFFIXES = ('.shd', '.arr', '.ray')
 
 
-# bellhop.f90:176-178 zeroes the angular spacing for a single beam, which
-# gives every beam zero width and an all-NaN field at exit 0. Two is the
-# smallest fan with a finite Dalpha, and it does produce a field wherever its
-# rays reach the receiver: on a deep-water direct path (1 km source and
-# receiver, 2 km range, +/-10 deg fan) it returns 69.1 dB against a converged
-# 66.1 dB. Under-resolved, not degenerate — and not specially so, since a
-# five-beam fan on the same geometry lands a beam edge on the receiver and
-# reads 100.1 dB. How well a sparse fan covers a grid is the caller's problem.
-_MIN_INFLUENCE_BEAMS = 2
+def _bellhop_variant(exe) -> Optional[str]:
+    """Which engine a Bellhop binary is, read off its basename: ``'cuda'``
+    (bellhopcuda), ``'cxx'`` (bellhopcxx) or ``'fortran'`` (bellhop, the
+    name every AT build and ``install.sh`` produce). ``None`` for a name
+    carrying none of the three, which only a user-pinned ``executable=``
+    can be."""
+    lower = Path(exe).name.lower()
+    if 'cuda' in lower:
+        return 'cuda'
+    if 'cxx' in lower:
+        return 'cxx'
+    if 'bellhop' in lower:
+        return 'fortran'
+    return None
 
 
 # Volume-attenuation mismatch (dB per km of path) above which a BROADBAND run
@@ -481,8 +492,10 @@ class Bellhop(PropagationModel):
         falls back to the Fortran binary with a ``UserWarning``. Mirrors
         ``RAM(backend=...)``.
     dimensionality : str, optional
-        Only ``'2D'`` (default) is supported — it is the ``--2D`` flag the
-        bellhopcxx / bellhopcuda CLIs require (the Fortran binary ignores it).
+        Only ``'2D'`` (default) is supported — it is passed to the
+        bellhopcxx / bellhopcuda CLIs as ``--2D`` (accepted, not required:
+        without a flag they assume 2D, ``cmdline.cpp:186-191``; the Fortran
+        binary takes no flag).
         ``'3D'`` is rejected because 3-D running is not yet available: the
         env writer cannot emit a 3D-format input file, so a 3D flag would
         mis-drive the binary. The BELLHOP3D / FIELD3D *file* readers and
@@ -725,9 +738,10 @@ class Bellhop(PropagationModel):
             installed, Bellhop falls back to the Fortran binary with a
             ``UserWarning``. Mirrors ``RAM(backend=...)``.
         dimensionality : str, optional
-            Only ``'2D'`` (default) is supported — the ``--2D`` flag the
-            bellhopcxx / bellhopcuda CLIs require (ignored by the Fortran
-            binary, which has no such flag). ``'3D'`` raises: 3-D running is
+            Only ``'2D'`` (default) is supported — passed to the bellhopcxx /
+            bellhopcuda CLIs as ``--2D`` (accepted, not required: without a
+            flag they assume 2D, ``cmdline.cpp:186-191``; the Fortran binary
+            takes no flag). ``'3D'`` raises: 3-D running is
             not yet available because the env writer produces 2D-format
             input only. The BELLHOP3D / FIELD3D *file* readers and writers
             are already in :mod:`uacpy.io` and retained for it
@@ -777,9 +791,9 @@ class Bellhop(PropagationModel):
             ``.ati`` interpolation. ``'linear'`` (default) or
             ``'curvilinear'``.
         beam_width_type : {'F', 'M', 'W'}, optional
-            Cerveny beam width type. 'F' = filling
-            (default), 'M' = match, 'W' = waveguide. Only used when
-            ``beam_type`` ∈ ('C', 'R').
+            Cerveny beam width type (``ReadEnvironmentBell.f90:178-181``):
+            'F' = space-filling (default), 'M' = minimum width, 'W' = WKB
+            beams. Only used when ``beam_type`` ∈ ('C', 'R').
         beam_curvature : {'D', 'S', 'Z'}, optional
             Beam curvature: 'D' = double (default), 'S' = single,
             'Z' = zero.
@@ -970,16 +984,17 @@ class Bellhop(PropagationModel):
         self.version = "unknown"
 
         # A copy re-resolves the binary honoring ``backend=`` instead of
-        # re-pinning the already-resolved path (which would flip ``version``
-        # to 'custom' and drop the cxx/cuda ``--<dim>`` flag).
+        # re-pinning the already-resolved path. A pinned path is read the
+        # way an auto-picked one is — its basename says which engine it is,
+        # and with it whether the .arr needs the pair-merge and whether the
+        # CLI takes ``--<dim>``; a name matching no engine is 'custom'.
         self._exe = self._resolve_executable(
             executable, self._find_bellhop_executable,
         )
         if self.executable is not None:
-            self.version = "custom"
+            self.version = _bellhop_variant(self._exe) or "custom"
 
-        if self.version != "custom":
-            self._log(f"Using Bellhop {self.version}: {self._exe}")
+        self._log(f"Using Bellhop {self.version}: {self._exe}")
 
     def _validate_component(self) -> None:
         """``component`` is a Cerveny **ray-centred** knob only.
@@ -1241,29 +1256,54 @@ class Bellhop(PropagationModel):
         zs = np.atleast_1d(np.asarray(source.depths, dtype=float))
         zr = np.atleast_1d(np.asarray(receiver.depths, dtype=float))
         rr = np.atleast_1d(np.asarray(receiver.ranges, dtype=float))
-        rr = rr[rr > 0.0]                      # r = 0 carries no ray path
-        if not zs.size or not zr.size or not rr.size:
-            return
-        # Whether ANY pair misses is decided by the extremes of the angle over
-        # the (zs, zr, rr) box, and those sit at its corners: atan2(d, r) rises
-        # with d at fixed r, and is monotone in r at fixed d (falling for
-        # d > 0, rising for d < 0). So four angles settle the common case
-        # without the (n_sz, n_rz, n_rr) cube the check used to build — 1.5 GiB
-        # and 1.3 s of float64 at 20 x 500 x 10000, to emit nothing.
-        d_ends = np.array([zr.min() - zs.max(), zr.max() - zs.min()])
-        r_ends = np.array([rr.min(), rr.max()])
-        corner = np.degrees(np.arctan2(d_ends[:, None], r_ends[None, :]))
-        if corner.min() >= fan_lo and corner.max() <= fan_hi:
-            return
-        # The corners cannot answer the other two: a count is not an extremal
-        # quantity, and the steepest angle among the MISSES is a corner only
-        # when the fan spans the horizontal (measured wrong in 6,369 of 99,698
-        # random cases on fans that exclude 0, which alpha=(17, 74) is —
-        # :758 requires only alpha_lo < alpha_hi). Both come exactly off the
-        # sorted range axis instead.
-        n_out, worst = _fan_miss_count_and_worst(zs, zr, rr, fan_lo, fan_hi)
+        if self._receiver_grid_is_paired(receiver):
+            # An 'I' deck pairs sorted depth i with sorted range i
+            # (bellhop.f90:202-206): one receiver per index, not the
+            # depth x range product, so the angles are evaluated per pair.
+            # Unequal lists are refused when the deck is written.
+            if zr.size != rr.size:
+                return
+            keep = rr > 0.0                    # r = 0 carries no ray path
+            zr, rr = zr[keep], rr[keep]
+            if not zs.size or not rr.size:
+                return
+            needed = np.degrees(np.arctan2(zr[None, :] - zs[:, None],
+                                           rr[None, :]))
+            outside = (needed < fan_lo) | (needed > fan_hi)
+            if not outside.any():
+                return
+            n_out = int(outside.sum())
+            n_pairs = zs.size * rr.size
+            worst = float(needed[outside].flat[
+                int(np.argmax(np.abs(needed[outside])))])
+        else:
+            rr = rr[rr > 0.0]                  # r = 0 carries no ray path
+            if not zs.size or not zr.size or not rr.size:
+                return
+            # Whether ANY pair misses is decided by the extremes of the angle
+            # over the (zs, zr, rr) box, and those sit at its corners:
+            # atan2(d, r) rises with d at fixed r, and is monotone in r at
+            # fixed d (falling for d > 0, rising for d < 0). So four angles
+            # settle the common case without the (n_sz, n_rz, n_rr) cube the
+            # check used to build — 1.5 GiB and 1.3 s of float64 at
+            # 20 x 500 x 10000, to emit nothing.
+            d_ends = np.array([zr.min() - zs.max(), zr.max() - zs.min()])
+            r_ends = np.array([rr.min(), rr.max()])
+            corner = np.degrees(np.arctan2(d_ends[:, None], r_ends[None, :]))
+            if corner.min() >= fan_lo and corner.max() <= fan_hi:
+                return
+            # The corners cannot answer the other two: a count is not an
+            # extremal quantity, and the steepest angle among the MISSES is
+            # a corner only when the fan spans the horizontal (measured
+            # wrong in 6,369 of 99,698 random cases on fans that exclude 0,
+            # which alpha=(17, 74) is — :758 requires only
+            # alpha_lo < alpha_hi). Both come exactly off the sorted range
+            # axis instead.
+            n_out, worst = _fan_miss_count_and_worst(
+                zs, zr, rr, fan_lo, fan_hi)
+            n_pairs = zs.size * zr.size * rr.size
         warnings.warn(
-            f"{self.model_name}: {n_out} of {zs.size * zr.size * rr.size} "
+            f"{self.model_name}: {n_out} of {n_pairs} "
             f"source/receiver pairs need a direct-path launch angle outside "
             f"alpha = [{fan_lo:g}, {fan_hi:g}] deg — the steepest is "
             f"{worst:.1f} deg. angleMod.f90:58-61 launches nothing beyond the "
@@ -1306,37 +1346,6 @@ class Bellhop(PropagationModel):
                     f"fails without naming the cause. Use acoustic_type='file' "
                     f"with a .brc table instead",
                     ['KrakenC', 'Scooter'])
-
-    def _check_beam_count_supports_run_mode(self, run_mode) -> None:
-        """Reject a beam fan too sparse to carry an influence calculation.
-
-        ``bellhop.f90:176-178`` leaves ``Angles%Dalpha = 0`` when
-        ``Nalpha == 1``, so ``q0 = c / Dalpha`` gives every beam zero width
-        and the influence sum contributes nothing: the field comes back
-        all-NaN at exit 0, with no diagnostic. That is the whole of the
-        degenerate case — a two-beam fan has a finite ``Dalpha`` and returns
-        a field wherever its rays reach the receivers (see
-        :data:`_MIN_INFLUENCE_BEAMS`); it is under-resolved, not degenerate,
-        and an under-resolved fan is the caller's choice to make.
-
-        Ray runs are unaffected — ``bellhop.f90:288`` skips the influence
-        step, and a single traced ray is a legitimate request. Eigenray runs
-        are not: they detect receiver hits inside that influence step, so a
-        single beam finds them only by beam-type accident.
-        """
-        if run_mode == RunMode.RAYS:
-            return
-        n = self.n_beams
-        if n is None or n == 0 or n >= _MIN_INFLUENCE_BEAMS:
-            return                                  # 0 = Bellhop auto-picks
-        raise ConfigurationError(
-            f"Bellhop(n_beams={n}) cannot produce a {run_mode.name} field: "
-            f"bellhop.f90:176-178 leaves the angular spacing Dalpha at 0 for a "
-            f"single beam, so every beam has zero width and the influence sum "
-            f"is empty — the run exits 0 with an all-NaN field.",
-            remediation=f"Use n_beams >= {_MIN_INFLUENCE_BEAMS} (or 0 to let "
-                        f"Bellhop choose), or run_mode=RunMode.RAYS to trace "
-                        f"individual rays.")
 
     def _check_beam_type_supports_run_mode(self, run_mode) -> None:
         """Reject ``beam_type`` × ``run_mode`` pairs the influence routine cannot
@@ -1404,7 +1413,7 @@ class Bellhop(PropagationModel):
         :data:`_IRREGULAR_GRID_BEAM_TYPES` and
         :data:`_UNIFORM_RANGE_BEAM_TYPES`. Both failures are silent and
         plausible-looking: up to 30 dB off with no NaN and no warning."""
-        if (str(self.grid_type).upper() == 'I'
+        if (self._receiver_grid_is_paired(receiver)
                 and self.beam_type not in _IRREGULAR_GRID_BEAM_TYPES):
             raise ConfigurationError(
                 f"Bellhop(grid_type='I', beam_type={self.beam_type!r}) would "
@@ -1468,13 +1477,7 @@ class Bellhop(PropagationModel):
             bin_subdirs=['bellhopcuda', 'oalib', 'bellhop'],
             dev_subdir='Acoustics-Toolbox/Bellhop',
         )
-        lower = path.name.lower()
-        if 'cuda' in lower:
-            self.version = 'cuda'
-        elif 'cxx' in lower:
-            self.version = 'cxx'
-        else:
-            self.version = 'fortran'
+        self.version = _bellhop_variant(path) or 'fortran'
 
         if self.backend is not None and self.version != self.backend:
             warnings.warn(
@@ -1605,8 +1608,8 @@ class Bellhop(PropagationModel):
             ``source_waveform`` is given, the wrapper auto-synthesises
             ``DEFAULT_BROADBAND_N_FREQS`` (128) bins linearly spaced
             over ``[fc*(1 - bw/2), fc*(1 + bw/2)]`` (clipped to [1, ∞))
-            with ``bw = DEFAULT_BROADBAND_BANDWIDTH_FACTOR`` (0.5 →
-            half-octave band). Pass ``frequencies=`` explicitly to
+            with ``bw = DEFAULT_BROADBAND_BANDWIDTH_FACTOR`` (0.5 → a
+            ±25 % band, 0.74 octave). Pass ``frequencies=`` explicitly to
             override. That default sets the spacing from the carrier
             alone — ``Δf = fc/254``, a synthesised record ``254/fc`` s
             long, with no reference to how long the channel rings — so a
@@ -1647,7 +1650,6 @@ class Bellhop(PropagationModel):
         self._reject_precalc_boundary(env)
         self._warn_if_fan_misses_receivers(source, receiver)
         self._check_beam_type_supports_run_mode(run_mode)
-        self._check_beam_count_supports_run_mode(run_mode)
         if run_mode != RunMode.RAYS:      # bellhop.f90:288 skips influence
             self._check_beam_type_supports_receiver_grid(receiver)
 
@@ -1755,7 +1757,6 @@ class Bellhop(PropagationModel):
             return routed
 
         # ── Resolve SSP interpolation, project the env, validate ────────
-        from uacpy.io.oalib_writer import resolve_ssp_interp
         effective_interp = resolve_ssp_interp(env, self.interp_ssp)
         interp_for_writer = self.interp_ssp
         if self.interp_ssp is None:
@@ -1793,8 +1794,7 @@ class Bellhop(PropagationModel):
         # mismatch here so users see a clear error instead of a confusing
         # Bellhop .prt message.
         if (
-            self.grid_type is not None
-            and str(self.grid_type).upper() == 'I'
+            self._receiver_grid_is_paired(receiver)
             and len(receiver.depths) != len(receiver.ranges)
         ):
             raise ConfigurationError(
@@ -1892,12 +1892,22 @@ class Bellhop(PropagationModel):
         is unmerged on any multi-core host; bellhopcuda's GPU run is always
         unmerged. Re-merging a merged file is not a no-op (see
         :func:`uacpy.io.oalib_reader.read_arr_file`), so the two cases must
-        not be confused.
+        not be confused. A ``'custom'`` binary (a pinned ``executable=``
+        whose name says nothing) is read as written, with a warning that
+        this may be the unmerged multi-thread file.
         """
         if self.version == 'cuda':
             return True
         if self.version == 'cxx':
             return (os.cpu_count() or 1) > 1
+        if self.version == 'custom':
+            warnings.warn(
+                f"{self.model_name}: executable={str(self._exe)!r} names "
+                f"none of bellhop / bellhopcxx / bellhopcuda, so whether its "
+                f".arr needs the AddArr pair-merge is unknown; it is read as "
+                f"written. Rename the binary after its engine, or pass "
+                f"backend= and let the package locate it.",
+                UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
         return False
 
     def _pad_receiver_ranges(self, receiver, run_type):
@@ -1920,7 +1930,7 @@ class Bellhop(PropagationModel):
         ranges = np.atleast_1d(np.asarray(receiver.ranges, dtype=float))
         if (run_type == 'E'
                 and self.beam_type in _UNIFORM_RANGE_BEAM_TYPES
-                and str(self.grid_type).upper() == 'R'
+                and not self._receiver_grid_is_paired(receiver)
                 and ranges.size >= 2):
             # An eigenray run reaches the SAME RcvrRanges loop: 'g' steps from
             # irA + 1 - II at influence.f90:373, after the clamps at :339
@@ -1951,7 +1961,7 @@ class Bellhop(PropagationModel):
             return receiver, None
         if (self.beam_type not in _UNIFORM_RANGE_BEAM_TYPES
                 or run_type not in ('C', 'I', 'S', 'A')
-                or str(self.grid_type).upper() != 'R'
+                or self._receiver_grid_is_paired(receiver)
                 or ranges.size < 2):
             return receiver, None
         dr = float(ranges[1] - ranges[0])
@@ -1978,14 +1988,15 @@ class Bellhop(PropagationModel):
     def _trim_padded_ranges(result, run_type, lo, hi):
         """Drop the range columns ``_pad_receiver_ranges`` added — on the raw
         result, before any assembly reads its axes."""
-        if run_type == 'A':
-            by_receiver = [[cells[lo:hi] for cells in by_depth]
-                           for by_depth in result.by_receiver]
-            result.by_receiver = by_receiver
-            result.receiver_ranges = np.asarray(result.receiver_ranges)[lo:hi]
-            result.arrivals = result._flatten_by_receiver(by_receiver)
-            return result
         slabs = result.slabs if isinstance(result, ResultStack) else [result]
+        if run_type == 'A':
+            for slab in slabs:
+                by_receiver = [[cells[lo:hi] for cells in by_depth]
+                               for by_depth in slab.by_receiver]
+                slab.by_receiver = by_receiver
+                slab.receiver_ranges = np.asarray(slab.receiver_ranges)[lo:hi]
+                slab.arrivals = slab._flatten_by_receiver(by_receiver)
+            return result
         for slab in slabs:
             if 'range' in slab.coords:
                 axis = list(slab.coords).index('range')
@@ -2021,16 +2032,27 @@ class Bellhop(PropagationModel):
                   if run_type == 'A' else reader(output_file))
         if trim is not None:
             result = self._trim_padded_ranges(result, run_type, *trim)
+        if run_type == 'A':
+            result = self._restore_arrival_depths(result, receiver, env)
         if run_type == 'A' and source.source_type == 'line':
-            # The .arr amplitudes carry ArrMod.f90:104's 4*sqrt(pi); bring
-            # them to the package's unit-at-1 m line-source level so the
-            # arrivals, broadband and time-series routes agree with the field.
-            for by_depth in result.by_receiver:
-                for cells in by_depth:
-                    for cell in cells:
-                        cell['amplitudes'] = (np.asarray(cell['amplitudes'], dtype=float)
-                                              * _LINE_SOURCE_LEVEL)
-            result.arrivals = result._flatten_by_receiver(result.by_receiver)
+            # The .arr amplitudes carry ArrMod.f90:104's purely real
+            # 4*sqrt(pi): bring them to the package's unit-at-1 m
+            # line-source level and give every arrival the Green's
+            # function's -pi/4 (in the file's degrees) here, so the
+            # Arrivals result, the broadband and time-series syntheses
+            # built from it and the .shd field share one phase reference.
+            for slab in (result.slabs
+                         if isinstance(result, ResultStack) else [result]):
+                for by_depth in slab.by_receiver:
+                    for cells in by_depth:
+                        for cell in cells:
+                            cell['amplitudes'] = (
+                                np.asarray(cell['amplitudes'], dtype=float)
+                                * _LINE_SOURCE_LEVEL)
+                            cell['phases'] = (
+                                np.asarray(cell['phases'], dtype=float)
+                                + np.degrees(_LINE_SOURCE_PHASE))
+                slab.arrivals = slab._flatten_by_receiver(slab.by_receiver)
 
         # AT's ScalePressure (influence.f90:757-795) carries const = -1
         # into the point-source branch (factor = const/sqrt(r)), so the
@@ -2039,8 +2061,8 @@ class Bellhop(PropagationModel):
         # shares one phase reference. The line-source branch
         # (factor = -4*sqrt(pi)*const) already cancels the sign, and the
         # arrivals path computes its own positive factor
-        # (ArrMod.f90:103-111), so only the line source's
-        # _LINE_SOURCE_PHASE is left to apply there.
+        # (ArrMod.f90:103-111) and takes the line source's
+        # _LINE_SOURCE_PHASE in the loop above.
         # Measured against the exact 2-D solution that correction is pi/4
         # to 0.01 deg, and once applied the line-source residual equals
         # the point-source beam bias exactly (4.78 deg vs 4.79 deg).
@@ -2093,7 +2115,10 @@ class Bellhop(PropagationModel):
         if run_type in ('R', 'E'):
             # The .ray file format is identical for fan and
             # eigenray runs; only the wrapper knows which one
-            # produced it. Same goes for the receiver geometry.
+            # produced it. Same goes for the receiver geometry: the
+            # requested depths are stamped as read, so an eigenray found
+            # at a clamped depth (misc/SourceReceiverPositions.f90:136-139)
+            # is labelled with the depth that was asked for.
             rcv_d = np.atleast_1d(np.asarray(receiver.depths, dtype=float))
             rcv_r = np.atleast_1d(np.asarray(receiver.ranges, dtype=float))
             ray_slabs = (
@@ -2449,7 +2474,7 @@ class Bellhop(PropagationModel):
         # depth axis therefore collapses onto the range axis, and the paired
         # depths ride on ``metadata['receiver_depths']`` — the same shape
         # ``read_shd_file`` gives the TL path.
-        irregular = str(self.grid_type).upper() == 'I'
+        irregular = self._receiver_grid_is_paired(receiver)
         nrd = 1 if irregular else len(rz)
         nrr = len(rr)
 
@@ -2461,12 +2486,6 @@ class Bellhop(PropagationModel):
             else:
                 coords = {'depth': np.asarray(rz, dtype=float), **coords}
             return (data[0] if irregular else data), coords, extra
-
-        # ArrMod.f90:103-104 scales a line source by a purely real
-        # 4*sqrt(pi), so the arrivals need the same exp(-i*pi/4) the .shd
-        # path applies.
-        arr_phase = (_LINE_SOURCE_PHASE
-                     if source.source_type == 'line' else 0.0)
 
         # ── Path A: time-domain delay-and-sum with source waveform ──
         if run_mode == RunMode.TIME_SERIES:
@@ -2508,7 +2527,6 @@ class Bellhop(PropagationModel):
                 fc=fc,
                 time_window=effective_time_window,
                 t_start=effective_t_start,
-                phase_offset=arr_phase,
                 report={},          # the grid loop below totals and says it once
             )
             t_start_locked = float(t_vec[0])
@@ -2537,7 +2555,6 @@ class Bellhop(PropagationModel):
                         fc=fc,
                         time_window=time_window_locked,
                         t_start=t_start_locked,
-                        phase_offset=arr_phase,
                         report=clip_report,
                     )
                     # delayandsum may return a slightly different length —
@@ -2603,8 +2620,7 @@ class Bellhop(PropagationModel):
         for ird in range(nrd):
             for irr in range(nrr):
                 rcv_arr = arrivals_by_rcv[0][ird][irr]
-                H[ird, irr, :] = self._arrivals_to_tf(
-                    rcv_arr, frequencies, phase_offset=arr_phase)
+                H[ird, irr, :] = self._arrivals_to_tf(rcv_arr, frequencies)
 
         self._log(f"Built transfer function "
                   f"({nrd} depths x {nrr} ranges x {n_freq} freqs)")
@@ -2635,6 +2651,36 @@ class Bellhop(PropagationModel):
         if not irregular:
             field = self._restore_broadband_depth_axis(field, receiver, env)
         return field
+
+    def _restore_arrival_depths(self, result, receiver, env):
+        """Reattach the requested depth axis to an ARRIVALS result and empty
+        (``n_arrivals = 0``) the cells BELLHOP clamped onto the deck bottom
+        (``misc/SourceReceiverPositions.f90:136-139``) — the arrivals
+        counterpart of the TL modes' ``_restore_depths_and_mask``. On a
+        paired grid (``grid_type='I'``) depth ``i`` is range cell ``i``."""
+        depths = np.atleast_1d(np.asarray(receiver.depths, dtype=float))
+        below = depths > float(env.depth)
+        paired = self._receiver_grid_is_paired(receiver)
+        for slab in (result.slabs
+                     if isinstance(result, ResultStack) else [result]):
+            if slab.receiver_depths.size != depths.size:
+                raise ModelExecutionError(
+                    self.model_name, return_code=0, stdout=None,
+                    stderr=(f"{self.model_name} returned "
+                            f"{slab.receiver_depths.size} receiver depths "
+                            f"for {depths.size} requested; the depth axis "
+                            f"cannot be reattached."),
+                )
+            for by_src in slab.by_receiver:
+                for d_idx, cells in enumerate(by_src):
+                    for r_idx, cell in enumerate(cells):
+                        if below[r_idx if paired else d_idx]:
+                            cells[r_idx] = {
+                                k: (v[:0] if isinstance(v, np.ndarray) else 0)
+                                for k, v in cell.items()}
+            slab.receiver_depths = depths
+            slab.arrivals = slab._flatten_by_receiver(slab.by_receiver)
+        return result
 
     def _restore_broadband_depth_axis(self, field, receiver, env):
         """Restore the caller's depth axis on a broadband / time-series Field
@@ -2760,9 +2806,9 @@ class Bellhop(PropagationModel):
         frequencies : ndarray
             Frequency vector in Hz.
         phase_offset : float, optional
-            Constant phase (radians) added to every arrival. Carries the
-            line-source ``exp(-i*pi/4)``; ``0.0`` (default) for a point
-            source.
+            Constant phase (radians) added to every arrival. ``0.0``
+            (default): a :class:`Bellhop` ARRIVALS result already carries
+            the line-source ``exp(-i*pi/4)`` in its ``phases``.
 
         Returns
         -------
@@ -2863,8 +2909,6 @@ class Bellhop(PropagationModel):
         left unclamped so the Fortran, C++ and CUDA backends stay identical,
         which makes this the only available guard.
         """
-        from uacpy.io.refl_io import read_source_beam_pattern
-
         if isinstance(pattern, (str, Path)):
             angles = read_source_beam_pattern(pattern)[:, 0]
         else:
@@ -2890,8 +2934,9 @@ class Bellhop(PropagationModel):
     def _build_command(self, base_name: str) -> list:
         """Build the argv used to launch the binary.
 
-        The bellhopcxx / bellhopcuda CLIs require a ``--<dim>`` flag; the
-        Fortran binary takes none.
+        The bellhopcxx / bellhopcuda CLIs accept a ``--<dim>`` flag (they
+        assume 2D without one, ``cmdline.cpp:186-191``); the Fortran binary
+        takes none.
         """
         if self.version in ('cuda', 'cxx'):
             return [str(self._exe), f'--{self.dimensionality}', base_name]

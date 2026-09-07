@@ -108,63 +108,44 @@ def make_base_env(bottom):
     return env, bathymetry
 
 
+def _two_column_bottom(near_layers, near_halfspace, far_layer, far_halfspace):
+    """Layered bottom with a column at 0 km and another at 20 km: each layer
+    is ``(thickness_m, cp, rho, alpha)``, each half-space ``(cp, rho,
+    alpha)`` — the near column carries two layers, the far one a single
+    layer."""
+    def column(layers, halfspace):
+        return SeabedColumn(
+            layers=[SedimentLayer(thickness=thk, sound_speed=cp, density=rho,
+                                  attenuation=alpha)
+                    for thk, cp, rho, alpha in layers],
+            halfspace=BoundaryProperties(
+                acoustic_type='half-space', sound_speed=halfspace[0],
+                density=halfspace[1], attenuation=halfspace[2]),
+        )
+    return Bottom.from_columns(
+        [column(near_layers, near_halfspace), column([far_layer], far_halfspace)],
+        ranges=np.array([0, 20000]))
+
+
 def make_hard_bottom():
     """Hard layered bottom: high impedance contrast, low attenuation."""
-    near = SeabedColumn(
-        layers=[
-            SedimentLayer(thickness=8.0, sound_speed=1600, density=1.8,
-                          attenuation=0.2),
-            SedimentLayer(thickness=20.0, sound_speed=1700, density=2.0,
-                          attenuation=0.1),
-        ],
-        halfspace=BoundaryProperties(
-            acoustic_type='half-space', sound_speed=2500,
-            density=2.5, attenuation=0.05,
-        ),
-    )
-    far = SeabedColumn(
-        layers=[
-            SedimentLayer(thickness=3.0, sound_speed=1800, density=2.0,
-                          attenuation=0.1),
-        ],
-        halfspace=BoundaryProperties(
-            acoustic_type='half-space', sound_speed=3000,
-            density=2.8, attenuation=0.02,
-        ),
-    )
-    return Bottom.from_columns([near, far], ranges=np.array([0, 20000]))
+    return _two_column_bottom(
+        near_layers=[(8.0, 1600, 1.8, 0.2), (20.0, 1700, 2.0, 0.1)],
+        near_halfspace=(2500, 2.5, 0.05),
+        far_layer=(3.0, 1800, 2.0, 0.1),
+        far_halfspace=(3000, 2.8, 0.02))
 
 
 def make_soft_bottom():
     """Soft lossy layered bottom: low impedance contrast, high attenuation."""
-    near = SeabedColumn(
-        layers=[
-            SedimentLayer(thickness=8.0, sound_speed=1500, density=1.2,
-                          attenuation=1.0),
-            SedimentLayer(thickness=20.0, sound_speed=1580, density=1.5,
-                          attenuation=0.6),
-        ],
-        halfspace=BoundaryProperties(
-            acoustic_type='half-space', sound_speed=1800,
-            density=2.0, attenuation=0.2,
-        ),
-    )
-    far = SeabedColumn(
-        layers=[
-            SedimentLayer(thickness=3.0, sound_speed=1650, density=1.8,
-                          attenuation=0.3),
-        ],
-        halfspace=BoundaryProperties(
-            acoustic_type='half-space', sound_speed=2500,
-            density=2.5, attenuation=0.05,
-        ),
-    )
-    return Bottom.from_columns([near, far], ranges=np.array([0, 20000]))
+    return _two_column_bottom(
+        near_layers=[(8.0, 1500, 1.2, 1.0), (20.0, 1580, 1.5, 0.6)],
+        near_halfspace=(1800, 2.0, 0.2),
+        far_layer=(3.0, 1650, 1.8, 0.3),
+        far_halfspace=(2500, 2.5, 0.05))
 
 
 def main():
-    import matplotlib
-    matplotlib.use('Agg')
     import matplotlib.pyplot as plt
     from uacpy.visualization.plots import plot_field
 

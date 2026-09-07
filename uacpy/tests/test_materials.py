@@ -180,3 +180,40 @@ class TestLayeredBottomFromPresets:
                 layers=[('sand',)],
                 halfspace='limestone',
             )
+
+
+class TestHamiltonAttenuationFollowsThe1972GrainSizeRegressions:
+    """``k_p`` is the Fig. 3 caption of Hamilton (1972), Geophysics 37, p. 636."""
+
+    @pytest.mark.parametrize('phi, expected', [
+        (0.92, 0.4556 + 0.0245 * 0.92),
+        (4.24, 0.1978 + 0.1245 * 4.24),
+        (5.40, 8.0399 - 2.5228 * 5.40 + 0.20098 * 5.40 ** 2),
+        (8.80, 0.9431 - 0.2041 * 8.80 + 0.0117 * 8.80 ** 2),
+    ])
+    def test_each_branch_reproduces_the_printed_regression(self, phi, expected):
+        from uacpy.core.sediment import _hamilton_kp
+        assert _hamilton_kp(phi) == pytest.approx(expected, abs=1e-12)
+
+    @pytest.mark.parametrize('join', [2.6, 4.5, 6.0])
+    def test_the_branches_meet_at_their_joins(self, join):
+        from uacpy.core.sediment import _hamilton_kp
+        assert abs(_hamilton_kp(join - 1e-9) - _hamilton_kp(join + 1e-9)) < 0.005
+
+    def test_grain_sizes_outside_the_recommended_limits_hold_the_end_values(self):
+        from uacpy.core.sediment import _hamilton_kp
+        assert _hamilton_kp(-1.0) == _hamilton_kp(0.0)
+        assert _hamilton_kp(12.0) == _hamilton_kp(9.5)
+
+    def test_the_peak_sits_in_very_fine_sand(self):
+        import numpy as np
+        from uacpy.core.sediment import _hamilton_kp
+        phi = np.linspace(0.0, 9.5, 951)
+        k = np.array([_hamilton_kp(p) for p in phi])
+        assert phi[int(np.argmax(k))] == pytest.approx(4.5, abs=0.02)
+        assert k.max() == pytest.approx(0.758, abs=0.002)
+
+    def test_attenuation_in_db_per_wavelength_is_k_p_times_c_over_1000(self):
+        from uacpy.core.sediment import _hamilton_kp, grain_size_to_geoacoustics
+        props = grain_size_to_geoacoustics(5.4, model='hamilton')
+        assert props['attenuation'] == pytest.approx(_hamilton_kp(5.4) * props['sound_speed'] / 1000.0, rel=1e-9)

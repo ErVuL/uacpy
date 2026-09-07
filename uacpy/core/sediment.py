@@ -13,7 +13,7 @@ model sees a grain size at run time.
 Two models are provided:
 
 - ``'hamilton'`` (default) — the **low-frequency** Hamilton & Bachman (1982)
-  table + Hamilton (1980) ``k_p`` attenuation, reproduced from the open-access
+  table + Hamilton (1972) ``k_p`` grain-size regressions (Geophysics 37, Fig. 3
   CC-BY ESAB supplement of Fonseca, Lurton, Fezzani & Roche (2025).
 - ``'apl-uw'`` — APL-UW TR 9407 (1994) §IV.A.4 grain-size relations (the
   **high-frequency** ρ, ν polynomials + α₂/f). These are the same formulas the
@@ -85,29 +85,24 @@ _MODEL_RANGE = {'hamilton': (float(_HB_PHI[0]), float(_HB_PHI[-1])),
                 'apl-uw': (-1.0, 9.0)}
 
 
-def _hamilton_kp(impedance: float) -> float:
-    """Hamilton (1980) attenuation factor ``k_p`` vs sediment impedance.
+def _hamilton_kp(phi: float) -> float:
+    """Hamilton (1972) attenuation constant ``k_p`` versus mean grain size.
 
-    ``α(dB/m) = k_p · f(kHz)``; ``impedance`` is ρ·c in 10³ kg m⁻² s⁻¹. The
-    piecewise fit (ESAB supplement, after Fig. 18 of Hamilton 1980) peaks
-    (~0.78) in medium sand and tails to ~0.46 for coarse / ~0.07 for fine.
-
-    The first and last branches are unreachable through
-    :func:`grain_size_to_geoacoustics` (ϕ clamped to ``_MODEL_RANGE`` maps to
-    z ∈ ≈[2212, 3689]); they are kept for fidelity to the published curve.
+    ``α(dB/m) = k_p · f(kHz)``. The four regressions are the Fig. 3 caption of
+    Hamilton, "Compressional-wave attenuation in marine sediments",
+    Geophysics 37 (1972), p. 636 (``external:hamilton1972.pdf`` page 17),
+    "recommended only within the limiting values" 0 to 9.5 ϕ, so ϕ is held at
+    those limits outside them. The branches meet within 0.003 at 2.6, 4.5 and
+    6.0 ϕ; the peak is 0.758 at 4.5 ϕ (very fine sand), the clay end 0.05.
     """
-    z = impedance
-    if z < 1784.0:
-        return 0.07
-    if z < 2478.0:
-        return 0.07 + 7.2e-5 * (z - 1784.0)
-    if z < 3034.0:
-        return 0.12 + 1.19e-3 * (z - 2478.0)
-    if z < 3270.0:
-        return 0.78 - 1.10e-3 * (z - 3034.0)
-    if z < 3869.0:
-        return 0.52 - 1.00e-4 * (z - 3270.0)
-    return 0.46
+    m = min(max(float(phi), 0.0), 9.5)
+    if m <= 2.6:
+        return 0.4556 + 0.0245 * m
+    if m <= 4.5:
+        return 0.1978 + 0.1245 * m
+    if m <= 6.0:
+        return 8.0399 - 2.5228 * m + 0.20098 * m * m
+    return 0.9431 - 0.2041 * m + 0.0117 * m * m
 
 
 def _hamilton_geoacoustics(phi, water_sound_speed, water_density):
@@ -115,10 +110,8 @@ def _hamilton_geoacoustics(phi, water_sound_speed, water_density):
     density_ratio = float(np.interp(phi, _HB_PHI, _HB_RHO)) / _HB_REF_RHOW
     velocity_ratio = float(np.interp(phi, _HB_PHI, _HB_VRATIO))
     cp = velocity_ratio * water_sound_speed
-    # k_p is calibrated on the reference-water impedance (ρ·c at Hamilton's
-    # c_w/ρ_w); evaluate it there, then express α in dB/λ for the in-situ c.
-    z_ref = (density_ratio * _HB_REF_RHOW) * (velocity_ratio * _HB_REF_CW)
-    attenuation = _hamilton_kp(z_ref) * cp / 1000.0
+    # α(dB/λ) = k_p · f(kHz) · λ = k_p · c / 1000: frequency drops out.
+    attenuation = _hamilton_kp(phi) * cp / 1000.0
     return cp, density_ratio * water_density, attenuation
 
 
@@ -144,10 +137,11 @@ def _hamilton_geoacoustics(phi, water_sound_speed, water_density):
 # (the -0.0165406 Mz³ density term turns over), whereas a flat endpoint stays
 # physical. ``grain_size_to_geoacoustics`` warns when that clamp moves the
 # answer, so the divergence is visible at the call site rather than only here.
-# Stated honestly: TR 9407's own validity range could not be checked against a
-# copy of the report, so the "valid -1 <= Mz <= 9" above restates uacpy's own
-# docstring rather than a verified source. The clamp is justified by the
-# Wentworth bounds and by the fits' behaviour outside them, not by TR 9407.
+# The range is the report's own: TR 9407 §IV.A.4 "Model Input Parameters
+# Using Grain Size" (p. IV-7) states that relations (2)-(5) "are defined only
+# for -1 <= Mz <= 9", which is the interval the clamp holds the fits to. The
+# polynomial coefficients themselves are verified against the AT transcription
+# above (the report's equation blocks are not decoded in the parsed copy).
 def _apl_density_ratio(mz: float) -> float:
     if mz < 1.0:
         return 0.007797 * mz ** 2 - 0.17057 * mz + 2.3139
@@ -218,7 +212,7 @@ def grain_size_to_geoacoustics(
         Mean grain size on the Wentworth ϕ scale.
     model : {'hamilton', 'apl-uw'}, optional
         ``'hamilton'`` (default) — the **low-frequency** Hamilton & Bachman
-        (1982) / Hamilton (1980) relations. ``'apl-uw'`` — the **high-frequency**
+        (1982) / Hamilton (1972) relations. ``'apl-uw'`` — the **high-frequency**
         APL-UW TR 9407 (1994) grain-size relations (ρ, ν polynomials + α₂/f).
     water_sound_speed, water_density : float, optional
         In-situ seawater sound speed (m/s) and density (g/cm³) the ratios are

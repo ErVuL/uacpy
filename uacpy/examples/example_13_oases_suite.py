@@ -26,6 +26,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 import uacpy  # noqa: E402
 from uacpy.core.environment import SoundSpeedProfile  # noqa: E402
 from uacpy.models import OAST, OASN, OASR, OASP  # noqa: E402
+from uacpy.acoustic_signal.waveforms import gaussian_pulse  # noqa: E402
 
 
 def main():
@@ -205,9 +206,11 @@ def main():
         nt_pulse = 64
         t_pulse = np.arange(nt_pulse) / fs
         sigma = nt_pulse / (8.0 * fs)
+        # Gaussian-windowed sinusoid; gaussian_pulse's width parameter is
+        # sigma*sqrt(2), so the envelope is exp(-(t - t0)^2 / (2 sigma^2)).
         pulse = (
             np.sin(2 * np.pi * f_center * (t_pulse - t_pulse[-1] / 2))
-            * np.exp(-((t_pulse - t_pulse[-1] / 2) ** 2) / (2 * sigma ** 2))
+            * gaussian_pulse(t_pulse, t_pulse[-1] / 2, sigma * np.sqrt(2))
         )
         try:
             ts = result_oasp.synthesize_time_series(source_waveform=pulse, sample_rate=fs)

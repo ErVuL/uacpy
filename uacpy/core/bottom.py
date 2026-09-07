@@ -11,11 +11,12 @@ from dataclasses import dataclass
 
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core._warn_frames import USER_FRAME_SKIP
-from uacpy.core.constants import DECK_RANGE_RESOLUTION_M
+from uacpy.core.constants import DECK_RANGE_RESOLUTION_M, BoundaryType
 from uacpy.core._grid import (
     _as_finite_scalar_label, _nearest_index_on_axis,
 )
 from uacpy.core._carrier_validate import (
+    _DeepCopyMixin,
     _validate_acoustic_type, _require_strictly_increasing,
     _require_attenuation_in_range,
     _require_positive, _require_non_negative, _coerce_data_sources,
@@ -105,8 +106,32 @@ def _validate_boundary_write(owner: str, name, value, nodes, layered=False):
         _require_attenuation_in_range(value, f"{owner} {name}")
     return value
 
+
+def _delegate_write(owner: str, nodes, name, value, *, layered=False,
+                    noun='columns', hint='.columns[i].halfspace'):
+    """Store a write of a delegated boundary field on every node.
+
+    ``owner`` names the carrier for the messages, ``nodes`` are its
+    ``BoundaryProperties``, ``layered`` says whether sediment layers sit above
+    them (a flat write is then refused — :func:`_validate_boundary_write`),
+    and ``noun``/``hint`` are the per-node spelling the warning offers (a
+    ``Surface`` passes ``'nodes'`` / ``'.properties[i]'``). The value is
+    validated once, then broadcast; on more than one node that flattens any
+    range dependence, so it warns — attributed to the assigning line by the
+    frame walk, since the write reaches here through ``__setattr__``.
+    """
+    value = _validate_boundary_write(owner, name, value, nodes, layered)
+    if len(nodes) > 1:
+        warnings.warn(
+            f"{owner}.{name} = {value!r} sets all {len(nodes)} range {noun} "
+            f"to the same value, flattening any range dependence. Assign to "
+            f"{hint}.{name} to write a single {noun[:-1]}.",
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
+    for node in nodes:
+        setattr(node, name, value)
+
 @dataclass
-class SedimentLayer:
+class SedimentLayer(_DeepCopyMixin):
     """
     Single sediment layer in a layered bottom structure.
 
@@ -200,10 +225,6 @@ class SedimentLayer:
         kwargs.update(overrides)
         return cls(**kwargs)
 
-    def copy(self) -> 'SedimentLayer':
-        """Deep copy (symmetric with the other carriers)."""
-        return _copy.deepcopy(self)
-
 
 #: Constructor sentinel for ``acoustic_type``: ``None`` means "infer it",
 #: which ``__post_init__`` resolves to 'file', 'half-space' or 'vacuum' from
@@ -214,7 +235,7 @@ _TYPE_NOT_GIVEN: Any = None
 
 
 @dataclass
-class BoundaryProperties:
+class BoundaryProperties(_DeepCopyMixin):
     """
     Properties of ocean boundaries (surface or bottom).
 
@@ -408,7 +429,6 @@ class BoundaryProperties:
                 self.acoustic_type = 'vacuum'
 
         _validate_acoustic_type(self.acoustic_type, "BoundaryProperties")
-        from uacpy.core.constants import BoundaryType
         self.acoustic_type = BoundaryType.from_string(self.acoustic_type).value
 
         # ``misc/ReadEnvironmentMod.f90:292`` aborts a half-space whose
@@ -530,10 +550,6 @@ class BoundaryProperties:
         kwargs.update(overrides)
         return cls(**kwargs)
 
-    def copy(self) -> 'BoundaryProperties':
-        """Deep copy (symmetric with the other carriers)."""
-        return _copy.deepcopy(self)
-
 # The dataclass compiles ``__init__`` from the *field* annotations, so
 # ``inspect.signature`` / ``help()`` would advertise a default the annotation
 # refuses (``acoustic_type: str = None``). Restate the input types on the
@@ -600,6 +616,44 @@ def _reduce_boundaries(props: List[BoundaryProperties], reducer
     return _boundary_from_values(props[0], values)
 
 
+def _reduce_uniform_nodes(nodes: List[BoundaryProperties], method: str,
+                          who: str, noun: str) -> BoundaryProperties:
+    """``'mean'`` / ``'median'`` a range axis of boundary nodes down to one
+    :class:`BoundaryProperties` — the reduction :meth:`Bottom.select_range`
+    (``noun='columns'``) and :meth:`uacpy.core.surface.Surface.collapse`
+    (``noun='nodes'``) share; ``who`` names the caller in the messages.
+
+    Averaging is only meaningful within one boundary type: reducing a vacuum
+    node with a sand half-space would fold construction-time placeholders
+    into the numbers and stamp one node's type on the result. A uniform
+    ``'file'``/``'precalc'`` axis carries no real numbers to reduce — each
+    node is its reflection-coefficient table. Nodes sharing one table
+    collapse to that shared spec (roughness, the one genuine number they
+    carry, is still reduced); distinct tables cannot be averaged into
+    anything.
+    """
+    types = {n.acoustic_type for n in nodes}
+    if len(types) > 1:
+        raise ConfigurationError(
+            f"{who}({method!r}) needs a single boundary type to average; "
+            f"got {sorted(types)}. Boundary types cannot be blended — use "
+            f"'r0' or 'rmax'.")
+    reduce = np.mean if method == 'mean' else np.median
+    (the_type,) = types
+    if the_type in ('file', 'precalc'):
+        specs = {n.reflection_file for n in nodes}
+        if len(specs) > 1:
+            raise ConfigurationError(
+                f"{who}({method!r}) cannot average '{the_type}' {noun} with "
+                f"different reflection files ({sorted(specs, key=str)}). "
+                f"Reflection-coefficient tables cannot be blended — use "
+                f"'r0' or 'rmax'.")
+        shared = _copy.deepcopy(nodes[0])
+        shared.roughness = float(reduce([n.roughness for n in nodes]))
+        return shared
+    return _reduce_boundaries(nodes, reduce)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Unified bottom carrier — one ``Bottom`` (range as an optional axis), mirroring
 # ``SoundSpeedProfile``. A ``SeabedColumn`` is "layers over a half-space" at one
@@ -609,7 +663,7 @@ def _reduce_boundaries(props: List[BoundaryProperties], reducer
 
 
 @dataclass
-class SeabedColumn:
+class SeabedColumn(_DeepCopyMixin):
     """A seabed column at one range: sediment layers over a half-space.
 
     ``layers`` may be **empty** — that is a pure half-space. A non-empty
@@ -673,20 +727,14 @@ class SeabedColumn:
         """Total thickness of all sediment layers (m); 0 for a half-space."""
         return sum(layer.thickness for layer in self.layers)
 
-    def copy(self) -> 'SeabedColumn':
-        """Deep copy (symmetric with the other carriers)."""
-        return _copy.deepcopy(self)
-
     def __setattr__(self, name, value):
         # Writes to a half-space field follow through to ``halfspace``. A plain
         # assignment would create an instance attribute that echoes the new
         # value back while ``at()``, ``sample_at_depths()``, the repr and every
         # writer — all of which read ``halfspace`` — keep the previous one.
         if name in _HALFSPACE_DELEGATED and 'halfspace' in self.__dict__:
-            value = _validate_boundary_write(
-                type(self).__name__, name, value, [self.halfspace],
-                bool(self.layers))
-            setattr(self.halfspace, name, value)
+            _delegate_write(type(self).__name__, [self.halfspace], name,
+                            value, layered=bool(self.layers))
             return
         super().__setattr__(name, value)
 
@@ -889,39 +937,10 @@ class SeabedColumn:
         return cp, rho, attn
 
     @classmethod
-    def from_halfspace(
-        cls,
-        halfspace: BoundaryProperties,
-        *,
-        water_depth: Optional[float] = None,
-        sediment_thickness: Optional[float] = None,
-        sediment_fraction: float = 0.10,
-        min_thickness: float = 5.0,
-        synthesize: bool = False,
-    ) -> 'SeabedColumn':
-        """Build a column from a half-space.
-
-        ``synthesize=False`` (default) → a pure half-space (0 layers).
-        ``synthesize=True`` → a single synthetic sediment layer carrying the
-        half-space properties (thickness from ``sediment_thickness`` or
-        ``sediment_fraction*water_depth`` clamped to ``min_thickness``), as
-        the RAM PE update requires a layer above the half-space."""
-        if not synthesize:
-            return cls(layers=[], halfspace=_copy.deepcopy(halfspace))
-        if sediment_thickness is None:
-            base = float(water_depth) if water_depth is not None else 0.0
-            sediment_thickness = max(float(sediment_fraction) * base,
-                                     float(min_thickness))
-        layer = SedimentLayer(
-            thickness=float(sediment_thickness),
-            sound_speed=float(halfspace.sound_speed),
-            density=float(halfspace.density),
-            attenuation=float(halfspace.attenuation),
-            shear_speed=float(getattr(halfspace, 'shear_speed', 0.0) or 0.0),
-            shear_attenuation=float(
-                getattr(halfspace, 'shear_attenuation', 0.0) or 0.0),
-        )
-        return cls(layers=[layer], halfspace=_copy.deepcopy(halfspace))
+    def from_halfspace(cls, halfspace: BoundaryProperties) -> 'SeabedColumn':
+        """A pure half-space column (no sediment layers) over a copy of
+        ``halfspace``."""
+        return cls(layers=[], halfspace=_copy.deepcopy(halfspace))
 
     @classmethod
     def from_presets(
@@ -959,7 +978,7 @@ class SeabedColumn:
 
 # eq=False: a dataclass __eq__ over ndarray fields raises; compare by identity.
 @dataclass(eq=False)
-class Bottom:
+class Bottom(_DeepCopyMixin):
     """Unified seabed carrier — one or more :class:`SeabedColumn` columns with
     an optional ``ranges`` axis (metres). ``ranges=None`` ⇒ range-independent
     (exactly one column), mirroring ``SoundSpeedProfile(ranges=None)``.
@@ -1237,40 +1256,11 @@ class Bottom:
                 "Bottom.select_range('mean') is undefined for a layered "
                 "bottom (layer stacks can't be averaged); use 'r0', 'rmax' "
                 "or 'median'.")
-        # Averaging is only meaningful within one boundary type — the same
-        # guard Surface.collapse applies: reducing a vacuum node with a sand
-        # half-space would fold construction-time placeholders into the
-        # numbers and stamp one node's type on the result.
-        types = {c.halfspace.acoustic_type for c in self.columns}
-        if len(types) > 1:
-            raise ConfigurationError(
-                f"Bottom.select_range({method!r}) needs a single boundary "
-                f"type to average; got {sorted(types)}. Boundary types "
-                f"cannot be blended — use 'r0' or 'rmax'.")
-        reduce = np.mean if method == 'mean' else np.median
-        # A uniform 'file'/'precalc' axis carries no real numbers to reduce —
-        # each column is its reflection-coefficient table. Columns sharing one
-        # table collapse to that shared spec (roughness, the one genuine
-        # number they carry, is still reduced); distinct tables cannot be
-        # averaged into anything.
-        (the_type,) = types
-        if the_type in ('file', 'precalc'):
-            specs = {c.halfspace.reflection_file for c in self.columns}
-            if len(specs) > 1:
-                raise ConfigurationError(
-                    f"Bottom.select_range({method!r}) cannot average "
-                    f"'{the_type}' columns with different reflection files "
-                    f"({sorted(specs, key=str)}). Reflection-coefficient "
-                    f"tables cannot be blended — use 'r0' or 'rmax'.")
-            shared = _copy.deepcopy(self.columns[0].halfspace)
-            shared.roughness = float(
-                reduce([c.halfspace.roughness for c in self.columns]))
-            return Bottom(columns=[SeabedColumn(layers=[], halfspace=shared)],
-                          ranges=None)
-        return Bottom(columns=[SeabedColumn(
-            layers=[],
-            halfspace=_reduce_boundaries(
-                [c.halfspace for c in self.columns], reduce))], ranges=None)
+        halfspace = _reduce_uniform_nodes(
+            [c.halfspace for c in self.columns], method,
+            'Bottom.select_range', 'columns')
+        return Bottom(columns=[SeabedColumn(layers=[], halfspace=halfspace)],
+                      ranges=None)
 
     def collapse(self, *, range: Optional[str] = None,
                  layers: Optional[str] = None) -> 'Bottom':
@@ -1295,29 +1285,15 @@ class Bottom:
         """Collapse fully to a single ``BoundaryProperties``."""
         return self.select_range(range_method).columns[0].collapse('halfspace')
 
-    def copy(self) -> 'Bottom':
-        """Deep copy (symmetric with the other carriers)."""
-        return _copy.deepcopy(self)
-
     def __setattr__(self, name, value):
         # Writes to a half-space field follow through to every column. A plain
         # assignment would create an instance attribute that echoes the new
         # value back while ``halfspace_at()`` — and every writer and model
         # reading it — kept the stored half-spaces.
         if name in _HALFSPACE_DELEGATED and 'columns' in self.__dict__:
-            halfspaces = [c.halfspace for c in self.columns]
-            value = _validate_boundary_write(
-                type(self).__name__, name, value, halfspaces,
-                any(c.layers for c in self.columns))
-            if len(self.columns) > 1:
-                warnings.warn(
-                    f"Bottom.{name} = {value!r} sets all {len(self.columns)} "
-                    f"range columns to the same value, flattening any range "
-                    f"dependence. Assign to .columns[i].halfspace.{name} to "
-                    f"write a single column.",
-                    UserWarning, stacklevel=2)
-            for halfspace in halfspaces:
-                setattr(halfspace, name, value)
+            _delegate_write(type(self).__name__,
+                            [c.halfspace for c in self.columns], name, value,
+                            layered=any(c.layers for c in self.columns))
             return
         super().__setattr__(name, value)
 

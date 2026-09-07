@@ -365,7 +365,8 @@ def read_shd_bin(
 
     Notes
     -----
-    - File uses Fortran unformatted records with 4-byte record markers
+    - Direct-access file, RECL = 4*LRecl bytes, no record markers: record n
+      starts at byte (n-1)*4*LRecl (misc/RWSHDFile.f90:102)
     - Record length (recl) is read from first 4 bytes
     - Pressure is stored as interleaved real/imaginary pairs
     - For TL files from FIELD3D, source positions use compressed format
@@ -932,15 +933,17 @@ def read_arr_file(filepath: Union[str, Path], *, grid_type: str = 'R',
         for line in f:
             tokens.extend(line.split())
 
+    # Every value is a list-directed Fortran REAL write (ArrMod.f90:113-127),
+    # so the tokens go through fortran_float like the other AT text readers.
     def _next_floats(t_iter, n):
-        return [float(next(t_iter)) for _ in range(n)]
+        return [fortran_float(next(t_iter)) for _ in range(n)]
 
     def _next_int(t_iter):
         # Some writers emit counts as floats; tolerate either.
-        return int(float(next(t_iter)))
+        return int(fortran_float(next(t_iter)))
 
     t_iter = expand_repeat_counts(tokens)
-    freq = float(next(t_iter))
+    freq = fortran_float(next(t_iter))
     # AddArr's delay tolerance scales with omega = 2π·freq (ArrMod.f90:44);
     # the .arr header carries the run frequency this rule used.
     omega = 2.0 * np.pi * freq
@@ -1510,6 +1513,14 @@ def read_ssp_3d(filepath: Union[str, Path]) -> Dict[str, Any]:
     }
 
 
+def _preview(x, fmt='.2f'):
+    """Debug-log preview of an axis: every value while it has fewer than
+    ten entries, its two ends from ten on."""
+    if len(x) < 10:
+        return ", ".join(f"{v:{fmt}}" for v in x)
+    return f"{x[0]:{fmt}} … {x[-1]:{fmt}}"
+
+
 @typed_format_error
 def read_flp(fileroot: Union[str, Path], verbose: bool = False) -> Dict[str, Any]:
     """
@@ -1628,12 +1639,8 @@ def read_flp(fileroot: Union[str, Path], verbose: bool = False) -> Dict[str, Any
         # Python evaluates the argument before log_message can decline it,
         # so the guard has to be here rather than inside the logger.
         if verbose:
-            if N_prof < 10:
-                preview = ", ".join(f"{r:.2f}" for r in r_prof)
-            else:
-                preview = f"{r_prof[0]:.2f} … {r_prof[-1]:.2f}"
             log_message('oalib_reader',
-                        f"profile ranges rProf (km): {preview}",
+                        f"profile ranges rProf (km): {_preview(r_prof)}",
                         verbose=verbose, level='debug')
 
         # Receiver ranges pass through Sort in the Fortran
@@ -1652,12 +1659,9 @@ def read_flp(fileroot: Union[str, Path], verbose: bool = False) -> Dict[str, Any
                     verbose=verbose)
         # Built only when it can print — see the rProf preview above.
         if verbose:
-            if N_offsets < 10:
-                preview = ", ".join(f"{ro:.2f}" for ro in r_offsets)
-            else:
-                preview = f"{r_offsets[0]:.2f} … {r_offsets[-1]:.2f}"
             log_message('oalib_reader',
-                        f"receiver range offsets Rro (m): {preview}",
+                        "receiver range offsets Rro (m): "
+                        f"{_preview(r_offsets)}",
                         verbose=verbose, level='debug')
 
         if np.max(np.abs(r_offsets)) > 0.0:

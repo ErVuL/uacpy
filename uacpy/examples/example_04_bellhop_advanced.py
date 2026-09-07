@@ -9,7 +9,7 @@ OBJECTIVE:
     - Source directivity from a .sbp beam pattern
     - Cerveny Gaussian beam parameters
     - Volume attenuation (Thorp formula)
-    - Grain size boundary conditions
+    - Range-dependent half-space bottom (explicit cp, ρ, α per node)
     - Range-dependent environment
 
 ENVIRONMENT:
@@ -17,7 +17,7 @@ ENVIRONMENT:
     - The top 500 m of the Munk profile. Munk's c_min axis is at 1300 m, below
       this domain, so over 0-500 m the profile is monotonically decreasing
       (1548.5 → 1513.2 m/s): downward refraction, no sound channel.
-    - Grain size bottom transitioning to hard bottom
+    - Half-space bottom hardening with range (sand on the shelf → hardpack)
 
 FEATURES DEMONSTRATED:
     ✓ Full 7-position RunType string
@@ -27,7 +27,7 @@ FEATURES DEMONSTRATED:
     ✓ Source directivity (.sbp beam pattern) + its polar plot
     ✓ Rectilinear receiver grid (RunType position 5 = 'R')
     ✓ Beam shift on reflection
-    ✓ Grain size boundary conditions
+    ✓ Range-dependent half-space bottom
     ✓ Multiple run comparisons
 
 ═══════════════════════════════════════════════════════════════════════════════
@@ -70,7 +70,7 @@ def main():
     print("═" * 80)
 
     # ═══════════════════════════════════════════════════════════════════════
-    # ENVIRONMENT: Continental Shelf with Grain Size Bottom
+    # ENVIRONMENT: Continental Shelf with a Range-Dependent Half-Space Bottom
     # ═══════════════════════════════════════════════════════════════════════
 
     # Bathymetry: shallow shelf to deep ocean

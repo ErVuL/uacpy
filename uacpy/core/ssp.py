@@ -2,12 +2,11 @@
 Re-exported from :mod:`uacpy.core.environment` for stable import paths.
 """
 
-import copy as _copy
 import warnings
 
 import numpy as np
 from typing import List, Tuple, Optional, Union
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as _replace_fields
 
 from uacpy.core.constants import (DEFAULT_SOUND_SPEED,
                                   AT_LAST_SSP_POINT_EPS_M,
@@ -15,7 +14,11 @@ from uacpy.core.constants import (DEFAULT_SOUND_SPEED,
                                   DECK_RANGE_RESOLUTION_M)
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core._warn_frames import USER_FRAME_SKIP
+from uacpy.core._grid import (
+    collapse_axis, INTERP_METHODS, _as_finite_scalar_label,
+)
 from uacpy.core._carrier_validate import (
+    _DeepCopyMixin,
     _scalar_or_none,
     _reject_complex,
     _require_positive, _require_non_negative, _require_strictly_increasing,
@@ -37,7 +40,7 @@ _ROUND_TRIP_NOISE_M = 1.0e-9
 
 # eq=False: a dataclass __eq__ over ndarray fields raises; compare by identity.
 @dataclass(eq=False)
-class SoundSpeedProfile:
+class SoundSpeedProfile(_DeepCopyMixin):
     """
     Unified sound-speed profile (1-D or 2-D).
 
@@ -231,6 +234,16 @@ class SoundSpeedProfile:
         """
         return self._slice(depth=depth, range=range, interp=method)
 
+    def _replace(self, **changes) -> 'SoundSpeedProfile':
+        """A copy through the constructor with ``changes`` applied.
+
+        Every field not named in ``changes`` is carried over: ``shape``,
+        ``data_sources`` and ``formula`` (read by the deep extension in
+        ``uacpy.data.sound_speed`` to continue a column under the equation
+        that built it). ``__post_init__`` re-validates and copies the arrays.
+        """
+        return _replace_fields(self, **changes)
+
     def _require_pinned_range(self, caller: str) -> None:
         """Guard a depth-only slice of a range-dependent profile.
 
@@ -264,29 +277,22 @@ class SoundSpeedProfile:
             # coordinate at that range, read by ``env.max_range`` (the
             # ``Bottom.select_range`` rule); picking one of several columns
             # collapses the axis and drops it.
-            sliced = SoundSpeedProfile(
-                depths=self.depths.copy(),
-                data=self.data[:, [ridx]].copy(),
-                ranges=self.ranges if self.data.shape[1] == 1 else None,
-                shape=self.shape, data_sources=self.data_sources)
+            sliced = self._replace(
+                data=self.data[:, [ridx]],
+                ranges=self.ranges if self.data.shape[1] == 1 else None)
         if depth is not None:
             didx = int(depth)
             if not -sliced.depths.size <= didx < sliced.depths.size:
                 raise IndexError(
                     f"SoundSpeedProfile.isel: depth index {didx} out of range "
                     f"for {sliced.depths.size} depth(s)")
-            sliced = SoundSpeedProfile(
-                depths=np.array([float(sliced.depths[didx])]),
-                data=sliced.data[[didx], :].copy(), ranges=sliced.ranges,
-                shape=sliced.shape, data_sources=self.data_sources)
+            sliced = sliced._replace(
+                depths=sliced.depths[[didx]], data=sliced.data[[didx], :])
         return sliced
 
     def _slice(
         self, *, depth: Optional[float], range: Optional[float], interp: str,
     ) -> 'SoundSpeedProfile':
-        from uacpy.core._grid import (
-            collapse_axis, INTERP_METHODS, _as_finite_scalar_label,
-        )
         if interp not in INTERP_METHODS:
             raise ConfigurationError(
                 f"SoundSpeedProfile: interpolation method must be one of "
@@ -315,16 +321,12 @@ class SoundSpeedProfile:
         if depth is None:
             if range is None:
                 return self
-            return SoundSpeedProfile(
-                depths=self.depths.copy(), data=data.copy(),
-                ranges=out_ranges, shape=self.shape,
-                data_sources=self.data_sources)
+            return self._replace(data=data, ranges=out_ranges)
         c, dv = collapse_axis(data[:, 0], self.depths, depth, interp,
                               axis=0, name='depth')
-        return SoundSpeedProfile(
+        return self._replace(
             depths=np.array([float(dv)]), data=np.array([[float(c)]]),
-            ranges=out_ranges, shape=self.shape,
-            data_sources=self.data_sources)
+            ranges=out_ranges)
 
     @property
     def value(self) -> float:
@@ -339,10 +341,6 @@ class SoundSpeedProfile:
                 f"{self.data.shape}); slice with at(depth=, range=) first"
             )
         return float(self.data.flat[0])
-
-    def copy(self) -> 'SoundSpeedProfile':
-        """Deep copy (symmetric with the other carriers)."""
-        return _copy.deepcopy(self)
 
     def collapse(self, method: str = 'r0') -> 'SoundSpeedProfile':
         """Collapse a 2-D profile to 1-D using ``method``.
@@ -371,14 +369,7 @@ class SoundSpeedProfile:
                 f"SoundSpeedProfile.collapse: unknown method={method!r}; "
                 "valid: 'r0', 'rmax', 'mean', 'median'"
             )
-        return SoundSpeedProfile(
-            depths=self.depths.copy(),
-            data=col.reshape(-1, 1),
-            ranges=None,
-            shape=self.shape,
-            data_sources=self.data_sources,
-            formula=self.formula,
-        )
+        return self._replace(data=col.reshape(-1, 1), ranges=None)
 
     def extend_to(self, depth_max: float) -> 'SoundSpeedProfile':
         """Return a copy with the deepest sample sitting exactly at
@@ -437,15 +428,7 @@ class SoundSpeedProfile:
             # rather than return a non-increasing profile.
             snapped_depths = self.depths.copy()
             snapped_depths[-1] = float(depth_max)
-            return SoundSpeedProfile(
-                depths=snapped_depths,
-                data=self.data.copy(),
-                ranges=(self.ranges.copy() if self.ranges is not None
-                        else None),
-                shape=self.shape,
-                data_sources=self.data_sources,
-                formula=self.formula,
-            )
+            return self._replace(depths=snapped_depths)
         first = float(self.depths[0])
         if depth_max <= first:
             raise ConfigurationError(
@@ -484,14 +467,7 @@ class SoundSpeedProfile:
                 ])
                 new_depths = np.append(kept_depths, depth_max)
                 new_data = np.vstack([kept_data, interp_row[None, :]])
-        return SoundSpeedProfile(
-            depths=new_depths,
-            data=new_data,
-            ranges=(self.ranges.copy() if self.ranges is not None else None),
-            shape=self.shape,
-            data_sources=self.data_sources,
-            formula=self.formula,
-        )
+        return self._replace(depths=new_depths, data=new_data)
 
     @classmethod
     def coerce(

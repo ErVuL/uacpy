@@ -155,6 +155,20 @@ def ts_ellipsoid(
     )
 
 
+def _sinc2_ts(sigma_broadside, k_dim, angle_deg):
+    """``10·log10[sigma_broadside · sinc²β · cos²θ]``, ``β = k_dim·sinθ`` (the
+    physical-optics aspect pattern); ``-inf`` at nulls, float for a scalar."""
+    theta = np.deg2rad(np.asarray(angle_deg, dtype=float))
+    beta = k_dim * np.sin(theta)
+    # numpy's sinc is the normalized one, sinc(x) = sin(pi*x)/(pi*x), so the
+    # argument is divided by pi to recover Abraham's unnormalized [sin b / b].
+    # This also supplies the b -> 0 limit of 1 at broadside for free.
+    pattern = np.sinc(beta / np.pi) ** 2 * np.cos(theta) ** 2
+    with np.errstate(divide='ignore'):
+        ts = 10.0 * np.log10(sigma_broadside * pattern)
+    return float(ts) if np.ndim(angle_deg) == 0 else ts
+
+
 def ts_cylinder(
     radius_m,
     length_m,
@@ -195,16 +209,7 @@ def ts_cylinder(
     _warn_below_geometric(a, f, c, 'ts_cylinder', _KA_MIN_CYLINDER)
     lam = c / f
     k = 2.0 * np.pi / lam
-    theta = np.deg2rad(np.asarray(angle_deg, dtype=float))
-    beta = k * L * np.sin(theta)
-    # numpy's sinc is the normalized one, sinc(x) = sin(pi*x)/(pi*x), so the
-    # argument is divided by pi to recover Abraham's unnormalized [sin b / b].
-    # This also supplies the b -> 0 limit of 1 at broadside for free.
-    pattern = np.sinc(beta / np.pi) ** 2 * np.cos(theta) ** 2
-    sigma = a * L ** 2 / (2.0 * lam) * pattern
-    with np.errstate(divide='ignore'):
-        ts = 10.0 * np.log10(sigma)
-    return float(ts) if np.ndim(angle_deg) == 0 else ts
+    return _sinc2_ts(a * L ** 2 / (2.0 * lam), k * L, angle_deg)
 
 
 def ts_plate(
@@ -248,13 +253,4 @@ def ts_plate(
                           _KA_MIN_PLATE)
     lam = c / f
     k = 2.0 * np.pi / lam
-    theta = np.deg2rad(np.asarray(angle_deg, dtype=float))
-    beta = k * w * np.sin(theta)
-    # numpy's sinc is normalized, sinc(x) = sin(pi*x)/(pi*x); dividing the
-    # argument by pi gives the unnormalized [sin b / b] of the physical-optics
-    # pattern, and its b -> 0 limit of 1 at normal incidence.
-    pattern = np.sinc(beta / np.pi) ** 2 * np.cos(theta) ** 2
-    sigma = (w * h / lam) ** 2 * pattern
-    with np.errstate(divide='ignore'):
-        ts = 10.0 * np.log10(sigma)
-    return float(ts) if np.ndim(angle_deg) == 0 else ts
+    return _sinc2_ts((w * h / lam) ** 2, k * w, angle_deg)

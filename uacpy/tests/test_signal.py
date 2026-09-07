@@ -91,6 +91,20 @@ class TestGenerators:
         assert intercept == pytest.approx(fmin, abs=1.0)
         assert slope * T + intercept == pytest.approx(fmax, abs=1.0)
 
+    @pytest.mark.parametrize("chirp", [lfm_chirp, hfm_chirp])
+    @pytest.mark.parametrize("T,fs", [(0.29, 100.0), (0.007, 44100.0),
+                                      (0.1, 8000.0)])
+    def test_chirp_time_axis_is_sampled_at_the_requested_rate(self, chirp,
+                                                              T, fs):
+        # 0.29 * 100 evaluates to 28.999999999999996: the sample count is
+        # round(T * fs) and the spacing is 1/fs (tone_burst's rule), so the
+        # waveform played back at sample_rate lasts T and sweeps at the
+        # requested rate.
+        t, s = chirp(5.0, 20.0, T, fs)
+        assert t.size == s.size == round(T * fs)
+        assert t[0] == 0.0
+        assert np.allclose(np.diff(t), 1.0 / fs, rtol=1e-12, atol=0.0)
+
     def test_hfm_chirp_frequency_is_hyperbolic_in_time(self):
         # HFM == linear *period* modulation: 1/f_inst(t) is linear in t,
         # running from 1/fmin to 1/fmax (Abraham §8.3.6's pulse).
@@ -1721,6 +1735,23 @@ class TestNyquistGuardsSplitGeneratorsFromAnalysers:
         with pytest.raises(ConfigurationError, match='lower band edge'):
             make_noise_waveform(-1000.0, 200.0, 1.0, self.FS,
                                 rng=np.random.default_rng(0))
+
+    @pytest.mark.parametrize('name,value', [
+        ('sample_rate', -8000.0), ('sample_rate', 0.0), ('sample_rate', NAN),
+        ('duration', -1.0), ('bandwidth', -200.0), ('bandwidth', 0.0),
+    ])
+    def test_make_noise_waveform_refuses_a_non_positive_scalar_by_name(
+            self, name, value):
+        # A negative rate is refused by the band-edge guard for the wrong
+        # reason (a negative Nyquist), and a negative duration or bandwidth
+        # reaches resample as a negative count; each is refused up front by
+        # the shared positive-scalar rule, by name.
+        kw = dict(fc=1000.0, bandwidth=200.0, duration=1.0,
+                  sample_rate=self.FS)
+        kw[name] = value
+        with pytest.raises(ConfigurationError,
+                           match=f"make_noise_waveform: {name} must be > 0"):
+            make_noise_waveform(**kw, rng=np.random.default_rng(0))
 
     @pytest.mark.parametrize('fc', [1000.0, 2000.0, 4000.0])
     def test_an_admitted_band_lands_where_it_was_asked_for(self, fc):

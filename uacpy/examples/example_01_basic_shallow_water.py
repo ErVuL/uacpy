@@ -143,68 +143,26 @@ def main():
     ax.set_title('Transmission Loss Field (fixed 20-120 dB scale, jet_r colormap)',
                  fontweight='bold', fontsize=12)
 
-    # Plot 2: TL vs Range (at source depth)
+    # Plot 2: TL vs Range (at source depth) — a 1-D cut plots itself, with
+    # the loss axis running downward so the loud end is at the top.
     ax = axes[0, 1]
-    tl_vs_range = result.at(depth=source.depths[0]).db
-    ax.plot(result.ranges/1000, tl_vs_range, 'b-', linewidth=2)
-    ax.set_xlabel('Range (km)', fontweight='bold')
-    ax.set_ylabel('Transmission Loss (dB)', fontweight='bold')
-    ax.set_title(f'TL vs Range (at {source.depths[0]:.0f}m depth)', fontweight='bold', fontsize=12)
-    ax.grid(True, alpha=0.3)
+    result.at(depth=source.depths[0]).plot(
+        ax=ax, color='b', linewidth=2,
+        title=f'TL vs Range (at {source.depths[0]:.0f}m depth)')
 
-    # Compute ylim from data
-    tl_finite = tl_vs_range[np.isfinite(tl_vs_range)]
-    if len(tl_finite) > 0:
-        ax.set_ylim([np.floor(np.min(tl_finite)/10)*10, np.ceil(np.max(tl_finite)/10)*10])
-
-    # Plot 3: TL vs Depth (at mid-range)
+    # Plot 3: TL vs Depth (at mid-range) — depth down, TL along x.
     ax = axes[1, 0]
     mid_range_km = np.median(result.ranges) / 1000
-    tl_vs_depth = result.at(range=mid_range_km * 1000.0).db
-    ax.plot(tl_vs_depth, result.depths, 'r-', linewidth=2)
-    ax.invert_yaxis()
+    result.at(range=mid_range_km * 1000.0).plot(
+        ax=ax, color='r', linewidth=2,
+        title=f'TL vs Depth (at {mid_range_km:.1f}km range)')
     ax.axhline(source.depths[0], color='gray', linestyle='--', linewidth=1, alpha=0.5, label='Source depth')
     ax.axhline(env.depth, color='k', linewidth=2, label='Bottom')
-    ax.set_xlabel('Transmission Loss (dB)', fontweight='bold')
-    ax.set_ylabel('Depth (m)', fontweight='bold')
-    ax.set_title(f'TL vs Depth (at {mid_range_km:.1f}km range)', fontweight='bold', fontsize=12)
     ax.legend(fontsize=9)
-    ax.grid(True, alpha=0.3)
 
-    # Compute xlim from data
-    tl_finite = tl_vs_depth[np.isfinite(tl_vs_depth)]
-    if len(tl_finite) > 0:
-        ax.set_xlim([np.floor(np.min(tl_finite)/10)*10, np.ceil(np.max(tl_finite)/10)*10])
-
-    # Plot 4: Environment schematic
+    # Plot 4: the environment cross-section with the run geometry on it
     ax = axes[1, 1]
-
-    # Water column
-    ax.fill_between([0, 10], [0, 0], [env.depth, env.depth],
-                    color='lightblue', alpha=0.3, label='Water')
-
-    # Bottom
-    ax.fill_between([0, 10], [env.depth, env.depth], [env.depth*1.2, env.depth*1.2],
-                    color='#8B4513', alpha=0.5, label='Bottom')
-
-    # Seafloor line
-    ax.plot([0, 10], [env.depth, env.depth], 'k-', linewidth=3, label='Seafloor')
-
-    # Source
-    ax.plot(0.5, source.depths[0], 'r*', markersize=20, label='Source', zorder=10)
-
-    # Receiver positions (subsample on a 2-D grid)
-    R, Z = np.meshgrid(result.ranges[::10] / 1000, result.depths[::5])
-    ax.scatter(R, Z, c='green', s=10,
-               alpha=0.3, label='Receivers', zorder=5)
-
-    ax.set_xlim([0, receiver.ranges[-1]/1000])
-    ax.set_ylim([env.depth*1.2, 0])
-    ax.set_xlabel('Range (km)', fontweight='bold')
-    ax.set_ylabel('Depth (m)', fontweight='bold')
-    ax.set_title('Environment Setup', fontweight='bold', fontsize=12)
-    ax.legend(loc='upper right', fontsize=9)
-    ax.grid(True, alpha=0.3)
+    env.plot(ax=ax, source=source, receiver=receiver, title='Environment Setup')
 
     # Add text box with simulation parameters
     textstr = (f'Simulation Parameters:\n'
@@ -243,6 +201,8 @@ def main():
 
     print("\nPlotting features used:")
     print("  ✓ plot_field() with the fixed TL colour scale")
+    print("  ✓ result.at(depth=…).plot() / result.at(range=…).plot() for the 1-D cuts")
+    print("  ✓ env.plot(source=, receiver=) for the environment cross-section")
     print("  ✓ jet_r colormap (red=low TL/loud, blue=high TL/quiet)"
           " - Acoustic Toolbox standard")
     print("  ✓ Fixed TL limits, 20 to 120 dB, identical across every figure")

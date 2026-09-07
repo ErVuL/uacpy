@@ -163,7 +163,7 @@ frequency of each.
 | Call | Returns | Units |
 |---|---|---|
 | `psd(data, sample_rate, *, window='hann', nperseg=8192, noverlap=None, nfft=None, scaling='density')` | `PSDResult(frequencies, power)` | Pa²/Hz, linear |
-| `ppsd(data, sample_rate, *, seg_duration=1.0, overlap_pct=50, ddB=1.0, …, ref=1e-6)` | `PPSDResult(frequencies, level_edges, pdf, mean_db, std_db, binwidth_db, seg_duration, ref)` | dB histogram per frequency |
+| `ppsd(data, sample_rate, *, seg_duration=1.0, overlap_pct=50, ddB=1.0, …, ref=1e-6)` | `PPSDResult(frequencies, level_edges, pdf, mean_db, std_db, binwidth_db, seg_duration, ref, scaling)` | dB histogram per frequency |
 | `sel(data, sample_rate, *, fmin=8.9125, fmax=22387, band_type='third_octave', num_bands=30, …)` | `SELResult(sel_pa2s, bands)` | Pa²·s, linear; `plot_sel(ref=1e-6)` gives dB re 1 µPa²·s |
 | `decidecade_bands(f_low, f_high)` | `(lower, centers, upper)` | Hz |
 | `decidecade_band_levels(psd, frequencies, ref=1e-6)` | `(centers, levels)` | dB re `ref²` |

@@ -239,7 +239,7 @@ class TestInfeasibleGridRelaxationLadder:
     def _record_calls(self, monkeypatch, succeed_when):
         """Stub ``optimize_grid`` to record every (θ_max, ε) trial and
         succeed only when ``succeed_when(theta, eps)`` says so."""
-        import uacpy.models._pade_optimizer as popt
+        import uacpy.models.ram as ram_module
         calls = []
 
         def fake(**kw):
@@ -249,7 +249,7 @@ class TestInfeasibleGridRelaxationLadder:
                         'predicted_error': kw['eps']}
             raise RuntimeError('infeasible')
 
-        monkeypatch.setattr(popt, 'optimize_grid', fake)
+        monkeypatch.setattr(ram_module, 'optimize_grid', fake)
         return calls
 
     def test_fully_infeasible_walks_the_whole_ladder_then_raises(

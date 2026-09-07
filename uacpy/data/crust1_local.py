@@ -37,7 +37,10 @@ from uacpy.core.environment import (
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.data import _cache
-from uacpy.data._geo import as_coordinate, normalize_lon
+from uacpy.data._geo import (
+    as_coordinate, normalize_lon, central_angle, geodesic_waypoints,
+    checked_max_points, checked_n_points, capped_n_points,
+)
 from uacpy.data._http import http_get, checked_member_size
 
 __all__ = ['download_crust1_db', 'fetch_crust1_profile', 'fetch_bottom_crust1',
@@ -341,22 +344,22 @@ def fetch_bottom_crust1(point, *, roughness=0.0,
     """
     _warn_non_commercial()
     return _bottom_at_point(
-        point, roughness=roughness, sediment_attenuation=sediment_attenuation,
-        basement_attenuation=basement_attenuation,
-        sediment_shear_attenuation=sediment_shear_attenuation,
-        basement_shear_attenuation=basement_shear_attenuation, elastic=elastic,
-        sediment_thickness=sediment_thickness, use_globsed=use_globsed,
-        verbose=verbose)
+        point, sediment_thickness=sediment_thickness, use_globsed=use_globsed,
+        verbose=verbose, layer_kw=dict(
+            roughness=roughness, elastic=elastic,
+            sediment_attenuation=sediment_attenuation,
+            basement_attenuation=basement_attenuation,
+            sediment_shear_attenuation=sediment_shear_attenuation,
+            basement_shear_attenuation=basement_shear_attenuation))
 
 
-def _bottom_at_point(point, *, sediment_attenuation, basement_attenuation,
-                     elastic, sediment_shear_attenuation=(
-                         DEFAULT_SEDIMENT_SHEAR_ATTENUATION),
-                     basement_shear_attenuation=(
-                         DEFAULT_BASEMENT_SHEAR_ATTENUATION),
-                     roughness=0.0, sediment_thickness=None,
+def _bottom_at_point(point, *, layer_kw, sediment_thickness=None,
                      use_globsed=True, verbose=False):
     """One CRUST1.0 column, without the commercial notice.
+
+    ``layer_kw`` carries the per-layer keywords of :func:`_layered_from_column`
+    (roughness, the four attenuations, ``elastic``), built once per public
+    fetch and applied unchanged at every waypoint of a transect.
 
     The notice belongs to a whole fetch, not to each point of one, so the
     transect emits it once and builds its waypoints through here. Suppressing
@@ -390,11 +393,7 @@ def _bottom_at_point(point, *, sediment_attenuation, basement_attenuation,
             f"uacpy.data.sediment's grain-size backends).",
             UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
     bottom = _layered_from_column(
-        bnds, vp, vs, rho, sediment_attenuation=sediment_attenuation,
-        basement_attenuation=basement_attenuation,
-        sediment_shear_attenuation=sediment_shear_attenuation,
-        basement_shear_attenuation=basement_shear_attenuation, elastic=elastic,
-        roughness=roughness, sediment_thickness=sediment_thickness)
+        bnds, vp, vs, rho, sediment_thickness=sediment_thickness, **layer_kw)
     # 'globsed' only when the GlobSed value shaped the column; a consulted but
     # discarded value is stamped 'globsed-ignored' so provenance never lists a
     # dataset the result does not contain.
@@ -437,28 +436,30 @@ def fetch_bottom_crust1_transect(start, end, *, n_points=6, max_points=None,
     ``roughness`` and the four attenuation keywords are as in
     :func:`fetch_bottom_crust1`, applied at every waypoint.
     """
-    from uacpy.data._geo import checked_n_points, geodesic_waypoints
     n_points = checked_n_points(n_points, 'fetch_bottom_crust1_transect',
                                 allow_auto=True)
     # 'auto': CRUST1.0 is a 1-degree cached grid, so target roughly one
     # waypoint per degree of arc, clamped like the siblings.
     if n_points == 'auto':
-        from uacpy.data._geo import central_angle
         n_points = max(2, int(np.degrees(central_angle(start, end))) + 1)
     if max_points is not None:
-        n_points = max(2, min(n_points, int(max_points)))
+        max_points = checked_max_points(max_points,
+                                        'fetch_bottom_crust1_transect')
+    n_points = capped_n_points(n_points, max_points,
+                               'fetch_bottom_crust1_transect')
     _warn_non_commercial()
     lats, lons, ranges_m = geodesic_waypoints(start, end, n_points)
     # The notice is emitted once above, for the transect as a whole; the
     # waypoints go through the builder that does not raise it, so no filter
     # window has to be opened over the loop to keep it quiet.
+    layer_kw = dict(
+        roughness=roughness, elastic=elastic,
+        sediment_attenuation=sediment_attenuation,
+        basement_attenuation=basement_attenuation,
+        sediment_shear_attenuation=sediment_shear_attenuation,
+        basement_shear_attenuation=basement_shear_attenuation)
     profiles = [
-        _bottom_at_point((la, lo), roughness=roughness,
-                         sediment_attenuation=sediment_attenuation,
-                         basement_attenuation=basement_attenuation,
-                         sediment_shear_attenuation=sediment_shear_attenuation,
-                         basement_shear_attenuation=basement_shear_attenuation,
-                         elastic=elastic, use_globsed=use_globsed)
+        _bottom_at_point((la, lo), layer_kw=layer_kw, use_globsed=use_globsed)
         for la, lo in zip(lats, lons)
     ]
     rdl = Bottom.from_columns(profiles, ranges=np.asarray(ranges_m))

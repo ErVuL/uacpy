@@ -556,9 +556,8 @@ class TestOASESFrequencyResample:
     def test_helper_equispaced_no_warning(self, recwarn):
         from uacpy.models.oases import _oases_resample_frequencies
         freqs = np.linspace(10.0, 100.0, 10)
-        fmin, fmax, n, resampled = _oases_resample_frequencies(freqs, 'OASR')
+        fmin, fmax, n = _oases_resample_frequencies(freqs, 'OASR')
         assert (fmin, fmax, n) == (10.0, 100.0, 10)
-        assert resampled is False
         assert not any(
             "non-equispaced" in str(w.message) for w in recwarn.list
         )
@@ -569,11 +568,8 @@ class TestOASESFrequencyResample:
         freqs = np.array([10.0, 15.0, 30.0, 100.0])
         with _warnings.catch_warnings(record=True) as caught:
             _warnings.simplefilter("always")
-            fmin, fmax, n, resampled = _oases_resample_frequencies(
-                freqs, 'OASR'
-            )
+            fmin, fmax, n = _oases_resample_frequencies(freqs, 'OASR')
         assert (fmin, fmax, n) == (10.0, 100.0, 4)
-        assert resampled is True
         msgs = [str(w.message) for w in caught
                 if issubclass(w.category, UserWarning)]
         assert any("non-equispaced" in m for m in msgs), (
@@ -582,11 +578,8 @@ class TestOASESFrequencyResample:
 
     def test_helper_single_freq_no_warning(self, recwarn):
         from uacpy.models.oases import _oases_resample_frequencies
-        fmin, fmax, n, resampled = _oases_resample_frequencies(
-            np.array([50.0]), 'OASR',
-        )
+        fmin, fmax, n = _oases_resample_frequencies(np.array([50.0]), 'OASR')
         assert (fmin, fmax, n) == (50.0, 50.0, 1)
-        assert resampled is False
 
     @pytest.mark.requires_binary
     def test_oasr_equispaced_vector_no_warning_correct_freqs(self):

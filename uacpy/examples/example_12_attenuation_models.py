@@ -87,6 +87,7 @@ from uacpy.core.absorption import (  # noqa: E402
     convert_attenuation_units,
 )
 from uacpy.core.acoustics import soundspeed  # noqa: E402
+from uacpy.visualization import plot_absorption  # noqa: E402
 
 
 def scenario_a_model_comparison():
@@ -132,32 +133,27 @@ def scenario_a_model_comparison():
     # ─────────────────────────────────────────────────────────────────────────
     # Full frequency range comparison
     # ─────────────────────────────────────────────────────────────────────────
+    # plot_absorption draws alpha(f) on log-log axes; a second call with the
+    # same ax= overlays the other model.
     ax = axes[0, 0]
-    ax.loglog(frequencies / 1000, atten_thorp, 'b-', linewidth=2.5,
-              label='Thorp (1967)', alpha=0.8)
-    ax.loglog(frequencies / 1000, atten_fg, 'r-', linewidth=2.5,
-              label='Francois-Garrison (1982)', alpha=0.8)
-    ax.set_xlabel('Frequency (kHz)', fontweight='bold')
-    ax.set_ylabel('Attenuation (dB/km)', fontweight='bold')
-    ax.set_title('Attenuation vs Frequency (Full Range)', fontweight='bold', fontsize=14)
-    ax.legend(fontsize=12)
-    ax.grid(True, which='both', alpha=0.3)
-    ax.set_xlim([frequencies[0]/1000, frequencies[-1]/1000])
+    plot_absorption(frequencies, atten_thorp, ax=ax, label='Thorp (1967)',
+                    title='Attenuation vs Frequency (Full Range)',
+                    color='b', linewidth=2.5, alpha=0.8)
+    plot_absorption(frequencies, atten_fg, ax=ax, label='Francois-Garrison (1982)',
+                    color='r', linewidth=2.5, alpha=0.8)
+    ax.set_xlim([frequencies[0], frequencies[-1]])
 
     # ─────────────────────────────────────────────────────────────────────────
-    # Low frequency zoom (10 Hz - 10 kHz)
+    # Low frequency zoom (10 Hz - 10 kHz), linear attenuation axis
     # ─────────────────────────────────────────────────────────────────────────
     ax = axes[0, 1]
     mask_low = frequencies <= 10000
-    ax.semilogx(frequencies[mask_low] / 1000, atten_thorp[mask_low], 'b-',
-                linewidth=2.5, label='Thorp', alpha=0.8)
-    ax.semilogx(frequencies[mask_low] / 1000, atten_fg[mask_low], 'r-',
-                linewidth=2.5, label='Francois-Garrison', alpha=0.8)
-    ax.set_xlabel('Frequency (kHz)', fontweight='bold')
-    ax.set_ylabel('Attenuation (dB/km)', fontweight='bold')
-    ax.set_title('Low Frequency (10 Hz - 10 kHz)', fontweight='bold', fontsize=14)
-    ax.legend(fontsize=12)
-    ax.grid(True, which='both', alpha=0.3)
+    plot_absorption(frequencies[mask_low], atten_thorp[mask_low], ax=ax,
+                    label='Thorp', title='Low Frequency (10 Hz - 10 kHz)',
+                    color='b', linewidth=2.5, alpha=0.8)
+    plot_absorption(frequencies[mask_low], atten_fg[mask_low], ax=ax,
+                    label='Francois-Garrison', color='r', linewidth=2.5, alpha=0.8)
+    ax.set_yscale('linear')
 
     # ─────────────────────────────────────────────────────────────────────────
     # Difference between models
@@ -195,14 +191,11 @@ def scenario_a_model_comparison():
     summary_text += "MODEL CHARACTERISTICS:\n\n"
     summary_text += "Thorp (1967):\n"
     summary_text += "  • Simple empirical formula\n"
-    summary_text += "  • Good for quick estimates\n"
-    summary_text += "  • Fitted over 100 Hz - 10 kHz; extrapolates poorly\n"
-    summary_text += "    outside that band (see the 100 Hz row above)\n\n"
+    summary_text += "  • Good for quick estimates\n\n"
 
     summary_text += "Francois-Garrison (1982):\n"
     summary_text += "  • Physically-based\n"
     summary_text += "  • Includes relaxation effects\n"
-    summary_text += "  • Valid: 1 Hz - 1 MHz\n"
     summary_text += "  • Most accurate\n"
 
     ax.text(0.05, 0.95, summary_text, transform=ax.transAxes,

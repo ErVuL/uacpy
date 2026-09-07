@@ -1,11 +1,13 @@
 """Small shared geographic helpers for the data layer."""
 
+import warnings
 from typing import Tuple
 
 import numpy as np
 
 from uacpy.core.constants import EARTH_RADIUS_M
-from uacpy.core.exceptions import ConfigurationError
+from uacpy.core.exceptions import ConfigurationError, DataFetchError
+from uacpy.core._warn_frames import USER_FRAME_SKIP
 
 __all__ = [
     'Coordinate', 'as_coordinate', 'normalize_lon', 'lon_linspace',
@@ -13,7 +15,8 @@ __all__ = [
     'nearest_indices', 'ring_offsets', 'run_representative_indices',
     'run_boundary_indices',
     'DEFAULT_MAX_TRANSECT_POINTS', 'checked_max_points',
-    'checked_n_points',
+    'checked_n_points', 'capped_n_points', 'require_source',
+    'depth_from_elevation',
     'depth_to_pressure_dbar', 'pressure_dbar_to_depth',
     'insitu_from_potential',
 ]
@@ -27,6 +30,28 @@ __all__ = [
 DEFAULT_MAX_TRANSECT_POINTS = 1000
 
 Coordinate = Tuple[float, float]
+
+
+def require_source(source, allowed, what: str, remediation: str) -> None:
+    """Refuse a ``source`` keyword outside ``allowed`` (a tuple of ids) with
+    a typed error; ``what`` names the keyword in the message."""
+    if source not in allowed:
+        raise ConfigurationError(
+            f"{what} must be one of {allowed}; got {source!r}.",
+            remediation=remediation,
+        )
+
+
+def depth_from_elevation(elev, lat, lon, *, dataset: str) -> float:
+    """Water depth (m, positive down) from a ``dataset`` elevation (m,
+    positive up) at ``(lat, lon)``; a non-negative elevation is land."""
+    if elev >= 0.0:
+        raise DataFetchError(
+            f"{dataset} reports land (elevation {elev:.0f} m) at "
+            f"({lat:.4f}, {lon:.4f}); no water column.",
+            remediation="Pick a location offshore, or supply a depth directly.",
+        )
+    return -elev
 
 
 def checked_max_points(max_points, caller: str) -> int:
@@ -111,6 +136,23 @@ def checked_n_points(n_points, label: str, *, allow_auto: bool = False):
                         + "fewer than two waypoints is not a transect.",
         )
     return value
+
+
+def capped_n_points(n_points: int, max_points, label: str) -> int:
+    """``n_points`` clamped to ``max_points`` (``None``: no cap), with a
+    ``UserWarning`` naming both when the clamp bites.
+
+    The transect fetchers share this one cap rule for an explicit count;
+    their ``'auto'`` branches resolve a probe count against ``max_points``
+    themselves and never come here.
+    """
+    if max_points is None or n_points <= max_points:
+        return n_points
+    warnings.warn(
+        f"{label}: n_points={n_points} exceeds max_points={max_points}; "
+        f"sampling {max_points}.",
+        UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
+    return int(max_points)
 
 
 #: How close to antipodal (radians of central angle short of π) a pair of

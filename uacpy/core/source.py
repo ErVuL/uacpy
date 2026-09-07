@@ -2,7 +2,6 @@
 Source class for defining acoustic sources in underwater environments
 """
 
-import copy as _copy
 import numpy as np
 from pathlib import Path
 from typing import TYPE_CHECKING, Union, List, Optional
@@ -13,6 +12,7 @@ from uacpy.core.constants import (
     DECK_DEPTH_RESOLUTION_M, SBP_ANGLE_RESOLUTION_DEG,
 )
 from uacpy.core._carrier_validate import (
+    _DeepCopyMixin,
     _reject_complex,
     _require_positive, _require_non_negative, _require_strictly_increasing,
 )
@@ -20,7 +20,7 @@ from uacpy.core._carrier_validate import (
 
 # eq=False: a dataclass __eq__ over ndarray fields raises; compare by identity.
 @dataclass(eq=False)
-class Source:
+class Source(_DeepCopyMixin):
     """
     Acoustic source definition
 
@@ -223,10 +223,6 @@ class Source:
             freq_str = f"{self.n_frequencies} frequencies"
 
         return (f"Source({depth_str}, {freq_str}, type='{self.source_type}')")
-
-    def copy(self):
-        """Deep copy (symmetric with the other carriers)."""
-        return _copy.deepcopy(self)
 
 # The dataclass compiles ``__init__`` from the *field* annotations, so
 # ``inspect.signature`` / ``help()`` would advertise a default the annotation

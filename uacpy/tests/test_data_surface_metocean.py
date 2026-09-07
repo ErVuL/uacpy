@@ -446,7 +446,7 @@ def test_wind_climatology_closes_its_handle_when_a_variable_is_missing(
     from uacpy.data import _netcdf, wind_local
     opened = []
 
-    def fake_open(path):
+    def fake_open(path, memory=None):
         ds = _RecordingDataset()
         opened.append(ds)
         return ds

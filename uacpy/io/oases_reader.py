@@ -26,7 +26,7 @@ from typing import Any, Dict, Tuple, TypedDict, Union
 
 import numpy as np
 
-from uacpy.core.exceptions import FileFormatError, UnsupportedFeatureError
+from uacpy.core.exceptions import FileFormatError
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.io._fortran_helpers import (
     PARSE_ERRORS,
@@ -34,6 +34,7 @@ from uacpy.io._fortran_helpers import (
     fortran_float,
     read_fortran_record as _read_fortran_record,
     detect_endian,
+    typed_format_error,
 )
 from uacpy.core.units import km_to_m
 
@@ -147,23 +148,11 @@ def read_oast_tl(
     # OAST writes the curve data on unit 20 and the plot description on unit
     # 19 (``bin/oast``: FOR019=.plp, FOR020=.plt); an unmapped unit 20 lands
     # in .020 instead.
-    if filepath.suffix == '.plt':
-        plt_file = filepath
-        plp_file = filepath.with_suffix('.plp')
-        f020_file = filepath.with_suffix('.020')
-    elif filepath.suffix == '.plp':
-        plp_file = filepath
-        plt_file = filepath.with_suffix('.plt')
-        f020_file = filepath.with_suffix('.020')
-    elif filepath.suffix == '.020':
-        f020_file = filepath
-        plt_file = filepath.with_suffix('.plt')
-        plp_file = filepath.with_suffix('.plp')
-    else:
-        # No extension given, try all
-        plt_file = filepath.with_suffix('.plt')
-        plp_file = filepath.with_suffix('.plp')
-        f020_file = filepath.with_suffix('.020')
+    # Whichever of the three the caller named (or a bare root), the trio
+    # is the same: each is the given path with its own suffix.
+    plt_file = filepath.with_suffix('.plt')
+    plp_file = filepath.with_suffix('.plp')
+    f020_file = filepath.with_suffix('.020')
 
     # Try to find TL data file (prefer .plt, then .020)
     if plt_file.exists():
@@ -672,6 +661,7 @@ def _curve_values(block: np.ndarray, curve: Dict, plt_file: Path) -> np.ndarray:
     return block[-n:]
 
 
+@typed_format_error
 def read_oasn_covariance(
     filepath: Union[str, Path]
 ) -> Dict:
@@ -736,102 +726,97 @@ def read_oasn_covariance(
     # bytes, either way.
     recl = 8
 
-    try:
-        with open(filepath, 'rb') as f:
-            # Probe the byte order from the first int32 (n_rcv at record 5).
-            f.seek(4 * recl)
-            probe = f.read(4)
-            endian = detect_endian(probe, source=f'read_oasn_covariance:{filepath.name}')
+    with open(filepath, 'rb') as f:
+        # Probe the byte order from the first int32 (n_rcv at record 5).
+        f.seek(4 * recl)
+        probe = f.read(4)
+        endian = detect_endian(probe, source=f'read_oasn_covariance:{filepath.name}')
 
-            # Read header (first 10 records)
-            # Records 1-4 are four consecutive 8-character slices of one
-            # CHARACTER*80 TITLE (oasmun21_bin.f:364-367 writes TITLE(1:8),
-            # (9:16), (17:24), (25:32)) — slices, not tokens, so concatenate
-            # the raw bytes and strip once. Stripping each slice would delete
-            # any space that falls on a record boundary.
-            f.seek(0)
-            title = _decode_fortran_title(f.read(4 * recl))
+        # Read header (first 10 records)
+        # Records 1-4 are four consecutive 8-character slices of one
+        # CHARACTER*80 TITLE (oasmun21_bin.f:364-367 writes TITLE(1:8),
+        # (9:16), (17:24), (25:32)) — slices, not tokens, so concatenate
+        # the raw bytes and strip once. Stripping each slice would delete
+        # any space that falls on a record boundary.
+        f.seek(0)
+        title = _decode_fortran_title(f.read(4 * recl))
 
-            # Record 5: NRCV, NFREQ (2 integers)
-            f.seek(4 * recl)
-            n_rcv, n_freq = struct.unpack(endian + 'ii', f.read(8))
+        # Record 5: NRCV, NFREQ (2 integers)
+        f.seek(4 * recl)
+        n_rcv, n_freq = struct.unpack(endian + 'ii', f.read(8))
 
-            # Bound the n_freq*n_rcv*n_rcv covariance allocation against the
-            # file size before the strided read / ljust below.
-            f.seek(0, 2)
-            file_size = f.tell()
-            _bound_counts(filepath, file_size, recl,
-                          n_rcv=n_rcv, n_freq=n_freq, n_rcv2=n_rcv)
+        # Bound the n_freq*n_rcv*n_rcv covariance allocation against the
+        # file size before the strided read / ljust below.
+        f.seek(0, 2)
+        file_size = f.tell()
+        _bound_counts(filepath, file_size, recl,
+                      n_rcv=n_rcv, n_freq=n_freq, n_rcv2=n_rcv)
 
-            # Record 6: ENSEM, IZERO (ensemble size, dummy) — skipped
+        # Record 6: ENSEM, IZERO (ensemble size, dummy) — skipped
 
-            # Record 7: FREQ1, FREQ2 (2 floats)
-            f.seek(6 * recl)
-            freq1, freq2 = struct.unpack(endian + 'ff', f.read(8))
+        # Record 7: FREQ1, FREQ2 (2 floats)
+        f.seek(6 * recl)
+        freq1, freq2 = struct.unpack(endian + 'ff', f.read(8))
 
-            # Record 8: DELFRQ, ZERO (frequency increment)
-            f.seek(7 * recl)
-            delfrq, _ = struct.unpack(endian + 'ff', f.read(8))
+        # Record 8: DELFRQ, ZERO (frequency increment)
+        f.seek(7 * recl)
+        delfrq, _ = struct.unpack(endian + 'ff', f.read(8))
 
-            # Record 9: SSLEV, WNLEV (surface and white noise levels)
-            f.seek(8 * recl)
-            sslev, wnlev = struct.unpack(endian + 'ff', f.read(8))
+        # Record 9: SSLEV, WNLEV (surface and white noise levels)
+        f.seek(8 * recl)
+        sslev, wnlev = struct.unpack(endian + 'ff', f.read(8))
 
-            # Record 10: ZERO, ZERO (reserved)
-            # Skip
+        # Record 10: ZERO, ZERO (reserved)
+        # Skip
 
-            # Read covariance matrices. Data starts at record 11 and runs
-            # NRCV*NRCV records per frequency (``SRTREC = 11 + (IFR-1) *
-            # NRCV*NRCV``, oasmun21_bin.f:390-399), one complex value
-            # (re, im float32) at the head of each ``recl``-byte record. The
-            # matrix is flattened column-major — OASES addresses element
-            # (ircv, jrcv) as ``IRCV + (JRCV-1)*NRCV`` (oasnun22.f:1174) — so
-            # the receiver index of the first subscript runs fastest. A
-            # structured dtype with ``itemsize=recl`` strides over the records
-            # in a single read.
-            n_total = n_freq * n_rcv * n_rcv
-            f.seek(10 * recl)
-            rec_dt = np.dtype({
-                'names': ['re', 'im'],
-                'formats': [endian + 'f4', endian + 'f4'],
-                'itemsize': recl,
-            })
-            # The final record may carry only its 8-byte payload (no
-            # padding to ``recl``); pad the buffer so the strided view
-            # still covers ``n_total`` records.
-            buf = f.read(n_total * recl)
-            if len(buf) < (n_total - 1) * recl + 8:
-                raise FileFormatError(
-                    f"{filepath}: truncated covariance data — expected "
-                    f"{n_total} records of {recl} bytes, got {len(buf)} bytes"
-                )
-            buf = buf.ljust(n_total * recl, b'\x00')
-            flat = np.frombuffer(buf, dtype=rec_dt, count=n_total)
-            vals = (flat['re'] + 1j * flat['im']).astype(np.complex64)
-            # C-order reshape puts the fastest axis last, i.e. ircv; transpose
-            # to (ifreq, ircv, jrcv). The matrix is Hermitian
-            # (``CORRNS(JI)=CONJG(CORRNS(IJ))``, oasnun22.f:1148), so getting
-            # this backwards would silently conjugate every cross-spectrum.
-            covariance = vals.reshape(n_freq, n_rcv, n_rcv).transpose(0, 2, 1).copy()
+        # Read covariance matrices. Data starts at record 11 and runs
+        # NRCV*NRCV records per frequency (``SRTREC = 11 + (IFR-1) *
+        # NRCV*NRCV``, oasmun21_bin.f:390-399), one complex value
+        # (re, im float32) at the head of each ``recl``-byte record. The
+        # matrix is flattened column-major — OASES addresses element
+        # (ircv, jrcv) as ``IRCV + (JRCV-1)*NRCV`` (oasnun22.f:1174) — so
+        # the receiver index of the first subscript runs fastest. A
+        # structured dtype with ``itemsize=recl`` strides over the records
+        # in a single read.
+        n_total = n_freq * n_rcv * n_rcv
+        f.seek(10 * recl)
+        rec_dt = np.dtype({
+            'names': ['re', 'im'],
+            'formats': [endian + 'f4', endian + 'f4'],
+            'itemsize': recl,
+        })
+        # The final record may carry only its 8-byte payload (no
+        # padding to ``recl``); pad the buffer so the strided view
+        # still covers ``n_total`` records.
+        buf = f.read(n_total * recl)
+        if len(buf) < (n_total - 1) * recl + 8:
+            raise FileFormatError(
+                f"{filepath}: truncated covariance data — expected "
+                f"{n_total} records of {recl} bytes, got {len(buf)} bytes"
+            )
+        buf = buf.ljust(n_total * recl, b'\x00')
+        flat = np.frombuffer(buf, dtype=rec_dt, count=n_total)
+        vals = (flat['re'] + 1j * flat['im']).astype(np.complex64)
+        # C-order reshape puts the fastest axis last, i.e. ircv; transpose
+        # to (ifreq, ircv, jrcv). The matrix is Hermitian
+        # (``CORRNS(JI)=CONJG(CORRNS(IJ))``, oasnun22.f:1148), so getting
+        # this backwards would silently conjugate every cross-spectrum.
+        covariance = vals.reshape(n_freq, n_rcv, n_rcv).transpose(0, 2, 1).copy()
 
-        return {
-            'title': title,
-            'n_receivers': n_rcv,
-            'n_frequencies': n_freq,
-            'freq_min': freq1,
-            'freq_max': freq2,
-            'freq_delta': delfrq,
-            'surface_noise_level': sslev,
-            'white_noise_level': wnlev,
-            'covariance': covariance
-        }
-
-    except (FileFormatError, UnsupportedFeatureError):
-        raise
-    except PARSE_ERRORS as e:
-        raise FileFormatError(f"Failed to read OASN covariance file {filepath}: {e}") from e
+    return {
+        'title': title,
+        'n_receivers': n_rcv,
+        'n_frequencies': n_freq,
+        'freq_min': freq1,
+        'freq_max': freq2,
+        'freq_delta': delfrq,
+        'surface_noise_level': sslev,
+        'white_noise_level': wnlev,
+        'covariance': covariance
+    }
 
 
+@typed_format_error
 def read_oasn_replicas(
     filepath: Union[str, Path]
 ) -> Dict:
@@ -892,117 +877,111 @@ def read_oasn_replicas(
                         "letter.",
         )
 
-    try:
-        with open(filepath, 'rb') as f:
-            head = f.read(4)
-            f.seek(0)
-            endian = detect_endian(
-                head, source=f'read_oasn_replicas:{filepath.name}',
+    with open(filepath, 'rb') as f:
+        head = f.read(4)
+        f.seek(0)
+        endian = detect_endian(
+            head, source=f'read_oasn_replicas:{filepath.name}',
+        )
+
+        # Read title (CHARACTER*80, oasmun21_bin.f:506)
+        title = _decode_fortran_title(
+            _read_fortran_record(f, raw=True, endian=endian))
+
+        # Read NRCV, NFREQ
+        n_rcv, n_freq = _read_fortran_record(f, 'ii', endian=endian)
+
+        # Read FREQ1, FREQ2, DELFRQ
+        freq1, freq2, delfrq = _read_fortran_record(f, 'fff',
+                                                    endian=endian)
+
+        # Read replica grid: ZMINR, ZMAXR, NZR
+        z_min, z_max, n_z = _read_fortran_record(f, 'ffi', endian=endian)
+
+        # Read XMINR, XMAXR, NXR
+        x_min, x_max, n_x = _read_fortran_record(f, 'ffi', endian=endian)
+
+        # Read YMINR, YMAXR, NYR
+        y_min, y_max, n_y = _read_fortran_record(f, 'ffi', endian=endian)
+
+        # Bound every header count before the receiver / replica arrays
+        # are sized off them. Each replica record is 16 bytes on disk
+        # (2 markers + re + im); use that as the per-item floor for the
+        # (n_freq, n_z, n_x, n_y, n_rcv) product.
+        cur = f.tell()
+        f.seek(0, 2)
+        file_size = f.tell()
+        f.seek(cur)
+        _bound_counts(filepath, file_size, 16,
+                      n_freq=n_freq, n_z=n_z, n_x=n_x, n_y=n_y, n_rcv=n_rcv)
+
+        # Read receiver positions and properties
+        receiver_positions = np.zeros((n_rcv, 3))
+        receiver_types = np.zeros(n_rcv, dtype=int)
+        receiver_gains = np.zeros(n_rcv)
+
+        for i in range(n_rcv):
+            # PUTREP writes RAN, TRAN, DEP, IRTYP, GAIN per receiver
+            # (oasmun21_bin.f:515-516).
+            x, y, z, itype, gain = _read_fortran_record(
+                f, 'fffif', endian=endian)
+            receiver_positions[i] = [x, y, z]
+            receiver_types[i] = itype
+            # INPRCV converts the deck's dB column in place before any
+            # output is written (oasnun22.f:99
+            # `GAIN(I)=10.0**(GAIN(I)/20.0)`), so the file holds a linear
+            # amplitude factor. Invert it to report dB, the unit the deck
+            # and oasn.tex:51 use.
+            receiver_gains[i] = 20.0 * np.log10(gain) if gain > 0 else -np.inf
+
+        # Each replica is a Fortran sequential record
+        # ``[marker][re im][marker]`` (16 bytes), written contiguously by
+        # nested loops over (ifreq, iz, ix, iy, ircv) with ircv innermost
+        # (``doc/oasn.tex:681-686``). Read the whole block in one strided
+        # pass.
+        n_total = n_freq * n_z * n_x * n_y * n_rcv
+        rep_dt = np.dtype([
+            ('m1', endian + 'i4'),
+            ('re', endian + 'f4'),
+            ('im', endian + 'f4'),
+            ('m2', endian + 'i4'),
+        ])
+        flat = np.fromfile(f, dtype=rep_dt, count=n_total)
+        if flat.size < n_total:
+            raise FileFormatError(
+                f"{filepath}: truncated replica data — expected "
+                f"{n_total} records, got {flat.size}"
             )
+        if np.any(flat['m1'] != 8) or np.any(flat['m2'] != 8):
+            raise FileFormatError(
+                f"{filepath}: unexpected replica record layout — "
+                "Fortran record markers are not the expected 8-byte "
+                "payload length"
+            )
+        vals = (flat['re'] + 1j * flat['im']).astype(np.complex64)
+        replicas = vals.reshape(n_freq, n_z, n_x, n_y, n_rcv)
 
-            # Read title (CHARACTER*80, oasmun21_bin.f:506)
-            title = _decode_fortran_title(
-                _read_fortran_record(f, raw=True, endian=endian))
-
-            # Read NRCV, NFREQ
-            n_rcv, n_freq = _read_fortran_record(f, 'ii', endian=endian)
-
-            # Read FREQ1, FREQ2, DELFRQ
-            freq1, freq2, delfrq = _read_fortran_record(f, 'fff',
-                                                        endian=endian)
-
-            # Read replica grid: ZMINR, ZMAXR, NZR
-            z_min, z_max, n_z = _read_fortran_record(f, 'ffi', endian=endian)
-
-            # Read XMINR, XMAXR, NXR
-            x_min, x_max, n_x = _read_fortran_record(f, 'ffi', endian=endian)
-
-            # Read YMINR, YMAXR, NYR
-            y_min, y_max, n_y = _read_fortran_record(f, 'ffi', endian=endian)
-
-            # Bound every header count before the receiver / replica arrays
-            # are sized off them. Each replica record is 16 bytes on disk
-            # (2 markers + re + im); use that as the per-item floor for the
-            # (n_freq, n_z, n_x, n_y, n_rcv) product.
-            cur = f.tell()
-            f.seek(0, 2)
-            file_size = f.tell()
-            f.seek(cur)
-            _bound_counts(filepath, file_size, 16,
-                          n_freq=n_freq, n_z=n_z, n_x=n_x, n_y=n_y, n_rcv=n_rcv)
-
-            # Read receiver positions and properties
-            receiver_positions = np.zeros((n_rcv, 3))
-            receiver_types = np.zeros(n_rcv, dtype=int)
-            receiver_gains = np.zeros(n_rcv)
-
-            for i in range(n_rcv):
-                # PUTREP writes RAN, TRAN, DEP, IRTYP, GAIN per receiver
-                # (oasmun21_bin.f:515-516).
-                x, y, z, itype, gain = _read_fortran_record(
-                    f, 'fffif', endian=endian)
-                receiver_positions[i] = [x, y, z]
-                receiver_types[i] = itype
-                # INPRCV converts the deck's dB column in place before any
-                # output is written (oasnun22.f:99
-                # `GAIN(I)=10.0**(GAIN(I)/20.0)`), so the file holds a linear
-                # amplitude factor. Invert it to report dB, the unit the deck
-                # and oasn.tex:51 use.
-                receiver_gains[i] = 20.0 * np.log10(gain) if gain > 0 else -np.inf
-
-            # Each replica is a Fortran sequential record
-            # ``[marker][re im][marker]`` (16 bytes), written contiguously by
-            # nested loops over (ifreq, iz, ix, iy, ircv) with ircv innermost
-            # (``doc/oasn.tex:681-686``). Read the whole block in one strided
-            # pass.
-            n_total = n_freq * n_z * n_x * n_y * n_rcv
-            rep_dt = np.dtype([
-                ('m1', endian + 'i4'),
-                ('re', endian + 'f4'),
-                ('im', endian + 'f4'),
-                ('m2', endian + 'i4'),
-            ])
-            flat = np.fromfile(f, dtype=rep_dt, count=n_total)
-            if flat.size < n_total:
-                raise FileFormatError(
-                    f"{filepath}: truncated replica data — expected "
-                    f"{n_total} records, got {flat.size}"
-                )
-            if np.any(flat['m1'] != 8) or np.any(flat['m2'] != 8):
-                raise FileFormatError(
-                    f"{filepath}: unexpected replica record layout — "
-                    "Fortran record markers are not the expected 8-byte "
-                    "payload length"
-                )
-            vals = (flat['re'] + 1j * flat['im']).astype(np.complex64)
-            replicas = vals.reshape(n_freq, n_z, n_x, n_y, n_rcv)
-
-        return {
-            'title': title,
-            'n_receivers': n_rcv,
-            'n_frequencies': n_freq,
-            'freq_min': freq1,
-            'freq_max': freq2,
-            'freq_delta': delfrq,
-            'z_min': z_min,
-            'z_max': z_max,
-            'n_z': n_z,
-            'x_min': x_min,
-            'x_max': x_max,
-            'n_x': n_x,
-            'y_min': y_min,
-            'y_max': y_max,
-            'n_y': n_y,
-            'receiver_positions': receiver_positions,
-            'receiver_types': receiver_types,
-            'receiver_gains': receiver_gains,
-            'replicas': replicas
-        }
-
-    except (FileFormatError, UnsupportedFeatureError):
-        raise
-    except PARSE_ERRORS as e:
-        raise FileFormatError(f"Failed to read OASN replica file {filepath}: {e}") from e
+    return {
+        'title': title,
+        'n_receivers': n_rcv,
+        'n_frequencies': n_freq,
+        'freq_min': freq1,
+        'freq_max': freq2,
+        'freq_delta': delfrq,
+        'z_min': z_min,
+        'z_max': z_max,
+        'n_z': n_z,
+        'x_min': x_min,
+        'x_max': x_max,
+        'n_x': n_x,
+        'y_min': y_min,
+        'y_max': y_max,
+        'n_y': n_y,
+        'receiver_positions': receiver_positions,
+        'receiver_types': receiver_types,
+        'receiver_gains': receiver_gains,
+        'replicas': replicas
+    }
 
 
 #: The option letter that selects each 1-based ``IOUT``/NPAR slot in OASP's
@@ -1342,6 +1321,7 @@ def _read_oasp_trf_binary(filepath: Path, receiver_depths: np.ndarray) -> Dict:
     }
 
 
+@typed_format_error
 def read_oasr_reflection_coefficients(
     filepath: Union[str, Path],
     format_type: str = 'auto'
@@ -1422,106 +1402,101 @@ def read_oasr_reflection_coefficients(
             extension_hint = 'angle'
         format_type = None
 
-    try:
-        with open(filepath, 'r') as f:
-            # Read header line
-            header_line = f.readline().strip()
-            header_parts = header_line.split()
+    with open(filepath, 'r') as f:
+        # Read header line
+        header_line = f.readline().strip()
+        header_parts = header_line.split()
 
-            # fortran_float, not float(): every value column is a Fortran
-            # real write, which can spell an exponent as D+00 or drop the
-            # letter entirely when it needs three digits.
-            if len(header_parts) >= 4:
-                freq_min = fortran_float(header_parts[0])
-                freq_max = fortran_float(header_parts[1])
-                n_freq = int(header_parts[2])
-                sampling_type_code = int(header_parts[3])
+        # fortran_float, not float(): every value column is a Fortran
+        # real write, which can spell an exponent as D+00 or drop the
+        # letter entirely when it needs three digits.
+        if len(header_parts) >= 4:
+            freq_min = fortran_float(header_parts[0])
+            freq_max = fortran_float(header_parts[1])
+            n_freq = int(header_parts[2])
+            sampling_type_code = int(header_parts[3])
 
-                # Decode sampling type
-                if format_type is None:
-                    format_type = ('slowness' if sampling_type_code == 1
-                                   else 'angle')
-                    if extension_hint not in (None, format_type):
-                        warnings.warn(
-                            f"read_oasr_reflection_coefficients: "
-                            f"{filepath.name} is named {filepath.suffix} "
-                            f"(OASR writes {extension_hint} tables there), "
-                            f"but its header code {sampling_type_code} says "
-                            f"{format_type} — following the header, so the "
-                            f"abscissa is read as {format_type}. Pass "
-                            f"format_type='{extension_hint}' to override.",
-                            UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
+            # Decode sampling type
+            if format_type is None:
+                format_type = ('slowness' if sampling_type_code == 1
+                               else 'angle')
+                if extension_hint not in (None, format_type):
+                    warnings.warn(
+                        f"read_oasr_reflection_coefficients: "
+                        f"{filepath.name} is named {filepath.suffix} "
+                        f"(OASR writes {extension_hint} tables there), "
+                        f"but its header code {sampling_type_code} says "
+                        f"{format_type} — following the header, so the "
+                        f"abscissa is read as {format_type}. Pass "
+                        f"format_type='{extension_hint}' to override.",
+                        UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
 
-                sampling_type = format_type
+            sampling_type = format_type
+        else:
+            raise FileFormatError(f"Invalid header format: {header_line}")
+
+        # Read data for each frequency
+        frequencies = []
+        angles_or_slowness_list = []
+        magnitude_list = []
+        phase_list = []
+
+        for i_freq in range(n_freq):
+            raw_header = f.readline()
+            freq_header = raw_header.strip().split()
+            if len(freq_header) < 2:
+                # Wide fields can concatenate; slice the per-frequency
+                # header's own (1h ,f12.3,i6) layout (oasjun21.f:27-30)
+                # before giving up.
+                try:
+                    freq = fortran_float(raw_header[1:13])
+                    n_samples = int(raw_header[13:19])
+                except (ValueError, IndexError):
+                    raise FileFormatError(
+                        f"{filepath}: frequency header {i_freq + 1} of "
+                        f"{n_freq} is malformed or missing "
+                        f"({raw_header.strip()!r}) — the file is "
+                        f"truncated or not a valid OASR "
+                        f"{filepath.suffix or '.rco/.trc'} table.")
             else:
-                raise FileFormatError(f"Invalid header format: {header_line}")
+                freq = fortran_float(freq_header[0])
+                n_samples = int(freq_header[1])
 
-            # Read data for each frequency
-            frequencies = []
-            angles_or_slowness_list = []
-            magnitude_list = []
-            phase_list = []
+            # Read samples
+            angles_or_slowness = []
+            magnitude = []
+            phase = []
 
-            for i_freq in range(n_freq):
-                raw_header = f.readline()
-                freq_header = raw_header.strip().split()
-                if len(freq_header) < 2:
-                    # Wide fields can concatenate; slice the per-frequency
-                    # header's own (1h ,f12.3,i6) layout (oasjun21.f:27-30)
-                    # before giving up.
-                    try:
-                        freq = fortran_float(raw_header[1:13])
-                        n_samples = int(raw_header[13:19])
-                    except (ValueError, IndexError):
-                        raise FileFormatError(
-                            f"{filepath}: frequency header {i_freq + 1} of "
-                            f"{n_freq} is malformed or missing "
-                            f"({raw_header.strip()!r}) — the file is "
-                            f"truncated or not a valid OASR "
-                            f"{filepath.suffix or '.rco/.trc'} table.")
-                else:
-                    freq = fortran_float(freq_header[0])
-                    n_samples = int(freq_header[1])
+            for i_row in range(n_samples):
+                parts = f.readline().split()
+                if len(parts) < 3:
+                    raise FileFormatError(
+                        f"{filepath}: reflection row {i_row + 1} of "
+                        f"{n_samples} at {freq:g} Hz is short or missing "
+                        f"— oasjun21.f:103-104 writes exactly NWVNO "
+                        f"(3f15.6) rows, so the run died mid-write.")
+                angles_or_slowness.append(fortran_float(parts[0]))
+                magnitude.append(fortran_float(parts[1]))
+                phase.append(fortran_float(parts[2]))
 
-                # Read samples
-                angles_or_slowness = []
-                magnitude = []
-                phase = []
+            frequencies.append(freq)
+            angles_or_slowness_list.append(np.array(angles_or_slowness))
+            magnitude_list.append(np.array(magnitude))
+            phase_list.append(np.array(phase))
 
-                for i_row in range(n_samples):
-                    parts = f.readline().split()
-                    if len(parts) < 3:
-                        raise FileFormatError(
-                            f"{filepath}: reflection row {i_row + 1} of "
-                            f"{n_samples} at {freq:g} Hz is short or missing "
-                            f"— oasjun21.f:103-104 writes exactly NWVNO "
-                            f"(3f15.6) rows, so the run died mid-write.")
-                    angles_or_slowness.append(fortran_float(parts[0]))
-                    magnitude.append(fortran_float(parts[1]))
-                    phase.append(fortran_float(parts[2]))
-
-                frequencies.append(freq)
-                angles_or_slowness_list.append(np.array(angles_or_slowness))
-                magnitude_list.append(np.array(magnitude))
-                phase_list.append(np.array(phase))
-
-        return {
-            'freq_min': freq_min,
-            'freq_max': freq_max,
-            'n_frequencies': n_freq,
-            'sampling_type': sampling_type,
-            'frequencies': frequencies,
-            'angles_or_slowness': angles_or_slowness_list,
-            'magnitude': magnitude_list,
-            'phase': phase_list,
-        }
-
-    except (FileFormatError, UnsupportedFeatureError):
-        raise
-    except PARSE_ERRORS as e:
-        raise FileFormatError(f"Failed to read OASR reflection coefficient file {filepath}: {e}") from e
+    return {
+        'freq_min': freq_min,
+        'freq_max': freq_max,
+        'n_frequencies': n_freq,
+        'sampling_type': sampling_type,
+        'frequencies': frequencies,
+        'angles_or_slowness': angles_or_slowness_list,
+        'magnitude': magnitude_list,
+        'phase': phase_list,
+    }
 
 
+@typed_format_error
 def read_oases_rhs_header(filepath: Union[str, Path]) -> Dict:
     """Read the header of a mean-field ``.rhs`` (OASES unit 45).
 
@@ -1581,51 +1556,45 @@ def read_oases_rhs_header(filepath: Union[str, Path]) -> Dict:
                         "even under 's'.",
         )
 
-    try:
-        with open(filepath, 'rb') as f:
-            probe = f.read(4)
-            if len(probe) < 4:
-                raise FileFormatError(
-                    f"OASES .rhs {filepath} is empty or truncated. OPFILB "
-                    f"opens unit 45 with STATUS='UNKNOWN' (oashun21.f:634), so "
-                    f"a producer run that wrote no scattering right-hand sides "
-                    f"still leaves a zero-length file behind."
-                )
-            endian = detect_endian(
-                probe, source=f'read_oases_rhs_header:{filepath.name}')
-            f.seek(0)
-            nx, fr1, fr2, dt = _read_fortran_record(f, 'ifff', endian=endian)
-            freq, lays1, nwvno, _nflag, _fni5 = _read_fortran_record(
-                f, 'fiiif', endian=endian)
-            # The SCTRHS record opens with a COMPLEX wavenumber (two reals)
-            # followed by the interface index; the eight complex words after
-            # it are the boundary operators DBDZ and BLC, which nothing here
-            # needs. 19 four-byte words in all — checked, because a short
-            # record here means the file is a per-frequency header rather
-            # than a scattering record, i.e. the producer wrote none.
-            try:
-                payload = _read_fortran_record(f, raw=True, endian=endian)
-            except FileFormatError as e:
-                raise FileFormatError(
-                    f"OASES .rhs {filepath} ends after its frequency header, "
-                    f"so it holds no 76-byte SCTRHS record (WVNO, IN1, "
-                    f"DBDZ(4), BLC(4) — oaseun31.f:2395) and names no "
-                    f"scattering interface. SCTRHS skips every interface with "
-                    f"ROUGH2 < 1e-10 (oaseun31.f:2310), so the producer run's "
-                    f"environment was smooth. Underlying error: {e}"
-                ) from e
-            if len(payload) != 4 * (2 + 1 + 8 + 8):
-                raise FileFormatError(
-                    f"OASES .rhs {filepath}: expected a 76-byte SCTRHS record "
-                    f"(WVNO, IN1, DBDZ(4), BLC(4) — oaseun31.f:2395), got "
-                    f"{len(payload)} bytes."
-                )
-            interface = struct.unpack(endian + 'ffi', payload[:12])[2]
-    except FileFormatError:
-        raise
-    except PARSE_ERRORS as e:
-        raise FileFormatError(
-            f"Failed to read OASES .rhs header {filepath}: {e}") from e
+    with open(filepath, 'rb') as f:
+        probe = f.read(4)
+        if len(probe) < 4:
+            raise FileFormatError(
+                f"OASES .rhs {filepath} is empty or truncated. OPFILB "
+                f"opens unit 45 with STATUS='UNKNOWN' (oashun21.f:634), so "
+                f"a producer run that wrote no scattering right-hand sides "
+                f"still leaves a zero-length file behind."
+            )
+        endian = detect_endian(
+            probe, source=f'read_oases_rhs_header:{filepath.name}')
+        f.seek(0)
+        nx, fr1, fr2, dt = _read_fortran_record(f, 'ifff', endian=endian)
+        freq, lays1, nwvno, _nflag, _fni5 = _read_fortran_record(
+            f, 'fiiif', endian=endian)
+        # The SCTRHS record opens with a COMPLEX wavenumber (two reals)
+        # followed by the interface index; the eight complex words after
+        # it are the boundary operators DBDZ and BLC, which nothing here
+        # needs. 19 four-byte words in all — checked, because a short
+        # record here means the file is a per-frequency header rather
+        # than a scattering record, i.e. the producer wrote none.
+        try:
+            payload = _read_fortran_record(f, raw=True, endian=endian)
+        except FileFormatError as e:
+            raise FileFormatError(
+                f"OASES .rhs {filepath} ends after its frequency header, "
+                f"so it holds no 76-byte SCTRHS record (WVNO, IN1, "
+                f"DBDZ(4), BLC(4) — oaseun31.f:2395) and names no "
+                f"scattering interface. SCTRHS skips every interface with "
+                f"ROUGH2 < 1e-10 (oaseun31.f:2310), so the producer run's "
+                f"environment was smooth. Underlying error: {e}"
+            ) from e
+        if len(payload) != 4 * (2 + 1 + 8 + 8):
+            raise FileFormatError(
+                f"OASES .rhs {filepath}: expected a 76-byte SCTRHS record "
+                f"(WVNO, IN1, DBDZ(4), BLC(4) — oaseun31.f:2395), got "
+                f"{len(payload)} bytes."
+            )
+        interface = struct.unpack(endian + 'ffi', payload[:12])[2]
 
     if int(nx) < 1 or float(dt) <= 0.0:
         raise FileFormatError(

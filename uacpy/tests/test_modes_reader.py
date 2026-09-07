@@ -311,3 +311,22 @@ class TestHalfspaceVerticalWavenumber:
         assert data['title'][:7] == 'KRAKENC'
         expected = np.sqrt(data['k'] ** 2 - data['Bot']['k2'])
         assert np.allclose(np.abs(data['Bot']['gamma']), np.abs(expected))
+
+
+def test_a_missing_mod_file_is_named_with_its_resolved_extension(tmp_path):
+    """The ``.mod`` extension is appended before the file is looked for, so
+    the typed error names the path that was actually opened."""
+    with pytest.raises(FileFormatError, match=r'not found.*absent\.mod'):
+        read_modes_bin(str(tmp_path / 'absent'))
+    with pytest.raises(FileFormatError, match=r'not found.*absent\.mod'):
+        read_modes_bin(str(tmp_path / 'absent.mod'))
+
+
+def test_a_truncated_mod_file_is_a_typed_parse_error(tmp_path):
+    """A record read that runs off the end of the file surfaces as the
+    ``typed_format_error`` ``FileFormatError``, never a bare ``struct.error``
+    or ``IndexError``."""
+    path = tmp_path / 'short.mod'
+    path.write_bytes(struct.pack('<i', 32) + b'\x00' * 20)
+    with pytest.raises(FileFormatError):
+        read_modes_bin(str(path))

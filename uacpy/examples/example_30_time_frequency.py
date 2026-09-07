@@ -39,7 +39,9 @@ from uacpy.acoustic_signal import (  # noqa: E402
     radon_transform,
     wigner_ville,
 )
-from uacpy.visualization import draw_sound_cone, draw_slowness_line  # noqa: E402
+from uacpy.visualization import (  # noqa: E402
+    plot_cepstrum, plot_cwt, plot_fk, plot_radon, plot_taup, plot_wigner_ville,
+)
 
 
 def main():
@@ -114,66 +116,52 @@ def main():
 
     fig, axes = plt.subplots(3, 2, figsize=(12, 14), constrained_layout=True)
 
-    # (A) f-k + acoustic cone
+    # Every panel is the package plotter for its transform, drawn into the
+    # grid's axes; only the window and the annotations are set here.
+
+    # (A) f-k + acoustic cone. The gather is synthetic and unit-less, so the
+    # power is shown relative to its own maximum (ref=1 → 10·log10(p/p_max)).
     ax = axes[0, 0]
-    im = ax.imshow(10 * np.log10(fkp / fkp.max() + 1e-6), aspect='auto',
-                   origin='lower', extent=[fkk[0], fkk[-1], fkf[0], fkf[-1]],
-                   vmin=-40, vmax=0, cmap='jet')
-    draw_sound_cone(ax, fkf[-1], fkk[-1], 1500)
-    ax.set_title('f-k transform + 1500 m/s cone', fontweight='bold')
-    ax.set_xlabel('Wavenumber k (rad/m)'); ax.set_ylabel('Frequency [Hz]')
+    plot_fk(fkf, fkk, fkp / fkp.max(), ax=ax, ref=1.0, vmin=-40, vmax=0,
+            cmap='jet', sound_speed=1500, title='f-k transform + 1500 m/s cone')
+    ax.images[0].colorbar.set_label('Relative power (dB)')
     ax.set_ylim(0, 400)
-    fig.colorbar(im, ax=ax, label='Relative power [dB]')
 
     # (B) tau-p slant stack + slowness line
     ax = axes[0, 1]
-    im = ax.imshow(np.abs(U).T, aspect='auto', origin='upper', cmap='jet',
-                   extent=[pax[0] * 1e3, pax[-1] * 1e3, tauax[-1], tauax[0]],
-                   vmin=0, vmax=np.abs(U).max())
-    draw_slowness_line(ax, tauax[-1], 1500)
-    ax.set_title('tau-p slant stack + 1500 m/s', fontweight='bold')
-    ax.set_xlabel('Slowness p [s/km]'); ax.set_ylabel('Intercept tau [s]')
-    fig.colorbar(im, ax=ax, label='Stack amplitude')
+    plot_taup(pax, tauax, U, ax=ax, sound_speed=1500,
+              title='tau-p slant stack + 1500 m/s')
 
     # (C) Morlet CWT
     ax = axes[1, 0]
-    pcm = ax.pcolormesh(t, freqs, np.abs(W), shading='auto', cmap='jet')
+    plot_cwt(freqs, W, fs, ax=ax, title='Morlet CWT scalogram')
     ax.set_yscale('log')
-    ax.set_title('Morlet CWT scalogram', fontweight='bold')
-    ax.set_xlabel('Time [s]'); ax.set_ylabel('Frequency [Hz]')
-    fig.colorbar(pcm, ax=ax, label='Wavelet amplitude |W|')
 
     # (D) Wigner-Ville
     ax = axes[1, 1]
-    im = ax.imshow(Wv, aspect='auto', origin='lower',
-                   extent=[tvw[0], tvw[-1], fvw[0], fvw[-1]], cmap='jet',
-                   vmin=0.0, vmax=Wv.max())
-    ax.set_title('Wigner-Ville (cross-term near 325 Hz)', fontweight='bold')
-    ax.set_xlabel('Time [s]'); ax.set_ylabel('Frequency [Hz]')
+    plot_wigner_ville(fvw, tvw, Wv, ax=ax, vmin=0.0, vmax=Wv.max(),
+                      title='Wigner-Ville (cross-term near 325 Hz)')
     ax.set_ylim(0, 700)
-    fig.colorbar(im, ax=ax, label='Energy density')
 
-    # (E) cepstrum
+    # (E) cepstrum, windowed to the 8-100 ms quefrency search band
     ax = axes[2, 0]
-    ax.plot(quef[lo:hi] * 1e3, cep[lo:hi], color='#1f77b4', lw=1.2)
-    ax.axvline(echo_delay * 1e3, color='crimson', ls='--',
+    plot_cepstrum(cep, ax=ax, sample_rate=fs, color='#1f77b4', lw=1.2,
+                  title='Cepstrum — echo-delay recovery')
+    ax.axvline(echo_delay, color='crimson', ls='--',
                label=f'echo {echo_delay*1e3:.0f} ms')
-    ax.axvline(2 * echo_delay * 1e3, color='crimson', ls=':', alpha=0.6,
+    ax.axvline(2 * echo_delay, color='crimson', ls=':', alpha=0.6,
                label=f'2× ({2*echo_delay*1e3:.0f} ms)')
-    ax.set_title('Cepstrum — echo-delay recovery', fontweight='bold')
-    ax.set_xlabel('Quefrency [ms]'); ax.set_ylabel('Amplitude')
-    ax.set_xlim(lo / fs * 1e3, hi / fs * 1e3)
-    ax.legend(loc='upper right'); ax.grid(alpha=0.3)
+    ax.set_xlim(lo / fs, hi / fs)
+    # The value axis follows the search band, not the pulse's own envelope at
+    # quefrency 0, which is a hundred times the echo rahmonic.
+    ax.set_ylim(1.2 * cep[lo:hi].min(), 1.2 * cep[lo:hi].max())
+    ax.legend(loc='upper right')
 
     # (F) hyperbolic Radon
     ax = axes[2, 1]
-    im = ax.imshow(np.abs(Rh).T, aspect='auto', origin='upper', cmap='jet',
-                   extent=[vels[0], vels[-1], tauh[-1], tauh[0]],
-                   vmin=0, vmax=np.abs(Rh).max())
+    plot_radon(vels, tauh, Rh, ax=ax, kind='hyperbolic',
+               title='Hyperbolic Radon (velocity)')
     ax.axvline(v0, color='w', ls='--', lw=1.1)
-    ax.set_title('Hyperbolic Radon (velocity)', fontweight='bold')
-    ax.set_xlabel('Velocity [m/s]'); ax.set_ylabel('Intercept tau [s]')
-    fig.colorbar(im, ax=ax, label='Stack amplitude')
 
     fig.suptitle('Time-Frequency, Wavenumber & Slowness Transforms',
                  fontsize=15, fontweight='bold')

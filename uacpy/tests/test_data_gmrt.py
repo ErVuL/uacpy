@@ -191,7 +191,7 @@ def test_gmrt_region_grid_closes_its_handle_when_a_variable_is_missing(
     from uacpy.data import _netcdf, gmrt_live
     opened = []
 
-    def fake_open(path):
+    def fake_open(path, memory=None):
         ds = _RecordingDataset()
         ds.variables.pop('lon')
         opened.append(ds)

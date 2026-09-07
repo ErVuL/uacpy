@@ -779,6 +779,22 @@ class TestPlotSSP:
         with pytest.raises(ConfigurationError):
             _plot_ssp(42)
 
+    def test_the_speed_ticks_of_a_shallow_profile_do_not_overprint(self):
+        """Neighbouring speed tick labels never overlap on the default 5-inch
+        panel. A 20 m/s profile — the common shallow-water case — is the
+        span on which matplotlib's own tick count puts eleven 6-character
+        labels ("1480.0", "1482.5", …) side by side, so it is the case that
+        needs the tick cap."""
+        ssp = uacpy.SoundSpeedProfile.from_pairs(
+            [(0, 1500), (30, 1485), (100, 1480)])
+        fig, ax = ssp.plot()
+        fig.canvas.draw()
+        boxes = [t.get_window_extent() for t in ax.get_xticklabels()
+                 if t.get_text()]
+        for a, b in zip(boxes, boxes[1:]):
+            assert a.x1 < b.x0, (a, b)
+        plt.close(fig)
+
 
 class TestPlotBottomProperties:
     def _env(self, bottom, bathy=None):
@@ -918,6 +934,21 @@ class TestBathymetryMap:
             transect=((42, 4), (38.3, 6)), title='t')
         assert fig is not None and ax.has_data()
         assert ax.get_xlabel().startswith('Longitude')
+        plt.close(fig)
+
+    def test_the_plain_map_keeps_the_equirectangular_aspect_too(self):
+        """``aspect=None`` applies the ``1/cos(lat)`` equirectangular
+        correction on the ``basemap=False`` branch as on the basemap one
+        (a 40° window is a quarter taller than 'equal'); an explicit
+        ``aspect`` wins."""
+        lats, lons, depth = self._grid()
+        expected = 1.0 / np.cos(np.radians(np.mean([lats.min(), lats.max()])))
+        fig, ax = plots.plot_bathymetry_map(lats, lons, depth, basemap=False)
+        assert ax.get_aspect() == pytest.approx(expected)
+        plt.close(fig)
+        fig, ax = plots.plot_bathymetry_map(lats, lons, depth, basemap=False,
+                                            aspect=1)
+        assert ax.get_aspect() == pytest.approx(1.0)
         plt.close(fig)
 
     def test_relief_orientation_invariant_to_lat_order(self):
@@ -1635,8 +1666,11 @@ class TestLayeredSeabedFollowsTheBathymetry:
 
     @staticmethod
     def _drawn_at(ax, r_km, z_m):
+        """Whether a seabed fill covers the point. Only the ``fill_between``
+        polygons count: the water column's QuadMesh is one path covering the
+        whole mesh and says nothing about where the stack is."""
         polys = [c for c in ax.collections
-                 if hasattr(c, 'get_paths') and c.get_paths()]
+                 if isinstance(c, mcoll.PolyCollection) and c.get_paths()]
         return any(p.contains_point((r_km, z_m))
                    for c in polys for p in c.get_paths())
 
@@ -1856,6 +1890,46 @@ class TestTheSourceMarkerClearsTheAxisEdge:
             pads.append(-lo / (hi - lo))          # pad as a share of the span
             plt.close(fig)
         assert pads[0] > 2.0 * pads[1], pads
+
+    @staticmethod
+    def _env_panel():
+        import uacpy
+        env = uacpy.Environment(bathymetry=100.0, ssp=1500.0, bottom=1650.0)
+        return env.plot(source=uacpy.Source(depths=[30.0], frequencies=200.0),
+                        receiver=uacpy.Receiver(depths=[50.0], ranges=[3000.0]))
+
+    def test_a_source_on_the_left_limit_is_whole_in_the_environment_panel(
+            self, marker_fraction_inside):
+        """``env.plot()`` starts its axis at the source range, so the star sits
+        exactly ON ``xlim[0]`` and needs the same half-width pad as a source
+        outside the axis."""
+        fig, ax = self._env_panel()
+        assert marker_fraction_inside(ax) == pytest.approx(1.0)
+        plt.close(fig)
+
+    def test_a_receiver_at_the_maximum_range_is_whole_in_the_environment_panel(
+            self, marker_fraction_inside):
+        """The furthest receiver sets the panel's width, so its dot sits
+        exactly ON ``xlim[1]`` and needs a half-width pad on the right, as the
+        source star does on the left."""
+        fig, ax = self._env_panel()
+        assert marker_fraction_inside(ax, marker='o', side='right') == pytest.approx(1.0)
+        plt.close(fig)
+
+    def test_a_source_on_the_left_limit_is_whole_in_the_ray_fan(
+            self, marker_fraction_inside):
+        """``rays.plot()`` starts its axis at r = 0 too."""
+        rays = Rays(
+            rays=[{'r': np.linspace(0, 2000, 10), 'z': np.linspace(30, 60, 10),
+                   'alpha': 0.0, 'n_top_bounces': 0, 'n_bot_bounces': 0}],
+            source_depths=np.array([30.0]),
+            receiver_depths=np.array([50.0]),
+            receiver_ranges=np.array([2000.0]),
+            model='Bellhop',
+        )
+        fig, ax = rays.plot()
+        assert marker_fraction_inside(ax) == pytest.approx(1.0)
+        plt.close(fig)
 
 
 class TestAStackedViewLabelsOnlyAsManyTracesAsFit:
@@ -2251,10 +2325,12 @@ class TestLinearViewsGetTheLinearColormap:
 
 
 class TestSeafloorSpansTheWholePanel:
-    """The bathymetry is anchored to both ends of the data range. Without the
-    end anchors a profile NARROWER than the field stops at its last sample and
-    the panel shows a water column with no seabed under it — while the model
-    held that depth out to the end of the run."""
+    """The bathymetry is anchored at or beyond both ends of the data range
+    (a marker's width beyond, so the panel stays painted where the source
+    star and the receiver dots widen the axis). Without the end anchors a
+    profile NARROWER than the field stops at its last sample and the panel
+    shows a water column with no seabed under it — while the model held that
+    depth out to the end of the run."""
 
     @staticmethod
     def _field():
@@ -2275,8 +2351,8 @@ class TestSeafloorSpansTheWholePanel:
         seabed = [ln for ln in ax.lines if len(np.atleast_1d(ln.get_xdata())) > 1]
         assert seabed, f"no seafloor line drawn ({label})"
         x = np.concatenate([np.asarray(ln.get_xdata()) for ln in seabed])
-        assert x.min() == pytest.approx(0.0)
-        assert x.max() == pytest.approx(10.0)
+        assert x.min() <= 1e-9, f"seafloor starts at {x.min():g} km ({label})"
+        assert x.max() >= 10.0 - 1e-9, f"seafloor ends at {x.max():g} km ({label})"
         plt.close(fig)
 
 
@@ -2580,8 +2656,10 @@ class TestEnvironmentPanelSpansToReceivers:
             bathymetry=np.column_stack([ranges, depths]), ssp=1500.0)
         receiver = uacpy.Receiver(depths=[50.0], ranges=[20_000.0])
         fig, ax = env.plot(receiver=receiver)
+        # The axis reaches the furthest receiver, plus the pad that keeps its
+        # dot off the spine.
         x_hi = max(ax.get_xlim())
-        assert x_hi == pytest.approx(20.0)
+        assert 20.0 <= x_hi < 20.0 * 1.05
 
         mesh_xmax, fill_xmax = self._artists_xmax(ax)
         assert mesh_xmax >= x_hi
@@ -2591,7 +2669,7 @@ class TestEnvironmentPanelSpansToReceivers:
                           if np.atleast_1d(l.get_xdata()).size > ranges.size]
         assert seafloor_lines, "seafloor line missing its right-edge anchor"
         line = seafloor_lines[0]
-        assert float(np.max(line.get_xdata())) == pytest.approx(x_hi)
+        assert float(np.max(line.get_xdata())) >= x_hi - 1e-9
         # The anchor continues the last bathymetry value, constant.
         assert float(np.asarray(line.get_ydata())[-1]) == pytest.approx(150.0)
         plt.close(fig)
@@ -2607,7 +2685,7 @@ class TestEnvironmentPanelSpansToReceivers:
         receiver = uacpy.Receiver(depths=[50.0], ranges=[20_000.0])
         fig, ax = env.plot(receiver=receiver)
         x_hi = max(ax.get_xlim())
-        assert x_hi == pytest.approx(20.0)
+        assert 20.0 <= x_hi < 20.0 * 1.05
         mesh_xmax, _ = self._artists_xmax(ax)
         assert mesh_xmax >= x_hi
         plt.close(fig)
@@ -2845,6 +2923,9 @@ def test_arrivals_left_off_the_axis_are_declared():
         if ax.get_legend() else ''
     assert '1' in text and ('beyond' in text or 'outside' in text
                             or 'off' in text), text
+    # The declaration names the axis limit in the axis's own unit (ms), so
+    # the reader can place the missing arrival against the ticks.
+    assert f"beyond {max(ax.get_xlim()):.0f} ms" in text, text
     plt.close(fig)
 
 
@@ -3529,6 +3610,29 @@ def test_the_overview_colorbar_follows_tl_kwargs(tl_kwargs, expected):
     assert [c.get_ylabel() for c in ax_tl.child_axes] == [expected]
 
 
+def test_the_overview_environment_panel_paints_the_water_over_the_tl_range():
+    """A range-independent environment carries no range vector of its own, so
+    without a ``receiver=`` the environment panel takes its span from the TL
+    field it is drawn beside: the water mesh reaches the TL range extent, the
+    same limit the panel's x axis is synced to."""
+    ranges = np.linspace(100.0, 3000.0, 30)
+    tl = Field(data=np.full((4, ranges.size), 60.0),
+               coords={'depth': np.linspace(10.0, 190.0, 4), 'range': ranges},
+               model='Synth', frequencies=200.0,
+               metadata={'kind': 'pressure', 'unit': 'dB'})
+    lats, lons = np.linspace(40.0, 41.0, 4), np.linspace(-1.0, 1.0, 5)
+    fig, (_ax_map, ax_tl, ax_env) = plot_overview(
+        env=uacpy.Environment(bathymetry=200.0, ssp=1500.0), tl=tl,
+        map_args=(lats, lons, np.full((4, 5), 1000.0)),
+        map_kwargs=dict(basemap=False))
+    water = [c for c in ax_env.collections if isinstance(c, mcoll.QuadMesh)]
+    assert water, "the environment panel has no water mesh"
+    mesh_xmax = max(float(m.get_coordinates()[..., 0].max()) for m in water)
+    assert mesh_xmax >= max(ax_tl.get_xlim()) - 1e-9
+    assert mesh_xmax >= 3.0
+    plt.close(fig)
+
+
 def test_a_panel_grid_warning_points_at_the_caller():
     """``typed_plot_error`` wraps every plotter, so a plotter's own
     ``stacklevel`` lands on the decorator: the user was told to fix a call and
@@ -3755,12 +3859,14 @@ def test_the_seafloor_fill_reaches_the_right_spine(env):
     """The fill is anchored on the receiver extent while the x-limit is set
     a margin wider, so the seabed stopped short of the spine and left a bare
     strip under the rays past the receiver — the sliver the anchoring exists
-    to avoid."""
+    to avoid. The seabed reaches both spines: the right one past the
+    receiver margin, the left one past the half width the source star
+    widens the axis by."""
     fig, ax = _rays_to_receiver().plot(env=env)
     lo, hi = _fill_extent(ax)
     x_lo, x_hi = ax.get_xlim()
     assert hi >= x_hi - 1e-9, f"fill stops at {hi:g} km, axis ends at {x_hi:g}"
-    assert lo <= x_lo + 1e-9
+    assert lo <= x_lo + 1e-9, f"fill starts at {lo:g} km, axis starts at {x_lo:g}"
     plt.close(fig)
 
 
@@ -4448,3 +4554,54 @@ def test_a_constant_profile_sits_at_the_centre_of_its_water_colorbar(bottom):
     assert lo < 1500.0 < hi
     assert (lo + hi) / 2.0 == pytest.approx(1500.0)
     plt.close(fig)
+
+
+class TestRangeDependentHalfspaceFillReadsOnItsColorbar:
+    """``_draw_rd_bottom`` shades each node's column by its sound speed on the
+    same relative scale the panel's 'Bottom cp' colorbar spans, so the fill
+    colour reads back to that node's cp. Nodes sharing one speed sit at the
+    bar's mid-scale (the bar pads a constant pool ±5 %) and are painted that
+    colour."""
+
+    @staticmethod
+    def _env(speeds):
+        ranges = np.array([0.0, 5000.0, 10000.0])
+        bottom = uacpy.Bottom.from_halfspaces(
+            ranges, sound_speed=np.array(speeds, dtype=float),
+            density=np.array([1.8, 1.8, 1.8]),
+            attenuation=np.array([0.5, 0.5, 0.5]),
+            shear_speed=np.zeros(3), acoustic_type='half-space')
+        return uacpy.Environment(bathymetry=100.0, ssp=1500.0, bottom=bottom)
+
+    @pytest.mark.parametrize('speeds', [
+        (1700.0, 1700.0, 1700.0),
+        (1600.0, 1700.0, 1800.0),
+    ])
+    def test_each_column_is_painted_where_its_speed_sits_on_the_bar(self, speeds):
+        from uacpy.visualization.style import BOTTOM_CMAP
+        fig, ax = self._env(speeds).plot()
+        cax = next(a for a in ax.child_axes
+                   if a.get_ylabel() == 'Bottom cp (m/s)')
+        lo, hi = sorted(cax.get_ylim())
+        columns = [p for p in ax.patches if p.get_hatch()]
+        assert len(columns) == len(speeds)
+        for patch, cp in zip(columns, speeds):
+            expected = BOTTOM_CMAP(0.25 + 0.6 * (cp - lo) / (hi - lo))
+            assert patch.get_facecolor() == pytest.approx(expected, abs=1e-6)
+        plt.close(fig)
+
+
+def test_the_range_axis_label_and_its_pinned_subtitle_share_one_unit_entry():
+    """``_AXIS_LABELS['range']`` is read by the pinned-cut subtitle ("Range =
+    1.5 km") and must name the unit every range axis is drawn in, so the
+    generic ``_coord_label`` agrees with the km axis ``_coord_axis`` builds."""
+    from uacpy.visualization.plots._common import (
+        _AXIS_LABELS, _coord_axis, _coord_label, _pinned_subtitle)
+    values, label = _coord_axis(np.array([1500.0]), 'range')
+    assert values == pytest.approx([1.5])
+    assert label == 'Range (km)'
+    assert _coord_label('range') == label
+    assert _AXIS_LABELS['range'] == ('Range', 'km')
+    field = Field(data=np.zeros(3), coords={'depth': np.arange(3.0)},
+                  pinned={'range': 1500.0})
+    assert _pinned_subtitle(field) == 'Range = 1.5 km'

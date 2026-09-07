@@ -12,8 +12,6 @@ NBS is a U.S. Government work — **public domain**.
 """
 
 import contextlib
-import tempfile
-from pathlib import Path
 
 import numpy as np
 
@@ -113,22 +111,21 @@ def _fetch_monthly_grid(year, month, *, timeout, verbose):
                             user_agent=_USER_AGENT)
         except DataFetchError:
             continue
-        with tempfile.NamedTemporaryFile(suffix='.nc', prefix='uacpy_nbs_',
-                                         delete=False) as fh:
-            fh.write(blob)
-            tmp = Path(fh.name)
         try:
+            # Parsed in memory, with no scratch file.
+            #
             # closing(), not a bare close() after the reads: the KeyError the
             # next clause catches is raised between the two, once per month a
             # 120-grid climatology build cannot name a variable in — each one
-            # leaking a handle on the file the finally is about to unlink.
+            # leaking an open in-memory handle.
             #
             # netcdf_lock spans the whole statement, so the slices below and
             # the close() that ends it are inside it as well as the open —
             # netCDF4 is not thread-safe here, and a 120-file climatology
             # build would otherwise read and close alongside another thread's
             # grid read.
-            with netcdf_lock, contextlib.closing(open_netcdf(tmp)) as ds:
+            with netcdf_lock, contextlib.closing(
+                    open_netcdf('nbs_monthly.nc', memory=blob)) as ds:
                 names = {n.lower(): n for n in ds.variables}
                 lat = np.asarray(ds.variables[names['latitude']][:], float)
                 lon = np.asarray(ds.variables[names['longitude']][:], float)
@@ -141,8 +138,6 @@ def _fetch_monthly_grid(year, month, *, timeout, verbose):
                     np.nan)
         except (KeyError, OSError):
             continue
-        finally:
-            tmp.unlink(missing_ok=True)
         return lat, lon, speed
     return None
 

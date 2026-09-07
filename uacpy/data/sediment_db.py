@@ -8,8 +8,9 @@ It reads up to two normalized CSVs from the cache:
   (:func:`download_sediment_db`).
 * ``deck41.csv``    — DECK41 surficial descriptions (dominant lithology text).
   Optional, and no installer step produces it: drop it in by hand
-  (``latitude, longitude, lithology``) to widen coverage where grain-size
-  samples are sparse.
+  (``latitude, longitude, lithology``; the reader also accepts the header
+  aliases in ``_LAT_COLS``/``_LON_COLS``/``_LITH_COLS``, e.g. ``lat, lon,
+  description``) to widen coverage where grain-size samples are sparse.
 
 A nearest-neighbour lookup (great-circle, via a unit-sphere KD-tree) returns the
 closest sample. The two files hold **separate** trees, compared rather than

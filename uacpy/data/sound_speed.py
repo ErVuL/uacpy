@@ -41,6 +41,7 @@ from uacpy.data._geo import (
     great_circle_km,
     Coordinate, as_coordinate, normalize_lon, depth_to_pressure_dbar,
     geodesic_waypoints, ring_offsets, run_representative_indices,
+    capped_n_points, require_source,
     DEFAULT_MAX_TRANSECT_POINTS, checked_max_points, checked_n_points,
 )
 from uacpy.data._time import parse_date
@@ -183,15 +184,8 @@ def ssp_transect_plan(
             remediation=f"Use one of {sorted(_GRIDS)}.")
     max_points = checked_max_points(max_points, 'ssp_transect_plan')
     n_points = checked_n_points(n_points, 'ssp_transect_plan', allow_auto=True)
-    if n_points == 'auto':
-        probe_n = max_points
-    else:
-        if n_points > max_points:
-            warnings.warn(
-                f"ssp_transect_plan: n_points={n_points} exceeds "
-                f"max_points={max_points}; sampling {max_points}.",
-                UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
-        probe_n = min(int(n_points), max_points)
+    probe_n = (max_points if n_points == 'auto'
+               else capped_n_points(n_points, max_points, 'ssp_transect_plan'))
     lats, lons, ranges_m = geodesic_waypoints(start, end, probe_n)
     if n_points == 'auto':
         # Identity = WOA grid cell (analytic, no fetch). Collapse runs that
@@ -376,7 +370,8 @@ def _ts_profile_with_cell(
             f"fetch_ts_profile: unknown resolution={resolution!r}.",
             remediation=f"Use one of {sorted(_GRIDS)}.",
         )
-    _check_woa_source(source)
+    require_source(source, WOA_SOURCES, 'WOA23 source',
+                   "Use 'opendap' (online) or 'local' (install.sh --data woa23).")
     lat, lon = as_coordinate(point)
     period = _resolve_period(date, month)
     lat_idx, lon_idx, lat_c, lon_c = _grid_index(lat, lon, resolution)
@@ -544,14 +539,6 @@ def _truncate_column(z, t, s) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
 WOA_SOURCES = ('opendap', 'local')
 
 
-def _check_woa_source(source):
-    if source not in WOA_SOURCES:
-        raise ConfigurationError(
-            f"WOA23 source must be one of {WOA_SOURCES}; got {source!r}.",
-            remediation="Use 'opendap' (online) or 'local' (install.sh --data woa23).",
-        )
-
-
 #: Network columns already fetched in this process, keyed on everything
 #: that selects one: ``fetch_environment(with_absorption=True)`` reads the
 #: same T/S column twice (sound speed, then absorption), and a coastal ring
@@ -569,22 +556,20 @@ def _get_column(source, period, lat_idx, lon_idx, *, resolution, decade,
         from uacpy.data import woa23_local
         return woa23_local.column(period, lat_idx, lon_idx,
                                   resolution=resolution, decade=decade)
-    # The fetch stack in use is stored beside the column and compared by
-    # identity: a caller that swaps ``_fetch_column`` or ``http_get`` for a
-    # stub is never answered from a previous one (``id()`` alone is reused
-    # once a stub is garbage-collected). In production both are the module's
-    # own functions.
+    # Keyed on the request alone; a test that swaps ``http_get`` for a stub
+    # clears the memo through ``_cache.invalidate_grids()`` (it is registered
+    # above) so it is never answered from a previous stub's column.
     key = (period, int(lat_idx), int(lon_idx), resolution, decade, base_url)
     hit = _COLUMN_MEMO.get(key)
-    if hit is None or hit[0] is not _fetch_column or hit[1] is not http_get:
+    if hit is None:
         if len(_COLUMN_MEMO) >= _COLUMN_MEMO_MAX:
             _COLUMN_MEMO.clear()
-        hit = (_fetch_column, http_get, _fetch_column(
+        hit = _fetch_column(
             period, lat_idx, lon_idx, resolution=resolution, decade=decade,
             base_url=base_url, timeout=timeout, verbose=verbose,
-        ))
+        )
         _COLUMN_MEMO[key] = hit
-    return tuple(np.array(a, copy=True) for a in hit[2])
+    return tuple(np.array(a, copy=True) for a in hit)
 
 
 def _file_url(folder, var, period, code, resolution, decade, base_url) -> str:
@@ -757,11 +742,12 @@ def extend_ssp_below_data(ssp, depth_max: float,
         ranges=(ssp.ranges.copy() if ssp.ranges is not None else None),
         shape=ssp.shape,
         data_sources=ssp.data_sources,
-        # The rebuild has to restate ``formula``; dropping it made the result
-        # look literal, so a *second* extension (transect column, then the
-        # assembled profile against the bathymetry) silently reverted to
-        # UNESCO. The carrier's own copies keep it (``SoundSpeedProfile``
-        # ``extend_to``/``subset``/``copy``), so this is the only gap.
+        # The rebuild has to restate ``formula``: without it the result
+        # looks literal, and a *second* extension (transect column, then the
+        # assembled profile against the bathymetry) reverts to UNESCO. The
+        # carrier's own copies (``SoundSpeedProfile._replace``, which every
+        # slicer, ``collapse`` and ``extend_to`` go through, and ``copy``)
+        # keep it, so this constructor call is the only one that must.
         formula=ssp.formula,
     )
 

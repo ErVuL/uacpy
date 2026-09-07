@@ -35,6 +35,7 @@ from uacpy.data._geo import (
     Coordinate, as_coordinate, normalize_lon, lon_linspace,
     central_angle, geodesic_waypoints, EARTH_RADIUS_KM,
     DEFAULT_MAX_TRANSECT_POINTS, checked_max_points, checked_n_points,
+    capped_n_points, require_source,
 )
 from uacpy.data._http import http_get
 from uacpy._log import log_message
@@ -65,14 +66,11 @@ _rate_limit_lock = threading.Lock()   # serializes the read-sleep-stamp above
 
 
 def _check_source(source):
-    if source not in BATHY_SOURCES:
-        raise ConfigurationError(
-            f"bathymetry source must be one of {BATHY_SOURCES}; got {source!r}.",
-            remediation="Use 'api' (OpenTopoData/GEBCO), 'gmrt' (GMRT multibeam, "
-                        "higher-res live), 'emodnet' (EMODnet DTM, ~115 m, "
-                        "European seas + Caribbean), or 'local' (offline GEBCO "
-                        "grid).",
-        )
+    require_source(source, BATHY_SOURCES, 'bathymetry source',
+                   "Use 'api' (OpenTopoData/GEBCO), 'gmrt' (GMRT multibeam, "
+                   "higher-res live), 'emodnet' (EMODnet DTM, ~115 m, "
+                   "European seas + Caribbean), or 'local' (offline GEBCO "
+                   "grid).")
 
 
 def fetch_bathy(
@@ -196,14 +194,9 @@ def fetch_bathy_transect(
                 f"max_points, or use GMRT / a self-hosted OpenTopoData for "
                 f"finer sampling.",
                 UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
-    elif int(n_points) > int(max_points):
-        warnings.warn(
-            f"fetch_bathy_transect: n_points={n_points} exceeds "
-            f"max_points={max_points}; sampling {max_points}.",
-            UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
 
     log_message(
-        'bathymetry', f"sampling {n} GEBCO depths along "
+        'bathymetry', f"sampling {n} depths (source={source!r}) along "
         f"{ranges_m[-1] / 1000:.1f} km transect", verbose=verbose,
     )
     if source == 'local':
@@ -248,8 +241,9 @@ def bathy_transect_plan(
     if n_points == 'auto':
         n = min(native, max_points)
     else:
-        n = min(checked_n_points(n_points, 'bathy_transect_plan',
-                                 allow_auto=True), max_points)
+        n = capped_n_points(
+            checked_n_points(n_points, 'bathy_transect_plan', allow_auto=True),
+            max_points, 'bathy_transect_plan')
     lats, lons, ranges_m = geodesic_waypoints(start, end, n)
     return {'n_points': int(n), 'native_points': native, 'lats': lats,
             'lons': lons, 'ranges_m': ranges_m}
@@ -298,6 +292,16 @@ def fetch_bathy_grid(
     # sort here too and all four backends share one axis order.
     lat_range = (min(float(lat_range[0]), float(lat_range[1])),
                  max(float(lat_range[0]), float(lat_range[1])))
+    # lon_range is directional on the 'api'/'local' paths — eastward from
+    # lon_range[0], so (179, -179) samples the 2° dateline strip — and reversed
+    # ends therefore sweep the long way round the globe.
+    lon_span = (float(lon_range[1]) - float(lon_range[0])) % 360.0
+    if lon_span > 180.0 and source in ('api', 'local'):
+        warnings.warn(
+            f"fetch_bathy_grid: lon_range={tuple(lon_range)} spans "
+            f"{lon_span:.0f}° eastward from lon_range[0]; swap the ends for "
+            f"the {360.0 - lon_span:.0f}° strip west of it.",
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
     if source == 'local':
         from uacpy.data import gebco_local
         log_message('bathymetry', f"GEBCO grid (local) {n_lat}×{n_lon} over "

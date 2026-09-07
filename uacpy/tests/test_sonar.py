@@ -1662,6 +1662,34 @@ class TestReverberationGuardsRefuseNaNButKeepZeroRange:
                                  pulse_length_s=0.01,
                                  solid_angle_beamwidth_sr=NAN)
 
+    @pytest.mark.parametrize("bad,first", [
+        (dict(pulse_length_s=NAN, sound_speed=-1.0, ranges_m=[-1.0]),
+         "pulse_length_s and horizontal_beamwidth_rad must be > 0 and finite"),
+        (dict(sound_speed=-1.0, ranges_m=[-1.0]),
+         "boundary_reverberation: sound_speed must be > 0 m/s and finite"),
+        (dict(ranges_m=[-1.0]),
+         "boundary_reverberation: ranges_m must be >= 0 and finite"),
+    ])
+    def test_boundary_reverberation_reports_the_first_failing_guard(
+            self, bad, first):
+        # Guard order is pulse/beam, sound speed, ranges: a call with several
+        # bad arguments names the first of them.
+        kw = dict(ranges_m=[100.0], pulse_length_s=0.01,
+                  horizontal_beamwidth_rad=0.1, sound_speed=1500.0)
+        kw.update(bad)
+        with pytest.raises(ConfigurationError, match=first):
+            boundary_reverberation(kw.pop("ranges_m"), 200.0, -30.0, **kw)
+
+    def test_volume_reverberation_names_its_own_beam_argument_first(self):
+        with pytest.raises(ConfigurationError,
+                           match="volume_reverberation: pulse_length_s and "
+                                 "solid_angle_beamwidth_sr must be > 0 and "
+                                 "finite; got pulse_length_s=0.01, "
+                                 "solid_angle_beamwidth_sr=-0.1"):
+            volume_reverberation([-1.0], 200.0, -70.0, pulse_length_s=0.01,
+                                 solid_angle_beamwidth_sr=-0.1,
+                                 sound_speed=0.0)
+
     # ``INF`` completes the set the test's name already claimed: the guard was
     # a bare ``~(r >= 0)``, which refuses NAN and -inf but admits +inf.
     @pytest.mark.parametrize("bad", [NAN, -np.inf, INF])

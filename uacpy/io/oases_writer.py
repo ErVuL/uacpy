@@ -3,7 +3,7 @@ OASES Input File Writers
 
 This module provides functions for writing input files for OASES models:
 - OAST: Transmission loss module (wavenumber integration)
-- OASN: Noise/covariance module (also used for normal mode computation)
+- OASN: Noise covariance / replica computation (oasn.tex:1)
 - OASR: Plane-wave reflection-coefficient module
 - OASP: Pulse / broadband transfer-function module
 - OASS: Reverberation / scattered-field statistics from rough interfaces
@@ -277,10 +277,12 @@ def _emit_water_layers(
     equals the seabed record's top, so it is a zero-thickness layer and
     looks droppable; it is not. It is the *dummy isovelocity layer* that
     oaseun31.f:381-388 demands. INENVI walks every interface ``M = 2 ..
-    NUML`` and, where ``ROUGH2(M) > 1e-10``, refuses roughness if the
+    NUML`` and, where ``ROUGH2(M) > 1e-10``, flags roughness if the
     layer above OR below is LAYTYP 2 — the n²-linear gradient type set at
     :189 — printing '*** SURFACE ROUGHNESS NOT ALLOWED BETWEEN LAYERS
-    WITH SOUND SPEED GRADIENT. INSERT A DUMMY ISOVELOCITY LAYER ***'.
+    WITH SOUND SPEED GRADIENT. INSERT A DUMMY ISOVELOCITY LAYER ***'
+    and carrying on (the STOP at :388 is commented out), the run then
+    being, in its own words, valid for volume scattering only.
     With the CS = 0 record present, the layer above the seabed interface
     is LAYTYP 1 and the pairing is legal. Drop it and the seabed
     interface would butt straight onto the last gradient layer, so every
@@ -412,11 +414,6 @@ def _emit_bottom_layers(
     f: TextIO,
     env: Environment,
     water_depth: float,
-    fallback_c_p: float,
-    fallback_c_s: float,
-    fallback_alpha_p: float,
-    fallback_alpha_s: float,
-    fallback_rho: float,
     *,
     extra_columns: int = 0,
     suffix_fn: Optional[Callable[[int], str]] = None,
@@ -426,7 +423,9 @@ def _emit_bottom_layers(
 
     Writes one interface line per SedimentLayer when ``env.bottom`` is
     layered, followed by the halfspace at the correct depth. Falls back to a
-    single halfspace line for a pure half-space column.
+    single halfspace line for a pure half-space column. The halfspace row
+    carries ``_extract_bottom_props(env.bottom.halfspace_at(range=0.0))``,
+    the r = 0 column every OAS* deck describes.
 
     OASES interface format: D CC CS AC AS RO RG (oast.tex:42-48). INENVI
     consumes exactly those seven —
@@ -466,6 +465,16 @@ def _emit_bottom_layers(
             rg = rgs[k] if 0 <= k < len(rgs) else 0.0
             return f" {rg:.4f}{trail}"
 
+    # ``halfspace_at(range=0.0)`` is the r = 0 column every OAS* deck
+    # describes; a layered bottom is range-independent, so it is
+    # ``columns[0].halfspace`` itself. ``_extract_bottom_props`` writes a
+    # vacuum as the all-zero LAYTYP=-1 row and raises for a rigid or
+    # tabulated boundary — never the construction placeholders (measured
+    # ~10 dB of bottom loss per bounce when a placeholder was written).
+    props = _extract_bottom_props(env.bottom.halfspace_at(range=0.0))
+    c_p, c_s, rho = props['c_p'], props['c_s'], props['rho']
+    alpha_p, alpha_s = props['alpha_p'], props['alpha_s']
+
     iface = iface_start
     if env.has_layered_bottom:
         lb = env.bottom.columns[0]
@@ -494,35 +503,11 @@ def _emit_bottom_layers(
             current_depth += layer.thickness
             iface += 1
         # Deepest halfspace below all sediment layers.
-        hs = getattr(lb, 'halfspace', None)
-        if hs is not None and getattr(hs, 'acoustic_type', None) is not None:
-            # Same acoustic_type branch as _extract_bottom_props: a vacuum
-            # termination writes the all-zero LAYTYP=-1 row, and rigid/file
-            # raise — never the construction placeholders (measured ~10 dB
-            # of bottom loss per bounce when the placeholder was written).
-            props = _extract_bottom_props(hs)
-            c_p, c_s = props['c_p'], props['c_s']
-            alpha_p, alpha_s = props['alpha_p'], props['alpha_s']
-            rho = props['rho']
-        elif hs is not None:
-            # Plain getattr defaults only — ``or fallback`` would turn a
-            # legitimate 0.0 (e.g. fluid halfspace shear) into the fallback.
-            c_p = getattr(hs, 'sound_speed', fallback_c_p)
-            c_s = getattr(hs, 'shear_speed', fallback_c_s)
-            alpha_p = getattr(hs, 'attenuation', fallback_alpha_p)
-            alpha_s = getattr(hs, 'shear_attenuation', fallback_alpha_s)
-            rho = getattr(hs, 'density', fallback_rho)
-        else:
-            c_p, c_s, alpha_p, alpha_s, rho = (
-                fallback_c_p, fallback_c_s,
-                fallback_alpha_p, fallback_alpha_s, fallback_rho,
-            )
         f.write(f"{current_depth:.2f} {c_p:.2f} {c_s:.2f} "
                 f"{alpha_p:.3f} {alpha_s:.3f} {rho:.2f}{suffix_fn(iface)}\n")
     else:
-        f.write(f"{water_depth:.2f} {fallback_c_p:.2f} {fallback_c_s:.2f} "
-                f"{fallback_alpha_p:.3f} {fallback_alpha_s:.3f} "
-                f"{fallback_rho:.2f}{suffix_fn(iface)}\n")
+        f.write(f"{water_depth:.2f} {c_p:.2f} {c_s:.2f} "
+                f"{alpha_p:.3f} {alpha_s:.3f} {rho:.2f}{suffix_fn(iface)}\n")
 
 
 def bottom_interface_roughness(env: Environment) -> List[float]:
@@ -1786,12 +1771,6 @@ def write_oast_input(
     freq = float(source.frequencies[0])
     depth = env.depth
 
-    # Bottom properties
-    bottom = env.bottom.halfspace_at(range=0.0)
-    _bp = _extract_bottom_props(bottom)
-    rho, c_p, c_s = _bp['rho'], _bp['c_p'], _bp['c_s']
-    alpha_p, alpha_s = _bp['alpha_p'], _bp['alpha_s']
-
     # Sound speed profile — align to env.depth so the deepest sample sits
     # exactly at the seabed interface (OASES expects monotone depth + the
     # last entry to terminate the water column).
@@ -1874,7 +1853,6 @@ def write_oast_input(
                     f"{_surface_roughness(env):.4f} 0\n")
             _emit_bottom_layers(
                 f, env, depth,
-                c_p, c_s, alpha_p, alpha_s, rho,
                 extra_columns=1,
             )
         else:
@@ -1887,7 +1865,6 @@ def write_oast_input(
                                extra_columns=1)
             _emit_bottom_layers(
                 f, env, depth,
-                c_p, c_s, alpha_p, alpha_s, rho,
                 extra_columns=1,
             )
 
@@ -2026,7 +2003,8 @@ def write_oasn_input(
     receiver : Receiver
         Receiver array specification (for covariance matrices)
     options : str, optional
-        OASN option string. If None, uses 'N J' for normal mode computation
+        OASN option string. If None, uses 'N J' (noise covariance matrices on
+        a complex integration contour)
         Common options:
         - N: Output covariance matrices to .xsm file
         - R: Output replicas to .rpo file
@@ -2102,7 +2080,7 @@ def write_oasn_input(
     IX.  Discrete source parameters (if NDNS > 0)
     X.   Replica parameters (if option R)
 
-    For normal mode computation, set options='N J' and ensure
+    For the noise covariance matrices, set options='N J' and ensure the
     receiver array is specified properly.
 
     Examples
@@ -2121,12 +2099,6 @@ def write_oasn_input(
     # Extract parameters
     freq = float(source.frequencies[0])
     depth = env.depth
-
-    # Bottom properties
-    bottom = env.bottom.halfspace_at(range=0.0)
-    _bp = _extract_bottom_props(bottom)
-    rho, c_p, c_s = _bp['rho'], _bp['c_p'], _bp['c_s']
-    alpha_p, alpha_s = _bp['alpha_p'], _bp['alpha_s']
 
     # Sound speed profile — align to env.depth (see OAST writer for rationale).
     ssp_data = env.ssp.extend_to(depth).to_pairs()
@@ -2267,7 +2239,6 @@ def write_oasn_input(
                            extra_columns=1)
         _emit_bottom_layers(
             f, env, depth,
-            c_p, c_s, alpha_p, alpha_s, rho,
             extra_columns=1,
         )
 
@@ -2465,13 +2436,14 @@ def write_oasp_input(
     filepath : str or Path
         Output file path (typically .dat extension)
     env : Environment
-        Ocean environment (can be range-dependent)
+        Ocean environment (must be range-independent)
     source : Source
         Acoustic source specification
     receiver : Receiver
         Receiver array specification
     options : str, optional
-        OASP option string. If None, uses default 'N V J'
+        OASP option string. If None, uses default 'N J' (a second output
+        letter raises NOUT and the .trf reader keeps only the first)
         Common options:
         - N: Normal stress (pressure)
         - V: Vertical velocity
@@ -2680,11 +2652,6 @@ def _write_oasp_family_deck(
     filepath = Path(filepath)
     depth = env.depth
 
-    bottom = env.bottom.halfspace_at(range=0.0)
-    _bp = _extract_bottom_props(bottom)
-    rho, c_p, c_s = _bp['rho'], _bp['c_p'], _bp['c_s']
-    alpha_p, alpha_s = _bp['alpha_p'], _bp['alpha_s']
-
     # Sound speed profile — align to env.depth (see OAST writer).
     ssp_data = env.ssp.extend_to(depth).to_pairs()
 
@@ -2730,13 +2697,11 @@ def _write_oasp_family_deck(
         if roughness_tail is None:
             _emit_bottom_layers(
                 f, env, depth,
-                c_p, c_s, alpha_p, alpha_s, rho,
                 extra_columns=2,
             )
         else:
             _emit_bottom_layers(
                 f, env, depth,
-                c_p, c_s, alpha_p, alpha_s, rho,
                 suffix_fn=roughness_tail,
                 iface_start=1,
             )
@@ -3238,11 +3203,9 @@ def write_oasr_input(
     freq = float(source.frequencies[0])
     depth = env.depth
 
-    # Bottom properties
-    bottom = env.bottom.halfspace_at(range=0.0)
-    _bp = _extract_bottom_props(bottom)
-    rho, c_p, c_s = _bp['rho'], _bp['c_p'], _bp['c_s']
-    alpha_p, alpha_s = _bp['alpha_p'], _bp['alpha_s']
+    # Block IX's speed axis brackets the half-space c_p; the layer rows
+    # themselves come from _emit_bottom_layers.
+    c_p = _extract_bottom_props(env.bottom.halfspace_at(range=0.0))['c_p']
 
     # Sound speed profile - for OASR we only need a single representative
     # water sound speed: OASR is a *local* interface reflection solver, the
@@ -3384,7 +3347,6 @@ def write_oasr_input(
         # interface 0 was the water/sediment-top line above.
         _emit_bottom_layers(
             f, env, depth,
-            c_p, c_s, alpha_p, alpha_s, rho,
             suffix_fn=_roughness_tail,
             iface_start=1,
         )
@@ -3660,10 +3622,6 @@ def write_oass_input(
             f"got {correlation_length}.")
 
     depth = float(env.depth)
-    bottom = env.bottom.halfspace_at(range=0.0)
-    _bp = _extract_bottom_props(bottom)
-    rho, c_p, c_s = _bp['rho'], _bp['c_p'], _bp['c_s']
-    alpha_p, alpha_s = _bp['alpha_p'], _bp['alpha_s']
     ssp_data = env.ssp.extend_to(depth).to_pairs()
 
     frequency = float(np.atleast_1d(source.frequencies)[0])
@@ -3810,7 +3768,6 @@ def write_oass_input(
                                surface_suffix=surface_suffix)
         _emit_bottom_layers(
             f, env, depth,
-            c_p, c_s, alpha_p, alpha_s, rho,
             suffix_fn=_roughness_tail,
             iface_start=1,
         )

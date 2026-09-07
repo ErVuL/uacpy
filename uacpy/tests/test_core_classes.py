@@ -1959,6 +1959,52 @@ class TestSoundSpeedProfileExtendTo:
         assert out.ranges.tolist() == [0.0, 5000.0]
 
 
+class TestSoundSpeedProfileCopiesKeepTheFormula:
+    """``formula`` records which seawater equation built ``data``; the deep
+    extension in ``uacpy.data.sound_speed`` reads it to continue the column
+    under the same equation. Every copy a slicer returns carries it, as
+    ``collapse`` and ``extend_to`` do."""
+
+    @staticmethod
+    def _profile(range_dependent):
+        if range_dependent:
+            return SoundSpeedProfile(
+                depths=[0.0, 50.0, 100.0], ranges=[0.0, 1000.0],
+                data=[[1500.0, 1510.0], [1495.0, 1505.0], [1490.0, 1500.0]],
+                formula='delgrosso')
+        return SoundSpeedProfile(
+            depths=[0.0, 50.0, 100.0], data=[1500.0, 1495.0, 1490.0],
+            formula='delgrosso')
+
+    @pytest.mark.parametrize('slicer', [
+        lambda p: p.at(depth=10.0),
+        lambda p: p.eval(depth=10.0),
+        lambda p: p.isel(depth=1),
+        lambda p: p.at(range=0.0),
+        lambda p: p.extend_to(200.0),
+    ], ids=['at-depth', 'eval-depth', 'isel-depth', 'at-range', 'extend_to'])
+    def test_a_one_dimensional_copy_carries_the_formula(self, slicer):
+        assert slicer(self._profile(False)).formula == 'delgrosso'
+
+    @pytest.mark.parametrize('slicer', [
+        lambda p: p.at(range=0.0),
+        lambda p: p.eval(range=500.0),
+        lambda p: p.isel(range=1),
+        lambda p: p.at(depth=10.0, range=0.0),
+        lambda p: p.eval(depth=10.0, range=500.0),
+        lambda p: p.isel(depth=1, range=0),
+        lambda p: p.collapse(),
+        lambda p: p.extend_to(200.0),
+    ], ids=['at-range', 'eval-range', 'isel-range', 'at-both', 'eval-both',
+            'isel-both', 'collapse', 'extend_to'])
+    def test_a_two_dimensional_copy_carries_the_formula(self, slicer):
+        assert slicer(self._profile(True)).formula == 'delgrosso'
+
+    def test_a_literal_profile_stays_literal(self):
+        ssp = SoundSpeedProfile(depths=[0.0, 100.0], data=[1500.0, 1490.0])
+        assert ssp.at(depth=10.0).formula is None
+
+
 class TestFieldSlicing:
     """:meth:`Field.at` / :meth:`Field.isel` drop the named axis from
     ``coords`` and record the selected sample in :attr:`pinned`.
@@ -2670,6 +2716,31 @@ class TestZeroDimensionalArraysCoerceLikeTheirScalars:
         with pytest.raises(ConfigurationError, match='is a bool'):
             Environment(bathymetry=100.0, ssp=1500.0,
                         bottom=np.array(True))
+
+
+class TestBathymetryCoerceRefusesNonNumericScalars:
+    """A numeric string is not a depth. ``_scalar_or_none`` returns for
+    every numeric scalar, so a 0-d value reaching the fallback (``'100'``,
+    ``b'100'``, a 0-d string array, ``None``) must be refused with a message
+    that names it, the way ``SoundSpeedProfile.coerce`` refuses a string."""
+
+    @pytest.mark.parametrize('spelling', ['100', b'100', np.array('100')],
+                             ids=['str', 'bytes', '0-d str array'])
+    def test_a_numeric_string_is_refused_and_named(self, spelling):
+        with pytest.raises(ConfigurationError, match='non-numeric') as info:
+            Bathymetry.coerce(spelling)
+        assert repr(spelling) in str(info.value)
+
+    def test_none_keeps_its_non_numeric_message(self):
+        with pytest.raises(ConfigurationError, match='non-numeric None'):
+            Bathymetry.coerce(None)
+
+    def test_the_environment_refuses_a_string_bathymetry(self):
+        with pytest.raises(ConfigurationError, match='non-numeric'):
+            Environment(bathymetry='100', ssp=1500.0)
+
+    def test_a_numeric_scalar_coerces_to_a_flat_seafloor(self):
+        assert Bathymetry.coerce(np.float32(100.0)).depth == 100.0
 
 
 class TestFieldEvalSamplingGuard:
@@ -3949,6 +4020,14 @@ class TestResultStackAndTraceLabelsMustBeFinite:
         stack = self._stack()
         assert stack.at(source_depth=40.0) is stack.slabs[1]
 
+    @pytest.mark.parametrize('label', [1e300, -1e300])
+    def test_stack_at_a_label_that_absorbs_the_axis_is_refused(self, label):
+        """The rule ``Field.at`` applies: every ``|c - 1e300|`` rounds to
+        1e300, argmin ties on index 0, and the first slab would be handed
+        back as if it were the nearest."""
+        with pytest.raises(ConfigurationError, match='same distance'):
+            self._stack().at(source_depth=label)
+
     def _broadband(self):
         n_freq = 64
         data = np.zeros((3, 2, n_freq), dtype=complex)
@@ -4169,6 +4248,35 @@ class TestFieldAtRejectsALabelItCannotRank:
                           'range': np.array([100.0, 200.0, 300.0])},
                   model='Test')
         assert f.at(depth=1e300).pinned['depth'] == pytest.approx(7.0)
+
+
+class TestSlicingAnEmptyAxisIsRefused:
+    """The constructor admits an axis of size 0 (an axis sliced to nothing
+    is a supported state of ``coords``), but no sample on it can be picked:
+    ``at``, ``isel`` and ``eval`` refuse it with one typed error naming the
+    axis, in place of numpy's bare ``ValueError`` / ``IndexError``."""
+
+    @staticmethod
+    def _empty_depth():
+        return Field(data=np.zeros((0, 3)),
+                     coords={'depth': np.array([]),
+                             'range': np.array([100.0, 200.0, 300.0])},
+                     model='Test')
+
+    @pytest.mark.parametrize('slicer', [
+        lambda f: f.at(depth=0.0),
+        lambda f: f.isel(depth=0),
+        lambda f: f.eval(depth=0.0),
+    ], ids=['at', 'isel', 'eval'])
+    def test_an_empty_axis_raises_a_typed_error_naming_it(self, slicer):
+        with pytest.raises(ConfigurationError, match="'depth' has no samples"):
+            slicer(self._empty_depth())
+
+    def test_a_populated_axis_beside_an_empty_one_slices(self):
+        """The guard is per named axis: the populated one stays usable."""
+        out = self._empty_depth().at(range=200.0)
+        assert out.pinned['range'] == 200.0
+        assert out.coords['depth'].size == 0
 
 
 class TestToDbRewritesTheUnitTag:

@@ -28,6 +28,7 @@ import numpy as np
 from uacpy.core.constants import DEFAULT_SOUND_SPEED
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core._warn_frames import USER_FRAME_SKIP
+from uacpy.acoustic_signal._signal_validate import require_positive_finite_scalar
 
 
 def _check_ranges(caller: str, ranges_m) -> np.ndarray:
@@ -58,29 +59,6 @@ def _check_ranges(caller: str, ranges_m) -> np.ndarray:
             remediation="Pass slant ranges as positive distances in metres.",
         )
     return r
-
-
-def _check_sound_speed(caller: str, sound_speed) -> float:
-    """Sound speed as a positive finite float.
-
-    The only cell term that carried no check at all, and it fails three
-    different ways in silence: the range extent is ``c*tau/2``, so ``c == 0``
-    collapses the cell to zero area and returns -inf, a negative ``c`` takes
-    ``log10`` of a negative cell and returns NaN, and ``c = inf`` returns +inf.
-
-    ``target_strength`` already refuses all three at its own door, through
-    ``_require_positive``. One sound speed reaching two doors that disagree on
-    what they accept is the shape the package's cross-layer guard-agreement
-    test exists to catch, so this door now answers as that one does.
-    """
-    c = float(sound_speed)
-    if not np.isfinite(c) or not (c > 0.0):
-        raise ConfigurationError(
-            f"{caller}: sound_speed must be > 0 m/s and finite; "
-            f"got {sound_speed!r}",
-            remediation="Pass the cell's sound speed in m/s, e.g. 1500.0.",
-        )
-    return c
 
 
 def _warn_if_cell_is_not_short(caller: str, r: np.ndarray,
@@ -135,6 +113,41 @@ def _resolve_tl(ranges_m: np.ndarray, tl_db) -> np.ndarray:
     return tl
 
 
+def _reverberation(caller, beam_name, beam_value, cell_of_range, ranges_m,
+                   source_level, scattering_strength_db, pulse_length_s,
+                   sound_speed, tl_db):
+    """``SL - 2*TL + S + 10*log10(cell_of_range(r) * c*tau/2)``; the guards
+    run pulse/beam, sound speed, ranges, short-cell warning, TL, so several
+    bad arguments report the first (``beam_name`` names the caller's)."""
+    # Negated admissible condition so NaN is refused: a NaN pulse length or
+    # beamwidth otherwise returned an all-NaN reverberation level silently.
+    # ``isfinite`` is the other half of the message's "and finite": the sign
+    # test admits ``+inf``, and an infinite pulse length or beamwidth made the
+    # cell infinite and returned an infinite level just as silently.
+    if (not np.isfinite(pulse_length_s) or not (pulse_length_s > 0.0)
+            or not np.isfinite(beam_value) or not (beam_value > 0.0)):
+        raise ConfigurationError(
+            f"{caller}: pulse_length_s and {beam_name}"
+            f" must be > 0 and finite; got pulse_length_s={pulse_length_s!r}, "
+            f"{beam_name}={beam_value!r}"
+        )
+    # The range extent is c*tau/2, so c == 0 collapses the cell to zero area
+    # (-inf level), c < 0 takes log10 of a negative cell (NaN) and c = inf
+    # returns +inf; the shared positive-scalar guard refuses all three, as
+    # ``target_strength`` does for the same argument.
+    sound_speed = require_positive_finite_scalar(sound_speed, caller,
+                                                 "sound_speed", " m/s")
+    r = _check_ranges(caller, ranges_m)
+    _warn_if_cell_is_not_short(caller, r, sound_speed, pulse_length_s)
+    tl = _resolve_tl(r, tl_db)
+    s = np.asarray(scattering_strength_db, dtype=float)
+    cell = cell_of_range(r) * (sound_speed * pulse_length_s / 2.0)
+    zero_range = r == 0.0
+    with np.errstate(divide="ignore", invalid="ignore"):
+        out = source_level - 2.0 * tl + s + 10.0 * np.log10(cell)
+    return np.where(zero_range, np.nan, out)
+
+
 def boundary_reverberation(
     ranges_m,
     source_level: float,
@@ -170,30 +183,10 @@ def boundary_reverberation(
     ndarray
         Reverberation level (dB) at each range.
     """
-    # Negated admissible condition so NaN is refused: a NaN pulse length or
-    # beamwidth otherwise returned an all-NaN reverberation level silently.
-    # ``isfinite`` is the other half of the message's "and finite": the sign
-    # test admits ``+inf``, and an infinite pulse length or beamwidth made the
-    # cell infinite and returned an infinite level just as silently.
-    if (not np.isfinite(pulse_length_s) or not (pulse_length_s > 0.0)
-            or not np.isfinite(horizontal_beamwidth_rad)
-            or not (horizontal_beamwidth_rad > 0.0)):
-        raise ConfigurationError(
-            f"boundary_reverberation: pulse_length_s and horizontal_beamwidth_rad"
-            f" must be > 0 and finite; got pulse_length_s={pulse_length_s!r}, "
-            f"horizontal_beamwidth_rad={horizontal_beamwidth_rad!r}"
-        )
-    sound_speed = _check_sound_speed('boundary_reverberation', sound_speed)
-    r = _check_ranges('boundary_reverberation', ranges_m)
-    _warn_if_cell_is_not_short('boundary_reverberation', r, sound_speed,
-                               pulse_length_s)
-    tl = _resolve_tl(r, tl_db)
-    s = np.asarray(scattering_strength_db, dtype=float)
-    cell = horizontal_beamwidth_rad * r * (sound_speed * pulse_length_s / 2.0)
-    zero_range = r == 0.0
-    with np.errstate(divide="ignore", invalid="ignore"):
-        out = source_level - 2.0 * tl + s + 10.0 * np.log10(cell)
-    return np.where(zero_range, np.nan, out)
+    return _reverberation(
+        "boundary_reverberation", "horizontal_beamwidth_rad", horizontal_beamwidth_rad,
+        lambda r: horizontal_beamwidth_rad * r, ranges_m, source_level,
+        scattering_strength_db, pulse_length_s, sound_speed, tl_db)
 
 
 def volume_reverberation(
@@ -213,30 +206,10 @@ def volume_reverberation(
     (dB re 1/m) and ``solid_angle_beamwidth_sr`` is the equivalent two-way
     solid-angle beamwidth ``Psi`` (sr). The cell volume grows as ``r^2``.
     """
-    # Negated admissible condition so NaN is refused: a NaN pulse length or
-    # beamwidth otherwise returned an all-NaN reverberation level silently.
-    # ``isfinite`` is the other half of the message's "and finite": the sign
-    # test admits ``+inf``, and an infinite pulse length or beamwidth made the
-    # cell infinite and returned an infinite level just as silently.
-    if (not np.isfinite(pulse_length_s) or not (pulse_length_s > 0.0)
-            or not np.isfinite(solid_angle_beamwidth_sr)
-            or not (solid_angle_beamwidth_sr > 0.0)):
-        raise ConfigurationError(
-            f"volume_reverberation: pulse_length_s and solid_angle_beamwidth_sr"
-            f" must be > 0 and finite; got pulse_length_s={pulse_length_s!r}, "
-            f"solid_angle_beamwidth_sr={solid_angle_beamwidth_sr!r}"
-        )
-    sound_speed = _check_sound_speed('volume_reverberation', sound_speed)
-    r = _check_ranges('volume_reverberation', ranges_m)
-    _warn_if_cell_is_not_short('volume_reverberation', r, sound_speed,
-                               pulse_length_s)
-    tl = _resolve_tl(r, tl_db)
-    s = np.asarray(scattering_strength_db, dtype=float)
-    cell = solid_angle_beamwidth_sr * r ** 2 * (sound_speed * pulse_length_s / 2.0)
-    zero_range = r == 0.0
-    with np.errstate(divide="ignore", invalid="ignore"):
-        out = source_level - 2.0 * tl + s + 10.0 * np.log10(cell)
-    return np.where(zero_range, np.nan, out)
+    return _reverberation(
+        "volume_reverberation", "solid_angle_beamwidth_sr", solid_angle_beamwidth_sr,
+        lambda r: solid_angle_beamwidth_sr * r ** 2, ranges_m, source_level,
+        scattering_strength_db, pulse_length_s, sound_speed, tl_db)
 
 
 def total_reverberation(*levels_db):

@@ -115,6 +115,16 @@ def plot_subcarriers(channel, n_subcarriers, ax=None, *, title=None,
     return fig, ax
 
 
+def _iq_axes(ax) -> None:
+    """Furnish an I/Q plane: zero lines, equal aspect, grid, axis names."""
+    ax.axhline(0, color="k", lw=0.5)
+    ax.axvline(0, color="k", lw=0.5)
+    ax.set_aspect("equal")
+    ax.grid(alpha=0.3)
+    ax.set_xlabel("In-phase")
+    ax.set_ylabel("Quadrature")
+
+
 @typed_plot_error
 def plot_scatter(symbols, ax=None, *, ideal=None, title=None, figsize=(5, 5),
                  **mpl_kw):
@@ -130,12 +140,7 @@ def plot_scatter(symbols, ax=None, *, ideal=None, title=None, figsize=(5, 5),
         ax.scatter(ideal.real, ideal.imag, marker="x", s=80, color="k",
                    zorder=5, label="ideal")
         ax.legend()
-    ax.axhline(0, color="k", lw=0.5)
-    ax.axvline(0, color="k", lw=0.5)
-    ax.set_aspect("equal")
-    ax.grid(alpha=0.3)
-    ax.set_xlabel("In-phase")
-    ax.set_ylabel("Quadrature")
+    _iq_axes(ax)
     ax.set_title(title or "Constellation", loc="left")
     return fig, ax
 
@@ -146,6 +151,7 @@ def plot_constellation(constellation, ax=None, *, scheme="", annotate=True,
     """Plot an ideal Gray-labeled constellation."""
     _require_nonempty('plot_constellation', constellation=constellation)
     c = np.asarray(constellation, dtype=complex)
+    own_fig = ax is None
     fig, ax = fig_ax(ax, figsize)
     ax.scatter(c.real, c.imag, marker="o", s=60, **mpl_kw)
     if annotate and len(c) >= 2:
@@ -153,13 +159,12 @@ def plot_constellation(constellation, ax=None, *, scheme="", annotate=True,
         for label, pt in enumerate(c):
             ax.annotate(format(label, f"0{bps}b"), (pt.real, pt.imag),
                         textcoords="offset points", xytext=(6, 4), fontsize=8)
-    ax.axhline(0, color="k", lw=0.5)
-    ax.axvline(0, color="k", lw=0.5)
-    ax.set_aspect("equal")
-    ax.grid(alpha=0.3)
-    ax.set_xlabel("In-phase")
-    ax.set_ylabel("Quadrature")
+    _iq_axes(ax)
     ax.set_title(title or f"{scheme} constellation".strip(), loc="left")
+    if own_fig:
+        # Lay the plotter's own figure out around its labels: four-digit tick
+        # labels need more left margin than the square panel's default.
+        fig.tight_layout()
     return fig, ax
 
 

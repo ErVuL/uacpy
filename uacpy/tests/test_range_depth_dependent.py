@@ -256,7 +256,7 @@ class TestModelWithRangeDependence:
         The unpinned-dz path is the only one that inspects the bottom speed to
         size the grid, so it is the only one that can meet the array where the
         other tests hand it a scalar. Every other range-dependent test here
-        pins ``dz=2.0`` and never reaches ``_compute_dz``.
+        pins ``dz=2.0`` and never reaches the optimizer.
         """
         bottom_rd = Bottom.from_halfspaces(np.array([0.0, 2500.0, 5000.0]),
             sound_speed=np.array([1600.0, 1700.0, 1800.0]),
@@ -272,7 +272,7 @@ class TestModelWithRangeDependence:
             depths=np.array([50.0, 100.0]),
             ranges=np.array([1000.0, 3000.0]),
         )
-        ram = RAM(verbose=False)   # dz unpinned → _compute_dz path
+        ram = RAM(verbose=False)   # dz unpinned → Lytaev optimizer path
         # The auto-dz on this env hits the depth-grid and λ_p/16 floors,
         # which warn by design.
         with pytest.warns(UserWarning, match="raised dz"):

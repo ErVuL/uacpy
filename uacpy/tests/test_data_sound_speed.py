@@ -11,7 +11,18 @@ import pytest
 import uacpy
 from uacpy.core.environment import Bathymetry, SoundSpeedProfile
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
+from uacpy.data import _cache
 from uacpy.data import sound_speed as ss
+
+
+@pytest.fixture(autouse=True)
+def _fresh_column_memo():
+    """Each test stubs its own ``http_get``; the network-column memo is keyed
+    on the request alone, so it must not answer one test from another's
+    stub."""
+    _cache.invalidate_grids()
+    yield
+    _cache.invalidate_grids()
 
 FILL = '9.96921E36'
 SEP = '-' * 45

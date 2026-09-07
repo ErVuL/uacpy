@@ -25,8 +25,9 @@ two pedagogically interesting time-domain paths are spelled out below.
   window has a soft periodicity but the source-pulse envelope keeps
   late-time content small.
 
-**Scooter** (spectral FFP) and **Kraken** (coupled normal modes) are
-shown too — additional full-wave references built through the same
+**Scooter** (spectral FFP) and **Kraken** (normal modes; the guide is
+range-independent, so no mode coupling is involved) are shown too —
+additional full-wave references built through the same
 broadband H(f) → IFFT path as RAM.
 
 Bellhop is included for contrast: its TIME_SERIES output is a
@@ -62,6 +63,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 
 import uacpy  # noqa: E402
 from uacpy.core.environment import BoundaryProperties  # noqa: E402
+from uacpy.acoustic_signal.waveforms import gaussian_pulse  # noqa: E402
 from uacpy.models import (  # noqa: E402
     RAM, SPARC, Scooter, Kraken, Bellhop, RunMode,
 )
@@ -125,7 +127,8 @@ def _gaussian_pulse(f_center: float, sigma_t: float, fs: float,
     t = np.arange(0, duration, 1.0 / fs)
     peak_time = duration / 2.0
     t_centered = t - peak_time
-    envelope = np.exp(-0.5 * (t_centered / sigma_t) ** 2)
+    # exp(-0.5 (t / sigma_t)^2): gaussian_pulse's width is sigma_t*sqrt(2)
+    envelope = gaussian_pulse(t, peak_time, sigma_t * np.sqrt(2))
     return envelope * np.cos(2 * np.pi * f_center * t_centered), peak_time
 
 

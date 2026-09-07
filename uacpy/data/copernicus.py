@@ -40,11 +40,11 @@ from uacpy.core.environment import SoundSpeedProfile
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.data._geo import (
     Coordinate, as_coordinate, normalize_lon, depth_to_pressure_dbar,
-    insitu_from_potential, checked_n_points,
+    insitu_from_potential, checked_n_points, geodesic_waypoints,
 )
 from uacpy.data._time import parse_date
 from uacpy.data.sound_speed import (
-    _FORMULAS, assemble_range_dependent,
+    _FORMULAS, assemble_range_dependent, extend_column_to_seafloor,
 )
 from uacpy.data.sources import SOURCES, DataProvenance
 from uacpy._log import log_message
@@ -180,8 +180,6 @@ def fetch_ssp_transect_operational(
     :class:`~uacpy.core.environment.SoundSpeedProfile`. See
     :func:`fetch_ssp_operational` for parameters/exceptions.
     """
-    from uacpy.data._geo import geodesic_waypoints
-
     if formula not in _FORMULAS:
         raise ConfigurationError(
             f"fetch_ssp_transect_operational: unknown formula={formula!r}.",
@@ -223,7 +221,6 @@ def fetch_ssp_transect_operational(
         f"over {ranges_m[-1] / 1000:.1f} km", verbose=verbose,
     )
     if seafloor is not None:
-        from uacpy.data.sound_speed import extend_column_to_seafloor
         # Same per-column extension as fetch_ssp_transect: never flat-hold a
         # shallower column inside its used water column.
         columns = [
@@ -280,30 +277,13 @@ def _ts_column(point, *, date, max_days, dataset_id, verbose):
     return depths, temp, sal, actual
 
 
-#: Per-fetcher wording for :func:`_snapped_date`'s out-of-coverage error:
-#: ``(message(actual, gap, when, max_days), remediation)``. The three fetchers
-#: word the same failure differently and point at different alternatives, so
-#: the wording is data rather than three copies of the guard.
-_DATE_GAP_MESSAGES = {
-    'ssp': (
-        lambda actual, gap, when, max_days:
-            f"Copernicus: nearest available time is {actual} "
-            f"({gap:.0f} days from requested {when}, > max_days={max_days}) "
-            "— the date is outside the dataset's range.",
-        "Pass a date within range, a forecast dataset_id, "
-        "raise max_days, or use ssp_sources='woa23'."),
-    'waves': (
-        lambda actual, gap, when, max_days:
-            f"Copernicus waves: nearest time is {actual} ({gap:.0f} days "
-            f"from {when}, > max_days={max_days}).",
-        "Pass a date within range, raise max_days, or use "
-        "the WaveWatch III source."),
-    'ph': (
-        lambda actual, gap, when, max_days:
-            f"Copernicus pH: nearest time is {actual} ({gap:.0f} days from "
-            f"{when}, > max_days={max_days}) — outside the dataset's range.",
-        "Pass a date within range, raise max_days, or rely "
-        "on the GLODAP climatology / model default."),
+#: Per fetcher ``kind``, the label its out-of-coverage message carries and the
+#: alternative its remediation points at (:func:`_snapped_date`): the three
+#: fetchers fall back to different sources.
+_DATE_GAP_FALLBACKS = {
+    'ssp': ('', "pass a forecast dataset_id, or use ssp_sources='woa23'"),
+    'waves': (' waves', "use the WaveWatch III source"),
+    'ph': (' pH', "rely on the GLODAP climatology / model default"),
 }
 
 
@@ -315,18 +295,21 @@ def _snapped_date(da, when: Optional[str], max_days: int,
     date; raise rather than substitute an edge value so the tolerance is
     honoured the same way the other dated sources honour it.
 
-    ``kind`` selects the wording in :data:`_DATE_GAP_MESSAGES` — the waves and
-    pH fetchers ran their own copies of this guard, differing only in the
-    message and the alternative source it recommends.
+    ``kind`` (``'ssp'``, ``'waves'``, ``'ph'``) selects the label the message
+    carries and the alternative source the remediation recommends
+    (:data:`_DATE_GAP_FALLBACKS`).
     """
     if when is None or 'time' not in getattr(da, 'coords', {}):
         return None
     actual = np.datetime64(np.asarray(da['time'].values).reshape(-1)[0], 'D')
     gap = abs((actual - np.datetime64(when, 'D')) / np.timedelta64(1, 'D'))
     if gap > max_days:
-        message, remediation = _DATE_GAP_MESSAGES[kind]
-        raise DataFetchError(message(actual, gap, when, max_days),
-                             remediation=remediation)
+        label, fallback = _DATE_GAP_FALLBACKS[kind]
+        raise DataFetchError(
+            f"Copernicus{label}: nearest available time is {actual} "
+            f"({gap:.0f} days from requested {when}, > max_days={max_days}) "
+            "— the date is outside the dataset's range.",
+            remediation=f"Pass a date within range, raise max_days, or {fallback}.")
     return str(actual)
 
 
@@ -486,8 +469,11 @@ def fetch_ph_operational(
 
     The operational counterpart of the cached GLODAP climatology
     (:func:`uacpy.data.fetch_ph`): returns the pH at ``reference_depth`` (m,
-    nearest level), or the shallowest finite level when ``None`` — matching the
-    nominal-row convention of :func:`uacpy.data.build_francois_garrison`.
+    nearest finite level), or at the **mid-depth** of the finite levels when
+    ``None`` — the row :func:`uacpy.data.build_francois_garrison` takes by
+    default, so the two defaults pair a pH with the temperature of the same
+    depth. Pass ``reference_depth`` to pin the row to a T/S column of a
+    different extent (``fetch_environment`` does).
 
     Raises ``DataFetchError`` when ``copernicusmarine`` is unavailable, the
     service fails, the location has no column, or the nearest time step is more
@@ -516,10 +502,9 @@ def fetch_ph_operational(
             remediation="Pick an ocean location/date within the dataset.",
         )
     depth, ph = depth[finite], ph[finite]
-    if reference_depth is None:
-        return float(ph[0])
-    i = int(np.argmin(np.abs(depth - float(reference_depth))))
-    return float(ph[i])
+    ref = (0.5 * (float(depth.min()) + float(depth.max()))
+           if reference_depth is None else float(reference_depth))
+    return float(ph[int(np.argmin(np.abs(depth - ref)))])
 
 
 _LOGIN_HINT = ("Run `copernicusmarine login` (free account) and check "

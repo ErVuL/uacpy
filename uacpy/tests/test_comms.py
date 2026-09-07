@@ -2529,3 +2529,24 @@ class TestTheDefaultReceiverRecoversPhaseGainAndTiming:
                                 preamble=64)
         assert not [w for w in rec if 'training symbols' in str(w.message)]
 
+
+def test_default_preamble_and_ofdm_pilot_come_from_their_fixed_seeds():
+    # The seeds are the contract between the two ends of a link: each end
+    # regenerates the preamble (0xC0FFEE) and the pilot (0xACE0FDA) from the
+    # seed and correlates against exactly these symbols.
+    from uacpy.comms.modulation import Modulator
+    from uacpy.comms.transceiver import (CommsReceiver, OFDMReceiver,
+                                         OFDMTransmitter, Transmitter)
+    cases = [
+        ("qpsk", 64, 0xC0FFEE, Transmitter("qpsk").preamble),
+        ("8psk", 32, 0xC0FFEE, CommsReceiver("8psk", preamble=32).preamble),
+        ("16qam", 64, 0xACE0FDA,
+         OFDMTransmitter("16qam", n_subcarriers=64, cp_len=8).pilot_freq),
+        ("qpsk", 128, 0xACE0FDA,
+         OFDMReceiver("qpsk", n_subcarriers=128, cp_len=8).pilot_freq),
+    ]
+    for scheme, n, seed, got in cases:
+        mod = Modulator(scheme)
+        rng = np.random.default_rng(seed)
+        bits = rng.integers(0, 2, n * mod.bits_per_symbol)
+        assert np.array_equal(got, mod.modulate(bits))

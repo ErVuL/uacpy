@@ -163,6 +163,25 @@ def test_short_signal_warns_and_drops_low_bins():
     assert np.isfinite(p.power[-1])      # highest bin: short window fits
 
 
+@pytest.mark.parametrize("estimator,fate,not_fate", [
+    (constant_q_transform, "zero-padded window", "dropped"),
+    (constant_q_spectrogram, "zero-padded window", "dropped"),
+    (constant_q_psd, "dropped from the average", "zero-padded"),
+    (probabilistic_constant_q, "dropped from the average", "zero-padded"),
+])
+def test_short_signal_warning_names_what_the_estimator_does_with_the_bins(
+        estimator, fate, not_fate):
+    # The transform and the spectrogram keep every frame, so a bin that never
+    # fits a full window is evaluated on a zero-padded one and reads low; the
+    # averaging estimators drop it. The warning says which.
+    short = _tone(440.0, dur=0.02)
+    with pytest.warns(UserWarning, match=fate) as rec:
+        estimator(short, FS, fmin=20, fmax=2000, bins_per_octave=12)
+    short_bin = [str(w.message) for w in rec
+                 if "lowest bin needs" in str(w.message)]
+    assert len(short_bin) == 1 and not_fate not in short_bin[0]
+
+
 # ── scaling: spectrum vs density ─────────────────────────────────────────────
 def test_density_scaling_matches_welch_white_noise():
     from scipy.signal import welch

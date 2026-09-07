@@ -25,6 +25,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 import uacpy  # noqa: E402
 from uacpy.core.environment import BoundaryProperties  # noqa: E402
 from uacpy.models import Bellhop, RunMode  # noqa: E402
+from uacpy.acoustic_signal.waveforms import gaussian_pulse  # noqa: E402
 
 OUTPUT_DIR = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
                   or Path(__file__).parent / 'output')
@@ -69,7 +70,8 @@ def main():
     duration = n_cycles / f_center
     t_src = np.arange(0, duration, 1.0 / fs)
     sigma = duration / 6
-    envelope = np.exp(-((t_src - duration / 2) ** 2) / (2 * sigma ** 2))
+    # exp(-(t - T/2)^2 / (2 sigma^2)): gaussian_pulse's width is sigma*sqrt(2)
+    envelope = gaussian_pulse(t_src, duration / 2, sigma * np.sqrt(2))
     p_src = envelope * np.sin(2 * np.pi * f_center * t_src)
 
     # 3. Synthesize p(t) = IFFT(H · S)
@@ -80,23 +82,13 @@ def main():
     # 4. Plot
     fig, axes = plt.subplots(2, 1, figsize=(10, 7))
 
-    tl_at_pt = H.at(depth=target_depth_m, range=target_range_m).to_db()
-    axes[0].plot(tl_at_pt.frequencies, tl_at_pt.db, 'C0-', lw=1.2)
-    axes[0].invert_yaxis()
-    axes[0].set_xlabel('Frequency (Hz)')
-    axes[0].set_ylabel('TL(f)  (dB)')
-    axes[0].set_title(
-        f'Transmission loss at r={target_range_m/1000:.1f} km, '
-        f'z={target_depth_m:.0f} m'
-    )
-    axes[0].grid(True, alpha=0.3)
-
-    p_trace = ts.at(depth=target_depth_m, range=target_range_m).data
-    axes[1].plot(ts.times * 1e3, p_trace, 'C1-', lw=1.0)
-    axes[1].set_xlabel('Time (ms)')
-    axes[1].set_ylabel('p(t)')
-    axes[1].set_title('Synthesized time series')
-    axes[1].grid(True, alpha=0.3)
+    # Each cut plots itself: TL(f) with the loss axis downward, p(t) linear.
+    H.at(depth=target_depth_m, range=target_range_m).plot(
+        ax=axes[0], color='C0', lw=1.2,
+        title=(f'Transmission loss at r={target_range_m/1000:.1f} km, '
+               f'z={target_depth_m:.0f} m'))
+    ts.at(depth=target_depth_m, range=target_range_m).plot(
+        ax=axes[1], color='C1', lw=1.0, title='Synthesized time series')
 
     fig.tight_layout()
     out = OUTPUT_DIR / 'example_24_synthesize_time_series.png'

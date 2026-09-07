@@ -9,8 +9,8 @@ from uacpy.core.exceptions import (ConfigurationError, DataFetchError,
 from uacpy.data import argo
 
 _HEADER = ("platform_number,cycle_number,direction,time,latitude,longitude,"
-           "pres,temp,psal,temp_qc,psal_qc\n"
-           ",,,UTC,degrees_north,degrees_east,decibar,degree_Celsius,PSU,,\n")
+           "pres,temp,psal,temp_qc,psal_qc,pres_qc\n"
+           ",,,UTC,degrees_north,degrees_east,decibar,degree_Celsius,PSU,,,\n")
 
 
 def _csv(rows):
@@ -19,11 +19,11 @@ def _csv(rows):
 
 # Float A is ~15 km from (30,-40); float B is far. A has one bad-QC level.
 _ROWS = [
-    "4900001,1,A,2024-06-04T00:00:00Z,30.1,-40.1,5,20,36,1,1\n",
-    "4900001,1,A,2024-06-04T00:00:00Z,30.1,-40.1,100,15,36.2,1,1\n",
-    "4900001,1,A,2024-06-04T00:00:00Z,30.1,-40.1,1000,5,35,1,1\n",
-    "4900001,1,A,2024-06-04T00:00:00Z,30.1,-40.1,1500,4,35,4,1\n",  # bad temp_qc
-    "4900002,5,A,2024-06-04T00:00:00Z,33.0,-43.0,5,19,36,1,1\n",    # far float
+    "4900001,1,A,2024-06-04T00:00:00Z,30.1,-40.1,5,20,36,1,1,1\n",
+    "4900001,1,A,2024-06-04T00:00:00Z,30.1,-40.1,100,15,36.2,1,1,1\n",
+    "4900001,1,A,2024-06-04T00:00:00Z,30.1,-40.1,1000,5,35,1,1,1\n",
+    "4900001,1,A,2024-06-04T00:00:00Z,30.1,-40.1,1500,4,35,4,1,1\n",  # bad temp_qc
+    "4900002,5,A,2024-06-04T00:00:00Z,33.0,-43.0,5,19,36,1,1,1\n",    # far float
 ]
 
 
@@ -34,6 +34,15 @@ def test_fetch_profile_picks_nearest_and_filters_qc(monkeypatch):
     assert prof['distance_km'] < 20
     assert prof['pres'].tolist() == [5.0, 100.0, 1000.0]   # bad-QC level dropped
     assert np.all(np.diff(prof['pres']) > 0)       # sorted by pressure
+
+
+def test_a_level_with_a_bad_pressure_flag_is_dropped(monkeypatch):
+    rows = _ROWS[:3] + [
+        "4900001,1,A,2024-06-04T00:00:00Z,30.1,-40.1,700,8,35.2,1,1,4\n",
+    ]
+    monkeypatch.setattr(argo, 'http_get', lambda url, **kw: _csv(rows))
+    prof = argo.fetch_argo_profile((30.0, -40.0), date='2024-06-04')
+    assert prof['pres'].tolist() == [5.0, 100.0, 1000.0]
 
 
 def test_fetch_ssp_argo_builds_profile(monkeypatch):
@@ -69,12 +78,12 @@ def test_bad_formula_raises(monkeypatch):
 # (platform, cycle, direction). Modelled on the measured case: float 3902110
 # cycle 463 in the Baltic, whose D and A casts are 4 days and 22 km apart.
 _TWO_CAST_ROWS = [
-    "3902110,463,D,2023-03-08T09:34:00Z,58.9670,20.1725,10,2.66,7.04,1,1\n",
-    "3902110,463,D,2023-03-08T09:34:00Z,58.9670,20.1725,20,2.66,7.04,1,1\n",
-    "3902110,463,D,2023-03-08T09:34:00Z,58.9670,20.1725,30,2.70,7.10,1,1\n",
-    "3902110,463,A,2023-03-12T09:08:30Z,58.7737,19.9920,10,2.49,7.08,1,1\n",
-    "3902110,463,A,2023-03-12T09:08:30Z,58.7737,19.9920,20,2.50,7.08,1,1\n",
-    "3902110,463,A,2023-03-12T09:08:30Z,58.7737,19.9920,30,2.52,7.12,1,1\n",
+    "3902110,463,D,2023-03-08T09:34:00Z,58.9670,20.1725,10,2.66,7.04,1,1,1\n",
+    "3902110,463,D,2023-03-08T09:34:00Z,58.9670,20.1725,20,2.66,7.04,1,1,1\n",
+    "3902110,463,D,2023-03-08T09:34:00Z,58.9670,20.1725,30,2.70,7.10,1,1,1\n",
+    "3902110,463,A,2023-03-12T09:08:30Z,58.7737,19.9920,10,2.49,7.08,1,1,1\n",
+    "3902110,463,A,2023-03-12T09:08:30Z,58.7737,19.9920,20,2.50,7.08,1,1,1\n",
+    "3902110,463,A,2023-03-12T09:08:30Z,58.7737,19.9920,30,2.52,7.12,1,1,1\n",
 ]
 
 
@@ -148,7 +157,7 @@ def test_a_dated_argo_profile_beats_an_undated_one_at_equal_distance(
     from uacpy.data import argo
 
     def _row(platform, time_str, pres):
-        return f"{platform},1,A,{time_str},45.0,-30.0,{pres},10.0,35.0,1,1"
+        return f"{platform},1,A,{time_str},45.0,-30.0,{pres},10.0,35.0,1,1,1"
 
     body = _argo_csv([_row('1', '', 10.0), _row('1', '', 20.0),
                       _row('2', '2026-08-14T00:00:00Z', 10.0),

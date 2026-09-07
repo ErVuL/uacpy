@@ -1135,6 +1135,19 @@ class TestBottomDelegatedWritesReachTheHalfspaces:
         assert b.halfspace_at(
             range=5000.0).sound_speed == pytest.approx(1650.0)
 
+    def test_the_multi_column_warning_names_the_callers_file(self):
+        """The write is delegated through a shared helper, so the warning
+        walks out of the package to the assigning line rather than counting
+        frames to it."""
+        b = Bottom.from_halfspaces([0.0, 5000.0],
+                                   sound_speed=[1600.0, 1700.0],
+                                   density=1.8, attenuation=0.4)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            b.sound_speed = 1650.0
+        (w,) = [w for w in caught if 'sets all 2 range' in str(w.message)]
+        assert w.filename == __file__
+
     def test_the_multi_column_warning_points_at_columns(self):
         b = Bottom.from_halfspaces([0.0, 5000.0],
                                    sound_speed=[1600.0, 1700.0],
@@ -1345,3 +1358,16 @@ class TestTheAcousticTypeGuardCatchesOnlyWhatFromStringRaises:
         from uacpy.core._carrier_validate import _validate_acoustic_type
         for value in ('half-space', 'halfspace', 'vacuum', 'V', 'file'):
             assert _validate_acoustic_type(value, 'BoundaryProperties') is None
+
+
+def test_seabed_column_from_halfspace_takes_only_the_halfspace():
+    """``from_halfspace`` builds a pure half-space column over a copy: it
+    takes no layer-synthesis keywords (a layer above the half-space is built
+    explicitly with ``SeabedColumn(layers=[...], halfspace=...)``)."""
+    import inspect
+    assert list(inspect.signature(
+        SeabedColumn.from_halfspace).parameters) == ['halfspace']
+    hs = BoundaryProperties(sound_speed=1650.0, density=1.7, attenuation=0.3)
+    col = SeabedColumn.from_halfspace(hs)
+    assert col.layers == [] and col.halfspace is not hs
+    assert col.halfspace == hs

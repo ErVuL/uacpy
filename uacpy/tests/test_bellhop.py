@@ -9,6 +9,7 @@ resolves its executable, so even the tests that never launch a run need the
 install to be present.
 """
 
+import os
 import warnings
 
 import pytest
@@ -2618,37 +2619,47 @@ class TestBellhopComponentIsRayCentredOnly:
 
 class TestBellhopMinimumBeamFan:
     """``bellhop.f90:176-178`` zeroes ``Dalpha`` for a single beam, so every
-    beam has zero width and the field is all-NaN. Two beams have a finite
-    ``Dalpha`` and do produce a field — 69.1 dB on a deep-water direct path
-    against a converged 66.1 dB, under-resolved but not degenerate, and no
-    more so than the five-beam fan that reads 100.1 dB on the same
-    geometry."""
+    beam has zero width and the field is all-NaN. The deck writer
+    (``bellhop_writer.py``) refuses ``n_beams=1`` for every influence run
+    type before the binary is launched. Two beams have a finite ``Dalpha``
+    and do produce a field — 69.1 dB on a deep-water direct path against a
+    converged 66.1 dB, under-resolved but not degenerate, and no more so
+    than the five-beam fan that reads 100.1 dB on the same geometry."""
 
-    def test_one_beam_is_refused(self):
+    @staticmethod
+    def _run(n_beams, run_mode, tmp_path):
+        env = Environment(bathymetry=100.0, ssp=1500.0,
+                          bottom=BoundaryProperties(
+                              acoustic_type='half-space', sound_speed=1600.0,
+                              density=1.5, attenuation=0.5))
+        return Bellhop(n_beams=n_beams, verbose=False, work_dir=tmp_path).run(
+            env, Source(depths=25.0, frequencies=200.0),
+            Receiver(depths=[50.0], ranges=[1000.0]), run_mode=run_mode)
+
+    def test_one_beam_is_refused(self, tmp_path):
         with pytest.raises(ConfigurationError, match='n_beams=1'):
-            Bellhop(n_beams=1, verbose=False)._check_beam_count_supports_run_mode(
-                RunMode.COHERENT_TL)
+            self._run(1, RunMode.COHERENT_TL, tmp_path)
+        assert not (tmp_path / 'bellhop.shd').exists()
 
-    def test_two_beams_are_allowed(self):
-        Bellhop(n_beams=2, verbose=False)._check_beam_count_supports_run_mode(
-            RunMode.COHERENT_TL)
+    def test_two_beams_are_allowed(self, tmp_path):
+        self._run(2, RunMode.COHERENT_TL, tmp_path)
 
-    def test_a_single_ray_trace_is_allowed_but_not_a_single_beam_eigenray_search(self):
+    def test_a_single_ray_trace_is_allowed_but_not_a_single_beam_eigenray_search(
+            self, tmp_path):
         # bellhop.f90:288 skips influence for RAYS only; EIGENRAYS detect
         # receiver hits inside the influence step, where one beam has no width.
-        Bellhop(n_beams=1, verbose=False)._check_beam_count_supports_run_mode(RunMode.RAYS)
+        self._run(1, RunMode.RAYS, tmp_path)
         with pytest.raises(ConfigurationError, match='single beam'):
-            Bellhop(n_beams=1, verbose=False)._check_beam_count_supports_run_mode(
-                RunMode.EIGENRAYS)
+            self._run(1, RunMode.EIGENRAYS, tmp_path)
 
 
 @pytest.mark.requires_binary
 @pytest.mark.slow
 def test_bellhop_two_beam_fan_returns_a_usable_field():
-    """The measurement behind :data:`_MIN_INFLUENCE_BEAMS`: a two-beam fan on
-    a deep-water direct path returns a finite TL a few dB off a converged
-    51-beam run — not the all-NaN field the guard claimed — so refusing it
-    was refusing a working, merely under-resolved, configuration."""
+    """The measurement behind the writer's floor of two beams: a two-beam
+    fan on a deep-water direct path returns a finite TL a few dB off a
+    converged 51-beam run — not an all-NaN field — so refusing it would
+    refuse a working, merely under-resolved, configuration."""
     env = Environment(
         name='deep', bathymetry=5000.0, ssp=1500.0,
         bottom=BoundaryProperties(acoustic_type='half-space',
@@ -3221,6 +3232,10 @@ class TestArrivalsAreMergedExactlyOnce:
 
 
 class TestASingleBeamCannotCarryEigenrays:
+    """The deck writer refuses ``n_beams=1`` for an eigenray run
+    (``bellhop_writer.py``): eigenrays are detected inside the influence
+    step, where a single beam has no width."""
+
     def test_eigenrays_with_one_beam_are_refused_before_the_run(self):
         env = uacpy.Environment(name='one', bathymetry=100.0, ssp=1500.0)
         source = Source(depths=50.0, frequencies=200.0)
@@ -3228,3 +3243,228 @@ class TestASingleBeamCannotCarryEigenrays:
         with pytest.raises(ConfigurationError, match='single beam'):
             Bellhop(verbose=False, n_beams=1).run(
                 env, source, receiver, run_mode=RunMode.EIGENRAYS)
+
+
+class TestArrivalsKeepTheRequestedDepthAxis:
+    """BELLHOP clamps a receiver below the deck's bottom boundary onto it
+    (``misc/SourceReceiverPositions.f90:136-139``) and the ``.arr`` then
+    carries the clamped depth with the boundary cell's arrivals. The wrapper
+    hands the ARRIVALS result back on the depth axis that was asked for, with
+    that cell empty — the same no-data convention the TL and broadband routes
+    report as NaN — instead of relabelling the receiver and handing over
+    arrivals evaluated somewhere else."""
+
+    @staticmethod
+    def _run(depths):
+        from uacpy.tests.conftest import make_pekeris
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            return Bellhop(verbose=False, n_beams=20, beam_type='G').run(
+                make_pekeris(name='clamp', bathymetry=100.0),
+                Source(depths=50.0, frequencies=1000.0),
+                Receiver(depths=depths, ranges=[500.0]),
+                run_mode=RunMode.ARRIVALS)
+
+    def test_a_below_seafloor_receiver_comes_back_empty_under_its_own_depth(self):
+        result = self._run([50.0, 150.0])
+        np.testing.assert_array_equal(result.receiver_depths, [50.0, 150.0])
+        cells = result.by_receiver[0]
+        assert cells[0][0]['n_arrivals'] > 0
+        assert cells[1][0]['n_arrivals'] == 0
+        assert len(cells[1][0]['delays']) == 0
+        assert {a['depth_idx'] for a in result.arrivals} == {0}
+
+    def test_an_in_water_receiver_is_left_as_read(self):
+        # The discriminating counterpart: nothing is emptied when every
+        # receiver lies inside the deck, and the axis is the one asked for.
+        result = self._run([50.0, 90.0])
+        np.testing.assert_array_equal(result.receiver_depths, [50.0, 90.0])
+        assert all(c[0]['n_arrivals'] > 0 for c in result.by_receiver[0])
+
+    def test_a_padded_two_source_run_returns_a_slab_per_source_depth(self):
+        # beam_type 'g' on a rectilinear grid with >= 2 ranges takes the
+        # padded route (_pad_receiver_ranges), and two source depths make
+        # the reader hand back a ResultStack; the trim and the restore walk
+        # its slabs, each of which keeps the two requested ranges.
+        from uacpy.tests.conftest import make_pekeris
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            result = Bellhop(verbose=False, n_beams=20, beam_type='g').run(
+                make_pekeris(name='clamp-pad', bathymetry=100.0),
+                Source(depths=[30.0, 50.0], frequencies=1000.0),
+                Receiver(depths=[50.0, 150.0], ranges=[500.0, 600.0]),
+                run_mode=RunMode.ARRIVALS)
+        assert result.n_slabs == 2
+        for slab in result.slabs:
+            np.testing.assert_array_equal(slab.receiver_ranges, [500.0, 600.0])
+            np.testing.assert_array_equal(slab.receiver_depths, [50.0, 150.0])
+            assert all(c['n_arrivals'] == 0 for c in slab.by_receiver[0][1])
+            assert {a['depth_idx'] for a in slab.arrivals} == {0}
+
+    def test_a_paired_grid_empties_the_cell_of_the_clamped_pair(self):
+        from uacpy.tests.conftest import make_pekeris
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            result = Bellhop(verbose=False, n_beams=20, beam_type='G',
+                             grid_type='I').run(
+                make_pekeris(name='clamp-i', bathymetry=100.0),
+                Source(depths=50.0, frequencies=1000.0),
+                Receiver(depths=[50.0, 150.0], ranges=[400.0, 500.0]),
+                run_mode=RunMode.ARRIVALS)
+        np.testing.assert_array_equal(result.receiver_depths, [50.0, 150.0])
+        cells = result.by_receiver[0][0]
+        assert cells[0]['n_arrivals'] > 0
+        assert cells[1]['n_arrivals'] == 0
+
+
+class TestAPinnedExecutableIsReadLikeTheAutoPickedOne:
+    """``Bellhop(executable=...)`` names the binary by path; which engine it
+    is — and so whether its ``.arr`` still needs the AddArr pair-merge and
+    whether the CLI takes a ``--2D`` flag — is read off the basename with
+    the same three-way test the auto-pick uses. A basename matching none of
+    them stays ``'custom'``, and an arrivals read then says the merge state
+    is unknown."""
+
+    @staticmethod
+    def _stub(tmp_path, name):
+        stub = tmp_path / name
+        stub.write_text('')
+        stub.chmod(0o755)
+        return stub
+
+    @pytest.mark.parametrize('name,version', [
+        ('bellhopcxx', 'cxx'), ('bellhopcuda', 'cuda'), ('bellhop', 'fortran'),
+        ('BellhopCUDA.exe', 'cuda'), ('my-bellhopcxx-build', 'cxx'),
+    ])
+    def test_the_variant_is_inferred_from_the_basename(
+            self, tmp_path, name, version):
+        model = Bellhop(executable=self._stub(tmp_path, name), verbose=False)
+        assert model.version == version
+        assert model.executable == tmp_path / name
+
+    def test_a_pinned_cxx_path_merges_like_the_auto_picked_one(
+            self, tmp_path, monkeypatch):
+        model = Bellhop(executable=self._stub(tmp_path, 'bellhopcxx'),
+                        verbose=False)
+        monkeypatch.setattr(os, 'cpu_count', lambda: 4)
+        assert model._arrivals_need_merge() is True
+        monkeypatch.setattr(os, 'cpu_count', lambda: 1)
+        assert model._arrivals_need_merge() is False
+        assert model._build_command('base')[1] == '--2D'
+
+    def test_an_unrecognised_name_stays_custom_and_warns_on_arrivals(
+            self, tmp_path):
+        model = Bellhop(executable=self._stub(tmp_path, 'ray-solver'),
+                        verbose=False)
+        assert model.version == 'custom'
+        assert model._build_command('base') == [str(tmp_path / 'ray-solver'),
+                                                'base']
+        with pytest.warns(UserWarning, match='merge'):
+            assert model._arrivals_need_merge() is False
+
+    def test_a_recognised_name_reads_arrivals_without_a_warning(
+            self, tmp_path):
+        model = Bellhop(executable=self._stub(tmp_path, 'bellhop'),
+                        verbose=False)
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            assert model._arrivals_need_merge() is False
+
+
+class TestALineSourceArrivalsCarryTheGreensFunctionPhase:
+    """A 2-D line source carries the Green's function's ``exp(-i*pi/4)``
+    against the ``e^{-ikR}`` carrier, and ``ArrMod.f90:103-104`` scales
+    its arrivals by a purely real ``4*sqrt(pi)``. The ARRIVALS result the
+    caller receives carries that phase itself — its ``phases`` sit 45 deg
+    behind a point source's for the same rays — and the broadband routes
+    synthesise from those arrivals as they are, so the offset enters
+    exactly once: each arrival's ``phases`` entry is exactly −45° behind the
+    point run's, and the transfer function is built from those arrivals
+    with no further offset (the line/point H(f) ratio only approximates
+    −45°, since a point source weights each beam by √cos α)."""
+
+    FREQS = np.linspace(900.0, 1100.0, 5)
+
+    @staticmethod
+    def _model():
+        return Bellhop(verbose=False, n_beams=20, beam_type='G')
+
+    @classmethod
+    def _run(cls, source_type, run_mode):
+        from uacpy.tests.conftest import make_pekeris
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            return cls._model().run(
+                make_pekeris(name='line-' + source_type, bathymetry=100.0),
+                Source(depths=50.0, frequencies=1000.0,
+                       source_type=source_type),
+                Receiver(depths=[50.0], ranges=[500.0]),
+                run_mode=run_mode, frequencies=cls.FREQS)
+
+    def test_line_arrival_phases_sit_45_deg_behind_point_ones(self):
+        point = self._run('point', RunMode.ARRIVALS)
+        line = self._run('line', RunMode.ARRIVALS)
+        assert len(line.arrivals) == len(point.arrivals) > 0
+        i_p, i_l = np.argsort(point.delays), np.argsort(line.delays)
+        np.testing.assert_allclose(line.delays[i_l], point.delays[i_p],
+                                   rtol=0, atol=1e-9)
+        diff = np.degrees(line.phases[i_l] - point.phases[i_p])
+        np.testing.assert_allclose(diff, -45.0, rtol=0, atol=1e-6)
+
+    def test_the_broadband_result_carries_the_phase_exactly_once(self):
+        # A point run's phases carry no source-shape offset (influence.f90
+        # weights its beams by sqrt(cos(alpha)), so only its amplitudes
+        # differ); the line run's own amplitudes with those phases and ONE
+        # explicit -pi/4 is the reference H(f). Applying the offset twice
+        # or not at all lands 45 deg away from it.
+        from uacpy.models.bellhop import _LINE_SOURCE_PHASE
+        point = self._run('point', RunMode.ARRIVALS).by_receiver[0][0][0]
+        line = self._run('line', RunMode.ARRIVALS).by_receiver[0][0][0]
+        tf = self._run('line', RunMode.BROADBAND)
+        i_p, i_l = np.argsort(point['delays']), np.argsort(line['delays'])
+        reference = {k: (v[i_l] if isinstance(v, np.ndarray) else v)
+                     for k, v in line.items()}
+        reference['phases'] = point['phases'][i_p]
+        expected = Bellhop._arrivals_to_tf(reference, self.FREQS,
+                                           phase_offset=_LINE_SOURCE_PHASE)
+        np.testing.assert_allclose(np.asarray(tf.data)[0, 0, :], expected,
+                                   rtol=1e-9, atol=0)
+
+    def test_the_transfer_function_is_built_from_the_arrivals_as_they_are(self):
+        # The same offset must not be added again on synthesis: H(f) is
+        # ``_arrivals_to_tf`` of the returned cell with no extra phase.
+        arr = self._run('line', RunMode.ARRIVALS)
+        tf = self._run('line', RunMode.BROADBAND)
+        expected = Bellhop._arrivals_to_tf(arr.by_receiver[0][0][0], self.FREQS)
+        np.testing.assert_allclose(np.asarray(tf.data)[0, 0, :], expected,
+                                   rtol=1e-12, atol=0)
+
+
+class TestTheFanMissCheckFollowsThePairedGrid:
+    """``grid_type='I'`` pairs ``depths[i]`` with ``ranges[i]``
+    (``bellhop.f90:202-206``), so the launch-angle check reasons over those
+    pairs, not over the depth x range product a rectilinear deck spans."""
+
+    @staticmethod
+    def _check(grid_type, depths, ranges):
+        with warnings.catch_warnings(record=True) as rec:
+            warnings.simplefilter('always')
+            Bellhop(alpha=(-80.0, 80.0), grid_type=grid_type,
+                    verbose=False)._warn_if_fan_misses_receivers(
+                Source(depths=10.0, frequencies=2000.0),
+                Receiver(depths=depths, ranges=ranges))
+        return [str(w.message) for w in rec
+                if 'launch angle outside' in str(w.message)]
+
+    def test_a_paired_grid_whose_pairs_are_inside_the_fan_is_silent(self):
+        # Pairs (90 m, 500 m) -> 9.1 deg and (10 m, 10 m) -> 0 deg are both
+        # inside; only the product's (90 m, 10 m) at 82.9 deg would miss.
+        assert self._check('I', [10.0, 90.0], [10.0, 500.0]) == []
+        assert len(self._check('R', [10.0, 90.0], [10.0, 500.0])) == 1
+
+    def test_a_paired_grid_counts_its_pairs(self):
+        # (85 m, 10 m) at 82.4 deg misses, (90 m, 500 m) at 9.1 deg does
+        # not: 1 of 2 pairs, where the product would say 2 of 4.
+        said = self._check('I', [85.0, 90.0], [10.0, 500.0])
+        assert len(said) == 1
+        assert '1 of 2 source/receiver pairs' in said[0], said[0]

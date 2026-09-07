@@ -30,7 +30,8 @@ from uacpy.core.constants import parse_boundary_type
 from uacpy.io.grn_reader import read_grn_file, grn_to_field, grn_to_transfer_function
 from uacpy.io.oalib_writer import (
     write_scooter_env_file, reject_coarse_at_mesh,
-    reject_unsupported_ssp_interp,
+    reject_unsupported_ssp_interp, resolve_ssp_topopt,
+    resolve_phase_speed_bounds,
     SOURCE_TYPE_CODE as _SOURCE_TYPE_CODE,
 )
 
@@ -580,7 +581,6 @@ class Scooter(PropagationModel):
         and (broadband only) the frequency vector, and simply stops there.
         The range axis is applied in-tree when the ``.grn`` is transformed.
         """
-        from uacpy.io.oalib_writer import resolve_ssp_topopt
         ssp_topopt = resolve_ssp_topopt(env, self.interp_ssp)
         surface_type = parse_boundary_type(env.surface.acoustic_type)
         bottom_type = parse_boundary_type(env.bottom.halfspace_at(range=0.0).acoustic_type)
@@ -604,7 +604,6 @@ class Scooter(PropagationModel):
                 remediation="Pass a Receiver with at least one range > 0 m.",
             )
         rmax_m = float(receiver.ranges.max()) * self._resolve_rmax_multiplier(run_mode)
-        from uacpy.io.oalib_writer import resolve_phase_speed_bounds
         cl, ch = resolve_phase_speed_bounds(env, self.c_low, self.c_high)
         # The constructor (:195-199) can only compare two pinned bounds. A
         # single pinned bound is only comparable once the other has been

@@ -533,3 +533,57 @@ class TestTheWriterRefusesASingleBeamForInfluenceRuns:
     def test_one_beam_is_allowed_for_a_ray_trace(self, tmp_path):
         self._write(tmp_path, 1, 'R')
         assert (tmp_path / 'w.env').exists()
+
+
+class TestALongFormatBtySamplesARampFinelyEnoughForBellhop:
+    """Bellhop applies each ``.bty`` row's geoacoustics to the whole segment to
+    its right (``bdryMod.f90``, ``Bot(IsegBot)%HS``), so a property ramp given
+    by two range nodes has to be written as many rows or the engine sees a
+    constant seabed."""
+
+    @staticmethod
+    def _ramp_bottom(n_nodes):
+        from uacpy import Bottom
+        r = np.linspace(0.0, 5000.0, n_nodes)
+        return r, Bottom.from_halfspaces(
+            r, sound_speed=1600.0 + 200.0 * r / 5000.0,
+            density=np.full(n_nodes, 1.8), attenuation=np.full(n_nodes, 0.5))
+
+    def test_a_two_node_ramp_writes_rows_that_follow_the_ramp(self, tmp_path):
+        from uacpy.io.bathy_io import write_bty_long_format, _BTY_RAMP_ROWS
+        r, bottom = self._ramp_bottom(2)
+        out = tmp_path / 'ramp.bty'
+        write_bty_long_format(out, np.array([[0.0, 100.0], [5000.0, 100.0]]), bottom)
+        rows = np.loadtxt(out, skiprows=2)
+        assert rows.shape[0] >= _BTY_RAMP_ROWS
+        cp_expected = 1600.0 + 200.0 * rows[:, 0] * 1000.0 / 5000.0
+        assert np.abs(rows[:, 2] - cp_expected).max() < 1e-3
+        assert np.all(np.diff(rows[:, 0]) > 0)
+
+    def test_range_independent_geoacoustics_keep_the_union_rows_only(self, tmp_path):
+        from uacpy import Bottom
+        from uacpy.io.bathy_io import write_bty_long_format
+        r = np.array([0.0, 5000.0])
+        bottom = Bottom.from_halfspaces(r, sound_speed=np.full(2, 1600.0),
+                                        density=np.full(2, 1.8), attenuation=np.full(2, 0.5))
+        out = tmp_path / 'flat.bty'
+        write_bty_long_format(out, np.array([[0.0, 100.0], [2500.0, 110.0], [5000.0, 100.0]]), bottom)
+        assert np.loadtxt(out, skiprows=2).shape[0] == 3
+
+    @pytest.mark.requires_binary
+    def test_bellhop_tl_over_a_two_node_ramp_matches_a_finely_sampled_one(self, tmp_path):
+        from uacpy import Environment, Source, Receiver, Bellhop, RunMode
+
+        def tl(n_nodes, tag):
+            r, bottom = self._ramp_bottom(n_nodes)
+            env = Environment(bathymetry=np.column_stack([r, np.full_like(r, 100.0)]),
+                              ssp=1500.0, bottom=bottom)
+            model = Bellhop(n_beams=200, beam_type='B', work_dir=tmp_path / tag)
+            field = model.run(env, Source(depths=[30.0], frequencies=300.0),
+                              Receiver(depths=[50.0], ranges=[1000.0, 2000.0, 3000.0, 4000.0, 4800.0]),
+                              RunMode.COHERENT_TL)
+            return np.asarray(field.db).ravel()
+
+        diff = tl(2, 'two') - tl(101, 'fine')
+        assert np.sqrt(np.mean(diff ** 2)) < 1.5
+        assert np.abs(diff).max() < 3.0

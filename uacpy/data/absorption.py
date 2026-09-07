@@ -39,6 +39,19 @@ def build_francois_garrison(
         Matching 1-D profiles (m, °C, psu), as returned by the data fetchers.
     pH : float, optional
         Seawater pH (default 8.1). Supply a measured value where available.
+        GLODAP and Copernicus report pH on the total scale. Francois &
+        Garrison (1982, Part II) took their pH from Lovett's (1980) contour
+        charts, drawn from the Gorshkov (1978) World Ocean Atlas, whose scale
+        is not reported; Brewer & Hester (Oceanography 22(4), 2009, p. 91-92)
+        judge it "probably" the NBS scale and state that "the sound
+        absorption equations are based on the old NBS scale", with
+        interconversion "still difficult". No conversion is applied here.
+        With the Takahashi et al. (1982) activity-coefficient fit used by
+        CO2SYS, NBS pH exceeds seawater-scale pH by 0.10 at 4 °C and 0.15 at
+        25 °C (S = 35); +0.12 raises the boric-acid term, and so the whole
+        absorption below 1 kHz, by about 20 %: 1 dB per 100 km at 1 kHz,
+        5-6 dB over a 3000 km basin path at 300 Hz, under 2 dB per 100 km
+        at any frequency.
     reference_depth : float, optional
         Depth (m) at which the nominal T/S row is taken. Default ``None``
         selects the **mid-depth** of the supplied column.

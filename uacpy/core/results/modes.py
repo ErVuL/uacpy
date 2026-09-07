@@ -10,6 +10,7 @@ from typing import Optional, Union
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core._finite_difference import warn_if_storage_under_resolves
+from uacpy.core.bottom import BoundaryProperties, _NON_GEOACOUSTIC_TYPES
 
 from uacpy.core.results._base import Result
 from uacpy.core.results.field import Field
@@ -388,7 +389,7 @@ class Modes(Result):
         Notes
         -----
         The perturbed ``k`` is consumed by uacpy's Python-side modal
-        synthesis (:meth:`pressure_at`, :meth:`tl_at`). It is **not**
+        synthesis (:meth:`modal_propagation_loss`). It is **not**
         consumed by Acoustics-Toolbox ``field.exe`` / ``fieldS.exe``:
         uacpy has no ``.mod`` writer, and ``field.exe`` reads
         attenuation natively from the environment passed to its field
@@ -502,13 +503,11 @@ class Modes(Result):
         # not exist. Runs BEFORE the bottom block so a dropped boundary takes
         # the water-only path rather than falling into it with bottom = None.
         if bottom is not None:
-            from uacpy.core.environment import BoundaryProperties as _BP
-            if not isinstance(bottom, _BP):
+            if not isinstance(bottom, BoundaryProperties):
                 raise ConfigurationError(
                     "Modes.with_attenuation: bottom must be a "
                     f"BoundaryProperties; got {type(bottom).__name__}"
                 )
-            from uacpy.core.bottom import _NON_GEOACOUSTIC_TYPES
             _btype = str(getattr(bottom, 'acoustic_type', '')).lower()
             if _btype in _NON_GEOACOUSTIC_TYPES:
                 if _btype in ('vacuum', 'rigid'):
@@ -778,7 +777,7 @@ class Modes(Result):
         # interpolate: ``np.interp`` would hold the end value flat, which is
         # neither the shape nor the evanescent tail the half-space carries, and
         # would report a plausible number for a depth this mode set never
-        # covered. (AT is no better off the end — ``calculateweights.f90:43-49``
+        # covered. (AT is no better off the end — ``misc/calculateweights.f90:43-49``
         # stops its bracket search at ``L < Nx-1`` and extrapolates linearly —
         # and neither code carries the half-space wavenumber needed for the
         # true ``exp(-gamma_m (z-D))`` tail.) Follow uacpy's depth policy: a

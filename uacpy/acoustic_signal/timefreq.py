@@ -25,6 +25,7 @@ import scipy.signal as _sig
 
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.acoustic_signal._signal_validate import (
+    require_at_most_nyquist,
     require_finite_signal,
     require_positive_finite_scalar,
 )
@@ -109,6 +110,11 @@ def _smoothing_window(spec, name):
     return w, w.size // 2
 
 
+# Cap on the (NF, n) float64 distribution, checked before it is allocated:
+# 2**27 cells is 1 GiB, the ceiling ``active._MAX_AMBIGUITY_CELLS`` sets.
+_MAX_WIGNER_CELLS = 1 << 27
+
+
 def wigner_ville(data, sample_rate: float, *, analytic: bool = True,
                  freq_window=None, time_window=None, nfft=None):
     """Discrete (smoothed-pseudo-) Wigner-Ville distribution of a 1-D signal.
@@ -172,6 +178,15 @@ def wigner_ville(data, sample_rate: float, *, analytic: bool = True,
     hv, Lh = _smoothing_window(freq_window, "freq_window")
     gv, Lg = _smoothing_window(time_window, "time_window")
     lag_cap = n - 1 if hv is None else Lh
+    cells = NF * n
+    if cells > _MAX_WIGNER_CELLS:
+        raise ConfigurationError(
+            f"wigner_ville: the distribution would be {NF} x {n} = {cells} "
+            f"float64 cells ({cells * 8 / 2 ** 30:.2f} GiB), past the "
+            f"{_MAX_WIGNER_CELLS} cell cap "
+            f"({_MAX_WIGNER_CELLS * 8 / 2 ** 30:.2f} GiB). Shorten or "
+            f"decimate the record, or pass a smaller nfft; freq_window "
+            f"bounds the lags, not the surface.")
     W = np.zeros((NF, n))
     for ti in range(n):
         taumax = min(ti, n - 1 - ti, lag_cap)
@@ -339,8 +354,7 @@ def cwt(data, sample_rate, frequencies=None, wavelet="morlet", *, w0=6.0,
                 f"range — the lowest analysis frequency {f_lo:.1f} Hz already "
                 f"exceeds Nyquist {fs / 2.0:.1f} Hz. Pass an explicit "
                 "`frequencies=` below Nyquist, or use a longer signal.")
-        frequencies = np.logspace(np.log10(f_lo), np.log10(fs / 2.0),
-                                  int(n_freqs))
+        frequencies = np.geomspace(f_lo, fs / 2.0, int(n_freqs))
     frequencies = np.atleast_1d(np.asarray(frequencies, dtype=float))
     if np.any(frequencies <= 0):
         bad = frequencies <= 0
@@ -348,13 +362,9 @@ def cwt(data, sample_rate, frequencies=None, wavelet="morlet", *, w0=6.0,
             f"cwt: frequencies must be > 0; got {int(bad.sum())} value(s) "
             f"<= 0, first at index {int(np.argmax(bad))} "
             f"({frequencies[bad][0]:g} Hz)")
-    above = frequencies > fs / 2.0
-    if np.any(above):
-        raise ConfigurationError(
-            f"cwt: analysis frequencies {frequencies[above]} Hz lie above "
-            f"the Nyquist frequency sample_rate/2 = {fs / 2.0:g} Hz, where "
-            f"the sampled wavelet aliases and the coefficients are "
-            f"numerical residue, not band content.")
+    require_at_most_nyquist(frequencies, fs, "cwt", "analysis frequencies",
+                            "the sampled wavelet aliases and the coefficients "
+                            "are numerical residue, not band content")
     omega = 2.0 * np.pi * np.fft.fftfreq(n)  # rad/sample
     Xf = np.fft.fft(xr)
     # One scale gives the factor; scales follow from f = factor*fs/s.

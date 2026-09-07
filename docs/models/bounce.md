@@ -24,8 +24,9 @@ R(θ) = |R(θ)| · e^{iφ(θ)}
 
 `|R|` is the fraction of amplitude returned (0 = perfectly absorbing, 1 =
 perfectly reflecting) and `φ` is the phase the boundary adds, in the Acoustics
-Toolbox's `e^{−iωt}` time convention: `rc.R * exp(1j * rc.phi)` is exactly the
-coefficient BOUNCE computed. Both depend on the grazing angle θ, measured from
+Toolbox's `e^{+iωt}` time convention (`index.htm:801`; the outgoing propagators
+are `e^{−ikr}`): `rc.R * exp(1j * rc.phi)` is exactly the coefficient BOUNCE
+computed. Both depend on the grazing angle θ, measured from
 the interface — **0° is a ray skimming along the seabed, 90° is normal
 incidence.**
 

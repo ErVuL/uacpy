@@ -49,6 +49,12 @@ from typing import Dict, List, Optional, Self, Union
 import numpy as np
 
 import uacpy._stack  # noqa: F401 — side-effect: raise RLIMIT_STACK
+from uacpy._log import _resolve_threshold, log_message
+from uacpy.core.absorption import Thorp
+from uacpy.core.bottom import BoundaryProperties, Bottom
+from uacpy.core.constants import (
+    DEFAULT_BROADBAND_N_FREQS, DEFAULT_BROADBAND_BANDWIDTH_FACTOR,
+)
 from uacpy.core.environment import Environment, Bathymetry
 from uacpy.core.exceptions import (
     ConfigurationError,
@@ -58,8 +64,10 @@ from uacpy.core.exceptions import (
     UnsupportedFeatureError,
 )
 from uacpy.core.receiver import Receiver
-from uacpy.core.results import PhaseReference, Result, ResultStack
+from uacpy.core.results import Field, PhaseReference, Result, ResultStack
 from uacpy.core.source import Source
+from uacpy.core.surface import Surface
+from uacpy.models.sources import MODEL_SOURCES, model_source
 from uacpy.io.file_manager import FileManager
 from uacpy.io.oalib_reader import read_prt
 
@@ -562,7 +570,6 @@ def _warn_if_volume_absorption_is_missing(env, source, receiver) -> None:
     if not (np.isfinite(f_max) and np.isfinite(r_max)) or f_max <= 0.0 \
             or r_max <= 0.0:
         return
-    from uacpy.core.absorption import Thorp
     alpha = float(np.atleast_1d(Thorp().alpha_db_per_m(f_max, 0.0))[0])
     omitted = alpha * r_max
     if not np.isfinite(omitted) or omitted < _ABSORPTION_NOTICE_DB:
@@ -662,7 +669,6 @@ class PropagationModel(ABC):
                 )
             spec.validate(cls.__name__)
         if cls.source is not None:
-            from uacpy.models.sources import MODEL_SOURCES
             if cls.source not in MODEL_SOURCES:
                 raise ConfigurationError(
                     f"{cls.__name__}.source = {cls.source!r} is not a known "
@@ -739,7 +745,6 @@ class PropagationModel(ABC):
         timeout: float = 600.0,
         collapse: Optional[Dict[str, str]] = None,
     ):
-        from uacpy._log import _resolve_threshold
         _resolve_threshold(verbose)  # validate up front
         self.model_name = self.__class__.__name__
         self.use_tmpfs = use_tmpfs
@@ -848,7 +853,6 @@ class PropagationModel(ABC):
         """The engine's :class:`~uacpy.models.sources.ModelSource` (authorship
         + licence + citation), or ``None`` if the class declares no
         :attr:`source`."""
-        from uacpy.models.sources import model_source
         return model_source(self.source)
 
     @property
@@ -1344,10 +1348,6 @@ class PropagationModel(ABC):
         centre frequency expands to ``n_freqs`` bins spanning
         ``fc·(1 ± bandwidth_factor/2)``.
         """
-        from uacpy.core.constants import (
-            DEFAULT_BROADBAND_N_FREQS,
-            DEFAULT_BROADBAND_BANDWIDTH_FACTOR,
-        )
         if frequencies is not None:
             return np.asarray(frequencies, dtype=float)
         src_f = np.atleast_1d(np.asarray(source.frequencies, dtype=float))
@@ -1621,7 +1621,6 @@ class PropagationModel(ABC):
         """Emit a tagged line through :func:`uacpy._log.log_message`.
         ``WARN`` / ``ERROR`` always print; ``INFO`` / ``DEBUG`` only when
         ``self.verbose``."""
-        from uacpy._log import log_message
         log_message(
             self.model_name, message,
             verbose=self.verbose, level=level,
@@ -1778,12 +1777,15 @@ class PropagationModel(ABC):
         :meth:`_check_per_range_receiver_depth`: warn — never raise — when a
         receiver lies below the depth this model resolves the field at.
         Such receivers are accepted; what comes back is per-engine:
-        Bellhop, Scooter, SPARC and RAM return NaN there (their solvers
-        clamp the receiver onto the domain or stop meshing, so no field is
-        evaluated at the asked depth), while Kraken and the OASES models
-        compute a physical transmitted / evanescent field through the
-        sediment they mesh. The range-dependent case is handled per-range
-        by :meth:`_check_per_range_receiver_depth`.
+        Scooter, SPARC and RAM return NaN there (their solvers clamp the
+        receiver onto the domain or stop meshing, so no field is evaluated
+        at the asked depth); Bellhop returns NaN on its TL, BROADBAND and
+        TIME_SERIES routes, an empty cell on ARRIVALS, and on RAYS /
+        EIGENRAYS labels the rays it found at the clamped depth with the
+        requested one; Kraken and the OASES models compute a physical
+        transmitted / evanescent field through the sediment they mesh. The
+        range-dependent case is handled per-range by
+        :meth:`_check_per_range_receiver_depth`.
         """
         if env.has_range_dependent_bathymetry:
             return
@@ -1817,8 +1819,10 @@ class PropagationModel(ABC):
         """Emit a ``UserWarning`` if any receiver sits below the local
         seafloor in a range-dependent bathymetry. Below-seafloor receivers
         are accepted, not rejected; the cells come back NaN from the
-        engines that evaluate no field there (Bellhop, Scooter, SPARC,
-        RAM) and as a physical transmitted field from the ones that mesh
+        engines that evaluate no field there (Scooter, SPARC, RAM, and
+        Bellhop's TL / broadband routes — its ARRIVALS cells come back
+        empty, its RAYS / EIGENRAYS carry whatever reached the clamped
+        depth) and as a physical transmitted field from the ones that mesh
         the sediment (Kraken, OASES). The flat-bathy case is handled by
         :meth:`_warn_receiver_below_resolvable`.
 
@@ -2329,12 +2333,11 @@ class PropagationModel(ABC):
         names,
         bin_subdirs=None,
         dev_subdir: Optional[str] = None,
-        try_exe_suffix: bool = True,
     ) -> Path:
         """
         Find a model executable by searching standard locations.
 
-        Search order:
+        Search order (each name is also tried with a ``.exe`` suffix):
             1. uacpy/bin/<bin_subdir>/<name>[+.exe] for each combination
             2. uacpy/third_party/<dev_subdir>/bin (development location)
             3. System PATH
@@ -2348,8 +2351,6 @@ class PropagationModel(ABC):
         dev_subdir : str, optional
             Subdirectory under uacpy/third_party/ (e.g. 'Acoustics-Toolbox/Kraken',
             'oases'). If given, also checks <dev_subdir>/bin and <dev_subdir>/.
-        try_exe_suffix : bool, optional
-            If True, also try "<name>.exe". Default True.
 
         Raises
         ------
@@ -2366,7 +2367,7 @@ class PropagationModel(ABC):
         candidates = []
         for name in names:
             variants = [name]
-            if try_exe_suffix and not name.endswith('.exe'):
+            if not name.endswith('.exe'):
                 variants.append(name + '.exe')
             for v in variants:
                 for sd in bin_subdirs:
@@ -2384,7 +2385,7 @@ class PropagationModel(ABC):
 
         for name in names:
             variants = [name]
-            if try_exe_suffix and not name.endswith('.exe'):
+            if not name.endswith('.exe'):
                 variants.append(name + '.exe')
             for v in variants:
                 found = shutil.which(v)
@@ -2402,9 +2403,7 @@ class PropagationModel(ABC):
         cmd,
         cwd,
         timeout: Optional[float] = None,
-        stdin_input: Optional[str] = None,
         env: Optional[dict] = None,
-        check: bool = True,
     ):
         """
         Run an external binary and raise ModelExecutionError on failure.
@@ -2425,12 +2424,8 @@ class PropagationModel(ABC):
             Working directory for the subprocess.
         timeout : float, optional
             Max seconds before raising.
-        stdin_input : str, optional
-            Text fed to the subprocess's stdin.
         env : dict, optional
             Environment variables for the subprocess.
-        check : bool, optional
-            If True (default), raise on non-zero return code.
 
         Returns
         -------
@@ -2450,12 +2445,11 @@ class PropagationModel(ABC):
                 cwd=str(cwd),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                stdin=subprocess.PIPE if stdin_input is not None else None,
                 text=True,
                 env=env,
                 start_new_session=(os.name == 'posix'),
             )
-            stdout, stderr = proc.communicate(input=stdin_input, timeout=timeout)
+            stdout, stderr = proc.communicate(timeout=timeout)
             result = subprocess.CompletedProcess(
                 proc.args, proc.returncode, stdout, stderr,
             )
@@ -2505,7 +2499,7 @@ class PropagationModel(ABC):
                 self._terminate_process_group(proc)
             raise
 
-        if check and result.returncode != 0:
+        if result.returncode != 0:
             raise ModelExecutionError(
                 self.model_name,
                 return_code=result.returncode,
@@ -2518,8 +2512,6 @@ class PropagationModel(ABC):
     def _has_shear(boundary) -> bool:
         """True if ``boundary`` carries any non-zero shear speed. Accepts a
         :class:`Bottom` or a surface :class:`BoundaryProperties`."""
-        from uacpy.core.bottom import Bottom
-        from uacpy.core.surface import Surface
         if boundary is None:
             return False
         if isinstance(boundary, (Bottom, Surface)):
@@ -2536,9 +2528,6 @@ class PropagationModel(ABC):
         Accepts a :class:`Bottom` (every column's layers + half-space) or a
         surface :class:`BoundaryProperties`, returning the same kind.
         """
-        from uacpy.core.bottom import BoundaryProperties, Bottom
-        from uacpy.core.surface import Surface
-
         def _zero_shear(b):
             b.shear_speed = 0.0
             b.shear_attenuation = 0.0
@@ -3114,7 +3103,6 @@ class PropagationModel(ABC):
         Used by the full-waveguide spectral solvers (Scooter, SPARC), which
         mesh through the sediment stack the same way.
         """
-        from uacpy.core.results import Field
         depths = np.atleast_1d(np.asarray(receiver.depths, dtype=float))
         d = result.to_dict()
         data = d['data']

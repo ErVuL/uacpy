@@ -342,7 +342,7 @@ def test_concurrent_gmrt_region_reads_never_enter_netcdf_together(monkeypatch):
     counter = _NetcdfEntryCounter()
     handles = []
 
-    def open_stub(path):
+    def open_stub(path, memory=None):
         ds = _OverlapCountingDataset(counter, {
             'lon': np.array([0.0, 1.0]),
             'lat': np.array([0.0, 1.0]),
@@ -367,7 +367,7 @@ def test_concurrent_wind_grid_fetches_never_enter_netcdf_together(monkeypatch):
     handles = []
     speed_var = wind_local._SPEED_VARS[0]
 
-    def open_stub(path):
+    def open_stub(path, memory=None):
         ds = _OverlapCountingDataset(counter, {
             'latitude': np.array([0.0, 1.0]),
             'longitude': np.array([0.0, 1.0]),

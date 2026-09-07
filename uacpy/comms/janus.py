@@ -24,7 +24,8 @@ interleaver, the initial band (Fc=11520 Hz, Bw=4160 Hz, FSw=160 Hz, Cd=6.25 ms),
 the Table III tone frequencies, the **frequency-hop sequence** (the CMRE
 ``janus_hop_index`` Galois-field generator with ``alpha=2, q=13`` — universal
 across bands since ``nblock = Bw/(FSw*2) = 13`` always) and the **32-chip
-preamble** (``JANUS_32_CHIP_SEQUENCE = 0xAEC7CD20``). Pass ``fh_seq=`` only to
+preamble** (``JANUS_32_CHIP_SEQUENCE = 0xAEC7CD20``, janus-c
+``external:defaults.h:61``). Pass ``fh_seq=`` only to
 experiment with non-standard hop orders. **Verified interoperable** with the CMRE
 janus-c 3.0.5 reference: uacpy's encoder is bit-exact to ``janus-tx`` coded-symbol
 vectors, and uacpy decodes the reference implementation's emitted ``.wav`` back to
@@ -122,7 +123,8 @@ FH_PREAMBLE_BITS = np.array(
 
 
 def _hop_index(idx, alpha=_FH_ALPHA, q=_FH_Q):
-    """CMRE ``janus_hop_index``: Galois-field FH slot for chip ``idx`` (0..q-1)."""
+    """CMRE ``janus_hop_index`` (janus-c ``hop_index.c``): Galois-field FH slot for chip
+    ``idx`` (0..q-1); ``q = 13, alpha = 2`` is ``primitive.c``'s table entry for 13 blocks."""
     u1 = -(-(idx + 1) // ((q - 1) * q))          # ceil((idx+1) / ((q-1)*q))
     u2 = idx // (q - 1)
     gp = (idx % (q - 1)) + 1
@@ -259,7 +261,9 @@ def _bits_int(bits):
 
 
 def _interleave_perm():
-    """Depth-13 interleaver permutation over the 144 coded symbols (``out[i]=conv[perm[i]]``)."""
+    """Depth-13 interleaver permutation over the 144 coded symbols (``out[i]=conv[perm[i]]``),
+    janus-c ``interleave.c``: ``perm[i] = (perm[i-1] + q) % n`` with
+    ``q = janus_interleave_q(144) = 13``."""
     return (np.arange(_N_CODED) * _INTERLEAVE_DEPTH) % _N_CODED
 
 

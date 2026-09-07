@@ -15,8 +15,10 @@ NBS is a U.S. Government work — **public domain**.
 
 import numpy as np
 
-from uacpy.core.exceptions import ConfigurationError, DataFetchError
-from uacpy.data._geo import as_coordinate
+from uacpy.core.exceptions import DataFetchError
+from uacpy.data._geo import (
+    as_coordinate, checked_n_points, geodesic_waypoints, require_source,
+)
 from uacpy.data._http import (erddap_griddap_url, erddap_last_value,
                               http_get)
 from uacpy.data._time import parse_date
@@ -35,12 +37,9 @@ WIND_SOURCES = ('erddap', 'local')
 
 
 def _check_source(source):
-    if source not in WIND_SOURCES:
-        raise ConfigurationError(
-            f"wind source must be one of {WIND_SOURCES}; got {source!r}.",
-            remediation="Use 'erddap' (NBS live) or 'local' (cached monthly "
-                        "climatology; see install.sh --data wind).",
-        )
+    require_source(source, WIND_SOURCES, 'wind source',
+                   "Use 'erddap' (NBS live) or 'local' (cached monthly "
+                   "climatology; see install.sh --data wind).")
 
 
 def _griddap_url(var, when, lat, lon):
@@ -108,7 +107,6 @@ def fetch_wind(point, *, date, source='erddap', timeout=60.0, verbose=False):
 def fetch_wind_transect(start, end, *, date, n_points=6, source='erddap',
                         timeout=60.0, verbose=False):
     """``(ranges_m, wind_speed_mps)`` sampled along ``start`` → ``end``."""
-    from uacpy.data._geo import checked_n_points, geodesic_waypoints
     n_points = checked_n_points(n_points, 'fetch_wind_transect')
     _check_source(source)
     lats, lons, ranges_m = geodesic_waypoints(start, end, n_points)

@@ -11,8 +11,40 @@ from uacpy.core.environment import Environment
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.results import Field, ResultStack
 from uacpy.core.units import m_to_km
-from uacpy.visualization.style import SOURCE_MARKER_STYLE
-from uacpy.visualization.plots._common import ZORDER_SOURCE, _imshow_extent, _overlay_seafloor, typed_plot_error
+from uacpy.visualization.plots._common import ZORDER_SOURCE, _draw_geometry, _imshow_extent, _overlay_seafloor, typed_plot_error
+
+
+_TIME_AXES = ('depth', 'range', 'time')
+
+
+def _time_layout(field, caller: str, what: str = 'field'):
+    """``(data, depths, ranges, times)`` of a time-series field in the
+    canonical (depth, range, time) layout, whatever storage order
+    ``field.coords`` declares. Refuses a field missing any of the three axes
+    by name, so no caller indexes a coordinate it does not have."""
+    coords = getattr(field, 'coords', {})
+    missing = set(_TIME_AXES) - set(coords)
+    if missing:
+        raise ConfigurationError(
+            f"{caller}: {what} is missing coord axes {sorted(missing)}. "
+            f"Need depth, range, and time — got {list(coords)}.")
+    order = list(coords)
+    data = np.moveaxis(np.asarray(field.data),
+                       [order.index(a) for a in _TIME_AXES], [0, 1, 2])
+    return (data, *(np.asarray(coords[a], dtype=float) for a in _TIME_AXES))
+
+
+def _pmax_percentile(data) -> float:
+    """Symmetric colour limit for ±pressure: the 99.5th percentile of
+    ``|data|`` over the finite samples, so the early-time near-source spike
+    does not wash out later frames. Falls back to the maximum when that
+    percentile is zero (a field silent almost everywhere) and to 1.0 when
+    nothing is finite."""
+    finite = np.asarray(data)[np.isfinite(data)]
+    if finite.size == 0:
+        return 1.0
+    p = float(np.percentile(np.abs(finite), 99.5))
+    return p if p > 0 else (float(np.max(np.abs(finite))) or 1.0)
 
 
 @typed_plot_error
@@ -59,8 +91,10 @@ def animate_field(
     ax : matplotlib.axes.Axes, optional
         Target axes. ``None`` creates a fresh figure.
     show_source : bool, optional
-        Plot a marker at ``(range=0, depth=field.source_depths[0])`` if
-        the field carries a source depth.
+        Mark the source at range 0 and ``field.source_depths`` when the
+        field carries them, as :func:`plot_field`'s ``source=`` does; the
+        x axis widens so the marker stays on screen when the grid starts
+        past r = 0.
     show_seafloor : bool, optional
         Overlay env.bathymetry (or env.depth) on every frame.
     show_time : bool, optional
@@ -84,31 +118,13 @@ def animate_field(
         ``HTML(ani.to_jshtml())`` for notebook embedding.
     """
     from matplotlib.animation import FuncAnimation
-    from uacpy.core.results import Field  # local import to avoid cycle
 
     if not isinstance(field, Field) or 'time' not in getattr(field, 'coords', {}):
         raise ConfigurationError(
             "animate_field: needs a Field carrying a 'time' axis. "
             f"Got coords={tuple(getattr(field, 'coords', ()))!r}."
         )
-    expected_axes = {'depth', 'range', 'time'}
-    if expected_axes - set(field.coords):
-        missing = expected_axes - set(field.coords)
-        raise ConfigurationError(
-            f"animate_field: field is missing coord axes {sorted(missing)}. "
-            f"Need depth, range, and time — got {list(field.coords)}."
-        )
-
-    # Move data into canonical (depth, range, time) layout regardless of
-    # the storage order ``field.coords`` declares.
-    axis_order = list(field.coords)
-    d_axis = axis_order.index('depth')
-    r_axis = axis_order.index('range')
-    t_axis = axis_order.index('time')
-    data = np.moveaxis(np.asarray(field.data), [d_axis, r_axis, t_axis], [0, 1, 2])
-    depths = np.asarray(field.coords['depth'], dtype=float)
-    ranges = np.asarray(field.coords['range'], dtype=float)
-    times = np.asarray(field.coords['time'], dtype=float)
+    data, depths, ranges, times = _time_layout(field, 'animate_field')
     n_t = times.size
 
     if frame_stride is None:
@@ -126,13 +142,7 @@ def animate_field(
     n_frames = frame_idx.size
 
     if p_max is None:
-        finite = data[np.isfinite(data)]
-        if finite.size == 0:
-            p_max = 1.0
-        else:
-            p_max = float(np.percentile(np.abs(finite), 99.5))
-            if p_max <= 0:
-                p_max = float(np.max(np.abs(finite))) or 1.0
+        p_max = _pmax_percentile(data)
 
     if ax is None:
         fig, ax = plt.subplots(figsize=(8, 4.5))
@@ -162,11 +172,8 @@ def animate_field(
     if show_seafloor and env is not None:
         _overlay_seafloor(ax, env, ranges)
 
-    if show_source and field.source_depths is not None and len(field.source_depths):
-        ax.plot(
-            [0.0], [float(field.source_depths[0])],
-            zorder=ZORDER_SOURCE, **SOURCE_MARKER_STYLE,
-        )
+    if show_source:
+        _draw_geometry(ax, field.source_depths)
 
     time_label = ax.text(
         0.98, 0.96, '', transform=ax.transAxes,
@@ -272,9 +279,12 @@ def plot_time_snapshots(
 
     Parameters
     ----------
-    fields : Mapping[str, Field] or Sequence[(str, Field)]
-        Time-series fields keyed by display name. Insertion order =
-        row order.
+    fields : ResultStack, Mapping[str, Field], Sequence[(str, Field)], Field or Sequence[Field]
+        Time-series fields, one row each, in the order given. A
+        :class:`ResultStack` names its rows ``"<coordinate>=<value>"``; a
+        mapping or a sequence of ``(name, field)`` pairs names them
+        explicitly; a bare :class:`Field` or a sequence of fields is named
+        by each field's ``model``.
     times_s : sequence of float
         Wall-clock times to sample (s). Each model's nearest time bin
         is picked independently.
@@ -330,17 +340,9 @@ def plot_time_snapshots(
             f"be non-empty — the grid is one row per field, one column per "
             f"time.")
 
-    required_axes = {'depth', 'range', 'time'}
-    for name, field in rows:
-        coords = getattr(field, 'coords', {})
-        missing = required_axes - set(coords)
-        if missing:
-            raise ConfigurationError(
-                f"plot_time_snapshots: field "
-                f"{(name or type(field).__name__)!r} is missing coord axes "
-                f"{sorted(missing)}. Need depth, range, and time — got "
-                f"{list(coords)}."
-            )
+    layouts = [_time_layout(field, 'plot_time_snapshots',
+                            f"field {(name or type(field).__name__)!r}")
+               for name, field in rows]
 
     fig, axes = plt.subplots(
         n_models, n_times,
@@ -351,13 +353,7 @@ def plot_time_snapshots(
 
     # Per-row pmax derivation (default).
     if p_max is None:
-        p_max_per_row = []
-        for _, f in rows:
-            finite = np.asarray(f.data)[np.isfinite(f.data)]
-            p_max_per_row.append(
-                float(np.percentile(np.abs(finite), 99.5))
-                if finite.size else 1.0
-            )
+        p_max_per_row = [_pmax_percentile(data) for data, *_ in layouts]
     elif np.isscalar(p_max):
         p_max_per_row = [float(np.asarray(p_max).item())] * n_models
     else:
@@ -368,17 +364,8 @@ def plot_time_snapshots(
                 f"{len(p_max_per_row)} != n_models {n_models}."
             )
 
-    for i, (name, field) in enumerate(rows):
-        times = np.asarray(field.coords['time'])
-        depths = np.asarray(field.coords['depth'])
-        ranges = np.asarray(field.coords['range'])
-        ax_order = list(field.coords)
-        d_ax = ax_order.index('depth')
-        r_ax = ax_order.index('range')
-        t_ax = ax_order.index('time')
-        data3 = np.moveaxis(
-            np.asarray(field.data), [d_ax, r_ax, t_ax], [0, 1, 2],
-        )
+    for i, ((name, field), (data3, depths, ranges, times)) in enumerate(
+            zip(rows, layouts)):
         # Decide aspect ratio once per row from the data extent. The imshow
         # extent is km in x and m in y, so aspect = 1/1000 displays 1 m of
         # depth as long as 1 m of range — isotropic, wavefronts stay round.
@@ -422,9 +409,6 @@ def plot_time_snapshots(
                 ax.set_ylim(float(env.depth) * 1.05, 0)
             else:
                 ax.set_ylim(depths[-1], depths[0])
-            if field.source_depths is not None and len(field.source_depths):
-                ax.plot([0.0], [float(field.source_depths[0])],
-                        zorder=ZORDER_SOURCE, **SOURCE_MARKER_STYLE)
             ax.set_xlim(0, float(m_to_km(ranges[-1])))
             if i == 0:
                 ax.set_title(f"t = {times[k] * 1000:.0f} ms", fontsize=10)
@@ -438,4 +422,10 @@ def plot_time_snapshots(
     if title is not None:
         fig.suptitle(title, fontsize=11, fontweight='bold')
     fig.tight_layout()
+    # The source star sits on the left limit and widens it by its own half
+    # width, measured in the panel's pixels — so it is drawn once the layout
+    # has fixed the panel size.
+    for (_, field), row in zip(rows, axes):
+        for ax in row:
+            _draw_geometry(ax, field.source_depths)
     return fig, axes

@@ -82,6 +82,20 @@ class TestUnrunnableBinaryIsTyped:
             self._model()._run_subprocess([str(dud)], cwd=tmp_path)
         assert str(dud) in str(excinfo.value)
 
+    def test_a_non_zero_exit_raises_with_its_return_code(self, tmp_path):
+        # Every AT / RAM binary reports failure through its exit status;
+        # the runner turns any non-zero status into ModelExecutionError
+        # carrying that code, and a zero status hands back the process.
+        script = tmp_path / 'ramgeo'
+        script.write_text('#!/bin/sh\nexit 3\n')
+        script.chmod(0o755)
+        with pytest.raises(ModelExecutionError) as excinfo:
+            self._model()._run_subprocess([str(script)], cwd=tmp_path)
+        assert excinfo.value.return_code == 3
+        script.write_text('#!/bin/sh\nexit 0\n')
+        assert self._model()._run_subprocess(
+            [str(script)], cwd=tmp_path).returncode == 0
+
     def test_the_resolver_refuses_a_non_executable_pinned_path(self, tmp_path):
         dud = tmp_path / 'ramgeo'
         dud.write_bytes(b'\x7fELF' + b'\x00' * 64)

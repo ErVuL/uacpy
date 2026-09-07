@@ -230,8 +230,6 @@ def example_range_dependent_layered():
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
-    import matplotlib
-    matplotlib.use('Agg')
     import matplotlib.pyplot as plt
     from uacpy.models.ram import RAM
     from uacpy.models.bellhop import Bellhop

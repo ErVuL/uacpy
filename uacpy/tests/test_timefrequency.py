@@ -101,6 +101,41 @@ class TestTimeFrequency:
         with pytest.raises(ConfigurationError):
             wigner_ville(np.zeros(256), FS, nfft=128)
 
+    def test_wigner_ville_refuses_surface_past_cell_cap_before_allocating(
+            self, monkeypatch):
+        # (nfft, n) = (1 << 17, 2000) is 2.6e8 float64 cells, past the 1 << 27
+        # ceiling ambiguity_function shares. The refusal must come before
+        # np.zeros runs: the kernel backs the surface lazily, so a cap checked
+        # after the allocation would still let the per-time loop swap the host
+        # instead of raising.
+        import uacpy.acoustic_signal.timefreq as timefreq
+
+        class AllocationAttempted(Exception):
+            pass
+
+        class NumpyRefusingZeros:
+            def __getattr__(self, name):
+                if name == "zeros":
+                    def refuse(*args, **kwargs):
+                        raise AllocationAttempted(args)
+                    return refuse
+                return getattr(np, name)
+
+        monkeypatch.setattr(timefreq, "np", NumpyRefusingZeros())
+        z = np.ones(2000, dtype=complex)
+        with pytest.raises(ConfigurationError, match=r"131072 x 2000.*nfft"):
+            wigner_ville(z, 48000.0, nfft=1 << 17)
+
+    def test_wigner_ville_cell_cap_admits_equality_and_refuses_one_past(
+            self, monkeypatch):
+        import uacpy.acoustic_signal.timefreq as timefreq
+        n = 64
+        monkeypatch.setattr(timefreq, "_MAX_WIGNER_CELLS", n * n)
+        z = np.ones(n, dtype=complex)
+        assert wigner_ville(z, FS, nfft=n).distribution.shape == (n, n)
+        with pytest.raises(ConfigurationError, match=r"65 x 64 = 4160"):
+            wigner_ville(z, FS, nfft=n + 1)
+
     def test_wigner_ville_time_marginal_and_energy(self):
         # Defining WVD property (convention-independent): sum_f W(t,f) is
         # exactly proportional to the instantaneous power |z(t)|^2, and the
@@ -195,6 +230,26 @@ class TestCWT:
         f, W = cwt(x, FS, frequencies=freqs)
         assert W.shape == (3, 1024)
         assert np.iscomplexobj(W)
+
+    @pytest.mark.parametrize("fs", [4000.0, 8000.0, 16000.0, 22050.0,
+                                    44100.0, 48000.0, 96000.0])
+    def test_default_grid_runs_from_four_cycles_to_exactly_nyquist(self, fs):
+        # The default grid caps itself at fs/2, which the analyser rule admits
+        # (require_at_most_nyquist); its endpoints are exact, not 10**log10.
+        n = 1024
+        x = np.cos(2 * np.pi * 0.1 * fs * np.arange(n) / fs)
+        freqs, W = cwt(x, fs)
+        assert freqs[-1] == fs / 2.0
+        assert freqs[0] == 4.0 * fs / n
+        assert W.shape == (freqs.size, n)
+
+    def test_explicit_grid_admits_nyquist_and_refuses_one_ulp_past(self):
+        x = np.cos(2 * np.pi * 100 * np.arange(256) / FS)
+        nyq = FS / 2.0
+        f, _ = cwt(x, FS, frequencies=[100.0, nyq])
+        assert f[-1] == nyq
+        with pytest.raises(ConfigurationError, match="above the Nyquist"):
+            cwt(x, FS, frequencies=[100.0, np.nextafter(nyq, np.inf)])
 
     def test_bad_wavelet_raises(self):
         with pytest.raises(ConfigurationError):

@@ -22,6 +22,11 @@ RAY_CLASS_COLOURS = {
     'both': '#000000',
 }
 
+#: Right-hand margin on the receiver extent, so a receiver at the maximum
+#: range is not clipped to the spine. The seafloor overlay and the x-limit
+#: both use it — anchoring them differently is what left a bare strip.
+_RECEIVER_EDGE_MARGIN = 1.03
+
 
 @typed_plot_error
 def _plot_rays(
@@ -240,10 +245,11 @@ def _plot_arrivals(
         for kind, col in color_map.items() if counts[kind] > 0
     ]
     if beyond:
+        # In ms, the unit of the delay axis the entry refers to.
         handles.append(mlines.Line2D(
             [], [], linestyle='none', marker='',
-            label=f"+{len(beyond)} beyond {hi / 1000.0:.2f} s "
-                  f"(to {max(beyond) / 1000.0:.2f} s)"))
+            label=f"+{len(beyond)} beyond {hi:.0f} ms "
+                  f"(to {max(beyond):.0f} ms)"))
     if handles:
         ax.legend(handles=handles, loc='upper right', fontsize=9,
                   framealpha=0.85)
@@ -658,12 +664,6 @@ _LAUNCH_FAN_DEG = (-90.0, 90.0)
 _BEAM_PATTERN_TICKS = np.arange(_LAUNCH_FAN_DEG[0], _LAUNCH_FAN_DEG[1] + 1e-9,
                                 30.0)
 _BEAM_PATTERN_TICK_LABELS = [f'{t:g}\u00b0' for t in _BEAM_PATTERN_TICKS]
-
-
-#: Right-hand margin on the receiver extent, so a receiver at the maximum
-#: range is not clipped to the spine. The seafloor overlay and the x-limit
-#: both use it — anchoring them differently is what left a bare strip.
-_RECEIVER_EDGE_MARGIN = 1.03
 
 
 def _densify_in_angle(angles, levels, step_deg: float = 1.0):

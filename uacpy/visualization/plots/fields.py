@@ -13,7 +13,7 @@ from uacpy.core.results import Field
 from uacpy.visualization.style import (cmap_for_field, reversed_cmap,
                                       PROBABILITY_COLORMAP,
                                       PROBABILITY_LIMITS)
-from uacpy.visualization.plots._common import _value_array, _value_label, _default_value, _coord_label, _coord_axis, _TL_LIMITS, _is_loss_view, _overlay_seafloor, _pinned_subtitle, _draw_result_credit, fig_ax, invert_yaxis_once, _draw_geometry, typed_plot_error, _plot_warn
+from uacpy.visualization.plots._common import _value_array, _value_label, _default_value, _coord_label, _coord_axis, _TL_LIMITS, _is_loss_view, _overlay_seafloor, _pinned_subtitle, _draw_result_credit, _draw_credit, _model_attribution, fig_ax, invert_yaxis_once, _draw_geometry, typed_plot_error, _plot_warn
 
 
 # Which of ``plot_field``'s knobs each of its three render branches reads.
@@ -533,10 +533,11 @@ def _plot_field_2d(
             vmin = float(levels.min()) if vmin is None else vmin
             vmax = float(levels.max()) if vmax is None else vmax
     elif value in ('mag', 'real', 'imag') and (vmin is None or vmax is None):
-        # Zero has to land on the diverging map's neutral colour, so the
-        # signed views take symmetric limits and the non-negative modulus
-        # starts at 0 — the same reading of "white = silence" across all
-        # three. An autoscale puts zero at an arbitrary colour instead.
+        # Zero has to land at a fixed place on the map, so the signed views
+        # take symmetric limits (zero on the diverging map's white) and the
+        # non-negative modulus starts at 0 (zero at the map's dark end, white
+        # at half the maximum). An autoscale puts zero at an arbitrary colour
+        # instead.
         # The top is the maximum, deliberately. A linear view compresses
         # everything under its loudest cell — that is what a linear scale
         # is — and no robust statistic helps: on a 1/r field the 99th
@@ -932,9 +933,6 @@ def compare(
 
 def _draw_multi_model_credit(fig, fields):
     """One credit footnote listing every distinct contributing model."""
-    from uacpy.visualization.plots._common import (
-        _draw_credit, _model_attribution,
-    )
     seen, attrs = set(), []
     for f in fields:
         a = _model_attribution(f)

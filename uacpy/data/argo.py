@@ -48,7 +48,8 @@ _GOOD_QC = {'1', '2'}                       # good / probably-good Argo QC flags
 # ERDDAP returns columns in the order requested, and the rows below are unpacked
 # positionally, so the header is checked against this list before it is trusted.
 _COLUMNS = ('platform_number', 'cycle_number', 'direction', 'time', 'latitude',
-            'longitude', 'pres', 'temp', 'psal', 'temp_qc', 'psal_qc')
+            'longitude', 'pres', 'temp', 'psal', 'temp_qc', 'psal_qc',
+            'pres_qc')
 
 
 def _abs_days(time_str, when):
@@ -138,9 +139,9 @@ def fetch_argo_profile(
     for r in rows[2:]:
         if len(r) < len(_COLUMNS):
             continue
-        plat, cyc, dirn, _t, rlat, rlon, pres, temp, psal, tqc, sqc = \
+        plat, cyc, dirn, _t, rlat, rlon, pres, temp, psal, tqc, sqc, pqc = \
             r[:len(_COLUMNS)]
-        if tqc not in _GOOD_QC or sqc not in _GOOD_QC:
+        if any(qc not in _GOOD_QC for qc in (tqc, sqc, pqc)):
             continue
         try:
             vals = (float(rlat), float(rlon), float(pres), float(temp),

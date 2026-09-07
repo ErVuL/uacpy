@@ -45,12 +45,17 @@ from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.data._geo import (
     Coordinate, as_coordinate, great_circle_km, DEFAULT_MAX_TRANSECT_POINTS,
-    pressure_dbar_to_depth,
+    capped_n_points, checked_n_points, depth_to_pressure_dbar,
+    insitu_from_potential, pressure_dbar_to_depth,
 )
 from uacpy.data._http import raise_substantive
-from uacpy.data.bathymetry import fetch_bathy, fetch_bathy_transect
+from uacpy.data.bathymetry import (
+    DEFAULT_DATASET, fetch_bathy, fetch_bathy_transect, transect_length,
+)
 from uacpy.data.sediment import bottom_from_class, bottom_from_grain_size
-from uacpy.data.sound_speed import fetch_ssp, fetch_ssp_transect
+from uacpy.data.sound_speed import (
+    extend_ssp_below_data, fetch_ssp, fetch_ssp_transect, fetch_ts_profile,
+)
 from uacpy.data.sources import SOURCES, DataProvenance
 
 __all__ = ['fetch_environment']
@@ -571,11 +576,15 @@ def fetch_environment(
                 from uacpy.data.copernicus import fetch_ssp_transect_operational
                 # Copernicus has no 'auto' resolver (no cheap cell identity
                 # exposed here), so 'auto' falls back to that fetcher's own
-                # default column count, capped at max_points.
-                cop_n = ssp_n_points if isinstance(ssp_n_points, int) else 6
+                # default column count, capped at max_points; an explicit
+                # count is capped with the shared warning.
+                cop_n = checked_n_points(ssp_n_points, 'fetch_environment',
+                                         allow_auto=True)
+                cop_n = (min(6, max_points) if cop_n == 'auto' else
+                         capped_n_points(cop_n, max_points, 'fetch_environment'))
                 cop_extra = {} if max_days is None else {'max_days': max_days}
                 return fetch_ssp_transect_operational(
-                    point, transect_to, date=date, n_points=min(cop_n, max_points),
+                    point, transect_to, date=date, n_points=cop_n,
                     formula=formula, verbose=verbose,
                     seafloor=(Bathymetry.coerce(bathymetry)
                               if bathymetry is not None else None),
@@ -624,7 +633,6 @@ def fetch_environment(
     # depth axis, so it has to reach the deepest seafloor the run touches.
     depth_max = float(np.max(seafloor.depths))
     if ssp_fetched:
-        from uacpy.data.sound_speed import extend_ssp_below_data
         ssp = extend_ssp_below_data(ssp, depth_max, latitude=lat)
     # A literal ssp= passes straight to Environment, which coerces a scalar /
     # pairs / SoundSpeedProfile and reconciles its depth to the bathymetry.
@@ -726,7 +734,6 @@ def fetch_environment(
     # a fetched altimetry needs both a transect (for its extent) and a date.
     altimetry_result, altimetry_src = altimetry, None
     if altimetry_sources is not None:
-        from uacpy.data.bathymetry import transect_length
         from uacpy.data.sea_surface import fetch_sea_surface
         # The transect/date guards sit inside the try so a supplied altimetry=
         # literal is the fallback for a missing prerequisite, like any other
@@ -882,7 +889,6 @@ def _bathymetry_vintage(src_id, backend):
         except (ConfigurationError, DataFetchError, FileNotFoundError):
             return 'local'          # a stubbed backend: no grid to name
     if backend == 'api' and src_id == 'gebco':
-        from uacpy.data.bathymetry import DEFAULT_DATASET
         return f"{DEFAULT_DATASET} via OpenTopoData"
     return f"{backend} (live)" if backend else None
 
@@ -904,7 +910,6 @@ def _fetch_absorption(point, *, date, ssp_source, ssp_backend, cache_only,
     """
     from uacpy.data.absorption import build_francois_garrison
     if cache_only:
-        from uacpy.data.sound_speed import fetch_ts_profile
         depths, temp, sal = fetch_ts_profile(
             point, date=date, source='local', resolution=resolution,
             timeout=timeout, verbose=verbose)
@@ -913,6 +918,11 @@ def _fetch_absorption(point, *, date, ssp_source, ssp_backend, cache_only,
         extra = {} if max_days is None else {'max_days': max_days}
         depths, temp, sal = fetch_ts_profile_operational(
             point, date=date, verbose=verbose, **extra)
+        # The column's thetao is potential temperature; Francois-Garrison
+        # takes the in-situ value at the row's pressure, as the sound-speed
+        # route converts it before its equation.
+        temp = insitu_from_potential(
+            sal, temp, depth_to_pressure_dbar(depths, as_coordinate(point)[0]))
     elif ssp_source == 'argo':
         from uacpy.data.argo import fetch_argo_profile
         extra = {}
@@ -925,7 +935,6 @@ def _fetch_absorption(point, *, date, ssp_source, ssp_backend, cache_only,
         depths = pressure_dbar_to_depth(prof['pres'], prof['lat'])
         temp, sal = prof['temp'], prof['psal']
     else:
-        from uacpy.data.sound_speed import fetch_ts_profile
         ts_kwargs = {} if ssp_backend is None else {'source': ssp_backend}
         depths, temp, sal = fetch_ts_profile(
             point, date=date, resolution=resolution, timeout=timeout,

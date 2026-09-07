@@ -158,6 +158,15 @@ def test_bathy_fetch_samples_exactly_where_the_plan_says(monkeypatch):
     assert np.allclose(out[:, 0], plan['ranges_m'])
 
 
+def test_bathy_fetch_warns_when_an_explicit_count_is_capped(monkeypatch):
+    monkeypatch.setattr(bath, '_fetch_depths',
+                        lambda points, **kw: np.full(len(points), 1500.0))
+    with pytest.warns(UserWarning, match=r'n_points=30 exceeds max_points=10'):
+        out = bath.fetch_bathy_transect((0.0, 0.0), (0.0, 2.0), n_points=30,
+                                        max_points=10)
+    assert out.shape == (10, 2)
+
+
 def test_bathy_plan_reports_the_uncapped_native_count(monkeypatch):
     # 'native_points' is what the max_points warning quotes, so it must survive
     # the cap rather than being recomputed at the warning site.
@@ -259,8 +268,8 @@ def _raise_downstream(*_args, **_kwargs):
 
 
 def test_a_two_point_transect_reaches_the_waypoint_sampler(monkeypatch):
-    from uacpy.data import _geo, graw_local
-    monkeypatch.setattr(_geo, 'geodesic_waypoints', _raise_downstream)
+    from uacpy.data import graw_local
+    monkeypatch.setattr(graw_local, 'geodesic_waypoints', _raise_downstream)
     with pytest.raises(_ReachedDownstream):
         graw_local.fetch_seabed_density_transect((45.0, -30.0), (46.0, -30.0),
                                                  n_points=2)

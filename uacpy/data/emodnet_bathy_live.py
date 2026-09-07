@@ -19,7 +19,7 @@ import numpy as np
 
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.data._geo import (
-    as_coordinate, nearest_indices, normalize_lon,
+    as_coordinate, depth_from_elevation, nearest_indices, normalize_lon,
 )
 from uacpy.data._http import erddap_last_value, http_get
 
@@ -79,29 +79,21 @@ def _elevation_any(lat, lon, *, timeout, verbose):
     )
 
 
-def _depth(elev, lat, lon):
-    if elev >= 0.0:
-        raise DataFetchError(
-            f"EMODnet DTM reports land (elevation {elev:.0f} m) at "
-            f"({lat:.4f}, {lon:.4f}); no water column.",
-            remediation="Pick a location offshore, or supply a depth directly.",
-        )
-    return -elev
-
-
 def point_depth(point, *, timeout=30.0, verbose=False):
     """Water depth (m, positive down) at a single point from the EMODnet DTM."""
     lat, lon = as_coordinate(point)
-    return _depth(_elevation_any(lat, lon, timeout=timeout, verbose=verbose),
-                  lat, lon)
+    return depth_from_elevation(
+        _elevation_any(lat, lon, timeout=timeout, verbose=verbose), lat, lon,
+        dataset='EMODnet DTM')
 
 
 def depths_along(lats, lons, *, timeout=30.0, verbose=False):
     """Depths (m) at paired ``lats``/``lons`` waypoints (one griddap call each)."""
     out = np.empty(len(lats))
     for k, (la, lo) in enumerate(zip(lats, lons)):
-        out[k] = _depth(
-            _elevation_any(la, lo, timeout=timeout, verbose=verbose), la, lo)
+        out[k] = depth_from_elevation(
+            _elevation_any(la, lo, timeout=timeout, verbose=verbose), la, lo,
+            dataset='EMODnet DTM')
     return out
 
 

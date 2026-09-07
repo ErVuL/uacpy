@@ -194,11 +194,6 @@ def plot_bathymetry_map(
         ax.set_xlim(*lon_rng)
         ax.set_ylim(*lat_rng)
         _draw_graticule(ax, lon_rng, lat_rng, graticule, graticule_minor, proj)
-        # Equirectangular: on the ground 1° of longitude is cos(lat) as long as
-        # 1° of latitude, so stretching the y axis by 1/cos(lat) makes the panel
-        # distance-isotropic at the mid-latitude of the window.
-        ax.set_aspect(aspect if aspect is not None
-                      else 1.0 / np.cos(np.radians(np.mean(lat_rng))))
     else:
         cm = cm.with_extremes(bad='#d9cdb8')
         pc = _draw_depth(ax, lons, lats, depth, cm, relief, relief_exag, 1)
@@ -215,7 +210,12 @@ def plot_bathymetry_map(
         else:
             ax.set_xlabel("Longitude (°E)")
         ax.set_ylabel("Latitude (°N)")
-        ax.set_aspect(aspect if aspect is not None else 'equal')
+    # Equirectangular: on the ground 1° of longitude is cos(lat) as long as 1°
+    # of latitude, so stretching the y axis by 1/cos(lat) makes the panel
+    # distance-isotropic at the mid-latitude of the window — with and without
+    # the coastline basemap.
+    ax.set_aspect(aspect if aspect is not None
+                  else 1.0 / np.cos(np.radians(np.mean(lat_rng))))
 
     if contours is not None and contours is not False and dm.count() > 1:
         levels = list(range(0, 6000, 200)) if contours is True else contours
@@ -363,8 +363,14 @@ def plot_overview(
         ax_tl.set_xticks([])
         ax_tl.set_yticks([])
 
+    # The environment panel paints out to the furthest range it knows; a
+    # range-independent environment without ``receiver=`` knows none, so it
+    # is handed the TL span, the x limit it is synced to below.
     _plot_environment(env, ax=ax_env, source=source, receiver=receiver,
-                     bottom_colorbar=True, sea_ice=sea_ice)
+                     bottom_colorbar=True, sea_ice=sea_ice,
+                     x_max_m=(float(np.max(tl.coords['range']))
+                              if tl is not None and 'range' in tl.coords
+                              else None))
     ax_env.set_title(env_title)
 
     # Both right-column panels now keep their full gridspec cell — neither
@@ -497,9 +503,8 @@ def _draw_depth(ax, lons, lats, depth, cmap, relief, exag, zorder):
         return ax.pcolormesh(lons, lats, dm, cmap=cmap, shading='auto',
                              zorder=zorder)
 
-    from matplotlib.colors import LightSource, Normalize
     base = plt.get_cmap(cmap)
-    norm = Normalize(float(finite.min()), float(finite.max()))
+    norm = _mcolors.Normalize(float(finite.min()), float(finite.max()))
     # Cell size in metres, which the hillshade needs to turn ``vert_exag`` into
     # a real slope: n samples span n-1 intervals. 111320 m is one degree of arc
     # at the equator (40 075 km / 360); longitude degrees shrink by cos(lat).
@@ -530,7 +535,7 @@ def _draw_depth(ax, lons, lats, depth, cmap, relief, exag, zorder):
     # cancels that and azdeg means what it says. Measured on a Gaussian
     # seamount, azdeg=315 now lights the flank bearing 315 deg.
     rgb = base(norm(filled))
-    shaded = LightSource(azdeg=315, altdeg=45).shade_rgb(
+    shaded = _mcolors.LightSource(azdeg=315, altdeg=45).shade_rgb(
         rgb, -filled, blend_mode='soft', vert_exag=exag, dx=dx, dy=-dy)
     rgb[..., :3] = shaded[..., :3]
     rgb[nan_mask, 3] = 0.0                              # land → transparent

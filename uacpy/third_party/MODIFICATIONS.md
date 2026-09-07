@@ -1515,6 +1515,33 @@ modified version wraps it in `if (iflat==1)`.
 +  end if
 ```
 
+#### Sub-bin bandwidth marches one frequency (2026-09-03)
+
+`nf1 = int((bw-df)/df) + 1` sizes the marched band; Fortran's `int()`
+truncates toward zero, so a bandwidth narrower than one bin (`bw < df`, the
+`Q=1e6, T=1` COHERENT_TL deck) gave `nf1=1`, `nf=3` and marched `fc-df`, `fc`,
+`fc+df` — 2.4× the wall time of a single march (0.0658 s against 0.0275 s
+single-threaded on a 100 m Pekeris deck), of which uacpy kept the centre bin.
+Now `nf1=0` when `bw < df`: one marched frequency, `nf=1` in the `psif.dat`
+header. `ram.py`'s `_broadband_frequencies` applies the same rule so the
+Collins loop marches the same vector. `peramx_mpi.f90` is unpatched (see
+below) and still marches three.
+
+```diff
+ tmp=(bw-df)/df
+ nf1=int(tmp) + 1  ! (37.5-0.5)/0.5 + 1 = 75 frequencies, one half
++! UACPY: a bandwidth narrower than one bin marches ONE frequency, not three.
++! int() truncates toward zero, so for bw < df the negative tmp gives
++! int(tmp)=0 and nf1=1 -> nf=3: with Q=1e6, T=1 at fc=800 Hz (bw=8e-4 Hz,
++! df=1 Hz) the loop at :417 marched fc-1, fc and fc+1 Hz and psif.dat
++! recorded nf=3. uacpy keeps only the centre bin, so no reported number was
++! wrong — it cost 2.4x the wall time of the default fluid backend (measured
++! 0.0658 s against 0.0275 s single-threaded on a 100 m Pekeris deck). There is
++! no side bin to place when the band does not reach the first one.
++if (bw < df) nf1 = 0
+ nf=2*nf1+1          ! including 0, 151 frequencies altogether.
+```
+
 ### `src/peramx_mpi.f90` and `Makefile.mpi` -- unbuilt, kept verbatim-upstream
 
 `install.sh` builds only the single-processor target (`make` →

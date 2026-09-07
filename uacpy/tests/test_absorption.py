@@ -150,6 +150,22 @@ def test_francois_garrison_accepts_the_boundary_values(kwargs):
     assert absorption.topopt_code() == 'F'
 
 
+@pytest.mark.parametrize('bad', [np.inf, -np.inf, np.nan])
+@pytest.mark.parametrize(
+    'name', ['temperature_c', 'salinity_psu', 'pH', 'z_bar_m'])
+def test_francois_garrison_refuses_a_non_finite_field_naming_it(name, bad):
+    """inf passes every range guard: inf T or S evaluate to a NaN alpha,
+    inf pH to an inf alpha, and inf z_bar_m to a finite alpha whose deck
+    record reads "inf". The finiteness check runs ahead of the range guards
+    so the message names the field, not the sound speed it feeds."""
+    kwargs = dict(temperature_c=10.0, salinity_psu=35.0, pH=8.0,
+                  z_bar_m=1000.0)
+    kwargs[name] = bad
+    with pytest.raises(ConfigurationError,
+                       match=re.escape(name) + '.*must be finite'):
+        FrancoisGarrison(**kwargs)
+
+
 def test_the_bare_formula_answers_an_out_of_domain_row_with_nan_only():
     """The module-level formula keeps its no-validation contract — but the
     NaN comes back without numpy's raw ``RuntimeWarning``, which would be the

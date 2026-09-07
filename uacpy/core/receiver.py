@@ -2,7 +2,6 @@
 Receiver class for defining hydrophones and receiver arrays
 """
 
-import copy as _copy
 import warnings
 
 import numpy as np
@@ -12,6 +11,7 @@ from dataclasses import dataclass
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.constants import DECK_DEPTH_RESOLUTION_M, DECK_RANGE_RESOLUTION_M
 from uacpy.core._carrier_validate import (
+    _DeepCopyMixin,
     _reject_complex, _require_non_negative, _require_strictly_increasing,
 )
 
@@ -25,7 +25,7 @@ _RANGES_NOT_GIVEN: Any = None
 
 # eq=False: a dataclass __eq__ over ndarray fields raises; compare by identity.
 @dataclass(eq=False)
-class Receiver:
+class Receiver(_DeepCopyMixin):
     """
     Acoustic receiver definition
 
@@ -197,10 +197,6 @@ class Receiver:
 
     def __repr__(self) -> str:
         return f"Receiver(grid: {self.n_depths} depths × {self.n_ranges} ranges)"
-
-    def copy(self):
-        """Deep copy (symmetric with the other carriers)."""
-        return _copy.deepcopy(self)
 
 # The dataclass compiles ``__init__`` from the *field* annotations, so
 # ``inspect.signature`` / ``help()`` would advertise a default the annotation

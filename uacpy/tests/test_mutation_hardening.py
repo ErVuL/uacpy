@@ -651,12 +651,14 @@ class TestConstantQSetupWarningBoundary:
             "hann")[0][0]
         with _w.catch_warnings(record=True) as caught:
             _w.simplefilter("always")
-            _cq_setup(np.zeros(n_lowest), fs, fmin, None, B, "hann", "t")
+            _cq_setup(np.zeros(n_lowest), fs, fmin, None, B, "hann", "t",
+                      drops_short_bins=True)
         # Only this warning is under test. `fmax=None` resolves to fs/2, so
         # the near-Nyquist image note fires on the same call by design.
         assert not any("lowest bin needs" in str(c.message) for c in caught)
         with pytest.warns(UserWarning, match="lowest bin needs"):
-            _cq_setup(np.zeros(n_lowest - 1), fs, fmin, None, B, "hann", "t")
+            _cq_setup(np.zeros(n_lowest - 1), fs, fmin, None, B, "hann", "t",
+                      drops_short_bins=True)
 
 
 class TestConstantQTransformCentresTheFrame:

@@ -21,7 +21,7 @@ from uacpy.core.environment import BoundaryProperties
 from uacpy.core.exceptions import DataFetchError
 from uacpy.core.sediment import _HB_PHI, _HB_RHO, grain_size_to_geoacoustics
 from uacpy.data import _cache
-from uacpy.data._geo import as_coordinate
+from uacpy.data._geo import as_coordinate, checked_n_points, geodesic_waypoints
 from uacpy.data._netcdf import NetcdfGrid
 from uacpy.data.sediment import (
     range_dependent_bottom_along, water_sound_speed_at,
@@ -42,7 +42,12 @@ GRAW_URL = 'https://zenodo.org/records/3762390/files/Dataset_S2.nc'
 # suite never sampled. The inversion therefore saturates at ϕ = 8.80 over most
 # of the deep ocean: there the returned density is still the measured one, but
 # the speed and attenuation derived from it are the silty-clay end member
-# rather than a value tracking the grid.
+# rather than a value tracking the grid. Inside the table the inversion is
+# ill-conditioned at the fine end: the rows at 1.480 g/cm³ (ϕ 8.80) and
+# 1.484 g/cm³ (ϕ 7.13) differ by 0.3 % in density, so a 0.3 % density change
+# swings ϕ by 1.67 and the derived compressional speed by 24 m/s (1.6 %;
+# velocity ratio 0.990 → 1.006), while the attenuation barely moves (k_p
+# 0.101 → 0.104).
 _RHO_ASC = _HB_RHO[::-1]
 _PHI_DESC = _HB_PHI[::-1]
 
@@ -113,7 +118,6 @@ def fetch_seabed_density_transect(start, end, n_points=6):
 
     ``density_gcm3`` is ``NaN`` at any waypoint without a finite grid value.
     """
-    from uacpy.data._geo import checked_n_points, geodesic_waypoints
     n_points = checked_n_points(n_points, 'fetch_seabed_density_transect')
     lats, lons, ranges_m = geodesic_waypoints(start, end, n_points)
     g = _grid()

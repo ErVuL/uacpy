@@ -364,13 +364,12 @@ def lfm_chirp(
                           "the top of the sweep",
                           "the sampled waveform aliases")
     T = duration  # local alias for the sweep-duration symbol in the phase law
-    N = int(T * sample_rate)
+    N = int(round(T * sample_rate))  # so dt == 1/sample_rate exactly
     if N <= 0:
         raise ConfigurationError(
             "lfm_chirp: duration * sample_rate must cover at least one sample; "
             f"got duration={duration}, sample_rate={sample_rate}.")
-    deltat = T / N
-    time = np.linspace(0.0, T - deltat, N)
+    time = np.arange(N) / sample_rate
 
     # Time-averaged frequency over [0, t]; 2*pi*f_avg*t is the chirp phase
     # (instantaneous frequency is fmin + (fmax-fmin)*t/T, twice the slope).
@@ -524,13 +523,12 @@ def hfm_chirp(
                           "the top of the sweep",
                           "the sampled waveform aliases")
     T = duration  # local alias for the sweep-duration symbol in the phase law
-    N = int(T * sample_rate)
+    N = int(round(T * sample_rate))  # so dt == 1/sample_rate exactly
     if N <= 0:
         raise ConfigurationError(
             "hfm_chirp: duration * sample_rate must cover at least one sample; "
             f"got duration={duration}, sample_rate={sample_rate}.")
-    deltat = T / N
-    time = np.linspace(0.0, T - deltat, N)
+    time = np.arange(N) / sample_rate
 
     # b < 0 for an up-sweep; see the sign convention in the docstring.
     b = (fmin - fmax) / (fmin * fmax * T)

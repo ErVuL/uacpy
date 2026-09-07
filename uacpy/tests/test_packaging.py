@@ -2547,9 +2547,10 @@ def test_a_type_clean_subpackage_stays_at_zero_checker_errors(subpackage,
 _UNSHIPPED_DIRS = {'tests', 'examples', 'third_party', 'bin', '__pycache__'}
 
 #: The lowest number of ``TypedDict``-annotated returns the sweep below has to
-#: find. Two readers carry one today; a sweep that found none would report no
+#: find. Two readers carry one today (``read_oast_tl``,
+#: ``read_reflection_coefficient``); a sweep that found none would report no
 #: mismatches and pass.
-_MIN_TYPED_DICT_RETURNS = 3
+_MIN_TYPED_DICT_RETURNS = 2
 
 
 def _typed_dict_returns():

@@ -317,7 +317,7 @@ through.
 | Source | Coverage | Resolution | Licence | Offline |
 |---|---|---|---|---|
 | `emodnet` | European seas | Folk 5-class polygons, 1:1M | CC-BY 4.0 | ✅ `--data emodnet` (~200 MB) |
-| `grainsize` | global but **sparse** | point samples (NCEI G00127 + DECK41) | public domain | ✅ `--data sediment` (~3 MB) |
+| `grainsize` | global but **sparse** | point samples (NCEI G00127 + a hand-placed DECK41 file) | public domain | ✅ `--data sediment` (~3 MB; DECK41 is never downloaded) |
 | `diesing` | deep sea only (> 500 m) | 10 km raster, 5 lithologies | CC-BY 4.0 | ✅ `--data diesing` (~40 MB) |
 | `mars` | Australian margin | ~100k point samples | CC-BY 4.0 | ❌ live WFS |
 | `graw` | global | 5′ predicted bulk density | CC-BY 4.0 | ✅ `--data graw` (~37 MB) |
@@ -399,7 +399,7 @@ for model in ('hamilton', 'apl-uw'):
 ![Grain size to geoacoustics](figures/data_grain_size.png)
 
 Two published models: `'hamilton'` (Hamilton & Bachman 1982 table plus the
-Hamilton 1980 `k_p` attenuation) is the **low-frequency** answer and the
+Hamilton 1972 `k_p` attenuation) is the **low-frequency** answer and the
 default; `'apl-uw'` (APL-UW TR 9407 §IV.A.4) is the **high-frequency** one. They
 agree on the shape — coarse sediment is fast, dense and lossy; fine mud is slow,
 light and quiet — and disagree at the coarse end: ~160 m/s at the ϕ = −0.5 edge
@@ -414,9 +414,9 @@ Three things worth reading off the plot:
   `fetch_environment` builds a bottom it passes the sound speed from the
   reconciled SSP at that seafloor, so the seabed is scaled to the water actually
   above it.
-- **Attenuation peaks at the sand–silt boundary** — ϕ = 4.05 for Hamilton,
-  ϕ = 4.5 for APL-UW — then falls by roughly an order of magnitude into clay
-  (8.6× and 14.6× respectively). The lossiest sediment is neither the coarsest
+- **Attenuation peaks at the sand–silt boundary** — ϕ = 4.5 for both
+  Hamilton and APL-UW — then falls by roughly an order of magnitude into clay
+  (15.6× and 14.6× respectively). The lossiest sediment is neither the coarsest
   nor the finest. Returned in dB/**wavelength**, which is frequency-independent.
 - **Hamilton flattens below ϕ ≈ 0.5.** That is the edge of its table, and ϕ is
   clamped there. The clamp warns when it changes the numbers you get back, so
@@ -610,10 +610,14 @@ days away. `DataProvenance` records both, and derives the miss distance:
 ```python
 for prov in env.data_sources:
     print(prov.source.id, prov.data_date, prov.data_point, prov.offset_km)
-# gebco  None                     None          None
-# woa23  month 07 (climatology)   (48.5, -7.5)  49.8
-# emodnet None                    None          None
+# gebco   GEBCO_2025               None          None
+# woa23   month 07 (climatology)   (45.5, -6.5)  25.9
+# emodnet None                     None          None
 ```
+
+(The §1 point on the cached grids, `*_sources='local'`: the GEBCO record
+carries the grid vintage as its date; a local WOA23 fetch snaps to the 1° cell
+centre; EMODnet substrate is a polygon lookup with no date or cell.)
 
 Carriers carry provenance too — `env.ssp.data_sources`, `env.bathymetry.data_sources`
 — and `env.data_sources` is the de-duplicated union in axis order. It survives
@@ -626,14 +630,15 @@ print(uacpy.data.citations(env))
 ```
 
 ```
-GEBCO grid (served via OpenTopoData)  [Public domain (attribution requested)]
+GEBCO grid  [Public domain (attribution requested)]
   Attribution: GEBCO Compilation Group, GEBCO Grid
   Cite:        GEBCO Compilation Group, GEBCO Grid — cite the grid DOI for the vintage used (GEBCO 2025 offline; gebco.net).
+  Fetched:     date GEBCO_2025
 
 World Ocean Atlas 2023 (NOAA NCEI)  [U.S. Government work — public domain]
   Attribution: NOAA World Ocean Atlas 2023 (NCEI)
   Cite:        Reagan, J.R., et al. (2024). World Ocean Atlas 2023. NOAA National Centers for Environmental Information.
-  Fetched:     date month 07 (climatology), requested 2026-07-15; at 48.500, -7.500, 50 km from requested
+  Fetched:     date month 07 (climatology), requested 2026-07-15; at 45.500, -6.500, 26 km from requested
 
 EMODnet Geology — seabed substrate  [CC-BY 4.0]
   Attribution: EMODnet Geology seabed substrate (emodnet.ec.europa.eu), CC-BY 4.0

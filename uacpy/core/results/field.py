@@ -4,15 +4,17 @@ they construct it)."""
 
 from __future__ import annotations
 
-import copy as _copy
 import warnings
 import numpy as np
 from typing import Optional, Dict, Any, List, Tuple, Union
 
-from uacpy.core._carrier_validate import _require_finite, _reject_complex
+from uacpy.core._carrier_validate import _DeepCopyMixin, _require_finite, _reject_complex
 from uacpy.core.constants import DEFAULT_SOUND_SPEED
 from uacpy.core.exceptions import ConfigurationError
-from uacpy.core._grid import _nearest_index_on_axis
+from uacpy.core._grid import (
+    _as_finite_scalar_label, _nearest_index_on_axis, collapse_axis,
+)
+from uacpy.core.environment import Bathymetry, Environment
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 
 from uacpy.core.results import quantities as _quantities
@@ -610,7 +612,6 @@ class Field(Result):
         sharp interference nulls; slice complex pressure (or use ``at``) for
         null-critical work.
         """
-        from uacpy.core._grid import collapse_axis
         method = kwargs.pop('method', 'linear')
         self._check_axes(kwargs)
         if method != 'nearest':      # 'nearest' fabricates nothing
@@ -690,6 +691,10 @@ class Field(Result):
                     f"Field: unknown axis {name!r}; available: "
                     f"{list(self.coords)}"
                 )
+            if self.coords[name].size == 0:
+                raise ConfigurationError(
+                    f"Field: axis {name!r} has no samples (size 0) to select "
+                    f"from; widen the selection that sliced it to nothing.")
 
     def _slice(self, idx_map: Dict[str, int]) -> "Field":
         slicers: List[Any] = []
@@ -773,7 +778,6 @@ class Field(Result):
                 "Field.mask_below_seafloor: requires canonical "
                 f"['depth', 'range'] coords; got {list(self.coords)}"
             )
-        from uacpy.core.environment import Environment, Bathymetry
         if isinstance(bathymetry, Environment):
             bathymetry = bathymetry.bathymetry
         if not isinstance(bathymetry, Bathymetry):
@@ -1308,7 +1312,7 @@ _RESULTSTACK_VARYING_ATTR = {
 }
 
 
-class ResultStack:
+class ResultStack(_DeepCopyMixin):
     """Stack of typed :class:`Result` slabs along one coordinate.
 
     Bundles a list of slabs together with the coordinate vector along
@@ -1445,10 +1449,6 @@ class ResultStack:
     def __len__(self) -> int:
         return self.n_slabs
 
-    def copy(self) -> "ResultStack":
-        """Deep copy (symmetric with :class:`Result` and the carriers)."""
-        return _copy.deepcopy(self)
-
     def __getitem__(self, index: int) -> Result:
         return self.slabs[int(index)]
 
@@ -1464,16 +1464,15 @@ class ResultStack:
         must be a finite scalar, the same label contract :meth:`Field.at`
         applies.
         """
-        from uacpy.core._grid import _as_finite_scalar_label
         if len(kwargs) != 1 or self.coordinate_name not in kwargs:
             raise ConfigurationError(
                 f"ResultStack.at(): pass exactly the stacking-axis "
                 f"keyword ({self.coordinate_name}=<value>); got "
                 f"{list(kwargs)}"
             )
-        target = _as_finite_scalar_label(
-            kwargs[self.coordinate_name], self.coordinate_name)
-        idx = int(np.argmin(np.abs(self.coordinate - target)))
+        idx = _nearest_index_on_axis(
+            self.coordinate, kwargs[self.coordinate_name],
+            self.coordinate_name)
         return self.slabs[idx]
 
     def isel(self, **kwargs) -> Result:
@@ -1875,7 +1874,6 @@ def _ifft_to_trace(
     freqs, df, bin_indices, bin_offset_hz, nfft, win = _synthesis_plan(
         tf, window=window, nfft=nfft, sample_rate=sample_rate, who=who)
 
-    from uacpy.core._grid import _as_finite_scalar_label
     d_idx = (
         int(np.argmin(np.abs(
             depths - _as_finite_scalar_label(depth, 'depth'))))

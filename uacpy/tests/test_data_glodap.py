@@ -25,7 +25,9 @@ def _write_glodap(cache):
 
     One populated column at (30.5, -40.5) with a NaN-masked deepest level (a
     sub-seafloor fill), so the reader exercises both the shifted-origin longitude
-    wrap and the seafloor trim; everywhere else is NaN (land / unmapped).
+    wrap and the seafloor trim, and one full three-level column at (31.5, -40.5)
+    whose mid-depth (1000 m) is nearest a single level; everywhere else is NaN
+    (land / unmapped).
     """
     gdir = cache / 'glodap'; gdir.mkdir(parents=True)
     depth = np.array([0.0, 500.0, 2000.0])
@@ -34,6 +36,7 @@ def _write_glodap(cache):
     ph = np.full((depth.size, lat.size, lon.size), np.nan)
     # col wrap: lon -40.5 → 319.5 (index 299); row: lat 30.5 → index 120.
     ph[:, 120, 299] = [8.10, 8.05, np.nan]
+    ph[:, 121, 299] = [8.10, 8.05, 7.95]
     ds = netCDF4.Dataset(gdir / glodap_local.GLODAP_FILE, 'w')
     ds.createDimension('depth', depth.size)
     ds.createDimension('lat', lat.size)
@@ -80,8 +83,23 @@ def test_ph_profile_trims_at_seafloor(glodap_cache):
     assert ph.tolist() == [pytest.approx(8.10), pytest.approx(8.05)]
 
 
-def test_ph_surface_and_reference_depth(glodap_cache):
-    assert glodap_local.fetch_ph((30.5, -40.5)) == pytest.approx(8.10)
+def test_ph_defaults_to_the_level_nearest_the_column_mid_depth(glodap_cache):
+    # Levels 0 / 500 / 2000 m: the mid-depth 1000 m is nearest the 500 m level,
+    # the row build_francois_garrison takes by default from a T/S column of
+    # the same extent.
+    point = (31.5, -40.5)
+    depths, ph = glodap_local.fetch_ph_profile(point)
+    mid = 0.5 * (depths.min() + depths.max())
+    assert glodap_local.fetch_ph(point) == glodap_local.fetch_ph(
+        point, reference_depth=mid)
+    assert glodap_local.fetch_ph(point) == pytest.approx(
+        ph[np.argmin(np.abs(depths - mid))])
+    assert glodap_local.fetch_ph(point) != pytest.approx(ph[0])
+
+
+def test_ph_reference_depth_picks_the_nearest_level(glodap_cache):
+    assert glodap_local.fetch_ph((30.5, -40.5),
+                                 reference_depth=0.0) == pytest.approx(8.10)
     assert glodap_local.fetch_ph((30.5, -40.5),
                                  reference_depth=500.0) == pytest.approx(8.05)
 

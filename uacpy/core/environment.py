@@ -6,14 +6,14 @@ so ``from uacpy.core.environment import BoundaryProperties`` (etc.) is a valid
 import path for every carrier an :class:`Environment` holds.
 """
 
-import copy as _copy
 import warnings
 import numpy as np
-from typing import TYPE_CHECKING, Union, List, Tuple, Optional
+from typing import Union, List, Tuple, Optional
 
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core._carrier_validate import (
+    _DeepCopyMixin,
     _sanitize_title, _dedupe_provenance, _scalar_or_none,
 )
 from uacpy.core.bottom import (
@@ -23,9 +23,7 @@ from uacpy.core.ssp import SoundSpeedProfile, generate_sea_surface
 from uacpy.core.bathymetry import Bathymetry
 from uacpy.core.altimetry import Altimetry
 from uacpy.core.surface import Surface
-
-if TYPE_CHECKING:
-    from uacpy.core.absorption import Absorption  # noqa: F401
+from uacpy.core.absorption import Absorption
 
 
 def _coerce_coordinate(value, label):
@@ -91,7 +89,7 @@ def _coerce_date(value):
         f"or None; got {type(value).__name__}.")
 
 
-class Environment:
+class Environment(_DeepCopyMixin):
     """
     Ocean environment definition.
 
@@ -209,7 +207,6 @@ class Environment:
                                  Tuple[float, float]]] = None,
         date=None,
     ):
-        from uacpy.core.absorption import Absorption
         if absorption is not None and not isinstance(absorption, Absorption):
             raise ConfigurationError(
                 f"Environment: absorption must be an Absorption subclass "
@@ -301,9 +298,8 @@ class Environment:
         scalar cp, preset name, ``BoundaryProperties``, ``SeabedColumn`` or
         ``Bottom`` (``None`` → the default half-space)."""
         if bottom is None:
-            return Bottom.from_halfspace(BoundaryProperties(
-                acoustic_type='half-space', density=1.5,
-                sound_speed=1600.0, attenuation=0.5))
+            return Bottom.from_halfspace(
+                BoundaryProperties(acoustic_type='half-space'))
         if isinstance(bottom, Bottom):
             return bottom
         if isinstance(bottom, SeabedColumn):
@@ -517,15 +513,6 @@ class Environment:
                 f"Environment.get_representative_depth: unknown method={method!r}; "
                 "valid: 'max', 'median', 'mean', 'min', 'initial'"
             )
-
-    def copy(self):
-        """Deep copy of the environment.
-
-        Uses ``copy.deepcopy`` so every field — including ``ssp``,
-        ``altimetry``, and ``bottom`` — is duplicated without aliasing
-        back to the original instance.
-        """
-        return _copy.deepcopy(self)
 
 
 __all__ = [

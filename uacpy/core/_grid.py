@@ -11,13 +11,12 @@ interpolation semantics. ``at`` is ``method='nearest'``; ``eval`` defaults to
 
 from __future__ import annotations
 
-import copy as _copy
-
 import numpy as np
 
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.constants import DECK_RANGE_RESOLUTION_M
 from uacpy.core._carrier_validate import (
+    _DeepCopyMixin,
     _reject_complex, _require_non_negative, _require_strictly_increasing,
 )
 
@@ -161,7 +160,7 @@ def collapse_axis(arr, axis_values, value, method='linear', *, axis=0,
     return out, v
 
 
-class _RangeProfile:
+class _RangeProfile(_DeepCopyMixin):
     """Base for the 1-D ``value(range)`` shape carriers.
 
     :class:`~uacpy.core.bathymetry.Bathymetry` (seafloor depth, positive down)
@@ -229,10 +228,6 @@ class _RangeProfile:
     def to_pairs(self) -> np.ndarray:
         """``(N, 2)`` ``(range, value)`` array."""
         return np.column_stack([self.ranges, self._values])
-
-    def copy(self):
-        """Deep copy (symmetric with the other carriers)."""
-        return _copy.deepcopy(self)
 
     @property
     def n_ranges(self) -> int:

@@ -36,6 +36,7 @@ from uacpy.comms.doppler import compensate_doppler, estimate_doppler_scale
 from uacpy.comms.equalization import DFE, slicer
 from uacpy.comms.modulation import Modulator
 from uacpy.comms.ofdm import (equalize_subcarriers,
+    ofdm_demodulate,
     ofdm_symbol,
     apply_cfo,
     estimate_channel,
@@ -80,8 +81,17 @@ def _require_passband_fits(sample_rate, fc, sps, rolloff, where):
                         f"sample_rate/sps/rolloff to narrow the band.")
 
 
-def _default_preamble(n_symbols, scheme, seed=0xC0FFEE):
-    """A fixed pseudo-random preamble with good autocorrelation."""
+# The seeds are the contract between the two ends of a link: a receiver
+# regenerates the preamble / pilot from the same seed and correlates against
+# exactly these symbols.
+_PREAMBLE_SEED = 0xC0FFEE
+_PILOT_SEED = 0xACE0FDA
+
+
+def _seeded_symbols(n_symbols, scheme, seed):
+    """``n_symbols`` pseudo-random ``scheme`` symbols from a fixed seed: the
+    default preamble (good autocorrelation) or the known pilot loaded on every
+    OFDM subcarrier for channel estimation."""
     rng = np.random.default_rng(seed)
     mod = Modulator(scheme)
     return mod.modulate(rng.integers(0, 2, n_symbols * mod.bits_per_symbol))
@@ -108,7 +118,7 @@ class Transmitter:
         self.code = code
         if preamble is None or np.isscalar(preamble):
             n = 64 if preamble is None else int(np.asarray(preamble).item())
-            self.preamble = _default_preamble(n, modulation)
+            self.preamble = _seeded_symbols(n, modulation, _PREAMBLE_SEED)
         else:
             self.preamble = np.asarray(preamble, dtype=complex)
 
@@ -144,7 +154,7 @@ class CommsReceiver:
         self.equalizer = equalizer
         if preamble is None or np.isscalar(preamble):
             n = 64 if preamble is None else int(np.asarray(preamble).item())
-            self.preamble = _default_preamble(n, modulation)
+            self.preamble = _seeded_symbols(n, modulation, _PREAMBLE_SEED)
         else:
             self.preamble = np.asarray(preamble, dtype=complex)
         if equalizer is not None and getattr(equalizer, 'forget', None) is None:
@@ -230,13 +240,6 @@ class CommsReceiver:
         return self.receive(syms, threshold=threshold)
 
 
-def _pilot_spectrum(n_subcarriers, scheme, seed=0xACE0FDA):
-    """Known QAM/PSK pilot loaded on every subcarrier (channel-estimation symbol)."""
-    rng = np.random.default_rng(seed)
-    mod = Modulator(scheme)
-    return mod.modulate(rng.integers(0, 2, n_subcarriers * mod.bits_per_symbol))
-
-
 class OFDMTransmitter:
     """OFDM passband transmitter (FEC + QAM + Schmidl-Cox preamble + pilot + CP).
 
@@ -261,7 +264,8 @@ class OFDMTransmitter:
         self.cp_len = int(cp_len)
         self.code = code
         self.preamble = schmidl_cox_preamble(self.n_subcarriers, self.cp_len)
-        self.pilot_freq = _pilot_spectrum(self.n_subcarriers, modulation)
+        self.pilot_freq = _seeded_symbols(self.n_subcarriers, modulation,
+                                          _PILOT_SEED)
 
     def transmit(self, bits):
         """Information bits -> baseband OFDM frame (complex time samples)."""
@@ -323,21 +327,8 @@ class OFDMReceiver:
         self.code = code
         self.snr_linear = snr_linear
         self.preamble = schmidl_cox_preamble(self.n_subcarriers, self.cp_len)
-        self.pilot_freq = _pilot_spectrum(self.n_subcarriers, modulation)
-
-    def _equalize(self, freq, h):
-        """One-tap-per-subcarrier ZF (or MMSE) division by the channel estimate.
-
-        Both branches take the ``conj(h)/(|h|^2 + eps)`` form of
-        :func:`~uacpy.comms.ofdm.ofdm_demodulate`, with ``eps`` scaled to the
-        estimate's own power. ``h`` here comes from the received pilot, so its
-        magnitude is the receive amplitude: against a fixed offset the estimate
-        stopped being used at all once the record fell near it — measured,
-        16-QAM over a 4-tap channel ran at BER 0.24 at a receive amplitude of
-        1e-12, and MMSE at 1e-9. A subcarrier the estimate calls silent comes
-        back as zero.
-        """
-        return equalize_subcarriers(freq, h, self.snr_linear)
+        self.pilot_freq = _seeded_symbols(self.n_subcarriers, modulation,
+                                          _PILOT_SEED)
 
     def receive(self, baseband):
         """Baseband OFDM frame -> information bits (sync, channel est, equalize).
@@ -368,16 +359,15 @@ class OFDMReceiver:
                 f"got {nblocks} block(s) of {blk} samples from {x.size} "
                 f"samples, need >= 3")
 
-        def block_spectrum(b):
-            """FFT of OFDM block ``b`` (cyclic prefix removed)."""
-            seg = x[b * blk + cp: b * blk + cp + nsc]
-            return np.fft.fft(seg) / np.sqrt(nsc)
-
         h = estimate_channel(x[blk:2 * blk], self.pilot_freq, nsc, cp)
         c = self.modulator.constellation
         data = []
-        for b in range(2, nblocks):
-            d = self._equalize(block_spectrum(b), h)
+        # Every whole block after the pilot, CP stripped and transformed;
+        # equalised here (channel=None) by the pilot estimate h rather than
+        # by a channel the caller describes.
+        spectra = ofdm_demodulate(x[2 * blk:], nsc, cp, channel=None)
+        for d in spectra.reshape(-1, nsc):
+            d = equalize_subcarriers(d, h, self.snr_linear)
             # decision-directed common-phase-error correction (residual CFO drift)
             dec = slicer(d, c)
             d *= np.exp(-1j * np.angle(np.vdot(dec, d)))

@@ -390,6 +390,17 @@ class TestSurfaceDelegatedWriteBroadcasts:
             s.roughness = 3.0
         assert all(p.roughness == pytest.approx(3.0) for p in s.properties)
 
+    def test_the_multi_node_warning_names_the_callers_file(self):
+        """The write is delegated through the helper the seabed carriers
+        share, so the warning walks out of the package to the assigning
+        line rather than counting frames to it."""
+        s = self._multi_node()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            s.roughness = 3.0
+        (w,) = [w for w in caught if 'sets all 2 range' in str(w.message)]
+        assert w.filename == __file__
+
     def test_the_multi_node_warning_points_at_properties(self):
         s = self._multi_node()
         with pytest.warns(UserWarning, match=r"\.properties\[i\]"):

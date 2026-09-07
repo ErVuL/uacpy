@@ -22,7 +22,6 @@ FEATURES DEMONSTRATED:
 """
 
 import sys
-import wave
 import os
 from pathlib import Path
 
@@ -38,15 +37,7 @@ from scipy.signal import resample_poly  # noqa: E402
 
 from uacpy import comms  # noqa: E402
 from uacpy.visualization import plot_scatter, plot_convergence, plot_sync_metric  # noqa: E402
-
-
-def _write_wav(path, signal, fs):
-    """Write a real signal to a 16-bit mono .wav (normalized)."""
-    x = signal / (np.max(np.abs(signal)) + 1e-12)
-    pcm = (x * 32767).astype(np.int16)
-    with wave.open(str(path), 'wb') as w:
-        w.setnchannels(1); w.setsampwidth(2); w.setframerate(int(fs))
-        w.writeframes(pcm.tobytes())
+from plotting_utils import write_wav as _write_wav  # noqa: E402
 
 
 def main():

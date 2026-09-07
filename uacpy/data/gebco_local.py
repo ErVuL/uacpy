@@ -15,7 +15,7 @@ import numpy as np
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.data import _cache
-from uacpy.data._geo import as_coordinate, lon_linspace
+from uacpy.data._geo import as_coordinate, depth_from_elevation, lon_linspace
 from uacpy.data._netcdf import NetcdfGrid, netcdf_lock
 
 __all__ = ['point_depth', 'depths_along', 'region_grid']
@@ -120,20 +120,11 @@ def _grid():
     return _cache.cached_grid_at(_grid_path(), _GebcoGrid, 'gebco')
 
 
-def _depth_from_elevation(elev, lat, lon):
-    if elev >= 0.0:
-        raise DataFetchError(
-            f"GEBCO reports land (elevation {elev:.0f} m) at "
-            f"({lat:.4f}, {lon:.4f}); no water column.",
-            remediation="Pick a location offshore, or supply a depth directly.",
-        )
-    return -elev
-
-
 def point_depth(point):
     """Water depth (m, positive down) at a single point from the GEBCO grid."""
     lat, lon = as_coordinate(point)
-    return _depth_from_elevation(_grid().elevation(lat, lon), lat, lon)
+    return depth_from_elevation(_grid().elevation(lat, lon), lat, lon,
+                                dataset='GEBCO')
 
 
 def depths_along(lats, lons):
@@ -141,7 +132,8 @@ def depths_along(lats, lons):
     g = _grid()
     out = np.empty(len(lats))
     for k, (la, lo) in enumerate(zip(lats, lons)):
-        out[k] = _depth_from_elevation(g.elevation(la, lo), la, lo)
+        out[k] = depth_from_elevation(g.elevation(la, lo), la, lo,
+                                      dataset='GEBCO')
     return out
 
 

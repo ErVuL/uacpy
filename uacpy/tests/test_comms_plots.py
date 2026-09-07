@@ -142,3 +142,17 @@ def test_comms_plotters_return_fig_ax_and_honour_ax(plotter, args):
     _, ax3 = plotter(*args, ax=ax2)
     assert ax3 is ax2
     plt.close(fig2)
+
+
+def test_the_quadrature_label_of_a_wide_constellation_stays_on_the_figure():
+    """The "Quadrature" axis label sits entirely inside the saved figure even
+    with four-digit tick labels on the default 5-inch square panel: the
+    plotter lays its own figure out around its labels."""
+    from uacpy import comms
+    from uacpy.visualization.plots.comms import plot_constellation
+    fig, ax = plot_constellation(1000.0 * comms.constellation('16qam'),
+                                 scheme='16qam')
+    fig.canvas.draw()
+    bbox = ax.yaxis.label.get_window_extent()
+    assert bbox.x0 >= 0.0, f"ylabel starts {bbox.x0:.1f} px left of the figure"
+    plt.close(fig)

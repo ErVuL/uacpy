@@ -40,7 +40,7 @@ from uacpy.models.base import (
 from uacpy.io.oalib_reader import read_rts_file
 from uacpy.io.oalib_writer import (
     write_sparc_env_file, reject_unsupported_ssp_interp,
-    resolve_phase_speed_bounds,
+    resolve_phase_speed_bounds, resolve_ssp_topopt,
     SOURCE_TYPE_CODE as _SOURCE_TYPE_CODE,
     at_env_media,
 )
@@ -1150,7 +1150,6 @@ class SPARC(PropagationModel):
         The ``'D'`` loop pins it to the full receiver extent so its per-range
         runs share one time grid.
         """
-        from uacpy.io.oalib_writer import resolve_ssp_topopt
         ssp_code = resolve_ssp_topopt(env, self.interp_ssp)
         surface_type = parse_boundary_type(env.surface.acoustic_type)
 

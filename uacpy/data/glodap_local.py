@@ -169,11 +169,13 @@ def fetch_ph(point, *, reference_depth=None):
     """Representative seawater pH at a ``(lat, lon)`` point.
 
     Samples the GLODAP column and returns the value at ``reference_depth`` (m,
-    nearest level), or the shallowest level (surface) when ``None`` — matching
-    the nominal-row convention of :func:`uacpy.data.build_francois_garrison`.
+    nearest level), or at the column's **mid-depth** when ``None`` — the row
+    :func:`uacpy.data.build_francois_garrison` takes by default, so the two
+    defaults pair a pH with the temperature of the same depth. The pH column
+    ends at the GLODAP seafloor level, which need not be the T/S column's;
+    pass ``reference_depth`` to pin the row (``fetch_environment`` does).
     """
     depths, ph = fetch_ph_profile(point)
-    if reference_depth is None:
-        return float(ph[0])
-    i = int(np.argmin(np.abs(depths - float(reference_depth))))
-    return float(ph[i])
+    ref = (0.5 * (float(depths.min()) + float(depths.max()))
+           if reference_depth is None else float(reference_depth))
+    return float(ph[int(np.argmin(np.abs(depths - ref)))])

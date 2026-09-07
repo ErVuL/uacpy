@@ -5,14 +5,19 @@ from __future__ import annotations
 
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.cm import ScalarMappable
+from matplotlib.colors import LinearSegmentedColormap, Normalize
+from matplotlib.ticker import MaxNLocator
 from typing import Optional, Tuple
 
+from uacpy.core.absorption import francois_garrison_db_per_km, thorp_db_per_km
 from uacpy.core.environment import Environment
+from uacpy.core.ssp import SoundSpeedProfile
 from uacpy.visualization.style import (
-    BOTTOM_FILL_STYLE, BOTTOM_FILL_HATCH, BOTTOM_CMAP, BOTTOM_LINE_STYLE,
-    BOTTOM_LINE_STYLE_FLAT, _blend,
+    BOTTOM_FILL_STYLE, BOTTOM_CMAP, BOTTOM_LINE_STYLE, BOTTOM_LINE_STYLE_FLAT,
+    hatched_fill,
 )
-from uacpy.visualization.plots._common import ZORDER_SEDIMENT, _credit_attributions, _draw_credit, _draw_geometry, _draw_sea_ice, _draw_surface_boundary, _draw_altimetry, fig_ax, typed_plot_error, invert_yaxis_once
+from uacpy.visualization.plots._common import ZORDER_SEDIMENT, _credit_attributions, _draw_credit, _draw_geometry, _draw_sea_ice, _draw_surface_boundary, _draw_altimetry, _fill_margins, fig_ax, typed_plot_error, invert_yaxis_once
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.units import km_to_m, m_to_km
 
@@ -64,20 +69,62 @@ def _halfspace_cp(bottom) -> float | None:
     return cp if cp and cp > 0 else None
 
 
-def _hatched_fill(facecolor) -> dict:
-    """``fill_between`` kwargs: a solid ``facecolor`` under the half-space's
-    diagonal hatch, so it still reads as the semi-infinite half-space."""
-    # facecolor (NOT color): with ``color=`` set, mpl draws the hatch in the
-    # fill colour, making the '///' invisible. ``facecolor`` lets the hatch
-    # render in ``edgecolor``.
-    return {'facecolor': facecolor, 'hatch': BOTTOM_FILL_HATCH,
-            'edgecolor': _blend('black', facecolor, 0.4), 'linewidth': 0.4}
-
-
 def _speeds_read_absolute(colorbar):
     """Print a sound-speed colorbar's ticks as absolute m/s: a nearly constant
     profile otherwise draws 0.0/0.4/0.8 over a "+1.5e3" offset."""
     colorbar.ax.yaxis.get_major_formatter().set_useOffset(False)
+
+
+def _truncated(cmap, lo, hi, n=256):
+    """The ``lo``–``hi`` band of a colormap as a colormap of its own."""
+    base = plt.get_cmap(cmap) if isinstance(cmap, str) else cmap
+    return LinearSegmentedColormap.from_list(
+        f"{getattr(base, 'name', 'cmap')}_clip", base(np.linspace(lo, hi, n)),
+    )
+
+
+def _make_sm(cs_values, cmap):
+    """``(cs_min, cs_max, mappable)`` spanning the sound speeds in
+    ``cs_values`` — the scale a colorbar for them is drawn on."""
+    pool = list(cs_values) if len(cs_values) else [1500.0]
+    cs_min = float(min(pool))
+    cs_max = float(max(pool))
+    if cs_max <= cs_min:
+        # A constant profile gets a window centred on its value.
+        # Relative, not +1 m/s absolute: ticks over 1500–1501 need six
+        # significant digits, which the colorbar printed as 0.0/0.4/0.8
+        # over a "+1.5e3" offset.
+        pad = 0.05 * abs(cs_min) if cs_min else 0.5
+        cs_min, cs_max = cs_min - pad, cs_max + pad
+    sm = ScalarMappable(cmap=cmap, norm=Normalize(vmin=cs_min, vmax=cs_max))
+    sm.set_array([])
+    return cs_min, cs_max, sm
+
+
+def _voronoi_edges(nodes_km, lo, hi):
+    """Cell edges of range nodes: the midpoints between neighbours, with the
+    outer ends at ``lo`` / ``hi``."""
+    return [lo, *(0.5 * (nodes_km[:-1] + nodes_km[1:])), hi]
+
+
+def _fill_layer_stack(ax, x, z_top, layers, cmap, cs_min, cs_range, *,
+                      linewidth, dashed_edges):
+    """Paint ``layers`` downward from the seafloor profile ``z_top`` (one
+    depth per ``x``), each shaded by its sound speed on the caller's cp scale,
+    with a dashed line under each layer when ``dashed_edges``. Returns the
+    base of the stack."""
+    z_top = np.asarray(z_top, dtype=float)
+    for layer in layers:
+        z_bot = z_top + layer.thickness
+        colour = cmap(0.25 + 0.6 * (layer.sound_speed - cs_min) / cs_range)
+        ax.fill_between(x, z_top, z_bot, color=colour, alpha=1.0,
+                        edgecolor='black', linewidth=linewidth,
+                        zorder=ZORDER_SEDIMENT + 1)
+        if dashed_edges:
+            ax.plot(x, z_bot, color='black', linewidth=0.8, linestyle='--',
+                    alpha=0.5, zorder=ZORDER_SEDIMENT + 2)
+        z_top = z_bot
+    return z_top
 
 
 def _halfspace_fill_style(cp) -> dict:
@@ -89,7 +136,7 @@ def _halfspace_fill_style(cp) -> dict:
         return dict(BOTTOM_FILL_STYLE)
     t = float(np.clip((cp - _HALFSPACE_CP_LO)
                       / (_HALFSPACE_CP_HI - _HALFSPACE_CP_LO), 0.0, 1.0))
-    return _hatched_fill(BOTTOM_CMAP(0.25 + 0.6 * t))
+    return hatched_fill(BOTTOM_CMAP(0.25 + 0.6 * t))
 
 
 def _layered_halfspace_style(hs, cmap, cs_min, cs_range) -> dict:
@@ -100,7 +147,7 @@ def _layered_halfspace_style(hs, cmap, cs_min, cs_range) -> dict:
     if cp is None:
         return dict(BOTTOM_FILL_STYLE)
     norm = min(1.0, max(0.0, (cp - cs_min) / cs_range))
-    return _hatched_fill(cmap(0.25 + 0.6 * norm))
+    return hatched_fill(cmap(0.25 + 0.6 * norm))
 
 
 def _draw_layered_bottom(ax_bathy, column, r_km, seafloor, z_max_layer,
@@ -109,27 +156,16 @@ def _draw_layered_bottom(ax_bathy, column, r_km, seafloor, z_max_layer,
     # edges + hatched half-space, keyed by the caller's right-margin
     # 'Bottom cp' colorbar. Same visual template as the range-dependent
     # layered branch below.
-    cmap, cs_min, cs_max, _ = _layer_cmap_and_norm()
+    cmap, cs_min, cs_max = _layer_cmap_and_norm()
     cs_range = max(1e-9, cs_max - cs_min)
     # Every layer rides the seafloor, as in the range-dependent layered branch.
     # A scalar top anchored at the deepest bathymetry point would detach the
     # stack from a sloping seabed and leave the water colormap painted in the
     # gap below the drawn seafloor line.
-    z_top = np.broadcast_to(np.asarray(seafloor, dtype=float),
-                            np.shape(r_km)).astype(float)
-    for layer in column.layers:
-        z_bot = z_top + layer.thickness
-        norm_cs = (layer.sound_speed - cs_min) / cs_range
-        colour = cmap(0.25 + 0.6 * norm_cs)
-        ax_bathy.fill_between(
-            r_km, z_top, z_bot, color=colour, alpha=1.0,
-            edgecolor='black', linewidth=0.4,
-            zorder=ZORDER_SEDIMENT + 1,
-        )
-        ax_bathy.plot(r_km, z_bot, color='black', linewidth=0.8,
-                      linestyle='--', alpha=0.5,
-                      zorder=ZORDER_SEDIMENT + 2)
-        z_top = z_bot
+    z_top = _fill_layer_stack(
+        ax_bathy, r_km,
+        np.broadcast_to(np.asarray(seafloor, dtype=float), np.shape(r_km)),
+        column.layers, cmap, cs_min, cs_range, linewidth=0.4, dashed_edges=True)
     hs = column.halfspace
     # The half-space reaches at least the panel floor, so no axis is left
     # blank below the sediment. Extended by a margin taken from the stack
@@ -158,12 +194,11 @@ def _draw_rdl_bottom(ax_bathy, bottom, r_km, seafloor, z_max_layer,
     # leave the section beyond them bare while the model still uses that column.
     r_lo_panel = float(np.min(r_km)) if np.size(r_km) else prof_ranges_km[0]
     r_hi_panel = float(np.max(r_km)) if np.size(r_km) else prof_ranges_km[-1]
-    boundaries = [min(r_lo_panel, float(prof_ranges_km[0]))]
-    for i in range(len(prof_ranges_km) - 1):
-        boundaries.append(0.5 * (prof_ranges_km[i] + prof_ranges_km[i + 1]))
-    boundaries.append(max(r_hi_panel, float(prof_ranges_km[-1])))
+    boundaries = _voronoi_edges(prof_ranges_km,
+                                min(r_lo_panel, float(prof_ranges_km[0])),
+                                max(r_hi_panel, float(prof_ranges_km[-1])))
 
-    cmap, cs_min, cs_max, _ = _layer_cmap_and_norm()
+    cmap, cs_min, cs_max = _layer_cmap_and_norm()
     cs_range = max(1e-9, cs_max - cs_min)
 
     max_thickness = max(
@@ -187,17 +222,9 @@ def _draw_rdl_bottom(ax_bathy, bottom, r_km, seafloor, z_max_layer,
         z_top_arr = (np.interp(x_bin, r_km, seafloor)
                      if r_km.size > 1
                      else np.full_like(x_bin, env.depth))
-        for layer in prof.layers:
-            z_bot_arr = z_top_arr + layer.thickness
-            norm_cs = (layer.sound_speed - cs_min) / cs_range
-            colour = cmap(0.25 + 0.6 * norm_cs)
-            ax_bathy.fill_between(
-                x_bin, z_top_arr, z_bot_arr,
-                color=colour, alpha=1.0,
-                edgecolor='black', linewidth=0.3,
-                zorder=ZORDER_SEDIMENT + 1,
-            )
-            z_top_arr = z_bot_arr
+        z_top_arr = _fill_layer_stack(
+            ax_bathy, x_bin, z_top_arr, prof.layers, cmap, cs_min, cs_range,
+            linewidth=0.3, dashed_edges=False)
         # Hatched half-space below this column, shaded by its basement cp.
         ax_bathy.fill_between(
             x_bin, z_top_arr, np.full_like(x_bin, hs_floor),
@@ -223,30 +250,27 @@ def _draw_rdl_bottom(ax_bathy, bottom, r_km, seafloor, z_max_layer,
     return z_max_layer
 
 
-def _draw_rd_bottom(ax_bathy, bottom, r_km, seafloor, z_max_layer):
+def _draw_rd_bottom(ax_bathy, bottom, r_km, seafloor, z_max_layer,
+                    _layer_cmap_and_norm):
     # A range-dependent half-space: properties vary with range, uniform with
     # depth. So each node colours its whole column (seafloor → floor) by its
     # sound speed, hatched like any half-space, with Voronoi boundaries: each
     # node owns from the midpoint with its left neighbour to the midpoint with
     # its right; outer nodes reach the bathymetry edges. Tops follow the
-    # seafloor so kinks are honoured.
+    # seafloor so kinks are honoured. The speed scale is the caller's
+    # 'Bottom cp' colorbar scale, as for the layered bottoms, so a column's
+    # colour reads back to its cp on the bar — nodes sharing one speed sit at
+    # the bar's padded mid-scale, not at the light end of a zero-width range.
     bot_r_km = m_to_km(np.asarray(bottom.ranges, dtype=float))
     bathy_r = r_km
     bathy_z = seafloor
     cs = np.asarray(bottom.halfspace_sound_speed, dtype=float)
-    cs_min, cs_max = float(cs.min()), float(cs.max())
+    cmap, cs_min, cs_max = _layer_cmap_and_norm()
     cs_range = max(1e-9, cs_max - cs_min)
-    cmap = BOTTOM_CMAP
     hs_floor = _panel_floor(z_max_layer)
 
-    # Voronoi cell edges: midpoints between consecutive nodes,
-    # clamped to the bathymetry extent at the outer ends.
-    bathy_lo = float(bathy_r.min())
-    bathy_hi = float(bathy_r.max())
-    edges = [bathy_lo]
-    for i in range(len(bot_r_km) - 1):
-        edges.append(0.5 * (bot_r_km[i] + bot_r_km[i + 1]))
-    edges.append(bathy_hi)
+    # Voronoi cell edges, clamped to the bathymetry extent at the outer ends.
+    edges = _voronoi_edges(bot_r_km, float(bathy_r.min()), float(bathy_r.max()))
 
     for i in range(len(bot_r_km)):
         r_lo = float(edges[i])
@@ -267,11 +291,8 @@ def _draw_rd_bottom(ax_bathy, bottom, r_km, seafloor, z_max_layer):
             [poly_z_top, np.full(poly_r_top.shape, hs_floor)]
         )
         colour = cmap(0.25 + 0.6 * (cs[i] - cs_min) / cs_range)
-        ax_bathy.fill(
-            poly_r, poly_z, facecolor=colour, hatch=BOTTOM_FILL_HATCH,
-            edgecolor=_blend('black', colour, 0.4), linewidth=0.3,
-            zorder=ZORDER_SEDIMENT + 1,
-        )
+        ax_bathy.fill(poly_r, poly_z, zorder=ZORDER_SEDIMENT + 1,
+                      **hatched_fill(colour, linewidth=0.3))
 
     layer_top = np.interp(bot_r_km, bathy_r, bathy_z)
     ax_bathy.plot(bot_r_km, layer_top, 'k.',
@@ -308,6 +329,7 @@ def _plot_environment(
     sea_ice=None,
     title: Optional[str] = None,
     figsize: Tuple[float, float] = (10, 5),
+    x_max_m=None,
 ):
     """Single-panel water column + bottom structure with two colorbars.
 
@@ -326,8 +348,10 @@ def _plot_environment(
     the seabed's other geoacoustic properties (cs, ρ, αp, αs) use
     :func:`plot_bottom_properties`.
 
-    Two colorbars: ``Water c`` (Blues) and ``Bottom cp`` (earthy brown) — each
-    on its own dynamic range so neither is washed out by the other.
+    Two colorbars: ``Water c`` (Blues) on the profile's own speed range, and
+    ``Bottom cp`` (earthy brown) on the seabed's own cp range for a layered or
+    range-dependent bottom, or on the fixed 1450–2300 m/s surficial-sediment
+    scale for a single half-space — so neither is washed out by the other.
 
     Pass ``ax=`` to draw into an existing axis (for composite figures); returns
     ``(fig, ax)``. ``bottom_colorbar=False`` drops the second (bottom cp)
@@ -343,6 +367,10 @@ def _plot_environment(
     e.g. from ``uacpy.data.fetch_sea_ice_concentration_transect``).
 
     ``title`` overrides the default ``"Bottom — <shape>"`` panel title.
+
+    ``x_max_m`` is a further range (m) the panel must reach — the span of a
+    TL field it is drawn beside — for an environment that carries no range
+    vector of its own.
     """
     if not isinstance(env, Environment):
         raise ConfigurationError(
@@ -368,6 +396,8 @@ def _plot_environment(
     if (env.ssp.is_range_dependent
             and env.ssp.ranges is not None and len(env.ssp.ranges) > 0):
         candidate_rmaxes_km.append(m_to_km(float(np.max(env.ssp.ranges))))
+    if x_max_m is not None:
+        candidate_rmaxes_km.append(m_to_km(float(x_max_m)))
     x_max_km = max(candidate_rmaxes_km) if candidate_rmaxes_km else 1.0
 
     if env.has_range_dependent_bathymetry:
@@ -384,6 +414,14 @@ def _plot_environment(
         r_km = np.array([0.0, x_max_km])
         seafloor = np.array([env.depth, env.depth])
     x_range = (float(r_km.min()), float(x_max_km))
+    # The limits first, so the margins are measured on this panel: the water
+    # mesh, seabed fills and seafloor line are painted a marker's width past
+    # them (see _fill_margins) for the source star and the furthest receiver
+    # dot to widen the axis into.
+    ax_bathy.set_xlim(*x_range)
+    m_lo, m_hi = _fill_margins(ax_bathy)
+    r_km = np.concatenate(([r_km[0] - m_lo], r_km, [r_km[-1] + m_hi]))
+    seafloor = np.concatenate(([seafloor[0]], seafloor, [seafloor[-1]]))
 
     z_max_layer = float(np.max(seafloor))
     seafloor_depth = z_max_layer  # remember the *actual* deepest seafloor
@@ -397,32 +435,7 @@ def _plot_environment(
     # normalized to its own cs range so neither is washed out by the
     # other's extent. Convention: blue family for water, the earthy BOTTOM_CMAP for the
     # sediment / bottom.
-    def _truncated(cmap, lo, hi, n=256):
-        from matplotlib.colors import LinearSegmentedColormap
-        base = plt.get_cmap(cmap) if isinstance(cmap, str) else cmap
-        return LinearSegmentedColormap.from_list(
-            f"{getattr(base, 'name', 'cmap')}_clip", base(np.linspace(lo, hi, n)),
-        )
-
-    def _make_sm(cs_values, cmap):
-        from matplotlib.colors import Normalize
-        from matplotlib.cm import ScalarMappable
-        pool = list(cs_values) if len(cs_values) else [1500.0]
-        cs_min = float(min(pool))
-        cs_max = float(max(pool))
-        if cs_max <= cs_min:
-            # A constant profile gets a window centred on its value.
-            # Relative, not +1 m/s absolute: ticks over 1500–1501 need six
-            # significant digits, which the colorbar printed as 0.0/0.4/0.8
-            # over a "+1.5e3" offset.
-            pad = 0.05 * abs(cs_min) if cs_min else 0.5
-            cs_min, cs_max = cs_min - pad, cs_max + pad
-        sm = ScalarMappable(cmap=cmap, norm=Normalize(vmin=cs_min, vmax=cs_max))
-        sm.set_array([])
-        return cs_min, cs_max, sm
-
     water_cmap = _truncated('Blues', 0.25, 0.95)
-    bottom_cmap_full = BOTTOM_CMAP                      # raw, used by 0.25+0.6*x trick
     bottom_cmap_truncated = _truncated(BOTTOM_CMAP, 0.25, 0.85)
 
     water_cs_pool = list(np.asarray(ssp.data, dtype=float).ravel())
@@ -450,8 +463,6 @@ def _plot_environment(
         bot_cs_min = bot_cs_max = None
         bottom_sm = None
     elif is_single_halfspace:
-        from matplotlib.colors import Normalize
-        from matplotlib.cm import ScalarMappable
         bot_cs_min, bot_cs_max = _HALFSPACE_CP_LO, _HALFSPACE_CP_HI
         bottom_sm = ScalarMappable(cmap=bottom_cmap_truncated,
                                    norm=Normalize(bot_cs_min, bot_cs_max))
@@ -463,11 +474,10 @@ def _plot_environment(
 
     def _layer_cmap_and_norm():
         """Bottom-only normalization shared by the layered / range-dependent
-        seabed branches. Returns ``(base_cmap, cs_min,
-        cs_max, sm)`` where ``base_cmap`` is the raw BOTTOM_CMAP — branches sample
-        it at ``0.25 + 0.6 * norm`` for the truncated band, so the
-        ``ScalarMappable`` has to match (truncated) for the colorbar to read."""
-        return bottom_cmap_full, bot_cs_min, bot_cs_max, bottom_sm
+        seabed branches: ``(BOTTOM_CMAP, cs_min, cs_max)``. Branches sample
+        the raw map at ``0.25 + 0.6 * norm`` for the truncated band, so the
+        colorbar's ``ScalarMappable`` is built on the truncated map to match."""
+        return BOTTOM_CMAP, bot_cs_min, bot_cs_max
 
     # Water column on the bathy panel — water cmap (Blues), normalized
     # to its own cs range. The bottom rendering below covers anything
@@ -476,11 +486,14 @@ def _plot_environment(
     if ssp.is_range_dependent:
         ssp_r_km_b = m_to_km(ssp.ranges)
         ssp_grid = np.asarray(ssp.data, dtype=float)
-        # Models hold the last profile constant past its node; anchoring the
-        # mesh at the right edge keeps the water colormap under the whole
-        # xlim rather than stopping at the last SSP range.
-        if float(ssp_r_km_b[-1]) < x_max_km:
-            ssp_r_km_b = np.append(ssp_r_km_b, x_max_km)
+        # Models hold the end profiles constant past their nodes; anchoring
+        # the mesh at the painted span's ends keeps the water colormap under
+        # the whole panel rather than stopping at the outer SSP ranges.
+        if float(ssp_r_km_b[0]) > float(r_km[0]):
+            ssp_r_km_b = np.insert(ssp_r_km_b, 0, r_km[0])
+            ssp_grid = np.column_stack([ssp_grid[:, 0], ssp_grid])
+        if float(ssp_r_km_b[-1]) < float(r_km[-1]):
+            ssp_r_km_b = np.append(ssp_r_km_b, r_km[-1])
             ssp_grid = np.column_stack([ssp_grid, ssp_grid[:, -1]])
         ax_bathy.pcolormesh(
             ssp_r_km_b, ssp.depths, ssp_grid,
@@ -511,7 +524,7 @@ def _plot_environment(
             _layer_cmap_and_norm)
     elif bottom.is_range_dependent:
         z_max_layer = _draw_rd_bottom(
-            ax_bathy, bottom, r_km, seafloor, z_max_layer)
+            ax_bathy, bottom, r_km, seafloor, z_max_layer, _layer_cmap_and_norm)
     elif bottom.is_layered:
         z_max_layer = _draw_layered_bottom(
             ax_bathy, bottom.columns[0], r_km, seafloor, z_max_layer,
@@ -532,7 +545,6 @@ def _plot_environment(
         # panels uncrowded). Equal-size, near-full-height halves with a small
         # gap; compact labels + ≤3 ticks so they stay legible even in the
         # small env panel of plot_overview. Water on top, Bottom below.
-        from matplotlib.ticker import MaxNLocator
         water_cax = ax_bathy.inset_axes([1.04, 0.54, 0.03, 0.45])
         bottom_cax = ax_bathy.inset_axes([1.04, 0.01, 0.03, 0.45])
         cbar_water = fig.colorbar(water_sm, cax=water_cax,
@@ -557,11 +569,11 @@ def _plot_environment(
     else:
         ax_bathy.axhline(env.depth, **BOTTOM_LINE_STYLE_FLAT, zorder=10)
 
-    # Source / receiver markers on the bottom panel.
+    # Source / receiver markers on the bottom panel, drawn after the x limit
+    # is set so the source star at the left limit can widen it.
+    ax_bathy.set_xlim(*x_range)
     _draw_geometry(ax_bathy, source, receiver, max_markersize=5,
                    source_range_m=km_to_m(x_range[0]))
-
-    ax_bathy.set_xlim(*x_range)
     # Tight ylim — surface to a small margin past the deepest seafloor, but
     # never above what the bottom branch actually painted. Every branch
     # returns ``z_max_layer``, the floor of its own rendering (layer stack +
@@ -624,9 +636,6 @@ def _plot_ssp(env_or_ssp, *, ax=None, title: Optional[str] = None,
     label. Remaining ``line_kwargs`` (``linestyle``, ``alpha``, ``zorder`` ...)
     are forwarded to ``ax.plot``.
     """
-    from uacpy.core.environment import Environment
-    from uacpy.core.ssp import SoundSpeedProfile
-
     ssp = env_or_ssp.ssp if isinstance(env_or_ssp, Environment) else env_or_ssp
     if not isinstance(ssp, SoundSpeedProfile):
         raise ConfigurationError(
@@ -643,8 +652,6 @@ def _plot_ssp(env_or_ssp, *, ax=None, title: Optional[str] = None,
         line_kwargs.setdefault('linewidth', 1.2)
         ranges_km = m_to_km(np.asarray(ssp.ranges, dtype=float))
         if color is None:
-            from matplotlib.cm import ScalarMappable
-            from matplotlib.colors import Normalize
             cmap = plt.get_cmap('viridis')
             norm = Normalize(vmin=float(ranges_km.min()),
                              vmax=float(ranges_km.max()) or 1.0)
@@ -668,6 +675,9 @@ def _plot_ssp(env_or_ssp, *, ax=None, title: Optional[str] = None,
                 label=label, **line_kwargs)
 
     ax.set_xlabel('Sound speed (m/s)')
+    # Speeds are 6-character labels ("1482.5"); five ticks is what the
+    # default 5-inch panel fits without neighbouring labels touching.
+    ax.xaxis.set_major_locator(MaxNLocator(nbins=5))
     ax.set_ylabel('Depth (m)')
     invert_yaxis_once(ax)                               # depth positive down
     ax.grid(True, alpha=0.3)
@@ -875,10 +885,8 @@ def plot_absorption(frequencies, absorption=None, ax=None, *, model=None,
                 "('thorp' / 'francois_garrison').")
         m = str(model).lower().replace('-', '_')
         if m == 'thorp':
-            from uacpy.core.absorption import thorp_db_per_km
             absorption = thorp_db_per_km(frequencies)
         elif m in ('francois_garrison', 'fg'):
-            from uacpy.core.absorption import francois_garrison_db_per_km
             absorption = francois_garrison_db_per_km(frequencies, **mk)
         else:
             raise ConfigurationError(

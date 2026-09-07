@@ -39,8 +39,12 @@ netcdf_lock = threading.RLock()
 _COVERAGE_TOL_DEG = 1e-6
 
 
-def open_netcdf(path):
+def open_netcdf(path, *, memory=None):
     """Open a local NetCDF file, or raise a typed error if netCDF4 is absent.
+
+    With ``memory=`` (the file's bytes, e.g. a downloaded grid) the blob is
+    parsed in memory — nothing is staged on disk — and ``path`` is only the
+    name netCDF4 reports for it.
 
     netCDF4 ships with the default install (the offline grid backend); the typed
     error only fires in a stripped-down environment that dropped it.
@@ -57,7 +61,7 @@ def open_netcdf(path):
                         "with `pip install -e .`, or `pip install netCDF4`.",
         )
     with netcdf_lock:
-        return Dataset(str(path))
+        return Dataset(str(path), memory=memory)
 
 
 class NetcdfGrid:

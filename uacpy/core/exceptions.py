@@ -19,18 +19,23 @@ __all__ = [
 ]
 
 
-def _rebuild_exc(cls, args, kwargs):
-    """Reconstruct an exception from its original constructor arguments.
+def _restore(cls, state, args):
+    """Rebuild a pickled exception from its type, ``__dict__`` and ``args``.
 
     The subclasses below override ``__init__`` with multi-positional /
     keyword-only signatures but store only the formatted message in
-    ``self.args``; the default ``BaseException.__reduce__`` would then unpickle
-    via ``cls(*self.args)`` and fail. Each provides ``__reduce__`` pointing here
-    so the exception round-trips through ``pickle`` — required for
+    ``self.args``, so the default ``BaseException.__reduce__`` would unpickle
+    via ``cls(*self.args)`` and fail. Every constructor-derived attribute
+    lives in ``__dict__`` and ``args`` is a ``BaseException`` slot, so both
+    are restored directly and ``__init__`` is not re-run. This is what lets
+    the exception round-trip through ``pickle`` — required for
     ``run_parallel`` to return real per-job errors instead of a
     ``BrokenProcessPool``.
     """
-    return cls(*args, **kwargs)
+    exc = cls.__new__(cls)
+    exc.__dict__.update(state)
+    exc.args = args
+    return exc
 
 
 class UACPYError(Exception):
@@ -40,6 +45,9 @@ class UACPYError(Exception):
         self.message = message
         self.remediation = remediation
         super().__init__(self.message)
+
+    def __reduce__(self):
+        return (_restore, (type(self), self.__dict__, self.args))
 
     def __str__(self):
         msg = self.message
@@ -84,11 +92,6 @@ class ExecutableNotFoundError(UACPYError):
         self.executable = executable
         self.search_paths = search_paths
         self.reason = reason
-
-    def __reduce__(self):
-        return (_rebuild_exc, (ExecutableNotFoundError,
-                               (self.model_name, self.executable,
-                                self.search_paths), {'reason': self.reason}))
 
 
 class ModelExecutionError(UACPYError):
@@ -161,12 +164,6 @@ class ModelExecutionError(UACPYError):
         except ValueError:
             return None
 
-    def __reduce__(self):
-        return (_rebuild_exc, (ModelExecutionError,
-                               (self.model_name, self.return_code,
-                                self.stdout, self.stderr),
-                               {'timed_out': self.timed_out}))
-
 
 class InvalidDepthError(UACPYError):
     """Raised when a source or receiver depth exceeds the depth a model can
@@ -181,10 +178,6 @@ class InvalidDepthError(UACPYError):
         self.depth = depth
         self.max_depth = max_depth
         self.context = context
-
-    def __reduce__(self):
-        return (_rebuild_exc, (InvalidDepthError,
-                               (self.depth, self.max_depth, self.context), {}))
 
 
 class UnsupportedFeatureError(UACPYError):
@@ -217,12 +210,6 @@ class UnsupportedFeatureError(UACPYError):
         self.feature = feature
         self.alternatives = alternatives
         self.alternatives_label = alternatives_label
-
-    def __reduce__(self):
-        return (_rebuild_exc, (UnsupportedFeatureError,
-                               (self.model_name, self.feature,
-                                self.alternatives),
-                               {'alternatives_label': self.alternatives_label}))
 
 
 class ConfigurationError(UACPYError):

@@ -49,9 +49,12 @@ from uacpy.models._pe_phase import psi_to_travelling_wave
 # The Padé optimiser's own Δz ladder floor, imported (not duplicated) so the
 # relaxation warning can contrast it with the wrapper's binding cost floor
 # ``LAMBDA_PER_DZ_FLOOR`` below and the two cannot drift apart.
-from uacpy.models._pade_optimizer import DZ_MIN as _PADE_LADDER_DZ_MIN
+from uacpy.models._pade_optimizer import (
+    DZ_MIN as _PADE_LADDER_DZ_MIN, grid_error, optimal_c0, optimize_grid,
+    rams_dz_shear_cap,
+)
 from uacpy.core.environment import (
-    Environment, SeabedColumn,
+    Environment,
 )
 from uacpy.core.bottom import _NON_GEOACOUSTIC_TYPES
 from uacpy.core.source import Source
@@ -64,7 +67,10 @@ from uacpy.core.exceptions import (
     FileFormatError,
     UnsupportedFeatureError,
 )
-from uacpy.io.mpirams_writer import write_inpe, write_ssp_file, write_bth_file, write_ranges_file
+from uacpy.io.mpirams_writer import (
+    write_inpe, write_ssp_file, write_bth_file, write_ranges_file,
+    write_sediment_file,
+)
 from uacpy.io.mpirams_reader import read_psif
 from uacpy.io.ramsurf_writer import write_ramin
 from uacpy.io.ramsurf_reader import read_tl_grid, read_pcomplex_grid
@@ -134,16 +140,6 @@ _EARTH_RADIUS_M = 6378137.0
 #: seabed, 2 reaches +0.12 dB against a +0.07 dB converged deep grid, and 4
 #: is indistinguishable from converged.
 _SEABED_WAVELENGTHS_BEFORE_ABSORBER = 2.0
-
-#: Thickness of the synthetic sediment layer a bare half-space stands in as,
-#: as a fraction of the water depth and as an absolute floor. The same rule
-#: :meth:`~uacpy.core.bottom.SeabedColumn.from_halfspace` applies through its
-#: ``sediment_fraction`` and ``min_thickness`` defaults; named here so
-#: :meth:`RAM._prepare_bottom_properties` (which floors ``sedlayer`` at it)
-#: and :meth:`RAM._adequate_zmax` (which has to leave room for it) cannot
-#: drift apart.
-_SYNTHETIC_SEDIMENT_FRACTION = 0.10
-_SYNTHETIC_SEDIMENT_MIN_M = 5.0
 
 # Output files each family writes into the work dir. Cleared before launch so
 # a pinned ``work_dir`` cannot hand an earlier run's output back as this run's
@@ -306,8 +302,8 @@ class RAM(PropagationModel):
     ``ramgeo`` tracks sediment layers *parallel to the bathymetry* — the most
     faithful Collins treatment of a sloping layered fluid seabed — and is
     auto-selected for narrowband (COHERENT_TL) layered cases. For a simple
-    half-space mpiramS is preferred (native, vs ramgeo's synthetic-layer
-    wrapping), but ramgeo *accepts* a simple bottom when forced. Like the
+    half-space mpiramS is preferred (there is no layer geometry for ramgeo
+    to track), but ramgeo *accepts* a simple bottom when forced. Like the
     other Collins backends it supports every run mode via uacpy's complex-
     envelope patch; auto-dispatch hands broadband / time-series to mpiramS's
     faster native sweep. Pass ``RAM(backend=...)`` to force a backend
@@ -404,13 +400,10 @@ class RAM(PropagationModel):
         * a single frequency with ``T`` pinned — ``2.0``;
         * a single frequency with neither pinned, and every COHERENT_TL
           run — ``1e6``, which collapses the band to one bin so mpiramS
-          doesn't sweep ~500 frequencies per call. mpiramS reaches one bin
-          only because uacpy patched it to: ``peramx.f90:360-379`` builds
-          ``nf1 = int((bw-df)/df) + 1``, and ``int()`` truncating a negative
-          toward zero gave ``nf1=1``, ``nf=3`` for any sub-bin bandwidth —
-          three marched frequencies (fc-df, fc, fc+df) at 2.4x the runtime,
-          of which uacpy kept the centre. The vendored source now sets
-          ``nf1=0`` when ``bw < df``.
+          doesn't sweep ~500 frequencies per call: a band narrower than one
+          bin (``fc/Q < 1/T``) marches ``fc`` alone (``peramx.f90:362-370``,
+          a UACPY patch; :meth:`_broadband_frequencies` applies the same
+          rule to the Collins loop).
 
         Used by every backend's broadband mode to derive the frequency
         vector — mpiramS internally, Collins backends as the Python-side
@@ -468,8 +461,9 @@ class RAM(PropagationModel):
       picks the coarsest grid that meets ``accuracy``.
     - ``zmax=None`` → ``_compute_zmax`` (water + absorbing layer).
     - ``c0=None`` → Lytaev Eq. (15) from speed spectrum.
-    - ``Q`` / ``T`` → narrowband ``(1e6, 1.0)`` for ``COHERENT_TL``,
-      broadband ``(2.0, 10.0)`` for ``BROADBAND`` / ``TIME_SERIES``.
+    - ``Q`` / ``T`` → narrowband ``(1e6, 1.0)`` for ``COHERENT_TL``; on
+      ``BROADBAND`` / ``TIME_SERIES`` resolved from the source (the ``Q``
+      and ``T`` entries above).
     - Backend (mpiramS / ramgeo / rams0.5 / ramsurf1.5) picked by
       :meth:`select_backend` from ``env`` shape.
 
@@ -838,7 +832,6 @@ class RAM(PropagationModel):
         """
         if self.c0 is not None:
             return float(self.c0)
-        from uacpy.models._pade_optimizer import optimal_c0
         bounds = self._speed_bounds(env)
         c_min, c_max = bounds
         return float(optimal_c0(c_min, c_max, self._resolve_theta_max(env)))
@@ -995,35 +988,29 @@ class RAM(PropagationModel):
         """The symmetric frequency vector a ``(fc, Q, T)`` sweep marches.
 
         Reproduces ``peramx.f90:353-379``: half-bandwidth ``bw = fc/Q``,
-        ``df = fs/Nsam = 1/T``, ``nf1 = int((bw - df)/df) + 1`` and
+        ``df = fs/Nsam = 1/T``, ``nf1 = int((bw - df)/df) + 1`` — ``0`` for
+        a band narrower than one bin (``bw < df``, the UACPY patch at
+        ``:362-370``), so that band marches ``fc`` alone — and
         ``frq(ii) = -(nf1 - (ii-1))·df + fc`` for ``ii = 1..2·nf1+1``. Every
         backend sweeps this same vector — mpiramS inside the Fortran loop, the
         Collins backends one subprocess per element.
 
         ``frq(1) = fc - nf1·df`` goes non-positive whenever
-        ``fc <= nf1·df`` — a small ``Q`` (half-bandwidth at or above fc),
-        or an ``fc`` at or below ``Δf = 1/T`` once ``nf1`` floors at 1 (the
-        collapsed COHERENT_TL sweep included) — which no PE can march. The
-        serial driver uacpy builds has no guard and writes NaN bins at zero
-        and negative frequency; its MPI sibling stops on exactly this test
-        and names ``Q`` (``peramx_mpi.f90:417-423``).
+        ``fc <= nf1·df`` — a small ``Q`` (half-bandwidth at or above fc) —
+        which no PE can march. The serial driver uacpy builds has no guard
+        and writes NaN bins at zero and negative frequency; its MPI sibling
+        stops on exactly this test and names ``Q`` (``peramx_mpi.f90:417-423``).
         """
         bw = float(fc) / float(Q)
         df = 1.0 / float(T)
-        nf1 = max(1, int((bw - df) / df) + 1)
+        nf1 = 0 if bw < df else int((bw - df) / df) + 1
         frq = (np.arange(2 * nf1 + 1, dtype=float) - nf1) * df + float(fc)
         if frq[0] <= 0.0:
-            # The advice names the knob that actually moves this edge:
-            # with nf1 floored at 1 the binding constraint is fc > Δf = 1/T
-            # (Q no longer enters), and with nf1 bandwidth-driven it is the
-            # half-bandwidth fc/Q.
+            # The advice names the knob that moves this edge: the
+            # half-bandwidth fc/Q (nf1·Δf never exceeds it).
             if float(fc) <= 0.0:
                 advice = ("fc itself is not positive; no (Q, T) admits a "
                           "non-positive centre frequency.")
-            elif nf1 == 1:
-                advice = (f"Lengthen T so Δf = 1/T falls below fc "
-                          f"(T > {1.0 / float(fc):.4g} s), or raise fc "
-                          f"above Δf = {df:.4g} Hz.")
             else:
                 advice = (f"Raise Q (= {Q:g}) so the half-bandwidth "
                           f"fc/Q = {bw:.4g} Hz falls below fc.")
@@ -1044,8 +1031,8 @@ class RAM(PropagationModel):
         The symmetric ``(fc, Q, T)`` sweep of :meth:`_broadband_frequencies`
         can only march ``2·nf1 + 1`` bins, so it is a superset of a
         caller-supplied frequency array whenever the two differ (one extra
-        bin past ``f_max`` for an even count, a 3-bin collapsed band for a
-        single frequency). The broadband runners trim their output onto this
+        bin past ``f_max`` for an even count). The broadband runners trim
+        their output onto this
         grid so ``H(f)`` round-trips the request bin for bin. ``None`` —
         keep the full sweep — when the caller pinned both ``Q`` and ``T``
         (the sweep *is* the spec, and :meth:`_resolve_broadband_grid` warns
@@ -1060,8 +1047,7 @@ class RAM(PropagationModel):
         return freqs
 
     def _compute_zmax(self, env: Environment, freq: float,
-                      c0: Optional[float] = None,
-                      kind: Optional[str] = None) -> float:
+                      c0: Optional[float] = None) -> float:
         """
         Compute PE domain depth (zmax) that extends below the seafloor.
 
@@ -1078,10 +1064,10 @@ class RAM(PropagationModel):
             Frequency in Hz (for wavelength calculation).
         c0 : float
             Reference sound speed for wavelength estimate.
-        kind : str, optional
-            Backend the grid is being sized for. Only ``'mpiramS'`` changes
-            the answer, and only for the synthetic sediment layer it wraps a
-            half-space in; ``None`` sizes the Collins-family domain.
+
+        One rule for all four backends: mpiramS snaps the result onto its
+        depth grid (:meth:`_mpirams_zmax`), the Collins family reads it as
+        is (:meth:`_resolve_collins_grid`).
         """
         if self.zmax is not None:
             # mpiramS reaches a pinned zmax only through here; the Collins
@@ -1090,17 +1076,16 @@ class RAM(PropagationModel):
             # (mpiramS/src/ram.f90:101 iz=min(nz,iz), ramgeo1.5.f:135), so the
             # seabed-outside-the-grid pathology is not Collins-specific:
             # measured 29 dB silent error on mpiramS with zmax below depth.
-            # No ``kind`` here on purpose: the guard's rams branch RAISES, and
-            # ``_resolve_collins_grid`` already calls it with its own kind and
-            # dz — passing one here would either raise early or warn twice.
-            # ``kind`` still reaches ``_adequate_zmax`` below, which only sizes.
+            # No ``kind`` for the guard on purpose: its rams branch RAISES,
+            # and ``_resolve_collins_grid`` already calls it with its own kind
+            # and dz — passing one here would either raise early or warn
+            # twice.
             self._warn_if_seafloor_outside_grid(self.zmax, env, freq=freq)
             return self.zmax
-        return self._adequate_zmax(env, freq, c0, kind=kind)
+        return self._adequate_zmax(env, freq, c0)
 
     def _adequate_zmax(self, env: Environment, freq: float,
-                       c0: Optional[float] = None,
-                       kind: Optional[str] = None) -> float:
+                       c0: Optional[float] = None) -> float:
         """The grid bottom ``ram.pdf`` p.7 asks for: the seafloor, the
         modelled sediment stack, a real-seabed pad and the absorbing layer.
 
@@ -1112,8 +1097,7 @@ class RAM(PropagationModel):
             c0 = self._resolve_c0(env)
         wavelength = c0 / max(freq, 1.0)
         absorbing_width = self.absorbing_layer_width * wavelength
-        dz_for_pad = (float(self.dz) if self.dz is not None
-                      else self._compute_dz(env, freq, c0))
+        dz_for_pad = float(self.dz) if self.dz is not None else 0.0
         # Leave REAL seabed between the seafloor and the absorber, not one
         # cell. ``_absorber_span`` puts the ramp over the deepest
         # ``absorbing_layer_width`` wavelengths, so the non-absorbing
@@ -1172,33 +1156,13 @@ class RAM(PropagationModel):
             stack = float(env.bottom.max_total_thickness())
         c_bottom = self._seabed_sound_speed(env, c0)
         seabed_pad = _SEABED_WAVELENGTHS_BEFORE_ABSORBER * c_bottom / max(freq, 1.0)
-        sub_bottom = stack + max(dz_for_pad, seabed_pad)
-        if kind == 'mpiramS':
-            # mpiramS models a bare half-space as a synthetic sediment layer
-            # (:meth:`_prepare_bottom_properties` floors ``sedlayer`` at 10 %
-            # of the water depth, at least 5 m), and on a thin stack in deep
-            # water that floor is thicker than the stack. The absorber has to
-            # start below whatever the deck actually models, so the domain has
-            # to hold that floor too — otherwise control point ``nzs-1`` lands
-            # past ``zmax`` and the ramp is again outside the grid.
-            sub_bottom = max(sub_bottom,
-                             self._synthetic_sediment_thickness(env))
-        return env.depth + sub_bottom + absorbing_width
-
-    @staticmethod
-    def _synthetic_sediment_thickness(env: Environment) -> float:
-        """Thickness of the synthetic sediment layer a half-space stands in as.
-
-        The same rule :meth:`~uacpy.core.bottom.SeabedColumn.from_halfspace`
-        applies when it synthesises a layer — 10 % of the water depth, at
-        least 5 m, from its ``sediment_fraction`` and ``min_thickness``
-        defaults. Shared by
-        :meth:`_prepare_bottom_properties`, which floors ``sedlayer`` at it,
-        and :meth:`_adequate_zmax`, which has to leave room for it — the two
-        drifting apart is what puts the absorbing ramp outside the grid.
-        """
-        return max(_SYNTHETIC_SEDIMENT_FRACTION * float(env.depth),
-                   _SYNTHETIC_SEDIMENT_MIN_M)
+        # A bare half-space adds no stack: the pad alone separates the
+        # seafloor from the absorber, on every backend. mpiramS starts its
+        # ramp at control point ``nzs-1`` (``seafloor + sedlayer``,
+        # ``ram.f90:334-342``) and :meth:`_prepare_bottom_properties` sets
+        # ``sedlayer`` from this same domain (:meth:`_absorber_span`), so the
+        # two decks ramp from one depth.
+        return env.depth + stack + max(dz_for_pad, seabed_pad) + absorbing_width
 
     @staticmethod
     def _flat_earth_depth(z: float) -> float:
@@ -1240,7 +1204,7 @@ class RAM(PropagationModel):
         transformed frame and mapping back is what makes the spacing exact on
         both paths.
         """
-        zmax = self._compute_zmax(env, freq, kind='mpiramS')
+        zmax = self._compute_zmax(env, freq)
         transformed = (self._flat_earth_depth(zmax) if self.flat_earth
                        else zmax)
         snapped = (int(np.floor(transformed / float(dz) - 0.5)) + 1) * float(dz)
@@ -1296,10 +1260,10 @@ class RAM(PropagationModel):
 
         return ssp_filename
 
-    def _prepare_bathymetry(self, env: Environment, rmax: float, work_dir: Path) -> tuple:
-        """
-        Write bathymetry file. Returns (bth_filename, ibot).
-        """
+    def _prepare_bathymetry(self, env: Environment, rmax: float,
+                            work_dir: Path) -> str:
+        """Write the bathymetry file, extended to ``r = 0`` and ``rmax``
+        with its end values. Returns the filename."""
         bth_filename = 'bathy.dat'
 
         bathy = env.bathymetry.to_pairs()
@@ -1308,17 +1272,18 @@ class RAM(PropagationModel):
         if bathy[-1, 0] < rmax:
             bathy = np.vstack([bathy, [rmax, bathy[-1, 1]]])
         write_bth_file(work_dir / bth_filename, bathy[:, 0], bathy[:, 1])
-        return bth_filename, 1
+        return bth_filename
 
     @staticmethod
     def _ssp_column(env: Environment, rng: float, depths) -> np.ndarray:
         """The water sound speed uacpy writes at ``depths`` for range ``rng``.
 
         One evaluator for both sides of the deck: ``_prepare_ssp`` writes
-        ``ssp.dat`` from it and the sediment builders subtract it. That shared
-        definition is what makes ``csg = cwg + cs`` (``ram.f90:345-346``)
-        reproduce the requested absolute bottom speed — the offset is only
-        correct against the very column mpiramS will read back.
+        ``ssp.dat`` from it and :meth:`_sediment_profiles` subtracts it.
+        That shared definition is what makes ``csg = cwg + cs``
+        (``ram.f90:345-346``) reproduce the requested absolute bottom
+        speed — the offset is only correct against the very column
+        mpiramS will read back.
 
         Depths outside the tabulation hold the end values, matching how the
         profile is written.
@@ -1455,7 +1420,7 @@ class RAM(PropagationModel):
 
     def _prepare_bottom_properties(self, env: Environment, work_dir: Path,
                                    absorber_span: float, zmax: float,
-                                   dz: Optional[float] = None):
+                                   dz: float):
         """
         Extract bottom properties from environment and convert to mpiramS format.
 
@@ -1470,14 +1435,15 @@ class RAM(PropagationModel):
               The last point is set to absorbing-layer attenuation.
 
         ``absorber_span`` (:meth:`_absorber_span`) is the depth below the
-        seafloor where the absorbing layer starts; every builder stretches
-        ``sedlayer`` to it, floored by the modelled sediment thickness.
+        seafloor where the absorbing layer starts; :meth:`_sediment_profiles`
+        stretches ``sedlayer`` to it, floored by the modelled sediment
+        thickness.
         ``zmax`` locates the final control point. ``dz`` is the depth step the
-        march will actually use; it only sizes ``nzs`` (see below), and
-        defaults to :meth:`_effective_dz` for callers with no grid in scope.
+        march will actually use; it sizes ``nzs`` (see below) and floors
+        ``sedlayer``.
 
-        Returns (sedlayer, nzs, cs, rho, attn, isedrd, sed_filename). Dispatches
-        to a per-bottom-shape builder; each returns that same 7-tuple.
+        Returns (sedlayer, nzs, cs, rho, attn, isedrd, sed_filename) from
+        :meth:`_sediment_profiles`.
         """
         # ``profl`` spreads the interior control points at
         # ``dz_sed = sedlayer/(nzs-3)`` (``mpiramS/src/ram.f90:337``) and
@@ -1493,38 +1459,23 @@ class RAM(PropagationModel):
         # at zmax=400 m. Hold it to one depth cell: ``nzs-3 >= sedlayer/dz``.
         # ``n_sed_points`` stays the floor, so a caller who raised it still
         # gets what they asked for.
-        dz_grid = (float(dz) if dz is not None and float(dz) > 0.0
-                   else self._effective_dz())
-        # A bare half-space contributes no layer thickness of its own, so
-        # without a floor ``sedlayer`` collapses to one depth cell and the
-        # attenuation ramp starts at the seabed itself — replacing the
-        # seabed's own attenuation over the whole sub-bottom, which
-        # :meth:`_absorber_span` exists to prevent. Floor it at the same
-        # synthetic-layer thickness the Collins path wraps a half-space in
-        # (``SeabedColumn.from_halfspace``: 10% of the water depth, at least
-        # 5 m), so the ramp begins below genuinely modelled seabed. The
-        # layered builders still stretch it to the real stack thickness.
-        synthetic_thickness = self._synthetic_sediment_thickness(env)
-        sedlayer = max(self._effective_dz(), float(absorber_span),
-                       synthetic_thickness)
+        dz_grid = float(dz)
+        # ``absorber_span`` is where the automatic domain puts the ramp start
+        # (``_adequate_zmax``: the real-seabed pad below the stack); one
+        # depth cell is the floor that keeps control point ``nzs-1`` below the
+        # seafloor point. ``_sediment_profiles`` stretches it to the modelled
+        # stack.
+        sedlayer = max(dz_grid, float(absorber_span))
 
-        # The layered builders stretch ``sedlayer`` again, to the modelled
-        # stack (``_bottom_layered``: the single column's thickness,
-        # ``_bottom_rd_layered``: the deepest column's) — the same quantity
-        # ``Bottom.max_total_thickness`` reduces to. Size ``nzs`` against the
-        # span they will end up with, not the one they are handed.
+        # :meth:`_sediment_profiles` stretches ``sedlayer`` again, to the
+        # deepest modelled stack (``Bottom.max_total_thickness``). Size
+        # ``nzs`` against the span it will end up with, not the one it is
+        # handed.
         nzs = max(int(self.n_sed_points),
                   int(np.ceil(max(sedlayer,
                                   float(env.bottom.max_total_thickness()))
                               / dz_grid)) + 3)
-
-        if env.has_range_dependent_layered_bottom:
-            return self._bottom_rd_layered(env, work_dir, nzs, sedlayer, zmax)
-        if env.has_layered_bottom:
-            return self._bottom_layered(env, work_dir, nzs, sedlayer, zmax)
-        if env.has_range_dependent_bottom:
-            return self._bottom_rd_halfspace(env, work_dir, nzs, sedlayer, zmax)
-        return self._bottom_halfspace(env, work_dir, nzs, sedlayer, zmax)
+        return self._sediment_profiles(env, work_dir, nzs, sedlayer, zmax)
 
     @staticmethod
     def _sample_layered_column(col, nzs: int, sedlayer: float):
@@ -1574,138 +1525,56 @@ class RAM(PropagationModel):
                 np.concatenate(([rho[0]], rho, [rho[-1]])),
                 np.concatenate(([attn[0]], attn, [attn[-1]])))
 
-    def _bottom_rd_layered(self, env, work_dir, nzs, sedlayer, zmax):
-        """Range-dependent *layered* seabed → per-range sediment .sed profiles."""
-        rdl = env.bottom
-        n_ranges = len(rdl.ranges)
-        sedlayer_rdl = max(rdl.max_total_thickness(), sedlayer)
+    def _sediment_profile_ranges(self, env: Environment) -> List[float]:
+        """Ranges the sediment deck carries a profile at: the bottom's own
+        breaks plus every range where the water speed at the seafloor moves
+        (:meth:`_varying_seafloor_speeds`), since ``cs`` is referenced to
+        the local water column. ``[0.0]`` when one profile serves the whole
+        march."""
+        breaks = {0.0}
+        if env.bottom.is_range_dependent:
+            breaks.update(float(r) for r in env.bottom.ranges)
+        varying, _cwg = self._varying_seafloor_speeds(env)
+        if varying is not None:
+            breaks.update(float(r) for r in varying)
+        return sorted(breaks)
 
-        cs_profiles = np.zeros((nzs, n_ranges))
-        rho_profiles = np.zeros((nzs, n_ranges))
-        attn_profiles = np.zeros((nzs, n_ranges))
+    def _sediment_profiles(self, env, work_dir, nzs, sedlayer, zmax):
+        """The 7-tuple :meth:`_prepare_bottom_properties` returns, for every
+        seabed shape.
 
-        for i in range(n_ranges):
-            lb = rdl.columns[i]
-            cs_samp, rho_samp, attn_samp = self._sample_layered_column(
-                lb, nzs, sedlayer_rdl)
-
-            cs_profiles[:, i] = self._sediment_offsets(
-                env, rdl.ranges[i], cs_samp, nzs, sedlayer_rdl, zmax)
-
-            rho_profiles[:, i] = rho_samp
-            attn_profiles[:, i] = attn_samp
-            attn_profiles[-1, i] = self.absorbing_layer_attn
-
-        sed_filename = self._write_sediment_profiles(
-            work_dir, rdl.ranges, cs_profiles, rho_profiles, attn_profiles)
-
-        self._log(f"Range-dependent layered sediment: {n_ranges} profiles, "
-                  f"nzs={nzs}, sedlayer={sedlayer_rdl:.1f} m")
-
-        cs = cs_profiles[:, 0].copy()
-        rho_arr = rho_profiles[:, 0].copy()
-        attn_arr = attn_profiles[:, 0].copy()
-        return sedlayer_rdl, nzs, cs, rho_arr, attn_arr, 1, sed_filename
-
-    def _bottom_layered(self, env, work_dir, nzs, sedlayer, zmax):
-        """Range-independent *layered* seabed → single sediment profile,
-        or one profile per range break when the water speed at the seafloor
-        varies with range (see :meth:`_water_speed_at_seafloor`)."""
-        col = env.bottom.columns[0]
-        sedlayer_lay = max(col.total_thickness(), sedlayer)
-
-        cs_samp, rho_arr, attn_arr = self._sample_layered_column(
-            col, nzs, sedlayer_lay)
-        attn_arr[-1] = self.absorbing_layer_attn
-
-        self._log(f"Layered bottom: {len(col.layers)} layers, "
-                  f"nzs={nzs}, sedlayer={sedlayer_lay:.1f} m")
-
-        return self._offsets_over_seafloor_speeds(
-            env, work_dir, cs_samp, nzs, sedlayer_lay, zmax, rho_arr, attn_arr)
-
-    def _bottom_rd_halfspace(self, env, work_dir, nzs, sedlayer, zmax):
-        """Range-dependent *halfspace* seabed → per-range sediment .sed profiles."""
-        bottom_rd = env.bottom
-        n_ranges = len(bottom_rd.ranges)
-
-        cs_profiles = np.zeros((nzs, n_ranges))
-        rho_profiles = np.zeros((nzs, n_ranges))
-        attn_profiles = np.zeros((nzs, n_ranges))
-
-        cp_arr = bottom_rd.halfspace_sound_speed
-        rho_view = bottom_rd.halfspace_density
-        attn_view = bottom_rd.halfspace_attenuation
-        for i in range(n_ranges):
-            cs_profiles[:, i] = self._sediment_offsets(
-                env, bottom_rd.ranges[i], np.full(nzs, float(cp_arr[i])),
-                nzs, sedlayer, zmax)
-
-            rho_profiles[:, i] = rho_view[i]
-            attn_profiles[:, i] = attn_view[i]
-            attn_profiles[-1, i] = self.absorbing_layer_attn
-
-        sed_filename = self._write_sediment_profiles(
-            work_dir, bottom_rd.ranges, cs_profiles, rho_profiles,
-            attn_profiles)
-
-        self._log(f"Range-dependent sediment: {n_ranges} profiles, nzs={nzs}")
-
-        cs = cs_profiles[:, 0].copy()
-        rho_arr = rho_profiles[:, 0].copy()
-        attn_arr = attn_profiles[:, 0].copy()
-        return sedlayer, nzs, cs, rho_arr, attn_arr, 1, sed_filename
-
-    def _bottom_halfspace(self, env, work_dir, nzs, sedlayer, zmax):
-        """Range-independent *halfspace* seabed (the Environment default).
-
-        Emits one profile per range break when the water speed at the seafloor
-        varies with range (see :meth:`_water_speed_at_seafloor`).
+        One profile per range of :meth:`_sediment_profile_ranges`, each
+        sampling the column nearest its range (``Bottom.column_index_at``, the
+        same nearest rule ``ram.f90:316-320`` applies when it marches with
+        the nearest written profile — so a column switch sits midway between
+        the two written samples straddling the bottom break) and referencing
+        ``cs`` to the water column at its own seafloor
+        (:meth:`_sediment_offsets`). ``sedlayer`` is stretched to the deepest
+        modelled stack so every layer is sampled; a pure half-space samples
+        to the same value at every point. One range → the inline profile
+        (``isedrd = 0``); more → the ``.sed`` deck.
         """
-        # ``env.bottom`` is always a coerced ``Bottom`` carrier (Environment
-        # defaults None → a half-space), so ``halfspace_at`` returns real
-        # geoacoustics — no fabricated fallback.
-        hs = env.bottom.halfspace_at(range=0.0)
-        cb_val = float(hs.sound_speed)
-        rho_val = float(hs.density)
-        attn_val = float(hs.attenuation)
-
-        rho_arr = np.full(nzs, rho_val)
-        attn_arr = np.full(nzs, attn_val)
-        attn_arr[-1] = self.absorbing_layer_attn
-        cp_abs = np.full(nzs, cb_val)
-
-        return self._offsets_over_seafloor_speeds(
-            env, work_dir, cp_abs, nzs, sedlayer, zmax, rho_arr, attn_arr)
-
-    def _offsets_over_seafloor_speeds(self, env, work_dir, cp_abs, nzs,
-                                      sedlayer, zmax, rho_arr, attn_arr):
-        """Turn one range-independent sediment column ``cp_abs`` (absolute
-        speeds at the ``nzs`` control points) into the 7-tuple
-        :meth:`_prepare_bottom_properties` returns.
-
-        The column is range-independent but its *offsets* need not be: one
-        profile per range break whenever the water speed at the seafloor moves
-        (:meth:`_varying_seafloor_speeds`), a single profile otherwise. Density
-        and attenuation are the same column at every range — only ``cs`` is
-        referenced to the local water column.
-        """
-        ranges, _cwg = self._varying_seafloor_speeds(env)
-        if ranges is None:
-            cs = self._sediment_offsets(env, 0.0, cp_abs, nzs, sedlayer, zmax)
-            return sedlayer, nzs, cs, rho_arr, attn_arr, 0, ''
-
-        cs_profiles = np.column_stack([
-            self._sediment_offsets(env, r, cp_abs, nzs, sedlayer, zmax)
-            for r in ranges
-        ])
-        sed_filename = self._write_sediment_profiles(
-            work_dir, ranges, cs_profiles,
-            np.repeat(rho_arr[:, None], len(ranges), axis=1),
-            np.repeat(attn_arr[:, None], len(ranges), axis=1),
-        )
-        return (sedlayer, nzs, cs_profiles[:, 0].copy(), rho_arr, attn_arr,
-                1, sed_filename)
+        bottom = env.bottom
+        sedlayer = max(float(bottom.max_total_thickness()), float(sedlayer))
+        ranges = self._sediment_profile_ranges(env)
+        cs = np.zeros((nzs, len(ranges)))
+        rho = np.zeros((nzs, len(ranges)))
+        attn = np.zeros((nzs, len(ranges)))
+        for i, rng in enumerate(ranges):
+            col = bottom.columns[bottom.column_index_at(range=rng)]
+            cp_abs, rho[:, i], attn[:, i] = self._sample_layered_column(
+                col, nzs, sedlayer)
+            cs[:, i] = self._sediment_offsets(env, rng, cp_abs, nzs,
+                                              sedlayer, zmax)
+        attn[-1, :] = self.absorbing_layer_attn
+        self._log(f"Sediment: {len(ranges)} profile(s), nzs={nzs}, "
+                  f"sedlayer={sedlayer:.1f} m")
+        if len(ranges) == 1:
+            return sedlayer, nzs, cs[:, 0], rho[:, 0], attn[:, 0], 0, ''
+        sed_filename = self._write_sediment_profiles(work_dir, ranges, cs,
+                                                     rho, attn)
+        return (sedlayer, nzs, cs[:, 0].copy(), rho[:, 0].copy(),
+                attn[:, 0].copy(), 1, sed_filename)
 
     def _varying_seafloor_speeds(self, env: Environment):
         """``(ranges, cwg)`` when the water speed at the seafloor varies with
@@ -1732,7 +1601,6 @@ class RAM(PropagationModel):
     def _write_sediment_profiles(work_dir, ranges, cs_profiles,
                                  rho_profiles, attn_profiles) -> str:
         """Write the mpiramS ``.sed`` deck and return its filename."""
-        from uacpy.io.mpirams_writer import write_sediment_file
         sed_filename = 'sediment.sed'
         write_sediment_file(work_dir / sed_filename, np.asarray(ranges, float),
                             cs_profiles, rho_profiles, attn_profiles)
@@ -1751,7 +1619,8 @@ class RAM(PropagationModel):
         output_duration: Optional[float] = None,
     ) -> Result:
         """
-        Run RAM (mpiramS) simulation.
+        Run a RAM march on the backend :meth:`select_backend` picks
+        (mpiramS / ramgeo / rams0.5 / ramsurf1.5).
 
         Parameters
         ----------
@@ -2106,10 +1975,9 @@ class RAM(PropagationModel):
             return 'ramsurf'
         # Fluid + flat: RAMGEO for narrowband TL through a *layered* bottom,
         # because its deck carries the layer geometry itself. mpiramS keeps the
-        # broadband path and the simple half-space cases, where it models the
-        # seabed natively (ramgeo would wrap it in a synthetic layer, a small
-        # accuracy cost). ramgeo still *accepts* a simple bottom when forced
-        # via backend='ramgeo'. See :meth:`_prefer_ramgeo` for what actually
+        # broadband path and the simple half-space cases, where there is no
+        # layer geometry to track. ramgeo still *accepts* a simple bottom when
+        # forced via backend='ramgeo'. See :meth:`_prefer_ramgeo` for what actually
         # separates the two on a layered stack — following the bathymetry is
         # not it, since mpiramS anchors its own profile at the local seafloor.
         if self._prefer_ramgeo(env, run_mode):
@@ -2582,17 +2450,13 @@ class RAM(PropagationModel):
                 UserWarning, skip_file_prefixes=USER_FRAME_SKIP
             )
         psi_raw = np.asarray(raw['pcomplex'], dtype=np.complex128)
-        mag = np.abs(psi_raw)
-        with np.errstate(invalid='ignore', divide='ignore'):
-            unit = np.where(mag > 0.0, psi_raw / mag, 1.0 + 0.0j)
-        # An exactly-zero sample — the pressure-release surface node the
-        # fluid codes emit at z = 0 when ndz = 1 — is a valid boundary value,
-        # not divergence, and it stays zero: the shared ``_complex_to_db``
-        # floor reports it as the one no-energy level, and it is not counted
-        # in the warning above. Every surviving magnitude is likewise the
-        # engine's own, uncapped: inside the 1 m reference radius
-        # |p/p0| > 1 is what the field is.
-        return np.where(invalid, complex(np.nan, np.nan), mag * unit)
+        # Every surviving sample is the engine's own value, bit for bit:
+        # the exact zero at the z = 0 pressure-release node the fluid codes
+        # emit when ndz = 1 is a valid boundary value, not divergence (the
+        # shared ``_complex_to_db`` floor reports it as the one no-energy
+        # level, and it is not counted in the warning above), and inside the
+        # 1 m reference radius |p/p0| > 1 is what the field is.
+        return np.where(invalid, complex(np.nan, np.nan), psi_raw)
 
     def _run_collins_one_freq(
         self,
@@ -3033,11 +2897,10 @@ class RAM(PropagationModel):
         hand-rolled copy got all three wrong: the depths are written **relative
         to the seafloor** for ramgeo/ramsurf (:meth:`_collins_deck_base`'s
         ``z_top``) so an absolute-depth copy runs the arithmetic in the wrong
-        frame; a pure half-space column is wrapped as one **synthetic layer**
-        (the same method's ``from_halfspace(synthesize=True)``) so it has
-        interior block points after all; and
-        :meth:`_ramp_absorbing_attenuation` **adds** points to the attenuation
-        block. One section per range break, each with its own seafloor.
+        frame; a pure half-space column is its two breakpoints and nothing
+        else; and :meth:`_ramp_absorbing_attenuation` **adds** points to the
+        attenuation block. One section per range break, each with its own
+        seafloor.
 
         This is the one deck build that stays per-frequency: the ramp is what
         moves the block points around, and this method exists to see them.
@@ -3146,7 +3009,6 @@ class RAM(PropagationModel):
             dz_min = dz_aligned
         shear_cap = 0.0
         if kind == 'rams' and freq is not None:
-            from uacpy.models._pade_optimizer import rams_dz_shear_cap
             shear_cap = rams_dz_shear_cap(self._min_shear_speed(env),
                                           float(freq))
         if shear_cap > 0.0 and dz_min > shear_cap:
@@ -3767,8 +3629,7 @@ class RAM(PropagationModel):
         # and stops following the seafloor. ramgeo/ramsurf re-anchor at the
         # local seafloor in ``matrc`` (``ramgeo1.5.f:262-268``, ``ii=1 …
         # ii=ii+1``) and need no extra sections. A half-space column is
-        # immune either way — ``from_halfspace(synthesize=True)`` gives every
-        # profile point the same value.
+        # immune either way — both of its breakpoints carry the same value.
         if (not seafloor_relative and b.is_layered
                 and env.bathymetry.is_range_dependent):
             breaks.update(self._bathy_anchor_ranges(env, b))
@@ -3779,13 +3640,11 @@ class RAM(PropagationModel):
             # Section 0 is the initial profile; write_ramin ignores its range.
             marker = rng if i == 0 else 0.5 * (ranges[i - 1] + rng)
             seafloor = float(np.asarray(env.bathymetry.eval(range=rng)).flat[0])
+            # A pure half-space column is written as its two breakpoints:
+            # ``zread`` interpolates any block onto the grid and ``matrc``
+            # reads per-node values (``ramgeo1.5.f:209-311``), so no layer is
+            # needed above the half-space.
             col = b.at(range=rng)
-            # The Collins PE update needs a sediment layer above the half-space,
-            # so a pure half-space column is wrapped as one synthetic layer.
-            if not col.is_layered:
-                col = SeabedColumn.from_halfspace(
-                    col.halfspace, water_depth=seafloor, synthesize=True)
-
             z_top = 0.0 if seafloor_relative else seafloor
             z_bottom = (zmax - seafloor) if seafloor_relative else zmax
             bp = col.to_piecewise_breakpoints(
@@ -4101,8 +3960,6 @@ class RAM(PropagationModel):
         spectrum bounds it sets), so the θ steps below share the cache without
         reading each other's numbers.
         """
-        from uacpy.models._pade_optimizer import optimize_grid
-
         tau_cache = {}
         eps_used, theta_used, res, last_exc = eps0, theta0, None, None
         for theta_trial in (theta0, 20.0, self._THETA_MAX_FLOOR):
@@ -4264,8 +4121,6 @@ class RAM(PropagationModel):
         Raises ``ConfigurationError`` if no candidate ``(dr, dz)`` pair
         meets the accuracy budget even after auto-loosening.
         """
-        from uacpy.models._pade_optimizer import grid_error, rams_dz_shear_cap
-
         c0_pe = self._resolve_c0(env)
 
         # Spectrum bounds: slowest / fastest acoustic speeds in the env,
@@ -4275,9 +4130,9 @@ class RAM(PropagationModel):
         c_min = min(bounds[0], c0_pe)
         c_max = max(bounds[1], c0_pe)
 
-        # Per-backend dz floor: λ_p/16 for the Collins backends, a cost bound
-        # so the optimizer cannot demand an absurdly fine depth grid.
-        # Override via ``dr=…``/``dz=…``.
+        # Depth-grid cost floor λ_p/16 (``LAMBDA_PER_DZ_FLOOR``) on every
+        # backend, so the optimizer cannot demand an absurdly fine depth
+        # grid. Override via ``dr=…``/``dz=…``.
         if kind in ('mpiramS', 'rams', 'ramsurf', 'ramgeo'):
             dz_floor = c_min / (LAMBDA_PER_DZ_FLOOR * max(freq, 1.0))
             cs_min = self._min_shear_speed(env) if kind == 'rams' else 0.0
@@ -4416,10 +4271,8 @@ class RAM(PropagationModel):
         if dz_opt > dz_pre_floor:
             if cs_min > 0:
                 reason = 'shear-wavelength resolution (λ_s / 14)'
-            elif kind == 'mpiramS':
-                reason = 'mpiramS runtime cap (λ_p / 16)'
             else:
-                reason = 'acoustic stability (λ_p / 16)'
+                reason = 'depth-grid cost floor (λ_p / 16)'
             msg = (
                 f"RAM:{kind}: raised dz from {dz_pre_floor:.3f} m to "
                 f"{dz_opt:.3f} m for {reason} "
@@ -4472,66 +4325,6 @@ class RAM(PropagationModel):
             f"ε={self._accuracy:.0e})."
         )
         return dr_opt, dz_opt
-
-    def _effective_dz(self) -> float:
-        """Resolve `dz` outside the per-frequency hot paths (sediment layer
-        thickness, layered-bottom padding, metadata). Honours an explicit
-        `self.dz` if set; no frequency is in scope at these call sites, so
-        the fallback is a fixed 0.5 m.
-        """
-        if self.dz is not None:
-            return float(self.dz)
-        return 0.5
-
-    def _compute_dz(self, env: 'Environment', freq: float,
-                    c0: Optional[float] = None) -> float:
-        """Quick ``λ_min/16`` depth-step estimate, clipped to [0.05, 1.0] m.
-
-        Used only for auxiliary sizing (absorbing-layer thickness in
-        ``_compute_zmax``). The main PE grid is always picked by the
-        Lytaev optimizer or by an explicit user value.
-
-        ``λ_min`` uses the slowest **acoustic** (compressional) wave
-        speed in the env — water column and sediment ``cp``. Shear
-        speeds are deliberately excluded:
-
-        * The shear wave lives in the sediment, not in the water
-          column where the PE march computes the acoustic field. The
-          elastic seafloor is handled by the interface impedance
-          condition, which only requires the right boundary terms in
-          the wave equation, not depth-grid resolution of λ_s/16.
-        * Including shear when it is "fast enough to propagate"
-          (cs ≳ 200 m/s) actually drives the Padé march unstable on
-          ``rams0.5``: the resulting dz ≈ λ_s/16 ≈ 0.15 m gives a
-          dr/dz ratio of 100+ that the rotated Padé operator cannot
-          handle (validated empirically on Pekeris-with-elastic
-          regressions — bad-sample fraction goes from 0% at shear=150
-          to >90% at shear=200 with the same auto-numerics).
-        """
-        # Slowest compressional speed anywhere in the env (water column and
-        # sediment), the same c_min ``_compute_grid_lytaev`` floors its dz
-        # with. ``c0`` is only a fallback for an env that declares no speeds.
-        bounds = self._speed_bounds(env)
-        if bounds is not None:
-            c_min = float(bounds[0])
-        else:
-            c_min = float(c0) if c0 is not None else self._resolve_c0(env)
-        wavelength = c_min / max(freq, 1.0)
-        target = float(np.clip(wavelength / LAMBDA_PER_DZ_FLOOR, 0.05, 1.0))
-        # Snap dz so the seafloor lands on a depth grid point. PE
-        # accuracy degrades sharply when dz does NOT divide the water
-        # depth (the seafloor interface gets smeared between adjacent
-        # samples) — depth-FD discretisation artifact, not a physics
-        # limit. For range-dependent bathymetry we cannot align the
-        # grid to every range simultaneously: snap to the SHALLOWEST
-        # bathymetry point, which is the most numerically demanding
-        # (fewest grid points in the water column → largest relative
-        # interface displacement when off-grid). The deeper ranges
-        # then have the seafloor between grid points by at most one
-        # dz, which is small relative to their thicker water columns.
-        h = self._seafloor_snap_depth(env)
-        n_layers = max(1, int(round(h / target)))
-        return self._snap_dz_to_seafloor(h, n_layers)
 
     def _resolve_mpirams_grid(self, env, freq: float, rmax: float):
         """``(dr, dz)`` for an mpiramS march: user values where pinned, the
@@ -4599,7 +4392,7 @@ class RAM(PropagationModel):
         rmax = float(np.max(receiver.ranges))
         f_zmax = float(freq) if zmax_freq is None else float(zmax_freq)
         ssp_filename = self._prepare_ssp(env, work_dir, f_zmax, dz)
-        bth_filename, ibot = self._prepare_bathymetry(env, rmax, work_dir)
+        bth_filename = self._prepare_bathymetry(env, rmax, work_dir)
         zmax_pe = self._mpirams_zmax(env, f_zmax, dz)
         sedlayer, nzs, cs, rho_arr, attn_arr, isedrd, sed_filename = \
             self._prepare_bottom_properties(
@@ -4635,7 +4428,7 @@ class RAM(PropagationModel):
             ssp_filename=ssp_filename,
             iflat=1 if self.flat_earth else 0,
             ihorz=0,
-            ibot=ibot,
+            ibot=1,
             bth_filename=bth_filename,
             sedlayer=sedlayer,
             nzs=nzs,
@@ -4667,10 +4460,8 @@ class RAM(PropagationModel):
         dr, dz = self._resolve_mpirams_grid(env, freq, rmax)
 
         # COHERENT_TL collapses the mpiramS broadband window to one bin
-        # (Q→∞, T=1) unless the user widened it via Q=/T=. "One" is exact
-        # only because the vendored ``peramx.f90:370`` now forces ``nf1=0``
-        # for a sub-bin bandwidth; the upstream arithmetic marched three
-        # (fc-df, fc, fc+df) and uacpy discarded two of them.
+        # (Q→∞, T=1) unless the user widened it via Q=/T=: a band narrower
+        # than one bin marches fc alone (``peramx.f90:370``).
         Q_tl = 1e6 if self.Q is None else float(self.Q)
         T_tl = 1.0 if self.T is None else float(self.T)
         # The deck carries (fc, Q, T) and the serial binary derives the

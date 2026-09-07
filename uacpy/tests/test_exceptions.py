@@ -24,7 +24,6 @@ somewhere else:
 import inspect
 import pickle
 import re
-import types
 from pathlib import Path
 
 import numpy as np
@@ -222,20 +221,33 @@ class TestValidationHelpers:
                    for w in caught)
 
 
-# Typed exceptions must survive pickling so run_parallel returns the real
-# per-job error instead of a BrokenProcessPool (these override __init__ with
-# multi-positional / keyword-only signatures and need __reduce__).
+# Every exception must survive pickling so run_parallel returns the real
+# per-job error instead of a BrokenProcessPool. The subclasses that override
+# __init__ with multi-positional / keyword-only signatures store only the
+# formatted message in ``args``, so the default ``cls(*args)`` rebuild fails
+# for them; the base class restores type, ``__dict__`` and ``args`` instead.
 @pytest.mark.parametrize("exc", [
+    UACPYError("base message"),
+    UACPYError("base message", remediation="do this"),
+    ConfigurationError("bad input", remediation="fix the input"),
+    DataFetchError("no cell here"),
+    FileFormatError("truncated .shd"),
     InvalidDepthError(99999.0, 4482.0, "Source depth"),
     ExecutableNotFoundError("Bellhop", "bellhop.exe", ["/a", "/b"]),
+    ExecutableNotFoundError("Bellhop", "bellhop.exe", ["/a"],
+                            reason="is a directory"),
     ModelExecutionError("Kraken", -6, stdout="o", stderr="e"),
+    ModelExecutionError("Kraken", -1, timed_out=True),
     UnsupportedFeatureError("Kraken", "elastic ice surface", ["Bellhop"]),
     UnsupportedFeatureError("OASR", "freq override", ["OASP"],
                             alternatives_label='run modes'),
 ])
-def test_typed_exceptions_pickle_roundtrip(exc):
+def test_every_exception_pickle_roundtrips_with_its_state(exc):
     back = pickle.loads(pickle.dumps(exc))
-    assert type(back) is type(exc) and str(back) == str(exc)
+    assert type(back) is type(exc)
+    assert str(back) == str(exc)
+    assert back.args == exc.args
+    assert back.__dict__ == exc.__dict__
 
 
 # ── 1. a missing file is typed by who was supposed to write it ───────────────
@@ -494,20 +506,17 @@ class TestCapabilityLimitsAreUnsupportedFeatureErrors:
         assert "'pchip'" in exc.value.remediation
 
     def test_kraken_quad_ssp_interp_is_refused_by_capability(self):
-        from uacpy.models.kraken import Kraken
-        stub = types.SimpleNamespace(interp_ssp='quad')
+        from uacpy.io.oalib_writer import reject_unsupported_ssp_interp
         with pytest.raises(UnsupportedFeatureError, match="'quad'") as exc:
-            Kraken._check_kraken_ssp_type(stub)
+            reject_unsupported_ssp_interp('Kraken', 'quad')
         assert "'pchip'" in exc.value.remediation
 
     def test_a_supported_ssp_interp_passes(self):
         """Both guards fire on 'quad' alone — a retype that started raising on
         the default would pass every test above."""
         from uacpy.io.oalib_writer import reject_unsupported_ssp_interp
-        from uacpy.models.kraken import Kraken
         assert reject_unsupported_ssp_interp('Scooter', 'pchip') is None
-        assert Kraken._check_kraken_ssp_type(
-            types.SimpleNamespace(interp_ssp=None)) is None
+        assert reject_unsupported_ssp_interp('Kraken', None) is None
 
     @pytest.mark.parametrize('writer,options,cite', [
         ('write_oast_input', 'N J T E', 'unoast31.f:299'),

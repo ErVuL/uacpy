@@ -578,6 +578,14 @@ class TestNoisePositivityGuardsRefuseNaN:
         with pytest.raises(ConfigurationError, match=r"non-negative \(knots\) and finite"):
             compute_windnoise(_GUARD_FREQS, NAN)
 
+    def test_compute_windnoise_dc_bin_raises(self):
+        with pytest.raises(ConfigurationError, match="frequencies must be > 0 Hz and finite"):
+            compute_windnoise(np.array([0.0, 100.0]), 10.0)
+
+    def test_compute_windnoise_nan_frequency_bin_raises(self):
+        with pytest.raises(ConfigurationError, match="frequencies must be > 0 Hz and finite"):
+            compute_windnoise(np.array([NAN, 100.0]), 10.0)
+
     def test_compute_windnoise_zero_wind_returns_minus_inf(self):
         assert np.all(np.isneginf(compute_windnoise(_GUARD_FREQS, 0.0)))
 

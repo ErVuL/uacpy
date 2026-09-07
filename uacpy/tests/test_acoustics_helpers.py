@@ -387,8 +387,8 @@ class TestArrayCapableHelpersAnnotateArrayReturns:
     in the package is what a downstream type checker sees. A helper annotated
     ``-> float`` that hands back an ``ndarray`` for array input makes the
     checker reject the array call — including the package's own, at
-    ``SoundSpeedProfile.from_ts``, which calls ``soundspeed`` on three raveled
-    arrays."""
+    ``SoundSpeedProfile.from_mackenzie``, which calls ``soundspeed`` on three
+    raveled arrays."""
 
     #: ``(function, array kwargs, scalar kwargs)`` for every helper in
     #: ``core.acoustics`` documented to take either. Both spellings are driven,

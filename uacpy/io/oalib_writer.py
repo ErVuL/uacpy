@@ -1531,7 +1531,9 @@ def write_fieldflp(
         - 's': dict with 'z' (source depths in m)
         - 'r': dict with 'z' (receiver depths in m), 'r' (ranges in m)
     title : str, optional
-        Title for the file (default: empty)
+        Title for the file. Default ``''``, which ``quote_fortran_title``
+        writes as ``'unnamed'`` (an empty quoted title is legal to field.f90
+        but useless as a label).
     M_limit : int, optional
         Maximum number of modes to include (default: 999999 = all)
     n_profiles : int, optional
@@ -1700,7 +1702,8 @@ def write_field3dflp(
         ``{}`` / ``{:`` is formatted with ``(x_km, y_km)``; anything else is
         written verbatim. Default ``"'{}'"``.
     title : str, optional
-        Deck title. Default empty.
+        Deck title. Default ``''``, written as ``'unnamed'`` by
+        ``quote_fortran_title``.
     M_limit : int, optional
         Mode-count cap. Default 999999.
 
@@ -1874,7 +1877,7 @@ def write_field3dflp(
                 f.write(f"{n0 + 1:5d} {n0 + nx:5d} {n0 + nx + 1:5d}\n")
 
 
-def write_kraken_env_file(
+def _write_kraken_family_env_file(
     filepath: Union[str, Path],
     env: Environment,
     source: Source,
@@ -1888,61 +1891,12 @@ def write_kraken_env_file(
     rmax_m: float,
     c_low: float,
     c_high: float,
+    topopt_extra: str = '',
 ) -> None:
-    """Write a Kraken environment file (.env).
-
-    Kraken extends the KRAKEN ENV format with phase-speed limits (cLow,
-    cHigh), a maximum range (RMax), and an optional broadband frequency
-    vector (``TopOpt(6)='B'``, read after the source/receiver depth blocks).
-    All policy (rmax, cLow/cHigh, broadband detection) is resolved by the
-    caller; this function only formats. ``receiver`` is whatever carries the
-    receiver depths (a ``Receiver`` or a depth array).
-    """
-    with open(filepath, 'w') as f:
-        write_header(
-            f, env, source,
-            ssp_topopt=ssp_topopt,
-            surface_type=surface_type,
-            frequencies=frequencies,
-            filepath=Path(filepath),
-        )
-        write_ssp_section(f, env, env.depth, n_mesh=n_mesh)
-        write_layer_sections(f, env, env.depth, n_mesh=n_mesh)
-        write_bottom_section(
-            f, env,
-            bottom_type=bottom_type,
-            filepath=Path(filepath),
-        )
-        write_phase_speed_and_rmax(f, env, rmax_m=rmax_m, c_low=c_low, c_high=c_high)
-        write_source_depths(f, source)
-        write_receiver_depths(f, receiver)
-        if frequencies is not None and len(np.atleast_1d(frequencies)) > 1:
-            write_broadband_freqs(f, np.asarray(frequencies))
-
-
-def write_scooter_env_file(
-    filepath: Union[str, Path],
-    env: Environment,
-    source: Source,
-    receiver: Receiver,
-    *,
-    ssp_topopt: str,
-    surface_type: BoundaryType,
-    bottom_type: BoundaryType,
-    frequencies: Optional[np.ndarray],
-    topopt_extra: str,
-    n_mesh: int,
-    rmax_m: float,
-    c_low: float,
-    c_high: float,
-) -> None:
-    """Write a Scooter environment file (.env).
-
-    Scooter uses the KRAKEN ENV format plus cLow/cHigh, RMax, and shear
-    support on the bottom halfspace 'A' line. It reads no receiver ranges —
-    ``scooter.f90:158-176`` (``GetPar``) stops at ``ReadfreqVec`` and the
-    ranges come from the ``.grn`` post-processing instead. Policy (rmax,
-    cLow/cHigh) is resolved by the caller; this only formats.
+    """The KRAKEN ENV deck Kraken and Scooter share: header, SSP, sediment
+    layers, bottom, cLow/cHigh/RMax, source and receiver depths, and the
+    broadband frequency vector when there is more than one frequency.
+    ``topopt_extra`` is the extra TopOpt character only Scooter reads.
     """
     with open(filepath, 'w') as f:
         write_header(
@@ -1955,9 +1909,10 @@ def write_scooter_env_file(
         )
         write_ssp_section(f, env, env.depth, n_mesh=n_mesh)
         write_layer_sections(f, env, env.depth, n_mesh=n_mesh)
-        # Scooter honours real shear attenuation on the 'A' halfspace line and
-        # writes cLow/cHigh/RMax via write_phase_speed_and_rmax, so the F-type
-        # reflection-table bounds line is suppressed here.
+        # Both engines read the 'A' halfspace line as ``zTemp, alphaR, betaR,
+        # rhoR, alphaI, betaI`` (misc/ReadEnvironmentMod.f90:285), shear
+        # attenuation included, and take cLow/cHigh/RMax from the
+        # write_phase_speed_and_rmax record that follows it.
         write_bottom_section(
             f, env,
             bottom_type=bottom_type,
@@ -1970,6 +1925,50 @@ def write_scooter_env_file(
         write_receiver_depths(f, receiver)
         if frequencies is not None and len(np.atleast_1d(frequencies)) > 1:
             write_broadband_freqs(f, np.asarray(frequencies))
+
+
+def write_kraken_env_file(
+    filepath: Union[str, Path], env: Environment, source: Source, receiver, *,
+    ssp_topopt: str, surface_type: BoundaryType, bottom_type: BoundaryType,
+    frequencies: Optional[np.ndarray], n_mesh: int, rmax_m: float,
+    c_low: float, c_high: float,
+) -> None:
+    """Write a Kraken environment file (.env).
+
+    Kraken extends the KRAKEN ENV format with phase-speed limits (cLow,
+    cHigh), a maximum range (RMax), and an optional broadband frequency
+    vector (``TopOpt(6)='B'``, read after the source/receiver depth blocks).
+    All policy (rmax, cLow/cHigh, broadband detection) is resolved by the
+    caller; this function only formats. ``receiver`` is whatever carries the
+    receiver depths (a ``Receiver`` or a depth array).
+    """
+    _write_kraken_family_env_file(
+        filepath, env, source, receiver, ssp_topopt=ssp_topopt,
+        surface_type=surface_type, bottom_type=bottom_type,
+        frequencies=frequencies, n_mesh=n_mesh, rmax_m=rmax_m,
+        c_low=c_low, c_high=c_high)
+
+
+def write_scooter_env_file(
+    filepath: Union[str, Path], env: Environment, source: Source,
+    receiver: Receiver, *,
+    ssp_topopt: str, surface_type: BoundaryType, bottom_type: BoundaryType,
+    frequencies: Optional[np.ndarray], topopt_extra: str, n_mesh: int,
+    rmax_m: float, c_low: float, c_high: float,
+) -> None:
+    """Write a Scooter environment file (.env).
+
+    Scooter uses the KRAKEN ENV format plus cLow/cHigh, RMax, and shear
+    support on the bottom halfspace 'A' line. It reads no receiver ranges —
+    ``scooter.f90:158-176`` (``GetPar``) stops at ``ReadfreqVec`` and the
+    ranges come from the ``.grn`` post-processing instead. Policy (rmax,
+    cLow/cHigh) is resolved by the caller; this only formats.
+    """
+    _write_kraken_family_env_file(
+        filepath, env, source, receiver, ssp_topopt=ssp_topopt,
+        surface_type=surface_type, bottom_type=bottom_type,
+        frequencies=frequencies, topopt_extra=topopt_extra, n_mesh=n_mesh,
+        rmax_m=rmax_m, c_low=c_low, c_high=c_high)
 
 
 def write_sparc_env_file(

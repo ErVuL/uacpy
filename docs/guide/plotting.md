@@ -278,8 +278,9 @@ plain:
 - **`source=` / `receiver=`** — the run geometry. The receiver lattice is
   decimated (≤ 20 range dots × 10 depth dots) so a dense grid does not paint the
   panel solid. The source is drawn at **r = 0** by the package convention that
-  range is measured from it, and the x axis widens to keep it on screen — which
-  is why the last panel starts at 0 km while the data starts at 50 m.
+  range is measured from it, and the x axis widens by the marker's own half
+  width to keep it whole on screen — which is why the last panel starts just
+  left of 0 km while the data starts at 50 m.
 
 All three apply to a `(depth, range)` cross-section only (§2.2). `env=` is
 accepted by every view that has one — `plot_field`, `plot_signal_excess`,

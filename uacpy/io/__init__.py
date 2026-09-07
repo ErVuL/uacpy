@@ -19,7 +19,8 @@ Layout:
 * ``mpirams_writer`` / ``mpirams_reader`` — RAM mpiramS backend.
 * ``ramsurf_writer`` / ``ramsurf_reader`` — Collins rams0.5 / ramsurf1.5.
 * ``grn_reader`` — Scooter / SPARC Green's-function with post-processing.
-* ``utils`` — shared helpers (``equally_spaced``).
+* ``utils`` — shared helpers (``equally_spaced``, ``reject_unknown_kwargs``,
+  ``_collapsed_pair_index``).
 * ``file_manager`` — temp-dir / tmpfs management.
 * ``_fortran_helpers`` — private low-level Fortran-record helpers.
 

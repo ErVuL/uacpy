@@ -21,8 +21,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parents[2]))
 
 import numpy as np  # noqa: E402
-import matplotlib  # noqa: E402
-matplotlib.use('Agg')
 import matplotlib.pyplot as plt  # noqa: E402
 
 from uacpy.core.environment import BoundaryProperties, Environment  # noqa: E402

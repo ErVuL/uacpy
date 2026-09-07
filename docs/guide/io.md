@@ -372,7 +372,7 @@ become `n_samples` and `c_min` — so a consumer can forward them straight into
 | File | Direction | Written by / read by |
 |---|---|---|
 | `rams.in` / `ram.in` / `ramgeo.in` | in | `write_ramin(..., kind='rams'\|'ramsurf'\|'ramgeo')` |
-| `tl.line` | out | — (written by the binaries; uacpy reads `tl.grid` / `pcomplex.bin` instead) |
+| `tl.line` | out | `read_tl_line` — ranges (m) and TL (dB) at the single `zr_line` receiver depth (the RAM wrapper builds its `Field` from `tl.grid` / `pcomplex.bin`) |
 | `tl.grid` | out | `read_tl_grid` — Fortran sequential, real TL on the `(z, r)` grid |
 | `pcomplex.bin` | out | `read_pcomplex_grid` — **uacpy-patched**, the complex envelope |
 
@@ -550,9 +550,8 @@ The conversion set is deliberately narrow. `AttributeError`, `TypeError` and
 `NameError` are **not** converted: those signal a defect in uacpy, and dressing
 them as `FileFormatError` would send you off to debug a file that is fine.
 
-The decorator is applied per reader. Its two former holdouts are gone:
-`read_rts_file` now carries the conversion like the rest, and the `tl.line`
-reader was removed.
+The decorator is applied per reader, `read_rts_file` and `read_tl_line`
+included.
 
 ---
 

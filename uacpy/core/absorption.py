@@ -80,7 +80,8 @@ def thorp_db_per_km(frequency: _ArrayLike) -> np.ndarray:
     **Frequency band.** The 3.3e-3 dB/km constant term is not an absorption
     mechanism — JKPS attributes that regime to leakage out of the deep sound
     channel — so below ~50 Hz this and Francois-Garrison diverge hard (at 10 Hz
-    3.3e-3 dB/km against FG's 1.2e-5, and only FG is modelling absorption).
+    3.3e-3 dB/km against FG's 1.2e-5 at 4 °C, 35 ppt, pH 8.0, 3000 m, and
+    only FG is modelling absorption).
     ``docs/guide/environment.md §6 "Two things the curve does not tell you"``
     works the comparison through.
 
@@ -499,6 +500,8 @@ class FrancoisGarrison(Absorption):
 
     def __post_init__(self):
         Absorption.__post_init__(self)
+        for name in ('temperature_c', 'salinity_psu', 'pH', 'z_bar_m'):
+            _require_finite(getattr(self, name), f"FrancoisGarrison: {name}")
         if not (self.salinity_psu >= 0):
             raise ConfigurationError(
                 f"FrancoisGarrison: salinity_psu must be non-negative (PSU); "

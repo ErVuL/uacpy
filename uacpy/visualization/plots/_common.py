@@ -16,7 +16,7 @@ from uacpy.core.results.quantities import label as quantity_label
 from uacpy.core.units import m_to_km
 from uacpy.visualization.style import (
     BOTTOM_FILL_STYLE_SOLID, BOTTOM_LINE_STYLE, BOTTOM_LINE_STYLE_FLAT,
-    RECEIVER_MARKER_STYLE,
+    RECEIVER_MARKER_STYLE, SOURCE_MARKER_STYLE,
 )
 
 
@@ -171,6 +171,19 @@ def _marker_half_width_in_data(ax, markersize_pt):
     return abs(inv.transform((half_px, 0.0))[0] - inv.transform((0.0, 0.0))[0])
 
 
+def _fill_margins(ax):
+    """``(left, right)`` widths, in x data units, that the water mesh, seabed
+    fills and seafloor line are painted past the axis limits by.
+
+    :func:`_draw_geometry` widens the left limit by the source star's half
+    width and the right one by the furthest receiver dot's, and matplotlib
+    clips the fills at the limits, so painting past them keeps the panel
+    behind the markers painted. The factor covers the ray fan's larger star
+    and a layout pass that shrinks the panel after the widths are measured."""
+    return (1.25 * _marker_half_width_in_data(ax, SOURCE_MARKER_STYLE['markersize']),
+            1.25 * _marker_half_width_in_data(ax, RECEIVER_MARKER_STYLE['markersize']))
+
+
 def _draw_geometry(ax, source=None, receiver=None, *, source_range_m=0.0,
                    max_markersize=8, source_markersize_bonus=0):
     """Draw the source and receiver markers on a (depth, range) cross-section.
@@ -181,10 +194,13 @@ def _draw_geometry(ax, source=None, receiver=None, *, source_range_m=0.0,
     ``source_range_m`` is where the source sits — 0 by the package convention
     that range is measured from it. ``receiver`` is decimated by
     :func:`_draw_receiver_grid`."""
-    from uacpy.visualization.style import SOURCE_MARKER_STYLE
+    # Every marker that may sit on a spine, as (x, half width in data units).
+    needs = []
     if receiver is not None and getattr(receiver, 'depths', None) is not None:
-        _draw_receiver_grid(ax, receiver.ranges, receiver.depths,
-                            max_markersize=max_markersize)
+        rr_km = _draw_receiver_grid(ax, receiver.ranges, receiver.depths,
+                                    max_markersize=max_markersize)
+        needs.append((float(rr_km.max()), _marker_half_width_in_data(
+            ax, min(RECEIVER_MARKER_STYLE.get('markersize', 8), max_markersize))))
     source_depths = getattr(source, 'depths', source)
     if source_depths is not None and np.size(source_depths):
         style = dict(SOURCE_MARKER_STYLE)
@@ -194,29 +210,23 @@ def _draw_geometry(ax, source=None, receiver=None, *, source_range_m=0.0,
         x = m_to_km(np.atleast_1d(source_range_m))[0]
         for sd in np.atleast_1d(source_depths):
             ax.plot([x], [float(sd)], zorder=ZORDER_SOURCE, **style)
-        # Models exclude the singular near field, so a TL grid usually starts
-        # beyond r = 0 while the source sits at it. Widen the axis to keep the
-        # marker on screen rather than clipping it to the spine.
-        x_lo, x_hi = ax.get_xlim()
-        lo, hi = min(x_lo, x_hi), max(x_lo, x_hi)
-        if not (lo <= x <= hi):
-            # Widening to EXACTLY the marker's x centres it ON the spine, and
-            # markers keep matplotlib's default clipping for the reason
-            # _draw_receiver_grid's docstring gives (a later zoom must hide
-            # out-of-view markers), so half the marker is cut away — visible
-            # on the source star of docs/guide/figures/plot_overlays.png.
-            # Pad the side that moved by the marker's own half width, which is
-            # what it actually needs: a fixed fraction of the span is a
-            # different number of points on every figure size, and 1 % still
-            # clipped the star on a 3-inch panel.
-            ax.set_xlim(min(lo, x), max(hi, x))
-            pad = _marker_half_width_in_data(ax, style.get('markersize', 15))
-            new_lo, new_hi = min(lo, x), max(hi, x)
-            if x < lo:
-                new_lo -= pad
-            if x > hi:
-                new_hi += pad
-            ax.set_xlim(new_lo, new_hi)
+        needs.append((x, _marker_half_width_in_data(ax, style.get('markersize', 15))))
+    # Widen the axis so every marker is whole: markers keep default clipping
+    # (a later zoom must hide out-of-view markers), so a limit on a marker's
+    # centre cuts half of it away. The pad is the marker's own half width in
+    # pixels, which is more data on a wider axis, so the limits are the fixed
+    # point of "pad measured on the axis it produces" — solved for the
+    # marker that reaches furthest past each spine.
+    x_lo, x_hi = ax.get_xlim()
+    lo, hi = min(x_lo, x_hi), max(x_lo, x_hi)
+    span = hi - lo
+    left = min(((x - p, x, p / span) for x, p in needs if x - p < lo),
+               default=(lo, lo, 0.0))
+    right = max(((x + p, x, p / span) for x, p in needs if x + p > hi),
+                default=(hi, hi, 0.0))
+    if left[2] or right[2]:
+        new_span = (right[1] - left[1]) / (1.0 - left[2] - right[2])
+        ax.set_xlim(left[1] - left[2] * new_span, right[1] + right[2] * new_span)
 
 
 def _draw_receiver_grid(ax, ranges_m, depths, *, max_markersize,
@@ -242,29 +252,20 @@ def _draw_receiver_grid(ax, ranges_m, depths, *, max_markersize,
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+# Range is drawn in km on every axis (see :func:`_coord_axis`) and read in km
+# by the pinned-cut subtitle, so its unit here is the drawn one.
 _AXIS_LABELS = {
     'depth':        ('Depth', 'm'),
-    'range':        ('Range', 'm'),
+    'range':        ('Range', 'km'),
     'frequency':    ('Frequency', 'Hz'),
     'time':         ('Time', 's'),
     'source_depth': ('Source depth', 'm'),
 }
 
 
-def _db_label(field: Field) -> str:
-    """Axis label for the ``value='db'`` view of ``field``.
-
-    ``value`` is the caller's choice of *view*; ``field.kind`` is what the data
-    *is*. They are independent — one complex field renders every view — but the
-    label has to come from the field, or the dB view of a signal-excess grid
-    announces itself as transmission loss. Split out from :func:`_value_array`
-    so a caller that wants only the label does not build the array to get it."""
-    return quantity_label(field.kind, 'dB' if field.is_complex else field.unit)
-
-
 # Axis / colorbar label per ``value`` view, for the views whose label is fixed.
 # ``'db'`` is missing on purpose: its label comes from the field (see
-# :func:`_db_label`), because the dB view of a signal-excess grid is not TL.
+# :func:`_value_label`), because the dB view of a signal-excess grid is not TL.
 _VALUE_LABELS = {
     'mag_db': '|H| (dB)',
     'mag': '|p|',
@@ -305,7 +306,11 @@ def _value_label(field: Field, value: str) -> str:
     drew (a composite figure's shared colorbar) and so must not build the array
     a second time to read its label."""
     if value == 'db':
-        return _db_label(field)
+        # ``value`` is the caller's choice of VIEW; ``field.kind`` is what the
+        # data IS. They are independent — one complex field renders every
+        # view — but the label has to come from the field, or the dB view of
+        # a signal-excess grid announces itself as transmission loss.
+        return quantity_label(field.kind, 'dB' if field.is_complex else field.unit)
     if value == 'real':
         # A time trace is p(t); a real field that is not pressure (a
         # probability, a signal excess) is named by what it is — 'Re(p)'
@@ -313,7 +318,7 @@ def _value_label(field: Field, value: str) -> str:
         if 'time' in field.coords:
             return 'p(t)'
         if not field.is_complex and getattr(field, 'kind', 'pressure') != 'pressure':
-            # From the registry, the same source :func:`_db_label` reads, not
+            # From the registry, the same source the dB branch above reads, not
             # from the tag spelling: mangling ``kind`` produced 'probability
             # of detection' where the dedicated plotter's colorbar and the
             # registry both say 'Probability of detection'.
@@ -368,7 +373,7 @@ def _coord_axis(coord: np.ndarray, name: str) -> Tuple[np.ndarray, str]:
     ``range`` axis from metres to km so 1-D cuts, 2-D heatmaps and ``compare``
     all share one x-scale."""
     if name == 'range':
-        return m_to_km(coord), 'Range (km)'
+        return m_to_km(coord), _coord_label(name)
     return np.asarray(coord), _coord_label(name)
 
 
@@ -466,8 +471,10 @@ def _overlay_seafloor(ax, env: Environment, ranges_m: np.ndarray) -> None:
 
     Uses high z-orders (sediment + 5, line + 6) so the bathymetry sits
     above contour lines and TL data — matches the original AT-style
-    rendering. Bathymetry is clipped to the data x-range and anchored at both
-    ends, and the y-axis is extended downward when the seafloor dips below the
+    rendering. Bathymetry is clipped to the painted span — the data x-range
+    plus a marker's width past each end (:func:`_fill_margins`), from the
+    source range when the data start beyond it — and anchored at both ends,
+    and the y-axis is extended downward when the seafloor dips below the
     data extent so the sediment fill stays visible. The boundary stroke is
     sunk into the sediment (:func:`_sink_line_into_sediment`) so nothing in
     the water column — a ray skimming the bottom, the lowest field row — is
@@ -482,6 +489,8 @@ def _overlay_seafloor(ax, env: Environment, ranges_m: np.ndarray) -> None:
     if x_hi <= x_lo:
         return  # nothing to overlay on a zero-width axis
     ax.set_xlim(x_lo, x_hi)
+    m_lo, m_hi = _fill_margins(ax)
+    fill_lo, fill_hi = min(x_lo, 0.0) - m_lo, x_hi + m_hi
 
     if env.has_range_dependent_bathymetry:
         r_km = m_to_km(env.bathymetry.ranges)
@@ -492,21 +501,15 @@ def _overlay_seafloor(ax, env: Environment, ranges_m: np.ndarray) -> None:
         # the panel shows a water column with no seabed under it, while the
         # model held that depth out to the end of the field. ``np.interp``
         # clamps outside the profile, so the anchors continue the end value —
-        # the same constant extension the models apply. A no-op when the
-        # bathymetry already spans the field exactly.
+        # the same constant extension the models apply.
         if r_km.size >= 2:
-            mask = (r_km >= x_lo) & (r_km <= x_hi)
-            r_clip = list(r_km[mask])
-            z_clip = list(z[mask])
-            if not r_clip or r_clip[0] > x_lo:
-                r_clip.insert(0, x_lo)
-                z_clip.insert(0, float(np.interp(x_lo, r_km, z)))
-            if r_clip[-1] < x_hi:
-                r_clip.append(x_hi)
-                z_clip.append(float(np.interp(x_hi, r_km, z)))
-            r_km = np.array(r_clip)
-            z = np.array(z_clip)
-        max_seafloor = float(np.max(z))
+            inside = (r_km > fill_lo) & (r_km < fill_hi)
+            z_ends = np.interp([fill_lo, fill_hi], r_km, z)
+            r_km = np.concatenate(([fill_lo], r_km[inside], [fill_hi]))
+            z = np.concatenate(([z_ends[0]], z[inside], [z_ends[1]]))
+        # The depth headroom follows the seafloor over the DATA span: the
+        # painted margins beyond it are a marker's width and set no limit.
+        max_seafloor = float(np.max(np.interp(np.clip(r_km, x_lo, x_hi), r_km, z)))
         depth_max = max(max(ax.get_ylim()), max_seafloor * 1.05)
         if depth_max > max(ax.get_ylim()):
             ax.set_ylim(depth_max, min(ax.get_ylim()))
@@ -520,7 +523,7 @@ def _overlay_seafloor(ax, env: Environment, ranges_m: np.ndarray) -> None:
         if depth_max > max(ax.get_ylim()):
             ax.set_ylim(depth_max, min(ax.get_ylim()))
         ax.fill_between(
-            data_r_km, env.depth, depth_max,
+            [fill_lo, fill_hi], env.depth, depth_max,
             zorder=ZORDER_SEDIMENT + 5, **BOTTOM_FILL_STYLE_SOLID,
         )
         line = ax.axhline(env.depth, zorder=ZORDER_SEDIMENT + 6,

@@ -158,8 +158,12 @@ def _surface(max_range, wind_ms, n_points, seed):
     # ripples over a transect would ask for millions of samples.
     calm = wind_ms < _CALM_WIND_MS
     wind_ms = max(wind_ms, _CALM_WIND_MS)
-    # Deep-water peak wavelength of the Pierson-Moskowitz spectrum: the peak
-    # sits at omega_p = g/U, and omega² = g·k_wave gives k_wave = g/U².
+    # Deep-water wavelength at the Pierson-Moskowitz *nominal* peak frequency
+    # omega_0 = g/U (Medwin & Clay §13.1); omega² = g·k_wave gives
+    # k_wave = g/U². The spectrum's maximum sits lower, at (4β/5)^¼·omega_0 =
+    # 0.877·omega_0 for β = 0.74, so this lambda_p is 0.77× the true peak
+    # wavelength and the sample count below is ~30 % more than the true peak
+    # needs — the safe direction.
     lambda_p = 2.0 * np.pi * wind_ms ** 2 / _G
     needed = int(np.ceil(_SAMPLES_PER_PEAK * max_range / lambda_p)) + 1
     if n_points is None:

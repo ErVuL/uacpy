@@ -459,9 +459,9 @@ def test_independent_bathy_ssp_bottom_ranges_compose_ok():
 
 
 def test_bty_long_format_uses_union_of_range_grids(tmp_path):
-    """RD-bottom ranges that differ from the bathymetry ranges are emitted on
-    the union grid — the bottom's own breakpoints survive exactly (with depth
-    interpolated onto them) instead of being blended onto the bathy grid."""
+    """RD-bottom ranges that differ from the bathymetry ranges survive exactly
+    on the written grid (with depth interpolated onto them) instead of being
+    blended onto the bathy grid; a varying seabed is filled to >= 128 rows."""
     from uacpy.io.bathy_io import write_bty_long_format
 
     bathy = np.array([[0.0, 100.0],
@@ -478,8 +478,9 @@ def test_bty_long_format_uses_union_of_range_grids(tmp_path):
     write_bty_long_format(out, bathy, rd_bot)
     lines = [ln.split() for ln in out.read_text().splitlines() if ln.strip()
              and not ln.strip().startswith("'")]
-    assert int(lines[0][0]) == 4                    # union {0, 3, 6, 9} km
-    rows = [list(map(float, row)) for row in lines[1:5]]
+    n_rows = int(lines[0][0])
+    assert n_rows >= 128        # union {0, 3, 6, 9} km, filled: the seabed varies
+    rows = [list(map(float, row)) for row in lines[1:1 + n_rows]]
     by_range = {r[0]: r for r in rows}
     assert by_range[3.0][2] == pytest.approx(1700.0)    # midway 1600→1800
     assert by_range[6.0][2] == pytest.approx(1800.0)    # bottom's own break

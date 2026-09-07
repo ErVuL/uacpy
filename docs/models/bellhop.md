@@ -210,7 +210,7 @@ any of them under another beam type — including the default `'B'` — emits a
 
 | Name | Default | Meaning |
 |---|---|---|
-| `beam_width_type` | `'F'` | Beam-width law: `'F'` filling, `'M'` match, `'W'` waveguide. |
+| `beam_width_type` | `'F'` | Beam-width law (`ReadEnvironmentBell.f90:178-181`): `'F'` space-filling, `'M'` minimum width, `'W'` WKB. |
 | `beam_curvature` | `'D'` | Curvature correction. |
 | `component` | `'P'` | Output component for displacement-receiver fields: `'P'` pressure, `'V'` vertical, `'H'` horizontal (`influence.f90:120-130`). |
 
@@ -227,7 +227,7 @@ any of them under another beam type — including the default `'B'` — emits a
 | Name | Default | Meaning |
 |---|---|---|
 | `backend` | `None` | `'fortran'`, `'cxx'`, `'cuda'`; `None` auto-picks in the order cuda → cxx → fortran, silently. The auto-pick's usual winner, `cuda`, is not run-to-run reproducible — §7. |
-| `dimensionality` | `'2D'` | Only `'2D'`; `'3D'` raises. It is the `--2D` flag the cxx/cuda CLIs require; the Fortran binary takes none. |
+| `dimensionality` | `'2D'` | Only `'2D'`; `'3D'` raises. It is passed to the cxx/cuda CLIs as `--2D` (accepted, not required: without a flag they assume 2D, `cmdline.cpp:186-191`); the Fortran binary takes none. |
 | `work_dir` | `None` | Pin the scratch dir to keep `.env`/`.shd`/`.prt`. |
 | `cleanup` | `None` | Defaults to *keep* when `work_dir` is pinned. |
 | `timeout` | `600.0` | Subprocess timeout (s). |
@@ -345,11 +345,16 @@ contributions that land within its delay/phase tolerance as it accumulates
 them (`ArrMod.f90`), while the multithreaded `cxx`/`cuda` binaries append
 every contribution unmerged, in thread-completion order — the same run writes
 far more records there, and an incoherent energy sum taken directly over the
-raw records disagrees between backends. uacpy applies the Fortran merge rule
-on read (`read_arr_file`'s default; `merge=False` returns the raw records), so
-an `Arrivals` result holds the same *set* of records whichever backend produced
-the file: the `beam_type='G'` run above returns 31 records on `fortran`, `cxx`
-and `cuda` alike.
+raw records disagrees between backends. The `Bellhop` model applies the Fortran
+merge rule only to files those backends left unmerged — always for `cuda`, for
+`cxx` only when `os.cpu_count() > 1` (`_arrivals_need_merge`), never for
+`fortran`, whose file is already merged and would not survive a second pass —
+so an `Arrivals` result holds the same *set* of records whichever backend
+produced the file: the `beam_type='G'` run above returns 31 records on
+`fortran`, `cxx` and `cuda` alike. `read_arr_file` itself defaults to
+`merge=False`, the file as written; `read_arr_file(path, merge=True)` applies
+the Fortran merge rule, and is what the model passes for a `cxx`/`cuda` file
+the backend left unmerged.
 
 Three things that set does **not** guarantee:
 

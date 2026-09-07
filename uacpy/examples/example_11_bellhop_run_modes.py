@@ -117,9 +117,10 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 import numpy as np  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
 import uacpy  # noqa: E402
-from uacpy.core.environment import SoundSpeedProfile  # noqa: E402
+from uacpy.core.environment import SoundSpeedProfile, BoundaryProperties  # noqa: E402
 from uacpy.models import Bellhop  # noqa: E402
 from uacpy.models import RunMode  # noqa: E402
+from uacpy.visualization import plot_field, compare  # noqa: E402
 
 
 def scenario_a_tl_modes():
@@ -190,80 +191,26 @@ def scenario_a_tl_modes():
     # ═══════════════════════════════════════════════════════════════════════
     fig, axes = plt.subplots(2, 2, figsize=(16, 12))
 
-    # Common colorbar limits
+    # Common colour window for the three TL panels (plot_field's default
+    # 20-120 dB scale narrowed to where this deep-water field lives).
     vmin, vmax = 60, 120
 
-    # Coherent TL
-    ax = axes[0, 0]
-    im = ax.pcolormesh(result_coherent.ranges/1000, result_coherent.depths,
-                       result_coherent.db, cmap='viridis', vmin=vmin, vmax=vmax,
-                       shading='auto', zorder=1)
-    ax.set_xlim([result_coherent.ranges[0]/1000, result_coherent.ranges[-1]/1000])
-    ax.set_ylim([result_coherent.depths[-1], result_coherent.depths[0]])
-    ax.plot(0, source.depths[0], 'r*', markersize=15, label='Source', zorder=12)
-    ax.set_xlabel('Range (km)', fontweight='bold')
-    ax.set_ylabel('Depth (m)', fontweight='bold')
-    ax.set_title('Coherent TL (run_mode=RunMode.COHERENT_TL)', fontweight='bold', fontsize=12)
-    ax.legend(loc='upper right')
-    ax.grid(True, alpha=0.3)
-    plt.colorbar(im, ax=ax, label='TL (dB)')
-
-    # Incoherent TL
-    ax = axes[0, 1]
-    im = ax.pcolormesh(result_incoherent.ranges/1000, result_incoherent.depths,
-                       result_incoherent.db, cmap='viridis', vmin=vmin, vmax=vmax,
-                       shading='auto', zorder=1)
-    ax.set_xlim([result_incoherent.ranges[0]/1000, result_incoherent.ranges[-1]/1000])
-    ax.set_ylim([result_incoherent.depths[-1], result_incoherent.depths[0]])
-    ax.plot(0, source.depths[0], 'r*', markersize=15, label='Source', zorder=12)
-    ax.set_xlabel('Range (km)', fontweight='bold')
-    ax.set_ylabel('Depth (m)', fontweight='bold')
-    ax.set_title('Incoherent TL (run_mode=RunMode.INCOHERENT_TL)', fontweight='bold', fontsize=12)
-    ax.legend(loc='upper right')
-    ax.grid(True, alpha=0.3)
-    plt.colorbar(im, ax=ax, label='TL (dB)')
-
-    # Semi-coherent TL
-    ax = axes[1, 0]
-    im = ax.pcolormesh(result_semicoherent.ranges/1000, result_semicoherent.depths,
-                       result_semicoherent.db, cmap='viridis', vmin=vmin, vmax=vmax,
-                       shading='auto', zorder=1)
-    ax.set_xlim([result_semicoherent.ranges[0]/1000, result_semicoherent.ranges[-1]/1000])
-    ax.set_ylim([result_semicoherent.depths[-1], result_semicoherent.depths[0]])
-    ax.plot(0, source.depths[0], 'r*', markersize=15, label='Source', zorder=12)
-    ax.set_xlabel('Range (km)', fontweight='bold')
-    ax.set_ylabel('Depth (m)', fontweight='bold')
-    ax.set_title('Semi-coherent TL (run_mode=RunMode.SEMICOHERENT_TL)', fontweight='bold', fontsize=12)
-    ax.legend(loc='upper right')
-    ax.grid(True, alpha=0.3)
-    plt.colorbar(im, ax=ax, label='TL (dB)')
+    for ax, field, run_mode in ((axes[0, 0], result_coherent, 'COHERENT_TL'),
+                                (axes[0, 1], result_incoherent, 'INCOHERENT_TL'),
+                                (axes[1, 0], result_semicoherent, 'SEMICOHERENT_TL')):
+        plot_field(field, ax=ax, env=env, source=source, vmin=vmin, vmax=vmax,
+                   title=f'{run_mode.split("_")[0].capitalize()} TL '
+                         f'(run_mode=RunMode.{run_mode})')
 
     # Range cut comparison at the source depth
     ax = axes[1, 1]
-    tl_coherent = result_coherent.at(depth=1000).db
-    tl_incoherent = result_incoherent.at(depth=1000).db
-    tl_semicoherent = result_semicoherent.at(depth=1000).db
-
-    ax.plot(result_coherent.ranges/1000, tl_coherent,
-            'b-', linewidth=2.5, label='Coherent', alpha=0.8)
-    ax.plot(result_incoherent.ranges/1000, tl_incoherent,
-            'r-', linewidth=2.5, label='Incoherent', alpha=0.8)
-    ax.plot(result_semicoherent.ranges/1000, tl_semicoherent,
-            'g-', linewidth=2.5, label='Semi-coherent', alpha=0.8)
-    ax.set_xlabel('Range (km)', fontweight='bold')
-    ax.set_ylabel('Transmission Loss (dB)', fontweight='bold')
-    ax.set_title(f'TL Comparison at {source.depths[0]:.0f}m Depth (Channel Axis)',
-                 fontweight='bold', fontsize=12)
-    ax.legend(fontsize=11)
-    ax.grid(True, alpha=0.3)
-
-    # Compute ylim from data with margin
-    all_tl = np.concatenate([tl_coherent, tl_incoherent, tl_semicoherent])
-    all_tl = all_tl[np.isfinite(all_tl)]
-    if len(all_tl) > 0:
-        tl_min = np.floor(np.min(all_tl) / 10) * 10
-        tl_max = np.ceil(np.max(all_tl) / 10) * 10
-        ax.set_ylim([tl_min, tl_max])
+    cuts = {'Coherent': result_coherent.at(depth=1000),
+            'Incoherent': result_incoherent.at(depth=1000),
+            'Semi-coherent': result_semicoherent.at(depth=1000)}
+    compare(list(cuts.values()), list(cuts), ax=ax, linewidth=2.5, alpha=0.8,
+            title=f'TL Comparison at {source.depths[0]:.0f}m Depth '
+                  f'(300 m above the 1300 m channel axis)')
+    tl_coherent, tl_incoherent, tl_semicoherent = (c.db for c in cuts.values())
 
     plt.tight_layout()
     plt.savefig(OUTPUT_DIR / 'example_11a_tl_modes.png', dpi=150, bbox_inches='tight')
@@ -494,8 +441,6 @@ def scenario_d_compute_eigenrays_pekeris():
     print("\n" + "="*80)
     print("SCENARIO D: compute_eigenrays() on a Pekeris waveguide")
     print("="*80)
-
-    from uacpy.core.environment import BoundaryProperties
 
     bottom = BoundaryProperties(
         acoustic_type='half-space', sound_speed=1600.0,

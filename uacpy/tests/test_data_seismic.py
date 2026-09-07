@@ -259,11 +259,25 @@ def test_every_bottom_fetcher_takes_a_roughness_argument():
 
 def test_crust1_transect_accepts_max_points(cache):
     # environment._fetch_bottom forwards max_points to every transect bottom
-    # fetcher; crust1's must accept it and clamp n_points to it.
-    rdl = crust1_local.fetch_bottom_crust1_transect(
-        (30.0, -40.0), (31.0, -40.0), n_points=6, max_points=3)
+    # fetcher; crust1's must accept it and clamp n_points to it, warning like
+    # the other transect fetchers.
+    with pytest.warns(UserWarning, match=r'n_points=6 exceeds max_points=3'):
+        rdl = crust1_local.fetch_bottom_crust1_transect(
+            (30.0, -40.0), (31.0, -40.0), n_points=6, max_points=3)
     assert isinstance(rdl, Bottom)
     assert len(rdl.columns) == 3                         # clamped to max_points
+
+
+def test_crust1_transect_without_max_points_is_uncapped(cache):
+    rdl = crust1_local.fetch_bottom_crust1_transect(
+        (30.0, -40.0), (31.0, -40.0), n_points=7)
+    assert len(rdl.columns) == 7
+
+
+def test_crust1_transect_rejects_max_points_below_two(cache):
+    with pytest.raises(ConfigurationError, match='max_points'):
+        crust1_local.fetch_bottom_crust1_transect(
+            (30.0, -40.0), (31.0, -40.0), n_points=6, max_points=1)
 
 
 def test_crust1_emits_commercial_warning(cache):

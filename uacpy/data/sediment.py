@@ -33,7 +33,7 @@ from uacpy.core.materials import MATERIALS, list_materials
 from uacpy.core.sediment import GRAIN_SIZE_MODELS, grain_size_to_geoacoustics
 from uacpy.data._geo import (
     geodesic_waypoints, run_boundary_indices, DEFAULT_MAX_TRANSECT_POINTS,
-    checked_max_points, checked_n_points,
+    checked_max_points, checked_n_points, capped_n_points,
 )
 
 __all__ = [
@@ -145,7 +145,7 @@ def range_dependent_bottom_along(
     max_points = checked_max_points(max_points, source_label)
     n_points = checked_n_points(n_points, source_label, allow_auto=True)
     probe_n = (max_points if n_points == 'auto'
-               else min(n_points, max_points))
+               else capped_n_points(n_points, max_points, source_label))
     lats, lons, ranges_m = geodesic_waypoints(start, end, probe_n)
     props: List = []
     for la, lo in zip(lats, lons):

@@ -2100,22 +2100,23 @@ class TestLogSweptFrequenciesRequireAPositiveLowerBound:
 
     def test_a_log_spaced_vector_passes_unresampled(self):
         freqs = np.geomspace(50.0, 400.0, 8)
-        fmin, fmax, n, resampled = _oases_resample_frequencies(
-            freqs, 'OASR', log_spaced=True)
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            fmin, fmax, n = _oases_resample_frequencies(
+                freqs, 'OASR', log_spaced=True)
         assert (fmin, fmax, n) == (50.0, 400.0, 8)
-        assert resampled is False
 
     def test_a_linear_vector_is_regridded_with_a_warning(self):
         with pytest.warns(UserWarning, match='not log-spaced'):
-            *_, resampled = _oases_resample_frequencies(
+            _oases_resample_frequencies(
                 np.linspace(50.0, 400.0, 8), 'OASR', log_spaced=True)
-        assert resampled is True
 
     def test_a_zero_lower_bound_survives_a_linear_sweep(self):
-        fmin, fmax, n, resampled = _oases_resample_frequencies(
-            np.linspace(0.0, 400.0, 9), 'OASR', log_spaced=False)
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            fmin, fmax, n = _oases_resample_frequencies(
+                np.linspace(0.0, 400.0, 9), 'OASR', log_spaced=False)
         assert (fmin, fmax, n) == (0.0, 400.0, 9)
-        assert resampled is False
 
 
 @pytest.mark.requires_binary

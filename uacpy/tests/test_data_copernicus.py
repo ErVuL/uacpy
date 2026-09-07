@@ -153,14 +153,28 @@ class _BGCStub:
         return self._vars[key]
 
 
-def test_fetch_ph_operational_surface_value(monkeypatch):
+def test_fetch_ph_operational_defaults_to_the_level_nearest_mid_depth(
+        monkeypatch):
+    # Levels 0 / 500 / 2000 m: the mid-depth 1000 m is nearest the 500 m level.
     _install_fake_toolbox(monkeypatch, _BGCStub([8.05, 8.00, 7.90]))
     ph = copernicus.fetch_ph_operational((30.0, -40.0), date='2020-06-15')
-    assert ph == pytest.approx(8.05)
+    assert ph == pytest.approx(8.00)
+    assert ph == copernicus.fetch_ph_operational(
+        (30.0, -40.0), date='2020-06-15', reference_depth=1000.0)
 
 
-def test_fetch_ph_operational_skips_nan_surface(monkeypatch):
-    # A masked surface level falls through to the shallowest finite one.
+def test_fetch_ph_operational_reference_depth_picks_the_nearest_level(
+        monkeypatch):
+    _install_fake_toolbox(monkeypatch, _BGCStub([8.05, 8.00, 7.90]))
+    assert copernicus.fetch_ph_operational(
+        (30.0, -40.0), date='2020-06-15',
+        reference_depth=0.0) == pytest.approx(8.05)
+
+
+def test_fetch_ph_operational_drops_masked_levels_before_the_mid_depth(
+        monkeypatch):
+    # Only the finite levels (500, 2000 m) define the column: mid-depth 1250 m
+    # is nearest 500 m.
     _install_fake_toolbox(monkeypatch, _BGCStub([np.nan, 8.00, 7.90]))
     ph = copernicus.fetch_ph_operational((30.0, -40.0), date='2020-06-15')
     assert ph == pytest.approx(8.00)
@@ -208,6 +222,26 @@ def test_environment_copernicus_ssp_prefers_bgc_ph(monkeypatch, tmp_path):
     # surface value the old surface-pH pairing returned.
     assert env.absorption.pH == pytest.approx(7.90)
     assert 'copernicus_bgc' in [s.source.id for s in env.data_sources]
+
+
+def test_environment_copernicus_absorption_row_is_in_situ_temperature(
+        monkeypatch, tmp_path):
+    import uacpy.data as data
+    from uacpy.data._geo import depth_to_pressure_dbar, insitu_from_potential
+    monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path / 'empty'))
+    _install_routing_toolbox(monkeypatch, bgc=RuntimeError("no bgc"))
+    env = data.fetch_environment((30.0, -40.0), bathymetry=1000.0,
+                                 ssp_sources='copernicus', date='2020-06-15',
+                                 with_absorption=True)
+    # The nominal row is the level nearest the column mid-depth (1500 m →
+    # 1000 m), where the dataset's thetao is 5.0 °C potential; Francois-
+    # Garrison takes the in-situ value at that pressure, as the sound-speed
+    # route already does.
+    assert env.absorption.z_bar_m == 1000.0
+    expected = float(insitu_from_potential(
+        35.0, 5.0, depth_to_pressure_dbar(1000.0, 30.0)))
+    assert expected != 5.0
+    assert env.absorption.temperature_c == pytest.approx(expected)
 
 
 def test_environment_bgc_failure_falls_back(monkeypatch, tmp_path):
@@ -530,15 +564,14 @@ def test_copernicus_profiles_record_the_formula_that_built_them(monkeypatch,
 
 @pytest.mark.parametrize('kind,fetcher,var,needle,remedy', [
     ('waves', 'fetch_waves_operational', copernicus.WAVE_HS_VAR,
-     'Copernicus waves: nearest time is', 'WaveWatch III'),
+     'Copernicus waves: nearest available time is', 'WaveWatch III'),
     ('ph', 'fetch_ph_operational', copernicus.BGC_PH_VAR,
-     'Copernicus pH: nearest time is', 'GLODAP'),
+     'Copernicus pH: nearest available time is', 'GLODAP'),
 ])
 def test_the_waves_and_ph_fetchers_keep_their_own_date_gap_wording(
         monkeypatch, kind, fetcher, var, needle, remedy):
-    """Both ran a verbatim copy of ``_snapped_date``'s guard. They call the
-    helper now, and each keeps the wording and the alternative source it
-    recommends."""
+    """Both call ``_snapped_date``'s guard; each names itself in the message
+    and keeps the alternative source its remediation recommends."""
     class _VarDSStub(_DSStub):
         def __init__(self):
             super().__init__([0.0, 10.0], [20.0, 19.0], [35.0, 35.0],

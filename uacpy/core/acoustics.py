@@ -86,7 +86,7 @@ def soundspeed(
     float or ndarray
         Sound speed in m/s. The formula is evaluated element-wise, so an
         array argument gives an array of the broadcast shape — which is how
-        :meth:`uacpy.SoundSpeedProfile.from_ts` calls it.
+        :meth:`uacpy.SoundSpeedProfile.from_mackenzie` calls it.
 
     Examples
     --------
@@ -733,17 +733,22 @@ def bubble_surface_loss(
 
     Notes
     -----
-    Surface bubble loss ``SBL`` (APL-UW TR 9407 eqs. 28a/28b, p. II-21):
+    Surface bubble loss ``SBL`` (APL-UW TR 9407 §II.C.4 "Absorption Due to
+    Near-Surface Bubbles", eqs. 28a/28b, p. II-21):
 
     ``SBL = 1.26e-3/sin(theta) * U**1.57 * f**0.85``   for ``U >= 6 m/s``,
     ``SBL = SBL(U=6) * exp(1.2*(U-6))``                for ``U < 6 m/s``,
 
     with ``U`` the wind speed 10 m above the surface, ``f`` in kHz and
-    ``theta`` the nominal grazing angle of the surface-bounce path. The 6 m/s
-    break is the breaking-wave (Beaufort) threshold below which bubbles are
-    not produced. The handbook fits 20-40 kHz data to within +/-3 dB and notes
-    a nominal 30 dB ceiling on ``SBL`` from scattering off the underside of the
-    bubble layer; that ceiling is not imposed here.
+    ``theta`` the nominal grazing angle of the surface-bounce path (θ > 0°).
+    The 6 m/s break is the breaking-wave (Beaufort) threshold below which
+    bubbles are not produced. Eq. 27 (p. II-20) defines the loss as a power
+    ratio, ``RL(dB) = SBL(dB) = -10 log10(a_b)``, which the ``10**(-SBL/20)``
+    below turns into the amplitude multiplier ``sqrt(a_b)``. The handbook fits
+    20-40 kHz data to within +/-3 dB. It gives 30 dB as a nominal ceiling on
+    ``SBL`` (scattering off the underside of a uniform bubble layer), a bound
+    it reports as never observed in data, and recommends ``SBLmax = 15 dB``
+    in practice (p. II-21); no ceiling is imposed here.
 
     References
     ----------

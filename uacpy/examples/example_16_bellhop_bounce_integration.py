@@ -28,8 +28,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parents[2]))
 
 import numpy as np  # noqa: E402
-import matplotlib  # noqa: E402
-matplotlib.use('Agg')
 import matplotlib.pyplot as plt  # noqa: E402
 
 import uacpy  # noqa: E402
@@ -38,8 +36,8 @@ from uacpy import (  # noqa: E402
     Bottom, SedimentLayer, SeabedColumn,
     BoundaryProperties,
 )
-from uacpy.models import Bellhop, RAM, RunMode  # noqa: E402
-from uacpy.visualization.plots import plot_field  # noqa: E402
+from uacpy.models import Bellhop, RAM, RunMode, Scooter  # noqa: E402
+from uacpy.visualization.plots import plot_field, plot_bottom_properties  # noqa: E402
 
 OUTPUT_DIR = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
                   or Path(__file__).parent / 'output')
@@ -184,7 +182,6 @@ def demo_layered_bottom():
     # Run Scooter (supports layered via NMEDIA > 1, gives TL directly)
     print("\n--- Running Scooter with layered bottom ---")
     try:
-        from uacpy.models import Scooter
         scooter = Scooter(verbose=True)
         result = scooter.compute_tl(env, source, receiver)
         print(f"Scooter TL: {np.nanmin(result.db):.1f} to {np.nanmax(result.db):.1f} dB")
@@ -199,13 +196,13 @@ def demo_layered_bottom():
         import traceback
         traceback.print_exc()
 
-    # Plot layered bottom structure
-    fig2, ax2 = env.plot()
+    # Plot the layer stack's geoacoustic properties (cp, cs, rho, alpha)
+    plot_bottom_properties(env)
     plt.savefig(OUTPUT_DIR / 'example_16_layered_structure.png', dpi=150, bbox_inches='tight')
     print(f"  ✓ Saved: {OUTPUT_DIR / 'example_16_layered_structure.png'}")
 
-    # Plot environment overview
-    fig3, axes3 = env.plot()
+    # Plot environment overview (water column + layer stack shaded by cp)
+    env.plot()
     plt.savefig(OUTPUT_DIR / 'example_16_layered_env.png', dpi=150, bbox_inches='tight')
     print(f"  ✓ Saved: {OUTPUT_DIR / 'example_16_layered_env.png'}")
 
@@ -274,18 +271,18 @@ def demo_range_dependent_bottom():
     plt.savefig(OUTPUT_DIR / 'example_16_rd_bottom_tl.png', dpi=150, bbox_inches='tight')
     print(f"  ✓ Saved: {OUTPUT_DIR / 'example_16_rd_bottom_tl.png'}")
 
-    # Plot RD bottom properties
-    fig2, _ = env.plot()
+    # Plot RD bottom properties (one panel per geoacoustic property)
+    plot_bottom_properties(env)
     plt.savefig(OUTPUT_DIR / 'example_16_rd_bottom_props.png', dpi=150, bbox_inches='tight')
     print(f"  ✓ Saved: {OUTPUT_DIR / 'example_16_rd_bottom_props.png'}")
 
-    # Plot 2D SSP
-    fig3, ax3 = env.plot()
+    # Plot 2D SSP (one c(z) line per range column)
+    env.ssp.plot()
     plt.savefig(OUTPUT_DIR / 'example_16_rd_ssp.png', dpi=150, bbox_inches='tight')
     print(f"  ✓ Saved: {OUTPUT_DIR / 'example_16_rd_ssp.png'}")
 
     # Plot full environment
-    fig4, axes4 = env.plot()
+    env.plot()
     plt.savefig(OUTPUT_DIR / 'example_16_rd_env.png', dpi=150, bbox_inches='tight')
     print(f"  ✓ Saved: {OUTPUT_DIR / 'example_16_rd_env.png'}")
 
@@ -408,11 +405,11 @@ def main():
     print("  - Range-dependent bottom (scalar) with RAM")
     print("  - Range-dependent LAYERED bottom (depth+range) with RAM")
     print("  - plot_field() with contours")
-    print("  - env.plot() for sediment structure")
+    print("  - plot_bottom_properties() for the sediment layers' properties")
     print("  - env.plot() for RD layered structure")
-    print("  - env.plot() for RD bottom")
-    print("  - env.plot() for range-dependent SSP")
-    print("  - env.plot() for full overview")
+    print("  - plot_bottom_properties() for the RD bottom")
+    print("  - env.ssp.plot() for the range-dependent SSP")
+    print("  - env.plot() for the full overview")
 
     print("\n✓ Example 16 complete\n")
     return 0

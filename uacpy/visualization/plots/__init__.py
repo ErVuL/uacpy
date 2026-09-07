@@ -18,7 +18,7 @@ from uacpy.core.results import (
 
 from uacpy.visualization.plots.fields import (
     plot_field, plot_signal_excess, plot_detection_probability,
-    compare, compare_models,
+    compare, compare_models, _plot_field_stack,
 )
 from uacpy.visualization.plots.animation import (
     animate_field, save_animation, plot_time_snapshots,
@@ -61,7 +61,6 @@ def plot_result(result, env: Optional[Environment] = None, **kwargs):
     """
     if isinstance(result, ResultStack):
         if issubclass(result.slab_type, Field):
-            from uacpy.visualization.plots.fields import _plot_field_stack
             return _plot_field_stack(result, env=env, **kwargs)
         raise ConfigurationError(
             f"plot_result: this ResultStack holds {result.slab_type.__name__} "
