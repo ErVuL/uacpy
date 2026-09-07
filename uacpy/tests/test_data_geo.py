@@ -176,7 +176,7 @@ def test_potential_temperature_costs_about_two_m_per_s_at_5000_dbar():
     from uacpy.data.sound_speed import _FORMULAS
     sal, theta, pres = 34.7, 1.5, 5000.0
     insitu = float(insitu_from_potential(sal, theta, pres))
-    for name in ('unesco', 'delgrosso'):
+    for name in ('unesco', 'delgrosso', 'teos10'):
         speed_fn = _FORMULAS[name]
         delta = speed_fn(insitu, sal, pres) - speed_fn(theta, sal, pres)
         assert 1.8 < delta < 2.0, (name, delta)

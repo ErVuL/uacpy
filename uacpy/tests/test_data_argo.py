@@ -184,7 +184,7 @@ def test_the_argo_query_window_includes_the_whole_last_tolerated_day():
     assert 'time%3C2026-08-26T00:00:00Z' in url
 
 
-@pytest.mark.parametrize('formula', ['unesco', 'delgrosso'])
+@pytest.mark.parametrize('formula', ['unesco', 'delgrosso', 'teos10'])
 def test_argo_profile_records_the_formula_that_built_it(monkeypatch, formula):
     """The profile has to carry its own equation: a float ending at 1000 m over
     a deep seafloor is extended, and the extension continues under whatever

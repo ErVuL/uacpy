@@ -129,7 +129,7 @@ fetched environment with no `bottom_sources=` has a *made-up* seabed.
 | `with_absorption` | `False` | build `FrancoisGarrison` from the site's T/S column (and GLODAP pH) |
 | `max_distance_km` | `None` | distance guard for the **nearest-sample** sources (`argo`, `grainsize`, `mars`); ignored by grids and polygons |
 | `max_days` | `None` | staleness guard for the **time-specific** SSP sources (`argo`, `copernicus`); ignored by climatologies |
-| `formula` | `'unesco'` | sound-speed equation; `'delgrosso'` also available |
+| `formula` | `'unesco'` | sound-speed equation; `'delgrosso'` and `'teos10'` also available (both sit ≈ 0.6 m/s below UNESCO in deep water, see [utilities](utilities.md)) |
 | `resolution` | `'1.00'` | WOA23 grid spacing in degrees (`'0.25'` for the fine grid) |
 | `timeout`, `verbose` | `120.0`, `False` | forwarded to the fetchers |
 

@@ -2,7 +2,7 @@
 Underwater acoustics utilities for UACPY
 
 This module provides various underwater acoustics functions including:
-- Seawater sound speed (Mackenzie, UNESCO, Del Grosso) and density
+- Seawater sound speed (Mackenzie, UNESCO, Del Grosso, TEOS-10) and density
 - Plane-wave bottom reflection and bottom loss
 - Bubble acoustics (resonance, bubbly-water speed, surface bubble loss)
 - Acoustic pressure, SPL and power → dB utilities
@@ -50,6 +50,7 @@ __all__ = [
     'soundspeed',
     'soundspeed_unesco',
     'soundspeed_delgrosso',
+    'soundspeed_teos10',
     'density',
     'doppler',
     'reflection_coeff',
@@ -331,6 +332,224 @@ def soundspeed_delgrosso(temperature=15.0, salinity=35.0, pressure=0.0):
              + 0.485639620015e-5 * t * s ** 2 * p
              - 0.340597039004e-3 * s * t * p)
     c = c000 + dct + dcs + dcp + dcstp
+    return float(c) if np.ndim(c) == 0 else c
+
+
+# TEOS-10 Gibbs function of seawater, g(S_A, t, p) = g_W(t, p) + g_S(S_A, t, p),
+# as a polynomial in the reduced variables x = sqrt(S_A / S_u), y = t / t_u,
+# z = p / p_u with S_u = 40 × 35.16504/35 g/kg, t_u = 40 °C, p_u = 1e8 Pa
+# (TEOS-10 manual, IOC Manuals and Guides 56, Table D.4). Pure-water
+# coefficients g_jk from appendix G (IAPWS-09, 41 terms); saline coefficients
+# g_ijk from appendix H (IAPWS-08, 64 terms), where i = 1 multiplies x²·ln x
+# and i ≥ 2 multiplies x^i. Both tables are transcribed from the manual and
+# pinned against the GSW toolbox in test_acoustics_helpers.py.
+_TEOS10_SU_G_PER_KG = 40.0 * 35.16504 / 35.0
+_TEOS10_TU_C = 40.0
+_TEOS10_PU_PA = 1.0e8
+_TEOS10_PSS78_TO_G_PER_KG = 35.16504 / 35.0    # Practical → Reference Salinity
+
+_TEOS10_GW = (                                   # (j, k, g_jk)
+    (0, 0, 0.101342743139674e3), (0, 1, 0.100015695367145e6),
+    (0, 2, -0.254457654203630e4), (0, 3, 0.284517778446287e3),
+    (0, 4, -0.333146754253611e2), (0, 5, 0.420263108803084e1),
+    (0, 6, -0.546428511471039),
+    (1, 0, 0.590578347909402e1), (1, 1, -0.270983805184062e3),
+    (1, 2, 0.776153611613101e3), (1, 3, -0.196512550881220e3),
+    (1, 4, 0.289796526294175e2), (1, 5, -0.213290083518327e1),
+    (2, 0, -0.123577859330390e5), (2, 1, 0.145503645404680e4),
+    (2, 2, -0.756558385769359e3), (2, 3, 0.273479662323528e3),
+    (2, 4, -0.555604063817218e2), (2, 5, 0.434420671917197e1),
+    (3, 0, 0.736741204151612e3), (3, 1, -0.672507783145070e3),
+    (3, 2, 0.499360390819152e3), (3, 3, -0.239545330654412e3),
+    (3, 4, 0.488012518593872e2), (3, 5, -0.166307106208905e1),
+    (4, 0, -0.148185936433658e3), (4, 1, 0.397968445406972e3),
+    (4, 2, -0.301815380621876e3), (4, 3, 0.152196371733841e3),
+    (4, 4, -0.263748377232802e2),
+    (5, 0, 0.580259125842571e2), (5, 1, -0.194618310617595e3),
+    (5, 2, 0.120520654902025e3), (5, 3, -0.552723052340152e2),
+    (5, 4, 0.648190668077221e1),
+    (6, 0, -0.189843846514172e2), (6, 1, 0.635113936641785e2),
+    (6, 2, -0.222897317140459e2), (6, 3, 0.817060541818112e1),
+    (7, 0, 0.305081646487967e1), (7, 1, -0.963108119393062e1),
+)
+
+_TEOS10_GS = (                                   # (i, j, k, g_ijk)
+    (1, 0, 0, 5812.81456626732), (1, 1, 0, 851.226734946706),
+    (2, 0, 0, 1416.27648484197), (3, 0, 0, -2432.14662381794),
+    (4, 0, 0, 2025.80115603697), (5, 0, 0, -1091.66841042967),
+    (6, 0, 0, 374.601237877840), (7, 0, 0, -48.5891069025409),
+    (2, 1, 0, 168.072408311545), (3, 1, 0, -493.407510141682),
+    (4, 1, 0, 543.835333000098), (5, 1, 0, -196.028306689776),
+    (6, 1, 0, 36.7571622995805), (2, 2, 0, 880.031352997204),
+    (3, 2, 0, -43.0664675978042), (4, 2, 0, -68.5572509204491),
+    (2, 3, 0, -225.267649263401), (3, 3, 0, -10.0227370861875),
+    (4, 3, 0, 49.3667694856254), (2, 4, 0, 91.4260447751259),
+    (3, 4, 0, 0.875600661808945), (4, 4, 0, -17.1397577419788),
+    (2, 5, 0, -21.6603240875311), (4, 5, 0, 2.49697009569508),
+    (2, 6, 0, 2.13016970847183),
+    (2, 0, 1, -3310.49154044839), (3, 0, 1, 199.459603073901),
+    (4, 0, 1, -54.7919133532887), (5, 0, 1, 36.0284195611086),
+    (2, 1, 1, 729.116529735046), (3, 1, 1, -175.292041186547),
+    (4, 1, 1, -22.6683558512829), (2, 2, 1, -860.764303783977),
+    (3, 2, 1, 383.058066002476), (2, 3, 1, 694.244814133268),
+    (3, 3, 1, -460.319931801257), (2, 4, 1, -297.728741987187),
+    (3, 4, 1, 234.565187611355),
+    (2, 0, 2, 384.794152978599), (3, 0, 2, -52.2940909281335),
+    (4, 0, 2, -4.08193978912261), (2, 1, 2, -343.956902961561),
+    (3, 1, 2, 83.1923927801819), (2, 2, 2, 337.409530269367),
+    (3, 2, 2, -54.1917262517112), (2, 3, 2, -204.889641964903),
+    (2, 4, 2, 74.7261411387560),
+    (2, 0, 3, -96.5324320107458), (3, 0, 3, 68.0444942726459),
+    (4, 0, 3, -30.1755111971161), (2, 1, 3, 124.687671116248),
+    (3, 1, 3, -29.4830643494290), (2, 2, 3, -178.314556207638),
+    (3, 2, 3, 25.6398487389914), (2, 3, 3, 113.561697840594),
+    (2, 4, 3, -36.4872919001588),
+    (2, 0, 4, 15.8408172766824), (3, 0, 4, -3.41251932441282),
+    (2, 1, 4, -31.6569643860730), (2, 2, 4, 44.2040358308000),
+    (2, 3, 4, -11.1282734326413),
+    (2, 0, 5, -2.62480156590992), (2, 1, 5, 7.04658803315449),
+    (2, 2, 5, -7.92001547211682),
+)
+
+
+def _teos10_gibbs_derivative(n_t, n_p, x, y, z):
+    """``∂^(n_t+n_p) g / ∂t^n_t ∂p^n_p`` of the TEOS-10 Gibbs function, in
+    SI units (J/kg per K^n_t per Pa^n_p), at reduced ``(x, y, z)``.
+
+    Only temperature and pressure derivatives are needed for sound speed, so
+    the salinity factor ``X_i(x)`` (``1`` for the pure-water table, ``x²·ln x``
+    for ``i = 1``, ``x^i`` for ``i ≥ 2``) is never differentiated. Terms
+    whose power is below the derivative order vanish and are skipped rather
+    than evaluated as ``0 × y^(negative)``, which would be ``nan`` at ``y = 0``.
+    """
+    def falling(power, order):
+        out = 1.0
+        for r in range(order):
+            out *= power - r
+        return out
+
+    # x²·ln x → 0 as x → 0⁺: the limit, not 0 × (−inf).
+    with np.errstate(divide='ignore', invalid='ignore'):
+        x2lnx = np.where(x > 0, x * x * np.log(np.where(x > 0, x, 1.0)), 0.0)
+
+    total = np.zeros(np.broadcast(x, y, z).shape, dtype=float)
+    for j, k, g in _TEOS10_GW:
+        if j < n_t or k < n_p:
+            continue
+        total = total + (g * falling(j, n_t) * falling(k, n_p)
+                         * y ** (j - n_t) * z ** (k - n_p))
+    for i, j, k, g in _TEOS10_GS:
+        if j < n_t or k < n_p:
+            continue
+        xi = x2lnx if i == 1 else x ** i
+        total = total + (g * falling(j, n_t) * falling(k, n_p)
+                         * xi * y ** (j - n_t) * z ** (k - n_p))
+    return total / (_TEOS10_TU_C ** n_t * _TEOS10_PU_PA ** n_p)
+
+
+def soundspeed_teos10(temperature=15.0, salinity=35.0, pressure=0.0):
+    """Speed of sound in seawater — TEOS-10 (IOC, SCOR and IAPSO 2010).
+
+    Evaluates Eqn. (2.17.1) of the TEOS-10 manual,
+    ``c = g_P·sqrt(g_TT / (g_TP² − g_TT·g_PP))``, on the full Gibbs function
+    of seawater: the IAPWS-09 pure-water part plus the IAPWS-08 saline part
+    (Feistel 2008), with the coefficient tables of the manual's appendices G
+    and H. This is the ``sound_speed_t_exact`` of the GSW toolbox, written
+    out in numpy; it needs no library.
+
+    Same argument triple as :func:`soundspeed_unesco` and
+    :func:`soundspeed_delgrosso`: ITS-90 temperature, **Practical Salinity**
+    and pressure in **decibars**. TEOS-10 is stated in Absolute Salinity
+    (g/kg); the conversion applied here is the Reference-Salinity factor
+    ``35.16504/35`` (manual Eqn. 2.4.1), which is exact for seawater of
+    Reference Composition. The remaining Absolute Salinity anomaly
+    ``δS_A(lon, lat, p)`` of real seawater — at most ≈ 0.025 g/kg in the deep
+    North Pacific, ≈ 0.03 m/s of sound speed — needs the global lookup
+    atlas and is not applied.
+
+    **Why a third equation.** The Gibbs function was fitted to the laboratory
+    sound-speed data (manual appendix O, Table O.1; rms 0.035 m/s) and so
+    reproduces Del Grosso (1974) to within a few cm/s over the ocean, while
+    the uncorrected Chen–Millero polynomial of :func:`soundspeed_unesco`
+    carries a pressure-dependent bias of about +0.6 m/s below 3000 dbar
+    (APL-UW TR 9407, "Chen-Millero-Li Equation"; Etter §2, citing Dushaw et
+    al. 1993). Choose this equation when the profile must agree with a
+    TEOS-10-based oceanographic tool or with travel-time work.
+
+    Valid over the manual's §2.6 range: ``S_A ∈ [0, 42] g/kg`` (``S ∈
+    [0, 41.80]`` on the Practical scale), ``t ∈ [−6, 40] °C`` and
+    ``p ∈ [0, 10000] dbar``. Outside it the result is an extrapolation and a
+    :class:`UserWarning` says so, the contract the siblings keep; a negative
+    salinity is undefined (``x = sqrt(S_A/S_u)``) and returns NaN. The cold
+    end needs no relaxation: −6 °C already covers every polar cast.
+
+    Parameters
+    ----------
+    temperature : float or array
+        Temperature [°C, ITS-90].
+    salinity : float or array
+        Practical salinity [PSU, PSS-78].
+    pressure : float or array
+        Sea pressure [dbar] — decibars, *not* Pa. The Gibbs function is
+        stated in Pa and the argument is converted internally.
+
+    Returns
+    -------
+    float or ndarray
+        Sound speed [m/s]; a Python float for scalar input, otherwise the
+        broadcast shape of the three arguments.
+
+    References
+    ----------
+    IOC, SCOR and IAPSO (2010). *The international thermodynamic equation of
+    seawater – 2010: Calculation and use of thermodynamic properties.*
+    Intergovernmental Oceanographic Commission, Manuals and Guides No. 56,
+    UNESCO. §2.6 (validity), §2.17 Eqn. (2.17.1), appendices G, H, O.
+    Feistel, R. (2008). "A Gibbs function for seawater thermodynamics for
+    −6 to 80 °C and salinity up to 120 g kg⁻¹." Deep-Sea Res. I 55, 1639-1671.
+    """
+    t = np.asarray(temperature, dtype=float)
+    s = np.asarray(salinity, dtype=float)
+    p = np.asarray(pressure, dtype=float)
+    s_max = 42.0 / _TEOS10_PSS78_TO_G_PER_KG          # 42 g/kg on the PSS-78 scale
+    if np.any(t < -6.0) or np.any(t > 40.0):
+        _warnings.warn(
+            "TEOS-10 soundspeed: temperature outside validated range "
+            "[-6, 40] °C; treating as extrapolation.",
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+        )
+    if np.any(s < 0):
+        _warnings.warn(
+            "TEOS-10 soundspeed: salinity below 0 is undefined, not "
+            "extrapolated — x = sqrt(S_A/S_u) has no real value there, so "
+            "the result is NaN.",
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+        )
+    elif np.any(s > s_max):
+        _warnings.warn(
+            f"TEOS-10 soundspeed: salinity outside validated range "
+            f"[0, {s_max:.2f}] PSU (S_A = 42 g/kg); treating as "
+            f"extrapolation.",
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+        )
+    if np.any(p < 0) or np.any(p > 10000.0):
+        _warnings.warn(
+            "TEOS-10 soundspeed: pressure outside validated range "
+            "[0, 10000] dbar (this argument is in DECIBARS); treating as "
+            "extrapolation.",
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+        )
+
+    with np.errstate(invalid='ignore'):
+        x = np.sqrt(s * _TEOS10_PSS78_TO_G_PER_KG / _TEOS10_SU_G_PER_KG)
+    y = t / _TEOS10_TU_C
+    z = p * 1.0e4 / _TEOS10_PU_PA                     # dbar → Pa → reduced
+    g_p = _teos10_gibbs_derivative(0, 1, x, y, z)
+    g_tt = _teos10_gibbs_derivative(2, 0, x, y, z)
+    g_tp = _teos10_gibbs_derivative(1, 1, x, y, z)
+    g_pp = _teos10_gibbs_derivative(0, 2, x, y, z)
+    with np.errstate(invalid='ignore'):
+        c = g_p * np.sqrt(g_tt / (g_tp * g_tp - g_tt * g_pp))
     return float(c) if np.ndim(c) == 0 else c
 
 

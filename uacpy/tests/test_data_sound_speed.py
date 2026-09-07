@@ -487,12 +487,16 @@ class TestTheDeepExtensionUsesTheProfilesOwnFormula:
                                  data=np.array([1500.0, 1551.05]),
                                  formula=formula)
 
-    def test_delgrosso_and_unesco_extend_differently_and_none_means_unesco(self):
+    def test_each_formula_extends_differently_and_none_means_unesco(self):
         from uacpy.data.sound_speed import extend_ssp_below_data
         deep = {f: float(np.asarray(extend_ssp_below_data(self._profile(f), 8800.0).data)[-1, 0])
-                for f in ('unesco', 'delgrosso', None)}
+                for f in ('unesco', 'delgrosso', 'teos10', None)}
         assert deep[None] == deep['unesco']
         assert abs(deep['delgrosso'] - deep['unesco']) > 0.1     # verifier: +0.33 m/s at 8.8 km
+        # TEOS-10 continues the column with its own pressure term, which sits
+        # with Del Grosso's, not UNESCO's, below 3000 dbar.
+        assert abs(deep['teos10'] - deep['unesco']) > 0.1
+        assert abs(deep['teos10'] - deep['delgrosso']) < 0.1
 
     def test_the_formula_survives_the_carrier_copies(self):
         ssp = self._profile('delgrosso')
@@ -500,7 +504,7 @@ class TestTheDeepExtensionUsesTheProfilesOwnFormula:
         assert ssp.copy().formula == 'delgrosso'
 
 
-@pytest.mark.parametrize('formula', ['unesco', 'delgrosso'])
+@pytest.mark.parametrize('formula', ['unesco', 'delgrosso', 'teos10'])
 def test_extending_a_profile_keeps_its_formula(formula):
     """``extend_ssp_below_data`` rebuilds the carrier and has to restate
     ``formula``; dropping it made the *next* extension revert to UNESCO."""

@@ -547,7 +547,7 @@ def test_raw_ts_profile_stays_potential_temperature(monkeypatch):
     assert t.tolist() == _DEEP_THETA
 
 
-@pytest.mark.parametrize('formula', ['unesco', 'delgrosso'])
+@pytest.mark.parametrize('formula', ['unesco', 'delgrosso', 'teos10'])
 def test_copernicus_profiles_record_the_formula_that_built_them(monkeypatch,
                                                                 formula):
     """Both fetchers stamp ``formula``, so a later seafloor extension continues

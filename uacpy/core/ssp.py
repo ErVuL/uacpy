@@ -71,7 +71,8 @@ class SoundSpeedProfile(_DeepCopyMixin):
     ranges: Optional[np.ndarray] = None
     shape: str = 'measured'
     data_sources: tuple = ()
-    #: Sound-speed formula that built ``data`` from T/S ('unesco', 'delgrosso');
+    #: Sound-speed formula that built ``data`` from T/S ('unesco', 'delgrosso',
+    #: 'teos10');
     #: ``None`` for a literal or hand-built profile. Read by the deep extension.
     formula: Optional[str] = None
 

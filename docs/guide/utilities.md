@@ -241,10 +241,11 @@ and each names the standard or paper it implements.
 | `soundspeed(temperature, salinity, depth)` | Mackenzie (1981), nine-term | °C, PSU, **metres** |
 | `soundspeed_unesco(temperature, salinity, pressure)` | UNESCO (1983) / Chen & Millero (1977) | °C (ITS-90), PSU (PSS-78), **decibars** |
 | `soundspeed_delgrosso(temperature, salinity, pressure)` | Del Grosso (1974), "NRL II" | °C, PSU, **decibars** |
+| `soundspeed_teos10(temperature, salinity, pressure)` | TEOS-10 (IOC/SCOR/IAPSO 2010), Eqn. (2.17.1) on the IAPWS-08/09 Gibbs function | °C (ITS-90), PSU (PSS-78), **decibars** |
 
-Note the third argument: Mackenzie takes **depth in metres**, the other two
+Note the third argument: Mackenzie takes **depth in metres**, the other three
 take **pressure in decibars**. They are numerically close (≈ 1 dbar per metre)
-but they are not the same quantity, and the two standard equations are defined
+but they are not the same quantity, and the standard equations are defined
 in pressure.
 
 UNESCO is the international standard algorithm. `soundspeed_unesco` accepts
@@ -259,11 +260,27 @@ over `T ∈ [0, 35] °C`, `S ∈ [29, 43]` and `P ∈ [0, 1000] kg/cm²` (9807 d
 The paper predates PSS-78 and states that salinity range in ‰ (ppt); the
 `salinity` argument here is PSU, the scale that replaced it.
 
+TEOS-10 is the current international standard for seawater thermodynamics.
+`soundspeed_teos10` evaluates the manual's sound-speed definition,
+`c = g_P·sqrt(g_TT / (g_TP² − g_TT·g_PP))`, on the full Gibbs function (the
+IAPWS-09 pure-water and IAPWS-08 saline coefficient tables are written out in
+`core/acoustics.py`; no library is needed). It takes the same triple as the
+other two — Practical Salinity is converted to Reference Salinity with the
+exact `35.16504/35` factor; the ≤ 0.025 g/kg Absolute Salinity anomaly of
+real seawater is not applied (≈ 0.03 m/s). Valid over `S ∈ [0, 41.8] PSU`,
+`T ∈ [−6, 40] °C`, `P ∈ [0, 10000] dbar`. The Gibbs function was fitted to
+the laboratory sound-speed data (rms 0.035 m/s), so at depth it reproduces
+Del Grosso and not UNESCO: the Chen–Millero polynomial as published carries
+a pressure-dependent bias of about +0.6 m/s below 3000 dbar (the Millero &
+Li 1994 correction, which `soundspeed_unesco` does not include). That is
+27 ms of travel time per 100 km — invisible in a transmission-loss curve,
+real for tomography or any comparison with a TEOS-10-based tool.
+
 Mackenzie is the cheap nine-term fit. It is validated for
 `T ∈ [-2, 30] °C`, `S ∈ [25, 40] PSU`, `depth ∈ [0, 8000] m`, and emits a
 `UserWarning` outside those ranges rather than quietly extrapolating.
 
-All three vectorise over any argument.
+All four vectorise over any argument.
 
 ```python
 temperatures = np.linspace(0.0, 30.0, 121)
@@ -271,6 +288,7 @@ pressures = np.linspace(0.0, 6000.0, 121)          # dbar ≈ metres
 
 unesco = acoustics.soundspeed_unesco(temperatures, 35.0, 0.0)
 delgrosso = acoustics.soundspeed_delgrosso(temperatures, 35.0, 0.0)
+teos10 = acoustics.soundspeed_teos10(temperatures, 35.0, 0.0)
 mackenzie = acoustics.soundspeed(temperatures, 35.0, 0.0)
 
 T, P = np.meshgrid(temperatures, pressures)
@@ -285,9 +303,9 @@ about 2 m/s per °C at 30 °C — temperature is by far the strongest control in
 the upper ocean, which is why the thermocline is the dominant feature of almost
 every profile.
 
-Middle: the three equations against each other at the surface. Del Grosso stays
-within 0.15 m/s of UNESCO and Mackenzie within 0.25 m/s, across the whole
-temperature range. At that level the choice of equation is irrelevant next to
+Middle: the four equations against each other at the surface. Del Grosso and
+TEOS-10 stay within 0.15 m/s of UNESCO (and within 0.06 m/s of each other) and
+Mackenzie within 0.25 m/s, across the whole temperature range. At that level the choice of equation is irrelevant next to
 the uncertainty in your `T` and `S`.
 
 Right: the same difference over the full temperature–pressure plane. Del Grosso

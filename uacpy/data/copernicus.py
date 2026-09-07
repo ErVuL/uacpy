@@ -96,7 +96,7 @@ def fetch_ssp_operational(
         Latitude/longitude in decimal degrees (WGS84).
     date : str or datetime.date
         Calendar date of interest. The nearest available time step is used.
-    formula : {'unesco', 'delgrosso'}, optional
+    formula : {'unesco', 'delgrosso', 'teos10'}, optional
         Sound-speed equation. Default ``'unesco'``.
     max_days : int, optional
         Maximum days the nearest available time step may differ from ``date``

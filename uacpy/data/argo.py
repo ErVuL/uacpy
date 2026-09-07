@@ -22,7 +22,9 @@ from typing import Union
 import numpy as np
 
 from uacpy._log import log_message
-from uacpy.core.acoustics import soundspeed_delgrosso, soundspeed_unesco
+from uacpy.core.acoustics import (
+    soundspeed_delgrosso, soundspeed_teos10, soundspeed_unesco,
+)
 from uacpy.core.environment import SoundSpeedProfile
 from uacpy.core.exceptions import (ConfigurationError, DataFetchError,
                                    FileFormatError)
@@ -43,7 +45,8 @@ DEFAULT_MAX_DISTANCE_KM = 250.0
 # temporal slack here than for the smoother daily-mean Copernicus model
 # (DEFAULT_MAX_DAYS=31). The tolerance tracks how slowly the field varies.
 DEFAULT_MAX_DAYS = 15
-_FORMULAS = {'unesco': soundspeed_unesco, 'delgrosso': soundspeed_delgrosso}
+_FORMULAS = {'unesco': soundspeed_unesco, 'delgrosso': soundspeed_delgrosso,
+             'teos10': soundspeed_teos10}
 _GOOD_QC = {'1', '2'}                       # good / probably-good Argo QC flags
 # ERDDAP returns columns in the order requested, and the rows below are unpacked
 # positionally, so the header is checked against this list before it is trusted.
@@ -203,7 +206,8 @@ def fetch_ssp_argo(
     """Real in-situ sound-speed profile from the nearest Argo float.
 
     Finds the nearest good-QC Argo T/S profile (:func:`fetch_argo_profile`) and
-    converts it with ``formula`` (``'unesco'`` / ``'delgrosso'``). Raises
+    converts it with ``formula`` (``'unesco'`` / ``'delgrosso'`` / ``'teos10'``).
+    Raises
     ``DataFetchError`` when no profile is close enough.
     """
     if formula not in _FORMULAS:

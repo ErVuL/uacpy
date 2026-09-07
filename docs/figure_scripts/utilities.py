@@ -74,22 +74,26 @@ def bottom_loss():
 
 
 def sound_speed_equations():
-    """UNESCO vs Del Grosso vs Mackenzie, and where they disagree."""
+    """UNESCO vs Del Grosso vs TEOS-10 vs Mackenzie, and where they disagree."""
     temperatures = np.linspace(0.0, 30.0, 121)
     pressures = np.linspace(0.0, 6000.0, 121)          # dbar ≈ metres
 
     unesco = acoustics.soundspeed_unesco(temperatures, 35.0, 0.0)
     delgrosso = acoustics.soundspeed_delgrosso(temperatures, 35.0, 0.0)
+    teos10 = acoustics.soundspeed_teos10(temperatures, 35.0, 0.0)
     mackenzie = acoustics.soundspeed(temperatures, 35.0, 0.0)
 
     fig, axes = plt.subplots(1, 3, figsize=(12.0, 4.0))
 
     ax = axes[0]
-    ax.plot(temperatures, unesco, linewidth=1.8, label='UNESCO (Chen–Millero)')
+    ax.plot(temperatures, unesco, linewidth=1.8, color='C0',
+            label='UNESCO (Chen–Millero)')
     ax.plot(temperatures, delgrosso, linewidth=1.8, linestyle='--',
-            label='Del Grosso (NRL II)')
+            color='C1', label='Del Grosso (NRL II)')
+    ax.plot(temperatures, teos10, linewidth=1.2, linestyle='-.',
+            color='C3', label='TEOS-10')
     ax.plot(temperatures, mackenzie, linewidth=1.4, linestyle=':',
-            label='Mackenzie')
+            color='C2', label='Mackenzie')
     ax.set_xlabel('Temperature (°C)')
     ax.set_ylabel('Sound speed (m/s)')
     ax.set_title('S = 35 PSU, surface', fontsize=11)
@@ -98,6 +102,8 @@ def sound_speed_equations():
     ax.axhline(0.0, color='C0', linewidth=1.8, label='UNESCO (reference)')
     ax.plot(temperatures, delgrosso - unesco, linewidth=1.8, linestyle='--',
             color='C1', label='Del Grosso − UNESCO')
+    ax.plot(temperatures, teos10 - unesco, linewidth=1.2, linestyle='-.',
+            color='C3', label='TEOS-10 − UNESCO')
     ax.plot(temperatures, mackenzie - unesco, linewidth=1.4, linestyle=':',
             color='C2', label='Mackenzie − UNESCO')
     ax.set_xlabel('Temperature (°C)')

@@ -32,7 +32,9 @@ from typing import List, Optional, Tuple, Union
 import numpy as np
 from scipy.optimize import brentq
 
-from uacpy.core.acoustics import soundspeed_unesco, soundspeed_delgrosso
+from uacpy.core.acoustics import (
+    soundspeed_unesco, soundspeed_delgrosso, soundspeed_teos10,
+)
 from uacpy.core._carrier_validate import _dedupe_provenance
 from uacpy.core.environment import SoundSpeedProfile
 from uacpy.data import _cache
@@ -71,6 +73,7 @@ _GRIDS = {
 _FORMULAS = {
     'unesco': soundspeed_unesco,
     'delgrosso': soundspeed_delgrosso,
+    'teos10': soundspeed_teos10,
 }
 
 
@@ -100,8 +103,10 @@ def fetch_ssp(
     month : int, optional
         Climatological month ``1``–``12``. ``None`` (and no ``date``) selects
         the annual mean.
-    formula : {'unesco', 'delgrosso'}, optional
-        Sound-speed equation. Default ``'unesco'`` (Chen-Millero).
+    formula : {'unesco', 'delgrosso', 'teos10'}, optional
+        Sound-speed equation. Default ``'unesco'`` (Chen-Millero); see
+        :func:`uacpy.core.acoustics.soundspeed_teos10` for why the other two
+        sit 0.6 m/s below it in deep water.
     resolution : {'1.00', '0.25'}, optional
         WOA grid spacing in degrees. Default ``'1.00'``.
     source : {'opendap', 'local'}, optional

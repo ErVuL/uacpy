@@ -1750,6 +1750,8 @@ single module — each is sourced to its standard:
   (Chen & Millero 1977 / UNESCO 1983), `c(T, S, pressure)`.
 - **`uacpy.core.acoustics.soundspeed_delgrosso`** — Del Grosso 1974 alternative,
   preferred at high pressure / deep water.
+- **`uacpy.core.acoustics.soundspeed_teos10`** — TEOS-10 (IOC/SCOR/IAPSO 2010),
+  Eqn. (2.17.1) on the IAPWS-08/09 Gibbs function; agrees with Del Grosso at depth.
 - **`uacpy.acoustic_signal.decidecade_bands`** / `decidecade_band_levels` —
   one-third-octave (decidecade) bands, ISO 18405 / IEC 61260-1.
 - **`uacpy.noise.monopole_source_level`** / `radiated_noise_level` — ship
@@ -1761,10 +1763,13 @@ single module — each is sourced to its standard:
 (`tl_rmse`, `tl_max_error`, `tl_bias`), each taking two 2-D `Field`s.
 
 ```python
-from uacpy.core.acoustics import soundspeed_unesco, soundspeed_delgrosso
+from uacpy.core.acoustics import (
+    soundspeed_unesco, soundspeed_delgrosso, soundspeed_teos10,
+)
 
 soundspeed_unesco(15, 35, 0)      # 1506.675 m/s  (T °C, S PSU, pressure dbar)
 soundspeed_delgrosso(15, 35, 0)   # 1506.667 m/s
+soundspeed_teos10(15, 35, 0)      # 1506.674 m/s
 ```
 
 Example 35 chains site sound speed → decidecade bands → ship SL → weighted level.

@@ -24,6 +24,7 @@ from uacpy.core.acoustics import (
     power_to_db,
     soundspeed,
     soundspeed_delgrosso,
+    soundspeed_teos10,
     soundspeed_unesco,
 )
 from uacpy.core.constants import PRESSURE_FLOOR, REFERENCE_PRESSURE_WATER
@@ -477,3 +478,104 @@ def test_unesco_reproduces_the_canonical_high_pressure_check_value():
     The temperature argument is ITS-90, so T68 = 40 enters as 40/1.00024."""
     c = soundspeed_unesco(40.0 / 1.00024, 40.0, 10000.0)
     assert float(c) == pytest.approx(1731.995, rel=1e-6)
+
+
+class TestTeos10SoundSpeedEvaluatesTheGibbsFunction:
+    """``soundspeed_teos10`` is Eqn. (2.17.1) of the TEOS-10 manual (IOC
+    Manuals and Guides 56, p. 22), ``c = g_P·sqrt(g_TT / (g_TP² − g_TT·g_PP))``,
+    evaluated on the IAPWS-09 pure-water plus IAPWS-08 saline Gibbs function
+    whose coefficients the manual tabulates in appendices G and H. It takes
+    the same ``(ITS-90 °C, Practical Salinity, dbar)`` triple as the UNESCO
+    and Del Grosso equations and converts Practical to Reference Salinity
+    (``× 35.16504/35``) internally.
+
+    Reference values: GSW-Python 3.6.23 ``gsw.sound_speed_t_exact(SA, t, p)``
+    with ``SA = SP × 35.16504/35`` — the TEOS-10 toolbox's own evaluation of
+    the same Gibbs function. Agreement to 1e-5 m/s pins every coefficient:
+    a single wrong digit in either table moves the result by far more.
+    """
+
+    @pytest.mark.parametrize('temperature, salinity, pressure, expected', [
+        (15.0, 35.0, 0.0, 1506.673601),
+        (0.0, 35.0, 0.0, 1449.024607),       # the Standard Ocean point
+        (25.0, 35.0, 0.0, 1534.357131),
+        (30.0, 40.0, 0.0, 1550.694855),
+        (2.0, 34.7, 5000.0, 1541.614915),
+        (4.0, 35.0, 4000.0, 1533.099822),
+        (1.5, 34.7, 6000.0, 1557.008080),
+        (4.0, 35.0, 10000.0, 1637.285857),
+        (-3.0, 34.7, 0.0, 1434.333863),
+    ])
+    def test_matches_the_gsw_reference_to_ten_micrometres_per_second(
+            self, temperature, salinity, pressure, expected):
+        assert soundspeed_teos10(temperature, salinity, pressure) == \
+            pytest.approx(expected, abs=1e-5)
+
+    def test_fresh_water_is_finite_where_the_saline_term_has_x_squared_ln_x(self):
+        """At ``S = 0`` the saline Gibbs function's ``x²·ln x`` terms are the
+        limit 0, not ``0 × (−inf) = nan``."""
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', UserWarning)
+            c = soundspeed_teos10(10.0, 0.0, 0.0)
+        assert c == pytest.approx(1447.284153, abs=1e-5)
+
+    def test_returns_a_python_float_for_scalars_and_broadcasts_arrays(self):
+        assert isinstance(soundspeed_teos10(15.0, 35.0, 0.0), float)
+        t = np.array([0.0, 15.0, 25.0])
+        p = np.array([[0.0], [4000.0]])
+        c = soundspeed_teos10(t, 35.0, p)
+        assert c.shape == (2, 3)
+        assert c[0, 1] == pytest.approx(1506.673601, abs=1e-5)
+        assert c[1, 0] == pytest.approx(
+            soundspeed_teos10(0.0, 35.0, 4000.0), abs=1e-9)
+
+    def test_sits_with_del_grosso_not_unesco_in_deep_water(self):
+        """The Feistel (2008) Gibbs function was fitted to sound-speed data
+        (manual appendix O, Table O.1; rms 0.035 m/s), so at depth it
+        reproduces Del Grosso and exposes the ~0.6 m/s pressure bias of the
+        uncorrected Chen–Millero polynomial (APL-UW TR 9407, "Chen-Millero-Li
+        Equation"). Measured 2026-09-07 at the audit's deep fixture point."""
+        t, s, p = 2.0, 34.7, 5000.0
+        c = soundspeed_teos10(t, s, p)
+        assert abs(c - soundspeed_delgrosso(t, s, p)) < 0.05
+        assert soundspeed_unesco(t, s, p) - c > 0.5
+
+
+class TestTeos10ValidityWarnings:
+    """``soundspeed_teos10`` announces extrapolation the way its siblings do.
+
+    The domain is the manual's own (§2.6): the saline Gibbs function "is
+    valid over the ranges 0 < S_A < 42 g/kg, −6.0 °C < t < 40 °C, and
+    0 < p < 10⁴ dbar". 42 g/kg of Absolute Salinity is 41.80 on the
+    Practical scale this argument takes.
+    """
+
+    @pytest.mark.parametrize('kwargs', [
+        dict(temperature=-6.5),          # T < -6
+        dict(temperature=40.5),          # T > 40
+        dict(salinity=42.5),             # S > 41.80 PSU (42 g/kg)
+        dict(pressure=-1.0),             # P < 0
+        dict(pressure=10100.0),          # P > 10000 dbar
+    ])
+    def test_out_of_range_input_warns_of_extrapolation(self, kwargs):
+        with pytest.warns(UserWarning, match='outside validated range'):
+            soundspeed_teos10(**kwargs)
+
+    def test_negative_salinity_is_undefined_not_extrapolated(self):
+        """``x = sqrt(S_A / S_u)`` has no real value below zero; the result is
+        NaN and the message says so, as UNESCO's does for its ``S^1.5``."""
+        with pytest.warns(UserWarning, match='undefined'):
+            c = soundspeed_teos10(10.0, -1.0, 0.0)
+        assert np.isnan(c)
+
+    def test_the_pressure_message_names_the_unit(self):
+        with pytest.warns(UserWarning, match='DECIBARS'):
+            soundspeed_teos10(15.0, 35.0, 10100.0)
+
+    def test_a_deep_polar_cast_and_the_defaults_are_silent(self):
+        """−3 °C sits inside this equation's own −6 °C floor, so unlike the
+        two older fits nothing here is relaxed."""
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', UserWarning)
+            assert 1400.0 < soundspeed_teos10(-3.0, 34.7, 5000.0) < 1600.0
+            assert soundspeed_teos10() == pytest.approx(1506.67, abs=0.01)

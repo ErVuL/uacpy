@@ -347,6 +347,7 @@ CONVERTED_SITES = [
     ('core/absorption.py', 'BiologicalLayer.__init__', 1),
     ('core/acoustics.py', 'soundspeed', 3),
     ('core/acoustics.py', 'soundspeed_delgrosso', 3),
+    ('core/acoustics.py', 'soundspeed_teos10', 4),
     ('core/acoustics.py', 'soundspeed_unesco', 4),
     ('core/bottom.py', 'SeabedColumn.collapse', 1),
     ('core/environment.py', 'Environment.get_sound_speed', 1),
