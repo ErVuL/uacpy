@@ -465,10 +465,10 @@ class TestDeepSSPExtension:
             _w.simplefilter('ignore')
             out = extend_ssp_below_data(self._profile(), 8801.0, latitude=29.78)
         c_end = float(np.asarray(out.data)[-1, 0])
-        # UNESCO at 8801 m holding the deepest T/S gives 1611.93 m/s. The
+        # TEOS-10 at 8801 m holding the deepest T/S gives 1611.68 m/s. The
         # tolerance is tight on purpose: at 2 m/s a fixed 0.0165 s^-1 gradient
         # (6.4 m/s slow here) is only just excluded, and a fixed 0.017 is not.
-        assert c_end == pytest.approx(1611.93, abs=0.05), (
+        assert c_end == pytest.approx(1611.68, abs=0.05), (
             f"deep sound speed {c_end:.2f} m/s — holding the last value would "
             f"give 1551.05, which is 61 m/s slow")
         assert float(np.asarray(out.depths)[-1]) == pytest.approx(8801.0)
@@ -532,17 +532,24 @@ class TestDeepSSPExtension:
     def test_warm_deep_basins_are_handled(self):
         """Mediterranean (~13 C) and Red Sea (~21 C) deep water are far off the
         canonical polar values, and dc/dz falls with temperature. The inversion
-        recovers it from the column itself."""
-        from uacpy.core.acoustics import soundspeed_unesco
+        recovers it from the column itself. The truth is the increment's
+        own (default) equation at the true T/S, so what is measured is the
+        inversion, not the 0.16 m/s by which UNESCO's and TEOS-10's pressure
+        terms differ over this span."""
+        from uacpy.core.acoustics import soundspeed_teos10
         from uacpy.data._geo import depth_to_pressure_dbar
         from uacpy.data.sound_speed import _deep_increment
         for t_true, s_true in ((13.0, 38.5), (21.0, 40.5)):
             p0 = float(depth_to_pressure_dbar(1500.0, 45.0))
             p1 = float(depth_to_pressure_dbar(3000.0, 45.0))
-            c0 = soundspeed_unesco(t_true, s_true, p0)
-            truth = soundspeed_unesco(t_true, s_true, p1) - c0
+            c0 = soundspeed_teos10(t_true, s_true, p0)
+            truth = soundspeed_teos10(t_true, s_true, p1) - c0
+            # The inversion holds S at the 35 reference; the residual is the
+            # equation's salinity-pressure cross term over 1500 m: 0.04 m/s
+            # for the Mediterranean, 0.16 for the Red Sea at 40.5 PSU (UNESCO
+            # gave 0.14 there). A fixed gradient is 7 m/s out on the same span.
             assert _deep_increment(c0, 1500.0, 3000.0, 45.0) == pytest.approx(
-                truth, abs=0.15)
+                truth, abs=0.2)
 
     def test_long_extrapolation_warns(self):
         from uacpy.data.sound_speed import extend_ssp_below_data

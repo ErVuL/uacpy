@@ -1859,8 +1859,10 @@ uacpy is SI throughout; underwater levels reference **1 µPa**.
 ### Sound speed & density
 
 - Sound-speed helpers: **`soundspeed` = Mackenzie (1981)** (T °C, S ppt, depth m)
-  is the default; **`soundspeed_unesco` = Chen & Millero / UNESCO** (T °C, S PSU,
-  **pressure in dbar**) is the international-standard algorithm.
+  is `SoundSpeedProfile.from_mackenzie`'s equation; **`soundspeed_teos10`** (T °C,
+  S PSU, **pressure in dbar**) is the data routes' default `formula`, with
+  **`soundspeed_unesco` = Chen & Millero / UNESCO** and `soundspeed_delgrosso`
+  as alternatives.
 - **Density has two distinct roles** — do not conflate them:
   - *Acoustic input* density (bottom/sediment, and the water column on disk) is
     **g/cm³**; when a water density is not written, the AT binaries use their

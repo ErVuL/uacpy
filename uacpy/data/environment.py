@@ -206,7 +206,7 @@ def fetch_environment(
     with_absorption: bool = False,
     max_distance_km: Optional[float] = None,
     max_days: Optional[int] = None,
-    formula: str = 'unesco',
+    formula: str = 'teos10',
     resolution: str = '1.00',
     timeout: float = 120.0,
     verbose: Union[bool, str] = False,
@@ -431,7 +431,7 @@ def fetch_environment(
         ``None`` → each source's own default (Argo 15, Copernicus 31).
     formula, resolution, timeout, verbose
         Forwarded to the sound-speed / bathymetry fetchers. ``formula`` is the
-        sound-speed equation, ``{'unesco', 'delgrosso', 'teos10'}``; ``resolution`` is the
+        sound-speed equation, ``{'teos10', 'unesco', 'delgrosso'}``; ``resolution`` is the
         WOA23 grid spacing in degrees, ``{'1.00', '0.25'}``, and also selects the
         grid the ``with_absorption`` T/S column is drawn from, so the SSP and the
         absorption come from one cell; ``timeout`` is a per-request network

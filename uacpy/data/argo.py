@@ -196,7 +196,7 @@ def fetch_argo_profile(
 
 def fetch_ssp_argo(
     point: Coordinate, *, date,
-    formula: str = 'unesco',
+    formula: str = 'teos10',
     max_distance_km: float = DEFAULT_MAX_DISTANCE_KM,
     max_days: int = DEFAULT_MAX_DAYS,
     base_url: str = ARGO_ERDDAP_URL,
@@ -206,7 +206,7 @@ def fetch_ssp_argo(
     """Real in-situ sound-speed profile from the nearest Argo float.
 
     Finds the nearest good-QC Argo T/S profile (:func:`fetch_argo_profile`) and
-    converts it with ``formula`` (``'unesco'`` / ``'delgrosso'`` / ``'teos10'``).
+    converts it with ``formula`` (``'teos10'`` / ``'unesco'`` / ``'delgrosso'``).
     Raises
     ``DataFetchError`` when no profile is close enough.
     """

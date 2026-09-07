@@ -248,7 +248,8 @@ take **pressure in decibars**. They are numerically close (≈ 1 dbar per metre)
 but they are not the same quantity, and the standard equations are defined
 in pressure.
 
-UNESCO is the international standard algorithm. `soundspeed_unesco` accepts
+UNESCO was the international standard algorithm until TEOS-10 replaced it,
+and it stays available as `formula='unesco'`. `soundspeed_unesco` accepts
 ITS-90 temperature and converts internally to the IPTS-68 scale the polynomial
 was fitted on. Valid for `T ∈ [0, 40] °C`, `S ∈ [0, 40] PSU`,
 `P ∈ [0, 1000] bar`.
@@ -274,7 +275,8 @@ Del Grosso and not UNESCO: the Chen–Millero polynomial as published carries
 a pressure-dependent bias of about +0.6 m/s below 3000 dbar (the Millero &
 Li 1994 correction, which `soundspeed_unesco` does not include). That is
 27 ms of travel time per 100 km — invisible in a transmission-loss curve,
-real for tomography or any comparison with a TEOS-10-based tool.
+real for tomography or any comparison with a TEOS-10-based tool. It is the
+default `formula` on every data route that turns T/S into sound speed.
 
 Mackenzie is the cheap nine-term fit. It is validated for
 `T ∈ [-2, 30] °C`, `S ∈ [25, 40] PSU`, `depth ∈ [0, 8000] m`, and emits a

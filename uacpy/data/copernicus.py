@@ -83,7 +83,7 @@ def fetch_ssp_operational(
     point: Coordinate,
     *,
     date: Union[str, _dt.date],
-    formula: str = 'unesco',
+    formula: str = 'teos10',
     max_days: int = DEFAULT_MAX_DAYS,
     dataset_id: str = DEFAULT_DATASET_ID,
     verbose: Union[bool, str] = False,
@@ -96,8 +96,8 @@ def fetch_ssp_operational(
         Latitude/longitude in decimal degrees (WGS84).
     date : str or datetime.date
         Calendar date of interest. The nearest available time step is used.
-    formula : {'unesco', 'delgrosso', 'teos10'}, optional
-        Sound-speed equation. Default ``'unesco'``.
+    formula : {'teos10', 'unesco', 'delgrosso'}, optional
+        Sound-speed equation. Default ``'teos10'``.
     max_days : int, optional
         Maximum days the nearest available time step may differ from ``date``
         before raising ``DataFetchError`` (the date is outside the dataset's
@@ -161,7 +161,7 @@ def fetch_ssp_transect_operational(
     *,
     date: Union[str, _dt.date],
     n_points: int = 6,
-    formula: str = 'unesco',
+    formula: str = 'teos10',
     max_days: int = DEFAULT_MAX_DAYS,
     dataset_id: str = DEFAULT_DATASET_ID,
     verbose: Union[bool, str] = False,

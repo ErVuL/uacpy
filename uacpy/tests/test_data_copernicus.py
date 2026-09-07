@@ -522,7 +522,7 @@ def test_deep_ssp_converts_potential_temperature_to_in_situ(monkeypatch):
     ssp = copernicus.fetch_ssp_operational((30.0, -40.0), date='2020-06-15')
 
     pressure = depth_to_pressure_dbar(np.array(_DEEP_DEPTH), 30.0)
-    raw = np.array([_FORMULAS['unesco'](t, s, p)
+    raw = np.array([_FORMULAS['teos10'](t, s, p)
                     for t, s, p in zip(_DEEP_THETA, _DEEP_S, pressure)])
     excess = ssp.data.ravel() - raw
     assert excess[0] == pytest.approx(0.0, abs=1e-9)     # surface: no shift

@@ -9,8 +9,9 @@ objectively-analyzed climatology (``t_an`` / ``s_an``). ``source='opendap'``
 reads a single ``(lat, lon)`` water column from the NCEI THREDDS server via the
 DAP ``.ascii`` response — stdlib text, no NetCDF dependency; ``source='local'``
 reads the same fields from the install-time NetCDF grids (``install.sh --data
-woa23``). Sound speed is then computed from T, S and pressure with the UNESCO
-(Chen-Millero) or Del Grosso equation already in :mod:`uacpy.core.acoustics`.
+woa23``). Sound speed is then computed from T, S and pressure with the TEOS-10
+equation (default), UNESCO (Chen-Millero) or Del Grosso, all in
+:mod:`uacpy.core.acoustics`.
 
 Time handling
 -------------
@@ -82,7 +83,7 @@ def fetch_ssp(
     *,
     date: Union[str, _dt.date, None] = None,
     month: Optional[int] = None,
-    formula: str = 'unesco',
+    formula: str = 'teos10',
     resolution: str = '1.00',
     source: str = 'opendap',
     decade: str = DEFAULT_DECADE,
@@ -103,10 +104,10 @@ def fetch_ssp(
     month : int, optional
         Climatological month ``1``–``12``. ``None`` (and no ``date``) selects
         the annual mean.
-    formula : {'unesco', 'delgrosso', 'teos10'}, optional
-        Sound-speed equation. Default ``'unesco'`` (Chen-Millero); see
-        :func:`uacpy.core.acoustics.soundspeed_teos10` for why the other two
-        sit 0.6 m/s below it in deep water.
+    formula : {'teos10', 'unesco', 'delgrosso'}, optional
+        Sound-speed equation. Default ``'teos10'``; see
+        :func:`uacpy.core.acoustics.soundspeed_teos10` for why UNESCO
+        (Chen-Millero 1977 as published) sits 0.6 m/s above it in deep water.
     resolution : {'1.00', '0.25'}, optional
         WOA grid spacing in degrees. Default ``'1.00'``.
     source : {'opendap', 'local'}, optional
@@ -213,7 +214,7 @@ def fetch_ssp_transect(
     max_points: int = DEFAULT_MAX_TRANSECT_POINTS,
     date: Union[str, _dt.date, None] = None,
     month: Optional[int] = None,
-    formula: str = 'unesco',
+    formula: str = 'teos10',
     resolution: str = '1.00',
     source: str = 'opendap',
     decade: str = DEFAULT_DECADE,
@@ -314,7 +315,7 @@ def assemble_range_dependent(columns, ranges_m) -> SoundSpeedProfile:
     # dataset, a column without ``data_sources`` contributing nothing).
     sources = _dedupe_provenance(columns)
     # One formula for the assembled field only if every column agrees on it;
-    # a mixed stack has none, and the extension then falls back to UNESCO
+    # a mixed stack has none, and the extension then falls back to the default
     # rather than picking an arbitrary column's equation.
     formulas = {getattr(c, 'formula', None) for c in columns}
     formula = formulas.pop() if len(formulas) == 1 else None
@@ -651,9 +652,10 @@ def _parse_dods_ascii(text: str) -> List[float]:
 # 33..36, because the inversion absorbs the difference into the temperature.
 _DEEP_REFERENCE_SALINITY = 35.0
 # Effective-temperature search bracket, wider than any ocean water mass:
-# UNESCO spans 1435-1555 m/s across it at the surface. Sub-zero temperatures
-# are in range because polar deep water reaches -1.9 C and the profiles being
-# extended were themselves built by evaluating UNESCO at those temperatures.
+# the equations span 1435-1555 m/s across it at the surface. Sub-zero
+# temperatures are in range because polar deep water reaches -1.9 C and the
+# profiles being extended were themselves built by evaluating the formula at
+# those temperatures.
 _EFFECTIVE_T_BRACKET_DEGC = (-3.0, 35.0)
 # Leroy & Parthiot's own reference latitude, for callers that have none. The
 # pressure conversion is the only latitude-dependent step and the increment
@@ -665,17 +667,18 @@ _EXTRAPOLATION_WARN_M = 50.0
 
 
 def _deep_increment(c_deepest: float, z_from: float, z_to: float,
-                    latitude: float, speed_fn=soundspeed_unesco) -> float:
+                    latitude: float, speed_fn=soundspeed_teos10) -> float:
     """Sound-speed increment from ``z_from`` down to ``z_to`` under the
-    formula ``speed_fn(t, s, p)`` that built the column (UNESCO by default).
+    formula ``speed_fn(t, s, p)`` that built the column (TEOS-10 by default).
 
     Extrapolation only ever happens below the deepest analysed level, so in the
     deep isothermal layer, where temperature is nearly constant and sound speed
     rises almost linearly under the pressure term alone (Stergiopoulos,
     *Advanced Signal Processing Handbook* 10.2). The increment is therefore
-    UNESCO at fixed T/S. The temperature is not assumed: it is inverted from the
-    column's own deepest sound speed, which holds the increment to 0.07 m/s over
-    a 3.3 km span against UNESCO at the true T/S (worst case over T in -1..6 C,
+    the formula at fixed T/S. The temperature is not assumed: it is inverted
+    from the column's own deepest sound speed, which holds the increment to
+    0.07 m/s over a 3.3 km span against the formula at the true T/S (worst
+    case over T in -1..6 C,
     S in 33..35.5, z in 1..8 km). Any single gradient is 7.3 m/s out over that
     span, because dc/dz is itself a function of depth: 0.0168 s^-1 at 1 km
     against 0.0189 s^-1 at 8 km.
@@ -705,7 +708,7 @@ def extend_ssp_below_data(ssp, depth_max: float,
     analysed level — by more than 200 m at ~15% of ocean points, and by 3.3 km
     in a trench. The carrier's generic ``extend_to`` holds the last value,
     which drops the entire pressure term: at (29.78, 142.77) WOA ends at
-    5500 m / 1551.05 m/s while UNESCO at the 8801 m seafloor gives 1611.93,
+    5500 m / 1551.05 m/s while TEOS-10 at the 8801 m seafloor gives 1611.68,
     so a held profile is 61 m/s (3.9%) slow over the bottom 3.3 km — enough to
     move ray turning depths and convergence-zone structure.
 
@@ -723,9 +726,9 @@ def extend_ssp_below_data(ssp, depth_max: float,
     span = depth_max - last
     # The extension continues the column under the formula that built it (a
     # Del Grosso column extended with UNESCO is 0.33 m/s off at 8.8 km); a
-    # literal profile carries no formula and takes UNESCO.
-    speed_fn = _FORMULAS.get(ssp.formula or 'unesco',
-                             soundspeed_unesco)
+    # literal profile carries no formula and takes the package default.
+    speed_fn = _FORMULAS.get(ssp.formula or 'teos10',
+                             soundspeed_teos10)
     new_row = np.empty(data.shape[1], dtype=float)
     for j in range(data.shape[1]):
         new_row[j] = data[-1, j] + _deep_increment(
@@ -749,7 +752,7 @@ def extend_ssp_below_data(ssp, depth_max: float,
         data_sources=ssp.data_sources,
         # The rebuild has to restate ``formula``: without it the result
         # looks literal, and a *second* extension (transect column, then the
-        # assembled profile against the bathymetry) reverts to UNESCO. The
+        # assembled profile against the bathymetry) reverts to the default. The
         # carrier's own copies (``SoundSpeedProfile._replace``, which every
         # slicer, ``collapse`` and ``extend_to`` go through, and ``copy``)
         # keep it, so this constructor call is the only one that must.

@@ -188,7 +188,7 @@ def test_the_argo_query_window_includes_the_whole_last_tolerated_day():
 def test_argo_profile_records_the_formula_that_built_it(monkeypatch, formula):
     """The profile has to carry its own equation: a float ending at 1000 m over
     a deep seafloor is extended, and the extension continues under whatever
-    ``formula`` says (UNESCO when it says nothing)."""
+    ``formula`` says (TEOS-10 when it says nothing)."""
     monkeypatch.setattr(argo, 'http_get', lambda url, **kw: _csv(_ROWS))
     ssp = argo.fetch_ssp_argo((30.0, -40.0), date='2024-06-04', formula=formula)
     assert ssp.formula == formula
@@ -196,20 +196,22 @@ def test_argo_profile_records_the_formula_that_built_it(monkeypatch, formula):
 
 def test_an_argo_profile_extends_under_its_own_equation(monkeypatch):
     """A float ending at 1000 m over a deep seafloor is extended. Without the
-    stamp the extension always ran UNESCO. Both branches below extend the very
-    same numbers, so the stamp is the only variable."""
+    stamp the extension always ran the package default. Both branches below
+    extend the very same numbers, so the stamp is the only variable; UNESCO
+    is the stamp because its deep pressure term is the one that differs from
+    the TEOS-10 default (Del Grosso's agrees with it to a few cm/s)."""
     import warnings
     from uacpy.core.environment import SoundSpeedProfile
     from uacpy.data.sound_speed import extend_ssp_below_data
     monkeypatch.setattr(argo, 'http_get', lambda url, **kw: _csv(_ROWS))
     ssp = argo.fetch_ssp_argo((30.0, -40.0), date='2024-06-04',
-                              formula='delgrosso')
+                              formula='unesco')
     stripped = SoundSpeedProfile(depths=ssp.depths, data=ssp.data,
                                  shape='measured', formula=None)
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
         stamped = float(np.asarray(
             extend_ssp_below_data(ssp, 5000.0).data)[-1, 0])
-        unesco = float(np.asarray(
+        default = float(np.asarray(
             extend_ssp_below_data(stripped, 5000.0).data)[-1, 0])
-    assert abs(stamped - unesco) > 0.05
+    assert abs(stamped - default) > 0.05

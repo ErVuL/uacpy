@@ -384,8 +384,9 @@ def test_column_extends_under_a_deeper_seafloor():
         out = ss.extend_column_to_seafloor(
             col, _bathy([[0.0, 8801.0], [1.0e5, 8801.0]]), 0.0, latitude=29.78)
     assert float(out.depths[-1]) == pytest.approx(8801.0)
-    # UNESCO at 8801 m holding the column's own deepest T/S: 1611.93 m/s.
-    assert float(out.data[-1, 0]) == pytest.approx(1611.93, abs=0.05)
+    # TEOS-10 at 8801 m holding the column's own deepest T/S: 1611.68 m/s
+    # (UNESCO, the former default, gave 1611.93 — its deep pressure bias).
+    assert float(out.data[-1, 0]) == pytest.approx(1611.68, abs=0.05)
 
 
 def test_transect_holds_no_cut_value_inside_the_water_column(monkeypatch):
@@ -487,11 +488,14 @@ class TestTheDeepExtensionUsesTheProfilesOwnFormula:
                                  data=np.array([1500.0, 1551.05]),
                                  formula=formula)
 
-    def test_each_formula_extends_differently_and_none_means_unesco(self):
+    def test_each_formula_extends_differently_and_none_means_teos10(self):
+        """A literal profile carries no formula; its extension runs the
+        package default, TEOS-10 — not UNESCO, whose pressure term is the
+        0.6 m/s-high one below 3000 dbar."""
         from uacpy.data.sound_speed import extend_ssp_below_data
         deep = {f: float(np.asarray(extend_ssp_below_data(self._profile(f), 8800.0).data)[-1, 0])
                 for f in ('unesco', 'delgrosso', 'teos10', None)}
-        assert deep[None] == deep['unesco']
+        assert deep[None] == deep['teos10']
         assert abs(deep['delgrosso'] - deep['unesco']) > 0.1     # verifier: +0.33 m/s at 8.8 km
         # TEOS-10 continues the column with its own pressure term, which sits
         # with Del Grosso's, not UNESCO's, below 3000 dbar.
@@ -567,3 +571,19 @@ def test_assembling_mixed_columns_keeps_no_formula():
                               shape='measured', formula=f)
             for f in ('delgrosso', 'unesco', 'delgrosso')]
     assert assemble_range_dependent(cols, [0.0, 1e3, 2e3]).formula is None
+
+
+def test_every_ssp_route_defaults_to_teos10():
+    """One default for the package: the TEOS-10 equation, valid from fresh
+    to 42 g/kg and fitted to the deep-water sound-speed data, on every route
+    that turns T/S into sound speed. UNESCO (Chen–Millero 1977 as published)
+    stays available as the legacy choice with its documented +0.6 m/s deep
+    bias; Del Grosso is undefined below 29 PSU and cannot be a default."""
+    import inspect
+    from uacpy.data import argo, copernicus, environment, sound_speed
+    routes = [sound_speed.fetch_ssp, sound_speed.fetch_ssp_transect,
+              argo.fetch_ssp_argo, copernicus.fetch_ssp_operational,
+              copernicus.fetch_ssp_transect_operational,
+              environment.fetch_environment]
+    for fn in routes:
+        assert inspect.signature(fn).parameters['formula'].default == 'teos10', fn
