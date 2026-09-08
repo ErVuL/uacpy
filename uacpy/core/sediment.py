@@ -78,10 +78,14 @@ GRAIN_SIZE_MODELS = ('hamilton', 'apl-uw')
 _MODEL_WATER_REFERENCE = {'hamilton': (_HB_REF_CW, _HB_REF_RHOW),
                           'apl-uw': (1500.0, 1.0)}
 # Valid ϕ range per model; outside it ϕ is clamped. The clamp is silent
-# wherever it changes nothing — on 'hamilton' it never can, because that model
-# is an np.interp lookup that already flat-extrapolates past the table ends —
+# wherever it changes nothing — on 'hamilton' it never can: its velocity and
+# density are an np.interp lookup that already holds the table's end rows
+# (0.92 and 8.8 ϕ) flat, and its attenuation is the Hamilton (1972) k_p
+# regression, which holds its own limits, 0 and 9.5 ϕ. The model range is the
+# wider of the two, so the clamp lands exactly where each part already stops —
 # and warns whenever it moves the returned values, which is 'apl-uw' only.
-_MODEL_RANGE = {'hamilton': (float(_HB_PHI[0]), float(_HB_PHI[-1])),
+_HAMILTON_KP_PHI_RANGE = (0.0, 9.5)
+_MODEL_RANGE = {'hamilton': _HAMILTON_KP_PHI_RANGE,
                 'apl-uw': (-1.0, 9.0)}
 
 
@@ -91,11 +95,11 @@ def _hamilton_kp(phi: float) -> float:
     ``α(dB/m) = k_p · f(kHz)``. The four regressions are the Fig. 3 caption of
     Hamilton, "Compressional-wave attenuation in marine sediments",
     Geophysics 37 (1972), p. 636 (``external:hamilton1972.pdf`` page 17),
-    "recommended only within the limiting values" 0 to 9.5 ϕ, so ϕ is held at
-    those limits outside them. The branches meet within 0.003 at 2.6, 4.5 and
+    "recommended only within the limiting values" 0 to 9.5 ϕ
+    (``_HAMILTON_KP_PHI_RANGE``), so ϕ is held at those limits outside them. The branches meet within 0.003 at 2.6, 4.5 and
     6.0 ϕ; the peak is 0.758 at 4.5 ϕ (very fine sand), the clay end 0.05.
     """
-    m = min(max(float(phi), 0.0), 9.5)
+    m = min(max(float(phi), _HAMILTON_KP_PHI_RANGE[0]), _HAMILTON_KP_PHI_RANGE[1])
     if m <= 2.6:
         return 0.4556 + 0.0245 * m
     if m <= 4.5:
@@ -224,9 +228,11 @@ def grain_size_to_geoacoustics(
     ``grain_size_phi`` outside the model's ϕ range is clamped to it. A
     ``UserWarning`` is emitted exactly when that clamp changes the returned
     values, so the warning marks a real substitution rather than a boundary
-    crossing. It never fires for ``'hamilton'``: that model interpolates a
-    table, and ``np.interp`` already holds the end rows flat, so the clamp
-    cannot move the result. It fires for ``'apl-uw'`` at any ϕ outside
+    crossing. It never fires for ``'hamilton'``: its range is the 0 to 9.5 ϕ
+    Hamilton (1972) recommends for ``k_p``, and inside it the velocity /
+    density table already holds its end rows (0.92 and 8.8 ϕ) flat through
+    ``np.interp``, so the clamp cannot move the result. It fires for
+    ``'apl-uw'`` at any ϕ outside
     ``[-1, 9]``, whose polynomials do keep extrapolating (ϕ = 9.5 differs by
     1.8 m/s, ϕ = -1.5 by 47 m/s).
     """
@@ -247,7 +253,8 @@ def grain_size_to_geoacoustics(
     # Warn on the substitution, not on the boundary crossing. The previous
     # +-1 phi deadband warned for neither model in the band just outside the
     # range, and for 'hamilton' the clamp is a provable no-op at any phi
-    # (np.interp flat-extrapolates), so a deadband keyed on phi alone either
+    # (np.interp and k_p both hold their own limits), so a deadband keyed on
+    # phi alone either
     # cried wolf or stayed silent on a real change. Evaluating the fit at the
     # raw phi and comparing is the direct test, and it costs one extra call
     # only when the clamp actually engaged.

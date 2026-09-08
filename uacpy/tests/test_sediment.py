@@ -612,3 +612,20 @@ class TestGrainSizeClampWarnsOnSubstitutionNotOnCrossing:
             warnings.simplefilter('error')
             out = grain_size_to_geoacoustics(float('nan'), model='apl-uw')
         assert np.isnan(out['sound_speed'])
+
+
+def test_hamilton_honours_its_own_attenuation_range_to_nine_and_a_half_phi():
+    """Hamilton (1972) recommends the ``k_p`` regressions over 0 to 9.5 ϕ,
+    while the Hamilton & Bachman velocity/density table ends at 8.8. The
+    model's ϕ range is the wider of the two: between 8.8 and 9.5 the table
+    holds its end row (``np.interp``) but ``k_p`` keeps following the
+    regression, which turns up from 0.053 at 8.8 to 0.060 at 9.5, and no
+    clamp is reported because none substituted anything."""
+    with warnings.catch_warnings():
+        warnings.simplefilter('error')
+        edge = sediment.grain_size_to_geoacoustics(8.8, model='hamilton')
+        clay = sediment.grain_size_to_geoacoustics(9.5, model='hamilton')
+    assert clay['sound_speed'] == pytest.approx(edge['sound_speed'])
+    assert clay['density'] == pytest.approx(edge['density'])
+    assert clay['attenuation'] > edge['attenuation'] * 1.1
+    assert _MODEL_RANGE['hamilton'] == (0.0, 9.5)
