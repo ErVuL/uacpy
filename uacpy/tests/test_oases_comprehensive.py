@@ -107,7 +107,7 @@ class TestOAST:
                 acoustic_type='half-space', sound_speed=1700.0,
                 density=1.8, attenuation=0.5))
         ref = oast.compute_tl(env=fluid, source=source, receiver=receiver)
-        diff = np.abs(np.asarray(result.db) - np.asarray(ref.db))
+        diff = np.abs(np.asarray(result.dB) - np.asarray(ref.dB))
         assert np.nanmean(diff) > 0.5, (
             "elastic and fluid seabeds gave the same OAST field — the shear "
             "speed never reached the deck")
@@ -2134,7 +2134,7 @@ class TestOasesFrequencyReachesTheDeck:
 
         def tl(freq):
             return np.asarray(OAST().compute_tl(
-                env, Source(depths=50.0, frequencies=freq), rcv).db).ravel()
+                env, Source(depths=50.0, frequencies=freq), rcv).dB).ravel()
 
         # Bit-identical before the fix: the deck carried '200.0' either way.
         assert np.nanmax(np.abs(tl(200.0) - tl(200.04))) > 0.1

@@ -163,7 +163,7 @@ frequency of each.
 | Call | Returns | Units |
 |---|---|---|
 | `psd(data, sample_rate, *, window='hann', nperseg=8192, noverlap=None, nfft=None, scaling='density')` | `PSDResult(frequencies, power)` | Pa²/Hz, linear |
-| `ppsd(data, sample_rate, *, seg_duration=1.0, overlap_pct=50, ddB=1.0, …, ref=1e-6)` | `PPSDResult(frequencies, level_edges, pdf, mean_db, std_db, binwidth_db, seg_duration, ref, scaling)` | dB histogram per frequency |
+| `ppsd(data, sample_rate, *, seg_duration=1.0, overlap_pct=50, ddB=1.0, …, ref=1e-6)` | `PPSDResult(frequencies, level_edges, pdf, mean_dB, std_dB, binwidth_dB, seg_duration, ref, scaling)` | dB histogram per frequency |
 | `sel(data, sample_rate, *, fmin=8.9125, fmax=22387, band_type='third_octave', num_bands=30, …)` | `SELResult(sel_pa2s, bands)` | Pa²·s, linear; `plot_sel(ref=1e-6)` gives dB re 1 µPa²·s |
 | `decidecade_bands(f_low, f_high)` | `(lower, centers, upper)` | Hz |
 | `decidecade_band_levels(psd, frequencies, ref=1e-6)` | `(centers, levels)` | dB re `ref²` |
@@ -206,9 +206,9 @@ from uacpy.visualization import plot_psd, plot_band_levels
 # A target soundscape: −17 dB/decade with a narrow 300 Hz tonal on top.
 rng = np.random.default_rng(0)
 f_target = np.logspace(np.log10(10.0), np.log10(10_000.0), 200)
-level_db = 100.0 - 17.0 * np.log10(f_target / 100.0)
-level_db += 12.0 * np.exp(-0.5 * ((np.log10(f_target / 300.0)) / 0.02) ** 2)
-target = 1e-12 * 10.0 ** (level_db / 10.0)          # Pa²/Hz
+level_dB = 100.0 - 17.0 * np.log10(f_target / 100.0)
+level_dB += 12.0 * np.exp(-0.5 * ((np.log10(f_target / 300.0)) / 0.02) ** 2)
+target = 1e-12 * 10.0 ** (level_dB / 10.0)          # Pa²/Hz
 
 _, x, fs = synthesize_noise_from_psd(
     target, f_target, duration=30.0, sample_rate=25_000,

@@ -67,10 +67,10 @@ def oast_tl():
     return fig
 
 
-def _range_average(tl_db, n=15):
+def _range_average(tl_dB, n=15):
     """Average TL in intensity over ``n`` range cells, returning dB."""
     kernel = np.ones(n) / n
-    intensity = np.convolve(10.0 ** (-tl_db / 10.0), kernel, mode='valid')
+    intensity = np.convolve(10.0 ** (-tl_dB / 10.0), kernel, mode='valid')
     return -10.0 * np.log10(intensity)
 
 
@@ -96,7 +96,7 @@ def shear_loss():
         axes[0].plot(rc.theta, -20.0 * np.log10(np.maximum(rc.R, 1e-6)),
                      color=colour, label=label)
         tl = OAST().run(env, source, receiver, run_mode=RunMode.COHERENT_TL)
-        smoothed = _range_average(tl.db.ravel())
+        smoothed = _range_average(tl.dB.ravel())
         ranges = tl.coords['range'][:len(smoothed)] + 250.0
         axes[1].plot(ranges / 1000.0, smoothed, color=colour, label=label)
 

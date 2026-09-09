@@ -539,8 +539,8 @@ class TestALithologySampleCitesDeck41:
     ])
     def test_the_sample_names_the_index_it_came_from(self, point, expected,
                                                      tmp_path, monkeypatch):
-        db = self._cache(tmp_path, monkeypatch)
-        assert db.fetch_sediment_sample(point)['dataset'] == expected
+        dB = self._cache(tmp_path, monkeypatch)
+        assert dB.fetch_sediment_sample(point)['dataset'] == expected
 
     @pytest.mark.parametrize('point, expected', [
         ((-20.0, -140.0), 'deck41'),
@@ -548,8 +548,8 @@ class TestALithologySampleCitesDeck41:
     ])
     def test_the_bottom_provenance_cites_that_index(self, point, expected,
                                                     tmp_path, monkeypatch):
-        db = self._cache(tmp_path, monkeypatch)
-        bottom = db.fetch_bottom_local(point)
+        dB = self._cache(tmp_path, monkeypatch)
+        bottom = dB.fetch_bottom_local(point)
         assert bottom.data_sources[0].source.id == expected
 
 

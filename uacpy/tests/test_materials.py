@@ -213,7 +213,7 @@ class TestHamiltonAttenuationFollowsThe1972GrainSizeRegressions:
         assert phi[int(np.argmax(k))] == pytest.approx(4.5, abs=0.02)
         assert k.max() == pytest.approx(0.758, abs=0.002)
 
-    def test_attenuation_in_db_per_wavelength_is_k_p_times_c_over_1000(self):
+    def test_attenuation_in_dB_per_wavelength_is_k_p_times_c_over_1000(self):
         from uacpy.core.sediment import _hamilton_kp, grain_size_to_geoacoustics
         props = grain_size_to_geoacoustics(5.4, model='hamilton')
         assert props['attenuation'] == pytest.approx(_hamilton_kp(5.4) * props['sound_speed'] / 1000.0, rel=1e-9)

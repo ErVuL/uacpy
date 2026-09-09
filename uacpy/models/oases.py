@@ -1182,7 +1182,7 @@ class OASN(OASES):
         TL plot range axis bounds (m).
     vrec : float
         Vertical receiver velocity (m/s) for Doppler. Default 0.
-    offdb : float, optional
+    offdB : float, optional
         Single-mode horizontal offset (dB).
     use_tmpfs, verbose, work_dir, cleanup, timeout, collapse : optional
         Standard plumbing (see :class:`PropagationModel`).
@@ -1259,9 +1259,9 @@ class OASN(OASES):
         plot_rmin: Optional[float] = None,
         plot_rmax: Optional[float] = None,
         # Frequency-line extras: vrec (m/s, vertical receiver velocity
-        # for Doppler), offdb (single-mode horizontal offset).
+        # for Doppler), offdB (single-mode horizontal offset).
         vrec: float = 0.0,
-        offdb: Optional[float] = None,
+        offdB: Optional[float] = None,
         use_tmpfs: bool = False,
         verbose: Union[bool, str] = False,
         work_dir: Optional[Path] = None,
@@ -1355,7 +1355,7 @@ class OASN(OASES):
         self.vrec = 0.0
         # Same OASES field as integration_offset (unoasn22.f:142 reads
         # FREQ1 FREQ2 NFREQ OFFDBIN); an explicit value wins in the writer.
-        self.offdb = float(offdb) if offdb is not None else None
+        self.offdB = float(offdB) if offdB is not None else None
         # run() writes ``self.options or 'J'`` plus the run-mode letter, so
         # only a custom string can drop 'J' — and without it the binary
         # zeroes the offset and reads a three-token frequency line, the same
@@ -1400,8 +1400,8 @@ class OASN(OASES):
         }
         if self.deep_source_depth is not None:
             kw['deep_source_depth'] = self.deep_source_depth
-        if self.offdb is not None:
-            kw['offdb'] = self.offdb
+        if self.offdB is not None:
+            kw['offdB'] = self.offdB
 
         # Phase-speed bounds applied identically to OASN's noise and
         # replica integrations (singular on the public API, plural-with-
@@ -2629,7 +2629,7 @@ class OASP(OASES):
             # COHERENT_TL: pick the bin nearest the requested frequency
             # and return the complex narrowband pressure (transposed
             # to the (n_depth, n_range) layout). Users get TL via
-            # ``field.db`` or ``.to_db()``.
+            # ``field.dB`` or ``.to_dB()``.
             f_req = (float(np.atleast_1d(frequencies)[0])
                      if frequencies is not None
                      else float(source.frequencies[0]))
@@ -4178,7 +4178,7 @@ class OASS(OASES):
             source,
             backend='oass',
             kind='reverberation',
-            oass_quantity='reverberation_loss_db',
+            oass_quantity='reverberation_loss_dB',
             **extras,
         )
         native = Field(

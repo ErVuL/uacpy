@@ -14,7 +14,7 @@ parameters (reproduced in Etter, Table 11.1):
 ``SE = 0`` means the detector achieves its design ``(P_D, P_F)`` operating
 point. ``DT`` is the detection threshold (recognition differential) — see
 :mod:`uacpy.sonar.detection`. ``L_sp`` is the optional implementation loss
-(``processing_loss_db``); ``AG`` optionally replaces ``DI`` for
+(``processing_loss_dB``); ``AG`` optionally replaces ``DI`` for
 non-isotropic noise.
 
 ``SL``, ``NL`` and ``RL`` must all share one band reference — see
@@ -83,7 +83,7 @@ def noise_background(noise_level, directivity_index=None, *, array_gain=None):
 
 def passive_signal_excess(
     source_level, tl, noise_level, directivity_index=None,
-    detection_threshold=0.0, *, array_gain=None, processing_loss_db=0.0,
+    detection_threshold=0.0, *, array_gain=None, processing_loss_dB=0.0,
 ):
     """Passive signal excess ``SE = SL - TL - (NL - DI) - DT - L_sp`` (dB).
 
@@ -91,7 +91,7 @@ def passive_signal_excess(
     reference as ``noise_level`` (see :func:`noise_background`). ``SE >= 0``
     means the detector achieves its design ``(P_D, P_F)`` operating point.
     ``array_gain`` replaces ``directivity_index`` for non-isotropic
-    noise (see :func:`noise_background`); ``processing_loss_db`` is the
+    noise (see :func:`noise_background`); ``processing_loss_dB`` is the
     implementation/system loss ``L_sp >= 0`` (windowing, scalloping,
     beam-pattern, integration mismatch) subtracted from the budget.
     """
@@ -103,7 +103,7 @@ def passive_signal_excess(
         - noise_background(noise_level, directivity_index,
                            array_gain=array_gain)
         - np.asarray(detection_threshold, float)
-        - np.asarray(processing_loss_db, float)
+        - np.asarray(processing_loss_dB, float)
     )
 
 
@@ -117,7 +117,7 @@ def active_signal_excess(
     reverberation_level=None,
     detection_threshold=0.0,
     array_gain=None,
-    processing_loss_db=0.0,
+    processing_loss_dB=0.0,
 ):
     """Active signal excess (dB), noise- or reverberation-limited.
 
@@ -134,7 +134,7 @@ def active_signal_excess(
     the scattering-cell size (``horizontal_beamwidth_rad`` in
     :func:`uacpy.sonar.reverberation.boundary_reverberation`).
     ``array_gain`` replaces ``directivity_index`` for non-isotropic
-    noise; ``processing_loss_db`` is the implementation loss
+    noise; ``processing_loss_dB`` is the implementation loss
     ``L_sp >= 0`` subtracted from the budget. ``SL``, ``NL`` and ``RL``
     share one band reference — see :func:`noise_background`.
     """
@@ -156,17 +156,17 @@ def active_signal_excess(
         np.sum([10.0 ** (b / 10.0) for b in bcast], axis=0)
     )
     return (el - background - np.asarray(detection_threshold, float)
-            - np.asarray(processing_loss_db, float))
+            - np.asarray(processing_loss_dB, float))
 
 
 def figure_of_merit(
     source_level, noise_level, directivity_index=None, detection_threshold=0.0,
-    *, array_gain=None, processing_loss_db=0.0,
+    *, array_gain=None, processing_loss_dB=0.0,
 ):
     """Figure of merit ``FOM = SL - (NL - DI) - DT - L_sp`` (dB).
 
     Equals the maximum allowable one-way TL (passive), or two-way TL when
-    ``TS = 0`` (active). ``array_gain`` / ``processing_loss_db`` as in
+    ``TS = 0`` (active). ``array_gain`` / ``processing_loss_dB`` as in
     :func:`passive_signal_excess`; ``source_level`` and ``noise_level`` share
     one band reference — see :func:`noise_background`.
     """
@@ -175,7 +175,7 @@ def figure_of_merit(
         - noise_background(noise_level, directivity_index,
                            array_gain=array_gain)
         - np.asarray(detection_threshold, float)
-        - np.asarray(processing_loss_db, float)
+        - np.asarray(processing_loss_dB, float)
     )
 
 
@@ -192,7 +192,7 @@ def _tl_array_from_field(tl_field) -> np.ndarray:
             "loss; pass a TL / pressure Field (e.g. from "
             f"run_mode=COHERENT_TL). Got axes {list(tl_field.coords)}."
         )
-    return tl_field.db
+    return tl_field.dB
 
 
 def _reject_field(value, caller: str, label: str, twin: str) -> None:
@@ -207,11 +207,11 @@ def _reject_field(value, caller: str, label: str, twin: str) -> None:
     if isinstance(value, Field):
         raise ConfigurationError(
             f"{caller}: {label} is a Field; this function takes dB arrays. "
-            f"Use {twin}(...) for a Field, or pass {label}.db().data / "
+            f"Use {twin}(...) for a Field, or pass {label}.dB().data / "
             f"np.asarray({label}.data) to stay here.")
 
 
-def _require_scalar_db(value, caller: str, label: str) -> float:
+def _require_scalar_dB(value, caller: str, label: str) -> float:
     """Validate a sonar-budget term documented as a scalar and return it.
 
     ``reverberation_level`` is the one term of the budget that may be
@@ -284,13 +284,13 @@ def passive_signal_excess_field(
     directivity_index=None,
     detection_threshold=0.0,
     array_gain=None,
-    processing_loss_db=0.0,
+    processing_loss_dB=0.0,
 ) -> Field:
     """Passive signal excess over a model TL grid: ``SE = SL - TL - (NL - DI) - DT``.
 
     Grid counterpart of :func:`passive_signal_excess`: takes the
     :class:`~uacpy.core.results.Field` a propagation model returned
-    (real dB TL, or complex pressure — converted via ``Field.db``) and
+    (real dB TL, or complex pressure — converted via ``Field.dB``) and
     evaluates the sonar equation at every ``(depth, range)`` sample.
 
     Parameters
@@ -311,7 +311,7 @@ def passive_signal_excess_field(
     array_gain : float, optional
         Replaces ``directivity_index`` for non-isotropic noise (see
         :func:`noise_background`).
-    processing_loss_db : float, optional
+    processing_loss_dB : float, optional
         Implementation/system loss ``L_sp >= 0`` (dB). Default 0.
 
     Returns
@@ -323,7 +323,7 @@ def passive_signal_excess_field(
         :func:`uacpy.visualization.plots.plot_signal_excess`.
     """
     tl = _tl_array_from_field(tl_field)
-    noise_level = _require_scalar_db(noise_level,
+    noise_level = _require_scalar_dB(noise_level,
                                      'passive_signal_excess_field',
                                      'noise_level')
     se = passive_signal_excess(
@@ -331,7 +331,7 @@ def passive_signal_excess_field(
         directivity_index=directivity_index,
         detection_threshold=detection_threshold,
         array_gain=array_gain,
-        processing_loss_db=processing_loss_db,
+        processing_loss_dB=processing_loss_dB,
     )
     budget = {
         'mode': 'passive',
@@ -339,7 +339,7 @@ def passive_signal_excess_field(
         'noise_level': float(noise_level),
         'directivity_index': 0.0 if directivity_index is None else float(directivity_index),
         'detection_threshold': float(detection_threshold),
-        'processing_loss_db': float(processing_loss_db),
+        'processing_loss_dB': float(processing_loss_dB),
     }
     if array_gain is not None:
         budget['array_gain'] = float(array_gain)
@@ -356,7 +356,7 @@ def active_signal_excess_field(
     directivity_index=None,
     detection_threshold=0.0,
     array_gain=None,
-    processing_loss_db=0.0,
+    processing_loss_dB=0.0,
 ) -> Field:
     """Active (monostatic) signal excess over a model TL grid.
 
@@ -393,7 +393,7 @@ def active_signal_excess_field(
     array_gain : float, optional
         Replaces ``directivity_index`` against the noise background
         (never against ``RL`` — see :func:`active_signal_excess`).
-    processing_loss_db : float, optional
+    processing_loss_dB : float, optional
         Implementation/system loss ``L_sp >= 0`` (dB). Default 0.
 
     Returns
@@ -404,7 +404,7 @@ def active_signal_excess_field(
     """
     tl = _tl_array_from_field(tl_field)
     if noise_level is not None:
-        noise_level = _require_scalar_db(noise_level,
+        noise_level = _require_scalar_dB(noise_level,
                                          'active_signal_excess_field',
                                          'noise_level')
     rl = (
@@ -419,7 +419,7 @@ def active_signal_excess_field(
         reverberation_level=rl,
         detection_threshold=detection_threshold,
         array_gain=array_gain,
-        processing_loss_db=processing_loss_db,
+        processing_loss_dB=processing_loss_dB,
     )
     budget = {
         'mode': 'active',
@@ -427,7 +427,7 @@ def active_signal_excess_field(
         'target_strength': float(target_strength),
         'directivity_index': 0.0 if directivity_index is None else float(directivity_index),
         'detection_threshold': float(detection_threshold),
-        'processing_loss_db': float(processing_loss_db),
+        'processing_loss_dB': float(processing_loss_dB),
     }
     if array_gain is not None:
         budget['array_gain'] = float(array_gain)
@@ -445,15 +445,15 @@ def active_signal_excess_field(
     return _spawn_se_field(tl_field, se, budget)
 
 
-def probability_of_detection_field(se_field, *, sigma_db) -> Field:
+def probability_of_detection_field(se_field, *, sigma_dB) -> Field:
     """Detection-probability field from a signal-excess field.
 
     Urick's transition curve (Fig. 12.10; Abraham §2.3.5): the detector
     decision statistic is taken log-normal under signal-plus-noise, so
     in dB it is Gaussian with mean ``DT + SE`` and standard deviation
-    ``sigma_db``, giving
+    ``sigma_dB``, giving
 
-        ``P_D = Phi(SE / sigma_db)``
+        ``P_D = Phi(SE / sigma_dB)``
 
     with ``Phi`` the standard normal CDF. ``P_D = 0.5`` exactly on the
     ``SE = 0`` contour — consistent with a detection threshold defined
@@ -471,9 +471,9 @@ def probability_of_detection_field(se_field, *, sigma_db) -> Field:
         Signal excess (dB) from :func:`passive_signal_excess_field` /
         :func:`active_signal_excess_field`. Any coords shape — the
         transform is elementwise.
-    sigma_db : float
+    sigma_dB : float
         Standard deviation of the signal-excess fluctuation (dB).
-        Dyer's saturated-multipath result gives ``sigma_db ≈ 5.6``;
+        Dyer's saturated-multipath result gives ``sigma_dB ≈ 5.6``;
         measured one-way totals typically run 5–9 dB. No default —
         it is a physical claim about the channel, not a processing knob.
 
@@ -481,13 +481,13 @@ def probability_of_detection_field(se_field, *, sigma_db) -> Field:
     -------
     Field
         ``P_D`` in [0, 1] on the same coords/pinned grid;
-        ``metadata['sigma_db']`` records the fluctuation model. Plot
+        ``metadata['sigma_dB']`` records the fluctuation model. Plot
         with :func:`uacpy.visualization.plots.plot_detection_probability`.
 
     Notes
     -----
     The log-normal approximation is most accurate near ``SE = 0`` and
-    optimistic in the tails; as ``sigma_db → 0`` it degenerates to a
+    optimistic in the tails; as ``sigma_dB → 0`` it degenerates to a
     step at ``SE = 0`` rather than the deterministic-signal ROC
     (Abraham §2.3.5.6). For fluctuation statistics beyond Gaussian-in-dB
     (e.g. the gamma-fluctuating-intensity model), compute ``P_D`` from
@@ -506,15 +506,15 @@ def probability_of_detection_field(se_field, *, sigma_db) -> Field:
             "passive/active_signal_excess_field. Got dtype "
             f"{se_field.data.dtype}."
         )
-    sigma = float(sigma_db)
+    sigma = float(sigma_dB)
     if sigma <= 0.0:
         raise ConfigurationError(
-            f"probability_of_detection_field: sigma_db must be positive; "
-            f"got {sigma_db}"
+            f"probability_of_detection_field: sigma_dB must be positive; "
+            f"got {sigma_dB}"
         )
     pd = norm.cdf(np.asarray(se_field.data, dtype=float) / sigma)
     kwargs = se_field.id_kwargs()
-    kwargs['metadata']['sigma_db'] = sigma
+    kwargs['metadata']['sigma_dB'] = sigma
     # A probability is dimensionless, not dB; inheriting the SE field's tags
     # would put a 0–1 array on a decibel axis.
     kwargs['metadata']['kind'] = 'probability_of_detection'
@@ -560,10 +560,10 @@ def detection_range_by_depth(se_field):
     return depths, out
 
 
-def detection_range(ranges_m, signal_excess_db):
+def detection_range(ranges_m, signal_excess_dB):
     """Largest range (m) at which the signal excess is still non-negative.
 
-    Finds the outermost zero-crossing of ``signal_excess_db`` versus range by
+    Finds the outermost zero-crossing of ``signal_excess_dB`` versus range by
     linear interpolation. Returns ``np.inf`` if SE >= 0 everywhere, the last
     sampled range where SE recovers positive at the far edge without crossing
     back down, and ``np.nan`` if SE < 0 everywhere. When the outermost positive
@@ -581,15 +581,15 @@ def detection_range(ranges_m, signal_excess_db):
     ----------
     ranges_m : array
         Monotonically increasing ranges (m).
-    signal_excess_db : array
+    signal_excess_dB : array
         Signal excess (dB) at each range.
     """
     r = np.asarray(ranges_m, dtype=float)
-    se = np.asarray(signal_excess_db, dtype=float)
+    se = np.asarray(signal_excess_dB, dtype=float)
     if r.shape != se.shape:
         raise ConfigurationError(
             "detection_range: ranges and signal_excess shape mismatch; got "
-            f"ranges_m shape {r.shape} and signal_excess_db shape {se.shape}")
+            f"ranges_m shape {r.shape} and signal_excess_dB shape {se.shape}")
     # NaN marks a cell the propagation model never filled (no ray reached it),
     # not a cell where the target is undetectable, so the crossing is sought
     # among the sampled ranges only — the same no-data handling as

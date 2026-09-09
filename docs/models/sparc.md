@@ -214,7 +214,7 @@ further `−√(4π)` away.
 Hankel transform weights each wavenumber sample by `Δk·√(2k/(π·r))`, which is
 exactly what `sparc.f90`'s `'D'` branch carries; `'R'` is that weight *without*
 the `1/√π`, i.e. ~4.97 dB hot. uacpy therefore divides `'R'` by `√π` and scales
-`'S'` by `−2` onto `'D'`, so `Field.db` means the same thing everywhere. That
+`'S'` by `−2` onto `'D'`, so `Field.dB` means the same thing everywhere. That
 is derived from the kernel, not fitted.
 
 `'D'` and `'S'` remain **experimental** in the sense that matters here: see

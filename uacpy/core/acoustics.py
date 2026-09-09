@@ -15,7 +15,7 @@ Physics-only helpers with no uacpy dependencies beyond
 uses the seawater equations (:mod:`uacpy.data.sound_speed`,
 :mod:`uacpy.data.argo`), :mod:`uacpy.core.ssp` builds profiles from
 Mackenzie, :mod:`uacpy.io.modes_reader` takes :func:`pekeris_root`, and the
-spectral estimators and their plotters share :func:`power_to_db`. They are
+spectral estimators and their plotters share :func:`power_to_dB`. They are
 also public API for notebooks and examples (e.g.
 example_12_attenuation_models.py).
 
@@ -60,7 +60,7 @@ __all__ = [
     'bubble_soundspeed',
     'pressure',
     'spl',
-    'power_to_db',
+    'power_to_dB',
     'pekeris_root',
 ]
 
@@ -730,8 +730,8 @@ def reflection_coeff(
     >>> print(f"Reflection coefficient: {R:.4f}")
     Reflection coefficient: 0.1198
 
-    >>> R_db = 20 * np.log10(abs(R))
-    >>> print(f"Reflection loss: {R_db:.2f} dB")
+    >>> R_dB = 20 * np.log10(abs(R))
+    >>> print(f"Reflection loss: {R_dB:.2f} dB")
     Reflection loss: -18.43 dB
 
     References
@@ -820,7 +820,7 @@ def bottom_loss_curve(
     Returns
     -------
     grazing_angles_deg : ndarray
-    loss_db : ndarray
+    loss_dB : ndarray
         Bottom loss ``-20·log10|R|`` at each angle.
     """
     if isinstance(material, str):
@@ -846,8 +846,8 @@ def bottom_loss_curve(
         rho=float(water_density) * 1000.0,
         c=float(water_speed),
     )
-    loss_db = -20.0 * np.log10(np.abs(R) + 1e-300)
-    return np.asarray(grazing_angles_deg, dtype=float), np.asarray(loss_db, dtype=float)
+    loss_dB = -20.0 * np.log10(np.abs(R) + 1e-300)
+    return np.asarray(grazing_angles_deg, dtype=float), np.asarray(loss_dB, dtype=float)
 
 
 def bubble_resonance(
@@ -929,7 +929,7 @@ def bubble_surface_loss(
         Surface reflection as a linear amplitude multiplier in ``[0, 1]``
         (1.0 = no loss). To express the loss as a **positive** dB number,
         consistent with :func:`bottom_loss_curve`, negate the log:
-        ``loss_db = -20 * np.log10(multiplier)``. Exact grazing
+        ``loss_dB = -20 * np.log10(multiplier)``. Exact grazing
         (``|angle| = pi/2``) is the ``1/sin(beta) -> inf`` limit and returns
         0.0.
 
@@ -946,8 +946,8 @@ def bubble_surface_loss(
     Examples
     --------
     >>> mult = bubble_surface_loss(3, 10000, 0)
-    >>> loss_db = -20 * np.log10(mult)   # positive dB loss
-    >>> print(f"Surface loss: {loss_db:.2f} dB")
+    >>> loss_dB = -20 * np.log10(mult)   # positive dB loss
+    >>> print(f"Surface loss: {loss_dB:.2f} dB")
     Surface loss: 0.00 dB
 
     Notes
@@ -1150,15 +1150,15 @@ def spl(x: np.ndarray, ref: float = 1) -> float:
 
     >>> rng = np.random.default_rng(0)
     >>> pressure_signal = rng.standard_normal(1000) * 100
-    >>> spl_db = spl(pressure_signal, ref=1)
-    >>> print(f"SPL: {spl_db:.2f} dB re 1 µPa")
+    >>> spl_dB = spl(pressure_signal, ref=1)
+    >>> print(f"SPL: {spl_dB:.2f} dB re 1 µPa")
     SPL: 39.81 dB re 1 µPa
 
     The rms pressure is floored at ``sqrt(PRESSURE_FLOOR)`` before the log,
     so a silent (all-zero) signal returns a finite
     ``20*log10(sqrt(PRESSURE_FLOOR)/ref)`` — -300 dB re 1 µPa at the default
     ``ref=1`` — instead of ``-inf``. The floor is read in this function's µPa
-    working unit, while :func:`power_to_db` applies the same named constant
+    working unit, while :func:`power_to_dB` applies the same named constant
     to its ``power`` argument in the units of ``ref**2`` (Pa² at its
     default), where a silent signal floors at -180 dB re 1 µPa; the two
     silent-signal levels coincide only when both are called with ``ref=1``.
@@ -1167,7 +1167,7 @@ def spl(x: np.ndarray, ref: float = 1) -> float:
     return 20 * np.log10(np.maximum(rmsx, np.sqrt(PRESSURE_FLOOR)) / ref)
 
 
-def power_to_db(power, ref: float = REFERENCE_PRESSURE_WATER, *,
+def power_to_dB(power, ref: float = REFERENCE_PRESSURE_WATER, *,
                 floor: float = PRESSURE_FLOOR):
     """Mean-square / power-like pressure quantity → level in dB re ``ref``.
 

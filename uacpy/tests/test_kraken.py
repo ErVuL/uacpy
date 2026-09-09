@@ -393,7 +393,7 @@ def test_coarse_beam_pattern_does_not_hang_field_exe(tmp_path):
     pat = np.array([[-90.0, -30.0], [0.0, 0.0], [90.0, -30.0]])
     field = Kraken(work_dir=tmp_path, cleanup=False, timeout=90.0).run(
         env, Source(depths=50, frequencies=200, beam_pattern=pat), rcv)
-    assert np.isfinite(np.asarray(field.db)).any()
+    assert np.isfinite(np.asarray(field.dB)).any()
 
 
 def test_field_exe_timeout_is_not_swallowed(tmp_path, monkeypatch):
@@ -449,8 +449,8 @@ def test_two_receiver_depths_are_not_range_offset():
     src = Source(depths=50.0, frequencies=100.0)
     ranges = np.array([1000., 2000., 3000.])
     m = Kraken(verbose=False)
-    tl2 = np.asarray(m.run(env, src, Receiver(depths=[60., 120.], ranges=ranges)).db)
-    tl3 = np.asarray(m.run(env, src, Receiver(depths=[60., 120., 180.], ranges=ranges)).db)
+    tl2 = np.asarray(m.run(env, src, Receiver(depths=[60., 120.], ranges=ranges)).dB)
+    tl3 = np.asarray(m.run(env, src, Receiver(depths=[60., 120., 180.], ranges=ranges)).dB)
     np.testing.assert_allclose(tl2[0], tl3[0], rtol=0, atol=0.05)
     np.testing.assert_allclose(tl2[1], tl3[1], rtol=0, atol=0.05)
 
@@ -572,7 +572,7 @@ class TestFortranFatalErrorExitsZero:
         from uacpy.core.exceptions import ModelExecutionError
         wd = str(tmp_path / 'shared')
         first = np.asarray(Kraken(work_dir=wd, timeout=300).run(
-            self._env(100.0, 1500.0), self._SRC(), self._RCV()).db)
+            self._env(100.0, 1500.0), self._SRC(), self._RCV()).dB)
         assert np.all(np.isfinite(first))
 
         with pytest.raises(ModelExecutionError):
@@ -652,7 +652,7 @@ class TestElasticCLowDefault:
         env = self._elastic_env(cs_layer)
         tl = np.asarray(Kraken(timeout=300).run(
             env, Source(depths=36.0, frequencies=100.0),
-            Receiver(depths=[20.0, 50.0], ranges=[1000.0, 3000.0])).db)
+            Receiver(depths=[20.0, 50.0], ranges=[1000.0, 3000.0])).dB)
         finite = tl[np.isfinite(tl)]
         assert finite.size, "no finite TL returned"
         assert finite.max() < 120.0, (
@@ -821,13 +821,13 @@ class TestRangeDependentElasticMesh:
         result = Kraken(verbose=False, mode_coupling='adiabatic',
                         n_segments=5, timeout=600).run(
             self._env([0.0, 0.0, 400.0, 600.0]), self._SRC(), self._RCV())
-        tl = np.asarray(result.db)
+        tl = np.asarray(result.dB)
         finite = tl[np.isfinite(tl)]
         assert finite.size, "no finite TL returned"
         assert finite.max() < 200.0, (
             f"max TL {finite.max():.1f} dB — not a physical waterborne field")
         # TL must grow with range, not sit at a constant or run backwards.
-        at_source_depth = np.asarray(result.at(depth=50.0).db)
+        at_source_depth = np.asarray(result.at(depth=50.0).dB)
         assert at_source_depth[-1] > at_source_depth[4] + 10.0
 
     @pytest.mark.slow
@@ -838,7 +838,7 @@ class TestRangeDependentElasticMesh:
         result = Kraken(verbose=False, mode_coupling='adiabatic',
                         n_segments=5, timeout=600).run(
             self._env([300.0, 400.0, 500.0, 600.0]), self._SRC(), self._RCV())
-        finite = np.asarray(result.db)[np.isfinite(result.db)]
+        finite = np.asarray(result.dB)[np.isfinite(result.dB)]
         assert finite.size and finite.max() < 200.0
 
 
@@ -885,7 +885,7 @@ class TestBroadbandSingleFrequency:
             self._env(), self._SRC(), self._RCV(),
             run_mode=RunMode.BROADBAND, frequencies=np.array([100.0, 137.0]))
         assert np.nanmax(np.abs(
-            np.asarray(one.db)[:, :, 0] - np.asarray(two.db)[:, :, 1])) < 0.5
+            np.asarray(one.dB)[:, :, 0] - np.asarray(two.dB)[:, :, 1])) < 0.5
 
     def test_one_element_grid_can_synthesize_a_time_series(self):
         """``synthesize_time_series`` requires a canonical (depth, range,
@@ -978,7 +978,7 @@ class TestCoupledModeGridReachesTheDeclaredBottom:
             run_mode=RunMode.COHERENT_TL)
         assert result.metadata['mode_coupling'] == 'coupled'
         assert result.metadata['n_profiles'] == n_segments
-        tl = np.asarray(result.db)
+        tl = np.asarray(result.dB)
         finite = tl[np.isfinite(tl)]
         assert finite.size, "no finite TL returned"
         assert 20.0 < finite.min() < 200.0, (
@@ -1074,9 +1074,9 @@ class TestIncoherentTL:
         magnitudes removes the modal interference nulls."""
         common = (self._env(), self._SRC(), self._RCV())
         coh = np.asarray(Kraken(verbose=False).run(
-            *common, run_mode=RunMode.COHERENT_TL).db)[0]
+            *common, run_mode=RunMode.COHERENT_TL).dB)[0]
         inc = np.asarray(Kraken(verbose=False).run(
-            *common, run_mode=RunMode.INCOHERENT_TL).db)[0]
+            *common, run_mode=RunMode.INCOHERENT_TL).dB)[0]
         assert np.ptp(inc) < np.ptp(coh), (
             "incoherent TL is no smoother than coherent — Opt(4:4)='I' "
             "never took effect")
@@ -1327,7 +1327,7 @@ def test_zero_receiver_range_is_no_data(recwarn):
                         ranges=np.array([0.0, 1000.0, 3000.0]))
     with pytest.warns(UserWarning, match="r = 0"):
         tl = np.asarray(Kraken(verbose=False).compute_tl(
-            env, Source(depths=50.0, frequencies=100.0), receiver).db)
+            env, Source(depths=50.0, frequencies=100.0), receiver).dB)
     assert np.all(np.isnan(tl[:, 0]))
     assert np.all(np.isfinite(tl[:, 1:]))
 
@@ -1411,14 +1411,14 @@ class TestRMaxPrecision:
     def test_a_short_range_run_refines_the_mesh(self, tmp_path):
         auto = Kraken(work_dir=tmp_path / 'auto', cleanup=False)
         tl_auto = np.asarray(auto.compute_tl(
-            self._env(), self._SRC(), self._RCV()).db)
+            self._env(), self._SRC(), self._RCV()).dB)
         assert self._deck_rmax(tmp_path / 'auto') > 0.0, (
             "RMax reached the deck as 0.0 km — kraken.f90:80 then skips every "
             "mesh doubling")
 
         pinned = Kraken(rmax_m=1000.0, work_dir=tmp_path / 'pin', cleanup=False)
         tl_pinned = np.asarray(pinned.compute_tl(
-            self._env(), self._SRC(), self._RCV()).db)
+            self._env(), self._SRC(), self._RCV()).dB)
         assert np.nanmax(np.abs(tl_auto - tl_pinned)) < 0.05, (
             "the auto-RMax deck converges to a different field than a pinned "
             "one — the mesh was not refined")
@@ -1451,11 +1451,11 @@ class TestSSPStartsAtTheSurface:
             offset = np.asarray(Kraken(
                 work_dir=tmp_path / 'off', cleanup=False).compute_tl(
                     _pekeris(ssp=[(10.0, 1500.0), (200.0, 1500.0)]),
-                    self._SRC(), self._RCV()).db)
+                    self._SRC(), self._RCV()).dB)
         surface = np.asarray(Kraken(
             work_dir=tmp_path / 'sfc', cleanup=False).compute_tl(
                 _pekeris(ssp=[(0.0, 1500.0), (200.0, 1500.0)]),
-                self._SRC(), self._RCV()).db)
+                self._SRC(), self._RCV()).dB)
         assert np.allclose(offset, surface, atol=1e-6), (
             "an SSP starting below the surface models a different waveguide")
 
@@ -1500,7 +1500,7 @@ class TestReflectionTableBackendDispatch:
         env = self._brc_env(tmp_path)
         model = Kraken(work_dir=tmp_path / 'w', cleanup=False)
         assert model.select_backend(env) == 'krakenc'
-        tl = np.asarray(model.compute_tl(env, self._SRC(), self._RCV()).db)
+        tl = np.asarray(model.compute_tl(env, self._SRC(), self._RCV()).dB)
         assert np.all(np.isfinite(tl)) and tl.max() < 200.0
 
     def test_a_top_trc_gives_the_same_field_on_auto_and_forced_krakenc(
@@ -1511,8 +1511,8 @@ class TestReflectionTableBackendDispatch:
         forced = Kraken(backend='krakenc', work_dir=tmp_path / 'b',
                         cleanup=False)
         assert np.allclose(
-            np.asarray(auto.compute_tl(env, self._SRC(), self._RCV()).db),
-            np.asarray(forced.compute_tl(env, self._SRC(), self._RCV()).db))
+            np.asarray(auto.compute_tl(env, self._SRC(), self._RCV()).dB),
+            np.asarray(forced.compute_tl(env, self._SRC(), self._RCV()).dB))
 
     def test_an_irc_bottom_dispatches_to_krakenc(self, tmp_path):
         table = tmp_path / 'bot.irc'
@@ -1558,13 +1558,13 @@ class TestTopReflectionFileKnob:
 
         knob = np.asarray(Kraken(
             top_reflection_file=table, work_dir=tmp_path / 'k',
-            cleanup=False).compute_tl(_pekeris(), src, rcv).db)
+            cleanup=False).compute_tl(_pekeris(), src, rcv).dB)
         env = _pekeris()
         env.surface = Surface(properties=[BoundaryProperties(
             acoustic_type='file', reflection_file=str(table))])
         carrier = np.asarray(Kraken(
             work_dir=tmp_path / 'c', cleanup=False).compute_tl(
-                env, src, rcv).db)
+                env, src, rcv).dB)
         assert np.allclose(knob, carrier)
         assert (tmp_path / 'k' / 'kfield.trc').exists()
 
@@ -1625,12 +1625,12 @@ class TestElasticSeaSurfaceRunsUnderTheCompressionalFloor:
     def test_an_ice_canopy_returns_finite_physical_tl(self, freq):
         """Including the two frequencies that failed before the floor was
         fixed (1 kHz and 2 kHz: 'No modes for given phase speed interval')."""
-        db = np.asarray(Kraken(verbose=False).compute_tl(
+        dB = np.asarray(Kraken(verbose=False).compute_tl(
             self._ice_env(), Source(depths=100.0, frequencies=freq),
-            Receiver(depths=[150.0], ranges=[5000.0])).db).ravel()
-        assert np.isfinite(db).all()
-        assert (0.0 < db).all() and (db < 200.0).all(), (
-            f"TL {db} at {freq:g} Hz is outside the physical band — a "
+            Receiver(depths=[150.0], ranges=[5000.0])).dB).ravel()
+        assert np.isfinite(dB).all()
+        assert (0.0 < dB).all() and (dB < 200.0).all(), (
+            f"TL {dB} at {freq:g} Hz is outside the physical band — a "
             f"Scholte-mode solve reads as several hundred dB")
 
 
@@ -1674,11 +1674,11 @@ class TestElasticSurfaceFloorIncludesTheFluidSeabed:
         assert len(k_default) == len(k_explicit), (
             f"the derived floor lost {len(k_explicit) - len(k_default)} of "
             f"{len(k_explicit)} modes")
-        db_default = np.asarray(Kraken(verbose=False).compute_tl(
-            env, source, receiver).db)
-        db_explicit = np.asarray(Kraken(c_low=1450.0, verbose=False)
-                                 .compute_tl(env, source, receiver).db)
-        np.testing.assert_allclose(db_default, db_explicit, rtol=0, atol=0.01)
+        dB_default = np.asarray(Kraken(verbose=False).compute_tl(
+            env, source, receiver).dB)
+        dB_explicit = np.asarray(Kraken(c_low=1450.0, verbose=False)
+                                 .compute_tl(env, source, receiver).dB)
+        np.testing.assert_allclose(dB_default, dB_explicit, rtol=0, atol=0.01)
 
 
 class TestSurfaceRoughnessOnATabulatedTop:
@@ -2150,7 +2150,7 @@ class TestBeamPatternOnMultipleFrequencies:
             _pekeris(depth=100.0),
             Source(depths=[25.0], frequencies=200.0, beam_pattern=self.PATTERN),
             Receiver(depths=[50.0], ranges=[1000.0, 2000.0]))
-        assert np.all(np.isfinite(np.asarray(tl.db)))
+        assert np.all(np.isfinite(np.asarray(tl.dB)))
 
     def test_field_completion_marker_separates_teardown_from_a_real_abort(
             self, tmp_path):
@@ -2252,9 +2252,9 @@ class TestAutoSegmentationIsWritableAtDeckResolution:
         src = Source(depths=50.0, frequencies=200.0)
         rcv = Receiver(depths=np.linspace(20.0, 180.0, 5),
                        ranges=np.linspace(1000.0, 9000.0, 5))
-        on_node = np.asarray(Kraken().compute_tl(self._env(4000.0), src, rcv).db)
+        on_node = np.asarray(Kraken().compute_tl(self._env(4000.0), src, rcv).dB)
         off_node = np.asarray(
-            Kraken().compute_tl(self._env(4000.0000001), src, rcv).db)
+            Kraken().compute_tl(self._env(4000.0000001), src, rcv).dB)
         assert np.all(np.isfinite(on_node)) and np.all(np.isfinite(off_node))
         np.testing.assert_allclose(off_node, on_node, rtol=0, atol=1e-9)
 
@@ -2336,9 +2336,9 @@ class TestModeGridTracksFrequency:
                              ranges=np.linspace(500.0, 5000.0, 10))
         src = uacpy.Source(depths=20.0, frequencies=1600.0)
         sc = np.squeeze(uacpy.Scooter().run(
-            env, src, rcv, run_mode=uacpy.RunMode.COHERENT_TL).db)
+            env, src, rcv, run_mode=uacpy.RunMode.COHERENT_TL).dB)
         kr = np.squeeze(uacpy.Kraken().run(
-            env, src, rcv, run_mode=uacpy.RunMode.COHERENT_TL).db)
+            env, src, rcv, run_mode=uacpy.RunMode.COHERENT_TL).dB)
         assert np.max(np.abs(kr - sc)) < 1.0
 
 
@@ -2974,7 +2974,7 @@ class TestOnlyElasticMediaAreMaskedOut:
             tl = np.asarray(Kraken(verbose=False).run(
                 env, Source(depths=25.0, frequencies=75.0),
                 Receiver(depths=depths,
-                         ranges=np.array([500.0, 1000.0, 2000.0]))).db)
+                         ranges=np.array([500.0, 1000.0, 2000.0]))).dB)
         assert np.isfinite(tl[0]).all(), "water column"
         assert np.isfinite(tl[1]).all(), "fluid sediment layer 50-60 m"
         assert not np.isfinite(tl[2]).any(), "elastic layer 60-75 m"
@@ -3000,7 +3000,7 @@ class TestOnlyElasticMediaAreMaskedOut:
             ref = np.asarray(Kraken(verbose=False).run(
                 fluid, Source(depths=25.0, frequencies=75.0),
                 Receiver(depths=depths,
-                         ranges=np.array([500.0, 1000.0, 2000.0]))).db)
+                         ranges=np.array([500.0, 1000.0, 2000.0]))).dB)
         assert np.max(np.abs(tl[1] - ref[1])) < 5.0, (tl[1], ref[1])
 
     def test_a_depth_at_the_elastic_top_interface_is_kept(self):
@@ -3349,7 +3349,7 @@ def test_the_shear_term_changes_the_field_it_is_kept_for():
         warnings.simplefilter('ignore')
         fields = [
             np.asarray(Kraken(verbose=False,
-                              mode_points_per_meter=ppm).run(env, src, rcv).db,
+                              mode_points_per_meter=ppm).run(env, src, rcv).dB,
                        dtype=float)
             for ppm in (with_shear, MODE_POINTS_PER_METER_FLOOR)
         ]
@@ -3616,7 +3616,7 @@ class TestNarrowbandLineSourceCarriesTheSameLevelAsBroadband:
             warnings.simplefilter('ignore')
             field = Kraken(verbose=False).run(env, src, rcv,
                                               run_mode=run_mode, **kw)
-        return np.asarray(field.db, dtype=float).ravel()
+        return np.asarray(field.dB, dtype=float).ravel()
 
     def _broadband(self, source_type):
         return self._tl(RunMode.BROADBAND, source_type,

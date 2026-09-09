@@ -27,7 +27,7 @@ from uacpy.core._warn_frames import USER_FRAME_SKIP
 # He measured it constant at this value for both 530 and 1030 Hz (Etter,
 # *Underwater Acoustic Modeling and Simulation*, eq. 9.6). For unconsolidated
 # sediments the empirical spread is -25 to -35 dB, with -29 dB a common first
-# guess (Jensen et al., *Computational Ocean Acoustics*, §1.7.2) — pass mu_db to
+# guess (Jensen et al., *Computational Ocean Acoustics*, §1.7.2) — pass mu_dB to
 # pick another point in that range.
 LAMBERT_MU_DB = -27.0
 
@@ -125,16 +125,16 @@ def _warn_outside_chapman_harris_fit(theta, frequency_hz: float,
         )
 
 
-def lambert_bottom(grazing_deg, mu_db: float = LAMBERT_MU_DB):
+def lambert_bottom(grazing_deg, mu_dB: float = LAMBERT_MU_DB):
     """Bottom backscattering strength from Lambert's law.
 
-    ``S_b(theta) = 10*log10(mu) + 10*log10(sin^2 theta) = mu_db + 20*log10(sin theta)``
+    ``S_b(theta) = 10*log10(mu) + 10*log10(sin^2 theta) = mu_dB + 20*log10(sin theta)``
 
     Etter Sect. 9.2, citing Urick (1983) Ch. 8: the relationship "appears to
     provide a good approximation to the observed data for many deep-water
     bottoms at grazing angles below about 45 deg". Steeper angles warn.
 
-    ``mu_db`` defaults to Mackenzie's -27 dB — Etter Eq. 9.6: "The term
+    ``mu_dB`` defaults to Mackenzie's -27 dB — Etter Eq. 9.6: "The term
     10 log10 mu was found to be constant at -27 dB for both frequencies"
     (530 and 1030 Hz, deep water). JKPS Sect. 1.7.2 puts the unconsolidated
     -sediment spread at -25 to -35 dB with -29 dB "a popular first guess".
@@ -143,7 +143,7 @@ def lambert_bottom(grazing_deg, mu_db: float = LAMBERT_MU_DB):
     ----------
     grazing_deg : float or array
         Grazing angle measured from the horizontal (degrees).
-    mu_db : float
+    mu_dB : float
         Lambert coefficient ``10*log10(mu)`` in dB.
 
     Returns
@@ -185,7 +185,7 @@ def lambert_bottom(grazing_deg, mu_db: float = LAMBERT_MU_DB):
     # points at this file rather than at the caller's argument. The surface law
     # silences both the same way.
     with np.errstate(divide="ignore", invalid="ignore"):
-        return mu_db + 20.0 * np.log10(np.sin(theta))
+        return mu_dB + 20.0 * np.log10(np.sin(theta))
 
 
 def chapman_harris_surface(grazing_deg, wind_speed_kn: float, frequency: float):
@@ -272,7 +272,7 @@ def chapman_harris_surface(grazing_deg, wind_speed_kn: float, frequency: float):
         return 3.3 * beta * np.log10(theta / 30.0) - 42.4 * np.log10(beta) + 2.6
 
 
-def column_scattering_strength(sv_db, thickness_m: float):
+def column_scattering_strength(sv_dB, thickness_m: float):
     """Integrate a volume scattering strength to a column (area) strength.
 
     ``S_col = S_v + 10*log10(thickness)`` — turns ``S_v`` (dB re 1/m, per unit
@@ -281,7 +281,7 @@ def column_scattering_strength(sv_db, thickness_m: float):
 
     Parameters
     ----------
-    sv_db : float or array
+    sv_dB : float or array
         Volume scattering strength (dB re 1/m).
     thickness_m : float
         Layer thickness (m), > 0.
@@ -296,4 +296,4 @@ def column_scattering_strength(sv_db, thickness_m: float):
             f"column_scattering_strength: thickness_m must be > 0 and finite; "
             f"got {thickness_m!r}"
         )
-    return np.asarray(sv_db, dtype=float) + 10.0 * np.log10(thickness_m)
+    return np.asarray(sv_dB, dtype=float) + 10.0 * np.log10(thickness_m)

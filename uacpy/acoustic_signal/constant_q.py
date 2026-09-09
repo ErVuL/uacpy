@@ -76,7 +76,7 @@ from scipy.signal import get_window
 
 from uacpy.core.constants import REFERENCE_PRESSURE_WATER
 from uacpy.core.exceptions import ConfigurationError
-from uacpy.core.acoustics import power_to_db
+from uacpy.core.acoustics import power_to_dB
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.acoustic_signal._signal_validate import (
     require_at_most_nyquist, require_finite_signal,
@@ -85,7 +85,7 @@ from uacpy.acoustic_signal._signal_validate import (
 CQTResult = namedtuple("CQTResult", "frequencies coefficients")
 CQPSDResult = namedtuple("CQPSDResult", "frequencies power")
 CQSpectrogramResult = namedtuple("CQSpectrogramResult", "frequencies times power")
-# ``ref`` is the dB reference the levels in ``pdf`` / ``mean_db`` / ``std_db``
+# ``ref`` is the dB reference the levels in ``pdf`` / ``mean_dB`` / ``std_dB``
 # are stated against — the value ``probabilistic_constant_q`` was called with,
 # carried forward so a consumer does not have to guess it. See the same field
 # on ``analysis.PPSDResult`` for why: a label that assumes the package default
@@ -94,7 +94,7 @@ CQSpectrogramResult = namedtuple("CQSpectrogramResult", "frequencies times power
 # still constructible; the estimator always passes the caller's value.
 CQPPSDResult = namedtuple(
     "CQPPSDResult",
-    "frequencies level_edges pdf mean_db std_db binwidth_db ref scaling",
+    "frequencies level_edges pdf mean_dB std_dB binwidth_dB ref scaling",
     defaults=(REFERENCE_PRESSURE_WATER, "spectrum"))
 
 _SCALINGS = ("spectrum", "density")
@@ -275,8 +275,8 @@ def _cq_setup(data, sample_rate, fmin, fmax, bins_per_octave, window, caller,
             f"signal has {x.size}; low-frequency bins never fit a full window "
             f"and are {fate}. Raise fmin or lengthen the signal.",
             UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
-    bias_db = 10.0 * np.log10(1.0 + _cq_image_ratio(freqs, fs, kernels) ** 2)
-    hot = np.flatnonzero(bias_db > _CQ_IMAGE_BIAS_WARN_DB)
+    bias_dB = 10.0 * np.log10(1.0 + _cq_image_ratio(freqs, fs, kernels) ** 2)
+    hot = np.flatnonzero(bias_dB > _CQ_IMAGE_BIAS_WARN_DB)
     if hot.size:
         # ``fmax=None`` resolves to fs/2, which puts the top bin in this
         # region on every default call, so this is a statement about the
@@ -289,7 +289,7 @@ def _cq_setup(data, sample_rate, fmin, fmax, bins_per_octave, window, caller,
             f"{caller}: {hot.size} bin(s) above {freqs[hot[0]]:.4g} Hz sit "
             f"close enough to Nyquist that the tone's negative-frequency "
             f"image leaks through the analysis window: a coherent tone in "
-            f"those bins reads high by up to {bias_db[hot].max():.2f} dB "
+            f"those bins reads high by up to {bias_dB[hot].max():.2f} dB "
             f"averaged over frame phase (a bin at exactly fs/2 follows the "
             f"tone's own phase instead: +6.02 dB for a cosine) "
             f"(highest bin {freqs[-1]:.4g} Hz, f/fs = {freqs[-1] / fs:.4f}). "
@@ -375,7 +375,7 @@ def probabilistic_constant_q(data, sample_rate, *, fmin=20.0, fmax=None,
     whereas ``ppsd`` histograms Welch averages over ``seg_duration`` chunks,
     so the level spread here is wider for the same signal. Only frames whose
     window lay fully inside the signal contribute (per bin). Returns a :class:`CQPPSDResult`
-    ``(frequencies, level_edges, pdf, mean_db, std_db, binwidth_db, ref, scaling)``;
+    ``(frequencies, level_edges, pdf, mean_dB, std_dB, binwidth_dB, ref, scaling)``;
     ``pdf`` is shaped ``(n_levels, n_freqs)`` and density-normalised per
     frequency column (empty bins are ``NaN``). With ``scaling='density'`` the
     levels are PSD levels (dB re ref²/Hz) rather than band-power levels
@@ -391,23 +391,23 @@ def probabilistic_constant_q(data, sample_rate, *, fmin=20.0, fmax=None,
     _, power, valid = _cq_power_frames(x, fs, kernels, hop, scaling)
     level_edges = np.arange(lvlmin, lvlmax + ddB, ddB)
     pdf = np.zeros((level_edges.size - 1, freqs.size))
-    mean_db = np.full(freqs.size, np.nan)
-    std_db = np.full(freqs.size, np.nan)
+    mean_dB = np.full(freqs.size, np.nan)
+    std_dB = np.full(freqs.size, np.nan)
     with np.errstate(divide="ignore"):
-        levels_db = power_to_db(power, ref)
+        levels_dB = power_to_dB(power, ref)
     for i in range(freqs.size):
-        vals = levels_db[i, valid[i]]
+        vals = levels_dB[i, valid[i]]
         vals = vals[np.isfinite(vals)]
         if vals.size == 0:
             continue
         with np.errstate(invalid="ignore", divide="ignore"):
             hist, _ = np.histogram(vals, bins=level_edges, density=True)
         pdf[:, i] = hist
-        mean_db[i] = vals.mean()
-        std_db[i] = vals.std()
+        mean_dB[i] = vals.mean()
+        std_dB[i] = vals.std()
     pdf[pdf == 0] = np.nan
     # See PPSDResult: the reference and the scaling are part of what the
     # levels MEAN, so they travel with them rather than being restated by
     # every consumer.
-    return CQPPSDResult(freqs, level_edges, pdf, mean_db, std_db, ddB,
+    return CQPPSDResult(freqs, level_edges, pdf, mean_dB, std_dB, ddB,
                         float(ref), str(scaling))

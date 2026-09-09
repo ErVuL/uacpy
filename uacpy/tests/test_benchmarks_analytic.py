@@ -290,7 +290,7 @@ def test_kraken_tl_matches_pekeris_modal_sum():
     *assembly and reader*, not just the eigenvalues. Measured agreement is
     ~0.02 dB median / 0.07 dB max; atol=0.3 dB is a tight, robust bound."""
     src, rcv = _modal_src_rcv()
-    d, _ = _modal_abs_dtl(Kraken(timeout=120).compute_tl(_pekeris_env(), src, rcv).db)
+    d, _ = _modal_abs_dtl(Kraken(timeout=120).compute_tl(_pekeris_env(), src, rcv).dB)
     assert np.median(d) < 0.1, f"median |dTL|={np.median(d):.3f} dB"
     assert np.max(d) < 0.4, f"max |dTL|={np.max(d):.3f} dB"
 
@@ -300,7 +300,7 @@ def test_scooter_tl_matches_pekeris_modal_sum():
     analytic Pekeris normal-mode sum — two *independent exact* range-independent
     methods. Measured median ~0.03 dB / p90 ~0.13 dB; bounds are tight."""
     src, rcv = _modal_src_rcv()
-    d, _ = _modal_abs_dtl(Scooter(timeout=120).compute_tl(_pekeris_env(), src, rcv).db)
+    d, _ = _modal_abs_dtl(Scooter(timeout=120).compute_tl(_pekeris_env(), src, rcv).dB)
     assert np.median(d) < 0.2, f"median |dTL|={np.median(d):.3f} dB"
     assert np.percentile(d, 90) < 0.6, f"p90 |dTL|={np.percentile(d, 90):.3f} dB"
 
@@ -312,7 +312,7 @@ def test_oast_tl_matches_pekeris_modal_sum():
     where TL is hyper-sensitive, are excluded). Measured median ~0.02 dB."""
     from uacpy.models.oases import OAST
     src, rcv = _modal_src_rcv()
-    d, ana = _modal_abs_dtl(OAST(timeout=120).run(_pekeris_env(), src, rcv).db)
+    d, ana = _modal_abs_dtl(OAST(timeout=120).run(_pekeris_env(), src, rcv).dB)
     # The analytic field over this 3x5 grid runs 49.0-66.6 dB with a single
     # outlier at 75.2 dB, so 70 sits in the gap and excises exactly that one
     # null cell. Keeping it would let a sub-metre range difference dominate the
@@ -330,7 +330,7 @@ def test_ram_tl_matches_pekeris_modal_sum():
     error — this validates RAM is physically correct in the ballpark (catches
     a grossly-wrong field), not a tight match. Measured median ~2.3 dB."""
     src, rcv = _modal_src_rcv()
-    d, _ = _modal_abs_dtl(RAM(timeout=180).compute_tl(_pekeris_env(), src, rcv).db)
+    d, _ = _modal_abs_dtl(RAM(timeout=180).compute_tl(_pekeris_env(), src, rcv).dB)
     assert np.median(d) < 3.5, f"median |dTL|={np.median(d):.2f} dB"
 
 
@@ -411,7 +411,7 @@ def test_kraken_vacuum_waveguide_matches_dirichlet_modal_sum():
     src, rcv = _pr_src_rcv()
     d = _pr_abs_dtl(Kraken(timeout=120).compute_tl(
         _pressure_release_env(BoundaryProperties(acoustic_type='vacuum')),
-        src, rcv).db)
+        src, rcv).dB)
     assert np.median(d) < 0.1, f"median |dTL|={np.median(d):.3f} dB"
     assert np.max(d) < 0.4, f"max |dTL|={np.max(d):.3f} dB"
 
@@ -442,7 +442,7 @@ def test_ram_pressure_release_waveguide_matches_dirichlet_modal_sum():
         _pressure_release_env(BoundaryProperties(
             acoustic_type='half-space', sound_speed=C_W,
             density=RHO_SOFT, attenuation=0.0)),
-        src, rcv).db)
+        src, rcv).dB)
     assert np.median(d) < 0.15, f"median |dTL|={np.median(d):.3f} dB"
     assert np.percentile(d, 90) < 0.5, f"p90 |dTL|={np.percentile(d, 90):.3f} dB"
 
@@ -484,7 +484,7 @@ def test_bellhop_ideal_wedge_matches_analytic():
         bottom=BoundaryProperties(acoustic_type='vacuum'))
     tl_bh = np.asarray(Bellhop(n_beams=4000, timeout=180).compute_tl(
         env, Source(depths=z_s, frequencies=f),
-        Receiver(depths=[z_r], ranges=r_src)).db).ravel()
+        Receiver(depths=[z_r], ranges=r_src)).dB).ravel()
     tl_ana = ideal_wedge_tl(r_src, z_r, z_s, R_s, f, c, slope)
 
     diff = tl_bh - tl_ana
@@ -569,14 +569,14 @@ def test_bellhop_lloyd_mirror():
     # narrowed to ±20°, which still spans the 10.2° steepest path (200 m receiver),
     # so 5001 rays resolve the near-grazing surface image at the far end.
     tl_hat = np.asarray(Bellhop(timeout=120, beam_type='G', n_beams=5001,
-                                alpha=(-20.0, 20.0)).compute_tl(env, src, rcv).db).ravel()
+                                alpha=(-20.0, 20.0)).compute_tl(env, src, rcv).dB).ravel()
     d_hat = np.abs(tl_hat - tl_ana)
     assert np.max(d_hat) < 0.05, f"max |dTL|={np.max(d_hat):.4f} dB"
 
     # The default geometric Gaussian beams spread energy across the beam width and
     # so do not reproduce this field exactly: the residual measures 0.7 dB at 200 m,
     # rises to 2.5 dB by 850 m and holds near that out to 2 km. Bounded, not pinned.
-    d_gauss = np.abs(np.asarray(Bellhop(timeout=120).compute_tl(env, src, rcv).db)
+    d_gauss = np.abs(np.asarray(Bellhop(timeout=120).compute_tl(env, src, rcv).dB)
                      .ravel() - tl_ana)
     assert np.max(d_gauss) < 3.0, f"max |dTL|={np.max(d_gauss):.2f} dB"
     assert np.median(d_gauss[ranges < 400.0]) < 1.0
@@ -615,9 +615,9 @@ def test_semicoherent_is_the_lloyd_shaded_incoherent_sum():
     model = Bellhop(timeout=120, beam_type='G', n_beams=5001,
                     alpha=(-20.0, 20.0))
     tl_inc = np.asarray(model.run(env, src, rcv,
-                                  run_mode=RunMode.INCOHERENT_TL).db).ravel()
+                                  run_mode=RunMode.INCOHERENT_TL).dB).ravel()
     tl_semi = np.asarray(model.run(env, src, rcv,
-                                   run_mode=RunMode.SEMICOHERENT_TL).db).ravel()
+                                   run_mode=RunMode.SEMICOHERENT_TL).dB).ravel()
 
     k = 2.0 * np.pi * f / c
     R1 = np.hypot(ranges, z_r - z_s)
@@ -771,7 +771,7 @@ def test_scaled_cylindrical_removes_exactly_the_spreading_term():
     def tl(source_type):
         return np.asarray(Scooter(timeout=120).run(
             env, Source(depths=50.0, frequencies=100.0,
-                        source_type=source_type), rcv).db).ravel()
+                        source_type=source_type), rcv).dB).ravel()
 
     np.testing.assert_allclose(tl('point') - tl('scaled'),
                                10.0 * np.log10(ranges), atol=0.01)
@@ -865,6 +865,6 @@ def test_bellhop_line_source_level_is_unit_amplitude_at_one_metre():
         env, Source(depths=z_s, frequencies=f, source_type='line'), rcv).data).ravel()
     k = 2 * np.pi * f / c
     exact = np.sqrt(8 * np.pi * k) * lloyd_mirror_pressure_2d(ranges, z_s, z_r, f, c)
-    level_db = 20 * np.log10(np.abs(p_ln) / np.abs(exact))
-    assert abs(float(np.mean(level_db))) < 1.0, level_db
+    level_dB = 20 * np.log10(np.abs(p_ln) / np.abs(exact))
+    assert abs(float(np.mean(level_dB))) < 1.0, level_dB
 

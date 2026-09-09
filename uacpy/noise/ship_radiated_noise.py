@@ -41,7 +41,7 @@ RNL_UNCERTAINTY_DB = {
 }
 
 
-def radiated_noise_level(received_spl_db, distance_m):
+def radiated_noise_level(received_spl_dB, distance_m):
     """Radiated Noise Level from a far-field SPL measurement (ISO 17208-1).
 
     ``L_RN = L_p + 20*log10(r)`` — the received decidecade-band SPL plus spherical
@@ -59,7 +59,7 @@ def radiated_noise_level(received_spl_db, distance_m):
             f"radiated_noise_level: distance must be > 0 m and finite; got "
             f"{int(np.count_nonzero(~(np.isfinite(r) & (r > 0))))} bad "
             f"value(s) of {r.size}, first {float(np.ravel(r)[np.argmax(~(np.isfinite(r) & (r > 0)).ravel())])!r}.")
-    return np.asarray(received_spl_db, dtype=float) + 20.0 * np.log10(r)
+    return np.asarray(received_spl_dB, dtype=float) + 20.0 * np.log10(r)
 
 
 def nominal_source_depth(draught_m):
@@ -109,11 +109,11 @@ def lloyd_mirror_correction(frequency, source_depth, sound_speed=DEFAULT_SOUND_S
         return -10.0 * np.log10(num / den)
 
 
-def monopole_source_level(rnl_db, frequency, source_depth, sound_speed=DEFAULT_SOUND_SPEED):
+def monopole_source_level(rnl_dB, frequency, source_depth, sound_speed=DEFAULT_SOUND_SPEED):
     """Equivalent Monopole Source Level ``L_s = L_RN + ΔL`` (ISO 17208-2 Formula 2).
 
     ``frequency`` is the decidecade band centre(s) [Hz]; ``source_depth`` the
     nominal source depth (``0.7 * draught``). Returns dB re 1 µPa·m.
     """
-    return np.asarray(rnl_db, dtype=float) + lloyd_mirror_correction(
+    return np.asarray(rnl_dB, dtype=float) + lloyd_mirror_correction(
         frequency, source_depth, sound_speed)

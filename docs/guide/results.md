@@ -76,12 +76,12 @@ There is no `Field.dtype` — the storage axis is read off `.data.dtype`, or as
 the boolean `.is_complex`.
 
 Bellhop's `COHERENT_TL` hands back complex pressure — `unit='Pa'`, as the
-one-line summaries above show. `.to_db()` is the step that moves it onto the dB
+one-line summaries above show. `.to_dB()` is the step that moves it onto the dB
 side of the `.unit` axis:
 
 ```python
->>> tl_db = tl.to_db()
->>> tl_db
+>>> tl_dB = tl.to_dB()
+>>> tl_dB
 Field(kind='pressure', unit='dB', model='Bellhop', f=200 Hz, axes=(depth, range))
 ```
 
@@ -121,9 +121,9 @@ H = Bellhop(n_beams=3000).run(env, source_bb, point,
 spectrum = H.isel(depth=0, range=0)
 trace = H.to_time_trace()
 
-pressure.to_db().plot(env=env)          # real    + {depth, range} → dB
+pressure.to_dB().plot(env=env)          # real    + {depth, range} → dB
 pressure.plot(env=env, value='phase')   # complex + {depth, range} → Pa
-spectrum.plot(value='mag_db')           # complex + {frequency}    → H(f)
+spectrum.plot(value='mag_dB')           # complex + {frequency}    → H(f)
 trace.plot()                            # real    + {time}         → p(t)
 ```
 
@@ -170,7 +170,7 @@ in every row but two. Both read as losses everywhere: `Field.max` returns the
 smallest cell, and a 1-D cut of either draws its value axis downward.
 
 The consequence worth internalising: **operations that change the dtype or the
-axes change what the field is**. `pressure.to_db()` moves `Pa` to `dB`.
+axes change what the field is**. `pressure.to_dB()` moves `Pa` to `dB`.
 `H.at(frequency=300)` drops the frequency axis. `H.to_time_trace()` returns to
 the time domain. You never declare any of it.
 
@@ -182,7 +182,7 @@ uses the same order: `source_depth → depth → range → frequency` (or `time`
 | `coords` | `.unit` | Produced by |
 |---|---|---|
 | `{depth, range}`, complex | `Pa` | `COHERENT_TL` from every field model |
-| `{depth, range}`, real | `dB` | Kraken `INCOHERENT_TL`, OAST `COHERENT_TL`, any `.to_db()` |
+| `{depth, range}`, real | `dB` | Kraken `INCOHERENT_TL`, OAST `COHERENT_TL`, any `.to_dB()` |
 | `{depth, range, frequency}` | `Pa` | `BROADBAND` |
 | `{depth, range, time}` | `Pa` | `TIME_SERIES` (natively from [SPARC](../models/sparc.md)) |
 | `{time}` | `Pa` | `to_time_trace()` on one cell |
@@ -217,7 +217,7 @@ still a function of. `pinned` is the running record of where you are standing.
 ![Slicing a Field](figures/results_slicing.png)
 
 ```python
-tl = Bellhop(n_beams=3000).run(env, source, receiver).to_db()
+tl = Bellhop(n_beams=3000).run(env, source, receiver).to_dB()
 loudest = tl.max()
 
 tl.plot(env=env, source=source)     # coords = {depth, range}  → heatmap
@@ -295,17 +295,17 @@ None of these mutate the field; each returns a fresh array or a fresh `Field`.
 
 | Accessor | Returns | Notes |
 |---|---|---|
-| `.db` | ndarray, dB | `-20·log10\|data\|` for complex data; a **read-only view** when data is already dB. Raises for a time-domain field. |
-| `.tl` | ndarray, dB | transmission loss: exactly `.db`, on **pressure-kind fields only** — any other kind raises and points at `.db` |
+| `.dB` | ndarray, dB | `-20·log10\|data\|` for complex data; a **read-only view** when data is already dB. Raises for a time-domain field. |
+| `.tl` | ndarray, dB | transmission loss: exactly `.dB`, on **pressure-kind fields only** — any other kind raises and points at `.dB` |
 | `.p` | ndarray, complex | read-only view; raises when data is real (the phase is gone) |
 | `.magnitude` | ndarray | `\|data\|`, complex only |
 | `.phase` | ndarray, radians | `angle(data)`, complex only |
-| `.to_db()` | `Field` | the dB counterpart of this field; a no-op when already real |
+| `.to_dB()` | `Field` | the dB counterpart of this field; a no-op when already real |
 | `.shape`, `.axes`, `.is_complex` | — | shape, axis names, dtype test |
 | `.depths`, `.ranges`, `.times` | ndarray or `None` | the coord vectors by name |
 | `.dt`, `.sample_rate` | float | time-axis spacing; `0.0` when not time-resolved |
 
-`.db` and `.p` hand back read-only views on purpose: the array *is* the
+`.dB` and `.p` hand back read-only views on purpose: the array *is* the
 result's payload, and `p = field.p; p *= 2` would otherwise silently corrupt
 it. Copy first if you need to modify.
 
@@ -352,11 +352,11 @@ validates that at construction rather than letting a mismatched bundle through.
 | `stack.isel(source_depth=1)` | the slab at a position |
 | `for depth, slab in stack:` | `(coordinate, slab)` pairs |
 | `len(stack)`, `stack.n_slabs` | slab count |
-| `stack.db` | one dense array, shape `(n_slabs, *slab.db.shape)` |
-| `stack.tl` | `stack.db` for pressure slabs; any other kind raises |
+| `stack.dB` | one dense array, shape `(n_slabs, *slab.dB.shape)` |
+| `stack.tl` | `stack.dB` for pressure slabs; any other kind raises |
 | `stack.model`, `.backend`, `.frequencies`, `.source_depths` | the identity every slab agrees on |
 
-`stack.db` exists so generic code can read `result.db` whether one or many
+`stack.dB` exists so generic code can read `result.dB` whether one or many
 source depths were asked for. Everything else — `Rays`, `Arrivals` — stacks the
 same way, and `RunMode.RAYS` / `ARRIVALS` with several source depths gives you
 `ResultStack[Rays]` / `ResultStack[Arrivals]`. The exception is Bellhop's own
@@ -647,9 +647,9 @@ slice. Keep the parent if you need it.
 **A synthesised record is `1/Δf` long.** More `nfft` does not buy more time; a
 finer frequency grid does, at the cost of more model runs.
 
-**`.p` — and `.db` on an already-real field — hand back read-only views.**
+**`.p` — and `.dB` on an already-real field — hand back read-only views.**
 They look at the result's own buffer, so numpy refuses in-place edits rather
-than let you corrupt it. Copy first. (`.db` on complex data computes a fresh
+than let you corrupt it. Copy first. (`.dB` on complex data computes a fresh
 array, which is writable; do not rely on the difference.)
 
 ---

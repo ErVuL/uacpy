@@ -378,7 +378,7 @@ class TestShipRadiatedNoise:
         assert monopole_source_level(rnl, f, ds) == pytest.approx(
             rnl + lloyd_mirror_correction(f, ds))
 
-    def test_rnl_uncertainty_db_pinned(self):
+    def test_rnl_uncertainty_dB_pinned(self):
         """ISO 17208-2 §5 combined RNL measurement uncertainty per band group:
         5 dB (10-100 Hz), 3 dB (125 Hz-16 kHz), 4 dB (>20 kHz)."""
         from uacpy.noise import RNL_UNCERTAINTY_DB
@@ -426,7 +426,7 @@ class TestMarineMammalWeighting:
         for params in WEIGHTING_PARAMS.values():
             assert set(params) == {"a", "b", "f1", "f2", "C", "K"}
 
-    def test_peak_is_zero_db(self):
+    def test_peak_is_zero_dB(self):
         from uacpy.noise import auditory_weighting
         import numpy as np
         f = np.logspace(1, 5.5, 5000)
@@ -867,7 +867,7 @@ class TestWindNoiseModelsAgreeAtZeroWind:
         assert np.all(np.isneginf(coates.wind))
         np.testing.assert_allclose(coates.total, default.total)
 
-    def test_a_nineteen_knot_coates_wind_lands_between_60_and_75_db(self):
+    def test_a_nineteen_knot_coates_wind_lands_between_60_and_75_dB(self):
         w = N.WIND_MODELS['coates'](np.array([1000.0]), wind_speed_kn=19.4)[0]
         assert 60.0 < w < 75.0
 

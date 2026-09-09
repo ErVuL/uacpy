@@ -51,10 +51,10 @@ from uacpy.visualization.plots import (  # noqa: E402
 )
 
 
-def thorp_db_per_km(freq_hz):
+def thorp_dB_per_km(freq_hz):
     """Thorp volume absorption, dB/km, with f in Hz.
 
-    The two small terms differ from ``uacpy.core.absorption.thorp_db_per_km``,
+    The two small terms differ from ``uacpy.core.absorption.thorp_dB_per_km``,
     which carries the (3.0e-4, 3.3e-3) pair rather than (2.75e-4, 0.003). That
     pair is JKPS 2nd ed. Eq. (1.47); AT's ``AttenMod.f90:93`` labels the same
     expression "JKPS Eq. 1.34" using 1st-edition numbering. The gap is
@@ -77,7 +77,7 @@ def main():
     # SL=140, NL-DI=45 and DT=-4.3 the passive curve crosses near 45 km, so
     # 30 km would stop short of the very quantity this example is about.
     ranges = np.linspace(100.0, 60000.0, 600)
-    tl = 20.0 * np.log10(ranges) + thorp_db_per_km(freq) * ranges / 1000.0
+    tl = 20.0 * np.log10(ranges) + thorp_dB_per_km(freq) * ranges / 1000.0
 
     # Detection threshold for Pd=0.5, Pf=1e-4 over a 100 Hz / 1 s integration.
     dt = sonar.detection_threshold_energy(0.5, 1e-4, bandwidth_hz=100.0,
@@ -95,7 +95,7 @@ def main():
     sb = sonar.lambert_bottom(grazing)
     rl = sonar.boundary_reverberation(
         ranges, 220.0, sb,
-        pulse_length_s=0.05, horizontal_beamwidth_rad=0.1, tl_db=tl,
+        pulse_length_s=0.05, horizontal_beamwidth_rad=0.1, tl_dB=tl,
     )
     active_se = sonar.active_signal_excess(
         220.0, tl, target_strength=10.0, noise_level=60.0,
@@ -200,14 +200,14 @@ def main():
     )
     # Reverberation uses the same modeled TL as the echo — evaluated at the
     # seafloor depth, where the scattering patch sits.
-    tl_at_bottom = tl_field.at(depth=float(env.depth)).db
+    tl_at_bottom = tl_field.at(depth=float(env.depth)).dB
     rl_grid = sonar.boundary_reverberation(
         rcv.ranges, 190.0,
         # Grazing angle at the seafloor patch in THIS scene: the 18 m source
         # sits 200 - 18 = 182 m above the 200 m bottom.
         sonar.lambert_bottom(np.rad2deg(np.arctan2(182.0, rcv.ranges))),
         pulse_length_s=0.05, horizontal_beamwidth_rad=0.1,
-        tl_db=tl_at_bottom,
+        tl_dB=tl_at_bottom,
     )
     # Geometric-regime TS of a 1.5 m × 5 m rigid cylinder at broadside
     # (Urick Table 9.1) instead of an assumed number.
@@ -227,7 +227,7 @@ def main():
     # Mean SE → detection probability via Urick's transition curve
     # (σ = 5.6 dB, Dyer's saturated-multipath fluctuation), and the
     # 50%-detection range profile across the water column.
-    pd_passive = sonar.probability_of_detection_field(se_passive, sigma_db=5.6)
+    pd_passive = sonar.probability_of_detection_field(se_passive, sigma_dB=5.6)
     dr_depths, dr_m = sonar.detection_range_by_depth(se_passive)
 
     fig, axes = plt.subplots(2, 2, figsize=(15, 9))

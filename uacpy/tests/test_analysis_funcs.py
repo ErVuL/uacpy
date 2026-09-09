@@ -80,7 +80,7 @@ def test_psd_hann_spectrum_to_density_ratio_is_1p5_bins():
                                rtol=1e-12)
 
 
-def test_psd_hann_worst_case_scalloping_is_1_42_db():
+def test_psd_hann_worst_case_scalloping_is_1_42_dB():
     """A tone half a bin off centre reads ``8/(3*pi)`` of the on-bin
     amplitude through the default hann window: ``20*log10(8/(3*pi)) =
     -1.4236`` dB, the worst-case 1.42 dB scalloping loss. On a bin centre
@@ -94,9 +94,9 @@ def test_psd_hann_worst_case_scalloping_is_1_42_db():
     _, p_off = psd(np.cos(2 * np.pi * f_off * t), fs, nperseg=nper,
                    scaling="spectrum")
     assert p_on.max() == pytest.approx(0.5, rel=1e-6)
-    loss_db = 10 * np.log10(p_off.max() / p_on.max())
-    assert loss_db == pytest.approx(20 * np.log10(8 / (3 * np.pi)), abs=1e-3)
-    assert loss_db == pytest.approx(-1.42, abs=0.01)
+    loss_dB = 10 * np.log10(p_off.max() / p_on.max())
+    assert loss_dB == pytest.approx(20 * np.log10(8 / (3 * np.pi)), abs=1e-3)
+    assert loss_dB == pytest.approx(-1.42, abs=0.01)
 
 
 def test_ppsd_function():
@@ -224,8 +224,8 @@ class TestPPSDCarriesTheScalingItsLevelsAreStatedAgainst:
         # The control: if they were the same quantity there would be nothing
         # to carry. A density and a spectrum differ by the bin width.
         x, fs = self._x()
-        d = ppsd(x, fs, scaling='density', nperseg=1024).mean_db
-        sp = ppsd(x, fs, scaling='spectrum', nperseg=1024).mean_db
+        d = ppsd(x, fs, scaling='density', nperseg=1024).mean_dB
+        sp = ppsd(x, fs, scaling='spectrum', nperseg=1024).mean_dB
         assert not np.allclose(d, sp, atol=0.5), (d[:3], sp[:3])
 
 
@@ -253,12 +253,12 @@ class TestPPSDCarriesTheReferenceItsLevelsAreStatedAgainst:
     def test_a_non_default_reference_is_reported(self, ref):
         assert self._run(ref=ref).ref == ref
 
-    def test_the_reference_tracks_a_real_120_db_move_in_the_levels(self):
+    def test_the_reference_tracks_a_real_120_dB_move_in_the_levels(self):
         """Not a decorative field: the value it carries is what separates two
         results whose levels differ by 120 dB."""
         default = self._run()
         pascals = self._run(ref=1.0)
-        shift = np.nanmean(pascals.mean_db - default.mean_db)
+        shift = np.nanmean(pascals.mean_dB - default.mean_dB)
         assert shift == pytest.approx(-120.0, abs=1e-9)
         assert default.ref != pascals.ref
 
@@ -267,12 +267,12 @@ class TestPPSDCarriesTheReferenceItsLevelsAreStatedAgainst:
         including result objects other suites build by hand — is unaffected."""
         r = self._run()
         assert r._fields[:7] == ('frequencies', 'level_edges', 'pdf',
-                                 'mean_db', 'std_db', 'binwidth_db',
+                                 'mean_dB', 'std_dB', 'binwidth_dB',
                                  'seg_duration')
         assert r._fields[7] == 'ref'
         from uacpy.acoustic_signal.analysis import PPSDResult
-        built = PPSDResult(r.frequencies, r.level_edges, r.pdf, r.mean_db,
-                           r.std_db, r.binwidth_db, r.seg_duration)
+        built = PPSDResult(r.frequencies, r.level_edges, r.pdf, r.mean_dB,
+                           r.std_dB, r.binwidth_dB, r.seg_duration)
         assert built.ref == r.ref
 
 
@@ -284,14 +284,14 @@ def test_ppsd_columns_are_densities_with_blank_bins_as_nan():
     rng = np.random.default_rng(1)
     r = ppsd(rng.standard_normal(int(30 * fs)) * 1e-3, fs, seg_duration=1.0,
              nperseg=1024, noverlap=512)
-    integral = np.nansum(r.pdf, axis=0) * r.binwidth_db
+    integral = np.nansum(r.pdf, axis=0) * r.binwidth_dB
     assert np.allclose(integral, 1.0)
     assert np.isnan(r.pdf).any() and not np.any(r.pdf == 0)
 
     centres = (r.level_edges[:-1] + r.level_edges[1:]) / 2
-    first_moment = np.nansum(r.pdf * centres[:, None], axis=0) * r.binwidth_db
+    first_moment = np.nansum(r.pdf * centres[:, None], axis=0) * r.binwidth_dB
     band = (r.frequencies > 200) & (r.frequencies < 3500)
-    assert np.abs(r.mean_db[band] - first_moment[band]).max() < r.binwidth_db
+    assert np.abs(r.mean_dB[band] - first_moment[band]).max() < r.binwidth_dB
 
 
 class TestSELBandGridIsAnchoredAt1kHz:
@@ -460,7 +460,7 @@ def test_ppsd_square_input_warns_and_takes_the_first_axis_as_time():
                    lvlmax=200)
     columns = ppsd([data[:, i] for i in range(n)], fs, seg_duration=0.16,
                    nperseg=16, lvlmin=-200, lvlmax=200)
-    assert np.allclose(out.mean_db, columns.mean_db)
+    assert np.allclose(out.mean_dB, columns.mean_dB)
 
 
 def test_ppsd_segment_shorter_than_one_sample_is_diagnosed_as_such():
@@ -573,7 +573,7 @@ class TestPpsdOutOfWindowLevels:
         assert 'lvlmin=0' in typed[0] and 'lvlmax=150' in typed[0]
         assert 'dB re ref²' in typed[0]
         assert np.all(np.isnan(res.pdf))
-        assert np.all(np.isfinite(res.mean_db))
+        assert np.all(np.isfinite(res.mean_dB))
 
     def test_levels_inside_the_window_produce_no_warning(self):
         with warnings.catch_warnings(record=True) as caught:

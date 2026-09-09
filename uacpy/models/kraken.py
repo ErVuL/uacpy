@@ -1573,7 +1573,7 @@ class Kraken(PropagationModel):
             magnitude sum has no phase, so the complex slot AT parks it in
             is not preserved.
             Bellhop's ``INCOHERENT_TL`` instead keeps complex Pa in
-            ``.data``; the two engines agree on ``.db``, the uniform
+            ``.data``; the two engines agree on ``.dB``, the uniform
             cross-engine surface for magnitude-sum results.
         frequencies : ndarray, optional
             Frequency vector (Hz) for native broadband computation. Only a
@@ -2443,7 +2443,7 @@ class Kraken(PropagationModel):
             # The line-source level (×√k0, see ``line_level``) is applied
             # ONCE here, before the INCOHERENT/COHERENT split, because both
             # branches below need it: COHERENT_TL keeps this payload as the
-            # complex pressure and INCOHERENT_TL takes ``.db`` of it. It is a
+            # complex pressure and INCOHERENT_TL takes ``.dB`` of it. It is a
             # real, positive scalar, so it commutes with both the magnitude
             # sum and the ``phase_corr`` rotation, and it is exactly 1 for a
             # point/scaled source. Without it the narrowband line-source
@@ -2460,7 +2460,7 @@ class Kraken(PropagationModel):
                 # (EvaluateMod.f90:43,66); AT parks that in the complex .shd
                 # slot, where its phase is an artefact. Store real dB TL so
                 # the result claims only what it has.
-                field.data = np.asarray(field.db, dtype=float)
+                field.data = np.asarray(field.dB, dtype=float)
                 phase_reference = None
             else:
                 # field.exe emits the modal sum with a prefactor that differs
@@ -2675,7 +2675,7 @@ class Kraken(PropagationModel):
             # Tested on TL so it covers both the complex branches and the
             # real dB INCOHERENT_TL one: an empty sum saturates at the
             # PRESSURE_FLOOR clamp.
-            tl = np.asarray(field.db, dtype=float)
+            tl = np.asarray(field.dB, dtype=float)
             finite = np.isfinite(tl)
             if not np.any(tl[finite] < -20.0 * np.log10(PRESSURE_FLOOR)):
                 warnings.warn(

@@ -1010,7 +1010,7 @@ class Bellhop(PropagationModel):
         (m/s), which the :class:`~uacpy.core.results.Field` contract has no
         ``kind`` for — its pressure conventions (the point/line ``_shd_phase``
         correction, ``phase_reference='travelling_wave'``, ``unit='Pa'``,
-        ``.db`` as transmission loss) would all be applied to it and every
+        ``.dB`` as transmission loss) would all be applied to it and every
         one of them would be wrong. So that pairing is refused rather than
         mislabelled.
         """
@@ -1034,7 +1034,7 @@ class Bellhop(PropagationModel):
                 f"would then hold particle velocity (m/s), and uacpy's Field "
                 f"carries no such kind: the result would report unit 'Pa', "
                 f"apply the pressure point/line phase correction and read its "
-                f".db as transmission loss"
+                f".dB as transmission loss"
             ),
             alternatives=[
                 "Bellhop(component='P') for the pressure field",
@@ -1599,7 +1599,7 @@ class Bellhop(PropagationModel):
             the ``.shd`` — its magnitude is the incoherent / semicoherent
             beam sum, its phase an artefact of AT's storage with no phase
             reference stamped. Kraken's ``INCOHERENT_TL`` instead stores
-            real dB TL in ``.data``; the two engines agree on ``.db``,
+            real dB TL in ``.data``; the two engines agree on ``.dB``,
             which is the uniform cross-engine surface for magnitude-sum
             results.
         frequencies : ndarray, optional
@@ -2744,26 +2744,26 @@ class Bellhop(PropagationModel):
         def alpha_at(f: float) -> float:
             """Volume attenuation (dB/m) at the surface, at one frequency.
 
-            ``alpha_db_per_m`` takes ``(frequency, depths)`` in that order and
+            ``alpha_dB_per_m`` takes ``(frequency, depths)`` in that order and
             wants a SCALAR frequency; passing the band as an array raises.
             """
             return float(np.atleast_1d(np.asarray(
-                absorption.alpha_db_per_m(float(f), 0.0), dtype=float))[0])
+                absorption.alpha_dB_per_m(float(f), 0.0), dtype=float))[0])
 
         alpha_c = alpha_at(fc)
         if not np.isfinite(alpha_c) or alpha_c <= 0.0:
             return
         # Only the band edges can be furthest from a straight line through fc.
         edges = (float(freqs[0]), float(freqs[-1]))
-        err_db_per_km = 0.0
+        err_dB_per_km = 0.0
         for f in edges:
             true_alpha = alpha_at(f)
             if not np.isfinite(true_alpha):
                 return
             applied = alpha_c * f / fc          # what the frozen Im(tau) gives
-            err_db_per_km = max(err_db_per_km,
+            err_dB_per_km = max(err_dB_per_km,
                                 abs(true_alpha - applied) * 1000.0)
-        if err_db_per_km < _BROADBAND_ATTEN_WARN_DB_PER_KM:
+        if err_dB_per_km < _BROADBAND_ATTEN_WARN_DB_PER_KM:
             return
         warnings.warn(
             f"{self.model_name}: the arrival set is traced once at "
@@ -2772,8 +2772,8 @@ class Bellhop(PropagationModel):
             f"(Step.f90:73 with cimag = alphaT*c^2/omega, "
             f"misc/AttenMod.f90:113). {type(absorption).__name__} is not "
             f"linear in f, so the band edges are mis-attenuated by up to "
-            f"{err_db_per_km:.3g} dB/km of path — about "
-            f"{err_db_per_km * 10.0:.3g} dB over a 10 km path. Narrow "
+            f"{err_dB_per_km:.3g} dB/km of path — about "
+            f"{err_dB_per_km * 10.0:.3g} dB over a 10 km path. Narrow "
             f"bandwidth_factor, or run each frequency separately, if the band "
             f"edges matter.",
             UserWarning, skip_file_prefixes=USER_FRAME_SKIP)

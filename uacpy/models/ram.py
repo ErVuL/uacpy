@@ -2426,13 +2426,13 @@ class RAM(PropagationModel):
         tl_raw = np.asarray(raw['tl'], dtype=float)
         ranges = np.asarray(raw['ranges'], dtype=float)
         with np.errstate(divide='ignore'):
-            floor_db = 20.0 * np.log10(
+            floor_dB = 20.0 * np.log10(
                 np.minimum(np.maximum(ranges, np.finfo(float).tiny), 1.0)
             ) - IMAGE_GAIN_DB
         # A blow-up cannot be found by a NaN test: rams0.5.f:265 takes TL from
         # ``alog10(cabs(ur))``, so a march that overflows the field but stays
         # under the float32 ceiling writes finite, hugely negative samples.
-        invalid = ~np.isfinite(tl_raw) | (tl_raw < floor_db)
+        invalid = ~np.isfinite(tl_raw) | (tl_raw < floor_dB)
         n_invalid = int(np.count_nonzero(invalid))
         if n_invalid:
             note = ""
@@ -2453,7 +2453,7 @@ class RAM(PropagationModel):
         # Every surviving sample is the engine's own value, bit for bit:
         # the exact zero at the z = 0 pressure-release node the fluid codes
         # emit when ndz = 1 is a valid boundary value, not divergence (the
-        # shared ``_complex_to_db`` floor reports it as the one no-energy
+        # shared ``_complex_to_dB`` floor reports it as the one no-energy
         # level, and it is not counted in the warning above), and inside the
         # 1 m reference radius |p/p0| > 1 is what the field is.
         return np.where(invalid, complex(np.nan, np.nan), psi_raw)
@@ -2774,7 +2774,7 @@ class RAM(PropagationModel):
         pressure-release in every Collins backend, so the node carries no
         energy — an exact boundary value, not an extrapolation. The pressure
         is written as a literal zero and the TL as what the shared
-        ``_complex_to_db`` floor turns that zero into, so this row reports
+        ``_complex_to_dB`` floor turns that zero into, so this row reports
         the same no-energy level as every other model's, and no wrapper
         invents one of its own.
         """
@@ -2782,10 +2782,10 @@ class RAM(PropagationModel):
         if depths.size == 0 or depths[0] <= 0.0:
             return depths, tl, pcomplex
         n_r = np.asarray(tl).shape[1]
-        no_energy_db = -20.0 * np.log10(PRESSURE_FLOOR)
+        no_energy_dB = -20.0 * np.log10(PRESSURE_FLOOR)
         return (
             np.concatenate([[0.0], depths]),
-            np.vstack([np.full((1, n_r), no_energy_db), np.asarray(tl)]),
+            np.vstack([np.full((1, n_r), no_energy_dB), np.asarray(tl)]),
             np.vstack([np.zeros((1, n_r), dtype=np.complex128),
                        np.asarray(pcomplex)]),
         )
@@ -3899,7 +3899,7 @@ class RAM(PropagationModel):
             return
         from uacpy.core.absorption import ConstantAbsorption
         if (isinstance(absorption, ConstantAbsorption)
-                and absorption.value_db_per_wavelength == 0.0):
+                and absorption.value_dB_per_wavelength == 0.0):
             return
         warnings.warn(
             f"RAM ignores env.absorption ({type(absorption).__name__}): no "
@@ -4594,7 +4594,7 @@ class RAM(PropagationModel):
         log_ranges[log_ranges <= 0.0] = dr
 
         # Convert the mpiramS .psif output to engineering travelling-
-        # wave pressure (see ``models/_pe_phase.py``). ``Field.db``
+        # wave pressure (see ``models/_pe_phase.py``). ``Field.dB``
         # only needs |p|, but downstream consumers that do coherent
         # integration get a meaningful phase.
         with np.errstate(divide='ignore', invalid='ignore'):
@@ -4606,7 +4606,7 @@ class RAM(PropagationModel):
             ).astype(np.complex128)
         # An exactly-zero sample is the pressure-release surface node (z = 0,
         # where mpiramS's field is identically zero). It is left at zero: the
-        # shared ``_complex_to_db`` floors it to the one no-energy level every
+        # shared ``_complex_to_dB`` floors it to the one no-energy level every
         # model reports, rather than this wrapper writing a level of its own.
 
         elapsed = time.time() - start_time
@@ -4741,7 +4741,7 @@ class RAM(PropagationModel):
         )
         # An exactly-zero sample is the pressure-release surface node
         # (z = 0, where mpiramS's field is identically zero). It is left at
-        # zero for the shared ``_complex_to_db`` floor to report, so no
+        # zero for the shared ``_complex_to_dB`` floor to report, so no
         # wrapper writes a no-energy level of its own.
 
         # Map to receiver depth grid. PE domain extends below the

@@ -103,7 +103,7 @@ class TestBellhopRunModes:
         assert isinstance(result, Field)
         assert result.shape == (len(setup_receiver.depths), len(setup_receiver.ranges))
         assert np.all(np.isfinite(result.data))
-        assert np.all(result.db > 0), "TL should be positive"
+        assert np.all(result.dB > 0), "TL should be positive"
 
     @pytest.mark.requires_binary
     def test_r0_column_is_no_data_nan(self, setup_env, setup_source):
@@ -116,7 +116,7 @@ class TestBellhopRunModes:
         result = Bellhop(verbose=False).run(
             env=setup_env, source=setup_source, receiver=rcv,
             run_mode=RunMode.COHERENT_TL)
-        tl = np.asarray(result.db)
+        tl = np.asarray(result.dB)
         assert np.all(np.isnan(tl[:, 0]))
         assert np.all(np.isfinite(tl[:, 1:]))
 
@@ -138,7 +138,7 @@ class TestBellhopRunModes:
         # the payload stays complex with an identically zero imaginary part
         # (docs/guide/results.md §9 "An incoherent field has no phase",
         # DOCUMENTATION.md §7 "its phase an artefact of AT's storage") — the
-        # phase carries no information and .db is the cross-engine surface.
+        # phase carries no information and .dB is the cross-engine surface.
         assert np.iscomplexobj(result.data)
         assert np.all(np.imag(result.data) == 0.0)
 
@@ -455,7 +455,7 @@ class TestBellhopRangeDependentSSP:
         )
         bh = Bellhop(verbose=False, interp_ssp='quad', backend=backend)
         res = bh.run(rd_ssp_env, src, rcv, run_mode=RunMode.COHERENT_TL)
-        tl = np.asarray(res.db)
+        tl = np.asarray(res.dB)
         # Cells no ray reached (shadow zones) are NaN no-data cells.
         real = tl[np.isfinite(tl)]
         assert real.size > tl.size * 0.5, (
@@ -485,7 +485,7 @@ class TestBellhopRangeDependentSSP:
         msgs = [str(w.message) for w in record]
         assert any('range-dependent SSP spans' in m for m in msgs)
         assert any('constant-extrapolated' in m for m in msgs)
-        tl = np.asarray(res.db)
+        tl = np.asarray(res.dB)
         real = tl[(tl > 0) & (tl < 500)]
         assert real.size > tl.size * 0.5
         assert real.max() < 200
@@ -560,7 +560,7 @@ class TestBellhopMultiSourceDepth:
         stack = bh.run(env, source, receiver, run_mode=RunMode.COHERENT_TL)
         for sd_value, slab in stack:
             assert slab.data.shape == (9, 10)
-            tl = slab.db
+            tl = slab.dB
             real = tl[(tl > 0) & (tl < 500)]
             assert real.size > tl.size * 0.5
             assert real.min() > 0
@@ -593,7 +593,7 @@ class TestBellhopMultiSourceDepth:
             env, Source(depths=50.0, frequencies=100.0),
             receiver, run_mode=RunMode.COHERENT_TL,
         )
-        np.testing.assert_allclose(slab.db, single.db, rtol=1e-4, atol=1e-3)
+        np.testing.assert_allclose(slab.dB, single.dB, rtol=1e-4, atol=1e-3)
 
     @pytest.mark.requires_binary
     def test_multi_source_rays_returns_stack(self):
@@ -769,7 +769,7 @@ class TestBellhopSourceGeometry:
                                    source_type='point'), rcv)
         ln = model.run(env, Source(depths=50, frequencies=200,
                                    source_type='line'), rcv)
-        delta = np.nanmax(np.abs(np.asarray(pt.db) - np.asarray(ln.db)))
+        delta = np.nanmax(np.abs(np.asarray(pt.dB) - np.asarray(ln.dB)))
         assert delta > 10.0, f"source_type is still inert (max dTL={delta})"
 
     def test_line_vs_point_matches_influence_f90_ratio(self):
@@ -789,9 +789,9 @@ class TestBellhopSourceGeometry:
         rcv = Receiver(depths=100.0, ranges=ranges)
         model = Bellhop(verbose=False)
         pt = np.asarray(model.run(env, Source(depths=50, frequencies=200,
-                                              source_type='point'), rcv).db).ravel()
+                                              source_type='point'), rcv).dB).ravel()
         ln = np.asarray(model.run(env, Source(depths=50, frequencies=200,
-                                              source_type='line'), rcv).db).ravel()
+                                              source_type='line'), rcv).dB).ravel()
         diff = pt - ln
         measured = diff[-1] - diff[0]
         expected = 10 * np.log10(ranges[-1] / ranges[0])
@@ -1122,7 +1122,7 @@ class TestEnvRecordOrder:
         prt = next(iter(tmp_path.rglob('*.prt'))).read_text()
         assert '*** FATAL ERROR ***' not in prt
         assert 'CRCI' not in prt
-        assert np.any(np.isfinite(np.asarray(result.db)))
+        assert np.any(np.isfinite(np.asarray(result.dB)))
 
 
 class TestQuadSSPMatrixAlignment:
@@ -1197,7 +1197,7 @@ class TestQuadSSPMatrixAlignment:
             run_mode=RunMode.COHERENT_TL)
         prt = next(iter(tmp_path.rglob('*.prt'))).read_text()
         assert '*** FATAL ERROR ***' not in prt
-        assert np.any(np.isfinite(np.asarray(result.db)))
+        assert np.any(np.isfinite(np.asarray(result.dB)))
 
 
 class TestMeshDepthCoversBathymetry:
@@ -1243,7 +1243,7 @@ class TestMeshDepthCoversBathymetry:
         prt = next(iter(tmp_path.rglob('*.prt'))).read_text()
         assert '*** FATAL ERROR ***' not in prt
         assert list(tmp_path.rglob('*.shd'))
-        assert np.any(np.isfinite(np.asarray(result.db)))
+        assert np.any(np.isfinite(np.asarray(result.dB)))
 
 
 class TestRayCenteredGaussianRejected:
@@ -1480,13 +1480,13 @@ class TestBeamPatternMustSpanTheLaunchFan:
 
     @pytest.mark.requires_binary
     def test_a_pattern_covering_the_fan_runs_and_is_finite(self):
-        tl = np.asarray(self._run(80.0, (-80.0, 80.0)).db)
+        tl = np.asarray(self._run(80.0, (-80.0, 80.0)).dB)
         assert np.isfinite(tl).all()
 
     @pytest.mark.requires_binary
     def test_narrowing_the_fan_to_the_pattern_also_works(self):
         """The other remedy the error offers must work too."""
-        tl = np.asarray(self._run(60.0, (-60.0, 60.0)).db)
+        tl = np.asarray(self._run(60.0, (-60.0, 60.0)).dB)
         assert np.isfinite(tl).all()
 
 
@@ -1608,7 +1608,7 @@ class TestReceiverGridMatchesTheBeamType:
                        ranges=[500.0, 1400.0, 2300.0, 3200.0])
         result = Bellhop(verbose=False, beam_type=beam_type,
                          grid_type='I').run(env, src, rcv, RunMode.COHERENT_TL)
-        assert np.asarray(result.db).shape == (4,)
+        assert np.asarray(result.dB).shape == (4,)
 
     @pytest.mark.parametrize('beam_type', ['g', 'C', 'R'])
     def test_non_uniform_ranges_are_refused(self, beam_type):
@@ -1634,7 +1634,7 @@ class TestReceiverGridMatchesTheBeamType:
                        ranges=[500.0, 700.0, 1000.0, 1500.0, 2200.0, 3200.0])
         result = Bellhop(verbose=False, beam_type=beam_type).run(
             env, src, rcv, RunMode.COHERENT_TL)
-        assert np.isfinite(np.asarray(result.db)).all()
+        assert np.isfinite(np.asarray(result.dB)).all()
 
     @pytest.mark.parametrize('beam_type', ['g', 'C', 'R'])
     def test_uniform_ranges_accepted(self, beam_type):
@@ -1695,7 +1695,7 @@ class TestBeamCountGuard:
         tl = np.squeeze(Bellhop(n_beams=n_beams).run(
             self._env(), Source(depths=25.0, frequencies=200.0),
             Receiver(depths=[50.0], ranges=[1000.0]),
-            run_mode=RunMode.COHERENT_TL).db)
+            run_mode=RunMode.COHERENT_TL).dB)
         assert np.all(np.isfinite(tl))
 
 
@@ -1742,7 +1742,7 @@ class TestPrecalcBoundaryIsRefused:
         tl = np.squeeze(Bellhop().run(
             env, Source(depths=25.0, frequencies=200.0),
             Receiver(depths=[50.0], ranges=[1000.0]),
-            run_mode=RunMode.COHERENT_TL).db)
+            run_mode=RunMode.COHERENT_TL).dB)
         assert np.all(np.isfinite(tl))
 
 
@@ -1794,7 +1794,7 @@ class TestSourceMustBeInsideTheMedium:
         # NaN by the below-domain mask — masked cells, not a rejection.
         env = getattr(self, env_name)()
         rcv = self._rcv()
-        tl = np.atleast_2d(np.squeeze(self._run(env, zs).db))
+        tl = np.atleast_2d(np.squeeze(self._run(env, zs).dB))
         seafloor = np.asarray(env.bathymetry.eval(range=rcv.ranges),
                               dtype=float)
         above = (np.asarray(rcv.depths, dtype=float)[:, None]
@@ -1841,7 +1841,7 @@ class TestSingleReceiverRangeBeamTypes:
         tl = np.squeeze(Bellhop(beam_type=beam_type).run(
             self._env(), Source(depths=25.0, frequencies=200.0),
             Receiver(depths=[50.0], ranges=[1000.0]),
-            run_mode=RunMode.COHERENT_TL).db)
+            run_mode=RunMode.COHERENT_TL).dB)
         assert np.all(np.isfinite(tl))
 
     @pytest.mark.parametrize('beam_type', ['g', 'C', 'R'])
@@ -1849,7 +1849,7 @@ class TestSingleReceiverRangeBeamTypes:
         tl = np.squeeze(Bellhop(beam_type=beam_type).run(
             self._env(), Source(depths=25.0, frequencies=200.0),
             Receiver(depths=[50.0], ranges=np.linspace(500.0, 3000.0, 6)),
-            run_mode=RunMode.COHERENT_TL).db)
+            run_mode=RunMode.COHERENT_TL).dB)
         assert np.any(np.isfinite(tl))
 
 
@@ -2037,7 +2037,7 @@ class TestAutoBounceTriggersOnLayeringOnly:
                                            run_mode=RunMode.COHERENT_TL)
         assert not [w for w in caught if 'BOUNCE' in str(w.message)]
         assert 'bounce_result' not in f.metadata
-        assert np.isfinite(np.asarray(f.db)).all()
+        assert np.isfinite(np.asarray(f.dB)).all()
 
     def test_rd_elastic_bottom_runs_natively(self):
         from uacpy.core.bottom import Bottom
@@ -2055,7 +2055,7 @@ class TestAutoBounceTriggersOnLayeringOnly:
                                            run_mode=RunMode.COHERENT_TL)
         assert not [w for w in caught if 'BOUNCE' in str(w.message)]
         assert 'bounce_result' not in f.metadata
-        assert np.isfinite(np.asarray(f.db)).all()
+        assert np.isfinite(np.asarray(f.dB)).all()
 
 
 class TestTLModeRelationships:
@@ -2082,16 +2082,16 @@ class TestTLModeRelationships:
                              RunMode.SEMICOHERENT_TL)}
 
     def test_incoherent_smooths_the_interference_pattern(self, tl_fields):
-        coh = np.asarray(tl_fields[RunMode.COHERENT_TL].db).ravel()
-        inc = np.asarray(tl_fields[RunMode.INCOHERENT_TL].db).ravel()
+        coh = np.asarray(tl_fields[RunMode.COHERENT_TL].dB).ravel()
+        inc = np.asarray(tl_fields[RunMode.INCOHERENT_TL].dB).ravel()
         assert np.ptp(inc) < np.ptp(coh), (
             "incoherent TL is no smoother than coherent — RunType(1:1)='I' "
             "never took effect")
 
     def test_semicoherent_differs_from_both(self, tl_fields):
-        coh = np.asarray(tl_fields[RunMode.COHERENT_TL].db).ravel()
-        inc = np.asarray(tl_fields[RunMode.INCOHERENT_TL].db).ravel()
-        semi = np.asarray(tl_fields[RunMode.SEMICOHERENT_TL].db).ravel()
+        coh = np.asarray(tl_fields[RunMode.COHERENT_TL].dB).ravel()
+        inc = np.asarray(tl_fields[RunMode.INCOHERENT_TL].dB).ravel()
+        semi = np.asarray(tl_fields[RunMode.SEMICOHERENT_TL].dB).ravel()
         # The Lloyd shading redistributes several dB across a 4 km line, so
         # 0.1 dB separates a real third mode from either neighbour while
         # staying far above solver reproducibility.
@@ -2674,7 +2674,7 @@ def test_bellhop_two_beam_fan_returns_a_usable_field():
             result = Bellhop(n_beams=n_beams, alpha=(-10, 10),
                              verbose=False).run(env, source, receiver,
                                                 run_mode=RunMode.COHERENT_TL)
-        return float(np.asarray(result.db, dtype=float).ravel()[0])
+        return float(np.asarray(result.dB, dtype=float).ravel()[0])
 
     two, converged = _tl(2), _tl(51)
     assert np.isfinite(two), "a two-beam fan is not degenerate"

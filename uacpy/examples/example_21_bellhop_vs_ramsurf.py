@@ -71,11 +71,11 @@ def main():
     res_bh = Bellhop(verbose=False).run(
         env, src, rcv, run_mode=RunMode.COHERENT_TL,
     )
-    tl_bh = res_bh.db[0]
+    tl_bh = res_bh.dB[0]
 
     print("Running RAM (dispatches to ramsurf1.5) ...")
     res_ram = RAM(verbose=False).run(env, src, rcv, run_mode=RunMode.COHERENT_TL)
-    tl_ram = res_ram.db[0]
+    tl_ram = res_ram.dB[0]
     print(f"  → backend: {res_ram.backend}")
     print()
 
@@ -130,7 +130,7 @@ def main():
     ax_bot.plot(ranges / 1000, tl_ram - tl_bh, 'b-', lw=1.0,
                 label='RAM − Bellhop')
     # 8 dB is the empirical bar the cross-model test holds this pair to over
-    # 1-5 km (tests/test_cross_model_agreement.py, tolerance_db=8.0): ray and
+    # 1-5 km (tests/test_cross_model_agreement.py, tolerance_dB=8.0): ray and
     # PE diverge past ~3 km as surface multipaths accumulate, while a flipped
     # altimetry sign would push the RMSE past 25 dB.
     ax_bot.fill_between(ranges / 1000, -8, 8, color='green', alpha=0.15,

@@ -38,7 +38,7 @@ def _broadband(n_depth=1, n_range=1):
 
 # ── plot_transfer_function ───────────────────────────────────────────────────
 
-def test_tf_stacked_mag_db_and_phase():
+def test_tf_stacked_mag_dB_and_phase():
     # Two stacked panels: modulus in dB (top) over phase (bottom), sharing
     # the frequency axis. A single-receiver field plots with no .at().
     fig, (ax_mag, ax_phase) = _broadband().plot_transfer_function()
@@ -142,7 +142,7 @@ def test_ir_unpinned_range_raises():
 def test_tf_real_field_raises_before_drawing():
     # A real (already-dB) broadband field has no phase panel; the guard must
     # be a typed error raised before any figure exists.
-    tl = _broadband().to_db()
+    tl = _broadband().to_dB()
     with pytest.raises(ConfigurationError, match='complex'):
         tl.plot_transfer_function()
     assert not plt.get_fignums()

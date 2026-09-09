@@ -84,7 +84,7 @@ def main():
             f"dz={meta.get('dz'):6.3f} m"
         )
 
-    diff = np.abs(fields['c1500'].db - fields['c_eq15'].db)
+    diff = np.abs(fields['c1500'].dB - fields['c_eq15'].dB)
     rms = float(np.sqrt(np.nanmean(diff ** 2)))
     print(f"\n  RMS |TL_c1500 - TL_c_eq15| = {rms:.2f} dB")
 

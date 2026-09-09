@@ -24,7 +24,7 @@ import pytest
 from uacpy.core.absorption import (
     ph_to_nbs,
     Biological, BiologicalLayer, FrancoisGarrison,
-    convert_attenuation_units, francois_garrison_db_per_km,
+    convert_attenuation_units, francois_garrison_dB_per_km,
 )
 from uacpy.core.constants import (
     DEFAULT_SOUND_SPEED, MAX_ATTENUATION_DB_PER_WAVELENGTH,
@@ -92,8 +92,8 @@ class TestNominalRowIsColumnRepresentative:
     def test_surface_reference_understates_high_frequency_absorption(self):
         # Pins the reason the default moved, in dB rather than in degrees.
         zq = np.array([500.0])
-        a_mid = float(np.ravel(self._fg().alpha_db_per_m(1e4, zq))[0])
-        a_surf = float(np.ravel(self._fg(ref=0.0).alpha_db_per_m(1e4, zq))[0])
+        a_mid = float(np.ravel(self._fg().alpha_dB_per_m(1e4, zq))[0])
+        a_surf = float(np.ravel(self._fg(ref=0.0).alpha_dB_per_m(1e4, zq))[0])
         assert a_surf < a_mid
         assert (a_mid - a_surf) / a_mid == pytest.approx(0.34, abs=0.05)
 
@@ -173,7 +173,7 @@ def test_the_bare_formula_answers_an_out_of_domain_row_with_nan_only():
     one warning uacpy emits that is not a ``UserWarning``."""
     with warnings.catch_warnings(record=True) as record:
         warnings.simplefilter('always')
-        alpha = francois_garrison_db_per_km(
+        alpha = francois_garrison_dB_per_km(
             1000.0, temperature=-500.0, salinity=-10.0, pH=-3.0, depth=50.0)
     assert np.isnan(alpha)
     assert record == [], [str(w.message) for w in record]
@@ -181,7 +181,7 @@ def test_the_bare_formula_answers_an_out_of_domain_row_with_nan_only():
 
 def test_an_in_domain_row_is_unchanged_by_the_errstate_guard():
     """Silencing the invalid flag must not touch the numbers."""
-    alpha = francois_garrison_db_per_km(
+    alpha = francois_garrison_dB_per_km(
         10_000.0, temperature=10.0, salinity=35.0, pH=8.0, depth=1000.0)
     assert 0.0 < float(alpha) < 10.0
 
@@ -198,7 +198,7 @@ class TestBiologicalLayerMeetsTheCrciCeiling:
     ``f0`` and the ceiling scales with the true ``c(z)`` over the layer."""
 
     @staticmethod
-    def _ceiling_db_km(f0):
+    def _ceiling_dB_km(f0):
         return (MAX_ATTENUATION_DB_PER_WAVELENGTH * 1000.0 * f0
                 / DEFAULT_SOUND_SPEED)
 
@@ -209,8 +209,8 @@ class TestBiologicalLayerMeetsTheCrciCeiling:
         args.update(kw)
         return BiologicalLayer(**args)
 
-    def test_the_documented_at_threshold_is_3638_db_per_km_at_100hz(self):
-        assert self._ceiling_db_km(100.0) == pytest.approx(3638.34, abs=0.01)
+    def test_the_documented_at_threshold_is_3638_dB_per_km_at_100hz(self):
+        assert self._ceiling_dB_km(100.0) == pytest.approx(3638.34, abs=0.01)
 
     def test_a_peak_over_the_ceiling_warns(self):
         with pytest.warns(UserWarning, match='CRCI'):
@@ -245,7 +245,7 @@ class TestBiologicalLayerMeetsTheCrciCeiling:
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
             bio = Biological(layers=[(0.0, 50.0, 100.0, 61.0, 1.0)])
-        got = float(bio.alpha_db_per_m(100.0, [25.0])[0]) * 1000.0
+        got = float(bio.alpha_dB_per_m(100.0, [25.0])[0]) * 1000.0
         assert got == pytest.approx(1.0 * 61.0 ** 2, rel=1e-12)
 
     @pytest.mark.parametrize('kwargs, match', [
@@ -262,7 +262,7 @@ class TestBiologicalLayerMeetsTheCrciCeiling:
         the two tests above already had it the other way round. Pinned against
         the computed ceiling so the prose cannot drift off the arithmetic
         again."""
-        ceiling = self._ceiling_db_km(100.0)
+        ceiling = self._ceiling_dB_km(100.0)
         assert 1.0 * 60.0 ** 2 < ceiling < 1.0 * 61.0 ** 2
         doc = ' '.join(BiologicalLayer.__doc__.split())
         assert '``a0 = 1, Q = 60`` gives 3600 and clears it' in doc
@@ -379,8 +379,8 @@ class TestTheTwoAbsorptionRoutesDivergeByTheDocumentedAmount:
     @classmethod
     def _percent_over_deck(cls, frequency, depth):
         fg = cls._fg()
-        python = float(np.ravel(fg.alpha_db_per_m(frequency, [depth]))[0]) * 1000.0
-        deck = float(francois_garrison_db_per_km(
+        python = float(np.ravel(fg.alpha_dB_per_m(frequency, [depth]))[0]) * 1000.0
+        deck = float(francois_garrison_dB_per_km(
             frequency, fg.temperature_c, fg.salinity_psu, fg.pH, fg.z_bar_m))
         return 100.0 * (python - deck) / deck
 
@@ -408,7 +408,7 @@ class TestTheTwoAbsorptionRoutesDivergeByTheDocumentedAmount:
             self, sound_speed, expected):
         from uacpy.core.absorption import ConstantAbsorption
         python = float(np.ravel(
-            ConstantAbsorption(0.5).alpha_db_per_m(1e3, [0.0]))[0])
+            ConstantAbsorption(0.5).alpha_dB_per_m(1e3, [0.0]))[0])
         deck = float(convert_attenuation_units(
             0.5, 1e3, 'dB/wavelength', 'dB/m', sound_speed=sound_speed))
         assert 100.0 * (python - deck) / deck == pytest.approx(expected,
@@ -495,17 +495,17 @@ class TestFrancoisGarrisonPhScale:
         assert total.ph_nbs == pytest.approx(converted)
         assert total.as_at_tuple()[2] == pytest.approx(converted)
         for f in (100.0, 500.0, 1000.0, 10000.0):
-            assert total.alpha_db_per_m(f, [0.0, 1000.0]) == pytest.approx(
-                nbs.alpha_db_per_m(f, [0.0, 1000.0]))
+            assert total.alpha_dB_per_m(f, [0.0, 1000.0]) == pytest.approx(
+                nbs.alpha_dB_per_m(f, [0.0, 1000.0]))
 
     def test_total_scale_raises_low_frequency_absorption_by_about_a_fifth(self):
         """+0.10 on the boric term's ``10**(0.78·pH)`` is ×1.20; at 300 Hz
         that term is nearly all of the absorption, at 10 kHz almost none."""
         total, nbs = self._pair('total'), self._pair('nbs')
-        low = float(total.alpha_db_per_m(300.0, [1000.0])[0]
-                    / nbs.alpha_db_per_m(300.0, [1000.0])[0])
-        high = float(total.alpha_db_per_m(20000.0, [1000.0])[0]
-                     / nbs.alpha_db_per_m(20000.0, [1000.0])[0])
+        low = float(total.alpha_dB_per_m(300.0, [1000.0])[0]
+                    / nbs.alpha_dB_per_m(300.0, [1000.0])[0])
+        high = float(total.alpha_dB_per_m(20000.0, [1000.0])[0]
+                     / nbs.alpha_dB_per_m(20000.0, [1000.0])[0])
         assert 1.15 < low < 1.22
         assert 1.0 < high < 1.02
 

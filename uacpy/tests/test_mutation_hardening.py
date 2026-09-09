@@ -23,7 +23,7 @@ from uacpy.core.exceptions import ConfigurationError, FileFormatError
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _thorp_db_per_km_published(f_hz):
+def _thorp_dB_per_km_published(f_hz):
     """Thorp attenuation in dB/km, transcribed from the published polynomial.
 
     JKPS *Computational Ocean Acoustics* 2nd ed. Eq. (1.47) — four terms in
@@ -45,7 +45,7 @@ def _thorp_db_per_km_published(f_hz):
             + 3.0e-4 * f ** 2)
 
 
-def _francois_garrison_db_per_km_published(f_hz, T, S, pH, z):
+def _francois_garrison_dB_per_km_published(f_hz, T, S, pH, z):
     """Francois–Garrison attenuation in dB/km, transcribed from the published
     formulas: Francois & Garrison (1982), JASA 72(6) 1879–1890, in the form AT
     codes in ``misc/AttenMod.f90``. ``f`` in **kHz**, ``T`` in °C, ``S`` in
@@ -70,7 +70,7 @@ def _francois_garrison_db_per_km_published(f_hz, T, S, pH, z):
     **warm** branch there. This transcription writes the branch the same way,
     which is the behaviour uacpy matches.
 
-    Same purpose as :func:`_thorp_db_per_km_published`: the 16-digit check
+    Same purpose as :func:`_thorp_dB_per_km_published`: the 16-digit check
     values below were produced from these coefficients, so only an independent
     statement of the coefficients can catch a slip in them.
     """
@@ -101,40 +101,40 @@ class TestThorpReferenceValues:
     values were evaluated from the published coefficients and agree with the
     textbook curve (~0.07 dB/km at 1 kHz, ~1.2 dB/km at 10 kHz)."""
 
-    @pytest.mark.parametrize("f_hz, a_db_km", [
+    @pytest.mark.parametrize("f_hz, a_dB_km", [
         (100.0, 0.004499425722313501),
         (1e3, 0.06932909046574005),
         (1e4, 1.1898299387081566),
         (5e4, 17.52992268425963),
     ])
-    def test_matches_published_curve(self, f_hz, a_db_km):
-        from uacpy.core.absorption import thorp_db_per_km
-        assert float(thorp_db_per_km(f_hz)) == pytest.approx(
-            a_db_km, rel=1e-12)
+    def test_matches_published_curve(self, f_hz, a_dB_km):
+        from uacpy.core.absorption import thorp_dB_per_km
+        assert float(thorp_dB_per_km(f_hz)) == pytest.approx(
+            a_dB_km, rel=1e-12)
 
     @pytest.mark.parametrize("f_hz", [
         10.0, 100.0, 1e3, 1e4, 5e4, 1e5, 3e5,
     ])
     def test_matches_the_published_polynomial(self, f_hz):
-        """The implementation against :func:`_thorp_db_per_km_published`, which
+        """The implementation against :func:`_thorp_dB_per_km_published`, which
         states the coefficients independently of it. Evaluated on the four
         pinned frequencies plus three more, so a coefficient change that
         happened to leave the pinned values alone still has nowhere to hide.
         The 1e-12 is for float association, not for the algebra: the two
         expressions are the same polynomial and agree to a few ulp."""
-        from uacpy.core.absorption import thorp_db_per_km
-        assert float(thorp_db_per_km(f_hz)) == pytest.approx(
-            _thorp_db_per_km_published(f_hz), rel=1e-12)
+        from uacpy.core.absorption import thorp_dB_per_km
+        assert float(thorp_dB_per_km(f_hz)) == pytest.approx(
+            _thorp_dB_per_km_published(f_hz), rel=1e-12)
 
-    def test_class_converts_db_per_km_to_db_per_m(self):
-        """Thorp.alpha_db_per_m is the bare formula divided by 1000, flat in
+    def test_class_converts_dB_per_km_to_dB_per_m(self):
+        """Thorp.alpha_dB_per_m is the bare formula divided by 1000, flat in
         depth."""
-        from uacpy.core.absorption import Thorp, thorp_db_per_km
+        from uacpy.core.absorption import Thorp, thorp_dB_per_km
         z = np.array([0.0, 500.0, 5000.0])
-        a = Thorp().alpha_db_per_m(1e4, z)
+        a = Thorp().alpha_dB_per_m(1e4, z)
         assert a.shape == z.shape
         np.testing.assert_allclose(
-            a, float(thorp_db_per_km(1e4)) / 1000.0, rtol=1e-12)
+            a, float(thorp_dB_per_km(1e4)) / 1000.0, rtol=1e-12)
 
 
 class TestFrancoisGarrisonReferenceValues:
@@ -143,7 +143,7 @@ class TestFrancoisGarrisonReferenceValues:
     boric-acid, MgSO4 and viscosity regimes, a deep cold-water case for the
     pressure corrections, and both sides of the 20 °C viscosity fit."""
 
-    @pytest.mark.parametrize("f_hz, T, S, pH, z, a_db_km", [
+    @pytest.mark.parametrize("f_hz, T, S, pH, z, a_dB_km", [
         (1e3, 10.0, 35.0, 8.0, 0.0, 0.060126063391378846),
         (1e4, 10.0, 35.0, 8.0, 0.0, 0.962637291817115),
         (1e5, 10.0, 35.0, 8.0, 0.0, 33.63031641787127),
@@ -153,10 +153,10 @@ class TestFrancoisGarrisonReferenceValues:
         (5e5, 10.0, 35.0, 8.0, 0.0, 124.67276253563452),
         (5e5, 25.0, 35.0, 8.0, 0.0, 169.7876059853789),
     ])
-    def test_matches_published_curve(self, f_hz, T, S, pH, z, a_db_km):
-        from uacpy.core.absorption import francois_garrison_db_per_km
-        got = float(francois_garrison_db_per_km(f_hz, T, S, pH, z))
-        assert got == pytest.approx(a_db_km, rel=1e-12)
+    def test_matches_published_curve(self, f_hz, T, S, pH, z, a_dB_km):
+        from uacpy.core.absorption import francois_garrison_dB_per_km
+        got = float(francois_garrison_dB_per_km(f_hz, T, S, pH, z))
+        assert got == pytest.approx(a_dB_km, rel=1e-12)
 
     @pytest.mark.parametrize("f_hz, T, S, pH, z", [
         # Every point the check values above pin, so the two sets are tied
@@ -182,14 +182,14 @@ class TestFrancoisGarrisonReferenceValues:
     ])
     def test_matches_the_published_formula(self, f_hz, T, S, pH, z):
         """The implementation against
-        :func:`_francois_garrison_db_per_km_published`, which states every
+        :func:`_francois_garrison_dB_per_km_published`, which states every
         coefficient independently of it. Same role as the Thorp transcription
         test, and the same reason for 1e-12: the two expressions differ only in
         how the products associate."""
-        from uacpy.core.absorption import francois_garrison_db_per_km
-        got = float(francois_garrison_db_per_km(f_hz, T, S, pH, z))
+        from uacpy.core.absorption import francois_garrison_dB_per_km
+        got = float(francois_garrison_dB_per_km(f_hz, T, S, pH, z))
         assert got == pytest.approx(
-            _francois_garrison_db_per_km_published(f_hz, T, S, pH, z),
+            _francois_garrison_dB_per_km_published(f_hz, T, S, pH, z),
             rel=1e-12)
 
     def test_the_a3_branch_at_exactly_20_degrees_is_the_warm_fit(self):
@@ -206,39 +206,39 @@ class TestFrancoisGarrisonReferenceValues:
         wholly invisible to a percent-level check, so the branch is worth
         pinning and only worth pinning tightly.
         """
-        from uacpy.core.absorption import francois_garrison_db_per_km
+        from uacpy.core.absorption import francois_garrison_dB_per_km
         f_khz, T, z = 500.0, 20.0, 0.0
         A3_warm = 3.964e-4 - 1.146e-5 * T + 1.45e-7 * T ** 2 - 6.5e-10 * T ** 3
         A3_cold = 4.937e-4 - 2.59e-5 * T + 9.11e-7 * T ** 2 - 1.5e-8 * T ** 3
         P3 = 1.0 - 3.83e-5 * z + 4.9e-10 * z ** 2
 
-        warm = _francois_garrison_db_per_km_published(f_khz * 1e3, T, 35.0, 8.0, z)
+        warm = _francois_garrison_dB_per_km_published(f_khz * 1e3, T, 35.0, 8.0, z)
         # A3 is the only thing the branch changes, so swapping it is the whole
         # of the difference between the two readings at this T.
         cold = warm + (A3_cold - A3_warm) * P3 * f_khz ** 2
         assert abs(cold - warm) / warm > 1e-5
 
-        assert float(francois_garrison_db_per_km(f_khz * 1e3, T, 35.0, 8.0, z)) \
+        assert float(francois_garrison_dB_per_km(f_khz * 1e3, T, 35.0, 8.0, z)) \
             == pytest.approx(warm, rel=1e-12)
 
     def test_depth_correction_attenuates_mgso4_term(self):
         """P2 = 1 − 1.37e-4·z + 6.2e-9·z² cuts the 63-kHz (MgSO4-dominated)
         absorption to ~0.549 of its surface value at 4000 m."""
-        from uacpy.core.absorption import francois_garrison_db_per_km
-        a_surf = float(francois_garrison_db_per_km(6.3e4, 10., 35., 8., 0.))
-        a_deep = float(francois_garrison_db_per_km(6.3e4, 10., 35., 8., 4000.))
+        from uacpy.core.absorption import francois_garrison_dB_per_km
+        a_surf = float(francois_garrison_dB_per_km(6.3e4, 10., 35., 8., 0.))
+        a_deep = float(francois_garrison_dB_per_km(6.3e4, 10., 35., 8., 4000.))
         assert a_deep / a_surf == pytest.approx(0.54917617566523, rel=1e-10)
 
     def test_class_overrides_nominal_depth_with_the_depth_axis(self):
-        """FrancoisGarrison.alpha_db_per_m re-evaluates the formula per depth
+        """FrancoisGarrison.alpha_dB_per_m re-evaluates the formula per depth
         (dB/m = dB/km / 1000), ignoring z_bar_m."""
         from uacpy.core.absorption import (
-            FrancoisGarrison, francois_garrison_db_per_km)
+            FrancoisGarrison, francois_garrison_dB_per_km)
         fg = FrancoisGarrison(temperature_c=10.0, salinity_psu=35.0,
                               pH=8.0, z_bar_m=100.0)
         z = np.array([0.0, 2000.0])
-        got = fg.alpha_db_per_m(1e4, z)
-        want = francois_garrison_db_per_km(
+        got = fg.alpha_dB_per_m(1e4, z)
+        want = francois_garrison_dB_per_km(
             1e4, temperature=10.0, salinity=35.0, pH=8.0, depth=z) / 1000.0
         np.testing.assert_allclose(got, want, rtol=1e-12)
         assert float(got[0]) == pytest.approx(0.000962637291817115, rel=1e-12)
@@ -260,13 +260,13 @@ class TestConvertAttenuationUnitsClosedForms:
         return float(convert_attenuation_units(
             alpha, self.F, frm, to, sound_speed=self.C))
 
-    def test_db_km_is_db_m_times_1000(self):
+    def test_dB_km_is_dB_m_times_1000(self):
         assert self._conv(3.0, 'dB/km', 'dB/m') == pytest.approx(
             3.0e-3, rel=1e-12)
         assert self._conv(3.0e-3, 'dB/m', 'dB/km') == pytest.approx(
             3.0, rel=1e-12)
 
-    def test_db_per_wavelength_uses_lambda_c_over_f(self):
+    def test_dB_per_wavelength_uses_lambda_c_over_f(self):
         lam = self.C / self.F
         assert self._conv(0.5, 'dB/wavelength', 'dB/m') == pytest.approx(
             0.5 / lam, rel=1e-12)
@@ -315,18 +315,18 @@ class TestBiologicalLorentzian:
         return Biological(layers=[(10.0, 60.0, 1000.0, 5.0, 10.0)])
 
     def test_peak_is_a0_q_squared(self):
-        a = self._bio().alpha_db_per_m(1000.0, np.array([30.0]))
+        a = self._bio().alpha_dB_per_m(1000.0, np.array([30.0]))
         assert float(a[0]) == pytest.approx(10.0 * 25.0 / 1000.0, rel=1e-12)
 
     def test_off_resonance_denominator(self):
-        a = self._bio().alpha_db_per_m(500.0, np.array([30.0]))
+        a = self._bio().alpha_dB_per_m(500.0, np.array([30.0]))
         want = 10.0 / (9.0 + 1.0 / 25.0) / 1000.0
         assert float(a[0]) == pytest.approx(want, rel=1e-12)
 
     def test_zero_frequency_raises_typed_error(self):
         """f = 0 must raise ConfigurationError, not divide by zero."""
         with pytest.raises(ConfigurationError, match="frequency must be > 0"):
-            self._bio().alpha_db_per_m(0.0, np.array([30.0]))
+            self._bio().alpha_dB_per_m(0.0, np.array([30.0]))
 
     def test_zero_resonance_frequency_rejected(self):
         from uacpy.core.absorption import BiologicalLayer
@@ -341,15 +341,15 @@ class TestConstantAbsorptionContract:
 
     def test_zero_value_is_a_valid_lossless_baseline(self):
         from uacpy.core.absorption import ConstantAbsorption
-        c = ConstantAbsorption(value_db_per_wavelength=0.0)
+        c = ConstantAbsorption(value_dB_per_wavelength=0.0)
         np.testing.assert_allclose(
-            c.alpha_db_per_m(100.0, np.array([0.0, 50.0])), 0.0)
+            c.alpha_dB_per_m(100.0, np.array([0.0, 50.0])), 0.0)
 
     def test_zero_frequency_raises_typed_error(self):
         from uacpy.core.absorption import ConstantAbsorption
-        c = ConstantAbsorption(value_db_per_wavelength=0.5)
+        c = ConstantAbsorption(value_dB_per_wavelength=0.5)
         with pytest.raises(ConfigurationError, match="frequency must be > 0"):
-            c.alpha_db_per_m(0.0, np.array([10.0]))
+            c.alpha_dB_per_m(0.0, np.array([10.0]))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -730,9 +730,9 @@ class TestConvertFromQualityFactorBoundaries:
 
     def test_sub_unity_q_round_trips(self):
         from uacpy.core.absorption import convert_attenuation_units
-        db_m = convert_attenuation_units(0.5, 100.0, 'Q', 'dB/m',
+        dB_m = convert_attenuation_units(0.5, 100.0, 'Q', 'dB/m',
                                          sound_speed=1480.0)
-        back = convert_attenuation_units(db_m, 100.0, 'dB/m', 'Q',
+        back = convert_attenuation_units(dB_m, 100.0, 'dB/m', 'Q',
                                          sound_speed=1480.0)
         assert float(back) == pytest.approx(0.5, rel=1e-12)
 
@@ -768,7 +768,7 @@ class TestBiologicalLayerValidatorBoundaries:
     def test_sub_unity_parameters_are_legal(self):
         from uacpy.core.absorption import Biological
         b = Biological(layers=[(0.0, 10.0, 0.5, 0.5, 0.5)])
-        a = b.alpha_db_per_m(0.5, np.array([5.0]))
+        a = b.alpha_dB_per_m(0.5, np.array([5.0]))
         assert np.isfinite(a).all()
 
 
@@ -777,8 +777,8 @@ class TestSubHertzFrequenciesAreLegal:
 
     def test_constant_absorption_at_half_a_hertz(self):
         from uacpy.core.absorption import ConstantAbsorption
-        c = ConstantAbsorption(value_db_per_wavelength=0.5)
-        assert np.isfinite(c.alpha_db_per_m(0.5, np.array([10.0]))).all()
+        c = ConstantAbsorption(value_dB_per_wavelength=0.5)
+        assert np.isfinite(c.alpha_dB_per_m(0.5, np.array([10.0]))).all()
 
 
 # ─────────────────────────────────────────────────────────────────────────────

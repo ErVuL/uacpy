@@ -5,7 +5,7 @@ scripts. Keeps numeric-comparison logic out of plotting and IO modules.
 
 Public helpers: :func:`tl_rmse`, :func:`tl_max_error`, :func:`tl_bias`.
 All accept a pair of 2-D :class:`~uacpy.Field` instances. Read TL via
-``field.db`` regardless of whether the field stores complex pressure or
+``field.dB`` regardless of whether the field stores complex pressure or
 real dB — :class:`Field` handles the conversion.
 """
 
@@ -40,7 +40,7 @@ def _validate_tl_pair_and_window(
     """Shared validation for TL-pair metrics.
 
     Both inputs must be 2-D ``(depth, range)`` fields carrying the same
-    :attr:`~uacpy.Field.kind`. TL is pulled from ``.db`` (handles complex → dB
+    :attr:`~uacpy.Field.kind`. TL is pulled from ``.dB`` (handles complex → dB
     conversion). Returns ``(diff, finite)`` —
     the signed TL difference and the boolean mask of finite cells inside the
     requested window.
@@ -56,7 +56,7 @@ def _validate_tl_pair_and_window(
                 f"got coords {list(f.coords)}"
             )
     # Compare the QUANTITY, not the representation: complex pressure and real
-    # TL are the same quantity written two ways and ``.db`` reconciles them,
+    # TL are the same quantity written two ways and ``.dB`` reconciles them,
     # while reverberation shares TL's dB representation exactly and is a
     # different quantity. Same rule ``compare_models`` applies before it puts
     # two fields on one colour scale.
@@ -69,10 +69,10 @@ def _validate_tl_pair_and_window(
                         "reverberation fields).",
         )
 
-    # ``Field.db`` refuses a real field whose unit is not dB, and raises
+    # ``Field.dB`` refuses a real field whose unit is not dB, and raises
     # AttributeError doing it. Matching the kind above is not enough to make
     # the pair a TL pair — a probability-of-detection field passes it — so the
-    # unit is checked here, the way ``ResultStack.db`` pre-checks its slabs.
+    # unit is checked here, the way ``ResultStack.dB`` pre-checks its slabs.
     for label, f in (('field_a', field_a), ('field_b', field_b)):
         if not f.is_complex and f.unit != 'dB':
             raise ConfigurationError(
@@ -82,15 +82,15 @@ def _validate_tl_pair_and_window(
                             "read the raw values via field.data.",
             )
 
-    # dtype=float, not the field's own: ``Field.db`` hands back the stored
+    # dtype=float, not the field's own: ``Field.dB`` hands back the stored
     # dtype, and a ``.shd``-backed result is float32. The differences below
     # are reduced to one RMSE / bias scalar, and that accumulation is done in
     # float64 whichever engine produced either side.
-    da = np.asarray(field_a.db, dtype=float)
-    db = np.asarray(field_b.db, dtype=float)
-    if da.shape != db.shape:
+    da = np.asarray(field_a.dB, dtype=float)
+    dB = np.asarray(field_b.dB, dtype=float)
+    if da.shape != dB.shape:
         raise ConfigurationError(
-            f"{fname}: shape mismatch — field_a {da.shape} vs field_b {db.shape}"
+            f"{fname}: shape mismatch — field_a {da.shape} vs field_b {dB.shape}"
         )
 
     depths = field_a.coords['depth']
@@ -118,7 +118,7 @@ def _validate_tl_pair_and_window(
     zmask = _resolve_window(depths, depth_window)
     region_mask = zmask[:, None] & rmask[None, :]
 
-    diff = da - db
+    diff = da - dB
     finite = np.isfinite(diff) & region_mask
     if not np.any(finite):
         raise ConfigurationError(

@@ -613,7 +613,7 @@ def write_bellhop_env_file(
         # Emit all six or an elastic top halfspace leaks its ice properties
         # into the water column.
         alpha_i = (
-            env.absorption.value_db_per_wavelength
+            env.absorption.value_dB_per_wavelength
             if isinstance(env.absorption, ConstantAbsorption)
             else 0.0
         )

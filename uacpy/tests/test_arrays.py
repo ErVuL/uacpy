@@ -260,7 +260,7 @@ from uacpy.acoustic_signal import beamform as beamform_fn
 LAM = C / FREQ                     # 1.5 m at 1000 Hz in 1500 m/s water
 
 
-def _pattern_db(n, d, steer_deg=0.0, weights=None,
+def _pattern_dB(n, d, steer_deg=0.0, weights=None,
                 angles=np.linspace(-90.0, 90.0, 36001)):
     """Deterministic beampattern in dB: Bartlett scan of the rank-one
     covariance of a single plane wave (the arrays.md figure method)."""
@@ -300,7 +300,7 @@ class TestRankOneBeampattern:
     N, D = 16, LAM / 2.0
 
     def test_minus_3db_width_is_0886_lambda_over_L(self):
-        ang, pdb = _pattern_db(self.N, self.D)
+        ang, pdb = _pattern_dB(self.N, self.D)
         width = np.ptp(ang[pdb >= -3.0])
         L = self.N * self.D
         # 0.886·λ/L rad = 6.346°; the discrete 16-element pattern measures
@@ -323,7 +323,7 @@ class TestRankOneBeampattern:
         assert p[1] < 1e-12 * max(p[0], p[2])
 
     def test_first_sidelobe_level(self):
-        ang, pdb = _pattern_db(self.N, self.D)
+        ang, pdb = _pattern_dB(self.N, self.D)
         null_deg = np.degrees(np.arcsin(LAM / (self.N * self.D)))
         beyond = ang > null_deg
         peaks = _local_maxima(pdb[beyond])
@@ -354,14 +354,14 @@ class TestTwoSourceRayleighResolution:
         p = bartlett_spectrum(R, steering_vectors(pos, ang, FREQ, C)).real
         return ang, p
 
-    def test_dip_at_rayleigh_separation_is_0p9_db(self):
+    def test_dip_at_rayleigh_separation_is_0p9_dB(self):
         ang, p = self._scan(1.0)
         peaks = _local_maxima(p)
         assert len(peaks) == 2                       # still two maxima
         mid = p[np.argmin(np.abs(ang))]
-        dip_db = 10.0 * np.log10(p[peaks].max() / mid)
+        dip_dB = 10.0 * np.log10(p[peaks].max() / mid)
         # Measured 0.915 dB on this pattern; the doc rounds to 0.9.
-        assert dip_db == pytest.approx(0.92, abs=0.05)
+        assert dip_dB == pytest.approx(0.92, abs=0.05)
 
     def test_peaks_survive_just_above_the_merge_point(self):
         ang, p = self._scan(0.86)                    # 0.83 + margin
@@ -392,7 +392,7 @@ class TestGratingLobes:
 
     def test_steered_alias_position_is_arcsin_u0_minus_lambda_over_d(self):
         d, steer = 0.75 * LAM, 45.0
-        ang, pdb = _pattern_db(self.N, d, steer_deg=steer)
+        ang, pdb = _pattern_dB(self.N, d, steer_deg=steer)
         alias = np.degrees(np.arcsin(np.sin(np.deg2rad(steer)) - LAM / d))
         assert alias == pytest.approx(-38.77, abs=0.01)   # the doc's −39°
         i = int(np.argmin(np.abs(ang - alias)))
@@ -408,7 +408,7 @@ class TestGratingLobes:
         # replica inside (measured −0.0 dB at −68.2°).
         steer = 30.0
         d = d_frac * LAM
-        ang, pdb = _pattern_db(self.N, d, steer_deg=steer)
+        ang, pdb = _pattern_dB(self.N, d, steer_deg=steer)
         u = np.sin(np.deg2rad(ang))
         u0 = np.sin(np.deg2rad(steer))
         # Mask the mainlobe (2 null-widths around u₀).
@@ -429,12 +429,12 @@ class TestIsotropicNoiseArrayGain:
 
     N = 16
 
-    @pytest.mark.parametrize('d_frac,gain_db', [
+    @pytest.mark.parametrize('d_frac,gain_dB', [
         (0.5, 12.04),      # = 10·log10(16): isotropic noise spatially white
         (0.25, 9.12),
         (0.125, 6.23),
     ])
-    def test_broadside_gain_against_isotropic_noise(self, d_frac, gain_db):
+    def test_broadside_gain_against_isotropic_noise(self, d_frac, gain_dB):
         pos = np.arange(self.N) * d_frac * LAM
         e = steering_vectors(pos, [0.0], FREQ, C)
         # Unit-element-power plane wave and unit-element-power isotropic
@@ -445,7 +445,7 @@ class TestIsotropicNoiseArrayGain:
         Q = np.sinc(2.0 * dz / LAM)                  # sin(k·d)/(k·d)
         ag = (bartlett_spectrum(S, e) / bartlett_spectrum(Q, e)).real[0]
         # Computed 12.041 / 9.118 / 6.232 dB; the doc rounds to one place.
-        assert 10.0 * np.log10(ag) == pytest.approx(gain_db, abs=0.01)
+        assert 10.0 * np.log10(ag) == pytest.approx(gain_dB, abs=0.01)
 
     def test_half_wavelength_matches_white_noise_gain(self):
         # At λ/2 every off-diagonal sinc is zero, so the isotropic field
@@ -467,7 +467,7 @@ class TestShadingTapers:
 
     def _taper_pattern(self, window):
         w = shading_taper(self.N, window)
-        return _pattern_db(self.N, self.D, weights=w,
+        return _pattern_dB(self.N, self.D, weights=w,
                            angles=np.linspace(-90.0, 90.0, 72001))
 
     def _width_and_sidelobe(self, window):
@@ -497,14 +497,14 @@ class TestShadingTapers:
         w = shading_taper(32, 'hann')
         assert w[0] == 0.0 and w[-1] == 0.0
 
-    @pytest.mark.parametrize('window,loss_db', [('hann', -1.90),
+    @pytest.mark.parametrize('window,loss_dB', [('hann', -1.90),
                                                 (('chebwin', 50), -1.54),
                                                 ('boxcar', 0.0)])
-    def test_white_noise_gain_loss_formula(self, window, loss_db):
+    def test_white_noise_gain_loss_formula(self, window, loss_dB):
         # ΔG = 10·log10((Σw)² / (N·Σw²)) — the arrays.md closed form.
         w = shading_taper(self.N, window)
         dg = 10.0 * np.log10(w.sum() ** 2 / (self.N * np.sum(w ** 2)))
-        assert dg == pytest.approx(loss_db, abs=0.01)
+        assert dg == pytest.approx(loss_dB, abs=0.01)
 
 
 class TestBeamformOutputContract:

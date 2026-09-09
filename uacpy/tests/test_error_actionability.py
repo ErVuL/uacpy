@@ -633,13 +633,13 @@ def _guard_cases():
              _time_domain_field(), source_level=180.0, noise_level=60.0,
              detection_threshold=10.0),
          ('Got axes [',)),
-        ('pd_field_needs_real_db',
+        ('pd_field_needs_real_dB',
          lambda: probability_of_detection_field(_complex_se_field(),
-                                                sigma_db=8.0),
+                                                sigma_dB=8.0),
          ('Got dtype complex',)),
         ('detection_range_shape_mismatch',
          lambda: detection_range(np.zeros(3), np.zeros(4)),
-         ('ranges_m shape (3,)', 'signal_excess_db shape (4,)')),
+         ('ranges_m shape (3,)', 'signal_excess_dB shape (4,)')),
     ]
 
 

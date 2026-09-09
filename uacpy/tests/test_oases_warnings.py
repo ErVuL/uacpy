@@ -285,7 +285,7 @@ class TestOasesForwardsItsOwnStdoutWarnings:
         field, said = self._run(self._env(1650.0))
         assert len(said) == 1
         assert 'UNPHYSICAL SPEED RATIO' in said[0]
-        assert np.isfinite(np.asarray(field.db)).all(), (
+        assert np.isfinite(np.asarray(field.dB)).all(), (
             "the run must still return a field — this warning is the only "
             "sign anything was wrong, so a failed run would not test it")
 

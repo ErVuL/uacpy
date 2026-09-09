@@ -98,7 +98,7 @@ def main():
           f"{int(np.sum(dec[:info.size] != info))} after Viterbi")
     code = comms.m_sequence(5, [5, 2])
     print(f"  DSSS            : N={code.size}, processing gain "
-          f"{comms.processing_gain_db(code):.1f} dB")
+          f"{comms.processing_gain_dB(code):.1f} dB")
 
     # --- JANUS (NATO STANAG 4748): standards-compliant FH-BFSK beacon ---
     jbits = comms.JanusPacket(class_id=16, app_type=0).to_bits()

@@ -569,7 +569,7 @@ class TestTheReverberationCitationNamesTheRoutineOnOptionRsPath:
         from uacpy.models.oases import OASS
         return inspect.getdoc(OASS._read_reverberation)
 
-    def test_the_cited_block_converts_to_db(self):
+    def test_the_cited_block_converts_to_dB(self):
         cited = '\n'.join(self._src('oassun26.f')[853 - 1:858])
         assert 'CONVERT TO dB' in cited
         assert 'CVMAGS' in cited          # magnitude squared
@@ -668,7 +668,7 @@ class TestTwoBinaryRoundTrip:
           every value would flip both runs together and keep the inequality.
         * ``test_reverberation_field`` above checks the near/far endpoints of
           one real run, but nothing downstream of the Field.
-        * ``test_core_classes.py`` pins ``Field.max()``, ``.db`` and the axis
+        * ``test_core_classes.py`` pins ``Field.max()``, ``.dB`` and the axis
           label on Fields built from hand-written arrays, so it pins the
           CONSUMERS against a direction the test itself supplies.
 

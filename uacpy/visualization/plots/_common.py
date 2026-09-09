@@ -264,10 +264,10 @@ _AXIS_LABELS = {
 
 
 # Axis / colorbar label per ``value`` view, for the views whose label is fixed.
-# ``'db'`` is missing on purpose: its label comes from the field (see
+# ``'dB'`` is missing on purpose: its label comes from the field (see
 # :func:`_value_label`), because the dB view of a signal-excess grid is not TL.
 _VALUE_LABELS = {
-    'mag_db': '|H| (dB)',
+    'mag_dB': '|H| (dB)',
     'mag': '|p|',
     'phase': 'Phase (rad)',
     'real': 'Re(p)',
@@ -296,7 +296,7 @@ def _default_value(field: Field) -> str:
         return 'real'
     if not field.is_complex and getattr(field, 'unit', None) == '1':
         return 'real'
-    return 'db'
+    return 'dB'
 
 
 def _value_label(field: Field, value: str) -> str:
@@ -305,7 +305,7 @@ def _value_label(field: Field, value: str) -> str:
     Split from :func:`_value_array` for callers that label a panel someone else
     drew (a composite figure's shared colorbar) and so must not build the array
     a second time to read its label."""
-    if value == 'db':
+    if value == 'dB':
         # ``value`` is the caller's choice of VIEW; ``field.kind`` is what the
         # data IS. They are independent — one complex field renders every
         # view — but the label has to come from the field, or the dB view of
@@ -328,19 +328,19 @@ def _value_label(field: Field, value: str) -> str:
     except KeyError:
         raise ConfigurationError(
             f"plot_field: unknown value={value!r}; "
-            "valid: 'db', 'mag_db', 'mag', 'phase', 'real', 'imag'"
+            "valid: 'dB', 'mag_dB', 'mag', 'phase', 'real', 'imag'"
         ) from None
 
 
 def _value_array(field: Field, value: str) -> Tuple[np.ndarray, str]:
-    """Return ``(array, axis_label)`` for ``value`` ∈ ``{'db', 'mag_db',
+    """Return ``(array, axis_label)`` for ``value`` ∈ ``{'dB', 'mag_dB',
     'mag', 'phase', 'real', 'imag'}``."""
     label = _value_label(field, value)
-    if value == 'db':
-        return field.db, label
-    if value == 'mag_db':
+    if value == 'dB':
+        return field.dB, label
+    if value == 'mag_dB':
         # Modulus in dB: 20·log10|H| = −TL (shares the floored dB conversion).
-        # Complex only, for the same reason 'mag' is: ``.db`` negates the
+        # Complex only, for the same reason 'mag' is: ``.dB`` negates the
         # modulus of COMPLEX data, but hands back real data untouched
         # because it is already a level — so negating that flips a level
         # rather than converting one. On signal excess, where the sign is
@@ -349,8 +349,8 @@ def _value_array(field: Field, value: str) -> Tuple[np.ndarray, str]:
             raise ConfigurationError(
                 f"plot_field: value={value!r} requires complex data; this "
                 f"field is real and already a level, so its dB view is "
-                f"value='db'.")
-        return -field.db, label
+                f"value='dB'.")
+        return -field.dB, label
     if value in ('mag', 'phase'):
         if not field.is_complex:
             raise ConfigurationError(
@@ -400,7 +400,7 @@ def _is_loss_view(field: Field, value: str) -> bool:
     loud end at the top. Two quantities read that way: transmission loss (the
     dB view of a ``pressure`` field) and OASS reverberation, whose stored
     numbers are a loss for the reason ``_LOSS_KINDS`` gives. Every other dB
-    view is a **level** (signal excess, ``mag_db``) and more of a level is
+    view is a **level** (signal excess, ``mag_dB``) and more of a level is
     more, so it reads upward like any other quantity.
 
     Identifying a loss takes both the field and the view, exactly as
@@ -408,7 +408,7 @@ def _is_loss_view(field: Field, value: str) -> bool:
     a real dB grid or derived from complex pressure. Every entry point that
     draws a value axis asks here, so one field cuts the same way through
     :func:`plot_field` and :func:`compare` alike."""
-    return (value == 'db' and field.kind in _LOSS_KINDS
+    return (value == 'dB' and field.kind in _LOSS_KINDS
             and (field.is_complex or field.unit == 'dB'))
 
 

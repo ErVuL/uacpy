@@ -65,12 +65,12 @@ def test_plot_channel_spectrum_is_centred_on_zero_hz():
     fs = 500.0
     fig, ax = plot_channel(_TAPS, fs)
     f = ax[1].lines[0].get_xdata()
-    mag_db = ax[1].lines[0].get_ydata()
+    mag_dB = ax[1].lines[0].get_ydata()
     assert np.all(np.diff(f) > 0)
     assert f[0] == -fs / 2
     # H(0) = sum of the taps; misaligned f/H shifts would break this pairing.
     dc = 20 * np.log10(np.abs(_TAPS.sum()) + 1e-12)
-    np.testing.assert_allclose(mag_db[f == 0.0], [dc])
+    np.testing.assert_allclose(mag_dB[f == 0.0], [dc])
     plt.close(fig)
 
 

@@ -269,16 +269,16 @@ COMPLEX_PA_ENGINES = ['bellhop_field', 'kraken_field', 'scooter_field',
 @pytest.mark.parametrize('engine', COMPLEX_PA_ENGINES)
 def test_tl_engines_return_complex_pascal_travelling_wave(engine, request):
     """COHERENT_TL from Bellhop/Kraken/Scooter/RAM is complex pressure in Pa
-    with the travelling-wave phase convention; ``.db`` derives real TL."""
+    with the travelling-wave phase convention; ``.dB`` derives real TL."""
     field = request.getfixturevalue(engine)
     assert field.is_complex
     assert field.kind == 'pressure'
     assert field.unit == 'Pa'
     assert field.phase_reference == 'travelling_wave'
     assert list(field.coords) == ['depth', 'range']
-    db = np.asarray(field.db)
-    assert not np.iscomplexobj(db)
-    assert np.isfinite(db[I_WATER, 1:]).all()
+    dB = np.asarray(field.dB)
+    assert not np.iscomplexobj(dB)
+    assert np.isfinite(dB[I_WATER, 1:]).all()
 
 
 PHASE_REFERENCE_ENGINES = COMPLEX_PA_ENGINES + [
@@ -364,14 +364,14 @@ def test_oasp_shares_the_travelling_wave_sign_with_scooter(oasp_field):
 
 
 @pytest.mark.requires_oases
-def test_oast_returns_real_db_tl(oast_field):
+def test_oast_returns_real_dB_tl(oast_field):
     """OAST's .plt carries only real TL, so its Field is real with
-    ``unit='dB'`` and ``.db`` is the data itself (no derivation)."""
+    ``unit='dB'`` and ``.dB`` is the data itself (no derivation)."""
     assert not oast_field.is_complex
     assert oast_field.kind == 'pressure'
     assert oast_field.unit == 'dB'
     np.testing.assert_array_equal(
-        np.asarray(oast_field.db), np.asarray(oast_field.data))
+        np.asarray(oast_field.dB), np.asarray(oast_field.data))
 
 
 def test_sparc_returns_real_time_domain_pascal(sparc_field):
@@ -440,11 +440,11 @@ def test_depth_swap_reciprocity_on_a_range_independent_channel():
     forward = np.asarray(Kraken(verbose=False).run(
         env, Source(depths=30.0, frequencies=FREQ),
         Receiver(depths=np.array([80.0]), ranges=ranges),
-        run_mode=RunMode.COHERENT_TL).db)
+        run_mode=RunMode.COHERENT_TL).dB)
     swapped = np.asarray(Kraken(verbose=False).run(
         env, Source(depths=80.0, frequencies=FREQ),
         Receiver(depths=np.array([30.0]), ranges=ranges),
-        run_mode=RunMode.COHERENT_TL).db)
+        run_mode=RunMode.COHERENT_TL).dB)
     np.testing.assert_allclose(swapped, forward, rtol=0, atol=0.05)
 
 
@@ -518,7 +518,7 @@ class TestWaveEnginesAreReciprocal:
             f = model.run(self._env(),
                           uacpy.Source(depths=zs, frequencies=self.FREQ),
                           uacpy.Receiver(depths=[zr], ranges=[self.RANGE]))
-        return float(np.asarray(f.to_db().db, dtype=float).ravel()[0])
+        return float(np.asarray(f.to_dB().dB, dtype=float).ravel()[0])
 
     @pytest.mark.parametrize('engine', ['Kraken', 'RAM', 'Scooter'])
     def test_swapping_source_and_receiver_depth_returns_the_same_level(
@@ -568,7 +568,7 @@ def test_every_engine_reports_one_line_source_level():
     for name, model in (('bellhop', Bellhop(verbose=False)),
                         ('kraken', Kraken(verbose=False)),
                         ('scooter', Scooter(verbose=False))):
-        grids[name] = np.asarray(model.run(env, src, rcv).db, dtype=float)
+        grids[name] = np.asarray(model.run(env, src, rcv).dB, dtype=float)
     common = np.all([np.isfinite(tl) for tl in grids.values()], axis=0)
     # The r > 0 in-water cells: enough of them that the mean is not one
     # sample, and the same cells for every engine.

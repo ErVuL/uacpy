@@ -357,9 +357,9 @@ These are the physics-agnostic primitives every model consumes:
   `ResultStack`. Defines `PhaseReference` enum (`'travelling_wave'` /
   `'time_domain_native'`).
 - `absorption.py` — `Thorp`, `FrancoisGarrison`, `Biological`,
-  `ConstantAbsorption`. Callers use `alpha_db_per_m(f, z)`, which the base
+  `ConstantAbsorption`. Callers use `alpha_dB_per_m(f, z)`, which the base
   class implements: it validates the frequency once for every model and
-  dispatches to `_alpha_db_per_m(f, z)`, the method a new subclass
+  dispatches to `_alpha_dB_per_m(f, z)`, the method a new subclass
   overrides. All implement `topopt_code()`. Models read `env.absorption` and emit the right AT
   `TopOpt[4]` letter automatically.
 - `acoustics.py` — user-helper sound-speed / density / pekeris-root

@@ -72,9 +72,9 @@ def main():
     rx = np.concatenate([np.zeros(811), wav])
     echo = np.zeros_like(rx); d = int(0.03 * fs); echo[d:] = 0.4 * rx[:rx.size - d]
     rx = rx + echo
-    snr_db = 12.0
-    rx = rx + np.sqrt(np.mean(wav ** 2) / 10 ** (snr_db / 10)) * rng.standard_normal(rx.size)
-    print(f"  channel    : 811-sample delay + 30 ms echo (0.4) + {snr_db:.0f} dB SNR")
+    snr_dB = 12.0
+    rx = rx + np.sqrt(np.mean(wav ** 2) / 10 ** (snr_dB / 10)) * rng.standard_normal(rx.size)
+    print(f"  channel    : 811-sample delay + 30 ms echo (0.4) + {snr_dB:.0f} dB SNR")
 
     # --- detect + decode ---
     start, metric = janus.janus_detect(rx, fs)

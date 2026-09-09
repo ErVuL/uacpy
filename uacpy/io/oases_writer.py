@@ -1070,7 +1070,7 @@ _OAST_KWARGS = frozenset({
 _OASN_KWARGS = frozenset({
     'surface_noise_level', 'white_noise_level', 'deep_noise_level',
     'deep_source_depth', 'discrete_sources',
-    'integration_offset', 'offdb', 'nw_samples', 'c_low', 'c_high',
+    'integration_offset', 'offdB', 'nw_samples', 'c_low', 'c_high',
     'cmins_discrete', 'cmaxs_discrete', 'cmins_replica', 'cmaxs_replica',
     'replica_zmin', 'replica_zmax', 'replica_nz',
     'replica_xmin', 'replica_xmax', 'replica_nx',
@@ -2048,8 +2048,8 @@ def write_oasn_input(
             per-source phase. As for the surface level, a negative ``'level'``
             names a spectrum-file unit number (oasnun22.f:383-385) rather
             than a level in dB, and is rejected.
-        - integration_offset, offdb : float
-            Wavenumber-integration contour offset in dB/wavelength; ``offdb``
+        - integration_offset, offdB : float
+            Wavenumber-integration contour offset in dB/wavelength; ``offdB``
             wins when both are given (default: 0)
         - nw_samples : int
             Number of wavenumber samples for every integration block;
@@ -2216,12 +2216,12 @@ def write_oasn_input(
         _write_oases_header(f, env, options, "OASN Simulation via UACPY")
 
         # Block III: Frequencies — FREQ1 FREQ2 NFREQ COFF
-        # (unoasn22.f:142 READ(1,*) FREQ1,FREQ2,NFREQ,OFFDBIN). ``offdb`` and
+        # (unoasn22.f:142 READ(1,*) FREQ1,FREQ2,NFREQ,OFFDBIN). ``offdB`` and
         # ``integration_offset`` name the same OASES field, so an explicit
-        # ``offdb`` wins rather than being silently dropped.
+        # ``offdB`` wins rather than being silently dropped.
         _emit_oases_freq_line(
             f, freq_min_b, freq_max_b, nfreq,
-            integration_offset=kwargs.get('offdb', integration_offset),
+            integration_offset=kwargs.get('offdB', integration_offset),
         )
 
         # Block IV: Environment — NL then NL layer records, read by INENVI

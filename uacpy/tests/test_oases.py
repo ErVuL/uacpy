@@ -83,9 +83,9 @@ class TestOasesKeepsTheFullSSP:
                              ranges=np.linspace(1000.0, 8000.0, 15))
         with _w.catch_warnings():
             _w.simplefilter('ignore')
-            k = np.asarray(uacpy.Kraken(timeout=600).run(env, src, rcv).db)
+            k = np.asarray(uacpy.Kraken(timeout=600).run(env, src, rcv).dB)
             o = np.asarray(uacpy.OASES.for_mode(RunMode.COHERENT_TL)
-                           .run(env, src, rcv).db)
+                           .run(env, src, rcv).dB)
         d = np.abs(k - o)
         # Median, not max: a modal sum and a wavenumber integral put the
         # interference nulls of a ducted profile at slightly different ranges,
@@ -316,7 +316,7 @@ def test_oast_short_range_run_returns_a_field_not_nan():
         tl = np.asarray(uacpy.OASES.for_mode(RunMode.COHERENT_TL).run(
             env, uacpy.Source(depths=50.0, frequencies=500.0),
             uacpy.Receiver(depths=np.linspace(10.0, 90.0, 9),
-                           ranges=np.linspace(10.0, 40.0, 20))).db)
+                           ranges=np.linspace(10.0, 40.0, 20))).dB)
     assert np.isfinite(tl).any(), "entire short-range TL field is NaN"
     finite = tl[np.isfinite(tl)]
     assert finite.min() > 0.0 and finite.max() < 200.0
@@ -639,7 +639,7 @@ class TestOasnWhiteNoiseDefaultThroughTheModel:
         text = self._deck(tmp_path, monkeypatch)
         assert '70.0 -200.0 0.0 0' in text
 
-    def test_explicit_zero_reaches_the_deck_as_0_db(self, tmp_path,
+    def test_explicit_zero_reaches_the_deck_as_0_dB(self, tmp_path,
                                                     monkeypatch):
         text = self._deck(tmp_path, monkeypatch, white_noise_level=0.0)
         assert '70.0 0.0 0.0 0' in text

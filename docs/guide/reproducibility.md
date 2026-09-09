@@ -89,7 +89,7 @@ import numpy as np
 import uacpy.comms as comms
 
 rng = np.random.default_rng(12345)
-link = comms.simulate_link('qpsk', ebn0_db=12.0, n_bits=20000, rng=rng)
+link = comms.simulate_link('qpsk', ebn0_dB=12.0, n_bits=20000, rng=rng)
 ```
 
 **Every set-to-output path is sorted.** Python's set iteration order depends

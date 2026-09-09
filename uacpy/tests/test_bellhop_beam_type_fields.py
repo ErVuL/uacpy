@@ -81,7 +81,7 @@ def _max_tl_diff(field_a, field_b, *, skip_first_range=False):
     the column one range step from the source, where the ray-centred and
     Cartesian hat windows differ by ~0.1 dB in the near field — real data
     since the wrapper pads 'g'/'R'/'C', not a coordinate-system disagreement."""
-    tl_a, tl_b = np.asarray(field_a.db), np.asarray(field_b.db)
+    tl_a, tl_b = np.asarray(field_a.dB), np.asarray(field_b.dB)
     if skip_first_range:
         tl_a, tl_b = tl_a[..., 1:], tl_b[..., 1:]
     both = np.isfinite(tl_a) & np.isfinite(tl_b)
@@ -103,19 +103,19 @@ DISTINCT_PAIRS = [
 
 
 @pytest.mark.parametrize(
-    'bt_a,bt_b,min_diff_db',
+    'bt_a,bt_b,min_diff_dB',
     DISTINCT_PAIRS,
     ids=[f'{a}-vs-{b}' for a, b, _ in DISTINCT_PAIRS],
 )
 def test_different_beam_models_give_different_tl(beam_runs, bt_a, bt_b,
-                                                 min_diff_db):
+                                                 min_diff_dB):
     """Beam models with different influence routines must land measurably
     different TL on the same case — the field-level proof that ``beam_type``
     reaches the solver."""
     diff = _max_tl_diff(beam_runs[bt_a][0], beam_runs[bt_b][0])
-    assert diff > min_diff_db, (
+    assert diff > min_diff_dB, (
         f"beam_type {bt_a!r} and {bt_b!r} produced near-identical TL "
-        f"(max|dTL|={diff:.4f} dB <= {min_diff_db} dB) — beam_type may not "
+        f"(max|dTL|={diff:.4f} dB <= {min_diff_dB} dB) — beam_type may not "
         f"be reaching the Bellhop influence routine"
     )
 

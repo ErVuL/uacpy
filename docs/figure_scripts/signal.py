@@ -56,7 +56,7 @@ from uacpy.visualization.plots._common import _cell_edge_extent, _flip_y
 GUIDE = True
 
 
-def _db(x, floor=-60.0):
+def _dB(x, floor=-60.0):
     """Amplitude (real or complex) -> dB re peak, clipped at ``floor``."""
     a = np.abs(np.asarray(x))
     peak = a.max()
@@ -65,7 +65,7 @@ def _db(x, floor=-60.0):
     return np.maximum(d, floor)
 
 
-def _power_db(p, floor=-60.0):
+def _power_dB(p, floor=-60.0):
     """Power -> dB relative to the peak, clipped at ``floor``."""
     a = np.abs(np.asarray(p))
     with np.errstate(divide='ignore'):
@@ -133,7 +133,7 @@ def chirp_sweep_laws():
                               (axes[1], hfm, t_hfm, 'hfm_chirp — hyperbolic sweep')]:
         f, t_spec, Sxx = spectrogram(sig, fs, nperseg=256, noverlap=240)
         ax.set_facecolor('k')
-        ax.pcolormesh(t_spec * 1e3, f, _power_db(Sxx, floor=-35.0),
+        ax.pcolormesh(t_spec * 1e3, f, _power_dB(Sxx, floor=-35.0),
                       shading='auto', cmap='magma', vmin=-35.0, vmax=0.0)
         f_inst = instantaneous_frequency(sig, fs)
         keep = slice(int(0.015 * fs), -int(0.015 * fs))
@@ -185,7 +185,7 @@ def pulse_compression_gain():
     # window against the RMS of the noise that add_noise actually drew.
     clean = rx * 10.0 ** (180.0 / 20.0)
     inside = (t_rx >= span[0]) & (t_rx <= span[1])
-    snr_db = 20.0 * np.log10(np.sqrt(np.mean(clean[inside] ** 2))
+    snr_dB = 20.0 * np.log10(np.sqrt(np.mean(clean[inside] ** 2))
                              / np.std(noisy - clean))
 
     fig, axes = plt.subplots(2, 1, figsize=(9.5, 6.4))
@@ -195,13 +195,13 @@ def pulse_compression_gain():
                  label='envelope()')
     axes[0].set_title(f'Received — a 50 ms chirp smeared over '
                       f'{1e3 * (span[1] - span[0]):.0f} ms of Bellhop '
-                      f'multipath, at {snr_db:+.0f} dB in-band SNR',
+                      f'multipath, at {snr_dB:+.0f} dB in-band SNR',
                       fontweight='bold', fontsize=10)
     axes[0].set_xlabel('Time (s)')
     axes[0].set_ylabel('Pressure (Pa)')
 
     keep = (lags > 1.85) & (lags < 2.45)
-    axes[1].plot(lags[keep], _db(comp[keep], floor=-40.0), lw=0.6,
+    axes[1].plot(lags[keep], _dB(comp[keep], floor=-40.0), lw=0.6,
                  color='#1f4e79')
     axes[1].axvspan(*span, color='#f0ad4e', alpha=0.18,
                     label='Bellhop arrival window')
@@ -237,7 +237,7 @@ def ambiguity_surfaces():
     for ax, sig, name in [(axes[0], lfm, 'lfm_chirp'), (axes[1], hfm, 'hfm_chirp')]:
         delays, dop, chi = ambiguity_function(
             analytic_signal(sig), fs, doppler_hz=doppler)
-        im = ax.imshow(_db(chi, floor=-30.0), aspect='auto', origin='lower',
+        im = ax.imshow(_dB(chi, floor=-30.0), aspect='auto', origin='lower',
                        extent=_cell_edge_extent(delays * 1e3, dop),
                        vmin=-30.0, vmax=0.0, cmap='viridis')
         ax.set_xlim(-6.0, 6.0)
@@ -280,7 +280,7 @@ def resolution_tradeoff():
     for ax, nperseg in [(axes[0], 64), (axes[1], 512)]:
         f, t_spec, Sxx = spectrogram(sig, fs, nperseg=nperseg,
                                      noverlap=nperseg - 8)
-        ax.pcolormesh(t_spec, f, _power_db(Sxx, floor=-40.0), shading='auto',
+        ax.pcolormesh(t_spec, f, _power_dB(Sxx, floor=-40.0), shading='auto',
                       cmap='magma', vmin=-40.0, vmax=0.0)
         ax.set_title(f'spectrogram(nperseg={nperseg}) — '
                      f'Δf ≈ {fs / nperseg:.0f} Hz, Δt = {nperseg / fs * 1e3:.0f} ms',
@@ -288,7 +288,7 @@ def resolution_tradeoff():
         ax.set_xlabel('Time (s)')
     freqs, W = cwt(sig, fs, frequencies=np.logspace(np.log10(20.0),
                                                     np.log10(900.0), 160))
-    axes[2].pcolormesh(t, freqs, _db(W, floor=-40.0), shading='auto',
+    axes[2].pcolormesh(t, freqs, _dB(W, floor=-40.0), shading='auto',
                        cmap='magma', vmin=-40.0, vmax=0.0)
     axes[2].set_title('cwt(wavelet="morlet") — Δf/f constant',
                       fontweight='bold', fontsize=10)
@@ -323,7 +323,7 @@ def wigner_ville_cross_terms():
     f_p, t_p, P = wigner_ville(sig, fs, freq_window=63, time_window=25)
 
     fig, axes = plt.subplots(1, 3, figsize=(13.0, 4.2), sharey=True)
-    axes[0].pcolormesh(t_s, f_s, _power_db(Sxx, floor=-35.0), shading='auto',
+    axes[0].pcolormesh(t_s, f_s, _power_dB(Sxx, floor=-35.0), shading='auto',
                        cmap='magma', vmin=-35.0, vmax=0.0)
     axes[0].set_title('spectrogram — no cross-terms, blurred',
                       fontweight='bold', fontsize=10)
@@ -331,7 +331,7 @@ def wigner_ville_cross_terms():
             (axes[1], f_w, t_w, W, 'wigner_ville() — sharp, with a cross-term'),
             (axes[2], f_p, t_p, P,
              'wigner_ville(freq_window=63, time_window=25)')]:
-        ax.pcolormesh(tt, ff, _power_db(np.maximum(D, 0.0), floor=-35.0),
+        ax.pcolormesh(tt, ff, _power_dB(np.maximum(D, 0.0), floor=-35.0),
                       shading='auto', cmap='magma', vmin=-35.0, vmax=0.0)
         ax.set_title(name, fontweight='bold', fontsize=10)
     for ax in axes:
@@ -402,7 +402,7 @@ def fk_round_trip():
     fig, axes = plt.subplots(2, 2, figsize=(11.0, 8.0))
     draw(axes[0, 0], gather, 'Bellhop gather — 64-element vertical array, 1 km')
     ax = axes[0, 1]
-    ax.imshow(_power_db(power, floor=-40.0), aspect='auto', origin='lower',
+    ax.imshow(_power_dB(power, floor=-40.0), aspect='auto', origin='lower',
               extent=_cell_edge_extent(wavenumbers, frequencies),
               vmin=-40.0, vmax=0.0, cmap='magma')
     draw_sound_cone(ax, frequencies[-1], wavenumbers[-1], 1500.0, color='#7fffd4')
@@ -478,7 +478,7 @@ def modal_warping():
     axes[0].grid(alpha=0.3)
 
     f_a, t_a, S_a = spectrogram(arrival, fs, nperseg=128, noverlap=124)
-    axes[1].pcolormesh(t_a + range_m / c, f_a, _power_db(S_a, floor=-30.0),
+    axes[1].pcolormesh(t_a + range_m / c, f_a, _power_dB(S_a, floor=-30.0),
                        shading='auto', cmap='magma', vmin=-30.0, vmax=0.0)
     axes[1].set_xlabel('Time (s)')
     axes[1].set_ylabel('Frequency (Hz)')
@@ -487,7 +487,7 @@ def modal_warping():
                       fontweight='bold', fontsize=10)
 
     f_w, t_w, S_w = spectrogram(warped, fs_warp, nperseg=256, noverlap=252)
-    axes[2].pcolormesh(t_w, f_w, _power_db(S_w, floor=-30.0), shading='auto',
+    axes[2].pcolormesh(t_w, f_w, _power_dB(S_w, floor=-30.0), shading='auto',
                        cmap='magma', vmin=-30.0, vmax=0.0)
     axes[2].set_xlabel('Warped time (s)')
     axes[2].set_ylabel('Warped frequency (Hz)')
@@ -511,9 +511,9 @@ def spectra_and_bands():
     """A synthesised soundscape, its Welch PSD, and its decidecade band levels."""
     rng = np.random.default_rng(0)
     f_target = np.logspace(np.log10(10.0), np.log10(10_000.0), 200)
-    level_db = 100.0 - 17.0 * np.log10(f_target / 100.0)
-    level_db += 12.0 * np.exp(-0.5 * ((np.log10(f_target / 300.0)) / 0.02) ** 2)
-    target = 1e-12 * 10.0 ** (level_db / 10.0)          # Pa²/Hz
+    level_dB = 100.0 - 17.0 * np.log10(f_target / 100.0)
+    level_dB += 12.0 * np.exp(-0.5 * ((np.log10(f_target / 300.0)) / 0.02) ** 2)
+    target = 1e-12 * 10.0 ** (level_dB / 10.0)          # Pa²/Hz
 
     _, x, fs = synthesize_noise_from_psd(
         target, f_target, duration=30.0, sample_rate=25_000,

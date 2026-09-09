@@ -1029,7 +1029,7 @@ def write_ssp_section(
     f.write(f"{int(n_mesh)}  {surface_roughness:.6f}  {bottom_depth_rounded:{_DECK_DEPTH_FMT}}\n")
 
     baseline = (
-        env.absorption.value_db_per_wavelength
+        env.absorption.value_dB_per_wavelength
         if isinstance(env.absorption, ConstantAbsorption)
         else 0.0
     )

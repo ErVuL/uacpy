@@ -1226,7 +1226,7 @@ class TestMissingVolumeAbsorptionIsAnnounced:
         from uacpy.core.absorption import Thorp
         env, src, rcv = self._triple(40e3, 1000.0)
         alpha = float(np.atleast_1d(
-            Thorp().alpha_db_per_m(40e3, 0.0))[0])
+            Thorp().alpha_dB_per_m(40e3, 0.0))[0])
         expected = alpha * 1000.0
         msg = self._warnings_for(env, src, rcv)[0]
         assert f"{expected:.1f}" in msg, msg

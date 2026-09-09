@@ -114,7 +114,7 @@ class TestSSPInterpolationMethods:
         for scheme in ('linear', 'cubic'):
             field = Bellhop(verbose=False, interp_ssp=scheme).compute_tl(
                 env=env, source=src, receiver=rcv)
-            tl[scheme] = np.asarray(field.db).ravel()
+            tl[scheme] = np.asarray(field.dB).ravel()
         both = np.isfinite(tl['linear']) & np.isfinite(tl['cubic'])
         assert both.sum() > tl['linear'].size // 2
         # Identical decks reproduce bit-identically, so any real difference

@@ -76,10 +76,10 @@ def main():
     rx = np.convolve(wav, h)
     rx = resample_poly(rx, 100015, 100000)              # 150 ppm Doppler
     rx = np.concatenate([np.zeros(37), rx])
-    snr_db = 24.0
-    rx = rx + np.sqrt(np.mean(rx ** 2) / 10 ** (snr_db / 10)) * rng.standard_normal(rx.size)
+    snr_dB = 24.0
+    rx = rx + np.sqrt(np.mean(rx ** 2) / 10 ** (snr_dB / 10)) * rng.standard_normal(rx.size)
     print(f"  channel    : 3-path ({h.nonzero()[0][-1]}-sample spread) + 150 ppm "
-          f"Doppler, {snr_db:.0f} dB SNR")
+          f"Doppler, {snr_dB:.0f} dB SNR")
 
     # --- receive ---
     rxr = comms.OFDMReceiver("qpsk", nsc, cp, code=code)

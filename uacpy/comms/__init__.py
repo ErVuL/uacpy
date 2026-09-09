@@ -89,7 +89,7 @@ from .coding import (
     interleave,
     viterbi_decode,
 )
-from .dsss import despread, m_sequence, processing_gain_db, spread
+from .dsss import despread, m_sequence, processing_gain_dB, spread
 
 from . import (
     channel_est,
@@ -144,7 +144,7 @@ __all__ = [
     # coding
     "ConvCode", "conv_encode", "viterbi_decode", "interleave", "deinterleave",
     # DSSS
-    "m_sequence", "spread", "despread", "processing_gain_db",
+    "m_sequence", "spread", "despread", "processing_gain_dB",
     # submodules
     "modulation", "metrics", "channel_models", "equalization", "doppler",
     "sync", "link", "channel_est", "ofdm", "coding",

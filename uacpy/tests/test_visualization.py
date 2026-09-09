@@ -170,7 +170,7 @@ class TestPlotField:
 
 class TestValueModeDefaults:
     """``value=`` defaults to ``'real'`` if and only if the field carries a
-    ``time`` axis, and ``'db'`` otherwise; each default brings its own colour
+    ``time`` axis, and ``'dB'`` otherwise; each default brings its own colour
     treatment."""
 
     def test_time_field_defaults_to_real_with_seismic_rms_clim(self, time_field):
@@ -186,12 +186,12 @@ class TestValueModeDefaults:
         assert mesh.get_clim() == pytest.approx((-rms, rms))
         plt.close(fig)
 
-    def test_non_time_field_defaults_to_db(self, complex_field):
+    def test_non_time_field_defaults_to_dB(self, complex_field):
         fig, ax = plots.plot_field(complex_field)
         mesh = ax.collections[0]
         # The drawn array is the dB view, on the fixed TL scale.
         assert np.allclose(np.asarray(mesh.get_array()).ravel(),
-                           complex_field.db.ravel())
+                           complex_field.dB.ravel())
         assert mesh.get_clim() == (20.0, 120.0)
         plt.close(fig)
 
@@ -901,7 +901,7 @@ class TestNoiseSonarPlotterSignatures:
     @pytest.mark.parametrize('name, params, args, kwargs', [
         ('plot_roc', ('deflection', 'ax', 'pfa', 'pd'),
          (), {'deflection': 2.0, 'n_points': 16}),
-        ('plot_source_level', ('frequency', 'level_db', 'ax', 'label'),
+        ('plot_source_level', ('frequency', 'level_dB', 'ax', 'label'),
          (np.array([63.0, 125.0, 250.0]),
           np.array([150.0, 148.0, 145.0])), {}),
         ('plot_weighting', ('group', 'ax', 'frequency'),
@@ -1381,13 +1381,13 @@ def test_a_difference_field_is_drawn_as_a_signed_residual_not_a_loss():
 
     # Untagged, it is claimed by the transmission-loss treatment.
     assert resid.kind == 'pressure'
-    assert _is_loss_view(resid, 'db') is True
+    assert _is_loss_view(resid, 'dB') is True
 
     resid.metadata['kind'] = 'difference'
     assert resid.kind == 'difference'
-    assert _is_loss_view(resid, 'db') is False, (
+    assert _is_loss_view(resid, 'dB') is False, (
         "a signed residual must not be drawn with its value axis inverted")
-    cmap, lo, hi = _value_style(resid, 'db')
+    cmap, lo, hi = _value_style(resid, 'dB')
     assert (lo, hi) != _TL_LIMITS, "the fixed TL window swallows a residual"
     assert lo == -hi, f"a residual needs a window symmetric about 0, got {lo, hi}"
     assert 'TL' not in _q.label('difference', 'dB')
@@ -1798,7 +1798,7 @@ class TestATLDifferenceIsNotLabelledAsALevel:
 class TestOnlySomeViewsCarryAFixedColourWindow:
     """The docstring and the guide both said the dB view is "never an
     autoscale". It is one for two of the four registered kinds, and
-    ``value='mag_db'`` takes the REVERSED TL map, not the TL map. This table
+    ``value='mag_dB'`` takes the REVERSED TL map, not the TL map. This table
     is what the prose now describes, so the two cannot drift apart silently."""
 
     @staticmethod
@@ -1809,11 +1809,11 @@ class TestOnlySomeViewsCarryAFixedColourWindow:
                      model='Synth', frequencies=100.0, metadata=metadata)
 
     @pytest.mark.parametrize('kind, unit, value, expected', [
-        ('pressure', None, 'db', ('jet_r', 20.0, 120.0)),
-        ('signal_excess', 'dB', 'db', ('RdBu_r', -40.0, 40.0)),
-        ('reverberation', 'dB', 'db', ('jet_r', None, None)),
+        ('pressure', None, 'dB', ('jet_r', 20.0, 120.0)),
+        ('signal_excess', 'dB', 'dB', ('RdBu_r', -40.0, 40.0)),
+        ('reverberation', 'dB', 'dB', ('jet_r', None, None)),
         ('probability_of_detection', '1', 'real', ('RdYlGn', 0.0, 1.0)),
-        ('pressure', None, 'mag_db', ('jet', None, None)),
+        ('pressure', None, 'mag_dB', ('jet', None, None)),
     ])
     def test_the_colour_window_each_view_actually_takes(self, kind, unit,
                                                         value, expected):
@@ -2115,7 +2115,7 @@ class TestCompareModelsSharesItsColourScale:
                      coords={'depth': d, 'range': r},
                      model='Synth', frequencies=100.0)
 
-    @pytest.mark.parametrize('value', ['mag', 'real', 'mag_db', 'db'])
+    @pytest.mark.parametrize('value', ['mag', 'real', 'mag_dB', 'dB'])
     def test_every_value_shares_one_scale(self, value):
         from uacpy.visualization.plots.fields import compare_models
         fig, axes = compare_models([self._field(1.0 + 0j),
@@ -2233,11 +2233,11 @@ class TestLinearViewsGetTheLinearColormap:
     transmission-loss ``jet_r`` with an asymmetric autoscale puts zero at an
     arbitrary colour.
 
-    ``mag_db`` takes that map MIRRORED, because it carries the negated
-    quantity (``-field.db``): larger is louder there and larger is quieter
+    ``mag_dB`` takes that map MIRRORED, because it carries the negated
+    quantity (``-field.dB``): larger is louder there and larger is quieter
     on the loss view, so sharing one map unmirrored paints the same water
     two different colours — see
-    ``test_the_loud_end_is_the_same_colour_in_both_db_views``."""
+    ``test_the_loud_end_is_the_same_colour_in_both_dB_views``."""
 
     @staticmethod
     def _field():
@@ -2249,7 +2249,7 @@ class TestLinearViewsGetTheLinearColormap:
                      model='Synth', frequencies=100.0)
 
     @pytest.mark.parametrize('value, expected', [
-        ('db', 'jet_r'), ('mag_db', 'jet'),
+        ('dB', 'jet_r'), ('mag_dB', 'jet'),
         ('mag', 'seismic'), ('real', 'seismic'), ('imag', 'seismic'),
     ])
     def test_colormap_per_value_mode(self, value, expected):
@@ -2309,7 +2309,7 @@ class TestLinearViewsGetTheLinearColormap:
                 == 'Probability of detection')
         plt.close('all')
 
-    @pytest.mark.parametrize('value', ['db', 'mag_db', 'mag', 'real'])
+    @pytest.mark.parametrize('value', ['dB', 'mag_dB', 'mag', 'real'])
     def test_compare_models_picks_the_same_colormap(self, value):
         """One field must not render two ways through the two public entry
         points."""
@@ -2476,7 +2476,7 @@ def test_colorbar_takes_the_mesh_when_another_collection_is_drawn_first(
     polygon's default 0..1 scale under the field's own dB label."""
     monkeypatch.setattr(_fields, 'plot_field',
                         _draw_decoy_then(_fields.plot_field))
-    fig, axes = compare_models([_grid()], labels=['a'], value='db')
+    fig, axes = compare_models([_grid()], labels=['a'], value='dB')
     panel = axes[0, 0]
     assert [type(c).__name__ for c in panel.collections][0] != 'QuadMesh'
     assert len(colorbar_mappables) == 1
@@ -2495,7 +2495,7 @@ def test_no_colorbar_when_no_panel_drew_a_mesh(monkeypatch,
         return ax.figure, ax
 
     monkeypatch.setattr(_fields, 'plot_field', mesh_free)
-    fig, axes = compare_models([_grid()], labels=['a'], value='db')
+    fig, axes = compare_models([_grid()], labels=['a'], value='dB')
     assert axes[0, 0].collections            # the panel is not empty
     assert colorbar_mappables == []
 
@@ -2508,7 +2508,7 @@ def test_colorbar_maps_the_shared_scale_through_contours_and_seafloor(
     index form it replaces — it pins the contract, not the selection."""
     env = uacpy.Environment(bathymetry=200.0, ssp=1500.0)
     fig, axes = compare_models([_grid(), _grid()], labels=['a', 'b'], env=env,
-                               value='db', contours=[60.0, 80.0], vmin=40.0,
+                               value='dB', contours=[60.0, 80.0], vmin=40.0,
                                vmax=90.0)
     panel = axes[0, -1]
     kinds = [type(c).__name__ for c in panel.collections]
@@ -2757,11 +2757,11 @@ def _clim(ax):
     raise AssertionError('no mappable on the axes')
 
 
-def test_a_no_energy_cell_does_not_set_the_db_colour_limit():
+def test_a_no_energy_cell_does_not_set_the_dB_colour_limit():
     """600 dB is the marker for "no energy here", not a level the model
     computed, so it must not decide the scale: letting it in stretches the
     bar to 580 dB and paints every real level into the top sixth of it."""
-    fig, ax = _field_with_a_no_energy_cell().plot(value='mag_db')
+    fig, ax = _field_with_a_no_energy_cell().plot(value='mag_dB')
     lo, hi = _clim(ax)
     assert hi - lo < 120.0, f"colour bar spans {hi - lo:.0f} dB"
     plt.close(fig)
@@ -2779,22 +2779,22 @@ def _real_signal_excess_field():
                  frequencies=1000.0, metadata={'kind': 'signal_excess'})
 
 
-@pytest.mark.parametrize('value', ['mag', 'mag_db', 'phase', 'imag'])
+@pytest.mark.parametrize('value', ['mag', 'mag_dB', 'phase', 'imag'])
 def test_the_views_of_a_complex_field_are_refused_on_a_real_one(value):
-    """``.db`` returns ``-20*log10|data|`` for complex data but the data
+    """``.dB`` returns ``-20*log10|data|`` for complex data but the data
     ITSELF for real data, which is already a level. A view derived from the
     complex payload therefore has nothing to read on a real field, and
-    ``mag_db`` negating that level silently inverted it: -20 dB of signal
+    ``mag_dB`` negating that level silently inverted it: -20 dB of signal
     excess, meaning undetectable, plotted as +20."""
     with pytest.raises(ConfigurationError, match='complex'):
         _real_signal_excess_field().plot(value=value)
 
 
-def test_the_loud_end_is_the_same_colour_in_both_db_views():
-    """``mag_db`` is ``-field.db``: the same water, the opposite sign. The
+def test_the_loud_end_is_the_same_colour_in_both_dB_views():
+    """``mag_dB`` is ``-field.dB``: the same water, the opposite sign. The
     colours have to run the opposite way with it, or the two dB views paint
     one cell two different colours — measured, the loudest water came out
-    dark red under ``db`` and dark blue under ``mag_db``, while style.py
+    dark red under ``dB`` and dark blue under ``mag_dB``, while style.py
     states the convention as "LOW TL (loud, near) is red"."""
     from uacpy.core.results import Field, PhaseReference
     depths = np.linspace(0.0, 200.0, 20)
@@ -2815,14 +2815,14 @@ def test_the_loud_end_is_the_same_colour_in_both_db_views():
         plt.close(fig)
         return np.asarray(rgba[:3])
 
-    assert np.allclose(loud_colour('db'), loud_colour('mag_db'), atol=0.1), (
-        f"db paints the loudest cell {loud_colour('db')} and mag_db paints "
-        f"it {loud_colour('mag_db')}")
+    assert np.allclose(loud_colour('dB'), loud_colour('mag_dB'), atol=0.1), (
+        f"dB paints the loudest cell {loud_colour('dB')} and mag_dB paints "
+        f"it {loud_colour('mag_dB')}")
 
 
-def test_the_marker_is_dropped_whichever_sign_the_db_view_carries():
-    """``db`` and ``mag_db`` are the same numbers with opposite signs —
-    ``mag_db`` is literally ``-field.db`` — so the no-energy marker is -600
+def test_the_marker_is_dropped_whichever_sign_the_dB_view_carries():
+    """``dB`` and ``mag_dB`` are the same numbers with opposite signs —
+    ``mag_dB`` is literally ``-field.dB`` — so the no-energy marker is -600
     on one and +600 on the other. A filter written for one direction leaves
     the other setting the limit: a loss view then runs to 600 dB and packs
     the real levels into the bottom tenth of the bar."""
@@ -2840,7 +2840,7 @@ def test_the_marker_is_dropped_whichever_sign_the_db_view_carries():
                   frequencies=1000.0,
                   phase_reference=PhaseReference.TRAVELLING_WAVE,
                   metadata={'kind': 'reverberation'})
-    fig, ax = field.plot(value='db')
+    fig, ax = field.plot(value='dB')
     lo, hi = _clim(ax)
     assert hi - lo < 120.0, f"loss colour bar spans {hi - lo:.0f} dB"
     plt.close(fig)
@@ -2851,10 +2851,10 @@ def test_a_genuine_deep_null_keeps_its_colour():
     not: the 1st percentile of this field lands at -80 dB and clips the real
     -70 dB interference null, which is exactly the feature the view is for."""
     field = _field_with_a_no_energy_cell()
-    fig, ax = field.plot(value='mag_db')
+    fig, ax = field.plot(value='mag_dB')
     lo, _ = _clim(ax)
-    db = 20 * np.log10(np.abs(np.asarray(field.data)))
-    null = np.sort(db.ravel())[1]          # deepest real level, past the marker
+    dB = 20 * np.log10(np.abs(np.asarray(field.data)))
+    null = np.sort(dB.ravel())[1]          # deepest real level, past the marker
     assert lo <= null + 1e-6, (
         f"colour floor {lo:.1f} dB clips the genuine null at {null:.1f} dB")
     plt.close(fig)
@@ -2868,9 +2868,9 @@ def _absorbing_arrivals():
     volume absorption in the imaginary travel time and the second path is
     1.24 km longer.
     """
-    f0, alpha_db_per_km = 40e3, 12.90
+    f0, alpha_dB_per_km = 40e3, 12.90
     def dimag(arc_km):
-        return -(alpha_db_per_km * arc_km / 8.6858896) / (2 * np.pi * f0)
+        return -(alpha_dB_per_km * arc_km / 8.6858896) / (2 * np.pi * f0)
     cell = {
         "delays": np.array([0.669, 1.496, 8.06]),
         "amplitudes": np.array([2.23e-4, 1.49e-4, 1.0e-8]),
@@ -2926,6 +2926,132 @@ def test_arrivals_left_off_the_axis_are_declared():
     # The declaration names the axis limit in the axis's own unit (ms), so
     # the reader can place the missing arrival against the ticks.
     assert f"beyond {max(ax.get_xlim()):.0f} ms" in text, text
+    plt.close(fig)
+
+
+def _arrivals_at_levels(amplitudes):
+    """Arrivals carrying no volume absorption, so the received level IS the
+    amplitude column and a test can name a dB level directly."""
+    amplitudes = np.asarray(amplitudes, dtype=float)
+    n = amplitudes.size
+    cell = {
+        "delays": np.linspace(1.0, 1.0 + 0.001 * n, n),
+        "amplitudes": amplitudes,
+        "phases": np.zeros(n),
+        "n_top_bounces": np.zeros(n, int),
+        "n_bot_bounces": np.zeros(n, int),
+        "src_angles": np.zeros(n), "rcv_angles": np.zeros(n),
+        "delays_imag": np.zeros(n),
+    }
+    return Arrivals(by_receiver=[[[cell]]],
+                    receiver_depths=np.array([100.0]),
+                    receiver_ranges=np.array([1000.0]),
+                    model='Bellhop', frequencies=10e3)
+
+
+def _stem_heads(ax):
+    """Y of every arrival head marker drawn on ``ax``."""
+    return [float(ln.get_ydata()[0]) for ln in ax.lines
+            if ln.get_marker() == 'o']
+
+
+def test_the_dB_view_draws_twenty_log_of_the_received_amplitude():
+    """``dB=True`` is 20·log10 of what reaches the receiver, absorption
+    included — the same quantity the linear view draws, not the amplitude
+    column, which stands the absorbed cluster 19 dB too high."""
+    arr = _absorbing_arrivals()
+    fig, ax = arr.plot(dB=True, dynamic_range=400.0)
+    expected = sorted(20.0 * np.log10(np.abs(arr.received_amplitudes)),
+                      reverse=True)
+    assert np.allclose(sorted(_stem_heads(ax), reverse=True), expected), (
+        f"{sorted(_stem_heads(ax), reverse=True)} != {expected}")
+    assert 'dB' in ax.get_ylabel(), ax.get_ylabel()
+    plt.close(fig)
+
+
+def test_the_default_arrivals_axis_is_the_linear_received_amplitude():
+    """The dB view is opt-in: the default axis is the linear received
+    amplitude, and says so."""
+    arr = _absorbing_arrivals()
+    fig, ax = arr.plot()
+    expected = sorted(np.abs(arr.received_amplitudes), reverse=True)
+    assert np.allclose(sorted(_stem_heads(ax), reverse=True), expected)
+    assert 'dB' not in ax.get_ylabel(), ax.get_ylabel()
+    plt.close(fig)
+
+
+def test_dB_stems_rise_from_the_dynamic_range_floor_not_from_zero():
+    """Every level here is negative, so a stem anchored at 0 hangs DOWN
+    from the axis and its length reads loudness inverted — the loudest
+    arrival drawing the shortest stem."""
+    arr = _absorbing_arrivals()
+    fig, ax = arr.plot(dB=True, dynamic_range=40.0)
+    peak = float(np.max(20.0 * np.log10(np.abs(arr.received_amplitudes))))
+    bases = [seg[0][1] for coll in ax.collections
+             for seg in coll.get_segments()]
+    assert bases, "no stems drawn"
+    assert np.allclose(bases, peak - 40.0), bases
+    assert ax.get_ylim()[0] == pytest.approx(peak - 40.0)
+    plt.close(fig)
+
+
+def test_arrivals_below_the_dynamic_range_floor_are_declared():
+    """Off the bottom of a dB axis an arrival leaves no trace of itself, so
+    the plot names it the way it names one off the end of the delay axis."""
+    arr = _absorbing_arrivals()          # the third arrival is 229 dB down
+    fig, ax = arr.plot(dB=True, dynamic_range=60.0)
+    assert len(_stem_heads(ax)) == 2, _stem_heads(ax)
+    text = ' '.join(t.get_text() for t in ax.get_legend().get_texts())
+    peak = float(np.max(20.0 * np.log10(np.abs(arr.received_amplitudes))))
+    # The declaration names the floor in the axis's own unit, so the reader
+    # can place the missing arrival against the ticks.
+    assert f"below {peak - 60.0:.0f} dB" in text, text
+    assert '+1' in text, text
+    plt.close(fig)
+
+
+def test_an_arrival_exactly_on_the_dynamic_range_floor_is_drawn():
+    """Both sides of the threshold. The span is chosen so the floor lands
+    exactly on the second arrival's level: on the floor it is kept, a hair
+    under it is dropped."""
+    span = -20.0 * np.log10(0.5)
+    fig, ax = _arrivals_at_levels([1.0, 0.5]).plot(dB=True,
+                                                   dynamic_range=span)
+    assert len(_stem_heads(ax)) == 2, _stem_heads(ax)
+    plt.close(fig)
+    fig, ax = _arrivals_at_levels([1.0, 0.5 * (1 - 1e-9)]).plot(
+        dB=True, dynamic_range=span)
+    assert len(_stem_heads(ax)) == 1, _stem_heads(ax)
+    plt.close(fig)
+
+
+def test_a_dynamic_range_without_the_dB_view_is_rejected():
+    """Accepting it on the linear axis would look like the axis had been
+    clipped to it."""
+    with pytest.raises(ConfigurationError, match="dynamic_range"):
+        _absorbing_arrivals().plot(dynamic_range=40.0)
+    assert not plt.get_fignums()
+
+
+def test_a_non_positive_dynamic_range_is_rejected():
+    """A span of zero leaves the floor on the peak and nothing to draw; a
+    negative one puts it above the peak. Any positive span is a view."""
+    arr = _absorbing_arrivals()
+    for bad in (0.0, -10.0, float('nan'), float('inf')):
+        with pytest.raises(ConfigurationError, match="dynamic_range"):
+            arr.plot(dB=True, dynamic_range=bad)
+    assert not plt.get_fignums()
+    fig, _ax = arr.plot(dB=True, dynamic_range=1e-6)
+    plt.close(fig)
+
+
+def test_a_silent_arrival_gets_a_finite_dB_level():
+    """``log10(0)`` is ``-inf``; one infinite stem takes the whole axis
+    with it and every real arrival collapses onto a single pixel."""
+    fig, ax = _arrivals_at_levels([1.0, 0.0]).plot(dB=True,
+                                                   dynamic_range=700.0)
+    assert all(np.isfinite(h) for h in _stem_heads(ax)), _stem_heads(ax)
+    assert all(np.isfinite(v) for v in ax.get_ylim()), ax.get_ylim()
     plt.close(fig)
 
 
@@ -3058,15 +3184,15 @@ def _ppsd_result(level_lo, level_hi, ref=1e-6):
     frequencies = np.array([100.0, 200.0, 400.0])
     level_edges = np.linspace(level_lo, level_hi, 5)
     pdf = np.full((level_edges.size - 1, frequencies.size), 0.25)
-    mean_db = np.full(frequencies.size, 0.5 * (level_lo + level_hi))
-    return PPSDResult(frequencies, level_edges, pdf, mean_db,
+    mean_dB = np.full(frequencies.size, 0.5 * (level_lo + level_hi))
+    return PPSDResult(frequencies, level_edges, pdf, mean_dB,
                       np.ones(frequencies.size), 1.0, 1.0, ref)
 
 
 def _cq_ppsd_result(level_lo, level_hi, ref=1e-6):
     r = _ppsd_result(level_lo, level_hi, ref)
-    return CQPPSDResult(r.frequencies, r.level_edges, r.pdf, r.mean_db,
-                        r.std_db, r.binwidth_db, ref)
+    return CQPPSDResult(r.frequencies, r.level_edges, r.pdf, r.mean_dB,
+                        r.std_dB, r.binwidth_dB, ref)
 
 
 class TestALevelAxisNamesTheReferenceItWasComputedAgainst:
@@ -3090,7 +3216,7 @@ class TestALevelAxisNamesTheReferenceItWasComputedAgainst:
 
     @pytest.mark.parametrize('ref, shown', [(1e-6, '1µ'), (1.0, '1')])
     def test_the_fk_colourbar_carries_its_reference(self, ref, shown):
-        """``plot_fk`` converts with ``power_to_db(power, ref)``, so its
+        """``plot_fk`` converts with ``power_to_dB(power, ref)``, so its
         colourbar is an absolute level, not a relative one."""
         from uacpy.visualization.plots.signal import plot_fk
         f = np.linspace(0.0, 500.0, 8)
@@ -3178,7 +3304,7 @@ def test_compare_models_signal_excess_window_spans_every_panel():
     panel saturated (measured: 70% of its samples) under a colourbar that
     claimed to describe it."""
     narrow, wide = _se_field(4, 5), _se_field(4, 5, scale=4.0)
-    fig, axes = compare_models([narrow, wide], value='db')
+    fig, axes = compare_models([narrow, wide], value='dB')
     lo, hi = axes[0, 0].collections[0].get_clim()
     peak = float(np.max(np.abs(np.asarray(wide.data))))
     assert (lo, hi) == pytest.approx((-peak, peak))
@@ -3191,8 +3317,8 @@ def test_compare_models_signal_excess_window_ignores_the_panel_order():
     """Order-dependence was the proof the window was one panel's own: reversing
     the list changed the shared colour limits."""
     narrow, wide = _se_field(4, 5), _se_field(4, 5, scale=4.0)
-    fig_a, axes_a = compare_models([narrow, wide], value='db')
-    fig_b, axes_b = compare_models([wide, narrow], value='db')
+    fig_a, axes_a = compare_models([narrow, wide], value='dB')
+    fig_b, axes_b = compare_models([wide, narrow], value='dB')
     assert (axes_a[0, 0].collections[0].get_clim()
             == axes_b[0, 0].collections[0].get_clim())
     plt.close(fig_a)
@@ -3204,7 +3330,7 @@ def test_compare_models_keeps_signal_excess_zero_on_the_neutral_colour():
     signal excess that colour is the SE = 0 dB detection boundary. The generic
     pooled scale is an asymmetric min/max and would move it."""
     fig, axes = compare_models([_se_field(4, 5), _se_field(4, 5, scale=4.0)],
-                               value='db')
+                               value='dB')
     lo, hi = axes[0, 0].collections[0].get_clim()
     assert lo == pytest.approx(-hi)
     plt.close(fig)
@@ -3212,7 +3338,7 @@ def test_compare_models_keeps_signal_excess_zero_on_the_neutral_colour():
 
 def test_compare_models_signal_excess_panels_share_one_window():
     fig, axes = compare_models([_se_field(4, 5), _se_field(4, 5, scale=4.0)],
-                               value='db')
+                               value='dB')
     clims = [ax.collections[0].get_clim() for ax in axes.ravel()]
     assert clims[0] == clims[1]
     plt.close(fig)
@@ -3409,16 +3535,16 @@ def _ylim_direction(ax):
     # reverberation is a LOSS like TL and its axis runs the same way.
     ('reverberation', 'down'),
 ])
-def test_db_cut_points_the_same_way_through_either_entry_point(kind, expected):
-    """``compare`` keyed the flip on ``value == 'db'`` and ``plot_field`` on the
+def test_dB_cut_points_the_same_way_through_either_entry_point(kind, expected):
+    """``compare`` keyed the flip on ``value == 'dB'`` and ``plot_field`` on the
     quantity, so every dB view except TL came out vertically mirrored between
     the two — and the tick labels stayed truthful, so nothing looked wrong.
 
     Direction follows the quantity, not the entry point: a loss reads downward
     through both doors, a level upward through both."""
     field = _cut(kind)
-    _, ax_single = plot_field(field, value='db')
-    _, ax_overlay = compare([field], labels=['a'], value='db')
+    _, ax_single = plot_field(field, value='dB')
+    _, ax_overlay = compare([field], labels=['a'], value='dB')
     assert _ylim_direction(ax_single) == expected
     assert _ylim_direction(ax_overlay) == expected
 
@@ -3432,9 +3558,9 @@ def test_a_real_tl_grid_and_a_complex_one_agree():
     complex_tl = Field(data=np.array([1e-2, 1e-3, 1e-4, 1e-5]) * (1 + 0j),
                        coords={'range': _RANGE})
     for field in (real_tl, complex_tl):
-        _, ax = plot_field(field, value='db')
+        _, ax = plot_field(field, value='dB')
         assert _ylim_direction(ax) == 'down'
-        _, ax = compare([field], labels=['a'], value='db')
+        _, ax = compare([field], labels=['a'], value='dB')
         assert _ylim_direction(ax) == 'down'
 
 
@@ -3443,7 +3569,7 @@ def test_a_depth_cut_inverts_for_every_quantity():
     which way the quantity reads."""
     field = Field(data=np.array([1.0, 2.0, 3.0]), coords={'depth': _DEPTH},
                   metadata={'kind': 'signal_excess', 'unit': 'dB'})
-    _, ax = compare([field], labels=['a'], value='db')
+    _, ax = compare([field], labels=['a'], value='dB')
     assert _ylim_direction(ax) == 'down'
     assert ax.get_ylabel() == 'Depth (m)'
 
@@ -3453,7 +3579,7 @@ def _panel(fig_axes):
     return axes[0, 0].collections[0]
 
 
-@pytest.mark.parametrize("value", ['db', 'mag_db', 'mag', 'phase',
+@pytest.mark.parametrize("value", ['dB', 'mag_dB', 'mag', 'phase',
                                    'real', 'imag'])
 def test_one_field_renders_identically_alone_and_in_a_panel(value):
     """``compare_models`` computed one figure-level colormap and colour range
@@ -3476,12 +3602,12 @@ def test_phase_keeps_its_cyclic_colormap_in_a_panel():
 
 
 def test_a_quiet_response_is_not_stretched_to_a_symmetric_scale():
-    """``mag_db`` is a level, not a signed quantity: a -80..-20 dB response
+    """``mag_dB`` is a level, not a signed quantity: a -80..-20 dB response
     forced out to ±80 occupies half the colormap."""
     mag = 10 ** (np.linspace(-80, -20, 12).reshape(3, 4) / 20)
     field = Field(data=mag * np.exp(1j * 0.1),
                   coords={'depth': _DEPTH, 'range': _RANGE})
-    lo, hi = _panel(compare_models([field], value='mag_db')).get_clim()
+    lo, hi = _panel(compare_models([field], value='mag_dB')).get_clim()
     assert (lo, hi) == pytest.approx((-80.0, -20.0))
 
 
@@ -3505,8 +3631,8 @@ def test_panels_share_one_pooled_scale():
 
 
 @pytest.mark.parametrize("value, expected", [
-    ('db', 'TL (dB)'),
-    ('mag_db', '|H| (dB)'),
+    ('dB', 'TL (dB)'),
+    ('mag_dB', '|H| (dB)'),
     ('mag', '|p|'),
     ('phase', 'Phase (rad)'),
     ('real', 'Re(p)'),
@@ -3523,7 +3649,7 @@ def test_the_shared_colorbar_names_the_quantity(value, expected):
 
 def test_the_shared_colorbar_names_the_quantity_not_transmission_loss():
     """A dB view is labelled from the field: signal excess is not TL."""
-    fig, axes = compare_models([_grid('signal_excess')], value='db')
+    fig, axes = compare_models([_grid('signal_excess')], value='dB')
     panels = list(axes.ravel())
     labels = [a.get_ylabel() for a in fig.axes if a not in panels]
     assert 'Signal excess (dB)' in labels
@@ -3670,10 +3796,10 @@ def test_an_ordinary_band_starts_at_one_hertz():
     assert _log_freq_xlim(np.array([0.0, 10.0, 100.0])) == (1.0, 100.0)
 
 
-def _flat_spectrogram(level_db, n_f=6, n_t=5, f_lo=1.0, f_hi=500.0):
-    """``(frequencies, times, Sxx)`` whose every cell sits at ``level_db``
+def _flat_spectrogram(level_dB, n_f=6, n_t=5, f_lo=1.0, f_hi=500.0):
+    """``(frequencies, times, Sxx)`` whose every cell sits at ``level_dB``
     re 1 µPa²/Hz, so the whole record is on one side of a colour window."""
-    power = (10.0 ** (level_db / 10.0)) * REFERENCE_PRESSURE_WATER ** 2
+    power = (10.0 ** (level_dB / 10.0)) * REFERENCE_PRESSURE_WATER ** 2
     return (np.linspace(f_lo, f_hi, n_f), np.linspace(0.0, 10.0, n_t),
             np.full((n_f, n_t), power))
 
@@ -3720,21 +3846,21 @@ def test_a_spectrogram_outside_the_pinned_colour_window_says_it_is_flat():
     for plotter, caller in ((plot_spectrogram, "plot_spectrogram"),
                             (plot_constant_q_spectrogram,
                              "plot_constant_q_spectrogram")):
-        for level_db in (240.0, -80.0):
+        for level_dB in (240.0, -80.0):
             with pytest.warns(UserWarning,
                               match=f"{caller}: every sample.*colour window"):
-                fig, _ = plotter(*_flat_spectrogram(level_db))
+                fig, _ = plotter(*_flat_spectrogram(level_dB))
             plt.close(fig)
 
 
-@pytest.mark.parametrize("level_db", [0.0, 200.0])
-def test_a_spectrogram_on_the_colour_window_edge_is_not_flagged(level_db):
+@pytest.mark.parametrize("level_dB", [0.0, 200.0])
+def test_a_spectrogram_on_the_colour_window_edge_is_not_flagged(level_dB):
     """Both edges of the window are inside it — the warning fires only when
     every sample is strictly outside, or an ordinary panel trains the reader
     to ignore it."""
     with warnings.catch_warnings():
         warnings.simplefilter("error", UserWarning)
-        fig, _ = plot_spectrogram(*_flat_spectrogram(level_db))
+        fig, _ = plot_spectrogram(*_flat_spectrogram(level_dB))
         plt.close(fig)
 
 
@@ -4229,7 +4355,7 @@ def test_peak_of_the_main_lobe_reaches_the_radial_maximum():
 
 # ── omnidirectional ──────────────────────────────────────────────────────────
 
-def test_none_draws_a_flat_zero_db_circle():
+def test_none_draws_a_flat_zero_dB_circle():
     fig, ax = plot_beam_pattern(None)
     levels = ax.lines[0].get_ydata()
     assert np.allclose(levels, 0.0)
@@ -4420,7 +4546,7 @@ class TestThePlottersRefuseAndLabelWhatTheAuditFound:
             plot_constellation(np.array([]))
         with pytest.raises(ConfigurationError, match='c is empty'):
             plot_cepstrum(np.array([]))
-        with pytest.raises(ConfigurationError, match='level_db is empty'):
+        with pytest.raises(ConfigurationError, match='level_dB is empty'):
             plot_source_level(np.array([100.0]), np.array([]))
 
     def test_a_mismatched_spectrogram_grid_is_a_typed_error(self):

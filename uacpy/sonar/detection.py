@@ -57,7 +57,7 @@ def probability_of_detection(deflection, pf):
     This is **not** the scalar form of
     :func:`uacpy.sonar.sonar_equation.probability_of_detection_field` —
     that function evaluates a different model, Urick's transition curve
-    ``P_D = Phi(SE / sigma_db)`` (log-normal signal-excess fluctuation,
+    ``P_D = Phi(SE / sigma_dB)`` (log-normal signal-excess fluctuation,
     ``P_D = 0.5`` pinned at ``SE = 0``, no ``P_F`` argument).
     """
     pf = np.asarray(pf, dtype=float)
@@ -136,12 +136,12 @@ def albersheim_snr(pd: float, pf: float, n_pulses: int = 1) -> float:
         )
     a = np.log(0.62 / pf)
     b = np.log(pd / (1.0 - pd))
-    snr_db = (
+    snr_dB = (
         -5.0 * np.log10(n)
         + (6.2 + 4.54 / np.sqrt(n + 0.44))
         * np.log10(a + 0.12 * a * b + 1.7 * b)
     )
-    return float(snr_db)
+    return float(snr_dB)
 
 
 #: How far the shipped large-M approximation may sit from the exact
@@ -151,7 +151,7 @@ def albersheim_snr(pd: float, pf: float, n_pulses: int = 1) -> float:
 _DT_APPROXIMATION_TOLERANCE_DB = 1.0
 
 
-def _exact_detection_threshold_db(pd: float, pf: float, m: float) -> float:
+def _exact_detection_threshold_dB(pd: float, pf: float, m: float) -> float:
     """Exact required per-cell SNR (dB) for the noise-normalised energy detector.
 
     ``M`` independent cells of unit-mean noise give ``T ~ Gamma(M, 1)`` under
@@ -231,14 +231,14 @@ def detection_threshold_energy(
     # it claims, so it cannot warn on a correct value or stay silent on a
     # wrong one. The fitted `max(10, 7*d)` backs it up only where the exact
     # quantiles do not resolve, so the check never disappears silently.
-    exact = _exact_detection_threshold_db(pd, pf, m)
+    exact = _exact_detection_threshold_dB(pd, pf, m)
     with np.errstate(invalid="ignore"):
-        error_db = value - exact
-    if np.isfinite(error_db):
-        outside = abs(error_db) >= _DT_APPROXIMATION_TOLERANCE_DB
-        detail = (f"it is optimistic by {-error_db:.2f} dB here (exact "
-                  f"threshold {exact:.2f} dB)" if error_db < 0 else
-                  f"it is off by {error_db:.2f} dB here (exact threshold "
+        error_dB = value - exact
+    if np.isfinite(error_dB):
+        outside = abs(error_dB) >= _DT_APPROXIMATION_TOLERANCE_DB
+        detail = (f"it is optimistic by {-error_dB:.2f} dB here (exact "
+                  f"threshold {exact:.2f} dB)" if error_dB < 0 else
+                  f"it is off by {error_dB:.2f} dB here (exact threshold "
                   f"{exact:.2f} dB)")
     else:
         outside = m < max(10.0, 7.0 * d)

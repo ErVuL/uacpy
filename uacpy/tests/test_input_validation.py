@@ -757,8 +757,8 @@ def test_get_sound_speed_warns_on_extrapolation():
 
 def test_francois_garrison_accepts_list_pH():
     """pH as a Python list must not raise a bare TypeError (it is coerced)."""
-    from uacpy.core.absorption import francois_garrison_db_per_km
-    out = francois_garrison_db_per_km(10000, 10, 35, [8.0, 8.1], 100)
+    from uacpy.core.absorption import francois_garrison_dB_per_km
+    out = francois_garrison_dB_per_km(10000, 10, 35, [8.0, 8.1], 100)
     out = np.atleast_1d(np.asarray(out, dtype=float))
     assert out.shape == (2,) and np.all(out > 0)
 
@@ -788,7 +788,7 @@ def test_receiver_type_line_is_rejected_not_silently_gridded(model_name):
         uacpy.Receiver(depths=d, ranges=r, receiver_type='line')
     # The documented workaround still works.
     tl = np.asarray(model.run(env, src,
-                              uacpy.Receiver(depths=d, ranges=r)).db)
+                              uacpy.Receiver(depths=d, ranges=r)).dB)
     i = np.arange(len(d))
     assert tl[i, i].shape == (3,)
 
@@ -1070,7 +1070,7 @@ class TestExtendToUsesTheReadersOwnEpsilon:
         src = uacpy.core.Source(depths=0.25 * depth, frequencies=200.0)
         rcv = uacpy.core.Receiver(depths=0.5 * depth, ranges=[1000.0, 2000.0])
         for model in (Kraken(verbose=False), Scooter(verbose=False)):
-            tl = np.asarray(model.run(env, src, rcv).db)
+            tl = np.asarray(model.run(env, src, rcv).dB)
             assert np.isfinite(tl).all(), f"{model.model_name} returned {tl}"
 
 

@@ -35,7 +35,7 @@ also re-exported at the top level for convenience: `uacpy.plot_result`,
 
 ```python
 env, source, receiver = shallow_water()
-tl = Bellhop(n_beams=3000).run(env, source, receiver).to_db()
+tl = Bellhop(n_beams=3000).run(env, source, receiver).to_dB()
 rays = Bellhop(n_beams=25, alpha=(-12.0, 12.0)).run(
     env, source, receiver, run_mode=RunMode.RAYS)
 
@@ -57,7 +57,7 @@ and forwards the rest of your keywords to the plotter it picked:
 | `Field` | heatmap / line cut / stacked traces | `plot_field` (public) |
 | `ResultStack[Field]` | one titled panel per slab | `_plot_field_stack` |
 | `Rays` | the ray fan, coloured by boundary interaction | `_plot_rays` |
-| `Arrivals` | amplitude-vs-delay stems | `_plot_arrivals` |
+| `Arrivals` | amplitude-vs-delay stems; `dB=True` draws the level axis instead, bounded `dynamic_range` dB (default 60) under the loudest arrival | `_plot_arrivals` |
 | `Modes` | the depth eigenfunctions ψ(z) | `_plot_mode_functions` |
 | `ReflectionCoefficient` | \|R(θ)\| (and phase with `show_phase=True`) | `_plot_reflection_coefficient` |
 | `Covariance` | the CSDM as an image | `_plot_covariance` |
@@ -202,13 +202,13 @@ ConfigurationError: plot_field: env= has no effect on a heatmap that is not a
 ### 2.3 `value=` — which number gets drawn
 
 `value=` applies to every branch and picks what the field's complex pressure is
-reduced to. It defaults to `'real'` for a time-series field and `'db'`
+reduced to. It defaults to `'real'` for a time-series field and `'dB'`
 otherwise.
 
 | `value` | Draws | Auto colour treatment (heatmap) |
 |---|---|---|
-| `'db'` | the dB view (TL for a pressure field) | depends on the quantity: fixed 20–120 dB (§4) for pressure, symmetric about 0 dB for signal excess, autoscaled for reverberation |
-| `'mag_db'` | 20·log10\|H\| = −TL, dB | the TL colormap REVERSED (`jet`), autoscaled |
+| `'dB'` | the dB view (TL for a pressure field) | depends on the quantity: fixed 20–120 dB (§4) for pressure, symmetric about 0 dB for signal excess, autoscaled for reverberation |
+| `'mag_dB'` | 20·log10\|H\| = −TL, dB | the TL colormap REVERSED (`jet`), autoscaled |
 | `'mag'` | \|p\|, linear (complex fields only) | linear colormap (`seismic`), anchored at zero |
 | `'phase'` | arg(p), radians (complex fields only) | `twilight`, fixed ±π |
 | `'real'`, `'imag'` | Re(p) / Im(p) (`'imag'` complex only) | linear colormap (`seismic`), symmetric about zero; real time-domain data is clipped to ±RMS |
@@ -256,7 +256,7 @@ spans exactly the receiver grid and draws no seabed. That is correct, not a bug.
 env, source, _ = shallow_water()
 receiver = uacpy.Receiver(depths=np.linspace(1.0, 60.0, 80),
                           ranges=np.linspace(50.0, 5000.0, 250))
-tl = Bellhop(n_beams=3000).run(env, source, receiver).to_db()
+tl = Bellhop(n_beams=3000).run(env, source, receiver).to_dB()
 
 tl.plot(ax=axes[0], show_colorbar=False,
         title='tl.plot()  —  depth axis spans the receiver grid')
@@ -299,7 +299,7 @@ plotter draws both by default instead, and turns them off with
 TL heatmaps default to **`vmin=20`, `vmax=120` dB** — a fixed scale, not one
 derived from the data. `_TL_LIMITS` in
 [`uacpy/visualization/plots/_common.py`](../../uacpy/visualization/plots/_common.py)
-is the single definition; `plot_field(value='db')` and `compare_models` both
+is the single definition; `plot_field(value='dB')` and `compare_models` both
 read it.
 
 ![Why the TL scale is fixed](figures/plot_tl_scale.png)
@@ -307,8 +307,8 @@ read it.
 ```python
 env_s, src_s, rcv_s = shallow_water()
 env_d, src_d, rcv_d = deep_water()
-shallow = Bellhop(n_beams=3000).run(env_s, src_s, rcv_s).to_db()
-deep = Bellhop(n_beams=3000).run(env_d, src_d, rcv_d).to_db()
+shallow = Bellhop(n_beams=3000).run(env_s, src_s, rcv_s).to_dB()
+deep = Bellhop(n_beams=3000).run(env_d, src_d, rcv_d).to_dB()
 
 for col, (field, env, name) in enumerate(
         [(shallow, env_s, 'Shallow, 200 Hz, 5 km'),
@@ -352,8 +352,8 @@ and returns `(fig, ax)` for that figure; hand it nothing and it makes its own of
 
 ```python
 env, source, receiver = shallow_water()
-bellhop = Bellhop(n_beams=3000).run(env, source, receiver).to_db()
-kraken = Kraken().run(env, source, receiver).to_db()
+bellhop = Bellhop(n_beams=3000).run(env, source, receiver).to_dB()
+kraken = Kraken().run(env, source, receiver).to_dB()
 
 fig = plt.figure(figsize=(11.0, 6.4))
 gs = fig.add_gridspec(2, 2, width_ratios=[1.0, 2.2],
@@ -490,7 +490,7 @@ yours) and the two `draw_*` overlays; every entry takes
 |---|---|---|
 | `plot_result(result, env=None, **kw)` | — | type-dispatcher behind every `Result.plot()` |
 | `plot_field(field, ax=None, …)` | ✓ | the workhorse — §2 |
-| `compare(fields, labels=None, ax=None, value='db')` | ✓ | overlay several 1-D sliced fields on one axes |
+| `compare(fields, labels=None, ax=None, value='dB')` | ✓ | overlay several 1-D sliced fields on one axes |
 | `compare_models(fields, labels=None, env=None, ncols=None, contours=None)` | — | side-by-side heatmap grid, one shared colourbar |
 | `plot_signal_excess(field, ax=None, env=None, …)` | ✓ | diverging SE heatmap + the SE = 0 detection boundary → [sonar](sonar.md) |
 | `plot_detection_probability(field, ax=None, env=None, …)` | ✓ | `P_D` on a fixed [0, 1] scale with labelled contours → [sonar](sonar.md) |
@@ -583,7 +583,7 @@ Every one consumes the output of the same-named routine in
 | `draw_sound_cone(ax, f_max, k_max, sound_speed, …)` | overlay | the `f = c·k/2π` cone on an f-k axis |
 | `draw_slowness_line(ax, tau_max, sound_speed, …)` | overlay | `p = ±1/c` on a τ-p axis |
 | `plot_ambiguity(delays_s, doppler_hz, chi, ax=None, …)` | ✓ | `ambiguity_function` — range-Doppler surface |
-| `plot_angular_spectrum(angles_deg, spectrum, ax=None, db=True, …)` | ✓ | a Bartlett / MVDR / MUSIC spectrum → [arrays](arrays.md) |
+| `plot_angular_spectrum(angles_deg, spectrum, ax=None, dB=True, …)` | ✓ | a Bartlett / MVDR / MUSIC spectrum → [arrays](arrays.md) |
 | `plot_frf(frequencies, tf, ax=None, tag='', …)` | 2-tuple | `FRF` — magnitude (dB) over phase (deg) |
 | `plot_coherence(frequencies, coh, ax=None, …)` | ✓ | `FRF` coherence vs frequency |
 | `plot_impulse_response_info(Minfo, Vinfo, g)` | — | LS-FIR diagnostics: information matrix, vector, impulse response |
@@ -602,7 +602,7 @@ Every one consumes the output of the same-named routine in
 | `plot_convergence(mse, ax=None, label=None, …)` | ✓ | equaliser learning curve (MSE vs symbol, dB) |
 | `plot_sync_metric(metric, ax=None, threshold=None, …)` | ✓ | synchronisation metric vs sample index |
 | `plot_doppler_ambiguity(scales, peak_metric, ax=None, …)` | ✓ | peak correlation vs Doppler scale |
-| `plot_ber_curve(ebn0_db, ber_measured, ax=None, scheme=None, …)` | ✓ | measured BER vs Eb/N0, with the theory curve when `scheme=` is given |
+| `plot_ber_curve(ebn0_dB, ber_measured, ax=None, scheme=None, …)` | ✓ | measured BER vs Eb/N0, with the theory curve when `scheme=` is given |
 
 ### Noise and sonar
 
@@ -610,7 +610,7 @@ Every one consumes the output of the same-named routine in
 |---|---|---|
 | `plot_wenz(wenz, ax=None, show_components=True, …)` | ✓ | a Wenz ambient-noise spectrum and its components → [noise](noise.md) |
 | `plot_weighting(group, ax=None, frequency=None, …)` | ✓ | marine-mammal auditory weighting curve(s) |
-| `plot_source_level(frequency, level_db, ax=None, label=None, …)` | ✓ | a ship source-level spectrum |
+| `plot_source_level(frequency, level_dB, ax=None, label=None, …)` | ✓ | a ship source-level spectrum |
 | `plot_roc(deflection=None, ax=None, pfa=None, pd=None, …)` | ✓ | the ROC curve, `P_D` vs log `P_F` → [sonar](sonar.md) |
 
 ---

@@ -161,8 +161,8 @@ def main():
     sel_vals, sel_bands = uacpy.acoustic_signal.sel(
         x, fs, fmin=10.0, fmax=fs / 2.0, band_type='third_octave',
     )
-    total_sel_db = 10.0 * np.log10(sel_vals.sum() / UPA ** 2)
-    print(f"  SEL: broadband {total_sel_db:.1f} dB re 1 µPa²·s over "
+    total_sel_dB = 10.0 * np.log10(sel_vals.sum() / UPA ** 2)
+    print(f"  SEL: broadband {total_sel_dB:.1f} dB re 1 µPa²·s over "
           f"{sel_dur:.0f} s across {len(sel_bands)} third-octave bands")
     fig, ax = uacpy.visualization.plot_sel(
         sel_vals, sel_bands, ref=UPA, duration=sel_dur,

@@ -74,8 +74,8 @@ class TestScooterBroadband:
         # the comparison bounds the median bias rather than pinning equality.
         nb = Scooter(verbose=False).compute_tl(env=env, source=source,
                                                receiver=receiver)
-        got = np.asarray(result.at(frequency=100.0).to_db().data, dtype=float)
-        ref = np.asarray(nb.db, dtype=float)
+        got = np.asarray(result.at(frequency=100.0).to_dB().data, dtype=float)
+        ref = np.asarray(nb.dB, dtype=float)
         ok = np.isfinite(got) & np.isfinite(ref)
         assert ok.any()
         bias = float(np.median(got[ok] - ref[ok]))
@@ -197,11 +197,11 @@ class TestZeroReceiverRange:
         env, source = self._env(), self._source()
         with pytest.warns(UserWarning, match="r = 0"):
             scooter_tl = np.asarray(
-                Scooter(verbose=False).run(env, source, self._receiver()).db)
+                Scooter(verbose=False).run(env, source, self._receiver()).dB)
         with pytest.warns(UserWarning, match="r = 0"):
             kraken_tl = np.asarray(
                 Kraken(verbose=False).compute_tl(
-                    env, source, self._receiver()).db)
+                    env, source, self._receiver()).dB)
 
         assert np.all(np.isnan(scooter_tl[:, 0]))
         assert np.all(np.isnan(kraken_tl[:, 0]))
@@ -486,7 +486,7 @@ class TestNMeshSilentFloor:
             env=env, source=Source(depths=50.0, frequencies=50.0),
             receiver=Receiver(depths=np.array([25.0, 75.0]),
                               ranges=np.linspace(500.0, 3000.0, 6)))
-        return np.asarray(result.db, dtype=float)
+        return np.asarray(result.dB, dtype=float)
 
     @pytest.mark.requires_binary
     def test_sub_floor_n_mesh_is_bit_identical_to_the_floor(self):

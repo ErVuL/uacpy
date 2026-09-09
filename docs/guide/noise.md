@@ -626,7 +626,7 @@ underwater spectrum.
 |---|---|---|
 | `auditory_weighting(f, group)` | frequency in **Hz** | `W(f)` in dB, peak 0 |
 | `apply_weighting(level, f, group)` | a level **spectrum** | `L(f) + W(f)`, still a spectrum |
-| `weighted_level(psd_db, f, group)` | a level **density** | one broadband number |
+| `weighted_level(psd_dB, f, group)` | a level **density** | one broadband number |
 
 `weighted_level` integrates: `10·log₁₀(∫ 10^((L+W)/10) df)`. It takes a
 **density** (dB re ref²/Hz) precisely so that the answer does not depend on how

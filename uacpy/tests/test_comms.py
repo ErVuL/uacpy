@@ -933,7 +933,7 @@ class TestSpread:
         syms = comms.Modulator("qpsk").modulate(rng.integers(0, 2, 200))
         rec = comms.despread(comms.spread(syms, code), code)
         assert np.linalg.norm(rec - syms) < 1e-9
-        assert comms.processing_gain_db(code) == pytest.approx(10 * np.log10(31))
+        assert comms.processing_gain_dB(code) == pytest.approx(10 * np.log10(31))
 
 
 class TestAgainstPublishedExpressions:
@@ -963,18 +963,18 @@ class TestAgainstPublishedExpressions:
         def q(x):
             return 0.5 * erfc(np.asarray(x, float) / np.sqrt(2.0))
 
-        ebn0_db = np.array([4.0, 8.0, 12.0, 16.0])
-        e = 10 ** (ebn0_db / 10)
-        assert np.allclose(comms.ber_theory('bpsk', ebn0_db), q(np.sqrt(2 * e)))
-        assert np.allclose(comms.ber_theory('qpsk', ebn0_db), q(np.sqrt(2 * e)))
+        ebn0_dB = np.array([4.0, 8.0, 12.0, 16.0])
+        e = 10 ** (ebn0_dB / 10)
+        assert np.allclose(comms.ber_theory('bpsk', ebn0_dB), q(np.sqrt(2 * e)))
+        assert np.allclose(comms.ber_theory('qpsk', ebn0_dB), q(np.sqrt(2 * e)))
         for scheme, M in (('8psk', 8), ('16psk', 16)):
             k = np.log2(M)
-            assert np.allclose(comms.ber_theory(scheme, ebn0_db),
+            assert np.allclose(comms.ber_theory(scheme, ebn0_dB),
                                (2 / k) * q(np.sqrt(2 * k * e) * np.sin(np.pi / M)))
         for scheme, M in (('16qam', 16), ('64qam', 64), ('256qam', 256)):
             k = np.log2(M)
             assert np.allclose(
-                comms.ber_theory(scheme, ebn0_db),
+                comms.ber_theory(scheme, ebn0_dB),
                 (4 / k) * (1 - 1 / np.sqrt(M)) * q(np.sqrt(3 * k / (M - 1) * e)))
 
     @pytest.mark.parametrize("scheme", ["qpsk", "8psk", "16psk", "16qam", "64qam"])
@@ -1022,18 +1022,18 @@ class TestAgainstPublishedExpressions:
         assert dfree == 10
 
     def test_dsss_processing_gain_is_ten_log_n(self):
-        from uacpy.comms.dsss import m_sequence, processing_gain_db
+        from uacpy.comms.dsss import m_sequence, processing_gain_dB
         for n, taps in ((3, [3, 2]), (5, [5, 3]), (7, [7, 6])):
             code = m_sequence(n, taps)
             assert code.size == 2 ** n - 1
-            assert processing_gain_db(code) == pytest.approx(
+            assert processing_gain_dB(code) == pytest.approx(
                 10 * np.log10(code.size))
 
 
 class TestMSequencePrimitivity:
     """A non-primitive tap set returns to the seed early, so the register
     cycles a subset of its states. The output still has the right length,
-    dtype and +/-1 alphabet, and ``processing_gain_db`` still reports the full
+    dtype and +/-1 alphabet, and ``processing_gain_dB`` still reports the full
     ``10log10(N)`` — nothing looks wrong until a link budget is far out.
     Measured off-peak autocorrelation: 1 for a real m-sequence, 11 for
     ``[5,1]``, 31 for ``[5]``."""

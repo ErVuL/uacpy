@@ -63,7 +63,7 @@ import numpy as np
 from uacpy import comms
 
 rng = np.random.default_rng(0xACED)
-link = comms.simulate_link('qpsk', ebn0_db=12.0, n_bits=20000, rng=rng)
+link = comms.simulate_link('qpsk', ebn0_dB=12.0, n_bits=20000, rng=rng)
 print(f'BER {link.ber:.2e}, EVM {link.evm:.1%}')
 ```
 
@@ -208,7 +208,7 @@ the stochastic and time-varying parts, and the noise.
 | `apply_channel(signal, h)` | convolve with a static channel |
 | `fading_taps(n_taps, n_samples, doppler_hz, sample_rate, rician_k=..., rng=...)` | time-varying tap gains, Rayleigh or Rician |
 | `apply_fading_channel(signal, taps, delays_samples)` | apply the time-varying tap-delay line |
-| `awgn(signal, snr_db, rng=...)` | additive noise at a target in-band SNR |
+| `awgn(signal, snr_dB, rng=...)` | additive noise at a target in-band SNR |
 | `apply_cfo(signal, cfo)` | de-rotate by a normalised carrier offset |
 
 ```python
@@ -306,8 +306,8 @@ expect, not from the tap count.
 | `bit_error_rate(tx_bits, rx_bits)` | fraction of differing bits over the overlap |
 | `symbol_error_rate(tx, rx)` | same, on labels or exact symbols |
 | `evm(rx_symbols, ref_symbols)` | RMS error-vector magnitude (a fraction) |
-| `ber_theory(scheme, ebn0_db)` | closed-form AWGN BER |
-| `ber_sweep(scheme, ebn0_db_list, n_bits, ...)` | measured BER over a list of Eb/N0 |
+| `ber_theory(scheme, ebn0_dB)` | closed-form AWGN BER |
+| `ber_sweep(scheme, ebn0_dB_list, n_bits, ...)` | measured BER over a list of Eb/N0 |
 
 ```python
 ebn0 = np.arange(0.0, 13.0, 2.0)
@@ -433,7 +433,7 @@ link = comms.simulate_link('qpsk', 16.0, 40000, channel=channel,
                            n_train=400, rng=rng)
 ```
 
-`LinkResult` carries `ber`, `evm`, `scheme`, `ebn0_db`, `tx_symbols`,
+`LinkResult` carries `ber`, `evm`, `scheme`, `ebn0_dB`, `tx_symbols`,
 `rx_symbols` and the equaliser's `mse`.
 
 **`Transmitter` / `CommsReceiver`** go all the way to real passband samples —
@@ -689,7 +689,7 @@ climbs by that much.
 | `m_sequence(n_register, taps)` | maximal-length ±1 PN sequence, length `2ⁿ−1` |
 | `spread(symbols, code)` | one symbol → `len(code)` chips |
 | `despread(chips, code)` | correlate per symbol period |
-| `processing_gain_db(code)` | `10·log₁₀(N)` |
+| `processing_gain_dB(code)` | `10·log₁₀(N)` |
 
 ```python
 code = comms.m_sequence(5, [5, 2])              # length 31, 14.9 dB of gain

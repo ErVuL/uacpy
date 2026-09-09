@@ -792,11 +792,11 @@ def test_ram_stepped_waveguide_matches_coupled_mode_reference():
     ram = RAM(backend='mpiramS', dr=5.0, dz=0.25, np_pade=6, timeout=900)
     ref = _reference(D2_WEAK)
 
-    med, p90, mx = _abs_dtl(ram.compute_tl(_stepped_env(D2_WEAK, _SOFT), src, rcv).db, ref)
+    med, p90, mx = _abs_dtl(ram.compute_tl(_stepped_env(D2_WEAK, _SOFT), src, rcv).dB, ref)
     assert med < 0.35, f"median |dTL|={med:.3f} dB"
     assert p90 < 0.9, f"p90 |dTL|={p90:.3f} dB"
 
-    n_med, n_p90, _ = _abs_dtl(ram.compute_tl(_stepped_env(D1, _SOFT), src, rcv).db, ref)
+    n_med, n_p90, _ = _abs_dtl(ram.compute_tl(_stepped_env(D1, _SOFT), src, rcv).dB, ref)
     assert n_med > 1.5 and n_p90 > 3.0, (
         f"step-removed run is only {n_med:.3f} dB median / {n_p90:.3f} dB p90 "
         f"from the stepped reference: this benchmark cannot tell the step's "
@@ -830,11 +830,11 @@ def test_ramgeo_stepped_waveguide_matches_coupled_mode_reference():
     ram = RAM(backend='ramgeo', dr=5.0, dz=0.25, np_pade=6, timeout=900)
     ref = _reference(D2_WEAK)
 
-    med, p90, mx = _abs_dtl(ram.compute_tl(_stepped_env(D2_WEAK, _SOFT), src, rcv).db, ref)
+    med, p90, mx = _abs_dtl(ram.compute_tl(_stepped_env(D2_WEAK, _SOFT), src, rcv).dB, ref)
     assert med < 0.4, f"median |dTL|={med:.3f} dB"
     assert p90 < 1.0, f"p90 |dTL|={p90:.3f} dB"
 
-    n_med, n_p90, _ = _abs_dtl(ram.compute_tl(_stepped_env(D1, _SOFT), src, rcv).db, ref)
+    n_med, n_p90, _ = _abs_dtl(ram.compute_tl(_stepped_env(D1, _SOFT), src, rcv).dB, ref)
     assert n_med > 1.5 and n_p90 > 3.0, (
         f"step-removed run is only {n_med:.3f} dB median / {n_p90:.3f} dB p90 "
         f"from the stepped reference: this benchmark cannot tell the step's "
@@ -865,11 +865,11 @@ def test_bellhop_stepped_waveguide_matches_coupled_mode_reference():
     bh = Bellhop(n_beams=8000, timeout=900)
     ref = _reference(D2_WEAK)
 
-    med, p90, mx = _abs_dtl(bh.compute_tl(_stepped_env(D2_WEAK, _VACUUM), src, rcv).db, ref)
+    med, p90, mx = _abs_dtl(bh.compute_tl(_stepped_env(D2_WEAK, _VACUUM), src, rcv).dB, ref)
     assert med < 1.2, f"median |dTL|={med:.3f} dB"
     assert p90 < 3.6, f"p90 |dTL|={p90:.3f} dB"
 
-    n_med, n_p90, _ = _abs_dtl(bh.compute_tl(_stepped_env(D1, _VACUUM), src, rcv).db, ref)
+    n_med, n_p90, _ = _abs_dtl(bh.compute_tl(_stepped_env(D1, _VACUUM), src, rcv).dB, ref)
     assert n_med > 1.2 and n_p90 > 3.6, (
         f"step-removed run is only {n_med:.3f} dB median / {n_p90:.3f} dB p90 "
         f"from the stepped reference: this benchmark cannot tell the step's "
@@ -898,9 +898,9 @@ def test_a_one_way_pe_loses_the_stepped_field_once_the_step_reflects():
     src, rcv = _src_rcv()
     ram = RAM(backend='mpiramS', dr=5.0, dz=0.25, np_pade=6, timeout=900)
     weak, _, _ = _abs_dtl(
-        ram.compute_tl(_stepped_env(D2_WEAK, _SOFT), src, rcv).db, _reference(D2_WEAK))
+        ram.compute_tl(_stepped_env(D2_WEAK, _SOFT), src, rcv).dB, _reference(D2_WEAK))
     strong, _, _ = _abs_dtl(
-        ram.compute_tl(_stepped_env(D2_STRONG, _SOFT), src, rcv).db, _reference(D2_STRONG))
+        ram.compute_tl(_stepped_env(D2_STRONG, _SOFT), src, rcv).dB, _reference(D2_STRONG))
     assert weak < 0.35, f"weak-coupling median |dTL|={weak:.3f} dB"
     assert strong > 4 * weak, (
         f"strong-coupling median |dTL|={strong:.3f} dB is not clearly worse "

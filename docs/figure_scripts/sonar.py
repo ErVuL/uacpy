@@ -88,7 +88,7 @@ def _passive_shelf():
     return env, tl, sonar.passive_signal_excess_field(tl, **PASSIVE_SHELF)
 
 
-def _csdm(modes, seed=0, snr_db=10.0, n_snapshots=50):
+def _csdm(modes, seed=0, snr_dB=10.0, n_snapshots=50):
     """A measured CSDM: one source at ``(TRUE_DEPTH, TRUE_RANGE)`` plus noise.
 
     ``modes`` describes the ocean the *data* came from — pass a perturbed
@@ -97,19 +97,19 @@ def _csdm(modes, seed=0, snr_db=10.0, n_snapshots=50):
     e = sonar.synthesize_replica(modes, TRUE_DEPTH, TRUE_RANGE, ARRAY_DEPTHS)
     rng = np.random.default_rng(seed)
     phases = np.exp(1j * rng.uniform(0.0, 2.0 * np.pi, n_snapshots))
-    n_power = np.mean(np.abs(e) ** 2) / 10.0 ** (snr_db / 10.0)
+    n_power = np.mean(np.abs(e) ** 2) / 10.0 ** (snr_dB / 10.0)
     noise = np.sqrt(n_power / 2.0) * (
         rng.standard_normal((ARRAY_DEPTHS.size, n_snapshots))
         + 1j * rng.standard_normal((ARRAY_DEPTHS.size, n_snapshots)))
     return sonar.csdm(e[:, None] * phases + noise)
 
 
-def _draw_surface(ax, surface, title, *, extra='', floor_db=-20.0):
+def _draw_surface(ax, surface, title, *, extra='', floor_dB=-20.0):
     """One normalised ambiguity surface with truth and estimate marked."""
-    db = 10.0 * np.log10(np.clip(surface / np.nanmax(surface),
-                                 10.0 ** (floor_db / 10.0), None))
+    dB = 10.0 * np.log10(np.clip(surface / np.nanmax(surface),
+                                 10.0 ** (floor_dB / 10.0), None))
     im = ax.imshow(
-        db, aspect='auto', cmap='turbo', vmin=floor_db, vmax=0.0,
+        dB, aspect='auto', cmap='turbo', vmin=floor_dB, vmax=0.0,
         extent=_flip_y(_cell_edge_extent(CAND_RANGES / 1e3, CAND_DEPTHS)))
     iz, ir = np.unravel_index(np.nanargmax(surface), surface.shape)
     ax.plot(TRUE_RANGE / 1e3, TRUE_DEPTH, '*', mfc='w', mec='k', ms=15,
@@ -186,7 +186,7 @@ def detection_probability_field():
     env, se = _passive_deep()
     fig, axes = plt.subplots(2, 1, figsize=(9.0, 7.2), sharex=True)
     for ax, sigma in zip(axes, (SIGMA_DB, 9.0)):
-        pd = sonar.probability_of_detection_field(se, sigma_db=sigma)
+        pd = sonar.probability_of_detection_field(se, sigma_dB=sigma)
         plot_detection_probability(
             pd, ax=ax, env=env,
             title=f'Detection probability, σ = {sigma:g} dB')
@@ -353,7 +353,7 @@ def active_budget():
     rl = sonar.boundary_reverberation(
         ranges, ACTIVE_SL, sonar.lambert_bottom(grazing),
         pulse_length_s=PULSE_S, horizontal_beamwidth_rad=BEAMWIDTH_RAD,
-        tl_db=tl_bottom)
+        tl_dB=tl_bottom)
 
     se_noise = sonar.active_signal_excess(
         ACTIVE_SL, tl, ts, noise_level=ACTIVE_NL,

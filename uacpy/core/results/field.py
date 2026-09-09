@@ -18,7 +18,7 @@ from uacpy.core.environment import Bathymetry, Environment
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 
 from uacpy.core.results import quantities as _quantities
-from uacpy.core.results._base import PhaseReference, Result, _complex_to_db
+from uacpy.core.results._base import PhaseReference, Result, _complex_to_dB
 
 # Auto-sized IFFT length is ~sample_rate/df rounded up to a power of two, so a
 # too-high sample_rate (or a too-fine frequency grid) can silently demand a
@@ -87,7 +87,7 @@ class Field(Result):
     complex                    ``{depth, range, frequency}``     Broadband ``H(d, r, f)``
     real                       ``{depth, range, time}``          Time-domain ``p(d, r, t)``
     real                       ``{time}``                        Single-point trace
-    complex                    ``{source_depth, depth, range}``  Multi-source complex pressure (``.kind == 'pressure'``; ``.db`` derives dB)
+    complex                    ``{source_depth, depth, range}``  Multi-source complex pressure (``.kind == 'pressure'``; ``.dB`` derives dB)
     =========================  ================================  =====================================
 
     ``data.shape`` matches the insertion order of :attr:`coords`, which
@@ -105,12 +105,12 @@ class Field(Result):
     :attr:`data` is the payload, and it is **writeable**: the attribute is
     the stored array itself, so ``field.data *= k`` rescales the result in
     place. The derived views refuse that — :attr:`p` and the real branch of
-    :attr:`db` (and of :attr:`tl`, which is ``.db`` under the quantity's
+    :attr:`dB` (and of :attr:`tl`, which is ``.dB`` under the quantity's
     name on pressure fields) hand back arrays with ``writeable=False`` —
     but ``.p`` is a
     view of *this same buffer*, so its read-only flag protects the accessor
     rather than the field: a write through ``.data`` changes what ``.p`` and
-    ``.db`` return afterwards. What the copy-on-ingest in the constructor
+    ``.dB`` return afterwards. What the copy-on-ingest in the constructor
     guarantees is the other direction — the stored array never aliases the
     caller's, so mutating the array you passed in cannot reach the Field.
 
@@ -326,7 +326,7 @@ class Field(Result):
     # ── value accessors ───────────────────────────────────────────────
 
     @property
-    def db(self) -> np.ndarray:
+    def dB(self) -> np.ndarray:
         """This field's dB view, at ``data.shape``.
 
         ``-20·log10(|data|)`` if data is complex — for pressure that is
@@ -337,11 +337,11 @@ class Field(Result):
 
         The real branch converts nothing, so the array carries the field's
         own **dtype** — float32 for a ``.shd``-backed result, since
-        :meth:`to_db` of a complex64 field is float32 — and it **aliases**
+        :meth:`to_dB` of a complex64 field is float32 — and it **aliases**
         :attr:`data` whatever that dtype is, so a later write through
         ``data`` shows up in an array taken earlier. A caller that needs
         float64 regardless of the engine that produced the field asks for it:
-        ``np.asarray(field.db, dtype=float)``.
+        ``np.asarray(field.dB, dtype=float)``.
 
         Named for the *unit*, not the quantity: on a reverberation or
         signal-excess field this returns that quantity's dB values, and
@@ -356,29 +356,29 @@ class Field(Result):
         recover a complex narrowband field first."""
         if 'time' in self.coords:
             raise AttributeError(
-                "Field.db: a time-domain trace is linear pressure, not a "
+                "Field.dB: a time-domain trace is linear pressure, not a "
                 "level; use .data for raw samples or .extract_tone(f) to "
                 "recover a complex narrowband field first"
             )
         if self.is_complex:
-            return _complex_to_db(self.data)
+            return _complex_to_dB(self.data)
         # Real data is handed back as-is, which is only a level if the field
         # says it is one. A Field carrying a dimensionless quantity — e.g.
         # `sonar_equation`'s probability-of-detection field, kind=
         # 'probability_of_detection', unit='1' — otherwise had its raw values
         # returned as though they were dB. `Field.max()` already consults
         # `self.unit` to pick its direction, so the two accessors disagreed.
-        # ``to_db()`` is not the remedy to offer here: it returns ``self`` for
+        # ``to_dB()`` is not the remedy to offer here: it returns ``self`` for
         # any real field (its first statement), and this branch is reachable
         # only for real data — the complex branch above returns before it. The
         # set of fields that can see this message is exactly the set on which
-        # ``to_db()`` does nothing, so the message names the arithmetic
+        # ``to_dB()`` does nothing, so the message names the arithmetic
         # instead.
         if self.unit != 'dB':
             raise AttributeError(
-                f"Field.db: this field is in {self.unit!r}, not dB, so its "
+                f"Field.dB: this field is in {self.unit!r}, not dB, so its "
                 f"values are not a level; use .data for the raw values. "
-                f"to_db() returns a real field unchanged, so if a dB view of "
+                f"to_dB() returns a real field unchanged, so if a dB view of "
                 f"{self.unit!r} is meaningful, take "
                 f"20*np.log10(np.abs(field.data)) yourself and tag the result "
                 f"unit='dB'."
@@ -389,16 +389,16 @@ class Field(Result):
 
     @property
     def tl(self) -> np.ndarray:
-        """Transmission loss in dB — :attr:`db` restricted to pressure fields.
+        """Transmission loss in dB — :attr:`dB` restricted to pressure fields.
 
-        The values are exactly :attr:`db`'s (``-20·log10(|data|)`` for
+        The values are exactly :attr:`dB`'s (``-20·log10(|data|)`` for
         complex pressure; the same read-only view for a real dB pressure
         field), under the name the quantity carries in the literature, so
         a reader of ``result.tl`` knows the field is pressure-derived
         without consulting :attr:`kind`.
 
         Raises :class:`AttributeError` for any other ``kind``: a
-        reverberation or detection field has its own dB view in :attr:`db`,
+        reverberation or detection field has its own dB view in :attr:`dB`,
         and returning it here would label that quantity a transmission
         loss. Reverberation is a loss too, and runs the same direction, but
         it is a different loss — scattering, not one-way propagation — so
@@ -407,9 +407,9 @@ class Field(Result):
             raise AttributeError(
                 f"Field.tl: this field's kind is {self.kind!r}, not "
                 f"'pressure', so its values are not a transmission loss; "
-                f"its level view is .db."
+                f"its level view is .dB."
             )
-        return self.db
+        return self.dB
 
     @property
     def p(self) -> np.ndarray:
@@ -542,7 +542,7 @@ class Field(Result):
             f"{df * r_max / DEFAULT_SOUND_SPEED:.2f} cycles between stored "
             f"bins. Interpolating across it cuts the carrier: the level and "
             f"the phase are both unreliable. Re-run the model on the target "
-            f"frequencies instead, or take .db first if only the level is "
+            f"frequencies instead, or take .dB first if only the level is "
             f"wanted.",
             UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
 
@@ -655,7 +655,7 @@ class Field(Result):
         ``-10·log10 E[|p_scat|²]``, from ``CVMAGS`` → ``VALG10`` →
         ``VSMUL(-5E0)`` in ``REVINT`` (``oassun26.f:853-858``, the routine on
         option ``'r'``'s path), which uacpy stores unchanged and tags
-        ``oass_quantity='reverberation_loss_db'``. Read as a level it made
+        ``oass_quantity='reverberation_loss_dB'``. Read as a level it made
         this method return the *quietest* cell of a reverberation grid.
 
         ``NaN`` no-data cells (e.g. Bellhop cells no ray reached) are
@@ -671,7 +671,7 @@ class Field(Result):
         if self.is_complex:
             strength = np.abs(self.data)  # complex is linear: loudest |p|
         elif self.unit == 'dB' and self.kind in ('pressure', 'reverberation'):
-            strength = -np.asarray(self.db, dtype=float)  # least loss = loudest
+            strength = -np.asarray(self.dB, dtype=float)  # least loss = loudest
         elif self.unit == 'dB':
             strength = np.asarray(self.data, dtype=float)  # a level: more is more
         else:
@@ -737,11 +737,11 @@ class Field(Result):
             **id_kwargs,
         )
 
-    def to_db(self) -> "Field":
+    def to_dB(self) -> "Field":
         """Return a real-dB Field via ``-20·log10(|data|)``.
 
         No-op when ``data`` is already real — including a real field whose
-        unit is not dB, which is returned unchanged and whose :attr:`db` still
+        unit is not dB, which is returned unchanged and whose :attr:`dB` still
         refuses it. There is no linear-to-dB conversion here for real data:
         the sign convention above is the *transmission-loss* one, and applying
         it to an arbitrary real quantity would invent a level the field does
@@ -760,7 +760,7 @@ class Field(Result):
             meta['unit'] = 'dB'
             id_kwargs['metadata'] = meta
         return Field(
-            data=_complex_to_db(self.data),
+            data=_complex_to_dB(self.data),
             coords=dict(self.coords),
             pinned=dict(self.pinned),
             **id_kwargs,
@@ -860,7 +860,7 @@ class Field(Result):
                 f"{where}: this Field carries no frequency, so the "
                 f"quarter-wavelength condition that decides whether a coherent "
                 f"field may be interpolated cannot be checked. The result may "
-                f"carry an unreported level bias; take .db first if only the "
+                f"carry an unreported level bias; take .dB first if only the "
                 f"level is wanted.",
                 UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
             return
@@ -882,7 +882,7 @@ class Field(Result):
             f"in depth, +4.9 with both) and it corrupts the phase — the two peak "
             f"at different spacings, so a small level error does not imply a "
             f"usable phase. Re-run the model on the target grid instead, or take "
-            f".db first if only the level is wanted.",
+            f".dB first if only the level is wanted.",
             UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
 
     def resample_to(
@@ -910,7 +910,7 @@ class Field(Result):
         wavelength at the highest frequency the field carries (its shortest
         wavelength) and a coarse one warns — except under
         ``method='nearest'``, which returns a stored sample and fabricates
-        nothing, the same exemption :meth:`eval` makes. Take :attr:`db` first
+        nothing, the same exemption :meth:`eval` makes. Take :attr:`dB` first
         if only the level is wanted; a real field carries no carrier and
         interpolates freely."""
         if list(self.coords) != ['depth', 'range']:
@@ -1149,7 +1149,7 @@ class Field(Result):
             raise ConfigurationError(
                 "Field.plot_transfer_function: needs a complex H(f) (a real "
                 "dB spectrum has no phase panel) — plot it with "
-                ".plot(value='db') instead."
+                ".plot(value='dB') instead."
             )
         owns_fig = axes is None
         if owns_fig:
@@ -1158,7 +1158,7 @@ class Field(Result):
         else:
             ax_mag, ax_phase = axes
             fig = ax_mag.figure
-        spec.plot(value='mag_db', ax=ax_mag, title=title, **kwargs)
+        spec.plot(value='mag_dB', ax=ax_mag, title=title, **kwargs)
         spec.plot(value='phase', ax=ax_phase, **kwargs)
         ax_phase.set_title('')       # keep the title/pinned subtitle on top only
         ax_mag.set_xlabel('')        # shared axis: label only the bottom panel
@@ -1490,43 +1490,43 @@ class ResultStack(_DeepCopyMixin):
         return self.slabs[int(kwargs[self.coordinate_name])]
 
     @property
-    def db(self) -> np.ndarray:
+    def dB(self) -> np.ndarray:
         """Every slab's dB view stacked along the coordinate axis — shape
-        ``(n_slabs, *slab.db.shape)`` — so generic code can read ``result.db``
+        ``(n_slabs, *slab.dB.shape)`` — so generic code can read ``result.dB``
         whether one or many source depths were requested. Requires Field slabs.
         """
         first = self.slabs[0]
         if not isinstance(first, Field):
             raise ConfigurationError(
-                f"ResultStack.db: slabs are {self.slab_type.__name__}, not "
+                f"ResultStack.dB: slabs are {self.slab_type.__name__}, not "
                 f"Field — no dB view. Pick a slab with stack[i] or "
                 f"stack.at({self.coordinate_name}=...)."
             )
         if 'time' in first.coords:
             raise ConfigurationError(
-                "ResultStack.db: time-domain slabs are linear pressure, not "
+                "ResultStack.dB: time-domain slabs are linear pressure, not "
                 "a level; read the samples via stack[i].data, or recover a "
                 "complex narrowband field first with stack[i].extract_tone(f)."
             )
         # Complex slabs derive their dB view (unit 'Pa', -20*log10|data|);
         # a real slab's data IS its dB view only when its unit says so, and
-        # Field.db refuses any other unit — pre-check it here so the stack
+        # Field.dB refuses any other unit — pre-check it here so the stack
         # raises the same typed error as the time-domain case above.
         if not first.is_complex and first.unit != 'dB':
             raise ConfigurationError(
-                f"ResultStack.db: slabs are in {first.unit!r}, not dB, so "
+                f"ResultStack.dB: slabs are in {first.unit!r}, not dB, so "
                 f"their values are not a level; read them via stack[i].data. "
-                f"to_db() returns a real slab unchanged, so if a dB view of "
+                f"to_dB() returns a real slab unchanged, so if a dB view of "
                 f"{first.unit!r} is meaningful, take "
                 f"20*np.log10(np.abs(stack[i].data)) yourself and tag the "
                 f"result unit='dB'."
             )
-        return np.stack([s.db for s in self.slabs], axis=0)
+        return np.stack([s.dB for s in self.slabs], axis=0)
 
     @property
     def tl(self) -> np.ndarray:
         """Every slab's transmission loss stacked along the coordinate
-        axis — :attr:`db` restricted to pressure slabs, mirroring
+        axis — :attr:`dB` restricted to pressure slabs, mirroring
         :attr:`Field.tl` in values. The refusal type follows each class's
         own accessors: ``Field`` accessors raise :class:`AttributeError`,
         stack accessors raise ConfigurationError."""
@@ -1535,9 +1535,9 @@ class ResultStack(_DeepCopyMixin):
             raise ConfigurationError(
                 f"ResultStack.tl: the slabs' kind is {first.kind!r}, not "
                 f"'pressure', so their values are not a transmission loss; "
-                f"their level view is stack.db."
+                f"their level view is stack.dB."
             )
-        return self.db
+        return self.dB
 
     def plot(self, **kwargs):
         """Plot every slab as a labelled panel grid (Field stacks), delegating

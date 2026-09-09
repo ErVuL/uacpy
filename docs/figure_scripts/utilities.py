@@ -56,8 +56,8 @@ def bottom_loss():
     """What the preset numbers buy you: reflection loss vs grazing angle."""
     fig, ax = plt.subplots(figsize=WIDE)
     for name in ['clay', 'silt', 'sand', 'gravel', 'limestone']:
-        angles, loss_db = acoustics.bottom_loss_curve(name)
-        ax.plot(angles, loss_db, linewidth=1.7, label=name)
+        angles, loss_dB = acoustics.bottom_loss_curve(name)
+        ax.plot(angles, loss_dB, linewidth=1.7, label=name)
         c_p = uacpy.get_material(name)['sound_speed']
         if c_p > 1500.0:
             ax.axvline(np.degrees(np.arccos(1500.0 / c_p)),
@@ -151,7 +151,7 @@ def cross_model_metrics():
     kraken.plot(env=env, ax=axes[1], show_colorbar=True)
     axes[1].set_title('Kraken — normal modes', fontweight='bold', fontsize=11)
 
-    difference = np.asarray(bellhop.db) - np.asarray(kraken.db)
+    difference = np.asarray(bellhop.dB) - np.asarray(kraken.dB)
     mesh = axes[2].pcolormesh(receiver.ranges / 1000.0, receiver.depths,
                               difference, cmap='RdBu_r', vmin=-20.0, vmax=20.0,
                               shading='auto')

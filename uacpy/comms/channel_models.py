@@ -28,20 +28,20 @@ from uacpy.core._warn_frames import USER_FRAME_SKIP
 _MIN_DOPPLER_BINS = 8
 
 
-def awgn(signal, snr_db, *, rng=None):
+def awgn(signal, snr_dB, *, rng=None):
     """Add complex (or real) AWGN for a target in-band SNR (dB).
 
     A zero-power signal is returned unchanged with a UserWarning: the SNR
     target scales the noise power off the signal power, so zero signal
-    power means zero noise power at any ``snr_db``.
+    power means zero noise power at any ``snr_dB``.
 
     Parameters
     ----------
     signal : array_like
         Clean signal, real or complex. A complex signal is given ``n0/2`` in
-        each quadrature, so ``snr_db`` means the same thing for a
+        each quadrature, so ``snr_dB`` means the same thing for a
         complex-baseband and a real-passband input.
-    snr_db : float
+    snr_dB : float
         Target in-band signal-to-noise ratio in dB, referred to the mean
         power of ``signal``.
     rng : numpy.random.Generator, optional
@@ -62,7 +62,7 @@ def awgn(signal, snr_db, *, rng=None):
             "realises the requested SNR is zero and the signal is returned "
             "unchanged.",
             UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
-    n0 = p / (10.0 ** (float(snr_db) / 10.0))
+    n0 = p / (10.0 ** (float(snr_dB) / 10.0))
     if np.iscomplexobj(x):
         # n0 is the *total* noise power, split n0/2 into each quadrature so
         # E|noise|^2 = n0 and the requested SNR means the same thing for a

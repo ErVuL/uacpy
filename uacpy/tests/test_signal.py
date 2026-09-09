@@ -685,11 +685,11 @@ class TestBandLimitedNoiseLandsInTheRequestedBand:
         reference = float(np.trapezoid(power, f) / power.max())
 
         neb = _noise_equivalent_bandwidth(sos, fs, fc, bw)
-        error_db = 10 * np.log10(neb / reference)
-        assert abs(error_db) < 0.05, (
+        error_dB = 10 * np.log10(neb / reference)
+        assert abs(error_dB) < 0.05, (
             f"NEB of the {bw:g} Hz band at fc={fc:g} Hz, fs={fs:g} Hz is "
             f"{neb:.6g} Hz against a converged {reference:.6g} Hz: "
-            f"{error_db:+.3f} dB, which ``add_noise`` turns into the same "
+            f"{error_dB:+.3f} dB, which ``add_noise`` turns into the same "
             f"level error")
 
     def test_a_wide_band_neb_is_unchanged_by_the_focused_grid(self):
@@ -1191,7 +1191,7 @@ class TestLsFirSolvesSingularNormalEquationsByMinimumNorm:
                                         nperseg=2048)
         return frf, freqs, h, g
 
-    def _in_band_db_error(self, freqs, h):
+    def _in_band_dB_error(self, freqs, h):
         import scipy.signal as sig
         _, ht = sig.freqz(self.h_true, worN=freqs, fs=self.fs)
         band = (freqs >= 100.0) & (freqs <= 20000.0)
@@ -1212,7 +1212,7 @@ class TestLsFirSolvesSingularNormalEquationsByMinimumNorm:
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
             _, freqs, h, _ = self._fit()
-        assert self._in_band_db_error(freqs, h) < 0.05
+        assert self._in_band_dB_error(freqs, h) < 0.05
 
     def test_the_warning_names_the_order_and_the_condition_estimate(self):
         with pytest.warns(UserWarning, match=r"FIR order 512 is numerically "

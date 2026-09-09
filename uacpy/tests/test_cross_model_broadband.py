@@ -237,11 +237,11 @@ def test_broadband_transfer_function_magnitude(label):
     ref_freqs = np.asarray(ref.frequencies)
     j_fc = int(np.argmin(np.abs(ref_freqs - FC)))
     Href = np.abs(np.asarray(ref.data)[0, 0, j_fc])
-    diff_db = 20.0 * np.log10(Hfc / Href)
-    tolerance_db = _H_FC_TOLERANCE_DB[label]
-    assert abs(diff_db) <= tolerance_db, (
-        f'{label} vs Scooter at fc: |H| differs by {diff_db:.2f} dB '
-        f'> {tolerance_db} dB'
+    diff_dB = 20.0 * np.log10(Hfc / Href)
+    tolerance_dB = _H_FC_TOLERANCE_DB[label]
+    assert abs(diff_dB) <= tolerance_dB, (
+        f'{label} vs Scooter at fc: |H| differs by {diff_dB:.2f} dB '
+        f'> {tolerance_dB} dB'
     )
 
 
@@ -416,7 +416,7 @@ def test_sparc_pn_n_pulse_deconvolves_onto_kraken_broadband():
         env, Source(depths=z_src, frequencies=fc),
         Receiver(depths=np.array([z_rcv]), ranges=ranges),
         run_mode=RunMode.BROADBAND, frequencies=f_bins)
-    tl_kraken = np.asarray(kraken.db)[0]          # (n_ranges, n_bins)
+    tl_kraken = np.asarray(kraken.dB)[0]          # (n_ranges, n_bins)
 
     diff = tl_sparc - tl_kraken
     assert np.all(np.isfinite(diff)), (tl_sparc, tl_kraken)

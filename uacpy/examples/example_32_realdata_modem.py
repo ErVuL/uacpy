@@ -67,9 +67,9 @@ def main():
     rx = np.convolve(wav, h)
     rx = resample_poly(rx, 100020, 100000)              # 200 ppm clock skew
     rx = np.concatenate([np.zeros(11), rx])             # propagation delay
-    snr_db = 22.0
-    rx = rx + np.sqrt(np.mean(rx ** 2) / 10 ** (snr_db / 10)) * rng.standard_normal(rx.size)
-    print(f"  channel    : 3-path multipath, 200 ppm Doppler, {snr_db:.0f} dB SNR")
+    snr_dB = 22.0
+    rx = rx + np.sqrt(np.mean(rx ** 2) / 10 ** (snr_dB / 10)) * rng.standard_normal(rx.size)
+    print(f"  channel    : 3-path multipath, 200 ppm Doppler, {snr_dB:.0f} dB SNR")
 
     # --- receive: downconvert + MF + timing recovery + sync + DFE/PLL + FEC ---
     dfe = comms.DFE(n_ff=16, n_fb=6, forget=0.997, pll_bandwidth=0.04)

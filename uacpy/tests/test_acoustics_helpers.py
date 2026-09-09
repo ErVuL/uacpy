@@ -1,6 +1,6 @@
 """Reference-value anchors for the scalar helpers in
 :mod:`uacpy.core.acoustics` — seawater sound speed / density, the bubble
-calculators, and ``power_to_db``. All analytic, no binary.
+calculators, and ``power_to_dB``. All analytic, no binary.
 
 Sources per pin: Mackenzie (1981) validity ranges; Fofonoff EOS-80
 one-atmosphere check values; Medwin & Clay eq. (8.2.13) (the Minnaert
@@ -21,7 +21,7 @@ from uacpy.core.acoustics import (
     bubble_soundspeed,
     bubble_surface_loss,
     density,
-    power_to_db,
+    power_to_dB,
     soundspeed,
     soundspeed_delgrosso,
     soundspeed_teos10,
@@ -194,22 +194,22 @@ class TestBubbleSurfaceLoss:
 
 
 class TestPowerToDb:
-    """``power_to_db`` floors ``power`` at :data:`PRESSURE_FLOOR` before the
+    """``power_to_dB`` floors ``power`` at :data:`PRESSURE_FLOOR` before the
     log, so a silent sample yields a finite very negative level, never
     ``-inf`` (DOCUMENTATION.md §14)."""
 
     def test_zero_power_is_finite_at_the_floor_level(self):
-        out = power_to_db(0.0)
+        out = power_to_dB(0.0)
         assert np.isfinite(out)
         assert out == pytest.approx(
             10.0 * np.log10(PRESSURE_FLOOR / REFERENCE_PRESSURE_WATER ** 2))
         assert out == pytest.approx(-180.0)      # 1e-30 / (1e-6)² = 1e-18
 
-    def test_reference_power_reads_zero_db(self):
-        assert power_to_db(REFERENCE_PRESSURE_WATER ** 2) == pytest.approx(0.0)
+    def test_reference_power_reads_zero_dB(self):
+        assert power_to_dB(REFERENCE_PRESSURE_WATER ** 2) == pytest.approx(0.0)
 
     def test_custom_floor_is_honoured(self):
-        assert power_to_db(0.0, floor=1e-12) == pytest.approx(
+        assert power_to_dB(0.0, floor=1e-12) == pytest.approx(
             10.0 * np.log10(1e-12 / REFERENCE_PRESSURE_WATER ** 2))
 
 
@@ -297,15 +297,15 @@ class TestBubbleSurfaceLossAcceptsSequences:
 class TestSplFloorsSilentSignal:
     """``spl`` floors the rms pressure at ``sqrt(PRESSURE_FLOOR)`` before the
     log, so an all-zero signal returns the same finite level as
-    ``power_to_db`` gives zero power, with no runtime warning."""
+    ``power_to_dB`` gives zero power, with no runtime warning."""
 
     def test_all_zero_signal_returns_the_pressure_floor_level(self):
         assert spl(np.zeros(64)) == pytest.approx(
             10.0 * np.log10(PRESSURE_FLOOR))
 
-    def test_zero_signal_level_matches_power_to_db_of_zero_power(self):
+    def test_zero_signal_level_matches_power_to_dB_of_zero_power(self):
         assert spl(np.zeros(64)) == pytest.approx(
-            float(power_to_db(0.0, ref=1.0)))
+            float(power_to_dB(0.0, ref=1.0)))
 
     def test_zero_signal_emits_no_runtime_warning(self):
         with warnings.catch_warnings():
@@ -448,19 +448,19 @@ class TestArrayCapableHelpersAnnotateArrayReturns:
 
 class TestPressureFloorLevelsMatchTheirDocstrings:
     """``spl`` floors rms pressure in its µPa working unit (silent signal:
-    -300 dB re 1 µPa at ``ref=1``); ``power_to_db`` floors ``power`` in
+    -300 dB re 1 µPa at ``ref=1``); ``power_to_dB`` floors ``power`` in
     ``ref**2`` units (silent signal: -180 dB re 1 µPa at its Pa-based
     default). Both docstrings state the split; neither claims the two
     floors coincide at the defaults."""
 
-    def test_spl_floors_a_silent_signal_at_minus_300_db(self):
+    def test_spl_floors_a_silent_signal_at_minus_300_dB(self):
         assert spl(np.zeros(16)) == pytest.approx(-300.0, rel=1e-12)
 
-    def test_power_to_db_default_ref_floors_at_minus_180_db(self):
-        assert float(power_to_db(0.0)) == pytest.approx(-180.0, rel=1e-12)
+    def test_power_to_dB_default_ref_floors_at_minus_180_dB(self):
+        assert float(power_to_dB(0.0)) == pytest.approx(-180.0, rel=1e-12)
 
     def test_the_two_floors_coincide_only_at_unit_ref(self):
-        assert float(power_to_db(0.0, ref=1)) == pytest.approx(-300.0,
+        assert float(power_to_dB(0.0, ref=1)) == pytest.approx(-300.0,
                                                                rel=1e-12)
 
     def test_spl_docstring_states_both_floor_levels(self):
@@ -468,8 +468,8 @@ class TestPressureFloorLevelsMatchTheirDocstrings:
         assert '-180 dB' in spl.__doc__
         assert 'same -300 dB' not in spl.__doc__
 
-    def test_power_to_db_docstring_states_its_own_floor_level(self):
-        assert '-180' in power_to_db.__doc__
+    def test_power_to_dB_docstring_states_its_own_floor_level(self):
+        assert '-180' in power_to_dB.__doc__
 
 
 def test_unesco_reproduces_the_canonical_high_pressure_check_value():

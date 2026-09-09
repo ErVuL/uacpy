@@ -140,11 +140,11 @@ class TestFieldErrors:
         with pytest.raises(AttributeError):
             r.at(range=1000, depth=50)
 
-    def test_rays_has_no_to_db(self):
+    def test_rays_has_no_to_dB(self):
         from uacpy.core.results import Rays
         r = Rays(rays=[], model='Bellhop')
         with pytest.raises(AttributeError):
-            r.to_db()
+            r.to_dB()
 
 
 class TestErrorMessages:

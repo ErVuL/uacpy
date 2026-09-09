@@ -97,14 +97,14 @@ def main():
     n_snap = 50
     phases = np.exp(1j * rng.uniform(0, 2 * np.pi, n_snap))
     sig = e_true[:, None] * phases
-    snr_db = 10.0
-    npow = np.mean(np.abs(e_true) ** 2) / 10 ** (snr_db / 10)
+    snr_dB = 10.0
+    npow = np.mean(np.abs(e_true) ** 2) / 10 ** (snr_dB / 10)
     noise = np.sqrt(npow / 2) * (
         rng.standard_normal((array_depths.size, n_snap))
         + 1j * rng.standard_normal((array_depths.size, n_snap))
     )
     K = csdm(sig + noise)
-    print(f"  ✓ CSDM from {n_snap} snapshots at {snr_db:.0f} dB SNR")
+    print(f"  ✓ CSDM from {n_snap} snapshots at {snr_dB:.0f} dB SNR")
 
     # ── Replica bank over the search grid + ambiguity surfaces ─────────────
     print("\n[3/4] Building replica bank and scanning...")
@@ -128,8 +128,8 @@ def main():
     fig, axes = plt.subplots(1, 2, figsize=(13, 5), sharey=True)
     extent = _imshow_extent(cand_r, cand_z)
     for ax, name, surf in [(axes[0], "Bartlett", surf_b), (axes[1], "MVDR", surf_m)]:
-        db = 10 * np.log10(np.clip(surf / surf.max(), 1e-3, None))
-        im = ax.imshow(db, aspect='auto', extent=extent, cmap='turbo',
+        dB = 10 * np.log10(np.clip(surf / surf.max(), 1e-3, None))
+        im = ax.imshow(dB, aspect='auto', extent=extent, cmap='turbo',
                        vmin=-15, vmax=0)
         ax.plot(true_r / 1e3, true_z, 'w*', ms=16, mec='k', label='truth')
         iz, ir = np.unravel_index(np.argmax(surf), surf.shape)

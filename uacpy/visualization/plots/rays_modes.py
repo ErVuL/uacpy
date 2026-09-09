@@ -7,6 +7,7 @@ import numpy as np
 from typing import Optional, Tuple
 
 from uacpy.core.environment import Environment
+from uacpy.core.constants import PRESSURE_FLOOR
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.results import Arrivals, Rays, Modes, Covariance, Replicas, ReflectionCoefficient
 from uacpy.core.units import m_to_km
@@ -26,6 +27,13 @@ RAY_CLASS_COLOURS = {
 #: range is not clipped to the spine. The seafloor overlay and the x-limit
 #: both use it — anchoring them differently is what left a bare strip.
 _RECEIVER_EDGE_MARGIN = 1.03
+
+#: Span of the arrival stem plot's dB axis when the caller names none, in dB
+#: below the loudest arrival. 60 dB is a 1000:1 amplitude ratio — a path a
+#: millionth of the peak power, which moves neither the delay spread nor an
+#: equaliser's tap set, while a straggler hundreds of dB down would set the
+#: scale for every arrival that does.
+_ARRIVALS_DYNAMIC_RANGE_DB = 60.0
 
 
 @typed_plot_error
@@ -176,6 +184,8 @@ def _plot_arrivals(
     *,
     figsize: Tuple[float, float] = (10, 4),
     title: Optional[str] = None,
+    dB: bool = False,
+    dynamic_range: Optional[float] = None,
 ):
     """Stem plot of arrivals: received level vs delay, by multipath class.
 
@@ -191,10 +201,38 @@ def _plot_arrivals(
     stretch the way it stretches the first-to-last range, and the legend
     counts the arrivals past the end and names how far they run — off the
     axis they leave no sign of themselves, where an outlier on a colour
-    scale at least still paints a pixel."""
+    scale at least still paints a pixel.
+
+    ``dB=True`` draws ``20·log10`` of that same received level instead —
+    dB re unit source, the negative of the transmission loss along the
+    path — and bounds the axis at ``dynamic_range`` dB under the loudest
+    arrival (:data:`_ARRIVALS_DYNAMIC_RANGE_DB` when unset). The bound is
+    what makes the view readable: a level axis has no zero for a stem to
+    stand on, and a path hundreds of dB down would otherwise set the scale
+    and squeeze every arrival carrying energy onto one pixel. Arrivals
+    under the floor are counted in the legend rather than dropped in
+    silence, for the reason the ones past the end of the delay axis are.
+
+    ``dynamic_range`` without ``dB=True`` raises: the linear axis is not
+    clipped to it, and accepting it would look as though it were."""
     if not isinstance(arrivals, Arrivals):
         raise ConfigurationError(
             f"_plot_arrivals: expected Arrivals, got {type(arrivals).__name__}"
+        )
+    # Both checks run before ``fig_ax``, so a rejected call opens no figure.
+    if dynamic_range is not None and not dB:
+        raise ConfigurationError(
+            f"_plot_arrivals: dynamic_range={dynamic_range!r} has nothing to "
+            "clip on the linear amplitude axis. Pass dB=True for the level "
+            "view it bounds, or drop dynamic_range=."
+        )
+    range_dB = (_ARRIVALS_DYNAMIC_RANGE_DB if dynamic_range is None
+                else float(dynamic_range))
+    if dB and not (np.isfinite(range_dB) and range_dB > 0.0):
+        raise ConfigurationError(
+            f"_plot_arrivals: dynamic_range={dynamic_range!r} must be a "
+            "finite positive number of dB. At or below zero the floor sits "
+            "on the loudest arrival and there is nothing left to draw."
         )
     _owns_fig = ax is None
     fig, ax = fig_ax(ax, figsize)
@@ -209,16 +247,36 @@ def _plot_arrivals(
     # heavily absorbed late path at its lossless height — on a 1 km 40 kHz
     # link the second bounce cluster draws five times taller than it arrives.
     levels = np.sqrt(arrivals._arrival_power()) if arrivals.arrivals else None
+    # Baseline every stem stands on, and how many the dB floor hides. On the
+    # linear axis the baseline is zero and nothing is ever hidden.
+    floor = 0.0
+    under = 0
+    if dB and levels is not None:
+        # Convert to 20·log10 and put the floor ``range_dB`` under the peak.
+        # A level is the negative of a transmission loss, so this is the
+        # canonical ``_complex_to_dB`` conversion with its sign flipped,
+        # sharing the PRESSURE_FLOOR clamp that holds a silent arrival at
+        # -600 dB rather than -inf, which would take the whole axis with it.
+        levels = 20.0 * np.log10(np.maximum(levels, PRESSURE_FLOOR))
+        floor = float(np.max(levels)) - range_dB
     for index, a in enumerate(arrivals.arrivals):
         kind = a.get('kind', 'direct')
         col = color_map.get(kind, '#1e88e5')
         d_ms = a['delay'] * 1000.0
+        # Recorded before the floor test, so the delay axis spans the same
+        # arrivals in both views: which stems the level floor hides says
+        # nothing about when the energy arrives.
         delays_ms.append(d_ms)
         level = float(levels[index]) if levels is not None else a['amplitude']
-        ax.vlines(d_ms, 0, level, colors=col, lw=1.5, alpha=0.85)
+        counts[kind] += 1
+        if dB and level < floor:
+            # Skip it and count it. Clipped to the floor it would read as a
+            # level it does not have, on a stem with no length left to read.
+            under += 1
+            continue
+        ax.vlines(d_ms, floor, level, colors=col, lw=1.5, alpha=0.85)
         ax.plot(d_ms, level, 'o', color=col, markersize=4,
                 markeredgecolor='black', markeredgewidth=0.4)
-        counts[kind] += 1
     if delays_ms:
         # The axis follows the ENERGY, not the last ray. A peak-to-peak span
         # is an extremum: one faint straggler stretches it without bound —
@@ -235,7 +293,13 @@ def _plot_arrivals(
         ax.set_xlim(lo, hi)
         beyond = [d for d in delays_ms if d > hi]
     ax.set_xlabel('Delay (ms)')
-    ax.set_ylabel('Received amplitude (re unit source)')
+    ax.set_ylabel('Received level (dB re unit source)' if dB
+                  else 'Received amplitude (re unit source)')
+    if dB and levels is not None:
+        # Bottom on the floor exactly, so the dynamic range can be measured
+        # off the axis; 5% of it as headroom above the peak, so the loudest
+        # head marker is not drawn on the spine.
+        ax.set_ylim(floor, floor + range_dB * 1.05)
     ax.grid(True, alpha=0.3)
     # Legend with per-class counts (skip empty classes).
     import matplotlib.lines as mlines
@@ -250,6 +314,12 @@ def _plot_arrivals(
             [], [], linestyle='none', marker='',
             label=f"+{len(beyond)} beyond {hi:.0f} ms "
                   f"(to {max(beyond):.0f} ms)"))
+    if under:
+        # In dB, the unit of the level axis it refers to, as the delay entry
+        # above is in the milliseconds of the delay axis.
+        handles.append(mlines.Line2D(
+            [], [], linestyle='none', marker='',
+            label=f"+{under} below {floor:.0f} dB"))
     if handles:
         ax.legend(handles=handles, loc='upper right', fontsize=9,
                   framealpha=0.85)
@@ -612,7 +682,7 @@ def _resolve_beam_pattern(pattern) -> np.ndarray:
             f"plot_beam_pattern: a beam pattern is an (N, 2) "
             f"[angle_deg, level_dB] table; got shape {table.shape}.",
             remediation="Stack the two columns with "
-                        "np.column_stack([angles_deg, levels_db]).",
+                        "np.column_stack([angles_deg, levels_dB]).",
         )
     if len(table) < 2:
         raise ConfigurationError(

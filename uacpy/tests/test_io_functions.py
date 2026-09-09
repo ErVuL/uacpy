@@ -857,7 +857,7 @@ def test_surface_halfspace_does_not_leak_into_the_water_column():
             surface=surface)
         return np.asarray(Kraken(timeout=300).run(
             env, Source(depths=25.0, frequencies=100.0),
-            Receiver(depths=[50.0], ranges=np.linspace(500.0, 5000.0, 10))).db)
+            Receiver(depths=[50.0], ranges=np.linspace(500.0, 5000.0, 10))).dB)
 
     leaky = tl(BoundaryProperties(acoustic_type='half-space',
                                   sound_speed=1600.0, density=0.9,
@@ -1460,7 +1460,7 @@ class TestSourceBeamPatternRoundTrip:
     linear amplitude only after reading), and dB is what
     :attr:`uacpy.Source.beam_pattern` carries."""
 
-    def test_write_then_read_returns_the_written_db(self, tmp_path):
+    def test_write_then_read_returns_the_written_dB(self, tmp_path):
         from uacpy.io.refl_io import (
             read_source_beam_pattern, write_source_beam_pattern)
         angles = np.array([-90.0, -30.0, 0.0, 30.0, 90.0])
@@ -3166,7 +3166,7 @@ class TestOneEnvironmentOneWaterDepth:
                     env, uacpy.Source(depths=50.0, frequencies=200.0),
                     uacpy.Receiver(depths=[75.0],
                                    ranges=np.linspace(1000.0, 10000.0, 91))
-                ).db).ravel()
+                ).dB).ravel()
 
         assert np.nanmax(np.abs(tl(100.04) - tl(100.1))) > 1.0
 

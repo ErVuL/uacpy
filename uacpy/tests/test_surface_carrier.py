@@ -146,7 +146,7 @@ class TestSurfaceModelBehaviour:
         env = uacpy.Environment(bathymetry=300.0, ssp=1500.0, surface=self._ice())
         src = uacpy.Source(depths=50.0, frequencies=120.0)
         rcv = uacpy.Receiver(depths=[100.0], ranges=[2000.0])
-        tl = np.asarray(uacpy.Kraken(verbose=False).compute_tl(env, src, rcv).db,
+        tl = np.asarray(uacpy.Kraken(verbose=False).compute_tl(env, src, rcv).dB,
                         dtype=float)
         assert np.isfinite(tl).all()
 

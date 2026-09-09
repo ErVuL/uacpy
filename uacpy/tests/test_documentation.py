@@ -1410,7 +1410,7 @@ def test_documented_samples_use_names_the_package_has() -> None:
 # * Descriptions stating two different defaults, and undelimited numbers
 #   followed by a unit. The first has no single subject (`fetch_environment`'s
 #   `with_absorption` gives pH's 8.1 before its own False); the second states a
-#   physical quantity that need not be the stored value (`power_to_db`'s
+#   physical quantity that need not be the stored value (`power_to_dB`'s
 #   "1 µPa" is REFERENCE_PRESSURE_WATER, 1e-6 Pa). These two rules are what let
 #   the claim pattern accept the connective-less "Default 10." that most of
 #   this tree writes.
@@ -1442,7 +1442,7 @@ _PARAM_HEAD = re.compile(
 _NUMBER = r"-?\d+(?:_\d+)*(?:\.\d*)?(?:[eE][+-]?\d+)?"
 _DELIMITED = r"``[^`]+``|`[^`]+`|\([^)]*\)|'[^']*'|\"[^\"]*\""
 # A unit directly after an undelimited number means the sentence states a
-# physical quantity, which need not be the stored value: ``power_to_db``'s
+# physical quantity, which need not be the stored value: ``power_to_dB``'s
 # "(default: 1 µPa, water)" is ``REFERENCE_PRESSURE_WATER``, i.e. 1e-6 Pa.
 _UNIT = (r"(?:m/s|[µu]?Pa|[kMG]?Hz|dB|km|kg|ms|degrees?|deg|ppt|psu|°?C"
          r"|[ms])\b")
@@ -1745,12 +1745,12 @@ def test_c_high_factor_records_which_models_require_the_pad():
 
 
 def test_thorp_docstring_points_at_its_frequency_band():
-    """``help(thorp_db_per_km)`` gave T/S/pH/depth at length and said nothing
+    """``help(thorp_dB_per_km)`` gave T/S/pH/depth at length and said nothing
     about frequency, while the guide has it —
     ``docs/guide/environment.md §6 "Two things the curve does not tell you"``.
     """
-    from uacpy.core.absorption import thorp_db_per_km
-    doc = thorp_db_per_km.__doc__
+    from uacpy.core.absorption import thorp_dB_per_km
+    doc = thorp_dB_per_km.__doc__
     assert 'docs/guide/environment.md §6 "Two things the curve does not tell you"' in doc
     assert '10 Hz' in doc
 

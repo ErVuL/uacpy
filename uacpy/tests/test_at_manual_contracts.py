@@ -162,14 +162,14 @@ class TestBiologicalLorentzianFormula:
         from uacpy.core.absorption import Biological
         a0, f0, Q, f = 0.1, 400.0, 5.0, 500.0
         bio = Biological(layers=[(10.0, 20.0, f0, Q, a0)])
-        expected_db_per_km = a0 / ((1.0 - f0**2 / f**2)**2 + 1.0 / Q**2)
-        got = bio.alpha_db_per_m(f, [15.0])[0] * 1000.0
-        assert got == pytest.approx(expected_db_per_km, rel=1e-12)
+        expected_dB_per_km = a0 / ((1.0 - f0**2 / f**2)**2 + 1.0 / Q**2)
+        got = bio.alpha_dB_per_m(f, [15.0])[0] * 1000.0
+        assert got == pytest.approx(expected_dB_per_km, rel=1e-12)
 
     def test_outside_the_layer_is_zero(self):
         from uacpy.core.absorption import Biological
         bio = Biological(layers=[(10.0, 20.0, 400.0, 5.0, 0.1)])
-        assert bio.alpha_db_per_m(500.0, [25.0])[0] == 0.0
+        assert bio.alpha_dB_per_m(500.0, [25.0])[0] == 0.0
 
     def test_stacked_layers_sum_on_a_shared_boundary(self):
         # AttenMod.f90:102-109 tests z >= Z1 .AND. z <= Z2 per layer and
@@ -178,8 +178,8 @@ class TestBiologicalLorentzianFormula:
         one = Biological(layers=[(10.0, 20.0, 400.0, 5.0, 0.1)])
         two = Biological(layers=[(10.0, 20.0, 400.0, 5.0, 0.1),
                                  (20.0, 30.0, 400.0, 5.0, 0.1)])
-        assert (two.alpha_db_per_m(500.0, [20.0])[0]
-                == pytest.approx(2.0 * one.alpha_db_per_m(500.0, [20.0])[0]))
+        assert (two.alpha_dB_per_m(500.0, [20.0])[0]
+                == pytest.approx(2.0 * one.alpha_dB_per_m(500.0, [20.0])[0]))
 
 
 class TestKrakenDeckBlockOrder:

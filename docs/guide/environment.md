@@ -598,7 +598,7 @@ is set.
 | `Thorp()` | none | no |
 | `FrancoisGarrison(temperature_c, salinity_psu, pH, z_bar_m, ph_scale='nbs')` | four required, plus the scale `pH` is on | yes |
 | `Biological(layers=[(z_top, z_bottom, f0, Q, a0), …])` | per-layer resonance | yes, by layer |
-| `ConstantAbsorption(value_db_per_wavelength)` | one | no |
+| `ConstantAbsorption(value_dB_per_wavelength)` | one | no |
 
 ```python
 freqs = np.logspace(1, 5.7, 400)
@@ -608,7 +608,7 @@ uacpy.FrancoisGarrison(temperature_c=20.0, salinity_psu=35.0,
                        pH=8.0, z_bar_m=50.0).plot(freqs, depth=50.0)
 uacpy.FrancoisGarrison(temperature_c=4.0, salinity_psu=35.0,
                        pH=8.0, z_bar_m=3000.0).plot(freqs, depth=3000.0)
-uacpy.ConstantAbsorption(value_db_per_wavelength=1.0e-4).plot(freqs)
+uacpy.ConstantAbsorption(value_dB_per_wavelength=1.0e-4).plot(freqs)
 uacpy.Biological(layers=[(20.0, 80.0, 1500.0, 4.0, 0.02)]).plot(freqs, depth=50.0)
 ```
 

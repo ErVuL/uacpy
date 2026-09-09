@@ -436,12 +436,12 @@ def test_detector_fails_unmarked_error_lines_with_defect_signatures():
     with pytest.raises(AssertionError, match="swallowed"):
         _check_no_swallowed_failure(_EXAMPLE, _FakeResult(stdout=(
             "    KrakenField       ERROR: 'Field' object has no attribute "
-            "'to_db'\n"
+            "'to_dB'\n"
         )))
 
 
 @pytest.mark.parametrize("line", [
-    "  SKIPPED: 'Field' object has no attribute 'to_db'",        # example 19
+    "  SKIPPED: 'Field' object has no attribute 'to_dB'",        # example 19
     "  Kraken skipped: run() got an unexpected keyword argument 'x'",  # ex 26
     "  TL: [skipped] AttributeError: 'Bellhop' object has no attribute 'go'",
 ])
@@ -574,13 +574,13 @@ def _plotting_utils():
     return module
 
 
-def _tl_field(ranges, level_db):
-    """A Field whose TL at every depth is ``level_db + 20·log10(r)``."""
+def _tl_field(ranges, level_dB):
+    """A Field whose TL at every depth is ``level_dB + 20·log10(r)``."""
     import numpy as np
     from uacpy.core.results import Field
 
     depths = np.linspace(0.0, 200.0, 21)
-    tl = np.tile(level_db + 20.0 * np.log10(np.maximum(ranges, 1.0)),
+    tl = np.tile(level_dB + 20.0 * np.log10(np.maximum(ranges, 1.0)),
                  (depths.size, 1))
     return Field(data=tl, coords={'depth': depths, 'range': ranges},
                  model='test')

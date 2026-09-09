@@ -88,20 +88,20 @@ class TestPekerisWaveguide:
 
         # Physics validation
         # 1. TL increases with range (monotonic in mean)
-        tl_vs_range = result.db.mean(axis=0)  # Average over depths
+        tl_vs_range = result.dB.mean(axis=0)  # Average over depths
         assert tl_vs_range[-1] > tl_vs_range[0], "TL should increase with range"
 
         # 2. TL at 5km sits in the plausible band for 100 Hz in 100 m water
-        tl_at_5km = result.db[:, -1].mean()
+        tl_at_5km = result.dB[:, -1].mean()
         assert 60 < tl_at_5km < 100, f"TL at 5km outside 60-100 dB: {tl_at_5km:.1f} dB"
 
         # 3. TL at 1km should be less than at 5km
-        tl_at_1km = result.db[:, 0].mean()
+        tl_at_1km = result.dB[:, 0].mean()
         assert tl_at_1km < tl_at_5km, "TL at 1km should be less than at 5km"
 
         # 4. No NaN or inf values
-        assert np.all(result.db > 0), "All TL values should be positive"
-        assert np.all(result.db < 200), "TL should not exceed 200 dB (sanity check)"
+        assert np.all(result.dB > 0), "All TL values should be positive"
+        assert np.all(result.dB < 200), "TL should not exceed 200 dB (sanity check)"
 
     @pytest.mark.requires_binary
     def test_bellhop_pekeris_depth_structure(self, pekeris_env_soft_bottom, pekeris_source, pekeris_receiver):
@@ -116,7 +116,7 @@ class TestPekerisWaveguide:
         result = bellhop.compute_tl(pekeris_env_soft_bottom, pekeris_source, pekeris_receiver)
 
         # Check depth variation exists (not constant)
-        tl_vs_depth_at_1km = result.db[:, 0]
+        tl_vs_depth_at_1km = result.dB[:, 0]
         depth_std = np.std(tl_vs_depth_at_1km)
         assert depth_std > 1.0, "Should see >1 dB variation in TL vs depth (Lloyd mirror pattern)"
 
@@ -220,8 +220,8 @@ class TestRangeDependentPhysicalSanity:
         assert result.shape == (len(slope_receiver.depths), len(slope_receiver.ranges))
 
         # TL should be reasonable
-        assert np.all(result.db > 0)
-        assert np.all(result.db < 150)
+        assert np.all(result.dB > 0)
+        assert np.all(result.dB < 150)
 
     @pytest.mark.requires_binary
     @pytest.mark.slow
@@ -238,8 +238,8 @@ class TestRangeDependentPhysicalSanity:
         assert np.all(np.isfinite(result.data))
 
         # TL should be physically reasonable
-        assert np.all(result.db > 0)
-        assert np.all(result.db < 150)
+        assert np.all(result.dB > 0)
+        assert np.all(result.dB < 150)
 
 
 class TestMunkProfile:
@@ -279,7 +279,7 @@ class TestMunkProfile:
             munk_env, munk_source, munk_receiver,
             run_mode=RunMode.COHERENT_TL,
         )
-        tl = np.asarray(result.db).reshape(-1)
+        tl = np.asarray(result.dB).reshape(-1)
         z = np.asarray(munk_receiver.depths)
 
         tl_surface = float(np.median(tl[z < 200.0]))
@@ -472,4 +472,4 @@ class TestNumericalStability:
         assert np.all(np.isfinite(result.data))
         # Geometric spreading alone exceeds 20 dB at the nearest range
         # (100 m), so this only catches a TL that came back near zero.
-        assert np.all(result.db > 20)
+        assert np.all(result.dB > 20)

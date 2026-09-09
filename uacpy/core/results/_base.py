@@ -12,10 +12,10 @@ from uacpy.core.exceptions import ConfigurationError
 from uacpy.core._carrier_validate import _DeepCopyMixin
 
 
-def _complex_to_db(data: np.ndarray) -> np.ndarray:
+def _complex_to_dB(data: np.ndarray) -> np.ndarray:
     """``-20·log10(|data|)`` with ``|data|`` clamped to :data:`PRESSURE_FLOOR`.
 
-    Canonical TL conversion used by :attr:`Field.db` and the metrics in
+    Canonical TL conversion used by :attr:`Field.dB` and the metrics in
     :mod:`uacpy.core.metrics`. Preserves shape — no squeeze. The clamp caps
     an exactly-zero sample (a cell no energy reached) at 600 dB rather than
     ``+inf``, keeping the array finite for plotting and reductions.
@@ -443,7 +443,7 @@ _DOCUMENTED_METADATA: Dict[Tuple[str, str], Tuple[type, str]] = {
     ),
     ('OASS', 'oass_quantity'): (
         str, "Long name of the quantity on the Field: "
-        "'reverberation_loss_db'."
+        "'reverberation_loss_dB'."
     ),
     ('OASS', 'interface'): (
         int, 'OASES deck-layer index (INTFC) of the scattering interface the '

@@ -37,10 +37,10 @@ class TestWithAttenuation:
         # For uniform c, ρ, the perturbation reduces to
         # α_m = (ω/(c·k_rm)) · α  =  (k₀/k_rm) · α    (in Np/m)
         modes = _pekeris_modes()
-        alpha_db_m = 0.01
-        alpha_np_m = alpha_db_m * np.log(10.0) / 20.0
+        alpha_dB_m = 0.01
+        alpha_np_m = alpha_dB_m * np.log(10.0) / 20.0
         out = modes.with_attenuation(
-            alpha_db_m, sound_speed_z=1500.0, density_z=1.0,
+            alpha_dB_m, sound_speed_z=1500.0, density_z=1.0,
         )
         omega = 2.0 * np.pi * float(modes.f0)
         k0 = omega / 1500.0
@@ -50,7 +50,7 @@ class TestWithAttenuation:
     def test_thorp_absorption(self):
         from uacpy.core.absorption import Thorp
         modes = _pekeris_modes(freq=1000.0)
-        alpha = Thorp().alpha_db_per_m(modes.f0, modes.depths)
+        alpha = Thorp().alpha_dB_per_m(modes.f0, modes.depths)
         out = modes.with_attenuation(alpha)
         assert np.all(out.k.imag > 0)
 
@@ -60,7 +60,7 @@ class TestWithAttenuation:
         fg = FrancoisGarrison(
             temperature_c=15.0, salinity_psu=35.0, pH=8.1, z_bar_m=50.0,
         )
-        out = modes.with_attenuation(fg.alpha_db_per_m(modes.f0, modes.depths))
+        out = modes.with_attenuation(fg.alpha_dB_per_m(modes.f0, modes.depths))
         assert np.all(out.k.imag > 0)
 
     def test_depth_dependent_alpha_weighted_by_phi_square(self):
@@ -454,13 +454,13 @@ class TestNormalisationRunsIntoTheHalfSpace:
     so the mode that dominates at long range was over-attenuated by 17 %.
     """
 
-    def _exact_alpha(self, phi, z, gamma, c, alpha_water_db, alpha_bottom_db):
+    def _exact_alpha(self, phi, z, gamma, c, alpha_water_dB, alpha_bottom_dB):
         """``α_m = (ω/k_r)·∫₀^∞ α/(cρ)ψ² dz / ∫₀^∞ ψ²/ρ dz`` in closed form:
         the water part by quadrature on the tabulated axis, the half-space
         part as ``ψ(D)²/(2γ)`` (the tail ``∫_D^∞ e^{−2γ(z−D)} dz``)."""
         rho1, rho2 = c['rho1'] * 1000.0, c['rho2'] * 1000.0
-        a_w = alpha_water_db * np.log(10.0) / 20.0
-        a_b = alpha_bottom_db * np.log(10.0) / 20.0 * c['freq'] / c['c2']
+        a_w = alpha_water_dB * np.log(10.0) / 20.0
+        a_b = alpha_bottom_dB * np.log(10.0) / 20.0 * c['freq'] / c['c2']
         i_water = np.trapezoid(phi ** 2, z, axis=0)
         tail = phi[-1, :] ** 2 / (2.0 * gamma)
         num = a_w / (c['c1'] * rho1) * i_water + a_b / (c['c2'] * rho2) * tail
@@ -473,20 +473,20 @@ class TestNormalisationRunsIntoTheHalfSpace:
             acoustic_type='half-space', sound_speed=consts['c2'],
             density=consts['rho2'], attenuation=attenuation)
 
-    @pytest.mark.parametrize('alpha_water_db, alpha_bottom_db',
+    @pytest.mark.parametrize('alpha_water_dB, alpha_bottom_dB',
                              [(0.02, 0.0), (0.02, 0.5), (0.0, 0.5)])
-    def test_matches_the_exact_perturbation_integral(self, alpha_water_db,
-                                                     alpha_bottom_db):
+    def test_matches_the_exact_perturbation_integral(self, alpha_water_dB,
+                                                     alpha_bottom_dB):
         modes, z, phi, gamma, c = _exact_pekeris()
         assert gamma.size >= 4
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
             out = modes.with_attenuation(
-                alpha_water_db, sound_speed_z=c['c1'], density_z=c['rho1'],
-                bottom=self._bottom(c, alpha_bottom_db),
+                alpha_water_dB, sound_speed_z=c['c1'], density_z=c['rho1'],
+                bottom=self._bottom(c, alpha_bottom_dB),
                 seafloor_depth=c['D'])
-        ratio = self._exact_alpha(phi, z, gamma, c, alpha_water_db,
-                                  alpha_bottom_db)
+        ratio = self._exact_alpha(phi, z, gamma, c, alpha_water_dB,
+                                  alpha_bottom_dB)
         expected = (c['omega'] / modes.k.real) * ratio
         np.testing.assert_allclose(out.k.imag, expected, rtol=1e-9)
 

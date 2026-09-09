@@ -176,7 +176,7 @@ class TestBiologicalBoundaryContributions:
                                   (10.0, 20.0, 100.0, 5.0, 10.0)])
 
     def test_shared_boundary_sums_both_layers(self):
-        a = self._stack().alpha_db_per_m(100.0, [5.0, 10.0, 15.0])
+        a = self._stack().alpha_dB_per_m(100.0, [5.0, 10.0, 15.0])
         assert a[1] == pytest.approx(a[0] + a[2])
         # At f = f0 each layer peaks at a0·Q² = 10·25 = 250 dB/km, so the
         # shared depth carries 500 dB/km (the AttenMod.f90 sum).
@@ -184,7 +184,7 @@ class TestBiologicalBoundaryContributions:
         assert a[1] * 1000.0 == pytest.approx(500.0)
 
     def test_outer_edges_are_inclusive(self):
-        a = self._stack().alpha_db_per_m(100.0, [0.0, 20.0, 25.0])
+        a = self._stack().alpha_dB_per_m(100.0, [0.0, 20.0, 25.0])
         assert a[0] == pytest.approx(a[1])
         assert a[0] > 0.0
         assert a[2] == 0.0
@@ -197,26 +197,26 @@ class TestAbsorptionFormulaOutputShapes:
 
     def test_one_element_array_stays_indexable(self):
         from uacpy.core.absorption import (
-            thorp_db_per_km, francois_garrison_db_per_km,
+            thorp_dB_per_km, francois_garrison_dB_per_km,
             convert_attenuation_units)
-        assert thorp_db_per_km(np.array([100.0])).shape == (1,)
-        assert float(thorp_db_per_km(np.array([100.0]))[0]) > 0
-        assert francois_garrison_db_per_km(np.array([100.0])).shape == (1,)
+        assert thorp_dB_per_km(np.array([100.0])).shape == (1,)
+        assert float(thorp_dB_per_km(np.array([100.0]))[0]) > 0
+        assert francois_garrison_dB_per_km(np.array([100.0])).shape == (1,)
         assert convert_attenuation_units(
             np.array([1.0]), 100.0, 'dB/km', 'dB/m').shape == (1,)
 
     def test_scalar_input_yields_0d(self):
         from uacpy.core.absorption import (
-            thorp_db_per_km, francois_garrison_db_per_km,
+            thorp_dB_per_km, francois_garrison_dB_per_km,
             convert_attenuation_units)
-        assert np.ndim(thorp_db_per_km(100.0)) == 0
-        assert np.ndim(francois_garrison_db_per_km(100.0)) == 0
+        assert np.ndim(thorp_dB_per_km(100.0)) == 0
+        assert np.ndim(francois_garrison_dB_per_km(100.0)) == 0
         assert np.ndim(
             convert_attenuation_units(1.0, 100.0, 'dB/km', 'dB/m')) == 0
 
     def test_n_element_array_keeps_shape(self):
-        from uacpy.core.absorption import thorp_db_per_km
-        assert thorp_db_per_km(np.array([100.0, 200.0, 300.0])).shape == (3,)
+        from uacpy.core.absorption import thorp_dB_per_km
+        assert thorp_dB_per_km(np.array([100.0, 200.0, 300.0])).shape == (3,)
 
 
 class TestConvertAttenuationUnitsFromQ:
@@ -232,8 +232,8 @@ class TestConvertAttenuationUnitsFromQ:
     def test_positive_q_round_trips(self):
         from uacpy.core.absorption import convert_attenuation_units
         q = 50.0
-        db_m = convert_attenuation_units(q, 100.0, 'Q', 'dB/m')
-        back = convert_attenuation_units(float(db_m), 100.0, 'dB/m', 'Q')
+        dB_m = convert_attenuation_units(q, 100.0, 'Q', 'dB/m')
+        back = convert_attenuation_units(float(dB_m), 100.0, 'dB/m', 'Q')
         assert float(back) == pytest.approx(q)
 
 
@@ -272,7 +272,7 @@ class TestConvertAttenuationUnitsToQ:
 
 class TestAbsorptionFrequencyGuardIsShared:
     """``α(f, z)`` has no value at or below zero for any of the four models,
-    so the guard sits on the public ``alpha_db_per_m`` ahead of the dispatch
+    so the guard sits on the public ``alpha_dB_per_m`` ahead of the dispatch
     rather than in each subclass. Thorp and Francois-Garrison are polynomials
     that had no guard and kept evaluating: both returned a *positive*
     attenuation at f = 0 and for a negative frequency."""
@@ -285,7 +285,7 @@ class TestAbsorptionFrequencyGuardIsShared:
             FrancoisGarrison(temperature_c=15.0, salinity_psu=35.0,
                              pH=8.1, z_bar_m=50.0),
             Biological(layers=[(0.0, 100.0, 100.0, 10.0, 1.0)]),
-            ConstantAbsorption(value_db_per_wavelength=0.5),
+            ConstantAbsorption(value_dB_per_wavelength=0.5),
         ]
 
     @pytest.mark.parametrize('freq', [0.0, -100.0, float('nan')])
@@ -294,24 +294,24 @@ class TestAbsorptionFrequencyGuardIsShared:
         for model in self._models():
             with pytest.raises(ConfigurationError,
                                match='frequency must be > 0'):
-                model.alpha_db_per_m(freq, z)
+                model.alpha_dB_per_m(freq, z)
 
     def test_the_message_names_the_model(self):
         from uacpy.core.absorption import Thorp
-        with pytest.raises(ConfigurationError, match='Thorp.alpha_db_per_m'):
-            Thorp().alpha_db_per_m(0.0, np.array([0.0]))
+        with pytest.raises(ConfigurationError, match='Thorp.alpha_dB_per_m'):
+            Thorp().alpha_dB_per_m(0.0, np.array([0.0]))
 
     def test_a_positive_frequency_evaluates(self):
         z = np.array([0.0, 50.0])
         for model in self._models():
-            a = np.asarray(model.alpha_db_per_m(1000.0, z))
+            a = np.asarray(model.alpha_dB_per_m(1000.0, z))
             assert a.shape == z.shape
             assert np.isfinite(a).all() and (a >= 0).all()
 
     def test_sub_hertz_is_legal(self):
         """Only f <= 0 has no wavelength; infrasonic frequencies convert."""
         from uacpy.core.absorption import ConstantAbsorption
-        out = ConstantAbsorption(value_db_per_wavelength=0.5).alpha_db_per_m(
+        out = ConstantAbsorption(value_dB_per_wavelength=0.5).alpha_dB_per_m(
             0.5, np.array([10.0]))
         assert np.isfinite(out).all()
 
@@ -325,14 +325,14 @@ class TestConstantAbsorptionCeiling:
         from uacpy.core.constants import MAX_ATTENUATION_DB_PER_WAVELENGTH
         with pytest.raises(ConfigurationError, match="dB/wavelength exceeds"):
             ConstantAbsorption(
-                value_db_per_wavelength=MAX_ATTENUATION_DB_PER_WAVELENGTH + 1.0)
+                value_dB_per_wavelength=MAX_ATTENUATION_DB_PER_WAVELENGTH + 1.0)
 
     def test_at_ceiling_constructs(self):
         from uacpy.core.absorption import ConstantAbsorption
         from uacpy.core.constants import MAX_ATTENUATION_DB_PER_WAVELENGTH
         c = ConstantAbsorption(
-            value_db_per_wavelength=MAX_ATTENUATION_DB_PER_WAVELENGTH)
-        assert c.value_db_per_wavelength == pytest.approx(
+            value_dB_per_wavelength=MAX_ATTENUATION_DB_PER_WAVELENGTH)
+        assert c.value_dB_per_wavelength == pytest.approx(
             MAX_ATTENUATION_DB_PER_WAVELENGTH)
 
 
@@ -622,14 +622,14 @@ class TestField:
         field = self._tl_field(data, ranges, depths)
         # Off-centre query: range=4200 → index 4, depth=68 → index 7,
         # so the nearest cell is data[7, 4] = 74 (a transpose reads 47).
-        assert float(field.at(range=4200.0, depth=68.0).db) == 74.0
+        assert float(field.at(range=4200.0, depth=68.0).dB) == 74.0
 
     def test_at_range_returns_nearest_cell_values(self):
         data = np.arange(100).reshape(10, 10).astype(float)
         ranges = np.linspace(0, 9000, 10)
         depths = np.linspace(0, 90, 10)
         field = self._tl_field(data, ranges, depths)
-        values = field.at(range=4200.0).db
+        values = field.at(range=4200.0).dB
         # Nearest range sample is index 4 (4000 m): the depth column
         # 10*d + 4. A transposed field would return 40..49 instead.
         np.testing.assert_array_equal(values, np.arange(10) * 10.0 + 4.0)
@@ -639,7 +639,7 @@ class TestField:
         ranges = np.linspace(0, 9000, 10)
         depths = np.linspace(0, 90, 10)
         field = self._tl_field(data, ranges, depths)
-        values = field.at(depth=68.0).db
+        values = field.at(depth=68.0).dB
         # Nearest depth sample is index 7 (70 m): the range row 70..79.
         # A transposed field would return 8, 18, ..., 98 instead.
         np.testing.assert_array_equal(values, np.arange(10) + 70.0)
@@ -781,7 +781,7 @@ class TestField:
 class TestFieldValueAccessorsAreWriteGuarded:
     """``Field`` copies on ingest, so no accessor may hand back a writable
     alias of ``data``: ``p = field.p; p *= k`` would otherwise corrupt the
-    stored result. Real ``.db`` is the common path (RAM / OAST /
+    stored result. Real ``.dB`` is the common path (RAM / OAST /
     Bellhop-incoherent all return real dB)."""
 
     @staticmethod
@@ -796,7 +796,7 @@ class TestFieldValueAccessorsAreWriteGuarded:
 
     def test_real_tl_is_read_only(self):
         f = self._real()
-        tl = f.db
+        tl = f.dB
         assert not tl.flags.writeable
         with pytest.raises(ValueError):
             tl[0, 0] = -999.0
@@ -804,16 +804,16 @@ class TestFieldValueAccessorsAreWriteGuarded:
 
     def test_real_tl_reads_the_stored_dB_values(self):
         f = self._real()
-        np.testing.assert_array_equal(np.asarray(f.db), f.data)
+        np.testing.assert_array_equal(np.asarray(f.dB), f.data)
 
     def test_scalar_tl_is_read_only_and_castable(self):
         f = self._real().at(depth=0.0, range=1.0)
-        assert not f.db.flags.writeable
-        assert float(f.db) == 70.0
+        assert not f.dB.flags.writeable
+        assert float(f.dB) == 70.0
 
     def test_complex_tl_is_a_fresh_array(self):
         f = self._complex()
-        tl = f.db
+        tl = f.dB
         assert not np.shares_memory(tl, f.data)
         tl[0, 0] = -999.0                       # derived array: safe to write
         assert f.data[0, 0] == 1 + 1j
@@ -854,68 +854,68 @@ class TestFieldValueAccessorsAreWriteGuarded:
         assert 'same buffer' in prose or 'same memory' in prose
 
     @pytest.mark.parametrize('dtype', ['float64', 'float32', 'int64'])
-    def test_real_db_aliases_data_in_every_real_dtype(self, dtype):
+    def test_real_dB_aliases_data_in_every_real_dtype(self, dtype):
         """The real branch hands back ``data`` itself, so which engine
         produced the field decides nothing about the contract.
 
-        float32 is the case a user meets: ``to_db()`` of a ``.shd``-backed
+        float32 is the case a user meets: ``to_dB()`` of a ``.shd``-backed
         complex64 Field is float32. float64 is what an in-memory Field and
         the RAM/OAST readers carry. Both alias, and the array taken before a
         write reads the value written after it."""
         f = Field(data=np.ones((2, 2), dtype=dtype),
                   coords={'depth': [0.0, 1.0], 'range': [0.0, 1.0]},
                   metadata={'unit': 'dB'})
-        view = f.db
+        view = f.dB
         assert np.shares_memory(view, f.data)
         assert not view.flags.writeable
         f.data[0, 0] = 999
         assert view[0, 0] == 999
 
     @pytest.mark.parametrize('dtype', ['float64', 'float32', 'int64'])
-    def test_real_db_carries_the_fields_own_dtype(self, dtype):
+    def test_real_dB_carries_the_fields_own_dtype(self, dtype):
         # The accepted cost of aliasing: no upcast, so the caller reads the
         # stored precision and asks for float64 explicitly if it needs it.
         f = Field(data=np.ones((2, 2), dtype=dtype),
                   coords={'depth': [0.0, 1.0], 'range': [0.0, 1.0]},
                   metadata={'unit': 'dB'})
-        assert f.db.dtype == np.dtype(dtype)
-        assert np.asarray(f.db, dtype=float).dtype == np.dtype('float64')
+        assert f.dB.dtype == np.dtype(dtype)
+        assert np.asarray(f.dB, dtype=float).dtype == np.dtype('float64')
 
-    def test_to_db_of_a_complex64_field_gives_a_float32_field_whose_db_aliases(self):
+    def test_to_dB_of_a_complex64_field_gives_a_float32_field_whose_dB_aliases(self):
         # The in-package route to a non-float64 real field: read_shd_bin
-        # returns complex64, so to_db() of it is float32.
+        # returns complex64, so to_dB() of it is float32.
         f = Field(data=np.ones((2, 2), dtype='complex64'),
                   coords={'depth': [0.0, 1.0], 'range': [0.0, 1.0]},
                   metadata={'unit': 'Pa'})
-        real = f.to_db()
+        real = f.to_dB()
         assert real.data.dtype == np.dtype('float32')
         assert not real.is_complex
-        assert np.shares_memory(real.db, real.data)
-        assert real.db.dtype == np.dtype('float32')
+        assert np.shares_memory(real.dB, real.data)
+        assert real.dB.dtype == np.dtype('float32')
 
-    def test_the_docstring_states_in_prose_that_db_follows_the_fields_dtype(self):
+    def test_the_docstring_states_in_prose_that_dB_follows_the_fields_dtype(self):
         """The contract a caller reads before deciding whether to cast.
 
         Literal spans are stripped first: ``dtype`` also occurs inside the
         ``np.asarray(..., dtype=float)`` example, which shows how to opt out
-        of the stored precision rather than stating what ``.db`` returns.
+        of the stored precision rather than stating what ``.dB`` returns.
         Matching it there passes on a docstring that never makes the claim.
         """
         prose = re.sub(r'``[^`]*``', ' ',
-                       ' '.join((Field.db.__doc__ or '').split()))
+                       ' '.join((Field.dB.__doc__ or '').split()))
         assert 'dtype' in prose
         assert 'read-only view' in prose
         assert 'alias' in prose
 
     @pytest.mark.parametrize('dtype', ['complex128', 'complex64'])
-    def test_complex_db_is_a_fresh_array_in_every_complex_dtype(self, dtype):
+    def test_complex_dB_is_a_fresh_array_in_every_complex_dtype(self, dtype):
         """The other side of the same boundary: the complex branch computes
         ``-20·log10|data|``, so there is nothing of ``data`` to alias and the
         caller owns what it gets."""
         f = Field(data=np.full((2, 2), 1 + 1j, dtype=dtype),
                   coords={'depth': [0.0, 1.0], 'range': [0.0, 1.0]},
                   metadata={'unit': 'Pa'})
-        tl = f.db
+        tl = f.dB
         assert not np.shares_memory(tl, f.data)
         tl[0, 0] = -999.0
         assert f.data[0, 0] == 1 + 1j
@@ -933,7 +933,7 @@ class TestFieldMaxComplexData:
     """max() ranks complex data by magnitude whatever unit the field is
     tagged with, so no float cast of complex values occurs."""
 
-    def test_complex_db_tagged_field_uses_magnitude(self):
+    def test_complex_dB_tagged_field_uses_magnitude(self):
         f = Field(
             data=np.array([[1 + 1j, 3 + 4j]]),
             coords={'depth': np.array([1.0]),
@@ -1171,8 +1171,8 @@ class TestArrivalsFilterChain:
                         model='Test', frequencies=100.0)
 
     @staticmethod
-    def _absorbed_pair(loss_db, *, phases=(0.0, 0.0)):
-        """Two equal-amplitude arrivals; the second loses ``loss_db`` to
+    def _absorbed_pair(loss_dB, *, phases=(0.0, 0.0)):
+        """Two equal-amplitude arrivals; the second loses ``loss_dB`` to
         absorption, carried where Bellhop carries it — the imaginary delay."""
         from uacpy.core.results import Arrivals
         cell = {
@@ -1183,7 +1183,7 @@ class TestArrivalsFilterChain:
             "n_bot_bounces": np.zeros(2, dtype=int),
             "src_angles": np.zeros(2), "rcv_angles": np.zeros(2),
             "delays_imag": np.array(
-                [0.0, -np.log(10 ** (loss_db / 20.0)) / (2 * np.pi * 100.0)]),
+                [0.0, -np.log(10 ** (loss_dB / 20.0)) / (2 * np.pi * 100.0)]),
         }
         return Arrivals(by_receiver=[[[cell]]],
                         receiver_depths=np.array([50.0]),
@@ -1400,9 +1400,9 @@ class TestArrivalsFilterChain:
         amplitude and still arrive far quieter. At 40 kHz a 6 km bounce path
         with three times the direct's amplitude lands 55 dB below it."""
         from uacpy.core.results import Arrivals
-        f0, alpha_db_per_km = 40e3, 12.90        # Thorp at 40 kHz
+        f0, alpha_dB_per_km = 40e3, 12.90        # Thorp at 40 kHz
         def dimag(arc_km):
-            return -(alpha_db_per_km * arc_km / 8.6858896) / (2 * np.pi * f0)
+            return -(alpha_dB_per_km * arc_km / 8.6858896) / (2 * np.pi * f0)
         cell = {
             "delays": np.array([1000 / 1500.0, 6000 / 1500.0]),
             "amplitudes": np.array([1.0e-3, 3.0e-3]),
@@ -2043,7 +2043,7 @@ class TestFieldSlicing:
 
     def test_full_grid_tl_preserves_data_shape(self):
         f = self._full_grid(complex_data=True)
-        assert f.db.shape == f.data.shape == (4, 5)
+        assert f.dB.shape == f.data.shape == (4, 5)
         assert f.p.shape == f.data.shape
 
     def test_eval_interpolates_and_differs_from_neighbours(self):
@@ -2098,7 +2098,7 @@ class TestFieldSlicing:
         point = f.at(range=500.0, depth=50.0)
         assert list(point.coords) == []
         assert point.data.shape == ()
-        assert isinstance(float(point.db), float)
+        assert isinstance(float(point.dB), float)
 
     def test_max_records_every_axis_in_pinned(self):
         f = self._full_grid()
@@ -2183,15 +2183,15 @@ class TestFieldSlicing:
 
     def test_tf_to_tl_returns_real_field(self):
         tf = self._tf()
-        tl = tf.to_db()
+        tl = tf.to_dB()
         assert not tl.is_complex
         assert tl.data.shape == tf.data.shape
 
     def test_tf_to_tl_is_minus_20log10_magnitude(self):
-        """``to_db`` is exactly ``-20·log10(|data|)`` (every |data| here is
+        """``to_dB`` is exactly ``-20·log10(|data|)`` (every |data| here is
         far above the PRESSURE_FLOOR clamp, so the clamp is inert)."""
         tf = self._tf()
-        tl = tf.to_db()
+        tl = tf.to_dB()
         np.testing.assert_allclose(
             tl.data, -20.0 * np.log10(np.abs(tf.data)), rtol=1e-12)
         # One hand-checked value: data flat index 3 is 3+1j, |3+1j|² = 10,
@@ -2270,20 +2270,20 @@ class TestResultStackInvariants:
         np.testing.assert_array_equal(
             stack.coordinate, np.array([10.0, 20.0]))
 
-    def test_db_stacks_slab_views_into_a_dense_array(self):
-        """``stack.db`` is one dense ``(n_slabs, *slab.shape)`` ndarray, so
-        generic code can read ``result.db`` whether one or many source
+    def test_dB_stacks_slab_views_into_a_dense_array(self):
+        """``stack.dB`` is one dense ``(n_slabs, *slab.shape)`` ndarray, so
+        generic code can read ``result.dB`` whether one or many source
         depths were requested."""
         from uacpy.core.results import ResultStack
         a = self._slab(source_depth=10.0)               # |p| = 1 → 0 dB
         b = self._slab(source_depth=20.0)
         b.data[...] = 10.0 + 0j                          # |p| = 10 → -20 dB
         stack = ResultStack(slabs=[a, b], coordinate=[10.0, 20.0])
-        db = stack.db
-        assert isinstance(db, np.ndarray)
-        assert db.shape == (2, 2, 3)                     # (n_slabs, z, r)
-        np.testing.assert_allclose(db[0], 0.0)
-        np.testing.assert_allclose(db[1], -20.0)
+        dB = stack.dB
+        assert isinstance(dB, np.ndarray)
+        assert dB.shape == (2, 2, 3)                     # (n_slabs, z, r)
+        np.testing.assert_allclose(dB[0], 0.0)
+        np.testing.assert_allclose(dB[1], -20.0)
 
     def test_iteration_and_label_select_share_slab_identity(self):
         from uacpy.core.results import ResultStack
@@ -2974,7 +2974,7 @@ class TestKindUnitAndDtypeAreIndependentAxes:
         (None, 40.0),               # pressure in dB: transmission loss
         ('reverberation', 40.0),
     ], ids=['transmission_loss', 'reverberation'])
-    def test_a_db_loss_inverts(self, kind, expected_max):
+    def test_a_dB_loss_inverts(self, kind, expected_max):
         """Both dB *losses* run backwards, so the least of either is loudest.
 
         Reverberation belongs here because that is what the vendored engine
@@ -2983,7 +2983,7 @@ class TestKindUnitAndDtypeAreIndependentAxes:
         ``VALG10`` and scales by ``VSMUL(-5E0)``, giving
         ``-10*log10 E[|p_scat|^2]``. The leading minus is the whole point: a
         larger stored number is a *weaker* scattered field, which is why the
-        model tags it ``oass_quantity='reverberation_loss_db'``. Read as a
+        model tags it ``oass_quantity='reverberation_loss_dB'``. Read as a
         level, ``max()`` returned the quietest cell of the grid.
 
         **A bound stated on the level is the opposite bound on this array.**
@@ -2999,7 +2999,7 @@ class TestKindUnitAndDtypeAreIndependentAxes:
         assert f.unit == 'dB'
         assert float(f.max().data) == pytest.approx(expected_max)
 
-    def test_a_db_level_is_not_inverted(self):
+    def test_a_dB_level_is_not_inverted(self):
         # Signal excess shares the dB unit but is a level, not a loss: more
         # is more. Deciding direction from the unit alone reports the
         # *weakest* cell of a level grid as the strongest.
@@ -3028,7 +3028,7 @@ class TestKindUnitAndDtypeAreIndependentAxes:
         assert label == 'Reverberation loss (dB re unit source)'
         assert 'level' not in label.lower()
 
-    def test_a_time_trace_is_linear_not_db(self):
+    def test_a_time_trace_is_linear_not_dB(self):
         # Real data alone does not mean dB — a time trace is Pa, and treating
         # it as a level would make max() return the trace's *trough*.
         t = np.array([0.0, 1.0, 2.0, 3.0])
@@ -3179,20 +3179,20 @@ class TestSpectrumAndToneExtraction:
 
 class TestFieldDomainAccessorContracts:
     """The documented unit/domain guards on the value accessors
-    (docs/guide/results.md §4): ``.db`` refuses a time-domain trace,
+    (docs/guide/results.md §4): ``.dB`` refuses a time-domain trace,
     ``.p`` refuses real data, and ``.dt``/``.sample_rate`` read 0.0 when
     no time axis exists."""
 
-    def test_db_raises_on_a_time_domain_field(self):
+    def test_dB_raises_on_a_time_domain_field(self):
         trace = Field(data=np.zeros((1, 1, 8)),
                       coords={'depth': np.array([10.0]),
                               'range': np.array([100.0]),
                               'time': np.arange(8) * 0.01},
                       model='Test')
         with pytest.raises(AttributeError, match='time-domain'):
-            trace.db
+            trace.dB
 
-    def test_p_raises_on_a_real_db_field(self):
+    def test_p_raises_on_a_real_dB_field(self):
         tl = Field(data=np.array([[60.0]]),
                    coords={'depth': np.array([10.0]),
                            'range': np.array([100.0])},
@@ -3626,7 +3626,7 @@ class TestEnvironmentCoerceDispatchesRejectBool:
 
 
 class TestResultStackDbRefusesNonDbSlabs:
-    """``ResultStack.db`` raises the stack's typed error for slabs whose
+    """``ResultStack.dB`` raises the stack's typed error for slabs whose
     real data is not a level (unit other than ``'dB'``), while complex
     slabs — whose dB view is derived — still stack."""
 
@@ -3645,21 +3645,21 @@ class TestResultStackDbRefusesNonDbSlabs:
                         meta={'kind': 'probability_of_detection',
                               'unit': '1'})
         with pytest.raises(ConfigurationError,
-                           match=r"ResultStack\.db: slabs are in '1', not dB"):
-            self._stack([pd, pd]).db
+                           match=r"ResultStack\.dB: slabs are in '1', not dB"):
+            self._stack([pd, pd]).dB
 
-    def test_complex_pressure_slabs_stack_to_a_db_view(self):
+    def test_complex_pressure_slabs_stack_to_a_dB_view(self):
         stack = self._stack([self._slab(np.full((2, 3), 1j)),
                              self._slab(np.full((2, 3), 1j))])
-        assert stack.db.shape == (2, 2, 3)
-        assert np.allclose(stack.db, 0.0)
+        assert stack.dB.shape == (2, 2, 3)
+        assert np.allclose(stack.dB, 0.0)
 
     def test_time_domain_slabs_raise_the_stack_typed_error(self):
         trace = Field(data=np.zeros(4),
                       coords={'time': np.arange(4.0)})
         with pytest.raises(ConfigurationError, match="time-domain slabs"):
             ResultStack([trace, trace], np.array([5.0, 10.0]),
-                        coordinate_name='source_depth').db
+                        coordinate_name='source_depth').dB
 
 
 class TestSynthesisWarnsWhenNoSpeedStamped:
@@ -4280,7 +4280,7 @@ class TestSlicingAnEmptyAxisIsRefused:
 
 
 class TestToDbRewritesTheUnitTag:
-    """``metadata['unit']`` describes the data, and ``to_db`` replaces the
+    """``metadata['unit']`` describes the data, and ``to_dB`` replaces the
     data. Carrying a ``'Pa'`` tag onto ``-20·log10|p|`` left a dB field
     reporting Pa, which sends ``Field.max`` down its linear branch: it then
     ranks by ``|dB|``, where the largest magnitude is the *quietest* sample
@@ -4293,21 +4293,21 @@ class TestToDbRewritesTheUnitTag:
         return _field(data=self.AMP * (1.0 + 0j), metadata={'unit': 'Pa'})
 
     def test_the_tag_follows_the_data(self):
-        assert self._tagged().to_db().unit == 'dB'
-        assert self._tagged().to_db().metadata['unit'] == 'dB'
+        assert self._tagged().to_dB().unit == 'dB'
+        assert self._tagged().to_dB().metadata['unit'] == 'dB'
 
     def test_the_source_field_keeps_its_own_tag(self):
         f = self._tagged()
-        f.to_db()
+        f.to_dB()
         assert f.metadata['unit'] == 'Pa'
 
     def test_max_finds_the_same_point_tagged_or_not(self):
-        tagged = self._tagged().to_db().max().pinned
-        untagged = _field(data=self.AMP * (1.0 + 0j)).to_db().max().pinned
+        tagged = self._tagged().to_dB().max().pinned
+        untagged = _field(data=self.AMP * (1.0 + 0j)).to_dB().max().pinned
         assert tagged == untagged
 
     def test_max_finds_the_loudest_sample_and_not_the_quietest(self):
-        loudest = self._tagged().to_db().max().pinned
+        loudest = self._tagged().to_dB().max().pinned
         i, j = np.unravel_index(int(np.argmax(self.AMP)), self.AMP.shape)
         assert loudest['depth'] == pytest.approx(
             float(_field().coords['depth'][i]))
@@ -4315,20 +4315,20 @@ class TestToDbRewritesTheUnitTag:
             float(_field().coords['range'][j]))
 
     def test_an_untagged_field_gains_no_tag(self):
-        out = _field(data=self.AMP * (1.0 + 0j)).to_db()
+        out = _field(data=self.AMP * (1.0 + 0j)).to_dB()
         assert 'unit' not in out.metadata
         assert out.unit == 'dB'
 
     def test_a_real_field_is_returned_unchanged(self):
         f = _field(metadata={'unit': 'dB'})
-        assert f.to_db() is f
+        assert f.to_dB() is f
 
 
 class TestDbRefusalOffersAnActionableRoute:
-    """``Field.db``'s unit guard is reachable only for real data — the complex
-    branch returns first — and ``to_db()`` returns ``self`` for every real
+    """``Field.dB``'s unit guard is reachable only for real data — the complex
+    branch returns first — and ``to_dB()`` returns ``self`` for every real
     field. So the set of fields that can see this message is exactly the set
-    on which ``to_db()`` does nothing, and naming it as the remedy sends the
+    on which ``to_dB()`` does nothing, and naming it as the remedy sends the
     reader in a circle."""
 
     def _dimensionless(self):
@@ -4341,40 +4341,40 @@ class TestDbRefusalOffersAnActionableRoute:
                       metadata={'kind': 'pressure', 'unit': 'Pa'})
 
     @pytest.mark.parametrize('name', ['_dimensionless', '_linear_pressure'])
-    def test_to_db_is_the_identity_on_every_field_that_reaches_the_guard(
+    def test_to_dB_is_the_identity_on_every_field_that_reaches_the_guard(
             self, name):
         f = getattr(self, name)()
         assert not f.is_complex
         assert f.unit != 'dB'
-        assert f.to_db() is f
+        assert f.to_dB() is f
 
     @pytest.mark.parametrize('name', ['_dimensionless', '_linear_pressure'])
     def test_the_message_names_an_operation_that_changes_the_values(self, name):
         f = getattr(self, name)()
         with pytest.raises(AttributeError) as excinfo:
-            f.db
+            f.dB
         message = str(excinfo.value)
         assert 'not dB' in message
         assert 'log10' in message
-        # Naming to_db() is only honest alongside the fact that it is the
+        # Naming to_dB() is only honest alongside the fact that it is the
         # identity here.
-        if 'to_db()' in message:
+        if 'to_dB()' in message:
             assert 'unchanged' in message
 
-    def test_a_db_tagged_real_field_is_the_other_side_of_the_guard(self):
+    def test_a_dB_tagged_real_field_is_the_other_side_of_the_guard(self):
         f = _field(data=np.full((4, 3), -60.0), metadata={'unit': 'dB'})
-        assert np.allclose(f.db, -60.0)
+        assert np.allclose(f.dB, -60.0)
 
     def test_the_stack_message_names_an_operation_that_changes_the_values(self):
         slab = self._dimensionless()
         stack = ResultStack([slab, slab], np.array([5.0, 10.0]),
                             coordinate_name='source_depth')
         with pytest.raises(ConfigurationError) as excinfo:
-            stack.db
+            stack.dB
         message = str(excinfo.value)
         assert 'not dB' in message
         assert 'log10' in message
-        if 'to_db()' in message:
+        if 'to_dB()' in message:
             assert 'unchanged' in message
 
 
@@ -4714,9 +4714,9 @@ class TestArrivalDictPhaseUnit:
 
 
 class TestTlIsTheDbViewRestrictedToPressureFields:
-    """``Field.tl`` answers with exactly ``Field.db``'s values on a
+    """``Field.tl`` answers with exactly ``Field.dB``'s values on a
     pressure-kind field — the quantity's literature name for the same
-    array — and refuses any other kind, whose level view stays ``.db``."""
+    array — and refuses any other kind, whose level view stays ``.dB``."""
 
     @staticmethod
     def _pressure_field():
@@ -4733,36 +4733,36 @@ class TestTlIsTheDbViewRestrictedToPressureFields:
                      model='Test',
                      metadata={'kind': 'reverberation', 'unit': 'dB'})
 
-    def test_tl_of_complex_pressure_equals_db_and_is_a_positive_loss(self):
+    def test_tl_of_complex_pressure_equals_dB_and_is_a_positive_loss(self):
         f = self._pressure_field()
-        assert np.array_equal(f.tl, f.db)
+        assert np.array_equal(f.tl, f.dB)
         assert (f.tl > 0).all()
 
-    def test_tl_of_a_real_db_pressure_field_is_the_same_readonly_view(self):
+    def test_tl_of_a_real_dB_pressure_field_is_the_same_readonly_view(self):
         f = self._pressure_field()
-        real = f.to_db()
+        real = f.to_dB()
         assert real.tl.base is real.data or np.shares_memory(real.tl,
                                                              real.data)
         assert not real.tl.flags.writeable
 
-    def test_tl_of_a_reverberation_field_refuses_and_names_db(self):
-        with pytest.raises(AttributeError, match="'reverberation'.*\\.db"):
+    def test_tl_of_a_reverberation_field_refuses_and_names_dB(self):
+        with pytest.raises(AttributeError, match="'reverberation'.*\\.dB"):
             self._reverberation_field().tl
 
-    def test_stack_tl_matches_stack_db_on_pressure_slabs(self):
+    def test_stack_tl_matches_stack_dB_on_pressure_slabs(self):
         from uacpy.core.results.field import ResultStack
         f = self._pressure_field()
         st = ResultStack(slabs=[f, f], coordinate=np.array([10.0, 20.0]),
                          coordinate_name='source_depth')
-        assert np.array_equal(st.tl, st.db)
+        assert np.array_equal(st.tl, st.dB)
         assert st.tl.shape == (2, 1, 2)
 
-    def test_stack_tl_of_reverberation_slabs_refuses_and_names_stack_db(self):
+    def test_stack_tl_of_reverberation_slabs_refuses_and_names_stack_dB(self):
         from uacpy.core.results.field import ResultStack
         rl = self._reverberation_field()
         st = ResultStack(slabs=[rl, rl], coordinate=np.array([10.0, 20.0]),
                          coordinate_name='source_depth')
-        with pytest.raises(ConfigurationError, match='stack\\.db'):
+        with pytest.raises(ConfigurationError, match='stack\\.dB'):
             st.tl
 
 
@@ -4833,7 +4833,7 @@ class TestTheOassReverberationCitationNamesTheRoutineOnOptionRsPath:
         from uacpy.core.results._base import _DOCUMENTED_METADATA
         return _DOCUMENTED_METADATA[('OASS', 'kind')][1]
 
-    def test_the_cited_lines_convert_to_db(self):
+    def test_the_cited_lines_convert_to_dB(self):
         # Necessary but NOT sufficient — this passes on REVRAN's block too,
         # which is the whole reason the address drifted unnoticed.
         cited = '\n'.join(self._src('oassun26.f')[853 - 1:858])
@@ -5056,20 +5056,20 @@ class TestTheSeaSurfaceUndersamplingWarningNamesTheNominalPeak:
                                  seed=1)
 
 
-def test_the_db_docstring_contrasts_itself_against_tl_not_against_itself():
-    """``Field.db``'s closing paragraph explains why the property is named for
+def test_the_dB_docstring_contrasts_itself_against_tl_not_against_itself():
+    """``Field.dB``'s closing paragraph explains why the property is named for
     the unit: on a reverberation field it returns that level, and the
     quantity-named spelling would have mislabelled it. The sentence named
-    ``.db`` — the property it is written on — so it read as saying its own
+    ``.dB`` — the property it is written on — so it read as saying its own
     name was the misnomer. The property it means is ``.tl``, which exists and
     refuses every non-pressure kind for exactly this reason."""
-    doc = ' '.join(Field.db.__doc__.split())
+    doc = ' '.join(Field.dB.__doc__.split())
     assert 'calling it ``.tl`` would have been the same misnomer' in doc
-    assert 'calling it ``.db``' not in doc
+    assert 'calling it ``.dB``' not in doc
     # The claim is only true because the sibling really does refuse: a
-    # reverberation field has a level in .db and no .tl at all.
+    # reverberation field has a level in .dB and no .tl at all.
     rev = Field(data=np.array([60.0, 70.0]), coords={'range': [0.0, 10.0]},
                 metadata={'kind': 'reverberation', 'unit': 'dB'})
-    assert rev.db.tolist() == [60.0, 70.0]
+    assert rev.dB.tolist() == [60.0, 70.0]
     with pytest.raises(AttributeError, match='not a transmission loss'):
         rev.tl

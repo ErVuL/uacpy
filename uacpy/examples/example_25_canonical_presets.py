@@ -61,8 +61,8 @@ def main():
 
     for name in ['clay', 'silt', 'sand', 'gravel', 'moraine',
                  'chalk', 'limestone', 'basalt']:
-        angles, loss_db = bottom_loss_curve(name)
-        axes[1].plot(angles, loss_db, label=name, lw=1.5)
+        angles, loss_dB = bottom_loss_curve(name)
+        axes[1].plot(angles, loss_dB, label=name, lw=1.5)
     axes[1].set_xlabel('Grazing angle (°)')
     axes[1].set_ylabel('Bottom loss (dB)')
     axes[1].set_title('Plane-wave bottom loss')

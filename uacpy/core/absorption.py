@@ -22,7 +22,7 @@ Concrete subclasses
 
 Module-level numerics
 ---------------------
-:func:`thorp_db_per_km`, :func:`francois_garrison_db_per_km`
+:func:`thorp_dB_per_km`, :func:`francois_garrison_dB_per_km`
     Bare formulas returning ``α(f)`` in dB/km. Useful for plotting
     attenuation curves without constructing an :class:`Absorption`.
 :func:`convert_attenuation_units`
@@ -56,7 +56,7 @@ _ArrayLike = Union[float, np.ndarray]
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def thorp_db_per_km(frequency: _ArrayLike) -> np.ndarray:
+def thorp_dB_per_km(frequency: _ArrayLike) -> np.ndarray:
     """Thorp seawater volume attenuation in dB/km.
 
     Uses the JKPS Eq. (1.47) coefficients, which match the AT
@@ -175,7 +175,7 @@ def ph_to_nbs(pH, scale, *, temperature_c, salinity_psu):
     return float(out) if np.ndim(out) == 0 else out
 
 
-def francois_garrison_db_per_km(
+def francois_garrison_dB_per_km(
     frequency: _ArrayLike,
     temperature: _ArrayLike = 10.0,
     salinity: _ArrayLike = 35.0,
@@ -346,14 +346,14 @@ def convert_attenuation_units(
                         "Nepers/m, which carry no sound speed.")
 
     if from_unit == 'dB/km':
-        alpha_db_m = alpha / 1000.0
+        alpha_dB_m = alpha / 1000.0
     elif from_unit == 'dB/m':
-        alpha_db_m = alpha
+        alpha_dB_m = alpha
     elif from_unit == 'dB/wavelength':
         wavelength = sound_speed / frequency
-        alpha_db_m = alpha / wavelength
+        alpha_dB_m = alpha / wavelength
     elif from_unit == 'Nepers/m':
-        alpha_db_m = alpha * NEPER_TO_DB
+        alpha_dB_m = alpha * NEPER_TO_DB
     elif from_unit == 'Q':
         # Q sits in the denominator of alphaT = omega / (2 * c * Q), so a
         # non-positive Q has no attenuation to convert (Q -> inf is the
@@ -365,25 +365,25 @@ def convert_attenuation_units(
                 f"got {float(np.min(alpha)):g}."
             )
         alpha_nepers_m = np.pi * frequency / (alpha * sound_speed)
-        alpha_db_m = alpha_nepers_m * NEPER_TO_DB
+        alpha_dB_m = alpha_nepers_m * NEPER_TO_DB
     elif from_unit == 'L':
         # alphaT = L * omega / c
         alpha_nepers_m = alpha * 2.0 * np.pi * frequency / sound_speed
-        alpha_db_m = alpha_nepers_m * NEPER_TO_DB
+        alpha_dB_m = alpha_nepers_m * NEPER_TO_DB
     else:
         raise ConfigurationError(f"Unknown unit: {from_unit}")
 
     if to_unit == 'dB/km':
-        result = alpha_db_m * 1000.0
+        result = alpha_dB_m * 1000.0
     elif to_unit == 'dB/m':
-        result = alpha_db_m
+        result = alpha_dB_m
     elif to_unit == 'dB/wavelength':
         wavelength = sound_speed / frequency
-        result = alpha_db_m * wavelength
+        result = alpha_dB_m * wavelength
     elif to_unit == 'Nepers/m':
-        result = alpha_db_m / NEPER_TO_DB
+        result = alpha_dB_m / NEPER_TO_DB
     elif to_unit == 'Q':
-        alpha_nepers_m = alpha_db_m / NEPER_TO_DB
+        alpha_nepers_m = alpha_dB_m / NEPER_TO_DB
         # A zero attenuation is the lossless limit and ``Q = omega/(2*c*a)``
         # -> inf is its exact value, so the division is answered rather than
         # trapped: ``inf`` converts back through ``from_unit='Q'`` to a = 0.
@@ -392,7 +392,7 @@ def convert_attenuation_units(
         with np.errstate(divide='ignore', invalid='ignore'):
             result = np.pi * frequency / (alpha_nepers_m * sound_speed)
     elif to_unit == 'L':
-        alpha_nepers_m = alpha_db_m / NEPER_TO_DB
+        alpha_nepers_m = alpha_dB_m / NEPER_TO_DB
         result = alpha_nepers_m * sound_speed / (2.0 * np.pi * frequency)
     else:
         raise ConfigurationError(f"Unknown unit: {to_unit}")
@@ -412,11 +412,11 @@ class Absorption:
     :class:`FrancoisGarrison`, :class:`Biological`,
     :class:`ConstantAbsorption`.
 
-    Subclasses implement :meth:`_alpha_db_per_m`, which evaluates
+    Subclasses implement :meth:`_alpha_dB_per_m`, which evaluates
     ``α(f, z)`` at the depths a model needs (used by the Kraken-class
     modal perturbation kernel; the Acoustics-Toolbox writers read
     :meth:`topopt_code` and the per-class fields instead). The public
-    :meth:`alpha_db_per_m` checks the frequency and delegates to it.
+    :meth:`alpha_dB_per_m` checks the frequency and delegates to it.
     """
 
     def __post_init__(self):
@@ -430,7 +430,7 @@ class Absorption:
         """Single Acoustics-Toolbox character for ``TopOpt`` position 4."""
         raise NotImplementedError
 
-    def alpha_db_per_m(
+    def alpha_dB_per_m(
         self,
         frequency: float,
         depths: _ArrayLike,
@@ -458,18 +458,18 @@ class Absorption:
         f = float(frequency)
         if not f > 0.0:
             raise ConfigurationError(
-                f"{type(self).__name__}.alpha_db_per_m: frequency must be "
+                f"{type(self).__name__}.alpha_dB_per_m: frequency must be "
                 f"> 0 Hz; got {frequency}"
             )
-        return self._alpha_db_per_m(f, depths)
+        return self._alpha_dB_per_m(f, depths)
 
-    def _alpha_db_per_m(
+    def _alpha_dB_per_m(
         self,
         frequency: float,
         depths: _ArrayLike,
     ) -> np.ndarray:
         """Model-specific ``α(f, z)`` in dB/m, reached through
-        :meth:`alpha_db_per_m` with ``frequency`` already checked positive."""
+        :meth:`alpha_dB_per_m` with ``frequency`` already checked positive."""
         raise NotImplementedError
 
     def plot(self, frequencies, *, depth: float = 0.0, ax=None, **kwargs):
@@ -489,7 +489,7 @@ class Absorption:
         from uacpy.visualization import plot_absorption
         freqs = np.atleast_1d(np.asarray(frequencies, dtype=float))
         alpha_km = np.array([
-            float(np.asarray(self.alpha_db_per_m(f, depth)).reshape(-1)[0])
+            float(np.asarray(self.alpha_dB_per_m(f, depth)).reshape(-1)[0])
             * 1000.0 for f in freqs])
         if not np.any(alpha_km > 0):
             warnings.warn(
@@ -510,12 +510,12 @@ class Thorp(Absorption):
     def topopt_code(self) -> str:
         return 'T'
 
-    def _alpha_db_per_m(
+    def _alpha_dB_per_m(
         self,
         frequency: float,
         depths: _ArrayLike,
     ) -> np.ndarray:
-        a = float(thorp_db_per_km(float(frequency))) / 1000.0
+        a = float(thorp_dB_per_km(float(frequency))) / 1000.0
         z = np.atleast_1d(np.asarray(depths, dtype=float))
         return np.full(z.shape, a)
 
@@ -526,14 +526,14 @@ class FrancoisGarrison(Absorption):
 
     The per-instance ``temperature_c``, ``salinity_psu``, ``pH``, and
     ``z_bar_m`` are the Acoustics-Toolbox single-row parameters. When
-    :meth:`alpha_db_per_m` is called for a modal perturbation, the
+    :meth:`alpha_dB_per_m` is called for a modal perturbation, the
     depth axis the caller provides overrides ``z_bar_m`` so the formula
     is evaluated per depth (pressure-corrected).
 
     Notes
     -----
     The four fields are checked only where the formula itself has no
-    value there (see :func:`francois_garrison_db_per_km`): the
+    value there (see :func:`francois_garrison_dB_per_km`): the
     boric-acid relaxation takes ``sqrt(S/35)``, its temperature factor
     is ``10**(4 - 1245/(T + 273))``, and all three mechanisms divide by
     the sound speed ``c = 1412 + 3.21·T + 1.19·S + 0.0167·z``. Nothing
@@ -545,7 +545,7 @@ class FrancoisGarrison(Absorption):
     a deliberate refinement over the single-row model AT writes: the solver's
     ``Franc_Garr`` reads a module-level ``z_bar``
     (``misc/AttenMod.f90:148-160``) and applies the one resulting alpha at
-    every depth. So an ``alpha_db_per_m`` sampled over a column and a run of
+    every depth. So an ``alpha_dB_per_m`` sampled over a column and a run of
     the same environment absorb different amounts. On
     ``FrancoisGarrison(10, 35, 8, z_bar_m=1000)`` the accessor at the surface
     is +3.0 % over the deck at 1 kHz, +13.9 % at 10 kHz, +15.5 % at 30 kHz
@@ -628,13 +628,13 @@ class FrancoisGarrison(Absorption):
             self.ph_nbs, float(self.z_bar_m),
         )
 
-    def _alpha_db_per_m(
+    def _alpha_dB_per_m(
         self,
         frequency: float,
         depths: _ArrayLike,
     ) -> np.ndarray:
         z = np.atleast_1d(np.asarray(depths, dtype=float))
-        a_km = francois_garrison_db_per_km(
+        a_km = francois_garrison_dB_per_km(
             frequency=float(frequency),
             temperature=self.temperature_c,
             salinity=self.salinity_psu,
@@ -742,22 +742,22 @@ class BiologicalLayer:
         # a0*Q² is the most absorption this layer can present to CRCI. Taken
         # to dB/wavelength at f0 it meets the same package-wide ceiling the
         # seabed and surface carriers are held to.
-        peak_db_km = float(self.a0) * float(self.Q) ** 2
-        peak_db_lambda = float(convert_attenuation_units(
-            peak_db_km, float(self.f0_hz), 'dB/km', 'dB/wavelength',
+        peak_dB_km = float(self.a0) * float(self.Q) ** 2
+        peak_dB_lambda = float(convert_attenuation_units(
+            peak_dB_km, float(self.f0_hz), 'dB/km', 'dB/wavelength',
             sound_speed=DEFAULT_SOUND_SPEED))
-        if peak_db_lambda > MAX_ATTENUATION_DB_PER_WAVELENGTH:
-            ceiling_db_km = peak_db_km * (
-                MAX_ATTENUATION_DB_PER_WAVELENGTH / peak_db_lambda)
+        if peak_dB_lambda > MAX_ATTENUATION_DB_PER_WAVELENGTH:
+            ceiling_dB_km = peak_dB_km * (
+                MAX_ATTENUATION_DB_PER_WAVELENGTH / peak_dB_lambda)
             warnings.warn(
                 f"BiologicalLayer: the on-resonance peak a0*Q² = "
-                f"{peak_db_km:g} dB/km is {peak_db_lambda:g} dB/wavelength at "
+                f"{peak_dB_km:g} dB/km is {peak_dB_lambda:g} dB/wavelength at "
                 f"f0={self.f0_hz:g} Hz in {DEFAULT_SOUND_SPEED:g} m/s water, "
                 f"over the {MAX_ATTENUATION_DB_PER_WAVELENGTH:.4f} above which "
                 f"misc/AttenMod.f90's CRCI (:116) finds an imaginary sound "
                 f"speed larger than the real part and aborts. A run at or near "
                 f"f0 will fail in every AT solver; the ceiling here is "
-                f"{ceiling_db_km:g} dB/km, and scales with the water sound "
+                f"{ceiling_dB_km:g} dB/km, and scales with the water sound "
                 f"speed over the layer.",
                 # The walk, not a count: this constructor is reached from a
                 # user's ``BiologicalLayer(...)`` and from the normalising
@@ -820,7 +820,7 @@ class Biological(Absorption):
             for layer in self.layers
         ]
 
-    def _alpha_db_per_m(
+    def _alpha_dB_per_m(
         self,
         frequency: float,
         depths: _ArrayLike,
@@ -849,14 +849,14 @@ class ConstantAbsorption(Absorption):
 
     Parameters
     ----------
-    value_db_per_wavelength : float
+    value_dB_per_wavelength : float
         Absorption coefficient (dB/wavelength). Non-negative.
 
     Notes
     -----
     dB/wavelength is the unit the deck carries, so the value written to the
     ``alphaI`` column is exact and the divergence is only in
-    :meth:`alpha_db_per_m`. That accessor holds no SSP, so it converts to
+    :meth:`alpha_dB_per_m`. That accessor holds no SSP, so it converts to
     dB/m at :data:`~uacpy.core.constants.DEFAULT_SOUND_SPEED`, while the
     solver converts at each SSP row's own ``c``
     (``misc/AttenMod.f90:73``, the ``'W'`` branch: ``alphaT = alpha * freq /
@@ -867,23 +867,23 @@ class ConstantAbsorption(Absorption):
     :meth:`uacpy.core.results.modes.Modes.with_attenuation` for where the
     difference is felt.
     """
-    value_db_per_wavelength: float = 0.0
+    value_dB_per_wavelength: float = 0.0
 
     def __post_init__(self):
         Absorption.__post_init__(self)
-        if not (self.value_db_per_wavelength >= 0):
+        if not (self.value_dB_per_wavelength >= 0):
             raise ConfigurationError(
-                f"ConstantAbsorption.value_db_per_wavelength must be "
-                f"non-negative; got {self.value_db_per_wavelength}."
+                f"ConstantAbsorption.value_dB_per_wavelength must be "
+                f"non-negative; got {self.value_dB_per_wavelength}."
             )
         _require_attenuation_in_range(
-            self.value_db_per_wavelength,
-            "ConstantAbsorption.value_db_per_wavelength")
+            self.value_dB_per_wavelength,
+            "ConstantAbsorption.value_dB_per_wavelength")
 
     def topopt_code(self) -> str:
         return ' '
 
-    def _alpha_db_per_m(
+    def _alpha_dB_per_m(
         self,
         frequency: float,
         depths: _ArrayLike,
@@ -892,7 +892,7 @@ class ConstantAbsorption(Absorption):
         # dB/wavelength → dB/m at this frequency (flat in depth). No SSP is
         # carried here, so the conversion uses the reference sound speed.
         alpha = float(convert_attenuation_units(
-            self.value_db_per_wavelength, frequency,
+            self.value_dB_per_wavelength, frequency,
             'dB/wavelength', 'dB/m',
         ))
         return np.full(depths.shape, alpha)

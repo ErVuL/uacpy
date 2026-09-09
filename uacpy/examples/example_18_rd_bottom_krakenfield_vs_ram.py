@@ -198,7 +198,7 @@ def main():
             try:
                 field = model.run(env, source, receiver)
                 results[case_label][model_label] = field
-                print(f"    {model_label:17s} TL: [{np.nanmin(field.db):.1f}, {np.nanmax(field.db):.1f}] dB")
+                print(f"    {model_label:17s} TL: [{np.nanmin(field.dB):.1f}, {np.nanmax(field.dB):.1f}] dB")
             except Exception as e:
                 print(f"    {model_label:17s} ERROR: {e}")
                 results[case_label][model_label] = None
@@ -226,7 +226,7 @@ def main():
             if f_ram is None or f_kraken is None:
                 print(f"    {case_label:15s} {kraken_label:17s}  not computed")
                 continue
-            diff = f_ram.db[mid_idx, :] - f_kraken.db[mid_idx, :]
+            diff = f_ram.dB[mid_idx, :] - f_kraken.dB[mid_idx, :]
             rms[(case_label, kraken_label)] = float(np.sqrt(np.nanmean(diff ** 2)))
             print(f"    {case_label:15s} {kraken_label:17s}  mean diff: {np.nanmean(diff):+.1f} dB,  "
                   f"RMS: {np.sqrt(np.nanmean(diff**2)):.1f} dB")
@@ -251,7 +251,7 @@ def main():
     for case_label in results:
         for field in results[case_label].values():
             if field is not None:
-                all_tl.append(field.db)
+                all_tl.append(field.dB)
     if all_tl:
         vmin_shared = max(30, np.nanpercentile(np.concatenate([a.ravel() for a in all_tl]), 5))
         vmax_shared = min(140, np.nanpercentile(np.concatenate([a.ravel() for a in all_tl]), 95))
@@ -290,7 +290,7 @@ def main():
         for key in ['RAM', 'Kraken adiabatic', 'Kraken coupled']:
             f = results[case_label].get(key)
             if f is not None:
-                ax.plot(ranges_km, f.db[mid_idx, :], color=colors[key],
+                ax.plot(ranges_km, f.dB[mid_idx, :], color=colors[key],
                         label=key)
         ax.set_xlabel('Range (km)')
         ax.set_ylabel('TL (dB)')
@@ -312,7 +312,7 @@ def main():
         for diff_idx, (kraken_key, _) in enumerate(diff_panels):
             f_kraken = results[case_label].get(kraken_key)
             if f_ram is not None and f_kraken is not None:
-                d = np.asarray(f_ram.db) - np.asarray(f_kraken.db)
+                d = np.asarray(f_ram.dB) - np.asarray(f_kraken.dB)
                 finite = d[np.isfinite(d)]
                 if finite.size:
                     v = max(5.0, float(np.nanpercentile(np.abs(finite), 95)))

@@ -27,7 +27,7 @@ class LinkResult:
     ber: float
     evm: float
     scheme: str
-    ebn0_db: float
+    ebn0_dB: float
     tx_symbols: np.ndarray
     rx_symbols: np.ndarray
     mse: np.ndarray | None = None
@@ -42,8 +42,8 @@ class LinkResult:
         """
         if not isinstance(other, LinkResult):
             return NotImplemented
-        if (self.ber, self.evm, self.scheme, self.ebn0_db) != (
-                other.ber, other.evm, other.scheme, other.ebn0_db):
+        if (self.ber, self.evm, self.scheme, self.ebn0_dB) != (
+                other.ber, other.evm, other.scheme, other.ebn0_dB):
             return False
         if (self.mse is None) != (other.mse is None):
             return False
@@ -57,7 +57,7 @@ class LinkResult:
 
 
 
-def simulate_link(scheme, ebn0_db, n_bits=20000, *, channel=None,
+def simulate_link(scheme, ebn0_dB, n_bits=20000, *, channel=None,
                   equalizer=None, code=None, n_train=400, rng=None):
     """Simulate one link and return a :class:`LinkResult`.
 
@@ -75,9 +75,9 @@ def simulate_link(scheme, ebn0_db, n_bits=20000, *, channel=None,
         Modulation name accepted by
         :class:`~uacpy.comms.modulation.Modulator` — ``'bpsk'``, ``'qpsk'``,
         ``'16qam'`` and the rest of its table.
-    ebn0_db : float
+    ebn0_dB : float
         Information-bit energy to noise density ratio in dB. A ``code``
-        lowers the channel Ec/N0 by its rate, so ``ebn0_db`` stays the
+        lowers the channel Ec/N0 by its rate, so ``ebn0_dB`` stays the
         information-bit figure that BER curves are plotted against.
     n_bits : int, optional
         Number of information bits to transmit. Defaults to ``20000``.
@@ -118,7 +118,7 @@ def simulate_link(scheme, ebn0_db, n_bits=20000, *, channel=None,
     if rx.size < tx.size + delay:
         rx = np.concatenate([rx, np.zeros(tx.size + delay - rx.size, dtype=complex)])
 
-    ebn0 = 10.0 ** (float(ebn0_db) / 10.0)
+    ebn0 = 10.0 ** (float(ebn0_dB) / 10.0)
     # Es/N0 = (info Eb/N0) x bits-per-symbol x code rate: a coded frame
     # carries R information bits per transmitted bit, so omitting R labels
     # Ec/N0 as Eb/N0 and overstates coding gain by 10log10(1/R).
@@ -143,14 +143,14 @@ def simulate_link(scheme, ebn0_db, n_bits=20000, *, channel=None,
         ber=ber,
         evm=evm(rx_sym, tx),
         scheme=scheme,
-        ebn0_db=float(ebn0_db),
+        ebn0_dB=float(ebn0_dB),
         tx_symbols=tx,
         rx_symbols=rx_sym,
         mse=mse,
     )
 
 
-def ber_sweep(scheme, ebn0_db_list, n_bits=50000, *, channel=None,
+def ber_sweep(scheme, ebn0_dB_list, n_bits=50000, *, channel=None,
               equalizer=None, code=None, rng=None):
     """Measured BER over a list of Eb/N0 values. Returns a NumPy array.
 
@@ -162,7 +162,7 @@ def ber_sweep(scheme, ebn0_db_list, n_bits=50000, *, channel=None,
     ----------
     scheme : str
         Modulation name, as :func:`simulate_link` takes it.
-    ebn0_db_list : array_like
+    ebn0_dB_list : array_like
         Information-bit Eb/N0 values in dB, one BER measured at each. A
         scalar is accepted and returns a length-1 array.
     n_bits : int, optional
@@ -183,11 +183,11 @@ def ber_sweep(scheme, ebn0_db_list, n_bits=50000, *, channel=None,
     Returns
     -------
     ndarray
-        Measured BER, one per entry of ``ebn0_db_list``.
+        Measured BER, one per entry of ``ebn0_dB_list``.
     """
     rng = np.random.default_rng() if rng is None else rng
     return np.array([
         simulate_link(scheme, e, n_bits, channel=channel, equalizer=equalizer,
                       code=code, rng=rng).ber
-        for e in np.atleast_1d(ebn0_db_list)
+        for e in np.atleast_1d(ebn0_dB_list)
     ])

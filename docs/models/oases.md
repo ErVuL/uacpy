@@ -596,7 +596,7 @@ escape hatch still runs P-SV: the deck is written verbatim, with a
 | `ymin`/`ymax`/`ny` | `None`/`None`/`1` | Replica grid in y (m); `None` → 0 / 0. |
 | `zmin`/`zmax`/`nz` | `None`/`None`/`20` | Replica grid in depth (m); `None` → 10 m / `depth − 10`. |
 | `c_low`, `c_high` | `None` | Phase-speed bounds for the integrations (m/s). |
-| `offdb` | `None` | Contour offset; shares OASES' field with `integration_offset`. |
+| `offdB` | `None` | Contour offset; shares OASES' field with `integration_offset`. |
 
 ---
 

@@ -235,7 +235,7 @@ def ofdm():
         decisions = ideal[np.argmin(np.abs(d[:, None] - ideal[None, :]), axis=1)]
         blocks.append(d * np.exp(-1j * np.angle(np.vdot(decisions, d))))
     symbols = np.concatenate(blocks)
-    h_db = np.tile(20 * np.log10(np.abs(h_est)), len(blocks))
+    h_dB = np.tile(20 * np.log10(np.abs(h_est)), len(blocks))
 
     k = np.arange(N_SC) - N_SC // 2
     fig, axes = plt.subplots(1, 2, figsize=ROW2)
@@ -250,7 +250,7 @@ def ofdm():
     axes[0].legend(fontsize=9)
 
     ax = axes[1]
-    dots = ax.scatter(symbols.real, symbols.imag, c=h_db, cmap='viridis',
+    dots = ax.scatter(symbols.real, symbols.imag, c=h_dB, cmap='viridis',
                       s=7, alpha=0.8, vmin=-15, vmax=6)
     ax.scatter(ideal.real, ideal.imag, marker='x', s=80, color='k', zorder=5)
     fig.colorbar(dots, ax=ax, label='subcarrier |H| (dB)')
@@ -326,7 +326,7 @@ def dsss():
 
     rng = np.random.default_rng(0)
     code = comms.m_sequence(5, [5, 2])
-    gain = comms.processing_gain_db(code)
+    gain = comms.processing_gain_dB(code)
     mod = comms.Modulator('bpsk')
 
     chip_snr = np.arange(-18.0, 3.1, 3.0)

@@ -42,7 +42,7 @@ def line_array(n_elements: int, spacing: float) -> np.ndarray:
     return np.arange(n_elements) * spacing
 
 
-def norm_db(power) -> np.ndarray:
+def norm_dB(power) -> np.ndarray:
     """Power spectrum in dB, normalised to its peak, floored at -120 dB."""
     p = np.asarray(power, dtype=float)
     return 10.0 * np.log10(np.maximum(p, p.max() * 1e-12) / p.max())
@@ -60,55 +60,55 @@ def beampattern(positions, angles, *, steer_deg=0.0, weights=None):
     e = steering_vectors(positions, angles, FREQ, C)
     if weights is not None:
         e = e * weights
-    return norm_db(bartlett_spectrum(R, e))
+    return norm_dB(bartlett_spectrum(R, e))
 
 
-def width_3db(angles, pattern_db, *, steer_deg=0.0) -> float:
+def width_3db(angles, pattern_dB, *, steer_deg=0.0) -> float:
     """Full -3 dB width of the lobe centred on ``steer_deg``, in degrees.
 
     The peak is located by the steer direction rather than by ``argmax``: an
     array with grating lobes has several equal maxima.
     """
     peak = int(np.argmin(np.abs(angles - steer_deg)))
-    below = pattern_db <= -3.0
+    below = pattern_dB <= -3.0
     lo = angles[:peak][below[:peak]]
     hi = angles[peak:][below[peak:]]
     return float(hi[0] - lo[-1])
 
 
-def peak_sidelobe_db(angles, pattern_db, *, steer_deg=0.0) -> float:
+def peak_sidelobe_dB(angles, pattern_dB, *, steer_deg=0.0) -> float:
     """Highest sidelobe, in dB relative to the mainlobe peak."""
     peak = int(np.argmin(np.abs(angles - steer_deg)))
     right = peak
-    while right + 1 < pattern_db.size and pattern_db[right + 1] <= pattern_db[right]:
+    while right + 1 < pattern_dB.size and pattern_dB[right + 1] <= pattern_dB[right]:
         right += 1
     left = peak
-    while left - 1 >= 0 and pattern_db[left - 1] <= pattern_db[left]:
+    while left - 1 >= 0 and pattern_dB[left - 1] <= pattern_dB[left]:
         left -= 1
-    return float(np.concatenate([pattern_db[:left], pattern_db[right:]]).max())
+    return float(np.concatenate([pattern_dB[:left], pattern_dB[right:]]).max())
 
 
-def plane_wave_snapshots(positions, angles_deg, *, snr_db, n_snapshots, rng,
-                         powers_db=None):
+def plane_wave_snapshots(positions, angles_deg, *, snr_dB, n_snapshots, rng,
+                         powers_dB=None):
     """Synthetic array data: independent plane waves in white element noise.
 
-    Each source is scaled to **unit power per element**, so ``snr_db`` is the
+    Each source is scaled to **unit power per element**, so ``snr_dB`` is the
     per-element signal-to-noise ratio of a 0 dB source before any array gain.
-    ``powers_db`` offsets individual sources from that reference.
+    ``powers_dB`` offsets individual sources from that reference.
     """
     angles_deg = np.atleast_1d(np.asarray(angles_deg, dtype=float))
-    if powers_db is None:
-        powers_db = np.zeros(angles_deg.size)
+    if powers_dB is None:
+        powers_dB = np.zeros(angles_deg.size)
     n = np.size(positions)
     x = np.zeros((n, n_snapshots), dtype=complex)
-    for angle, level in zip(angles_deg, np.atleast_1d(powers_db)):
+    for angle, level in zip(angles_deg, np.atleast_1d(powers_dB)):
         # steering_vectors is unit-norm; sqrt(n) restores unit magnitude per
         # element so the power bookkeeping above holds.
         a = steering_vectors(positions, [angle], FREQ, C)[0] * np.sqrt(n)
         s = (rng.standard_normal(n_snapshots)
              + 1j * rng.standard_normal(n_snapshots)) / np.sqrt(2.0)
         x += 10.0 ** (level / 20.0) * np.outer(a, s)
-    sigma = 10.0 ** (-snr_db / 20.0)
+    sigma = 10.0 ** (-snr_dB / 20.0)
     x += sigma * (rng.standard_normal((n, n_snapshots))
                   + 1j * rng.standard_normal((n, n_snapshots))) / np.sqrt(2.0)
     return x
@@ -199,7 +199,7 @@ def grating_lobes():
         positions = line_array(n, d_over_lambda * LAMBDA)
         manifold = np.exp(1j * k * np.outer(u, positions)) / np.sqrt(n)
         a = manifold[np.argmin(np.abs(u))]
-        axes[1].plot(u, norm_db(np.abs(manifold.conj() @ a) ** 2), lw=1.4,
+        axes[1].plot(u, norm_dB(np.abs(manifold.conj() @ a) ** 2), lw=1.4,
                      label=f'd = {d_over_lambda:g}λ  '
                            f'(period λ/d = {1 / d_over_lambda:g})')
     axes[1].axvspan(-1.0, 1.0, color='0.88', zorder=0)
@@ -251,7 +251,7 @@ def beampattern_anatomy():
     positions = line_array(16, LAMBDA / 2)
     pattern = beampattern(positions, angles)
     width = width_3db(angles, pattern)
-    psl = peak_sidelobe_db(angles, pattern)
+    psl = peak_sidelobe_dB(angles, pattern)
     null = np.rad2deg(np.arcsin(LAMBDA / (16 * LAMBDA / 2)))
 
     ax_l.plot(angles, pattern, lw=1.5, color='C0')
@@ -313,7 +313,7 @@ def shading():
         weights = None if window is None else shading_taper(n, window)
         pattern = beampattern(positions, angles, weights=weights)
         width = width_3db(angles, pattern)
-        psl = peak_sidelobe_db(angles, pattern)
+        psl = peak_sidelobe_dB(angles, pattern)
         w = np.ones(n) if weights is None else weights
         gain_loss = 10.0 * np.log10(w.sum() ** 2 / (n * (w ** 2).sum()))
         rows.append((label, width, psl, gain_loss))
@@ -382,14 +382,14 @@ def resolution():
     fig, axes = plt.subplots(3, 1, figsize=(9.0, 9.0), sharex=True)
     for ax, (bearings, powers, title) in zip(axes, cases):
         rng = np.random.default_rng(0)
-        x = plane_wave_snapshots(positions, bearings, snr_db=10.0,
-                                 n_snapshots=200, rng=rng, powers_db=powers)
+        x = plane_wave_snapshots(positions, bearings, snr_dB=10.0,
+                                 n_snapshots=200, rng=rng, powers_dB=powers)
         R = sample_covariance(x)
         for label, spectrum in (
                 ('Bartlett', bartlett_spectrum(R, steering)),
                 ('MVDR', mvdr_spectrum(R, steering)),
                 ('MUSIC (n_sources=2)', music_spectrum(R, steering, 2))):
-            ax.plot(angles, norm_db(spectrum), lw=1.4, label=label)
+            ax.plot(angles, norm_dB(spectrum), lw=1.4, label=label)
         for bearing in bearings:
             ax.axvline(bearing, color='k', ls='--', lw=0.9, alpha=0.45)
         ax.set_title(title, fontweight='bold', fontsize=10)
@@ -424,8 +424,8 @@ def snapshots():
     for k in (8, 16, 32, 256):
         rng = np.random.default_rng(0)
         R = sample_covariance(plane_wave_snapshots(
-            positions, bearings, snr_db=10.0, n_snapshots=k, rng=rng))
-        ax_spec.plot(angles, norm_db(mvdr_spectrum(R, steering)), lw=1.4,
+            positions, bearings, snr_dB=10.0, n_snapshots=k, rng=rng))
+        ax_spec.plot(angles, norm_dB(mvdr_spectrum(R, steering)), lw=1.4,
                      label=f'K = {k:3d}  (K/N = {k / n:g})')
     for bearing in bearings:
         ax_spec.axvline(bearing, color='k', ls='--', lw=0.9, alpha=0.45)
@@ -450,7 +450,7 @@ def snapshots():
         for trial in range(40):
             rng = np.random.default_rng(100 + trial)
             R = sample_covariance(plane_wave_snapshots(
-                positions, bearings, snr_db=10.0, n_snapshots=int(k), rng=rng))
+                positions, bearings, snr_dB=10.0, n_snapshots=int(k), rng=rng))
             trials.append(np.linalg.norm(R - R_true) / np.linalg.norm(R_true))
         errors.append(np.mean(trials))
     errors = np.array(errors)
@@ -474,8 +474,8 @@ def snapshots():
     for loading in (0.0, 1e-6, 1e-2, 1.0):
         rng = np.random.default_rng(0)
         R = sample_covariance(plane_wave_snapshots(
-            positions, bearings, snr_db=10.0, n_snapshots=12, rng=rng))
-        spectrum = norm_db(
+            positions, bearings, snr_dB=10.0, n_snapshots=12, rng=rng))
+        spectrum = norm_dB(
             mvdr_spectrum(R, wide_steering, diagonal_loading=loading))
         ax_load.plot(wide, spectrum, lw=1.4, label=f'loading = {loading:g}')
     for bearing in bearings:
@@ -504,7 +504,7 @@ def music_order():
 
     rng = np.random.default_rng(0)
     R = sample_covariance(plane_wave_snapshots(
-        positions, bearings, snr_db=10.0, n_snapshots=200, rng=rng))
+        positions, bearings, snr_dB=10.0, n_snapshots=200, rng=rng))
     eigenvalues = np.linalg.eigvalsh(R)[::-1]
 
     fig, (ax_e, ax_s) = plt.subplots(1, 2, figsize=(9.0, 4.0))
@@ -523,9 +523,9 @@ def music_order():
 
     for n_sources, style in ((1, '-'), (2, '-'), (4, (0, (1.5, 1.5)))):
         label = {1: '1 — too few', 2: '2 — correct', 4: '4 — too many'}[n_sources]
-        ax_s.plot(angles, norm_db(music_spectrum(R, steering, n_sources)),
+        ax_s.plot(angles, norm_dB(music_spectrum(R, steering, n_sources)),
                   lw=1.6, ls=style, label=f'n_sources = {label}')
-    ax_s.plot(angles, norm_db(bartlett_spectrum(R, steering)), lw=1.0,
+    ax_s.plot(angles, norm_dB(bartlett_spectrum(R, steering)), lw=1.0,
               ls='--', color='0.45', label='Bartlett, for reference')
     for bearing in bearings:
         ax_s.axvline(bearing, color='k', ls='--', lw=0.9, alpha=0.45)
@@ -557,8 +557,8 @@ def bearing_time():
     adaptive = np.empty((scan.size, n_blocks))
     for t, bearing in enumerate(track):
         block = plane_wave_snapshots(
-            positions, [bearing, 8.0], snr_db=0.0, n_snapshots=n_snapshots,
-            rng=rng, powers_db=[0.0, 20.0])
+            positions, [bearing, 8.0], snr_dB=0.0, n_snapshots=n_snapshots,
+            rng=rng, powers_dB=[0.0, 20.0])
         # beamform returns dB per snapshot; averaging in power over the block
         # is exactly bartlett_spectrum of the block's covariance.
         snr = beamform(block, positions, FREQ, angles=scan, SL=0.0, NL=0.0).snr

@@ -31,10 +31,10 @@ INF = float('inf')
 
 class TestScattering:
     def test_lambert_at_grazing_90_equals_mu(self):
-        # sin(90)=1 -> 20*log10(1)=0, so S_b = mu_db.
-        assert sonar.lambert_bottom(90.0, mu_db=-27.0) == pytest.approx(-27.0)
+        # sin(90)=1 -> 20*log10(1)=0, so S_b = mu_dB.
+        assert sonar.lambert_bottom(90.0, mu_dB=-27.0) == pytest.approx(-27.0)
 
-    def test_lambert_mu_db_constant(self):
+    def test_lambert_mu_dB_constant(self):
         # Mackenzie (1961) measured 10*log10(mu) constant at -27 dB for both
         # 530 and 1030 Hz (Etter eq. 9.6); the module exports it and
         # lambert_bottom defaults to it.
@@ -60,7 +60,7 @@ class TestReverberation:
         r = np.array([1000.0])
         rl = sonar.boundary_reverberation(
             r, 220.0, -40.0, pulse_length_s=0.1,
-            horizontal_beamwidth_rad=0.1, sound_speed=1500.0, tl_db=None,
+            horizontal_beamwidth_rad=0.1, sound_speed=1500.0, tl_dB=None,
         )
         tl = 20 * np.log10(1000.0)
         cell = 0.1 * 1000.0 * (1500.0 * 0.1 / 2)
@@ -71,38 +71,38 @@ class TestReverberation:
         # re-derives it.
         assert rl[0] == pytest.approx(98.751, abs=0.01)
 
-    def test_tl_db_callable_matches_precomputed(self):
-        # tl_db accepts a callable r -> TL(r); the equation evaluates it on
+    def test_tl_dB_callable_matches_precomputed(self):
+        # tl_dB accepts a callable r -> TL(r); the equation evaluates it on
         # the range grid, matching the same TL passed as a precomputed array.
         r = np.array([500.0, 1000.0, 2000.0, 4000.0])
         tl_fn = lambda rr: 15.0 * np.log10(rr)  # noqa: E731
         b_call = sonar.boundary_reverberation(
             r, 200.0, -27.0, pulse_length_s=0.01,
-            horizontal_beamwidth_rad=0.1, tl_db=tl_fn,
+            horizontal_beamwidth_rad=0.1, tl_dB=tl_fn,
         )
         b_arr = sonar.boundary_reverberation(
             r, 200.0, -27.0, pulse_length_s=0.01,
-            horizontal_beamwidth_rad=0.1, tl_db=15.0 * np.log10(r),
+            horizontal_beamwidth_rad=0.1, tl_dB=15.0 * np.log10(r),
         )
         np.testing.assert_allclose(b_call, b_arr)
         v_call = sonar.volume_reverberation(
             r, 200.0, -70.0, pulse_length_s=0.01,
-            solid_angle_beamwidth_sr=0.01, tl_db=tl_fn,
+            solid_angle_beamwidth_sr=0.01, tl_dB=tl_fn,
         )
         v_arr = sonar.volume_reverberation(
             r, 200.0, -70.0, pulse_length_s=0.01,
-            solid_angle_beamwidth_sr=0.01, tl_db=15.0 * np.log10(r),
+            solid_angle_beamwidth_sr=0.01, tl_dB=15.0 * np.log10(r),
         )
         np.testing.assert_allclose(v_call, v_arr)
-        # Spherical-spreading callable reproduces the tl_db=None default.
+        # Spherical-spreading callable reproduces the tl_dB=None default.
         b_sph = sonar.boundary_reverberation(
             r, 200.0, -27.0, pulse_length_s=0.01,
             horizontal_beamwidth_rad=0.1,
-            tl_db=lambda rr: 20.0 * np.log10(rr),
+            tl_dB=lambda rr: 20.0 * np.log10(rr),
         )
         b_none = sonar.boundary_reverberation(
             r, 200.0, -27.0, pulse_length_s=0.01,
-            horizontal_beamwidth_rad=0.1, tl_db=None,
+            horizontal_beamwidth_rad=0.1, tl_dB=None,
         )
         np.testing.assert_allclose(b_sph, b_none)
 
@@ -433,14 +433,14 @@ class TestSignalExcessField:
         )
         assert set(se.metadata['sonar_budget']) == {
             'mode', 'source_level', 'noise_level', 'directivity_index',
-            'detection_threshold', 'processing_loss_db',
+            'detection_threshold', 'processing_loss_dB',
         }
         se_ag = sonar.passive_signal_excess_field(
             field, source_level=140.0, noise_level=60.0, array_gain=12.0,
         )
         assert set(se_ag.metadata['sonar_budget']) == {
             'mode', 'source_level', 'noise_level', 'directivity_index',
-            'detection_threshold', 'processing_loss_db', 'array_gain',
+            'detection_threshold', 'processing_loss_dB', 'array_gain',
         }
         # Active budget: five always-present terms, plus 'noise_level',
         # 'reverberation_level' and 'array_gain' when supplied.
@@ -451,7 +451,7 @@ class TestSignalExcessField:
         )
         assert set(se_act.metadata['sonar_budget']) == {
             'mode', 'source_level', 'target_strength', 'directivity_index',
-            'detection_threshold', 'processing_loss_db',
+            'detection_threshold', 'processing_loss_dB',
             'noise_level', 'reverberation_level', 'array_gain',
         }
         se_min = sonar.active_signal_excess_field(
@@ -460,7 +460,7 @@ class TestSignalExcessField:
         )
         assert set(se_min.metadata['sonar_budget']) == {
             'mode', 'source_level', 'target_strength', 'directivity_index',
-            'detection_threshold', 'processing_loss_db', 'noise_level',
+            'detection_threshold', 'processing_loss_dB', 'noise_level',
         }
 
     def test_se_field_kind_and_unit(self):
@@ -564,10 +564,10 @@ class TestBudgetKnobs:
                                            directivity_index=15.0)
         lossy = sonar.passive_signal_excess(140.0, 70.0, 60.0,
                                             directivity_index=15.0,
-                                            processing_loss_db=3.0)
+                                            processing_loss_dB=3.0)
         assert lossy == pytest.approx(base - 3.0)
         fom = sonar.figure_of_merit(140.0, 60.0, 15.0,
-                                    processing_loss_db=3.0)
+                                    processing_loss_dB=3.0)
         assert fom == pytest.approx(140.0 - 45.0 - 3.0)
 
     def test_active_array_gain_applies_to_noise_not_reverb(self):
@@ -592,12 +592,12 @@ class TestBudgetKnobs:
         field, tl = TestSignalExcessField._tl_field()
         se = sonar.passive_signal_excess_field(
             field, source_level=140.0, noise_level=60.0,
-            array_gain=12.0, processing_loss_db=3.0,
+            array_gain=12.0, processing_loss_dB=3.0,
         )
         expected = 140.0 - tl - 48.0 - 3.0
         np.testing.assert_allclose(se.data, expected)
         assert se.metadata['sonar_budget']['array_gain'] == 12.0
-        assert se.metadata['sonar_budget']['processing_loss_db'] == 3.0
+        assert se.metadata['sonar_budget']['processing_loss_dB'] == 3.0
 
 
 class TestDetectionProbabilityField:
@@ -616,17 +616,17 @@ class TestDetectionProbabilityField:
         # Pd = Phi(SE/sigma): 0.5 at SE=0, Phi(±1) at SE=±sigma.
         sigma = 5.6
         se = self._se_field([[0.0, sigma, -sigma, 2 * sigma]])
-        pd = sonar.probability_of_detection_field(se, sigma_db=sigma)
+        pd = sonar.probability_of_detection_field(se, sigma_dB=sigma)
         expected = norm.cdf(np.array([0.0, 1.0, -1.0, 2.0]))
         np.testing.assert_allclose(pd.data[0], expected, atol=1e-12)
-        assert pd.metadata['sigma_db'] == pytest.approx(sigma)
+        assert pd.metadata['sigma_dB'] == pytest.approx(sigma)
         assert list(pd.coords) == ['depth', 'range']
 
     def test_pd_field_kind_and_unit(self):
         # The P_D Field is tagged kind='probability_of_detection' with
         # unit='1' — a dimensionless 0-1 probability, not dB.
         se = self._se_field([[0.0, 6.0]])
-        pd = sonar.probability_of_detection_field(se, sigma_db=6.0)
+        pd = sonar.probability_of_detection_field(se, sigma_dB=6.0)
         assert pd.kind == 'probability_of_detection'
         assert pd.unit == '1'
         assert pd.metadata['kind'] == 'probability_of_detection'
@@ -634,21 +634,21 @@ class TestDetectionProbabilityField:
 
     def test_monotonic_in_se_and_bounded(self):
         se = self._se_field(np.linspace(-30, 30, 61).reshape(1, -1))
-        pd = sonar.probability_of_detection_field(se, sigma_db=6.0)
+        pd = sonar.probability_of_detection_field(se, sigma_dB=6.0)
         assert np.all(np.diff(pd.data[0]) > 0)
         assert pd.data.min() >= 0.0 and pd.data.max() <= 1.0
 
     def test_bad_sigma_raises(self):
         se = self._se_field([[0.0]])
         with pytest.raises(ConfigurationError):
-            sonar.probability_of_detection_field(se, sigma_db=0.0)
+            sonar.probability_of_detection_field(se, sigma_dB=0.0)
         with pytest.raises(ConfigurationError):
-            sonar.probability_of_detection_field(se, sigma_db=-1.0)
+            sonar.probability_of_detection_field(se, sigma_dB=-1.0)
 
     def test_non_field_and_complex_rejected(self):
         with pytest.raises(ConfigurationError):
             sonar.probability_of_detection_field(
-                np.zeros((2, 2)), sigma_db=6.0,
+                np.zeros((2, 2)), sigma_dB=6.0,
             )
         from uacpy.core.results import Field
         cplx = Field(
@@ -656,7 +656,7 @@ class TestDetectionProbabilityField:
             coords={'depth': [0.0], 'range': [1.0, 2.0]},
         )
         with pytest.raises(ConfigurationError):
-            sonar.probability_of_detection_field(cplx, sigma_db=6.0)
+            sonar.probability_of_detection_field(cplx, sigma_dB=6.0)
 
     def test_detection_range_by_depth(self):
         # Row 0 crosses zero between samples; row 1 all positive (inf);
@@ -684,7 +684,7 @@ class TestDetectionProbabilityField:
         se = self._se_field(
             np.linspace(20, -20, 40).reshape(2, 20),
         )
-        pd = sonar.probability_of_detection_field(se, sigma_db=5.6)
+        pd = sonar.probability_of_detection_field(se, sigma_dB=5.6)
         fig, ax = plot_detection_probability(pd)
         assert ax.get_xlabel() == 'Range (km)'
         assert 'σ = 5.6 dB' in ax.get_title()
@@ -694,7 +694,7 @@ class TestDetectionProbabilityField:
 
 
 class TestTargetStrength:
-    def test_two_metre_sphere_is_zero_db(self):
+    def test_two_metre_sphere_is_zero_dB(self):
         # The classic anchor (Urick Table 9.1; Abraham §3.4 uses it too):
         # a = 2 m -> a²/4 = 1 m² -> TS = 0 dB.
         assert sonar.ts_sphere(2.0) == pytest.approx(0.0)
@@ -835,7 +835,7 @@ class TestTargetStrength:
 class TestDetectionThresholdReference:
     """Pin the DT convention and the 10*log10(w) offset to Urick's form."""
 
-    def test_five_db_per_decade_of_time_bandwidth(self):
+    def test_five_dB_per_decade_of_time_bandwidth(self):
         """Abraham 9.2.3.1: SNR_d falls 5 dB per decade of M = w*t."""
         from uacpy.sonar import detection_threshold_energy
         a = detection_threshold_energy(0.5, 1e-4, bandwidth_hz=100.0,
@@ -869,34 +869,34 @@ class TestDetectionThresholdLargeMEnvelope:
     """
 
     @staticmethod
-    def _exact_dt_db(pd, pf, m):
+    def _exact_dt_dB(pd, pf, m):
         from scipy.stats import gamma
         return 10.0 * np.log10(gamma.isf(pf, m) / gamma.isf(pd, m) - 1.0)
 
     def test_the_exact_benchmark_recovers_its_own_operating_point(self):
         from scipy.stats import gamma
         pd, pf, m = 0.9, 1e-6, 40.0
-        s = 10.0 ** (self._exact_dt_db(pd, pf, m) / 10.0)
+        s = 10.0 ** (self._exact_dt_dB(pd, pf, m) / 10.0)
         h = gamma.isf(pf, m)
         assert gamma.sf(h, m) == pytest.approx(pf, rel=1e-9)
         assert gamma.sf(h / (1.0 + s), m) == pytest.approx(pd, rel=1e-9)
 
-    @pytest.mark.parametrize('pd, pf, m, expected_db', [
+    @pytest.mark.parametrize('pd, pf, m, expected_dB', [
         (0.9, 1e-6, 1.0, -13.337),
         (0.9, 1e-6, 10.0, -3.485),
         (0.9, 1e-6, 100.0, -1.070),
         (0.99, 1e-6, 1.0, -22.879),
     ])
     def test_the_shipped_value_is_optimistic_by_the_documented_amount(
-            self, pd, pf, m, expected_db):
+            self, pd, pf, m, expected_dB):
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
             got = detection_threshold_energy(pd, pf, m, 1.0)
-        error = got - self._exact_dt_db(pd, pf, m)
+        error = got - self._exact_dt_dB(pd, pf, m)
         assert error < 0.0
-        assert error == pytest.approx(expected_db, abs=5e-3)
+        assert error == pytest.approx(expected_dB, abs=5e-3)
 
-    def test_the_warning_boundary_is_the_1_db_promise_itself(self):
+    def test_the_warning_boundary_is_the_1_dB_promise_itself(self):
         """The guard's threshold and the accuracy claim are one thing, so the
         two sides of it are the two sides of the promise. At pd=0.9, pf=1e-6
         the crossing sits at M = 115."""
@@ -905,9 +905,9 @@ class TestDetectionThresholdLargeMEnvelope:
         # pinned to the code, not to whatever -W the suite is invoked with.
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
-            assert abs(self._exact_dt_db(pd, pf, 114.0)
+            assert abs(self._exact_dt_dB(pd, pf, 114.0)
                        - detection_threshold_energy(pd, pf, 114.0, 1.0)) >= 1.0
-            assert abs(self._exact_dt_db(pd, pf, 115.0)
+            assert abs(self._exact_dt_dB(pd, pf, 115.0)
                        - detection_threshold_energy(pd, pf, 115.0, 1.0)) < 1.0
         with pytest.warns(UserWarning, match='large-M approximation'):
             detection_threshold_energy(pd, pf, 114.0, 1.0)
@@ -926,7 +926,7 @@ class TestDetectionThresholdLargeMEnvelope:
         ('guide DT_PASSIVE', 0.5, 1e-4, 500.0),
         ('guide DT_ACTIVE', 0.5, 1e-4, 50.0),
         ('test_detection_threshold_energy_formula', 0.9, 0.01, 100.0),
-        ('test_five_db_per_decade', 0.5, 1e-4, 100.0),
+        ('test_five_dB_per_decade', 0.5, 1e-4, 100.0),
         ('test_offset_from_urick', 0.5, 1e-4, 200.0),
         ('example_27', 0.5, 1e-4, 100.0),
     ])
@@ -937,7 +937,7 @@ class TestDetectionThresholdLargeMEnvelope:
         the assertion is on the measured error, not on the guard, so it also
         catches the envelope drifting off the promise."""
         error = (detection_threshold_energy(pd, pf, m, 1.0)
-                 - self._exact_dt_db(pd, pf, m))
+                 - self._exact_dt_dB(pd, pf, m))
         assert abs(error) < 1.0, f'{label} is outside the promise: {error} dB'
         with warnings.catch_warnings():
             warnings.simplefilter('error')
@@ -946,13 +946,13 @@ class TestDetectionThresholdLargeMEnvelope:
     def test_the_fallback_bound_covers_an_unresolvable_operating_point(self):
         """The exact benchmark is allowed to fail; the check is not allowed to
         disappear when it does."""
-        from uacpy.sonar.detection import _exact_detection_threshold_db
+        from uacpy.sonar.detection import _exact_detection_threshold_dB
         # A sub-unity time-bandwidth product at a low Pf: the detection index
         # is a healthy 36, so this is not the degenerate pd == pf corner, but
         # the Gamma quantile ratio overflows and the exact value is not finite.
         pd, pf, m = 0.5, 1e-9, 1e-6
         assert sonar.detection_index(pd, pf) > 0
-        assert not np.isfinite(_exact_detection_threshold_db(pd, pf, m))
+        assert not np.isfinite(_exact_detection_threshold_dB(pd, pf, m))
         with pytest.warns(UserWarning, match='fitted fallback bound'):
             detection_threshold_energy(pd, pf, m, 1.0)
 
@@ -1846,7 +1846,7 @@ class TestSonarGuardsRefuseInfinity:
             assert np.isneginf(sonar.lambert_bottom(np.array([0.0]))[0])
 
     @pytest.mark.parametrize('level', [-INF, NAN], ids=['-inf', 'nan'])
-    def test_a_db_level_keeps_its_non_finite_meaning(self, level):
+    def test_a_dB_level_keeps_its_non_finite_meaning(self, level):
         """The deliberate leaves, pinned so a later round cannot "harmonise"
         them into rejections.
 
@@ -1863,11 +1863,11 @@ class TestSonarGuardsRefuseInfinity:
                 np.array([0.0]), np.array([50.0]))[0] > 50.0
         else:
             assert np.isnan(out[0])
-        for db_arg in (lambda v: sonar.boundary_reverberation(
+        for dB_arg in (lambda v: sonar.boundary_reverberation(
                            [100.0, 200.0], v, -30.0, pulse_length_s=0.01,
                            horizontal_beamwidth_rad=0.1),
                        lambda v: sonar.column_scattering_strength(v, 10.0)):
-            assert not np.all(np.isfinite(np.asarray(db_arg(level), float)))
+            assert not np.all(np.isfinite(np.asarray(dB_arg(level), float)))
 
     def test_the_finite_path_is_untouched(self):
         """Rejecting infinity must not be bought by rejecting anything else:

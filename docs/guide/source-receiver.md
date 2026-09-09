@@ -74,7 +74,7 @@ below are condensed from it, so the script is the authoritative figure code.
 
 ```python
 env, source, receiver = shallow_water()      # 100 m channel, 200 Hz
-tl = Bellhop(n_beams=3000).run(env, source, receiver).to_db()
+tl = Bellhop(n_beams=3000).run(env, source, receiver).to_dB()
 
 env.plot(source=source, receiver=receiver)   # top panel
 tl.plot(env=env, source=source)              # bottom panel
@@ -116,8 +116,8 @@ vla = uacpy.Receiver(depths=np.linspace(5.0, 95.0, 46), ranges=3000.0)
 hla = uacpy.Receiver(depths=60.0, ranges=np.linspace(200.0, 5000.0, 240))
 
 model = Bellhop(n_beams=3000)
-tl_v = model.run(env, source, vla).to_db()
-tl_h = model.run(env, source, hla).to_db()
+tl_v = model.run(env, source, vla).to_dB()
+tl_h = model.run(env, source, hla).to_dB()
 
 tl_v.isel(range=0).plot()     # coords = {depth} → a depth cut
 tl_h.isel(depth=0).plot()     # coords = {range} → a range cut
@@ -224,7 +224,7 @@ receiver = uacpy.Receiver(depths=60.0, ranges=ranges)
 curves = {}
 for kind in ('point', 'line', 'scaled'):
     source = uacpy.Source(depths=25.0, frequencies=200.0, source_type=kind)
-    curves[kind] = Kraken().run(env, source, receiver).to_db().data.ravel()
+    curves[kind] = Kraken().run(env, source, receiver).to_dB().data.ravel()
 ```
 
 ![Point vs line vs scaled](figures/srcrcv_spreading.png)
@@ -489,7 +489,7 @@ carrier *is*.
 ```python
 receiver = uacpy.Receiver(depths=np.linspace(1.0, 160.0, 160), ranges=3000.0)
 for model in (Bellhop(n_beams=4000), Kraken(), RAM()):
-    model.run(env, source, receiver).to_db()      # 100 m water — warns, runs
+    model.run(env, source, receiver).to_dB()      # 100 m water — warns, runs
 ```
 
 ![Below the seabed](figures/srcrcv_below_domain.png)

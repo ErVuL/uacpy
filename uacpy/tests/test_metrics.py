@@ -112,32 +112,32 @@ class TestGridAlignment:
 
 
 class TestTLMetricsUnits:
-    """Metrics pull TL via :attr:`Field.db`, so a complex-pressure field
+    """Metrics pull TL via :attr:`Field.dB`, so a complex-pressure field
     and an equivalent real-dB field round-trip."""
 
     def _pair(self, *, both_complex=False):
         rng = np.random.default_rng(0)
-        a_db = 50.0 + 5.0 * rng.standard_normal((4, 5))
-        b_db = a_db + 1.0     # 1-dB shift everywhere
+        a_dB = 50.0 + 5.0 * rng.standard_normal((4, 5))
+        b_dB = a_dB + 1.0     # 1-dB shift everywhere
         depths = np.linspace(10, 90, 4)
         ranges = np.linspace(100, 1000, 5)
         if both_complex:
-            a = 10 ** (-a_db / 20.0) * np.exp(1j * rng.standard_normal((4, 5)))
-            b = 10 ** (-b_db / 20.0) * np.exp(1j * rng.standard_normal((4, 5)))
+            a = 10 ** (-a_dB / 20.0) * np.exp(1j * rng.standard_normal((4, 5)))
+            b = 10 ** (-b_dB / 20.0) * np.exp(1j * rng.standard_normal((4, 5)))
         else:
-            a, b = a_db, b_db
+            a, b = a_dB, b_dB
         return (
             _tl_field(a, depths, ranges, model='Test', frequencies=100.0),
             _tl_field(b, depths, ranges, model='Test', frequencies=100.0),
         )
 
-    def test_rmse_db_pair(self):
+    def test_rmse_dB_pair(self):
         a, b = self._pair(both_complex=False)
         assert tl_rmse(a, b) == pytest.approx(1.0, abs=1e-9)
 
-    def test_rmse_complex_pair_recovers_db_offset(self):
+    def test_rmse_complex_pair_recovers_dB_offset(self):
         # The complex pair stores |p| = 10^(-TL/20) with independent random
-        # phases; .db discards the phases, so the built-in 1-dB offset comes
+        # phases; .dB discards the phases, so the built-in 1-dB offset comes
         # back exactly — the same pin as the real-dB pair above.
         a, b = self._pair(both_complex=True)
         assert tl_rmse(a, b) == pytest.approx(1.0, abs=1e-9)
@@ -147,11 +147,11 @@ class TestTLMetricsUnits:
         a_cplx, _ = self._pair(both_complex=True)
         depths = a_cplx.coords['depth']
         ranges = a_cplx.coords['range']
-        a_db = _tl_field(
+        a_dB = _tl_field(
             -20.0 * np.log10(np.maximum(np.abs(a_cplx.data), 1e-50)),
             depths, ranges, model='Test', frequencies=100.0,
         )
-        assert tl_rmse(a_cplx, a_db) == pytest.approx(0.0, abs=1e-9)
+        assert tl_rmse(a_cplx, a_dB) == pytest.approx(0.0, abs=1e-9)
 
     def test_max_error_and_bias_companions(self):
         a, b = self._pair(both_complex=False)
@@ -213,11 +213,11 @@ def _probability_field(value):
 
 class TestTlMetricsPreCheckTheUnit:
     """Matching ``kind`` is not enough to make a pair a TL pair: a
-    probability-of-detection field passes it and then reaches ``Field.db``,
+    probability-of-detection field passes it and then reaches ``Field.dB``,
     whose refusal is an ``AttributeError``."""
 
     @pytest.mark.parametrize('metric', [tl_rmse, tl_max_error, tl_bias])
-    def test_a_non_db_pair_raises_a_typed_error(self, metric):
+    def test_a_non_dB_pair_raises_a_typed_error(self, metric):
         with pytest.raises(ConfigurationError, match="not dB"):
             metric(_probability_field(0.4), _probability_field(0.6))
 
@@ -227,13 +227,13 @@ class TestTlMetricsPreCheckTheUnit:
             metric(_uniform_tl_field(10.0), _probability_field(0.6))
         assert 'field_b' in str(exc.value)
 
-    def test_two_db_fields_compute_the_metrics(self):
+    def test_two_dB_fields_compute_the_metrics(self):
         a, b = _uniform_tl_field(10.0), _uniform_tl_field(20.0)
         assert tl_rmse(a, b) == pytest.approx(10.0)
         assert tl_max_error(a, b) == pytest.approx(10.0)
         assert tl_bias(a, b) == pytest.approx(-10.0)
 
-    def test_a_complex_field_derives_its_db_view_and_compares(self):
+    def test_a_complex_field_derives_its_dB_view_and_compares(self):
         complex_field = Field(
             data=np.full((2, 3), 1e-3 + 0j),
             coords={'depth': np.array([10.0, 20.0]),

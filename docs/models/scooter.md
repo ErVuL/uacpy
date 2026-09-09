@@ -371,12 +371,12 @@ from uacpy.models import Bellhop, Kraken
 
 env, source, _ = shallow_water()
 line = uacpy.Receiver(depths=50.0, ranges=np.linspace(50.0, 5000.0, 400))
-reference = np.asarray(Scooter().run(env, source, line).db,
+reference = np.asarray(Scooter().run(env, source, line).dB,
                        dtype=float).ravel()
 others = [('Kraken (normal modes)', Kraken(), 'C1'),
           ('Bellhop (Gaussian beams)', Bellhop(n_beams=3000), 'C2')]
 for label, model, colour in others:
-    tl = np.asarray(model.run(env, source, line).db, dtype=float).ravel()
+    tl = np.asarray(model.run(env, source, line).dB, dtype=float).ravel()
     ...  # plot tl, and |tl - reference|
 ```
 

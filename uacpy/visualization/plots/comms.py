@@ -193,11 +193,11 @@ def plot_eye_diagram(signal, samples_per_symbol, ax=None, *, n_symbols=2,
 
 
 @typed_plot_error
-def plot_ber_curve(ebn0_db, ber_measured, ax=None, *, scheme=None,
+def plot_ber_curve(ebn0_dB, ber_measured, ax=None, *, scheme=None,
                    label="measured", title=None, figsize=(7, 5), **mpl_kw):
     """Measured BER vs Eb/N0 (semilog-y) with optional theory overlay."""
-    _require_nonempty('plot_ber_curve', ebn0_db=ebn0_db, ber_measured=ber_measured)
-    ebn0 = np.atleast_1d(np.asarray(ebn0_db, dtype=float))
+    _require_nonempty('plot_ber_curve', ebn0_dB=ebn0_dB, ber_measured=ber_measured)
+    ebn0 = np.atleast_1d(np.asarray(ebn0_dB, dtype=float))
     ber = np.atleast_1d(np.asarray(ber_measured, dtype=float))
     fig, ax = fig_ax(ax, figsize)
     mpl_kw.setdefault("marker", "o")

@@ -189,7 +189,7 @@ def main():
     # ═══════════════════════════════════════════════════════════════════════
 
     print("\nResults:")
-    print(f"  • TL range: {np.nanmin(result.db):.1f} to {np.nanmax(result.db):.1f} dB")
+    print(f"  • TL range: {np.nanmin(result.dB):.1f} to {np.nanmax(result.dB):.1f} dB")
     print(f"  • Max range: {result.ranges[-1]/1000:.1f} km")
     print(f"  • Bellhop run time: {elapsed:.2f} s")
 

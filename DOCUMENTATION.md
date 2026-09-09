@@ -122,10 +122,10 @@ uacpy.plot_field(field, env=env)
 plt.show()
 
 # field is a Field of COMPLEX PRESSURE in Pa, on a (depth × range) grid.
-# .db is what turns it into transmission loss (.tl is the same view,
+# .dB is what turns it into transmission loss (.tl is the same view,
 # defined only on pressure fields); .p keeps the phase.
-print(field.db.shape)                 # (101, 200)
-print(field.at(depth=50.0).db.shape)  # (200,) — TL vs range at source depth
+print(field.dB.shape)                 # (101, 200)
+print(field.at(depth=50.0).dB.shape)  # (200,) — TL vs range at source depth
 ```
 
 `compute_tl` is the convenience wrapper for transmission loss; it is
@@ -133,7 +133,7 @@ exactly `model.run(env, source, receiver, run_mode=RunMode.COHERENT_TL)`.
 
 Note what that means: despite the name, `compute_tl` does **not** return TL. It
 returns the **coherent** complex pressure field, `unit='Pa'`, phase intact —
-`.db` (`-20·log10|p|`) is the step that makes it a loss. Two consequences. You
+`.dB` (`-20·log10|p|`) is the step that makes it a loss. Two consequences. You
 can beamform or matched-filter the result, because the phase is still there
 ([§8](#8-results)). And a coherent field crosses any threshold
 at every interference null, so it is the **wrong** input to a detection-range
@@ -269,7 +269,7 @@ engines (Acoustics Toolbox; the Collins RAM family) stay quiet.
 Every `run()` returns a typed `Result` subclass chosen by the run mode:
 `Field` (TL / H(f) / p(t) — one unified array type whose physical meaning
 follows from its dtype and coordinate axes), `Rays`, `Modes`, `Arrivals`,
-`Covariance`/`Replicas`, `ReflectionCoefficient`. `Field` exposes `.db` (and
+`Covariance`/`Replicas`, `ReflectionCoefficient`. `Field` exposes `.dB` (and
 `.tl`, the same values under the quantity's name, pressure fields only),
 the `.depths`/`.ranges` axes, and `.at(...)`/`.isel(...)`/`.max(...)` to
 slice a dimension away. Details are in the Results section.
@@ -583,7 +583,7 @@ namespace):
 
 ```python
 from uacpy.core.absorption import (
-    thorp_db_per_km, francois_garrison_db_per_km, convert_attenuation_units,
+    thorp_dB_per_km, francois_garrison_dB_per_km, convert_attenuation_units,
 )
 ```
 
@@ -636,7 +636,7 @@ great-circle path instead, for a range-dependent environment.
 | Provenance | `SOURCES`, `DataSource`, `DataProvenance`, `citations` |
 
 **Offline caches.** `install.sh --data <keyword>` calls the matching
-`download_*_db` function, which is also public: `download_emodnet_db`,
+`download_*_dB` function, which is also public: `download_emodnet_db`,
 `download_globsed_db`, `download_crust1_db`, `download_diesing_db`,
 `download_graw_db`, `download_sediment_db`, `download_glodap_db`,
 `download_seaice_db`, `download_wind_db`. Once a database is cached the
@@ -693,7 +693,7 @@ back a grid. Take the paired samples from a grid run instead:
 
 ```python
 rcv = Receiver(depths=[10, 20, 30], ranges=[100, 200, 300])   # grid
-tl = model.run(env, src, rcv).db
+tl = model.run(env, src, rcv).dB
 i = np.arange(len(rcv.depths))
 paired = tl[i, i]        # (depths[k], ranges[k]) for each k
 ```
@@ -1056,13 +1056,13 @@ One output caveat: **OAST is the only TL engine that returns a real dB
 raises and off-grid receiver ranges are interpolated *in dB* (with a warning:
 that smears sharp interference nulls). Every other coherent-TL path — Bellhop,
 Kraken, Scooter, RAM, and OASP's `COHERENT_TL` — returns complex pressure in
-Pa, from which `.db` derives the same TL (§8). Use OASP when you need the
+Pa, from which `.dB` derives the same TL (§8). Use OASP when you need the
 phase or exact null depths from an OASES run.
 
 Two more payload notes. `INCOHERENT_TL` diverges in `.data`: Bellhop stores
 the complex pressure it read back from the `.shd` (its magnitude is the
 incoherent beam sum, its phase an artefact of AT's storage with no phase
-reference stamped), while Kraken stores real dB TL — `.db` means the same
+reference stamped), while Kraken stores real dB TL — `.dB` means the same
 thing on both and is the uniform cross-engine surface for magnitude-sum
 results. And across the complex-pressure engines the **phase convention is
 uniform**: every coherent complex `Field` is tagged
@@ -1091,7 +1091,7 @@ if __name__ == '__main__':
     ]
     batch = run_parallel(jobs, n_workers=3)                 # ParallelResult
     for label, result in zip(['bellhop', 'kraken', 'ram'], batch):
-        print(label, result.db.min())
+        print(label, result.dB.min())
 
     # Single-model sweep -> stack into one ResultStack:
     sweep = [Job(RAM(accuracy=1e-1).copy(np_pade=p), env, source, receiver, label=p)
@@ -1176,7 +1176,7 @@ more is more — which is why `.max()` consults both axes, never the unit alone.
 `source_depth → depth → range → frequency|time`).
 
 ```python
-field.db          # dB; -20·log10(|data|) for complex, data as-is if already real
+field.dB          # dB; -20·log10(|data|) for complex, data as-is if already real
 field.p           # complex pressure / H(f) (raises if data is real — phase gone)
 field.magnitude   # |data|;  field.phase  → angle in rad  (complex only)
 field.data        # raw ndarray
@@ -1196,7 +1196,7 @@ plot dispatcher which view to build.
 Derived views return new `Field`s and never re-run the solver:
 
 ```python
-field.to_db()                              # → the same kind in unit='dB'
+field.to_dB()                              # → the same kind in unit='dB'
 field.mask_below_seafloor(env.bathymetry)  # NaN out the sub-seafloor cells
 field.resample_to(depths=np.linspace(0, 100, 60),
                   ranges=np.linspace(100, 5_000, 200))   # onto another grid
@@ -1358,7 +1358,7 @@ rays.filter_nfirst(10)                       # first N traced rays
 rays.truncate_at_receiver(target_range_m=5000, target_depth_m=50)
 modes.first_n(10).compute_phase_speeds()     # Modes: trim + derive v_p
 modes.compute_group_velocity(modes2)         # dω/dk — needs a 2nd frequency's Modes
-modes.with_attenuation(alpha_db_per_m=0.01,  # perturbational modal attenuation
+modes.with_attenuation(alpha_dB_per_m=0.01,  # perturbational modal attenuation
                        bottom=env.bottom)    # bottom= runs the normalisation
                                             # into the half-space; without it
                                             # the result is an upper bound
@@ -1388,7 +1388,7 @@ Models that don't support multiple source depths (e.g. `Kraken`) raise a
 ```python
 for src_depth, slab in stack: ...     # iterate (coordinate, slab) pairs
 stack.at(source_depth=20)             # nearest-label slab → a Field
-stack.db                              # stacked TL, shape (n_slabs, *slab.db.shape)
+stack.dB                              # stacked TL, shape (n_slabs, *slab.dB.shape)
 stack.n_slabs, stack.slab_type        # how many slabs, and of what result type
 stack.plot()                          # panel grid (Field slabs)
 ```
@@ -1524,7 +1524,7 @@ explicit `vmin=`/`vmax=` to override.
 
 ```python
 import uacpy
-tl = bellhop.compute_tl(env, src, rcv)     # Field, coords = {depth, range}; .db → dB
+tl = bellhop.compute_tl(env, src, rcv)     # Field, coords = {depth, range}; .dB → dB
 fig, ax = uacpy.plot_field(
     tl, env=env,            # env= overlays the seafloor on the (depth, range) heatmap
     contours=[60, 80, 100], # dB contour lines
@@ -1632,7 +1632,7 @@ TS, RL. The `*_field` helpers map the equation over a model TL
 
 `LAMBERT_MU_DB` (float, −27.0) is `lambert_bottom`'s default backscattering
 constant 10·log10(μ) in dB — Mackenzie's (1961) deep-water value; pass
-`mu_db=` to `lambert_bottom` to pick another point in the empirical −25 to
+`mu_dB=` to `lambert_bottom` to pick another point in the empirical −25 to
 −35 dB spread for unconsolidated sediments.
 
 ```python
@@ -1708,7 +1708,7 @@ from uacpy.comms import simulate_link, ber_theory
 
 rng = np.random.default_rng(0xACED)
 for ebn0 in (0, 4, 8, 12):
-    res = simulate_link("qpsk", ebn0_db=ebn0, n_bits=20_000, rng=rng)
+    res = simulate_link("qpsk", ebn0_dB=ebn0, n_bits=20_000, rng=rng)
     print(ebn0, res.ber, ber_theory("qpsk", ebn0))
 ```
 
@@ -1793,7 +1793,7 @@ uacpy is SI throughout; underwater levels reference **1 µPa**.
 | Sound speed | m/s | |
 | Density | g/cm³ | **acoustic inputs** (bottom/sediment). The `core.acoustics` formula-level helpers are the exception — SI `kg/m³` (and radians) — see *Density* below |
 | Attenuation (geoacoustic) | dB per wavelength | models emit the matching `AT` TopOpt letter |
-| Attenuation (volume) | dB/km | `francois_garrison_db_per_km`, `thorp_db_per_km` |
+| Attenuation (volume) | dB/km | `francois_garrison_dB_per_km`, `thorp_dB_per_km` |
 | Pressure | Pa (µPa for levels) | |
 | Pressure level / SPL | dB re 1 µPa | air would be dB re 20 µPa |
 | Noise spectral level | dB re 1 µPa²/Hz | |
@@ -1813,7 +1813,7 @@ uacpy is SI throughout; underwater levels reference **1 µPa**.
 - A `Field` with **complex** `data` holds the **acoustic pressure normalized to
   a unit point source at 1 m** — i.e. referenced to the free-field
   `p₀(r) = e^{i k₀ r}/(4π r)`. Hence transmission loss is simply
-  **`TL = −20·log₁₀|p|`** (`Field.db`), in dB re 1 m. Real `data` is already in
+  **`TL = −20·log₁₀|p|`** (`Field.dB`), in dB re 1 m. Real `data` is already in
   dB and returned as-is.
 - This is the 3-D point-source (**spherical-spreading**) convention, and it is
   **the same for every model** (Bellhop, Kraken, Scooter, RAM, SPARC) so that
@@ -1830,7 +1830,7 @@ uacpy is SI throughout; underwater levels reference **1 µPa**.
   their plots (`plot_sel`, `plot_psd`, `plot_ppsd`, `plot_spectrogram`, and the
   gather/transform/comms plotters) live in `uacpy.visualization`, not in the
   computation modules. Levels are formed through
-  `core.acoustics.power_to_db` (`10·log₁₀(power/ref²)`), which floors `power` at
+  `core.acoustics.power_to_dB` (`10·log₁₀(power/ref²)`), which floors `power` at
   `PRESSURE_FLOOR` before the log so a silent sample yields a finite, very
   negative level rather than `−inf`.
 
@@ -2236,7 +2236,7 @@ with a warning naming the value it dropped.
 | `nw_samples` | count | `-1` | Wavenumber sample count; `-1` = auto. |
 | `plot_rmin` / `plot_rmax` | — | — | **Raise.** OASN writes covariance/replica outputs, not a TL plot. |
 | `vrec` | — | — | **Raise.** VREC is OAST's Doppler receiver velocity. |
-| `offdb` | dB | `None` | Single-mode horizontal offset. |
+| `offdB` | dB | `None` | Single-mode horizontal offset. |
 
 ### OASES — OASS (reverberation / scattered field)
 

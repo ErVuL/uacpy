@@ -82,7 +82,7 @@ returns at each grazing angle.
 from uacpy.core import acoustics
 
 for name in ['clay', 'silt', 'sand', 'gravel', 'limestone']:
-    angles, loss_db = acoustics.bottom_loss_curve(name)
+    angles, loss_dB = acoustics.bottom_loss_curve(name)
 ```
 
 ![Bottom loss from the presets](figures/util_bottom_loss.png)
@@ -149,7 +149,7 @@ from uacpy.metrics import tl_rmse, tl_max_error, tl_bias
 | `tl_bias(a, b, …)` | Mean **signed** difference; positive means `a` reports more loss |
 
 Both arguments must be 2-D `(depth, range)` [`Field`](results.md) instances.
-TL is pulled from `.db`, so it does not matter whether a field stores complex
+TL is pulled from `.dB`, so it does not matter whether a field stores complex
 pressure or real dB. Non-finite cells — Bellhop's shadow zones, an empty modal
 sum — are dropped rather than propagated.
 
@@ -350,7 +350,7 @@ every uacpy plot use **grazing angle in degrees**. The conversion is
 
 `bubble_surface_loss` returns a multiplier, not a loss. For a positive dB
 number consistent with `bottom_loss_curve`, negate the log:
-`loss_db = -20 * np.log10(multiplier)`.
+`loss_dB = -20 * np.log10(multiplier)`.
 
 ### SPL and level conversions
 
@@ -358,13 +358,13 @@ number consistent with `bottom_loss_curve`, negate the log:
 |---|---|
 | `pressure(x, sensitivity, gain, volt_params=None)` | Recorded volts (or ADC bits) → µPa, given hydrophone sensitivity in dB re 1 V/µPa and preamp gain in dB |
 | `spl(x, ref=1)` | A pressure time series → mean SPL in dB re `ref` µPa |
-| `power_to_db(power, ref=1e-6, floor=1e-30)` | A **squared** quantity (PSD, mean-square pressure, an f-k spectrum) → dB re `ref` |
+| `power_to_dB(power, ref=1e-6, floor=1e-30)` | A **squared** quantity (PSD, mean-square pressure, an f-k spectrum) → dB re `ref` |
 
-`power_to_db` is the conversion every spectral estimator in the package uses:
+`power_to_dB` is the conversion every spectral estimator in the package uses:
 `10·log10(power / ref²)`, with `power` floored before the log so a silent
 sample gives a finite, very negative level instead of `-inf` — which would
 otherwise poison a downstream `mean` or histogram. Use `spl` for a waveform,
-`power_to_db` for anything already squared. For standards-based band levels and
+`power_to_dB` for anything already squared. For standards-based band levels and
 weighting, see [noise](noise.md) and [signal processing](signal.md).
 
 ---

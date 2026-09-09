@@ -95,8 +95,8 @@ def demo_bellhop_bounce():
     )
 
     # Compare
-    tl_hs = result_hs.db
-    tl_bn = result_bounce.db
+    tl_hs = result_hs.dB
+    tl_bn = result_bounce.dB
     diff = tl_bn - tl_hs
     print(f"\nHalf-space TL: {np.nanmin(tl_hs):.1f} to {np.nanmax(tl_hs):.1f} dB")
     print(f"BOUNCE TL:     {np.nanmin(tl_bn):.1f} to {np.nanmax(tl_bn):.1f} dB")
@@ -184,7 +184,7 @@ def demo_layered_bottom():
     try:
         scooter = Scooter(verbose=True)
         result = scooter.compute_tl(env, source, receiver)
-        print(f"Scooter TL: {np.nanmin(result.db):.1f} to {np.nanmax(result.db):.1f} dB")
+        print(f"Scooter TL: {np.nanmin(result.dB):.1f} to {np.nanmax(result.dB):.1f} dB")
 
         # Plot TL
         fig1, ax1 = plot_field(result, env=env, contours=[70, 80, 90])
@@ -264,7 +264,7 @@ def demo_range_dependent_bottom():
     print("\n--- Running RAM with range-dependent bottom ---")
     ram = RAM(verbose=True, accuracy=1e-1)
     result = ram.run(env, source, receiver)
-    print(f"RAM TL: {np.nanmin(result.db):.1f} to {np.nanmax(result.db):.1f} dB")
+    print(f"RAM TL: {np.nanmin(result.dB):.1f} to {np.nanmax(result.dB):.1f} dB")
 
     fig1, ax1 = plot_field(result, env=env, contours=[70, 85, 100])
     ax1.set_title('RAM TL — Range-Dependent Bottom (Mud to Sand)')
@@ -371,8 +371,8 @@ def demo_rd_layered_bottom():
     print("\n--- Running RAM with range-dependent layered bottom ---")
     ram = RAM(verbose=True, accuracy=1e-1)
     result = ram.run(env, source, receiver)
-    print(f"RAM TL: {np.nanmin(result.db):.1f} to "
-          f"{np.nanmax(result.db):.1f} dB")
+    print(f"RAM TL: {np.nanmin(result.dB):.1f} to "
+          f"{np.nanmax(result.dB):.1f} dB")
 
     fig1, ax1 = plot_field(result, env=env, contours=[70, 85, 100])
     ax1.set_title('RAM TL — Range-Dependent Layered Bottom')

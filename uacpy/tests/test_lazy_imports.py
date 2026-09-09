@@ -221,12 +221,12 @@ def test_bare_absorption_formulas_stay_off_the_top_level():
     at the top level; the bare per-km formula functions stay addressed as
     ``uacpy.core.absorption.*``. Runs in-process — it inspects the surface,
     not import order."""
-    assert not hasattr(uacpy, 'thorp_db_per_km')
-    assert not hasattr(uacpy, 'francois_garrison_db_per_km')
+    assert not hasattr(uacpy, 'thorp_dB_per_km')
+    assert not hasattr(uacpy, 'francois_garrison_dB_per_km')
     # The class spellings and the fully-qualified functions remain available.
     assert hasattr(uacpy, 'Thorp') and hasattr(uacpy, 'FrancoisGarrison')
-    from uacpy.core.absorption import thorp_db_per_km          # noqa: F401
-    from uacpy.core.absorption import francois_garrison_db_per_km  # noqa: F401
+    from uacpy.core.absorption import thorp_dB_per_km          # noqa: F401
+    from uacpy.core.absorption import francois_garrison_dB_per_km  # noqa: F401
 
 
 def test_uacpy_plot_is_an_attribute_alias_not_a_module_path():

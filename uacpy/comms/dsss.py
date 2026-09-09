@@ -57,7 +57,7 @@ def m_sequence(n_register, taps):
             period = i + 1
     # A non-primitive polynomial returns early to the seed, so the register
     # cycles through a subset of its states. The output still has the right
-    # length, dtype and +/-1 alphabet, and processing_gain_db still reports
+    # length, dtype and +/-1 alphabet, and processing_gain_dB still reports
     # 10log10(N) — nothing looks wrong until a link budget is far out.
     if period != length:
         raise ConfigurationError(
@@ -109,6 +109,6 @@ def despread(chips, code):
     return (blocks @ np.conj(c)) / energy
 
 
-def processing_gain_db(code):
+def processing_gain_dB(code):
     """Processing gain ``10*log10(N)`` in dB for an ``N``-chip code."""
     return float(10.0 * np.log10(np.asarray(code).size))

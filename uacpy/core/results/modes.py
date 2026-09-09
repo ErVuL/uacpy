@@ -261,7 +261,7 @@ class Modes(Result):
 
     def with_attenuation(
         self,
-        alpha_db_per_m: Union[float, np.ndarray],
+        alpha_dB_per_m: Union[float, np.ndarray],
         *,
         sound_speed_z: Union[float, np.ndarray] = 1500.0,
         density_z: Union[float, np.ndarray] = 1.0,
@@ -307,11 +307,11 @@ class Modes(Result):
 
         Parameters
         ----------
-        alpha_db_per_m : float or ndarray
+        alpha_dB_per_m : float or ndarray
             Per-depth volume attenuation in dB/m, sampled on
             :attr:`depths`. Scalar broadcasts to every depth. Build one
             from an :class:`~uacpy.core.absorption.Absorption` via
-            ``absorption.alpha_db_per_m(modes.f0, modes.depths)``.
+            ``absorption.alpha_dB_per_m(modes.f0, modes.depths)``.
 
             **This is not the same number the solver used.** The Python
             accessor and the Acoustics-Toolbox deck evaluate the same model
@@ -404,7 +404,7 @@ class Modes(Result):
             )
         # Each depth-tabulated input is a scalar (spread over the
         # tabulation) or one value per tabulated depth.
-        a = self._on_depths(alpha_db_per_m, 'alpha')
+        a = self._on_depths(alpha_dB_per_m, 'alpha')
         c_arr = self._on_depths(sound_speed_z, 'sound_speed_z')
         rho_g = self._on_depths(density_z, 'density_z')
         rho_arr = rho_g * 1000.0  # g/cm³ → kg/m³

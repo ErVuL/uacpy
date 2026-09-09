@@ -582,7 +582,7 @@ class TestOasnWhiteNoiseContract:
         text = self._deck(tmp_path)
         assert '70.0 -200.0 0.0 0' in text
 
-    def test_explicit_zero_writes_literal_zero_db(self, tmp_path):
+    def test_explicit_zero_writes_literal_zero_dB(self, tmp_path):
         text = self._deck(tmp_path, white_noise_level=0.0)
         assert '70.0 0.0 0.0 0' in text
 

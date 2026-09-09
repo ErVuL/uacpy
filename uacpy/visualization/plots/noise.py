@@ -80,12 +80,12 @@ def plot_weighting(group, ax=None, *, frequency=None, title=None,
 
 
 @typed_plot_error
-def plot_source_level(frequency, level_db, ax=None, *, label=None, title=None,
+def plot_source_level(frequency, level_dB, ax=None, *, label=None, title=None,
                       figsize=(8, 4), **mpl_kw):
     """Plot a ship source-level spectrum (dB re 1 µPa·m vs band centre)."""
-    _require_nonempty('plot_source_level', frequency=frequency, level_db=level_db)
+    _require_nonempty('plot_source_level', frequency=frequency, level_dB=level_dB)
     f = np.asarray(frequency, dtype=float)
-    lv = np.asarray(level_db, dtype=float)
+    lv = np.asarray(level_dB, dtype=float)
     fig, ax = fig_ax(ax, figsize)
     # setdefault: a caller restyling the marker through **mpl_kw would
     # otherwise collide with the hardcoded one and raise a raw TypeError.

@@ -74,7 +74,7 @@ _BER_PSK_ORDERS = {"8psk": 8, "16psk": 16}
 _BER_QAM_ORDERS = {"16qam": 16, "64qam": 64, "256qam": 256}
 
 
-def ber_theory(scheme, ebn0_db):
+def ber_theory(scheme, ebn0_dB):
     """Theoretical AWGN BER vs Eb/N0 (dB) for a Gray-mapped scheme.
 
     Exact for BPSK/QPSK; standard nearest-neighbour approximations for higher
@@ -90,7 +90,7 @@ def ber_theory(scheme, ebn0_db):
     nearest-neighbour symbol error costs exactly one of the ``k`` bits.
     :func:`uacpy.comms.constellation` is Gray-mapped throughout.
     """
-    ebn0 = 10.0 ** (np.asarray(ebn0_db, dtype=float) / 10.0)
+    ebn0 = 10.0 ** (np.asarray(ebn0_dB, dtype=float) / 10.0)
     s = scheme.lower()
     if s in ("bpsk", "qpsk"):
         return _q(np.sqrt(2.0 * ebn0))

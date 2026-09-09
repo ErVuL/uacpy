@@ -350,9 +350,9 @@ class TestSedimentBlockIsResolvedByZread:
         from uacpy.models import Scooter
         env = self._env(thickness)
         src, rcv = self._src_rcv()
-        ram = np.asarray(RAM(verbose=False).run(env, src, rcv).db)
+        ram = np.asarray(RAM(verbose=False).run(env, src, rcv).dB)
         scooter = np.asarray(Scooter(verbose=False, c_low=1400.0,
-                                     c_high=1e9).run(env, src, rcv).db)
+                                     c_high=1e9).run(env, src, rcv).dB)
         ranges = np.asarray(rcv.ranges)
         worst = 0.0
         for iz in (0, 1):
@@ -577,8 +577,8 @@ class TestAbsorbingRampSpansTheAbsorbingWidthUnderAHalfSpace:
                 warnings.simplefilter('ignore')
                 return np.asarray(RAM(**kw).run(env, src, rcv).tl, dtype=float)
 
-        def incoherent(tl_db):
-            intensity = 10.0 ** (-tl_db / 10.0)
+        def incoherent(tl_dB):
+            intensity = 10.0 ** (-tl_dB / 10.0)
             windows = intensity.reshape(intensity.shape[0], -1, 10)
             return -10.0 * np.log10(windows.mean(axis=2))
 
@@ -841,11 +841,11 @@ class TestCollinsDivergenceIsMarkedNoDataNotOverwritten:
         noise = [str(w.message) for w in caught
                  if 'divergence' in str(w.message)]
         assert not noise, noise
-        db = np.asarray(field.db).ravel()
-        assert np.isfinite(db).all()
+        dB = np.asarray(field.dB).ravel()
+        assert np.isfinite(dB).all()
         # r = 0.75 m sits inside the 1 m reference radius, so its TL is
         # legitimately negative and is the march's own number.
-        assert db[0] < 0.0, f"near-source TL {db[0]:.2f} dB"
+        assert dB[0] < 0.0, f"near-source TL {dB[0]:.2f} dB"
 
     def test_a_nonfinite_grid_is_marked_no_data_and_warned(self):
         raw = {
@@ -1088,7 +1088,7 @@ class TestRamsSeafloorIndexFloor:
             warnings.simplefilter('ignore')
             f = RAM(backend='rams', verbose=False).run(
                 self._env(shelf), self.SRC, self.RCV)
-        assert np.isfinite(f.db).all()
+        assert np.isfinite(f.dB).all()
 
     def test_the_clamped_backends_are_unaffected(self):
         # ramgeo applies max(2,iz) (ramgeo1.5.f:134), so the same track is
@@ -1130,18 +1130,18 @@ class TestSubBottomMarginIsEnoughForTheAbsorber:
         return any('grid' in str(w.message) or 'absorbing' in str(w.message)
                    for w in caught)
 
-    @pytest.mark.parametrize('zmax,measured_db', [(300.0, 3.1), (222.0, 16.0),
+    @pytest.mark.parametrize('zmax,measured_dB', [(300.0, 3.1), (222.0, 16.0),
                                                   (220.0, 27.0)])
-    def test_a_thin_sub_bottom_margin_warns(self, zmax, measured_db):
-        assert self._warns(zmax), f'{measured_db} dB error passed in silence'
+    def test_a_thin_sub_bottom_margin_warns(self, zmax, measured_dB):
+        assert self._warns(zmax), f'{measured_dB} dB error passed in silence'
 
-    @pytest.mark.parametrize('zmax,measured_db', [(700.0, 0.32), (1500.0, 0.0)])
-    def test_an_ample_margin_stays_silent(self, zmax, measured_db):
+    @pytest.mark.parametrize('zmax,measured_dB', [(700.0, 0.32), (1500.0, 0.0)])
+    def test_an_ample_margin_stays_silent(self, zmax, measured_dB):
         # The discriminating half. Comparing against uacpy's own 20-lambda
         # auto pad would fire here, at 0.32 dB — a warning users would learn
         # to ignore.
         assert not self._warns(zmax), \
-            f'{measured_db} dB error warned — the threshold is too eager'
+            f'{measured_dB} dB error warned — the threshold is too eager'
 
 
 class TestSourceRowIsActuallySolved:
@@ -1198,7 +1198,7 @@ class TestSourceRowIsActuallySolved:
             warnings.simplefilter('ignore')
             f = RAM(backend=backend, verbose=False).run(
                 self._env(), Source(depths=25.0, frequencies=100.0), self.RCV)
-        assert np.isfinite(f.db).any()
+        assert np.isfinite(f.dB).any()
 
     def test_the_guard_is_keyed_to_dz_not_to_a_fixed_depth(self):
         # A 0.5 m source is fine once dz is small enough to resolve it — the
@@ -1208,7 +1208,7 @@ class TestSourceRowIsActuallySolved:
             warnings.simplefilter('ignore')
             f = RAM(backend='ramgeo', dz=0.1, dr=50.0, verbose=False).run(
                 self._env(), Source(depths=0.5, frequencies=100.0), self.RCV)
-        assert np.isfinite(f.db).any()
+        assert np.isfinite(f.dB).any()
 
 
 class TestEveryPerRangeStreamBoundsDr:
@@ -1694,9 +1694,9 @@ class TestRangeDependentBottomIsHonoured:
         near = self._column(1550.0, 1.5, 0.1, 1600.0)
         far = self._column(1800.0, 2.1, 1.0, 2400.0)
         rd = np.asarray(self._run(Bottom.from_columns(
-            [near, far], ranges=np.array([0.0, 2000.0]))).db)
+            [near, far], ranges=np.array([0.0, 2000.0]))).dB)
         uniform = np.asarray(self._run(Bottom.from_columns(
-            [near, near], ranges=np.array([0.0, 2000.0]))).db)
+            [near, near], ranges=np.array([0.0, 2000.0]))).dB)
         ok = np.isfinite(rd) & np.isfinite(uniform)
         assert ok.any()
         # Beyond the 2 km transition the two seabeds must separate the TL.
@@ -2381,10 +2381,10 @@ class TestCollinsBroadbandSizesItsRangeStepAtTheBandTop:
         wide = RAM(backend='ramgeo', verbose=False).run(
             env, Source(depths=25.0, frequencies=band), rcv,
             run_mode=RunMode.BROADBAND)
-        db = np.asarray(wide.db, dtype=float)
-        top = db[..., -1].ravel() if db.ndim > 1 else db.ravel()
+        dB = np.asarray(wide.dB, dtype=float)
+        top = dB[..., -1].ravel() if dB.ndim > 1 else dB.ravel()
         narrow = np.asarray(RAM(backend='ramgeo', verbose=False).run(
-            env, Source(depths=25.0, frequencies=500.0), rcv).db,
+            env, Source(depths=25.0, frequencies=500.0), rcv).dB,
             dtype=float).ravel()
         rms = float(np.sqrt(np.nanmean((top - narrow) ** 2)))
         assert rms < 2.0, f"broadband top bin is {rms:.2f} dB rms from the " \
@@ -2423,7 +2423,7 @@ class TestRamWarnsWhenReceiverRangesStartAtZero:
             field = RAM(verbose=False).run(
                 self._env(), Source(depths=25.0, frequencies=100.0), rcv)
         assert len(self._zero_range_warnings(rec)) == 1
-        tl = np.asarray(field.to_db().db, dtype=float).ravel()
+        tl = np.asarray(field.to_dB().dB, dtype=float).ravel()
         assert np.isnan(tl[0]) and np.isfinite(tl[1:]).all()
 
     def test_a_positive_first_range_is_silent(self):

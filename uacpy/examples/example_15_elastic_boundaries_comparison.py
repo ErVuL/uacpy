@@ -220,7 +220,7 @@ def main():
     print("=" * 80)
 
     # Compute difference
-    tl_diff = result_kraken.db - result_scooter.db
+    tl_diff = result_kraken.dB - result_scooter.dB
     max_diff = np.nanmax(np.abs(tl_diff))
     mean_diff = np.nanmean(np.abs(tl_diff))
     rms_diff = np.sqrt(np.nanmean(tl_diff**2))

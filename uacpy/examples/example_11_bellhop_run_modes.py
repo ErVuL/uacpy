@@ -210,7 +210,7 @@ def scenario_a_tl_modes():
     compare(list(cuts.values()), list(cuts), ax=ax, linewidth=2.5, alpha=0.8,
             title=f'TL Comparison at {source.depths[0]:.0f}m Depth '
                   f'(300 m above the 1300 m channel axis)')
-    tl_coherent, tl_incoherent, tl_semicoherent = (c.db for c in cuts.values())
+    tl_coherent, tl_incoherent, tl_semicoherent = (c.dB for c in cuts.values())
 
     plt.tight_layout()
     plt.savefig(OUTPUT_DIR / 'example_11a_tl_modes.png', dpi=150, bbox_inches='tight')
@@ -226,11 +226,11 @@ def scenario_a_tl_modes():
 
     # Whole-grid spread is the fair smoothness measure — one depth slice is
     # too short a sample to separate 'I' from 'S'.
-    std_c = np.nanstd(np.asarray(result_coherent.db))
-    std_i = np.nanstd(np.asarray(result_incoherent.db))
-    std_s = np.nanstd(np.asarray(result_semicoherent.db))
-    max_is = np.nanmax(np.abs(np.asarray(result_incoherent.db)
-                              - np.asarray(result_semicoherent.db)))
+    std_c = np.nanstd(np.asarray(result_coherent.dB))
+    std_i = np.nanstd(np.asarray(result_incoherent.dB))
+    std_s = np.nanstd(np.asarray(result_semicoherent.dB))
+    max_is = np.nanmax(np.abs(np.asarray(result_incoherent.dB)
+                              - np.asarray(result_semicoherent.dB)))
     print("\n  Whole-grid TL std dev:")
     print(f"    • Coherent {std_c:.2f} dB   • Incoherent {std_i:.2f} dB"
           f"   • Semi-coherent {std_s:.2f} dB")

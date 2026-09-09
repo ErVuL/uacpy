@@ -41,7 +41,7 @@ def save(fig, stem: str, *, guide: bool = False) -> Path:
 
 
 def source_beam_pattern(angles_deg, *, beamwidth_deg=30.0, tilt_deg=0.0,
-                        floor_db=-40.0):
+                        floor_dB=-40.0):
     """``(N, 2)`` ``[angle_deg, level_dB]`` directivity for a point source.
 
     A main lobe ``beamwidth_deg`` wide between its -3 dB points, centred on
@@ -66,7 +66,7 @@ def source_beam_pattern(angles_deg, *, beamwidth_deg=30.0, tilt_deg=0.0,
     angles = np.asarray(angles_deg, dtype=float)
     x = 0.442946 * (angles - tilt_deg) / (0.5 * beamwidth_deg)
     amplitude = np.abs(np.sinc(x))
-    level = 20.0 * np.log10(np.maximum(amplitude, 10.0 ** (floor_db / 20.0)))
+    level = 20.0 * np.log10(np.maximum(amplitude, 10.0 ** (floor_dB / 20.0)))
     return np.column_stack([angles, level])
 
 

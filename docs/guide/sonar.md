@@ -123,9 +123,9 @@ from uacpy import sonar
 |---|---|
 | `echo_level(source_level, tl, target_strength)` | `EL` |
 | `noise_background(noise_level, directivity_index=None, *, array_gain=None)` | `NL − DI` |
-| `passive_signal_excess(source_level, tl, noise_level, directivity_index=None, detection_threshold=0.0, *, array_gain=None, processing_loss_db=0.0)` | `SE` |
-| `active_signal_excess(source_level, tl, target_strength, *, noise_level=None, directivity_index=None, reverberation_level=None, detection_threshold=0.0, array_gain=None, processing_loss_db=0.0)` | `SE` |
-| `figure_of_merit(source_level, noise_level, directivity_index=None, detection_threshold=0.0, *, array_gain=None, processing_loss_db=0.0)` | `FOM` |
+| `passive_signal_excess(source_level, tl, noise_level, directivity_index=None, detection_threshold=0.0, *, array_gain=None, processing_loss_dB=0.0)` | `SE` |
+| `active_signal_excess(source_level, tl, target_strength, *, noise_level=None, directivity_index=None, reverberation_level=None, detection_threshold=0.0, array_gain=None, processing_loss_dB=0.0)` | `SE` |
+| `figure_of_merit(source_level, noise_level, directivity_index=None, detection_threshold=0.0, *, array_gain=None, processing_loss_dB=0.0)` | `FOM` |
 
 `directivity_index` defaults to `None`, treated as 0 dB. `None` rather than
 `0.0` so that "not supplied" stays distinguishable from a legitimate per-angle
@@ -150,9 +150,9 @@ evaluate the sonar equation at every `(depth, range)` sample of it:
 
 | Call | Takes | Gives |
 |---|---|---|
-| `passive_signal_excess_field(tl_field, *, source_level, noise_level, directivity_index=None, detection_threshold=0.0, array_gain=None, processing_loss_db=0.0)` | a TL `Field` | `SE` `Field` |
-| `active_signal_excess_field(tl_field, *, source_level, target_strength, noise_level=None, reverberation_level=None, directivity_index=None, detection_threshold=0.0, array_gain=None, processing_loss_db=0.0)` | a TL `Field` | `SE` `Field` |
-| `probability_of_detection_field(se_field, *, sigma_db)` | an `SE` `Field` | `P_D` `Field` |
+| `passive_signal_excess_field(tl_field, *, source_level, noise_level, directivity_index=None, detection_threshold=0.0, array_gain=None, processing_loss_dB=0.0)` | a TL `Field` | `SE` `Field` |
+| `active_signal_excess_field(tl_field, *, source_level, target_strength, noise_level=None, reverberation_level=None, directivity_index=None, detection_threshold=0.0, array_gain=None, processing_loss_dB=0.0)` | a TL `Field` | `SE` `Field` |
+| `probability_of_detection_field(se_field, *, sigma_dB)` | an `SE` `Field` | `P_D` `Field` |
 | `detection_range_by_depth(se_field)` | an `SE` `Field` | `(depths, ranges)` |
 
 ```python
@@ -210,7 +210,7 @@ recorded for you:
 ```python
 >>> se.metadata['sonar_budget']
 {'mode': 'passive', 'source_level': 125.0, 'noise_level': 65.0,
- 'directivity_index': 15.0, 'detection_threshold': -7.79..., 'processing_loss_db': 0.0}
+ 'directivity_index': 15.0, 'detection_threshold': -7.79..., 'processing_loss_dB': 0.0}
 ```
 
 ---
@@ -403,16 +403,16 @@ relative one.
 
 `probability_of_detection_field` applies the **log-normal** transition curve:
 the decision statistic is taken log-normal, so in dB it is Gaussian with
-standard deviation `sigma_db`, giving
+standard deviation `sigma_dB`, giving
 
 ```
-P_D = Φ(SE / sigma_db)
+P_D = Φ(SE / sigma_dB)
 ```
 
 ```python
 env, se = _passive_deep()      # the §2 run, factored into a helper
 for sigma in (5.6, 9.0):
-    pd = sonar.probability_of_detection_field(se, sigma_db=sigma)
+    pd = sonar.probability_of_detection_field(se, sigma_dB=sigma)
     plot_detection_probability(pd, env=env,
                                title=f'Detection probability, σ = {sigma:g} dB')
 ```
@@ -431,7 +431,7 @@ retreats toward the source and the `0.1` contour pushes far beyond it. The
 detectable *area* barely moves; the certainty with which you can speak about its
 edge collapses.
 
-`sigma_db` has **no default**, deliberately. It is a physical claim about the
+`sigma_dB` has **no default**, deliberately. It is a physical claim about the
 channel, not a processing knob. Dyer's *saturated-multipath* result gives
 `σ ≈ 5.6` dB; measured one-way totals typically run 5–9 dB, which is exactly
 the span the two panels bracket. Saturation is the precondition: many arrivals
@@ -670,11 +670,11 @@ after the ping.
 
 | Call | |
 |---|---|
-| `boundary_reverberation(ranges_m, source_level, scattering_strength_db, *, pulse_length_s, horizontal_beamwidth_rad, sound_speed=1500.0, tl_db=None)` | surface or bottom |
-| `volume_reverberation(ranges_m, source_level, scattering_strength_db, *, pulse_length_s, solid_angle_beamwidth_sr, sound_speed=1500.0, tl_db=None)` | scattering layers |
-| `total_reverberation(*levels_db)` | incoherent (power) sum |
+| `boundary_reverberation(ranges_m, source_level, scattering_strength_dB, *, pulse_length_s, horizontal_beamwidth_rad, sound_speed=1500.0, tl_dB=None)` | surface or bottom |
+| `volume_reverberation(ranges_m, source_level, scattering_strength_dB, *, pulse_length_s, solid_angle_beamwidth_sr, sound_speed=1500.0, tl_dB=None)` | scattering layers |
+| `total_reverberation(*levels_dB)` | incoherent (power) sum |
 
-`tl_db=None` falls back to spherical spreading, `20·log10(r)`. Pass an array or
+`tl_dB=None` falls back to spherical spreading, `20·log10(r)`. Pass an array or
 a callable to use a **modelled** TL instead — the same move as §2, and §8 does
 exactly that.
 
@@ -682,9 +682,9 @@ exactly that.
 
 | Call | |
 |---|---|
-| `lambert_bottom(grazing_deg, mu_db=-27.0)` | `S_b = µ_dB + 20·log10(sin θ)`, the **monostatic** case of `S_b = 10·log10(µ sin θ_i sin θ_s)`; Mackenzie's −27 dB; holds below ~45° grazing |
+| `lambert_bottom(grazing_deg, mu_dB=-27.0)` | `S_b = µ_dB + 20·log10(sin θ)`, the **monostatic** case of `S_b = 10·log10(µ sin θ_i sin θ_s)`; Mackenzie's −27 dB; holds below ~45° grazing |
 | `chapman_harris_surface(grazing_deg, wind_speed_kn, frequency)` | wind-driven sea surface; fitted by Chapman & Harris over 0.4–6.4 kHz, validated by Chapman & Scott over 0.1–6.4 kHz for θ < 80°, though the underlying data are all below 40° grazing |
-| `column_scattering_strength(sv_db, thickness_m)` | `S_v + 10·log10(h)` — a scattering layer as an equivalent area strength |
+| `column_scattering_strength(sv_dB, thickness_m)` | `S_v + 10·log10(h)` — a scattering layer as an equivalent area strength |
 
 `LAMBERT_MU_DB` is exported if you want the constant itself. Any substitute is
 bounded above by **−4.97 dB** — `µ = 1/π`, the diffuse-scattering ceiling that
@@ -733,12 +733,12 @@ gives `+20` back, leaving `−20`. A boundary cell gives only `+10`, leaving
 strength down with it — steeply for Lambert, more gently for Chapman–Harris.
 
 **Every rate in that table is conditioned on spherical spreading**, which is
-what `tl_db=None` gives you. A waveguide changes them: in a shallow-water
+what `tl_dB=None` gives you. A waveguide changes them: in a shallow-water
 mode-stripping region where `TL = 15·log₁₀ r`, boundary reverberation decays at
 20 dB/decade rather than 30. Worse for planning, Zhou and Harrison show that
 under Lambert's rule the echo and the reverberation both settle to `30·log₁₀ r`
 at ranges large compared with the water depth, so the signal-to-reverberation
-ratio **stops improving with range altogether**. Pass `tl_db=` a modelled TL, as
+ratio **stops improving with range altogether**. Pass `tl_dB=` a modelled TL, as
 [§8](#8-the-active-budget-end-to-end) does, and the rate comes out right without
 your having to know which regime you are in.
 
@@ -781,7 +781,7 @@ grazing = np.rad2deg(np.arctan2(SONAR_HEIGHT, ranges))
 rl = sonar.boundary_reverberation(
     ranges, ACTIVE_SL, sonar.lambert_bottom(grazing),
     pulse_length_s=PULSE_S, horizontal_beamwidth_rad=BEAMWIDTH_RAD,
-    tl_db=tl_bottom)
+    tl_dB=tl_bottom)
 
 se_noise = sonar.active_signal_excess(
     ACTIVE_SL, tl, ts, noise_level=ACTIVE_NL,
@@ -791,7 +791,7 @@ se_both = sonar.active_signal_excess(
     reverberation_level=rl, detection_threshold=DT_ACTIVE)
 ```
 
-Note `tl_db=tl_bottom` on the reverberation call: the scattering patch is on the
+Note `tl_dB=tl_bottom` on the reverberation call: the scattering patch is on the
 seabed, so its two-way loss is the modelled TL **at the seabed**, not spherical
 spreading and not the TL to the target at 60 m. And the grazing angle falls as
 the range grows, because the sonar sits 75 m above the bottom.
@@ -1069,7 +1069,7 @@ same 60 km field gives **45.9 km** coherent against **31.7 km** incoherent: 45 %
 too far, from one keyword. Pass `run_mode=RunMode.INCOHERENT_TL` whenever the
 answer you want is a detection range rather than an interference pattern.
 
-**`sigma_db` has no default.** `probability_of_detection_field` requires it,
+**`sigma_dB` has no default.** `probability_of_detection_field` requires it,
 because it is a claim about the channel. 5–9 dB covers most one-way
 measurements; Dyer's saturated-multipath value is 5.6 dB.
 

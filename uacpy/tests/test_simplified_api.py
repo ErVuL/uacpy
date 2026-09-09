@@ -137,13 +137,13 @@ class TestFieldMethods:
 
         point = result.at(range=3000, depth=50)
         assert isinstance(point, Field)
-        assert point.db.ndim == 0
-        assert isinstance(float(point.db), float)
+        assert point.dB.ndim == 0
+        assert isinstance(float(point.dB), float)
 
-        values_at_range = result.at(range=3000).db
+        values_at_range = result.at(range=3000).dB
         assert len(values_at_range) == len(receiver_small.depths)
 
-        values_at_depth = result.at(depth=50).db
+        values_at_depth = result.at(depth=50).dB
         assert len(values_at_depth) == len(receiver_small.ranges)
 
     def test_field_properties(self, simple_env, source, receiver_small):

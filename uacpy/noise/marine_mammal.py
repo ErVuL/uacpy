@@ -90,19 +90,19 @@ def auditory_weighting(frequency, group):
         r1 ** p["a"] / ((1 + r1) ** p["a"] * (1 + r2) ** p["b"]))
 
 
-def apply_weighting(level_db, frequency, group):
+def apply_weighting(level_dB, frequency, group):
     """Apply the group weighting to a per-frequency level spectrum: ``L + W(f)`` [dB]."""
-    return np.asarray(level_db, dtype=float) + auditory_weighting(frequency, group)
+    return np.asarray(level_dB, dtype=float) + auditory_weighting(frequency, group)
 
 
-def weighted_level(psd_db, frequency, group):
+def weighted_level(psd_dB, frequency, group):
     """Broadband group-weighted level [dB] from a level-*density* spectrum.
 
     Integrates the weighted spectral density over frequency::
 
         10·log10( ∫ 10^((L(f) + W(f))/10) df )
 
-    where ``psd_db`` is a level density (dB re ref²/Hz) at ``frequency`` [Hz].
+    where ``psd_dB`` is a level density (dB re ref²/Hz) at ``frequency`` [Hz].
     Integrating — rather than summing the samples — makes the result
     **independent of the frequency-grid spacing** (a bare sum is not: it scales
     with the number of bins). Mirrors how :func:`uacpy.acoustic_signal.bands`
@@ -121,9 +121,9 @@ def weighted_level(psd_db, frequency, group):
             f"weighted_level: integrating the weighted density over frequency "
             f"needs at least two frequencies to span a bandwidth; got "
             f"{f.size}. For the weighted level at a single frequency use "
-            f"apply_weighting(psd_db, frequency, group).")
+            f"apply_weighting(psd_dB, frequency, group).")
     w = np.atleast_1d(
-        np.asarray(apply_weighting(psd_db, frequency, group), dtype=float))
+        np.asarray(apply_weighting(psd_dB, frequency, group), dtype=float))
     order = np.argsort(f)
     integral = np.trapezoid(10.0 ** (w[order] / 10.0), f[order])
     return float(10.0 * np.log10(max(float(integral), np.finfo(float).tiny)))

@@ -13,7 +13,7 @@ import scipy.signal as _sig
 
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.constants import REFERENCE_PRESSURE_WATER
-from uacpy.core.acoustics import power_to_db
+from uacpy.core.acoustics import power_to_dB
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.acoustic_signal._signal_validate import (
     require_finite_signal,
@@ -44,7 +44,7 @@ def _warn_two_sided(caller: str, data):
 
 PSDResult = namedtuple("PSDResult", "frequencies power")
 SELResult = namedtuple("SELResult", "sel_pa2s bands")
-# ``ref`` is the dB reference the levels in ``pdf`` / ``mean_db`` / ``std_db``
+# ``ref`` is the dB reference the levels in ``pdf`` / ``mean_dB`` / ``std_dB``
 # are stated against — the value ``ppsd`` was called with, carried forward so a
 # consumer does not have to guess it. Without it every downstream label had to
 # assume the default, and a caller who passed a Pa-based reference to µPa data
@@ -54,7 +54,7 @@ SELResult = namedtuple("SELResult", "sel_pa2s bands")
 # estimator itself always passes the caller's value explicitly.
 PPSDResult = namedtuple(
     "PPSDResult",
-    "frequencies level_edges pdf mean_db std_db binwidth_db seg_duration ref "
+    "frequencies level_edges pdf mean_dB std_dB binwidth_dB seg_duration ref "
     "scaling",
     defaults=(REFERENCE_PRESSURE_WATER, "density"))
 
@@ -113,12 +113,12 @@ def ppsd(data, sample_rate, *, seg_duration=1.0, overlap_pct=50, ddB=1.0,
     warning.
 
     ``pdf`` is a probability *density* (each frequency column integrates to 1
-    over the level axis, i.e. ``nansum(col) * binwidth_db == 1``) and **empty
+    over the level axis, i.e. ``nansum(col) * binwidth_dB == 1``) and **empty
     bins are NaN, not 0**, so a level never observed stays blank instead of
     being drawn as the lowest colour. Reduce it with the ``nan``-aware
     functions: plain ``pdf.sum()`` returns NaN.
 
-    ``mean_db`` and ``std_db`` are taken over *all* segments, so they are not
+    ``mean_dB`` and ``std_dB`` are taken over *all* segments, so they are not
     clipped by ``lvlmin`` / ``lvlmax`` the way the histogram is; if levels fall
     outside that window the two stop describing the same population.
 
@@ -206,7 +206,7 @@ def ppsd(data, sample_rate, *, seg_duration=1.0, overlap_pct=50, ddB=1.0,
             f"{len(signals[-1])/sample_rate:.2f}s")
 
     psd_array = np.array(psd_list)
-    psd_segments_dB = power_to_db(psd_array, ref)
+    psd_segments_dB = power_to_dB(psd_array, ref)
     mean_psd = np.mean(psd_segments_dB, axis=0)
     std_psd = np.std(psd_segments_dB, axis=0)
 
@@ -229,7 +229,7 @@ def ppsd(data, sample_rate, *, seg_duration=1.0, overlap_pct=50, ddB=1.0,
             f"[lvlmin={lvlmin:g}, lvlmax={lvlmax:g}] dB — the segments span "
             f"{float(np.min(psd_segments_dB)):.1f} to "
             f"{float(np.max(psd_segments_dB)):.1f} dB re ref² — so pdf is "
-            f"all-NaN (mean_db/std_db still cover every segment). Widen "
+            f"all-NaN (mean_dB/std_dB still cover every segment). Widen "
             f"lvlmin/lvlmax to cover that span, or pass ref in the data's "
             f"own pressure unit (µPa-scaled samples against the default "
             f"Pa-based ref read 120 dB high).",

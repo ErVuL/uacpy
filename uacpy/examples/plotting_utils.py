@@ -52,7 +52,7 @@ def _plot_tl_difference(a, b, env=None, *, ax=None, title=None,
     """
     if diff_vmax is not None:
         vmin, vmax = -abs(diff_vmax), abs(diff_vmax)
-    diff = Field(data=a.db - b.db, coords=dict(a.coords))
+    diff = Field(data=a.dB - b.dB, coords=dict(a.coords))
     # Tag it for what it is. Untagged, a Field inherits ``kind='pressure'``,
     # which would caption the bar 'TL (dB)' over a signed residual and let the
     # loss predicate run a 1-D cut's value axis downward — meaningless for a
@@ -97,7 +97,7 @@ def plot_model_statistics(results: Dict, source_depth: float):
     model_names = list(results.keys())
     stats = []
     for name, result in results.items():
-        tl = np.asarray(result.at(depth=source_depth).db)
+        tl = np.asarray(result.at(depth=source_depth).dB)
         stats.append([np.nanmean(tl), np.nanstd(tl)])
     stats = np.array(stats)
     x = np.arange(len(model_names))
@@ -123,8 +123,8 @@ def plot_model_statistics(results: Dict, source_depth: float):
                     continue
                 ri = results[model_names[i]]
                 rj = results[model_names[j]]
-                tl_i = np.asarray(ri.at(depth=source_depth).db)
-                tl_j = np.asarray(rj.at(depth=source_depth).db)
+                tl_i = np.asarray(ri.at(depth=source_depth).dB)
+                tl_j = np.asarray(rj.at(depth=source_depth).dB)
                 r_i = np.asarray(ri.ranges, dtype=float)
                 r_j = np.asarray(rj.ranges, dtype=float)
                 # Every cell under the "RMS Error (dB)" label has to come from
@@ -238,7 +238,7 @@ def create_example_report(example_num: int, title: str, description: str,
     for name, result in results.items():
         if result is not None:
             print(f"  {name:15s}: TL range "
-                  f"{np.nanmin(result.db):.1f} to {np.nanmax(result.db):.1f} dB")
+                  f"{np.nanmin(result.dB):.1f} to {np.nanmax(result.dB):.1f} dB")
         else:
             print(f"  {name:15s}: Skipped")
 

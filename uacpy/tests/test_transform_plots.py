@@ -57,7 +57,7 @@ _FREQS3 = np.array([10.0, 100.0, 1000.0])
 @pytest.mark.parametrize('fn, params, args', [
     (plot_band_levels, ('centers', 'levels', 'ax'),
      (np.array([63.0, 80.0, 100.0]), np.array([90.0, 95.0, 92.0]))),
-    (plot_angular_spectrum, ('angles_deg', 'spectrum', 'ax', 'db'),
+    (plot_angular_spectrum, ('angles_deg', 'spectrum', 'ax', 'dB'),
      (np.linspace(-90.0, 90.0, 7), np.linspace(1.0, 2.0, 7))),
     (plot_frf, ('frequencies', 'tf', 'ax', 'tag'),
      (_FREQS3, np.array([1.0 + 1.0j, 2.0 + 0.0j, 0.5 - 0.5j]))),

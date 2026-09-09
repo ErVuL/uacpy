@@ -9,10 +9,10 @@ self-starter artefacts dominate).
 
 Adding a scenario:
 1. Append a ``Scenario(name=..., env=..., source=..., receiver=...,
-   reference=..., comparisons=[...], tolerance_db=...)`` to ``SCENARIOS``.
+   reference=..., comparisons=[...], tolerance_dB=...)`` to ``SCENARIOS``.
 2. Each entry in ``comparisons`` is a ``(label, callable)`` pair, where
    the callable takes ``(env, source, receiver)`` and returns a
-   ``Field`` holding TL (the comparison reads its ``.db``).
+   ``Field`` holding TL (the comparison reads its ``.dB``).
 
 Tests are parametrised over ``(scenario, comparison)`` so the failure
 report tells you exactly which model disagreed on which scenario.
@@ -66,8 +66,8 @@ class Scenario:
     should agree with it.
 
     ``comparisons`` is a list of ``(label, runner)`` or ``(label, runner,
-    tolerance_db)`` tuples. The third element overrides the scenario-level
-    ``tolerance_db`` for that one comparison — useful when ray-vs-mode or
+    tolerance_dB)`` tuples. The third element overrides the scenario-level
+    ``tolerance_dB`` for that one comparison — useful when ray-vs-mode or
     PE-vs-mode physics disagree more than mode-vs-mode but you still want
     to track the agreement.
     """
@@ -78,7 +78,7 @@ class Scenario:
     reference_label: str
     reference: Callable[[Environment, Source, Receiver], 'uacpy.core.results.Result']
     comparisons: List[Tuple] = field(default_factory=list)
-    tolerance_db: float = 3.0
+    tolerance_dB: float = 3.0
     range_window_m: Tuple[float, float] = (1000.0, 8000.0)
     slow: bool = False         # adds ``@pytest.mark.slow`` to the generated params
 
@@ -139,7 +139,7 @@ def _pekeris_fluid() -> Scenario:
             # frequency / few modes — empirically ~5 dB RMSE on this case.
             ('Bellhop', _bellhop_tl, 6.0),
         ],
-        tolerance_db=3.0,
+        tolerance_dB=3.0,
     )
 
 
@@ -205,7 +205,7 @@ def _pekeris_elastic() -> Scenario:
         reference_label='Kraken (auto-krakenc)',
         reference=reference,
         comparisons=[('RAM(rams0.5)', rams, 3.0)],
-        tolerance_db=3.0,
+        tolerance_dB=3.0,
     )
 
 
@@ -266,7 +266,7 @@ def _altimetry_consistency() -> Scenario:
             ('RAM(ramsurf1.5)', lambda env, s, r: RAM(verbose=False, dr=20.0, dz=0.25).run(
                 env, s, r, run_mode=RunMode.COHERENT_TL), 4.5),
         ],
-        tolerance_db=4.5,
+        tolerance_dB=4.5,
         range_window_m=(1000.0, 5000.0),
     )
 
@@ -299,7 +299,7 @@ def _pekeris_fluid_hf() -> Scenario:
             ('RAM(mpiramS)', _ram_tl, 4.0),
             ('Bellhop', _bellhop_tl, 6.0),
         ],
-        tolerance_db=4.0,
+        tolerance_dB=4.0,
     )
 
 
@@ -350,7 +350,7 @@ def _pekeris_elastic_broadband_at_fc() -> Scenario:
             frequencies=np.linspace(25.5, 74.5, 99),
             run_mode=RunMode.BROADBAND,
         )
-        return kf.at(frequency=50.0).to_db()
+        return kf.at(frequency=50.0).to_dB()
 
     def rams_bb(env_unused, src_, rcv_):
         # Only the fc=50 Hz slice is asserted, and each band frequency is an
@@ -360,7 +360,7 @@ def _pekeris_elastic_broadband_at_fc() -> Scenario:
         ram = RAM(verbose=False, np_pade=6, dr=2.0, dz=0.25, zmax=400.0,
                   rams_theta=45.0, Q=2.0, T=0.2)
         hf = ram.run(env_layered, src_, rcv_, run_mode=RunMode.BROADBAND)
-        return hf.at(frequency=50.0).to_db()
+        return hf.at(frequency=50.0).to_dB()
 
     return Scenario(
         name='pekeris-elastic-broadband-50Hz-fc-slice',
@@ -368,7 +368,7 @@ def _pekeris_elastic_broadband_at_fc() -> Scenario:
         reference_label='Kraken broadband (fc slice)',
         reference=reference,
         comparisons=[('RAM(rams0.5) broadband', rams_bb, 4.0)],
-        tolerance_db=4.0,
+        tolerance_dB=4.0,
         range_window_m=(1000.0, 7000.0),
         slow=True,                    # rams0.5 broadband Python freq-loop
     )
@@ -418,7 +418,7 @@ def _altimetry_broadband_at_fc() -> Scenario:
         ram = RAM(verbose=False, np_pade=6, dr=2.0, dz=0.25, zmax=400.0,
                   Q=2.0, T=0.2)
         hf = ram.run(env_, src_, rcv_, run_mode=RunMode.BROADBAND)
-        return hf.at(frequency=200.0).to_db()
+        return hf.at(frequency=200.0).to_dB()
 
     return Scenario(
         name='altimetry-broadband-200Hz-fc-slice',
@@ -434,7 +434,7 @@ def _altimetry_broadband_at_fc() -> Scenario:
         # retuned range window produces, while 9.0 still clears the worst
         # single kilometre by 1.3x.
         comparisons=[('RAM(ramsurf1.5) broadband', ramsurf_bb, 9.0)],
-        tolerance_db=9.0,
+        tolerance_dB=9.0,
         range_window_m=(1000.0, 5000.0),
         slow=True,                    # ramsurf1.5 broadband Python freq-loop
     )
@@ -459,13 +459,13 @@ def _comparison_pairs():
         for entry in s.comparisons:
             if len(entry) == 2:
                 label, fn = entry
-                tol = s.tolerance_db
+                tol = s.tolerance_dB
             elif len(entry) == 3:
                 label, fn, tol = entry
             else:
                 raise ValueError(
                     f"Scenario {s.name!r}: comparison entry must be "
-                    f"(label, fn) or (label, fn, tolerance_db); got {entry!r}"
+                    f"(label, fn) or (label, fn, tolerance_dB); got {entry!r}"
                 )
             marks = (pytest.mark.slow,) if s.slow else ()
             out.append(pytest.param(
@@ -508,8 +508,8 @@ def test_cross_model_agreement(scenario: Scenario, label: str, callable_,
 
     # Pick the receiver-depth and ranges shared by both (single-depth
     # scenarios are the simple case; for multi-depth, take depth 0).
-    ref_tl = np.asarray(ref_field.db)
-    cmp_tl = np.asarray(cmp_field.db)
+    ref_tl = np.asarray(ref_field.dB)
+    cmp_tl = np.asarray(cmp_field.dB)
     if ref_tl.ndim == 2:
         ref_tl = ref_tl[0]
     if cmp_tl.ndim == 2:

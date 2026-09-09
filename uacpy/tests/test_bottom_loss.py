@@ -269,7 +269,7 @@ class TestDefaultWaterColumnIsAnnounced:
         assert f"{R_doc:.4f}" == '0.1198'
         assert f"{20.0 * np.log10(abs(R_doc)):.2f}" == '-18.43'
 
-    def test_the_two_entry_points_differ_by_about_four_db(self):
+    def test_the_two_entry_points_differ_by_about_four_dB(self):
         """The magnitude the docstring quotes, on the seabed it quotes. The
         peak sits at the critical angle and its exact height depends on how
         finely the grid samples there (4.29 dB on the wrapper's own 181-point
@@ -350,10 +350,10 @@ class TestShearLossMagnitude:
                                    atol=1e-10)
 
     @pytest.mark.parametrize('name', ['clay', 'silt', 'sand', 'gravel'])
-    def test_soft_sediment_shear_costs_under_a_quarter_db(self, name):
+    def test_soft_sediment_shear_costs_under_a_quarter_dB(self, name):
         assert np.max(np.abs(self._extra_loss(name))) < 0.25
 
-    def test_chalk_and_limestone_lose_an_extra_11_to_16_db(self):
+    def test_chalk_and_limestone_lose_an_extra_11_to_16_dB(self):
         band = (self.G >= 20.0) & (self.G <= 30.0)
         # Computed peaks: chalk 16.2 dB, limestone 11.4 dB in the band —
         # the doc's "extra 11–16 dB near 20–30°". abs=0.5 covers the 1°

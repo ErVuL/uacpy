@@ -83,7 +83,7 @@ def main():
     for i, f in enumerate(fbands):
         src = uacpy.Source(depths=d_s, frequencies=float(f))
         field = bellhop.run(env, src, receiver)
-        tl[i] = float(np.asarray(field.db).squeeze())
+        tl[i] = float(np.asarray(field.dB).squeeze())
     print("done")
 
     # --- (4) received + auditory-weighted levels ---

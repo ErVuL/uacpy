@@ -570,7 +570,7 @@ def _warn_if_volume_absorption_is_missing(env, source, receiver) -> None:
     if not (np.isfinite(f_max) and np.isfinite(r_max)) or f_max <= 0.0 \
             or r_max <= 0.0:
         return
-    alpha = float(np.atleast_1d(Thorp().alpha_db_per_m(f_max, 0.0))[0])
+    alpha = float(np.atleast_1d(Thorp().alpha_dB_per_m(f_max, 0.0))[0])
     omitted = alpha * r_max
     if not np.isfinite(omitted) or omitted < _ABSORPTION_NOTICE_DB:
         return
@@ -1407,7 +1407,7 @@ class PropagationModel(ABC):
         frequencies,
         source_waveform,
         sample_rate,
-        threshold_db: float = -40.0,
+        threshold_dB: float = -40.0,
         announce: bool = True,
     ):
         """Resolve the broadband frequency grid for TIME_SERIES dispatch.
@@ -1415,7 +1415,7 @@ class PropagationModel(ABC):
         When ``run_mode == TIME_SERIES`` and the caller did not pass
         ``frequencies=``, derive one from the source waveform: Δf =
         ``sample_rate / n_samples`` (= 1 / waveform duration), band edges
-        from the spectral support above ``threshold_db`` below the peak
+        from the spectral support above ``threshold_dB`` below the peak
         (default −40 dB). Pinning ``frequencies=`` skips derivation.
         Other run-modes pass through unchanged.
 
@@ -1446,13 +1446,13 @@ class PropagationModel(ABC):
                 f"{self.model_name}.run(run_mode=TIME_SERIES): "
                 f"source_waveform is identically zero."
             )
-        threshold = peak * 10.0 ** (threshold_db / 20.0)
+        threshold = peak * 10.0 ** (threshold_dB / 20.0)
         significant = spectrum >= threshold
         if not significant.any():
             raise ConfigurationError(
                 f"{self.model_name}.run(run_mode=TIME_SERIES): "
                 f"source_waveform has no spectral content above "
-                f"{threshold_db} dB."
+                f"{threshold_dB} dB."
             )
         i_lo = int(np.argmax(significant))
         i_hi = len(significant) - 1 - int(np.argmax(significant[::-1]))
@@ -1490,7 +1490,7 @@ class PropagationModel(ABC):
                 f"{self.model_name}.run(run_mode=TIME_SERIES): no "
                 f"`frequencies=` passed; auto-derived {refined} freqs from "
                 f"the source waveform ({f_min:.2f}-{f_max:.2f} Hz, "
-                f"Δf={df_grid:.4g} Hz, threshold {threshold_db:.0f} dB){note}. "
+                f"Δf={df_grid:.4g} Hz, threshold {threshold_dB:.0f} dB){note}. "
                 f"That Δf makes the record {record:.4g} s long, and it is set "
                 f"by the pulse, not by the channel: any arrival later than "
                 f"{record:.4g} s after the first folds back onto the early "
@@ -2984,7 +2984,7 @@ class PropagationModel(ABC):
         returned. The one cross-model *convention* the base class carries is
         ``phase_reference`` (see
         :class:`~uacpy.core.results._base.PhaseReference`), which is about
-        phase, not level; the absolute dB reference behind ``Field.db`` is a
+        phase, not level; the absolute dB reference behind ``Field.dB`` is a
         per-model property and is not asserted here.
         """
         kw = dict(

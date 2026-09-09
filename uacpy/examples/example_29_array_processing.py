@@ -63,14 +63,14 @@ def main():
     capon = mvdr_spectrum(R, steering)
     music = music_spectrum(R, steering, n_sources=2)
 
-    def norm_db(p):
+    def norm_dB(p):
         return 10 * np.log10(p / p.max())
 
     print(f"\n  True arrival angles: {true_angles} deg")
     fig, ax = plt.subplots(figsize=(11, 6))
-    ax.plot(angles, norm_db(bart), label='Bartlett (conventional)')
-    ax.plot(angles, norm_db(capon), label='MVDR / Capon')
-    ax.plot(angles, norm_db(music), label='MUSIC')
+    ax.plot(angles, norm_dB(bart), label='Bartlett (conventional)')
+    ax.plot(angles, norm_dB(capon), label='MVDR / Capon')
+    ax.plot(angles, norm_dB(music), label='MUSIC')
     for a in true_angles:
         ax.axvline(a, color='k', ls='--', alpha=0.4)
     ax.set_title('Direction-of-Arrival spectra (16-element line array)',

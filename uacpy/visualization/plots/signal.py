@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 
 from uacpy.core.constants import (REFERENCE_PRESSURE_AIR,
                                   REFERENCE_PRESSURE_WATER)
-from uacpy.core.acoustics import power_to_db
+from uacpy.core.acoustics import power_to_dB
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.visualization.plots._common import (_cell_edge_extent, _flip_y,
                                                _require_nonempty,
@@ -143,7 +143,7 @@ def draw_sound_cone(ax, f_max, k_max, sound_speed, *, color="w", ls="--",
 # (plot_radon, plot_taup). A fixed -60..+20 dB window suits a PEAK-RELATIVE
 # scale — which is what docs/figure_scripts/signal.py hand-rolls, at
 # vmin=-40, vmax=0 — but the level here goes through
-# power_to_db(power, ref), an ABSOLUTE dB re 1 uPa^2. Measured on the
+# power_to_dB(power, ref), an ABSOLUTE dB re 1 uPa^2. Measured on the
 # fk_transform output this function documents itself as consuming, for a 1 Pa
 # plane-wave gather at fs = 2 kHz, dx = 2 m: the panel spans 107.3 .. 196.9 dB
 # with a median of 122.2, so every pixel would sit above that vmax and the
@@ -156,12 +156,12 @@ def plot_fk(frequencies, wavenumbers, power, ax=None, *, ref=REFERENCE_PRESSURE_
     """Image an f-k power panel (dB). Consumes :func:`fk_transform` output."""
     _require_image_grid(power, len(frequencies), len(wavenumbers),
                         "plot_fk", "frequencies", "wavenumbers")
-    fk_db = power_to_db(np.asarray(power), ref)
+    fk_dB = power_to_dB(np.asarray(power), ref)
     fig, ax = fig_ax(ax, figsize)
     # Edge-aligned: the axes are FFT bin centres, and draw_sound_cone below
     # places f = c*k/(2*pi) at true coordinates, so a half-bin shift would
     # offset the image against the very line used to read it.
-    im = ax.imshow(fk_db, extent=_cell_edge_extent(wavenumbers, frequencies),
+    im = ax.imshow(fk_dB, extent=_cell_edge_extent(wavenumbers, frequencies),
                    origin="lower", aspect="auto",
                    vmin=vmin, vmax=vmax, cmap=cmap, **mpl_kw)
     if sound_speed is not None:
@@ -171,7 +171,7 @@ def plot_fk(frequencies, wavenumbers, power, ax=None, *, ref=REFERENCE_PRESSURE_
     ax.set_ylabel("Frequency (Hz)")
     ax.grid(alpha=0.3)
     if show_colorbar:
-        # With the reference: `power_to_db(power, ref)` above makes this an
+        # With the reference: `power_to_dB(power, ref)` above makes this an
         # ABSOLUTE level, so the number is meaningless without saying what it
         # is referred to — as every sibling axis in this module does.
         fig.colorbar(im, ax=ax, label=f"Power (dB re {_ref_label(ref)}Pa²)")
@@ -263,15 +263,15 @@ def plot_psd(frequencies, psd_linear, ax=None, *, ref=REFERENCE_PRESSURE_WATER,
     ``ymin`` / ``ymax`` pin the level axis to the 0–150 dB window an ambient
     record occupies; a quieter one needs them widened or the panel comes out
     empty."""
-    psd_db = power_to_db(np.asarray(psd_linear), ref)
+    psd_dB = power_to_dB(np.asarray(psd_linear), ref)
     fig, ax = fig_ax(ax, figsize)
-    ax.semilogx(frequencies, psd_db, label=label, **mpl_kw)
+    ax.semilogx(frequencies, psd_dB, label=label, **mpl_kw)
     ax.set_title(title or "Power spectral density", loc="left")
     ax.set_xlabel("Frequency (Hz)")
     ax.set_ylabel(f"Level (dB re {_ref_label(ref)}Pa²/Hz)")
     ax.set_ylim((ymin, ymax))
     ax.set_xlim(_log_freq_xlim(frequencies))
-    _warn_if_offscreen(ax, psd_db, "plot_psd", "ymin=/ymax")
+    _warn_if_offscreen(ax, psd_dB, "plot_psd", "ymin=/ymax")
     ax.grid(which="both", alpha=0.75)
     if label:
         ax.legend()
@@ -287,29 +287,29 @@ def _plot_level_histogram(result, ax, *, y_label, default_title, caller,
     Shared by :func:`plot_ppsd` and :func:`plot_constant_q_ppsd`, which differ
     only in the level axis label, the default title and the name they report
     in an off-screen warning. Any result carrying ``frequencies``,
-    ``level_edges``, ``pdf``, ``mean_db``, ``std_db`` and ``binwidth_db``
+    ``level_edges``, ``pdf``, ``mean_dB``, ``std_dB`` and ``binwidth_dB``
     renders here; a caller's own shape guards run before it, so nothing that
     would raise gets a figure allocated first."""
     if vmax is None:
         # Each frequency column integrates to 1 over the level axis, so the
         # largest attainable density is 1/binwidth (all mass in one bin) —
         # the natural top of the colour scale.
-        vmax = 1 / result.binwidth_db
+        vmax = 1 / result.binwidth_dB
     fig, ax = fig_ax(ax, figsize)
     # ``level_edges`` are bin EDGES and ``pdf`` has one row per bin; shift by
     # half a bin so each row is centred on its own level. Empty bins arrive as
     # NaN and render as the axes background.
-    align = result.binwidth_db / 2
+    align = result.binwidth_dB / 2
     pcm = ax.pcolormesh(result.frequencies, result.level_edges[:-1] + align,
                         result.pdf, cmap=cmap, shading="auto",
                         vmin=vmin, vmax=vmax, **mpl_kw)
     if show_colorbar:
         fig.colorbar(pcm, ax=ax,
-                     label=f"Probability Density ({result.binwidth_db:.1f} dB/bin)")
-    ax.plot(result.frequencies, result.mean_db, "k-", label="Mean level", lw=1.5)
-    ax.plot(result.frequencies, result.mean_db + result.std_db, "k--",
+                     label=f"Probability Density ({result.binwidth_dB:.1f} dB/bin)")
+    ax.plot(result.frequencies, result.mean_dB, "k-", label="Mean level", lw=1.5)
+    ax.plot(result.frequencies, result.mean_dB + result.std_dB, "k--",
             label="Mean level ± STD")
-    ax.plot(result.frequencies, result.mean_db - result.std_db, "k--")
+    ax.plot(result.frequencies, result.mean_dB - result.std_dB, "k--")
     ax.set_title(title or default_title, loc="left")
     ax.set_xlabel("Frequency (Hz)")
     ax.set_ylabel(y_label)
@@ -363,8 +363,8 @@ def plot_sel(sel_pa2s, bands, ax=None, *, ref=REFERENCE_PRESSURE_WATER,
     # vector is every low edge plus the top edge of the last band.
     Fedges = [low for low, _, _ in bands] + [bands[-1][2]]
     width = [Fedges[i + 1] - Fedges[i] for i in range(len(Fedges) - 1)]
-    sel_db = power_to_db(np.asarray(sel_pa2s), ref)
-    ax.bar(Fedges[:-1], sel_db, width=width,
+    sel_dB = power_to_dB(np.asarray(sel_pa2s), ref)
+    ax.bar(Fedges[:-1], sel_dB, width=width,
            align="edge", edgecolor="black", **mpl_kw)
     ax.set_title(title or f"SEL ({duration}s)", loc="left")
     ax.set_ylabel(f"Level (dB re {_ref_label(ref)}Pa²·s)")
@@ -372,7 +372,7 @@ def plot_sel(sel_pa2s, bands, ax=None, *, ref=REFERENCE_PRESSURE_WATER,
         ax.set_xscale("log")
     ax.set_xlabel(f"Frequency ({band_type}) (Hz)")
     ax.set_ylim(ylim)
-    _warn_if_offscreen(ax, sel_db, "plot_sel", "ylim")
+    _warn_if_offscreen(ax, sel_dB, "plot_sel", "ylim")
     ax.grid(which="both", alpha=0.75)
     ax.set_axisbelow(True)
     return fig, ax
@@ -392,11 +392,11 @@ def plot_spectrogram(frequencies, times, Sxx, ax=None, *,
     the 1 Hz clamp the default applies. A clamp that sits above the record's
     whole band would reverse the axis, so such a band starts at its own first
     positive bin instead."""
-    Sxx_db = _require_image_grid(power_to_db(np.asarray(Sxx), ref),
+    Sxx_dB = _require_image_grid(power_to_dB(np.asarray(Sxx), ref),
                                  len(frequencies), len(times),
                                  'plot_spectrogram', 'frequencies', 'times')
     fig, ax = fig_ax(ax, figsize)
-    pcm = ax.pcolormesh(times, frequencies, Sxx_db, cmap=cmap, shading="auto",
+    pcm = ax.pcolormesh(times, frequencies, Sxx_dB, cmap=cmap, shading="auto",
                         vmin=vmin, vmax=vmax, **mpl_kw)
     if show_colorbar:
         fig.colorbar(pcm, ax=ax, label=f"Level (dB re {_ref_label(ref)}Pa²/Hz)")
@@ -407,7 +407,7 @@ def plot_spectrogram(frequencies, times, Sxx, ax=None, *,
     ax.set_ylim((float(frequencies[0]), hi) if ymin is None
                 else _clamped_freq_limits(frequencies, ymin, hi))
     _warn_if_offscreen(ax, frequencies, "plot_spectrogram", "ymin/ymax")
-    _warn_if_colour_saturated(Sxx_db, vmin, vmax, "plot_spectrogram", "vmin/vmax")
+    _warn_if_colour_saturated(Sxx_dB, vmin, vmax, "plot_spectrogram", "vmin/vmax")
     ax.grid(which="both", alpha=0.25, color="black")
     return fig, ax
 
@@ -424,12 +424,12 @@ def plot_constant_q_spectrogram(frequencies, times, power, ax=None, *,
     the same ``scaling`` used there so the unit reads ``Pa²`` (band power) or
     ``Pa²/Hz`` (density)."""
     unit = f"{_ref_label(ref)}Pa²" + ("/Hz" if scaling == "density" else "")
-    power_db = _require_image_grid(power_to_db(np.asarray(power), ref),
+    power_dB = _require_image_grid(power_to_dB(np.asarray(power), ref),
                                    len(frequencies), len(times),
                                    'plot_constant_q_spectrogram',
                                    'frequencies', 'times')
     fig, ax = fig_ax(ax, figsize)
-    pcm = ax.pcolormesh(times, frequencies, power_db, cmap=cmap, shading="auto",
+    pcm = ax.pcolormesh(times, frequencies, power_dB, cmap=cmap, shading="auto",
                         vmin=vmin, vmax=vmax, **mpl_kw)
     if show_colorbar:
         fig.colorbar(pcm, ax=ax, label=f"Level (dB re {unit})")
@@ -438,7 +438,7 @@ def plot_constant_q_spectrogram(frequencies, times, power, ax=None, *,
     ax.set_ylabel("Frequency (Hz)")
     ax.set_yscale("log")
     ax.set_ylim((frequencies[0], frequencies[-1]))
-    _warn_if_colour_saturated(power_db, vmin, vmax,
+    _warn_if_colour_saturated(power_dB, vmin, vmax,
                               "plot_constant_q_spectrogram", "vmin/vmax")
     ax.grid(which="both", alpha=0.25, color="black")
     return fig, ax
@@ -454,16 +454,16 @@ def plot_constant_q_psd(frequencies, power, ax=None, *,
     ``scaling`` used there: ``'spectrum'`` labels band power (``Pa²``),
     ``'density'`` labels PSD (``Pa²/Hz``)."""
     unit = f"{_ref_label(ref)}Pa²" + ("/Hz" if scaling == "density" else "")
-    power_db = power_to_db(np.asarray(power), ref)
+    power_dB = power_to_dB(np.asarray(power), ref)
     fig, ax = fig_ax(ax, figsize)
-    ax.semilogx(frequencies, power_db, label=label, **mpl_kw)
+    ax.semilogx(frequencies, power_dB, label=label, **mpl_kw)
     ax.set_title(title or ("Constant-Q PSD" if scaling == "density"
                            else "Constant-Q band power"), loc="left")
     ax.set_xlabel("Frequency (Hz)")
     ax.set_ylabel(f"Level (dB re {unit})")
     ax.set_ylim((ymin, ymax))
     ax.set_xlim(_log_freq_xlim(frequencies))
-    _warn_if_offscreen(ax, power_db, "plot_constant_q_psd", "ymin=/ymax")
+    _warn_if_offscreen(ax, power_dB, "plot_constant_q_psd", "ymin=/ymax")
     ax.grid(which="both", alpha=0.75)
     if label:
         ax.legend()
@@ -582,11 +582,11 @@ def plot_band_levels(centers, levels, ax=None, *, title=None, width=0.8,
 
 
 @typed_plot_error
-def plot_angular_spectrum(angles_deg, spectrum, ax=None, *, db=True, label=None,
+def plot_angular_spectrum(angles_deg, spectrum, ax=None, *, dB=True, label=None,
                           title=None, figsize=(8, 4), **mpl_kw):
     """Line plot of a beamformer angular spectrum (Bartlett/MVDR/MUSIC)."""
     P = np.real(np.asarray(spectrum))
-    if db:
+    if dB:
         # Beamformer output has no absolute reference (MVDR/MUSIC pseudo-power
         # least of all), so the dB axis is relative to the peak: 0 dB = look
         # direction of maximum response.
@@ -594,7 +594,7 @@ def plot_angular_spectrum(angles_deg, spectrum, ax=None, *, db=True, label=None,
     fig, ax = fig_ax(ax, figsize)
     ax.plot(angles_deg, P, label=label, **mpl_kw)
     ax.set_xlabel("Angle (deg)")
-    ax.set_ylabel("Power (dB)" if db else "Power")
+    ax.set_ylabel("Power (dB)" if dB else "Power")
     ax.set_title(title or "Angular spectrum", loc="left")
     ax.grid(alpha=0.3)
     if label:
@@ -636,8 +636,8 @@ def plot_frf(frequencies, tf, ax=None, *, tag="", label=None, ymin=-60,
         ax1, ax2 = ax
         fig = ax1.figure
     lbl = (f"{tag} {label}").strip() if (tag or label) else None
-    mag_db = 20 * np.log10(np.abs(tf))
-    ax1.plot(frequencies, mag_db, label=lbl, **mpl_kw)
+    mag_dB = 20 * np.log10(np.abs(tf))
+    ax1.plot(frequencies, mag_dB, label=lbl, **mpl_kw)
     ax1.set_title(title or "Frequency response", loc="left")
     ax1.set_ylabel("Magnitude (dB)")
     ax1.set_xscale("log")
@@ -645,7 +645,7 @@ def plot_frf(frequencies, tf, ax=None, *, tag="", label=None, ymin=-60,
     ax1.set_xlim(_log_freq_xlim(frequencies))
     # Only the magnitude panel is pinned to a fixed window; the phase axis
     # below spans the full ±180° a phase can occupy.
-    _warn_if_offscreen(ax1, mag_db, "plot_frf", "ymin=/ymax")
+    _warn_if_offscreen(ax1, mag_dB, "plot_frf", "ymin=/ymax")
     ax1.grid(which="both", alpha=0.5)
     ax2.plot(frequencies, np.angle(tf, deg=True), label=lbl, **mpl_kw)
     ax2.set_ylabel("Phase (degrees)")

@@ -61,7 +61,7 @@ def greens_function():
     _, grn = run_with_greens_function(env, source, receiver)
     k = _wavenumbers(grn)
     G = np.abs(grn['G'][0, 0])                       # (n_rd, n_k)
-    G_db = 20.0 * np.log10(G / G.max() + 1e-12)
+    G_dB = 20.0 * np.log10(G / G.max() + 1e-12)
     modes = Kraken().compute_modes(env, source)
 
     freq = float(grn['freq'])
@@ -71,7 +71,7 @@ def greens_function():
     fig, axes = plt.subplots(2, 1, figsize=(9.5, 6.8), sharex=True,
                              gridspec_kw={'height_ratios': [1.5, 1.0]})
     im = axes[0].imshow(
-        G_db, aspect='auto', origin='upper', cmap='inferno', vmin=-55, vmax=0,
+        G_dB, aspect='auto', origin='upper', cmap='inferno', vmin=-55, vmax=0,
         extent=_flip_y(_cell_edge_extent(k, grn['rd'])))
     axes[0].set_ylabel('Depth (m)')
     axes[0].set_title(f"$|G(k, z)|$ — {grn['nk']} wavenumbers × "
@@ -87,7 +87,7 @@ def greens_function():
     k_water = 2.0 * np.pi * freq / c_water
     axes[1].axvspan(k_bottom, k_water, color='0.85', zorder=0,
                     label=f'trapped: {c_bottom:.0f} > c > {c_water:.0f} m/s')
-    axes[1].plot(k, G_db[zi], color='C0', linewidth=0.9,
+    axes[1].plot(k, G_dB[zi], color='C0', linewidth=0.9,
                  label=f"$|G(k)|$ at z = {grn['rd'][zi]:.0f} m")
     for i, km in enumerate(np.real(modes.k)):
         axes[1].axvline(km, color='C3', linestyle=':', linewidth=1.0,
@@ -139,7 +139,7 @@ def phase_speed_window():
             axes[0].axvspan(*span, color=colour, alpha=0.22, zorder=1,
                             label=f'excluded by {label}')
         axes[1].plot(np.asarray(line.ranges) / 1000.0,
-                     np.asarray(tl.db, dtype=float).ravel(),
+                     np.asarray(tl.dB, dtype=float).ravel(),
                      color=colour, linewidth=1.0,
                      label=f"{label} — {grn['nk']} k-samples")
 
@@ -197,7 +197,7 @@ def elastic_seabed():
     for label, e, colour in (('fluid seabed (no shear)', env, 'C0'),
                              ('elastic=True — $c_s$ = 3000 m/s in the '
                               'granite', elastic, 'C3')):
-        line_tl = np.asarray(Scooter().run(e, source, line).db,
+        line_tl = np.asarray(Scooter().run(e, source, line).dB,
                              dtype=float).ravel()
         axes[1].plot(np.asarray(line.ranges) / 1000.0, line_tl,
                      color=colour, linewidth=1.0, label=label)
@@ -223,7 +223,7 @@ def benchmark():
     """
     env, source, _ = shallow_water()
     line = uacpy.Receiver(depths=50.0, ranges=np.linspace(50.0, 5000.0, 400))
-    reference = np.asarray(Scooter().run(env, source, line).db,
+    reference = np.asarray(Scooter().run(env, source, line).dB,
                            dtype=float).ravel()
     others = [('Kraken (normal modes)', Kraken(), 'C1'),
               ('Bellhop (Gaussian beams)', Bellhop(n_beams=3000), 'C2')]
@@ -234,7 +234,7 @@ def benchmark():
     axes[0].plot(r_km, reference, color='C0', linewidth=1.4,
                  label='Scooter (wavenumber integration)')
     for label, model, colour in others:
-        tl = np.asarray(model.run(env, source, line).db, dtype=float).ravel()
+        tl = np.asarray(model.run(env, source, line).dB, dtype=float).ravel()
         axes[0].plot(r_km, tl, color=colour, linewidth=0.9, alpha=0.85,
                      label=label)
         axes[1].plot(r_km, np.abs(tl - reference), color=colour,

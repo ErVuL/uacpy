@@ -43,7 +43,7 @@ def _time_series():
 def dispatch():
     """Carriers and results, one convention: every object has ``.plot()``."""
     env, source, receiver = shallow_water()
-    tl = Bellhop(n_beams=3000).run(env, source, receiver).to_db()
+    tl = Bellhop(n_beams=3000).run(env, source, receiver).to_dB()
     rays = Bellhop(n_beams=25, alpha=(-12.0, 12.0)).run(
         env, source, receiver, run_mode=RunMode.RAYS)
 
@@ -121,7 +121,7 @@ def overlays():
     env, source, _ = shallow_water()
     receiver = uacpy.Receiver(depths=np.linspace(1.0, 60.0, 80),
                               ranges=np.linspace(50.0, 5000.0, 250))
-    tl = Bellhop(n_beams=3000).run(env, source, receiver).to_db()
+    tl = Bellhop(n_beams=3000).run(env, source, receiver).to_dB()
 
     fig, axes = plt.subplots(3, 1, figsize=(8.6, 9.0))
     tl.plot(ax=axes[0], show_colorbar=False,
@@ -143,8 +143,8 @@ def tl_scale():
     """Why the TL scale is fixed: the same two fields, two scalings."""
     env_s, src_s, rcv_s = shallow_water()
     env_d, src_d, rcv_d = deep_water()
-    shallow = Bellhop(n_beams=3000).run(env_s, src_s, rcv_s).to_db()
-    deep = Bellhop(n_beams=3000).run(env_d, src_d, rcv_d).to_db()
+    shallow = Bellhop(n_beams=3000).run(env_s, src_s, rcv_s).to_dB()
+    deep = Bellhop(n_beams=3000).run(env_d, src_d, rcv_d).to_dB()
 
     fig, axes = plt.subplots(2, 2, figsize=(12.0, 7.6))
     for col, (field, env, name) in enumerate(
@@ -167,8 +167,8 @@ def tl_scale():
 def composition():
     """A figure built by hand: carrier, result and overlay share one canvas."""
     env, source, receiver = shallow_water()
-    bellhop = Bellhop(n_beams=3000).run(env, source, receiver).to_db()
-    kraken = Kraken().run(env, source, receiver).to_db()
+    bellhop = Bellhop(n_beams=3000).run(env, source, receiver).to_dB()
+    kraken = Kraken().run(env, source, receiver).to_dB()
 
     fig = plt.figure(figsize=(11.0, 6.4))
     gs = fig.add_gridspec(2, 2, width_ratios=[1.0, 2.2],

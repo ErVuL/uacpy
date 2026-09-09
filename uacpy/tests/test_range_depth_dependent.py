@@ -278,7 +278,7 @@ class TestModelWithRangeDependence:
         with pytest.warns(UserWarning, match="raised dz"):
             result = ram.run(env, source, receiver)
         assert isinstance(result, Field)
-        assert np.all(np.isfinite(result.db))
+        assert np.all(np.isfinite(result.dB))
 
 
 class TestRangeDependentConsistency:
@@ -440,7 +440,7 @@ class TestRangeDependentLayeredBottom:
         ram = RAM(verbose=False, dr=20.0, dz=2.0)
         result = ram.run(env, source, receiver)
         assert result.data.shape[0] == 10
-        assert 30 < np.nanmin(result.db) < 100
+        assert 30 < np.nanmin(result.dB) < 100
 
 
 @pytest.mark.requires_binary
@@ -542,8 +542,8 @@ class TestIntegrationLayeredBottom:
         kf = Kraken(verbose=False)
         result = kf.compute_tl(layered_env, source, receiver)
         assert result.data.shape == (20, 20)
-        assert 30 < np.nanmin(result.db) < 100
-        assert 50 < np.nanmax(result.db) < 200
+        assert 30 < np.nanmin(result.dB) < 100
+        assert 50 < np.nanmax(result.dB) < 200
 
     @pytest.mark.requires_binary
     def test_scooter_layered(self, layered_env, source, receiver):
@@ -552,7 +552,7 @@ class TestIntegrationLayeredBottom:
         scooter = Scooter(verbose=False)
         result = scooter.compute_tl(layered_env, source, receiver)
         assert result.data.shape == (20, 20)
-        assert 30 < np.nanmin(result.db) < 100
+        assert 30 < np.nanmin(result.dB) < 100
 
     @pytest.mark.requires_binary
     def test_kraken_layered_modes(self, layered_env, source, receiver):
@@ -592,8 +592,8 @@ class TestIntegrationRunWithBounce:
         result = bellhop.run_with_bounce(env, source, receiver, run_mode=RunMode.COHERENT_TL)
 
         assert result.data.shape == (10, 10)
-        assert 30 < np.nanmin(result.db) < 100
-        assert 50 < np.nanmax(result.db) < 200
+        assert 30 < np.nanmin(result.dB) < 100
+        assert 50 < np.nanmax(result.dB) < 200
 
 
 class TestIntegrationRAMRangeDependent:
@@ -618,4 +618,4 @@ class TestIntegrationRAMRangeDependent:
         ram = RAM(verbose=False, dr=20.0, dz=2.0)
         result = ram.run(env, source, receiver)
         assert result.data.shape[0] == 10
-        assert 30 < np.nanmin(result.db) < 100
+        assert 30 < np.nanmin(result.dB) < 100

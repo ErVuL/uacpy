@@ -98,10 +98,10 @@ class TestConstantQPPSDCarriesTheReferenceItsLevelsAreStatedAgainst:
     def test_a_non_default_reference_is_reported(self, ref):
         assert self._run(ref=ref).ref == ref
 
-    def test_the_reference_tracks_a_real_120_db_move_in_the_levels(self):
+    def test_the_reference_tracks_a_real_120_dB_move_in_the_levels(self):
         default = self._run()
         pascals = self._run(ref=1.0)
-        shift = np.nanmean(pascals.mean_db - default.mean_db)
+        shift = np.nanmean(pascals.mean_dB - default.mean_dB)
         assert shift == pytest.approx(-120.0, abs=1e-9)
         assert default.ref != pascals.ref
 
@@ -116,12 +116,12 @@ class TestConstantQPPSDCarriesTheReferenceItsLevelsAreStatedAgainst:
         prefix check misses, since a reorder moves one of the six.
         """
         r = self._run()
-        original_six = ('frequencies', 'level_edges', 'pdf', 'mean_db',
-                        'std_db', 'binwidth_db')
+        original_six = ('frequencies', 'level_edges', 'pdf', 'mean_dB',
+                        'std_dB', 'binwidth_dB')
         assert r._fields[:len(original_six)] == original_six
         assert set(r._fields) >= {'ref', 'scaling'}
-        built = CQPPSDResult(r.frequencies, r.level_edges, r.pdf, r.mean_db,
-                             r.std_db, r.binwidth_db)
+        built = CQPPSDResult(r.frequencies, r.level_edges, r.pdf, r.mean_dB,
+                             r.std_dB, r.binwidth_dB)
         assert built.ref == r.ref
         assert built.scaling == 'spectrum'
 
@@ -131,13 +131,13 @@ def test_probabilistic_constant_q():
                                   bins_per_octave=12, ddB=1.0)
     assert isinstance(pp, CQPPSDResult)
     assert pp.pdf.shape == (pp.level_edges.size - 1, pp.frequencies.size)
-    assert pp.mean_db.shape == pp.frequencies.shape
+    assert pp.mean_dB.shape == pp.frequencies.shape
     # each frequency column integrates to ~1 over the level axis (density)
-    col = pp.pdf[:, np.nanargmax(pp.mean_db)]
-    integral = np.nansum(col) * pp.binwidth_db
+    col = pp.pdf[:, np.nanargmax(pp.mean_dB)]
+    integral = np.nansum(col) * pp.binwidth_dB
     assert integral == pytest.approx(1.0, abs=0.05)
     # mean level peaks near the tone bin
-    assert abs(pp.frequencies[np.nanargmax(pp.mean_db)] - 440.0) < 60.0
+    assert abs(pp.frequencies[np.nanargmax(pp.mean_dB)] - 440.0) < 60.0
 
 
 # ── validation / robustness ──────────────────────────────────────────────────
@@ -342,13 +342,13 @@ def test_kernel_analyses_at_bin_centre_up_to_nyquist():
         x = np.cos(2 * np.pi * f0 * t)
         r = constant_q_psd(x, fs, fmin=20.0, bins_per_octave=24)
         k = int(np.argmin(np.abs(r.frequencies - f0)))
-        err_db = 10 * np.log10(r.power[k] / 0.5)
-        assert abs(err_db) < 0.05, f"{err_db:.3f} dB at f0={f0:.1f} Hz"
+        err_dB = 10 * np.log10(r.power[k] / 0.5)
+        assert abs(err_dB) < 0.05, f"{err_dB:.3f} dB at f0={f0:.1f} Hz"
 
 
-@pytest.mark.parametrize("B,expected_db", [(6, 1.20), (12, 1.31), (24, 1.37),
+@pytest.mark.parametrize("B,expected_dB", [(6, 1.20), (12, 1.31), (24, 1.37),
                                            (48, 1.39)])
-def test_scalloping_loss_matches_the_documented_figure(B, expected_db):
+def test_scalloping_loss_matches_the_documented_figure(B, expected_dB):
     """Worst-case scalloping is ~1.4 dB, not the ~1.3 dB once documented.
 
     A tone midway (geometrically) between two centres is read low by both
@@ -367,9 +367,9 @@ def test_scalloping_loss_matches_the_documented_figure(B, expected_db):
         kernel = (w * np.exp(-2j * np.pi * centre * n / fs)) / w.sum()
         tone = np.cos(2 * np.pi * centre * 2.0 ** (offset / B) * n / fs)
         losses.append(2 * abs(np.sum(tone * kernel)) ** 2)
-    loss_db = -10 * np.log10(max(losses) / 0.5)
-    assert loss_db == pytest.approx(expected_db, abs=0.02)
-    assert loss_db < 1.42
+    loss_dB = -10 * np.log10(max(losses) / 0.5)
+    assert loss_dB == pytest.approx(expected_dB, abs=0.02)
+    assert loss_dB < 1.42
 
 
 # ── near-Nyquist image leak ──────────────────────────────────────────────────
@@ -412,13 +412,13 @@ class TestNearNyquistBinsReadAToneHigh:
         return [str(c.message) for c in caught
                 if 'negative-frequency image' in str(c.message)]
 
-    @pytest.mark.parametrize("u, expected_db", [
+    @pytest.mark.parametrize("u, expected_dB", [
         (0.4000, 0.0003), (0.4600, 0.0000), (0.4835, 0.0031), (0.4860, 0.0000),
         (0.4875, 0.0128), (0.4920, 0.6791), (0.4935, 1.2130), (0.4990, 2.9525),
     ])
-    def test_the_over_read_follows_the_measured_bias_curve(self, u, expected_db):
-        got_db = 10 * np.log10(self._one_bin_power(u) / 0.5)
-        assert got_db == pytest.approx(expected_db, abs=2e-3)
+    def test_the_over_read_follows_the_measured_bias_curve(self, u, expected_dB):
+        got_dB = 10 * np.log10(self._one_bin_power(u) / 0.5)
+        assert got_dB == pytest.approx(expected_dB, abs=2e-3)
 
     def test_the_curve_has_a_null_inside_the_rising_region(self):
         """``u = Q/(2(Q+1)) = 0.48577`` is a null of the bias, not its onset:
@@ -437,14 +437,14 @@ class TestNearNyquistBinsReadAToneHigh:
 
     @pytest.mark.parametrize("fs", [2000.0, 8000.0, 32000.0])
     def test_the_bias_tracks_f_over_fs_and_not_the_sample_rate(self, fs):
-        got_db = 10 * np.log10(self._one_bin_power(0.4935, fs=fs) / 0.5)
-        assert got_db == pytest.approx(1.2130, abs=5e-3)
+        got_dB = 10 * np.log10(self._one_bin_power(0.4935, fs=fs) / 0.5)
+        assert got_dB == pytest.approx(1.2130, abs=5e-3)
 
     @pytest.mark.parametrize("amp", [1e-3, 1.0, 1e3])
     def test_the_bias_is_the_same_fraction_at_every_amplitude(self, amp):
-        got_db = 10 * np.log10(
+        got_dB = 10 * np.log10(
             self._one_bin_power(0.4935, amp=amp) / (0.5 * amp ** 2))
-        assert got_db == pytest.approx(1.2130, abs=5e-3)
+        assert got_dB == pytest.approx(1.2130, abs=5e-3)
 
     def test_broadband_noise_in_the_same_bin_is_unbiased(self):
         """The reason the bias is reported rather than divided out: white
@@ -456,8 +456,8 @@ class TestNearNyquistBinsReadAToneHigh:
         with _w.catch_warnings():
             _w.simplefilter("ignore")
             freqs, power = constant_q_psd(x, FS, scaling="density")
-        db = 10 * np.log10(power / (2.0 / FS))
-        assert abs(db[-1]) < 0.4
+        dB = 10 * np.log10(power / (2.0 / FS))
+        assert abs(dB[-1]) < 0.4
         assert freqs[-1] / FS > 0.49
 
     def test_every_estimator_warns_on_the_default_call(self):
@@ -499,11 +499,11 @@ class TestNearNyquistBinsReadAToneHigh:
             self._one_bin_power_at_phase(0.4990, phase_deg) / 0.5)
         assert got == pytest.approx(2.965, abs=0.02)
 
-    @pytest.mark.parametrize("phase_deg, expected_db", [
+    @pytest.mark.parametrize("phase_deg, expected_dB", [
         (0.0, 6.0206), (30.0, 4.7712), (45.0, 3.0103), (60.0, 0.0),
     ])
     def test_at_exactly_nyquist_the_reading_follows_the_tone_s_own_phase(
-            self, phase_deg, expected_db):
+            self, phase_deg, expected_dB):
         """At ``f_k = fs/2`` the image lands on DC, where its phase no longer
         turns with the frame, so the frame average that produces the 3.01 dB
         figure does not apply. The reading is ``10*log10(4 cos**2 phi)``: a
@@ -512,9 +512,9 @@ class TestNearNyquistBinsReadAToneHigh:
         bound."""
         got = 10 * np.log10(
             self._one_bin_power_at_phase(0.5, phase_deg) / 0.5)
-        assert got == pytest.approx(expected_db, abs=5e-3), (
+        assert got == pytest.approx(expected_dB, abs=5e-3), (
             f"a tone at exactly fs/2 with phase {phase_deg:g} deg reads "
-            f"{got:+.4f} dB; 10*log10(4 cos**2 phi) is {expected_db:+.4f}")
+            f"{got:+.4f} dB; 10*log10(4 cos**2 phi) is {expected_dB:+.4f}")
 
     def test_a_sine_at_exactly_nyquist_is_identically_zero_on_the_grid(self):
         """The other end of the same phase dependence: sin(pi n) is zero at

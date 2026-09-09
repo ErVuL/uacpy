@@ -582,7 +582,7 @@ class TestALongFormatBtySamplesARampFinelyEnoughForBellhop:
             field = model.run(env, Source(depths=[30.0], frequencies=300.0),
                               Receiver(depths=[50.0], ranges=[1000.0, 2000.0, 3000.0, 4000.0, 4800.0]),
                               RunMode.COHERENT_TL)
-            return np.asarray(field.db).ravel()
+            return np.asarray(field.dB).ravel()
 
         diff = tl(2, 'two') - tl(101, 'fine')
         assert np.sqrt(np.mean(diff ** 2)) < 1.5

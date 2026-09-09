@@ -385,7 +385,7 @@ def main():
         # cell so what's left is a 1-D vector over depth.
         depth_cut = result.at(
             frequency=source.frequencies[0], range=target_range,
-        ).to_db().db
+        ).to_dB().dB
         ax.plot(np.asarray(depth_cut).ravel(), result.depths,
                 label=name, linewidth=1.5)
 

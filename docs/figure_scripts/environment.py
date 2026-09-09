@@ -234,7 +234,7 @@ def absorption_models():
         temperature_c=4.0, salinity_psu=35.0, pH=8.0, z_bar_m=3000.0,
     ).plot(freqs, depth=3000.0, ax=ax,
            label='Francois–Garrison, 4 °C / 3000 m')
-    uacpy.ConstantAbsorption(value_db_per_wavelength=1.0e-4).plot(
+    uacpy.ConstantAbsorption(value_dB_per_wavelength=1.0e-4).plot(
         freqs, ax=ax, label='ConstantAbsorption, 1e-4 dB/λ')
     uacpy.Biological(layers=[(20.0, 80.0, 1500.0, 4.0, 0.02)]).plot(
         freqs, depth=50.0, ax=ax, label='Biological, f0 = 1.5 kHz')

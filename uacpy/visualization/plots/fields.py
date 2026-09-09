@@ -36,23 +36,23 @@ _BRANCH_DESCRIPTION = {
 
 # Contour-label unit, keyed by ``value``. Linear pressure ('mag', 'real',
 # 'imag') carries no unit, so its labels are bare numbers.
-_CONTOUR_FMT = {'db': '%g dB', 'mag_db': '%g dB', 'phase': '%g rad'}
+_CONTOUR_FMT = {'dB': '%g dB', 'mag_dB': '%g dB', 'phase': '%g rad'}
 
 # ``value`` modes that render a dB view of the quantity, and so take its dB
-# colormap (``cmap_for_field(kind, db=True)``). Every other mode is a linear
+# colormap (``cmap_for_field(kind, dB=True)``). Every other mode is a linear
 # view and shares one signed colormap — see ``style.LINEAR_VIEW_COLORMAP``.
 # ``plot_field`` and ``compare_models`` both key on this, so one field renders
 # the same through either entry point.
 from uacpy.core.constants import PRESSURE_FLOOR
 
-_DB_VALUES = ('db', 'mag_db')
+_DB_VALUES = ('dB', 'mag_dB')
 
 #: Magnitude of the no-energy marker on a dB axis, 600. ``PRESSURE_FLOOR``
 #: is what the package writes where a model reported no energy at all (as
 #: against NaN, which is no data), so a sample of this size is a marker
 #: rather than a level and takes no part in a colour limit. Its SIGN depends
-#: on the view: ``db`` is a loss and puts it at +600, ``mag_db`` is
-#: ``-field.db`` and puts the same cell at -600, so the two are read by
+#: on the view: ``dB`` is a loss and puts it at +600, ``mag_dB`` is
+#: ``-field.dB`` and puts the same cell at -600, so the two are read by
 #: magnitude and nothing real reaches it from either side.
 _NO_ENERGY_DB = abs(20.0 * np.log10(PRESSURE_FLOOR))
 
@@ -108,18 +108,18 @@ def plot_field(
         rather than reducing it to the line cut it would otherwise become;
         that row is drawn as a band at its own coordinate.
     value : str
-        ``'db'``, ``'mag_db'`` (``20·log10|H|``), ``'mag'``, ``'phase'``,
+        ``'dB'``, ``'mag_dB'`` (``20·log10|H|``), ``'mag'``, ``'phase'``,
         ``'real'``, ``'imag'``. Defaults to ``'real'`` for a time-series
-        field and ``'db'`` otherwise.
+        field and ``'dB'`` otherwise.
     vmin, vmax : float, optional
         Colour limits (2-D heatmap only). What an unset limit falls back to
         depends on the quantity, since only some of them have a window that
-        means something: a **pressure** field's ``value='db'`` view takes the
+        means something: a **pressure** field's ``value='dB'`` view takes the
         fixed 20–120 dB TL scale (``_TL_LIMITS``), so TL panels stay directly
         comparable across models, frequencies and runs; **signal excess**
         takes a window symmetric about its 0 dB detection boundary; a
         **probability** takes a fixed [0, 1]; and everything else, including
-        reverberation and ``value='mag_db'``, autoscales.
+        reverberation and ``value='mag_dB'``, autoscales.
     cmap : str, optional
         Override the default colormap (2-D heatmap only).
     title : str, optional
@@ -434,7 +434,7 @@ def _value_style(field, value):
         # Real time-domain pressure → diverging map centred at 0. Its limits
         # come from the record's own RMS, so they are not fixed here.
         return 'seismic', None, None
-    if value == 'db':
+    if value == 'dB':
         # The fixed scale is a *transmission-loss* convention, so it applies
         # only to a pressure field. Another dB quantity — signal excess spans
         # roughly -20..+40 dB — renders as one flat block against 20..120.
@@ -454,16 +454,16 @@ def _value_style(field, value):
             lo, hi = _symmetric_span([field.data])
         else:
             lo, hi = (None, None)
-        return cmap_for_field(field.kind, db=True), lo, hi
+        return cmap_for_field(field.kind, dB=True), lo, hi
     if value == 'phase':
         return 'twilight', -np.pi, np.pi
-    if value == 'mag_db':
+    if value == 'mag_dB':
         # A dB view of |H|, so larger is LOUDER — the opposite of the loss
         # the dB colormap is built for. Measured under the unreversed map:
         # the loudest water came out dark blue at -20 dB while the same cell
-        # reads dark red through ``db``, against style.py's stated
+        # reads dark red through ``dB``, against style.py's stated
         # convention that low TL (loud, near) is red.
-        return (reversed_cmap(cmap_for_field(field.kind, db=True)),
+        return (reversed_cmap(cmap_for_field(field.kind, dB=True)),
                 None, None)
     if not field.is_complex and field.unit == '1':
         # A real, dimensionless quantity is a probability: bounded [0, 1] and
@@ -475,7 +475,7 @@ def _value_style(field, value):
         return PROBABILITY_COLORMAP, *PROBABILITY_LIMITS
     # 'mag' / 'real' / 'imag' are linear views, which share one signed
     # colormap whatever the quantity.
-    return cmap_for_field(field.kind, db=False), None, None
+    return cmap_for_field(field.kind, dB=False), None, None
 
 
 def _plot_field_2d(
@@ -518,7 +518,7 @@ def _plot_field_2d(
     elif value in _DB_VALUES and (vmin is None or vmax is None):
         # A no-energy cell is a MARKER, not a level: the package writes
         # ``PRESSURE_FLOOR`` where the model reported no energy, so it lands
-        # 600 dB out and drags the bar with it — measured, ``mag_db`` ran
+        # 600 dB out and drags the bar with it — measured, ``mag_dB`` ran
         # -600..-20 and a loss view 20..600, each packing every real level
         # into a tenth of the scale. Reading it by MAGNITUDE covers both
         # views, which carry the same cell at opposite signs. Nothing the
@@ -820,7 +820,7 @@ def plot_detection_probability(
                 colors='black', linewidths=1.2, linestyles='solid',
             )
             ax.clabel(cs, inline=True, fontsize=9, fmt='%.1f')
-    sigma = field.metadata.get('sigma_db')
+    sigma = field.metadata.get('sigma_dB')
     pin = _pinned_subtitle(field)
     auto = 'Detection probability'
     if sigma is not None:
@@ -838,7 +838,7 @@ def compare(
     labels: Optional[Sequence[str]] = None,
     ax=None,
     *,
-    value: str = 'db',
+    value: str = 'dB',
     figsize: Tuple[float, float] = (10, 5),
     title: Optional[str] = None,
     **mpl_kw,
@@ -949,7 +949,7 @@ def compare_models(
     labels: Optional[Sequence[str]] = None,
     *,
     env: Optional[Environment] = None,
-    value: str = 'db',
+    value: str = 'dB',
     vmin: Optional[float] = None,
     vmax: Optional[float] = None,
     cmap: Optional[str] = None,
@@ -1027,7 +1027,7 @@ def compare_models(
     # for the whole figure — and it is read from the same table plot_field
     # reads, so a panel is coloured as if it had been plotted on its own.
     style_cmap, style_vmin, style_vmax = _value_style(ref, value)
-    if (value == 'db' and ref.kind == 'signal_excess'
+    if (value == 'dB' and ref.kind == 'signal_excess'
             and not _is_time_domain(ref)):
         # _value_style sizes the symmetric signal-excess window from the one
         # field it is handed, which here is panel 1: measured on a second panel

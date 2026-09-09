@@ -10,7 +10,7 @@ from matplotlib.colors import LinearSegmentedColormap, Normalize
 from matplotlib.ticker import MaxNLocator
 from typing import Optional, Tuple
 
-from uacpy.core.absorption import francois_garrison_db_per_km, thorp_db_per_km
+from uacpy.core.absorption import francois_garrison_dB_per_km, thorp_dB_per_km
 from uacpy.core.environment import Environment
 from uacpy.core.ssp import SoundSpeedProfile
 from uacpy.visualization.style import (
@@ -885,9 +885,9 @@ def plot_absorption(frequencies, absorption=None, ax=None, *, model=None,
                 "('thorp' / 'francois_garrison').")
         m = str(model).lower().replace('-', '_')
         if m == 'thorp':
-            absorption = thorp_db_per_km(frequencies)
+            absorption = thorp_dB_per_km(frequencies)
         elif m in ('francois_garrison', 'fg'):
-            absorption = francois_garrison_db_per_km(frequencies, **mk)
+            absorption = francois_garrison_dB_per_km(frequencies, **mk)
         else:
             raise ConfigurationError(
                 f"plot_absorption: unknown model={model!r}; use 'thorp' or "
