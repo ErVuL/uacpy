@@ -24,7 +24,7 @@ Two constraints, both real limits rather than incidental settings:
 
 Uses: Bottom.from_columns · SoundSpeedProfile.from_2d ·
 Kraken(n_segments=, mode_coupling=) · RAM(accuracy=) · plot_field ·
-plot.plot_field_difference
+plot.plot_field_difference · plot.shared_colorbar
 """
 
 import os
@@ -164,12 +164,14 @@ fig.suptitle('Range-dependent bottom — adiabatic vs coupled modes vs RAM\n'
              f'{receiver.ranges[-1] / 1000:.0f} km of a '
              f'{BATHYMETRY[0, 1]:.0f}-{BATHYMETRY[-1, 1]:.0f} m slope',
              fontsize=13, fontweight='bold', y=0.995)
-fig.subplots_adjust(left=0.05, right=0.93, top=0.90, bottom=0.06,
-                    wspace=0.18, hspace=0.30)
-fig.colorbar(axes[0, 0].collections[0],
-             cax=fig.add_axes([0.945, 0.36, 0.010, 0.54]), label='TL (dB)')
-fig.colorbar(axes[2, 0].collections[0],
-             cax=fig.add_axes([0.945, 0.06, 0.010, 0.24]), label='Δ TL (dB)')
+# Margins first: each bar takes its space from the panels as they stand, so a
+# subplots_adjust after them would move the panels back over the bars.
+fig.subplots_adjust(left=0.05, top=0.90, bottom=0.06, wspace=0.18, hspace=0.30)
+# Two bars, because there are two quantities: one over the six TL panels,
+# one over the four residuals. Asking for a single bar across both would
+# be refused — they are not on one scale, and could not honestly share one.
+uacpy.plot.shared_colorbar(fig, axes[:2, :3], label='TL (dB)')
+uacpy.plot.shared_colorbar(fig, axes[2, :], label='Δ TL (dB)')
 fig.savefig(OUT / 'example_18_rd_krakenfield_vs_ram.png', dpi=150)
 plt.close(fig)
 

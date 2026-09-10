@@ -8,7 +8,8 @@ range. Bellhop takes the surface cases, RAM the bottom ones.
 
 Uses: env.altimetry from generate_sea_surface · an elastic `surface=` ·
 SedimentLayer / SeabedColumn · SeabedColumn.from_presets ·
-Bottom.from_columns · env.has_range_dependent_layered_bottom
+Bottom.from_columns · env.has_range_dependent_layered_bottom ·
+plot.shared_colorbar
 """
 
 import os
@@ -145,10 +146,12 @@ for index, (label, field) in enumerate(fields.items()):
 axes.flat[-1].axis('off')
 fig.suptitle('Boundary conditions — surface and bottom', fontsize=14,
              fontweight='bold', y=0.995)
-fig.subplots_adjust(left=0.06, right=0.93, top=0.90, bottom=0.07,
-                    wspace=0.20, hspace=0.30)
-fig.colorbar(axes.flat[0].collections[0],
-             cax=fig.add_axes([0.945, 0.07, 0.012, 0.83]), label='TL (dB)')
+# Margins first: the bar takes its space from the panels as they stand, so a
+# subplots_adjust after it would move the panels back over it.
+fig.subplots_adjust(left=0.06, top=0.90, bottom=0.07, wspace=0.20, hspace=0.30)
+# One bar for all seven panels; it refuses the job if they are not on one
+# colour scale, which is the whole point of computing vmin/vmax above.
+uacpy.plot.shared_colorbar(fig, axes.flat[:7], label='TL (dB)')
 fig.savefig(OUT / 'example_17_boundary_conditions.png', dpi=150)
 plt.close(fig)
 

@@ -1,6 +1,6 @@
 # File I/O — the layer between metres and the native formats
 
-> `uacpy.io` · 102 public names · every reader and writer the models run on
+> `uacpy.io` · 104 public names · every reader and writer the models run on
 
 Underneath the Python API, uacpy drives seven native solvers by writing text
 and binary files, launching a subprocess, and parsing what comes back. Each of
@@ -680,6 +680,8 @@ The 16 remaining names in `__all__` are the submodules themselves.
 | Name | |
 |---|---|
 | `write_wav(path, signal, fs, *, encoding, normalize, metadata)` | a real signal to `.wav`; `pcm16`/`pcm24`/`pcm32` for players and recorders, `float32`/`float64` to keep a calibrated level. `normalize` defaults to on for PCM, off for float. `metadata` writes a `LIST`/`INFO` chunk |
+| `read_wav(path)` | `.wav` → `(signal, sample_rate)`, mono `(n,)` or `(n, n_channels)`. An integer encoding comes back divided by its full scale, so it lands in ±1 whatever its depth; a float one comes back as written, which is the point of it |
+| `read_wav_metadata(path)` | the `LIST`/`INFO` block as `write_wav`'s own keys, or `{}` — most recorders write none, so empty is the common case and not an error |
 
 ---
 

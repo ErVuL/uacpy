@@ -600,6 +600,101 @@ class Field(Result):
         self._check_axes(kwargs)
         return self._slice({name: int(i) for name, i in kwargs.items()})
 
+    def window(self, **bounds) -> "Field":
+        """Label-based axis window: narrow an axis and **keep** it.
+
+        :meth:`at` and :meth:`isel` collapse an axis to one sample. This
+        narrows one instead: each kwarg names a coord axis and an inclusive
+        ``(lo, hi)`` pair in that axis's own units, samples outside it are
+        dropped, and the axis survives with what remains — so the result is
+        still a field over that axis rather than a slice through it. ``None``
+        for either end leaves that end alone, so ``window(time=(0.0, None))``
+        trims a pre-roll and nothing else.
+
+        Several models put the same scene on different spans — a time-marching
+        solver integrating from a negative pre-roll while an IFFT one starts at
+        zero — and comparing them means cutting both to one window.
+
+        Raises when a window selects no sample: an empty axis is not a smaller
+        field but a field with nothing in it, and every later slice of it would
+        fail somewhere less obvious.
+
+        Examples
+        --------
+        >>> import numpy as np
+        >>> from uacpy.core.results import Field
+        >>> f = Field(data=np.arange(5.0).reshape(1, 5),
+        ...           coords={'depth': np.array([10.0]),
+        ...                   'range': np.linspace(0.0, 400.0, 5)})
+        >>> f.window(range=(100.0, 300.0)).ranges
+        array([100., 200., 300.])
+        """
+        self._check_axes(bounds)
+        data = self.data
+        coords = dict(self.coords)
+        axis_of = {name: i for i, name in enumerate(self.coords)}
+        for name, pair in bounds.items():
+            try:
+                low, high = pair
+            except (TypeError, ValueError):
+                raise ConfigurationError(
+                    f"Field.window: {name}={pair!r} is not a (lo, hi) pair.",
+                    remediation="Pass two bounds, either of which may be None "
+                                "to leave that end where it is.") from None
+            if (low is not None and high is not None
+                    and float(low) > float(high)):
+                raise ConfigurationError(
+                    f"Field.window: {name}=({low}, {high}) is inverted.",
+                    remediation="Give the bounds low end first.")
+            axis = coords[name]
+            keep = np.ones(axis.size, dtype=bool)
+            if low is not None:
+                keep &= axis >= float(low)
+            if high is not None:
+                keep &= axis <= float(high)
+            if not keep.any():
+                raise ConfigurationError(
+                    f"Field.window: {name}=({low}, {high}) keeps no sample of "
+                    f"an axis spanning {axis.min():g} to {axis.max():g}.",
+                    remediation="Widen the window, or check it is in the "
+                                "axis's own units (metres, seconds, Hz).")
+            data = np.compress(keep, data, axis=axis_of[name])
+            coords[name] = axis[keep]
+        return Field(data=data, coords=coords, pinned=dict(self.pinned),
+                     **self.id_kwargs())
+
+    def shift(self, **offsets) -> "Field":
+        """Translate a coordinate axis by a constant. The data is untouched.
+
+        Each kwarg names a coord axis and an offset in that axis's own units.
+        Use it to move an origin: a transfer function synthesised against a
+        source waveform carries that waveform's own peak offset into its time
+        axis, and ``shift(time=-peak)`` puts the emission at ``t=0`` so it
+        lines up with a solver that marches from the emission itself.
+
+        Examples
+        --------
+        >>> import numpy as np
+        >>> from uacpy.core.results import Field
+        >>> f = Field(data=np.zeros((1, 3)),
+        ...           coords={'depth': np.array([10.0]),
+        ...                   'time': np.array([0.0, 0.1, 0.2])})
+        >>> f.shift(time=-0.1).times
+        array([-0.1,  0. ,  0.1])
+        """
+        self._check_axes(offsets)
+        coords = dict(self.coords)
+        for name, offset in offsets.items():
+            delta = float(offset)
+            if not np.isfinite(delta):
+                raise ConfigurationError(
+                    f"Field.shift: {name}={offset!r} is not finite.",
+                    remediation="A non-finite offset would put the whole axis "
+                                "at NaN, losing the coordinate entirely.")
+            coords[name] = coords[name] + delta
+        return Field(data=self.data, coords=coords, pinned=dict(self.pinned),
+                     **self.id_kwargs())
+
     def eval(self, **kwargs) -> "Field":
         """Interpolated slice — the interpolating counterpart of :meth:`at`.
 

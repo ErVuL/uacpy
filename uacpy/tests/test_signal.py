@@ -2151,3 +2151,52 @@ def test_the_signal_guide_states_the_per_call_frf_contract():
     frf.compute(u, y, 1000.0, m='CP')
     assert frf.selected_order == 6
     assert frf.m == FRF(method='ls_fir').m == 512
+
+
+class TestRickerWaveletDelay:
+    """``delay=`` places the wavelet's centre, where the default keeps the
+    Acoustics-Toolbox offset. Its sibling ``gaussian_pulse`` always took a
+    delay; this one did not, so a gather needing one pulse per trace at a
+    moveout-dependent time had to reimplement the wavelet locally."""
+
+    def test_the_default_centring_is_unchanged(self):
+        """AT's ``u = 2πFt − 8`` puts the central lobe at 4/(pi*f)."""
+        frequency = 40.0
+        time = np.linspace(0, 0.2, 2001)
+
+        centre = time[np.argmin(ricker_wavelet(time, frequency))]
+        assert centre == pytest.approx(4 / (np.pi * frequency), abs=1e-4)
+
+    def test_the_equivalent_delay_reproduces_the_default(self):
+        """Algebraically the same expression, so the two agree to round-off —
+        about 1e-15 of the lobe, not bit-identical."""
+        frequency = 40.0
+        time = np.linspace(0, 0.2, 2001)
+
+        default = ricker_wavelet(time, frequency)
+        explicit = ricker_wavelet(time, frequency,
+                                  delay=4 / (np.pi * frequency))
+        assert np.allclose(default, explicit, rtol=1e-12, atol=1e-15)
+
+    @pytest.mark.parametrize('delay', [0.05, 0.10, 0.15])
+    def test_the_wavelet_lands_where_it_is_asked_to(self, delay):
+        time = np.linspace(0, 0.2, 2001)
+
+        wavelet = ricker_wavelet(time, 40.0, delay=delay)
+        assert time[np.argmin(wavelet)] == pytest.approx(delay, abs=1e-4)
+
+    def test_delay_broadcasts_into_a_gather(self):
+        """One call lays a pulse on every trace at that trace's own arrival
+        time — the shape a moveout gather needs."""
+        time = np.linspace(0, 0.2, 2001)
+        arrivals = np.array([0.05, 0.10, 0.15])
+
+        gather = ricker_wavelet(time[:, None], 40.0, delay=arrivals[None, :])
+        assert gather.shape == (time.size, arrivals.size)
+        for column, expected in enumerate(arrivals):
+            assert time[np.argmin(gather[:, column])] == pytest.approx(
+                expected, abs=1e-4)
+
+    def test_a_non_finite_delay_raises(self):
+        with pytest.raises(ConfigurationError, match='delay must be finite'):
+            ricker_wavelet(np.linspace(0, 0.1, 10), 40.0, delay=np.nan)

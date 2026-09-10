@@ -1,6 +1,6 @@
 # Plotting — one convention, one workhorse
 
-> `uacpy.plot` · 53 public plotters · every result and every drawable carrier
+> `uacpy.plot` · 54 public plotters · every result and every drawable carrier
 > renders itself with `.plot()`
 
 There are two halves to the plotting surface. Anything that is a uacpy object
@@ -477,7 +477,7 @@ detection probability and the ROC.
 
 ## 7. Reference — every public plotter
 
-All 53 plotters in `uacpy.plot.__all__` — the 8 remaining names in `__all__`
+All 54 plotters in `uacpy.plot.__all__` — the 8 remaining names in `__all__`
 are the submodules themselves. **ax** marks a single-axes plotter you can
 compose with. Every entry takes `title=` except `plot_result` (it forwards
 yours) and the two `draw_*` overlays; every entry takes
@@ -494,6 +494,7 @@ yours) and the two `draw_*` overlays; every entry takes
 | `compare_models(fields, labels=None, env=None, ncols=None, contours=None)` | — | side-by-side heatmap grid, one shared colourbar |
 | `plot_field_difference(field, reference, ax=None, env=None, diff_vmax=None)` | ✓ | `field - reference` in dB on a diverging map, symmetric about zero; positive means `field` is the quieter one |
 | `plot_field_statistics(fields, labels=None, *, depth)` | — | mean ± std per field at one depth, plus the pairwise RMS-difference matrix |
+| `shared_colorbar(fig, axes, *, label=None, **kw)` | — | one colorbar for a row or grid of panels drawn with `show_colorbar=False`, taken from their own mappable. Refuses panels that are not on one colour scale — a single bar over two scales describes one and mislabels the rest |
 | `plot_signal_excess(field, ax=None, env=None, …)` | ✓ | diverging SE heatmap + the SE = 0 detection boundary → [sonar](sonar.md) |
 | `plot_detection_probability(field, ax=None, env=None, …)` | ✓ | `P_D` on a fixed [0, 1] scale with labelled contours → [sonar](sonar.md) |
 | `animate_field(field, env=None, fps=30, …)` | ✓ | a `FuncAnimation` sweeping the time axis |

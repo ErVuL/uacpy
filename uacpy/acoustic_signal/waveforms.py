@@ -1,6 +1,6 @@
 """Deterministic source waveforms: SPARC pulses, Ricker/Gaussian pulses, LFM/HFM chirps, tone bursts and N-waves."""
 
-from typing import Tuple, Literal
+from typing import Optional, Tuple, Literal
 
 import numpy as np
 
@@ -193,7 +193,8 @@ def sparc_pulse(
     return s, pulse_title
 
 
-def ricker_wavelet(time: np.ndarray, frequency: float) -> np.ndarray:
+def ricker_wavelet(time: np.ndarray, frequency: float,
+                   delay: Optional[float] = None) -> np.ndarray:
     """
     Generate a Ricker wavelet (Mexican hat wavelet).
 
@@ -203,12 +204,27 @@ def ricker_wavelet(time: np.ndarray, frequency: float) -> np.ndarray:
     (``cans.f90``, documented in ``models/sparc.py``) centres at
     ``ωT − 5`` — the two "Ricker" pulses are offset in time.
 
+    ``delay`` overrides that fixed centring and places the wavelet's centre at
+    a time you choose, which is what a gather needs: one pulse per trace at a
+    moveout-dependent time. It broadcasts against ``time``, so a whole gather
+    is one call. Omitting it keeps AT's centring exactly, and
+    ``delay=4/(pi*frequency)`` reproduces that same wavelet to within
+    floating-point round-off (~1e-15 of the lobe amplitude: the two
+    dimensionless-time expressions are algebraically equal but not
+    bit-identical).
+
     Parameters
     ----------
     time : ndarray
         Time vector
     frequency : float
         Nominal source frequency in Hz
+    delay : float or ndarray, optional
+        Centre the wavelet here instead of at AT's ``4/(pi*frequency)``.
+        Broadcast against ``time``. Note that AT's offset exists to make
+        truncation at ``time = 0`` free (``s(0)`` is 3e-6 of the lobe
+        amplitude); a delay smaller than that truncates the leading flank,
+        which is the caller's call to make.
 
     Returns
     -------
@@ -243,7 +259,19 @@ def ricker_wavelet(time: np.ndarray, frequency: float) -> np.ndarray:
     frequency = require_positive_finite_scalar(frequency, "ricker_wavelet",
                                                "frequency", " Hz")
     time = np.asarray(time, dtype=float)
-    u = 2 * np.pi * frequency * time - 8  # Dimensionless time
+    if delay is None:
+        u = 2 * np.pi * frequency * time - 8  # Dimensionless time
+    else:
+        centre = np.asarray(delay, dtype=float)
+        if not np.isfinite(centre).all():
+            raise ConfigurationError(
+                "ricker_wavelet: delay must be finite.",
+                remediation="A non-finite centre puts the whole wavelet at "
+                            "NaN. Omit delay for the Acoustics-Toolbox "
+                            "centring at 4/(pi*frequency).")
+        # Same dimensionless time, centred where the caller asked: at
+        # delay = 4/(pi*frequency) this is identical to the branch above.
+        u = 2 * np.pi * frequency * (time - centre)
     s = 0.5 * (0.25 * u**2 - 0.5) * np.sqrt(np.pi) * np.exp(-0.25 * u**2)
     return s
 

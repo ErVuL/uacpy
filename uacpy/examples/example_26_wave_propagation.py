@@ -19,7 +19,8 @@ five ways on one grid, as a snapshot sheet and as one GIF per solver.
   tracks the modal field; at lower frequencies or shorter ranges it does not.
 
 Uses: RunMode.TIME_SERIES on five solvers · source_waveform= / sample_rate= /
-output_duration= · plot_time_snapshots · save_animation
+output_duration= · Field.shift / Field.window (one display window across five
+solvers) · plot_time_snapshots · save_animation
 """
 
 import os
@@ -31,7 +32,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 import uacpy
 from uacpy.acoustic_signal.waveforms import gaussian_pulse
-from uacpy.core.results import Field
 
 OUT = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
            or Path(__file__).parent / 'output')
@@ -66,22 +66,6 @@ waveform = (gaussian_pulse(t, peak_time, sigma_t * np.sqrt(2))
             * np.cos(2 * np.pi * F_CENTER * (t - peak_time)))
 
 
-def rebuild(field, *, data=None, times=None):
-    """``field`` with a new time axis (and optionally new data).
-
-    Field exposes no time-window crop or coordinate shift, and both are needed
-    below to put every solver on one display window.
-    """
-    return Field(
-        data=field.data if data is None else data,
-        coords={'depth': field.coords['depth'],
-                'range': field.coords['range'],
-                'time': field.coords['time'] if times is None else times},
-        model=field.model, backend=field.backend,
-        source_depths=field.source_depths, frequencies=field.frequencies,
-        phase_reference=field.phase_reference)
-
-
 def run(name, model, waveform=None):
     """One call site for every solver: TIME_SERIES on the shared window.
 
@@ -100,16 +84,10 @@ def run(name, model, waveform=None):
                           run_mode=uacpy.RunMode.TIME_SERIES,
                           source_waveform=waveform, sample_rate=FS,
                           output_duration=T_MAX + peak_time)
-        field = rebuild(field,
-                        times=np.asarray(field.coords['time']) - peak_time)
+        field = field.shift(time=-peak_time)
     # Clip to 0 ≤ t ≤ T_MAX. SPARC integrates from t = -0.1 s (pre-roll) while
     # the IFFT models start at 0, so the lower bound drops that pre-roll.
-    times = np.asarray(field.coords['time'])
-    keep = (times >= 0.0) & (times <= T_MAX)
-    if not keep.all():
-        data = np.moveaxis(np.asarray(field.data),
-                           list(field.coords).index('time'), 2)[:, :, keep]
-        field = rebuild(field, data=data, times=times[keep])
+    field = field.window(time=(0.0, T_MAX))
     print(f"  {name:8s} {field.data.shape}")
     return field
 

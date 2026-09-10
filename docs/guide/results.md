@@ -239,6 +239,37 @@ dict_keys(['range'])
 {'depth': 60.3939393939394}           # nearest receiver depth, not 60.0
 ```
 
+### Narrowing an axis instead of collapsing it — `window` and `shift`
+
+The four slicers above all *collapse*: one sample survives and the axis is
+gone. Two more methods leave the axis in place.
+
+| Call | Effect | Axis survives? |
+|---|---|---|
+| `.window(time=(0.0, 0.18))` | drop samples outside an inclusive label range | **yes** |
+| `.shift(time=-0.02)` | translate the coordinate, data untouched | **yes** |
+
+`window` takes `None` for either end, so `window(time=(0.0, None))` trims a
+pre-roll and nothing else, and it **raises when the window keeps no sample** —
+an empty axis is not a smaller field but a field with nothing in it, and every
+later slice of it would fail somewhere less obvious.
+
+Together they put several models on one display axis, which is what comparing
+them takes:
+
+```python
+# A time-marching solver integrates from a negative pre-roll; an IFFT one
+# starts at zero and carries the source waveform's own peak offset. Move the
+# emission to t=0, then cut both to the same window.
+aligned = synthesised.shift(time=-waveform_peak).window(time=(0.0, t_max))
+```
+
+Both go through `id_kwargs()` (§8), so the result keeps the whole identity
+surface — model, backend, frequencies, source depths, phase reference,
+`model_source` and `metadata`. Rebuilding a `Field` by hand to do this is how
+`metadata` gets dropped, and `metadata` is where `kind` lives, so a tagged
+quantity silently becomes an untagged one.
+
 `at` asked for 60 m and got 60.394 m, because that is where a receiver
 actually is. Nothing was interpolated and nothing was invented. Slicing
 composes, and `pinned` accumulates:

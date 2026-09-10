@@ -10,9 +10,9 @@ Six transforms, each on the signal it suits:
 * Cepstrum — an echo delay recovered as a quefrency peak.
 * Hyperbolic Radon — a curved (NMO) event focusing to its velocity.
 
-Uses: acoustic_signal.fk_transform · taup_transform · cwt · wigner_ville ·
-cepstrum · radon_transform · plot_fk(sound_speed=) · plot_taup · plot_cwt ·
-plot_wigner_ville · plot_cepstrum · plot_radon
+Uses: acoustic_signal.ricker_wavelet(delay=) · fk_transform · taup_transform ·
+cwt · wigner_ville · cepstrum · radon_transform · plot_fk(sound_speed=) ·
+plot_taup · plot_cwt · plot_wigner_ville · plot_cepstrum · plot_radon
 """
 
 import os
@@ -26,23 +26,13 @@ import uacpy
 from uacpy.acoustic_signal import (cepstrum, cwt, fk_transform,
                                    radon_transform, taup_transform,
                                    wigner_ville)
+from uacpy.acoustic_signal.waveforms import ricker_wavelet
 
 OUT = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
            or Path(__file__).parent / 'output')
 OUT.mkdir(parents=True, exist_ok=True)
 
 fs = 2000.0
-
-
-def ricker(time, centre, frequency=40.0):
-    """A Ricker pulse centred at ``centre``; broadcasts over both arguments.
-
-    uacpy's own ``ricker_wavelet`` fixes the centre at the Acoustics-Toolbox
-    offset, and these gathers need one pulse per trace at a moveout-dependent
-    time.
-    """
-    u = 2 * np.pi * frequency * (time - centre)
-    return (1 - 0.5 * u ** 2) * np.exp(-0.25 * u ** 2)
 
 
 # (A) Two plane waves at 1500 and 2500 m/s, tapered, for the f-k transform.
@@ -61,8 +51,10 @@ fk_f, fk_k, fk_power, _ = fk_transform(wavefield, fs, dx)
 gather_fs, gather_nt, gather_nx, gather_dx = 1000.0, 512, 48, 10.0
 t_gather = np.arange(gather_nt) / gather_fs
 x_gather = np.arange(gather_nx) * gather_dx
-gather = sum(ricker(t_gather[:, None],
-                    tau + slowness * x_gather[None, :])
+# delay= broadcasts, so one call lays a pulse on every trace at that
+# trace's own arrival time.
+gather = sum(ricker_wavelet(t_gather[:, None], 40.0,
+                            delay=tau + slowness * x_gather[None, :])
              for slowness, tau in [(1 / 1800.0, 0.04), (-1 / 2500.0, 0.13)])
 slownesses, taus, slant_stack = taup_transform(
     gather, gather_fs, gather_dx, p_max=1 / 1200.0, n_slowness=301)
@@ -91,9 +83,9 @@ low, high = int(0.008 * fs), int(0.1 * fs)
 
 # (F) A hyperbolic (NMO) event, for the Radon transform.
 true_velocity = 1500.0
-hyperbolic = ricker(
-    t_gather[:, None],
-    np.sqrt(0.07 ** 2 + (x_gather[None, :] / true_velocity) ** 2))
+hyperbolic = ricker_wavelet(
+    t_gather[:, None], 40.0,
+    delay=np.sqrt(0.07 ** 2 + (x_gather[None, :] / true_velocity) ** 2))
 velocities = np.linspace(1200.0, 2000.0, 121)
 _, radon_taus, radon = radon_transform(hyperbolic, gather_fs, gather_dx,
                                        velocities, kind='hyperbolic')

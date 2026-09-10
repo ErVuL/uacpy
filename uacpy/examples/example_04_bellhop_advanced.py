@@ -14,7 +14,8 @@ Uses: Bellhop(beam_type=, grid_type=, n_beams=, alpha=, beam_shift=,
 beam_width_type=, beam_curvature=, eps_multiplier=, r_loop=, n_image=, ib_win=)
 · Source(source_type='line') · Source(beam_pattern=) ·
 Source.plot_beam_pattern · multi-depth Source → ResultStack ·
-RunMode.RAYS · Rays.plot(color_by=) · uacpy.Thorp · Bottom.from_halfspaces
+RunMode.RAYS · Rays.plot(color_by=) · uacpy.Thorp · Bottom.from_halfspaces ·
+plot.shared_colorbar
 """
 
 import os
@@ -24,26 +25,11 @@ sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.collections import QuadMesh
 import uacpy
 
 OUT = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
            or Path(__file__).parent / 'output')
 OUT.mkdir(parents=True, exist_ok=True)
-
-
-def shared_colorbar(fig, ax, left=0.92, width=0.02):
-    """One colorbar for a row of TL panels, taken from a panel's own mesh.
-
-    Reading the mappable back off the axes ties the bar to the panels' own
-    colour scale (the fixed 20-120 dB TL window) instead of restating it, so
-    the two cannot disagree. Contour overlays also live in ``ax.collections``,
-    hence the type filter.
-    """
-    mesh = next(c for c in ax.collections if isinstance(c, QuadMesh))
-    bar = fig.colorbar(mesh, cax=fig.add_axes([left, 0.15, width, 0.7]))
-    bar.set_label('TL (dB)', fontsize=12, fontweight='bold')
-    return bar
 
 
 bathymetry = np.array([[0, 100], [10000, 150], [20000, 300], [30000, 500]])
@@ -139,7 +125,7 @@ uacpy.plot_field(gaussian, left, env=env, show_colorbar=False,
 uacpy.plot_field(cerveny, right, env=env, show_colorbar=False,
                  contours=[70, 85, 100],
                  title='Cerveny beams, minimum width\n(with beam shift)')
-shared_colorbar(fig, left)
+uacpy.plot.shared_colorbar(fig, (left, right), label='TL (dB)')
 fig.suptitle('Gaussian vs Cerveny beams', fontsize=16, fontweight='bold')
 fig.savefig(OUT / 'example_04_beam_comparison.png', dpi=150,
             bbox_inches='tight')
@@ -150,7 +136,7 @@ uacpy.plot_field(gaussian, left, env=env, show_colorbar=False,
                  title="Point source (cylindrical)\nRunType: 'CB RR  '")
 uacpy.plot_field(line, right, env=env, show_colorbar=False,
                  title="Line source (Cartesian)\nRunType: 'CB XR  '")
-shared_colorbar(fig, left)
+uacpy.plot.shared_colorbar(fig, (left, right), label='TL (dB)')
 fig.suptitle('Point vs line source', fontsize=16, fontweight='bold')
 fig.savefig(OUT / 'example_04_source_comparison.png', dpi=150,
             bbox_inches='tight')
@@ -170,7 +156,7 @@ for ax, (depth, slab) in zip(np.atleast_1d(axes), stack):
     ax.plot(0.0, depth, marker='*', markersize=18, color='white',
             markeredgecolor='black', markeredgewidth=1.2, zorder=10,
             clip_on=False)
-shared_colorbar(fig, np.atleast_1d(axes)[0], width=0.015)
+uacpy.plot.shared_colorbar(fig, axes, label='TL (dB)')
 fig.suptitle('Multi-source-depth: one binary call, one ResultStack',
              fontsize=15, fontweight='bold')
 fig.savefig(OUT / 'example_04_multi_source.png', dpi=150, bbox_inches='tight')
@@ -187,13 +173,15 @@ directional_source.plot_beam_pattern(
 omni_ax = fig.add_subplot(1, 3, 2)
 uacpy.plot_field(gaussian, omni_ax, env=env, show_colorbar=False,
                  title='Omnidirectional source\n(beam_pattern=None)')
-uacpy.plot_field(directional, fig.add_subplot(1, 3, 3), env=env,
-                 show_colorbar=False,
+dir_ax = fig.add_subplot(1, 3, 3)
+uacpy.plot_field(directional, dir_ax, env=env, show_colorbar=False,
                  title="Directional source\n(.sbp, RunType(3:3) = '*')")
-shared_colorbar(fig, omni_ax, width=0.015)
 # Room for the two-line panel titles: add_subplot fills more of the figure than
 # plt.subplots leaves, so the default top margin puts the suptitle through them.
+# This has to come BEFORE the colorbar: the bar takes its space from the panels
+# as they stand, and a later subplots_adjust moves the panels back over it.
 fig.subplots_adjust(top=0.74)
+uacpy.plot.shared_colorbar(fig, (omni_ax, dir_ax), label='TL (dB)')
 fig.suptitle('Source directivity shapes the field', fontsize=15,
              fontweight='bold')
 fig.savefig(OUT / 'example_04_beam_pattern.png', dpi=150, bbox_inches='tight')

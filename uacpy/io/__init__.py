@@ -101,7 +101,7 @@ from uacpy.io.ramsurf_writer import write_ramin
 from uacpy.io.ramsurf_reader import (
     read_tl_line, read_tl_grid, read_pcomplex_grid,
 )
-from uacpy.io.audio_io import write_wav
+from uacpy.io.audio_io import read_wav, read_wav_metadata, write_wav
 
 __all__ = [
     # File management
@@ -161,7 +161,7 @@ __all__ = [
     # ramsurf writer
     "write_ramin",
     # Audio
-    "write_wav",
+    "write_wav", "read_wav", "read_wav_metadata",
     # Utilities
     "equally_spaced",
     # Submodules (importing uacpy.io makes each reachable as an attribute)

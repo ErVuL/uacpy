@@ -690,22 +690,24 @@ def test_the_bound_figure_check_can_see_a_pyplot_save(tmp_path):
     assert len(found) == 1
 
 
-def test_the_ambiguity_surfaces_are_drawn_on_their_grid_points():
-    """Example 38 draws its matched-field surfaces with ``contourf``, which
-    places every value ON its candidate position.
+def test_the_ambiguity_surfaces_are_drawn_through_the_library():
+    """Example 38 hands its matched-field surfaces to ``plot_field`` as Fields
+    of kind ``'ambiguity'`` rather than drawing them itself.
 
     It used to build an ``imshow`` extent by hand, and an extent taken from the
     outer grid CENTRES rather than the cell edges shifts the whole surface half
     a cell — the peak is then reported at a position the processor never
-    scanned. ``contourf`` cannot express that error, so the fix is structural
-    rather than a tolerance.
+    scanned. ``plot_field`` computes those edges itself, so routing through it
+    removes the class of error instead of guarding it.
     """
     source = (EXAMPLES_DIR / 'example_38_matched_field.py').read_text(
         encoding='utf-8')
-    assert 'contourf(' in source
-    assert 'imshow(' not in source, (
-        "example 38 is back on imshow: an extent from grid centres shifts the "
-        "surface half a cell off the positions it was computed at.")
+    assert "'kind': 'ambiguity'" in source and 'plot_field(' in source
+    for hand_rolled in ('imshow(', 'extent='):
+        assert hand_rolled not in source, (
+            f"example 38 is back to placing the surface itself ({hand_rolled});"
+            f" an extent from grid centres shifts it half a cell off the "
+            f"positions it was computed at.")
 
 
 def test_the_comparison_examples_use_the_librarys_tl_difference_renderer():

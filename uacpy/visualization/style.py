@@ -15,6 +15,10 @@ DB_VIEW_COLORMAPS = {
     'reverberation': 'jet_r',
     'signal_excess': 'RdBu_r',  # diverging: the SE = 0 dB detection boundary is the midpoint
     'difference': 'RdBu_r',     # diverging: zero difference is the midpoint
+    # An ambiguity surface is unsigned and read for where its peak is,
+    # so it takes a perceptually ordered map rather than a diverging
+    # one: the 0 dB peak is the extreme, not the midpoint.
+    'ambiguity': 'turbo',
 }
 
 # Every linear view (magnitude, real, imaginary part) of a SIGNED quantity.

@@ -79,6 +79,15 @@ QUANTITIES: Mapping[str, Quantity] = {
         # for a quantity whose zero is the meaningful value.
         Quantity('difference', {'dB': 'Difference (dB)'}),
         Quantity('probability_of_detection', {'1': 'Probability of detection'}),
+        # A matched-field / range-Doppler ambiguity surface: correlation
+        # power against a hypothesis, normalised by its own maximum, so the
+        # peak is 0 dB by construction and every cell says how far under the
+        # best hypothesis it sits. dB only, like reverberation — the linear
+        # form carries no information the dB one does not, and reading it in
+        # dB re max is what makes sidelobes visible. It is a LEVEL, not a
+        # loss (more of it is a better match), which is what ``_LOSS_KINDS``
+        # leaving it out already says.
+        Quantity('ambiguity', {'dB': 'Normalised power (dB re max)'}),
     )
 }
 

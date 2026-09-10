@@ -16,7 +16,8 @@ array, a source hidden at (62 m, 3.2 km) seen through 50 snapshots at 10 dB
 SNR, localized by the Bartlett (linear) and MVDR (Capon) processors.
 
 Uses: Kraken.compute_modes · sonar.synthesize_replica / replica_bank · csdm ·
-bartlett · mvdr
+bartlett · mvdr · a Field of kind 'ambiguity' through plot_field ·
+plot.shared_colorbar
 """
 
 import os
@@ -27,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 import numpy as np
 import matplotlib.pyplot as plt
 import uacpy
+from uacpy.core.results import Field
 from uacpy.sonar import bartlett, csdm, mvdr, replica_bank, synthesize_replica
 
 OUT = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
@@ -81,27 +83,33 @@ for name, surface in surfaces.items():
     print(f"  {name:8s} estimate: {candidate_depths[depth_index]:5.1f} m, "
           f"{candidate_ranges[range_index] / 1e3:.2f} km")
 
+# Each surface becomes a Field of kind 'ambiguity' — normalised power in dB re
+# its own maximum — so the library owns the rendering: the turbo map, the
+# "Normalised power (dB re max)" label, depth downward, range in km, and cell
+# edges computed from the candidate positions rather than an extent built by
+# hand (which is how a surface ends up drawn half a cell off the grid it was
+# computed on).
+ambiguity = {
+    name: Field(data=10 * np.log10(np.clip(surface / surface.max(), 1e-3,
+                                           None)),
+                coords={'depth': candidate_depths, 'range': candidate_ranges},
+                model='MFP', frequencies=source.frequencies,
+                metadata={'kind': 'ambiguity'})
+    for name, surface in surfaces.items()}
+
 fig, axes = plt.subplots(1, 2, figsize=(13, 5), sharey=True)
-for ax, (name, surface) in zip(axes, surfaces.items()):
-    normalized = 10 * np.log10(np.clip(surface / surface.max(), 1e-3, None))
-    # Filled contours place every value ON its grid point, so the surface
-    # cannot be drawn half a cell off the candidate positions it was computed
-    # at — which is what an imshow extent has to be hand-corrected for.
-    mesh = ax.contourf(candidate_ranges / 1e3, candidate_depths, normalized,
-                       levels=np.linspace(-15, 0, 31), cmap='turbo',
-                       extend='min')
+for ax, (name, field) in zip(axes, ambiguity.items()):
+    uacpy.plot_field(field, ax, vmin=-15, vmax=0, show_colorbar=False,
+                     title=f"{name} ambiguity surface")
     ax.plot(true_range / 1e3, true_depth, 'w*', ms=16, mec='k', label='truth')
-    depth_index, range_index = np.unravel_index(np.argmax(surface),
-                                                surface.shape)
+    depth_index, range_index = np.unravel_index(
+        np.argmax(surfaces[name]), surfaces[name].shape)
     ax.plot(candidate_ranges[range_index] / 1e3,
             candidate_depths[depth_index], 'o', mfc='none', mec='w', ms=12,
             mew=2, label='estimate')
-    ax.set_title(f"{name} ambiguity surface", loc='left')
-    ax.set_xlabel("Range [km]")
     ax.legend(loc='upper right', fontsize=8)
-    fig.colorbar(mesh, ax=ax, label="Normalised power [dB]")
-axes[0].set_ylabel("Depth [m]")
-axes[0].invert_yaxis()
+# Both panels are on the same -15..0 dB window, so one bar describes both.
+uacpy.plot.shared_colorbar(fig, axes, label='Normalised power [dB re max]')
 fig.suptitle("Matched-field localization — KRAKEN replicas "
              "(150 Hz, 16-element VLA)")
 fig.savefig(OUT / 'example_38_matched_field.png', dpi=150,

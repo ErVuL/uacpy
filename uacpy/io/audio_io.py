@@ -22,7 +22,9 @@ players and audio editors display. The broadcast-WAV ``bext`` chunk that
 passive-acoustic-monitoring tooling reads is *not* written; nothing in uacpy
 needs it yet.
 
-Reading is not implemented: no uacpy model consumes a ``.wav``.
+:func:`read_wav` reads back what :func:`write_wav` writes, and
+:func:`read_wav_metadata` recovers the ``INFO`` block, so a file this module
+produces is not a one-way trip. Both accept the encodings the writer emits.
 """
 
 import struct
@@ -252,3 +254,115 @@ def write_wav(
         handle.write(b'data' + struct.pack('<I', len(data)))
         handle.write(data)
         handle.write(data_pad)
+
+
+def _chunks(raw: bytes):
+    """Walk a RIFF file's top-level chunks, yielding ``(id, payload)``.
+
+    Chunks are word-aligned with a pad byte the declared size does not count,
+    so the walk steps by the padded length or it drifts one byte and reads the
+    rest of the file as garbage.
+    """
+    if raw[:4] != b'RIFF' or raw[8:12] != b'WAVE':
+        raise ConfigurationError(
+            "read_wav: not a RIFF/WAVE file.",
+            remediation="Check the path; this reads the .wav files write_wav "
+                        "produces, not .aiff/.flac/.mp3.")
+    offset = 12
+    while offset + 8 <= len(raw):
+        chunk_id = raw[offset:offset + 4]
+        size = struct.unpack('<I', raw[offset + 4:offset + 8])[0]
+        yield chunk_id, raw[offset + 8:offset + 8 + size]
+        offset += 8 + size + (size % 2)
+
+
+def read_wav(filepath: Union[str, Path]):
+    """Read a ``.wav`` written by :func:`write_wav` (or anything like it).
+
+    Parameters
+    ----------
+    filepath : str or Path
+
+    Returns
+    -------
+    signal : ndarray
+        ``(n,)`` for mono, ``(n, n_channels)`` de-interleaved otherwise. An
+        integer encoding comes back divided by its full scale, so it lands in
+        ±1 whatever its bit depth and a round trip through ``pcm16`` and
+        ``pcm24`` gives the same numbers to within their quantisation. A float
+        encoding comes back as written — that is the point of it, so nothing
+        rescales a calibrated signal on the way in.
+    sample_rate : float
+        Hz. The argument order mirrors ``write_wav(path, signal, fs)``.
+
+    Raises
+    ------
+    ConfigurationError
+        Not a RIFF/WAVE file, no ``fmt ``/``data`` chunk, or a format this
+        module does not write (compressed, or a bit depth outside 16/24/32).
+    """
+    raw = Path(filepath).read_bytes()
+    fmt = data = None
+    for chunk_id, payload in _chunks(raw):
+        if chunk_id == b'fmt ' and fmt is None:
+            fmt = payload
+        elif chunk_id == b'data' and data is None:
+            data = payload
+    if fmt is None or data is None:
+        raise ConfigurationError(
+            f"read_wav: {'fmt ' if fmt is None else 'data'} chunk missing.",
+            remediation="The file is truncated or not a wav; every WAVE file "
+                        "carries both.")
+
+    format_tag, n_channels, rate = struct.unpack('<HHI', fmt[:8])
+    bits = struct.unpack('<H', fmt[14:16])[0]
+    if (format_tag, bits) not in {(tag, b) for tag, b in _ENCODINGS.values()}:
+        raise ConfigurationError(
+            f"read_wav: format tag {format_tag} at {bits} bits is not one "
+            f"this module handles.",
+            remediation=f"It reads {sorted(_ENCODINGS)} — PCM and IEEE float. "
+                        f"A compressed or extensible wav needs soundfile.")
+
+    if format_tag == 1 and bits == 24:
+        # 24-bit has no numpy dtype: widen each 3-byte little-endian sample
+        # into the TOP three bytes of an int32 and shift back down, so the
+        # sign bit lands where two's complement expects it.
+        packed = np.frombuffer(data, dtype=np.uint8).reshape(-1, 3)
+        widened = np.zeros((packed.shape[0], 4), dtype=np.uint8)
+        widened[:, 1:] = packed
+        samples = (widened.view('<i4').ravel() >> 8).astype(np.float64)
+        samples /= 2.0 ** (bits - 1) - 1.0
+    elif format_tag == 1:
+        samples = np.frombuffer(
+            data, dtype='<i2' if bits == 16 else '<i4').astype(np.float64)
+        samples /= 2.0 ** (bits - 1) - 1.0
+    else:
+        samples = np.frombuffer(
+            data, dtype='<f4' if bits == 32 else '<f8').astype(np.float64)
+
+    if n_channels > 1:
+        samples = samples.reshape(-1, n_channels)
+    return samples, float(rate)
+
+
+def read_wav_metadata(filepath: Union[str, Path]) -> dict:
+    """The ``LIST``/``INFO`` metadata of a ``.wav``, as :func:`write_wav` keys.
+
+    Returns an empty dict when the file carries no ``INFO`` block, which is the
+    common case: most recorders write none.
+    """
+    by_tag = {tag: key for key, tag in _INFO_TAGS.items()}
+    for chunk_id, payload in _chunks(Path(filepath).read_bytes()):
+        if chunk_id != b'LIST' or payload[:4] != b'INFO':
+            continue
+        found, offset = {}, 4
+        while offset + 8 <= len(payload):
+            tag = payload[offset:offset + 4].decode('ascii', 'replace')
+            size = struct.unpack('<I', payload[offset + 4:offset + 8])[0]
+            text = payload[offset + 8:offset + 8 + size]
+            if tag in by_tag:
+                found[by_tag[tag]] = text.split(b'\x00', 1)[0].decode(
+                    'utf-8', 'replace')
+            offset += 8 + size + (size % 2)
+        return found
+    return {}

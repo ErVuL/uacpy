@@ -81,7 +81,7 @@ the signal.
 | `lfm_chirp(fmin, fmax, duration, sample_rate)` | `(t, s)` | linear sweep; instantaneous frequency ramps `fmin → fmax` |
 | `hfm_chirp(fmin, fmax, duration, sample_rate)` | `(t, s)` | hyperbolic sweep, a.k.a. linear period modulation |
 | `tone_burst(frequency, n_cycles, sample_rate, window=True)` | `(t, s)` | Hann-gated by default; `window=False` for a hard gate |
-| `ricker_wavelet(time, frequency)` | `s` | second derivative of a Gaussian, AT centring `u = 2πFt − 8` |
+| `ricker_wavelet(time, frequency, delay=None)` | `s` | second derivative of a Gaussian, AT centring `u = 2πFt − 8`. `delay` centres it where you ask instead and **broadcasts against `time`**, so one call lays a pulse on every trace of a moveout gather |
 | `gaussian_pulse(time, delay, duration)` | `s` | `exp(−((t − delay)/duration)²)` |
 | `nwave(time, frequency)` | `s` | `sin(ωt) − ½sin(2ωt)`, forced to zero outside `[0, 1/f]` |
 | `sparc_pulse(t, omega, pulse_type)` | `(s, title)` | the 11-shape SPARC library; `omega` is **rad/s**, and the second return is the shape's name |

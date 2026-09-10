@@ -22,6 +22,14 @@ Three things make the comparison fair:
   uacpy converts the half-space to rigid and warns. Its trace shows the
   time-marching method, not the same physics.
 
+Two things in the figures are worth reading carefully. Bellhop's |H| sits about
+2.7 dB under the six full-wave models: this 100 m guide is only D/λ = 3-10
+wavelengths deep over 50-150 Hz, far outside the D/λ ≳ 100 that ray theory
+wants, and the gap closes to 0.1 dB by D/λ = 67 and 0.0 dB by D/λ = 200
+(measured). The phase panel removes the bulk travel time before plotting,
+because the raw phase of a 3.3 s delay is aliased on any grid this coarse —
+see the comment at that panel.
+
 The elastic RAM backend rams0.5 is deliberately absent: its rotated-Padé march
 is only marginally stable (|G| ≈ 1 for the below-real-line elastic eigenvalues,
 Collins & Siegmann §3.3, Milinazzo 1997), and that error compounds across a
@@ -30,7 +38,7 @@ on the elastic Pekeris — which is its proper regime.
 
 Uses: RunMode.BROADBAND across six models · RunMode.TIME_SERIES (SPARC native,
 Bellhop delay-and-sum with source_waveform=) · RAM(Q=, T=, backend=) ·
-Field.to_time_trace · Field.at(frequency=) · plot.compare(value='mag'/'phase')
+Field.to_time_trace · Field.at(frequency=) · plot.compare(value='mag')
 """
 
 import os
@@ -130,8 +138,24 @@ fig, (ax_mag, ax_phase) = plt.subplots(2, 1, figsize=(11, 8), sharex=True,
                                        gridspec_kw={'hspace': 0.25})
 uacpy.plot.compare(spectra, labels=list(fields), value='mag', ax=ax_mag,
                    title='Magnitude |H(f)|')
-uacpy.plot.compare(spectra, labels=list(fields), value='phase', ax=ax_phase,
-                   title='Phase ∠H(f)')
+# The RAW phase cannot be read on this grid, for any model. The bulk travel
+# time is r/c0 = 3.3 s, and a phase sampled every df Hz is unambiguous only for
+# delays under 1/(2·df) — 0.5 s at this 1 Hz grid — so every curve would be
+# aliased, each model by its own sampling. (OASP rebuilds a finer grid of its
+# own, so it aliases differently and merely LOOKS like different physics.)
+# Removing the bulk delay leaves the multipath residual, which the grid does
+# resolve: all seven then agree, at about 7 ms.
+bulk_delay = TARGET_RANGE / 1500.0
+for name, spectrum in zip(fields, spectra):
+    spectrum_hz = np.asarray(spectrum.coords['frequency'], dtype=float)
+    compensated = (np.asarray(spectrum.data).ravel()
+                   * np.exp(2j * np.pi * spectrum_hz * bulk_delay))
+    ax_phase.plot(spectrum_hz, np.angle(compensated), label=name)
+ax_phase.set_ylabel('Phase (rad)')
+ax_phase.legend(fontsize=8)
+ax_phase.grid(True, alpha=0.3)
+ax_phase.set_title(f'Phase ∠H(f), bulk delay r/c₀ = {bulk_delay * 1e3:.0f} ms '
+                   f'removed')
 ax_mag.set_xlabel('')
 ax_phase.set_xlabel('Frequency (Hz)', fontweight='bold')
 fig.suptitle(f'Transfer functions — depth {mid_depth:.0f} m, range '

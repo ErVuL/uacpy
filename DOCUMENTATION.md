@@ -1235,6 +1235,13 @@ takes a positional index; `.eval(**labels, method='linear')` *interpolates*
 the old per-shape result subclasses: you slice a `Field` down to 1-D/2-D, then
 hand it to one plotter.
 
+Two methods narrow an axis instead of collapsing it: `.window(time=(lo, hi))`
+drops the samples outside an inclusive label range and **keeps** the axis
+(`None` for either end leaves it alone; a window that keeps nothing raises),
+and `.shift(time=delta)` translates a coordinate without touching the data.
+Together they put several models on one display axis — move an IFFT model's
+emission to `t=0`, then cut every trace to the same window.
+
 `at` / `isel` is the **grid-library convention** shared across the whole API
 (`at` = nearest, `isel` = positional): `Field`, `ResultStack`,
 `ReflectionCoefficient`, and the input carriers `SoundSpeedProfile`,
@@ -1465,6 +1472,7 @@ in a `from … import` statement use the real modules
 | `compare_models(fields, labels, env=…, title=…)` | side-by-side heatmaps, one shared colourbar; `title=` sets the figure title above the panels |
 | `plot.plot_field_difference(field, reference, env=…, diff_vmax=…)` | `field - reference` in dB, diverging map symmetric about zero; positive means `field` carries the higher loss. Refuses two fields that are not on one grid |
 | `plot.plot_field_statistics(fields, labels, depth=…)` | mean ± std per field at one depth, plus the pairwise RMS-difference matrix; `None` entries (a model that did not run) are dropped |
+| `plot.shared_colorbar(fig, axes, label=…)` | one colorbar for panels drawn with `show_colorbar=False`, taken from their own mappable; refuses panels that are not on one colour scale |
 | `env.plot()` | SSP + seafloor cross-section, optional `source=`/`receiver=` markers |
 | `ssp.plot()` / `env.ssp.plot()` | sound-speed profile `c(z)` as a depth-down line (one per range if range-dependent). `label=` / `color=` overlay several profiles on one `ax=`: an explicit colour draws the whole profile in it and drops the range colourbar, and the label names the profile rather than each column. `legend=` forces the legend on or off |
 | `bathymetry.plot()` / `altimetry.plot()` | seafloor depth / sea-surface height vs range — the shape carriers |

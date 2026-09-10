@@ -4865,3 +4865,109 @@ def test_the_range_axis_label_and_its_pinned_subtitle_share_one_unit_entry():
     field = Field(data=np.zeros(3), coords={'depth': np.arange(3.0)},
                   pinned={'range': 1500.0})
     assert _pinned_subtitle(field) == 'Range = 1.5 km'
+
+
+class TestSharedColorbar:
+    """One bar over several panels, and the guard that makes it honest.
+
+    Plotters return ``(fig, ax)``, so composing panels under a single bar meant
+    reaching into ``ax.collections`` and knowing to skip the contour overlays
+    that live there too. Four examples did exactly that by hand.
+    """
+
+    @staticmethod
+    def _panel(ax, *, vmin=40, vmax=100, contours=None):
+        field = Field(data=np.full((6, 9), 1e-3, dtype=complex),
+                      coords={'depth': np.linspace(5.0, 95.0, 6),
+                              'range': np.linspace(100.0, 3000.0, 9)},
+                      model='Synth', frequencies=100.0)
+        plots.plot_field(field, ax, vmin=vmin, vmax=vmax, show_colorbar=False,
+                         contours=contours)
+
+    def test_one_bar_describes_a_row_of_matched_panels(self):
+        fig, axes = plt.subplots(1, 3)
+        for ax in axes:
+            self._panel(ax)
+        bar = uacpy.plot.shared_colorbar(fig, axes, label='TL (dB)')
+
+        assert bar.ax.get_ylabel() == 'TL (dB)'
+        assert tuple(bar.mappable.get_clim()) == (40.0, 100.0)
+        plt.close(fig)
+
+    def test_contour_overlays_do_not_confuse_the_mappable_search(self):
+        """Contour sets are Collections too, so the heatmap is found by type
+        rather than by position in ``ax.collections``."""
+        fig, axes = plt.subplots(1, 2)
+        for ax in axes:
+            self._panel(ax, contours=[60, 80])
+        bar = uacpy.plot.shared_colorbar(fig, axes, label='TL (dB)')
+
+        assert tuple(bar.mappable.get_clim()) == (40.0, 100.0)
+        plt.close(fig)
+
+    def test_panels_on_different_scales_are_refused(self):
+        """One bar over two scales describes one panel and mislabels the
+        other, which is precisely what the hand-rolled version could not
+        notice."""
+        fig, axes = plt.subplots(1, 2)
+        self._panel(axes[0], vmin=40, vmax=100)
+        self._panel(axes[1], vmin=20, vmax=120)
+
+        with pytest.raises(ConfigurationError, match='not on one colour scale'):
+            uacpy.plot.shared_colorbar(fig, axes, label='TL (dB)')
+        plt.close(fig)
+
+    def test_a_panel_with_no_heatmap_is_refused(self):
+        """A 1-D line cut has no colour scale to describe."""
+        fig, ax = plt.subplots()
+        Field(data=np.full((6, 9), 1e-3, dtype=complex),
+              coords={'depth': np.linspace(5.0, 95.0, 6),
+                      'range': np.linspace(100.0, 3000.0, 9)},
+              model='Synth', frequencies=100.0).at(depth=50.0).plot(ax=ax)
+
+        with pytest.raises(ConfigurationError, match='no.*heatmap'):
+            uacpy.plot.shared_colorbar(fig, ax)
+        plt.close(fig)
+
+    def test_no_axes_at_all_is_refused(self):
+        fig = plt.figure()
+        with pytest.raises(ConfigurationError, match='no axes given'):
+            uacpy.plot.shared_colorbar(fig, [])
+        plt.close(fig)
+
+
+class TestAmbiguityIsARegisteredQuantity:
+    """A matched-field / range-Doppler ambiguity surface is normalised power in
+    dB re its own max. Before it was registered, such a surface could not ride
+    on a Field at all — the kind registry is closed on purpose — so example 38
+    drew it with raw matplotlib and placed the cells itself."""
+
+    @staticmethod
+    def _surface():
+        return Field(data=np.linspace(-15.0, 0.0, 20 * 30).reshape(20, 30),
+                     coords={'depth': np.linspace(5.0, 95.0, 20),
+                             'range': np.linspace(500.0, 5000.0, 30)},
+                     model='MFP', metadata={'kind': 'ambiguity'})
+
+    def test_it_renders_with_its_own_label_and_colormap(self):
+        fig, ax = plots.plot_field(self._surface(), vmin=-15, vmax=0)
+
+        assert fig.axes[-1].get_ylabel() == 'Normalised power (dB re max)'
+        assert ax.collections[0].get_cmap().name == 'turbo'
+        plt.close(fig)
+
+    def test_it_is_a_level_and_not_a_loss(self):
+        """More of it is a better match, so a 1-D cut through it must read
+        upward — unlike TL, where the least of it is the loudest."""
+        from uacpy.visualization.plots._common import _is_loss_view
+
+        assert _is_loss_view(self._surface(), 'dB') is False
+
+    def test_a_kind_outside_the_registry_is_refused(self):
+        """The registry stays closed: a silent default is how a mislabelled
+        quantity reaches a plot looking correct."""
+        surface = self._surface()
+        surface.metadata['kind'] = 'not_a_quantity'
+
+        with pytest.raises(ConfigurationError, match='unknown Field kind'):
+            plots.plot_field(surface)

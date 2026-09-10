@@ -5121,3 +5121,87 @@ def test_the_dB_docstring_contrasts_itself_against_tl_not_against_itself():
     assert rev.dB.tolist() == [60.0, 70.0]
     with pytest.raises(AttributeError, match='not a transmission loss'):
         rev.tl
+
+
+class TestFieldWindowAndShift:
+    """``window`` narrows an axis and keeps it; ``shift`` moves its origin.
+
+    ``at`` and ``isel`` collapse an axis to one sample, so before these there
+    was no way to cut a field to a time window or move its time origin — the
+    examples rebuilt the Field by hand, re-passing five identity fields and
+    silently dropping the two (``model_source``, ``metadata``) they forgot.
+    Both methods go through ``id_kwargs()``, which is the documented single
+    home for that identity surface.
+    """
+
+    @staticmethod
+    def _field():
+        from uacpy.core.results import Field
+        return Field(
+            data=np.arange(3 * 4 * 10, dtype=float).reshape(3, 4, 10),
+            coords={'depth': np.linspace(5.0, 95.0, 3),
+                    'range': np.linspace(100.0, 4000.0, 4),
+                    'time': np.linspace(-0.1, 0.8, 10)},
+            model='probe', backend='synthetic',
+            metadata={'kind': 'pressure', 'provenance': 'keep me'})
+
+    def test_window_keeps_the_axis_it_narrows(self):
+        field = self._field()
+        cut = field.window(time=(0.0, 0.5))
+
+        assert 'time' in cut.coords                     # not collapsed
+        assert cut.data.shape == (3, 4, 5)
+        assert cut.times.min() >= 0.0 and cut.times.max() <= 0.5
+
+    def test_an_open_end_trims_only_the_other(self):
+        field = self._field()
+        assert field.window(time=(0.0, None)).times.min() >= 0.0
+        assert field.window(time=(0.0, None)).times.max() == pytest.approx(
+            field.times.max())
+
+    def test_shift_moves_the_coordinate_and_leaves_the_data(self):
+        field = self._field()
+        moved = field.shift(time=-0.2)
+
+        assert np.allclose(moved.times, field.times - 0.2)
+        assert np.array_equal(moved.data, field.data)
+
+    def test_both_carry_the_whole_identity_surface(self):
+        """The hand-rebuild these replace copied five fields and dropped
+        ``metadata`` — which is where ``kind`` lives, so a tagged quantity
+        silently became an untagged one."""
+        field = self._field()
+        for derived in (field.window(time=(0.0, 0.5)), field.shift(time=1.0)):
+            assert derived.model == 'probe'
+            assert derived.backend == 'synthetic'
+            assert derived.metadata['kind'] == 'pressure'
+            assert derived.metadata['provenance'] == 'keep me'
+
+    def test_a_window_that_keeps_nothing_raises(self):
+        """An empty axis is not a smaller field; every later slice of it would
+        fail somewhere less obvious."""
+        with pytest.raises(ConfigurationError, match='keeps no sample'):
+            self._field().window(time=(50.0, 60.0))
+
+    @pytest.mark.parametrize('bounds,match', [
+        ({'time': (0.5, 0.1)}, 'inverted'),
+        ({'time': 0.5}, 'not a .lo, hi. pair'),
+        ({'nonexistent': (0.0, 1.0)}, 'unknown axis'),
+    ])
+    def test_rejected_windows(self, bounds, match):
+        with pytest.raises(ConfigurationError, match=match):
+            self._field().window(**bounds)
+
+    def test_a_non_finite_shift_raises(self):
+        """It would put the whole axis at NaN, losing the coordinate."""
+        with pytest.raises(ConfigurationError, match='not finite'):
+            self._field().shift(time=np.nan)
+
+    def test_the_two_compose(self):
+        """Shift the origin, then cut the window — what comparing solvers on
+        one display axis actually takes."""
+        field = self._field()
+        aligned = field.shift(time=0.1).window(time=(0.0, 0.3))
+
+        assert aligned.times.min() >= 0.0 and aligned.times.max() <= 0.3
+        assert aligned.metadata['provenance'] == 'keep me'

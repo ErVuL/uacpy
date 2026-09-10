@@ -1129,6 +1129,90 @@ def compare_models(
     return fig, axes
 
 
+@typed_plot_error
+def shared_colorbar(fig, axes, *, label=None, **colorbar_kw):
+    """One colorbar for a row or grid of panels, from the panels' own mappable.
+
+    Every plotter returns ``(fig, ax)``, so composing several into one figure
+    under a single colorbar meant reaching into ``ax.collections`` and knowing
+    to filter out the contour overlays that live there too. This does that, and
+    checks the thing a hand-rolled version cannot: **every panel must be on one
+    colour scale**, because a single bar drawn over panels with different
+    limits or colormaps describes one of them and mislabels the rest.
+
+    Draw the panels with ``show_colorbar=False`` and call this once.
+
+    Parameters
+    ----------
+    fig : Figure
+    axes : Axes, or a sequence / ndarray of Axes
+        The panels the bar describes. Space is taken from all of them, so the
+        bar lines up with the group rather than needing a hand-placed cax.
+    label : str, optional
+        Colorbar label. The panels were drawn without their own bars, so there
+        is no label to recover from them — pass the quantity's name.
+    **colorbar_kw
+        Forwarded to ``Figure.colorbar`` (``fraction``, ``pad``, ``shrink``,
+        ``location``, …). ``fraction`` and ``pad`` default to a **thin** bar
+        (0.02 / 0.02) rather than matplotlib's 0.15, which is sized for a
+        single axes and eats a sixth of a multi-panel sheet.
+
+    Returns
+    -------
+    Colorbar
+
+    Raises
+    ------
+    ConfigurationError
+        No panel drew a heatmap, or the panels disagree on colour limits or
+        colormap.
+
+    Notes
+    -----
+    Call this **after** any ``subplots_adjust``. The bar takes its space from
+    the panels as they stand, and a later ``subplots_adjust`` moves the panels
+    back over it — the same ordering hazard ``compare_models`` documents for
+    its credit footnote.
+    """
+    panels = [ax for ax in np.atleast_1d(np.asarray(axes, dtype=object)).ravel()
+              if ax is not None]
+    if not panels:
+        raise ConfigurationError(
+            "shared_colorbar: no axes given.",
+            remediation="Pass the panel (or the array of panels) the bar "
+                        "should describe.")
+
+    found = []
+    for ax in panels:
+        # Contour overlays are Collections too, so the heatmap is identified by
+        # type rather than by position in ax.collections.
+        meshes = [arr for arr in ax.collections if isinstance(arr, _mcoll.QuadMesh)]
+        found.extend(meshes + list(ax.images))
+    if not found:
+        raise ConfigurationError(
+            "shared_colorbar: none of these axes carries a heatmap.",
+            remediation="Draw the panels with a heatmap plotter (plot_field on "
+                        "a 2-D Field, plot_field_difference, …) before asking "
+                        "for a bar over them; a 1-D line cut has no colour "
+                        "scale to describe.")
+
+    reference = found[0]
+    ref_clim, ref_cmap = reference.get_clim(), reference.get_cmap().name
+    for other in found[1:]:
+        clim, cmap = other.get_clim(), other.get_cmap().name
+        if not np.allclose(clim, ref_clim, equal_nan=True) or cmap != ref_cmap:
+            raise ConfigurationError(
+                f"shared_colorbar: the panels are not on one colour scale — "
+                f"{ref_cmap} over {ref_clim} against {cmap} over {clim}.",
+                remediation="Pass the same vmin/vmax (and cmap) to every "
+                            "panel, or give each its own colorbar. One bar "
+                            "over two scales describes one panel and "
+                            "mislabels the other.")
+    colorbar_kw.setdefault('fraction', 0.02)
+    colorbar_kw.setdefault('pad', 0.02)
+    return fig.colorbar(reference, ax=panels, label=label, **colorbar_kw)
+
+
 def _same_grid_or_raise(caller: str, field: Field, reference: Field) -> None:
     """Refuse two fields that are not on one grid.
 
