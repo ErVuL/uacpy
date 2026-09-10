@@ -1,479 +1,144 @@
-"""
-═══════════════════════════════════════════════════════════════════════════════
-EXAMPLE 15: Elastic Boundaries - Complete Comparison of Both Workflows
-═══════════════════════════════════════════════════════════════════════════════
+"""Elastic boundaries — the two workflows, side by side.
 
-OBJECTIVE:
-    Demonstrate and compare TWO workflows for handling elastic boundaries:
-    1. Kraken Auto-Detection (uses krakenc internally)
-    2. BOUNCE → SCOOTER (pre-computed reflection coefficients)
+An elastic seabed (shear_speed > 0) can be handled two ways, and this runs both
+on one environment:
 
-FEATURES DEMONSTRATED:
-    ✓ Kraken automatic elastic boundary detection
-    ✓ krakenc for complex modes with shear
-    ✓ BOUNCE reflection coefficient computation
-    ✓ SCOOTER with .brc files
-    ✓ Side-by-side comparison of both approaches
-    ✓ Performance and accuracy analysis
+1. Kraken alone. It detects the shear speed and switches to krakenc for complex
+   modes — one call, nothing to manage.
+2. BOUNCE first, writing reflection coefficients to a .brc file, then Scooter
+   reading that file through acoustic_type='file'. More steps, but the .brc is
+   reusable across runs and shareable.
 
-WHEN TO USE EACH APPROACH:
+BOUNCE writes both .brc and .irc: Bellhop, Scooter and krakenc read .brc, while
+plain Kraken needs .irc (kraken.f90:47-48 aborts on a tabulated-'F' bottom), and
+SPARC reads neither.
 
-    **Approach 1: Kraken Auto (→ krakenc)**
-    ✓ Simple elastic boundaries
-    ✓ Quick, one-step solution
-    ✓ Good for beginners
-    ✓ Single run scenarios
-
-    **Approach 2: BOUNCE → BELLHOP/SCOOTER/KRAKEN**
-    ✓ Complex layered elastic media
-    ✓ Reusable reflection coefficients
-    ✓ Multiple simulations with same bottom
-    ✓ Professional workflows
-    ✓ When sharing reflection data
-
-    NOTE: BOUNCE generates both .brc and .irc files
-          - BELLHOP, SCOOTER, KRAKENC use .brc files
-          - KRAKEN uses .irc files (NOT .brc): Kraken/kraken.f90:47-48 aborts
-            outright on a bottom 'F' (tabulated .brc) boundary condition, while
-            a bottom 'P' (.irc) one passes
-          - SPARC does not support reflection files
-
-═══════════════════════════════════════════════════════════════════════════════
+Uses: Kraken auto-detection · Bounce(work_dir=) · BoundaryProperties(
+acoustic_type='file', reflection_file=) · ReflectionCoefficient.plot ·
+plot_field · plot.compare · plot.plot_field_difference
 """
 
-import sys
 import os
+import sys
+import time
 from pathlib import Path
-# Repo root, so ``import uacpy`` resolves from a source checkout.
-sys.path.insert(0, str(Path(__file__).parents[2]))
+sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
-OUTPUT_DIR = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
-                  or Path(__file__).parent / 'output')
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+import numpy as np
+import matplotlib.pyplot as plt
+import uacpy
 
-import numpy as np  # noqa: E402
-import matplotlib.pyplot as plt  # noqa: E402
-import uacpy  # noqa: E402
-from uacpy.models import Kraken, Bounce, Scooter  # noqa: E402
-from uacpy.core import BoundaryProperties  # noqa: E402
-from uacpy.visualization import plot_field, compare  # noqa: E402
-from plotting_utils import _plot_tl_difference  # noqa: E402
-import time  # noqa: E402
+OUT = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
+           or Path(__file__).parent / 'output')
+OUT.mkdir(parents=True, exist_ok=True)
 
-# Timing repeats. One cold call mostly measures process and binary load,
-# which lands on whichever model happens to run first, so every timing here
-# is a median of repeats taken after a discarded warm-up call.
-N_TIMING_REPEATS = 3
+N_REPEATS = 3
 
 
-def _median_time(call, repeats=N_TIMING_REPEATS):
-    """Return ``(result, median_seconds)`` for ``call``.
+def median_time(call, repeats=N_REPEATS):
+    """(result, median seconds) for ``call``, after a discarded warm-up.
 
-    Runs ``call`` once as an unmeasured warm-up, then ``repeats`` timed
-    runs, and returns the last result with the median wall time.
+    One cold call mostly measures process and binary load, which would land on
+    whichever model happened to run first.
     """
-    call()                                     # warm-up, discarded
+    call()
     times = []
     for _ in range(repeats):
-        t0 = time.perf_counter()
+        started = time.perf_counter()
         result = call()
-        times.append(time.perf_counter() - t0)
+        times.append(time.perf_counter() - started)
     return result, float(np.median(times))
 
 
-def main():
-    print("\n" + "═" * 80)
-    print("EXAMPLE 15: Elastic Boundaries - Complete Workflow Comparison")
-    print("═" * 80)
-    print("\nCompares two approaches for modeling elastic boundaries:")
-    print("  1. Kraken Auto-Detection (→ krakenc)")
-    print("  2. BOUNCE → Reflection Files → BELLHOP/SCOOTER/KRAKEN")
+bottom = uacpy.BoundaryProperties(
+    acoustic_type='half-space',
+    sound_speed=1600.0,        # compressional, m/s
+    shear_speed=400.0,         # shear > 0 is what makes the seabed ELASTIC
+    density=1.8,
+    attenuation=0.2,
+    shear_attenuation=0.5,
+)
+env = uacpy.Environment(name="Elastic bottom test", bathymetry=100.0,
+                        ssp=1500.0, bottom=bottom)
+source = uacpy.Source(depths=50.0, frequencies=100.0)
+receiver = uacpy.Receiver(depths=np.linspace(5, 95, 50),
+                          ranges=np.linspace(100, 10000, 100))
 
-    # ═══════════════════════════════════════════════════════════════════════
-    # SETUP: Define Environment with Elastic Bottom
-    # ═══════════════════════════════════════════════════════════════════════
+# Approach 1: Kraken sees shear_speed > 0 and routes itself to krakenc.
+kraken_tl, t_kraken = median_time(
+    lambda: uacpy.Kraken().run(env, source, receiver))
 
-    print("\n[SETUP] Creating environment with elastic bottom...")
-
-    # Elastic bottom with shear wave support
-    bottom_elastic = BoundaryProperties(
-        acoustic_type='half-space',
-        sound_speed=1600.0,         # Compressional wave speed (m/s)
-        shear_speed=400.0,          # Shear wave speed (m/s) - THIS MAKES IT ELASTIC
-        density=1.8,                # Density (g/cm³)
-        attenuation=0.2,            # P-wave attenuation (dB/wavelength)
-        shear_attenuation=0.5,      # S-wave attenuation (dB/wavelength)
-    )
-
-    env = uacpy.Environment(
-        name="Elastic Bottom Test",
-        bathymetry=100.0,
-        ssp=1500.0,
-        bottom=bottom_elastic
-    )
-
-    source = uacpy.Source(depths=50.0, frequencies=100.0)
-    receiver = uacpy.Receiver(
-        depths=np.linspace(5, 95, 50),
-        ranges=np.linspace(100, 10000, 100)
-    )
-
-    print(f"  ✓ Environment: depth={env.depth}m")
-    print(f"  ✓ Bottom: Cp={bottom_elastic.sound_speed} m/s, Cs={bottom_elastic.shear_speed} m/s")
-    print(f"  ✓ Source: {source.depths[0]}m depth, {source.frequencies[0]} Hz")
-    print(f"  ✓ Receiver: {len(receiver.depths)} depths, {len(receiver.ranges)} ranges")
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # APPROACH 1: Kraken Auto-Detection (→ krakenc)
-    # ═══════════════════════════════════════════════════════════════════════
-
-    print("\n" + "─" * 80)
-    print("APPROACH 1: Kraken with Auto-Detection")
-    print("─" * 80)
-    print("Kraken detects elastic boundary and automatically uses krakenc")
-    print("for complex modes computation.\n")
-
-    print("[1/2] Running Kraken...")
-    print("  • Kraken will detect shear_speed > 0")
-    print("  • Automatically switches to krakenc (complex modes)")
-    print("  • Computes TL field directly")
-
-    result_kraken, t_kraken = _median_time(
-        lambda: Kraken(verbose=False).compute_tl(env, source, receiver))
-
-    print(f"  ✓ Kraken completed in {t_kraken:.3f}s"
-          f" (median of {N_TIMING_REPEATS} runs after a warm-up)")
-    print(f"    - TL field shape: {result_kraken.data.shape}")
-    print("    - Used krakenc internally for elastic bottom")
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # APPROACH 2: BOUNCE → SCOOTER
-    # ═══════════════════════════════════════════════════════════════════════
-
-    print("\n" + "─" * 80)
-    print("APPROACH 2: BOUNCE → SCOOTER Workflow")
-    print("─" * 80)
-    print("Pre-compute reflection coefficients with BOUNCE, then use in SCOOTER.\n")
-
-    print("[1/3] Running BOUNCE to compute reflection coefficients...")
-    receiver_bounce = uacpy.Receiver(
-        depths=np.array([50.0]),
-        ranges=np.array([1000.0])
-    )
-
-    bounce_output = OUTPUT_DIR / 'bounce_brc'
-    bounce_result, t_bounce = _median_time(
-        lambda: Bounce(
-            verbose=False, c_low=1400.0, c_high=10000.0, rmax=10000.0,
-            # pinned work_dir ⇒ cleanup=False ⇒ .brc/.irc persist here
-            work_dir=bounce_output,
-        ).run(env=env, source=source, receiver=receiver_bounce))
-
-    print(f"  ✓ BOUNCE completed in {t_bounce:.3f}s")
-    print(f"    - Output: {Path(bounce_result.metadata['brc_file']).name}")
-
-    has_rc_data = bounce_result.theta is not None and bounce_result.R is not None
-    if has_rc_data:
-        angles = bounce_result.theta
-        R_mag = bounce_result.R
-        print(f"    - Reflection coefficient: {len(angles)} angles")
-        print(f"    - |R| range: [{R_mag.min():.3f}, {R_mag.max():.3f}]")
-
-    print("\n[2/3] Creating environment with .brc file...")
-    bottom_with_file = BoundaryProperties(
+# Approach 2: BOUNCE writes the reflection coefficients, Scooter reads them.
+# A pinned work_dir keeps the .brc/.irc files after the run.
+bounce, t_bounce = median_time(
+    lambda: uacpy.Bounce(c_low=1400.0, c_high=10000.0, rmax=10000.0,
+                         work_dir=OUT / 'bounce_brc').run(
+        env=env, source=source,
+        receiver=uacpy.Receiver(depths=np.array([50.0]),
+                                ranges=np.array([1000.0]))))
+env_from_file = uacpy.Environment(
+    name="Scooter with BOUNCE reflection coefficients",
+    bathymetry=100.0, ssp=1500.0,
+    bottom=uacpy.BoundaryProperties(
         acoustic_type='file',
-        reflection_file=bounce_result.metadata['brc_file'],
-        sound_speed=1600.0,
-        density=1.8,
-        attenuation=0.2,
-    )
+        reflection_file=bounce.metadata['brc_file'],
+        sound_speed=1600.0, density=1.8, attenuation=0.2),
+)
+scooter_tl, t_scooter = median_time(
+    lambda: uacpy.Scooter(c_low=bounce.metadata['c_low'],
+                          c_high=bounce.metadata['c_high']).run(
+        env_from_file, source, receiver))
 
-    env_with_rc = uacpy.Environment(
-        name="SCOOTER with BOUNCE RC",
-        bathymetry=100.0,
-        ssp=1500.0,
-        bottom=bottom_with_file
-    )
+residual = kraken_tl.dB - scooter_tl.dB
+mean_diff = float(np.nanmean(np.abs(residual)))
+p95_diff = float(np.nanpercentile(np.abs(residual), 95))
+max_diff = float(np.nanmax(np.abs(residual)))
+print(f"  |Kraken − Scooter|: mean {mean_diff:.2f} dB, "
+      f"95th pct {p95_diff:.2f} dB, worst cell {max_diff:.2f} dB")
+print("  Judge the two on the mean and the percentile: a large single-cell gap "
+      "is where the\n  methods put an interference null a little differently, "
+      "and near a null a small\n  shift in position is a big shift in dB.")
+print(f"  {len(bounce.theta)} reflection angles, "
+      f"|R| in [{bounce.R.min():.3f}, {bounce.R.max():.3f}]")
+print(f"  timing: Kraken {t_kraken:.3f} s against BOUNCE {t_bounce:.3f} s + "
+      f"Scooter {t_scooter:.3f} s (medians of {N_REPEATS})")
+print("  That ratio is a property of THIS grid and frequency — a krakenc mode "
+      "sum against\n  a Scooter FFP integration — and the .brc is reusable, "
+      "which changes the sum\n  entirely once you run more than once.")
 
-    print("  ✓ Environment created with acoustic_type='file'")
+fig, axes = plt.subplots(2, 3, figsize=(18, 9))
+uacpy.plot_field(kraken_tl, axes[0, 0], vmin=50, vmax=100,
+                 title='1: Kraken (auto krakenc)')
+uacpy.plot_field(scooter_tl, axes[0, 1], vmin=50, vmax=100,
+                 title='2: Scooter (BOUNCE .brc)')
+uacpy.plot.plot_field_difference(
+    kraken_tl, scooter_tl, axes[0, 2],
+    diff_vmax=max(5, max_diff),
+    title=f'Kraken − Scooter (mean |Δ| {mean_diff:.2f} dB)')
 
-    print("\n[3/3] Running SCOOTER with .brc file...")
-    result_scooter, t_scooter = _median_time(
-        lambda: Scooter(
-            verbose=False,
-            c_low=bounce_result.metadata['c_low'],
-            c_high=bounce_result.metadata['c_high'],
-        ).compute_tl(env_with_rc, source, receiver))
+# The BOUNCE result plots itself: |R| against grazing angle.
+bounce.plot(ax=axes[1, 0])
+# Mark the compressional critical angle, arccos(c_water / c_p): |R| is 1 below
+# it and falls past it. The shear speed (400 m/s) is below the water speed, so
+# there is no shear critical angle.
+critical = np.degrees(np.arccos(env.ssp.data.min() / bottom.sound_speed))
+axes[1, 0].axvline(critical, color='r', ls='--', lw=1.5, alpha=0.7)
+axes[1, 0].text(critical + 2, 0.5, f'critical\n≈{critical:.1f}°', color='red',
+                fontsize=9)
 
-    print(f"  ✓ SCOOTER completed in {t_scooter:.3f}s")
-    print(f"    - TL field shape: {result_scooter.data.shape}")
+labels = ['Kraken (auto)', 'Scooter (BOUNCE)']
+mid_range = float(np.median(kraken_tl.ranges))
+uacpy.plot.compare([kraken_tl.at(depth=50.0), scooter_tl.at(depth=50.0)],
+                   labels, ax=axes[1, 1], linewidth=2.5, alpha=0.8,
+                   title='TL vs range at 50 m')
+uacpy.plot.compare([kraken_tl.at(range=mid_range),
+                    scooter_tl.at(range=mid_range)],
+                   labels, ax=axes[1, 2], linewidth=2.5, alpha=0.8,
+                   title=f'TL vs depth at {mid_range / 1000:.1f} km')
 
-    t_bounce_total = t_bounce + t_scooter
-    print(f"\n  Total time for BOUNCE→SCOOTER: {t_bounce_total:.3f}s")
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # COMPARISON & ANALYSIS
-    # ═══════════════════════════════════════════════════════════════════════
-
-    print("\n" + "=" * 80)
-    print("COMPARISON & ANALYSIS")
-    print("=" * 80)
-
-    # Compute difference
-    tl_diff = result_kraken.dB - result_scooter.dB
-    max_diff = np.nanmax(np.abs(tl_diff))
-    mean_diff = np.nanmean(np.abs(tl_diff))
-    rms_diff = np.sqrt(np.nanmean(tl_diff**2))
-
-    p95_diff = float(np.nanpercentile(np.abs(tl_diff), 95))
-    worst = np.unravel_index(np.nanargmax(np.abs(tl_diff)), tl_diff.shape)
-    worst_depth = float(result_kraken.depths[worst[0]])
-    worst_range = float(result_kraken.ranges[worst[1]])
-
-    print("\nTL Comparison (Kraken vs SCOOTER):")
-    print(f"  • Maximum difference: {max_diff:.2f} dB"
-          f"  (at z = {worst_depth:.0f} m, r = {worst_range/1000:.2f} km)")
-    print(f"  • 95th percentile |difference|: {p95_diff:.2f} dB")
-    print(f"  • Mean absolute difference: {mean_diff:.2f} dB")
-    print(f"  • RMS difference: {rms_diff:.2f} dB")
-
-    print("\nPerformance:")
-    print(f"  • Kraken: {t_kraken:.3f}s")
-    print(f"  • BOUNCE+SCOOTER: {t_bounce_total:.3f}s "
-          f"(BOUNCE: {t_bounce:.3f}s + SCOOTER: {t_scooter:.3f}s)")
-    direction = 'faster' if t_kraken < t_bounce_total else 'slower'
-    print(f"  • Ratio: {t_bounce_total/t_kraken:.1f}x {direction}")
-    print(f"    Medians of {N_TIMING_REPEATS} runs after a warm-up, on this"
-          f" {len(receiver.depths)}x{len(receiver.ranges)} grid only.")
-    print("    This compares two different algorithms — a krakenc mode sum against")
-    print("    BOUNCE plus a Scooter FFP integration — not 'auto-detection versus")
-    print("    reflection files'. The ratio will move with grid size, frequency and")
-    print("    wavenumber sampling; do not carry this number to another problem.")
-
-    print("\nAccuracy:")
-    if mean_diff < 2.0 and max_diff < 10.0:
-        print("  ✓ Excellent agreement (mean < 2 dB, worst cell < 10 dB)")
-    elif mean_diff < 5.0:
-        print(f"  ✓ Agreement is good in the mean ({mean_diff:.2f} dB) and at the 95th")
-        print(f"    percentile ({p95_diff:.2f} dB), but the worst cell differs by")
-        print(f"    {max_diff:.2f} dB. Large single-cell gaps are expected where the two")
-        print("    methods put interference nulls in slightly different places: near a")
-        print("    null a small shift in position is a big shift in dB. Judge these two")
-        print("    solvers on the mean/percentile, and inspect the difference map for")
-        print("    whether the outliers are isolated nulls or a structural bias.")
-    else:
-        print("  ⚠ Moderate differences (consider parameter tuning)")
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # VISUALIZATION
-    # ═══════════════════════════════════════════════════════════════════════
-
-    print("\n[VISUALIZATION] Creating comparison plots...")
-
-    fig = plt.figure(figsize=(18, 12))
-    gs = fig.add_gridspec(3, 3, hspace=0.3, wspace=0.35)
-
-    # ─────────────────────────────────────────────────────────────────────
-    # Plot 1: Kraken TL
-    # ─────────────────────────────────────────────────────────────────────
-    ax1 = fig.add_subplot(gs[0, 0])
-
-    # Both TL panels on one 50-100 dB window (plot_field's default 20-120 dB
-    # scale narrowed to where this 100 m guide lives).
-    vmin, vmax = 50, 100
-    plot_field(result_kraken, ax=ax1, vmin=vmin, vmax=vmax,
-               title='APPROACH 1: Kraken (auto krakenc)')
-
-    # ─────────────────────────────────────────────────────────────────────
-    # Plot 2: SCOOTER TL
-    # ─────────────────────────────────────────────────────────────────────
-    ax2 = fig.add_subplot(gs[0, 1])
-
-    plot_field(result_scooter, ax=ax2, vmin=vmin, vmax=vmax,
-               title='APPROACH 2: SCOOTER (BOUNCE .brc)')
-
-    # ─────────────────────────────────────────────────────────────────────
-    # Plot 3: Difference
-    # ─────────────────────────────────────────────────────────────────────
-    ax3 = fig.add_subplot(gs[0, 2])
-
-    diff_max = max(5, max(abs(np.nanmin(tl_diff)), abs(np.nanmax(tl_diff))))
-    _plot_tl_difference(result_kraken, result_scooter, ax=ax3, diff_vmax=diff_max,
-                        title=f'Difference (Kraken - SCOOTER)\nMean: {mean_diff:.2f} dB')
-
-    # ─────────────────────────────────────────────────────────────────────
-    # Plot 4: Reflection Coefficient
-    # ─────────────────────────────────────────────────────────────────────
-    ax4 = fig.add_subplot(gs[1, 0])
-
-    if has_rc_data:
-        # The result plots itself: |R| against grazing angle.
-        bounce_result.plot(ax=ax4)
-        ax4.set_title('BOUNCE: Bottom Reflection Coefficient', fontweight='bold')
-
-        # Mark the compressional critical angle, arccos(c_water / c_p): |R|
-        # is 1 below it and falls past it (the shear speed, 400 m/s, is below
-        # the water speed, so there is no shear critical angle).
-        crit_angle = np.degrees(np.arccos(env.ssp.data.min() / bottom_elastic.sound_speed))
-        ax4.axvline(crit_angle, color='r', linestyle='--', linewidth=1.5, alpha=0.7)
-        ax4.text(crit_angle + 2, 0.5, f'Critical\nangle\n≈{crit_angle:.1f}°',
-                 fontsize=9, color='red', ha='left')
-    else:
-        ax4.text(0.5, 0.5, 'Reflection coefficient\ndata not available',
-                 ha='center', va='center', transform=ax4.transAxes, fontsize=11)
-        ax4.set_title('BOUNCE: Bottom Reflection Coefficient', fontweight='bold')
-
-    # ─────────────────────────────────────────────────────────────────────
-    # Plot 5: TL Comparison at Source Depth
-    # ─────────────────────────────────────────────────────────────────────
-    ax5 = fig.add_subplot(gs[1, 1])
-
-    labels = ['Kraken (Auto)', 'SCOOTER (BOUNCE)']
-    compare([result_kraken.at(depth=source.depths[0]),
-             result_scooter.at(depth=source.depths[0])], labels, ax=ax5,
-            linewidth=2.5, alpha=0.8,
-            title=f'TL Comparison at {source.depths[0]:.0f}m Depth')
-
-    # ─────────────────────────────────────────────────────────────────────
-    # Plot 6: TL Comparison at Mid-Range
-    # ─────────────────────────────────────────────────────────────────────
-    ax6 = fig.add_subplot(gs[1, 2])
-
-    mid_range_km = np.median(result_kraken.ranges) / 1000
-
-    compare([result_kraken.at(range=mid_range_km * 1000.0),
-             result_scooter.at(range=mid_range_km * 1000.0)], labels, ax=ax6,
-            linewidth=2.5, alpha=0.8,
-            title=f'TL vs Depth at {mid_range_km:.1f}km Range')
-
-    # ─────────────────────────────────────────────────────────────────────
-    # Plot 7: Workflow Diagram
-    # ─────────────────────────────────────────────────────────────────────
-    ax7 = fig.add_subplot(gs[2, 0])
-    ax7.axis('off')
-
-    workflow1 = "APPROACH 1: Kraken Auto\n" + "="*35 + "\n\n"
-    workflow1 += "Step 1: Define environment\n"
-    workflow1 += "  bottom = BoundaryProperties(\n"
-    workflow1 += "    acoustic_type='half-space',\n"
-    workflow1 += "    shear_speed=400  # Elastic!\n"
-    workflow1 += "  )\n\n"
-    workflow1 += "Step 2: Run Kraken\n"
-    workflow1 += "  kraken = Kraken()\n"
-    workflow1 += "  result = kraken.run(...)\n"
-    workflow1 += "  # Auto-detects elastic\n"
-    workflow1 += "  # Uses krakenc internally\n\n"
-    workflow1 += "✓ Simple, one-step\n"
-    workflow1 += "✓ Good for beginners\n"
-    workflow1 += f"✓ Time: {t_kraken:.1f}s"
-
-    ax7.text(0.05, 0.95, workflow1, transform=ax7.transAxes,
-             fontsize=8, verticalalignment='top', family='monospace',
-             bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.5))
-
-    # ─────────────────────────────────────────────────────────────────────
-    # Plot 8: Workflow Diagram 2
-    # ─────────────────────────────────────────────────────────────────────
-    ax8 = fig.add_subplot(gs[2, 1])
-    ax8.axis('off')
-
-    workflow2 = "APPROACH 2: BOUNCE→SCOOTER\n" + "="*35 + "\n\n"
-    workflow2 += "Step 1: Run BOUNCE\n"
-    workflow2 += "  bounce = Bounce()\n"
-    workflow2 += "  rc = bounce.run(...)\n"
-    workflow2 += "  # Generates .brc file\n\n"
-    workflow2 += "Step 2: Create env with file\n"
-    workflow2 += "  bottom = BoundaryProperties(\n"
-    workflow2 += "    acoustic_type='file',\n"
-    workflow2 += "    reflection_file=rc.metadata['brc_file']\n"
-    workflow2 += "  )\n\n"
-    workflow2 += "Step 3: Run SCOOTER\n"
-    workflow2 += "  scooter = Scooter()\n"
-    workflow2 += "  result = scooter.run(...)\n\n"
-    workflow2 += "✓ Reusable .brc files\n"
-    workflow2 += "✓ Professional workflow\n"
-    workflow2 += f"✓ Time: {t_bounce_total:.1f}s"
-
-    ax8.text(0.05, 0.95, workflow2, transform=ax8.transAxes,
-             fontsize=8, verticalalignment='top', family='monospace',
-             bbox=dict(boxstyle='round', facecolor='lightgreen', alpha=0.5))
-
-    # ─────────────────────────────────────────────────────────────────────
-    # Plot 9: Summary & Recommendations
-    # ─────────────────────────────────────────────────────────────────────
-    ax9 = fig.add_subplot(gs[2, 2])
-    ax9.axis('off')
-
-    summary = "RECOMMENDATIONS\n" + "="*35 + "\n\n"
-    summary += "When to use EACH:\n\n"
-    summary += "Kraken Auto:\n"
-    summary += "  • Simple elastic bottoms\n"
-    summary += "  • Single simulation runs\n"
-    summary += "  • Quick prototyping\n"
-    summary += "  • Learning/teaching\n\n"
-    summary += "BOUNCE→SCOOTER:\n"
-    summary += "  • Complex layered media\n"
-    summary += "  • Multiple simulations\n"
-    summary += "  • Production workflows\n"
-    summary += "  • Reusable coefficients\n"
-    summary += "  • Sharing reflection data\n\n"
-    summary += "ACCURACY:\n"
-    summary += f"  Mean diff: {mean_diff:.2f} dB\n"
-    summary += f"  RMS diff: {rms_diff:.2f} dB\n"
-    summary += f"  {'✓ Excellent' if mean_diff < 2 else '✓ Good'}"
-
-    ax9.text(0.05, 0.95, summary, transform=ax9.transAxes,
-             fontsize=8, verticalalignment='top', family='monospace',
-             bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.5))
-
-    # Main title
-    fig.suptitle('EXAMPLE 15: Elastic Boundaries - Complete Workflow Comparison',
-                 fontsize=14, fontweight='bold', y=0.995)
-
-    # Save
-    output_file = OUTPUT_DIR / 'example_15_elastic_boundaries_comparison.png'
-    plt.savefig(output_file, dpi=150, bbox_inches='tight')
-    print(f"  ✓ Saved: {output_file}")
-
-    plt.close()
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # SUMMARY
-    # ═══════════════════════════════════════════════════════════════════════
-
-    print("\n" + "=" * 80)
-    print("SUMMARY")
-    print("=" * 80)
-
-    print("\n✓ BOTH approaches work correctly for elastic boundaries")
-    print(f"✓ Results agree within {mean_diff:.2f} dB (mean absolute difference)")
-    print(f"✓ RMS difference: {rms_diff:.2f} dB")
-
-    print("\nPERFORMANCE:")
-    print(f"  • Kraken Auto: {t_kraken:.3f}s")
-    print(f"  • BOUNCE+SCOOTER: {t_bounce_total:.3f}s")
-    if t_kraken < t_bounce_total:
-        print(f"  → On this grid Kraken ran {t_bounce_total/t_kraken:.1f}x faster")
-    else:
-        print(f"  → On this grid SCOOTER ran {t_kraken/t_bounce_total:.1f}x faster")
-    print("  → Two different algorithms, one grid size, one frequency — treat the")
-    print("    ratio as a property of this configuration, not of the two codes.")
-    print("  → And BOUNCE .brc can be reused across runs, which changes the sum")
-    print("    entirely once you do more than one.")
-
-    print("\nCHOOSE:")
-    print("  • Kraken Auto → For simple cases and single runs")
-    print("  • BOUNCE→BELLHOP/SCOOTER/KRAKEN → For professional workflows and reusability")
-    print("\nNOTE:")
-    print("  • BOUNCE outputs: .brc (bottom) + .irc (internal) reflection coefficients")
-    print("  • BELLHOP, SCOOTER, KRAKENC use .brc files")
-    print("  • KRAKEN uses .irc files (NOT .brc)")
-    print("  • SPARC does not support reflection files")
-
-    print("\n✓ Example 15 complete\n")
-
-    return 0
-
-
-if __name__ == '__main__':
-    sys.exit(main())
+fig.suptitle('Elastic boundaries — Kraken auto-detection against '
+             'BOUNCE → Scooter', fontsize=14, fontweight='bold')
+fig.tight_layout()
+fig.savefig(OUT / 'example_15_elastic_boundaries_comparison.png', dpi=150,
+            bbox_inches='tight')
+plt.close(fig)

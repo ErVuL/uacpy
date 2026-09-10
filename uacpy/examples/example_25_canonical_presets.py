@@ -1,80 +1,57 @@
-"""
-Example 25: Canonical SSP shapes and bottom-loss curves
-=========================================================
+"""Canonical SSP shapes and bottom-loss curves.
 
-Showcases the SSP factories on :class:`SoundSpeedProfile` and the
-plane-wave bottom-loss helper:
+Two catalogues side by side: the sound-speed profiles uacpy can build from a
+factory — isovelocity, Munk, and one derived from T(z), S(z) through Mackenzie
+— and the plane-wave bottom loss of the sediment and rock presets.
 
-1. Side-by-side plot of three canonical SSPs — isothermal, Munk, and a
-   Mackenzie-derived T(z), S(z) profile.
-2. Overlay of the fluid–fluid bottom-loss curves across grazing angle for
-   the sediment and rock presets in :mod:`uacpy.core.materials` (all but
-   ``granite``, whose 5500 m/s would sit on top of basalt's 5250 m/s).
-   ``bottom_loss_curve`` ignores each preset's shear speed by construction.
+Granite is left out of the loss panel: its 5500 m/s would sit on top of
+basalt's 5250 m/s. bottom_loss_curve ignores each preset's shear speed by
+construction.
 
-Output: ``output/example_25_canonical_presets.png``.
+Uses: SoundSpeedProfile.from_isovelocity / from_munk / from_mackenzie ·
+ssp.plot(ax=, label=, color=) · core.acoustics.bottom_loss_curve
 """
 
-import sys
 import os
+import sys
 from pathlib import Path
-# Repo root, so ``import uacpy`` resolves from a source checkout.
-sys.path.insert(0, str(Path(__file__).parents[2]))
+sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
-import numpy as np  # noqa: E402
-import matplotlib.pyplot as plt  # noqa: E402
+import numpy as np
+import matplotlib.pyplot as plt
+import uacpy
+from uacpy.core.acoustics import bottom_loss_curve
 
-from uacpy.core.environment import SoundSpeedProfile  # noqa: E402
-from uacpy.core.acoustics import bottom_loss_curve  # noqa: E402
+OUT = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
+           or Path(__file__).parent / 'output')
+OUT.mkdir(parents=True, exist_ok=True)
 
+depths = np.linspace(0.0, 4000.0, 161)
+temperature = 4.0 + 14.0 * np.exp(-depths / 400.0)
+salinity = 35.0 - 0.5 * np.exp(-depths / 300.0)
 
-def main():
-    out_dir = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
-                   or Path(__file__).parent / 'output')
-    out_dir.mkdir(parents=True, exist_ok=True)
+fig, axes = plt.subplots(1, 2, figsize=(15, 8))
 
-    print("\n" + "═" * 80)
-    print("EXAMPLE 25: Canonical SSP shapes + bottom-loss curves")
-    print("═" * 80)
+# Each profile draws itself; an explicit colour overlays them on one axes.
+uacpy.SoundSpeedProfile.from_isovelocity(
+    depth_max=4000.0, sound_speed=1500.0).plot(
+        ax=axes[0], label='isovelocity', color='C0')
+uacpy.SoundSpeedProfile.from_munk(depth_max=4000.0, n_points=81).plot(
+    ax=axes[0], label='Munk', color='C1')
+uacpy.SoundSpeedProfile.from_mackenzie(depths, temperature, salinity).plot(
+    ax=axes[0], label='Mackenzie T,S', color='C2')
+axes[0].set_title('Canonical SSP shapes')
 
-    fig, axes = plt.subplots(1, 2, figsize=(15, 8))
+for preset in ('clay', 'silt', 'sand', 'gravel', 'moraine',
+               'chalk', 'limestone', 'basalt'):
+    angles, loss_dB = bottom_loss_curve(preset)
+    axes[1].plot(angles, loss_dB, label=preset, lw=1.5)
+axes[1].set_xlabel('Grazing angle (°)')
+axes[1].set_ylabel('Bottom loss (dB)')
+axes[1].set_title('Plane-wave bottom loss')
+axes[1].legend(loc='upper right', fontsize=9)
+axes[1].grid(True, alpha=0.3)
 
-    iso = SoundSpeedProfile.from_isovelocity(depth_max=4000.0, sound_speed=1500.0)
-    munk = SoundSpeedProfile.from_munk(depth_max=4000.0, n_points=81)
-    z = np.linspace(0.0, 4000.0, 161)
-    T = 4.0 + 14.0 * np.exp(-z / 400.0)
-    S = 35.0 - 0.5 * np.exp(-z / 300.0)
-    mackenzie = SoundSpeedProfile.from_mackenzie(z, T, S)
-
-    for label, ssp, style in [
-        ('isovelocity',    iso,        '-'),
-        ('Munk',           munk,       '--'),
-        ('Mackenzie T,S',  mackenzie,  '-.'),
-    ]:
-        axes[0].plot(ssp.data[:, 0], ssp.depths, style, lw=2, label=label)
-    axes[0].invert_yaxis()
-    axes[0].set_xlabel('Sound speed (m/s)')
-    axes[0].set_ylabel('Depth (m)')
-    axes[0].set_title('Canonical SSP shapes')
-    axes[0].legend(loc='lower left', fontsize=10)
-    axes[0].grid(True, alpha=0.3)
-
-    for name in ['clay', 'silt', 'sand', 'gravel', 'moraine',
-                 'chalk', 'limestone', 'basalt']:
-        angles, loss_dB = bottom_loss_curve(name)
-        axes[1].plot(angles, loss_dB, label=name, lw=1.5)
-    axes[1].set_xlabel('Grazing angle (°)')
-    axes[1].set_ylabel('Bottom loss (dB)')
-    axes[1].set_title('Plane-wave bottom loss')
-    axes[1].legend(loc='upper right', fontsize=9)
-    axes[1].grid(True, alpha=0.3)
-
-    fig.tight_layout()
-    out = out_dir / 'example_25_canonical_presets.png'
-    fig.savefig(out, dpi=120)
-    plt.close(fig)
-    print(f"  ✓ Saved {out.name}")
-
-
-if __name__ == '__main__':
-    main()
+fig.tight_layout()
+fig.savefig(OUT / 'example_25_canonical_presets.png', dpi=120)
+plt.close(fig)

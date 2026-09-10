@@ -1,594 +1,234 @@
-"""
-===============================================================================
-BROADBAND COMPARISON: Time-Series and Transfer Functions Across Models
-===============================================================================
+"""Broadband comparison — transfer functions and time series across models.
 
-OBJECTIVE:
-    Demonstrate broadband / time-series capability across all models that
-    support it:
-    - Bellhop: ray-tracing arrivals → transfer function or delay-and-sum
-    - RAM (mpiramS, ramgeo, ramsurf1.5): native broadband fluid PE — three
-      independent Collins-family codes on the same fluid Pekeris (the elastic
-      backend rams0.5 is excluded here; its rotated-Padé march is marginally
-      stable and unsuited to wide-band time-series synthesis — see §3 below)
-    - SPARC: time-marched FFP, returns time-domain pressure
-    - Scooter: multi-frequency FFP, returns transfer function
-    - Kraken: multi-frequency normal modes, returns transfer function
+Eight solvers on one Pekeris waveguide, each producing the broadband quantity
+it naturally produces, then all of them turned into time traces at the same
+receiver: Bellhop (arrivals → H(f), and delay-and-sum for a chirp), the three
+fluid RAM backends (mpiramS, ramgeo, ramsurf1.5), Scooter and Kraken
+(multi-frequency FFP and modes), OASP (OASES transient), and SPARC
+(time-marched FFP, which returns p(t) directly).
 
-SCENARIO:
-    Pekeris waveguide (isovelocity, 100 m depth, 100 Hz center frequency).
-    Compare transfer functions and synthesize time-domain impulse responses.
+Three things make the comparison fair:
 
-NOTE ON THE TIME TRACES:
-    All broadband models share one dense, matched frequency grid (50–150 Hz,
-    df = 1 Hz → 1/df = 1 s IFFT window). A fine df matters for two reasons:
-    (1) if the IFFT window exceeds 1/df, coarse sampling produces periodic
-    replicas of the impulse response before the geometric arrival r/c₀; the
-    dense grid pushes those replicas out to 1 s, well outside the display
-    window. (2) The Pekeris waveguide is dispersive — slower modal group
-    velocities (down to the Airy phase) arrive AFTER the first arrival, so a
-    broadband pulse develops a real modal coda; the fine df resolves it
-    identically across models. The RAM backends size their grid from
-    (Q, T) and the others from this ``frequencies`` array, both landing on
-    the same 50–150 Hz / df = 1 Hz sampling.
+* ONE seabed object, passed to every model. Leaving `bottom=` off would fall
+  back to the Environment default for some models while others got an explicit
+  half-space — they would then be solving different waveguides.
+* ONE frequency grid, 50-150 Hz at df = 1 Hz. Fine df matters twice over: a
+  coarse grid produces periodic replicas of the impulse response before the
+  geometric arrival when the IFFT window exceeds 1/df, and the Pekeris guide is
+  dispersive, so slower modal group velocities arrive after the first arrival
+  and build a real coda that df has to resolve. The RAM backends size their
+  grid from (Q, T) and the rest from the frequencies array; both land here.
+* SPARC is the stated exception: it accepts only vacuum/rigid boundaries, so
+  uacpy converts the half-space to rigid and warns. Its trace shows the
+  time-marching method, not the same physics.
 
-FEATURES DEMONSTRATED:
-    - RunMode.BROADBAND for H(f) transfer functions across all models
-    - RunMode.TIME_SERIES for time-domain p(t):
-        * SPARC: native time-marching (no source waveform required)
-        * Bellhop: delay-and-sum with source_waveform + sample_rate
-        * RAM/Scooter/Kraken: BROADBAND + IFFT-convolve with source waveform
-    - Transfer function (complex pressure vs. frequency) output
-    - IFFT synthesis for time-domain impulse response
-    - Delay-and-sum convolution with LFM chirp source
-    - Comparison of time-domain results across models
+The elastic RAM backend rams0.5 is deliberately absent: its rotated-Padé march
+is only marginally stable (|G| ≈ 1 for the below-real-line elastic eigenvalues,
+Collins & Siegmann §3.3, Milinazzo 1997), and that error compounds across a
+wide sweep plus IFFT. It is robust in NARROWBAND TL — within ~0.1 dB of krakenc
+on the elastic Pekeris — which is its proper regime.
 
-===============================================================================
+Uses: RunMode.BROADBAND across six models · RunMode.TIME_SERIES (SPARC native,
+Bellhop delay-and-sum with source_waveform=) · RAM(Q=, T=, backend=) ·
+Field.to_time_trace · Field.at(frequency=) · plot.compare(value='mag'/'phase')
 """
 
+import os
 import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
+
 import numpy as np
-import matplotlib.pyplot as plt  # noqa: E402
+import matplotlib.pyplot as plt
+import uacpy
+from uacpy.acoustic_signal.waveforms import lfm_chirp
 
-import os  # noqa: E402
-from pathlib import Path  # noqa: E402
+OUT = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
+           or Path(__file__).parent / 'output')
+OUT.mkdir(parents=True, exist_ok=True)
 
-# Repo root, so ``import uacpy`` resolves from a source checkout.
-sys.path.insert(0, str(Path(__file__).parents[2]))
+seabed = uacpy.BoundaryProperties(acoustic_type='half-space',
+                                  sound_speed=1600.0, density=1.5,
+                                  attenuation=0.5)
+env = uacpy.Environment(name='Pekeris waveguide', bathymetry=100, ssp=1500,
+                        bottom=seabed)
+source = uacpy.Source(depths=36, frequencies=100)
+receiver = uacpy.Receiver(depths=np.linspace(5, 95, 12),
+                          ranges=np.array([5000.0]))
+frequencies = np.arange(50.0, 150.0 + 0.5, 1.0)
+TARGET_DEPTH, TARGET_RANGE = 50.0, 5000.0
+print(f"  {env.depth:.0f} m Pekeris, source {source.depths[0]:.0f} m, "
+      f"receiver {TARGET_RANGE / 1000:.0f} km, "
+      f"{frequencies[0]:.0f}-{frequencies[-1]:.0f} Hz at "
+      f"df={frequencies[1] - frequencies[0]:.0f} Hz")
 
-OUTPUT_DIR = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
-                  or Path(__file__).parent / 'output')
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
-import uacpy  # noqa: E402
-from uacpy.core.environment import BoundaryProperties  # noqa: E402
-from uacpy.models import Bellhop, RAM, SPARC, Scooter, Kraken, OASP  # noqa: E402
-from uacpy.models.base import RunMode  # noqa: E402
-from uacpy.acoustic_signal.waveforms import lfm_chirp  # noqa: E402
-
-
-def main():
-    # =========================================================================
-    # 1. ENVIRONMENT SETUP
-    # =========================================================================
-    print("\n" + "═" * 80)
-    print("EXAMPLE 19: Broadband Model Comparison")
-    print("═" * 80)
-
-    # ONE seabed, shared by every model in this script. Leaving ``bottom=``
-    # off would fall back to the Environment default (cp=1600, rho=1.5,
-    # alpha=0.5) for some models while others were handed an explicit,
-    # different half-space — the models would then be solving physically
-    # different waveguides and the comparison below would be meaningless.
-    # Stated explicitly so that cannot happen silently.
-    pekeris_bottom = BoundaryProperties(
-        acoustic_type='half-space', sound_speed=1600.0,
-        density=1.5, attenuation=0.5,
+# Six transfer-function models on the shared grid. OASP rebuilds an equispaced
+# grid of its own, so its sweep bounds go on the constructor.
+fields = {
+    name: model.run(env, source, receiver,
+                    run_mode=uacpy.RunMode.BROADBAND, frequencies=frequencies)
+    for name, model in (
+        ('Bellhop', uacpy.Bellhop()),
+        ('Scooter', uacpy.Scooter()),
+        ('Kraken', uacpy.Kraken()),
+        ('OASP', uacpy.OASP(n_time_samples=512,
+                            freq_max=float(frequencies[-1]),
+                            freq_min=float(frequencies[0]))),
     )
+}
 
-    env = uacpy.Environment(
-        name='Pekeris Waveguide',
-        bathymetry=100,
-        ssp=1500,
-        bottom=pekeris_bottom,
-    )
+# The RAM dispatcher routes by environment: fluid Pekeris + flat surface →
+# mpiramS; the same fluid Pekeris carrying a flat z=0 altimetry line →
+# ramsurf1.5 (the altimetry only selects the code path); backend='ramgeo'
+# forces the third. Only the broadband window (Q, T) is supplied — dr and dz
+# come from the Lytaev optimizer. Q=2, T=1 gives fc ± 50 Hz at df = 1 Hz, the
+# same grid as the frequencies array above.
+flat_env = env
+altimetry_env = uacpy.Environment(name='Pekeris-fluid-altimetry',
+                                  bathymetry=env.depth, ssp=1500.0,
+                                  bottom=seabed,
+                                  altimetry=[(0.0, 0.0), (8000.0, 0.0)])
+for label, ram_env, kwargs in (
+        ('RAM (mpiramS)', flat_env, {}),
+        ('RAM (ramgeo)', flat_env, {'backend': 'ramgeo'}),
+        ('RAM (ramsurf1.5)', altimetry_env, {})):
+    model = uacpy.RAM(Q=2.0, T=1.0, **kwargs)
+    print(f"  {label:18s} → backend {model.select_backend(ram_env)}")
+    fields[label] = model.run(ram_env, source, receiver,
+                              run_mode=uacpy.RunMode.BROADBAND)
 
-    source = uacpy.Source(depths=36, frequencies=100)
+for name, field in fields.items():
+    print(f"  {name:18s} H{field.data.shape} over "
+          f"{field.frequencies[0]:.0f}-{field.frequencies[-1]:.0f} Hz")
 
-    # Single range for broadband comparison (5 km)
-    receiver = uacpy.Receiver(
-        depths=np.linspace(5, 95, 12),
-        ranges=np.array([5000.0])
-    )
+# SPARC marches time directly. n_t_out sets the output rate, n_t_out / t_max:
+# 4800 over 4 s is 1200 Hz (Nyquist 600 Hz), above the 200 Hz top of the source
+# band. 1001 would give 250 Hz and alias p(t).
+sparc_receiver = uacpy.Receiver(depths=np.array([50.0]),
+                                ranges=np.linspace(500, 5000, 5))
+sparc = uacpy.SPARC(n_t_out=4800, t_max=4.0, f_min=50.0, f_max=200.0).run(
+    env, source, sparc_receiver, run_mode=uacpy.RunMode.TIME_SERIES)
+print(f"  SPARC              p{sparc.data.shape}, dt={sparc.dt * 1e3:.3f} ms "
+      f"(rigid bottom — see the module docstring)")
 
-    # All broadband models share one dense grid matching RAM's band
-    # (fc=100, Q=2 → 50–150 Hz) with df=1 Hz → a 1 s IFFT window. This is fine
-    # enough to (a) suppress the pre-arrival periodic replicas that coarse
-    # sampling produces when the IFFT window exceeds 1/df, and (b) resolve the
-    # Pekeris dispersive modal coda consistently across every model.
-    # Together with the single shared ``pekeris_bottom`` above, that makes the
-    # time-series comparison apples-to-apples for the seven transfer-function
-    # models. SPARC is the exception and says so where it runs: it accepts only
-    # vacuum/rigid boundaries, so it solves a rigid-bottom guide.
-    frequencies = np.arange(50.0, 150.0 + 0.5, 1.0)
+# Bellhop's other time-domain route: delay-and-sum of its arrivals against a
+# real source waveform.
+fs, chirp_duration = 2000.0, 0.1
+t_chirp, chirp = lfm_chirp(50.0, 150.0, chirp_duration, fs)
+chirp_response = uacpy.Bellhop().run(
+    env, source,
+    uacpy.Receiver(depths=np.array([TARGET_DEPTH]),
+                   ranges=np.array([TARGET_RANGE])),
+    run_mode=uacpy.RunMode.TIME_SERIES, source_waveform=chirp, sample_rate=fs)
+print(f"  Bellhop (chirp)    p{chirp_response.data.shape}, "
+      f"peak {np.max(np.abs(chirp_response.data)):.3e}")
 
-    # Target receiver for time-series extraction
-    target_depth = 50.0  # m
-    target_range = 5000.0  # m
+# ── The transfer functions, magnitude and phase ─────────────────────────────
+mid_depth = float(receiver.depths[receiver.depths.size // 2])
+spectra = [f.at(depth=mid_depth, range=TARGET_RANGE) for f in fields.values()]
+fig, (ax_mag, ax_phase) = plt.subplots(2, 1, figsize=(11, 8), sharex=True,
+                                       gridspec_kw={'hspace': 0.25})
+uacpy.plot.compare(spectra, labels=list(fields), value='mag', ax=ax_mag,
+                   title='Magnitude |H(f)|')
+uacpy.plot.compare(spectra, labels=list(fields), value='phase', ax=ax_phase,
+                   title='Phase ∠H(f)')
+ax_mag.set_xlabel('')
+ax_phase.set_xlabel('Frequency (Hz)', fontweight='bold')
+fig.suptitle(f'Transfer functions — depth {mid_depth:.0f} m, range '
+             f'{TARGET_RANGE / 1000:.0f} km', fontsize=13, fontweight='bold',
+             y=0.995)
+fig.subplots_adjust(top=0.92, bottom=0.08, left=0.08, right=0.97)
+fig.savefig(OUT / 'example_19_transfer_functions.png', dpi=150,
+            bbox_inches='tight')
+plt.close(fig)
 
-    print(f"\nEnvironment: {env.name}")
-    print(f"  Depth: {env.depth} m, Sound speed: 1500 m/s")
-    print(f"  Source: {source.depths[0]} m depth, {source.frequencies[0]} Hz center")
-    print(f"  Receiver: {len(receiver.depths)} depths, range = {receiver.ranges[0]/1000:.0f} km")
-    print(f"  Frequencies: {frequencies[0]:.0f} - {frequencies[-1]:.0f} Hz ({len(frequencies)} points)")
-    print(f"  Time-series target: depth={target_depth} m, range={target_range/1000:.0f} km")
+# ── TL against depth at the centre frequency ────────────────────────────────
+fig, ax = plt.subplots(figsize=(8, 6))
+for name, field in fields.items():
+    # Slice to one (frequency, range) cell, leaving a 1-D vector over depth.
+    cut = field.at(frequency=source.frequencies[0], range=TARGET_RANGE).to_dB()
+    ax.plot(np.asarray(cut.dB).ravel(), field.depths, label=name, linewidth=1.5)
+ax.set_xlabel('Transmission loss (dB)')
+ax.set_ylabel('Depth (m)')
+ax.set_title(f'TL vs depth at {source.frequencies[0]:.0f} Hz, '
+             f'{TARGET_RANGE / 1000:.0f} km')
+ax.invert_yaxis()
+ax.legend()
+ax.grid(True, alpha=0.3)
+fig.tight_layout()
+fig.savefig(OUT / 'example_19_tl_depth_comparison.png', dpi=150,
+            bbox_inches='tight')
+plt.close(fig)
 
-    results = {}
+# ── Every model as a time trace at the same receiver ────────────────────────
+arrival_s = TARGET_RANGE / 1500.0
+t_start = max(0.0, arrival_s - 0.5)          # half a second of lead-in
+traces = {}
+for name, field in fields.items():
+    trace = field.to_time_trace(depth=TARGET_DEPTH, range=TARGET_RANGE,
+                                t_start=t_start)
+    traces[name] = (trace.times * 1000, trace.data)
+traces['Bellhop (chirp)'] = (
+    chirp_response.times * 1000,
+    chirp_response.at(depth=TARGET_DEPTH, range=TARGET_RANGE).data)
+traces['SPARC'] = (
+    sparc.times * 1000,
+    sparc.at(depth=float(sparc.depths[0]), range=float(sparc.ranges[-1])).data)
+print(f"  first arrival at {arrival_s * 1e3:.0f} ms; {len(traces)} traces")
 
-    # =========================================================================
-    # 2. BELLHOP BROADBAND (arrivals → transfer function)
-    # =========================================================================
-    print("\n--- Bellhop Broadband ---")
-    try:
-        bellhop = Bellhop(verbose=False)
-        result_bellhop = bellhop.run(
-            env, source, receiver,
-            run_mode=RunMode.BROADBAND,
-            frequencies=frequencies,
-        )
-        print(f"  Output type: {result_bellhop.field_type}")
-        print(f"  Shape: {result_bellhop.data.shape} (depth x range x freq)")
-        print(f"  Frequencies: {result_bellhop.frequencies[0]:.1f} - "
-              f"{result_bellhop.frequencies[-1]:.1f} Hz")
-        results['Bellhop'] = result_bellhop
-    except Exception as e:
-        print(f"  SKIPPED: {e}")
-
-    # =========================================================================
-    # 3. RAM BROADBAND — the three fluid PE backends
-    # =========================================================================
-    # The dispatcher routes by env: Pekeris fluid + flat surface → mpiramS;
-    # fluid + a flat z=0 altimetry line → ramsurf1.5 (the altimetry merely
-    # forces the ramsurf code path on the SAME fluid Pekeris). RAMGEO is
-    # forced via backend='ramgeo' on the flat env (its bathymetry-parallel
-    # layering isn't exercised on a half-space, but it is a third independent
-    # Collins fluid PE on identical physics). All three read the same
-    # ``pekeris_bottom`` as the non-PE models, so this is a clean fluid-PE
-    # algorithm cross-comparison on the same Pekeris.
-    #
-    # The elastic backend rams0.5 is deliberately NOT included in this
-    # broadband time-series comparison. Its rotated-Padé elastic march is only
-    # marginally stable (|G| ≈ 1 for the below-real-line elastic eigenvalues;
-    # Collins & Siegmann §3.3, Milinazzo 1997), so that marginal error
-    # compounds across a wide frequency sweep + IFFT and contaminates the
-    # synthesized pulse. rams0.5 is robust and validated in NARROWBAND TL —
-    # it matches krakenc to ~0.1 dB on the elastic Pekeris (see
-    # tests/test_cross_model_agreement.py, the ``pekeris-elastic`` scenario) —
-    # which is its proper regime; wide-band time-series synthesis is not.
-    # Same ``pekeris_bottom`` as every other model — the only thing that
-    # differs between env_mp and env_rs is the presence of a flat z=0
-    # altimetry line, which selects the ramsurf1.5 code path.
-    env_mp = uacpy.Environment(
-        name='Pekeris-fluid-flat', bathymetry=env.depth,
-        ssp=1500.0, bottom=pekeris_bottom,
-    )
-    env_rs = uacpy.Environment(
-        name='Pekeris-fluid-altimetry', bathymetry=env.depth,
-        ssp=1500.0, bottom=pekeris_bottom,
-        altimetry=[(0.0, 0.0), (8000.0, 0.0)],
-    )
-
-    # Only the broadband window (Q, T) is supplied. (dr, dz) are picked
-    # by the Lytaev Padé-error optimizer from env + centre frequency;
-    # zmax is sized to the seafloor plus an absorbing-layer wavelength
-    # buffer. Q=2, T=1 → fc±50 Hz at df=1 Hz (101 freqs), the SAME 50–150 Hz /
-    # df=1 Hz grid the ``frequencies`` array gives Scooter/Kraken/OASP, so all
-    # broadband models are compared on one matched grid.
-    common_numerics = dict(Q=2.0, T=1.0)
-    ram_specs = [
-        ('RAM (mpiramS)', env_mp, dict(**common_numerics)),
-        ('RAM (ramgeo)', env_mp, dict(backend='ramgeo', **common_numerics)),
-        ('RAM (ramsurf1.5)', env_rs, dict(**common_numerics)),
-    ]
-
-    for label, env_ram, ram_kwargs in ram_specs:
-        print(f"\n--- {label} Broadband ---")
-        try:
-            ram = RAM(verbose=False, **ram_kwargs)
-            print(f"  backend = {ram.select_backend(env_ram)}")
-            result_ram = ram.run(env_ram, source, receiver,
-                                 run_mode=RunMode.BROADBAND)
-            print(f"  Output shape: {result_ram.data.shape}")
-            print(f"  Frequencies: {result_ram.frequencies[0]:.1f} - "
-                  f"{result_ram.frequencies[-1]:.1f} Hz")
-            results[label] = result_ram
-        except Exception as e:
-            print(f"  SKIPPED: {type(e).__name__}: {e}")
-
-    # =========================================================================
-    # 4. SCOOTER BROADBAND (multi-frequency FFP)
-    # =========================================================================
-    print("\n--- Scooter Broadband ---")
-    try:
-        scooter = Scooter(verbose=False)
-        result_scooter = scooter.run(
-            env, source, receiver,
-            run_mode=RunMode.BROADBAND,
-            frequencies=frequencies
-        )
-        print(f"  Output shape: {result_scooter.data.shape} (depth x range x freq)")
-        print(f"  Frequencies: {result_scooter.frequencies[0]:.1f} - {result_scooter.frequencies[-1]:.1f} Hz")
-        results['Scooter'] = result_scooter
-    except Exception as e:
-        print(f"  SKIPPED: {e}")
-
-    # =========================================================================
-    # 5. KRAKEN BROADBAND (multi-frequency normal modes)
-    # =========================================================================
-    print("\n--- Kraken Broadband ---")
-    try:
-        kraken = Kraken(verbose=False)
-        result_kraken = kraken.run(
-            env, source, receiver,
-            run_mode=RunMode.BROADBAND,
-            frequencies=frequencies
-        )
-        print(f"  Output shape: {result_kraken.data.shape} (depth x range x freq)")
-        print(f"  Frequencies: {result_kraken.frequencies[0]:.1f} - "
-              f"{result_kraken.frequencies[-1]:.1f} Hz")
-        results['Kraken'] = result_kraken
-    except Exception as e:
-        print(f"  SKIPPED: {e}")
-
-    # =========================================================================
-    # 5b. OASP BROADBAND (OASES wavenumber-integration broadband)
-    # =========================================================================
-    print("\n--- OASP Broadband ---")
-    try:
-        # OASP rebuilds an equispaced (n_time_samples, freq_max) grid; pass
-        # the broadband sweep parameters on the constructor.
-        oasp = OASP(
-            verbose=False,
-            n_time_samples=512,
-            freq_max=float(frequencies[-1]),
-            freq_min=float(frequencies[0]),
-        )
-        result_oasp = oasp.run(
-            env, source, receiver,
-            run_mode=RunMode.BROADBAND,
-            frequencies=frequencies,
-        )
-        print(f"  Output shape: {result_oasp.data.shape} (depth x range x freq)")
-        print(f"  Frequencies: {result_oasp.frequencies[0]:.1f} - "
-              f"{result_oasp.frequencies[-1]:.1f} Hz "
-              f"({len(result_oasp.frequencies)} bins)")
-        results['OASP'] = result_oasp
-    except Exception as e:
-        print(f"  SKIPPED: {e}")
-
-    # =========================================================================
-    # 6. SPARC TIME-DOMAIN (direct time-marching)
-    # =========================================================================
-    print("\n--- SPARC Time-Domain ---")
-    print("  NOTE: SPARC is the one model here that does NOT share the seabed.")
-    print("  It supports only 'vacuum'/'rigid' boundaries, so uacpy converts the")
-    print("  shared half-space to rigid and warns. SPARC therefore solves a")
-    print("  perfectly-reflecting guide, not the Pekeris guide the other seven")
-    print("  models solve; its trace is shown for the time-marching method, not")
-    print("  as a same-physics comparison.")
-    try:
-        # n_t_out sets the output sample rate, n_t_out / t_max. At 1001 over
-        # a 4 s window that is 250 Hz — Nyquist 125 Hz, below the 200 Hz top
-        # of the source band, so p(t) aliases. 4800 gives 1200 Hz (Nyquist
-        # 600 Hz), which is what the library's own guidance asks for.
-        sparc = SPARC(
-            verbose=False, n_t_out=4800, t_max=4.0,
-            f_min=50.0, f_max=200.0,
-        )
-        receiver_sparc = uacpy.Receiver(
-            depths=np.array([50.0]),
-            ranges=np.linspace(500, 5000, 5)
-        )
-        result_sparc = sparc.run(
-            env, source, receiver_sparc, run_mode=RunMode.TIME_SERIES,
-        )
-        print(f"  Output shape: {result_sparc.data.shape} (n_depths x nr x nt)")
-        print(f"  Time step: {result_sparc.dt*1000:.3f} ms")
-        print(f"  Duration: {result_sparc.times[-1]*1000:.1f} ms")
-        results['SPARC'] = result_sparc
-    except Exception as e:
-        print(f"  SKIPPED: {e}")
-
-    # =========================================================================
-    # 7. BELLHOP DELAY-AND-SUM WITH LFM CHIRP
-    # =========================================================================
-    print("\n--- Bellhop Delay-and-Sum (LFM chirp) ---")
-    try:
-        bellhop_das = Bellhop(verbose=False)
-
-        # Generate LFM chirp: 50-150 Hz over 100 ms
-        fs = 2000.0  # sample rate
-        chirp_duration = 0.1
-        f0, f1 = 50.0, 150.0
-        t_chirp, chirp = lfm_chirp(f0, f1, chirp_duration, fs)
-
-        # Receiver with target depth/range for arrivals computation
-        receiver_das = uacpy.Receiver(
-            depths=np.array([target_depth]),
-            ranges=np.array([target_range])
-        )
-        result_das = bellhop_das.run(
-            env, source, receiver_das,
-            run_mode=RunMode.TIME_SERIES,
-            source_waveform=chirp,
-            sample_rate=fs,
-        )
-        print(f"  Output type: {result_das.field_type}")
-        print(f"  Shape: {result_das.data.shape}")
-        print(f"  Time: {result_das.times[0]*1000:.1f} - "
-              f"{result_das.times[-1]*1000:.1f} ms")
-        print(f"  Max amplitude: {np.max(np.abs(result_das.data)):.6f}")
-        results['Bellhop (chirp)'] = result_das
-    except Exception as e:
-        print(f"  SKIPPED: {e}")
-
-    # =========================================================================
-    # 8. COMPARISON PLOTS
-    # =========================================================================
-    if len(results) < 2:
-        print("\nNot enough models succeeded for comparison. Exiting.")
-        return
-
-    # --- Plot A: Transfer function magnitude/phase comparison ---
-    tf_models = {k: v for k, v in results.items()
-                 if 'frequency' in v.coords}
-    if tf_models:
-        from uacpy.visualization.plots import compare
-        depth_idx = receiver.depths.shape[0] // 2
-        depth = float(receiver.depths[depth_idx])
-        # Slice each broadband Field to a single (depth, range) → leaves
-        # a 1-D spectrum over frequency. Stack magnitude (top) and phase
-        # (bottom) on a shared 2-row axes layout via the ax= kwarg.
-        traces = [
-            f.at(depth=depth, range=target_range)
-            for f in tf_models.values()
-        ]
-        labels = list(tf_models)
-        fig, (ax_mag, ax_phase) = plt.subplots(
-            2, 1, figsize=(11, 8), sharex=True,
-            gridspec_kw={'height_ratios': [1, 1], 'hspace': 0.25},
-        )
-        compare(traces, labels=labels, value='mag', ax=ax_mag,
-                title='Magnitude |H(f)|')
-        compare(traces, labels=labels, value='phase', ax=ax_phase,
-                title='Phase ∠H(f)')
-        ax_mag.set_xlabel('')
-        ax_phase.set_xlabel('Frequency (Hz)', fontweight='bold')
-        # Lift the figure title above the magnitude panel so it doesn't
-        # collide with the per-axes title.
-        fig.suptitle(
-            f'Transfer functions — depth={depth:.0f} m, '
-            f'range={target_range/1000:.0f} km',
-            fontsize=13, fontweight='bold', y=0.995,
-        )
-        fig.subplots_adjust(top=0.92, bottom=0.08, left=0.08, right=0.97)
-        fig.savefig(OUTPUT_DIR / 'example_19_transfer_functions.png',
-                    dpi=150, bbox_inches='tight')
-        plt.close(fig)
-        print(f"\n  ✓ Saved: {OUTPUT_DIR / 'example_19_transfer_functions.png'}")
-
-    # --- Plot B: TL vs depth comparison at center frequency ---
-    fig, ax = plt.subplots(figsize=(8, 6))
-
-    for name, result in tf_models.items():
-        # Slice the broadband Field down to a single (frequency, range)
-        # cell so what's left is a 1-D vector over depth.
-        depth_cut = result.at(
-            frequency=source.frequencies[0], range=target_range,
-        ).to_dB().dB
-        ax.plot(np.asarray(depth_cut).ravel(), result.depths,
-                label=name, linewidth=1.5)
-
-    ax.set_xlabel('Transmission Loss (dB)')
-    ax.set_ylabel('Depth (m)')
-    ax.set_title(f'TL vs Depth at {source.frequencies[0]:.0f} Hz, '
-                 f'range={target_range/1000:.0f} km')
-    ax.invert_yaxis()
-    ax.legend()
+fig, axes = plt.subplots(len(traces), 1, figsize=(14, 2.5 * len(traces)),
+                         squeeze=False)
+window = (arrival_s * 1000 - 250, arrival_s * 1000 + 250)
+for ax, (name, (times_ms, values)) in zip(axes[:, 0], traces.items()):
+    ax.plot(times_ms, values, color=f'C{list(traces).index(name) % 10}', lw=0.8)
+    ax.set_ylabel(name, fontsize=10, fontweight='bold')
     ax.grid(True, alpha=0.3)
-    fig.tight_layout()
-    fig.savefig(OUTPUT_DIR / 'example_19_tl_depth_comparison.png',
-                dpi=150, bbox_inches='tight')
-    plt.close(fig)
-    print(f"  ✓ Saved: {OUTPUT_DIR / 'example_19_tl_depth_comparison.png'}")
+    if name != 'Bellhop (chirp)':     # the chirp trace has its own short axis
+        ax.set_xlim(*window)
+    ax.text(0.98, 0.92, f'max = {np.max(np.abs(values)):.2e}',
+            transform=ax.transAxes, ha='right', va='top', fontsize=8,
+            color='gray',
+            bbox=dict(boxstyle='round,pad=0.3', fc='white', alpha=0.8))
+axes[-1, 0].set_xlabel('Time (ms)')
+fig.suptitle(f'Time series — depth {TARGET_DEPTH:.0f} m, range '
+             f'{TARGET_RANGE / 1000:.0f} km, fc '
+             f'{source.frequencies[0]:.0f} Hz', fontsize=13)
+fig.tight_layout()
+fig.savefig(OUT / 'example_19_time_series_comparison.png', dpi=150,
+            bbox_inches='tight')
+plt.close(fig)
 
-    # --- Plot C: TIME-SERIES COMPARISON (all models at same receiver) ---
-    # Convert all transfer functions to time domain at the target point
-    # Use consistent t_start for all models so they share the same time window
-    c0 = 1500.0
-    t_arrival = target_range / c0  # ~3.333 s for 5 km
-    t_start_common = max(0.0, t_arrival - 0.5)  # 0.5 s before first arrival
+# ── The chirp in and the chirp out ──────────────────────────────────────────
+fig, (ax_tx, ax_rx) = plt.subplots(2, 1, figsize=(12, 6))
+ax_tx.plot(t_chirp * 1000, chirp, 'k-', linewidth=0.8)
+ax_tx.set_title(f'Source: LFM chirp 50-150 Hz, '
+                f'{chirp_duration * 1000:.0f} ms')
+ax_rx.plot(*traces['Bellhop (chirp)'], color='b', linewidth=0.8)
+ax_rx.set_title(f'Received: Bellhop delay-and-sum at {TARGET_DEPTH:.0f} m, '
+                f'{TARGET_RANGE / 1000:.0f} km')
+for ax in (ax_tx, ax_rx):
+    ax.set_xlabel('Time (ms)')
+    ax.set_ylabel('Amplitude')
+    ax.grid(True, alpha=0.3)
+fig.tight_layout()
+fig.savefig(OUT / 'example_19_bellhop_chirp.png', dpi=150, bbox_inches='tight')
+plt.close(fig)
 
-    print(f"\n--- Converting to time-domain at depth={target_depth} m, "
-          f"range={target_range/1000:.0f} km ---")
-    print(f"  Common t_start = {t_start_common*1000:.1f} ms "
-          f"(arrival at {t_arrival*1000:.1f} ms)")
-
-    ts_results = {}  # name → (time_array_ms, data_array)
-
-    for name, result in tf_models.items():
-        try:
-            ts = result.to_time_trace(
-                depth=target_depth, range=target_range,
-                t_start=t_start_common,
-            )
-            ts_results[name] = (ts.times * 1000, ts.data)
-            print(f"  {name}: {len(ts.data)} samples, "
-                  f"t=[{ts.times[0]*1000:.1f}, "
-                  f"{ts.times[-1]*1000:.1f}] ms")
-        except Exception as e:
-            print(f"  {name}: FAILED ({e})")
-
-    # Add Bellhop delay-and-sum result. Bellhop TIME_SERIES returns a
-    # Field over a 1×1 grid; extract the single trace.
-    if 'Bellhop (chirp)' in results:
-        r = results['Bellhop (chirp)']
-        trace = r.at(depth=target_depth, range=target_range).data
-        ts_results['Bellhop (chirp)'] = (r.times * 1000, trace)
-
-    # Add SPARC at the first depth and last range.
-    if 'SPARC' in results:
-        r = results['SPARC']
-        trace = r.at(depth=float(r.depths[0]), range=float(r.ranges[-1])).data
-        ts_results['SPARC'] = (r.times * 1000, trace)
-
-    if ts_results:
-        # Separate impulse-response models from chirp/SPARC for cleaner comparison
-        ir_results = {k: v for k, v in ts_results.items()
-                      if k not in ('Bellhop (chirp)', 'SPARC')}
-
-        n_ts = len(ts_results)
-        fig, axes = plt.subplots(n_ts, 1, figsize=(14, 2.5 * n_ts), squeeze=False)
-        axes = axes[:, 0]
-
-        colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b']
-
-        # Compute common time window for impulse-response models
-        t_center_ms = t_arrival * 1000
-        t_window_ms = 500  # +/- 250 ms around arrival
-        t_lo = t_center_ms - t_window_ms / 2
-        t_hi = t_center_ms + t_window_ms / 2
-
-        for idx, (name, (t_ms, data)) in enumerate(ts_results.items()):
-            ax = axes[idx]
-            color = colors[idx % len(colors)]
-
-            ax.plot(t_ms, data, color=color, linewidth=0.8)
-            ax.set_ylabel(name, fontsize=10, fontweight='bold')
-            ax.grid(True, alpha=0.3)
-
-            # Use common time window for comparable models
-            if name in ir_results or name == 'SPARC':
-                ax.set_xlim(t_lo, t_hi)
-
-            # Show max amplitude
-            max_amp = np.max(np.abs(data))
-            ax.text(0.98, 0.92, f'max = {max_amp:.2e}',
-                    transform=ax.transAxes, ha='right', va='top',
-                    fontsize=8, color='gray',
-                    bbox=dict(boxstyle='round,pad=0.3', fc='white', alpha=0.8))
-
-        axes[-1].set_xlabel('Time (ms)')
-        fig.suptitle(f'Time-Series Comparison — depth={target_depth:.0f} m, '
-                     f'range={target_range/1000:.0f} km\n'
-                     f'fc={source.frequencies[0]:.0f} Hz, '
-                     f'Pekeris waveguide {env.depth:.0f} m',
-                     fontsize=13)
-        fig.tight_layout()
-        fig.savefig(OUTPUT_DIR / 'example_19_time_series_comparison.png',
-                    dpi=150, bbox_inches='tight')
-        plt.close(fig)
-        print(f"  ✓ Saved: {OUTPUT_DIR / 'example_19_time_series_comparison.png'}")
-
-    # --- Plot D: Bellhop delay-and-sum detail ---
-    if 'Bellhop (chirp)' in results:
-        r = results['Bellhop (chirp)']
-        t_ms = r.times * 1000
-        data = r.at(depth=target_depth, range=target_range).data
-
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 6))
-
-        # Source chirp
-        t_chirp_ms = t_chirp * 1000
-        ax1.plot(t_chirp_ms, chirp, 'k-', linewidth=0.8)
-        ax1.set_ylabel('Amplitude')
-        ax1.set_title(f'Source: LFM chirp {f0:.0f}–{f1:.0f} Hz, '
-                      f'{chirp_duration*1000:.0f} ms')
-        ax1.set_xlabel('Time (ms)')
-        ax1.grid(True, alpha=0.3)
-
-        # Received waveform
-        ax2.plot(t_ms, data, 'b-', linewidth=0.8)
-        ax2.set_ylabel('Amplitude')
-        ax2.set_title(f'Received: Bellhop delay-and-sum at '
-                      f'depth={target_depth:.0f} m, '
-                      f'range={target_range/1000:.0f} km')
-        ax2.set_xlabel('Time (ms)')
-        ax2.grid(True, alpha=0.3)
-
-        fig.tight_layout()
-        fig.savefig(OUTPUT_DIR / 'example_19_bellhop_chirp.png',
-                    dpi=150, bbox_inches='tight')
-        plt.close(fig)
-        print(f"  ✓ Saved: {OUTPUT_DIR / 'example_19_bellhop_chirp.png'}")
-
-    # --- Plot E: SPARC waterfall (if available) ---
-    if 'SPARC' in results:
-        result_sparc = results['SPARC']
-        time_ms = result_sparc.times * 1000
-        # New shape (n_d, n_r, n_t) — depth 0 → (n_r, n_t).
-        pressure = result_sparc.data[0]
-
-        fig, ax = plt.subplots(figsize=(12, 6))
-        n_traces = min(pressure.shape[0], 10)   # n_r
-        ranges_km = receiver_sparc.ranges[:n_traces] / 1000
-
-        for i in range(n_traces):
-            trace = pressure[i, :]              # all time samples at range i
-            trace_norm = trace / (np.max(np.abs(trace)) + 1e-30) * 0.8
-            ax.plot(time_ms, trace_norm + i, 'k-', linewidth=0.7)
-            ax.text(time_ms[-1] * 1.01, i, f'{ranges_km[i]:.1f} km',
-                    fontsize=8, va='center')
-
-        ax.set_xlabel('Time (ms)')
-        ax.set_ylabel('Range (trace index)')
-        ax.set_title('SPARC Time-Domain Waveforms')
-        ax.set_xlim(time_ms[0], time_ms[-1])
-        ax.grid(True, alpha=0.3)
-        fig.tight_layout()
-        fig.savefig(OUTPUT_DIR / 'example_19_sparc_time_series.png',
-                    dpi=150, bbox_inches='tight')
-        plt.close(fig)
-        print(f"  ✓ Saved: {OUTPUT_DIR / 'example_19_sparc_time_series.png'}")
-
-    # =========================================================================
-    # 9. SUMMARY
-    # =========================================================================
-    print("\n" + "=" * 70)
-    print("BROADBAND MODEL COMPARISON SUMMARY")
-    print("=" * 70)
-    print(f"\n{'Model':<20} {'Type':<20} {'Shape':<25} {'Notes'}")
-    print("-" * 85)
-    for name, result in results.items():
-        # Categorise from which axis lives in ``coords`` — broadband
-        # carries 'frequency', time-domain carries 'time'.
-        if 'frequency' in result.coords:
-            kind = 'broadband H(f)'
-            notes = f'{len(result.coords["frequency"])} freqs'
-        elif 'time' in result.coords:
-            kind = 'time series p(t)'
-            notes = f"dt={result.dt*1000:.2f} ms"
-        else:
-            kind = 'narrowband'
-            notes = ''
-        print(f"{name:<20} {kind:<20} {str(result.data.shape):<25} {notes}")
-
-    print("\nModels with TIME_SERIES support:")
-    print("  Bellhop     - arrivals → H(f) via Fourier synthesis, or delay-and-sum")
-    print("  RAM         - native broadband PE (mpiramS/ramgeo/ramsurf1.5), H(f)")
-    print("  Scooter     - multi-freq FFP (native freq loop), returns H(f)")
-    print("  Kraken - multi-freq normal modes (Python loop), returns H(f)")
-    print("  SPARC       - time-marched FFP (native time domain), returns p(t)")
-    print("  OASP        - OASES transient (pulse) module: wavenumber integration /")
-    print("                global matrix, NOT a parabolic equation. Returns")
-    print("                H(f).")
-    print("\nSeabed: every model above runs the same half-space")
-    print(f"  (cp={pekeris_bottom.sound_speed:.0f} m/s, rho={pekeris_bottom.density:.1f},")
-    print(f"   alpha={pekeris_bottom.attenuation:.1f} dB/wavelength)")
-    print("  except SPARC, which supports only vacuum/rigid and is converted to rigid.")
-
-    print("\n✓ Example 19 complete\n")
-
-
-if __name__ == '__main__':
-    main()
+# ── SPARC's own waterfall, one trace per range ──────────────────────────────
+fig, ax = plt.subplots(figsize=(12, 6))
+times_ms = sparc.times * 1000
+for index, trace in enumerate(sparc.data[0]):          # depth 0 → (n_r, n_t)
+    normalised = trace / (np.max(np.abs(trace)) + 1e-30) * 0.8
+    ax.plot(times_ms, normalised + index, 'k-', linewidth=0.7)
+    ax.text(times_ms[-1] * 1.01, index,
+            f'{sparc_receiver.ranges[index] / 1000:.1f} km', fontsize=8,
+            va='center')
+ax.set_xlabel('Time (ms)')
+ax.set_ylabel('Range (trace index)')
+ax.set_title('SPARC time-domain waveforms')
+ax.set_xlim(times_ms[0], times_ms[-1])
+ax.grid(True, alpha=0.3)
+fig.tight_layout()
+fig.savefig(OUT / 'example_19_sparc_time_series.png', dpi=150,
+            bbox_inches='tight')
+plt.close(fig)

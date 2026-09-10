@@ -1,327 +1,161 @@
+"""Boundary conditions — top surfaces and layered bottoms.
+
+Seven boundaries on one 100 m waveguide, at 200 Hz, so the panels are directly
+comparable: a flat pressure-release surface, a Pierson-Moskowitz rough sea, an
+elastic ice cover; then a single sediment layer, three layers, the same three
+built from material presets, and finally a layered seabed that changes along
+range. Bellhop takes the surface cases, RAM the bottom ones.
+
+Uses: env.altimetry from generate_sea_surface · an elastic `surface=` ·
+SedimentLayer / SeabedColumn · SeabedColumn.from_presets ·
+Bottom.from_columns · env.has_range_dependent_layered_bottom
 """
-Example 17: Boundary Conditions - Top BC and Layered Bottoms
-=============================================================
 
-Demonstrates:
-  1. Top boundary conditions: vacuum, rough sea surface, elastic (ice)
-  2. Layered bottoms: single layer, multi-layer sediment
-  3. Range-dependent layered bottoms
-  4. Sea surface wave scattering (Pierson-Moskowitz spectrum)
-
-Models exercised: RAM (bottom scenarios), Bellhop (surface scenarios)
-"""
-
-import sys
 import os
+import sys
 from pathlib import Path
-# Repo root, so ``import uacpy`` resolves from a source checkout.
-sys.path.insert(0, str(Path(__file__).parents[2]))
+sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
-import numpy as np  # noqa: E402
-import uacpy  # noqa: E402
-from uacpy.core.environment import (  # noqa: E402
-    BoundaryProperties, SedimentLayer, SeabedColumn,
-    Bottom, SoundSpeedProfile, generate_sea_surface,
-)
+import numpy as np
+import matplotlib.pyplot as plt
+import uacpy
+from uacpy.core.environment import generate_sea_surface
 
+OUT = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
+           or Path(__file__).parent / 'output')
+OUT.mkdir(parents=True, exist_ok=True)
 
-def make_source_receiver():
-    """Standard source/receiver for all tests."""
-    source = uacpy.Source(frequencies=200, depths=25)
-    receiver = uacpy.Receiver(
-        depths=np.linspace(1, 95, 30),
-        ranges=np.linspace(500, 5000, 40),
-    )
-    return source, receiver
+source = uacpy.Source(frequencies=200, depths=25)
+receiver = uacpy.Receiver(depths=np.linspace(1, 95, 30),
+                          ranges=np.linspace(500, 5000, 40))
+isovelocity = uacpy.SoundSpeedProfile.from_pairs([(0, 1500), (100, 1500)])
+sand = uacpy.BoundaryProperties(acoustic_type='half-space', sound_speed=1600,
+                                density=1.5, attenuation=0.5)
+rock = uacpy.BoundaryProperties(acoustic_type='half-space', sound_speed=2500,
+                                density=2.5, attenuation=0.1)
 
+# Ice: angles here follow the ocean-acoustics convention, θ from the
+# HORIZONTAL (grazing), so a critical angle is arccos(c1/c2), not arcsin
+# (Jensen, Kuperman, Porter & Schmidt, 2nd ed., §1.4). Ice cp = 3500 m/s gives
+# a compressional critical grazing angle of arccos(1480/3500) = 65.0°, but ice
+# also has shear, and cs = 1800 m/s > c_water makes the SHEAR angle
+# arccos(1480/1800) = 34.7° the binding one. Shallow-water modes sit at small
+# grazing angles, well below both, so TL stays close to the vacuum case and the
+# difference shows up in the interference phase rather than the loss level.
+ice = uacpy.BoundaryProperties(acoustic_type='half-space', sound_speed=3500.0,
+                               shear_speed=1800.0, density=0.9,
+                               attenuation=1.0, shear_attenuation=2.0)
 
-# ── 1. Top Boundary Conditions ──────────────────────────────────────────────
+# Presets are fluid by default (elastic=False), so RAM dispatches to the fluid
+# mpiramS backend; the rams0.5 elastic PE is conservative on its dz cap and
+# would degrade accuracy at 200 Hz over 100 m of water.
+preset_column = uacpy.SeabedColumn.from_presets(
+    layers=[('clay', 5.0), ('silt', 15.0), ('sand', 30.0)],
+    halfspace='limestone')
 
-def example_vacuum_surface():
-    """Default vacuum (pressure-release) surface — Bellhop for comparison."""
-    source, receiver = make_source_receiver()
-    env = uacpy.Environment(
-        name='vacuum_surface',
-        bathymetry=100,
-        ssp=SoundSpeedProfile.from_pairs([(0, 1500), (100, 1500)]),
-        bottom=BoundaryProperties(
-            acoustic_type='half-space', sound_speed=1600,
-            density=1.5, attenuation=0.5,
-        ),
-    )
-    return env, source, receiver
+scenarios = {
+    'Flat surface (Bellhop)': (
+        uacpy.Environment(name='vacuum_surface', bathymetry=100,
+                          ssp=isovelocity, bottom=sand),
+        uacpy.Bellhop()),
+    'Rough sea, 15 m/s (Bellhop)': (
+        uacpy.Environment(
+            name='rough_surface', bathymetry=100, ssp=isovelocity, bottom=sand,
+            altimetry=generate_sea_surface(max_range=10000,
+                                           wind_speed_mps=15,
+                                           n_points=300, seed=42)),
+        uacpy.Bellhop()),
+    'Ice surface (Bellhop)': (
+        uacpy.Environment(
+            name='ice_surface', bathymetry=100,
+            ssp=uacpy.SoundSpeedProfile.from_pairs([(0, 1480), (100, 1480)]),
+            surface=ice, bottom=sand),
+        uacpy.Bellhop()),
+    'Single-layer bottom (RAM)': (
+        uacpy.Environment(
+            name='single_layer_bottom', bathymetry=100, ssp=isovelocity,
+            bottom=uacpy.SeabedColumn(
+                layers=[uacpy.SedimentLayer(thickness=10.0, sound_speed=1550,
+                                            density=1.3, attenuation=0.8)],
+                halfspace=rock)),
+        uacpy.RAM(accuracy=1e-1)),
+    'Multi-layer bottom (RAM)': (
+        uacpy.Environment(
+            name='multi_layer_bottom', bathymetry=100, ssp=isovelocity,
+            bottom=uacpy.SeabedColumn(
+                layers=[uacpy.SedimentLayer(thickness=5.0, sound_speed=1550,
+                                            density=1.3, attenuation=0.8),
+                        uacpy.SedimentLayer(thickness=15.0, sound_speed=1650,
+                                            density=1.7, attenuation=0.4),
+                        uacpy.SedimentLayer(thickness=30.0, sound_speed=1800,
+                                            density=2.0, attenuation=0.2)],
+                halfspace=rock)),
+        uacpy.RAM(accuracy=1e-1)),
+    'Preset layered bottom (RAM)': (
+        uacpy.Environment(name='preset_layered_bottom', bathymetry=100,
+                          ssp=isovelocity, bottom=preset_column),
+        uacpy.RAM(accuracy=1e-1)),
+    'Range-dep layered (RAM)': (
+        uacpy.Environment(
+            name='rd_layered_bottom', bathymetry=100, ssp=isovelocity,
+            bottom=uacpy.Bottom.from_columns(
+                [uacpy.SeabedColumn(                     # mud over clay
+                    layers=[uacpy.SedimentLayer(thickness=8.0,
+                                                sound_speed=1500, density=1.2,
+                                                attenuation=1.0),
+                            uacpy.SedimentLayer(thickness=20.0,
+                                                sound_speed=1580, density=1.5,
+                                                attenuation=0.6)],
+                    halfspace=uacpy.BoundaryProperties(
+                        acoustic_type='half-space', sound_speed=1800,
+                        density=2.0, attenuation=0.2)),
+                 uacpy.SeabedColumn(                     # sand over rock
+                    layers=[uacpy.SedimentLayer(thickness=3.0,
+                                                sound_speed=1650, density=1.8,
+                                                attenuation=0.3),
+                            uacpy.SedimentLayer(thickness=10.0,
+                                                sound_speed=1750, density=2.0,
+                                                attenuation=0.2)],
+                    halfspace=uacpy.BoundaryProperties(
+                        acoustic_type='half-space', sound_speed=2500,
+                        density=2.5, attenuation=0.05))],
+                ranges=np.array([0, 10000]))),
+        uacpy.RAM(accuracy=1e-1)),
+}
 
+fields = {label: model.run(env, source, receiver)
+          for label, (env, model) in scenarios.items()}
+for label, field in fields.items():
+    print(f"  {label:30s} TL [{np.nanmin(field.dB):5.1f}, "
+          f"{np.nanmax(field.dB):5.1f}] dB")
 
-def example_rough_surface():
-    """Rough sea surface from Pierson-Moskowitz spectrum (15 m/s wind)."""
-    source, receiver = make_source_receiver()
-    surface = generate_sea_surface(
-        max_range=10000, wind_speed_mps=15, n_points=300, seed=42,
-    )
-    env = uacpy.Environment(
-        name='rough_surface',
-        bathymetry=100,
-        ssp=SoundSpeedProfile.from_pairs([(0, 1500), (100, 1500)]),
-        altimetry=surface,
-        bottom=BoundaryProperties(
-            acoustic_type='half-space', sound_speed=1600,
-            density=1.5, attenuation=0.5,
-        ),
-    )
-    return env, source, receiver
+# One colour window across all seven, so the panels can be read against each
+# other rather than each against itself.
+every_tl = np.concatenate([f.dB.ravel() for f in fields.values()])
+vmin = 5 * round(max(30, np.nanpercentile(every_tl, 5)) / 5)
+vmax = 5 * round(min(140, np.nanpercentile(every_tl, 95)) / 5)
 
+fig, axes = plt.subplots(2, 4, figsize=(22, 11))
+for index, (label, field) in enumerate(fields.items()):
+    ax = axes.flat[index]
+    uacpy.plot_field(field, ax, env=scenarios[label][0], show_colorbar=False,
+                     vmin=vmin, vmax=vmax, title=label)
+    if index % 4:                     # depth label on the left column only
+        ax.set_ylabel('')
+axes.flat[-1].axis('off')
+fig.suptitle('Boundary conditions — surface and bottom', fontsize=14,
+             fontweight='bold', y=0.995)
+fig.subplots_adjust(left=0.06, right=0.93, top=0.90, bottom=0.07,
+                    wspace=0.20, hspace=0.30)
+fig.colorbar(axes.flat[0].collections[0],
+             cax=fig.add_axes([0.945, 0.07, 0.012, 0.83]), label='TL (dB)')
+fig.savefig(OUT / 'example_17_boundary_conditions.png', dpi=150)
+plt.close(fig)
 
-def example_ice_surface():
-    """Elastic (ice) surface — half-space upper boundary.
-
-    Angles here follow the ocean-acoustics / Acoustics-Toolbox convention:
-    theta is measured from the *horizontal* (grazing), so the critical angle
-    is ``arccos(c1/c2)``, not ``arcsin``. Jensen, Kuperman, Porter & Schmidt,
-    *Computational Ocean Acoustics* 2nd ed., section 1.4.
-
-    Ice cp (3500 m/s) >> water c (1480 m/s), giving a compressional critical
-    grazing angle of ``arccos(1480/3500)`` = 65.0 deg. Shallow-water modes sit
-    at small grazing angles, so they are well below it and would reflect
-    without compressional leakage.
-
-    But ice also has shear, and here cs = 1800 m/s > c_water, so the binding
-    constraint is the *shear* critical grazing angle ``arccos(1480/1800)``
-    = 34.7 deg. Lossless reflection therefore holds only below 34.7 deg
-    grazing, not below 65 deg.
-
-    (The same two numbers in the from-normal convention are 25.0 deg and
-    55.3 deg. Mixing the conventions is what makes "below critical" and
-    "~25 deg" sound compatible when they are not.)
-
-    Net effect: TL stays close to the vacuum case for the low-grazing modes;
-    the main difference is in the interference-pattern phase rather than the
-    overall loss level.
-    """
-    source, receiver = make_source_receiver()
-    ice = BoundaryProperties(
-        acoustic_type='half-space',
-        sound_speed=3500.0,     # compressional speed in ice (m/s)
-        shear_speed=1800.0,     # shear speed in ice (m/s)
-        density=0.9,            # ice density (g/cm^3)
-        attenuation=1.0,        # compressional attenuation (dB/wavelength)
-        shear_attenuation=2.0,  # shear attenuation (dB/wavelength)
-    )
-    env = uacpy.Environment(
-        name='ice_surface',
-        bathymetry=100,
-        ssp=SoundSpeedProfile.from_pairs([(0, 1480), (100, 1480)]),
-        surface=ice,
-        bottom=BoundaryProperties(
-            acoustic_type='half-space', sound_speed=1600,
-            density=1.5, attenuation=0.5,
-        ),
-    )
-    return env, source, receiver
-
-
-# ── 2. Layered Bottoms ──────────────────────────────────────────────────────
-
-def example_single_layer_bottom():
-    """Single sediment layer over a rock halfspace."""
-    source, receiver = make_source_receiver()
-    lb = SeabedColumn(
-        layers=[
-            SedimentLayer(thickness=10.0, sound_speed=1550, density=1.3,
-                          attenuation=0.8),
-        ],
-        halfspace=BoundaryProperties(
-            acoustic_type='half-space', sound_speed=2500,
-            density=2.5, attenuation=0.1,
-        ),
-    )
-    env = uacpy.Environment(
-        name='single_layer_bottom', bathymetry=100,
-        ssp=SoundSpeedProfile.from_pairs([(0, 1500), (100, 1500)]),
-        bottom=lb,
-    )
-    return env, source, receiver
-
-
-def example_multi_layer_bottom():
-    """Sand over clay over rock — 3 sediment layers."""
-    source, receiver = make_source_receiver()
-    lb = SeabedColumn(
-        layers=[
-            SedimentLayer(thickness=5.0, sound_speed=1550, density=1.3,
-                          attenuation=0.8),
-            SedimentLayer(thickness=15.0, sound_speed=1650, density=1.7,
-                          attenuation=0.4),
-            SedimentLayer(thickness=30.0, sound_speed=1800, density=2.0,
-                          attenuation=0.2),
-        ],
-        halfspace=BoundaryProperties(
-            acoustic_type='half-space', sound_speed=2500,
-            density=2.5, attenuation=0.1,
-        ),
-    )
-    env = uacpy.Environment(
-        name='multi_layer_bottom', bathymetry=100,
-        ssp=SoundSpeedProfile.from_pairs([(0, 1500), (100, 1500)]),
-        bottom=lb,
-    )
-    return env, source, receiver
-
-
-def example_preset_layered_bottom():
-    """Same shape as ``example_multi_layer_bottom`` but built from
-    :mod:`uacpy.materials` presets — class-typical clay/silt/sand
-    over a limestone halfspace, with no hand-typed property numbers.
-
-    Presets are fluid by default (``elastic=False``), so RAM dispatches to
-    the fluid mpiramS backend; the rams0.5 elastic PE backend is conservative
-    on its dz cap and would degrade accuracy at 200 Hz / 100 m water.
-    """
-    source, receiver = make_source_receiver()
-    lb = SeabedColumn.from_presets(
-        layers=[('clay', 5.0), ('silt', 15.0), ('sand', 30.0)],
-        halfspace='limestone',
-    )
-    env = uacpy.Environment(
-        name='preset_layered_bottom', bathymetry=100,
-        ssp=SoundSpeedProfile.from_pairs([(0, 1500), (100, 1500)]),
-        bottom=lb,
-    )
-    return env, source, receiver
-
-
-# ── 3. Range-Dependent Layered Bottoms ───────────────────────────────────────
-
-def example_range_dependent_layered():
-    """Mud-over-clay nearshore, sand-over-rock offshore."""
-    source, receiver = make_source_receiver()
-    near = SeabedColumn(
-        layers=[
-            SedimentLayer(thickness=8.0, sound_speed=1500, density=1.2,
-                          attenuation=1.0),
-            SedimentLayer(thickness=20.0, sound_speed=1580, density=1.5,
-                          attenuation=0.6),
-        ],
-        halfspace=BoundaryProperties(
-            acoustic_type='half-space', sound_speed=1800,
-            density=2.0, attenuation=0.2,
-        ),
-    )
-    far = SeabedColumn(
-        layers=[
-            SedimentLayer(thickness=3.0, sound_speed=1650, density=1.8,
-                          attenuation=0.3),
-            SedimentLayer(thickness=10.0, sound_speed=1750, density=2.0,
-                          attenuation=0.2),
-        ],
-        halfspace=BoundaryProperties(
-            acoustic_type='half-space', sound_speed=2500,
-            density=2.5, attenuation=0.05,
-        ),
-    )
-    rdl = Bottom.from_columns([near, far], ranges=np.array([0, 10000]))
-    env = uacpy.Environment(
-        name='rd_layered_bottom', bathymetry=100,
-        ssp=SoundSpeedProfile.from_pairs([(0, 1500), (100, 1500)]),
-        bottom=rdl,
-    )
-    return env, source, receiver
-
-
-# ── Main ─────────────────────────────────────────────────────────────────────
-
-def main():
-    import matplotlib.pyplot as plt
-    from uacpy.models.ram import RAM
-    from uacpy.models.bellhop import Bellhop
-    from uacpy.visualization.plots import plot_field
-
-    # (label, setup_fn, model_class)
-    scenarios = [
-        ('Flat surface (Bellhop)',         example_vacuum_surface,          Bellhop),
-        ('Rough sea, 15 m/s (Bellhop)',    example_rough_surface,           Bellhop),
-        ('Ice surface (Bellhop)',          example_ice_surface,             Bellhop),
-        ('Single-layer bottom (RAM)',      example_single_layer_bottom,     RAM),
-        ('Multi-layer bottom (RAM)',       example_multi_layer_bottom,      RAM),
-        ('Preset layered bottom (RAM)',    example_preset_layered_bottom,   RAM),
-        ('Range-dep layered (RAM)',        example_range_dependent_layered, RAM),
-    ]
-
-    print("\n" + "═" * 80)
-    print("EXAMPLE 17: Boundary Conditions - Top BC and Layered Bottoms")
-    print("═" * 80)
-
-    fields = []
-    envs_out = []
-    for idx, (label, setup_fn, model_cls) in enumerate(scenarios):
-        env, source, receiver = setup_fn()
-        kwargs = {'accuracy': 1e-1} if model_cls is RAM else {}
-        model = model_cls(verbose=False, **kwargs)
-        try:
-            field = model.run(env, source, receiver)
-            tl = field.dB
-            print(f"  {label:40s}  TL: [{np.nanmin(tl):5.1f}, {np.nanmax(tl):5.1f}] dB")
-            fields.append(field)
-            envs_out.append(env)
-        except Exception as e:
-            print(f"  {label:40s}  ERROR: {e}")
-            fields.append(None)
-            envs_out.append(env)
-
-    all_tl = [f.dB for f in fields if f is not None]
-    if all_tl:
-        vmin = max(30, np.nanpercentile(np.concatenate([a.ravel() for a in all_tl]), 5))
-        vmax = min(140, np.nanpercentile(np.concatenate([a.ravel() for a in all_tl]), 95))
-        vmin = 5 * round(vmin / 5)
-        vmax = 5 * round(vmax / 5)
-    else:
-        vmin, vmax = 40, 100
-
-    fig, axes = plt.subplots(2, 4, figsize=(22, 11))
-    axes_flat = axes.flatten()
-    tl_im = None
-    for idx, (label, _, _) in enumerate(scenarios):
-        ax = axes_flat[idx]
-        field = fields[idx]
-        env = envs_out[idx]
-        if field is not None:
-            plot_field(field, env=env, ax=ax, show_colorbar=False,
-                       vmin=vmin, vmax=vmax)
-            if ax.collections:
-                tl_im = ax.collections[0]
-            # Keep the depth label on the left-most column only (4-wide grid).
-            if idx % 4 != 0:
-                ax.set_ylabel('')
-        else:
-            ax.text(0.5, 0.5, 'ERROR', ha='center', va='center',
-                    transform=ax.transAxes, fontsize=14, color='red')
-        ax.set_title(label, fontsize=11, fontweight='bold')
-
-    fig.suptitle('Example 17: Boundary Conditions — Surface and Bottom',
-                 fontsize=14, fontweight='bold', y=0.995)
-    fig.subplots_adjust(left=0.06, right=0.93, top=0.90, bottom=0.07,
-                        wspace=0.20, hspace=0.30)
-    if tl_im is not None:
-        cbar_ax = fig.add_axes([0.945, 0.07, 0.012, 0.83])
-        fig.colorbar(tl_im, cax=cbar_ax, label='TL (dB)')
-
-    out_dir = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
-                   or Path(__file__).parent / 'output')
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / 'example_17_boundary_conditions.png'
-    fig.savefig(out_path, dpi=150)
-    print(f"\n  ✓ Saved: {out_path}")
-
-    for label, env in zip([s[0] for s in scenarios], envs_out):
-        if env.has_range_dependent_layered_bottom:
-            fig_b, _ = env.plot()
-            path = out_dir / 'example_17_rd_layered_structure.png'
-            fig_b.savefig(path, dpi=150, bbox_inches='tight')
-            plt.close(fig_b)
-            print(f"  ✓ Saved: {path}")
-            break
-
-    print("\n✓ Example 17 complete\n")
-
-
-if __name__ == '__main__':
-    main()
+rd_env = scenarios['Range-dep layered (RAM)'][0]
+print(f"  range-dependent layered bottom: "
+      f"{rd_env.has_range_dependent_layered_bottom}")
+fig, _ = rd_env.plot()
+fig.savefig(OUT / 'example_17_rd_layered_structure.png', dpi=150,
+            bbox_inches='tight')
+plt.close(fig)

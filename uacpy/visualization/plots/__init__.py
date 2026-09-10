@@ -18,7 +18,8 @@ from uacpy.core.results import (
 
 from uacpy.visualization.plots.fields import (
     plot_field, plot_signal_excess, plot_detection_probability,
-    compare, compare_models, _plot_field_stack,
+    compare, compare_models, plot_field_difference,
+    plot_field_statistics, _plot_field_stack,
 )
 from uacpy.visualization.plots.animation import (
     animate_field, save_animation, plot_time_snapshots,
@@ -104,6 +105,8 @@ __all__ = [
     'plot_detection_probability',
     'compare',
     'compare_models',
+    'plot_field_difference',
+    'plot_field_statistics',
     'plot_bottom_properties',
     'plot_absorption',
     'plot_bathymetry_map',

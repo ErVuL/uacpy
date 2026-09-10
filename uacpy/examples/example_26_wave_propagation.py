@@ -1,297 +1,146 @@
-"""
-EXAMPLE 26: Animated wave propagation (wave-equation solvers vs a ray solver)
-============================================================================
+"""Animated wave propagation — wave-equation solvers against a ray solver.
 
-Watch a pulse propagate through a Pekeris waveguide and bounce off the
-seafloor — five solvers shown on the same grid, same physics target. The
-two pedagogically interesting time-domain paths are spelled out below.
+A pulse crossing a Pekeris waveguide and bouncing off the seafloor, computed
+five ways on one grid, as a snapshot sheet and as one GIF per solver.
 
-* **SPARC** — native time-marched FFP. The TIME_SERIES output is the
-  pressure field the solver produced directly. The range domain has an
-  implicit periodic boundary from the wavenumber-FFT method, so
-  ``t_max`` must end *before* the wave reaches the far range edge
-  (otherwise the field wraps back and the late-time animation shows
-  aliasing, not propagation). Here the receiver array ends at 200 m and
-  TIME_SERIES mode auto-widens the solver domain to 3x that, i.e.
-  ``RMax = 600 m``. With ``c ≈ 1500 m/s``, ``T_MAX = 0.18 s`` puts the
-  wavefront at 270 m — past the array, so bottom reflections are visible,
-  and still well inside the 600 m wrap edge.
+* SPARC marches time natively. Its range domain has an implicit periodic
+  boundary from the wavenumber-FFT method, so T_MAX must end BEFORE the wave
+  reaches the far edge or the late frames show aliasing rather than
+  propagation. TIME_SERIES auto-widens the solver domain to 3× the receiver
+  span (600 m here), and at 1500 m/s, 0.18 s puts the front at 270 m — past
+  the array, so reflections are visible, and well inside the wrap edge. Adapt
+  it as T_MAX < 3·max(receiver ranges)/c.
+* RAM, Scooter and Kraken get there through broadband H(f) → IFFT, which is a
+  wave-equation solution too.
+* Bellhop is the contrast: its TIME_SERIES output is a per-receiver
+  delay-and-sum of arrivals, so the 2-D animation is a grid of independent
+  traces rather than a coherent wavefield — the "wave" is stitched from
+  neighbouring receivers. At 200 Hz over 50 m of water the eigenray sum still
+  tracks the modal field; at lower frequencies or shorter ranges it does not.
 
-  If you adapt this script, size ``T_MAX`` from your own geometry:
-  ``T_MAX < 3 * max(RECEIVER_RANGES) / c``.
-* **RAM via synthesize_time_series** — broadband PE H(f) → IFFT with a
-  windowed Gaussian source. PE is a wave-equation solver too; the
-  Fourier-domain time axis is what governs validity, and the IFFT
-  window has a soft periodicity but the source-pulse envelope keeps
-  late-time content small.
-
-**Scooter** (spectral FFP) and **Kraken** (normal modes; the guide is
-range-independent, so no mode coupling is involved) are shown too —
-additional full-wave references built through the same
-broadband H(f) → IFFT path as RAM.
-
-Bellhop is included for contrast: its TIME_SERIES output is a
-*per-receiver* delay-and-sum of arrivals — not a wave-equation
-solution. The 2-D animation is then a grid of independent time-series,
-not a coherent wavefield, and the visual "wave" is an illusion
-stitched from neighbour-receiver arrivals. At fc=200 Hz / 50 m water
-the eigenray sum still tracks the modal field reasonably; at lower
-frequencies or shorter ranges it falls apart.
-
-The script saves (under ``output/``):
-
-* ``example_26_wave_propagation.png`` — snapshot grid: all five solvers ×
-  time frames.
-* ``example_26_<model>.gif`` — one animation per solver (``sparc``,
-  ``scooter``, ``ram``, ``kraken``, ``bellhop``).
-
-ENVIRONMENT
-    Pekeris guide, 50 m deep (``BATHYMETRY``), fluid half-space bottom.
-    Source at mid-depth, 25 m, pulse centred at 200 Hz. All five models
-    share the same receiver grid so the snapshot panels are directly
-    comparable.
+Uses: RunMode.TIME_SERIES on five solvers · source_waveform= / sample_rate= /
+output_duration= · plot_time_snapshots · save_animation
 """
 
-import sys
 import os
+import sys
 from pathlib import Path
-# Repo root, so ``import uacpy`` resolves from a source checkout.
-sys.path.insert(0, str(Path(__file__).parents[2]))
+sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
-import numpy as np  # noqa: E402
-import matplotlib.pyplot as plt  # noqa: E402
+import numpy as np
+import matplotlib.pyplot as plt
+import uacpy
+from uacpy.acoustic_signal.waveforms import gaussian_pulse
+from uacpy.core.results import Field
 
-import uacpy  # noqa: E402
-from uacpy.core.environment import BoundaryProperties  # noqa: E402
-from uacpy.acoustic_signal.waveforms import gaussian_pulse  # noqa: E402
-from uacpy.models import (  # noqa: E402
-    RAM, SPARC, Scooter, Kraken, Bellhop, RunMode,
-)
-from uacpy.visualization import (  # noqa: E402
-    save_animation, plot_time_snapshots,
-)
+OUT = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
+           or Path(__file__).parent / 'output')
+OUT.mkdir(parents=True, exist_ok=True)
 
-OUTPUT_DIR = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
-                  or Path(__file__).parent / 'output')
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+# 50 m of water over 200 m of range. Range sampling is 64 bins from 2 to 200 m
+# = 3.14 m, against λ_min = 1500/350 = 4.3 m at the top of the band — about 1.4
+# samples per minimum wavelength, so the panels render the pulse envelope and
+# the modal arrivals but not individual wavefronts up there. Raise the bin
+# count if you want those.
+T_MAX = 0.18            # s — front at 270 m: past the array, inside the wrap
+F_CENTER, F_MIN, F_MAX = 200.0, 50.0, 350.0
+FS = 8000.0             # ≥ 2× f_max
+receiver = uacpy.Receiver(depths=np.linspace(1, 49, 32),
+                          ranges=np.linspace(2, 200, 64))
 
+env = uacpy.Environment(
+    name='Pekeris (animation)', bathymetry=50.0, ssp=1500.0,
+    bottom=uacpy.BoundaryProperties(acoustic_type='half-space',
+                                    sound_speed=1700.0, density=1.5,
+                                    attenuation=0.5))
+source = uacpy.Source(depths=25.0, frequencies=F_CENTER)   # mid-depth
 
-# Shared simulation parameters — 50 m water × 200 m of range, fine
-# grid. Constraints kept in mind:
-#   * RMax / safety-margin / interpolation-edge knobs (SPARC's
-#     ``rmax_safety_margin``, Scooter's ``rmax_multiplier``,
-#     Kraken's ``rmax_m``) auto-widen to 3× receiver_max in
-#     TIME_SERIES mode — no need to compute them by hand here.
-#   * Range sampling: 64 bins from 2 to 200 m → 3.14 m spacing, against
-#     λ_min = 1500/350 = 4.3 m at f_max. That is ~1.4 samples per
-#     minimum wavelength, so the panels render the pulse envelope and
-#     the modal arrivals; they do not resolve individual wavefronts at
-#     the top of the band. Raise the bin count if you want that.
-BATHYMETRY = 50.0                                # water depth (m)
-RECEIVER_DEPTHS = np.linspace(1, 49, 32)         # ~1.5 m vertical spacing
-RECEIVER_RANGES = np.linspace(2, 200, 64)        # ~3 m horizontal spacing
-T_MAX = 0.18           # seconds — wave at 270 m past array, shows reflections
-F_CENTER = 200.0       # Hz, source-pulse centre frequency
-F_MIN = 50.0           # Hz, pulse-band lower edge (SPARC only)
-F_MAX = 350.0          # Hz, pulse-band upper edge (SPARC only)
-SIGMA_T = 0.003        # s, Gaussian-pulse 1-σ width (~3 ms ≈ 4.5 m wide)
-FS = 8000.0            # Hz, time-series sample rate (>= 2× f_max)
+# A Gaussian-windowed cosine whose peak sits at duration/2, so the early
+# samples are identically zero (causality) and the spectrum stays narrow around
+# F_CENTER. gaussian_pulse's width argument is σ·√2.
+sigma_t = 0.003
+duration = max(8 / F_CENTER, 6 * sigma_t)
+t = np.arange(0, duration, 1.0 / FS)
+peak_time = duration / 2.0
+waveform = (gaussian_pulse(t, peak_time, sigma_t * np.sqrt(2))
+            * np.cos(2 * np.pi * F_CENTER * (t - peak_time)))
 
 
-def _build_env_source():
-    """Pekeris guide with a fluid half-space bottom + a 200 Hz source."""
-    bottom = BoundaryProperties(
-        acoustic_type='half-space', sound_speed=1700.0,
-        density=1.5, attenuation=0.5,
-    )
-    env = uacpy.Environment(
-        name='Pekeris (animation)', bathymetry=BATHYMETRY, ssp=1500.0,
-        bottom=bottom,
-    )
-    # Source at mid-depth so the visualisation is roughly symmetric.
-    source = uacpy.Source(depths=BATHYMETRY / 2.0, frequencies=F_CENTER)
-    return env, source
+def rebuild(field, *, data=None, times=None):
+    """``field`` with a new time axis (and optionally new data).
 
-
-def _gaussian_pulse(f_center: float, sigma_t: float, fs: float,
-                    n_periods: int = 8):
-    """Gaussian-windowed cosine. Returns ``(waveform, peak_time_s)``.
-
-    The pulse peak sits at ``duration/2`` so the early samples are
-    identically zero (causality), keeping the spectrum narrow around
-    ``f_center``. ``peak_time_s`` is reported so the caller can shift
-    the IFFT output's time axis to put the emission peak at t=0
-    (matching SPARC's native convention).
+    Field exposes no time-window crop or coordinate shift, and both are needed
+    below to put every solver on one display window.
     """
-    duration = max(n_periods / f_center, 6 * sigma_t)
-    t = np.arange(0, duration, 1.0 / fs)
-    peak_time = duration / 2.0
-    t_centered = t - peak_time
-    # exp(-0.5 (t / sigma_t)^2): gaussian_pulse's width is sigma_t*sqrt(2)
-    envelope = gaussian_pulse(t, peak_time, sigma_t * np.sqrt(2))
-    return envelope * np.cos(2 * np.pi * f_center * t_centered), peak_time
-
-
-def _clip_to_window(field, t_max):
-    """Return ``field`` with its time axis clipped to ``0 ≤ t ≤ t_max``
-    so every model shares the same display window. SPARC's integration
-    starts at ``t_start = -0.1 s`` (pre-roll); the IFFT models start
-    at t=0, so the lower bound drops SPARC's negative-t pre-roll."""
-    times = np.asarray(field.coords['time'])
-    keep = (times >= 0.0) & (times <= t_max)
-    if keep.all():
-        return field
-    from uacpy.core.results import Field
-    data = np.moveaxis(np.asarray(field.data),
-                       list(field.coords).index('time'), 2)[:, :, keep]
     return Field(
-        data=data,
+        data=field.data if data is None else data,
         coords={'depth': field.coords['depth'],
                 'range': field.coords['range'],
-                'time': times[keep]},
+                'time': field.coords['time'] if times is None else times},
         model=field.model, backend=field.backend,
-        source_depths=field.source_depths,
-        frequencies=field.frequencies,
-        phase_reference=field.phase_reference,
-    )
+        source_depths=field.source_depths, frequencies=field.frequencies,
+        phase_reference=field.phase_reference)
 
 
-def _shift_time(field, dt: float):
-    """Return ``field`` with its time coord shifted by ``dt`` seconds
-    (no data change). This is what puts the source-emission peak at t=0 for
-    the IFFT-based syntheses, which otherwise carry the waveform's own peak
-    offset (``duration/2``) into the output time axis."""
-    if dt == 0.0:
-        return field
-    from uacpy.core.results import Field
-    return Field(
-        data=field.data,
-        coords={'depth': field.coords['depth'],
-                'range': field.coords['range'],
-                'time': np.asarray(field.coords['time']) + dt},
-        model=field.model, backend=field.backend,
-        source_depths=field.source_depths,
-        frequencies=field.frequencies,
-        phase_reference=field.phase_reference,
-    )
+def run(name, model, waveform=None):
+    """One call site for every solver: TIME_SERIES on the shared window.
 
-
-def _run(name, model, env, source, receiver, waveform=None,
-         waveform_peak_t: float = 0.0):
-    """Single call site for every solver: TIME_SERIES with output_duration.
-
-    SPARC builds p(t) from its native ``pulse_type``; the IFFT models
-    (RAM / Scooter / Kraken / Bellhop) auto-derive their frequency
-    grid from the source-waveform spectrum, zero-pad the waveform
-    internally to ``output_duration``, and auto-widen their ``rmax_*``.
-    ``waveform_peak_t`` is the time-offset of the source-emission peak
-    within the user's waveform array; shifting the output time axis by
-    ``-waveform_peak_t`` aligns the emission peak with t=0 so every
-    solver's wavefront emerges from the source at t≈0.
+    SPARC builds p(t) from its own pulse_type; the IFFT models derive their
+    frequency grid from the waveform's spectrum, zero-pad it internally to
+    output_duration and auto-widen their rmax. Those carry the waveform's own
+    peak offset into the output time axis, so it is shifted back out — every
+    solver's wavefront then emerges from the source at t ≈ 0, matching SPARC's
+    native convention.
     """
-    print(f"  Running {name}...", end=' ', flush=True)
     if waveform is None:
         field = model.run(env, source, receiver,
-                          run_mode=RunMode.TIME_SERIES)
+                          run_mode=uacpy.RunMode.TIME_SERIES)
     else:
         field = model.run(env, source, receiver,
-                          run_mode=RunMode.TIME_SERIES,
+                          run_mode=uacpy.RunMode.TIME_SERIES,
                           source_waveform=waveform, sample_rate=FS,
-                          output_duration=T_MAX + waveform_peak_t)
-        field = _shift_time(field, -waveform_peak_t)
-    field = _clip_to_window(field, T_MAX)
-    print(f"✓  shape={field.data.shape}")
+                          output_duration=T_MAX + peak_time)
+        field = rebuild(field,
+                        times=np.asarray(field.coords['time']) - peak_time)
+    # Clip to 0 ≤ t ≤ T_MAX. SPARC integrates from t = -0.1 s (pre-roll) while
+    # the IFFT models start at 0, so the lower bound drops that pre-roll.
+    times = np.asarray(field.coords['time'])
+    keep = (times >= 0.0) & (times <= T_MAX)
+    if not keep.all():
+        data = np.moveaxis(np.asarray(field.data),
+                           list(field.coords).index('time'), 2)[:, :, keep]
+        field = rebuild(field, data=data, times=times[keep])
+    print(f"  {name:8s} {field.data.shape}")
     return field
 
 
+# What each constructor declares is the physics or numerics that has to stay
+# pinned per solver; the wrappers handle the TIME_SERIES aliases and band
+# derivation at run time. SPARC's pulse band and n_t_out are its own
+# pulse-shaping knobs (not equivalent to source_waveform); RAM's dr/dz are
+# pinned for upper-band resolution and c0=1500 matches the physical sound speed
+# so its carrier wavelength lines up with the others.
+fields = {
+    'SPARC': run('SPARC', uacpy.SPARC(n_t_out=400, t_max=T_MAX, f_min=F_MIN,
+                                      f_max=F_MAX,
+                                      max_depths=receiver.depths.size)),
+    'Scooter': run('Scooter', uacpy.Scooter(), waveform),
+    'RAM': run('RAM', uacpy.RAM(dr=1.0, dz=0.5, c0=1500.0), waveform),
+    'Kraken': run('Kraken', uacpy.Kraken(), waveform),
+    'Bellhop': run('Bellhop', uacpy.Bellhop(), waveform),
+}
 
+# Snapshots from t=0 (the emission) through the first seafloor reflection.
+fig, _ = uacpy.plot.plot_time_snapshots(
+    fields, times_s=tuple(np.linspace(0.0, T_MAX, 8)), env=env,
+    title='Pulse propagation snapshots — Pekeris waveguide, fc=200 Hz '
+          '(per-row colour scale: each solver has its own normalisation)')
+fig.savefig(OUT / 'example_26_wave_propagation.png', dpi=140,
+            bbox_inches='tight')
+plt.close(fig)
 
-def main():
-    print("\n" + "═" * 80)
-    print("EXAMPLE 26: Animated wave propagation "
-          "(SPARC / Scooter / RAM / Kraken vs Bellhop)")
-    print("═" * 80)
-
-    env, source = _build_env_source()
-    waveform, waveform_peak_t = _gaussian_pulse(F_CENTER, SIGMA_T, FS)
-    receiver = uacpy.Receiver(depths=RECEIVER_DEPTHS, ranges=RECEIVER_RANGES)
-
-    # Per-model construction. The wrappers handle every alias / wrap /
-    # band-derivation detail for TIME_SERIES at run-time; what each
-    # constructor declares below is just the physics / numerics that
-    # have to stay pinned per solver:
-    #   * SPARC builds p(t) natively — pulse band + n_t_out are SPARC's
-    #     own pulse-shaping knobs (not equivalent to source_waveform).
-    #   * RAM: dr/dz pinned for upper-band resolution; c0=1500 matches
-    #     the physical sound speed so the PE carrier wavelength (c0/fc)
-    #     lines up with the other three solvers.
-    models = [
-        ('SPARC', SPARC(
-            verbose=False, n_t_out=400, t_max=T_MAX,
-            f_min=F_MIN, f_max=F_MAX,
-            max_depths=len(RECEIVER_DEPTHS),
-        ), None),
-        ('Scooter', Scooter(verbose=False), waveform),
-        ('RAM', RAM(verbose=False, dr=1.0, dz=0.5, c0=1500.0), waveform),
-        ('Kraken', Kraken(verbose=False), waveform),
-        # Bellhop is a ray solver — its TIME_SERIES output is the
-        # delay-and-sum of arrivals per receiver, not a wave-equation
-        # solution. At 200 Hz / 50 m water / 200 m range the
-        # eigenray sum still tracks the modal field reasonably, but
-        # the visual will look stripier than the three full-wave
-        # solvers because each (z, r) cell is an independent trace.
-        ('Bellhop', Bellhop(verbose=False), waveform),
-    ]
-
-    fields = {}
-    for name, model, wf in models:
-        try:
-            fields[name] = _run(
-                name, model, env, source, receiver, wf,
-                waveform_peak_t=(waveform_peak_t if wf is not None else 0.0),
-            )
-        except Exception as exc:
-            print(f"  {name} skipped: {exc}")
-
-    if not fields:
-        print("\n  No models produced a time-series field — nothing to plot.")
-        return
-
-    # Snapshot times spaced across the t_max window, starting from t=0
-    # to capture the source emission. Later frames show the wave
-    # propagating outward and the first seafloor reflection.
-    target_times = np.linspace(0.0, T_MAX, 8)
-
-    print("\n  Building snapshot grid...")
-    fig, _ = plot_time_snapshots(
-        fields, times_s=tuple(target_times), env=env,
-        title=(
-            'Pulse propagation snapshots — Pekeris waveguide, fc=200 Hz '
-            '(per-row colour scale: each solver has its own absolute '
-            'pressure normalisation)'
-        ),
-    )
-    out_png = OUTPUT_DIR / 'example_26_wave_propagation.png'
-    fig.savefig(out_png, dpi=140, bbox_inches='tight')
-    plt.close(fig)
-    print(f"  ✓ Saved: {out_png}")
-
-    print("\n  Saving per-model GIFs...")
-    for name, field in fields.items():
-        safe_name = name.lower().replace(' ', '_')
-        out_gif = OUTPUT_DIR / f'example_26_{safe_name}.gif'
-        try:
-            save_animation(
-                field, out_gif, env=env, fps=25,
-                aspect=1 / 1000.0,
-                title=f"{name} — Pekeris propagation (fc=200 Hz)",
-            )
-            print(f"  ✓ Saved: {out_gif}")
-        except Exception as exc:
-            print(f"  {name} animation skipped: {exc}")
-
-    print(f"\n✓ Example 26 complete — outputs under {OUTPUT_DIR}")
-
-
-if __name__ == '__main__':
-    main()
+for name, field in fields.items():
+    uacpy.plot.save_animation(
+        field, OUT / f'example_26_{name.lower()}.gif', env=env, fps=25,
+        aspect=1 / 1000.0,
+        title=f"{name} — Pekeris propagation (fc=200 Hz)")

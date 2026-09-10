@@ -1759,23 +1759,10 @@ class TestAnExampleTitleQuotesTheDeckThatRan:
 
 
 class TestATLDifferenceIsNotLabelledAsALevel:
-    """``_plot_tl_difference`` builds its residual as a bare ``Field``, which
+    """``plot_field_difference`` builds its residual as a bare ``Field``, which
     inherits ``kind='pressure'``, so the colourbar came back reading 'TL (dB)'
     over a signed difference — and the loss predicate reads the same tag, which
     would run a 1-D cut's value axis downward. Neither is true of a residual."""
-
-    @staticmethod
-    def _plotting_utils():
-        """``uacpy/examples`` carries no ``__init__.py``, so the shared helper
-        is loaded from its path rather than imported by package name."""
-        import importlib.util
-        from pathlib import Path
-        path = (Path(uacpy.__file__).parent / 'examples' / 'plotting_utils.py')
-        spec = importlib.util.spec_from_file_location(
-            'uacpy_examples_plotting_utils_for_tests', path)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return module
 
     @staticmethod
     def _pair():
@@ -1788,11 +1775,140 @@ class TestATLDifferenceIsNotLabelledAsALevel:
 
     def test_the_colourbar_names_the_residual_and_its_sign(self):
         a, b = self._pair()
-        fig, ax = self._plotting_utils()._plot_tl_difference(a, b)
+        fig, ax = uacpy.plot.plot_field_difference(a, b)
         label = fig.axes[-1].get_ylabel()
         assert label.startswith('ΔTL (dB)'), label
         assert 'quieter' in label, label
         plt.close(fig)
+
+    def test_the_sign_reads_the_view_rather_than_assuming_a_loss(self):
+        """More of a LOSS is quieter; more of a LEVEL is louder. The helper
+        this was promoted from said 'quieter' for both."""
+        a, b = self._pair()
+        for field in (a, b):
+            field.metadata['kind'] = 'signal_excess'
+        fig, ax = uacpy.plot.plot_field_difference(a, b)
+        label = fig.axes[-1].get_ylabel()
+        assert 'louder' in label, label
+        plt.close(fig)
+
+    def test_two_fields_on_different_grids_are_refused(self):
+        """Differencing cell by cell publishes a number for positions that
+        never met — equal lengths are not equal axes."""
+        a, _ = self._pair()
+        shifted = Field(data=np.full((6, 9), 1e-3, dtype=complex),
+                        coords={'depth': np.linspace(5.0, 95.0, 6),
+                                'range': np.linspace(5100.0, 8000.0, 9)},
+                        model='Synth', frequencies=100.0)
+        with pytest.raises(ConfigurationError, match='not its values'):
+            uacpy.plot.plot_field_difference(a, shifted)
+
+        shorter = Field(data=np.full((6, 5), 1e-3, dtype=complex),
+                        coords={'depth': np.linspace(5.0, 95.0, 6),
+                                'range': np.linspace(100.0, 3000.0, 5)},
+                        model='Synth', frequencies=100.0)
+        with pytest.raises(ConfigurationError, match='different grids'):
+            uacpy.plot.plot_field_difference(a, shorter)
+
+
+class TestFieldStatisticsPanels:
+    """``plot_field_statistics``: mean/std per field at one depth, and the
+    pairwise RMS-difference matrix beside it.
+
+    Promoted out of ``examples/plotting_utils.py``, where these panels were
+    the example-report scaffolding; the boundary cases below came with it.
+    """
+
+    @staticmethod
+    def _tl_field(ranges, level_dB):
+        """A Field whose TL at every depth is ``level_dB + 20·log10(r)``."""
+        depths = np.linspace(0.0, 200.0, 21)
+        tl = np.tile(level_dB + 20.0 * np.log10(np.maximum(ranges, 1.0)),
+                     (depths.size, 1))
+        return Field(data=tl, coords={'depth': depths, 'range': ranges},
+                     model='test')
+
+    @classmethod
+    def _rms_tiles(cls, fields):
+        """The numbers the RMS panel prints, keyed by ``(row, column)``."""
+        fig, axes = uacpy.plot.plot_field_statistics(fields, depth=100.0)
+        tiles = {(round(t.get_position()[1]), round(t.get_position()[0])):
+                 t.get_text() for t in axes[1].texts}
+        plt.close(fig)
+        return tiles
+
+    def test_it_compares_only_ranges_both_fields_computed(self):
+        """Two fields on the same *count* of ranges over different spans are a
+        pairing ``uacpy.metrics.tl_rmse`` refuses outright, and differencing
+        them cell-by-cell publishes a number for ranges that never met."""
+        a = self._tl_field(np.linspace(50.0, 3000.0, 200), 60.0)
+        b = self._tl_field(np.linspace(500.0, 8000.0, 200), 66.0)
+        with pytest.raises(Exception):              # the library's own metric
+            uacpy.metrics.tl_rmse(a, b)
+        # 500-3000 m is the shared span, where the two differ by exactly 6 dB
+        assert self._rms_tiles({'A': a, 'B': b}) == {(0, 1): '6.0',
+                                                     (1, 0): '6.0'}
+
+    def test_it_leaves_an_aligned_pair_untouched(self):
+        """The common-grid step must be an identity on a pair already sharing
+        one axis, and on the unequal-length pair it interpolates."""
+        span = np.linspace(50.0, 3000.0, 200)
+        assert self._rms_tiles({'C': self._tl_field(span, 60.0),
+                                'D': self._tl_field(span, 70.5)}) == {
+            (0, 1): '10.5', (1, 0): '10.5'}
+        assert self._rms_tiles(
+            {'E': self._tl_field(np.linspace(50.0, 3000.0, 40), 60.0),
+             'F': self._tl_field(np.linspace(50.0, 3000.0, 25), 70.5)}) == {
+            (0, 1): '10.5', (1, 0): '10.5'}
+
+    def test_it_reports_no_number_for_fields_sharing_no_range(self):
+        """Two spans that do not touch have nothing to compare, so the tile
+        carries no figure and does not take the diagonal's zero colour."""
+        fields = {'G': self._tl_field(np.linspace(50.0, 500.0, 30), 60.0),
+                  'H': self._tl_field(np.linspace(5000.0, 8000.0, 30), 60.0)}
+        assert self._rms_tiles(fields) == {(0, 1): 'n/a', (1, 0): 'n/a'}
+
+        fig, axes = uacpy.plot.plot_field_statistics(fields, depth=100.0)
+        im = axes[1].get_images()[0]
+        rgba = im.cmap(im.norm(np.ma.filled(im.get_array(), np.nan)))
+        plt.close(fig)
+        assert tuple(rgba[0, 0]) == plt.get_cmap('RdYlGn_r')(0.0)  # diagonal
+        assert tuple(rgba[0, 1]) != plt.get_cmap('RdYlGn_r')(0.0)
+
+    @pytest.mark.parametrize('start_b, tile', [
+        (3000.0, '6.0'),      # the spans meet on one shared range: comparable
+        (3000.001, 'n/a'),    # a millimetre further apart and they share none
+    ])
+    def test_the_smallest_overlap_it_will_compare(self, start_b, tile):
+        """Both sides of the boundary between a comparison and no comparison:
+        two spans touching at a single range is still a range both computed."""
+        a = self._tl_field(np.linspace(50.0, 3000.0, 200), 60.0)
+        b = self._tl_field(np.linspace(start_b, 8000.0, 200), 66.0)
+        assert self._rms_tiles({'A': a, 'B': b})[(0, 1)] == tile
+
+    def test_the_diagonal_keeps_the_colormaps_zero_tile(self):
+        """The diagonal is a true zero and must stay visually distinct from a
+        not-comparable tile."""
+        span = np.linspace(50.0, 3000.0, 200)
+        fig, axes = uacpy.plot.plot_field_statistics(
+            {'C': self._tl_field(span, 60.0), 'D': self._tl_field(span, 70.5)},
+            depth=100.0)
+        im = axes[1].get_images()[0]
+        diagonal = im.cmap(im.norm(np.ma.filled(im.get_array(), np.nan)))[0, 0]
+        plt.close(fig)
+        assert tuple(diagonal) == plt.get_cmap('RdYlGn_r')(0.0)
+
+    def test_a_field_that_did_not_run_is_dropped_not_plotted(self):
+        """``None`` is how a comparison records a model that did not run."""
+        span = np.linspace(50.0, 3000.0, 40)
+        fig, axes = uacpy.plot.plot_field_statistics(
+            {'ran': self._tl_field(span, 60.0), 'skipped': None}, depth=100.0)
+        assert [t.get_text() for t in axes[0].get_xticklabels()] == ['ran']
+        plt.close(fig)
+
+    def test_all_fields_missing_raises(self):
+        with pytest.raises(ConfigurationError, match='no fields to plot'):
+            uacpy.plot.plot_field_statistics({'a': None}, depth=100.0)
 
 
 class TestOnlySomeViewsCarryAFixedColourWindow:

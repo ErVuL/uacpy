@@ -1,523 +1,180 @@
-"""
-═══════════════════════════════════════════════════════════════════════════════
-EXAMPLE 11: Bellhop Run Modes - Comprehensive
-═══════════════════════════════════════════════════════════════════════════════
+"""Bellhop run modes — TL, rays, eigenrays, arrivals.
 
-OBJECTIVE:
-    Demonstrate all Bellhop run modes and their applications.
-    Compare coherent vs incoherent vs semi-coherent TL.
-    Show ray tracing, eigenrays, and arrival structure analysis.
+One model, six run modes, four scenarios.
 
-COMPLEXITY LEVEL: ⭐⭐⭐ (3/5) - Advanced Model Features
+The three TL modes share one ray trace and differ only in the accumulator:
 
-FEATURES DEMONSTRATED:
-    ✓ Coherent TL (run_mode=RunMode.COHERENT_TL) - Phase-preserving transmission loss
-    ✓ Incoherent TL (run_mode=RunMode.INCOHERENT_TL) - Phase-averaged transmission loss
-    ✓ Semi-coherent TL (run_mode=RunMode.SEMICOHERENT_TL) - Incoherent sum with a
-      Lloyd-mirror source pattern (see RUN MODES EXPLAINED below)
-    ✓ Ray tracing (run_mode=RunMode.RAYS) - Ray path visualization
-    ✓ Eigenrays (run_mode=RunMode.EIGENRAYS) - Specific receiver rays
-    ✓ Arrivals (run_mode=RunMode.ARRIVALS) - Arrival time/amplitude structure
-    ✓ Ray file reading and visualization
-    ✓ Arrival structure analysis
+* COHERENT_TL keeps phase, so the modal interference is there — use it for CW.
+* INCOHERENT_TL sums power, giving the smooth long-term average a broadband
+  signal sees.
+* SEMICOHERENT_TL is NOT a hybrid of the two. The vendored solver accumulates
+  'S' exactly as it accumulates 'I' — influence.f90 branches on
+  ``CASE ( 'I', 'S' )`` and squares the magnitude for both. The one 'S'-specific
+  line is a Lloyd-mirror SOURCE AMPLITUDE pattern applied at launch
+  (bellhop.f90:276-278, ``Amp0 * SQRT(2) * ABS(SIN(omega/c * zs * SIN(alpha)))``).
+  So 'S' is an incoherent sum with the source's surface-image directivity baked
+  in, and its smoothness matches 'I'. The statistics below show that directly,
+  and the run times are measured rather than asserted.
 
-SCENARIOS:
+Then: a ray fan through the Munk channel, eigenrays found two ways (the
+EIGENRAYS run mode and compute_eigenrays, whose Fortran miss tolerance is loose
+enough to need filtering), and the arrival structure behind them.
 
-    Scenario A: TL Mode Comparison
-    ───────────────────────────────
-    - Compare coherent vs incoherent vs semi-coherent TL
-    - Same environment, different run modes
-    - Munk profile to show modal interference
-    - Demonstrates phase effects
-
-    Scenario B: Ray Tracing
-    ────────────────────────
-    - Visualize ray paths through environment
-    - Ray tube spreading
-    - Caustics and shadow zones
-    - Ray turning points
-
-    Scenario C: Eigenrays & Arrivals
-    ─────────────────────────────────
-    - Find all eigenrays to specific receiver
-    - Analyze arrival structure
-    - Travel times and amplitudes
-    - Multipath arrival patterns
-
-RUN MODES EXPLAINED:
-
-    Coherent TL ('C'):
-    - Preserves phase relationships
-    - Shows interference patterns (Lloyd mirror, modal)
-    - Best for CW signals
-
-    Incoherent TL ('I'):
-    - Phase-averaged (power sum of contributions)
-    - Smoother TL field
-    - Better for broadband signals
-    - Represents long-term average
-
-    Semi-coherent TL ('S'):
-    - NOT a hybrid summation. Bellhop accumulates 'S' exactly as it
-      accumulates 'I' — an incoherent power sum. In the vendored solver,
-      Bellhop/influence.f90 branches on
-      ``CASE ( 'I', 'S' )   ! Incoherent or Semi-coherent TL`` and does
-      ``contri = ABS( contri ) ** 2`` for both.
-    - The one 'S'-specific line in the solver is a Lloyd-mirror *source
-      amplitude pattern* applied at launch, Bellhop/bellhop.f90:276-278:
-      ``Amp0 = Amp0 * SQRT(2) * ABS( SIN( omega/c * xs(2) * SIN(alpha) ) )``
-    - So 'S' is "incoherent sum, with the source's surface-image directivity
-      baked into the launch amplitude". Its smoothness matches 'I'; it is not
-      intermediate between 'C' and 'I'. The statistics printed by Scenario A
-      show this directly.
-
-    Three run modes, three costs: the three TL modes share one ray trace and
-    differ only in the accumulator, so they cost about the same. Scenario A
-    times each run and prints the numbers instead of asserting an ordering.
-
-    Rays ('R'):
-    - Compute and save ray paths
-    - Visualize propagation geometry
-    - Identify turning points, caustics
-    - No TL field computed
-
-    Eigenrays ('E'):
-    - Find all rays reaching specific receiver
-    - Useful for multipath analysis
-    - Shows direct, surface-reflected, bottom-reflected paths
-    - Essential for pulse propagation
-
-    Arrivals ('A'):
-    - Complete arrival structure
-    - Travel time, amplitude, phase for each path
-    - Number of surface/bottom bounces
-    - Critical for pulse/transient analysis
-
-LEARNING OUTCOMES:
-    - When to use each run mode
-    - Phase effects in coherent propagation
-    - Ray-based propagation visualization
-    - Multipath structure analysis
-    - Practical sonar applications
-
-═══════════════════════════════════════════════════════════════════════════════
+Uses: RunMode.COHERENT_TL / INCOHERENT_TL / SEMICOHERENT_TL / RAYS / EIGENRAYS
+/ ARRIVALS · Bellhop.compute_eigenrays · Rays.filter_by_miss_distance /
+top_n_by_miss / truncate_at_receiver · Rays.plot · Arrivals.plot · plot.compare
 """
 
+import os
 import sys
 import time
-import os
 from pathlib import Path
-# Repo root, so ``import uacpy`` resolves from a source checkout.
-sys.path.insert(0, str(Path(__file__).parents[2]))
-
-OUTPUT_DIR = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
-                  or Path(__file__).parent / 'output')
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
-import numpy as np  # noqa: E402
-import matplotlib.pyplot as plt  # noqa: E402
-import uacpy  # noqa: E402
-from uacpy.core.environment import SoundSpeedProfile, BoundaryProperties  # noqa: E402
-from uacpy.models import Bellhop  # noqa: E402
-from uacpy.models import RunMode  # noqa: E402
-from uacpy.visualization import plot_field, compare  # noqa: E402
-
-
-def scenario_a_tl_modes():
-    """
-    Scenario A: Compare coherent, incoherent, and semi-coherent TL.
-    """
-    print("\n" + "="*80)
-    print("SCENARIO A: TL Mode Comparison (Coherent vs Incoherent vs Semi-coherent)")
-    print("="*80)
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # ENVIRONMENT - Munk profile to show modal interference
-    # ═══════════════════════════════════════════════════════════════════════
-    env = uacpy.Environment(
-        name="Munk Profile - TL Mode Comparison",
-        bathymetry=5000.0,
-        ssp=SoundSpeedProfile.from_munk(5000.0),
-    )
-
-    source = uacpy.Source(
-        depths=1000.0,      # Inside the channel, 300 m above the 1300 m axis
-        frequencies=50.0     # 50 Hz
-    )
-
-    receiver = uacpy.Receiver(
-        depths=np.linspace(100, 4900, 40),      # Reduced for faster computation
-        ranges=np.linspace(1000, 50000, 80)     # 1-50 km
-    )
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # RUN BELLHOP WITH DIFFERENT MODES
-    # ═══════════════════════════════════════════════════════════════════════
-    print("\n  Running Bellhop with different TL modes:")
-
-    # The first Bellhop call in a process pays binary/library load — about
-    # 1.8 s here, which would be charged entirely to whichever mode ran first.
-    # Burn one run so the three timings below are comparable.
-    print("    • warm-up run...", end=" ", flush=True)
-    Bellhop(verbose=False).run(env, source, receiver, run_mode=RunMode.COHERENT_TL)
-    print("✓")
-
-    # Coherent TL
-    print("    • Coherent TL...", end=" ", flush=True)
-    bellhop_coherent = Bellhop(verbose=False)
-    t0 = time.perf_counter()
-    result_coherent = bellhop_coherent.run(env, source, receiver, run_mode=RunMode.COHERENT_TL)
-    dt_coherent = time.perf_counter() - t0
-    print(f"✓ ({dt_coherent:.2f} s)")
-
-    # Incoherent TL
-    print("    • Incoherent TL...", end=" ", flush=True)
-    bellhop_incoherent = Bellhop(verbose=False)
-    t0 = time.perf_counter()
-    result_incoherent = bellhop_incoherent.run(env, source, receiver, run_mode=RunMode.INCOHERENT_TL)
-    dt_incoherent = time.perf_counter() - t0
-    print(f"✓ ({dt_incoherent:.2f} s)")
-
-    # Semi-coherent TL
-    print("    • Semi-coherent TL...", end=" ", flush=True)
-    bellhop_semicoherent = Bellhop(verbose=False)
-    t0 = time.perf_counter()
-    result_semicoherent = bellhop_semicoherent.run(env, source, receiver, run_mode=RunMode.SEMICOHERENT_TL)
-    dt_semicoherent = time.perf_counter() - t0
-    print(f"✓ ({dt_semicoherent:.2f} s)")
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # PLOT COMPARISON
-    # ═══════════════════════════════════════════════════════════════════════
-    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-
-    # Common colour window for the three TL panels (plot_field's default
-    # 20-120 dB scale narrowed to where this deep-water field lives).
-    vmin, vmax = 60, 120
-
-    for ax, field, run_mode in ((axes[0, 0], result_coherent, 'COHERENT_TL'),
-                                (axes[0, 1], result_incoherent, 'INCOHERENT_TL'),
-                                (axes[1, 0], result_semicoherent, 'SEMICOHERENT_TL')):
-        plot_field(field, ax=ax, env=env, source=source, vmin=vmin, vmax=vmax,
-                   title=f'{run_mode.split("_")[0].capitalize()} TL '
-                         f'(run_mode=RunMode.{run_mode})')
-
-    # Range cut comparison at the source depth
-    ax = axes[1, 1]
-    cuts = {'Coherent': result_coherent.at(depth=1000),
-            'Incoherent': result_incoherent.at(depth=1000),
-            'Semi-coherent': result_semicoherent.at(depth=1000)}
-    compare(list(cuts.values()), list(cuts), ax=ax, linewidth=2.5, alpha=0.8,
-            title=f'TL Comparison at {source.depths[0]:.0f}m Depth '
-                  f'(300 m above the 1300 m channel axis)')
-    tl_coherent, tl_incoherent, tl_semicoherent = (c.dB for c in cuts.values())
-
-    plt.tight_layout()
-    plt.savefig(OUTPUT_DIR / 'example_11a_tl_modes.png', dpi=150, bbox_inches='tight')
-    plt.close()
-
-    print("\n  TL statistics at 1000m depth (300m above the 1300m Munk axis):")
-    print(f"    • Coherent    - Mean: {np.mean(tl_coherent):.1f} dB, "
-          f"Std: {np.std(tl_coherent):.1f} dB")
-    print(f"    • Incoherent  - Mean: {np.mean(tl_incoherent):.1f} dB, "
-          f"Std: {np.std(tl_incoherent):.1f} dB")
-    print(f"    • Semi-coh    - Mean: {np.mean(tl_semicoherent):.1f} dB, "
-          f"Std: {np.std(tl_semicoherent):.1f} dB")
-
-    # Whole-grid spread is the fair smoothness measure — one depth slice is
-    # too short a sample to separate 'I' from 'S'.
-    std_c = np.nanstd(np.asarray(result_coherent.dB))
-    std_i = np.nanstd(np.asarray(result_incoherent.dB))
-    std_s = np.nanstd(np.asarray(result_semicoherent.dB))
-    max_is = np.nanmax(np.abs(np.asarray(result_incoherent.dB)
-                              - np.asarray(result_semicoherent.dB)))
-    print("\n  Whole-grid TL std dev:")
-    print(f"    • Coherent {std_c:.2f} dB   • Incoherent {std_i:.2f} dB"
-          f"   • Semi-coherent {std_s:.2f} dB")
-    print(f"    • max |Incoherent - Semi-coherent| = {max_is:.2f} dB")
-
-    print("\n  Key observations:")
-    print("    • Coherent TL shows strong modal interference (highest std dev)")
-    print("    • Incoherent TL is phase-averaged and smooth")
-    print("    • Semi-coherent is NOT intermediate: it uses the same incoherent")
-    print("      power sum as 'I', so its std dev sits on top of the incoherent")
-    print("      one. The two differ only by the Lloyd-mirror source amplitude")
-    print("      pattern 'S' applies at launch (bellhop.f90:276-278), which is")
-    print("      what the max|I-S| figure above measures.")
-    print("\n  Run times, after a warm-up run (same ray trace, different accumulator):")
-    print(f"    • Coherent {dt_coherent:.2f} s   • Incoherent {dt_incoherent:.2f} s"
-          f"   • Semi-coherent {dt_semicoherent:.2f} s")
-
-    print(f"\n  ✓ Saved: {OUTPUT_DIR / 'example_11a_tl_modes.png'}")
-
-
-def scenario_b_ray_tracing():
-    """
-    Scenario B: Ray tracing and visualization.
-    """
-    print("\n" + "="*80)
-    print("SCENARIO B: Ray Tracing (run_mode=RunMode.RAYS)")
-    print("="*80)
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # ENVIRONMENT - Munk profile for interesting ray paths
-    # ═══════════════════════════════════════════════════════════════════════
-    env = uacpy.Environment(
-        name="Munk Profile - Ray Tracing",
-        bathymetry=5000.0,
-        ssp=SoundSpeedProfile.from_munk(5000.0),
-    )
-
-    source = uacpy.Source(
-        depths=1000.0,       # Inside the channel, 300 m above the 1300 m axis
-        frequencies=50.0,
-    )
-
-    # For ray tracing, we need to specify ray output
-    receiver = uacpy.Receiver(
-        depths=np.array([1000]),  # Single depth for ray endpoints
-        ranges=np.linspace(0, 100000, 100)  # 0-100 km
-    )
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # RUN BELLHOP IN RAY TRACING MODE
-    # ═══════════════════════════════════════════════════════════════════════
-    print("\n  Running Bellhop in ray tracing mode...")
-    print("    • Computing ray paths...", end=" ", flush=True)
-
-    bellhop = Bellhop(verbose=False, alpha=(-15.0, 15.0), n_beams=31)
-    result = bellhop.run(env, source, receiver, run_mode=RunMode.RAYS)
-
-    print("✓")
-
-    fig, axes = plt.subplots(2, 1, figsize=(14, 10))
-    result.plot(env=env, ax=axes[0],
-                title=f'Ray Paths ({bellhop.n_beams} rays, ±15° launch angles)')
-    axes[0].set_xlim(0, 100)
-    # 20-40 km is a zoom on the axial crossing region, not a convergence zone:
-    # a CZ is the near-surface refocusing of bottom-limited rays launched from
-    # a near-surface source. This source sits inside the channel with a ±15°
-    # fan, so every ray here is channel-trapped and never reaches the bottom.
-    result.plot(env=env, ax=axes[1],
-                title='Ray Paths — Zoomed View (20-40 km, axial crossings)')
-    axes[1].set_xlim(20, 40)
-    axes[1].set_ylim(2000, 0)
-    plt.tight_layout()
-    plt.savefig(OUTPUT_DIR / 'example_11b_ray_tracing.png', dpi=150,
-                bbox_inches='tight')
-    plt.close()
-
-    print("\n  Ray tracing parameters:")
-    print(f"    • Number of rays: {bellhop.n_beams}")
-    print(f"    • Launch angles: {bellhop.alpha[0]:.1f}° to {bellhop.alpha[1]:.1f}°")
-    print(f"    • Source depth: {source.depths[0]:.0f} m"
-          f" (inside the channel; Munk axis is at 1300 m)")
-    print("    • Maximum range: 100 km")
-
-    print(f"\n  ✓ Saved: {OUTPUT_DIR / 'example_11b_ray_tracing.png'}")
-
-
-def scenario_c_eigenrays_arrivals():
-    """
-    Scenario C: Eigenrays and arrival structure analysis.
-
-    Uses a dense launch fan (n_beams=2001 over ±20°) so Bellhop's native
-    EIGENRAYS run-mode converges sharply on the receiver — coarse fans
-    return rays that visibly miss because the per-angle vertical spacing
-    at the receiver range exceeds the eigenray miss-distance tolerance.
-    """
-    print("\n" + "="*80)
-    print("SCENARIO C: Eigenrays & Arrivals (run_mode=RunMode.EIGENRAYS and ARRIVALS)")
-    print("="*80)
-
-    env = uacpy.Environment(
-        name="Shallow Water - Eigenrays",
-        bathymetry=100.0,
-        ssp=SoundSpeedProfile.from_pairs(
-            [(0, 1500), (100, 1520)],
-        ),
-    )
-
-    source = uacpy.Source(depths=50.0, frequencies=100.0)
-    receiver = uacpy.Receiver(
-        depths=np.array([30.0]),
-        ranges=np.array([2000.0]),
-    )
-
-    print(f"\n  Receiver at (r={receiver.ranges[0]/1000:.1f} km, "
-          f"z={receiver.depths[0]:.0f} m)")
-
-    # RunMode.EIGENRAYS returns every ray Bellhop wrote — the Fortran
-    # eigenray tolerance is loose. Filter via Rays methods so only rays
-    # that actually land within λ/4 of the receiver survive.
-    bellhop_eigen = Bellhop(verbose=False, alpha=(-20.0, 20.0), n_beams=2001)
-    wavelength_m = 1500.0 / float(np.atleast_1d(source.frequencies)[0])
-    print(f"    • Filtering eigenrays "
-          f"(miss < λ/4 ≈ {wavelength_m / 4:.1f} m)...",
-          end=" ", flush=True)
-    eigen_target = uacpy.Receiver(
-        depths=[float(receiver.depths[0])],
-        ranges=[float(receiver.ranges[0])],
-    )
-    result_eigen = bellhop_eigen.compute_eigenrays(
-        env, source, eigen_target,
-    ).filter_by_miss_distance(wavelength_m / 4).top_n_by_miss(12).truncate_at_receiver()
-    print("✓")
-
-    print("    • Computing context ray fan (RunMode.RAYS)...",
-          end=" ", flush=True)
-    bellhop_full = Bellhop(verbose=False, alpha=(-20.0, 20.0), n_beams=21)
-    receiver_fan = uacpy.Receiver(
-        depths=np.array([receiver.depths[0]]),
-        ranges=np.linspace(0, receiver.ranges[0] * 1.1, 50),
-    )
-    result_rays = bellhop_full.run(env, source, receiver_fan,
-                                   run_mode=RunMode.RAYS)
-    print("✓")
-
-    print("    • Computing arrival structure (RunMode.ARRIVALS)...",
-          end=" ", flush=True)
-    try:
-        bellhop_arr = Bellhop(verbose=False, alpha=(-20.0, 20.0), n_beams=201)
-        result_arr = bellhop_arr.run(env, source, receiver,
-                                     run_mode=RunMode.ARRIVALS)
-        print("✓")
-    except Exception as e:
-        print(f"⚠ ({e})")
-        result_arr = None
-
-    arrivals_ok = result_arr is not None and len(result_arr) > 0
-
-    n_panels = 3 if arrivals_ok else 2
-    fig = plt.figure(figsize=(14, 4 * n_panels + 1))
-    gs = fig.add_gridspec(n_panels, 1, hspace=0.45)
-    ax_full = fig.add_subplot(gs[0])
-    ax_eigen = fig.add_subplot(gs[1])
-    ax_arr = fig.add_subplot(gs[2]) if arrivals_ok else None
-
-    result_rays.plot(env=env,
-                     ax=ax_full, linewidth=1.1, alpha=0.75,
-                     title=f'Context ray fan ({len(result_rays.rays)} rays, ±20°)')
-
-    n_eigenrays = len(result_eigen.rays)
-    if n_eigenrays > 0:
-        result_eigen.plot(env=env,
-                          ax=ax_eigen, linewidth=1.5, alpha=0.9,
-                          title=f'{n_eigenrays} eigenrays at receiver '
-                          f'(miss < λ/4 ≈ {wavelength_m / 4:.1f} m)')
-    else:
-        ax_eigen.text(0.5, 0.5, 'No eigenrays returned',
-                      ha='center', va='center', transform=ax_eigen.transAxes)
-        ax_eigen.axis('off')
-
-    if arrivals_ok:
-        result_arr.plot(ax=ax_arr)
-
-    fig.savefig(OUTPUT_DIR / 'example_11c_eigenrays_arrivals.png', dpi=150,
-                bbox_inches='tight')
-    plt.close(fig)
-
-    print("\n  Analysis complete:")
-    print(f"    • Eigenrays found: {n_eigenrays}")
-    if arrivals_ok:
-        rec = result_arr.arrivals
-        if rec:
-            delays = [r['delay'] for r in rec]
-            print(f"    • Arrivals detected: {len(rec)}")
-            print(f"    • Time spread: {max(delays) - min(delays):.4f} s")
-
-    print(f"\n  ✓ Saved: {OUTPUT_DIR / 'example_11c_eigenrays_arrivals.png'}")
-
-
-def scenario_d_compute_eigenrays_pekeris():
-    """
-    Scenario D: focused ``Bellhop.compute_eigenrays`` demo on a Pekeris guide.
-
-    Same API as scenario C uses internally, but on a clean Pekeris waveguide
-    so the multipath structure (direct + surface- and bottom-bounces) is
-    easy to read off the ray plot and the printed (alpha, miss, top, bot)
-    table.
-    """
-    print("\n" + "="*80)
-    print("SCENARIO D: compute_eigenrays() on a Pekeris waveguide")
-    print("="*80)
-
-    bottom = BoundaryProperties(
-        acoustic_type='half-space', sound_speed=1600.0,
-        density=1.5, attenuation=0.5,
-    )
-    env = uacpy.Environment(
-        name='Pekeris', bathymetry=100.0, ssp=1500.0, bottom=bottom,
-    )
-    source = uacpy.Source(depths=20.0, frequencies=200.0)
-
-    target_range_m = 3000.0
-    target_depth_m = 80.0
-
-    print(f"\n  Finding eigenrays at "
-          f"(r={target_range_m/1000:.1f} km, z={target_depth_m:.0f} m)...",
-          end=" ", flush=True)
-    bellhop = Bellhop(verbose=False, alpha=(-30, 30), n_beams=2001)
-    target = uacpy.Receiver(depths=[target_depth_m], ranges=[target_range_m])
-    rays = bellhop.compute_eigenrays(
-        env, source, target,
-    ).top_n_by_miss(8).truncate_at_receiver()
-    print("✓")
-
-    print(f"\n  Found {len(rays.rays)} eigenrays:")
-    print(f"    {'alpha (deg)':>12s} {'miss (m)':>10s} {'top':>4s} {'bot':>4s}")
-    for r in rays.rays:
-        print(f"    {r['alpha']:>12.3f} {r['miss_distance_m']:>10.3f} "
-              f"{r['n_top_bounces']:>4d} {r['n_bot_bounces']:>4d}")
-
-    fig, ax = rays.plot(env=env)
-    ax.plot(target_range_m / 1000.0, target_depth_m, 'ro', markersize=10,
-            markeredgecolor='black', label='Receiver')
-    ax.legend(loc='lower right')
-    fig.savefig(OUTPUT_DIR / 'example_11d_compute_eigenrays_pekeris.png',
-                dpi=150, bbox_inches='tight')
-    plt.close(fig)
-    print(f"\n  ✓ Saved: {OUTPUT_DIR / 'example_11d_compute_eigenrays_pekeris.png'}")
-
-
-def main():
-    """
-    Run all Bellhop run mode demonstrations.
-    """
-    print("\n" + "═" * 80)
-    print("EXAMPLE 11: Bellhop Run Modes - Comprehensive")
-    print("═" * 80)
-    print("\nThis example demonstrates:")
-    print("  • Coherent vs Incoherent vs Semi-coherent TL")
-    print("  • Ray tracing and visualization")
-    print("  • Eigenray finding (run_mode + compute_eigenrays)")
-    print("  • Arrival structure analysis")
-
-    # Run all scenarios
-    scenario_a_tl_modes()
-    scenario_b_ray_tracing()
-    scenario_c_eigenrays_arrivals()
-    scenario_d_compute_eigenrays_pekeris()
-
-    # Summary
-    print("\nKey Takeaways:")
-    print("  ✓ Coherent TL shows phase interference (modal patterns)")
-    print("  ✓ Incoherent TL represents phase-averaged, broadband behavior")
-    print("  ✓ Ray tracing reveals propagation geometry")
-    print("  ✓ Eigenrays essential for pulse propagation analysis")
-    print("  ✓ Arrival structure contains multipath timing and amplitudes")
-    print("\nWhen to use each mode:")
-    print("  → Coherent: CW signals, narrowband analysis, interference studies")
-    print("  → Incoherent: Broadband signals, long-term averages")
-    print("  → Semi-coherent: incoherent sum for a source whose surface image")
-    print("    matters — a shallow source over a pressure-release surface")
-    print("  → Rays: Understanding propagation paths, caustics")
-    print("  → Eigenrays/Arrivals: Pulse propagation, time-domain analysis")
-
-    print("\n✓ Example 11 complete\n")
-
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
+
+import numpy as np
+import matplotlib.pyplot as plt
+import uacpy
+
+OUT = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
+           or Path(__file__).parent / 'output')
+OUT.mkdir(parents=True, exist_ok=True)
+
+# ── A. The three TL modes on a Munk profile ─────────────────────────────────
+munk = uacpy.Environment(name="Munk profile", bathymetry=5000.0,
+                         ssp=uacpy.SoundSpeedProfile.from_munk(5000.0))
+source = uacpy.Source(depths=1000.0,     # in the channel, above the 1300 m axis
+                      frequencies=50.0)
+receiver = uacpy.Receiver(depths=np.linspace(100, 4900, 40),
+                          ranges=np.linspace(1000, 50000, 80))
+
+# The first Bellhop call in a process pays binary and library load — about
+# 1.8 s here — which would be charged entirely to whichever mode ran first.
+uacpy.Bellhop().run(munk, source, receiver,
+                    run_mode=uacpy.RunMode.COHERENT_TL)
+
+fields, elapsed = {}, {}
+for mode in (uacpy.RunMode.COHERENT_TL, uacpy.RunMode.INCOHERENT_TL,
+             uacpy.RunMode.SEMICOHERENT_TL):
+    label = mode.name.split('_')[0].capitalize()
+    started = time.perf_counter()
+    fields[label] = uacpy.Bellhop().run(munk, source, receiver, run_mode=mode)
+    elapsed[label] = time.perf_counter() - started
+
+# Whole-grid spread is the fair smoothness measure — one depth slice is too
+# short a sample to separate 'I' from 'S'.
+for label, field in fields.items():
+    print(f"  {label:12s} TL std {np.nanstd(field.dB):5.2f} dB, "
+          f"{elapsed[label]:.2f} s")
+print(f"  max |Incoherent − Semicoherent| = "
+      f"{np.nanmax(np.abs(fields['Incoherent'].dB - fields['Semicoherent'].dB)):.2f} dB"
+      f" — the Lloyd-mirror launch pattern, and nothing else")
+
+fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+for ax, (label, field) in zip(axes.flat, fields.items()):
+    # The default 20-120 dB TL scale, narrowed to where this deep field lives.
+    uacpy.plot_field(field, ax, env=munk, source=source, vmin=60, vmax=120,
+                     title=f'{label} TL')
+cuts = {label: field.at(depth=1000) for label, field in fields.items()}
+uacpy.plot.compare(list(cuts.values()), list(cuts), ax=axes[1, 1],
+                   linewidth=2.5, alpha=0.8,
+                   title='TL at 1000 m (300 m above the channel axis)')
+fig.tight_layout()
+fig.savefig(OUT / 'example_11a_tl_modes.png', dpi=150, bbox_inches='tight')
+plt.close(fig)
+
+# ── B. Ray paths through the channel ────────────────────────────────────────
+ray_model = uacpy.Bellhop(alpha=(-15.0, 15.0), n_beams=31)
+rays = ray_model.run(munk, source,
+                     uacpy.Receiver(depths=np.array([1000]),
+                                    ranges=np.linspace(0, 100000, 100)),
+                     run_mode=uacpy.RunMode.RAYS)
+print(f"  {ray_model.n_beams} rays over "
+      f"{ray_model.alpha[0]:.0f}° to {ray_model.alpha[1]:.0f}°, out to 100 km")
+
+fig, axes = plt.subplots(2, 1, figsize=(14, 10))
+rays.plot(env=munk, ax=axes[0],
+          title=f'Ray paths ({ray_model.n_beams} rays, ±15° launch)')
+axes[0].set_xlim(0, 100)
+# 20-40 km is the axial crossing region, not a convergence zone: a CZ is the
+# near-surface refocusing of bottom-limited rays from a near-surface source.
+# This source sits inside the channel with a ±15° fan, so every ray here is
+# channel-trapped and never reaches the bottom.
+rays.plot(env=munk, ax=axes[1],
+          title='Ray paths — zoom on the axial crossings (20-40 km)')
+axes[1].set_xlim(20, 40)
+axes[1].set_ylim(2000, 0)
+fig.tight_layout()
+fig.savefig(OUT / 'example_11b_ray_tracing.png', dpi=150, bbox_inches='tight')
+plt.close(fig)
+
+# ── C. Eigenrays and arrivals at one receiver ───────────────────────────────
+shelf = uacpy.Environment(
+    name="Shallow water", bathymetry=100.0,
+    ssp=uacpy.SoundSpeedProfile.from_pairs([(0, 1500), (100, 1520)]))
+shelf_source = uacpy.Source(depths=50.0, frequencies=100.0)
+target = uacpy.Receiver(depths=[30.0], ranges=[2000.0])
+
+# compute_eigenrays returns every ray Bellhop wrote — the Fortran tolerance is
+# loose — so the Rays methods filter to the ones that actually land on the
+# receiver. A dense launch fan is what makes them converge sharply: with a
+# coarse fan the per-angle vertical spacing at 2 km already exceeds the miss
+# tolerance.
+wavelength = 1500.0 / float(shelf_source.frequencies[0])
+eigenrays = uacpy.Bellhop(alpha=(-20.0, 20.0), n_beams=2001).compute_eigenrays(
+    shelf, shelf_source, target).filter_by_miss_distance(
+    wavelength / 4).top_n_by_miss(12).truncate_at_receiver()
+context = uacpy.Bellhop(alpha=(-20.0, 20.0), n_beams=21).run(
+    shelf, shelf_source,
+    uacpy.Receiver(depths=np.array([30.0]),
+                   ranges=np.linspace(0, 2200.0, 50)),
+    run_mode=uacpy.RunMode.RAYS)
+arrivals = uacpy.Bellhop(alpha=(-20.0, 20.0), n_beams=201).run(
+    shelf, shelf_source, uacpy.Receiver(depths=np.array([30.0]),
+                                        ranges=np.array([2000.0])),
+    run_mode=uacpy.RunMode.ARRIVALS)
+delays = [record['delay'] for record in arrivals.arrivals]
+print(f"  at 2 km / 30 m: {len(eigenrays.rays)} eigenrays within λ/4 "
+      f"({wavelength / 4:.1f} m), {len(delays)} arrivals spread over "
+      f"{max(delays) - min(delays):.4f} s")
+
+fig = plt.figure(figsize=(14, 13))
+grid = fig.add_gridspec(3, 1, hspace=0.45)
+context.plot(env=shelf, ax=fig.add_subplot(grid[0]), linewidth=1.1, alpha=0.75,
+             title=f'Context ray fan ({len(context.rays)} rays, ±20°)')
+eigenrays.plot(env=shelf, ax=fig.add_subplot(grid[1]), linewidth=1.5,
+               alpha=0.9,
+               title=f'{len(eigenrays.rays)} eigenrays at the receiver '
+                     f'(miss < λ/4 ≈ {wavelength / 4:.1f} m)')
+arrivals.plot(ax=fig.add_subplot(grid[2]))
+fig.savefig(OUT / 'example_11c_eigenrays_arrivals.png', dpi=150,
+            bbox_inches='tight')
+plt.close(fig)
+
+# ── D. The same eigenray API on a clean Pekeris guide ───────────────────────
+pekeris = uacpy.Environment(
+    name='Pekeris', bathymetry=100.0, ssp=1500.0,
+    bottom=uacpy.BoundaryProperties(acoustic_type='half-space',
+                                    sound_speed=1600.0, density=1.5,
+                                    attenuation=0.5))
+pekeris_source = uacpy.Source(depths=20.0, frequencies=200.0)
+target_range, target_depth = 3000.0, 80.0
+paths = uacpy.Bellhop(alpha=(-30, 30), n_beams=2001).compute_eigenrays(
+    pekeris, pekeris_source,
+    uacpy.Receiver(depths=[target_depth], ranges=[target_range])
+).top_n_by_miss(8).truncate_at_receiver()
+
+# The multipath structure reads straight off the table: launch angle, how close
+# it came, and how many times it touched each boundary.
+print(f"  Pekeris guide, {len(paths.rays)} eigenrays at 3 km / 80 m:")
+print(f"    {'α (deg)':>10s} {'miss (m)':>9s} {'top':>4s} {'bot':>4s}")
+for ray in paths.rays:
+    print(f"    {ray['alpha']:>10.3f} {ray['miss_distance_m']:>9.3f} "
+          f"{ray['n_top_bounces']:>4d} {ray['n_bot_bounces']:>4d}")
+
+fig, ax = paths.plot(env=pekeris)
+ax.plot(target_range / 1000.0, target_depth, 'ro', markersize=10,
+        markeredgecolor='black', label='Receiver')
+ax.legend(loc='lower right')
+fig.savefig(OUT / 'example_11d_compute_eigenrays_pekeris.png', dpi=150,
+            bbox_inches='tight')
+plt.close(fig)

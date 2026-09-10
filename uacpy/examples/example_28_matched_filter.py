@@ -1,109 +1,89 @@
-"""
-═══════════════════════════════════════════════════════════════════════════════
-EXAMPLE 28: Matched Filtering, Pulse Compression & the Ambiguity Function
-═══════════════════════════════════════════════════════════════════════════════
+"""Matched filtering, pulse compression and the ambiguity function.
 
-OBJECTIVE:
-    Transmit an LFM chirp through a simple two-path channel, then recover the
-    echo delays by replica correlation (pulse compression) and inspect the
-    waveform's range-Doppler ambiguity function.
+An LFM chirp through a two-path channel, with the echo delays recovered by
+correlating against a replica of the transmission. Pulse compression trades the
+long pulse needed for energy against the short one needed for resolution: the
+processing gain is 10·log10(B·T). The ambiguity function then shows what the
+waveform can and cannot separate in delay and Doppler together.
 
-FEATURES DEMONSTRATED:
-    ✓ uacpy.acoustic_signal.lfm_chirp + channel.simulate_reception
-    ✓ matched_filter / pulse_compression / processing_gain
-    ✓ ambiguity_function (range-Doppler resolution)
-═══════════════════════════════════════════════════════════════════════════════
+Uses: acoustic_signal.lfm_chirp · simulate_reception · pulse_compression ·
+processing_gain · ambiguity_function · plot_ambiguity
 """
 
-import sys
 import os
+import sys
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
-OUTPUT_DIR = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
-                  or Path(__file__).parent / 'output')
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-# Repo root, so ``import uacpy`` resolves from a source checkout.
-sys.path.insert(0, str(Path(__file__).parents[2]))
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.colors import LogNorm
+import uacpy
+from uacpy.acoustic_signal import (ambiguity_function, lfm_chirp,
+                                   processing_gain, pulse_compression,
+                                   simulate_reception)
 
-import numpy as np  # noqa: E402
-import matplotlib.pyplot as plt  # noqa: E402
-from matplotlib.colors import LogNorm  # noqa: E402
+OUT = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
+           or Path(__file__).parent / 'output')
+OUT.mkdir(parents=True, exist_ok=True)
 
-from uacpy.acoustic_signal import (  # noqa: E402
-    ambiguity_function,
-    lfm_chirp,
-    processing_gain,
-    pulse_compression,
-    simulate_reception,
-)
-from uacpy.visualization import plot_ambiguity  # noqa: E402
+rng = np.random.default_rng(0xACED)
+fs = 20000.0
+f_min, f_max, pulse_length = 1000.0, 5000.0, 0.02
+t_tx, transmitted = lfm_chirp(f_min, f_max, pulse_length, fs)
+bandwidth = f_max - f_min
 
+# Two echoes, the second weaker and 25 ms later. The noise is drawn from the
+# seeded generator above, so the figure is identical run to run.
+delays = [0.05, 0.075]
+t_rx, received = simulate_reception(transmitted, [1.0, 0.5], delays, fs)
+received = received + 0.1 * rng.standard_normal(received.size)
 
-def main():
-    print("═" * 80)
-    print("EXAMPLE 28: Matched Filtering & Ambiguity Function")
-    print("═" * 80)
+lags, compressed = pulse_compression(received, transmitted, fs)
+gain = processing_gain(bandwidth, pulse_length)
+peaks = lags[np.argsort(np.abs(compressed))[-1]]
+print(f"  B·T = {bandwidth * pulse_length:.0f} → processing gain "
+      f"{gain:.1f} dB")
+print(f"  echoes at {delays[0] * 1e3:.0f} and {delays[1] * 1e3:.0f} ms; "
+      f"strongest compressed peak at {peaks * 1e3:.1f} ms")
 
-    rng = np.random.default_rng(0xACED)
-    fs = 20000.0
-    fmin, fmax, T = 1000.0, 5000.0, 0.02
-    t_tx, tx = lfm_chirp(fmin, fmax, T, fs)
-    bandwidth = fmax - fmin
+lag_axis, doppler_axis, ambiguity = ambiguity_function(
+    transmitted.astype(complex), fs, n_doppler=121)
 
-    # Two echoes at 0.05 s and 0.075 s, second weaker.
-    amplitudes = [1.0, 0.5]
-    delays = [0.05, 0.075]
-    t_rx, rx = simulate_reception(tx, amplitudes, delays, fs)
-    # Draws the noise from the seeded generator above, so the figure this
-    # script writes is byte-identical run to run.
-    rx = rx + 0.1 * rng.standard_normal(rx.size)
+fig, axes = plt.subplots(2, 2, figsize=(14, 9))
+axes[0, 0].plot(t_tx * 1e3, transmitted, 'b-', lw=0.7)
+axes[0, 0].set_title('Transmitted LFM chirp', fontweight='bold')
+axes[0, 0].set_xlabel('Time (ms)')
+axes[0, 0].set_ylabel('Amplitude')
+axes[0, 0].grid(True, alpha=0.3)
 
-    lags, comp = pulse_compression(rx, tx, fs)
-    pg = processing_gain(bandwidth, T)
-    print(f"\n  Processing gain = {pg:.1f} dB  (B*T = {bandwidth*T:.0f})")
-    print(f"  Echo delays (truth): {delays}")
+axes[0, 1].plot(t_rx * 1e3, received, 'g-', lw=0.6)
+axes[0, 1].set_title('Received (2 echoes + noise)', fontweight='bold')
+axes[0, 1].set_xlabel('Time (ms)')
+axes[0, 1].set_ylabel('Amplitude')
+axes[0, 1].grid(True, alpha=0.3)
 
-    lag_axis, dop_axis, amb = ambiguity_function(tx.astype(complex), fs,
-                                                 n_doppler=121)
+axes[1, 0].plot(lags * 1e3, 20 * np.log10(np.abs(compressed) + 1e-6), 'r-',
+                lw=0.8)
+for delay in delays:
+    axes[1, 0].axvline(delay * 1e3, color='k', ls='--', alpha=0.5)
+axes[1, 0].set_title('Matched-filter output (pulse compression)',
+                     fontweight='bold')
+axes[1, 0].set_xlabel('Delay (ms)')
+axes[1, 0].set_ylabel('Level (dB)')
+axes[1, 0].set_xlim(0, 100)
+axes[1, 0].set_ylim(-60, 5)
+axes[1, 0].grid(True, alpha=0.3)
 
-    fig, axes = plt.subplots(2, 2, figsize=(14, 9))
+# Log colour scale over |χ| from 1e-2 to 1 — the -40..0 dB window that shows
+# the sidelobe structure, not only the mainlobe.
+uacpy.plot.plot_ambiguity(lag_axis, doppler_axis, ambiguity, ax=axes[1, 1],
+                          cmap='viridis',
+                          norm=LogNorm(vmin=1e-2, vmax=1.0),
+                          title='Ambiguity function |χ(τ, ν)|')
+axes[1, 1].set_xlim(-5, 5)
 
-    ax = axes[0, 0]
-    ax.plot(t_tx * 1e3, tx, 'b-', lw=0.7)
-    ax.set_title('Transmitted LFM chirp', fontweight='bold')
-    ax.set_xlabel('Time (ms)'); ax.set_ylabel('Amplitude')
-    ax.grid(True, alpha=0.3)
-
-    ax = axes[0, 1]
-    ax.plot(t_rx * 1e3, rx, 'g-', lw=0.6)
-    ax.set_title('Received (2 echoes + noise)', fontweight='bold')
-    ax.set_xlabel('Time (ms)'); ax.set_ylabel('Amplitude')
-    ax.grid(True, alpha=0.3)
-
-    ax = axes[1, 0]
-    ax.plot(lags * 1e3, 20 * np.log10(np.abs(comp) + 1e-6), 'r-', lw=0.8)
-    for d in delays:
-        ax.axvline(d * 1e3, color='k', ls='--', alpha=0.5)
-    ax.set_title('Matched-filter output (pulse compression)', fontweight='bold')
-    ax.set_xlabel('Delay (ms)'); ax.set_ylabel('Level (dB)')
-    ax.set_xlim(0, 100); ax.set_ylim(-60, 5); ax.grid(True, alpha=0.3)
-
-    ax = axes[1, 1]
-    # Log colour scale over |chi| from 1e-2 to 1 — the -40..0 dB window that
-    # shows the sidelobe structure, not only the mainlobe.
-    plot_ambiguity(lag_axis, dop_axis, amb, ax=ax, cmap='viridis',
-                   norm=LogNorm(vmin=1e-2, vmax=1.0),
-                   title='Ambiguity function |chi(tau, nu)|')
-    ax.set_xlim(-5, 5)
-
-    plt.tight_layout()
-    out = OUTPUT_DIR / 'example_28_matched_filter.png'
-    plt.savefig(out, dpi=150, bbox_inches='tight')
-    plt.close()
-    print(f"  ✓ Saved: {out}")
-    print("\n✓ Example 28 complete\n")
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+fig.tight_layout()
+fig.savefig(OUT / 'example_28_matched_filter.png', dpi=150,
+            bbox_inches='tight')
+plt.close(fig)

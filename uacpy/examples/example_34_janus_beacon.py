@@ -1,114 +1,91 @@
-"""
-═══════════════════════════════════════════════════════════════════════════════
-EXAMPLE 34: JANUS Standard Beacon (NATO STANAG 4748)
-═══════════════════════════════════════════════════════════════════════════════
+"""JANUS standard beacon (NATO STANAG 4748).
 
-OBJECTIVE:
-    Build, transmit and decode a standards-compliant JANUS baseline packet — the
-    open NATO underwater interoperability protocol:
-      • assemble a 64-bit JANUS packet (class 16, the NATO reference
-        implementation's own class user id) with CRC-8
-      • rate-1/2 K=9 convolutional coding + depth-13 interleaving (144 symbols)
-      • FH-BFSK waveform in the initial band (Fc=11520 Hz, Bw=4160 Hz, Cd=6.25 ms),
-        with the 32-chip detection preamble
-      • channel: propagation delay + reverberation tail + AWGN
-      • detect the preamble, non-coherently demodulate, decode, verify CRC
+Build, transmit and decode a standards-compliant JANUS baseline packet — the
+open NATO underwater interoperability protocol. A 64-bit packet with CRC-8,
+rate-1/2 K=9 convolutional coding and depth-13 interleaving, sent as FH-BFSK in
+the initial band, through delay + reverberation + noise, then detected and
+decoded.
 
-FEATURES DEMONSTRATED:
-    ✓ JanusPacket.to_bits / from_bits (+ CRC-8) · janus_modulate / janus_demodulate
-    ✓ janus_detect (32-chip preamble) · FH-BFSK spectrogram (the frequency hops)
-═══════════════════════════════════════════════════════════════════════════════
+Uses: comms.JanusPacket · janus.janus_modulate / janus_detect /
+janus_demodulate · uacpy.io.write_wav
 """
 
-import sys
 import os
+import sys
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
-OUTPUT_DIR = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
-                  or Path(__file__).parent / 'output')
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-# Repo root, so ``import uacpy`` resolves from a source checkout.
-sys.path.insert(0, str(Path(__file__).parents[2]))
+import numpy as np
+import matplotlib.pyplot as plt
+import uacpy
+from uacpy import comms
+from uacpy.comms import janus
 
-import numpy as np  # noqa: E402
-import matplotlib.pyplot as plt  # noqa: E402
+OUT = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
+           or Path(__file__).parent / 'output')
+OUT.mkdir(parents=True, exist_ok=True)
 
-from uacpy import comms  # noqa: E402
-from uacpy.comms import janus  # noqa: E402
-from plotting_utils import write_wav as _write_wav  # noqa: E402
+rng = np.random.default_rng(0xACED)
+fs = 48000.0
 
+# Class user id 16 is "NATO JANUS reference implementation", whose app type 0
+# plugin carries an 8-bit station identifier. The 34 app-data bits are filled
+# arbitrarily: this example exercises the waveform, not the plugin's fields.
+app_data = np.zeros(34, dtype=int)
+app_data[:16] = comms.bytes_to_bits(b"SOS")[:16]
+packet = comms.JanusPacket(class_id=16, app_type=0, app_data=app_data,
+                           mobility=1, tx_rx=1)
+bits = packet.to_bits()
+print(f"  packet   : 64 bits, v{janus.JANUS_VERSION}, class {packet.class_id}, "
+      f"app type {packet.app_type}")
+print(f"  band     : Fc={janus.FC_INITIAL / 1e3:.2f} kHz, "
+      f"Bw={janus.BW_INITIAL / 1e3:.2f} kHz, Cd=6.25 ms")
 
-def main():
-    print("═" * 80)
-    print("EXAMPLE 34: JANUS Standard Beacon (NATO STANAG 4748)")
-    print("═" * 80)
-    rng = np.random.default_rng(0xACED)
-    fs = 48000.0
+# 32 preamble chips + 144 data chips of FH-BFSK.
+waveform = janus.janus_modulate(bits, fs)
+uacpy.io.write_wav(OUT / 'example_34_janus.wav', waveform, fs,
+                   metadata={'title': 'JANUS baseline packet',
+                             'comment': 'NATO STANAG 4748, initial band'})
+print(f"  waveform : {waveform.size} samples, {waveform.size / fs:.2f} s @ "
+      f"{fs / 1e3:.0f} kHz")
 
-    # --- assemble a beacon packet (class 16, app type 0) ---
-    # Class user id 16 is "NATO JANUS reference Implementation" and its app
-    # type 0 plugin carries an 8-bit Station Identifier; the 34 app-data bits
-    # below are filled arbitrarily because this example exercises the
-    # waveform, not the plugin's field layout.
-    adb = np.zeros(34, dtype=int)
-    adb[:16] = comms.bytes_to_bits(b"SOS")[:16]      # arbitrary 34-bit app data block
-    pkt = comms.JanusPacket(class_id=16, app_type=0, app_data=adb,
-                            mobility=1, tx_rx=1)
-    bits = pkt.to_bits()
-    print(f"\n  packet     : 64 bits  (v{janus.JANUS_VERSION}, class {pkt.class_id} "
-          f"= NATO ref impl, app type {pkt.app_type})")
-    print(f"  band       : Fc={janus.FC_INITIAL/1e3:.2f} kHz, Bw={janus.BW_INITIAL/1e3:.2f} "
-          f"kHz, FSw=160 Hz, Cd=6.25 ms")
+# Channel: propagation delay, a 30 ms reverberation echo, then noise.
+received = np.concatenate([np.zeros(811), waveform])
+delay = int(0.03 * fs)
+echo = np.zeros_like(received)
+echo[delay:] = 0.4 * received[:received.size - delay]
+received = received + echo
+snr_dB = 12.0
+received = received + np.sqrt(
+    np.mean(waveform ** 2) / 10 ** (snr_dB / 10)) * rng.standard_normal(
+        received.size)
 
-    # --- FH-BFSK waveform ---
-    wav = janus.janus_modulate(bits, fs)
-    wav_path = OUTPUT_DIR / "example_34_janus.wav"
-    _write_wav(wav_path, wav, fs)
-    print(f"  waveform   : {wav.size} samples, {wav.size/fs:.2f} s @ {fs/1e3:.0f} kHz "
-          f"(32 preamble + 144 data chips)")
-    print(f"  wrote      : {wav_path.name}")
+start, metric = janus.janus_detect(received, fs)
+out_bits, crc_ok = janus.janus_demodulate(received, fs)
+decoded, _ = janus.JanusPacket.from_bits(out_bits)
+print(f"  preamble : detected at sample {start} (GO-CFAR)")
+print(f"  CRC      : {'OK' if crc_ok else 'FAIL'}")
+print(f"  decoded  : class {decoded.class_id}, app type {decoded.app_type}, "
+      f"mobility {decoded.mobility}, "
+      f"payload match {np.array_equal(decoded.app_data, app_data)}")
 
-    # --- channel: delay + reverberation echo + AWGN ---
-    rx = np.concatenate([np.zeros(811), wav])
-    echo = np.zeros_like(rx); d = int(0.03 * fs); echo[d:] = 0.4 * rx[:rx.size - d]
-    rx = rx + echo
-    snr_dB = 12.0
-    rx = rx + np.sqrt(np.mean(wav ** 2) / 10 ** (snr_dB / 10)) * rng.standard_normal(rx.size)
-    print(f"  channel    : 811-sample delay + 30 ms echo (0.4) + {snr_dB:.0f} dB SNR")
+fig, axes = plt.subplots(2, 1, figsize=(11, 8), constrained_layout=True)
+axes[0].specgram(waveform, NFFT=256, Fs=fs, noverlap=224, cmap='jet')
+axes[0].axhline(janus.FC_INITIAL, color='w', ls='--', lw=0.8)
+axes[0].set_ylim(janus.FC_INITIAL - janus.BW_INITIAL,
+                 janus.FC_INITIAL + janus.BW_INITIAL)
+axes[0].set_title('FH-BFSK waveform — hopping over 13 tone pairs', loc='left')
+axes[0].set_xlabel('Time [s]')
+axes[0].set_ylabel('Frequency [Hz]')
 
-    # --- detect + decode ---
-    start, metric = janus.janus_detect(rx, fs)
-    out_bits, crc_ok = janus.janus_demodulate(rx, fs)
-    out_pkt, _ = janus.JanusPacket.from_bits(out_bits)
-    print(f"\n  preamble   : detected at sample {start} (GO-CFAR)")
-    print(f"  CRC        : {'OK' if crc_ok else 'FAIL'}")
-    print(f"  decoded    : class {out_pkt.class_id}, app type {out_pkt.app_type}, "
-          f"mobility {out_pkt.mobility}")
-    print(f"  ADB match  : {np.array_equal(out_pkt.app_data, adb)}")
+axes[1].plot(metric)
+axes[1].axvline(int(np.argmax(metric)), color='g', ls=':', lw=1,
+                label='detected preamble')
+axes[1].set_title('GO-CFAR preamble detection statistic', loc='left')
+axes[1].set_xlabel('Alignment column (¼-chip)')
+axes[1].set_ylabel('CFAR statistic')
+axes[1].grid(alpha=0.3)
+axes[1].legend()
 
-    # ----------------------------------------------------------------------
-    fig, axes = plt.subplots(2, 1, figsize=(11, 8), constrained_layout=True)
-
-    ax = axes[0]
-    ax.specgram(wav, NFFT=256, Fs=fs, noverlap=224, cmap='jet')
-    ax.axhline(janus.FC_INITIAL, color='w', ls='--', lw=0.8)
-    ax.set_ylim(janus.FC_INITIAL - janus.BW_INITIAL, janus.FC_INITIAL + janus.BW_INITIAL)
-    ax.set_title('[janus] FH-BFSK waveform — frequency hopping over 13 tone pairs',
-                 loc='left')
-    ax.set_xlabel('Time [s]'); ax.set_ylabel('Frequency [Hz]')
-
-    ax = axes[1]
-    ax.plot(metric)
-    ax.axvline(int(np.argmax(metric)), color='g', ls=':', lw=1, label='detected preamble')
-    ax.set_title('[janus] GO-CFAR preamble detection statistic', loc='left')
-    ax.set_xlabel('Alignment column (¼-chip)'); ax.set_ylabel('CFAR statistic')
-    ax.grid(alpha=0.3); ax.legend()
-
-    out_path = OUTPUT_DIR / "example_34_janus_beacon.png"
-    fig.savefig(out_path, dpi=120)
-    print(f"\n  saved      : {out_path.name}")
-    plt.close(fig)
-
-
-if __name__ == "__main__":
-    main()
+fig.savefig(OUT / 'example_34_janus_beacon.png', dpi=120)
+plt.close(fig)

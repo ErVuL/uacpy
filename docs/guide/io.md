@@ -1,6 +1,6 @@
 # File I/O — the layer between metres and the native formats
 
-> `uacpy.io` · 100 public names · every reader and writer the models run on
+> `uacpy.io` · 102 public names · every reader and writer the models run on
 
 Underneath the Python API, uacpy drives seven native solvers by writing text
 and binary files, launching a subprocess, and parsing what comes back. Each of
@@ -558,7 +558,7 @@ included.
 ## 9. Reference — the whole public surface
 
 Every function and class in `uacpy.io.__all__`, grouped by format family.
-The 15 remaining names in `__all__` are the submodules themselves.
+The 16 remaining names in `__all__` are the submodules themselves.
 
 ### Plumbing
 
@@ -674,6 +674,12 @@ The 15 remaining names in `__all__` are the submodules themselves.
 | `read_tl_line` | `tl.line` → ranges (m), TL (dB) at the single `zr_line` receiver depth |
 | `read_tl_grid` | `tl.grid` → ranges, depths, TL grid |
 | `read_pcomplex_grid` | uacpy-patched `pcomplex.bin` → complex envelope |
+
+### Audio
+
+| Name | |
+|---|---|
+| `write_wav(path, signal, fs, *, encoding, normalize, metadata)` | a real signal to `.wav`; `pcm16`/`pcm24`/`pcm32` for players and recorders, `float32`/`float64` to keep a calibrated level. `normalize` defaults to on for PCM, off for float. `metadata` writes a `LIST`/`INFO` chunk |
 
 ---
 

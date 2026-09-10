@@ -1129,6 +1129,260 @@ def compare_models(
     return fig, axes
 
 
+def _same_grid_or_raise(caller: str, field: Field, reference: Field) -> None:
+    """Refuse two fields that are not on one grid.
+
+    Equal lengths are not equal grids: two 200-point range axes over
+    different spans subtract cell by cell into a plausible number for
+    positions that never met.
+    """
+    def axis_lengths(f):
+        return {name: len(axis) for name, axis in f.coords.items()}
+
+    if list(field.coords) != list(reference.coords) or \
+            field.data.shape != reference.data.shape:
+        raise ConfigurationError(
+            f"{caller}: the fields are on different grids — "
+            f"{axis_lengths(field)} vs {axis_lengths(reference)}.",
+            remediation="Run both models on one receiver grid, or resample "
+                        "one onto the other's axes before differencing.",
+        )
+    for name, axis in field.coords.items():
+        if not np.allclose(axis, reference.coords[name]):
+            raise ConfigurationError(
+                f"{caller}: the fields share the shape of their '{name}' "
+                f"axis but not its values.",
+                remediation="Difference fields sampled at the same "
+                            "coordinates; same length is not same axis.",
+            )
+
+
+@typed_plot_error
+def plot_field_difference(
+    field: Field,
+    reference: Field,
+    ax=None,
+    *,
+    env: Optional[Environment] = None,
+    vmin: float = -10.0,
+    vmax: float = 10.0,
+    diff_vmax: Optional[float] = None,
+    title: Optional[str] = None,
+    **mpl_kw,
+):
+    """Heatmap of ``field`` minus ``reference``, in dB.
+
+    The panel shows a signed RESIDUAL, not a level: positive means ``field``
+    carries the higher loss, so it is the quieter of the two. It takes the
+    diverging colormap and a window symmetric about zero, because zero — not
+    the smallest value — is the meaningful reading.
+
+    Parameters
+    ----------
+    field, reference : Field
+        The two fields to difference, on the same grid. A mismatch raises.
+    ax : Axes, optional
+        Draw here instead of a new figure.
+    env : Environment, optional
+        Overlay the seafloor, as :func:`plot_field` does.
+    vmin, vmax : float
+        Colour limits, default ±10 dB.
+    diff_vmax : float, optional
+        Symmetric-window shortcut: sets ``vmin, vmax = -diff_vmax, +diff_vmax``.
+    title : str, optional
+    **mpl_kw
+        Forwarded to :func:`plot_field`.
+
+    Returns
+    -------
+    fig, ax : Figure, Axes
+
+    See Also
+    --------
+    compare : the same two fields as 1-D cuts, overlaid.
+    plot_field_statistics : the residual reduced to one number per pair.
+    """
+    _same_grid_or_raise('plot_field_difference', field, reference)
+    if diff_vmax is not None:
+        vmin, vmax = -abs(diff_vmax), abs(diff_vmax)
+
+    difference = Field(data=field.dB - reference.dB, coords=dict(field.coords))
+    # Tag it for what it is. Untagged, a Field inherits ``kind='pressure'``,
+    # which would caption the bar 'TL (dB)' over a signed residual and let the
+    # loss predicate run a 1-D cut's value axis downward — meaningless for a
+    # difference, whose zero is the meaningful value. The 'difference'
+    # quantity carries the diverging map and the symmetric window instead.
+    difference.metadata['kind'] = 'difference'
+    fig, ax = plot_field(difference, ax, env=env, vmin=vmin, vmax=vmax,
+                         cmap='RdBu_r', title=title, **mpl_kw)
+    # The registry says 'Difference (dB)'; this panel knows which difference it
+    # drew and which way its sign runs, so it says that instead. Which way is
+    # not a constant: more of a LOSS is quieter, more of a LEVEL is louder, so
+    # the sense is read off the view rather than assumed to be transmission
+    # loss.
+    sense = 'quieter' if _is_loss_view(field, 'dB') else 'louder'
+    label = (f'Δ{_value_label(field, "dB")} — positive: field is {sense} '
+             f'than reference')
+    for artist in ax.collections + ax.images:
+        cbar = getattr(artist, 'colorbar', None)
+        if cbar is not None:
+            cbar.set_label(label)
+    return fig, ax
+
+
+def _rms_between(field, reference, depth):
+    """RMS dB difference at ``depth``, over the ranges both fields computed.
+
+    ``NaN`` when they share no range at all — nothing to compare, which is
+    not the same as agreeing.
+    """
+    tl_a = np.asarray(field.at(depth=depth).dB)
+    tl_b = np.asarray(reference.at(depth=depth).dB)
+    r_a = np.asarray(field.ranges, dtype=float)
+    r_b = np.asarray(reference.ranges, dtype=float)
+    # The common grid is the coarser axis clipped to the shared span.
+    # ``np.interp`` reproduces a node exactly, NaN included, so an already
+    # aligned pair is untouched; the clip keeps the flat extrapolation
+    # ``np.interp`` does past the ends of its own domain out of the number.
+    common = r_a if r_a.size <= r_b.size else r_b
+    common = common[(common >= max(r_a[0], r_b[0]))
+                    & (common <= min(r_a[-1], r_b[-1]))]
+    if common.size == 0:
+        return np.nan
+    residual = np.interp(common, r_a, tl_a) - np.interp(common, r_b, tl_b)
+    finite = np.isfinite(residual)
+    return (float(np.sqrt(np.mean(residual[finite] ** 2)))
+            if finite.any() else np.nan)
+
+
+@typed_plot_error
+def plot_field_statistics(
+    fields,
+    labels: Optional[Sequence[str]] = None,
+    *,
+    depth: float,
+    figsize: Tuple[float, float] = (12, 5),
+    title: Optional[str] = None,
+):
+    """Two panels summarising several fields at one depth.
+
+    Left: mean and standard deviation of each field's dB view along the cut.
+    Right: the pairwise RMS difference between them — how far apart the
+    fields actually are, one number per pair.
+
+    Parameters
+    ----------
+    fields : sequence of Field, or {label: Field} dict
+        The shapes :func:`compare_models` takes. A ``None`` entry is dropped,
+        so a comparison whose model did not run still plots the ones that did.
+    labels : sequence of str, optional
+        Per-field names; taken from a dict's keys when it is one.
+    depth : float
+        The receiver depth to cut every field at, in metres.
+    figsize : tuple, optional
+    title : str, optional
+        Titles the whole figure.
+
+    Returns
+    -------
+    fig, axes : Figure, ndarray of Axes
+        The two axes, bar chart first.
+
+    Notes
+    -----
+    Each off-diagonal cell is the RMS over the ranges both fields actually
+    computed — the coarser range axis, clipped to the span the two share. A
+    pair sharing no range has nothing to compare and is drawn as a neutral
+    tile labelled ``n/a``; the diagonal is a true zero and takes the
+    colormap's own deep green, so "not comparable" cannot be misread as
+    perfect agreement.
+    """
+    if isinstance(fields, dict):
+        if labels is None:
+            labels = list(fields.keys())
+        fields = list(fields.values())
+    fields = list(fields)
+    if labels is None:
+        labels = [getattr(f, 'model', '') or f"#{i}"
+                  for i, f in enumerate(fields)]
+    elif len(labels) != len(fields):
+        raise ConfigurationError(
+            f"plot_field_statistics: got {len(labels)} labels for "
+            f"{len(fields)} fields — they must match.")
+    kept = [(name, f) for name, f in zip(labels, fields) if f is not None]
+    if not kept:
+        raise ConfigurationError(
+            "plot_field_statistics: no fields to plot.",
+            remediation="Pass at least one Field; entries that are None are "
+                        "dropped as models that did not run.")
+    names = [name for name, _ in kept]
+    kept_fields = [f for _, f in kept]
+
+    fig, axes = plt.subplots(1, 2, figsize=figsize, squeeze=False)
+    axes = axes[0]
+
+    cuts = [np.asarray(f.at(depth=depth).dB) for f in kept_fields]
+    means = [float(np.nanmean(c)) for c in cuts]
+    stds = [float(np.nanstd(c)) for c in cuts]
+    x = np.arange(len(names))
+    width = 0.35
+    axes[0].bar(x - width / 2, means, width, label='Mean', alpha=0.8)
+    axes[0].bar(x + width / 2, stds, width, label='Std', alpha=0.8)
+    axes[0].set_xlabel('Field', fontweight='bold')
+    axes[0].set_ylabel(f'{_value_label(kept_fields[0], "dB")}',
+                       fontweight='bold')
+    axes[0].set_title(f'Level at {depth:g} m', fontweight='bold', fontsize=12)
+    axes[0].set_xticks(x)
+    axes[0].set_xticklabels(names, rotation=45, ha='right')
+    axes[0].legend()
+    axes[0].grid(True, alpha=0.3, axis='y')
+
+    n = len(kept_fields)
+    if n < 2:
+        axes[1].text(0.5, 0.5, 'Need at least 2 fields\nfor an RMS comparison',
+                     ha='center', va='center', transform=axes[1].transAxes,
+                     fontsize=12)
+        axes[1].axis('off')
+    else:
+        rms = np.zeros((n, n))
+        for i in range(n):
+            for j in range(n):
+                if i != j:
+                    rms[i, j] = _rms_between(kept_fields[i], kept_fields[j],
+                                             depth)
+        comparable = rms[np.isfinite(rms)]
+        limit = (max(10.0, float(np.percentile(rms[rms > 0], 95)))
+                 if comparable.size and comparable.max() > 0 else 15.0)
+        # Only a pair with no shared range is masked. The diagonal stays a
+        # real 0.0 and lands on the colormap's own deep green.
+        cmap = plt.get_cmap('RdYlGn_r').with_extremes(bad='0.85')
+        image = axes[1].imshow(np.ma.masked_invalid(rms), cmap=cmap,
+                               vmin=0, vmax=limit, interpolation='none')
+        fig.colorbar(image, ax=axes[1], label='RMS difference (dB)')
+        axes[1].set_xticks(range(n))
+        axes[1].set_yticks(range(n))
+        axes[1].set_xticklabels(names, rotation=45, ha='right')
+        axes[1].set_yticklabels(names)
+        axes[1].set_title('Pairwise agreement', fontweight='bold', fontsize=12)
+        for i in range(n):
+            for j in range(n):
+                if i == j:
+                    continue
+                value = rms[i, j]
+                if not np.isfinite(value):
+                    axes[1].text(j, i, 'n/a', ha='center', va='center',
+                                 color='0.3', fontweight='bold')
+                    continue
+                axes[1].text(j, i, f'{value:.1f}', ha='center', va='center',
+                             color='white' if value > limit / 2 else 'black',
+                             fontweight='bold')
+    if title:
+        fig.suptitle(title, fontweight='bold')
+    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.95 if title else 1.0))
+    _draw_multi_model_credit(fig, kept_fields)
+    return fig, axes
+
+
 @typed_plot_error
 def _plot_field_stack(stack, env: Optional[Environment] = None, *,
                       ncols: Optional[int] = None,

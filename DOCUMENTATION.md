@@ -1463,6 +1463,8 @@ in a `from … import` statement use the real modules
 | `H.plot_impulse_response()` | band-limited `p(t)` at one cell (IFFT of `H(f)`); same reduce-then-plot shape |
 | `plot.compare(fields, labels)` | overlay several 1-D sliced fields on one axes (`uacpy.plot.compare`) |
 | `compare_models(fields, labels, env=…, title=…)` | side-by-side heatmaps, one shared colourbar; `title=` sets the figure title above the panels |
+| `plot.plot_field_difference(field, reference, env=…, diff_vmax=…)` | `field - reference` in dB, diverging map symmetric about zero; positive means `field` carries the higher loss. Refuses two fields that are not on one grid |
+| `plot.plot_field_statistics(fields, labels, depth=…)` | mean ± std per field at one depth, plus the pairwise RMS-difference matrix; `None` entries (a model that did not run) are dropped |
 | `env.plot()` | SSP + seafloor cross-section, optional `source=`/`receiver=` markers |
 | `ssp.plot()` / `env.ssp.plot()` | sound-speed profile `c(z)` as a depth-down line (one per range if range-dependent). `label=` / `color=` overlay several profiles on one `ax=`: an explicit colour draws the whole profile in it and drops the range colourbar, and the label names the profile rather than each column. `legend=` forces the legend on or off |
 | `bathymetry.plot()` / `altimetry.plot()` | seafloor depth / sea-surface height vs range — the shape carriers |
@@ -1951,9 +1953,10 @@ have their own measurements —
 All 39 runnable scripts live in `uacpy/examples/`. Run them **by script
 path** from the repo root — `python uacpy/examples/example_01_basic_shallow_water.py`
 — the form `run_all_examples.py` and the test suite use. The module form
-(`python -m uacpy.examples.example_01_…`) is not supported: several examples
-import their sibling `plotting_utils` as a top-level module, which only
-resolves when the script's own directory is on `sys.path`.
+(`python -m uacpy.examples.example_01_…`) also works.
+
+Each script is a linear read: no `main()`, no helper indirection, and the
+uacpy calls it demonstrates are named in its own docstring.
 
 | # | Topic |
 |---|-------|

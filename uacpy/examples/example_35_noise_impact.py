@@ -1,113 +1,94 @@
-"""
-═══════════════════════════════════════════════════════════════════════════════
-EXAMPLE 35: Underwater Noise Impact Assessment (standards chain)
-═══════════════════════════════════════════════════════════════════════════════
+"""Underwater noise impact assessment — the standards chain.
 
-OBJECTIVE:
-    Chain the new international-standard tools into one workflow — from a ship
-    measurement to a marine-mammal auditory-impact estimate:
-      • site sound speed         — UNESCO (Chen-Millero) c(T, S, depth)
-      • decidecade bands         — ISO 18405 / IEC 61260-1 (10 Hz - 25 kHz)
-      • ship source level        — ISO 17208: measured RNL -> monopole MSL
-      • propagation              — spherical spreading + Thorp absorption
-      • marine-mammal weighting  — Southall et al. 2019 (LF whale, VHF porpoise)
-      • weighted received level  — the impact-relevant quantity
+One workflow from a ship measurement to a marine-mammal auditory-impact
+estimate, each step an international standard: UNESCO c(T, S, depth) for the
+site, ISO 18405 / IEC 61260-1 decidecade bands, ISO 17208 for measured radiated
+noise → monopole source level, spreading + Thorp absorption to the receiver,
+and Southall et al. 2019 auditory weighting for the impact-relevant level.
 
-FEATURES DEMONSTRATED:
-    ✓ soundspeed_unesco · decidecade_bands · radiated_noise_level /
-      monopole_source_level (ISO 17208) · auditory_weighting (Southall 2019)
-    ✓ consistent plot helpers: plot_source_level · plot_weighting
-═══════════════════════════════════════════════════════════════════════════════
+Weighting is the step that matters: a porpoise and a baleen whale hear the same
+spectrum very differently, so the unweighted received level is not the number
+an assessment turns on.
+
+Uses: soundspeed_unesco · decidecade_bands · nominal_source_depth ·
+radiated_noise_level · monopole_source_level · apply_weighting ·
+thorp_dB_per_km · plot_source_level · plot_weighting
 """
 
-import sys
 import os
+import sys
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
-OUTPUT_DIR = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
-                  or Path(__file__).parent / 'output')
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-# Repo root, so ``import uacpy`` resolves from a source checkout.
-sys.path.insert(0, str(Path(__file__).parents[2]))
+import numpy as np
+import matplotlib.pyplot as plt
+import uacpy
+from uacpy.core.absorption import thorp_dB_per_km
+from uacpy.core.acoustics import soundspeed_unesco
+from uacpy.acoustic_signal.bands import decidecade_bands
+from uacpy.noise import (apply_weighting, monopole_source_level,
+                         nominal_source_depth, radiated_noise_level)
 
-import numpy as np  # noqa: E402
-import matplotlib.pyplot as plt  # noqa: E402
+OUT = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
+           or Path(__file__).parent / 'output')
+OUT.mkdir(parents=True, exist_ok=True)
 
-from uacpy.core.absorption import thorp_dB_per_km  # noqa: E402
-from uacpy.core.acoustics import soundspeed_unesco  # noqa: E402
-from uacpy.acoustic_signal.bands import decidecade_bands  # noqa: E402
-from uacpy.noise import (  # noqa: E402
-    radiated_noise_level, nominal_source_depth, monopole_source_level,
-    apply_weighting,
-)
-from uacpy.visualization import plot_source_level, plot_weighting  # noqa: E402
+temperature, salinity, depth_dbar = 12.0, 35.0, 50.0
+sound_speed = soundspeed_unesco(temperature, salinity, depth_dbar)
+_, band_centres, _ = decidecade_bands(10, 25000)
+print(f"  site c (UNESCO, {temperature}°C, S={salinity}, "
+      f"{depth_dbar:.0f} m): {sound_speed:.2f} m/s")
 
+# A merchant ship: a typical measured received spectrum at the ISO 17208
+# geometry, back to radiated noise, then to an equivalent monopole.
+draught = 8.0
+source_depth = nominal_source_depth(draught)
+received_spl = 130.0 - 18.0 * np.log10(np.maximum(band_centres / 60.0, 1.0))
+radiated = radiated_noise_level(received_spl, 150.0)     # 150 m slant range
+monopole = monopole_source_level(radiated, band_centres, source_depth,
+                                 sound_speed=sound_speed)
+print(f"  draught {draught} m → source depth {source_depth} m; peak MSL "
+      f"{monopole.max():.1f} dB re 1 µPa·m at "
+      f"{band_centres[np.argmax(monopole)]:.0f} Hz")
 
-def main():
-    print("═" * 80)
-    print("EXAMPLE 35: Underwater Noise Impact Assessment (standards chain)")
-    print("═" * 80)
+# Out to 2 km: spherical spreading plus Thorp volume absorption.
+range_m = 2000.0
+tl = 20 * np.log10(range_m) + thorp_dB_per_km(band_centres) * (range_m / 1000)
+received = monopole - tl
+print(f"  received level at {range_m / 1000:.0f} km: "
+      f"{received.max():.1f} dB re 1 µPa (band peak)")
 
-    # --- (1) site sound speed (UNESCO) ---
-    T, S, depth_dbar = 12.0, 35.0, 50.0
-    c = soundspeed_unesco(T, S, depth_dbar)
-    print(f"\n  site c (UNESCO, T={T}°C S={S} ~{depth_dbar:.0f} m) : {c:.2f} m/s")
+groups = {"LF": "baleen whale", "VHF": "harbour porpoise"}
+weighted = {group: apply_weighting(received, band_centres, group)
+            for group in groups}
+for group, animal in groups.items():
+    print(f"  {group} ({animal}) weighted band peak: "
+          f"{np.nanmax(weighted[group]):.1f} dB")
 
-    # --- (2) decidecade bands 10 Hz - 25 kHz ---
-    _, fc, _ = decidecade_bands(10, 25000)
+fig, axes = plt.subplots(2, 2, figsize=(12, 9), constrained_layout=True)
+uacpy.plot.plot_source_level(band_centres, monopole, ax=axes[0, 0],
+                             title="(ISO 17208 monopole)")
+axes[0, 0].semilogx(band_centres, radiated, "--", color="gray",
+                    label="RNL (measured)")
+axes[0, 0].legend()
 
-    # --- (3) ship: a measured decidecade RNL spectrum -> monopole source level ---
-    draught = 8.0
-    d_s = nominal_source_depth(draught)                      # 5.6 m
-    slant = 150.0
-    # a typical merchant-ship received SPL spectrum at the standard geometry:
-    rx_spl = 130.0 - 18.0 * np.log10(np.maximum(fc / 60.0, 1.0))
-    rnl = radiated_noise_level(rx_spl, slant)
-    msl = monopole_source_level(rnl, fc, d_s, sound_speed=c)
-    print(f"  ship draught {draught} m -> source depth d_s = {d_s} m")
-    print(f"  peak MSL : {msl.max():.1f} dB re 1 µPa·m at {fc[np.argmax(msl)]:.0f} Hz")
+uacpy.plot.plot_weighting(list(groups), ax=axes[0, 1])
 
-    # --- (4) propagate to a receiver 2 km away (spreading + Thorp) ---
-    R = 2000.0
-    tl = 20 * np.log10(R) + thorp_dB_per_km(fc) * (R / 1000.0)
-    rl = msl - tl
-    print(f"  received level @ {R/1000:.0f} km : {rl.max():.1f} dB re 1 µPa "
-          f"(band peak)")
+axes[1, 0].semilogx(band_centres, received, "k-", label="unweighted RL @ 2 km")
+for group, animal in groups.items():
+    axes[1, 0].semilogx(band_centres, weighted[group],
+                        label=f"{group}-weighted ({animal})")
+axes[1, 0].set_xlabel("Frequency [Hz]")
+axes[1, 0].set_ylabel("Level [dB re 1 µPa]")
+axes[1, 0].set_title("received vs auditory-weighted", loc="left")
+axes[1, 0].grid(which="both", alpha=0.3)
+axes[1, 0].legend()
 
-    # --- (5) marine-mammal weighting (Southall 2019) ---
-    groups = {"LF": "baleen whale", "VHF": "harbour porpoise"}
-    weighted = {g: apply_weighting(rl, fc, g) for g in groups}
-    for g, name in groups.items():
-        print(f"  {g} ({name}) weighted band-peak : {np.nanmax(weighted[g]):.1f} dB")
+axes[1, 1].semilogx(band_centres, tl, color="C3")
+axes[1, 1].set_xlabel("Frequency [Hz]")
+axes[1, 1].set_ylabel("Transmission loss [dB]")
+axes[1, 1].set_title("spreading + Thorp @ 2 km", loc="left")
+axes[1, 1].grid(which="both", alpha=0.3)
 
-    # ----------------------------------------------------------------------
-    fig, axes = plt.subplots(2, 2, figsize=(12, 9), constrained_layout=True)
-
-    plot_source_level(fc, msl, ax=axes[0, 0], title="(ISO 17208 monopole)")
-    axes[0, 0].semilogx(fc, rnl, "--", color="gray", label="RNL (measured)")
-    axes[0, 0].legend()
-
-    plot_weighting(list(groups), ax=axes[0, 1])
-
-    ax = axes[1, 0]
-    ax.semilogx(fc, rl, "k-", label="unweighted RL @ 2 km")
-    for g, name in groups.items():
-        ax.semilogx(fc, weighted[g], label=f"{g}-weighted ({name})")
-    ax.set_xlabel("Frequency [Hz]"); ax.set_ylabel("Level [dB re 1 µPa]")
-    ax.set_title("[impact] received vs auditory-weighted", loc="left")
-    ax.grid(which="both", alpha=0.3); ax.legend()
-
-    ax = axes[1, 1]
-    ax.semilogx(fc, tl, color="C3")
-    ax.set_xlabel("Frequency [Hz]"); ax.set_ylabel("Transmission loss [dB]")
-    ax.set_title("[propagation] spreading + Thorp @ 2 km", loc="left")
-    ax.grid(which="both", alpha=0.3)
-
-    out = OUTPUT_DIR / "example_35_noise_impact.png"
-    fig.savefig(out, dpi=120)
-    print(f"\n  saved : {out.name}")
-    plt.close(fig)
-
-
-if __name__ == "__main__":
-    main()
+fig.savefig(OUT / "example_35_noise_impact.png", dpi=120)
+plt.close(fig)

@@ -19,6 +19,7 @@ Layout:
 * ``mpirams_writer`` / ``mpirams_reader`` — RAM mpiramS backend.
 * ``ramsurf_writer`` / ``ramsurf_reader`` — Collins rams0.5 / ramsurf1.5.
 * ``grn_reader`` — Scooter / SPARC Green's-function with post-processing.
+* ``audio_io`` — ``.wav`` output for a computed or measured signal.
 * ``utils`` — shared helpers (``equally_spaced``, ``reject_unknown_kwargs``,
   ``_collapsed_pair_index``).
 * ``file_manager`` — temp-dir / tmpfs management.
@@ -100,6 +101,7 @@ from uacpy.io.ramsurf_writer import write_ramin
 from uacpy.io.ramsurf_reader import (
     read_tl_line, read_tl_grid, read_pcomplex_grid,
 )
+from uacpy.io.audio_io import write_wav
 
 __all__ = [
     # File management
@@ -158,10 +160,12 @@ __all__ = [
     "write_sediment_file",
     # ramsurf writer
     "write_ramin",
+    # Audio
+    "write_wav",
     # Utilities
     "equally_spaced",
     # Submodules (importing uacpy.io makes each reachable as an attribute)
-    "bathy_io", "bellhop_writer", "file_manager", "grn_reader",
+    "audio_io", "bathy_io", "bellhop_writer", "file_manager", "grn_reader",
     "modes_reader", "mpirams_reader", "mpirams_writer",
     "oalib_reader", "oalib_writer", "oases_reader", "oases_writer",
     "ramsurf_reader", "ramsurf_writer", "refl_io", "utils",

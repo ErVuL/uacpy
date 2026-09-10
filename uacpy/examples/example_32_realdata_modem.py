@@ -1,119 +1,101 @@
-"""
-═══════════════════════════════════════════════════════════════════════════════
-EXAMPLE 32: Real-Data Underwater Modem (text -> .wav -> text)
-═══════════════════════════════════════════════════════════════════════════════
+"""Real-data underwater modem — text → .wav → text.
 
-OBJECTIVE:
-    Transmit a real byte payload over the full passband physical layer and
-    recover it through a realistic underwater channel:
-      • frame a text message (length header + CRC-32)
-      • Transmitter: FEC + QPSK + preamble + RRC pulse shaping + upconvert
-      • write the real passband signal to a .wav file (what a transducer emits)
-      • channel: sparse multipath + clock-skew Doppler + delay + AWGN
-      • Receiver: downconvert + matched filter + Gardner timing recovery +
-        preamble frame-sync + adaptive DFE with carrier PLL + Viterbi decode
-      • verify the recovered bytes against the CRC
+A real byte payload over the full passband physical layer, recovered through a
+realistic underwater channel: frame the message (length header + CRC-32), send
+it as FEC + QPSK + preamble + RRC pulse shaping upconverted to passband, push
+it through sparse multipath, clock-skew Doppler, delay and noise, then
+downconvert, recover timing, sync on the preamble, equalise with a DFE and
+carrier PLL, Viterbi-decode, and check the CRC.
 
-FEATURES DEMONSTRATED:
-    ✓ pack_frame/unpack_frame · Transmitter.transmit_passband · .wav write
-    ✓ Receiver.receive_passband (timing recovery + sync + DFE/PLL + FEC)
-    ✓ passband spectrogram · recovered constellation · sync metric · convergence
-═══════════════════════════════════════════════════════════════════════════════
+Uses: comms.pack_frame/unpack_frame · Transmitter.transmit_passband ·
+CommsReceiver.from_passband/receive · comms.DFE · uacpy.io.write_wav ·
+plot_scatter · plot_sync_metric · plot_convergence
 """
 
-import sys
 import os
+import sys
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
-OUTPUT_DIR = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
-                  or Path(__file__).parent / 'output')
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-# Repo root, so ``import uacpy`` resolves from a source checkout.
-sys.path.insert(0, str(Path(__file__).parents[2]))
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.signal import resample_poly
+import uacpy
+from uacpy import comms
 
-import numpy as np  # noqa: E402
-import matplotlib.pyplot as plt  # noqa: E402
-from scipy.signal import resample_poly  # noqa: E402
+OUT = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
+           or Path(__file__).parent / 'output')
+OUT.mkdir(parents=True, exist_ok=True)
 
-from uacpy import comms  # noqa: E402
-from uacpy.visualization import plot_scatter, plot_convergence, plot_sync_metric  # noqa: E402
-from plotting_utils import write_wav as _write_wav  # noqa: E402
+rng = np.random.default_rng(0xACED)
+fs, fc, sps = 96000.0, 24000.0, 8
 
+message = (b"uacpy underwater acoustic modem -- real data over a simulated "
+           b"ocean channel. The quick brown fox jumps over 13 lazy dogs!")
+frame_bits = comms.pack_frame(message)
 
-def main():
-    print("═" * 80)
-    print("EXAMPLE 32: Real-Data Underwater Modem (text -> .wav -> text)")
-    print("═" * 80)
-    rng = np.random.default_rng(0xACED)
-    fs, fc, sps = 96000.0, 24000.0, 8
+# Transmit: FEC + QPSK + preamble + RRC + upconvert. The passband signal is
+# what a transducer would emit, so it is also what goes in the .wav.
+code = comms.ConvCode(interleave_depth=16)
+tx = comms.Transmitter("qpsk", code=code, preamble=256)
+waveform = tx.transmit_passband(frame_bits, fs, fc, sps=sps)
+uacpy.io.write_wav(OUT / 'example_32_modem.wav', waveform, fs)
+print(f"  payload  : {len(message)} bytes → {frame_bits.size} framed bits")
+print(f"  waveform : {waveform.size} real samples, "
+      f"{waveform.size / fs * 1e3:.0f} ms @ {fs / 1e3:.0f} kHz, "
+      f"carrier {fc / 1e3:.0f} kHz")
 
-    message = (b"uacpy underwater acoustic modem -- real data over a simulated "
-               b"ocean channel. The quick brown fox jumps over 13 lazy dogs!")
-    frame_bits = comms.pack_frame(message)
-    print(f"\n  payload    : {len(message)} bytes -> {frame_bits.size} framed bits")
+# Channel: 3-path multipath, 200 ppm clock skew, propagation delay, then noise.
+impulse_response = np.zeros(40)
+impulse_response[[0, 17, 33]] = [1.0, 0.4, 0.2]
+received = np.convolve(waveform, impulse_response)
+received = resample_poly(received, 100020, 100000)
+received = np.concatenate([np.zeros(11), received])
+snr_dB = 22.0
+received = received + np.sqrt(
+    np.mean(received ** 2) / 10 ** (snr_dB / 10)) * rng.standard_normal(
+        received.size)
 
-    # --- transmit: FEC + QPSK + preamble + RRC + upconvert ---
-    code = comms.ConvCode(interleave_depth=16)
-    tx = comms.Transmitter("qpsk", code=code, preamble=256)
-    wav = tx.transmit_passband(frame_bits, fs, fc, sps=sps)
-    wav_path = OUTPUT_DIR / "example_32_modem.wav"
-    _write_wav(wav_path, wav, fs)
-    print(f"  waveform   : {wav.size} real samples, {wav.size/fs*1e3:.0f} ms @ "
-          f"{fs/1e3:.0f} kHz, carrier {fc/1e3:.0f} kHz")
-    print(f"  wrote      : {wav_path.name}")
+# Receive: downconvert + matched filter + Gardner timing recovery, then frame
+# sync on the preamble, adaptive DFE with carrier PLL, Viterbi decode.
+dfe = comms.DFE(n_ff=16, n_fb=6, forget=0.997, pll_bandwidth=0.04)
+receiver = comms.CommsReceiver("qpsk", code=code, equalizer=dfe, preamble=256)
+symbols = receiver.from_passband(received, fs, fc, sps=sps)
+start, sync_metric = comms.detect_preamble(symbols, receiver.preamble,
+                                           threshold=0.4)
+payload, crc_ok = comms.unpack_frame(receiver.receive(symbols))
+print(f"  channel  : 3-path multipath, 200 ppm Doppler, {snr_dB:.0f} dB SNR")
+print(f"  preamble : found at symbol {start}")
+print(f"  CRC      : {'OK' if crc_ok else 'FAIL'}, "
+      f"payload match {payload == message}")
+print(f"  recovered: {payload[:60]!r}{'...' if len(payload) > 60 else ''}")
 
-    # --- underwater channel: multipath + clock-skew Doppler + delay + AWGN ---
-    h = np.zeros(40); h[[0, 17, 33]] = [1.0, 0.4, 0.2]
-    rx = np.convolve(wav, h)
-    rx = resample_poly(rx, 100020, 100000)              # 200 ppm clock skew
-    rx = np.concatenate([np.zeros(11), rx])             # propagation delay
-    snr_dB = 22.0
-    rx = rx + np.sqrt(np.mean(rx ** 2) / 10 ** (snr_dB / 10)) * rng.standard_normal(rx.size)
-    print(f"  channel    : 3-path multipath, 200 ppm Doppler, {snr_dB:.0f} dB SNR")
+# Re-run the equaliser to keep the symbols and the error curve for the figure;
+# receive() returns decoded bits, not these.
+aligned = symbols[start:]
+delay = dfe.n_ff // 2
+reference = np.concatenate([np.zeros(delay, dtype=complex), receiver.preamble])
+equalized, mse = comms.DFE(n_ff=16, n_fb=6, forget=0.997,
+                           pll_bandwidth=0.04).equalize(
+    aligned, receiver.modulator.constellation, train=reference)
+payload_symbols = equalized[delay + receiver.preamble.size:]
 
-    # --- receive: downconvert + MF + timing recovery + sync + DFE/PLL + FEC ---
-    dfe = comms.DFE(n_ff=16, n_fb=6, forget=0.997, pll_bandwidth=0.04)
-    rxr = comms.CommsReceiver("qpsk", code=code, equalizer=dfe, preamble=256)
-    syms = rxr.from_passband(rx, fs, fc, sps=sps)
-    start, sync_metric = comms.detect_preamble(syms, rxr.preamble, threshold=0.4)
-    out_bits = rxr.receive(syms)
-    payload, crc_ok = comms.unpack_frame(out_bits)
-    print(f"\n  preamble   : found at symbol {start}")
-    print(f"  CRC        : {'OK' if crc_ok else 'FAIL'}")
-    print(f"  recovered  : {payload[:60]!r}{'...' if len(payload) > 60 else ''}")
-    print(f"  MATCH      : {payload == message}")
+fig, axes = plt.subplots(2, 2, figsize=(12, 9), constrained_layout=True)
+axes[0, 0].specgram(received, NFFT=256, Fs=fs, noverlap=200, cmap='jet')
+axes[0, 0].axhline(fc, color='w', ls='--', lw=1)
+axes[0, 0].set_title('received passband spectrogram', loc='left')
+axes[0, 0].set_xlabel('Time [s]')
+axes[0, 0].set_ylabel('Frequency [Hz]')
+axes[0, 0].set_ylim(0, fs / 2)
 
-    # equalized constellation (re-run to grab symbols + mse for the plot)
-    aligned = syms[start:]
-    delay = dfe.n_ff // 2
-    ref = np.concatenate([np.zeros(delay, dtype=complex), rxr.preamble])
-    eq, mse = comms.DFE(n_ff=16, n_fb=6, forget=0.997, pll_bandwidth=0.04).equalize(
-        aligned, rxr.modulator.constellation, train=ref)
-    payload_syms = eq[delay + rxr.preamble.size:]
+uacpy.plot.plot_scatter(payload_symbols[200:], ax=axes[0, 1],
+                        title=f"recovered QPSK "
+                              f"(CRC {'OK' if crc_ok else 'FAIL'})")
+axes[0, 1].scatter(receiver.modulator.constellation.real,
+                   receiver.modulator.constellation.imag,
+                   marker='x', s=80, color='k', zorder=5)
+uacpy.plot.plot_sync_metric(sync_metric, threshold=0.4, ax=axes[1, 0])
+uacpy.plot.plot_convergence(mse, ax=axes[1, 1], title='(DFE + carrier PLL)')
 
-    # ----------------------------------------------------------------------
-    fig, axes = plt.subplots(2, 2, figsize=(12, 9), constrained_layout=True)
-
-    ax = axes[0, 0]
-    ax.specgram(rx, NFFT=256, Fs=fs, noverlap=200, cmap='jet')
-    ax.axhline(fc, color='w', ls='--', lw=1)
-    ax.set_title('[modem] received passband spectrogram', loc='left')
-    ax.set_xlabel('Time [s]'); ax.set_ylabel('Frequency [Hz]'); ax.set_ylim(0, fs / 2)
-
-    plot_scatter(payload_syms[200:], ax=axes[0, 1],
-                  title=f"recovered QPSK (CRC {'OK' if crc_ok else 'FAIL'})")
-    axes[0, 1].scatter(rxr.modulator.constellation.real,
-                       rxr.modulator.constellation.imag, marker='x', s=80,
-                       color='k', zorder=5)
-
-    plot_sync_metric(sync_metric, threshold=0.4, ax=axes[1, 0])
-    plot_convergence(mse, ax=axes[1, 1], title='(DFE + carrier PLL)')
-
-    out_path = OUTPUT_DIR / "example_32_realdata_modem.png"
-    fig.savefig(out_path, dpi=120)
-    print(f"\n  saved      : {out_path.name}")
-    plt.close(fig)
-
-
-if __name__ == "__main__":
-    main()
+fig.savefig(OUT / 'example_32_realdata_modem.png', dpi=120)
+plt.close(fig)

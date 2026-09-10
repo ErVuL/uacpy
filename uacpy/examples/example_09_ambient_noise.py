@@ -1,184 +1,103 @@
-"""
-═══════════════════════════════════════════════════════════════════════════════
-EXAMPLE 09: Ambient noise (Wenz) + PSD→time-series synthesis + PPSD verification
-═══════════════════════════════════════════════════════════════════════════════
+"""Ambient noise (Wenz) → time series → PPSD → sound exposure level.
 
-Pipeline:
-  1. Build a Wenz total ambient-noise PSD via :class:`uacpy.noise.WenzNoise`
-     (deep water, Beaufort-6 wind, heavy shipping + rain).
-  2. Synthesise a time-domain realisation with
-     :func:`uacpy.acoustic_signal.synthesize_noise_from_psd`
-     (spectral synthesis of random processes).
-  3. Visualise the time–frequency content with
-     :func:`uacpy.acoustic_signal.spectrogram` — a stationary process should show
-     a uniform spectral pattern across time.
-  4. Round-trip the realisation through :func:`uacpy.acoustic_signal.ppsd` to
-     verify the synthesis recovers the input spectrum and to visualise
-     the level distribution across time segments.
-  5. Integrate the realisation into a per-band Sound Exposure Level (SEL)
-     with :func:`uacpy.acoustic_signal.sel` (ISO 18405) — the cumulative
-     energy dose of the synthesised dataset, third-octave band by band.
+A full noise pipeline: build a Wenz total ambient-noise spectrum, synthesise a
+time-domain realisation of it, look at that realisation two ways, and integrate
+it into a dose.
 
-Outputs
--------
-output/example_09_wenz_components.png  — Wenz components (per-source).
-output/example_09_ssrp_timeseries.png  — synthesised noise waveform snapshot.
-output/example_09_ssrp_spectrogram.png — time–frequency content of the noise.
-output/example_09_ppsd.png             — PPSD with analytic Wenz overlay.
-output/example_09_sel.png              — per-band SEL of the realisation.
+The round trip is the point. A stationary process should show a uniform pattern
+across the spectrogram, and its PPSD should land back on the analytic Wenz curve
+it was synthesised from — which is what the magenta overlay checks.
+
+Uses: noise.WenzNoise(.as_psd) · plot_wenz ·
+acoustic_signal.synthesize_noise_from_psd · spectrogram · ppsd · sel (ISO
+18405) · plot_spectrogram · plot_ppsd · plot_sel
 """
 
 import os
-from pathlib import Path
 import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
-import matplotlib.pyplot as plt
 import numpy as np
+import matplotlib.pyplot as plt
+import uacpy
+from uacpy.acoustic_signal import (ppsd, sel, spectrogram,
+                                   synthesize_noise_from_psd)
+from uacpy.noise import WenzNoise
 
-# Repo root, so ``import uacpy`` resolves from a source checkout.
-sys.path.insert(0, str(Path(__file__).parents[2]))
+OUT = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
+           or Path(__file__).parent / 'output')
+OUT.mkdir(parents=True, exist_ok=True)
 
-import uacpy  # noqa: E402
-from uacpy.noise import WenzNoise  # noqa: E402
+UPA = 1e-6                     # 1 µPa, the water-acoustics dB reference
 
-OUTPUT_DIR = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
-                  or Path(__file__).parent / 'output')
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+# Deep water, Beaufort-6 wind, heavy shipping and rain.
+conditions = dict(wind_speed_kn=24, water_depth='deep',
+                  shipping_level='high', rain_rate='heavy')
+label = "Wenz @ 24 kn / high shipping / heavy rain"
 
-# 1 µPa = 10⁻⁶ Pa (water-acoustics dB reference).
-UPA = 1e-6
+fig, _ = uacpy.plot.plot_wenz(
+    WenzNoise(np.linspace(1.0, 1e5, int(1e5 - 1)), **conditions), title=label)
+fig.savefig(OUT / 'example_09_wenz_components.png', dpi=150,
+            bbox_inches='tight')
+plt.close(fig)
 
+# n_fft is the IFFT chunk size and sets the synthesis bin width
+# df = sample_rate / n_fft. The Wenz target starts at 1 Hz, so the chunk has to
+# be long enough for the low-frequency shape to survive resampling onto the
+# FFT-native grid: 96 kHz / 65536 gives df = 1.46 Hz. (The library clamps n_fft
+# to [16, 262144], so a token value like 1 would silently become the default.)
+sample_rate, n_fft, duration = 96000, 65536, 30.0
+frequencies = np.linspace(1.0, 5e4, 10000)
+wenz = WenzNoise(frequencies, **conditions)
+t, pressure, fs = synthesize_noise_from_psd(
+    wenz.as_psd(ref=UPA), frequencies, sample_rate=sample_rate,
+    duration=duration, scale=1.0, n_fft=n_fft)
+print(f"  synthesised {duration:.0f} s @ {fs / 1e3:.1f} kHz "
+      f"({pressure.size:,} samples), df = {fs / n_fft:.2f} Hz")
 
-def main():
-    print("\n" + "═" * 80)
-    print("EXAMPLE 09: Ambient noise + ssrp synthesis + PPSD")
-    print("═" * 80)
+fig, ax = plt.subplots(figsize=(10, 4))
+ax.plot(t[:int(0.2 * fs)] * 1e3, pressure[:int(0.2 * fs)] / UPA, lw=0.5,
+        color='C0')
+ax.set_xlabel('Time [ms]')
+ax.set_ylabel('Pressure [µPa]')
+ax.set_title(f'Synthesised Wenz noise (first 0.2 s of {duration:.0f} s)')
+ax.grid(True, alpha=0.3)
+fig.tight_layout()
+fig.savefig(OUT / 'example_09_ssrp_timeseries.png', dpi=150,
+            bbox_inches='tight')
+plt.close(fig)
 
-    # ── 1. Wenz spectrum ────────────────────────────────────────────────
-    f_plot = np.linspace(1.0, 1e5, int(1e5 - 1))
-    wenz_plot = WenzNoise(
-        f_plot,
-        wind_speed_kn=24,                  # knots (Beaufort 6)
-        water_depth='deep',
-        shipping_level='high',
-        rain_rate='heavy',
-    )
-    fig, _ = uacpy.visualization.plot_wenz(
-        wenz_plot,
-        title=(f'{wenz_plot.wind_speed_kn:g} kn / '
-               f'{wenz_plot.shipping_level} shipping / '
-               f'{wenz_plot.rain_rate} rain'),
-    )
-    fig.savefig(OUTPUT_DIR / 'example_09_wenz_components.png',
-                dpi=150, bbox_inches='tight')
-    plt.close(fig)
-    print(f"  ✓ Saved: {OUTPUT_DIR / 'example_09_wenz_components.png'}")
+# Stationary noise: the spectrogram should look the same at every time.
+f_spec, t_spec, power = spectrogram(pressure, fs, nperseg=4096, noverlap=2048)
+fig, _ = uacpy.plot.plot_spectrogram(f_spec, t_spec, power, ref=UPA,
+                                     title=label, ymin=10, ymax=fs / 2,
+                                     vmin=20, vmax=120)
+fig.savefig(OUT / 'example_09_ssrp_spectrogram.png', dpi=150,
+            bbox_inches='tight')
+plt.close(fig)
 
-    # ── 2. ssrp time-domain realisation of the Wenz total ───────────────
-    # n_fft is the IFFT chunk size, and it sets the synthesis bin width
-    # df = sample_rate / n_fft. The Wenz target starts at 1 Hz, so the chunk
-    # has to be long enough for the low-frequency shape to survive resampling
-    # onto the FFT-native grid: 96 kHz / 65536 gives df = 1.46 Hz.
-    # (The library clamps n_fft to [16, 262144]; anything below the floor is
-    # raised, so a token value like 1 would silently become the 65536 default.)
-    sample_rate = 96000
-    n_fft = 65536
-    f_ssrp = np.linspace(1.0, 5e4, 10000)
-    wenz_ssrp = WenzNoise(
-        f_ssrp,
-        wind_speed_kn=wenz_plot.wind_speed_kn,
-        water_depth=wenz_plot.water_depth,
-        shipping_level=wenz_plot.shipping_level,
-        rain_rate=wenz_plot.rain_rate,
-    )
-    Pxx = wenz_ssrp.as_psd(ref=UPA)                    # SI Pa²/Hz (linear)
+fig, ax = uacpy.plot.plot_ppsd(
+    ppsd(pressure, fs, ref=UPA, seg_duration=1.0, overlap_pct=50, ddB=1.0,
+         lvlmin=20, lvlmax=140),
+    title=label, ymin=20, ymax=120)
+# The check: the analytic curve the realisation came from, over its own PPSD.
+ax.semilogx(wenz.frequencies, wenz.total, color='magenta', linewidth=2.0,
+            label='Wenz total (analytic)')
+ax.legend(loc='upper right', fontsize=9, framealpha=0.85)
+fig.savefig(OUT / 'example_09_ppsd.png', dpi=150, bbox_inches='tight')
+plt.close(fig)
 
-    duration = 30.0                                    # seconds
-    t, x, fs = uacpy.acoustic_signal.synthesize_noise_from_psd(
-        Pxx, f_ssrp, sample_rate=sample_rate,
-        duration=duration, scale=1.0, n_fft=n_fft)
-    print(f"  noise synthesis: {duration:.1f} s @ fs = {fs/1e3:.1f} kHz "
-          f"({len(x):,} samples)")
-    print(f"  n_fft = {n_fft:,} → synthesis bin width df = {fs / n_fft:.2f} Hz")
-
-    # Snapshot of the waveform (first 0.2 s).
-    n_show = int(0.2 * fs)
-    fig, ax = plt.subplots(figsize=(10, 4))
-    ax.plot(t[:n_show] * 1e3, x[:n_show] / UPA, linewidth=0.5, color='C0')
-    ax.set_xlabel('Time [ms]')
-    ax.set_ylabel(r'Pressure [µPa]')
-    ax.set_title('Synthesised Wenz-noise time series '
-                 f'(first 0.2 s of {duration:.0f} s)')
-    ax.grid(True, alpha=0.3)
-    fig.tight_layout()
-    fig.savefig(OUTPUT_DIR / 'example_09_ssrp_timeseries.png',
-                dpi=150, bbox_inches='tight')
-    plt.close(fig)
-    print(f"  ✓ Saved: {OUTPUT_DIR / 'example_09_ssrp_timeseries.png'}")
-
-    # ── 3. Spectrogram of the synthesised noise ─────────────────────────
-    sf, st, sSxx = uacpy.acoustic_signal.spectrogram(
-        x, fs, nperseg=4096, noverlap=2048)
-    fig, ax = uacpy.visualization.plot_spectrogram(
-        sf, st, sSxx, ref=UPA,
-        title=(f'Wenz @ {wenz_ssrp.wind_speed_kn:g} kn / '
-               f'{wenz_ssrp.shipping_level} shipping / '
-               f'{wenz_ssrp.rain_rate} rain'),
-        ymin=10, ymax=fs / 2,
-        vmin=20, vmax=120,
-    )
-    fig.savefig(OUTPUT_DIR / 'example_09_ssrp_spectrogram.png',
-                dpi=150, bbox_inches='tight')
-    print(f"  ✓ Saved: {OUTPUT_DIR / 'example_09_ssrp_spectrogram.png'}")
-
-    # ── 4. PPSD of the synthesised noise ────────────────────────────────
-    ppsd_result = uacpy.acoustic_signal.ppsd(
-        x, fs, ref=UPA, seg_duration=1.0, overlap_pct=50, ddB=1.0,
-        lvlmin=20, lvlmax=140,
-    )
-    fig, ax = uacpy.visualization.plot_ppsd(
-        ppsd_result,
-        title=(f'Wenz @ {wenz_ssrp.wind_speed_kn:g} kn / '
-               f'{wenz_ssrp.shipping_level} shipping / '
-               f'{wenz_ssrp.rain_rate} rain'),
-        ymin=20, ymax=120,
-    )
-    # Overlay the analytic Wenz total for direct comparison.
-    ax.semilogx(wenz_ssrp.frequencies, wenz_ssrp.total,
-                color='magenta', linewidth=2.0,
-                label='Wenz total (analytic)')
-    ax.legend(loc='upper right', fontsize=9, framealpha=0.85)
-    fig.savefig(OUTPUT_DIR / 'example_09_ppsd.png',
-                dpi=150, bbox_inches='tight')
-    print(f"  ✓ Saved: {OUTPUT_DIR / 'example_09_ppsd.png'}")
-
-    # ── 5. Sound Exposure Level (SEL) of the synthesised realisation ─────
-    # SEL is the time-integral of p²(t) (ISO 18405) — the cumulative energy
-    # dose of the record. Computed here per third-octave band over the whole
-    # 30 s realisation; each bar is dB re 1 µPa²·s. The broadband total is the
-    # incoherent (energy) sum across bands.
-    sel_dur = len(x) / fs
-    sel_vals, sel_bands = uacpy.acoustic_signal.sel(
-        x, fs, fmin=10.0, fmax=fs / 2.0, band_type='third_octave',
-    )
-    total_sel_dB = 10.0 * np.log10(sel_vals.sum() / UPA ** 2)
-    print(f"  SEL: broadband {total_sel_dB:.1f} dB re 1 µPa²·s over "
-          f"{sel_dur:.0f} s across {len(sel_bands)} third-octave bands")
-    fig, ax = uacpy.visualization.plot_sel(
-        sel_vals, sel_bands, ref=UPA, duration=sel_dur,
-        band_type='third_octave',
-        title=(f'Wenz @ {wenz_ssrp.wind_speed_kn:g} kn / '
-               f'{wenz_ssrp.shipping_level} shipping / '
-               f'{wenz_ssrp.rain_rate} rain'),
-    )
-    fig.savefig(OUTPUT_DIR / 'example_09_sel.png',
-                dpi=150, bbox_inches='tight')
-    plt.close(fig)
-    print(f"  ✓ Saved: {OUTPUT_DIR / 'example_09_sel.png'}")
-
-    print("\n✓ Example 09 complete\n")
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+# SEL is the time-integral of p²(t) (ISO 18405) — the cumulative energy dose of
+# the record, per third-octave band, in dB re 1 µPa²·s. The broadband total is
+# the incoherent (energy) sum across bands.
+levels, bands = sel(pressure, fs, fmin=10.0, fmax=fs / 2.0,
+                    band_type='third_octave')
+print(f"  SEL: broadband {10 * np.log10(levels.sum() / UPA ** 2):.1f} dB "
+      f"re 1 µPa²·s over {pressure.size / fs:.0f} s across {len(bands)} "
+      f"third-octave bands")
+fig, _ = uacpy.plot.plot_sel(levels, bands, ref=UPA,
+                             duration=pressure.size / fs,
+                             band_type='third_octave', title=label)
+fig.savefig(OUT / 'example_09_sel.png', dpi=150, bbox_inches='tight')
+plt.close(fig)

@@ -15,8 +15,6 @@ example's actual dependencies.
 from __future__ import annotations
 
 import ast
-import importlib
-import importlib.util
 import os
 import re
 import subprocess
@@ -24,7 +22,6 @@ import sys
 from pathlib import Path
 from typing import Set
 
-import numpy as np
 import pytest
 
 import uacpy
@@ -558,132 +555,6 @@ def test_harness_env_var_lands_example_pngs_in_the_workdir(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# plotting_utils: the shared report panels.
-# ---------------------------------------------------------------------------
-
-
-def _plotting_utils():
-    """``uacpy/examples`` carries no ``__init__.py``, so the shared helper is
-    loaded straight from its path rather than imported by package name."""
-    import importlib.util
-
-    spec = importlib.util.spec_from_file_location(
-        "uacpy_examples_plotting_utils", EXAMPLES_DIR / "plotting_utils.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def _tl_field(ranges, level_dB):
-    """A Field whose TL at every depth is ``level_dB + 20·log10(r)``."""
-    import numpy as np
-    from uacpy.core.results import Field
-
-    depths = np.linspace(0.0, 200.0, 21)
-    tl = np.tile(level_dB + 20.0 * np.log10(np.maximum(ranges, 1.0)),
-                 (depths.size, 1))
-    return Field(data=tl, coords={'depth': depths, 'range': ranges},
-                 model='test')
-
-
-def _rms_tiles(results):
-    """The numbers the RMS-error panel prints, keyed by ``(row, column)``."""
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    fig = _plotting_utils().plot_model_statistics(results, source_depth=100.0)
-    tiles = {(round(t.get_position()[1]), round(t.get_position()[0])):
-             t.get_text() for t in fig.axes[1].texts}
-    plt.close(fig)
-    return tiles
-
-
-def test_the_rms_panel_compares_only_ranges_both_models_computed():
-    """The panel is labelled "RMS Error (dB)". Two models on the same *count*
-    of ranges over different spans are a pairing ``uacpy.metrics.tl_rmse``
-    refuses outright, and differencing them cell-by-cell publishes a number for
-    ranges that never met."""
-    import numpy as np
-    import pytest as _pytest
-
-    a = _tl_field(np.linspace(50.0, 3000.0, 200), 60.0)
-    b = _tl_field(np.linspace(500.0, 8000.0, 200), 66.0)
-    with _pytest.raises(Exception):                 # the library's own metric
-        __import__('uacpy').metrics.tl_rmse(a, b)
-    # 500-3000 m is the shared span, where the two differ by exactly 6 dB
-    assert _rms_tiles({'A': a, 'B': b}) == {(0, 1): '6.0', (1, 0): '6.0'}
-
-
-def test_the_rms_panel_leaves_an_aligned_pair_untouched():
-    """The common-grid step must be an identity on a pair already sharing one
-    axis, and on the unequal-length pair the panel already interpolated."""
-    import numpy as np
-
-    span = np.linspace(50.0, 3000.0, 200)
-    assert _rms_tiles({'C': _tl_field(span, 60.0),
-                       'D': _tl_field(span, 70.5)}) == {(0, 1): '10.5',
-                                                        (1, 0): '10.5'}
-    assert _rms_tiles(
-        {'E': _tl_field(np.linspace(50.0, 3000.0, 40), 60.0),
-         'F': _tl_field(np.linspace(50.0, 3000.0, 25), 70.5)}) == {
-            (0, 1): '10.5', (1, 0): '10.5'}
-
-
-def test_the_rms_panel_reports_no_number_for_models_sharing_no_range():
-    """Two spans that do not touch have nothing to compare, so the tile carries
-    no figure and does not take the diagonal's zero-error colour."""
-    import matplotlib
-    matplotlib.use("Agg")
-    import numpy as np
-    import matplotlib.pyplot as plt
-
-    results = {'G': _tl_field(np.linspace(50.0, 500.0, 30), 60.0),
-               'H': _tl_field(np.linspace(5000.0, 8000.0, 30), 60.0)}
-    assert _rms_tiles(results) == {(0, 1): 'n/a', (1, 0): 'n/a'}
-
-    fig = _plotting_utils().plot_model_statistics(results, source_depth=100.0)
-    im = fig.axes[1].get_images()[0]
-    rgba = im.cmap(im.norm(np.ma.filled(im.get_array(), np.nan)))
-    plt.close(fig)
-    assert tuple(rgba[0, 0]) == plt.get_cmap('RdYlGn_r')(0.0)   # the diagonal
-    assert tuple(rgba[0, 1]) != plt.get_cmap('RdYlGn_r')(0.0)
-
-
-@pytest.mark.parametrize("start_b, tile", [
-    (3000.0, '6.0'),      # the spans meet on one shared range: comparable
-    (3000.001, 'n/a'),    # a millimetre further apart and they share nothing
-])
-def test_the_smallest_overlap_the_rms_panel_will_compare(start_b, tile):
-    """Both sides of the boundary between a comparison and no comparison: the
-    two spans touching at a single range is still a range both models
-    computed."""
-    import numpy as np
-
-    a = _tl_field(np.linspace(50.0, 3000.0, 200), 60.0)
-    b = _tl_field(np.linspace(start_b, 8000.0, 200), 66.0)
-    assert _rms_tiles({'A': a, 'B': b})[(0, 1)] == tile
-
-
-def test_the_rms_panel_diagonal_keeps_the_colormaps_zero_tile():
-    """The diagonal is a true zero and must stay visually distinct from a
-    not-comparable tile."""
-    import matplotlib
-    matplotlib.use("Agg")
-    import numpy as np
-    import matplotlib.pyplot as plt
-
-    span = np.linspace(50.0, 3000.0, 200)
-    fig = _plotting_utils().plot_model_statistics(
-        {'C': _tl_field(span, 60.0), 'D': _tl_field(span, 70.5)},
-        source_depth=100.0)
-    im = fig.axes[1].get_images()[0]
-    diagonal = im.cmap(im.norm(np.ma.filled(im.get_array(), np.nan)))[0, 0]
-    plt.close(fig)
-    assert tuple(diagonal) == plt.get_cmap('RdYlGn_r')(0.0)
-
-
-# ---------------------------------------------------------------------------
 # The examples prologue: UACPY_EXAMPLE_OUTPUT at an arbitrary depth.
 # ---------------------------------------------------------------------------
 
@@ -780,51 +651,86 @@ def test_an_example_opening_several_figures_closes_them():
     assert offenders == []
 
 
-def test_example_04_saves_through_the_figure_it_bound():
-    """Every save in this example names the figure the plotter returned rather
-    than pyplot's current one, so inserting a panel between a plotter call and
-    its save cannot silently write the wrong figure."""
-    source = (EXAMPLES_DIR / "example_04_bellhop_advanced.py").read_text()
-    saves = [node for node in ast.walk(ast.parse(source))
+def test_every_example_saves_through_the_figure_it_bound():
+    """Every save names the figure the plotter returned, never pyplot's
+    *current* one.
+
+    ``plt.savefig()`` writes whichever figure pyplot considers current, so
+    inserting a panel between a plotter call and its save silently writes the
+    wrong figure — and in a script that builds several, the wrong figure is
+    usually the last one touched. Binding the return value makes that
+    impossible to express. Checked across every example rather than in the one
+    that first got it wrong.
+    """
+    offenders = []
+    for example in sorted(EXAMPLES_DIR.glob("example_*.py")):
+        for node in ast.walk(ast.parse(example.read_text(encoding="utf-8"))):
+            if (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "savefig"
+                    and getattr(node.func.value, "id", None) in ("plt",
+                                                                 "pyplot",
+                                                                 "matplotlib")):
+                offenders.append(f"{example.name}:{node.lineno}")
+    assert offenders == [], (
+        "these saves go through pyplot's current figure instead of a bound "
+        f"one: {offenders}")
+
+
+def test_the_bound_figure_check_can_see_a_pyplot_save(tmp_path):
+    """The sweep above passes trivially if the AST walk finds nothing."""
+    probe = tmp_path / "example_99_probe.py"
+    probe.write_text("import matplotlib.pyplot as plt\nplt.savefig('x.png')\n",
+                     encoding="utf-8")
+    found = [node for node in ast.walk(ast.parse(probe.read_text()))
              if isinstance(node, ast.Call)
              and isinstance(node.func, ast.Attribute)
-             and node.func.attr == "savefig"]
-    assert len(saves) == 6, len(saves)
-    assert [getattr(node.func.value, "id", None) for node in saves] == [
-        "fig1", "fig2", "fig3", "fig4", "fig5", "fig6"]
+             and node.func.attr == "savefig"
+             and getattr(node.func.value, "id", None) == "plt"]
+    assert len(found) == 1
 
 
-def _load_example(stem):
-    spec = importlib.util.spec_from_file_location(
-        f'_examples_{stem}', EXAMPLES_DIR / f'{stem}.py')
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+def test_the_ambiguity_surfaces_are_drawn_on_their_grid_points():
+    """Example 38 draws its matched-field surfaces with ``contourf``, which
+    places every value ON its candidate position.
+
+    It used to build an ``imshow`` extent by hand, and an extent taken from the
+    outer grid CENTRES rather than the cell edges shifts the whole surface half
+    a cell — the peak is then reported at a position the processor never
+    scanned. ``contourf`` cannot express that error, so the fix is structural
+    rather than a tolerance.
+    """
+    source = (EXAMPLES_DIR / 'example_38_matched_field.py').read_text(
+        encoding='utf-8')
+    assert 'contourf(' in source
+    assert 'imshow(' not in source, (
+        "example 38 is back on imshow: an extent from grid centres shifts the "
+        "surface half a cell off the positions it was computed at.")
 
 
-def test_example_38_extent_pads_half_a_cell_beyond_the_grid_centres(
-        monkeypatch, tmp_path):
-    monkeypatch.setenv('UACPY_EXAMPLE_OUTPUT', str(tmp_path))
-    ex38 = _load_example('example_38_matched_field')
-    extent = ex38._imshow_extent(np.linspace(500.0, 5000.0, 121),
-                                 np.linspace(5.0, 95.0, 91))
-    assert extent == pytest.approx([0.48125, 5.01875, 95.5, 4.5])
+def test_the_comparison_examples_use_the_librarys_tl_difference_renderer():
+    """The TL-difference panel is ``uacpy.plot.plot_field_difference``, not a
+    copy inside an example.
 
+    It was ``examples/plotting_utils._plot_tl_difference`` until it was
+    promoted into the library; a local reimplementation pasted back into one
+    example is the regression this catches, because it would drift from the
+    tagging that keeps a signed residual off the TL colour scale.
+    """
+    for stem in ('example_05_ram_advanced',
+                 'example_15_elastic_boundaries_comparison',
+                 'example_16_bellhop_bounce_integration',
+                 'example_18_rd_bottom_krakenfield_vs_ram',
+                 'example_22_ram_lytaev_grid'):
+        source = (EXAMPLES_DIR / f'{stem}.py').read_text(encoding='utf-8')
+        assert 'plot_field_difference' in source, stem
 
-def test_the_three_comparison_examples_share_one_tl_difference_renderer(
-        monkeypatch, tmp_path):
-    monkeypatch.setenv('UACPY_EXAMPLE_OUTPUT', str(tmp_path))
-    monkeypatch.syspath_prepend(str(EXAMPLES_DIR))
-    fresh = 'plotting_utils' not in sys.modules
-    try:
-        plotting_utils = importlib.import_module('plotting_utils')
-        renderers = [
-            _load_example(stem)._plot_tl_difference
-            for stem in ('example_05_ram_advanced',
-                         'example_16_bellhop_bounce_integration',
-                         'example_18_rd_bottom_krakenfield_vs_ram')]
-        assert all(fn is plotting_utils._plot_tl_difference
-                   for fn in renderers)
-    finally:
-        if fresh:
-            sys.modules.pop('plotting_utils', None)
+    local = []
+    for path in sorted(EXAMPLES_DIR.glob('example_*.py')):
+        for node in ast.walk(ast.parse(path.read_text(encoding='utf-8'))):
+            if (isinstance(node, ast.FunctionDef)
+                    and 'difference' in node.name.lower()):
+                local.append(f'{path.name}:{node.name}')
+    assert not local, (
+        f"an example defines its own difference renderer: {local}. Use "
+        f"uacpy.plot.plot_field_difference.")

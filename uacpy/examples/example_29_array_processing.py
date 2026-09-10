@@ -1,92 +1,74 @@
-"""
-═══════════════════════════════════════════════════════════════════════════════
-EXAMPLE 29: Adaptive & High-Resolution Array Processing
-═══════════════════════════════════════════════════════════════════════════════
+"""Adaptive and high-resolution array processing.
 
-OBJECTIVE:
-    Resolve two closely spaced plane-wave arrivals on a 16-element line array,
-    comparing the conventional Bartlett beamformer with the adaptive MVDR
-    (Capon) and subspace MUSIC estimators.
+Two plane waves 14° apart on a 16-element half-wavelength line array, resolved
+three ways: the conventional Bartlett beamformer, the adaptive MVDR (Capon)
+estimator, and the subspace MUSIC estimator. Bartlett's beamwidth sets the
+classical resolution limit; the other two are built to beat it.
 
-FEATURES DEMONSTRATED:
-    ✓ uacpy.acoustic_signal.steering_vectors / sample_covariance
-    ✓ bartlett_spectrum / mvdr_spectrum / music_spectrum
-═══════════════════════════════════════════════════════════════════════════════
+Uses: acoustic_signal.steering_vectors · sample_covariance ·
+bartlett_spectrum · mvdr_spectrum · music_spectrum
 """
 
-import sys
 import os
+import sys
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
-OUTPUT_DIR = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
-                  or Path(__file__).parent / 'output')
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-# Repo root, so ``import uacpy`` resolves from a source checkout.
-sys.path.insert(0, str(Path(__file__).parents[2]))
+import numpy as np
+import matplotlib.pyplot as plt
+from uacpy.acoustic_signal import (bartlett_spectrum, music_spectrum,
+                                   mvdr_spectrum, sample_covariance,
+                                   steering_vectors)
 
-import numpy as np  # noqa: E402
-import matplotlib.pyplot as plt  # noqa: E402
+OUT = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
+           or Path(__file__).parent / 'output')
+OUT.mkdir(parents=True, exist_ok=True)
 
-from uacpy.acoustic_signal import (  # noqa: E402
-    bartlett_spectrum,
-    music_spectrum,
-    mvdr_spectrum,
-    sample_covariance,
-    steering_vectors,
-)
+frequency, c = 1500.0, 1500.0
+positions = np.arange(16) * (c / frequency / 2.0)   # half-wavelength spacing
+true_angles = [-8.0, 6.0]
 
+# Two uncorrelated sources on the array, plus a little sensor noise.
+rng = np.random.default_rng(0)
+n_snapshots = 500
+data = np.zeros((positions.size, n_snapshots), dtype=complex)
+for angle in true_angles:
+    steering = steering_vectors(positions, [angle], frequency, c)[0]
+    amplitude = (rng.standard_normal(n_snapshots)
+                 + 1j * rng.standard_normal(n_snapshots))
+    data += np.outer(steering, amplitude)
+data += 0.05 * (rng.standard_normal(data.shape)
+                + 1j * rng.standard_normal(data.shape))
 
-def main():
-    print("═" * 80)
-    print("EXAMPLE 29: Adaptive & High-Resolution Array Processing")
-    print("═" * 80)
+covariance = sample_covariance(data)
+angles = np.linspace(-40, 40, 801)
+replicas = steering_vectors(positions, angles, frequency, c)
+bartlett = bartlett_spectrum(covariance, replicas)
+capon = mvdr_spectrum(covariance, replicas)
+music = music_spectrum(covariance, replicas, n_sources=2)
 
-    freq, c = 1500.0, 1500.0
-    n_elem = 16
-    positions = np.arange(n_elem) * (c / freq / 2.0)  # half-wavelength spacing
-    true_angles = [-8.0, 6.0]
+for name, spectrum in (('Bartlett', bartlett), ('MVDR', capon),
+                       ('MUSIC', music)):
+    peaks = angles[np.argsort(spectrum)[-2:]]
+    print(f"  {name:9s} two strongest bearings: "
+          f"{np.sort(peaks)[0]:+.1f}°, {np.sort(peaks)[1]:+.1f}° "
+          f"(true {true_angles[0]:+.0f}°, {true_angles[1]:+.0f}°)")
 
-    rng = np.random.default_rng(0)
-    n_snap = 500
-    x = np.zeros((n_elem, n_snap), dtype=complex)
-    for ang in true_angles:
-        a = steering_vectors(positions, [ang], freq, c)[0]
-        src = rng.standard_normal(n_snap) + 1j * rng.standard_normal(n_snap)
-        x += np.outer(a, src)
-    x += 0.05 * (rng.standard_normal((n_elem, n_snap))
-                 + 1j * rng.standard_normal((n_elem, n_snap)))
+fig, ax = plt.subplots(figsize=(11, 6))
+for label, spectrum in (('Bartlett (conventional)', bartlett),
+                        ('MVDR / Capon', capon), ('MUSIC', music)):
+    ax.plot(angles, 10 * np.log10(spectrum / spectrum.max()), label=label)
+for angle in true_angles:
+    ax.axvline(angle, color='k', ls='--', alpha=0.4)
+ax.set_title('Direction-of-arrival spectra (16-element line array)',
+             fontweight='bold')
+ax.set_xlabel('Angle from broadside (deg)')
+ax.set_ylabel('Normalised power (dB)')
+ax.set_ylim(-50, 2)
+ax.legend()
+ax.grid(True, alpha=0.3)
 
-    R = sample_covariance(x)
-    angles = np.linspace(-40, 40, 801)
-    steering = steering_vectors(positions, angles, freq, c)
-    bart = bartlett_spectrum(R, steering)
-    capon = mvdr_spectrum(R, steering)
-    music = music_spectrum(R, steering, n_sources=2)
-
-    def norm_dB(p):
-        return 10 * np.log10(p / p.max())
-
-    print(f"\n  True arrival angles: {true_angles} deg")
-    fig, ax = plt.subplots(figsize=(11, 6))
-    ax.plot(angles, norm_dB(bart), label='Bartlett (conventional)')
-    ax.plot(angles, norm_dB(capon), label='MVDR / Capon')
-    ax.plot(angles, norm_dB(music), label='MUSIC')
-    for a in true_angles:
-        ax.axvline(a, color='k', ls='--', alpha=0.4)
-    ax.set_title('Direction-of-Arrival spectra (16-element line array)',
-                 fontweight='bold')
-    ax.set_xlabel('Angle from broadside (deg)')
-    ax.set_ylabel('Normalised power (dB)')
-    ax.set_ylim(-50, 2); ax.legend(); ax.grid(True, alpha=0.3)
-
-    plt.tight_layout()
-    out = OUTPUT_DIR / 'example_29_array_processing.png'
-    plt.savefig(out, dpi=150, bbox_inches='tight')
-    plt.close()
-    print(f"  ✓ Saved: {out}")
-    print("\n✓ Example 29 complete\n")
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+fig.tight_layout()
+fig.savefig(OUT / 'example_29_array_processing.png', dpi=150,
+            bbox_inches='tight')
+plt.close(fig)

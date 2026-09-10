@@ -346,9 +346,7 @@ localization. Run them **by script path** (the form
 python uacpy/examples/example_01_basic_shallow_water.py
 ```
 
-not as modules — `python -m uacpy.examples.example_01_…` fails for the
-examples that import their sibling `plotting_utils` as a top-level module.
-See the
+The module form, `python -m uacpy.examples.example_01_…`, works too. See the
 [examples index](./DOCUMENTATION.md#17-examples-index) for a description
 of each one.
 

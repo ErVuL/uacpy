@@ -1,222 +1,63 @@
-"""
-═══════════════════════════════════════════════════════════════════════════════
-EXAMPLE 01: Basic Shallow Water Propagation - Pekeris Waveguide
-═══════════════════════════════════════════════════════════════════════════════
+"""Basic shallow-water propagation — the Pekeris waveguide.
 
-OBJECTIVE:
-    The simplest possible UACPY example - a "Hello World" for underwater acoustics.
-    Demonstrates basic propagation modeling with minimal complexity.
+The shortest complete uacpy run: build an Environment, place a Source and a
+Receiver grid, run Bellhop for coherent transmission loss, and plot the field
+with two cuts through it. Start here.
 
-ENVIRONMENT:
-    - Pekeris waveguide (classic benchmark)
-    - Flat bottom at 100m depth
-    - Isovelocity water (1500 m/s)
-    - Fluid bottom (no shear)
-
-FEATURES DEMONSTRATED:
-    ✓ Basic Environment setup
-    ✓ Source and Receiver configuration
-    ✓ Bellhop propagation model
-    ✓ Simple TL visualization
-    ✓ Quick start for new users
-
-═══════════════════════════════════════════════════════════════════════════════
+Uses: uacpy.Environment · Source · Receiver · Bellhop.run · plot_field ·
+Field.at().plot() · env.plot()
 """
 
-import sys
-import time
 import os
+import sys
 from pathlib import Path
-# Repo root, so ``import uacpy`` resolves from a source checkout.
-sys.path.insert(0, str(Path(__file__).parents[2]))
+sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
-import numpy as np  # noqa: E402
-import matplotlib.pyplot as plt  # noqa: E402
-import uacpy  # noqa: E402
-from uacpy.models import Bellhop  # noqa: E402
-from uacpy.core.environment import BoundaryProperties  # noqa: E402
-from uacpy.visualization.plots import plot_field  # noqa: E402
-from uacpy.models import RunMode  # noqa: E402
+import numpy as np
+import matplotlib.pyplot as plt
+import uacpy
 
-OUTPUT_DIR = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
-                  or Path(__file__).parent / 'output')
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+OUT = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
+           or Path(__file__).parent / 'output')
+OUT.mkdir(parents=True, exist_ok=True)
 
-
-def main():
-    print("\n" + "═" * 80)
-    print("EXAMPLE 01: Basic Shallow Water Propagation - Pekeris Waveguide")
-    print("═" * 80)
-    print("\nThis is the simplest UACPY example - a 'Hello World' for underwater acoustics!")
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # STEP 1: Create Environment
-    # ═══════════════════════════════════════════════════════════════════════
-
-    print("\n[Step 1/5] Creating environment...")
-
-    # Create bottom boundary properties
-    bottom = BoundaryProperties(
+# A Pekeris waveguide: isovelocity water over a faster fluid half-space. The
+# classic shallow-water benchmark, and the simplest environment uacpy takes.
+env = uacpy.Environment(
+    name="Pekeris waveguide",
+    bathymetry=100.0,                   # flat seafloor, m
+    ssp=1500.0,                         # isovelocity water column, m/s
+    bottom=uacpy.BoundaryProperties(
         acoustic_type='half-space',
-        sound_speed=1600.0,      # Slightly faster sediment
-        density=1.5,              # Typical sediment density (g/cm³)
-        attenuation=0.5           # Moderate attenuation (dB/wavelength)
-    )
+        sound_speed=1600.0,             # sediment, m/s — faster than the water
+        density=1.5,                    # g/cm³
+        attenuation=0.5,                # dB/wavelength
+    ),
+)
 
-    env = uacpy.Environment(
-        name="Pekeris Waveguide",
-        bathymetry=100.0,              # Flat bottom at 100m
-        ssp=1500.0,       # Isovelocity water column
-        bottom=bottom             # Use BoundaryProperties object
-    )
+source = uacpy.Source(depths=50.0, frequencies=100.0)
+receiver = uacpy.Receiver(depths=np.linspace(5, 95, 50),
+                          ranges=np.linspace(100, 10000, 100))
 
-    print("  ✓ Created Pekeris waveguide:")
-    print(f"    - Water depth: {env.depth}m")
-    print(f"    - Sound speed: {env.ssp.value} m/s")
-    print("    - Bottom type: Fluid half-space")
+# 300 Gaussian beams over ±80°, enough to fill a 100 m duct out to 10 km.
+tl = uacpy.Bellhop(beam_type='B', n_beams=300, alpha=(-80, 80)).run(
+    env, source, receiver, run_mode=uacpy.RunMode.COHERENT_TL)
 
-    # ═══════════════════════════════════════════════════════════════════════
-    # STEP 2: Define Source
-    # ═══════════════════════════════════════════════════════════════════════
+fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+# The TL field on the fixed 20–120 dB scale every uacpy figure shares, with
+# the jet_r colormap of the Acoustics Toolbox: red is loud, blue is quiet.
+uacpy.plot_field(tl, ax=axes[0, 0], env=env)
+# A Field sliced to one axis plots itself as a line cut.
+tl.at(depth=50.0).plot(ax=axes[0, 1], color='b',
+                       title='TL vs range at source depth')
+tl.at(range=5000.0).plot(ax=axes[1, 0], color='r',
+                         title='TL vs depth at 5 km')
+env.plot(ax=axes[1, 1], source=source, receiver=receiver,
+         title='Environment')
+fig.tight_layout()
+fig.savefig(OUT / 'example_01_basic_shallow_water.png', dpi=150,
+            bbox_inches='tight')
 
-    print("\n[Step 2/5] Defining acoustic source...")
-
-    source = uacpy.Source(
-        depths=50.0,       # Mid-water column
-        frequencies=100.0   # 100 Hz (typical low-frequency sonar)
-    )
-
-    print("  ✓ Source configured:")
-    print(f"    - Depth: {source.depths[0]}m")
-    print(f"    - Frequency: {source.frequencies[0]} Hz")
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # STEP 3: Define Receiver Grid
-    # ═══════════════════════════════════════════════════════════════════════
-
-    print("\n[Step 3/5] Defining receiver grid...")
-
-    receiver = uacpy.Receiver(
-        depths=np.linspace(5, 95, 50),      # 50 depths from 5m to 95m
-        ranges=np.linspace(100, 10000, 100)  # 100 ranges from 0.1km to 10km
-    )
-
-    print("  ✓ Receiver grid:")
-    print(f"    - Depths: {len(receiver.depths)} points ({receiver.depths[0]}m to {receiver.depths[-1]}m)")
-    r0_km = receiver.ranges[0] / 1000
-    r1_km = receiver.ranges[-1] / 1000
-    print(f"    - Ranges: {len(receiver.ranges)} points ({r0_km:.1f}km to {r1_km:.1f}km)")
-    print(f"    - Total receivers: {len(receiver.depths) * len(receiver.ranges)}")
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # STEP 4: Run Propagation Model
-    # ═══════════════════════════════════════════════════════════════════════
-
-    print("\n[Step 4/5] Running Bellhop propagation model...")
-
-    bellhop = Bellhop(verbose=False, beam_type='B', n_beams=300, alpha=(-80, 80))
-
-    try:
-        t_start = time.perf_counter()
-        result = bellhop.run(
-            env, source, receiver,
-            run_mode=RunMode.COHERENT_TL,        # Coherent TL
-        )
-        elapsed = time.perf_counter() - t_start
-        print("  ✓ Propagation complete!")
-
-    except Exception as e:
-        print(f"  ✗ Error: {e}")
-        return 1
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # STEP 5: Visualize Results
-    # ═══════════════════════════════════════════════════════════════════════
-
-    print("\n[Step 5/5] Creating visualization...")
-
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-
-    # Plot 1: TL field
-    ax = axes[0, 0]
-    _, _ = plot_field(result, ax=ax, env=env)
-    ax.set_title('Transmission Loss Field (fixed 20-120 dB scale, jet_r colormap)',
-                 fontweight='bold', fontsize=12)
-
-    # Plot 2: TL vs Range (at source depth) — a 1-D cut plots itself, with
-    # the loss axis running downward so the loud end is at the top.
-    ax = axes[0, 1]
-    result.at(depth=source.depths[0]).plot(
-        ax=ax, color='b', linewidth=2,
-        title=f'TL vs Range (at {source.depths[0]:.0f}m depth)')
-
-    # Plot 3: TL vs Depth (at mid-range) — depth down, TL along x.
-    ax = axes[1, 0]
-    mid_range_km = np.median(result.ranges) / 1000
-    result.at(range=mid_range_km * 1000.0).plot(
-        ax=ax, color='r', linewidth=2,
-        title=f'TL vs Depth (at {mid_range_km:.1f}km range)')
-    ax.axhline(source.depths[0], color='gray', linestyle='--', linewidth=1, alpha=0.5, label='Source depth')
-    ax.axhline(env.depth, color='k', linewidth=2, label='Bottom')
-    ax.legend(fontsize=9)
-
-    # Plot 4: the environment cross-section with the run geometry on it
-    ax = axes[1, 1]
-    env.plot(ax=ax, source=source, receiver=receiver, title='Environment Setup')
-
-    # Add text box with simulation parameters
-    textstr = (f'Simulation Parameters:\n'
-               f'  Water depth: {env.depth}m\n'
-               f'  Sound speed: {env.ssp.value} m/s\n'
-               f'  Frequency: {source.frequencies[0]} Hz\n'
-               f'  Source depth: {source.depths[0]}m\n'
-               f'  Model: Bellhop (Gaussian beams)\n'
-               f'  Grid: {len(receiver.depths)}×{len(receiver.ranges)} receivers')
-    props = dict(boxstyle='round', facecolor='wheat', alpha=0.8)
-    ax.text(0.02, 0.98, textstr, transform=ax.transAxes, fontsize=8,
-            verticalalignment='top', bbox=props, family='monospace')
-
-    plt.tight_layout()
-
-    # Save figure
-    plt.savefig(OUTPUT_DIR / 'example_01_basic_shallow_water.png', dpi=150, bbox_inches='tight')
-    plt.close()
-
-    print(f"  ✓ Saved: {OUTPUT_DIR / 'example_01_basic_shallow_water.png'}")
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # Summary
-    # ═══════════════════════════════════════════════════════════════════════
-
-    print("\nResults:")
-    print(f"  • TL range: {np.nanmin(result.dB):.1f} to {np.nanmax(result.dB):.1f} dB")
-    print(f"  • Max range: {result.ranges[-1]/1000:.1f} km")
-    print(f"  • Bellhop run time: {elapsed:.2f} s")
-
-    print("\nWhat you learned:")
-    print("  ✓ How to create a basic Environment")
-    print("  ✓ How to define Source and Receiver")
-    print("  ✓ How to run Bellhop propagation model")
-    print("  ✓ How to visualize transmission loss")
-
-    print("\nPlotting features used:")
-    print("  ✓ plot_field() with the fixed TL colour scale")
-    print("  ✓ result.at(depth=…).plot() / result.at(range=…).plot() for the 1-D cuts")
-    print("  ✓ env.plot(source=, receiver=) for the environment cross-section")
-    print("  ✓ jet_r colormap (red=low TL/loud, blue=high TL/quiet)"
-          " - Acoustic Toolbox standard")
-    print("  ✓ Fixed TL limits, 20 to 120 dB, identical across every figure")
-
-    print("\nNext steps:")
-    print("  • Try example_02 for different sound speed profiles")
-    print("  • Try example_03 for multi-frequency analysis")
-    print("  • Try example_07 to compare multiple models")
-    print("  • Try example_14 for the visualization tour")
-
-    print("\n✓ Example 01 complete\n")
-
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+print(f"TL spans {np.nanmin(tl.dB):.1f} to {np.nanmax(tl.dB):.1f} dB "
+      f"over {tl.ranges[-1] / 1000:.0f} km")
+print(f"wrote {OUT / 'example_01_basic_shallow_water.png'}")

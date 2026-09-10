@@ -1,419 +1,219 @@
-"""
-===============================================================================
-EXAMPLE 16: Bellhop + BOUNCE Integration, Layered Bottom, Range-Dependent Bottom
-===============================================================================
+"""Bellhop + BOUNCE, layered bottoms, range-dependent bottoms.
 
-OBJECTIVE:
-    Demonstrate three key features for range/depth-dependent modeling:
-    1. Bellhop.run_with_bounce() — explicit BOUNCE control for elastic
-       bottoms. (Bellhop.run() already auto-routes through BOUNCE for
-       elastic / layered bottoms with a UserWarning; use
-       run_with_bounce when you need to pin c_low / c_high / rmax.)
-    2. SeabedColumn — multi-layer sediment with Scooter
-    3. Range-dependent bottom properties — with RAM and visualization
+Four seabeds of rising complexity, each with the model that handles it:
 
-FEATURES DEMONSTRATED:
-    - Bellhop.run_with_bounce() for explicit BOUNCE parameters
-    - SeabedColumn + SedimentLayer for depth-dependent sediment
-    - Bottom with RAM (true Fortran RD support)
-    - plot_field(), env.plot()
+1. an elastic half-space through Bellhop.run_with_bounce(), which is how you
+   pin BOUNCE's own c_low / c_high / rmax (plain run() auto-routes layered
+   bottoms through BOUNCE already, with a warning);
+2. a three-layer sediment column with Scooter, which takes NMEDIA > 1;
+3. a scalar seabed that varies along range, with RAM;
+4. a LAYERED seabed that varies along range — depth and range together.
 
-===============================================================================
+Uses: Bellhop.run_with_bounce · SedimentLayer / SeabedColumn ·
+Bottom.from_halfspaces / from_columns · SoundSpeedProfile.from_2d ·
+env.has_layered_bottom flags · plot_field(contours=) · plot_bottom_properties ·
+env.ssp.plot · plot.plot_field_difference
 """
 
-import sys
 import os
+import sys
 from pathlib import Path
-# Repo root, so ``import uacpy`` resolves from a source checkout.
-sys.path.insert(0, str(Path(__file__).parents[2]))
+sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
-import numpy as np  # noqa: E402
-import matplotlib.pyplot as plt  # noqa: E402
+import numpy as np
+import matplotlib.pyplot as plt
+import uacpy
 
-import uacpy  # noqa: E402
-from uacpy.core.environment import SoundSpeedProfile  # noqa: E402
-from uacpy import (  # noqa: E402
-    Bottom, SedimentLayer, SeabedColumn,
-    BoundaryProperties,
+OUT = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
+           or Path(__file__).parent / 'output')
+OUT.mkdir(parents=True, exist_ok=True)
+
+# ── 1. Elastic half-space: native Bellhop against explicit BOUNCE ───────────
+elastic_env = uacpy.Environment(
+    name='Elastic sandy bottom',
+    bathymetry=100,
+    ssp=1500.0,
+    bottom=uacpy.BoundaryProperties(acoustic_type='half-space',
+                                    sound_speed=1700.0, shear_speed=400.0,
+                                    density=1.9, attenuation=0.5,
+                                    shear_attenuation=1.0),
 )
-from uacpy.models import Bellhop, RAM, RunMode, Scooter  # noqa: E402
-from uacpy.visualization.plots import plot_field, plot_bottom_properties  # noqa: E402
+source = uacpy.Source(frequencies=500.0, depths=25.0)
+receiver = uacpy.Receiver(depths=np.linspace(1, 99, 30),
+                          ranges=np.linspace(100, 3000, 40))
 
-OUTPUT_DIR = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
-                  or Path(__file__).parent / 'output')
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+# Only *layered* bottoms auto-route through BOUNCE, so this elastic half-space
+# runs natively either way — bellhop.f90 applies its exact acousto-elastic
+# reflection coefficient, shear included. auto_bounce=False makes that explicit.
+native = uacpy.Bellhop(auto_bounce=False).run(
+    elastic_env, source, receiver, run_mode=uacpy.RunMode.COHERENT_TL)
+bounced = uacpy.Bellhop().run_with_bounce(
+    elastic_env, source, receiver, run_mode=uacpy.RunMode.COHERENT_TL,
+    c_low=1400.0, c_high=10000.0, rmax=10000.0)
+print(f"  half-space TL {np.nanmin(native.dB):.1f}-{np.nanmax(native.dB):.1f} dB, "
+      f"BOUNCE TL {np.nanmin(bounced.dB):.1f}-{np.nanmax(bounced.dB):.1f} dB, "
+      f"max |Δ| {np.nanmax(np.abs(bounced.dB - native.dB)):.1f} dB")
 
+fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+uacpy.plot_field(native, env=elastic_env, ax=axes[0], vmin=40, vmax=90,
+                 title='Native elastic half-space')
+uacpy.plot_field(bounced, env=elastic_env, ax=axes[1], vmin=40, vmax=90,
+                 title='BOUNCE (with shear)')
+uacpy.plot.plot_field_difference(bounced, native, axes[2], env=elastic_env,
+                                 diff_vmax=10, title='BOUNCE − half-space')
+fig.suptitle(f'Bellhop + BOUNCE at {source.frequencies[0]:.0f} Hz, elastic '
+             f'sandy bottom (cp=1700, cs=400 m/s)', fontweight='bold')
+fig.tight_layout()
+fig.savefig(OUT / 'example_16_bounce_comparison.png', dpi=150)
+plt.close(fig)
 
-from plotting_utils import _plot_tl_difference  # noqa: E402
+fig, _ = uacpy.plot_field(bounced, env=elastic_env, contours=[60, 70, 80],
+                          title='Bellhop + BOUNCE TL with contours')
+fig.savefig(OUT / 'example_16_bounce_tl.png', dpi=150, bbox_inches='tight')
+plt.close(fig)
 
+# ── 2. Three sediment layers over a half-space, with Scooter ────────────────
+layered = uacpy.SeabedColumn(
+    layers=[
+        uacpy.SedimentLayer(thickness=5.0, sound_speed=1550.0, density=1.5,
+                            attenuation=0.3, shear_speed=100.0),
+        uacpy.SedimentLayer(thickness=10.0, sound_speed=1650.0, density=1.7,
+                            attenuation=0.5),
+        uacpy.SedimentLayer(thickness=20.0, sound_speed=1800.0, density=2.0,
+                            attenuation=0.8, shear_speed=200.0,
+                            shear_attenuation=0.5),
+    ],
+    halfspace=uacpy.BoundaryProperties(acoustic_type='half-space',
+                                       sound_speed=2000.0, density=2.2,
+                                       attenuation=0.1),
+)
+layered_env = uacpy.Environment(name='Continental shelf — layered sediment',
+                                bathymetry=200.0, ssp=1500.0, bottom=layered)
+layered_tl = uacpy.Scooter().run(
+    layered_env,
+    uacpy.Source(frequencies=100.0, depths=50.0),
+    uacpy.Receiver(depths=np.linspace(1, 199, 30),
+                   ranges=np.linspace(100, 5000, 40)))
+print(f"  {layered.total_thickness():.1f} m of sediment in "
+      f"{len(layered.layers)} layers, has_layered_bottom="
+      f"{layered_env.has_layered_bottom}; Scooter TL "
+      f"{np.nanmin(layered_tl.dB):.1f}-{np.nanmax(layered_tl.dB):.1f} dB")
 
-def demo_bellhop_bounce():
-    """Part 1: Bellhop + BOUNCE for elastic bottom modeling."""
-    print("\n" + "=" * 70)
-    print("PART 1: Bellhop + BOUNCE Integration")
-    print("=" * 70)
+fig, _ = uacpy.plot_field(layered_tl, env=layered_env, contours=[70, 80, 90],
+                          title='Scooter TL — 3 layers + half-space')
+fig.savefig(OUT / 'example_16_layered_tl.png', dpi=150, bbox_inches='tight')
+plt.close(fig)
+fig, _ = uacpy.plot.plot_bottom_properties(layered_env)
+fig.savefig(OUT / 'example_16_layered_structure.png', dpi=150,
+            bbox_inches='tight')
+plt.close(fig)
+fig, _ = layered_env.plot()
+fig.savefig(OUT / 'example_16_layered_env.png', dpi=150, bbox_inches='tight')
+plt.close(fig)
 
-    # Sandy bottom with significant shear properties
-    bottom = BoundaryProperties(
-        acoustic_type='half-space',
-        sound_speed=1700.0,
-        shear_speed=400.0,
-        density=1.9,
-        attenuation=0.5,
-        shear_attenuation=1.0,
-    )
+# ── 3. A scalar seabed that varies along range, with RAM ────────────────────
+bathymetry = np.array([[0, 150], [3000, 160], [6000, 180],
+                       [9000, 200], [12000, 220], [15000, 250]])
+rd_bottom = uacpy.Bottom.from_halfspaces(
+    bathymetry[:, 0].astype(float),
+    sound_speed=np.array([1500, 1550, 1600, 1650, 1700, 1750]),
+    density=np.array([1.2, 1.4, 1.5, 1.7, 1.8, 2.0]),
+    attenuation=np.array([1.0, 0.8, 0.6, 0.5, 0.4, 0.3]),
+    shear_speed=np.zeros(6),
+    acoustic_type='half-space',
+)
 
-    env = uacpy.Environment(
-        name='Elastic Sandy Bottom',
-        bathymetry=100,
-        ssp=1500.0,
-        bottom=bottom,
-    )
+# A 2-D water column too: warm inshore, cooler offshore. c(T, z) is Medwin's
+# equation truncated after the T² term, salinity fixed at S = 35 PSU.
+ssp_depths = np.array([0, 25, 50, 100, 150, 200, 250])
+ssp_ranges_km = np.array([0, 5, 10, 15])
+t_surface = 18 - 0.4 * ssp_ranges_km
+t_deep = 8 - 0.1 * ssp_ranges_km
+temperature = t_deep + (t_surface - t_deep) * np.exp(-ssp_depths[:, None] / 60)
+ssp_matrix = (1449 + 4.6 * temperature - 0.055 * temperature ** 2
+              + 0.016 * ssp_depths[:, None])
 
-    source = uacpy.Source(frequencies=500.0, depths=25.0)
-    receiver = uacpy.Receiver(
-        depths=np.linspace(1, 99, 30),
-        ranges=np.linspace(100, 3000, 40),
-    )
+rd_env = uacpy.Environment(
+    name='Shelf break: mud to sand',
+    ssp=uacpy.SoundSpeedProfile.from_2d(depths=ssp_depths,
+                                        ranges=ssp_ranges_km * 1000.0,
+                                        matrix=ssp_matrix),
+    bathymetry=bathymetry,
+    bottom=rd_bottom,
+)
+rd_tl = uacpy.RAM(accuracy=1e-1).run(
+    rd_env,
+    uacpy.Source(frequencies=100.0, depths=30.0),
+    uacpy.Receiver(depths=np.linspace(5, 240, 30),
+                   ranges=np.linspace(100, 5000, 40)))
+print(f"  range-dependent seabed: RAM TL {np.nanmin(rd_tl.dB):.1f}-"
+      f"{np.nanmax(rd_tl.dB):.1f} dB")
 
-    bellhop = Bellhop(verbose=True)
+fig, _ = uacpy.plot_field(rd_tl, env=rd_env, contours=[70, 85, 100],
+                          title='RAM TL — range-dependent bottom (mud to sand)')
+fig.savefig(OUT / 'example_16_rd_bottom_tl.png', dpi=150, bbox_inches='tight')
+plt.close(fig)
+fig, _ = uacpy.plot.plot_bottom_properties(rd_env)
+fig.savefig(OUT / 'example_16_rd_bottom_props.png', dpi=150,
+            bbox_inches='tight')
+plt.close(fig)
+fig, _ = rd_env.ssp.plot()      # one c(z) line per range column
+fig.savefig(OUT / 'example_16_rd_ssp.png', dpi=150, bbox_inches='tight')
+plt.close(fig)
+fig, _ = rd_env.plot()
+fig.savefig(OUT / 'example_16_rd_env.png', dpi=150, bbox_inches='tight')
+plt.close(fig)
 
-    # Baseline: only *layered* bottoms auto-route through BOUNCE, so this
-    # elastic half-space runs natively either way — bellhop.f90 applies its
-    # exact acousto-elastic reflection coefficient (shear included);
-    # auto_bounce=False just makes that explicit.
-    print("\n--- Standard Bellhop (native elastic half-space) ---")
-    bellhop_native = Bellhop(verbose=True, auto_bounce=False)
-    result_hs = bellhop_native.run(env, source, receiver, run_mode=RunMode.COHERENT_TL)
+# ── 4. A LAYERED seabed that varies along range — depth and range together ──
+inshore = uacpy.SeabedColumn(          # soft mud over clay
+    layers=[uacpy.SedimentLayer(thickness=5.0, sound_speed=1500.0,
+                                density=1.2, attenuation=1.0),
+            uacpy.SedimentLayer(thickness=15.0, sound_speed=1550.0,
+                                density=1.4, attenuation=0.8)],
+    halfspace=uacpy.BoundaryProperties(acoustic_type='half-space',
+                                       sound_speed=1700.0, density=1.8,
+                                       attenuation=0.2))
+midshelf = uacpy.SeabedColumn(         # mixed sediment
+    layers=[uacpy.SedimentLayer(thickness=3.0, sound_speed=1580.0,
+                                density=1.5, attenuation=0.6),
+            uacpy.SedimentLayer(thickness=12.0, sound_speed=1650.0,
+                                density=1.7, attenuation=0.4)],
+    halfspace=uacpy.BoundaryProperties(acoustic_type='half-space',
+                                       sound_speed=1900.0, density=2.0,
+                                       attenuation=0.1))
+offshore = uacpy.SeabedColumn(         # hard sand over rock
+    layers=[uacpy.SedimentLayer(thickness=2.0, sound_speed=1700.0,
+                                density=1.9, attenuation=0.3),
+            uacpy.SedimentLayer(thickness=8.0, sound_speed=1850.0,
+                                density=2.1, attenuation=0.2)],
+    halfspace=uacpy.BoundaryProperties(acoustic_type='half-space',
+                                       sound_speed=2200.0, density=2.5,
+                                       attenuation=0.05))
 
-    # Method 2: With BOUNCE (accounts for shear)
-    print("\n--- Bellhop with BOUNCE reflection coefficients ---")
-    result_bounce = bellhop.run_with_bounce(
-        env, source, receiver,
-        run_mode=RunMode.COHERENT_TL,
-        c_low=1400.0, c_high=10000.0, rmax=10000.0,
-    )
+rd_layered = uacpy.Bottom.from_columns([inshore, midshelf, offshore],
+                                       ranges=np.array([0, 7500, 15000]))
+rdl_env = uacpy.Environment(
+    name='Shelf: mud/clay to sand/rock',
+    ssp=1500.0,
+    bathymetry=np.column_stack([[0.0, 7500.0, 15000.0],
+                                [120.0, 180.0, 280.0]]),
+    bottom=rd_layered,
+)
+rdl_tl = uacpy.RAM(accuracy=1e-1).run(
+    rdl_env,
+    uacpy.Source(frequencies=100.0, depths=30.0),
+    uacpy.Receiver(depths=np.linspace(5, 270, 30),
+                   ranges=np.linspace(100, 8000, 40)))
+print(f"  range-dependent LAYERED seabed: "
+      f"has_range_dependent_layered_bottom="
+      f"{rdl_env.has_range_dependent_layered_bottom}, up to "
+      f"{rd_layered.max_total_thickness():.1f} m of sediment; RAM TL "
+      f"{np.nanmin(rdl_tl.dB):.1f}-{np.nanmax(rdl_tl.dB):.1f} dB")
 
-    # Compare
-    tl_hs = result_hs.dB
-    tl_bn = result_bounce.dB
-    diff = tl_bn - tl_hs
-    print(f"\nHalf-space TL: {np.nanmin(tl_hs):.1f} to {np.nanmax(tl_hs):.1f} dB")
-    print(f"BOUNCE TL:     {np.nanmin(tl_bn):.1f} to {np.nanmax(tl_bn):.1f} dB")
-    print(f"Max |diff|:    {np.nanmax(np.abs(diff)):.1f} dB")
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-    vmin, vmax = 40, 90
-    plot_field(result_hs, env=env, ax=axes[0],
-                           show_colorbar=False, vmin=vmin, vmax=vmax)
-    axes[0].set_title('Native elastic half-space', fontsize=11, fontweight='bold')
-    plot_field(result_bounce, env=env, ax=axes[1],
-                           show_colorbar=False, vmin=vmin, vmax=vmax)
-    axes[1].set_title('BOUNCE (with shear)', fontsize=11, fontweight='bold')
-    axes[1].set_ylabel('')
-    _plot_tl_difference(result_bounce, result_hs, env, ax=axes[2],
-                       diff_vmax=10, show_colorbar=False)
-    axes[2].set_title('BOUNCE − half-space', fontsize=11, fontweight='bold')
-    axes[2].set_ylabel('')
-
-    fig.suptitle(f'Bellhop + BOUNCE: f={source.frequencies[0]:.0f} Hz, '
-                 f'elastic sandy bottom (cp={bottom.sound_speed}, '
-                 f'cs={bottom.shear_speed} m/s)',
-                 fontsize=12, fontweight='bold', y=0.995)
-    fig.subplots_adjust(left=0.05, right=0.91, top=0.86, bottom=0.13,
-                        wspace=0.18)
-    tl_im = axes[1].collections[0] if axes[1].collections else None
-    diff_im = axes[2].collections[0] if axes[2].collections else None
-    if tl_im is not None:
-        cax_tl = fig.add_axes([0.918, 0.13, 0.010, 0.36])
-        fig.colorbar(tl_im, cax=cax_tl, label='TL (dB)')
-    if diff_im is not None:
-        cax_dif = fig.add_axes([0.918, 0.51, 0.010, 0.35])
-        fig.colorbar(diff_im, cax=cax_dif, label='Δ TL (dB)')
-    fig.savefig(OUTPUT_DIR / 'example_16_bounce_comparison.png', dpi=150)
-    print(f"  ✓ Saved: {OUTPUT_DIR / 'example_16_bounce_comparison.png'}")
-
-    # Also plot TL with contours using the plot function
-    fig2, ax2 = plot_field(result_bounce, env=env, contours=[60, 70, 80])
-    ax2.set_title('Bellhop + BOUNCE TL with Contours')
-    plt.savefig(OUTPUT_DIR / 'example_16_bounce_tl.png', dpi=150, bbox_inches='tight')
-    print(f"  ✓ Saved: {OUTPUT_DIR / 'example_16_bounce_tl.png'}")
-
-    plt.close('all')
-
-
-def demo_layered_bottom():
-    """Part 2: Layered bottom with Scooter."""
-    print("\n" + "=" * 70)
-    print("PART 2: Layered Bottom (Multi-Layer Sediment) with Scooter")
-    print("=" * 70)
-
-    # Define sediment layers
-    layers = [
-        SedimentLayer(thickness=5.0, sound_speed=1550.0, density=1.5,
-                      attenuation=0.3, shear_speed=100.0),
-        SedimentLayer(thickness=10.0, sound_speed=1650.0, density=1.7,
-                      attenuation=0.5),
-        SedimentLayer(thickness=20.0, sound_speed=1800.0, density=2.0,
-                      attenuation=0.8, shear_speed=200.0, shear_attenuation=0.5),
-    ]
-
-    halfspace = BoundaryProperties(
-        acoustic_type='half-space',
-        sound_speed=2000.0, density=2.2, attenuation=0.1,
-    )
-
-    layered = SeabedColumn(layers=layers, halfspace=halfspace)
-    print(f"Total sediment thickness: {layered.total_thickness():.1f} m")
-
-    env = uacpy.Environment(
-        name='Continental Shelf - Layered Sediment',
-        bathymetry=200.0,
-        ssp=1500.0,
-        bottom=layered,
-    )
-    print(f"has_layered_bottom: {env.has_layered_bottom}")
-
-    source = uacpy.Source(frequencies=100.0, depths=50.0)
-    receiver = uacpy.Receiver(
-        depths=np.linspace(1, 199, 30),
-        ranges=np.linspace(100, 5000, 40),
-    )
-
-    # Run Scooter (supports layered via NMEDIA > 1, gives TL directly)
-    print("\n--- Running Scooter with layered bottom ---")
-    try:
-        scooter = Scooter(verbose=True)
-        result = scooter.compute_tl(env, source, receiver)
-        print(f"Scooter TL: {np.nanmin(result.dB):.1f} to {np.nanmax(result.dB):.1f} dB")
-
-        # Plot TL
-        fig1, ax1 = plot_field(result, env=env, contours=[70, 80, 90])
-        ax1.set_title('Scooter TL — Layered Sediment (3 layers + halfspace)')
-        plt.savefig(OUTPUT_DIR / 'example_16_layered_tl.png', dpi=150, bbox_inches='tight')
-        print(f"  ✓ Saved: {OUTPUT_DIR / 'example_16_layered_tl.png'}")
-    except Exception as e:
-        print(f"  Scooter error: {e}")
-        import traceback
-        traceback.print_exc()
-
-    # Plot the layer stack's geoacoustic properties (cp, cs, rho, alpha)
-    plot_bottom_properties(env)
-    plt.savefig(OUTPUT_DIR / 'example_16_layered_structure.png', dpi=150, bbox_inches='tight')
-    print(f"  ✓ Saved: {OUTPUT_DIR / 'example_16_layered_structure.png'}")
-
-    # Plot environment overview (water column + layer stack shaded by cp)
-    env.plot()
-    plt.savefig(OUTPUT_DIR / 'example_16_layered_env.png', dpi=150, bbox_inches='tight')
-    print(f"  ✓ Saved: {OUTPUT_DIR / 'example_16_layered_env.png'}")
-
-    plt.close('all')
-
-
-def demo_range_dependent_bottom():
-    """Part 3: Range-dependent bottom with RAM."""
-    print("\n" + "=" * 70)
-    print("PART 3: Range-Dependent Bottom Properties with RAM")
-    print("=" * 70)
-
-    # Create RD bottom: mud transitioning to sand over 15 km
-    bathymetry_rd = np.array([
-        [0, 150], [3000, 160], [6000, 180],
-        [9000, 200], [12000, 220], [15000, 250],
-    ])
-
-    bottom_rd = Bottom.from_halfspaces(bathymetry_rd[:, 0].astype(float),
-        sound_speed=np.array([1500, 1550, 1600, 1650, 1700, 1750]),
-        density=np.array([1.2, 1.4, 1.5, 1.7, 1.8, 2.0]),
-        attenuation=np.array([1.0, 0.8, 0.6, 0.5, 0.4, 0.3]),
-        shear_speed=np.zeros(6),
-        acoustic_type='half-space',
-    )
-
-    # 2D SSP (warm to cold transition)
-    depths_ssp = np.array([0, 25, 50, 100, 150, 200, 250])
-    ranges_ssp = np.array([0, 5, 10, 15])
-    ssp_2d = np.zeros((len(depths_ssp), len(ranges_ssp)))
-    # ranges_ssp is in km here (the front gradients below are per km); the
-    # Environment gets it in metres. c(T, z) is Medwin's equation truncated
-    # after the T^2 term, with salinity fixed at its S = 35 PSU reference.
-    for i, r in enumerate(ranges_ssp):
-        t_surf = 18 - r * 0.4
-        t_bot = 8 - r * 0.1
-        temp = t_bot + (t_surf - t_bot) * np.exp(-depths_ssp / 60)
-        ssp_2d[:, i] = 1449 + 4.6 * temp - 0.055 * temp**2 + 0.016 * depths_ssp
-
-    ssp_1d = np.column_stack([depths_ssp, ssp_2d[:, 0]])
-
-    env = uacpy.Environment(
-        name='Shelf Break: Mud to Sand',
-        ssp=SoundSpeedProfile.from_2d(depths=ssp_1d[:, 0], ranges=ranges_ssp * 1000.0, matrix=ssp_2d,
-                                      ),
-        bathymetry=bathymetry_rd,
-        bottom=bottom_rd,
-    )
-
-    source = uacpy.Source(frequencies=100.0, depths=30.0)
-    receiver = uacpy.Receiver(
-        depths=np.linspace(5, 240, 30),
-        ranges=np.linspace(100, 5000, 40),
-    )
-
-    # Run RAM with true RD bottom (via modified Fortran). A RAM failure
-    # propagates: this run is the part's subject, so there is nothing
-    # useful to show without it.
-    print("\n--- Running RAM with range-dependent bottom ---")
-    ram = RAM(verbose=True, accuracy=1e-1)
-    result = ram.run(env, source, receiver)
-    print(f"RAM TL: {np.nanmin(result.dB):.1f} to {np.nanmax(result.dB):.1f} dB")
-
-    fig1, ax1 = plot_field(result, env=env, contours=[70, 85, 100])
-    ax1.set_title('RAM TL — Range-Dependent Bottom (Mud to Sand)')
-    plt.savefig(OUTPUT_DIR / 'example_16_rd_bottom_tl.png', dpi=150, bbox_inches='tight')
-    print(f"  ✓ Saved: {OUTPUT_DIR / 'example_16_rd_bottom_tl.png'}")
-
-    # Plot RD bottom properties (one panel per geoacoustic property)
-    plot_bottom_properties(env)
-    plt.savefig(OUTPUT_DIR / 'example_16_rd_bottom_props.png', dpi=150, bbox_inches='tight')
-    print(f"  ✓ Saved: {OUTPUT_DIR / 'example_16_rd_bottom_props.png'}")
-
-    # Plot 2D SSP (one c(z) line per range column)
-    env.ssp.plot()
-    plt.savefig(OUTPUT_DIR / 'example_16_rd_ssp.png', dpi=150, bbox_inches='tight')
-    print(f"  ✓ Saved: {OUTPUT_DIR / 'example_16_rd_ssp.png'}")
-
-    # Plot full environment
-    env.plot()
-    plt.savefig(OUTPUT_DIR / 'example_16_rd_env.png', dpi=150, bbox_inches='tight')
-    print(f"  ✓ Saved: {OUTPUT_DIR / 'example_16_rd_env.png'}")
-
-    plt.close('all')
-
-
-def demo_rd_layered_bottom():
-    """Part 4: Range-dependent layered bottom with RAM."""
-    print("\n" + "=" * 70)
-    print("PART 4: Range-Dependent Layered Bottom (depth+range) with RAM")
-    print("=" * 70)
-
-    # Near-shore: soft mud over clay
-    near = SeabedColumn(
-        layers=[
-            SedimentLayer(thickness=5.0, sound_speed=1500.0, density=1.2,
-                          attenuation=1.0),
-            SedimentLayer(thickness=15.0, sound_speed=1550.0, density=1.4,
-                          attenuation=0.8),
-        ],
-        halfspace=BoundaryProperties(
-            acoustic_type='half-space',
-            sound_speed=1700.0, density=1.8, attenuation=0.2,
-        ),
-    )
-
-    # Mid-range: mixed sediment
-    mid = SeabedColumn(
-        layers=[
-            SedimentLayer(thickness=3.0, sound_speed=1580.0, density=1.5,
-                          attenuation=0.6),
-            SedimentLayer(thickness=12.0, sound_speed=1650.0, density=1.7,
-                          attenuation=0.4),
-        ],
-        halfspace=BoundaryProperties(
-            acoustic_type='half-space',
-            sound_speed=1900.0, density=2.0, attenuation=0.1,
-        ),
-    )
-
-    # Offshore: hard sand over rock
-    far = SeabedColumn(
-        layers=[
-            SedimentLayer(thickness=2.0, sound_speed=1700.0, density=1.9,
-                          attenuation=0.3),
-            SedimentLayer(thickness=8.0, sound_speed=1850.0, density=2.1,
-                          attenuation=0.2),
-        ],
-        halfspace=BoundaryProperties(
-            acoustic_type='half-space',
-            sound_speed=2200.0, density=2.5, attenuation=0.05,
-        ),
-    )
-
-    rdl = Bottom.from_columns([near, mid, far], ranges=np.array([0, 7500, 15000]))
-    rdl_bathymetry = np.column_stack([
-        np.array([0.0, 7500.0, 15000.0]),
-        np.array([120.0, 180.0, 280.0]),
-    ])
-
-    print(f"Max sediment thickness: {rdl.max_total_thickness():.1f} m")
-    print(f"Ranges: {rdl.ranges / 1000.0} km")
-    for i, lb in enumerate(rdl.columns):
-        print(f"  r={(rdl.ranges / 1000.0)[i]:.1f} km: {len(lb.layers)} layers, "
-              f"total {lb.total_thickness():.0f} m")
-
-    env = uacpy.Environment(
-        name='Shelf: Mud/Clay to Sand/Rock',
-        ssp=1500.0,
-        bathymetry=rdl_bathymetry,
-        bottom=rdl,
-    )
-
-    print(f"has_range_dependent_layered_bottom: "
-          f"{env.has_range_dependent_layered_bottom}")
-
-    source = uacpy.Source(frequencies=100.0, depths=30.0)
-    receiver = uacpy.Receiver(
-        depths=np.linspace(5, 270, 30),
-        ranges=np.linspace(100, 8000, 40),
-    )
-
-    # Run RAM (supports RD layered via Fortran sediment file). A RAM
-    # failure propagates: this run is the part's subject, so there is
-    # nothing useful to show without it.
-    print("\n--- Running RAM with range-dependent layered bottom ---")
-    ram = RAM(verbose=True, accuracy=1e-1)
-    result = ram.run(env, source, receiver)
-    print(f"RAM TL: {np.nanmin(result.dB):.1f} to "
-          f"{np.nanmax(result.dB):.1f} dB")
-
-    fig1, ax1 = plot_field(result, env=env, contours=[70, 85, 100])
-    ax1.set_title('RAM TL — Range-Dependent Layered Bottom')
-    plt.savefig(OUTPUT_DIR / 'example_16_rdl_tl.png', dpi=150,
-                bbox_inches='tight')
-    print(f"  ✓ Saved: {OUTPUT_DIR / 'example_16_rdl_tl.png'}")
-
-    # Plot the RD layered structure
-    fig2, axes2 = env.plot()
-    plt.savefig(OUTPUT_DIR / 'example_16_rdl_structure.png', dpi=150,
-                bbox_inches='tight')
-    print(f"  ✓ Saved: {OUTPUT_DIR / 'example_16_rdl_structure.png'}")
-
-    plt.close('all')
-
-
-def main():
-    print("\n" + "═" * 80)
-    print("EXAMPLE 16: Range/Depth-Dependent Features + Bellhop+BOUNCE")
-    print("═" * 80)
-
-    demo_bellhop_bounce()
-    demo_layered_bottom()
-    demo_range_dependent_bottom()
-    demo_rd_layered_bottom()
-
-    print("\nFeatures demonstrated:")
-    print("  - Bellhop.run_with_bounce() for elastic bottom")
-    print("  - SeabedColumn with Scooter (NMEDIA > 1)")
-    print("  - Range-dependent bottom (scalar) with RAM")
-    print("  - Range-dependent LAYERED bottom (depth+range) with RAM")
-    print("  - plot_field() with contours")
-    print("  - plot_bottom_properties() for the sediment layers' properties")
-    print("  - env.plot() for RD layered structure")
-    print("  - plot_bottom_properties() for the RD bottom")
-    print("  - env.ssp.plot() for the range-dependent SSP")
-    print("  - env.plot() for the full overview")
-
-    print("\n✓ Example 16 complete\n")
-    return 0
-
-
-if __name__ == '__main__':
-    sys.exit(main())
+fig, _ = uacpy.plot_field(rdl_tl, env=rdl_env, contours=[70, 85, 100],
+                          title='RAM TL — range-dependent layered bottom')
+fig.savefig(OUT / 'example_16_rdl_tl.png', dpi=150, bbox_inches='tight')
+plt.close(fig)
+fig, _ = rdl_env.plot()
+fig.savefig(OUT / 'example_16_rdl_structure.png', dpi=150, bbox_inches='tight')
+plt.close(fig)
