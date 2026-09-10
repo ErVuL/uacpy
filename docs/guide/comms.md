@@ -437,7 +437,8 @@ link = comms.simulate_link('qpsk', 16.0, 40000, channel=channel,
 `rx_symbols` and the equaliser's `mse`.
 
 **`Transmitter` / `CommsReceiver`** go all the way to real passband samples —
-what you would write to a `.wav` and play through a projector:
+what you write to a `.wav` with `uacpy.io.write_wav` and play through a
+projector:
 
 ```python
 code = comms.ConvCode(interleave_depth=16)
@@ -455,7 +456,11 @@ The preamble does double duty, as it does in every real underwater frame: it
 is the sync probe *and* the equaliser's training sequence. Both ends must
 agree on it — passing the same integer to both constructors generates the same
 pseudo-random sequence. [`example_32_realdata_modem.py`](../../uacpy/examples/example_32_realdata_modem.py)
-runs this end to end, text in and text out, through a `.wav` file.
+runs this end to end, text in and text out, through a `.wav` file written with
+[`uacpy.io.write_wav`](io.md#9-reference--the-whole-public-surface) — which
+defaults to 16-bit PCM normalised to full scale, the shape a player expects.
+Pass `encoding='float32'` instead when the samples are calibrated and the
+absolute level has to survive the file.
 
 ---
 
