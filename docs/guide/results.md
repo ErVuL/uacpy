@@ -270,6 +270,34 @@ surface — model, backend, frequencies, source depths, phase reference,
 `metadata` gets dropped, and `metadata` is where `kind` lives, so a tagged
 quantity silently becomes an untagged one.
 
+### The same move in the frequency domain — `remove_delay`
+
+Shifting a time axis by `-τ` and removing a delay `τ` from `H(f)` are one
+operation on two representations, so `remove_delay` is `shift`'s frequency-domain
+twin:
+
+```python
+H.remove_delay(seconds=tau)          # a delay you already know
+H.remove_delay(sound_speed=1500.0)   # take r/c from the field's own range
+```
+
+**There is no default τ.** The delay worth removing is the geometric travel time
+`r/c`, and a `Field` carries `r` but not `c` — the sound speed belongs to the
+Environment that produced it, and guessing 1500 m/s would be the package
+inventing a number you did not supply. Give it `sound_speed` and it does the
+division itself; on a field that still has a range axis, **each range is
+advanced by its own `r/c`** (the reduced-time convention).
+
+Why you need it: the phase of a delay wraps at `1/τ` in frequency, so on a grid
+of spacing `Δf` it is unambiguous only for `τ < 1/(2·Δf)`. A 3.3 s travel time
+on a 1 Hz grid is aliased beyond reading — and two models sampled on *different*
+grids alias differently and appear to disagree when they do not. Read the delay
+back off the unwrapped phase slope of one such field and the coarse grid says
++340 ms while a finer one says −60 ms, for a true 3340 ms; compensated, both say
+the 7 ms residual they can actually resolve. The magnitude is untouched
+throughout — it is a unit-modulus factor — so `|H|` and any TL from it are
+unchanged.
+
 `at` asked for 60 m and got 60.394 m, because that is where a receiver
 actually is. Nothing was interpolated and nothing was invented. Slicing
 composes, and `pinned` accumulates:

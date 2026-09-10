@@ -5205,3 +5205,150 @@ class TestFieldWindowAndShift:
 
         assert aligned.times.min() >= 0.0 and aligned.times.max() <= 0.3
         assert aligned.metadata['provenance'] == 'keep me'
+
+
+class TestFieldRemoveDelay:
+    """``remove_delay`` advances a transfer function: ``H(f)·exp(+2πi·f·τ)``.
+
+    The phase of a delay wraps at ``1/τ`` in frequency, so on a grid of spacing
+    ``Δf`` it is unambiguous only for ``τ < 1/(2·Δf)``. A long-range ``H(f)``
+    is therefore aliased beyond reading, and two models on *different* grids
+    alias differently and look like they disagree when they do not.
+    """
+
+    FREQUENCIES = np.linspace(50.0, 150.0, 101)
+    RANGES = np.array([2000.0, 5000.0])
+    SPEED = 1500.0
+
+    @classmethod
+    def _transfer_function(cls):
+        """A pure delay per range: |H| flat, phase entirely ``-2πf·r/c``."""
+        from uacpy.core.results import Field
+        delay = cls.RANGES[:, None] / cls.SPEED
+        data = 0.5 * np.exp(-2j * np.pi * cls.FREQUENCIES[None, :] * delay)
+        return Field(data=data.reshape(1, cls.RANGES.size, -1),
+                     coords={'depth': np.array([50.0]), 'range': cls.RANGES,
+                             'frequency': cls.FREQUENCIES},
+                     model='probe', backend='synthetic',
+                     metadata={'kind': 'pressure', 'provenance': 'keep me'})
+
+    def test_removing_the_exact_delay_flattens_the_phase(self):
+        one_range = self._transfer_function().at(range=5000.0)
+
+        flattened = one_range.remove_delay(seconds=5000.0 / self.SPEED)
+        assert np.max(np.abs(np.angle(flattened.data))) < 1e-9
+
+    def test_sound_speed_takes_the_delay_from_the_fields_own_range(self):
+        """There is no default tau: r/c is the delay worth removing, and a
+        Field carries r but not c."""
+        one_range = self._transfer_function().at(range=5000.0)
+
+        assert np.allclose(one_range.remove_delay(sound_speed=self.SPEED).data,
+                           one_range.remove_delay(seconds=5000.0 / self.SPEED).data)
+
+    def test_each_range_is_advanced_by_its_own_travel_time(self):
+        """The reduced-time convention: on a field that still has a range axis,
+        every trace lines up on its own geometric arrival, so one scalar delay
+        would be wrong for all but one range."""
+        compensated = self._transfer_function().remove_delay(
+            sound_speed=self.SPEED)
+
+        assert np.max(np.abs(np.angle(compensated.data))) < 1e-9
+
+    def test_the_magnitude_is_untouched(self):
+        """A unit-modulus factor, so |H| and any TL from it are unchanged."""
+        field = self._transfer_function()
+
+        assert np.allclose(np.abs(field.remove_delay(sound_speed=self.SPEED).data),
+                           np.abs(field.data))
+
+    def test_a_negative_delay_adds_one_back(self):
+        field = self._transfer_function()
+        tau = 5000.0 / self.SPEED
+
+        there_and_back = field.remove_delay(tau).remove_delay(-tau)
+        assert np.allclose(there_and_back.data, field.data)
+
+    def test_it_carries_the_whole_identity_surface(self):
+        field = self._transfer_function().remove_delay(sound_speed=self.SPEED)
+
+        assert field.model == 'probe' and field.backend == 'synthetic'
+        assert field.metadata['provenance'] == 'keep me'
+
+    def test_it_works_on_a_pinned_frequency(self):
+        """``at(frequency=…)`` collapses the axis but keeps the value, so the
+        operation is still well defined — a constant phase."""
+        one_cell = self._transfer_function().at(range=5000.0, frequency=100.0)
+
+        moved = one_cell.remove_delay(sound_speed=self.SPEED)
+        assert abs(float(np.angle(np.ravel(moved.data)[0]))) < 1e-9
+
+    @pytest.mark.parametrize('kwargs,match', [
+        ({}, 'exactly one of'),
+        ({'seconds': 1.0, 'sound_speed': 1500.0}, 'exactly one of'),
+        ({'seconds': np.inf}, 'not finite'),
+        ({'sound_speed': 0.0}, 'not a positive, finite speed'),
+        ({'sound_speed': -1500.0}, 'not a positive, finite speed'),
+    ])
+    def test_rejected_arguments(self, kwargs, match):
+        with pytest.raises(ConfigurationError, match=match):
+            self._transfer_function().remove_delay(**kwargs)
+
+    def test_a_time_domain_field_is_pointed_at_shift(self):
+        """The two are the same operation on the two representations, so the
+        error names the one that applies."""
+        from uacpy.core.results import Field
+        trace = Field(data=np.ones((1, 3), dtype=complex),
+                      coords={'depth': np.array([5.0]),
+                              'time': np.arange(3.0)})
+
+        with pytest.raises(ConfigurationError, match='shift\\(time='):
+            trace.remove_delay(seconds=1.0)
+
+    def test_real_data_has_no_phase_to_move(self):
+        with pytest.raises(ConfigurationError, match='carries no'):
+            self._transfer_function().to_dB().remove_delay(seconds=1.0)
+
+    def test_a_field_without_a_range_cannot_infer_the_delay(self):
+        from uacpy.core.results import Field
+        no_range = Field(data=np.ones((1, 3), dtype=complex),
+                         coords={'depth': np.array([5.0]),
+                                 'frequency': np.arange(1.0, 4.0)})
+
+        with pytest.raises(ConfigurationError, match='no range to take'):
+            no_range.remove_delay(sound_speed=1500.0)
+
+    def test_two_grids_agree_on_the_residual_once_the_bulk_delay_is_gone(self):
+        """The reason the method exists.
+
+        Read the delay back off the unwrapped phase slope. Raw, the two grids
+        report wildly different delays for the SAME field — +340 ms and −60 ms
+        for a true 3340 ms — because each aliases the bulk delay its own way.
+        Compensated, both report the 7 ms residual they can actually resolve.
+        """
+        from uacpy.core.results import Field
+        residual = 0.007
+        total = 5000.0 / self.SPEED + residual
+
+        def build(n_points):
+            grid = np.linspace(50.0, 150.0, n_points)
+            return Field(
+                data=np.exp(-2j * np.pi * grid * total).reshape(1, 1, -1),
+                coords={'depth': np.array([50.0]),
+                        'range': np.array([5000.0]), 'frequency': grid})
+
+        def implied_delay(field):
+            grid = np.asarray(field.coords['frequency'], dtype=float)
+            phase = np.unwrap(np.angle(np.ravel(field.data)))
+            return -np.polyfit(grid, phase, 1)[0] / (2 * np.pi)
+
+        coarse, fine = build(101), build(171)      # 1.0 Hz and 0.585 Hz
+        raw = [implied_delay(f) for f in (coarse, fine)]
+        fixed = [implied_delay(f.remove_delay(sound_speed=self.SPEED))
+                 for f in (coarse, fine)]
+
+        # Both halves matter: without the first, this would pass on a method
+        # that did nothing at all.
+        assert abs(raw[0] - raw[1]) > 0.1, (
+            raw, "the two grids alias alike here, so this pins nothing")
+        assert all(abs(tau - residual) < 1e-6 for tau in fixed), fixed

@@ -1240,7 +1240,11 @@ drops the samples outside an inclusive label range and **keeps** the axis
 (`None` for either end leaves it alone; a window that keeps nothing raises),
 and `.shift(time=delta)` translates a coordinate without touching the data.
 Together they put several models on one display axis — move an IFFT model's
-emission to `t=0`, then cut every trace to the same window.
+emission to `t=0`, then cut every trace to the same window. `.remove_delay(seconds=)` /
+`.remove_delay(sound_speed=)` is the frequency-domain twin: it advances `H(f)`
+by a delay you name, or by `r/c` taken from the field's own range (per range if
+the axis survives). There is no default — a `Field` carries `r` but not `c`. The
+magnitude is untouched.
 
 `at` / `isel` is the **grid-library convention** shared across the whole API
 (`at` = nearest, `isel` = positional): `Field`, `ResultStack`,

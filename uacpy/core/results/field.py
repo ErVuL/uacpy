@@ -695,6 +695,135 @@ class Field(Result):
         return Field(data=self.data, coords=coords, pinned=dict(self.pinned),
                      **self.id_kwargs())
 
+    def remove_delay(self, seconds: Optional[float] = None, *,
+                     sound_speed: Optional[float] = None) -> "Field":
+        """Advance a transfer function: ``H(f) · exp(+2πi·f·τ)``.
+
+        The frequency-domain counterpart of :meth:`shift` — shifting a time
+        axis by ``-τ`` and removing a delay ``τ`` from ``H(f)`` are the same
+        operation on the two representations.
+
+        Give **either** ``seconds`` (a signed delay; negative *adds* delay) or
+        ``sound_speed``, which takes the delay from this field's own range as
+        ``r/c``. There is no default: ``r/c`` is the delay worth removing, and
+        a Field carries ``r`` but not ``c`` — the sound speed belongs to the
+        Environment that produced it, and guessing 1500 m/s would be the
+        package inventing a number the caller did not supply.
+
+        With ``sound_speed`` on a field that still has a range axis, **each
+        range is advanced by its own** ``r/c`` — the reduced-time convention,
+        which lines every trace up on its geometric arrival. On a single range
+        (sliced, or pinned by :meth:`at`) that is just the one delay.
+
+        Why it matters: the phase of a delay wraps at ``1/τ`` in frequency, so
+        on a grid of spacing ``Δf`` it is unambiguous only for
+        ``τ < 1/(2·Δf)``. A 3.3 s travel time on a 1 Hz grid is aliased beyond
+        reading, and two models sampled on *different* grids alias differently
+        and appear to disagree when they do not. Removing the bulk delay leaves
+        the multipath residual, which the grid does resolve.
+
+        The magnitude is untouched — this multiplies by a unit-modulus factor —
+        so ``|H|`` and any TL derived from it are unchanged.
+
+        Parameters
+        ----------
+        seconds : float, optional
+            Delay to remove, signed. Mutually exclusive with ``sound_speed``.
+        sound_speed : float, optional
+            Reference speed in m/s; the delay becomes ``r/c`` from this field's
+            own range. Mutually exclusive with ``seconds``.
+
+        Returns
+        -------
+        Field
+            Same coords and identity; only the phase moves.
+
+        Raises
+        ------
+        ConfigurationError
+            Neither or both arguments, no ``frequency`` axis (a time-domain
+            field wants :meth:`shift`), real data (no phase to move), no range
+            to take ``r/c`` from, or a non-finite / non-positive value.
+
+        Examples
+        --------
+        >>> import numpy as np
+        >>> from uacpy.core.results import Field
+        >>> f = np.array([100.0, 200.0])
+        >>> H = Field(data=np.exp(-2j * np.pi * f * 0.01).reshape(1, 1, 2),
+        ...           coords={'depth': np.array([50.0]),
+        ...                   'range': np.array([15.0]), 'frequency': f})
+        >>> np.round(np.angle(H.remove_delay(0.01).data).ravel(), 6)
+        array([0., 0.])
+
+        The same thing from the geometry, since 15 m at 1500 m/s is 0.01 s:
+
+        >>> np.round(np.angle(H.remove_delay(sound_speed=1500.0).data).ravel(), 6)
+        array([0., 0.])
+        """
+        if (seconds is None) == (sound_speed is None):
+            raise ConfigurationError(
+                "Field.remove_delay: give exactly one of seconds= or "
+                "sound_speed=.",
+                remediation="seconds= removes a delay you already know; "
+                            "sound_speed= takes it from this field's range as "
+                            "r/c.")
+        if not self.is_complex:
+            raise ConfigurationError(
+                "Field.remove_delay: the data is real, so it carries no "
+                "phase to move.",
+                remediation="Apply it to the complex pressure or transfer "
+                            "function, before to_dB() throws the phase away.")
+
+        def _broadcast(name, values):
+            """``values`` shaped to broadcast along this field's ``name`` axis."""
+            shape = [1] * self.data.ndim
+            shape[list(self.coords).index(name)] = np.size(values)
+            return np.asarray(values, dtype=float).reshape(shape)
+
+        if 'frequency' in self.coords:
+            hertz = _broadcast('frequency', self.coords['frequency'])
+        elif 'frequency' in self.pinned:
+            # Collapsed by at(frequency=…); the value survives in pinned, so
+            # the operation is still well defined — a constant phase.
+            hertz = float(self.pinned['frequency'])
+        else:
+            raise ConfigurationError(
+                f"Field.remove_delay: no frequency axis; this field is over "
+                f"{list(self.coords)}.",
+                remediation="A delay lives in the phase of H(f). For a "
+                            "time-domain field, move its axis instead: "
+                            "shift(time=-seconds).")
+
+        if seconds is not None:
+            delay = float(seconds)
+            if not np.isfinite(delay):
+                raise ConfigurationError(
+                    f"Field.remove_delay: seconds={seconds!r} is not finite.",
+                    remediation="Pass the delay to remove in seconds, usually "
+                                "the geometric travel time r/c.")
+        else:
+            speed = float(sound_speed)
+            if not np.isfinite(speed) or speed <= 0:
+                raise ConfigurationError(
+                    f"Field.remove_delay: sound_speed={sound_speed!r} is not a "
+                    f"positive, finite speed.",
+                    remediation="Pass the reference speed in m/s, e.g. the "
+                                "water column's own c.")
+            if 'range' in self.coords:
+                delay = _broadcast('range', self.coords['range']) / speed
+            elif 'range' in self.pinned:
+                delay = float(self.pinned['range']) / speed
+            else:
+                raise ConfigurationError(
+                    f"Field.remove_delay: no range to take r/c from; this "
+                    f"field is over {list(self.coords)}.",
+                    remediation="Pass the delay directly with seconds=.")
+
+        return Field(data=self.data * np.exp(2j * np.pi * hertz * delay),
+                     coords=dict(self.coords), pinned=dict(self.pinned),
+                     **self.id_kwargs())
+
     def eval(self, **kwargs) -> "Field":
         """Interpolated slice — the interpolating counterpart of :meth:`at`.
 
