@@ -448,6 +448,38 @@ _EXPECTED_ROUGH_BOTTOM = {
 }
 
 
+# Whether the engine honours ``env.absorption``. One flag, mirroring
+# ``_consumes_volume_absorption``: a second one would differ only on Bounce,
+# and False is the honest answer there -- it tabulates R(theta) AT an
+# interface, so there is no range over which volume loss accumulates.
+_VOLUME_ATTENUATION = {
+    'Bellhop': True,    # alpha_dB_per_m, carried in the imaginary travel time
+    'Kraken': True,     # TopOpt position 4
+    'Scooter': True,    # TopOpt position 4
+    'SPARC': True,      # TopOpt position 4
+    'Bounce': False,    # a reflection table has no path length
+    'RAM': False,       # ksqw carries no attn term in any backend
+    'OAST': False,      # substitutes its own law, oaseun31.f:1516-1521
+    'OASN': False,
+    'OASP': False,
+    'OASR': False,
+}
+
+
+@pytest.mark.parametrize('model_name', _MODEL_PARAMS)
+def test_volume_attenuation_capability_matrix(model_name):
+    """Whether ``env.absorption`` reaches the engine, asked of the public API.
+
+    RAM is the case this exists for: no backend puts loss in the water --
+    ``matrc`` assigns ``ksq(i)=ksqw(i)`` above the bathymetry with no branch
+    and ``ksqw`` carries no attenuation term -- so a caller has to be able to
+    find that out without reading Fortran.
+    """
+    model = _EXPECTED[model_name][0]()
+    assert model.supports_feature('volume_attenuation') is \
+        _VOLUME_ATTENUATION[model_name], model_name
+
+
 @pytest.mark.parametrize('model_name', _MODEL_PARAMS)
 def test_rough_bottom_capability_matrix(model_name):
     """Only solvers whose deck reaches a slot the binary reads may declare it.

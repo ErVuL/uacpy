@@ -280,6 +280,13 @@ _CAPABILITY_FLAGS: frozenset = frozenset({
     'source_beam_pattern',
     'rough_surface',
     'rough_bottom',
+    # Declarative ONLY: unlike every other flag this one drives no branch in
+    # ``_project_environment`` -- ``env.absorption`` passes through untouched
+    # -- and it is NOT read from ``spec.supports``. It mirrors the existing
+    # ``_consumes_volume_absorption`` class attribute so there is one source
+    # of truth for "does this engine honour env.absorption", the question RAM
+    # answers no to in every backend.
+    'volume_attenuation',
 })
 
 
@@ -836,6 +843,9 @@ class PropagationModel(ABC):
         # (Kraken/Scattering.f90:8, Kraken/kraken.f90:902); Bellhop's solver
         # ignores the value and RAM's PE format has nowhere to put it.
         self._supports_rough_bottom: bool = False
+        # Mirrors the class attribute; see _CAPABILITY_FLAGS.
+        self._supports_volume_attenuation: bool = \
+            self._consumes_volume_absorption
         self._supported_source_types: frozenset = frozenset({'point'})
 
         # When the subclass declares a ModelSpec, apply it now (after the
@@ -890,7 +900,14 @@ class PropagationModel(ABC):
         spec = self.spec
         if spec.modes:
             self._supported_modes = list(spec.modes)
-        for flag in _CAPABILITY_FLAGS:
+        if 'volume_attenuation' in spec.supports:
+            raise ConfigurationError(
+                f"{self.model_name}.spec.supports must not list "
+                f"'volume_attenuation': it mirrors the class attribute "
+                f"_consumes_volume_absorption, so declaring it here would "
+                f"give the same question two answers."
+            )
+        for flag in _CAPABILITY_FLAGS - {'volume_attenuation'}:
             setattr(self, f'_supports_{flag}', flag in spec.supports)
         self._supported_source_types = frozenset(spec.source_types)
         if spec.collapse:

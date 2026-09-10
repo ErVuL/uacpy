@@ -251,6 +251,7 @@ def _plot_arrivals(
     # linear axis the baseline is zero and nothing is ever hidden.
     floor = 0.0
     under = 0
+    drawn_ms = []
     if dB and levels is not None:
         # Convert to 20·log10 and put the floor ``range_dB`` under the peak.
         # A level is the negative of a transmission loss, so this is the
@@ -274,6 +275,7 @@ def _plot_arrivals(
             # level it does not have, on a stem with no length left to read.
             under += 1
             continue
+        drawn_ms.append(d_ms)
         ax.vlines(d_ms, floor, level, colors=col, lw=1.5, alpha=0.85)
         ax.plot(d_ms, level, 'o', color=col, markersize=4,
                 markeredgecolor='black', markeredgewidth=0.4)
@@ -288,6 +290,16 @@ def _plot_arrivals(
         first = min(delays_ms)
         support_ms = arrivals.energy_support() * 1000.0
         span = support_ms if support_ms > 0 else (max(delays_ms) - first)
+        if dB and drawn_ms:
+            # The energy support collapses when two near-simultaneous
+            # arrivals hold all of it: a direct path and its own bottom
+            # bounce 0.5 us apart leave a 0.0005 ms axis, and every later
+            # arrival falls off the end of a plot that had room for it. The
+            # dB view already knows which arrivals cleared the floor, so the
+            # axis reaches the last one it actually drew. The linear view
+            # keeps the pure energy rule: it has no floor, so it has no such
+            # set to span.
+            span = max(span, max(drawn_ms) - first)
         lo = first - 0.05 * (span or 1)
         hi = first + span + 0.05 * (span or 1)
         ax.set_xlim(lo, hi)

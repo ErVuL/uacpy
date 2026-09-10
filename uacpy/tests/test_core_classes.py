@@ -3305,6 +3305,54 @@ class TestRaysFilterAndSortHelpers:
         return Rays(rays=[ray(1.0, 47.0), ray(2.0, 60.0), ray(3.0, 80.0)],
                     model='Bellhop', frequencies=100.0, **kwargs)
 
+    def _bracketed(self, **kwargs):
+        """Two bracketing rays per path, as hat beams actually report them.
+
+        Bellhop writes BOTH rays of the ray tube enclosing the receiver, so a
+        dense fan reports one path once per beam. Here each path appears
+        twice, with one member nearer the target than the other.
+        """
+        from uacpy.core.results import Rays
+
+        def ray(alpha, z_end, top, bot):
+            return {'r': np.array([0.0, 500.0, 1000.0]),
+                    'z': np.array([10.0, 30.0, z_end]),
+                    'alpha': alpha, 'n_top_bounces': top, 'n_bot_bounces': bot}
+        return Rays(rays=[ray(-71.53, 51.0, 1, 0),    # far  member of the pair
+                          ray(-71.52, 50.2, 1, 0),    # near member
+                          ray(-71.54, 50.5, 1, 1),    # a different path, down
+                          ray(+71.54, 50.4, 1, 1)],   # and its mirror, up
+                    is_eigen=True, model='Bellhop', frequencies=100.0,
+                    receiver_ranges=np.array([1000.0]),
+                    receiver_depths=np.array([50.0]), **kwargs)
+
+    def test_distinct_paths_keeps_the_nearer_ray_of_each_bracketing_pair(self):
+        kept = self._bracketed().distinct_paths()
+        # Three paths from four rays: (1,0,down) was reported twice.
+        assert len(kept.rays) == 3
+        pair = [r for r in kept.rays
+                if (r['n_top_bounces'], r['n_bot_bounces']) == (1, 0)]
+        assert len(pair) == 1
+        assert pair[0]['alpha'] == pytest.approx(-71.52)   # the nearer one
+
+    def test_distinct_paths_keeps_both_directions_of_one_bounce_pattern(self):
+        """A path launched up and its mirror launched down are two paths, not
+        one: they have different lengths and different phase."""
+        kept = self._bracketed().distinct_paths()
+        alphas = sorted(r['alpha'] for r in kept.rays
+                        if (r['n_top_bounces'], r['n_bot_bounces']) == (1, 1))
+        assert alphas == pytest.approx([-71.54, 71.54])
+
+    def test_distinct_paths_preserves_the_eigenray_flag(self):
+        assert self._bracketed().distinct_paths().is_eigen is True
+
+    def test_distinct_paths_refuses_a_ray_fan(self):
+        """A fan's rays are samples of a continuum, not paths: grouping them
+        by bounce count would collapse the picture to a handful of rays."""
+        fan = self._bracketed(); fan.is_eigen = False
+        with pytest.raises(ConfigurationError, match="eigenray"):
+            fan.distinct_paths()
+
     def test_filter_by_miss_distance_keeps_and_annotates(self):
         kept = self._fan().filter_by_miss_distance(
             5.0, target_range_m=1000.0, target_depth_m=50.0)

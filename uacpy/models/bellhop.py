@@ -457,6 +457,15 @@ def _fan_miss_count_and_worst(zs, zr, rr, fan_lo, fan_hi):
     return n_out, worst
 
 
+#: Above this launch angle, widening the fan stops being the remedy for a
+#: receiver it cannot reach: 90 deg is a vertical ray, so the un-reachable
+#: near-field cone shrinks with every extra tenth of a degree but never
+#: closes. Below it the fan is the fix — the docstring of
+#: ``_warn_if_fan_misses_receivers`` measures 25.05 dB of error at +/-80 deg
+#: on a geometry needing 82.9 deg.
+_FAN_WIDENING_CEILING = 85.0
+
+
 class Bellhop(PropagationModel):
     """
     Bellhop Gaussian beam/ray tracing model
@@ -1302,6 +1311,40 @@ class Bellhop(PropagationModel):
             n_out, worst = _fan_miss_count_and_worst(
                 zs, zr, rr, fan_lo, fan_hi)
             n_pairs = zs.size * zr.size * rr.size
+        # The remedy is DERIVED, not a constant: a fixed suggestion is the
+        # fan already in use for anyone running near-vertical, and is
+        # narrower than it for alpha beyond +/-89.9 (which is accepted).
+        # Which remedy applies is decided by the FAN's width, not by the
+        # angle needed: a narrow fan has room to widen whatever the geometry
+        # asks for, while one already near vertical does not.
+        needed = abs(worst)
+        limit = max(abs(fan_lo), abs(fan_hi))
+        dz = max(abs(float(zr.max()) - float(zs.min())),
+                 abs(float(zr.min()) - float(zs.max())))
+        cone = dz / np.tan(np.radians(limit)) if 0.0 < limit < 90.0 else 0.0
+        blind = (f"a blind cone of range < {cone:.2f} m (= {dz:g} m of depth "
+                 f"offset / tan {limit:g} deg)")
+        if limit >= _FAN_WIDENING_CEILING:
+            # Widening chases an asymptote: 90 deg is a vertical ray, so the
+            # cone shrinks with every extra tenth of a degree but never
+            # closes. Only the receiver ranges close it.
+            remedy = (
+                f"alpha already spans {limit:g} deg and 90 deg is a vertical "
+                f"ray, so widening it chases an asymptote. These pairs lie "
+                f"inside {blind}; start the receiver ranges beyond it if the "
+                f"near field matters."
+            )
+        else:
+            # Margin past the angle needed, because proximity to the edge
+            # costs level too — 76 deg against an 80 deg edge is 3.71 dB, see
+            # the method docstring.
+            wider = min(max(needed, limit) + 5.0, 89.9)
+            remedy = (f"Widen alpha (e.g. alpha=(-{wider:g}, {wider:g})) if "
+                      f"the near field matters.")
+            if needed >= _FAN_WIDENING_CEILING:
+                remedy += (f" That leaves {blind} whatever the fan, since "
+                           f"90 deg is a vertical ray; start the receiver "
+                           f"ranges beyond it to close it entirely.")
         warnings.warn(
             f"{self.model_name}: {n_out} of {n_pairs} "
             f"source/receiver pairs need a direct-path launch angle outside "
@@ -1310,9 +1353,7 @@ class Bellhop(PropagationModel):
             f"fan and bellhop.f90:252-258 only checks the beam count, so"
             f" those "
             f"receivers lose their direct path with no diagnostic from the "
-            f"binary. Widen alpha (e.g. alpha=(-89.9, 89.9)) if the near"
-            f" field "
-            f"matters.",
+            f"binary. {remedy}",
             UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
 
     def _reject_precalc_boundary(self, env) -> None:

@@ -2929,13 +2929,14 @@ def test_arrivals_left_off_the_axis_are_declared():
     plt.close(fig)
 
 
-def _arrivals_at_levels(amplitudes):
+def _arrivals_at_levels(amplitudes, delays=None):
     """Arrivals carrying no volume absorption, so the received level IS the
     amplitude column and a test can name a dB level directly."""
     amplitudes = np.asarray(amplitudes, dtype=float)
     n = amplitudes.size
     cell = {
-        "delays": np.linspace(1.0, 1.0 + 0.001 * n, n),
+        "delays": (np.linspace(1.0, 1.0 + 0.001 * n, n) if delays is None
+                   else np.asarray(delays, dtype=float)),
         "amplitudes": amplitudes,
         "phases": np.zeros(n),
         "n_top_bounces": np.zeros(n, int),
@@ -3042,6 +3043,23 @@ def test_a_non_positive_dynamic_range_is_rejected():
             arr.plot(dB=True, dynamic_range=bad)
     assert not plt.get_fignums()
     fig, _ax = arr.plot(dB=True, dynamic_range=1e-6)
+    plt.close(fig)
+
+
+def test_the_dB_delay_axis_spans_the_arrivals_it_drew():
+    """A direct path and its bottom bounce half a microsecond apart hold
+    all the energy, so the energy support collapses to 0.0005 ms and an
+    axis built from it hides every later arrival off the end. The dB view
+    knows which arrivals it drew; the axis has to reach them."""
+    arr = _arrivals_at_levels([1.0, 0.9, 0.02, 0.005],
+                              delays=[0.6664580, 0.6664585, 2.0910809, 2.0923464])
+    assert arr.energy_support() * 1e3 < 0.01, "fixture must collapse the support"
+    fig, ax = arr.plot(dB=True, dynamic_range=60.0)
+    drawn = [ln.get_xdata()[0] for ln in ax.lines if ln.get_marker() == 'o']
+    assert len(drawn) == 4, drawn
+    lo, hi = ax.get_xlim()
+    assert hi >= max(drawn), f"axis ends at {hi:.3f} ms, last stem at {max(drawn):.3f}"
+    assert lo <= min(drawn)
     plt.close(fig)
 
 

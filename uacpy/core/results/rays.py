@@ -816,7 +816,18 @@ class Rays(Result):
         self,
         n: int = 10
     ) -> 'Rays':
-        """Keep only the first ``n`` rays."""
+        """Keep only the first ``n`` rays, in the order currently held.
+
+        Meaningful after a sort: ``sorted_by_miss(...).filter_nfirst(n)`` is
+        the ``n`` closest rays, which is what :meth:`top_n_by_miss` wraps.
+
+        On an untouched fan the order is launch angle, so this keeps one EDGE
+        of the fan rather than a spread across it — measured, 41 rays of a
+        5001-ray ±76.6° fan span 1.2°, which plots as a narrow beam aimed one
+        way rather than as the fan. For a slice of the fan use
+        :meth:`filter_by_launch_angle`; for the ``n`` nearest a receiver,
+        :meth:`top_n_by_miss`.
+        """
         return self._spawn(self.rays[:n])
 
     def _miss_distance_to(
@@ -868,6 +879,59 @@ class Rays(Result):
         j = int(np.argmin(distances))
         nearest_vertex = j + 1 if (u[j] > 0.5 and j + 1 < r.size) else j
         return float(distances[j]), nearest_vertex
+
+    def distinct_paths(
+        self,
+        target_range_m: Optional[float] = None,
+        target_depth_m: Optional[float] = None,
+    ) -> 'Rays':
+        """One ray per physical path: the closest-approaching of each.
+
+        Bellhop writes BOTH bracketing rays of the ray tube that encloses the
+        receiver — "arrivals come in pairs, corresponding to a ray tube that
+        encloses the receiver" (Bellhop User Guide, eigenray section) — so a
+        dense fan reports one path once per beam. On a 1 km near-bottom link
+        at 40 kHz a 2.56M-beam fan returns 40 rays for 20 paths, never more
+        than 2 per path. Bellhop already combines such pairs for the ARRIVALS
+        list; the ray output deliberately keeps both, because a picture wants
+        the tube while a count wants the path.
+
+        A path is keyed by its bounce counts and the direction it left the
+        source: over a flat seabed those identify it, and the four members of
+        one surface order — ``(n, n-1, down)``, ``(n, n, down)``,
+        ``(n, n, up)``, ``(n, n+1, up)`` — differ only by whether a 1 m detour
+        to the bed happens at each end. The survivor of each group is the ray
+        passing closest to the target, so the kept geometry is the best the
+        fan resolved.
+
+        ``target_range_m`` / ``target_depth_m`` default to the single-point
+        receiver this ``Rays`` was built for, as in :meth:`sorted_by_miss`.
+
+        Raises
+        ------
+        ConfigurationError
+            For a ray fan (``is_eigen`` false). A fan's rays are samples of a
+            continuum rather than paths that reach a receiver, so grouping
+            them by bounce count would collapse the picture to a handful of
+            rays; use :meth:`filter_by_launch_angle` to subset one instead.
+        """
+        if not self.is_eigen:
+            raise ConfigurationError(
+                "Rays.distinct_paths: this Rays is a ray fan, not an "
+                "eigenray set — its rays sample a continuum rather than "
+                "reaching the receiver, so there are no paths to collapse "
+                "to. Run RunMode.EIGENRAYS, or subset the fan with "
+                "filter_by_launch_angle."
+            )
+        seen = set()
+        kept = []
+        for ray in self.sorted_by_miss(target_range_m, target_depth_m).rays:
+            key = (ray['n_top_bounces'], ray['n_bot_bounces'],
+                   ray['alpha'] >= 0.0)
+            if key not in seen:
+                seen.add(key)
+                kept.append(ray)
+        return self._spawn(kept)
 
     def _resolve_target(
         self,

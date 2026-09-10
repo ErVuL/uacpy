@@ -12,6 +12,7 @@ install to be present.
 import os
 import warnings
 
+import re
 import pytest
 import numpy as np
 
@@ -2747,6 +2748,41 @@ class TestBellhopReportsAFanThatCannotReachAReceiver:
         Bellhop(alpha=alpha, verbose=False)._warn_if_fan_misses_receivers(
             Source(depths=10.0, frequencies=2000.0),
             Receiver(depths=[90.0], ranges=ranges))
+
+    def test_the_suggested_fan_covers_the_angle_actually_needed(self):
+        """The advice was a hardcoded ``alpha=(-89.9, 89.9)`` whatever the fan
+        or the geometry. It has to be derived from the angle needed, and must
+        never be NARROWER than the fan already in use."""
+        with pytest.warns(UserWarning, match='launch angle outside') as rec:
+            self._check([10.0], alpha=(-80.0, 80.0))
+        msg = str(rec[0].message)
+        assert 'Widen alpha' in msg, msg
+        nums = [float(x) for x in re.findall(r'alpha=\(-([0-9.]+)', msg)]
+        assert nums and nums[0] >= 82.9, msg      # covers atan2(80, 10)
+        assert nums[0] > 80.0, msg                # wider than what is in use
+
+    def test_a_narrow_fan_is_told_to_widen_even_when_the_need_is_vertical(self):
+        """The branch must key on the FAN's width, not on the angle needed. A
+        +/-80 deg fan has room to widen whatever the geometry asks for; only a
+        fan already near vertical does not. Both parts of the advice apply
+        here: widening recovers most of these pairs, and a residual blind cone
+        remains because 90 deg is a vertical ray."""
+        with pytest.warns(UserWarning, match='launch angle outside') as rec:
+            self._check([0.05], alpha=(-80.0, 80.0))
+        msg = str(rec[0].message)
+        assert 'Widen alpha' in msg, msg
+        assert 'blind cone' in msg, msg
+
+    def test_a_fan_already_at_the_vertical_limit_is_not_told_to_widen(self):
+        """A fan of +/-89.95 deg is a hair off vertical, so widening chases an
+        asymptote: the blind cone shrinks but never closes. The reachable
+        remedy is the receiver range -- here r < 80/tan(89.95) = 0.07 m."""
+        with pytest.warns(UserWarning, match='launch angle outside') as rec:
+            self._check([0.05], alpha=(-89.95, 89.95))
+        msg = str(rec[0].message)
+        assert 'Widen alpha' not in msg, msg
+        assert 'range' in msg.lower(), msg
+        assert '0.07' in msg, msg
 
     def test_a_receiver_needing_a_steeper_launch_is_reported(self):
         # atan2(90 - 10, 10) = 82.9 deg, past the +/-80 deg default.
