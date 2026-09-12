@@ -410,6 +410,11 @@ def _plot_environment(
         if float(r_km[-1]) < x_max_km:
             r_km = np.append(r_km, x_max_km)
             seafloor = np.append(seafloor, seafloor[-1])
+        # And the first value constant back to the source at r = 0, where the
+        # panel starts whatever range the profile's first node sits at.
+        if float(r_km[0]) > 0.0:
+            r_km = np.insert(r_km, 0, 0.0)
+            seafloor = np.insert(seafloor, 0, seafloor[0])
     else:
         r_km = np.array([0.0, x_max_km])
         seafloor = np.array([env.depth, env.depth])
@@ -570,10 +575,11 @@ def _plot_environment(
         ax_bathy.axhline(env.depth, **BOTTOM_LINE_STYLE_FLAT, zorder=10)
 
     # Source / receiver markers on the bottom panel, drawn after the x limit
-    # is set so the source star at the left limit can widen it.
+    # is set so the source star at the left limit can widen it. The source
+    # sits at r = 0, where every cross-section on this surface draws it.
     ax_bathy.set_xlim(*x_range)
     _draw_geometry(ax_bathy, source, receiver, max_markersize=5,
-                   source_range_m=km_to_m(x_range[0]))
+                   source_range_m=0.0)
     # Tight ylim — surface to a small margin past the deepest seafloor, but
     # never above what the bottom branch actually painted. Every branch
     # returns ``z_max_layer``, the floor of its own rendering (layer stack +

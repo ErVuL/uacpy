@@ -438,10 +438,10 @@ class Environment(_DeepCopyMixin):
         than one node on a ranged axis, identical or not).
 
         Altimetry is not consulted: a non-flat sea surface varies with range
-        by nature, but it is boundary geometry that Bellhop — the only model
-        reading altimetry — traces directly from its ``.ati`` file, so it
-        never triggers the segmented-profile machinery this flag selects for
-        the four carriers above."""
+        by nature, but it is boundary geometry that the models reading it
+        take directly (Bellhop from its ``.ati`` file, RAM's ramsurf backend
+        from its surface block), so it never triggers the segmented-profile
+        machinery this flag selects for the four carriers above."""
         return (
             self.has_range_dependent_bathymetry
             or self.ssp.is_range_dependent

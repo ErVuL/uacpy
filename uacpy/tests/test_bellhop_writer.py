@@ -74,8 +74,10 @@ def test_flat_bathy_rd_bottom_writes_long_bty(tmp_path):
 
 
 def test_long_bty_preserves_interior_property_breaks(tmp_path):
-    # 2-point bathymetry (0, 20 km) + property breaks at 8 and 16 km: the
-    # .bty must carry the union of the grids, not blend the interior away.
+    # 2-point bathymetry (0, 20 km) + columns at 0, 8 and 16 km: the .bty
+    # carries a row at each switch (midway between columns, 4 and 12 km)
+    # holding the column to its right, so the interior steps are not lost
+    # between the two bathymetry points.
     bathy = [(0.0, 200.0), (20000.0, 200.0)]
     env = uacpy.Environment(
         bathymetry=bathy, ssp=1500.0,
@@ -86,9 +88,10 @@ def test_long_bty_preserves_interior_property_breaks(tmp_path):
             path.with_suffix('.bty').read_text().splitlines()[2:] if ln.strip()]
     ranges_km = [float(r[0]) for r in rows]
     cp_by_range = {float(r[0]): float(r[2]) for r in rows}
-    assert 8.0 in ranges_km and 16.0 in ranges_km
-    assert cp_by_range[8.0] == pytest.approx(1550.0)
-    assert cp_by_range[16.0] == pytest.approx(2000.0)
+    assert ranges_km == [0.0, 4.0, 12.0, 20.0]
+    assert cp_by_range[0.0] == pytest.approx(1800.0)
+    assert cp_by_range[4.0] == pytest.approx(1550.0)
+    assert cp_by_range[12.0] == pytest.approx(2000.0)
 
 
 def test_single_sample_altimetry_writes_ati(tmp_path):
@@ -351,19 +354,19 @@ class TestBoundaryFilesRespectTheirOwnKmColumn:
 
 
 class TestTheLongFormatChecksTheAxisItWrites:
-    """``write_bty_long_format`` writes the UNION of the bathymetry and
-    range-dependent-bottom range axes, not the bathymetry axis alone.
+    """``write_bty_long_format`` writes the UNION of the bathymetry axis, the
+    bottom's first node and the switches between its columns, not the
+    bathymetry axis alone — and checks the axis it writes.
 
     Each carrier enforces its own 1 mm minimum step within itself
     (``Bottom.__post_init__``, ``_grid.py``), but nothing enforces one across
     them, and ``np.union1d`` de-dupes by exact float equality — so the same
     physical range arrived at by different arithmetic survives twice and both
-    copies print one ``%.6f`` km token. Measured with bathymetry ranges
-    ``np.cumsum(np.full(16, 333.3))`` against bottom ranges
-    ``np.arange(1, 17) * 333.3`` — the same 16 ranges, differing by at most
-    9.1e-13 m — the union is 23 rows carrying 7 duplicated tokens, after which
-    ``bdryMod.f90:230`` -> ``monotonicMod.f90:32`` aborts "not monotonically
-    increasing" and ``FatalError.f90`` STOPs at exit 0, leaving no ``.shd``.
+    copies print one ``%.6f`` km token, after which ``bdryMod.f90:230`` ->
+    ``monotonicMod.f90:32`` aborts "not monotonically increasing" and
+    ``FatalError.f90`` STOPs at exit 0, leaving no ``.shd``. The bottom's
+    first node is written as the user gave it; a switch the writer derives
+    within 1 mm of an existing row is dropped instead.
     """
 
     @staticmethod
@@ -372,15 +375,19 @@ class TestTheLongFormatChecksTheAxisItWrites:
         from uacpy.core.bottom import Bottom
         bathy = Bathymetry(ranges=np.cumsum(np.full(16, 333.3)),
                            depths=np.linspace(200.0, 120.0, 16))
+        n = len(bottom_ranges)
         bottom = Bottom.from_halfspaces(
-            bottom_ranges, sound_speed=np.full(16, 1700.0),
-            density=np.full(16, 1.8), attenuation=np.full(16, 0.5))
+            bottom_ranges, sound_speed=np.full(n, 1700.0),
+            density=np.full(n, 1.8), attenuation=np.full(n, 0.5))
         return bathy, bottom
 
     def test_axes_that_collide_only_after_the_union_are_refused(self,
                                                                 tmp_path):
         from uacpy.io.bathy_io import write_bty_long_format
-        bathy, bottom = self._carriers(np.arange(1, 17) * 333.3)
+        # The bottom's first node, 6 * 333.3, is the sixth bathymetry node
+        # arrived at by a different sum: equal at six decimals, unequal as
+        # floats (2.3e-13 m apart), so the union writes the token twice.
+        bathy, bottom = self._carriers(np.arange(6, 17) * 333.3)
         with pytest.raises(ConfigurationError, match='merged range axis'):
             write_bty_long_format(tmp_path / 'bad.bty', bathy, bottom)
 
@@ -390,7 +397,8 @@ class TestTheLongFormatChecksTheAxisItWrites:
         write_bty_long_format(tmp_path / 'ok.bty', bathy, bottom)
         rows = [ln for ln in (tmp_path / 'ok.bty').read_text().splitlines()
                 if ln.strip()]
-        assert len(rows) == 18          # type + count + 16 range rows
+        # type + count + 16 bathymetry rows + 15 switches between the columns
+        assert len(rows) == 2 + 16 + 15
 
 
 class TestTheOptionLetterAndTheAuxiliaryFileAreDecidedTogether:
@@ -535,30 +543,48 @@ class TestTheWriterRefusesASingleBeamForInfluenceRuns:
         assert (tmp_path / 'w.env').exists()
 
 
-class TestALongFormatBtySamplesARampFinelyEnoughForBellhop:
-    """Bellhop applies each ``.bty`` row's geoacoustics to the whole segment to
-    its right (``bdryMod.f90``, ``Bot(IsegBot)%HS``), so a property ramp given
-    by two range nodes has to be written as many rows or the engine sees a
-    constant seabed."""
+class TestALongFormatBtyWritesTheNearestColumnStep:
+    """A range-dependent half-space is a step function of range: each column
+    holds up to the midpoint with its neighbour (``Bottom.halfspace_at``,
+    nearest). Bellhop applies a ``.bty`` row's geoacoustics to the whole
+    segment to its right (``bellhop.f90:478``), so the writer puts one row at
+    every switch, carrying the column to the right of it, and no other row
+    beyond the bathymetry nodes."""
 
     @staticmethod
-    def _ramp_bottom(n_nodes):
+    def _two_column_bottom():
         from uacpy import Bottom
-        r = np.linspace(0.0, 5000.0, n_nodes)
-        return r, Bottom.from_halfspaces(
-            r, sound_speed=1600.0 + 200.0 * r / 5000.0,
-            density=np.full(n_nodes, 1.8), attenuation=np.full(n_nodes, 0.5))
+        return Bottom.from_halfspaces(
+            [0.0, 5000.0], sound_speed=[1600.0, 1800.0],
+            density=[1.5, 1.9], attenuation=[0.3, 0.5])
 
-    def test_a_two_node_ramp_writes_rows_that_follow_the_ramp(self, tmp_path):
-        from uacpy.io.bathy_io import write_bty_long_format, _BTY_RAMP_ROWS
-        r, bottom = self._ramp_bottom(2)
-        out = tmp_path / 'ramp.bty'
-        write_bty_long_format(out, np.array([[0.0, 100.0], [5000.0, 100.0]]), bottom)
+    def test_two_columns_switch_at_the_midpoint_row(self, tmp_path):
+        from uacpy.io.bathy_io import write_bty_long_format
+        out = tmp_path / 'step.bty'
+        write_bty_long_format(out, np.array([[0.0, 100.0], [5000.0, 100.0]]),
+                              self._two_column_bottom())
         rows = np.loadtxt(out, skiprows=2)
-        assert rows.shape[0] >= _BTY_RAMP_ROWS
-        cp_expected = 1600.0 + 200.0 * rows[:, 0] * 1000.0 / 5000.0
-        assert np.abs(rows[:, 2] - cp_expected).max() < 1e-3
-        assert np.all(np.diff(rows[:, 0]) > 0)
+        # Union of the bathymetry nodes and the one switch: no fill rows.
+        assert np.allclose(rows[:, 0], [0.0, 2.5, 5.0])
+        assert int(out.read_text().splitlines()[1]) == 3
+        # Column 1 up to the 2.5 km row, column 2 from it.
+        assert np.allclose(rows[:, 2], [1600.0, 1800.0, 1800.0])
+        assert np.allclose(rows[:, 4], [1.5, 1.9, 1.9])
+        assert np.allclose(rows[:, 5], [0.3, 0.5, 0.5])
+
+    def test_a_bathymetry_node_between_the_columns_carries_its_own_side(
+            self, tmp_path):
+        from uacpy.io.bathy_io import write_bty_long_format
+        out = tmp_path / 'step.bty'
+        write_bty_long_format(
+            out, np.array([[0.0, 100.0], [2000.0, 110.0], [3000.0, 120.0],
+                           [5000.0, 100.0]]),
+            self._two_column_bottom())
+        rows = np.loadtxt(out, skiprows=2)
+        assert np.allclose(rows[:, 0], [0.0, 2.0, 2.5, 3.0, 5.0])
+        # Depth ramps between its nodes (Bellhop's 'L'); the seabed steps.
+        assert np.allclose(rows[:, 1], [100.0, 110.0, 115.0, 120.0, 100.0])
+        assert np.allclose(rows[:, 2], [1600.0, 1600.0, 1800.0, 1800.0, 1800.0])
 
     def test_range_independent_geoacoustics_keep_the_union_rows_only(self, tmp_path):
         from uacpy import Bottom
@@ -571,19 +597,38 @@ class TestALongFormatBtySamplesARampFinelyEnoughForBellhop:
         assert np.loadtxt(out, skiprows=2).shape[0] == 3
 
     @pytest.mark.requires_binary
-    def test_bellhop_tl_over_a_two_node_ramp_matches_a_finely_sampled_one(self, tmp_path):
-        from uacpy import Environment, Source, Receiver, Bellhop, RunMode
+    def test_bellhop_and_ram_agree_on_the_step_as_they_do_on_a_flat_seabed(
+            self, tmp_path):
+        """Both engines place the switch midway between the two columns: the
+        Bellhop-vs-RAM spread on the step is no wider than the spread the
+        same two engines show on a range-INDEPENDENT seabed of the same
+        case, measured here rather than remembered."""
+        from uacpy import (Environment, Source, Receiver, Bellhop, RAM,
+                           RunMode, Bottom)
 
-        def tl(n_nodes, tag):
-            r, bottom = self._ramp_bottom(n_nodes)
-            env = Environment(bathymetry=np.column_stack([r, np.full_like(r, 100.0)]),
-                              ssp=1500.0, bottom=bottom)
-            model = Bellhop(n_beams=200, beam_type='B', work_dir=tmp_path / tag)
-            field = model.run(env, Source(depths=[30.0], frequencies=300.0),
-                              Receiver(depths=[50.0], ranges=[1000.0, 2000.0, 3000.0, 4000.0, 4800.0]),
-                              RunMode.COHERENT_TL)
-            return np.asarray(field.dB).ravel()
+        receivers = Receiver(depths=[50.0],
+                             ranges=[1000.0, 1500.0, 2000.0,
+                                     3000.0, 3500.0, 4000.0])
+        source = Source(depths=[30.0], frequencies=300.0)
+        bathy = np.array([[0.0, 100.0], [5000.0, 100.0]])
 
-        diff = tl(2, 'two') - tl(101, 'fine')
-        assert np.sqrt(np.mean(diff ** 2)) < 1.5
-        assert np.abs(diff).max() < 3.0
+        def spread(bottom, tag):
+            env = Environment(bathymetry=bathy, ssp=1500.0, bottom=bottom)
+            tl = []
+            for model in (Bellhop(n_beams=400, beam_type='B',
+                                  work_dir=tmp_path / f'{tag}-bh'),
+                          RAM(verbose=False, work_dir=tmp_path / f'{tag}-ram')):
+                field = model.run(env, source, receivers, RunMode.COHERENT_TL)
+                tl.append(np.asarray(field.dB).ravel())
+            diff = tl[0] - tl[1]
+            return float(np.sqrt(np.mean(diff ** 2))), float(np.abs(diff).max())
+
+        flat = Bottom.from_halfspaces(
+            [0.0, 5000.0], sound_speed=[1600.0, 1600.0],
+            density=[1.5, 1.5], attenuation=[0.3, 0.3])
+        rms_flat, max_flat = spread(flat, 'flat')
+        rms_step, max_step = spread(self._two_column_bottom(), 'step')
+        # Cross-engine tolerance is what the flat case measures, with a
+        # 2 dB allowance for the ray/PE treatment of the switch itself.
+        assert rms_step <= rms_flat + 2.0, (rms_step, rms_flat)
+        assert max_step <= max_flat + 3.0, (max_step, max_flat)

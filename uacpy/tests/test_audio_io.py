@@ -6,6 +6,7 @@ independent parsers, so a header built by hand here cannot pass by agreeing
 only with itself; the third pins the round trip callers actually make.
 """
 
+import struct
 import wave
 import warnings
 
@@ -272,3 +273,50 @@ def test_an_odd_length_chunk_does_not_desynchronise_the_walk(tmp_path):
     recovered, rate = read_wav(tmp_path / 'odd.wav')
     assert rate == FS and recovered.size == 960
     assert read_wav_metadata(tmp_path / 'odd.wav') == {'title': 'abcd'}
+
+
+def _riff(fmt_payload, data_payload):
+    """A RIFF/WAVE file from raw ``fmt `` and ``data`` payloads."""
+    def chunk(cid, payload):
+        return cid + struct.pack('<I', len(payload)) + payload + (
+            b'\x00' if len(payload) % 2 else b'')
+    body = b'WAVE' + chunk(b'fmt ', fmt_payload) + chunk(b'data', data_payload)
+    return b'RIFF' + struct.pack('<I', len(body)) + body
+
+
+_PCM16_MONO_FMT = struct.pack('<HHIIHH', 1, 1, 8000, 16000, 2, 16)
+
+
+def test_a_sixteen_byte_fmt_chunk_is_the_shortest_that_reads(tmp_path):
+    (tmp_path / 'ok.wav').write_bytes(
+        _riff(_PCM16_MONO_FMT, struct.pack('<hh', 1000, -1000)))
+    samples, rate = read_wav(tmp_path / 'ok.wav')
+    assert rate == 8000.0 and samples.shape == (2,)
+
+
+@pytest.mark.parametrize('n_bytes', [15, 12, 6, 0])
+def test_a_truncated_fmt_chunk_raises_the_typed_error(tmp_path, n_bytes):
+    (tmp_path / 'short.wav').write_bytes(
+        _riff(_PCM16_MONO_FMT[:n_bytes], struct.pack('<hh', 1000, -1000)))
+    with pytest.raises(ConfigurationError, match='fmt'):
+        read_wav(tmp_path / 'short.wav')
+
+
+@pytest.mark.parametrize('n_channels, n_bytes', [
+    (1, 3),    # one and a half 16-bit samples
+    (2, 6),    # three samples: whole samples, but not whole stereo frames
+])
+def test_a_data_chunk_that_is_not_whole_frames_raises_the_typed_error(
+        tmp_path, n_channels, n_bytes):
+    fmt = struct.pack('<HHIIHH', 1, n_channels, 8000, 16000 * n_channels,
+                      2 * n_channels, 16)
+    (tmp_path / 'ragged.wav').write_bytes(_riff(fmt, b'\x01' * n_bytes))
+    with pytest.raises(ConfigurationError, match='data chunk'):
+        read_wav(tmp_path / 'ragged.wav')
+
+
+def test_a_data_chunk_of_whole_frames_reads(tmp_path):
+    fmt = struct.pack('<HHIIHH', 1, 2, 8000, 32000, 4, 16)
+    (tmp_path / 'frames.wav').write_bytes(_riff(fmt, b'\x01' * 8))
+    samples, _rate = read_wav(tmp_path / 'frames.wav')
+    assert samples.shape == (2, 2)

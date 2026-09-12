@@ -466,3 +466,11 @@ def test_the_environment_provenance_carries_the_seaice_vintage(tmp_path,
     monkeypatch.setattr(seaice_local, '_pyproj_transformer',
                         lambda epsg, **kw: _FakeTF(0.0, 0.0))
     assert _climatology_vintage('seaice') == '2019-2023 (climatology)'
+
+
+def test_sea_ice_grid_names_the_bad_month_before_the_bad_hemisphere(monkeypatch):
+    monkeypatch.setattr(seaice_local, '_model', lambda: pytest.fail('no grid load'))
+    with pytest.raises(ConfigurationError, match='month=13'):
+        seaice_local.sea_ice_grid(13, hemi='X')
+    with pytest.raises(ConfigurationError, match="hemi must be 'N'/'S'"):
+        seaice_local.sea_ice_grid(3, hemi='X')

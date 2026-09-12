@@ -19,7 +19,7 @@ import numpy as np
 import uacpy
 from uacpy.models import Bellhop
 from uacpy import Field
-from uacpy.core.results import Rays, Arrivals
+from uacpy.core.results import Rays, Arrivals, ResultStack
 from uacpy.models.base import RunMode
 from uacpy.models.bellhop import (_RAY_VALIDITY_D_OVER_LAMBDA,
                                   _WARNED_RAY_VALIDITY)
@@ -3504,3 +3504,134 @@ class TestTheFanMissCheckFollowsThePairedGrid:
         said = self._check('I', [85.0, 90.0], [10.0, 500.0])
         assert len(said) == 1
         assert '1 of 2 source/receiver pairs' in said[0], said[0]
+
+
+def _layered_bottom_env(name='layered'):
+    """5 m of silt over a sand half-space: a layer stack the single-halfspace
+    ``.env`` cannot carry, so ``run`` auto-routes through BOUNCE."""
+    from uacpy.core.bottom import Bottom
+    return Environment(
+        name=name, bathymetry=100.0, ssp=1500.0,
+        bottom=Bottom.from_presets([('silt', 5.0)], halfspace='sand'))
+
+
+class TestBounceTableRidesOnEveryStackSlab:
+    """A multi-depth Source stacks the ``.shd`` into a ``ResultStack`` whose
+    ``metadata`` is a copy of slab 0's dict, so the in-memory BOUNCE table the
+    constructor promises on ``result.metadata['bounce_result']`` has to sit on
+    each slab — and it is one table, since BOUNCE reads no source depth."""
+
+    def test_multi_depth_tl_stack_carries_the_table_on_each_slab(self):
+        rcv = Receiver(depths=[30.0], ranges=[500.0])
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            result = Bellhop(verbose=False, beam_type='G').run(
+                _layered_bottom_env(), Source(depths=[10.0, 20.0],
+                                              frequencies=500.0),
+                rcv, run_mode=RunMode.COHERENT_TL)
+        assert isinstance(result, ResultStack)
+        assert 'bounce_result' in result.metadata
+        tables = [slab.metadata.get('bounce_result') for slab in result.slabs]
+        assert all(t is tables[0] and t is not None for t in tables), tables
+        # The table is propagated to the receiver's own range.
+        assert tables[0].metadata['rmax'] == pytest.approx(rcv.range_max)
+
+
+class TestEigenraysMultiDepthRoutesThroughBounceOnce:
+    """The BOUNCE table depends on the bottom column and frequency only, so a
+    multi-depth EIGENRAYS run on a layered bottom computes it once — as RAYS
+    does — before the per-depth ``.ray`` loop, not once per depth."""
+
+    def test_three_source_depths_run_bounce_once_and_warn_once(self, monkeypatch):
+        from uacpy.models import bounce as bounce_mod
+        calls = []
+        original_run = bounce_mod.Bounce.run
+
+        def counting_run(self_, *args, **kwargs):
+            calls.append(1)
+            return original_run(self_, *args, **kwargs)
+
+        monkeypatch.setattr(bounce_mod.Bounce, 'run', counting_run)
+        with warnings.catch_warnings(record=True) as rec:
+            warnings.simplefilter('always')
+            result = Bellhop(verbose=False, beam_type='G').run(
+                _layered_bottom_env('eig'),
+                Source(depths=[10.0, 20.0, 30.0], frequencies=500.0),
+                Receiver(depths=[50.0], ranges=[500.0]),
+                run_mode=RunMode.EIGENRAYS)
+        routed = [w for w in rec
+                  if 'auto-routing through BOUNCE' in str(w.message)]
+        assert isinstance(result, ResultStack) and len(result) == 3
+        assert len(calls) == 1, f"Bounce.run called {len(calls)} times"
+        assert len(routed) == 1, [str(w.message) for w in routed]
+
+
+class TestAllZeroReceiverRangesResolveTheBounceRangeByFallback:
+    """``rmax`` for the spawned Bounce is left to ``Bounce.run``, whose own
+    rule reads ``receiver.range_max`` and falls back to 10 km when every
+    receiver sits at r = 0 — so the hidden BOUNCE pass cannot fail on an
+    input Bellhop itself accepts (its ``r_box`` uses the same fallback)."""
+
+    def test_zero_range_rays_on_a_layered_bottom_uses_the_10_km_fallback(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            result = Bellhop(verbose=False).run(
+                _layered_bottom_env('r0'),
+                Source(depths=25.0, frequencies=500.0),
+                Receiver(depths=[50.0], ranges=[0.0]),
+                run_mode=RunMode.RAYS)
+        assert isinstance(result, Rays)
+        assert result.metadata['bounce_result'].metadata['rmax'] == \
+            pytest.approx(10000.0)
+
+
+class TestPairedGridReceiversBelowTheSeafloorAreNoData:
+    """BELLHOP clamps a receiver below the deck bottom onto it
+    (``misc/SourceReceiverPositions.f90:136-139``), and a receiver just under
+    a shoaling ``.bty`` still collects a finite Gaussian-beam tail from the
+    rays skimming the seafloor; both cells are no-data and come back NaN
+    under the requested depth, on the paired ``grid_type='I'`` grid exactly as
+    on the rectilinear one. Pair ``i`` is ``(depths[i], ranges[i])``."""
+
+    _SRC = Source(depths=25.0, frequencies=500.0)
+
+    @staticmethod
+    def _run(env, rcv, run_mode, **kwargs):
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            return Bellhop(verbose=False, beam_type='G', grid_type='I').run(
+                env, TestPairedGridReceiversBelowTheSeafloorAreNoData._SRC,
+                rcv, run_mode=run_mode, **kwargs)
+
+    def test_tl_cell_below_the_deck_bottom_is_nan_under_its_own_depth(self):
+        env = Environment(name='flat', bathymetry=100.0, ssp=1500.0)
+        rcv = Receiver(depths=[30.0, 120.0], ranges=[500.0, 1000.0])
+        result = self._run(env, rcv, RunMode.COHERENT_TL)
+        assert list(result.coords) == ['range']
+        tl = np.asarray(result.dB, dtype=float)
+        assert np.isfinite(tl[0]) and np.isnan(tl[1]), tl
+        np.testing.assert_allclose(result.metadata['receiver_depths'],
+                                   [30.0, 120.0])
+
+    def test_tl_cell_below_a_shoaling_seafloor_is_nan(self):
+        env = Environment(name='shoal', ssp=1500.0,
+                          bathymetry=[(0.0, 100.0), (1000.0, 100.0),
+                                      (2000.0, 40.0)])
+        # (50 m, 500 m) sits in 100 m of water; (55 m, 1800 m) is 3 m under
+        # the 52 m seafloor there — inside the beam tails, so the engine
+        # alone returns a finite level — and above the 100 m deck bottom.
+        rcv = Receiver(depths=[50.0, 55.0], ranges=[500.0, 1800.0])
+        result = self._run(env, rcv, RunMode.COHERENT_TL)
+        tl = np.asarray(result.dB, dtype=float)
+        assert np.isfinite(tl[0]) and np.isnan(tl[1]), tl
+
+    def test_broadband_cell_below_the_deck_bottom_is_nan(self):
+        env = Environment(name='flat', bathymetry=100.0, ssp=1500.0)
+        rcv = Receiver(depths=[30.0, 120.0], ranges=[500.0, 1000.0])
+        result = self._run(env, rcv, RunMode.BROADBAND,
+                           frequencies=np.array([450.0, 500.0]))
+        assert list(result.coords) == ['range', 'frequency']
+        assert np.isfinite(result.data[0]).all()
+        assert np.isnan(result.data[1]).all()
+        np.testing.assert_allclose(result.metadata['receiver_depths'],
+                                   [30.0, 120.0])

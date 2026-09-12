@@ -24,7 +24,8 @@ def _complex_to_dB(data: np.ndarray) -> np.ndarray:
 
 
 class PhaseReference(str, Enum):
-    """Phase convention of a complex transfer function ``H(f)``.
+    """Phase convention of a complex transfer function ``H(f)`` or of a
+    reflection coefficient ``R(θ)``'s phase.
 
     Every uacpy wrapper normalises its native phase convention before
     storing data on a broadband :class:`Field`; downstream consumers
@@ -39,7 +40,10 @@ class PhaseReference(str, Enum):
         ``H(f)`` carries the engineering propagator ``exp(-i k0 r)``;
         ``2*Re[ifft(H)]`` lands the causal arrival at ``t = r/c0``.
         Used by Bellhop, Scooter, OASES OAST/OASP, Kraken, and RAM
-        (mpiramS / Collins backends bake the carrier into the data).
+        (mpiramS / Collins backends bake the carrier into the data). Also
+        the sign of :class:`~uacpy.core.results.ReflectionCoefficient`'s
+        ``phi`` (Bounce, OASR): positive below the critical angle on a
+        lossy fluid half-space.
     TIME_DOMAIN_NATIVE
         The payload is ``p(t)``, or is the transform of one, so there is
         no travelling-wave carrier left to interpret. Two producers tag
@@ -161,6 +165,10 @@ _DOCUMENTED_METADATA: Dict[Tuple[str, str], Tuple[type, str]] = {
     ('Kraken', 'n_profiles'): (
         int, 'Number of modal segments used for the range-dependent '
         'field path.'
+    ),
+    ('Kraken', 'modes_backend'): (
+        str, "Modes binary that produced the field: 'kraken' or 'krakenc' "
+        "(``backend`` names the field binary, 'field')."
     ),
     ('Kraken', 'native_broadband'): (
         bool, 'True when Kraken produced H(f) natively from a '
@@ -381,6 +389,10 @@ _DOCUMENTED_METADATA: Dict[Tuple[str, str], Tuple[type, str]] = {
     ('OASR', 'sampling_type'): (
         str, "How the angle/slowness axis was sampled by OASR "
         "('angle' or 'slowness')."
+    ),
+    ('OASR', 'angle_type'): (
+        str, "How the requested angles were read ('grazing' or 'incidence'); "
+        "``theta`` on the result is always grazing."
     ),
     ('OASR', 'reflection_type'): (
         str, "Which reflection coefficient OASR returned: 'P-P' (default), "

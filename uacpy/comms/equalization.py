@@ -86,6 +86,16 @@ def lms_equalizer(rx, constellation, n_taps=11, step=0.01, train=None):
 
     Trains on ``train`` symbols while available, then switches to
     decision-directed mode. ``constellation`` is the (Gray-mapped) symbol set.
+
+    Alignment: the taps start as a centre spike at index ``n_taps // 2``, so
+    the output at step ``k`` estimates the symbol received ``n_taps // 2``
+    samples earlier. ``train`` must therefore be the transmitted symbols
+    delayed by ``n_taps // 2`` (zero-padded in front), and ``eq_symbols``
+    lags ``rx`` by the same amount: ``eq_symbols[n_taps // 2:]`` lines up
+    with the transmitted sequence. :func:`~uacpy.comms.link.simulate_link`
+    applies both. An undelayed ``train`` sets LMS chasing a target one
+    spike-width away (measured with LMS on 16-QAM: 1e-2 BER on a noiseless
+    identity channel; QPSK hides it because its decisions ignore amplitude).
     """
     return _dfe_core(rx, constellation, n_taps, 0, step, None, 0.0, train)
 
@@ -96,6 +106,12 @@ def rls_equalizer(rx, constellation, n_taps=11, forget=0.99, train=None):
     Istepanian & Stojanovic put RLS convergence at ~``2N`` symbol intervals
     against LMS's ~``20N``, for ``N`` the total adaptive coefficient count, at
     higher per-symbol cost. Returns ``(eq_symbols, mse)``.
+
+    Same alignment as :func:`lms_equalizer`: delay ``train`` by
+    ``n_taps // 2`` and read ``eq_symbols[n_taps // 2:]``. RLS re-learns a
+    causal filter within a few symbols on a minimum-phase channel, so an
+    undelayed ``train`` is usually recovered, but the delayed form is the
+    contract.
     """
     return _dfe_core(rx, constellation, n_taps, 0, 0.0, forget, 0.0, train)
 
@@ -128,8 +144,20 @@ class DFE:
         self.forget = forget
         self.pll_bandwidth = float(pll_bandwidth)
 
+    @property
+    def output_delay(self) -> int:
+        """Symbols by which :meth:`equalize`'s output lags ``rx``:
+        ``n_ff // 2``, the centre-spike tap index. Delay ``train`` by this
+        many symbols and read ``eq_symbols[output_delay:]``."""
+        return self.n_ff // 2
+
     def equalize(self, rx, constellation, train=None):
-        """Equalize ``rx`` (symbol-spaced). Returns ``(eq_symbols, mse)``."""
+        """Equalize ``rx`` (symbol-spaced). Returns ``(eq_symbols, mse)``.
+
+        ``train`` must be the transmitted symbols delayed by
+        :attr:`output_delay` (zero-padded in front); the output lags ``rx``
+        by the same amount, so ``eq_symbols[output_delay:]`` lines up with
+        the transmitted sequence (see :func:`lms_equalizer`)."""
         return _dfe_core(rx, constellation, self.n_ff, self.n_fb, self.step,
                          self.forget, self.pll_bandwidth, train)
 

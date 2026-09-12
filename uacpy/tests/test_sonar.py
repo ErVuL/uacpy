@@ -2061,3 +2061,39 @@ class TestScalarSonarEquationNamesItsFieldTwin:
     def test_a_plain_array_reaches_the_scalar_function(self):
         out = sonar.passive_signal_excess(180.0, np.full((5, 7), 60.0), 60.0)
         assert np.asarray(out).shape == (5, 7)
+
+
+class TestScalarBudgetsRefuseAFieldWithUsableAdvice:
+    """The scalar sonar-equation functions take dB arrays. Handed a pressure
+    Field they name the ``*_field`` twin and the one array form that is a
+    TL: ``.dB`` is a property, and ``.data`` is complex pressure, so neither
+    ``.dB()`` nor ``.data`` may be advised."""
+
+    @staticmethod
+    def _pressure_field():
+        from uacpy.core.results import Field
+        tl_dB = np.array([[67.0, 50.0]])
+        return Field(
+            data=(10.0 ** (-tl_dB / 20.0)).astype(complex),
+            coords={'depth': np.array([10.0]),
+                    'range': np.array([1000.0, 2000.0])},
+            model='Test', frequencies=100.0)
+
+    @pytest.mark.parametrize('fn, twin', [
+        (sonar.passive_signal_excess, 'passive_signal_excess_field'),
+    ])
+    def test_the_advice_names_the_twin_and_the_dB_property(self, fn, twin):
+        f = self._pressure_field()
+        with pytest.raises(ConfigurationError) as info:
+            fn(160.0, f, 60.0, 0.0)
+        text = str(info.value)
+        assert twin in text
+        assert 'tl.dB' in text
+        assert '.dB()' not in text
+        assert '.data' not in text
+
+    def test_following_the_advice_gives_the_level_budget(self):
+        f = self._pressure_field()
+        se = sonar.passive_signal_excess(160.0, np.asarray(f.dB, float),
+                                         60.0, 0.0)
+        np.testing.assert_allclose(se, [[33.0, 50.0]], atol=1e-6)

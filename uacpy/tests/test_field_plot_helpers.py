@@ -194,14 +194,18 @@ def test_env_extends_depth_axis_to_the_seabed():
 
 
 def test_range_dependent_seafloor_headroom_below_deepest_clipped_point():
-    """The bathymetry is clipped to the plotted range span, and the depth
-    axis bottom sits 5 % below the deepest seafloor point of that span."""
+    """The bathymetry is clipped to the painted range span — the mesh's cell
+    edges, half a cell past the outermost sample — and the depth axis bottom
+    sits 5 % below the deepest seafloor point of that span."""
     env = uacpy.Environment(bathymetry=[(0.0, 100.0), (5000.0, 120.0)],
                             ssp=1500.0)
-    fig, ax = _tl_field().plot(env=env)
-    # The field spans 1–2000 m, so the deepest visible seafloor sits at the
-    # 2 km end of the 100→120 m slope.
-    deepest = np.interp(2000.0, [0.0, 5000.0], [100.0, 120.0])
+    field = _tl_field()
+    fig, ax = field.plot(env=env)
+    # The deepest painted seafloor sits at the far cell edge of the field's
+    # range grid, on the 100→120 m slope.
+    r = field.coords['range']
+    far_edge = r[-1] + 0.5 * (r[-1] - r[-2])
+    deepest = np.interp(far_edge, [0.0, 5000.0], [100.0, 120.0])
     assert max(ax.get_ylim()) == pytest.approx(deepest * 1.05)
 
 

@@ -1248,7 +1248,7 @@ def _resolve_bottom(bottom, *, water_sound_speed=None):
         return bottom
     if isinstance(bottom, str):
         return bottom_from_class(bottom)
-    if isinstance(bottom, (int, float)):
+    if isinstance(bottom, (int, float)) and not isinstance(bottom, bool):
         return bottom_from_grain_size(
             float(bottom), water_sound_speed=water_sound_speed)
     raise ConfigurationError(

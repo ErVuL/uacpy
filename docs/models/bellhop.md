@@ -99,15 +99,15 @@ What Bellhop takes natively, and what it routes or collapses first:
 | Sea-surface altimetry | ✅ | also supported by [RAM](ram.md) (`ramsurf` backend); no other model |
 | Multiple source depths | ✅ | returns a `ResultStack` |
 | Source beam pattern | ✅ | staged as an `.sbp` |
-| Elastic media | ✅ | native for a half-space — bellhop.f90's exact acousto-elastic `R(θ)`, per range node when the bottom is range-dependent; a layered *elastic* stack goes via auto-BOUNCE — see below |
+| Elastic media | ✅ | native for a half-space — bellhop.f90's exact acousto-elastic `R(θ)`, per column (a step switching midway between range nodes) when the bottom is range-dependent; a layered *elastic* stack goes via auto-BOUNCE — see below |
 | Layered bottom | ✅ | via auto-BOUNCE; layer stack kept, range collapsed to one column |
 | Rough surface/bottom (`sigma`) | ❌ | collapsed |
 
 ### Elastic bottoms and the auto-BOUNCE route
 
 An elastic **half-space** needs no help: the writer puts the shear pair
-(`c_s`, `α_s`) on the halfspace line — per range node on a range-dependent
-bottom — and `bellhop.f90:694-712` evaluates the exact acousto-elastic
+(`c_s`, `α_s`) on the halfspace line — per column on a range-dependent
+bottom, each holding to the midpoint with its neighbour — and `bellhop.f90:694-712` evaluates the exact acousto-elastic
 reflection coefficient at every boundary hit. What Bellhop cannot represent is
 a **layer stack**: its `.env` carries a single halfspace, so a layered bottom
 (fluid or elastic) would silently lose its layers. When `env.bottom` is

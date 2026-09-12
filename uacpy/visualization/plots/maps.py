@@ -11,6 +11,7 @@ import matplotlib.patheffects as _patheffects
 import matplotlib.ticker as _mticker
 from typing import Optional, Tuple
 
+from uacpy.core.units import km_to_m
 from uacpy.visualization.style import SOURCE_MARKER_STYLE
 from uacpy.visualization.plots._common import _cell_edge_extent, _credit_attributions, _default_value, _draw_credit, _draw_sea_ice, _model_attribution, _value_label, typed_plot_error
 # plot_overview composes a map panel with the TL field and the environment
@@ -365,10 +366,11 @@ def plot_overview(
 
     # The environment panel paints out to the furthest range it knows; a
     # range-independent environment without ``receiver=`` knows none, so it
-    # is handed the TL span, the x limit it is synced to below.
+    # is handed the TL panel's right limit — the far edge of its last painted
+    # cell — the x limit it is synced to below.
     _plot_environment(env, ax=ax_env, source=source, receiver=receiver,
                      bottom_colorbar=True, sea_ice=sea_ice,
-                     x_max_m=(float(np.max(tl.coords['range']))
+                     x_max_m=(km_to_m(max(ax_tl.get_xlim()))
                               if tl is not None and 'range' in tl.coords
                               else None))
     ax_env.set_title(env_title)

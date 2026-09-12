@@ -9,10 +9,19 @@ https://doi.org/10.3390/jmse11030496
 The PE marches on a uniform ``(Δx, Δz)`` grid using a rational Padé
 approximation of the propagator ``exp(ikΔx(√(1+ξ) − 1))``. This module:
 
-* Picks an optimal reference sound speed ``c₀`` (Eq. 15) so the spectrum
-  ``ξ ∈ [ξ_min, ξ_max]`` straddles the Padé sweet spot at ``ξ = 0``.
-* Computes the Padé approximation error on that interval and a Numerov
-  vertical-FD error from ``Δz``.
+* Splits the spectrum (:func:`_bands`) into an **accuracy band** — the
+  water column's propagating components out to the wider of the caller's
+  aperture and the seabed's critical angle, everything that carries energy
+  to the far field — and a **stability band**, the rest of the medium's
+  hull (Lytaev §4.1), held non-amplifying only. Scored on the whole hull a
+  granite seabed put the branch point ``ξ = −1`` inside the interval and
+  every grid was refused; scored on the aperture alone a rock seabed
+  (critical angle 51°) read better than sand while measuring 3 dB rms
+  worse at 1–5 km, its trapped modes between 30° and 51° unseen.
+* Picks a reference sound speed ``c₀`` (:func:`optimal_c0`, Eq. 15 on the
+  accuracy band) so that band straddles the Padé sweet spot ``ξ = 0``.
+* Computes the Padé approximation error on the accuracy band and a
+  Numerov vertical-FD error from ``Δz`` at that band's steepest component.
 * Searches for the coarsest ``(Δx, Δz)`` whose total error stays under a
   user accuracy budget ``ε`` over ``n_steps = ⌈x_max/Δx⌉`` range steps.
 
@@ -25,7 +34,17 @@ explicitly and pass the result back in via the ``c0`` argument.
 The Padé coefficients are derived numerically from the Taylor series of
 ``f(ξ) = exp(ikΔx(√(1+ξ)−1))`` so the same code handles any order
 ``[p/p]``. We use the diagonal ``[p/p]`` form because it is the standard
-choice for one-way propagators (see Collins 1993).
+choice for one-way propagators (see Collins 1993). The Collins binaries
+march that approximant with one accuracy row traded for the stability
+constraint ``P(−3) = 0`` (``ns = 1``, ``epade``), whose per-step error on
+the propagating band is 4–12× the pure ``[p/p]`` one scored here; at the
+grids this module selects the Padé term is orders of magnitude under the
+``Δz`` term, so the selection and the reported error are unchanged by it.
+
+The score ``τ·n_steps`` bounds the accumulated error of the STEEPEST
+scored component; the field error measured against Kraken on a 9 × 19
+receiver grid is 3–10× below it (sand, silt, rock at 100–200 Hz), and the
+near field — r ≲ 15·Δx, components steeper than the band — is outside it.
 
 The receiver grid stays user-controlled — the optimizer reshapes only
 the internal march grid.
@@ -154,8 +173,11 @@ def _eval_poly(coeffs: np.ndarray, x: np.ndarray) -> np.ndarray:
 def numerov_error(
     dz: float, k0: float, theta_max: float,
     alpha: float = 0.0, n_samples: int = 401,
+    kz_max: Optional[float] = None,
 ) -> float:
-    """Max FD error of the depth operator on ``k_z ∈ [-k₀ sin θ_max, 0]``.
+    """Max FD error of the depth operator on ``k_z ∈ [-k₀ sin θ_max, 0]``,
+    or on ``[-kz_max, 0]`` when ``kz_max`` (rad/m, the accuracy band's
+    steepest component, :func:`_bands`) is given.
 
     ``theta_max`` is in **radians** here, unlike :func:`optimal_c0` /
     :func:`optimize_grid` / :func:`grid_error`, whose ``theta_max`` is the
@@ -168,9 +190,8 @@ def numerov_error(
     """
     if dz <= 0:
         return float("inf")
-    kz_min = -k0 * np.sin(theta_max)
-    kz_max = 0.0
-    kz = np.linspace(kz_min, kz_max, n_samples)
+    kz_min = -(k0 * np.sin(theta_max) if kz_max is None else float(kz_max))
+    kz = np.linspace(kz_min, 0.0, n_samples)
     s = np.sin(0.5 * kz * dz)
     # Continuous: Δz²·k_z².  Discrete (with optional Numerov α):
     #   D_{Δz} e^{ikz·} → (1/Δz²)·(-4 sin² + α·16 sin⁴) · e^{ikz·}
@@ -186,19 +207,29 @@ def numerov_error(
 _EVANESCENT_GROWTH_TOL = 1e-9
 
 
-def combined_error(
+def _step_error(
     dx: float, dz: float, k0: float, p: int,
     xi_min: float, xi_max: float,
     theta_max: float, alpha: float = 0.0,
     n_xi: int = 161, n_offsets: int = 5,
     pade: Optional[Tuple[np.ndarray, np.ndarray]] = None,
-) -> float:
-    """Per-step error τ(Δx, Δz) — worst case of ``|f(ξ₁) - P(ξ₂)/Q(ξ₂)|``
-    over ``ξ₁ ∈ [ξ_min, ξ_max]``, ``|ξ₂-ξ₁| ≤ Δξ`` where
-    ``Δξ = h(Δz)/k₀²`` is the discretisation-induced wander of ``ξ``.
+    kz_max: Optional[float] = None,
+    xi_stab_min: Optional[float] = None,
+    xi_stab_max: Optional[float] = None,
+) -> Tuple[float, float]:
+    """``(τ, growth)`` of one step. τ(Δx, Δz) is the worst case of
+    ``|f(ξ₁) - P(ξ₂)/Q(ξ₂)|`` over ``ξ₁ ∈ [ξ_min, ξ_max]``, ``|ξ₂-ξ₁| ≤ Δξ``
+    where ``Δξ = h(Δz)/k₀²`` is the discretisation-induced wander of ``ξ``;
+    growth is ``max |P/Q| − 1`` over the stability band outside the
+    accuracy band (``0`` when there is none).
 
     ``theta_max`` is in **radians** (passed straight to
-    :func:`numerov_error`).
+    :func:`numerov_error`, together with ``kz_max`` when given).
+    ``xi_stab_min`` / ``xi_stab_max`` widen the sampled interval to the
+    stability band (:func:`_bands`), on which the approximant is not held
+    to ``f``: its evanescent part (``ξ < −1``) only has to be
+    non-amplifying, the test below. Left ``None`` the accuracy band is the
+    whole interval, and its own evanescent part, if any, is the part tested.
 
     Lytaev (2023), τ formula above Eq. (14) —
     https://doi.org/10.3390/jmse11030496. The discretisation spread
@@ -212,13 +243,20 @@ def combined_error(
     build out of its Δz ladder. It must have been built at this call's
     ``(dx, k0, p)``; ``None`` builds it here.
     """
-    h = numerov_error(dz, k0, theta_max, alpha=alpha)
+    h = numerov_error(dz, k0, theta_max, alpha=alpha, kz_max=kz_max)
     delta_xi = h / (k0 ** 2)
 
     # Depends only on (dx, k0, p) — see _propagator_pade.
     P, Q = _propagator_pade(dx, k0, p) if pade is None else pade
 
-    xi1_grid = np.linspace(xi_min, xi_max, n_xi)
+    lo = xi_min if xi_stab_min is None else min(float(xi_stab_min), xi_min)
+    hi = xi_max if xi_stab_max is None else max(float(xi_stab_max), xi_max)
+    xi1_grid = np.linspace(lo, hi, n_xi)
+    # The accuracy band itself, sampled at its ends whatever the spacing.
+    in_band = (xi1_grid >= xi_min) & (xi1_grid <= xi_max)
+    if xi_stab_min is not None or xi_stab_max is not None:
+        xi1_grid = np.concatenate([xi1_grid, [xi_min, xi_max]])
+        in_band = np.concatenate([in_band, [True, True]])
     if delta_xi > 0:
         offsets = np.linspace(-delta_xi, delta_xi, n_offsets)
     else:
@@ -246,49 +284,112 @@ def combined_error(
     # the evanescent band is AMPLIFY, so that part is checked for stability
     # instead of accuracy.
     propagating = xi1_grid >= -1.0
+    scored = propagating & in_band
     err_max = 0.0
+    growth = 0.0
     for off in offsets:
         xi2 = xi1_grid + off
         pq = _eval_poly(P, xi2) / _eval_poly(Q, xi2)
-        if propagating.any():
-            m = float(np.max(np.abs(f_xi1 - pq)[propagating]))
+        if scored.any():
+            m = float(np.max(np.abs(f_xi1 - pq)[scored]))
             if not np.isfinite(m):
                 # A non-finite score must never read as "no error" — that is
                 # exactly what let the coarsest grid look perfect. Report the
                 # candidate as unusable so the search rejects it; if every
                 # candidate is unusable, optimize_grid raises rather than
                 # returning a grid nothing vouched for.
-                return float('inf')
+                return float('inf'), float('inf')
             if m > err_max:
                 err_max = m
         if not propagating.all():
             # Measured 1.000000 for every candidate on the basalt case, so
             # this is a safety net rather than a discriminator: a Padé that
             # grew the evanescent spectrum would blow the march up.
-            growth = float(np.max(np.abs(pq[~propagating])))
-            if not np.isfinite(growth) or growth > 1.0 + _EVANESCENT_GROWTH_TOL:
-                return float('inf')
-    return err_max
+            g = float(np.max(np.abs(pq[~propagating])))
+            if not np.isfinite(g) or g > 1.0 + _EVANESCENT_GROWTH_TOL:
+                return float('inf'), float('inf')
+        if not scored.all():
+            # The propagating part outside the aperture is damped or garbled
+            # by design (Collins' ns constraint); reported, not thresholded.
+            g = float(np.max(np.abs(pq[~scored])))
+            growth = float('inf') if not np.isfinite(g) else max(growth, g - 1.0)
+    return err_max, growth
+
+
+def combined_error(*args, **kwargs) -> float:
+    """Per-step error τ(Δx, Δz) alone — :func:`_step_error`'s first value,
+    same arguments."""
+    return _step_error(*args, **kwargs)[0]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Optimal reference sound speed (Eq. 15)
+# Spectral bands and the reference sound speed (Eq. 15)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def optimal_c0(c_min: float, c_max: float, theta_max: float) -> float:
-    """Picks ``c₀`` so the propagation spectrum centres on the Padé sweet
-    spot ``ξ = 0``.
+def _bands(
+    c0: float, c_min: float, c_max: float, theta_max: float,
+    c_min_all: Optional[float] = None, c_max_all: Optional[float] = None,
+) -> dict:
+    """The two ``ξ`` bands scored at ``c₀`` (``theta_max`` in **degrees**;
+    ``c_min`` / ``c_max`` the water column, ``c_min_all`` / ``c_max_all``
+    the whole domain, default the water bounds).
 
-    ``theta_max`` is in **degrees**.
-
-    Lytaev (2023), Eq. (15) — *Mesh Optimization for the Acoustic
-    Parabolic Equation*, https://doi.org/10.3390/jmse11030496.
+    Accuracy band ``[xi_min, xi_max]``: ``(c₀/c_min)² − 1`` down to the
+    lower of Lytaev §4.1's aperture end ``−sin²θ + (c₀/c_max)² − 1`` and
+    the trapped-mode end ``(c₀/c_max_all)² − 1`` — the component grazing
+    the fastest medium at its critical angle (``trapped_end_binds``).
+    Stability band ``[xi_stab_min, xi_stab_max]``: the whole medium's hull
+    with the aperture term. ``kz_max_over_k0``: the steepest scored
+    component's vertical wavenumber over ``k₀`` — ``sin θ`` while the
+    aperture binds, the critical-angle component's in the slowest water
+    otherwise.
     """
-    theta_max_rad = np.deg2rad(float(theta_max))
-    return float(c_min * c_max * np.sqrt(
-        (2.0 + np.sin(theta_max_rad) ** 2) / (c_min ** 2 + c_max ** 2)
-    ))
+    c0, c_min, c_max = float(c0), float(c_min), float(c_max)
+    c_min_all = c_min if c_min_all is None else min(float(c_min_all), c_min)
+    c_max_all = c_max if c_max_all is None else max(float(c_max_all), c_max)
+    sin2 = np.sin(np.deg2rad(float(theta_max))) ** 2
+    xi_aperture = -sin2 + (c0 / c_max) ** 2 - 1.0
+    xi_trapped = (c0 / c_max_all) ** 2 - 1.0
+    trapped = bool(xi_trapped < xi_aperture)
+    kz2 = (c0 / c_min) ** 2 - (c0 / c_max_all) ** 2 if trapped else sin2
+    xi_min, xi_max = min(xi_aperture, xi_trapped), (c0 / c_min) ** 2 - 1.0
+    return dict(
+        xi_min=float(xi_min), xi_max=float(xi_max),
+        xi_stab_min=float(min(-sin2 + (c0 / c_max_all) ** 2 - 1.0, xi_min)),
+        xi_stab_max=float(max((c0 / c_min_all) ** 2 - 1.0, xi_max)),
+        kz_max_over_k0=float(np.sqrt(max(kz2, 0.0))),
+        trapped_end_binds=trapped,
+    )
+
+
+def optimal_c0(c_min: float, c_max: float, theta_max: float,
+               c_max_all: Optional[float] = None) -> float:
+    """Picks ``c₀`` so the accuracy band centres on the Padé sweet spot
+    ``ξ = 0``: Lytaev (2023) Eq. (15) — *Mesh Optimization for the Acoustic
+    Parabolic Equation*, https://doi.org/10.3390/jmse11030496 — on
+    whichever end bounds the band (:func:`_bands`).
+
+    ``theta_max`` is in **degrees**. ``c_min`` / ``c_max`` bound the water
+    column; a seabed ``c_max_all`` faster than ``c_max`` adds the trapped
+    end's own symmetric solution (``ξ_min = −ξ_max`` there: Eq. 15 of
+    ``(c_min, c_max_all)`` at zero aperture), and the candidate leaving the
+    band's larger ``|ξ|`` smaller wins — 1591 m/s on 1500 m/s water over
+    sand (1600), 2047 m/s over granite (5500).
+    """
+    def eq15(c_hi, theta):
+        s2 = np.sin(np.deg2rad(float(theta))) ** 2
+        return float(c_min * c_hi * np.sqrt((2.0 + s2) / (c_min ** 2 + c_hi ** 2)))
+
+    candidates = [eq15(c_max, theta_max)]
+    if c_max_all is not None and float(c_max_all) > float(c_max):
+        candidates.append(eq15(float(c_max_all), 0.0))
+
+    def half_width(c0):
+        b = _bands(c0, c_min, c_max, theta_max, c_max_all=c_max_all)
+        return max(abs(b['xi_min']), abs(b['xi_max']))
+
+    return min(candidates, key=half_width)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -324,31 +425,40 @@ def optimize_grid(
     p: int = 6,
     alpha: float = 0.0,
     tau_cache: Optional[dict] = None,
+    c_min_all: Optional[float] = None,
+    c_max_all: Optional[float] = None,
+    grid: Optional[Tuple[float, float]] = None,
 ) -> dict:
     """Find the coarsest ``(Δx, Δz)`` whose accumulated error stays under
-    ``ε`` over ``⌈x_max/Δx⌉`` march steps for the given ``c₀``.
+    ``ε`` over ``⌈x_max/Δx⌉`` march steps for the given ``c₀`` — or, with
+    ``grid=(dr, dz)``, score that pair instead of searching.
 
     The search sees Lytaev's error model only. RAM applies its own
     stability floors and array caps to the returned ``Δz`` afterwards and
-    re-reports the accuracy of the grid it actually marches via
-    :func:`grid_error`, so the ``predicted_error`` here describes the
+    re-reports the accuracy of the grid it actually marches through the
+    ``grid`` form, so a search's ``predicted_error`` describes the
     unadjusted pair.
 
     Parameters
     ----------
     freq, c_min, c_max : float
         Operating frequency (Hz) and the slowest / fastest sound speeds
-        anywhere in the propagation medium (m/s).
+        of the water column (m/s) — the medium of the accuracy band.
+    c_min_all, c_max_all : float, optional
+        Slowest / fastest sound speeds anywhere in the domain, seabed
+        included, bounding the stability band (:func:`_bands`).
+        Default: the water bounds, i.e. one band as in Lytaev §4.1.
     x_max : float
         Maximum range (m) the PE will march to.
     c0 : float
         Reference sound speed (m/s). The RAM wrapper resolves its
-        default via :func:`optimal_c0` (Lytaev Eq. 15) before calling
-        in here; pass any pinned user value through unchanged.
+        default via :func:`optimal_c0` before calling in here; pass any
+        pinned user value through unchanged.
     theta_max : float
         Maximum propagation angle in **degrees**. Default 30°.
     eps : float
         Total accuracy budget (max ``|τ · n_steps|``). Default 1e-3.
+        Unused with ``grid``.
     p : int
         Padé order ``[p/p]``. Default 6 (matches our RAM default).
     alpha : float
@@ -365,51 +475,61 @@ def optimize_grid(
         than answering from the wrong medium. This is **not** a search knob:
         the ``(Δx, Δz)`` selected and its ``predicted_error`` are the same
         values with the cache as without.
+    grid : (float, float), optional
+        A ``(dr, dz)`` to score in place of the ladders; the result then
+        describes that pair whatever its error (``inf`` when unusable).
 
     Returns
     -------
     dict
         Keys: ``c0`` (echoed back), ``dr``, ``dz``, ``xi_min`` /
-        ``xi_max`` (Padé spectrum interval at the given ``c0``),
-        ``predicted_error`` (``τ · n_steps`` at the chosen grid),
-        ``alpha``, ``p``.
+        ``xi_max`` (the accuracy band at the given ``c0``),
+        ``xi_stab_min`` / ``xi_stab_max`` (the stability band),
+        ``kz_max`` (rad/m, the steepest scored component),
+        ``trapped_end_binds`` (it is the seabed's critical-angle mode),
+        ``predicted_error`` (``τ · n_steps`` at the grid), ``growth``
+        (``max |P/Q| − 1`` per step over the stability band outside the
+        accuracy band; 0 when there is none), ``alpha``, ``p``.
 
     Raises
     ------
     RuntimeError
-        If no candidate ``(Δx, Δz)`` meets the accuracy budget. Caller
-        can either widen ``ε``, raise ``p``, switch ``c0`` to a more
-        favourable value (try :func:`optimal_c0`), or shrink
-        ``theta_max`` / ``x_max``.
+        If no candidate ``(Δx, Δz)`` meets the accuracy budget. The
+        message states the search, not a remedy: RAM catches it and
+        raises the user-facing ``ConfigurationError``.
     """
     c0_use = float(c0)
     k0 = 2.0 * np.pi * freq / c0_use
     theta_max_rad = np.deg2rad(float(theta_max))
-    xi_min = -np.sin(theta_max_rad) ** 2 + (c0_use / c_max) ** 2 - 1.0
-    xi_max = (c0_use / c_min) ** 2 - 1.0
+    bands = _bands(c0_use, c_min, c_max, theta_max,
+                   c_min_all=c_min_all, c_max_all=c_max_all)
+    xi_min, xi_max = bands['xi_min'], bands['xi_max']
+    xi_stab_min, xi_stab_max = bands['xi_stab_min'], bands['xi_stab_max']
+    kz_max = k0 * bands.pop('kz_max_over_k0')
 
     # Candidate ladders, scanned in full; the pair maximising ``dx·dz``
     # among those inside the budget wins.
     dx_top = x_max * 0.5
-    dx_candidates = _ladder(max(0.5, c0_use / freq / 8.0), dx_top)
-    # The ladder deliberately runs below any caller's own Δz floor. Floors are
-    # applied to the RESULT (RAM's ``c_min/(16 f)`` cost floor,
-    # ``_compute_grid_lytaev``), so a rung under the floor still selects a
-    # marchable grid once floored — and flooring the ladder instead was
-    # measured to make the marched field WORSE, because the extra ε relaxation
-    # it forces licenses a coarser Δx: 800 Hz over 2 km went from 1.93 dB rms
-    # to 3.40 dB rms against a converged grid. What the caller must not do is
-    # report this search's ε as the marched grid's accuracy; RAM recomputes
-    # that with :func:`grid_error` and reports both.
-    dz_candidates = _ladder(DZ_MIN, DZ_MAX)
+    if grid is not None:
+        dx_candidates, dz_candidates = [float(grid[0])], [float(grid[1])]
+    else:
+        dx_candidates = _ladder(max(0.5, c0_use / freq / 8.0), dx_top)
+        # The ladder deliberately runs below any caller's own Δz floor.
+        # Floors are applied to the RESULT (RAM's ``c_min/(16 f)`` cost
+        # floor, ``_compute_grid_lytaev``), so a rung under the floor still
+        # selects a marchable grid once floored — and flooring the ladder
+        # instead was measured to make the marched field WORSE, because the
+        # extra ε relaxation it forces licenses a coarser Δx (800 Hz over
+        # 2 km moved further from a converged ramgeo march). What the caller
+        # must not do is report this search's ε as the marched grid's
+        # accuracy; RAM rescores that grid and reports both.
+        dz_candidates = _ladder(DZ_MIN, DZ_MAX)
 
     cache = {} if tau_cache is None else tau_cache
 
     best = None
     best_product = -1.0
     for dx in dx_candidates:
-        if dx <= 0 or dx > x_max:
-            continue
         n_steps = int(np.ceil(x_max / dx))
         # One Padé build per Δx instead of one per (Δx, Δz): the approximant
         # is a function of (dx, k0, p) alone (:func:`_propagator_pade`), while
@@ -417,26 +537,26 @@ def optimize_grid(
         # Δz ladder is already memoised builds nothing.
         pade = None
         for dz in dz_candidates:
-            if dz <= 0:
-                continue
-            key = (dx, dz, k0, p, xi_min, xi_max, theta_max_rad, alpha)
-            tau = cache.get(key)
-            if tau is None:
+            key = (dx, dz, k0, p, xi_min, xi_max, xi_stab_min, xi_stab_max,
+                   kz_max, alpha)
+            scored = cache.get(key)
+            if scored is None:
                 if pade is None:
                     pade = _propagator_pade(dx, k0, p)
-                tau = combined_error(
+                scored = cache[key] = _step_error(
                     dx, dz, k0, p, xi_min, xi_max, theta_max_rad, alpha=alpha,
-                    pade=pade,
+                    pade=pade, kz_max=kz_max,
+                    xi_stab_min=xi_stab_min, xi_stab_max=xi_stab_max,
                 )
-                cache[key] = tau
+            tau, growth = scored
             total = tau * n_steps
-            if total < eps:
+            if grid is not None or total < eps:
                 product = dx * dz
                 if product > best_product:
                     best_product = product
                     best = dict(
                         dr=float(dx), dz=float(dz),
-                        predicted_error=float(total),
+                        predicted_error=float(total), growth=float(growth),
                     )
     if best is None:
         # Internal control-flow signal: RAM catches this RuntimeError to fall
@@ -445,50 +565,22 @@ def optimize_grid(
         raise RuntimeError(
             f"No (Δx, Δz) candidate satisfies ε={eps:.2e} for "
             f"f={freq:.1f} Hz, c₀={c0_use:.0f} m/s, θ_max={float(theta_max):.1f}°, "
-            f"x_max={x_max:.0f} m, Δz ladder [{DZ_MIN:g}, {DZ_MAX:g}] m. "
-            f"Try a larger ε, higher Padé order p, "
-            f"smaller θ_max, or a finer dz/dx ladder."
+            f"x_max={x_max:.0f} m on the accuracy band "
+            f"ξ ∈ [{xi_min:.3f}, {xi_max:.3f}] with the Δz ladder "
+            f"[{DZ_MIN:g}, {DZ_MAX:g}] m and the Δx ladder "
+            f"[{dx_candidates[-1]:.3g}, {dx_top:.3g}] m."
         )
     return dict(
-        c0=c0_use,
-        xi_min=float(xi_min),
-        xi_max=float(xi_max),
-        alpha=float(alpha),
-        p=int(p),
-        **best,
+        c0=c0_use, kz_max=float(kz_max), alpha=float(alpha), p=int(p),
+        **bands, **best,
     )
 
 
-def grid_error(
-    *,
-    dr: float,
-    dz: float,
-    freq: float,
-    c_min: float,
-    c_max: float,
-    x_max: float,
-    c0: float,
-    theta_max: float = 30.0,
-    p: int = 6,
-    alpha: float = 0.0,
-) -> float:
-    """Accumulated Padé error ``τ · n_steps`` at an arbitrary ``(dr, dz)``.
-
-    :func:`optimize_grid` reports this for the pair it selected; callers
-    that adjust the grid afterwards (stability floors, array-size caps,
-    seafloor snapping) use this to describe the grid they actually march.
-    Same units and conventions as :func:`optimize_grid`.
-    """
-    c0_use = float(c0)
-    k0 = 2.0 * np.pi * freq / c0_use
-    theta_max_rad = np.deg2rad(float(theta_max))
-    xi_min = -np.sin(theta_max_rad) ** 2 + (c0_use / c_max) ** 2 - 1.0
-    xi_max = (c0_use / c_min) ** 2 - 1.0
-    tau = combined_error(
-        float(dr), float(dz), k0, int(p), xi_min, xi_max, theta_max_rad,
-        alpha=float(alpha),
-    )
-    return float(tau * int(np.ceil(float(x_max) / float(dr))))
+def grid_error(*, dr: float, dz: float, **kwargs) -> float:
+    """Accumulated Padé error ``τ · n_steps`` at an arbitrary ``(dr, dz)``:
+    :func:`optimize_grid`'s ``predicted_error`` for ``grid=(dr, dz)``, same
+    remaining keyword arguments."""
+    return optimize_grid(grid=(dr, dz), **kwargs)['predicted_error']
 
 
 def rams_dz_shear_cap(c_shear_min: float, freq: float,

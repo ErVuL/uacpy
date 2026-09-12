@@ -327,7 +327,7 @@ ramgeo section) was matched *to*. Of the three files vendored from
 quiet-oceans, only `rams0.5.f` (below) carries a uacpy dimension patch.
 
 Upstream's own bounds checks (`Need to increase parameter …`,
-`ramsurf1.5.f:124-132`) are left as they are: their conditions are written
+`ramsurf1.5.f:123-134`) are left as they are: their conditions are written
 against `nz+2` / `np` / `i`, so they keep working at the larger dimensions and
 still stop the run rather than overrun. `uacpy.models.ram._COLLINS_ARRAY_LIMITS`
 carries the matching per-backend limit and `tests/test_ram_backends.py` asserts
@@ -384,6 +384,13 @@ one that produced a given binary shifts TL by ~0.005 dB — `mz` is the leading
 dimension of the `(mz,mp)` arrays, so it also changes column stride and hence
 vectorisation. Both effects are far below any physical tolerance.)
 
+### `rams0.5.f` — `jter` initialised in `guerre`
+
+The same one-line patch as ramgeo's (`iter=0; jter=0` at `rams0.5.f:1181`;
+rotation counter read at `:1215-1218`), for the same reason; measured
+`tl.line` shift 3.5e-12 dB between pre- and post-patch builds. See the
+ramgeo section for the full entry.
+
 ### Build system
 
 uacpy supplies a minimal `Makefile` (`gfortran -O2 -std=legacy -w`) that
@@ -405,7 +412,7 @@ Collins backends loop in Python (one subprocess per frequency).
 Vendored at `third_party/ramgeo/` as a single source, `ramgeo1.5.f`
 (Collins' RAMGEO, version 1.5g). Sourced from the **Acoustics Toolbox** `RAM/`
 bundle (Porter's AT, mirroring `oalib.hlsresearch.com/Modes/AcousticsToolbox/`);
-the vendored file is byte-for-byte that copy plus the two patches below.
+the vendored file is byte-for-byte that copy plus the three patches below.
 
 - **Licence:** **public domain** — a U.S. Government work (Collins, NRL). No
   explicit licence accompanies the code (NRL/OALIB distribute it freely with no
@@ -422,7 +429,8 @@ the vendored file is byte-for-byte that copy plus the two patches below.
   `ramgeo.in` is the upstream sample, kept for a smoke test.
 
 Two patches give it full parity with the other Collins backends (the same
-two `ramsurf1.5.f` carries):
+two `ramsurf1.5.f` carries), and a third initialises a counter `ramsurf1.5.f`
+already initialises:
 
 ### Enlarged array dimensions
 
@@ -466,6 +474,26 @@ is what lets `RAM(backend='ramgeo')` return complex pressure for
        write(3)(tlg(j),j=1,lz)
 +      write(11)(urg(j),j=1,lz)
 ```
+
+### `guerre` -- `jter` initialised
+
+Collins' Laguerre solver counts iterations in `iter` and rotates the step by
+90° every ninth one through `jter` (`ramgeo1.5.f:759-762`), but only `iter`
+is set before the loop; `jter` starts from whatever the stack holds
+(`ramsurf1.5.f:735-736` initialises both, `rams0.5.f` and the original
+`ram1.5.f` neither). The value only decides which iterations get the
+rotation, so a converged root is unchanged. The two counters are set on one
+line so no address below moves (gfortran accepts `;` in fixed form):
+
+```diff
+-      iter=0
++      iter=0; jter=0
+```
+
+Measured on a 100 Hz, 2 km, `dz=0.5` layered deck, builds from the pre-patch
+and post-patch sources with the same flags: `tl.line` moves by at most
+4.1e-12 dB. Same patch, same measurement (3.5e-12 dB), in `rams0.5.f`
+(`rams0.5.f:1181`, see the ramsurf section).
 
 ---
 
@@ -595,6 +623,54 @@ entries NaN with the multiply form, none with the assignment form).
 -  a=0.0_wp2*a
 +  ! zero a by assignment (gauss reads the entries the fills below skip)
 +  a=(0.0_wp2,0.0_wp2)
+```
+
+### `src/epade.f90` -- non-convergence stop in `guerre`
+
+Collins' Laguerre solver stops the run when it reaches its iteration cap
+without converging (`doc/RAM.ORIG/ram1.5.f:804-810`); the mpiramS port dropped
+that test, so a root the search never reached was deflated out of the
+polynomial (`epade.f90:205-210`) and turned into a Padé coefficient
+(`pdu/pdl = -1/root`) with no message. `fndrt` calls `guerre` twice per
+root: the search (`epade.f90:194`, `err=1e-12`, `nter=1000`) and a polish
+(`:199`, `err=0`, `nter=5`) that always runs exactly `nter` steps and always
+leaves the loop with `|dz|>0`, so a bare post-loop `iter>=nter` test would
+stop every run. The stop is therefore keyed on `err>0`:
+
+```diff
+     if ((abs(dz)>err).and.(iter<nter)) then
+       continue
+     else
++      ! UACPY: a search call (err>0) leaving the loop with |dz|>err has hit
++      ! its iteration cap without converging; stop here, as Collins'
++      ! ram1.5.f does, rather than deflate a wrong root into the Pade
++      ! coefficients. The err=0 polish call runs exactly nter steps.
++      if ((abs(dz)>err).and.(err>0.0_wp2)) then
++        write(*,*) 'Laguerre method not converging. Try a different combination of dr and np.'
++        stop
++      end if
+       exit
+     end if
+```
+
+Verified: the shipped decks are byte-identical before and after (the guard
+never fires on a converging search); a scratch build with the search cap
+lowered from 1000 to 2 prints the message and writes no `psif.dat`, which
+`RAM._run_binary` reports through its missing-output error together with the
+binary's stdout. The insertion adds eight lines at `epade.f90:295-302`; every
+address at or below the old `:295` moved down by eight.
+
+### `src/mattri.f90` -- `dfact` computed in double
+
+`dfact=0.0833333333333333` is a default-real literal, so the
+`real(kind=wp2)` parameter held `8.3333335816860199E-02` instead of
+`1/12 = 8.3333333333333329E-02` (3.0e-8 relative, on the `k²` mass terms of
+every tridiagonal row). Collins computes it in the working precision
+(`doc/RAM.ORIG/ram1.5.f:110`).
+
+```diff
+-real(kind=wp2), parameter :: dfact=0.0833333333333333  !  dfact=twelfth
++real(kind=wp2), parameter :: dfact=1.0_wp2/12.0_wp2  !  dfact=twelfth
 ```
 
 ### `src/splnlib.f90` -- per-call bisection start in `interv`
@@ -894,7 +970,7 @@ range when `isedrd == 1`.
  
  !   First find the depth at this range
      rwork(1)=r
-     work(:,1)=interp1(rb,zb,rwork,zb(1))
+     work(:,1)=interp1(rb,zb,rwork,zb(size(zb)))
      depth=work(1,1)
 -    ! The four values of depth that go with cs, rho, and attn
 -    zwork(1)=0.0_wp; zwork(2)=depth
@@ -1067,6 +1143,47 @@ from a legal 2 mm receiver pair).
 
 The restore branch stays: without it, `dr` never returns to `deltar` and the
 upstream cost defect above comes back.
+
+#### Seabed extended from the last bathymetry depth beyond the table
+
+`profl` interpolates the seafloor depth at the current range from the raw
+bathymetry table, and beyond its last breakpoint `interp1` returns the value
+passed as its fourth argument. Upstream passed the *first* depth, so past the
+table the sediment was laid out from the range-0 seafloor while the march
+itself (`ram.f90:92-94`, `rb1(nb+1)=2*rb(nb)+dr`, `zb1(nb+1)=zb(nb)`) kept the
+*last* one — Collins uses a single extended array for both (`doc/RAM.ORIG/ram1.5.f:105-106`).
+
+```diff
+-    work(:,1)=interp1(rb,zb,rwork,zb(1))
++    work(:,1)=interp1(rb,zb,rwork,zb(size(zb)))
+```
+
+`zb(size(zb))`, not `zb(nb)`: `profl` is an internal procedure that
+host-associates `nb`, and `nb=size(rb)` is assigned at `ram.f90:87`, after the
+first `profl` call at `:72`.
+
+Measured (75 Hz, single frequency, iso 1500 m/s, `dz=1 dr=10 np=4`, seafloor
+100 → 200 m over 1.5 km, outputs at 1/2/3 km) against the same deck padded
+to 4 km: before, `psif` differed by 0 / 31 % / 31 % of its peak at the three
+ranges; after, by exactly 0. The padded deck itself is byte-identical before
+and after. uacpy never reached the defect — `RAM._prepare_bathymetry` pads
+every table to the last receiver range, which is why that padding is
+load-bearing — and `tests/test_mpirams_bathymetry_extension.py` now drives
+the binary on the unpadded deck directly.
+
+#### Double-precision `eta` literal
+
+`eta=0.018323389971986` is a default-real (single) literal assigned to a
+`real(kind=wp)` parameter, so the double build carried
+`1.8323389813303947E-02` against the intended `1.8323389971985696E-02`
+(8.7e-9 relative, on every dB/λ attenuation). Same class as `dfact` in
+`mattri.f90` (its entry below); the two together move `psif` by at most
+5.5e-9 of its peak on the deck above.
+
+```diff
+-real(kind=wp), parameter :: eta=0.018323389971986   !  eta=1/(40*pi*log10(exp(1)));
++real(kind=wp), parameter :: eta=0.018323389971986_wp   !  eta=1/(40*pi*log10(exp(1)));
+```
 
 ### `src/peramx.f90` -- I/O rewrite (largest change)
 

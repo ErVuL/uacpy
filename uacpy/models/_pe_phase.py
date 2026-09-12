@@ -12,8 +12,9 @@ where ψ is the slow PE envelope, k₀ = ω/c₀ is the reference wavenumber,
 ``exp(-iπ/4)`` is the Hankel-asymptotic cylindrical-spreading phase of
 ``H₀⁽¹⁾(k₀r) ≈ √(2/(π k₀ r))·exp(+i(k₀r - π/4))`` under the conjugated
 carrier, and the bar denotes complex conjugation (the conjugate flips the
-mpiramS / Collins carrier from the ``exp(+iωt)`` to the ``exp(-iωt)``
-sign uacpy uses everywhere else). mpiramS bakes the π/4 into what it
+mpiramS / Collins ``exp(+i k₀ r)`` carrier, the physics ``exp(-iωt)``
+convention, to the ``exp(+iωt)`` engineering sign uacpy uses everywhere
+else). mpiramS bakes the π/4 into what it
 writes; the Collins codes factor out only ``exp(+i k₀ r)``
 (``ramgeo1.5.f:436``, ``ramsurf1.5.f:445``, ``rams0.5.f:270``), so their
 branches apply it here.
@@ -24,9 +25,16 @@ Three convention strings cover the three vendored binaries:
 convention    What the backend writes                                Fortran source
 ============  ====================================================  =======================================
 ``'mpiramS'`` ``psif = ψ · exp(+i(k₀ r + π/4)) / (4π)``              ``third_party/mpiramS/`` patched output
-``'rams'``    ``ψ · exp(+i k₀ r rot₀)`` (carrier baked in via g₀)    ``rams0.5.f:848-851`` (g₀ at ``:889``)
+``'rams'``    ``ψ · exp(+i k₀ (dr + (r-dr) rot₀))`` (g₀ per step)    ``rams0.5.f:848-851`` (g₀ at ``:889``)
 ``'ramsurf'`` ``ψ``                  (bare envelope, no carrier)     ``ramsurf1.5.f``: no ``g0`` anywhere
 ============  ====================================================  =======================================
+
+The rams carrier is ``exp(+i k₀ r rot₀)`` up to a constant: the
+self-starter's last solve (``rams0.5.f:378``) runs ``epade`` with
+``irot=0``, which stamps one unrotated ``exp(+i k₀ dr)`` before ``rpade``
+takes over at ``:889``, so the baked phase at ``r = n·dr`` is
+``k₀·dr·(1 + (n-1)·rot₀)``, a fixed ``k₀·dr·(1-rot₀)`` offset (a few
+degrees at uacpy's ``dr ≤ λ/25``) that no per-range correction removes.
 
 Adding a fourth backend amounts to one new branch here plus declaring
 the convention name in the backend's reader output — no other

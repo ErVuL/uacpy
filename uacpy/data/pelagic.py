@@ -153,7 +153,7 @@ def _water_depth(point, timeout, verbose, cache_only):
 def fetch_bottom_pelagic(point: Coordinate, *, roughness: float = 0.0,
                          water_sound_speed: Optional[float] = None,
                          depth: Optional[float] = None, cache_only: bool = False,
-                         timeout=None,
+                         timeout: float = 30.0,
                          verbose: Union[bool, str] = False) -> BoundaryProperties:
     """Model-ready bottom from the pelagic depth/latitude model at ``(lat, lon)``.
 
@@ -167,7 +167,9 @@ def fetch_bottom_pelagic(point: Coordinate, *, roughness: float = 0.0,
     resulting lithology maps to a mean grain size ϕ and then a half-space via
     :func:`uacpy.data.bottom_from_grain_size`. ``water_sound_speed`` (m/s)
     scales the grain-size velocity ratio to the in-situ near-seabed water;
-    ``None`` uses the Hamilton reference.
+    ``None`` uses the Hamilton reference. ``timeout`` (s) bounds each live
+    GEBCO request; a stalled host raises ``DataFetchError`` instead of
+    blocking indefinitely.
     """
     lat, lon = as_coordinate(point)
     d = depth if depth is not None else _water_depth(point, timeout, verbose,
@@ -187,7 +189,7 @@ def fetch_bottom_pelagic_transect(start: Coordinate, end: Coordinate, *,
                                   roughness: float = 0.0,
                                   water_sound_speed: Optional[float] = None,
                                   depth=None, cache_only: bool = False,
-                                  timeout=None,
+                                  timeout: float = 30.0,
                                   verbose: Union[bool, str] = False
                                   ) -> Bottom:
     """Range-dependent bottom from the pelagic model along ``start`` → ``end``.
@@ -196,6 +198,7 @@ def fetch_bottom_pelagic_transect(start: Coordinate, end: Coordinate, *,
     column scales to the water over its own seafloor. ``depth`` likewise takes
     a ``(lat, lon) -> m`` callable, so a caller holding the transect's
     bathymetry supplies it instead of paying for a second fetch per waypoint.
+    ``timeout`` (s) bounds each live GEBCO request.
     """
     return range_dependent_bottom_along(
         lambda la, lo: fetch_bottom_pelagic(

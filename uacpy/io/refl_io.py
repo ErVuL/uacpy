@@ -604,7 +604,8 @@ def stage_reflection_file(
         # either way (misc/RefCoef.f90:45-55 applies no monotonicity test); it
         # is bellhopcuda that refuses a repeated angle
         # (src/module/reflcoef.hpp:135-141), so say so instead of editing.
-        angles = read_reflection_coefficient(dest)['theta']
+        table = read_reflection_coefficient(dest)
+        angles = table['theta']
         if angles.size > 1 and not np.all(np.diff(angles) > 0):
             warnings.warn(
                 f"{dest} is both the reflection table you supplied and the "
@@ -612,6 +613,24 @@ def stage_reflection_file(
                 f"angle column repeats a value, which bellhopcuda rejects "
                 f"(src/module/reflcoef.hpp:135-141). Pass the table from a "
                 f"path other than {dest} to have uacpy stage a cleaned copy.",
+                UserWarning,
+                skip_file_prefixes=USER_FRAME_SKIP,
+            )
+        # The engine interpolates phi linearly between bracketing rows and
+        # assumes the column is unwrapped (misc/RefCoef.f90:119,157-160); a
+        # step past a half turn is swept the long way round through the
+        # whole interval. The copy path unwraps; here the table is not
+        # edited, so the step is reported instead.
+        phase_step_deg = np.abs(np.diff(np.degrees(table['phi'])))
+        if phase_step_deg.size and np.any(phase_step_deg > 180.0):
+            warnings.warn(
+                f"{dest} is both the reflection table you supplied and the "
+                f"name the engine reads, so it is staged unmodified; its "
+                f"phase column steps {phase_step_deg.max():.1f} deg between "
+                f"adjacent angles, which the engine interpolates as written "
+                f"(misc/RefCoef.f90:119 assumes an unwrapped phase). Unwrap "
+                f"the phase column, or pass the table from a path other than "
+                f"{dest} to have uacpy stage an unwrapped copy.",
                 UserWarning,
                 skip_file_prefixes=USER_FRAME_SKIP,
             )

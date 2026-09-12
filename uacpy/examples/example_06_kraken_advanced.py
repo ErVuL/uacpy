@@ -146,8 +146,10 @@ fig, ax = uacpy.plot_field(
     tl, env=env, contours=[70, 85, 100],
     title=f'Kraken adiabatic modes over the shelf transition\n'
           f'({N_SEGMENTS} segments, contours at 70/85/100 dB)')
-# N segments have N+1 edges; the interior ones are the boundaries.
-for edge in np.linspace(0, 20, N_SEGMENTS + 1)[1:-1]:
-    ax.axvline(edge, color='white', ls='--', alpha=0.3, lw=0.5, zorder=8)
+# The run holds one profile at each of np.linspace(0, 20, N_SEGMENTS) km and
+# the adiabatic evaluator interpolates between neighbours, so an interior node
+# marks where one profile's weight peaks — not a hard switch between two.
+for node in np.linspace(0, 20, N_SEGMENTS)[1:-1]:
+    ax.axvline(node, color='white', ls='--', alpha=0.3, lw=0.5, zorder=8)
 fig.savefig(OUT / 'example_06_result.png', dpi=150, bbox_inches='tight')
 plt.close(fig)

@@ -365,3 +365,41 @@ class TestTheEqualiserDenominatorIsOneImplementation:
         from uacpy.comms._equalizer_core import regularizer
         assert regularizer(np.zeros(4), 10.0) == 0.0
         assert regularizer(np.array([]), None) == 0.0
+
+
+class TestAdaptiveOutputLagsByHalfTheFeedforwardSpan:
+    """The feedforward taps start as a centre spike at ``n_ff // 2``, so the
+    equalized stream lags ``rx`` by that many symbols and ``train`` must be
+    delayed by the same amount: aligned, LMS recovers a noiseless identity
+    channel exactly; undelayed, it chases a shifted target."""
+
+    @pytest.mark.parametrize('n_ff', [1, 2, 11, 12])
+    def test_output_delay_is_the_centre_tap_index(self, n_ff):
+        from uacpy.comms.equalization import DFE
+        assert DFE(n_ff=n_ff, n_fb=2).output_delay == n_ff // 2
+
+    @staticmethod
+    def _identity_link(n_taps, delay):
+        from uacpy.comms.equalization import lms_equalizer
+        rng = np.random.default_rng(3)
+        mod = Modulator('qpsk')
+        tx = mod.modulate(rng.integers(0, 2, 2 * 600))
+        rx = np.concatenate([tx, np.zeros(delay, dtype=complex)])
+        train = np.concatenate([np.zeros(delay, dtype=complex), tx])[:200]
+        eq, mse = lms_equalizer(rx, mod.constellation, n_taps=n_taps,
+                                step=0.01, train=train)
+        return tx, eq, mse
+
+    def test_train_delayed_by_the_output_delay_recovers_the_symbols(self):
+        # The record is brought to unit mean power before adapting, so the
+        # zero padding scales the recovered symbols by sqrt(605/600).
+        n_taps = 11
+        delay = n_taps // 2
+        tx, eq, mse = self._identity_link(n_taps, delay)
+        np.testing.assert_allclose(eq[delay:delay + tx.size], tx, atol=1e-2)
+        assert mse[-100:].max() < 1e-3
+
+    def test_the_equalized_stream_is_not_aligned_at_zero_lag(self):
+        n_taps = 11
+        tx, eq, _mse = self._identity_link(n_taps, n_taps // 2)
+        assert np.abs(eq[:tx.size] - tx).mean() > 0.5

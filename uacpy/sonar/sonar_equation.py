@@ -207,8 +207,9 @@ def _reject_field(value, caller: str, label: str, twin: str) -> None:
     if isinstance(value, Field):
         raise ConfigurationError(
             f"{caller}: {label} is a Field; this function takes dB arrays. "
-            f"Use {twin}(...) for a Field, or pass {label}.dB().data / "
-            f"np.asarray({label}.data) to stay here.")
+            f"Use {twin}(...) for a Field, or pass np.asarray({label}.dB, "
+            f"float) to stay here ({label}.dB is the loss in dB; the raw "
+            f"payload is complex pressure).")
 
 
 def _require_scalar_dB(value, caller: str, label: str) -> float:

@@ -10,7 +10,6 @@ from typing import Optional, Sequence, Tuple
 from uacpy.core.environment import Environment
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.results import Field, ResultStack
-from uacpy.core.units import m_to_km
 from uacpy.visualization.plots._common import ZORDER_SOURCE, _draw_geometry, _imshow_extent, _overlay_seafloor, typed_plot_error
 
 
@@ -170,7 +169,7 @@ def animate_field(
     )
 
     if show_seafloor and env is not None:
-        _overlay_seafloor(ax, env, ranges)
+        _overlay_seafloor(ax, env, ranges, painted=im)
 
     if show_source:
         _draw_geometry(ax, field.source_depths)
@@ -398,18 +397,19 @@ def plot_time_snapshots(
             k = int(np.argmin(np.abs(times - t_target)))
             slab = data3[:, :, k]
             ax = axes[i, j]
-            ax.imshow(
-                slab,
-                extent=_imshow_extent(ranges, depths),
+            extent = _imshow_extent(ranges, depths)
+            im = ax.imshow(
+                slab, extent=extent,
                 aspect=row_aspect, cmap=cmap,
                 vmin=-pm, vmax=pm, origin='upper',
             )
             if env is not None:
-                _overlay_seafloor(ax, env, ranges)
+                _overlay_seafloor(ax, env, ranges, painted=im)
                 ax.set_ylim(float(env.depth) * 1.05, 0)
             else:
                 ax.set_ylim(depths[-1], depths[0])
-            ax.set_xlim(0, float(m_to_km(ranges[-1])))
+            # From the source out to the far edge of the last painted cell.
+            ax.set_xlim(0, max(extent[:2]))
             if i == 0:
                 ax.set_title(f"t = {times[k] * 1000:.0f} ms", fontsize=10)
             if j == 0:

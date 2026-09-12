@@ -597,7 +597,7 @@ def _plot_field_2d(
     # is a (depth, range) cross-section.
     if axes_present == ['depth', 'range']:
         if env is not None:
-            _overlay_seafloor(ax, env, x_coord)
+            _overlay_seafloor(ax, env, x_coord, painted=im)
         if source is not None or receiver is not None:
             # Range is measured from the source, so the source sits at r = 0
             # even when the field's own grid starts further out.
@@ -647,7 +647,7 @@ def _finish_sonar_heatmap(fig, ax, im, field, *, env, x_label, colorbar_label,
     ax.grid(True, alpha=0.3, zorder=0)
     ax.set_title(title if title else auto_title)
     if env is not None:
-        _overlay_seafloor(ax, env, field.coords['range'])
+        _overlay_seafloor(ax, env, field.coords['range'], painted=im)
     if owns_fig:                         # credit only a figure we own
         _draw_result_credit(fig, field, env=env)
     return fig, ax
@@ -838,7 +838,7 @@ def compare(
     labels: Optional[Sequence[str]] = None,
     ax=None,
     *,
-    value: str = 'dB',
+    value: Optional[str] = None,
     figsize: Tuple[float, float] = (10, 5),
     title: Optional[str] = None,
     **mpl_kw,
@@ -854,6 +854,9 @@ def compare(
     either: depth increases downward, and so does the value axis of a loss
     cut — transmission loss or reverberation, see :func:`_is_loss_view` — but
     not that of any other dB quantity, which is a level and reads upward.
+    ``value=None`` picks the view :func:`plot_field` would pick for the
+    first field on its own (:func:`_default_value`): the dB view wherever
+    one exists, the raw samples of a time trace.
     """
     if not fields:
         raise ConfigurationError(
@@ -886,6 +889,10 @@ def compare(
                 f"physical quantities and share no value axis.",
                 remediation="Compare like with like, or plot them separately "
                             "with plot_field.")
+        if value is None:
+            # Every field shares the first one's kind, so its default view
+            # is the shared view.
+            value = _default_value(fields[0])
         axes = list(f.coords)
         if len(axes) != 1:
             raise ConfigurationError(
@@ -910,9 +917,11 @@ def compare(
             ax.plot(x_plot, np.asarray(arr).ravel(), label=lbl, **mpl_kw)
     # The kind check above makes the first field representative of them all,
     # so it settles the shared value-axis label and — for a loss cut — the
-    # direction that axis runs.
-    vlabel = _value_label(fields[0], value)
-    value_is_loss = _is_loss_view(fields[0], value)
+    # direction that axis runs. ``view`` is the resolved name of the view the
+    # loop drew (``fields`` is non-empty, so it is never the default here).
+    view: str = value if value is not None else _default_value(fields[0])
+    vlabel = _value_label(fields[0], view)
+    value_is_loss = _is_loss_view(fields[0], view)
     if common_axis == 'depth':
         ax.set_ylabel(_coord_label(common_axis))
         ax.set_xlabel(vlabel)
@@ -949,7 +958,7 @@ def compare_models(
     labels: Optional[Sequence[str]] = None,
     *,
     env: Optional[Environment] = None,
-    value: str = 'dB',
+    value: Optional[str] = None,
     vmin: Optional[float] = None,
     vmax: Optional[float] = None,
     cmap: Optional[str] = None,
@@ -967,6 +976,9 @@ def compare_models(
     ``title`` titles the whole figure; the per-panel titles come from
     ``labels``. ``ncols`` controls the grid width — defaults to ``n`` (single
     row). ``contours`` adds dB-level contour lines to every panel.
+    ``value=None`` picks the view :func:`plot_field` would pick for the first
+    panel on its own (:func:`_default_value`): the dB view wherever one
+    exists, the raw samples of a time-domain wavefield.
 
     Returns
     -------
@@ -1023,9 +1035,12 @@ def compare_models(
                 )
                 break
 
-    # Every panel here shares one kind already, so ``ref`` settles the styling
-    # for the whole figure — and it is read from the same table plot_field
-    # reads, so a panel is coloured as if it had been plotted on its own.
+    # Every panel here shares one kind already, so ``ref`` settles the view
+    # and the styling for the whole figure — both read from the same tables
+    # plot_field reads, so a panel is drawn as if it had been plotted on its
+    # own.
+    if value is None:
+        value = _default_value(ref)
     style_cmap, style_vmin, style_vmax = _value_style(ref, value)
     if (value == 'dB' and ref.kind == 'signal_excess'
             and not _is_time_domain(ref)):

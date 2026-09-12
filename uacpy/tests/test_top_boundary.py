@@ -137,12 +137,14 @@ def test_kraken_family_env_writes_top_bc_for_halfspace_surface(
 
 @pytest.mark.requires_binary
 def test_ram_drops_surface_shear_with_warning():
-    """RAM has no backend that reads surface shear; elastic surfaces must be
-    collapsed to pressure-release with a UserWarning."""
+    """RAM has no backend that reads any surface but a pressure-release one;
+    an elastic ice surface must be collapsed to vacuum with a UserWarning
+    that names the shear."""
     env = _basic_env(_ice())
     ram = uacpy.models.RAM(verbose=False)
     with pytest.warns(UserWarning, match="surface shear is not supported"):
-        env_collapsed = ram._drop_unsupported_surface_shear(env)
+        env_collapsed = ram._collapse_surface_to_pressure_release(env)
+    assert env_collapsed.surface.acoustic_type == 'vacuum'
     assert env_collapsed.surface.shear_speed == 0.0
     assert env_collapsed.surface.shear_attenuation == 0.0
 

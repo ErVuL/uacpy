@@ -298,7 +298,7 @@ class TestLayeredBottom:
         assert isinstance(env.bottom, uacpy.Bottom)
 
 
-# ─── range-dependent half-space: linear blend + reductions ──────────────────
+# ─── range-dependent half-space: nearest step, opt-in blend, reductions ─────
 
 class TestRDHalfspace:
     def _b(self):
@@ -306,15 +306,35 @@ class TestRDHalfspace:
             [0, 5000, 12000], sound_speed=[1600, 1700, 1800],
             density=[1.5, 1.6, 1.7], attenuation=[0.5, 0.4, 0.3])
 
-    def test_halfspace_at_linear(self):
+    def test_halfspace_at_default_is_the_nearest_column(self):
+        """The default is the same step rule as ``at`` / ``column_index_at``:
+        the switch sits midway between consecutive nodes, and either side
+        of it the column is returned intact (no blended value anywhere)."""
         b = self._b()
-        assert b.halfspace_at(range=0).sound_speed == pytest.approx(1600)
-        assert b.halfspace_at(range=2500).sound_speed == pytest.approx(1650)   # midpoint
-        assert b.halfspace_at(range=2500).density == pytest.approx(1.55)
+        eps = 1e-6
+        assert b.halfspace_at(range=0).sound_speed == 1600
+        assert b.halfspace_at(range=2500 - eps).sound_speed == 1600
+        assert b.halfspace_at(range=2500 - eps).density == 1.5
+        assert b.halfspace_at(range=2500 + eps).sound_speed == 1700
+        assert b.halfspace_at(range=2500 + eps).density == 1.6
+        assert b.halfspace_at(range=8500 - eps).sound_speed == 1700
+        assert b.halfspace_at(range=8500 + eps).sound_speed == 1800
+        assert b.halfspace_at(range=12000).sound_speed == 1800
+        assert (b.halfspace_at(range=7000).sound_speed
+                == b.halfspace_at(range=7000, interp='nearest').sound_speed
+                == 1700)
+
+    def test_halfspace_at_linear_is_an_explicit_opt_in(self):
+        b = self._b()
+
+        def lin(r):
+            return b.halfspace_at(range=r, interp='linear')
+        assert lin(0).sound_speed == pytest.approx(1600)
+        assert lin(2500).sound_speed == pytest.approx(1650)   # midpoint
+        assert lin(2500).density == pytest.approx(1.55)
         # between 5000 and 12000 at 7000: t = 2000/7000
-        assert b.halfspace_at(range=7000).sound_speed == pytest.approx(
-            1700 + (2000 / 7000) * 100)
-        assert b.halfspace_at(range=12000).sound_speed == pytest.approx(1800)
+        assert lin(7000).sound_speed == pytest.approx(1700 + (2000 / 7000) * 100)
+        assert lin(12000).sound_speed == pytest.approx(1800)
 
     def test_soa_views(self):
         b = self._b()

@@ -396,7 +396,7 @@ CONVERTED_SITES = [
     ('io/oases_writer.py', '_write_oases_header', 1),
     ('io/oases_writer.py', 'write_oasn_input', 1),
     ('io/oases_writer.py', 'write_oassp_input', 1),
-    ('io/refl_io.py', 'stage_reflection_file', 1),
+    ('io/refl_io.py', 'stage_reflection_file', 2),
     ('parallel.py', '_reap_scratch_root', 2),
     ('sonar/reverberation.py', '_warn_if_cell_is_not_short', 1),
     ('sonar/scattering.py', '_warn_outside_chapman_harris_fit', 3),

@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from uacpy.core.environment import SoundSpeedProfile
+from uacpy.core.environment import Environment, SoundSpeedProfile
 from uacpy.core.exceptions import (ConfigurationError, DataFetchError,
                                    FileFormatError)
 from uacpy.data import argo
@@ -215,3 +215,36 @@ def test_an_argo_profile_extends_under_its_own_equation(monkeypatch):
         default = float(np.asarray(
             extend_ssp_below_data(stripped, 5000.0).data)[-1, 0])
     assert abs(stamped - default) > 0.05
+
+
+def test_a_repeated_pressure_level_keeps_its_first_sample(monkeypatch):
+    rows = [
+        "4900001,1,A,2024-06-04T00:00:00Z,30.1,-40.1,5,20,36,1,1,1\n",
+        "4900001,1,A,2024-06-04T00:00:00Z,30.1,-40.1,5,21,36.5,1,1,1\n",
+        "4900001,1,A,2024-06-04T00:00:00Z,30.1,-40.1,10,18,36,1,1,1\n",
+        "4900001,1,A,2024-06-04T00:00:00Z,30.1,-40.1,20,15,36,1,1,1\n",
+    ]
+    monkeypatch.setattr(argo, 'http_get', lambda url, **kw: _csv(rows))
+    prof = argo.fetch_argo_profile((30.0, -40.0), date='2024-06-04')
+    assert prof['pres'].tolist() == [5.0, 10.0, 20.0]
+    assert prof['temp'][0] == 20.0                  # first sample of the pair
+    assert prof['psal'][0] == 36.0
+    ssp = argo.fetch_ssp_argo((30.0, -40.0), date='2024-06-04')
+    assert ssp.n_depths == 3                        # strictly increasing depths
+
+
+def test_a_negative_surface_pressure_becomes_the_0_m_node(monkeypatch):
+    rows = [
+        "4900001,1,A,2024-06-04T00:00:00Z,30.1,-40.1,-0.2,20,36,1,1,1\n",
+        "4900001,1,A,2024-06-04T00:00:00Z,30.1,-40.1,0.0,20,36,1,1,1\n",
+        "4900001,1,A,2024-06-04T00:00:00Z,30.1,-40.1,10,18,36,1,1,1\n",
+        "4900001,1,A,2024-06-04T00:00:00Z,30.1,-40.1,20,15,36,1,1,1\n",
+    ]
+    monkeypatch.setattr(argo, 'http_get', lambda url, **kw: _csv(rows))
+    prof = argo.fetch_argo_profile((30.0, -40.0), date='2024-06-04')
+    assert prof['pres'].tolist() == [0.0, 10.0, 20.0]   # clamped, then merged
+    ssp = argo.fetch_ssp_argo((30.0, -40.0), date='2024-06-04')
+    assert ssp.depths[0] == 0.0
+    assert np.all(np.diff(ssp.depths) > 0)
+    env = Environment(ssp=ssp, bathymetry=50.0)
+    assert env.ssp.depths[0] == 0.0                 # the deck's first SSP row

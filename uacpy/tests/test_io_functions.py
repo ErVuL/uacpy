@@ -1169,14 +1169,15 @@ class TestBathyIOTypedErrors:
         bty, bty_type = read_bathymetry(path)
         assert bty_type == 'L'
         assert bty.shape[0] == 7, "long format must return the geoacoustic rows"
-        # The seabed varies, so the writer fills the axis; read the node columns.
-        r = bty[0, 1:-1]
-        nodes = [0.0, 5000.0, 10000.0] if r.max() > 100.0 else [0.0, 5.0, 10.0]
-        idx = [1 + int(np.argmin(np.abs(r - v))) for v in nodes]
-        assert bty.shape[1] - 2 >= 128
-        assert np.allclose(bty[2, idx], [1600.0, 1650.0, 1700.0])
-        assert np.allclose(bty[4, idx], [1.7, 1.8, 1.9])
-        assert np.allclose(bty[5, idx], [0.4, 0.5, 0.6])
+        # Rows: the bathymetry nodes plus the switch midway between the two
+        # bottom nodes (here coinciding with the 5 km bathymetry node). The
+        # seabed steps there: the first column up to the switch row, the
+        # second from it — nothing blended.
+        assert np.allclose(bty[0, 1:-1], [0.0, 5000.0, 10000.0])
+        assert np.allclose(bty[1, 1:-1], [100.0, 150.0, 120.0])
+        assert np.allclose(bty[2, 1:-1], [1600.0, 1700.0, 1700.0])
+        assert np.allclose(bty[4, 1:-1], [1.7, 1.9, 1.9])
+        assert np.allclose(bty[5, 1:-1], [0.4, 0.6, 0.6])
         # ±infinity extension holds every row constant.
         assert bty[0, 0] == -1e50 and bty[0, -1] == 1e50
         assert bty[2, 0] == bty[2, 1] and bty[2, -1] == bty[2, -2]
@@ -4059,6 +4060,34 @@ class TestReflectionTablesAreNeverEditedInPlace:
             stage_reflection_file(src, tmp_path / 'deck.env',
                                   boundary='bottom')
         assert [str(w.message) for w in caught] == []
+
+    @staticmethod
+    def _stage_two_row_table(tmp_path, phase_deg_step):
+        from uacpy.io.refl_io import stage_reflection_file
+        src = tmp_path / 'deck.brc'
+        src.write_text(f"2\n 10.0 0.5 0.0\n 20.0 0.6 {phase_deg_step:.1f}\n")
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            stage_reflection_file(src, tmp_path / 'deck.env',
+                                  boundary='bottom')
+        return [str(w.message) for w in caught]
+
+    @pytest.mark.parametrize('step', [180.5, -180.5, 315.6])
+    def test_a_phase_step_past_a_half_turn_at_the_destination_is_reported(
+            self, tmp_path, step):
+        """The engine interpolates phi linearly between bracketing rows
+        (misc/RefCoef.f90:119 assumes an unwrapped column), so a wrapped
+        step is swept the long way round. The copy path unwraps; the
+        in-place path can only say so."""
+        messages = self._stage_two_row_table(tmp_path, step)
+        assert len(messages) == 1
+        assert 'unwrap' in messages[0]
+        assert 'staged unmodified' in messages[0]
+
+    @pytest.mark.parametrize('step', [180.0, -180.0, 179.5])
+    def test_a_phase_step_within_a_half_turn_is_not_reported(
+            self, tmp_path, step):
+        assert self._stage_two_row_table(tmp_path, step) == []
 
     def test_a_copied_table_is_normalised(self, tmp_path):
         """The copy is what earns the right to rewrite."""

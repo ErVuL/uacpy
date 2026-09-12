@@ -663,16 +663,6 @@ def write_bty_file(filepath: Union[str, Path], bathymetry: np.ndarray, interp_ty
     _write_boundary_2d(filepath, bathymetry, interp_type)
 
 
-#: Minimum number of ``.bty`` rows written across a range-dependent geoacoustic
-#: profile. Bellhop applies each row's half-space to the whole segment to its
-#: right (``bdryMod.f90``, ``Bot(IsegBot)%HS``), so a ramp given by two nodes
-#: reaches the engine as a constant seabed unless it is sampled: measured on a
-#: 1600 -> 1800 m/s ramp over 5 km at 300 Hz against 101 rows, two rows were
-#: 9.3 dB rms / 18.8 dB max off, eleven rows 1.1 / 1.5 dB, and 128 rows match
-#: RAM's ``_MAX_SED_PROFILES`` sampling of the same kind of profile.
-_BTY_RAMP_ROWS = 128
-
-
 def write_bty_long_format(
     filepath: Union[str, Path],
     bathymetry: np.ndarray,
@@ -715,13 +705,17 @@ def write_bty_long_format(
     - Following lines:
       ``range_km depth cp_m_s cs_m_s rho_g_cm3 alpha_p alpha_s``
 
-    Rows are emitted on the **union** of the bathymetry and bottom range
-    grids (depth and geoacoustics each interpolated onto it), so property
-    breaks between bathymetry points survive rather than being blended away.
-    When any geoacoustic property varies with range, the union is filled to
-    at least ``_BTY_RAMP_ROWS`` evenly spaced rows: Bellhop holds each row's
-    values over the whole segment to its right, so a ramp has to be sampled
-    to reach the engine as a ramp.
+    A range-dependent half-space is a STEP function of range: each column
+    holds from the midpoint with its left neighbour to the midpoint with its
+    right (the nearest-column rule of ``Bottom.at`` / ``Bottom.halfspace_at``,
+    the one Kraken's segments and RAM's profiles switch on too). Bellhop
+    applies a row's geoacoustics to the whole segment to its right
+    (``bellhop.f90:478``, ``Bot(IsegBot)%HS``), so the rows are the union of
+    the bathymetry nodes, the first bottom node and the MIDPOINTS between
+    consecutive bottom nodes, and every row carries the column that owns the
+    segment starting at it. That reproduces the step exactly with no extra
+    rows. Depth is linearly interpolated onto every row — bathymetry IS a
+    ramp between its nodes, which is Bellhop's own ``'L'`` semantics.
     """
     filepath = Path(filepath)
     interp_char = _validate_interp_type(interp_type)
@@ -752,18 +746,19 @@ def write_bty_long_format(
     bathy_km[:, 0] = m_to_km(bathy_km[:, 0])
     _check_km_column_resolves('.bty (long) range column', bathy_km[:, 0])
 
-    rd_r_km = m_to_km(bottom_rd.ranges)
-    r_km = np.union1d(bathy_km[:, 0], np.asarray(rd_r_km, dtype=float))
-    varies = any(np.ptp(np.asarray(v, dtype=float)) > 0.0 for v in (
-        bottom_rd.halfspace_sound_speed, bottom_rd.halfspace_density,
-        bottom_rd.halfspace_attenuation, bottom_rd.halfspace_shear_speed,
-        bottom_rd.halfspace_shear_attenuation))
-    if varies and r_km.size < _BTY_RAMP_ROWS:
-        fill = np.linspace(r_km[0], r_km[-1], _BTY_RAMP_ROWS)
-        # Drop fill points within 1 mm of an existing node: the merged-axis
-        # check below refuses tokens that print identically at six decimals.
-        fill = fill[np.abs(fill[:, None] - r_km[None, :]).min(axis=1) > 1e-6]
-        r_km = np.union1d(r_km, fill)
+    rd_r_km = np.atleast_1d(np.asarray(m_to_km(bottom_rd.ranges), dtype=float))
+    # Column switches sit midway between consecutive bottom nodes. Each
+    # switch is a row, so Bellhop's hold-to-the-right rule reproduces the
+    # nearest-column step exactly; the first node anchors the first column.
+    switches_km = 0.5 * (rd_r_km[:-1] + rd_r_km[1:])
+    r_km = np.union1d(bathy_km[:, 0], rd_r_km[:1])
+    # Drop a switch within 1 mm of an existing row: the merged-axis check
+    # below refuses tokens that print identically at six decimals, and the
+    # row already there takes the switch's column through the segment
+    # centre lookup.
+    new_switches = switches_km[
+        np.abs(switches_km[:, None] - r_km[None, :]).min(axis=1) > 1e-6]
+    r_km = np.union1d(r_km, new_switches)
     # Check the axis that is WRITTEN, not just the bathymetry axis checked
     # above. Each carrier enforces its own 1 mm minimum step within itself
     # (Bottom.__post_init__, _grid.py), but nothing enforces one ACROSS them,
@@ -777,12 +772,18 @@ def write_bty_long_format(
     # FatalError.f90 STOPs at exit 0, leaving no .shd.
     _check_km_column_resolves('.bty (long) merged range axis', r_km)
     depth = np.interp(r_km, bathy_km[:, 0], bathy_km[:, 1])
-    cp = np.interp(r_km, rd_r_km, bottom_rd.halfspace_sound_speed)
-    rho = np.interp(r_km, rd_r_km, bottom_rd.halfspace_density)
-    alpha = np.interp(r_km, rd_r_km, bottom_rd.halfspace_attenuation)
-    cs = np.interp(r_km, rd_r_km, bottom_rd.halfspace_shear_speed)
-    alpha_s = np.interp(r_km, rd_r_km,
-                        bottom_rd.halfspace_shear_attenuation)
+    # The column a row carries is the one owning the segment to its right:
+    # evaluated at the segment's centre (the last row at itself), so a row
+    # sitting exactly on a switch takes the column to the right of it, and
+    # the number of switches at or left of that point is the column index.
+    seg_centre = np.append(0.5 * (r_km[:-1] + r_km[1:]), r_km[-1])
+    col = np.searchsorted(switches_km, seg_centre, side='right')
+    cp = np.asarray(bottom_rd.halfspace_sound_speed, dtype=float)[col]
+    rho = np.asarray(bottom_rd.halfspace_density, dtype=float)[col]
+    alpha = np.asarray(bottom_rd.halfspace_attenuation, dtype=float)[col]
+    cs = np.asarray(bottom_rd.halfspace_shear_speed, dtype=float)[col]
+    alpha_s = np.asarray(bottom_rd.halfspace_shear_attenuation,
+                         dtype=float)[col]
     n_pts = r_km.size
 
     with open(filepath, "w") as f:

@@ -738,6 +738,35 @@ class TestBroadbandNFreqsGuard:
         np.testing.assert_allclose(got, [90.0, 100.0])
 
 
+class TestBroadbandBandwidthFactorGuard:
+    """``_resolve_broadband_frequencies`` names the cause of an empty band:
+    a non-positive ``bandwidth_factor`` (the band ``fc·(1 ± bf/2)`` inverts
+    or collapses at any fc) is reported as such, and only a centre frequency
+    the 1 Hz floor overtakes is blamed on being sub-1 Hz."""
+
+    _SRC = Source(depths=50.0, frequencies=1000.0)
+
+    def _resolve(self, source, bandwidth_factor):
+        return Bellhop(verbose=False)._resolve_broadband_frequencies(
+            source, None, n_freqs=8, bandwidth_factor=bandwidth_factor)
+
+    @pytest.mark.parametrize('bandwidth_factor', [-0.5, 0.0])
+    def test_a_non_positive_factor_is_named_as_the_cause(self, bandwidth_factor):
+        with pytest.raises(ConfigurationError) as exc:
+            self._resolve(self._SRC, bandwidth_factor)
+        text = str(exc.value)
+        assert 'bandwidth_factor must be positive' in text, text
+        assert 'Sub-1 Hz' not in text, text
+
+    def test_the_smallest_positive_factor_expands_the_band(self):
+        got = self._resolve(self._SRC, 1e-3)
+        assert got.size == 8 and got[0] < got[-1]
+
+    def test_a_sub_1_hz_centre_frequency_is_blamed_on_the_floor(self):
+        with pytest.raises(ConfigurationError, match=r'Sub-1 Hz centre'):
+            self._resolve(Source(depths=50.0, frequencies=0.5), 0.5)
+
+
 @pytest.mark.requires_binary
 class TestSelectBackendIsPureIntrospection:
     """``Kraken.select_backend`` decides the backend name from the

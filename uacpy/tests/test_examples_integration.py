@@ -22,6 +22,7 @@ import sys
 from pathlib import Path
 from typing import Set
 
+import numpy as np
 import pytest
 
 import uacpy
@@ -736,3 +737,109 @@ def test_the_comparison_examples_use_the_librarys_tl_difference_renderer():
     assert not local, (
         f"an example defines its own difference renderer: {local}. Use "
         f"uacpy.plot.plot_field_difference.")
+
+
+def _module_constants(tree):
+    """Module-level ``NAME = literal`` and ``a, b = 1, 2`` assignments."""
+    consts = {}
+    for node in tree.body:
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            continue
+        try:
+            value = ast.literal_eval(node.value)
+        except ValueError:
+            continue
+        target = node.targets[0]
+        if isinstance(target, ast.Name):
+            consts[target.id] = value
+        elif (isinstance(target, ast.Tuple)
+                and all(isinstance(e, ast.Name) for e in target.elts)):
+            consts.update(zip((e.id for e in target.elts), value))
+    return consts
+
+
+def _first_call(tree, name):
+    """The first ``name(...)`` / ``x.name(...)`` call in ``tree``."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            f = node.func
+            if ((isinstance(f, ast.Name) and f.id == name)
+                    or (isinstance(f, ast.Attribute) and f.attr == name)):
+                return node
+    raise AssertionError(f"no call to {name}")
+
+
+def _literal_kwargs(call, consts):
+    """The keyword arguments of ``call`` that are literals or module
+    constants; the others (an axes, an array) are left out."""
+    out = {}
+    for kw in call.keywords:
+        v = kw.value
+        if isinstance(v, ast.Name) and v.id in consts:
+            out[kw.arg] = consts[v.id]
+        else:
+            try:
+                out[kw.arg] = ast.literal_eval(v)
+            except ValueError:
+                continue
+    return out
+
+
+def test_example_06_marks_the_profile_ranges_its_run_held():
+    """The dashed lines on the shelf TL panel sit at the ranges the adiabatic
+    run held its profiles at — the ``n_segments`` linspace
+    ``segment_environment_by_range`` builds over the same bathymetry — and
+    nowhere else. Lines at the midpoints between profiles annotate the figure
+    with switches the run never made."""
+    from uacpy.core.units import m_to_km
+    from uacpy.models._segmentation import segment_environment_by_range
+
+    source = (EXAMPLES_DIR / 'example_06_kraken_advanced.py').read_text(
+        encoding='utf-8')
+    tree = ast.parse(source)
+    n_segments = _module_constants(tree)['N_SEGMENTS']
+    bathymetry = next(
+        ast.literal_eval(node.value.args[0]) for node in tree.body
+        if isinstance(node, ast.Assign)
+        and isinstance(node.targets[0], ast.Name)
+        and node.targets[0].id == 'bathymetry')
+    env = uacpy.Environment(bathymetry=np.array(bathymetry, dtype=float))
+    profiles_km = m_to_km(np.array(
+        [r for r, _ in segment_environment_by_range(env, n_segments=n_segments)]))
+
+    marker_loop = next(
+        node for node in ast.walk(tree) if isinstance(node, ast.For)
+        and any(isinstance(c, ast.Call) and getattr(c.func, 'attr', '') == 'axvline'
+                for c in ast.walk(node)))
+    drawn_km = np.asarray(eval(ast.get_source_segment(source, marker_loop.iter),
+                               {'np': np, 'N_SEGMENTS': n_segments}), dtype=float)
+    np.testing.assert_allclose(drawn_km, profiles_km[1:-1], err_msg=(
+        f"the markers sit at {drawn_km} km; the run's profiles sit at "
+        f"{profiles_km} km"))
+
+
+def test_example_10_band_power_window_holds_the_sweep():
+    """The constant-Q band-power panel's y window contains the level of the
+    chirp it is titled for: the bulk of the in-band bins — their interquartile
+    band — sits inside it. A window under the sweep shows only the leakage
+    skirts, the curve climbing off the top edge between them."""
+    from uacpy.acoustic_signal import constant_q_psd
+    from uacpy.acoustic_signal.waveforms import lfm_chirp
+    from uacpy.core.acoustics import power_to_dB
+
+    source = (EXAMPLES_DIR / 'example_10_signal_processing.py').read_text(
+        encoding='utf-8')
+    tree = ast.parse(source)
+    consts = _module_constants(tree)
+    chirp = _literal_kwargs(_first_call(tree, 'lfm_chirp'), consts)
+    _, lfm = lfm_chirp(**chirp)
+    cq = constant_q_psd(lfm, chirp['sample_rate'],
+                        **_literal_kwargs(_first_call(tree, 'constant_q_psd'),
+                                          consts))
+    window = _literal_kwargs(_first_call(tree, 'plot_constant_q_psd'), consts)
+    in_band = (cq.frequencies >= chirp['fmin']) & (cq.frequencies <= chirp['fmax'])
+    levels = power_to_dB(cq.power, 1e-6)[in_band]     # as the plotter scales it
+    q1, q3 = np.percentile(levels, [25, 75])
+    assert window['ymin'] <= q1 and q3 <= window['ymax'], (
+        f"the in-band interquartile band {q1:.0f}..{q3:.0f} dB is not inside "
+        f"the panel's {window['ymin']}..{window['ymax']} dB window")

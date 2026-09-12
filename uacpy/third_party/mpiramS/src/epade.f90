@@ -292,6 +292,14 @@ complex(kind=wp2), dimension(:), allocatable :: az, azz
     if ((abs(dz)>err).and.(iter<nter)) then
       continue
     else
+      ! UACPY: a search call (err>0) leaving the loop with |dz|>err has hit
+      ! its iteration cap without converging; stop here, as Collins'
+      ! ram1.5.f does, rather than deflate a wrong root into the Pade
+      ! coefficients. The err=0 polish call runs exactly nter steps.
+      if ((abs(dz)>err).and.(err>0.0_wp2)) then
+        write(*,*) 'Laguerre method not converging. Try a different combination of dr and np.'
+        stop
+      end if
       exit
     end if
   end do

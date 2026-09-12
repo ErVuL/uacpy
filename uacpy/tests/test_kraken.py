@@ -3775,3 +3775,40 @@ def test_the_mode_grid_is_sized_on_the_column_the_modes_are_solved_on():
             or 'moved up' in str(w.message)]
     assert said == [], said
     assert float(np.max(modes.depths)) <= 55.0 + 1e-9
+
+
+class TestFieldResultsRecordTheModesBinary:
+    """``backend`` on a TL / broadband result is ``'field'`` — the binary that
+    wrote the ``.shd`` — so the modes binary the dispatch picked (kraken or
+    krakenc) is recorded alongside it as ``metadata['modes_backend']``, the
+    way ``compute_modes`` stamps it on ``backend``."""
+
+    _SRC = Source(depths=25.0, frequencies=100.0)
+    _RCV = Receiver(depths=[30.0], ranges=[1000.0])
+
+    @staticmethod
+    def _env(shear_speed):
+        return Environment(
+            name='hs', bathymetry=100.0, ssp=1500.0,
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=1800, density=1.8,
+                                      attenuation=0.3,
+                                      shear_speed=shear_speed))
+
+    def test_fluid_tl_names_kraken(self):
+        result = Kraken(verbose=False).run(self._env(0.0), self._SRC, self._RCV)
+        assert result.backend == 'field'
+        assert result.metadata['modes_backend'] == 'kraken'
+
+    def test_elastic_tl_names_krakenc(self):
+        result = Kraken(verbose=False).run(self._env(400.0), self._SRC,
+                                           self._RCV)
+        assert result.backend == 'field'
+        assert result.metadata['modes_backend'] == 'krakenc'
+
+    def test_broadband_carries_the_stamp(self):
+        result = Kraken(verbose=False).run(
+            self._env(0.0), self._SRC, self._RCV, run_mode=RunMode.BROADBAND,
+            frequencies=np.array([90.0, 100.0]))
+        assert result.backend == 'field'
+        assert result.metadata['modes_backend'] == 'kraken'

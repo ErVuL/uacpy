@@ -221,8 +221,8 @@ real(kind=wp),dimension(:),allocatable :: rb1, zb1
       ! cw/cb/rhob/attn at ABSOLUTE depth indices and matrc reads them at the
       ! current iz, so between rebuilds up to 20 m of seabed immediately below
       ! a RISING seafloor still holds water values. Measured on a 200->100 m
-      ! wedge: 4.38 dB median / 29.6 dB max against ramgeo, versus 0.51 dB
-      ! downslope (where the stale band lands above iz and is unused).
+      ! wedge: 4.38 dB median / 29.6 dB max against ramgeo; the downslope
+      ! control is unaffected (the stale band lands above iz and is unused).
              iflag=iflag+1
              izll=iz
       end if
@@ -286,7 +286,7 @@ use profiles
 
 implicit none
 
-real(kind=wp), parameter :: eta=0.018323389971986   !  eta=1/(40*pi*log10(exp(1)));
+real(kind=wp), parameter :: eta=0.018323389971986_wp   !  eta=1/(40*pi*log10(exp(1)));
                                  !  Why calculate a division, a log, and an exponential every time?
 complex(kind=wp), parameter :: ci=cmplx(0.0, 1.0,wp)
 
@@ -326,7 +326,7 @@ if (iflag==1.or.iflag==3) then    ! update sediment sound speed, density, attenu
 
 !   First find the depth at this range
     rwork(1)=r
-    work(:,1)=interp1(rb,zb,rwork,zb(1))
+    work(:,1)=interp1(rb,zb,rwork,zb(size(zb)))
     depth=work(1,1)
 
 !   Construct nzs depth points: surface, seafloor, nzs-3 interior sediment

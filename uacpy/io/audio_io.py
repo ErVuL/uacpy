@@ -298,8 +298,10 @@ def read_wav(filepath: Union[str, Path]):
     Raises
     ------
     ConfigurationError
-        Not a RIFF/WAVE file, no ``fmt ``/``data`` chunk, or a format this
-        module does not write (compressed, or a bit depth outside 16/24/32).
+        Not a RIFF/WAVE file, no ``fmt ``/``data`` chunk, a ``fmt `` chunk
+        shorter than a format block, a ``data`` chunk that is not a whole
+        number of frames, or a format this module does not write
+        (compressed, or a bit depth outside 16/24/32).
     """
     raw = Path(filepath).read_bytes()
     fmt = data = None
@@ -314,6 +316,11 @@ def read_wav(filepath: Union[str, Path]):
             remediation="The file is truncated or not a wav; every WAVE file "
                         "carries both.")
 
+    if len(fmt) < 16:
+        raise ConfigurationError(
+            f"read_wav: fmt chunk holds {len(fmt)} bytes; a WAVE format "
+            f"block is at least 16.",
+            remediation="The file is truncated or not a wav.")
     format_tag, n_channels, rate = struct.unpack('<HHI', fmt[:8])
     bits = struct.unpack('<H', fmt[14:16])[0]
     if (format_tag, bits) not in {(tag, b) for tag, b in _ENCODINGS.values()}:
@@ -322,6 +329,15 @@ def read_wav(filepath: Union[str, Path]):
             f"this module handles.",
             remediation=f"It reads {sorted(_ENCODINGS)} — PCM and IEEE float. "
                         f"A compressed or extensible wav needs soundfile.")
+
+    frame_bytes = n_channels * bits // 8
+    if frame_bytes == 0 or len(data) % frame_bytes:
+        raise ConfigurationError(
+            f"read_wav: data chunk holds {len(data)} bytes, not a whole "
+            f"number of {frame_bytes}-byte frames ({n_channels} channel(s) "
+            f"at {bits} bits).",
+            remediation="The file is truncated or its header does not "
+                        "describe its samples.")
 
     if format_tag == 1 and bits == 24:
         # 24-bit has no numpy dtype: widen each 3-byte little-endian sample

@@ -73,10 +73,10 @@ class TestRangeDependentEnvironment:
         assert env.has_range_dependent_bottom
         assert len(env.bottom.ranges) == 3
 
-        # Test getting bottom at specific range
-        bottom_at_2km = env.bottom.halfspace_at(range=2000)
-        assert bottom_at_2km.sound_speed > 1600
-        assert bottom_at_2km.sound_speed < 1650
+        # Nearest column: 2 km is on the first column's side of the 2.5 km
+        # switch, 3 km on the second's.
+        assert env.bottom.halfspace_at(range=2000).sound_speed == 1600
+        assert env.bottom.halfspace_at(range=3000).sound_speed == 1650
 
     def test_range_dependent_ssp(self):
         """Test range-dependent sound speed profile."""
@@ -273,9 +273,11 @@ class TestModelWithRangeDependence:
             ranges=np.array([1000.0, 3000.0]),
         )
         ram = RAM(verbose=False)   # dz unpinned → Lytaev optimizer path
-        # The auto-dz on this env hits the depth-grid and λ_p/16 floors,
-        # which warn by design.
-        with pytest.warns(UserWarning, match="raised dz"):
+        # The auto-dz on this env hits the depth-grid and λ_p/16 floors; at
+        # the default accuracy that is a log line, not a UserWarning (a
+        # pinned ``accuracy`` is what promotes it).
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", UserWarning)
             result = ram.run(env, source, receiver)
         assert isinstance(result, Field)
         assert np.all(np.isfinite(result.dB))
@@ -322,10 +324,14 @@ class TestRangeDependentConsistency:
             bottom=bottom_rd
         )
 
-        bottom_at_2_5km = env.bottom.halfspace_at(range=2500)
+        bottom_at_2km = env.bottom.halfspace_at(range=2000)
+        bottom_at_3km = env.bottom.halfspace_at(range=3000)
         depth_at_2_5km = float(env.bathymetry.eval(range=2500))
 
-        assert 1600 < bottom_at_2_5km.sound_speed < 1650
+        # The seabed steps at the midpoint between its nodes; the bathymetry
+        # ramps between its nodes.
+        assert bottom_at_2km.sound_speed == 1600
+        assert bottom_at_3km.sound_speed == 1650
         assert 100 < depth_at_2_5km < 110
 
     def test_ssp_2d_matrix_shape(self):

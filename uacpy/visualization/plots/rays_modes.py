@@ -303,7 +303,10 @@ def _plot_arrivals(
         lo = first - 0.05 * (span or 1)
         hi = first + span + 0.05 * (span or 1)
         ax.set_xlim(lo, hi)
-        beyond = [d for d in delays_ms if d > hi]
+        # Over the DRAWN stems: in the dB view the axis reaches the last one
+        # drawn, so an arrival past the end is one the floor hid, and it is
+        # counted with those below rather than a second time here.
+        beyond = [d for d in drawn_ms if d > hi]
     ax.set_xlabel('Delay (ms)')
     ax.set_ylabel('Received level (dB re unit source)' if dB
                   else 'Received amplitude (re unit source)')
@@ -328,13 +331,18 @@ def _plot_arrivals(
                   f"(to {max(beyond):.0f} ms)"))
     if under:
         # In dB, the unit of the level axis it refers to, as the delay entry
-        # above is in the milliseconds of the delay axis.
+        # above is in the milliseconds of the delay axis. A hidden arrival
+        # past the end of the axis is named here, once.
+        hidden_beyond = sum(1 for d in delays_ms if d > hi)
+        label = f"+{under} below {floor:.0f} dB"
+        if hidden_beyond:
+            label += f", of which {hidden_beyond} beyond the axis"
         handles.append(mlines.Line2D(
-            [], [], linestyle='none', marker='',
-            label=f"+{under} below {floor:.0f} dB"))
+            [], [], linestyle='none', marker='', label=label))
     if handles:
-        ax.legend(handles=handles, loc='upper right', fontsize=9,
-                  framealpha=0.85)
+        # Placed clear of the stems, as _plot_rays places its own: pinned to
+        # a corner, it can cover the head marker of the last stem drawn.
+        ax.legend(handles=handles, loc='best', fontsize=9, framealpha=0.85)
     if title:
         ax.set_title(title)
     if _owns_fig:

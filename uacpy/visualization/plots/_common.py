@@ -466,23 +466,40 @@ def _sink_line_into_sediment(line) -> None:
         0.0, -half_inch, line.axes.figure.dpi_scale_trans))
 
 
-def _overlay_seafloor(ax, env: Environment, ranges_m: np.ndarray) -> None:
+def _painted_x_span(artist) -> Tuple[float, float]:
+    """``(lo, hi)`` x-extent, in data units, of the heatmap ``artist`` an
+    overlay sits on: the outer cell edges of a ``QuadMesh``, the extent of an
+    image. Both reach half a cell past the outermost sample centre."""
+    if hasattr(artist, 'get_coordinates'):
+        xs = np.asarray(artist.get_coordinates())[..., 0]
+        return float(np.nanmin(xs)), float(np.nanmax(xs))
+    x0, x1 = artist.get_extent()[:2]
+    return float(min(x0, x1)), float(max(x0, x1))
+
+
+def _overlay_seafloor(ax, env: Environment, ranges_m: np.ndarray, *,
+                      painted=None) -> None:
     """Draw the seafloor on top of a (depth, range) heatmap.
 
     Uses high z-orders (sediment + 5, line + 6) so the bathymetry sits
     above contour lines and TL data — matches the original AT-style
-    rendering. Bathymetry is clipped to the painted span — the data x-range
-    plus a marker's width past each end (:func:`_fill_margins`), from the
-    source range when the data start beyond it — and anchored at both ends,
-    and the y-axis is extended downward when the seafloor dips below the
-    data extent so the sediment fill stays visible. The boundary stroke is
-    sunk into the sediment (:func:`_sink_line_into_sediment`) so nothing in
-    the water column — a ray skimming the bottom, the lowest field row — is
-    covered by it."""
+    rendering. Bathymetry is clipped to the painted span — the x-extent of
+    the heatmap ``painted`` (its cell edges, :func:`_painted_x_span`) or,
+    with no heatmap, the ``ranges_m`` span — plus a marker's width past each
+    end (:func:`_fill_margins`), from the source range when the data start
+    beyond it — and anchored at both ends, and the y-axis is extended
+    downward when the seafloor dips below the data extent so the sediment
+    fill stays visible. The x limits are set to that span, so the panel
+    shows every painted cell whole. The boundary stroke is sunk into the
+    sediment (:func:`_sink_line_into_sediment`) so nothing in the water
+    column — a ray skimming the bottom, the lowest field row — is covered by
+    it."""
     if env is None:
         return
     data_r_km = m_to_km(ranges_m)
-    if data_r_km.size:
+    if painted is not None:
+        x_lo, x_hi = _painted_x_span(painted)
+    elif data_r_km.size:
         x_lo, x_hi = float(data_r_km.min()), float(data_r_km.max())
     else:
         x_lo, x_hi = ax.get_xlim()

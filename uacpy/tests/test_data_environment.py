@@ -743,3 +743,15 @@ def test_with_absorption_without_a_ph_source_keeps_the_model_default_as_nbs(
     env = env_mod.fetch_environment((43.2, 7.5), with_absorption=True)
     assert env.absorption.ph_scale == 'nbs'
     assert env.absorption.ph_nbs == DEFAULT_OCEAN_PH
+
+
+@pytest.mark.parametrize('flag', [True, False])
+def test_a_bool_bottom_is_refused_rather_than_read_as_phi(flag):
+    with pytest.raises(ConfigurationError, match='bottom must be'):
+        env_mod._resolve_bottom(flag, water_sound_speed=1500.0)
+
+
+def test_an_integer_bottom_is_a_grain_size():
+    bp = env_mod._resolve_bottom(1, water_sound_speed=1500.0)
+    assert isinstance(bp, BoundaryProperties)
+    assert bp.grain_size_phi == 1.0

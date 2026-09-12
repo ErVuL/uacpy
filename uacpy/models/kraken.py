@@ -2094,7 +2094,7 @@ class Kraken(PropagationModel):
         of each profile is medium 1.
         """
         media = []
-        for _range_km, seg in segments:
+        for _range_m, seg in segments:
             seafloor = deck_depth(seg.depth)
             water = seg.ssp.extend_to(seafloor).to_pairs()
             media.append((seafloor, float(water[-1, 1])))
@@ -2655,6 +2655,11 @@ class Kraken(PropagationModel):
                 bounds,
                 line_c_source=(_source_sound_speed(env, source)
                                if source.source_type == 'line' else None))
+            # ``backend`` names field.exe, which wrote the .shd; the modes
+            # binary the dispatch picked (kraken / krakenc) moves the
+            # eigenvalues, so it is recorded beside it, as ``compute_modes``
+            # stamps it on ``backend``.
+            field.metadata['modes_backend'] = Path(kraken_exe).stem
 
             # Physical fastest compressional speed in the waveguide (water
             # column + sediment + half-space) on the complex-spectrum

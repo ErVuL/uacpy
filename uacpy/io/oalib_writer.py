@@ -402,9 +402,9 @@ def _plan_unpadded_media(segments, acoustic_types
     range-dependent bathymetry over a boundary-condition seabed cannot
     satisfy it in any deck, so it is refused rather than approximated.
     """
-    plans = [_profile_media(env_seg) for _range_km, env_seg in segments]
+    plans = [_profile_media(env_seg) for _range_m, env_seg in segments]
     bottoms = {(media[-1][1] if media else deck_depth(env_seg.depth))
-               for media, (_range_km, env_seg) in zip(plans, segments)}
+               for media, (_range_m, env_seg) in zip(plans, segments)}
     counts = {len(media) for media in plans}
 
     if len(bottoms) > 1 or len(counts) > 1:
@@ -460,7 +460,7 @@ def plan_multi_profile_media(segments) -> Tuple[int, float, List[List[Tuple]]]:
     """
     non_geoacoustic = sorted(
         {env_seg.bottom.halfspace_at(range=0.0).acoustic_type
-         for _range_km, env_seg in segments} & _NON_GEOACOUSTIC_TYPES
+         for _range_m, env_seg in segments} & _NON_GEOACOUSTIC_TYPES
     )
     if non_geoacoustic:
         return _plan_unpadded_media(segments, non_geoacoustic)
@@ -468,7 +468,7 @@ def plan_multi_profile_media(segments) -> Tuple[int, float, List[List[Tuple]]]:
     n_media = max(_profile_n_media(seg) for _, seg in segments) + 1
 
     plans = []
-    for _range_km, env_seg in segments:
+    for _range_m, env_seg in segments:
         hs = env_seg.bottom.halfspace_at(range=0.0)
         media = _profile_media(env_seg)
         current = media[-1][1] if media else deck_depth(env_seg.depth)
@@ -1335,8 +1335,9 @@ def write_multi_profile_env(
     ----------
     filepath : Path
         Output .env file path
-    segments : list of (range_km, Environment)
-        Range segments. Each Environment must be range-independent.
+    segments : list of (range_m, Environment)
+        Range segments (segment start in metres). Each Environment must be
+        range-independent.
     source : Source
         Source configuration (frequency, depth)
     receiver : Receiver
@@ -1365,7 +1366,7 @@ def write_multi_profile_env(
     interp_ssp = kwargs.get('interp_ssp', 'linear')
 
     with open(filepath, 'w') as f:
-        for (_range_km, env_seg), all_extra_media in zip(segments,
+        for (_range_m, env_seg), all_extra_media in zip(segments,
                                                          media_plans):
             ssp_topopt = resolve_ssp_topopt(env_seg, interp_ssp)
             surface_obj = getattr(env_seg, 'surface', None)

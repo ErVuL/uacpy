@@ -1405,10 +1405,19 @@ class PropagationModel(ABC):
                 UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
             )
             lo = 1.0
-        # A sub-1 Hz fc can put the floored lower edge at or above the upper
-        # edge; a descending or duplicated frequency axis is a silently
-        # mislabelled Field, so refuse it.
+        # A non-positive bandwidth_factor inverts or collapses the band at
+        # any fc, and a sub-1 Hz fc can put the floored lower edge at or
+        # above the upper edge; a descending or duplicated frequency axis is
+        # a silently mislabelled Field, so refuse both, naming the cause.
         if hi <= lo:
+            if float(bandwidth_factor) <= 0:
+                raise ConfigurationError(
+                    f"{self.model_name} broadband: bandwidth_factor = "
+                    f"{bandwidth_factor:g} gives the band [{lo:g}, {hi:g}] Hz "
+                    f"around fc = {fc:g} Hz. The band is "
+                    f"fc*(1 +/- bandwidth_factor/2), so bandwidth_factor "
+                    f"must be positive."
+                )
             raise ConfigurationError(
                 f"{self.model_name} broadband: the band "
                 f"[{lo:g}, {hi:g}] Hz is empty after the 1 Hz floor "

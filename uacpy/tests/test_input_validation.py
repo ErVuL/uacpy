@@ -413,7 +413,7 @@ def test_ssp_eval_clamps_beyond_last_range():
     assert sliced.data[1, 0] == pytest.approx(1470.0)
 
 
-def test_rd_bottom_eval_interpolates_off_grid_range():
+def test_rd_bottom_halfspace_at_steps_to_the_nearest_column_at_the_midpoint():
     rd = Bottom.from_halfspaces(
         np.array([0.0, 5_000.0]),
         sound_speed=np.array([1600.0, 1800.0]),
@@ -421,9 +421,10 @@ def test_rd_bottom_eval_interpolates_off_grid_range():
         attenuation=np.array([0.3, 0.5]),
         acoustic_type='half-space',
     )
-    bp = rd.halfspace_at(range=2_500.0)
-    assert bp.sound_speed == pytest.approx(1700.0)
-    assert bp.density == pytest.approx(1.7)
+    below = rd.halfspace_at(range=2_500.0 - 1e-6)
+    above = rd.halfspace_at(range=2_500.0 + 1e-6)
+    assert (below.sound_speed, below.density) == (1600.0, 1.5)
+    assert (above.sound_speed, above.density) == (1800.0, 1.9)
 
 
 def test_bathymetry_eval_interpolates_off_grid():
@@ -455,13 +456,16 @@ def test_independent_bathy_ssp_bottom_ranges_compose_ok():
     assert env.is_range_dependent
     assert env.bathymetry.eval(range=4_000.0) == pytest.approx(140.0)
     assert env.ssp.eval(range=4_000.0).data[0, 0] == pytest.approx(1496.0)
-    assert env.bottom.halfspace_at(range=4_500.0).sound_speed == pytest.approx(1675.0)
+    # The seabed steps midway between its 3 and 6 km columns.
+    assert env.bottom.halfspace_at(range=4_500.0 - 1e-6).sound_speed == 1650.0
+    assert env.bottom.halfspace_at(range=4_500.0 + 1e-6).sound_speed == 1700.0
 
 
-def test_bty_long_format_uses_union_of_range_grids(tmp_path):
-    """RD-bottom ranges that differ from the bathymetry ranges survive exactly
-    on the written grid (with depth interpolated onto them) instead of being
-    blended onto the bathy grid; a varying seabed is filled to >= 128 rows."""
+def test_bty_long_format_rows_are_bathymetry_nodes_plus_column_switches(tmp_path):
+    """The written rows are the union of the bathymetry nodes and the switch
+    midway between the bottom's columns; the switch row carries the next
+    column (Bellhop holds a row's geoacoustics to its right), depth is
+    interpolated onto every row, and there is no other row."""
     from uacpy.io.bathy_io import write_bty_long_format
 
     bathy = np.array([[0.0, 100.0],
@@ -479,13 +483,16 @@ def test_bty_long_format_uses_union_of_range_grids(tmp_path):
     lines = [ln.split() for ln in out.read_text().splitlines() if ln.strip()
              and not ln.strip().startswith("'")]
     n_rows = int(lines[0][0])
-    assert n_rows >= 128        # union {0, 3, 6, 9} km, filled: the seabed varies
     rows = [list(map(float, row)) for row in lines[1:1 + n_rows]]
+    # Bathymetry nodes 0, 3, 9 km; the one switch (midway 0 -> 6 km) is the
+    # 3 km node itself; the 6 km bottom node is not a row.
+    assert [r[0] for r in rows] == [0.0, 3.0, 9.0]
+    assert n_rows == 3
     by_range = {r[0]: r for r in rows}
-    assert by_range[3.0][2] == pytest.approx(1700.0)    # midway 1600→1800
-    assert by_range[6.0][2] == pytest.approx(1800.0)    # bottom's own break
-    assert by_range[6.0][1] == pytest.approx(165.0)     # depth interpolated
-    assert by_range[9.0][2] == pytest.approx(1800.0)    # constant-extended
+    assert by_range[0.0][2] == pytest.approx(1600.0)    # first column
+    assert by_range[3.0][2] == pytest.approx(1800.0)    # switch row: next column
+    assert by_range[3.0][1] == pytest.approx(130.0)     # depth at its node
+    assert by_range[9.0][2] == pytest.approx(1800.0)    # still the second column
 
 
 @pytest.mark.requires_binary  # constructs Scooter/Kraken/Bellhop (resolves their binaries)

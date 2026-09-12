@@ -9,7 +9,7 @@ import numpy as np
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 
-from uacpy.core.results._base import Result
+from uacpy.core.results._base import PhaseReference, Result
 
 
 class ReflectionCoefficient(Result):
@@ -30,6 +30,16 @@ class ReflectionCoefficient(Result):
     frequencies : ndarray, optional, shape ``(n_frequencies,)`` — Hz
         Required when ``R`` is 2-D.
     is_broadband : bool — True iff ``R.ndim == 2``.
+
+    Sign convention of ``phi``: the package's travelling-wave form
+    (:attr:`~uacpy.core.results.PhaseReference.TRAVELLING_WAVE`, time
+    dependence ``exp(+iωt)``, propagator ``exp(-ikr)``), which is what
+    Bounce writes and the Acoustics Toolbox engines read from a ``.brc`` /
+    ``.trc`` table: a lossy fluid half-space below its critical angle has a
+    **positive** ``phi``. A table derived under the physics ``exp(-iωt)``
+    convention carries the opposite sign and must be conjugated before it
+    is handed to this class. A result built without an explicit
+    ``phase_reference`` is stamped ``'travelling_wave'``.
     """
     field_type = "reflection_coefficients"
 
@@ -41,6 +51,7 @@ class ReflectionCoefficient(Result):
         phi: np.ndarray,
         **kwargs,
     ):
+        kwargs.setdefault('phase_reference', PhaseReference.TRAVELLING_WAVE)
         super().__init__(**kwargs)
         # Copy on ingest (small arrays) so caller-side mutation can't corrupt
         # this result.

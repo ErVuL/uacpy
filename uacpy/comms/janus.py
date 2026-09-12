@@ -475,6 +475,14 @@ def _chips_alignment(x, fs, f_low, fsw, fh, cd, max_speed):
     # Doppler search, or moving to a band with higher tones, shortens it below
     # a chip so the window still fits within one Doppler-scaled chip. The floor
     # holds it at 3/4 chip, the reference's lower bound on the DFT length.
+    # The operand is the highest PASSBAND preamble tone (13 440 Hz in the
+    # initial band: f_low + 25 * fsw), because this detector runs on the
+    # passband record; the reference detects on the down-converted stream
+    # and feeds the same formula the highest BASEBAND slot offset (+1920 Hz,
+    # external:rx.c:329-332). At 5 m/s that is 0.78 chip here against 0.96 chip
+    # there (~44 Hz of tone drift over a chip against a ~800 Hz Hamming
+    # main lobe), a marginal difference that every detection statistic
+    # nevertheless depends on.
     gf = int(np.floor(fs * (_DOPPLER_C0 * cd)
                       / ((cd * float(tones.max()) + 1) * max_speed + _DOPPLER_C0)))
     gf = max(gf, int(0.75 * chip))

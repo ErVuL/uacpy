@@ -38,6 +38,18 @@ _VALID_SSP_SHAPES = (
 _ROUND_TRIP_NOISE_M = 1.0e-9
 
 
+def _flat_numeric_sequence(value):
+    """``value`` as a 1-D float array when it is a non-empty flat sequence
+    of numbers, else ``None`` (pair tables, ragged input and anything the
+    float cast refuses fall through to :meth:`SoundSpeedProfile.from_pairs`,
+    which reports the shape)."""
+    try:
+        arr = np.asarray(value, dtype=float)
+    except (TypeError, ValueError):
+        return None
+    return arr if arr.ndim == 1 and arr.size else None
+
+
 # eq=False: a dataclass __eq__ over ndarray fields raises; compare by identity.
 @dataclass(eq=False)
 class SoundSpeedProfile(_DeepCopyMixin):
@@ -509,6 +521,17 @@ class SoundSpeedProfile(_DeepCopyMixin):
                 f"(depth, sound_speed) pairs, or a SoundSpeedProfile; got "
                 f"a 0-d array of dtype {value.dtype}.")
         if isinstance(value, (list, tuple, np.ndarray)):
+            flat = _flat_numeric_sequence(value)
+            if flat is not None:
+                # A 1-D sequence of numbers is neither a scalar nor a pair
+                # table; say which of the two the caller may have meant.
+                raise ConfigurationError(
+                    f"Environment: ssp must be a scalar (m/s), a list of "
+                    f"(depth, sound_speed) pairs, or a SoundSpeedProfile; "
+                    f"got ssp={value!r}, a flat sequence of {flat.size} "
+                    f"number(s). For an isovelocity ocean pass "
+                    f"ssp={flat[0]:g}; for a profile pass pairs of shape "
+                    f"(N, 2): ssp=[(depth_m, sound_speed), ...].")
             return cls.from_pairs(value)
         raise ConfigurationError(
             f"Environment: ssp must be a scalar (m/s), a list of (depth, "

@@ -4971,3 +4971,175 @@ class TestAmbiguityIsARegisteredQuantity:
 
         with pytest.raises(ConfigurationError, match='unknown Field kind'):
             plots.plot_field(surface)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Composite plotters pick the view plot_field would pick
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _wavefield_pair():
+    """Two small (depth, range, time) pressure wavefields."""
+    rng = np.random.default_rng(3)
+    coords = {'depth': np.linspace(10.0, 50.0, 3),
+              'range': np.linspace(100.0, 500.0, 5),
+              'time': np.linspace(0.0, 0.1, 8)}
+    return [Field(data=rng.normal(size=(3, 5, 8)), coords=coords,
+                  model=name, frequencies=100.0, metadata={'kind': 'pressure'})
+            for name in ('A', 'B')]
+
+
+def test_compare_models_defaults_to_plot_fields_view_of_a_wavefield():
+    """A time-domain field has no dB view; ``compare_models`` at its default
+    draws the raw samples, as ``plot_field`` does for the same field."""
+    a, b = [f.isel(depth=0) for f in _wavefield_pair()]
+    fig, axes = compare_models([a, b])
+    mesh = next(c for c in axes[0, 0].collections
+                if isinstance(c, mcoll.QuadMesh))
+    np.testing.assert_allclose(np.asarray(mesh.get_array()).ravel(),
+                               np.asarray(a.data, dtype=float).ravel())
+    plt.close(fig)
+
+
+def test_compare_defaults_to_plot_fields_view_of_a_time_trace():
+    """``compare`` at its default overlays the raw samples of time traces,
+    the view ``plot_field`` picks for a field with a time axis."""
+    a, b = [f.at(depth=10.0, range=200.0) for f in _wavefield_pair()]
+    fig, ax = compare([a, b])
+    np.testing.assert_allclose(ax.lines[0].get_ydata(),
+                               np.asarray(a.data, dtype=float).ravel())
+    plt.close(fig)
+
+
+def test_compare_models_default_is_the_dB_view_of_a_pressure_field():
+    """For a field that has a dB view the default is that view: the panels and
+    the shared colorbar read exactly as with ``value='dB'`` spelled out."""
+    coords = {'depth': np.linspace(10.0, 50.0, 3),
+              'range': np.linspace(100.0, 500.0, 5)}
+    fields = [Field(data=(1e-3 * (k + 1)) * np.ones((3, 5), complex),
+                    coords=coords, model=f"M{k}", frequencies=100.0,
+                    metadata={'kind': 'pressure'}) for k in range(2)]
+    fig_default, axes_default = compare_models(fields)
+    fig_dB, axes_dB = compare_models(fields, value='dB')
+    for ax_default, ax_dB in zip(axes_default.ravel(), axes_dB.ravel()):
+        m_default, m_dB = [next(c for c in ax.collections
+                                if isinstance(c, mcoll.QuadMesh))
+                           for ax in (ax_default, ax_dB)]
+        np.testing.assert_allclose(m_default.get_array(), m_dB.get_array())
+    label = lambda fig: fig.axes[-1].get_ylabel()       # the shared colorbar
+    assert label(fig_default) == label(fig_dB) and 'dB' in label(fig_dB)
+    plt.close(fig_default)
+    plt.close(fig_dB)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# The seafloor overlay clips to the painted cells
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _uniform_pressure_field():
+    return Field(data=1e-3 * np.ones((10, 50), complex),
+                 coords={'depth': np.arange(5.0, 100.0, 10.0),
+                         'range': np.linspace(100.0, 5000.0, 50)},
+                 model='Synth', frequencies=100.0,
+                 metadata={'kind': 'pressure'})
+
+
+def _mesh_x_span(ax):
+    mesh = next(c for c in ax.collections if isinstance(c, mcoll.QuadMesh))
+    xs = np.asarray(mesh.get_coordinates())[..., 0]
+    return float(np.nanmin(xs)), float(np.nanmax(xs))
+
+
+def test_the_seafloor_overlay_keeps_every_painted_cell_on_the_axis():
+    """With ``env=`` the x limits are the mesh's outer cell edges, exactly as
+    without it: the overlay clips to what is painted, not to the sample
+    centres half a cell inside it."""
+    env = Environment(bathymetry=[[0.0, 80.0], [5000.0, 120.0]])
+    fig, ax = plot_field(_uniform_pressure_field(), env=env)
+    assert ax.get_xlim() == pytest.approx(_mesh_x_span(ax)), (
+        f"xlim {ax.get_xlim()} clips the mesh spanning {_mesh_x_span(ax)}")
+    fig_bare, ax_bare = plot_field(_uniform_pressure_field())
+    assert ax.get_xlim() == pytest.approx(ax_bare.get_xlim())
+    plt.close(fig)
+    plt.close(fig_bare)
+
+
+def test_the_animated_wavefield_keeps_every_painted_cell_on_the_axis():
+    """``animate_field`` and ``plot_time_snapshots`` paint an image out to the
+    cell edges; with ``env=`` the axis still reaches them."""
+    from uacpy.visualization.plots.animation import (animate_field,
+                                                     plot_time_snapshots)
+    rng = np.random.default_rng(0)
+    f = Field(data=rng.normal(size=(11, 6, 5)),
+              coords={'depth': np.arange(0.0, 101.0, 10.0),
+                      'range': np.arange(500.0, 3001.0, 500.0),
+                      'time': np.linspace(0.0, 1.0, 5)},
+              model='Synth', frequencies=100.0)
+    env = Environment(bathymetry=100.0)
+    anim = animate_field(f, env=env)
+    ax = anim._fig.axes[0]
+    left, right = ax.images[0].get_extent()[:2]
+    assert ax.get_xlim() == pytest.approx((left, right))
+    plt.close(anim._fig)
+    fig, axes = plot_time_snapshots({'a': f}, [0.5], env=env)
+    ax = np.asarray(axes).ravel()[0]
+    assert max(ax.get_xlim()) == pytest.approx(max(ax.images[0].get_extent()[:2]))
+    plt.close(fig)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# The dB arrival legend names a hidden arrival once
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_the_dB_legend_names_a_hidden_far_arrival_once():
+    """In the dB view the axis reaches the last stem drawn, so an arrival past
+    its end is one the floor already hid: the legend says so in ONE entry —
+    below the floor, and beyond the axis — rather than counting it under each
+    heading as if two arrivals were missing. The legend also sits clear of
+    every stem head."""
+    # One class per arrival: three class entries make the legend tall enough
+    # to reach the surface stem's head when it is pinned to a corner.
+    cell = {
+        "delays": np.array([1.000, 1.010, 1.050]),
+        "amplitudes": np.array([1.0, 0.3, 1e-5]), "phases": np.zeros(3),
+        "n_top_bounces": np.array([0, 1, 0]), "n_bot_bounces": np.array([0, 0, 1]),
+        "src_angles": np.zeros(3), "rcv_angles": np.zeros(3),
+        "delays_imag": np.zeros(3),
+    }
+    arr = Arrivals(by_receiver=[[[cell]]], receiver_depths=np.array([100.0]),
+                   receiver_ranges=np.array([1000.0]), model='Bellhop',
+                   frequencies=10e3)
+    fig, ax = arr.plot(dB=True, dynamic_range=60.0)
+    texts = [t.get_text() for t in ax.get_legend().get_texts()]
+    qualifiers = [t for t in texts if t.startswith('+')]
+    assert len(qualifiers) == 1, texts
+    assert 'below' in qualifiers[0] and 'beyond' in qualifiers[0], texts
+    fig.canvas.draw()
+    box = ax.get_legend().get_window_extent()
+    heads = [ln for ln in ax.lines if ln.get_marker() == 'o']
+    covered = [ln for ln in heads if box.contains(*ax.transData.transform(
+        (float(ln.get_xdata()[0]), float(ln.get_ydata()[0]))))]
+    assert not covered, [(ln.get_xdata()[0], ln.get_ydata()[0])
+                         for ln in covered]
+    plt.close(fig)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# The environment panel draws the source at r = 0
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_the_environment_panel_draws_the_source_at_the_source_range():
+    """Range is measured from the source, so ``env.plot(source=)`` puts the
+    star at r = 0 as ``plot_field`` does — also when the bathymetry's first
+    node sits further out — and the seafloor runs back to it, the first depth
+    held constant as the models hold it."""
+    import uacpy
+    env = Environment(bathymetry=[[500.0, 100.0], [5000.0, 150.0]])
+    fig, ax = env.plot(source=uacpy.Source(depths=50.0, frequencies=1000.0))
+    star = next(ln for ln in ax.get_lines() if ln.get_marker() == '*')
+    assert float(np.ravel(star.get_xdata())[0]) == 0.0, star.get_xdata()
+    seafloor = [ln for ln in ax.get_lines()
+                if ln.get_marker() in ('', 'None') and np.size(ln.get_xdata()) >= 2]
+    assert any(float(np.min(ln.get_xdata())) <= 0.0 for ln in seafloor), (
+        [float(np.min(ln.get_xdata())) for ln in seafloor])
+    assert min(ax.get_xlim()) <= 0.0
+    plt.close(fig)

@@ -3,7 +3,7 @@ module mattri
 
 use kinds
 
-real(kind=wp2), parameter :: dfact=0.0833333333333333  !  dfact=twelfth
+real(kind=wp2), parameter :: dfact=1.0_wp2/12.0_wp2  !  dfact=twelfth
 real(kind=wp2) :: cfact, a1, a2, a3
 
 complex(kind=wp),dimension(:),allocatable :: uu,f3

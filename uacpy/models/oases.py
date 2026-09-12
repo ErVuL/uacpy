@@ -1952,7 +1952,9 @@ class OASR(OASES):
         Returns a :class:`ReflectionCoefficient` with ``theta`` (1-D angle
         grid in degrees) and ``R``/``phi`` shaped ``(n_angles, n_frequencies)``
         when more than one frequency was requested. Single-frequency runs
-        return 1-D ``R``/``phi``.
+        return 1-D ``R``/``phi``. ``theta`` is always the GRAZING angle,
+        whichever ``angle_type`` the input angles were given in; the
+        ``angle_type`` used is stamped in the result's metadata.
 
         OASES uses grazing angles natively. When ``angle_type='incidence'``,
         input angles are converted via ``grazing = 90 - incidence`` before
@@ -2070,6 +2072,7 @@ class OASR(OASES):
                     frequencies=freqs_arr if len(freqs_arr) else None,
                     sampling_type=data.get('sampling_type', 'angle'),
                     reflection_type=self._resolve_reflection_type(),
+                    angle_type=self.angle_type,
                 ),
             )
             self._attach_output_paths(

@@ -163,6 +163,12 @@ class TestOptimizeGrid:
         ``test_ram_backends.py``. A knob here would let the two disagree
         about which grid is actually marched.
 
+        ``c_min_all`` / ``c_max_all`` bound the stability band — the medium's
+        hull, Lytaev §4.1's own ``inf c`` / ``sup c`` — while ``c_min`` /
+        ``c_max`` bound the water column the accuracy band is scored on
+        (``_bands``); both are physics inputs, not knobs. ``grid`` names a
+        ``(dr, dz)`` to score in place of the search (``grid_error``, and
+        RAM's rescoring of the grid it marches) — an input, not a knob.
         ``tau_cache`` is the one parameter that is not a Lytaev input, and it
         is not a knob either: it memoises τ(Δx, Δz) across RAM's ε-relaxation
         ladder and is barred from changing the answer by
@@ -173,7 +179,8 @@ class TestOptimizeGrid:
         params = set(inspect.signature(optimize_grid).parameters)
         assert params - {'tau_cache'} == {'freq', 'c_min', 'c_max', 'x_max',
                                           'c0', 'theta_max', 'eps', 'p',
-                                          'alpha'}
+                                          'alpha', 'c_min_all', 'c_max_all',
+                                          'grid'}
 
     def test_infeasible_raises(self):
         """No grid satisfies ε at this combination of inputs."""
@@ -355,11 +362,39 @@ class TestPadeBuildIsHoistedOutOfTheDepthLadder:
         assert len(set(calls)) == len(calls)     # never twice for one Δx
 
 
+def _pop_band_keys(result, kwargs):
+    """Remove the band keys from an ``optimize_grid`` result after checking
+    them against the band rule, so a dict recorded before the bands existed
+    still pins the selection. Without seabed bounds the stability band IS
+    the accuracy band (nothing outside it to grow) and the aperture end
+    binds, so the depth-operator band ends at ``k₀ sin θ``."""
+    c0, c_min, c_max = kwargs['c0'], kwargs['c_min'], kwargs['c_max']
+    sin_t = np.sin(np.deg2rad(kwargs['theta_max']))
+    assert result.pop('xi_stab_min') == pytest.approx(
+        -sin_t ** 2 + (c0 / c_max) ** 2 - 1)
+    assert result.pop('xi_stab_max') == pytest.approx((c0 / c_min) ** 2 - 1)
+    assert result.pop('kz_max') == pytest.approx(
+        2 * np.pi * kwargs['freq'] / c0 * sin_t)
+    assert result.pop('trapped_end_binds') is False
+    assert result.pop('growth') == 0.0
+
+
+def _bands_of(c0, c_max_all=None, c_min=1500.0, c_max=1500.0, theta_max=30.0):
+    """The bands ``optimize_grid`` scores at ``c0``, read off a scored pair;
+    ``kz_max_over_k0`` is its rad/m ``kz_max`` over ``k₀``."""
+    r = optimize_grid(grid=(10.0, 0.25), freq=200.0, c_min=c_min, c_max=c_max,
+                      x_max=5000.0, c0=c0, theta_max=theta_max, p=6,
+                      c_max_all=c_max_all)
+    r['kz_max_over_k0'] = r['kz_max'] / (2 * np.pi * 200.0 / c0)
+    return r
+
+
 class TestOptimizerReturnsItsRecordedGrids:
     """The independent pin for the Padé hoist: grids recorded from the
     optimiser as it stood when the approximant was rebuilt for every
     ``(Δx, Δz)`` pair. The hoist is a pure code motion, so every digit has
-    to survive it."""
+    to survive it. The band keys added later are checked against their own
+    functions and dropped before the comparison."""
 
     _CASES = [
         (dict(freq=100.0, c_min=1480.0, c_max=1750.0, x_max=5000.0,
@@ -399,6 +434,7 @@ class TestOptimizerReturnsItsRecordedGrids:
         cross-machine noise passes, while a formulation regression (the
         0.0-scores-everything class) still fails by orders of magnitude."""
         result = optimize_grid(**kwargs)
+        _pop_band_keys(result, kwargs)
         rendered = {k: repr(v) for k, v in sorted(result.items())}
         stable = dict(expected)
         for key in ('predicted_error', 'xi_min'):
@@ -447,6 +483,8 @@ class TestTauMemoAcrossTheRelaxationLadder:
         result, eps_used, theta_used = model._optimize_grid_relaxing(
             freq=1000.0, c_min=1500.0, c_max=1700.0, max_range=50000.0,
             c0_pe=1600.0, eps0=1e-4, theta0=30.0, kind='ramgeo')
+        _pop_band_keys(result, dict(freq=1000.0, c_min=1500.0, c_max=1700.0,
+                                    c0=1600.0, theta_max=theta_used, p=6))
         assert repr(theta_used) == '20.0'
         assert repr(eps_used) == '0.21869999999999998'
         rendered = self._rendered(result)
@@ -524,3 +562,213 @@ class TestPadeErrorSurvivesAnEvanescentSpectrum:
         assert combined_error(100.0, 1.0, k0, 6, xi_min, xi_max,
                               theta) == pytest.approx(0.018687614024691053,
                                                       rel=1e-12)
+
+
+class TestTheScoredBands:
+    """``optimize_grid`` splits the spectrum into the accuracy band (the
+    water column out to the wider of the aperture and the seabed's critical
+    angle) and the stability band (the medium's hull, Lytaev §4.1), and
+    reports both."""
+
+    def test_a_slow_seabed_leaves_the_aperture_end_binding(self):
+        """Sand (1600) traps modes to 20°, inside the 30° aperture, so the
+        accuracy band is Lytaev's water interval and the depth-operator
+        band ends at ``k₀ sin θ``."""
+        c0 = 1591.0
+        b = _bands_of(c0, 1600.0)
+        assert not b['trapped_end_binds']
+        assert b['xi_min'] == pytest.approx(-0.25 + (c0 / 1500.0) ** 2 - 1)
+        assert b['xi_max'] == pytest.approx((c0 / 1500.0) ** 2 - 1)
+        assert b['kz_max_over_k0'] == pytest.approx(np.sin(np.deg2rad(30.0)))
+
+    def test_a_fast_seabed_extends_the_band_to_its_critical_angle(self):
+        """Rock (2400) traps modes to 51°: the band's lower end is the
+        component grazing the rock, ``(c₀/c_max_all)² − 1``, and the
+        depth-operator band ends at that component's ``k_z`` in the water,
+        ``k_w sin θ_c`` — well past ``k₀ sin 30°``."""
+        c0 = 1799.0
+        b = _bands_of(c0, 2400.0)
+        assert b['trapped_end_binds']
+        assert b['xi_min'] == pytest.approx((c0 / 2400.0) ** 2 - 1)
+        theta_c = np.arccos(1500.0 / 2400.0)
+        assert b['kz_max_over_k0'] == pytest.approx(
+            (c0 / 1500.0) * np.sin(theta_c))
+        assert b['kz_max_over_k0'] > np.sin(np.deg2rad(30.0))
+
+    def test_the_stability_band_is_the_mediums_hull(self):
+        """Lytaev's own interval over ``inf c`` / ``sup c`` of the whole
+        domain, containing the accuracy band; on granite it crosses the
+        branch point ``ξ = −1`` while the accuracy band does not."""
+        c0 = 2047.0
+        b = _bands_of(c0, 5500.0)
+        assert b['xi_stab_min'] == pytest.approx(
+            -0.25 + (c0 / 5500.0) ** 2 - 1)
+        assert b['xi_stab_min'] < -1.0 < b['xi_min']
+        assert b['xi_stab_max'] >= b['xi_max']
+
+    def test_one_band_is_lytaevs_interval(self):
+        """Without seabed bounds the two bands coincide with §4.1's
+        ``[−sin²θ + (c₀/c_max)² − 1, (c₀/c_min)² − 1]``."""
+        b = _bands_of(1600.0, c_min=1500.0, c_max=1700.0)
+        assert b['xi_min'] == pytest.approx(-0.25 + (1600 / 1700) ** 2 - 1)
+        assert b['xi_max'] == pytest.approx((1600 / 1500) ** 2 - 1)
+        assert b['xi_stab_min'] == pytest.approx(b['xi_min'])
+        assert b['xi_stab_max'] == pytest.approx(b['xi_max'])
+
+
+class TestOptimalC0FollowsTheBindingEnd:
+    """With a seabed, ``optimal_c0`` centres the accuracy band on ``ξ = 0``
+    with Eq. (15) applied to whichever end bounds it."""
+
+    def test_sand_takes_the_water_columns_eq15_value(self):
+        c0 = optimal_c0(1500.0, 1500.0, 30.0, c_max_all=1600.0)
+        assert c0 == pytest.approx(optimal_c0(1500.0, 1500.0, 30.0))
+        assert 1590 < c0 < 1592
+
+    def test_granite_takes_the_trapped_bands_symmetric_value(self):
+        """``ξ_min = −ξ_max`` with the trapped-mode end: Eq. (15) of
+        ``(c_water, c_seabed)`` at zero aperture, 2047 m/s here."""
+        c0 = optimal_c0(1500.0, 1500.0, 30.0, c_max_all=5500.0)
+        assert c0 == pytest.approx(optimal_c0(1500.0, 5500.0, 0.0))
+        assert 2046 < c0 < 2048
+
+    def test_the_winner_leaves_the_band_narrower_than_the_loser(self):
+        """The rule, on both seabeds: the returned ``c₀`` gives the smaller
+        ``max(|ξ_min|, |ξ_max|)`` of the two candidates."""
+        for c_b in (1600.0, 5500.0):
+            cands = (optimal_c0(1500.0, 1500.0, 30.0),
+                     optimal_c0(1500.0, c_b, 0.0))
+
+            def width(c0):
+                b = _bands_of(c0, c_b)
+                return max(abs(b['xi_min']), abs(b['xi_max']))
+
+            c0 = optimal_c0(1500.0, 1500.0, 30.0, c_max_all=c_b)
+            assert width(c0) == pytest.approx(min(width(c) for c in cands))
+
+    def test_a_seabed_no_faster_than_the_water_leaves_eq15(self):
+        eq15 = 1480.0 * 1540.0 * np.sqrt(
+            (2 + np.sin(np.deg2rad(25.0)) ** 2) / (1480.0 ** 2 + 1540.0 ** 2))
+        assert optimal_c0(1480.0, 1540.0, 25.0) == pytest.approx(eq15)
+        assert optimal_c0(1480.0, 1540.0, 25.0, c_max_all=1540.0) == \
+            pytest.approx(eq15)
+
+
+class TestTheScoreRanksAFastSeabedsGrids:
+    """On granite the one-hull score saturated on every grid; the water-band
+    score follows the measured order (8.3 / 5.5 / 1.5 dB rms against
+    Kraken for the first three grids below)."""
+
+    C0 = 2046.5731207219399
+    KW = dict(freq=200.0, c_min=1500.0, c_max=1500.0, x_max=5000.0,
+              theta_max=30.0, p=6, c_min_all=1500.0, c_max_all=5500.0)
+    LADDER = [(10.0, 0.25), (2.25, 0.25), (2.0, 0.1), (0.5, 0.05),
+              (2.25, 0.03)]
+
+    def _scores(self):
+        return [optimize_grid(grid=(dr, dz), c0=self.C0, **self.KW)
+                for dr, dz in self.LADDER]
+
+    def test_the_water_band_score_is_monotone_down_the_ladder(self):
+        errs = [s['predicted_error'] for s in self._scores()]
+        assert errs == sorted(errs, reverse=True), errs
+        assert errs[0] > 5 * errs[2] > 5 * errs[-1]
+
+    def test_the_one_hull_score_saturates_on_every_rung(self):
+        """The old interval (seabed included in the accuracy band) cannot
+        rank these grids: every rung scores a saturated τ·n ≫ 1."""
+        hull = [grid_error(dr=dr, dz=dz, freq=200.0, c_min=1500.0,
+                           c_max=5500.0, x_max=5000.0, c0=self.C0,
+                           theta_max=30.0, p=6)
+                for dr, dz in self.LADDER]
+        assert min(hull) > 40.0
+
+    def test_the_stability_band_does_not_amplify(self):
+        for s in self._scores():
+            assert 0.0 <= s['growth'] < 1e-6
+
+    def test_granite_gets_a_grid_where_the_one_hull_model_refused(self):
+        c0 = optimal_c0(1500.0, 1500.0, 30.0, c_max_all=5500.0)
+        kw = dict(freq=200.0, c_min=1500.0, c_max=1500.0, x_max=5000.0,
+                  c0=c0, theta_max=30.0, p=6)
+        found = None
+        for eps in (1e-3, 3e-3, 9e-3, 2.7e-2, 8.1e-2, 0.243):
+            try:
+                found = optimize_grid(eps=eps, c_min_all=1500.0,
+                                      c_max_all=5500.0, **kw)
+                break
+            except RuntimeError:
+                continue
+        assert found is not None and found['dr'] > 0
+        for eps in (1e-3, 3e-3, 9e-3, 2.7e-2, 8.1e-2, 0.243):
+            with pytest.raises(RuntimeError):
+                optimize_grid(eps=eps, **dict(kw, c_max=5500.0))
+
+
+class TestTheStabilityBandIsHeldNonAmplifyingOnly:
+    """The stability band adds no accuracy demand: τ on the accuracy band
+    is the same with or without it, and it is the one-hull τ that is
+    larger — the hull's evanescent part is what saturated the score."""
+
+    def test_tau_ignores_the_stability_band_for_accuracy(self):
+        k0 = 2 * np.pi * 200.0 / 2047.0
+        band = combined_error(2.0, 0.1, k0, 6, -0.86, 0.86, np.deg2rad(30))
+        with_stab = combined_error(2.0, 0.1, k0, 6, -0.86, 0.86,
+                                   np.deg2rad(30), xi_stab_min=-1.11)
+        hull = combined_error(2.0, 0.1, k0, 6, -1.11, 0.86, np.deg2rad(30))
+        assert with_stab == pytest.approx(band, rel=1e-9)
+        assert hull > 10 * band
+
+    def test_an_amplifying_evanescent_band_is_rejected(self, monkeypatch):
+        """The growth test is what keeps the split honest: an operator that
+        grew the evanescent stability band would blow the march up, so it
+        scores as unusable (``inf``) rather than as accurate."""
+        import uacpy.models._pade_optimizer as mod
+        k0 = 2 * np.pi * 200.0 / 2047.0
+        real_eval = mod._eval_poly
+
+        def amplified(coeffs, x):
+            out = real_eval(coeffs, x)
+            # Scale the numerator on the evanescent part only.
+            if coeffs is P:
+                out = np.where(x < -1.0, out * 1.01, out)
+            return out
+
+        P, Q = mod._propagator_pade(2.0, k0, 6)
+        monkeypatch.setattr(mod, '_eval_poly', amplified)
+        assert mod.combined_error(2.0, 0.1, k0, 6, -0.86, 0.86,
+                                  np.deg2rad(30), pade=(P, Q),
+                                  xi_stab_min=-1.11) == float('inf')
+
+    def test_numerov_error_takes_the_band_edge_wavenumber(self):
+        """``kz_max`` overrides the aperture: the critical-angle component
+        of a fast seabed has ``k_z > k₀ sin θ`` and costs more."""
+        k0 = 2 * np.pi * 200.0 / 1799.0
+        at_aperture = numerov_error(0.25, k0, np.deg2rad(30.0))
+        at_kz = numerov_error(0.25, k0, np.deg2rad(30.0), kz_max=0.936 * k0)
+        assert at_kz > 5 * at_aperture
+        assert numerov_error(0.25, k0, np.deg2rad(30.0),
+                             kz_max=k0 * np.sin(np.deg2rad(30.0))) == \
+            pytest.approx(at_aperture)
+
+
+class TestTheRefusalStatesTheSearch:
+    """``optimize_grid``'s ``RuntimeError`` is RAM's control-flow signal:
+    it names the band and the ladders searched and carries no remedy, so
+    it cannot contradict the ``ConfigurationError`` RAM wraps it in."""
+
+    def test_the_message_names_the_band_and_ladders_and_no_remedy(self):
+        with pytest.raises(RuntimeError) as excinfo:
+            optimize_grid(freq=10000.0, c_min=1500.0, c_max=1500.0,
+                          x_max=1000000.0, c0=1500.0, theta_max=60.0,
+                          eps=1e-12, p=2, alpha=0.0)
+        text = str(excinfo.value)
+        assert 'accuracy band' in text and 'Δz ladder' in text
+        assert 'Δx ladder' in text
+        assert 'Try' not in text
+
+    def test_grid_error_is_the_scored_pairs_predicted_error(self):
+        kw = dict(freq=200.0, c_min=1500.0, c_max=1500.0, x_max=5000.0,
+                  c0=1799.0, theta_max=30.0, p=6, c_max_all=2400.0)
+        assert grid_error(dr=20.0, dz=0.2, **kw) == \
+            optimize_grid(grid=(20.0, 0.2), **kw)['predicted_error']

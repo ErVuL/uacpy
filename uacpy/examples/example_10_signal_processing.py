@@ -77,8 +77,9 @@ axes[3, 0].set_title('', loc='left')       # drop the plotter's own left title
 axes[3, 0].set_title('LFM constant-Q spectrogram', fontweight='bold')
 
 cq_psd = constant_q_psd(lfm, fs, fmin=80, fmax=2000, bins_per_octave=24)
+# The same 60 dB window as the spectrogram: the in-band bins peak near 107 dB.
 uacpy.plot.plot_constant_q_psd(cq_psd.frequencies, cq_psd.power,
-                               ax=axes[3, 1], ymin=-20, ymax=80)
+                               ax=axes[3, 1], ymin=60, ymax=120)
 axes[3, 1].set_title('', loc='left')
 axes[3, 1].set_title('LFM constant-Q band power', fontweight='bold')
 

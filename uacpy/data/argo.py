@@ -113,7 +113,9 @@ def fetch_argo_profile(
     float is preferred over a marginally closer but staler one.
 
     Returns ``{'platform', 'cycle', 'lat', 'lon', 'distance_km', 'pres', 'temp',
-    'psal'}`` (arrays sorted by increasing pressure, good-QC levels only). Raises
+    'psal'}`` (arrays sorted by strictly increasing pressure, good-QC levels
+    only; a negative surface pressure is floored at 0 dbar and an exactly
+    repeated level keeps its first sample). Raises
     ``DataFetchError`` when no float profile is within ``max_distance_km`` /
     ``max_days``.
     """
@@ -188,6 +190,12 @@ def fetch_argo_profile(
 
     (plat, cyc, dirn), prof, dist = min(within, key=_spacetime_cost)
     lev = np.array(sorted(prof['lev']), dtype=float)        # sort by pressure
+    # Real-time surface PRES may be slightly negative with QC 1 (Argo's
+    # global-range test admits -5 dbar): floor it at the surface so the depth
+    # conversion cannot place a node above 0 m, then keep the first sample of
+    # each exactly repeated level so the depths stay strictly increasing.
+    lev[:, 0] = np.maximum(lev[:, 0], 0.0)
+    lev = lev[np.unique(lev[:, 0], return_index=True)[1]]
     return {'platform': plat, 'cycle': cyc, 'direction': dirn,
             'lat': prof['lat'], 'lon': prof['lon'],
             'distance_km': float(dist), 'time': prof.get('time'),

@@ -83,3 +83,17 @@ def test_transect_classifies_each_waypoint_from_its_own_cell():
     assert rdb.halfspace_sound_speed.tolist() == pytest.approx(expected)
     assert rdb.halfspace_sound_speed[0] == pytest.approx(1494.90, abs=0.01)
     assert rdb.halfspace_sound_speed[1] == pytest.approx(1513.71, abs=0.01)
+
+
+def test_the_depth_fetch_carries_a_finite_default_timeout(monkeypatch):
+    seen = []
+
+    def _depth(point, timeout, verbose, cache_only):
+        seen.append(timeout)
+        return 3000.0
+
+    monkeypatch.setattr(pelagic, '_water_depth', _depth)
+    pelagic.fetch_bottom_pelagic((10.0, 20.0))
+    pelagic.fetch_bottom_pelagic_transect((10.0, 20.0), (11.0, 20.0),
+                                          n_points=2)
+    assert seen and all(t == 30.0 for t in seen)

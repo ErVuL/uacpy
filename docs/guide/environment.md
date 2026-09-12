@@ -396,7 +396,7 @@ uacpy.Bottom.from_columns(
 The same 120 m water column in all four panels, so the only thing that changes
 is the seabed carrier. The half-space is a single hatched fill; the layered
 column adds solid per-layer bands above it; the range-dependent half-space
-steps through three property sets at the range breaks; the range-dependent
+steps through three property sets, each switch midway between two range nodes; the range-dependent
 layered case is a geological cross-section with one column per range node
 (`P1`, `P2`) and a dashed boundary between them.
 
@@ -508,15 +508,19 @@ column.isel(layer=0)                      # the SedimentLayer itself
 column.total_thickness()                  # 35.0
 column.layer_depths(seafloor_depth=100.0) # [(100.0, 110.0), (110.0, 135.0)]
 
-bottom.halfspace_at(range=2000.0)         # interpolates — half-space bottoms only
+bottom.halfspace_at(range=2000.0)         # nearest column's half-space (step)
+bottom.halfspace_at(range=2000.0, interp='linear')  # opt-in blend, pure half-spaces only
 bottom.max_total_thickness()
 bottom.all_sound_speeds()                 # every real c_p in the seabed
 ```
 
 `Bottom` and `SeabedColumn` have `at` and `isel` but **no** `eval`: distinct
 materials cannot be linearly blended, so selection is always nearest.
-`halfspace_at` is the one exception — when every column is a pure half-space,
-blending properties is well defined, and it interpolates by default.
+`halfspace_at` follows the same nearest rule by default, so a range-dependent
+half-space is a step function of range whose switches sit midway between
+consecutive nodes — the same switch every engine deck is written with. When
+every column is a pure half-space, blending the properties is well defined,
+and `interp='linear'` asks for it explicitly.
 
 ---
 

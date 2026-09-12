@@ -1666,6 +1666,9 @@ class TestOASRIncidenceAngleAxis:
         np.testing.assert_allclose(np.asarray(inc.R, dtype=float),
                                    np.asarray(gra.R, dtype=float),
                                    rtol=1e-6, atol=1e-9)
+        # theta is grazing on both; the input convention rides in metadata.
+        assert inc.metadata['angle_type'] == 'incidence'
+        assert gra.metadata['angle_type'] == 'grazing'
 
 
 @pytest.mark.requires_binary

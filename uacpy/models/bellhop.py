@@ -1758,22 +1758,6 @@ class Bellhop(PropagationModel):
             output_duration=output_duration,
         )
 
-        # Multi-source-depth EIGENRAYS: ``WriteRay2D`` fires once per
-        # ray-meets-receiver (influence.f90:633-635), so the number of .ray
-        # records a source depth contributes is data-dependent and the header
-        # counts give no parseable per-source boundary. A RAYS run instead
-        # writes exactly Nalpha records per source depth (bellhop.f90:288-289,
-        # inside the SourceDepth / DeclinationAngle loops at :236, :262), so it
-        # — like TL and ARRIVALS — splits at the reader level from the single
-        # binary call. Loop in Python for this one mode.
-        if (
-            run_mode == RunMode.EIGENRAYS
-            and len(np.atleast_1d(source.depths)) > 1
-        ):
-            return self._run_eigenrays_multi_depth(
-                env, source, receiver, run_mode,
-                frequencies, source_waveform, sample_rate, output_duration)
-
         run_type = _RUN_MODE_TO_BELLHOP_TYPE[run_mode]
 
         # ── Bottom physics: BOUNCE for what the ray tracer cannot carry ──
@@ -1796,6 +1780,24 @@ class Bellhop(PropagationModel):
             frequencies, source_waveform, sample_rate, output_duration)
         if routed is not None:
             return routed
+
+        # Multi-source-depth EIGENRAYS: ``WriteRay2D`` fires once per
+        # ray-meets-receiver (influence.f90:633-635), so the number of .ray
+        # records a source depth contributes is data-dependent and the header
+        # counts give no parseable per-source boundary. A RAYS run instead
+        # writes exactly Nalpha records per source depth (bellhop.f90:288-289,
+        # inside the SourceDepth / DeclinationAngle loops at :236, :262), so it
+        # — like TL and ARRIVALS — splits at the reader level from the single
+        # binary call. Loop in Python for this one mode — below the BOUNCE
+        # route, whose table depends on the bottom column and frequency only,
+        # so a layered bottom is tabulated once for every source depth.
+        if (
+            run_mode == RunMode.EIGENRAYS
+            and len(np.atleast_1d(source.depths)) > 1
+        ):
+            return self._run_eigenrays_multi_depth(
+                env, source, receiver, run_mode,
+                frequencies, source_waveform, sample_rate, output_duration)
 
         # ── Resolve SSP interpolation, project the env, validate ────────
         effective_interp = resolve_ssp_interp(env, self.interp_ssp)
@@ -2124,9 +2126,12 @@ class Bellhop(PropagationModel):
             # .bty leaves sub-seafloor receivers above the deck depth
             # unclamped but ray-free), matching the RAM / Scooter /
             # SPARC below-domain convention. The irregular grid
-            # (RunType(5:5)='I') carries no depth axis and is left as
-            # read.
+            # (RunType(5:5)='I') carries no depth axis: its pairs are
+            # masked in place.
             def _restore_depths_and_mask(slab):
+                if list(slab.coords) == ['range']:
+                    return self._mask_paired_receivers_below_seafloor(
+                        slab, receiver, env)
                 if list(slab.coords) != ['depth', 'range']:
                     return slab
                 slab = self._mask_unresolvable_depths(
@@ -2246,17 +2251,20 @@ class Bellhop(PropagationModel):
             (default) uses ``DEFAULT_C_MAX_UNBOUNDED``, which zeroes BOUNCE's
             ``kMin`` and so covers grazing angles down to 0.
         rmax : float, optional
-            Maximum range for angular resolution (m). ``None`` (default) uses
-            ``receiver.range_max``, the range the table is propagated to.
+            Maximum range for angular resolution (m). ``None`` (default) is
+            resolved by ``Bounce.run``: ``receiver.range_max``, the range the
+            table is propagated to, or its 10 km fallback when every receiver
+            sits at r = 0 (the same fallback Bellhop's own ``r_box`` takes).
 
         Returns
         -------
         result : Result or ResultStack
             Bellhop simulation results using reflection coefficients. This
             forwards ``run_mode`` to :meth:`run`, so it hands back the same
-            two shapes: a ``ResultStack`` for an ``EIGENRAYS`` run over a
+            two shapes: a ``ResultStack`` (one slab per source depth) for a
             multi-depth ``Source``, one of the typed
-            :mod:`uacpy.core.results` subclasses otherwise.
+            :mod:`uacpy.core.results` subclasses otherwise. Every slab
+            carries ``metadata['bounce_result']``.
         """
         from uacpy.models.bounce import Bounce
 
@@ -2274,9 +2282,10 @@ class Bellhop(PropagationModel):
         # which you are propagating", and CMax must be ~1e9 "for a full 90
         # degree calculation" — a finite CMax truncates the table at
         # asin(c_water/CMax) and RefCoef.f90:144-149 then silently returns
-        # R = 0 for every steeper ray. Both default to the run's own geometry.
-        if rmax is None:
-            rmax = float(np.max(np.atleast_1d(receiver.ranges)))
+        # R = 0 for every steeper ray. ``rmax=None`` is forwarded: Bounce.run
+        # reads ``receiver.range_max`` and takes its own 10 km fallback when
+        # every receiver sits at r = 0, where the Bounce constructor would
+        # reject a literal 0.
         if c_high is None:
             c_high = DEFAULT_C_MAX_UNBOUNDED
         # ``c_low=None`` is forwarded rather than resolved here: Bounce's own
@@ -2335,11 +2344,15 @@ class Bellhop(PropagationModel):
             # Strip the about-to-be-invalid file paths (work dir is wiped
             # in the finally block below) and attach the in-memory bounce
             # result so the user can plot R(θ) / inspect the BRC without
-            # re-running BOUNCE.
+            # re-running BOUNCE. A multi-depth Source stacks the slabs and
+            # ``ResultStack.metadata`` reads slab 0's dict, so the one table
+            # (BOUNCE reads no source depth) goes on every slab.
             bounce_result.metadata.pop('brc_file', None)
             bounce_result.metadata.pop('irc_file', None)
             bounce_result.metadata.pop('prt_file', None)
-            result.metadata['bounce_result'] = bounce_result
+            for slab in (result.slabs
+                         if isinstance(result, ResultStack) else [result]):
+                slab.metadata['bounce_result'] = bounce_result
             return result
         finally:
             bounce_fm.cleanup_work_dir()
@@ -2689,8 +2702,39 @@ class Bellhop(PropagationModel):
                 **extra,
             ),
         )
-        if not irregular:
-            field = self._restore_broadband_depth_axis(field, receiver, env)
+        if irregular:
+            return self._mask_paired_receivers_below_seafloor(
+                field, receiver, env)
+        return self._restore_broadband_depth_axis(field, receiver, env)
+
+    def _mask_paired_receivers_below_seafloor(self, field, receiver, env):
+        """NaN the no-data cells of a paired-grid (``grid_type='I'``) result
+        and put the requested depths back on ``metadata['receiver_depths']``.
+
+        Pair ``i`` is ``(depths[i], ranges[i])``. BELLHOP clamps a depth below
+        the deck bottom onto it (``misc/SourceReceiverPositions.f90:136-139``)
+        and reports the clamped depth, and a pair under a shoaling ``.bty`` is
+        ray-free; both are no-data, exactly as on the rectilinear grid
+        (``_restore_depths_and_mask`` / ``_restore_broadband_depth_axis``).
+        The range axis (axis 0) is the pair index, so the one mask serves the
+        1-D TL slab and the ``(range, frequency | time)`` broadband Field.
+        """
+        depths = np.atleast_1d(np.asarray(receiver.depths, dtype=float))
+        ranges = np.asarray(field.coords['range'], dtype=float)
+        if depths.size != ranges.size:
+            raise ModelExecutionError(
+                self.model_name, return_code=0, stdout=None,
+                stderr=(f"{self.model_name} returned {ranges.size} receiver "
+                        f"pairs for {depths.size} requested; the paired "
+                        f"depths cannot be reattached."),
+            )
+        bathy = np.asarray(env.bathymetry.to_pairs(), dtype=float)
+        seafloor = np.interp(ranges, bathy[:, 0], bathy[:, 1])
+        below = (depths > float(env.depth)) | (depths > seafloor)
+        data = np.array(field.data, copy=True)
+        data[below, ...] = np.nan
+        field.data = data
+        field.metadata['receiver_depths'] = depths
         return field
 
     def _restore_arrival_depths(self, result, receiver, env):
@@ -2736,7 +2780,8 @@ class Bellhop(PropagationModel):
         depth unclamped but ray-free) — the 3-D
         ``(depth, range, time|frequency)`` counterpart of the
         ``_restore_depths_and_mask`` step the TL modes apply in :meth:`run`.
-        The irregular grid carries no depth axis and never reaches here.
+        The irregular grid carries no depth axis and takes
+        :meth:`_mask_paired_receivers_below_seafloor` instead.
         """
         field = self._mask_unresolvable_depths(
             field, receiver, float(env.depth))

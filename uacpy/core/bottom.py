@@ -1086,9 +1086,9 @@ class Bottom(_DeepCopyMixin):
 
         Always nearest — layer stacks cannot be linearly blended, so a `Bottom`
         has no general ``eval`` (unlike ``SoundSpeedProfile``/``Field``). For
-        the one blendable quantity use :meth:`halfspace_at` (interpolates the
-        half-space when every column is a pure half-space). Positional
-        counterpart: :meth:`isel`.
+        the one blendable quantity, the half-space of a pure half-space
+        bottom, :meth:`halfspace_at` offers an opt-in ``interp='linear'``.
+        Positional counterpart: :meth:`isel`.
 
         ``range`` must be a finite scalar — a NaN/inf or array-valued label
         raises ``ConfigurationError``, the same contract ``Field.at`` applies.
@@ -1129,13 +1129,18 @@ class Bottom(_DeepCopyMixin):
 
     def halfspace_at(self, *, range: float,
                      interp: Optional[str] = None) -> BoundaryProperties:
-        """Half-space ``BoundaryProperties`` at ``range`` (m). ``interp=None``
-        auto-resolves: **linear** when every column is a pure half-space
-        (the only case where blending properties is well-defined), else
-        **nearest**. A blend takes the non-blendable fields (``acoustic_type``,
-        ``reflection_file``, ``grain_size_phi``) from the r = 0 column; a
-        nearest lookup returns that column's half-space intact. ``range`` must
-        be a finite scalar on both paths."""
+        """Half-space ``BoundaryProperties`` at ``range`` (m).
+
+        The default (``interp=None`` or ``'nearest'``) reads the NEAREST
+        column's half-space intact — the same step rule as :meth:`at` and
+        :meth:`column_index_at`, switching midway between consecutive
+        ``ranges`` nodes, which is where every engine deck (Bellhop long
+        ``.bty``, Kraken segments, RAM profiles) places the switch.
+        ``interp='linear'`` blends the properties between the two bracketing
+        columns; it is only defined when every column is a pure
+        ``'half-space'``, and it takes the non-blendable fields
+        (``acoustic_type``, ``reflection_file``, ``grain_size_phi``) from the
+        r = 0 column. ``range`` must be a finite scalar on both paths."""
         if interp not in (None, 'linear', 'nearest'):
             raise ConfigurationError(
                 f"Bottom.halfspace_at: interp must be 'linear', 'nearest' or "
@@ -1152,9 +1157,7 @@ class Bottom(_DeepCopyMixin):
         # boundary that exists nowhere on the axis.
         blendable = (not self.is_layered and all(
             c.halfspace.acoustic_type == 'half-space' for c in self.columns))
-        if interp is None:
-            interp = 'linear' if blendable else 'nearest'
-        if self.ranges is None or interp == 'nearest':
+        if self.ranges is None or interp in (None, 'nearest'):
             return _copy.deepcopy(
                 self.columns[self._nearest_index(range)].halfspace)
         if not blendable:
@@ -1163,8 +1166,8 @@ class Bottom(_DeepCopyMixin):
                 f"Bottom.halfspace_at(interp='linear') needs every column to "
                 f"be a pure 'half-space' to blend; got {types}"
                 f"{' with sediment layers' if self.is_layered else ''}. Use "
-                f"interp='nearest' (the default here) to read the nearest "
-                f"column intact.")
+                f"interp='nearest' (the default) to read the nearest column "
+                f"intact.")
         return _reduce_boundaries(
             [c.halfspace for c in self.columns],
             lambda values: np.interp(label, self.ranges, values))

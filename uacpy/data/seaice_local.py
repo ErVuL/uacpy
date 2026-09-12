@@ -464,10 +464,11 @@ def sea_ice_grid(month: int, *, hemi: str = 'N') -> np.ndarray:
     ``hemi`` is ``'N'`` / ``'S'``; the array is on the NSIDC polar-stereographic
     grid (North EPSG:3411, South EPSG:3412, 25 km).
     """
-    if hemi not in _GRID or not 1 <= require_month(month, 'sea_ice_grid') <= 12:
+    month = require_month(month, 'sea_ice_grid')
+    if hemi not in _GRID:
         raise ConfigurationError(
-            "sea_ice_grid: hemi must be 'N'/'S' and month 1-12.")
-    return _model()[hemi][int(month) - 1]
+            f"sea_ice_grid: hemi must be 'N'/'S'; got {hemi!r}.")
+    return _model()[hemi][month - 1]
 
 
 def sea_ice_pixel(point: Coordinate, *, hemi: str = 'N'):

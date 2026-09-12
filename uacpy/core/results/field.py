@@ -11,9 +11,7 @@ from typing import Optional, Dict, Any, List, Tuple, Union
 from uacpy.core._carrier_validate import _DeepCopyMixin, _require_finite, _reject_complex
 from uacpy.core.constants import DEFAULT_SOUND_SPEED
 from uacpy.core.exceptions import ConfigurationError
-from uacpy.core._grid import (
-    _as_finite_scalar_label, _nearest_index_on_axis, collapse_axis,
-)
+from uacpy.core._grid import _nearest_index_on_axis, collapse_axis
 from uacpy.core.environment import Bathymetry, Environment
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 
@@ -479,7 +477,10 @@ class Field(Result):
 
     @property
     def n_frequencies(self) -> int:
-        if self.frequencies is not None:
+        """Number of frequencies, from the identity list or the
+        ``'frequency'`` coord under the same length guard :attr:`f0` uses;
+        0 for time-domain results."""
+        if self.frequencies is not None and len(self.frequencies):
             return int(len(self.frequencies))
         f = self.coords.get('frequency')
         return int(f.size) if f is not None else 0
@@ -1022,9 +1023,12 @@ class Field(Result):
         ranges = self.coords['range']
         depths = self.coords['depth']
         seafloor = np.interp(ranges, bathy[:, 0], bathy[:, 1])
-        new_data = self.data.astype(
-            np.complex128 if self.is_complex else np.float64, copy=True,
-        )
+        # An inexact payload keeps its width (a .shd-backed float32 result
+        # stays float32); only an integer payload, which cannot hold NaN,
+        # is widened.
+        dtype = (self.data.dtype
+                 if np.issubdtype(self.data.dtype, np.inexact) else np.float64)
+        new_data = self.data.astype(dtype, copy=True)
         for j, sf in enumerate(seafloor):
             mask = depths > sf
             new_data[mask, j] = np.nan
@@ -2098,16 +2102,10 @@ def _ifft_to_trace(
     freqs, df, bin_indices, bin_offset_hz, nfft, win = _synthesis_plan(
         tf, window=window, nfft=nfft, sample_rate=sample_rate, who=who)
 
-    d_idx = (
-        int(np.argmin(np.abs(
-            depths - _as_finite_scalar_label(depth, 'depth'))))
-        if depth is not None else n_d // 2
-    )
-    r_idx = (
-        int(np.argmin(np.abs(
-            ranges - _as_finite_scalar_label(range, 'range'))))
-        if range is not None else 0
-    )
+    d_idx = (_nearest_index_on_axis(depths, depth, 'depth')
+             if depth is not None else n_d // 2)
+    r_idx = (_nearest_index_on_axis(ranges, range, 'range')
+             if range is not None else 0)
     actual_depth = float(depths[d_idx])
     actual_range = float(ranges[r_idx])
 

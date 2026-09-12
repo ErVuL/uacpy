@@ -3663,8 +3663,9 @@ class TestEnvironmentCoerceDispatchesRejectBool:
         with pytest.raises(ConfigurationError, match='is a bool'):
             SoundSpeedProfile.coerce(np.array(True), depth_max=50.0)
 
-    def test_a_one_d_array_goes_to_from_pairs(self):
-        # The dimension boundary: 0-d is a scalar, 1-d and above are pairs.
+    def test_a_one_d_array_is_refused_and_a_two_d_array_is_pairs(self):
+        # The dimension boundary: 0-d is a scalar, 1-d is refused with a
+        # message naming both accepted forms, 2-d is (depth, c) pairs.
         with pytest.raises(ConfigurationError, match=r'shape \(N, 2\)'):
             SoundSpeedProfile.coerce(np.array([1500.0, 1490.0]),
                                      depth_max=50.0)
@@ -5352,3 +5353,28 @@ class TestFieldRemoveDelay:
         assert abs(raw[0] - raw[1]) > 0.1, (
             raw, "the two grids alias alike here, so this pins nothing")
         assert all(abs(tau - residual) < 1e-6 for tau in fixed), fixed
+
+
+class TestReflectionCoefficientCarriesTheTravellingWavePhaseSign:
+    """``phi`` is written and read in the package's travelling-wave sign
+    (positive below the critical angle on a lossy fluid half-space, as
+    Bounce writes it and the AT engines read it), so a result built
+    without an explicit convention is stamped ``'travelling_wave'``; an
+    explicit stamp is kept."""
+
+    @staticmethod
+    def _rc(**kwargs):
+        from uacpy.core.results import ReflectionCoefficient
+        theta = np.array([10.0, 20.0, 30.0])
+        return ReflectionCoefficient(theta=theta, R=np.full(3, 0.5),
+                                     phi=np.zeros(3), model='Test', **kwargs)
+
+    def test_default_stamp_is_travelling_wave(self):
+        assert self._rc().phase_reference == 'travelling_wave'
+
+    def test_an_explicit_stamp_is_kept(self):
+        rc = self._rc(phase_reference='time_domain_native')
+        assert rc.phase_reference == 'time_domain_native'
+
+    def test_a_slice_keeps_the_stamp(self):
+        assert self._rc().at(angle=20.0).phase_reference == 'travelling_wave'

@@ -722,7 +722,7 @@ c
       azz(i)=float(i)*az(i+1)
     2 continue
 c
-      iter=0
+      iter=0; jter=0
     3 p=a(n)+a(n+1)*z
       do 4 i=n-1,1,-1
       p=a(i)+z*p

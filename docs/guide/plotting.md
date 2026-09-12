@@ -480,8 +480,9 @@ detection probability and the ROC.
 All 54 plotters in `uacpy.plot.__all__` — the 8 remaining names in `__all__`
 are the submodules themselves. **ax** marks a single-axes plotter you can
 compose with. Every entry takes `title=` except `plot_result` (it forwards
-yours) and the two `draw_*` overlays; every entry takes
-`figsize=` except `plot_result`, `animate_field`, the two `draw_*` overlays and
+yours), `shared_colorbar` (a colorbar on an existing figure) and the two
+`draw_*` overlays; every entry takes `figsize=` except `plot_result`,
+`shared_colorbar`, `animate_field`, the two `draw_*` overlays and
 `plot_time_snapshots`, which sizes itself from `figsize_per_panel=` instead.
 
 ### Fields and results
@@ -490,7 +491,7 @@ yours) and the two `draw_*` overlays; every entry takes
 |---|---|---|
 | `plot_result(result, env=None, **kw)` | — | type-dispatcher behind every `Result.plot()` |
 | `plot_field(field, ax=None, …)` | ✓ | the workhorse — §2 |
-| `compare(fields, labels=None, ax=None, value='dB')` | ✓ | overlay several 1-D sliced fields on one axes |
+| `compare(fields, labels=None, ax=None, value=None)` | ✓ | overlay several 1-D sliced fields on one axes |
 | `compare_models(fields, labels=None, env=None, ncols=None, contours=None)` | — | side-by-side heatmap grid, one shared colourbar |
 | `plot_field_difference(field, reference, ax=None, env=None, diff_vmax=None)` | ✓ | `field - reference` in dB on a diverging map, symmetric about zero; positive means `field` is the quieter one |
 | `plot_field_statistics(fields, labels=None, *, depth)` | — | mean ± std per field at one depth, plus the pairwise RMS-difference matrix |
