@@ -34,6 +34,25 @@ class Modes(Result):
         it, ``:598`` writes it to the ``.mod``). The modes are known
         nowhere else, and this object carries no half-space wavenumber from
         which the evanescent tail below the span could be continued.
+    group_velocity : ndarray, shape ``(n_modes,)``, or None
+        Group speed (m/s) each mode was reported at by the solver, from a
+        SINGLE run — ``None`` when the binary did not supply one.
+
+        Only ``backend='krakenc'`` supplies it. KRAKENC computes it in its
+        perturbation pass (``krakenc.f90:819``, ``VG = 1/Slow``) and prints
+        it. KRAKEN allocates and prints the same column but never fills it:
+        the assignment is commented out at ``kraken.f90:815-819``, so the
+        column reads 0.00000 for every mode, and this attribute is ``None``
+        there rather than an array of zeros.
+
+        Entries are ``NaN`` for any mode the print file skipped.
+        ``kraken.f90:101`` prints ``MAX(1, M/30)``-stride, so a run with
+        more than 30 modes reports only about 30 of them.
+
+        Use :meth:`compute_group_velocity` instead when this is ``None``, or
+        when every mode is needed from a large set. The perturbation caveat
+        the source states at ``kraken.f90:772`` applies either way: "group
+        speeds will be wrong for leaky modes".
     """
     field_type = "modes"
 
@@ -43,6 +62,7 @@ class Modes(Result):
         k: np.ndarray,
         phi: np.ndarray,
         depths: np.ndarray,
+        group_velocity: Optional[np.ndarray] = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -56,6 +76,17 @@ class Modes(Result):
                 f"Modes.phi: shape {self.phi.shape} must equal "
                 f"(len(depths), len(k)) = ({len(self.depths)}, {len(self.k)})"
             )
+        if group_velocity is None:
+            self.group_velocity = None
+        else:
+            gv = np.atleast_1d(np.array(group_velocity, dtype=float))
+            if gv.shape != self.k.shape:
+                raise ConfigurationError(
+                    f"Modes.group_velocity: shape {gv.shape} must equal "
+                    f"k's {self.k.shape} — one group speed per mode, NaN "
+                    f"where the binary did not report one."
+                )
+            self.group_velocity = gv
 
     @property
     def n_modes(self) -> int:
@@ -90,6 +121,8 @@ class Modes(Result):
             k=new_k,
             phi=new_phi,
             depths=self.depths,
+            group_velocity=(None if self.group_velocity is None
+                            else self.group_velocity[:n]),
             **self.id_kwargs(),
         )
 
@@ -684,6 +717,10 @@ class Modes(Result):
         new_k = kr + 1j * alpha_m
         return Modes(
             k=new_k, phi=self.phi, depths=self.depths,
+            # The solver's group speed survives: this perturbation moves the
+            # IMAGINARY part of k, and dropping it here while first_n keeps it
+            # made the attribute disappear depending on which method was called.
+            group_velocity=self.group_velocity,
             **self.id_kwargs(),
         )
 

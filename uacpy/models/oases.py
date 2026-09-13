@@ -283,6 +283,65 @@ def _oasn_freq_axis(data: dict) -> np.ndarray:
     return np.linspace(f1, f2, n, dtype=float)
 
 
+def _rough_interface_sigma(env, interface: int, oass_index_space: bool) -> float:
+    """RMS roughness (m) of the interface being scattered from.
+
+    ``INTFC`` lives in TWO different deck index spaces and
+    ``oases_writer.py:3452-3457`` says outright that they "must not be
+    mixed": OAST/OASS collapse an isovelocity water column to one record, the
+    OASP/OASSP decks never do, so the same seafloor is deck layer 3 in one and
+    ``2 + n_ssp_rows`` in the other. Looking an OASSP interface up in the OASS
+    table therefore indexes past the end of the roughness list and reads 0.0 —
+    silently disarming the caller's check.
+
+    So only OASS indexes. OASSP is guaranteed by
+    ``_require_single_rough_interface`` to have exactly one rough interface,
+    which can be found without any index at all.
+    """
+    first_bottom, roughness = oass_bottom_interfaces(env)
+    surface = abs(float(env.surface.roughness)) if env.surface is not None else 0.0
+    if not oass_index_space:
+        candidates = [surface] + [abs(float(r)) for r in roughness]
+        return max(candidates) if candidates else 0.0
+    if interface == _OASS_SURFACE_INTERFACE:
+        return surface
+    index = interface - first_bottom
+    return (abs(float(roughness[index]))
+            if 0 <= index < len(roughness) else 0.0)
+
+
+def _warn_roughness_not_perturbative(model_name: str, env, interface: int,
+                                     frequency_hz: float, rms_override,
+                                     *, oass_index_space: bool) -> None:
+    """Warn when a rough-interface run is outside the small-roughness theory.
+
+    OASS and OASSP both treat the rough interface as a perturbation of the
+    flat one, which is a small-roughness expansion: valid while the RMS height
+    is small against the wavelength normal to the surface. Nothing in the
+    returned field marks where that stops being true — the scattered
+    intensity stays smooth and plausible — so the Rayleigh parameter is the
+    only warning available.
+
+    The deck's own ``rms_roughness`` wins when set, since that is what the
+    scattering run uses; otherwise the environment's roughness is the one in
+    force. For a broadband run pass the HIGHEST frequency: ``P`` grows with
+    ``k``, so that is the worst case.
+    """
+    from uacpy.sonar.scattering import warn_if_roughness_is_not_perturbative
+
+    if rms_override is not None:
+        sigma = abs(float(rms_override))
+    else:
+        sigma = _rough_interface_sigma(env, interface, oass_index_space)
+
+    depth = (0.0 if (oass_index_space and interface == _OASS_SURFACE_INTERFACE)
+             else float(env.depth))
+    # get_sound_speed returns an array even for a scalar depth.
+    c_interface = float(np.ravel(env.get_sound_speed(depth))[0])
+    warn_if_roughness_is_not_perturbative(
+        model_name, float(frequency_hz), sigma, sound_speed=c_interface)
+
+
 def _warn_offset_ignored_under_auto_sampling(model_name, integration_offset,
                                              nw_samples, options=None,
                                              offset_letters='J',
@@ -3333,6 +3392,11 @@ class OASSP(OASES):
             vol_path = fm.get_path(f'{mean_stem}.046')
             rhs = read_oases_rhs_header(rhs_path)
             interface = self._resolve_interface(env, rhs)
+            # P grows with k, so the top of the band is the worst case.
+            _warn_roughness_not_perturbative(
+                type(self).__name__, env, interface,
+                float(np.max(np.asarray(source.frequencies, dtype=float))),
+                self.rms_roughness, oass_index_space=False)
 
             base_name = 'oassp_run'
             input_file = fm.get_path(f'{base_name}.dat')
@@ -4056,6 +4120,9 @@ class OASS(OASES):
         self.validate_inputs(env, source, receiver, run_mode=run_mode)
         interface = self._resolve_interface(env)
         self._warn_on_c_low_mismatch(env)
+        _warn_roughness_not_perturbative(
+            type(self).__name__, env, interface, frequency, self.rms_roughness,
+            oass_index_space=True)
 
         fm = self._setup_file_manager()
         try:

@@ -2404,3 +2404,100 @@ class TestSurfaceBackscatter:
             apl_uw_surface_backscatter(20.0, 25e3, -1.0)
         with pytest.raises(ConfigurationError, match='0-90'):
             apl_uw_surface_backscatter(-5.0, 25e3, 8.0)
+
+
+class TestRayleighRoughnessParameter:
+    """P = 2*k*sigma*sin(theta): the number that says whether a rough-interface
+    perturbation treatment applies (JKPS Sect. 1.7)."""
+
+    def test_matches_hand_evaluation_of_the_definition(self):
+        from uacpy.sonar import rayleigh_parameter
+        f, sigma, theta, c = 250.0, 0.5, 30.0, 1500.0
+        k = 2 * np.pi * f / c
+        expected = 2 * k * sigma * np.sin(np.deg2rad(theta))
+        assert rayleigh_parameter(f, sigma, theta, c) == pytest.approx(expected)
+
+    def test_grazing_convention_is_sine_not_cosine(self):
+        # JKPS writes 2*k*sigma*sin(theta) for GRAZING theta; Brekhovskikh &
+        # Lysanov Sect. 9.1 write 2*k*sigma*cos(theta_0) against INCIDENCE.
+        # Same number, so the two must agree on complementary angles, and a
+        # cosine slip here would be silent at 45 deg only.
+        from uacpy.sonar import rayleigh_parameter
+        grazing = 20.0
+        p = rayleigh_parameter(250.0, 0.5, grazing)
+        k = 2 * np.pi * 250.0 / 1500.0
+        assert p == pytest.approx(2 * k * 0.5 * np.cos(np.deg2rad(90 - grazing)))
+        # Largest at normal incidence, vanishing along the interface.
+        assert rayleigh_parameter(250.0, 0.5, 90.0) > p
+        assert rayleigh_parameter(250.0, 0.5, 0.0) == pytest.approx(0.0)
+
+    def test_scales_with_frequency_and_roughness(self):
+        from uacpy.sonar import rayleigh_parameter
+        base = rayleigh_parameter(100.0, 0.5, 10.0)
+        assert rayleigh_parameter(200.0, 0.5, 10.0) == pytest.approx(2 * base)
+        assert rayleigh_parameter(100.0, 1.0, 10.0) == pytest.approx(2 * base)
+
+    def test_reproduces_the_smooth_to_scattering_swing_of_one_sea_state(self):
+        # A 0.5 m RMS sea at 10 deg grazing is a mirror at 100 Hz and a
+        # scatterer at 10 kHz -- the same water, two decades apart.
+        from uacpy.sonar import rayleigh_parameter
+        assert rayleigh_parameter(100.0, 0.5, 10.0) == pytest.approx(0.073, abs=0.001)
+        assert rayleigh_parameter(10_000.0, 0.5, 10.0) == pytest.approx(7.27, abs=0.01)
+
+    def test_coherent_factor_is_the_jkps_exponential(self):
+        from uacpy.sonar import coherent_reflection_factor, rayleigh_parameter
+        p = rayleigh_parameter(250.0, 0.5, 45.0)
+        assert coherent_reflection_factor(250.0, 0.5, 45.0) == pytest.approx(
+            np.exp(-0.5 * p ** 2))
+
+    def test_coherent_factor_is_unity_on_a_smooth_interface(self):
+        from uacpy.sonar import coherent_reflection_factor
+        assert coherent_reflection_factor(250.0, 0.0, 45.0) == pytest.approx(1.0)
+
+    def test_grazing_limit_inverts_the_parameter_at_p_equals_one(self):
+        from uacpy.sonar import perturbative_grazing_limit, rayleigh_parameter
+        limit = float(perturbative_grazing_limit(250.0, 0.5))
+        assert limit < 90.0
+        assert rayleigh_parameter(250.0, 0.5, limit) == pytest.approx(1.0)
+
+    def test_grazing_limit_saturates_at_ninety_when_always_perturbative(self):
+        from uacpy.sonar import perturbative_grazing_limit, rayleigh_parameter
+        # 2*k*sigma <= 1, so P <= 1 even at normal incidence.
+        assert float(perturbative_grazing_limit(250.0, 0.05)) == pytest.approx(90.0)
+        assert rayleigh_parameter(250.0, 0.05, 90.0) < 1.0
+
+    def test_rejects_a_negative_rms_height(self):
+        from uacpy.sonar import rayleigh_parameter
+        from uacpy.core.exceptions import ConfigurationError
+        with pytest.raises(ConfigurationError, match='cannot be negative'):
+            rayleigh_parameter(250.0, -0.5, 10.0)
+
+    def test_warning_fires_only_past_the_limit_and_names_the_angle(self):
+        from uacpy.sonar.scattering import warn_if_roughness_is_not_perturbative
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter('always')
+            warn_if_roughness_is_not_perturbative('T', 250.0, 0.05)
+        assert not [x for x in w if 'Rayleigh' in str(x.message)]
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter('always')
+            warn_if_roughness_is_not_perturbative('T', 250.0, 0.5)
+        hit = [x for x in w if 'Rayleigh' in str(x.message)]
+        assert len(hit) == 1
+        assert '72.7 deg' in str(hit[0].message)
+
+    def test_warning_uses_the_requested_angles_when_given(self):
+        from uacpy.sonar.scattering import warn_if_roughness_is_not_perturbative
+        # Shallow grazing on the same interface stays inside the theory even
+        # though normal incidence would not.
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter('always')
+            warn_if_roughness_is_not_perturbative(
+                'T', 250.0, 0.5, grazing_deg=[5.0, 10.0, 20.0])
+        assert not [x for x in w if 'Rayleigh' in str(x.message)]
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter('always')
+            warn_if_roughness_is_not_perturbative(
+                'T', 250.0, 0.5, grazing_deg=[5.0, 85.0])
+        assert len([x for x in w if 'Rayleigh' in str(x.message)]) == 1

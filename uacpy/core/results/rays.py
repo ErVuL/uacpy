@@ -243,6 +243,45 @@ class Arrivals(Result):
         return np.deg2rad(
             np.asarray([a['phase'] for a in self.arrivals], dtype=float))
 
+    def _angle_column(self, key: str, name: str) -> np.ndarray:
+        """Bulk view of one angle column, with an error that names the cause."""
+        try:
+            return np.asarray([a[key] for a in self.arrivals], dtype=float)
+        except KeyError:
+            raise AttributeError(
+                f"Arrivals.{name}: these arrivals carry no '{key}'. Bellhop "
+                f"always writes it, so this is an Arrivals built by hand or "
+                f"read from a source that dropped the column; supply "
+                f"'{key}s' in each receiver cell to use this accessor."
+            ) from None
+
+    @property
+    def src_angles(self) -> np.ndarray:
+        """Declination angle each arrival LEFT the source at, in **degrees**.
+
+        Degrees, not radians — unlike :attr:`phases`, which converts because
+        its consumer is ``exp(1j * phase)``. These angles are reported for
+        reading and for geometry (a Doppler projection, a grazing-angle
+        filter), so they keep the unit ``ArrMod.f90:55`` writes and
+        ``read_arr_file`` documents. Call ``np.deg2rad`` yourself before
+        feeding a trigonometric function.
+
+        Sign follows Bellhop's convention: positive is downward-declined.
+        """
+        return self._angle_column('src_angle', 'src_angles')
+
+    @property
+    def rcv_angles(self) -> np.ndarray:
+        """Declination angle each arrival ARRIVED at the receiver at, in **degrees**.
+
+        The companion to :attr:`src_angles`, and the one a Doppler
+        calculation wants: a platform closing at speed ``v`` shifts each path
+        by ``f * v * cos(theta) / c`` with ``theta`` the arrival angle, so the
+        SPREAD of this column across the arrivals is the channel's Doppler
+        spread. Degrees, as ``ArrMod.f90:56`` writes them.
+        """
+        return self._angle_column('rcv_angle', 'rcv_angles')
+
     # Filter / chain / sort --------------------------------------------------
 
     def _spawn(self, arrivals: List[Dict[str, Any]]) -> 'Arrivals':

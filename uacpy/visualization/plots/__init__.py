@@ -26,6 +26,7 @@ from uacpy.visualization.plots.animation import (
 )
 from uacpy.visualization.plots.rays_modes import (
     _plot_rays, _plot_arrivals, _plot_mode_functions, plot_mode_wavenumbers,
+    plot_mode_speeds, plot_dispersion, plot_greens_function,
     plot_modes_heatmap, _plot_reflection_coefficient, _plot_covariance,
     plot_beam_pattern,
     _plot_replicas,
@@ -114,6 +115,9 @@ __all__ = [
     'plot_overview',
     'plot_sea_ice_map',
     'plot_mode_wavenumbers',
+    'plot_mode_speeds',
+    'plot_greens_function',
+    'plot_dispersion',
     'plot_modes_heatmap',
     'plot_beam_pattern',
     'plot_fk',

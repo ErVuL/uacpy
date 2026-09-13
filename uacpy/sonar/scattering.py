@@ -72,6 +72,204 @@ _CH_SCOTT_GRAZING_DEG = 80.0
 _CH_SCOTT_FREQ_HZ = (100.0, 6400.0)
 
 
+#: Rayleigh parameter past which the small-roughness (perturbation) treatment
+#: of a rough interface stops being a perturbation. Abraham Sect. 3.2.7.6: the
+#: horizontal-facet reflections "span more than one cycle of a narrowband
+#: signal when the Rayleigh parameter is greater than about one", at which
+#: point "the reflections from the non-horizontal surface slopes play a
+#: significant role". Brekhovskikh & Lysanov Sect. 9.1 put the same boundary
+#: qualitatively: "At P << 1 the roughness of the surface is small... The
+#: value P >> 1 corresponds to large roughness which causes considerable
+#: sound scattering in a relatively wide angular interval."
+_RAYLEIGH_PERTURBATION_LIMIT = 1.0
+
+
+def rayleigh_parameter(frequency, rms_roughness, grazing_deg, sound_speed=1500.0):
+    """RMS phase deviation a rough interface imposes, in radians.
+
+    ``P = 2 k sigma sin(theta)`` with ``k = 2 pi f / c`` the acoustic
+    wavenumber, ``sigma`` the RMS roughness height and ``theta`` the GRAZING
+    angle (JKPS Sect. 1.7, which writes it ``Gamma``). The physical reading:
+    an element of surface a height ``h`` above the mean plane lengthens the
+    reflected path by ``2 h sin(theta)``, so ``P`` is the RMS of the resulting
+    phase shift.
+
+    ``P << 1`` is an acoustically smooth boundary — reflection stays coherent
+    and the scattered field is a small perturbation. ``P >~ 1`` is a boundary
+    that scatters most of what arrives, and small-roughness perturbation
+    theory has no claim there. This is the quantity to check before trusting
+    :class:`~uacpy.models.OASS` or :class:`~uacpy.models.OASSP`, whose
+    treatment of a rough interface is exactly that perturbation.
+
+    Conventions differ and the difference is a factor of two in the exponent,
+    so be explicit about which one a source uses. This function follows JKPS
+    and Brekhovskikh & Lysanov Sect. 9.1, for whom ``P`` is the RMS phase
+    itself. Abraham Sect. 3.2.7.6 takes the other convention: his ``g_r``
+    (3.140) is ``4 k**2 sigma**2 cos**2(theta_incidence)``, the SQUARE of the
+    quantity returned here, and his footnote 8 records that its square root --
+    this form -- is also commonly called the Rayleigh parameter. Brekhovskikh &
+    Lysanov also write it ``2 k sigma cos(theta_0)`` against the angle of
+    INCIDENCE, which is the same number — ``cos`` of incidence is ``sin`` of
+    grazing.
+
+    Parameters
+    ----------
+    frequency : float or array_like
+        Acoustic frequency (Hz).
+    rms_roughness : float or array_like
+        RMS roughness height of the interface (m).
+    grazing_deg : float or array_like
+        Grazing angle measured from the interface (degrees), not from its
+        normal. 90 deg is normal incidence, where ``P`` is largest.
+    sound_speed : float, optional
+        Sound speed in the water at the interface (m/s), default 1500.
+
+    Returns
+    -------
+    ndarray
+        ``P``, broadcast over the inputs. Dimensionless (radians).
+
+    See Also
+    --------
+    coherent_reflection_factor : the loss ``P`` implies for the mean field.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> from uacpy.sonar import rayleigh_parameter
+    >>> # A 0.5 m RMS sea at 10 deg grazing: a mirror at 100 Hz, a
+    >>> # scatterer at 10 kHz, in the same sea state.
+    >>> float(np.round(rayleigh_parameter(100.0, 0.5, 10.0), 3))
+    0.073
+    >>> float(np.round(rayleigh_parameter(10_000.0, 0.5, 10.0), 2))
+    7.27
+    """
+    f = np.asarray(frequency, dtype=float)
+    sigma = np.asarray(rms_roughness, dtype=float)
+    theta = np.asarray(grazing_deg, dtype=float)
+    c = float(sound_speed)
+    if c <= 0:
+        raise ConfigurationError(
+            f"rayleigh_parameter: sound_speed must be positive, got {c:g} m/s.")
+    if np.any(sigma < 0):
+        raise ConfigurationError(
+            "rayleigh_parameter: rms_roughness is an RMS height and cannot be "
+            "negative.")
+    k = 2.0 * np.pi * f / c
+    return 2.0 * k * sigma * np.sin(np.deg2rad(theta))
+
+
+def coherent_reflection_factor(frequency, rms_roughness, grazing_deg,
+                               sound_speed=1500.0):
+    """Factor a rough interface multiplies the COHERENT reflection by.
+
+    ``exp(-0.5 P**2)`` with ``P`` from :func:`rayleigh_parameter` — JKPS
+    Sect. 1.7 eq. (1.79), ``R'(theta) = R(theta) exp(-0.5 Gamma**2)``. The
+    energy this removes has not vanished: it has gone into the incoherent
+    scattered field, which is reverberation. Multiply a smooth-interface
+    reflection coefficient by this to get the mean (coherent) one.
+
+    The formula is itself a small-roughness result — JKPS introduces it "if
+    the roughness is small with respect to the acoustic wavelength" — so it
+    decays far faster than reality once ``P`` passes 1. Brekhovskikh & Lysanov
+    Sect. 1 report that the measured coherence parameter follows ``exp(-P^2)``
+    well, and that for ``P >> 1`` the coherent component is close to zero.
+    """
+    p = rayleigh_parameter(frequency, rms_roughness, grazing_deg, sound_speed)
+    return np.exp(-0.5 * p ** 2)
+
+
+def perturbative_grazing_limit(frequency, rms_roughness, sound_speed=1500.0):
+    """Steepest grazing angle (deg) at which roughness is still a perturbation.
+
+    Solves ``P = 2 k sigma sin(theta) = 1`` for ``theta``. Below the returned
+    angle the interface is acoustically smooth and a small-roughness
+    treatment applies; above it the reflected field is increasingly incoherent
+    and the perturbation has no claim.
+
+    Returns ``90.0`` when ``2 k sigma <= 1``, i.e. the interface is
+    perturbative at every angle including normal incidence.
+
+    This is the useful form for a full-field scattering run, which does not
+    have one grazing angle but a whole spectrum of them: it says which part of
+    that spectrum the answer covers. In a waveguide at range the energy that
+    survives is shallow-grazing, so a limit of a few tens of degrees still
+    leaves the long-range multipath inside the theory while putting steep
+    backscatter outside it.
+    """
+    f = np.asarray(frequency, dtype=float)
+    sigma = np.asarray(rms_roughness, dtype=float)
+    c = float(sound_speed)
+    # Without these an invalid input returned 90.0 -- "perturbative at every
+    # angle" -- which is the most reassuring answer the function can give.
+    if c <= 0:
+        raise ConfigurationError(
+            f"perturbative_grazing_limit: sound_speed must be positive, got "
+            f"{c:g} m/s.")
+    if np.any(sigma < 0):
+        raise ConfigurationError(
+            "perturbative_grazing_limit: rms_roughness is an RMS height and "
+            "cannot be negative.")
+    if np.any(f < 0):
+        raise ConfigurationError(
+            "perturbative_grazing_limit: frequency cannot be negative.")
+    k = 2.0 * np.pi * f / c
+    with np.errstate(divide='ignore', invalid='ignore'):
+        sin_theta = np.where(2.0 * k * sigma > 0.0,
+                             1.0 / (2.0 * k * sigma), np.inf)
+    return np.degrees(np.arcsin(np.clip(sin_theta, 0.0, 1.0)))
+
+
+def warn_if_roughness_is_not_perturbative(caller: str, frequency,
+                                          rms_roughness, sound_speed=1500.0,
+                                          grazing_deg=None) -> None:
+    """Warn where a perturbation treatment of roughness is being over-driven.
+
+    Small-roughness perturbation theory has no failure mode a caller can see:
+    it returns a smooth, plausible scattered field well past the point where
+    it stops describing one. The Rayleigh parameter is the only thing that
+    marks the boundary, so compute it and say where it falls.
+
+    With ``grazing_deg`` the check is against those angles. Without it — the
+    full-field case, where the run spans every angle at once — the message
+    reports the grazing angle at which ``P`` reaches 1, so the caller knows
+    which part of the answer is inside the theory.
+    """
+    sigma = np.asarray(rms_roughness, dtype=float)
+    if not np.any(np.isfinite(sigma) & (sigma > 0.0)):
+        return
+
+    if grazing_deg is not None:
+        p = np.asarray(rayleigh_parameter(frequency, rms_roughness,
+                                          grazing_deg, sound_speed),
+                       dtype=float)
+        p = p[np.isfinite(p)]
+        if not p.size or float(np.max(np.abs(p))) <= _RAYLEIGH_PERTURBATION_LIMIT:
+            return
+        where = (f"reaches {float(np.max(np.abs(p))):.2f} at the requested "
+                 f"grazing angles")
+    else:
+        limit = np.asarray(perturbative_grazing_limit(
+            frequency, rms_roughness, sound_speed), dtype=float)
+        finite = limit[np.isfinite(limit)]
+        if not finite.size or float(np.min(finite)) >= 90.0:
+            return
+        where = (f"passes {_RAYLEIGH_PERTURBATION_LIMIT:g} above "
+                 f"{float(np.min(finite)):.1f} deg grazing")
+
+    warnings.warn(
+        f"{caller}: the Rayleigh parameter P = 2*k*sigma*sin(theta) {where}, "
+        f"where small-roughness perturbation theory stops applying "
+        f"(JKPS Sect. 1.7; Abraham Sect. 3.2.7.6: the facet reflections "
+        f"\"span more than one cycle\" once P exceeds about one). Shallower "
+        f"angles remain inside the theory, so a long-range multipath answer "
+        f"can be sound while steep backscatter from the same run is not. "
+        f"uacpy.sonar.rayleigh_parameter and perturbative_grazing_limit "
+        f"compute these directly.",
+        UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+    )
+
+
 def _warn_outside_chapman_harris_fit(theta, frequency_hz: float,
                                     wind_speed_kn: float) -> None:
     """Warn where the Chapman-Harris fit is being read outside its envelope.

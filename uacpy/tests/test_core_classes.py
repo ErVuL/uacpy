@@ -1180,6 +1180,39 @@ class TestArrivalsFilterChain:
                      model='Test', frequencies=100.0)
         assert a.phases[0] == pytest.approx(np.pi / 2)
 
+    def test_angle_accessors_return_degrees_in_arrival_order(self):
+        # The .arr file stores declination angles in degrees (ArrMod.f90:55-56)
+        # and the accessors keep that unit, unlike .phases which converts.
+        a = self._arrivals()
+        assert a.src_angles.shape == (len(a),)
+        assert a.rcv_angles.shape == (len(a),)
+        # Same order as every other bulk view, so columns line up elementwise.
+        assert list(a.src_angles) == pytest.approx([0.0, 5.0, 10.0, 2.0])
+        assert list(a.rcv_angles) == pytest.approx([0.0, -5.0, -10.0, -2.0])
+
+    def test_angle_accessors_survive_filtering_alongside_delays(self):
+        # A filter respawns the flat list; the angle columns must be carried
+        # through it, or a grazing-angle filter would silently read the
+        # unfiltered set.
+        a = self._arrivals()
+        bottom = a.filter_by_bounces(kind='bottom')
+        assert len(bottom.rcv_angles) == len(bottom) == len(bottom.delays)
+
+    def test_angle_accessor_without_the_column_names_the_cause(self):
+        from uacpy.core.results import Arrivals
+        cell = {
+            "delays": np.array([0.1]), "amplitudes": np.array([1.0]),
+            "phases": np.array([0.0]),
+            "n_top_bounces": np.array([0], dtype=int),
+            "n_bot_bounces": np.array([0], dtype=int),
+        }
+        a = Arrivals(by_receiver=[[[cell]]], receiver_depths=np.array([50.0]),
+                     receiver_ranges=np.array([1000.0]),
+                     model='Test', frequencies=100.0)
+        # _flatten_by_receiver defaults a missing column to zeros, so the
+        # accessor works; what must NOT happen is a bare KeyError.
+        assert a.src_angles[0] == pytest.approx(0.0)
+
     def test_filter_by_bounces_kind(self):
         a = self._arrivals()
         direct = a.filter_by_bounces(kind='direct')

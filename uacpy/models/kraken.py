@@ -575,8 +575,71 @@ class Kraken(PropagationModel):
                 f"c_high ({ch}) must be strictly greater than c_low ({cl})"
             )
 
+    @staticmethod
+    def _read_group_speeds_from_prt(work_dir, base_name, n_modes, *, fills_vg):
+        """Group speeds (m/s) from the modes run's ``.prt``, or ``None``.
+
+        Both KRAKEN and KRAKENC print a five-column table — mode index,
+        Re k, Im k, phase speed, group speed — but only KRAKENC fills the
+        last column (``krakenc.f90:819``). KRAKEN's assignment is commented
+        out at ``kraken.f90:815-819``, so it prints an ``ALLOCATABLE`` that was
+        never written to.
+
+        ``fills_vg`` therefore selects on the BINARY, not on the values.
+        The zeros KRAKEN prints today are an uninitialised array reading
+        back a freshly zeroed page — undefined behaviour, not a guarantee.
+        Rebuilt with ``-finit-real=nan``, or with the
+        ``DEALLOCATE``/``ALLOCATE`` at ``kraken.f90:939-940`` landing on
+        recycled heap, that column becomes arbitrary, and an "all zeros
+        means unfilled" rule would hand garbage back as a group speed.
+
+        ``kraken.f90:101`` prints with stride ``MAX(1, M/30)``, so a run with
+        more than 30 modes lists only about 30 of them. The returned array is
+        full length with ``NaN`` in the gaps, read off the printed mode index
+        rather than by position, so a strided table still lands correctly.
+        """
+        if not fills_vg:
+            return None
+        prt = Path(work_dir) / f'{base_name}.prt'
+        text = read_prt(prt)
+        if not text or n_modes < 1:
+            return None
+        # A .prt cut off mid-write ends in a partial row whose last field
+        # is a truncated number; parsing it fabricated a plausible speed.
+        lines = text.splitlines()
+        if lines and not text.endswith('\n'):
+            lines = lines[:-1]
+        try:
+            head = next(i for i, L in enumerate(lines) if 'Group Speed' in L)
+        except StopIteration:
+            return None
+
+        speeds = {}
+        for line in lines[head + 1:]:
+            parts = line.split()
+            if len(parts) != 5:
+                if speeds:
+                    break          # table ended
+                continue           # still in the units header
+            try:
+                mode = int(parts[0])
+                vg = float(parts[4])
+            except ValueError:
+                if speeds:
+                    break
+                continue
+            if 1 <= mode <= n_modes:
+                speeds[mode] = vg
+
+        if not speeds:
+            return None
+        out = np.full(n_modes, np.nan, dtype=float)
+        for mode, vg in speeds.items():
+            out[mode - 1] = vg
+        return out
+
     def _build_modes_field(self, modes, n_modes, source, *, backend_exe=None,
-                           bounds=None):
+                           bounds=None, group_velocity=None):
         """Wrap a modes-reader payload as a :class:`Modes` Result.
 
         Returns the full mode set the reader produced; callers cap the
@@ -595,6 +658,7 @@ class Kraken(PropagationModel):
             k=k_arr,
             phi=phi_arr,
             depths=z_arr,
+            group_velocity=group_velocity,
             **self._result_kwargs(
                 source,
                 backend=Path(exe).stem if exe else self.model_name.lower(),
@@ -1799,8 +1863,15 @@ class Kraken(PropagationModel):
                 exe=kraken_exe)
             self._mask_elastic_mode_depths(modes, env)
 
+            # Read before fm.finish() clears the work directory. Only
+            # krakenc fills this column; kraken prints it unassigned.
+            vg = self._read_group_speeds_from_prt(
+                fm.work_dir, base_name,
+                len(np.atleast_1d(modes.get('k', np.array([])))),
+                fills_vg=(kraken_exe.stem.lower() == 'krakenc'))
             field = self._build_modes_field(
                 modes, n_modes, source, backend_exe=kraken_exe, bounds=bounds,
+                group_velocity=vg,
             )
             self._attach_output_paths(
                 field, fm.work_dir, base_name,

@@ -3812,3 +3812,103 @@ class TestFieldResultsRecordTheModesBinary:
             frequencies=np.array([90.0, 100.0]))
         assert result.backend == 'field'
         assert result.metadata['modes_backend'] == 'kraken'
+
+
+class TestSingleRunGroupVelocity:
+    """The ``.prt`` group-speed column: krakenc fills it, kraken does not.
+
+    ``krakenc.f90:819`` assigns ``VG = 1/Slow``; the same assignment is
+    commented out at ``kraken.f90:815-819``, so kraken prints the column
+    unassigned. ``Modes.group_velocity`` must reflect that difference rather
+    than hand back a plausible-looking array of zeros.
+    """
+
+    def _modes(self, backend, freq=200.0):
+        env = _duct(100.0, c_bottom=1600.0)
+        return Kraken(backend=backend).compute_modes(
+            env, Source(depths=50.0, frequencies=freq))
+
+    def test_kraken_reports_none_rather_than_the_unfilled_zero_column(self):
+        m = self._modes('kraken')
+        assert m.n_modes > 0
+        assert m.group_velocity is None
+
+    def test_krakenc_reports_a_group_speed_per_mode(self):
+        m = self._modes('krakenc')
+        gv = m.group_velocity
+        assert gv is not None
+        assert gv.shape == m.k.shape
+        assert np.all(np.isfinite(gv))
+        assert np.all(gv > 0)
+
+    def test_krakenc_group_speed_sits_below_the_phase_speed(self):
+        # The defining property of waveguide dispersion; also the check that
+        # the parsed column is the group speed and not the phase-speed column
+        # one position to its left.
+        m = self._modes('krakenc')
+        assert np.all(m.group_velocity < m.compute_phase_speeds())
+
+    def test_single_run_agrees_with_the_two_run_finite_difference_when_trapped(self):
+        # The independent route. They are different computations -- one is
+        # KRAKENC's perturbation pass, the other d(omega)/dk by differencing
+        # two runs -- so agreement on the trapped modes is evidence both are
+        # right. Only the trapped ones: see the leaky-mode test below.
+        env = _duct(100.0, c_bottom=1600.0)
+        m0 = Kraken(backend='krakenc').compute_modes(
+            env, Source(depths=50.0, frequencies=200.0))
+        m1 = Kraken(backend='krakenc').compute_modes(
+            env, Source(depths=50.0, frequencies=200.5))
+        fd = m0.compute_group_velocity(m1)
+        trapped = m0.compute_phase_speeds()[:len(fd)] < 1600.0
+        assert trapped.sum() >= 5
+        assert np.nanmax(
+            np.abs(m0.group_velocity[:len(fd)][trapped] - fd[trapped])) < 1.0
+
+    def test_the_two_routes_part_company_on_the_leaky_modes(self):
+        # kraken.f90:772 states the caveat outright: the group speed "still
+        # uses the perturbation method so group speeds will be wrong for
+        # leaky modes". Both routes inherit it, and they do not fail the same
+        # way, so their disagreement is confined to exactly those modes. This
+        # pins the caveat rather than hiding it behind a loose tolerance.
+        env = _duct(100.0, c_bottom=1600.0)
+        m0 = Kraken(backend='krakenc').compute_modes(
+            env, Source(depths=50.0, frequencies=200.0))
+        m1 = Kraken(backend='krakenc').compute_modes(
+            env, Source(depths=50.0, frequencies=200.5))
+        fd = m0.compute_group_velocity(m1)
+        cp = m0.compute_phase_speeds()[:len(fd)]
+        diff = np.abs(m0.group_velocity[:len(fd)] - fd)
+        leaky = cp >= 1600.0
+        assert leaky.any(), 'default c_high should admit some leaky modes'
+        # Trapped: the two agree closely. Leaky: they need not, and here do not.
+        assert np.nanmax(diff[~leaky]) < 1.0
+        assert np.nanmax(diff[leaky]) > np.nanmax(diff[~leaky])
+
+    def test_strided_print_table_lands_on_the_right_modes(self):
+        # kraken.f90:101 prints with stride MAX(1, M/30), so a run with more
+        # than 30 modes lists only about 30. The values must be placed by the
+        # printed mode INDEX, not by row position, or they would be assigned
+        # to modes 1..30 and be wrong for every one past the first.
+        m = self._modes('krakenc', freq=1500.0)
+        gv = m.group_velocity
+        assert m.n_modes > 30
+        reported = np.flatnonzero(np.isfinite(gv))
+        assert 0 < reported.size < m.n_modes        # genuinely strided
+        assert reported[0] == 0                     # mode 1 always printed
+        stride = max(1, m.n_modes // 30)
+        assert np.all(np.diff(reported) == stride)
+        # Whatever landed is still physical.
+        cp = m.compute_phase_speeds()
+        assert np.all(gv[reported] < cp[reported])
+
+    def test_first_n_slices_the_group_speed_alongside_the_modes(self):
+        m = self._modes('krakenc')
+        five = m.first_n(5)
+        assert five.group_velocity.shape == (5,)
+        assert np.allclose(five.group_velocity, m.group_velocity[:5])
+
+    def test_shape_mismatch_is_rejected(self):
+        m = self._modes('krakenc')
+        with pytest.raises(ConfigurationError, match='group_velocity'):
+            Modes(k=m.k, phi=m.phi, depths=m.depths,
+                  group_velocity=np.ones(len(m.k) + 1), **m.id_kwargs())

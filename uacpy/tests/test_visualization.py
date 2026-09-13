@@ -5176,3 +5176,181 @@ def test_the_environment_panel_draws_the_source_at_the_source_range():
         [float(np.min(ln.get_xdata())) for ln in seafloor])
     assert min(ax.get_xlim()) <= 0.0
     plt.close(fig)
+
+
+class TestModalSpeedPlots:
+    """Phase speed, group speed and dispersion — what the eigenvalue MEANS,
+    as opposed to ``plot_mode_wavenumbers``, which draws Re(k) itself."""
+
+    def _modes_at(self, f, n=6, group=False):
+        depths = np.linspace(0.0, 100.0, 21)
+        phi = np.sin(np.outer(depths, np.arange(1, n + 1)) * np.pi / 100.0)
+        kz = (np.arange(n) + 0.5) * np.pi / 100.0
+        k = np.sqrt((2 * np.pi * f / 1500.0) ** 2 - kz ** 2 + 0j)
+        gv = None
+        if group:
+            # Below the phase speed, as waveguide dispersion requires.
+            gv = 2 * np.pi * f / np.real(k) - 10.0 * np.arange(1, n + 1)
+        return Modes(k=k, phi=phi, depths=depths, group_velocity=gv,
+                     model='Test', frequencies=float(f))
+
+    def test_mode_speeds_draws_phase_speed_alone_without_group(self):
+        m = self._modes_at(200.0, group=False)
+        fig, ax = plots.plot_mode_speeds(m)
+        # One line: the phase speed. No group speed exists to draw.
+        assert len(ax.lines) == 1
+        assert np.allclose(ax.lines[0].get_ydata(), m.compute_phase_speeds())
+        plt.close(fig)
+
+    def test_mode_speeds_overlays_group_speed_when_present(self):
+        m = self._modes_at(200.0, group=True)
+        fig, ax = plots.plot_mode_speeds(m)
+        assert len(ax.lines) == 2
+        assert np.allclose(ax.lines[1].get_ydata(), m.group_velocity)
+        plt.close(fig)
+
+    def test_mode_speeds_marks_the_trapped_leaky_boundary(self):
+        m = self._modes_at(200.0)
+        cp = np.sort(m.compute_phase_speeds())
+        # Split ASYMMETRICALLY, between the 2nd and 3rd of six modes. A median
+        # split leaves sum(cp <= cb) == sum(cp >= cb), so the assertion passes
+        # whichever way the comparison runs -- it cannot see the direction it
+        # exists to check, and inverting '<=' in the source left it green.
+        c_bottom = float(0.5 * (cp[1] + cp[2]))
+        n_below, n_above = int(np.sum(cp <= c_bottom)), int(np.sum(cp >= c_bottom))
+        assert n_below == 2 and n_above == 4 and n_below != n_above
+        fig, ax = plots.plot_mode_speeds(m, c_bottom=c_bottom)
+        assert any(np.allclose(ln.get_ydata(), c_bottom) for ln in ax.lines)
+        assert any(f'{n_below} trapped' in t.get_text() for t in ax.texts)
+        assert not any(f'{n_above} trapped' in t.get_text() for t in ax.texts)
+        plt.close(fig)
+
+    def test_dispersion_places_a_differenced_group_speed_at_the_midpoint(self):
+        # compute_group_velocity estimates d(omega)/dk for the PAIR, so it
+        # belongs at (f0 + f1)/2. Plotting it at the left endpoint shifted the
+        # curve half a step on the plot used to read off the Airy frequency.
+        sets = [self._modes_at(f, group=False) for f in (100.0, 200.0)]
+        fig, ax = plots.plot_dispersion(sets, n_modes=1)
+        phase, group = ax.lines[0], ax.lines[1]
+        assert list(phase.get_xdata()) == [100.0, 200.0]
+        assert list(group.get_xdata()) == [150.0]
+        plt.close(fig)
+
+    def test_dispersion_uses_the_solver_value_at_its_own_frequency(self):
+        # A reported group speed is AT that frequency, not between two.
+        sets = [self._modes_at(f, group=True) for f in (100.0, 200.0)]
+        fig, ax = plots.plot_dispersion(sets, n_modes=1)
+        assert list(ax.lines[1].get_xdata()) == [100.0, 200.0]
+        plt.close(fig)
+
+    def test_mode_speeds_rejects_a_non_modes_result(self):
+        with pytest.raises(ConfigurationError):
+            plots.plot_mode_speeds(_rays())
+
+    def test_dispersion_draws_two_curves_per_mode(self):
+        sets = [self._modes_at(f, group=True) for f in (100.0, 150.0, 200.0)]
+        fig, ax = plots.plot_dispersion(sets, n_modes=3)
+        assert len(ax.lines) == 6            # phase + group for each of 3
+        plt.close(fig)
+
+    def test_dispersion_sorts_by_frequency_so_input_order_is_free(self):
+        freqs = (200.0, 100.0, 150.0)
+        sets = [self._modes_at(f, group=True) for f in freqs]
+        fig, ax = plots.plot_dispersion(sets, n_modes=1)
+        x = ax.lines[0].get_xdata()
+        assert list(x) == sorted(freqs)
+        plt.close(fig)
+
+    def test_dispersion_needs_more_than_one_frequency(self):
+        with pytest.raises(ConfigurationError, match='two or more'):
+            plots.plot_dispersion([self._modes_at(100.0)])
+
+    def test_dispersion_rejects_duplicate_frequencies(self):
+        with pytest.raises(ConfigurationError, match='distinct'):
+            plots.plot_dispersion([self._modes_at(100.0),
+                                   self._modes_at(100.0)])
+
+    def test_dispersion_rejects_modes_without_a_frequency(self):
+        m = self._modes_at(100.0)
+        bare = Modes(k=m.k, phi=m.phi, depths=m.depths, model='Test')
+        with pytest.raises(ConfigurationError, match='frequency'):
+            plots.plot_dispersion([m, bare])
+
+    def test_dispersion_skips_frequencies_below_a_mode_cutoff(self):
+        # A mode that does not exist at the low frequencies must not be
+        # plotted there -- and must not shift the other modes' samples.
+        few = self._modes_at(100.0, n=2, group=True)
+        many = self._modes_at(200.0, n=5, group=True)
+        more = self._modes_at(300.0, n=5, group=True)
+        fig, ax = plots.plot_dispersion([few, many, more], n_modes=4)
+        mode1_x = ax.lines[0].get_xdata()
+        assert list(mode1_x) == [100.0, 200.0, 300.0]
+        mode4_x = ax.lines[-2].get_xdata()    # last mode's phase curve
+        assert list(mode4_x) == [200.0, 300.0]
+        plt.close(fig)
+
+
+class TestGreensFunctionPlot:
+    """|G(k_r, z)|: what a wavenumber-integration solver computes before the
+    Hankel transform to range. The ridges in k_r are the normal modes."""
+
+    def _grn(self, nk=64, nrd=11, nfreq=1, nsd=1):
+        rng = np.random.default_rng(0)
+        G = rng.normal(size=(nfreq, nsd, nrd, nk)) + 0j
+        # A pole at a known wavenumber index, so alignment is testable.
+        G[0, 0, :, 20] *= 50.0
+        c = np.linspace(1800.0, 1400.0, nk)        # decreasing, as stored
+        return {'G': G.astype(np.complex64), 'cVec': c, 'freq': 200.0,
+                'rd': np.linspace(0.0, 100.0, nrd), 'nk': nk}
+
+    def test_image_axes_are_wavenumber_and_depth(self):
+        fig, ax = plots.plot_greens_function(self._grn())
+        assert 'k_r' in ax.get_xlabel()
+        assert 'depth' in ax.get_ylabel()
+        # Depth increases downward, like every other uacpy depth axis.
+        assert ax.get_ylim()[0] > ax.get_ylim()[1]
+        plt.close(fig)
+
+    def test_wavenumber_axis_is_omega_over_the_stored_phase_speed(self):
+        grn = self._grn()
+        fig, ax = plots.plot_greens_function(grn)
+        expected = 2 * np.pi * grn['freq'] / grn['cVec']
+        lo, hi = ax.get_xlim()
+        assert lo <= expected.min() and hi >= expected.max()
+        plt.close(fig)
+
+    def test_depth_cut_draws_a_line_at_the_nearest_stored_depth(self):
+        grn = self._grn()
+        fig, ax = plots.plot_greens_function(grn, depth=52.0)
+        assert len(ax.lines) == 1
+        assert len(ax.lines[0].get_xdata()) == grn['nk']
+        # 50 m is the nearest stored depth to 52 m on this grid.
+        assert '50' in ax.get_title()
+        plt.close(fig)
+
+    def test_modes_overlay_draws_one_line_per_eigenvalue(self):
+        grn = self._grn()
+        n = 4
+        depths = np.linspace(0.0, 100.0, 11)
+        modes = Modes(k=np.linspace(0.80, 0.74, n) + 0j,
+                      phi=np.zeros((11, n)), depths=depths,
+                      model='Test', frequencies=200.0)
+        fig, ax = plots.plot_greens_function(grn, modes=modes)
+        overlaid = [ln for ln in ax.lines
+                    if len(set(np.round(ln.get_xdata(), 9))) == 1]
+        assert len(overlaid) == n
+        plt.close(fig)
+
+    def test_rejects_something_that_is_not_a_grn_payload(self):
+        with pytest.raises(ConfigurationError, match='read_grn_file payload'):
+            plots.plot_greens_function({'G': np.zeros((1, 1, 2, 2))})
+
+    def test_rejects_an_out_of_range_slab_index(self):
+        with pytest.raises(ConfigurationError, match='frequency_index'):
+            plots.plot_greens_function(self._grn(), frequency_index=7)
+        with pytest.raises(ConfigurationError, match='source_index'):
+            plots.plot_greens_function(self._grn(), source_index=7)
+
+    def test_rejects_a_non_modes_overlay(self):
+        with pytest.raises(ConfigurationError, match='modes='):
+            plots.plot_greens_function(self._grn(), modes=_rays())

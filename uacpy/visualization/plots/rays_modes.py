@@ -433,6 +433,304 @@ def plot_mode_wavenumbers(
 
 
 @typed_plot_error
+def plot_greens_function(
+    grn,
+    ax=None,
+    *,
+    frequency_index: int = 0,
+    source_index: int = 0,
+    depth: Optional[float] = None,
+    modes: Optional[Modes] = None,
+    vmin_db: float = -60.0,
+    cmap: str = 'viridis',
+    figsize: Tuple[float, float] = (9, 6),
+    title: Optional[str] = None,
+):
+    """Image the depth-separated Green's function ``|G(k_r, z)|`` of a ``.grn``.
+
+    ``G(k_r, z)`` is what a wavenumber-integration solver actually computes
+    before the Hankel transform to range: the response of the stratified
+    column, at one frequency, to a source driven at horizontal wavenumber
+    ``k_r`` (JKPS Sect. 4). It is the most instructive object in the method,
+    because the sharp ridges in ``k_r`` ARE the normal modes — Kraken finds
+    those poles by a root search and sums their residues, while Scooter
+    integrates straight through them. Pass ``modes`` to overlay Kraken's
+    eigenvalues and see the two methods land on the same poles.
+
+    Feed it the dict :func:`uacpy.io.read_grn_file` returns. Scooter records
+    the path in ``result.metadata['grn_file']`` when ``work_dir`` is pinned,
+    so the file survives the run::
+
+        fld = Scooter(work_dir=tmp).run(env, source, receiver)
+        plot_greens_function(read_grn_file(fld.metadata['grn_file']))
+
+    With ``depth`` the view becomes a cut: ``|G|`` in dB against wavenumber at
+    the stored depth nearest the one asked for, which is where the poles are
+    easiest to read off individually.
+
+    Parameters
+    ----------
+    grn : dict
+        Payload from :func:`~uacpy.io.read_grn_file`.
+    frequency_index, source_index : int, optional
+        Which frequency and source depth of ``G`` (shape
+        ``(nfreq, nsd, nrd, nk)``) to draw. Default the first of each.
+    depth : float, optional
+        Draw the cut at this receiver depth (m) instead of the 2-D image.
+    modes : Modes, optional
+        Overlay ``Re(k_m)`` from a Kraken solve of the same environment.
+    vmin_db : float, optional
+        Floor of the dB scale, relative to the panel maximum (default -60).
+    """
+    required = ('G', 'cVec', 'freq', 'rd')
+    missing = [key for key in required if key not in grn]
+    if missing:
+        raise ConfigurationError(
+            f"plot_greens_function: this is not a read_grn_file payload — "
+            f"missing {missing}. Pass the dict read_grn_file returns, not a "
+            f"Result; Scooter records the file at "
+            f"result.metadata['grn_file'] when work_dir is pinned.")
+
+    if grn.get('is_sparc'):
+        raise ConfigurationError(
+            "plot_greens_function: this is a SPARC .grn, whose 'freqVec' "
+            "holds output TIMES, not frequencies (read_grn_file documents "
+            "the difference). The wavenumber axis here is omega/c, so "
+            "reading a time as a frequency would mislabel every k_r. Use a "
+            "Scooter .grn for this view.")
+    G = np.asarray(grn['G'])
+    if G.ndim != 4:
+        raise ConfigurationError(
+            f"plot_greens_function: G should be 4-D (nfreq, nsd, nrd, nk), "
+            f"got shape {G.shape}.")
+    if not 0 <= frequency_index < G.shape[0]:
+        raise ConfigurationError(
+            f"plot_greens_function: frequency_index {frequency_index} is "
+            f"outside the {G.shape[0]} frequency slab(s) in this file.")
+    if not 0 <= source_index < G.shape[1]:
+        raise ConfigurationError(
+            f"plot_greens_function: source_index {source_index} is outside "
+            f"the {G.shape[1]} source depth(s) in this file.")
+
+    # cVec is a phase-speed grid; the wavenumber axis is omega / c.
+    freq = float(np.ravel(grn.get('freqVec', grn['freq']))[frequency_index]
+                 if np.size(grn.get('freqVec', [])) > frequency_index
+                 else grn['freq'])
+    c_vec = np.asarray(grn['cVec'], dtype=float)
+    with np.errstate(divide='ignore'):
+        k_r = 2.0 * np.pi * freq / c_vec
+    z = np.asarray(grn['rd'], dtype=float)
+    panel = np.abs(G[frequency_index, source_index])          # (nrd, nk)
+
+    _owns_fig = ax is None
+    fig, ax = fig_ax(ax, figsize)
+    peak = float(np.nanmax(panel)) if np.any(np.isfinite(panel)) else 0.0
+    ref = peak if peak > PRESSURE_FLOOR else PRESSURE_FLOOR
+
+    if depth is None:
+        with np.errstate(divide='ignore'):
+            db = 20.0 * np.log10(np.maximum(panel, PRESSURE_FLOOR) / ref)
+        im = ax.pcolormesh(k_r, z, db, shading='auto', cmap=cmap,
+                           vmin=vmin_db, vmax=0.0)
+        fig.colorbar(im, ax=ax, label='$|G|$ (dB re panel max)')
+        ax.set_ylabel('depth (m)')
+        invert_yaxis_once(ax)
+    else:
+        j = int(np.argmin(np.abs(z - float(depth))))
+        with np.errstate(divide='ignore'):
+            cut = 20.0 * np.log10(
+                np.maximum(panel[j], PRESSURE_FLOOR) / ref)
+        ax.plot(k_r, cut, lw=1.0, color='C0')
+        ax.set_ylabel('$|G|$ (dB re panel max)')
+        ax.set_ylim(vmin_db, 5.0)
+        ax.set_title(title or
+                     f'Green\'s function at z = {z[j]:g} m, {freq:g} Hz')
+
+    if modes is not None:
+        if not isinstance(modes, Modes):
+            raise ConfigurationError(
+                f"plot_greens_function: modes= expects Modes, got "
+                f"{type(modes).__name__}.")
+        for i, km in enumerate(np.real(np.asarray(modes.k))):
+            ax.axvline(km, color='C3', ls=':', lw=0.9, alpha=0.8,
+                       label='Kraken $\\mathrm{Re}\\,k_m$' if i == 0 else None)
+        ax.legend(loc='upper right', fontsize=8)
+
+    ax.set_xlabel('horizontal wavenumber $k_r$ (rad/m)')
+    if depth is None:
+        ax.set_title(title or
+                     f"Depth-separated Green's function $|G(k_r, z)|$"
+                     f" at {freq:g} Hz")
+    if _owns_fig:
+        fig.tight_layout()
+    return fig, ax
+
+
+@typed_plot_error
+def plot_mode_speeds(
+    modes: Modes,
+    ax=None,
+    *,
+    c_bottom: Optional[float] = None,
+    figsize: Tuple[float, float] = (8, 5),
+    title: Optional[str] = None,
+):
+    """Phase speed of every mode against mode index, with group speed if known.
+
+    ``plot_mode_wavenumbers`` draws the raw eigenvalue ``Re(k_m)``; this draws
+    what the eigenvalue means. The phase speed ``omega / Re(k_m)`` rises with
+    mode number, and where it crosses the seabed sound speed the mode stops
+    being trapped and starts radiating into the bottom (JKPS Sect. 2.4.5.1) —
+    pass ``c_bottom`` to mark that boundary and the trapped count reads off
+    the figure.
+
+    The group speed is overlaid when the result carries one. Only
+    ``backend='krakenc'`` reports it from a single run
+    (:attr:`~uacpy.core.results.Modes.group_velocity`); on the real backend
+    it is ``None`` and only the phase speed is drawn. Gaps are left where the
+    print file strided over a mode rather than interpolated across them.
+
+    Parameters
+    ----------
+    modes : Modes
+        The mode set to draw.
+    c_bottom : float, optional
+        Seabed sound speed (m/s). Drawn as the trapped/leaky boundary.
+    """
+    if not isinstance(modes, Modes):
+        raise ConfigurationError(
+            f"plot_mode_speeds: expected Modes, got {type(modes).__name__}")
+    _owns_fig = ax is None
+    fig, ax = fig_ax(ax, figsize)
+    idx = np.arange(1, modes.n_modes + 1)
+    cp = modes.compute_phase_speeds()
+    ax.plot(idx, cp, 'o-', ms=4, color='C0', label='phase speed $\\omega/\\mathrm{Re}\\,k_m$')
+
+    vg = getattr(modes, 'group_velocity', None)
+    if vg is not None and np.any(np.isfinite(vg)):
+        ax.plot(idx, vg, 's--', ms=4, color='C1',
+                label='group speed $d\\omega/dk_m$')
+
+    if c_bottom is not None:
+        cb = float(c_bottom)
+        ax.axhline(cb, color='C3', ls='--', lw=1.0)
+        n_trapped = int(np.sum(cp <= cb))
+        ax.text(0.99, cb, f' seabed $c_p$ = {cb:g} m/s — {n_trapped} trapped',
+                color='C3', fontsize=8, va='bottom', ha='right',
+                transform=ax.get_yaxis_transform())
+
+    ax.set_xlabel('Mode index $m$')
+    ax.set_ylabel('speed (m/s)')
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc='best', fontsize=8)
+    ax.set_title(title or f'Modal speeds at {modes.f0:g} Hz'
+                 if modes.f0 else (title or 'Modal speeds'))
+    if _owns_fig:
+        _draw_result_credit(fig, modes, env=None)
+    return fig, ax
+
+
+@typed_plot_error
+def plot_dispersion(
+    modes_by_frequency,
+    ax=None,
+    *,
+    n_modes: int = 3,
+    figsize: Tuple[float, float] = (8, 5),
+    title: Optional[str] = None,
+):
+    """Phase and group speed against frequency — the dispersion diagram.
+
+    Takes a sequence of :class:`~uacpy.core.results.Modes`, one per frequency,
+    and draws mode ``m``'s phase speed (solid) and group speed (dashed) as
+    curves in frequency. This is the picture of geometric dispersion: both
+    speeds start at the seabed speed at that mode's cutoff and tend to the
+    water speed at high frequency, the phase speed falling monotonically
+    while the group speed passes through a minimum — the frequency of that
+    minimum arrives last in a transient, the Airy phase (JKPS Sect. 2.4.5.2).
+
+    The group speed is taken from each result's
+    :attr:`~uacpy.core.results.Modes.group_velocity` when the solver supplied
+    one (``backend='krakenc'``), and otherwise differenced between
+    neighbouring frequencies with
+    :meth:`~uacpy.core.results.Modes.compute_group_velocity`, which is what
+    the real backend needs. Both carry the caveat the KRAKEN source states at
+    ``kraken.f90:772``: group speeds are wrong for leaky modes.
+
+    Parameters
+    ----------
+    modes_by_frequency : sequence of Modes
+        At least two mode sets at distinct frequencies. Sorted here, so the
+        caller need not.
+    n_modes : int, optional
+        How many low-order modes to draw (default 3).
+    """
+    sets = list(modes_by_frequency)
+    if len(sets) < 2:
+        raise ConfigurationError(
+            "plot_dispersion: needs Modes at two or more frequencies — "
+            f"got {len(sets)}. Dispersion is a statement about how the modal "
+            "speeds vary with frequency, so one solve cannot show it.")
+    for m in sets:
+        if not isinstance(m, Modes):
+            raise ConfigurationError(
+                f"plot_dispersion: expected a sequence of Modes, found "
+                f"{type(m).__name__}.")
+        if m.f0 is None:
+            raise ConfigurationError(
+                "plot_dispersion: every Modes needs a frequency (f0); one "
+                "carries none, so it cannot be placed on the frequency axis.")
+    sets.sort(key=lambda m: float(m.f0))
+    freqs = np.array([float(m.f0) for m in sets])
+    if np.any(np.diff(freqs) <= 0):
+        raise ConfigurationError(
+            f"plot_dispersion: frequencies must be distinct, got {freqs}.")
+
+    _owns_fig = ax is None
+    fig, ax = fig_ax(ax, figsize)
+    for mode_i in range(int(n_modes)):
+        vp, ff = [], []
+        vg, ff_g = [], []
+        for j, m in enumerate(sets):
+            if m.n_modes <= mode_i:
+                continue                      # below this mode's cutoff
+            ff.append(freqs[j])
+            vp.append(float(m.compute_phase_speeds()[mode_i]))
+            reported = getattr(m, 'group_velocity', None)
+            if reported is not None and np.isfinite(reported[mode_i]):
+                # The solver's own value belongs AT this frequency.
+                vg.append(float(reported[mode_i]))
+                ff_g.append(freqs[j])
+            elif j + 1 < len(sets) and sets[j + 1].n_modes > mode_i:
+                # A finite difference estimates d(omega)/dk at the MIDPOINT of
+                # the pair, which is what compute_group_velocity's own
+                # docstring says. Plotting it at the left endpoint shifted the
+                # whole curve half a step -- and on the last pair it repeated
+                # one value at two frequencies, on the very plot whose purpose
+                # is reading off the Airy-phase frequency.
+                fd = m.compute_group_velocity(sets[j + 1])
+                if mode_i < len(fd):
+                    vg.append(float(fd[mode_i]))
+                    ff_g.append(0.5 * (freqs[j] + freqs[j + 1]))
+        if not ff:
+            continue
+        colour = f'C{mode_i}'
+        ax.plot(ff, vp, '-', color=colour, lw=1.4, label=f'mode {mode_i + 1}')
+        if ff_g:
+            ax.plot(ff_g, vg, '--', color=colour, lw=1.2)
+
+    ax.set_xlabel('frequency (Hz)')
+    ax.set_ylabel('speed (m/s)')
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc='best', fontsize=8, title='solid: phase   dashed: group',
+              title_fontsize=7)
+    ax.set_title(title or 'Modal dispersion')
+    if _owns_fig:
+        _draw_result_credit(fig, sets[0], env=None)
+    return fig, ax
+
+
+@typed_plot_error
 def plot_modes_heatmap(
     modes: Modes,
     n_modes: Optional[int] = None,

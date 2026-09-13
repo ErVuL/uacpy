@@ -29,8 +29,11 @@ from .scattering import (
     LAMBERT_MU_DB,
     apl_uw_surface_backscatter,
     chapman_harris_surface,
+    coherent_reflection_factor,
     column_scattering_strength,
     lambert_bottom,
+    perturbative_grazing_limit,
+    rayleigh_parameter,
 )
 from .reverberation import (
     boundary_reverberation,
@@ -83,6 +86,9 @@ __all__ = [
     "lambert_bottom",
     "chapman_harris_surface",
     "column_scattering_strength",
+    "rayleigh_parameter",
+    "coherent_reflection_factor",
+    "perturbative_grazing_limit",
     "BottomParameters",
     "APL_UW_SEDIMENTS",
     "apl_uw_bottom_backscatter",
