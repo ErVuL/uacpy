@@ -515,9 +515,9 @@ def boundary_scattering():
               color='k', lw=1.2, label='Lambert, µ = −27 dB (any f)')
     ax_b.set_title('Bottom backscatter, 30 kHz', fontweight='bold', fontsize=12)
 
-    for wind_ms, style in ((3.0, ':'), (8.0, '-'), (15.0, '--')):
-        ax_s.plot(grazing, sonar.apl_uw_surface_backscatter(grazing, 25e3, wind_ms),
-                  ls=style, color='C0', lw=1.4, label=f'APL-UW {wind_ms:g} m/s')
+    for wind_mps, style in ((3.0, ':'), (8.0, '-'), (15.0, '--')):
+        ax_s.plot(grazing, sonar.apl_uw_surface_backscatter(grazing, 25e3, wind_mps),
+                  ls=style, color='C0', lw=1.4, label=f'APL-UW {wind_mps:g} m/s')
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')      # 25 kHz is 20 kHz above the fit
         ax_s.plot(grazing[grazing <= 50.0],

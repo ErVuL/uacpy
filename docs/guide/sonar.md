@@ -687,7 +687,7 @@ exactly that.
 | `column_scattering_strength(sv_dB, thickness_m)` | `S_v + 10·log10(h)` — a scattering layer as an equivalent area strength |
 | `apl_uw_bottom_backscatter(grazing_deg, frequency, params, *, water_sound_speed=1500.0)` | APL-UW TR 9407 seabed model, 10–100 kHz: interface roughness (Kirchhoff, composite, large) plus sediment volume scattering from the six `BottomParameters` |
 | `apl_uw_bottom_loss(grazing_deg, params)` | TR 9407 forward reflection loss, a lossy Rayleigh coefficient; no frequency dependence |
-| `apl_uw_surface_backscatter(grazing_deg, frequency, wind_speed_ms)` | TR 9407 sea-surface model, 10–100 kHz: bubble layer + Bragg ripples + specular facets, with bubble-layer extinction; wind in **m/s** |
+| `apl_uw_surface_backscatter(grazing_deg, frequency, wind_speed_mps)` | TR 9407 sea-surface model, 10–100 kHz: bubble layer + Bragg ripples + specular facets, with bubble-layer extinction; wind in **m/s** |
 | `BottomParameters.from_sediment(name)` / `.from_grain_size(Mz)` / `.from_geoacoustics(...)` | the six seabed inputs (ρ, ν, δ, σ₂, γ, w₂) from TR 9407 Table 2, its grain-size relations, or measured cp / ρ / attenuation |
 | `BottomParameters.from_environment(env, *, range=0.0, method='auto')` / `.from_bottom(seabed, *, water_sound_speed, ...)` | the same six inputs from a uacpy seabed — a fetched `Environment`, a `Bottom` at a range, a `SeabedColumn` or a `BoundaryProperties` — off its grain size when it has one, else its geoacoustics against the water at the seafloor |
 
@@ -736,8 +736,8 @@ grazing = np.linspace(1.0, 90.0, 180)
 params = sonar.BottomParameters.from_sediment(name)
 ax_b.plot(grazing, sonar.apl_uw_bottom_backscatter(grazing, 30e3, params),
           ls=style, color='C1', lw=1.4, label=f'APL-UW {name}')
-ax_s.plot(grazing, sonar.apl_uw_surface_backscatter(grazing, 25e3, wind_ms),
-          ls=style, color='C0', lw=1.4, label=f'APL-UW {wind_ms:g} m/s')
+ax_s.plot(grazing, sonar.apl_uw_surface_backscatter(grazing, 25e3, wind_mps),
+          ls=style, color='C0', lw=1.4, label=f'APL-UW {wind_mps:g} m/s')
 ```
 
 ![The APL-UW boundary models beside the low-frequency laws](figures/sonar_boundary_scattering.png)

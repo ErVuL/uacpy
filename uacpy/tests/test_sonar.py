@@ -2400,7 +2400,7 @@ class TestSurfaceBackscatter:
         with warnings.catch_warnings():
             warnings.simplefilter('error')
             apl_uw_surface_backscatter(20.0, 25e3, 0.0)   # calm sea is valid
-        with pytest.raises(ConfigurationError, match='wind_speed_ms'):
+        with pytest.raises(ConfigurationError, match='wind_speed_mps'):
             apl_uw_surface_backscatter(20.0, 25e3, -1.0)
         with pytest.raises(ConfigurationError, match='0-90'):
             apl_uw_surface_backscatter(-5.0, 25e3, 8.0)

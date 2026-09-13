@@ -523,6 +523,7 @@ class TestTheSecondsSuffixIsNotSpentOnMetresPerSecond:
             'uacpy.comms.doppler_from_speed(sound_speed_mps)',
             'uacpy.comms.doppler_from_speed(speed_mps)',
             'uacpy.generate_sea_surface(wind_speed_mps)',
+            'uacpy.sonar.apl_uw_surface_backscatter(wind_speed_mps)',
         ]
 
 

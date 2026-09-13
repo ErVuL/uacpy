@@ -351,14 +351,14 @@ _EXTRAPOLATE_BELOW_DEG = 0.5
 _FREQUENCY_LIMITS_HZ = (10e3, 100e3)
 
 
-def _bubble_cross_section(theta_rad, f_khz: float, wind_ms: float):
+def _bubble_cross_section(theta_rad, f_khz: float, wind_mps: float):
     """Eqs. 2-6: backscattering by the near-surface bubble layer."""
-    if wind_ms < _BUBBLE_WIND_BREAK_MS:
-        beta_v = 10.0 ** (-5.2577 + 0.4701 * wind_ms) * (f_khz / 25.0) ** 0.85
+    if wind_mps < _BUBBLE_WIND_BREAK_MS:
+        beta_v = 10.0 ** (-5.2577 + 0.4701 * wind_mps) * (f_khz / 25.0) ** 0.85
     else:
         beta_v = (10.0 ** (-5.2577 + 0.4701 * _BUBBLE_WIND_BREAK_MS)
                   * (f_khz / 25.0) ** 0.85
-                  * (wind_ms / _BUBBLE_WIND_BREAK_MS) ** 3.5)
+                  * (wind_mps / _BUBBLE_WIND_BREAK_MS) ** 3.5)
     delta = 2.55e-2 * f_khz ** (1.0 / 3.0)                       # Eq. 6
     with np.errstate(divide='ignore', invalid='ignore', over='ignore'):
         beta = beta_v / np.sin(theta_rad)                        # Eq. 3
@@ -370,11 +370,11 @@ def _bubble_cross_section(theta_rad, f_khz: float, wind_ms: float):
     return np.where(np.isfinite(sigma_b), sigma_b, 0.0)
 
 
-def _facet_slope_sq(wind_ms: float) -> float:
+def _facet_slope_sq(wind_mps: float) -> float:
     """Eq. 12: mean-square surface slope."""
-    if wind_ms < _FACET_WIND_FLOOR_MS:
+    if wind_mps < _FACET_WIND_FLOOR_MS:
         return 0.0034
-    return 4.6e-3 * np.log(2.1 * wind_ms ** 2)
+    return 4.6e-3 * np.log(2.1 * wind_mps ** 2)
 
 
 def _facet_cross_section(theta_rad, s2: float):
@@ -398,14 +398,14 @@ def _facet_transition_deg(s2: float) -> float:
     return 90.0 - np.degrees(g)
 
 
-def _strength(theta_deg: np.ndarray, f_hz: float, wind_ms: float) -> np.ndarray:
+def _strength(theta_deg: np.ndarray, f_hz: float, wind_mps: float) -> np.ndarray:
     theta = np.deg2rad(theta_deg)
     f_khz = f_hz / 1000.0
-    sigma_b = _bubble_cross_section(theta, f_khz, wind_ms)
-    a_u = 1.3e-5 * wind_ms ** 2                                  # Eq. 10
+    sigma_b = _bubble_cross_section(theta, f_khz, wind_mps)
+    a_u = 1.3e-5 * wind_mps ** 2                                  # Eq. 10
     sigma_sc = np.where(theta_deg <= _BRAGG_MAX_DEG,
                         a_u * np.tan(theta) ** 4, 0.0)           # Eq. 9
-    s2 = _facet_slope_sq(wind_ms)
+    s2 = _facet_slope_sq(wind_mps)
     sigma_f = _facet_cross_section(theta, s2)
     theta_f = _facet_transition_deg(s2)
     fx = 1.0 / (1.0 + np.exp(np.clip(0.524 * (theta_f - theta_deg),
@@ -414,14 +414,14 @@ def _strength(theta_deg: np.ndarray, f_hz: float, wind_ms: float) -> np.ndarray:
     # Eq. 16: the two-way passage through the bubble layer. SBL is a power
     # loss; the helper returns the amplitude multiplier 10^(-SBL/20), so its
     # square is 10^(-SBL/10). It takes the angle from the surface normal.
-    extinction = bubble_surface_loss(wind_ms, f_hz, np.pi / 2.0 - theta) ** 2
+    extinction = bubble_surface_loss(wind_mps, f_hz, np.pi / 2.0 - theta) ** 2
     sigma_r = sigma_r1 * extinction
     with np.errstate(divide='ignore'):
         return 10.0 * np.log10(sigma_r + sigma_b)
 
 
 def apl_uw_surface_backscatter(grazing_deg, frequency: float,
-                               wind_speed_ms: float):
+                               wind_speed_mps: float):
     """Sea-surface backscattering strength, TR 9407 II.B (Eqs. 1-16), dB.
 
     ``S_s = 10 log10(sigma_r + sigma_b)``: the near-surface bubble layer
@@ -441,7 +441,7 @@ def apl_uw_surface_backscatter(grazing_deg, frequency: float,
         Acoustic frequency (Hz). The handbook's band is 10-100 kHz and its
         comparisons ran 12-70 kHz with no frequency trend in accuracy;
         outside the band the call warns.
-    wind_speed_ms : float
+    wind_speed_mps : float
         Wind speed 10 m above the surface (m/s), >= 0. Note the unit:
         :func:`chapman_harris_surface` takes knots.
 
@@ -466,15 +466,15 @@ def apl_uw_surface_backscatter(grazing_deg, frequency: float,
             f"apl_uw_surface_backscatter: grazing angles must be finite and "
             f"within 0-90 deg; got {grazing_deg!r}.")
     f = float(frequency)
-    u = float(wind_speed_ms)
+    u = float(wind_speed_mps)
     if not (np.isfinite(f) and f > 0.0):
         raise ConfigurationError(
             f"apl_uw_surface_backscatter: frequency must be > 0 and finite "
             f"(Hz); got {frequency!r}.")
     if not (np.isfinite(u) and u >= 0.0):
         raise ConfigurationError(
-            f"apl_uw_surface_backscatter: wind_speed_ms must be >= 0 and "
-            f"finite (m/s); got {wind_speed_ms!r}.")
+            f"apl_uw_surface_backscatter: wind_speed_mps must be >= 0 and "
+            f"finite (m/s); got {wind_speed_mps!r}.")
     lo, hi = _FREQUENCY_LIMITS_HZ
     if not lo <= f <= hi:
         warnings.warn(
