@@ -4,6 +4,7 @@ Pade parameters and stability, the range/depth grids the deck carries, and the
 tolerances the Fortran march itself imposes on where a receiver can land.
 """
 
+import subprocess
 import types
 import re
 import warnings
@@ -23,6 +24,11 @@ from uacpy.core import (Altimetry, Bathymetry,
     Environment, Source, Receiver, SoundSpeedProfile, BoundaryProperties,
     Bottom, SeabedColumn, SedimentLayer,
 )
+from uacpy.core.absorption import (
+    ConstantAbsorption, FrancoisGarrison, Thorp, thorp_dB_per_km,
+)
+from uacpy.io.mpirams_writer import write_inpe, write_water_attenuation_file
+from uacpy.io.ramsurf_writer import write_ramin
 
 pytestmark = pytest.mark.requires_binary
 
@@ -3897,3 +3903,294 @@ class TestAvailableMemoryReadsMemAvailable:
         got = _available_memory_bytes()
         assert got is not None
         assert got == pytest.approx(expected, rel=0.5)
+
+
+# ── Water-column volume attenuation on every RAM backend ─────────────────────
+# The Collins decks carry ``alpha(z)`` as one more profile block per section in
+# dB per local wavelength, announced by a fifth number on row 5; mpiramS reads
+# a depth x bin table named on the last line of ``in.pe``. The binaries apply
+# it to the water wavenumber as ``k(1 + i*eta*beta)`` — the seabed's own form
+# (``third_party/MODIFICATIONS.md``, *water-column attenuation*).
+
+def _segment(with_water, rho=1.5, shear=False):
+    seg = dict(
+        range=0.0,
+        water_ssp=[(0.0, 1500.0), (100.0, 1500.0)],
+        bottom_c=[(0.0, 1700.0), (200.0, 1700.0)],
+        bottom_rho=[(0.0, rho), (200.0, rho)],
+        bottom_attn=[(0.0, 0.5), (200.0, 0.5)],
+    )
+    if shear:
+        seg['bottom_cs'] = [(0.0, 300.0), (200.0, 300.0)]
+        seg['bottom_attns'] = [(0.0, 1.0), (200.0, 1.0)]
+    if with_water:
+        seg['water_attn'] = [(0.0, 0.001), (200.0, 0.001)]
+    return seg
+
+
+def _write(path, kind, segments, **kw):
+    args = dict(kind=kind, fc=400.0, zs=30.0, zr_line=30.0, rmax=3000.0,
+                dr=5.0, ndr=1, zmax=200.0, dz=0.25, ndz=1, zmplt=150.0,
+                c0=1500.0, np_pade=4,
+                bathymetry=[(0.0, 100.0), (3000.0, 100.0)],
+                range_segments=segments)
+    if kind == 'ramsurf':
+        args['surface'] = [(0.0, 0.0), (3000.0, 0.0)]
+    if kind == 'rams':
+        args.update(irot=1, theta=45.0)
+    args.update(kw)
+    write_ramin(str(path), **args)
+    return path.read_text().splitlines()
+
+
+class TestRamInWaterBlock:
+
+    def test_block_in_every_section_sets_row5_and_adds_one_terminator_each(
+            self, tmp_path):
+        segs = [_segment(True), dict(_segment(True), range=1500.0)]
+        lines = _write(tmp_path / 'ramgeo.in', 'ramgeo', segs)
+        assert lines[4] == '1500 4 1 0 1'
+        # bathymetry + 2 sections x (cw, cb, rho, attn, attw)
+        assert sum(1 for ln in lines if ln.startswith('-1')) == 11
+        # the water block is the LAST block of a section: its value line sits
+        # right before the range line that opens the next section.
+        i = lines.index('1500')
+        assert lines[i - 1] == '-1 -1' and lines[i - 2] == '200 0.001'
+
+    def test_without_the_block_row5_keeps_four_numbers(self, tmp_path):
+        lines = _write(tmp_path / 'ramgeo.in', 'ramgeo', [_segment(False)])
+        assert lines[4] == '1500 4 1 0'
+        assert sum(1 for ln in lines if ln.startswith('-1')) == 5
+
+    def test_rams_row5_carries_the_fifth_number_after_theta(self, tmp_path):
+        lines = _write(tmp_path / 'rams.in', 'rams',
+                       [_segment(True, shear=True)])
+        assert lines[4] == '1500 4 1 45 1'
+        assert sum(1 for ln in lines if ln.startswith('-1')) == 8
+
+    def test_a_block_in_some_sections_only_is_refused(self, tmp_path):
+        segs = [_segment(True), dict(_segment(False), range=1500.0)]
+        with pytest.raises(ConfigurationError, match='every range segment'):
+            _write(tmp_path / 'ramgeo.in', 'ramgeo', segs)
+
+
+class TestMpiramsWaterTable:
+
+    def _inpe(self, path, **kw):
+        write_inpe(path, fc=400.0, Q=1e6, T=1.0, zsrc=30.0, deltaz=0.25,
+                   deltar=5.0, np_pade=4, nss=1, rs=3000.0, dzm=1,
+                   ssp_filename='ssp.dat', iflat=0, ihorz=0, ibot=1,
+                   bth_filename='bth.dat', sedlayer=50.0, nzs=4,
+                   cs=np.zeros(4), rho=np.full(4, 1.5), attn=np.full(4, 0.5),
+                   c0_user=1500.0, **kw)
+        return path.read_text().splitlines()
+
+    def test_table_name_is_the_decks_last_line(self, tmp_path):
+        lines = self._inpe(tmp_path / 'in.pe', water_attn_filename='w.dat')
+        assert lines[-1] == 'w.dat'
+        assert lines[-2].split() == ['0.5'] * 4
+
+    def test_without_a_table_the_deck_ends_with_the_attenuation_row(
+            self, tmp_path):
+        lines = self._inpe(tmp_path / 'in.pe')
+        assert lines[-1].split() == ['0.5'] * 4
+
+    def test_table_layout_is_header_frequencies_then_one_row_per_depth(
+            self, tmp_path):
+        out = tmp_path / 'w.dat'
+        table = np.array([[1e-4, 2e-4, 3e-4], [4e-4, 5e-4, 6e-4]])
+        write_water_attenuation_file(out, [0.0, 150.0], [399.0, 400.0, 401.0],
+                                     table)
+        lines = out.read_text().splitlines()
+        assert lines[0] == '2 3'
+        assert [float(v) for v in lines[1].split()] == [399.0, 400.0, 401.0]
+        assert [float(v) for v in lines[2].split()] == [0.0, 1e-4, 2e-4, 3e-4]
+        assert [float(v) for v in lines[3].split()] == [150.0, 4e-4, 5e-4, 6e-4]
+
+    def test_non_monotone_depths_and_negative_values_are_refused(
+            self, tmp_path):
+        with pytest.raises(ConfigurationError, match='increase strictly'):
+            write_water_attenuation_file(tmp_path / 'w.dat', [0.0, 0.0],
+                                         [400.0], np.zeros((2, 1)))
+        with pytest.raises(ConfigurationError, match='non-negative'):
+            write_water_attenuation_file(tmp_path / 'w.dat', [0.0, 1.0],
+                                         [400.0], -np.ones((2, 1)))
+
+
+@pytest.mark.requires_binary  # constructs RAM (resolves its binary)
+class TestWrapperBlock:
+
+    def _ram(self):
+        from uacpy.models import RAM
+        return RAM(verbose=False, flat_earth=False)
+
+    def test_thorp_block_is_dB_per_local_wavelength(self):
+        env = Environment(name='grad', bathymetry=100.0,
+                          ssp=[(0.0, 1500.0), (100.0, 1480.0)],
+                          absorption=Thorp())
+        block = self._ram()._water_attenuation_block(
+            env, 10000.0, env.ssp.to_pairs(), 150.0)
+        alpha_m = float(thorp_dB_per_km(10000.0)) / 1000.0
+        by_depth = dict(block)
+        assert by_depth[0.0] == pytest.approx(alpha_m * 1500.0 / 10000.0)
+        assert by_depth[100.0] == pytest.approx(alpha_m * 1480.0 / 10000.0)
+        # below the profile's last sample the speed holds, so the block does
+        assert by_depth[150.0] == pytest.approx(by_depth[100.0])
+
+    def test_francois_garrison_is_evaluated_per_depth(self):
+        fg = FrancoisGarrison(temperature_c=10.0, salinity_psu=35.0, pH=8.0,
+                              z_bar_m=0.0)
+        env = Environment(name='fg', bathymetry=1000.0, ssp=1500.0,
+                          absorption=fg)
+        block = self._ram()._water_attenuation_block(
+            env, 10000.0, env.ssp.to_pairs(), 1000.0)
+        z = np.array([d for d, _ in block])
+        a = np.array([v for _, v in block])
+        expected = np.atleast_1d(fg.alpha_dB_per_m(10000.0, z)) * 1500.0 / 1e4
+        np.testing.assert_allclose(a, expected, rtol=1e-12)
+        assert a[-1] < a[0], "pressure lowers FG absorption with depth"
+
+    def test_depths_thin_to_one_per_cell_and_stay_inside_the_domain(self):
+        env = Environment(name='t', bathymetry=100.0,
+                          ssp=[(0.0, 1500.0), (3.0, 1499.0), (100.0, 1480.0)],
+                          absorption=Thorp())
+        z = self._ram()._water_attenuation_depths(env, 150.0, dz=10.0)
+        assert z[0] == 0.0 and z[-1] <= 150.0
+        assert np.all(np.diff(z) >= 10.0)
+        z_fine = self._ram()._water_attenuation_depths(env, 150.0)
+        assert 3.0 in z_fine and 150.0 in z_fine
+
+    def test_mpirams_table_has_one_column_per_sweep_bin(self, tmp_path):
+        env = Environment(name='t', bathymetry=100.0, ssp=1500.0,
+                          absorption=Thorp())
+        m = self._ram()
+        name = m._write_mpirams_water_attenuation(env, tmp_path, 100.0, 10.0,
+                                                  1.0, 150.0)
+        lines = (tmp_path / name).read_text().splitlines()
+        frq = m._broadband_frequencies(100.0, 10.0, 1.0)
+        nz, nf = (int(v) for v in lines[0].split())
+        assert nf == frq.size == 21
+        np.testing.assert_allclose([float(v) for v in lines[1].split()], frq)
+        rows = np.array([[float(v) for v in ln.split()] for ln in lines[2:]])
+        assert rows.shape == (nz, nf + 1)
+        j = 5
+        expected = (float(thorp_dB_per_km(frq[j])) / 1000.0 * 1500.0 / frq[j])
+        np.testing.assert_allclose(rows[:, j + 1], expected, rtol=1e-9)
+
+
+def _tl_line(path):
+    rows = [ln.split() for ln in path.read_text().splitlines() if ln.strip()]
+    return np.array([[float(r[0]), float(r[1])] for r in rows])
+
+
+@pytest.mark.requires_binary
+@pytest.mark.slow
+class TestCollinsBinariesApplyTheBlock:
+    """Deck + binary, no wrapper: the patched engines read the fifth block
+    and lose the plane-wave ``beta * r / lambda`` over the water path; a
+    block of zeros changes nothing."""
+
+    BETA = 0.02  # dB/wavelength; 800 wavelengths at 3 km and 400 Hz = 16 dB
+
+    def _run(self, tmp_path, kind, water):
+        from uacpy.models import RAM
+        ram = RAM(verbose=False)
+        d = tmp_path / f'{kind}_{water}'
+        d.mkdir()
+        seg = _segment(False, shear=(kind == 'rams'))
+        if water is not None:
+            seg['water_attn'] = [(0.0, water), (200.0, water)]
+        _write(d / RAM._collins_in_name(kind), kind, [seg])
+        subprocess.run([str(ram._collins_binary(kind))], cwd=d, check=True,
+                       capture_output=True, timeout=600)
+        return d
+
+    @pytest.mark.parametrize('kind', ['ramgeo', 'rams', 'ramsurf'])
+    def test_extra_loss_is_the_plane_wave_value(self, tmp_path, kind):
+        plain = _tl_line(self._run(tmp_path, kind, None) / 'tl.line')
+        lossy = _tl_line(self._run(tmp_path, kind, self.BETA) / 'tl.line')
+        r = plain[:, 0]
+        extra = lossy[:, 1] - plain[:, 1]
+        expected = self.BETA * r / (1500.0 / 400.0)
+        tail = r > 2000.0
+        ratio = np.median(extra[tail] / expected[tail])
+        assert 0.85 < ratio < 1.3, (
+            f"{kind}: extra loss is {ratio:.2f} x the plane-wave value")
+
+    @pytest.mark.parametrize('kind', ['ramgeo', 'rams', 'ramsurf'])
+    def test_a_block_of_zeros_reproduces_the_lossless_field(self, tmp_path,
+                                                            kind):
+        plain = self._run(tmp_path, kind, None)
+        zero = self._run(tmp_path, kind, 0.0)
+        if kind == 'ramsurf':
+            # the complex square rounds differently from the real one
+            d = np.abs(_tl_line(plain / 'tl.line')[:, 1]
+                       - _tl_line(zero / 'tl.line')[:, 1])
+            assert d.max() < 1e-6
+        else:
+            assert (plain / 'tl.grid').read_bytes() == \
+                (zero / 'tl.grid').read_bytes()
+            assert (plain / 'pcomplex.bin').read_bytes() == \
+                (zero / 'pcomplex.bin').read_bytes()
+
+
+def _pekeris(backend, absorption):
+    kw = {}
+    if backend == 'rams':
+        bottom = BoundaryProperties(sound_speed=1700.0, shear_speed=300.0,
+                                    density=1.8, attenuation=0.5,
+                                    shear_attenuation=1.0)
+    else:
+        bottom = BoundaryProperties(sound_speed=1700.0, density=1.8,
+                                    attenuation=0.5)
+    if backend == 'ramsurf':
+        kw['altimetry'] = [(0.0, 0.0), (3000.0, 0.0)]
+    return Environment(name=f'pekeris-{backend}', bathymetry=100.0,
+                       ssp=1500.0, bottom=bottom, absorption=absorption, **kw)
+
+
+@pytest.mark.requires_binary
+@pytest.mark.slow
+class TestEveryBackendAppliesEnvAbsorption:
+    """The wrapper route: the same ``Environment`` with and without a
+    constant 0.02 dB/wavelength loses the plane-wave value on every backend,
+    and mpiramS's broadband table lowers every bin."""
+
+    BETA = 0.02
+    RANGES = [1000.0, 2000.0, 3000.0]
+
+    def _tl(self, backend, absorption):
+        from uacpy.models import RAM
+        ram = RAM(backend=backend, verbose=False)
+        field = ram.run(_pekeris(backend, absorption),
+                        Source(depths=30.0, frequencies=400.0),
+                        Receiver(depths=[30.0], ranges=self.RANGES),
+                        run_mode=RunMode.COHERENT_TL)
+        return np.asarray(field.tl, dtype=float).reshape(-1)
+
+    @pytest.mark.parametrize('backend', ['mpiramS', 'ramgeo', 'rams', 'ramsurf'])
+    def test_constant_absorption_costs_beta_r_over_lambda(self, backend):
+        extra = (self._tl(backend, ConstantAbsorption(self.BETA))
+                 - self._tl(backend, None))
+        expected = self.BETA * np.asarray(self.RANGES) / (1500.0 / 400.0)
+        ratio = extra / expected
+        assert np.all((0.8 < ratio) & (ratio < 1.35)), (
+            f"{backend}: extra loss / plane-wave = {ratio}")
+
+    def test_mpirams_broadband_table_lowers_every_bin(self):
+        from uacpy.models import RAM
+        freqs = np.array([380.0, 390.0, 400.0, 410.0, 420.0])
+        src = Source(depths=30.0, frequencies=freqs)
+        rcv = Receiver(depths=[30.0], ranges=[3000.0])
+        H = {}
+        for label, absorption in (('plain', None),
+                                  ('lossy', ConstantAbsorption(self.BETA))):
+            field = RAM(backend='mpiramS', verbose=False).run(
+                _pekeris('mpiramS', absorption), src, rcv,
+                run_mode=RunMode.BROADBAND)
+            H[label] = np.abs(np.asarray(field.data)).reshape(-1)
+        assert H['plain'].size == freqs.size
+        extra = 20.0 * np.log10(H['plain'] / H['lossy'])
+        expected = self.BETA * 3000.0 / (1500.0 / freqs)
+        assert np.all((0.8 < extra / expected) & (extra / expected < 1.35)), (
+            f"broadband extra loss / plane-wave = {extra / expected}")

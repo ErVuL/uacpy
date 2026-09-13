@@ -603,7 +603,10 @@ Each axis can be a **literal** (`ssp=`, `bathymetry=`, `bottom=`, exactly as
 `Environment` takes them) and/or fetched from one or more `*_sources` tried in
 order. `transect_to=(lat, lon)` samples bathymetry (and optionally SSP/bottom)
 along a great-circle path for a range-dependent environment;
-`with_absorption=True` attaches a site-specific Francois–Garrison model.
+`with_absorption=True` attaches a site-specific Francois–Garrison model;
+`bottom_model='apl-uw'` swaps the grain-size → geoacoustics relations every
+ϕ-reporting seabed source goes through from Hamilton's low-frequency table to
+the APL-UW TR 9407 high-frequency ones.
 Fetching is cache-first **within each source**: an installed local dataset is
 sampled before that source's own network call. It is not cache-first across the
 chain — `'auto'` is ordered by data quality, not by what happens to be
@@ -1642,7 +1645,18 @@ TS, RL. The `*_field` helpers map the equation over a model TL
 | Detection theory | `albersheim_snr`, `probability_of_detection`, `roc_curve`, `detection_index`, `deflection_coefficient`, `detection_threshold_energy` |
 | Target strength | `ts_sphere`, `ts_cylinder`, `ts_plate`, `ts_ellipsoid`, `ts_convex` |
 | Scattering / reverb | `lambert_bottom`, `LAMBERT_MU_DB`, `chapman_harris_surface`, `column_scattering_strength`, `boundary_reverberation`, `volume_reverberation`, `total_reverberation` |
+| High-frequency boundary scattering (APL-UW TR 9407, 10–100 kHz) | `apl_uw_bottom_backscatter`, `apl_uw_bottom_loss`, `apl_uw_surface_backscatter`, `BottomParameters` (`.from_sediment` / `.from_grain_size` / `.from_geoacoustics` / `.from_bottom` / `.from_environment`), `APL_UW_SEDIMENTS` |
 | Matched-field localization | `synthesize_replica`, `replica_bank`, `replica_bank_from_field`, `csdm`, `bartlett`, `mvdr` |
+
+`apl_uw_bottom_backscatter` and `apl_uw_surface_backscatter` are the handbook's
+seabed (Kirchhoff + composite roughness + large roughness + sediment volume)
+and sea-surface (bubble layer + Bragg ripples + facets) models for 10–100 kHz,
+where Lambert and Chapman–Harris are out of band; `BottomParameters` carries the
+six seabed inputs from a sediment name, a grain size or measured geoacoustics,
+or from a uacpy seabed — `from_environment(env)` reads a fetched
+`Environment`'s bottom (grain size first, geoacoustics against the water at
+the seafloor otherwise), `from_bottom` a bare `Bottom` / `SeabedColumn` /
+`BoundaryProperties` — and `APL_UW_SEDIMENTS` is the handbook's Table 2.
 
 `LAMBERT_MU_DB` (float, −27.0) is `lambert_bottom`'s default backscattering
 constant 10·log10(μ) in dB — Mackenzie's (1961) deep-water value; pass

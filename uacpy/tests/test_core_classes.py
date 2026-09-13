@@ -26,7 +26,8 @@ from uacpy.core.altimetry import Altimetry
 from uacpy.core.bathymetry import Bathymetry
 from uacpy.core.bottom import Bottom, BoundaryProperties, SeabedColumn
 from uacpy.core.constants import (
-    AttenuationUnits, BoundaryType, SBP_ANGLE_RESOLUTION_DEG,
+    AttenuationUnits, BoundaryType, DEFAULT_WATER_DENSITY_G_CM3,
+    SBP_ANGLE_RESOLUTION_DEG,
 )
 from uacpy.core.environment import Environment
 from uacpy.core.exceptions import ConfigurationError
@@ -37,6 +38,7 @@ from uacpy.core.results.field import ResultStack
 from uacpy.core.source import Source
 from uacpy.core.ssp import SoundSpeedProfile
 from uacpy.core.surface import Surface
+from uacpy.models._segmentation import segment_environment_by_range
 
 
 class TestEnvironment:
@@ -130,6 +132,54 @@ class TestEnvironment:
                 bathymetry=[[-100.0, 80.0], [5000.0, 90.0]],
                 ssp=1500,
             )
+
+
+def _water_density_env(**kw):
+    kw.setdefault('name', 'rho')
+    kw.setdefault('bathymetry', 100.0)
+    kw.setdefault('ssp', 1500.0)
+    kw.setdefault('bottom', BoundaryProperties(sound_speed=1700.0, density=1.5,
+                                               attenuation=0.5))
+    return Environment(**kw)
+
+
+class TestEnvironmentWaterDensity:
+    """``Environment.water_density``: sea water by default (1.027 g/cm³),
+    an explicit value kept through copies, range segmentation and
+    Kraken's single-profile reduction; the wrong unit refused."""
+
+    def test_default_is_sea_water_not_one(self):
+        assert DEFAULT_WATER_DENSITY_G_CM3 == 1.027
+        assert _water_density_env().water_density == 1.027
+
+    def test_an_explicit_value_is_kept(self):
+        assert _water_density_env(water_density=1.0).water_density == 1.0
+        assert _water_density_env(water_density=1.03).water_density == 1.03
+
+    def test_kg_per_m3_is_refused_with_the_unit_named(self):
+        with pytest.raises(ConfigurationError, match='g/cm³.*kg/m³'):
+            _water_density_env(water_density=1027.0)
+
+    def test_a_non_number_is_refused(self):
+        with pytest.raises(ConfigurationError, match='number in g/cm³'):
+            _water_density_env(water_density='sea water')
+
+    def test_copy_keeps_it(self):
+        assert _water_density_env(water_density=1.02).copy().water_density == 1.02
+
+    def test_range_segmentation_keeps_it(self):
+        env = _water_density_env(bathymetry=[(0.0, 100.0), (5000.0, 200.0)],
+                   water_density=1.02)
+        for _, seg in segment_environment_by_range(env, n_segments=3):
+            assert seg.water_density == 1.02
+
+    @pytest.mark.requires_binary  # constructs Kraken (resolves its binary)
+    def test_krakens_single_profile_reduction_keeps_it(self):
+        from uacpy.models import Kraken
+        env = _water_density_env(bathymetry=[(0.0, 100.0), (5000.0, 200.0)],
+                   water_density=1.02)
+        assert Kraken(verbose=False)._modes_single_profile(env).water_density \
+            == 1.02
 
 
 class TestBiologicalLayerValidation:

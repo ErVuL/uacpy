@@ -58,7 +58,8 @@ _FOLK5_TO_BOTTOM = {
 _FOLK5_UNCLASSIFIED = 6
 
 
-def _bottom_from_folk5(code, lat, lon, *, roughness, water_sound_speed=None):
+def _bottom_from_folk5(code, lat, lon, *, roughness, water_sound_speed=None,
+                       model='hamilton'):
     """``BoundaryProperties`` for one Folk 5-class code, or a typed refusal.
 
     Shared by the live WFS backend and the offline polygon backend
@@ -81,7 +82,7 @@ def _bottom_from_folk5(code, lat, lon, *, roughness, water_sound_speed=None):
         )
     kind, value = _FOLK5_TO_BOTTOM[code]
     if kind == 'phi':
-        return bottom_from_grain_size(value, roughness=roughness,
+        return bottom_from_grain_size(value, roughness=roughness, model=model,
                                       water_sound_speed=water_sound_speed)
     return bottom_from_class(value, roughness=roughness)
 
@@ -168,6 +169,7 @@ def fetch_bottom(
     *,
     roughness: float = 0.0,
     water_sound_speed: Optional[float] = None,
+    model: str = 'hamilton',
     layer: str = EMODNET_LAYER,
     base_url: str = EMODNET_WFS_URL,
     timeout: float = 60.0,
@@ -180,13 +182,15 @@ def fetch_bottom(
     ``DataFetchError`` outside European-seas coverage. ``water_sound_speed``
     (m/s) scales the grain-size velocity ratio to the in-situ near-seabed
     water; ``None`` uses the Hamilton reference (class bottoms are absolute and
-    unaffected).
+    unaffected). ``model`` picks the grain-size relations (``'hamilton'`` or
+    ``'apl-uw'``), see :func:`uacpy.data.grain_size_to_geoacoustics`.
     """
     lat, lon = as_coordinate(point)
     sub = fetch_seabed_substrate(point, layer=layer, base_url=base_url,
                                  timeout=timeout, verbose=verbose)
     bottom = _bottom_from_folk5(sub['folk_5cl'], lat, lon, roughness=roughness,
-                                water_sound_speed=water_sound_speed)
+                                water_sound_speed=water_sound_speed,
+                                model=model)
     log_message(
         'seabed', f"EMODnet '{sub['folk_5cl_txt']}' at {lat:.3f}, {lon:.3f} → "
         f"{bottom.acoustic_type} c_p={bottom.sound_speed:.0f} m/s",
@@ -201,6 +205,7 @@ def fetch_bottom_transect(
     max_points=None,
     roughness: float = 0.0,
     water_sound_speed: Optional[float] = None,
+    model: str = 'hamilton',
     layer: str = EMODNET_LAYER,
     base_url: str = EMODNET_WFS_URL,
     timeout: float = 60.0,
@@ -223,6 +228,7 @@ def fetch_bottom_transect(
         lambda la, lo: fetch_bottom((la, lo), roughness=roughness,
                                     water_sound_speed=water_sound_speed_at(
                                         water_sound_speed, la, lo),
+                                    model=model,
                                     layer=layer, base_url=base_url,
                                     timeout=timeout, verbose=verbose),
         start, end, n_points, source_label='EMODnet', max_points=max_points,

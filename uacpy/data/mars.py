@@ -261,6 +261,7 @@ def fetch_bottom_mars(
     *,
     roughness: float = 0.0,
     water_sound_speed: Optional[float] = None,
+    model: str = 'hamilton',
     max_distance_km: float = DEFAULT_MAX_DISTANCE_KM,
     layer: str = MARS_LAYER,
     base_url: str = MARS_WFS_URL,
@@ -272,14 +273,15 @@ def fetch_bottom_mars(
     Convenience wrapper: :func:`fetch_mars_sediment` →
     :func:`uacpy.data.bottom_from_grain_size`. ``water_sound_speed`` (m/s)
     scales the grain-size velocity ratio to the in-situ near-seabed water;
-    ``None`` uses the Hamilton reference.
+    ``None`` uses the Hamilton reference. ``model`` picks the grain-size
+    relations (``'hamilton'`` or ``'apl-uw'``).
     """
     lat, lon = as_coordinate(point)
     sample = fetch_mars_sediment(
         point, max_distance_km=max_distance_km, layer=layer,
         base_url=base_url, timeout=timeout, verbose=verbose)
     bottom = bottom_from_grain_size(
-        sample['phi'], roughness=roughness,
+        sample['phi'], roughness=roughness, model=model,
         water_sound_speed=water_sound_speed)
     # Point samples are sparse, so the nearest one can be up to
     # max_distance_km from the requested position; record where it actually
@@ -299,6 +301,7 @@ def fetch_bottom_mars_transect(
     max_points=None,
     roughness: float = 0.0,
     water_sound_speed: Optional[float] = None,
+    model: str = 'hamilton',
     max_distance_km: float = DEFAULT_MAX_DISTANCE_KM,
     layer: str = MARS_LAYER,
     base_url: str = MARS_WFS_URL,
@@ -314,6 +317,7 @@ def fetch_bottom_mars_transect(
         lambda la, lo: fetch_bottom_mars(
             (la, lo), roughness=roughness,
             water_sound_speed=water_sound_speed_at(water_sound_speed, la, lo),
+            model=model,
             max_distance_km=max_distance_km, layer=layer, base_url=base_url,
             timeout=timeout, verbose=verbose),
         start, end, n_points, source_label='AusSeabed MARS',

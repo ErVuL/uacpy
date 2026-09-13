@@ -54,6 +54,7 @@ from uacpy.data._http import raise_substantive
 from uacpy.data.bathymetry import (
     DEFAULT_DATASET, fetch_bathy, fetch_bathy_transect, transect_length,
 )
+from uacpy.core.sediment import GRAIN_SIZE_MODELS
 from uacpy.data.sediment import bottom_from_class, bottom_from_grain_size
 from uacpy.data.sound_speed import (
     extend_ssp_below_data, fetch_ssp, fetch_ssp_transect, fetch_ts_profile,
@@ -190,6 +191,7 @@ def fetch_environment(
     bathymetry_sources: Union[str, Sequence[str], None] = None,
     bottom: Union[float, str, BoundaryProperties, None] = None,
     bottom_sources: Union[str, Sequence[str], None] = None,
+    bottom_model: str = 'hamilton',
     surface: Optional[BoundaryProperties] = None,
     surface_sources: Union[str, Sequence[str], None] = None,
     altimetry=None,
@@ -302,6 +304,19 @@ def fetch_environment(
         Most sources permit commercial use;
         CRUST1.0 does not without verification — a non-commercial source emits a
         ``UserWarning`` when fetched. See ``uacpy.data.citations(env)``.
+    bottom_model : {'hamilton', 'apl-uw'}, optional
+        The grain-size → geoacoustics relations behind every seabed that
+        arrives as a mean grain size ϕ — the fetched sources above (all but
+        ``'crust1'``) and a ϕ ``bottom=`` literal alike. ``'hamilton'``
+        (default) is the low-frequency Hamilton & Bachman table;
+        ``'apl-uw'`` the APL-UW TR 9407 relations for 10-100 kHz work, the
+        same seabed the high-frequency scattering models in
+        :mod:`uacpy.sonar` are built on (``BottomParameters.from_environment``
+        reads it back). Both are scaled to the water at the seafloor. A
+        class-name literal, a ``BoundaryProperties`` and the hard-substrate
+        presets some sources return (EMODnet rock, DECK41 ``'rock'``) carry
+        their own numbers and are not affected. See
+        :func:`uacpy.data.grain_size_to_geoacoustics`.
     transect_to : (lat, lon), optional
         If given, bathymetry is sampled along the great-circle path from
         ``(lat, lon)`` to here (range-dependent); otherwise a single depth.
@@ -456,6 +471,11 @@ def fetch_environment(
                        (bottom_sources, 'bottom'),
                        (surface_sources, 'surface')):
         _require_nonempty_sources(_spec, axis=_ax)
+    if bottom_model not in GRAIN_SIZE_MODELS:
+        raise ConfigurationError(
+            f"fetch_environment: unknown bottom_model {bottom_model!r}.",
+            remediation=f"Use one of {GRAIN_SIZE_MODELS}.",
+        )
 
     # Each axis is a literal (ssp=/bathymetry=/bottom=) and/or fetched from
     # source(s) (*_sources). When both are given the source is fetched first and
@@ -656,6 +676,7 @@ def fetch_environment(
                     water_sound_speed=_seabed_sound_speed_along(
                         ssp, seafloor, (lat, lon)),
                     depth=_seabed_depth_along(seafloor, (lat, lon)),
+                    model=bottom_model,
                     max_distance_km=max_distance_km,
                     n_points=bottom_n_points, max_points=max_points,
                     timeout=timeout, verbose=verbose,
@@ -665,6 +686,7 @@ def fetch_environment(
                     order, point, transect=False, cache_only=bottom_cache_only,
                     water_sound_speed=water_c,
                     depth=float(seafloor.eval(range=0.0)),
+                    model=bottom_model,
                     max_distance_km=max_distance_km,
                     timeout=timeout, verbose=verbose,
                 )
@@ -678,10 +700,11 @@ def fetch_environment(
                     f"uniform literal makes the bottom range-independent.",
                     UserWarning, stacklevel=2)
             bottom_props = _resolve_bottom(  # fall back to the literal
-                bottom, water_sound_speed=water_c)
+                bottom, water_sound_speed=water_c, model=bottom_model)
     elif bottom is not None:
         bottom_props = _resolve_bottom(
-            bottom, water_sound_speed=_seabed_sound_speed(ssp, seafloor))
+            bottom, water_sound_speed=_seabed_sound_speed(ssp, seafloor),
+            model=bottom_model)
 
     # ── Surface (top boundary, optional): fetch sea ice, else literal ──
     # The only fetchable surface is NSIDC sea ice; a point classified as open
@@ -1070,6 +1093,7 @@ class _BottomProvider:
     in_cache_auto: bool = False
     accepts_max_distance: bool = False  # nearest-neighbour source: honours max_distance_km
     accepts_depth: bool = False         # depth-driven source: takes the fetched water depth
+    accepts_grain_size_model: bool = False  # converts a grain size: takes model=
 
 
 def _emodnet_pair(cached):
@@ -1116,24 +1140,28 @@ def _pelagic_pair(cached):
 
 _BOTTOM_PROVIDERS = (
     _BottomProvider('emodnet', _emodnet_pair, has_cached_variant=True,
-                    in_auto=True, in_cache_auto=True),
+                    in_auto=True, in_cache_auto=True,
+                    accepts_grain_size_model=True),
     # A measured sample beats a modelled or interpolated map, so the
     # grain-size database sits directly behind EMODnet's polygons in 'auto'
     # too, not only in 'local'. Omitting it there returned pelagic ooze
     # (rho*c 2245) at 36 N 75 W where a sand sample 124 km away gives 3608.
     _BottomProvider('grainsize', _grainsize_pair, in_auto=True,
-                    in_cache_auto=True, accepts_max_distance=True),
+                    in_cache_auto=True, accepts_max_distance=True,
+                    accepts_grain_size_model=True),
     _BottomProvider('crust1', _crust1_pair),
-    _BottomProvider('graw', _graw_pair),
-    _BottomProvider('diesing', _diesing_pair, in_auto=True, in_cache_auto=True),
+    _BottomProvider('graw', _graw_pair, accepts_grain_size_model=True),
+    _BottomProvider('diesing', _diesing_pair, in_auto=True, in_cache_auto=True,
+                    accepts_grain_size_model=True),
     # MARS is live-only, so it sits *after* the offline global Diesing map:
     # 'auto' consults the installed raster before any AusSeabed request, and
     # MARS then covers the Australian shelf Diesing (deep sea only) misses.
     _BottomProvider('mars', _mars_pair, in_auto=True,
-                    accepts_max_distance=True),
+                    accepts_max_distance=True, accepts_grain_size_model=True),
     _BottomProvider('pelagic', _pelagic_pair, has_cached_variant=True,
                     in_auto=True, in_cache_auto=True,
-                    accepts_depth=True),  # never fails (last resort)
+                    accepts_depth=True,  # never fails (last resort)
+                    accepts_grain_size_model=True),
 )
 _BOTTOM_BY_ID = {p.id: p for p in _BOTTOM_PROVIDERS}
 _AUTO_BOTTOM_ORDER = tuple(p.id for p in _BOTTOM_PROVIDERS if p.in_auto)
@@ -1161,7 +1189,7 @@ def _bottom_order(bottom_source):
 
 
 def _fetch_bottom(order, *args, transect, cache_only=False,
-                  max_distance_km=None, depth=None, **kwargs):
+                  max_distance_km=None, depth=None, model=None, **kwargs):
     """Fetch a bottom from the first source in ``order`` that yields data.
 
     ``transect`` selects the point (``False``) or transect (``True``) fetcher.
@@ -1172,6 +1200,9 @@ def _fetch_bottom(order, *args, transect, cache_only=False,
     concept. ``depth`` is the water depth already fetched for this site, handed
     to the depth-driven sources (``accepts_depth``) so they classify off the
     same bathymetry the environment uses rather than re-fetching their own.
+    ``model`` names the grain-size relations and reaches the sources that
+    convert a grain size (``accepts_grain_size_model``) — CRUST1.0 carries
+    measured layer properties and takes none.
     Returns ``(bottom, source_keyword)``; a source with no coverage (or no
     installed cache) falls through to the next.
     """
@@ -1183,6 +1214,8 @@ def _fetch_bottom(order, *args, transect, cache_only=False,
             call_kwargs['max_distance_km'] = max_distance_km
         if provider.accepts_depth and depth is not None:
             call_kwargs['depth'] = depth
+        if provider.accepts_grain_size_model and model is not None:
+            call_kwargs['model'] = model
         # Cache-first: the local twin before the live backend, where one
         # exists; cache_only drops the live attempt. Providers without a
         # cached twin resolve one fetcher pair, with no flag to pass.
@@ -1251,14 +1284,14 @@ def _seabed_depth_along(seafloor, start):
     return at
 
 
-def _resolve_bottom(bottom, *, water_sound_speed=None):
+def _resolve_bottom(bottom, *, water_sound_speed=None, model='hamilton'):
     if bottom is None or isinstance(bottom, BoundaryProperties):
         return bottom
     if isinstance(bottom, str):
         return bottom_from_class(bottom)
     if isinstance(bottom, (int, float)) and not isinstance(bottom, bool):
         return bottom_from_grain_size(
-            float(bottom), water_sound_speed=water_sound_speed)
+            float(bottom), model=model, water_sound_speed=water_sound_speed)
     raise ConfigurationError(
         f"fetch_environment: bottom must be a ϕ float, a class name, a "
         f"BoundaryProperties, or None; got {type(bottom).__name__}.",

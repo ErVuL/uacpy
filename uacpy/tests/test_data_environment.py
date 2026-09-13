@@ -755,3 +755,66 @@ def test_an_integer_bottom_is_a_grain_size():
     bp = env_mod._resolve_bottom(1, water_sound_speed=1500.0)
     assert isinstance(bp, BoundaryProperties)
     assert bp.grain_size_phi == 1.0
+
+
+def test_bottom_model_selects_the_grain_size_relations_for_a_phi_literal():
+    """The literal route honours the model: an APL-UW seabed is the
+    apl-uw conversion at the same water speed, and a class name (its own
+    numbers) ignores it."""
+    from uacpy.data import bottom_from_class, grain_size_to_geoacoustics
+    apl = env_mod._resolve_bottom(2.0, water_sound_speed=1500.0, model='apl-uw')
+    ham = env_mod._resolve_bottom(2.0, water_sound_speed=1500.0)
+    expected = grain_size_to_geoacoustics(2.0, model='apl-uw',
+                                          water_sound_speed=1500.0)
+    assert apl.sound_speed == pytest.approx(expected['sound_speed'])
+    assert apl.attenuation == pytest.approx(expected['attenuation'])
+    assert apl.sound_speed != pytest.approx(ham.sound_speed)
+    assert env_mod._resolve_bottom('sand', model='apl-uw') == \
+        bottom_from_class('sand')
+
+
+def test_an_unknown_bottom_model_is_refused_before_any_fetch(monkeypatch):
+    calls = _block_all_fetchers(monkeypatch)
+    with pytest.raises(ConfigurationError, match="bottom_model 'bachman'"):
+        env_mod.fetch_environment((43.0, 7.5), bottom_model='bachman')
+    assert calls == []
+
+
+def test_bottom_model_reaches_every_grain_size_source(stub_fetchers):
+    """End to end through a source: the pelagic seabed fetched under
+    bottom_model='apl-uw' is the apl-uw conversion of its grain size at the
+    seafloor water speed the environment holds, and differs from the
+    default's."""
+    from uacpy.data import grain_size_to_geoacoustics
+    ham = env_mod.fetch_environment((43.2, 7.5), bottom_sources='pelagic')
+    apl = env_mod.fetch_environment((43.2, 7.5), bottom_sources='pelagic',
+                                    bottom_model='apl-uw')
+    hs_h, hs_a = ham.bottom.columns[0].halfspace, apl.bottom.columns[0].halfspace
+    assert hs_h.grain_size_phi == hs_a.grain_size_phi == pytest.approx(7.5)
+    water_c = apl.get_sound_speed(apl.bathymetry.depth).item()
+    for model, hs in (('hamilton', hs_h), ('apl-uw', hs_a)):
+        expected = grain_size_to_geoacoustics(7.5, model=model,
+                                              water_sound_speed=water_c)
+        assert hs.sound_speed == pytest.approx(expected['sound_speed'])
+        assert hs.attenuation == pytest.approx(expected['attenuation'])
+    assert hs_a.sound_speed != pytest.approx(hs_h.sound_speed)
+
+
+def test_every_grain_size_provider_takes_the_model_keyword():
+    """The registry flag and the fetcher signatures agree: each provider
+    that converts a grain size (point and transect fetcher, cached and live
+    backend) accepts ``model``, and CRUST1.0 — measured layer properties, no
+    grain size — is the one that does not, so ``_fetch_bottom`` never hands
+    it a keyword it would refuse."""
+    import inspect
+    for provider in env_mod._BOTTOM_PROVIDERS:
+        arg_sets = ((True,), (False,)) if provider.has_cached_variant else ((),)
+        for resolve_args in arg_sets:
+            for fn in provider.resolve(*resolve_args):
+                takes_model = 'model' in inspect.signature(fn).parameters
+                assert takes_model == provider.accepts_grain_size_model, \
+                    (provider.id, getattr(fn, '__name__', fn))
+    flags = {p.id: p.accepts_grain_size_model for p in env_mod._BOTTOM_PROVIDERS}
+    assert flags == {'emodnet': True, 'grainsize': True, 'crust1': False,
+                     'graw': True, 'diesing': True, 'mars': True,
+                     'pelagic': True}

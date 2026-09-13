@@ -181,6 +181,7 @@ def fetch_seabed_local(point: Coordinate) -> dict:
 
 def fetch_bottom_local(point: Coordinate, *, roughness: float = 0.0,
                        water_sound_speed: Optional[float] = None,
+                       model: str = 'hamilton',
                        timeout=None, verbose: Union[bool, str] = False
                        ) -> BoundaryProperties:
     """Model-ready bottom from the offline EMODnet polygon at ``(lat, lon)``.
@@ -194,12 +195,14 @@ def fetch_bottom_local(point: Coordinate, *, roughness: float = 0.0,
     ``timeout`` is accepted (and ignored — this backend is offline) for signature
     uniformity with the network bottom fetchers. ``water_sound_speed`` (m/s)
     scales the grain-size velocity ratio to the in-situ near-seabed water;
-    ``None`` uses the Hamilton reference.
+    ``None`` uses the Hamilton reference. ``model`` picks the grain-size
+    relations (``'hamilton'`` or ``'apl-uw'``).
     """
     lat, lon = as_coordinate(point)
     sub = fetch_seabed_local(point)
     bottom = _bottom_from_folk5(sub['folk_5cl'], lat, lon, roughness=roughness,
-                                water_sound_speed=water_sound_speed)
+                                water_sound_speed=water_sound_speed,
+                                model=model)
     log_message(
         'seabed', f"EMODnet (offline) folk_5cl={sub['folk_5cl']} at "
         f"{lat:.3f}, {lon:.3f} → {bottom.acoustic_type} "
@@ -212,6 +215,7 @@ def fetch_bottom_local_transect(start: Coordinate, end: Coordinate, *,
                                 n_points=6, max_points=None,
                                 roughness: float = 0.0,
                                 water_sound_speed: Optional[float] = None,
+                                model: str = 'hamilton',
                                 timeout=None, verbose: Union[bool, str] = False
                                 ) -> Bottom:
     """Range-dependent bottom from the offline EMODnet polygons along a transect.
@@ -227,7 +231,8 @@ def fetch_bottom_local_transect(start: Coordinate, end: Coordinate, *,
     return range_dependent_bottom_along(
         lambda la, lo: fetch_bottom_local(
             (la, lo), roughness=roughness,
-            water_sound_speed=water_sound_speed_at(water_sound_speed, la, lo)),
+            water_sound_speed=water_sound_speed_at(water_sound_speed, la, lo),
+            model=model),
         start, end, n_points, source_label='EMODnet (offline)',
         max_points=max_points,
     )

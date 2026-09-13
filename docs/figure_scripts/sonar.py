@@ -13,6 +13,8 @@ forms need ``ka >> 1`` — so they run at 5 kHz over the same 100 m geometry.
 
 from __future__ import annotations
 
+import warnings
+
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -492,6 +494,48 @@ def replica_banks():
     return fig
 
 
+def boundary_scattering():
+    """The APL-UW TR 9407 boundary models beside the low-frequency laws.
+
+    Left: bottom backscattering strength at 30 kHz for four Table 2 sediments
+    against Lambert's law, which carries no sediment or frequency dependence.
+    Right: the sea-surface model at 25 kHz for three wind speeds against
+    Chapman-Harris read 20 kHz above its fitted band.
+    """
+    grazing = np.linspace(1.0, 90.0, 180)
+
+    fig, (ax_b, ax_s) = plt.subplots(1, 2, figsize=WIDE)
+    for name, style in (('rock', ':'), ('sandy gravel', '-.'),
+                        ('medium sand', '-'), ('silty clay', '--')):
+        params = sonar.BottomParameters.from_sediment(name)
+        ax_b.plot(grazing, sonar.apl_uw_bottom_backscatter(grazing, 30e3, params),
+                  ls=style, color='C1', lw=1.4, label=f'APL-UW {name}')
+    shallow = grazing[grazing <= 45.0]          # Lambert's stated range
+    ax_b.plot(shallow, sonar.lambert_bottom(shallow),
+              color='k', lw=1.2, label='Lambert, µ = −27 dB (any f)')
+    ax_b.set_title('Bottom backscatter, 30 kHz', fontweight='bold', fontsize=12)
+
+    for wind_ms, style in ((3.0, ':'), (8.0, '-'), (15.0, '--')):
+        ax_s.plot(grazing, sonar.apl_uw_surface_backscatter(grazing, 25e3, wind_ms),
+                  ls=style, color='C0', lw=1.4, label=f'APL-UW {wind_ms:g} m/s')
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')      # 25 kHz is 20 kHz above the fit
+        ax_s.plot(grazing[grazing <= 50.0],
+                  sonar.chapman_harris_surface(grazing[grazing <= 50.0],
+                                               wind_speed_kn=15.6, frequency=25e3),
+                  color='k', lw=1.2, label='Chapman–Harris 8 m/s, extrapolated')
+    ax_s.set_title('Surface backscatter, 25 kHz', fontweight='bold', fontsize=12)
+    for ax in (ax_b, ax_s):
+        ax.set_xlabel('Grazing angle (deg)')
+        ax.set_ylabel('Scattering strength (dB)')
+        ax.set_xlim(0.0, 90.0)
+        ax.set_ylim(-60.0, 10.0)
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=8, loc='lower right')
+    fig.tight_layout()
+    return fig
+
+
 FIGURES = {
     'sonar_signal_excess': signal_excess_field,
     'sonar_detection_range': detection_range,
@@ -499,6 +543,7 @@ FIGURES = {
     'sonar_detection_theory': detection_theory,
     'sonar_target_strength': target_strength,
     'sonar_reverberation': reverberation,
+    'sonar_boundary_scattering': boundary_scattering,
     'sonar_active_budget': active_budget,
     'sonar_matched_field': matched_field,
     'sonar_replica_banks': replica_banks,

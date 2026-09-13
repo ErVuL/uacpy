@@ -127,6 +127,7 @@ fetched environment with no `bottom_sources=` has a *made-up* seabed.
 
 | Argument | Default | Meaning |
 |---|---|---|
+| `bottom_model` | `'hamilton'` | grain-size → geoacoustics relations behind every seabed that arrives as a ϕ (all sources but `crust1`, and a ϕ literal): `'apl-uw'` for 10–100 kHz work, see [§5](#the-grain-size-conversion) |
 | `with_absorption` | `False` | build `FrancoisGarrison` from the site's T/S column (and GLODAP pH) |
 | `max_distance_km` | `None` | distance guard for the **nearest-sample** sources (`argo`, `grainsize`, `mars`); ignored by grids and polygons |
 | `max_days` | `None` | staleness guard for the **time-specific** SSP sources (`argo`, `copernicus`); ignored by climatologies |
@@ -431,6 +432,26 @@ Three things worth reading off the plot:
 
 Two shortcuts wrap the conversion: `bottom_from_grain_size(phi)` and
 `bottom_from_class('sand')`, both returning a ready `BoundaryProperties`.
+
+**Choosing the conversion for a fetched seabed.** Every seabed source that
+reports a ϕ goes through this conversion, so the choice is one keyword away:
+
+```python
+env = uacpy.data.fetch_environment((43.2, 7.5), bottom_sources='auto',
+                                   bottom_model='apl-uw')
+```
+
+`bottom_model` reaches every source (point and transect, cached and live) and
+the ϕ literal `bottom=2.0` alike, and each seabed is still scaled to the
+water at its own seafloor. It does not touch what carries its own numbers: a
+class-name literal, a `BoundaryProperties`, the CRUST1.0 layers, and the
+hard-substrate presets EMODnet rock and DECK41 `'rock'` route through. The
+seabed keeps its `grain_size_phi` either way, which is what the
+high-frequency scattering model in `uacpy.sonar` reads back:
+`BottomParameters.from_environment(env)` (see the
+[sonar guide](sonar.md#the-high-frequency-boundary-models)) takes the
+handbook's own relations off that grain size, with the geoacoustics as its
+fallback for a seabed that has none.
 
 ### Deep structure — thickness, layers and shear
 

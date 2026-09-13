@@ -132,7 +132,7 @@ def _phi_from_density(rho):
 
 
 def fetch_bottom_graw(point, *, roughness=0.0, water_sound_speed=None,
-                      timeout=None, verbose=False):
+                      model='hamilton', timeout=None, verbose=False):
     """Model-ready half-space bottom from the Graw measured-density grid.
 
     Provenance is catalogue-level: the grid cell under the point supplies the
@@ -146,11 +146,16 @@ def fetch_bottom_graw(point, *, roughness=0.0, water_sound_speed=None,
     ``timeout``/``verbose`` are accepted (and ignored — this backend is
     offline) for signature uniformity with the network bottom fetchers.
     ``water_sound_speed`` (m/s) scales the velocity ratio to the in-situ
-    near-seabed water; ``None`` uses the Hamilton reference.
+    near-seabed water; ``None`` uses the Hamilton reference. ``model`` picks
+    the relations that turn that grain size into sound speed and
+    attenuation (``'hamilton'`` or ``'apl-uw'``); the density stays the
+    grid's measured value, and the grain size is always Hamilton's
+    inversion of it.
     """
     rho = fetch_seabed_density(point)
     phi = _phi_from_density(rho)
-    geo = grain_size_to_geoacoustics(phi, water_sound_speed=water_sound_speed)
+    geo = grain_size_to_geoacoustics(phi, model=model,
+                                     water_sound_speed=water_sound_speed)
     return BoundaryProperties(
         acoustic_type='half-space',
         sound_speed=geo['sound_speed'],
@@ -163,7 +168,7 @@ def fetch_bottom_graw(point, *, roughness=0.0, water_sound_speed=None,
 
 def fetch_bottom_graw_transect(start, end, *, n_points=6, max_points=None,
                                roughness=0.0, water_sound_speed=None,
-                               timeout=None, verbose=False):
+                               model='hamilton', timeout=None, verbose=False):
     """Range-dependent bottom from the Graw grid along ``start`` → ``end``.
 
     ``water_sound_speed`` also takes a ``(lat, lon) -> m/s`` callable, so each
@@ -174,7 +179,8 @@ def fetch_bottom_graw_transect(start, end, *, n_points=6, max_points=None,
     return range_dependent_bottom_along(
         lambda la, lo: fetch_bottom_graw(
             (la, lo), roughness=roughness,
-            water_sound_speed=water_sound_speed_at(water_sound_speed, la, lo)),
+            water_sound_speed=water_sound_speed_at(water_sound_speed, la, lo),
+            model=model),
         start, end, n_points, source_label='Graw density grid',
         max_points=max_points,
     )

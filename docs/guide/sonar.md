@@ -685,6 +685,11 @@ exactly that.
 | `lambert_bottom(grazing_deg, mu_dB=-27.0)` | `S_b = µ_dB + 20·log10(sin θ)`, the **monostatic** case of `S_b = 10·log10(µ sin θ_i sin θ_s)`; Mackenzie's −27 dB; holds below ~45° grazing |
 | `chapman_harris_surface(grazing_deg, wind_speed_kn, frequency)` | wind-driven sea surface; fitted by Chapman & Harris over 0.4–6.4 kHz, validated by Chapman & Scott over 0.1–6.4 kHz for θ < 80°, though the underlying data are all below 40° grazing |
 | `column_scattering_strength(sv_dB, thickness_m)` | `S_v + 10·log10(h)` — a scattering layer as an equivalent area strength |
+| `apl_uw_bottom_backscatter(grazing_deg, frequency, params, *, water_sound_speed=1500.0)` | APL-UW TR 9407 seabed model, 10–100 kHz: interface roughness (Kirchhoff, composite, large) plus sediment volume scattering from the six `BottomParameters` |
+| `apl_uw_bottom_loss(grazing_deg, params)` | TR 9407 forward reflection loss, a lossy Rayleigh coefficient; no frequency dependence |
+| `apl_uw_surface_backscatter(grazing_deg, frequency, wind_speed_ms)` | TR 9407 sea-surface model, 10–100 kHz: bubble layer + Bragg ripples + specular facets, with bubble-layer extinction; wind in **m/s** |
+| `BottomParameters.from_sediment(name)` / `.from_grain_size(Mz)` / `.from_geoacoustics(...)` | the six seabed inputs (ρ, ν, δ, σ₂, γ, w₂) from TR 9407 Table 2, its grain-size relations, or measured cp / ρ / attenuation |
+| `BottomParameters.from_environment(env, *, range=0.0, method='auto')` / `.from_bottom(seabed, *, water_sound_speed, ...)` | the same six inputs from a uacpy seabed — a fetched `Environment`, a `Bottom` at a range, a `SeabedColumn` or a `BoundaryProperties` — off its grain size when it has one, else its geoacoustics against the water at the seafloor |
 
 `LAMBERT_MU_DB` is exported if you want the constant itself. Any substitute is
 bounded above by **−4.97 dB** — `µ = 1/π`, the diffuse-scattering ceiling that
@@ -714,6 +719,81 @@ background = sonar.noise_background(55.0, 20.0)          # 35.0 dB
 ```
 
 ![Reverberation decay after a ping](figures/sonar_reverberation.png)
+
+### The high-frequency boundary models
+
+Lambert and Chapman–Harris are the low-frequency laws, and at the
+frequencies a modem or an imaging sonar uses they are read far outside what
+they were fitted on: Chapman–Harris stops at 6.4 kHz, and Lambert returns the
+same number at 40 kHz as at 500 Hz for every seabed. The APL-UW *High-Frequency
+Ocean Environmental Acoustic Models Handbook* (TR 9407) is the reference for
+10–100 kHz, and both of its boundary models are here as
+`apl_uw_bottom_backscatter` and `apl_uw_surface_backscatter`, with the seabed's
+forward loss as `apl_uw_bottom_loss`.
+
+```python
+grazing = np.linspace(1.0, 90.0, 180)
+params = sonar.BottomParameters.from_sediment(name)
+ax_b.plot(grazing, sonar.apl_uw_bottom_backscatter(grazing, 30e3, params),
+          ls=style, color='C1', lw=1.4, label=f'APL-UW {name}')
+ax_s.plot(grazing, sonar.apl_uw_surface_backscatter(grazing, 25e3, wind_ms),
+          ls=style, color='C0', lw=1.4, label=f'APL-UW {wind_ms:g} m/s')
+```
+
+![The APL-UW boundary models beside the low-frequency laws](figures/sonar_boundary_scattering.png)
+
+The seabed model takes the six inputs of the handbook's Table 1 as a
+`BottomParameters`: density ratio ρ, sound-speed ratio ν, loss parameter δ,
+volume parameter σ₂, and the relief spectrum's exponent γ and strength w₂.
+`from_sediment('medium sand')` reads them off Table 2, `from_grain_size(1.5)`
+evaluates the handbook's grain-size relations (the two agree to the table's
+printed digits), and `from_geoacoustics(...)` takes measured cp, ρ and
+attenuation and infers the grain size from the sound-speed ratio for the two
+the geoacoustics cannot give. A seabed you already hold goes in directly:
+`from_environment(env)` reads `env.bottom` (at `range=`, nearest column, top
+layer of a layered column) against the water sound speed the environment has
+at that seafloor and its `water_density`, and `from_bottom(seabed,
+water_sound_speed=...)` does the same for a bare `Bottom`, `SeabedColumn` or
+`BoundaryProperties`. Both take the grain-size route when the seabed carries a
+`grain_size_phi` — every seabed `fetch_environment` builds from a grain size
+does, whichever `bottom_model=` converted it — and the geoacoustics route
+otherwise; `method='grain-size'` or `'geoacoustics'` forces one. Fetching the
+site under `bottom_model='apl-uw'` makes the propagation model's seabed and
+the scattering model's the same handbook relations:
+
+```python
+env = uacpy.data.fetch_environment((43.2, 7.5), bottom_sources='auto',
+                                   bottom_model='apl-uw')
+params = sonar.BottomParameters.from_environment(env)
+bs_dB = sonar.apl_uw_bottom_backscatter(grazing, 30e3, params)
+```
+
+What the model buys over Lambert is sediment and
+frequency dependence: at 20° grazing and 30 kHz it puts rock at −15 dB, sandy
+gravel at −22 dB, medium sand at −28 dB and silty clay at −32 dB, where
+Lambert's one curve says −36 dB for all of them; and medium sand rises from
+−31 dB at 10 kHz to −24 dB at 100 kHz. The implementation reproduces the
+handbook's Table 3 to 0.6 dB worst case over twelve columns and fifteen
+angles, once a documented constant is applied to the Kirchhoff level (the
+module explains it); the handbook's own uncertainty is about 3 dB for
+characterised sand and silt and 10 dB for rock and gravel.
+
+The surface model's inputs are wind speed in m/s and frequency. Bubble
+scattering dominates below about 60° and saturates above about 8 m/s, which
+is why the 8 and 15 m/s curves sit within a few dB of each other while the
+3 m/s one is 20 dB down at 30°; the specular facets take over near vertical,
+where every wind ends between +3 and +8 dB. Chapman–Harris at the same 8 m/s,
+read 20 kHz above its band, lands within 1 dB of the model at 30° and 5 dB
+below it at 10°, the region where the bubbles carry the model. The handbook
+quotes ±4 dB above 8 m/s and ±5 dB below, and recommends running a ±1 m/s
+spread about the measured wind.
+
+Two handbook cautions carry over. Its forward-loss model treats the interface
+as flat, so on gravel and rock it reports very little loss because the energy
+leaves the specular direction by scattering rather than absorption; and for
+soft bottoms the backscatter is set mostly by σ₂, which is an empirical fit
+that varies an order of magnitude between sites of the same name — the
+handbook's advice is to fit it to any backscatter data you have.
 
 A 20 ms ping at 5 kHz, plotted against two-way travel time with range on the
 top axis. The two boundary terms dominate at the start — 139 dB surface and
@@ -1128,6 +1208,16 @@ mismatch behaviour visible.
   1964 — validation of that fit down to 0.1 kHz, for grazing angles below 80°.
 - Mackenzie, K. V., "Bottom reverberation for 530- and 1030-cps sound in deep
   water", *JASA* 33(11), 1498–1504, 1961 — the −27 dB Lambert coefficient.
+- APL-UW, *High-Frequency Ocean Environmental Acoustic Models Handbook*,
+  Technical Report APL-UW TR 9407, 1994 — Section II.B for the sea-surface
+  backscattering model (bubbles, Bragg ripples, facets; Eqs. 1–16), Section IV
+  for the seabed forward-loss (Eqs. 29–33) and backscattering (Eqs. 34–66)
+  models, Tables 1–3 for their inputs and reference values. Mourad, P. D. &
+  Jackson, D. R., "High frequency sediment acoustic scattering: a model", *Oceans
+  '89*, 1989, and Jackson, Winebrenner & Ishimaru, "Application of the composite
+  roughness model to high-frequency bottom backscattering", *JASA* 79, 1410–1422,
+  1986 — the basis of the seabed model; McDaniel, S. T., "Sea surface
+  reverberation: a review", *JASA* 94, 1905–1922, 1993 — of the surface one.
 - Albersheim, W. J., "A closed-form approximation to Robertson's detection
   characteristics", *Proc. IEEE* 69(7), 839, 1981; Tufts, D. W. & Cann, A. J.,
   "On Albersheim's detection equation", *IEEE Trans. AES* 19(4), 643–646, 1983 —

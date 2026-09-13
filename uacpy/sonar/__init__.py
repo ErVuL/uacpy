@@ -19,8 +19,15 @@ processors (:func:`bartlett`, :func:`mvdr`). Self-contained — KRAKEN modes or 
 ``Field``/``ResultStack`` plus numpy, no OASES dependency.
 """
 
+from .bottom_scattering import (
+    BottomParameters,
+    APL_UW_SEDIMENTS,
+    apl_uw_bottom_backscatter,
+    apl_uw_bottom_loss,
+)
 from .scattering import (
     LAMBERT_MU_DB,
+    apl_uw_surface_backscatter,
     chapman_harris_surface,
     column_scattering_strength,
     lambert_bottom,
@@ -76,6 +83,11 @@ __all__ = [
     "lambert_bottom",
     "chapman_harris_surface",
     "column_scattering_strength",
+    "BottomParameters",
+    "APL_UW_SEDIMENTS",
+    "apl_uw_bottom_backscatter",
+    "apl_uw_bottom_loss",
+    "apl_uw_surface_backscatter",
     "boundary_reverberation",
     "volume_reverberation",
     "total_reverberation",

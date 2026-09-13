@@ -407,6 +407,7 @@ def fetch_sediment_sample(point, *, max_distance_km=DEFAULT_MAX_DISTANCE_KM):
 
 
 def fetch_bottom_local(point, *, roughness=0.0, water_sound_speed=None,
+                       model='hamilton',
                        max_distance_km=DEFAULT_MAX_DISTANCE_KM,
                        timeout=None, verbose=False):
     """Model-ready bottom from the nearest local sediment sample.
@@ -422,6 +423,9 @@ def fetch_bottom_local(point, *, roughness=0.0, water_sound_speed=None,
     for signature uniformity with the network bottom fetchers.
     ``water_sound_speed`` (m/s) scales the grain-size velocity ratio to the
     in-situ near-seabed water; ``None`` uses the Hamilton reference.
+    ``model`` picks the grain-size relations (``'hamilton'`` or
+    ``'apl-uw'``); a DECK41 hard-substrate sample routes through its
+    material preset and ignores it.
     """
     lat, lon = as_coordinate(point)
     sample = fetch_sediment_sample(point, max_distance_km=max_distance_km)
@@ -432,7 +436,7 @@ def fetch_bottom_local(point, *, roughness=0.0, water_sound_speed=None,
         bottom = bottom_from_class(sample['material'], roughness=roughness)
     else:
         bottom = bottom_from_grain_size(
-            sample['phi'], roughness=roughness,
+            sample['phi'], roughness=roughness, model=model,
             water_sound_speed=water_sound_speed)
     # Point samples are sparse, so the nearest one can be far from the
     # requested position; record where it actually came from so
@@ -452,6 +456,7 @@ def fetch_bottom_local(point, *, roughness=0.0, water_sound_speed=None,
 def fetch_bottom_local_transect(start, end, *, n_points=6, max_points=None,
                                 roughness=0.0,
                                 water_sound_speed=None,
+                                model='hamilton',
                                 max_distance_km=DEFAULT_MAX_DISTANCE_KM,
                                 timeout=None, verbose=False):
     """Range-dependent bottom from local samples along ``start`` → ``end``.
@@ -484,7 +489,7 @@ def fetch_bottom_local_transect(start, end, *, n_points=6, max_points=None,
         lambda la, lo: fetch_bottom_local(
             (la, lo), roughness=roughness,
             water_sound_speed=water_sound_speed_at(water_sound_speed, la, lo),
-            max_distance_km=max_distance_km),
+            model=model, max_distance_km=max_distance_km),
         start, end, n_points, source_label='local sediment DB',
         max_points=max_points,
     )

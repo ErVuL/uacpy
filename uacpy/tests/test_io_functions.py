@@ -14,8 +14,9 @@ import warnings
 import io
 
 import numpy as np
-from uacpy.io.oalib_writer import write_ssp_section
-from uacpy.core import Environment, BoundaryProperties
+from uacpy.io.oalib_writer import write_ssp_section, write_bounce_input_file
+from uacpy.io.oases_writer import _emit_water_layers
+from uacpy.core import Environment, BoundaryProperties, Source
 from uacpy.core.bathymetry import Bathymetry
 from uacpy.core.bottom import Bottom, SeabedColumn, SedimentLayer
 import pytest
@@ -27,7 +28,7 @@ from uacpy.core.exceptions import ConfigurationError, FileFormatError
 from uacpy.core.environment import SoundSpeedProfile
 from uacpy.core.results import Field
 from uacpy.io.file_manager import FileManager
-from uacpy.core.constants import DEFAULT_WATER_DENSITY_G_CM3
+from uacpy.core.constants import DEFAULT_WATER_DENSITY_G_CM3, BoundaryType
 
 
 class TestFileManager:
@@ -4752,3 +4753,84 @@ class TestScooterExtraTopOptCharacter:
         with pytest.raises(TypeError, match='topopt_extra'):
             _write_kraken(tmp_path / 'k.env', _top_block_env(_fg()),
                           topopt_extra='0')
+
+
+def _water_density_env(**kw):
+    kw.setdefault('name', 'rho')
+    kw.setdefault('bathymetry', 100.0)
+    kw.setdefault('ssp', 1500.0)
+    kw.setdefault('bottom', BoundaryProperties(sound_speed=1700.0, density=1.5,
+                                               attenuation=0.5))
+    return Environment(**kw)
+
+
+class TestDecksCarryTheWaterDensity:
+    """Where every deck writes ``env.water_density``: the Acoustics
+    Toolbox SSP rows and the OASES water layers carry the value itself;
+    Bounce and the RAM codes fix the water at 1 and get seabed densities
+    as ratios."""
+
+    @staticmethod
+    def _ssp_rows(env):
+        buf = io.StringIO()
+        write_ssp_section(buf, env, 100.0)
+        return [ln.split() for ln in buf.getvalue().splitlines()
+                if ln.strip().endswith('/')]
+
+    def test_acoustics_toolbox_ssp_rows_carry_it(self):
+        rows = self._ssp_rows(_water_density_env())
+        assert rows and all(r[3] == '1.027000' for r in rows)
+        rows = self._ssp_rows(_water_density_env(water_density=1.0))
+        assert all(r[3] == '1.000000' for r in rows)
+
+    def test_bounce_gets_seabed_densities_as_ratios_to_it(self, tmp_path):
+        out = tmp_path / 'b.env'
+        write_bounce_input_file(
+            out, _water_density_env(), Source(depths=10.0, frequencies=100.0),
+            ssp_topopt='CVW', bottom_type=BoundaryType.HALF_SPACE, n_mesh=0,
+            c_low=1400.0, c_high=2000.0, rmax=1.0)
+        lines = out.read_text().splitlines()
+        top = [ln for ln in lines
+               if ln.strip().startswith('0.00') and '1500.000000' in ln]
+        assert top, out.read_text()
+        # bounce.f90 references R to a unit density and never reads this
+        # row's, so the water stays at 1 and the seabed becomes a ratio.
+        assert top[0].split()[3] == '1.000000'
+        seabed = [ln for ln in lines if '1700.000000' in ln]
+        assert seabed and seabed[0].split()[3] == f'{1.5 / 1.027:.6f}'
+
+    def test_oases_water_layers_carry_it(self):
+        buf = io.StringIO()
+        _emit_water_layers(buf, [(0.0, 1500.0), (100.0, 1500.0)],
+                           surface_roughness=0.0, extra_columns=1,
+                           water_density=1.027)
+        rows = buf.getvalue().splitlines()
+        assert rows and all(r.split()[5] == '1.027' for r in rows)
+
+
+@pytest.mark.requires_binary  # constructs RAM (resolves its binary)
+class TestRamDecksCarryTheWaterDensityRatio:
+    """Every RAM code fixes the water at 1 (RAM guide) and reads the seabed
+    density relative to it, so the deck carries rho_b / rho_w."""
+
+    def _ram(self):
+        from uacpy.models import RAM
+        return RAM(verbose=False, flat_earth=False)
+
+    def test_collins_density_block_is_rho_b_over_rho_w(self):
+        seg = self._ram()._collins_range_segments(_water_density_env(), 'ramgeo', 150.0,
+                                                  400.0)[0]
+        assert all(v == pytest.approx(1.5 / 1.027) for _, v in seg['bottom_rho'])
+        seg = self._ram()._collins_range_segments(
+            _water_density_env(water_density=1.0), 'ramgeo', 150.0, 400.0)[0]
+        assert all(v == 1.5 for _, v in seg['bottom_rho'])
+
+    def test_mpirams_density_row_is_rho_b_over_rho_w(self, tmp_path):
+        ram = self._ram()
+        _, _, _, rho, _, _, _ = ram._prepare_bottom_properties(
+            _water_density_env(), tmp_path, absorber_span=20.0, zmax=150.0, dz=0.5)
+        np.testing.assert_allclose(rho, 1.5 / 1.027)
+        _, _, _, rho, _, _, _ = ram._prepare_bottom_properties(
+            _water_density_env(water_density=1.0), tmp_path, absorber_span=20.0, zmax=150.0,
+            dz=0.5)
+        np.testing.assert_allclose(rho, 1.5)

@@ -187,6 +187,7 @@ def fetch_seafloor_lithology(point: Coordinate) -> dict:
 
 def fetch_bottom_diesing(point: Coordinate, *, roughness: float = 0.0,
                          water_sound_speed: Optional[float] = None,
+                         model: str = 'hamilton',
                          timeout=None, verbose: Union[bool, str] = False
                          ) -> BoundaryProperties:
     """Model-ready bottom from the Diesing 2020 lithology at ``(lat, lon)``.
@@ -199,12 +200,13 @@ def fetch_bottom_diesing(point: Coordinate, *, roughness: float = 0.0,
     ``timeout`` is accepted (and ignored — this backend is offline) for signature
     parity with the network bottom fetchers. ``water_sound_speed`` (m/s) scales
     the grain-size velocity ratio to the in-situ near-seabed water; ``None``
-    uses the Hamilton reference.
+    uses the Hamilton reference. ``model`` picks the grain-size relations
+    (``'hamilton'`` or ``'apl-uw'``).
     """
     lat, lon = as_coordinate(point)
     sub = fetch_seafloor_lithology(point)
     bottom = bottom_from_grain_size(
-        sub['grain_size_phi'], roughness=roughness,
+        sub['grain_size_phi'], roughness=roughness, model=model,
         water_sound_speed=water_sound_speed)
     log_message(
         'diesing', f"Diesing {sub['lithology']} at {lat:.2f}, {lon:.2f} → "
@@ -216,6 +218,7 @@ def fetch_bottom_diesing_transect(start: Coordinate, end: Coordinate, *,
                                   n_points=6, max_points=None,
                                   roughness: float = 0.0,
                                   water_sound_speed: Optional[float] = None,
+                                  model: str = 'hamilton',
                                   timeout=None, verbose: Union[bool, str] = False
                                   ) -> Bottom:
     """Range-dependent bottom from the Diesing 2020 map along a transect.
@@ -228,7 +231,8 @@ def fetch_bottom_diesing_transect(start: Coordinate, end: Coordinate, *,
     return range_dependent_bottom_along(
         lambda la, lo: fetch_bottom_diesing(
             (la, lo), roughness=roughness,
-            water_sound_speed=water_sound_speed_at(water_sound_speed, la, lo)),
+            water_sound_speed=water_sound_speed_at(water_sound_speed, la, lo),
+            model=model),
         start, end, n_points, source_label='Diesing 2020',
         max_points=max_points,
     )

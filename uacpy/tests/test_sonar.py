@@ -17,6 +17,10 @@ from scipy.stats import norm
 
 from uacpy import sonar
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.sonar import (APL_UW_SEDIMENTS, BottomParameters,
+                         apl_uw_bottom_backscatter, apl_uw_bottom_loss,
+                         apl_uw_surface_backscatter)
+from uacpy.sonar.bottom_scattering import TABLE_WATER_SOUND_SPEED
 from uacpy.sonar import target_strength as ts
 from uacpy.sonar.detection import (detection_threshold_energy,
                                    probability_of_detection, roc_curve)
@@ -2097,3 +2101,306 @@ class TestScalarBudgetsRefuseAFieldWithUsableAdvice:
         se = sonar.passive_signal_excess(160.0, np.asarray(f.dB, float),
                                          60.0, 0.0)
         np.testing.assert_allclose(se, [[33.0, 50.0]], atol=1e-6)
+
+
+# ── The APL-UW TR 9407 seabed and sea-surface scattering models ──────────────
+# The bottom model is pinned to the report's own Table 3 (scattering strengths
+# for generic bottom types, computed by its authors at 1528 m/s); the forward
+# loss to its Figure 1; the parameter constructors to Table 2 and Eqs. 2-10;
+# the surface model to the levels its Figures 3-8 show against data.
+
+ANGLES = np.array([1, 2, 3, 5, 7, 10, 20, 40, 60, 70, 80, 85, 88, 89, 90.0])
+
+#: TR 9407 Table 3 (pp. IV-23..25), the 30 kHz column unless stated.
+TABLE_3 = {
+    ('rough rock', 30e3): [-23.0, -19.4, -17.4, -14.8, -13.3, -11.3, -7.9, -5.4,
+                           -4.9, -5.0, -5.4, -5.3, -5.4, -5.4, -5.4],
+    ('rock', 30e3): [-44.0, -37.3, -33.3, -28.4, -25.2, -21.7, -15.4, -10.0,
+                     -9.1, -8.3, -7.3, -6.8, -6.6, -6.6, -6.6],
+    ('cobble', 30e3): [-48.5, -41.7, -37.6, -32.6, -29.2, -25.7, -19.3, -14.9,
+                       -13.1, -11.5, -9.2, -8.2, -7.9, -7.9, -7.8],
+    ('sandy gravel', 30e3): [-50.3, -44.2, -40.3, -35.1, -31.7, -28.1, -22.1,
+                             -18.9, -16.5, -13.7, -9.9, -8.4, -8.0, -7.9, -7.8],
+    ('coarse sand', 30e3): [-47.1, -43.8, -41.5, -37.9, -34.9, -31.5, -25.1,
+                            -21.4, -18.8, -15.3, -8.9, -5.6, -4.6, -4.4, -4.4],
+    ('medium sand', 10e3): [-61.5, -56.8, -53.2, -47.6, -43.4, -38.8, -30.9,
+                            -24.4, -22.6, -20.4, -13.2, -5.0, 1.2, 2.3, 2.6],
+    ('medium sand', 30e3): [-51.4, -48.1, -45.8, -42.1, -39.0, -35.4, -28.3,
+                            -23.5, -21.2, -17.7, -10.8, -5.5, -3.4, -3.1, -3.1],
+    ('medium sand', 100e3): [-50.0, -44.9, -41.5, -36.6, -33.3, -29.8, -24.2,
+                             -21.7, -19.5, -16.4, -12.2, -10.4, -9.8, -9.7, -9.7],
+    ('very fine sand', 30e3): [-59.7, -54.7, -50.8, -44.6, -40.1, -35.2, -27.1,
+                               -24.9, -23.7, -23.1, -20.2, -13.1, -5.9, -4.3, -3.8],
+    ('very fine sand', 100e3): [-51.4, -47.9, -45.4, -41.3, -37.9, -34.0, -27.0,
+                                -24.8, -23.5, -22.3, -18.0, -12.9, -10.3, -10.0,
+                                -10.0],
+}
+#: Table 3's two silt columns: Mz = 6.0 at sigma2 = 0.001 and 0.0003, 30 kHz.
+TABLE_3_SILT = {
+    0.001: [-58.2, -51.1, -46.6, -41.3, -38.3, -35.7, -31.8, -28.8, -27.4,
+            -27.0, -26.3, -23.9, -13.1, -6.8, -3.6],
+    0.0003: [-63.4, -56.3, -51.8, -46.5, -43.5, -40.9, -37.0, -34.0, -32.6,
+             -32.1, -30.5, -25.8, -13.3, -6.8, -3.6],
+}
+
+
+class TestBottomBackscatterReproducesTable3:
+
+    @pytest.mark.parametrize('name,freq', sorted(TABLE_3))
+    def test_generic_bottom_column(self, name, freq):
+        """Every column to 0.6 dB (the table prints 0.1 dB): the
+        composite-roughness, large-roughness and volume terms to 0.3 dB,
+        rock's 40 deg cell 0.6 dB, everything on sand within 0.25 dB."""
+        got = apl_uw_bottom_backscatter(
+            ANGLES, freq, BottomParameters.from_sediment(name),
+            water_sound_speed=TABLE_WATER_SOUND_SPEED)
+        d = np.abs(got - np.array(TABLE_3[(name, freq)]))
+        assert d.max() < 0.6, f"{name} at {freq/1e3:g} kHz: {np.round(d, 2)}"
+
+    @pytest.mark.parametrize('sigma2', sorted(TABLE_3_SILT))
+    def test_silt_columns_follow_the_volume_parameter(self, sigma2):
+        """The soft-bottom column moves with sigma2 alone (IV.C.3): the
+        two silt tables differ only in that parameter."""
+        p = BottomParameters.from_grain_size(6.0).with_(volume_parameter=sigma2)
+        got = apl_uw_bottom_backscatter(ANGLES, 30e3, p,
+                                        water_sound_speed=TABLE_WATER_SOUND_SPEED)
+        assert np.abs(got - np.array(TABLE_3_SILT[sigma2])).max() < 0.25
+
+    def test_kirchhoff_level_is_the_documented_factor_above_the_printed_form(self):
+        """The near-vertical value would sit 3.6 dB under Table 3 without
+        the level factor; the factor is 2^(2(1-alpha)/alpha) = 2.30 at
+        gamma = 3.25, applied to the Kirchhoff branch only."""
+        from uacpy.sonar.bottom_scattering import _kirchhoff_level
+        assert _kirchhoff_level(3.25 / 2.0 - 1.0) == pytest.approx(2.0 ** 1.2)
+
+    def test_zero_grazing_uses_the_value_at_one_thousandth_of_a_degree(self):
+        p = BottomParameters.from_sediment('medium sand')
+        s0, s1 = apl_uw_bottom_backscatter([0.0, 0.001], 30e3, p,
+                                           water_sound_speed=1528.0)
+        assert np.isfinite(s0) and s0 == s1
+
+    def test_out_of_band_frequency_warns_and_bad_inputs_raise(self):
+        p = BottomParameters.from_sediment('medium sand')
+        with pytest.warns(UserWarning, match='10-100 kHz'):
+            apl_uw_bottom_backscatter(20.0, 5e3, p)
+        with pytest.warns(UserWarning, match='water_sound_speed'):
+            apl_uw_bottom_backscatter(20.0, 30e3, p, water_sound_speed=1700.0)
+        with pytest.raises(ConfigurationError, match='0-90'):
+            apl_uw_bottom_backscatter(95.0, 30e3, p)
+        with pytest.raises(ConfigurationError, match='frequency'):
+            apl_uw_bottom_backscatter(20.0, np.nan, p)
+
+
+class TestBottomForwardLoss:
+
+    def test_slow_silt_shows_the_intromission_peak_of_figure_1(self):
+        """Figure 1: silt (Mz = 6, nu < 1) peaks near 35 dB at about 16 deg
+        and settles near 24 dB at vertical; rock loses under 0.1 dB below
+        its 66 deg critical angle and about 2.8 dB at vertical."""
+        silt = apl_uw_bottom_loss(np.arange(1.0, 90.5, 0.5),
+                                  BottomParameters.from_grain_size(6.0))
+        i = int(np.argmax(silt))
+        assert 14.0 <= np.arange(1.0, 90.5, 0.5)[i] <= 18.0
+        assert 33.0 < silt[i] < 37.0
+        assert 23.0 < silt[-1] < 25.5
+        rock = apl_uw_bottom_loss([30.0, 60.0, 90.0],
+                                  BottomParameters.from_sediment('rock'))
+        assert rock[0] < 0.1 and rock[1] < 0.1 and 2.5 < rock[2] < 3.1
+
+    def test_loss_is_zero_at_grazing_incidence_and_frequency_free(self):
+        p = BottomParameters.from_sediment('medium sand')
+        assert apl_uw_bottom_loss(0.0, p) == pytest.approx(0.0, abs=1e-9)
+        # no frequency argument at all: the model has none (IV.B.1)
+        assert apl_uw_bottom_loss(20.0, p) == apl_uw_bottom_loss(20.0, p)
+
+
+class TestBottomParameters:
+
+    def test_table_2_rows_are_the_grain_size_relations(self):
+        """Medium sand (Mz = 1.5) prints rho 1.845, nu 1.1782, delta 0.01624,
+        sigma2 0.002, w2 0.004446; sandy gravel (Mz = -1) w2 0.012937; the
+        silts w2 0.000518 and sigma2 0.001 above Mz 5.5."""
+        p = BottomParameters.from_sediment('medium sand')
+        assert p.density_ratio == pytest.approx(1.845, abs=5e-4)
+        assert p.speed_ratio == pytest.approx(1.1782, abs=5e-5)
+        assert p.loss_parameter == pytest.approx(0.01624, abs=5e-6)
+        assert p.volume_parameter == 0.002
+        assert p.spectral_strength == pytest.approx(0.004446, abs=1e-6)
+        assert p.spectral_exponent == 3.25
+        assert BottomParameters.from_sediment('sandy gravel').spectral_strength \
+            == pytest.approx(0.012937, abs=1e-6)
+        silt = BottomParameters.from_sediment('sandy mud')
+        assert silt.spectral_strength == pytest.approx(0.000518, abs=1e-6)
+        assert silt.volume_parameter == 0.001
+
+    def test_names_are_normalised_and_unknown_ones_list_the_table(self):
+        assert BottomParameters.from_sediment('Fine-Sand') == \
+            BottomParameters.from_grain_size(2.5)
+        with pytest.raises(ConfigurationError, match='medium sand'):
+            BottomParameters.from_sediment('basalt')
+        assert 'rough rock' in APL_UW_SEDIMENTS
+
+    def test_geoacoustics_invert_the_speed_ratio_for_the_grain_size(self):
+        """Given medium sand's own cp, rho and dB/wavelength attenuation,
+        from_geoacoustics recovers Table 2's row: delta from the attenuation
+        (alpha = 40 pi log10(e) delta) and w2, sigma2 from the Mz that
+        inverts Eq. 3 (p. IV-12)."""
+        ref = BottomParameters.from_sediment('medium sand')
+        alpha_dB_lambda = ref.loss_parameter * 40.0 * np.pi / np.log(10.0)
+        p = BottomParameters.from_geoacoustics(
+            sound_speed=ref.speed_ratio * 1500.0, density=ref.density_ratio * 1.027,
+            attenuation_dB_per_wavelength=alpha_dB_lambda,
+            water_sound_speed=1500.0, water_density=1.027)
+        assert p.density_ratio == pytest.approx(ref.density_ratio)
+        assert p.speed_ratio == pytest.approx(ref.speed_ratio)
+        assert p.loss_parameter == pytest.approx(ref.loss_parameter)
+        assert p.spectral_strength == pytest.approx(ref.spectral_strength, rel=1e-3)
+        assert p.volume_parameter == ref.volume_parameter
+
+    def test_a_fetched_seabed_takes_the_grain_size_route_by_default(self):
+        """A seabed built from a grain size (what every grain-size source of
+        fetch_environment returns) carries grain_size_phi, and from_bottom
+        reads the handbook's own relations off it whatever conversion built
+        the geoacoustics — the same BottomParameters for the Hamilton and the
+        APL-UW seabed of the same Mz."""
+        from uacpy.data import bottom_from_grain_size
+        expected = BottomParameters.from_grain_size(1.5)
+        for model in ('hamilton', 'apl-uw'):
+            seabed = bottom_from_grain_size(1.5, model=model,
+                                            water_sound_speed=1500.0)
+            assert BottomParameters.from_bottom(
+                seabed, water_sound_speed=1500.0) == expected
+            assert BottomParameters.from_bottom(
+                seabed, water_sound_speed=1500.0, method='grain-size') == expected
+
+    def test_the_geoacoustics_route_forms_the_ratios_against_the_given_water(self):
+        """method='geoacoustics' is from_geoacoustics on the surficial cp,
+        rho and dB/wavelength attenuation: the ratios follow the water values
+        passed, and the seabed's own grain size still supplies sigma2 and w2.
+        A boundary without a grain size takes this route under 'auto', and
+        refuses 'grain-size' with the remedy."""
+        from uacpy.core.environment import BoundaryProperties
+        from uacpy.data import bottom_from_grain_size
+        seabed = bottom_from_grain_size(1.5, model='apl-uw',
+                                        water_sound_speed=1500.0)
+        p = BottomParameters.from_bottom(seabed, water_sound_speed=1500.0,
+                                         water_density=1.0, method='geoacoustics')
+        ref = BottomParameters.from_grain_size(1.5)
+        assert p.speed_ratio == pytest.approx(ref.speed_ratio)
+        assert p.density_ratio == pytest.approx(ref.density_ratio)
+        assert p.spectral_strength == ref.spectral_strength
+        assert p.volume_parameter == ref.volume_parameter
+        colder = BottomParameters.from_bottom(seabed, water_sound_speed=1450.0,
+                                              water_density=1.0, method='geoacoustics')
+        assert colder.speed_ratio == pytest.approx(ref.speed_ratio * 1500.0 / 1450.0)
+        bare = BoundaryProperties(sound_speed=1700.0, density=1.9, attenuation=0.6)
+        auto = BottomParameters.from_bottom(bare, water_sound_speed=1500.0,
+                                            water_density=1.0)
+        assert auto == BottomParameters.from_geoacoustics(
+            sound_speed=1700.0, density=1.9, attenuation_dB_per_wavelength=0.6,
+            water_sound_speed=1500.0, water_density=1.0)
+        with pytest.raises(ConfigurationError, match="method='geoacoustics'"):
+            BottomParameters.from_bottom(bare, water_sound_speed=1500.0,
+                                         method='grain-size')
+
+    def test_layered_and_range_dependent_seabeds_contribute_their_surface(self):
+        """A SeabedColumn hands over its top layer, a Bottom the nearest
+        column at ``range``; a vacuum/rigid seabed has nothing to
+        parameterise and says so."""
+        from uacpy.core.bottom import (Bottom, BoundaryProperties, SeabedColumn,
+                                       SedimentLayer)
+        from uacpy.data import bottom_from_grain_size
+        sand = SedimentLayer(thickness=5.0, sound_speed=1700.0, density=1.9,
+                             attenuation=0.6)
+        rock = BoundaryProperties(sound_speed=3000.0, density=2.4, attenuation=0.1)
+        column = SeabedColumn(layers=[sand], halfspace=rock)
+        top = BottomParameters.from_bottom(column, water_sound_speed=1500.0,
+                                           water_density=1.0)
+        assert top.speed_ratio == pytest.approx(1700.0 / 1500.0)
+        bottom = Bottom.from_columns(
+            [SeabedColumn.from_halfspace(
+                bottom_from_grain_size(1.5, water_sound_speed=1500.0)),
+             SeabedColumn.from_halfspace(
+                bottom_from_grain_size(6.0, water_sound_speed=1500.0))],
+            ranges=[0.0, 1000.0])
+        near = BottomParameters.from_bottom(bottom, water_sound_speed=1500.0)
+        far = BottomParameters.from_bottom(bottom, water_sound_speed=1500.0,
+                                           range=900.0)
+        assert near == BottomParameters.from_grain_size(1.5)
+        assert far == BottomParameters.from_grain_size(6.0)
+        with pytest.raises(ConfigurationError, match="'vacuum'"):
+            BottomParameters.from_bottom(BoundaryProperties(),
+                                         water_sound_speed=1500.0)
+        with pytest.raises(ConfigurationError, match='expected a BoundaryProperties'):
+            BottomParameters.from_bottom('medium sand', water_sound_speed=1500.0)
+
+    def test_from_environment_reads_the_water_at_the_seafloor(self):
+        """The ratios are formed against the sound speed the environment has
+        at the seafloor under ``range`` and against env.water_density."""
+        from uacpy.core.environment import BoundaryProperties, Environment
+        seabed = BoundaryProperties(sound_speed=1700.0, density=1.9,
+                                    attenuation=0.6)
+        env = Environment(bathymetry=100.0, ssp=[(0.0, 1500.0), (100.0, 1480.0)],
+                          bottom=seabed, water_density=1.03)
+        p = BottomParameters.from_environment(env)
+        assert p.speed_ratio == pytest.approx(1700.0 / 1480.0)
+        assert p.density_ratio == pytest.approx(1.9 / 1.03)
+        assert p == BottomParameters.from_bottom(
+            seabed, water_sound_speed=1480.0, water_density=1.03)
+
+    def test_grain_size_outside_the_fit_is_clamped_with_a_warning(self):
+        with pytest.warns(UserWarning, match='-1 <= Mz <= 9'):
+            p = BottomParameters.from_grain_size(12.0)
+        assert p == BottomParameters.from_grain_size(9.0)
+
+    def test_values_outside_the_recommended_limits_warn(self):
+        with pytest.warns(UserWarning, match='Section IV.A.8'):
+            BottomParameters(density_ratio=3.5, speed_ratio=1.2, loss_parameter=0.01,
+                             volume_parameter=0.002, spectral_strength=0.005)
+        with pytest.raises(ConfigurationError, match='between 2 and 4'):
+            BottomParameters(density_ratio=1.8, speed_ratio=1.2, loss_parameter=0.01,
+                             volume_parameter=0.002, spectral_strength=0.005,
+                             spectral_exponent=4.0)
+
+
+class TestSurfaceBackscatter:
+
+    def test_levels_match_the_reports_model_data_figures(self):
+        """Figure 3 (FLIP77, 15 kHz, 3.5 m/s): about -47 to -45 dB over
+        10-30 deg; Figure 7 (SAXON-FPN, 70 kHz, 8 m/s): about -24 dB at 30 and
+        -19 dB at 60 deg; Figure 8 (NOREX85, 18 kHz, 17 m/s): about -27, -21
+        and -17 dB at 15, 40 and 60 deg. Read off the plots to +-2 dB."""
+        flip = apl_uw_surface_backscatter([10.0, 20.0, 30.0], 15e3, 3.5)
+        assert np.all((-50.0 < flip) & (flip < -43.0))
+        saxon = apl_uw_surface_backscatter([30.0, 60.0], 70e3, 8.0)
+        assert saxon[0] == pytest.approx(-24.0, abs=2.0)
+        assert saxon[1] == pytest.approx(-19.0, abs=2.0)
+        norex = apl_uw_surface_backscatter([15.0, 40.0, 60.0], 18e3, 17.0)
+        assert np.abs(norex - np.array([-27.0, -21.0, -17.0])).max() < 2.5
+
+    def test_bubbles_saturate_and_facets_dominate_near_vertical(self):
+        """II.B.3: the curves stop moving with wind above about 8 m/s;
+        Figure 2: every curve ends between about +3 and +8 dB at 90 deg."""
+        mid = [float(apl_uw_surface_backscatter(30.0, 25e3, u)) for u in (3, 5, 8, 10, 15)]
+        assert mid[0] < mid[1] < mid[2]
+        assert abs(mid[3] - mid[4]) < 5.0
+        top = [float(apl_uw_surface_backscatter(90.0, 25e3, u)) for u in (3, 10, 15)]
+        assert all(2.0 < v < 9.0 for v in top)
+        assert top[0] > top[2], "a rougher sea spreads the specular peak"
+
+    def test_below_half_a_degree_is_a_linear_extrapolation(self):
+        s = apl_uw_surface_backscatter([0.0, 0.25, 0.5, 1.0], 25e3, 8.0)
+        assert np.all(np.isfinite(s))
+        assert s[1] == pytest.approx(0.5 * (s[0] + s[2]))
+        assert s[2] - s[0] == pytest.approx(s[3] - s[2])
+
+    def test_out_of_band_frequency_warns_and_bad_inputs_raise(self):
+        with pytest.warns(UserWarning, match='12-70 kHz'):
+            apl_uw_surface_backscatter(20.0, 5e3, 8.0)
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            apl_uw_surface_backscatter(20.0, 25e3, 0.0)   # calm sea is valid
+        with pytest.raises(ConfigurationError, match='wind_speed_ms'):
+            apl_uw_surface_backscatter(20.0, 25e3, -1.0)
+        with pytest.raises(ConfigurationError, match='0-90'):
+            apl_uw_surface_backscatter(-5.0, 25e3, 8.0)
