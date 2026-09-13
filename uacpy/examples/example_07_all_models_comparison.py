@@ -6,10 +6,10 @@ range, a shelf-break slope, and Thorp volume attenuation. Bellhop, RAM, Kraken,
 Scooter and OAST each take the same Environment and reduce whatever they cannot
 represent — warning about it — rather than refusing.
 
-Volume attenuation is honoured by Bellhop, Kraken and Scooter. RAM has no
-backend that models water-column attenuation, and OASES substitutes its own
-internal Skretting-Leroy attenuation for AC=0 water layers; both say so at
-runtime.
+Volume attenuation is honoured by Bellhop, Kraken, Scooter and RAM (every RAM
+backend takes it as a dB-per-wavelength profile on the water wavenumber). OASES
+substitutes its own internal Skretting-Leroy attenuation for AC=0 water layers
+and says so at runtime.
 
 Uses: SoundSpeedProfile.from_2d · Bottom.from_halfspaces · uacpy.Thorp ·
 Kraken(mode_coupling=, n_segments=) · env.plot · compare_models(ncols=,

@@ -458,7 +458,7 @@ _VOLUME_ATTENUATION = {
     'Scooter': True,    # TopOpt position 4
     'SPARC': True,      # TopOpt position 4
     'Bounce': False,    # a reflection table has no path length
-    'RAM': False,       # ksqw carries no attn term in any backend
+    'RAM': True,        # water block on ksqw / lamw in every patched backend
     'OAST': False,      # substitutes its own law, oaseun31.f:1516-1521
     'OASN': False,
     'OASP': False,

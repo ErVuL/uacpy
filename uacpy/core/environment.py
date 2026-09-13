@@ -24,6 +24,7 @@ from uacpy.core.bathymetry import Bathymetry
 from uacpy.core.altimetry import Altimetry
 from uacpy.core.surface import Surface
 from uacpy.core.absorption import Absorption
+from uacpy.core.constants import DEFAULT_WATER_DENSITY_G_CM3
 
 
 def _coerce_coordinate(value, label):
@@ -138,6 +139,20 @@ class Environment(_DeepCopyMixin):
         :class:`uacpy.core.absorption.ConstantAbsorption`. Default ``None``
         (no volume absorption). Models inspect this field to set
         ``TopOpt`` position 4 and write the supporting per-formula lines.
+    water_density : float, keyword-only
+        Sea-water density in g/cm³. The decks that carry a water density
+        write it (the Acoustics Toolbox and Bellhop SSP rows, the OASES
+        water layers);
+        the engines that fix the water at 1 and read seabed densities as
+        ratios — the RAM codes and BOUNCE — receive each seabed density
+        divided by it. Default ``None`` is
+        :data:`~uacpy.core.constants.DEFAULT_WATER_DENSITY_G_CM3` (1.027);
+        ``uacpy.core.acoustics.density(T, S) / 1000`` gives the value for a
+        measured column. Seabed densities stay absolute g/cm³ (Hamilton's
+        tables), so the impedance contrast the engines see is ρ_b/ρ_w
+        rather than ρ_b/1 — 2.7 % less, a few tenths of a dB per bottom
+        bounce. Pass ``water_density=1.0`` to reproduce a textbook
+        benchmark that takes ρ_w = 1 by convention.
     name : str, keyword-only
         Environment identifier. Default ``'unnamed'``.
     location : (float, float), keyword-only
@@ -206,6 +221,7 @@ class Environment(_DeepCopyMixin):
         transect: Optional[Tuple[Tuple[float, float],
                                  Tuple[float, float]]] = None,
         date=None,
+        water_density: Optional[float] = None,
     ):
         if absorption is not None and not isinstance(absorption, Absorption):
             raise ConfigurationError(
@@ -214,6 +230,20 @@ class Environment(_DeepCopyMixin):
                 f"got {type(absorption).__name__}"
             )
         self.absorption = absorption
+        if water_density is None:
+            water_density = DEFAULT_WATER_DENSITY_G_CM3
+        try:
+            rho_w = float(water_density)
+        except (TypeError, ValueError):
+            raise ConfigurationError(
+                f"Environment: water_density must be a number in g/cm³; "
+                f"got {water_density!r}.")
+        if not (0.9 <= rho_w <= 1.1):
+            raise ConfigurationError(
+                f"Environment: water_density={rho_w:g} lies outside 0.9-1.1 "
+                f"g/cm³. The unit is g/cm³ (sea water is about 1.027); a "
+                f"kg/m³ value has to be divided by 1000.")
+        self.water_density = rho_w
         self.name = _sanitize_title(name)
 
         # Optional geolocation (WGS84 decimal degrees) and the time the env

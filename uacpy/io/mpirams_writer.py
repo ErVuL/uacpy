@@ -47,6 +47,7 @@ def write_inpe(
     sed_filename: str = '',
     *,
     c0_user: float,
+    water_attn_filename: str = '',
 ):
     """
     Write mpiramS input configuration file (in.pe).
@@ -111,6 +112,14 @@ def write_inpe(
         PE reference sound speed (m/s). The Fortran binary requires a
         positive value (e.g. Lytaev Eq. (15) optimum) and stops with
         an error otherwise.
+    water_attn_filename : str, keyword-only, optional
+        Name of a water-column attenuation table written by
+        :func:`write_water_attenuation_file`. When given it is the deck's
+        last line, after the sediment block; the uacpy-patched binary
+        reads it and applies the table to the water wavenumber
+        (``read_wattn`` in ``peramx.f90``, ``wksqw`` in ``ram.f90``).
+        Empty (default) ends the deck with the sediment block, which the
+        binary reads as a lossless water column exactly as before.
 
     Notes
     -----
@@ -217,6 +226,56 @@ def write_inpe(
             f.write("  ".join(f"{v}" for v in cs) + "\n")
             f.write("  ".join(f"{v}" for v in rho) + "\n")
             f.write("  ".join(f"{v}" for v in attn) + "\n")
+        if water_attn_filename:
+            f.write(f"{water_attn_filename}\n")
+
+
+def write_water_attenuation_file(
+    filepath: Union[str, Path],
+    depths: np.ndarray,
+    frequencies: np.ndarray,
+    attn_dB_per_wavelength: np.ndarray,
+) -> None:
+    """Write the water-column attenuation table mpiramS reads.
+
+    Layout (``read_wattn`` in ``peramx.f90``, list-directed): a ``nzaw nfaw``
+    header, one row of the ``nfaw`` bin frequencies (Hz), then one row per
+    depth — the depth (m) followed by its ``nfaw`` attenuations in
+    dB/wavelength. The binary looks the marched bin up in the frequency row
+    and stops if no entry sits within 1e-7 of it, so ``frequencies`` must be
+    the sweep :meth:`~uacpy.models.RAM._broadband_frequencies` reproduces.
+    Between depths the binary interpolates linearly and holds the end values
+    beyond the table (``wksqw`` in ``ram.f90``).
+
+    Parameters
+    ----------
+    depths : ndarray, shape (nz,)
+        Increasing depths (m), in the frame the deck's other depths use.
+    frequencies : ndarray, shape (nf,)
+        The bin frequencies (Hz).
+    attn_dB_per_wavelength : ndarray, shape (nz, nf)
+        ``alpha(z, f)`` in dB per wavelength.
+    """
+    z = np.atleast_1d(np.asarray(depths, dtype=float))
+    f = np.atleast_1d(np.asarray(frequencies, dtype=float))
+    a = np.asarray(attn_dB_per_wavelength, dtype=float).reshape(z.size, f.size)
+    if z.size == 0 or f.size == 0:
+        raise ConfigurationError(
+            "write_water_attenuation_file: the table needs at least one depth "
+            "and one frequency.")
+    if np.any(np.diff(z) <= 0.0):
+        raise ConfigurationError(
+            "write_water_attenuation_file: depths must increase strictly; the "
+            "binary walks the table assuming monotone depths.")
+    if not np.all(np.isfinite(a)) or np.any(a < 0.0):
+        raise ConfigurationError(
+            "write_water_attenuation_file: attenuation must be finite and "
+            "non-negative dB/wavelength.")
+    with open(filepath, 'w') as fh:
+        fh.write(f"{z.size} {f.size}\n")
+        fh.write(" ".join(f"{v:.12g}" for v in f) + "\n")
+        for zi, row in zip(z, a):
+            fh.write(f"{zi:.12g} " + " ".join(f"{v:.12g}" for v in row) + "\n")
 
 
 def write_sediment_file(

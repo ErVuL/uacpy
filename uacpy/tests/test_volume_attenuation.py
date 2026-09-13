@@ -129,25 +129,67 @@ class TestVolumeAttenuation:
         assert float(np.abs(im_thorp).mean()) > float(np.abs(im_plain).mean()), (
             "Thorp volume absorption did not increase the modal Im(k)")
 
-    def test_ram_warns_that_absorption_is_ignored(self, shallow_env,
-                                                  shallow_env_thorp):
-        """No RAM backend consumes water-column volume attenuation
-        (ram.md §7); an absorbing env warns instead of silently running a
-        lossless water column. Unit-tests the helper — no binary runs."""
-        import warnings as _w
+    def test_ram_deck_carries_thorp_as_dB_per_local_wavelength(
+            self, shallow_env, shallow_env_thorp):
+        """Every RAM backend applies ``env.absorption`` through a water
+        block in dB per wavelength (ram.md §3). At 10 kHz Thorp is
+        ``thorp_dB_per_km(f)/1000 · c/f`` per wavelength, the block sits at
+        absolute depths inside the domain, and a lossless env or a zero
+        constant writes no block. Deck-level — no binary runs."""
         from uacpy.models import RAM
-        from uacpy.core.absorption import ConstantAbsorption
-        m = RAM(verbose=False)
-        with pytest.warns(UserWarning, match='env.absorption'):
-            m._warn_on_dropped_absorption(shallow_env_thorp)
-        with _w.catch_warnings(record=True) as caught:
-            _w.simplefilter('always')
-            m._warn_on_dropped_absorption(shallow_env)
-            m._warn_on_dropped_absorption(Environment(
-                name='zero', bathymetry=100.0, ssp=1500.0,
-                absorption=ConstantAbsorption(0.0)))
-        assert not [w for w in caught
-                    if 'env.absorption' in str(w.message)]
+        from uacpy.core.absorption import ConstantAbsorption, thorp_dB_per_km
+        m = RAM(verbose=False, flat_earth=False)
+        seg = m._collins_range_segments(shallow_env_thorp, 'ramgeo', 200.0,
+                                        10000.0, dz=0.05)[0]
+        block = seg['water_attn']
+        expected = float(thorp_dB_per_km(10000.0)) / 1000.0 * 1500.0 / 10000.0
+        assert block[0][0] == 0.0 and block[-1][0] == 200.0
+        assert all(abs(v - expected) < 1e-12 * expected for _, v in block)
+        assert 'water_attn' not in m._collins_range_segments(
+            shallow_env, 'ramgeo', 200.0, 10000.0)[0]
+        zero = Environment(name='zero', bathymetry=100.0, ssp=1500.0,
+                           absorption=ConstantAbsorption(0.0))
+        assert 'water_attn' not in m._collins_range_segments(
+            zero, 'ramgeo', 200.0, 10000.0)[0]
+
+    @pytest.mark.requires_binary
+    @pytest.mark.parametrize('law', ['thorp', 'fg'])
+    def test_every_bellhop_port_applies_the_same_law_as_the_fortran(
+            self, shallow_env, law):
+        """The C++ / CUDA port carried Francois-Garrison's boric-acid
+        relaxation frequency with base 1 instead of 10 (a constant 2.8 kHz),
+        1.34 x the Fortran's loss at 5 kHz while its Thorp agreed
+        (third_party/MODIFICATIONS.md, bellhopcuda). The increment
+        TL(law) - TL(lossless) of every available port must match the
+        Fortran binary's to 3 %."""
+        from uacpy.core.absorption import FrancoisGarrison
+        from uacpy.models.bellhop import Bellhop as _B
+        absorption = (Thorp() if law == 'thorp' else FrancoisGarrison(
+            temperature_c=10.0, salinity_psu=35.0, pH=8.0, z_bar_m=50.0))
+        lossy = Environment(name='lossy', bathymetry=100.0, ssp=1500.0,
+                            bottom=shallow_env.bottom, absorption=absorption)
+        src = Source(depths=30.0, frequencies=5000.0)
+        rcv = Receiver(depths=[20.0, 30.0, 50.0, 70.0],
+                       ranges=np.arange(1000.0, 5001.0, 500.0))
+
+        def increment(backend):
+            m = _B(backend=backend, verbose=False)
+            tl = [np.asarray(m.run(e, src, rcv,
+                                   run_mode=RunMode.COHERENT_TL).tl, float)
+                  for e in (shallow_env, lossy)]
+            return float(np.nanmedian(tl[1] - tl[0]))
+
+        ref = increment('fortran')
+        # medians over 1-5 km: Thorp 1.2 dB, Francois-Garrison 1.0 dB
+        assert ref > 0.5, f"Fortran {law} increment {ref:.2f} dB is not measurable"
+        for backend in ('cxx', 'cuda'):
+            try:
+                inc = increment(backend)
+            except Exception as exc:          # port not built on this host
+                pytest.skip(f"{backend}: {type(exc).__name__}")
+            assert abs(inc / ref - 1.0) < 0.03, (
+                f"Bellhop {backend} {law} increment {inc:.3f} dB vs Fortran "
+                f"{ref:.3f} dB")
 
     @pytest.mark.requires_binary
     def test_frequency_dependent_attenuation(self, shallow_env_thorp,

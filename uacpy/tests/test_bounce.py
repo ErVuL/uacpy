@@ -17,7 +17,7 @@ from uacpy.core import (
     Environment, Source, Receiver, BoundaryProperties,
 )
 from uacpy.core.bottom import Bottom, SeabedColumn, SedimentLayer
-from uacpy.core.constants import DEFAULT_C_MIN
+from uacpy.core.constants import DEFAULT_C_MIN, DEFAULT_WATER_DENSITY_G_CM3
 from uacpy.core.environment import SoundSpeedProfile
 from uacpy.core.exceptions import (
     ConfigurationError, ModelExecutionError, UnsupportedFeatureError,
@@ -103,7 +103,7 @@ class TestBareHalfspaceReferencePlane:
         env = _halfspace_env()
         res = Bounce(work_dir=tmp_path, cleanup=False).run(env, _src(), _rcv())
         hs = env.bottom.halfspace_at(range=0.0)
-        z1 = 1.0 * 1500.0
+        z1 = env.water_density * 1500.0
         z2 = hs.density * hs.sound_speed
         expected = (z2 - z1) / (z2 + z1)
 
@@ -448,9 +448,11 @@ class TestLosslessSandRayleighAnalytics:
             f"arccos(1500/1650) = {_SAND_THETA_C:.2f} deg")
 
     def test_normal_incidence_is_the_impedance_ratio(self, rc):
-        z1 = 1.0 * 1500.0
+        # BOUNCE references R to a unit density and gets the seabed as a
+        # ratio, so the water's real density enters the contrast.
+        z1 = DEFAULT_WATER_DENSITY_G_CM3 * 1500.0
         z2 = 1.9 * 1650.0
-        expected = (z2 - z1) / (z2 + z1)      # 0.3528
+        expected = (z2 - z1) / (z2 + z1)      # 0.3410
         i = int(np.argmax(rc.theta))
         assert rc.theta[i] == pytest.approx(90.0, abs=1e-6)
         assert rc.R[i] == pytest.approx(expected, abs=5e-4)

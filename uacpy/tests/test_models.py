@@ -1280,18 +1280,19 @@ class TestMissingVolumeAbsorptionIsAnnounced:
 
     def test_only_models_that_carry_absorption_advise_setting_it(self):
         """A wrapper that ignores ``env.absorption`` must not tell anyone to
-        set it: RAM models no water-column attenuation at all and the OASES
-        family substitutes its own empirical law, and both already warn when
-        one IS set. Advising it there would contradict their own diagnostic."""
+        set it: the OASES family substitutes its own empirical law and
+        already warns when one IS set, so advising it there would contradict
+        its own diagnostic. RAM carries the model as a dB/wavelength profile
+        on every backend, so it advises like the Acoustics Toolbox wrappers."""
         from uacpy.models import Bellhop, Kraken, Scooter, SPARC, Bounce, RAM
         from uacpy.models.oases import OAST, OASN, OASP, OASR
-        for model in (Bellhop, Kraken, Scooter, SPARC):
+        for model in (Bellhop, Kraken, Scooter, SPARC, RAM):
             assert model._consumes_volume_absorption, model.__name__
         # Bounce reaches the engine's TopOpt(4) too, but it tabulates R(theta)
         # at an interface: its `receiver` sizes the table's resolution rather
         # than describing a path, so the notice would quote that knob as a
         # propagation distance.
-        for model in (Bounce, RAM, OAST, OASN, OASP, OASR):
+        for model in (Bounce, OAST, OASN, OASP, OASR):
             assert not model._consumes_volume_absorption, model.__name__
 
     def test_one_user_run_gives_one_notice(self):

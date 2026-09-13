@@ -62,6 +62,7 @@ from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
 from uacpy.core.results import Result, Field
 from uacpy.core.constants import PRESSURE_FLOOR
+from uacpy.core.absorption import ConstantAbsorption
 from uacpy.core.exceptions import (
     ConfigurationError,
     ExecutableNotFoundError,
@@ -70,7 +71,7 @@ from uacpy.core.exceptions import (
 )
 from uacpy.io.mpirams_writer import (
     write_inpe, write_ssp_file, write_bth_file, write_ranges_file,
-    write_sediment_file,
+    write_sediment_file, write_water_attenuation_file,
 )
 from uacpy.io.mpirams_reader import read_psif
 from uacpy.io.ramsurf_writer import write_ramin
@@ -409,12 +410,15 @@ class RAM(PropagationModel):
     are supported by every backend: mpiramS threads them through its native
     range-dependent setup, and the Collins backends emit one ``ram.in``
     profile section per range break (each carrying its range-local SSP and
-    Collins-style depth/value bottom profile).
+    Collins-style depth/value bottom profile). Water-column volume
+    attenuation (``env.absorption``) is too: every backend receives
+    ``alpha(z)`` in dB per local wavelength — per frequency bin on a
+    broadband sweep — and applies it to the water wavenumber the way the
+    seabed's attenuation is applied (uacpy's patched binaries; see
+    ``third_party/MODIFICATIONS.md``).
 
     Limitations
     -----------
-    - Water-column volume attenuation (Thorp / Francois-Garrison / biological)
-      is not exposed by any RAM backend. Use Bellhop or Kraken instead.
     - The lower boundary at ``zmax`` is an absorbing layer, not a rigid
       Neumann floor — true rigid bottoms are not supported.
     - Collins backends (rams0.5, ramsurf1.5) are single-frequency at the
@@ -584,6 +588,9 @@ class RAM(PropagationModel):
         },
     )
     source = 'collins_ram'
+    # Every backend applies ``env.absorption`` as a dB/wavelength profile on
+    # the water wavenumber (:meth:`_water_attenuation_block`).
+    _consumes_volume_absorption = True
 
     def __init__(
         self,
@@ -1584,7 +1591,8 @@ class RAM(PropagationModel):
 
         - cs: sediment sound speed *perturbation* relative to water column,
               taken per control point (:meth:`_sediment_offsets`).
-        - rho: sediment density (g/cm^3).
+        - rho: sediment density relative to the water's
+              (``env.water_density``): ``profl`` fixes the water at 1.
         - attn: sediment attenuation (dB/wavelength).
               The last point is set to absorbing-layer attenuation.
 
@@ -1727,6 +1735,10 @@ class RAM(PropagationModel):
         # linearly between control points (``ram.f90:373-405``), so a seabed
         # above ``absorbing_layer_attn`` would otherwise ramp DOWN into it.
         attn[-1, :] = np.maximum(attn[-2, :], self.absorbing_layer_attn)
+        # mpiramS fixes the water density at 1 (``profl``: rhob is the
+        # seabed's alone), so the absolute g/cm³ become ratios here, as
+        # ``_collins_deck_base`` does for the Collins decks.
+        rho = rho / float(env.water_density)
         self._log(f"Sediment: {len(ranges)} profile(s), nzs={nzs}, "
                   f"sedlayer={sedlayer:.1f} m")
         if len(ranges) == 1:
@@ -1866,7 +1878,6 @@ class RAM(PropagationModel):
         # not change dispatch.
         env = self._collapse_surface_to_pressure_release(env)
         self.validate_inputs(env, source, receiver, run_mode=run_mode)
-        self._warn_on_dropped_absorption(env)
 
         backend = self.select_backend(env, run_mode)
         elastic = self._env_has_elastic_bottom(env)
@@ -2755,10 +2766,10 @@ class RAM(PropagationModel):
         # Built before the stride because the section spacing bounds ``dr``:
         # the binary consumes at most one profile section per range step.
         range_segments = (
-            self._collins_range_segments(env, kind, zmax, fc)
+            self._collins_range_segments(env, kind, zmax, fc, dz=dz)
             if deck_base is None
             else self._ramp_range_segments(env, deck_base, fc, kind=kind,
-                                           zmax=zmax)
+                                           zmax=zmax, dz=dz)
         )
         bathymetry = self._anchored_at_the_origin(
             [(float(r), self._deck_depth(float(d)))
@@ -3846,7 +3857,8 @@ class RAM(PropagationModel):
         return dr_out
 
     def _collins_range_segments(
-        self, env: Environment, kind: str, zmax: float, freq: float
+        self, env: Environment, kind: str, zmax: float, freq: float,
+        dz: Optional[float] = None,
     ) -> list:
         """Build the Collins ``range_segments`` list — one ``ram.in`` profile
         section per range break — from the environment's range-dependent SSP
@@ -3862,7 +3874,7 @@ class RAM(PropagationModel):
         """
         return self._ramp_range_segments(
             env, self._collins_deck_base(env, kind, zmax), freq,
-            kind=kind, zmax=zmax,
+            kind=kind, zmax=zmax, dz=dz,
         )
 
     def _collins_deck_base(self, env: Environment, kind: str,
@@ -3892,10 +3904,12 @@ class RAM(PropagationModel):
         rams0.5 indexes absolutely from z=0. Water-SSP blocks are absolute for
         all three.
 
-        Frequency enters the deck at exactly one place — the absorbing
-        layer's width (:meth:`_absorbing_width`), which reaches it
-        only through each section's ramped attenuation block
-        (:meth:`_ramp_absorbing_attenuation`). Every other quantity above is
+        Frequency enters the deck at two places — the absorbing layer's
+        width (:meth:`_absorbing_width`), which reaches it only through each
+        section's ramped attenuation block
+        (:meth:`_ramp_absorbing_attenuation`), and the water-attenuation
+        block (:meth:`_water_attenuation_block`), which is ``alpha(f)``
+        outright. Every other quantity above is
         a function of the environment and ``zmax`` alone, so a broadband
         sweep cuts this once for the band and re-ramps per bin — the whole
         cost of the deck minus the ramp.
@@ -3918,6 +3932,7 @@ class RAM(PropagationModel):
         )
         b = env.bottom
         seafloor_relative = kind in ('ramgeo', 'ramsurf')
+        rho_w = float(env.water_density)
 
         breaks = {0.0}
         if b.is_range_dependent:
@@ -3962,12 +3977,19 @@ class RAM(PropagationModel):
             # frames never mix inside one deck.
             def block(pairs):
                 return self._deck_block(pairs, seafloor, seafloor_relative)
+            ssp_cut = self._cut_water_ssp_at_zmax(ssp_pairs, zmax)
             seg = dict(
                 range=float(marker),
-                water_ssp=self._deck_water_column(
-                    self._cut_water_ssp_at_zmax(ssp_pairs, zmax)),
+                water_ssp=self._deck_water_column(ssp_cut),
+                # Kept geometric for the water-attenuation block, whose
+                # local wavelength is c(z)/f; not written to the deck.
+                ssp_geo=ssp_cut,
                 bottom_c=block(bp['sound_speed']),
-                bottom_rho=block(bp['density']),
+                # Every RAM code fixes the water density at 1 and reads
+                # the seabed's as a ratio to it (RAM guide: 'the density
+                # is assigned the value 1 g/cc'), so the absolute g/cm³
+                # the Bottom carries is divided by the water's.
+                bottom_rho=block([(z, v / rho_w) for z, v in bp['density']]),
             )
             if kind == 'rams':
                 seg['bottom_cs'] = block(bp['shear_speed'])
@@ -4055,7 +4077,8 @@ class RAM(PropagationModel):
         return out
 
     def _ramp_range_segments(self, env: Environment, base: dict,
-                             freq: float, *, kind: str, zmax: float) -> list:
+                             freq: float, *, kind: str, zmax: float,
+                             dz: Optional[float] = None) -> list:
         """Finish a :meth:`_collins_deck_base` payload at one frequency.
 
         The ramp is recomputed per frequency rather than rescaled because the
@@ -4073,7 +4096,8 @@ class RAM(PropagationModel):
         survives whatever a single bin's deck is handed to.
 
         ``kind`` / ``zmax`` are the grid this deck is about to be written for;
-        they must match the ones the base was cut against.
+        they must match the ones the base was cut against. ``dz`` thins the
+        water-attenuation block to one point per depth cell when known.
         """
         if base['kind'] != kind or base['zmax'] != float(zmax):
             raise AssertionError(
@@ -4084,6 +4108,7 @@ class RAM(PropagationModel):
                 f"the deck describes a different domain; rebuild it."
             )
         absorbing_width = self._absorbing_width(env, freq)
+        water_attn = self._water_attenuation_active(env)
         out = []
         seafloor_relative = kind in ('ramgeo', 'ramsurf')
         for seg, (attn, z_sediment_base, z_bottom, seafloor) in zip(
@@ -4101,6 +4126,14 @@ class RAM(PropagationModel):
             if 'bottom_cs' in seg:
                 done['bottom_cs'] = list(seg['bottom_cs'])
                 done['bottom_attns'] = list(seg['bottom_attns'])
+            if water_attn:
+                # Absolute depth on every backend (``wattn`` fills the
+                # water rows 1..iz from it), so the mapping is the
+                # absolute-frame branch of ``_deck_block``.
+                done['water_attn'] = self._deck_block(
+                    self._water_attenuation_block(
+                        env, freq, seg['ssp_geo'], zmax, dz),
+                    seafloor, False)
             out.append(done)
         return out
 
@@ -4288,22 +4321,98 @@ class RAM(PropagationModel):
                     UserWarning, skip_file_prefixes=USER_FRAME_SKIP
                 )
 
-    def _warn_on_dropped_absorption(self, env: Environment) -> None:
-        """No RAM backend consumes water-column volume attenuation; warn
-        loudly rather than silently producing a lossless water column."""
+    @staticmethod
+    def _water_attenuation_active(env: Environment) -> bool:
+        """Whether the deck carries a water-attenuation block: an absorption
+        model is set and is not the zero constant, which the block would
+        only spell out as a column of zeros."""
         absorption = env.absorption
         if absorption is None:
-            return
-        from uacpy.core.absorption import ConstantAbsorption
-        if (isinstance(absorption, ConstantAbsorption)
-                and absorption.value_dB_per_wavelength == 0.0):
-            return
-        warnings.warn(
-            f"RAM ignores env.absorption ({type(absorption).__name__}): no "
-            f"RAM backend models water-column volume attenuation. Use Bellhop "
-            f"or Kraken for volume-attenuation-sensitive runs.",
-            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
-        )
+            return False
+        return not (isinstance(absorption, ConstantAbsorption)
+                    and absorption.value_dB_per_wavelength == 0.0)
+
+    @staticmethod
+    def _water_attenuation_depths(env: Environment, zmax: float,
+                                  dz: Optional[float] = None) -> np.ndarray:
+        """Depths at which the water block samples ``alpha(z)``: the SSP's
+        breakpoints, 32 uniform intervals over the water column, the edges
+        of every biological layer, and the domain floor.
+
+        ``zread`` pins a pair to the node ``1.5 + z/dz`` and pushes a second
+        pair on the same node one node down (``ramgeo1.5.f:222-223``), so
+        with ``dz`` given the list is thinned to one point per depth cell;
+        the last kept value is held to the floor by ``zread`` itself.
+        """
+        zmax = float(zmax)
+        pts = {0.0, zmax}
+        pts.update(float(d) for d in np.atleast_1d(env.ssp.depths)
+                   if 0.0 <= float(d) <= zmax)
+        pts.update(np.linspace(0.0, min(float(env.depth), zmax), 33).tolist())
+        layers = getattr(env.absorption, 'as_at_tuples', None)
+        if layers is not None:
+            for layer in layers():
+                pts.update(float(v) for v in layer[:2]
+                           if 0.0 <= float(v) <= zmax)
+        depths = np.array(sorted(pts), dtype=float)
+        if dz is not None and float(dz) > 0.0:
+            kept = [depths[0]]
+            for z in depths[1:]:
+                if z - kept[-1] >= float(dz):
+                    kept.append(z)
+            depths = np.array(kept, dtype=float)
+        return depths
+
+    def _water_attenuation_block(self, env: Environment, freq: float,
+                                 ssp_pairs, zmax: float,
+                                 dz: Optional[float] = None) -> list:
+        """The water-attenuation block at one frequency: ``(depth, alpha)``
+        pairs in dB per wavelength at absolute geometric depth.
+
+        ``alpha[dB/λ] = alpha[dB/m](f, z) · c(z) / f`` — dB per *local*
+        wavelength, the unit the binaries apply through ``k(1 + iηβ)``
+        (Collins 1989; ``ramgeo1.5.f:199`` for the seabed, ``wattn`` for the
+        water). ``c(z)`` is the section's own profile, so a range-dependent
+        SSP gets its local wavelength. The Fortran never learns which law
+        produced the profile — Thorp, Francois-Garrison, a biological layer
+        stack or a constant all arrive as the same block.
+        """
+        depths = self._water_attenuation_depths(env, zmax, dz)
+        pairs = np.asarray([(float(d), float(c)) for d, c in ssp_pairs])
+        c = np.interp(depths, pairs[:, 0], pairs[:, 1])
+        alpha_m = np.atleast_1d(env.absorption.alpha_dB_per_m(float(freq),
+                                                              depths))
+        attw = alpha_m * c / float(freq)
+        return [(float(z), float(a)) for z, a in zip(depths, attw)]
+
+    def _write_mpirams_water_attenuation(self, env: Environment,
+                                         work_dir: Path, freq: float,
+                                         Q: float, T: float,
+                                         zmax_pe: float) -> str:
+        """Write mpiramS's water-attenuation table and return its name.
+
+        One column per bin of the ``(fc, Q, T)`` sweep the binary marches
+        (:meth:`_broadband_frequencies`; the binary refuses a column set that
+        does not match), each the block :meth:`_water_attenuation_block`
+        would give a Collins deck at that bin, on the r = 0 sound-speed
+        column — the table is range-independent, and the local wavelength
+        moves by under a percent across any SSP's range dependence. Depths
+        are written in the deck's frame (:meth:`_deck_depth`), which is the
+        grid ``wksqw`` interpolates onto.
+        """
+        frequencies = self._broadband_frequencies(float(freq), float(Q),
+                                                  float(T))
+        depths = self._water_attenuation_depths(env, zmax_pe)
+        c = self._ssp_column(env, 0.0, depths)
+        table = np.column_stack([
+            np.atleast_1d(env.absorption.alpha_dB_per_m(float(f), depths))
+            * c / float(f)
+            for f in frequencies
+        ])
+        name = 'water_attn.dat'
+        write_water_attenuation_file(work_dir / name, self._deck_depth(depths),
+                                     frequencies, table)
+        return name
 
     # Narrowest source aperture the auto-loosening below will fall back to.
     # Collins (1993) treats 30° as the standard wide-angle PE; under 15° the
@@ -5173,6 +5282,10 @@ class RAM(PropagationModel):
             self._prepare_bottom_properties(
                 env, work_dir, self._absorber_span(env, f_zmax, zmax_pe),
                 zmax_pe, dz=dz)
+        water_attn_filename = (
+            self._write_mpirams_water_attenuation(env, work_dir, freq, Q, T,
+                                                  zmax_pe)
+            if self._water_attenuation_active(env) else '')
 
         write_ranges_file(work_dir / 'ranges.dat', receiver.ranges)
 
@@ -5212,7 +5325,8 @@ class RAM(PropagationModel):
             attn=attn_arr,
             isedrd=isedrd,
             sed_filename=sed_filename,
-            c0_user=self._resolve_c0(env)
+            c0_user=self._resolve_c0(env),
+            water_attn_filename=water_attn_filename,
         )
 
         return zmax_pe

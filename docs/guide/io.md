@@ -1,6 +1,6 @@
 # File I/O — the layer between metres and the native formats
 
-> `uacpy.io` · 104 public names · every reader and writer the models run on
+> `uacpy.io` · 105 public names · every reader and writer the models run on
 
 Underneath the Python API, uacpy drives seven native solvers by writing text
 and binary files, launching a subprocess, and parsing what comes back. Each of
@@ -159,7 +159,10 @@ terminates them early, which triggers a *generated* vector (two values before
 the slash means equally spaced, one means replicated).
 `strip_fortran_comment`, `strip_fortran_quotes` and `read_vector` implement
 those rules so no reader has to re-derive them. The OASES `.dat` and RAM
-`ram.in` decks are plain fixed-layout text that uacpy only writes.
+`ram.in` decks are plain fixed-layout text that uacpy only writes (uacpy's
+build of the Collins codes accepts one extra `(z, attw)` block per section for
+`env.absorption`, announced by a fifth number on row 5 — see
+`third_party/MODIFICATIONS.md`).
 
 Every helper named in this section — `read_fortran_record`,
 `detect_endian`, `read_vector` and the string
@@ -353,6 +356,7 @@ and they do not share an input format.
 | bathymetry file | in | `write_bth_file` |
 | output-ranges file | in | `write_ranges_file` |
 | sediment file | in | `write_sediment_file` (range-dependent seabed) |
+| `water_attn.dat` | in | `write_water_attenuation_file` (depth × bin table of `env.absorption` in dB/wavelength; named on the last line of `in.pe`) |
 | `psif.dat` | out | read by `read_psif` |
 
 `psif.dat` is Fortran sequential unformatted, double precision throughout. Its
@@ -371,7 +375,7 @@ become `n_samples` and `c_min` — so a consumer can forward them straight into
 
 | File | Direction | Written by / read by |
 |---|---|---|
-| `rams.in` / `ram.in` / `ramgeo.in` | in | `write_ramin(..., kind='rams'\|'ramsurf'\|'ramgeo')` |
+| `rams.in` / `ram.in` / `ramgeo.in` | in | `write_ramin(..., kind='rams'\|'ramsurf'\|'ramgeo')`; `water_attn=` per segment adds the dB/wavelength block |
 | `tl.line` | out | `read_tl_line` — ranges (m) and TL (dB) at the single `zr_line` receiver depth (the RAM wrapper builds its `Field` from `tl.grid` / `pcomplex.bin`) |
 | `tl.grid` | out | `read_tl_grid` — Fortran sequential, real TL on the `(z, r)` grid |
 | `pcomplex.bin` | out | `read_pcomplex_grid` — **uacpy-patched**, the complex envelope |
@@ -669,6 +673,7 @@ The 16 remaining names in `__all__` are the submodules themselves.
 | `write_bth_file` | mpiramS bathymetry, `range(m) depth(m)` pairs |
 | `write_ranges_file` | mpiramS output ranges (m) |
 | `write_sediment_file` | mpiramS range-dependent sediment profiles (range axis m → km) |
+| `write_water_attenuation_file` | mpiramS water-column attenuation table, depths × sweep bins in dB/wavelength |
 | `read_psif` | mpiramS `psif.dat` → `psif` of shape `(nzo, nf, nr)`; takes the containing **directory**, not the file |
 | `write_ramin` | Collins `ram.in` / `rams.in` / `ramgeo.in` (metres) |
 | `read_tl_line` | `tl.line` → ranges (m), TL (dB) at the single `zr_line` receiver depth |

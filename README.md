@@ -520,7 +520,7 @@ when redistributing or modifying UACPY or its outputs.
 |----------------------------|------------------------------------|--------------------------------------------------|--------------------------------------------------|
 | UACPY wrapper              | this repository                    | source + Python package                          | GPL-3.0                                          |
 | Acoustics Toolbox (Porter) | `uacpy/third_party/Acoustics-Toolbox/`   | vendored Fortran sources, **modified**           | GPL-3.0                                          |
-| bellhopcuda (Schmid et al.)| `uacpy/third_party/bellhopcuda/`         | git submodule pinned to upstream `v1.5`, unmodified | GPL-3.0                                       |
+| bellhopcuda (Schmid et al.)| `uacpy/third_party/bellhopcuda/`         | git submodule pinned to uacpy's fork (`ErVuL/bellhopcuda`): upstream `v1.5` + the Francois-Garrison fix in `MODIFICATIONS.md` | GPL-3.0                                       |
 | mpiramS (Dushaw)           | `uacpy/third_party/mpiramS/`             | vendored Fortran sources, **modified**           | Creative Commons Attribution 4.0 International   |
 | ramsurf (Calvo / Quiet Oceans) | `uacpy/third_party/ramsurf/`         | vendored Fortran sources, **modified**           | BSD-3-Clause |
 | ramgeo (Collins, NRL)      | `uacpy/third_party/ramgeo/`              | vendored Fortran source, **modified**            | Public domain (U.S. Government work, no explicit licence) |

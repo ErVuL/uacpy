@@ -82,6 +82,7 @@ tl.plot(env=env, source=source)
 | `surface` | ❌ | free (pressure-release) surface |
 | `altimetry` | ❌ | flat sea surface |
 | `absorption` | ❌ (`with_absorption=True`) | the model's default Thorp |
+| `water_density` | with `with_absorption=True` (same T/S row, IES-80) | 1.027 g/cm³ |
 
 **Bathymetry and sound speed are mandatory axes**, so with neither a literal
 nor a `*_sources` list they are fetched from the default chains. The seabed,
@@ -293,6 +294,8 @@ env.absorption      # FrancoisGarrison built from the T/S row nearest the
                     # column, with its cold deep temperature, not the surface
 ```
 
+The same row sets `env.water_density` (IES-80 at that T and S), which every
+deck's water column carries — see [Conventions](environment.md#8-conventions-and-gotchas).
 One extra T/S request builds a site-specific `FrancoisGarrison` instead of the
 model-default Thorp, with pH from the cached GLODAP grid when installed and 8.1
 otherwise (a fetched pH is declared `ph_scale='total'` and converted to the

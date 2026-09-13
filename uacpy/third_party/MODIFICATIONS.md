@@ -184,6 +184,57 @@ Building this tree outside uacpy requires passing `FFLAGS=` explicitly.
 
 ---
 
+## bellhopcuda (C++ / CUDA port of Bellhop)
+
+A git **submodule** at `third_party/bellhopcuda/`. Upstream is
+`A-New-BellHope/bellhopcuda`; uacpy pins the submodule (and
+`install.sh`'s `BELLHOPCUDA_COMMIT_SHA`) to a commit on its **fork**
+`ErVuL/bellhopcuda` — `e9f464a7`, upstream `v1.5` (`b396d40b`, plus one
+README-only commit) with the fix below committed on top — because a
+submodule's working tree is not carried by uacpy's commits. The fix is
+offered upstream as a pull request from that fork; the entries below record
+what the fork commit changes. `bellhopcxx*` and `bellhopcuda*` are built from the
+same sources, and `Bellhop(backend=None)` prefers them over the Fortran
+binary. The blocks below are text rather than `diff` fences on purpose: the
+ledger's diff gate compares `+` lines against the working tree, which is
+whatever commit the submodule is checked out at.
+
+### `src/module/atten.cpp` -- Francois-Garrison boric-acid relaxation frequency
+
+The port transcribes `Franc_Garr` from `misc/AttenMod.f90:141-171` with one
+slip: the boric-acid relaxation frequency `f1 = 2.8 sqrt(S/35) 10^(4 - 1245/(T+273))`
+kHz (Francois & Garrison, JASA 72, 1879 (1982), Part II, Eq. 7 — their Fig. 2
+caption defines it as the best-fit line in θ = T + 273; the equation is
+printed in full in Medwin & Clay, *Fundamentals of Acoustical Oceanography*,
+§3.4 "Boric Acid Component in Sea Water", p. 110) was written with base `1.0`
+instead of `10.0`, so `f1` came out as a constant
+2.8 kHz (1.12 kHz at 10 °C in the original) and the boric-acid term roughly
+doubled. Found (2026-09-13) as a cross-engine disagreement: on a 100 m Pekeris
+guide at 5 kHz the port's Francois-Garrison loss increment was 1.34 x Kraken's
+and the Fortran Bellhop's for a byte-identical deck, while its Thorp increment
+matched them exactly. The excess it predicts — 0.146 / 0.111 / 0.071 dB/km at
+0 / 10 / 20 °C and 0.018 dB/km at pH 7 — reproduces the measured 0.150 / 0.114 /
+0.073 / 0.019 dB/km. An instrumented Fortran build confirmed both Fortran
+programs compute the same coefficient (3.7226e-5 Np/m, the closed-form value).
+
+```text
+-        * STD::pow(FL(1.0), FL(4.0) - FL(1245.0) / (atten->t + FL(273.0)));
++        * STD::pow(FL(10.0), FL(4.0) - FL(1245.0) / (atten->t + FL(273.0)));
+```
+
+### `src/module/topopt.hpp` -- `z_bar` echo
+
+The print-file line for the Francois-Garrison parameters wrote the label and
+the field width but not the value, so `z_bar` echoed as a blank field (the
+lead that pointed at the port).
+
+```text
+-                    << " z_bar = " << std::setw(11) << " m\n";
++                    << " z_bar = " << std::setw(11) << atten->z_bar << " m\n";
+```
+
+---
+
 ## ramsurf (Collins-style RAM family)
 
 Vendored from https://github.com/quiet-oceans/ramsurf — BSD-3
@@ -391,6 +442,245 @@ rotation counter read at `:1215-1218`), for the same reason; measured
 `tl.line` shift 3.5e-12 dB between pre- and post-patch builds. See the
 ramgeo section for the full entry.
 
+### Water-column attenuation block — `ramsurf1.5.f`
+
+Collins' codes assume a lossless water column (RAM guide: *"In the water
+column, the density is assigned the value 1 g/cc and the attenuation is assumed
+to vanish"*), while the seabed's loss enters through the complex wavenumber
+`k(1 + iηβ)`, β in dB/wavelength, `η = 1/(40π log10 e)` (Collins 1989). The
+patch applies the same factor to the water wavenumber from one more profile
+block per section — `z attw` in dB/wavelength, read right after the attenuation
+block(s) — announced by a **fifth number** on the `c0 np ns rs` row
+(`c0 np irot theta` on rams0.5). `uacpyh` reads that row as a string and tries
+five items, falling back to four, so a stock four-number deck reads exactly as
+before; a list-directed five-item read would have swallowed the next line.
+`attw` lives in a `COMMON` block zeroed by a `BLOCK DATA` unit, so no argument
+list moves; every edit above the new procedures replaces a line in place (a
+blank `c` line or a declaration), so **no citation into the file shifts**.
+`wattn` recomputes the water rows only when `iattw=1`; with no block the
+original statement runs untouched, and a rebuilt binary given a stock deck
+reproduces the pre-patch binary's `tl.grid` / `pcomplex.bin` / `tl.line`
+**byte for byte** (measured on the upstream sample decks for all three codes).
+A block of zeros reproduces them byte for byte on ramgeo and rams and to
+1.6e-9 dB on ramsurf, where the complex square rounds differently from the
+real one under FMA contraction. A 0.5 dB/wavelength water column (167
+wavelengths over the ramgeo sample's 10 km) costs 61 dB at 10 km where the
+plane wave predicts 83 — the remainder travels in the less lossy seabed; over
+the first kilometre of the mpiramS sample, where the seabed has no such
+shortcut, 25.2 dB against 25.0 predicted.
+
+`ramsurf1.5.f` already carried `ksqw` complex; `rams0.5.f` holds the water as
+a Lamé constant `lamw = cw²`, which becomes `(cw/(1 + iηβ))²` — the form its
+own `lamb` uses for the seabed — so `lamw` is promoted to complex in every
+routine that declares it (all in place).
+
+```diff
+@@ -77,7 +77,7 @@
+       read(1,*)freq,zs,zr
+       read(1,*)rmax,dr,ndr
+       read(1,*)zmax,dz,ndz,zmplt
+-      read(1,*)c0,np,ns,rs
++      call uacpyh(c0,np,ns,rs)
+ c
+       i=1
+     1 read(1,*)rsrf(i),zsrf(i)
+@@ -171,12 +171,12 @@
+      >   attn,alpw,alpb,ksqw,ksqb)
+       complex ci,ksqb(mz),ksqw(mz)
+       real k0,cw(mz),cb(mz),rhob(mz),attn(mz),alpw(mz),alpb(mz)
+-c
++      common /uacpyw/ iattw,attw(20002)
+       call zread(mz,nz,dz,cw)
+       call zread(mz,nz,dz,cb)
+       call zread(mz,nz,dz,rhob)
+       call zread(mz,nz,dz,attn)
+-      rp=2.0*rmax
++      if(iattw.eq.1)call zread(mz,nz,dz,attw); rp=2.0*rmax
+       read(1,*,end=1)rp
+ c
+     1 do 2 i=1,nz+2
+@@ -185,7 +185,7 @@
+       alpw(i)=sqrt(cw(i)/c0)
+       alpb(i)=sqrt(rhob(i)*cb(i)/c0)
+     2 continue
+-c
++      if(iattw.eq.1)call wattn(mz,nz,ci,eta,omega,k0,cw,ksqw)
+       return
+       end
+ c
+@@ -786,3 +786,35 @@
+ c
+       return
+       end
++c
++c     UACPY: optional water-column attenuation block (dB/wavelength).
++c     Row 5 may carry a fifth number iattw; a stock four-number row reads
++c     as before (the five-item internal read fails and iattw stays 0).
++c     With iattw=1 every profile section carries one more zread block
++c     after the attenuation block, applied to the water wavenumber the
++c     way attn is applied to the bottom's (Collins 1989).
++c
++      subroutine uacpyh(c0,np,n3,x4)
++      character*256 line
++      common /uacpyw/ iattw,attw(20002)
++      read(1,'(a)')line
++      read(line,*,iostat=ios)c0,np,n3,x4,iattw
++      if(ios.ne.0)iattw=0
++      if(ios.ne.0)read(line,*)c0,np,n3,x4
++      return
++      end
++c
++      subroutine wattn(mz,nz,ci,eta,omega,k0,cw,ksqw)
++      complex ci,ksqw(mz)
++      real k0,cw(mz)
++      common /uacpyw/ iattw,attw(20002)
++      do 1 i=1,nz+2
++      ksqw(i)=((omega/cw(i))*(1.0+ci*eta*attw(i)))**2-k0**2
++    1 continue
++      return
++      end
++c
++      block data uacpyw0
++      common /uacpyw/ iattw,attw(20002)
++      data iattw/0/,attw/20002*0.0/
++      end
+```
+
+### Water-column attenuation block — `rams0.5.f`
+
+The same block and header rule as `ramsurf1.5.f` above, on the elastic code
+(`lamw` promoted to complex, see there).
+
+```diff
+@@ -40,8 +40,8 @@
+ c     Research Centre. 
+ c
+       complex ci,lamb,mub,u,v,r1,r2,r3,r4,r5,r6,r7,s1,s2,s3,s4,s5,s6,
+-     >   s7,t1,t2,t3,t4,t5,t6,t7,pd1,pd2,g0
+-      real k0,lamw
++     >   s7,t1,t2,t3,t4,t5,t6,t7,pd1,pd2,g0,lamw
++      real k0
+ c
+ c     mr=bathymetry points, mz=depth grid, mp=pade terms.
+ c
+@@ -100,13 +100,13 @@
+      >   t1(6,mp),t2(6,mp),t3(6,mp),t4(6,mp),t5(6,mp),t6(6,mp),
+      >   t7(6,mp),pd1(mp),pd2(mp),nu
+       real k0,rb(mr),zb(mr),cw(mz),cp(mz),cs(mz),rhob(mz),attnp(mz),
+-     >   attns(mz),lamw(mz),tlg(mz)
+-c
++     >   attns(mz),tlg(mz)
++      complex lamw(mz)
+       read(1,*)
+       read(1,*)freq,zs,zr
+       read(1,*)rmax,dr,ndr
+       read(1,*)zmax,dz,ndz,zmplt
+-      read(1,*)c0,np,irot,theta
++      call uacpyh(c0,np,irot,theta)
+ c
+       i=1
+     1 read(1,*)rb(i),zb(i)
+@@ -185,16 +185,16 @@
+ c
+       subroutine profl(mz,nz,ci,dz,eta,omega,rmax,rp,cw,cp,cs,rhob,
+      >   attnp,attns,lamw,lamb,mub)
+-      complex ci,mub(mz),lamb(mz)
+-      real cw(mz),cp(mz),cs(mz),rhob(mz),attnp(mz),attns(mz),lamw(mz)
+-c
++      complex ci,mub(mz),lamb(mz),lamw(mz)
++      real cw(mz),cp(mz),cs(mz),rhob(mz),attnp(mz),attns(mz)
++      common /uacpyw/ iattw,attw(40004)
+       call zread(mz,nz,dz,cw)
+       call zread(mz,nz,dz,cp)
+       call zread(mz,nz,dz,cs)
+       call zread(mz,nz,dz,rhob)
+       call zread(mz,nz,dz,attnp)
+       call zread(mz,nz,dz,attns)
+-      rp=2.0*rmax
++      if(iattw.eq.1)call zread(mz,nz,dz,attw); rp=2.0*rmax
+       read(1,*,end=1)rp
+ c
+     1 do 2 i=1,nz+2
+@@ -203,7 +203,7 @@
+      >   2.0*(cs(i)/(1.0+ci*eta*attns(i)))**2)
+       mub(i)=rhob(i)*(cs(i)/(1.0+ci*eta*attns(i)))**2
+     2 continue
+-c
++      if(iattw.eq.1)call wattn(mz,nz,ci,eta,cw,lamw)
+       return
+       end
+ c
+@@ -296,8 +296,8 @@
+      >   t2(6,mp),t3(6,mp),t4(6,mp),t5(6,mp),t6(6,mp),t7(6,mp),pd1(mp),
+      >   pd2(mp)
+       real k0,rb(mr),zb(mr),cw(mz),cp(mz),cs(mz),rhob(mz),attnp(mz),
+-     >   attns(mz),lamw(mz)
+-c
++     >   attns(mz)
++      complex lamw(mz)
+ c     Varying bathymetry.
+ c
+       jz=iz
+@@ -350,8 +350,8 @@
+      >   s2(mz,mp),s3(mz,mp),s4(mz,mp),s5(mz,mp),s6(mz,mp),s7(mz,mp),
+      >   t1(6,mp),t2(6,mp),t3(6,mp),t4(6,mp),t5(6,mp),t6(6,mp),
+      >   t7(6,mp),pd1(mp),pd2(mp),nu
+-      real k0,rhob(mz),lamw(mz)
+-c
++      real k0,rhob(mz)
++      complex lamw(mz)
+ c     Conditions for the delta function.
+ c
+       si=1.0+zs/dz
+@@ -396,8 +396,8 @@
+      >   s1(mz,mp),s2(mz,mp),s3(mz,mp),s4(mz,mp),s5(mz,mp),s6(mz,mp),
+      >   s7(mz,mp),t1(6,mp),t2(6,mp),t3(6,mp),t4(6,mp),t5(6,mp),
+      >   t6(6,mp),t7(6,mp),pd1(mp),pd2(mp)
+-      real k0,rhob(mz),lamw(mz)
+-c
++      real k0,rhob(mz)
++      complex lamw(mz)
+ c     New matrices when iz.eq.jz.
+ c
+       if(iz.eq.jz)then
+@@ -1231,3 +1231,35 @@
+ c
+       return
+       end
++c
++c     UACPY: optional water-column attenuation block (dB/wavelength).
++c     Row 5 may carry a fifth number iattw; a stock four-number row reads
++c     as before (the five-item internal read fails and iattw stays 0).
++c     With iattw=1 every profile section carries one more zread block
++c     after the attenuation block, applied to the water wavenumber the
++c     way attn is applied to the bottom's (Collins 1989).
++c
++      subroutine uacpyh(c0,np,n3,x4)
++      character*256 line
++      common /uacpyw/ iattw,attw(40004)
++      read(1,'(a)')line
++      read(line,*,iostat=ios)c0,np,n3,x4,iattw
++      if(ios.ne.0)iattw=0
++      if(ios.ne.0)read(line,*)c0,np,n3,x4
++      return
++      end
++c
++      subroutine wattn(mz,nz,ci,eta,cw,lamw)
++      complex ci,lamw(mz)
++      real cw(mz)
++      common /uacpyw/ iattw,attw(40004)
++      do 1 i=1,nz+2
++      lamw(i)=(cw(i)/(1.0+ci*eta*attw(i)))**2
++    1 continue
++      return
++      end
++c
++      block data uacpyw0
++      common /uacpyw/ iattw,attw(40004)
++      data iattw/0/,attw/40004*0.0/
++      end
+```
+
 ### Build system
 
 uacpy supplies a minimal `Makefile` (`gfortran -O2 -std=legacy -w`) that
@@ -494,6 +784,165 @@ Measured on a 100 Hz, 2 km, `dz=0.5` layered deck, builds from the pre-patch
 and post-patch sources with the same flags: `tl.line` moves by at most
 4.1e-12 dB. Same patch, same measurement (3.5e-12 dB), in `rams0.5.f`
 (`rams0.5.f:1181`, see the ramsurf section).
+
+### Water-column attenuation block — `ramgeo1.5.f`
+
+Collins' codes assume a lossless water column (RAM guide: *"In the water
+column, the density is assigned the value 1 g/cc and the attenuation is assumed
+to vanish"*), while the seabed's loss enters through the complex wavenumber
+`k(1 + iηβ)`, β in dB/wavelength, `η = 1/(40π log10 e)` (Collins 1989). The
+patch applies the same factor to the water wavenumber from one more profile
+block per section — `z attw` in dB/wavelength, read right after the attenuation
+block(s) — announced by a **fifth number** on the `c0 np ns rs` row
+(`c0 np irot theta` on rams0.5). `uacpyh` reads that row as a string and tries
+five items, falling back to four, so a stock four-number deck reads exactly as
+before; a list-directed five-item read would have swallowed the next line.
+`attw` lives in a `COMMON` block zeroed by a `BLOCK DATA` unit, so no argument
+list moves; every edit above the new procedures replaces a line in place (a
+blank `c` line or a declaration), so **no citation into the file shifts**.
+`wattn` recomputes the water rows only when `iattw=1`; with no block the
+original statement runs untouched, and a rebuilt binary given a stock deck
+reproduces the pre-patch binary's `tl.grid` / `pcomplex.bin` / `tl.line`
+**byte for byte** (measured on the upstream sample decks for all three codes).
+A block of zeros reproduces them byte for byte on ramgeo and rams and to
+1.6e-9 dB on ramsurf, where the complex square rounds differently from the
+real one under FMA contraction. A 0.5 dB/wavelength water column (167
+wavelengths over the ramgeo sample's 10 km) costs 61 dB at 10 km where the
+plane wave predicts 83 — the remainder travels in the less lossy seabed; over
+the first kilometre of the mpiramS sample, where the seabed has no such
+shortcut, 25.2 dB against 25.0 predicted.
+
+`ksqw` was real in every routine of RAMGEO; it is promoted to complex in place
+(the main program, `setup`, `profl`, `matrc`, `updat`, `selfs`), which changes
+no value — `matrc` copies it into the complex `ksq` either way.
+
+```diff
+@@ -46,8 +46,8 @@
+ c     improvement was suggested by Ed McDonald of the SACLANT Undersea
+ c     Research Centre. 
+ c
+-      complex ci,ksq,ksqb,u,v,r1,r2,r3,s1,s2,s3,pd1,pd2
+-      real k0,ksqw
++      complex ci,ksq,ksqb,u,v,r1,r2,r3,s1,s2,s3,pd1,pd2,ksqw
++      real k0
+ c
+ c     mr=bathymetry points, mz=depth grid, mp=pade terms.
+ c
+@@ -99,13 +99,13 @@
+       complex ci,u(mz),v(mz),ksq(mz),ksqb(mz),r1(mz,mp),r2(mz,mp),
+      >   r3(mz,mp),s1(mz,mp),s2(mz,mp),s3(mz,mp),pd1(mp),pd2(mp)
+       real k0,rb(mr),zb(mr),cw(mz),cb(mz),rhob(mz),attn(mz),alpw(mz),
+-     >   alpb(mz),f1(mz),f2(mz),f3(mz),ksqw(mz),tlg(mz)
+-c
++     >   alpb(mz),f1(mz),f2(mz),f3(mz),tlg(mz)
++      complex ksqw(mz)
+       read(1,*)
+       read(1,*)freq,zs,zr
+       read(1,*)rmax,dr,ndr
+       read(1,*)zmax,dz,ndz,zmplt
+-      read(1,*)c0,np,ns,rs
++      call uacpyh(c0,np,ns,rs)
+ c
+       i=1
+     1 read(1,*)rb(i),zb(i)
+@@ -184,14 +184,14 @@
+ c
+       subroutine profl(mz,nz,ci,dz,eta,omega,rmax,c0,k0,rp,cw,cb,rhob,
+      >   attn,alpw,alpb,ksqw,ksqb)
+-      complex ci,ksqb(mz)
+-      real k0,cw(mz),cb(mz),rhob(mz),attn(mz),alpw(mz),alpb(mz),ksqw(mz)
+-c
++      complex ci,ksqb(mz),ksqw(mz)
++      real k0,cw(mz),cb(mz),rhob(mz),attn(mz),alpw(mz),alpb(mz)
++      common /uacpyw/ iattw,attw(20002)
+       call zread(mz,nz,dz,cw)
+       call zread(mz,nz,dz,cb)
+       call zread(mz,nz,dz,rhob)
+       call zread(mz,nz,dz,attn)
+-      rp=2.0*rmax
++      if(iattw.eq.1)call zread(mz,nz,dz,attw); rp=2.0*rmax
+       read(1,*,end=1)rp
+ c
+     1 do 2 i=1,nz+2
+@@ -200,7 +200,7 @@
+       alpw(i)=sqrt(cw(i)/c0)
+       alpb(i)=sqrt(rhob(i)*cb(i)/c0)
+     2 continue
+-c
++      if(iattw.eq.1)call wattn(mz,nz,ci,eta,omega,k0,cw,ksqw)
+       return
+       end
+ c
+@@ -245,8 +245,8 @@
+      >   ksqb,f1,f2,f3,r1,r2,r3,s1,s2,s3,pd1,pd2)
+       complex d1,d2,d3,rfact,ksq(mz),ksqb(mz),r1(mz,mp),r2(mz,mp),
+      >   r3(mz,mp),s1(mz,mp),s2(mz,mp),s3(mz,mp),pd1(mp),pd2(mp)
+-      real k0,rhob(mz),f1(mz),f2(mz),f3(mz),alpw(mz),alpb(mz),ksqw(mz)
+-c
++      real k0,rhob(mz),f1(mz),f2(mz),f3(mz),alpw(mz),alpb(mz)
++      complex ksqw(mz)
+       a1=k0**2/6.0
+       a2=2.0*k0**2/3.0
+       a3=k0**2/6.0
+@@ -339,8 +339,8 @@
+      >   ci,r,rp,rs,rb,zb,cw,cb,rhob,attn,alpw,alpb,ksq,ksqw,ksqb,f1,f2,
+      >   f3,r1,r2,r3,s1,s2,s3,pd1,pd2)
+       complex ci,ksq(mz),ksqb(mz),r1(mz,mp),r2(mz,mp),r3(mz,mp),
+-     >   s1(mz,mp),s2(mz,mp),s3(mz,mp),pd1(mp),pd2(mp)
+-      real k0,rb(mr),zb(mr),attn(mz),cb(mz),rhob(mz),cw(mz),ksqw(mz),
++     >   s1(mz,mp),s2(mz,mp),s3(mz,mp),pd1(mp),pd2(mp),ksqw(mz)
++      real k0,rb(mr),zb(mr),attn(mz),cb(mz),rhob(mz),cw(mz),
+      >   f1(mz),f2(mz),f3(mz),alpw(mz),alpb(mz)
+ c
+ c     Varying bathymetry.
+@@ -382,8 +382,8 @@
+      >   alpb,ksq,ksqw,ksqb,f1,f2,f3,u,v,r1,r2,r3,s1,s2,s3,pd1,pd2)
+       complex u(mz),v(mz),ksq(mz),ksqb(mz),r1(mz,mp),r2(mz,mp),
+      >   r3(mz,mp),s1(mz,mp),s2(mz,mp),s3(mz,mp),pd1(mp),pd2(mp)
+-      real k0,rhob(mz),alpw(mz),alpb(mz),f1(mz),f2(mz),f3(mz),ksqw(mz)
+-c
++      real k0,rhob(mz),alpw(mz),alpb(mz),f1(mz),f2(mz),f3(mz)
++      complex ksqw(mz)
+ c     Conditions for the delta function.
+ c
+       si=1.0+zs/dz
+@@ -775,3 +775,35 @@
+ c
+       return
+       end
++c
++c     UACPY: optional water-column attenuation block (dB/wavelength).
++c     Row 5 may carry a fifth number iattw; a stock four-number row reads
++c     as before (the five-item internal read fails and iattw stays 0).
++c     With iattw=1 every profile section carries one more zread block
++c     after the attenuation block, applied to the water wavenumber the
++c     way attn is applied to the bottom's (Collins 1989).
++c
++      subroutine uacpyh(c0,np,n3,x4)
++      character*256 line
++      common /uacpyw/ iattw,attw(20002)
++      read(1,'(a)')line
++      read(line,*,iostat=ios)c0,np,n3,x4,iattw
++      if(ios.ne.0)iattw=0
++      if(ios.ne.0)read(line,*)c0,np,n3,x4
++      return
++      end
++c
++      subroutine wattn(mz,nz,ci,eta,omega,k0,cw,ksqw)
++      complex ci,ksqw(mz)
++      real k0,cw(mz)
++      common /uacpyw/ iattw,attw(20002)
++      do 1 i=1,nz+2
++      ksqw(i)=((omega/cw(i))*(1.0+ci*eta*attw(i)))**2-k0**2
++    1 continue
++      return
++      end
++c
++      block data uacpyw0
++      common /uacpyw/ iattw,attw(20002)
++      data iattw/0/,attw/20002*0.0/
++      end
+```
 
 ---
 
@@ -1673,6 +2122,219 @@ still reads the upstream fixed-format `in.pe` (single receiver range,
 node-weighting lines) that the I/O rewrite above replaced. It is
 retained as an upstream reference only; making it buildable would mean
 porting the whole I/O rewrite onto a code path uacpy never invokes.
+
+### Water-column attenuation table — `src/envdata.f90`
+
+mpiramS marches every bin of the `(fc, Q, T)` sweep from one deck, so its
+water attenuation is a **depth × frequency table** rather than a profile:
+`in.pe` may end with one more line naming the file (a deck that ends with the
+sediment block reads as before — the extra read hits end-of-file), laid out as
+`nzaw nfaw`, a row of the bin frequencies, then `z attw(z, f1) … attw(z, fnf)`
+per depth in dB/wavelength (`uacpy.io.mpirams_writer.write_water_attenuation_file`).
+`read_wattn` replaces the two `close(nunit)` calls that ended the sediment
+section (in place), reads the optional line, and loads the table into
+`envdata`; `wksqw` (end of `ram.f90`), called from the blank line after
+`profl`'s two update blocks, picks the column whose frequency matches the
+marched bin (stopping if none is within 1e-7), interpolates it linearly onto
+the depth grid, and recomputes `ksqw` as `((ω/cw)(1 + iηβ))² − k0²` — the
+seabed's form at `ram.f90:361`. `ksqw` moves from the real to the complex
+declaration in `profiles.f90`; `matrc.f90:47` copies it into the complex `ksq`
+either way. With no table the original real statement runs and the field
+moves by at most 1.1e-16 (2e-14 of the field maximum on the sample deck) —
+the compiler's code path through the now-complex array, not the physics; a
+table of zeros lands within the same 1e-16. A 0.5 dB/wavelength table costs
+25.2 dB over the sample's first kilometre against 25.0 predicted.
+
+The bin frequencies the wrapper writes come from the same formula the driver
+uses (`peramx.f90:353-379`, reproduced by `RAM._broadband_frequencies`), so a
+mismatch is a wrapper bug and the binary says so rather than picking a
+neighbour.
+
+```diff
+@@ -23,6 +23,14 @@
+ real(kind=wp),dimension(:),   allocatable :: rp_sed        ! sediment range points (m)
+ real(kind=wp),dimension(:,:), allocatable :: cs,rho,attn   ! bottom properties (nzs, nrp_sed)
+ 
++! UACPY: optional water-column attenuation table, attw(nzaw,nfaw) in
++! dB/wavelength at depths zaw(nzaw) and bin frequencies faw(nfaw);
++! iattw=0 (no table read) leaves the water column lossless as stock.
++integer :: iattw = 0
++integer :: nzaw, nfaw
++real(kind=wp),dimension(:),  allocatable :: zaw, faw
++real(kind=wp),dimension(:,:),allocatable :: attw
++
+ end module envdata
+ 
+ 
+```
+
+### Water-column attenuation table — `src/profiles.f90`
+
+`ksqw` moves to the complex declaration (see `src/envdata.f90` above).
+
+```diff
+@@ -2,8 +2,8 @@
+ 
+    use kinds
+ 
+-   real(kind=wp),dimension(:),allocatable :: cwg, rhob, alpw, alpb, ksqw
+-   complex(kind=wp),dimension(:),allocatable :: ksqb, pdu, pdl
++   real(kind=wp),dimension(:),allocatable :: cwg, rhob, alpw, alpb
++   complex(kind=wp),dimension(:),allocatable :: ksqb, pdu, pdl, ksqw
+ 
+ !$OMP THREADPRIVATE (pdu,pdl,cwg,rhob,alpw,alpb,ksqw,ksqb)
+ 
+```
+
+### Water-column attenuation table — `src/peramx.f90`
+
+`read_wattn` replaces the two `close(nunit)` that ended the sediment section
+and is appended after `end program` (see `src/envdata.f90` above).
+
+```diff
+@@ -116,7 +116,7 @@
+    rho(:,1) = 1.2_wp
+    attn(:,1)= 0.5_wp
+ 
+-   close(nunit)
++   call read_wattn(nunit)
+ 
+    ! Read sediment profile file (same format as SSP: "-1 range_km" headers)
+    print *,'Reading sediment file: ', trim(name4)
+@@ -151,7 +151,7 @@
+    read (nunit,*) (cs(jj,1), jj=1,nzs)
+    read (nunit,*) (rho(jj,1), jj=1,nzs)
+    read (nunit,*) (attn(jj,1), jj=1,nzs)
+-   close(nunit)
++   call read_wattn(nunit)
+ end if
+ 
+ ! Read output ranges from file
+@@ -541,3 +541,49 @@
+ 
+ end program peramx
+ 
++
++!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
++! UACPY: the optional water-column attenuation table. in.pe may carry one
++! more line after the sediment block naming a file; a deck that ends with
++! the sediment block reads as before (the read hits end-of-file and the
++! water column stays lossless). File layout, list-directed:
++!   nzaw nfaw
++!   faw(1) ... faw(nfaw)                  bin frequencies (Hz)
++!   zaw(i) attw(i,1) ... attw(i,nfaw)     one row per depth, dB/wavelength
++! The frequencies are checked against the marched bin in wksqw (ram.f90).
++
++subroutine read_wattn(nunit)
++
++use kinds
++use envdata
++
++implicit none
++
++integer, intent(in) :: nunit
++integer :: ios, ii, jj
++character(len=256) :: name5
++
++iattw=0
++read(nunit,'(a)',iostat=ios) name5
++close(nunit)
++if (ios/=0) return
++name5=trim(adjustl(name5))
++if (len_trim(name5)==0) return
++
++open(nunit,file=name5,status='old')
++read(nunit,*) nzaw, nfaw
++if (nzaw<1 .or. nfaw<1) then
++   print *,'ERROR: water attenuation table needs nzaw>=1 and nfaw>=1; got ', nzaw, nfaw
++   stop 1
++end if
++allocate(zaw(nzaw), faw(nfaw), attw(nzaw,nfaw))
++read(nunit,*) (faw(jj), jj=1,nfaw)
++do ii=1,nzaw
++   read(nunit,*) zaw(ii), (attw(ii,jj), jj=1,nfaw)
++end do
++close(nunit)
++iattw=1
++print '(a,a,a,i5,a,i5,a)','Water attenuation table: ', trim(name5), &
++      ' (', nzaw, ' depths x ', nfaw, ' frequencies)'
++
++end subroutine read_wattn
+```
+
+### Water-column attenuation table — `src/ram.f90`
+
+`wksqw`, called from the blank line after `profl`'s update blocks (see
+`src/envdata.f90` above).
+
+```diff
+@@ -362,7 +362,7 @@
+     forall(ii=1:n) alpb(ii)=sqrt(rhob(ii)*csg(ii)*ic0)
+     deallocate(csg,attng)
+   end if
+-
++  if (iattw==1 .and. (iflag==2.or.iflag==3)) call wksqw(omega)
+   !csg=cwg.*sqrt(1+(eta*attng).^2)./(1+ci*eta*attng);
+   !ksqb=((omega./csg)).^2-(omega/c0)^2;
+   !alpb=sqrt(rhob.*abs(csg)/c0);
+@@ -475,3 +475,56 @@
+ end function gorp2
+ 
+ end subroutine ram
++
++!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
++! UACPY: water wavenumber with the volume attenuation of the marched bin,
++! ksqw = ((omega/cw)(1 + i*eta*attw))^2 - k0^2 -- the sediment's form
++! (profl above) applied to the water column. attw is the table column
++! whose frequency matches omega, interpolated linearly onto the depth grid
++! and held constant beyond the table's ends.
++
++subroutine wksqw(omega)
++
++use kinds
++use envdata
++use param
++use profiles
++
++implicit none
++
++real(kind=wp), intent(in) :: omega
++real(kind=wp), parameter :: eta=0.018323389971986_wp
++complex(kind=wp), parameter :: ci=cmplx(0.0_wp, 1.0_wp, wp)
++integer :: ib0(1), ib, ii, jj, n
++real(kind=wp) :: f, w
++real(kind=wp), dimension(:), allocatable :: attwg
++
++f=omega/(2.0_wp*pi)
++ib0=minloc(abs(faw-f)); ib=ib0(1)
++if (abs(faw(ib)-f) > 1.0e-7_wp*f) then
++   print *,'ERROR: water attenuation table has no column at ', f, &
++           ' Hz; nearest is ', faw(ib), ' Hz'
++   stop 1
++end if
++
++n=size(zg)
++allocate(attwg(n))
++do ii=1,n
++   if (zg(ii)<=zaw(1)) then
++      attwg(ii)=attw(1,ib)
++   else if (zg(ii)>=zaw(nzaw)) then
++      attwg(ii)=attw(nzaw,ib)
++   else
++      jj=1
++      do while (zaw(jj+1)<zg(ii))
++         jj=jj+1
++      end do
++      w=(zg(ii)-zaw(jj))/(zaw(jj+1)-zaw(jj))
++      attwg(ii)=attw(jj,ib)+w*(attw(jj+1,ib)-attw(jj,ib))
++   end if
++end do
++forall(ii=1:n) ksqw(ii)=((omega/cwg(ii))*(1.0_wp+ci*eta*attwg(ii)))**2 &
++                        -(omega*ic0)**2
++deallocate(attwg)
++
++end subroutine wksqw
+```
 
 ### `in.pe` / `ranges.dat` -- sample deck in the current input format
 

@@ -319,6 +319,7 @@ def segment_environment_by_range(
             bottom=bottom_segment,
             surface=env.surface,
             absorption=env.absorption,
+            water_density=env.water_density,
         )
 
         segments.append((r, env_segment))

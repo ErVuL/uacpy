@@ -1341,8 +1341,10 @@ class TestSedimentOffsetsFollowTheSeafloorBetweenBottomBreaks:
     def _env():
         # 100 → 200 m slope under a 0.1 s⁻¹ downward-refracting gradient, on
         # a half-space that steps from 1600 to 1700 m/s at 3 km.
+        # rho_w = 1 keeps the recorded density rows about the seafloor
+        # reference, not the water density.
         return Environment(
-            name='rd-halfspace-gradient',
+            name='rd-halfspace-gradient', water_density=1.0,
             bathymetry=Bathymetry(ranges=[0.0, 5000.0], depths=[100.0, 200.0]),
             ssp=SoundSpeedProfile.from_pairs(
                 np.array([[0.0, 1520.0], [200.0, 1500.0]])),
@@ -1982,6 +1984,7 @@ def _env_range_dependent_elastic():
         ranges=[0.0, 3000.0, 6000.0],
     )
     return Environment(
+        water_density=1.0,   # the recorded decks below took rho_w = 1
         name='rd-elastic',
         bathymetry=[(0.0, 120.0), (2000.0, 180.0), (4000.0, 90.0),
                     (6000.0, 200.0)],
@@ -1991,7 +1994,7 @@ def _env_range_dependent_elastic():
 
 def _env_flat_fluid():
     return Environment(name='flat-fluid', bathymetry=100.0, ssp=1500.0,
-                       bottom=_fluid_column(15.0, 1650.0))
+                       water_density=1.0, bottom=_fluid_column(15.0, 1650.0))
 
 
 def _env_slope_range_independent_bottom():

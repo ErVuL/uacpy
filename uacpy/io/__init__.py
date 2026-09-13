@@ -95,6 +95,7 @@ from uacpy.io.oases_reader import (
 from uacpy.io.mpirams_writer import (
     write_inpe, write_ssp_file, write_bth_file, write_ranges_file,
     write_sediment_file,
+    write_water_attenuation_file,
 )
 from uacpy.io.mpirams_reader import read_psif
 from uacpy.io.ramsurf_writer import write_ramin
@@ -158,6 +159,7 @@ __all__ = [
     # mpiramS writers
     "write_inpe", "write_ssp_file", "write_bth_file", "write_ranges_file",
     "write_sediment_file",
+    "write_water_attenuation_file",
     # ramsurf writer
     "write_ramin",
     # Audio

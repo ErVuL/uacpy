@@ -75,12 +75,16 @@ GEBCO_MD5="cd18ddc4162134465af310f714d50f01"
 # curl: NCEI/Akamai throttles Python urllib to a trickle, but serves curl fast.
 GLOBSED_NC_URL="https://www.ncei.noaa.gov/data/oceans/archive/arc0231/0305030/1.1/data/0-data/GlobSed/GlobSed_package3/GlobSed-v3.nc"
 
-# Bellhopcuda upstream release we build against. Tags are mutable on the
-# upstream side, so an immutable commit SHA is preferred. When
+# Bellhopcuda commit we build against, on uacpy's fork of the upstream
+# (github.com/ErVuL/bellhopcuda, see .gitmodules): upstream v1.5 plus the
+# Francois-Garrison fix recorded in third_party/MODIFICATIONS.md. Tags are
+# mutable, so an immutable commit SHA is preferred. When
 # BELLHOPCUDA_COMMIT_SHA is non-empty install.sh checks out that exact
 # commit; otherwise it falls back to BELLHOPCUDA_TAG with a loud warning.
-BELLHOPCUDA_TAG="v1.5"
-BELLHOPCUDA_COMMIT_SHA="b396d40ba49c2f349258b9687cfae8ff8323828f"
+# The tag is left empty on purpose: the SHA is the pin, and upstream's v1.5
+# tag (which the fork inherits) does not carry the fix.
+BELLHOPCUDA_TAG=""
+BELLHOPCUDA_COMMIT_SHA="e9f464a7df0c0ec4711da4246bd094ca8a26c8cc"
 
 # Default behavior: interactive
 AUTO_YES=0         # 0 = interactive (prompt the user); 1 = assume "yes"
@@ -768,8 +772,8 @@ check_cuda() {
     return 1
 }
 
-# bellhopcuda + GLM submodule sanity check. bellhopcuda is now a git submodule
-# pinned to an upstream tag (see .gitmodules); GLM is a nested submodule of
+# bellhopcuda + GLM submodule sanity check. bellhopcuda is a git submodule
+# pinned to a commit on uacpy's fork (see .gitmodules); GLM is a nested submodule of
 # bellhopcuda. Both are populated by `git submodule update --init --recursive`,
 # which we attempt automatically if the directory looks empty.
 check_bellhopcuda_submodule() {

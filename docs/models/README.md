@@ -55,6 +55,7 @@ is the exception: multiple source depths on a ✗ model raise
 | Rough surface/bottom (`sigma`) | ✗ | ✅ | ✅⁴ | ✗ | ✗ | ✗ | ✅ |
 | Elastic media (shear) | ✅¹ | ✅² | ✅ | ✗ | ✅³ | ✅ | ✅ |
 | Multiple source depths | ✅ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
+| Water-column absorption (`env.absorption`) | ✅ | ✅ | ✅ | ✅ | ✅⁵ | ✗ | ✗⁶ |
 
 ¹ an elastic *half-space* is native (bellhop.f90 applies its exact
 acousto-elastic `R(θ)`); a layered bottom goes via the auto-BOUNCE reflection
@@ -65,6 +66,10 @@ range-independent, so the seabed collapses to one column.
 ⁴ sea surface only, and only under a pressure-release (vacuum) surface —
 Scooter drops seabed roughness, and a rough rigid/elastic surface, with a
 warning. Kraken and OASES carry both interfaces unconditionally.
+⁵ as a dB-per-wavelength profile on the water wavenumber in every backend,
+per bin on a broadband sweep (uacpy-patched binaries). Bounce tabulates a
+reflection coefficient at an interface, so volume loss has no path to act on.
+⁶ OASES substitutes its own Skretting-Leroy law for the water and says so.
 
 `OASES` is an abstract base: instantiate **OAST** (TL), **OASN** (covariance,
 replicas), **OASR** (reflection), **OASP** (pulse/broadband), **OASS**

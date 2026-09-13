@@ -362,7 +362,7 @@ end if
     forall(ii=1:n) alpb(ii)=sqrt(rhob(ii)*csg(ii)*ic0)
     deallocate(csg,attng)
   end if
-
+  if (iattw==1 .and. (iflag==2.or.iflag==3)) call wksqw(omega)
   !csg=cwg.*sqrt(1+(eta*attng).^2)./(1+ci*eta*attng);
   !ksqb=((omega./csg)).^2-(omega/c0)^2;
   !alpb=sqrt(rhob.*abs(csg)/c0);
@@ -475,3 +475,56 @@ end interface
 end function gorp2
 
 end subroutine ram
+
+!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+! UACPY: water wavenumber with the volume attenuation of the marched bin,
+! ksqw = ((omega/cw)(1 + i*eta*attw))^2 - k0^2 -- the sediment's form
+! (profl above) applied to the water column. attw is the table column
+! whose frequency matches omega, interpolated linearly onto the depth grid
+! and held constant beyond the table's ends.
+
+subroutine wksqw(omega)
+
+use kinds
+use envdata
+use param
+use profiles
+
+implicit none
+
+real(kind=wp), intent(in) :: omega
+real(kind=wp), parameter :: eta=0.018323389971986_wp
+complex(kind=wp), parameter :: ci=cmplx(0.0_wp, 1.0_wp, wp)
+integer :: ib0(1), ib, ii, jj, n
+real(kind=wp) :: f, w
+real(kind=wp), dimension(:), allocatable :: attwg
+
+f=omega/(2.0_wp*pi)
+ib0=minloc(abs(faw-f)); ib=ib0(1)
+if (abs(faw(ib)-f) > 1.0e-7_wp*f) then
+   print *,'ERROR: water attenuation table has no column at ', f, &
+           ' Hz; nearest is ', faw(ib), ' Hz'
+   stop 1
+end if
+
+n=size(zg)
+allocate(attwg(n))
+do ii=1,n
+   if (zg(ii)<=zaw(1)) then
+      attwg(ii)=attw(1,ib)
+   else if (zg(ii)>=zaw(nzaw)) then
+      attwg(ii)=attw(nzaw,ib)
+   else
+      jj=1
+      do while (zaw(jj+1)<zg(ii))
+         jj=jj+1
+      end do
+      w=(zg(ii)-zaw(jj))/(zaw(jj+1)-zaw(jj))
+      attwg(ii)=attw(jj,ib)+w*(attw(jj+1,ib)-attw(jj,ib))
+   end if
+end do
+forall(ii=1:n) ksqw(ii)=((omega/cwg(ii))*(1.0_wp+ci*eta*attwg(ii)))**2 &
+                        -(omega*ic0)**2
+deallocate(attwg)
+
+end subroutine wksqw

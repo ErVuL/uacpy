@@ -284,8 +284,8 @@ _CAPABILITY_FLAGS: frozenset = frozenset({
     # ``_project_environment`` -- ``env.absorption`` passes through untouched
     # -- and it is NOT read from ``spec.supports``. It mirrors the existing
     # ``_consumes_volume_absorption`` class attribute so there is one source
-    # of truth for "does this engine honour env.absorption", the question RAM
-    # answers no to in every backend.
+    # of truth for "does this engine honour env.absorption", the question the
+    # OASES family and Bounce answer no to.
     'volume_attenuation',
 })
 

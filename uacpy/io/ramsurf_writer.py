@@ -127,6 +127,14 @@ def write_ramin(
         - ``bottom_attn``: list of (depth, attn) — compressional attenuation
         - ``bottom_cs``  (RAMS only): list of (depth, shear speed)
         - ``bottom_attns`` (RAMS only): list of (depth, shear attenuation)
+        - ``water_attn`` (optional): list of (depth, attn) — water-column
+          volume attenuation in dB/wavelength, absolute depth. Either
+          every segment carries it or none does. When present, row 5
+          gets a fifth number ``1`` and the block is written last in each
+          segment; the uacpy-patched binaries read both
+          (``third_party/MODIFICATIONS.md``, *water-column attenuation*).
+          A deck without it is byte-identical to one written before the
+          block existed, so a stock binary still reads it.
     surface : list of (range, depth), optional
         Surface profile (only used / required when ``kind='ramsurf'``).
         ``depth`` ≥ 0 means how far below z=0 the pressure-release
@@ -155,6 +163,15 @@ def write_ramin(
                     "kind='rams' requires bottom_cs and bottom_attns "
                     "in every range segment"
                 )
+    with_water_attn = [seg.get('water_attn') is not None
+                       for seg in range_segments]
+    if any(with_water_attn) and not all(with_water_attn):
+        raise ConfigurationError(
+            "write_ramin: water_attn must be given in every range segment "
+            "or in none. The binary reads a fifth block per section only "
+            "when row 5 announces it, so a mixed deck would misread the "
+            "next section's range line as a profile block.")
+    iattw = 1 if all(with_water_attn) and with_water_attn else 0
 
     Path(filepath).parent.mkdir(parents=True, exist_ok=True)
     with open(filepath, 'w') as fh:
@@ -175,13 +192,18 @@ def write_ramin(
         fh.write(
             f"{float(zmax):.12g} {float(dz):.12g} {int(ndz)} {float(zmplt):.12g}\n"
         )
+        # A fifth number announces the water-attenuation block: the patched
+        # readers take row 5 as a string and try five items, falling back
+        # to four (``uacpyh`` in each source). Stock decks stay four
+        # numbers so the row is unchanged when no block follows.
+        tail = ' 1' if iattw else ''
         if kind == 'rams':
             fh.write(
-                f"{float(c0):.12g} {int(np_pade)} {int(irot)} {float(theta):.12g}\n"
+                f"{float(c0):.12g} {int(np_pade)} {int(irot)} {float(theta):.12g}{tail}\n"
             )
         else:
             fh.write(
-                f"{float(c0):.12g} {int(np_pade)} {int(ns_stab)} {float(rs_stab):.12g}\n"
+                f"{float(c0):.12g} {int(np_pade)} {int(ns_stab)} {float(rs_stab):.12g}{tail}\n"
             )
 
         if kind == 'ramsurf':
@@ -205,3 +227,7 @@ def write_ramin(
             _write_block(fh, seg['bottom_attn'])
             if kind == 'rams':
                 _write_block(fh, seg['bottom_attns'])
+            # Last in the section, before the next range line: ``profl``
+            # reads it right after the sediment blocks when iattw is set.
+            if iattw:
+                _write_block(fh, seg['water_attn'])

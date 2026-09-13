@@ -31,6 +31,7 @@ aspect of the ocean:
 | `surface` | `Surface` | top-boundary acoustic properties | vacuum (pressure release) |
 | `altimetry` | `Altimetry` or `None` | sea-surface **shape** vs range | `None` (flat, z = 0) |
 | `absorption` | `Absorption` or `None` | water-column volume attenuation | `None` |
+| `water_density` | `float` (g/cm³) | sea-water density every deck writes for the water column | 1.027 |
 
 Only `bathymetry` is required. Every other argument has a physically sensible
 default, and each accepts a shorthand that is coerced to the real carrier — so
@@ -587,15 +588,17 @@ reproducing the engine's own answer for the same deck — but it is easy to
 leave in place by accident: at 40 kHz over a kilometre Thorp puts the
 omission at 12.9 dB, and at 20 kHz over 5 km a Kraken run measured 21.3 dB
 against Francois-Garrison. Bellhop,
-Kraken, Scooter and SPARC therefore warn when the omission is worth more
-than a decibel over the track. Bounce does not, although the option letter
-reaches its engine: it tabulates a reflection coefficient at an interface,
-and its `receiver` is read only for `range_max`, which sizes the table's
-angular resolution, so the notice would quote that knob as a propagation
-distance. RAM and the OASES family do not warn either, because they do not
-carry `env.absorption` at all — RAM models no water-column attenuation and
-OASES substitutes its own empirical law — and both already say so when one
-is set.
+Kraken, Scooter, SPARC and RAM therefore warn when the omission is worth
+more than a decibel over the track. Bounce does not, although the option
+letter reaches its engine: it tabulates a reflection coefficient at an
+interface, and its `receiver` is read only for `range_max`, which sizes the
+table's angular resolution, so the notice would quote that knob as a
+propagation distance. The OASES family does not warn either, because it does
+not carry `env.absorption` at all — it substitutes its own empirical law —
+and already says so when one is set. RAM carries it as a dB-per-wavelength
+profile on every backend (see [RAM](../models/ram.md), *Environment
+support*): the same `alpha(f, z)` the other wrappers hand their engines,
+evaluated per bin on a broadband sweep.
 
 | Class | Parameters | Depth-dependent |
 |---|---|---|
@@ -835,6 +838,23 @@ native file formats.
 
 **Depth is positive down, altimetry positive up.** Range is measured from the
 source, which sits at `r = 0`.
+
+**The water has a density, and it is not 1.** Seabed densities are absolute
+g/cm³ from Hamilton's tables (sand 1.9, clay 1.5); sea water is about 1.027.
+The decks used to write 1.0 for the water — the Acoustics Toolbox and Collins
+convention — which overstated every impedance contrast by 2.7 %: sand over
+water at normal incidence gave |R| = 0.353 instead of 0.341, a bottom loss of
+9.05 dB instead of 9.34 dB per bounce, 1 to 3 dB over a ten-bounce
+shallow-water path, always toward a harder seabed and invisible to a
+cross-engine comparison because every engine agreed. `env.water_density`
+(default 1.027 g/cm³, IES-80 at 10 °C and 35 psu) now goes into the water
+rows of every deck that has one — Acoustics Toolbox and Bellhop SSP rows,
+OASES water layers — and the engines that fix the water at 1 and read seabed densities
+as ratios (the four RAM codes, and BOUNCE, whose `R` is referenced to a unit
+density) receive each seabed density divided by it. `uacpy.core.acoustics.density(T, S) / 1000` gives the value for a measured
+column, and `fetch_environment` sets it from the same T/S row that builds its
+Francois-Garrison absorption. Textbook benchmarks take ρw = 1 by convention:
+pass `water_density=1.0` to reproduce one.
 
 **A result carries no environment.** `Result` holds its own identity and
 provenance — the model, backend, frequencies and file paths — never the

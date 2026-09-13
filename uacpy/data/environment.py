@@ -38,6 +38,8 @@ from typing import Callable, Optional, Sequence, Union
 import numpy as np
 
 from uacpy._log import log_message
+from uacpy.core.absorption import FrancoisGarrison
+from uacpy.core.acoustics import density
 from uacpy.core.environment import (
     Bathymetry, BoundaryProperties, Environment, SoundSpeedProfile,
 )
@@ -789,6 +791,12 @@ def fetch_environment(
             max_distance_km=max_distance_km, max_days=max_days,
             timeout=timeout, verbose=verbose,
         )
+    absorption = kwargs.get('absorption')
+    if isinstance(absorption, FrancoisGarrison):
+        # The same mid-column T/S row that sets the absorption sets the
+        # water density the decks carry (IES-80, kg/m³ -> g/cm³).
+        kwargs['water_density'] = float(density(
+            absorption.temperature_c, absorption.salinity_psu)) / 1000.0
     env = Environment(**kwargs)
 
     _record_provenance(env, bathy_src, ssp_src, bottom_kw, bottom_props,

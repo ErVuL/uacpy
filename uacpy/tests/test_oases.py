@@ -1625,7 +1625,7 @@ class TestWaterLayersNeverCollapseToZeroThickness:
         out = tmp_path / 'e.dat'
         write_oast_input(str(out), _env(), _source(), _receiver())
         lines = out.read_text().splitlines()
-        assert '100.00 1510.00 0.00 0.0 0 1.0 0.0000 0' in lines
+        assert '100.00 1510.00 0.00 0.0 0 1.027 0.0000 0' in lines
         assert any(l.startswith('100.00 1700.00 ') for l in lines)
 
     def test_no_half_written_layer_block_survives_the_refusal(self, tmp_path):

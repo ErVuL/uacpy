@@ -5378,3 +5378,122 @@ class TestReflectionCoefficientCarriesTheTravellingWavePhaseSign:
 
     def test_a_slice_keeps_the_stamp(self):
         assert self._rc().at(angle=20.0).phase_reference == 'travelling_wave'
+
+
+class TestFrequencyAccessorsAgreeOnAnEmptyIdentityList:
+    """``n_frequencies`` falls through to the ``'frequency'`` coord under the
+    same length guard ``f0`` uses, so the two never disagree on whether a
+    result carries frequencies."""
+
+    @staticmethod
+    def _field(frequencies):
+        return Field(data=np.zeros((2, 3)),
+                     coords={'depth': np.array([0.0, 10.0]),
+                             'frequency': np.array([100.0, 200.0, 300.0])},
+                     frequencies=frequencies)
+
+    def test_empty_list_counts_the_frequency_coord(self):
+        f = self._field(np.array([]))
+        assert f.f0 == 100.0
+        assert f.n_frequencies == 3
+
+    def test_non_empty_list_is_counted_before_the_coord(self):
+        f = self._field(np.array([50.0]))
+        assert f.f0 == 50.0
+        assert f.n_frequencies == 1
+
+    def test_no_list_and_no_coord_counts_zero(self):
+        f = Field(data=np.zeros((2, 2)),
+                  coords={'depth': np.array([0.0, 10.0]),
+                          'range': np.array([1.0, 2.0])})
+        assert f.f0 is None
+        assert f.n_frequencies == 0
+
+
+class TestTimeTraceLabelsFollowTheNearestCellRule:
+    """``to_time_trace`` selects its cell the way ``at`` does: a finite label
+    so far outside the axis that every sample rounds to the same distance is
+    refused instead of silently landing on index 0."""
+
+    @staticmethod
+    def _broadband():
+        n_freq = 16
+        data = np.zeros((3, 2, n_freq), dtype=complex)
+        data[:, :, :] = 1.0
+        return Field(data=data,
+                     coords={'depth': np.array([10.0, 20.0, 30.0]),
+                             'range': np.array([1000.0, 2000.0]),
+                             'frequency': np.linspace(100.0, 250.0, n_freq)})
+
+    @pytest.mark.parametrize('axis', ['depth', 'range'])
+    @pytest.mark.parametrize('label', [1e300, -1e300])
+    def test_absorbing_label_is_refused_like_at(self, axis, label):
+        tf = self._broadband()
+        with pytest.raises(ConfigurationError, match='same distance'):
+            tf.at(**{axis: label})
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            with pytest.raises(ConfigurationError, match='same distance'):
+                tf.to_time_trace(**{axis: label})
+
+    @pytest.mark.parametrize('axis, label, expected',
+                             [('depth', 1e6, 30.0), ('range', -1e6, 1000.0)])
+    def test_far_but_rankable_label_lands_on_the_end_sample(
+            self, axis, label, expected):
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            trace = self._broadband().to_time_trace(**{axis: label})
+        assert trace.pinned[axis] == expected
+
+
+class TestOneElementSspArrayIsToldTheAcceptedForms:
+    """A 1-D ``ssp`` array with a single entry is neither a scalar nor a
+    pair table; the refusal names ``ssp=`` and both accepted forms."""
+
+    @pytest.mark.parametrize('value', [np.array([1500.0]), [1500.0]])
+    def test_message_names_the_scalar_and_pair_forms(self, value):
+        with pytest.raises(ConfigurationError) as info:
+            Environment(bathymetry=100.0, ssp=value)
+        text = str(info.value)
+        assert 'ssp=' in text
+        assert 'scalar' in text
+        assert '(depth, sound_speed)' in text
+
+    def test_two_entry_flat_array_is_refused_as_a_pair_table(self):
+        with pytest.raises(ConfigurationError) as info:
+            Environment(bathymetry=100.0, ssp=np.array([1500.0, 1520.0]))
+        assert 'ssp=' in str(info.value)
+
+    def test_scalar_and_pairs_coerce(self):
+        assert Environment(bathymetry=100.0, ssp=1500.0).ssp is not None
+        env = Environment(bathymetry=100.0,
+                          ssp=[(0.0, 1500.0), (100.0, 1480.0)])
+        assert env.ssp is not None
+
+
+class TestMaskBelowSeafloorKeepsTheFloatingDtype:
+    """The masked copy keeps an inexact payload's dtype (a ``.shd``-backed
+    result stays float32) and widens only integers, which cannot hold NaN."""
+
+    @staticmethod
+    def _field(dtype):
+        return Field(
+            data=np.ones((3, 2), dtype=dtype),
+            coords={'depth': np.array([0.0, 50.0, 150.0]),
+                    'range': np.array([0.0, 1000.0])},
+            frequencies=100.0)
+
+    _BATHY = [(0.0, 100.0), (1000.0, 100.0)]
+
+    @pytest.mark.parametrize('dtype', [np.float32, np.float64,
+                                       np.complex64, np.complex128])
+    def test_inexact_dtype_is_kept(self, dtype):
+        masked = self._field(dtype).mask_below_seafloor(self._BATHY)
+        assert masked.data.dtype == np.dtype(dtype)
+        assert np.isnan(masked.data[2, :]).all()
+        assert np.isfinite(masked.data[:2, :]).all()
+
+    def test_integer_payload_is_widened_to_float64(self):
+        masked = self._field(np.int32).mask_below_seafloor(self._BATHY)
+        assert masked.data.dtype == np.dtype(np.float64)
+        assert np.isnan(masked.data[2, :]).all()

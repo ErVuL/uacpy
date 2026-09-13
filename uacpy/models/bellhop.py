@@ -487,7 +487,9 @@ class Bellhop(PropagationModel):
     two 2-D scenarios, the ports agree with the Fortran to ~0.3 dB at p99
     with excursions of a few dB at interference nulls, and **no bias**
     (|signed mean| <= 0.0007 dB); ``'cxx'`` and ``'cuda'`` are identical to
-    each other. :attr:`Result.backend` records which binary ran.
+    each other. uacpy builds them from its own fork of that port (upstream
+    v1.5 plus a Francois-Garrison fix, ``third_party/MODIFICATIONS.md``).
+    :attr:`Result.backend` records which binary ran.
 
     Parameters
     ----------

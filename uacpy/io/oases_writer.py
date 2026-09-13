@@ -258,7 +258,7 @@ def _check_water_layer_thickness(ssp_rows) -> None:
 
 def _emit_water_layers(
     f: TextIO, ssp_rows, *, surface_roughness: float, extra_columns: int,
-    surface_suffix: Optional[str] = None,
+    water_density: float, surface_suffix: Optional[str] = None,
 ) -> None:
     """Emit one OASES layer record per SSP sample, top down.
 
@@ -291,7 +291,8 @@ def _emit_water_layers(
     rule at the sea surface, where uacpy has no such spare record and
     warns instead.
 
-    The fixed ``0.0 0 1.0`` are AC, AS and RO. AC = 0 is not "lossless": it
+    The fixed ``0.0 0`` are AC and AS; RO is ``water_density`` (g/cm³, the
+    ``Environment``'s). AC = 0 is not "lossless": it
     is what hands the water column to OASES' own Skretting-Leroy attenuation
     (oaseun31.f:1516-1521) — see :func:`_warn_volume_attenuation_ignored`.
 
@@ -346,10 +347,10 @@ def _emit_water_layers(
                 # carries the nine-token -|RG| CL M form instead of a bare
                 # RMS, and the trailing padding column is dropped because
                 # INENVI re-reads the record as nine (oaseun31.f:91-93).
-                f.write(f"{d:.2f} {c:.2f} {cs:.2f} 0.0 0 1.0"
+                f.write(f"{d:.2f} {c:.2f} {cs:.2f} 0.0 0 {water_density:.3f}"
                         f"{surface_suffix}\n")
                 continue
-        f.write(f"{d:.2f} {c:.2f} {cs:.2f} 0.0 0 1.0 {rg:.4f}{trail}\n")
+        f.write(f"{d:.2f} {c:.2f} {cs:.2f} 0.0 0 {water_density:.3f} {rg:.4f}{trail}\n")
 
 
 def _warn_rough_gradient_surface(rg: float, c_top: float, cs: float) -> None:
@@ -1849,7 +1850,7 @@ def write_oast_input(
             n_layers = 3 + n_sed_layers  # vacuum + water + sed_layers + bottom
             f.write(f"{n_layers}\n")
             f.write(f"{_format_upper_halfspace(env)}\n")
-            f.write(f"0.00 {c_values[0]:.2f} 0 0.0 0 1.0 "
+            f.write(f"0.00 {c_values[0]:.2f} 0 0.0 0 {env.water_density:.3f} "
                     f"{_surface_roughness(env):.4f} 0\n")
             _emit_bottom_layers(
                 f, env, depth,
@@ -1862,6 +1863,7 @@ def write_oast_input(
             f.write(f"{_format_upper_halfspace(env)}\n")
             _emit_water_layers(f, ssp_subset,
                                surface_roughness=_surface_roughness(env),
+                               water_density=env.water_density,
                                extra_columns=1)
             _emit_bottom_layers(
                 f, env, depth,
@@ -2236,6 +2238,7 @@ def write_oasn_input(
         f.write(f"{_format_upper_halfspace(env)}\n")
         _emit_water_layers(f, ssp_subset,
                            surface_roughness=_surface_roughness(env),
+                           water_density=env.water_density,
                            extra_columns=1)
         _emit_bottom_layers(
             f, env, depth,
@@ -2693,6 +2696,7 @@ def _write_oasp_family_deck(
         f.write(f"{_format_upper_halfspace(env)}\n")
         _emit_water_layers(f, geom['ssp_array'],
                            surface_roughness=_surface_roughness(env),
+                           water_density=env.water_density,
                            extra_columns=2)
         if roughness_tail is None:
             _emit_bottom_layers(
@@ -3340,7 +3344,8 @@ def write_oasr_input(
         # (oaseun31.f:1516-1521) and so suppresses the empirical
         # Skretting-Leroy substitution — a lossless upper halfspace, which is
         # what a plane-wave reflection coefficient wants.
-        f.write(f"0.00 {c_water:.2f} 0 0.0 0 1.0{_roughness_tail(0)}\n")
+        f.write(f"0.00 {c_water:.2f} 0 0.0 0 {env.water_density:.3f}"
+                f"{_roughness_tail(0)}\n")
 
         # Sediment stack + bottom halfspace via the shared helper, with
         # OASR's per-interface roughness suffix; iface_start=1 because
@@ -3754,16 +3759,17 @@ def write_oass_input(
             # and oaskun21.f:54-66 builds the perturbed boundary operator from
             # it, so dropping it silently omits surface re-scattering.
             if surface_suffix is not None:
-                f.write(f"0.00 {c_values[0]:.2f} 0 0.0 0 1.0"
+                f.write(f"0.00 {c_values[0]:.2f} 0 0.0 0 {env.water_density:.3f}"
                         f"{surface_suffix}\n")
             else:
-                f.write(f"0.00 {c_values[0]:.2f} 0 0.0 0 1.0 "
+                f.write(f"0.00 {c_values[0]:.2f} 0 0.0 0 {env.water_density:.3f} "
                         f"{_surface_roughness(env):.4f}\n")
         else:
             f.write(f"{1 + len(ssp_subset) + n_sed_layers + 1}\n")
             f.write(f"{_format_upper_halfspace(env)}\n")
             _emit_water_layers(f, ssp_subset,
                                surface_roughness=_surface_roughness(env),
+                               water_density=env.water_density,
                                extra_columns=0,
                                surface_suffix=surface_suffix)
         _emit_bottom_layers(

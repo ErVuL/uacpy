@@ -116,7 +116,7 @@ if (isedrd==1) then
    rho(:,1) = 1.2_wp
    attn(:,1)= 0.5_wp
 
-   close(nunit)
+   call read_wattn(nunit)
 
    ! Read sediment profile file (same format as SSP: "-1 range_km" headers)
    print *,'Reading sediment file: ', trim(name4)
@@ -151,7 +151,7 @@ else
    read (nunit,*) (cs(jj,1), jj=1,nzs)
    read (nunit,*) (rho(jj,1), jj=1,nzs)
    read (nunit,*) (attn(jj,1), jj=1,nzs)
-   close(nunit)
+   call read_wattn(nunit)
 end if
 
 ! Read output ranges from file
@@ -541,3 +541,49 @@ end function cssprofile
 
 end program peramx
 
+
+!%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+! UACPY: the optional water-column attenuation table. in.pe may carry one
+! more line after the sediment block naming a file; a deck that ends with
+! the sediment block reads as before (the read hits end-of-file and the
+! water column stays lossless). File layout, list-directed:
+!   nzaw nfaw
+!   faw(1) ... faw(nfaw)                  bin frequencies (Hz)
+!   zaw(i) attw(i,1) ... attw(i,nfaw)     one row per depth, dB/wavelength
+! The frequencies are checked against the marched bin in wksqw (ram.f90).
+
+subroutine read_wattn(nunit)
+
+use kinds
+use envdata
+
+implicit none
+
+integer, intent(in) :: nunit
+integer :: ios, ii, jj
+character(len=256) :: name5
+
+iattw=0
+read(nunit,'(a)',iostat=ios) name5
+close(nunit)
+if (ios/=0) return
+name5=trim(adjustl(name5))
+if (len_trim(name5)==0) return
+
+open(nunit,file=name5,status='old')
+read(nunit,*) nzaw, nfaw
+if (nzaw<1 .or. nfaw<1) then
+   print *,'ERROR: water attenuation table needs nzaw>=1 and nfaw>=1; got ', nzaw, nfaw
+   stop 1
+end if
+allocate(zaw(nzaw), faw(nfaw), attw(nzaw,nfaw))
+read(nunit,*) (faw(jj), jj=1,nfaw)
+do ii=1,nzaw
+   read(nunit,*) zaw(ii), (attw(ii,jj), jj=1,nfaw)
+end do
+close(nunit)
+iattw=1
+print '(a,a,a,i5,a,i5,a)','Water attenuation table: ', trim(name5), &
+      ' (', nzaw, ' depths x ', nfaw, ' frequencies)'
+
+end subroutine read_wattn

@@ -1757,6 +1757,7 @@ class Kraken(PropagationModel):
             bottom=bottom,
             surface=env.surface.collapse('r0'),
             absorption=env.absorption,
+            water_density=env.water_density,
             location=env.location,
             transect=env.transect,
             date=env.date,

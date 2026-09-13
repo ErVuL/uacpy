@@ -28,7 +28,11 @@ Range-dependent Acoustic Model (split-step Padé parabolic equation) that
   `zmax dz ndz zmplt` / `c0 np ns rs`, then `-1 -1`-terminated blocks for
   bathymetry `(rb, zb)`, water SSP `(z, cw)`, and the bottom profiles
   `(z, cb)`, `(z, rhob)`, `(z, attn)`; an optional bare range line starts a
-  new profile section, the mechanism for range dependence).
+  new profile section, the mechanism for range dependence). uacpy's build
+  also accepts a fifth number on the `c0 np ns rs` row: `1` announces one
+  more block per section after `attn`, `(z, attw)` — water-column
+  attenuation in dB/wavelength (`MODIFICATIONS.md`, *water-column
+  attenuation block*); a four-number row reads exactly as stock.
 - Writes `tl.line` (text, TL at `zr`) and `tl.grid` (unformatted, depth ×
   range), the same outputs as `rams0.5` / `ramsurf1.5`.
 

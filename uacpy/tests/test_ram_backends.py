@@ -1,11 +1,14 @@
 """Tests for the RAM multi-backend dispatcher and the Collins-style I/O."""
 
+import os
 import re
+import subprocess
 import warnings
 from pathlib import Path
 
 import numpy as np
 import pytest
+from scipy.io import FortranFile
 
 from uacpy.core.environment import (
     Bottom,
@@ -2935,8 +2938,9 @@ class TestMpiramsLayeredSubBottomIsNotSmeared:
     ``d + sedlayer`` — control point ``nzs-1``, not ``nzs``."""
 
     def _layered_env(self):
+        # rho_w = 1: the pins below read the seabed density back as written.
         return Environment(
-            name='layered', bathymetry=100.0, ssp=1500.0,
+            name='layered', bathymetry=100.0, ssp=1500.0, water_density=1.0,
             bottom=SeabedColumn(
                 layers=[SedimentLayer(thickness=5.0, sound_speed=1520.0,
                                       density=1.3, attenuation=0.2)],
@@ -4640,3 +4644,82 @@ class TestRamsCarrierStatements:
         doc = read_pcomplex_grid.__doc__
         assert 'carrier differs per backend' in doc
         assert 'rams0.5' in doc
+
+
+# s_mpiram extends the seabed past the last bathymetry node at its last depth.
+# ``profl`` (``third_party/mpiramS/src/ram.f90:329``) lays the sediment out
+# from the seafloor depth it interpolates at the current range; beyond the
+# last breakpoint that depth must be the last tabulated one, the rule the
+# march itself applies (``ram.f90:92-94``). uacpy's writer pads every table to
+# ``rmax`` (``RAM._prepare_bathymetry``), so the check below drives the binary
+# directly on a deck whose table stops short and compares it with the padded
+# deck.
+_SEABED_EXTENSION_DECK = """0.0
+75.0  1000000.0
+1.0
+50.0
+1.0
+10.0
+4 1
+1000.0
+1
+1500.0
+iso.ssp
+0
+0
+1
+bathy.bth
+ranges.dat
+300.0
+4
+0
+0.0 0.0 200.0 200.0
+1.2 1.2 1.2 1.2
+0.5 0.5 5.0 5.0
+"""
+
+
+
+
+def _read_psif(path: Path) -> np.ndarray:
+    with FortranFile(path, 'r') as f:
+        hdr = f.read_reals('f8')
+        nf, nzo, nr = (int(round(x)) for x in hdr[1:4])
+        f.read_reals('f8')  # frequencies
+        f.read_reals('f8')  # output ranges
+        psif = np.empty((nzo, nf, nr), complex)
+        for ir in range(nr):
+            for ii in range(nzo):
+                rec = f.read_reals('f8')
+                psif[ii, :, ir] = rec[1::2] + 1j * rec[2::2]
+    return psif
+
+
+def _run_deck(exe: Path, work: Path, bathymetry: str) -> np.ndarray:
+    work.mkdir()
+    (work / 'in.pe').write_text(_SEABED_EXTENSION_DECK)
+    (work / 'iso.ssp').write_text("-1 0\n0 1500\n500 1500\n")
+    (work / 'ranges.dat').write_text("2000.0\n")
+    (work / 'bathy.bth').write_text(bathymetry)
+    env = dict(os.environ, OMP_NUM_THREADS='1')
+    subprocess.run([str(exe)], cwd=work, env=env, check=True,
+                   capture_output=True, timeout=60)
+    return _read_psif(work / 'psif.dat')
+
+
+@pytest.mark.requires_binary
+class TestSeabedBeyondTheLastBathymetryPoint:
+
+    def test_seabed_beyond_the_last_breakpoint_follows_the_last_depth(
+            self, tmp_path):
+        exe = RAM(verbose=False)._exe
+        # The table ends at 1.5 km, the output range is 2 km: the sloping seafloor
+        # must continue at its final 200 m, which the padded deck states outright.
+        short = _run_deck(exe, tmp_path / 'short', "0 100\n1500 200\n")
+        padded = _run_deck(exe, tmp_path / 'padded', "0 100\n1500 200\n4000 200\n")
+        scale = np.abs(padded).max()
+        assert scale > 0
+        rel = np.abs(short - padded).max() / scale
+        assert rel < 1e-12, (
+            f"field beyond the last bathymetry point differs from the padded deck "
+            f"by {rel:.3e} (relative): the seabed was laid out from another depth")

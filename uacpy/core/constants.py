@@ -13,6 +13,11 @@ from uacpy.core.exceptions import ConfigurationError
 
 DEFAULT_SOUND_SPEED = 1500.0  # m/s — typical ocean value
 
+# g/cm³ — sea water at 10 °C, 35 psu, one atmosphere: IES-80 (Fofonoff 1985,
+# ``core.acoustics.density``) gives 1026.95 kg/m³. What every deck writes for
+# the water column unless ``Environment(water_density=...)`` says otherwise.
+DEFAULT_WATER_DENSITY_G_CM3 = 1.027
+
 # dB — the ceiling a run's own TL is compared against (a level this deep is
 # past anything a model resolves usefully). It is NOT a marker: a cell
 # carrying no energy is reported through PRESSURE_FLOOR like every other

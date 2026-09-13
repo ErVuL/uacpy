@@ -27,6 +27,7 @@ from uacpy.core.exceptions import ConfigurationError, FileFormatError
 from uacpy.core.environment import SoundSpeedProfile
 from uacpy.core.results import Field
 from uacpy.io.file_manager import FileManager
+from uacpy.core.constants import DEFAULT_WATER_DENSITY_G_CM3
 
 
 class TestFileManager:
@@ -835,7 +836,9 @@ class TestSSPLinePinsWaterProperties:
                 f"SSP row {row} has {len(row)} columns; a short form lets the "
                 f"top half-space's cs/rho/alphaI/betaI leak into the water")
             assert float(row[2]) == 0.0, f"water shear speed must be 0: {row}"
-            assert float(row[3]) == 1.0, f"water density must be 1.0: {row}"
+            assert float(row[3]) == pytest.approx(DEFAULT_WATER_DENSITY_G_CM3), (
+                f"water density must be the Environment's (default "
+                f"{DEFAULT_WATER_DENSITY_G_CM3} g/cm³): {row}")
             assert float(row[5]) == 0.0, f"water shear atten must be 0: {row}"
 
 

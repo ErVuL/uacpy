@@ -127,10 +127,6 @@ _PAD_MEDIUM_THICKNESS_M = 0.1
 DECK_RANGE_QUANTUM_M = DECK_RANGE_RESOLUTION_M
 
 
-# Water density in the AT g/cm^3 convention the .env format wants; AT's own
-# default is 1.0.
-WATER_DENSITY_G_CM3 = 1.0
-
 # misc/AttenMod.f90:10,18 — ``MaxBioLayers = 200`` sizes the static
 # ``bio( MaxBioLayers )`` array shared by every AT program.
 # misc/ReadEnvironmentMod.f90:222-225 bounds the count before filling it;
@@ -1054,7 +1050,7 @@ def write_ssp_section(
     # very module variables first, so a short form donates the surface's
     # cs/rho/alphaI/betaI to the water.
     for depth, c in pairs:
-        f.write(f"  {depth:.6f} {c:.6f} 0.000000 1.000000 "
+        f.write(f"  {depth:.6f} {c:.6f} 0.000000 {env.water_density:.6f} "
                 f"{baseline:.6f} 0.000000 /\n")
 
 
@@ -1063,6 +1059,7 @@ def write_layer_sections(
     env: 'Environment',
     seafloor_depth: float,
     n_mesh: int = 0,
+    density_reference: float = 1.0,
 ) -> float:
     """
     Write sediment layer SSP blocks for a layered SeabedColumn (NMEDIA > 1).
@@ -1072,6 +1069,10 @@ def write_layer_sections(
 
     Parameters
     ----------
+    density_reference : float, optional
+        Every density is written divided by this (default 1, i.e. as
+        carried). BOUNCE references its reflection coefficient to a unit
+        water density, so its writer passes ``env.water_density`` here.
     f : TextIO
         Open file handle
     env : Environment
@@ -1142,10 +1143,10 @@ def write_layer_sections(
         f.write(f"{n_layer_mesh}  {layer.roughness:.6f}  {bottom_depth:{zfmt}}\n")
         alpha_s = layer.shear_attenuation
         f.write(f"  {top_depth:{zfmt}} {layer.sound_speed:.6f} "
-                f"{layer.shear_speed:.6f} {layer.density:.6f} "
+                f"{layer.shear_speed:.6f} {layer.density / density_reference:.6f} "
                 f"{layer.attenuation:.6f} {alpha_s:.6f} /\n")
         f.write(f"  {bottom_depth:{zfmt}} {layer.sound_speed:.6f} "
-                f"{layer.shear_speed:.6f} {layer.density:.6f} "
+                f"{layer.shear_speed:.6f} {layer.density / density_reference:.6f} "
                 f"{layer.attenuation:.6f} {alpha_s:.6f} /\n")
 
         current_depth = bottom_depth
@@ -1160,12 +1161,17 @@ def write_bottom_section(
     filepath: Optional[Path] = None,
     verbose: bool = False,
     halfspace_depth: Optional[float] = None,
+    density_reference: float = 1.0,
 ) -> None:
     """
     Write bottom boundary section
 
     Parameters
     ----------
+    density_reference : float, optional
+        Every density is written divided by this (default 1, i.e. as
+        carried). BOUNCE references its reflection coefficient to a unit
+        water density, so its writer passes ``env.water_density`` here.
     f : TextIO
         Open file handle
     env : Environment
@@ -1188,7 +1194,7 @@ def write_bottom_section(
 
     cp = hs.sound_speed
     cs = hs.shear_speed
-    rho = hs.density
+    rho = hs.density / density_reference
     alpha = hs.attenuation
 
     bottom_code = bottom_type.to_acoustics_toolbox_code()
@@ -2168,6 +2174,15 @@ def write_bounce_input_file(
 
     ``n_mesh`` is passed through to :func:`write_layer_sections` (a scalar for
     every medium, or one count per writable layer).
+
+    **Densities reach BOUNCE as ratios to the water's.** ``bounce.f90:200``
+    forms ``R = -(f - i kz g)/(f + i kz g)`` with ``g = P'/rho`` referenced
+    to a unit density — no ``HSTop`` density appears anywhere in the
+    program — so the reference row's density is written as ``1`` (the
+    number it would ignore) and every seabed density below is divided by
+    ``env.water_density`` (``density_reference``), the same treatment the
+    RAM codes get. Measured: the water row alone moved ``R`` by 0.0, the
+    direct Scooter run of the same seabed by 2 dB.
     """
     filepath = Path(filepath)
     seafloor = float(env.depth)
@@ -2177,7 +2192,7 @@ def write_bounce_input_file(
     water_top = BoundaryProperties(
         acoustic_type='half-space',
         sound_speed=float(np.atleast_1d(env.get_sound_speed(seafloor))[0]),
-        density=WATER_DENSITY_G_CM3,
+        density=1.0,
         attenuation=0.0,
     )
     bounce_env = env.copy()
@@ -2194,7 +2209,8 @@ def write_bounce_input_file(
         )
         if layers:
             halfspace_top = write_layer_sections(
-                f, bounce_env, seafloor, n_mesh=n_mesh)
+                f, bounce_env, seafloor, n_mesh=n_mesh,
+                density_reference=env.water_density)
         else:
             halfspace_top = seafloor
         write_bottom_section(
@@ -2203,6 +2219,7 @@ def write_bounce_input_file(
             filepath=filepath,
             halfspace_depth=halfspace_top,
             verbose=verbose,
+            density_reference=env.water_density,
         )
         # Phase velocity bounds (define angular coverage) and RMax (km),
         # through the same writer the sibling decks use. Both bounds arrive

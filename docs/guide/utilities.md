@@ -327,7 +327,7 @@ positioning, and for little else.
 
 | Function | Implements |
 |---|---|
-| `density(temperature, salinity)` | Fofonoff (1985), IES 80 — near-surface seawater density, **kg/m³** |
+| `density(temperature, salinity)` | Fofonoff (1985), IES 80 — near-surface seawater density, **kg/m³**; `Environment(water_density=density(T, S) / 1000)` is how a measured value reaches the decks |
 | `reflection_coeff(angle, rho1, c1, alpha=0, rho=None, c=None)` | Rayleigh plane-wave `R` (Brekhovskikh & Lysanov); `angle` is **from normal, in radians** |
 | `bottom_loss_curve(material, …)` | Preset-aware wrapper: grazing angles in **degrees**, loss in dB |
 | `doppler(speed, frequency, c=None)` | Doppler shift, `speed ≪ c` |

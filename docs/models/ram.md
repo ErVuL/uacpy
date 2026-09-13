@@ -129,7 +129,6 @@ asked for.
 | You need the modes | No modal decomposition | [Kraken](kraken.md) |
 | Reference-grade accuracy check | The PE is an approximation; a wavenumber integral is not | [Scooter](scooter.md), [OASES](oases.md) |
 | Fast shear seabed (rock) | `rams` needs a hand-pinned `dz` — see [Gotchas](#9-gotchas) | [OASES](oases.md), [Scooter](scooter.md) |
-| Water-column volume absorption | No RAM backend consumes it | [Bellhop](bellhop.md), [Kraken](kraken.md) |
 | Several source depths at once | One `(zs, f)` per march | loop over `Source`s |
 
 ---
@@ -146,7 +145,7 @@ asked for.
 | Elastic media (shear) | ✅ | `rams` only; the **top** sediment layer must itself carry `shear_speed > 0` — a fluid layer over an elastic half-space is refused (see [§4](#forcing-a-backend)) |
 | Multiple source depths | ❌ | raises; loop over `Source` |
 | Source beam pattern | ❌ | raises; the march starts from Collins' self-starter, which is omnidirectional — use [Bellhop](bellhop.md) or [Kraken](kraken.md) |
-| Water-column volume attenuation | ❌ | `env.absorption` is ignored, with a `UserWarning` |
+| Water-column volume attenuation | ✅ | every backend, as a dB/wavelength profile on the water wavenumber — Thorp, Francois-Garrison, biological layers and a constant alike; per bin on a broadband sweep (uacpy-patched binaries) |
 | Non-vacuum surface (rigid, fluid or elastic ice) | ❌ | collapsed to vacuum with a `UserWarning` naming the kind; every backend hard-codes a pressure-release surface and no deck carries a surface record |
 | Rigid / vacuum / tabulated-reflection seabed | ❌ | raises `UnsupportedFeatureError` — the RAM decks express the seabed only as fluid geoacoustic layers, and the domain floor at `zmax` is an **absorbing layer**, not a Neumann wall |
 
@@ -751,10 +750,29 @@ instead averages across opposite-phase lobes and biases the level upward — 1.5
 to 2.3 dB in median TL on the Pekeris reference case. If you post-process
 `tl.data` onto a different grid yourself, do the same.
 
-**Water-column absorption is ignored.** No RAM backend consumes
-`env.absorption`; uacpy warns rather than quietly giving you a lossless water
-column. At long range that matters — use [Bellhop](bellhop.md) or
-[Kraken](kraken.md) when volume attenuation is part of the answer.
+**Water-column absorption needs the patched binaries.** Collins' codes assume
+a lossless water column (RAM guide: *"the density is assigned the value 1 g/cc
+and the attenuation is assumed to vanish"*), so uacpy's build adds one more
+profile block per section — `alpha(z)` in dB per local wavelength, announced
+by a fifth number on the `c0 np ns rs` row — and mpiramS reads a
+depth × frequency table named on the last line of `in.pe`
+(`third_party/MODIFICATIONS.md`, *water-column attenuation*). The Fortran
+applies it to the water wavenumber exactly as it applies `attn` to the
+seabed's, `k(1 + iηβ)`, and never learns which law produced the profile. A
+deck written for a lossless environment is byte-identical to one written
+before the block existed; a binary built from stock sources given a deck
+*with* the block misreads it, so rebuild with `install.sh` after updating.
+Without `env.absorption` RAM now warns like the Acoustics Toolbox wrappers
+when the omission is worth more than a decibel over the track.
+
+**Seabed densities reach the binaries as ratios.** Every RAM code fixes the
+water density at 1 and reads `rhob` relative to it, so uacpy divides each
+seabed density by `env.water_density` (default 1.027 g/cm³) before writing
+it. That is the same impedance contrast the Acoustics Toolbox and OASES decks
+carry, where the water rows hold the density itself (BOUNCE gets the same
+ratio treatment as RAM); pass
+`Environment(water_density=1.0)` to reproduce a benchmark that takes ρw = 1
+by convention.
 
 **The domain floor absorbs.** `zmax` sits below the seafloor with an absorbing
 layer (20 wavelengths of `c0` by default, ramping to 10 dB/wavelength) so

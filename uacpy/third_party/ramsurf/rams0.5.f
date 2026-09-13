@@ -40,8 +40,8 @@ c     improvement was suggested by Ed McDonald of the SACLANT Undersea
 c     Research Centre. 
 c
       complex ci,lamb,mub,u,v,r1,r2,r3,r4,r5,r6,r7,s1,s2,s3,s4,s5,s6,
-     >   s7,t1,t2,t3,t4,t5,t6,t7,pd1,pd2,g0
-      real k0,lamw
+     >   s7,t1,t2,t3,t4,t5,t6,t7,pd1,pd2,g0,lamw
+      real k0
 c
 c     mr=bathymetry points, mz=depth grid, mp=pade terms.
 c
@@ -100,13 +100,13 @@ c
      >   t1(6,mp),t2(6,mp),t3(6,mp),t4(6,mp),t5(6,mp),t6(6,mp),
      >   t7(6,mp),pd1(mp),pd2(mp),nu
       real k0,rb(mr),zb(mr),cw(mz),cp(mz),cs(mz),rhob(mz),attnp(mz),
-     >   attns(mz),lamw(mz),tlg(mz)
-c
+     >   attns(mz),tlg(mz)
+      complex lamw(mz)
       read(1,*)
       read(1,*)freq,zs,zr
       read(1,*)rmax,dr,ndr
       read(1,*)zmax,dz,ndz,zmplt
-      read(1,*)c0,np,irot,theta
+      call uacpyh(c0,np,irot,theta)
 c
       i=1
     1 read(1,*)rb(i),zb(i)
@@ -185,16 +185,16 @@ c     Set up the profiles.
 c
       subroutine profl(mz,nz,ci,dz,eta,omega,rmax,rp,cw,cp,cs,rhob,
      >   attnp,attns,lamw,lamb,mub)
-      complex ci,mub(mz),lamb(mz)
-      real cw(mz),cp(mz),cs(mz),rhob(mz),attnp(mz),attns(mz),lamw(mz)
-c
+      complex ci,mub(mz),lamb(mz),lamw(mz)
+      real cw(mz),cp(mz),cs(mz),rhob(mz),attnp(mz),attns(mz)
+      common /uacpyw/ iattw,attw(40004)
       call zread(mz,nz,dz,cw)
       call zread(mz,nz,dz,cp)
       call zread(mz,nz,dz,cs)
       call zread(mz,nz,dz,rhob)
       call zread(mz,nz,dz,attnp)
       call zread(mz,nz,dz,attns)
-      rp=2.0*rmax
+      if(iattw.eq.1)call zread(mz,nz,dz,attw); rp=2.0*rmax
       read(1,*,end=1)rp
 c
     1 do 2 i=1,nz+2
@@ -203,7 +203,7 @@ c
      >   2.0*(cs(i)/(1.0+ci*eta*attns(i)))**2)
       mub(i)=rhob(i)*(cs(i)/(1.0+ci*eta*attns(i)))**2
     2 continue
-c
+      if(iattw.eq.1)call wattn(mz,nz,ci,eta,cw,lamw)
       return
       end
 c
@@ -296,8 +296,8 @@ c
      >   t2(6,mp),t3(6,mp),t4(6,mp),t5(6,mp),t6(6,mp),t7(6,mp),pd1(mp),
      >   pd2(mp)
       real k0,rb(mr),zb(mr),cw(mz),cp(mz),cs(mz),rhob(mz),attnp(mz),
-     >   attns(mz),lamw(mz)
-c
+     >   attns(mz)
+      complex lamw(mz)
 c     Varying bathymetry.
 c
       jz=iz
@@ -350,8 +350,8 @@ c
      >   s2(mz,mp),s3(mz,mp),s4(mz,mp),s5(mz,mp),s6(mz,mp),s7(mz,mp),
      >   t1(6,mp),t2(6,mp),t3(6,mp),t4(6,mp),t5(6,mp),t6(6,mp),
      >   t7(6,mp),pd1(mp),pd2(mp),nu
-      real k0,rhob(mz),lamw(mz)
-c
+      real k0,rhob(mz)
+      complex lamw(mz)
 c     Conditions for the delta function.
 c
       si=1.0+zs/dz
@@ -396,8 +396,8 @@ c
      >   s1(mz,mp),s2(mz,mp),s3(mz,mp),s4(mz,mp),s5(mz,mp),s6(mz,mp),
      >   s7(mz,mp),t1(6,mp),t2(6,mp),t3(6,mp),t4(6,mp),t5(6,mp),
      >   t6(6,mp),t7(6,mp),pd1(mp),pd2(mp)
-      real k0,rhob(mz),lamw(mz)
-c
+      real k0,rhob(mz)
+      complex lamw(mz)
 c     New matrices when iz.eq.jz.
 c
       if(iz.eq.jz)then
@@ -1230,4 +1230,36 @@ c
       if((abs(dz).gt.err).and.(iter.lt.nter))go to 3
 c
       return
+      end
+c
+c     UACPY: optional water-column attenuation block (dB/wavelength).
+c     Row 5 may carry a fifth number iattw; a stock four-number row reads
+c     as before (the five-item internal read fails and iattw stays 0).
+c     With iattw=1 every profile section carries one more zread block
+c     after the attenuation block, applied to the water wavenumber the
+c     way attn is applied to the bottom's (Collins 1989).
+c
+      subroutine uacpyh(c0,np,n3,x4)
+      character*256 line
+      common /uacpyw/ iattw,attw(40004)
+      read(1,'(a)')line
+      read(line,*,iostat=ios)c0,np,n3,x4,iattw
+      if(ios.ne.0)iattw=0
+      if(ios.ne.0)read(line,*)c0,np,n3,x4
+      return
+      end
+c
+      subroutine wattn(mz,nz,ci,eta,cw,lamw)
+      complex ci,lamw(mz)
+      real cw(mz)
+      common /uacpyw/ iattw,attw(40004)
+      do 1 i=1,nz+2
+      lamw(i)=(cw(i)/(1.0+ci*eta*attw(i)))**2
+    1 continue
+      return
+      end
+c
+      block data uacpyw0
+      common /uacpyw/ iattw,attw(40004)
+      data iattw/0/,attw/40004*0.0/
       end

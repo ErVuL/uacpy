@@ -77,7 +77,7 @@ c
       read(1,*)freq,zs,zr
       read(1,*)rmax,dr,ndr
       read(1,*)zmax,dz,ndz,zmplt
-      read(1,*)c0,np,ns,rs
+      call uacpyh(c0,np,ns,rs)
 c
       i=1
     1 read(1,*)rsrf(i),zsrf(i)
@@ -171,12 +171,12 @@ c
      >   attn,alpw,alpb,ksqw,ksqb)
       complex ci,ksqb(mz),ksqw(mz)
       real k0,cw(mz),cb(mz),rhob(mz),attn(mz),alpw(mz),alpb(mz)
-c
+      common /uacpyw/ iattw,attw(20002)
       call zread(mz,nz,dz,cw)
       call zread(mz,nz,dz,cb)
       call zread(mz,nz,dz,rhob)
       call zread(mz,nz,dz,attn)
-      rp=2.0*rmax
+      if(iattw.eq.1)call zread(mz,nz,dz,attw); rp=2.0*rmax
       read(1,*,end=1)rp
 c
     1 do 2 i=1,nz+2
@@ -185,7 +185,7 @@ c
       alpw(i)=sqrt(cw(i)/c0)
       alpb(i)=sqrt(rhob(i)*cb(i)/c0)
     2 continue
-c
+      if(iattw.eq.1)call wattn(mz,nz,ci,eta,omega,k0,cw,ksqw)
       return
       end
 c
@@ -785,4 +785,36 @@ c
       if((abs(dz).gt.err).and.(iter.lt.nter))go to 3
 c
       return
+      end
+c
+c     UACPY: optional water-column attenuation block (dB/wavelength).
+c     Row 5 may carry a fifth number iattw; a stock four-number row reads
+c     as before (the five-item internal read fails and iattw stays 0).
+c     With iattw=1 every profile section carries one more zread block
+c     after the attenuation block, applied to the water wavenumber the
+c     way attn is applied to the bottom's (Collins 1989).
+c
+      subroutine uacpyh(c0,np,n3,x4)
+      character*256 line
+      common /uacpyw/ iattw,attw(20002)
+      read(1,'(a)')line
+      read(line,*,iostat=ios)c0,np,n3,x4,iattw
+      if(ios.ne.0)iattw=0
+      if(ios.ne.0)read(line,*)c0,np,n3,x4
+      return
+      end
+c
+      subroutine wattn(mz,nz,ci,eta,omega,k0,cw,ksqw)
+      complex ci,ksqw(mz)
+      real k0,cw(mz)
+      common /uacpyw/ iattw,attw(20002)
+      do 1 i=1,nz+2
+      ksqw(i)=((omega/cw(i))*(1.0+ci*eta*attw(i)))**2-k0**2
+    1 continue
+      return
+      end
+c
+      block data uacpyw0
+      common /uacpyw/ iattw,attw(20002)
+      data iattw/0/,attw/20002*0.0/
       end

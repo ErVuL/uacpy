@@ -740,7 +740,10 @@ UACPY vendors:
 - `ramsurf/` — Collins's RAM family: `rams0.5.f` (elastic) and
   `ramsurf1.5.f` (variable sea surface).
 - `ramgeo/` — Collins's RAMGEO range-dependent layered-fluid PE.
-- `bellhopcuda/` — git submodule pinned to upstream `v1.5`, unmodified.
+- `bellhopcuda/` — git submodule pinned to a commit on uacpy's fork
+  (`ErVuL/bellhopcuda`): upstream `v1.5` plus the Francois-Garrison fix,
+  offered upstream as a pull request. `install.sh` pins the SHA
+  (`BELLHOPCUDA_COMMIT_SHA`); bump it and the submodule pointer together.
 - `arlpy/` — partial vendor of arlpy.uwa (BSD-3-Clause). See
   `third_party/arlpy/NOTICE` for the list of adapted functions.
 

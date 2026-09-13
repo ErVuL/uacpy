@@ -34,7 +34,9 @@ pytestmark = [pytest.mark.benchmark, pytest.mark.requires_binary]
 from uacpy import (Environment, SoundSpeedProfile, BoundaryProperties, Bathymetry,
                    Source, Receiver, Kraken, Scooter, RAM, Bounce, Bellhop, RunMode)
 
-RHO_WATER = 1.0  # g/cm^3 — AT default when the .env omits a water density
+# g/cm^3 — the analytic solutions below take rho_w = 1, so every Environment
+# here pins water_density to it rather than the sea-water default.
+RHO_WATER = 1.0
 
 # ── analytic references ─────────────────────────────────────────────────────
 
@@ -210,6 +212,7 @@ C_W, C_B, RHO_B, DEPTH, FREQ = 1500.0, 1800.0, 1.8, 100.0, 50.0
 
 def _pekeris_env():
     return Environment(
+        water_density=RHO_WATER,
         bathymetry=DEPTH,
         ssp=SoundSpeedProfile.from_pairs([(0.0, C_W), (DEPTH, C_W)]),
         bottom=BoundaryProperties(acoustic_type='half-space',
@@ -355,6 +358,7 @@ RHO_SOFT = 1e-4
 
 def _pressure_release_env(bottom):
     return Environment(
+        water_density=RHO_WATER,
         bathymetry=_PR_DEPTH,
         ssp=SoundSpeedProfile.from_pairs([(0.0, C_W), (_PR_DEPTH, C_W)]),
         bottom=bottom)
@@ -479,6 +483,7 @@ def test_bellhop_ideal_wedge_matches_analytic():
     r_src = np.array([500., 1000., 1500., 2000., 2500., 3000.])
     rr = np.linspace(0.0, 3800.0, 40)
     env = Environment(
+        water_density=RHO_WATER,
         bathymetry=Bathymetry(ranges=rr, depths=200.0 - slope * rr),
         ssp=SoundSpeedProfile.from_pairs([(0.0, c), (200.0, c)]),
         bottom=BoundaryProperties(acoustic_type='vacuum'))
@@ -551,6 +556,7 @@ def test_bellhop_lloyd_mirror():
     surface image — the geometry a ray model is exact for."""
     c, z_s, z_r, f = C_W, 18.0, 18.0, 200.0
     env = Environment(
+        water_density=RHO_WATER,
         bathymetry=3000.0,
         ssp=SoundSpeedProfile.from_pairs([(0.0, c), (3000.0, c)]),
         bottom=BoundaryProperties(acoustic_type='half-space',
@@ -605,6 +611,7 @@ def test_semicoherent_is_the_lloyd_shaded_incoherent_sum():
     c, z_s, z_r, f = C_W, 20.0, 60.0, 200.0
     ranges = np.linspace(1000.0, 2500.0, 40)
     env = Environment(
+        water_density=RHO_WATER,
         bathymetry=3000.0,
         ssp=SoundSpeedProfile.from_pairs([(0.0, c), (3000.0, c)]),
         bottom=BoundaryProperties(acoustic_type='half-space',
@@ -688,6 +695,7 @@ def test_bellhop_line_source_carries_the_2d_quarter_wave_phase():
     c, z_s, z_r, f = C_W, 25.0, 100.0, 100.0
     ranges = np.array([1000.0, 1500.0, 2000.0, 3000.0, 4000.0])
     env = Environment(
+        water_density=RHO_WATER,
         bathymetry=4000.0,
         ssp=SoundSpeedProfile.from_pairs([(0.0, c), (4000.0, c)]),
         bottom=BoundaryProperties(acoustic_type='half-space',
@@ -725,6 +733,7 @@ def test_complex_field_phase_matches_lloyd_mirror(model_cls):
     c, z_s, z_r, f = C_W, 25.0, 100.0, 100.0
     ranges = np.array([1000.0, 1500.0, 2000.0, 3000.0, 4000.0])
     env = Environment(
+        water_density=RHO_WATER,
         bathymetry=4000.0,
         ssp=SoundSpeedProfile.from_pairs([(0.0, c), (4000.0, c)]),
         bottom=BoundaryProperties(acoustic_type='half-space',
@@ -760,6 +769,7 @@ def test_scaled_cylindrical_removes_exactly_the_spreading_term():
     """
     c = C_W
     env = Environment(
+        water_density=RHO_WATER,
         bathymetry=200.0,
         ssp=SoundSpeedProfile.from_pairs([(0.0, c), (200.0, c)]),
         bottom=BoundaryProperties(acoustic_type='half-space',
@@ -796,6 +806,7 @@ class TestBounceReflectsTheSeabedNotTheOcean:
         barely moves |R| but rotates the phase substantially."""
         from uacpy.models import Bounce
         env = Environment(
+            water_density=RHO_WATER,
             bathymetry=float(water_depth),
             ssp=SoundSpeedProfile.from_pairs(
                 [(0.0, c_water), (float(water_depth), c_water)]),
@@ -855,6 +866,7 @@ def test_bellhop_line_source_level_is_unit_amplitude_at_one_metre():
     c, z_s, z_r, f = C_W, 25.0, 100.0, 100.0
     ranges = np.array([1000.0, 1500.0, 2000.0, 3000.0, 4000.0])
     env = Environment(
+        water_density=RHO_WATER,
         bathymetry=4000.0,
         ssp=SoundSpeedProfile.from_pairs([(0.0, c), (4000.0, c)]),
         bottom=BoundaryProperties(acoustic_type='half-space',

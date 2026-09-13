@@ -618,8 +618,11 @@ def write_bellhop_env_file(
             else 0.0
         )
         for depth, c in zip(ssp_depths, ssp_matrix[:, 0]):
+            # rhoR is the water density Bellhop's own reflection uses
+            # (ReflectMod.f90:153 forms R from the SSP's rho against
+            # HS%rho), so it carries env.water_density like the AT rows.
             f.write(
-                f"{depth:.6f} {c:.6f} 0.0 1.0 "
+                f"{depth:.6f} {c:.6f} 0.0 {env.water_density:.6f} "
                 f"{alpha_i:.6f} 0.0 /\n"
             )
 
