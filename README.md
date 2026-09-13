@@ -496,6 +496,10 @@ redistributes Collins' original.
 - Collins, *A split-step Padé solution for the parabolic equation method*, JASA 93, 1736–1742, 1993
 - Collins, *Users Guide for RAM versions 1.0 and 1.0p / RAMGeo*, NRL, 1999
 
+The vendored RAM codes are patched to read an optional water-column attenuation
+profile (how `env.absorption` reaches them); every change is listed in
+[`uacpy/third_party/MODIFICATIONS.md`](uacpy/third_party/MODIFICATIONS.md).
+
 ### OASES --- OAST, OASN, OASR, OASP, OASS, OASSP
 
 Henrik Schmidt (Massachusetts Institute of Technology) --- https://acoustics.mit.edu/faculty/henrik/oases.html
@@ -521,9 +525,9 @@ when redistributing or modifying UACPY or its outputs.
 | UACPY wrapper              | this repository                    | source + Python package                          | GPL-3.0                                          |
 | Acoustics Toolbox (Porter) | `uacpy/third_party/Acoustics-Toolbox/`   | vendored Fortran sources, **modified**           | GPL-3.0                                          |
 | bellhopcuda (Schmid et al.)| `uacpy/third_party/bellhopcuda/`         | git submodule pinned to uacpy's fork (`ErVuL/bellhopcuda`): upstream `v1.5` + the Francois-Garrison fix in `MODIFICATIONS.md` | GPL-3.0                                       |
-| mpiramS (Dushaw)           | `uacpy/third_party/mpiramS/`             | vendored Fortran sources, **modified**           | Creative Commons Attribution 4.0 International   |
-| ramsurf (Calvo / Quiet Oceans) | `uacpy/third_party/ramsurf/`         | vendored Fortran sources, **modified**           | BSD-3-Clause |
-| ramgeo (Collins, NRL)      | `uacpy/third_party/ramgeo/`              | vendored Fortran source, **modified**            | Public domain (U.S. Government work, no explicit licence) |
+| mpiramS (Dushaw)           | `uacpy/third_party/mpiramS/`             | vendored Fortran sources, **modified** (see `MODIFICATIONS.md`) | Creative Commons Attribution 4.0 International   |
+| ramsurf (Calvo / Quiet Oceans) | `uacpy/third_party/ramsurf/`         | vendored Fortran sources, **modified** (see `MODIFICATIONS.md`) | BSD-3-Clause |
+| ramgeo (Collins, NRL)      | `uacpy/third_party/ramgeo/`              | vendored Fortran source, **modified** (see `MODIFICATIONS.md`) | Public domain (U.S. Government work, no explicit licence) |
 | arlpy utilities (Chitre)   | `uacpy/core/`                      | adapted (ported into UACPY sources, unmodified scientifically) | BSD-3-Clause                    |
 | OASES (Schmidt, MIT)       | `uacpy/third_party/oases/` (gitignored)  | **optional** download at install time, **not redistributed**| Academic license --- see Henrik Schmidt's terms  |
 

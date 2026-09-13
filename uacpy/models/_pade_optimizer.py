@@ -605,3 +605,228 @@ def rams_dz_shear_cap(c_shear_min: float, freq: float,
     if c_shear_min <= 0:
         return 0.0
     return float(c_shear_min / (per_wavelength * max(freq, 1.0)))
+
+
+# ── rams0.5's rotated Crank-Nicolson range step: amplification, and the
+#    range step it can march without diverging ─────────────────────────────
+#
+# With ``irot = 1`` rams0.5 does not march the split-step Padé exponential
+# scored above. ``rpade`` (``third_party/ramsurf/rams0.5.f:859-892``) rotates
+# the branch cut of the square root by ``theta`` (Milinazzo, Zala & Brooke
+# 1997) and then takes ONE Crank-Nicolson step per Padé term,
+# ``(1 + pd1·ξ)/(1 + pd2·ξ)`` with ``pd1,2 = rot2 ± ½ i k0 dr rot1``. The
+# rotated square root itself maps the propagating band to |·| ≤ 1 + 4e-4
+# (θ = 45°, np = 6) and the evanescent band ξ < −1 to |·| < 1: it is stable.
+# The Crank-Nicolson step of it is not: its modulus error grows as
+# ``(k0 dr)³`` for small ``k0 dr`` and peaks on the steep propagating
+# components just above cutoff, ξ ≈ −0.9 (grazing ≈ 70°), where one step
+# multiplies the component by ``G = 1.015`` at ``k0 dr = 4`` and ``1.05`` at
+# ``6``. Whether the march diverges is then a race per metre between that
+# growth and the physical loss of those steep components, which leave the
+# water column on every bottom bounce: the seabed's reflection loss at their
+# grazing angle, once per ``2h/tan θ`` of range. Measured on a 100 m sand
+# channel (1700 m/s, 1.8 g/cm³, 0.5 dB/λ, c_s = 300 m/s): every grid whose
+# growth rate was under the leak rate ran (1 kHz at dr = 1 m, 1.5 kHz at
+# 0.5 m, 2 kHz at 0.25 m, 5 kHz at 0.04 m) and every grid above it returned
+# a field that had blown up within the first few hundred metres (1.5 kHz at
+# 1 m, 2 kHz at 0.5 m, 5 kHz at 0.1 m); the measured threshold sits between
+# 0.0152 and 0.021 Np/m against a fluid-Rayleigh leak estimate of
+# 0.0147 Np/m for that channel. On a 200 m channel 1 kHz at dr = 1 m
+# diverged, as the halved leak rate predicts. The rule replaces neither the
+# λ/5 accuracy cap nor the shear dz cap; it binds where they do not — at
+# high frequency and in deep water, where a fixed fraction of a wavelength
+# lets the growth rate (∝ k0 at fixed k0·dr) outrun the leak. The leak
+# estimate is the fluid-fluid Rayleigh coefficient with the seabed's
+# attenuation; shear conversion only adds loss, so the estimate is
+# conservative on an elastic seabed (a 2400 m/s, 2.2 g/cm³ bottom with
+# c_s = 300 ran at a growth rate 2.3× the fluid estimate). ``safety``
+# halves the leak the rule may lean on.
+RAMS_STABILITY_SAFETY = 2.0
+_RAMS_XI_GRID = np.linspace(-0.999, -1e-3, 2000)
+
+
+def rotated_pade_coefficients(np_pade: int, theta_deg: float):
+    """``(rot1, rot2, rot0)`` of rams0.5's ``rpade`` — the rotated
+    rational-linear square root ``√(1+ξ) ≈ rot0 + Σ rot1 ξ/(1 + rot2 ξ)``
+    (``rams0.5.f:859-892``, before the Crank-Nicolson step is folded in)."""
+    tfact = np.exp(-1j * np.deg2rad(float(theta_deg)) / 2.0)
+    den = float(2 * int(np_pade) + 1)
+    rot0 = 1.0 + 0.0j
+    rot1, rot2 = [], []
+    for j in range(1, int(np_pade) + 1):
+        pade1 = (2.0 / den) * np.sin(j * np.pi / den) ** 2
+        pade2 = np.cos(j * np.pi / den) ** 2
+        shift = 1.0 + pade2 * (tfact ** 2 - 1.0)
+        rot1.append(tfact * pade1 / shift ** 2)
+        rot2.append(tfact ** 2 * pade2 / shift)
+        rot0 += pade1 * (tfact ** 2 - 1.0) / shift
+    return np.array(rot1), np.array(rot2), complex(rot0 / tfact)
+
+
+def rotated_cn_growth(xi, k0: float, dr: float, np_pade: int,
+                      theta_deg: float) -> np.ndarray:
+    """Per-metre amplification ``ln|G(ξ)| / dr`` (Np/m) of one rams0.5 range
+    step on the spectral component ``ξ = (k_r/k0)² − 1``: the product of the
+    ``np_pade`` Crank-Nicolson factors ``(1 + pd1 ξ)/(1 + pd2 ξ)`` and the
+    carrier ``g0 = exp(i k0 dr rot0)`` (``rams0.5.f:780-850, 848-851``).
+    Positive is growth. Vectorised over ``xi``."""
+    xi = np.asarray(xi, dtype=float)
+    rot1, rot2, rot0 = rotated_pade_coefficients(np_pade, theta_deg)
+    s = 0.5j * float(k0) * float(dr)
+    log_g = np.full(xi.shape, np.log(abs(np.exp(1j * float(k0) * float(dr)
+                                                    * rot0))))
+    for a, b in zip(rot1, rot2):
+        log_g += np.log(np.abs((1.0 + b * xi + s * a * xi)
+                               / (1.0 + b * xi - s * a * xi)))
+    return log_g / float(dr)
+
+
+def rotated_growth_floor(xi, k0: float, np_pade: int,
+                         theta_deg: float) -> np.ndarray:
+    """The part of :func:`rotated_cn_growth` no range step removes: the
+    per-metre amplification ``−k0·Im s(ξ)`` (Np/m) of the rotated square
+    root ``s(ξ)`` itself, which is what the Crank-Nicolson step converges
+    to as ``dr → 0``. At θ = 45°, np = 6 it peaks at 3.7e-4 Np/m per kHz
+    just above cutoff (ξ ≈ −0.89) — a rotation that maps the steepest
+    propagating components slightly into the lower half-plane — and it
+    falls below 1e-6 Np/m per kHz at θ ≤ 20°, or with a higher order."""
+    xi = np.asarray(xi, dtype=float)
+    rot1, rot2, rot0 = rotated_pade_coefficients(np_pade, theta_deg)
+    s = rot0 + sum(a * xi / (1.0 + b * xi) for a, b in zip(rot1, rot2))
+    return -float(k0) * s.imag
+
+
+def seabed_leak_rate(xi, *, c0: float, water_speed: float,
+                     water_density: float, seabed_speed: float,
+                     seabed_density: float,
+                     seabed_attenuation_dB_lambda: float,
+                     depth: float) -> np.ndarray:
+    """Per-metre loss (Np/m) of the steep component ``ξ`` to the seabed of a
+    ``depth`` m channel: the fluid-fluid Rayleigh reflection loss at its
+    grazing angle, paid once per bottom-bounce cycle ``2·depth/tan θ``.
+    Components at or below grazing 0 (``ξ`` above the water band) return 0."""
+    from uacpy.core.acoustics import reflection_coeff
+    xi = np.asarray(xi, dtype=float)
+    kr_over_kw = np.sqrt(np.clip(1.0 + xi, 0.0, None)) * float(c0) / float(water_speed)
+    grazing = np.arccos(np.clip(kr_over_kw, 0.0, 1.0))
+    alpha = float(seabed_attenuation_dB_lambda) * np.log(10.0) / (40.0 * np.pi)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        r = np.abs(reflection_coeff(np.pi / 2.0 - grazing,
+                                    rho1=1000.0 * float(seabed_density),
+                                    c1=float(seabed_speed), alpha=alpha,
+                                    rho=1000.0 * float(water_density),
+                                    c=float(water_speed)))
+        leak = -np.log(np.clip(r, 1e-12, 1.0)) * np.tan(grazing) / (2.0 * float(depth))
+    return np.where(kr_over_kw < 1.0, leak, 0.0)
+
+
+def _rams_steep_band(c0: float, water_speed: float, seabed_speed: float):
+    """The ``ξ`` grid of the steep band the stability rule is scored on:
+    from just above cutoff up to the seabed's critical angle (the whole
+    propagating band when the seabed is slower than the water). Below the
+    critical angle the step's growth is a small accuracy error that the
+    sediment's own loss masks — measured 0.06 dB bias against Kraken over
+    5 km — not a stability question."""
+    if seabed_speed > water_speed:
+        xi_crit = (water_speed ** 2 / (seabed_speed * c0)) ** 2 - 1.0
+    else:
+        xi_crit = -1e-3
+    xi_top = min(max(xi_crit, -0.999 + 1e-6), -1e-3)
+    return _RAMS_XI_GRID[_RAMS_XI_GRID <= xi_top]
+
+
+def rams_growth_margin(dr: Optional[float], *, freq: float, c0: float,
+                       water_speed: float, water_density: float,
+                       seabed_speed: float, seabed_density: float,
+                       seabed_attenuation_dB_lambda: float, depth: float,
+                       np_pade: int, theta_deg: float,
+                       safety: float = RAMS_STABILITY_SAFETY) -> dict:
+    """How far the rams0.5 march at ``dr`` sits from divergence.
+
+    Returns ``{'growth', 'leak', 'xi', 'excess', 'floor', 'floor_leak',
+    'floor_xi', 'floor_excess'}``: at the steep component where
+    ``growth − leak/safety`` is largest, the step's amplification and the
+    seabed's leak (both Np/m), that ``ξ``, and the excess itself — positive
+    means the rule predicts divergence — and the same three for the
+    rotation's own ``dr``-independent growth (:func:`rotated_growth_floor`),
+    which a positive ``floor_excess`` says no range step can cure. With
+    ``dr=None`` only the floor entries are returned."""
+    xi = _rams_steep_band(c0, water_speed, seabed_speed)
+    k0 = 2.0 * np.pi * float(freq) / float(c0)
+    leak = seabed_leak_rate(
+        xi, c0=c0, water_speed=water_speed, water_density=water_density,
+        seabed_speed=seabed_speed, seabed_density=seabed_density,
+        seabed_attenuation_dB_lambda=seabed_attenuation_dB_lambda,
+        depth=depth)
+    floor = rotated_growth_floor(xi, k0, np_pade, theta_deg)
+    floor_excess = floor - leak / float(safety)
+    j = int(np.argmax(floor_excess))
+    out = {'floor': float(floor[j]), 'floor_leak': float(leak[j]),
+           'floor_xi': float(xi[j]), 'floor_excess': float(floor_excess[j])}
+    if dr is None:
+        return out
+    growth = rotated_cn_growth(xi, k0, dr, np_pade, theta_deg)
+    excess = growth - leak / float(safety)
+    i = int(np.argmax(excess))
+    out.update({'growth': float(growth[i]), 'leak': float(leak[i]),
+                'xi': float(xi[i]), 'excess': float(excess[i])})
+    return out
+
+
+def rams_stable_dr(dr_max: float, **params) -> float:
+    """The largest range step ``<= dr_max`` at which the rams0.5 rotated
+    Crank-Nicolson march is predicted not to diverge: the step's growth rate
+    on every steep component stays under the seabed's leak rate divided by
+    ``safety`` (:func:`rams_growth_margin`). The growth rate rises
+    monotonically with ``dr`` (as ``dr²`` for small ``k0·dr``), so a
+    bisection on ``log dr`` finds the boundary to 1 %. Returns ``None`` when
+    the rotation's own growth already exceeds the leak (``floor_excess > 0``):
+    a smaller ``theta_deg`` or a higher order is then the only remedy —
+    see :func:`rams_stable_theta`."""
+    if rams_growth_margin(None, **params)['floor_excess'] > 0.0:
+        return None
+    # The search is monotone only while the step is a fraction of a
+    # wavelength: past k0·dr ~ 2π the Crank-Nicolson factor saturates and
+    # its growth *per metre* falls again, which would read as "stable" a
+    # step no march survives. One wavelength is the ceiling.
+    k0 = 2.0 * np.pi * float(params['freq']) / float(params['c0'])
+    dr_hi = min(float(dr_max), 2.0 * np.pi / k0)
+    if rams_growth_margin(dr_hi, **params)['excess'] <= 0.0:
+        return dr_hi
+    dr_lo = dr_hi
+    for _ in range(30):
+        dr_lo *= 0.5
+        if rams_growth_margin(dr_lo, **params)['excess'] <= 0.0:
+            break
+    else:
+        return dr_lo
+    for _ in range(12):
+        mid = float(np.sqrt(dr_hi * dr_lo))
+        if rams_growth_margin(mid, **params)['excess'] <= 0.0:
+            dr_lo = mid
+        else:
+            dr_hi = mid
+    return dr_lo
+
+
+
+#: Rotation angles tried, largest first, when the default rotation's own
+#: growth outruns the seabed's leak: Milinazzo, Zala & Brooke (1997) show the
+#: evanescent spectrum handled better the larger the angle, so the largest
+#: angle that is stable is the one to name.
+RAMS_THETA_LADDER_DEG = (45.0, 40.0, 30.0, 25.0, 20.0, 15.0, 10.0, 5.0)
+
+
+def rams_stable_theta(**params) -> Optional[float]:
+    """The largest rotation angle on :data:`RAMS_THETA_LADDER_DEG` at or
+    below the requested ``theta_deg`` whose own growth
+    (:func:`rotated_growth_floor`) stays under the seabed's leak over
+    ``safety``; ``None`` when none does (a higher ``np_pade``, or a
+    wavenumber-integration model, is then the way out)."""
+    theta0 = float(params.pop('theta_deg'))
+    for theta in RAMS_THETA_LADDER_DEG:
+        if theta > theta0 + 1e-9:
+            continue
+        if rams_growth_margin(None, theta_deg=theta, **params)['floor_excess'] <= 0.0:
+            return theta
+    return None

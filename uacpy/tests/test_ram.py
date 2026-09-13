@@ -1680,6 +1680,50 @@ class TestGridResolverConstraints:
                                        kind='rams')
         assert dr == pytest.approx(1500.0 / (5.0 * 100.0))
 
+    def test_the_stability_rule_caps_the_step_where_the_wavelength_cap_does_not(self):
+        """At 5 kHz over 100 m of sand the Crank-Nicolson growth outruns the
+        seabed's leak below the λ/5 cap (0.060 m), so the stability rule
+        binds at 0.05 m; at 200 Hz the λ/5 cap (1.5 m) is the tighter one
+        and nothing changes."""
+        _, elastic = self._envs()
+        m = self._stub(RAM(backend='rams', rams_dr_safety_factor=1.0,
+                           verbose=False), dr=10.0, dz=0.01)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            dr_hi, _ = m._compute_grid_lytaev(elastic, 5000.0,
+                                              max_range=5000.0, kind='rams')
+            m = self._stub(RAM(backend='rams', rams_dr_safety_factor=1.0,
+                               verbose=False), dr=10.0, dz=1.0)
+            dr_lo, _ = m._compute_grid_lytaev(elastic, 200.0,
+                                              max_range=5000.0, kind='rams')
+        assert 0.04 < dr_hi < 1500.0 / (5.0 * 5000.0)
+        assert dr_lo == pytest.approx(1500.0 / (5.0 * 200.0))
+
+    def test_a_rotation_limited_case_takes_the_widest_stable_angle_or_refuses_a_pinned_one(self):
+        """In 4000 m of water at 1 kHz the rotated square root's own growth
+        (3.7e-4 Np/m at 45°) exceeds what the seabed leaks, so no step
+        helps. Left to itself the wrapper takes the widest stable angle
+        (40°) and says so once; a pinned 45° is refused naming that angle."""
+        deep = Environment(bathymetry=4000.0, ssp=1500.0,
+                           bottom=_elastic_halfspace())
+        m = self._stub(RAM(backend='rams', verbose=False), dr=10.0, dz=1.0)
+        with warnings.catch_warnings(record=True) as rec:
+            warnings.simplefilter('always')
+            dr, _ = m._compute_grid_lytaev(deep, 1000.0, max_range=5000.0,
+                                           kind='rams')
+            assert m._resolve_rams_theta(deep, 1000.0) == 40.0
+        lowered = [w for w in rec if 'using rams_theta=40' in str(w.message)]
+        assert len(lowered) == 1
+        assert 0.0 < dr < 0.3
+        m = self._stub(RAM(backend='rams', rams_theta=45.0, verbose=False),
+                       dr=10.0, dz=1.0)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            with pytest.raises(ConfigurationError, match='rams_theta=40'):
+                m._compute_grid_lytaev(deep, 1000.0, max_range=5000.0,
+                                       kind='rams')
+        assert RAM(backend='rams', verbose=False)._theta_for_freq(1000.0) == 45.0
+
     def test_rams_dz_is_capped_at_the_shear_wavelength(self):
         from uacpy.models._pade_optimizer import rams_dz_shear_cap
         _, elastic = self._envs()
@@ -4194,3 +4238,106 @@ class TestEveryBackendAppliesEnvAbsorption:
         expected = self.BETA * 3000.0 / (1500.0 / freqs)
         assert np.all((0.8 < extra / expected) & (extra / expected < 1.35)), (
             f"broadband extra loss / plane-wave = {extra / expected}")
+
+
+
+class TestRamsRangeStepStability:
+    """The rams0.5 rotated Crank-Nicolson march diverges when its per-metre
+    amplification of the steep propagating components just above cutoff
+    outruns the seabed's leak of those components. The rule in
+    ``_pade_optimizer`` is pinned to the divergence table measured on a
+    100 m sand channel (1700 m/s, 1.8 g/cm³, 0.5 dB/λ, c_s = 300 m/s): the
+    binary was marched at each grid and the field either stayed finite or
+    blew up within the first few hundred metres."""
+
+    SAND = dict(c0=1591.0, water_speed=1500.0, water_density=1.0,
+                seabed_speed=1700.0, seabed_density=1.8,
+                seabed_attenuation_dB_lambda=0.5, np_pade=6, theta_deg=45.0)
+    #: (frequency Hz, dr m, water depth m, what the binary did)
+    MEASURED = [(1000.0, 1.0, 100.0, 'ran'), (1500.0, 1.0, 100.0, 'diverged'),
+                (1500.0, 0.5, 100.0, 'ran'), (1500.0, 0.25, 100.0, 'ran'),
+                (2000.0, 0.5, 100.0, 'diverged'), (2000.0, 0.25, 100.0, 'ran'),
+                (5000.0, 0.1, 100.0, 'diverged'), (5000.0, 0.04, 100.0, 'ran'),
+                (1000.0, 1.0, 200.0, 'diverged'), (1000.0, 0.5, 200.0, 'ran'),
+                (1000.0, 1.5, 50.0, 'ran')]
+
+    def test_every_measured_divergence_has_positive_excess(self):
+        from uacpy.models._pade_optimizer import rams_growth_margin
+        for freq, dr, depth, outcome in self.MEASURED:
+            excess = rams_growth_margin(dr, freq=freq, depth=depth, safety=1.0,
+                                        **self.SAND)['excess']
+            if outcome == 'diverged':
+                assert excess > 0.005, (freq, dr, depth, excess)
+            else:
+                # The fluid-Rayleigh leak is a lower bound on an elastic
+                # seabed's, so a run that survived may sit a little above
+                # zero; none sits far above.
+                assert excess < 0.005, (freq, dr, depth, excess)
+
+    def test_the_stable_step_sits_between_the_last_run_and_the_first_divergence(self):
+        from uacpy.models._pade_optimizer import rams_stable_dr
+        dr = rams_stable_dr(10.0, freq=1500.0, depth=100.0, **self.SAND)
+        assert 0.2 < dr < 0.5
+        dr = rams_stable_dr(10.0, freq=5000.0, depth=100.0, **self.SAND)
+        assert 0.03 < dr < 0.1
+
+    def test_growth_rises_as_the_cube_of_the_step_and_evanescent_components_decay(self):
+        from uacpy.models._pade_optimizer import rotated_cn_growth
+        xi = np.linspace(-0.999, -0.05, 2000)
+        g1 = rotated_cn_growth(xi, 1.0, 1.0, 6, 45.0).max()
+        g2 = rotated_cn_growth(xi, 1.0, 2.0, 6, 45.0).max()
+        assert g2 / g1 == pytest.approx(4.0, rel=0.25)   # per metre: (k0 dr)³ / dr
+        assert np.all(rotated_cn_growth(np.linspace(-300.0, -1.001, 500),
+                                        4.0, 1.0, 6, 45.0) < 0.0)
+
+    def test_the_rotation_floor_is_what_a_smaller_angle_or_higher_order_removes(self):
+        from uacpy.models._pade_optimizer import rotated_growth_floor
+        xi = np.linspace(-0.999, -0.05, 2000)
+        k0 = 2 * np.pi * 1000.0 / 1591.0
+        f45 = rotated_growth_floor(xi, k0, 6, 45.0).max()
+        assert f45 == pytest.approx(3.7e-4, rel=0.1)
+        assert rotated_growth_floor(xi, k0, 6, 20.0).max() < 1e-6
+        assert rotated_growth_floor(xi, k0, 8, 45.0).max() < f45
+        assert rotated_growth_floor(xi, k0, 6, 90.0).max() > 10 * f45
+
+    def test_a_pinned_step_predicted_to_diverge_warns_before_the_march(self):
+        env = Environment(bathymetry=100.0, ssp=1500.0,
+                          bottom=BoundaryProperties(
+                              sound_speed=1700.0, density=1.8, attenuation=0.5,
+                              shear_speed=300.0, shear_attenuation=1.0))
+        ram = RAM(backend='rams', verbose=False)
+        with pytest.warns(UserWarning, match='predicted to diverge') as rec:
+            ram._resolve_collins_grid(env, 1500.0, 'rams', 5000.0,
+                                      1.0, 0.02, None, zs=30.0)
+        assert 'dr <= 0.3' in str(rec[0].message)
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', UserWarning)
+            ram._resolve_collins_grid(env, 1500.0, 'rams', 5000.0,
+                                      0.25, 0.02, None, zs=30.0)
+
+    def test_the_rule_does_not_apply_without_the_rotation(self):
+        env = Environment(bathymetry=100.0, ssp=1500.0,
+                          bottom=_elastic_halfspace())
+        assert RAM(backend='rams', rams_irot=0,
+                   verbose=False)._rams_stability(env, 1500.0, dr=1.0) is None
+
+    @pytest.mark.slow
+    def test_the_divergence_warning_names_the_range_step(self):
+        """Deck + binary at the first measured divergence (1.5 kHz, dr = 1 m):
+        the samples come back NaN and the warning names the step that
+        holds, not a Padé order or a depth step."""
+        env = Environment(bathymetry=100.0, ssp=1500.0,
+                          bottom=BoundaryProperties(
+                              sound_speed=1700.0, density=1.8, attenuation=0.5,
+                              shear_speed=300.0, shear_attenuation=1.0))
+        src = Source(depths=30.0, frequencies=1500.0)
+        rcv = Receiver(depths=[30.0], ranges=[1000.0, 2000.0])
+        with warnings.catch_warnings(record=True) as rec:
+            warnings.simplefilter('always')
+            field = RAM(backend='rams', verbose=False, dr=1.0, dz=0.02).run(
+                env, src, rcv, run_mode=RunMode.COHERENT_TL)
+        assert np.isnan(np.asarray(field.tl, float)).all()
+        texts = [str(w.message) for w in rec]
+        assert any('predicted to diverge' in s for s in texts)
+        assert any('Use dr <= 0.3' in s for s in texts)
+        assert not any('larger np_pade or a finer dz' in s for s in texts)

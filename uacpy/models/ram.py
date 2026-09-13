@@ -50,8 +50,9 @@ from uacpy.models._pe_phase import psi_to_travelling_wave
 # relaxation warning can contrast it with the wrapper's binding cost floor
 # ``LAMBDA_PER_DZ_FLOOR`` below and the two cannot drift apart.
 from uacpy.models._pade_optimizer import (
-    DZ_MIN as _PADE_LADDER_DZ_MIN, grid_error, optimal_c0, optimize_grid,
-    rams_dz_shear_cap,
+    DZ_MIN as _PADE_LADDER_DZ_MIN, RAMS_STABILITY_SAFETY, grid_error,
+    optimal_c0, optimize_grid, rams_dz_shear_cap, rams_growth_margin,
+    rams_stable_dr, rams_stable_theta,
 )
 from uacpy.core.environment import (
     Environment,
@@ -157,6 +158,9 @@ SEAFLOOR_CELL_OFFSET = 0.25
 # ``floor(x + g/dz) - floor(x) >= floor(g/dz)``.
 BLOCK_GAP_PER_DZ = 2.0
 RAMS_DR_LAMBDA_CAP = 5.0
+# The rotation angle a rams march takes when ``rams_theta`` is left ``None``
+# and the stability rule does not ask for less (see ``_resolve_rams_theta``).
+RAMS_DEFAULT_THETA_DEG = 45.0
 
 # Ceiling on the number of range records a Collins binary writes. The stride
 # ``ndr`` is otherwise lowered until the first written range reaches the
@@ -542,12 +546,17 @@ class RAM(PropagationModel):
         consume the layered bottom as Collins-style ``(depth, value)``
         breakpoints (see ``SeabedColumn.to_piecewise_breakpoints``).
     rams_theta : float or callable, optional
-        Padé rotation angle in degrees for elastic stability (0 < theta
-        < 90). Default: 45.0 (tuned against Kraken on the Pekeris-elastic
-        scenario in tests/test_cross_model_agreement.py). May also be a
-        callable ``theta_fn(freq_hz) -> float`` to vary the angle across
-        a broadband run — useful when stability degrades with frequency.
-        **[rams0.5]**
+        Padé rotation angle in degrees for elastic stability (0 <= theta
+        <= 90). ``None`` (default) takes :data:`RAMS_DEFAULT_THETA_DEG`
+        (45°, tuned against Kraken on the Pekeris-elastic scenario in
+        tests/test_cross_model_agreement.py) unless that angle's own growth
+        on the steepest propagating components outruns what the seabed leaks
+        (``_pade_optimizer.rams_growth_margin``) — then the widest angle on
+        :data:`~uacpy.models._pade_optimizer.RAMS_THETA_LADDER_DEG` that is
+        stable is taken, per frequency, with a ``UserWarning`` naming it. A
+        float pins the angle for every frequency and is refused when it is
+        unstable; a callable ``theta_fn(freq_hz) -> float`` varies it across
+        a broadband run. **[rams0.5]**
     rams_irot : int, optional
         Padé rotation flag (1 = on). Default: 1. **[rams0.5]**
     use_tmpfs, verbose, work_dir, cleanup, timeout, collapse : optional
@@ -619,7 +628,7 @@ class RAM(PropagationModel):
         # `theta` is the Padé rotation angle (degrees, 0–90) used by RAMS
         # for elastic stability; defaults are tuned against Kraken on the
         # Pekeris-elastic problem. ``irot`` is the rotation flag (1 = on).
-        rams_theta: float = 45.0,
+        rams_theta: Optional[float] = None,
         rams_irot: int = 1,
         # Multiplicative tightening of the Lytaev-optimised ``dr`` for
         # the ``rams`` backend. Independent of the ``c_min/(5·f)`` λ cap
@@ -816,7 +825,7 @@ class RAM(PropagationModel):
         if not isinstance(ns_stability, int) or ns_stability < 0:
             raise ConfigurationError(f"ns_stability must be a non-negative integer; "
                                      f"got {ns_stability!r}.")
-        if not callable(rams_theta):
+        if rams_theta is not None and not callable(rams_theta):
             theta_val = float(rams_theta)
             if not (0.0 <= theta_val <= 90.0):
                 raise ConfigurationError(f"rams_theta must be in [0, 90] degrees; "
@@ -845,9 +854,12 @@ class RAM(PropagationModel):
         # ``rams_theta`` is either a float (used for every frequency) or
         # a callable ``theta_fn(freq_hz) -> float`` resolved per
         # frequency by ``_theta_for_freq``.
-        if not callable(rams_theta):
+        if rams_theta is not None and not callable(rams_theta):
             rams_theta = float(rams_theta)
         self.rams_theta = rams_theta
+        # Frequencies at which the automatic angle was lowered and said so,
+        # so the grid chooser and the deck writer do not both warn.
+        self._rams_theta_lowered = set()
         if rams_irot not in (0, 1):
             raise ConfigurationError(f"rams_irot must be 0 or 1; got {rams_irot!r}.")
         self.rams_irot = int(rams_irot)
@@ -2305,9 +2317,46 @@ class RAM(PropagationModel):
             different stability angles across the band.
         """
         t = self.rams_theta
+        if t is None:
+            return float(RAMS_DEFAULT_THETA_DEG)
         if callable(t):
             return float(t(float(freq)))
         return float(t)
+
+    def _resolve_rams_theta(self, env: Environment, freq: float) -> float:
+        """The rotation angle a rams march at ``freq`` on ``env`` uses.
+
+        A pinned ``rams_theta`` (float or callable) is returned as is. Left
+        ``None``, the default 45° is kept unless the stability rule finds its
+        own growth above the seabed's leak, in which case the widest stable
+        angle on the ladder replaces it (Milinazzo, Zala & Brooke 1997: the
+        wider the angle, the better the evanescent spectrum is handled, so
+        the widest that holds is the one to take), warned once per
+        frequency. When no angle on the ladder is stable the default is
+        returned and the grid chooser refuses the run.
+        """
+        requested = self._theta_for_freq(freq)
+        if self.rams_theta is not None:
+            return requested
+        stab = self._rams_stability(env, freq, theta=requested)
+        if stab is None or stab['margin']['floor_excess'] <= 0.0:
+            return requested
+        if stab['theta'] is None:
+            return requested
+        key = round(float(freq), 6)
+        if key not in self._rams_theta_lowered:
+            self._rams_theta_lowered.add(key)
+            m = stab['margin']
+            warnings.warn(
+                f"RAM:rams: at f={freq:.1f} Hz the default rams_theta="
+                f"{requested:.0f}° would amplify the steepest propagating "
+                f"components at {m['floor']:.2e} Np/m against the "
+                f"{m['floor_leak']:.2e} Np/m this seabed leaks them at, whatever "
+                f"the range step; using rams_theta={stab['theta']:.0f}°, the "
+                f"widest stable angle. Pin rams_theta to choose yourself.",
+                UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+            )
+        return float(stab['theta'])
 
     def _rams_rot0(self, theta: float) -> complex:
         """``rot0`` of the rams0.5 rotated-Padé scalar ``g0``.
@@ -2325,6 +2374,87 @@ class RAM(PropagationModel):
             pade2 = np.cos(j * np.pi / den) ** 2
             rot0 += pade1 * (tfact ** 2 - 1.0) / (1.0 + pade2 * (tfact ** 2 - 1.0))
         return complex(rot0 / tfact)
+
+    def _rams_stability_params(self, env: Environment, freq: float,
+                               theta: Optional[float] = None):
+        """Inputs of the rams0.5 stability rule (``_pade_optimizer.
+        rams_growth_margin``), one dict per seabed column, or ``None`` when
+        the rule does not apply: ``rams_irot = 0`` marches real Padé
+        coefficients (a unitary Crank-Nicolson step), and a column with no
+        surficial half-space carries no seabed to leak into.
+
+        The steep components the step amplifies leave the water on every
+        bottom bounce, so the leak is set by the column's *surficial*
+        material (top layer or half-space) and the water depth; the deepest
+        seafloor is used for every column because it leaks least per metre.
+        The water speed is the column's slowest, which maps a given ``ξ`` to
+        the shallowest grazing angle and hence the least leak — the
+        conservative side.
+        """
+        if int(self.rams_irot) != 1:
+            return None
+        theta_deg = (float(theta) if theta is not None
+                     else self._theta_for_freq(freq))
+        c0 = self._resolve_c0(env)
+        water_c, _ = self._water_speed_bounds(env)
+        depth = float(env.bathymetry.depth)
+        params = []
+        for column in env.bottom.columns:
+            top = column.at(depth=0.0)
+            if top.acoustic_type != 'half-space' or top.sound_speed is None:
+                continue
+            params.append(dict(
+                freq=float(freq), c0=float(c0), water_speed=float(water_c),
+                water_density=float(env.water_density),
+                seabed_speed=float(top.sound_speed),
+                seabed_density=float(top.density if top.density is not None
+                                     else 1.0),
+                seabed_attenuation_dB_lambda=float(
+                    top.attenuation if top.attenuation is not None else 0.0),
+                depth=depth, np_pade=int(self.np_pade),
+                theta_deg=theta_deg,
+            ))
+        return params or None
+
+    def _rams_stability(self, env: Environment, freq: float,
+                        dr: Optional[float] = None, dr_max: float = 1e3,
+                        theta: Optional[float] = None):
+        """The rams0.5 march's stability on ``env`` at ``freq``: the worst
+        column's :func:`rams_growth_margin` at ``dr`` (``None`` for the
+        rotation floor alone), the largest stable ``dr`` (``None`` when the
+        rotation itself is unstable), and the largest stable rotation angle
+        (``None`` when no angle on the ladder is). ``None`` when the rule
+        does not apply (:meth:`_rams_stability_params`)."""
+        params = self._rams_stability_params(env, freq, theta=theta)
+        if params is None:
+            return None
+        margins = [rams_growth_margin(dr, **p) for p in params]
+        key = 'excess' if dr is not None else 'floor_excess'
+        worst = max(margins, key=lambda m: m[key])
+        drs = [rams_stable_dr(dr_max, **p) for p in params]
+        dr_stable = None if any(d is None for d in drs) else min(drs)
+        thetas = [rams_stable_theta(**dict(p)) for p in params]
+        theta_stable = (None if any(th is None for th in thetas)
+                        else min(thetas))
+        return {'margin': worst, 'dr': dr_stable, 'theta': theta_stable,
+                'theta_requested': params[0]['theta_deg']}
+
+    def _rams_rotation_remedy(self, stab: dict) -> str:
+        """The sentence naming what fixes a rotation-limited rams march."""
+        m = stab['margin']
+        head = (f"the rotated square root itself (rams_theta="
+                f"{stab['theta_requested']:.0f}°, np_pade={int(self.np_pade)}) "
+                f"amplifies the steepest propagating components at "
+                f"{m['floor']:.2e} Np/m, above the {m['floor_leak']:.2e} Np/m "
+                f"this seabed leaks them at (over the "
+                f"{RAMS_STABILITY_SAFETY:g}× safety margin), so no range step "
+                f"can keep the march bounded.")
+        if stab['theta'] is not None:
+            return (head + f" Pass rams_theta={stab['theta']:.0f} (the largest "
+                    f"angle that is stable here), or leave rams_theta=None "
+                    f"to have it chosen, or use a larger np_pade.")
+        return (head + " No rotation angle down to 5° is stable here; use "
+                "a larger np_pade, or OAST / Scooter for this seabed.")
 
     def _collins_carrier_rate(self, env: Environment, kind: str,
                               freq: float, theta: float) -> float:
@@ -2575,7 +2705,8 @@ class RAM(PropagationModel):
         requested receiver grid.
         """
         fc = float(np.atleast_1d(source.frequencies)[0])
-        theta = self._theta_for_freq(fc)
+        theta = (self._resolve_rams_theta(env, fc) if kind == 'rams'
+                 else self._theta_for_freq(fc))
         raw = self._run_collins_one_freq(
             env, source, receiver, kind=kind, freq=fc, theta=theta
         )
@@ -2674,6 +2805,22 @@ class RAM(PropagationModel):
         if n_invalid:
             note = ""
             c0_pe = self._resolve_c0(env)
+            advice = "Try a larger np_pade or a finer dz."
+            if kind == 'rams' and raw.get('dr') is not None:
+                stab = self._rams_stability(
+                    env, float(raw['frequency']), dr=float(raw['dr']),
+                    theta=self._resolve_rams_theta(env, float(raw['frequency'])))
+                if stab is not None and stab['margin']['excess'] > 0.0:
+                    m = stab['margin']
+                    advice = (
+                        f"The rotated Crank-Nicolson step at dr="
+                        f"{float(raw['dr']):.4g} m amplifies the steepest "
+                        f"propagating components at {m['growth']:.2e} Np/m "
+                        f"against the {m['leak']:.2e} Np/m this seabed leaks "
+                        f"them at. "
+                        + (f"Use dr <= {stab['dr']:.4g} m (dr=None picks it)."
+                           if stab['dr'] is not None
+                           else self._rams_rotation_remedy(stab)))
             if kind == 'rams' and self._max_shear_speed(env) > c0_pe:
                 # A shear speed above the reference speed puts the shear band
                 # next to the branch point of the rotated square root
@@ -2693,7 +2840,7 @@ class RAM(PropagationModel):
                 f"level their range allows (Padé instability or PE "
                 f"divergence) and are returned as NaN — no data there, not a "
                 f"shadow zone. Every other sample is the march's own value. "
-                f"Try a larger np_pade or a finer dz.{note}",
+                f"{advice}{note}",
                 UserWarning, skip_file_prefixes=USER_FRAME_SKIP
             )
         psi_raw = np.asarray(raw['pcomplex'], dtype=np.complex128)
@@ -3054,6 +3201,31 @@ class RAM(PropagationModel):
                        np.asarray(pcomplex)]),
         )
 
+    def _warn_if_rams_step_unstable(self, env, fc, dr):
+        """A pinned ``dr`` is the caller's, so it is marched as given — but
+        a step the stability rule predicts will diverge is said so *before*
+        the minutes it takes to march into NaN, with the step (or the
+        rotation angle) that would hold."""
+        stab = self._rams_stability(env, fc, dr=dr,
+                                    theta=self._resolve_rams_theta(env, fc))
+        if stab is None or stab['margin']['excess'] <= 0.0:
+            return
+        m = stab['margin']
+        if stab['dr'] is None:
+            remedy = self._rams_rotation_remedy(stab)
+        else:
+            remedy = (f"Its rotated Crank-Nicolson step amplifies the "
+                      f"steepest propagating components (grazing "
+                      f"{np.degrees(np.arccos(np.sqrt(1 + m['xi']))):.0f}°) at "
+                      f"{m['growth']:.2e} Np/m against the {m['leak']:.2e} "
+                      f"Np/m this seabed leaks them at; the automatic grid "
+                      f"would use dr <= {stab['dr']:.4g} m here.")
+        warnings.warn(
+            f"RAM:rams: the pinned dr={dr:.4g} m at f={fc:.1f} Hz is "
+            f"predicted to diverge. {remedy}",
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+        )
+
     def _resolve_collins_grid(self, env, fc, kind, max_range,
                               dr_override, dz_override, zmax_override,
                               zs=None):
@@ -3077,6 +3249,7 @@ class RAM(PropagationModel):
         )
         dz_pinned = self.dz is not None
 
+        dr_pinned = dr is not None
         if dr is None or dz is None:
             dr_auto, dz_auto = self._compute_grid_lytaev(
                 env, fc, max_range=max_range, kind=kind, zs=zs
@@ -3085,6 +3258,8 @@ class RAM(PropagationModel):
                 dr = dr_auto
             if dz is None:
                 dz = dz_auto
+        if kind == 'rams' and dr_pinned:
+            self._warn_if_rams_step_unstable(env, fc, dr)
         if zmax_override is not None:
             zmax = float(zmax_override)
         elif self.zmax is not None:
@@ -3700,7 +3875,8 @@ class RAM(PropagationModel):
                         f"{kind} broadband: freq {k + 1}/{len(frequencies)} "
                         f"({float(freq):.2f} Hz)"
                     )
-                theta_k = self._theta_for_freq(float(freq))
+                theta_k = (self._resolve_rams_theta(env, float(freq))
+                           if kind == 'rams' else self._theta_for_freq(float(freq)))
                 raw = self._run_collins_one_freq(
                     env, source, receiver,
                     kind=kind, freq=float(freq), theta=theta_k,
@@ -4247,7 +4423,7 @@ class RAM(PropagationModel):
     # ``write_ramin`` switches the row per kind. Overriding the pair the
     # selected backend does not read discards the value silently.
     _RAMS_ONLY_SETTINGS = (
-        ('rams_theta', 45.0),
+        ('rams_theta', None),
         ('rams_irot', 1),
     )
     _NOT_RAMS_SETTINGS = (
@@ -4739,16 +4915,44 @@ class RAM(PropagationModel):
         #   2. a wavelength cap ``dr ≤ c_min / (5·f)`` ≈ 0.2 λ per step —
         #      the truncation requirement of the O(dr²) step (τ·n ≈ 0.1
         #      there against 14.6 at the Lytaev dr).
+        #   3. the stability rule of ``_pade_optimizer.rams_growth_margin``:
+        #      the Crank-Nicolson step's amplification of the steep
+        #      propagating components just above cutoff must stay under the
+        #      rate at which the seabed leaks them. The λ cap is a fixed
+        #      fraction of a wavelength, and at fixed k0·dr the growth per
+        #      metre scales with k0, so above a few kHz — or in deep water,
+        #      where the leak per metre falls as 1/h — the λ cap alone lets
+        #      the march diverge (5 kHz over 100 m of sand: 0.050 m stable
+        #      against a 0.060 m λ cap; 1 kHz over 1000 m: 0.14 m against
+        #      0.30 m). When the rotation's own growth already exceeds the
+        #      leak no step helps and the run is refused with the angle
+        #      that would be stable.
         if kind == 'rams':
             dr_pre = dr_opt
             dr_safety = dr_opt / self.rams_dr_safety_factor
             dr_cap = c_min_all / (RAMS_DR_LAMBDA_CAP * freq)
             dr_opt = min(dr_safety, dr_cap)
             limit = 'safety factor' if dr_safety <= dr_cap else 'λ cap'
+            stab = self._rams_stability(
+                env, freq, dr_max=dr_opt,
+                theta=self._resolve_rams_theta(env, freq))
+            dr_stab = None if stab is None else stab['dr']
+            if stab is not None and dr_stab is None:
+                raise ConfigurationError(
+                    f"RAM:rams at f={freq:.1f} Hz: "
+                    + self._rams_rotation_remedy(stab),
+                    remediation="rams_theta is a constructor knob (a float, "
+                                "or a callable f -> degrees across a band); "
+                                "see docs/models/ram.md §6 constraint 3.",
+                )
+            if dr_stab is not None and dr_stab < dr_opt:
+                dr_opt = dr_stab
+                limit = 'stability rule'
             self._log(
                 f"rams: tightened dr from {dr_pre:.2f} m to "
-                f"{dr_opt:.2f} m (safety={dr_safety:.2f}, "
-                f"λ-cap={dr_cap:.2f}; {limit} active)."
+                f"{dr_opt:.4g} m (safety={dr_safety:.4g}, "
+                f"λ-cap={dr_cap:.4g}, stability={dr_stab if dr_stab is None else round(dr_stab, 6)}; "
+                f"{limit} active)."
             )
 
         # The Collins binaries write the field only every ndr·dr and the

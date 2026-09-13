@@ -360,17 +360,58 @@ error model does not know about them:
    1.1 / 2.8). The shallowest column has the fewest water points, so its
    placement costs most (`env.depth` is the deepest, and only coincides on
    flat bathymetry);
-3. a **`dr` tightening on `rams`** — `rams_dr_safety_factor` (default 5×) and
-   an independent `dr ≤ c_min/(5f)` cap, whichever is tighter. With the
-   default `rams_irot=1`, `rams0.5` does not march the split-step Padé
-   exponential the optimiser scores: its `rpade` builds Crank-Nicolson
-   coefficients and the march is a Crank-Nicolson step in range of the
-   rotated square root — second-order in `dr`, with real amplification
-   (`|G| = 1.028` on the propagating band at the Lytaev `dr` of 2.46 λ on a
-   1500/1800 case, where the march diverges; 0.41 / 2.45 / 14.1 dB rms
-   against `krakenc` at 0.2 / 0.6 / 1.8 λ). The λ/5 cap is that operator's
-   truncation requirement, and the "predicted error" logged for a `rams`
-   grid is labelled as the split-step score it is, not this march's error;
+3. a **`dr` tightening on `rams`** — `rams_dr_safety_factor` (default 5×), an
+   independent `dr ≤ c_min/(5f)` cap, and a **stability rule**, whichever is
+   tightest. With the default `rams_irot=1`, `rams0.5` does not march the
+   split-step Padé exponential the optimiser scores: its `rpade` builds
+   Crank-Nicolson coefficients and the march is a Crank-Nicolson step in
+   range of the rotated square root — second-order in `dr`, with real
+   amplification (`|G| = 1.028` on the propagating band at the Lytaev `dr` of
+   2.46 λ on a 1500/1800 case, where the march diverges; 0.41 / 2.45 / 14.1 dB
+   rms against `krakenc` at 0.2 / 0.6 / 1.8 λ). The λ/5 cap is that
+   operator's truncation requirement, and the "predicted error" logged for a
+   `rams` grid is labelled as the split-step score it is, not this march's
+   error.
+
+   The stability rule is where the amplification actually bites. Computed
+   from the `rpade` coefficients themselves, the Crank-Nicolson step
+   multiplies the steep propagating components just above cutoff (`ξ ≈ −0.9`,
+   grazing ≈ 70°) by `1 + 2.4·10⁻⁴ (k₀ dr)³` per step at the default 45°
+   rotation and order 6 — 1.5 % at `k₀ dr = 4`, 5 % at 6 — while the
+   evanescent band decays and the trapped modes see under 10⁻⁵. Whether the
+   march survives is a race per metre: those components leave the water on
+   every bottom bounce, so the seabed's reflection loss at their grazing
+   angle, paid once per `2h/tan θ`, is what drains them. Measured on a 100 m
+   sand channel (`c_s = 300 m/s`), every grid whose growth rate was under
+   that leak rate ran (1 kHz at `dr = 1 m`, 1.5 kHz at 0.5 m, 2 kHz at
+   0.25 m, 5 kHz at 0.04 m) and every grid above it had blown up within the
+   first few hundred metres (1.5 kHz at 1 m, 2 kHz at 0.5 m, 5 kHz at
+   0.1 m); the threshold fell between 0.015 and 0.021 Np/m against a
+   fluid-Rayleigh leak estimate of 0.0147 Np/m, and in 200 m of water
+   1 kHz at 1 m diverged as the halved leak predicts. Because the growth per
+   metre scales with `k₀` at a fixed fraction of a wavelength while the leak
+   does not, the λ/5 cap alone stops sufficing above a few kHz and in deep
+   water: 5 kHz over 100 m of sand needs 0.050 m against the 0.060 m cap,
+   1 kHz over 1000 m needs 0.14 m against 0.30 m (measured there: 0.5 m
+   diverged, the 0.30 m cap marched 3.4 dB from Kraken, 0.12 m 1.9 dB). The
+   rule keeps the growth
+   under half the leak (`RAMS_STABILITY_SAFETY = 2`); the leak is the
+   fluid-fluid Rayleigh coefficient with the seabed's attenuation, which
+   shear conversion only lowers, so it is conservative on an elastic seabed
+   (a 2400 m/s, 2.2 g/cm³ bottom ran at 2.3× the estimate). A second term
+   no step removes: the rotated square root itself maps the steepest
+   propagating components slightly into the lower half-plane, a growth of
+   3.7·10⁻⁴ Np/m per kHz at 45° and order 6 that is below 10⁻⁶ at 20° or
+   with a higher order. Where it exceeds the leak — 1 kHz in 4000 m of
+   water, 20 kHz in 100 m — a `rams_theta` left `None` (the default) takes
+   the widest stable angle on the ladder 45°, 40°, 30°, 25°, 20°, 15°, 10°,
+   5° for that frequency, with a warning naming it; a pinned angle is
+   refused naming that angle. The same trade-off is the subject of Ren et
+   al. (2025), who find the angle must shrink as frequency rises. A pinned
+   `dr` is marched as given, but one the rule predicts to diverge is said so
+   before the march, with the step the automatic grid would use, and the
+   divergence warning after a blown-up march names that step rather than a
+   Padé order or a depth step;
 4. a **10 000-point cap** on the depth grid, purely to keep runtimes sane;
 5. on the **Collins backends, an output-stride cap**: those binaries write the
    field only every `ndr·dr` and the receiver modulus is interpolated between
@@ -537,7 +578,7 @@ override one the selected backend cannot read.
 |---|---|---|
 | `ns_stability` | `1` | How many stability constraints. They annihilate the evanescent spectrum (`Re X < −1`) and are what keep the self-starter and the energy-conservation correction well-behaved. Collins recommends 1 or 2. **[mpiramS, ramgeo, ramsurf]** |
 | `rs_stability` | `None` | Range (m) beyond which those constraints are switched off. They inject a little artificial attenuation — negligible on ordinary problems, but Collins notes it can matter in deep water at very long range, which is the case this knob exists for. **[mpiramS, ramgeo, ramsurf]** |
-| `rams_theta` | `45.0` | Padé rotation angle, degrees. A callable `f → θ` varies it across a band. **[rams]** |
+| `rams_theta` | `None` | Padé rotation angle, degrees. `None` takes 45° unless that angle's own growth on the steepest propagating components outruns the seabed's leak (§6 constraint 3), then the widest stable angle, per frequency, with a warning. A float pins it (refused when unstable); a callable `f → θ` varies it across a band. **[rams]** |
 | `rams_irot` | `1` | Rotation flag. **[rams]** |
 | `rams_dr_safety_factor` | `5.0` | Tightening of the optimised `dr`; `1.0` disables. **[rams]** |
 
@@ -707,7 +748,14 @@ refused automatically; on a pinned grid coarser than the elastic march can carry
 (`dz = 5 m` here) 94% of the samples come back marked no-data. The same case is
 clean from `dz = 1 m` down, and `ramgeo` on the identical seabed is stable at
 every `dz` tried, so the fragility belongs to the elastic solver rather than to
-the environment. Stability is not convergence, though: successive halvings from
+the environment. The range step has its own limit, and it is the one a pinned
+grid at a few kHz runs into: the rotated Crank-Nicolson step amplifies the
+steepest propagating components faster than the seabed leaks them once `dr`
+passes a threshold that tightens as `f^{-3/2}` and with water depth (§6
+constraint 3) — 1.5 kHz over 100 m of sand diverges at `dr = 1 m` and runs at
+0.5 m, 5 kHz at 0.1 m and 0.04 m. The automatic grid holds `dr` under it; a
+pinned `dr` above it warns before the march and the divergence warning names
+the step that holds. Stability is not convergence, though: successive halvings from
 1 m still move the median field by 10.0, 4.1 and 1.4 dB, so budget about a
 thirtieth of the water-column wavelength — 0.25 m in this case — for an answer
 you mean to trust. uacpy does
@@ -829,6 +877,10 @@ pinned it. Both bite on the default path: auto `dz` at 10 Hz is 5.7 m, auto
 - Milinazzo, F. A., Zala, C. A. & Brooke, G. H., "Rational square-root
   approximations for parabolic equation algorithms", *JASA* 101(2), 760–766,
   1997 — the rotated Padé used by `rams`.
+- Ren, Y. et al., *Stable rational approximations for parabolic equation
+  methods*, arXiv:2510.18622, 2025 — the rotation angle's trade-off between
+  the evanescent and the steep propagating spectrum in elastic waveguides,
+  and why it must shrink with frequency.
 - Porter, M. B., Jensen, F. B. & Ferla, C. M., "The problem of energy
   conservation in one-way models", *JASA* 89, 1058–1067, 1991; and Collins,
   M. D. & Westwood, E. K., "A higher-order energy-conserving parabolic equation

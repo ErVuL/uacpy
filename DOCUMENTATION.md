@@ -962,6 +962,13 @@ ts = ram.compute_time_series(env, source, receiver,
                              source_waveform=pulse, sample_rate=fs)
 ```
 
+`env.absorption` reaches every RAM backend through **uacpy-patched binaries**:
+Collins' codes assume a lossless water column, so the vendored ramgeo, rams and
+ramsurf read an optional water-column attenuation block per range section and
+mpiramS a depth × frequency table (`uacpy/third_party/MODIFICATIONS.md`,
+*water-column attenuation*). A stock build misreads a deck carrying the block,
+so rebuild with `install.sh` after updating; see `docs/models/ram.md` §9.
+
 ### SPARC
 
 Time-marched FFP (Porter 1990) — wavenumber integration marched in time to
@@ -2186,9 +2193,9 @@ with a warning naming the value it dropped.
 | `c0` | m/s | `None` | PE reference (expansion) speed — algorithmic, not physical; `None` → Lytaev Eq. (15). |
 | `accuracy` | — | `None` | Lytaev optimiser accuracy budget (max \|τ·n_steps\|); `None` uses the 1e-3 default. A pinned value that the stability floor prevents reaching warns; the default reports it as status only. |
 | `theta_max` | deg | `30.0` | Max propagation angle bounding the PE spectrum (Lytaev). |
-| `rams_theta` | deg | `45.0` | `rams` backend rotated-Padé angle (Milinazzo-Zala-Brooke). |
+| `rams_theta` | deg | `None` | `rams` backend rotated-Padé angle (Milinazzo-Zala-Brooke): `None` is 45° unless the stability rule needs less, then the widest stable angle per frequency (warned); a float pins it. |
 | `rams_irot` | — | `1` | `rams` rotation flag. |
-| `rams_dr_safety_factor` | factor | `5.0` | Tightening factor on the Lytaev `dr` for the `rams` backend (1.0 disables). |
+| `rams_dr_safety_factor` | factor | `5.0` | Tightening factor on the Lytaev `dr` for the `rams` backend (1.0 disables). The automatic `rams` step is also held under a stability rule — the rotated Crank-Nicolson step's growth on the steepest propagating components against the seabed's leak of them — which binds above a few kHz and in deep water; a pinned `dr` the rule predicts to diverge warns before the march. |
 
 ### Bounce parameters
 
