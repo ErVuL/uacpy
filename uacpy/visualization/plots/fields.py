@@ -1120,6 +1120,17 @@ def compare_models(
     for ax in axes_flat[n:]:
         ax.axis('off')
 
+    # Only the lowest live panel in each column keeps its x label. ``plot_field``
+    # labels every axes it is given, and the layout below uses a fixed
+    # ``hspace``, so in a stacked comparison of short wide panels -- a shallow
+    # water TL field is exactly that -- row i's x label printed straight over
+    # row i+1's title. Walk each column upward from the bottom so that a short
+    # final row leaves the panel above it labelled rather than bare.
+    for col in range(ncols):
+        live = [r for r in range(nrows) if r * ncols + col < n]
+        for r in live[:-1]:
+            axes[r][col].set_xlabel('')
+
     top = 0.90 if title else 0.95
     # One credit line per model sits under the panels; leave it room.
     bottom = 0.08 + 0.025 * max(0, len(fields) - 1)

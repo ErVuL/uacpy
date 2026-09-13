@@ -1464,6 +1464,39 @@ def test_compare_models_label_length_validation(tl_field):
                                   labels=['only-one'])
 
 
+def test_compare_models_labels_only_the_lowest_panel_of_each_column(tl_field):
+    """Every panel used to carry an x label, which the fixed ``hspace`` then
+    printed over the title of the panel below -- four collisions in a
+    five-model stacked comparison of a shallow-water field."""
+    fig, axes = uacpy.plot.compare_models([tl_field] * 5, ncols=1)
+    labelled = [bool(ax.get_xlabel()) for ax in axes.ravel()[:5]]
+    assert labelled == [False, False, False, False, True], labelled
+    plt.close(fig)
+
+
+def test_compare_models_labels_the_lowest_panel_even_on_a_ragged_row(tl_field):
+    """With 5 panels in 2 columns the second column's last live panel sits in
+    row 1, not row 2: clearing by row index alone would leave it bare."""
+    fig, axes = uacpy.plot.compare_models([tl_field] * 5, ncols=2)
+    # column 0 is live in rows 0,1,2; column 1 only in rows 0,1
+    assert not axes[0][0].get_xlabel() and not axes[1][0].get_xlabel()
+    assert axes[2][0].get_xlabel()          # lowest live panel, column 0
+    assert not axes[0][1].get_xlabel()
+    assert axes[1][1].get_xlabel()          # lowest live panel, column 1
+    plt.close(fig)
+
+    # 4 panels in 3 columns distinguishes ROW-major fill from column-major:
+    # both agree on the 5x1 and 5x2 shapes above, but here a column-major
+    # reading would strip the label from (0,1), which is live and is the only
+    # panel in its column. Without this case that mutant survives.
+    fig, axes = uacpy.plot.compare_models([tl_field] * 4, ncols=3)
+    assert not axes[0][0].get_xlabel()      # (1,0) is live below it
+    assert axes[1][0].get_xlabel()
+    assert axes[0][1].get_xlabel()          # alone in its column -> keeps it
+    assert axes[0][2].get_xlabel()          # alone in its column -> keeps it
+    plt.close(fig)
+
+
 def test_plot_environment_rejects_non_environment():
     from uacpy.visualization.plots.environment import _plot_environment
     with pytest.raises(ConfigurationError, match="Environment"):
