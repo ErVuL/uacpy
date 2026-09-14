@@ -22,6 +22,7 @@ from figure_scripts._common import (deep_water, shallow_water,
 
 import uacpy
 from uacpy.models import Bellhop, Kraken, RAM, RunMode
+from uacpy.visualization.plots import shared_colorbar
 
 # Write into docs/guide/figures/ rather than docs/models/figures/.
 GUIDE = True
@@ -35,10 +36,18 @@ def geometry_to_grid():
     fig, axes = plt.subplots(2, 1, figsize=(9.0, 7.0))
     env.plot(source=source, receiver=receiver, ax=axes[0],
              title='Geometry — source at 25 m, 100 × 250 receiver grid')
-    tl.plot(env=env, source=source, ax=axes[1],
-            title=f'Result — Field{tl.data.shape}, '
-                  f'coords={tuple(tl.coords)}')
+    im = tl.plot(env=env, source=source, ax=axes[1], show_colorbar=False,
+                 title=f'Result — Field{tl.data.shape}, '
+                       f'coords={tuple(tl.coords)}')[1].collections[0]
     fig.tight_layout()
+    # The whole point of the pair is that the lattice drawn on top is the grid
+    # filled in below, so a range must sit above the same range. env.plot puts
+    # its two speed bars in INSET axes precisely so a composite keeps its full
+    # width (environment.py), while the TL bar is taken out of its panel --
+    # which left the lower panel narrower than the one it is being compared
+    # with. The invisible bar takes the identical slice out of the top.
+    fig.colorbar(im, ax=axes[1], fraction=0.046, pad=0.02, label='TL (dB)')
+    fig.colorbar(im, ax=axes[0], fraction=0.046, pad=0.02).ax.set_visible(False)
     return fig
 
 
@@ -54,7 +63,7 @@ def source_depth():
     fig, axes = plt.subplots(3, 1, figsize=(9.0, 9.5), sharex=True, sharey=True)
     for ax, (depth, slab) in zip(axes, stack):
         slab.plot(env=env, source=uacpy.Source(depths=depth, frequencies=50.0),
-                  ax=ax, show_colorbar=(ax is axes[0]))
+                  ax=ax, show_colorbar=False)
         ax.set_title(f'Source depth {depth:.0f} m',
                      fontweight='bold', fontsize=11)
         if ax is not axes[-1]:
@@ -62,6 +71,12 @@ def source_depth():
     fig.suptitle('Deep water, 50 Hz — only the source depth changed',
                  fontweight='bold', fontsize=13)
     fig.tight_layout()
+    # One bar for the whole column: drawn inside the first panel, it
+    # took that panel's width and left the same range sitting at two
+    # different x positions down a figure whose point is the comparison.
+    # After tight_layout, which would otherwise re-expand the panels
+    # back over the room it had just made for the bar.
+    shared_colorbar(fig, axes, label='TL (dB)')
     return fig
 
 
@@ -182,12 +197,18 @@ def beam_pattern():
     for ax, src, label in ((ax_omni, omni, 'beam_pattern=None (omni)'),
                            (ax_beam, beamed, 'beam_pattern=30° beam')):
         model.run(env, src, receiver).plot(
-            env=env, source=src, ax=ax, show_colorbar=(ax is ax_omni))
+            env=env, source=src, ax=ax, show_colorbar=False)
         ax.set_title(label, fontweight='bold', fontsize=11)
     ax_omni.set_xlabel('')
     fig.suptitle('Source directivity — Bellhop, 200 Hz',
                  fontweight='bold', fontsize=13)
     fig.tight_layout()
+    # One bar for the pair, not a bar on the top panel only: these two are
+    # here to be compared, and a colourbar drawn inside one of them made that
+    # panel narrower than the other, so the same range sat at two different x
+    # positions down the figure. After tight_layout, which would otherwise
+    # re-expand the panels back over the bar it had just been given room for.
+    shared_colorbar(fig, (ax_omni, ax_beam), label='TL (dB)')
     return fig
 
 

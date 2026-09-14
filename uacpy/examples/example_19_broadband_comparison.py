@@ -154,7 +154,7 @@ uacpy.plot.compare(compensated, labels=list(fields), value='phase',
 ax_mag.set_xlabel('')
 ax_phase.set_xlabel('Frequency (Hz)', fontweight='bold')
 fig.suptitle(f'Transfer functions — depth {mid_depth:.0f} m, range '
-             f'{TARGET_RANGE / 1000:.0f} km', fontsize=13, fontweight='bold',
+             f'{TARGET_RANGE / 1000:.0f} km', fontsize='large', fontweight='bold',
              y=0.995)
 fig.subplots_adjust(top=0.92, bottom=0.08, left=0.08, right=0.97)
 fig.savefig(OUT / 'example_19_transfer_functions.png', dpi=150,
@@ -200,18 +200,18 @@ fig, axes = plt.subplots(len(traces), 1, figsize=(14, 2.5 * len(traces)),
 window = (arrival_s * 1000 - 250, arrival_s * 1000 + 250)
 for ax, (name, (times_ms, values)) in zip(axes[:, 0], traces.items()):
     ax.plot(times_ms, values, color=f'C{list(traces).index(name) % 10}', lw=0.8)
-    ax.set_ylabel(name, fontsize=10, fontweight='bold')
+    ax.set_ylabel(name, fontsize='medium', fontweight='bold')
     ax.grid(True, alpha=0.3)
     if name != 'Bellhop (chirp)':     # the chirp trace has its own short axis
         ax.set_xlim(*window)
     ax.text(0.98, 0.92, f'max = {np.max(np.abs(values)):.2e}',
-            transform=ax.transAxes, ha='right', va='top', fontsize=8,
+            transform=ax.transAxes, ha='right', va='top', fontsize='small',
             color='gray',
             bbox=dict(boxstyle='round,pad=0.3', fc='white', alpha=0.8))
 axes[-1, 0].set_xlabel('Time (ms)')
 fig.suptitle(f'Time series — depth {TARGET_DEPTH:.0f} m, range '
              f'{TARGET_RANGE / 1000:.0f} km, fc '
-             f'{source.frequencies[0]:.0f} Hz', fontsize=13)
+             f'{source.frequencies[0]:.0f} Hz', fontsize='large')
 fig.tight_layout()
 fig.savefig(OUT / 'example_19_time_series_comparison.png', dpi=150,
             bbox_inches='tight')
@@ -240,7 +240,7 @@ for index, trace in enumerate(sparc.data[0]):          # depth 0 → (n_r, n_t)
     normalised = trace / (np.max(np.abs(trace)) + 1e-30) * 0.8
     ax.plot(times_ms, normalised + index, 'k-', linewidth=0.7)
     ax.text(times_ms[-1] * 1.01, index,
-            f'{sparc_receiver.ranges[index] / 1000:.1f} km', fontsize=8,
+            f'{sparc_receiver.ranges[index] / 1000:.1f} km', fontsize='small',
             va='center')
 ax.set_xlabel('Time (ms)')
 ax.set_ylabel('Range (trace index)')

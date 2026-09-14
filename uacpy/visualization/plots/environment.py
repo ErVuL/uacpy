@@ -234,7 +234,7 @@ def _draw_rdl_bottom(ax_bathy, bottom, r_km, seafloor, z_max_layer,
         label_x = 0.5 * (r_lo + r_hi)
         ax_bathy.text(
             label_x, hs_floor * 0.02, f'P{i_r + 1}',
-            ha='center', va='top', fontsize=9,
+            ha='center', va='top', fontsize='small',
             fontweight='bold', color='dimgray',
             zorder=20,
             bbox=dict(boxstyle='round,pad=0.2',
@@ -557,8 +557,11 @@ def _plot_environment(
         cbar_bottom = fig.colorbar(bottom_sm, cax=bottom_cax,
                                    label='Bottom cp (m/s)')
         for cb in (cbar_water, cbar_bottom):
-            cb.ax.tick_params(labelsize=6)
-            cb.ax.yaxis.label.set_size(7)
+            cb.ax.tick_params(labelsize='xx-small')
+            # Relative like the ticks beside it: an absolute 7 pt here left the
+            # label SMALLER than its own ticks under any profile that raises
+            # font.size (the slide deck's is 20), which reads as a broken axis.
+            cb.ax.yaxis.label.set_size('x-small')
             cb.ax.yaxis.set_major_locator(MaxNLocator(3))
             _speeds_read_absolute(cb)
     else:
@@ -601,7 +604,7 @@ def _plot_environment(
         _draw_sea_ice(ax_bathy, sea_ice)
     ax_bathy.set_title(title if title is not None
                        else f"Bottom — {_bottom_kind(bottom)}",
-                       fontweight='bold', fontsize=12)
+                       fontweight='bold', fontsize='large')
 
     if ax is None:
         credit = _credit_attributions(data_source, carrier=env)
@@ -837,14 +840,14 @@ def plot_bottom_properties(env, *, properties=None, title: Optional[str] = None,
         pcm = ax_p.pcolormesh(r_km, z, grid, cmap=cmap,
                               vmin=vmin, vmax=vmax, shading='auto')
         ax_p.plot(r_km, seafloor_r, color='black', linewidth=1.2, zorder=5)
-        ax_p.set_title(f"{sym}  ({unit})", fontweight='bold', fontsize=11)
+        ax_p.set_title(f"{sym}  ({unit})", fontweight='bold', fontsize='large')
         if idx % ncols == 0:                       # left column only
             ax_p.set_ylabel("Depth (m)")
         if idx + ncols >= n:                       # bottom-most visible per col
             ax_p.set_xlabel("Range (km)")
             ax_p.tick_params(labelbottom=True)
         cb = fig.colorbar(pcm, ax=ax_p, pad=0.015, fraction=0.05)
-        cb.ax.tick_params(labelsize=8)
+        cb.ax.tick_params(labelsize='small')
 
     invert_yaxis_once(axes_flat[0])                # shared → inverts all
     for ax_p in axes_flat[n:]:                     # hide unused cells
@@ -852,7 +855,7 @@ def plot_bottom_properties(env, *, properties=None, title: Optional[str] = None,
 
     fig.suptitle(title if title is not None
                  else f"Seabed properties — {_bottom_kind(bottom)}",
-                 fontweight='bold', fontsize=13)
+                 fontweight='bold', fontsize='large')
     _draw_credit(fig, _credit_attributions(data_source, carrier=env),
                       reserve=False)
     return fig, axes
@@ -908,7 +911,7 @@ def plot_absorption(frequencies, absorption=None, ax=None, *, model=None,
     ax.set_title(title or "Volume absorption", loc="left")
     ax.grid(which="both", alpha=0.3)
     if label is not None:
-        ax.legend(fontsize=8)
+        ax.legend(fontsize='small')
     return fig, ax
 
 
@@ -941,5 +944,5 @@ def _plot_range_profile(profile, *, ax=None, title=None, figsize=(10, 4),
         invert_yaxis_once(ax)
     ax.set_title(title if title is not None
                  else f"{type(profile).__name__} profile",
-                 fontweight='bold', fontsize=12)
+                 fontweight='bold', fontsize='large')
     return fig, ax

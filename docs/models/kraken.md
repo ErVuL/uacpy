@@ -484,11 +484,17 @@ fig, axes = plt.subplots(2, 1, figsize=(9.0, 6.6), sharex=True, sharey=True)
 for ax, coupling in zip(axes, ('adiabatic', 'coupled')):
     tl = Kraken(mode_coupling=coupling, n_segments=12).run(
         env, source, receiver)
-    tl.plot(env=env, source=source, ax=ax,
-            show_colorbar=(ax is axes[0]))
+    tl.plot(env=env, source=source, ax=ax, show_colorbar=False)
+shared_colorbar(fig, axes, label='TL (dB)')
 ```
 
 ![Kraken adiabatic vs coupled](figures/kraken_range_dependent.png)
+
+(`shared_colorbar` is `uacpy.plot.shared_colorbar` — see
+[plotting](../guide/plotting.md). One bar for the pair, rather than one drawn
+inside the upper panel: that would take its width alone and leave the two
+panels' range axes offset from each other, which is the one thing this figure
+must not do.)
 
 **Adiabatic** mode theory assumes each mode keeps its identity as the waveguide
 changes: mode 3 stays mode 3, its shape stretching to fit the local depth, its

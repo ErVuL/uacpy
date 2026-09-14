@@ -222,7 +222,7 @@ def plot_bathymetry_map(
         levels = list(range(0, 6000, 200)) if contours is True else contours
         cs = ax.contour(lons, lats, dm, levels=levels, colors='#0c1830',
                         linewidths=0.8, alpha=0.85, zorder=1.5)
-        ax.clabel(cs, inline=True, fontsize=8)
+        ax.clabel(cs, inline=True, fontsize='small')
 
     if transect is not None:
         (a_lat, a_lon), (b_lat, b_lon) = transect
@@ -248,7 +248,7 @@ def plot_bathymetry_map(
         ax.plot(sp[0], sp[1], zorder=7, **SOURCE_MARKER_STYLE)
 
     fig.colorbar(pc, ax=ax, label="Water depth (m)")
-    ax.set_title(title or "Bathymetry", loc='left', fontsize=11, fontweight='bold')
+    ax.set_title(title or "Bathymetry", loc='left', fontsize='large', fontweight='bold')
     if own_fig:
         credit = _credit_attributions(data_source)
         fig.tight_layout(rect=(0, 0.05, 1, 1) if credit else (0, 0, 1, 1))
@@ -388,7 +388,7 @@ def plot_overview(
                  center_ax=ax_map)
 
     if title:
-        fig.suptitle(title, fontsize=13, fontweight='bold')
+        fig.suptitle(title, fontsize='large', fontweight='bold')
     return fig, (ax_map, ax_tl, ax_env)
 
 
@@ -436,7 +436,7 @@ def plot_sea_ice_map(grid, *, hemi: str = 'N', transect=None, source=None,
             p0 = sea_ice_pixel((lat_c, 0.0), hemi=hemi)
             if p0:
                 ax.annotate(f"{abs(int(lat_c))}°{suffix}", (p0[1], p0[0]),
-                            color='0.25', fontsize=7, ha='center', va='center',
+                            color='0.25', fontsize='x-small', ha='center', va='center',
                             zorder=2, bbox=dict(boxstyle='round,pad=0.1',
                                                 fc='white', ec='none', alpha=0.6))
         lat_s = np.arange(50.0, 89.0, 1.0) * sgn
@@ -475,7 +475,7 @@ def plot_sea_ice_map(grid, *, hemi: str = 'N', transect=None, source=None,
         ax.set_ylim(min(cy + half, ny - 0.5), max(cy - half, -0.5))  # origin='upper'
 
     fig.colorbar(im, ax=ax, label=concentration_label)
-    ax.set_title(title or "Sea-ice concentration", loc='left', fontsize=11,
+    ax.set_title(title or "Sea-ice concentration", loc='left', fontsize='large',
                  fontweight='bold')
     ax.set_xticks([])
     ax.set_yticks([])
@@ -582,7 +582,7 @@ def _draw_graticule(ax, lon_range, lat_range, major, minor, proj):
         ax.set_yticks([proj(la, 0.0)[1] for la in seq(lat_range, minor)], minor=True)
         ax.grid(which='minor', color='1.0', lw=0.3, alpha=0.25, zorder=4)
     ax.grid(which='major', color='1.0', lw=0.6, alpha=0.45, zorder=4)
-    ax.tick_params(which='major', length=5, direction='out', labelsize=9)
+    ax.tick_params(which='major', length=5, direction='out', labelsize='small')
     ax.tick_params(which='minor', length=2.5, direction='out')
     for spine in ax.spines.values():
         spine.set_edgecolor('0.2')

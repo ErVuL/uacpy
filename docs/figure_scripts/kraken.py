@@ -18,6 +18,7 @@ from figure_scripts._common import (
 
 import uacpy
 from uacpy.models import Kraken, RunMode
+from uacpy.visualization.plots import shared_colorbar
 from uacpy.visualization.plots import plot_modes_heatmap
 
 
@@ -151,8 +152,7 @@ def range_dependent():
             warnings.simplefilter('ignore')
             tl = Kraken(mode_coupling=coupling, n_segments=12).run(
                 env, source, receiver)
-        tl.plot(env=env, source=source, ax=ax,
-                show_colorbar=(ax is axes[0]))
+        tl.plot(env=env, source=source, ax=ax, show_colorbar=False)
         ax.set_title(f"mode_coupling='{coupling}' — "
                      f"{tl.metadata['n_profiles']} range segments",
                      fontweight='bold', fontsize=11)
@@ -161,6 +161,12 @@ def range_dependent():
     fig.suptitle('Kraken — range dependence by segmentation, 100 Hz',
                  fontweight='bold', fontsize=13)
     fig.tight_layout()
+    # One bar for the whole column: drawn inside the first panel, it
+    # took that panel's width and left the same range sitting at two
+    # different x positions down a figure whose point is the comparison.
+    # After tight_layout, which would otherwise re-expand the panels
+    # back over the room it had just made for the bar.
+    shared_colorbar(fig, axes, label='TL (dB)')
     return fig
 
 

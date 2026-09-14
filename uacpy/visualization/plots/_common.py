@@ -662,7 +662,7 @@ def _draw_credit(fig, data_attributions=(), *, model=None,
     else:
         x, ha = 0.012, 'left'
     credit = fig.text(x, 0.012, "\n".join(lines), ha=ha, va='bottom',
-                      fontsize=7, color='0.45', linespacing=1.5)
+                      fontsize='x-small', color='0.45', linespacing=1.5)
     if reserve:
         _reserve_credit_margin(fig, credit)
 
@@ -733,7 +733,7 @@ def _draw_sea_ice(ax, sea_ice):
     ax.add_collection(lc)
     # Its own label, below the ice-band's "ice", so the two never overprint.
     ax.text(0.985, 0.86, "sea-ice concentration", transform=ax.transAxes,
-            ha='right', va='top', fontsize=8, style='italic', color='#5b1a8b',
+            ha='right', va='top', fontsize='small', style='italic', color='#5b1a8b',
             zorder=ZORDER_SOURCE)
 
 
@@ -777,7 +777,7 @@ def _draw_surface_boundary(ax, env):
     if drew:
         ax.set_ylim(lo, hi - 1.25 * band)   # headroom above the surface
         ax.text(0.985, 0.93, "ice", transform=ax.transAxes, ha='right',
-                va='top', fontsize=8, style='italic', color='#3a6e8f',
+                va='top', fontsize='small', style='italic', color='#3a6e8f',
                 zorder=ZORDER_SOURCE)
 
 

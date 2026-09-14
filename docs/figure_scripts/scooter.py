@@ -20,6 +20,7 @@ from figure_scripts._common import (
 import uacpy
 from uacpy.io import read_grn_file
 from uacpy.models import Bellhop, Kraken, RunMode, Scooter
+from uacpy.visualization.plots import shared_colorbar
 from uacpy.visualization.plots._common import _cell_edge_extent, _flip_y
 
 
@@ -77,6 +78,13 @@ def greens_function():
     axes[0].set_title(f"$|G(k, z)|$ — {grn['nk']} wavenumbers × "
                       f"{grn['nrd']} depths", fontweight='bold', fontsize=11)
     fig.colorbar(im, ax=axes[0], pad=0.02, label='dB re max')
+    # The bar belongs to the map, so it stays on the top panel -- but it was
+    # taken out of that panel's width ALONE, and these two share an x axis.
+    # The k_bottom / k_water lines drawn on both below therefore printed at
+    # two different x positions, one above the other. An invisible bar takes
+    # the identical slice out of the lower panel, which is what makes the
+    # shared axis actually shared.
+    fig.colorbar(im, ax=axes[1], pad=0.02).ax.set_visible(False)
     top = axes[0].secondary_xaxis(
         'top', functions=(lambda x: 2.0 * np.pi * freq / np.maximum(x, 1e-9),
                           lambda c: 2.0 * np.pi * freq / np.maximum(c, 1e-9)))
@@ -208,6 +216,11 @@ def elastic_seabed():
     axes[1].invert_yaxis()
     axes[1].legend(fontsize=8)
     axes[1].grid(True, alpha=0.3)
+    # The cut IS the map's own row at 50 m, so the two range axes have to line
+    # up; the map's colourbar was taken out of its width alone. An invisible
+    # bar takes the identical slice out of the cut.
+    fig.colorbar(axes[0].collections[0], ax=axes[1],
+                 fraction=0.046, pad=0.02).ax.set_visible(False)
     fig.suptitle('Scooter — layered and elastic seabeds, meshed directly',
                  fontweight='bold', fontsize=13)
     fig.tight_layout()
@@ -276,7 +289,7 @@ def range_collapse():
 
     fig, axes = plt.subplots(2, 1, figsize=(9.0, 6.6), sharex=True,
                              sharey=True)
-    flat.plot(ax=axes[0], source=source, show_colorbar=True)
+    flat.plot(ax=axes[0], source=source, show_colorbar=False)
     axes[0].plot(bathy[:, 0] / 1000.0, bathy[:, 1], color='k',
                  linestyle='--', linewidth=1.6)
     axes[0].set_title(f"Scooter — flat {env.depth:.0f} m "
@@ -291,6 +304,10 @@ def range_collapse():
     fig.suptitle('Scooter — range dependence is collapsed, not modelled, '
                  '100 Hz', fontweight='bold', fontsize=13)
     fig.tight_layout()
+    # Both panels are TL on the package's fixed scale, and the pair exists to
+    # be read against each other -- a bar inside the top one alone made it
+    # narrower and put the same range at two x positions.
+    shared_colorbar(fig, axes, label='TL (dB)')
     return fig
 
 

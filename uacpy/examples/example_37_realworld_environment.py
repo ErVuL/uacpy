@@ -253,7 +253,7 @@ if data.is_installed('sediment') and data.is_installed('crust1'):
     crust_env.plot(ax=axes[1], bottom_colorbar=False, data_source=None)
     axes[1].set_title("CRUST1.0 layered elastic (deep · low-freq)")
     fig.suptitle("Seabed model comparison — grain size vs sediment layers",
-                 fontsize=13, fontweight='bold')
+                 fontsize='large', fontweight='bold')
     fig.tight_layout()
     fig.savefig(OUT / 'example_37_bottom_comparison.png', dpi=130,
                 bbox_inches='tight')
@@ -264,7 +264,7 @@ if data.is_installed('sediment') and data.is_installed('crust1'):
     # for shear, which env.plot() (cp only) omits.
     fig, _ = uacpy.plot.plot_bottom_properties(crust_env, data_source=None)
     fig.suptitle("CRUST1.0 seabed properties along A→B (cp · cs · ρ · αp · αs)",
-                 fontsize=13, fontweight='bold')
+                 fontsize='large', fontweight='bold')
     fig.savefig(OUT / 'example_37_bottom_properties.png', dpi=130,
                 bbox_inches='tight')
     plt.close(fig)

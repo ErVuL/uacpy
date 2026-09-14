@@ -142,7 +142,7 @@ uacpy.plot.plot_radon(velocities, radon_taus, radon, ax=axes[2, 1],
 axes[2, 1].axvline(true_velocity, color='w', ls='--', lw=1.1)
 
 fig.suptitle('Time-frequency, wavenumber and slowness transforms',
-             fontsize=15, fontweight='bold')
+             fontsize='x-large', fontweight='bold')
 fig.savefig(OUT / 'example_30_time_frequency.png', dpi=150,
             bbox_inches='tight')
 plt.close(fig)

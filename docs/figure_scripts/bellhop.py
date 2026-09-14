@@ -15,6 +15,7 @@ from figure_scripts._common import SQUARE, WIDE, shallow_water
 
 import uacpy
 from uacpy.models import Bellhop, RunMode
+from uacpy.visualization.plots import shared_colorbar
 
 
 def tl_field():
@@ -76,13 +77,19 @@ def coherence_modes():
     fig, axes = plt.subplots(3, 1, figsize=(9.0, 9.0), sharex=True, sharey=True)
     for ax, (mode, label) in zip(axes, modes):
         field = Bellhop(n_beams=3000).run(env, source, receiver, run_mode=mode)
-        field.plot(env=env, ax=ax, show_colorbar=(ax is axes[0]))
+        field.plot(env=env, ax=ax, show_colorbar=False)
         ax.set_title(label, fontweight='bold', fontsize=11)
         if ax is not axes[-1]:
             ax.set_xlabel('')
     fig.suptitle('Bellhop — the three TL summation modes',
                  fontweight='bold', fontsize=13)
     fig.tight_layout()
+    # One bar for the whole column: drawn inside the first panel, it
+    # took that panel's width and left the same range sitting at two
+    # different x positions down a figure whose point is the comparison.
+    # After tight_layout, which would otherwise re-expand the panels
+    # back over the room it had just made for the bar.
+    shared_colorbar(fig, axes, label='TL (dB)')
     return fig
 
 

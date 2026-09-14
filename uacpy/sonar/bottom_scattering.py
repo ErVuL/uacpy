@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass, replace
-from typing import Optional
+from typing import Dict, Optional, Union
 
 import numpy as np
 from scipy.special import erf, gamma as _gamma
@@ -374,17 +374,24 @@ class BottomParameters:
                 "boundary with grain_size_phi, and this one has none.",
                 remediation="Use method='geoacoustics' (or 'auto'), or build "
                             "the seabed from a grain size.")
-        if method == 'grain-size' or (method == 'auto' and mz is not None):
+        # method='grain-size' with no Mz already raised above, so the two
+        # routes here are "there is an Mz and we are allowed to use it" and
+        # "fall through to the geoacoustics" -- written that way round so the
+        # non-None Mz is visible at the call rather than inferred from the
+        # earlier raise.
+        if mz is not None and method in ('grain-size', 'auto'):
             return cls.from_grain_size(mz)
-        missing = [name for name in ('sound_speed', 'density', 'attenuation')
-                   if getattr(top, name) is None]
-        if missing:
+        cp, rho, alpha = top.sound_speed, top.density, top.attenuation
+        if cp is None or rho is None or alpha is None:
+            missing = [name for name, value
+                       in (('sound_speed', cp), ('density', rho),
+                           ('attenuation', alpha)) if value is None]
             raise ConfigurationError(
                 f"BottomParameters.from_bottom: the half-space has no "
                 f"{', '.join(missing)}, which the geoacoustics route needs.")
         return cls.from_geoacoustics(
-            sound_speed=top.sound_speed, density=top.density,
-            attenuation_dB_per_wavelength=top.attenuation,
+            sound_speed=cp, density=rho,
+            attenuation_dB_per_wavelength=alpha,
             water_sound_speed=water_sound_speed, water_density=water_density,
             grain_size_phi=mz)
 
@@ -420,7 +427,10 @@ def _rock(speed_ratio: float, spectral_strength: float) -> BottomParameters:
 
 #: TR 9407 Table 2: a ready :class:`BottomParameters` for the rock and cobble
 #: rows, the table's ``Mz`` for every other row (see ``from_sediment``).
-APL_UW_SEDIMENTS = {
+#: Annotated because the two value kinds are the whole point: without it a
+#: checker reads the values as ``object`` and cannot see that the branch after
+#: ``from_sediment``'s ``isinstance`` is left with the grain size.
+APL_UW_SEDIMENTS: Dict[str, Union[BottomParameters, float]] = {
     'rough rock': _rock(2.5, 0.20693),
     'rock': _rock(2.5, 0.01862),
     # w2 read from the scan as 0.0186; 0.0156 reproduces the table's cobble

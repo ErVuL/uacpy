@@ -578,7 +578,7 @@ def _plot_field_2d(
             colors='black', linewidths=1.5, alpha=0.8,
             linestyles='solid',
         )
-        ax.clabel(cs, inline=True, fontsize=9,
+        ax.clabel(cs, inline=True, fontsize='small',
                   fmt=_CONTOUR_FMT.get(value, '%g'))
     if show_colorbar:
         fig.colorbar(im, ax=ax, label=value_label,
@@ -738,7 +738,7 @@ def plot_signal_excess(
                     r_km, depths, Z, levels=[0.0],
                     colors='black', linewidths=1.5, linestyles='solid',
                 )
-                ax.clabel(cs, inline=True, fontsize=9,
+                ax.clabel(cs, inline=True, fontsize='small',
                           fmt=lambda _: 'SE = 0 dB')
     return _finish_sonar_heatmap(
         fig, ax, im, field, env=env, x_label=x_label,
@@ -819,7 +819,7 @@ def plot_detection_probability(
                 r_km, depths, Z, levels=levels,
                 colors='black', linewidths=1.2, linestyles='solid',
             )
-            ax.clabel(cs, inline=True, fontsize=9, fmt='%.1f')
+            ax.clabel(cs, inline=True, fontsize='small', fmt='%.1f')
     sigma = field.metadata.get('sigma_dB')
     pin = _pinned_subtitle(field)
     auto = 'Detection probability'
@@ -1137,7 +1137,7 @@ def compare_models(
     fig.subplots_adjust(left=0.05, right=0.88, top=top, bottom=bottom,
                         wspace=0.22, hspace=0.30)
     if title:
-        fig.suptitle(title, fontsize=14, fontweight='bold', y=0.97)
+        fig.suptitle(title, fontsize='x-large', fontweight='bold', y=0.97)
     _draw_multi_model_credit(fig, fields)
     if im_last is not None:
         # The label the panels would carry if each had drawn its own colorbar:
@@ -1441,7 +1441,7 @@ def plot_field_statistics(
     axes[0].set_xlabel('Field', fontweight='bold')
     axes[0].set_ylabel(f'{_value_label(kept_fields[0], "dB")}',
                        fontweight='bold')
-    axes[0].set_title(f'Level at {depth:g} m', fontweight='bold', fontsize=12)
+    axes[0].set_title(f'Level at {depth:g} m', fontweight='bold', fontsize='large')
     axes[0].set_xticks(x)
     axes[0].set_xticklabels(names, rotation=45, ha='right')
     axes[0].legend()
@@ -1451,7 +1451,7 @@ def plot_field_statistics(
     if n < 2:
         axes[1].text(0.5, 0.5, 'Need at least 2 fields\nfor an RMS comparison',
                      ha='center', va='center', transform=axes[1].transAxes,
-                     fontsize=12)
+                     fontsize='large')
         axes[1].axis('off')
     else:
         rms = np.zeros((n, n))
@@ -1473,7 +1473,7 @@ def plot_field_statistics(
         axes[1].set_yticks(range(n))
         axes[1].set_xticklabels(names, rotation=45, ha='right')
         axes[1].set_yticklabels(names)
-        axes[1].set_title('Pairwise agreement', fontweight='bold', fontsize=12)
+        axes[1].set_title('Pairwise agreement', fontweight='bold', fontsize='large')
         for i in range(n):
             for j in range(n):
                 if i == j:

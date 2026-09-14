@@ -5270,6 +5270,16 @@ class TestModalSpeedPlots:
             plots.plot_dispersion([self._modes_at(100.0),
                                    self._modes_at(100.0)])
 
+    def test_dispersion_takes_a_sequence_not_a_mapping_of_frequency(self):
+        """The parameter is named ``modes_by_frequency`` and the guide read
+        that as a mapping. Iterating a dict yields its KEYS, so the mistake
+        arrives as a float where a result was expected -- say so by name."""
+        sets = [self._modes_at(100.0), self._modes_at(200.0)]
+        fig, ax = plots.plot_dispersion(sets)
+        plt.close(fig)
+        with pytest.raises(ConfigurationError, match='sequence of Modes'):
+            plots.plot_dispersion({m.f0: m for m in sets})
+
     def test_dispersion_rejects_modes_without_a_frequency(self):
         m = self._modes_at(100.0)
         bare = Modes(k=m.k, phi=m.phi, depths=m.depths, model='Test')
@@ -5354,3 +5364,275 @@ class TestGreensFunctionPlot:
     def test_rejects_a_non_modes_overlay(self):
         with pytest.raises(ConfigurationError, match='modes='):
             plots.plot_greens_function(self._grn(), modes=_rays())
+
+
+class TestWavenumberSamplingPlot:
+    """The Hankel transform's sampling: the window that decides which physics
+    is carried, and the step that sets the alias period."""
+
+    def test_window_spans_omega_over_c_high_to_omega_over_c_low(self):
+        f, c_lo, c_hi = 200.0, 1400.0, 1e9
+        fig, ax = plots.plot_wavenumber_sampling(f, c_lo, c_hi, 1e-3)
+        omega = 2 * np.pi * f
+        lo, hi = ax.get_xlim()
+        # c_low sets the LARGEST wavenumber -- the easy one to get backwards.
+        assert hi >= omega / c_lo - 1e-9
+        assert lo <= omega / c_hi + 1e-9
+        plt.close(fig)
+
+    def test_says_the_field_folds_when_r_max_exceeds_the_alias_period(self):
+        dk = 2 * np.pi / 2900.0                      # alias period 2900 m
+        fig, ax = plots.plot_wavenumber_sampling(200.0, 1400.0, 1e9, dk,
+                                                 r_max=5000.0)
+        assert 'BEYOND' in ax.get_title()
+        plt.close(fig)
+
+    def test_says_it_fits_when_r_max_is_inside_the_alias_period(self):
+        dk = 2 * np.pi / 22000.0
+        fig, ax = plots.plot_wavenumber_sampling(200.0, 1400.0, 1e9, dk,
+                                                 r_max=5000.0)
+        # "inside" must NOT be reported as sufficient: this book's own ch05
+        # has a run that is inside the period and still 4.86 dB out.
+        assert 'is inside it' in ax.get_title()
+        assert 'necessary, not sufficient' in ax.get_title()
+        assert 'BEYOND' not in ax.get_title()
+        plt.close(fig)
+
+    def test_alias_period_is_two_pi_over_delta_k(self):
+        fig, ax = plots.plot_wavenumber_sampling(200.0, 1400.0, 1e9, 2 * np.pi / 7000.0)
+        assert '7000' in ax.get_title()
+        plt.close(fig)
+
+    def test_a_seabed_slower_than_the_water_has_no_trapped_band(self):
+        """There is no critical angle, so there is nothing to trap. Drawn
+        blind the span came out reversed and kept the label -- a picture of a
+        trapped band over a channel that has none."""
+        fig, ax = plots.plot_wavenumber_sampling(200.0, 1400.0, 1e9, 1e-3,
+                                                 c_water=1500.0,
+                                                 c_bottom=1450.0)
+        labels = [t.get_text() for t in ax.get_legend().get_texts()]
+        assert any('no trapped band' in t for t in labels), labels
+        plt.close(fig)
+
+    def test_a_faster_seabed_gets_its_trapped_band(self):
+        fig, ax = plots.plot_wavenumber_sampling(200.0, 1400.0, 1e9, 1e-3,
+                                                 c_water=1500.0,
+                                                 c_bottom=1700.0)
+        labels = [t.get_text() for t in ax.get_legend().get_texts()]
+        assert 'trapped band' in labels, labels
+        plt.close(fig)
+
+    def test_rejects_a_window_whose_bounds_are_the_wrong_way_round(self):
+        with pytest.raises(ConfigurationError, match='c_high'):
+            plots.plot_wavenumber_sampling(200.0, 1700.0, 1500.0, 1e-3)
+
+    def test_rejects_a_non_positive_step(self):
+        with pytest.raises(ConfigurationError, match='delta_k'):
+            plots.plot_wavenumber_sampling(200.0, 1400.0, 1e9, 0.0)
+
+    def test_rejects_a_non_positive_marked_speed(self):
+        """The optional marks were unchecked: a truthiness test dropped an
+        explicit 0.0 without a word, and a negative speed drew its line at a
+        negative wavenumber and stretched the axis to reach it."""
+        with pytest.raises(ConfigurationError, match='c_water'):
+            plots.plot_wavenumber_sampling(200.0, 1400.0, 1e9, 1e-3,
+                                           c_water=0.0)
+        with pytest.raises(ConfigurationError, match='c_bottom'):
+            plots.plot_wavenumber_sampling(200.0, 1400.0, 1e9, 1e-3,
+                                           c_bottom=-1700.0)
+
+    def test_rejects_a_non_positive_range(self):
+        with pytest.raises(ConfigurationError, match='r_max'):
+            plots.plot_wavenumber_sampling(200.0, 1400.0, 1e9, 1e-3,
+                                           r_max=-5000.0)
+
+
+class TestMatchedFieldSurface:
+    """``plot_matched_field`` — the ambiguity surface a replica bank scores."""
+
+    @staticmethod
+    def _grid(peak_x=3000.0, peak_z=40.0):
+        x = np.linspace(500.0, 6000.0, 45)
+        z = np.linspace(5.0, 95.0, 25)
+        X, Z = np.meshgrid(x, z)
+        S = np.exp(-(((X - peak_x) / 400.0) ** 2 + ((Z - peak_z) / 8.0) ** 2)) + 0.01
+        return x, z, S
+
+    def test_depth_runs_downward(self):
+        x, z, S = self._grid()
+        fig, ax = plots.plot_matched_field(x, z, S)
+        bottom, top = ax.get_ylim()
+        assert bottom > top
+        plt.close(fig)
+
+    def test_a_second_call_on_a_shared_axis_keeps_depth_downward(self):
+        """The limit is SET, not toggled: ``invert_yaxis`` twice on a shared-y
+        pair would undo itself and draw depth upward with every check passing."""
+        x, z, S = self._grid()
+        fig, ax = plots.plot_matched_field(x, z, S)
+        plots.plot_matched_field(x, z, S, ax=ax)
+        bottom, top = ax.get_ylim()
+        assert bottom > top
+        plt.close(fig)
+
+    def test_the_peak_marker_lands_on_the_maximum(self):
+        x, z, S = self._grid(peak_x=2000.0, peak_z=70.0)
+        fig, ax = plots.plot_matched_field(x, z, S)
+        iz, ix = np.unravel_index(int(np.argmax(S)), S.shape)
+        marked = [line.get_xydata()[0] for line in ax.lines
+                  if line.get_marker() == '+']
+        assert marked, 'no peak marker drawn'
+        assert marked[0][0] == pytest.approx(x[ix] / 1000.0, abs=1e-9)
+        assert marked[0][1] == pytest.approx(z[iz], abs=1e-9)
+        plt.close(fig)
+
+    def test_a_known_source_uses_the_package_source_marker(self):
+        """A true source position is drawn with the same marker every other
+        uacpy plot marks a source with, not a locally invented one."""
+        from uacpy.visualization.style import SOURCE_MARKER_STYLE
+        x, z, S = self._grid()
+        fig, ax = plots.plot_matched_field(x, z, S, true_position=(3000.0, 40.0))
+        stars = [line for line in ax.lines
+                 if line.get_marker() == SOURCE_MARKER_STYLE['marker']]
+        assert len(stars) == 1
+        assert stars[0].get_xydata()[0][0] == pytest.approx(3.0, abs=1e-9)
+        plt.close(fig)
+
+    def test_the_processors_own_four_axis_shape_is_accepted(self):
+        """``Covariance.bartlett`` / ``.mvdr`` return
+        ``(n_frequencies, n_zr, n_xr, n_yr)``. A single-frequency run over a
+        range/depth grid is that shape with 1 at both ends, and it plots
+        without the caller reshaping anything."""
+        x, z, S = self._grid()
+        fig, ax = plots.plot_matched_field(x, z, S[None, :, :, None])
+        plt.close(fig)
+
+    def test_refuses_to_pick_a_frequency_out_of_a_multi_frequency_surface(self):
+        """Frequency is the FIRST axis of the processors' output, so a
+        trailing-axis slice would have taken candidate ranges, not a
+        frequency. Choosing one is the caller's decision either way."""
+        x, z, S = self._grid()
+        multi = np.stack([S, 0.5 * S])[..., None]      # (2, nz, nx, 1)
+        with pytest.raises(ConfigurationError, match='n_frequencies'):
+            plots.plot_matched_field(x, z, multi)
+
+    def test_refuses_to_pick_a_y_plane_out_of_a_three_dimensional_grid(self):
+        """A grid with several ``y`` planes was silently drawn as its first
+        one -- a slice of a search under a title claiming the whole of it."""
+        x, z, S = self._grid()
+        volume = np.repeat(S[None, :, :, None], 3, axis=3)   # (1, nz, nx, 3)
+        with pytest.raises(ConfigurationError, match='y axes'):
+            plots.plot_matched_field(x, z, volume)
+
+    def test_rejects_a_surface_that_does_not_match_the_grid(self):
+        x, z, S = self._grid()
+        with pytest.raises(ConfigurationError, match='replica grid'):
+            plots.plot_matched_field(x, z, S.T)
+
+    def test_rejects_a_surface_with_no_positive_peak(self):
+        x, z, S = self._grid()
+        with pytest.raises(ConfigurationError, match='dB scale'):
+            plots.plot_matched_field(x, z, np.zeros_like(S))
+
+    def test_a_degenerate_candidate_does_not_refuse_the_surface(self):
+        """``mvdr`` writes NaN at a candidate position the forward model put
+        no energy at -- documented behaviour, not a broken run. Taking the
+        peak with ``max`` let one such cell out of thousands refuse the whole
+        picture, and blame the array geometry for it."""
+        x, z, S = self._grid(peak_x=2000.0, peak_z=70.0)
+        S[0, 0] = np.nan
+        fig, ax = plots.plot_matched_field(x, z, S)
+        iz, ix = np.unravel_index(int(np.nanargmax(S)), S.shape)
+        marked = [line.get_xydata()[0] for line in ax.lines
+                  if line.get_marker() == '+']
+        assert marked[0][0] == pytest.approx(x[ix] / 1000.0, abs=1e-9)
+        plt.close(fig)
+
+    def test_a_zero_scored_candidate_lands_on_the_floor_not_at_minus_inf(self):
+        """``bartlett`` scores the same degenerate cell as an exact zero, and
+        ``log10(0)`` is ``-inf`` plus a RuntimeWarning that reached the
+        caller."""
+        x, z, S = self._grid()
+        S[0, 0] = 0.0
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            fig, ax = plots.plot_matched_field(x, z, S, dynamic_range=20.0)
+        drawn = np.asarray(ax.collections[0].get_array())
+        assert np.isfinite(drawn).all()
+        assert float(np.min(drawn)) == pytest.approx(-20.0)
+        plt.close(fig)
+
+    def test_the_marker_key_can_be_dropped_for_a_grid_of_panels(self):
+        x, z, S = self._grid()
+        fig, ax = plots.plot_matched_field(x, z, S, true_position=(3000.0, 40.0),
+                                           show_legend=False)
+        assert ax.get_legend() is None
+        plt.close(fig)
+
+
+class TestAmbiguityDecibelScale:
+    """``plot_ambiguity(dB=True)`` — sidelobes live tens of dB down."""
+
+    @staticmethod
+    def _chi():
+        delays = np.linspace(-0.004, 0.004, 17)
+        doppler = np.linspace(-60.0, 60.0, 13)
+        chi = np.full((doppler.size, delays.size), 0.001)
+        chi[6, 8] = 1.0
+        return delays, doppler, chi
+
+    def test_the_default_stays_linear(self):
+        delays, doppler, chi = self._chi()
+        fig, ax = plots.plot_ambiguity(delays, doppler, chi)
+        assert ax.images[0].get_array().max() == pytest.approx(1.0)
+        plt.close(fig)
+
+    def test_decibels_are_relative_to_the_peak_and_floored(self):
+        delays, doppler, chi = self._chi()
+        fig, ax = plots.plot_ambiguity(delays, doppler, chi,
+                                       dB=True, dynamic_range=40.0)
+        data = ax.images[0].get_array()
+        assert data.max() == pytest.approx(0.0, abs=1e-9)
+        assert data.min() == pytest.approx(-40.0, abs=1e-9)
+        assert ax.images[0].get_clim() == (-40.0, 0.0)
+        plt.close(fig)
+
+    def test_rejects_a_surface_with_no_positive_peak(self):
+        delays, doppler, chi = self._chi()
+        with pytest.raises(ConfigurationError, match='dB scale'):
+            plots.plot_ambiguity(delays, doppler, np.zeros_like(chi), dB=True)
+
+
+class TestBroadbandReflectionOrientation:
+    """``ReflectionCoefficient.plot()`` on a broadband result."""
+
+    @staticmethod
+    def _rc():
+        theta = np.linspace(0.0, 90.0, 31)
+        freqs = np.linspace(50.0, 2000.0, 10)
+        R = np.tile(np.linspace(1.0, 0.0, 31)[:, None], (1, 10))
+        return ReflectionCoefficient(theta=theta, R=R, phi=np.zeros_like(R),
+                                     frequencies=freqs, model='Bounce')
+
+    def test_frequency_is_on_the_abscissa_by_default(self):
+        fig, ax = self._rc().plot()
+        assert 'Frequency' in ax.get_xlabel()
+        assert 'angle' in ax.get_ylabel().lower()
+        plt.close(fig)
+
+    def test_angle_on_x_transposes_both_axes_and_the_data(self):
+        """``R`` is stored ``(angle, frequency)``; the swap reads that layout
+        rather than inferring it from whichever axis length happens to match."""
+        fig, ax = self._rc().plot(angle_on_x=True)
+        assert 'angle' in ax.get_xlabel().lower()
+        assert 'Frequency' in ax.get_ylabel()
+        plt.close(fig)
+
+    def test_hertz_labelling_is_available_for_a_low_band(self):
+        fig, ax = self._rc().plot(angle_on_x=True, frequency_unit='Hz')
+        assert '(Hz)' in ax.get_ylabel()
+        plt.close(fig)
+
+    def test_rejects_an_unknown_frequency_unit(self):
+        with pytest.raises(ConfigurationError, match='frequency_unit'):
+            self._rc().plot(frequency_unit='MHz')

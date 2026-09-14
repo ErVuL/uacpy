@@ -287,8 +287,8 @@ def _rough_interface_sigma(env, interface: int, oass_index_space: bool) -> float
     """RMS roughness (m) of the interface being scattered from.
 
     ``INTFC`` lives in TWO different deck index spaces and
-    ``oases_writer.py:3452-3457`` says outright that they "must not be
-    mixed": OAST/OASS collapse an isovelocity water column to one record, the
+    :func:`~uacpy.io.oases_writer.oass_bottom_interfaces` says outright in its
+    own docstring that they "must not be mixed": OAST/OASS collapse an isovelocity water column to one record, the
     OASP/OASSP decks never do, so the same seafloor is deck layer 3 in one and
     ``2 + n_ssp_rows`` in the other. Looking an OASSP interface up in the OASS
     table therefore indexes past the end of the roughness list and reads 0.0 —

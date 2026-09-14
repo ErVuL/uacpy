@@ -126,7 +126,7 @@ uacpy.plot_field(cerveny, right, env=env, show_colorbar=False,
                  contours=[70, 85, 100],
                  title='Cerveny beams, minimum width\n(with beam shift)')
 uacpy.plot.shared_colorbar(fig, (left, right), label='TL (dB)')
-fig.suptitle('Gaussian vs Cerveny beams', fontsize=16, fontweight='bold')
+fig.suptitle('Gaussian vs Cerveny beams', fontsize='xx-large', fontweight='bold')
 fig.savefig(OUT / 'example_04_beam_comparison.png', dpi=150,
             bbox_inches='tight')
 plt.close(fig)
@@ -137,7 +137,7 @@ uacpy.plot_field(gaussian, left, env=env, show_colorbar=False,
 uacpy.plot_field(line, right, env=env, show_colorbar=False,
                  title="Line source (Cartesian)\nRunType: 'CB XR  '")
 uacpy.plot.shared_colorbar(fig, (left, right), label='TL (dB)')
-fig.suptitle('Point vs line source', fontsize=16, fontweight='bold')
+fig.suptitle('Point vs line source', fontsize='xx-large', fontweight='bold')
 fig.savefig(OUT / 'example_04_source_comparison.png', dpi=150,
             bbox_inches='tight')
 plt.close(fig)
@@ -158,7 +158,7 @@ for ax, (depth, slab) in zip(np.atleast_1d(axes), stack):
             clip_on=False)
 uacpy.plot.shared_colorbar(fig, axes, label='TL (dB)')
 fig.suptitle('Multi-source-depth: one binary call, one ResultStack',
-             fontsize=15, fontweight='bold')
+             fontsize='x-large', fontweight='bold')
 fig.savefig(OUT / 'example_04_multi_source.png', dpi=150, bbox_inches='tight')
 plt.close(fig)
 
@@ -182,7 +182,7 @@ uacpy.plot_field(directional, dir_ax, env=env, show_colorbar=False,
 # as they stand, and a later subplots_adjust moves the panels back over it.
 fig.subplots_adjust(top=0.74)
 uacpy.plot.shared_colorbar(fig, (omni_ax, dir_ax), label='TL (dB)')
-fig.suptitle('Source directivity shapes the field', fontsize=15,
+fig.suptitle('Source directivity shapes the field', fontsize='x-large',
              fontweight='bold')
 fig.savefig(OUT / 'example_04_beam_pattern.png', dpi=150, bbox_inches='tight')
 plt.close(fig)

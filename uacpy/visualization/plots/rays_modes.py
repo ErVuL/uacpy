@@ -162,7 +162,7 @@ def _plot_rays(
             # range, and on a bottom-mounted geometry at the seabed too, so
             # 'lower right' lands exactly on the marker the key explains.
             legend = ax.legend(handles=handles, loc='best',
-                               fontsize=9, framealpha=0.85)
+                               fontsize='small', framealpha=0.85)
             # Matplotlib defaults a legend to zorder 5, under this package's
             # seabed fill, seafloor line, receivers and source: the key ends
             # up drawn beneath the picture it explains.
@@ -342,7 +342,7 @@ def _plot_arrivals(
     if handles:
         # Placed clear of the stems, as _plot_rays places its own: pinned to
         # a corner, it can cover the head marker of the last stem drawn.
-        ax.legend(handles=handles, loc='best', fontsize=9, framealpha=0.85)
+        ax.legend(handles=handles, loc='best', fontsize='small', framealpha=0.85)
     if title:
         ax.set_title(title)
     if _owns_fig:
@@ -394,7 +394,7 @@ def _plot_mode_functions(
     invert_yaxis_once(ax)
     ax.grid(True, alpha=0.3)
     if n_modes <= 12:
-        ax.legend(fontsize=8, loc='best')
+        ax.legend(fontsize='small', loc='best')
     ax.set_title(title or f"Mode functions (n={n_modes})")
     if _owns_fig:
         _draw_result_credit(fig, modes, env=None)
@@ -429,6 +429,118 @@ def plot_mode_wavenumbers(
     ax.set_title(title or 'Modal wavenumbers')
     if _owns_fig:
         _draw_result_credit(fig, modes, env=None)
+    return fig, ax
+
+
+@typed_plot_error
+def plot_wavenumber_sampling(
+    frequency: float,
+    c_low: float,
+    c_high: float,
+    delta_k: float,
+    ax=None,
+    *,
+    r_max: Optional[float] = None,
+    c_water: Optional[float] = None,
+    c_bottom: Optional[float] = None,
+    figsize: Tuple[float, float] = (9, 3.2),
+    title: Optional[str] = None,
+):
+    """Draw the wavenumber axis a Hankel transform is being sampled on.
+
+    The inverse transform of :func:`plot_greens_function`'s ``G(k_r, z)`` back
+    to range is a discrete sum, and both of its sampling choices can ruin the
+    answer silently:
+
+    * the **window** ``[omega/c_high, omega/c_low]`` decides which physics is
+      carried. Closing ``c_high`` below the seabed speed discards trapped
+      modes; raising ``c_low`` discards the steep and evanescent components
+      that build the near field.
+    * the **step** ``Delta k`` sets the alias period ``r_wrap = 2*pi/Delta k``.
+      Energy from beyond ``r_wrap`` folds back inside it, and folded energy is
+      indistinguishable from real energy once it has landed — it makes the
+      field too LOUD, which reads as a physical result rather than an error.
+
+    This draws the window against the wavenumbers that matter — ``omega/c`` in
+    the water and in the seabed, whose interval is the trapped band — and, if
+    ``r_max`` is given, says whether the requested ranges fit inside the alias
+    period.
+
+    Parameters
+    ----------
+    frequency : float
+        Hz.
+    c_low, c_high : float
+        Phase-speed window (m/s). ``k`` runs from ``omega/c_high`` to
+        ``omega/c_low``, so ``c_low`` sets the LARGEST wavenumber.
+    delta_k : float
+        Wavenumber step (rad/m) of the sampled transform.
+    r_max : float, optional
+        Farthest receiver range (m), to test against the alias period.
+    c_water, c_bottom : float, optional
+        Marked on the axis; their interval is the trapped band.
+    """
+    optional = (('r_max', r_max), ('c_water', c_water), ('c_bottom', c_bottom))
+    for name, value in (('frequency', frequency), ('c_low', c_low),
+                        ('c_high', c_high), ('delta_k', delta_k),
+                        *((n, v) for n, v in optional if v is not None)):
+        if not np.isfinite(value) or value <= 0:
+            raise ConfigurationError(
+                f"plot_wavenumber_sampling: {name} must be positive and "
+                f"finite, got {value!r}.")
+    if c_high <= c_low:
+        raise ConfigurationError(
+            f"plot_wavenumber_sampling: c_high ({c_high:g}) must exceed "
+            f"c_low ({c_low:g}) -- they bracket a phase-speed window.")
+
+    omega = 2.0 * np.pi * float(frequency)
+    k_min, k_max = omega / float(c_high), omega / float(c_low)
+    r_wrap = 2.0 * np.pi / float(delta_k)
+
+    _owns_fig = ax is None
+    fig, ax = fig_ax(ax, figsize)
+    ax.axvspan(k_min, k_max, color='C0', alpha=0.15,
+               label=f'sampled window, $\\Delta k$ = {delta_k:.3g} rad/m')
+    for c, label, colour in ((c_bottom, 'seabed', 'C3'), (c_water, 'water', 'C0')):
+        if c is not None:
+            kc = omega / float(c)
+            ax.axvline(kc, color=colour, ls='--', lw=1.2)
+            # Grown UPWARD from the floor, not down from the top: the
+            # legend sits in an upper corner and a speed marked in that half
+            # of the window had its label printed underneath the legend box.
+            ax.text(kc, 0.04, f' {label} $\\omega/c$ = {kc:.3f}', color=colour,
+                    fontsize='small', rotation=90, va='bottom',
+                    transform=ax.get_xaxis_transform())
+    if c_water is not None and c_bottom is not None:
+        # A seabed SLOWER than the water traps nothing -- there is no angle
+        # beyond critical because there is no critical angle. Drawn blind,
+        # the span came out reversed and still carried the label, which is a
+        # picture of a trapped band over a channel that has none.
+        if float(c_bottom) > float(c_water):
+            ax.axvspan(omega / float(c_water), omega / float(c_bottom),
+                       color='C2', alpha=0.12, label='trapped band')
+        else:
+            ax.axvspan(np.nan, np.nan, color='C2', alpha=0.12,
+                       label='no trapped band: seabed is the slower medium')
+
+    ax.set_yticks([])
+    ax.set_xlabel('horizontal wavenumber $k_r$ (rad/m)')
+    note = f'alias period $2\\pi/\\Delta k$ = {r_wrap:.0f} m'
+    if r_max is not None:
+        safe = float(r_max) < r_wrap
+        note += (f'; farthest receiver {float(r_max):.0f} m '
+                 + ('is inside it — necessary, not sufficient: refine until '
+                    'the field stops moving' if safe
+                    else 'is BEYOND it — the field folds'))
+        ax.set_title(title or note,
+                     color=('black' if safe else 'C3'), fontsize='small')
+    else:
+        ax.set_title(title or note, fontsize='small')
+    # Two full-height spans leave no empty corner for 'best' to find, so the
+    # corner is chosen here and the omega/c labels are kept out of it above.
+    ax.legend(loc='upper left', fontsize='small', framealpha=0.9)
+    if _owns_fig:
+        fig.tight_layout()
     return fig, ax
 
 
@@ -544,7 +656,7 @@ def plot_greens_function(
         ax.set_ylabel('$|G|$ (dB re panel max)')
         ax.set_ylim(vmin_db, 5.0)
         ax.set_title(title or
-                     f'Green\'s function at z = {z[j]:g} m, {freq:g} Hz')
+                     f'Green\'s function at z = {z[j]:.1f} m, {freq:g} Hz')
 
     if modes is not None:
         if not isinstance(modes, Modes):
@@ -554,7 +666,7 @@ def plot_greens_function(
         for i, km in enumerate(np.real(np.asarray(modes.k))):
             ax.axvline(km, color='C3', ls=':', lw=0.9, alpha=0.8,
                        label='Kraken $\\mathrm{Re}\\,k_m$' if i == 0 else None)
-        ax.legend(loc='upper right', fontsize=8)
+        ax.legend(loc='upper right', fontsize='small')
 
     ax.set_xlabel('horizontal wavenumber $k_r$ (rad/m)')
     if depth is None:
@@ -616,13 +728,13 @@ def plot_mode_speeds(
         ax.axhline(cb, color='C3', ls='--', lw=1.0)
         n_trapped = int(np.sum(cp <= cb))
         ax.text(0.99, cb, f' seabed $c_p$ = {cb:g} m/s — {n_trapped} trapped',
-                color='C3', fontsize=8, va='bottom', ha='right',
+                color='C3', fontsize='small', va='bottom', ha='right',
                 transform=ax.get_yaxis_transform())
 
     ax.set_xlabel('Mode index $m$')
     ax.set_ylabel('speed (m/s)')
     ax.grid(True, alpha=0.3)
-    ax.legend(loc='best', fontsize=8)
+    ax.legend(loc='best', fontsize='small')
     ax.set_title(title or f'Modal speeds at {modes.f0:g} Hz'
                  if modes.f0 else (title or 'Modal speeds'))
     if _owns_fig:
@@ -722,8 +834,8 @@ def plot_dispersion(
     ax.set_xlabel('frequency (Hz)')
     ax.set_ylabel('speed (m/s)')
     ax.grid(True, alpha=0.3)
-    ax.legend(loc='best', fontsize=8, title='solid: phase   dashed: group',
-              title_fontsize=7)
+    ax.legend(loc='best', fontsize='small', title='solid: phase   dashed: group',
+              title_fontsize='x-small')
     ax.set_title(title or 'Modal dispersion')
     if _owns_fig:
         _draw_result_credit(fig, sets[0], env=None)
@@ -840,11 +952,23 @@ def _plot_reflection_coefficient(
     figsize: Tuple[float, float] = (8, 5),
     title: Optional[str] = None,
     show_phase: bool = False,
+    angle_on_x: bool = False,
+    frequency_unit: str = 'kHz',
+    cmap: str = 'viridis',
+    vmin: Optional[float] = None,
+    vmax: Optional[float] = None,
+    show_colorbar: bool = True,
 ):
     """Auto-detect narrowband (line) vs broadband (heatmap) reflection coefficient.
 
     ``show_phase=True`` overlays the phase ``φ(θ)`` on a twin y-axis
-    when the input is narrowband (single frequency)."""
+    when the input is narrowband (single frequency).
+
+    For the broadband map, ``angle_on_x=True`` puts grazing angle on the
+    abscissa so the map can sit beside a narrowband ``|R|(θ)`` panel on a
+    shared axis, and ``frequency_unit='Hz'`` labels the other axis in hertz --
+    a band of tens to thousands of hertz reads as 0.02-2 on a kHz axis.
+    ``show_colorbar=False`` leaves the bar to the caller."""
     if not isinstance(rc, ReflectionCoefficient):
         raise ConfigurationError(
             f"_plot_reflection_coefficient: expected ReflectionCoefficient, "
@@ -853,14 +977,28 @@ def _plot_reflection_coefficient(
     if rc.is_broadband:
         _owns_fig = ax is None
         fig, ax = fig_ax(ax, figsize)
+        if frequency_unit not in ('kHz', 'Hz'):
+            raise ConfigurationError(
+                f"_plot_reflection_coefficient: frequency_unit must be 'kHz' "
+                f"or 'Hz', got {frequency_unit!r}")
         freqs = np.asarray(rc.frequencies, dtype=float)
-        im = ax.pcolormesh(
-            freqs / 1000.0, rc.theta, rc.R,
-            shading='nearest', cmap='viridis',
-        )
-        fig.colorbar(im, ax=ax, label='|R|')
-        ax.set_xlabel('Frequency (kHz)')
-        ax.set_ylabel('Grazing angle (°)')
+        scale = 1000.0 if frequency_unit == 'kHz' else 1.0
+        f_axis, f_label = freqs / scale, f'Frequency ({frequency_unit})'
+        # rc.R is (angle, frequency); pcolormesh wants C indexed (y, x), so the
+        # orientation is read off the result's documented layout rather than
+        # inferred from which axis length happens to match.
+        if angle_on_x:
+            x, y, C = rc.theta, f_axis, rc.R.T
+            xlabel, ylabel = 'Grazing angle (°)', f_label
+        else:
+            x, y, C = f_axis, rc.theta, rc.R
+            xlabel, ylabel = f_label, 'Grazing angle (°)'
+        im = ax.pcolormesh(x, y, C, shading='nearest', cmap=cmap,
+                           vmin=vmin, vmax=vmax)
+        if show_colorbar:
+            fig.colorbar(im, ax=ax, label='|R|')
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel(ylabel)
         ax.set_title(title or 'Reflection coefficient |R(θ, f)|')
         if _owns_fig:
             _draw_result_credit(fig, rc, env=None)

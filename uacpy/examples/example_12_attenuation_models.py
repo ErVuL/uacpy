@@ -75,7 +75,7 @@ axes[2].semilogx(frequencies / 1000, francois - thorp, 'g-', linewidth=2.5)
 axes[2].axhline(0, color='k', ls='--', lw=1, alpha=0.5)
 axes[2].set_xlabel('Frequency (kHz)', fontweight='bold')
 axes[2].set_ylabel('Difference (dB/km)', fontweight='bold')
-axes[2].set_title('Francois-Garrison − Thorp', fontweight='bold', fontsize=14)
+axes[2].set_title('Francois-Garrison − Thorp', fontweight='bold', fontsize='x-large')
 axes[2].grid(True, alpha=0.3)
 axes[2].set_xlim([frequencies[0] / 1000, frequencies[-1] / 1000])
 
@@ -110,7 +110,7 @@ for ax, (label, values, baseline, colour, evaluate) in zip(axes.flat, sweeps):
     ax.set_xlabel(label, fontweight='bold')
     ax.set_ylabel('Attenuation (dB/km)', fontweight='bold')
     ax.set_title(f'{label.split(" (")[0]} effect', fontweight='bold',
-                 fontsize=12)
+                 fontsize='large')
     ax.legend()
     ax.grid(True, alpha=0.3)
     print(f"    {label:<18} {alpha.min():.3f} to {alpha.max():.3f} dB/km "
@@ -148,7 +148,7 @@ ax.plot(ranges_km, per_km * ranges_km, 'b-', linewidth=2.5)
 ax.set_xlabel('Range (km)', fontweight='bold')
 ax.set_ylabel('Total attenuation loss (dB)', fontweight='bold')
 ax.set_title(f'Cumulative attenuation vs range ({PROBE_HZ / 1000:.0f} kHz)',
-             fontweight='bold', fontsize=12)
+             fontweight='bold', fontsize='large')
 ax.grid(True, alpha=0.3)
 fig.tight_layout()
 fig.savefig(OUT / 'example_12c_unit_conversions.png', dpi=150,

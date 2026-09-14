@@ -2665,6 +2665,69 @@ def test_every_public_sonar_name_appears_in_the_reference_manual():
     assert missing == []
 
 
+@requires_docs
+def test_every_public_plotter_is_documented():
+    """Every plotter exported from ``uacpy.visualization`` appears in the
+    plotting guide.
+
+    Only ``uacpy.sonar`` had a coverage gate, so a new plotter could ship with
+    no row in the guide's table and a fully green suite -- ``plot_matched_field``
+    did exactly that. The comparison is against ``__all__``, never a
+    hand-written list here, which would have the same blind spot it is fixing.
+
+    "Not a submodule" rather than a ``plot_``/``draw_`` prefix, for the same
+    reason: the prefix is a hand-written rule, and it silently excused
+    ``compare``, ``compare_models``, ``shared_colorbar``, ``animate_field``
+    and ``save_animation`` -- 54 names checked out of 59 exported.
+    """
+    import types
+    import uacpy.visualization as viz
+    text = (DOCS_DIR / "guide" / "plotting.md").read_text(encoding="utf-8")
+    plotters = [n for n in viz.__all__
+                if not isinstance(getattr(viz, n), types.ModuleType)]
+    assert plotters, "no plotters found to check"
+    missing = [n for n in plotters if not re.search(rf'\b{re.escape(n)}\b', text)]
+    assert missing == [], (
+        f"{len(missing)} plotter(s) exported but absent from "
+        f"docs/guide/plotting.md: {missing}")
+
+    # The reference manual names them all too, and had drifted by six:
+    # plot_absorption, the three mode/Green's-function plotters, and the two
+    # added with this gate. Gating only the guide would have left it drifting.
+    manual = (DOCS_DIR.parent / "DOCUMENTATION.md").read_text(encoding="utf-8")
+    absent = [n for n in plotters if not re.search(rf'\b{re.escape(n)}\b', manual)]
+    assert absent == [], (
+        f"{len(absent)} plotter(s) exported but absent from "
+        f"DOCUMENTATION.md: {absent}")
+
+
+@requires_docs
+def test_the_plotter_count_the_guide_advertises_matches_the_package():
+    """The plotting reference opens by counting itself. That sentence had
+    drifted to 54 against 59 exported plotters: a reader checking whether a
+    name exists would conclude the page listed them all when it did not, and
+    the two plotters added alongside this gate widened the gap rather than
+    caused it. Both halves of the sentence are pinned, since the second is
+    what makes the first checkable.
+    """
+    import types
+    import uacpy
+    plot = uacpy.plot
+    submodules = [n for n in plot.__all__
+                  if isinstance(getattr(plot, n), types.ModuleType)]
+    plotters = [n for n in plot.__all__ if n not in submodules]
+    text = (DOCS_DIR / "guide" / "plotting.md").read_text(encoding="utf-8")
+    m = re.search(r"All (\d+) plotters in `uacpy\.plot\.__all__`[^0-9]+"
+                  r"(\d+) remaining names", text)
+    assert m, "the reference section's opening sentence has moved or changed"
+    assert int(m.group(1)) == len(plotters), (
+        f"docs/guide/plotting.md advertises {m.group(1)} plotters; "
+        f"uacpy.plot exports {len(plotters)}")
+    assert int(m.group(2)) == len(submodules), (
+        f"docs/guide/plotting.md advertises {m.group(2)} submodule names; "
+        f"uacpy.plot exports {len(submodules)}")
+
+
 def test_the_data_package_scopes_its_cache_first_claim_to_one_source():
     """``uacpy.data``'s docstring promised "cache-first (a locally installed
     dataset is sampled before any network call)", which ``fetch_environment``'s

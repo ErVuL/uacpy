@@ -158,7 +158,7 @@ def plot_constellation(constellation, ax=None, *, scheme="", annotate=True,
         bps = int(np.ceil(np.log2(len(c))))
         for label, pt in enumerate(c):
             ax.annotate(format(label, f"0{bps}b"), (pt.real, pt.imag),
-                        textcoords="offset points", xytext=(6, 4), fontsize=8)
+                        textcoords="offset points", xytext=(6, 4), fontsize='small')
     _iq_axes(ax)
     ax.set_title(title or f"{scheme} constellation".strip(), loc="left")
     if own_fig:

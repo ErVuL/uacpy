@@ -108,7 +108,7 @@ for ax, (a, b) in zip(axes, [('RAM', 'Bellhop'), ('RAM', 'Kraken'),
                              ('Bellhop', 'Kraken')]):
     uacpy.plot.plot_field_difference(fields[a], fields[b], ax, env=env,
                                      title=f'{a} − {b}')
-fig.suptitle('Pairwise differences (signed, dB)', fontsize=13,
+fig.suptitle('Pairwise differences (signed, dB)', fontsize='large',
              fontweight='bold')
 fig.tight_layout()
 fig.savefig(OUT / 'example_05_differences.png', dpi=150)

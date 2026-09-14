@@ -17,6 +17,7 @@ from figure_scripts._common import TALL, WIDE, layered_elastic
 
 import uacpy
 from uacpy.models import Bellhop, Bounce, RunMode
+from uacpy.visualization.plots import shared_colorbar
 
 # One angular grid for every figure. ``c_high=1e9`` zeroes BOUNCE's minimum
 # wavenumber, which is what buys coverage all the way down to 0° grazing; a
@@ -228,13 +229,19 @@ def bellhop_route():
     for ax, auto, label in zip(axes, (True, False), labels):
         tl = Bellhop(n_beams=6000, auto_bounce=auto).run(
             env, source, receiver, run_mode=RunMode.COHERENT_TL)
-        tl.plot(env=env, ax=ax, show_colorbar=(ax is axes[0]))
+        tl.plot(env=env, ax=ax, show_colorbar=False)
         ax.set_title(label, fontweight='bold', fontsize=10)
         if ax is not axes[-1]:
             ax.set_xlabel('')
     fig.suptitle('Bellhop over a layered seabed, with and without auto-BOUNCE',
                  fontweight='bold', fontsize=12)
     fig.tight_layout()
+    # One bar for the whole column: drawn inside the first panel, it
+    # took that panel's width and left the same range sitting at two
+    # different x positions down a figure whose point is the comparison.
+    # After tight_layout, which would otherwise re-expand the panels
+    # back over the room it had just made for the bar.
+    shared_colorbar(fig, axes, label='TL (dB)')
     return fig
 
 

@@ -84,7 +84,7 @@ fig, ax = uacpy.plot.plot_ppsd(
 # The check: the analytic curve the realisation came from, over its own PPSD.
 ax.semilogx(wenz.frequencies, wenz.total, color='magenta', linewidth=2.0,
             label='Wenz total (analytic)')
-ax.legend(loc='upper right', fontsize=9, framealpha=0.85)
+ax.legend(loc='upper right', fontsize='small', framealpha=0.85)
 fig.savefig(OUT / 'example_09_ppsd.png', dpi=150, bbox_inches='tight')
 plt.close(fig)
 

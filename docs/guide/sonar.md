@@ -991,8 +991,11 @@ ocean, the replicas from another.
 
 ![Matched-field ambiguity surfaces](figures/sonar_matched_field.png)
 
-Four surfaces on a common −20 dB colour floor, with the true source starred and
-each processor's own peak circled.
+Four surfaces on one −20 dB colour scale — each is
+`plot_matched_field(replica_ranges, replica_depths, surface, …)`, which is in
+dB **re its own peak**, so the bar reads the same on all four — with the true
+source under uacpy's red star and each processor's own peak under a black
+cross.
 
 | | Bartlett | MVDR, `diagonal_loading=1e-3` |
 |---|---|---|

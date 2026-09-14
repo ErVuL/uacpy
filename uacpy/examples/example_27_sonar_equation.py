@@ -180,6 +180,6 @@ plt.close(fig)
 fig, ax = uacpy.plot.plot_roc([1.0, 2.0, 3.0, 4.0, 5.0],
                               title='ROC — Gaussian detector')
 ax.axvline(1e-4, color='k', ls='--', lw=1, alpha=0.6)
-ax.text(1.1e-4, 0.05, 'Pfa = 1e-4', fontsize=8)
+ax.text(1.1e-4, 0.05, 'Pfa = 1e-4', fontsize='small')
 fig.savefig(OUT / 'example_27_roc.png', dpi=150, bbox_inches='tight')
 plt.close(fig)

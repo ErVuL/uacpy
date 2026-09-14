@@ -146,7 +146,7 @@ for row, (case, per_model) in enumerate(fields.items()):
     axes[row, 3].set_xlabel('Range (km)')
     axes[row, 3].set_ylabel('TL (dB)')
     axes[row, 3].invert_yaxis()
-    axes[row, 3].legend(fontsize=8)
+    axes[row, 3].legend(fontsize='small')
     axes[row, 3].grid(True, alpha=0.3)
     axes[row, 3].set_title(f'{case} — TL at {mid_depth:.0f} m')
 
@@ -163,7 +163,7 @@ fig.suptitle('Range-dependent bottom — adiabatic vs coupled modes vs RAM\n'
              f'n_segments=2, window {receiver.ranges[0] / 1000:.0f}-'
              f'{receiver.ranges[-1] / 1000:.0f} km of a '
              f'{BATHYMETRY[0, 1]:.0f}-{BATHYMETRY[-1, 1]:.0f} m slope',
-             fontsize=13, fontweight='bold', y=0.995)
+             fontsize='large', fontweight='bold', y=0.995)
 # Margins first: each bar takes its space from the panels as they stand, so a
 # subplots_adjust after them would move the panels back over the bars.
 fig.subplots_adjust(left=0.05, top=0.90, bottom=0.06, wspace=0.18, hspace=0.30)

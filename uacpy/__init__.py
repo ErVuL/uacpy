@@ -98,6 +98,10 @@ _LAZY_ATTRS = {
     'plot_field': ('uacpy.visualization.plots', 'plot_field'),
     'plot_overview': ('uacpy.visualization.plots', 'plot_overview'),
     'compare_models': ('uacpy.visualization.plots', 'compare_models'),
+    'plot_mode_speeds': ('uacpy.visualization.plots', 'plot_mode_speeds'),
+    'plot_dispersion': ('uacpy.visualization.plots', 'plot_dispersion'),
+    'plot_greens_function': ('uacpy.visualization.plots', 'plot_greens_function'),
+    'plot_wavenumber_sampling': ('uacpy.visualization.plots', 'plot_wavenumber_sampling'),
 }
 
 
@@ -125,6 +129,8 @@ if _TYPE_CHECKING:
     from uacpy.parallel import Job, ParallelResult, run_parallel  # noqa: F401
     from uacpy.visualization.plots import (  # noqa: F401
         compare_models, plot_field, plot_overview, plot_result,
+        plot_mode_speeds, plot_dispersion, plot_greens_function,
+        plot_wavenumber_sampling,
     )
 
 
@@ -182,6 +188,8 @@ __all__ = [
     'models',
     'plot',
     'plot_result', 'plot_field', 'plot_overview', 'compare_models',
+    'plot_mode_speeds', 'plot_dispersion', 'plot_greens_function',
+    'plot_wavenumber_sampling',
     'io',
     'parallel',
     'visualization',

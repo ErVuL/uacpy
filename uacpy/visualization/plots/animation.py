@@ -176,7 +176,7 @@ def animate_field(
 
     time_label = ax.text(
         0.98, 0.96, '', transform=ax.transAxes,
-        ha='right', va='top', fontsize=9,
+        ha='right', va='top', fontsize='small',
         bbox=dict(boxstyle='round,pad=0.3', fc='white', alpha=0.85),
         zorder=ZORDER_SOURCE + 1,
     )
@@ -411,16 +411,16 @@ def plot_time_snapshots(
             # From the source out to the far edge of the last painted cell.
             ax.set_xlim(0, max(extent[:2]))
             if i == 0:
-                ax.set_title(f"t = {times[k] * 1000:.0f} ms", fontsize=10)
+                ax.set_title(f"t = {times[k] * 1000:.0f} ms", fontsize='medium')
             if j == 0:
-                ax.set_ylabel(f"{name}\nDepth (m)", fontsize=10)
+                ax.set_ylabel(f"{name}\nDepth (m)", fontsize='medium')
             if i == n_models - 1:
-                ax.set_xlabel('Range (km)', fontsize=9)
+                ax.set_xlabel('Range (km)', fontsize='small')
             else:
                 ax.set_xticklabels([])
 
     if title is not None:
-        fig.suptitle(title, fontsize=11, fontweight='bold')
+        fig.suptitle(title, fontsize='large', fontweight='bold')
     fig.tight_layout()
     # The source star sits on the left limit and widens it by its own half
     # width, measured in the panel's pixels — so it is drawn once the layout

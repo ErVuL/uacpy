@@ -133,5 +133,5 @@ def plot_roc(deflection=None, ax=None, *, pfa=None, pd=None, n_points=200,
     ax.set_title(title or "Receiver operating characteristic", loc="left")
     ax.grid(which="both", alpha=0.3)
     if ax.get_legend_handles_labels()[0]:
-        ax.legend(loc="lower right", fontsize=8)
+        ax.legend(loc="lower right", fontsize='small')
     return fig, ax

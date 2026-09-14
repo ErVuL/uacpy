@@ -25,10 +25,11 @@ from uacpy import sonar
 from uacpy.models import Bellhop, Kraken, RunMode
 from uacpy.visualization.plots import (
     plot_detection_probability,
+    plot_matched_field,
     plot_roc,
     plot_signal_excess,
+    shared_colorbar,
 )
-from uacpy.visualization.plots._common import _cell_edge_extent, _flip_y
 
 GUIDE = True
 
@@ -106,23 +107,35 @@ def _csdm(modes, seed=0, snr_dB=10.0, n_snapshots=50):
     return sonar.csdm(e[:, None] * phases + noise)
 
 
-def _draw_surface(ax, surface, title, *, extra='', floor_dB=-20.0):
-    """One normalised ambiguity surface with truth and estimate marked."""
-    dB = 10.0 * np.log10(np.clip(surface / np.nanmax(surface),
-                                 10.0 ** (floor_dB / 10.0), None))
-    im = ax.imshow(
-        dB, aspect='auto', cmap='turbo', vmin=floor_dB, vmax=0.0,
-        extent=_flip_y(_cell_edge_extent(CAND_RANGES / 1e3, CAND_DEPTHS)))
+def _draw_surface(ax, surface, title, *, extra='', show_legend=False):
+    """One ambiguity surface, drawn by the package's own plotter.
+
+    This was hand-rolled until :func:`~uacpy.plot.plot_matched_field` existed:
+    its own imshow, its own dB normalisation, its own truth star and estimate
+    ring, and two PRIVATE helpers imported for the extent. The page now shows
+    the call a reader would make, and the markers read as they do everywhere
+    else in uacpy -- the red source star, and a black cross for the estimate.
+    """
     iz, ir = np.unravel_index(np.nanargmax(surface), surface.shape)
-    ax.plot(TRUE_RANGE / 1e3, TRUE_DEPTH, '*', mfc='w', mec='k', ms=15,
-            mew=0.8, label='true source')
-    ax.plot(CAND_RANGES[ir] / 1e3, CAND_DEPTHS[iz], 'o', mfc='none', mec='k',
-            ms=15, mew=3.0, label='estimate')
-    ax.plot(CAND_RANGES[ir] / 1e3, CAND_DEPTHS[iz], 'o', mfc='none', mec='w',
-            ms=15, mew=1.2)
-    ax.set_title(f'{title}\nestimate ({CAND_DEPTHS[iz]:.0f} m, '
-                 f'{CAND_RANGES[ir] / 1e3:.2f} km){extra}', fontsize=10)
-    return im
+    plot_matched_field(
+        CAND_RANGES, CAND_DEPTHS, surface, ax=ax, cmap='turbo',
+        dynamic_range=20.0, true_position=(TRUE_RANGE, TRUE_DEPTH),
+        show_colorbar=False, show_legend=show_legend,
+        title=f'{title}\nestimate ({CAND_DEPTHS[iz]:.0f} m, '
+              f'{CAND_RANGES[ir] / 1e3:.2f} km){extra}')
+
+
+def _outer_labels_only(axes):
+    """Keep the axis labels the plotter set on the outer panels of a grid.
+
+    ``sharex``/``sharey`` hide the tick labels, not the axis labels, so every
+    panel would otherwise repeat "Candidate range (km)" over a blank strip.
+    """
+    grid = np.atleast_2d(axes)
+    for ax in grid[:-1].ravel():
+        ax.set_xlabel('')
+    for ax in grid[:, 1:].ravel():
+        ax.set_ylabel('')
 
 
 # ── figures ──────────────────────────────────────────────────────────────────
@@ -439,18 +452,15 @@ def matched_field():
     ]
     fig, axes = plt.subplots(2, 2, figsize=(11.5, 7.6), sharex=True,
                              sharey=True)
-    for ax, (title, surface) in zip(axes.ravel(), panels):
-        im = _draw_surface(ax, surface, title)
-        fig.colorbar(im, ax=ax, label='Normalised power (dB)',
-                     fraction=0.046, pad=0.02)
-    for ax in axes[1]:
-        ax.set_xlabel('Range (km)')
-    for ax in axes[:, 0]:
-        ax.set_ylabel('Depth (m)')
-    axes[0, 0].legend(fontsize=8, loc='upper right', framealpha=0.9)
+    for i, (ax, (title, surface)) in enumerate(zip(axes.ravel(), panels)):
+        # The marker key once, on the first panel: it is the same two markers
+        # on all four, and all four are on the one dB-re-peak scale below.
+        _draw_surface(ax, surface, title, show_legend=(i == 0))
+    _outer_labels_only(axes)
     fig.suptitle('Matched-field ambiguity surfaces — 16-element VLA, 200 Hz',
-                 fontweight='bold', fontsize=12)
+                 fontweight='bold', fontsize='large')
     fig.tight_layout()
+    shared_colorbar(fig, axes, label='dB re peak')
     return fig
 
 
@@ -477,20 +487,17 @@ def replica_banks():
 
     K = _csdm(modes)
     fig, axes = plt.subplots(1, 2, figsize=(11.5, 4.6), sharey=True)
-    for ax, title, bank in (
+    for i, (ax, title, bank) in enumerate((
             (axes[0], 'replica_bank — Kraken modes', modal_bank),
-            (axes[1], 'replica_bank_from_field — Bellhop', ray_bank)):
+            (axes[1], 'replica_bank_from_field — Bellhop', ray_bank))):
         surface = sonar.bartlett(K, bank)
-        im = _draw_surface(ax, surface, title,
-                           extra=f' · peak {surface.max():.2f}')
-        fig.colorbar(im, ax=ax, label='Normalised power (dB)',
-                     fraction=0.046, pad=0.02)
-        ax.set_xlabel('Range (km)')
-    axes[0].set_ylabel('Depth (m)')
-    axes[0].legend(fontsize=8, loc='upper right', framealpha=0.9)
+        _draw_surface(ax, surface, title, show_legend=(i == 0),
+                      extra=f' · peak {surface.max():.2f}')
+    _outer_labels_only(axes[None, :])
     fig.suptitle('Bartlett on the same data, from two replica engines',
-                 fontweight='bold', fontsize=12)
+                 fontweight='bold', fontsize='large')
     fig.tight_layout()
+    shared_colorbar(fig, axes, label='dB re peak')
     return fig
 
 

@@ -13,10 +13,12 @@ from uacpy.core.constants import (REFERENCE_PRESSURE_AIR,
                                   REFERENCE_PRESSURE_WATER)
 from uacpy.core.acoustics import power_to_dB
 from uacpy.core.exceptions import ConfigurationError
-from uacpy.visualization.plots._common import (_cell_edge_extent, _flip_y,
+from uacpy.visualization.plots._common import (ZORDER_LEGEND, ZORDER_SOURCE,
+                                               _cell_edge_extent, _flip_y,
                                                _require_nonempty,
                                                fig_ax, typed_plot_error,
                                                _plot_warn)
+from uacpy.visualization.style import SOURCE_MARKER_STYLE
 
 
 def _require_image_grid(arr, n0, n1, caller, name0, name1):
@@ -135,7 +137,7 @@ def draw_sound_cone(ax, f_max, k_max, sound_speed, *, color="w", ls="--",
     ax.plot([0, k], [0, f], color=color, ls=ls, lw=lw, alpha=alpha)
     ax.plot([0, -k], [0, f], color=color, ls=ls, lw=lw, alpha=alpha)
     if label:
-        ax.text(k, f, f" {c:.0f} m/s", color=color, fontsize=8,
+        ax.text(k, f, f" {c:.0f} m/s", color=color, fontsize='small',
                 va="top", ha="right")
 
 
@@ -230,7 +232,7 @@ def draw_slowness_line(ax, tau_max, sound_speed, *, color="w", ls="--",
         ax.axvline(sgn * p_skm, color=color, ls=ls, lw=lw, alpha=alpha)
     if label:
         ax.text(p_skm, tau_max, f" {sound_speed:.0f} m/s", color=color,
-                fontsize=8, va="bottom", ha="left")
+                fontsize='small', va="bottom", ha="left")
 
 
 @typed_plot_error
@@ -603,20 +605,136 @@ def plot_angular_spectrum(angles_deg, spectrum, ax=None, *, dB=True, label=None,
 
 
 @typed_plot_error
-def plot_ambiguity(delays_s, doppler_hz, chi, ax=None, *, cmap="jet",
+def plot_matched_field(x_m, z_m, surface, ax=None, *, dynamic_range=20.0,
+                       cmap="viridis", true_position=None, mark_peak=True,
+                       title=None, figsize=(8, 5), show_colorbar=True,
+                       show_legend=True, **mpl_kw):
+    """Matched-field ambiguity surface over a replica grid, in dB re its peak.
+
+    Consumes the candidate-position axes a replica set carries
+    (``replicas.replica_x`` / ``replica_z``, in metres) and the processor
+    output of ``Covariance.bartlett`` / ``Covariance.mvdr``.
+    ``true_position`` is an ``(x_m, z_m)`` pair, marked with the package's
+    source star for comparison, and ``**mpl_kw`` goes to the pcolormesh.
+
+    Both processors return ``(n_frequencies, n_zr, n_xr, n_yr)`` -- frequency
+    FIRST, ``y`` last -- so a single-frequency run over a range/depth grid
+    squeezes straight to the ``(z, x)`` plane this draws. Anything left over
+    is refused rather than sliced: choosing a frequency or a ``y`` plane is
+    the caller's decision, and a plotter making it silently would draw one
+    slice of a search under a title claiming the whole of it.
+
+    A degenerate candidate position -- one the forward model put no energy at
+    -- is part of the contract, not a broken surface: ``mvdr`` writes NaN
+    there and ``bartlett`` an exact zero. Both are drawn, the NaN as the
+    colormap's "bad" colour and the zero on the floor; only a surface with no
+    positive value anywhere is refused. ``show_legend=False`` drops the marker
+    key, for a grid of panels that needs it once.
+    """
+    x = np.asarray(x_m, dtype=float)
+    z = np.asarray(z_m, dtype=float)
+    _require_nonempty('plot_matched_field', x_m=x, z_m=z)
+    raw = np.asarray(surface)
+    # Squeeze drops the length-1 frequency and y axes a single-frequency run
+    # over a range/depth grid carries, whichever end they sit at.
+    S = np.real(np.squeeze(raw))
+    if S.ndim != 2:
+        raise ConfigurationError(
+            f"plot_matched_field: surface is {raw.shape}, which is not one "
+            f"(z, x) plane once its length-1 axes are dropped. "
+            f"Covariance.bartlett / .mvdr return "
+            f"(n_frequencies, n_zr, n_xr, n_yr), so index the frequency and "
+            f"y axes you want -- e.g. surface[0, :, :, 0] -- before plotting.")
+    if S.shape != (z.size, x.size):
+        raise ConfigurationError(
+            f"plot_matched_field: surface is {S.shape}, but the replica grid "
+            f"is (z, x) = ({z.size}, {x.size}). Pass the same replica set the "
+            f"processor was run against.")
+    # nanmax, not max: mvdr writes NaN at a candidate position the forward
+    # model put no energy at, so one degenerate cell out of thousands used to
+    # refuse the whole surface -- and blame the array geometry for it.
+    finite = np.isfinite(S)
+    peak = float(np.max(S[finite])) if finite.any() else float('nan')
+    if not np.isfinite(peak) or peak <= 0.0:
+        raise ConfigurationError(
+            f"plot_matched_field: the surface peaks at {peak}, so a dB scale "
+            f"relative to it is undefined. Check the covariance and replicas "
+            f"come from the same array geometry.")
+    # A matched-field processor carries no absolute reference -- MVDR's
+    # pseudo-power least of all -- so 0 dB is the best-matching candidate
+    # position, not a level. Clipped to the floor before the log because
+    # bartlett scores that same degenerate cell as an exact zero, and
+    # log10(0) is -inf plus a RuntimeWarning.
+    floor = 10.0 ** (-abs(dynamic_range) / 10.0)
+    SdB = 10.0 * np.log10(np.clip(S / peak, floor, None))
+    fig, ax = fig_ax(ax, figsize)
+    im = ax.pcolormesh(x / 1000.0, z, SdB, cmap=cmap, vmin=-abs(dynamic_range),
+                       vmax=0.0, shading='auto', **mpl_kw)
+    if true_position is not None:
+        # A known source position is a source: same red star every other uacpy
+        # plot marks one with, so it reads the same across the package.
+        tx, tz = true_position
+        ax.plot(float(tx) / 1000.0, float(tz), zorder=ZORDER_SOURCE,
+                label='true position', **SOURCE_MARKER_STYLE)
+    if mark_peak:
+        # The estimate, kept visually distinct from the truth marker: black
+        # reads on the bright cell a peak sits in, on any of the sequential
+        # colormaps this plot is used with. Drawn ABOVE the star and after it,
+        # because the case worth reading is the one where they coincide -- a
+        # star painted over the cross hid the estimate exactly when the
+        # picture's point was that the estimate had landed.
+        iz, ix = np.unravel_index(int(np.nanargmax(S)), S.shape)
+        ax.plot(x[ix] / 1000.0, z[iz], '+', color='black', ms=13, mew=2.2,
+                zorder=ZORDER_SOURCE + 1, label='peak')
+    if show_colorbar:
+        fig.colorbar(im, ax=ax, label='dB re peak')
+    ax.set_xlabel('Candidate range (km)')
+    ax.set_ylabel('Candidate depth (m)')
+    ax.set_title(title or 'Matched-field ambiguity surface', loc='left')
+    # Depth downward, set as an explicit descending limit rather than
+    # invert_yaxis(): a shared-y pair would call this once per axis and the
+    # second call would undo the first.
+    ax.set_ylim(float(np.max(z)), float(np.min(z)))
+    if show_legend and (mark_peak or true_position is not None):
+        # One row, not a block: a heatmap fills its axes, so 'best' has no
+        # empty corner to find and any multi-row box lands on the surface --
+        # on the deck it covered a third of it, directly over the peak.
+        ax.legend(loc='upper center', ncol=2, fontsize='small',
+                  framealpha=0.85).set_zorder(ZORDER_LEGEND)
+    return fig, ax
+
+
+@typed_plot_error
+def plot_ambiguity(delays_s, doppler_hz, chi, ax=None, *, dB=False,
+                   dynamic_range=40.0, cmap="jet",
                    title=None, figsize=(8, 6), show_colorbar=True, **mpl_kw):
     """Range-Doppler ambiguity surface ``|chi|``. Consumes
-    :func:`ambiguity_function` output."""
+    :func:`ambiguity_function` output. ``dB=True`` shows it relative to its
+    peak over ``dynamic_range`` decibels."""
     amp = _require_image_grid(np.abs(np.asarray(chi)), len(doppler_hz),
                               len(delays_s), "plot_ambiguity",
                               "doppler_hz", "delays_s")
+    label = "|χ|"
+    if dB:
+        # The sidelobe structure IS the reason to draw an ambiguity surface,
+        # and it sits tens of dB down, where a linear |chi| is uniformly black.
+        peak = float(np.max(amp))
+        if not np.isfinite(peak) or peak <= 0.0:
+            raise ConfigurationError(
+                f"plot_ambiguity: the surface peaks at {peak}, so a dB scale "
+                f"relative to it is undefined.")
+        floor = 10.0 ** (-abs(dynamic_range) / 20.0)
+        amp = 20.0 * np.log10(np.maximum(amp / peak, floor))
+        mpl_kw.setdefault("vmin", -abs(dynamic_range))
+        mpl_kw.setdefault("vmax", 0.0)
+        label = "|χ| (dB re peak)"
     fig, ax = fig_ax(ax, figsize)
     im = ax.imshow(amp, aspect="auto", origin="lower",
                    extent=_cell_edge_extent(np.asarray(delays_s) * 1e3,
                                             doppler_hz),
                    cmap=cmap, **mpl_kw)
     if show_colorbar:
-        fig.colorbar(im, ax=ax, label="|χ|")
+        fig.colorbar(im, ax=ax, label=label)
     ax.set_title(title or "Ambiguity surface", loc="left")
     ax.set_xlabel("Delay (ms)")
     ax.set_ylabel("Doppler (Hz)")

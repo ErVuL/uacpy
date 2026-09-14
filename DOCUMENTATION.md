@@ -1490,10 +1490,12 @@ in a `from … import` statement use the real modules
 | `env.plot()` | SSP + seafloor cross-section, optional `source=`/`receiver=` markers |
 | `ssp.plot()` / `env.ssp.plot()` | sound-speed profile `c(z)` as a depth-down line (one per range if range-dependent). `label=` / `color=` overlay several profiles on one `ax=`: an explicit colour draws the whole profile in it and drops the range colourbar, and the label names the profile rather than each column. `legend=` forces the legend on or off |
 | `bathymetry.plot()` / `altimetry.plot()` | seafloor depth / sea-surface height vs range — the shape carriers |
-| `absorption.plot(frequencies)` | volume absorption `α(f)` (dB/km, log-log) |
+| `absorption.plot(frequencies)` / `plot_absorption(frequencies, …)` | volume absorption `α(f)` (dB/km, log-log); the free function also takes a precomputed `absorption=` array and a `model=` name for the credit line |
 | `plot_bottom_properties(env)` | seabed `c` / `ρ` / `α` vs depth, per layer stack |
 | `source.plot_beam_pattern()` / `plot_beam_pattern(pattern)` | source directivity from a `.sbp` table or an `(N, 2)` array; polar by default, oriented like the field (0° = increasing range, +angle downward) and spanning the propagating half-plane. `polar=False` gives level-vs-angle, `mirror=True` reflects a half-defined table |
 | `plot_mode_wavenumbers(modes)` / `plot_modes_heatmap(modes)` | Re and Im of the modal wavenumbers against mode index (twin axes) · mode shapes as a heatmap |
+| `plot_mode_speeds(modes, c_bottom=…)` / `plot_dispersion(modes_by_frequency)` | phase speed per mode index, with the group speed where the backend filled it and the seabed speed marking the trapped count · the same two speeds against frequency, over a **sequence** of `Modes` (one per frequency), which it sorts by each result's own `f0` |
+| `plot_greens_function(grn, modes=…)` / `plot_wavenumber_sampling(f, c_low, c_high, delta_k, r_max=…)` | `|G(k_r, z)|` from a Scooter `.grn`, with Kraken's eigenvalues marked on it · the wavenumber axis that transform is sampled on — the phase-speed window against the water and seabed `ω/c`, and whether the receivers fit inside the alias period `2π/Δk` |
 | `plot_signal_excess(field)` / `plot_detection_probability(field)` / `plot_roc(deflection)` | `uacpy.sonar` field maps and the ROC curve |
 | `plot_bathymetry_map(lats, lons, depth)` / `plot_sea_ice_map(grid)` | geographic maps (also the pluggable `map_fn=` of `plot_overview`) |
 | `plot_overview(env, map_args, tl=…, title=…)` | three-panel map + TL + environment composite; `map_title`/`tl_title`/`env_title` name the panels, `title=` the figure |
@@ -1529,8 +1531,10 @@ builds its own three-panel figure and returns `(fig, [ax1, ax2, ax3])`.
 - **Time-frequency:** `plot_cwt`, `plot_wigner_ville`, `plot_cepstrum`.
 - **Constant-Q:** `plot_constant_q_spectrogram`, `plot_constant_q_psd`,
   `plot_constant_q_ppsd`.
-- **Arrays / active / system-ID:** `plot_angular_spectrum`, `plot_ambiguity`,
-  `plot_frf`, `plot_coherence`, `plot_impulse_response_info`.
+- **Arrays / active / system-ID:** `plot_angular_spectrum`, `plot_ambiguity`
+  (`dB=True` for the sidelobes, which sit tens of dB down), `plot_matched_field`
+  (a `Covariance.bartlett` / `.mvdr` surface over a replica grid, dB re its own
+  peak), `plot_frf`, `plot_coherence`, `plot_impulse_response_info`.
 - **Comms:** `plot_channel`, `plot_constellation`, `plot_scatter`,
   `plot_eye_diagram`, `plot_ber_curve`, `plot_convergence`, `plot_sync_metric`,
   `plot_doppler_ambiguity`, `plot_subcarriers`.
@@ -1653,7 +1657,22 @@ TS, RL. The `*_field` helpers map the equation over a model TL
 | Target strength | `ts_sphere`, `ts_cylinder`, `ts_plate`, `ts_ellipsoid`, `ts_convex` |
 | Scattering / reverb | `lambert_bottom`, `LAMBERT_MU_DB`, `chapman_harris_surface`, `column_scattering_strength`, `boundary_reverberation`, `volume_reverberation`, `total_reverberation` |
 | High-frequency boundary scattering (APL-UW TR 9407, 10–100 kHz) | `apl_uw_bottom_backscatter`, `apl_uw_bottom_loss`, `apl_uw_surface_backscatter`, `BottomParameters` (`.from_sediment` / `.from_grain_size` / `.from_geoacoustics` / `.from_bottom` / `.from_environment`), `APL_UW_SEDIMENTS` |
+| Interface roughness (coherent reflection) | `rayleigh_parameter`, `coherent_reflection_factor`, `perturbative_grazing_limit` |
 | Matched-field localization | `synthesize_replica`, `replica_bank`, `replica_bank_from_field`, `csdm`, `bartlett`, `mvdr` |
+
+`rayleigh_parameter` is the RMS phase deviation a rough interface imposes,
+`P = 2kσ·sin θ` with θ the **grazing** angle (JKPS Sect. 1.7, where it is `Γ`):
+`P ≪ 1` is an acoustically smooth boundary, `P ≳ 1` one that scatters most of
+what reaches it. `coherent_reflection_factor` is the `exp(−P²/2)` that a
+smooth-interface reflection coefficient is multiplied by (JKPS eq. 1.79) — the
+energy it removes has gone into the incoherent field, which is reverberation,
+so it is a redistribution and not a loss. Because that factor is itself a
+small-roughness result it decays far faster than reality once `P` passes 1;
+`perturbative_grazing_limit` solves `P = 1` for θ and returns the steepest
+grazing angle at which the treatment still has a claim (90° when `2kσ ≤ 1`,
+i.e. perturbative everywhere). That last one is the form a full-field run
+needs, since such a run has no single grazing angle but a spectrum of them —
+it is what the OASES rough-interface warning reports.
 
 `apl_uw_bottom_backscatter` and `apl_uw_surface_backscatter` are the handbook's
 seabed (Kirchhoff + composite roughness + large roughness + sediment volume)

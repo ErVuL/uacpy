@@ -124,7 +124,7 @@ bounce.plot(ax=axes[1, 0])
 critical = np.degrees(np.arccos(env.ssp.data.min() / bottom.sound_speed))
 axes[1, 0].axvline(critical, color='r', ls='--', lw=1.5, alpha=0.7)
 axes[1, 0].text(critical + 2, 0.5, f'critical\n≈{critical:.1f}°', color='red',
-                fontsize=9)
+                fontsize='small')
 
 labels = ['Kraken (auto)', 'Scooter (BOUNCE)']
 mid_range = float(np.median(kraken_tl.ranges))
@@ -137,7 +137,7 @@ uacpy.plot.compare([kraken_tl.at(range=mid_range),
                    title=f'TL vs depth at {mid_range / 1000:.1f} km')
 
 fig.suptitle('Elastic boundaries — Kraken auto-detection against '
-             'BOUNCE → Scooter', fontsize=14, fontweight='bold')
+             'BOUNCE → Scooter', fontsize='x-large', fontweight='bold')
 fig.tight_layout()
 fig.savefig(OUT / 'example_15_elastic_boundaries_comparison.png', dpi=150,
             bbox_inches='tight')

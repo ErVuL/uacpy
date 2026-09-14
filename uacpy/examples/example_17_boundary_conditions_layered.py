@@ -144,7 +144,7 @@ for index, (label, field) in enumerate(fields.items()):
     if index % 4:                     # depth label on the left column only
         ax.set_ylabel('')
 axes.flat[-1].axis('off')
-fig.suptitle('Boundary conditions — surface and bottom', fontsize=14,
+fig.suptitle('Boundary conditions — surface and bottom', fontsize='x-large',
              fontweight='bold', y=0.995)
 # Margins first: the bar takes its space from the panels as they stand, so a
 # subplots_adjust after it would move the panels back over it.

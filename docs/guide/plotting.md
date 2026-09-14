@@ -59,7 +59,7 @@ and forwards the rest of your keywords to the plotter it picked:
 | `Rays` | the ray fan, coloured by boundary interaction | `_plot_rays` |
 | `Arrivals` | amplitude-vs-delay stems; `dB=True` draws the level axis instead, bounded `dynamic_range` dB (default 60) under the loudest arrival | `_plot_arrivals` |
 | `Modes` | the depth eigenfunctions ψ(z) | `_plot_mode_functions` |
-| `ReflectionCoefficient` | \|R(θ)\| (and phase with `show_phase=True`) | `_plot_reflection_coefficient` |
+| `ReflectionCoefficient` | \|R(θ)\| (and phase with `show_phase=True`); broadband draws \|R(θ,f)\| as a heatmap, with `angle_on_x=True` to share an angle axis with a narrowband panel, `frequency_unit='Hz'`, `vmin`/`vmax`, `cmap` and `show_colorbar` | `_plot_reflection_coefficient` |
 | `Covariance` | the CSDM as an image | `_plot_covariance` |
 | `Replicas` | the replica field | `_plot_replicas` |
 
@@ -364,10 +364,17 @@ ax_tl = fig.add_subplot(gs[0, 1])
 bellhop.plot(env=env, source=source, ax=ax_tl, title='Bellhop TL')
 ax_tl.axhline(CUT_DEPTH, color='white', lw=1.2, ls='--')
 
+ax_cut = fig.add_subplot(gs[1, 1])
 uacpy.plot.compare(
     [bellhop.at(depth=CUT_DEPTH), kraken.at(depth=CUT_DEPTH)],
-    labels=['Bellhop', 'Kraken'], ax=fig.add_subplot(gs[1, 1]),
+    labels=['Bellhop', 'Kraken'], ax=ax_cut,
     title=f'compare() — TL at {CUT_DEPTH:g} m')
+
+# The cut is the map's own row, so the two range axes have to line up — and
+# `bellhop.plot` took its colourbar out of the map's width alone.
+fig.canvas.draw()
+b_map, b_cut = ax_tl.get_position(), ax_cut.get_position()
+ax_cut.set_position([b_map.x0, b_cut.y0, b_map.width, b_cut.height])
 ```
 
 Three rules make this work:
@@ -477,7 +484,7 @@ detection probability and the ROC.
 
 ## 7. Reference — every public plotter
 
-All 54 plotters in `uacpy.plot.__all__` — the 8 remaining names in `__all__`
+All 59 plotters in `uacpy.plot.__all__` — the 8 remaining names in `__all__`
 are the submodules themselves. **ax** marks a single-axes plotter you can
 compose with. Every entry takes `title=` except `plot_result` (it forwards
 yours), `shared_colorbar` (a colorbar on an existing figure) and the two
@@ -508,10 +515,19 @@ yours), `shared_colorbar` (a colorbar on an existing figure) and the two
 |---|---|---|
 | `plot_mode_wavenumbers(modes, ax=None)` | ✓ | `Re(k_m)` vs mode index, with `Im(k_m)` when non-zero → [Kraken](../models/kraken.md) |
 | `plot_modes_heatmap(modes, n_modes=None, ax=None, …)` | ✓ | ψ_m(z) as a (depth, mode index) image |
+| `plot_mode_speeds(modes, ax=None, c_bottom=None, …)` | ✓ | phase speed per mode index, plus group speed when the result carries it |
+| `plot_dispersion(modes_by_frequency, ax=None, n_modes=3, …)` | ✓ | phase and group speed vs frequency — the dispersion diagram |
+| `plot_greens_function(grn, ax=None, frequency_index=0, depth=None, modes=None, vmin_db=-60, …)` | ✓ | \|G(k_r, z)\| from a Scooter `.grn`; `modes=` marks the trapped eigenvalues on it |
+| `plot_wavenumber_sampling(frequency, c_low, c_high, delta_k, ax=None, r_max=None, …)` | ✓ | the k_r axis a Hankel transform is sampled on, with the wrap-around limit `r_max` implies |
 
 Ray fans, arrival stems, mode functions, covariance, replicas and reflection
 coefficients have no public free plotter — they are reached through
-`result.plot()` (§1).
+`result.plot()` (§1). `plot_dispersion` is the exception that needs several
+results at once: it takes a sequence of `Modes`, one per frequency — it sorts
+them by each result's own `f0`, so the caller need not — because a dispersion
+curve is not a property of any single run. Group speed is only
+drawn where the backend filled it — `krakenc` does, `kraken` prints zeros
+(see [Kraken](../models/kraken.md)).
 
 ### Source
 
@@ -586,7 +602,8 @@ Every one consumes the output of the same-named routine in
 | `plot_radon(moveout, taus, R, ax=None, kind='linear', …)` | ✓ | `radon_transform` |
 | `draw_sound_cone(ax, f_max, k_max, sound_speed, …)` | overlay | the `f = c·k/2π` cone on an f-k axis |
 | `draw_slowness_line(ax, tau_max, sound_speed, …)` | overlay | `p = ±1/c` on a τ-p axis |
-| `plot_ambiguity(delays_s, doppler_hz, chi, ax=None, …)` | ✓ | `ambiguity_function` — range-Doppler surface |
+| `plot_ambiguity(delays_s, doppler_hz, chi, ax=None, dB=False, dynamic_range=40, …)` | ✓ | `ambiguity_function` — range-Doppler surface; `dB=True` shows it re its peak, where the sidelobes are |
+| `plot_matched_field(x_m, z_m, surface, ax=None, dynamic_range=20, true_position=None, …)` | ✓ | a matched-field ambiguity surface over a replica grid (`Covariance.bartlett` / `.mvdr`). Draws one (z, x) plane: those return `(n_frequencies, n_zr, n_xr, n_yr)`, so index the frequency and y axes yourself when either is longer than 1 |
 | `plot_angular_spectrum(angles_deg, spectrum, ax=None, dB=True, …)` | ✓ | a Bartlett / MVDR / MUSIC spectrum → [arrays](arrays.md) |
 | `plot_frf(frequencies, tf, ax=None, tag='', …)` | 2-tuple | `FRF` — magnitude (dB) over phase (deg) |
 | `plot_coherence(frequencies, coh, ax=None, …)` | ✓ | `FRF` coherence vs frequency |

@@ -107,7 +107,7 @@ for ax, (name, field) in zip(axes, ambiguity.items()):
     ax.plot(candidate_ranges[range_index] / 1e3,
             candidate_depths[depth_index], 'o', mfc='none', mec='w', ms=12,
             mew=2, label='estimate')
-    ax.legend(loc='upper right', fontsize=8)
+    ax.legend(loc='upper right', fontsize='small')
 # Both panels are on the same -15..0 dB window, so one bar describes both.
 uacpy.plot.shared_colorbar(fig, axes, label='Normalised power [dB re max]')
 fig.suptitle("Matched-field localization — KRAKEN replicas "

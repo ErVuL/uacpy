@@ -119,7 +119,7 @@ for ax in axes:
     ax.set_ylabel('Depth (m)')
     ax.legend()
     ax.grid(True, alpha=0.3)
-fig.suptitle('Mode evolution: shelf to slope', fontsize=16, fontweight='bold')
+fig.suptitle('Mode evolution: shelf to slope', fontsize='xx-large', fontweight='bold')
 fig.tight_layout()
 fig.savefig(OUT / 'example_06_modes.png', dpi=150, bbox_inches='tight')
 plt.close(fig)
@@ -138,7 +138,7 @@ plt.close(fig)
 
 fig, _ = uacpy.plot.plot_modes_heatmap(shelf_modes, mode_range=None,
                                        normalize=True, figsize=(14, 8))
-fig.suptitle('All shelf mode shapes', fontsize=14, fontweight='bold')
+fig.suptitle('All shelf mode shapes', fontsize='x-large', fontweight='bold')
 fig.savefig(OUT / 'example_06_modes_heatmap.png', dpi=150, bbox_inches='tight')
 plt.close(fig)
 

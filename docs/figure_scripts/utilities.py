@@ -19,6 +19,7 @@ import uacpy
 from uacpy.core import acoustics
 from uacpy.metrics import tl_bias, tl_max_error, tl_rmse
 from uacpy.models import Bellhop, Kraken, RunMode
+from uacpy.visualization.plots import plot_field_difference
 
 # Write into docs/guide/figures/ rather than docs/models/figures/.
 GUIDE = True
@@ -151,14 +152,15 @@ def cross_model_metrics():
     kraken.plot(env=env, ax=axes[1], show_colorbar=True)
     axes[1].set_title('Kraken — normal modes', fontweight='bold', fontsize=11)
 
-    difference = np.asarray(bellhop.dB) - np.asarray(kraken.dB)
-    mesh = axes[2].pcolormesh(receiver.ranges / 1000.0, receiver.depths,
-                              difference, cmap='RdBu_r', vmin=-20.0, vmax=20.0,
-                              shading='auto')
-    axes[2].set_xlabel('Range (km)')
-    axes[2].set_ylabel('Depth (m)')
-    axes[2].set_title('Bellhop − Kraken (dB)', fontweight='bold', fontsize=11)
-    fig.colorbar(mesh, ax=axes[2], label='ΔTL (dB)')
+    # The package's own residual panel rather than a hand-rolled pcolormesh:
+    # that version's colourbar took matplotlib's default fraction/pad, roughly
+    # three times the width plot_field gives its own, so the difference panel
+    # came out narrower than the two TL panels it sits under and the ranges
+    # did not line up down the column.
+    plot_field_difference(bellhop, kraken, ax=axes[2], env=env,
+                          diff_vmax=20.0, title='Bellhop − Kraken (dB)')
+    axes[2].set_title('Bellhop − Kraken (dB)', fontweight='bold',
+                      fontsize=11)
     for ax in axes:
         ax.axvline(window[0] / 1000.0, color='k', linestyle='--', linewidth=1.0)
         if ax is not axes[-1]:

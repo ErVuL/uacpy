@@ -27,6 +27,7 @@ from uacpy.visualization.plots.animation import (
 from uacpy.visualization.plots.rays_modes import (
     _plot_rays, _plot_arrivals, _plot_mode_functions, plot_mode_wavenumbers,
     plot_mode_speeds, plot_dispersion, plot_greens_function,
+    plot_wavenumber_sampling,
     plot_modes_heatmap, _plot_reflection_coefficient, _plot_covariance,
     plot_beam_pattern,
     _plot_replicas,
@@ -43,6 +44,7 @@ from uacpy.visualization.plots.signal import (
     plot_spectrogram, plot_cwt, plot_wigner_ville, plot_cepstrum,
     plot_constant_q_spectrogram, plot_constant_q_psd, plot_constant_q_ppsd,
     plot_band_levels, plot_angular_spectrum, plot_ambiguity,
+    plot_matched_field,
     plot_frf, plot_coherence, plot_impulse_response_info,
 )
 from uacpy.visualization.plots.comms import (
@@ -117,6 +119,7 @@ __all__ = [
     'plot_mode_wavenumbers',
     'plot_mode_speeds',
     'plot_greens_function',
+    'plot_wavenumber_sampling',
     'plot_dispersion',
     'plot_modes_heatmap',
     'plot_beam_pattern',
@@ -138,6 +141,7 @@ __all__ = [
     'plot_band_levels',
     'plot_angular_spectrum',
     'plot_ambiguity',
+    'plot_matched_field',
     'plot_frf',
     'plot_coherence',
     'plot_impulse_response_info',

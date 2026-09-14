@@ -16,6 +16,7 @@ from figure_scripts._common import (deep_water, shallow_water,
 
 import uacpy
 from uacpy.acoustic_signal import lfm_chirp, psd, spectrogram
+from uacpy.visualization.plots import shared_colorbar
 from uacpy.comms import Modulator, awgn, constellation
 from uacpy.models import Bellhop, Kraken, RunMode
 
@@ -58,6 +59,13 @@ def dispatch():
     fig.suptitle('Carriers and results plot themselves — .plot() everywhere',
                  fontweight='bold', fontsize=13)
     fig.tight_layout()
+    # The TL panel's colourbar is taken out of ITS cell alone, so the
+    # panel above it (whose speed bars are insets, by design) ended up
+    # wider and the same range printed at two x positions. Invisible
+    # bars take the identical slice out of the other cells.
+    im = axes[1][0].collections[0]
+    for ax in (axes[0][0], axes[0][1], axes[1][1]):
+        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.02).ax.set_visible(False)
     return fig
 
 
@@ -131,11 +139,27 @@ def overlays():
     tl.plot(env=env, source=source, receiver=receiver, ax=axes[2],
             show_colorbar=False,
             title='+ source=, receiver=  —  the run geometry')
+    # Say what the empty band is. `env=` extends the axis to the whole water
+    # column while the receiver grid stops at 60 m, so 60-100 m is blank
+    # because nothing was ASKED for there -- which is the figure's point, and
+    # which an unlabelled white strip reads as missing data instead.
+    # get_YaxisTransform: x in axes fraction (centre it), y in DATA (the
+    # middle of the blank band). The x-axis transform is the other way round
+    # and printed the note at 0.5 km, half of it outside the panel.
+    axes[1].text(0.5, 80.0,
+                 'blank because the receiver grid stops at 60 m — '
+                 'no data was asked for here',
+                 transform=axes[1].get_yaxis_transform(),
+                 ha='center', va='center', fontsize='small', style='italic',
+                 color='0.35')
     for ax in axes:
         ax.title.set_fontsize(10)
     fig.suptitle('A result carries no Environment — overlays are explicit',
                  fontweight='bold', fontsize=12)
     fig.tight_layout()
+    # All three panels are TL on the package's fixed scale and none of them
+    # drew a bar, so the figure had no colour key at all.
+    shared_colorbar(fig, axes, label='TL (dB)')
     return fig
 
 
@@ -179,14 +203,24 @@ def composition():
     bellhop.plot(env=env, source=source, ax=ax_tl, title='Bellhop TL')
     ax_tl.axhline(CUT_DEPTH, color='white', lw=1.2, ls='--')
 
+    ax_cut = fig.add_subplot(gs[1, 1])
     uacpy.plot.compare(
         [bellhop.at(depth=CUT_DEPTH), kraken.at(depth=CUT_DEPTH)],
-        labels=['Bellhop', 'Kraken'], ax=fig.add_subplot(gs[1, 1]),
+        labels=['Bellhop', 'Kraken'], ax=ax_cut,
         title=f'compare() — TL at {CUT_DEPTH:g} m')
     for ax in fig.axes:
         ax.title.set_fontsize(10)
     fig.suptitle('ax= composes: every plotter draws into axes you own',
                  fontweight='bold', fontsize=13)
+    # The cut below the map is the map's own row at CUT_DEPTH, so their range
+    # axes have to line up -- and the TL colourbar was taken out of the map's
+    # width alone. This figure lays itself out with an explicit gridspec and
+    # never calls tight_layout, so the invisible-bar trick the other composites
+    # use does not equalise here (a real bar also reserves room for its ticks
+    # and label; an empty one does not). Copy the map's x-extent onto the cut.
+    fig.canvas.draw()
+    b_map, b_cut = ax_tl.get_position(), ax_cut.get_position()
+    ax_cut.set_position([b_map.x0, b_cut.y0, b_map.width, b_cut.height])
     return fig
 
 

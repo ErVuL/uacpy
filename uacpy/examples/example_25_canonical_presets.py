@@ -49,7 +49,7 @@ for preset in ('clay', 'silt', 'sand', 'gravel', 'moraine',
 axes[1].set_xlabel('Grazing angle (°)')
 axes[1].set_ylabel('Bottom loss (dB)')
 axes[1].set_title('Plane-wave bottom loss')
-axes[1].legend(loc='upper right', fontsize=9)
+axes[1].legend(loc='upper right', fontsize='small')
 axes[1].grid(True, alpha=0.3)
 
 fig.tight_layout()

@@ -327,7 +327,12 @@ rc.plot()
 ![OASR broadband reflection](figures/oases_oasr_broadband.png)
 
 `ReflectionCoefficient.plot()` switches from line to heatmap on its own when
-the result is broadband. Read the picture as: above about 300 Hz and below the
+the result is broadband. `R` is stored `(angle, frequency)`, and the plotter
+reads that layout rather than inferring it from which axis length happens
+to match, so `angle_on_x=True` transposes safely — use it to stand the map
+beside a single-frequency \|R(θ)\| panel on one shared abscissa, with
+`frequency_unit='Hz'` when the band is tens to thousands of hertz rather
+than kilohertz. Read the picture as: above about 300 Hz and below the
 sand's critical angle, `arccos(1490/1650) = 25.4°`, the stack is a near-perfect
 mirror; past the critical angle each fringe is another half-wavelength fitting
 into the 8 m layer, so the fringes crowd together as frequency rises. A seabed's
