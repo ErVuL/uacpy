@@ -13,7 +13,7 @@ from typing import Optional, Tuple
 
 from uacpy.core.units import km_to_m
 from uacpy.visualization.style import SOURCE_MARKER_STYLE
-from uacpy.visualization.plots._common import _cell_edge_extent, _credit_attributions, _default_value, _draw_credit, _draw_sea_ice, _model_attribution, _value_label, typed_plot_error
+from uacpy.visualization.plots._common import _cell_edge_extent, _credit_attributions, _default_value, _draw_credit, _draw_sea_ice, _model_attribution, _value_label, typed_plot_error, _title_or
 # plot_overview composes a map panel with the TL field and the environment
 # cross-section, so it reaches across to those plotters.
 from uacpy.visualization.plots.fields import plot_field
@@ -248,7 +248,7 @@ def plot_bathymetry_map(
         ax.plot(sp[0], sp[1], zorder=7, **SOURCE_MARKER_STYLE)
 
     fig.colorbar(pc, ax=ax, label="Water depth (m)")
-    ax.set_title(title or "Bathymetry", loc='left', fontsize='large', fontweight='bold')
+    ax.set_title(_title_or(title, "Bathymetry"), loc='left', fontsize='large', fontweight='bold')
     if own_fig:
         credit = _credit_attributions(data_source)
         fig.tight_layout(rect=(0, 0.05, 1, 1) if credit else (0, 0, 1, 1))
@@ -475,7 +475,7 @@ def plot_sea_ice_map(grid, *, hemi: str = 'N', transect=None, source=None,
         ax.set_ylim(min(cy + half, ny - 0.5), max(cy - half, -0.5))  # origin='upper'
 
     fig.colorbar(im, ax=ax, label=concentration_label)
-    ax.set_title(title or "Sea-ice concentration", loc='left', fontsize='large',
+    ax.set_title(_title_or(title, "Sea-ice concentration"), loc='left', fontsize='large',
                  fontweight='bold')
     ax.set_xticks([])
     ax.set_yticks([])

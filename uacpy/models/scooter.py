@@ -186,6 +186,7 @@ class Scooter(PropagationModel):
         rmax_multiplier: Optional[float] = None,
         interp_ssp: Optional[str] = None,
         spectrum: str = 'positive',
+        taper: float = 0.05,
         stabilizing_attenuation_off: bool = False,
         use_tmpfs: bool = False,
         verbose: Union[bool, str] = False,
@@ -245,6 +246,13 @@ class Scooter(PropagationModel):
 
         self.c_low = c_low
         self.c_high = c_high
+        if not (0.0 <= float(taper) < 0.5):
+            raise ConfigurationError(
+                f"Scooter: taper is the fraction of the wavenumber span "
+                f"rolled off at EACH edge, so it must satisfy "
+                f"0 <= taper < 0.5; got {taper!r}."
+            )
+        self.taper = float(taper)
         self.interp_ssp = interp_ssp
         if c_low is not None and c_high is not None and c_low >= c_high:
             raise ConfigurationError(
@@ -515,6 +523,43 @@ class Scooter(PropagationModel):
             raise exc
         return grn_data
 
+    def _taper_bounds(self, grn_data):
+        """``(cmin, cmax)`` phase-speed bounds for the kernel taper.
+
+        COA Sect. 4.5 is explicit that a wavenumber integral truncated with a
+        rectangular edge rings -- its sidelobes decay only as ``1/x`` -- and
+        that the cure is to "taper the kernel close to the maximum wavenumber
+        selected such that the kernel is forced to gradually vanish". The
+        roll-off is Hanning (:func:`~uacpy.io.grn_reader._hanning_taper`,
+        mirroring ``fieldsco.m:taper``), which drops the sidelobe law to
+        ``1/x^3``.
+
+        ``taper`` is a fraction of the wavenumber span applied at EACH edge.
+        The fraction is taken in ``k`` while the bounds are returned as phase
+        speeds, so ``omega`` cancels: they depend only on the deck's own
+        ``c_low`` / ``c_high`` and are identical at every frequency of a
+        broadband sweep. ``taper=0`` disables it and restores the rectangular
+        cut.
+
+        COA also warns that the choice of the truncation point itself "is not
+        easily automated" -- tapering smooths an edge, it does not recover
+        spectrum that was never computed. Widen ``c_high`` when the field is
+        built close to a boundary, where steep and evanescent components still
+        carry energy at the edge.
+        """
+        if self.taper <= 0.0:
+            return None, None
+        c = np.asarray(grn_data['cVec'], dtype=float)
+        c = c[np.isfinite(c) & (c > 0.0)]
+        if c.size < 4:
+            return None, None
+        inv_lo, inv_hi = 1.0 / c.max(), 1.0 / c.min()   # k/omega at each edge
+        span = inv_hi - inv_lo
+        if span <= 0.0:
+            return None, None
+        return (1.0 / (inv_hi - self.taper * span),
+                1.0 / (inv_lo + self.taper * span))
+
     def _assemble_field_from_grn(self, grn_data, source, receiver,
                                  broadband_mode):
         """Hankel-transform the Green's function onto the receiver ranges.
@@ -522,9 +567,15 @@ class Scooter(PropagationModel):
         Broadband transforms every frequency in the ``.grn`` at once; the
         narrowband path transforms the single frequency slice.
         """
+        cmin, cmax = self._taper_bounds(grn_data)
+        if cmin is not None:
+            self._log(f"Kernel taper: Hanning roll-off over "
+                      f"{self.taper:.0%} of the wavenumber span at each edge "
+                      f"(pass band {cmin:.1f}-{cmax:.1f} m/s)")
         transform_kwargs = dict(
             source_type=_SOURCE_TYPE_CODE[source.source_type],
             spectrum=self._spectrum_code,
+            cmin=cmin, cmax=cmax,
         )
         if broadband_mode:
             self._log(f"Transforming {grn_data['nfreq']} frequencies to "

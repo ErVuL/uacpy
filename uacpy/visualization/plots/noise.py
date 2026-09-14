@@ -6,7 +6,8 @@ positional argument (a new figure is made when it is ``None``) and returns
 ``(fig, ax)`` — the same convention as :func:`plot_field`.
 """
 import numpy as np
-from uacpy.visualization.plots._common import fig_ax, typed_plot_error, _require_nonempty
+from uacpy.visualization.plots._common import (fig_ax, typed_plot_error,
+                                               _require_nonempty, _title_or)
 from uacpy.core.exceptions import ConfigurationError
 
 
@@ -50,7 +51,7 @@ def plot_wenz(wenz, ax=None, *, show_components=True, title=None, ymin=6,
                     label='Turbulence noise')
     ax.set_xlabel('Frequency (Hz)')
     ax.set_ylabel(r'Noise Level (dB re 1$\mu$Pa$^2$/Hz)')
-    ax.set_title(title or 'WENZ noise level estimate', loc='left')
+    ax.set_title(_title_or(title, 'WENZ noise level estimate'), loc='left')
     ax.set_xlim((f[0], f[-1]))
     ax.set_ylim((ymin, ymax))
     ax.legend()
@@ -72,7 +73,8 @@ def plot_weighting(group, ax=None, *, frequency=None, title=None,
         ax.semilogx(f, auditory_weighting(f, g), label=f"{g.upper()}", **mpl_kw)
     ax.set_xlabel("Frequency (Hz)")
     ax.set_ylabel("Weighting W(f) (dB)")
-    ax.set_title(title or "Marine-mammal auditory weighting", loc="left")
+    ax.set_title(_title_or(title, "Marine-mammal auditory weighting"),
+                 loc="left")
     ax.set_ylim(-40, 5)
     ax.grid(which="both", alpha=0.3)
     ax.legend()
@@ -93,7 +95,7 @@ def plot_source_level(frequency, level_dB, ax=None, *, label=None, title=None,
     ax.semilogx(f, lv, label=label, **mpl_kw)
     ax.set_xlabel("Decidecade band centre (Hz)")
     ax.set_ylabel("Source level (dB re 1 µPa·m)")
-    ax.set_title(title or "Ship radiated noise", loc="left")
+    ax.set_title(_title_or(title, "Ship radiated noise"), loc="left")
     ax.grid(which="both", alpha=0.3)
     if label:
         ax.legend()
@@ -130,7 +132,8 @@ def plot_roc(deflection=None, ax=None, *, pfa=None, pd=None, n_points=200,
     ax.set_xlabel("Probability of false alarm  $P_F$")
     ax.set_ylabel("Probability of detection  $P_D$")
     ax.set_ylim(0.0, 1.0)
-    ax.set_title(title or "Receiver operating characteristic", loc="left")
+    ax.set_title(_title_or(title, "Receiver operating characteristic"),
+                 loc="left")
     ax.grid(which="both", alpha=0.3)
     if ax.get_legend_handles_labels()[0]:
         ax.legend(loc="lower right", fontsize='small')

@@ -17,7 +17,7 @@ from uacpy.visualization.style import (
     BOTTOM_FILL_STYLE, BOTTOM_CMAP, BOTTOM_LINE_STYLE, BOTTOM_LINE_STYLE_FLAT,
     hatched_fill,
 )
-from uacpy.visualization.plots._common import ZORDER_SEDIMENT, _credit_attributions, _draw_credit, _draw_geometry, _draw_sea_ice, _draw_surface_boundary, _draw_altimetry, _fill_margins, fig_ax, typed_plot_error, invert_yaxis_once
+from uacpy.visualization.plots._common import ZORDER_SEDIMENT, _credit_attributions, _draw_credit, _draw_geometry, _draw_sea_ice, _draw_surface_boundary, _draw_altimetry, _fill_margins, fig_ax, typed_plot_error, invert_yaxis_once, _title_or
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.units import km_to_m, m_to_km
 
@@ -908,7 +908,7 @@ def plot_absorption(frequencies, absorption=None, ax=None, *, model=None,
     ax.loglog(frequencies, absorption, label=label, **mpl_kw)
     ax.set_xlabel("Frequency (Hz)")
     ax.set_ylabel("Absorption (dB/km)")
-    ax.set_title(title or "Volume absorption", loc="left")
+    ax.set_title(_title_or(title, "Volume absorption"), loc="left")
     ax.grid(which="both", alpha=0.3)
     if label is not None:
         ax.legend(fontsize='small')

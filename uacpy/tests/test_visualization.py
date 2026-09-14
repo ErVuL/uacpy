@@ -5636,3 +5636,278 @@ class TestBroadbandReflectionOrientation:
     def test_rejects_an_unknown_frequency_unit(self):
         with pytest.raises(ConfigurationError, match='frequency_unit'):
             self._rc().plot(frequency_unit='MHz')
+
+
+# ── an empty title is a request, not a missing argument ─────────────────────
+def _rendered_titles(fig):
+    """Every title string the figure actually draws, in any location."""
+    out = []
+    for ax in fig.axes:
+        out += [t for t in (ax.get_title(loc=loc)
+                            for loc in ('left', 'center', 'right')) if t.strip()]
+    sup = getattr(fig, '_suptitle', None)
+    if sup is not None and sup.get_text().strip():
+        out.append(sup.get_text())
+    return out
+
+
+def _one_call_per_title_spelling(title):
+    """One plotter per module and per spelling of the ``title`` default.
+
+    Every entry must HAVE a default title, or it cannot distinguish the two
+    spellings. ``plot_field`` appears twice because its 1-D pin branch and its
+    2-D ``signal_excess`` branch resolve the default differently. Branches
+    with no default at all (a stacked field, an unpinned 2-D grid) draw
+    nothing either way and are not a case.
+    """
+    rng = np.random.default_rng(11)
+    freqs = np.logspace(1.0, 4.0, 32)
+    grid = Field(data=rng.normal(size=(6, 16)) + 1j * rng.normal(size=(6, 16)),
+                 coords={'depth': np.linspace(5.0, 95.0, 6),
+                         'range': np.linspace(100.0, 5000.0, 16)},
+                 model='A', frequencies=100.0, metadata={'kind': 'pressure'})
+    # ``at`` leaves a pin, which is what gives the 1-D branch a default title;
+    # an unpinned cut has none, so it could not tell the two spellings apart.
+    cut = grid.at(depth=50.0)
+    excess = Field(data=rng.normal(size=(6, 16)),
+                   coords={'depth': np.linspace(5.0, 95.0, 6),
+                           'range': np.linspace(100.0, 5000.0, 16)},
+                   model='A', frequencies=100.0,
+                   metadata={'kind': 'signal_excess'})
+    return {
+        'noise.plot_wenz':
+            lambda: plots.plot_wenz(
+                WenzNoise(freqs, wind_speed_kn=10.0, shipping_level='medium'),
+                title=title),
+        'noise.plot_roc':
+            lambda: plots.plot_roc(deflection=2.0, title=title),
+        'signal.plot_psd':
+            lambda: plots.plot_psd(freqs, np.abs(rng.normal(size=freqs.size)) + 1e-9,
+                                   title=title),
+        'comms.plot_constellation':
+            lambda: plots.plot_constellation(
+                np.array([1 + 1j, -1 + 1j, -1 - 1j, 1 - 1j]) / np.sqrt(2),
+                title=title),
+        'environment.plot_absorption':
+            lambda: plots.plot_absorption(freqs, model='thorp', title=title),
+        'rays_modes.plot_wavenumber_sampling':
+            lambda: plots.plot_wavenumber_sampling(200.0, 1400.0, 1800.0,
+                                                   1e-3, title=title),
+        'fields.plot_field (pinned 1-D cut)':
+            lambda: plot_field(cut, title=title),
+        'fields.plot_field (signal excess)':
+            lambda: plot_field(excess, title=title),
+    }
+
+
+class TestAnEmptyTitleIsHonouredRatherThanReplaced:
+    """``title=None`` means "not given"; ``title=''`` means "draw no title".
+
+    Every plotter used to spell the default as ``title or default``, which
+    conflates the two: the empty string is falsy, so a caller asking for no
+    title silently got the plotter's own. Both sides of that boundary are
+    pinned here, because a fix that suppressed the default unconditionally
+    would pass a one-sided test.
+    """
+
+    @pytest.mark.parametrize(
+        "name", sorted(_one_call_per_title_spelling(None)))
+    def test_no_title_is_given_and_the_plotter_supplies_its_own(self, name):
+        out = _one_call_per_title_spelling(None)[name]()
+        fig = out[0] if isinstance(out, tuple) else out
+        assert _rendered_titles(fig), f'{name} drew no default title'
+        plt.close(fig)
+
+    @pytest.mark.parametrize(
+        "name", sorted(_one_call_per_title_spelling('')))
+    def test_an_empty_title_leaves_the_axes_untitled(self, name):
+        out = _one_call_per_title_spelling('')[name]()
+        fig = out[0] if isinstance(out, tuple) else out
+        assert _rendered_titles(fig) == [], (
+            f"{name} replaced title='' with {_rendered_titles(fig)!r}")
+        plt.close(fig)
+
+    @pytest.mark.parametrize(
+        "name", sorted(_one_call_per_title_spelling('mine')))
+    def test_a_given_title_is_drawn_verbatim(self, name):
+        out = _one_call_per_title_spelling('mine')[name]()
+        fig = out[0] if isinstance(out, tuple) else out
+        assert 'mine' in _rendered_titles(fig), f'{name} dropped the title'
+        plt.close(fig)
+
+    def test_no_plotter_spells_the_default_with_a_falsy_test(self):
+        """The runtime cases above cover one plotter per module; this covers
+        the other forty-odd, and stops the construct coming back.
+
+        Parsed, not grepped, for two reasons: a text search reads the words
+        inside a docstring that merely *describes* the construct, and it
+        misses the two sites that wrap the line right after ``or``.
+        """
+        import ast
+        root = Path(uacpy.__file__).resolve().parent / 'visualization' / 'plots'
+        offenders = []
+        for path in sorted(root.glob('*.py')):
+            for node in ast.walk(ast.parse(path.read_text())):
+                # `title or default` and `title if title else default` --
+                # the two ways of letting a falsy title pick the default.
+                # NOT `0.9 if title else 0.95`, which asks whether a title
+                # exists in order to reserve space for it, and is right to
+                # treat '' as nothing to reserve.
+                named = lambda x: isinstance(x, ast.Name) and x.id == 'title'
+                bad = ((isinstance(node, ast.BoolOp)
+                        and isinstance(node.op, ast.Or)
+                        and node.values and named(node.values[0]))
+                       or (isinstance(node, ast.IfExp)
+                           and named(node.test) and named(node.body)))
+                if bad:
+                    offenders.append(f'{path.name}:{node.lineno}')
+        assert offenders == [], (
+            'a falsy test decides the title default at: ' + ', '.join(offenders))
+
+
+class TestCompareModelsKeepsItsLabelsOnTheCanvas:
+    """``compare_models`` laid its panels out with fixed fractional margins
+    (``subplots_adjust(left=0.05, right=0.88)``) and a colorbar hard-placed at
+    ``x=0.905``. A fraction cannot hold a label whose width is set in points,
+    so the outer labels were clipped as soon as the caller moved off the
+    default font size — measured at font 20, the left column's depth label
+    started 23.6 px outside the canvas.
+
+    Both font sizes are exercised: the small one passed before the fix and
+    must keep passing, so a fix that simply widened the fixed margin cannot
+    satisfy this on its own.
+    """
+
+    @staticmethod
+    def _pair():
+        rng = np.random.default_rng(5)
+        coords = {'depth': np.linspace(5.0, 95.0, 6),
+                  'range': np.linspace(100.0, 5000.0, 16)}
+        return [Field(data=rng.normal(size=(6, 16)) + 1j * rng.normal(size=(6, 16)),
+                      coords=coords, model=name, frequencies=200.0,
+                      metadata={'kind': 'pressure'})
+                for name in ('A', 'B')]
+
+    @pytest.mark.parametrize("font_size", [9, 20])
+    @pytest.mark.parametrize("ncols", [1, 2])
+    def test_every_label_stays_inside_the_figure(self, font_size, ncols):
+        with plt.rc_context({'font.size': font_size,
+                             'axes.labelsize': font_size + 2,
+                             'axes.titlesize': font_size + 4,
+                             'xtick.labelsize': font_size - 2,
+                             'ytick.labelsize': font_size - 2}):
+            fig, axes = compare_models(self._pair(), ['A', 'B'], ncols=ncols)
+            fig.canvas.draw()
+            renderer = fig.canvas.get_renderer()
+            width, height = fig.bbox.width, fig.bbox.height
+            outside = []
+            for ax in fig.axes:
+                for what, artist in (('x', ax.xaxis.label), ('y', ax.yaxis.label)):
+                    if not artist.get_text():
+                        continue
+                    box = artist.get_window_extent(renderer)
+                    if box.x0 < 0 or box.x1 > width or box.y0 < 0 or box.y1 > height:
+                        outside.append(f'{what}-label {artist.get_text()!r} '
+                                       f'at x=[{box.x0:.0f}, {box.x1:.0f}] '
+                                       f'of [0, {width:.0f}]')
+            plt.close(fig)
+        assert outside == [], (
+            f'at font.size={font_size}, ncols={ncols}, clipped: ' + '; '.join(outside))
+
+
+class TestWavenumberSamplingKeepsItsLabelsOnTheCanvas:
+    """The ``omega/c`` markers are rotated 90 degrees and anchored INSIDE the
+    axes, so their height is set in points while the figure's is set in
+    inches. Raise the font and the two move opposite ways: the label grows
+    (108 -> 240 px from font 9 to 20) while the axes shrinks (236 -> 162 px),
+    because the title and x-label take more of a fixed 3.2 in figure. They
+    cross between 14 and 20, and the label then runs off the top — even
+    though the plotter owns its figure and calls ``tight_layout`` itself,
+    which cannot help when the height is fixed and the text is anchored
+    inside the axes.
+
+    Font 9 is the size the plotter was authored at and must keep working, so
+    a fix that simply shrank everything would not satisfy this.
+    """
+
+    @pytest.mark.parametrize("font_size", [9, 14, 20])
+    def test_every_label_stays_inside_the_figure(self, font_size):
+        with plt.rc_context({'font.size': font_size}):
+            fig, ax = plots.plot_wavenumber_sampling(
+                200.0, 1400.0, 1.0e4, 2 * np.pi / 40_000.0,
+                r_max=5000.0, c_water=1500.0, c_bottom=1650.0)
+            fig.canvas.draw()
+            renderer = fig.canvas.get_renderer()
+            width, height = fig.bbox.width, fig.bbox.height
+            outside = []
+            for text in ax.texts:
+                if not text.get_text().strip():
+                    continue
+                box = text.get_window_extent(renderer)
+                if (box.x0 < 0 or box.x1 > width
+                        or box.y0 < 0 or box.y1 > height):
+                    outside.append(
+                        f'{text.get_text().strip()!r} at '
+                        f'y=[{box.y0:.0f}, {box.y1:.0f}] of [0, {height:.0f}]')
+            plt.close(fig)
+        assert outside == [], (
+            f'at font.size={font_size} these ran off the canvas: '
+            + '; '.join(outside))
+
+    @pytest.mark.parametrize("font_size", [9, 14, 20])
+    def test_the_markers_stay_below_the_title(self, font_size):
+        """Inside the canvas is not the same as inside the axes: the text is
+        anchored near the axes floor and grows upward, so measuring it against
+        the whole axes height rather than the room above its anchor lets it
+        print through the title."""
+        with plt.rc_context({'font.size': font_size}):
+            fig, ax = plots.plot_wavenumber_sampling(
+                200.0, 1400.0, 1.0e4, 2 * np.pi / 40_000.0,
+                c_water=1500.0, c_bottom=1650.0)
+            fig.canvas.draw()
+            renderer = fig.canvas.get_renderer()
+            axes_top = ax.get_window_extent(renderer).y1
+            over = [t.get_text().strip() for t in ax.texts
+                    if t.get_text().strip()
+                    and t.get_window_extent(renderer).y1 > axes_top]
+            plt.close(fig)
+        assert over == [], (
+            f'at font.size={font_size} these reach above the axes: {over}')
+
+    def test_the_marker_names_its_speed_when_there_is_room(self):
+        """Fitting must not win by deleting the information: at the size the
+        plotter is authored for, the numeric value belongs on the chart."""
+        with plt.rc_context({'font.size': 9}):
+            fig, ax = plots.plot_wavenumber_sampling(
+                200.0, 1400.0, 1.0e4, 2 * np.pi / 40_000.0,
+                r_max=5000.0, c_water=1500.0, c_bottom=1650.0)
+            labels = [t.get_text() for t in ax.texts]
+            plt.close(fig)
+        assert any('0.8' in t for t in labels), (
+            f'the wavenumber value is no longer printed: {labels}')
+
+    def test_a_tight_axes_shortens_the_label_rather_than_shrinking_the_type(self):
+        """Staying on the canvas is not enough on its own.
+
+        The helper has two ways to make a label fit: pick a shorter spelling,
+        or shrink the type. Only the first is any use on a projected slide, so
+        removing the shorter spellings must be a visible failure and not
+        something the font-shrink quietly absorbs.
+        """
+        with plt.rc_context({'font.size': 20}):
+            fig, ax = plots.plot_wavenumber_sampling(
+                200.0, 1400.0, 1.0e4, 2 * np.pi / 40_000.0,
+                r_max=5000.0, c_water=1500.0, c_bottom=1650.0)
+            marks = [t for t in ax.texts if 'omega' in t.get_text()
+                     or t.get_text().strip() in ('water', 'seabed')]
+            sizes = [t.get_fontsize() for t in marks]
+            texts = [t.get_text() for t in marks]
+            plt.close(fig)
+        assert marks, 'the speed markers are gone entirely'
+        # 'small' of a 20 pt base is 16.7 pt; anything far below that means the
+        # fit was bought by shrinking rather than by shortening.
+        assert min(sizes) > 12.0, (
+            f'labels were shrunk to {min(sizes):.1f} pt instead of shortened: '
+            f'{texts}')
+        assert all('0.7' not in t and '0.8' not in t for t in texts), (
+            f'at this size the numeric value should have been dropped: {texts}')

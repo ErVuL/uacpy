@@ -667,6 +667,18 @@ def _draw_credit(fig, data_attributions=(), *, model=None,
         _reserve_credit_margin(fig, credit)
 
 
+def _title_or(title, default):
+    """The title to draw: ``default`` only when the caller gave none.
+
+    ``title=None`` is "not given"; ``title=''`` is a caller asking for **no**
+    title, and is a legitimate value that must be honoured. Every plotter used
+    to spell this ``title or default``, which conflates the two because the
+    empty string is falsy — so ``plot_field(f, title='')`` came back captioned
+    ``Depth = 50 m``. The only way to get a blank title was ``title=' '``.
+    """
+    return default if title is None else title
+
+
 def _reserve_credit_margin(fig, credit, pad_px=4.0):
     """Raise the subplot bottom by the measured overlap between the credit
     and the lowest axis label, so the footnote never runs into an x-label.
@@ -682,6 +694,105 @@ def _reserve_credit_margin(fig, credit, pad_px=4.0):
     if top > lowest:
         fig.subplots_adjust(
             bottom=fig.subplotpars.bottom + (top - lowest) / fig.bbox.height)
+
+
+def _fit_rotated_axis_label(ax, x, candidates, colour, *, y=0.04,
+                            fontsize='small', headroom=0.98):
+    """Draw the longest of ``candidates`` whose rotated height fits the axes.
+
+    A label anchored inside the axes and rotated 90 degrees has its height set
+    in POINTS, while the axes has its height set in inches. Raise the font and
+    the two move opposite ways -- measured on
+    :func:`plot_wavenumber_sampling`, the label grew 108 -> 240 px between
+    font 9 and font 20 while its axes shrank 236 -> 162 px, because the title
+    and x-label take more of a fixed-height figure. They cross, and the label
+    then runs off the top of the canvas. ``tight_layout`` cannot help: the
+    figure height is fixed and the text is anchored inside the axes.
+
+    So the text is chosen to fit rather than assumed to: longest candidate
+    first, falling back to shorter spellings, and only shrinking the type if
+    even the shortest will not go. Call it after the layout is settled --
+    the axes box is measured as it stands.
+    """
+    fig = ax.figure
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    # The text is anchored at ``y`` and grows upward, so the room it has is
+    # what lies ABOVE that anchor -- not the whole axes. Measuring against the
+    # full height let a label end just past the top and print through the
+    # title.
+    available = ax.get_window_extent(renderer).height * (headroom - y)
+    text = ax.text(x, y, candidates[0], color=colour, fontsize=fontsize,
+                   rotation=90, va='bottom',
+                   transform=ax.get_xaxis_transform())
+    for candidate in candidates:
+        text.set_text(candidate)
+        if text.get_window_extent(renderer).height <= available:
+            return text
+    # Nothing fits at this size: keep the shortest and take the type down,
+    # which is still better than printing off the edge of the figure.
+    text.set_text(candidates[-1])
+    height = text.get_window_extent(renderer).height
+    if height > available:
+        shrunk = max(4.0, text.get_fontsize() * available / height)
+        text.set_fontsize(shrunk)
+    return text
+
+
+def _fit_subplot_margins(fig, axes, *, pad_px=4.0, right_limit=1.0):
+    """Grow the subplot margins until every label of ``axes`` is on the canvas.
+
+    Measured, like :func:`_reserve_credit_margin`, and for the same reason: a
+    margin given as a *fraction* cannot hold a label whose width is set in
+    *points*. ``compare_models`` used to open with a fixed
+    ``subplots_adjust(left=0.05, right=0.88)``; measured on its own two-field
+    figure, the depth label of a one-column comparison started 11 px outside
+    the canvas at the default font size and 57 px outside it at 20 pt, and at
+    two columns the range labels dropped 7 px below it.
+
+    ``right_limit`` is the fraction of the width the panels may occupy, so a
+    caller can keep a strip free for a colorbar it has not drawn yet.
+    """
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    boxes = [ax.get_tightbbox(renderer) for ax in axes if ax.get_visible()]
+    boxes = [b for b in boxes if b is not None]
+    if not boxes:
+        return
+    width, height = fig.bbox.width, fig.bbox.height
+    sp = fig.subplotpars
+    left = sp.left + max(0.0, pad_px - min(b.x0 for b in boxes)) / width
+    bottom = sp.bottom + max(0.0, pad_px - min(b.y0 for b in boxes)) / height
+    right = sp.right - max(
+        0.0, max(b.x1 for b in boxes) - (right_limit * width - pad_px)) / width
+    top = sp.top - max(
+        0.0, max(b.y1 for b in boxes) - (height - pad_px)) / height
+    # A figure too small to hold its own labels would invert the margins and
+    # matplotlib would raise; leave it alone and let it clip rather than fail.
+    if left < right and bottom < top:
+        fig.subplots_adjust(left=left, right=right, bottom=bottom, top=top)
+
+
+def _fit_colorbar_strip(fig, cbar_ax, pad_px=4.0):
+    """Pull a right-hand colorbar and the panels left until its label fits.
+
+    The colorbar's own tick labels and axis label sit *outside* its axes, so a
+    hard ``fig.add_axes((0.905, ...))`` clips them as soon as the font grows:
+    measured at 20 pt, ``TL (dB)`` ended 34 px past the canvas edge.
+    """
+    fig.canvas.draw()
+    box = cbar_ax.get_tightbbox(fig.canvas.get_renderer())
+    if box is None:
+        return
+    over = box.x1 + pad_px - fig.bbox.width
+    if over <= 0:
+        return
+    dx = over / fig.bbox.width
+    pos = cbar_ax.get_position()
+    cbar_ax.set_position((pos.x0 - dx, pos.y0, pos.width, pos.height))
+    sp = fig.subplotpars
+    if sp.right - dx > sp.left:
+        fig.subplots_adjust(right=sp.right - dx)
 
 
 def _draw_result_credit(fig, result, *, env=None, data_source=True, **draw_kw):

@@ -11,7 +11,7 @@ from uacpy.core.constants import PRESSURE_FLOOR
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.results import Arrivals, Rays, Modes, Covariance, Replicas, ReflectionCoefficient
 from uacpy.core.units import m_to_km
-from uacpy.visualization.plots._common import ZORDER_LEGEND, ZORDER_RAYS, ZORDER_SURFACE, _overlay_seafloor, _draw_geometry, _draw_receiver_grid, _draw_result_credit, _plot_warn, fig_ax, typed_plot_error, invert_yaxis_once
+from uacpy.visualization.plots._common import ZORDER_LEGEND, ZORDER_RAYS, ZORDER_SURFACE, _overlay_seafloor, _draw_geometry, _draw_receiver_grid, _draw_result_credit, _plot_warn, fig_ax, typed_plot_error, invert_yaxis_once, _title_or, _fit_rotated_axis_label
 
 
 #: Multipath class -> colour, for the ray fan and the arrival stems alike:
@@ -171,7 +171,7 @@ def _plot_rays(
     ax.set_xlabel('Range (km)')
     ax.set_ylabel('Depth (m)')
     ax.grid(True, alpha=0.3)
-    ax.set_title(title or ('Eigenrays' if rays.is_eigen else 'Ray fan'))
+    ax.set_title(_title_or(title, 'Eigenrays' if rays.is_eigen else 'Ray fan'))
     if _owns_fig:
         _draw_result_credit(fig, rays, env=env)
     return fig, ax
@@ -395,7 +395,7 @@ def _plot_mode_functions(
     ax.grid(True, alpha=0.3)
     if n_modes <= 12:
         ax.legend(fontsize='small', loc='best')
-    ax.set_title(title or f"Mode functions (n={n_modes})")
+    ax.set_title(_title_or(title, f"Mode functions (n={n_modes})"))
     if _owns_fig:
         _draw_result_credit(fig, modes, env=None)
     return fig, ax
@@ -426,7 +426,7 @@ def plot_mode_wavenumbers(
     ax.set_xlabel('Mode index')
     ax.set_ylabel(r'$\mathrm{Re}(k_m)$ (1/m)')
     ax.grid(True, alpha=0.3)
-    ax.set_title(title or 'Modal wavenumbers')
+    ax.set_title(_title_or(title, 'Modal wavenumbers'))
     if _owns_fig:
         _draw_result_credit(fig, modes, env=None)
     return fig, ax
@@ -501,16 +501,17 @@ def plot_wavenumber_sampling(
     fig, ax = fig_ax(ax, figsize)
     ax.axvspan(k_min, k_max, color='C0', alpha=0.15,
                label=f'sampled window, $\\Delta k$ = {delta_k:.3g} rad/m')
+    # Grown UPWARD from the floor, not down from the top: the legend sits in
+    # an upper corner and a speed marked in that half of the window had its
+    # label printed underneath the legend box. The text itself is chosen
+    # AFTER the layout below, because how much of it fits depends on the axes
+    # height, which depends on the font -- see _fit_rotated_axis_label.
+    _markers = []
     for c, label, colour in ((c_bottom, 'seabed', 'C3'), (c_water, 'water', 'C0')):
         if c is not None:
             kc = omega / float(c)
             ax.axvline(kc, color=colour, ls='--', lw=1.2)
-            # Grown UPWARD from the floor, not down from the top: the
-            # legend sits in an upper corner and a speed marked in that half
-            # of the window had its label printed underneath the legend box.
-            ax.text(kc, 0.04, f' {label} $\\omega/c$ = {kc:.3f}', color=colour,
-                    fontsize='small', rotation=90, va='bottom',
-                    transform=ax.get_xaxis_transform())
+            _markers.append((kc, label, colour))
     if c_water is not None and c_bottom is not None:
         # A seabed SLOWER than the water traps nothing -- there is no angle
         # beyond critical because there is no critical angle. Drawn blind,
@@ -532,15 +533,22 @@ def plot_wavenumber_sampling(
                  + ('is inside it — necessary, not sufficient: refine until '
                     'the field stops moving' if safe
                     else 'is BEYOND it — the field folds'))
-        ax.set_title(title or note,
+        ax.set_title(_title_or(title, note),
                      color=('black' if safe else 'C3'), fontsize='small')
     else:
-        ax.set_title(title or note, fontsize='small')
+        ax.set_title(_title_or(title, note), fontsize='small')
     # Two full-height spans leave no empty corner for 'best' to find, so the
     # corner is chosen here and the omega/c labels are kept out of it above.
     ax.legend(loc='upper left', fontsize='small', framealpha=0.9)
     if _owns_fig:
         fig.tight_layout()
+    for kc, label, colour in _markers:
+        _fit_rotated_axis_label(
+            ax, kc,
+            [f' {label} $\\omega/c$ = {kc:.3f}',
+             f' {label} $\\omega/c$',
+             f' {label}'],
+            colour)
     return fig, ax
 
 
@@ -655,8 +663,8 @@ def plot_greens_function(
         ax.plot(k_r, cut, lw=1.0, color='C0')
         ax.set_ylabel('$|G|$ (dB re panel max)')
         ax.set_ylim(vmin_db, 5.0)
-        ax.set_title(title or
-                     f'Green\'s function at z = {z[j]:.1f} m, {freq:g} Hz')
+        ax.set_title(_title_or(
+            title, f'Green\'s function at z = {z[j]:.1f} m, {freq:g} Hz'))
 
     if modes is not None:
         if not isinstance(modes, Modes):
@@ -670,9 +678,9 @@ def plot_greens_function(
 
     ax.set_xlabel('horizontal wavenumber $k_r$ (rad/m)')
     if depth is None:
-        ax.set_title(title or
-                     f"Depth-separated Green's function $|G(k_r, z)|$"
-                     f" at {freq:g} Hz")
+        ax.set_title(_title_or(
+            title, f"Depth-separated Green's function $|G(k_r, z)|$"
+                   f" at {freq:g} Hz"))
     if _owns_fig:
         fig.tight_layout()
     return fig, ax
@@ -735,8 +743,8 @@ def plot_mode_speeds(
     ax.set_ylabel('speed (m/s)')
     ax.grid(True, alpha=0.3)
     ax.legend(loc='best', fontsize='small')
-    ax.set_title(title or f'Modal speeds at {modes.f0:g} Hz'
-                 if modes.f0 else (title or 'Modal speeds'))
+    ax.set_title(_title_or(title, f'Modal speeds at {modes.f0:g} Hz')
+                 if modes.f0 else (_title_or(title, 'Modal speeds')))
     if _owns_fig:
         _draw_result_credit(fig, modes, env=None)
     return fig, ax
@@ -836,7 +844,7 @@ def plot_dispersion(
     ax.grid(True, alpha=0.3)
     ax.legend(loc='best', fontsize='small', title='solid: phase   dashed: group',
               title_fontsize='x-small')
-    ax.set_title(title or 'Modal dispersion')
+    ax.set_title(_title_or(title, 'Modal dispersion'))
     if _owns_fig:
         _draw_result_credit(fig, sets[0], env=None)
     return fig, ax
@@ -933,7 +941,7 @@ def plot_modes_heatmap(
     # fabricated '@ 0.0 Hz', which a published figure would assert as fact.
     auto = (f'Mode shapes — {n_plot} modes @ {modes.f0:.1f} Hz'
             if modes.f0 is not None else f'Mode shapes — {n_plot} modes')
-    ax.set_title(title or auto)
+    ax.set_title(_title_or(title, auto))
     if _owns_fig:
         _draw_result_credit(fig, modes, env=None)
     return fig, ax
@@ -999,7 +1007,7 @@ def _plot_reflection_coefficient(
             fig.colorbar(im, ax=ax, label='|R|')
         ax.set_xlabel(xlabel)
         ax.set_ylabel(ylabel)
-        ax.set_title(title or 'Reflection coefficient |R(θ, f)|')
+        ax.set_title(_title_or(title, 'Reflection coefficient |R(θ, f)|'))
         if _owns_fig:
             _draw_result_credit(fig, rc, env=None)
         return fig, ax
@@ -1017,7 +1025,7 @@ def _plot_reflection_coefficient(
                     label='φ')
         ax_phi.set_ylabel('Phase (°)', color='C1')
         ax_phi.tick_params(axis='y', labelcolor='C1')
-    ax.set_title(title or 'Reflection coefficient')
+    ax.set_title(_title_or(title, 'Reflection coefficient'))
     if _owns_fig:
         _draw_result_credit(fig, rc, env=None)
     return fig, ax
@@ -1345,7 +1353,7 @@ def plot_beam_pattern(
         # fact about the fan, not about how the response is drawn.
         ax.set_xlim(fan_lo, fan_hi)
         ax.grid(True, alpha=0.3)
-        ax.set_title(title or default_title)
+        ax.set_title(_title_or(title, default_title))
         return fig, ax
 
     fig, ax = _polar_fig_ax(ax, figsize)
@@ -1378,5 +1386,5 @@ def plot_beam_pattern(
     ax.yaxis.set_major_locator(MaxNLocator(nbins=4))
     # Clear of that thetamin spoke, which runs along the top edge — and through
     # an unpadded title — whenever the wedge opens forward.
-    ax.set_title(title or default_title, pad=28.0)
+    ax.set_title(_title_or(title, default_title), pad=28.0)
     return fig, ax

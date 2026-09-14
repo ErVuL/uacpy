@@ -8,7 +8,8 @@ do not import matplotlib. Each function consumes plain arrays, takes the target
 import numpy as np
 import matplotlib.pyplot as plt
 
-from uacpy.visualization.plots._common import fig_ax, typed_plot_error, _require_nonempty
+from uacpy.visualization.plots._common import (fig_ax, typed_plot_error,
+                                               _require_nonempty, _title_or)
 
 
 
@@ -28,7 +29,7 @@ def plot_channel(h, sample_rate, ax=None, *, title=None, figsize=(12, 4),
     ax[0].stem(t, np.abs(h))
     ax[0].set_xlabel("Delay (ms)")
     ax[0].set_ylabel("|h|")
-    ax[0].set_title(title or "Channel impulse response", loc="left")
+    ax[0].set_title(_title_or(title, "Channel impulse response"), loc="left")
     ax[0].grid(alpha=0.3)
     # h is complex (baseband IR): use the full FFT, not rfft (which rejects
     # complex input), and fftshift so |H(f)| is centred on 0 Hz.
@@ -55,7 +56,7 @@ def plot_doppler_ambiguity(scales, peak_metric, ax=None, *, title=None,
     ax.axvline(best, color="r", ls="--", lw=1, label=f"a = {best:.2f} e-3")
     ax.set_xlabel("Doppler scale a (×10⁻³)")
     ax.set_ylabel("Norm. peak correlation")
-    ax.set_title(title or "Doppler ambiguity", loc="left")
+    ax.set_title(_title_or(title, "Doppler ambiguity"), loc="left")
     ax.grid(alpha=0.3)
     ax.legend()
     return fig, ax
@@ -71,7 +72,7 @@ def plot_convergence(mse, ax=None, *, label=None, title=None, figsize=(7, 4),
     ax.plot(10 * np.log10(np.maximum(m, 1e-12)), label=label, **mpl_kw)
     ax.set_xlabel("Symbol index")
     ax.set_ylabel("MSE (dB)")
-    ax.set_title(title or "Equalizer convergence", loc="left")
+    ax.set_title(_title_or(title, "Equalizer convergence"), loc="left")
     ax.grid(alpha=0.3)
     if label:
         ax.legend()
@@ -92,7 +93,7 @@ def plot_sync_metric(metric, ax=None, *, threshold=None, title=None,
         ax.legend()
     ax.set_xlabel("Sample index")
     ax.set_ylabel("Norm. correlation")
-    ax.set_title(title or "Sync metric", loc="left")
+    ax.set_title(_title_or(title, "Sync metric"), loc="left")
     ax.grid(alpha=0.3)
     return fig, ax
 
@@ -110,7 +111,7 @@ def plot_subcarriers(channel, n_subcarriers, ax=None, *, title=None,
             20 * np.log10(np.abs(H)), **mpl_kw)      # a zero bin is -inf, not -240 dB
     ax.set_xlabel("Subcarrier index")
     ax.set_ylabel("|H| (dB)")
-    ax.set_title(title or "OFDM subcarrier response", loc="left")
+    ax.set_title(_title_or(title, "OFDM subcarrier response"), loc="left")
     ax.grid(alpha=0.3)
     return fig, ax
 
@@ -141,7 +142,7 @@ def plot_scatter(symbols, ax=None, *, ideal=None, title=None, figsize=(5, 5),
                    zorder=5, label="ideal")
         ax.legend()
     _iq_axes(ax)
-    ax.set_title(title or "Constellation", loc="left")
+    ax.set_title(_title_or(title, "Constellation"), loc="left")
     return fig, ax
 
 
@@ -160,7 +161,8 @@ def plot_constellation(constellation, ax=None, *, scheme="", annotate=True,
             ax.annotate(format(label, f"0{bps}b"), (pt.real, pt.imag),
                         textcoords="offset points", xytext=(6, 4), fontsize='small')
     _iq_axes(ax)
-    ax.set_title(title or f"{scheme} constellation".strip(), loc="left")
+    ax.set_title(_title_or(title, f"{scheme} constellation".strip()),
+                 loc="left")
     if own_fig:
         # Lay the plotter's own figure out around its labels: four-digit tick
         # labels need more left margin than the square panel's default.
@@ -187,7 +189,7 @@ def plot_eye_diagram(signal, samples_per_symbol, ax=None, *, n_symbols=2,
         ax.plot(t, x[k * sps: k * sps + span], **mpl_kw)
     ax.set_xlabel("Symbol intervals")
     ax.set_ylabel("Amplitude")
-    ax.set_title(title or "Eye diagram", loc="left")
+    ax.set_title(_title_or(title, "Eye diagram"), loc="left")
     ax.grid(alpha=0.3)
     return fig, ax
 
@@ -214,7 +216,7 @@ def plot_ber_curve(ebn0_dB, ber_measured, ax=None, *, scheme=None,
                     label=f"{scheme} theory")
     ax.set_xlabel("Eb/N0 (dB)")
     ax.set_ylabel("BER")
-    ax.set_title(title or "Bit error rate", loc="left")
+    ax.set_title(_title_or(title, "Bit error rate"), loc="left")
     ax.grid(which="both", alpha=0.3)
     ax.legend()
     return fig, ax

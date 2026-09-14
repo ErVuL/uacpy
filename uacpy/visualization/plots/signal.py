@@ -17,7 +17,7 @@ from uacpy.visualization.plots._common import (ZORDER_LEGEND, ZORDER_SOURCE,
                                                _cell_edge_extent, _flip_y,
                                                _require_nonempty,
                                                fig_ax, typed_plot_error,
-                                               _plot_warn)
+                                               _plot_warn, _title_or)
 from uacpy.visualization.style import SOURCE_MARKER_STYLE
 
 
@@ -168,7 +168,7 @@ def plot_fk(frequencies, wavenumbers, power, ax=None, *, ref=REFERENCE_PRESSURE_
                    vmin=vmin, vmax=vmax, cmap=cmap, **mpl_kw)
     if sound_speed is not None:
         draw_sound_cone(ax, frequencies[-1], wavenumbers[-1], sound_speed)
-    ax.set_title(title or "f–k spectrum", loc="left")
+    ax.set_title(_title_or(title, "f–k spectrum"), loc="left")
     ax.set_xlabel("Wavenumber k (rad/m)")
     ax.set_ylabel("Frequency (Hz)")
     ax.grid(alpha=0.3)
@@ -219,7 +219,7 @@ def plot_radon(moveout, taus, R, ax=None, *, kind="linear", vmin=None,
     fig, ax = _plot_tau_panel(np.asarray(moveout) * scale, taus, amp, ax,
                               vmin=vmin, vmax=vmax, cmap=cmap, figsize=figsize,
                               show_colorbar=show_colorbar, **mpl_kw)
-    ax.set_title(title or f"Radon ({kind})", loc="left")
+    ax.set_title(_title_or(title, f"Radon ({kind})"), loc="left")
     ax.set_xlabel(xlabel)
     return fig, ax
 
@@ -249,7 +249,7 @@ def plot_taup(slownesses, taus, taup, ax=None, *, vmin=None, vmax=None,
                               show_colorbar=show_colorbar, **mpl_kw)
     if sound_speed is not None:
         draw_slowness_line(ax, taus[-1], sound_speed)
-    ax.set_title(title or "tau-p", loc="left")
+    ax.set_title(_title_or(title, "tau-p"), loc="left")
     ax.set_xlabel("Slowness p (s/km)")
     return fig, ax
 
@@ -268,7 +268,7 @@ def plot_psd(frequencies, psd_linear, ax=None, *, ref=REFERENCE_PRESSURE_WATER,
     psd_dB = power_to_dB(np.asarray(psd_linear), ref)
     fig, ax = fig_ax(ax, figsize)
     ax.semilogx(frequencies, psd_dB, label=label, **mpl_kw)
-    ax.set_title(title or "Power spectral density", loc="left")
+    ax.set_title(_title_or(title, "Power spectral density"), loc="left")
     ax.set_xlabel("Frequency (Hz)")
     ax.set_ylabel(f"Level (dB re {_ref_label(ref)}Pa²/Hz)")
     ax.set_ylim((ymin, ymax))
@@ -312,7 +312,7 @@ def _plot_level_histogram(result, ax, *, y_label, default_title, caller,
     ax.plot(result.frequencies, result.mean_dB + result.std_dB, "k--",
             label="Mean level ± STD")
     ax.plot(result.frequencies, result.mean_dB - result.std_dB, "k--")
-    ax.set_title(title or default_title, loc="left")
+    ax.set_title(_title_or(title, default_title), loc="left")
     ax.set_xlabel("Frequency (Hz)")
     ax.set_ylabel(y_label)
     ax.set_xscale("log")
@@ -368,7 +368,7 @@ def plot_sel(sel_pa2s, bands, ax=None, *, ref=REFERENCE_PRESSURE_WATER,
     sel_dB = power_to_dB(np.asarray(sel_pa2s), ref)
     ax.bar(Fedges[:-1], sel_dB, width=width,
            align="edge", edgecolor="black", **mpl_kw)
-    ax.set_title(title or f"SEL ({duration}s)", loc="left")
+    ax.set_title(_title_or(title, f"SEL ({duration}s)"), loc="left")
     ax.set_ylabel(f"Level (dB re {_ref_label(ref)}Pa²·s)")
     if band_type != "linear":
         ax.set_xscale("log")
@@ -402,7 +402,7 @@ def plot_spectrogram(frequencies, times, Sxx, ax=None, *,
                         vmin=vmin, vmax=vmax, **mpl_kw)
     if show_colorbar:
         fig.colorbar(pcm, ax=ax, label=f"Level (dB re {_ref_label(ref)}Pa²/Hz)")
-    ax.set_title(title or "Spectrogram", loc="left")
+    ax.set_title(_title_or(title, "Spectrogram"), loc="left")
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("Frequency (Hz)")
     hi = float(frequencies[-1] if ymax is None else ymax)
@@ -435,7 +435,7 @@ def plot_constant_q_spectrogram(frequencies, times, power, ax=None, *,
                         vmin=vmin, vmax=vmax, **mpl_kw)
     if show_colorbar:
         fig.colorbar(pcm, ax=ax, label=f"Level (dB re {unit})")
-    ax.set_title(title or "Constant-Q spectrogram", loc="left")
+    ax.set_title(_title_or(title, "Constant-Q spectrogram"), loc="left")
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("Frequency (Hz)")
     ax.set_yscale("log")
@@ -459,7 +459,7 @@ def plot_constant_q_psd(frequencies, power, ax=None, *,
     power_dB = power_to_dB(np.asarray(power), ref)
     fig, ax = fig_ax(ax, figsize)
     ax.semilogx(frequencies, power_dB, label=label, **mpl_kw)
-    ax.set_title(title or ("Constant-Q PSD" if scaling == "density"
+    ax.set_title(_title_or(title, "Constant-Q PSD" if scaling == "density"
                            else "Constant-Q band power"), loc="left")
     ax.set_xlabel("Frequency (Hz)")
     ax.set_ylabel(f"Level (dB re {unit})")
@@ -510,7 +510,7 @@ def plot_cwt(frequencies, W, sample_rate, ax=None, *, cmap="jet", title=None,
     pcm = ax.pcolormesh(t, frequencies, amp, cmap=cmap, shading="auto", **mpl_kw)
     if show_colorbar:
         fig.colorbar(pcm, ax=ax, label="|W|")
-    ax.set_title(title or "CWT scalogram", loc="left")
+    ax.set_title(_title_or(title, "CWT scalogram"), loc="left")
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("Frequency (Hz)")
     return fig, ax
@@ -529,7 +529,7 @@ def plot_wigner_ville(frequencies, times, W, ax=None, *, cmap="jet", title=None,
                         shading="auto", **mpl_kw)
     if show_colorbar:
         fig.colorbar(pcm, ax=ax, label="WVD")
-    ax.set_title(title or "Wigner-Ville", loc="left")
+    ax.set_title(_title_or(title, "Wigner-Ville"), loc="left")
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("Frequency (Hz)")
     return fig, ax
@@ -550,7 +550,7 @@ def plot_cepstrum(c, ax=None, *, sample_rate=None, title=None, figsize=(9, 4),
         ax.plot(c, **mpl_kw)
         ax.set_xlabel("Quefrency (samples)")
     ax.set_ylabel("Amplitude")
-    ax.set_title(title or "Cepstrum", loc="left")
+    ax.set_title(_title_or(title, "Cepstrum"), loc="left")
     ax.grid(alpha=0.3)
     return fig, ax
 
@@ -578,7 +578,7 @@ def plot_band_levels(centers, levels, ax=None, *, title=None, width=0.8,
     ax.set_xticklabels([f"{v:.0f}" for v in 10 ** ticks], rotation=45)
     ax.set_xlabel("Decidecade band centre (Hz)")
     ax.set_ylabel(f"Band level (dB re {ref_label})")
-    ax.set_title(title or "Decidecade band levels", loc="left")
+    ax.set_title(_title_or(title, "Decidecade band levels"), loc="left")
     ax.grid(alpha=0.3, axis="y")
     return fig, ax
 
@@ -597,7 +597,7 @@ def plot_angular_spectrum(angles_deg, spectrum, ax=None, *, dB=True, label=None,
     ax.plot(angles_deg, P, label=label, **mpl_kw)
     ax.set_xlabel("Angle (deg)")
     ax.set_ylabel("Power (dB)" if dB else "Power")
-    ax.set_title(title or "Angular spectrum", loc="left")
+    ax.set_title(_title_or(title, "Angular spectrum"), loc="left")
     ax.grid(alpha=0.3)
     if label:
         ax.legend()
@@ -690,7 +690,8 @@ def plot_matched_field(x_m, z_m, surface, ax=None, *, dynamic_range=20.0,
         fig.colorbar(im, ax=ax, label='dB re peak')
     ax.set_xlabel('Candidate range (km)')
     ax.set_ylabel('Candidate depth (m)')
-    ax.set_title(title or 'Matched-field ambiguity surface', loc='left')
+    ax.set_title(_title_or(title, 'Matched-field ambiguity surface'),
+                 loc='left')
     # Depth downward, set as an explicit descending limit rather than
     # invert_yaxis(): a shared-y pair would call this once per axis and the
     # second call would undo the first.
@@ -735,7 +736,7 @@ def plot_ambiguity(delays_s, doppler_hz, chi, ax=None, *, dB=False,
                    cmap=cmap, **mpl_kw)
     if show_colorbar:
         fig.colorbar(im, ax=ax, label=label)
-    ax.set_title(title or "Ambiguity surface", loc="left")
+    ax.set_title(_title_or(title, "Ambiguity surface"), loc="left")
     ax.set_xlabel("Delay (ms)")
     ax.set_ylabel("Doppler (Hz)")
     return fig, ax
@@ -756,7 +757,7 @@ def plot_frf(frequencies, tf, ax=None, *, tag="", label=None, ymin=-60,
     lbl = (f"{tag} {label}").strip() if (tag or label) else None
     mag_dB = 20 * np.log10(np.abs(tf))
     ax1.plot(frequencies, mag_dB, label=lbl, **mpl_kw)
-    ax1.set_title(title or "Frequency response", loc="left")
+    ax1.set_title(_title_or(title, "Frequency response"), loc="left")
     ax1.set_ylabel("Magnitude (dB)")
     ax1.set_xscale("log")
     ax1.set_ylim((ymin, ymax))
@@ -795,7 +796,7 @@ def plot_coherence(frequencies, coh, ax=None, *, label=None, title=None,
     ax.set_xlim(_log_freq_xlim(frequencies))
     _warn_if_offscreen(ax, coh, "plot_coherence", "ylim")
     ax.grid(which="both", alpha=0.5)
-    ax.set_title(title or "Coherence", loc="left")
+    ax.set_title(_title_or(title, "Coherence"), loc="left")
     if label:
         ax.legend()
     return fig, ax
@@ -809,7 +810,7 @@ def plot_impulse_response_info(Minfo, Vinfo, g, *, title=None, figsize=(12, 8)):
     gs = GridSpec(2, 2, width_ratios=[2, 1], height_ratios=[2, 1])
     ax1 = fig.add_subplot(gs[0, 0])
     im = ax1.imshow(Minfo, cmap="viridis", aspect="equal")
-    ax1.set_title(title or "Information Matrix", loc="left")
+    ax1.set_title(_title_or(title, "Information Matrix"), loc="left")
     ax1.set_xlabel("Index j")
     ax1.set_ylabel("Index i")
     fig.colorbar(im, ax=ax1, shrink=0.8, label="Correlation Value")

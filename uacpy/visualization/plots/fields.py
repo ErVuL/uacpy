@@ -13,7 +13,7 @@ from uacpy.core.results import Field
 from uacpy.visualization.style import (cmap_for_field, reversed_cmap,
                                       PROBABILITY_COLORMAP,
                                       PROBABILITY_LIMITS)
-from uacpy.visualization.plots._common import _value_array, _value_label, _default_value, _coord_label, _coord_axis, _TL_LIMITS, _is_loss_view, _overlay_seafloor, _pinned_subtitle, _draw_result_credit, _draw_credit, _model_attribution, fig_ax, invert_yaxis_once, _draw_geometry, typed_plot_error, _plot_warn
+from uacpy.visualization.plots._common import _value_array, _value_label, _default_value, _coord_label, _coord_axis, _TL_LIMITS, _is_loss_view, _overlay_seafloor, _pinned_subtitle, _draw_result_credit, _draw_credit, _model_attribution, fig_ax, invert_yaxis_once, _draw_geometry, typed_plot_error, _plot_warn, _title_or, _fit_subplot_margins, _fit_colorbar_strip
 
 
 # Which of ``plot_field``'s knobs each of its three render branches reads.
@@ -324,11 +324,12 @@ def _plot_field_1d(
         if _is_loss_view(field, value):
             invert_yaxis_once(ax)
     ax.grid(True, alpha=0.3)
-    if title:
+    if title is not None:
         ax.set_title(title)
-    pin_text = _pinned_subtitle(field)
-    if pin_text and not title:
-        ax.set_title(pin_text)
+    else:
+        pin_text = _pinned_subtitle(field)
+        if pin_text:
+            ax.set_title(pin_text)
     if label:
         ax.legend()
     return fig, ax
@@ -584,7 +585,7 @@ def _plot_field_2d(
         fig.colorbar(im, ax=ax, label=value_label,
                      fraction=0.046, pad=0.02)
     ax.grid(True, alpha=0.3, zorder=0)
-    if title:
+    if title is not None:
         ax.set_title(title)
     elif field.kind == 'signal_excess':
         ax.set_title(_signal_excess_title(field))      # as plot_signal_excess does
@@ -645,7 +646,7 @@ def _finish_sonar_heatmap(fig, ax, im, field, *, env, x_label, colorbar_label,
     ax.set_ylabel(_coord_label('depth'))
     invert_yaxis_once(ax)
     ax.grid(True, alpha=0.3, zorder=0)
-    ax.set_title(title if title else auto_title)
+    ax.set_title(_title_or(title, auto_title))
     if env is not None:
         _overlay_seafloor(ax, env, field.coords['range'], painted=im)
     if owns_fig:                         # credit only a figure we own
@@ -1134,8 +1135,14 @@ def compare_models(
     top = 0.90 if title else 0.95
     # One credit line per model sits under the panels; leave it room.
     bottom = 0.08 + 0.025 * max(0, len(fields) - 1)
-    fig.subplots_adjust(left=0.05, right=0.88, top=top, bottom=bottom,
+    #: Panels may run to here; the strip beyond it belongs to the colorbar.
+    _PANEL_RIGHT = 0.88
+    fig.subplots_adjust(left=0.05, right=_PANEL_RIGHT, top=top, bottom=bottom,
                         wspace=0.22, hspace=0.30)
+    # Those fractions are only a starting point. They cannot hold a label
+    # whose width is in points, so the margins are then grown from the
+    # rendered labels -- see _fit_subplot_margins for the measurements.
+    _fit_subplot_margins(fig, axes_flat[:n], right_limit=_PANEL_RIGHT)
     if title:
         fig.suptitle(title, fontsize='x-large', fontweight='bold', y=0.97)
     _draw_multi_model_credit(fig, fields)
@@ -1147,8 +1154,11 @@ def compare_models(
         # margin with a second subplots_adjust, and an axes placed at the
         # earlier ``bottom`` does not follow it. Read the panels' final bottom.
         cbar_bottom = fig.subplotpars.bottom
-        cbar_ax = fig.add_axes((0.905, cbar_bottom, 0.015, top - cbar_bottom))
+        cbar_ax = fig.add_axes((_PANEL_RIGHT + 0.025, cbar_bottom, 0.015,
+                                fig.subplotpars.top - cbar_bottom))
         fig.colorbar(im_last, cax=cbar_ax, label=cbar_label)
+        # Its ticks and label live outside its axes, so it too is measured.
+        _fit_colorbar_strip(fig, cbar_ax)
     # One shape for every grid-of-panels return on this surface: the 2-D
     # axes array, matching _plot_field_stack (documented in the Returns
     # section above).
