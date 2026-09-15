@@ -16,7 +16,8 @@ from uacpy.acoustic_signal import (  # noqa: E402
     CQPPSDResult)
 from uacpy.acoustic_signal.constant_q import _cq_quality, _cq_frequencies
 from uacpy.visualization import (  # noqa: E402
-    plot_constant_q_spectrogram, plot_constant_q_psd, plot_constant_q_ppsd)
+    plot_constant_q_transform, plot_constant_q_spectrogram,
+    plot_constant_q_psd, plot_constant_q_ppsd)
 from uacpy.core.exceptions import ConfigurationError  # noqa: E402
 
 FS = 8000.0
@@ -281,10 +282,41 @@ def test_plotters_smoke():
     sg = constant_q_spectrogram(x, FS, fmin=100, fmax=2000, bins_per_octave=12)
     p = constant_q_psd(x, FS, fmin=100, fmax=2000, bins_per_octave=12)
     pp = probabilistic_constant_q(x, FS, fmin=100, fmax=2000, bins_per_octave=12)
-    for fig, ax in (plot_constant_q_spectrogram(sg.frequencies, sg.times, sg.power),
+    cqt = constant_q_transform(x, FS, fmin=100, fmax=2000, bins_per_octave=12)
+    for fig, ax in (plot_constant_q_transform(cqt.frequencies, cqt.coefficients),
+                    plot_constant_q_spectrogram(sg.frequencies, sg.times, sg.power),
                     plot_constant_q_psd(p.frequencies, p.power),
                     plot_constant_q_ppsd(pp)):
         assert fig is not None and ax is not None
+    plt.close("all")
+
+
+def test_the_transform_plotter_draws_the_magnitude_on_a_log_axis():
+    """The coefficients are complex, so the line is ``|X_cq|``, and the
+    frequency axis is geometric like the bins it draws."""
+    x = _tone(440.0, dur=1.0)
+    cqt = constant_q_transform(x, FS, fmin=100, fmax=2000, bins_per_octave=12)
+    _, ax = plot_constant_q_transform(cqt.frequencies, cqt.coefficients)
+    drawn = ax.lines[0].get_ydata()
+    assert ax.get_xscale() == "log"
+    np.testing.assert_allclose(drawn, np.abs(cqt.coefficients))
+    assert np.isrealobj(drawn)
+    plt.close("all")
+
+
+@pytest.mark.parametrize("n_coefficients, raises", [(31, True), (32, False)])
+def test_the_transform_plotter_requires_one_coefficient_per_frequency(
+        n_coefficients, raises):
+    """Both sides of the length check: a coefficient array one short of the
+    frequency axis is a mismatched pair, not a shorter curve."""
+    frequencies = np.geomspace(100.0, 2000.0, 32)
+    coefficients = np.ones(n_coefficients, dtype=complex)
+    if raises:
+        with pytest.raises(ConfigurationError, match="one value per frequency"):
+            plot_constant_q_transform(frequencies, coefficients)
+    else:
+        fig, _ = plot_constant_q_transform(frequencies, coefficients)
+        assert fig is not None
     plt.close("all")
 
 

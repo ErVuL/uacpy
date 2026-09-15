@@ -9,8 +9,9 @@ across the spectrogram, and its PPSD should land back on the analytic Wenz curve
 it was synthesised from — which is what the magenta overlay checks.
 
 Uses: noise.WenzNoise(.as_psd) · plot_wenz ·
-acoustic_signal.synthesize_noise_from_psd · spectrogram · ppsd · sel (ISO
-18405) · plot_spectrogram · plot_ppsd · plot_sel
+acoustic_signal.synthesize_noise_from_psd · spectrogram · ppsd ·
+probabilistic_constant_q · constant_q_psd · sel (ISO 18405) ·
+plot_spectrogram · plot_ppsd · plot_constant_q_ppsd · plot_sel
 """
 
 import os
@@ -21,7 +22,8 @@ sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 import numpy as np
 import matplotlib.pyplot as plt
 import uacpy
-from uacpy.acoustic_signal import (ppsd, sel, spectrogram,
+from uacpy.acoustic_signal import (constant_q_psd, ppsd,
+                                   probabilistic_constant_q, sel, spectrogram,
                                    synthesize_noise_from_psd)
 from uacpy.noise import WenzNoise
 
@@ -87,6 +89,45 @@ ax.semilogx(wenz.frequencies, wenz.total, color='magenta', linewidth=2.0,
 ax.legend(loc='upper right', fontsize='small', framealpha=0.85)
 fig.savefig(OUT / 'example_09_ppsd.png', dpi=150, bbox_inches='tight')
 plt.close(fig)
+
+# The constant-Q twin of that PPSD: geometric bins, so the resolution follows
+# the decades a soundscape spans rather than a fixed Hz spacing.
+# scaling='density' is what makes the levels comparable to a Wenz curve, which
+# is a density; fmax below Nyquist keeps the near-Nyquist bins (which read a
+# coherent tone high) out of the picture.
+cq_kw = dict(fmin=20.0, fmax=20000.0, bins_per_octave=24, scaling='density')
+cq_hist = probabilistic_constant_q(pressure, fs, ref=UPA, lvlmin=20,
+                                   lvlmax=140, **cq_kw)
+cq_mean = constant_q_psd(pressure, fs, **cq_kw)
+
+# vmax: the plotter defaults to 1/binwidth_dB — the largest density a 1 dB bin
+# could hold — which suits a Welch-averaged PPSD. A single-look constant-Q
+# histogram is far broader (median per-bin std 5.5 dB against 0.9 dB for the
+# linear PPSD above), so its peak density is 0.164 and the default would render
+# the whole panel in the bottom sixth of the colormap.
+fig, ax = uacpy.plot.plot_constant_q_ppsd(cq_hist, title=label, ymin=20,
+                                          ymax=120, vmax=0.18)
+ax.semilogx(wenz.frequencies, wenz.total, color='magenta', linewidth=2.0,
+            label='Wenz total (analytic)')
+# The power mean of the same bins lands on that curve, while the histogram's
+# own mean line sits below it — the single-look bias the print below measures,
+# not an error in the synthesis. Dotted because the plotter already draws that
+# mean solid black and its ±STD dashed black.
+ax.semilogx(cq_mean.frequencies, 10 * np.log10(cq_mean.power / UPA ** 2),
+            color='k', lw=2.2, ls=':', label='constant_q_psd (power mean)')
+ax.legend(loc='upper right', fontsize='small', framealpha=0.85)
+fig.savefig(OUT / 'example_09_cq_ppsd.png', dpi=150, bbox_inches='tight')
+plt.close(fig)
+
+# Each constant-Q frame is one look, so the mean of its dB levels sits
+# 10·γ/ln10 = 2.51 dB under the power mean — read mean_dB as the centre of the
+# histogram, and compare a target curve against constant_q_psd instead.
+analytic = np.interp(cq_hist.frequencies, wenz.frequencies, wenz.total)
+print(f"  constant-Q: power mean "
+      f"{np.nanmedian(10 * np.log10(cq_mean.power / UPA ** 2) - analytic):+.2f}"
+      f" dB against the analytic curve, per-bin dB mean "
+      f"{np.nanmedian(cq_hist.mean_dB - analytic):+.2f} dB "
+      f"(single-look log mean, 2.51 dB low by construction)")
 
 # SEL is the time-integral of p²(t) (ISO 18405) — the cumulative energy dose of
 # the record, per third-octave band, in dB re 1 µPa²·s. The broadband total is

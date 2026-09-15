@@ -1,6 +1,6 @@
 # Plotting — one convention, one workhorse
 
-> `uacpy.plot` · 54 public plotters · every result and every drawable carrier
+> `uacpy.plot` · 60 public plotters · every result and every drawable carrier
 > renders itself with `.plot()`
 
 There are two halves to the plotting surface. Anything that is a uacpy object
@@ -484,7 +484,7 @@ detection probability and the ROC.
 
 ## 7. Reference — every public plotter
 
-All 59 plotters in `uacpy.plot.__all__` — the 8 remaining names in `__all__`
+All 60 plotters in `uacpy.plot.__all__` — the 8 remaining names in `__all__`
 are the submodules themselves. **ax** marks a single-axes plotter you can
 compose with. Every entry takes `title=` except `plot_result` (it forwards
 yours), `shared_colorbar` (a colorbar on an existing figure) and the two
@@ -591,6 +591,7 @@ Every one consumes the output of the same-named routine in
 | `plot_sel(sel_pa2s, bands, ax=None, band_type='third_octave', …)` | ✓ | `sel` — per-band sound exposure level |
 | `plot_band_levels(centers, levels, ax=None, …)` | ✓ | `decidecade_band_levels` — bar plot |
 | `plot_spectrogram(frequencies, times, Sxx, ax=None, ymin=1, vmin=0, vmax=200, …)` | ✓ | `spectrogram` |
+| `plot_constant_q_transform(frequencies, coefficients, ax=None, label=None, …)` | ✓ | `constant_q_transform` — one frame's \|X_cq\|, linear |
 | `plot_constant_q_spectrogram(frequencies, times, power, ax=None, scaling='spectrum', …)` | ✓ | `constant_q_spectrogram` (log frequency) |
 | `plot_constant_q_psd(frequencies, power, ax=None, scaling='spectrum', …)` | ✓ | `constant_q_psd` |
 | `plot_constant_q_ppsd(result, ax=None, scaling='spectrum', …)` | ✓ | `probabilistic_constant_q` |

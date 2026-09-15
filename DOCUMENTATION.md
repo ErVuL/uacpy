@@ -1529,7 +1529,7 @@ builds its own three-panel figure and returns `(fig, [ax1, ax2, ax3])`.
 - **Gather transforms:** `plot_fk`, `plot_radon`, `plot_taup` (+ `draw_sound_cone`,
   `draw_slowness_line` overlays).
 - **Time-frequency:** `plot_cwt`, `plot_wigner_ville`, `plot_cepstrum`.
-- **Constant-Q:** `plot_constant_q_spectrogram`, `plot_constant_q_psd`,
+- **Constant-Q:** `plot_constant_q_transform`, `plot_constant_q_spectrogram`, `plot_constant_q_psd`,
   `plot_constant_q_ppsd`.
 - **Arrays / active / system-ID:** `plot_angular_spectrum`, `plot_ambiguity`
   (`dB=True` for the sidelobes, which sit tens of dB down), `plot_matched_field`
@@ -1601,12 +1601,12 @@ fitted state). All plotting lives in `uacpy.visualization` (`plot_psd`,
 | Noise synthesis | `make_noise_waveform`, `make_bandlimited_noise`, `synthesize_noise_from_psd`, `fourier_synthesis`, `add_noise` |
 | Spectral / levels | `psd`, `ppsd`, `sel` (→ `PSDResult`/`PPSDResult`/`SELResult`) |
 | Decidecade (ISO 18405) | `decidecade_bands`, `decidecade_band_levels` |
-| Arrays | `steering_vectors`, `beamform`, `sample_covariance`, `bartlett_spectrum`, `mvdr_spectrum`, `music_spectrum`, `shading_taper` |
-| Active / pulse compression | `matched_filter`, `pulse_compression`, `processing_gain`, `ambiguity_function` |
+| Arrays | `steering_vectors`, `beamform`, `sample_covariance`, `bartlett_spectrum`, `mvdr_spectrum`, `music_spectrum`, `shading_taper` (→ `BeamformResult`) |
+| Active / pulse compression | `matched_filter`, `pulse_compression`, `processing_gain`, `ambiguity_function` (→ `AmbiguityResult`) |
 | Time-frequency | `spectrogram`, `analytic_signal`, `envelope`, `instantaneous_frequency`, `wigner_ville`, `cwt`, `inverse_cwt`, `cepstrum`, `complex_cepstrum`, `inverse_complex_cepstrum` (→ `SpectrogramResult`/`WignerVilleResult`/`CWTResult`/`ComplexCepstrum`) |
 | Constant-Q (Brown 1991) | `constant_q_transform`, `constant_q_psd`, `constant_q_spectrogram`, `probabilistic_constant_q` (→ `CQTResult`/`CQPSDResult`/`CQSpectrogramResult`/`CQPPSDResult`) |
-| Gather transforms | `fk_transform`, `taup_transform`, `radon_transform` (+ `inverse_*`; → `FKResult`/`TauPResult`/`RadonResult`) |
-| System ID / channel | `FRF`, `impulse_response`, `impulse_response_from_transfer_function`, `simulate_reception` |
+| Gather transforms | `fk_transform`, `taup_transform`, `radon_transform`, `inverse_fk`, `inverse_taup`, `inverse_radon` (→ `FKResult`/`TauPResult`/`RadonResult`) |
+| System ID / channel | `FRF`, `impulse_response`, `impulse_response_from_transfer_function`, `simulate_reception`, `fractional_delay_taps` |
 | Modal / dispersion | `warp_signal`, `unwarp_signal`, `modal_group_velocity` |
 
 `FRF` is a class because it keeps the fit. `FRF(method=…, estimator=…, m=…)`
@@ -1743,14 +1743,18 @@ verified bit-exact against CMRE janus-c).
 
 | Area | Public names |
 |------|--------------|
-| Modulation | `Modulator`, `constellation`, `dpsk_modulate`, `fsk_modulate` |
-| Channel | `awgn`, `multipath_channel`, `apply_fading_channel`, `fading_taps` |
-| Equalization | `DFE`, `lms_equalizer`, `rls_equalizer`, `mmse_equalizer` |
-| Doppler / sync | `estimate_doppler_scale`, `compensate_doppler`, `detect_preamble`, `detect_frames` |
+| Modulation | `Modulator`, `constellation`, `dpsk_modulate`, `dpsk_demodulate`, `fsk_modulate`, `fsk_demodulate` |
+| Channel | `awgn`, `multipath_channel`, `apply_channel`, `apply_fading_channel`, `fading_taps` |
+| Equalization | `DFE`, `lms_equalizer`, `rls_equalizer`, `mmse_equalizer`, `slicer` |
+| Doppler / sync | `estimate_doppler_scale`, `compensate_doppler`, `doppler_from_speed`, `detect_preamble`, `detect_frames`, `matched_filter_metric` |
+| Passband PHY | `rrc_filter`, `pulse_shape`, `rrc_matched_filter`, `upconvert`, `downconvert`, `symbol_sync` |
+| Framing | `pack_frame`, `unpack_frame`, `bytes_to_bits`, `bits_to_bytes` |
+| Transceivers | `Transmitter`, `CommsReceiver` (the OFDM pair is in its own row) |
+| Channel estimation | `ls_estimate`, `omp_estimate` |
 | Link harness | `simulate_link`, `ber_sweep`, `LinkResult` |
 | Metrics | `bit_error_rate`, `symbol_error_rate`, `evm`, `ber_theory` |
-| Coding / spread | `ConvCode`, `conv_encode`, `viterbi_decode`, `interleave`, `spread`, `despread` |
-| OFDM | `ofdm_modulate`, `ofdm_demodulate`, `schmidl_cox_sync`, `OFDMTransmitter`, `OFDMReceiver` |
+| Coding / spread | `ConvCode`, `conv_encode`, `viterbi_decode`, `viterbi_hard`, `interleave`, `deinterleave`, `m_sequence`, `spread`, `despread`, `processing_gain_dB` |
+| OFDM | `ofdm_modulate`, `ofdm_demodulate`, `ofdm_symbol`, `equalize_subcarriers`, `schmidl_cox_preamble`, `schmidl_cox_sync`, `apply_cfo`, `estimate_channel`, `OFDMTransmitter`, `OFDMReceiver` |
 | JANUS | `janus_encode`, `janus_decode`, `janus_modulate`, `janus_demodulate`, `janus_detect`, `janus_transmit`, `janus_receive`, `JanusPacket` |
 
 `simulate_link` composes transmit → channel → receive and measures BER;

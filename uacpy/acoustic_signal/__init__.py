@@ -100,6 +100,7 @@ _EXPORTS = {
     'FKResult': 'transforms', 'TauPResult': 'transforms',
     'RadonResult': 'transforms',
     # channel
+    'fractional_delay_taps': 'channel',
     'impulse_response': 'channel',
     'impulse_response_from_transfer_function': 'channel',
     'simulate_reception': 'channel',
@@ -146,7 +147,7 @@ __all__ = [
     "radon_transform", "inverse_radon", "RadonResult",
     # channel
     "impulse_response", "simulate_reception",
-    "impulse_response_from_transfer_function",
+    "impulse_response_from_transfer_function", "fractional_delay_taps",
     # modal
     "modal_group_velocity", "warp_signal", "unwarp_signal",
     # time-frequency

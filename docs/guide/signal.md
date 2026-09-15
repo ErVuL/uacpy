@@ -86,7 +86,7 @@ the signal.
 | `nwave(time, frequency)` | `s` | `sin(ωt) − ½sin(2ωt)`, forced to zero outside `[0, 1/f]` |
 | `sparc_pulse(t, omega, pulse_type)` | `(s, title)` | the 11-shape SPARC library; `omega` is **rad/s**, and the second return is the shape's name |
 | `mseq(m)` | `s` | maximum-length sequence, `2**m − 1` chips of ±1 (standard BPSK mapping bit 0 → +1, bit 1 → −1, the same polarity as `comms.m_sequence`), `2 ≤ m ≤ 15` |
-| `bpsk_modulate(chips, fc, sample_rate, chips_per_sec)` | `s` | one carrier cycle-block per chip; requires an integer `sample_rate / chips_per_sec` |
+| `bpsk_modulate(s_bipolar, fc, sample_rate, chips_per_sec)` | `s` | one carrier cycle-block per chip; requires an integer `sample_rate / chips_per_sec` |
 | `make_mseq_probe(fmin, fmax, sample_rate, T_tot)` | `probe` | 0.2 s leader + whole periods of `mseq(10)`, BPSK'd at `(fmin + fmax)/2`, zero-filled to exactly `round(T_tot · sample_rate)` samples |
 
 ```python
@@ -285,8 +285,11 @@ grid is too coarse at the bottom of the band set — raise `nperseg`.
 | `cwt(data, sample_rate, frequencies=None, wavelet='morlet', *, w0=6.0, order=None, n_freqs=64)` | `CWTResult(frequencies, coefficients)` | `inverse_cwt`, approximately |
 | `wigner_ville(data, sample_rate, *, analytic=True, freq_window=None, time_window=None, nfft=None)` | `WignerVilleResult(frequencies, times, distribution)` | no |
 | `cepstrum(data, *, window=None, nfft=None, lifter=None)` | real cepstrum | no — phase is discarded |
-| `complex_cepstrum(data)` | **complex** cepstrum | `inverse_complex_cepstrum`, exactly |
-| `constant_q_transform` / `_spectrogram` / `_psd` / `probabilistic_constant_q` | `CQTResult` / `CQSpectrogramResult` / `CQPSDResult` / `CQPPSDResult` | no |
+| `complex_cepstrum(data)` | `ComplexCepstrum(cepstrum, delay)` — the **complex** cepstrum, and the linear-phase samples removed that its inverse needs back | `inverse_complex_cepstrum`, exactly |
+| `constant_q_transform(data, sample_rate, *, fmin=20.0, fmax=None, bins_per_octave=24, window='hann')` | `CQTResult(frequencies, coefficients)` — one centred frame, complex | no |
+| `constant_q_spectrogram(data, sample_rate, *, fmin=20.0, fmax=None, bins_per_octave=24, hop=None, window='hann', scaling='spectrum')` | `CQSpectrogramResult(frequencies, times, power)` | no |
+| `constant_q_psd(data, sample_rate, *, fmin=20.0, fmax=None, bins_per_octave=24, hop=None, window='hann', scaling='spectrum')` | `CQPSDResult(frequencies, power)` | no |
+| `probabilistic_constant_q(data, sample_rate, *, fmin=20.0, fmax=None, bins_per_octave=24, hop=None, window='hann', scaling='spectrum', ddB=1.0, lvlmin=0, lvlmax=150, ref=1e-6)` | `CQPPSDResult(frequencies, level_edges, pdf, mean_dB, std_dB, binwidth_dB, ref, scaling)` | no |
 
 `cwt` offers three analysing wavelets: `'morlet'` (complex, best frequency
 resolution), `'paul'` (complex, best time resolution) and `'dog'` (real
@@ -318,6 +321,27 @@ bandwidth in Hz — and because constant-Q bins widen in proportion to
 frequency, that offset is frequency-dependent: on white noise it measures ~4×
 at 100 Hz and ~40× at 1 kHz. Pass the same `scaling=` to both when levels
 must line up.
+
+`probabilistic_constant_q` is the one to read carefully: each of its samples is
+a single unaveraged frame, so its per-bin `mean_dB` is the mean of a *single
+look's* dB levels. On noise that sits 2.51 dB (`10γ/ln10`) below the power mean
+`constant_q_psd` returns from the same record — measured 2.507 ± 0.004 dB over
+four seeds, on 60 s of white noise at `bins_per_octave=24`. That is the
+two-degrees-of-freedom figure, and it holds across the band (2.48–2.53 dB) with
+one exception: a bin essentially at Nyquist has no quadrature component left, so
+the offset climbs toward the one-dof value of 5.52 dB — measured 2.91 dB at
+`f/fs = 0.4995`. The band *power* there is unaffected; what moves is the shape
+of its distribution.
+
+`ppsd`'s `mean_dB` carries the same bias, and how much of it depends on how many
+Welch segments a `seg_duration` chunk actually holds. `nperseg` is clamped to
+the chunk length, so at the defaults (`seg_duration=1.0`, `nperseg=8192`) a
+sample is **one look — the full 2.51 dB — at any `sample_rate` of 8192 Hz or
+below**, which is most of this package's own test and example rates. Measured on
+white noise: 2.49 dB at both 4 and 8 kHz (one look), 1.19 dB at 16 kHz (two),
+0.23 dB at 48 kHz (ten), against `(10/ln10)·(ψ(L) − ln L)` for `L` looks.
+Compare `psd` or `constant_q_psd` against a target curve; read either `mean_dB`
+as the centre of the histogram it describes.
 
 ### The resolution trade-off
 
@@ -515,6 +539,7 @@ wants. Decide up front whether you are estimating power or filtering.
 | `impulse_response(amplitudes, delays_s, sample_rate, *, n_samples=None, fractional=True)` | `(t, h)` | discrete arrivals → channel IR |
 | `simulate_reception(transmit, amplitudes, delays_s, sample_rate)` | `(t, received)` | transmit waveform convolved with that IR |
 | `impulse_response_from_transfer_function(H, frequencies, sample_rate, n_samples=None)` | `(t, h)` | one-sided `H(f)` → real IR |
+| `fractional_delay_taps(frac, half_len=8, beta=8.0)` | `2·half_len` taps | the sub-sample kernel `impulse_response` places arrivals with (`simulate_reception` through it) |
 
 `fractional=True` places each arrival with a windowed-sinc fractional-delay
 kernel (Kaiser `β = 8`, 8 taps each side, normalised to unit DC gain), so a

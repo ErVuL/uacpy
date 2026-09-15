@@ -373,7 +373,21 @@ def probabilistic_constant_q(data, sample_rate, *, fmin=20.0, fmax=None,
     analogue of :func:`uacpy.acoustic_signal.ppsd` — note the two histogram
     different populations: each sample here is a *single unaveraged frame*,
     whereas ``ppsd`` histograms Welch averages over ``seg_duration`` chunks,
-    so the level spread here is wider for the same signal. Only frames whose
+    so the level spread here is wider for the same signal, and ``mean_dB``
+    — the mean of those dB levels — sits ``10*gamma/ln(10)`` = 2.51 dB below
+    the power mean :func:`constant_q_psd` returns from the same record
+    (measured 2.507 +/- 0.004 dB over four seeds, 60 s of white noise at
+    ``bins_per_octave=24``). That figure is the two-degrees-of-freedom case:
+    a bin essentially *at* Nyquist loses its quadrature component, so
+    ``|X|**2`` tends toward one dof and the offset climbs toward
+    ``10*(gamma+ln2)/ln(10)`` = 5.52 dB — measured 2.91 dB at
+    ``f_k/fs = 0.4995`` against 2.48-2.53 dB across the rest of the band. This
+    does not contradict "broadband noise is not affected" above: the band
+    *power* there is unchanged, and it is the shape of its distribution, hence
+    the mean of the logs, that moves. ``ppsd`` carries the same bias wherever
+    its own ``nperseg`` is clamped to the ``seg_duration`` chunk, which is one
+    look too. Compare a target curve against ``constant_q_psd``; ``mean_dB``
+    is the centre of the histogram. Only frames whose
     window lay fully inside the signal contribute (per bin). Returns a :class:`CQPPSDResult`
     ``(frequencies, level_edges, pdf, mean_dB, std_dB, binwidth_dB, ref, scaling)``;
     ``pdf`` is shaped ``(n_levels, n_freqs)`` and density-normalised per

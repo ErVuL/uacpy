@@ -1,6 +1,6 @@
 # Communications — digital modems for the underwater channel
 
-> `uacpy.comms` · 82 public names · modulation, coding, equalisation,
+> `uacpy.comms` · 86 public names · modulation, coding, equalisation,
 > synchronisation, OFDM, DSSS, Doppler, and the NATO JANUS standard
 
 `uacpy.comms` is a digital-communications toolbox built for the one channel
@@ -97,6 +97,7 @@ codeword.
 | `ConvCode(polys, K, interleave_depth)` | codec bundling encode/decode with matched settings |
 | `conv_encode(bits, polys, K)` | rate-`1/len(polys)` encoder with zero tail-flush |
 | `viterbi_decode(coded, polys, K)` | hard-decision Viterbi |
+| `viterbi_hard(bm0, bm1, prev0, prev1, n_states, bit_of_state)` | the survivor selection on its own, for a caller holding its own branch metrics |
 | `interleave(bits, depth)` / `deinterleave` | block-local `depth × depth` transpose |
 
 ```python
@@ -136,7 +137,10 @@ bits_out = mod.demodulate(symbols)  # hard minimum-distance decision
 All constellations are **Gray-mapped and unit-average-energy**, so a symbol
 index is its bit label and the Eb/N0 bookkeeping in
 [`ber_theory`](#9-metrics) is exact. `constellation(scheme)` returns the
-lookup table directly if you want to plot or slice against it.
+lookup table directly if you want to plot or slice against it, and
+`slicer(x, constellation)` makes that decision for you — the nearest point of
+the table to each element of `x`, which is what every hard-decision receiver in
+this module is doing internally.
 
 Coherent PSK/QAM work in the *symbol* domain, which is what lets them compose
 with the equalisers, OFDM and channel estimators. DPSK and FSK are the
@@ -304,7 +308,7 @@ expect, not from the tap count.
 | Call | Measures |
 |---|---|
 | `bit_error_rate(tx_bits, rx_bits)` | fraction of differing bits over the overlap |
-| `symbol_error_rate(tx, rx)` | same, on labels or exact symbols |
+| `symbol_error_rate(tx_symbols_or_labels, rx_symbols_or_labels)` | same, on labels or exact symbols |
 | `evm(rx_symbols, ref_symbols)` | RMS error-vector magnitude (a fraction) |
 | `ber_theory(scheme, ebn0_dB)` | closed-form AWGN BER |
 | `ber_sweep(scheme, ebn0_dB_list, n_bits, ...)` | measured BER over a list of Eb/N0 |
@@ -483,6 +487,8 @@ tens of milliseconds, and every sample of it is throughput you do not send.
 |---|---|
 | `ofdm_modulate(symbols, n_subcarriers, cp_len)` | map + IFFT + prepend CP |
 | `ofdm_demodulate(rx, n_subcarriers, cp_len, channel=, snr_linear=)` | strip CP + FFT + optional ZF/MMSE |
+| `ofdm_symbol(freq, n_sc, cp)` | one CP-prefixed symbol from one length-`n_sc` spectrum |
+| `equalize_subcarriers(freq, H, snr_linear=None)` | the one-tap-per-subcarrier division on its own |
 | `OFDMTransmitter(modulation, n_subcarriers, cp_len, code=)` | full frame: preamble, pilot, data, guard |
 | `OFDMReceiver(..., snr_linear=).from_passband(samples, fs, fc)` | resample away the common Doppler scale, down-convert, decimate |
 | `OFDMReceiver(...).receive(baseband)` | Schmidl-Cox → residual CFO → FFT → pilot estimate → equalise → per-block phase |
@@ -798,13 +804,13 @@ plotters in `uacpy.visualization`. The comms family:
 |---|---|
 | `plot_scatter(symbols, ax, ideal=)` | a received constellation |
 | `plot_constellation(constellation, ax)` | an ideal Gray-labelled constellation |
-| `plot_eye_diagram(signal, sps, ax)` | the eye |
-| `plot_ber_curve(ebn0, ber, ax, scheme=)` | measured BER with the theory overlay |
+| `plot_eye_diagram(signal, samples_per_symbol, ax)` | the eye |
+| `plot_ber_curve(ebn0_dB, ber_measured, ax, scheme=)` | measured BER with the theory overlay |
 | `plot_convergence(mse, ax)` | an equaliser learning curve |
 | `plot_sync_metric(metric, ax, threshold=)` | a synchronisation metric |
 | `plot_channel(h, sample_rate, (ax_h, ax_f))` | `\|h\|` and `\|H(f)\|` side by side |
 | `plot_subcarriers(channel, n_subcarriers, ax)` | the OFDM channel response |
-| `plot_doppler_ambiguity(scales, peak, ax)` | the Doppler ambiguity curve |
+| `plot_doppler_ambiguity(scales, peak_metric, ax)` | the Doppler ambiguity curve |
 
 All of them take plain arrays, accept `ax` as the last positional argument —
 directly after the data, so it sits second in the one-array signatures and

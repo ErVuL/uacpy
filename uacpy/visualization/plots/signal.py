@@ -417,6 +417,38 @@ def plot_spectrogram(frequencies, times, Sxx, ax=None, *,
 # ── Constant-Q (Brown 1991) ─────────────────────────────────────────────────
 
 @typed_plot_error
+def plot_constant_q_transform(frequencies, coefficients, ax=None, *,
+                              label=None, title=None, figsize=(10, 6),
+                              **mpl_kw):
+    """Line plot of one constant-Q frame's magnitude (log frequency). Consumes
+    :func:`constant_q_transform` output ``(frequencies, coefficients)``.
+
+    Linear amplitude, not dB, and deliberately: the coefficients are the
+    analytic band amplitude ``A/2``, while the one-sided band power the rest of
+    the family reports is ``2*|X_cq|**2``. Read levels off
+    :func:`plot_constant_q_psd`, whose estimator applies that conversion; this
+    panel shows the raw transform a single frame returns.
+    """
+    magnitude = np.abs(np.asarray(coefficients))
+    if magnitude.ndim != 1 or magnitude.size != len(frequencies):
+        raise ConfigurationError(
+            f"plot_constant_q_transform: coefficients has shape "
+            f"{magnitude.shape}; expected one value per frequency "
+            f"(len(frequencies)={len(frequencies)}) — pass "
+            f"constant_q_transform()'s own output.")
+    fig, ax = fig_ax(ax, figsize)
+    ax.semilogx(frequencies, magnitude, label=label, **mpl_kw)
+    ax.set_title(_title_or(title, "Constant-Q transform"), loc="left")
+    ax.set_xlabel("Frequency (Hz)")
+    ax.set_ylabel("|X_cq|")
+    ax.set_xlim(_log_freq_xlim(frequencies))
+    ax.grid(which="both", alpha=0.75)
+    if label:
+        ax.legend()
+    return fig, ax
+
+
+@typed_plot_error
 def plot_constant_q_spectrogram(frequencies, times, power, ax=None, *,
                                 ref=REFERENCE_PRESSURE_WATER, scaling="spectrum",
                                 vmin=0, vmax=200, cmap="jet", title=None,

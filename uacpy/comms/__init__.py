@@ -41,6 +41,7 @@ from .equalization import (
     lms_equalizer,
     mmse_equalizer,
     rls_equalizer,
+    slicer,
 )
 from .doppler import (
     compensate_doppler,
@@ -76,9 +77,11 @@ from .janus import (
 from .channel_est import ls_estimate, omp_estimate
 from .ofdm import (
     apply_cfo,
+    equalize_subcarriers,
     estimate_channel,
     ofdm_demodulate,
     ofdm_modulate,
+    ofdm_symbol,
     schmidl_cox_preamble,
     schmidl_cox_sync,
 )
@@ -88,6 +91,7 @@ from .coding import (
     deinterleave,
     interleave,
     viterbi_decode,
+    viterbi_hard,
 )
 from .dsss import despread, m_sequence, processing_gain_dB, spread
 
@@ -119,7 +123,7 @@ __all__ = [
     "awgn", "multipath_channel", "apply_channel", "fading_taps",
     "apply_fading_channel",
     # equalization
-    "DFE", "lms_equalizer", "rls_equalizer", "mmse_equalizer",
+    "DFE", "lms_equalizer", "rls_equalizer", "mmse_equalizer", "slicer",
     # doppler
     "doppler_from_speed", "compensate_doppler", "estimate_doppler_scale",
     # sync
@@ -140,9 +144,11 @@ __all__ = [
     "ls_estimate", "omp_estimate",
     # ofdm
     "ofdm_modulate", "ofdm_demodulate", "schmidl_cox_preamble",
-    "schmidl_cox_sync", "apply_cfo", "estimate_channel",
+    "schmidl_cox_sync", "apply_cfo", "estimate_channel", "ofdm_symbol",
+    "equalize_subcarriers",
     # coding
-    "ConvCode", "conv_encode", "viterbi_decode", "interleave", "deinterleave",
+    "ConvCode", "conv_encode", "viterbi_decode", "viterbi_hard", "interleave",
+    "deinterleave",
     # DSSS
     "m_sequence", "spread", "despread", "processing_gain_dB",
     # submodules

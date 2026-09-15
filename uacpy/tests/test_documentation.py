@@ -2393,6 +2393,22 @@ def test_the_readme_documentation_page_count_matches_the_docs_tree() -> None:
 
 
 @requires_docs
+def test_the_readme_figure_count_matches_the_figures_on_disk() -> None:
+    """The other half of the same sentence counts the figures, and only the
+    page halves were pinned — so it read 127 against 128 on disk. Counted from
+    the two generated-figure directories; the hero image at ``docs/`` root and
+    the scanned table under ``docs/other/`` are not generated and are excluded
+    by living outside them."""
+    drawn = sum(len(list((DOCS_DIR / part / "figures").glob("*.png")))
+                for part in ("guide", "models"))
+    match = re.search(r"with\s+(\d+)\s+generated figures", _docs_bullet())
+    assert match is not None, "README.md's figure-count phrasing changed"
+    assert int(match.group(1)) == drawn, (
+        f"README.md advertises {match.group(1)} generated figures; "
+        f"docs/guide/figures + docs/models/figures hold {drawn}")
+
+
+@requires_docs
 def test_the_readme_names_every_guide_page() -> None:
     """The same bullet enumerates the guides in prose. A page present on disk
     but absent from the sentence is invisible to a reader of the front page."""
@@ -2701,6 +2717,94 @@ def test_every_public_plotter_is_documented():
         f"DOCUMENTATION.md: {absent}")
 
 
+#: A guide page's subtitle that counts its package, e.g.
+#: ``> `uacpy.comms` · 86 public names · …``.
+_COUNTED_SUBTITLE = re.compile(r"`uacpy\.(\w+)` · (\d+) public names")
+
+
+@requires_docs
+def test_every_guide_subtitle_that_counts_its_package_counts_it_right():
+    """A page whose first line counts its own export surface counts it right.
+
+    ``io.md`` and ``data.md`` each had a gate on their own subtitle and
+    ``comms.md`` had none, so exporting four names left its "82 public names"
+    reading four short while every other gate stayed green. This sweeps the
+    pages for the pattern instead of naming them, so a page that starts
+    counting itself tomorrow is covered the day it does.
+    """
+    counted = []
+    for page in sorted((DOCS_DIR / "guide").glob("*.md")):
+        text = page.read_text(encoding="utf-8")
+        for module_name, advertised in _COUNTED_SUBTITLE.findall(text):
+            module = importlib.import_module(f"uacpy.{module_name}")
+            counted.append((page.name, int(advertised), len(module.__all__)))
+    assert counted, "no counted subtitle found — the pattern has moved"
+    wrong = [(name, advertised, live) for name, advertised, live in counted
+             if advertised != live]
+    assert wrong == [], (
+        "subtitle count(s) out of step with the package: "
+        + "; ".join(f"{name} advertises {advertised}, the package exports "
+                    f"{live}" for name, advertised, live in wrong))
+
+
+def _code_text(markdown: str) -> str:
+    """Only the fenced blocks and inline code spans of a page.
+
+    A name check against the raw page is satisfied by prose: ``slicer``,
+    ``spread``, ``envelope``, ``spectrogram``, ``DFE`` and five others are
+    ordinary words these pages use in sentences, so nine of the 146 exports
+    would be reported as documented whatever the tables said. Measured on the
+    live pages: deleting the whole paragraph that documents ``slicer`` left the
+    raw-text check green, because another line says "the hard-decision slicer
+    this receiver uses".
+    """
+    return "\n".join(re.findall(r"```.*?```|`[^`]+`", markdown, re.S))
+
+
+#: Each processing package and the guide page(s) that carry its reference
+#: tables. Arrays have a page of their own, so ``uacpy.acoustic_signal`` is
+#: checked against the union rather than against ``signal.md`` alone.
+_PROCESSING_GUIDE_PAGES = {
+    "uacpy.acoustic_signal": ("signal.md", "arrays.md"),
+    "uacpy.comms": ("comms.md",),
+}
+
+
+@requires_docs
+@pytest.mark.parametrize("module_name", sorted(_PROCESSING_GUIDE_PAGES))
+def test_every_processing_export_is_named_in_the_guide_and_the_manual(
+        module_name):
+    """Every public name of ``uacpy.acoustic_signal`` and ``uacpy.comms``
+    appears both in its guide page(s) and in the reference manual.
+
+    ``uacpy.io``, ``uacpy.data``, ``uacpy.sonar`` and ``uacpy.plot`` each had a
+    coverage gate and these two did not, so the whole DSP and modem surface was
+    documented only by hand: five exports of that surface reached a caller by
+    import while appearing on no page at all. The comparison is against
+    ``__all__``, never a list written here, which would carry the same blind
+    spot it is closing. The search runs over each page's code spans only — see
+    :func:`_code_text` for why the raw page is not enough. A submodule
+    re-exported as an attribute is skipped: it is a namespace, not a
+    documented call.
+    """
+    import types
+    module = importlib.import_module(module_name)
+    names = [n for n in module.__all__
+             if not isinstance(getattr(module, n), types.ModuleType)]
+    assert names, f"no public names found in {module_name}"
+    stems = _PROCESSING_GUIDE_PAGES[module_name]
+    guide = "\n".join((DOCS_DIR / "guide" / stem).read_text(encoding="utf-8")
+                      for stem in stems)
+    for text, where in ((guide, " + ".join(stems)),
+                        (_documentation_text(), "DOCUMENTATION.md")):
+        code = _code_text(text)
+        missing = [n for n in names
+                   if not re.search(rf"\b{re.escape(n)}\b", code)]
+        assert missing == [], (
+            f"{len(missing)} name(s) exported from {module_name} but absent "
+            f"from {where}: {missing}")
+
+
 @requires_docs
 def test_the_plotter_count_the_guide_advertises_matches_the_package():
     """The plotting reference opens by counting itself. That sentence had
@@ -2726,6 +2830,15 @@ def test_the_plotter_count_the_guide_advertises_matches_the_package():
     assert int(m.group(2)) == len(submodules), (
         f"docs/guide/plotting.md advertises {m.group(2)} submodule names; "
         f"uacpy.plot exports {len(submodules)}")
+
+    # The page's subtitle counts them a second time, four screens above §7,
+    # and had drifted to 54 while §7 read 59: pinning one sentence left the
+    # reader a wrong number in the first line of the page.
+    subtitle = re.search(r"`uacpy\.plot` · (\d+) public plotters", text)
+    assert subtitle, "the page's subtitle has moved or changed"
+    assert int(subtitle.group(1)) == len(plotters), (
+        f"docs/guide/plotting.md's subtitle advertises {subtitle.group(1)} "
+        f"plotters; uacpy.plot exports {len(plotters)}")
 
 
 def test_the_data_package_scopes_its_cache_first_claim_to_one_source():
