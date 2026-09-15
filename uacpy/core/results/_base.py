@@ -213,6 +213,13 @@ _DOCUMENTED_METADATA: Dict[Tuple[str, str], Tuple[type, str]] = {
         "Wavenumber-branch selector the Hankel transform consumed: 'P' "
         "positive branch, 'N' negative branch, 'B' both."
     ),
+    ('Scooter', 'taper'): (
+        float,
+        "Hanning roll-off applied to the wavenumber kernel before the "
+        "Hankel transform, as a fraction of the spectral span at each edge "
+        "(0 = the rectangular cut). It moves the field by a decibel or two "
+        "and leaves no other trace, so it is recorded here."
+    ),
     ('Scooter', 'center_frequency'): (
         float, 'Centre frequency (Hz) of the broadband sweep — picked '
         'as the middle element of freqVec.'

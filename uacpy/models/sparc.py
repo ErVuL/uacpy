@@ -684,7 +684,7 @@ class SPARC(PropagationModel):
                     f"free. It should complete but leaves little headroom; "
                     f"n_t_out, receiver.depths, the pulse band (f_min/f_max) "
                     f"and rmax_safety_margin all shrink it.",
-                    UserWarning, stacklevel=3,
+                    UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
                 )
                 return
         elif n_bytes <= _MAX_SNAPSHOT_GREEN_BYTES:

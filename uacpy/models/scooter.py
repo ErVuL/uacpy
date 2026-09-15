@@ -612,7 +612,7 @@ class Scooter(PropagationModel):
                 f"Green's function's phase-speed grid holds only {c.size} "
                 f"value(s), too few to place a roll-off. The transform runs "
                 f"untapered, i.e. as taper=0.",
-                UserWarning, stacklevel=3,
+                UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
             )
             return None, None
         inv_lo, inv_hi = 1.0 / c.max(), 1.0 / c.min()   # k/omega at each edge
@@ -623,7 +623,7 @@ class Scooter(PropagationModel):
                 f"Green's function's phase-speed grid spans a single speed, "
                 f"so there is no edge to roll off. The transform runs "
                 f"untapered, i.e. as taper=0.",
-                UserWarning, stacklevel=3,
+                UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
             )
             return None, None
         return (1.0 / (inv_hi - taper * span),
@@ -879,28 +879,35 @@ class Scooter(PropagationModel):
             "window. Fewer receiver depths or ranges shrink it too."
         )
         avail = available_memory_bytes()
+        # Both ways past the budget end at one raise, so ``advice`` is written
+        # once and the warning below shares it. ``over`` is assigned in each
+        # branch rather than built as a conditional inside a concatenation,
+        # which is the shape that silently drops a description.
         if avail is None:
             if cube <= _MAX_GREEN_CUBE_BYTES:
                 return
-            raise ConfigurationError(
-                f"This deck asks Scooter for {detail} The host's free memory "
-                f"could not be read, so uacpy falls back to a fixed "
-                f"{_MAX_GREEN_CUBE_BYTES / 1024 ** 3:.1f} GiB cube cap.",
-                remediation=advice,
+            over = (
+                f"The host's free memory could not be read, so uacpy falls "
+                f"back to a fixed "
+                f"{_MAX_GREEN_CUBE_BYTES / 1024 ** 3:.1f} GiB cube cap."
             )
-        if peak > avail:
-            raise ConfigurationError(
-                f"This deck asks Scooter for {detail} That is more than the "
-                f"{avail / 1024 ** 3:.1f} GiB this host reports free.",
-                remediation=advice,
-            )
-        if peak > 0.5 * avail:
-            warnings.warn(
-                f"Scooter: {detail} That is over half the "
-                f"{avail / 1024 ** 3:.1f} GiB this host reports free; the "
-                f"run should complete but leaves little headroom. {advice}",
-                UserWarning, stacklevel=3,
-            )
+        elif peak > avail:
+            over = (f"That is more than the {avail / 1024 ** 3:.1f} GiB this "
+                    f"host reports free.")
+        else:
+            if peak > 0.5 * avail:
+                warnings.warn(
+                    f"Scooter: {detail} That is over half the "
+                    f"{avail / 1024 ** 3:.1f} GiB this host reports free; the "
+                    f"run should complete but leaves little headroom. "
+                    f"{advice}",
+                    UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+                )
+            return
+        raise ConfigurationError(
+            f"This deck asks Scooter for {detail} {over}",
+            remediation=advice,
+        )
 
     def _run_scooter(self, base_name: str, work_dir: Path):
         """Execute Scooter via the shared binary-launch helper."""

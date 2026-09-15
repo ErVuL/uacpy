@@ -852,8 +852,10 @@ class TestScooterRefusesAGreenCubeOverTheReaderBudget:
         with pytest.raises(ConfigurationError, match='transform kernel'):
             self._call(self._NK_AT_CAP, nrd=1, nr=200_000)
 
-    def test_the_fixed_cap_still_applies_when_memory_is_unreadable(
+    def test_an_unreadable_host_falls_back_to_the_fixed_cap(
             self, monkeypatch):
+        """With no MemAvailable to size against, the 2 GiB cube cap decides:
+        a cube at the cap passes and one sample past it is refused."""
         self._with_free(monkeypatch, None)
         self._call(self._NK_AT_CAP)
         with pytest.raises(ConfigurationError, match='fixed'):
