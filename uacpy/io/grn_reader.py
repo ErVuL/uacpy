@@ -20,6 +20,7 @@ We detect SPARC by the ``'SPARC'`` prefix in the title (set at
 ``sparc.f90:84``).
 """
 
+import os
 import warnings
 
 import numpy as np
@@ -258,6 +259,28 @@ def _stab_attenuation(grn_data: Dict[str, Any], k: np.ndarray) -> float:
     return header_atten
 
 
+def available_memory_bytes():
+    """Memory the host says it can still hand out, or ``None`` if unreadable.
+
+    ``MemAvailable`` first: it counts reclaimable page cache, which
+    ``SC_AVPHYS_PAGES`` does not and which is most of what reading a large
+    ``.grn`` has just consumed. Callers size their allocations against this
+    rather than a fixed constant — the same cube is nothing on a workstation
+    and fatal on a laptop.
+    """
+    try:
+        with open('/proc/meminfo', 'r') as fh:
+            for line in fh:
+                if line.startswith('MemAvailable:'):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    try:
+        return os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_AVPHYS_PAGES')
+    except (ValueError, OSError, AttributeError):
+        return None
+
+
 def _hanning_taper(k: np.ndarray, freq: float,
                    cmin: Optional[float], cmax: Optional[float]) -> np.ndarray:
     """Build a window that tapers ``G(k)`` outside ``[ω/cmax, ω/cmin]``.
@@ -295,7 +318,10 @@ def _hanning_taper(k: np.ndarray, freq: float,
             f"(cmin={cmin!r}, cmax={cmax!r} m/s) has no overlap with the "
             f"file's phase-speed grid [{c_grid_lo:.1f}, {c_grid_hi:.1f}] m/s "
             f"at {freq:g} Hz — the taper would zero the entire spectrum. "
-            f"Widen or drop cmin/cmax."
+            f"Widen or drop cmin/cmax — via Scooter's taper= if that is "
+            f"how they were set, or directly if this transform was called "
+            f"by hand. SPARC has no taper setting; a SPARC .grn reaches this "
+            f"path only through grn_to_field/grn_to_transfer_function."
         )
     if Nk < 4:
         return win
@@ -415,14 +441,23 @@ def _hankel_transform(
                         "receiver ranges.")
     ck = k + 1j * atten
     abs_r = np.abs(ranges)
-    x = np.outer(ck, abs_r)
+    # Carry the kernel at the .grn's own precision. ``G`` is written complex64
+    # (``scooter.f90`` declares ``Green`` COMPLEX), so promoting it to
+    # complex128 adds no information to the data and doubles the largest array
+    # in the transform; measured on stress cases spanning the deepest
+    # cancellation, the two paths agree to within 0.03 dB. The PHASE is a
+    # different matter: ``k*r`` reaches ~1e5 rad here, so ``phase`` and the
+    # exponential are evaluated in double and only the RESULT is cast down.
+    # That result is not unit-modulus -- it carries ``exp(atten*r)``, ~2.2 at
+    # the far receiver here -- but it is bounded, so the cast costs relative
+    # precision only.
+    dt = G_src.dtype if G_src.dtype == np.complex64 else np.complex128
 
     if source_type == 'X':
         # Line source: no √k weighting, no phase shift, 1/√(2π).
         factor1 = np.ones_like(ck)
         factor2 = dk / np.sqrt(2.0 * np.pi) * np.ones_like(abs_r)
-        X_pos = np.exp(-1j * x)
-        X_neg = np.exp(+1j * x)
+        phase = np.outer(ck, abs_r)
     else:
         # Point source: phase factor exp(±i(kr - π/4)) and √k weighting.
         # 'R' adds 1/√(2πr) cylindrical spreading; 'S' omits it.
@@ -439,17 +474,32 @@ def _hankel_transform(
             factor2 = np.where(_zero_range_mask(abs_r), np.nan, factor2)
         else:
             factor2 = dk / np.sqrt(2.0 * np.pi) * np.ones_like(abs_r)
-        X_pos = np.exp(-1j * (x - np.pi / 4.0))
-        X_neg = np.exp(+1j * (x - np.pi / 4.0))
+        phase = np.outer(ck, abs_r)
+        phase -= np.pi / 4.0
 
-    G_scaled = G_src * factor1[np.newaxis, :]
+    G_scaled = G_src * factor1.astype(dt, copy=False)[np.newaxis, :]
 
-    if spectrum == 'P':
-        Y = -G_scaled @ X_pos
-    elif spectrum == 'N':
-        Y = -G_scaled @ X_neg
-    else:  # 'B'
-        Y = -G_scaled @ (X_pos + X_neg)
+    # Build ONE kernel, in place. ``phase`` is (nk, nr) complex128 -- 1.7 GiB on
+    # a 40 kHz near-field deck -- so each temporary the chain would allocate
+    # costs as much again; ``out=phase`` and the in-place operators keep the
+    # double-precision array plus its cast-down copy, and nothing else.
+    # ``phase`` is complex because the contour offset ``atten`` is its
+    # imaginary part, and every branch stays complex: cos of a complex
+    # argument carries the exp(atten*r) stabilisation, exactly as
+    # exp(-i.phase) + exp(+i.phase) does.
+    if spectrum == 'B':
+        np.cos(phase, out=phase)
+        phase *= 2.0
+    else:
+        phase *= -1j if spectrum == 'P' else 1j
+        np.exp(phase, out=phase)
+    X = phase.astype(dt, copy=False)
+    del phase
+
+    # Negate the PRODUCT, not the kernel: unary minus binds tighter than ``@``,
+    # so ``-G_scaled @ X`` would copy the whole (nrd, nk) array to flip a sign
+    # where ``-(G_scaled @ X)`` flips the much smaller (nrd, nr) result.
+    Y = -(G_scaled @ X)
 
     return Y * factor2[np.newaxis, :]
 

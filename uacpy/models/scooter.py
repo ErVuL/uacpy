@@ -27,7 +27,9 @@ from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
 from uacpy.core.results import Result
 from uacpy.core.constants import parse_boundary_type
-from uacpy.io.grn_reader import read_grn_file, grn_to_field, grn_to_transfer_function
+from uacpy.io.grn_reader import (read_grn_file, grn_to_field,
+                                 grn_to_transfer_function,
+                                 available_memory_bytes)
 from uacpy.io.oalib_writer import (
     write_scooter_env_file, reject_coarse_at_mesh,
     reject_unsupported_ssp_interp, resolve_ssp_topopt,
@@ -84,6 +86,12 @@ def _deck_nk(rmax_m: float, f_max: float, c_low: float, c_high: float) -> int:
 #: (``sparc._MAX_SNAPSHOT_GREEN_BYTES``).
 _MAX_GREEN_CUBE_BYTES = 2 * 1024 ** 3
 
+# Bytes per (nk x nr) element the k->r transform holds at peak: the complex128
+# phase array it exponentiates in place (16) plus the complex64 kernel that
+# array is cast to (8). Measured against peak RSS at nk x nr = 120000 x 499,
+# an estimate built on this bounds the real peak by 1.17x.
+_TRANSFORM_BYTES_PER_ELEMENT = 24
+
 
 class Scooter(PropagationModel):
     """
@@ -110,6 +118,35 @@ class Scooter(PropagationModel):
         ``scooter.f90:69`` takes ``Nk = INT(2000·RMax_km·(kMax−kMin)/π)``,
         i.e. ``Δk ≈ π/(2·RMax_m)``. Default ``None`` → 2.0 for
         ``COHERENT_TL``, 3.0 for ``BROADBAND`` / ``TIME_SERIES``.
+    taper : float, optional
+        Hanning roll-off applied to the wavenumber kernel over this fraction
+        of the spectral span at EACH edge, before the Hankel transform
+        (``fieldsco.m:taper``). Default ``0`` — OFF, matching the reference
+        implementation, which sets ``cmin=1e-10, cmax=1e30`` and calls the
+        feature "user play (at your own risk)"
+        (``Matlab/Scooter/fieldsco.m:23-32``). COA Sect. 4.5 gives the reason
+        to taper: the wavenumber beyond which the integrand is negligible
+        "will depend on range, and for multiple ranges it is not desirable to
+        truncate at different wavenumbers", so the kernel is instead "forced
+        to gradually vanish" at one fixed edge. The sidelobe rates are
+        standard windowing rather than COA: 6 dB/octave for a rectangular
+        edge against 18 for a Hann one (Abraham, *Underwater Acoustic
+        Signal Processing*, Sect. 4.10), i.e. ``1/x`` against ``1/x^3``.
+
+        The fraction is taken in ``k`` and the bounds are applied as phase
+        speeds, so they are identical at every frequency of a broadband
+        sweep. Tapering smooths an edge; it cannot recover
+        spectrum that was never computed, so widen ``c_high`` as well when the
+        field is built within a few wavelengths of a boundary, where steep and
+        evanescent components still carry energy at the cut.
+
+        COA's criterion is that the taper span "several periods" of
+        ``exp(i k r)``, i.e. ``taper * (kMax-kMin) * r_max >> 2*pi`` — a few
+        parts in ten thousand of the band over a kilometre, not a few percent.
+        Values far above that attenuate real spectrum, which is occasionally
+        what you want (the far evanescent tail is the least well conditioned
+        part of the solve) and is never free. Measure it against something
+        independent before adopting one.
     spectrum : str, optional
         FLP Opt(2): ``'positive'`` (fast, default) | ``'negative'`` | ``'both'``.
         This is the WAVENUMBER spectrum half — which side of the real k-axis
@@ -186,7 +223,7 @@ class Scooter(PropagationModel):
         rmax_multiplier: Optional[float] = None,
         interp_ssp: Optional[str] = None,
         spectrum: str = 'positive',
-        taper: float = 0.05,
+        taper: float = 0.0,
         stabilizing_attenuation_off: bool = False,
         use_tmpfs: bool = False,
         verbose: Union[bool, str] = False,
@@ -246,6 +283,7 @@ class Scooter(PropagationModel):
 
         self.c_low = c_low
         self.c_high = c_high
+        taper = 0.0 if taper is None else taper
         if not (0.0 <= float(taper) < 0.5):
             raise ConfigurationError(
                 f"Scooter: taper is the fraction of the wavenumber span "
@@ -439,6 +477,10 @@ class Scooter(PropagationModel):
             c_max = self._resolve_c_max(env)
             if c_max is not None:
                 result.metadata['c_max'] = c_max
+            # The taper changes the field by a decibel or two and leaves no
+            # other trace, so two otherwise identical results are only
+            # distinguishable by it.
+            result.metadata['taper'] = self.taper
 
             self._attach_output_paths(
                 result, fm.work_dir, base_name,
@@ -526,13 +568,14 @@ class Scooter(PropagationModel):
     def _taper_bounds(self, grn_data):
         """``(cmin, cmax)`` phase-speed bounds for the kernel taper.
 
-        COA Sect. 4.5 is explicit that a wavenumber integral truncated with a
-        rectangular edge rings -- its sidelobes decay only as ``1/x`` -- and
-        that the cure is to "taper the kernel close to the maximum wavenumber
-        selected such that the kernel is forced to gradually vanish". The
-        roll-off is Hanning (:func:`~uacpy.io.grn_reader._hanning_taper`,
-        mirroring ``fieldsco.m:taper``), which drops the sidelobe law to
-        ``1/x^3``.
+        COA Sect. 4.5 prescribes the cure: since the wavenumber beyond which
+        the integrand is negligible "will depend on range, and for multiple
+        ranges it is not desirable to truncate at different wavenumbers", the
+        kernel is "forced to gradually vanish" at one fixed edge. The roll-off
+        is Hanning (:func:`~uacpy.io.grn_reader._hanning_taper`, mirroring
+        ``fieldsco.m:taper``); a rectangular edge's sidelobes fall at
+        6 dB/octave against a Hann edge's 18 (Abraham, Sect. 4.10), i.e.
+        ``1/x`` against ``1/x^3``.
 
         ``taper`` is a fraction of the wavenumber span applied at EACH edge.
         The fraction is taken in ``k`` while the bounds are returned as phase
@@ -547,18 +590,44 @@ class Scooter(PropagationModel):
         built close to a boundary, where steep and evanescent components still
         carry energy at the edge.
         """
-        if self.taper <= 0.0:
+        taper = self.taper
+        if taper <= 0.0:
             return None, None
         c = np.asarray(grn_data['cVec'], dtype=float)
-        c = c[np.isfinite(c) & (c > 0.0)]
+        if c.size and not np.all(np.isfinite(c) & (c > 0.0)):
+            # ``_hanning_taper`` indexes the RAW grid, so filtering here and
+            # letting it index the unfiltered one turns a bad .grn into a
+            # numpy ValueError or ZeroDivisionError from inside the transform.
+            raise ConfigurationError(
+                f"Scooter(taper={taper:.4g}): the Green's function's "
+                f"phase-speed grid holds non-finite or non-positive values, "
+                f"so the taper's edges cannot be located. Re-run the solver, "
+                f"or pass taper=0 to transform it untapered.",
+                remediation="A .grn with a corrupt cVec usually means the "
+                            "run was interrupted; delete it and re-run.",
+            )
         if c.size < 4:
+            warnings.warn(
+                f"Scooter(taper={taper:.4g}) was requested but the "
+                f"Green's function's phase-speed grid holds only {c.size} "
+                f"value(s), too few to place a roll-off. The transform runs "
+                f"untapered, i.e. as taper=0.",
+                UserWarning, stacklevel=3,
+            )
             return None, None
         inv_lo, inv_hi = 1.0 / c.max(), 1.0 / c.min()   # k/omega at each edge
         span = inv_hi - inv_lo
         if span <= 0.0:
+            warnings.warn(
+                f"Scooter(taper={taper:.4g}) was requested but the "
+                f"Green's function's phase-speed grid spans a single speed, "
+                f"so there is no edge to roll off. The transform runs "
+                f"untapered, i.e. as taper=0.",
+                UserWarning, stacklevel=3,
+            )
             return None, None
-        return (1.0 / (inv_hi - self.taper * span),
-                1.0 / (inv_lo + self.taper * span))
+        return (1.0 / (inv_hi - taper * span),
+                1.0 / (inv_lo + taper * span))
 
     def _assemble_field_from_grn(self, grn_data, source, receiver,
                                  broadband_mode):
@@ -570,7 +639,7 @@ class Scooter(PropagationModel):
         cmin, cmax = self._taper_bounds(grn_data)
         if cmin is not None:
             self._log(f"Kernel taper: Hanning roll-off over "
-                      f"{self.taper:.0%} of the wavenumber span at each edge "
+                      f"{self.taper:.4g} of the wavenumber span at each edge "
                       f"(pass band {cmin:.1f}-{cmax:.1f} m/s)")
         transform_kwargs = dict(
             source_type=_SOURCE_TYPE_CODE[source.source_type],
@@ -723,6 +792,7 @@ class Scooter(PropagationModel):
             nk, n_freqs,
             int(np.atleast_1d(np.asarray(source.depths)).size),
             int(np.atleast_1d(np.asarray(receiver.depths)).size),
+            int(np.atleast_1d(np.asarray(receiver.ranges)).size),
             rmax_m=rmax_m, f_deck=f_deck, c_low=cl, c_high=ch,
         )
 
@@ -756,46 +826,81 @@ class Scooter(PropagationModel):
 
     def _reject_oversized_green_cube(
         self, nk: int, n_freqs: int, n_source_depths: int,
-        n_receiver_depths: int, *, rmax_m: float, f_deck: float,
-        c_low: float, c_high: float,
+        n_receiver_depths: int, n_ranges: int, *, rmax_m: float,
+        f_deck: float, c_low: float, c_high: float,
     ) -> None:
-        """Cap the Green's-function cube this deck commits uacpy to reading.
+        """Warn — or refuse — on the memory this deck commits the run to.
 
         ``scooter.exe`` holds one frequency's ``Green(NSz, NRz, Nk)`` at a
         time, but the ``.grn`` accumulates every frequency and
         ``read_grn_file`` allocates the whole ``(nfreq, nsd, nrd, nk)``
         complex64 cube in one ``np.zeros`` — the Python process, not the
-        binary, takes the full hit. ``Nk`` grows linearly with RMax
-        (``receiver.ranges.max() × rmax_multiplier``), the top deck
-        frequency and the phase-speed span, so a plausible broadband deck
-        reaches tens of GB with no single knob looking unreasonable. The
-        budget is the 2 GiB SPARC's snapshot cap applies to its own Green
-        cube (``sparc.py`` ``_MAX_SNAPSHOT_GREEN_BYTES``), against the same
-        8-byte complex64 element the reader allocates.
+        binary, takes the hit. ``Nk`` grows linearly with RMax
+        (``receiver.ranges.max() × rmax_multiplier``), the top deck frequency
+        and the phase-speed span, so a plausible broadband deck reaches tens
+        of GB with no single knob looking unreasonable.
+
+        The cube is not the whole bill, so counting it alone under-reads the
+        peak: :func:`~uacpy.io.grn_reader._hankel_transform` also builds
+        ``outer(k, r)`` in double and exponentiates it in place, then casts the
+        result down, so the kernel costs another ``nk × nr × 24`` bytes (16 for
+        the complex128 phase, 8 for the complex64 copy it becomes) on top of a
+        second copy of the cube. All of that is estimated here. Measured
+        against peak RSS on an ``nk x nr`` of 120000 x 499, the estimate is
+        1.17x the real peak — tight, and on the safe side.
+
+        It is measured against what the host actually has free rather than a
+        fixed constant: a 3 GiB cube is nothing on a 64 GiB workstation and
+        fatal on a 4 GiB laptop. Over half of ``MemAvailable`` warns; over all
+        of it raises, because that one cannot be made to work by waiting. With
+        no reading of the host's memory available, a fixed cap applies.
         """
-        n_bytes = (8 * int(n_freqs) * int(n_source_depths)
-                   * int(n_receiver_depths) * int(nk))
-        if n_bytes <= _MAX_GREEN_CUBE_BYTES:
-            return
-        raise ConfigurationError(
-            f"This deck asks Scooter for Nk = {int(nk)} wavenumber samples: "
-            f"a {n_bytes / 1024 ** 3:.1f} GiB complex64 Green's-function "
-            f"cube ({int(n_freqs)} frequencies × {int(n_source_depths)} "
-            f"source depth(s) × {int(n_receiver_depths)} receiver depth(s) × "
-            f"Nk × 8 B), over the {_MAX_GREEN_CUBE_BYTES / 1024 ** 3:.1f} "
-            f"GiB cap uacpy reads a .grn under. scooter.f90:69 derives "
+        cube = (8 * int(n_freqs) * int(n_source_depths)
+                * int(n_receiver_depths) * int(nk))
+        kernel = (_TRANSFORM_BYTES_PER_ELEMENT * int(nk)
+                  * max(int(n_ranges), 1))
+        peak = 2 * cube + kernel
+        detail = (
+            f"Nk = {int(nk)} wavenumber samples: a "
+            f"{cube / 1024 ** 3:.1f} GiB complex64 Green's-function cube "
+            f"({int(n_freqs)} frequencies x {int(n_source_depths)} source "
+            f"depth(s) x {int(n_receiver_depths)} receiver depth(s) x Nk x "
+            f"8 B) and a {kernel / 1024 ** 3:.1f} GiB transform kernel "
+            f"({int(nk)} x {int(n_ranges)} ranges), about "
+            f"{peak / 1024 ** 3:.1f} GiB at peak. scooter.f90:69 derives "
             f"Nk = INT(2000 * RMax_km * (kMax - kMin) / pi) from "
             f"RMax = {rmax_m:g} m at {f_deck:.6g} Hz with "
-            f"c_low = {c_low:.1f} and c_high = {c_high:.1f} m/s.",
-            remediation=(
-                "Nk scales with RMax = receiver.ranges.max() x "
-                "rmax_multiplier, with the top deck frequency, and with the "
-                "width of the c_low/c_high phase-speed window: lower "
-                "rmax_multiplier or the receiver ranges, lower f_max, or "
-                "narrow the window. Fewer deck frequencies or receiver "
-                "depths shrink the cube too."
-            ),
+            f"c_low = {c_low:.1f} and c_high = {c_high:.1f} m/s."
         )
+        advice = (
+            "Peak memory scales with Nk, which grows with RMax = "
+            "receiver.ranges.max() x rmax_multiplier, with the top deck "
+            "frequency and with the width of the c_low/c_high phase-speed "
+            "window. Fewer receiver depths or ranges shrink it too."
+        )
+        avail = available_memory_bytes()
+        if avail is None:
+            if cube <= _MAX_GREEN_CUBE_BYTES:
+                return
+            raise ConfigurationError(
+                f"This deck asks Scooter for {detail} The host's free memory "
+                f"could not be read, so uacpy falls back to a fixed "
+                f"{_MAX_GREEN_CUBE_BYTES / 1024 ** 3:.1f} GiB cube cap.",
+                remediation=advice,
+            )
+        if peak > avail:
+            raise ConfigurationError(
+                f"This deck asks Scooter for {detail} That is more than the "
+                f"{avail / 1024 ** 3:.1f} GiB this host reports free.",
+                remediation=advice,
+            )
+        if peak > 0.5 * avail:
+            warnings.warn(
+                f"Scooter: {detail} That is over half the "
+                f"{avail / 1024 ** 3:.1f} GiB this host reports free; the "
+                f"run should complete but leaves little headroom. {advice}",
+                UserWarning, stacklevel=3,
+            )
 
     def _run_scooter(self, base_name: str, work_dir: Path):
         """Execute Scooter via the shared binary-launch helper."""

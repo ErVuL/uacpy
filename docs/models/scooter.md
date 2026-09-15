@@ -44,7 +44,7 @@ one has a knob that converges it:
 | Error | Knob |
 |---|---|
 | Depth mesh too coarse | `n_mesh` |
-| Wavenumber axis truncated | `c_low`, `c_high` |
+| Wavenumber axis truncated | `c_low`, `c_high` (width), `taper` (edge shape) |
 | Wavenumber axis undersampled | `rmax_multiplier` |
 | Far-field (fast-field) kernel | none — structural; stay a few `λ` off the source |
 
@@ -168,6 +168,7 @@ Everything is configured on the constructor; `run()` has a fixed signature.
 | `rmax_multiplier` | `None` | Spectral `RMax = receiver.ranges.max() × this`. `None` ⇒ `2.0` for `COHERENT_TL`, `3.0` for `BROADBAND`/`TIME_SERIES`. |
 | `spectrum` | `'positive'` | Which wavenumber branch the transform integrates: `'positive'`, `'negative'`, `'both'`. |
 | `stabilizing_attenuation_off` | `False` | Zero Scooter's contour offset. Leave it alone unless you know why. |
+| `taper` | `0.0` | Hanning roll-off of the wavenumber kernel over this fraction of the spectral span at **each** edge, applied before the transform. `0` = off, matching `fieldsco.m`, which disables it and calls it *"user play (at your own risk)"*. A rectangular edge's sidelobes fall at 6 dB/octave, a Hann edge's at 18 (Abraham, *Underwater Acoustic Signal Processing*, Sect. 4.10). See the gotcha below before raising it. |
 
 **The depth mesh**
 
@@ -495,6 +496,55 @@ multi-frequency run the mesh scales as `f/f₀`, so
 **Multi-frequency sources need an explicit `run_mode`.** `Scooter().run(env,
 source_with_a_band, receiver)` raises rather than guessing. Pass
 `RunMode.BROADBAND` or `RunMode.TIME_SERIES`.
+
+**`c_high` is a trapped-mode bound, and that is wrong near a boundary.** The
+default `1.05 × max(SSP, bottom)` captures every mode the seabed totally
+reflects — right for far-field propagation, where nothing above `c_bottom`
+survives. But the integral is cut **square** there, and a square cut rings:
+the near-bed field then oscillates with a period
+`2π/√(k² − (ω/c_high)²)` — set by the cut, not the physics. Measured on a
+40 kHz, 1500 m case with source and receiver 0.15 m off the seabed, `c_high`
+of 1520 / 1600 / 1650 / 1700 / 6000 m/s gave vertical periods of 14.31 / 10.02
+/ 8.35 / 7.16 / 3.85 cm against 14.42 / 9.30 / 8.09 / 7.31 / 3.79 predicted,
+while the level wandered 4 dB with no trend. Raising `c_high` to `1e6` puts
+`k_min ≈ 0`, where the `√k` kernel vanishes on its own so there is no edge
+left, and the period becomes the physical one (1.93 cm, matching Bellhop).
+It costs only 1.30× here, because `k_min` was already small against `k_max`.
+COA Sect. 4.5 warns the truncation point "is not easily automated"; a source
+within a few wavelengths of a boundary is exactly where the default's
+assumption fails.
+
+**Memory is checked against the host, not a constant.** `read_grn_file`
+allocates the whole `(nfreq, nsd, nrd, nk)` complex64 cube at once, and the
+transform then builds `outer(k, r)` in double, exponentiates it and casts the
+result — so the real peak is roughly `2 × cube + nk × nr × 24` bytes (16 for
+the complex128 phase, 8 for the complex64 kernel it is cast to). Against the
+cube alone that is `2 + 3·nr / (nfreq·nsd·nrd)`, which is **3.7×** on a
+single-frequency deck of 900 receiver depths and 499 ranges: counting the cube
+by itself under-reads the peak by whatever the range count makes it. uacpy
+estimates the peak before writing the deck and compares it with
+`MemAvailable`: over half of it warns (`UserWarning`),
+over all of it raises, and if the host's free memory cannot be read it falls
+back to a fixed 2 GiB cube cap. A 3 GiB cube is nothing on a 64 GiB
+workstation and fatal on a 4 GiB laptop; a fixed limit is wrong at both ends.
+
+**The transform carries the `.grn`'s own precision.** `Green` is declared
+`COMPLEX` in `scooter.f90`, so the file is complex64 and promoting it to
+complex128 adds no information — measured on stress cases spanning the
+deepest cancellation, the two paths agree to within 0.03 dB, and complex128
+doubles the largest array in the transform. The *phase* is a separate
+question: `k·r` reaches ~10⁵ rad, so `outer(k, r)` and the exponential are
+evaluated in double and only the result is cast down. That result is not
+unit-modulus — it carries `exp(atten·r)`, about 2.2 at the far receiver here —
+but it is bounded, so the cast costs relative precision only.
+
+**`taper` smooths an edge; it cannot recover spectrum.** COA's criterion is
+that the roll-off span "several periods" of `exp(ikr)`, i.e.
+`taper × (kMax−kMin) × r_max ≫ 2π` — parts in ten thousand of the band over a
+kilometre, not percent. Values far above that attenuate real spectrum. That is
+occasionally what you want, since the far evanescent tail is the worst-
+conditioned part of the solve, but it is never free and should be measured
+against something independent. Widen `c_high` first.
 
 **The stabilising attenuation is load-bearing.** Scooter offsets the
 integration contour off the real `k` axis by `Δk` (`scooter.f90:129`). That is

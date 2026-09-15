@@ -5,7 +5,8 @@ import numpy as np
 
 from uacpy.core.results import Field
 from uacpy.models import Scooter
-from uacpy.models.scooter import _MAX_GREEN_CUBE_BYTES
+from uacpy.models.scooter import (_MAX_GREEN_CUBE_BYTES,
+                                  _TRANSFORM_BYTES_PER_ELEMENT)
 from uacpy.models.sparc import _MAX_SNAPSHOT_GREEN_BYTES
 from uacpy.models.base import RunMode
 from uacpy.core import Environment, Source, Receiver
@@ -694,6 +695,88 @@ def _halfspace(sound_speed, **kwargs):
         attenuation=kwargs.pop('attenuation', 0.3), **kwargs)
 
 
+class TestScooterKernelTaper:
+    """``taper`` is the only knob that reaches the transform rather than the
+    deck, and it changes a result by a decibel or two while leaving no other
+    trace. Nothing exercised it through ``Scooter`` before these."""
+
+    @staticmethod
+    def _grn(nk=2000, c_low=1388.0, c_high=1.0e6):
+        return {'cVec': np.linspace(c_low, c_high, nk)}
+
+    def test_zero_and_none_both_mean_no_taper(self):
+        assert Scooter(taper=0.0).taper == 0.0
+        assert Scooter(taper=None).taper == 0.0
+        assert Scooter(taper=0.0)._taper_bounds(self._grn()) == (None, None)
+
+    def test_the_default_is_off_like_fieldsco(self):
+        """``Matlab/Scooter/fieldsco.m:23-32`` sets cmin=1e-10, cmax=1e30 and
+        calls tapering "user play (at your own risk)". A default that quietly
+        differed would make uacpy disagree with the reference transform."""
+        assert Scooter().taper == 0.0
+        assert Scooter()._taper_bounds(self._grn()) == (None, None)
+
+    @pytest.mark.parametrize('taper', [0.002, 0.01, 0.05, 0.2, 0.49])
+    def test_both_edges_are_rolled_off_by_exactly_the_fraction(self, taper):
+        """The fraction is taken in k and returned as phase speeds, so both
+        edges must move in by the same fraction of the k span."""
+        grn = self._grn()
+        cmin, cmax = Scooter(taper=taper)._taper_bounds(grn)
+        c = np.asarray(grn['cVec'], float)
+        lo, hi = 1.0 / c.max(), 1.0 / c.min()          # k/omega at the edges
+        span = hi - lo
+        assert (1.0 / cmax - lo) / span == pytest.approx(taper, rel=1e-9)
+        assert (hi - 1.0 / cmin) / span == pytest.approx(taper, rel=1e-9)
+        assert cmin < cmax
+
+    def test_the_bounds_do_not_depend_on_frequency(self):
+        """omega cancels, so one broadband sweep uses one pass band."""
+        a = Scooter(taper=0.02)._taper_bounds(self._grn())
+        b = Scooter(taper=0.02)._taper_bounds(self._grn(nk=8000))
+        assert a == pytest.approx(b, rel=1e-6)
+
+    @pytest.mark.parametrize('bad', [-0.01, 0.5, 1.0, float('nan'),
+                                     float('inf')])
+    def test_out_of_range_is_refused(self, bad):
+        with pytest.raises(ConfigurationError, match='taper'):
+            Scooter(taper=bad)
+
+    def test_a_dirty_phase_speed_grid_raises_a_uacpy_error(self):
+        """``_hanning_taper`` indexes the RAW grid, so a non-finite entry
+        would surface as a numpy ValueError from inside the transform."""
+        grn = {'cVec': np.array([1400.0, np.nan, 1500.0, 1600.0, 1700.0])}
+        with pytest.raises(ConfigurationError, match='non-finite'):
+            Scooter(taper=0.02)._taper_bounds(grn)
+
+    def test_a_grid_too_small_to_taper_says_so(self):
+        """Returning (None, None) silently would make the run indistinguish-
+        able from taper=0, with nothing printed even at verbose=True."""
+        with pytest.warns(UserWarning, match='untapered'):
+            got = Scooter(taper=0.02)._taper_bounds(
+                {'cVec': np.array([1400.0, 1500.0])})
+        assert got == (None, None)
+
+    def test_a_single_speed_grid_says_so(self):
+        with pytest.warns(UserWarning, match='single speed'):
+            got = Scooter(taper=0.02)._taper_bounds(
+                {'cVec': np.full(64, 1500.0)})
+        assert got == (None, None)
+
+    def test_taper_zero_is_silent_on_a_grid_that_cannot_carry_one(self):
+        """Only a REQUESTED taper warns; taper=0 asked for nothing."""
+        import warnings as _w
+        with _w.catch_warnings(record=True) as caught:
+            _w.simplefilter('always')
+            Scooter(taper=0.0)._taper_bounds({'cVec': np.array([1400.0])})
+        assert not caught
+
+    def test_the_taper_reaches_the_result_metadata(self):
+        """A 2 dB change that leaves no other trace: two otherwise identical
+        results are distinguishable only by this key."""
+        import inspect
+        assert "metadata['taper']" in inspect.getsource(Scooter.run)
+
+
 class TestScooterRefusesAGreenCubeOverTheReaderBudget:
     """``read_grn_file`` allocates the whole ``(nfreq, nsd, nrd, nk)``
     complex64 cube in one ``np.zeros``, and nothing above bounded ``Nk``:
@@ -716,19 +799,71 @@ class TestScooterRefusesAGreenCubeOverTheReaderBudget:
     def test_the_budget_matches_the_sparc_snapshot_cap(self):
         assert _MAX_GREEN_CUBE_BYTES == _MAX_SNAPSHOT_GREEN_BYTES
 
-    def test_the_largest_cube_under_the_cap_is_accepted(self):
+    @staticmethod
+    def _with_free(monkeypatch, nbytes):
+        """Pin what the host reports free, so the threshold is not the
+        machine's mood. The guard is memory-aware by design, which makes an
+        unmocked test pass or fail on whatever else is running."""
+        import uacpy.models.scooter as _sc
+        monkeypatch.setattr(_sc, 'available_memory_bytes', lambda: nbytes)
+
+    def _call(self, nk, nrd=100, nr=1):
         self._model()._reject_oversized_green_cube(
-            self._NK_AT_CAP, 64, 1, 100,
+            nk, 64, 1, nrd, nr,
             rmax_m=5e4, f_deck=2e3, c_low=1406.0, c_high=3436.0)
 
-    def test_one_wavenumber_sample_over_the_cap_is_refused(self):
-        with pytest.raises(ConfigurationError, match='GiB'):
-            self._model()._reject_oversized_green_cube(
-                self._NK_AT_CAP + 1, 64, 1, 100,
-                rmax_m=5e4, f_deck=2e3, c_low=1406.0, c_high=3436.0)
+    def test_a_cube_well_inside_free_memory_is_accepted(self, monkeypatch):
+        self._with_free(monkeypatch, 64 * 1024 ** 3)
+        self._call(self._NK_AT_CAP)
+
+    def test_a_cube_over_free_memory_is_refused(self, monkeypatch):
+        self._with_free(monkeypatch, 1 * 1024 ** 3)
+        with pytest.raises(ConfigurationError, match='free'):
+            self._call(self._NK_AT_CAP)
+
+    def test_over_half_of_free_memory_warns_but_runs(self, monkeypatch):
+        # peak = 2*cube + kernel; make free just over that, under twice it.
+        cube = self._PER_NK * self._NK_AT_CAP
+        peak = 2 * cube + _TRANSFORM_BYTES_PER_ELEMENT * self._NK_AT_CAP
+        self._with_free(monkeypatch, int(peak * 1.5))
+        with pytest.warns(UserWarning, match='half'):
+            self._call(self._NK_AT_CAP)
+
+    def test_the_warning_category_is_one_python_shows_by_default(
+            self, monkeypatch):
+        """ResourceWarning is on CPython's default ignore list, so a guard
+        raising it warns nobody outside pytest (which forces 'always')."""
+        import warnings as _w
+        cube = self._PER_NK * self._NK_AT_CAP
+        peak = 2 * cube + _TRANSFORM_BYTES_PER_ELEMENT * self._NK_AT_CAP
+        self._with_free(monkeypatch, int(peak * 1.5))
+        with _w.catch_warnings(record=True) as caught:
+            _w.resetwarnings()            # CPython's defaults, not pytest's
+            _w.simplefilter('default')
+            self._call(self._NK_AT_CAP)
+        assert caught, 'the guard warned nobody under default filters'
+        assert not issubclass(caught[0].category, ResourceWarning)
+
+    def test_the_kernel_is_counted_not_only_the_cube(self, monkeypatch):
+        """The estimate covers the transform kernel, not just the cube: a
+        deck whose cube fits free memory but whose (nk x nr) kernel does not
+        is refused, and the message says which term it was."""
+        self._with_free(monkeypatch, 3 * 1024 ** 3)
+        with pytest.raises(ConfigurationError, match='transform kernel'):
+            self._call(self._NK_AT_CAP, nrd=1, nr=200_000)
+
+    def test_the_fixed_cap_still_applies_when_memory_is_unreadable(
+            self, monkeypatch):
+        self._with_free(monkeypatch, None)
+        self._call(self._NK_AT_CAP)
+        with pytest.raises(ConfigurationError, match='fixed'):
+            self._call(self._NK_AT_CAP + 1)
 
     def test_an_over_budget_broadband_deck_is_refused_before_writing(
-            self, tmp_path):
+            self, tmp_path, monkeypatch):
+        # Pinned free memory: otherwise this passes or fails on how much RAM
+        # the machine happens to have, which is not what it is testing.
+        self._with_free(monkeypatch, 4 * 1024 ** 3)
         out = tmp_path / 'over.env'
         with pytest.raises(ConfigurationError, match='Nk'):
             self._model()._write_scooter_env(
@@ -741,7 +876,8 @@ class TestScooterRefusesAGreenCubeOverTheReaderBudget:
                 run_mode=RunMode.BROADBAND)
         assert not out.exists()
 
-    def test_a_small_narrowband_deck_writes(self, tmp_path):
+    def test_a_small_narrowband_deck_writes(self, tmp_path, monkeypatch):
+        self._with_free(monkeypatch, 4 * 1024 ** 3)
         out = tmp_path / 'ok.env'
         Scooter(verbose=False)._write_scooter_env(
             out, Environment(name='flat', bathymetry=100.0, ssp=1500.0),

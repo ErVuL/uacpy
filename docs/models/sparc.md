@@ -534,6 +534,27 @@ because a pulse is limited in space, so its wavenumber kernel is band-limited
 and the real-axis sum converges on its own (COA §8.3.2). The margin is what
 buys the room instead.
 
+**A snapshot's memory is checked against the host, not a constant.**
+`output_mode='S'` holds the whole `(n_t_out x receiver depths x Nk)` complex64
+Green's table and `read_grn_file` reads it back the same way, so it can reach
+tens of GB without any single knob looking unreasonable. uacpy estimates that
+before writing the deck and compares it with `MemAvailable`: over half of it
+warns (`UserWarning`), over all of it raises, and if the host's free memory
+cannot be read it falls back to a fixed 2 GiB cap. Sizing against the host
+rather than a constant matters because the same table is nothing on a 64 GiB
+workstation and fatal on a 4 GiB laptop. `n_t_out`, `receiver.depths`, the
+pulse band (`f_min`/`f_max`) and `rmax_safety_margin` all shrink it.
+
+**The k -> r transform carries the `.grn`'s own precision.** `Green` is
+declared `COMPLEX` in the Fortran, so the file is complex64, and the shared
+transform (`grn_reader._hankel_transform`, which SPARC and Scooter both use)
+keeps it there: promoting to complex128 adds no information to the data while
+doubling the largest array in the transform, and on stress cases spanning the
+deepest cancellation the two paths agree to within 0.03 dB. The *phase* is a
+separate matter — `k*r` reaches ~1e5 rad, so it is evaluated in double and
+only the result is cast down; that result carries `exp(atten*r)` rather than
+unit modulus, but it is bounded, so the cast costs relative precision only.
+
 **Receivers below the mesh are `NaN`.** The finite-element mesh stops at the
 deepest modelled interface, and `sparc.exe` would clamp a deeper receiver onto
 it. uacpy hands those cells back as `NaN` instead, so the depth axis still

@@ -33,6 +33,7 @@ from uacpy.core.exceptions import (
 )
 from uacpy.io.grn_reader import (
     read_grn_file, sparc_snapshot_to_time_field,
+    available_memory_bytes,
 )
 from uacpy.models.base import (
     PropagationModel, RunMode, ModelSpec, USER_FRAME_SKIP,
@@ -662,15 +663,45 @@ class SPARC(PropagationModel):
             return
         n_depth = int(np.atleast_1d(np.asarray(receiver.depths)).size)
         n_bytes = 8 * int(n_t_out) * n_depth * int(nk)
-        if n_bytes <= _MAX_SNAPSHOT_GREEN_BYTES:
+        # Measured against what the host actually has free, not a fixed
+        # constant: this table is nothing on a workstation and fatal on a
+        # laptop. Over half of MemAvailable warns; over all of it raises, since
+        # that one cannot be made to work by waiting. An unreadable host falls
+        # back to the cap. What is weighed is the snapshot table alone --
+        # ``sparc_snapshot_to_time_field`` transforms it one output time at a
+        # time, and that scratch is not counted here, so this estimate is the
+        # more optimistic of the two memory guards.
+        avail = available_memory_bytes()
+        if avail is not None:
+            if n_bytes <= 0.5 * avail:
+                return
+            if n_bytes <= avail:
+                warnings.warn(
+                    f"SPARC: this snapshot's Green's-function table is "
+                    f"{n_bytes / 1024 ** 3:.1f} GiB (n_t_out={int(n_t_out)} x "
+                    f"{n_depth} receiver depth(s) x Nk={int(nk)} x 8 B), over "
+                    f"half the {avail / 1024 ** 3:.1f} GiB this host reports "
+                    f"free. It should complete but leaves little headroom; "
+                    f"n_t_out, receiver.depths, the pulse band (f_min/f_max) "
+                    f"and rmax_safety_margin all shrink it.",
+                    UserWarning, stacklevel=3,
+                )
+                return
+        elif n_bytes <= _MAX_SNAPSHOT_GREEN_BYTES:
             return
+        budget = (
+            f"the {avail / 1024 ** 3:.1f} GiB this host reports free"
+            if avail is not None else
+            f"the {_MAX_SNAPSHOT_GREEN_BYTES / 1024 ** 3:.1f} GiB fixed cap "
+            f"that applies when the host's free memory cannot be read"
+        )
         raise UnsupportedFeatureError(
             model_name='SPARC',
             feature=(
                 f"a snapshot (output_mode='S') whose Green's-function table "
                 f"is {n_bytes / 1024 ** 3:.1f} GiB (n_t_out={int(n_t_out)} × "
-                f"{n_depth} receiver depth(s) × Nk={int(nk)} × 8 B), over the "
-                f"{_MAX_SNAPSHOT_GREEN_BYTES / 1024 ** 3:.1f} GiB cap"
+                f"{n_depth} receiver depth(s) × Nk={int(nk)} × 8 B), over "
+                f"{budget}"
             ),
             alternatives=[
                 "Reduce n_t_out (the table scales with it one-for-one)",

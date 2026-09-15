@@ -1039,7 +1039,16 @@ class TestSparcDeckContracts:
         assert freq == pytest.approx(30.0)
         assert not caught
 
-    def test_snapshot_greens_function_cube_is_capped(self):
+    @staticmethod
+    def _with_free(monkeypatch, nbytes):
+        """Pin what the host reports free. The guard sizes the table against
+        MemAvailable, so an unmocked test passes or fails on how much RAM the
+        machine happens to have rather than on the contract."""
+        import uacpy.models.sparc as _sp
+        monkeypatch.setattr(_sp, 'available_memory_bytes', lambda: nbytes)
+
+    def test_snapshot_greens_function_cube_is_capped(self, monkeypatch):
+        self._with_free(monkeypatch, 4 * 1024 ** 3)
         receiver = Receiver(depths=np.linspace(10, 90, 30),
                             ranges=np.array([50_000.0]))
         with pytest.raises(UnsupportedFeatureError, match='GiB'):
@@ -1048,6 +1057,22 @@ class TestSparcDeckContracts:
         # A modest cube passes, and the looped modes are never capped here.
         SPARC(output_mode='S', verbose=False)._reject_oversized_snapshot(
             receiver, nk=300, n_t_out=512)
+
+    def test_the_refusal_names_the_table_and_the_budget(self, monkeypatch):
+        """The fallback branch must not swallow the description: a conditional
+        around implicitly-concatenated f-strings binds to the whole chain."""
+        receiver = Receiver(depths=np.linspace(10, 90, 30),
+                            ranges=np.array([50_000.0]))
+        for free in (4 * 1024 ** 3, None):
+            self._with_free(monkeypatch, free)
+            with pytest.raises(UnsupportedFeatureError) as exc:
+                SPARC(output_mode='S',
+                      verbose=False)._reject_oversized_snapshot(
+                    receiver, nk=300_000, n_t_out=512)
+            msg = str(exc.value)
+            assert 'snapshot' in msg, msg
+            assert 'n_t_out=512' in msg, msg
+            assert 'Nk=300000' in msg, msg
         SPARC(output_mode='R', verbose=False)._reject_oversized_snapshot(
             receiver, nk=300_000, n_t_out=512)
 
