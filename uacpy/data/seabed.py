@@ -30,6 +30,7 @@ from uacpy.data.sediment import (
     water_sound_speed_at,
 )
 from uacpy._log import log_message
+from uacpy.core.sediment import DEFAULT_GRAIN_SIZE_MODEL
 
 __all__ = ['fetch_seabed_substrate', 'fetch_bottom', 'fetch_bottom_transect']
 
@@ -59,7 +60,7 @@ _FOLK5_UNCLASSIFIED = 6
 
 
 def _bottom_from_folk5(code, lat, lon, *, roughness, water_sound_speed=None,
-                       model='hamilton'):
+                       model=DEFAULT_GRAIN_SIZE_MODEL, environment=None):
     """``BoundaryProperties`` for one Folk 5-class code, or a typed refusal.
 
     Shared by the live WFS backend and the offline polygon backend
@@ -83,6 +84,7 @@ def _bottom_from_folk5(code, lat, lon, *, roughness, water_sound_speed=None,
     kind, value = _FOLK5_TO_BOTTOM[code]
     if kind == 'phi':
         return bottom_from_grain_size(value, roughness=roughness, model=model,
+                                      environment=environment,
                                       water_sound_speed=water_sound_speed)
     return bottom_from_class(value, roughness=roughness)
 
@@ -169,7 +171,8 @@ def fetch_bottom(
     *,
     roughness: float = 0.0,
     water_sound_speed: Optional[float] = None,
-    model: str = 'hamilton',
+    model: str = DEFAULT_GRAIN_SIZE_MODEL,
+    environment: Optional[str] = None,
     layer: str = EMODNET_LAYER,
     base_url: str = EMODNET_WFS_URL,
     timeout: float = 60.0,
@@ -190,7 +193,7 @@ def fetch_bottom(
                                  timeout=timeout, verbose=verbose)
     bottom = _bottom_from_folk5(sub['folk_5cl'], lat, lon, roughness=roughness,
                                 water_sound_speed=water_sound_speed,
-                                model=model)
+                                model=model, environment=environment)
     log_message(
         'seabed', f"EMODnet '{sub['folk_5cl_txt']}' at {lat:.3f}, {lon:.3f} → "
         f"{bottom.acoustic_type} c_p={bottom.sound_speed:.0f} m/s",
@@ -205,7 +208,8 @@ def fetch_bottom_transect(
     max_points=None,
     roughness: float = 0.0,
     water_sound_speed: Optional[float] = None,
-    model: str = 'hamilton',
+    model: str = DEFAULT_GRAIN_SIZE_MODEL,
+    environment: Optional[str] = None,
     layer: str = EMODNET_LAYER,
     base_url: str = EMODNET_WFS_URL,
     timeout: float = 60.0,
@@ -228,7 +232,7 @@ def fetch_bottom_transect(
         lambda la, lo: fetch_bottom((la, lo), roughness=roughness,
                                     water_sound_speed=water_sound_speed_at(
                                         water_sound_speed, la, lo),
-                                    model=model,
+                                    model=model, environment=environment,
                                     layer=layer, base_url=base_url,
                                     timeout=timeout, verbose=verbose),
         start, end, n_points, source_label='EMODnet', max_points=max_points,

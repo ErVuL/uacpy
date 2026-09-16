@@ -430,8 +430,14 @@ def plot_sea_ice_map(grid, *, hemi: str = 'N', transect=None, source=None,
             if len(pts) > 1:
                 ax.plot([c for _, c in pts], [r for r, _ in pts], color='0.4',
                         lw=0.6, alpha=0.45, zorder=2)
-        lon_s = np.arange(-180.0, 181.0, 2.0)
-        for lat_c in np.arange(50.0, 90.0, graticule) * sgn:       # parallels
+        # Plain floats, not the numpy scalars ``arange`` yields: the grids
+        # below are fed to ``sea_ice_pixel``, whose ``Coordinate`` is a
+        # ``tuple[float, float]``. ``np.float64`` happens to subclass ``float``
+        # so this never misbehaved, but the annotation is what ``py.typed``
+        # promises a caller's checker, and the promise is checked here.
+        lon_s = [float(lon) for lon in np.arange(-180.0, 181.0, 2.0)]
+        for lat_c in [float(lat)                               # parallels
+                      for lat in np.arange(50.0, 90.0, graticule) * sgn]:
             _line([sea_ice_pixel((lat_c, lo), hemi=hemi) for lo in lon_s])
             p0 = sea_ice_pixel((lat_c, 0.0), hemi=hemi)
             if p0:
@@ -439,8 +445,9 @@ def plot_sea_ice_map(grid, *, hemi: str = 'N', transect=None, source=None,
                             color='0.25', fontsize='x-small', ha='center', va='center',
                             zorder=2, bbox=dict(boxstyle='round,pad=0.1',
                                                 fc='white', ec='none', alpha=0.6))
-        lat_s = np.arange(50.0, 89.0, 1.0) * sgn
-        for lon_c in np.arange(-180.0, 180.0, 30.0):               # meridians
+        lat_s = [float(lat) for lat in np.arange(50.0, 89.0, 1.0) * sgn]
+        for lon_c in [float(lon)
+                      for lon in np.arange(-180.0, 180.0, 30.0)]:  # meridians
             _line([sea_ice_pixel((la, lon_c), hemi=hemi) for la in lat_s])
 
     pa = pb = ps = None

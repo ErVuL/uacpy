@@ -37,6 +37,7 @@ from uacpy.core.environment import BoundaryProperties, Bottom
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.data._geo import Coordinate, as_coordinate, normalize_lon
+from uacpy.core.sediment import DEFAULT_GRAIN_SIZE_MODEL
 from uacpy.data.sediment import (
     bottom_from_grain_size, range_dependent_bottom_along,
     water_sound_speed_at,
@@ -152,7 +153,8 @@ def _water_depth(point, timeout, verbose, cache_only):
 
 def fetch_bottom_pelagic(point: Coordinate, *, roughness: float = 0.0,
                          water_sound_speed: Optional[float] = None,
-                         model: str = 'hamilton',
+                         model: str = DEFAULT_GRAIN_SIZE_MODEL,
+                         environment: Optional[str] = None,
                          depth: Optional[float] = None, cache_only: bool = False,
                          timeout: float = 30.0,
                          verbose: Union[bool, str] = False) -> BoundaryProperties:
@@ -179,6 +181,7 @@ def fetch_bottom_pelagic(point: Coordinate, *, roughness: float = 0.0,
     litho = pelagic_lithology(d, lat, lon)
     bottom = bottom_from_grain_size(
         _LITHOLOGY_PHI[litho], roughness=roughness, model=model,
+        environment=environment,
         water_sound_speed=water_sound_speed)
     log_message(
         'pelagic', f"pelagic {litho} at {lat:.2f}, {lon:.2f} "
@@ -190,7 +193,8 @@ def fetch_bottom_pelagic_transect(start: Coordinate, end: Coordinate, *,
                                   n_points=6, max_points=None,
                                   roughness: float = 0.0,
                                   water_sound_speed: Optional[float] = None,
-                                  model: str = 'hamilton',
+                                  model: str = DEFAULT_GRAIN_SIZE_MODEL,
+                                  environment: Optional[str] = None,
                                   depth=None, cache_only: bool = False,
                                   timeout: float = 30.0,
                                   verbose: Union[bool, str] = False
@@ -207,7 +211,7 @@ def fetch_bottom_pelagic_transect(start: Coordinate, end: Coordinate, *,
         lambda la, lo: fetch_bottom_pelagic(
             (la, lo), roughness=roughness,
             water_sound_speed=water_sound_speed_at(water_sound_speed, la, lo),
-            model=model,
+            model=model, environment=environment,
             depth=depth(la, lo) if callable(depth) else depth,
             cache_only=cache_only, timeout=timeout, verbose=verbose),
         start, end, n_points, source_label='pelagic model',

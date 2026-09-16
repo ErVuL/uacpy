@@ -5311,6 +5311,128 @@ class TestModalSpeedPlots:
         with pytest.raises(ConfigurationError):
             plots.plot_mode_speeds(_rays())
 
+    # ── the seabed label keeps clear of the curve ────────────────────────
+    #
+    # The label sits in the band just above the ``c_bottom`` rule, which is
+    # the one band the phase-speed curve is certain to enter: cp rises with
+    # mode index and leaves the rule at the trapped/leaky crossing. So the
+    # label has to go to whichever end of the axis is farther from that
+    # crossing. Neither fixed end works, and both failures are measured in
+    # ``test_neither_fixed_end_clears_the_curve_on_its_own`` below.
+
+    def _modes_rising(self, n=12, f=200.0):
+        """A mode set whose phase speed rises monotonically across the panel,
+        so the crossing can be placed anywhere by choosing ``c_bottom``."""
+        return self._modes_at(f, n=n)
+
+    @staticmethod
+    def _c_bottom_at(cp, fraction):
+        """``c_bottom`` placing the trapped/leaky crossing ``fraction`` of the
+        way along the mode axis."""
+        i = int(round(fraction * (cp.size - 1)))
+        return float(0.5 * (cp[i] + cp[min(i + 1, cp.size - 1)]))
+
+    @staticmethod
+    def _curve_points_inside_label(fig, ax):
+        """How many points of the phase-speed curve fall inside the seabed
+        label's rendered box.
+
+        The polyline is resampled densely rather than tested at its vertices:
+        a segment can cross the label with no vertex inside it, which is what
+        the collision looked like on the figure that exposed this.
+        """
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+        label = next(t for t in ax.texts if 'trapped' in t.get_text())
+        box = label.get_window_extent(renderer)
+        line = ax.lines[0]
+        x = np.asarray(line.get_xdata(), dtype=float)
+        y = np.asarray(line.get_ydata(), dtype=float)
+        s = np.linspace(0.0, x.size - 1, 4000)
+        pts = ax.transData.transform(np.column_stack((
+            np.interp(s, np.arange(x.size), x),
+            np.interp(s, np.arange(y.size), y))))
+        inside = ((pts[:, 0] >= box.x0) & (pts[:, 0] <= box.x1)
+                  & (pts[:, 1] >= box.y0) & (pts[:, 1] <= box.y1))
+        return int(inside.sum())
+
+    @pytest.mark.parametrize('fraction, expected_side', [
+        (0.85, 'left'), (0.70, 'left'),          # crossing right -> label left
+        (0.25, 'right'), (0.10, 'right'),        # crossing left  -> label right
+    ])
+    def test_the_seabed_label_sits_at_the_end_away_from_the_crossing(
+            self, fraction, expected_side):
+        m = self._modes_rising()
+        cp = np.sort(m.compute_phase_speeds())
+        fig, ax = plots.plot_mode_speeds(
+            m, c_bottom=self._c_bottom_at(cp, fraction))
+        try:
+            label = next(t for t in ax.texts if 'trapped' in t.get_text())
+            assert label.get_ha() == expected_side
+        finally:
+            plt.close(fig)
+
+    @pytest.mark.parametrize('fraction', [0.85, 0.70, 0.50, 0.25, 0.10])
+    def test_the_seabed_label_never_overlaps_the_phase_speed_curve(
+            self, fraction):
+        """The property the placement rule exists for, measured on the
+        rendered figure rather than inferred from the coordinates."""
+        m = self._modes_rising()
+        cp = np.sort(m.compute_phase_speeds())
+        fig, ax = plots.plot_mode_speeds(
+            m, c_bottom=self._c_bottom_at(cp, fraction))
+        try:
+            hits = self._curve_points_inside_label(fig, ax)
+            assert hits == 0, (
+                f"crossing at {fraction:.0%} of the panel: {hits} points of "
+                f"the phase-speed curve fall inside the seabed label")
+        finally:
+            plt.close(fig)
+
+    @pytest.mark.parametrize('c_bottom_of, expected_side', [
+        ('above_all', 'left'),     # every mode trapped, curve below the rule
+        ('below_all', 'right'),    # every mode leaky, curve above it
+    ])
+    def test_a_channel_with_no_crossing_places_the_label_at_the_far_end(
+            self, c_bottom_of, expected_side):
+        """Both degenerate ends of the rule: with no crossing the trapped
+        fraction is 1 or 0, and the label goes to the far end either way."""
+        m = self._modes_rising()
+        cp = np.sort(m.compute_phase_speeds())
+        cb = cp.max() * 1.05 if c_bottom_of == 'above_all' else cp.min() * 0.95
+        fig, ax = plots.plot_mode_speeds(m, c_bottom=cb)
+        try:
+            label = next(t for t in ax.texts if 'trapped' in t.get_text())
+            assert label.get_ha() == expected_side
+            assert self._curve_points_inside_label(fig, ax) == 0
+        finally:
+            plt.close(fig)
+
+    def test_neither_fixed_end_clears_the_curve_on_its_own(self):
+        """Why the rule is a comparison and not a constant.
+
+        Drawn by hand at each fixed end, on the crossing position that end
+        fails at, and measured the same way. If either of these ever comes
+        back clear, the placement rule can be simplified to that constant —
+        so the numbers are asserted non-zero rather than merely recorded.
+        """
+        m = self._modes_rising()
+        cp = np.sort(m.compute_phase_speeds())
+        for fraction, ha, x in ((0.85, 'right', 0.99), (0.10, 'left', 0.01)):
+            cb = self._c_bottom_at(cp, fraction)
+            fig, ax = plots.plot_mode_speeds(m)
+            try:
+                ax.axhline(cb, color='C3', ls='--', lw=1.0)
+                ax.text(x, cb, f' seabed $c_p$ = {cb:g} m/s — n trapped',
+                        color='C3', fontsize='small', va='bottom', ha=ha,
+                        transform=ax.get_yaxis_transform())
+                hits = self._curve_points_inside_label(fig, ax)
+                assert hits > 0, (
+                    f"a label pinned {ha} no longer collides at a crossing "
+                    f"{fraction:.0%} along — the rule could be a constant")
+            finally:
+                plt.close(fig)
+
     def test_dispersion_draws_two_curves_per_mode(self):
         sets = [self._modes_at(f, group=True) for f in (100.0, 150.0, 200.0)]
         fig, ax = plots.plot_dispersion(sets, n_modes=3)

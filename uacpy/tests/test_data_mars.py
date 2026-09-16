@@ -125,6 +125,37 @@ def test_the_class_centroids_are_area_centroids_of_the_ternary_diagram():
     assert checked == 11, f"the grid resolved {checked} classes, not 11"
 
 
+def test_the_end_members_are_the_phi_midpoints_of_their_grade_ranges():
+    """The rule the three end members follow, not the three numbers.
+
+    Each aggregate's representative ϕ is the midpoint of the grade interval it
+    is built from, taken in **ϕ** — which is logarithmic, so it is the
+    geometric mean of the interval's diameters. The convention is load-bearing:
+    an arithmetic midpoint in millimetres would put gravel at −7.01 ϕ instead
+    of −4.5, sand at −0.04 instead of 1.5, and mud at 4.99 instead of 7.5. The
+    evidence for it is that under the ϕ midpoint sand and mud come out at
+    exactly the values this module and the DECK41 lithology map have always
+    used for those two words, which is what identifies gravel as the outlier.
+
+    Grade intervals from USGS SIR 2019-5073 fig. 2, whose caption gives the
+    gravel/sand/silt/clay aggregates to Wentworth (1922) and the mud aggregate
+    to Folk (1954); gravel's coarse bound is Medwin & Clay's "2 to 256 mm"
+    rather than that ladder's own 4096 mm, a choice the module records."""
+    from uacpy.data.sediment_db import _DECK41_LITHOLOGY_TO_PHI as deck41
+    assert mars._AGGREGATE_PHI_LIMITS == {'gravel': (-8.0, -1.0),
+                                          'sand': (-1.0, 4.0),
+                                          'mud': (4.0, 11.0)}
+    for aggregate, member in (('gravel', mars._GRAVEL_PHI),
+                              ('sand', mars._SAND_PHI),
+                              ('mud', mars._MUD_PHI)):
+        lo, hi = mars._AGGREGATE_PHI_LIMITS[aggregate]
+        assert member == pytest.approx(0.5 * (lo + hi)), aggregate
+        coarse, fine = 2.0 ** -lo, 2.0 ** -hi          # the interval in mm
+        assert 2.0 ** -member == pytest.approx((coarse * fine) ** 0.5), aggregate
+    assert mars._SAND_PHI == deck41['sand']
+    assert mars._MUD_PHI == deck41['mud']
+
+
 def test_the_class_limits_are_folks_published_thresholds():
     """The tiling test below would pass just as well with 0.25 in place of
     0.30: it checks that the bands partition the diagram, not that they are
@@ -231,9 +262,9 @@ def test_bottom_from_mars(monkeypatch):
     assert bp.sound_speed > 1510.0                       # coarse sand: faster
 
 
-@pytest.mark.parametrize('folk, model', [('G', 'hamilton'),    # -1.13 ϕ
-                                         ('sG', 'hamilton'),   # -0.11 ϕ
-                                         ('G', 'apl-uw')])     # -1.13 < -1
+@pytest.mark.parametrize('folk, model', [('G', 'hamilton'),    # -3.30 ϕ
+                                         ('sG', 'hamilton'),   # -1.37 ϕ
+                                         ('sG', 'apl-uw')])    # -1.37 < -1
 def test_a_sample_coarser_than_the_relations_says_so(monkeypatch, folk, model):
     """MARS reaches seabed coarser than either grain-size relation is fitted
     over, and the conversion answers those with its fit at the nearer end —
@@ -249,38 +280,58 @@ def test_a_sample_coarser_than_the_relations_says_so(monkeypatch, folk, model):
     assert bp.sound_speed == pytest.approx(edge.sound_speed)
 
 
-@pytest.mark.parametrize('folk, model', [('sG', 'apl-uw'),     # -0.11 ϕ
+@pytest.mark.parametrize('folk, model', [('msG', 'apl-uw'),    # -0.63 ϕ
+                                         ('msG', 'hamilton'),  # -0.63 ϕ
                                          ('S', 'hamilton')])   # 1.80 ϕ
-def test_a_sample_inside_the_relations_is_converted_in_silence(
+def test_a_sample_inside_the_relations_is_not_announced(
         monkeypatch, folk, model):
-    """The other side of each model's own range, and 'sG' is the pair that
-    matters: at -0.11 ϕ it sits below 'hamilton''s 0 and inside 'apl-uw''s
-    -1, so the same sample is announced by one model and converted in silence
-    by the other."""
+    """The other side of each model's range. 'msG' at -0.63 ϕ is the case that
+    moved when the conversion began evaluating Hamilton & Bachman's regressions
+    coarse of their table: it is now inside *both* models' ranges, where it
+    used to be announced by 'hamilton'. (Under 'hamilton' the conversion still
+    reports its *attenuation* separately — ``k_p`` starts at 0 ϕ — which is the
+    per-quantity statement pinned in test_sediment.py, not this one.)"""
     _install(monkeypatch, _collection(_feature(-34.0, 151.31, folk=folk)))
-    with warnings.catch_warnings():
-        warnings.simplefilter('error')
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
         bp = mars.fetch_bottom_mars(_P, model=model)
+    assert not [w for w in caught if 'fitted over' in str(w.message)]
     assert bp.grain_size_phi == pytest.approx(mars._FOLK_TO_PHI[folk])
 
 
-@pytest.mark.parametrize('gravel, sand, warns', [(50.0, 50.0, True),    # -0.25 ϕ
-                                                 (40.0, 60.0, False)])  # +0.10 ϕ
+@pytest.mark.parametrize('gravel, sand, warns', [(45.0, 55.0, True),    # -1.20 ϕ
+                                                 (40.0, 60.0, False)])  # -0.90 ϕ
 def test_the_announcement_turns_over_at_the_models_own_edge(
         monkeypatch, gravel, sand, warns):
     """Both sides of the threshold itself, which no Folk class lands on: the
-    percentage route makes ϕ continuous, so two mixtures either side of
-    'hamilton''s 0 ϕ separate the samples it can convert from the ones it
-    answers with its end row."""
+    percentage route makes ϕ continuous, so two mixtures either side of the
+    -1 ϕ where both models' relations stop separate the samples they can
+    convert from the ones they answer with an edge value."""
     _install(monkeypatch, _collection(
         _feature(-34.0, 151.31, gravel=gravel, sand=sand, mud=0.0)))
-    if warns:
-        with pytest.warns(UserWarning, match='fitted over'):
-            mars.fetch_bottom_mars(_P)
-    else:
-        with warnings.catch_warnings():
-            warnings.simplefilter('error')
-            mars.fetch_bottom_mars(_P)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        mars.fetch_bottom_mars(_P)
+    announced = [w for w in caught if 'fitted over' in str(w.message)]
+    assert bool(announced) is warns
+    # Filtered on this warning's own text rather than run under
+    # simplefilter('error'): the conversion has its own per-quantity report,
+    # a different statement from this one, pinned in test_sediment.py.
+
+
+@pytest.mark.parametrize('model, warns', [('apl-uw', True),      # 9.2 > 9
+                                          ('hamilton', False)])  # 9.2 < 9.5
+def test_one_sample_can_be_announced_by_one_model_and_not_the_other(
+        monkeypatch, model, warns):
+    """The models' ranges differ only between 9 and 9.5 ϕ now, where Hamilton's
+    ``k_p`` regression still runs and TR 9407's equations have stopped. A
+    measured 1.7 µm grain — the third conversion route — lands there."""
+    _install(monkeypatch, _collection(_feature(-34.0, 151.31, grain_um=1.7)))
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        bp = mars.fetch_bottom_mars(_P, model=model)
+    assert bp.grain_size_phi == pytest.approx(9.2, abs=0.01)
+    assert bool([w for w in caught if 'fitted over' in str(w.message)]) is warns
 
 
 def test_bottom_from_mars_stamps_sample_provenance(monkeypatch):

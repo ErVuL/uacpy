@@ -54,7 +54,9 @@ from uacpy.data._http import raise_substantive
 from uacpy.data.bathymetry import (
     DEFAULT_DATASET, fetch_bathy, fetch_bathy_transect, transect_length,
 )
-from uacpy.core.sediment import GRAIN_SIZE_MODELS
+from uacpy.core.sediment import (DEFAULT_GRAIN_SIZE_MODEL,
+                                 DEFAULT_GRAIN_SIZE_ENVIRONMENT,
+                                 check_grain_size_selection)
 from uacpy.data.sediment import bottom_from_class, bottom_from_grain_size
 from uacpy.data.sound_speed import (
     extend_ssp_below_data, fetch_ssp, fetch_ssp_transect, fetch_ts_profile,
@@ -191,7 +193,8 @@ def fetch_environment(
     bathymetry_sources: Union[str, Sequence[str], None] = None,
     bottom: Union[float, str, BoundaryProperties, None] = None,
     bottom_sources: Union[str, Sequence[str], None] = None,
-    bottom_model: str = 'hamilton',
+    bottom_model: str = DEFAULT_GRAIN_SIZE_MODEL,
+    bottom_environment: Optional[str] = None,
     surface: Optional[BoundaryProperties] = None,
     surface_sources: Union[str, Sequence[str], None] = None,
     altimetry=None,
@@ -422,6 +425,17 @@ def fetch_environment(
         transect (a fixed count aliases the waves away on a long one).
     sea_surface_seed : int, optional
         Random seed for a fetched sea-surface realization (reproducibility).
+    bottom_environment : str, optional
+        Which of Hamilton & Bachman's three fits ``bottom_model=DEFAULT_GRAIN_SIZE_MODEL``
+        evaluates: ``'continental-terrace'`` (the default when ``None``, shelf
+        and slope, 1 to 9 ϕ), ``'abyssal-hill'`` or ``'abyssal-plain'`` (both
+        7 to 10 ϕ). It reaches the ϕ ``bottom=`` literal and every fetched
+        source that converts a grain size. **A deep-ocean site wants an abyssal
+        fit** — at 9 ϕ the terrace fit gives ρ = 1.45 against the 1.35 and 1.41
+        Hamilton & Bachman measured for abyssal clay — but nothing infers it:
+        the paper states no rule for choosing, so only the caller knows the
+        site. Pairing it with ``bottom_model='apl-uw'`` raises, that report
+        publishing one set of relations rather than one per environment.
     with_absorption : bool, optional
         If ``True``, attach a Francois-Garrison absorption built from the
         site's fetched temperature/salinity column (costs one extra T/S
@@ -471,11 +485,10 @@ def fetch_environment(
                        (bottom_sources, 'bottom'),
                        (surface_sources, 'surface')):
         _require_nonempty_sources(_spec, axis=_ax)
-    if bottom_model not in GRAIN_SIZE_MODELS:
-        raise ConfigurationError(
-            f"fetch_environment: unknown bottom_model {bottom_model!r}.",
-            remediation=f"Use one of {GRAIN_SIZE_MODELS}.",
-        )
+    check_grain_size_selection(
+        bottom_model, bottom_environment or DEFAULT_GRAIN_SIZE_ENVIRONMENT,
+        caller='fetch_environment', model_argument='bottom_model',
+        environment_argument='bottom_environment')
 
     # Each axis is a literal (ssp=/bathymetry=/bottom=) and/or fetched from
     # source(s) (*_sources). When both are given the source is fetched first and
@@ -676,7 +689,7 @@ def fetch_environment(
                     water_sound_speed=_seabed_sound_speed_along(
                         ssp, seafloor, (lat, lon)),
                     depth=_seabed_depth_along(seafloor, (lat, lon)),
-                    model=bottom_model,
+                    model=bottom_model, environment=bottom_environment,
                     max_distance_km=max_distance_km,
                     n_points=bottom_n_points, max_points=max_points,
                     timeout=timeout, verbose=verbose,
@@ -686,7 +699,7 @@ def fetch_environment(
                     order, point, transect=False, cache_only=bottom_cache_only,
                     water_sound_speed=water_c,
                     depth=float(seafloor.eval(range=0.0)),
-                    model=bottom_model,
+                    model=bottom_model, environment=bottom_environment,
                     max_distance_km=max_distance_km,
                     timeout=timeout, verbose=verbose,
                 )
@@ -700,11 +713,12 @@ def fetch_environment(
                     f"uniform literal makes the bottom range-independent.",
                     UserWarning, stacklevel=2)
             bottom_props = _resolve_bottom(  # fall back to the literal
-                bottom, water_sound_speed=water_c, model=bottom_model)
+                bottom, water_sound_speed=water_c, model=bottom_model,
+                environment=bottom_environment)
     elif bottom is not None:
         bottom_props = _resolve_bottom(
             bottom, water_sound_speed=_seabed_sound_speed(ssp, seafloor),
-            model=bottom_model)
+            model=bottom_model, environment=bottom_environment)
 
     # ── Surface (top boundary, optional): fetch sea ice, else literal ──
     # The only fetchable surface is NSIDC sea ice; a point classified as open
@@ -1189,7 +1203,8 @@ def _bottom_order(bottom_source):
 
 
 def _fetch_bottom(order, *args, transect, cache_only=False,
-                  max_distance_km=None, depth=None, model=None, **kwargs):
+                  max_distance_km=None, depth=None, model=None,
+                  environment=None, **kwargs):
     """Fetch a bottom from the first source in ``order`` that yields data.
 
     ``transect`` selects the point (``False``) or transect (``True``) fetcher.
@@ -1216,6 +1231,12 @@ def _fetch_bottom(order, *args, transect, cache_only=False,
             call_kwargs['depth'] = depth
         if provider.accepts_grain_size_model and model is not None:
             call_kwargs['model'] = model
+            # Every provider that converts a grain size takes the
+            # environment with it; test_data_environment pins that the
+            # two travel together, so a non-default environment cannot
+            # be dropped on the way to a fetcher.
+            if environment is not None:
+                call_kwargs['environment'] = environment
         # Cache-first: the local twin before the live backend, where one
         # exists; cache_only drops the live attempt. Providers without a
         # cached twin resolve one fetcher pair, with no flag to pass.
@@ -1284,14 +1305,16 @@ def _seabed_depth_along(seafloor, start):
     return at
 
 
-def _resolve_bottom(bottom, *, water_sound_speed=None, model='hamilton'):
+def _resolve_bottom(bottom, *, water_sound_speed=None, model=DEFAULT_GRAIN_SIZE_MODEL,
+                    environment=None):
     if bottom is None or isinstance(bottom, BoundaryProperties):
         return bottom
     if isinstance(bottom, str):
         return bottom_from_class(bottom)
     if isinstance(bottom, (int, float)) and not isinstance(bottom, bool):
         return bottom_from_grain_size(
-            float(bottom), model=model, water_sound_speed=water_sound_speed)
+            float(bottom), model=model, environment=environment,
+            water_sound_speed=water_sound_speed)
     raise ConfigurationError(
         f"fetch_environment: bottom must be a ϕ float, a class name, a "
         f"BoundaryProperties, or None; got {type(bottom).__name__}.",

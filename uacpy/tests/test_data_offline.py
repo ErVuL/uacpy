@@ -385,9 +385,11 @@ def test_cache_preset_never_hits_network(tmp_path, monkeypatch):
                                  bottom_sources='local')
     assert [s.source.id for s in env.data_sources] == ['pelagic']
     # 3000 m is above the CCD at this latitude → calcareous ooze (ϕ 7.5), and
-    # ϕ 7.5 interpolates the Hamilton & Bachman density table between clayey
-    # silt (7.13, 1.484) and silty clay (8.80, 1.480) → 1.4831.
-    assert env.bottom.columns[0].halfspace.density == pytest.approx(1.483, abs=1e-3)
+    # ϕ 7.5 goes through the Hamilton & Bachman (T) density regression,
+    # (2.374 − 0.175·7.5 + 0.008·7.5²)/1.026 × 1.030 = 1.5174 g/cm³. (The table
+    # this replaced interpolated its 7.13 and 8.80 rows to 1.4831; the fit runs
+    # above its own class means over 5.4–7.2 ϕ, by up to 0.071 g/cm³.)
+    assert env.bottom.columns[0].halfspace.density == pytest.approx(1.517, abs=1e-3)
 
 
 def test_pelagic_without_a_supplied_depth_needs_the_cache(tmp_path,

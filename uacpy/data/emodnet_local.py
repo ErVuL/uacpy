@@ -29,6 +29,7 @@ from uacpy.data.seabed import (
     EMODNET_WFS_URL, EMODNET_LAYER, _bottom_from_folk5,
 )
 from uacpy.data.sediment import range_dependent_bottom_along, water_sound_speed_at
+from uacpy.core.sediment import DEFAULT_GRAIN_SIZE_MODEL
 
 __all__ = ['download_emodnet_db', 'fetch_seabed_local', 'fetch_bottom_local',
            'fetch_bottom_local_transect']
@@ -181,7 +182,8 @@ def fetch_seabed_local(point: Coordinate) -> dict:
 
 def fetch_bottom_local(point: Coordinate, *, roughness: float = 0.0,
                        water_sound_speed: Optional[float] = None,
-                       model: str = 'hamilton',
+                       model: str = DEFAULT_GRAIN_SIZE_MODEL,
+                       environment: Optional[str] = None,
                        timeout=None, verbose: Union[bool, str] = False
                        ) -> BoundaryProperties:
     """Model-ready bottom from the offline EMODnet polygon at ``(lat, lon)``.
@@ -202,7 +204,7 @@ def fetch_bottom_local(point: Coordinate, *, roughness: float = 0.0,
     sub = fetch_seabed_local(point)
     bottom = _bottom_from_folk5(sub['folk_5cl'], lat, lon, roughness=roughness,
                                 water_sound_speed=water_sound_speed,
-                                model=model)
+                                model=model, environment=environment)
     log_message(
         'seabed', f"EMODnet (offline) folk_5cl={sub['folk_5cl']} at "
         f"{lat:.3f}, {lon:.3f} → {bottom.acoustic_type} "
@@ -215,7 +217,8 @@ def fetch_bottom_local_transect(start: Coordinate, end: Coordinate, *,
                                 n_points=6, max_points=None,
                                 roughness: float = 0.0,
                                 water_sound_speed: Optional[float] = None,
-                                model: str = 'hamilton',
+                                model: str = DEFAULT_GRAIN_SIZE_MODEL,
+                                environment: Optional[str] = None,
                                 timeout=None, verbose: Union[bool, str] = False
                                 ) -> Bottom:
     """Range-dependent bottom from the offline EMODnet polygons along a transect.
@@ -232,7 +235,7 @@ def fetch_bottom_local_transect(start: Coordinate, end: Coordinate, *,
         lambda la, lo: fetch_bottom_local(
             (la, lo), roughness=roughness,
             water_sound_speed=water_sound_speed_at(water_sound_speed, la, lo),
-            model=model),
+            model=model, environment=environment),
         start, end, n_points, source_label='EMODnet (offline)',
         max_points=max_points,
     )

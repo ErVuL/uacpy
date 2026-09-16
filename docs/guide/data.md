@@ -403,13 +403,35 @@ for model in ('hamilton', 'apl-uw'):
 
 ![Grain size to geoacoustics](figures/data_grain_size.png)
 
-Two published models: `'hamilton'` (Hamilton & Bachman 1982 table plus the
-Hamilton 1972 `k_p` attenuation) is the **low-frequency** answer and the
-default; `'apl-uw'` (APL-UW TR 9407 §IV.A.4) is the **high-frequency** one. They
-agree on the shape — coarse sediment is fast, dense and lossy; fine mud is slow,
-light and quiet — and disagree at the coarse end: ~160 m/s at the ϕ = −0.5 edge
-of the plot, and 203 m/s for gravel-grade ϕ ≤ −1, where both tables have run out
-and each returns its clamped end value.
+Two published models, and they are **not independent**: `'hamilton'` (the
+Hamilton & Bachman 1982 continental-terrace **regressions** plus the Hamilton
+1972 `k_p` attenuation) is the default; `'apl-uw'` is APL-UW TR 9407 §IV.A.4. They return
+the *same* attenuation — TR 9407 p. IV-8 reproduces Hamilton's α₂/f
+parameterisation from that same 1972 paper — and the same density and sound
+speed ratios below 1 ϕ, where TR 9407's coarse branch is the Hamilton & Bachman
+regression divided by 1528 m/s and 1.026 g/cm³ ("The density and sound speed
+ratios agree with those of Hamilton and Bachman for −1 ≤ M_z < 1", p. IV-8).
+
+What separates them, on 1–9 ϕ only, is **the depth of sediment each describes**:
+TR 9407 fits "the upper few centimeters" with surficial values it derived by
+model fitting, Hamilton & Bachman measured the upper 30 cm. Frequency is a proxy
+for that depth, not a property of the relations: neither source states a rule
+for choosing, Hamilton's velocities were measured at ~200 kHz, and the
+10–100 kHz band TR 9407 declares belongs to the scattering models its ratios
+feed. **A third source states the rule.** Ainslie, *Principles of Sonar
+Performance Modelling* §4.4.1, tabulates both sets with a band and a depth on
+each: Table 4.17 is "Default HF geo-acoustic parameters (10–100 kHz).
+Near-surface sediment properties" — APL-UW's, "the top few centimeters" —
+and Table 4.18 is "Default MF geo-acoustic parameters (1–10 kHz). Bulk
+sediment properties" — Hamilton's and Bachman's, "the uppermost few meters".
+uacpy's tables reproduce his row for row: 0.004 % on speed and 0.04 % on
+density against Table 4.17, and against Table 4.18 exactly below 0.81 ϕ then
+within 0.15 % on speed and Bachman's own 7.5 % standard error on density.
+That rule is why `'hamilton'` is the default: a propagation run at kilohertz
+penetrates metres of sediment, so the bulk values are the ones it should see.
+Pass `'apl-uw'` above 10 kHz — which is also what makes a uacpy seabed
+identical to the Acoustics Toolbox's own `'G'` bottom. Coarse of 1 ϕ the two are one relation evaluated twice, agreeing to 0.03 m/s —
+the rounding of TR 9407's printed coefficients.
 
 Three things worth reading off the plot:
 
@@ -420,15 +442,19 @@ Three things worth reading off the plot:
   reconciled SSP at that seafloor, so the seabed is scaled to the water actually
   above it.
 - **Attenuation peaks at the sand–silt boundary** — ϕ = 4.5 for both
-  Hamilton and APL-UW — then falls by roughly an order of magnitude into clay
-  (15.6× and 14.6× respectively). The lossiest sediment is neither the coarsest
+  Hamilton and APL-UW, the same `k_p` regression under both — then falls by
+  roughly an order of magnitude into clay (15.3× and 14.6× respectively; they
+  differ only through each model's own sound speed, dB/λ being `k_p·c/1000`). The lossiest sediment is neither the coarsest
   nor the finest. Returned in dB/**wavelength**, which is frequency-independent.
-- **Hamilton flattens below ϕ ≈ 0.5.** That is the edge of its table, and ϕ is
-  clamped there. The clamp warns when it changes the numbers you get back, so
-  in practice only `'apl-uw'` warns: Hamilton is a table lookup whose
-  interpolation already holds the end rows flat, making the clamp a no-op at
-  any ϕ, while APL-UW's polynomials keep extrapolating and do move (1.8 m/s at
-  ϕ = 9.5, 47 m/s at ϕ = −1.5).
+- **Each returned quantity is reported against its own source.** Hamilton is two
+  sources: the (T) regressions for speed and density, evaluated over −1…9 ϕ
+  (1–9 on Hamilton & Bachman's own authority, coarse of 1 on TR 9407's, whose
+  branch is those same polynomials rescaled), and the `k_p` regression over
+  0–9.5 ϕ for attenuation. So at ϕ = −0.5 the speed and density are evaluated
+  while the attenuation is announced as its 0 ϕ value. APL-UW is one equation
+  set over −1…9 ϕ, so its three answer together; outside that its polynomials
+  keep extrapolating and the clamp does move the numbers (1.8 m/s at ϕ = 9.5,
+  47 m/s at ϕ = −1.5), which the same warning reports.
 
 Two shortcuts wrap the conversion: `bottom_from_grain_size(phi)` and
 `bottom_from_class('sand')`, both returning a ready `BoundaryProperties`.

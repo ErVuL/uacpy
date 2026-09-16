@@ -76,13 +76,18 @@ def test_transect_classifies_each_waypoint_from_its_own_cell():
     assert isinstance(rdb, Bottom)
     assert rdb.ranges.shape == (3,) and rdb.ranges[0] == 0.0
     assert np.all(np.diff(rdb.ranges) > 0)
-    # Each column carries its own waypoint's lithology → ϕ → Hamilton c_p:
-    # ϕ 9.0 → 1494.90 m/s at the ends, ϕ 7.5 → 1513.71 m/s in the middle.
+    # Each column carries its own waypoint's lithology → ϕ → Hamilton c_p. The
+    # expectation is computed from that same conversion, so what it pins is the
+    # routing rather than a remembered speed.
     expected = [bottom_from_grain_size(phi).sound_speed
                 for phi in (9.0, 7.5, 9.0)]
     assert rdb.halfspace_sound_speed.tolist() == pytest.approx(expected)
-    assert rdb.halfspace_sound_speed[0] == pytest.approx(1494.90, abs=0.01)
-    assert rdb.halfspace_sound_speed[1] == pytest.approx(1513.71, abs=0.01)
+    # The two ϕ 9.0 ends agree and the ϕ 7.5 middle stands apart from them,
+    # which is what separates a per-waypoint lookup from one lithology applied
+    # to the whole transect. A derived expectation alone would also be met by a
+    # conversion that returned the same speed for every grain size.
+    assert rdb.halfspace_sound_speed[0] == rdb.halfspace_sound_speed[2]
+    assert rdb.halfspace_sound_speed[1] != rdb.halfspace_sound_speed[0]
 
 
 def test_the_depth_fetch_carries_a_finite_default_timeout(monkeypatch):

@@ -689,6 +689,52 @@ def test_auto_bottom_chain_prefers_a_measured_grain_size_sample():
             < order.index('pelagic'))
 
 
+def test_every_grain_size_provider_takes_the_environment_with_the_model():
+    """Structural, because the failure mode is silence: ``_fetch_bottom``
+    forwards ``environment`` to any provider it forwards ``model`` to, so a
+    provider that took one and not the other would have a non-default
+    environment dropped on the way to the fetcher and hand back a
+    continental-terrace seabed without saying so. Asserted by introspection
+    rather than by listing the providers, so a new one is covered the day it
+    is registered."""
+    import inspect
+    for provider in env_mod._BOTTOM_PROVIDERS:
+        if not provider.accepts_grain_size_model:
+            continue
+        for resolve_args in (((True,), (False,)) if provider.has_cached_variant
+                             else ((),)):
+            for fn in provider.resolve(*resolve_args):
+                params = inspect.signature(fn).parameters
+                assert 'model' in params, f"{provider.id}: {fn.__name__}"
+                assert 'environment' in params, (
+                    f"{provider.id}: {fn.__name__} takes model= but not "
+                    f"environment=, so the environment would be dropped")
+
+
+def test_an_abyssal_environment_reaches_a_phi_literal_and_is_refused_with_apl_uw():
+    """The knob has to work at the entry point people use, and refuse there
+    too: a caller who names an abyssal fit beside ``bottom_model='apl-uw'``
+    several layers up would otherwise have it silently dropped by a path that
+    never reaches the conversion — a class-name seabed, say."""
+    import warnings
+    from uacpy.core.exceptions import ConfigurationError
+    kwargs = dict(bathymetry=4000.0, ssp=1500.0, bottom=8.5)
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        terrace = env_mod.fetch_environment((30.0, -40.0), **kwargs)
+        abyssal = env_mod.fetch_environment((30.0, -40.0),
+                                         bottom_environment='abyssal-plain',
+                                         **kwargs)
+    rho = [e.bottom.columns[0].halfspace.density for e in (terrace, abyssal)]
+    assert rho[1] < rho[0]          # the abyssal fit is lighter at 8.5 ϕ
+    assert abs(rho[1] - 1.39) < 0.02
+    with pytest.raises(ConfigurationError, match='has no'):
+        env_mod.fetch_environment((30.0, -40.0), bottom='sand',
+                               bathymetry=4000.0, ssp=1500.0,
+                               bottom_model='apl-uw',
+                               bottom_environment='abyssal-hill')
+
+
 @pytest.mark.parametrize('preset', ['auto', 'local'])
 def test_grain_size_sample_beats_pelagic_ooze_off_cape_hatteras(preset):
     """At 36 N 75 W the grain-size database holds a sand sample 124 km away.
@@ -709,8 +755,11 @@ def test_grain_size_sample_beats_pelagic_ooze_off_cape_hatteras(preset):
             order, point, transect=False, cache_only=True, depth=40.0)
     assert source == 'grainsize'
     assert bottom.sound_speed == pytest.approx(sample.sound_speed, rel=1e-9)
-    assert bottom.sound_speed == pytest.approx(1792.1, abs=0.5)
-    assert bottom.density == pytest.approx(2.013, abs=0.01)
+    # The sample is coarse sand, and coarse of ~1 ϕ the grain-size conversion
+    # evaluates the Hamilton & Bachman (T) regression where it used to hold the
+    # table's 0.92 ϕ end row, so this baseline moved up with it.
+    assert bottom.sound_speed == pytest.approx(1817.5, abs=0.5)
+    assert bottom.density == pytest.approx(2.152, abs=0.01)
 
 
 def test_with_absorption_declares_a_fetched_ph_on_the_total_scale(

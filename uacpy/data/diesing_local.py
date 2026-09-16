@@ -29,6 +29,7 @@ from uacpy.core.exceptions import DataFetchError
 from uacpy.data import _cache
 from uacpy.data._geo import Coordinate, as_coordinate
 from uacpy.data._http import http_get, checked_member_size
+from uacpy.core.sediment import DEFAULT_GRAIN_SIZE_MODEL
 from uacpy.data.sediment import (
     bottom_from_grain_size, range_dependent_bottom_along, water_sound_speed_at,
 )
@@ -187,7 +188,8 @@ def fetch_seafloor_lithology(point: Coordinate) -> dict:
 
 def fetch_bottom_diesing(point: Coordinate, *, roughness: float = 0.0,
                          water_sound_speed: Optional[float] = None,
-                         model: str = 'hamilton',
+                         model: str = DEFAULT_GRAIN_SIZE_MODEL,
+                         environment: Optional[str] = None,
                          timeout=None, verbose: Union[bool, str] = False
                          ) -> BoundaryProperties:
     """Model-ready bottom from the Diesing 2020 lithology at ``(lat, lon)``.
@@ -207,6 +209,7 @@ def fetch_bottom_diesing(point: Coordinate, *, roughness: float = 0.0,
     sub = fetch_seafloor_lithology(point)
     bottom = bottom_from_grain_size(
         sub['grain_size_phi'], roughness=roughness, model=model,
+        environment=environment,
         water_sound_speed=water_sound_speed)
     log_message(
         'diesing', f"Diesing {sub['lithology']} at {lat:.2f}, {lon:.2f} → "
@@ -218,7 +221,8 @@ def fetch_bottom_diesing_transect(start: Coordinate, end: Coordinate, *,
                                   n_points=6, max_points=None,
                                   roughness: float = 0.0,
                                   water_sound_speed: Optional[float] = None,
-                                  model: str = 'hamilton',
+                                  model: str = DEFAULT_GRAIN_SIZE_MODEL,
+                                  environment: Optional[str] = None,
                                   timeout=None, verbose: Union[bool, str] = False
                                   ) -> Bottom:
     """Range-dependent bottom from the Diesing 2020 map along a transect.
@@ -232,7 +236,7 @@ def fetch_bottom_diesing_transect(start: Coordinate, end: Coordinate, *,
         lambda la, lo: fetch_bottom_diesing(
             (la, lo), roughness=roughness,
             water_sound_speed=water_sound_speed_at(water_sound_speed, la, lo),
-            model=model),
+            model=model, environment=environment),
         start, end, n_points, source_label='Diesing 2020',
         max_points=max_points,
     )

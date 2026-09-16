@@ -90,29 +90,63 @@ def _entry(
 # size. Table 1.3 gives clay's c_s as "< 100", prints moraine's as the constant
 # 600, and leaves silt / sand / gravel as depth-dependent c_s(z̄); those four
 # take a single value (see the module docstring).
+# ``chalk`` and ``limestone`` are that table's shelf/slope rock rows: the
+# porous, partly lithified calcareous rock of the chalk-to-limestone
+# transition, not massive limestone. Hamilton (1980) Fig. 24 p. 1334, the
+# velocity-density figure behind them, draws ONE calcareous trend and names
+# four stretches of it — CALCAREOUS SEDIMENT (1.7-1.9 km/s), LIMESTONE AND
+# CHALK (3.2-3.4), LIMESTONE (5.1-5.2), CALCITE (6.5, the pure mineral at
+# 2.71 g/cm3). Table 1.3's chalk (2400 m/s) and limestone (3000) fall in the
+# LIMESTONE AND CHALK stretch, Ainslie Table 4.20's limestone (5350 m/s at
+# 2700 kg/m3) in the LIMESTONE one: the same word at different points along
+# one porosity trend, which is why this row does not take Ainslie's the way
+# ``granite`` does. What makes that a naming difference rather than a
+# disagreement is his *chalk* row — identical to Table 1.3's in all five
+# columns while his limestone sits 2350 m/s away; two compilations that agree
+# to the digit on one rock are not measuring the next one differently.
+# Hamilton's own in-situ marine limestone is the slow one: Table IV p. 1320
+# fits the Ontong-Java "calcareous ooze, chalk, limestone" section as
+# V = 1.559 + 1.713 Z - 0.374 Z**2 km/s (Z in km below the seabed), i.e.
+# 2.90 km/s a full kilometre in, and it never reaches 5 km/s. For a massive
+# limestone basement pass explicit values rather than this preset.
 # ``granite`` has no row in Table 1.3. It is the granite row of Ainslie,
 # *Principles of Sonar Performance Modelling* (Springer Praxis, 2010),
 # Table 4.20 p. 183, "Representative geoacoustic parameters for typical
 # sedimentary and igneous rocks": rho 2650 kg/m3, c_p 5750 m/s, alpha_p
 # 0.10 dB/lambda, c_s 3000 m/s, alpha_s 0.20 dB/lambda — rounded there to the
 # nearest 50 kg/m3, 50 m/s and 0.05 dB/lambda, with the text warning that "the
-# variation around these representative values can be large". Its rows and
-# Table 1.3's are separate compilations that disagree where they overlap —
-# Ainslie's limestone row is 2.70 / 5350 / 2400 against Table 1.3's
-# 2.4 / 3000 / 1500 — so granite takes Ainslie's row entire and no other row
-# takes anything from it. Each row is the source the index above names for it,
-# never a blend.
+# variation around these representative values can be large". He names the
+# table's own sources on that page: "The main sources used to construct Table
+# 4.20 are Carmichael (1982) for wave speeds and Jensen et al. (1994) for
+# attenuation", with Christensen and Salisbury (1975) for basalt, Assefa and
+# Sothcott (1997) and Hamilton (1979) besides.
+# Its rows and Table 1.3's are separate compilations that disagree where
+# they overlap — Ainslie's limestone row is 2.70 / 5350 / 2400 against
+# Table 1.3's 2.4 / 3000 / 1500 — so granite takes Ainslie's row entire, and
+# no other row takes anything from it. Each row is the source the index above
+# names for it, never a blend.
+# What the wave speeds stand on. Carmichael, *Handbook of Physical Properties
+# of Rocks* Vol. II, Table 18 p. 142, gives twelve water-saturated granite
+# samples: c_p 5.10 to 6.30 km/s (mean 5.62) at densities 2.62 to 2.67 g/cm3.
+# 5750 m/s at 2650 kg/m3 is one draw from that spread, which is Ainslie's
+# "can be large" made quantitative: the whole 1.2 km/s of it sits inside
+# 0.05 g/cm3 of density, so knowing a granite's density does not pin its
+# sound speed to better than that. How much of c_p is pore state rather than
+# mineral is visible in the same twelve rows: dry, they read 3.20 to
+# 5.35 km/s, up to 1.9 km/s below their own saturated value.
 # Two limits on granite's attenuations. They are a rock-*class* figure, not a
-# granite measurement: Ainslie takes his rock attenuations from Jensen et al.
-# (1994), which carries no granite row, and his sandstone, basalt, granite and
-# limestone rows all share alpha_p = 0.10 while basalt, granite and limestone
-# all share alpha_s = 0.20. And they are low-frequency: resonant-bar
-# measurements of water-saturated granite give Q ~ 30 at 100 kHz (Coyner &
-# Martin 1990, read through Olson, Lyons & Saebo, JASA 139(4), 1833-1847
-# (2016), §II.A), i.e. alpha_p ~ 0.55 and alpha_s ~ 1.09 dB/lambda — 5.5 times
-# the tabulated pair. Olson et al.'s own "Generic Granite" column, 0.27 and
-# 1.36 dB/lambda, is 2.7 and 6.8 times it. Pass explicit attenuations for a
-# granite in the sonar band.
+# granite measurement: the attenuations come, by Ainslie's own attribution
+# above, from Jensen et al. (1994), which carries no granite row, and his
+# sandstone, basalt, granite and limestone rows all share alpha_p = 0.10 while
+# basalt, granite and limestone all share alpha_s = 0.20. And they are
+# low-frequency: resonant-bar measurements of water-saturated granite give
+# Q ~ 30 at 100 kHz (Coyner & Martin 1990, read through Olson, Lyons & Saebo,
+# JASA 139(4), 1833-1847 (2016), §II.A, where it sets delta_p ~ 0.02 and
+# delta_s = 2 delta_p), i.e. alpha_p ~ 0.55 and alpha_s ~ 1.09 dB/lambda —
+# 5.5 times the tabulated pair. The "Generic Granite" column of that paper's
+# Table II — Bourbie, Coussy & Zinszner (1987) Table 5.2, quoted there —
+# gives 0.27 and 1.36 dB/lambda, 2.7 and 6.8 times it. Pass explicit
+# attenuations for a granite in the sonar band.
 # The phi column comes from Hamilton & Bachman (1982) Table I — the row whose
 # Table II density and velocity ratio reproduce the JKPS row, within 2.4 %. Those
 # are per-class measured sample means, not class centres, hence 8.80 / 5.40 /
@@ -141,7 +175,7 @@ MATERIALS: Dict[str, Dict] = {
     'moraine':   _entry(sound_speed=1950.0, density=2.1, attenuation=0.4,
                         shear_speed=600.0, shear_attenuation=1.0,
                         porosity=25.0),
-    # Rocks
+    # Rocks (which limestone the row is: see the note above)
     'chalk':     _entry(sound_speed=2400.0, density=2.2, attenuation=0.2,
                         shear_speed=1000.0, shear_attenuation=0.5),
     'limestone': _entry(sound_speed=3000.0, density=2.4, attenuation=0.1,

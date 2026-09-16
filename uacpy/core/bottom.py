@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core.constants import DECK_RANGE_RESOLUTION_M, BoundaryType
+from uacpy.core.sediment import DEFAULT_GRAIN_SIZE_MODEL
 from uacpy.core._grid import (
     _as_finite_scalar_label, _nearest_index_on_axis,
 )
@@ -479,7 +480,8 @@ class BoundaryProperties(_DeepCopyMixin):
 
     @classmethod
     def from_grain_size(
-        cls, grain_size_phi: float, *, model: str = 'hamilton',
+        cls, grain_size_phi: float, *, model: str = DEFAULT_GRAIN_SIZE_MODEL,
+        environment: Optional[str] = None,
         roughness: float = 0.0,
         water_sound_speed: Optional[float] = None,
         water_density: Optional[float] = None,
@@ -498,15 +500,28 @@ class BoundaryProperties(_DeepCopyMixin):
             Mean grain size on the Wentworth ϕ scale.
         model : {'hamilton', 'apl-uw'}, optional
             Conversion model (see :func:`grain_size_to_geoacoustics`).
+        environment : str, optional
+            Which of Hamilton & Bachman's three fits ``'hamilton'`` uses —
+            ``'continental-terrace'`` (the default when ``None``),
+            ``'abyssal-hill'`` or ``'abyssal-plain'``. A deep-ocean seabed
+            wants one of the abyssal fits; nothing infers it, because the
+            paper states no rule for choosing and only the caller knows the
+            site.
         roughness : float, optional
             RMS interface roughness (m).
         water_sound_speed, water_density : float, optional
             In-situ seawater properties the ratios scale by (default: the
             Hamilton reference 1510 m/s, 1.030 g/cm³).
         """
-        from uacpy.core.sediment import grain_size_to_geoacoustics
+        from uacpy.core.sediment import (DEFAULT_GRAIN_SIZE_ENVIRONMENT,
+                                         check_grain_size_selection,
+                                         grain_size_to_geoacoustics)
+        if environment is None:
+            environment = DEFAULT_GRAIN_SIZE_ENVIRONMENT
+        check_grain_size_selection(model, environment,
+                                   caller='BoundaryProperties.from_grain_size')
         g = grain_size_to_geoacoustics(
-            grain_size_phi, model=model,
+            grain_size_phi, model=model, environment=environment,
             water_sound_speed=water_sound_speed, water_density=water_density)
         return cls(
             acoustic_type='half-space',
@@ -1308,7 +1323,7 @@ class Bottom(_DeepCopyMixin):
                    ranges=None)
 
     @classmethod
-    def from_grain_size(cls, grain_size_phi: float, *, model: str = 'hamilton',
+    def from_grain_size(cls, grain_size_phi: float, *, model: str = DEFAULT_GRAIN_SIZE_MODEL,
                         roughness: float = 0.0,
                         water_sound_speed: Optional[float] = None,
                         water_density: Optional[float] = None) -> 'Bottom':

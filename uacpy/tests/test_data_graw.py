@@ -7,6 +7,8 @@ density → grain-size inversion and a ``bottom_sources='graw'``
 is unavailable; one ``requires_network`` test hits the live Zenodo grid.
 """
 
+import warnings
+
 import numpy as np
 import pytest
 
@@ -91,13 +93,14 @@ def test_missing_cache_names_install_flag(tmp_path, monkeypatch):
 # ── density → bottom ────────────────────────────────────────────────────────
 
 def test_bottom_uses_measured_density(graw_cache):
-    # 1.962 g/cm³ is exactly Hamilton's fine sand row (ϕ = 2.61, ratio 1.152):
-    # the bottom carries the *measured* density and the ϕ-derived speed.
+    # The bottom carries the *measured* density and a ϕ-derived speed. 1.962
+    # g/cm³ inverts the Hamilton & Bachman (T) density regression to 2.74 ϕ,
+    # which is fine sand — the class whose measured mean density it is.
     bp = graw_local.fetch_bottom_graw((30.5, -40.5))
     assert bp.acoustic_type == 'half-space'
     assert bp.density == pytest.approx(1.962, abs=1e-3)
-    assert bp.grain_size_phi == pytest.approx(2.61, abs=0.05)
-    assert bp.sound_speed == pytest.approx(1.152 * 1510.0, rel=0.01)
+    assert bp.grain_size_phi == pytest.approx(2.74, abs=0.05)
+    assert bp.sound_speed == pytest.approx(1.1434 * 1510.0, rel=0.01)
     assert bp.attenuation > 0.0
 
 
@@ -109,16 +112,68 @@ def test_bottom_scales_to_water_sound_speed(graw_cache):
     assert warm.density == ref.density                 # measured, not scaled
 
 
-def test_density_clamped_to_table(tmp_path, monkeypatch):
-    # Densities outside the Hamilton table clamp to its end members instead of
-    # extrapolating to unphysical grain sizes.
+def test_density_outside_the_relation_is_held_at_its_end(tmp_path, monkeypatch):
+    # A density denser than the relation describes is held at its -1 ϕ end
+    # rather than extrapolated to an unphysical grain size, and the measured
+    # value still travels on the boundary either way.
     root = tmp_path / 'clamp_cache'
     monkeypatch.setenv('UACPY_DATA_CACHE', str(root))
     _cache.invalidate_grids()
-    _write_graw(root, value=2.4)                       # denser than coarse sand
-    bp = graw_local.fetch_bottom_graw((30.5, -40.5))
-    assert bp.grain_size_phi == pytest.approx(0.92)    # coarse-sand end member
-    assert bp.density == pytest.approx(2.4, abs=1e-3)
+    _write_graw(root, value=2.9)                       # denser than -1 ϕ
+    with pytest.warns(UserWarning, match='rather than one that reproduces'):
+        bp = graw_local.fetch_bottom_graw((30.5, -40.5))
+    assert bp.grain_size_phi == pytest.approx(-1.0)
+    assert bp.density == pytest.approx(2.9, abs=1e-3)
+
+
+@pytest.mark.parametrize('rho, expected_phi', [(1.35, 9.0),    # abyssal mud
+                                               (1.20, 9.0)])   # finer still
+def test_a_density_the_relation_cannot_represent_is_announced(
+        tmp_path, monkeypatch, rho, expected_phi):
+    """The case that is *not* an edge: the continental-terrace density
+    quadratic bottoms out at 1.417 g/cm³, and 45.5 % of the Graw grid's ocean
+    cells are below it. Returning its fine end silently would be the flat hold
+    again, over half the ocean, so the conversion says so — and the measured
+    density still travels on the boundary."""
+    root = tmp_path / 'abyssal_cache'
+    monkeypatch.setenv('UACPY_DATA_CACHE', str(root))
+    _cache.invalidate_grids()
+    _write_graw(root, value=rho)
+    with pytest.warns(UserWarning, match='rather than one that reproduces'):
+        bp = graw_local.fetch_bottom_graw((30.5, -40.5))
+    assert bp.grain_size_phi == pytest.approx(expected_phi)
+    assert bp.density == pytest.approx(rho, abs=1e-3)
+
+
+def test_a_density_the_relation_does_represent_is_silent(tmp_path, monkeypatch):
+    """The other side: inside the range it covers, nothing is substituted and
+    nothing is said."""
+    root = tmp_path / 'inside_cache'
+    monkeypatch.setenv('UACPY_DATA_CACHE', str(root))
+    _cache.invalidate_grids()
+    _write_graw(root, value=1.80)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        bp = graw_local.fetch_bottom_graw((30.5, -40.5))
+    assert not [w for w in caught
+                if 'reproduces' in str(w.message)]
+    assert 4.0 < bp.grain_size_phi < 4.2
+
+
+def test_the_grain_size_it_derives_round_trips_through_the_conversion(
+        tmp_path, monkeypatch):
+    """The rule, not two remembered numbers: the inverse and the forward
+    conversion are the same relation, so a density the relation covers must
+    come back as itself through ϕ. Pinned across a ladder spanning sand to
+    clay, and at both ends of the range it is evaluated over."""
+    from uacpy.core.sediment import (grain_size_to_geoacoustics,
+                                     GRAIN_SIZE_SOURCE_RANGES)
+    lo, hi = GRAIN_SIZE_SOURCE_RANGES['hamilton']['density']
+    for phi in np.linspace(lo, hi, 21):
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            rho = grain_size_to_geoacoustics(float(phi))['density']
+        assert graw_local._phi_from_density(rho) == pytest.approx(phi, abs=1e-9)
 
 
 def test_bottom_transect(graw_cache):

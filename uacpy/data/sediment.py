@@ -30,7 +30,8 @@ from uacpy.core.environment import BoundaryProperties, Bottom
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core.materials import MATERIALS, list_materials
-from uacpy.core.sediment import GRAIN_SIZE_MODELS, grain_size_to_geoacoustics
+from uacpy.core.sediment import (DEFAULT_GRAIN_SIZE_MODEL,
+                                 GRAIN_SIZE_MODELS, grain_size_to_geoacoustics)
 from uacpy.data._geo import (
     geodesic_waypoints, run_boundary_indices, DEFAULT_MAX_TRANSECT_POINTS,
     checked_max_points, checked_n_points, capped_n_points,
@@ -58,7 +59,8 @@ def water_sound_speed_at(water_sound_speed, lat: float, lon: float):
 
 
 def bottom_from_grain_size(
-    grain_size_phi: float, *, roughness: float = 0.0, model: str = 'hamilton',
+    grain_size_phi: float, *, roughness: float = 0.0, model: str = DEFAULT_GRAIN_SIZE_MODEL,
+    environment: Optional[str] = None,
     water_sound_speed: Optional[float] = None,
     water_density: Optional[float] = None,
 ) -> BoundaryProperties:
@@ -75,11 +77,15 @@ def bottom_from_grain_size(
         Mean grain size on the Wentworth ϕ scale.
     roughness : float, optional
         RMS interface roughness (m). Default 0.
-    model, water_sound_speed, water_density
-        Forwarded to :func:`grain_size_to_geoacoustics`.
+    model, environment, water_sound_speed, water_density
+        Forwarded to :func:`grain_size_to_geoacoustics`. ``environment``
+        picks which of Hamilton & Bachman's three fits ``'hamilton'`` uses;
+        ``None`` takes the continental-terrace default, and nothing infers an
+        abyssal site for the caller.
     """
     return BoundaryProperties.from_grain_size(
-        grain_size_phi, model=model, roughness=roughness,
+        grain_size_phi, model=model, environment=environment,
+        roughness=roughness,
         water_sound_speed=water_sound_speed, water_density=water_density)
 
 

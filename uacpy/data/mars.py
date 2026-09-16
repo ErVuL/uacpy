@@ -28,7 +28,8 @@ from typing import Dict, Optional, Union
 
 from uacpy.core.environment import BoundaryProperties, Bottom
 from uacpy.core.exceptions import DataFetchError
-from uacpy.core.sediment import GRAIN_SIZE_MODEL_RANGES
+from uacpy.core.sediment import (DEFAULT_GRAIN_SIZE_MODEL,
+                                 GRAIN_SIZE_MODEL_RANGES)
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.data._geo import (
     Coordinate, as_coordinate, great_circle_km, normalize_lon,
@@ -59,16 +60,56 @@ _MAX_FEATURES = 2000
 #: bottom chain and its search is a three-rung radius ladder.
 _COVERAGE_BOX = (-90.0, 0.0, 40.0, 180.0)
 
-# Representative ϕ per end-member fraction, which the percentage route weights.
-# ``_SAND_PHI`` and ``_MUD_PHI`` are what the DECK41 lithology map gives those
-# same two words (``sediment_db._DECK41_LITHOLOGY_TO_PHI``). ``_GRAVEL_PHI`` has
-# no counterpart there: that map carries no ϕ for gravel at all and routes the
-# term to the ``'gravel'`` material preset, because both grain-size models stop
-# at -1 ϕ. Here a number is unavoidable — a mixture mean needs one per end
-# member — and -2.0 ϕ is 4 mm, inside the 2-256 mm the Medwin & Clay definition
-# below gives gravel. A mixture that lands outside the model's range is
-# announced by ``_warn_outside_the_fit`` rather than converted in silence.
-_GRAVEL_PHI, _SAND_PHI, _MUD_PHI = -2.0, 1.5, 7.5
+# Folk's three aggregates as ϕ intervals — the grades each is built out of,
+# from the ladder in USGS Scientific Investigations Report 2019-5073, figure 2
+# (grade name, grain-diameter range, ϕ, and the aggregate each grade belongs
+# to), whose caption records that "the composite gravel grades and the gravel,
+# sand, silt, and clay sediment aggregates are from Wentworth (1922); and the
+# mud sediment aggregate is from Folk (1954)". Its ϕ column is the authority
+# and its millimetre column the rounded decimal of the same fractions, so the
+# bounds are taken in ϕ: sand runs from very coarse (2 mm, -1 ϕ) to very fine
+# (1/16 mm, 4 ϕ), and mud from coarse silt (4 ϕ) to fine clay (0.0005 mm,
+# 11 ϕ).
+#
+# Gravel's coarse end is a **choice**, because the ladder does not stop: its
+# gravel aggregate runs to very coarse boulder gravel at 4096 mm (-12 ϕ). This
+# takes Medwin & Clay's definition instead, quoted below and in the corpus —
+# "gravel … ranges in size from 2 to 256 mm" — so -8 ϕ. The ladder's own -12
+# was rejected on what it produces rather than on taste: it puts the end member
+# at -6.5 ϕ, and then 'mG', a class that is half mud, converts to -0.30 ϕ,
+# coarser than pure sand. That is a statement about arithmetic, not about a
+# seabed.
+_AGGREGATE_PHI_LIMITS = {
+    'gravel': (-8.0, -1.0),     # 256 mm to 2 mm
+    'sand': (-1.0, 4.0),        # 2 mm to 1/16 mm
+    'mud': (4.0, 11.0),         # 1/16 mm to 0.0005 mm
+}
+
+
+def _grade_midpoint_phi(aggregate: str) -> float:
+    """The representative ϕ of one aggregate: the midpoint of its grade range.
+
+    The midpoint is taken in **ϕ**, which is logarithmic, so it is the
+    geometric mean of the diameters — gravel's 2 and 256 mm give 22.6 mm,
+    where an arithmetic midpoint in millimetres would give 129 mm (-7 ϕ). The
+    evidence for the convention is that it is the one under which ``sand`` and
+    ``mud`` come out at 1.5 and 7.5 ϕ, the values this module and the DECK41
+    lithology map (``sediment_db._DECK41_LITHOLOGY_TO_PHI``) have always used
+    for those two words: two of the three reproduce exactly, which is what
+    identifies the third as the outlier rather than merely the odd one.
+    """
+    lo, hi = _AGGREGATE_PHI_LIMITS[aggregate]
+    return 0.5 * (lo + hi)
+
+
+#: Representative ϕ per end-member fraction, which the percentage route weights
+#: and every Folk class centroid is built from. A mixture that lands outside a
+#: grain-size model's range is announced by ``_warn_outside_the_fit`` rather
+#: than converted in silence — which is what makes a gravel end member the fits
+#: do not cover an honest weight rather than a hidden substitution.
+_GRAVEL_PHI = _grade_midpoint_phi('gravel')     # -4.5 ϕ, 22.6 mm
+_SAND_PHI = _grade_midpoint_phi('sand')         # 1.5 ϕ, 0.354 mm
+_MUD_PHI = _grade_midpoint_phi('mud')           # 7.5 ϕ, 5.5 µm
 
 
 def _phi_of_mixture(gravel: float, sand: float, mud: float) -> float:
@@ -146,11 +187,20 @@ def _folk_class_centroid(g_lo, g_hi, x_lo, x_hi):
 # the boundaries above.
 #
 # These are MIXTURE MEANS, not class ranges, and the distinction matters if
-# anyone is tempted to "correct" them: 'mG' is half gravel and a third mud, so
-# its mean sits in the sands at 1.97 ϕ even though its dominant end member is
-# gravel and gravel proper begins at ϕ = -1. The ordering by ϕ is therefore
-# *not* the ordering by gravel content — 'mG' is finer than 'S' — which is a
-# property of a linear mean in ϕ, not a fault in the table.
+# anyone is tempted to "correct" them: 'mG' is half gravel and around a third
+# mud, so its mean sits in the sands at 0.71 ϕ even though its dominant end
+# member is gravel and gravel proper begins at ϕ = -1. The ordering by ϕ is
+# therefore *not* the ordering by gravel content — 'gM' carries 5 to 30 %
+# gravel and still lands at 4.23 ϕ, finer than gravel-free 'mS' at 3.30 —
+# which is a property of a linear mean in ϕ, not a fault in the table.
+#
+# Ainslie, *Principles of Sonar Performance Modelling* Table 4.16, reads the
+# relation the other way: given a mean grain size it names the "typical mixed
+# sample" of that size, and for five of these classes the two agree — a -3.3 ϕ
+# sample is his Gravel, +0.74 his Gravelly sand, +3.3 his Muddy sand, +7.2 his
+# Mud. Where they part it is by one class, and his own footnote says why:
+# "Mean grain size is not enough on its own to determine either the Folk or
+# Shepard class unambiguously". A class has a ϕ; a ϕ does not have a class.
 #
 # The ϕ scale is Krumbein's, ϕ = -log2(d / 1 mm) — the same conversion
 # :func:`_phi_from_properties` applies to MEAN_GRAIN_SIZE just below. Medwin &
@@ -214,10 +264,15 @@ def _warn_outside_the_fit(sample: Dict, model: str) -> None:
     gravel-dominant Folk class, a gravel-weighted percentage mixture, or a
     measured ``MEAN_GRAIN_SIZE`` above 2 mm — and
     :func:`~uacpy.core.sediment.grain_size_to_geoacoustics` answers those with
-    its fit at the nearer end of the range. Under ``'hamilton'`` that
-    substitution is invisible downstream (the fit holds its end rows flat, so
-    the clamp moves nothing to compare against), which is why it is reported
-    here, where the sample and the route that produced ϕ are both known.
+    its fit at the nearer end of the range. That conversion reports which of
+    its quantities came from an endpoint; what it cannot say, because it is
+    handed a bare ϕ, is **which sample** the ϕ came from and by which of the
+    three routes. That is what this adds, at the layer that knows it.
+
+    Reported rather than replaced by a preset, because every route here starts
+    from a measurement:
+    :func:`uacpy.core.sediment.grain_size_to_geoacoustics` states that rule and
+    how the three places that face it differ.
     """
     bounds = GRAIN_SIZE_MODEL_RANGES.get(model)
     if bounds is None:
@@ -368,7 +423,8 @@ def fetch_bottom_mars(
     *,
     roughness: float = 0.0,
     water_sound_speed: Optional[float] = None,
-    model: str = 'hamilton',
+    model: str = DEFAULT_GRAIN_SIZE_MODEL,
+    environment: Optional[str] = None,
     max_distance_km: float = DEFAULT_MAX_DISTANCE_KM,
     layer: str = MARS_LAYER,
     base_url: str = MARS_WFS_URL,
@@ -393,6 +449,7 @@ def fetch_bottom_mars(
     _warn_outside_the_fit(sample, model)
     bottom = bottom_from_grain_size(
         sample['phi'], roughness=roughness, model=model,
+        environment=environment,
         water_sound_speed=water_sound_speed)
     # Point samples are sparse, so the nearest one can be up to
     # max_distance_km from the requested position; record where it actually
@@ -412,7 +469,8 @@ def fetch_bottom_mars_transect(
     max_points=None,
     roughness: float = 0.0,
     water_sound_speed: Optional[float] = None,
-    model: str = 'hamilton',
+    model: str = DEFAULT_GRAIN_SIZE_MODEL,
+    environment: Optional[str] = None,
     max_distance_km: float = DEFAULT_MAX_DISTANCE_KM,
     layer: str = MARS_LAYER,
     base_url: str = MARS_WFS_URL,
@@ -428,7 +486,7 @@ def fetch_bottom_mars_transect(
         lambda la, lo: fetch_bottom_mars(
             (la, lo), roughness=roughness,
             water_sound_speed=water_sound_speed_at(water_sound_speed, la, lo),
-            model=model,
+            model=model, environment=environment,
             max_distance_km=max_distance_km, layer=layer, base_url=base_url,
             timeout=timeout, verbose=verbose),
         start, end, n_points, source_label='AusSeabed MARS',

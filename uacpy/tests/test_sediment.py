@@ -5,38 +5,76 @@ the lookups and transect assembly built on it; the former is re-exported
 through the latter, so both halves are one subject and live here together.
 
 The conversion uses the Hamilton & Bachman (1982) continental-terrace relations
-(density / sound-speed ratios, water-referenced) plus the Hamilton (1980) k_p
-attenuation law, summarized in the open-access ESAB supplement.
+(density / sound-speed ratios, water-referenced) plus the Hamilton (1972) k_p
+attenuation law of Geophysics 37, Fig. 3.
 
-The model has a validity range in phi, and the clamp at its edge is the subject
-of the last class: a value outside the range is substituted, and the warning has
-to fire on the substitution rather than on merely reaching the boundary, or the
-caller cannot tell a clamped answer from an evaluated one.
+Each returned quantity has a validity range in phi, and it is its *source's*
+range rather than the model's: the subject of the last class. 'hamilton' is two
+sources, so one call can interpolate the attenuation while holding the velocity
+and density at a table end row, and the report has to name which — otherwise the
+caller cannot tell a substituted answer from an evaluated one.
 """
 
+import importlib
+import inspect
+import pkgutil
 import warnings
 
 import numpy as np
 import pytest
 
+import uacpy
+
 from uacpy.core.environment import BoundaryProperties
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.core.materials import MATERIALS
 from uacpy.core.sediment import (
-    GRAIN_SIZE_MODEL_RANGES, grain_size_to_geoacoustics,
+    DEFAULT_GRAIN_SIZE_MODEL, GRAIN_SIZE_MODEL_RANGES, GRAIN_SIZE_MODELS,
+    GRAIN_SIZE_SOURCE_RANGES, _MODEL_WATER_REFERENCE, _apl_density_ratio,
+    _apl_velocity_ratio, _hamilton_kp, grain_size_to_geoacoustics,
 )
 from uacpy.data import sediment
+from uacpy.sonar.bottom_scattering import (_grain_size_alpha_over_f,
+                                           _grain_size_density_ratio,
+                                           _grain_size_speed_ratio)
 
 
-def test_hamilton_table_endpoints():
-    # Coarse sand and silty clay reproduce the Hamilton & Bachman (1982) table
-    # at the reference seawater (c_w=1510 m/s, rho_w=1.030 g/cm3).
-    coarse = sediment.grain_size_to_geoacoustics(0.92)
-    assert coarse['sound_speed'] == pytest.approx(1813.5, abs=1.0)
-    assert coarse['density'] == pytest.approx(2.034, abs=1e-3)
-    fine = sediment.grain_size_to_geoacoustics(8.80)
-    assert fine['sound_speed'] == pytest.approx(1494.9, abs=1.0)
-    assert fine['density'] == pytest.approx(1.480, abs=1e-3)
+def test_the_regression_reproduces_the_class_means_it_was_fitted_to():
+    """Hamilton & Bachman published a table of class means and, in their
+    Appendix, regressions fitted to the same continental-terrace dataset. uacpy
+    evaluates the regressions, because the paper says to when a mean grain size
+    is what you hold (p. 1892); the table is kept as data, and it is also the
+    check on the fit. Inside the equations' declared 1-9 ϕ the two describe one
+    dataset, well within the published σ of 29 m/s and 0.11 g/cm³ — and the one
+    row that misses badly is the one row below 1 ϕ, which is Hamilton's own
+    limit showing rather than a defect."""
+    from uacpy.core.sediment import _HB_TABLE
+    dc, drho, coarse_sand = [], [], None
+    for phi, rho_row, ratio_row in _HB_TABLE:
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            got = sediment.grain_size_to_geoacoustics(phi)
+        gap = (got['sound_speed'] - ratio_row * 1510.0, got['density'] - rho_row)
+        if phi >= 1.0:
+            dc.append(gap[0])
+            drho.append(gap[1])
+        else:
+            coarse_sand = gap
+    assert np.sqrt(np.mean(np.square(dc))) < 29.0       # published sigma
+    assert max(abs(x) for x in dc) < 29.0
+    assert max(abs(x) for x in drho) < 0.11             # published sigma
+    assert abs(coarse_sand[0]) > 3 * np.sqrt(np.mean(np.square(dc)))
+
+
+def test_the_class_mean_table_is_kept_as_data():
+    """Not deleted with the interpolation it used to feed: these are the class
+    means the regressions were fitted to, carrying the clayey-silt *median*
+    that Table II's footnote recommends for that one class, and the rows
+    ``uacpy.data.graw_local`` inverts for ρ → ϕ."""
+    from uacpy.core.sediment import _HB_TABLE
+    assert _HB_TABLE[0] == (0.92, 2.034, 1.201)         # coarse sand
+    assert _HB_TABLE[-2] == (7.13, 1.484, 1.006)        # clayey silt, median
+    assert _HB_TABLE[-1] == (8.80, 1.480, 0.990)        # silty clay
 
 
 def test_velocity_ratio_dips_below_water_for_mud():
@@ -67,14 +105,17 @@ def test_water_referencing_scales_speed():
     assert warm['sound_speed'] > cold['sound_speed']
 
 
-def test_out_of_range_phi_is_clamped_to_the_table_end():
-    # Hamilton is an np.interp lookup, so ϕ past the table returns the end row
-    # whether it is clamped first or not — silently, because the clamp has
-    # nothing to announce.
-    with warnings.catch_warnings():
-        warnings.simplefilter('error')
+def test_a_phi_past_the_regressions_domain_is_held_at_it_and_says_so():
+    # Past 9 ϕ the (T) quadratics are not evaluated — Hamilton declares them to
+    # 9 ϕ and there is no environment-free answer beyond it — so ϕ is held at
+    # the edge, and the call names the quantities that came from there.
+    with pytest.warns(UserWarning, match='sound_speed and density'):
         g = sediment.grain_size_to_geoacoustics(12.0)
-    assert g['sound_speed'] == pytest.approx(1494.9, abs=1.0)   # → silty clay
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        edge = sediment.grain_size_to_geoacoustics(9.0)
+    assert g['sound_speed'] == pytest.approx(edge['sound_speed'])
+    assert g['density'] == pytest.approx(edge['density'])
 
 
 def test_out_of_range_phi_warns_when_the_clamp_moves_the_answer():
@@ -595,11 +636,12 @@ class TestALithologySampleCitesDeck41:
         assert bottom.data_sources[0].source.id == expected
 
 
-class TestGrainSizeClampWarnsOnSubstitutionNotOnCrossing:
-    """The clamp to the model's ϕ range is unconditional; the warning used to
-    be gated on a ±1 ϕ deadband. That gate was wrong in both directions —
-    silent for ``apl-uw`` where the clamp moved the answer by up to 47 m/s,
-    and reserved for ``hamilton`` where it can never move anything."""
+class TestEachQuantityIsReportedAgainstItsOwnSource:
+    """A validity range belongs to the source a quantity comes from, not to
+    the model. ``'hamilton'`` is two sources: ``sound_speed`` and ``density``
+    interpolate ``_HB_TABLE``'s nine rows (0.92-8.8 ϕ), ``attenuation`` is the
+    ``k_p`` regression (0-9.5 ϕ). So the answer to "was anything substituted?"
+    differs *between quantities of one call*, and the report names which."""
 
     @pytest.mark.parametrize('phi,unclamped_cp', [(9.5, 1468.1883),
                                                   (-1.5, 2052.8599)])
@@ -632,20 +674,233 @@ class TestGrainSizeClampWarnsOnSubstitutionNotOnCrossing:
         with pytest.warns(UserWarning, match='clamped'):
             grain_size_to_geoacoustics(phi, model='apl-uw')
 
-    @pytest.mark.parametrize('phi', [8.8001, 9.3, 9.799, 9.801, 0.42, -0.081,
+    @pytest.mark.parametrize('phi', [9.0001, 9.3, 9.799, 9.801, -1.0001,
                                      20.0, -20.0])
-    def test_hamilton_never_warns_because_its_clamp_is_a_no_op(self, phi):
-        """``_hamilton_geoacoustics`` is an ``np.interp`` lookup, which already
-        holds the end rows flat past the table. Clamping ϕ first changes
-        nothing, so a warning there would be reporting a substitution that did
-        not happen."""
-        lo, hi = GRAIN_SIZE_MODEL_RANGES['hamilton']
+    def test_hamilton_holds_its_regressions_at_their_edge_and_says_which(
+            self, phi):
+        """Past -1 or 9 ϕ the (T) quadratics are held at the edge rather than
+        run on, so the value returned is indistinguishable from one the source
+        covers — which is why the call names the quantities that came from
+        there. ϕ inside the union (9.0 to 9.5) still moves the attenuation,
+        which is the case no single verdict describes."""
+        lo, hi = GRAIN_SIZE_SOURCE_RANGES['hamilton']['sound_speed']
+        with pytest.warns(UserWarning, match='sound_speed and density'):
+            out = grain_size_to_geoacoustics(phi, model='hamilton')
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            edge = grain_size_to_geoacoustics(
+                float(np.clip(phi, lo, hi)), model='hamilton')
+        assert out['sound_speed'] == pytest.approx(edge['sound_speed'])
+        assert out['density'] == pytest.approx(edge['density'])
+
+    @pytest.mark.parametrize('model, quantity', [
+        ('hamilton', 'sound_speed'), ('hamilton', 'density'),
+        ('hamilton', 'attenuation'), ('apl-uw', 'sound_speed'),
+        ('apl-uw', 'density'), ('apl-uw', 'attenuation'),
+    ])
+    def test_a_phi_past_a_quantitys_own_source_is_announced_for_it(
+            self, model, quantity):
+        """The rule, read off ``GRAIN_SIZE_SOURCE_RANGES`` rather than written
+        out: on either side of **each source's own** edge, the quantities it
+        supplies are named the moment ϕ leaves it, and not before. Correcting a
+        published domain moves the edge and this test with it."""
+        lo, hi = GRAIN_SIZE_SOURCE_RANGES[model][quantity]
+        for outside, inside in ((lo - 1e-9, lo), (hi + 1e-9, hi)):
+            with pytest.warns(UserWarning, match=quantity):
+                grain_size_to_geoacoustics(outside, model=model)
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter('always')
+                grain_size_to_geoacoustics(inside, model=model)
+            assert not [w for w in caught if quantity in str(w.message)], (
+                f"{model} {quantity} announced at ϕ={inside}, inside its own "
+                f"source range {(lo, hi)}")
+
+    def test_the_model_range_is_the_union_of_its_sources(self):
+        """``GRAIN_SIZE_MODEL_RANGES`` is what the clamp uses and is derived
+        from the per-quantity ranges, so the two cannot drift apart."""
+        for model, quantities in GRAIN_SIZE_SOURCE_RANGES.items():
+            assert GRAIN_SIZE_MODEL_RANGES[model] == (
+                min(lo for lo, _ in quantities.values()),
+                max(hi for _, hi in quantities.values()))
+        # 'apl-uw' is one equation set (TR 9407 Eqs. 2-10), so its three
+        # quantities share one domain and nothing here can differ between them.
+        assert len(set(GRAIN_SIZE_SOURCE_RANGES['apl-uw'].values())) == 1
+
+    def test_each_environment_is_evaluated_over_its_own_published_range(self):
+        """Hamilton fits three environments and declares a different domain for
+        each — (T) 1 to 9 ϕ, (H) and (P) 7 to 10 — so the report has to follow
+        the environment, not just the model. The abyssal fits are straight
+        lines over deep-water fine sediment and describe no sand, so a coarser
+        ϕ is held at 7 and announced rather than extrapolated."""
+        from uacpy.core.sediment import GRAIN_SIZE_ENVIRONMENTS
+        assert (GRAIN_SIZE_ENVIRONMENTS['continental-terrace']['published_range']
+                == (1.0, 9.0))
+        for abyssal in ('abyssal-hill', 'abyssal-plain'):
+            fit = GRAIN_SIZE_ENVIRONMENTS[abyssal]
+            assert fit['published_range'] == (7.0, 10.0)
+            # nothing extends the abyssal families the way TR 9407 extends (T)
+            assert fit['evaluated_range'] == fit['published_range']
+            with pytest.warns(UserWarning, match='7 to 10 ϕ'):
+                sand = grain_size_to_geoacoustics(2.0, environment=abyssal)
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                edge = grain_size_to_geoacoustics(7.0, environment=abyssal)
+            assert sand['sound_speed'] == pytest.approx(edge['sound_speed'])
+            with warnings.catch_warnings():
+                warnings.simplefilter('error')
+                grain_size_to_geoacoustics(9.5, environment=abyssal)
+
+    def test_the_abyssal_fits_land_nearer_the_measured_abyssal_rows(self):
+        """What the selector is for. Hamilton & Bachman's Table IV measures
+        abyssal clay directly; the continental-terrace fit a deep-ocean caller
+        gets by default sits well above it, and each abyssal fit is nearer its
+        own measured rows. Densities are comparable directly (both are
+        saturated bulk density at the reference water); the velocities are not,
+        the paper's being in-situ-corrected absolutes."""
+        measured = [('abyssal-plain', 9.53, 1.352),
+                    ('abyssal-hill', 9.43, 1.414),
+                    ('abyssal-hill', 8.76, 1.344)]
+        for environment, phi, rho in measured:
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                terrace = grain_size_to_geoacoustics(phi)['density']
+                own = grain_size_to_geoacoustics(
+                    phi, environment=environment)['density']
+            assert abs(own - rho) < abs(terrace - rho), environment
+            assert abs(own - rho) < 0.05
+
+    def test_a_density_outside_a_fits_range_is_announced_not_absorbed(self):
+        """The inverse has the same duty as the forward direction. Its
+        no-solution branch is the one that matters: below the terrace
+        quadratic's minimum there is no root at all, which is 45.5 % of the
+        Graw grid's ocean cells, so returning the fine end quietly would be the
+        flat hold again in a new place. Both ends, and the other side."""
+        from uacpy.core.sediment import (grain_size_from_density,
+                                         GRAIN_SIZE_ENVIRONMENTS)
+        fit = GRAIN_SIZE_ENVIRONMENTS['continental-terrace']
+        lo, hi = fit['evaluated_range']
+        for phi in (lo, 0.0, 4.0, hi):
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter('always')
+                rho = grain_size_to_geoacoustics(float(phi))['density']
+                assert grain_size_from_density(rho) == pytest.approx(phi)
+            # Silent *about the density*; at -1 ϕ the forward call still
+            # reports its attenuation, which is a different statement.
+            assert not [w for w in caught if 'reproduces' in str(w.message)]
+        for rho, end in ((1.35, hi), (1.20, hi), (2.9, lo)):
+            with pytest.warns(UserWarning, match='reproduces'):
+                assert grain_size_from_density(rho) == pytest.approx(end)
+
+    def test_the_inverse_names_an_environment_that_covers_the_density(self):
+        """1.35 g/cm³ is ordinary abyssal mud — Table IV measures 1.352 for
+        abyssal-plain clay — and the terrace relation cannot represent it at
+        all. Naming the fit that can is what makes the warning actionable,
+        and that fit inverts the same density without one."""
+        from uacpy.core.sediment import grain_size_from_density
+        with pytest.warns(UserWarning, match='abyssal-plain covers this'):
+            grain_size_from_density(1.35)
         with warnings.catch_warnings():
             warnings.simplefilter('error')
-            out = grain_size_to_geoacoustics(phi, model='hamilton')
-        edge = grain_size_to_geoacoustics(
-            float(np.clip(phi, lo, hi)), model='hamilton')
-        assert out == edge
+            phi = grain_size_from_density(1.35, environment='abyssal-plain')
+        assert 7.0 <= phi <= 10.0
+
+    def test_an_unknown_environment_and_an_apl_uw_environment_are_refused(self):
+        """TR 9407 publishes one set of relations, not one per environment, so
+        asking it for an abyssal fit is asking for something that does not
+        exist — better refused than silently ignored."""
+        with pytest.raises(ConfigurationError, match='unknown environment'):
+            grain_size_to_geoacoustics(5.0, environment='abyss')
+        with pytest.raises(ConfigurationError, match='has no'):
+            grain_size_to_geoacoustics(8.0, model='apl-uw',
+                                       environment='abyssal-hill')
+        # The default is accepted by both, so nothing moves for a caller who
+        # never names one.
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            assert (grain_size_to_geoacoustics(4.0, model='apl-uw')
+                    == grain_size_to_geoacoustics(
+                        4.0, model='apl-uw',
+                        environment='continental-terrace'))
+
+    def test_the_velocity_and_density_interval_rests_on_two_documents(self):
+        """-1 to 9 ϕ is not one citation. **1 to 9** is Hamilton & Bachman's own
+        limit for the (T) regressions (p. 1902); **-1 to 1** is TR 9407, which
+        prints those same polynomials as its own coarse branch and declares -1
+        its floor. The structure has to keep both halves attributable, so the
+        two constants it is built from stay separate."""
+        from uacpy.core.sediment import (_HB_T_PHI_RANGE, _APL_UW_PHI_RANGE,
+                                         _HB_T_EVALUATED_RANGE)
+        assert _HB_T_PHI_RANGE == (1.0, 9.0)            # Hamilton & Bachman
+        assert _APL_UW_PHI_RANGE == (-1.0, 9.0)         # TR 9407
+        assert _HB_T_EVALUATED_RANGE == (_APL_UW_PHI_RANGE[0],
+                                         _HB_T_PHI_RANGE[1])
+        for quantity in ('sound_speed', 'density'):
+            assert (GRAIN_SIZE_SOURCE_RANGES['hamilton'][quantity]
+                    == _HB_T_EVALUATED_RANGE)
+
+    def test_the_attenuation_is_one_function_not_two_copies(self):
+        """TR 9407 reproduces Hamilton (1972), so uacpy evaluates it once. Two
+        copies used to differ by the tie at a branch join — ``<`` against
+        ``<=`` — returning different values from identical coefficients at
+        exactly 2.6, 4.5 and 6.0 ϕ. There is nothing left to differ: the two
+        models' k_p is the same object, and the join belongs to the branch
+        above it, as ``ReadEnvironmentBell.f90:509-518`` reads it."""
+        from uacpy.core.sediment import _hamilton_kp
+        water = dict(water_sound_speed=1500.0, water_density=1.0)
+        for phi in np.linspace(-1.0, 9.0, 1001):
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                h = grain_size_to_geoacoustics(float(phi), **water)
+                a = grain_size_to_geoacoustics(float(phi), model='apl-uw',
+                                               **water)
+            # k_p itself: the dB/λ differs through each model's own c.
+            assert (h['attenuation'] / h['sound_speed']
+                    == pytest.approx(a['attenuation'] / a['sound_speed'],
+                                     abs=1e-15)), phi
+        # The tie: at a join the value is continuous with the branch *above*
+        # and steps away from the branch below, which is AT's reading.
+        for join in (2.6, 4.5, 6.0):
+            assert _hamilton_kp(join) == pytest.approx(
+                _hamilton_kp(join + 1e-9), abs=1e-7)
+            assert abs(_hamilton_kp(join) - _hamilton_kp(join - 1e-9)) > 1e-4
+
+    def test_the_apl_uw_branches_are_the_terrace_fit_rescaled(self):
+        """TR 9407 p. IV-8: "The density and sound speed ratios agree with
+        those of Hamilton and Bachman for -1 <= M_z < 1". They are the same
+        polynomials over the published 1528.0 m/s and 1.026 g/cm³, and the
+        printed coefficients are *kept* rather than derived because AT
+        implements the printed digits and ``'apl-uw'`` exists to reproduce AT.
+        This ties the two so a correction to either cannot leave the other
+        stale — the residual is the rounding of TR 9407's own 4-to-6 digits."""
+        from uacpy.core.sediment import (_apl_density_ratio,
+                                         _apl_velocity_ratio, _HB_T_DENSITY,
+                                         _HB_T_REF_CW, _HB_T_REF_RHOW,
+                                         _HB_T_VELOCITY)
+        for mz in np.linspace(-1.0, 0.999, 200):
+            rescaled_nu = np.polyval(_HB_T_VELOCITY[::-1], mz) / _HB_T_REF_CW
+            rescaled_rho = np.polyval(_HB_T_DENSITY[::-1], mz) / _HB_T_REF_RHOW
+            assert _apl_velocity_ratio(mz) == pytest.approx(rescaled_nu,
+                                                            abs=2e-5), mz
+            assert _apl_density_ratio(mz) == pytest.approx(rescaled_rho,
+                                                           abs=7e-5), mz
+
+    @pytest.mark.parametrize('phi', [-1.0, -0.5, 0.0, 0.5, 0.999])
+    def test_the_two_models_agree_below_one_phi_because_they_are_one_fit(
+            self, phi):
+        """TR 9407 p. IV-8: "The density and sound speed ratios agree with
+        those of Hamilton and Bachman for -1 <= M_z < 1" — its coarse branch is
+        those polynomials over 1528 m/s and 1.026 g/cm³. Given the same water,
+        the two models must therefore return the same velocity and density
+        there. They agree to 0.03 m/s rather than exactly, which is the
+        rounding of TR 9407's own printed 4-to-6-digit coefficients."""
+        water = dict(water_sound_speed=1500.0, water_density=1.0)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            h = grain_size_to_geoacoustics(phi, model='hamilton', **water)
+            a = grain_size_to_geoacoustics(phi, model='apl-uw', **water)
+        assert h['sound_speed'] == pytest.approx(a['sound_speed'], abs=0.03)
+        assert h['density'] == pytest.approx(a['density'], abs=1e-4)
+        assert h['attenuation'] == pytest.approx(a['attenuation'], abs=2e-4)
 
     @pytest.mark.parametrize('phi, edge', [(float('inf'), 9.0),
                                            (float('-inf'), -1.0)])
@@ -669,16 +924,333 @@ class TestGrainSizeClampWarnsOnSubstitutionNotOnCrossing:
 
 def test_hamilton_honours_its_own_attenuation_range_to_nine_and_a_half_phi():
     """Hamilton (1972) recommends the ``k_p`` regressions over 0 to 9.5 ϕ,
-    while the Hamilton & Bachman velocity/density table ends at 8.8. The
-    model's ϕ range is the wider of the two: between 8.8 and 9.5 the table
-    holds its end row (``np.interp``) but ``k_p`` keeps following the
-    regression, which turns up from 0.053 at 8.8 to 0.060 at 9.5, and no
-    clamp is reported because none substituted anything."""
+    while Hamilton & Bachman declare their velocity/density fits to 9. The
+    model's ϕ range is the wider of the two: between 9 and 9.5 the quadratics
+    are held at 9 while ``k_p`` keeps following its own regression, which turns
+    up from 0.080 at 9 to 0.090 at 9.5. That is the case no single verdict can
+    describe, so the call reports it per quantity — velocity and density named,
+    attenuation not."""
     with warnings.catch_warnings():
         warnings.simplefilter('error')
-        edge = sediment.grain_size_to_geoacoustics(8.8, model='hamilton')
+        edge = sediment.grain_size_to_geoacoustics(9.0, model='hamilton')
+    with pytest.warns(UserWarning) as record:
         clay = sediment.grain_size_to_geoacoustics(9.5, model='hamilton')
+    message = str(record[0].message)
+    assert 'sound_speed and density' in message
+    assert 'attenuation' not in message
     assert clay['sound_speed'] == pytest.approx(edge['sound_speed'])
     assert clay['density'] == pytest.approx(edge['density'])
     assert clay['attenuation'] > edge['attenuation'] * 1.1
-    assert GRAIN_SIZE_MODEL_RANGES['hamilton'] == (0.0, 9.5)
+    assert GRAIN_SIZE_MODEL_RANGES['hamilton'] == (-1.0, 9.5)
+
+
+# --------------------------------------------------------------------------
+# The same relations, written down twice and published twice.
+#
+# Two modules evaluate the four relations above for their own reasons --
+# :mod:`uacpy.core.sediment` to build a seabed a propagation model can use,
+# :mod:`uacpy.sonar.bottom_scattering` to reproduce TR 9407's own scattering
+# tables -- and a second compilation, Ainslie's, prints both models' outputs
+# independently of either. The classes below hold those two subjects: that the
+# package's two copies of a relation have not drifted, and that what they
+# compute matches a source neither was written from.
+# --------------------------------------------------------------------------
+
+#: The interval both implementations evaluate: TR 9407's own -1 <= Mz <= 9
+#: (p. IV-8).
+_SHARED_RANGE = (-1.0, 9.0)
+#: The joins of Hamilton (1972) Fig. 3's four branches, where a tie-break
+#: decides the value and the two implementations could disagree while matching
+#: coefficient for coefficient everywhere else.
+_BRANCH_JOINS = (2.6, 4.5, 6.0)
+
+
+class TestCoreAndSonarEvaluateOneRelation:
+    """Neither implementation is a copy to be deleted, and they must not drift.
+
+    Each exists to reproduce a different published artefact -- the
+    Acoustics-Toolbox ``'G'`` bottom on one side, TR 9407's scattering tables
+    on the other -- and coupling them would put a propagation-side edit in the
+    path of a scattering-side fidelity test. A failure here is not a bug in
+    whichever module was edited last: it means the two have parted, and that
+    has to become a decision. It should never be made to pass by loosening a
+    tolerance.
+    """
+
+    @pytest.mark.parametrize('relation, core_fn, sonar_fn', [
+        ('attenuation', _hamilton_kp, _grain_size_alpha_over_f),
+        ('speed ratio', _apl_velocity_ratio, _grain_size_speed_ratio),
+        ('density ratio', _apl_density_ratio, _grain_size_density_ratio),
+    ])
+    def test_one_relation_however_many_modules_write_it_down(
+            self, relation, core_fn, sonar_fn):
+        grid = np.linspace(*_SHARED_RANGE, 4001)
+        worst, where = 0.0, None
+        for mz in grid:
+            gap = abs(core_fn(float(mz)) - sonar_fn(float(mz)))
+            if gap > worst:
+                worst, where = gap, float(mz)
+        assert worst < 1e-12, (
+            f"{relation}: uacpy.core.sediment and uacpy.sonar."
+            f"bottom_scattering differ by {worst:.3e} at Mz={where}. They "
+            f"implement the same published regression; if they must now "
+            f"differ, say which artefact each reproduces and record the split "
+            f"here rather than widening this bound.")
+
+    def test_the_branch_joins_are_tied_the_same_way_on_both_sides(self):
+        """The place they came closest to parting, and did.
+
+        Hamilton's Fig. 3 caption gives the branch ranges as "0 to 2.6 phi",
+        "2.6 to 4.5 phi" and so on, sharing each endpoint between two branches
+        and settling nothing, so a tie-break is an implementation choice. The
+        two sides once made it differently -- ``<=`` in core against ``<`` in
+        sonar -- and returned different attenuations at exactly these three phi
+        from identical coefficients. Both now read the join as belonging to the
+        branch **above** it, which is how ``ReadEnvironmentBell.f90:509-518``
+        reads it (``ELSE IF( Mz >= 2.6 .AND. Mz < 4.5 )``) and therefore what
+        the Acoustics-Toolbox ``'G'`` bottom does.
+        """
+        for join in _BRANCH_JOINS:
+            assert _hamilton_kp(join) == pytest.approx(
+                _grain_size_alpha_over_f(join), abs=1e-12), join
+            # Continuous with the branch above, stepping away from the one
+            # below: the tie itself, not merely the agreement.
+            for evaluate in (_hamilton_kp, _grain_size_alpha_over_f):
+                assert evaluate(join) == pytest.approx(evaluate(join + 1e-9),
+                                                       abs=1e-7)
+                assert abs(evaluate(join) - evaluate(join - 1e-9)) > 1e-4
+
+
+#: Ainslie, *Principles of Sonar Performance Modelling* (2010) Table 4.17,
+#: p. 176 -- "Default HF geo-acoustic parameters (10-100 kHz)", the APL-UW set:
+#: M_z, c_HF/c_w, rho_HF/rho_w, alpha_HF (dB/lambda).
+_AINSLIE_HF_TABLE = [
+    (-1.0, 1.3370, 2.492, 0.91), (-0.5, 1.3067, 2.401, 0.89),
+    (0.0, 1.2778, 2.314, 0.87), (0.5, 1.2503, 2.231, 0.87),
+    (1.0, 1.2241, 2.151, 0.88), (1.5, 1.1782, 1.845, 0.86),
+    (2.0, 1.1396, 1.615, 0.86), (2.5, 1.1073, 1.451, 0.85),
+    (3.0, 1.0800, 1.339, 0.92), (3.5, 1.0568, 1.268, 1.00),
+    (4.0, 1.0364, 1.224, 1.07), (4.5, 1.0179, 1.195, 1.15),
+    (5.0, 0.9999, 1.169, 0.67), (5.5, 0.9885, 1.149, 0.36),
+    (6.0, 0.9873, 1.149, 0.20), (6.5, 0.9861, 1.148, 0.16),
+    (7.0, 0.9849, 1.147, 0.13), (7.5, 0.9837, 1.147, 0.10),
+    (8.0, 0.9824, 1.146, 0.09), (8.5, 0.9812, 1.145, 0.08),
+    (9.0, 0.9800, 1.145, 0.08),
+]
+#: His Table 4.18, p. 178 -- "Default MF geo-acoustic parameters (1-10 kHz)",
+#: the bulk set, which is Bachman (1985): a DIFFERENT fit to the same kind of
+#: data, published three years after the regressions ``'hamilton'`` evaluates.
+_AINSLIE_MF_TABLE = [
+    (-1.0, 1.3370, 2.492, 0.91), (-0.5, 1.3067, 2.401, 0.89),
+    (0.0, 1.2778, 2.314, 0.87), (0.5, 1.2503, 2.231, 0.87),
+    (1.0, 1.2226, 2.162, 0.87), (1.5, 1.1978, 2.086, 0.88),
+    (2.0, 1.1743, 2.014, 0.88), (2.5, 1.1522, 1.945, 0.89),
+    (3.0, 1.1314, 1.879, 0.96), (3.5, 1.1120, 1.817, 1.05),
+    (4.0, 1.0939, 1.758, 1.13), (4.5, 1.0772, 1.702, 1.22),
+    (5.0, 1.0619, 1.650, 0.71), (5.5, 1.0479, 1.601, 0.38),
+    (6.0, 1.0352, 1.555, 0.21), (6.5, 1.0239, 1.513, 0.17),
+    (7.0, 1.0140, 1.474, 0.13), (7.5, 1.0054, 1.439, 0.11),
+    (8.0, 0.9982, 1.407, 0.09), (8.5, 0.9923, 1.378, 0.08),
+    (9.0, 0.9877, 1.353, 0.08),
+]
+#: Coarser than 0.81 phi Ainslie's MF branch IS his HF one (his Table 4.18's
+#: own definition), so over these grain sizes both models must match the table
+#: and each other to the printed digit.
+_SHARED_COARSE_BRANCH = (-1.0, -0.5, 0.0, 0.5)
+
+
+def _as_ratios(phi, model):
+    """A model's output as ratios to the seawater it is referenced to."""
+    ref_cw, ref_rhow = _MODEL_WATER_REFERENCE[model]
+    got = grain_size_to_geoacoustics(phi, model=model)
+    return (got['sound_speed'] / ref_cw, got['density'] / ref_rhow,
+            got['attenuation'])
+
+
+class TestBothModelsReproduceAPublishedCompilation:
+    """Reproducing the source you were written from is not sufficient.
+
+    A transcription error in a coefficient reproduces itself forever. Ainslie
+    Sec. 4.4.1 is an independent compilation of the same physics by a different
+    route, and agreeing with it is evidence no amount of self-consistency can
+    give.
+
+    Both tables print ratios to the seawater each set was referenced to, so
+    each model is divided by its own reference before the comparison. That
+    division makes every test here **blind to that constant** -- moving
+    ``'hamilton'``'s from 1510 m/s to 1500 leaves them all green, which is what
+    a mutation showed. It is pinned on its own below instead, because it is a
+    choice uacpy makes and not something these tables constrain.
+
+    What a failure means. On ``'apl-uw'`` a coefficient moved: the agreement
+    there is to the last printed digit. On ``'hamilton'`` it means more than
+    the tolerance allows of the gap between two published fits, which is a
+    judgement to make deliberately -- Bachman's own standard errors are 1.5 %
+    on sound speed and 7.5 % on density (Ainslie Eq. 4.95), and the measured
+    gaps are 0.15 % and 4.2 %. Widening a tolerance to pass is not a fix.
+    """
+
+    @pytest.mark.parametrize('phi, speed, density, alpha', _AINSLIE_HF_TABLE)
+    def test_apl_uw_reproduces_the_printed_high_frequency_table(
+            self, phi, speed, density, alpha):
+        got_speed, got_density, got_alpha = _as_ratios(phi, 'apl-uw')
+        assert got_speed == pytest.approx(speed, rel=5e-4)
+        assert got_density == pytest.approx(density, rel=5e-4)
+        assert got_alpha == pytest.approx(alpha, abs=0.02)
+
+    @pytest.mark.parametrize('phi, speed, density, alpha', _AINSLIE_MF_TABLE)
+    def test_hamilton_reproduces_the_printed_bulk_table(
+            self, phi, speed, density, alpha):
+        got_speed, got_density, got_alpha = _as_ratios(phi, 'hamilton')
+        # Two fits of the same quantity, not one fit twice: the tolerances are
+        # the measured gaps with a margin, both inside Bachman's own standard
+        # errors. alpha's worst gap is 0.021 dB/lambda, at 4 phi.
+        assert got_speed == pytest.approx(speed, rel=2e-3)
+        assert got_density == pytest.approx(density, rel=0.05)
+        assert got_alpha == pytest.approx(alpha, abs=0.03)
+
+    @pytest.mark.parametrize('phi', _SHARED_COARSE_BRANCH)
+    def test_the_two_models_share_the_coarse_branch_the_tables_share(
+            self, phi):
+        """Coarser than 0.81 phi the two models are one relation.
+
+        The comparison is between RATIOS, because that is what the tables print
+        and what the two models hold in common; each carries its output back to
+        a different seawater (1510 m/s / 1.03 against the Acoustics-Toolbox
+        1500 / 1.0), so the absolute values differ by that factor by
+        construction. The attenuation is in dB/lambda, proportional to the
+        sound speed, so it is compared with the same factor divided out -- and
+        then it too is one relation: Hamilton (1972)'s k_p on both sides.
+        """
+        hamilton_cw = _MODEL_WATER_REFERENCE['hamilton'][0]
+        apl_uw_cw = _MODEL_WATER_REFERENCE['apl-uw'][0]
+        h_speed, h_density, h_alpha = _as_ratios(phi, 'hamilton')
+        a_speed, a_density, a_alpha = _as_ratios(phi, 'apl-uw')
+        assert h_speed == pytest.approx(a_speed, rel=1e-3)
+        assert h_density == pytest.approx(a_density, rel=1e-3)
+        # 5e-5 is the residual of the one approximation between the two
+        # routes: 'hamilton' forms its velocity ratio as 1952.5/1528 =
+        # 1.277814 where APL-UW prints 1.2778, 1.1e-5 apart.
+        assert h_alpha / hamilton_cw == pytest.approx(a_alpha / apl_uw_cw,
+                                                     rel=5e-5)
+
+    def test_holding_the_attenuation_flat_below_zero_phi_tracks_the_rise(self):
+        """The clamp's shape, not just its value.
+
+        ``'hamilton'`` holds Hamilton (1972)'s ``k_p`` at its 0 phi value below
+        0 phi, because that is where his data end -- but alpha in dB/lambda is
+        ``k_p`` times the sound speed, which keeps rising. Both of Ainslie's
+        tables do the same: alpha goes 0.87 -> 0.91 from 0 to -1 phi, a factor
+        1.046. A clamp applied to alpha itself instead of to ``k_p`` would hold
+        it at 1.000 and pass every value test above within its tolerance.
+        """
+        at_zero = grain_size_to_geoacoustics(
+            0.0, model='hamilton')['attenuation']
+        at_minus_one = grain_size_to_geoacoustics(
+            -1.0, model='hamilton')['attenuation']
+        assert at_minus_one / at_zero == pytest.approx(0.91 / 0.87, rel=5e-3)
+
+    def test_each_model_carries_its_ratios_back_to_its_own_seawater(self):
+        """The reference the tests above divide out, pinned where it shows.
+
+        ``'apl-uw'``'s pair is what the Acoustics Toolbox applies to a ``'G'``
+        bottom -- ``alphaR = vr * 1500.0`` and the density ratio used directly
+        as g/cm3 (``ReadEnvironmentBell.f90:526`` and ``:531``) -- so a uacpy
+        grain-size seabed and a Bellhop one are the same seabed.
+        ``'hamilton'``'s is uacpy's in-situ default, which is the point of a
+        ratio: Hamilton & Bachman measured at 23 degC and 1 atm, and their
+        ratio is meant to be re-applied at the conditions of the site.
+
+        Changing either is allowed. Doing it silently is not: nothing else in
+        this class, and nothing in either published table, can see it.
+        """
+        assert _MODEL_WATER_REFERENCE['apl-uw'] == (1500.0, 1.0)
+        assert _MODEL_WATER_REFERENCE['hamilton'] == (1510.0, 1.03)
+
+
+class TestTheDefaultModelHasOneHome:
+    """``model='hamilton'`` is read from one constant, not written out 23 times.
+
+    It used to be a literal at 23 call signatures across ten modules. Nothing
+    held them together: a deliberate change of default would have had to find
+    all 23, and a half-done one would have left ``fetch_bottom_deck41`` and
+    ``fetch_bottom_mars`` converting the same grain size two different ways
+    without a word.
+
+    The sweep walks the package by signature rather than grepping, because the
+    default has three spellings -- ``model='hamilton'``, ``model: str =
+    'hamilton'`` and ``bottom_model='hamilton'`` -- and a grep that knows one
+    of them reports "all clear" about the two it cannot see.
+
+    Changing the default is allowed: it is a judgement about which band uacpy
+    serves by default, and ``DEFAULT_GRAIN_SIZE_MODEL``'s own docstring makes
+    the case for the one it has. Changing it in nine places out of ten is not.
+    """
+
+    #: A parameter named ``model`` means a dozen things in this package (a
+    #: ``Result`` carries the name of the propagation model that made it). The
+    #: grain-size ones are those sitting beside one of these.
+    COMPANIONS = ('environment', 'grain_size_phi', 'water_sound_speed',
+                  'bottom_model')
+
+    @classmethod
+    def _entry_points(cls):
+        """(module, qualname, parameter, default) for every grain-size default."""
+        found = []
+        for module in pkgutil.walk_packages(uacpy.__path__, 'uacpy.'):
+            if '.tests' in module.name or 'third_party' in module.name:
+                continue
+            try:
+                imported = importlib.import_module(module.name)
+            except Exception:             # optional dependency, driver binary
+                continue
+            for _, member in inspect.getmembers(imported):
+                if inspect.isfunction(member):
+                    functions = [member]
+                elif inspect.isclass(member):
+                    functions = [f for _, f in
+                                 inspect.getmembers(member, inspect.isfunction)]
+                else:
+                    continue
+                for function in functions:
+                    try:
+                        signature = inspect.signature(function)
+                    except (ValueError, TypeError):
+                        continue
+                    names = set(signature.parameters)
+                    for name in ('model', 'bottom_model'):
+                        parameter = signature.parameters.get(name)
+                        if parameter is None:
+                            continue
+                        if parameter.default is inspect.Parameter.empty:
+                            continue
+                        if name == 'model' and not (names & set(cls.COMPANIONS)):
+                            continue
+                        found.append((module.name, function.__qualname__,
+                                      name, parameter.default))
+        return found
+
+    def test_the_sweep_finds_the_entry_points_it_exists_to_check(self):
+        """A sweep that finds nothing passes the test below every time."""
+        found = self._entry_points()
+        assert len(found) >= 20, f"only {len(found)} entry point(s) found"
+        modules = {module for module, _, _, _ in found}
+        assert 'uacpy.data.mars' in modules
+        assert 'uacpy.data.sediment_db' in modules
+        assert 'uacpy.core.sediment' in modules
+
+    def test_every_grain_size_entry_point_reads_the_one_default(self):
+        disagreeing = []
+        for module, qualname, parameter, default in self._entry_points():
+            if default is None:               # "inherit from my caller"
+                continue
+            if default not in GRAIN_SIZE_MODELS:
+                disagreeing.append(
+                    f"{module}.{qualname}({parameter}={default!r}) "
+                    f"is not a known model")
+            elif default != DEFAULT_GRAIN_SIZE_MODEL:
+                disagreeing.append(
+                    f"{module}.{qualname}({parameter}={default!r})")
+        assert not disagreeing, (
+            "these entry points do not read DEFAULT_GRAIN_SIZE_MODEL = "
+            f"{DEFAULT_GRAIN_SIZE_MODEL!r}:\n  " + "\n  ".join(disagreeing))

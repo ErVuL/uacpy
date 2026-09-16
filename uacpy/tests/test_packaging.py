@@ -1960,11 +1960,6 @@ _CROSS_PACKAGE_PRIVATES = {
     ('core/ssp.py', 'uacpy.visualization.plots.environment', '_plot_ssp'),
     ('core/results/field.py', 'uacpy.visualization.plots._common',
      '_draw_result_credit'),
-    # Hamilton-Bachman grain-size coefficients: one definition, in the
-    # sediment model that owns the relation, read by the dataset reader that
-    # applies it.
-    ('data/graw_local.py', 'uacpy.core.sediment', '_HB_PHI'),
-    ('data/graw_local.py', 'uacpy.core.sediment', '_HB_RHO'),
     # The set of acoustic_type values that carry no geoacoustic parameters.
     # Defined beside the carrier that validates them; every writer and every
     # wrapper that skips a geoacoustic block reads the same set.

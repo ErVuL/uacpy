@@ -19,7 +19,10 @@ import numpy as np
 
 from uacpy.core.environment import BoundaryProperties
 from uacpy.core.exceptions import DataFetchError
-from uacpy.core.sediment import _HB_PHI, _HB_RHO, grain_size_to_geoacoustics
+from uacpy.core.sediment import (DEFAULT_GRAIN_SIZE_MODEL,
+                                 DEFAULT_GRAIN_SIZE_ENVIRONMENT,
+                                 grain_size_from_density,
+                                 grain_size_to_geoacoustics)
 from uacpy.data import _cache
 from uacpy.data._geo import as_coordinate, checked_n_points, geodesic_waypoints
 from uacpy.data._netcdf import NetcdfGrid
@@ -34,30 +37,23 @@ __all__ = ['download_graw_db', 'fetch_seabed_density',
 GRAW_FILE = 'Dataset_S2.nc'
 GRAW_URL = 'https://zenodo.org/records/3762390/files/Dataset_S2.nc'
 
-# Hamilton & Bachman density column reversed to be strictly increasing for the
-# ρ → ϕ inversion (the table runs coarse/dense → fine/light), as np.interp
-# requires. The table spans only 1.480-2.034 g/cm³ (silty clay → coarse sand),
-# but the Graw grid runs 0.96-2.21 g/cm³ and about three quarters of its ocean
-# cells sit *below* 1.480 — the abyssal muds that H&B's continental-terrace
-# suite never sampled. The inversion therefore saturates at ϕ = 8.80 over most
-# of the deep ocean: there the returned density is still the measured one, but
-# the speed and attenuation derived from it are the silty-clay end member
-# rather than a value tracking the grid. Inside the table the inversion is at
-# its steepest over that same fine end: the clayey-silt row (1.484 g/cm³,
-# ϕ 7.13) and the silty-clay row (1.480 g/cm³, ϕ 8.80) are 0.004 g/cm³ apart
-# over 1.67 ϕ — 417.5 ϕ per g/cm³, 9 times the next-steepest interval (45.7,
-# between 1.769 and 1.783) and 29 times the table's own end-to-end secant
-# (14.2). So ρ ∈ [1.480, 1.484] is not resolvable: a 0.27 % density change
-# crosses the whole clayey-silt → silty-clay span, moving the derived speed
-# 1519 → 1495 m/s (24 m/s, 1.6 %; velocity ratio 1.006 → 0.990) and the
-# attenuation 0.126 → 0.079 dB/λ, a fall of 37 %. The gap is that narrow
-# because the clayey-silt row carries Hamilton & Bachman's *median* density,
-# 1.484 — the value their Table II footnote recommends for predicting that
-# class — rather than the 1.489 mean; over the mean the same 1.67 ϕ would
-# span 0.009 g/cm³, i.e. 186 ϕ per g/cm³.
-_RHO_ASC = _HB_RHO[::-1]
-_PHI_DESC = _HB_PHI[::-1]
-
+# What the grid holds, measured over its own 6 208 522 finite cells (the other
+# third is land): 0.9615 to 2.2107 g/cm³, median 1.4267, and 45.5 % of them
+# below the 1.417 g/cm³ where the continental-terrace density relation bottoms
+# out. Those are not artefacts — only 0.12 % of cells fall below 1.2, and the
+# bulk sits at 1.30-1.42, which is what Hamilton & Bachman's Table IV measures
+# for abyssal clay (1.352 and 1.414). They are ordinary deep-ocean mud, which
+# is to say **they are not continental terrace**: over this grid the
+# abyssal-plain fit represents 65.3 % of cells where the terrace fit reaches
+# 40.8 %. So over nearly half the ocean the default conversion returns its
+# fine end, and ``grain_size_from_density`` says so and names the environment
+# whose range would cover the value.
+#
+# Where the relation does reach, its sensitivity rises monotonically towards
+# the fine end: |dϕ/dρ| is 5.2 ϕ per g/cm³ at -1 ϕ, 6.3 at 1 ϕ, 10.5 at 5 ϕ and
+# 32.3 at 9 ϕ (laboratory units), so a density read to ±0.01 g/cm³ fixes the
+# grain size to ±0.05 ϕ in sand and ±0.32 ϕ in clay. It diverges only at the
+# vertex, which is outside the evaluated range.
 
 
 def download_graw_db(cache_dir=None, *, timeout=300.0, verbose=False):
@@ -133,19 +129,19 @@ def fetch_seabed_density_transect(start, end, n_points=6):
 
 
 def _phi_from_density(rho):
-    """Invert the Hamilton & Bachman ρ(ϕ) table: bulk density (g/cm³) → mean
-    grain size (ϕ), clamped to the table's end members.
+    """Bulk density (g/cm³) → mean grain size (ϕ).
 
-    The two finest rows are 0.004 g/cm³ apart over 1.67 ϕ (417.5 ϕ per g/cm³),
-    so a density in [1.480, 1.484] pins ϕ only to that whole span, and any
-    density below 1.480 returns its 8.80 ϕ end member — see the table note at
-    the top of this module.
+    :func:`uacpy.core.sediment.grain_size_from_density` inverts the very
+    relation the forward conversion evaluates, so ϕ → ρ → ϕ returns what it was
+    given — and announces the densities it cannot represent, which over this
+    grid is nearly half the ocean (see the note at the top of this module).
     """
-    return float(np.interp(rho, _RHO_ASC, _PHI_DESC))
+    return grain_size_from_density(rho)
 
 
 def fetch_bottom_graw(point, *, roughness=0.0, water_sound_speed=None,
-                      model='hamilton', timeout=None, verbose=False):
+                      model=DEFAULT_GRAIN_SIZE_MODEL, environment=None,
+                      timeout=None, verbose=False):
     """Model-ready half-space bottom from the Graw measured-density grid.
 
     Provenance is catalogue-level: the grid cell under the point supplies the
@@ -153,14 +149,14 @@ def fetch_bottom_graw(point, *, roughness=0.0, water_sound_speed=None,
     the sample sources (``grainsize``, ``mars``), which record the sample the
     value came from.
 
-    The density is the grid value; the grain size is recovered by inverting
-    the Hamilton ρ(ϕ) table and yields the consistent sound speed and
-    attenuation via :func:`uacpy.core.sediment.grain_size_to_geoacoustics`.
-    That inversion is at its coarsest exactly where the deep ocean sits — the
-    table's two finest rows are 0.004 g/cm³ apart over 1.67 ϕ, so a density in
-    [1.480, 1.484] g/cm³ fixes the grain size only to within that span, which
-    is 1519 to 1495 m/s in speed and 0.126 to 0.079 dB/λ in attenuation, and
-    anything below 1.480 returns the 8.80 ϕ end member.
+    The density returned is the grid's measured value. The grain size is the
+    one *consistent* with it — :func:`uacpy.core.sediment.grain_size_from_density`
+    inverts the same Hamilton & Bachman (T) relation that
+    :func:`~uacpy.core.sediment.grain_size_to_geoacoustics` evaluates forward,
+    so the pair cannot disagree — and the sound speed and attenuation follow
+    from that grain size. Below ~1.42 g/cm³ the relation has no solution and
+    the grain size is its 9 ϕ end, which is most of the deep ocean; the note at
+    the top of this module gives the resolution along the rest of the range.
     ``timeout``/``verbose`` are accepted (and ignored — this backend is
     offline) for signature uniformity with the network bottom fetchers.
     ``water_sound_speed`` (m/s) scales the velocity ratio to the in-situ
@@ -173,6 +169,7 @@ def fetch_bottom_graw(point, *, roughness=0.0, water_sound_speed=None,
     rho = fetch_seabed_density(point)
     phi = _phi_from_density(rho)
     geo = grain_size_to_geoacoustics(phi, model=model,
+                                     environment=environment or DEFAULT_GRAIN_SIZE_ENVIRONMENT,
                                      water_sound_speed=water_sound_speed)
     return BoundaryProperties(
         acoustic_type='half-space',
@@ -186,7 +183,8 @@ def fetch_bottom_graw(point, *, roughness=0.0, water_sound_speed=None,
 
 def fetch_bottom_graw_transect(start, end, *, n_points=6, max_points=None,
                                roughness=0.0, water_sound_speed=None,
-                               model='hamilton', timeout=None, verbose=False):
+                               model=DEFAULT_GRAIN_SIZE_MODEL, environment=None,
+                               timeout=None, verbose=False):
     """Range-dependent bottom from the Graw grid along ``start`` → ``end``.
 
     ``water_sound_speed`` also takes a ``(lat, lon) -> m/s`` callable, so each
@@ -198,7 +196,7 @@ def fetch_bottom_graw_transect(start, end, *, n_points=6, max_points=None,
         lambda la, lo: fetch_bottom_graw(
             (la, lo), roughness=roughness,
             water_sound_speed=water_sound_speed_at(water_sound_speed, la, lo),
-            model=model),
+            model=model, environment=environment),
         start, end, n_points, source_label='Graw density grid',
         max_points=max_points,
     )

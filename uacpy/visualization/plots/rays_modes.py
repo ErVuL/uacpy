@@ -735,8 +735,22 @@ def plot_mode_speeds(
         cb = float(c_bottom)
         ax.axhline(cb, color='C3', ls='--', lw=1.0)
         n_trapped = int(np.sum(cp <= cb))
-        ax.text(0.99, cb, f' seabed $c_p$ = {cb:g} m/s — {n_trapped} trapped',
-                color='C3', fontsize='small', va='bottom', ha='right',
+        # The label sits in the band just above the rule, and that is the
+        # one band the phase-speed curve is guaranteed to enter: cp rises
+        # with mode index and leaves the rule behind at mode ``n_trapped``,
+        # so curve and label want the same pixels wherever the crossing is.
+        # Put the label at whichever end of the axis is FARTHER from the
+        # crossing. A fixed end cannot work: the right edge collides on a
+        # mostly-trapped channel (crossing at the right) and the left edge
+        # on a mostly-leaky one. The mode index is the abscissa and the
+        # modes are evenly spaced along it, so the trapped fraction is
+        # where the crossing falls across the panel.
+        crossing = n_trapped / max(modes.n_modes, 1)
+        at_left = crossing > 0.5
+        ax.text(0.01 if at_left else 0.99, cb,
+                f' seabed $c_p$ = {cb:g} m/s — {n_trapped} trapped',
+                color='C3', fontsize='small', va='bottom',
+                ha='left' if at_left else 'right',
                 transform=ax.get_yaxis_transform())
 
     ax.set_xlabel('Mode index $m$')
