@@ -279,15 +279,38 @@ def _read_capped(response, url: str, max_bytes: int) -> bytes:
     return data
 
 
+#: How many times :func:`curl_download` will resume one transfer. ``timeout``
+#: is the budget for each attempt, not for the file, so a grid that needs
+#: longer than one attempt is finished by the next rather than abandoned.
+_CURL_ATTEMPTS = 4
+#: Bytes per second under which a transfer counts as stalled rather than slow.
+_CURL_MIN_BYTES_PER_SECOND = 1024
+#: curl's "the server will not resume" exits: 33 is a host that does not serve
+#: byte ranges, 36 a resume the host accepted and then could not satisfy.
+_CURL_RESUME_REFUSED = frozenset({33, 36})
+
+
 def curl_download(url: str, out, *, timeout: float, verbose: bool) -> bool:
     """Fetch ``url`` → ``out`` with curl; ``True`` on success.
 
     ``False`` when curl is absent or fails, so the caller can fall back to
     :func:`http_get`. The large static grid hosts (NCEI/Akamai, Zenodo, GLODAP)
-    throttle Python urllib to a trickle but serve curl at full speed, so this is
-    the preferred path for them. Downloads to a staging sibling and moves it
+    throttle Python urllib to a trickle but serve curl at full speed, so this
+    is the preferred path for them. Downloads to a staging sibling and moves it
     into place only on success, so an interrupted transfer never leaves a
     truncated ``out`` for the cache to accept.
+
+    **A broken transfer is resumed, not restarted.** ``timeout`` is the budget
+    for one attempt; a transfer that breaks or stalls is picked up by the next
+    attempt with ``-C -``, up to :data:`_CURL_ATTEMPTS`, and the staging file
+    is kept in between. Two things this deliberately does NOT do. It does not
+    pass ``--retry``: curl fixes the ``-C -`` offset when it starts, so an
+    *internal* retry restarts at that offset and throws away everything the
+    failed attempt wrote — on a multi-gigabyte grid that is the difference
+    between resuming and downloading it twice. And it does not resume across
+    calls, because :func:`staging_path` gives the partial an unguessable name
+    on purpose (see its docstring): there is no name for a later run to find,
+    which is the price of the symlink-pre-placement defence.
 
     The staging file is :func:`uacpy.data._cache.staging_path`'s, so the name
     is unguessable: a predictable name such as ``<out>.part`` lets a symlink be
@@ -301,14 +324,37 @@ def curl_download(url: str, out, *, timeout: float, verbose: bool) -> bool:
     if not curl:
         return False
     part = staging_path(out)
-    try:
-        subprocess.run(
-            [curl, '-fL', '--retry', '3', '--max-time', str(int(timeout)),
-             '-o', str(part), url],
-            check=True, capture_output=not verbose)
-    except (subprocess.SubprocessError, OSError):
-        part.unlink(missing_ok=True)
-        return False
+    stalled = 0
+    for attempt in range(1, _CURL_ATTEMPTS + 1):
+        have = part.stat().st_size if part.exists() else 0
+        command = [curl, '-fL', '--connect-timeout', '30',
+                   # End a stalled transfer instead of letting it hold the
+                   # connection at 0 B/s until ``--max-time`` expires: the
+                   # attempt that follows resumes where it stopped.
+                   '--speed-limit', str(_CURL_MIN_BYTES_PER_SECOND),
+                   '--speed-time', '30',
+                   '--max-time', str(int(timeout))]
+        if have:
+            command += ['-C', '-']
+        command += ['-o', str(part), url]
+        try:
+            subprocess.run(command, check=True, capture_output=not verbose)
+            break
+        except subprocess.CalledProcessError as exc:
+            grew = (part.stat().st_size if part.exists() else 0) > have
+            if exc.returncode in _CURL_RESUME_REFUSED:
+                # The host will not serve ranges, so there is nothing to
+                # resume onto. Start the file again rather than retrying a
+                # resume it has already declined.
+                part.write_bytes(b'')
+                grew = True
+            stalled = 0 if grew else stalled + 1
+            if attempt == _CURL_ATTEMPTS or stalled >= 2:
+                part.unlink(missing_ok=True)
+                return False
+        except (subprocess.SubprocessError, OSError):
+            part.unlink(missing_ok=True)
+            return False
     if not (part.exists() and part.stat().st_size > 0):
         part.unlink(missing_ok=True)
         return False

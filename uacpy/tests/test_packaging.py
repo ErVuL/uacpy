@@ -20,6 +20,7 @@ import re
 import subprocess
 import tomllib
 import warnings
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -1491,15 +1492,105 @@ def test_the_gebco_digest_is_checked_before_the_grid_is_installed():
 
 def test_robust_curl_stops_on_a_permanent_http_error():
     """curl exit 22 with ``-f`` means the server answered >= 400.
-    ``--retry-all-errors`` has already re-sent it 4 times inside curl, so the
-    20-iteration outer loop turns one dead URL into ~80 requests — and
-    ``download_woa23`` loops 26 files."""
+
+    Those are permanent apart from the rate-limit codes, so the 20-iteration
+    outer loop would turn one dead URL into 20 requests and 100 s of sleeps —
+    and ``download_woa23`` loops 26 files."""
     body = _INSTALL_SH.read_text()
     fn = re.search(r"^robust_curl\(\) \{.*?^\}", body, re.S | re.M).group(0)
     assert "-w '%{http_code}'" in fn, "the HTTP status is never captured"
     assert re.search(r"rc == 22", fn), "curl's HTTP-error exit is not tested"
     # Rate limiting is transient and must still go round the outer loop.
     assert '"429"' in fn and '"408"' in fn
+
+
+@pytest.mark.slow
+def test_robust_curl_resumes_a_broken_transfer_rather_than_restarting_it():
+    """The retry has to resume, and only an outer retry can.
+
+    curl fixes the ``-C -`` offset when it STARTS, so an internal ``--retry``
+    restarts the transfer at that offset and discards every byte the failed
+    attempt wrote. With ``--retry 3`` on the 7.5 GB GEBCO grid that showed as:
+    2.5 GB, dropped, restarted from zero, 6.6 GB, dropped, restarted from zero
+    — 9 GB transferred, 2 GB kept. Retrying belongs to the outer loop, where
+    each pass is a fresh curl that re-reads the partial file.
+
+    A local server hangs up halfway through the first response and honours the
+    Range header on the second. A restart would also end with a complete file,
+    so the assertion that carries the meaning is that a range was ASKED for.
+    """
+    import http.server
+    import socketserver
+    import threading
+
+    payload = bytes(range(256)) * 4096          # 1 MiB, content-checkable
+    seen_ranges = []
+    seen_restarts = []                          # GETs carrying no Range
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_GET(self):
+            rng = self.headers.get("Range")
+            if rng:
+                seen_ranges.append(rng)
+                start = int(rng.split("=")[1].split("-")[0])
+                body = payload[start:]
+                self.send_response(206)
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Content-Range",
+                                 f"bytes {start}-{len(payload) - 1}"
+                                 f"/{len(payload)}")
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            # First pass: promise the whole file, send half, hang up. That is
+            # curl exit 18, "end of response with N bytes missing" — the
+            # failure the GEBCO download actually hit.
+            seen_restarts.append(self.path)
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(payload)))
+            self.send_header("Accept-Ranges", "bytes")
+            self.end_headers()
+            self.wfile.write(payload[:len(payload) // 2])
+            self.wfile.flush()
+            self.close_connection = True
+
+        def log_message(self, *args):
+            pass
+
+    with socketserver.TCPServer(("127.0.0.1", 0), _Handler) as httpd:
+        port = httpd.server_address[1]
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                out = Path(tmp) / "grid.bin"
+                script = _source_function("robust_curl") + (
+                    f'robust_curl "http://127.0.0.1:{port}/grid.bin" '
+                    f'"{out}"; echo "rc=$?"')
+                result = _run_bash(script)
+                assert "rc=0" in result.stdout, (result.stdout, result.stderr)
+                assert out.read_bytes() == payload, "the grid arrived corrupt"
+        finally:
+            httpd.shutdown()
+
+    assert seen_ranges, (
+        "no attempt sent a Range header: the transfer was restarted, not "
+        "resumed")
+    assert seen_ranges[0].startswith(f"bytes={len(payload) // 2}"), (
+        f"resumed from the wrong offset: {seen_ranges[0]}")
+    # The assertion that separates a resume from a retry-then-resume. Both end
+    # with a complete file and both eventually send a Range, so neither of the
+    # checks above can tell them apart -- a mutation putting ``--retry 3`` back
+    # passed all of them. What changes is how many times the server is asked
+    # for the file FROM THE BEGINNING: once when the outer loop owns the retry,
+    # four times when curl retries internally (the original request plus three
+    # inner retries), each one discarding what the last had written.
+    assert len(seen_restarts) == 1, (
+        f"{len(seen_restarts)} transfers started from byte zero; a resuming "
+        f"download starts from zero exactly once. Is ``--retry`` back on the "
+        f"curl line?")
 
 
 @pytest.mark.slow
@@ -2448,19 +2539,35 @@ def test_the_shared_download_helper_is_defined_before_any_flow():
 
 
 def test_the_shared_download_helper_fails_fast_on_a_refused_connection():
-    """``robust_curl`` gives curl exit 7 (could not connect) one extra
-    invocation and then stops, mirroring the python fetchers' one-quick-
-    retry policy for ECONNREFUSED: a refusing host answers instantly, so
-    every further round only multiplies sleeps — 20 outer attempts cost
-    ~6 minutes per file against a down server."""
+    """``robust_curl`` gives curl exit 7 (could not connect) two extra
+    invocations and then stops, mirroring the python fetchers' quick-retry
+    policy for ECONNREFUSED: a refusing host answers instantly, so every
+    further round only multiplies sleeps — 20 outer attempts cost ~6 minutes
+    per file against a down server.
+
+    Two rather than one because the curl line no longer carries ``--retry``:
+    it used to re-send a refused connection four times inside curl before the
+    outer loop saw it, and dropping it (so that ``-C -`` resumes instead of
+    restarting) took that cover away with it."""
     text = (Path(_REPO_ROOT) / "install.sh").read_text(encoding="utf-8")
     fn = text[text.index("robust_curl()"):]
     fn = fn[:fn.index("\n}\n")]
     assert "(( rc == 7 ))" in fn, "the exit-7 branch is gone"
     branch = fn[fn.index("(( rc == 7 ))"):]
-    assert "attempt >= 1" in branch.split("attempt=$((attempt + 1))")[0], (
-        "exit 7 no longer stops after the second invocation"
+    assert "attempt >= 2" in branch.split("attempt=$((attempt + 1))")[0], (
+        "exit 7 no longer stops after the third invocation"
     )
+    # The other half of the same decision: an inner --retry would make every
+    # one of those invocations restart the transfer from byte zero. Read the
+    # CODE, not the comment that explains why the flag is absent -- checking
+    # the whole function text fires on that comment.
+    code = "\n".join(line for line in fn.splitlines()
+                     if not line.lstrip().startswith("#"))
+    assert "--retry" not in code, (
+        "--retry is back on the curl line: curl fixes the -C - offset at "
+        "startup, so an internal retry discards the partial file"
+    )
+    assert "-C -" in code, "the resume flag is gone"
 
 
 _EVENT_NAMED_TEST_FILE = re.compile(r"audit|20\d{6}|round\d|batch",

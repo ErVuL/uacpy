@@ -1,5 +1,6 @@
 """Tests for the shared HTTP layer retry/backoff (uacpy.data._http)."""
 
+import pathlib
 import urllib.error
 
 import pytest
@@ -200,3 +201,111 @@ def test_both_classifiers_discriminate_through_the_shared_walker():
     assert _is_connection_refused(refused)
     assert not _is_connection_refused(timed_out)
     assert not _is_permanent_dns_failure(refused)
+
+
+# ── curl_download resumes a broken transfer ────────────────────────────────
+
+
+def _fake_curl(script, log):
+    """A ``subprocess.run`` that plays ``script`` and writes like curl would.
+
+    Each entry is the number of bytes that attempt manages to write before it
+    raises, or ``None`` for an attempt that completes. ``-C -`` appends, its
+    absence truncates — which is the whole behaviour under test.
+    """
+    import subprocess as sp
+
+    payload = bytes(range(256)) * 64
+
+    def run(command, **kwargs):
+        log.append(list(command))
+        out = pathlib.Path(command[command.index('-o') + 1])
+        resuming = '-C' in command
+        have = out.stat().st_size if resuming and out.exists() else 0
+        wrote = script.pop(0)
+        chunk = payload[have:] if wrote is None else payload[have:have + wrote]
+        with open(out, 'ab' if resuming else 'wb') as handle:
+            handle.write(chunk)
+        if wrote is not None:
+            raise sp.CalledProcessError(18, command)
+        return sp.CompletedProcess(command, 0)
+
+    return run, payload
+
+
+def test_a_broken_transfer_is_resumed_rather_than_restarted(tmp_path,
+                                                            monkeypatch):
+    """The bug: curl fixes the ``-C -`` offset when it starts, so an internal
+    ``--retry`` restarts there and discards what the failed attempt wrote."""
+    log = []
+    run, payload = _fake_curl([4000, 6000, None], log)
+    monkeypatch.setattr(_http.shutil, 'which', lambda _: '/usr/bin/curl')
+    monkeypatch.setattr(_http.subprocess, 'run', run)
+    out = tmp_path / 'grid.nc'
+
+    assert _http.curl_download('https://example.invalid/g.nc', out,
+                               timeout=30.0, verbose=False) is True
+    assert out.read_bytes() == payload, "the grid arrived corrupt"
+    assert len(log) == 3, "the transfer was not retried to completion"
+    assert '-C' not in log[0], "the first attempt has nothing to resume onto"
+    assert all('-C' in command for command in log[1:]), (
+        "a later attempt restarted the transfer instead of resuming it")
+    assert not any('--retry' in command for command in log), (
+        "--retry is back: curl's internal retry discards the partial file")
+
+
+def test_a_host_that_refuses_ranges_gets_the_file_from_byte_zero(
+        tmp_path, monkeypatch):
+    """curl exit 33 is "this server does not do byte ranges". Retrying the
+    resume it just refused only repeats the refusal, so the file restarts."""
+    import subprocess as sp
+    log = []
+    payload = b'x' * 500
+    state = {'attempt': 0}
+
+    def run(command, **kwargs):
+        log.append(list(command))
+        out = pathlib.Path(command[command.index('-o') + 1])
+        state['attempt'] += 1
+        if state['attempt'] == 1:
+            out.write_bytes(payload[:100])
+            raise sp.CalledProcessError(18, command)
+        if state['attempt'] == 2:
+            raise sp.CalledProcessError(33, command)   # refuses the range
+        assert '-C' not in command, "resumed onto a host that refuses ranges"
+        out.write_bytes(payload)
+        return sp.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(_http.shutil, 'which', lambda _: '/usr/bin/curl')
+    monkeypatch.setattr(_http.subprocess, 'run', run)
+    out = tmp_path / 'grid.nc'
+    assert _http.curl_download('https://example.invalid/g.nc', out,
+                               timeout=30.0, verbose=False) is True
+    assert out.read_bytes() == payload
+    assert '-C' in log[1], "the second attempt should have tried to resume"
+
+
+def test_two_attempts_without_progress_give_up_and_drop_the_partial(
+        tmp_path, monkeypatch):
+    """A resume that keeps failing at the same offset is not going to finish;
+    spending the whole attempt budget on it only multiplies the timeout."""
+    import subprocess as sp
+    log = []
+
+    def run(command, **kwargs):
+        log.append(list(command))
+        out = pathlib.Path(command[command.index('-o') + 1])
+        if len(log) == 1:
+            out.write_bytes(b'y' * 200)
+        raise sp.CalledProcessError(18, command)
+
+    monkeypatch.setattr(_http.shutil, 'which', lambda _: '/usr/bin/curl')
+    monkeypatch.setattr(_http.subprocess, 'run', run)
+    out = tmp_path / 'grid.nc'
+    assert _http.curl_download('https://example.invalid/g.nc', out,
+                               timeout=30.0, verbose=False) is False
+    assert not out.exists(), "a failed download left a file for the cache"
+    assert len(log) == 3, (
+        f"gave up after {len(log)} attempts; expected the first, then two "
+        f"that make no progress")
+    assert not list(tmp_path.glob('*')), "the staging file was left behind"

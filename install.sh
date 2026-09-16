@@ -215,29 +215,42 @@ robust_curl() {
     local url="$1" out="$2"; shift 2
     local attempt=0 max_attempts=20 rc http_code
     while :; do
-        http_code=$(curl -fL --http1.1 --retry 3 --retry-delay 5 --retry-all-errors \
-                --connect-timeout 30 -C - -o "$out" -w '%{http_code}' "$@" "$url")
+        # NO ``--retry``. curl computes the ``-C -`` resume offset ONCE, when
+        # it starts, and an internal retry restarts the transfer at that same
+        # offset -- so every byte the failed attempt wrote is thrown away. On
+        # the 7.5 GB GEBCO grid that showed up as a download reaching 2.5 GB,
+        # dropping, restarting from zero, reaching 6.6 GB, dropping, and
+        # restarting from zero again: three inner retries, three truncations,
+        # 9 GB transferred for nothing. Retrying is the OUTER loop's job
+        # because each pass is a fresh curl that re-reads the partial file and
+        # genuinely resumes.
+        #
+        # ``--speed-limit``/``--speed-time`` end a stalled transfer instead of
+        # letting it hold the connection at 0 B/s until the server times out;
+        # the outer loop then resumes it.
+        http_code=$(curl -fL --http1.1 --connect-timeout 30 \
+                --speed-limit 1024 --speed-time 60 \
+                -C - -o "$out" -w '%{http_code}' "$@" "$url")
         rc=$?
         if (( rc == 0 )); then
             return 0
         fi
         # Exit 22 means the server answered with an HTTP error (>= 400, since
-        # -f). Those are permanent apart from the rate-limit codes, and
-        # --retry-all-errors already re-sent each one 4 times inside curl, so
+        # -f). Those are permanent apart from the rate-limit codes, so
         # continuing the outer loop just burns the budget: a renamed URL would
-        # cost ~80 requests before the caller heard about it, and a 26-file
-        # download loop hours. Report it now.
+        # cost 20 requests and 100 s of sleeps before the caller heard about
+        # it, and a 26-file download loop far more. Report it now.
         if (( rc == 22 )) && [[ "$http_code" != "429" && "$http_code" != "408" ]]; then
             echo -e "  ${RED}HTTP ${http_code} for ${url} — permanent, not retrying${NC}" >&2
             return 1
         fi
         # Exit 7 is "could not connect": the host answers instantly with a
-        # rejection, or nothing listens at all. curl's internal --retry has
-        # already re-sent it; one more invocation covers a balancer blip,
-        # and further rounds only multiply sleeps against a down host —
-        # the same policy the python fetchers apply to ECONNREFUSED.
+        # rejection, or nothing listens at all. Two more invocations cover a
+        # balancer blip, and further rounds only multiply sleeps against a
+        # down host — the same policy the python fetchers apply to
+        # ECONNREFUSED.
         if (( rc == 7 )); then
-            if (( attempt >= 1 )); then
+            if (( attempt >= 2 )); then
                 echo -e "  ${RED}cannot connect for ${url} — host down or refusing; not retrying further${NC}" >&2
                 return 1
             fi
