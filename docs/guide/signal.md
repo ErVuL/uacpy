@@ -692,13 +692,32 @@ points across ±`sample_rate/20`.
 | Call | Returns | Notes |
 |---|---|---|
 | `modal_group_velocity(frequencies, k_horizontal)` | m/s, same shape as `k_horizontal` | `dω/dk_r` by finite difference; `frequencies` must be strictly increasing, `k_horizontal` is `(n_freq,)` or `(n_freq, n_modes)` |
-| `warp_signal(signal, sample_rate, range_m, c=1500.0, *, oversample=1)` | `(warped, t_warp)` | `t_w = √(t² − t_r²)`, `t_r = range/c`; `oversample` (≥ 1, fractional allowed) refines the warped grid — round-trip error roughly halves per doubling |
-| `unwarp_signal(warped, t_warp, sample_rate, range_m, c=1500.0)` | `(t, signal)` | back onto the original grid |
+| `warp_signal(signal, sample_rate, range_m, c=1500.0, *, oversample=None, interpolation='linear')` | `(warped, t_warp)` | `t_w = √(t² − t_r²)`, `t_r = range/c`; `oversample=None` takes Bonnel et al. (2020) Eqs. (13)–(14), a factor `2·(1 + t_r/t_max)` in (2, 4); a number overrides it (≥ 1, fractional allowed) and the round-trip error roughly halves per doubling |
+| `unwarp_signal(warped, t_warp, sample_rate, range_m, c=1500.0, *, interpolation='linear')` | `(t, signal)` | back onto the original grid |
 
 `warp_signal` assumes `signal` **starts at the direct arrival** `t_r = range/c`.
 Feed it a record that starts earlier and the warp is meaningless; slice first.
 The warped axis is not uniformly sampled in the original time, so read the
 warped sample rate off `t_warp` rather than assuming it equals `sample_rate`.
+
+**`range_m` and `c` are trial parameters, not measurements.** They enter only
+as `t_r = range/c`, warp→unwarp cancels it exactly, and the source paper warps
+every signal in its tutorial at r = 10 km, c = 1500 m/s while the true ranges
+are 5–15 km. The choice the result *is* sensitive to is the time origin, and
+its failure is asymmetric: too early and the modes smear across the warped
+band and interfere; too late and they sharpen but **mode 1 disappears**.
+
+**Why the default grid is prescribed rather than 1.** The map is expansive, so
+a warped axis the same length as the input sits *below* the paper's own
+Nyquist bound (Eq. C8) by a factor `1 + t_r/t_max` at every range and rate —
+not merely coarse. On white noise over 2–10 kHz and 0.1–20 km the round-trip
+error is 46.5–60.5 % at `oversample=1` against 15.6–20.6 % at the
+prescription. `interpolation='sinc'` (Eq. C12, Whittaker–Shannon) takes that to
+0.0036–0.0067 % — but only on the prescribed grid: on the `oversample=1` grid
+it is *worse* than linear, because an exact reconstruction faithfully
+reproduces the aliased content linear interpolation was smoothing away. It
+costs of order 1500–1700× the time of linear interpolation, which is why it is
+opt-in, and it must be passed to `unwarp_signal` too.
 
 ```python
 from uacpy.acoustic_signal import (
@@ -741,11 +760,15 @@ trick — `t_w = √(t² − t_r²)` is exactly the change of variable that line
 ideal-waveguide dispersion, so a single hydrophone can separate modes that
 overlap in both time and frequency. From there, mode-by-mode filtering in the
 warped domain and `unwarp_signal` back is the standard single-receiver
-source-range and geoacoustic-inversion route (Bonnel et al., JASA 134(2), 2013).
+source-range and geoacoustic-inversion route (Bonnel, Thode, Wright & Chapman,
+*Nonlinear time-warping made simple*, JASA **147**(3), 1897–1926, 2020,
+doi:10.1121/10.0000937 — the operator is Eqs. (7), (10) and (11) on p. 1907).
 
-The warping is derived for the **ideal** waveguide. A real profile and a lossy
-seabed blur the tones; they do not sit as cleanly on the cutoffs as they do
-here, which is why the figure uses a rigid bottom and isovelocity water.
+The warping is derived for the **ideal isovelocity** waveguide. On a real
+profile the warped modes are, in that paper's words, "not the theoretically
+predicted pure tones … but instead are tilted and slightly curved" — still
+separable, but no longer sitting as cleanly on the cutoffs as they do here,
+which is why the figure uses a rigid bottom and isovelocity water.
 
 ---
 

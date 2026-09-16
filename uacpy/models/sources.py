@@ -73,6 +73,25 @@ MODEL_SOURCES: Dict[str, ModelSource] = {
         note='Bellhop (Fortran backend), Kraken, Scooter, SPARC and Bounce. '
              'GPL-3.0 copyleft: derivatives that redistribute must stay GPL.',
     ),
+    'bellhopcxx': ModelSource(
+        id='bellhopcxx',
+        name='bellhopcxx / bellhopcuda',
+        authors='Marine Physical Lab at Scripps Oceanography (The Regents '
+                'of the University of California)',
+        license='GPL-3.0-or-later',
+        citation='bellhopcxx / bellhopcuda, C++/CUDA port of BELLHOP / '
+                 'BELLHOP3D, Copyright (C) 2021-2026 The Regents of the '
+                 'University of California, Marine Physical Lab at Scripps '
+                 'Oceanography; based on BELLHOP / BELLHOP3D, Copyright (C) '
+                 '1983-2022 Michael B. Porter.',
+        url='https://github.com/A-New-BellHope/bellhopcuda',
+        commercial_use=True,      # GPL permits commercial use (copyleft applies)
+        redistributable=True,
+        note='The C++ and CUDA ports of Bellhop, which Bellhop auto-selects '
+             'ahead of the Fortran binary (CUDA > C++ > Fortran). A different '
+             'codebase and a different copyright holder from the Acoustics '
+             'Toolbox Fortran Bellhop, under the same GPL-3.0 copyleft.',
+    ),
     'oases': ModelSource(
         id='oases',
         name='OASES',

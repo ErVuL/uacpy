@@ -26,6 +26,7 @@ from uacpy.acoustic_signal.channel import fractional_delay_taps
 from uacpy.models.base import (
     PropagationModel, RunMode, ModelSpec, USER_FRAME_SKIP,
 )
+from uacpy.models.sources import model_source
 from uacpy.core.environment import Environment, BoundaryProperties, Bottom
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
@@ -694,6 +695,37 @@ class Bellhop(PropagationModel):
         source_types=frozenset({'point', 'line'}),
     )
     source = 'acoustics_toolbox'
+
+    #: Catalogue entry per resolved engine. ``bellhopcxx`` and ``bellhopcuda``
+    #: are one codebase under one copyright holder, so both credit one entry.
+    _SOURCE_BY_VERSION = {
+        'fortran': 'acoustics_toolbox',
+        'cxx': 'bellhopcxx',
+        'cuda': 'bellhopcxx',
+    }
+
+    @property
+    def provenance(self):
+        """The catalogue entry for the binary this instance resolved.
+
+        ``__init__`` auto-selects CUDA > C++ > Fortran among whatever
+        ``install.sh`` built (:meth:`_find_bellhop_executable`), and the
+        C++/CUDA ports are a separate codebase under a separate copyright
+        holder — The Regents of the University of California / Scripps MPL,
+        ``third_party/bellhopcuda/README.md`` — so the credit follows
+        :attr:`version`, the engine that runs, rather than the class-level
+        :attr:`source`. Results therefore agree with themselves:
+        ``result.backend`` and ``result.model_source`` name the same binary.
+
+        A pinned ``executable=`` whose basename matches no engine resolves to
+        ``version='custom'``; uacpy cannot say what that binary is, so it
+        carries no provenance and its results render no model credit rather
+        than an invented one.
+        """
+        version = getattr(self, 'version', None)
+        if version == 'custom':
+            return None
+        return model_source(self._SOURCE_BY_VERSION.get(version, self.source))
 
     def __init__(
         self,

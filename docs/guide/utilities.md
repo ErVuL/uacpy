@@ -63,15 +63,16 @@ values = [uacpy.get_material(n)['sound_speed'] for n in names]
 Ordered by `c_p`, the catalogue splits cleanly. The five unconsolidated
 sediments (clay through moraine) sit within a factor of 1.3 of the water speed
 — clay sits exactly on it — and carry shear speeds of 80–180 m/s, moraine
-excepted at 600. The four rocks jump to 2400–5500 m/s with shear speeds
+excepted at 600. The four rocks jump to 2400–5750 m/s with shear speeds
 of 1000–3000. Attenuation does not track `c_p`: it peaks in the middle of the
 catalogue at silt (1.0 dB/λ) and falls off both ways — to 0.2 dB/λ in clay, the
 slowest material of the nine, and 0.1–0.2 dB/λ in the rocks.
 
-Two caveats the numbers do not carry. `c_s` for the unconsolidated sediments
-is a **near-surface (1 m)** value — real shear speed grows with depth below the
-seabed, so pass an explicit `shear_speed` if you need another depth. And `ϕ`
-(Wentworth grain size) is undefined for consolidated rock, hence the `None`.
+Two caveats the numbers do not carry. `c_s` for silt, sand and gravel is a
+single value standing in for the depth-dependent `c_s(z̄)` their source table
+leaves as a relation, and the depth it refers to is not recorded there — pass an
+explicit `shear_speed` when the depth matters. And `ϕ` (Wentworth grain size) is
+undefined for consolidated rock, hence the `None`.
 
 ### What those numbers buy you
 

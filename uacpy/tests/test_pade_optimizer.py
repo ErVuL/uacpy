@@ -597,7 +597,7 @@ class TestTheScoredBands:
 
     def test_the_stability_band_is_the_mediums_hull(self):
         """Lytaev's own interval over ``inf c`` / ``sup c`` of the whole
-        domain, containing the accuracy band; on granite it crosses the
+        domain, containing the accuracy band; on hard rock it crosses the
         branch point ``ξ = −1`` while the accuracy band does not."""
         c0 = 2047.0
         b = _bands_of(c0, 5500.0)
@@ -625,7 +625,7 @@ class TestOptimalC0FollowsTheBindingEnd:
         assert c0 == pytest.approx(optimal_c0(1500.0, 1500.0, 30.0))
         assert 1590 < c0 < 1592
 
-    def test_granite_takes_the_trapped_bands_symmetric_value(self):
+    def test_hard_rock_takes_the_trapped_bands_symmetric_value(self):
         """``ξ_min = −ξ_max`` with the trapped-mode end: Eq. (15) of
         ``(c_water, c_seabed)`` at zero aperture, 2047 m/s here."""
         c0 = optimal_c0(1500.0, 1500.0, 30.0, c_max_all=5500.0)
@@ -655,7 +655,7 @@ class TestOptimalC0FollowsTheBindingEnd:
 
 
 class TestTheScoreRanksAFastSeabedsGrids:
-    """On granite the one-hull score saturated on every grid; the water-band
+    """On hard rock the one-hull score saturated on every grid; the water-band
     score follows the measured order (8.3 / 5.5 / 1.5 dB rms against
     Kraken for the first three grids below)."""
 
@@ -687,7 +687,7 @@ class TestTheScoreRanksAFastSeabedsGrids:
         for s in self._scores():
             assert 0.0 <= s['growth'] < 1e-6
 
-    def test_granite_gets_a_grid_where_the_one_hull_model_refused(self):
+    def test_hard_rock_gets_a_grid_where_the_one_hull_model_refused(self):
         c0 = optimal_c0(1500.0, 1500.0, 30.0, c_max_all=5500.0)
         kw = dict(freq=200.0, c_min=1500.0, c_max=1500.0, x_max=5000.0,
                   c0=c0, theta_max=30.0, p=6)

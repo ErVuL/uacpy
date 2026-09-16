@@ -521,8 +521,8 @@ class TestAttenuationSagsThePlateauNotTheCriticalAngle:
 
 class TestElasticGraniteShearWindow:
     """bounce.md §4 ('Shear'): between the shear (60°) and compressional
-    (74°) critical angles the elastic granite radiates a shear wave and |R|
-    drops to ~0.73 (closed-form fluid-solid coefficient: 0.73-0.78 across
+    (75°) critical angles the elastic granite radiates a shear wave and |R|
+    drops to ~0.75 (closed-form fluid-solid coefficient: 0.72-0.77 across
     62-72°), while the shear-dropped fluid preset still reflects ~0.999."""
 
     @staticmethod
@@ -554,8 +554,8 @@ class TestElasticGraniteShearWindow:
 class TestSandOverGraniteEtalonNulls:
     """bounce.md §4 ('A layer turns a mirror into a filter'): 8 m of sand on
     granite interferes its two returns into nulls near 34° and 60° at 200 Hz
-    (closed-form two-interface recursion: |R| 0.162 at 33.9° and 0.600 at
-    59.3°). Bounds, not exact values — the binary meshes the layer while the
+    (closed-form two-interface recursion: |R| 0.178 at 34.0° and 0.609 at
+    59.4°). Bounds, not exact values — the binary meshes the layer while the
     closed form does not."""
 
     @pytest.fixture(scope='class')

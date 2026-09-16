@@ -445,7 +445,9 @@ env = uacpy.data.fetch_environment((43.2, 7.5), bottom_sources='auto',
 the ϕ literal `bottom=2.0` alike, and each seabed is still scaled to the
 water at its own seafloor. It does not touch what carries its own numbers: a
 class-name literal, a `BoundaryProperties`, the CRUST1.0 layers, and the
-hard-substrate presets EMODnet rock and DECK41 `'rock'` route through. The
+presets EMODnet rock, DECK41 `'rock'` and DECK41 gravel route through — the
+last because gravel is coarser than either grain-size relation is fitted
+over. The
 seabed keeps its `grain_size_phi` either way, which is what the
 high-frequency scattering model in `uacpy.sonar` reads back:
 `BottomParameters.from_environment(env)` (see the

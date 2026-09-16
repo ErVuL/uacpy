@@ -14,6 +14,9 @@ Three properties matter and each is pinned here:
   different signal.
 * **The accuracy knob works.** ``oversample`` is honoured as a fraction rather
   than truncated to an integer, which had made every setting below 2 a no-op.
+* **The warped grid clears its own Nyquist bound.** The default follows
+  Bonnel et al. (2020) Eq. (13); Eq. (C8) is the bound it has to clear, and it
+  is the bound rather than the resulting length that is pinned.
 """
 
 import inspect
@@ -77,8 +80,12 @@ class TestWarpIsUnitary:
     Its reciprocal inflates energy by a factor that grows with range — ~30x at
     20 km — which the range-independence test below is what detects.
 
-    Bonnel et al. (2013) is not in the corpus here, so the weight is pinned by
-    the conservation law the docstring itself claims rather than by citation.
+    The weight is ``sqrt(|h'(t)|)`` of Bonnel, Thode, Wright & Chapman (2020),
+    *JASA* **147**(3) 1897-1926, Eq. (7) on p. 1907, with ``h`` their Eq. (10)
+    ``sqrt(t^2 + t_r^2)``; discretely it is their Eq. (15)'s
+    ``sqrt(t_k/h(t_k))``, which is the shipped expression. The tests below pin
+    the conservation law rather than the algebra, because that is the property
+    a wrong weight breaks.
     """
 
     FS = 2000.0
@@ -250,6 +257,7 @@ class TestWarpRoundTripErrorMatchesTheDocumentedFigures:
                 + 0.5 * np.sin(2 * np.pi * 120 * t)) * np.hanning(n)
 
     @pytest.mark.parametrize('oversample, expected_pct', [(1, 0.0674),
+                                                          (None, 0.0188),
                                                           (8, 0.0079)])
     def test_the_band_limited_transient_figures(self, oversample,
                                                 expected_pct):
@@ -257,6 +265,7 @@ class TestWarpRoundTripErrorMatchesTheDocumentedFigures:
         assert got == pytest.approx(expected_pct, abs=5e-4)
 
     @pytest.mark.parametrize('oversample, lo_pct, hi_pct', [(1, 46.0, 61.0),
+                                                            (None, 15.0, 21.0),
                                                             (8, 5.8, 8.2)])
     def test_the_white_noise_figures_over_a_grid_of_rates_and_ranges(
             self, oversample, lo_pct, hi_pct):
@@ -272,6 +281,108 @@ class TestWarpRoundTripErrorMatchesTheDocumentedFigures:
                 for k in (1, 2, 4, 8, 16, 32)]
         ratios = [a / b for a, b in zip(errs, errs[1:])]
         assert all(1.8 <= q <= 2.2 for q in ratios), ratios
+
+
+class TestTheWarpedGridClearsItsNyquistBound:
+    """Bonnel et al. (2020) Eq. (C8): the warped signal's sampling rate has to
+    exceed ``[h^-1(t_max)/t_max]·f_s``, or the warped grid cannot carry the
+    band the original did. The default grid is Eq. (13)'s ``f_s^h = 2/dt_N``,
+    whose factor 2 is the paper's own margin over that bound.
+
+    The **bound** is what is pinned, over a ladder of ranges and sample rates,
+    rather than any resulting length — a length is an accident of one case.
+    Both sides are asserted: a fixed ``oversample=1`` sits *below* the bound
+    at every point on the same ladder, so the first assertion alone could not
+    tell a default that clears it from one that merely happened to.
+    """
+
+    N = 512
+    C = 1500.0
+    LADDER = [(fs, r) for fs in (2000.0, 5000.0, 10000.0)
+              for r in (100.0, 500.0, 1000.0, 5000.0, 20000.0)]
+
+    def _rate_and_bound(self, fs, r, oversample):
+        t_r = r / self.C
+        t_max = t_r + (self.N - 1) / fs
+        span = np.sqrt(t_max ** 2 - t_r ** 2)
+        _w, tw = warp_signal(np.zeros(self.N), fs, r, c=self.C,
+                             oversample=oversample)
+        achieved = (tw.size - 1) / (tw[-1] - tw[0])
+        return achieved, (span / t_max) * fs
+
+    @pytest.mark.parametrize('fs,r', LADDER)
+    def test_the_default_grid_clears_the_bound(self, fs, r):
+        achieved, bound = self._rate_and_bound(fs, r, None)
+        assert achieved > bound, (
+            f"fs={fs} r={r}: warped rate {achieved:.1f} Hz is at or below "
+            f"the Eq. (C8) bound {bound:.1f} Hz")
+
+    @pytest.mark.parametrize('fs,r', LADDER)
+    def test_a_fixed_factor_of_one_falls_below_the_bound(self, fs, r):
+        achieved, bound = self._rate_and_bound(fs, r, 1)
+        assert achieved < bound, (
+            f"fs={fs} r={r}: oversample=1 gave {achieved:.1f} Hz, which "
+            f"clears the Eq. (C8) bound {bound:.1f} Hz — then the default "
+            f"is not doing anything the fixed factor did not")
+
+    @pytest.mark.parametrize('fs,r', LADDER)
+    def test_the_default_length_is_the_documented_factor(self, fs, r):
+        """``K/n = 2·(1 + t_r/t_max)``, always in (2, 4) — the relation the
+        docstring states, checked as a relation rather than as a number."""
+        t_r = r / self.C
+        t_max = t_r + (self.N - 1) / fs
+        _w, tw = warp_signal(np.zeros(self.N), fs, r, c=self.C)
+        factor = tw.size / self.N
+        assert 2.0 < factor < 4.0, factor
+        assert factor == pytest.approx(2.0 * (1.0 + t_r / t_max), rel=0.02)
+
+    def test_a_number_overrides_the_prescription(self):
+        """The change is to the default, not to the contract."""
+        w, _tw = warp_signal(np.zeros(self.N), 10000.0, 1000.0, oversample=3)
+        assert w.size == self.N * 3
+
+
+class TestSincInterpolationNeedsThePrescribedGrid:
+    """Eq. (C12), Whittaker-Shannon, is what the paper advises over linear
+    interpolation — but only pays on a grid that satisfies Eq. (C8). On the
+    prescribed grid it makes the round trip essentially exact; on a fixed
+    ``oversample=1`` grid, which is below the bound, it is *worse* than
+    linear, because an exact reconstruction faithfully reproduces the aliased
+    content linear interpolation was accidentally smoothing away.
+
+    Both halves are asserted. Adopting the kernel without the grid is the
+    trap, and a test of the good case alone would not name it.
+    """
+
+    NOISE = np.random.default_rng(1).standard_normal(2048)
+
+    @staticmethod
+    def _roundtrip(x, fs, r, oversample, interpolation, c=1500.0):
+        w, tw = warp_signal(x, fs, r, c=c, oversample=oversample,
+                            interpolation=interpolation)
+        _, back = unwarp_signal(w, tw, fs, r, c=c,
+                                interpolation=interpolation)
+        n = min(back.size, x.size)
+        return 100.0 * float(np.linalg.norm(back[:n] - x[:n])
+                             / np.linalg.norm(x[:n]))
+
+    def test_on_the_prescribed_grid_the_round_trip_is_essentially_exact(self):
+        errs = [self._roundtrip(self.NOISE, fs, r, None, 'sinc')
+                for fs in (2000.0, 10000.0)
+                for r in (100.0, 1000.0, 20000.0)]
+        assert max(errs) < 0.01, errs
+
+    def test_on_an_undersampled_grid_it_is_worse_than_linear(self):
+        args = (self.NOISE, 10000.0, 1000.0, 1)
+        assert (self._roundtrip(*args, 'sinc')
+                > self._roundtrip(*args, 'linear'))
+
+    def test_an_unknown_kernel_is_refused_by_name(self):
+        with pytest.raises(ConfigurationError, match="interpolation must be"):
+            warp_signal(self.NOISE, FS, 1000.0, interpolation='cubic')
+        with pytest.raises(ConfigurationError, match="interpolation must be"):
+            w, tw = warp_signal(self.NOISE, FS, 1000.0)
+            unwarp_signal(w, tw, FS, 1000.0, interpolation='cubic')
 
 
 class TestModalGroupVelocityRefusesAFlatWavenumberAxis:

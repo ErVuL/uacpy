@@ -43,7 +43,10 @@ __all__ = [
 ]
 
 #: Water sound speed the report's Table 3 and Figure 2 were computed with
-#: (TR 9407 p. IV-21), and the ``c1`` its loss-parameter relation Eq. 4 uses.
+#: (TR 9407 p. IV-21), and the value of ``c1`` — the water sound speed, p. IV-8
+#: "All subscripts 1 refer to water" — the report states it used in determining
+#: the loss parameter from Eq. 4 (p. IV-9). It reproduces Table 2's printed
+#: loss-parameter column, where 1500 m/s reproduces none of it.
 TABLE_WATER_SOUND_SPEED = 1528.0
 
 #: Reference length of the relief spectrum, cm (Eq. 7).
@@ -145,6 +148,25 @@ def _grain_size_spectral_strength(mz: float) -> float:
     return 0.00207 * h ** 2 * _H0_CM ** 2
 
 
+def _checked_grain_size(grain_size_phi: float, caller: str) -> float:
+    """``Mz`` for a caller-supplied grain size: non-finite rejected, outside
+    the interval Eqs. 2-10 are defined on clamped with a warning."""
+    mz = float(grain_size_phi)
+    if not np.isfinite(mz):
+        raise ConfigurationError(
+            f"BottomParameters.{caller}: grain_size_phi must be "
+            f"finite; got {grain_size_phi!r}.")
+    lo, hi = _GRAIN_SIZE_RANGE
+    if mz < lo or mz > hi:
+        warnings.warn(
+            f"BottomParameters.{caller}: Mz={mz:g} is outside the "
+            f"{lo:g} <= Mz <= {hi:g} interval TR 9407 Eqs. 2-10 are defined "
+            f"on (p. IV-8); evaluating at the nearer end.",
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
+        mz = min(max(mz, lo), hi)
+    return mz
+
+
 def _grain_size_from_speed_ratio(speed_ratio: float) -> float:
     """Invert Eq. 3 for Mz on [-1, 9] (monotone decreasing there): the
     report's preferred route from geoacoustics to grain size (p. IV-12)."""
@@ -229,19 +251,7 @@ class BottomParameters:
         defined for ``-1 <= Mz <= 9``; values outside are clamped with a
         warning, the relations being fits over that interval only.
         """
-        mz = float(grain_size_phi)
-        if not np.isfinite(mz):
-            raise ConfigurationError(
-                f"BottomParameters.from_grain_size: grain_size_phi must be "
-                f"finite; got {grain_size_phi!r}.")
-        lo, hi = _GRAIN_SIZE_RANGE
-        if mz < lo or mz > hi:
-            warnings.warn(
-                f"BottomParameters.from_grain_size: Mz={mz:g} is outside the "
-                f"{lo:g} <= Mz <= {hi:g} interval TR 9407 Eqs. 2-10 are defined "
-                f"on (p. IV-8); evaluating at the nearer end.",
-                UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
-            mz = min(max(mz, lo), hi)
+        mz = _checked_grain_size(grain_size_phi, 'from_grain_size')
         nu = _grain_size_speed_ratio(mz)
         return cls(density_ratio=_grain_size_density_ratio(mz),
                    speed_ratio=nu,
@@ -292,14 +302,32 @@ class BottomParameters:
         give, ``sigma2`` and ``w2``, are taken from grain size when supplied,
         otherwise from the grain size that inverts the sound-speed relation
         Eq. 3 — "the preferred means of determining Mz" (p. IV-12) — unless
-        given explicitly.
+        given explicitly. A supplied ``grain_size_phi`` is held to the same
+        interval :meth:`from_grain_size` holds it to: non-finite is refused,
+        and outside ``-1 <= Mz <= 9`` it is clamped with a warning, the two
+        parameters it feeds being ones the report says the backscattering
+        strength is particularly sensitive to (p. IV-5).
+
+        ``delta`` here is built from the attenuation alone, with no ``c1``,
+        while :meth:`from_grain_size` builds it through Eq. 4 at the ``c1`` the
+        report used (``TABLE_WATER_SOUND_SPEED``). Give the same seabed to both
+        and their ``delta`` differ by the ratio of that ``c1`` to the water
+        sound speed the attenuation was scaled by, this method's being the
+        smaller — 1528/1500 - 1 = 1.87 % apart when the
+        geoacoustics came from
+        :func:`uacpy.core.sediment.grain_size_to_geoacoustics` under
+        ``model='apl-uw'`` at its 1500 m/s default. ``rho`` and ``nu`` agree
+        exactly.
         """
         nu = float(sound_speed) / float(water_sound_speed)
         rho = float(density) / float(water_density)
         delta = float(attenuation_dB_per_wavelength) * np.log(10.0) / (40.0 * np.pi)
-        mz = (float(grain_size_phi) if grain_size_phi is not None
-              else _grain_size_from_speed_ratio(nu))
-        mz = min(max(mz, _GRAIN_SIZE_RANGE[0]), _GRAIN_SIZE_RANGE[1])
+        if grain_size_phi is not None:
+            mz = _checked_grain_size(grain_size_phi, 'from_geoacoustics')
+        else:
+            # The inversion is a bisection over the interval, so it cannot
+            # leave it and needs no guard of its own.
+            mz = _grain_size_from_speed_ratio(nu)
         return cls(
             density_ratio=rho, speed_ratio=nu, loss_parameter=delta,
             volume_parameter=(float(volume_parameter) if volume_parameter is not None
@@ -336,9 +364,10 @@ class BottomParameters:
         - ``'auto'`` (default) — ``'grain-size'`` when the boundary carries a
           grain size, else ``'geoacoustics'``. With the seabed fetched under
           ``bottom_model='apl-uw'`` the two routes give the same ``rho`` and
-          ``nu``; under the default ``'hamilton'`` they differ by the two
-          relations, and the grain-size route keeps the handbook's own
-          seabed.
+          ``nu``, and ``delta`` differing by the ``c1`` factor
+          :meth:`from_geoacoustics` describes; under the default
+          ``'hamilton'`` they differ by the two relations, and the grain-size
+          route keeps the handbook's own seabed.
 
         ``water_sound_speed`` (m/s) and ``water_density`` (g/cm³) are the water
         at the seafloor the ratios are formed against;

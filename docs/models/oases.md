@@ -63,7 +63,7 @@ Fluid-approximate the seabed and it disappears entirely:
 Left: the plane-wave bottom loss of a granite seabed, computed twice — once
 with the granite's shear speed dropped (what `from_preset` hands you unless
 you ask for `elastic=True`) and once kept. Below its compressional critical
-angle, `arccos(1490/5500) = 74°`, the wave is evanescent in the fluid rock and
+angle, `arccos(1490/5750) = 75°`, the wave is evanescent in the fluid rock and
 the granite's small `αp = 0.1 dB/λ` costs only ~0.0015 dB per bounce — near
 enough a perfect mirror, though it is the small `α` that makes it so, not the
 evanescence. The elastic rock leaks more than twenty times as much, ~0.04 dB,

@@ -265,8 +265,8 @@ class TestDocumentedModeCounts:
         # kraken.md §6.2 "28 modes here against 14 for the same water column";
         # the env below is docs/figure_scripts/_common.py
         # layered_elastic(), verbatim. ``from_presets`` fluid-approximates
-        # by default, so the count rides on granite's 5500 m/s
-        # *compressional* speed lifting the auto c_high to 5775 m/s — the
+        # by default, so the count rides on granite's 5750 m/s
+        # *compressional* speed lifting the auto c_high to 6037.5 m/s — the
         # extra steep modes only exist because the basement supports them.
         env = uacpy.Environment(
             name='Layered elastic seabed',

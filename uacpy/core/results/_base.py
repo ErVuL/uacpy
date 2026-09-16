@@ -68,8 +68,27 @@ class PhaseReference(str, Enum):
 # (grep ``_attach_output_paths`` and ``_result_kwargs(`` calls per model).
 _UNIVERSAL_METADATA: Dict[str, Tuple[type, str]] = {
     'prt_file': (
-        str, 'Acoustics-Toolbox / RAM diagnostic .prt log (only when '
-        'work_dir is pinned).'
+        str, "Acoustics-Toolbox diagnostic .prt log (only when the run's "
+        'scratch survives, i.e. cleanup=False — which is the default '
+        'whenever work_dir is pinned). The RAM and OASES families write no '
+        'print file.'
+    ),
+    # Written by ``Field`` producers across every model, and read back by
+    # ``Field.kind`` / ``Field.unit``, so they are model-independent.
+    'kind': (
+        str, 'What the Field is, as a quantity: one of the names registered '
+        'in uacpy.core.results.quantities (pressure, reverberation, '
+        'signal_excess, difference, probability_of_detection, ambiguity). '
+        'Read by Field.kind, and keyed on by the plotters for the colour '
+        'scale and the axis label.'
+    ),
+    'unit': (
+        str, 'What the Field is measured in — one of the units its kind '
+        'registers in uacpy.core.results.quantities (\'Pa\' or \'dB\' for '
+        'pressure, \'dB\' for the loss-like kinds, \'1\' for a '
+        'probability). Read by Field.unit, rewritten by Field.to_dB, and '
+        'the flag Field.max branches on to decide which direction is '
+        'louder.'
     ),
     # Attached by the shared Field synthesis helpers (``to_time_trace`` /
     # ``synthesize_time_series``), so they are model-independent.
@@ -322,8 +341,18 @@ _DOCUMENTED_METADATA: Dict[Tuple[str, str], Tuple[type, str]] = {
         'physical extremes ride on c_min / c_max).'
     ),
     ('RAM', 'c_min'): (
-        float, 'Minimum sound speed (m/s) the solver brackets — used by '
-        'the per-wavelength stability cap on dr.'
+        float, 'Slowest compressional speed (m/s) anywhere in the modelled '
+        'waveguide — water column plus every bottom layer and half-space, '
+        'the mirror of c_max, and the same quantity on every backend. The '
+        'automatic grid chooser floors dz on it at c_min/(16·f), and caps '
+        'the rotated ``rams`` march at dr = c_min/(5·f).'
+    ),
+    ('RAM', 'tdelay_speed'): (
+        float, 'Minimum WATER-column sound speed (m/s) mpiramS read out of '
+        'its own profile and wrote into the psif.dat header — the speed it '
+        'anchors its time window with (``peramx.f90:295``, '
+        '``cmin=minval(cw)``; header record at ``:469``). Broadband mpiramS '
+        'runs only. Distinct from c_min, which spans the sediment too.'
     ),
     ('RAM', 'dr'): (float, 'Range step (m) used by the PE.'),
     ('RAM', 'dz'): (float, 'Depth step (m) used by the PE.'),
@@ -343,6 +372,14 @@ _DOCUMENTED_METADATA: Dict[Tuple[str, str], Tuple[type, str]] = {
         float, 'Time-series sample rate (Hz) for TIME_SERIES results.'
     ),
     ('RAM', 'tl_grid_file'): (str, 'tl.grid TL output from Collins backends.'),
+    ('RAM', 'tl_line_file'): (
+        str, "tl.line, the Collins backends' ASCII ``range  TL`` trace at the "
+        'single deck receiver depth. Written every MARCH step, not every '
+        'ndr-th one like tl.grid (``ramgeo1.5.f:420-425``: the write sits '
+        'above the ``if(mdr.eq.ndr)`` block), so it is a finer range axis '
+        'than the Field. uacpy builds its Field from tl.grid; read this with '
+        'uacpy.io.read_tl_line.'
+    ),
     ('RAM', 'pcomplex_file'): (str, 'pcomplex.bin complex-pressure output.'),
     ('RAM', 'in_file'): (str, 'ram.in input file consumed by the backend.'),
     ('RAM', 'psif_file'): (str, 'psif.dat broadband output from mpiramS.'),
@@ -564,9 +601,19 @@ class Result(_DeepCopyMixin):
         Name of the wrapper class that produced this result (e.g. ``'RAM'``,
         ``'Bellhop'``, ``'Kraken'``).
     backend : str, optional
-        Concrete binary that ran (e.g. ``'mpiramS'``, ``'kraken.exe'``,
-        ``'bellhop'``). Defaults to ``model.lower()`` when the wrapper is
-        not a dispatcher.
+        The engine that actually ran, as the wrapper resolved it (e.g.
+        ``'mpiramS'``, ``'kraken'``, ``'field'``, ``'cuda'``). Defaults to
+        ``model.lower()`` when the wrapper is not a dispatcher.
+
+        It is the *resolved* engine, which need not be the one a
+        ``backend=`` argument asked for, and the relation differs per
+        dispatcher: ``RAM(backend=…)`` round-trips; ``Kraken`` stamps the
+        field binary (``'field'``) and keeps the modes binary under
+        ``metadata['modes_backend']``; ``Bellhop`` stamps the engine family
+        it resolved (``'fortran'``, ``'cxx'``, ``'cuda'``, ``'custom'``),
+        which falls back to Fortran with a warning when the requested
+        variant is not built. Read this field, not the constructor
+        argument, to know what produced the numbers.
     source_depths : array-like, optional
         Source depths used in the run (m). Stored as a 1-D ndarray.
     frequencies : array-like, optional

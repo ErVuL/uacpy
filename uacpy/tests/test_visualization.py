@@ -886,6 +886,70 @@ class TestPlotReflectionCoefficient:
         plt.close(fig)
 
 
+class TestReflectionCoefficientPanelNamesItsQuantity:
+    """OASR returns a TRANSMISSION coefficient under
+    ``reflection_type='transmission'`` — a different quantity from a
+    reflection coefficient, and one that is not bounded by 1. The panel says
+    which of the two it is drawing instead of labelling everything ``|R|``.
+    """
+
+    @staticmethod
+    def _narrowband(reflection_type=None):
+        metadata = ({} if reflection_type is None
+                    else {'reflection_type': reflection_type})
+        return ReflectionCoefficient(
+            theta=np.linspace(0, 90, 91),
+            R=np.linspace(1.0, 0.0, 91),
+            phi=np.zeros(91),
+            model='OASR', metadata=metadata,
+        )
+
+    @staticmethod
+    def _broadband(reflection_type=None):
+        theta = np.linspace(0, 90, 31)
+        R = np.tile(np.linspace(1.0, 0.0, 31)[:, None], (1, 10))
+        metadata = ({} if reflection_type is None
+                    else {'reflection_type': reflection_type})
+        return ReflectionCoefficient(
+            theta=theta, R=R, phi=np.zeros_like(R),
+            frequencies=np.linspace(50, 500, 10),
+            model='OASR', metadata=metadata,
+        )
+
+    @pytest.mark.parametrize('build', ['_narrowband', '_broadband'])
+    def test_a_transmission_run_is_titled_and_labelled_as_one(self, build):
+        rc = getattr(self, build)('transmission')
+        fig, ax = rc.plot()
+        try:
+            assert 'Transmission coefficient' in ax.get_title()
+            assert 'Reflection' not in ax.get_title()
+            assert '|T|' in (ax.get_ylabel() + ''.join(
+                cb.ax.get_ylabel() for cb in _colorbars(fig)))
+        finally:
+            plt.close(fig)
+
+    @pytest.mark.parametrize('build', ['_narrowband', '_broadband'])
+    @pytest.mark.parametrize('reflection_type', [None, 'P-P', 'P-SV'])
+    def test_every_other_type_stays_a_reflection_coefficient(
+            self, build, reflection_type):
+        """Both sides of the branch: a missing key and the reflection-valued
+        options all keep the |R| labelling, so the transmission case is the
+        only one that changes."""
+        rc = getattr(self, build)(reflection_type)
+        fig, ax = rc.plot()
+        try:
+            assert 'Reflection coefficient' in ax.get_title()
+            assert 'Transmission' not in ax.get_title()
+        finally:
+            plt.close(fig)
+
+
+def _colorbars(fig):
+    return [getattr(im, 'colorbar') for ax in fig.axes
+            for im in ax.get_children()
+            if getattr(im, 'colorbar', None) is not None]
+
+
 class TestTLLimits:
     """The fixed TL colour scale used everywhere TL is drawn."""
 

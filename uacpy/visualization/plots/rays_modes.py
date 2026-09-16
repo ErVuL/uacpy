@@ -952,6 +952,21 @@ def plot_modes_heatmap(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def _coefficient_symbol(rc: ReflectionCoefficient) -> Tuple[str, str]:
+    """``(symbol letter, quantity name)`` for what this result actually holds.
+
+    OASR returns a transmission coefficient under ``reflection_type=
+    'transmission'`` (``models/oases.py`` ``_resolve_reflection_type``), and
+    that column is an amplitude ratio across the interface, not a reflection
+    coefficient — it is not bounded by 1 and it is not the same quantity. A
+    result carrying no ``reflection_type`` is a reflection coefficient:
+    Bounce writes only BRC/TRC tables, and OASR's own default is 'P-P'.
+    """
+    if rc.metadata.get('reflection_type') == 'transmission':
+        return 'T', 'Transmission coefficient'
+    return 'R', 'Reflection coefficient'
+
+
 @typed_plot_error
 def _plot_reflection_coefficient(
     rc: ReflectionCoefficient,
@@ -1003,20 +1018,22 @@ def _plot_reflection_coefficient(
             xlabel, ylabel = f_label, 'Grazing angle (°)'
         im = ax.pcolormesh(x, y, C, shading='nearest', cmap=cmap,
                            vmin=vmin, vmax=vmax)
+        letter, quantity = _coefficient_symbol(rc)
         if show_colorbar:
-            fig.colorbar(im, ax=ax, label='|R|')
+            fig.colorbar(im, ax=ax, label=f'|{letter}|')
         ax.set_xlabel(xlabel)
         ax.set_ylabel(ylabel)
-        ax.set_title(_title_or(title, 'Reflection coefficient |R(θ, f)|'))
+        ax.set_title(_title_or(title, f'{quantity} |{letter}(θ, f)|'))
         if _owns_fig:
             _draw_result_credit(fig, rc, env=None)
         return fig, ax
 
     _owns_fig = ax is None
     fig, ax = fig_ax(ax, figsize)
-    ax.plot(rc.theta, rc.R, label='|R|', color='C0')
+    letter, quantity = _coefficient_symbol(rc)
+    ax.plot(rc.theta, rc.R, label=f'|{letter}|', color='C0')
     ax.set_xlabel('Grazing angle (°)')
-    ax.set_ylabel('|R|', color='C0')
+    ax.set_ylabel(f'|{letter}|', color='C0')
     ax.tick_params(axis='y', labelcolor='C0')
     ax.grid(True, alpha=0.3)
     if show_phase:
@@ -1025,7 +1042,7 @@ def _plot_reflection_coefficient(
                     label='φ')
         ax_phi.set_ylabel('Phase (°)', color='C1')
         ax_phi.tick_params(axis='y', labelcolor='C1')
-    ax.set_title(_title_or(title, 'Reflection coefficient'))
+    ax.set_title(_title_or(title, quantity))
     if _owns_fig:
         _draw_result_credit(fig, rc, env=None)
     return fig, ax

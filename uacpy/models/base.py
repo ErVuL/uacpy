@@ -2999,9 +2999,12 @@ class PropagationModel(ABC):
         of the stamp. Anything in ``extra`` is stored on the result's
         ``metadata`` ad-hoc bag.
 
-        ``backend`` names the concrete binary that ran and is lowercase
-        across the package (``'scooter'``, ``'oast'``, ``'mpiramS'``, …), so
-        the default lowercases the class name rather than mixing conventions.
+        ``backend`` names the engine that ran, and the default lowercases
+        the class name rather than mixing conventions (``'scooter'``,
+        ``'oast'``, …). A dispatcher that passes its own string keeps the
+        binary's spelling, so the stamp is not lowercase everywhere:
+        ``'mpiramS'`` is the one that is not, and a caller comparing
+        ``result.backend`` must either match it exactly or fold the case.
 
         Identification only: this stamps who produced the result, never what
         it means numerically. Nothing here — nor anywhere else in

@@ -298,7 +298,7 @@ for i, name in enumerate(names):
 
 This is the whole reason "the bottom type" matters. Harder bottom → faster
 sound → larger critical angle → a wider cone of angles trapped in the water
-column. Granite holds on to everything out to 74°; silt gives up beyond 18°,
+column. Granite holds on to everything out to 75°; silt gives up beyond 18°,
 and leaks even below that.
 
 Clay is the instructive extreme: its sound speed *equals* the water's, so there

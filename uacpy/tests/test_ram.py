@@ -479,10 +479,10 @@ class TestAbsorbingRampLeavesTheSedimentColumnAlone:
 class TestTheAbsorberIsCountedInReferenceWavelengths:
     """``absorbing_layer_width`` counts wavelengths of the PE reference
     speed ``c0`` at every site that reads it. Counting basement wavelengths
-    instead was measured and refuted: on lossless rock and granite the
+    instead was measured and refuted: on lossless rock and hard rock the
     field moves ≤ 0.3 / 0.000 dB between the width and twice it under
-    either count, for ×2.1 depth nodes on granite at 100 Hz and ×2.3 at
-    25 Hz — the ramp already absorbs 37 dB one way on granite."""
+    either count, for ×2.1 depth nodes on hard rock at 100 Hz and ×2.3 at
+    25 Hz — the ramp already absorbs 37 dB one way on hard rock."""
 
     FREQ = 100.0
 
@@ -494,7 +494,7 @@ class TestTheAbsorberIsCountedInReferenceWavelengths:
                                       sound_speed=c_bottom, density=2.0,
                                       attenuation=0.1))
 
-    def test_a_granite_basement_gets_reference_wavelengths(self):
+    def test_a_hard_rock_basement_gets_reference_wavelengths(self):
         model = RAM(verbose=False)
         env = self._half_space(5500.0)
         c0 = model._resolve_c0(env)
@@ -1482,6 +1482,73 @@ class TestBroadbandSynthesisWindowAnchor:
         assert abs(peak - arrival) < 0.05, (
             f"energy peak at {peak:.3f} s is not the {arrival:.3f} s arrival "
             f"(a wrapped record puts it ~one window earlier)")
+
+
+class TestCMinIsOneQuantityOnEveryPath:
+    """``metadata['c_min']`` is the slowest compressional speed ANYWHERE in
+    the environment — water column plus seabed — on every backend and every
+    run mode, the mirror of ``c_max``. A mud half-space slower than the water
+    separates that from the water-column minimum, which is the other quantity
+    the key could plausibly carry: 1450 m/s against 1500.
+
+    The environment minimum is the one the registry describes, because it is
+    what the automatic grid chooser floors ``dz`` on (``ram.py`` binds
+    ``c_min_all`` from ``_speed_bounds``, not from ``_water_speed_bounds``).
+    mpiramS's own header ``cmin`` is the *water* minimum
+    (``peramx.f90:295``) and rides on ``tdelay_speed`` instead.
+    """
+
+    WATER_SPEED = 1500.0
+    SEABED_SPEED = 1450.0
+
+    def _env(self):
+        return Environment(
+            bathymetry=100.0, ssp=self.WATER_SPEED,
+            bottom=BoundaryProperties(
+                acoustic_type='half-space', sound_speed=self.SEABED_SPEED,
+                density=1.5, attenuation=0.5))
+
+    @staticmethod
+    def _geometry():
+        return (Source(depths=25.0, frequencies=100.0),
+                Receiver(depths=np.array([50.0]),
+                         ranges=np.array([1000.0, 2000.0])))
+
+    @pytest.mark.parametrize('backend', ['mpiramS', 'ramgeo'])
+    def test_narrowband_stamps_the_environment_minimum(self, backend):
+        env = self._env()
+        src, rcv = self._geometry()
+        field = RAM(verbose=False, backend=backend).run(env, src, rcv)
+        assert 'c_min' in field.metadata, (
+            f"{backend} narrowband stamped no c_min; keys: "
+            f"{sorted(field.metadata)}")
+        assert float(field.metadata['c_min']) == pytest.approx(
+            self.SEABED_SPEED), (
+            f"{backend} narrowband c_min={field.metadata['c_min']} is not the "
+            f"environment minimum {self.SEABED_SPEED}")
+
+    def test_broadband_mpirams_stamps_the_environment_minimum(self):
+        env = self._env()
+        src, rcv = self._geometry()
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            tf = RAM(verbose=False, backend='mpiramS', Q=4.0, T=0.4).run(
+                env, src, rcv, run_mode=RunMode.BROADBAND)
+        assert float(tf.metadata['c_min']) == pytest.approx(self.SEABED_SPEED)
+
+    def test_broadband_mpirams_keeps_the_binary_water_minimum_apart(self):
+        """Both quantities are on the result, under different keys, and they
+        are different numbers on this environment — which is what makes one
+        key carrying both a defect rather than a naming preference."""
+        env = self._env()
+        src, rcv = self._geometry()
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            tf = RAM(verbose=False, backend='mpiramS', Q=4.0, T=0.4).run(
+                env, src, rcv, run_mode=RunMode.BROADBAND)
+        assert float(tf.metadata['tdelay_speed']) == pytest.approx(
+            self.WATER_SPEED)
+        assert float(tf.metadata['c_min']) == pytest.approx(self.SEABED_SPEED)
 
 
 def _elastic_halfspace():
@@ -3831,14 +3898,14 @@ class TestTheTrappedModeWarning:
 
     def test_the_depth_budget_stops_the_refinement_and_the_warning_names_it(
             self):
-        """Both sides of ``MAX_DEPTH_POINTS``: the dz granite needs at
+        """Both sides of ``MAX_DEPTH_POINTS``: the dz hard rock needs at
         200 Hz is ~λ/162, which 400 m of water holds under the budget and
         600 m does not. Past it the automatic dz stops at the budget and
         the marched-grid warning names the need and the budget."""
         from uacpy.models.ram import MAX_DEPTH_POINTS, SEAFLOOR_CELL_OFFSET
 
         def grid(h):
-            # The real search: granite needs its own dr (2.9 m), not the
+            # The real search: hard rock needs its own dr (2.9 m), not the
             # stub's 19 m, for any dz to carry the 74° mode.
             m = RAM(backend='mpiramS', verbose=False)
             logged = []

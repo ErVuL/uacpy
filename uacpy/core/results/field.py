@@ -2047,6 +2047,14 @@ def _estimate_t_start(tf: "Field", actual_range: float, T_window: float,
     # error. A 5 % spread is representative of an ocean waveguide; when
     # it exceeds the lead the first arrival can fall before the window
     # and wrap to the end of the record.
+    #
+    # Where the 5 % lives, exactly: c0 is a SURFACE sample, so it is the
+    # fastest water speed only on a downward-refracting profile. The
+    # window wraps when r(1/c0 - 1/c_fast) > T/2, and this test fires when
+    # 0.05·r/c0 > T/2, so it covers the wrap iff c0 >= 0.95·c_fast — i.e.
+    # while the surface sample is within 5 % of the profile maximum. An
+    # upward-refracting column with a wider spread (a cold surface over a
+    # deep sound channel) leaves a band of window lengths uncovered.
     elif not c_max and t_start > 0.0 and 0.05 * travel > lead:
         warnings.warn(
             f"{who}: the {T_window:.3g}s synthesis window is "

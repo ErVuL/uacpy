@@ -110,16 +110,18 @@ def plot_field(
     value : str
         ``'dB'``, ``'mag_dB'`` (``20·log10|H|``), ``'mag'``, ``'phase'``,
         ``'real'``, ``'imag'``. Defaults to ``'real'`` for a time-series
-        field and ``'dB'`` otherwise.
+        field and for a real dimensionless one (a detection probability,
+        ``unit='1'``), ``'dB'`` otherwise.
     vmin, vmax : float, optional
         Colour limits (2-D heatmap only). What an unset limit falls back to
         depends on the quantity, since only some of them have a window that
         means something: a **pressure** field's ``value='dB'`` view takes the
         fixed 20–120 dB TL scale (``_TL_LIMITS``), so TL panels stay directly
         comparable across models, frequencies and runs; **signal excess**
-        takes a window symmetric about its 0 dB detection boundary; a
-        **probability** takes a fixed [0, 1]; and everything else, including
-        reverberation and ``value='mag_dB'``, autoscales.
+        (and a ``kind='difference'`` residual) takes a window symmetric about
+        its 0 dB boundary; a **probability** takes a fixed [0, 1]; and
+        everything else, including reverberation and ``value='mag_dB'``,
+        autoscales.
     cmap : str, optional
         Override the default colormap (2-D heatmap only).
     title : str, optional
@@ -972,7 +974,9 @@ def compare_models(
 
     ``fields`` is either a list of :class:`Field` (then ``labels`` is
     used as the per-axes title), or a ``{label: Field}`` dict. Shared
-    colour scale; one colorbar per axes.
+    colour scale, with one figure-level colorbar for the whole grid on a
+    strip outside the panels — no panel draws its own, so calling
+    :func:`shared_colorbar` on the result would add a second.
 
     ``title`` titles the whole figure; the per-panel titles come from
     ``labels``. ``ncols`` controls the grid width — defaults to ``n`` (single

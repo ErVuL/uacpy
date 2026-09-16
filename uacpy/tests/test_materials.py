@@ -34,20 +34,22 @@ class TestMaterialsCatalog:
     # porosity/roughness columns), keyed (c_p, ρ, α_p, c_s, α_s, porosity,
     # ϕ, roughness). Rows clay..basalt are JKPS *Computational Ocean
     # Acoustics* Table 1.3 (c_p = ratio × 1500 m/s; clay c_s "<100" and the
-    # depth-dependent silt/sand/gravel c_s(z̄) take the catalog's 1 m
-    # values); granite has no Table 1.3 row (see core/materials.py). ϕ is
-    # Hamilton & Bachman (1982) per the module comment. Roughness is 0.0
+    # depth-dependent silt/sand/gravel c_s(z̄) take the catalog's single
+    # value); granite is Ainslie (2010) Table 4.20 instead, Table 1.3 having
+    # no granite row (see core/materials.py). ϕ is
+    # Hamilton & Bachman (1982) per the module comment, except gravel's
+    # −1.0, which is TR 9407 Table 2's "Sandy Gravel" row. Roughness is 0.0
     # by construction unless overridden.
     _FULL_TABLE = {
         'clay':      (1500.0, 1.5, 0.2, 80.0, 1.0, 70.0, 8.80, 0.0),
         'silt':      (1575.0, 1.7, 1.0, 80.0, 1.5, 55.0, 5.40, 0.0),
         'sand':      (1650.0, 1.9, 0.8, 110.0, 2.5, 45.0, 3.34, 0.0),
-        'gravel':    (1800.0, 2.0, 0.6, 180.0, 1.5, 35.0, -1.5, 0.0),
+        'gravel':    (1800.0, 2.0, 0.6, 180.0, 1.5, 35.0, -1.0, 0.0),
         'moraine':   (1950.0, 2.1, 0.4, 600.0, 1.0, 25.0, None, 0.0),
         'chalk':     (2400.0, 2.2, 0.2, 1000.0, 0.5, None, None, 0.0),
         'limestone': (3000.0, 2.4, 0.1, 1500.0, 0.2, None, None, 0.0),
         'basalt':    (5250.0, 2.7, 0.1, 2500.0, 0.2, None, None, 0.0),
-        'granite':   (5500.0, 2.7, 0.1, 3000.0, 0.2, None, None, 0.0),
+        'granite':   (5750.0, 2.65, 0.1, 3000.0, 0.2, None, None, 0.0),
     }
 
     @pytest.mark.parametrize('name', sorted(_FULL_TABLE))
@@ -78,6 +80,58 @@ class TestMaterialsCatalog:
         names = list_materials()
         assert names == sorted(names)
         assert 'sand' in names and 'granite' in names
+
+    def test_the_granite_row_is_ainslies_tabulated_granite(self):
+        """The one row Jensen, Kuperman, Porter & Schmidt Table 1.3 does not
+        carry. It is Ainslie, *Principles of Sonar Performance Modelling*
+        (2010), Table 4.20 p. 183, whose granite is rho 2650 kg/m³, c_p 5750
+        m/s, alpha_p 0.10 dB/λ, c_s 3000 m/s, alpha_s 0.20 dB/λ — all five, so
+        the row is one source's and not a blend."""
+        granite = get_material('granite')
+        assert granite['density'] == 2.65          # 2650 kg/m³
+        assert granite['sound_speed'] == 5750.0
+        assert granite['attenuation'] == 0.10
+        assert granite['shear_speed'] == 3000.0
+        assert granite['shear_attenuation'] == 0.20
+        # A different compilation from basalt's row, and it differs in density
+        # and both wave speeds, not in c_p alone.
+        basalt = get_material('basalt')
+        assert granite['density'] != basalt['density']
+        assert granite['shear_speed'] != basalt['shear_speed']
+
+    def test_every_preset_grain_size_is_one_a_conversion_model_is_fitted_at(self):
+        """``grain_size_phi`` is documented as the input to
+        ``BoundaryProperties.from_grain_size``, so it has to be a ϕ some model
+        in :mod:`uacpy.core.sediment` covers. Outside every model's range the
+        conversion answers with an end row — the coarse end returns the
+        0.92 ϕ coarse-sand row — which is not the material the preset names."""
+        from uacpy.core.sediment import GRAIN_SIZE_MODEL_RANGES
+
+        def fitted(phi):
+            return any(lo <= phi <= hi
+                       for lo, hi in GRAIN_SIZE_MODEL_RANGES.values())
+
+        for name, m in MATERIALS.items():
+            if m['grain_size_phi'] is not None:
+                assert fitted(m['grain_size_phi']), name
+        # Both sides of each edge of that union, so the rule above is pinned to
+        # the models' own limits rather than to the values it happens to admit.
+        assert fitted(-1.0) and not fitted(-1.0 - 1e-9)
+        assert fitted(9.5) and not fitted(9.5 + 1e-9)
+
+    def test_the_gravel_phi_is_converted_by_apl_uw_without_substitution(self):
+        """Gravel is the only preset coarser than the Hamilton fits, so its ϕ
+        is the one that has to reach a model unclamped: ``'apl-uw'`` is fitted
+        to −1 ϕ and returns gravel's own speed there."""
+        import warnings
+
+        from uacpy.core.sediment import grain_size_to_geoacoustics
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            out = grain_size_to_geoacoustics(
+                MATERIALS['gravel']['grain_size_phi'], model='apl-uw')
+        assert out['sound_speed'] > 1900.0
+        assert out['density'] > 2.4
 
     def test_every_preset_has_required_keys(self):
         required = {
@@ -205,7 +259,7 @@ class TestHamiltonAttenuationFollowsThe1972GrainSizeRegressions:
         assert _hamilton_kp(-1.0) == _hamilton_kp(0.0)
         assert _hamilton_kp(12.0) == _hamilton_kp(9.5)
 
-    def test_the_peak_sits_in_very_fine_sand(self):
+    def test_the_peak_sits_at_four_and_a_half_phi(self):
         import numpy as np
         from uacpy.core.sediment import _hamilton_kp
         phi = np.linspace(0.0, 9.5, 951)

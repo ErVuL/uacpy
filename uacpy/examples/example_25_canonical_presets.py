@@ -4,7 +4,7 @@ Two catalogues side by side: the sound-speed profiles uacpy can build from a
 factory — isovelocity, Munk, and one derived from T(z), S(z) through Mackenzie
 — and the plane-wave bottom loss of the sediment and rock presets.
 
-Granite is left out of the loss panel: its 5500 m/s would sit on top of
+Granite is left out of the loss panel: its 5750 m/s would sit on top of
 basalt's 5250 m/s. bottom_loss_curve ignores each preset's shear speed by
 construction.
 

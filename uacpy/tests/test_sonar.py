@@ -2353,6 +2353,56 @@ class TestBottomParameters:
             p = BottomParameters.from_grain_size(12.0)
         assert p == BottomParameters.from_grain_size(9.0)
 
+    @pytest.mark.parametrize('phi, edge', [(-5.0, -1.0), (12.0, 9.0)])
+    def test_the_geoacoustics_route_clamps_its_grain_size_with_the_same_warning(
+            self, phi, edge):
+        """``sigma2`` and ``w2`` are the two parameters the report says the
+        backscattering strength is particularly sensitive to (p. IV-5), and in
+        this constructor they are the only two the grain size feeds: w2 swings
+        25x across the clamp. The measured rho, nu and delta are untouched."""
+        kwargs = dict(sound_speed=1700.0, density=1.8,
+                      attenuation_dB_per_wavelength=0.5,
+                      water_sound_speed=1500.0, water_density=1.0)
+        with pytest.warns(UserWarning, match='-1 <= Mz <= 9'):
+            p = BottomParameters.from_geoacoustics(grain_size_phi=phi, **kwargs)
+        at_edge = BottomParameters.from_geoacoustics(grain_size_phi=edge, **kwargs)
+        assert p == at_edge
+        assert p.loss_parameter == pytest.approx(
+            0.5 * np.log(10.0) / (40.0 * np.pi))
+
+    @pytest.mark.parametrize('phi', [float('nan'), float('inf')])
+    def test_the_geoacoustics_route_refuses_a_non_finite_grain_size(self, phi):
+        """min/max propagate a NaN, and both grain-size branches then take
+        their else arm on a false comparison, so a NaN would select the
+        fine-sediment sigma2 and w2 — a finite, plausible pair built out of
+        nothing. The sibling constructor refuses the same input."""
+        with pytest.raises(ConfigurationError, match='must be finite'):
+            BottomParameters.from_geoacoustics(
+                sound_speed=1700.0, density=1.8,
+                attenuation_dB_per_wavelength=0.5, water_sound_speed=1500.0,
+                water_density=1.0, grain_size_phi=phi)
+
+    def test_the_two_routes_differ_in_delta_by_the_reports_c1(self):
+        """from_grain_size builds delta through Eq. 4 at the c1 the report
+        used; from_geoacoustics builds it from the attenuation with no c1. On
+        the same seabed rho and nu agree exactly and delta differs by that
+        ratio — the factor from_geoacoustics documents."""
+        from uacpy.core.sediment import grain_size_to_geoacoustics
+        from uacpy.sonar.bottom_scattering import TABLE_WATER_SOUND_SPEED
+        water = 1500.0
+        for phi in (0.5, 2.5, 5.0, 8.0):
+            geo = grain_size_to_geoacoustics(phi, model='apl-uw')
+            direct = BottomParameters.from_grain_size(phi)
+            via_geo = BottomParameters.from_geoacoustics(
+                sound_speed=geo['sound_speed'], density=geo['density'],
+                attenuation_dB_per_wavelength=geo['attenuation'],
+                water_sound_speed=water, water_density=1.0,
+                grain_size_phi=phi)
+            assert via_geo.density_ratio == pytest.approx(direct.density_ratio)
+            assert via_geo.speed_ratio == pytest.approx(direct.speed_ratio)
+            assert direct.loss_parameter / via_geo.loss_parameter == \
+                pytest.approx(TABLE_WATER_SOUND_SPEED / water)
+
     def test_values_outside_the_recommended_limits_warn(self):
         with pytest.warns(UserWarning, match='Section IV.A.8'):
             BottomParameters(density_ratio=3.5, speed_ratio=1.2, loss_parameter=0.01,

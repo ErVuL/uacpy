@@ -290,7 +290,7 @@ field. A 2400 m/s rock traps modes out to 51° whatever aperture you named, and
 scored on the 30° aperture alone it read *better* than sand while measuring
 3 dB rms worse at 1–5 km. The rest of the medium's `inf c … sup c` hull is a
 **stability band** on which the operator is only held non-amplifying; scored
-for accuracy too, a granite basement put the branch point `ξ = −1` inside the
+for accuracy too, a hard rock basement put the branch point `ξ = −1` inside the
 interval and every grid was refused. It needs three things from you, and all
 three have defaults:
 
@@ -303,7 +303,7 @@ three have defaults:
 `c0` deserves a note: it is the *algorithmic* expansion point — the speed
 factored out as `exp(i k₀ r)` — not a physical input. Eq. (15) chooses the `c0`
 that centres the accuracy band around zero: 1591 m/s on 1500 m/s water over
-sand, 2047 m/s over granite, where the trapped-mode end of the band binds.
+sand, 2047 m/s over hard rock, where the trapped-mode end of the band binds.
 
 ![RAM grid optimiser](figures/ram_grid.png)
 
@@ -327,7 +327,7 @@ the chosen `dr` rather than propagated, which on the sand channel at 200 Hz
 to about **15 range steps** and exact to three digits beyond; widening the band
 to `c0` is what keeps `dr` at 25 m there rather than the 57 m the water column
 alone would license — nor the **seafloor interface**, whose position to a
-fraction of a cell sets the trapped modes on a fast seabed (granite at 200 Hz,
+fraction of a cell sets the trapped modes on a fast seabed (hard rock at 200 Hz,
 `dz = λ/250`: 3.3 dB rms from Kraken with the seafloor on a node, 1.8 a
 quarter cell below it, 1.3 mid-cell), which is why the grid places it
 (constraint 2 below, and [§9](#9-gotchas)). The grid line
@@ -417,7 +417,7 @@ error model does not know about them:
    field only every `ndr·dr` and the receiver modulus is interpolated between
    writes, so both the automatic `dr` and `ndr` are held so that stride
    samples the modal beat `2π/Δk` (`Δk = 2πf (1/c_min − 1/c_max)` over the
-   medium) six times per period — 20 m on sand at 200 Hz, 1.7 m on granite; a
+   medium) six times per period — 20 m on sand at 200 Hz, 1.7 m on hard rock; a
    pinned `dr` is yours. Measured on ramgeo at 200 Hz over 5 km of the sand
    channel (beat 120 m, receivers beyond 1 km, against the same backend at
    `dr = 1 m`): 3.7 / 1.9 / 0.6 / 1.0 / 0.5 / 0.2 % relative field error at
@@ -474,15 +474,15 @@ columns / beyond 1 km:
 |---|---|---|---|---|
 | rock 2400 m/s | 100 Hz | 2.8 / 3.0 | **0.8 / 0.8** (λ/45) | 0.3 → 0.7 s |
 | rock | 200 Hz | 6.3 / 6.8 | **1.4 / 1.1** (λ/64) | 0.3 → 0.9 s |
-| granite 5500 m/s | 100 Hz | 5.0 / 5.4 | **0.8 / 0.8** (λ/108) | 0.6 → 1.7 s |
-| granite | 200 Hz | 7.4 / 7.6 | **1.5 / 1.6** (λ/162) | 0.7 → 3.0 s |
+| hard rock 5500 m/s | 100 Hz | 5.0 / 5.4 | **0.8 / 0.8** (λ/108) | 0.6 → 1.7 s |
+| hard rock | 200 Hz | 7.4 / 7.6 | **1.5 / 1.6** (λ/162) | 0.7 → 3.0 s |
 | sand 1600 m/s | 200 Hz | 1.2 / 1.0 | 0.8 / 0.3 (λ/16 kept, placed) | 0.3 s |
 
 The refinement stops at the `MAX_DEPTH_POINTS` budget (10 000 points over the
 shallowest water column): past it the grid marched still cannot carry the mode,
 and that — like a pinned grid that cannot — raises a `UserWarning` at the
 default `accuracy` naming the `dz` the mode needs, its point count and the
-budget. Granite at 200 Hz needs `dz ≈ λ/162`, which 400 m of water holds and
+budget. Hard rock at 200 Hz needs `dz ≈ λ/162`, which 400 m of water holds and
 600 m does not.
 
 **How far from converged does the default actually land?** Far enough to matter
@@ -724,7 +724,7 @@ reverberation, a reflecting seamount face, a target echo — is absent from the
 answer, silently and by construction.
 
 **A very fast basement gets a refined grid, and the seafloor's place in its
-cell is half the answer.** Put granite (`c_p = 5500 m/s`) under the 100 m
+cell is half the answer.** Put a hard rock basement (`c_p = 5500 m/s`) under the 100 m
 channel at 200 Hz over 5 km and the accuracy band reaches the 74° critical
 angle: the chooser finds `dr = 2.9 m` (`ε` relaxed to 0.243), the λ/16 floor
 would set `dz = 0.47 m` where the steepest trapped mode scores 87 (7.4 dB rms
@@ -732,7 +732,7 @@ from Kraken on a 9 × 19 grid to 5 km; 5.0 dB at 100 Hz), so `dz` is refined to
 λ/162 (λ/108 at 100 Hz) and the seafloor placed a quarter cell below its node:
 1.5 dB at 200 Hz and 0.8 dB at 100 Hz, in 3.0 / 1.7 s. The placement is the
 other half: at a fixed `dz = λ/250` the same march reads 3.3 / 1.8 / 1.3 /
-3.2 dB rms with the seafloor 0 / ¼ / ½ / ¾ of a cell below its node (granite,
+3.2 dB rms with the seafloor 0 / ¼ / ½ / ¾ of a cell below its node (hard rock,
 200 Hz), and 2.2 / 0.6 / 0.8 / 2.1 at 100 Hz — no per-step score sees the
 interface, which is why the grid chooser places it rather than scores it. A
 pinned grid is **unscored on every backend beyond the trapped-mode check** (a
@@ -743,7 +743,7 @@ answer — keep `h/dz = n + 0.25` and check against Kraken or OASES. Leave `c0`
 alone: pinning it near the water speed helped only on the coarsest grid.
 
 **`rams` diverges when the grid is too coarse for the elastic waves.** Sand over
-granite (`c_s = 3000 m/s`) at 200 Hz is the case above with shear, so it too is
+hard rock (`c_s = 3000 m/s`) at 200 Hz is the case above with shear, so it too is
 refused automatically; on a pinned grid coarser than the elastic march can carry
 (`dz = 5 m` here) 94% of the samples come back marked no-data. The same case is
 clean from `dz = 1 m` down, and `ramgeo` on the identical seabed is stable at
@@ -826,10 +826,10 @@ by convention.
 layer (20 wavelengths of `c0` by default, ramping to 10 dB/wavelength) so
 nothing reflects off the bottom of the computational box. RAM's attenuation is
 per local wavelength, so the ramp absorbs 100 dB one way on sand and 37 dB on
-granite; on a fast seabed nothing reaches the floor anyway and the width is
-inert (granite moved 0.000 dB and rock ≤ 0.3 dB between 20 and 40 wavelengths,
+hard rock; on a fast seabed nothing reaches the floor anyway and the width is
+inert (hard rock moved 0.000 dB and rock ≤ 0.3 dB between 20 and 40 wavelengths,
 whether counted in `c0` or basement wavelengths — the basement count was
-measured and not adopted: ×2.3 depth nodes over granite at 25 Hz for no
+measured and not adopted: ×2.3 depth nodes over hard rock at 25 Hz for no
 decibel). On a slow **lossless** seabed the width is not inert, and the mechanism is the ramp's
 gradient rather than the floor: the near-cutoff modes' evanescent tails run
 into the ramp, and at a converged `dz` on lossless sand at 200 Hz the field is

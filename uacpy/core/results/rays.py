@@ -97,13 +97,21 @@ def _fold_notice(delays, power, record: float, *, who: str, remedy: str,
 class Arrivals(Result):
     """Ray arrivals from Bellhop — a flat list of arrival events.
 
-    Each arrival is a dict with: ``delay`` (s), ``amplitude``, ``phase``
-    (**degrees** — the unit the ``.arr`` reader stores; the :attr:`phases`
-    accessor converts to radians), ``n_top_bounces``, ``n_bot_bounces``,
-    ``src_angle``, ``rcv_angle``, ``kind`` ('direct' / 'surface' /
-    'bottom' / 'both'), plus the cell of origin (``src_idx``,
-    ``depth_idx``, ``range_idx``) so multi-cell runs can be filtered back
-    to one cell if needed.
+    Each arrival is a dict with: ``delay`` (s), ``delay_imag`` (s),
+    ``amplitude``, ``phase`` (**degrees** — the unit the ``.arr`` reader
+    stores; the :attr:`phases` accessor converts to radians),
+    ``n_top_bounces``, ``n_bot_bounces``, ``src_angle``, ``rcv_angle``,
+    ``kind`` ('direct' / 'surface' / 'bottom' / 'both'), plus the cell of
+    origin (``src_idx``, ``depth_idx``, ``range_idx``) so multi-cell runs
+    can be filtered back to one cell if needed.
+
+    ``delay_imag`` is Bellhop's volume-absorption term, the imaginary part
+    of the travel time (``ArrMod.f90:118-125`` writes it as its own field).
+    :attr:`received_amplitudes` applies it as ``exp(omega * Im tau)`` and
+    defaults it to 0 when it is absent, so an object assembled by hand
+    without the key carries the LOSSLESS amplitude — frequency-dependently
+    too loud, silently. :meth:`_rebuild_by_receiver` reads it strictly, but
+    only on an object that has a ``by_receiver`` form.
 
     Mirrors the :class:`Rays` API surface: filter / chain / sort.
     """
@@ -192,7 +200,11 @@ class Arrivals(Result):
 
     @property
     def amplitudes(self) -> np.ndarray:
-        """Amplitudes (linear) of every arrival in the list."""
+        """Amplitudes (linear) of every arrival in the list.
+
+        The GEOMETRIC amplitude, with no volume absorption in it. Use
+        :attr:`received_amplitudes` for what each path actually delivers.
+        """
         return np.asarray([a['amplitude'] for a in self.arrivals], dtype=float)
 
     @property

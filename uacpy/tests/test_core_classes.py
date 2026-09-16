@@ -1745,6 +1745,47 @@ class TestTimeFieldChainAccessors:
         assert m.pinned['time'] == ts.coords['time'][30]
 
 
+class TestReflectionCoefficientCarriesTransmissionValuesAboveOne:
+    """``R`` is in [0, 1] for a reflection coefficient, but OASR's
+    ``reflection_type='transmission'`` column is a *transmission* coefficient
+    — an amplitude ratio across the interface, which exceeds 1 into a
+    higher-impedance medium (Medwin & Clay: air→water gives T12 ≈ 2). The
+    class neither clamps nor warns, so those samples reach the caller intact,
+    and a clamp added later would silently corrupt every transmission run.
+    """
+
+    ABOVE_ONE = 1.15   # the peak PV measured on a 1700/400 m/s half-space
+
+    def _rc(self):
+        from uacpy.core.results import ReflectionCoefficient
+        theta = np.linspace(0.0, 90.0, 5)
+        R = np.array([0.3, 0.8, self.ABOVE_ONE, 0.9, 0.0])
+        return ReflectionCoefficient(
+            theta=theta, R=R, phi=np.zeros_like(R),
+            model='OASR', frequencies=100.0,
+            metadata={'reflection_type': 'transmission'},
+        )
+
+    def test_a_sample_above_one_survives_construction(self):
+        assert float(self._rc().R.max()) == pytest.approx(self.ABOVE_ONE)
+
+    def test_a_sample_above_one_survives_slicing(self):
+        sliced = self._rc().at(angle=45.0)
+        assert float(sliced.R[0]) == pytest.approx(self.ABOVE_ONE)
+
+    def test_a_reflection_run_is_not_given_a_bound_it_never_had(self):
+        """Both sides: the class applies no bound either way, so a physical
+        reflection table below 1 passes through unchanged too."""
+        from uacpy.core.results import ReflectionCoefficient
+        R = np.array([0.3, 0.8, 0.95, 0.9, 0.0])
+        rc = ReflectionCoefficient(
+            theta=np.linspace(0.0, 90.0, 5), R=R, phi=np.zeros_like(R),
+            model='OASR', frequencies=100.0,
+            metadata={'reflection_type': 'P-P'},
+        )
+        np.testing.assert_allclose(rc.R, R)
+
+
 class TestReflectionCoefficientChainAccessors:
     """``ReflectionCoefficient.at`` — label slicing of the angle and
     frequency axes; broadband-only kwargs raise on narrowband instances."""

@@ -22,7 +22,9 @@ import pytest
 from uacpy.core.environment import BoundaryProperties
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.core.materials import MATERIALS
-from uacpy.core.sediment import _MODEL_RANGE, grain_size_to_geoacoustics
+from uacpy.core.sediment import (
+    GRAIN_SIZE_MODEL_RANGES, grain_size_to_geoacoustics,
+)
 from uacpy.data import sediment
 
 
@@ -50,12 +52,13 @@ def test_monotonic_speed_and_density():
     assert coarse['density'] > fine['density']
 
 
-def test_attenuation_peaks_in_sand():
-    # Hamilton's k_p attenuation peaks in medium/fine sand, not silt or clay.
+def test_attenuation_peaks_at_four_and_a_half_phi():
+    # Hamilton's k_p attenuation peaks at the 4.5 ϕ branch join — coarse silt
+    # in TR 9407 Table 2 — and the dB/λ speed factor does not move it.
     phis = np.linspace(0.5, 8.5, 33)
     alpha = [sediment.grain_size_to_geoacoustics(p)['attenuation'] for p in phis]
     peak_phi = phis[int(np.argmax(alpha))]
-    assert 2.0 < peak_phi < 5.0
+    assert peak_phi == pytest.approx(4.5, abs=0.13)   # half the 0.25 ϕ step
 
 
 def test_water_referencing_scales_speed():
@@ -89,8 +92,9 @@ def test_unknown_model_raises():
 
 
 def test_apl_uw_model():
-    # APL-UW TR 9407 high-frequency variant: valid output, attenuation peaks in
-    # sand, and (per IV-8) lower density/speed than Hamilton at intermediate Mz.
+    # APL-UW TR 9407 high-frequency variant: valid output, attenuation peaking
+    # at the same 4.5 ϕ join, and (per IV-8) lower density/speed than Hamilton
+    # at intermediate Mz.
     a = sediment.grain_size_to_geoacoustics(2.0, model='apl-uw')
     h = sediment.grain_size_to_geoacoustics(2.0, model='hamilton')
     assert 1400 < a['sound_speed'] < 1800
@@ -98,7 +102,7 @@ def test_apl_uw_model():
     phis = np.linspace(-1, 9, 41)
     alpha = [sediment.grain_size_to_geoacoustics(p, model='apl-uw')['attenuation']
              for p in phis]
-    assert 2.0 < phis[int(np.argmax(alpha))] < 5.0
+    assert phis[int(np.argmax(alpha))] == pytest.approx(4.5, abs=0.13)
     # APL-UW covers coarse (gravel ϕ≈−1) without warning
     coarse = sediment.grain_size_to_geoacoustics(-1.0, model='apl-uw')
     assert coarse['sound_speed'] > a['sound_speed']
@@ -328,6 +332,42 @@ def test_deck41_rock_routes_to_limestone_material(monkeypatch):
     assert b.sound_speed >= 2500.0
 
 
+def test_deck41_gravel_classes_take_the_gravel_preset(tmp_path, monkeypatch):
+    """'gravel' and 'gravel and coarser' are coarser than either grain-size
+    relation is fitted over (both stop at -1 ϕ = 2 mm), so a ϕ for them is
+    evaluated at the fit's coarse end: the default 'hamilton' answers every ϕ
+    below 0 with its 0.92 ϕ coarse-sand row, which is neither lithology and is
+    also what 'sand' returns. Both terms carry a class sentinel instead and
+    come back as the gravel material preset, JKPS Table 1.3's own gravel. It
+    stays fluid: Table 1.3 gives that c_s as a depth relation rather than a
+    half-space property, and attaching it would make every fluid engine
+    collapse the shear with a warning on a path that reports none."""
+    from uacpy.data import _cache, sediment_db
+    for term in ('gravel', 'gravel and coarser'):
+        sentinel = sediment_db._phi_from_lithology(term)
+        assert sentinel is not None
+        assert sentinel <= sediment_db._PHI_CLASS_SENTINEL_MAX
+    root = tmp_path / 'cache'
+    (root / 'sediment').mkdir(parents=True)
+    (root / 'sediment' / 'deck41.csv').write_text(
+        'latitude,longitude,lithology\n'
+        '10.0,20.0,gravel\n11.0,21.0,gravel and coarser\n')
+    monkeypatch.setenv('UACPY_DATA_CACHE', str(root))
+    _cache.invalidate_grids()
+    sediment_db._SAMPLES.clear()
+    coarse_sand = sediment.grain_size_to_geoacoustics(0.92)['sound_speed']
+    for point in ((10.0, 20.0), (11.0, 21.0)):
+        assert sediment_db.fetch_sediment_sample(point)['material'] == 'gravel'
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            bottom = sediment_db.fetch_bottom_local(point)
+        assert bottom.sound_speed == MATERIALS['gravel']['sound_speed']
+        assert bottom.density == MATERIALS['gravel']['density']
+        assert bottom.attenuation == MATERIALS['gravel']['attenuation']
+        assert bottom.sound_speed != pytest.approx(coarse_sand)
+        assert bottom.shear_speed == 0.0
+
+
 def test_sediment_csv_row_with_an_unreadable_longitude_raises(tmp_path):
     """The three sample lists are appended together, so a malformed longitude
     can no longer leave them at different lengths — that desync escaped as an
@@ -361,8 +401,10 @@ def sediment_cache(tmp_path, monkeypatch):
     (root / 'sediment').mkdir(parents=True)
     (root / 'sediment' / 'grainsize.csv').write_text(
         'latitude,longitude,mean_phi\n50.0,0.0,5.5\n')
+    # A lithology term that carries a ϕ, so these tests pin which index
+    # answered rather than the class-sentinel route gravel takes.
     (root / 'sediment' / 'deck41.csv').write_text(
-        'latitude,longitude,lithology\n50.001,0.0,gravel\n60.0,0.0,gravel\n')
+        'latitude,longitude,lithology\n50.001,0.0,clay\n60.0,0.0,clay\n')
     monkeypatch.setenv('UACPY_DATA_CACHE', str(root))
     sediment_db._SAMPLES.clear()
     yield root
@@ -423,9 +465,9 @@ def test_the_grain_size_preference_turns_over_between_the_two_anchors():
 
 def test_lithology_answers_where_grain_size_is_out_of_reach(sediment_cache):
     from uacpy.data.sediment_db import fetch_sediment_sample
-    # 'gravel' maps to ϕ -2.0; the grain-size sample is >1000 km away here.
+    # 'clay' maps to ϕ 9.0; the grain-size sample is >1000 km away here.
     sample = fetch_sediment_sample((59.9, 0.0), max_distance_km=50.0)
-    assert sample['phi'] == pytest.approx(-2.0)
+    assert sample['phi'] == pytest.approx(9.0)
 
 
 def test_the_out_of_reach_message_quotes_the_nearest_of_the_two(sediment_cache):
@@ -597,7 +639,7 @@ class TestGrainSizeClampWarnsOnSubstitutionNotOnCrossing:
         holds the end rows flat past the table. Clamping ϕ first changes
         nothing, so a warning there would be reporting a substitution that did
         not happen."""
-        lo, hi = _MODEL_RANGE['hamilton']
+        lo, hi = GRAIN_SIZE_MODEL_RANGES['hamilton']
         with warnings.catch_warnings():
             warnings.simplefilter('error')
             out = grain_size_to_geoacoustics(phi, model='hamilton')
@@ -605,9 +647,20 @@ class TestGrainSizeClampWarnsOnSubstitutionNotOnCrossing:
             float(np.clip(phi, lo, hi)), model='hamilton')
         assert out == edge
 
-    def test_a_non_finite_phi_is_not_reported_as_a_clamp(self):
+    @pytest.mark.parametrize('phi, edge', [(float('inf'), 9.0),
+                                           (float('-inf'), -1.0)])
+    def test_an_infinite_phi_is_reported_like_any_other_clamp(self, phi, edge):
+        """±inf is the largest substitution the clamp can make — the apl-uw
+        polynomials run to ∓inf there — and it returns the same endpoint the
+        finite ϕ = 12 does, which already warns."""
+        with pytest.warns(UserWarning, match='clamped'):
+            out = grain_size_to_geoacoustics(phi, model='apl-uw')
+        assert out == grain_size_to_geoacoustics(edge, model='apl-uw')
+
+    def test_a_nan_phi_is_not_reported_as_a_clamp(self):
         """NaN compares unequal to its own clip, which would make a bare
-        ``phi != grain_size_phi`` test claim a clamp that never happened."""
+        ``phi != grain_size_phi`` test claim a clamp that never happened.
+        Unlike ±inf it substitutes nothing: it propagates to NaN outputs."""
         with warnings.catch_warnings():
             warnings.simplefilter('error')
             out = grain_size_to_geoacoustics(float('nan'), model='apl-uw')
@@ -628,4 +681,4 @@ def test_hamilton_honours_its_own_attenuation_range_to_nine_and_a_half_phi():
     assert clay['sound_speed'] == pytest.approx(edge['sound_speed'])
     assert clay['density'] == pytest.approx(edge['density'])
     assert clay['attenuation'] > edge['attenuation'] * 1.1
-    assert _MODEL_RANGE['hamilton'] == (0.0, 9.5)
+    assert GRAIN_SIZE_MODEL_RANGES['hamilton'] == (0.0, 9.5)

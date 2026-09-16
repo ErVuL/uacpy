@@ -206,3 +206,75 @@ class TestModelSourceLookup:
         assert 'not_a_catalogued_engine' in message
         for source_id in MODEL_SOURCES:
             assert source_id in message
+
+
+class TestBellhopCreditsTheBinaryThatRan:
+    """``Bellhop`` auto-selects CUDA > C++ > Fortran, and the C++/CUDA ports
+    are a separate codebase under a separate copyright holder (UC Regents /
+    Scripps MPL, ``third_party/bellhopcuda/README.md``) from the Acoustics
+    Toolbox Fortran. The credit follows the engine that resolved, so
+    ``result.backend`` and ``result.model_source`` never disagree about which
+    binary produced the numbers.
+    """
+
+    @pytest.mark.requires_binary
+    @pytest.mark.parametrize('version,expected_id', [
+        ('fortran', 'acoustics_toolbox'),
+        ('cxx', 'bellhopcxx'),
+        ('cuda', 'bellhopcxx'),
+    ])
+    def test_each_engine_is_credited_to_its_own_catalogue_entry(
+            self, version, expected_id):
+        model = uacpy.Bellhop(verbose=False, backend=version)
+        if model.version != version:
+            pytest.skip(f"the {version} binary is not built on this machine")
+        assert model.provenance.id == expected_id
+
+    def test_the_ported_engines_do_not_carry_porters_authorship(self):
+        """The two entries name different people, so crediting the wrong one
+        is visible rather than cosmetic."""
+        toolbox = model_source('acoustics_toolbox')
+        port = model_source('bellhopcxx')
+        assert 'Porter' in toolbox.authors
+        assert 'Porter' not in port.authors
+        assert 'Scripps' in port.authors
+        # The port is GPL like the Fortran, so nothing about the licence
+        # obligation changes with the credit — only the attribution.
+        assert port.license == toolbox.license
+
+
+class TestKindAndUnitAreDocumentedForEveryModel:
+    """``kind`` and ``unit`` are written on Fields by producers across the
+    package, not only by the OASES wrappers, and ``Field`` reads both back.
+    ``list_metadata()`` is documented to describe every entry on
+    ``result.metadata``, so it must describe these two whatever the model is.
+    """
+
+    @staticmethod
+    def _field(model, kind, unit):
+        return Field(
+            data=np.ones((1, 1)),
+            coords={'depth': np.array([25.0]), 'range': np.array([1000.0])},
+            model=model, frequencies=100.0,
+            metadata={'kind': kind, 'unit': unit},
+        )
+
+    @pytest.mark.parametrize('model,kind,unit', [
+        ('RAM', 'pressure', 'dB'),
+        ('Bellhop', 'probability_of_detection', '1'),
+        ('OASS', 'reverberation', 'dB'),
+    ])
+    def test_both_keys_carry_a_description(self, model, kind, unit):
+        described = self._field(model, kind, unit).list_metadata()
+        for key in ('kind', 'unit'):
+            assert described[key]['description'], (
+                f"{model}: metadata['{key}'] is undocumented")
+            assert described[key]['documented_type'] == 'str'
+
+    def test_the_oass_kind_note_wins_over_the_universal_one(self):
+        """The model-specific entry is the one that pins OASS's sign
+        convention; the universal entry must not shadow it."""
+        oass = self._field('OASS', 'reverberation', 'dB').list_metadata()
+        ram = self._field('RAM', 'pressure', 'dB').list_metadata()
+        assert 'oassun26.f' in oass['kind']['description']
+        assert 'oassun26.f' not in ram['kind']['description']

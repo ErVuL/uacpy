@@ -137,8 +137,8 @@ MAX_DEPTH_POINTS = 10000
 #: the 100 m channel, 9 × 19 receivers to 5 km, rms dB from Kraken (far
 #: field, mpiramS) at placements 0 / 0.25 / 0.5 / 0.75 of a cell: sand
 #: 200 Hz on the λ/16 grid 1.02 / 0.32 / 0.72 / 1.63; rock 200 Hz at λ/64
-#: 2.54 / 1.25 / 2.84 / 4.23; granite 100 Hz at λ/64 4.48 / 0.51 / 4.21 /
-#: 5.73; granite 200 Hz at λ/250 3.30 / 1.77 / 1.34 / 3.21. On every grid
+#: 2.54 / 1.25 / 2.84 / 4.23; hard rock 100 Hz at λ/64 4.48 / 0.51 / 4.21 /
+#: 5.73; hard rock 200 Hz at λ/250 3.30 / 1.77 / 1.34 / 3.21. On every grid
 #: the automatic path marches (trapped-mode score at or under 1) the node
 #: is never the best placement; a quarter cell wins or ties in 8 of 10
 #: cases and mid-cell the other two — the consistent-mass Galerkin depth
@@ -945,7 +945,7 @@ class RAM(PropagationModel):
            Lytaev (2023) on the accuracy band the grid chooser scores (the
            water column out to the wider of the aperture and the seabed's
            critical angle): 1591 m/s on 1500 m/s water over sand, 2047 m/s
-           over granite.
+           over hard rock.
 
         All four backends honour the resolved value: mpiramS reads it
         from the ``c0_user`` line in ``in.pe``; ramgeo, rams and ramsurf
@@ -1573,12 +1573,12 @@ class RAM(PropagationModel):
         (RAM guide) and names no medium; RAM reads attenuation in dB per
         LOCAL wavelength, so the ramp to ``absorbing_layer_attn`` absorbs
         ``absorbing_layer_attn/2 · width/λ_local`` dB one way — 100 dB on
-        sand and 37 dB on a 5500 m/s granite at the defaults, both far past
+        sand and 37 dB on 5500 m/s hard rock at the defaults, both far past
         what a grid-floor reflection needs. Counting the width in basement
         wavelengths instead was measured (lossless basements, λ/16 grid,
-        9 × 19 receivers to 5 km): granite moved 0.000 dB and rock ≤ 0.3 dB
+        9 × 19 receivers to 5 km): hard rock moved 0.000 dB and rock ≤ 0.3 dB
         between the width and twice it under EITHER count (rock 200 Hz:
-        0.012), for ×2.1 depth nodes on granite at 100 Hz and ×2.3 at 25 Hz
+        0.012), for ×2.1 depth nodes on hard rock at 100 Hz and ×2.3 at 25 Hz
         (zmax 2177 → 4940 m). What the width DOES set is the ramp's
         gradient, and that binds on a slow LOSSLESS seabed, where the
         near-cutoff modes' evanescent tails run into the ramp: at a
@@ -2747,6 +2747,7 @@ class RAM(PropagationModel):
                 frequencies=fc,
                 dr=raw['dr'], dz=raw['dz'], zmax=raw['zmax'],
                 pe_reference_speed=self._resolve_c0(env),
+                c_min=self._speed_bounds(env)[0],
                 c_max=self._resolve_c_max(env),
             )
         )
@@ -2755,6 +2756,7 @@ class RAM(PropagationModel):
             field, raw['work_dir'], '',
             primary_files=(
                 ('tl_grid_file', 'tl.grid'),
+                ('tl_line_file', 'tl.line'),
                 ('pcomplex_file', 'pcomplex.bin'),
                 ('in_file', raw['in_name'])
             )
@@ -3949,6 +3951,7 @@ class RAM(PropagationModel):
                 field, band_fm.work_dir, '',
                 primary_files=(
                     ('tl_grid_file', 'tl.grid'),
+                    ('tl_line_file', 'tl.line'),
                     ('pcomplex_file', 'pcomplex.bin'),
                     ('in_file', self._collins_in_name(kind))
                 )
@@ -4711,10 +4714,11 @@ class RAM(PropagationModel):
                     "grid is unscored on every backend beyond the "
                     "trapped-mode check, and no accuracy warning follows. "
                     "Two steps, dz first: halve dz until the field "
-                    "stops moving (on a 100 m / 200 Hz channel over granite "
-                    "the pinned grid was 8.3 dB rms from Kraken at dz=λ/30 "
-                    "and 1.5 dB at dz≈λ/75, while dr from 1.3 λ down to "
-                    "0.3 λ at the coarse dz moved it less), then halve dr the "
+                    "stops moving (on a 100 m / 200 Hz channel over hard "
+                    "rock the pinned grid was 8.3 dB rms from Kraken at "
+                    "dz=λ/30 and 1.5 dB at dz≈λ/75, while dr from 1.3 λ "
+                    "down to 0.3 λ at the coarse dz moved it less), then "
+                    "halve dr the "
                     "same way. Check against Kraken or OASES; leave c0 at "
                     "its default, pinning it near the water speed made the "
                     "converged answer worse."),
@@ -5029,7 +5033,8 @@ class RAM(PropagationModel):
             # ``TRAPPED_MODE_SCORE_LIMIT`` on the floored grid gets dz
             # refined until they pass, within the depth budget. Sand, silt
             # and a sloping sand wedge already pass on the floored grid and
-            # keep it; rock and granite do not (F-ram-optimizer §0.3).
+            # keep it; rock and the 5500 m/s basement do not
+            # (F-ram-optimizer §0.3).
             refined = self._refine_dz_for_trapped_modes(
                 env, kind, dr_opt, dz_opt, h, score_kw)
             if refined is not None:
@@ -5256,9 +5261,9 @@ class RAM(PropagationModel):
         9 × 19 receivers to 5 km, mpiramS, rms dB from Kraken (all columns),
         λ/16 floor → refined grid with the seafloor placed in its cell
         (``SEAFLOOR_CELL_OFFSET``): rock 100 Hz 2.8 → 0.8 (λ/45), rock 200 Hz
-        6.3 → 1.4 (λ/64), granite 100 Hz 5.0 → 0.8 (λ/108), granite 200 Hz
-        7.4 → 1.5 (λ/162); wall 0.3–0.7 s → 0.7–3.0 s. Sand, silt and a
-        sloping sand wedge keep the floored grid.
+        6.3 → 1.4 (λ/64), hard rock 100 Hz 5.0 → 0.8 (λ/108), hard rock
+        200 Hz 7.4 → 1.5 (λ/162); wall 0.3–0.7 s → 0.7–3.0 s. Sand, silt
+        and a sloping sand wedge keep the floored grid.
         """
         scores = optimize_grid(grid=(float(dr), float(dz)), **score_kw)
         if (not scores['trapped_end_binds']
@@ -5722,6 +5727,7 @@ class RAM(PropagationModel):
                 # supply one, so the key never lies about a domain depth.
                 **({} if zmax is None else {'zmax': float(zmax)}),
                 pe_reference_speed=self._resolve_c0(env),
+                c_min=self._speed_bounds(env)[0],
                 c_max=self._resolve_c_max(env),
             )
         )
@@ -5917,7 +5923,13 @@ class RAM(PropagationModel):
                 fs=result['fs'],
                 Q=result['Q'],
                 pe_reference_speed=result['c0'],
-                c_min=result['c_min'],
+                c_min=self._speed_bounds(env)[0],
+                # The binary's own header ``cmin`` is the WATER minimum
+                # (``peramx.f90:295``, ``cmin=minval(cw)`` over the water
+                # grid), carried for the time window rather than for the
+                # grid, so it rides on its own key instead of overloading
+                # ``c_min``.
+                tdelay_speed=result['c_min'],
                 c_max=self._resolve_c_max(env),
             )
         )

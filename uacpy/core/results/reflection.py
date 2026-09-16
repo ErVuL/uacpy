@@ -23,7 +23,16 @@ class ReflectionCoefficient(Result):
     ----------
     theta : ndarray, shape ``(n_angles,)``  — grazing angles in degrees
     R     : ndarray, shape ``(n_angles,)`` or ``(n_angles, n_frequencies)``
-            — magnitude in [0, 1]
+            — magnitude. In ``[0, 1]`` for a reflection coefficient, and
+            **not bounded by 1** when ``metadata['reflection_type']`` is
+            ``'transmission'``: a transmission coefficient is an amplitude
+            ratio *across* an interface, so into a higher-impedance medium
+            it exceeds 1 (Medwin & Clay, *Fundamentals of Acoustical
+            Oceanography*, give ``T12 = 2ρ2c2cosθ1 / (ρ2c2cosθ1 +
+            ρ1c1cosθ2)`` and note that air→water gives ``T12 ≈ 2``, "the
+            pressure is doubled at the surface"; 1.15 measured here on a
+            1700/400 m/s elastic half-space). Nothing in this class clamps
+            or validates it, so ``-20·log10(R)`` is negative there.
     phi   : ndarray, same shape as ``R`` — phase in radians, assumed
             **unwrapped**; see :meth:`eval` for what a table carrying the
             ±π branch cut interpolates to.

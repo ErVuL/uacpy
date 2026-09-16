@@ -14,7 +14,7 @@ approximation of the propagator ``exp(ikΔx(√(1+ξ) − 1))``. This module:
   aperture and the seabed's critical angle, everything that carries energy
   to the far field — and a **stability band**, the rest of the medium's
   hull (Lytaev §4.1), held non-amplifying only. Scored on the whole hull a
-  granite seabed put the branch point ``ξ = −1`` inside the interval and
+  hard rock seabed put the branch point ``ξ = −1`` inside the interval and
   every grid was refused; scored on the aperture alone a rock seabed
   (critical angle 51°) read better than sand while measuring 3 dB rms
   worse at 1–5 km, its trapped modes between 30° and 51° unseen.
@@ -375,7 +375,7 @@ def optimal_c0(c_min: float, c_max: float, theta_max: float,
     end's own symmetric solution (``ξ_min = −ξ_max`` there: Eq. 15 of
     ``(c_min, c_max_all)`` at zero aperture), and the candidate leaving the
     band's larger ``|ξ|`` smaller wins — 1591 m/s on 1500 m/s water over
-    sand (1600), 2047 m/s over granite (5500).
+    sand (1600), 2047 m/s over hard rock (5500).
     """
     def eq15(c_hi, theta):
         s2 = np.sin(np.deg2rad(float(theta))) ** 2

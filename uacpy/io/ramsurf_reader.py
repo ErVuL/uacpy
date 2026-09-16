@@ -5,10 +5,12 @@ uacpy dispatches to (``rams0.5``, ``ramsurf1.5``, ``ramgeo1.5``).
 The files read here are:
 
 - ``tl.line`` — ASCII ``range  TL`` rows at the single receiver depth
-  ``zr_line`` from row 2 of ``ram.in``, one row per output range step
+  ``zr_line`` from row 2 of ``ram.in``, one row per **march** step
   (:func:`read_tl_line`). No uacpy model consumes it — the RAM wrappers
   build their ``Field`` from ``tl.grid`` — but it is the run's own
-  single-depth trace and the cheapest cross-check on the grid.
+  single-depth trace, on a finer range axis than the grid, and the cheapest
+  cross-check on it. The Collins results carry its path as
+  ``metadata['tl_line_file']`` when the work dir survives.
 - ``tl.grid`` — unformatted Fortran binary. Record 1 is a single int32
   ``lz`` (number of stored depth points). Records 2..N hold ``lz``
   ``real*8`` TL samples each, one record per range output step.
@@ -68,11 +70,15 @@ def read_tl_line(filepath: Union[str, Path]) -> Tuple[np.ndarray, np.ndarray]:
 
     Notes
     -----
-    One row is written per output range step (every ``ndr``-th march step),
-    so this is :func:`read_tl_grid`'s single-depth sibling on the same range
-    axis, and the two agree row for row where ``zr_line`` falls on a stored
-    depth. It is unaffected by the ``-fdefault-real-8`` build the binary
-    ``tl.grid`` reader has to account for: this file is text.
+    One row is written per **march** step, i.e. every ``dr``, while
+    ``tl.grid`` is written every ``ndr``-th step: the ``write(2,*)r,tl`` sits
+    above the ``if(mdr.eq.ndr)`` block that gates the grid record
+    (``ramgeo1.5.f:420-425``, ``rams0.5.f``, ``ramsurf1.5.f`` alike). So the
+    two share a starting range and a single-depth quantity but **not** a
+    range axis: with ``ndr=2`` on a 5 km run at ``dr=2`` m this file holds
+    2500 rows spaced 2 m against ``tl.grid``'s 1250 spaced 4 m. It is
+    unaffected by the ``-fdefault-real-8`` build the binary ``tl.grid``
+    reader has to account for: this file is text.
 
     See Also
     --------

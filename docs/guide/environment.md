@@ -416,18 +416,22 @@ Nine class-typical materials, keyed by name:
 | `clay` | 1500 | 1.5 | 0.2 | 80 | 1.0 | 8.8 |
 | `silt` | 1575 | 1.7 | 1.0 | 80 | 1.5 | 5.4 |
 | `sand` | 1650 | 1.9 | 0.8 | 110 | 2.5 | 3.34 |
-| `gravel` | 1800 | 2.0 | 0.6 | 180 | 1.5 | −1.5 |
+| `gravel` | 1800 | 2.0 | 0.6 | 180 | 1.5 | −1.0 |
 | `moraine` | 1950 | 2.1 | 0.4 | 600 | 1.0 | — |
 | `chalk` | 2400 | 2.2 | 0.2 | 1000 | 0.5 | — |
 | `limestone` | 3000 | 2.4 | 0.1 | 1500 | 0.2 | — |
 | `basalt` | 5250 | 2.7 | 0.1 | 2500 | 0.2 | — |
-| `granite` | 5500 | 2.7 | 0.1 | 3000 | 0.2 | — |
+| `granite` | 5750 | 2.65 | 0.1 | 3000 | 0.2 | — |
 
 Each entry also carries `porosity` (%) and `roughness` (m). `list_materials()`
 returns the names, `get_material(name)` a copy of the dict. `ϕ` is the mean
-Wentworth grain size, undefined for consolidated rocks. Shear speeds for the
-unconsolidated sediments are near-surface (1 m) values — `c_s` grows with depth
-below the seabed, so pass an explicit `shear_speed` if you need another depth.
+Wentworth grain size, undefined for consolidated rocks. Rows `clay` … `basalt`
+are Jensen, Kuperman, Porter & Schmidt Table 1.3; `granite` has no row there and
+is Ainslie, *Principles of Sonar Performance Modelling* (2010), Table 4.20
+instead — two sources, each row the one named for it, never a blend. The `c_s`
+of silt, sand and gravel stands in for a depth-dependent `c_s(z̄)` that Table 1.3
+leaves as a relation, and the depth that single value refers to is not recorded
+there, so pass an explicit `shear_speed` when the depth matters.
 
 Three constructors read the catalogue:
 

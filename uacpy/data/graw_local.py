@@ -42,12 +42,19 @@ GRAW_URL = 'https://zenodo.org/records/3762390/files/Dataset_S2.nc'
 # suite never sampled. The inversion therefore saturates at ϕ = 8.80 over most
 # of the deep ocean: there the returned density is still the measured one, but
 # the speed and attenuation derived from it are the silty-clay end member
-# rather than a value tracking the grid. Inside the table the inversion is
-# ill-conditioned at the fine end: the rows at 1.480 g/cm³ (ϕ 8.80) and
-# 1.484 g/cm³ (ϕ 7.13) differ by 0.3 % in density, so a 0.3 % density change
-# swings ϕ by 1.67 and the derived compressional speed by 24 m/s (1.6 %;
-# velocity ratio 0.990 → 1.006), while the attenuation barely moves (k_p
-# 0.101 → 0.104).
+# rather than a value tracking the grid. Inside the table the inversion is at
+# its steepest over that same fine end: the clayey-silt row (1.484 g/cm³,
+# ϕ 7.13) and the silty-clay row (1.480 g/cm³, ϕ 8.80) are 0.004 g/cm³ apart
+# over 1.67 ϕ — 417.5 ϕ per g/cm³, 9 times the next-steepest interval (45.7,
+# between 1.769 and 1.783) and 29 times the table's own end-to-end secant
+# (14.2). So ρ ∈ [1.480, 1.484] is not resolvable: a 0.27 % density change
+# crosses the whole clayey-silt → silty-clay span, moving the derived speed
+# 1519 → 1495 m/s (24 m/s, 1.6 %; velocity ratio 1.006 → 0.990) and the
+# attenuation 0.126 → 0.079 dB/λ, a fall of 37 %. The gap is that narrow
+# because the clayey-silt row carries Hamilton & Bachman's *median* density,
+# 1.484 — the value their Table II footnote recommends for predicting that
+# class — rather than the 1.489 mean; over the mean the same 1.67 ϕ would
+# span 0.009 g/cm³, i.e. 186 ϕ per g/cm³.
 _RHO_ASC = _HB_RHO[::-1]
 _PHI_DESC = _HB_PHI[::-1]
 
@@ -127,7 +134,13 @@ def fetch_seabed_density_transect(start, end, n_points=6):
 
 def _phi_from_density(rho):
     """Invert the Hamilton & Bachman ρ(ϕ) table: bulk density (g/cm³) → mean
-    grain size (ϕ), clamped to the table's end members."""
+    grain size (ϕ), clamped to the table's end members.
+
+    The two finest rows are 0.004 g/cm³ apart over 1.67 ϕ (417.5 ϕ per g/cm³),
+    so a density in [1.480, 1.484] pins ϕ only to that whole span, and any
+    density below 1.480 returns its 8.80 ϕ end member — see the table note at
+    the top of this module.
+    """
     return float(np.interp(rho, _RHO_ASC, _PHI_DESC))
 
 
@@ -143,6 +156,11 @@ def fetch_bottom_graw(point, *, roughness=0.0, water_sound_speed=None,
     The density is the grid value; the grain size is recovered by inverting
     the Hamilton ρ(ϕ) table and yields the consistent sound speed and
     attenuation via :func:`uacpy.core.sediment.grain_size_to_geoacoustics`.
+    That inversion is at its coarsest exactly where the deep ocean sits — the
+    table's two finest rows are 0.004 g/cm³ apart over 1.67 ϕ, so a density in
+    [1.480, 1.484] g/cm³ fixes the grain size only to within that span, which
+    is 1519 to 1495 m/s in speed and 0.126 to 0.079 dB/λ in attenuation, and
+    anything below 1.480 returns the 8.80 ϕ end member.
     ``timeout``/``verbose`` are accepted (and ignored — this backend is
     offline) for signature uniformity with the network bottom fetchers.
     ``water_sound_speed`` (m/s) scales the velocity ratio to the in-situ

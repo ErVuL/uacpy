@@ -33,6 +33,7 @@ from scipy.spatial import cKDTree
 
 from uacpy._log import log_message
 from uacpy.core.exceptions import DataFetchError
+from uacpy.core.materials import MATERIALS
 from uacpy.data import _cache
 from uacpy.data._geo import as_coordinate, normalize_lon, EARTH_RADIUS_KM
 from uacpy.data._http import http_get, checked_member_size
@@ -58,15 +59,22 @@ _PHI_CLAMP = (-5.0, 13.0)
 
 # DECK41 dominant-lithology terms → representative Wentworth grain size (ϕ).
 _DECK41_LITHOLOGY_TO_PHI = {
-    'gravel': -2.0, 'sand': 1.5, 'silt': 5.5, 'clay': 9.0, 'mud': 7.5,
+    'sand': 1.5, 'silt': 5.5, 'clay': 9.0, 'mud': 7.5,
     'ooze': 7.5, 'calcareous ooze': 7.5, 'siliceous ooze': 8.5,
     'diatom ooze': 9.0, 'radiolarian ooze': 8.0, 'foraminiferal ooze': 6.5,
-    # 'rock' has no honest phi (the Wentworth scale describes loose
-    # sediment): it carries the sentinel below through the phi index and
-    # fetch_sediment_sample translates it to the 'limestone' material —
-    # the same route the EMODnet substrate path uses for hard substrata
-    # (seabed.py _FOLK5_TO_BOTTOM class 5).
-    'rock': -99.0, 'gravel and coarser': -3.0,
+    # Three terms have no phi either grain-size relation can evaluate, so each
+    # carries a sentinel through the phi index and fetch_sediment_sample
+    # translates it to a material preset instead:
+    #  - 'rock' is not loose sediment at all, and takes 'limestone' — the same
+    #    route the EMODnet substrate path uses for hard substrata
+    #    (seabed.py _FOLK5_TO_BOTTOM class 5);
+    #  - 'gravel' and 'gravel and coarser' are coarser than the fits: both
+    #    models stop at -1 phi (2 mm), and the default 'hamilton' answers
+    #    anything below 0 phi with its 0.92 phi coarse-sand end row. They take
+    #    the 'gravel' preset, whose geoacoustics are JKPS Table 1.3's. The two
+    #    terms share it because the coarse classes are not separable here
+    #    either: TR 9407 Table 2 carries one "Cobble, Gravel, Pebble" row.
+    'rock': -99.0, 'gravel': -98.0, 'gravel and coarser': -98.0,
 }
 
 # Candidate column names (lower-cased) for the tolerant CSV reader.
@@ -315,8 +323,12 @@ def _nearest(index, lat, lon):
 
 
 #: Any stored phi at or below this is a lithology-class sentinel, not a
-#: grain size ('rock' -> -99.0 above).
+#: grain size (the three terms mapped to -99.0 / -98.0 above).
 _PHI_CLASS_SENTINEL_MAX = -90.0
+
+#: Material preset each sentinel stands for. Anything else past the threshold
+#: is not a grain size under any reading and takes the hard-substrate route.
+_PHI_CLASS_SENTINEL_MATERIAL = {-99.0: 'limestone', -98.0: 'gravel'}
 
 #: Separation (km) within which a grain-size sample and a lithology
 #: description are treated as describing the same patch of seabed, so the
@@ -361,9 +373,11 @@ def fetch_sediment_sample(point, *, max_distance_km=DEFAULT_MAX_DISTANCE_KM):
     Returns ``{'phi', 'material', 'distance_km', 'latitude', 'longitude'}`` —
     the sample's own coordinates travel with it so a caller can record where
     the value actually came from. A grain-size sample carries ``phi``
-    (float) and ``material=None``; a hard-substrate sample ('rock' in
-    DECK41) carries ``phi=None`` and ``material='limestone'``, the same
-    material preset the EMODnet substrate route uses for hard substrata.
+    (float) and ``material=None``. A DECK41 lithology the grain-size relations
+    cannot evaluate carries ``phi=None`` and a material preset instead: 'rock'
+    takes ``'limestone'``, the same preset the EMODnet substrate route uses for
+    hard substrata, and 'gravel' / 'gravel and coarser' take ``'gravel'``,
+    being coarser than either relation is fitted over.
 
     The two files hold separate indices and are compared, not merged: a
     quantitative grain-size sample is preferred over a lithology description
@@ -397,9 +411,11 @@ def fetch_sediment_sample(point, *, max_distance_km=DEFAULT_MAX_DISTANCE_KM):
         )
     dist_km, phi, samp_lat, samp_lon = hit
     if phi <= _PHI_CLASS_SENTINEL_MAX:
-        # A lithology-class sentinel ('rock'): no grain size exists; the
-        # material preset carries the geoacoustics instead.
-        return {'phi': None, 'material': 'limestone', 'distance_km': dist_km,
+        # A lithology-class sentinel: no grain size the relations can evaluate
+        # exists; the material preset carries the geoacoustics instead.
+        return {'phi': None,
+                'material': _PHI_CLASS_SENTINEL_MATERIAL.get(phi, 'limestone'),
+                'distance_km': dist_km,
                 'latitude': samp_lat, 'longitude': samp_lon,
                 'dataset': dataset}
     return {'phi': phi, 'material': None, 'distance_km': dist_km,
@@ -424,16 +440,24 @@ def fetch_bottom_local(point, *, roughness=0.0, water_sound_speed=None,
     ``water_sound_speed`` (m/s) scales the grain-size velocity ratio to the
     in-situ near-seabed water; ``None`` uses the Hamilton reference.
     ``model`` picks the grain-size relations (``'hamilton'`` or
-    ``'apl-uw'``); a DECK41 hard-substrate sample routes through its
-    material preset and ignores it.
+    ``'apl-uw'``); a DECK41 sample whose lithology those relations cannot
+    evaluate — rock, and gravel and coarser — routes through its material
+    preset and ignores it.
     """
     lat, lon = as_coordinate(point)
     sample = fetch_sediment_sample(point, max_distance_km=max_distance_km)
     if sample['material'] is not None:
         # Hard substrata route through the material preset (~3000 m/s
         # limestone), exactly as the EMODnet substrate path does — a
-        # grain-size relation cannot describe rock.
-        bottom = bottom_from_class(sample['material'], roughness=roughness)
+        # grain-size relation cannot describe rock — and so does gravel,
+        # which is coarser than either relation is fitted over. The rock
+        # keeps its shear pair, shear support being what makes it rock; an
+        # unconsolidated class goes in fluid, Table 1.3 giving its c_s as a
+        # depth relation rather than a half-space property. ``porosity`` is
+        # the catalogue's own rock/sediment split (None for rocks).
+        elastic = MATERIALS[sample['material']]['porosity'] is None
+        bottom = bottom_from_class(sample['material'], roughness=roughness,
+                                   elastic=elastic)
     else:
         bottom = bottom_from_grain_size(
             sample['phi'], roughness=roughness, model=model,

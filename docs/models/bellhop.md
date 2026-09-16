@@ -1,7 +1,9 @@
 # Bellhop — Gaussian-beam ray tracing
 
-> `uacpy.models.Bellhop` · wraps Michael B. Porter's BELLHOP (Acoustics Toolbox)
-> · backends: `fortran`, `cxx`, `cuda`
+> `uacpy.models.Bellhop` · backends: `fortran` — Michael B. Porter's BELLHOP
+> (Acoustics Toolbox); `cxx` / `cuda` — bellhopcxx / bellhopcuda, the C++/CUDA
+> port by Scripps' Marine Physical Lab. `result.model_source` credits whichever
+> one resolved.
 
 Bellhop is the model to reach for first in shallow water at mid-to-high
 frequency, and the only uacpy model that gives you the **geometry** of the

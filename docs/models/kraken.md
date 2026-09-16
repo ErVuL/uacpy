@@ -152,7 +152,10 @@ incomplete one, for two reasons:
 - It clamps the upper phase-speed bound to the half-space **shear** speed
   (`kraken.f90:209`, `cHigh = MIN(cHigh, HSBot%cS)`), silently discarding every
   mode above it. On a sand-over-granite deck it stops at 2974.8 m/s and finds 26
-  modes; `krakenc.exe` reaches 5135.6 m/s and finds 28.
+  modes — a figure measured before the `granite` preset took its present
+  compressional speed and density, and not re-measured since, because reaching
+  it means driving `kraken.exe` on an elastic deck, which uacpy refuses by
+  design. `krakenc.exe` on that deck reaches 5545.9 m/s and finds 29.
 - Its absorption perturbation loops only over **acoustic** media
   (`kraken.f90:728`), so an elastic layer's loss is never accumulated and every
   mode comes back with `Im(k) = 0` — lossless, despite the sediment's
@@ -348,8 +351,8 @@ Two things to read off it. First, the depth axis runs past the dashed seafloor
 line to 108 m: Kraken **meshes through the sediment**, so a layered seabed is a
 medium the modes live in, not a boundary condition bolted on. Second, there are
 28 modes here against 14 for the same water column over a plain sand
-half-space — the granite basement is fast (5500 m/s compressional), the auto
-`c_high` follows it up to 5775 m/s, and the extra modes are steep ones that
+half-space — the granite basement is fast (5750 m/s compressional), the auto
+`c_high` follows it up to 6037.5 m/s, and the extra modes are steep ones that
 only exist because the basement supports them.
 
 ### 6.3 The field

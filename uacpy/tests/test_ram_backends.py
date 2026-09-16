@@ -2697,7 +2697,7 @@ class TestTheRelaxationWarningDescribesTheGridThatRuns:
 
     def test_the_refusal_prescribes_a_pinned_grid_ladder(self):
         """A pinned grid is unscored on every backend, so the refusal has to
-        say how to converge one: dz first (it bound the granite case), then
+        say how to converge one: dz first (it bound the hard rock case), then
         dr, against a reference model."""
         from uacpy.core.exceptions import ConfigurationError
         with pytest.raises(ConfigurationError) as excinfo:
@@ -2735,13 +2735,13 @@ class TestTheRelaxationWarningDescribesTheGridThatRuns:
         assert dr == pytest.approx(float(widened['dr']), rel=1e-9)
         assert dr < float(water['dr']), "the widening must buy a finer step"
 
-    def test_a_granite_seabed_gets_a_refined_grid_and_no_warning(self):
+    def test_a_hard_rock_seabed_gets_a_refined_grid_and_no_warning(self):
         """The one-hull chooser refused a 5500 m/s seabed at every rung; the
         band chooser returns a grid, and because the λ/16 floor cannot carry
         the modes trapped out to the 74° critical angle, dz is refined from
         the floor until they score under the limit — so the march runs
         finite and silent. One tiny mpiramS march."""
-        env = Environment(name='granite', bathymetry=100.0, ssp=1500.0,
+        env = Environment(name='hard_rock', bathymetry=100.0, ssp=1500.0,
                           bottom=BoundaryProperties(
                               acoustic_type='half-space', sound_speed=5500.0,
                               density=2.6, attenuation=0.1))

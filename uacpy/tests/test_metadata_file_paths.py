@@ -20,6 +20,7 @@ import pytest
 
 import uacpy
 from uacpy.models import Bellhop, Bounce, Kraken, RAM, SPARC
+from uacpy.io.ramsurf_reader import read_tl_line
 from uacpy.core import BoundaryProperties
 
 
@@ -228,6 +229,53 @@ def test_ram_mpirams_paths_absent_when_cleanup_true():
     ram = RAM(verbose=False, dr=20.0, dz=2.0)
     field = ram.run(env, src, rcv)
     assert 'psif_file' not in field.metadata
+
+
+@pytest.mark.requires_binary
+def test_ram_collins_exposes_the_tl_line_path(tmp_path):
+    """``tl.line`` — the Collins backends' single-depth TL trace — is an
+    output like any other, so its path is on the result and a caller does not
+    have to know the filename to reach it."""
+    env, src, rcv = _basic_setup()
+    ram = RAM(verbose=False, backend='ramgeo', dr=20.0, dz=2.0,
+              work_dir=tmp_path)
+    field = ram.run(env, src, rcv)
+    assert 'tl_line_file' in field.metadata, (
+        f"Expected RAM ramgeo tl_line_file; got keys: {list(field.metadata)}"
+    )
+    path = field.metadata['tl_line_file']
+    assert os.path.basename(path) == 'tl.line'
+    assert os.path.exists(path)
+
+
+@pytest.mark.requires_binary
+def test_tl_line_is_written_every_march_step_not_every_output_step(tmp_path):
+    """``tl.line`` and ``tl.grid`` are NOT on one range axis. The Fortran
+    writes the line trace above the ``if(mdr.eq.ndr)`` block that gates the
+    grid record (``ramgeo1.5.f:420-425``), so the line has ``ndr`` rows per
+    grid range. With ``ndr`` forced above 1 the two counts must differ."""
+    env = uacpy.Environment(name='t', bathymetry=100.0, ssp=1500.0)
+    src = uacpy.Source(depths=25.0, frequencies=200.0)
+    rcv = uacpy.Receiver(depths=np.array([50.0]),
+                         ranges=np.linspace(500.0, 5000.0, 10))
+    dr = 2.0
+    ram = RAM(verbose=False, backend='ramgeo', dr=dr, work_dir=tmp_path)
+    field = ram.run(env, src, rcv)
+
+    # Row 3 of the deck is ``rmax dr ndr`` — the stride the binary ran with,
+    # read back rather than re-derived.
+    deck = Path(field.metadata['in_file']).read_text().splitlines()
+    _rmax, dr_deck, ndr = deck[2].split()
+    ndr = int(ndr)
+    assert float(dr_deck) == pytest.approx(dr)
+    assert ndr > 1, "this case is only discriminating while ndr > 1"
+
+    ranges, _tl = read_tl_line(field.metadata['tl_line_file'])
+    assert ranges.size > 1
+    step = float(ranges[1] - ranges[0])
+    assert step == pytest.approx(dr), (
+        f"tl.line rows are {step} m apart; the march step is {dr} m and the "
+        f"tl.grid output spacing is dr·ndr = {dr * ndr} m")
 
 
 # ----------------------------------------------------------------------
