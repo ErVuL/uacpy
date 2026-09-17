@@ -24,7 +24,7 @@ foundation a future 3-D implementer builds on, together with
 :func:`~uacpy.io.bathy_io.read_boundary_3d`,
 :func:`~uacpy.io.bathy_io.write_bty_3d` and
 :func:`~uacpy.io.oalib_writer.write_field3dflp`;
-``uacpy/tests/test_io_restored_capabilities.py`` pins them against a
+``uacpy/tests/test_io_public_names_without_callers.py`` pins them against a
 dead-code sweep proposing their removal a second time.
 """
 
@@ -2067,7 +2067,7 @@ def rts_to_pressure(
         # theorem and would null the transient source pulse (first few samples).
         # Imported here rather than at module level: sparc_pulse pulls scipy
         # in, and only this deconvolution path needs it.
-        from uacpy.acoustic_signal.waveforms import sparc_pulse
+        from uacpy.acoustic_signal.generate import sparc_pulse
         t = np.asarray(rts_data["time"], dtype=float)
         s_t, _ = sparc_pulse(t, 2.0 * np.pi * frequency, pulse_type[0])
         freqs = np.fft.rfftfreq(nt, dt)

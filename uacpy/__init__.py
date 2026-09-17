@@ -57,6 +57,10 @@ from uacpy.core.exceptions import (
     FileFormatError,
 )
 from uacpy.core import acoustics
+# The two helpers a recording passes through before any model or estimator
+# sees it: volts -> Pa, and a pressure waveform -> dB re 1 uPa. Eager because
+# ``acoustics`` is already imported above, so naming them costs no import.
+from uacpy.core.acoustics import pressure, spl
 from uacpy.core import materials
 from uacpy.core.materials import MATERIALS, list_materials, get_material
 
@@ -198,7 +202,7 @@ __all__ = [
     'sonar',
     'comms',
     'data',
-    'acoustics',
+    'acoustics', 'pressure', 'spl',
     'materials', 'MATERIALS', 'list_materials', 'get_material',
     'metrics',
     '__version__',

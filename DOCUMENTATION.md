@@ -643,7 +643,11 @@ great-circle path instead, for a range-dependent environment.
 `download_globsed_db`, `download_crust1_db`, `download_diesing_db`,
 `download_graw_db`, `download_sediment_db`, `download_glodap_db`,
 `download_seaice_db`, `download_wind_db`. Once a database is cached the
-corresponding `*_sources='local'` path runs with no network.
+corresponding `*_sources='local'` path runs with no network. Each one takes the
+address it downloads from — `url=` for the fetchers that pull one file,
+`base_url=` for the two that page through a service (`emodnet`, `seaice`) — so
+a moved publisher or a dead host is a keyword away from a mirror; only
+`http`/`https` addresses are accepted.
 
 **Provenance & citations.** Every fetched layer records where it came from. Each
 carrier carries `carrier.data_sources` — a tuple of `data.DataProvenance`
@@ -1590,7 +1594,7 @@ and use `uacpy.plot.compare([f.at(depth=50) for f in ...], labels=[...])`.
 A processing toolbox for the waveforms that propagation models emit or
 consume. Named `acoustic_signal` so it never shadows the stdlib `signal`.
 Transforms and estimators are **pure functions** returning arrays (or a small
-named tuple such as `PPSDResult`); `FRF` is the one retained class (it holds
+named tuple such as `SpectralEstimate`); `FRF` is the one retained class (it holds
 fitted state). All plotting lives in `uacpy.visualization` (`plot_psd`,
 `plot_fk`, …), not in the computation modules.
 
@@ -1599,12 +1603,12 @@ fitted state). All plotting lives in `uacpy.visualization` (`plot_psd`,
 | Waveforms | `lfm_chirp`, `hfm_chirp`, `tone_burst`, `gaussian_pulse`, `ricker_wavelet`, `sparc_pulse`, `nwave` |
 | Coded probes | `mseq`, `make_mseq_probe`, `bpsk_modulate` |
 | Noise synthesis | `make_noise_waveform`, `make_bandlimited_noise`, `synthesize_noise_from_psd`, `fourier_synthesis`, `add_noise` |
-| Spectral / levels | `psd`, `ppsd`, `sel` (→ `PSDResult`/`PPSDResult`/`SELResult`) |
+| Spectral / levels | One estimator per statistic: `welch` and `constant_q` (both `scaling='density'` or `'spectrum'`), `sound_exposure` (the ISO 18405 band energy), and a histogram twin of each — `probabilistic_welch`, `probabilistic_constant_q`, `probabilistic_sound_exposure` (→ `SpectralEstimate` / `ProbabilisticSpectralEstimate`). Each takes only the parameters its own statistic can honour: `sound_exposure` has no window, overlap, detrending or averaging, because a band sum is the band's energy only when every bin is counted once and whole, and asking a bin estimator for `scaling='exposure'` raises and names it. `fmin`, `fmax` and `integration_time` mean the same thing in all six. `BAND_TYPES` names the ladders (`'decidecade'` by default, also `'third_octave'`, `'octave'`, `'linear'`). Two result types cover the family: a name that fixes one scaling would say "density" over band power |
 | Decidecade (ISO 18405) | `decidecade_bands`, `decidecade_band_levels` |
 | Arrays | `steering_vectors`, `beamform`, `sample_covariance`, `bartlett_spectrum`, `mvdr_spectrum`, `music_spectrum`, `shading_taper` (→ `BeamformResult`) |
 | Active / pulse compression | `matched_filter`, `pulse_compression`, `processing_gain`, `ambiguity_function` (→ `AmbiguityResult`) |
 | Time-frequency | `spectrogram`, `analytic_signal`, `envelope`, `instantaneous_frequency`, `wigner_ville`, `cwt`, `inverse_cwt`, `cepstrum`, `complex_cepstrum`, `inverse_complex_cepstrum` (→ `SpectrogramResult`/`WignerVilleResult`/`CWTResult`/`ComplexCepstrum`) |
-| Constant-Q (Brown 1991) | `constant_q_transform`, `constant_q_psd`, `constant_q_spectrogram`, `probabilistic_constant_q` (→ `CQTResult`/`CQPSDResult`/`CQSpectrogramResult`/`CQPPSDResult`) |
+| Constant-Q (Brown 1991) | `constant_q_transform`, `constant_q_spectrogram`, and `constant_q` / `probabilistic_constant_q` (→ `CQTResult`/`SpectralEstimate`/`CQSpectrogramResult`/`ProbabilisticSpectralEstimate`) |
 | Gather transforms | `fk_transform`, `taup_transform`, `radon_transform`, `inverse_fk`, `inverse_taup`, `inverse_radon` (→ `FKResult`/`TauPResult`/`RadonResult`) |
 | System ID / channel | `FRF`, `impulse_response`, `impulse_response_from_transfer_function`, `simulate_reception`, `fractional_delay_taps` |
 | Modal / dispersion | `warp_signal`, `unwarp_signal`, `modal_group_velocity` |
@@ -1815,7 +1819,9 @@ single module — each is sourced to its standard:
 - **`uacpy.core.acoustics.soundspeed_teos10`** — TEOS-10 (IOC/SCOR/IAPSO 2010),
   Eqn. (2.17.1) on the IAPWS-08/09 Gibbs function; agrees with Del Grosso at depth.
 - **`uacpy.acoustic_signal.decidecade_bands`** / `decidecade_band_levels` —
-  one-third-octave (decidecade) bands, ISO 18405 / IEC 61260-1.
+  decidecade bands, ISO 18405 / IEC 61260-1. Base-ten (`1000·10^(n/10)`), which
+  is what the standards specify; the base-two `third_octave` ladder is the
+  other option on every band-taking call.
 - **`uacpy.noise.monopole_source_level`** / `radiated_noise_level` — ship
   monopole source level, ISO 17208.
 - **`uacpy.noise.auditory_weighting`** — marine-mammal frequency weighting,
@@ -1852,7 +1858,7 @@ uacpy is SI throughout; underwater levels reference **1 µPa**.
 | Density | g/cm³ | **acoustic inputs** (bottom/sediment). The `core.acoustics` formula-level helpers are the exception — SI `kg/m³` (and radians) — see *Density* below |
 | Attenuation (geoacoustic) | dB per wavelength | models emit the matching `AT` TopOpt letter |
 | Attenuation (volume) | dB/km | `francois_garrison_dB_per_km`, `thorp_dB_per_km` |
-| Pressure | Pa (µPa for levels) | |
+| Pressure | Pa (µPa for levels) | a recording enters through `uacpy.pressure` (`core.acoustics.pressure`), which turns volts (or ADC counts) into Pa given the hydrophone sensitivity in dB re 1 V/µPa; `uacpy.spl` takes the waveform from there to dB re 1 µPa |
 | Pressure level / SPL | dB re 1 µPa | air would be dB re 20 µPa |
 | Noise spectral level | dB re 1 µPa²/Hz | |
 
@@ -1884,7 +1890,7 @@ uacpy is SI throughout; underwater levels reference **1 µPa**.
 - A 2-D (line-source) analytic solution differs by the spreading factor
   `|G₃D/G₂D| = √(k/2πr)` — relevant only when comparing against closed-form 2-D
   references (see the ideal-wedge benchmark in `tests/test_benchmarks_analytic.py`).
-- `sel`, `psd`, `ppsd` and `spectrogram` are pure functions returning arrays;
+- The spectral estimators and `spectrogram` are pure functions returning arrays;
   their plots (`plot_sel`, `plot_psd`, `plot_ppsd`, `plot_spectrogram`, and the
   gather/transform/comms plotters) live in `uacpy.visualization`, not in the
   computation modules. Levels are formed through

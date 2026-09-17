@@ -2,7 +2,7 @@
 Tests specific to OASN executable resolution and error paths.
 
 OASN instantiation and run-time tests (covariance + replicas) live in
-test_oases_comprehensive.py; this file covers only the things unique to
+test_oases_variants.py; this file covers only the things unique to
 the OASN wrapper:
   - the missing-executable error message
   - the ``_oasn_available`` probe used by the wrapper to decide whether

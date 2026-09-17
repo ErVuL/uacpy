@@ -504,7 +504,7 @@ point source a propagation model assumes:
 `d_s = 0.7 × draught` (Formula 1).
 
 ```python
-from uacpy.acoustic_signal.bands import decidecade_bands
+from uacpy.acoustic_signal.estimate import decidecade_bands
 from uacpy.noise import (RNL_UNCERTAINTY_DB, radiated_noise_level,
                          nominal_source_depth, monopole_source_level,
                          lloyd_mirror_correction)

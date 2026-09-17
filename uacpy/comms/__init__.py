@@ -15,103 +15,101 @@ Istepanian & Stojanovic (eds.). *Underwater Acoustic Digital Signal Processing
 Proakis & Salehi. *Digital Communications*.
 """
 
-from .modulation import (
+from .modulate import (
+    # symbol mapping
     Modulator,
     constellation,
-    dpsk_demodulate,
     dpsk_modulate,
-    fsk_demodulate,
+    dpsk_demodulate,
     fsk_modulate,
-)
-from .metrics import (
-    ber_theory,
-    bit_error_rate,
-    evm,
-    symbol_error_rate,
-)
-from .channel_models import (
-    apply_channel,
-    apply_fading_channel,
-    awgn,
-    fading_taps,
-    multipath_channel,
-)
-from .equalization import (
-    DFE,
-    lms_equalizer,
-    mmse_equalizer,
-    rls_equalizer,
-    slicer,
-)
-from .doppler import (
-    compensate_doppler,
-    doppler_from_speed,
-    estimate_doppler_scale,
-)
-from .sync import (
-    detect_frames,
-    detect_preamble,
-    matched_filter_metric,
-)
-from .link import LinkResult, ber_sweep, simulate_link
-from .framing import bits_to_bytes, bytes_to_bits, pack_frame, unpack_frame
-from .phy import (
-    downconvert,
-    matched_filter as rrc_matched_filter,
-    pulse_shape,
-    rrc_filter,
-    symbol_sync,
-    upconvert,
-)
-from .transceiver import OFDMReceiver, OFDMTransmitter, CommsReceiver, Transmitter
-from .janus import (
-    JanusPacket,
-    janus_decode,
-    janus_demodulate,
-    janus_detect,
-    janus_encode,
-    janus_modulate,
-    janus_receive,
-    janus_transmit,
-)
-from .channel_est import ls_estimate, omp_estimate
-from .ofdm import (
-    apply_cfo,
-    equalize_subcarriers,
-    estimate_channel,
-    ofdm_demodulate,
+    fsk_demodulate,
+    # payload framing
+    bytes_to_bits,
+    bits_to_bytes,
+    pack_frame,
+    unpack_frame,
+    # OFDM
     ofdm_modulate,
+    ofdm_demodulate,
     ofdm_symbol,
     schmidl_cox_preamble,
     schmidl_cox_sync,
-)
-from .coding import (
+    apply_cfo,
+    estimate_channel,
+    equalize_subcarriers,
+    # forward error correction and interleaving
     ConvCode,
     conv_encode,
-    deinterleave,
-    interleave,
     viterbi_decode,
     viterbi_hard,
+    interleave,
+    deinterleave,
+    # direct-sequence spread spectrum
+    m_sequence,
+    spread,
+    despread,
+    processing_gain_dB,
 )
-from .dsss import despread, m_sequence, processing_gain_dB, spread
+from .link import (
+    # channel models
+    awgn,
+    multipath_channel,
+    apply_channel,
+    fading_taps,
+    apply_fading_channel,
+    # passband PHY
+    rrc_filter,
+    pulse_shape,
+    matched_filter as rrc_matched_filter,
+    upconvert,
+    downconvert,
+    symbol_sync,
+    # transceivers
+    Transmitter,
+    CommsReceiver,
+    OFDMTransmitter,
+    OFDMReceiver,
+    # end-to-end harness
+    simulate_link,
+    ber_sweep,
+    LinkResult,
+)
+from .receive import (
+    # equalization
+    DFE,
+    lms_equalizer,
+    rls_equalizer,
+    mmse_equalizer,
+    slicer,
+    # doppler
+    doppler_from_speed,
+    compensate_doppler,
+    estimate_doppler_scale,
+    # synchronisation
+    matched_filter_metric,
+    detect_preamble,
+    detect_frames,
+    # channel estimation
+    ls_estimate,
+    omp_estimate,
+    # link quality
+    bit_error_rate,
+    symbol_error_rate,
+    evm,
+    ber_theory,
+)
+from .janus import (
+    JanusPacket,
+    janus_encode,
+    janus_decode,
+    janus_modulate,
+    janus_demodulate,
+    janus_detect,
+    janus_transmit,
+    janus_receive,
+)
 
-from . import (
-    channel_est,
-    channel_models,
-    coding,
-    doppler,
-    dsss,
-    equalization,
-    framing,
-    janus,
-    link,
-    metrics,
-    modulation,
-    ofdm,
-    phy,
-    sync,
-    transceiver,
-)
+from . import janus, link, modulate, receive
 
 __all__ = [
     # modulation
@@ -152,7 +150,5 @@ __all__ = [
     # DSSS
     "m_sequence", "spread", "despread", "processing_gain_dB",
     # submodules
-    "modulation", "metrics", "channel_models", "equalization", "doppler",
-    "sync", "link", "channel_est", "ofdm", "coding",
-    "framing", "phy", "transceiver", "janus", "dsss",
+    "modulate", "link", "receive", "janus",
 ]

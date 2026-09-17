@@ -36,7 +36,7 @@ from uacpy.io.oalib_writer import (
 )
 from uacpy.io.refl_io import stage_reflection_file
 from uacpy.core.units import m_to_km
-from uacpy.io.utils import reject_unknown_kwargs
+from uacpy.io.input_checks import reject_unknown_kwargs
 
 
 # The advanced Cerveny beam knobs — the only ``**kwargs`` the beam block of

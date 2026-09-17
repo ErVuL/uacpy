@@ -53,7 +53,7 @@ BAD_SAMPLE_RATES = [0.0, -10000.0, float('nan'), float('inf')]
 @pytest.mark.requires_binary
 class TestBellhop:
     """Tests for Bellhop model. Smoke TL coverage on ``simple_env`` lives
-    in ``test_simplified_api.TestComputeAPI`` and ``test_bellhop`` —
+    in ``test_compute_wrappers.TestComputeAPI`` and ``test_bellhop`` —
     only model-specific scenarios live here."""
 
     def test_range_dependent_env_returns_full_receiver_grid(self, range_dependent_env, source, receiver_small):
@@ -345,7 +345,7 @@ class TestRAM:
         assert captured['source_waveform'] is wf
 
 
-# OASES instantiation/supported-mode tests live in test_oases_comprehensive.py;
+# OASES instantiation/supported-mode tests live in test_oases_variants.py;
 # the cross-model workflow tests below cover Bounce → {Bellhop, Scooter,
 # Kraken(backend='krakenc')}.
 

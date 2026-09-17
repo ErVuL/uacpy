@@ -1,5 +1,5 @@
 """
-OASES wrapper edge cases not covered in test_oases_comprehensive.py.
+OASES wrapper edge cases not covered in test_oases_variants.py.
 
 This file holds the bits unique to the wrapper layer: warnings on
 unsupported, approximated or off-grid configurations, the option-line

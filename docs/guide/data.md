@@ -770,6 +770,33 @@ data.dataset_root('woa23')    # where WOA23 is expected
 data.is_installed('woa23')    # True / False, without catching an exception
 ```
 
+### Fetching from somewhere else
+
+Every `download_*_db` fetcher takes the address it downloads from, so a
+publisher that moves, a site that answers 403 on every path, or a service that
+hangs is not the end of the road:
+
+```python
+from uacpy import data
+
+data.download_globsed_db(url='https://mirror.example.org/GlobSed-v3.nc')
+data.download_seaice_db(base_url='https://mirror.example.org/NOAA/G02135')
+```
+
+`url=` names one file; `base_url=` names the address that many requests are
+built on, and is what the two fetchers that page through a service take —
+`download_emodnet_db` (the WFS endpoint) and `download_seaice_db` (the NSIDC
+directory tree, whose `<hemisphere>/monthly/geotiff/<MM_Mon>/` layout a mirror
+has to keep). `download_crust1_db` already tries a published mirror of its own
+before failing, and verifies all four grids against their md5 before writing
+any, so what decides whether a download is CRUST1.0 is the data rather than the
+host it came from.
+
+Only `http`/`https` are accepted, on both transports — a `file://` or `ftp://`
+address is refused rather than turned into a local-file read. And a dataset
+you have fetched by hand needs no download at all: drop it in the dataset's
+cache directory, which is where the reader looks.
+
 `is_installed` is the predicate behind the error below, for code that picks a
 source rather than failing on a missing one; it takes optional path parts
 (`data.is_installed('woa23', 'woa23_decav_s00_01.nc')`) to ask about one file

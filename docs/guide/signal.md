@@ -13,7 +13,8 @@ collide with Python's standard-library module of that name. Nothing here is
 re-exported onto `uacpy.*`; you import from the sub-package:
 
 ```python
-from uacpy.acoustic_signal import lfm_chirp, psd, spectrogram, matched_filter
+from uacpy.acoustic_signal import (lfm_chirp, welch,
+                                   spectrogram, matched_filter)
 ```
 
 Array processing — steering vectors, conventional and MVDR beamforming, MUSIC —
@@ -25,39 +26,38 @@ processing are in [`sonar.md`](sonar.md).
 
 ## 1. How the package is laid out
 
-| Sub-module | What it holds |
-|---|---|
-| `waveforms` | deterministic pulses: chirps, tone bursts, Ricker, Gaussian, N-wave, the SPARC pulse library |
-| `sequences` | m-sequences, BPSK modulation, the m-sequence channel probe |
-| `noise_synthesis` | PSD-to-time-series realisation, band-limited noise, SNR mixing, Fourier synthesis |
-| `analysis` | `psd`, `ppsd`, `sel` — spectral and level estimators |
-| `bands` | decidecade (ISO 18405) band edges and band levels |
-| `timefreq` | Hilbert, spectrogram, wavelet, Wigner-Ville, cepstrum |
-| `constant_q` | geometric-frequency (constant-Q) transform, PSD, spectrogram, PPSD |
-| `transforms` | f-k, tau-p, Radon gather transforms **and their inverses** |
-| `active` | matched filter, pulse compression, processing gain, ambiguity |
-| `channel` | impulse response and received-signal simulation |
-| `modal` | modal group velocity, waveguide warping |
-| `system_id` | `FRF` — frequency-response-function estimation |
-| `arrays` | beamforming — see [`arrays.md`](arrays.md) |
+| Sub-module | The question it answers | What it holds |
+|---|---|---|
+| `generate` | give me a signal | chirps, tone bursts, Ricker/Gaussian/N-wave, the SPARC pulse library; m-sequences and BPSK; PSD-to-time-series realisation, band-limited noise, SNR mixing |
+| `estimate` | measure this signal | `welch`, `constant_q`, `sound_exposure` and a `probabilistic_` twin of each; the constant-Q transform and spectrogram; Hilbert, spectrogram, wavelet, Wigner-Ville, cepstrum; decidecade (ISO 18405) band edges and levels |
+| `arrays` | what does this array see | beamforming and steering vectors (see [`arrays.md`](arrays.md)), plus the f-k, tau-p and Radon gather transforms **and their inverses** — the ones that take a receiver spacing `dx` |
+| `detect` | is my transmission in there | matched filter, pulse compression, processing gain, ambiguity |
+| `system` | what did the channel do to it | `FRF` frequency-response estimation, impulse response and received-signal simulation, modal group velocity and waveguide warping |
+
+You will not type those names: every public name is re-exported from
+`uacpy.acoustic_signal`, so it is `uacpy.acoustic_signal.welch`, never
+`...estimate.welch`. The boundaries are for whoever maintains the package.
 
 Three conventions hold across all of it:
 
 **Everything is a pure function.** No estimator carries state, and none of them
 plot. A transform takes arrays and keyword arguments and returns arrays, or a
-small data-only namedtuple (`PSDResult`, `FKResult`, `AmbiguityResult` …) that
+small data-only namedtuple (`SpectralEstimate`, `FKResult`, `AmbiguityResult`
+…) that
 unpacks positionally:
 
 ```python
-frequencies, power = psd(x, fs)
+frequencies, power = welch(x, fs)
 f, t, Sxx = spectrogram(x, fs, nperseg=1024)
 ```
 
 `FRF` is the single exception — it is a class because it carries a fitted model.
 
-**Levels are reference-free until the last step.** `psd` returns Pa²/Hz and
-`sel` returns Pa²·s, both linear. The reference pressure enters only where a dB
-number is actually formed: `decidecade_band_levels(..., ref=)`, `ppsd(ref=)`,
+**Levels are reference-free until the last step.** The estimators return
+Pa²/Hz, Pa² or Pa²·s — whichever `scaling` was asked for — all linear. The
+reference pressure enters only where a dB
+number is actually formed: `decidecade_band_levels(..., ref=)`, the histogram
+estimators' `ref=`,
 and the plotters. That way an estimate never carries a hidden `1 µPa` baked
 into it.
 
@@ -162,26 +162,174 @@ frequency of each.
 
 | Call | Returns | Units |
 |---|---|---|
-| `psd(data, sample_rate, *, window='hann', nperseg=8192, noverlap=None, nfft=None, scaling='density')` | `PSDResult(frequencies, power)` | Pa²/Hz, linear |
-| `ppsd(data, sample_rate, *, seg_duration=1.0, overlap_pct=50, ddB=1.0, …, ref=1e-6)` | `PPSDResult(frequencies, level_edges, pdf, mean_dB, std_dB, binwidth_dB, seg_duration, ref, scaling)` | dB histogram per frequency |
-| `sel(data, sample_rate, *, fmin=8.9125, fmax=22387, band_type='third_octave', num_bands=30, …)` | `SELResult(sel_pa2s, bands)` | Pa²·s, linear; `plot_sel(ref=1e-6)` gives dB re 1 µPa²·s |
+| `welch(data, sample_rate, *, scaling='density', nperseg=8192, noverlap=None, nfft=None, detrend='constant', average='mean', window=None, fmin=None, fmax=None, integration_time=None)` | `SpectralEstimate(frequencies, power)` carrying `.scaling`, `.method` | Pa²/Hz or Pa² per bin, linear |
+| `constant_q(data, sample_rate, *, scaling='density', fmin=20.0, fmax=None, bins_per_octave=24, hop=None, window='hann', integration_time=None)` | same, on geometric bins | Pa²/Hz or Pa² per bin, linear |
+| `probabilistic_welch(data, sample_rate, *, scaling='density', seg_duration=1.0, overlap_pct=50, ddB=1.0, lvlmin=0, lvlmax=150, nperseg=8192, noverlap=None, window=None, fmin=None, fmax=None, integration_time=None, ref=1e-6)` | `ProbabilisticSpectralEstimate(frequencies, level_edges, pdf)` carrying `.mean_dB`, `.std_dB`, `.binwidth_dB`, `.seg_duration`, `.ref`, `.scaling`, `.method`, `.bands` | dB histogram per frequency |
+| `probabilistic_constant_q(data, sample_rate, *, scaling='density', fmin=20.0, …, ddB=1.0, lvlmin=0, lvlmax=150, ref=1e-6)` | same, one sample per frame rather than per segment | dB histogram per frequency |
+| `sound_exposure(data, sample_rate, *, band_type='decidecade', num_bands=30, nperseg=None, batch_size=None, fmin=8.9125, fmax=22387, integration_time=None)` | `SpectralEstimate` carrying `.bands`, `.band_type` | Pa²·s per standard band — the ISO 18405 sound exposure; `.plot()` / `plot_sel(ref=1e-6)` gives dB re 1 µPa²·s |
+| `probabilistic_sound_exposure(data, sample_rate, *, seg_duration=1.0, …, band_type='decidecade', …, ref=1e-6)` | `ProbabilisticSpectralEstimate` carrying `.bands` | dB re 1 µPa²·s histogram, one sample per segment |
 | `decidecade_bands(f_low, f_high)` | `(lower, centers, upper)` | Hz |
 | `decidecade_band_levels(psd, frequencies, ref=1e-6)` | `(centers, levels)` | dB re `ref²` |
 
-`ppsd` accepts a 1-D signal, a 2-D block (longer axis is time), or a list of
-1-D arrays; the list form is the unambiguous one. Its constant-Q counterpart is
-`probabilistic_constant_q`.
+The probabilistic estimators accept a 1-D signal, a 2-D block (longer axis is
+time), or a list of 1-D arrays; the list form is the unambiguous one. There are
+no `psd` / `ppsd` short names: a three-letter alias of a nine-word statistic is
+exactly where a density gets read as a spectrum.
 
-`scaling='density'` (the default for `psd` and the other linear estimators;
-the constant-Q family defaults to `'spectrum'` — see §4) gives Pa²/Hz and is
-independent of `nperseg`
-and of the window — the right choice for noise. `scaling='spectrum'` gives
-per-bin power instead, which is the right choice for a tone and which moves with
-`nperseg`. Either way a tone falling between bins
-reads low — 1.42 dB at worst for a Hann window. That is *scalloping* loss, set
-by the mainlobe shape, and is a different figure of merit from the same
-window's 1.5-bin noise-equivalent bandwidth, which is what makes a density
-estimate window-independent. Both are the estimator, not the signal.
+**One function per method, and a `scaling` only where it is one divide.**
+There is no `method` keyword to cross: the name at the call site says how
+frequency is resolved, and each function takes only the parameters that method
+can honour.
+
+| function | what it returns | its own parameters |
+|---|---|---|
+| `welch` | Pa²/Hz or Pa² on equal-width bins | `scaling`, `nperseg`, `noverlap`, `nfft`, `detrend`, `average`, `window` |
+| `constant_q` | the same two, on geometric bins | `scaling`, `fmin`, `fmax`, `bins_per_octave`, `hop`, `window` |
+| `sound_exposure` | Pa²·s per standard band | `band_type` (one of `BAND_TYPES`), `num_bands`, `nperseg`, `batch_size` |
+
+`scaling='density'` and `'spectrum'` are the same estimate divided, or not, by
+the bin's noise-equivalent bandwidth, so they share every other argument and
+nothing has to be policed — `window=None` still resolves to `hann` for a
+density and `flattop` for a spectrum. An exposure is not a third value of that
+keyword: it is an energy, it needs bands, and it must refuse the knobs below,
+so it is its own function.
+
+Three arguments are shared, because one sentence describes each everywhere:
+`fmin` / `fmax`, the frequency range of the estimate, and `integration_time`,
+the stretch of record it is taken over (seconds from the start). What an unset
+one falls back to is the estimator's own answer — Welch resolves the whole
+spectrum and the range crops what comes back, constant-Q runs 20 Hz to
+Nyquist, the ladder spans the 10 Hz to 20 kHz reporting range.
+
+**What each function does not take is the point.** `sound_exposure` has no
+`window`, `noverlap`, `detrend` or `average`: a band's value is the sum of the
+bins inside it, which is the band's energy only when every bin is counted once
+and whole, so those are not choices there and Python's own `TypeError` says so.
+The same rule removed four runtime guards that used to police the combinations
+— the signature does that work now.
+
+`batch_size` (on `sound_exposure` alone) is not an estimator choice either: it
+is how many samples are read at a time, so a multi-hour record never
+materialises as one segment matrix. It changes memory, not the estimate, as
+long as each batch holds whole segments — it defaults to a whole number of
+them, and warns when a value you pass does not.
+
+**A band exposure is the Welch bins summed.** `sound_exposure` calls the Welch
+route per batch under the settings above and adds up the bins each band
+covers; there is no second estimator underneath, which is why the two agree to
+floating-point noise. At the default 1 Hz bins the seven lowest decidecade
+bands hold 2 to 7 FFT lines each, short of the ten a synthesised band level
+wants (Fahy, *Sound Intensity*). That is a resolution limit and not an error in
+the total — bins are orthogonal, so each one's energy lands in exactly one band
+— but energy near a band edge is assigned in whole-bin quanta. Raising
+`nperseg` to about `10·sample_rate/2.3` (4.3 s of record) resolves them, at the
+cost of time resolution.
+
+Welch also forwards scipy's own two estimate-changing knobs: `average='median'`
+— the robust choice for a record with transients, where a passing ship moves
+the mean of the periodograms and leaves the median at the background (3.7 dB
+apart on a tape with one loud burst in it) — and `detrend=False`, which keeps
+the DC bin scipy otherwise removes per segment. `axis` and `return_onesided`
+are deliberately not forwarded: the axis comes from the input's own shape, and
+complex input already produces a two-sided spectrum with a warning.
+
+Every estimate draws itself: `welch(x, fs).plot()` labels its own
+axis from the `scaling` and `method` it carries, the same convenience a model
+result's `.plot()` gives, and it returns `(fig, ax)` like every plotter in the
+package. `freq_scale='linear'` reads a narrow band the way a spectrum analyser
+does; the default `'log'` is what spaces constant-Q's geometric bins evenly.
+
+The histogram estimators draw themselves the same way:
+`probabilistic_welch(x, fs).plot()` goes to `plot_ppsd`, and the same
+call on a `method='constant_q'` estimate goes to `plot_constant_q_ppsd` —
+picked from the estimate's own `method`, so the two cannot be crossed. Calling
+the wrong plotter by hand raises and names the other one, because constant-Q
+bins are geometric and carry no `seg_duration`.
+
+| Estimate | `.plot()` draws | Underlying plotter |
+|---|---|---|
+| `SpectralEstimate` from `welch` / `constant_q` | the spectrum as a line, dB | `plot_psd` |
+| `SpectralEstimate` from `sound_exposure` | one bar per standard band | `plot_sel` |
+| `ProbabilisticSpectralEstimate` from `probabilistic_welch` / `probabilistic_sound_exposure` | the level histogram | `plot_ppsd` |
+| `ProbabilisticSpectralEstimate` from `probabilistic_constant_q` | the same, on geometric bins | `plot_constant_q_ppsd` |
+
+`scaling='density'` (the default on `welch` and `constant_q`) gives Pa²/Hz,
+independent of the window and of `nperseg` — the right choice for noise.
+`scaling='spectrum'` gives per-bin power, where an on-bin tone reads its full
+`A²/2` — the right choice for tones. The energy a record delivered is
+`sound_exposure`, which is a function rather than a third value of `scaling`:
+it needs standard bands, and it needs a window and an overlap the caller does
+not get to choose. Asking a bin estimator for `scaling='exposure'` **raises**
+and names it.
+
+**The window default follows the scaling**, because the two measure different
+things. A density uses `hann` (1.50-bin noise-equivalent bandwidth); a spectrum
+uses `flattop`, where a tone half a bin off centre reads about 0.01 dB low
+instead of hann's **1.42 dB**. That 1.42 dB is *scalloping* loss, set by the
+main-lobe shape, and is a different figure of merit from the bandwidth that
+makes a density window-independent — both are the estimator, not the signal.
+Flat-top pays for it in resolution: its noise-equivalent bandwidth is 3.77 bins
+against hann's 1.50 and its main lobe 10 bins against hann's 4, so pass
+`window='hann'` when separating neighbouring tones matters more than reading
+their level. Constant-Q keeps `hann` under both scalings, because a kernel's
+length sets its bin's bandwidth and swapping the window would change the Q the
+method is named for.
+
+| | `scaling='density'` | `scaling='spectrum'` | `sound_exposure` |
+|---|---|---|---|
+| Welch window | `hann` | `flattop` | `boxcar`, not an argument |
+| constant-Q window | `hann` | `hann` | — (a band sum needs orthogonal bins) |
+| Welch `noverlap` | `nperseg // 2` | `nperseg // 2` | `0`, not an argument |
+| Welch `detrend` | `'constant'` | `'constant'` | `False`, not an argument |
+| `average` | `'mean'`, `'median'` for robustness | same | `'mean'`, not an argument |
+| short record | left as it is | left as it is | padded to whole segments (padding adds no energy) |
+| unit | Pa²/Hz | Pa² | Pa²·s per band |
+| plot label / title | dB re 1 µPa²/Hz, "Power spectral density" | dB re 1 µPa², "Power spectrum" | dB re 1 µPa²·s, "SEL" (bars) |
+
+`window=`, `noverlap=`, `detrend=` and `average=` are yours on `welch` and
+`constant_q`. On `sound_exposure` they do not exist: a band's value is the sum
+of the bins inside it, which is the band's energy only when every bin is
+counted once and whole, so the enforcement is the signature rather than a
+runtime refusal.
+
+**`sound_exposure` is the Welch route, integrated — literally.** It calls
+`welch(..., scaling='exposure', window='boxcar')` internally on each batch of
+the record and sums the bins each band covers; there is no second estimator
+underneath. That per-bin exposure is already the energy (the record is padded
+to whole segments and the average multiplied by the padded duration, which is
+the sum over segments), and energy adds, so the batching is memory rather than
+method: a multi-hour record never materialises as one segment matrix.
+`nperseg` defaults to `sample_rate`, i.e. 1 Hz bins, and `batch_size` to a
+whole number of those segments.
+
+At those 1 Hz bins the seven lowest decidecade bands hold 2 to 7 FFT lines
+each, short of the ten a synthesised band level wants (Fahy, *Sound
+Intensity*). That is a resolution limit and not an error in the total — bins
+are orthogonal, so each one's energy lands in exactly one band — but energy
+near a band edge is assigned in whole-bin quanta. Raising `nperseg` to about
+`10·sample_rate/2.3` (4.3 s of record) resolves them, at the cost of time
+resolution.
+
+Banding a constant-Q estimate is not offered: its kernels overlap, so summing
+its bins would count the same energy more than once.
+
+`BAND_TYPES` names the ladders, for a caller that wants to loop over them or
+validate its own input.
+
+**Two result types, not six.** Every averaging estimator returns a
+`SpectralEstimate` and every histogram estimator a
+`ProbabilisticSpectralEstimate`, whichever method and scaling produced it —
+`method=` picks the frequency axis, not the return type. A name that fixes one
+scaling would say "density" over band power,
+so there is no such name.
+
+Both follow one rule: **the tuple is the measurement, the attributes are what
+it means.** `frequencies, power = welch(x, fs)` and
+`frequencies, level_edges, pdf = probabilistic_welch(x, fs)` unpack
+the numbers; `.scaling`, `.method`, `.ref`, `.bands`, `.seg_duration`,
+`.mean_dB`, `.std_dB`, `.binwidth_dB` are attributes on whichever type carries
+them, identical in name and meaning across the two, so code written against
+one reads the other.
 
 ### Decidecade is the base-10 third-octave, not the base-2 one
 
@@ -193,14 +341,20 @@ reporting uses, and it is also where the familiar third-octave centre
 frequencies come from: the standard series is built on powers of `10^(1/10)`,
 which is why 1, 10, 100 and 1000 Hz all land on band centres.
 
-`sel`'s `band_type='third_octave'` is the **base-2** system instead, `2^(1/3)`
-wide (0.3333 octave) on `2^(±1/6)` edges. The two are close, deliberately
+`sound_exposure` is written on that same ladder: its `band_type` defaults to
+`'decidecade'` and shares `decidecade_bands`'s edges exactly, so a band level
+and a band exposure are stated over the same bands. `band_type='third_octave'`
+selects the **base-2** system instead, `2^(1/3)` wide (0.3333 octave) on
+`2^(±1/6)` edges, with `'octave'` and `'linear'` (`num_bands` equal-width
+bands) as the other two ladders. Base-10 and base-2 are close, deliberately
 different, and not interchangeable in a report.
 
 ### Density versus band level
 
 ```python
-from uacpy.acoustic_signal import synthesize_noise_from_psd, psd, decidecade_band_levels
+from uacpy.acoustic_signal import (synthesize_noise_from_psd,
+                                   welch,
+                                   decidecade_band_levels)
 from uacpy.visualization import plot_psd, plot_band_levels
 
 # A target soundscape: −17 dB/decade with a narrow 300 Hz tonal on top.
@@ -214,11 +368,12 @@ _, x, fs = synthesize_noise_from_psd(
     target, f_target, duration=30.0, sample_rate=25_000,
     n_fft=65536, interp='log', rng=rng)
 
-frequencies, power = psd(x, fs, nperseg=32768)
+frequencies, power = welch(x, fs, nperseg=32768)
 band = (frequencies >= 20.0) & (frequencies <= 11_000.0)
 centers, levels = decidecade_band_levels(power[band], frequencies[band])
 
-plot_psd(frequencies, power, label='psd() of the realisation', ymin=55, ymax=125)
+plot_psd(frequencies, power, label='welch() of the realisation',
+         ymin=55, ymax=125)
 plot_band_levels(centers, levels)
 ```
 
@@ -288,8 +443,8 @@ grid is too coarse at the bottom of the band set — raise `nperseg`.
 | `complex_cepstrum(data)` | `ComplexCepstrum(cepstrum, delay)` — the **complex** cepstrum, and the linear-phase samples removed that its inverse needs back | `inverse_complex_cepstrum`, exactly |
 | `constant_q_transform(data, sample_rate, *, fmin=20.0, fmax=None, bins_per_octave=24, window='hann')` | `CQTResult(frequencies, coefficients)` — one centred frame, complex | no |
 | `constant_q_spectrogram(data, sample_rate, *, fmin=20.0, fmax=None, bins_per_octave=24, hop=None, window='hann', scaling='spectrum')` | `CQSpectrogramResult(frequencies, times, power)` | no |
-| `constant_q_psd(data, sample_rate, *, fmin=20.0, fmax=None, bins_per_octave=24, hop=None, window='hann', scaling='spectrum')` | `CQPSDResult(frequencies, power)` | no |
-| `probabilistic_constant_q(data, sample_rate, *, fmin=20.0, fmax=None, bins_per_octave=24, hop=None, window='hann', scaling='spectrum', ddB=1.0, lvlmin=0, lvlmax=150, ref=1e-6)` | `CQPPSDResult(frequencies, level_edges, pdf, mean_dB, std_dB, binwidth_dB, ref, scaling)` | no |
+| `constant_q(data, sample_rate, *, scaling='density', fmin=20.0, fmax=None, bins_per_octave=24, hop=None, window='hann', integration_time=None)` | `SpectralEstimate(frequencies, power)` — unset `fmax` means Nyquist | no |
+| `probabilistic_constant_q(data, sample_rate, *, scaling='density', fmin=20.0, …, ddB=1.0, lvlmin=0, lvlmax=150, ref=1e-6)` | `ProbabilisticSpectralEstimate(frequencies, level_edges, pdf)` with `.seg_duration = None` and `.method = 'constant_q'` | no |
 
 `cwt` offers three analysing wavelets: `'morlet'` (complex, best frequency
 resolution), `'paul'` (complex, best time resolution) and `'dog'` (real
@@ -309,23 +464,24 @@ runs off the data, so those coefficients are edge artefacts, worst at the lowest
 frequency where the wavelet is longest. Nothing marks that region for you, so
 give the record margin either side of the feature you care about.
 
-The constant-Q family bins geometrically (`bins_per_octave=24` by default)
-instead of linearly, which is the right resolution law for a soundscape spanning
-decades. Each is the constant-Q analogue of its linear counterpart:
-`constant_q_psd` ↔ `psd`, `constant_q_spectrogram` ↔ `spectrogram`,
-`probabilistic_constant_q` ↔ `ppsd` — with one default that deliberately
-differs: the constant-Q functions default to `scaling='spectrum'` (Pa² per
-bin) where the linear ones default to `'density'` (Pa²/Hz). Compare the two
-without aligning `scaling=` and you are off by each bin's noise-equivalent
-bandwidth in Hz — and because constant-Q bins widen in proportion to
-frequency, that offset is frequency-dependent: on white noise it measures ~4×
-at 100 Hz and ~40× at 1 kHz. Pass the same `scaling=` to both when levels
-must line up.
+Constant-Q bins geometrically (`bins_per_octave=24` by default) instead of
+linearly, which is the right resolution law for a soundscape spanning decades.
+It is **not a separate family**: it is `method='constant_q'` on the estimators
+above, so `welch(x, fs, method='constant_q', fmin=20)` is the
+constant-Q counterpart of `welch(x, fs)`. The transform and the
+spectrogram keep their own names because they have no linear twin to share.
 
-`probabilistic_constant_q` is the one to read carefully: each of its samples is
+The scaling default is the same under both methods — `'density'` — but what a
+density means per bin is not: Welch divides by one noise-equivalent bandwidth
+for the whole axis, constant-Q by each bin's own, which widens in proportion
+to frequency. Compare a constant-Q spectrum against a Welch density without
+aligning `scaling=` and the offset is frequency-dependent: on white noise ~4×
+at 100 Hz and ~40× at 1 kHz.
+
+The probabilistic constant-Q estimate is the one to read carefully: each of its samples is
 a single unaveraged frame, so its per-bin `mean_dB` is the mean of a *single
 look's* dB levels. On noise that sits 2.51 dB (`10γ/ln10`) below the power mean
-`constant_q_psd` returns from the same record — measured 2.507 ± 0.004 dB over
+`welch(..., method='constant_q')` returns from the same record — measured 2.507 ± 0.004 dB over
 four seeds, on 60 s of white noise at `bins_per_octave=24`. That is the
 two-degrees-of-freedom figure, and it holds across the band (2.48–2.53 dB) with
 one exception: a bin essentially at Nyquist has no quadrature component left, so
@@ -333,14 +489,15 @@ the offset climbs toward the one-dof value of 5.52 dB — measured 2.91 dB at
 `f/fs = 0.4995`. The band *power* there is unaffected; what moves is the shape
 of its distribution.
 
-`ppsd`'s `mean_dB` carries the same bias, and how much of it depends on how many
+the Welch histogram's `mean_dB` carries the same bias, and how much of it
+depends on how many
 Welch segments a `seg_duration` chunk actually holds. `nperseg` is clamped to
 the chunk length, so at the defaults (`seg_duration=1.0`, `nperseg=8192`) a
 sample is **one look — the full 2.51 dB — at any `sample_rate` of 8192 Hz or
 below**, which is most of this package's own test and example rates. Measured on
 white noise: 2.49 dB at both 4 and 8 kHz (one look), 1.19 dB at 16 kHz (two),
 0.23 dB at 48 kHz (ten), against `(10/ln10)·(ψ(L) − ln L)` for `L` looks.
-Compare `psd` or `constant_q_psd` against a target curve; read either `mean_dB`
+Compare a `welch` (either method) against a target curve; read either `mean_dB`
 as the centre of the histogram it describes.
 
 ### The resolution trade-off
@@ -890,11 +1047,14 @@ Lower `m`, or excite the whole band up to Nyquist.
 
 **Nothing here is on `uacpy.*`.** Import from `uacpy.acoustic_signal`.
 
-**`psd` and `sel` do not agree at DC, on purpose.** Welch detrends the constant
-component of every segment, so `psd`'s DC bin is suppressed. `sel` uses a
-boxcar window with no overlap and no detrending, because that is the only way
-the summed PSD equals the band exposure exactly (Parseval). Do not "fix" `sel`
-by giving it a smoothing window — it would corrupt the energy identity.
+**A density and an exposure do not agree at DC, on purpose.** Welch detrends
+the constant component of every segment under `scaling='density'`, so a
+density's
+DC bin is suppressed. An exposure turns detrending and overlap off and takes a
+boxcar window, because that is the only way the summed bins equal the record's
+energy exactly (Parseval) — which is why `scaling='exposure'` **refuses** a
+tapering window rather than quietly returning a number a window factor below
+the energy that passed the sensor.
 
 **A band level is not a density level.** They differ by `10·log10(bandwidth)`,
 which for decidecade bands is proportional to the centre frequency. See
@@ -905,7 +1065,8 @@ defined for a real signal; handing it something already analytic is a mistake
 the function will not guess its way past. Same for `cepstrum` and
 `complex_cepstrum`.
 
-**`spectrogram` and `psd` default to `nperseg=8192`.** That is right for a long
+**`spectrogram` and the Welch estimators default to `nperseg=8192`.** That is
+right for a long
 soundscape record and far too long for a transient. Scipy clamps `nperseg` to
 the input length rather than raising, so a short signal comes back as a single
 frame with a `UserWarning` — which you will miss if your warning filters are

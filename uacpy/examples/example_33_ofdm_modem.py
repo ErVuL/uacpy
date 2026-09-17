@@ -22,7 +22,7 @@ import matplotlib.pyplot as plt
 from scipy.signal import resample_poly
 import uacpy
 from uacpy import comms
-from uacpy.comms.ofdm import (apply_cfo, estimate_channel, ofdm_demodulate,
+from uacpy.comms.modulate import (apply_cfo, estimate_channel, ofdm_demodulate,
                               schmidl_cox_sync)
 
 OUT = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')

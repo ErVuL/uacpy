@@ -13,7 +13,7 @@ reader hitting a mismatch should re-read the report before changing either side.
 
 import numpy as np
 import pytest
-from uacpy.noise import noise as N
+from uacpy.noise import ambient as N
 from uacpy.core.exceptions import ConfigurationError
 
 F = np.array([10.0, 100.0, 1000.0, 10000.0])
@@ -387,7 +387,7 @@ class TestEveryRegistryEntryTakesTheSameFrequencyArgument:
 
 class TestAMisspeltRegistryKeyIsATypedError:
     def test_shipping_and_rain_levels(self):
-        from uacpy.noise.noise import _shipping_wenz, _shipping_coates, _rain_torres_costa
+        from uacpy.noise.ambient import _shipping_wenz, _shipping_coates, _rain_torres_costa
         from uacpy.core.exceptions import ConfigurationError
         f = np.array([100.0, 1000.0])
         with pytest.raises(ConfigurationError, match='shipping_level'):

@@ -210,7 +210,7 @@ def plot_ber_curve(ebn0_dB, ber_measured, ax=None, *, scheme=None,
         # In-function so importing the plotting surface does not drag the whole
         # comms toolkit (and scipy.signal) in behind it — the same rule
         # signal.py and noise.py follow for their compute imports.
-        from uacpy.comms.metrics import ber_theory
+        from uacpy.comms.receive import ber_theory
         fine = np.linspace(ebn0.min(), ebn0.max(), 100)
         ax.semilogy(fine, ber_theory(scheme, fine), "k--",
                     label=f"{scheme} theory")

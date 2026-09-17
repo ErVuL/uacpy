@@ -29,10 +29,10 @@ import warnings
 import numpy as np
 import pytest
 
-from uacpy.acoustic_signal.bands import decidecade_bands
+from uacpy.acoustic_signal.estimate import decidecade_bands
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.noise import auditory_weighting, compute_windnoise, WenzNoise
-from uacpy.noise import noise as N
+from uacpy.noise import ambient as N
 
 NAN = float('nan')
 #: Three decades, three points — enough for a guard to reject or accept.
@@ -529,7 +529,7 @@ class TestWindNoiseRollOffAnchor:
 
     @pytest.mark.parametrize('anchor', [10.0, 100.0, 500.0, 1500.0, 1999.0])
     def test_high_frequency_level_is_grid_independent(self, anchor):
-        from uacpy.noise.noise import compute_windnoise
+        from uacpy.noise.ambient import compute_windnoise
         probe = 5000.0
         with_anchor = compute_windnoise(np.array([anchor, probe]), 15.0)[-1]
         alone = compute_windnoise(np.array([probe]), 15.0)[-1]
@@ -538,7 +538,7 @@ class TestWindNoiseRollOffAnchor:
             f"{with_anchor - alone:.2f} dB")
 
     def test_curve_is_continuous_across_the_cutoff(self):
-        from uacpy.noise.noise import compute_windnoise
+        from uacpy.noise.ambient import compute_windnoise
         nl = compute_windnoise(np.array([1999.0, 2000.0, 2001.0]), 15.0)
         assert abs(nl[1] - nl[0]) < 0.05
         assert abs(nl[2] - nl[1]) < 0.05

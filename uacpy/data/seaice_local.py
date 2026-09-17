@@ -79,8 +79,8 @@ _MODEL = {}               # cache_root -> dict(N=(12,H,W), S=(12,H,W), tf=...)
 _cache.register_cache(_MODEL.clear)
 
 
-def _monthly_url(hemi, year, month):
-    return (f"{_BASE_URL}/{_HEMI_DIR[hemi]}/monthly/geotiff/{_MONTHS[month - 1]}/"
+def _monthly_url(hemi, year, month, base_url=_BASE_URL):
+    return (f"{base_url}/{_HEMI_DIR[hemi]}/monthly/geotiff/{_MONTHS[month - 1]}/"
             f"{hemi}_{year}{month:02d}_concentration_v4.0.tif")
 
 
@@ -93,8 +93,8 @@ def _to_fraction(arr):
     return f
 
 
-def download_seaice_db(cache_dir=None, *, years=None, timeout=120.0,
-                       verbose=False):
+def download_seaice_db(cache_dir=None, *, years=None, base_url: str = _BASE_URL,
+                       timeout=120.0, verbose=False):
     """Build the monthly sea-ice climatology and cache it.
 
     Averages the NSIDC monthly concentration grids over ``years`` (default: the
@@ -102,6 +102,11 @@ def download_seaice_db(cache_dir=None, *, years=None, timeout=120.0,
     writing ``<cache>/seaice/seaice_climatology.npz`` — one ``(12, H, W)``
     float32 array per hemisphere, under the keys ``'N'`` and ``'S'``. Missing
     months are skipped.
+
+    ``base_url`` is the address the per-month GeoTIFF paths hang off (default
+    the NSIDC G02135 tree), so a mirror that keeps NSIDC's own
+    ``<hemisphere>/monthly/geotiff/<MM_Mon>/`` layout builds the same
+    climatology.
     """
     import tifffile
     if years is None:
@@ -121,8 +126,9 @@ def download_seaice_db(cache_dir=None, *, years=None, timeout=120.0,
         for iy, year in enumerate(years):
             for m in range(1, 13):
                 try:
-                    blob = http_get(_monthly_url(hemi, year, m), timeout=timeout,
-                                    verbose=False, source='seaice')
+                    blob = http_get(_monthly_url(hemi, year, m, base_url),
+                                    timeout=timeout, verbose=False,
+                                    source='seaice')
                     arr = tifffile.imread(io.BytesIO(blob))
                 except Exception:               # noqa: BLE001 — skip missing
                     continue

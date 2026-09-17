@@ -23,7 +23,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import uacpy
 from uacpy.core.acoustics import soundspeed_unesco
-from uacpy.acoustic_signal.bands import decidecade_bands
+from uacpy.acoustic_signal.estimate import decidecade_bands
 from uacpy.noise import (apply_weighting, monopole_source_level,
                          nominal_source_depth, radiated_noise_level)
 

@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 import uacpy
-from uacpy.acoustic_signal.bands import decidecade_bands
+from uacpy.acoustic_signal.estimate import decidecade_bands
 from uacpy.noise import (
     HEARING_GROUPS,
     RNL_UNCERTAINTY_DB,

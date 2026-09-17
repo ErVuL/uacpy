@@ -15,7 +15,7 @@ from figure_scripts._common import (deep_water, shallow_water,
                                     source_beam_pattern)
 
 import uacpy
-from uacpy.acoustic_signal import lfm_chirp, psd, spectrogram
+from uacpy.acoustic_signal import lfm_chirp, spectrogram, welch
 from uacpy.visualization.plots import shared_colorbar
 from uacpy.comms import Modulator, awgn, constellation
 from uacpy.models import Bellhop, Kraken, RunMode
@@ -234,7 +234,7 @@ def dsp_plotters():
     p_t = 316.0 * np.asarray(trace.data, dtype=float)
 
     f_s, t_s, S = spectrogram(p_t, sample_rate, nperseg=256)
-    f_p, P = psd(p_t, sample_rate, nperseg=1024)
+    f_p, P = welch(p_t, sample_rate, nperseg=1024)
 
     mod = Modulator('16qam')
     bits = rng.integers(0, 2, size=4 * 600)

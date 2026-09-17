@@ -231,9 +231,15 @@ difference; see [plotting](plotting.md).
 
 ## 3. `uacpy.acoustics` — closed-form water and boundary physics
 
-Fourteen standalone functions, all pure NumPy, no solver involved. They are
+Fifteen standalone functions, all pure NumPy, no solver involved. They are
 what the rest of the package calls when it needs a number rather than a field,
 and each names the standard or paper it implements.
+
+They are grouped by subject in four sub-modules — `seawater` (sound speed,
+density, Doppler), `boundaries` (reflection, bottom loss, the Pekeris branch),
+`bubbles` and `levels` (volts → Pa → dB) — but every one of them is
+re-exported from the package, so you reach them all as
+`uacpy.acoustics.<name>` and never name a sub-module.
 
 ### Sound speed
 
@@ -266,8 +272,8 @@ TEOS-10 is the current international standard for seawater thermodynamics.
 `soundspeed_teos10` evaluates the manual's sound-speed definition,
 `c = g_P·sqrt(g_TT / (g_TP² − g_TT·g_PP))`, on the full Gibbs function (the
 IAPWS-09 pure-water and IAPWS-08 saline coefficient tables are written out in
-`core/acoustics.py`; no library is needed). It takes the same triple as the
-other two — Practical Salinity is converted to Reference Salinity with the
+`core/acoustics/seawater.py`; no library is needed). It takes the same
+triple as the other two — Practical Salinity is converted to Reference Salinity with the
 exact `35.16504/35` factor; the ≤ 0.025 g/kg Absolute Salinity anomaly of
 real seawater is not applied (≈ 0.03 m/s). Valid over `S ∈ [0, 41.8] PSU`,
 `T ∈ [−6, 40] °C`, `P ∈ [0, 10000] dbar`. The Gibbs function was fitted to
@@ -357,9 +363,35 @@ number consistent with `bottom_loss_curve`, negate the log:
 
 | Function | For |
 |---|---|
-| `pressure(x, sensitivity, gain, volt_params=None)` | Recorded volts (or ADC bits) → µPa, given hydrophone sensitivity in dB re 1 V/µPa and preamp gain in dB |
-| `spl(x, ref=1)` | A pressure time series → mean SPL in dB re `ref` µPa |
+| `pressure(x, sensitivity, gain, volt_params=None)` | Recorded volts (or ADC bits) → **pascals**, given hydrophone sensitivity in dB re 1 V/µPa and preamp gain in dB |
+| `spl(x, ref=REFERENCE_PRESSURE_WATER)` | A pressure time series in Pa → mean SPL in dB re `ref` (default 1 µPa, written in Pa as `1e-6`) |
 | `power_to_dB(power, ref=1e-6, floor=1e-30)` | A **squared** quantity (PSD, mean-square pressure, an f-k spectrum) → dB re `ref` |
+
+#### Volts → Pa → spectrum → dB
+
+`pressure` is the one place a recording's own units enter the package. It takes
+the hydrophone's data-sheet sensitivity in dB re 1 V/µPa (a negative number)
+and the preamp gain in dB, and returns **pascals**, so every estimator and
+every default reference downstream reads the same unit:
+
+```python
+from uacpy import pressure, spl                      # also uacpy.acoustics.*
+from uacpy.acoustic_signal import welch
+
+p = pressure(volts, sensitivity=-165.0, gain=20.0)   # Pa
+spl(p)                                               # dB re 1 µPa
+est = welch(p, sample_rate)         # Pa²/Hz
+est.plot()                                           # dB re 1 µPa²/Hz
+```
+
+`pressure` and `spl` are the two names from this module exported at the top
+level, because a recording passes through them before anything else in the
+package sees it; everything else here is reached as `uacpy.acoustics.<name>`.
+
+Pass `volt_params=(bits, v_ref)` when `x` is raw ADC counts rather than volts;
+the conversion to volts then happens first. The µPa in the sensitivity unit and
+the Pa that comes back out are 120 dB apart, and `pressure` carries that factor
+— a hand-rolled `10**(SH/20)` division leaves the level 120 dB high.
 
 `power_to_dB` is the conversion every spectral estimator in the package uses:
 `10·log10(power / ref²)`, with `power` floored before the log so a silent

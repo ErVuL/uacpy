@@ -60,7 +60,7 @@ def test_import_uacpy_leaves_scipy_and_matplotlib_unloaded():
 
 def test_import_uacpy_io_leaves_scipy_and_matplotlib_unloaded():
     """The io layer reads and writes decks with numpy alone; its one
-    scipy-adjacent dependency (acoustic_signal.waveforms in the SPARC
+    scipy-adjacent dependency (acoustic_signal.generate in the SPARC
     readers) is function-local, so ``import uacpy.io`` stays light."""
     result = _run_python(
         "import sys\n"
@@ -270,7 +270,7 @@ def test_importing_visualization_leaves_rcparams_untouched():
 def test_importing_the_plotting_surface_leaves_the_comms_toolkit_unloaded():
     """``uacpy/__init__`` advertises a lazy-cost design, and the plotters keep
     their compute-side imports inside the functions that use them. A single
-    module-scope ``from uacpy.comms.metrics import ...`` in the comms plotter
+    module-scope ``from uacpy.comms.receive import ...`` in the comms plotter
     pulled the whole toolkit — and scipy.signal behind it — into every
     ``import uacpy.visualization``."""
     result = _run_python(

@@ -20,7 +20,8 @@ Layout:
 * ``ramsurf_writer`` / ``ramsurf_reader`` — Collins rams0.5 / ramsurf1.5.
 * ``grn_reader`` — Scooter / SPARC Green's-function with post-processing.
 * ``audio_io`` — ``.wav`` output for a computed or measured signal.
-* ``utils`` — shared helpers (``equally_spaced``, ``reject_unknown_kwargs``,
+* ``input_checks`` — what a reader or writer checks before it trusts its
+  input (``equally_spaced``, ``reject_unknown_kwargs``,
   ``_collapsed_pair_index``).
 * ``file_manager`` — temp-dir / tmpfs management.
 * ``_fortran_helpers`` — private low-level Fortran-record helpers.
@@ -36,7 +37,7 @@ code.** No uacpy model runs ``bellhop3d`` or ``field3d`` yet — Bellhop's
 RunType position 6 is hardwired to the 2-D blank and
 ``Bellhop(dimensionality='3D')`` raises — so nothing in the 2-D public API calls them; the 2-D readers refuse
 3-D input and name them as what a future implementer builds on.
-``uacpy/tests/test_io_restored_capabilities.py`` pins all five, so a
+``uacpy/tests/test_io_public_names_without_callers.py`` pins all five, so a
 dead-code sweep meets that test before proposing their removal a second
 time.
 """
@@ -82,7 +83,7 @@ from uacpy.io.grn_reader import (
     read_grn_file, grn_to_field, grn_to_transfer_function,
     sparc_snapshot_to_field, sparc_snapshot_to_time_field,
 )
-from uacpy.io.utils import equally_spaced
+from uacpy.io.input_checks import equally_spaced
 from uacpy.io.oases_writer import (
     write_oast_input, write_oasn_input, write_oasp_input, write_oasr_input,
     write_oass_input, write_oassp_input,
@@ -170,5 +171,5 @@ __all__ = [
     "audio_io", "bathy_io", "bellhop_writer", "file_manager", "grn_reader",
     "modes_reader", "mpirams_reader", "mpirams_writer",
     "oalib_reader", "oalib_writer", "oases_reader", "oases_writer",
-    "ramsurf_reader", "ramsurf_writer", "refl_io", "utils",
+    "ramsurf_reader", "ramsurf_writer", "refl_io", "input_checks",
 ]

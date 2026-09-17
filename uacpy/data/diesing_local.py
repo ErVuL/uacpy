@@ -69,16 +69,21 @@ def _pyproj_transformer():
     return epsg_transformer(WAGNER4_PROJ, backend='Diesing seafloor-lithology')
 
 
-def download_diesing_db(cache_dir=None, *, timeout=300.0, verbose=False):
+def download_diesing_db(cache_dir=None, *, url: Optional[str] = None,
+                        timeout=300.0, verbose=False):
     """Download the Diesing 2020 lithology raster into the cache.
 
     Fetches the CC-BY PANGAEA package and extracts ``lithology_classes.tif`` into
     ``<cache>/diesing/``. Returns the written raster path.
+
+    ``url`` fetches that address instead of :data:`DIESING_URL` — a mirror,
+    or a copy staged on an http server of your own. What is written and
+    how it is read are the same whatever address served it.
     """
     dest = _cache.prepare_download(
         'diesing', "downloading Diesing 2020 seafloor lithology (CC-BY, ~40 MB)",
         cache_dir=cache_dir, verbose=verbose)
-    blob = http_get(DIESING_URL, timeout=timeout, verbose=verbose,
+    blob = http_get(url or DIESING_URL, timeout=timeout, verbose=verbose,
                     source='diesing')
     with zipfile.ZipFile(io.BytesIO(blob)) as zf:
         try:

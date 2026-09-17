@@ -9,12 +9,18 @@ reproduced in LICENSE (next to this file).
 
 Files in UACPY containing arlpy-adapted code:
 
-    uacpy/core/acoustics.py
+    uacpy/core/acoustics/seawater.py
         Functions adapted from arlpy.uwa (BSD-3-Clause, (c) 2016 Mandar Chitre):
           - soundspeed          (Mackenzie 1981)
           - density             (Fofonoff IES-80)
-          - reflection_coeff
           - doppler
+
+    uacpy/core/acoustics/boundaries.py
+        Functions adapted from arlpy.uwa (BSD-3-Clause, (c) 2016 Mandar Chitre):
+          - reflection_coeff
+
+    uacpy/core/acoustics/bubbles.py
+        Functions adapted from arlpy.uwa (BSD-3-Clause, (c) 2016 Mandar Chitre):
           - bubble_resonance
           - bubble_surface_loss
           - bubble_soundspeed

@@ -6,7 +6,7 @@ spectrum, symbol-interval windowing) and are asserted on the drawn data; the
 thin wrappers (``plot_convergence``, ``plot_sync_metric``,
 ``plot_doppler_ambiguity``) get their one transform pinned plus a shared
 smoke/``ax=`` sweep. The comms numerics themselves live in ``test_comms.py``
-and ``test_equalization.py``; the constellation/BER plotters are covered in
+and ``test_comms_equalizers.py``; the constellation/BER plotters are covered in
 ``test_carrier_plot_methods.py`` callers and the doc figure gates.
 """
 

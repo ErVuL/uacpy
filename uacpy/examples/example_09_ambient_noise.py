@@ -9,8 +9,9 @@ across the spectrogram, and its PPSD should land back on the analytic Wenz curve
 it was synthesised from — which is what the magenta overlay checks.
 
 Uses: noise.WenzNoise(.as_psd) · plot_wenz ·
-acoustic_signal.synthesize_noise_from_psd · spectrogram · ppsd ·
-probabilistic_constant_q · constant_q_psd · sel (ISO 18405) ·
+acoustic_signal.synthesize_noise_from_psd · spectrogram ·
+probabilistic_welch · constant_q · probabilistic_constant_q ·
+sound_exposure (ISO 18405, decidecade bands) ·
 plot_spectrogram · plot_ppsd · plot_constant_q_ppsd · plot_sel
 """
 
@@ -22,8 +23,10 @@ sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 import numpy as np
 import matplotlib.pyplot as plt
 import uacpy
-from uacpy.acoustic_signal import (constant_q_psd, ppsd,
-                                   probabilistic_constant_q, sel, spectrogram,
+from uacpy.acoustic_signal import (constant_q,
+                                   probabilistic_constant_q,
+                                   probabilistic_welch,
+                                   sound_exposure, spectrogram,
                                    synthesize_noise_from_psd)
 from uacpy.noise import WenzNoise
 
@@ -80,7 +83,7 @@ fig.savefig(OUT / 'example_09_ssrp_spectrogram.png', dpi=150,
 plt.close(fig)
 
 fig, ax = uacpy.plot.plot_ppsd(
-    ppsd(pressure, fs, ref=UPA, seg_duration=1.0, overlap_pct=50, ddB=1.0,
+    probabilistic_welch(pressure, fs, ref=UPA, seg_duration=1.0, overlap_pct=50, ddB=1.0,
          lvlmin=20, lvlmax=140),
     title=label, ymin=20, ymax=120)
 # The check: the analytic curve the realisation came from, over its own PPSD.
@@ -92,13 +95,13 @@ plt.close(fig)
 
 # The constant-Q twin of that PPSD: geometric bins, so the resolution follows
 # the decades a soundscape spans rather than a fixed Hz spacing.
-# scaling='density' is what makes the levels comparable to a Wenz curve, which
+# The density doors are what make the levels comparable to a Wenz curve, which
 # is a density; fmax below Nyquist keeps the near-Nyquist bins (which read a
 # coherent tone high) out of the picture.
-cq_kw = dict(fmin=20.0, fmax=20000.0, bins_per_octave=24, scaling='density')
-cq_hist = probabilistic_constant_q(pressure, fs, ref=UPA, lvlmin=20,
-                                   lvlmax=140, **cq_kw)
-cq_mean = constant_q_psd(pressure, fs, **cq_kw)
+cq_kw = dict(fmin=20.0, fmax=20000.0, bins_per_octave=24)
+cq_hist = probabilistic_constant_q(
+    pressure, fs, ref=UPA, lvlmin=20, lvlmax=140, **cq_kw)
+cq_mean = constant_q(pressure, fs, **cq_kw)
 
 # vmax: the plotter defaults to 1/binwidth_dB — the largest density a 1 dB bin
 # could hold — which suits a Welch-averaged PPSD. A single-look constant-Q
@@ -114,14 +117,15 @@ ax.semilogx(wenz.frequencies, wenz.total, color='magenta', linewidth=2.0,
 # not an error in the synthesis. Dotted because the plotter already draws that
 # mean solid black and its ±STD dashed black.
 ax.semilogx(cq_mean.frequencies, 10 * np.log10(cq_mean.power / UPA ** 2),
-            color='k', lw=2.2, ls=':', label='constant_q_psd (power mean)')
+            color='k', lw=2.2, ls=':',
+            label='constant_q')
 ax.legend(loc='upper right', fontsize='small', framealpha=0.85)
 fig.savefig(OUT / 'example_09_cq_ppsd.png', dpi=150, bbox_inches='tight')
 plt.close(fig)
 
 # Each constant-Q frame is one look, so the mean of its dB levels sits
 # 10·γ/ln10 = 2.51 dB under the power mean — read mean_dB as the centre of the
-# histogram, and compare a target curve against constant_q_psd instead.
+# histogram, and compare a target curve against the power mean instead.
 analytic = np.interp(cq_hist.frequencies, wenz.frequencies, wenz.total)
 print(f"  constant-Q: power mean "
       f"{np.nanmedian(10 * np.log10(cq_mean.power / UPA ** 2) - analytic):+.2f}"
@@ -130,15 +134,18 @@ print(f"  constant-Q: power mean "
       f"(single-look log mean, 2.51 dB low by construction)")
 
 # SEL is the time-integral of p²(t) (ISO 18405) — the cumulative energy dose of
-# the record, per third-octave band, in dB re 1 µPa²·s. The broadband total is
+# the record, per decidecade band, in dB re 1 µPa²·s. The broadband total is
 # the incoherent (energy) sum across bands.
-levels, bands = sel(pressure, fs, fmin=10.0, fmax=fs / 2.0,
-                    band_type='third_octave')
-print(f"  SEL: broadband {10 * np.log10(levels.sum() / UPA ** 2):.1f} dB "
-      f"re 1 µPa²·s over {pressure.size / fs:.0f} s across {len(bands)} "
-      f"third-octave bands")
-fig, _ = uacpy.plot.plot_sel(levels, bands, ref=UPA,
+exposure = sound_exposure(pressure, fs, fmin=10.0, fmax=fs / 2.0)
+print(f"  SEL: broadband "
+      f"{10 * np.log10(exposure.power.sum() / UPA ** 2):.1f} dB "
+      f"re 1 µPa²·s over {pressure.size / fs:.0f} s across "
+      f"{len(exposure.bands)} decidecade bands")
+# The estimate carries its bands and its scaling, so the bars and the unit on
+# the level axis come from the estimate rather than from arguments repeated
+# here: exposure.plot() is the same figure.
+fig, _ = uacpy.plot.plot_sel(exposure, ref=UPA,
                              duration=pressure.size / fs,
-                             band_type='third_octave', title=label)
+                             band_type='decidecade', title=label)
 fig.savefig(OUT / 'example_09_sel.png', dpi=150, bbox_inches='tight')
 plt.close(fig)

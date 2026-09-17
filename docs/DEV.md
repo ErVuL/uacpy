@@ -27,9 +27,11 @@ uacpy/
     ├── models/              One PropagationModel subclass per engine
     ├── io/                  File-format readers/writers + FileManager
     ├── data/                External-data fetch layer (GPS → Environment)
-    ├── comms/               Underwater communications (modem PHY, JANUS)
+    ├── comms/               modulate, link, receive, janus — the modem
+    │                        chain split by where a stage sits in it
     ├── sonar/               Sonar equation, reverberation, detection, MFP
-    ├── acoustic_signal/     psd/ppsd/sel, fk_transform/taup/radon, spectrogram, FRF
+    ├── acoustic_signal/     generate, estimate, arrays, detect, system
+    │                        (one module per question the package answers)
     ├── noise/               Wenz curves, wind noise, ship noise
     ├── visualization/       plot_field / plot_bottom_properties / … (+ result.plot())
     ├── tests/               pytest suite (markers: slow, requires_binary, …)
@@ -269,6 +271,14 @@ are direct attributes on `Result`, **not** metadata.
    - `requires_binary` if a native binary must be present;
    - `requires_oases` for OASES-only tests.
 
+   Name it for the subject it pins — what a reader searches when something
+   breaks — never for the module it happened to live next to, the work
+   session that produced it, or a kind of code. `utils`, `helpers`,
+   `functions` and `comprehensive` in a test file or a public module name are
+   gated (`tests/test_packaging.py`), as are audit/date/round/batch names;
+   a private module (leading underscore) is out of that scope, since it is
+   reached through the imports that name it rather than found by searching.
+
 ---
 
 ## 4. The I/O layer
@@ -304,7 +314,7 @@ units.py                            km_to_m, m_to_km, deg_to_rad
 _fortran_helpers.py                 detect_endian, read_fortran_record,
                                     read_vector — Fortran unformatted
                                     direct-access helpers
-utils.py                            misc reader/writer-shared utilities
+input_checks.py                     what a reader/writer checks first
 ```
 
 ### 4.2 Rules for I/O code
@@ -362,10 +372,15 @@ These are the physics-agnostic primitives every model consumes:
   dispatches to `_alpha_dB_per_m(f, z)`, the method a new subclass
   overrides. All implement `topopt_code()`. Models read `env.absorption` and emit the right AT
   `TopOpt[4]` letter automatically.
-- `acoustics.py` — user-helper sound-speed / density / pekeris-root
-  / SPL utilities. **Not** imported by the model wrappers; safe to
-  use from notebooks. Some functions are arlpy-adapted; see
-  `third_party/arlpy/NOTICE`.
+- `acoustics/` — user-helper physics, one module per subject:
+  `seawater.py` (four sound-speed equations, density, Doppler),
+  `boundaries.py` (`reflection_coeff`, `bottom_loss_curve`,
+  `pekeris_root`), `bubbles.py` (resonance, bubbly-water speed, surface
+  loss) and `levels.py` (volts → Pa → dB). All fifteen public names are
+  re-exported from the package, so callers write
+  `uacpy.acoustics.soundspeed` and never name a sub-module. **Not**
+  imported by the model wrappers; safe to use from notebooks. Some
+  functions are arlpy-adapted; see `third_party/arlpy/NOTICE`.
 - `materials.py` — named-material presets for `BoundaryProperties`,
   keyed (case-insensitively) in the `MATERIALS` dict and looked up via
   `get_material(name)` / enumerated via `list_materials()`. Keys are
@@ -487,24 +502,40 @@ attach `.stdout` / `.stderr` / `.return_code` on
 These are orthogonal to the model layer. They consume `Result`
 objects (typically `Field`) or raw arrays.
 
-- `acoustic_signal/analysis.py` — `psd`, `ppsd` (→ `PPSDResult`), `sel` (sound
-  exposure level). Pure functions returning arrays; `system_id.py` keeps the
-  `FRF` class (it holds fitted state). Transforms (`fk_transform`,
-  `taup_transform`, `radon_transform`, `spectrogram`, `cwt`, `wigner_ville`,
-  `cepstrum`) are likewise functions with `inverse_*` where meaningful. **All
-  plotting lives in `uacpy.visualization`** (`plot_psd`, `plot_fk`, …) — the
-  `acoustic_signal`/`comms` modules import no matplotlib.
-- `acoustic_signal/arrays.py` — beamforming / steering vectors;
-  `active.py` — matched filter, pulse compression, ambiguity.
-- `acoustic_signal/waveforms.py` — source-waveform synthesis (Ricker,
-  Gaussian, M-wave, Hann sine, …) — uses the same alphabet as AT
-  `cans.f90` where possible; `sequences.py` — m-sequences / coded probes.
-- `acoustic_signal/constant_q.py` — constant-Q transform family (Brown 1991:
-  transform / PSD / spectrogram / probabilistic), `spectrum`/`density` scaling.
-- `acoustic_signal/bands.py` — decidecade (ISO 18405) band levels;
-  `timefreq.py` — Hilbert, spectrogram, CWT, Wigner-Ville, cepstrum;
-  `channel.py`, `modal.py`, `noise_synthesis.py`, `system_id.py`.
-- `noise/noise.py` — `compute_windnoise`, `WenzNoise`, and the per-mechanism
+**Five modules, one question each.** The package re-exports every name flat
+(`uacpy.acoustic_signal.welch`), so these boundaries are for maintainers, not
+callers:
+
+- `acoustic_signal/generate.py` — *give me a signal*: parametric waveforms
+  (Ricker, Gaussian, M-wave, chirps — the same alphabet as AT `cans.f90`
+  where possible), coded sequences (m-sequences, BPSK probes) and noise built
+  to a target spectrum.
+- `acoustic_signal/estimate.py` — *measure this signal*: one estimator per
+  statistic — `welch` and `constant_q` (→ `SpectralEstimate`,
+  `scaling='density'` or `'spectrum'`), `sound_exposure` (the ISO 18405 band
+  energy, which takes no window or overlap because a band sum needs every bin
+  counted once and whole), and a histogram twin of each (→
+  `ProbabilisticSpectralEstimate`). With them: the time-resolved views
+  (`spectrogram`, `constant_q_spectrogram`, `cwt`, `wigner_ville`, cepstra)
+  and the band ladders (`decidecade_bands`). They share one subject and one
+  vocabulary — the constant-Q transform is how `constant_q` resolves
+  frequency, and `sound_exposure` is written on the ladder `decidecade_bands`
+  defines — and keeping them apart meant each side importing the other.
+- `acoustic_signal/arrays.py` — *what does this array see*: steering vectors,
+  conventional and adaptive beamforming, and the gather transforms
+  (`fk_transform`, `taup_transform`, `radon_transform`, each with an inverse).
+  Every one takes the receiver spacing `dx`, which is what separates them
+  from the single-channel estimators.
+- `acoustic_signal/detect.py` — *is my transmission in there*: matched filter,
+  pulse compression, processing gain, ambiguity function.
+- `acoustic_signal/system.py` — *what did the channel do to it*: `FRF`
+  (the one class, because it holds fitted state), channel simulation, and
+  modal group velocity with warping.
+
+Everything is a pure function returning arrays or a small namedtuple. **All
+plotting lives in `uacpy.visualization`** (`plot_psd`, `plot_fk`, …) — the
+`acoustic_signal`/`comms` modules import no matplotlib.
+- `noise/ambient.py` — `compute_windnoise`, `WenzNoise`, and the per-mechanism
   submodels (wind, shipping, rain, turbulence, thermal) the composite selects
   between; `ship_radiated_noise.py` — ISO 17208 RNL and equivalent monopole
   source level from a measured pass-by, a different quantity from the
@@ -686,7 +717,7 @@ metacharacters inside the fragment (`re.escape` or `\(`-style escapes).
 
 Future maintenance: the mechanical sibling clusters — 139–185 test
 functions (2.7–3.5% of the suite, same-file siblings identical once
-constants are masked, concentrated in `test_io_functions.py` and
+constants are masked, concentrated in `test_io_readers_and_decks.py` and
 `test_oass.py`) — are `@pytest.mark.parametrize` candidates, to be
 folded file-by-file with per-file collected-case parity as the gate.
 The `convention` marker is registered but not yet applied to the

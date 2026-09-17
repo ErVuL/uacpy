@@ -3,7 +3,7 @@ signature + minimal-call sweep of the other ``plots.signal`` free plotters.
 
 Each transform is fed a synthetic array-record and its plotter checked for an
 image artist and for honouring ``ax=``. The transforms' own numerics live in
-``test_transforms.py`` / ``test_transforms_fk.py``; nothing here asserts on
+``test_gather_transforms.py``; nothing here asserts on
 the values drawn.
 """
 
@@ -12,7 +12,7 @@ import inspect
 import matplotlib.pyplot as plt
 import numpy as np
 import pytest
-from uacpy.acoustic_signal.transforms import (
+from uacpy.acoustic_signal.arrays import (
     fk_transform, radon_transform, taup_transform)
 from uacpy.visualization.plots.signal import (
     plot_fk, plot_radon, plot_taup,

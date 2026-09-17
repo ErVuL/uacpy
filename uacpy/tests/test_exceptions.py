@@ -36,12 +36,12 @@ from uacpy.core.exceptions import (
     ModelExecutionError, UnsupportedFeatureError, ConfigurationError,
     DataFetchError, FileFormatError,
 )
-from uacpy.acoustic_signal.active import ambiguity_function, matched_filter
+from uacpy.acoustic_signal.detect import ambiguity_function, matched_filter
 from uacpy.acoustic_signal.arrays import steering_vectors
-from uacpy.acoustic_signal.waveforms import nwave
-from uacpy.comms.channel_models import apply_fading_channel
-from uacpy.comms.coding import deinterleave, interleave
-from uacpy.comms.metrics import evm
+from uacpy.acoustic_signal.generate import nwave
+from uacpy.comms.link import apply_fading_channel
+from uacpy.comms.modulate import deinterleave, interleave
+from uacpy.comms.receive import evm
 from uacpy.models import Kraken
 from uacpy.noise.marine_mammal import auditory_weighting
 

@@ -105,7 +105,7 @@ def weighted_level(psd_dB, frequency, group):
     where ``psd_dB`` is a level density (dB re ref²/Hz) at ``frequency`` [Hz].
     Integrating — rather than summing the samples — makes the result
     **independent of the frequency-grid spacing** (a bare sum is not: it scales
-    with the number of bins). Mirrors how :func:`uacpy.acoustic_signal.bands`
+    with the number of bins). Mirrors how :func:`uacpy.acoustic_signal.estimate`
     and SEL integrate a PSD. ``frequency`` need not be pre-sorted, but it needs
     at least two entries to span a bandwidth; the level of a single frequency
     is :func:`apply_weighting`.

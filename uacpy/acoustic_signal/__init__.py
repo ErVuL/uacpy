@@ -3,49 +3,60 @@
 Named ``acoustic_signal`` so it does not collide with Python's stdlib
 ``signal`` module. Sub-modules, each with one responsibility:
 
-* ``waveforms`` / ``sequences`` / ``noise_synthesis`` — deterministic pulses,
-  coded probe sequences, and stochastic/Fourier synthesis
-* ``arrays``     — steering vectors + conventional/adaptive beamforming
-* ``active``     — matched filter / pulse compression / ambiguity
-* ``transforms`` — f-k, tau-p, Radon (gather transforms + inverses)
-* ``timefreq``   — Hilbert, spectrogram, wavelet, Wigner-Ville, cepstrum
-* ``analysis``   — ``psd`` / ``ppsd`` / ``sel`` spectral & level estimators
-* ``system_id``  — FRF (transfer-function) estimation
-* ``channel``    — time-domain channel simulation
-* ``modal``      — modal / dispersion (waveguide warping)
+* ``generate``   — *give me a signal*: parametric waveforms, coded probe
+                   sequences, and noise built to a target spectrum
+* ``estimate``   — *measure this signal*: one estimator per statistic
+                   (``welch``, ``constant_q``, ``sound_exposure`` and a
+                   ``probabilistic_`` twin of each), the time-resolved views
+                   (``spectrogram``, ``cwt``, ``wigner_ville``, cepstra) and
+                   the standard band ladders
+* ``arrays``     — *what does this array see*: steering vectors, beamforming,
+                   and the gather transforms (f-k, tau-p, Radon), which are
+                   the ones that take a receiver spacing ``dx``
+* ``detect``     — *is my transmission in there*: matched filter, pulse
+                   compression, ambiguity
+* ``system``     — *what did the channel do to it*: FRF estimation, channel
+                   simulation, modal dispersion and warping
+
+One module per question the package answers. Every public name is re-exported
+here, so a caller writes ``uacpy.acoustic_signal.welch`` and never names a
+sub-module: these boundaries are for maintainers.
 
 Functional convention
 ---------------------
 Every transform/estimator is a **pure function** returning plain arrays (or a
-small data-only namedtuple such as ``PPSDResult``): ``psd`` / ``ppsd`` / ``sel``
-/ ``spectrogram`` / ``fk_transform`` / ``radon_transform`` / ``taup_transform``,
+small data-only namedtuple such as ``SpectralEstimate``):
+``welch`` / ``constant_q`` / ``sound_exposure`` / ``spectrogram``
+/ ``fk_transform`` / ``radon_transform`` / ``taup_transform``,
 with an ``inverse_<name>`` where an inverse is meaningful. Configure via keyword
 arguments (``functools.partial`` for the rare configure-once case). This module
 imports **no plotting** — all visualisation lives in
 :mod:`uacpy.visualization` (``plot_psd``, ``plot_fk``, ``plot_spectrogram`` …).
-``FRF`` (``system_id``) remains a class, as it carries fitted state.
+``FRF`` (``system``) remains a class, as it carries fitted state.
 
 Output dtype
 ------------
 Two estimators preserve a ``float32`` input and the rest promote to
 ``float64``; nothing here downcasts. Measured on a ``float32`` record:
 
-============================  =================================
-``psd``, ``spectrogram``      ``.power`` stays ``float32``
-                              (the axes are always ``float64``)
-``envelope``, ``cepstrum``,   promote to ``float64``
-``ppsd``, ``constant_q_psd``,
-``sel``, ``wigner_ville``
-``analytic_signal``,          ``complex128`` from either input
+==============================  ===============================
+Welch spectra, ``spectrogram``  ``.power`` stays ``float32``
+                                (the axes are always ``float64``)
+``envelope``, ``cepstrum``,     promote to ``float64``
+the histogram estimators,
+``constant_q`` and
+``sound_exposure`` estimates,
+``wigner_ville``
+``analytic_signal``,            ``complex128`` from either input
 ``fk_transform``
-============================  =================================
+==============================  ===============================
 
 The split follows what each estimator's backend does — the two that preserve
 are the scipy ``welch``/``stft`` wrappers — and it is stated rather than
-enforced because making the eight agree would change the dtype ``psd`` and
-``spectrogram`` return today. Stacking a ``psd`` result against a
-``constant_q_psd`` one therefore promotes; cast explicitly if a pipeline
-depends on the width.
+enforced because making the eight agree would change the dtype a Welch
+estimate and ``spectrogram`` return today. Stacking a Welch estimate against
+a constant-Q one therefore promotes; cast explicitly if a pipeline depends on
+the width.
 
 Lazy loading
 ------------
@@ -59,70 +70,74 @@ import importlib
 
 # Sub-modules, importable on demand as attributes of this package.
 _SUBMODULES = frozenset({
-    'active', 'analysis', 'arrays', 'bands', 'channel', 'constant_q',
-    'modal', 'noise_synthesis', 'sequences', 'system_id', 'timefreq',
-    'transforms', 'waveforms',
+    'generate', 'estimate', 'arrays', 'detect', 'system',
 })
 
 # Public name -> defining sub-module. Kept in sync with __all__ by the
 # consistency check at the bottom of this file (runs at import, costs nothing).
 _EXPORTS = {
     # waveforms
-    'sparc_pulse': 'waveforms', 'gaussian_pulse': 'waveforms',
-    'hfm_chirp': 'waveforms', 'lfm_chirp': 'waveforms', 'nwave': 'waveforms',
-    'ricker_wavelet': 'waveforms', 'tone_burst': 'waveforms',
+    'sparc_pulse': 'generate', 'gaussian_pulse': 'generate',
+    'hfm_chirp': 'generate', 'lfm_chirp': 'generate', 'nwave': 'generate',
+    'ricker_wavelet': 'generate', 'tone_burst': 'generate',
     # sequences
-    'bpsk_modulate': 'sequences', 'make_mseq_probe': 'sequences',
-    'mseq': 'sequences',
+    'bpsk_modulate': 'generate', 'make_mseq_probe': 'generate',
+    'mseq': 'generate',
     # noise_synthesis
-    'add_noise': 'noise_synthesis', 'fourier_synthesis': 'noise_synthesis',
-    'make_bandlimited_noise': 'noise_synthesis',
-    'make_noise_waveform': 'noise_synthesis',
-    'synthesize_noise_from_psd': 'noise_synthesis',
+    'add_noise': 'generate', 'fourier_synthesis': 'generate',
+    'make_bandlimited_noise': 'generate',
+    'make_noise_waveform': 'generate',
+    'synthesize_noise_from_psd': 'generate',
     # analysis
-    'PPSDResult': 'analysis', 'PSDResult': 'analysis', 'SELResult': 'analysis',
-    'ppsd': 'analysis', 'psd': 'analysis', 'sel': 'analysis',
+    'ProbabilisticSpectralEstimate': 'estimate',
+    'SpectralEstimate': 'estimate',
+    'BAND_TYPES': 'estimate',
+    'welch': 'estimate', 'constant_q': 'estimate',
+    'probabilistic_welch': 'estimate',
+    'probabilistic_constant_q': 'estimate',
+    'sound_exposure': 'estimate',
+    'probabilistic_sound_exposure': 'estimate',
     # system_id
-    'FRF': 'system_id',
+    'FRF': 'system',
     # arrays
     'bartlett_spectrum': 'arrays', 'beamform': 'arrays',
     'BeamformResult': 'arrays', 'music_spectrum': 'arrays',
     'mvdr_spectrum': 'arrays', 'sample_covariance': 'arrays',
     'steering_vectors': 'arrays', 'shading_taper': 'arrays',
     # active
-    'AmbiguityResult': 'active', 'ambiguity_function': 'active',
-    'matched_filter': 'active', 'processing_gain': 'active',
-    'pulse_compression': 'active',
+    'AmbiguityResult': 'detect', 'ambiguity_function': 'detect',
+    'matched_filter': 'detect', 'processing_gain': 'detect',
+    'pulse_compression': 'detect',
     # transforms
-    'fk_transform': 'transforms', 'inverse_fk': 'transforms',
-    'inverse_radon': 'transforms', 'inverse_taup': 'transforms',
-    'radon_transform': 'transforms', 'taup_transform': 'transforms',
-    'FKResult': 'transforms', 'TauPResult': 'transforms',
-    'RadonResult': 'transforms',
+    'fk_transform': 'arrays', 'inverse_fk': 'arrays',
+    'inverse_radon': 'arrays', 'inverse_taup': 'arrays',
+    'radon_transform': 'arrays', 'taup_transform': 'arrays',
+    'FKResult': 'arrays', 'TauPResult': 'arrays',
+    'RadonResult': 'arrays',
     # channel
-    'fractional_delay_taps': 'channel',
-    'impulse_response': 'channel',
-    'impulse_response_from_transfer_function': 'channel',
-    'simulate_reception': 'channel',
+    'fractional_delay_taps': 'system',
+    'impulse_response': 'system',
+    'impulse_response_from_transfer_function': 'system',
+    'simulate_reception': 'system',
     # modal
-    'modal_group_velocity': 'modal', 'unwarp_signal': 'modal',
-    'warp_signal': 'modal',
+    'modal_group_velocity': 'system', 'unwarp_signal': 'system',
+    'warp_signal': 'system',
     # timefreq
-    'spectrogram': 'timefreq', 'analytic_signal': 'timefreq',
-    'cepstrum': 'timefreq', 'ComplexCepstrum': 'timefreq',
-    'complex_cepstrum': 'timefreq', 'cwt': 'timefreq', 'envelope': 'timefreq',
-    'instantaneous_frequency': 'timefreq',
-    'inverse_complex_cepstrum': 'timefreq', 'inverse_cwt': 'timefreq',
-    'wigner_ville': 'timefreq', 'SpectrogramResult': 'timefreq',
-    'CWTResult': 'timefreq', 'WignerVilleResult': 'timefreq',
-    # constant_q
-    'constant_q_transform': 'constant_q', 'constant_q_psd': 'constant_q',
-    'constant_q_spectrogram': 'constant_q',
-    'probabilistic_constant_q': 'constant_q', 'CQTResult': 'constant_q',
-    'CQPSDResult': 'constant_q', 'CQSpectrogramResult': 'constant_q',
-    'CQPPSDResult': 'constant_q',
+    'spectrogram': 'estimate', 'analytic_signal': 'estimate',
+    'cepstrum': 'estimate', 'ComplexCepstrum': 'estimate',
+    'complex_cepstrum': 'estimate', 'cwt': 'estimate', 'envelope': 'estimate',
+    'instantaneous_frequency': 'estimate',
+    'inverse_complex_cepstrum': 'estimate', 'inverse_cwt': 'estimate',
+    'wigner_ville': 'estimate', 'SpectrogramResult': 'estimate',
+    'CWTResult': 'estimate', 'WignerVilleResult': 'estimate',
+    # the constant-Q transform and spectrogram; the ESTIMATORS live in
+    # analysis beside the others, and the module is private so the name
+    # ``constant_q`` belongs to the estimator rather than to a module.
+    'constant_q_transform': 'estimate',
+    'constant_q_spectrogram': 'estimate',
+    'CQTResult': 'estimate', 'CQSpectrogramResult': 'estimate',
     # bands
-    'decidecade_bands': 'bands', 'decidecade_band_levels': 'bands',
+    'decidecade_bands': 'estimate', 'decidecade_band_levels': 'estimate',
 }
 
 __all__ = [
@@ -132,7 +147,10 @@ __all__ = [
     "make_bandlimited_noise", "fourier_synthesis", "sparc_pulse", "nwave",
     "mseq", "make_mseq_probe", "make_noise_waveform",
     # spectral / level estimators
-    "psd", "ppsd", "PPSDResult", "PSDResult", "SELResult", "sel",
+    "welch", "constant_q", "sound_exposure",
+    "probabilistic_welch", "probabilistic_constant_q",
+    "probabilistic_sound_exposure",
+    "SpectralEstimate", "ProbabilisticSpectralEstimate", "BAND_TYPES",
     # system identification
     "FRF",
     # arrays
@@ -157,15 +175,12 @@ __all__ = [
     "inverse_complex_cepstrum",
     "SpectrogramResult", "CWTResult", "WignerVilleResult",
     # constant-Q (Brown 1991)
-    "constant_q_transform", "constant_q_psd", "constant_q_spectrogram",
-    "probabilistic_constant_q", "CQTResult", "CQPSDResult",
-    "CQSpectrogramResult", "CQPPSDResult",
+    "constant_q_transform", "constant_q_spectrogram",
+    "CQTResult", "CQSpectrogramResult",
     # decidecade bands (ISO 18405 / IEC 61260-1)
     "decidecade_bands", "decidecade_band_levels",
     # sub-modules
-    "waveforms", "sequences", "noise_synthesis", "arrays", "active",
-    "transforms", "timefreq", "analysis", "system_id", "channel", "modal",
-    "bands", "constant_q",
+    "generate", "estimate", "arrays", "detect", "system",
 ]
 
 if set(__all__) != set(_EXPORTS) | _SUBMODULES:

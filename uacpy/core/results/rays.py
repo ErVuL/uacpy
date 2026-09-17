@@ -225,7 +225,7 @@ class Arrivals(Result):
         convention ``read_arr_file`` documents for ``delays_imag`` and
         ``Bellhop._arrivals_to_tf`` applies, so it drops straight into a
         coherent sum or into
-        :func:`~uacpy.acoustic_signal.channel.impulse_response`.
+        :func:`~uacpy.acoustic_signal.system.impulse_response`.
         :meth:`_arrival_power` is its squared magnitude.
         """
         amplitude = np.abs(np.asarray(self.amplitudes, dtype=float).ravel())

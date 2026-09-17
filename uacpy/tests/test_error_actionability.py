@@ -25,6 +25,18 @@ import pytest
 from uacpy.core.exceptions import ConfigurationError, FileFormatError
 
 
+def _band_exposure(data, sample_rate, **options):
+    """The ISO-band sound exposure: the estimator's ``'exposure'`` scaling
+    reported on a band ladder. Returns a ``SpectralEstimate`` whose ``power``
+    is Pa²·s per band and whose ``bands`` are the ``(low, centre, high)``
+    edges those values sit on.
+    """
+    from uacpy.acoustic_signal.estimate import sound_exposure
+    return sound_exposure(data, sample_rate, **options)
+
+
+
+
 class TestReadersNameWhatWritesTheFile:
     """A missing model output is not the user's file: they cannot create it by
     hand, so "not found" alone leaves them nowhere to go. Each reader names the
@@ -111,26 +123,26 @@ class TestEmptyInputNamesBothLengths:
     sizes, so the caller reads the answer instead of bisecting."""
 
     def test_bit_error_rate_names_both_stream_lengths(self):
-        from uacpy.comms.metrics import bit_error_rate
+        from uacpy.comms.receive import bit_error_rate
         with pytest.raises(ConfigurationError) as exc:
             bit_error_rate([], [1, 0, 1])
         assert '0 bits' in str(exc.value)
         assert '3' in str(exc.value)
 
     def test_symbol_error_rate_names_both_stream_lengths(self):
-        from uacpy.comms.metrics import symbol_error_rate
+        from uacpy.comms.receive import symbol_error_rate
         with pytest.raises(ConfigurationError) as exc:
             symbol_error_rate([1, 2], [])
         assert '2 symbols' in str(exc.value)
 
     def test_evm_names_both_stream_lengths(self):
-        from uacpy.comms.metrics import evm
+        from uacpy.comms.receive import evm
         with pytest.raises(ConfigurationError) as exc:
             evm([], [1 + 0j])
         assert '0 symbols' in str(exc.value)
 
     def test_ofdm_demodulate_names_the_block_length_it_needed(self):
-        from uacpy.comms.ofdm import ofdm_demodulate
+        from uacpy.comms.modulate import ofdm_demodulate
         with pytest.raises(ConfigurationError) as exc:
             ofdm_demodulate(np.zeros(3, dtype=complex), n_subcarriers=8,
                             cp_len=2)
@@ -139,7 +151,7 @@ class TestEmptyInputNamesBothLengths:
         assert '8 + 2 = 10' in msg
 
     def test_matched_filter_metric_names_both_lengths(self):
-        from uacpy.comms.sync import matched_filter_metric
+        from uacpy.comms.receive import matched_filter_metric
         with pytest.raises(ConfigurationError) as exc:
             matched_filter_metric(np.zeros(4), np.zeros(9))
         msg = str(exc.value)
@@ -147,13 +159,13 @@ class TestEmptyInputNamesBothLengths:
         assert '4' in msg
 
     def test_spread_on_an_empty_code_names_a_generator_to_call(self):
-        from uacpy.comms.dsss import spread
+        from uacpy.comms.modulate import spread
         with pytest.raises(ConfigurationError) as exc:
             spread([1, -1], [])
         assert 'm_sequence' in str(exc.value)
 
     def test_apply_channel_on_an_empty_h_names_the_identity_channel(self):
-        from uacpy.comms.channel_models import apply_channel
+        from uacpy.comms.link import apply_channel
         with pytest.raises(ConfigurationError) as exc:
             apply_channel(np.zeros(4), [])
         assert 'h=[1.0]' in str(exc.value)
@@ -202,7 +214,7 @@ class TestConstraintMessagesNameTheOffendingValue:
         assert 'integration_time_s=2.0' in msg
 
     def test_rrc_filter_names_the_offending_rolloff(self):
-        from uacpy.comms.phy import rrc_filter
+        from uacpy.comms.link import rrc_filter
         with pytest.raises(ConfigurationError) as exc:
             rrc_filter(sps=4, rolloff=1.5, span=8)
         assert '1.5' in str(exc.value)
@@ -224,7 +236,7 @@ class TestConstraintMessagesNameTheOffendingValue:
         assert 'got 10' in str(exc.value)
 
     def test_omp_estimate_names_both_ends_of_the_interval(self):
-        from uacpy.comms.channel_est import omp_estimate
+        from uacpy.comms.receive import omp_estimate
         with pytest.raises(ConfigurationError) as exc:
             omp_estimate(np.zeros(8, dtype=complex), np.ones(8), n_taps=4,
                          sparsity=9)
@@ -233,7 +245,7 @@ class TestConstraintMessagesNameTheOffendingValue:
         assert 'n_taps=4' in msg
 
     def test_impulse_response_names_both_shapes(self):
-        from uacpy.acoustic_signal.channel import (
+        from uacpy.acoustic_signal.system import (
             impulse_response_from_transfer_function)
         with pytest.raises(ConfigurationError) as exc:
             impulse_response_from_transfer_function(
@@ -425,27 +437,26 @@ def _guard_cases():
     Built lazily inside the function so the module-level import list stays
     short; each entry triggers exactly one raise.
     """
-    from uacpy.acoustic_signal.active import (
+    from uacpy.acoustic_signal.detect import (
         ambiguity_function, matched_filter, processing_gain)
-    from uacpy.acoustic_signal.analysis import sel
     from uacpy.acoustic_signal.arrays import sample_covariance
-    from uacpy.acoustic_signal.bands import (
+    from uacpy.acoustic_signal.estimate import (
         decidecade_band_levels, decidecade_bands)
-    from uacpy.acoustic_signal.channel import impulse_response
-    from uacpy.acoustic_signal.constant_q import (
+    from uacpy.acoustic_signal.system import impulse_response
+    from uacpy.acoustic_signal.estimate import (
         constant_q_spectrogram, constant_q_transform)
-    from uacpy.acoustic_signal.modal import modal_group_velocity
-    from uacpy.acoustic_signal.noise_synthesis import (
+    from uacpy.acoustic_signal.system import modal_group_velocity
+    from uacpy.acoustic_signal.generate import (
         synthesize_noise_from_psd)
-    from uacpy.acoustic_signal.sequences import bpsk_modulate, mseq
-    from uacpy.acoustic_signal.timefreq import (
+    from uacpy.acoustic_signal.generate import bpsk_modulate, mseq
+    from uacpy.acoustic_signal.estimate import (
         ComplexCepstrum, analytic_signal, cepstrum, complex_cepstrum, cwt,
         inverse_complex_cepstrum, inverse_cwt, wigner_ville)
-    from uacpy.acoustic_signal.transforms import (
+    from uacpy.acoustic_signal.arrays import (
         fk_transform, inverse_fk, inverse_radon, inverse_taup,
         radon_transform, taup_transform)
     from uacpy.comms.janus import janus_decode
-    from uacpy.comms.transceiver import OFDMReceiver, OFDMTransmitter
+    from uacpy.comms.link import OFDMReceiver, OFDMTransmitter
     from uacpy.sonar.matched_field import (
         replica_bank_from_field, synthesize_replica)
     from uacpy.sonar.reverberation import total_reverberation
@@ -455,7 +466,7 @@ def _guard_cases():
 
     z4 = np.linspace(5, 95, 4)
     return [
-        # ── acoustic_signal/transforms.py ────────────────────────────────
+        # ── acoustic_signal/arrays.py ────────────────────────────────
         ('fk_transform_window_list_length',
          lambda: fk_transform(np.zeros((8, 4)), 1000.0, 1.0, window=['hann']),
          ('got 1 entries',)),
@@ -480,7 +491,7 @@ def _guard_cases():
         ('fk_transform_data_ndim',
          lambda: fk_transform(np.zeros(8), 1000.0, 1.0),
          ('got shape (8,)',)),
-        # ── acoustic_signal/timefreq.py ──────────────────────────────────
+        # ── acoustic_signal/estimate.py ──────────────────────────────────
         ('analytic_signal_data_ndim',
          lambda: analytic_signal(np.zeros((2, 3))),
          ('got shape (2, 3)',)),
@@ -516,7 +527,7 @@ def _guard_cases():
          lambda: inverse_complex_cepstrum(
              ComplexCepstrum(cepstrum=np.zeros((2, 3)), delay=0)),
          ('got shape (2, 3)',)),
-        # ── acoustic_signal/active.py ────────────────────────────────────
+        # ── acoustic_signal/detect.py ────────────────────────────────────
         ('matched_filter_input_ndim',
          lambda: matched_filter(np.zeros((2, 3)), np.zeros(4)),
          ('received shape (2, 3)', 'replica shape (4,)')),
@@ -526,14 +537,14 @@ def _guard_cases():
         ('ambiguity_function_waveform_ndim',
          lambda: ambiguity_function(np.zeros((2, 3)), 1000.0),
          ('got shape (2, 3)',)),
-        # ── acoustic_signal/analysis.py ──────────────────────────────────
-        ('sel_no_samples_to_integrate',
-         lambda: sel(np.ones(100), 1000.0, integration_time=1e-6),
-         ('Got 0 sample(s)', 'integration_time=1e-06')),
-        ('sel_no_band_below_nyquist',
-         lambda: sel(np.ones(4096), 100.0, fmin=1000.0, fmax=2000.0),
+        # ── acoustic_signal/estimate.py ──────────────────────────────────
+        ('integration_time_shorter_than_one_sample',
+         lambda: _band_exposure(np.ones(100), 1000.0, integration_time=1e-6),
+         ('integration_time=1e-06', 'shorter than one sample')),
+        ('no_band_fits_below_nyquist',
+         lambda: _band_exposure(np.ones(4096), 100.0, fmin=1000.0, fmax=2000.0),
          ('got fmin=1000.0', 'fmax=2000.0')),
-        # ── acoustic_signal/bands.py ─────────────────────────────────────
+        # ── acoustic_signal/estimate.py ─────────────────────────────────────
         ('decidecade_bands_edges',
          lambda: decidecade_bands(0.0, 100.0),
          ('got f_low=0.0', 'f_high=100.0')),
@@ -545,7 +556,7 @@ def _guard_cases():
          lambda: decidecade_band_levels(np.array([1.0, 2.0, 3.0]),
                                         np.array([10.0, 30.0, 20.0])),
          ('Got 1 non-increasing step(s)', 'first at index 1')),
-        # ── acoustic_signal/channel.py ───────────────────────────────────
+        # ── acoustic_signal/system.py ───────────────────────────────────
         ('impulse_response_shapes',
          lambda: impulse_response(np.ones(3), np.zeros(4), 1000.0),
          ('amplitudes shape (3,)', 'delays_s shape (4,)')),
@@ -553,21 +564,21 @@ def _guard_cases():
          lambda: impulse_response(np.ones(3), np.array([0.0, -1.0, -2.0]),
                                   1000.0),
          ('got 2 negative value(s)', 'first at index 1')),
-        # ── acoustic_signal/constant_q.py ────────────────────────────────
+        # ── acoustic_signal/estimate.py ────────────────────────────────
         ('constant_q_hop',
          lambda: constant_q_spectrogram(np.zeros(4096), 8000.0, hop=0),
          ('got 0',)),
         ('constant_q_data_ndim',
          lambda: constant_q_transform(np.zeros((2, 3)), 8000.0),
          ('got shape (2, 3)',)),
-        # ── acoustic_signal/modal.py ─────────────────────────────────────
+        # ── acoustic_signal/system.py ─────────────────────────────────────
         ('modal_group_velocity_frequency_order',
          lambda: modal_group_velocity([100.0, 50.0], [1.0, 2.0]),
          ('got shape (2,)', '1 non-increasing step(s)')),
         ('modal_group_velocity_wavenumber_rows',
          lambda: modal_group_velocity([1.0, 2.0, 3.0], np.zeros(2)),
          ('k_horizontal shape (2,)', '3 frequencies')),
-        # ── acoustic_signal/noise_synthesis.py ───────────────────────────
+        # ── acoustic_signal/generate.py ───────────────────────────
         ('synthesize_noise_frequency_order',
          lambda: synthesize_noise_from_psd(np.ones(3),
                                            np.array([1.0, 3.0, 2.0])),
@@ -577,7 +588,7 @@ def _guard_cases():
              np.array([1.0, 0.0, 2.0]), np.array([1.0, 2.0, 3.0]),
              duration=0.01, interp='log'),
          ('Fxx[0]=1', 'non-positive Pxx value(s)')),
-        # ── acoustic_signal/sequences.py ─────────────────────────────────
+        # ── acoustic_signal/generate.py ─────────────────────────────────
         ('bpsk_samples_per_chip_integer',
          lambda: bpsk_modulate(np.array([1, -1, 1]), 100.0, 1000.0, 300.0),
          ('sample_rate/chips_per_sec = 1000/300',)),
@@ -679,7 +690,7 @@ class TestShapeAndArrayGuardsNameWhatTheyGot:
         instead: every lexical proxy for "names the offending value" that can
         be computed (a ``got`` cue, an interpolation count, an interpolation
         overlapping the guard) mis-scores files that are already complete —
-        ``comms/metrics.py`` names both stream lengths in all five of its
+        ``comms/receive.py`` names both stream lengths in all five of its
         messages and scores 0/5 on the ``got`` cue. A floor built on any of
         them flagged 22 of 28 files and would need a whitelist longer than the
         set it measures. This counts the one thing that can be counted

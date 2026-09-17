@@ -37,7 +37,7 @@ from uacpy.tests._doc_gate import package_python_files
 
 import uacpy
 from uacpy.core._warn_frames import USER_FRAME_SKIP
-from uacpy.acoustic_signal.constant_q import constant_q_transform
+from uacpy.acoustic_signal.estimate import constant_q_transform
 from uacpy.core.absorption import Biological, BiologicalLayer
 from uacpy.core.acoustics import soundspeed_delgrosso
 from uacpy.core.receiver import Receiver
@@ -328,16 +328,16 @@ def test_grn_zero_range_warning_names_the_callers_file():
 # The count is part of the entry: a file may hold several converted sites in
 # one function, and a revert that leaves one behind still has to fail.
 CONVERTED_SITES = [
-    ('acoustic_signal/analysis.py', '_warn_two_sided', 1),
+    ('acoustic_signal/estimate.py', '_warn_two_sided', 1),
     ('acoustic_signal/arrays.py', '_powerless_covariance', 1),
-    ('acoustic_signal/channel.py', 'impulse_response', 2),
-    ('acoustic_signal/constant_q.py', '_cq_setup', 2),
-    ('acoustic_signal/system_id.py', '_etfe_divide', 1),
-    ('comms/channel_models.py', 'awgn', 1),
+    ('acoustic_signal/system.py', 'impulse_response', 2),
+    ('acoustic_signal/estimate.py', '_cq_setup', 2),
+    ('acoustic_signal/system.py', '_etfe_divide', 1),
+    ('comms/link.py', 'awgn', 1),
     ('comms/janus.py', 'JanusPacket.from_bits', 1),
-    ('comms/ofdm.py', 'ofdm_demodulate', 1),
-    ('comms/transceiver.py', 'CommsReceiver.receive', 1),
-    ('comms/transceiver.py', 'OFDMReceiver.receive', 1),
+    ('comms/modulate.py', 'ofdm_demodulate', 1),
+    ('comms/link.py', 'CommsReceiver.receive', 1),
+    ('comms/link.py', 'OFDMReceiver.receive', 1),
     # Not a converted hand count but the same rule, and it belongs under the
     # same guard: two construction depths (a direct ``BiologicalLayer(...)``
     # and the tuple normalisation inside ``Biological.__init__``) that no
@@ -345,10 +345,10 @@ CONVERTED_SITES = [
     # ``<string>`` frame stops the walk; a ``stacklevel`` reappearing here
     # would mean one of those was regenerated.
     ('core/absorption.py', 'BiologicalLayer.__init__', 1),
-    ('core/acoustics.py', 'soundspeed', 3),
-    ('core/acoustics.py', 'soundspeed_delgrosso', 3),
-    ('core/acoustics.py', 'soundspeed_teos10', 4),
-    ('core/acoustics.py', 'soundspeed_unesco', 4),
+    ('core/acoustics/seawater.py', 'soundspeed', 3),
+    ('core/acoustics/seawater.py', 'soundspeed_delgrosso', 3),
+    ('core/acoustics/seawater.py', 'soundspeed_teos10', 4),
+    ('core/acoustics/seawater.py', 'soundspeed_unesco', 4),
     ('core/bottom.py', 'SeabedColumn.collapse', 1),
     ('core/environment.py', 'Environment.get_sound_speed', 1),
     ('core/results/field.py', 'Field._warn_if_frequency_axis_undersamples', 1),
@@ -534,10 +534,17 @@ HAND_COUNTS_WITH_AN_IN_PACKAGE_CALLER = {
     ('core/receiver.py', 'Receiver.__post_init__'),
     # ``bottom_loss_curve`` always passes an explicit ``c=``, so the fallback
     # this warns about cannot be reached from inside the package.
-    ('core/acoustics.py', 'reflection_coeff'),
+    ('core/acoustics/boundaries.py', 'reflection_coeff'),
     # ``_wind_merklinger`` passes three positional arguments, so
     # ``band_integrate`` is always False on that path and the branch is dead.
-    ('noise/noise.py', 'compute_windnoise'),
+    ('noise/ambient.py', 'compute_windnoise'),
+    # Its in-package callers are the five histogram doors
+    # (``probabilistic_welch`` and the rest), which exist to
+    # name one statistic each and forward the arguments that statistic takes.
+    # A warning raised here is therefore still the user's own call one frame
+    # further out, which ``USER_FRAME_SKIP`` already walks past — the door
+    # adds a frame, not a caller.
+    ('acoustic_signal/estimate.py', '_probabilistic_estimate'),
 }
 
 

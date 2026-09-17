@@ -823,8 +823,8 @@ def test_example_10_band_power_window_holds_the_sweep():
     chirp it is titled for: the bulk of the in-band bins — their interquartile
     band — sits inside it. A window under the sweep shows only the leakage
     skirts, the curve climbing off the top edge between them."""
-    from uacpy.acoustic_signal import constant_q_psd
-    from uacpy.acoustic_signal.waveforms import lfm_chirp
+    from uacpy.acoustic_signal import constant_q
+    from uacpy.acoustic_signal.generate import lfm_chirp
     from uacpy.core.acoustics import power_to_dB
 
     source = (EXAMPLES_DIR / 'example_10_signal_processing.py').read_text(
@@ -833,9 +833,10 @@ def test_example_10_band_power_window_holds_the_sweep():
     consts = _module_constants(tree)
     chirp = _literal_kwargs(_first_call(tree, 'lfm_chirp'), consts)
     _, lfm = lfm_chirp(**chirp)
-    cq = constant_q_psd(lfm, chirp['sample_rate'],
-                        **_literal_kwargs(_first_call(tree, 'constant_q_psd'),
-                                          consts))
+    # The panel is drawn from the example's own
+    # ``constant_q(..., scaling='spectrum', ...)`` call.
+    cq_call = _literal_kwargs(_first_call(tree, 'constant_q'), consts)
+    cq = constant_q(lfm, chirp['sample_rate'], **cq_call)
     window = _literal_kwargs(_first_call(tree, 'plot_constant_q_psd'), consts)
     in_band = (cq.frequencies >= chirp['fmin']) & (cq.frequencies <= chirp['fmax'])
     levels = power_to_dB(cq.power, 1e-6)[in_band]     # as the plotter scales it

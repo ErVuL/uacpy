@@ -37,11 +37,11 @@ from uacpy.acoustic_signal import (
     mseq,
     nwave,
     processing_gain,
-    psd,
     pulse_compression,
     ricker_wavelet,
     simulate_reception,
     sparc_pulse,
+    welch,
     spectrogram,
     synthesize_noise_from_psd,
     tone_burst,
@@ -518,16 +518,16 @@ def spectra_and_bands():
     _, x, fs = synthesize_noise_from_psd(
         target, f_target, duration=30.0, sample_rate=25_000,
         n_fft=65536, interp='log', rng=rng)
-    frequencies, power = psd(x, fs, nperseg=32768)
+    frequencies, power = welch(x, fs, nperseg=32768)
     band = (frequencies >= 20.0) & (frequencies <= 11_000.0)
     centers, levels = decidecade_band_levels(power[band], frequencies[band])
 
     shown = frequencies >= 10.0
     fig, axes = plt.subplots(1, 2, figsize=(12.0, 4.4))
     plot_psd(frequencies[shown], power[shown], ax=axes[0],
-             label='psd() of the realisation', ymin=55, ymax=125,
+             label='welch() of the realisation', ymin=55, ymax=125,
              color='#1f4e79', lw=0.6,
-             title='synthesize_noise_from_psd → psd')
+             title='synthesize_noise_from_psd → welch')
     plot_psd(f_target, target, ax=axes[0], label='target PSD', ymin=55,
              ymax=125, color='#f0ad4e', lw=2.0, ls='--')
     plot_band_levels(centers, levels, ax=axes[1], color='#1f4e79',

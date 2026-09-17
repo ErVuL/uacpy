@@ -256,23 +256,85 @@ def plot_taup(slownesses, taus, taup, ax=None, *, vmin=None, vmax=None,
 
 # ── Spectral / level estimators (analysis) ──────────────────────────────────
 
+#: What each scaling puts on a level axis, and what the panel is called.
+#: An exposure carries the record's duration and a density the band's width,
+#: so a plot that names the wrong one is out by that factor and says nothing.
+_SCALING_UNIT = {"density": "Pa²/Hz", "spectrum": "Pa²",
+                 "exposure": "Pa²·s"}
+_SCALING_KIND = {"density": "Power spectral density",
+                 "spectrum": "Power spectrum",
+                 "exposure": "Sound exposure"}
+#: What a level HISTOGRAM is called, per scaling. "PPSD" is the name the
+#: density one goes by (McNamara & Buland 2004); the other two have no
+#: acronym, and calling them PPSD would put "density" over band power.
+_HISTOGRAM_KIND = {"density": "PPSD", "spectrum": "Band-power histogram",
+                   "exposure": "SEL histogram"}
+
+
+def _histogram_title(result):
+    """The panel's own name: the statistic, and the segment it summarises."""
+    kind = _HISTOGRAM_KIND[getattr(result, "scaling", "density")]
+    seg = getattr(result, "seg_duration", None)
+    return f"{kind} ({seg}s)" if seg is not None else kind
+
+
+
 @typed_plot_error
-def plot_psd(frequencies, psd_linear, ax=None, *, ref=REFERENCE_PRESSURE_WATER,
-             label=None, ymin=0, ymax=150, title=None, figsize=(10, 6),
+def plot_psd(frequencies, psd_linear=None, ax=None, *,
+             ref=REFERENCE_PRESSURE_WATER, scaling=None, label=None, ymin=0,
+             ymax=150, title=None, figsize=(10, 6), freq_scale="log",
              **mpl_kw):
-    """Line plot of a Welch PSD (dB). Consumes :func:`psd` output.
+    """Line plot of a Welch estimate (dB). Consumes
+    :func:`uacpy.acoustic_signal.welch` or
+    :func:`uacpy.acoustic_signal.constant_q` output.
+
+    Handed the result itself — ``plot_psd(welch(x, fs, scaling='spectrum'))`` — the axis
+    follows the estimator: Pa² and "Power spectrum" for band power, Pa²/Hz and
+    "Power spectral density" for a density. Handed bare arrays the estimator's
+    choice is not recoverable, so ``scaling=`` states it and defaults to
+    ``'density'``. The two differ by the window's noise-equivalent bandwidth —
+    18.5 dB for a 1024-point Hann at 48 kHz — so an axis reading "/Hz" over
+    band power is wrong by more than any plot convention.
+
+    ``freq_scale`` is ``'log'`` by default, which is what spaces constant-Q's
+    geometric bins evenly and what a decade-spanning soundscape wants;
+    ``'linear'`` reads a narrow band the way a spectrum analyser does.
 
     ``ymin`` / ``ymax`` pin the level axis to the 0–150 dB window an ambient
     record occupies; a quieter one needs them widened or the panel comes out
     empty."""
+    method = None
+    if psd_linear is None:
+        frequencies, psd_linear, scaling, method = (
+            frequencies.frequencies, frequencies.power,
+            getattr(frequencies, "scaling", scaling),
+            getattr(frequencies, "method", None))
+    scaling = "density" if scaling is None else str(scaling)
+    unit = _SCALING_UNIT[scaling]
+    # The estimate carries the method too, so the title names the bins the
+    # reader is looking at: equal-width from Welch, geometric from constant-Q.
+    kind = _SCALING_KIND[scaling]
+    if method == "constant_q":
+        kind = f"Constant-Q {kind[0].lower()}{kind[1:]}"
+    if freq_scale not in ("log", "linear"):
+        raise ConfigurationError(
+            f"plot_psd: unknown freq_scale {freq_scale!r}.",
+            remediation="Use 'log' (the default, and the only one that spaces "
+                        "constant-Q's geometric bins evenly) or 'linear', "
+                        "which reads a narrow band the way a spectrum "
+                        "analyser does.")
     psd_dB = power_to_dB(np.asarray(psd_linear), ref)
     fig, ax = fig_ax(ax, figsize)
-    ax.semilogx(frequencies, psd_dB, label=label, **mpl_kw)
-    ax.set_title(_title_or(title, "Power spectral density"), loc="left")
+    ax.plot(frequencies, psd_dB, label=label, **mpl_kw)
+    ax.set_xscale(freq_scale)
+    ax.set_title(_title_or(title, kind), loc="left")
     ax.set_xlabel("Frequency (Hz)")
-    ax.set_ylabel(f"Level (dB re {_ref_label(ref)}Pa²/Hz)")
+    ax.set_ylabel(f"Level (dB re {_ref_label(ref)}{unit})")
     ax.set_ylim((ymin, ymax))
-    ax.set_xlim(_log_freq_xlim(frequencies))
+    # A log axis cannot show DC, so its lower limit is the first positive
+    # bin; a linear one spans the record's own band.
+    ax.set_xlim(_log_freq_xlim(frequencies) if freq_scale == "log"
+                else (float(frequencies[0]), float(frequencies[-1])))
     _warn_if_offscreen(ax, psd_dB, "plot_psd", "ymin=/ymax")
     ax.grid(which="both", alpha=0.75)
     if label:
@@ -313,7 +375,12 @@ def _plot_level_histogram(result, ax, *, y_label, default_title, caller,
             label="Mean level ± STD")
     ax.plot(result.frequencies, result.mean_dB - result.std_dB, "k--")
     ax.set_title(_title_or(title, default_title), loc="left")
-    ax.set_xlabel("Frequency (Hz)")
+    # A banded histogram's values sit on whole bands, so the axis names
+    # the ladder, as the bar plot does — the two result types answer
+    # "what are these sitting on?" the same way.
+    _band_type = getattr(result, "band_type", None)
+    ax.set_xlabel(f"Frequency ({_band_type}) (Hz)" if _band_type
+                  else "Frequency (Hz)")
     ax.set_ylabel(y_label)
     ax.set_xscale("log")
     ax.set_xlim(_log_freq_xlim(result.frequencies))
@@ -330,46 +397,93 @@ def _plot_level_histogram(result, ax, *, y_label, default_title, caller,
 def plot_ppsd(result, ax=None, *, ymin=0, ymax=200, vmin=0, vmax=None,
               cmap="jet", title=None, figsize=(10, 6), show_colorbar=True,
               **mpl_kw):
-    """2-D histogram of PSD levels. Consumes a ``PPSDResult``.
+    """2-D histogram of Welch spectral levels. Consumes a
+    :class:`~uacpy.acoustic_signal.ProbabilisticSpectralEstimate` computed
+    with ``method='welch'``.
 
     The level axis is named from the reference the result carries, so a caller
-    who ran :func:`uacpy.acoustic_signal.ppsd` against a Pascal reference is
-    not handed a µPa axis 120 dB out."""
+    who ran the estimator against a Pascal reference is not handed a µPa axis
+    120 dB out."""
     if not hasattr(result, 'frequencies') or not hasattr(result, 'level_edges'):
         raise ConfigurationError(
-            f"plot_ppsd: expected a ppsd() result (with .frequencies and "
+            f"plot_ppsd: expected a probabilistic_welch() or "
+            f"probabilistic_sound_exposure() result (with .frequencies and "
             f".level_edges); got {type(result).__name__}.")
-    # ``ppsd`` takes ``ref=`` and carries it on the result, so the axis names
+    # Both histogram estimators return the one type, so the method is what
+    # separates them: constant-Q bins are geometric and carry no
+    # ``seg_duration``, which this plotter's linear axis and title state.
+    if getattr(result, 'method', 'welch') == 'constant_q':
+        raise ConfigurationError(
+            "plot_ppsd: this estimate was computed with method='constant_q', "
+            "whose bins are geometric and carry no segment duration.",
+            remediation="Use plot_constant_q_ppsd(result), or result.plot(), "
+                        "which picks the plotter from the estimate's method.")
+    # The estimator takes ``ref=`` and carries it on the result, so the axis
+    # names
     # the caller's reference rather than assuming the package default; a
-    # hardcoded "µPa²" was 120 dB out for anyone working in Pa. A dB axis
+    # hardcoded "µPa²" would be 120 dB out for anyone working in Pa. A dB axis
     # without a reference is an incomplete unit on a published figure.
-    # ``ppsd`` also takes ``scaling=``, and the result carries which was used:
+    # It also takes ``scaling=``, and the result carries which was used:
     # 'density' levels are per hertz, 'spectrum' levels are per band, so the
     # axis cannot claim /Hz over a spectrum.
     ref = getattr(result, 'ref', REFERENCE_PRESSURE_WATER)
-    per_hz = "/Hz" if getattr(result, 'scaling', 'density') == 'density' else ""
+    unit = _SCALING_UNIT[getattr(result, 'scaling', 'density')]
     return _plot_level_histogram(
-        result, ax, y_label=f"Level (dB re {_ref_label(ref)}Pa²{per_hz})",
-        default_title=f"PPSD ({result.seg_duration}s)", caller="plot_ppsd",
+        result, ax, y_label=f"Level (dB re {_ref_label(ref)}{unit})",
+        default_title=_histogram_title(result), caller="plot_ppsd",
         ymin=ymin, ymax=ymax, vmin=vmin, vmax=vmax, cmap=cmap, title=title,
         figsize=figsize, show_colorbar=show_colorbar, **mpl_kw)
 
 
 @typed_plot_error
-def plot_sel(sel_pa2s, bands, ax=None, *, ref=REFERENCE_PRESSURE_WATER,
+def plot_sel(sel_pa2s, bands=None, ax=None, *, ref=REFERENCE_PRESSURE_WATER,
              duration=None, band_type="third_octave", ylim=(0, 200),
              title=None, figsize=(10, 6), **mpl_kw):
-    """Bar plot of SEL per band (dB). Consumes :func:`sel` output."""
+    """Bar plot of standard-band levels (dB). Consumes a banded
+    :class:`~uacpy.acoustic_signal.SpectralEstimate` — one computed with a
+    ``band_type`` — or the same numbers as ``(values, bands)`` arrays.
+
+    The unit comes from the estimate's ``scaling``: an exposure is per band
+    and per second of record (Pa²·s), a spectrum per band (Pa²) and a density
+    per hertz of the band's own width (Pa²/Hz). A bar chart labelled "·s" over
+    band power would misstate the quantity by the record length."""
+    scaling = getattr(sel_pa2s, 'scaling', 'exposure')
+    if hasattr(sel_pa2s, 'power') and hasattr(sel_pa2s, 'bands'):
+        if sel_pa2s.bands is None:
+            raise ConfigurationError(
+                f"plot_sel: this estimate was asked for no band_type, so its "
+                f"values sit on {sel_pa2s.method!r} bins and there are no "
+                f"band edges to draw bars between.",
+                remediation="Use plot_psd(result), or result.plot(), which "
+                            "picks the plotter from the estimate itself; or "
+                            "compute it with sound_exposure(), whose values "
+                            "sit on bands.")
+        # The ladder decides the frequency axis: every standard ladder is
+        # geometric and reads on a log axis, while 'linear' does not.
+        band_type = getattr(sel_pa2s, 'band_type', None) or band_type
+        sel_pa2s, bands = sel_pa2s.power, sel_pa2s.bands
+    elif bands is None:
+        raise ConfigurationError(
+            "plot_sel: pass a banded estimate, or values and the bands "
+            "they sit on.",
+            remediation="plot_sel(sound_exposure(x, fs)), or "
+                        "plot_sel(values, bands).")
     fig, ax = fig_ax(ax, figsize)
-    # ``sel`` returns bands as (low, centre, high) triples; the contiguous edge
-    # vector is every low edge plus the top edge of the last band.
+    # Bands are (low, centre, high) triples; the contiguous edge vector is
+    # every low edge plus the top edge of the last band.
     Fedges = [low for low, _, _ in bands] + [bands[-1][2]]
     width = [Fedges[i + 1] - Fedges[i] for i in range(len(Fedges) - 1)]
     sel_dB = power_to_dB(np.asarray(sel_pa2s), ref)
     ax.bar(Fedges[:-1], sel_dB, width=width,
            align="edge", edgecolor="black", **mpl_kw)
-    ax.set_title(_title_or(title, f"SEL ({duration}s)"), loc="left")
-    ax.set_ylabel(f"Level (dB re {_ref_label(ref)}Pa²·s)")
+    unit = _SCALING_UNIT[scaling]
+    default = {"exposure": "SEL", "spectrum": "Band power",
+               "density": "Band density"}[scaling]
+    # ``duration`` is the caller's own note about the record; without it the
+    # title states the quantity alone rather than "(Nones)".
+    ax.set_title(_title_or(title, f"{default} ({duration}s)"
+                           if duration is not None else default), loc="left")
+    ax.set_ylabel(f"Level (dB re {_ref_label(ref)}{unit})")
     if band_type != "linear":
         ax.set_xscale("log")
     ax.set_xlabel(f"Frequency ({band_type}) (Hz)")
@@ -457,7 +571,7 @@ def plot_constant_q_spectrogram(frequencies, times, power, ax=None, *,
     :func:`constant_q_spectrogram` output ``(frequencies, times, power)``. Pass
     the same ``scaling`` used there so the unit reads ``Pa²`` (band power) or
     ``Pa²/Hz`` (density)."""
-    unit = f"{_ref_label(ref)}Pa²" + ("/Hz" if scaling == "density" else "")
+    unit = f"{_ref_label(ref)}{_SCALING_UNIT[scaling]}"
     power_dB = _require_image_grid(power_to_dB(np.asarray(power), ref),
                                    len(frequencies), len(times),
                                    'plot_constant_q_spectrogram',
@@ -484,10 +598,10 @@ def plot_constant_q_psd(frequencies, power, ax=None, *,
                         label=None, ymin=0, ymax=150, title=None,
                         figsize=(10, 6), **mpl_kw):
     """Line plot of constant-Q power (dB, log frequency). Consumes
-    :func:`constant_q_psd` output ``(frequencies, power)``. Pass the same
+    :func:`uacpy.acoustic_signal.constant_q` output ``(frequencies, power)``. Pass the same
     ``scaling`` used there: ``'spectrum'`` labels band power (``Pa²``),
     ``'density'`` labels PSD (``Pa²/Hz``)."""
-    unit = f"{_ref_label(ref)}Pa²" + ("/Hz" if scaling == "density" else "")
+    unit = f"{_ref_label(ref)}{_SCALING_UNIT[scaling]}"
     power_dB = power_to_dB(np.asarray(power), ref)
     fig, ax = fig_ax(ax, figsize)
     ax.semilogx(frequencies, power_dB, label=label, **mpl_kw)
@@ -508,21 +622,26 @@ def plot_constant_q_psd(frequencies, power, ax=None, *,
 def plot_constant_q_ppsd(result, ax=None, *, scaling="spectrum", ymin=0,
                          ymax=200, vmin=0, vmax=None, cmap="jet", title=None,
                          figsize=(10, 6), show_colorbar=True, **mpl_kw):
-    """2-D histogram of constant-Q power levels. Consumes a ``CQPPSDResult``.
+    """2-D histogram of constant-Q power levels. Consumes a
+    :class:`~uacpy.acoustic_signal.ProbabilisticSpectralEstimate` computed
+    with ``method='constant_q'``.
+
     The dB reference is fixed at compute time by
-    :func:`probabilistic_constant_q` (default 1 µPa) and read off the result,
-    so the level axis names whatever reference was used; pass the same
-    ``scaling`` used there so it reads band power or a density."""
-    # From the result, not assumed: a hardcoded "µPa²" was 120 dB out for a
+    :func:`uacpy.acoustic_signal.probabilistic_welch` (default
+    1 µPa) and read off the result, so the level axis names whatever reference
+    was used; ``scaling`` is read off it too, and the keyword stands in only
+    for a hand-built result that carries none."""
+    # From the result, not assumed: a hardcoded "µPa²" would be 120 dB out for a
     # caller who computed against a Pascal reference.
     ref = getattr(result, 'ref', REFERENCE_PRESSURE_WATER)
     # The result carries the scaling it was computed with; the keyword
     # stays as an override for a hand-built result that has none.
     scaling = getattr(result, 'scaling', None) or scaling
-    unit = f"{_ref_label(ref)}Pa²" + ("/Hz" if scaling == "density" else "")
+    unit = f"{_ref_label(ref)}{_SCALING_UNIT[scaling]}"
     return _plot_level_histogram(
         result, ax, y_label=f"Level (dB re {unit})",
-        default_title="Constant-Q PPSD", caller="plot_constant_q_ppsd",
+        default_title=f"Constant-Q {_histogram_title(result)}",
+        caller="plot_constant_q_ppsd",
         ymin=ymin, ymax=ymax, vmin=vmin, vmax=vmax, cmap=cmap, title=title,
         figsize=figsize, show_colorbar=show_colorbar, **mpl_kw)
 

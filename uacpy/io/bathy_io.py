@@ -17,7 +17,7 @@ BELLHOP3D boundary grid (``bdry3DMod.f90:216-330``). No uacpy model runs
 ``bellhop3d`` yet — Bellhop's RunType position 6 is hardwired to the 2-D
 blank and ``Bellhop(dimensionality='3D')`` raises — so nothing in the 2-D public API
 calls them. They are the foundation a future 3-D implementer builds on, and
-``uacpy/tests/test_io_restored_capabilities.py`` pins them against a
+``uacpy/tests/test_io_public_names_without_callers.py`` pins them against a
 dead-code sweep proposing their removal a second time.
 """
 
@@ -32,7 +32,7 @@ from uacpy.core.exceptions import (
 )
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core.units import km_to_m, m_to_km
-from uacpy.io.utils import _collapsed_pair_index
+from uacpy.io.input_checks import _collapsed_pair_index
 from uacpy.io._fortran_helpers import (
     list_directed_int, read_list_directed_values, read_vector,
     strip_fortran_quotes, typed_format_error,

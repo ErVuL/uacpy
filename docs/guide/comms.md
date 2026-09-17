@@ -1,6 +1,6 @@
 # Communications — digital modems for the underwater channel
 
-> `uacpy.comms` · 86 public names · modulation, coding, equalisation,
+> `uacpy.comms` · 75 public names · modulation, coding, equalisation,
 > synchronisation, OFDM, DSSS, Doppler, and the NATO JANUS standard
 
 `uacpy.comms` is a digital-communications toolbox built for the one channel
@@ -53,6 +53,19 @@ bits ◀── decoding ◀── demodulation ◀── equalisation ◀── 
                                                           ▲               │
                                                       synchronisation ◀───┘
 ```
+
+Four sub-modules carry it, split by where a stage sits in that chain:
+
+| Sub-module | The question it answers | What it holds |
+|---|---|---|
+| `modulate` | what goes on the wire | symbol mapping (PSK/QAM/DPSK/FSK), payload framing, OFDM symbol construction, convolutional coding and interleaving, DSSS spreading |
+| `link` | what the wire does to it | channel models (AWGN, multipath, fading), pulse shaping and the passband conversion, the `Transmitter`/`CommsReceiver` pair, and the end-to-end `simulate_link`/`ber_sweep` harness |
+| `receive` | what do I get back out | synchronisation, Doppler estimation and compensation, channel estimation, equalisation (`DFE`, LMS, RLS, MMSE), and the link-quality metrics |
+| `janus` | the standard beacon | NATO STANAG 4748 encode/decode, FH-BFSK modulation, detection, and the one-call transmit/receive pair |
+
+You will not type those names: every public name is re-exported from
+`uacpy.comms`, so it is `uacpy.comms.simulate_link`, never
+`...link.simulate_link`. The boundaries are for whoever maintains the package.
 
 Every stage is a function you can call on its own, and the whole chain is also
 available as one call:
@@ -151,7 +164,7 @@ track carrier phase, which on a bad day underwater is the whole game.
 
 ## 5. Pulse shaping and the passband
 
-Symbols are not a waveform. `uacpy.comms.phy` bridges the symbol domain and
+Symbols are not a waveform. `uacpy.comms.link` bridges the symbol domain and
 the real samples a transducer emits:
 
 ```
@@ -721,8 +734,8 @@ despread, the same chip SNR gives a BER on the theoretical curve evaluated
 `14.9 dB` higher — the processing gain, recovered exactly. The same
 correlation gain is what rejects a narrowband interferer.
 
-The module is `uacpy.comms.dsss`; the spreading function is `comms.spread`.
-`uacpy.acoustic_signal.sequences.mseq` is the sibling generator keyed by
+The module is `uacpy.comms.modulate`; the spreading function is `comms.spread`.
+`uacpy.acoustic_signal.generate.mseq` is the sibling generator keyed by
 preset polynomials rather than explicit taps, with the same chip polarity
 (bit 0 → +1, bit 1 → −1) — see [signal processing](signal.md).
 
@@ -730,7 +743,7 @@ preset polynomials rather than explicit taps, with the same chip polarity
 
 ## 16. Framing
 
-Bits are not a message. `uacpy.comms.framing` is the data-plane glue:
+Bits are not a message. `uacpy.comms.modulate` is the data-plane glue:
 
 | Call | Purpose |
 |---|---|

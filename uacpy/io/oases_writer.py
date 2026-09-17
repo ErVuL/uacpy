@@ -29,7 +29,7 @@ from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
 from uacpy.core.exceptions import ConfigurationError, UnsupportedFeatureError
 from uacpy.core._warn_frames import USER_FRAME_SKIP
-from uacpy.io.utils import (
+from uacpy.io.input_checks import (
     _collapsed_pair_index,
     equally_spaced,
     # Shared with the Bellhop and multi-profile writers; the module-private

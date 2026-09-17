@@ -55,6 +55,7 @@ _EXPECTED_PACKAGES = [
     "uacpy.acoustic_signal",
     "uacpy.comms",
     "uacpy.core",
+    "uacpy.core.acoustics",
     "uacpy.core.results",
     "uacpy.data",
     "uacpy.io",
@@ -2616,6 +2617,106 @@ def test_the_shared_download_helper_fails_fast_on_a_refused_connection():
 _EVENT_NAMED_TEST_FILE = re.compile(r"audit|20\d{6}|round\d|batch",
                                     re.IGNORECASE)
 
+#: Words that name a *kind* of code rather than a subject. A file called
+#: ``utils`` or ``helpers`` tells a reader nothing about what breaks when it
+#: goes red, and it attracts whatever has no home — ``io/utils.py`` had
+#: collected a grid check, a keyword guard and a table index by the time it
+#: was renamed. The scope is deliberately the names a reader searches:
+#: public modules and test files. A private module (leading underscore) is
+#: internal wiring named for its callers, and ``_common``/``_fortran_helpers``
+#: are read through the imports that reach them, not found by name.
+_CONTENT_FREE_NAME_WORDS = frozenset({
+    'util', 'utils', 'utilities', 'helper', 'helpers', 'misc', 'functions',
+    'stuff', 'things', 'various', 'comprehensive', 'extra', 'common',
+})
+
+
+def _content_free_words(stem: str):
+    """The content-free words ``stem`` carries, as whole underscore words.
+
+    Whole words, not substrings: ``uncommon`` carries ``common`` and
+    ``extrapolation`` carries ``extra`` as substrings, and a substring sweep
+    would flag both and teach the next reader to widen an exemption list
+    instead of fix a name.
+    """
+    return sorted(set(stem.split('_')) & _CONTENT_FREE_NAME_WORDS)
+
+
+def _searchable_module_names():
+    """``(relative path, stem)`` for every name a reader searches by: the
+    test files, and the public (non-underscore) modules under ``uacpy/``."""
+    package = _REPO_ROOT / "uacpy"
+    out = []
+    for path in sorted(package.rglob("*.py")):
+        rel = path.relative_to(_REPO_ROOT)
+        if "third_party" in rel.parts or "examples" in rel.parts:
+            continue
+        stem = path.stem
+        if stem == "__init__":
+            continue
+        is_test = "tests" in rel.parts and stem.startswith("test_")
+        if is_test or not stem.startswith("_"):
+            out.append((str(rel), stem))
+    return out
+
+
+@pytest.mark.convention
+def test_no_searchable_name_says_a_kind_of_code_instead_of_a_subject():
+    """A public module or test file is named for what it holds, never
+    ``utils`` / ``helpers`` / ``functions`` / ``comprehensive``.
+
+    Six files carried one of these words and every one of them was a
+    different subject underneath: ``io/utils.py`` was the checks a writer
+    makes on its input, ``test_io_functions.py`` was readers, writers and the
+    decks the Fortran reads, ``test_acoustics_helpers.py`` was published
+    check values, ``test_oases_comprehensive.py`` was the four OASES variants.
+    The name is what a reader searches and what a new test is filed under, so
+    a content-free one collects whatever has no home — which is how a
+    "utilities" module ends up holding a grid check, a keyword guard and a
+    table index at once.
+
+    The sibling ``_content_free_words`` matches whole underscore words, and
+    :func:`test_the_kind_matcher_reads_whole_words_not_substrings` owns that
+    claim.
+    """
+    offenders = [f"{path} — {', '.join(hit)}"
+                 for path, stem in _searchable_module_names()
+                 if (hit := _content_free_words(stem))]
+    assert not offenders, (
+        f"{len(offenders)} name(s) say a kind of code rather than the subject "
+        f"they hold:\n" + "\n".join(offenders))
+
+
+@pytest.mark.parametrize('stem,expected', [
+    # the substring traps: a naive ``'common' in stem`` flags both of these
+    ('test_uncommon_grid_spacings', []),
+    ('test_extrapolation_beyond_the_fit', []),
+    # and the shapes the gate exists for
+    ('test_io_functions', ['functions']),
+    ('utils', ['utils']),
+    ('test_acoustics_helpers', ['helpers']),
+    ('test_oases_comprehensive', ['comprehensive']),
+    # a private module is out of scope, so its name is never even offered
+    ('test_io_readers_and_decks', []),
+])
+def test_the_kind_matcher_reads_whole_words_not_substrings(stem, expected):
+    assert _content_free_words(stem) == expected
+
+
+@pytest.mark.convention
+def test_the_kind_sweep_reaches_both_test_files_and_public_modules():
+    """The gate above passes trivially if its sweep reaches nothing, and a
+    filter written for ``rglob`` is exactly the kind that can stop matching
+    without anyone noticing — so this pins what the sweep sees: a test file,
+    a nested public module, and no private one.
+    """
+    seen = dict(_searchable_module_names())
+    assert seen.get("uacpy/tests/test_packaging.py") == "test_packaging"
+    assert seen.get("uacpy/io/input_checks.py") == "input_checks"
+    assert seen.get("uacpy/core/acoustics/seawater.py") == "seawater"
+    assert "uacpy/visualization/plots/_common.py" not in seen
+    assert len(seen) > 200, len(seen)
+
 
 @pytest.mark.convention
 def test_no_test_file_is_named_after_the_work_session_that_produced_it():
@@ -2646,7 +2747,7 @@ def test_no_test_file_is_named_after_the_work_session_that_produced_it():
 #: numpy-union inference friction rather than wrong annotations. What the
 #: contract actually promises is measured by the gates on the public
 #: surface — the lazy-import static mirror (test_lazy_imports.py) and the
-#: carrier field annotations (test_core_classes.py) — not by a total.
+#: carrier field annotations (test_core_carriers_and_results.py) — not by a total.
 _TYPE_CLEAN_SUBPACKAGES = (
     "uacpy/noise",
     "uacpy/parallel.py",

@@ -51,13 +51,13 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from uacpy.comms.coding import conv_encode, viterbi_decode
+from uacpy.comms.modulate import conv_encode, viterbi_decode
 from numpy.lib.stride_tricks import sliding_window_view
 
 from uacpy.core.constants import DEFAULT_SOUND_SPEED
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core._warn_frames import USER_FRAME_SKIP
-from uacpy.comms.modulation import _require_binary_bits
+from uacpy.comms.modulate import _require_binary_bits
 
 JANUS_VERSION = 3
 

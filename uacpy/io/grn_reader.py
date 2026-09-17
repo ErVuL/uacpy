@@ -751,7 +751,7 @@ def sparc_snapshot_to_field(
         # Hann window is ~0). uacpy generated the pulse, so s(t) is known.
         # Imported here rather than at module level: sparc_pulse pulls scipy
         # in, and only this deconvolution path needs it.
-        from uacpy.acoustic_signal.waveforms import sparc_pulse
+        from uacpy.acoustic_signal.generate import sparc_pulse
         s_t, _ = sparc_pulse(tout, 2.0 * np.pi * frequency, pulse_type[0])
         S_at_f0 = np.fft.fft(s_t)[f_idx]
         if S_at_f0 == 0:

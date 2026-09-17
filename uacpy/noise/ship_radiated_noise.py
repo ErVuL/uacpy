@@ -5,7 +5,7 @@ Noise Level (RNL) and the equivalent Monopole Source Level (MSL), per
 ISO 17208-1/-2. The MSL removes the sea-surface (Lloyd's mirror) interference
 assuming a pressure-release surface, giving the omni-directional point-source
 description that long-range propagation models consume. Levels are reported in
-decidecade bands (see :mod:`uacpy.acoustic_signal.bands`).
+decidecade bands (see :mod:`uacpy.acoustic_signal.estimate`).
 
 Standards
 ---------

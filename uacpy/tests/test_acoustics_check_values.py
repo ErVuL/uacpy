@@ -1,0 +1,642 @@
+"""Published check values for :mod:`uacpy.core.acoustics`.
+
+Every formula in the package is anchored to a number someone else published:
+the ``seawater`` sound-speed equations and density, the ``bubbles``
+calculators, and ``levels``' volts-to-pascals-to-dB chain. All analytic, no
+binary.
+
+Sources per pin: Mackenzie (1981) validity ranges; Fofonoff EOS-80
+one-atmosphere check values; Medwin & Clay eq. (8.2.13) (the Minnaert
+breathing frequency); APL-UW TR 9407 eqs. 28a/28b; the worked numbers in
+docs/guide/environment.md §5.
+"""
+
+import warnings
+
+import numpy as np
+import pytest
+
+from uacpy.core.exceptions import ConfigurationError
+
+from uacpy.core.acoustics import (
+    bubble_resonance,
+    pressure,
+    spl,
+    bubble_soundspeed,
+    bubble_surface_loss,
+    density,
+    power_to_dB,
+    soundspeed,
+    soundspeed_delgrosso,
+    soundspeed_teos10,
+    soundspeed_unesco,
+)
+from uacpy.core.constants import PRESSURE_FLOOR, REFERENCE_PRESSURE_WATER
+
+
+class TestMackenzieValidityWarnings:
+    """``soundspeed`` warns (core/acoustics/seawater.py) whenever an input leaves
+    Mackenzie's validated ranges — T ∈ [-2, 30] °C, S ∈ [25, 40] PSU,
+    D ∈ [0, 8000] m — and stays silent inside them."""
+
+    @pytest.mark.parametrize('kwargs', [
+        dict(temperature=35.0),          # T > 30
+        dict(temperature=-5.0),          # T < -2
+        dict(salinity=10.0),             # S < 25
+        dict(salinity=45.0),             # S > 40
+        dict(depth=9000.0),              # D > 8000
+        dict(depth=-1.0),                # D < 0
+    ])
+    def test_out_of_range_input_warns_of_extrapolation(self, kwargs):
+        with pytest.warns(UserWarning, match='outside validated range'):
+            soundspeed(**kwargs)
+
+    def test_in_range_defaults_are_silent(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', UserWarning)
+            c = soundspeed()                     # T=27, S=35, D=10
+        # The default-point value the environment.md bubble example quotes.
+        assert c == pytest.approx(1539.087, abs=1e-3)
+
+
+class TestUnescoValidityWarnings:
+    """``soundspeed_unesco`` announces extrapolation the way ``soundspeed``
+    does. Its pressure argument is **decibars** while Chen & Millero state the
+    range in bar, so the bound is 10 000 dbar and not 1000: a 5000 m cast is
+    comfortably inside it. The cold end warns below −3 °C rather than the
+    fit's 0 °C, because seawater is liquid down to about −3 °C under pressure
+    and polar deep water lives there."""
+
+    def test_a_deep_cast_in_decibars_is_silent(self):
+        # 9000 dbar ≈ 9 km of water — inside 1000 bar, and the value the
+        # 10x trap would have flagged.
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', UserWarning)
+            c = soundspeed_unesco(2.0, 34.7, 9000.0)
+        assert 1500.0 < c < 1700.0
+
+    def test_pressure_past_the_range_warns_and_names_the_unit(self):
+        with pytest.warns(UserWarning, match='DECIBARS'):
+            soundspeed_unesco(15.0, 35.0, 10001.0)
+
+    @pytest.mark.parametrize('kwargs', [
+        dict(temperature=41.0),          # T > 40
+        dict(temperature=-3.5),          # T below the freezing point
+        dict(salinity=41.0),             # S > 40
+        dict(pressure=-1.0),             # P < 0
+    ])
+    def test_out_of_range_input_warns_of_extrapolation(self, kwargs):
+        with pytest.warns(UserWarning, match='outside validated range'):
+            soundspeed_unesco(**kwargs)
+
+    def test_negative_salinity_is_reported_as_undefined_and_returns_nan(self):
+        """Eqn 36's ``B(T,P)·S^1.5`` has no real value below S = 0, so the
+        function cannot extrapolate there — it returns NaN. Saying
+        "extrapolation" would describe a number the caller never gets, and
+        numpy's own "invalid value encountered in power" is suppressed so the
+        one diagnostic that names the cause is the one that reaches them."""
+        with pytest.warns(UserWarning, match='undefined, not extrapolated'):
+            value = soundspeed_unesco(salinity=-1.0)
+        assert np.isnan(value)
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            soundspeed_unesco(salinity=-1.0)
+        assert not [w for w in caught if w.category is RuntimeWarning], (
+            [str(w.message) for w in caught])
+
+    def test_polar_deep_water_is_silent(self):
+        """The relaxed cold bound exists for this case, and uacpy's own deep
+        extrapolation evaluates the formula at exactly −3 °C."""
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', UserWarning)
+            assert soundspeed_unesco(-3.0, 34.7, 0.0) == pytest.approx(
+                1434.45, abs=0.01)
+
+    def test_in_range_defaults_are_silent(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', UserWarning)
+            assert soundspeed_unesco() == pytest.approx(1507.0, abs=1.0)
+
+
+class TestSeawaterDensityEOS80CheckValues:
+    """``density`` is the EOS-80 one-atmosphere equation; the canonical
+    UNESCO check values pin every coefficient group (pure water, S, S^1.5,
+    S² terms)."""
+
+    def test_standard_seawater_check_values(self):
+        # UNESCO (1983) / Millero & Poisson one-atmosphere check values.
+        assert density(25.0, 35.0) == pytest.approx(1023.343, abs=1e-3)
+        assert density(0.0, 35.0) == pytest.approx(1028.106, abs=1e-3)
+        # Pure-water limit (S = 0) at 5 °C.
+        assert density(5.0, 0.0) == pytest.approx(999.96675, abs=1e-4)
+
+
+class TestBubbleResonance:
+    """``bubble_resonance`` is Medwin & Clay eq. (8.2.13) — the Minnaert
+    breathing frequency f = (1/2πa)·√(3γp_A/ρ_A)."""
+
+    def test_one_millimetre_surface_bubble(self):
+        # (1/2π·1e-3)·√(3·1.4·1.013e5/1022.476) = 3246.6 Hz — the classic
+        # ~3.25 kHz·mm product (fresh-water ρ=1000 gives 3283).
+        assert bubble_resonance(1e-3) == pytest.approx(3246.56, abs=0.01)
+
+    def test_frequency_scales_inversely_with_radius(self):
+        assert bubble_resonance(1e-4) == pytest.approx(
+            10.0 * bubble_resonance(1e-3), rel=1e-12)
+
+    def test_depth_raises_frequency_as_sqrt_ambient_pressure(self):
+        # p_A = p0 + ρ g z, so f(z)/f(0) = √(p_A(z)/p0): 1.4106 at 10 m.
+        rho, g = 1022.476, 9.80665
+        expected = np.sqrt((1.013e5 + rho * g * 10.0) / 1.013e5)
+        assert (bubble_resonance(1e-3, depth=10.0) / bubble_resonance(1e-3)
+                == pytest.approx(expected, rel=1e-12))
+
+
+class TestBubbleSoundspeed:
+    def test_documented_void_fraction_drop(self):
+        """environment.md §5: a void fraction of only 1e-6 drops
+        ``bubble_soundspeed`` by 15.5 m/s (1539.1 → 1523.6) at its default
+        reference — Wood's equation is that sensitive to entrained gas."""
+        c0 = soundspeed()
+        c_bubbly = bubble_soundspeed(1e-6)
+        assert c_bubbly == pytest.approx(1523.557, abs=1e-3)
+        assert c0 - c_bubbly == pytest.approx(15.53, abs=0.01)
+
+    def test_zero_void_fraction_recovers_the_water_speed(self):
+        assert bubble_soundspeed(0.0) == pytest.approx(soundspeed(),
+                                                       rel=1e-12)
+
+
+class TestBubbleSurfaceLoss:
+    """``bubble_surface_loss`` is APL-UW TR 9407 eqs. 28a/28b:
+    SBL = 1.26e-3/sinβ · U^1.57 · f_kHz^0.85 for U ≥ 6 m/s, continued
+    exponentially below the 6 m/s breaking-wave threshold. Returns an
+    amplitude multiplier in (0, 1], angle in radians."""
+
+    def test_reference_value_at_10ms_20khz_normal_incidence(self):
+        # a = 1.26e-3·10^1.57·20^0.85 = 0.598 dB → multiplier 0.9335.
+        assert bubble_surface_loss(10.0, 20000.0, 0.0) == pytest.approx(
+            0.93354, abs=1e-4)
+
+    def test_multiplier_bounded_and_monotonic_in_wind(self):
+        m3 = bubble_surface_loss(3.0, 20000.0, 0.0)
+        m10 = bubble_surface_loss(10.0, 20000.0, 0.0)
+        assert 0.0 < m10 < m3 <= 1.0
+
+    def test_continuous_across_the_6ms_breaking_wave_threshold(self):
+        below = bubble_surface_loss(5.999, 20000.0, 0.0)
+        at = bubble_surface_loss(6.0, 20000.0, 0.0)
+        assert below == pytest.approx(at, abs=1e-4)
+
+    def test_angle_enters_as_one_over_sin_of_the_grazing_angle(self):
+        # angle is incidence in radians; β = π/2 − angle, and the dB loss
+        # scales exactly as 1/sin β = 1/cos(angle).
+        db0 = -20.0 * np.log10(bubble_surface_loss(10.0, 20000.0, 0.0))
+        db1 = -20.0 * np.log10(bubble_surface_loss(10.0, 20000.0, 1.0))
+        assert db1 / db0 == pytest.approx(1.0 / np.cos(1.0), rel=1e-9)
+
+
+class TestPowerToDb:
+    """``power_to_dB`` floors ``power`` at :data:`PRESSURE_FLOOR` before the
+    log, so a silent sample yields a finite very negative level, never
+    ``-inf`` (DOCUMENTATION.md §14)."""
+
+    def test_zero_power_is_finite_at_the_floor_level(self):
+        out = power_to_dB(0.0)
+        assert np.isfinite(out)
+        assert out == pytest.approx(
+            10.0 * np.log10(PRESSURE_FLOOR / REFERENCE_PRESSURE_WATER ** 2))
+        assert out == pytest.approx(-180.0)      # 1e-30 / (1e-6)² = 1e-18
+
+    def test_reference_power_reads_zero_dB(self):
+        assert power_to_dB(REFERENCE_PRESSURE_WATER ** 2) == pytest.approx(0.0)
+
+    def test_custom_floor_is_honoured(self):
+        assert power_to_dB(0.0, floor=1e-12) == pytest.approx(
+            10.0 * np.log10(1e-12 / REFERENCE_PRESSURE_WATER ** 2))
+
+
+class TestDelGrossoValidityWarnings:
+    """``soundspeed_delgrosso`` announces extrapolation the way its two
+    siblings do.
+
+    It shipped with no domain guard at all while :func:`soundspeed` and
+    :func:`soundspeed_unesco` both had one, so the function its own docstring
+    recommends "at high pressure / in deep water" was the one that said
+    nothing when handed 50 °C, S = -5 or a pressure ten times its fit.
+
+    The domain is the paper's own: Del Grosso (1974) states "The temperatures
+    considered range from 0 to 35 C ... salinity ranges from 29 to 43 ppt ...
+    Pressure ranges from 0 to 1000 kg/cm2 gauge", and Etter's Table 2.1
+    tabulates the same triple.
+    """
+
+    @pytest.mark.parametrize('kwargs', [
+        dict(temperature=-3.5),          # T below the coldest seawater
+        dict(temperature=35.5),          # T > 35
+        dict(salinity=28.0),             # S < 29 — brackish, outside the fit
+        dict(salinity=44.0),             # S > 43
+        dict(pressure=-1.0),             # P < 0
+        dict(pressure=9900.0),           # P > 1000 kg/cm2 == 9806.65 dbar
+    ])
+    def test_out_of_range_input_warns_of_extrapolation(self, kwargs):
+        with pytest.warns(UserWarning, match='outside validated range'):
+            soundspeed_delgrosso(**kwargs)
+
+    def test_a_deep_open_ocean_cast_is_silent(self):
+        """The bounds are in the argument's decibars, not the paper's kg/cm2.
+        Getting that conversion backwards would warn on every cast past 102 m,
+        which is the mistake the UNESCO docstring calls out for its own bar /
+        decibar pair."""
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', UserWarning)
+            c = soundspeed_delgrosso(2.0, 34.7, 5000.0)
+        assert 1500.0 < c < 1600.0
+
+    def test_the_pressure_message_names_the_unit(self):
+        with pytest.warns(UserWarning, match='DECIBARS'):
+            soundspeed_delgrosso(15.0, 35.0, 9900.0)
+
+    def test_the_salinity_message_points_at_the_equation_that_covers_fresher(self):
+        """29 ppt is a floor, not a formality: below it the caller needs a
+        different equation, and the message says which."""
+        with pytest.warns(UserWarning, match='soundspeed_unesco'):
+            soundspeed_delgrosso(salinity=5.0)
+
+    def test_in_range_defaults_are_silent(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', UserWarning)
+            assert soundspeed_delgrosso() == pytest.approx(1506.67, abs=0.01)
+
+    def test_polar_deep_water_is_silent(self):
+        """The cold end is relaxed to −3 °C for the same reason UNESCO's is:
+        a literal 0 °C floor fires on every polar and deep cast, and the
+        extrapolation across that gap is smooth, monotone, and within Del
+        Grosso's own 0.05 m/s standard deviation of UNESCO at −3 °C."""
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', UserWarning)
+            assert soundspeed_delgrosso(-3.0, 34.7, 0.0) == pytest.approx(
+                1434.51, abs=0.01)
+
+
+class TestBubbleSurfaceLossAcceptsSequences:
+    """``frequency`` and ``angle`` are documented array_like, so a plain
+    list must produce the same multipliers as the equivalent ndarray."""
+
+    def test_list_and_ndarray_inputs_agree(self):
+        freqs = [10000.0, 20000.0]
+        angles = [0.0, 0.3]
+        from_lists = bubble_surface_loss(8.0, freqs, angles)
+        from_arrays = bubble_surface_loss(
+            8.0, np.asarray(freqs), np.asarray(angles))
+        np.testing.assert_allclose(from_lists, from_arrays)
+
+    def test_list_inputs_take_the_low_wind_branch_too(self):
+        got = bubble_surface_loss(3.0, [10000.0], [0.2])
+        want = bubble_surface_loss(3.0, np.array([10000.0]), np.array([0.2]))
+        np.testing.assert_allclose(got, want)
+
+
+class TestSplFloorsSilentSignal:
+    """``spl`` floors the rms pressure at ``sqrt(PRESSURE_FLOOR)`` before the
+    log, so an all-zero signal returns a finite level and no runtime warning.
+
+    Both this and ``power_to_dB`` work in pascals against the same default
+    reference, so the level they give a silent signal is the same number
+    without either being told a reference — which is the point of the module
+    speaking one unit.
+    """
+
+    def test_all_zero_signal_returns_the_pressure_floor_level(self):
+        assert spl(np.zeros(64)) == pytest.approx(
+            20.0 * np.log10(np.sqrt(PRESSURE_FLOOR)
+                            / REFERENCE_PRESSURE_WATER))
+
+    def test_zero_signal_level_matches_power_to_dB_of_zero_power(self):
+        assert spl(np.zeros(64)) == pytest.approx(float(power_to_dB(0.0)))
+
+    def test_zero_signal_emits_no_runtime_warning(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            spl(np.zeros(64))
+
+    def test_nonzero_signal_level_is_the_plain_rms_level(self):
+        # 100 µPa rms, written in the pascals this module reads.
+        assert spl(np.full(10, 100e-6)) == pytest.approx(40.0)
+
+
+class TestPressureCalibratesVoltsToPascals:
+    """``pressure`` is where a recording's own unit enters the package: it
+    divides the signal by the hydrophone sensitivity, which data sheets quote
+    in dB re 1 V/µPa, and returns **pascals** — the unit every level default
+    downstream reads.
+
+    Returning µPa instead reads 120 dB high through ``spl``, ``power_to_dB``
+    and every plotter, with nothing in the numbers saying so. Nothing in the
+    standing suite runs a ``core.acoustics`` doctest (only ``io`` writers get
+    theirs executed, in ``test_documentation``), so the unit is pinned here.
+    """
+
+    #: A mid-range hydrophone data sheet: SH in dB re 1 V/µPa, preamp gain dB.
+    SENSITIVITY, GAIN = -165.0, 20.0
+
+    def _micropascals_per_volt(self):
+        return 1.0 / (10.0 ** (self.SENSITIVITY / 20.0)
+                      * 10.0 ** (self.GAIN / 20.0))
+
+    def test_unity_scale_factors_return_the_voltage_in_pascals(self):
+        got = pressure(np.array([0.0, 0.5, -0.5]), sensitivity=0, gain=0)
+        np.testing.assert_allclose(got, [0.0, 0.5e-6, -0.5e-6])
+
+    def test_a_data_sheet_sensitivity_lands_in_pascals(self):
+        got = pressure(np.array([1e-3]), sensitivity=self.SENSITIVITY,
+                       gain=self.GAIN)
+        assert float(got[0]) == pytest.approx(
+            1e-6 * 1e-3 * self._micropascals_per_volt(), rel=1e-12)
+        assert float(got[0]) == pytest.approx(1.77828e-2, rel=1e-5)
+
+    def test_adc_counts_take_the_same_pascal_scale_as_volts(self):
+        # Half of full scale on a signed 16-bit sample against a 1 V
+        # reference is 0.5 V, and the level it reaches is stated in pascals
+        # rather than only against the volt call, which would hold whatever
+        # unit the function returned.
+        counts = pressure(np.array([16384]), sensitivity=self.SENSITIVITY,
+                          gain=self.GAIN, volt_params=(16, 1.0))
+        volts = pressure(np.array([0.5]), sensitivity=self.SENSITIVITY,
+                         gain=self.GAIN)
+        np.testing.assert_allclose(counts, volts)
+        assert float(counts[0]) == pytest.approx(
+            1e-6 * 0.5 * self._micropascals_per_volt(), rel=1e-12)
+
+    def test_the_chain_to_spl_needs_no_reference_argument(self):
+        # dB re 1 µPa is 20*log10 of the µPa count, so the expected level
+        # carries no pascal factor: a return in µPa would read 120 dB high.
+        volts = np.full(256, 1e-3)
+        level = spl(pressure(volts, sensitivity=self.SENSITIVITY,
+                             gain=self.GAIN))
+        assert level == pytest.approx(
+            20.0 * np.log10(1e-3 * self._micropascals_per_volt()), rel=1e-12)
+
+
+class TestBubbleSurfaceLossValidatesItsInputs:
+    """APL-UW TR 9407 eqs. 28a/28b are written for a non-negative wind speed,
+    a positive frequency and an incidence angle inside a quarter turn of the
+    surface normal. Outside that the arithmetic answered anyway: a negative
+    wind speed took the ``U < 6 m/s`` branch and reported a multiplier of
+    ~1.0 (no loss), a negative frequency raised a negative base to 0.85 and
+    returned a *complex* multiplier, and an angle past ``π/2`` flipped
+    ``sin(β)`` negative and returned a multiplier above 1 — a surface that
+    amplifies."""
+
+    @pytest.mark.parametrize('windspeed', [-5.0, -1e-9, float('nan'),
+                                           float('inf')])
+    def test_a_negative_or_non_finite_windspeed_is_refused(self, windspeed):
+        with pytest.raises(ConfigurationError, match='windspeed'):
+            bubble_surface_loss(windspeed, 20000.0, 0.0)
+
+    @pytest.mark.parametrize('frequency', [0.0, -1.0, float('nan'),
+                                           float('inf')])
+    def test_a_non_positive_frequency_is_refused(self, frequency):
+        with pytest.raises(ConfigurationError, match='frequency'):
+            bubble_surface_loss(10.0, frequency, 0.0)
+
+    def test_one_bad_entry_in_a_frequency_array_is_enough(self):
+        with pytest.raises(ConfigurationError, match='frequency'):
+            bubble_surface_loss(10.0, np.array([20000.0, -1.0]), 0.0)
+
+    @pytest.mark.parametrize('angle', [1.6, -1.6, np.pi, float('nan')])
+    def test_an_angle_outside_a_quarter_turn_is_refused(self, angle):
+        with pytest.raises(ConfigurationError, match='angle'):
+            bubble_surface_loss(10.0, 20000.0, angle)
+
+    def test_the_angle_message_says_it_is_from_the_normal(self):
+        with pytest.raises(ConfigurationError, match='surface normal'):
+            bubble_surface_loss(10.0, 20000.0, 2.0)
+
+    def test_exact_grazing_is_the_zero_limit_and_stays_quiet(self):
+        """``sin(β) = 0`` is the ``1/sin β → ∞`` limit, whose multiplier is
+        0.0. That is a real answer, so it is returned — without the
+        divide-by-zero RuntimeWarning it used to raise on the way."""
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            assert bubble_surface_loss(10.0, 20000.0, np.pi / 2) == 0.0
+
+    def test_a_grazing_entry_in_an_angle_array_stays_quiet(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            got = bubble_surface_loss(10.0, 20000.0,
+                                      np.array([0.0, np.pi / 2]))
+        np.testing.assert_allclose(got, [0.93354, 0.0], atol=1e-5)
+
+    def test_a_mirrored_angle_gives_the_same_loss(self):
+        """β = π/2 − angle enters only through ``sin β = cos(angle)``, which
+        is even, so ±angle are the same ray."""
+        assert (bubble_surface_loss(10.0, 20000.0, -1.0)
+                == pytest.approx(bubble_surface_loss(10.0, 20000.0, 1.0)))
+
+    def test_the_handbook_values_and_the_secant_angle_law_are_reproduced(self):
+        assert bubble_surface_loss(10.0, 20000.0, 0.0) == pytest.approx(
+            0.93354, abs=1e-4)
+        below = bubble_surface_loss(5.999, 20000.0, 0.0)
+        assert below == pytest.approx(
+            bubble_surface_loss(6.0, 20000.0, 0.0), abs=1e-4)
+        db0 = -20.0 * np.log10(bubble_surface_loss(10.0, 20000.0, 0.0))
+        db1 = -20.0 * np.log10(bubble_surface_loss(10.0, 20000.0, 1.0))
+        assert db1 / db0 == pytest.approx(1.0 / np.cos(1.0), rel=1e-9)
+
+
+class TestArrayCapableHelpersAnnotateArrayReturns:
+    """``uacpy`` ships ``py.typed`` (``pyproject.toml``), so every annotation
+    in the package is what a downstream type checker sees. A helper annotated
+    ``-> float`` that hands back an ``ndarray`` for array input makes the
+    checker reject the array call — including the package's own, at
+    ``SoundSpeedProfile.from_mackenzie``, which calls ``soundspeed`` on three
+    raveled arrays."""
+
+    #: ``(function, array kwargs, scalar kwargs)`` for every helper in
+    #: ``core.acoustics`` documented to take either. Both spellings are driven,
+    #: so an annotation that admits only one of them fails here.
+    CASES = [
+        ('soundspeed',
+         dict(temperature=np.array([10.0, 20.0]), salinity=35.0, depth=10.0),
+         dict(temperature=10.0, salinity=35.0, depth=10.0)),
+        ('density',
+         dict(temperature=np.array([10.0, 20.0]), salinity=35.0),
+         dict(temperature=10.0, salinity=35.0)),
+        ('doppler',
+         dict(speed=np.array([1.0, 2.0]), frequency=1000.0),
+         dict(speed=1.0, frequency=1000.0)),
+        ('bubble_resonance',
+         dict(radius=np.array([1e-3, 2e-3])), dict(radius=1e-3)),
+        ('reflection_coeff',
+         dict(angle=np.array([0.2, 0.4]), rho1=2000.0, c1=1800.0,
+              rho=1000.0, c=1500.0),
+         dict(angle=0.3, rho1=2000.0, c1=1800.0, rho=1000.0, c=1500.0)),
+    ]
+
+    @staticmethod
+    def _returns_of(name):
+        import inspect
+        import typing
+        from uacpy.core import acoustics
+        annotation = inspect.signature(
+            getattr(acoustics, name)).return_annotation
+        if annotation is inspect.Signature.empty:
+            return None
+        return set(typing.get_args(annotation)) or {annotation}
+
+    @pytest.mark.parametrize('name,array_kwargs,scalar_kwargs', CASES,
+                             ids=[c[0] for c in CASES])
+    def test_the_return_annotation_admits_both_shapes(
+            self, name, array_kwargs, scalar_kwargs):
+        from uacpy.core import acoustics
+        function = getattr(acoustics, name)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            array_out = function(**array_kwargs)
+            scalar_out = function(**scalar_kwargs)
+        assert isinstance(array_out, np.ndarray), name
+        assert not isinstance(scalar_out, np.ndarray), name
+
+        returns = self._returns_of(name)
+        assert returns is not None, f"{name} has no return annotation"
+        assert np.ndarray in returns, (
+            f"{name} returns an ndarray for array input but annotates "
+            f"{returns}")
+        assert float in returns, (
+            f"{name} returns a scalar for scalar input but annotates "
+            f"{returns}")
+
+
+class TestPressureFloorLevelsMatchTheirDocstrings:
+    """``spl`` floors rms pressure at ``sqrt(PRESSURE_FLOOR)`` pascals and
+    ``power_to_dB`` floors ``power`` at ``PRESSURE_FLOOR`` Pa², which is the
+    same floor on either side of the square. Both read pascals against the
+    same default reference, so a silent signal takes the same -180 dB re
+    1 µPa through either door, and both docstrings state that level."""
+
+    def test_spl_floors_a_silent_signal_at_minus_180_dB(self):
+        assert spl(np.zeros(16)) == pytest.approx(-180.0, rel=1e-12)
+
+    def test_power_to_dB_default_ref_floors_at_minus_180_dB(self):
+        assert float(power_to_dB(0.0)) == pytest.approx(-180.0, rel=1e-12)
+
+    def test_the_two_floors_coincide_at_the_default_reference(self):
+        assert spl(np.zeros(16)) == pytest.approx(float(power_to_dB(0.0)),
+                                                  rel=1e-12)
+
+    def test_spl_docstring_states_the_floor_level(self):
+        assert '-180 dB' in spl.__doc__
+
+    def test_power_to_dB_docstring_states_its_own_floor_level(self):
+        assert '-180' in power_to_dB.__doc__
+
+
+def test_unesco_reproduces_the_canonical_high_pressure_check_value():
+    """Fofonoff & Millard (UNESCO 1983) check value: c = 1731.995 m/s at
+    S = 40 PSU, T = 40 °C on the IPTS-68 scale, P = 10000 dbar (1000 bar).
+    The temperature argument is ITS-90, so T68 = 40 enters as 40/1.00024."""
+    c = soundspeed_unesco(40.0 / 1.00024, 40.0, 10000.0)
+    assert float(c) == pytest.approx(1731.995, rel=1e-6)
+
+
+class TestTeos10SoundSpeedEvaluatesTheGibbsFunction:
+    """``soundspeed_teos10`` is Eqn. (2.17.1) of the TEOS-10 manual (IOC
+    Manuals and Guides 56, p. 22), ``c = g_P·sqrt(g_TT / (g_TP² − g_TT·g_PP))``,
+    evaluated on the IAPWS-09 pure-water plus IAPWS-08 saline Gibbs function
+    whose coefficients the manual tabulates in appendices G and H. It takes
+    the same ``(ITS-90 °C, Practical Salinity, dbar)`` triple as the UNESCO
+    and Del Grosso equations and converts Practical to Reference Salinity
+    (``× 35.16504/35``) internally.
+
+    Reference values: GSW-Python 3.6.23 ``gsw.sound_speed_t_exact(SA, t, p)``
+    with ``SA = SP × 35.16504/35`` — the TEOS-10 toolbox's own evaluation of
+    the same Gibbs function. Agreement to 1e-5 m/s pins every coefficient:
+    a single wrong digit in either table moves the result by far more.
+    """
+
+    @pytest.mark.parametrize('temperature, salinity, pressure, expected', [
+        (15.0, 35.0, 0.0, 1506.673601),
+        (0.0, 35.0, 0.0, 1449.024607),       # the Standard Ocean point
+        (25.0, 35.0, 0.0, 1534.357131),
+        (30.0, 40.0, 0.0, 1550.694855),
+        (2.0, 34.7, 5000.0, 1541.614915),
+        (4.0, 35.0, 4000.0, 1533.099822),
+        (1.5, 34.7, 6000.0, 1557.008080),
+        (4.0, 35.0, 10000.0, 1637.285857),
+        (-3.0, 34.7, 0.0, 1434.333863),
+    ])
+    def test_matches_the_gsw_reference_to_ten_micrometres_per_second(
+            self, temperature, salinity, pressure, expected):
+        assert soundspeed_teos10(temperature, salinity, pressure) == \
+            pytest.approx(expected, abs=1e-5)
+
+    def test_fresh_water_is_finite_where_the_saline_term_has_x_squared_ln_x(self):
+        """At ``S = 0`` the saline Gibbs function's ``x²·ln x`` terms are the
+        limit 0, not ``0 × (−inf) = nan``."""
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', UserWarning)
+            c = soundspeed_teos10(10.0, 0.0, 0.0)
+        assert c == pytest.approx(1447.284153, abs=1e-5)
+
+    def test_returns_a_python_float_for_scalars_and_broadcasts_arrays(self):
+        assert isinstance(soundspeed_teos10(15.0, 35.0, 0.0), float)
+        t = np.array([0.0, 15.0, 25.0])
+        p = np.array([[0.0], [4000.0]])
+        c = soundspeed_teos10(t, 35.0, p)
+        assert c.shape == (2, 3)
+        assert c[0, 1] == pytest.approx(1506.673601, abs=1e-5)
+        assert c[1, 0] == pytest.approx(
+            soundspeed_teos10(0.0, 35.0, 4000.0), abs=1e-9)
+
+    def test_sits_with_del_grosso_not_unesco_in_deep_water(self):
+        """The Feistel (2008) Gibbs function was fitted to sound-speed data
+        (manual appendix O, Table O.1; rms 0.035 m/s), so at depth it
+        reproduces Del Grosso and exposes the ~0.6 m/s pressure bias of the
+        uncorrected Chen–Millero polynomial (APL-UW TR 9407, "Chen-Millero-Li
+        Equation"). Measured 2026-09-07 at the audit's deep fixture point."""
+        t, s, p = 2.0, 34.7, 5000.0
+        c = soundspeed_teos10(t, s, p)
+        assert abs(c - soundspeed_delgrosso(t, s, p)) < 0.05
+        assert soundspeed_unesco(t, s, p) - c > 0.5
+
+
+class TestTeos10ValidityWarnings:
+    """``soundspeed_teos10`` announces extrapolation the way its siblings do.
+
+    The domain is the manual's own (§2.6): the saline Gibbs function "is
+    valid over the ranges 0 < S_A < 42 g/kg, −6.0 °C < t < 40 °C, and
+    0 < p < 10⁴ dbar". 42 g/kg of Absolute Salinity is 41.80 on the
+    Practical scale this argument takes.
+    """
+
+    @pytest.mark.parametrize('kwargs', [
+        dict(temperature=-6.5),          # T < -6
+        dict(temperature=40.5),          # T > 40
+        dict(salinity=42.5),             # S > 41.80 PSU (42 g/kg)
+        dict(pressure=-1.0),             # P < 0
+        dict(pressure=10100.0),          # P > 10000 dbar
+    ])
+    def test_out_of_range_input_warns_of_extrapolation(self, kwargs):
+        with pytest.warns(UserWarning, match='outside validated range'):
+            soundspeed_teos10(**kwargs)
+
+    def test_negative_salinity_is_undefined_not_extrapolated(self):
+        """``x = sqrt(S_A / S_u)`` has no real value below zero; the result is
+        NaN and the message says so, as UNESCO's does for its ``S^1.5``."""
+        with pytest.warns(UserWarning, match='undefined'):
+            c = soundspeed_teos10(10.0, -1.0, 0.0)
+        assert np.isnan(c)
+
+    def test_the_pressure_message_names_the_unit(self):
+        with pytest.warns(UserWarning, match='DECIBARS'):
+            soundspeed_teos10(15.0, 35.0, 10100.0)
+
+    def test_a_deep_polar_cast_and_the_defaults_are_silent(self):
+        """−3 °C sits inside this equation's own −6 °C floor, so unlike the
+        two older fits nothing here is relaxed."""
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', UserWarning)
+            assert 1400.0 < soundspeed_teos10(-3.0, 34.7, 5000.0) < 1600.0
+            assert soundspeed_teos10() == pytest.approx(1506.67, abs=0.01)

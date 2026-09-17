@@ -18,7 +18,7 @@ Examples
 >>> psd_pa2_per_hz = wenz.as_psd(ref=1e-6)         # SI Pa²/Hz (ref = 1 µPa in Pa)
 """
 
-from uacpy.noise.noise import (
+from uacpy.noise.ambient import (
     compute_windnoise, WenzNoise, NoiseComponents,
     WIND_MODELS, SHIPPING_MODELS, RAIN_MODELS, THERMAL_MODELS, TURBULENCE_MODELS,
 )

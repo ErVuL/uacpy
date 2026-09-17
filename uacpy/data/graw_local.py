@@ -14,6 +14,7 @@ grid value and whose speed/attenuation are consistent with it.
 """
 
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 
@@ -56,15 +57,20 @@ GRAW_URL = 'https://zenodo.org/records/3762390/files/Dataset_S2.nc'
 # vertex, which is outside the evaluated range.
 
 
-def download_graw_db(cache_dir=None, *, timeout=300.0, verbose=False):
+def download_graw_db(cache_dir=None, *, url: Optional[str] = None,
+                     timeout=300.0, verbose=False):
     """Download the Graw 2021 seabed bulk-density grid into the cache.
 
     Writes ``<cache>/graw/Dataset_S2.nc`` (~37 MB, Zenodo) and returns the
     path. Uses curl when available, falling back to the urllib fetcher.
+
+    ``url`` fetches that address instead of :data:`GRAW_URL` — a mirror, or
+    a copy staged on an http server of your own. What is written and how it
+    is read are the same whatever address served it.
     """
     from uacpy.data._http import download_grid_file
     return download_grid_file(
-        'graw', GRAW_URL, GRAW_FILE,
+        'graw', url or GRAW_URL, GRAW_FILE,
         "downloading Graw 2021 seabed density grid (~37 MB)",
         "Graw density grid cached", cache_dir=cache_dir, timeout=timeout,
         verbose=verbose)

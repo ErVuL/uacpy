@@ -27,6 +27,7 @@ import dataclasses
 import io
 import tarfile
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 from scipy.spatial import cKDTree
@@ -107,7 +108,8 @@ def _tar_rows(tf, suffix):
     return list(csv.DictReader(stream, delimiter='\t'))
 
 
-def download_sediment_db(cache_dir=None, *, timeout=180.0, verbose=False):
+def download_sediment_db(cache_dir=None, *, url: Optional[str] = None,
+                         timeout=180.0, verbose=False):
     """Download + normalize the NCEI grain-size database into ``grainsize.csv``.
 
     Fetches the public-domain G00127 tarball, joins each sample's lat/lon with a
@@ -116,12 +118,16 @@ def download_sediment_db(cache_dir=None, *, timeout=180.0, verbose=False):
     — the file the local sediment backend reads. Returns the written path.
 
     ``cache_dir`` defaults to the offline cache's ``sediment`` directory.
+
+    ``url`` fetches that address instead of :data:`GRAINSIZE_TARBALL_URL` — a mirror,
+    or a copy staged on an http server of your own. What is written and
+    how it is read are the same whatever address served it.
     """
     dest = _cache.prepare_download(
         'sediment', "downloading NCEI grain-size DB (G00127, ~3 MB)",
         cache_dir=cache_dir, verbose=verbose)
-    blob = http_get(GRAINSIZE_TARBALL_URL, timeout=timeout, verbose=verbose,
-                    source='sediment')
+    blob = http_get(url or GRAINSIZE_TARBALL_URL, timeout=timeout,
+                    verbose=verbose, source='sediment')
     tf = tarfile.open(fileobj=io.BytesIO(blob))
 
     loc = {}

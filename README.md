@@ -508,7 +508,7 @@ Henrik Schmidt (Massachusetts Institute of Technology) --- https://acoustics.mit
 
 Mandar Chitre (Acoustic Research Lab, National University of Singapore) --- https://github.com/org-arl/arlpy
 
-Utility functions adapted into `uacpy/core/acoustics.py` preserve Mandar
+Utility functions adapted into `uacpy/core/acoustics/` preserve Mandar
 Chitre's 2016 copyright header and cite arlpy as the source.
 
 

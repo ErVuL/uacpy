@@ -668,7 +668,7 @@ class TestTwoBinaryRoundTrip:
           every value would flip both runs together and keep the inequality.
         * ``test_reverberation_field`` above checks the near/far endpoints of
           one real run, but nothing downstream of the Field.
-        * ``test_core_classes.py`` pins ``Field.max()``, ``.dB`` and the axis
+        * ``test_core_carriers_and_results.py`` pins ``Field.max()``, ``.dB`` and the axis
           label on Fields built from hand-written arrays, so it pins the
           CONSUMERS against a direction the test itself supplies.
 

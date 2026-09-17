@@ -31,7 +31,7 @@ from uacpy.core.constants import SBP_ANGLE_RESOLUTION_DEG
 from uacpy.core.exceptions import ConfigurationError, FileFormatError
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.io._fortran_helpers import _bound_counts
-from uacpy.io.utils import _collapsed_pair_index
+from uacpy.io.input_checks import _collapsed_pair_index
 from uacpy.io._fortran_helpers import (
     expand_repeat_counts,
     fortran_float, list_directed_int, read_list_directed_values,

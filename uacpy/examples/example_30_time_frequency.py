@@ -26,7 +26,7 @@ import uacpy
 from uacpy.acoustic_signal import (cepstrum, cwt, fk_transform,
                                    radon_transform, taup_transform,
                                    wigner_ville)
-from uacpy.acoustic_signal.waveforms import ricker_wavelet
+from uacpy.acoustic_signal.generate import ricker_wavelet
 
 OUT = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
            or Path(__file__).parent / 'output')

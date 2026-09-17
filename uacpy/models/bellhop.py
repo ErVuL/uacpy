@@ -21,7 +21,7 @@ from typing import Dict, Optional, Tuple, Union
 
 from scipy.signal import hilbert
 
-from uacpy.acoustic_signal.channel import fractional_delay_taps
+from uacpy.acoustic_signal.system import fractional_delay_taps
 
 from uacpy.models.base import (
     PropagationModel, RunMode, ModelSpec, USER_FRAME_SKIP,
@@ -45,7 +45,7 @@ from uacpy.io.bellhop_writer import (
 from uacpy.io.refl_io import read_source_beam_pattern, stage_source_beam_pattern
 from uacpy.io.file_manager import FileManager
 from uacpy.io.oalib_reader import read_shd_file, read_arr_file, read_ray_file
-from uacpy.io.utils import equally_spaced
+from uacpy.io.input_checks import equally_spaced
 from uacpy.io.oalib_writer import (
     SOURCE_TYPE_CODE as _SOURCE_TYPE_CODE, resolve_ssp_interp,
 )

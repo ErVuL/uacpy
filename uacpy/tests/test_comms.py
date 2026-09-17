@@ -11,24 +11,24 @@ import pytest
 
 from uacpy import comms
 from uacpy.comms import janus
-from uacpy.comms.equalization import mmse_equalizer
-from uacpy.comms.modulation import dpsk_demodulate, dpsk_modulate
-from uacpy.comms.ofdm import (
+from uacpy.comms.receive import mmse_equalizer
+from uacpy.comms.modulate import dpsk_demodulate, dpsk_modulate
+from uacpy.comms.modulate import (
     ofdm_demodulate, ofdm_modulate, schmidl_cox_preamble, schmidl_cox_sync,
 )
-from uacpy.comms.phy import matched_filter as phy_matched_filter
-from uacpy.comms.phy import pulse_shape, symbol_sync
-from uacpy.comms.sync import detect_preamble, matched_filter_metric
+from uacpy.comms.link import matched_filter as phy_matched_filter
+from uacpy.comms.link import pulse_shape, symbol_sync
+from uacpy.comms.receive import detect_preamble, matched_filter_metric
 from uacpy.core.exceptions import ConfigurationError
 
 NAN = float('nan')
 #: The scalars every sample-rate / dimension guard must refuse.
 BAD_SCALARS = [0.0, -100.0, np.nan, np.inf]
-from uacpy.acoustic_signal.sequences import (bpsk_modulate,
+from uacpy.acoustic_signal.generate import (bpsk_modulate,
                                              make_mseq_probe, mseq)
-from uacpy.acoustic_signal.waveforms import (hfm_chirp, lfm_chirp,
+from uacpy.acoustic_signal.generate import (hfm_chirp, lfm_chirp,
                                              tone_burst)
-from uacpy.comms.modulation import _DEMOD_CHUNK, Modulator
+from uacpy.comms.modulate import _DEMOD_CHUNK, Modulator
 
 
 class TestModulation:
@@ -996,7 +996,7 @@ class TestAgainstPublishedExpressions:
         10. Computing it from uacpy's own trellis checks the generators and the
         state/output mapping together."""
         import heapq
-        from uacpy.comms.coding import DEFAULT_K, DEFAULT_POLYS
+        from uacpy.comms.modulate import DEFAULT_K, DEFAULT_POLYS
 
         K = DEFAULT_K
 
@@ -1022,7 +1022,7 @@ class TestAgainstPublishedExpressions:
         assert dfree == 10
 
     def test_dsss_processing_gain_is_ten_log_n(self):
-        from uacpy.comms.dsss import m_sequence, processing_gain_dB
+        from uacpy.comms.modulate import m_sequence, processing_gain_dB
         for n, taps in ((3, [3, 2]), (5, [5, 3]), (7, [7, 6])):
             code = m_sequence(n, taps)
             assert code.size == 2 ** n - 1
@@ -1177,22 +1177,22 @@ class TestDopplerCoarseStrideTracksTheResampleQuantum:
     STEP = 1e-2 / 600.0
 
     def test_the_cap_holds_at_4000_samples_and_releases_at_4001(self):
-        from uacpy.comms.doppler import _coarse_stride
+        from uacpy.comms.receive import _coarse_stride
         assert _coarse_stride(4000, self.STEP) == 15
         assert _coarse_stride(4001, self.STEP) == 14
 
     @pytest.mark.parametrize('n', [1, 100, 2800, 3999])
     def test_short_records_keep_the_widest_stride(self, n):
-        from uacpy.comms.doppler import _coarse_stride
+        from uacpy.comms.receive import _coarse_stride
         assert _coarse_stride(n, self.STEP) == 15
 
     @pytest.mark.parametrize('n', [4001, 4286, 5773, 6370, 10552, 30000])
     def test_the_stride_stays_inside_the_resample_quantum(self, n):
-        from uacpy.comms.doppler import _coarse_stride
+        from uacpy.comms.receive import _coarse_stride
         assert _coarse_stride(n, self.STEP) * self.STEP <= 1.0 / n
 
     def test_the_longest_records_degrade_to_a_full_scan(self):
-        from uacpy.comms.doppler import _coarse_stride
+        from uacpy.comms.receive import _coarse_stride
         assert _coarse_stride(60000, self.STEP) == 1
         assert _coarse_stride(10 ** 6, self.STEP) == 1
 
@@ -1222,7 +1222,7 @@ class TestDopplerTwoStageMatchesFullScan:
         return rx + rng.standard_normal(rx.size) * noise, template
 
     def test_the_fixture_is_long_enough_to_exercise_the_adaptive_stride(self):
-        from uacpy.comms.doppler import _coarse_stride
+        from uacpy.comms.receive import _coarse_stride
         rx, _ = self._rx(0.0, seed=1)
         assert rx.size == 5800
         assert _coarse_stride(rx.size, 1e-2 / 600.0) == 10
@@ -1257,7 +1257,7 @@ class TestDopplerTwoStageMatchesFullScan:
         plateau covering indices 595-600 holds no coarse candidate unless the
         last index is forced into the coarse pass. This fixture puts the
         global maximum on exactly that plateau."""
-        from uacpy.comms.doppler import _coarse_stride
+        from uacpy.comms.receive import _coarse_stride
         fs, dur, a_true = 12000.0, 0.5, 5e-3
         t = np.arange(int(dur * fs)) / fs
         template = np.sin(2 * np.pi * (2000 * t + 3000 / dur * t ** 2 / 2))
@@ -1338,7 +1338,7 @@ class TestDopplerReturnsThePlateauCentreNotItsLowEdge:
         """Including a run truncated by the end of the scan: the answer is the
         midpoint of the part that was scanned, and never leaves the range the
         caller asked for."""
-        from uacpy.comms.doppler import _plateau_centre
+        from uacpy.comms.receive import _plateau_centre
         scales = np.arange(10, dtype=float)
         interior = np.array([0., 1., 2., 9., 9., 9., 9., 9., 3., 1.])
         assert _plateau_centre(scales, interior) == 5.0      # run 3..7
@@ -1412,7 +1412,7 @@ class TestOmpAtomNormalisationIsScaleInvariant:
 
     @pytest.mark.parametrize('scale', [1.0, 1e-3, 1e-6, 1e-9, 1e-12, 1e-14])
     def test_the_recovered_support_does_not_depend_on_units(self, scale):
-        from uacpy.comms.channel_est import omp_estimate
+        from uacpy.comms.receive import omp_estimate
         pilots, rx, n_taps = self._case()
         got = self._support(omp_estimate(rx * scale, pilots * scale,
                                          n_taps, 2))
@@ -1421,12 +1421,12 @@ class TestOmpAtomNormalisationIsScaleInvariant:
     def test_an_all_zero_pilot_does_not_divide_by_zero(self):
         # The offset's one legitimate job; the relative floor keeps it.
         import numpy as np
-        from uacpy.comms.channel_est import omp_estimate
+        from uacpy.comms.receive import omp_estimate
         z = np.zeros(120, dtype=complex)
         assert np.all(np.isfinite(omp_estimate(z, z, 4, 1)))
 
     def test_the_floor_is_relative_not_absolute(self):
-        from uacpy.comms import channel_est
+        from uacpy.comms import receive as channel_est
         assert channel_est._COLUMN_NORM_REL_FLOOR == 1e-12
 
 
@@ -2032,7 +2032,7 @@ class TestOFDMArgumentValidation:
         assert schmidl_cox_preamble(8, 2).size == 10
 
     def test_ofdm_symbol_negative_cp_len_is_rejected(self):
-        from uacpy.comms.ofdm import ofdm_symbol
+        from uacpy.comms.modulate import ofdm_symbol
         freq = np.ones(8, dtype=complex)
         with pytest.raises(ConfigurationError, match="cp_len"):
             ofdm_symbol(freq, 8, -4)
@@ -2205,7 +2205,7 @@ class TestOfdmAndPhyCountGuards:
                                       'schmidl_cox_sync'])
     def test_every_ofdm_entry_point_refuses_a_bad_subcarrier_count(
             self, name, bad):
-        from uacpy.comms import ofdm as _ofdm
+        from uacpy.comms import modulate as _ofdm
         calls = {
             'ofdm_modulate': lambda n: _ofdm.ofdm_modulate(self.SYMBOLS, n, 0),
             'ofdm_demodulate': lambda n: _ofdm.ofdm_demodulate(self.RX, n, 0),
@@ -2216,7 +2216,7 @@ class TestOfdmAndPhyCountGuards:
             calls[name](bad)
 
     def test_one_subcarrier_is_the_admissible_boundary(self):
-        from uacpy.comms import ofdm as _ofdm
+        from uacpy.comms import modulate as _ofdm
         out = _ofdm.ofdm_modulate(self.SYMBOLS, 1, 0)
         assert out.size == self.SYMBOLS.size
         with pytest.raises(ConfigurationError):
@@ -2224,12 +2224,12 @@ class TestOfdmAndPhyCountGuards:
 
     @pytest.mark.parametrize('bad', [0, -2])
     def test_rrc_filter_refuses_a_bad_samples_per_symbol(self, bad):
-        from uacpy.comms.phy import rrc_filter
+        from uacpy.comms.link import rrc_filter
         with pytest.raises(ConfigurationError, match='sps'):
             rrc_filter(bad, 0.25, 8)
 
     def test_one_sample_per_symbol_is_the_admissible_boundary(self):
-        from uacpy.comms.phy import rrc_filter
+        from uacpy.comms.link import rrc_filter
         taps = rrc_filter(1, 0.25, 8)
         assert taps.size == 9 and np.all(np.isfinite(taps))
 
@@ -2237,12 +2237,12 @@ class TestOfdmAndPhyCountGuards:
                                         {'loop_bw': 0.0},
                                         {'loop_bw': float('nan')}])
     def test_symbol_sync_refuses_a_dead_loop(self, kwargs):
-        from uacpy.comms.phy import symbol_sync
+        from uacpy.comms.link import symbol_sync
         with pytest.raises(ConfigurationError):
             symbol_sync(self.RX, 4, **kwargs)
 
     def test_the_documented_loop_defaults_are_accepted(self):
-        from uacpy.comms.phy import symbol_sync
+        from uacpy.comms.link import symbol_sync
         out = symbol_sync(self.RX, 4)
         assert out.size > 0 and np.all(np.isfinite(out))
 
@@ -2432,7 +2432,7 @@ class TestTheDefaultReceiverRecoversPhaseGainAndTiming:
     FS, FC, SPS = 96000.0, 24000.0, 8
 
     def _roundtrip(self, delay_samples, amplitude, modulation='16qam', n_bits=4 * 400):
-        from uacpy.acoustic_signal.channel import fractional_delay_taps
+        from uacpy.acoustic_signal.system import fractional_delay_taps
         rng = np.random.default_rng(3)
         bits = rng.integers(0, 2, n_bits)
         tx = comms.Transmitter(modulation, preamble=64)
@@ -2455,8 +2455,8 @@ class TestTheDefaultReceiverRecoversPhaseGainAndTiming:
         The loop constants are per symbol; applying the correction in samples
         unscaled left the gain sps times too small, and pull-in took ~380
         symbols — far past a 64-symbol preamble. Scaled, ~50."""
-        from uacpy.comms.phy import pulse_shape, matched_filter, symbol_sync
-        from uacpy.comms.equalization import slicer
+        from uacpy.comms.link import pulse_shape, matched_filter, symbol_sync
+        from uacpy.comms.receive import slicer
         rng = np.random.default_rng(7)
         mod = comms.Modulator('16qam')
         bits = rng.integers(0, 2, 4 * 600)
@@ -2479,8 +2479,8 @@ class TestTheDefaultReceiverRecoversPhaseGainAndTiming:
         starts exactly on the symbol grid, so it is not a pull-in residual.
         The docstring used to promise only a pull-in figure and nothing about
         where the loop comes to rest."""
-        import uacpy.comms.phy as phy
-        from uacpy.comms.phy import pulse_shape, matched_filter, symbol_sync
+        import uacpy.comms.link as phy
+        from uacpy.comms.link import pulse_shape, matched_filter, symbol_sync
         sps, span, rolloff = 8, 8, 0.25
         rng = np.random.default_rng(7)
         mod = comms.Modulator('16qam')
@@ -2534,8 +2534,8 @@ def test_default_preamble_and_ofdm_pilot_come_from_their_fixed_seeds():
     # The seeds are the contract between the two ends of a link: each end
     # regenerates the preamble (0xC0FFEE) and the pilot (0xACE0FDA) from the
     # seed and correlates against exactly these symbols.
-    from uacpy.comms.modulation import Modulator
-    from uacpy.comms.transceiver import (CommsReceiver, OFDMReceiver,
+    from uacpy.comms.modulate import Modulator
+    from uacpy.comms.link import (CommsReceiver, OFDMReceiver,
                                          OFDMTransmitter, Transmitter)
     cases = [
         ("qpsk", 64, 0xC0FFEE, Transmitter("qpsk").preamble),

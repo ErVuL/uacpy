@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 import numpy as np
 import matplotlib.pyplot as plt
 import uacpy
-from uacpy.acoustic_signal.waveforms import ricker_wavelet
+from uacpy.acoustic_signal.generate import ricker_wavelet
 
 OUT = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
            or Path(__file__).parent / 'output')

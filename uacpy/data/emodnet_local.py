@@ -57,7 +57,8 @@ def _shapely():
         ) from exc
 
 
-def download_emodnet_db(cache_dir=None, *, timeout=300.0, verbose=False):
+def download_emodnet_db(cache_dir=None, *, base_url: str = EMODNET_WFS_URL,
+                        timeout=300.0, verbose=False):
     """Download the EMODnet seabed-substrate polygons into a local WKB index.
 
     Pages through the public EMODnet Geology WFS (Folk 5-class, 1:1M, EPSG:4326),
@@ -73,6 +74,11 @@ def download_emodnet_db(cache_dir=None, *, timeout=300.0, verbose=False):
     pickled index held.
 
     ``cache_dir`` defaults to the offline cache's ``emodnet`` directory.
+
+    ``base_url`` is the WFS endpoint every page is requested from (default
+    :data:`uacpy.data.seabed.EMODNET_WFS_URL`), the same keyword the live
+    fetchers in :mod:`uacpy.data.seabed` take, so a mirror of the service
+    builds the same index.
     """
     shapely = _shapely()
     dest = _cache.prepare_download(
@@ -82,7 +88,7 @@ def download_emodnet_db(cache_dir=None, *, timeout=300.0, verbose=False):
     codes, wkb = [], []
     start = 0
     while True:
-        url = (f"{EMODNET_WFS_URL}?service=WFS&version=2.0.0&request=GetFeature"
+        url = (f"{base_url}?service=WFS&version=2.0.0&request=GetFeature"
                f"&typeNames={EMODNET_LAYER}&outputFormat=application/json"
                f"&srsName=EPSG:4326&sortBy={_SORT_BY}&count={_PAGE}"
                f"&startIndex={start}")

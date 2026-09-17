@@ -11,6 +11,7 @@ texture. Pair it with :mod:`uacpy.data.crust1_local` for a layered bottom.
 """
 
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 
@@ -29,14 +30,19 @@ GLOBSED_URL = ('https://www.ncei.noaa.gov/data/oceans/archive/arc0231/0305030/'
 
 
 
-def download_globsed_db(cache_dir=None, *, timeout=300.0, verbose=False):
+def download_globsed_db(cache_dir=None, *, url: Optional[str] = None,
+                        timeout=300.0, verbose=False):
     """Download the GlobSed v3 sediment-thickness grid into the cache.
 
     Writes ``<cache>/globsed/GlobSed-v3.nc`` and returns the path. Uses curl when
     available (NCEI throttles Python urllib), falling back to the urllib fetcher.
+
+    ``url`` fetches that address instead of :data:`GLOBSED_URL` — a mirror, or
+    a copy staged on an http server of your own. What is written and how it
+    is read are the same whatever address served it.
     """
     return download_grid_file(
-        'globsed', GLOBSED_URL, GLOBSED_FILE,
+        'globsed', url or GLOBSED_URL, GLOBSED_FILE,
         "downloading GlobSed v3 sediment thickness (~11 MB)",
         "GlobSed grid cached", cache_dir=cache_dir, timeout=timeout,
         verbose=verbose)

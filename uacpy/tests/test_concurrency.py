@@ -38,6 +38,7 @@ happened to be kind.
 import contextlib
 import gc
 import os
+import pathlib
 import threading
 import warnings
 from concurrent.futures import ThreadPoolExecutor
@@ -360,30 +361,43 @@ def test_concurrent_gmrt_region_reads_never_enter_netcdf_together(monkeypatch):
     assert counter.max_concurrent == 1
 
 
-def test_concurrent_wind_grid_fetches_never_enter_netcdf_together(monkeypatch):
+def test_concurrent_wind_climatology_reads_never_enter_netcdf_together(
+        monkeypatch, tmp_path):
+    """The wind cache is built by opening one downloaded file per call.
+
+    netCDF4 is not thread-safe here, so two builds racing would enter the
+    library together; ``netcdf_lock`` is what stops them, and a handle left
+    open by an exception would leak one descriptor per attempt.
+    """
     from uacpy.data import _netcdf, wind_local
 
     counter = _NetcdfEntryCounter()
     handles = []
-    speed_var = wind_local._SPEED_VARS[0]
+    n_lat, n_lon = 2, 2
 
     def open_stub(path, memory=None):
         ds = _OverlapCountingDataset(counter, {
-            'latitude': np.array([0.0, 1.0]),
-            'longitude': np.array([0.0, 1.0]),
-            speed_var: np.array([[5.0, 6.0], [7.0, 8.0]]),
+            'lat': np.array([0.0, 1.0]),
+            'lon': np.array([0.0, 1.0]),
+            'windspeed': np.tile(np.array([[[5.0, 6.0], [7.0, 8.0]]]),
+                                 (12, 1, 1, 1)),
         })
         handles.append(ds)
         return ds
 
-    monkeypatch.setattr(wind_local, 'http_get',
-                        lambda *a, **k: b'not a real grid')
+    def curl_stub(url, out, *, timeout, verbose):
+        pathlib.Path(out).write_bytes(b'not a real grid')
+        return True
+
+    monkeypatch.setattr(wind_local, 'curl_download', curl_stub)
     monkeypatch.setattr(_netcdf, 'open_netcdf', open_stub)
-    grids = _race(lambda: wind_local._fetch_monthly_grid(
-        2020, 1, timeout=1.0, verbose=False), n=8)
+    caches = [str(tmp_path / f'c{i}') for i in range(8)]
+    counter_index = iter(caches)
+    paths = _race(lambda: wind_local.download_wind_db(
+        cache_dir=next(counter_index), verbose=False), n=8)
     assert len(handles) == 8
-    assert all(ds.closes == 1 for ds in handles)
-    assert all(g is not None for g in grids)
+    assert all(ds.closes == 1 for ds in handles), "a handle was left open"
+    assert all(p is not None for p in paths)
     assert counter.max_concurrent == 1
 
 

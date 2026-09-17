@@ -12,6 +12,7 @@ NBS is a U.S. Government work — **public domain**.
 """
 
 import contextlib
+from typing import Optional
 
 import numpy as np
 
@@ -41,7 +42,8 @@ _CLIM = {}   # path -> _Climatology
 _cache.register_cache(_CLIM.clear)
 
 
-def download_wind_db(cache_dir=None, *, timeout=300.0, verbose=False):
+def download_wind_db(cache_dir=None, *, url: Optional[str] = None,
+                     timeout=300.0, verbose=False):
     """Cache NOAA/NCEI's published wind climatology and return its path.
 
     Downloads :data:`NBS_CLIMATOLOGY_URL` and writes
@@ -54,6 +56,12 @@ def download_wind_db(cache_dir=None, *, timeout=300.0, verbose=False):
     ``zlev`` axis (one level, 10 m) is dropped, so the cache keeps
     ``(12, nlat, nlon)``. The download itself is deleted afterwards: it is
     237 MB against the ~28 MB the cache keeps.
+
+    ``url`` fetches that address instead of :data:`NBS_CLIMATOLOGY_URL` — a
+    mirror, or a copy staged on an http server of your own. It has to carry
+    the same ``windspeed`` variable on the same ``(month, zlev, lat, lon)``
+    grid, and :data:`NBS_CLIMATOLOGY_YEARS` still names the period recorded
+    in the cache.
     """
     from uacpy.data._netcdf import netcdf_lock, open_netcdf
 
@@ -63,21 +71,25 @@ def download_wind_db(cache_dir=None, *, timeout=300.0, verbose=False):
         cache_dir=cache_dir, verbose=verbose)
     out = dest / WIND_FILE
     raw = dest / _NBS_RAW_FILE
-    if not curl_download(NBS_CLIMATOLOGY_URL, raw, timeout=timeout,
-                         verbose=verbose):
+    address = url or NBS_CLIMATOLOGY_URL
+    if not curl_download(address, raw, timeout=timeout, verbose=verbose):
         raise DataFetchError(
-            f"Could not download {NBS_CLIMATOLOGY_URL}.",
-            remediation="Retry — the transfer resumes — or pass years= to "
-                        "build the climatology from monthly fields instead.",
+            f"Could not download {address}.",
+            remediation="Retry — the transfer resumes where it stopped — or "
+                        "pass url= for a mirror of the same file.",
         )
     try:
         with netcdf_lock, contextlib.closing(open_netcdf(str(raw))) as ds:
-            lat = np.asarray(ds['lat'][:], dtype=np.float64)
-            lon = np.asarray(ds['lon'][:], dtype=np.float64)
+            # ``ds.variables[name]``, the accessor every other netCDF reader
+            # here uses: it never leaves Python, so it is safe outside the
+            # lock (see _netcdf) and one stub stands in for a file in tests.
+            lat = np.asarray(ds.variables['lat'][:], dtype=np.float64)
+            lon = np.asarray(ds.variables['lon'][:], dtype=np.float64)
             # Masked cells become NaN, which is what every reader of this
             # cache already treats as "no value here".
             speed = np.ma.filled(
-                np.ma.masked_invalid(ds['windspeed'][:]).astype(np.float32),
+                np.ma.masked_invalid(
+                    ds.variables['windspeed'][:]).astype(np.float32),
                 np.nan)
     finally:
         raw.unlink(missing_ok=True)

@@ -7,8 +7,8 @@ frequency, the way hearing does (Brown 1991).
 
 Uses: acoustic_signal.lfm_chirp / hfm_chirp / ricker_wavelet / gaussian_pulse ·
 sequences.mseq · constant_q_transform · constant_q_spectrogram ·
-constant_q_psd · plot_constant_q_transform · plot_constant_q_spectrogram ·
-plot_constant_q_psd
+constant_q · plot_constant_q_transform ·
+plot_constant_q_spectrogram · plot_constant_q_psd
 """
 
 import os
@@ -19,10 +19,11 @@ sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 import numpy as np
 import matplotlib.pyplot as plt
 import uacpy
-from uacpy.acoustic_signal import (constant_q_psd, constant_q_spectrogram,
+from uacpy.acoustic_signal import (constant_q,
+                                   constant_q_spectrogram,
                                    constant_q_transform)
-from uacpy.acoustic_signal.sequences import mseq
-from uacpy.acoustic_signal.waveforms import (gaussian_pulse, hfm_chirp,
+from uacpy.acoustic_signal.generate import mseq
+from uacpy.acoustic_signal.generate import (gaussian_pulse, hfm_chirp,
                                              lfm_chirp, ricker_wavelet)
 
 OUT = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
@@ -78,7 +79,8 @@ uacpy.plot.plot_constant_q_spectrogram(cqt.frequencies, cqt.times, cqt.power,
 axes[2, 0].set_title('', loc='left')       # drop the plotter's own left title
 axes[2, 0].set_title('LFM constant-Q spectrogram', fontweight='bold')
 
-cq_psd = constant_q_psd(lfm, fs, fmin=80, fmax=2000, bins_per_octave=24)
+cq_psd = constant_q(lfm, fs, scaling='spectrum', fmin=80, fmax=2000,
+                             bins_per_octave=24)
 # The same 60 dB window as the spectrogram: the in-band bins peak near 107 dB.
 uacpy.plot.plot_constant_q_psd(cq_psd.frequencies, cq_psd.power,
                                ax=axes[2, 1], ymin=60, ymax=120)

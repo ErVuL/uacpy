@@ -13,7 +13,7 @@ implementer builds on — with :func:`~uacpy.io.oalib_reader.read_flp3d`,
 :func:`~uacpy.io.oalib_reader.read_ssp_3d`,
 :func:`~uacpy.io.bathy_io.read_boundary_3d` and
 :func:`~uacpy.io.bathy_io.write_bty_3d`.
-``uacpy/tests/test_io_restored_capabilities.py`` pins the five against a
+``uacpy/tests/test_io_public_names_without_callers.py`` pins the five against a
 dead-code sweep proposing their removal a second time.
 
 Top-block record order (the one contract every AT ``.env`` here obeys)
@@ -73,7 +73,7 @@ from uacpy.core.constants import (
     C_LOW_FACTOR, C_HIGH_FACTOR, DEFAULT_C_MAX_UNBOUNDED,
     DECK_AXIS_DECIMALS, DECK_DEPTH_RESOLUTION_M, DECK_RANGE_RESOLUTION_M,
 )
-from uacpy.io.utils import (
+from uacpy.io.input_checks import (
     _collapsed_pair_index,
     equally_spaced,
     reject_unknown_kwargs,

@@ -438,7 +438,7 @@ trace = _time_series().isel(depth=0).at(range=1000.0)
 p_t = 316.0 * np.asarray(trace.data, dtype=float)
 
 f_s, t_s, S = spectrogram(p_t, sample_rate, nperseg=256)
-f_p, P = psd(p_t, sample_rate, nperseg=1024)
+f_p, P = welch(p_t, sample_rate, nperseg=1024)
 
 mod = Modulator('16qam')
 bits = rng.integers(0, 2, size=4 * 600)
@@ -458,8 +458,15 @@ uacpy.plot.plot_scatter(symbols, ax=axes[1][1],
 ```
 
 The pairing is one-to-one and mechanical: `spectrogram` → `plot_spectrogram`,
-`psd` → `plot_psd`, `cwt` → `plot_cwt`, `fk_transform` → `plot_fk`,
+`welch` → `plot_psd`, `cwt` → `plot_cwt`, `fk_transform` → `plot_fk`,
 `ambiguity_function` → `plot_ambiguity`. Unpack the result and pass it through.
+
+The spectral estimators also carry the pairing themselves: a
+`SpectralEstimate` or a `ProbabilisticSpectralEstimate` has `.plot()`, which
+picks the plotter from the `method` the estimate was computed with and labels
+the axis from its `scaling` and `ref` — see
+[signal processing](signal.md#3-spectra-levels-and-bands). Like every plotter
+here it returns `(fig, ax)`.
 
 Two conventions to know before reading the levels:
 
@@ -586,15 +593,15 @@ Every one consumes the output of the same-named routine in
 
 | Plotter | ax | Consumes |
 |---|---|---|
-| `plot_psd(frequencies, psd_linear, ax=None, ref=1e-6, …)` | ✓ | `psd` — Welch PSD, dB |
-| `plot_ppsd(result, ax=None, …)` | ✓ | `ppsd` — 2-D histogram of PSD levels |
-| `plot_sel(sel_pa2s, bands, ax=None, band_type='third_octave', …)` | ✓ | `sel` — per-band sound exposure level |
+| `plot_psd(frequencies, psd_linear, ax=None, ref=1e-6, freq_scale='log', …)` | ✓ | a `SpectralEstimate` from `welch` or `constant_q` — the spectrum in dB, labelled from its own scaling (also `.plot()`) |
+| `plot_ppsd(result, ax=None, …)` | ✓ | a `ProbabilisticSpectralEstimate` from `probabilistic_welch` or `probabilistic_sound_exposure` — 2-D histogram of levels (also `.plot()`) |
+| `plot_sel(result, ax=None, band_type='decidecade', …)` | ✓ | a banded `SpectralEstimate`, i.e. `sound_exposure` output — band levels as bars, labelled from its scaling; also `.plot()` |
 | `plot_band_levels(centers, levels, ax=None, …)` | ✓ | `decidecade_band_levels` — bar plot |
 | `plot_spectrogram(frequencies, times, Sxx, ax=None, ymin=1, vmin=0, vmax=200, …)` | ✓ | `spectrogram` |
 | `plot_constant_q_transform(frequencies, coefficients, ax=None, label=None, …)` | ✓ | `constant_q_transform` — one frame's \|X_cq\|, linear |
 | `plot_constant_q_spectrogram(frequencies, times, power, ax=None, scaling='spectrum', …)` | ✓ | `constant_q_spectrogram` (log frequency) |
-| `plot_constant_q_psd(frequencies, power, ax=None, scaling='spectrum', …)` | ✓ | `constant_q_psd` |
-| `plot_constant_q_ppsd(result, ax=None, scaling='spectrum', …)` | ✓ | `probabilistic_constant_q` |
+| `plot_constant_q_psd(frequencies, power, ax=None, scaling='spectrum', …)` | ✓ | `constant_q(...)` |
+| `plot_constant_q_ppsd(result, ax=None, scaling='spectrum', …)` | ✓ | a `probabilistic_constant_q` estimate — the same histogram on geometric bins (also `.plot()`) |
 | `plot_cwt(frequencies, W, sample_rate, ax=None, …)` | ✓ | `cwt` — scalogram \|W\| |
 | `plot_wigner_ville(frequencies, times, W, ax=None, …)` | ✓ | `wigner_ville` |
 | `plot_cepstrum(c, ax=None, sample_rate=None, …)` | ✓ | `cepstrum` vs quefrency |

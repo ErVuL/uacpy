@@ -132,9 +132,32 @@ def _is_connection_refused(exc) -> bool:
         isinstance(e, ConnectionRefusedError)
         or getattr(e, 'errno', None) == errno.ECONNREFUSED))
 _MAX_BACKOFF_S = 8.0
-# Only network schemes — never ``file://`` / ``ftp://`` (which urlopen honours),
-# so a user-supplied ``base_url=`` cannot turn into local-file disclosure / SSRF.
+# Only network schemes — never ``file://`` / ``ftp://`` (which urlopen and curl
+# both honour), so a user-supplied ``url=`` / ``base_url=`` cannot turn into
+# local-file disclosure / SSRF. Where a redirect LANDS is checked too, because
+# a 302 into ftp:// would otherwise walk around this: curl is told up front
+# (``--proto-redir``, since it allows ftp on a redirect by default) and the
+# urllib path checks the final URL before returning any bytes.
 _ALLOWED_SCHEMES = ('http', 'https')
+
+
+def _require_http_scheme(url: str) -> None:
+    """Raise unless ``url`` is http(s).
+
+    Both transports enforce it, because every address override reaches one of
+    them: ``curl -fL`` reads ``file://`` and speaks ftp/scp/smb as happily as
+    ``urlopen`` does, so a guard on the urllib path alone would be a guard on
+    the path that is not taken for the large grids.
+    """
+    scheme = urllib.parse.urlsplit(url).scheme.lower()
+    if scheme not in _ALLOWED_SCHEMES:
+        raise DataFetchError(
+            f"Refusing to fetch {url!r}: only http/https are allowed "
+            f"(got scheme {scheme or '<none>'!r}).",
+            remediation="Pass an http(s) url= / base_url=; file://, ftp:// "
+                        "and other schemes are blocked to avoid local-file "
+                        "disclosure.",
+        )
 # Ceiling on a single response body, so a malicious / misdirected host cannot
 # drive an unbounded allocation before the bytes ever reach a parser.
 _DEFAULT_MAX_BYTES = 512 * 1024 * 1024   # 512 MiB
@@ -185,19 +208,21 @@ def http_get(
     DataFetchError
         On any HTTP or transport-level failure (after retries are exhausted).
     """
-    scheme = urllib.parse.urlsplit(url).scheme.lower()
-    if scheme not in _ALLOWED_SCHEMES:
-        raise DataFetchError(
-            f"Refusing to fetch {url!r}: only http/https are allowed "
-            f"(got scheme {scheme or '<none>'!r}).",
-            remediation="Pass an http(s) base_url=; file://, ftp:// and other "
-                        "schemes are blocked to avoid local-file disclosure.",
-        )
+    _require_http_scheme(url)
     request = urllib.request.Request(url, headers={'User-Agent': user_agent})
     for attempt in range(_MAX_RETRIES + 1):
         log_message(source, f"GET {url}", verbose=verbose, level='debug')
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
+                # Where we ENDED UP is an address too. urllib's own redirect
+                # handler already refuses file://, so local-file disclosure
+                # cannot happen; it does follow ftp://, which this catches
+                # before a single byte reaches the caller. (The connection is
+                # made either way — curl, which carries the large grids, is
+                # constrained up front instead, by --proto-redir.)
+                _require_http_scheme(getattr(response, "url", None)
+                                     or getattr(response, "geturl",
+                                                lambda: url)())
                 return _read_capped(response, url, max_bytes)
         except urllib.error.HTTPError as exc:
             if exc.code in _RETRY_CODES and attempt < _MAX_RETRIES:
@@ -214,9 +239,11 @@ def http_get(
                             "academic page can be withdrawn without notice — "
                             "retry later, or fetch the file yourself and drop "
                             "it in this dataset's cache directory, which is "
-                            "where the reader looks. The ERDDAP fetchers "
-                            "(argo, bathymetry) also take base_url=; the "
-                            "static-grid downloaders do not.",
+                            "where the reader looks. Every download_*_db "
+                            "fetcher takes an address override (url=, or "
+                            "base_url= where it builds many requests: "
+                            "emodnet, seaice), as do the ERDDAP fetchers "
+                            "(argo, bathymetry).",
             ) from exc
         except _TRANSIENT_EXC as exc:
             # Connection reset / timeout / truncated body / remote disconnect —
@@ -325,6 +352,7 @@ def curl_download(url: str, out, *, timeout: float, verbose: bool) -> bool:
     failure is a ``False`` return, not an exception, and so must drop the
     staging file on a path that context manager treats as success.
     """
+    _require_http_scheme(url)
     curl = shutil.which('curl')
     if not curl:
         return False
@@ -332,7 +360,13 @@ def curl_download(url: str, out, *, timeout: float, verbose: bool) -> bool:
     stalled = 0
     for attempt in range(1, _CURL_ATTEMPTS + 1):
         have = part.stat().st_size if part.exists() else 0
-        command = [curl, '-fL', '--connect-timeout', '30',
+        command = [curl, '-fL',
+               # The scheme guard above is on the ADDRESS; these are on
+               # the redirects. curl allows http, https, ftp and ftps on
+               # a redirect by default, so a host could 302 a fetch onto
+               # ftp:// — past the very check _require_http_scheme runs.
+               '--proto', '=http,https', '--proto-redir', '=http,https',
+               '--connect-timeout', '30',
                    # End a stalled transfer instead of letting it hold the
                    # connection at 0 B/s until ``--max-time`` expires: the
                    # attempt that follows resumes where it stopped.

@@ -28,8 +28,7 @@ from uacpy.core.results import (
     Field, Modes, Arrivals, Rays, ReflectionCoefficient,
     Covariance, Replicas, ResultStack,
 )
-from uacpy.acoustic_signal.analysis import PPSDResult
-from uacpy.acoustic_signal.constant_q import CQPPSDResult
+from uacpy.acoustic_signal.estimate import ProbabilisticSpectralEstimate
 from uacpy.noise import WenzNoise
 from uacpy.visualization import plots
 from uacpy.visualization.plots import plot_beam_pattern, plot_field
@@ -1465,17 +1464,19 @@ def test_the_ppsd_level_axis_follows_the_results_own_scaling():
     was published under a density's unit. It now reads the scaling the result
     carries.
     """
-    from uacpy.acoustic_signal.analysis import ppsd as _ppsd
+    from uacpy.acoustic_signal.estimate import probabilistic_welch
     from uacpy.visualization.plots.signal import plot_ppsd
 
     rng = np.random.default_rng(0)
     x = rng.standard_normal(48000)
 
-    fig, ax = plot_ppsd(_ppsd(x, 48000.0, scaling='density', nperseg=1024))
+    fig, ax = plot_ppsd(probabilistic_welch(x, 48000.0,
+                                                            nperseg=1024))
     assert ax.get_ylabel().endswith('Pa²/Hz)'), ax.get_ylabel()
     plt.close(fig)
 
-    fig, ax = plot_ppsd(_ppsd(x, 48000.0, scaling='spectrum', nperseg=1024))
+    fig, ax = plot_ppsd(probabilistic_welch(x, 48000.0, scaling='spectrum',
+                                                     nperseg=1024))
     label = ax.get_ylabel()
     assert label.endswith('Pa²)'), label
     assert '/Hz' not in label, label
@@ -3410,20 +3411,24 @@ def _contour_sets(ax):
 
 
 def _ppsd_result(level_lo, level_hi, ref=1e-6):
-    """A ``PPSDResult`` whose histogram sits between ``level_lo`` and
-    ``level_hi`` dB, stated against ``ref``."""
+    """A Welch ``ProbabilisticSpectralEstimate`` whose histogram sits between
+    ``level_lo`` and ``level_hi`` dB, stated against ``ref``."""
     frequencies = np.array([100.0, 200.0, 400.0])
     level_edges = np.linspace(level_lo, level_hi, 5)
     pdf = np.full((level_edges.size - 1, frequencies.size), 0.25)
     mean_dB = np.full(frequencies.size, 0.5 * (level_lo + level_hi))
-    return PPSDResult(frequencies, level_edges, pdf, mean_dB,
-                      np.ones(frequencies.size), 1.0, 1.0, ref)
+    return ProbabilisticSpectralEstimate(
+        frequencies, level_edges, pdf, mean_dB=mean_dB,
+        std_dB=np.ones(frequencies.size), binwidth_dB=1.0, seg_duration=1.0,
+        ref=ref)
 
 
 def _cq_ppsd_result(level_lo, level_hi, ref=1e-6):
     r = _ppsd_result(level_lo, level_hi, ref)
-    return CQPPSDResult(r.frequencies, r.level_edges, r.pdf, r.mean_dB,
-                        r.std_dB, r.binwidth_dB, ref)
+    return ProbabilisticSpectralEstimate(
+        r.frequencies, r.level_edges, r.pdf, mean_dB=r.mean_dB,
+        std_dB=r.std_dB, binwidth_dB=r.binwidth_dB, ref=ref,
+        scaling='spectrum', method='constant_q')
 
 
 class TestALevelAxisNamesTheReferenceItWasComputedAgainst:
@@ -6097,3 +6102,76 @@ class TestWavenumberSamplingKeepsItsLabelsOnTheCanvas:
             f'{texts}')
         assert all('0.7' not in t and '0.8' not in t for t in texts), (
             f'at this size the numeric value should have been dropped: {texts}')
+
+
+def test_the_psd_axis_follows_the_estimate_it_is_handed():
+    """Handed the estimate, the panel states what the numbers are.
+
+    A spectrum drawn under a "/Hz" label is wrong by the window's
+    noise-equivalent bandwidth — 18.5 dB for a 1024-point hann at 48 kHz — and
+    nothing on the panel would say so. The method is named too, because
+    constant-Q bins are geometric and equal-width bins are not.
+    """
+    from uacpy.acoustic_signal import constant_q, welch
+    from uacpy.visualization import plot_psd
+    x = np.random.default_rng(0).standard_normal(120000)
+    fs = 48000.0
+    cases = {
+        ("welch", "density"): welch(x, fs, nperseg=1024),
+        ("welch", "spectrum"): welch(x, fs, scaling='spectrum', nperseg=1024),
+        ("constant_q", "density"): constant_q(
+            x, fs, fmin=200.0, fmax=8000.0),
+        ("constant_q", "spectrum"): constant_q(
+            x, fs, scaling='spectrum', fmin=200.0, fmax=8000.0),
+    }
+    for (method, scaling), result in cases.items():
+        _, ax = plot_psd(result)
+        unit = ax.get_ylabel()
+        title = ax.get_title(loc="left")
+        assert unit.endswith("/Hz)") is (scaling == "density"), (method, unit)
+        assert ("Constant-Q" in title) is (method == "constant_q"), title
+        plt.close("all")
+
+
+def test_bare_arrays_keep_the_density_label_they_always_had():
+    """Only the estimate carries the scaling; arrays cannot, so the older
+    two-argument call is unchanged rather than guessing."""
+    from uacpy.visualization import plot_psd
+    _, ax = plot_psd(np.arange(1, 6, dtype=float), np.ones(5))
+    assert ax.get_ylabel().endswith("Pa²/Hz)")
+    assert ax.get_title(loc="left") == "Power spectral density"
+    plt.close("all")
+
+
+def test_an_estimate_draws_itself_the_way_a_model_result_does():
+    """``.plot()`` is the call that cannot mislabel: the estimate carries its
+    own scaling and method, so nothing has to be remembered at the call."""
+    from uacpy.acoustic_signal import welch
+    x = np.random.default_rng(0).standard_normal(60000)
+    _, ax = welch(x, 48000.0, scaling='spectrum', nperseg=1024).plot()
+    assert ax.get_title(loc="left") == "Power spectrum"
+    assert ax.get_ylabel().endswith("Pa²)")
+    plt.close("all")
+    _, ax = welch(x, 48000.0, nperseg=1024).plot()
+    assert ax.get_ylabel().endswith("Pa²/Hz)")
+    plt.close("all")
+
+
+def test_the_frequency_axis_can_be_read_linearly():
+    """A decade-spanning soundscape wants the log axis; a narrow band read
+    like a spectrum analyser wants the linear one, and constant-Q's geometric
+    bins only space evenly on the log one."""
+    from uacpy.acoustic_signal import welch
+    from uacpy.core.exceptions import ConfigurationError
+    from uacpy.visualization import plot_psd
+    r = welch(np.random.default_rng(0).standard_normal(60000),
+                               48000.0, nperseg=1024)
+    _, ax = r.plot()
+    assert ax.get_xscale() == "log"
+    plt.close("all")
+    _, ax = r.plot(freq_scale="linear")
+    assert ax.get_xscale() == "linear"
+    assert ax.get_xlim()[0] == pytest.approx(float(r.frequencies[0]))
+    plt.close("all")
+    with pytest.raises(ConfigurationError, match="unknown freq_scale"):
+        plot_psd(r, freq_scale="semilog")

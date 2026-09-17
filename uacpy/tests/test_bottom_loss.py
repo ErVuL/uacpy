@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from uacpy.core import acoustics
+from uacpy.core.acoustics import boundaries
 from uacpy.core.acoustics import (
     bottom_loss_curve, density, reflection_coeff, soundspeed)
 
@@ -180,10 +180,10 @@ class TestDefaultWaterColumnIsAnnounced:
         ``test_bellhop.py`` records for ``_WARNED_RAY_VALIDITY``. Saved and
         restored rather than just cleared: this file is not the only caller of
         ``reflection_coeff`` in a session."""
-        emitted = acoustics._DEFAULT_WATER_COLUMN_WARN_EMITTED
-        acoustics._DEFAULT_WATER_COLUMN_WARN_EMITTED = False
+        emitted = boundaries._DEFAULT_WATER_COLUMN_WARN_EMITTED
+        boundaries._DEFAULT_WATER_COLUMN_WARN_EMITTED = False
         yield
-        acoustics._DEFAULT_WATER_COLUMN_WARN_EMITTED = emitted
+        boundaries._DEFAULT_WATER_COLUMN_WARN_EMITTED = emitted
 
     @staticmethod
     def _record(call):
@@ -207,7 +207,7 @@ class TestDefaultWaterColumnIsAnnounced:
 
     def test_the_notice_names_the_callers_file(self):
         """``stacklevel=2`` has to land on the line the user wrote. Naming a
-        line inside ``acoustics.py`` would also key the once-per-location
+        line inside ``boundaries.py`` would also key the once-per-location
         registry to that line, so under the default filter one caller anywhere
         in a program would silence every other."""
         record = self._record(
@@ -248,8 +248,8 @@ class TestDefaultWaterColumnIsAnnounced:
         """The other side of the once-per-process boundary: silence after the
         first call is the flag doing it, not the call being unreachable."""
         self._record(lambda: reflection_coeff(np.pi / 4.0, 1800.0, 1700.0))
-        assert acoustics._DEFAULT_WATER_COLUMN_WARN_EMITTED is True
-        acoustics._DEFAULT_WATER_COLUMN_WARN_EMITTED = False
+        assert boundaries._DEFAULT_WATER_COLUMN_WARN_EMITTED is True
+        boundaries._DEFAULT_WATER_COLUMN_WARN_EMITTED = False
         record = self._record(
             lambda: reflection_coeff(np.pi / 4.0, 1800.0, 1700.0))
         assert len(record) == 1, [str(w.message) for w in record]

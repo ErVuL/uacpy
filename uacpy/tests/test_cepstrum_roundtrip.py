@@ -1,6 +1,6 @@
 """Cepstrum value contracts: analytic echo series and exact inversion.
 
-The smoke test in ``test_timefreq_funcs.py`` only asserts finiteness; this
+The smoke test in ``test_time_frequency.py`` only asserts finiteness; this
 module pins what the transforms actually compute:
 
 * **Real cepstrum of a single echo** ``x = δ + a·δ_D``: the spectrum is

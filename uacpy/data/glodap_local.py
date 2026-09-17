@@ -14,6 +14,7 @@ letting :func:`uacpy.data.fetch_environment` build absorption from measured pH.
 import tarfile
 import tempfile
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 
@@ -36,15 +37,21 @@ _DEPTH_VARS = ('depth', 'depth_surface')
 
 
 
-def download_glodap_db(cache_dir=None, *, timeout=600.0, verbose=False):
+def download_glodap_db(cache_dir=None, *, url: Optional[str] = None,
+                       timeout=600.0, verbose=False):
     """Download the GLODAPv2.2016b Mapped pH field into the cache.
 
     Fetches the mapped-product tarball (~211 MB), extracts only the in-situ pH
     grid to ``<cache>/glodap/GLODAPv2.2016b.pHtsinsitutp.nc`` and discards the
     rest, then returns the path. Uses curl when available, falling back to the
     urllib fetcher.
+
+    ``url`` fetches that address instead of :data:`GLODAP_URL` — a mirror,
+    or a copy staged on an http server of your own. What is written and
+    how it is read are the same whatever address served it.
     """
     from uacpy.data._http import curl_download, http_get
+    url = url or GLODAP_URL
     dest = _cache.prepare_download(
         'glodap', "downloading GLODAPv2.2016b mapped product (~211 MB)",
         cache_dir=cache_dir, verbose=verbose)
@@ -53,10 +60,10 @@ def download_glodap_db(cache_dir=None, *, timeout=600.0, verbose=False):
     # tmpfs /tmp (RAM) the way the system temp dir can.
     with tempfile.TemporaryDirectory(dir=dest) as tmp:
         tar_path = Path(tmp) / GLODAP_TARBALL
-        if not curl_download(GLODAP_URL, tar_path, timeout=timeout,
+        if not curl_download(url, tar_path, timeout=timeout,
                              verbose=verbose):
             with _cache.atomic_write(tar_path) as part:
-                part.write_bytes(http_get(GLODAP_URL, timeout=timeout,
+                part.write_bytes(http_get(url, timeout=timeout,
                                           verbose=verbose, source='glodap'))
         _extract_ph(tar_path, out)
     _cache.invalidate_grids()
