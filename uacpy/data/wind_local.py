@@ -25,6 +25,12 @@ from uacpy.data._time import parse_date
 __all__ = ['download_wind_db', 'wind_speed', 'climatology_period']
 
 WIND_FILE = 'wind_climatology.npz'
+#: Running totals written after each calendar month, so a build interrupted by
+#: an unreachable host resumes from the months it already has. One global
+#: monthly field is ~4 MB over the wire and there are 12 x len(years) of them,
+#: so a build that restarts from zero re-fetches hundreds of megabytes the
+#: cache had already paid for.
+WIND_PARTIAL_FILE = 'wind_climatology.partial.npz'
 _MONTHLY_DATASET = 'noaacwBlendedWindsMonthly'
 _ERDDAP = 'https://coastwatch.noaa.gov/erddap/griddap'
 _SPEED_VARS = ('windspeed', 'wind_speed', 'w')
@@ -35,6 +41,11 @@ _USER_AGENT = 'uacpy (+https://github.com/ErVuL/uacpy)'
 #: failure, ``status`` of ``None`` -- is the server not answering, and the
 #: name was never the question.
 _NAME_IS_WRONG = frozenset({400, 404})
+#: How many months in a row may go unanswered before the build stops. Each one
+#: costs ``_MAX_RETRIES`` requests against a host that is not answering, so the
+#: figure bounds the wait on a dead server; it is larger than one so that a
+#: flapping host still yields a climatology.
+_UNANSWERED_LIMIT = 3
 
 _CLIM = {}   # path -> _Climatology
 _cache.register_cache(_CLIM.clear)
@@ -54,12 +65,57 @@ def download_wind_db(cache_dir=None, *, years=_DEFAULT_YEARS, timeout=120.0,
         f"{years[-1]} (~{len(years) * 12} monthly grids)",
         cache_dir=cache_dir, verbose=verbose)
     out = dest / WIND_FILE
+    partial = dest / WIND_PARTIAL_FILE
     lat = lon = None
     accum, count = None, None
+    done = set()
+    # Resume whatever a previous run reached, but only when it was building
+    # THIS reference period: totals accumulated over other years are a
+    # different climatology, not a head start on this one.
+    if partial.is_file():
+        with np.load(partial) as state:
+            if tuple(state['years'].tolist()) == tuple(years):
+                lat, lon = state['lat'], state['lon']
+                accum, count = state['accum'], state['count']
+                done = set(state['done'].tolist())
+                log_message('wind', f"resuming from {len(done)} month(s) "
+                            f"already built", verbose=verbose)
+    unanswered = 0
     for month in range(1, 13):
+        if month in done:
+            continue
         for year in years:
-            grid = _fetch_monthly_grid(year, month, timeout=timeout,
-                                       verbose=verbose)
+            # A month the server declines to serve is skipped, as a month the
+            # dataset does not hold is; a server that declines
+            # _UNANSWERED_LIMIT of them in a row is down, and the rest of the
+            # build would only wait out the same timeout ~110 more times.
+            # Counting CONSECUTIVE failures is what separates the two: an
+            # ERDDAP flapping between 502 and 200 answers often enough to
+            # reset the count, and its climatology is built from the months it
+            # did serve rather than abandoned for the ones it did not.
+            try:
+                grid = _fetch_monthly_grid(year, month, timeout=timeout,
+                                           verbose=verbose)
+            except DataFetchError as exc:
+                unanswered += 1
+                if unanswered >= _UNANSWERED_LIMIT:
+                    raise DataFetchError(
+                        f"NBS wind climatology stopped after "
+                        f"{_UNANSWERED_LIMIT} consecutive months the server "
+                        f"did not answer (last: {year}-{month:02d}). "
+                        f"{exc.message}",
+                        status=exc.status,
+                        remediation="The host is unreachable rather than "
+                                    "missing these months; retry when it is "
+                                    "back, or copy a built "
+                                    "<cache>/wind/wind_climatology.npz into "
+                                    "place.",
+                    ) from exc
+                log_message('wind', f"{year}-{month:02d} unanswered "
+                            f"({unanswered}/{_UNANSWERED_LIMIT} in a row)",
+                            verbose=verbose, level='warning')
+                continue
+            unanswered = 0
             if grid is None:
                 continue
             glat, glon, speed = grid
@@ -70,6 +126,16 @@ def download_wind_db(cache_dir=None, *, years=_DEFAULT_YEARS, timeout=120.0,
             valid = np.isfinite(speed)
             accum[month - 1][valid] += speed[valid]
             count[month - 1][valid] += 1
+        # Records the month just finished, so an interruption in the next one
+        # costs that month rather than every month before it.
+        if accum is not None:
+            done.add(month)
+            with _cache.atomic_write(partial) as part:
+                with open(part, 'wb') as fh:
+                    np.savez_compressed(fh, lat=lat, lon=lon, accum=accum,
+                                        count=count,
+                                        done=np.array(sorted(done)),
+                                        years=np.array(years))
         # Two full month sweeps with nothing fetched is the
         # unreachable-server signature; the remaining ten months would
         # retry their way to the same place, so the build stops here.
@@ -97,6 +163,8 @@ def download_wind_db(cache_dir=None, *, years=_DEFAULT_YEARS, timeout=120.0,
             # module default it may not have been built with.
             np.savez_compressed(fh, lat=lat, lon=lon, speed=speed,
                                 years=np.asarray(years, dtype=np.int32))
+    # The running totals have nothing left to resume.
+    partial.unlink(missing_ok=True)
     _CLIM.clear()
     log_message('wind', f"wind climatology cached → {out}", verbose=verbose)
     return out

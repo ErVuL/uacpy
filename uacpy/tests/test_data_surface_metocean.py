@@ -592,3 +592,74 @@ def test_a_failure_with_no_status_stops_rather_than_walking_the_names(
     with pytest.raises(DataFetchError):
         wind_local._fetch_monthly_grid(2020, 3, timeout=1.0, verbose=False)
     assert len(asked) == 1
+
+
+def _monthly_grid_stub(fail_from=None):
+    """A ``_fetch_monthly_grid`` returning a 2x2 field, failing from a month."""
+    lat = np.array([0.0, 1.0])
+    lon = np.array([0.0, 1.0])
+
+    def stub(year, month, **kw):
+        if fail_from is not None and month >= fail_from:
+            raise DataFetchError('HTTP 502 Bad Gateway', status=502)
+        return lat, lon, np.full((2, 2), float(month))
+
+    return stub
+
+
+def test_an_interrupted_build_resumes_from_the_months_it_has(tmp_path,
+                                                             monkeypatch):
+    """One global monthly field is ~4 MB and a build fetches 12 x len(years)
+    of them, so restarting from zero re-fetches what the cache already paid
+    for."""
+    cache = str(tmp_path / 'c')
+    monkeypatch.setattr(wind_local, '_fetch_monthly_grid',
+                        _monthly_grid_stub(fail_from=4))
+    with pytest.raises(DataFetchError, match='consecutive months'):
+        wind_local.download_wind_db(cache_dir=cache, verbose=False)
+
+    # ``cache_dir`` IS the dataset directory: prepare_download uses it
+    # directly rather than appending the dataset name under it.
+    partial = tmp_path / 'c' / wind_local.WIND_PARTIAL_FILE
+    assert partial.is_file(), "nothing was written to resume from"
+    with np.load(partial) as state:
+        assert sorted(state['done'].tolist()) == [1, 2, 3]
+
+    # The host comes back: only the months that are missing are fetched.
+    asked = []
+    inner = _monthly_grid_stub()
+
+    def counting(year, month, **kw):
+        asked.append(month)
+        return inner(year, month, **kw)
+
+    monkeypatch.setattr(wind_local, '_fetch_monthly_grid', counting)
+    out = wind_local.download_wind_db(cache_dir=cache, verbose=False)
+    assert out.is_file()
+    assert set(asked) == set(range(4, 13)), (
+        f"refetched months {sorted(set(asked))}; 1-3 were already built")
+    assert not partial.exists(), "the resume file outlived the build"
+
+
+def test_totals_from_another_reference_period_are_not_resumed(tmp_path,
+                                                              monkeypatch):
+    """Totals accumulated over other years are a different climatology, not a
+    head start on this one."""
+    cache = str(tmp_path / 'c')
+    monkeypatch.setattr(wind_local, '_fetch_monthly_grid',
+                        _monthly_grid_stub(fail_from=2))
+    with pytest.raises(DataFetchError):
+        wind_local.download_wind_db(cache_dir=cache, years=(2013, 2014),
+                                    verbose=False)
+
+    asked = []
+    inner = _monthly_grid_stub()
+
+    def counting(year, month, **kw):
+        asked.append(month)
+        return inner(year, month, **kw)
+
+    monkeypatch.setattr(wind_local, '_fetch_monthly_grid', counting)
+    wind_local.download_wind_db(cache_dir=cache, years=(2015, 2016),
+                                verbose=False)
+    assert 1 in asked, "January was taken from a build over different years"
