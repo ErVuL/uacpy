@@ -22,9 +22,11 @@ is to cite Laske et al. 2013; commercial terms are unspecified, so verify before
 commercial use. Downloaded at install time, never bundled.
 """
 
+import hashlib
 import io
 import tarfile
 from pathlib import Path
+from typing import Optional
 
 import warnings
 
@@ -46,8 +48,38 @@ from uacpy.data._http import http_get, checked_member_size
 __all__ = ['download_crust1_db', 'fetch_crust1_profile', 'fetch_bottom_crust1',
            'fetch_bottom_crust1_transect']
 
+#: Where the model is published: Laske et al.'s page at IGPP. Tried first
+#: although it does not answer (below), so a restored server is preferred to a
+#: mirror without an edit here.
 CRUST1_URL = 'https://igppweb.ucsd.edu/~gabi/crust1/crust1.0.tar.gz'
+#: Tried in order after :data:`CRUST1_URL`, which no longer serves the model:
+#: every path under ``igppweb.ucsd.edu`` answers a plain Apache 403 while
+#: ``/`` redirects to ``igpp.ucsd.edu``, the institute's current site. That is
+#: the whole legacy document tree rather than this page in particular --
+#: ``/~definitely-no-such-user/`` is 403 as well, where a live ``mod_userdir``
+#: answers 404 -- and it holds for every client, curl, a browser agent, a
+#: Python agent and none alike.
+#:
+#: A mirror is safe here because :data:`CRUST1_MD5` decides whether a download
+#: is the model, not the address it came from. This one is the Internet
+#: Archive's snapshot of the publisher's own tarball; ``id_`` asks it for the
+#: original bytes rather than a rewritten page.
+CRUST1_MIRROR_URLS = (
+    'https://web.archive.org/web/20260217164003id_/'
+    'https://igppweb.ucsd.edu/~gabi/crust1/crust1.0.tar.gz',
+)
 _FILES = ('crust1.bnds', 'crust1.vp', 'crust1.vs', 'crust1.rho')
+#: MD5 of each grid as published, checked on every download before any of the
+#: four is written. Measured on two independently obtained copies that agree
+#: to the byte: a cache built from the IGPP page while it served, and the
+#: Internet Archive's snapshot of the same tarball. What identifies CRUST1.0
+#: here is therefore the data, leaving the address free to change.
+CRUST1_MD5 = {
+    'crust1.bnds': '2b472a8d99d1c8d2ca35ecb8b79e36e2',
+    'crust1.vp': '8d2bab6fb836ab88407deed8c2084cf1',
+    'crust1.vs': '34f29ce5f8d4846d0508d4e709b8191b',
+    'crust1.rho': '6202a5339b98c9662caa45c4e6382c8a',
+}
 _NLAT, _NLON, _NLAYER = 180, 360, 9
 # 9 columns per cell: water, ice, upper/middle/lower sediment,
 # upper/middle/lower crystalline crust, mantle (below Moho).
@@ -100,29 +132,80 @@ _MODEL = {}   # cache_root -> dict(bnds=, vp=, vs=, rho=) each (64800, 9)
 _cache.register_cache(_MODEL.clear)
 
 
-def download_crust1_db(cache_dir=None, *, timeout=180.0, verbose=False):
+def download_crust1_db(cache_dir=None, *, url: Optional[str] = None,
+                       timeout=180.0, verbose=False):
     """Download + extract the CRUST1.0 grids (``crust1.bnds/vp/vs/rho``).
 
     Writes the four ASCII grids into ``<cache>/crust1/`` and returns that dir.
+
+    Every grid is checked against :data:`CRUST1_MD5` before it is written, so
+    what decides whether a download is CRUST1.0 is the data, not the host it
+    came from. A mismatch raises and leaves the cache untouched.
+
+    ``url`` fetches one address and only that one. Given nothing, the
+    published address :data:`CRUST1_URL` is tried first and
+    :data:`CRUST1_MIRROR_URLS` after it, so a restored publisher is preferred
+    to a mirror (those constants carry the state of each).
+
+    A copy of an existing ``<cache>/crust1/`` directory also works:
+    :func:`uacpy.data._cache.require` reads what is in the cache without
+    asking where it came from.
     """
     dest = _cache.prepare_download(
         'crust1', "downloading CRUST1.0 (Laske et al. 2013, ~1 MB)",
         cache_dir=cache_dir, verbose=verbose)
-    blob = http_get(CRUST1_URL, timeout=timeout, verbose=verbose, source='crust1')
+    addresses = (url,) if url else (CRUST1_URL,) + CRUST1_MIRROR_URLS
+    blob, failures = None, []
+    for address in addresses:
+        try:
+            blob = http_get(address, timeout=timeout, verbose=verbose,
+                            source='crust1')
+            break
+        except DataFetchError as exc:
+            failures.append(f"{address}: {exc}")
+            log_message('crust1', f"{address} did not answer; trying the next"
+                        if address is not addresses[-1] else f"{address} did "
+                        f"not answer", verbose=verbose, level='warning')
+    if blob is None:
+        raise DataFetchError(
+            "CRUST1.0 could not be fetched from any known address.\n  "
+            + "\n  ".join(failures),
+            remediation="Pass url= for a mirror, or copy an existing "
+                        "<cache>/crust1/ directory (crust1.bnds, .vp, .vs, "
+                        ".rho) into this cache; the reader does not care "
+                        "where the files came from.",
+        )
     tf = tarfile.open(fileobj=io.BytesIO(blob))
-    written = 0
+    # Digest every grid BEFORE any of them is written: a half-written cache of
+    # verified files beside unverified ones is the state that would be hardest
+    # to notice later.
+    bodies = {}
     for member in tf.getmembers():
         name = Path(member.name).name
-        if name in _FILES and not Path(member.name).name.startswith('._'):
+        if name in _FILES and not name.startswith('._'):
             checked_member_size(member.size, name)
-            with _cache.atomic_write(dest / name) as part:
-                part.write_bytes(tf.extractfile(member).read())
-            written += 1
-    if written < len(_FILES):
+            bodies[name] = tf.extractfile(member).read()
+    missing = [name for name in _FILES if name not in bodies]
+    if missing:
         raise DataFetchError(
-            "CRUST1.0 archive did not contain the expected grids.",
+            f"CRUST1.0 archive did not contain {', '.join(missing)}.",
             remediation="Retry; the upstream archive layout may have changed.",
         )
+    for name, body in bodies.items():
+        digest = hashlib.md5(body).hexdigest()
+        if digest != CRUST1_MD5[name]:
+            raise DataFetchError(
+                f"{name} from {addresses[0] if not url else url} is not the "
+                f"published grid: md5 {digest}, expected "
+                f"{CRUST1_MD5[name]}.",
+                remediation="The archive at that address is not CRUST1.0 as "
+                            "this package was validated against it. Use "
+                            "another mirror; do not relax the digest to make "
+                            "a download pass.",
+            )
+    for name, body in bodies.items():
+        with _cache.atomic_write(dest / name) as part:
+            part.write_bytes(body)
     _MODEL.clear()
     log_message('crust1', f"CRUST1.0 grids cached → {dest}", verbose=verbose)
     return dest

@@ -219,11 +219,11 @@ GRAIN_SIZE_MODELS = ('hamilton', 'apl-uw')
 #: ``model='apl-uw'`` for a high-frequency problem, which is also what makes a
 #: uacpy seabed identical to the Acoustics Toolbox's own ``'G'`` bottom.
 #:
-#: Two things this default does NOT decide. It does not reach
+#: Two things this default does not decide. It does not reach
 #: :mod:`uacpy.sonar.bottom_scattering`, whose APL-UW backscattering model is a
-#: 10-100 kHz model and evaluates the APL-UW relations by construction; and it
-#: is not applied from a frequency anywhere, because a grain-size conversion is
-#: never given one. A caller working above 10 kHz has to say so.
+#: 10-100 kHz model and evaluates the APL-UW relations by construction; and no
+#: code applies it from a frequency, because a grain-size conversion is never
+#: given one. A caller working above 10 kHz passes ``model='apl-uw'``.
 DEFAULT_GRAIN_SIZE_MODEL = 'hamilton'
 # Seawater each model's ratios are referenced to, used when the caller gives no
 # in-situ values. These are uacpy's in-situ defaults, not the conditions the

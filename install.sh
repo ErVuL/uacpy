@@ -215,19 +215,17 @@ robust_curl() {
     local url="$1" out="$2"; shift 2
     local attempt=0 max_attempts=20 rc http_code
     while :; do
-        # NO ``--retry``. curl computes the ``-C -`` resume offset ONCE, when
-        # it starts, and an internal retry restarts the transfer at that same
-        # offset -- so every byte the failed attempt wrote is thrown away. On
-        # the 7.5 GB GEBCO grid that showed up as a download reaching 2.5 GB,
-        # dropping, restarting from zero, reaching 6.6 GB, dropping, and
-        # restarting from zero again: three inner retries, three truncations,
-        # 9 GB transferred for nothing. Retrying is the OUTER loop's job
-        # because each pass is a fresh curl that re-reads the partial file and
-        # genuinely resumes.
+        # Fetches with resume, and leaves retrying to the outer loop. curl
+        # fixes the ``-C -`` offset when it starts, so an internal ``--retry``
+        # restarts at that offset and discards whatever the failed attempt
+        # wrote -- a multi-gigabyte grid is then fetched repeatedly from zero.
+        # Each pass of the loop is a fresh curl that re-reads the partial file,
+        # so every retry resumes.
         #
-        # ``--speed-limit``/``--speed-time`` end a stalled transfer instead of
-        # letting it hold the connection at 0 B/s until the server times out;
-        # the outer loop then resumes it.
+        # ``--speed-limit``/``--speed-time`` end a transfer that has stalled at
+        # under 1 kB/s for 30 s, which the next pass resumes, rather than
+        # holding a dead connection until ``--connect-timeout`` or the server
+        # drops it.
         http_code=$(curl -fL --http1.1 --connect-timeout 30 \
                 --speed-limit 1024 --speed-time 60 \
                 -C - -o "$out" -w '%{http_code}' "$@" "$url")
@@ -1202,11 +1200,30 @@ if [ -d "$OASES_DIR" ]; then
         OASES_OSTYPE="${OSTYPE//[^[:alnum:]\.-]/}"
     fi
 
-    export OASES_ROOT="$OASES_DIR"
-    export OASES_BIN="$OASES_DIR/bin/${OASES_HOSTTYPE}-${OASES_OSTYPE}"
-    export OASES_LIB="$OASES_DIR/lib/${OASES_HOSTTYPE}-${OASES_OSTYPE}"
+    # Builds OASES through a private symlink whose path holds no spaces,
+    # whatever the checkout is called. Every write lands in the real tree,
+    # because that is where the link points; only the name the makefiles see
+    # differs.
+    #
+    # The link is necessary rather than tidy: ``make`` splits targets on
+    # whitespace and ``$(BIN)/oast`` is a target, so a root path containing a
+    # space cannot be expressed at all, quoted or not, and the vendored
+    # makefiles carry that path at 48 sites across two files. A parenthesis in
+    # it also breaks the shell before any file compiles --
+    # "mkdir -p ${BIN} ${LIB}" (Makefile:275) reaches /bin/sh as a subshell.
+    OASES_LINK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/uacpy-oases-XXXXXX")"
+    ln -s "$OASES_DIR" "$OASES_LINK_DIR/oases"
+    OASES_BUILD_DIR="$OASES_LINK_DIR/oases"
 
-    mkdir -p "$OASES_BIN" "$OASES_LIB" "$OASES_DIR/src/${OASES_HOSTTYPE}-${OASES_OSTYPE}"
+    export OASES_ROOT="$OASES_BUILD_DIR"
+    export OASES_BIN="$OASES_BUILD_DIR/bin/${OASES_HOSTTYPE}-${OASES_OSTYPE}"
+    export OASES_LIB="$OASES_BUILD_DIR/lib/${OASES_HOSTTYPE}-${OASES_OSTYPE}"
+
+    mkdir -p "$OASES_BIN" "$OASES_LIB" \
+             "$OASES_BUILD_DIR/src/${OASES_HOSTTYPE}-${OASES_OSTYPE}"
+    # And build FROM the link, so a rule reaching for $(PWD) gets the plain
+    # name too rather than the one it cannot use.
+    cd "$OASES_BUILD_DIR"
 
     # The OASES root Makefile looks up per-platform settings using the key
     # "${HOSTTYPE}-${OSTYPE}" (e.g. "FC.i386-linux-linux" at line 196). Bash's
@@ -1250,7 +1267,7 @@ if [ -d "$OASES_DIR" ]; then
     make \
         HOSTTYPE="$OASES_HOSTTYPE" \
         OSTYPE="$OASES_OSTYPE" \
-        OASES_ROOT="$OASES_DIR" \
+        OASES_ROOT="$OASES_BUILD_DIR" \
         FC_STMNT="$OASES_FC" \
         CC_STMNT=gcc \
         FFLAGS="$OASES_FFLAGS" \
@@ -1260,6 +1277,16 @@ if [ -d "$OASES_DIR" ]; then
         oases 2>&1 | tee "${BUILD_LOG_DIR}"/oases_build.log
     OASES_STATUS=${PIPESTATUS[0]:-1}
     set -e
+
+    # Points the paths back at the real tree, then drops the link. The order
+    # matters: the copy step below reads $OASES_BIN, and a link-relative value
+    # there names a directory that no longer exists, so a successful build
+    # installs nothing.
+    export OASES_BIN="$OASES_DIR/bin/${OASES_HOSTTYPE}-${OASES_OSTYPE}"
+    export OASES_LIB="$OASES_DIR/lib/${OASES_HOSTTYPE}-${OASES_OSTYPE}"
+    export OASES_ROOT="$OASES_DIR"
+    cd "$OASES_DIR"
+    rm -rf "$OASES_LINK_DIR"
 
     if [[ $OASES_STATUS -eq 0 ]]; then
         echo -e "${GREEN}✓ OASES build completed${NC}"

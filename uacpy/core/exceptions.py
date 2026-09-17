@@ -239,7 +239,20 @@ class DataFetchError(UACPYError):
     apart would force a four-way ``except`` for that one decision.
 
     Catch via ``except DataFetchError`` or, more broadly, ``except
-    UACPYError``."""
+    UACPYError``.
+
+    ``status`` is the HTTP status when the failure came from a remote answer,
+    and ``None`` otherwise (a local read, a timeout, a DNS failure). It exists
+    so a caller can tell "the server said no such variable" from "the server
+    did not answer": the two look identical in the message and call for
+    opposite responses — try the next name, or stop asking. ``uacpy.data.
+    wind_local`` reads it for exactly that, walking its three candidate
+    variable names only while a server is answering.
+    """
+
+    def __init__(self, message, remediation=None, *, status=None):
+        super().__init__(message, remediation)
+        self.status = status
     pass
 
 

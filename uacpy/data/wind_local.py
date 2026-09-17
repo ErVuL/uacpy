@@ -30,6 +30,11 @@ _ERDDAP = 'https://coastwatch.noaa.gov/erddap/griddap'
 _SPEED_VARS = ('windspeed', 'wind_speed', 'w')
 _DEFAULT_YEARS = tuple(range(2013, 2023))            # a recent decade
 _USER_AGENT = 'uacpy (+https://github.com/ErVuL/uacpy)'
+#: Statuses that mean "this dataset does not have that variable", so the next
+#: candidate name is worth trying. Everything else -- a 5xx, a timeout, a DNS
+#: failure, ``status`` of ``None`` -- is the server not answering, and the
+#: name was never the question.
+_NAME_IS_WRONG = frozenset({400, 404})
 
 _CLIM = {}   # path -> _Climatology
 _cache.register_cache(_CLIM.clear)
@@ -107,10 +112,21 @@ def _fetch_monthly_grid(year, month, *, timeout, verbose):
         query = urllib.parse.quote(constraint, safe='[]():.,-TZ')
         url = f"{_ERDDAP}/{_MONTHLY_DATASET}.nc?{query}"
         try:
-            blob = http_get(url, timeout=timeout, verbose=verbose, source='wind',
-                            user_agent=_USER_AGENT)
-        except DataFetchError:
-            continue
+            blob = http_get(url, timeout=timeout, verbose=verbose,
+                            source='wind', user_agent=_USER_AGENT)
+        except DataFetchError as exc:
+            # Walks to the next candidate name only when the server answered
+            # and the answer was about the request: ERDDAP returns 400 or 404
+            # for a variable a dataset does not have. Any other failure means
+            # it never got far enough to have an opinion about variable names,
+            # so asking the same question under two more names buys nothing
+            # and costs two more timeouts each -- against a gateway that
+            # times out at 60 s, three names by four retries is twelve minutes
+            # for one month, and the caller needs twenty months of that before
+            # its unreachable-server guard fires.
+            if exc.status in _NAME_IS_WRONG:
+                continue
+            raise
         try:
             # Parsed in memory, with no scratch file.
             #

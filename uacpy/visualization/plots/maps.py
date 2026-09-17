@@ -430,11 +430,11 @@ def plot_sea_ice_map(grid, *, hemi: str = 'N', transect=None, source=None,
             if len(pts) > 1:
                 ax.plot([c for _, c in pts], [r for r, _ in pts], color='0.4',
                         lw=0.6, alpha=0.45, zorder=2)
-        # Plain floats, not the numpy scalars ``arange`` yields: the grids
-        # below are fed to ``sea_ice_pixel``, whose ``Coordinate`` is a
-        # ``tuple[float, float]``. ``np.float64`` happens to subclass ``float``
-        # so this never misbehaved, but the annotation is what ``py.typed``
-        # promises a caller's checker, and the promise is checked here.
+        # Builds the graticule grids as plain floats rather than the numpy
+        # scalars ``arange`` yields, because they are fed to
+        # ``sea_ice_pixel``, whose ``Coordinate`` is a ``tuple[float, float]``.
+        # ``np.float64`` subclasses ``float``, so this is what ``py.typed``
+        # promises a caller's checker rather than what the values do.
         lon_s = [float(lon) for lon in np.arange(-180.0, 181.0, 2.0)]
         for lat_c in [float(lat)                               # parallels
                       for lat in np.arange(50.0, 90.0, graticule) * sgn]:

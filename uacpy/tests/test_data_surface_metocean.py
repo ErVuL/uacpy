@@ -537,3 +537,58 @@ def test_the_environment_provenance_carries_the_wind_vintage(dated_wind_cache):
     assert _climatology_vintage('wind') == '2013-2022 (climatology)'
     assert _climatology_vintage('gebco') is None
     assert _climatology_vintage('woa23') is None
+
+
+def test_a_variable_the_dataset_lacks_moves_on_to_the_next_name(monkeypatch):
+    """Three candidate names exist because the NBS datasets have used
+    different ones; a 404 is the server saying this is not the right one."""
+    asked = []
+
+    def fake_get(url, **kw):
+        asked.append(url)
+        raise DataFetchError('HTTP 404 Not Found', status=404)
+
+    monkeypatch.setattr(wind_local, 'http_get', fake_get)
+    assert wind_local._fetch_monthly_grid(2020, 3, timeout=1.0,
+                                          verbose=False) is None
+    assert len(asked) == len(wind_local._SPEED_VARS), (
+        "a 404 should have been read as the wrong variable name")
+
+
+def test_a_server_that_does_not_answer_is_not_asked_under_two_more_names(
+        monkeypatch):
+    """A 5xx says nothing about variable names, and each one costs a timeout.
+
+    Against a gateway that answers 502 after 60 s, walking the three names
+    makes one month cost twelve minutes, and the caller's unreachable-server
+    guard needs twenty months before it fires — four hours to report that a
+    server is down.
+    """
+    asked = []
+
+    def fake_get(url, **kw):
+        asked.append(url)
+        raise DataFetchError('HTTP 502 Bad Gateway', status=502)
+
+    monkeypatch.setattr(wind_local, 'http_get', fake_get)
+    with pytest.raises(DataFetchError, match='502'):
+        wind_local._fetch_monthly_grid(2020, 3, timeout=1.0, verbose=False)
+    assert len(asked) == 1, (
+        f"the dead server was asked {len(asked)} times under different "
+        f"variable names")
+
+
+def test_a_failure_with_no_status_stops_rather_than_walking_the_names(
+        monkeypatch):
+    """A timeout or DNS failure carries no status at all, and it is no more
+    a statement about variable names than a 502 is."""
+    asked = []
+
+    def fake_get(url, **kw):
+        asked.append(url)
+        raise DataFetchError('connection timed out')
+
+    monkeypatch.setattr(wind_local, 'http_get', fake_get)
+    with pytest.raises(DataFetchError):
+        wind_local._fetch_monthly_grid(2020, 3, timeout=1.0, verbose=False)
+    assert len(asked) == 1

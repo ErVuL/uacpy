@@ -11,6 +11,8 @@ import threading
 import warnings
 
 import numpy as np
+import hashlib
+
 import pytest
 
 from uacpy.data import _cache
@@ -410,12 +412,19 @@ def test_graw_download(tmp_path, monkeypatch):
 
 def test_crust1_download(tmp_path, monkeypatch):
     buf = io.BytesIO()
+    blob = b'0 0 0 0 0 0 0 0 0\n'
     with tarfile.open(fileobj=buf, mode='w:gz') as tf:
         for name in ('crust1.bnds', 'crust1.vp', 'crust1.vs', 'crust1.rho'):
-            blob = b'0 0 0 0 0 0 0 0 0\n'
             info = tarfile.TarInfo(name); info.size = len(blob)
             tf.addfile(info, io.BytesIO(blob))
-    monkeypatch.setattr(crust1_local, 'http_get', lambda url, **kw: buf.getvalue())
+    # The transport is what this exercises, so the digests move to the stand-in
+    # rows: with the published ones in place the download would be refused,
+    # which is the subject of its own test below.
+    monkeypatch.setattr(crust1_local, 'CRUST1_MD5',
+                        {name: hashlib.md5(blob).hexdigest()
+                         for name in crust1_local.CRUST1_MD5})
+    monkeypatch.setattr(crust1_local, 'http_get',
+                        lambda url, **kw: buf.getvalue())
     out = crust1_local.download_crust1_db(cache_dir=str(tmp_path / 'o'))
     assert (out / 'crust1.bnds').exists()
 
@@ -481,3 +490,128 @@ def test_a_non_elastic_crust1_column_carries_no_shear_loss(cache):
         assert layer.shear_speed == 0.0
         assert layer.shear_attenuation == 0.0
     assert bottom.halfspace.shear_attenuation == 0.0
+
+
+def test_crust1_fetches_from_the_url_it_is_given(tmp_path, monkeypatch):
+    """The address is an argument, so a mirror or a locally served file
+    reaches the same reader.
+
+    The published tarball sits on a personal academic page: every path under
+    that host answers 403 while the host itself serves 200, which no retry
+    inside this package can do anything about.
+    """
+    import io as _io
+    import tarfile as _tarfile
+
+    from uacpy.data import crust1_local
+
+    grids = {'crust1.bnds': b'0.0\n', 'crust1.vp': b'6.0\n',
+             'crust1.vs': b'3.5\n', 'crust1.rho': b'2.7\n'}
+    monkeypatch.setattr(crust1_local, 'CRUST1_MD5',
+                        {name: hashlib.md5(body).hexdigest()
+                         for name, body in grids.items()})
+    buffer = _io.BytesIO()
+    with _tarfile.open(fileobj=buffer, mode='w:gz') as archive:
+        for name, body in grids.items():
+            info = _tarfile.TarInfo(f'crust1.0/{name}')
+            info.size = len(body)
+            archive.addfile(info, _io.BytesIO(body))
+    blob = buffer.getvalue()
+
+    asked = []
+
+    def fake_get(url, **kwargs):
+        asked.append(url)
+        return blob
+
+    monkeypatch.setattr(_http, 'http_get', fake_get)
+    monkeypatch.setattr(crust1_local, 'http_get', fake_get)
+    mirror = 'https://mirror.invalid/crust1.0.tar.gz'
+    out = crust1_local.download_crust1_db(cache_dir=str(tmp_path / 'c'),
+                                          url=mirror)
+    assert asked == [mirror], (
+        f"the mirror was ignored; fetched {asked} instead")
+    assert sorted(p.name for p in out.iterdir()) == sorted(grids)
+
+
+def test_crust1_asks_the_published_address_before_any_mirror(tmp_path,
+                                                            monkeypatch):
+    """The publisher is asked before any mirror.
+
+    A mirror is a fallback rather than a replacement, and the order is what
+    says so: a restored publisher is used again without an edit here.
+    """
+    from uacpy.data import crust1_local
+
+    asked = []
+
+    def fake_get(url, **kwargs):
+        asked.append(url)
+        raise DataFetchError('stop here', remediation='')
+
+    monkeypatch.setattr(crust1_local, 'http_get', fake_get)
+    with pytest.raises(DataFetchError, match='any known address'):
+        crust1_local.download_crust1_db(cache_dir=str(tmp_path / 'c'))
+    assert asked[0] == crust1_local.CRUST1_URL
+    assert asked[1:] == list(crust1_local.CRUST1_MIRROR_URLS)
+
+
+def _crust1_tarball(bodies):
+    """A CRUST1.0-shaped tar.gz carrying ``bodies`` as its four grids."""
+    import io as _io
+    import tarfile as _tarfile
+
+    buffer = _io.BytesIO()
+    with _tarfile.open(fileobj=buffer, mode='w:gz') as archive:
+        for name, body in bodies.items():
+            info = _tarfile.TarInfo(f'crust1.0/{name}')
+            info.size = len(body)
+            archive.addfile(info, _io.BytesIO(body))
+    return buffer.getvalue()
+
+
+def test_crust1_falls_back_to_a_mirror_when_the_publisher_does_not_answer(
+        tmp_path, monkeypatch):
+    """Every path under ``igppweb.ucsd.edu`` answers 403, so the published
+    address alone fetches nothing and the mirror carries the download."""
+    from uacpy.data import crust1_local
+
+    bodies = {name: b'1.0\n' for name in crust1_local.CRUST1_MD5}
+    digests = {name: hashlib.md5(body).hexdigest()
+               for name, body in bodies.items()}
+    monkeypatch.setattr(crust1_local, 'CRUST1_MD5', digests)
+
+    def fake_get(url, **kwargs):
+        if url == crust1_local.CRUST1_URL:
+            raise DataFetchError('HTTP 403 Forbidden', remediation='')
+        return _crust1_tarball(bodies)
+
+    monkeypatch.setattr(crust1_local, 'http_get', fake_get)
+    out = crust1_local.download_crust1_db(cache_dir=str(tmp_path / 'c'))
+    assert sorted(p.name for p in out.iterdir()) == sorted(bodies)
+
+
+def test_a_grid_that_is_not_the_published_one_is_refused(tmp_path,
+                                                         monkeypatch):
+    """The digests are what decide whether a download is CRUST1.0.
+
+    Nothing verified that before, so any mirror could have served anything.
+    A tampered grid must not reach the cache — and neither must the three
+    beside it that happen to be right, which is why the check runs over the
+    whole archive before a single file is written.
+    """
+    from uacpy.data import crust1_local
+
+    bodies = {name: b'1.0\n' for name in crust1_local.CRUST1_MD5}
+    digests = {name: hashlib.md5(body).hexdigest()
+               for name, body in bodies.items()}
+    monkeypatch.setattr(crust1_local, 'CRUST1_MD5', digests)
+    bodies['crust1.vp'] = b'9.9\n'          # not what the digest says
+
+    monkeypatch.setattr(crust1_local, 'http_get',
+                        lambda url, **kw: _crust1_tarball(bodies))
+    dest = tmp_path / 'c'
+    with pytest.raises(DataFetchError, match='is not the published grid'):
+        crust1_local.download_crust1_db(cache_dir=str(dest))
+    written = list((dest / 'crust1').glob('crust1.*')) if dest.exists() else []
+    assert not written, f"a refused archive still wrote {written}"

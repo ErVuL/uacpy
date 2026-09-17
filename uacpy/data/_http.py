@@ -209,9 +209,15 @@ def http_get(
                 continue
             raise DataFetchError(
                 f"Request to {url} failed: HTTP {exc.code} {exc.reason}.",
-                remediation="Check the dataset/coordinate request. Public hosts "
-                            "may be rate-limited — retry later or point at a "
-                            "self-hosted instance via base_url=.",
+                status=exc.code,
+                remediation="Check the dataset/coordinate request. Public "
+                            "hosts may be rate-limited, and a personal "
+                            "academic page can be withdrawn without notice — "
+                            "retry later, or fetch the file yourself and drop "
+                            "it in this dataset's cache directory, which is "
+                            "where the reader looks. The ERDDAP fetchers "
+                            "(argo, bathymetry) also take base_url=; the "
+                            "static-grid downloaders do not.",
             ) from exc
         except _TRANSIENT_EXC as exc:
             # Connection reset / timeout / truncated body / remote disconnect —

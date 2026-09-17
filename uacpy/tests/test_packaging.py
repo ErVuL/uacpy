@@ -1504,6 +1504,49 @@ def test_robust_curl_stops_on_a_permanent_http_error():
     assert '"429"' in fn and '"408"' in fn
 
 
+def test_oases_is_built_through_a_path_without_spaces():
+    """``make`` cannot express a target whose path contains a space.
+
+    OASES's vendored makefiles carry the root-derived path at 48 sites across
+    two files, and many of them are targets — ``$(BIN)/oast`` is one. Quoting
+    cannot fix a target, because make splits targets on whitespace before any
+    shell sees them. A parenthesis in the name breaks the shell as well: from a
+    checkout under a path like ``/srv/My Tools (v2)/uacpy``, ``Makefile:275``'s
+    ``mkdir -p ${BIN} ${LIB}`` fails with
+    ``/bin/sh: 1: Syntax error: "(" unexpected`` before a single file compiles.
+
+    So the build runs through a private symlink whose own path is plain, and
+    the writes land in the real tree because that is where the link points.
+    What this pins is that the path handed to make is the LINK's, not the
+    workspace's — passing ``$OASES_DIR`` would put the space back.
+    """
+    body = _INSTALL_SH.read_text(encoding="utf-8")
+    start = body.index("OASES_LINK_DIR=")
+    block = body[start:body.index("OASES_STATUS=", start)]
+    assert "mktemp -d" in block, "no private directory is made for the link"
+    assert 'ln -s "$OASES_DIR"' in block, "the real tree is never linked"
+    for name in ("OASES_ROOT", "OASES_BIN", "OASES_LIB"):
+        assert f'export {name}="$OASES_BUILD_DIR' in block, (
+            f"{name} is not derived from the space-free link")
+    assert 'OASES_ROOT="$OASES_BUILD_DIR"' in block, (
+        "make is handed the workspace path, so a space in it comes back")
+    assert 'OASES_ROOT="$OASES_DIR"' not in block, (
+        "the workspace path is still passed to make somewhere in the block")
+    assert 'cd "$OASES_BUILD_DIR"' in block, (
+        "the build does not run from the link, so $(PWD) still has the space")
+    assert 'rm -rf "$OASES_LINK_DIR"' in body, "the link directory leaks"
+    # The copy step that follows reads $OASES_BIN, so the variables point back
+    # at the real tree before the link goes: removing it first leaves the
+    # build succeeding and the install reporting "No OASES executables
+    # installed".
+    restored = body.index('export OASES_BIN="$OASES_DIR')
+    removed = body.index('rm -rf "$OASES_LINK_DIR"')
+    copied = body.index('cp "$OASES_BIN/$b"')
+    assert restored < removed < copied, (
+        "the link is removed before $OASES_BIN is pointed back at the real "
+        "tree, so the copy step searches a deleted directory")
+
+
 @pytest.mark.slow
 def test_robust_curl_resumes_a_broken_transfer_rather_than_restarting_it():
     """The retry has to resume, and only an outer retry can.
@@ -2545,10 +2588,10 @@ def test_the_shared_download_helper_fails_fast_on_a_refused_connection():
     further round only multiplies sleeps — 20 outer attempts cost ~6 minutes
     per file against a down server.
 
-    Two rather than one because the curl line no longer carries ``--retry``:
-    it used to re-send a refused connection four times inside curl before the
-    outer loop saw it, and dropping it (so that ``-C -`` resumes instead of
-    restarting) took that cover away with it."""
+    Two rather than one because the curl line carries no ``--retry``: curl
+    re-sending a refused connection internally would restart the transfer at
+    the ``-C -`` offset it fixed at startup, so the outer loop owns every
+    retry and covers the balancer blip itself."""
     text = (Path(_REPO_ROOT) / "install.sh").read_text(encoding="utf-8")
     fn = text[text.index("robust_curl()"):]
     fn = fn[:fn.index("\n}\n")]

@@ -1171,9 +1171,9 @@ class TestBothModelsReproduceAPublishedCompilation:
 class TestTheDefaultModelHasOneHome:
     """``model='hamilton'`` is read from one constant, not written out 23 times.
 
-    It used to be a literal at 23 call signatures across ten modules. Nothing
-    held them together: a deliberate change of default would have had to find
-    all 23, and a half-done one would have left ``fetch_bottom_deck41`` and
+    A literal repeated at 23 call signatures across ten modules has nothing
+    holding it together: changing the default deliberately means finding all
+    23, and a half-done change leaves ``fetch_bottom_deck41`` and
     ``fetch_bottom_mars`` converting the same grain size two different ways
     without a word.
 
