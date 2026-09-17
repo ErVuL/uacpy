@@ -19,211 +19,87 @@ from uacpy._log import log_message
 from uacpy.core.exceptions import DataFetchError
 from uacpy.data import _cache
 from uacpy.data._geo import as_coordinate, normalize_lon
-from uacpy.data._http import http_get
+from uacpy.data._http import curl_download
 from uacpy.data._time import parse_date
 
 __all__ = ['download_wind_db', 'wind_speed', 'climatology_period']
 
 WIND_FILE = 'wind_climatology.npz'
-#: Running totals written after each calendar month, so a build interrupted by
-#: an unreachable host resumes from the months it already has. One global
-#: monthly field is ~4 MB over the wire and there are 12 x len(years) of them,
-#: so a build that restarts from zero re-fetches hundreds of megabytes the
-#: cache had already paid for.
-WIND_PARTIAL_FILE = 'wind_climatology.partial.npz'
-_MONTHLY_DATASET = 'noaacwBlendedWindsMonthly'
-_ERDDAP = 'https://coastwatch.noaa.gov/erddap/griddap'
-_SPEED_VARS = ('windspeed', 'wind_speed', 'w')
-_DEFAULT_YEARS = tuple(range(2013, 2023))            # a recent decade
-_USER_AGENT = 'uacpy (+https://github.com/ErVuL/uacpy)'
-#: Statuses that mean "this dataset does not have that variable", so the next
-#: candidate name is worth trying. Everything else -- a 5xx, a timeout, a DNS
-#: failure, ``status`` of ``None`` -- is the server not answering, and the
-#: name was never the question.
-_NAME_IS_WRONG = frozenset({400, 404})
-#: How many months in a row may go unanswered before the build stops. Each one
-#: costs ``_MAX_RETRIES`` requests against a host that is not answering, so the
-#: figure bounds the wait on a dead server; it is larger than one so that a
-#: flapping host still yields a climatology.
-_UNANSWERED_LIMIT = 3
+#: The published climatology this fetcher caches: NOAA/NCEI's own blended
+#: monthly means over the 1991-2020 WMO reference period, on a 0.25 deg global
+#: grid. One request for a file that is already averaged.
+NBS_CLIMATOLOGY_URL = (
+    'https://www.ncei.noaa.gov/data/blended-global-sea-surface-wind-products/'
+    'access/climatology/NBS_v02_wind_climmonthly_s1991_e2020_c20221206.nc')
+#: Reference period of :data:`NBS_CLIMATOLOGY_URL`, recorded in the cache so
+#: :func:`climatology_period` reports it.
+NBS_CLIMATOLOGY_YEARS = (1991, 2020)
+#: Name the published file is staged under while its wind speed is extracted.
+_NBS_RAW_FILE = 'nbs_climatology.nc'
 
 _CLIM = {}   # path -> _Climatology
 _cache.register_cache(_CLIM.clear)
 
 
-def download_wind_db(cache_dir=None, *, years=_DEFAULT_YEARS, timeout=120.0,
-                     verbose=False):
-    """Build the NBS monthly wind-speed climatology and cache it.
+def download_wind_db(cache_dir=None, *, timeout=300.0, verbose=False):
+    """Cache NOAA/NCEI's published wind climatology and return its path.
 
-    Averages the NBS monthly-mean global fields over ``years`` per calendar
-    month, writing ``<cache>/wind/wind_climatology.npz`` (arrays ``lat``,
-    ``lon``, ``speed`` of shape ``(12, nlat, nlon)``). Missing months are
-    skipped. Returns the path.
+    Downloads :data:`NBS_CLIMATOLOGY_URL` and writes
+    ``<cache>/wind/wind_climatology.npz`` (arrays ``lat``, ``lon``, ``speed``
+    of shape ``(12, nlat, nlon)``, and ``years``). One request for a file NOAA
+    has already averaged over 1991-2020.
+
+    The file carries ``u_wind``, ``v_wind``, ``mask`` and ``windspeed`` on a
+    ``(month, zlev, lat, lon)`` grid; only ``windspeed`` is cached, and the
+    ``zlev`` axis (one level, 10 m) is dropped, so the cache keeps
+    ``(12, nlat, nlon)``. The download itself is deleted afterwards: it is
+    237 MB against the ~28 MB the cache keeps.
     """
+    from uacpy.data._netcdf import netcdf_lock, open_netcdf
+
     dest = _cache.prepare_download(
-        'wind', f"building NBS wind climatology over {years[0]}-"
-        f"{years[-1]} (~{len(years) * 12} monthly grids)",
+        'wind', "downloading NBS monthly wind climatology "
+        f"({NBS_CLIMATOLOGY_YEARS[0]}-{NBS_CLIMATOLOGY_YEARS[1]}, ~237 MB)",
         cache_dir=cache_dir, verbose=verbose)
     out = dest / WIND_FILE
-    partial = dest / WIND_PARTIAL_FILE
-    lat = lon = None
-    accum, count = None, None
-    done = set()
-    # Resume whatever a previous run reached, but only when it was building
-    # THIS reference period: totals accumulated over other years are a
-    # different climatology, not a head start on this one.
-    if partial.is_file():
-        with np.load(partial) as state:
-            if tuple(state['years'].tolist()) == tuple(years):
-                lat, lon = state['lat'], state['lon']
-                accum, count = state['accum'], state['count']
-                done = set(state['done'].tolist())
-                log_message('wind', f"resuming from {len(done)} month(s) "
-                            f"already built", verbose=verbose)
-    unanswered = 0
-    for month in range(1, 13):
-        if month in done:
-            continue
-        for year in years:
-            # A month the server declines to serve is skipped, as a month the
-            # dataset does not hold is; a server that declines
-            # _UNANSWERED_LIMIT of them in a row is down, and the rest of the
-            # build would only wait out the same timeout ~110 more times.
-            # Counting CONSECUTIVE failures is what separates the two: an
-            # ERDDAP flapping between 502 and 200 answers often enough to
-            # reset the count, and its climatology is built from the months it
-            # did serve rather than abandoned for the ones it did not.
-            try:
-                grid = _fetch_monthly_grid(year, month, timeout=timeout,
-                                           verbose=verbose)
-            except DataFetchError as exc:
-                unanswered += 1
-                if unanswered >= _UNANSWERED_LIMIT:
-                    raise DataFetchError(
-                        f"NBS wind climatology stopped after "
-                        f"{_UNANSWERED_LIMIT} consecutive months the server "
-                        f"did not answer (last: {year}-{month:02d}). "
-                        f"{exc.message}",
-                        status=exc.status,
-                        remediation="The host is unreachable rather than "
-                                    "missing these months; retry when it is "
-                                    "back, or copy a built "
-                                    "<cache>/wind/wind_climatology.npz into "
-                                    "place.",
-                    ) from exc
-                log_message('wind', f"{year}-{month:02d} unanswered "
-                            f"({unanswered}/{_UNANSWERED_LIMIT} in a row)",
-                            verbose=verbose, level='warning')
-                continue
-            unanswered = 0
-            if grid is None:
-                continue
-            glat, glon, speed = grid
-            if accum is None:
-                lat, lon = glat, glon
-                accum = np.zeros((12, lat.size, lon.size))
-                count = np.zeros((12, lat.size, lon.size))
-            valid = np.isfinite(speed)
-            accum[month - 1][valid] += speed[valid]
-            count[month - 1][valid] += 1
-        # Records the month just finished, so an interruption in the next one
-        # costs that month rather than every month before it.
-        if accum is not None:
-            done.add(month)
-            with _cache.atomic_write(partial) as part:
-                with open(part, 'wb') as fh:
-                    np.savez_compressed(fh, lat=lat, lon=lon, accum=accum,
-                                        count=count,
-                                        done=np.array(sorted(done)),
-                                        years=np.array(years))
-        # Two full month sweeps with nothing fetched is the
-        # unreachable-server signature; the remaining ten months would
-        # retry their way to the same place, so the build stops here.
-        if month == 2 and accum is None:
-            raise DataFetchError(
-                f"NBS wind climatology fetched nothing in the first two "
-                f"month sweeps ({2 * len(years)} fetches); stopping "
-                f"before the remaining ten months.",
-                remediation="Check network / the CoastWatch ERDDAP "
-                            "dataset id, then retry.",
-            )
-    if accum is None:
+    raw = dest / _NBS_RAW_FILE
+    if not curl_download(NBS_CLIMATOLOGY_URL, raw, timeout=timeout,
+                         verbose=verbose):
         raise DataFetchError(
-            "NBS wind climatology build fetched no monthly grids.",
-            remediation="Check network / the CoastWatch ERDDAP dataset id.",
+            f"Could not download {NBS_CLIMATOLOGY_URL}.",
+            remediation="Retry — the transfer resumes — or pass years= to "
+                        "build the climatology from monthly fields instead.",
         )
-    with np.errstate(invalid='ignore'):
-        speed = np.where(count > 0, accum / np.maximum(count, 1), np.nan)
+    try:
+        with netcdf_lock, contextlib.closing(open_netcdf(str(raw))) as ds:
+            lat = np.asarray(ds['lat'][:], dtype=np.float64)
+            lon = np.asarray(ds['lon'][:], dtype=np.float64)
+            # Masked cells become NaN, which is what every reader of this
+            # cache already treats as "no value here".
+            speed = np.ma.filled(
+                np.ma.masked_invalid(ds['windspeed'][:]).astype(np.float32),
+                np.nan)
+    finally:
+        raw.unlink(missing_ok=True)
+    if speed.ndim == 4:                      # (month, zlev, lat, lon)
+        speed = speed[:, 0]
+    if speed.shape != (12, lat.size, lon.size):
+        raise DataFetchError(
+            f"Published climatology has shape {speed.shape}, expected "
+            f"(12, {lat.size}, {lon.size}).",
+            remediation="The upstream file layout changed; pass years= to "
+                        "build from monthly fields while this is fixed.",
+        )
     with _cache.atomic_write(out) as part:
         # A file object, not the path: np.savez_compressed appends '.npz' to a
-        # name that lacks it, which would write '<out>.part.npz'.
+        # name that lacks it.
         with open(part, 'wb') as fh:
-            # ``years`` records the reference period, so a cache's vintage
-            # can be recovered from the file rather than assumed to be the
-            # module default it may not have been built with.
-            np.savez_compressed(fh, lat=lat, lon=lon, speed=speed,
-                                years=np.asarray(years, dtype=np.int32))
-    # The running totals have nothing left to resume.
-    partial.unlink(missing_ok=True)
+            np.savez_compressed(
+                fh, lat=lat, lon=lon, speed=speed,
+                years=np.asarray(NBS_CLIMATOLOGY_YEARS, dtype=np.int32))
     _CLIM.clear()
     log_message('wind', f"wind climatology cached → {out}", verbose=verbose)
     return out
-
-
-def _fetch_monthly_grid(year, month, *, timeout, verbose):
-    """One NBS monthly-mean global wind-speed field, or ``None`` on failure."""
-    import urllib.parse
-    from uacpy.data._netcdf import netcdf_lock, open_netcdf
-    iso = f"{year}-{month:02d}-01T00:00:00Z"
-    for var in _SPEED_VARS:
-        constraint = f"{var}[({iso})][(10.0)][][]"
-        query = urllib.parse.quote(constraint, safe='[]():.,-TZ')
-        url = f"{_ERDDAP}/{_MONTHLY_DATASET}.nc?{query}"
-        try:
-            blob = http_get(url, timeout=timeout, verbose=verbose,
-                            source='wind', user_agent=_USER_AGENT)
-        except DataFetchError as exc:
-            # Walks to the next candidate name only when the server answered
-            # and the answer was about the request: ERDDAP returns 400 or 404
-            # for a variable a dataset does not have. Any other failure means
-            # it never got far enough to have an opinion about variable names,
-            # so asking the same question under two more names buys nothing
-            # and costs two more timeouts each -- against a gateway that
-            # times out at 60 s, three names by four retries is twelve minutes
-            # for one month, and the caller needs twenty months of that before
-            # its unreachable-server guard fires.
-            if exc.status in _NAME_IS_WRONG:
-                continue
-            raise
-        try:
-            # Parsed in memory, with no scratch file.
-            #
-            # closing(), not a bare close() after the reads: the KeyError the
-            # next clause catches is raised between the two, once per month a
-            # 120-grid climatology build cannot name a variable in — each one
-            # leaking an open in-memory handle.
-            #
-            # netcdf_lock spans the whole statement, so the slices below and
-            # the close() that ends it are inside it as well as the open —
-            # netCDF4 is not thread-safe here, and a 120-file climatology
-            # build would otherwise read and close alongside another thread's
-            # grid read.
-            with netcdf_lock, contextlib.closing(
-                    open_netcdf('nbs_monthly.nc', memory=blob)) as ds:
-                names = {n.lower(): n for n in ds.variables}
-                lat = np.asarray(ds.variables[names['latitude']][:], float)
-                lon = np.asarray(ds.variables[names['longitude']][:], float)
-                # np.asarray() first would strip the netCDF4 mask before
-                # filled() ever sees it, letting a _FillValue cell (land / no
-                # retrieval) into the monthly mean as a real wind speed.
-                # Convert *as* a masked array, then fill through the mask.
-                speed = np.ma.filled(np.ma.asarray(
-                    ds.variables[names[var.lower()]][:], float).squeeze(),
-                    np.nan)
-        except (KeyError, OSError):
-            continue
-        return lat, lon, speed
-    return None
 
 
 class _Climatology:

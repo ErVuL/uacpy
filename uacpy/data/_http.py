@@ -209,7 +209,6 @@ def http_get(
                 continue
             raise DataFetchError(
                 f"Request to {url} failed: HTTP {exc.code} {exc.reason}.",
-                status=exc.code,
                 remediation="Check the dataset/coordinate request. Public "
                             "hosts may be rate-limited, and a personal "
                             "academic page can be withdrawn without notice — "

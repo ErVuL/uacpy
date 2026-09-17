@@ -670,7 +670,7 @@ choose_data() {
         && sel="${sel}graw,"
     prompt_yes_no "  • NSIDC sea-ice monthly climatology (built from ~120 grids, public domain)?" \
         && sel="${sel}seaice,"
-    prompt_yes_no "  • NBS 10 m wind-speed monthly climatology (built from ERDDAP grids, public domain)?" \
+    prompt_yes_no "  • NBS 10 m wind-speed monthly climatology (NOAA/NCEI 1991-2020, public domain)?" \
         && sel="${sel}wind,"
     prompt_yes_no "  • WOA23 sound-speed climatology grids (~hundreds of MB, public domain)?" \
         && sel="${sel}woa23,"
@@ -1934,14 +1934,15 @@ download_wind() {
     if [[ "$FORCE" != "1" && -s "${dir}/wind_climatology.npz" ]]; then
         echo -e "${GREEN}✓ NBS wind climatology already cached → ${dir}${NC}"; return 0
     fi
-    # Builds a monthly NBS 10 m wind-speed climatology from the CoastWatch ERDDAP
-    # monthly grids (needs netCDF4). Public domain.
+    # Caches NOAA/NCEI's published NBS 10 m wind-speed climatology: one file
+    # already averaged over 1991-2020, ~237 MB, of which the ~28 MB wind-speed
+    # field is kept (needs netCDF4). Public domain.
     if python3 -c "import uacpy.data.wind_local, netCDF4" >/dev/null 2>&1; then
-        echo -e "${BLUE}Building NBS wind monthly climatology (downloads ERDDAP grids; a few minutes)...${NC}"
+        echo -e "${BLUE}Downloading NBS wind monthly climatology (NOAA/NCEI 1991-2020, ~237 MB)...${NC}"
         if UACPY_INSTALL_CACHE_DIR="$dir" python3 -c "import os; from uacpy.data import wind_local; wind_local.download_wind_db(cache_dir=os.environ['UACPY_INSTALL_CACHE_DIR'], verbose=True)"; then
             echo -e "${GREEN}✓ NBS wind climatology ready → ${dir}${NC}"; return 0
         fi
-        echo -e "${YELLOW}◐ Automatic wind build failed.${NC}"
+        echo -e "${YELLOW}◐ Automatic wind download failed.${NC}"
     else
         echo -e "${YELLOW}◐ uacpy (netCDF4) not importable here — wind skipped.${NC}"
     fi

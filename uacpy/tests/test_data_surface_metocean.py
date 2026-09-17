@@ -4,6 +4,7 @@ The ERDDAP / Copernicus HTTP layers are stubbed with canned responses so these
 run offline; ``requires_network`` tests hit the live services.
 """
 
+import pathlib
 import re
 import urllib.parse
 from datetime import datetime, timedelta, timezone
@@ -400,33 +401,6 @@ def test_empty_wave_source_raises_a_typed_error():
         waves_mod.fetch_waves((50.0, 0.0), date='2020-01-01', source=())
 
 
-def test_nbs_monthly_grid_maps_a_filled_cell_to_nan(monkeypatch, tmp_path):
-    """Same hazard on the wind climatology build: a masked cell must not enter
-    the monthly mean as a real wind speed."""
-    netCDF4 = pytest.importorskip('netCDF4')
-    path = tmp_path / 'wind.nc'
-    ds = netCDF4.Dataset(path, 'w')
-    for name, size in (('time', 1), ('altitude', 1),
-                       ('latitude', 2), ('longitude', 2)):
-        ds.createDimension(name, size)
-    ds.createVariable('latitude', 'f8', ('latitude',))[:] = [0.5, 1.5]
-    ds.createVariable('longitude', 'f8', ('longitude',))[:] = [0.5, 1.5]
-    w = ds.createVariable('wind_speed', 'f4',
-                          ('time', 'altitude', 'latitude', 'longitude'),
-                          fill_value=-9999.0)
-    field = np.ma.masked_array(np.full((1, 1, 2, 2), 7.0))
-    field[0, 0, 0, 1] = np.ma.masked
-    w[:] = field
-    ds.close()
-    blob = path.read_bytes()
-    monkeypatch.setattr(wind_local, 'http_get', lambda url, **kw: blob)
-
-    _, _, speed = wind_local._fetch_monthly_grid(2020, 3, timeout=1.0,
-                                                 verbose=False)
-    assert np.isnan(speed[0, 1])
-    assert speed[0, 0] == pytest.approx(7.0)
-
-
 class _RecordingDataset:
     """netCDF stand-in with no data variable, so the reader raises mid-read."""
 
@@ -440,43 +414,6 @@ class _RecordingDataset:
     def close(self):
         self.closed = True
 
-
-def test_wind_climatology_closes_its_handle_when_a_variable_is_missing(
-        monkeypatch):
-    from uacpy.data import _netcdf, wind_local
-    opened = []
-
-    def fake_open(path, memory=None):
-        ds = _RecordingDataset()
-        opened.append(ds)
-        return ds
-
-    monkeypatch.setattr(_netcdf, 'open_netcdf', fake_open)
-    monkeypatch.setattr(wind_local, 'http_get', lambda url, **kw: b'not-a-grid')
-    assert wind_local._fetch_monthly_grid(2000, 1, timeout=1.0,
-                                          verbose=False) is None
-    assert opened and all(ds.closed for ds in opened), (
-        "the handle leaks once per month a 120-grid climatology build cannot "
-        "name a variable in")
-
-
-def test_two_empty_month_sweeps_stop_the_wind_climatology_build(
-        monkeypatch, tmp_path):
-    """Zero grids across the first two month sweeps raise the typed error
-    before the remaining ten months retry their way to the same place."""
-    import uacpy.data.wind_local as wl
-    calls = []
-    def nothing(year, month, *, timeout, verbose):
-        calls.append((year, month))
-        return None
-    monkeypatch.setattr(wl, '_fetch_monthly_grid', nothing)
-    with pytest.raises(DataFetchError,
-                       match='stopping before the remaining ten months'):
-        wl.download_wind_db(cache_dir=tmp_path, years=range(2013, 2023))
-    assert len(calls) == 20
-
-
-# ── climatology vintage (the reference period the cache records) ─────────────
 
 @pytest.fixture
 def dated_wind_cache(tmp_path, monkeypatch):
@@ -508,28 +445,6 @@ def test_a_wind_cache_without_a_period_loads_its_grid(wind_cache):
     assert wind_local.wind_speed((0.6, 0.6), date='2021-03-15') == pytest.approx(8.5)
 
 
-def test_a_built_wind_cache_records_its_years(tmp_path, monkeypatch):
-    """``download_wind_db`` writes the period it averaged. The per-month grid
-    fetch is stubbed, so this never touches the network."""
-    root = tmp_path / 'built_wind'
-    monkeypatch.setenv('UACPY_DATA_CACHE', str(root))
-    wind_local._CLIM.clear()
-    lat = np.linspace(-89.875, 89.875, 8)
-    lon = np.linspace(0.0, 359.75, 8)
-    calls = []
-
-    def _stub_grid(year, month, **_kwargs):
-        calls.append((year, month))
-        return lat, lon, np.full((lat.size, lon.size), 6.25)
-
-    monkeypatch.setattr(wind_local, '_fetch_monthly_grid', _stub_grid)
-    out = wind_local.download_wind_db(years=(2019, 2020, 2021))
-    assert calls, 'the stubbed month fetch was never reached'
-    with np.load(out, allow_pickle=False) as data:
-        assert [int(y) for y in data['years']] == [2019, 2020, 2021]
-    assert wind_local.climatology_period() == '2019-2021 (climatology)'
-
-
 def test_the_environment_provenance_carries_the_wind_vintage(dated_wind_cache):
     """``_climatology_vintage`` is what puts the period on the provenance
     record; every other source and every period-less cache yield None."""
@@ -539,127 +454,60 @@ def test_the_environment_provenance_carries_the_wind_vintage(dated_wind_cache):
     assert _climatology_vintage('woa23') is None
 
 
-def test_a_variable_the_dataset_lacks_moves_on_to_the_next_name(monkeypatch):
-    """Three candidate names exist because the NBS datasets have used
-    different ones; a 404 is the server saying this is not the right one."""
+def _published_climatology_bytes(nlat=4, nlon=8, nmonth=12):
+    """A file shaped like NCEI's published climatology, in memory."""
+    import netCDF4
+
+    ds = netCDF4.Dataset('clim.nc', 'w', diskless=True, persist=False,
+                         memory=1 << 20)
+    ds.createDimension('month', nmonth)
+    ds.createDimension('zlev', 1)
+    ds.createDimension('lat', nlat)
+    ds.createDimension('lon', nlon)
+    ds.createVariable('lat', 'f4', ('lat',))[:] = np.linspace(-80, 80, nlat)
+    ds.createVariable('lon', 'f4', ('lon',))[:] = np.linspace(0, 315, nlon)
+    speed = ds.createVariable('windspeed', 'f4',
+                              ('month', 'zlev', 'lat', 'lon'))
+    speed[:] = np.arange(nmonth)[:, None, None, None] * np.ones(
+        (1, 1, nlat, nlon))
+    ds.createVariable('u_wind', 'f4', ('month', 'zlev', 'lat', 'lon'))[:] = 1.0
+    return ds.close()
+
+
+def test_the_climatology_is_one_request_for_the_published_file(tmp_path,
+                                                               monkeypatch):
+    """One request for a file NOAA has already averaged: the cache is filled
+    from :data:`NBS_CLIMATOLOGY_URL` and from nothing else."""
+    blob = _published_climatology_bytes()
     asked = []
 
-    def fake_get(url, **kw):
+    def fake_curl(url, out, *, timeout, verbose):
         asked.append(url)
-        raise DataFetchError('HTTP 404 Not Found', status=404)
+        pathlib.Path(out).write_bytes(blob)
+        return True
 
-    monkeypatch.setattr(wind_local, 'http_get', fake_get)
-    assert wind_local._fetch_monthly_grid(2020, 3, timeout=1.0,
-                                          verbose=False) is None
-    assert len(asked) == len(wind_local._SPEED_VARS), (
-        "a 404 should have been read as the wrong variable name")
-
-
-def test_a_server_that_does_not_answer_is_not_asked_under_two_more_names(
-        monkeypatch):
-    """A 5xx says nothing about variable names, and each one costs a timeout.
-
-    Against a gateway that answers 502 after 60 s, walking the three names
-    makes one month cost twelve minutes, and the caller's unreachable-server
-    guard needs twenty months before it fires — four hours to report that a
-    server is down.
-    """
-    asked = []
-
-    def fake_get(url, **kw):
-        asked.append(url)
-        raise DataFetchError('HTTP 502 Bad Gateway', status=502)
-
-    monkeypatch.setattr(wind_local, 'http_get', fake_get)
-    with pytest.raises(DataFetchError, match='502'):
-        wind_local._fetch_monthly_grid(2020, 3, timeout=1.0, verbose=False)
-    assert len(asked) == 1, (
-        f"the dead server was asked {len(asked)} times under different "
-        f"variable names")
+    monkeypatch.setattr(wind_local, 'curl_download', fake_curl)
+    out = wind_local.download_wind_db(cache_dir=str(tmp_path / 'c'),
+                                      verbose=False)
+    assert asked == [wind_local.NBS_CLIMATOLOGY_URL]
+    with np.load(out) as cached:
+        assert cached['speed'].shape == (12, 4, 8), "the zlev axis survived"
+        assert cached['years'].tolist() == list(wind_local.NBS_CLIMATOLOGY_YEARS)
+    assert not (tmp_path / 'c' / wind_local._NBS_RAW_FILE).exists(), (
+        "the 237 MB download was kept beside the 28 MB it is kept for")
 
 
-def test_a_failure_with_no_status_stops_rather_than_walking_the_names(
-        monkeypatch):
-    """A timeout or DNS failure carries no status at all, and it is no more
-    a statement about variable names than a 502 is."""
-    asked = []
-
-    def fake_get(url, **kw):
-        asked.append(url)
-        raise DataFetchError('connection timed out')
-
-    monkeypatch.setattr(wind_local, 'http_get', fake_get)
-    with pytest.raises(DataFetchError):
-        wind_local._fetch_monthly_grid(2020, 3, timeout=1.0, verbose=False)
-    assert len(asked) == 1
-
-
-def _monthly_grid_stub(fail_from=None):
-    """A ``_fetch_monthly_grid`` returning a 2x2 field, failing from a month."""
-    lat = np.array([0.0, 1.0])
-    lon = np.array([0.0, 1.0])
-
-    def stub(year, month, **kw):
-        if fail_from is not None and month >= fail_from:
-            raise DataFetchError('HTTP 502 Bad Gateway', status=502)
-        return lat, lon, np.full((2, 2), float(month))
-
-    return stub
-
-
-def test_an_interrupted_build_resumes_from_the_months_it_has(tmp_path,
-                                                             monkeypatch):
-    """One global monthly field is ~4 MB and a build fetches 12 x len(years)
-    of them, so restarting from zero re-fetches what the cache already paid
-    for."""
-    cache = str(tmp_path / 'c')
-    monkeypatch.setattr(wind_local, '_fetch_monthly_grid',
-                        _monthly_grid_stub(fail_from=4))
-    with pytest.raises(DataFetchError, match='consecutive months'):
-        wind_local.download_wind_db(cache_dir=cache, verbose=False)
-
-    # ``cache_dir`` IS the dataset directory: prepare_download uses it
-    # directly rather than appending the dataset name under it.
-    partial = tmp_path / 'c' / wind_local.WIND_PARTIAL_FILE
-    assert partial.is_file(), "nothing was written to resume from"
-    with np.load(partial) as state:
-        assert sorted(state['done'].tolist()) == [1, 2, 3]
-
-    # The host comes back: only the months that are missing are fetched.
-    asked = []
-    inner = _monthly_grid_stub()
-
-    def counting(year, month, **kw):
-        asked.append(month)
-        return inner(year, month, **kw)
-
-    monkeypatch.setattr(wind_local, '_fetch_monthly_grid', counting)
-    out = wind_local.download_wind_db(cache_dir=cache, verbose=False)
-    assert out.is_file()
-    assert set(asked) == set(range(4, 13)), (
-        f"refetched months {sorted(set(asked))}; 1-3 were already built")
-    assert not partial.exists(), "the resume file outlived the build"
-
-
-def test_totals_from_another_reference_period_are_not_resumed(tmp_path,
-                                                              monkeypatch):
-    """Totals accumulated over other years are a different climatology, not a
-    head start on this one."""
-    cache = str(tmp_path / 'c')
-    monkeypatch.setattr(wind_local, '_fetch_monthly_grid',
-                        _monthly_grid_stub(fail_from=2))
-    with pytest.raises(DataFetchError):
-        wind_local.download_wind_db(cache_dir=cache, years=(2013, 2014),
-                                    verbose=False)
-
-    asked = []
-    inner = _monthly_grid_stub()
-
-    def counting(year, month, **kw):
-        asked.append(month)
-        return inner(year, month, **kw)
-
-    monkeypatch.setattr(wind_local, '_fetch_monthly_grid', counting)
-    wind_local.download_wind_db(cache_dir=cache, years=(2015, 2016),
-                                verbose=False)
-    assert 1 in asked, "January was taken from a build over different years"
+def test_the_published_climatology_reports_its_own_reference_period(
+        tmp_path, monkeypatch):
+    """``climatology_period`` reads the cache rather than assuming a default,
+    so the WMO period the published file covers is what a result records."""
+    blob = _published_climatology_bytes()
+    monkeypatch.setattr(
+        wind_local, 'curl_download',
+        lambda url, out, **kw: (pathlib.Path(out).write_bytes(blob), True)[1])
+    cache = tmp_path / 'c'
+    wind_local.download_wind_db(cache_dir=str(cache), verbose=False)
+    monkeypatch.setattr(wind_local._cache, 'require',
+                        lambda name, *rest: cache.joinpath(*rest))
+    wind_local._CLIM.clear()
+    assert wind_local.climatology_period() == '1991-2020 (climatology)'
