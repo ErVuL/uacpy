@@ -135,3 +135,54 @@ class TestBathymetryProvenanceNamesBackendAndVintage:
         except (ConfigurationError, DataFetchError, FileNotFoundError):
             pytest.skip("no local GEBCO grid cached")
         assert name.startswith('GEBCO_')
+
+
+class TestEveryPublicHelperOfTheDataLayerIsReachableFromThePackage:
+    """What ``uacpy.data`` does itself, a caller can do by hand.
+
+    Five helpers were declared public by their own modules, used by
+    ``fetch_environment`` on the way to an answer, and re-exported nowhere —
+    so reproducing one step of what the capstone did meant importing a
+    sub-module and reading the source to find the name. They are exported now,
+    and this drives each one on a worked input rather than only asserting the
+    attribute exists, because an export that raises on its first argument is
+    not a reachable feature either.
+    """
+
+    def test_a_profile_extends_below_the_deepest_level_its_source_carries(self):
+        import numpy as np
+        import uacpy
+
+        # WOA23 stops at 5500 m; a 6000 m basin needs the rest of the column.
+        ssp = uacpy.SoundSpeedProfile(depths=np.array([0.0, 1000.0, 5500.0]),
+                                      data=np.array([1500.0, 1485.0, 1540.0]))
+        deeper = uacpy.data.extend_ssp_below_data(ssp, 6000.0)
+        assert deeper.depths[-1] >= 6000.0
+        assert deeper.depths[-1] > ssp.depths[-1]
+        # the gradient continues rather than the last value being held flat
+        assert deeper.data[-1] > ssp.data[-1]
+
+    def test_a_wave_height_inverts_to_the_wind_that_would_raise_it(self):
+        import uacpy
+
+        # Pierson-Moskowitz: Hs = 0.0214 U², so the inverse returns that U.
+        assert uacpy.data.hs_to_pm_wind(0.0214 * 10.0 ** 2) == pytest.approx(10.0)
+        assert uacpy.data.hs_to_pm_wind(0.0) == pytest.approx(0.0)
+
+    def test_a_measured_density_inverts_to_the_grain_size_that_explains_it(self):
+        import uacpy
+
+        # The round trip through the pair: phi -> geoacoustics -> phi.
+        phi = 5.0
+        rows = uacpy.data.grain_size_to_geoacoustics(phi)
+        back = uacpy.data.grain_size_from_density(rows['density'])
+        assert back == pytest.approx(phi, abs=0.3)
+
+    def test_the_names_the_guide_teaches_are_the_names_the_package_exports(self):
+        import uacpy.data as data
+
+        for name in ('extend_ssp_below_data', 'extend_column_to_seafloor',
+                     'hs_to_pm_wind', 'grain_size_from_density',
+                     'fetch_seabed_local'):
+            assert name in data.__all__, name
+            assert callable(getattr(data, name)), name

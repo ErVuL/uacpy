@@ -1,6 +1,6 @@
 # File I/O — the layer between metres and the native formats
 
-> `uacpy.io` · 105 public names · every reader and writer the models run on
+> `uacpy.io` · 107 public names · every reader and writer the models run on
 
 Underneath the Python API, uacpy drives seven native solvers by writing text
 and binary files, launching a subprocess, and parsing what comes back. Each of
@@ -635,6 +635,7 @@ The 16 remaining names in `__all__` are the submodules themselves.
 | `read_bathymetry` | `.bty` → array (m), interpolation type; long format carries geoacoustics |
 | `read_altimetry` | `.ati` → array (m), interpolation type |
 | `read_reflection_coefficient` | `.brc`/`.trc` → `theta` (deg), `R`, `phi` (rad); an `.irc` is refused |
+| `ReflectionTable` | The `TypedDict` `read_reflection_coefficient` returns — keys `theta`, `R`, `phi` and the `n_pts` the header declared — for annotating a function that takes one |
 | `read_source_beam_pattern` | `.sbp` → angle / level array |
 | `write_bty_file` | `.bty`, short format (range, depth) |
 | `write_bty_long_format` | `.bty` with per-range `c_p`, `c_s`, `ρ`, `α_p`, `α_s` |
@@ -658,6 +659,7 @@ The 16 remaining names in `__all__` are the submodules themselves.
 | `write_oass_input` | OASS `.dat` (reverberation from a producer's `.rhs` mean field) |
 | `write_oassp_input` | OASSP `.dat` (one scattered-field realization from a producer's `.rhs`) |
 | `read_oast_tl` | `.plp` + `.plt` → TL on OAST's native range grid |
+| `OastTL` | The `TypedDict` `read_oast_tl` returns — keys `tl`, `depths`, `ranges`, `metadata`; the shapes depend on `NFREQ` and the reader's own Returns section carries them |
 | `read_oasp_trf` | `.trf` transfer function |
 | `read_oasr_reflection_coefficients` | `.rco`/`.trc` reflection table |
 | `read_oasn_covariance` | `.xsm` cross-spectral matrices |

@@ -73,6 +73,7 @@ from uacpy.io.bathy_io import (
     write_bty_file, write_bty_long_format, write_bty_3d, write_ati_file,
 )
 from uacpy.io.refl_io import (
+    ReflectionTable,
     read_reflection_coefficient, read_source_beam_pattern,
     write_reflection_coefficient, write_source_beam_pattern,
     stage_reflection_file, stage_source_beam_pattern,
@@ -89,6 +90,7 @@ from uacpy.io.oases_writer import (
     write_oass_input, write_oassp_input,
 )
 from uacpy.io.oases_reader import (
+    OastTL,
     read_oast_tl, read_oasn_covariance, read_oasn_replicas, read_oasp_trf,
     read_oasr_reflection_coefficients,
     read_oases_rhs_header,
@@ -117,7 +119,7 @@ __all__ = [
     "read_prt",
     # Boundary auxiliary I/O
     "read_bathymetry", "read_altimetry", "read_boundary_3d",
-    "read_reflection_coefficient",
+    "read_reflection_coefficient", "ReflectionTable",
     "read_source_beam_pattern",
     "dedupe_reflection_file",
     # Mode readers (Kraken)
@@ -127,7 +129,7 @@ __all__ = [
     "grn_to_field", "grn_to_transfer_function",
     "sparc_snapshot_to_field", "sparc_snapshot_to_time_field",
     # OASES outputs
-    "read_oast_tl", "read_oasn_covariance", "read_oasn_replicas",
+    "read_oast_tl", "OastTL", "read_oasn_covariance", "read_oasn_replicas",
     "read_oasp_trf", "read_oasr_reflection_coefficients",
     "read_oases_rhs_header",
     # mpiramS outputs

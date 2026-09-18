@@ -31,7 +31,8 @@ from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core.materials import MATERIALS, list_materials
 from uacpy.core.sediment import (DEFAULT_GRAIN_SIZE_MODEL,
-                                 GRAIN_SIZE_MODELS, grain_size_to_geoacoustics)
+                                 GRAIN_SIZE_MODELS, grain_size_from_density,
+                                 grain_size_to_geoacoustics)
 from uacpy.data._geo import (
     geodesic_waypoints, run_boundary_indices, DEFAULT_MAX_TRANSECT_POINTS,
     checked_max_points, checked_n_points, capped_n_points,
@@ -40,6 +41,7 @@ from uacpy.data._geo import (
 __all__ = [
     'GRAIN_SIZE_MODELS',
     'grain_size_to_geoacoustics',
+    'grain_size_from_density',
     'bottom_from_grain_size',
     'bottom_from_class',
     'range_dependent_bottom_along',

@@ -319,8 +319,9 @@ class _Recorded(Exception):
     """Raised by a stubbed transport once it has recorded its address."""
 
 
-#: One row per ``download_*_db`` fetcher: the module that defines it, the
-#: keyword it takes an address on, and the transport attributes to stub. A
+#: One row per cache filler — the nine ``download_*_db`` fetchers and the
+#: coastline downloader behind the map plotters: the module that defines it,
+#: the keyword it takes an address on, and the transport attributes to stub. A
 #: fetcher that imports its transport inside the function body reaches it
 #: through ``uacpy.data._http``, so that is where the stub goes; the rest
 #: bind it at module scope and take the stub in their own namespace.
@@ -343,6 +344,11 @@ _ADDRESS_OVERRIDES = [
      [('uacpy.data.emodnet_local', 'http_get')]),
     ('uacpy.data.seaice_local', 'download_seaice_db', 'base_url',
      [('uacpy.data.seaice_local', 'http_get')]),
+    # Not a ``_db`` name and not in ``uacpy.data``, but the same contract: it
+    # fills the offline cache the map plotters read, so it is pinned with its
+    # nine siblings rather than on its own where the next one would be missed.
+    ('uacpy.visualization.basemap', 'download_coastline', 'url',
+     [('uacpy.visualization.basemap', 'http_get')]),
 ]
 
 _MIRROR = 'https://mirror.invalid/somewhere'
@@ -375,8 +381,9 @@ def test_every_downloader_fetches_the_address_it_is_given(
     is a fetcher pinned to one hostname with no way past it except editing the
     package. Every one of them therefore takes ``url=`` (or ``base_url=``
     where it builds many requests from a directory tree), and this drives all
-    nine, because forwarding the keyword is exactly the step that is easy to
-    add to a signature and forget in the body.
+    ten, because forwarding the keyword is exactly the step that is easy to
+    add to a signature and forget in the body — ``download_coastline`` had the
+    signature of the other nine and no override at all.
     """
     import importlib
 
@@ -400,12 +407,21 @@ def test_every_downloader_fetches_the_address_it_is_given(
 
 
 def test_the_override_table_covers_every_downloader():
-    """The sweep itself: a tenth ``download_*_db`` must be listed here, or the
-    parametrisation above silently stops covering the package."""
+    """The sweep itself: a new cache filler must be listed here, or the
+    parametrisation above silently stops covering the package.
+
+    Two namespaces, because the cache is filled from two: the ``download_*_db``
+    fetchers in ``uacpy.data``, and ``download_coastline`` in
+    ``uacpy.visualization``, which caches the land polygons every map plotter
+    draws. Looking only at ``uacpy.data`` is what let that one ship with no
+    ``url=`` at all while its nine siblings had one.
+    """
     import uacpy.data as data
+    import uacpy.visualization as viz
 
     fetchers = {name for name in data.__all__
                 if name.startswith('download_') and name.endswith('_db')}
+    fetchers |= {name for name in viz.__all__ if name.startswith('download_')}
     assert fetchers == {row[1] for row in _ADDRESS_OVERRIDES}
 
 

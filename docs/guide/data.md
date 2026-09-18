@@ -1,6 +1,6 @@
 # External data — building an Environment from the real ocean
 
-> `uacpy.data` · 96 public names · GPS coordinates (and a date) in, a
+> `uacpy.data` · 101 public names · GPS coordinates (and a date) in, a
 > ready-to-run [`Environment`](environment.md) out
 
 [Environment](environment.md) tells you how to *describe* the ocean. This page
@@ -249,6 +249,19 @@ z, T, S = uacpy.data.fetch_ts_profile((45.6, -6.2), date='2026-07-15')
 | `glodap` | global | 1°, 33 levels | climatology | CC-BY 4.0 | ✅ `--data glodap` |
 | `copernicus_bgc` | global | model grid | date-specific | Copernicus Marine Licence | ❌ live |
 
+A fetched profile stops where its source stops, which is rarely the seafloor:
+WOA23's deepest standard level is 5500 m, and a shelf cast can end hundreds of
+metres above the bottom. Two public helpers close that gap, and they are what
+`fetch_environment` uses itself, so driving them by hand gives the same column:
+
+| Call | What it does |
+|---|---|
+| `extend_ssp_below_data(ssp, depth_max)` | Extend one profile down to `depth_max` along its own deep gradient, rather than holding the last value flat |
+| `extend_column_to_seafloor(...)` | The transect form: one column extended to the seafloor under a given range |
+
+A model needs sound speed *at* the seabed — an SSP that stops short leaves the
+bottom boundary interpolating over a gap it cannot see.
+
 The first three feed `ssp`; the last two supply the **pH** that Francois–Garrison
 absorption needs and WOA23 does not carry. T and S come from WOA23 (or whichever
 SSP source resolved), and sound speed is computed with the UNESCO (Chen–Millero)
@@ -329,6 +342,10 @@ through.
 | `pelagic` | global | modelled from depth + latitude | public domain | ✅ no download |
 
 Each returns a **half-space** `BoundaryProperties`, so any model can consume it.
+For the EMODnet cache there is also `fetch_seabed_local((lat, lon))`, which
+answers with the substrate **record** at a point — the Folk class and its
+polygon — rather than a converted half-space, for when you want to see what the
+map says before it becomes geoacoustics.
 
 ```python
 from uacpy.data import (
@@ -389,7 +406,9 @@ your result, run two of them and look at the spread.
 
 Most of those sources report a **mean grain size** on the Wentworth ϕ scale, not
 geoacoustics. `grain_size_to_geoacoustics` is the conversion, and it is public
-so you can drive it yourself:
+so you can drive it yourself. Its inverse, `grain_size_from_density`, recovers
+ϕ from a measured bulk density — which is how a density-only source (`graw`)
+enters a model that wants a grain size:
 
 ```python
 phi = np.linspace(-0.5, 9.0, 381)
@@ -577,8 +596,9 @@ env = uacpy.data.fetch_environment(
 ```
 
 `'waves'` inverts an observed significant wave height to the effective PM wind
-(`U = √(Hs/0.0214)`), so the realisation reproduces the observed `Hs` whether or
-not the sea is fully developed; `'wind'` uses the live 10 m NBS wind under a
+with `hs_to_pm_wind(hs)` (`U = √(Hs/0.0214)`), which is public so you can apply
+the same inversion to a wave height of your own, so the realisation reproduces
+the observed `Hs` whether or not the sea is fully developed; `'wind'` uses the live 10 m NBS wind under a
 fully-developed assumption; `'local'` uses the cached NBS monthly climatology —
 network-free, but a *mean state*, which understates a storm. `'auto'` tries them
 in that order. Sea state is the one axis where the cached product is the last

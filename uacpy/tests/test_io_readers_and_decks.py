@@ -4107,6 +4107,41 @@ class TestReflectionTablesAreNeverEditedInPlace:
         assert read_reflection_coefficient(dest)['n_pts'] == 3
 
 
+class TestTheCarriersTheReadersHandBackAreImportable:
+    """A reader's return type is part of its contract, so it is exported too.
+
+    ``read_reflection_coefficient`` and ``read_oast_tl`` are both documented,
+    and the ``TypedDict`` each returns lived only in the module that defined
+    it: a caller could read the keys but could not annotate a function that
+    takes one without naming a sub-module. Both now sit in ``uacpy.io.__all__``
+    beside the reader that produces them, and the keys are what is pinned —
+    a ``TypedDict`` is a dict at runtime, so the keys *are* the contract.
+    """
+
+    TABLE = "3\n 0.0 1.0 0.0\n 45.0 0.5 3.14\n 90.0 0.1 0.0\n"
+
+    def test_the_reflection_reader_fills_exactly_the_documented_keys(
+            self, tmp_path):
+        import uacpy.io as io
+
+        path = tmp_path / 'table.brc'
+        path.write_text(self.TABLE)
+        table = io.read_reflection_coefficient(path)
+        assert set(table) == set(io.ReflectionTable.__annotations__)
+        assert table['n_pts'] == 3
+        assert table['theta'].tolist() == [0.0, 45.0, 90.0]
+
+    def test_both_carriers_declare_the_keys_their_readers_document(self):
+        import uacpy.io as io
+
+        assert (tuple(io.ReflectionTable.__annotations__)
+                == ('theta', 'R', 'phi', 'n_pts'))
+        assert (tuple(io.OastTL.__annotations__)
+                == ('tl', 'depths', 'ranges', 'metadata'))
+        for name in ('ReflectionTable', 'OastTL'):
+            assert name in io.__all__, name
+
+
 class TestReflectionTableAngleOrderIsChecked:
     """``dedupe_reflection_file`` keeps the rows whose angle exceeds the last
     kept one, which collapses a descending table to a single row — one

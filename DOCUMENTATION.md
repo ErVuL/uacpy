@@ -639,11 +639,12 @@ great-circle path instead, for a range-dependent environment.
 | Provenance | `SOURCES`, `DataSource`, `DataProvenance`, `citations` |
 
 **Offline caches.** `install.sh --data <keyword>` calls the matching
-`download_*_dB` function, which is also public: `download_emodnet_db`,
+`download_*_db` function, which is also public: `download_emodnet_db`,
 `download_globsed_db`, `download_crust1_db`, `download_diesing_db`,
 `download_graw_db`, `download_sediment_db`, `download_glodap_db`,
-`download_seaice_db`, `download_wind_db`. Once a database is cached the
-corresponding `*_sources='local'` path runs with no network. Each one takes the
+`download_seaice_db`, `download_wind_db`, and — for the coastline the map
+plotters draw — `uacpy.visualization.download_coastline`. Once a database is
+cached the corresponding `*_sources='local'` path runs with no network. Each one takes the
 address it downloads from — `url=` for the fetchers that pull one file,
 `base_url=` for the two that page through a service (`emodnet`, `seaice`) — so
 a moved publisher or a dead host is a keyword away from a mirror; only
@@ -1502,6 +1503,7 @@ in a `from … import` statement use the real modules
 | `plot_greens_function(grn, modes=…)` / `plot_wavenumber_sampling(f, c_low, c_high, delta_k, r_max=…)` | `|G(k_r, z)|` from a Scooter `.grn`, with Kraken's eigenvalues marked on it · the wavenumber axis that transform is sampled on — the phase-speed window against the water and seabed `ω/c`, and whether the receivers fit inside the alias period `2π/Δk` |
 | `plot_signal_excess(field)` / `plot_detection_probability(field)` / `plot_roc(deflection)` | `uacpy.sonar` field maps and the ROC curve |
 | `plot_bathymetry_map(lats, lons, depth)` / `plot_sea_ice_map(grid)` | geographic maps (also the pluggable `map_fn=` of `plot_overview`) |
+| `land_polygons(resolution='50m')` / `download_coastline(cache_dir=None)` | the Natural Earth land rings those maps draw behind the data, and the call that caches them offline — both take `url=` for a mirror |
 | `plot_overview(env, map_args, tl=…, title=…)` | three-panel map + TL + environment composite; `map_title`/`tl_title`/`env_title` name the panels, `title=` the figure |
 | `animate_field(field)` / `save_animation(field, path)` / `plot_time_snapshots(fields, times_s)` | time-domain animation and its still-frame grid |
 

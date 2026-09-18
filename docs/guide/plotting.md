@@ -491,8 +491,9 @@ detection probability and the ROC.
 
 ## 7. Reference — every public plotter
 
-All 60 plotters in `uacpy.plot.__all__` — the 8 remaining names in `__all__`
-are the submodules themselves. **ax** marks a single-axes plotter you can
+All 60 plotters in `uacpy.plot.__all__`, plus the two coastline calls they
+draw land with — the 8 remaining names in `__all__` are the submodules
+themselves. **ax** marks a single-axes plotter you can
 compose with. Every entry takes `title=` except `plot_result` (it forwards
 yours), `shared_colorbar` (a colorbar on an existing figure) and the two
 `draw_*` overlays; every entry takes `figsize=` except `plot_result`,
@@ -585,6 +586,17 @@ against an omni one.
 | `plot_bathymetry_map(lats, lons, depth, transect=None, relief=True, …)` | ✓ | a fetched bathymetry grid as a geographic map → [external data](data.md) |
 | `plot_overview(env, map_args, tl=None, source=None, receiver=None, …)` | — | one-call composite: map + TL + environment cross-section |
 | `plot_sea_ice_map(grid, hemi='N', transect=None, …)` | ✓ | sea-ice concentration on a polar map |
+
+Every map above draws land from the same source, and the two calls behind it
+are public so a map of your own can use it:
+
+| Call | Returns |
+|---|---|
+| `land_polygons(resolution='50m', *, url=None, …)` | Natural Earth land rings as `(N, 2)` `(lon, lat)` arrays — the backdrop the map plotters draw, or `None` when no source is reachable (the map then renders sea only) |
+| `download_coastline(cache_dir=None, *, url=None, resolutions=…)` | Caches those rings for offline use and returns the written paths — the coastline's counterpart to `uacpy.data`'s `download_*_db` fetchers, and it takes the same `url=` mirror override |
+
+Natural Earth is public domain, so neither call carries an attribution
+requirement. `./install.sh --data coastline` runs `download_coastline` for you.
 
 ### Signal processing
 

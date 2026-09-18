@@ -129,7 +129,8 @@ def land_polygons(resolution='50m', *, url=None, timeout=40.0, verbose=False):
     return _rings(data)
 
 
-def download_coastline(cache_dir=None, *, resolutions=COASTLINE_RESOLUTIONS,
+def download_coastline(cache_dir=None, *, url=None,
+                       resolutions=COASTLINE_RESOLUTIONS,
                        timeout=120.0, verbose=False):
     """Download Natural Earth land polygons into the offline cache.
 
@@ -137,6 +138,11 @@ def download_coastline(cache_dir=None, *, resolutions=COASTLINE_RESOLUTIONS,
     into ``cache_dir`` when given, else into the offline cache's ``coastline/``
     dataset root (public domain — no attribution). Returns the list of written
     paths.
+
+    ``url`` fetches that address instead of :data:`NATURAL_EARTH_URL` — a
+    mirror, or a copy staged on an http server of your own. It carries the
+    same ``{resolution}`` field, so one address serves every resolution, and
+    :func:`land_polygons` takes the same override when it reads live.
     """
     dest = Path(cache_dir) if cache_dir else _cache.dataset_root('coastline')
     dest.mkdir(parents=True, exist_ok=True)
@@ -144,7 +150,8 @@ def download_coastline(cache_dir=None, *, resolutions=COASTLINE_RESOLUTIONS,
     for res in resolutions:
         log_message('coastline', f"downloading Natural Earth land ({res})",
                     verbose=verbose)
-        blob = http_get(NATURAL_EARTH_URL.format(resolution=res), timeout=timeout,
+        blob = http_get((url or NATURAL_EARTH_URL).format(resolution=res),
+                        timeout=timeout,
                         verbose=verbose, source='coastline', user_agent=_USER_AGENT)
         # A captive portal or proxy error page arrives as HTTP 200 HTML;
         # caching it would poison every later offline read. Parse before

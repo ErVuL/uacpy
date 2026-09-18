@@ -122,3 +122,38 @@ def test_an_interrupted_download_leaves_no_truncated_cache_file(tmp_path,
     dest = tmp_path / 'coastline'
     assert not (dest / 'ne_110m_land.geojson').exists()
     assert list(dest.iterdir()) == []
+
+
+def test_the_coastline_pair_is_reachable_from_the_package():
+    """``land_polygons`` and ``download_coastline`` are exported by
+    ``uacpy.visualization``, not only by the module that defines them.
+
+    Both were public in ``basemap.__all__`` and re-exported nowhere, so the
+    backdrop every map plotter draws, and the call that caches it for offline
+    use, could be reached only by naming a sub-module — while the nine
+    ``download_*_db`` fetchers that fill the same cache sat on
+    ``uacpy.data``. A reader looking for "how do I cache the coastline?"
+    found nothing.
+    """
+    import uacpy.visualization as viz
+
+    for name in ('land_polygons', 'download_coastline'):
+        assert name in viz.__all__, name
+        assert getattr(viz, name) is getattr(basemap, name)
+
+
+def test_the_coastline_downloader_takes_a_mirror_like_its_siblings():
+    """``url=`` is keyword-only and carries the ``{resolution}`` field, so one
+    address serves every resolution — the same shape ``land_polygons`` takes,
+    and the same keyword the nine ``download_*_db`` fetchers take.
+
+    ``test_data_http.py`` drives the address end to end; this pins the
+    signature, which is where the keyword is easiest to drop.
+    """
+    import inspect
+
+    for func in (basemap.download_coastline, basemap.land_polygons):
+        url = inspect.signature(func).parameters['url']
+        assert url.kind is inspect.Parameter.KEYWORD_ONLY, func.__name__
+        assert url.default is None, func.__name__
+    assert '{resolution}' in basemap.NATURAL_EARTH_URL

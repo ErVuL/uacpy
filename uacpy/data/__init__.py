@@ -38,6 +38,7 @@ from uacpy.data.bathymetry import (
 )
 from uacpy.data.sound_speed import (
     fetch_ssp, fetch_ssp_transect, fetch_ts_profile,
+    extend_ssp_below_data, extend_column_to_seafloor,
 )
 from uacpy.data.copernicus import (
     fetch_ssp_operational, fetch_ssp_transect_operational,
@@ -47,14 +48,15 @@ from uacpy.data.copernicus import (
 from uacpy.data.wind_live import fetch_wind, fetch_wind_transect
 from uacpy.data.wind_local import download_wind_db
 from uacpy.data.waves import fetch_waves
-from uacpy.data.sea_surface import fetch_sea_surface
+from uacpy.data.sea_surface import fetch_sea_surface, hs_to_pm_wind
 from uacpy.data.argo import fetch_argo_profile, fetch_ssp_argo
 from uacpy.data.absorption import build_francois_garrison
 from uacpy.data.glodap_local import (
     download_glodap_db, fetch_ph_profile, fetch_ph,
 )
 from uacpy.data.sediment import (
-    grain_size_to_geoacoustics, bottom_from_grain_size, bottom_from_class,
+    grain_size_to_geoacoustics, grain_size_from_density,
+    bottom_from_grain_size, bottom_from_class,
 )
 from uacpy.data.seabed import (
     fetch_seabed_substrate, fetch_bottom, fetch_bottom_transect,
@@ -66,7 +68,7 @@ from uacpy.data.sediment_db import (
     download_sediment_db, fetch_sediment_sample, fetch_bottom_local,
     fetch_bottom_local_transect,
 )
-from uacpy.data.emodnet_local import download_emodnet_db
+from uacpy.data.emodnet_local import download_emodnet_db, fetch_seabed_local
 from uacpy.data.globsed_local import (
     download_globsed_db, fetch_sediment_thickness, fetch_sediment_thickness_transect,
 )
@@ -114,6 +116,8 @@ __all__ = [
     'fetch_ssp',
     'fetch_ssp_transect',
     'fetch_ts_profile',
+    'extend_ssp_below_data',
+    'extend_column_to_seafloor',
     'fetch_ssp_operational',
     'fetch_ssp_transect_operational',
     'fetch_ts_profile_operational',
@@ -124,6 +128,7 @@ __all__ = [
     'download_wind_db',
     'fetch_waves',
     'fetch_sea_surface',
+    'hs_to_pm_wind',
     'fetch_argo_profile',
     'fetch_ssp_argo',
     'build_francois_garrison',
@@ -132,6 +137,7 @@ __all__ = [
     'fetch_ph',
     # bottom
     'grain_size_to_geoacoustics',
+    'grain_size_from_density',
     'bottom_from_grain_size',
     'bottom_from_class',
     'fetch_seabed_substrate',
@@ -142,6 +148,7 @@ __all__ = [
     'fetch_bottom_mars_transect',
     'download_sediment_db',
     'download_emodnet_db',
+    'fetch_seabed_local',
     'download_globsed_db',
     'download_crust1_db',
     'fetch_sediment_sample',

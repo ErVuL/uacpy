@@ -36,11 +36,16 @@ Canonical surface
   (``source.plot_beam_pattern()`` is the object-oriented form).
 * :func:`plot_absorption` — volume absorption α(f) from a raw dB/km array or a
   model string (``absorption.plot(frequencies)`` is the object-oriented form).
+* :func:`land_polygons` — the Natural Earth land rings the map plotters draw
+  behind a chart, for a map of your own; :func:`download_coastline` caches
+  them for offline use, the way ``uacpy.data``'s ``download_*_db`` fetchers
+  cache their grids.
 
 Importing this module does not mutate ``matplotlib.rcParams``.
 """
 
 from uacpy.visualization import style
+from uacpy.visualization.basemap import download_coastline, land_polygons
 
 from uacpy.visualization.plots import (
     plot_result,
@@ -166,5 +171,8 @@ __all__ = [
     'plot_weighting',
     'plot_source_level',
     'plot_roc',
+    # the coastline backdrop the map plotters draw, and its cache
+    'land_polygons',
+    'download_coastline',
     'style',
 ]
