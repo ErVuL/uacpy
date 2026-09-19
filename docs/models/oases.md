@@ -216,7 +216,7 @@ seabed the same way:
 | Range-dependent SSP | ❌ | collapsed |
 | Range-dependent bottom | ❌ | collapsed to the median column |
 | Sea-surface altimetry | ❌ | dropped |
-| Multiple source depths | ❌ | one source depth per run |
+| Multiple source depths | ❌ | one depth per deck; `run()` loops and stacks in the field modes (OAST / OASP / OASSP), OASN / OASR / OASS raise |
 
 Collapse defaults, where they differ from the package-wide ones:
 
@@ -615,10 +615,15 @@ between −40 dB neighbours reads back around −50 dB. Read
 `result.metadata['oast_native_ranges']` to see the grid, align to it, or use
 OASP when null depth matters.
 
-**Everything is single-source-depth and (for OAST) single-frequency.** A
+**Every deck carries one source depth, and (for OAST) one frequency.** A
 multi-frequency `Source` on `OAST.run` raises `ConfigurationError` pointing at
-`RunMode.BROADBAND` / `RunMode.TIME_SERIES`; a multi-depth `Source` raises on
-any OASES sub-model, telling you to loop over `Source`s yourself.
+`RunMode.BROADBAND` / `RunMode.TIME_SERIES`. A multi-depth `Source` on the
+field models (OAST, OASP, OASSP) runs once per depth inside `run()` and comes
+back as a `ResultStack` over `source_depth`. OASP and OASSP slabs are complex
+pressure, so `stack.superpose()` adds them with `Source.weights`; OAST returns
+transmission loss in dB with no phase, so its stack holds the slabs but
+`superpose()` refuses. OASN, OASR and OASS take a single source depth per
+run and raise, naming the field modes that stack.
 
 **OASN ignores `receiver.ranges`.** OASN models a vertical array at
 `x = y = 0`; only `receiver.depths` reaches the deck. Horizontal aperture is

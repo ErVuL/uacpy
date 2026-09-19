@@ -21,7 +21,7 @@ import numpy as np
 from uacpy.core.environment import Environment
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
-from uacpy.core.results import Result, Field
+from uacpy.core.results import Result, Field, ResultStack
 from uacpy.core.constants import (
     BoundaryType,
     parse_boundary_type,
@@ -511,7 +511,7 @@ class SPARC(PropagationModel):
         source_waveform: Optional[np.ndarray] = None,
         sample_rate: Optional[float] = None,
         output_duration: Optional[float] = None,
-    ) -> Result:
+    ) -> Union[Result, ResultStack]:
         """
         Run SPARC simulation (range-dependent environments will be approximated)
 

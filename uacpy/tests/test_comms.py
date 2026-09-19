@@ -2550,3 +2550,145 @@ def test_default_preamble_and_ofdm_pilot_come_from_their_fixed_seeds():
         rng = np.random.default_rng(seed)
         bits = rng.integers(0, 2, n * mod.bits_per_symbol)
         assert np.array_equal(got, mod.modulate(bits))
+
+
+class TestChannelTapsDriveTheLinkHarness:
+    """A ``ChannelTaps`` from ``Arrivals.channel_taps`` is a ``channel=``."""
+
+    @staticmethod
+    def _arrivals():
+        from uacpy.core.results import Arrivals
+        return Arrivals(
+            arrivals=[{'delay': 0.5, 'amplitude': 1.0, 'phase': 0.0},
+                      {'delay': 0.5 + 2e-3, 'amplitude': 0.5, 'phase': np.pi}],
+            receiver_depths=[50.0], receiver_ranges=[1000.0],
+            model='Test', frequencies=1000.0)
+
+    def test_simulate_link_takes_the_tuple_as_it_takes_its_taps(self):
+        ct = self._arrivals().channel_taps(1000.0, carrier=1000.0)
+        a = comms.simulate_link('qpsk', 12.0, 4000, channel=ct,
+                                rng=np.random.default_rng(7))
+        b = comms.simulate_link('qpsk', 12.0, 4000, channel=ct.taps,
+                                rng=np.random.default_rng(7))
+        assert a.ber == b.ber and np.array_equal(a.rx_symbols, b.rx_symbols)
+        assert a.ber > 0.0     # the two-path channel is felt
+
+    def test_simulate_link_refuses_taps_spaced_finer_than_a_symbol(self):
+        arr = self._arrivals()
+        two = arr.channel_taps(1000.0, carrier=1000.0, sps=2)
+        one = arr.channel_taps(1000.0, carrier=1000.0, sps=1)
+        with pytest.raises(ConfigurationError, match="sps=2"):
+            comms.simulate_link('qpsk', 12.0, 400, channel=two)
+        comms.simulate_link('qpsk', 12.0, 400, channel=one)
+
+    def test_rrc_pulse_on_the_grid_is_rrc_filter_before_normalisation(self):
+        from uacpy.comms.link import rrc_pulse, rrc_filter
+        for sps, rolloff, span in [(4, 0.25, 8), (8, 0.0, 6), (2, 1.0, 4),
+                                   (5, 0.5, 3)]:
+            n = span * sps
+            g = rrc_pulse((np.arange(n + 1) - n / 2) / sps, rolloff)
+            assert np.allclose(g / np.sqrt(np.sum(g ** 2)),
+                               rrc_filter(sps, rolloff, span), atol=1e-14)
+        # The removable singularity at |t| = 1/(4 beta) takes its limit, not
+        # a division by zero, off the grid too.
+        assert np.isfinite(rrc_pulse(1 / (4 * 0.25), 0.25))
+        assert np.isfinite(rrc_pulse(1 / (4 * 0.25) + 1e-9, 0.25))
+        assert rrc_pulse(0.0, 0.25) == pytest.approx(
+            1 - 0.25 + 4 * 0.25 / np.pi)
+
+    def test_rc_pulse_is_nyquist_with_a_finite_pole(self):
+        from uacpy.comms.link import rc_pulse, rrc_filter
+        assert rc_pulse(0.0, 0.25) == 1.0
+        assert np.allclose(rc_pulse(np.arange(1, 6), 0.25), 0.0, atol=1e-15)
+        assert np.allclose(rc_pulse(-np.arange(1, 6), 0.35), 0.0, atol=1e-15)
+        pole = 1 / (2 * 0.25)
+        assert rc_pulse(pole, 0.25) == pytest.approx(
+            (np.pi / 4) * np.sinc(pole))
+        assert np.isfinite(rc_pulse(pole + 1e-9, 0.25))
+        assert rc_pulse(0.5, 0.0) == pytest.approx(np.sinc(0.5))
+        # It is the root-raised-cosine convolved with itself, sampled.
+        sps, span = 16, 8
+        g = rrc_filter(sps, 0.25, span)
+        full = np.convolve(g, g)
+        centre = span * sps
+        t = np.arange(-3, 4) * 0.5
+        assert np.allclose(full[centre + (t * sps).astype(int)],
+                           rc_pulse(t, 0.25), atol=2e-3)
+        with pytest.raises(ConfigurationError, match="rolloff"):
+            rc_pulse(0.3, 1.5)
+
+    @pytest.mark.requires_binary
+    def test_the_carrier_rotation_matches_the_passband_synthesis(self):
+        """The tap rotation ``exp(-i 2 pi f_c tau)`` is the one the
+        package's own time-domain synthesis (``delayandsum``, analytic
+        signal, ``exp(+i omega t)``) produces once its passband output is
+        mixed down with the same carrier. The geometry puts the bounce
+        cluster at ``frac(2 f_c dtau) ~ 0.5``, so the conjugate rotation
+        turns the bounce taps by ~pi and the correlation with the passband
+        route falls to ~0.5 at ~-100 deg; the pins below then fail."""
+        import warnings
+        from uacpy.models import Bellhop
+        from uacpy.models.base import RunMode
+        from uacpy.models.bellhop import delayandsum
+        from uacpy.core import Environment, Source, Receiver
+        fc = 10036.0    # 2 fc (sqrt(500^2 + 100^2) - 500) / 1500 = 132.5
+        env = Environment(name="taps_sign", bathymetry=100.0, ssp=1500.0)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', UserWarning)
+            arr = Bellhop(verbose=False, n_beams=801, alpha=(-20.0, 20.0)).run(
+                env=env, source=Source(depths=50.0, frequencies=fc),
+                receiver=Receiver(depths=[50.0], ranges=[500.0]),
+                run_mode=RunMode.ARRIVALS)
+        kinds = {a['kind'] for a in arr}
+        assert {'direct', 'surface'} <= kinds
+        rate, sps = 1000.0, 32
+        fs = rate * sps
+        rng = np.random.default_rng(3)
+        symbols = 2.0 * rng.integers(0, 2, 64) - 1.0
+        baseband = pulse_shape(symbols, sps, 0.25, 8)
+        passband = comms.upconvert(baseband, fs, fc)
+
+        # Route A: the passband burst through the arrivals in the time
+        # domain, mixed down with the carrier referenced to the record start.
+        first, last = float(arr.delays.min()), float(arr.delays.max())
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', UserWarning)
+            rts, t = delayandsum(arr.by_receiver[0][0][0], passband, fs, fc,
+                                 t_start=first,
+                                 time_window=((last - first)
+                                              + baseband.size / fs + 0.02))
+        mixed = (comms.downconvert(rts, fs, fc)
+                 * np.exp(-2j * np.pi * fc * t[0]))
+        via_passband = comms.rrc_matched_filter(mixed, sps, 0.25, 8)
+
+        # Route B: the same symbols through the baseband taps.
+        ct = arr.channel_taps(rate, carrier=fc, sps=sps, pulse='rrc',
+                              rolloff=0.25, span=8)
+        up = np.zeros(symbols.size * sps, complex)
+        up[::sps] = symbols
+        via_taps = comms.rrc_matched_filter(comms.apply_channel(up, ct.taps),
+                                            sps, 0.25, 8)
+
+        n = max(via_passband.size, via_taps.size)
+        a = np.pad(via_passband, (0, n - via_passband.size))
+        b = np.pad(via_taps, (0, n - via_taps.size))
+        xc = np.fft.ifft(np.fft.fft(a, 2 * n) * np.conj(np.fft.fft(b, 2 * n)))
+        peak = xc[np.argmax(np.abs(xc))]
+        rho = peak / np.sqrt(np.sum(np.abs(a) ** 2) * np.sum(np.abs(b) ** 2))
+        assert abs(rho) > 0.999
+        assert abs(np.degrees(np.angle(rho))) < 1.0
+
+        # The surface bounce tap: Bellhop's pi reflection phase times the
+        # carrier rotation of its extra delay, relative to the direct tap.
+        direct = arr.filter_by_bounces(kind='direct')
+        surface = arr.filter_by_bounces(kind='surface')
+        h_d = direct.channel_taps(rate, carrier=fc, sps=sps,
+                                  pulse='nearest').taps
+        h_s = surface.channel_taps(rate, carrier=fc, sps=sps,
+                                   pulse='nearest').taps
+        tap_d = h_d[np.argmax(np.abs(h_d))]
+        tap_s = h_s[np.argmax(np.abs(h_s))]
+        dtau = float(surface.delays.min()) - float(direct.delays.min())
+        expect = np.angle(np.exp(1j * (np.pi - 2 * np.pi * fc * dtau)))
+        got = np.angle(tap_s / tap_d)
+        assert abs(np.degrees(np.angle(np.exp(1j * (got - expect))))) < 5.0

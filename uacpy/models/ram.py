@@ -61,7 +61,7 @@ from uacpy.core.surface import Surface
 from uacpy.core.bottom import _NON_GEOACOUSTIC_TYPES
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
-from uacpy.core.results import Result, Field
+from uacpy.core.results import Result, Field, ResultStack
 from uacpy.core.constants import PRESSURE_FLOOR
 from uacpy.core.absorption import ConstantAbsorption
 from uacpy.core.exceptions import (
@@ -1802,7 +1802,7 @@ class RAM(PropagationModel):
         source_waveform: Optional[np.ndarray] = None,
         sample_rate: Optional[float] = None,
         output_duration: Optional[float] = None,
-    ) -> Result:
+    ) -> Union[Result, ResultStack]:
         """
         Run a RAM march on the backend :meth:`select_backend` picks
         (mpiramS / ramgeo / rams0.5 / ramsurf1.5).

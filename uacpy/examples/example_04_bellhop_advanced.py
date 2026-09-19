@@ -4,7 +4,8 @@ Six runs over the same range-dependent environment, each turning on one thing:
 Gaussian beams with Thorp volume attenuation, Cerveny beams with their own
 width/curvature controls and beam shift, a line source instead of a point
 source, three source depths in a single binary call, a ray trace, and a
-directional source driven by a beam-pattern table.
+directional source driven by a beam-pattern table. The three-depth stack is
+then summed with complex weights as a phased vertical array.
 
 The water column is the top 500 m of the Munk profile. Munk's sound-channel
 axis is at 1300 m, below this domain, so over 0-500 m the profile only
@@ -14,6 +15,7 @@ Uses: Bellhop(beam_type=, grid_type=, n_beams=, alpha=, beam_shift=,
 beam_width_type=, beam_curvature=, eps_multiplier=, r_loop=, n_image=, ib_win=)
 · Source(source_type='line') · Source(beam_pattern=) ·
 Source.plot_beam_pattern · multi-depth Source → ResultStack ·
+ResultStack.superpose(weights=) ·
 RunMode.RAYS · Rays.plot(color_by=) · uacpy.Thorp · Bottom.from_halfspaces ·
 plot.shared_colorbar
 """
@@ -82,6 +84,27 @@ for depth, slab in stack:
     finite = np.asarray(slab.dB)[np.isfinite(slab.dB)]   # NaN = no ray reached
     print(f"    source depth {depth:5.1f} m → median TL "
           f"{np.median(finite):.1f} dB")
+
+# The engines are linear in the source amplitude, so the stack is also a
+# vertical array: superpose(weights) returns one complex Field holding
+# Σ wᵢ·pᵢ over the slabs. The weight exp(-i·k·n·d·sinθ) on the n-th element
+# cancels the path-length lead n·d·sinθ of a ray launched at θ (positive
+# downward, like Bellhop's launch angle), so the three unit sources add in
+# phase along that direction. At 300 Hz the 30 m spacing is nearly 6 λ, so
+# the same alignment recurs every asin(λ/d) ≈ 10°: the array's directivity is
+# a comb of lobes shifted by θ, not the single beam a λ/2 pair would steer.
+STEER_DEG = 5.0
+array_depths = stack.coordinate
+c_at_array = env.ssp.eval(depth=float(array_depths.mean())).value
+k_at_array = 2 * np.pi * 300.0 / c_at_array
+steering = np.exp(-1j * k_at_array * (array_depths - array_depths[0])
+                  * np.sin(np.radians(STEER_DEG)))
+steered = stack.superpose(weights=steering)
+spacing_m = float(np.diff(array_depths)[0])
+spacing_wavelengths = spacing_m * k_at_array / (2 * np.pi)
+print(f"  phased array: {stack.n_slabs} elements {spacing_m:.0f} m apart "
+      f"({spacing_wavelengths:.1f} λ), steered {STEER_DEG:.0f}° down → "
+      f"median TL {np.nanmedian(steered.dB):.1f} dB")
 
 rays = uacpy.Bellhop(beam_type='g', grid_type='R', n_beams=50,
                      alpha=(-80, 80), beam_shift=True).run(
@@ -160,6 +183,28 @@ uacpy.plot.shared_colorbar(fig, axes, label='TL (dB)')
 fig.suptitle('Multi-source-depth: one binary call, one ResultStack',
              fontsize='x-large', fontweight='bold')
 fig.savefig(OUT / 'example_04_multi_source.png', dpi=150, bbox_inches='tight')
+plt.close(fig)
+
+# One slab beside the phased sum of all three. The superposed Field has the
+# slabs' grid and phase reference, so it plots like any single-source field.
+fig, (left, right) = plt.subplots(1, 2, figsize=(16, 6))
+uacpy.plot_field(stack.at(source_depth=50.0).to_dB(), left, env=env,
+                 show_colorbar=False,
+                 title='One element\n(source depth 50 m, unit weight)')
+uacpy.plot_field(steered.to_dB(), right, env=env, show_colorbar=False,
+                 title=f'Three-element array, weights exp(-i·k·n·d·sinθ)\n'
+                       f'(θ = {STEER_DEG:.0f}° down, d = {spacing_m:.0f} m = '
+                       f'{spacing_wavelengths:.1f} λ)')
+# Each panel marks the sources it holds, at r = 0 km.
+for ax, depths in ((left, [50.0]), (right, array_depths)):
+    ax.plot(np.zeros(len(depths)), depths, marker='*', markersize=14,
+            linestyle='none', color='white', markeredgecolor='black',
+            markeredgewidth=1.2, zorder=10, clip_on=False)
+uacpy.plot.shared_colorbar(fig, (left, right), label='TL (dB)')
+fig.suptitle('ResultStack.superpose: the stack as a phased vertical array',
+             fontsize='x-large', fontweight='bold')
+fig.savefig(OUT / 'example_04_superposed_array.png', dpi=150,
+            bbox_inches='tight')
 plt.close(fig)
 
 # The directivity beside the field it produces. The polar axes are oriented

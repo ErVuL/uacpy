@@ -12,6 +12,7 @@ import warnings
 import numpy as np
 from uacpy.acoustic_signal.system import impulse_response
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.core.results.rays import ChannelTaps
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from dataclasses import dataclass
 from typing import Optional
@@ -100,6 +101,14 @@ def multipath_channel(gains, delays_s, sample_rate, *, fractional=False):
     and the equalizers consume. ``gains`` may be complex (carry per-path
     phase). A tap-delay line is an integer-tap FIR, hence ``fractional=False``
     by default.
+
+    For a channel that comes from a propagation model rather than from
+    hand-typed numbers, :meth:`uacpy.core.results.Arrivals.channel_taps`
+    does the carrier rotation and the pulse for you: it returns the
+    baseband taps of a Bellhop ``ARRIVALS`` result at a symbol rate, and
+    with ``pulse=None, sps=1`` it reduces tap for tap to this function
+    called on ``received_amplitudes`` and the delays re-referenced to the
+    earliest one.
     """
     _, h = impulse_response(gains, delays_s, sample_rate, fractional=fractional)
     return h.astype(complex)
@@ -269,8 +278,78 @@ def _require_integer_sps(caller, sps):
     return i
 
 
+def rrc_pulse(t_symbols, rolloff):
+    """Root-raised-cosine pulse ``g(t)`` at arbitrary times, unnormalised.
+
+    ``t_symbols`` is time in symbol periods, any shape; the value at
+    ``t = 0`` is ``1 - beta + 4 beta / pi``. This is the continuous pulse
+    :func:`rrc_filter` samples on its ``sps`` grid, exposed so a tap can be
+    placed at a delay that is not a whole number of samples
+    (:meth:`uacpy.core.results.Arrivals.channel_taps` evaluates it at
+    ``k T - tau_i``). Scale by ``sqrt(sum(rrc_filter(...) ** 2))`` of the
+    same ``sps``/``span`` grid to put it on ``rrc_filter``'s unit-energy
+    footing; here the peak is the textbook value and the energy is not one.
+    """
+    if not 0.0 <= rolloff <= 1.0:
+        raise ConfigurationError(
+            f"rrc_pulse: rolloff must be in [0, 1]; got {rolloff!r}")
+    t = np.asarray(t_symbols, dtype=float)
+    b = float(rolloff)
+    # The general expression divides by ``pi*t*(1 - (4*b*t)**2)``, which
+    # vanishes at t = 0 and at |t| = 1/(4b). Both are removable singularities
+    # of the RRC impulse response, so those points take their analytic
+    # limits; 1e-8 catches a grid landing on (or numerically next to) either.
+    at_zero = np.abs(t) < 1e-8
+    at_pole = (np.abs(np.abs(t) - 1 / (4 * b)) < 1e-8 if b > 0
+               else np.zeros(t.shape, dtype=bool))
+    safe = np.where(at_zero | at_pole, 0.5, t)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        num = (np.sin(np.pi * safe * (1 - b))
+               + 4 * b * safe * np.cos(np.pi * safe * (1 + b)))
+        den = np.pi * safe * (1 - (4 * b * safe) ** 2)
+        g = num / den
+    g = np.where(at_zero, 1 - b + 4 * b / np.pi, g)
+    if b > 0:
+        pole = (b / np.sqrt(2)) * ((1 + 2 / np.pi) * np.sin(np.pi / (4 * b))
+                                   + (1 - 2 / np.pi) * np.cos(np.pi / (4 * b)))
+        g = np.where(at_pole, pole, g)
+    return g
+
+
+def rc_pulse(t_symbols, rolloff):
+    """Raised-cosine pulse at arbitrary times, unit peak.
+
+    ``sinc(t) cos(pi beta t) / (1 - (2 beta t)^2)`` with ``t_symbols`` in
+    symbol periods, any shape; the removable singularity at
+    ``|t| = 1/(2 beta)`` takes its limit ``(pi/4) sinc(1/(2 beta))``. It is
+    the transmit root-raised-cosine convolved with its matched filter, so
+    it is what a receiver sees at its decision instants: zero at every
+    non-zero integer ``t`` (Nyquist) and, between integers, the
+    inter-symbol interference a path delayed by a fraction of a symbol
+    leaves. :meth:`uacpy.core.results.Arrivals.channel_taps` samples it at
+    ``k T - tau_i`` for its symbol-spaced (``sps=1``) taps.
+    """
+    if not 0.0 <= rolloff <= 1.0:
+        raise ConfigurationError(
+            f"rc_pulse: rolloff must be in [0, 1]; got {rolloff!r}")
+    t = np.asarray(t_symbols, dtype=float)
+    b = float(rolloff)
+    at_pole = (np.abs(np.abs(t) - 1 / (2 * b)) < 1e-8 if b > 0
+               else np.zeros(t.shape, dtype=bool))
+    safe = np.where(at_pole, 0.0, t)
+    g = np.sinc(safe) * np.cos(np.pi * b * safe) / (1 - (2 * b * safe) ** 2)
+    if b > 0:
+        g = np.where(at_pole, (np.pi / 4) * np.sinc(1 / (2 * b)), g)
+    return g
+
+
 def rrc_filter(sps, rolloff, span):
-    """Root-raised-cosine taps: ``span`` symbols, ``sps`` samples/symbol, unit energy."""
+    """Root-raised-cosine taps: ``span`` symbols, ``sps`` samples/symbol,
+    unit energy.
+
+    :func:`rrc_pulse` sampled at ``(arange(span*sps + 1) - span*sps/2) / sps``
+    symbol periods and scaled to unit energy.
+    """
     if not 0.0 <= rolloff <= 1.0:
         raise ConfigurationError(
             f"rrc_filter: rolloff must be in [0, 1]; got {rolloff!r}")
@@ -288,24 +367,7 @@ def rrc_filter(sps, rolloff, span):
             f"rrc_filter: span must be >= 1 (symbols); got {span!r}.")
     n = span * sps
     t = (np.arange(n + 1) - n / 2) / sps      # time in symbol periods
-    b = float(rolloff)
-    h = np.empty_like(t)
-    # The general expression below divides by ``pi*t*(1 - (4*b*t)**2)``, which
-    # vanishes at t = 0 and at |t| = 1/(4b) (t in symbol periods). Both are
-    # removable singularities of the RRC impulse response, so the two branches
-    # substitute their analytic limits; the 1e-8 tolerance catches the sampled
-    # grid landing on (or numerically next to) either point.
-    for i, ti in enumerate(t):
-        if abs(ti) < 1e-8:
-            h[i] = 1 - b + 4 * b / np.pi
-        elif b > 0 and abs(abs(ti) - 1 / (4 * b)) < 1e-8:
-            h[i] = (b / np.sqrt(2)) * ((1 + 2 / np.pi) * np.sin(np.pi / (4 * b))
-                                       + (1 - 2 / np.pi) * np.cos(np.pi / (4 * b)))
-        else:
-            num = (np.sin(np.pi * ti * (1 - b))
-                   + 4 * b * ti * np.cos(np.pi * ti * (1 + b)))
-            den = np.pi * ti * (1 - (4 * b * ti) ** 2)
-            h[i] = num / den
+    h = rrc_pulse(t, rolloff)
     return h / np.sqrt(np.sum(h ** 2))
 
 
@@ -524,7 +586,16 @@ def simulate_link(scheme, ebn0_dB, n_bits=20000, *, channel=None,
 
     Symbols are unit-average-energy, so the per-symbol SNR is ``k * Eb/N0``
     (``k`` bits/symbol). With ``channel=None`` and ``equalizer=None`` the BER
-    matches the AWGN theory curve. ``channel`` is a static FIR ``h``;
+    matches the AWGN theory curve. ``channel`` is a static FIR ``h``
+    convolved with the SYMBOLS: no pulse shaping is applied on the way out
+    and no matched filter on the way in, so the taps must already be the
+    channel as seen at the decision instants — symbol-spaced, with the
+    raised cosine (transmit pulse times matched filter) folded in, which is
+    what :meth:`Arrivals.channel_taps
+    <uacpy.core.results.Arrivals.channel_taps>` returns at ``sps=1``
+    (``pulse='rc'``, its default there) or, at whole-symbol delays,
+    ``pulse='nearest'``. A root-raised-cosine half alone (``pulse='rrc'``)
+    is the wrong channel here;
     ``equalizer`` a :class:`~uacpy.comms.receive.DFE` (trained on the first
     ``n_train`` symbols); ``code`` a
     :class:`~uacpy.comms.modulate.ConvCode` applied around the modem (BER then
@@ -542,9 +613,15 @@ def simulate_link(scheme, ebn0_dB, n_bits=20000, *, channel=None,
         information-bit figure that BER curves are plotted against.
     n_bits : int, optional
         Number of information bits to transmit. Defaults to ``20000``.
-    channel : array_like, optional
+    channel : array_like or ChannelTaps, optional
         Static FIR channel ``h`` convolved with the transmitted symbols.
-        ``None`` is the AWGN-only link.
+        ``None`` is the AWGN-only link. A
+        :class:`~uacpy.core.results.rays.ChannelTaps` from
+        :meth:`~uacpy.core.results.Arrivals.channel_taps`
+        is accepted when it was built at ``sps=1``: this harness works on
+        the symbol grid, so a tap vector at several samples per symbol
+        names a different grid and is refused. Build it with the default
+        pulse (``'rc'`` at ``sps=1``) or ``'nearest'``; see above.
     equalizer : uacpy.comms.receive.DFE, optional
         Equaliser trained on the first ``n_train`` symbols. ``None`` slices
         the received symbols straight out.
@@ -564,6 +641,14 @@ def simulate_link(scheme, ebn0_dB, n_bits=20000, *, channel=None,
         learning curve when one was used.
     """
     rng = np.random.default_rng() if rng is None else rng
+    if isinstance(channel, ChannelTaps):
+        if int(channel.sps) != 1:
+            raise ConfigurationError(
+                f"simulate_link: channel= is a ChannelTaps at sps="
+                f"{channel.sps}, but this harness convolves SYMBOLS, one "
+                f"sample per symbol. Rebuild it with "
+                f"Arrivals.channel_taps(symbol_rate, carrier=..., sps=1).")
+        channel = channel.taps
     mod = Modulator(scheme)
     k = mod.bits_per_symbol
     info = rng.integers(0, 2, int(n_bits))

@@ -25,7 +25,7 @@ from uacpy.models.base import (
 from uacpy.core.environment import Environment
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
-from uacpy.core.results import Result
+from uacpy.core.results import Result, ResultStack
 from uacpy.core.constants import parse_boundary_type
 from uacpy.io.grn_reader import (read_grn_file, grn_to_field,
                                  grn_to_transfer_function,
@@ -141,8 +141,10 @@ class Scooter(PropagationModel):
         evanescent components still carry energy at the cut.
 
         COA's criterion is that the taper span "several periods" of
-        ``exp(i k r)``, i.e. ``taper * (kMax-kMin) * r_max >> 2*pi`` — a few
-        parts in ten thousand of the band over a kilometre, not a few percent.
+        ``exp(i k r)``, i.e. ``taper * (kMax-kMin) * r_max >> 2*pi``. One
+        period is ``2*pi / ((kMax-kMin) * r_max)`` of the band: with the
+        default window that is a few per cent at a few kilometres and shrinks
+        as ``1/r_max`` — parts in a thousand at tens of kilometres.
         Values far above that attenuate real spectrum, which is occasionally
         what you want (the far evanescent tail is the least well conditioned
         part of the solve) and is never free. Measure it against something
@@ -348,7 +350,7 @@ class Scooter(PropagationModel):
         source_waveform: Optional[np.ndarray] = None,
         sample_rate: Optional[float] = None,
         output_duration: Optional[float] = None,
-    ) -> Result:
+    ) -> Union[Result, ResultStack]:
         """
         Run Scooter simulation
 

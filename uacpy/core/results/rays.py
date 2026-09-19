@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import warnings
 import numpy as np
-from typing import Optional, Dict, Any, List, Tuple, Union
+from dataclasses import dataclass
+from typing import Optional, Dict, Any, List, NamedTuple, Tuple, Union
 
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core._carrier_validate import _require_positive
@@ -92,6 +93,68 @@ def _fold_notice(delays, power, record: float, *, who: str, remedy: str,
             f"at {float(delays.max()):g} s, so the {int(folded.sum())} "
             f"arrival(s) past its end fold back onto the early trace at "
             f"{level} relative to the whole. {remedy}")
+
+
+class ChannelTaps(NamedTuple):
+    """Discrete-time baseband channel built by :meth:`Arrivals.channel_taps`.
+
+    ``taps[k]`` multiplies the baseband sample ``k`` samples after the one
+    the first arrival delivers; ``delays_s[k]`` is that tap's time relative
+    to the first arrival's centre (negative for the leading skirt of a
+    pulse), ``symbol_rate`` and ``carrier`` are the rate and carrier the
+    taps were built for, ``sps`` the samples per symbol they are spaced at,
+    and ``first_arrival_s`` the absolute travel time the delays were
+    re-referenced from. ``comms.apply_channel`` and ``comms.simulate_link``
+    take the whole tuple or its ``.taps``.
+    """
+    taps: np.ndarray
+    delays_s: np.ndarray
+    symbol_rate: float
+    carrier: float
+    sps: int
+    first_arrival_s: float
+
+
+# Coherence bandwidth = 1 / (factor * rms delay spread), by convention name.
+# 'inverse_spread' is the corpus's: APL-UW TR 9407 sect. II.7.b, p. II-32
+# ("the inverse [of the elongation time] in hertz is a measure of the
+# coherence bandwidth of the channel") and Abraham, *Underwater Acoustic
+# Signal Processing*, sect. 8.7 (W < 1/sigma_t = W_c, Fig. 8.34). The two
+# Rappaport factors are the 0.5- and 0.9-correlation rules of *Wireless
+# Communications*, 2nd ed., sect. 5.4.3, eqs 5.39-5.40 — a source outside
+# the corpus, kept as named options.
+_COHERENCE_BANDWIDTH_FACTORS = {'inverse_spread': 1.0,
+                                'rappaport_0.5': 5.0,
+                                'rappaport_0.9': 50.0}
+
+
+@dataclass(frozen=True)
+class ChannelRegime:
+    """Verdict of :meth:`Arrivals.channel_regime` for one symbol rate.
+
+    ``frequency_selective`` is
+    ``signal_bandwidth_hz > coherence_bandwidth_hz``:
+    the symbol band spans more than one fade of the channel, so the symbols
+    overlap their neighbours (``isi_symbols`` of them, the rms delay spread
+    in symbol periods) and a flat gain cannot describe the link.
+    """
+    coherence_bandwidth_hz: float
+    signal_bandwidth_hz: float
+    rms_delay_spread_s: float
+    symbol_duration_s: float
+    frequency_selective: bool
+    isi_symbols: float
+    convention: str
+
+    def __str__(self) -> str:
+        verdict = ("frequency-selective" if self.frequency_selective
+                   else "frequency-flat")
+        sign = ">" if self.frequency_selective else "<="
+        return (f"{verdict}: signal {self.signal_bandwidth_hz:g} Hz {sign} "
+                f"coherence {self.coherence_bandwidth_hz:g} Hz "
+                f"[{self.convention}] (rms delay spread "
+                f"{self.rms_delay_spread_s:g} s = {self.isi_symbols:g} "
+                f"symbols of {self.symbol_duration_s:g} s)")
 
 
 class Arrivals(Result):
@@ -228,9 +291,19 @@ class Arrivals(Result):
         :func:`~uacpy.acoustic_signal.system.impulse_response`.
         :meth:`_arrival_power` is its squared magnitude.
         """
-        amplitude = np.abs(np.asarray(self.amplitudes, dtype=float).ravel())
+        return self._received_amplitudes_at(self.f0 or 0.0, self.arrivals)
+
+    @staticmethod
+    def _received_amplitudes_at(frequency: float,
+                                records: List[Dict[str, Any]]) -> np.ndarray:
+        """``A * exp(2 pi f Im tau) * exp(1j * phase)`` of ``records`` at
+        ``frequency`` (Hz) — :attr:`received_amplitudes` at a frequency other
+        than the result's own, which the channel-tap builder needs at its
+        carrier."""
+        amplitude = np.abs(np.asarray(
+            [a['amplitude'] for a in records], dtype=float).ravel())
         delays_imag = np.asarray(
-            [a.get('delay_imag', 0.0) for a in self.arrivals], dtype=float)
+            [a.get('delay_imag', 0.0) for a in records], dtype=float)
         # Both derived columns are read tolerantly, unlike the strict
         # ``phases`` accessor. A magnitude does not depend on phase, so an
         # arrival set assembled without one — Bellhop always writes it, but
@@ -238,8 +311,8 @@ class Arrivals(Result):
         # ask what reaches the receiver, and :meth:`_arrival_power` goes
         # through here. The stored phase is radians.
         phase = np.asarray(
-            [a.get('phase', 0.0) for a in self.arrivals], dtype=float)
-        omega = 2.0 * np.pi * self.f0 if self.f0 else 0.0
+            [a.get('phase', 0.0) for a in records], dtype=float)
+        omega = 2.0 * np.pi * float(frequency)
         with np.errstate(over='ignore'):
             received = amplitude * np.exp(omega * delays_imag)
         return received * np.exp(1j * phase)
@@ -726,6 +799,357 @@ class Arrivals(Result):
         n_freq = max(int(np.ceil(bandwidth * record)) + 1, 2)
         return np.linspace(centre - bandwidth / 2.0,
                            centre + bandwidth / 2.0, n_freq)
+
+    # Communications view -------------------------------------------------
+
+    def _one_cell(self, receiver, who: str) -> List[Dict[str, Any]]:
+        """The arrival records of one receiver cell.
+
+        ``receiver=None`` is accepted only when every record sits in one
+        cell; otherwise ``receiver=(depth, range)`` picks a cell by the
+        coordinates on the result's receiver axes, and an empty cell — a
+        shadow zone, where the channel is undefined — is refused too.
+        """
+        def cell_of(a):
+            return (int(a.get('src_idx', 0)), int(a.get('depth_idx', 0)),
+                    int(a.get('range_idx', 0)))
+        cells = sorted({cell_of(a) for a in self.arrivals})
+        if receiver is None:
+            if len(cells) > 1:
+                raise ConfigurationError(
+                    f"{who}: these arrivals span {len(cells)} receiver "
+                    f"cells ({self.receiver_depths.size} depths x "
+                    f"{self.receiver_ranges.size} ranges), and a channel "
+                    f"is one receiver's. Pass receiver=(depth_m, range_m) "
+                    f"to choose the cell, or filter to one first.")
+            if not cells:
+                raise ConfigurationError(
+                    f"{who}: no arrivals — the channel of a cell nothing "
+                    f"reaches is undefined, not empty.")
+            return list(self.arrivals)
+        try:
+            depth, rng = (float(v) for v in receiver)
+        except (TypeError, ValueError) as exc:
+            raise ConfigurationError(
+                f"{who}: receiver= must be a (depth_m, range_m) pair; got "
+                f"{receiver!r}.") from exc
+        d_idx = _axis_index(self.receiver_depths, depth, who, "depth")
+        r_idx = _axis_index(self.receiver_ranges, rng, who, "range")
+        sources = sorted({c[0] for c in cells})
+        if len(sources) > 1:
+            raise ConfigurationError(
+                f"{who}: these arrivals come from {len(sources)} source "
+                f"depths, and a channel is one source's too. Filter on "
+                f"'src_idx' first: arr.filter(lambda a: a['src_idx'] == 0).")
+        picked = [a for a in self.arrivals
+                  if cell_of(a)[1:] == (d_idx, r_idx)]
+        if not picked:
+            raise ConfigurationError(
+                f"{who}: no arrivals at receiver depth {depth:g} m, range "
+                f"{rng:g} m — the channel of a cell nothing reaches is "
+                f"undefined, not empty.")
+        return picked
+
+    def channel_taps(
+        self,
+        symbol_rate: float,
+        *,
+        carrier: float,
+        sps: int = 1,
+        pulse: Optional[str] = None,
+        rolloff: float = 0.25,
+        span: int = 8,
+        receiver=None,
+        normalize: bool = False,
+    ) -> ChannelTaps:
+        """Baseband channel taps of these arrivals at a symbol rate.
+
+        The discrete-time channel a modem at ``carrier`` sees between its
+        pulse shaper and its receiver, at ``sps`` samples per symbol
+        (``T = 1 / (sps * symbol_rate)``)::
+
+            h[k] = sum_i a_i exp(i phi_i) exp(-i 2 pi f_c tau_i) g(k T - tau_i)
+
+        ``a_i`` is the received amplitude at the carrier, absorption included
+        (:attr:`received_amplitudes` evaluated at ``carrier`` rather than at
+        the result's own frequency), ``phi_i`` the arrival phase, ``tau_i``
+        the travel time, and ``g`` the transmit pulse. The tap grid starts
+        at the earliest arrival (``first_arrival_s`` records it), but the
+        rotation keeps the absolute ``tau_i``: the taps are what a receiver
+        mixing with the transmitter's carrier sees, common phase
+        ``exp(-i 2 pi f_c tau_first)`` included, and that phase is what
+        makes the passband test in ``test_comms.py`` reproducible.
+
+        ``pulse`` names ``g``, and ``None`` (the default) infers it from
+        ``sps``:
+
+        - ``'rc'`` — the raised cosine (:func:`~uacpy.comms.rc_pulse`, unit
+          peak): transmit root-raised-cosine times its matched filter, so
+          the taps are the channel at the receiver's decision instants —
+          what :func:`~uacpy.comms.simulate_link` and a symbol-spaced
+          equaliser consume. The default at ``sps=1``. Measured against the
+          ``sps=16`` root-raised-cosine taps matched-filtered and decimated,
+          it agrees to an NMSE of 1e-4 on- and off-grid; the
+          root-raised-cosine half alone is 1.7e-2 to 2.4e-2 off, so it is
+          not offered as a symbol-spaced default.
+        - ``'rrc'`` — the transmit root-raised-cosine alone
+          (:func:`~uacpy.comms.rrc_pulse`), normalised as
+          :func:`~uacpy.comms.rrc_filter` is (unit energy on the ``sps``
+          grid), so an arrival on a sample instant reproduces that filter's
+          taps and ``comms.apply_channel(upsampled_symbols, h)`` is the
+          pulse-shaped waveform through the channel, for a receiver that
+          applies its own matched filter. The default at ``sps > 1``.
+        - ``'nearest'`` — no pulse; each arrival on its nearest sample,
+          which is :func:`~uacpy.comms.multipath_channel` on
+          ``received_amplitudes`` and the re-referenced delays, tap for tap.
+
+        **Sign of the carrier rotation.** The package's time convention is
+        ``exp(+i omega t)``: ``Bellhop._arrivals_to_tf`` writes each arrival
+        into ``H(f)`` as ``A exp(i(phi - 2 pi f tau))``, and
+        :func:`~uacpy.models.bellhop.delayandsum` places ``a Re{x_a(t - tau)
+        exp(i phi)}`` with ``x_a`` the analytic source signal. For a
+        passband burst ``x(t) = Re{b(t) exp(i 2 pi f_c t)}`` the analytic
+        signal is ``b(t) exp(i 2 pi f_c t)``, so the received passband is
+        ``Re{sum_i a_i exp(i phi_i) b(t - tau_i) exp(i 2 pi f_c (t - tau_i))}``
+        and demodulating with the same carrier leaves
+        ``sum_i a_i exp(i phi_i) exp(-i 2 pi f_c tau_i) b(t - tau_i)``: the
+        rotation is ``exp(-i 2 pi f_c tau_i)``, as written above. Under the
+        opposite convention it would be the conjugate.
+
+        Parameters
+        ----------
+        symbol_rate : float
+            Symbol rate (Bd).
+        carrier : float
+            Carrier frequency (Hz) the modem mixes with. It sets both the
+            per-path rotation and the absorption applied to the amplitudes.
+        sps : int, default 1
+            Samples per symbol the taps are spaced at. ``1`` is the
+            symbol-spaced channel :func:`~uacpy.comms.simulate_link` takes.
+        pulse : {'rc', 'rrc', 'nearest', None}, default None
+            The pulse ``g``, as listed above; ``None`` takes ``'rc'`` at
+            ``sps=1`` and ``'rrc'`` above it.
+        rolloff, span : float, int
+            The pulse's excess bandwidth and length in symbols. Ignored
+            for ``pulse='nearest'``.
+        receiver : (float, float), optional
+            ``(depth_m, range_m)`` of the cell to take, on the result's
+            receiver axes. Required when the arrivals span several cells.
+        normalize : bool, default False
+            Scale the taps to unit energy (``sum |h|^2 = 1``), so a link
+            harness that sets its noise from the symbol energy sees the
+            multipath shape and not the path loss.
+
+        Returns
+        -------
+        ChannelTaps
+            ``(taps, delays_s, symbol_rate, carrier, sps, first_arrival_s)``.
+
+        Raises
+        ------
+        ConfigurationError
+            Non-positive ``symbol_rate`` or ``carrier``, ``sps`` below 1, an
+            unknown ``pulse``, several cells without ``receiver=``, or a
+            non-finite arrival.
+
+        References
+        ----------
+        Stojanovic, M. and Preisig, J., "Underwater acoustic communication
+        channels: propagation models and statistical characterization",
+        IEEE Commun. Mag. 47(1), 2009, sect. II — the sparse tap-delay
+        line with per-path gains and delays this samples.
+        Proakis, J. G., *Digital Communications*, 4th ed., sect. 14.5 —
+        the discrete-time model of a frequency-selective channel as taps
+        at the symbol (or fractional-symbol) spacing.
+        """
+        who = "Arrivals.channel_taps"
+        symbol_rate = float(symbol_rate)
+        _require_positive(symbol_rate, f"{who} symbol_rate", hint="Bd")
+        carrier = float(carrier)
+        _require_positive(carrier, f"{who} carrier", hint="Hz")
+        if int(sps) != sps or int(sps) < 1:
+            raise ConfigurationError(
+                f"{who}: sps must be a whole number of samples per symbol, "
+                f">= 1; got {sps!r}.")
+        sps = int(sps)
+        if pulse is None:
+            pulse = 'rc' if sps == 1 else 'rrc'
+        if pulse not in ('rc', 'rrc', 'nearest'):
+            raise ConfigurationError(
+                f"{who}: pulse must be 'rc' (raised cosine, the channel at "
+                f"the decision instants), 'rrc' (transmit root-raised-"
+                f"cosine alone), 'nearest' (no pulse) or None to infer "
+                f"from sps; got {pulse!r}.")
+        records = self._one_cell(receiver, who)
+        delays = np.asarray([a['delay'] for a in records], dtype=float)
+        gains = self._received_amplitudes_at(carrier, records)
+        if not (np.all(np.isfinite(delays)) and np.all(np.isfinite(gains))):
+            raise ConfigurationError(
+                f"{who}: an arrival carries a non-finite delay or amplitude, "
+                f"so the channel is undefined.")
+        first = float(delays.min())
+        rel = delays - first
+        # Baseband rotation of each path by its own carrier delay; the sign
+        # is derived in the docstring from the package's exp(+i omega t)
+        # convention.
+        gains = gains * np.exp(-2j * np.pi * carrier * delays)
+        fs = sps * symbol_rate
+        from uacpy.comms.link import multipath_channel, rc_pulse, rrc_pulse
+        if pulse == 'nearest':
+            taps = multipath_channel(gains, rel, fs)
+            times = np.arange(taps.size) / fs
+        else:
+            span = int(span)
+            if span < 1:
+                raise ConfigurationError(
+                    f"{who}: span must be >= 1 symbol; got {span!r}.")
+            half = span * sps / 2.0
+            # The 1e-9 keeps an arrival a rounding error past a sample
+            # instant from adding an empty tap.
+            n_taps = int(np.ceil(rel.max() * fs - 1e-9)) + span * sps + 1
+            times = (np.arange(n_taps) - half) / fs
+            if pulse == 'rc':
+                shape, norm = rc_pulse, 1.0     # unit peak: Nyquist samples
+            else:
+                grid = (np.arange(span * sps + 1) - half) / sps
+                shape = rrc_pulse
+                norm = float(np.sqrt(np.sum(rrc_pulse(grid, rolloff) ** 2)))
+            taps = np.zeros(n_taps, dtype=complex)
+            for gain, tau in zip(gains, rel):
+                arg = (times - tau) * symbol_rate
+                g = shape(arg, rolloff)
+                # The pulse ends at +-span/2 inclusive, as rrc_filter's grid
+                # does; the 1e-9 keeps rounding from dropping an end tap.
+                g[np.abs(arg) > span / 2.0 + 1e-9] = 0.0
+                taps += gain * g / norm
+        if normalize:
+            energy = float(np.sum(np.abs(taps) ** 2))
+            if energy <= 0.0:
+                raise ConfigurationError(
+                    f"{who}: every tap is zero, so there is no energy to "
+                    f"normalise to.")
+            taps = taps / np.sqrt(energy)
+        return ChannelTaps(taps=taps, delays_s=times, symbol_rate=symbol_rate,
+                           carrier=carrier, sps=sps, first_arrival_s=first)
+
+    @staticmethod
+    def _coherence_factor(convention: str, factor, who: str) -> float:
+        """The ``k`` of ``1 / (k tau_rms)``: ``factor`` when given (any
+        finite ``k > 0``), else the named convention's."""
+        if factor is not None:
+            factor = float(factor)
+            if not (np.isfinite(factor) and factor > 0.0):
+                raise ConfigurationError(
+                    f"{who}: factor must be a finite number > 0 (the k of "
+                    f"1 / (k * tau_rms)); got {factor!r}. Leave it out to "
+                    f"use convention={convention!r}.")
+            return factor
+        try:
+            return _COHERENCE_BANDWIDTH_FACTORS[convention]
+        except KeyError:
+            raise ConfigurationError(
+                f"{who}: convention must be one of "
+                f"{sorted(_COHERENCE_BANDWIDTH_FACTORS)} (1/tau_rms, "
+                f"1/(5 tau_rms), 1/(50 tau_rms)), or pass factor=k for "
+                f"1/(k tau_rms); got {convention!r}.") from None
+
+    def coherence_bandwidth(self, *, convention: str = 'inverse_spread',
+                            factor: Optional[float] = None) -> float:
+        """Bandwidth over which the channel's transfer function stays
+        correlated, in Hz, as ``1 / (k * tau_rms)`` with ``tau_rms`` the
+        :meth:`rms_delay_spread`.
+
+        The default ``k = 1`` is the convention the corpus states: "the
+        inverse [of the elongation time] in hertz is a measure of the
+        coherence bandwidth of the channel" (APL-UW TR 9407, sect. II.7.b,
+        p. II-32) and ``W < 1 / sigma_t = W_c`` (Abraham, *Underwater
+        Acoustic Signal Processing*, sect. 8.7, Fig. 8.34: 33 ms of
+        spreading gives 30 Hz). The named options ``'rappaport_0.5'``
+        (``k = 5``) and ``'rappaport_0.9'`` (``k = 50``) are the
+        0.5- and 0.9-correlation rules of Rappaport, *Wireless
+        Communications*, 2nd ed., sect. 5.4.3, eqs 5.39-5.40 — a source
+        outside the corpus, so they are options and not the default.
+        ``factor=k`` sets any other ``k > 0``. ``inf`` for a single arrival
+        (no spread, a flat channel), ``nan`` when the spread is.
+
+        Parameters
+        ----------
+        convention : {'inverse_spread', 'rappaport_0.5', 'rappaport_0.9'}
+            Which ``k`` to use. Default ``'inverse_spread'``.
+        factor : float, optional
+            Explicit ``k > 0``; overrides ``convention``.
+        """
+        k = self._coherence_factor(convention, factor,
+                                   "Arrivals.coherence_bandwidth")
+        spread = self.rms_delay_spread()
+        if not np.isfinite(spread):
+            return float('nan')
+        if spread <= 0.0:
+            return float('inf')
+        return 1.0 / (k * spread)
+
+    def channel_regime(self, symbol_rate: float, *,
+                       convention: str = 'inverse_spread',
+                       factor: Optional[float] = None,
+                       rolloff: float = 0.0) -> ChannelRegime:
+        """Whether a modem at ``symbol_rate`` sees this channel as flat or
+        frequency-selective.
+
+        Compares the signal bandwidth ``(1 + rolloff) * symbol_rate`` with
+        :meth:`coherence_bandwidth` under ``convention`` / ``factor``:
+        selective when the signal is the wider (Proakis, *Digital
+        Communications*, 4th ed., sect. 14.1.2; Stojanovic and Preisig
+        2009, sect. II). ``isi_symbols`` is the rms delay spread in symbol
+        periods, the number of neighbours each symbol overlaps. The result
+        records the convention it was judged under (``factor=k`` is
+        recorded as ``'factor=k'``).
+
+        Parameters
+        ----------
+        symbol_rate : float
+            Symbol rate (Bd).
+        convention, factor
+            As on :meth:`coherence_bandwidth`.
+        rolloff : float, default 0.0
+            Excess bandwidth of the pulse; ``0`` takes the Nyquist bandwidth
+            equal to the symbol rate.
+        """
+        symbol_rate = float(symbol_rate)
+        _require_positive(symbol_rate, "Arrivals.channel_regime symbol_rate",
+                          hint="Bd")
+        rolloff = float(rolloff)
+        if not 0.0 <= rolloff <= 1.0:
+            raise ConfigurationError(
+                f"Arrivals.channel_regime: rolloff must be in [0, 1]; got "
+                f"{rolloff!r}.")
+        k = self._coherence_factor(convention, factor,
+                                   "Arrivals.channel_regime")
+        coherence = self.coherence_bandwidth(factor=k)
+        spread = self.rms_delay_spread()
+        signal = (1.0 + rolloff) * symbol_rate
+        return ChannelRegime(
+            coherence_bandwidth_hz=coherence,
+            signal_bandwidth_hz=signal,
+            rms_delay_spread_s=spread,
+            symbol_duration_s=1.0 / symbol_rate,
+            frequency_selective=bool(signal > coherence),
+            isi_symbols=spread * symbol_rate,
+            convention=(str(convention) if factor is None
+                        else f"factor={float(factor):g}"),
+        )
+
+
+def _axis_index(axis: np.ndarray, value: float, who: str, name: str) -> int:
+    """Index of ``value`` on ``axis``, matched to 1e-6 of the axis span."""
+    axis = np.asarray(axis, dtype=float).ravel()
+    scale = max(float(np.ptp(axis)), abs(float(value)), 1.0)
+    hits = np.flatnonzero(np.abs(axis - value) <= 1e-6 * scale)
+    if hits.size != 1:
+        raise ConfigurationError(
+            f"{who}: receiver {name} {value:g} m is not on this result's "
+            f"{name} axis {np.array2string(axis, max_line_width=60)}; "
+            f"pass one of its values.")
+    return int(hits[0])
 
 
 class Rays(Result):

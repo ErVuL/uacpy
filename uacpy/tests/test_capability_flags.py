@@ -404,11 +404,13 @@ _EXPECTED_MULTI_SOURCE_DEPTH = {
 @pytest.mark.parametrize('model_name', _MODEL_PARAMS)
 def test_multi_source_depth_capability_matrix(model_name):
     """Bellhop is the only model that runs a source-depth *grid* in one
-    binary call (``ModelSpec.supports`` carries ``'multi_source_depth'``);
-    for every other model ``_validate_geometry`` refuses a multi-depth
-    Source with 'single source depth' (pinned in test_input_validation.py),
-    telling the caller to loop over Sources externally. Bounce also reads
-    ``False``, but its geometry validation is a no-op so nothing enforces it.
+    binary call (``ModelSpec.supports`` carries ``'multi_source_depth'``).
+    Every other model reads one depth per deck: in a field mode
+    ``PropagationModel.run`` loops over the depths and stacks the slabs, and
+    in any other mode ``_validate_geometry`` refuses a multi-depth Source
+    with 'single source depth' (pinned in test_input_validation.py). Bounce
+    also reads ``False``, but its geometry validation is a no-op so nothing
+    enforces it.
     """
     try:
         m = _EXPECTED[model_name][0]()
@@ -419,13 +421,16 @@ def test_multi_source_depth_capability_matrix(model_name):
 
 
 @pytest.mark.parametrize('model_name', _MODEL_PARAMS)
-def test_a_multi_depth_source_raises_or_reaches_no_deck(model_name):
+def test_a_multi_depth_source_stacks_in_a_field_mode_and_is_refused_elsewhere(
+        model_name):
     """What the flag costs a caller, per model.
 
     Bellhop runs the grid. Bounce reads no source geometry and overrides
     ``_validate_geometry`` to a no-op, so it accepts the extra depths and
-    they reach no deck. Every other model raises and names the loop the
-    caller has to write — nothing loops over source depths inside uacpy.
+    they reach no deck. Every other model accepts a multi-depth Source in
+    a field mode — ``run()`` loops over the depths — and refuses it in a
+    mode with no per-source sum (OASN's array products, OASR's reflection
+    table), naming the field modes that do stack.
     """
     try:
         m = _EXPECTED[model_name][0]()
@@ -433,11 +438,13 @@ def test_a_multi_depth_source_raises_or_reaches_no_deck(model_name):
         pytest.skip(f"{model_name} binary not available")
     source = uacpy.Source(depths=[30.0, 60.0], frequencies=100.0)
     args = (_reference_environment(), source, _reference_receiver())
-    if model_name in ('Bellhop', 'Bounce'):
+    default_is_field = m._default_run_mode() in m._FIELD_MODES
+    assert default_is_field == (model_name not in ('Bounce', 'OASN', 'OASR'))
+    if model_name in ('Bellhop', 'Bounce') or default_is_field:
         m.validate_inputs(*args)
     else:
         with pytest.raises(ConfigurationError,
-                           match='single source depth per run'):
+                           match='single source depth per .* run'):
             m.validate_inputs(*args)
 
 

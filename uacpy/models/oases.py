@@ -60,7 +60,7 @@ from uacpy.core.environment import Environment
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
 from uacpy.core.results import (
-    Result, Field,
+    Result, Field, ResultStack,
     Covariance, Replicas, ReflectionCoefficient,
 )
 from uacpy.core.exceptions import (
@@ -991,7 +991,7 @@ class OAST(OASES):
         source_waveform: Optional[np.ndarray] = None,
         sample_rate: Optional[float] = None,
         output_duration: Optional[float] = None,
-    ) -> Result:
+    ) -> Union[Result, ResultStack]:
         """
         Run OAST transmission loss computation
 
@@ -2387,7 +2387,7 @@ class OASP(OASES):
         source_waveform: Optional[np.ndarray] = None,
         sample_rate: Optional[float] = None,
         output_duration: Optional[float] = None,
-    ) -> Result:
+    ) -> Union[Result, ResultStack]:
         """
         Run OASP broadband wavenumber-integration computation.
 
@@ -3340,7 +3340,7 @@ class OASSP(OASES):
         source_waveform: Optional[np.ndarray] = None,
         sample_rate: Optional[float] = None,
         output_duration: Optional[float] = None,
-    ) -> Result:
+    ) -> Union[Result, ResultStack]:
         """
         Run the OASP → OASSP chain and return the scattered field.
 

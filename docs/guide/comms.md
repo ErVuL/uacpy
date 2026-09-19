@@ -1,6 +1,6 @@
 # Communications — digital modems for the underwater channel
 
-> `uacpy.comms` · 75 public names · modulation, coding, equalisation,
+> `uacpy.comms` · 78 public names · modulation, coding, equalisation,
 > synchronisation, OFDM, DSSS, Doppler, and the NATO JANUS standard
 
 `uacpy.comms` is a digital-communications toolbox built for the one channel
@@ -175,6 +175,8 @@ real samples ──downconvert(fc)──▶ ──rrc_matched_filter──▶ �
 | Call | Purpose |
 |---|---|
 | `rrc_filter(sps, rolloff, span)` | root-raised-cosine taps, unit energy |
+| `rrc_pulse(t_symbols, rolloff)` | the same pulse at arbitrary times in symbol periods, unnormalised — what `Arrivals.channel_taps` places at a delay between samples when `sps > 1` |
+| `rc_pulse(t_symbols, rolloff)` | the raised cosine (transmit RRC ⊗ matched RRC), unit peak, Nyquist on the symbol grid — what `Arrivals.channel_taps` places at `sps = 1` |
 | `pulse_shape(symbols, sps, rolloff, span)` | upsample + RRC filter |
 | `rrc_matched_filter(samples, sps, ...)` | the receiver half of the RRC pair |
 | `upconvert` / `downconvert(x, sample_rate, fc)` | complex baseband ↔ real passband |
@@ -222,6 +224,7 @@ the stochastic and time-varying parts, and the noise.
 | Call | Channel |
 |---|---|
 | `multipath_channel(gains, delays_s, sample_rate)` | static FIR taps from sparse arrivals |
+| `Arrivals.channel_taps(symbol_rate, carrier=…)` | the same taps straight from a propagation result, carrier rotation and pulse included ([§14](#14-driving-the-modem-with-a-modelled-channel)) |
 | `apply_channel(signal, h)` | convolve with a static channel |
 | `fading_taps(n_taps, n_samples, doppler_hz, sample_rate, rician_k=..., rng=...)` | time-varying tap gains, Rayleigh or Rician |
 | `apply_fading_channel(signal, taps, delays_samples)` | apply the time-varying tap-delay line |
@@ -679,6 +682,48 @@ symbols at this rate — with strong late arrivals at 10, 19, 23 and 28 ms and a
 frequency response spanning 37 dB, whose deepest fades sit 26 to 37 dB below
 its peaks. A DFE with 24 feedforward and 32 feedback taps reopens it at BER
 1.5×10⁻³.
+
+`Arrivals.channel_taps` does those three lines, and two things they leave
+out, in one call:
+
+```python
+taps = arrivals.channel_taps(BAUD, carrier=source.frequencies[0], normalize=True)
+print(arrivals.channel_regime(BAUD))
+link = comms.simulate_link('qpsk', 20.0, 20000, channel=taps, n_train=2000,
+                           equalizer=comms.DFE(n_ff=24, n_fb=32, forget=0.999),
+                           rng=rng)
+```
+
+The first thing it adds is the carrier: a path delayed by `τ` reaches a
+receiver mixing at `f_c` rotated by `e^{−i2πf_cτ}`, so the taps are
+`Σ aᵢ·e^{iφᵢ}·e^{−i2πf_cτᵢ}·g(kT − τᵢ)` and not the bare gains — at 12 kHz a
+microsecond of extra path is 4° of tap phase, and it is the relative rotation
+of the paths that sets where the fades sit. (The sign follows from the
+package's `e^{+iωt}` convention, the one `delayandsum` synthesises with; the
+comms test suite mixes a passband burst through that synthesis and back down
+to check it.) The second is the pulse, and which pulse depends on where in
+the receiver the taps are meant to sit. At `sps=1` the default is the
+**raised cosine**: transmit root-raised-cosine times the receiver's matched
+filter, sampled at `kT − τᵢ`, which is the channel at the decision instants.
+`simulate_link` applies no matched filter of its own, so this is the
+`ChannelTaps` it takes. On the symbol grid the raised cosine is Nyquist and the taps are the
+nearest-sample ones; off it, a path 3.37 symbols late leaves the
+inter-symbol interference the pulse tails carry — measured against the
+`sps=16` route (RRC taps, matched filter, decimate) the raised-cosine taps
+agree to an NMSE of 1e-4, the root-raised-cosine half alone is 2e-2 off. At
+`sps > 1` the default is the transmit **root-raised-cosine** alone, for a
+receiver that will matched-filter the waveform itself:
+`apply_channel(upsampled_symbols, taps.taps)` is then the pulse-shaped burst
+after the ocean. `pulse='nearest'` is the nearest-sample binning of
+`multipath_channel`, tap for tap. `channel_regime` says in
+one line whether the rate you chose sees the channel flat or
+frequency-selective: it compares the symbol band with the coherence
+bandwidth `1/τ_rms` — the inverse of the delay spread, the convention APL-UW
+TR 9407 (§II.7.b) and Abraham (§8.7) state — and reports the delay spread in
+symbols, which is the length the equaliser has to span. Rappaport's stricter
+0.5- and 0.9-correlation rules, `1/(5·τ_rms)` and `1/(50·τ_rms)`, are the
+named options `convention='rappaport_0.5'` and `'rappaport_0.9'`, and
+`factor=k` sets any other divisor.
 
 Some deliberate choices in that snippet are worth copying:
 

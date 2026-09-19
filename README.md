@@ -78,6 +78,8 @@ models — consistent `Environment` / `Source` / `Receiver` construction and
 - **Signal processing** (`uacpy.acoustic_signal`) — waveforms, matched filtering, beamforming, time‑frequency transforms, channel simulation.
 - **Sonar performance** (`uacpy.sonar`) — sonar equation, scattering, reverberation, detection & range, and matched-field source localization (KRAKEN replicas, Bartlett/MVDR).
 - **Communications** (`uacpy.comms`) — digital modems (PSK/QAM/OFDM…), equalization, FEC, and the **NATO JANUS** standard.
+- **Modelled channels for modems** — `Arrivals.channel_taps(symbol_rate, carrier=…)` turns a Bellhop arrivals result into symbol-spaced baseband taps (`ChannelTaps`) that `comms.simulate_link(channel=…)` runs directly, with `Arrivals.coherence_bandwidth` and `Arrivals.channel_regime` to say whether the link is flat or frequency-selective.
+- **Multi-source superposition** — a `Source(depths=[…], weights=[…])` runs on every field model and returns a `ResultStack`, one slab per depth; `ResultStack.superpose()` sums them as Σ wᵢ·pᵢ with complex weights, so a phased vertical array is one run and one call.
 - **Ambient noise** (`uacpy.noise`) — Wenz spectra (wind / shipping / rain / thermal).
 - **Standards & metrics** — sound speed, decidecade bands, ship source level, marine‑mammal weighting.
 - **Visualization** — TL maps, rays, modes, fields, cross‑model comparisons.
@@ -315,7 +317,8 @@ Upgrading to v0.5.0 from v0.4.x: run `git submodule update --init` and
 now writes a relocatable submodule link). Two calls change meaning: every
 per-arrival `'phase'` (and `Arrivals.phases`) is in **radians**, and
 `plot_fk` with bare arrays needs `scaling='density'` or `'power'` (pass the
-`FKResult` itself to skip it).
+`FKResult` itself to skip it). Multi-depth `Source`s now run on every field
+model and return a `ResultStack` (was Bellhop only).
 
 ### Uninstall
 

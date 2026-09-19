@@ -142,8 +142,9 @@ def _entry(
 # low-frequency: resonant-bar measurements of water-saturated granite give
 # Q ~ 30 at 100 kHz (Coyner & Martin 1990, read through Olson, Lyons & Saebo,
 # JASA 139(4), 1833-1847 (2016), §II.A, where it sets delta_p ~ 0.02 and
-# delta_s = 2 delta_p), i.e. alpha_p ~ 0.55 and alpha_s ~ 1.09 dB/lambda —
-# 5.5 times the tabulated pair. The "Generic Granite" column of that paper's
+# delta_s = 2 delta_p), i.e. alpha_p ~ 1.1 and alpha_s ~ 2.2 dB/lambda
+# (54.58 * delta, JKPS eq. 1.47: delta = 1/(2Q)) — about eleven times the
+# tabulated pair. The "Generic Granite" column of that paper's
 # Table II — Bourbie, Coussy & Zinszner (1987) Table 5.2, quoted there —
 # gives 0.27 and 1.36 dB/lambda, 2.7 and 6.8 times it. Pass explicit
 # attenuations for a granite in the sonar band.

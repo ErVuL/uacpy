@@ -42,8 +42,10 @@ result = Model(**knobs).run(env, source, receiver, run_mode=...)
 What each model consumes **natively**. An *environment* feature marked ✗ is
 *collapsed* to something the model can take, with a `UserWarning` naming what
 was dropped — see [collapse policy](../guide/environment.md). The source row
-is the exception: multiple source depths on a ✗ model raise
-`ConfigurationError` rather than collapsing — loop over `Source`s externally.
+is the exception: a ✗ model reads one depth per deck, and instead of
+collapsing, `run()` loops over the depths in the field modes (TL,
+`BROADBAND`, `TIME_SERIES`) and returns a `ResultStack`; in any other mode a
+multi-depth `Source` raises `ConfigurationError`.
 
 | | Bellhop | Kraken | Scooter | SPARC | RAM | Bounce | OASES |
 |---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|

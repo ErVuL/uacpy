@@ -63,7 +63,9 @@ from uacpy.core.environment import Environment
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
 from uacpy.core.surface import Surface
-from uacpy.core.results import Result, Modes, Field, PhaseReference
+from uacpy.core.results import (
+    Result, Modes, Field, PhaseReference, ResultStack,
+)
 from uacpy.core.constants import (
     parse_boundary_type,
     DEFAULT_SOUND_SPEED,
@@ -1603,6 +1605,13 @@ class Kraken(PropagationModel):
             )
         return self._exe  # kraken.exe
 
+    def _default_run_mode(self) -> RunMode:
+        """``run(run_mode=None)`` solves a TL field (``BROADBAND`` when a
+        ``frequencies=`` vector is passed, else ``COHERENT_TL``), not the
+        ``MODES`` entry that opens ``spec.modes``. Either choice is a field
+        mode, which is all the base's per-depth loop asks."""
+        return RunMode.COHERENT_TL
+
     def run(
         self,
         env: Environment,
@@ -1614,7 +1623,7 @@ class Kraken(PropagationModel):
         source_waveform: Optional[np.ndarray] = None,
         sample_rate: Optional[float] = None,
         output_duration: Optional[float] = None,
-    ) -> Result:
+    ) -> Union[Result, ResultStack]:
         """
         Compute TL field using normal modes.
 

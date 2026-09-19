@@ -73,6 +73,8 @@ from .link import (
     simulate_link,
     ber_sweep,
     LinkResult,
+    rrc_pulse,
+    rc_pulse,
 )
 from .receive import (
     # equalization
@@ -110,6 +112,9 @@ from .janus import (
 )
 
 from . import janus, link, modulate, receive
+# The baseband channel a propagation result hands this package
+# (``Arrivals.channel_taps``), re-exported where ``simulate_link`` takes it.
+from uacpy.core.results.rays import ChannelTaps
 
 __all__ = [
     # modulation
@@ -127,12 +132,12 @@ __all__ = [
     # sync
     "matched_filter_metric", "detect_preamble", "detect_frames",
     # link
-    "simulate_link", "ber_sweep", "LinkResult",
+    "simulate_link", "ber_sweep", "LinkResult", "ChannelTaps",
     # framing (real payloads)
     "bytes_to_bits", "bits_to_bytes", "pack_frame", "unpack_frame",
     # passband PHY
-    "rrc_filter", "pulse_shape", "rrc_matched_filter", "upconvert",
-    "downconvert", "symbol_sync",
+    "rrc_filter", "rrc_pulse", "rc_pulse", "pulse_shape",
+    "rrc_matched_filter", "upconvert", "downconvert", "symbol_sync",
     # transceiver
     "Transmitter", "CommsReceiver", "OFDMTransmitter", "OFDMReceiver",
     # JANUS (STANAG 4748)

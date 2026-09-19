@@ -495,16 +495,23 @@ class TestTheSecondsSuffixIsNotSpentOnMetresPerSecond:
         with pytest.raises(TypeError, match='wind_speed_ms'):
             uacpy.generate_sea_surface(2000.0, wind_speed_ms=5.0, n_points=64)
 
-    def test_the_seconds_suffix_is_already_spoken_for_on_eleven_surfaces(self):
+    def test_the_seconds_suffix_is_already_spoken_for_across_the_package(self):
         """The premise the ``_mps`` spelling rests on, measured rather than
-        asserted. Ten call parameters plus one attribute — the eleventh is
-        ``AmbiguityResult.delays_s``, readable as well as passable, which is
-        why the sweep covers attributes too. If this count moves the
-        convention has changed and the rule below has to be restated."""
+        asserted: ``_s`` names seconds on every public surface that carries
+        it — call parameters and readable attributes alike, which is why the
+        sweep covers attributes too. ``AmbiguityResult.delays_s`` and the
+        ``ChannelTaps`` pair (``delays_s``, ``first_arrival_s``) are both
+        passable and readable, so each counts twice. If this count moves
+        the convention has changed and the rule below has to be restated."""
         seconds = [s for s in _sites_with_suffix('_s')
                    if not s.rstrip(')').endswith('_ms')]
-        assert len(seconds) == 11, seconds
-        assert 'uacpy.acoustic_signal.AmbiguityResult.delays_s' in seconds
+        assert len(seconds) == 15, seconds
+        for site in ('uacpy.acoustic_signal.AmbiguityResult.delays_s',
+                     'uacpy.comms.ChannelTaps(delays_s)',
+                     'uacpy.comms.ChannelTaps.delays_s',
+                     'uacpy.comms.ChannelTaps(first_arrival_s)',
+                     'uacpy.comms.ChannelTaps.first_arrival_s'):
+            assert site in seconds, site
 
     def test_no_public_surface_spells_metres_per_second_as_ms(self):
         offenders = _sites_with_suffix('_ms')
@@ -5784,3 +5791,290 @@ class TestAMackenzieProfileIsExtendedUnderMackenzie:
         reference = float(soundspeed(temperature=2.0, salinity=35.0,
                                      depth=8800.0))
         assert abs(float(extended.data[-1, 0]) - reference) > 0.2
+
+
+class TestArrivalsChannelView:
+    """``Arrivals.channel_taps`` / ``coherence_bandwidth`` /
+    ``channel_regime`` — the arrival list as a modem's channel."""
+
+    @staticmethod
+    def _two_path(symbol_rate=1000.0, gap_symbols=3, amp=0.6):
+        from uacpy.core.results import Arrivals
+        t0 = 0.4
+        return Arrivals(
+            arrivals=[
+                {'delay': t0, 'amplitude': 1.0, 'phase': 0.0,
+                 'n_top_bounces': 0, 'n_bot_bounces': 0, 'kind': 'direct'},
+                {'delay': t0 + gap_symbols / symbol_rate, 'amplitude': amp,
+                 'phase': np.pi, 'n_top_bounces': 1, 'n_bot_bounces': 0,
+                 'kind': 'surface'}],
+            receiver_depths=[50.0], receiver_ranges=[1000.0],
+            model='Test', frequencies=1000.0)
+
+    def test_nearest_sample_taps_reproduce_multipath_channel_tap_for_tap(self):
+        from uacpy import comms
+        arr = self._two_path()
+        fc = 12345.0
+        ct = arr.channel_taps(1000.0, carrier=fc, sps=1, pulse='nearest')
+        rotated = (arr.received_amplitudes
+                   * np.exp(-2j * np.pi * fc * arr.delays))
+        expect = comms.multipath_channel(
+            rotated, arr.delays - arr.delays.min(), 1000.0)
+        assert np.array_equal(ct.taps, expect)
+        assert ct.first_arrival_s == 0.4
+        assert np.allclose(ct.delays_s, np.arange(4) / 1000.0)
+
+    def test_the_surface_bounce_tap_is_minus_the_carrier_rotation(self):
+        arr = self._two_path()
+        fc = 12345.0
+        ct = arr.channel_taps(1000.0, carrier=fc, sps=1, pulse='nearest')
+        tau = arr.delays[1]
+        rotation = np.exp(-2j * np.pi * fc * tau)
+        assert ct.taps[3] == pytest.approx(-0.6 * rotation)
+        # The conjugate rotation is a different tap; the pin is not vacuous.
+        assert ct.taps[3] != pytest.approx(-0.6 * np.conj(rotation))
+
+    def test_an_on_grid_arrival_with_a_pulse_reproduces_rrc_filter(self):
+        from uacpy.comms import rrc_filter
+        arr = self._two_path(gap_symbols=3)
+        fc, sps, span = 1000.0, 4, 6      # fc * tau integer: no rotation
+        ct = arr.channel_taps(1000.0, carrier=fc, sps=sps, pulse='rrc',
+                              rolloff=0.35, span=span)
+        g = rrc_filter(sps, 0.35, span)
+        expect = np.zeros(3 * sps + g.size, complex)
+        expect[:g.size] += g
+        expect[3 * sps:] += -0.6 * g
+        assert ct.taps.shape == expect.shape
+        assert np.allclose(ct.taps, expect, atol=1e-12)
+        assert ct.delays_s[0] == pytest.approx(-span / 2 / 1000.0)
+
+    def test_unit_energy_normalisation(self):
+        arr = self._two_path()
+        ct = arr.channel_taps(1000.0, carrier=500.0, normalize=True)
+        assert np.sum(np.abs(ct.taps) ** 2) == pytest.approx(1.0)
+
+    def test_the_carrier_sets_the_absorption_in_the_taps(self):
+        from uacpy.core.results import Arrivals
+        arr = Arrivals(
+            arrivals=[{'delay': 1.0, 'amplitude': 1.0, 'phase': 0.0,
+                       'delay_imag': -1e-4}],
+            receiver_depths=[1.0], receiver_ranges=[1.0],
+            model='Test', frequencies=100.0)
+        low = arr.channel_taps(100.0, carrier=100.0, pulse='nearest').taps
+        high = arr.channel_taps(100.0, carrier=1000.0, pulse='nearest').taps
+        assert abs(low[0]) == pytest.approx(np.exp(-2 * np.pi * 100.0 * 1e-4))
+        assert abs(high[0]) == pytest.approx(
+            np.exp(-2 * np.pi * 1000.0 * 1e-4))
+
+    @staticmethod
+    def _one_ms_spread():
+        from uacpy.core.results import Arrivals
+        # Equal powers at 0 and 2 ms: rms delay spread exactly 1 ms.
+        return Arrivals(
+            arrivals=[{'delay': 0.0, 'amplitude': 1.0},
+                      {'delay': 2e-3, 'amplitude': 1.0}],
+            receiver_depths=[1.0], receiver_ranges=[1.0],
+            model='Test', frequencies=None)
+
+    def test_coherence_bandwidth_defaults_to_the_inverse_rms_spread(self):
+        arr = self._one_ms_spread()
+        assert arr.rms_delay_spread() == pytest.approx(1e-3)
+        assert arr.coherence_bandwidth() == pytest.approx(1000.0)
+        assert arr.coherence_bandwidth(
+            convention='inverse_spread') == pytest.approx(1000.0)
+        assert arr.channel_regime(500.0).convention == 'inverse_spread'
+
+    def test_the_rappaport_rules_are_named_conventions(self):
+        arr = self._one_ms_spread()
+        assert arr.coherence_bandwidth(
+            convention='rappaport_0.5') == pytest.approx(200.0)
+        assert arr.coherence_bandwidth(
+            convention='rappaport_0.9') == pytest.approx(20.0)
+        with pytest.raises(ConfigurationError, match="convention must be"):
+            arr.coherence_bandwidth(convention='rappaport_0.7')
+        with pytest.raises(TypeError):
+            arr.coherence_bandwidth(level=0.5)
+
+    def test_the_conventions_order_the_bandwidth_from_loosest_to_strictest(
+            self):
+        arr = self._one_ms_spread()
+        loose = arr.coherence_bandwidth(convention='inverse_spread')
+        half = arr.coherence_bandwidth(convention='rappaport_0.5')
+        strict = arr.coherence_bandwidth(convention='rappaport_0.9')
+        assert loose > half > strict
+
+    @pytest.mark.parametrize("k, expect", [(1.0, 1000.0), (5.0, 200.0),
+                                           (50.0, 20.0)])
+    def test_factor_sets_any_positive_divisor(self, k, expect):
+        arr = self._one_ms_spread()
+        assert arr.coherence_bandwidth(factor=k) == pytest.approx(expect)
+        regime = arr.channel_regime(expect + 1.0, factor=k)
+        assert regime.frequency_selective
+        assert regime.coherence_bandwidth_hz == pytest.approx(expect)
+        assert regime.convention == f"factor={k:g}"
+        assert f"[factor={k:g}]" in str(regime)
+        below = arr.channel_regime(expect - 1.0, factor=k)
+        assert not below.frequency_selective
+
+    @pytest.mark.parametrize("k", [0.0, -5.0, np.nan, np.inf])
+    def test_a_non_positive_factor_is_refused(self, k):
+        arr = self._one_ms_spread()
+        with pytest.raises(ConfigurationError, match="factor must be"):
+            arr.coherence_bandwidth(factor=k)
+        with pytest.raises(ConfigurationError, match="factor must be"):
+            arr.channel_regime(100.0, factor=k)
+
+    def test_a_single_arrival_has_infinite_coherence_bandwidth(self):
+        from uacpy.core.results import Arrivals
+        arr = Arrivals(arrivals=[{'delay': 0.1, 'amplitude': 1.0}],
+                       receiver_depths=[1.0], receiver_ranges=[1.0],
+                       model='Test', frequencies=None)
+        assert arr.coherence_bandwidth() == np.inf
+        assert not arr.channel_regime(1e6).frequency_selective
+
+    def test_channel_regime_flips_at_the_coherence_bandwidth(self):
+        from uacpy.core.results import Arrivals
+        arr = Arrivals(
+            arrivals=[{'delay': 0.0, 'amplitude': 1.0},
+                      {'delay': 2e-3, 'amplitude': 1.0}],
+            receiver_depths=[1.0], receiver_ranges=[1.0],
+            model='Test', frequencies=None)   # coherence bandwidth 1000 Hz
+        flat = arr.channel_regime(999.0)
+        selective = arr.channel_regime(1001.0)
+        assert not flat.frequency_selective
+        assert selective.frequency_selective
+        assert not arr.channel_regime(1000.0).frequency_selective
+        # A 25 % excess bandwidth widens the signal past the same threshold.
+        assert arr.channel_regime(850.0, rolloff=0.25).frequency_selective
+        assert not arr.channel_regime(750.0, rolloff=0.25).frequency_selective
+        assert selective.isi_symbols == pytest.approx(1.001)
+        assert selective.symbol_duration_s == pytest.approx(1 / 1001.0)
+        assert selective.coherence_bandwidth_hz == pytest.approx(1000.0)
+        text = str(selective)
+        assert text.startswith("frequency-selective") and "1001" in text
+        assert "[inverse_spread]" in text
+        assert str(flat).startswith("frequency-flat")
+        # The stricter convention moves the boundary, not the verdict logic.
+        assert arr.channel_regime(
+            201.0, convention='rappaport_0.5').frequency_selective
+        assert not arr.channel_regime(
+            199.0, convention='rappaport_0.5').frequency_selective
+
+    @pytest.mark.parametrize("rate", [0.0, -1.0, np.nan])
+    def test_a_non_positive_symbol_rate_is_refused(self, rate):
+        arr = self._two_path()
+        with pytest.raises(ConfigurationError, match="symbol_rate"):
+            arr.channel_taps(rate, carrier=1000.0)
+        with pytest.raises(ConfigurationError, match="symbol_rate"):
+            arr.channel_regime(rate)
+        assert arr.channel_taps(1e-3, carrier=1000.0).taps.size >= 1
+
+    def test_sps_below_one_and_an_unknown_pulse_are_refused(self):
+        arr = self._two_path()
+        with pytest.raises(ConfigurationError, match="sps"):
+            arr.channel_taps(1000.0, carrier=1000.0, sps=0)
+        with pytest.raises(ConfigurationError, match="sps"):
+            arr.channel_taps(1000.0, carrier=1000.0, sps=1.5)
+        assert arr.channel_taps(1000.0, carrier=1000.0, sps=1.0).sps == 1
+        with pytest.raises(ConfigurationError, match="pulse must be"):
+            arr.channel_taps(1000.0, carrier=1000.0, pulse='raised')
+        with pytest.raises(ConfigurationError, match="carrier"):
+            arr.channel_taps(1000.0, carrier=0.0)
+
+    def test_a_grid_of_cells_needs_a_receiver_choice(self):
+        arr = TestArrivalsFilterChain()._arrivals()      # 1 depth x 2 ranges
+        with pytest.raises(ConfigurationError,
+                           match=r"receiver=\(depth_m, range_m\)"):
+            arr.channel_taps(1000.0, carrier=100.0)
+        one = arr.channel_taps(1000.0, carrier=100.0, receiver=(50.0, 2000.0),
+                               pulse='nearest')
+        assert one.taps.size == 1 and one.first_arrival_s == 0.4
+        three = arr.channel_taps(1000.0, carrier=100.0,
+                                 receiver=(50.0, 1000.0), pulse='nearest')
+        assert three.first_arrival_s == 0.1
+        with pytest.raises(ConfigurationError, match="range axis"):
+            arr.channel_taps(1000.0, carrier=100.0, receiver=(50.0, 1500.0))
+        with pytest.raises(ConfigurationError,
+                           match="no arrivals at receiver"):
+            arr.filter_by_bounces(kind='both').channel_taps(
+                1000.0, carrier=100.0, receiver=(50.0, 2000.0))
+        # A single-cell subset of the same grid needs no receiver=.
+        sub = arr.filter(lambda a: a['range_idx'] == 1)
+        assert sub.channel_taps(1000.0, carrier=100.0).first_arrival_s == 0.4
+
+    @staticmethod
+    def _decimated_reference(arr, fc, rolloff, span, sps=16):
+        """Symbol-spaced taps the long way: ``sps``-spaced root-raised-
+        cosine taps, the receiver's matched filter, then one sample per
+        symbol at the decision instants, on the time axis of the ``sps=1``
+        taps (``(j - span/2)`` symbols from the first arrival)."""
+        from uacpy.comms import rrc_filter
+        ct = arr.channel_taps(1000.0, carrier=fc, sps=sps, pulse='rrc',
+                              rolloff=rolloff, span=span)
+        full = np.convolve(ct.taps, rrc_filter(sps, rolloff, span))
+        # Index m of the convolution sits at (m - span*sps)/sps symbols.
+        j = np.arange((full.size - 1) // sps + 1)
+        idx = sps * j + span * sps // 2 - span * sps
+        idx = idx[(idx >= 0) & (idx < full.size)]
+        return full[idx], (idx - span * sps) / sps
+
+    @staticmethod
+    def _nmse(taps, times_symbols, ref, ref_times):
+        common = np.intersect1d(np.round(times_symbols, 6),
+                                np.round(ref_times, 6))
+        a = taps[np.isin(np.round(times_symbols, 6), common)]
+        b = ref[np.isin(np.round(ref_times, 6), common)]
+        return float(np.sum(np.abs(a - b) ** 2) / np.sum(np.abs(b) ** 2))
+
+    @pytest.mark.parametrize("gap_symbols", [3.0, 3.37])
+    def test_symbol_spaced_rc_taps_are_the_matched_filtered_channel(
+            self, gap_symbols):
+        """At ``sps=1`` the raised-cosine taps agree with the ``sps=16``
+        root-raised-cosine taps matched-filtered and decimated (NMSE
+        measured 8e-5 on-grid, 1.8e-4 at 3.37 symbols); the transmit
+        root-raised-cosine alone does not (2.4e-2 and 1.7e-2), which is
+        why ``'rc'`` and not ``'rrc'`` is the symbol-spaced default."""
+        arr = self._two_path(gap_symbols=gap_symbols)
+        fc, rolloff, span = 1000.0, 0.25, 8
+        ref, ref_t = self._decimated_reference(arr, fc, rolloff, span)
+        rc = arr.channel_taps(1000.0, carrier=fc, sps=1, pulse='rc',
+                              rolloff=rolloff, span=span)
+        rrc = arr.channel_taps(1000.0, carrier=fc, sps=1, pulse='rrc',
+                               rolloff=rolloff, span=span)
+        nmse_rc = self._nmse(rc.taps, rc.delays_s * 1000.0, ref, ref_t)
+        nmse_rrc = self._nmse(rrc.taps, rrc.delays_s * 1000.0, ref, ref_t)
+        assert nmse_rc < 1e-3
+        assert nmse_rrc > 1e-2
+
+    def test_the_default_pulse_follows_the_sample_spacing(self):
+        arr = self._two_path(gap_symbols=3.37)
+        kw = dict(carrier=1000.0, rolloff=0.25, span=8)
+        one = arr.channel_taps(1000.0, sps=1, **kw)
+        assert np.array_equal(one.taps, arr.channel_taps(
+            1000.0, sps=1, pulse='rc', **kw).taps)
+        four = arr.channel_taps(1000.0, sps=4, **kw)
+        assert np.array_equal(four.taps, arr.channel_taps(
+            1000.0, sps=4, pulse='rrc', **kw).taps)
+        assert not np.allclose(one.taps, arr.channel_taps(
+            1000.0, sps=1, pulse='rrc', **kw).taps)
+
+    def test_rc_taps_of_a_whole_symbol_delay_are_the_nearest_sample_taps(self):
+        """On the symbol grid the raised cosine is Nyquist — one at its
+        centre, zero at every other symbol — so the ``'rc'`` and
+        ``'nearest'`` channels coincide there and differ off it."""
+        arr = self._two_path(gap_symbols=3)
+        rc = arr.channel_taps(1000.0, carrier=1000.0, pulse='rc', span=8)
+        near = arr.channel_taps(1000.0, carrier=1000.0, pulse='nearest')
+        in_symbols = rc.delays_s * 1000.0
+        assert np.allclose(in_symbols, np.round(in_symbols), atol=1e-9)
+        lead = int(np.argmin(np.abs(rc.delays_s)))
+        assert np.allclose(rc.taps[lead:lead + near.taps.size], near.taps,
+                           atol=1e-12)
+        rest = np.delete(rc.taps, range(lead, lead + near.taps.size))
+        assert np.allclose(rest, 0.0, atol=1e-12)
+        off = self._two_path(gap_symbols=3.5)
+        rc_off = off.channel_taps(1000.0, carrier=1000.0, pulse='rc', span=8)
+        near_off = off.channel_taps(1000.0, carrier=1000.0, pulse='nearest')
+        lead = int(np.argmin(np.abs(rc_off.delays_s)))
+        assert not np.allclose(rc_off.taps[lead:lead + near_off.taps.size],
+                               near_off.taps, atol=1e-3)

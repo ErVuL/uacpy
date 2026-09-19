@@ -164,40 +164,65 @@ reaching the surface near 78 km.
 interference pattern laid over it — see [Bellhop](../models/bellhop.md) for the
 three summation modes.)
 
-### Multi-element `depths` and `ResultStack`
+### Multi-element `depths`, `weights` and `ResultStack`
 
-**Only Bellhop accepts more than one source depth in a single run.** It returns
-a [`ResultStack`](results.md#5-resultstack--one-run-several-source-depths) —
+**Every field model accepts more than one source depth in a single run** —
+the TL modes, `BROADBAND` and `TIME_SERIES` on Bellhop, Kraken, Scooter, RAM,
+SPARC and the OASES field models. The run returns a
+[`ResultStack`](results.md#5-resultstack--one-run-several-source-depths) —
 one slab per depth, plus the coordinate they vary along:
 
 ```python
 >>> Bellhop(n_beams=3000).run(env, uacpy.Source(depths=[15., 50., 85.],
 ...                                             frequencies=200.0), receiver)
 ResultStack[Field](n_slabs=3, source_depth=[15.0, 50.0, 85.0])
+>>> Kraken().run(env, uacpy.Source(depths=[20.0, 60.0], frequencies=200.0), receiver)
+ResultStack[Field](n_slabs=2, source_depth=[20.0, 60.0])
 ```
 
-Every other model takes one depth per run and says so rather than silently
-using the first:
+Bellhop writes every depth into one deck and its reader splits the slabs;
+every other engine reads one depth per deck, so `run()` runs it once per
+depth with the same environment, receiver and keywords. Either way each slab
+is the field of **one unit-amplitude source**, so the stack is what you sum
+to drive the sources together. `weights=` on the `Source` gives each one a
+complex amplitude (a scalar broadcasts; default all ones); the engines never
+read it, and `stack.superpose()` adds the slabs' complex pressure with those
+weights — `Σ wᵢ·pᵢ` on the shared grid:
 
 ```python
->>> Kraken().run(env, uacpy.Source(depths=[20.0, 60.0], frequencies=200.0), receiver)
-ConfigurationError: Kraken takes a single source depth per run; got 2:
-[np.float64(20.0), np.float64(60.0)]. Loop over Sources externally for
-multi-depth runs.
+>>> pair = uacpy.Source(depths=[40.0, 60.0], frequencies=200.0, weights=[1, -1])
+>>> field = Kraken().run(env, pair, receiver).superpose()   # antiphase pair
+>>> field.metadata['superposed_sources']
+{'depths': [40.0, 60.0], 'weights': [(1+0j), (-1+0j)]}
 ```
 
-For those, build one `Source` per depth and sweep with
-[`run_parallel`](utilities.md) — `.stack()` on the outcome gives you the same
-`ResultStack`, along whatever coordinate you varied.
+`superpose([w1, w2, …])` takes the weights from the call instead. A stack of
+real dB values has lost its phase and refuses to add — superpose the complex
+field the run returned.
 
-| Model | Multi-element `depths`? |
+Outside the field modes only Bellhop stacks (`RAYS`, `ARRIVALS`,
+`EIGENRAYS`). Mode shapes, reflection tables and array products have no
+per-source sum, so those modes say so rather than silently using the first
+depth:
+
+```python
+>>> Kraken().run(env, uacpy.Source(depths=[20.0, 60.0], frequencies=200.0),
+...              receiver, run_mode=RunMode.MODES)
+ConfigurationError: Kraken takes a single source depth per MODES run; got 2:
+[20.0, 60.0]. A multi-depth Source stacks only in the
+field modes (COHERENT_TL / INCOHERENT_TL / SEMICOHERENT_TL / BROADBAND /
+TIME_SERIES); for MODES loop over single-depth Sources externally.
+```
+
+| Mode | Multi-element `depths`? |
 |---|---|
-| [Bellhop](../models/bellhop.md) | ✅ returns `ResultStack` |
-| [Kraken](../models/kraken.md), [Scooter](../models/scooter.md), [RAM](../models/ram.md), [SPARC](../models/sparc.md), [Bounce](../models/bounce.md), [OASES](../models/oases.md) | ❌ `ConfigurationError` |
+| `COHERENT_TL`, `INCOHERENT_TL`, `SEMICOHERENT_TL`, `BROADBAND`, `TIME_SERIES` | ✅ every model returns `ResultStack` |
+| `RAYS`, `ARRIVALS`, `EIGENRAYS` | ✅ [Bellhop](../models/bellhop.md) returns `ResultStack` |
+| `MODES`, `REFLECTION`, `COVARIANCE`, `REPLICA`, `REVERBERATION` | ❌ `ConfigurationError` ([Bounce](../models/bounce.md) reads no source depth and ignores the extras) |
 
-Bellhop's own broadband path is the exception inside the exception:
-`BROADBAND` and `TIME_SERIES` synthesise from one carrier frequency at one
-source depth, and reject a multi-depth `Source`.
+A sweep over anything else — frequency, a model knob — still goes through
+[`run_parallel`](utilities.md); `.stack()` on the outcome gives the same
+`ResultStack`, along whatever coordinate you varied.
 
 ---
 

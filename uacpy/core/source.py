@@ -53,6 +53,17 @@ class Source(_DeepCopyMixin):
         Angles should span the full range the model queries: Bellhop uses
         launch angles (the reference ``shaded.sbp`` covers ±180°), Kraken
         uses mode angles in [0°, 90°].
+    weights : complex or array-like, optional
+        Complex amplitude of each source: a scalar broadcasts to every
+        depth, otherwise exactly one weight per depth (a length-1 array
+        on a multi-depth source is a length mismatch); ``None`` (default)
+        is unit weight everywhere. The engines never read it: every slab
+        of a multi-depth run is the unit-amplitude field of one source,
+        and the weights become the coefficients of
+        :meth:`ResultStack.superpose`, which adds the slabs' complex
+        pressure as ``Σ wᵢ·pᵢ``; a single-depth run scales its field by
+        the one weight. ``[1, -1]`` drives two sources in antiphase;
+        ``[1, 1j]`` puts them in quadrature. Every weight must be finite.
 
     Attributes
     ----------
@@ -64,6 +75,8 @@ class Source(_DeepCopyMixin):
         Source geometry
     beam_pattern : ndarray or Path or None
         Source directivity
+    weights : ndarray
+        Complex amplitude per depth, shape ``(n_sources,)``
 
     Notes
     -----
@@ -89,12 +102,18 @@ class Source(_DeepCopyMixin):
     Vertical source array:
 
     >>> source = Source(depths=[10, 20, 30], frequencies=200)
+
+    Two sources in antiphase, summed after the run:
+
+    >>> source = Source(depths=[40, 60], frequencies=200, weights=[1, -1])
+    >>> field = model.run(env, source, receiver).superpose()
     """
 
     depths: np.ndarray
     frequencies: np.ndarray
     source_type: str = 'point'
     beam_pattern: Optional[Union[np.ndarray, str, Path]] = None
+    weights: Optional[Union[complex, List[complex], np.ndarray]] = None
 
     if TYPE_CHECKING:
         # The two roles of a dataclass field annotation, separated: the
@@ -112,6 +131,8 @@ class Source(_DeepCopyMixin):
             frequencies: Union[float, List[float], np.ndarray],
             source_type: str = 'point',
             beam_pattern: Optional[Union[np.ndarray, str, Path]] = None,
+            weights: Optional[Union[complex, List[complex],
+                                    np.ndarray]] = None,
         ) -> None: ...
 
     def __post_init__(self):
@@ -181,6 +202,57 @@ class Source(_DeepCopyMixin):
                     min_step=SBP_ANGLE_RESOLUTION_DEG, unit='deg')
                 self.beam_pattern = pattern
 
+        self.weights = self._normalise_weights(self.weights)
+
+    def _normalise_weights(self, weights) -> np.ndarray:
+        """One finite complex weight per depth: ``None`` is all ones, a
+        scalar broadcasts, and a vector must match ``depths`` in length."""
+        n = self.depths.size
+        if weights is None:
+            return np.ones(n, dtype=np.complex128)
+        scalar = np.ndim(weights) == 0
+        arr = np.atleast_1d(np.asarray(weights, dtype=np.complex128))
+        if arr.ndim != 1:
+            raise ConfigurationError(
+                f"Source weights must be a scalar or a 1-D vector; got shape "
+                f"{arr.shape}"
+            )
+        if scalar and n > 1:
+            arr = np.repeat(arr, n)
+        if arr.size != n:
+            raise ConfigurationError(
+                f"Source weights must give one weight per depth: "
+                f"{n} depth(s) but {arr.size} weight(s)"
+            )
+        if not np.all(np.isfinite(arr)):
+            bad = int(np.flatnonzero(~np.isfinite(arr))[0])
+            raise ConfigurationError(
+                f"Source weights must be finite (no NaN/inf); "
+                f"weights[{bad}] = {arr[bad]}"
+            )
+        return arr
+
+    @property
+    def has_unit_weights(self) -> bool:
+        """True when every weight is exactly 1, so a superposition is a
+        plain sum of the slabs."""
+        return bool(np.all(self.weights == 1.0))
+
+    def at_depth(self, index: int) -> 'Source':
+        """A single-depth copy of this source: ``depths[index]`` alone,
+        unit weight, everything else shared.
+
+        The per-depth loop in :meth:`PropagationModel.run` runs one of
+        these per depth, so each slab of the returned stack is the field of
+        one unit-amplitude source; the weight is applied at
+        :meth:`ResultStack.superpose`."""
+        return Source(
+            depths=float(self.depths[index]),
+            frequencies=self.frequencies,
+            source_type=self.source_type,
+            beam_pattern=self.beam_pattern,
+        )
+
     def plot_beam_pattern(self, ax=None, **kwargs):
         """Plot this source's directivity — the ``.sbp`` beam pattern.
 
@@ -222,7 +294,10 @@ class Source(_DeepCopyMixin):
         else:
             freq_str = f"{self.n_frequencies} frequencies"
 
-        return (f"Source({depth_str}, {freq_str}, type='{self.source_type}')")
+        weight_str = ("" if self.has_unit_weights
+                      else f", weights={self.weights.tolist()}")
+        return (f"Source({depth_str}, {freq_str}, type='{self.source_type}'"
+                f"{weight_str})")
 
 # The dataclass compiles ``__init__`` from the *field* annotations, so
 # ``inspect.signature`` / ``help()`` would advertise a default the annotation
@@ -235,4 +310,5 @@ class Source(_DeepCopyMixin):
 Source.__init__.__annotations__.update(
     depths=Union[float, List[float], np.ndarray],
     frequencies=Union[float, List[float], np.ndarray],
+    weights=Optional[Union[complex, List[complex], np.ndarray]],
 )

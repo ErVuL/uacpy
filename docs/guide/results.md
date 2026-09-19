@@ -33,7 +33,7 @@ result = Bellhop().run(env, source, receiver, run_mode=RunMode.COHERENT_TL)
 | `ReflectionCoefficient` | `REFLECTION` | `R(θ)` magnitude + phase | [Bounce](../models/bounce.md), [OASR](../models/oases.md) |
 | `Covariance` | `COVARIANCE` | `C(f, i, j)` across an array | [OASN](../models/oases.md) |
 | `Replicas` | `REPLICA` | Green's functions per candidate position | [OASN](../models/oases.md) |
-| `ResultStack` | any of the above, with several source depths | a list of slabs + the coordinate they vary along | [Bellhop](../models/bellhop.md), [`run_parallel`](utilities.md) |
+| `ResultStack` | any of the above, with several source depths | a list of slabs + the coordinate they vary along | every field model, [Bellhop](../models/bellhop.md) for rays/arrivals, [`run_parallel`](utilities.md) |
 
 Not every model supports every mode; ask the model rather than guessing:
 
@@ -388,9 +388,10 @@ apply a `√r` gain before plotting.
 
 ## 5. `ResultStack` — one run, several source depths
 
-[Bellhop](../models/bellhop.md) is the only model that accepts more than one
-source depth in a single run; it returns a `ResultStack` — a list of slabs plus
-the coordinate they vary along.
+A `Source` with several depths runs on every field model in a single call
+and returns a `ResultStack` — a list of slabs plus the coordinate they vary
+along, one slab per source. Bellhop writes every depth into one deck; the
+other engines run once per depth inside `run()`.
 
 ![A ResultStack of Field slabs](figures/results_stack.png)
 
@@ -414,25 +415,46 @@ validates that at construction rather than letting a mismatched bundle through.
 | `stack.dB` | one dense array, shape `(n_slabs, *slab.dB.shape)` |
 | `stack.tl` | `stack.dB` for pressure slabs; any other kind raises |
 | `stack.model`, `.backend`, `.frequencies`, `.source_depths` | the identity every slab agrees on |
+| `stack.superpose()` | one `Field`: `Σ wᵢ·pᵢ` over the slabs with the `Source`'s `weights` |
+| `stack.superpose([w1, w2, …])` | the same sum with weights given here |
 
 `stack.dB` exists so generic code can read `result.dB` whether one or many
-source depths were asked for. Everything else — `Rays`, `Arrivals` — stacks the
-same way, and `RunMode.RAYS` / `ARRIVALS` with several source depths gives you
-`ResultStack[Rays]` / `ResultStack[Arrivals]`. The exception is Bellhop's own
-broadband path: `BROADBAND` and `TIME_SERIES` synthesise from one carrier
-frequency at one source depth, and reject a multi-depth `Source`.
+source depths were asked for.
 
-The other models take one source depth per run and say so:
+`superpose` is how several sources are driven together: each slab is the
+complex field of one unit-amplitude source, the engines are linear in the
+source amplitude, so the weighted sum on the shared grid is the field of the
+weighted array. The sum keeps the slabs' grid and `phase_reference`, widens
+`source_depths` to every depth it added and records the depths and weights
+in `metadata['superposed_sources']`. A `TIME_SERIES` stack sums its real
+traces with real weights. A stack of real dB values has lost its phase and
+refuses — superpose the complex field the run returned, before `to_dB()`.
 
 ```python
->>> Kraken().run(env, uacpy.Source(depths=[20.0, 60.0], frequencies=200.0), receiver)
-ConfigurationError: Kraken takes a single source depth per run; got 2:
-[np.float64(20.0), np.float64(60.0)]. Loop over Sources externally for
-multi-depth runs.
+pair = uacpy.Source(depths=[40.0, 60.0], frequencies=200.0, weights=[1, -1])
+stack = Kraken().run(env, pair, receiver)       # ResultStack[Field], 2 slabs
+field = stack.superpose()                       # p(40 m) − p(60 m)
+same = stack.superpose([1, -1])                 # weights given at the call
 ```
 
-For those, sweep with [`run_parallel`](utilities.md) and call `.stack()` on
-the outcome — the same `ResultStack`, along whatever coordinate you varied.
+Bellhop's `RAYS` / `ARRIVALS` / `EIGENRAYS` stack the same way and give
+`ResultStack[Rays]` / `ResultStack[Arrivals]`; those slabs are not fields and
+do not superpose. Every other non-field mode (`MODES`, `REFLECTION`,
+`COVARIANCE`, `REPLICA`, `REVERBERATION`) takes one source depth per run and
+says so:
+
+```python
+>>> Kraken().run(env, uacpy.Source(depths=[20.0, 60.0], frequencies=200.0),
+...              receiver, run_mode=RunMode.MODES)
+ConfigurationError: Kraken takes a single source depth per MODES run; got 2:
+[20.0, 60.0]. A multi-depth Source stacks only in the
+field modes (COHERENT_TL / INCOHERENT_TL / SEMICOHERENT_TL / BROADBAND /
+TIME_SERIES); for MODES loop over single-depth Sources externally.
+```
+
+A sweep over any other parameter goes through [`run_parallel`](utilities.md);
+`.stack()` on the outcome gives the same `ResultStack`, along whatever
+coordinate you varied.
 
 ---
 
@@ -526,6 +548,8 @@ a single point.
 | `.rms_delay_spread()` | energy-weighted width of the arrival pattern (s) — how much the multipath smears a pulse, and far less tail-driven than `ptp(delays)` |
 | `.energy_support(fraction=0.999)` | delay span holding that share of the energy (s) — the span a synthesis window has to cover, unmoved by a faint straggler the way `ptp(delays)` is |
 | `.synthesis_band(bandwidth=…, record=…)` | frequency grid to synthesise these arrivals on — a record is `1/Δf` long, so the window, not the bandwidth, decides the spacing. State `record` (seconds) or let it come from `energy_support`; anything left outside folds back onto the early trace, and it says so |
+| `.channel_taps(symbol_rate, carrier=…, sps=1, pulse=None)` | the arrivals as a modem's baseband channel: `ChannelTaps` whose `.taps[k]` is `Σ aᵢ·e^{iφᵢ}·e^{−i2πf_cτᵢ}·g(kT − τᵢ)` with `aᵢ` the received amplitude at the carrier and `g` the pulse — by default the raised cosine at `sps=1` (transmit pulse times matched filter: the channel at the decision instants) and the root-raised-cosine transmit half above it; `pulse='nearest'` bins to the nearest sample, exactly `comms.multipath_channel`. `comms.simulate_link(..., channel=taps)` takes the `sps=1` set; a multi-cell result needs `receiver=(depth, range)` |
+| `.coherence_bandwidth(convention='inverse_spread', factor=None)`, `.channel_regime(symbol_rate, convention=…, factor=…)` | `1/(k·τ_rms)` with `k = 1` by default — the convention the corpus states (APL-UW TR 9407 §II.7.b: the inverse of the delay spread measures the coherence bandwidth; Abraham §8.7: `W < 1/σ_t`). Rappaport's 0.5- and 0.9-correlation rules are the named options `'rappaport_0.5'` (`k = 5`) and `'rappaport_0.9'` (`k = 50`), and `factor=k` sets any other. The regime is the verdict for one symbol rate: signal bandwidth, coherence bandwidth, ISI in symbols, the convention used and `frequency_selective` — true when the symbol band is wider than the coherence bandwidth |
 | `len(arr)`, `for a in arr:` | count and iterate |
 
 `Arrivals` is the channel impulse response that

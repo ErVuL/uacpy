@@ -119,7 +119,7 @@ or vacuum** boundary.
 | Sea-surface altimetry | ❌ | collapsed |
 | Elastic media (shear) | ❌ | `sparc.f90` is fluid-only; shear is dropped up front |
 | Rough surface / bottom (`sigma`) | ❌ | `sparc.f90` refuses a non-zero `sigma` outright |
-| Multiple source depths | ❌ | raises `ConfigurationError`; loop over `Source`s |
+| Multiple source depths | ❌ | one march per depth; `run()` loops and returns a `ResultStack` of time-domain slabs |
 | Source beam pattern | ❌ | |
 | Source geometry (`point`/`line`/`scaled`) | `'S'` only | `'R'` and `'D'` are `point` only |
 

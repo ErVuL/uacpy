@@ -677,7 +677,11 @@ non-commercial sources also emit a `UserWarning` when fetched.
 
 `Source(depths, frequencies)` places one or more sources. Depths are positive
 down; multiple depths must be strictly increasing (outputs are indexed by source
-depth). Frequencies may be a scalar or array.
+depth). Frequencies may be a scalar or array. `weights=` gives each source a
+complex amplitude (one per depth, a scalar broadcasts, default all ones): the
+engines never read it — every slab of a multi-depth run is the field of one
+unit-amplitude source — and `ResultStack.superpose()` adds the slabs with
+those weights (§8, ResultStack).
 
 ```python
 from uacpy import Source
@@ -685,6 +689,7 @@ from uacpy import Source
 Source(depths=50, frequencies=100)              # single source, single tone
 Source(depths=[10, 20, 30], frequencies=200)    # vertical source array
 Source(depths=50, frequencies=[100, 200, 400])  # multi-frequency
+Source(depths=[40, 60], frequencies=200, weights=[1, -1])   # antiphase pair
 ```
 
 `Receiver(depths, ranges)` places the field-evaluation points. Depths are
@@ -803,6 +808,19 @@ The names are `altimetry`, `range_dependent_bathymetry`,
 `volume_attenuation` is declarative only: it answers whether the engine
 honours `env.absorption` (the OASES family and Bounce do not), drives no
 collapse, and `env.absorption` passes through untouched either way.
+
+`multi_source_depth` says whether the engine writes every source depth into
+one deck (Bellhop). It does not gate what a caller may pass: in the field
+modes (`COHERENT_TL` / `INCOHERENT_TL` / `SEMICOHERENT_TL` / `BROADBAND` /
+`TIME_SERIES`) **every model accepts a multi-depth `Source` and returns a
+`ResultStack` over `source_depth`** — `PropagationModel.run` runs the engine
+once per depth with the same environment, receiver and keywords and stacks
+the slabs. Outside the field modes only Bellhop stacks (`RAYS` / `ARRIVALS` /
+`EIGENRAYS`); the other engines raise `ConfigurationError`. Whether the stack
+then **superposes** depends on what the slabs hold: complex pressure (the
+coherent engines, and OASP / OASSP among the OASES family) adds, while a
+dB-only engine such as OAST stacks but cannot add its slabs coherently —
+`stack.superpose()` refuses and says so.
 
 When you hand a model an environment richer than it supports, the collapse
 step **collapses** the unsupported feature to something the model can run,
@@ -1394,6 +1412,7 @@ arr.delays, arr.amplitudes, arr.phases       # the ray-arrival triple
 arr.received_amplitudes                      # what ARRIVES: absorption + phase
 arr.rms_delay_spread()                       # pulse smearing, energy-weighted
 arr.synthesis_band(bandwidth=8e3)            # grid that holds this multipath
+arr.channel_taps(2000.0, carrier=12e3, sps=1, pulse=None, rolloff=0.25, span=8, receiver=None, normalize=False)  # ChannelTaps: baseband modem channel at a symbol rate; pulse None = 'rc' (raised cosine, the channel at the decision instants) at sps=1, 'rrc' above, or 'nearest'; .coherence_bandwidth(convention='inverse_spread', factor=None) = 1/(k·τ_rms), k=1 by default ('rappaport_0.5' k=5, 'rappaport_0.9' k=50, or factor=k) / .channel_regime(symbol_rate, convention=..., factor=...) say whether that rate sees it flat
 rays.filter_by_launch_angle(-10, 10)         # Rays: pure data subsets
 rays.top_n_by_miss(20, target_range_m=5000, target_depth_m=50)
 rays.filter_by_miss_distance(50.0, target_range_m=5000, target_depth_m=50)
@@ -1422,12 +1441,12 @@ there; `rc.is_broadband` is the guard.
 A `ResultStack` is a sequence of same-typed slabs that share every axis except a
 stacking coordinate. You get one two ways:
 
-* a **single run with a multi-source-depth `Source`** on a model that supports it
-  — `Bellhop` returns a `ResultStack` stacked over `source_depth`;
+* a **single run with a multi-depth `Source`** — in a field mode (the TL
+  modes, `BROADBAND`, `TIME_SERIES`) every model returns a `ResultStack`
+  stacked over `source_depth`, one slab per source, each the field of one
+  unit-amplitude source; Bellhop also stacks `RAYS` / `ARRIVALS` / `EIGENRAYS`,
+  and the other engines raise `ConfigurationError` outside the field modes;
 * `run_parallel(...).stack(coordinate_name=...)` over a parameter sweep.
-
-Models that don't support multiple source depths (e.g. `Kraken`) raise a
-`ConfigurationError` for a multi-depth `Source` — loop one `Source` per depth.
 
 ```python
 for src_depth, slab in stack: ...     # iterate (coordinate, slab) pairs
@@ -1435,10 +1454,16 @@ stack.at(source_depth=20)             # nearest-label slab → a Field
 stack.dB                              # stacked TL, shape (n_slabs, *slab.dB.shape)
 stack.n_slabs, stack.slab_type        # how many slabs, and of what result type
 stack.plot()                          # panel grid (Field slabs)
+stack.superpose()                     # Σ wᵢ·pᵢ with the Source's weights → one Field
+stack.superpose([1, 1j])              # the same with weights given here
 ```
 
 Index a single slab with `stack[i]` or `stack.at(source_depth=…)` (each is a
-`Field`).
+`Field`). `superpose` adds the slabs' complex pressure on the shared grid
+(a time-domain stack sums its real traces with real weights); the sum keeps
+the slabs' `phase_reference` and records what it added in
+`metadata['superposed_sources']`. A stack whose slabs are real dB values has
+lost its phase and refuses — superpose the complex field the run returned.
 
 ### File I/O (`uacpy.io`)
 
@@ -1772,11 +1797,11 @@ verified bit-exact against CMRE janus-c).
 | Channel | `awgn`, `multipath_channel`, `apply_channel`, `apply_fading_channel`, `fading_taps` |
 | Equalization | `DFE`, `lms_equalizer`, `rls_equalizer`, `mmse_equalizer`, `slicer` |
 | Doppler / sync | `estimate_doppler_scale`, `compensate_doppler`, `doppler_from_speed`, `detect_preamble`, `detect_frames`, `matched_filter_metric` |
-| Passband PHY | `rrc_filter`, `pulse_shape`, `rrc_matched_filter`, `upconvert`, `downconvert`, `symbol_sync` |
+| Passband PHY | `rrc_filter`, `rrc_pulse`, `rc_pulse`, `pulse_shape`, `rrc_matched_filter`, `upconvert`, `downconvert`, `symbol_sync` |
 | Framing | `pack_frame`, `unpack_frame`, `bytes_to_bits`, `bits_to_bytes` |
 | Transceivers | `Transmitter`, `CommsReceiver` (the OFDM pair is in its own row) |
 | Channel estimation | `ls_estimate`, `omp_estimate` |
-| Link harness | `simulate_link`, `ber_sweep`, `LinkResult` |
+| Link harness | `simulate_link`, `ber_sweep`, `LinkResult`, `ChannelTaps` (from `Arrivals.channel_taps(symbol_rate, carrier=…)`; hand it to the link harness as its `channel=`) |
 | Metrics | `bit_error_rate`, `symbol_error_rate`, `evm`, `ber_theory` |
 | Coding / spread | `ConvCode`, `conv_encode`, `viterbi_decode`, `viterbi_hard`, `interleave`, `deinterleave`, `m_sequence`, `spread`, `despread`, `processing_gain_dB` |
 | OFDM | `ofdm_modulate`, `ofdm_demodulate`, `ofdm_symbol`, `equalize_subcarriers`, `schmidl_cox_preamble`, `schmidl_cox_sync`, `apply_cfo`, `estimate_channel`, `OFDMTransmitter`, `OFDMReceiver` |
@@ -2055,9 +2080,9 @@ uacpy calls it demonstrates are named in its own docstring.
 | 01 | Basic shallow-water propagation — Pekeris waveguide |
 | 02 | Sound-speed profiles — Munk, Pekeris, thermocline |
 | 03 | Five models on one thermocline environment at a single reference frequency (needs OASES, `./install.sh --oases yes`; runs the other models without it) |
-| 04 | Bellhop advanced — all-features showcase |
+| 04 | Bellhop advanced — all-features showcase, multi-depth `ResultStack` summed as a phased array with `superpose(weights=)` |
 | 05 | RAM (mpiramS) — range-dependent bottom and bathymetry |
-| 06 | Kraken — adiabatic modes over a continental shelf |
+| 06 | Kraken — adiabatic modes over a continental shelf; an antiphase source pair (`Source(weights=[1, -1])` → `ResultStack.superpose()`) |
 | 07 | All models — comprehensive comparison (needs OASES, `./install.sh --oases yes`; runs the other models without it) |
 | 08 | Deep-water SOFAR channel — long-range propagation, convergence zones (needs OASES, `./install.sh --oases yes`; runs the other models without it) |
 | 09 | Ambient noise (Wenz) + PSD→time-series synthesis + PPSD check |
@@ -2082,7 +2107,7 @@ uacpy calls it demonstrates are named in its own docstring.
 | 28 | Matched filtering, pulse compression, ambiguity function |
 | 29 | Adaptive & high-resolution array processing |
 | 30 | Time-frequency, wavenumber & slowness transforms tour |
-| 31 | Underwater acoustic communications tour |
+| 31 | Underwater acoustic communications tour, incl. a modelled channel (`Arrivals.channel_taps` → `simulate_link`) |
 | 32 | Real-data underwater modem (text → .wav → text) |
 | 33 | OFDM underwater modem (text → .wav → text) |
 | 34 | JANUS standard beacon (NATO STANAG 4748) |

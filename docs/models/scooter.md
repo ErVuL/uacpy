@@ -110,7 +110,7 @@ band-limited transfer functions, SPARC to watch a pulse propagate.
 | Range-dependent SSP | ❌ | collapsed — default `'mean'` |
 | Range-dependent bottom | ❌ | collapsed — default `'median'` |
 | Sea-surface altimetry | ❌ | dropped |
-| Multiple source depths | ❌ | one at a time |
+| Multiple source depths | ❌ | one deck per depth; `run()` loops and returns a `ResultStack` |
 | Source beam pattern | ❌ | |
 
 The collapse defaults differ from the package-wide ones: Scooter takes the

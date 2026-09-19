@@ -32,6 +32,7 @@ Every concrete ``run()`` follows the same recipe, in this order::
 
 import copy as _copy
 import errno
+import functools
 import gc
 import os
 import re
@@ -600,6 +601,89 @@ def _warn_if_volume_absorption_is_missing(env, source, receiver) -> None:
         UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
 
 
+def _stamp_source_weights(slabs, source: 'Source') -> None:
+    """Record ``source.weights`` on every slab of a source-depth stack so
+    ``ResultStack.superpose()`` finds them without the ``Source``."""
+    for slab in slabs:
+        slab.metadata['source_weights'] = source.weights.copy()
+
+
+def _pad_time_slabs_to_common_axis(slabs):
+    """Zero-pad time-domain ``Field`` slabs at the end to the longest time
+    axis. An engine that sizes its window from the arrivals (Bellhop's
+    delay-and-sum) gives each source depth its own record length while
+    every record starts at the same instant and rate, so padding the
+    shorter tails with silence puts the slabs on one axis; a cell with no
+    data (all NaN) is padded with NaN. Slabs that are not time-domain
+    fields, or whose clocks differ, are returned unchanged."""
+    if not all(isinstance(s, Field) and 'time' in s.coords
+               and s.coords['time'].size > 1 for s in slabs):
+        return slabs
+    axes = [s.coords['time'] for s in slabs]
+    lengths = [t.size for t in axes]
+    if len(set(lengths)) == 1:
+        return slabs
+    t0 = axes[0][0]
+    dt = axes[0][1] - axes[0][0]
+    for t in axes[1:]:
+        if (abs(t[0] - t0) > 1e-9 * max(abs(t0), dt)
+                or abs((t[1] - t[0]) - dt) > 1e-9 * dt):
+            return slabs
+    n_max = max(lengths)
+    # The longest record's own axis is the common one: every record starts
+    # at the same instant and rate, so the shorter axes are its prefixes.
+    common_time = axes[int(np.argmax(lengths))]
+    padded = []
+    for slab in slabs:
+        n = slab.coords['time'].size
+        if n == n_max:
+            padded.append(slab)
+            continue
+        axis = list(slab.coords).index('time')
+        data = np.asarray(slab.data)
+        pad_shape = list(data.shape)
+        pad_shape[axis] = n_max - n
+        tail = np.zeros(pad_shape, dtype=data.dtype)
+        no_data = np.all(np.isnan(data), axis=axis, keepdims=True)
+        tail = np.where(no_data, np.nan, tail)
+        coords = dict(slab.coords)
+        coords['time'] = common_time
+        id_kwargs = slab.id_kwargs()
+        if 'nt' in id_kwargs['metadata']:
+            id_kwargs['metadata']['nt'] = n_max
+        padded.append(Field(data=np.concatenate([data, tail], axis=axis),
+                            coords=coords, pinned=slab.pinned,
+                            **id_kwargs))
+    return padded
+
+
+def _loop_run_over_source_depths(run):
+    """Wrap a wrapper's ``run`` so a multi-depth ``Source`` in a field mode
+    runs once per depth and returns a ``ResultStack``; everything else
+    reaches ``run`` untouched. Applied to every concrete ``run`` by
+    ``PropagationModel.__init_subclass__``."""
+    @functools.wraps(run)
+    def run_over_source_depths(self, env, source, receiver, run_mode=None,
+                               **kwargs):
+        multi = isinstance(source, Source) and source.depths.size > 1
+        if multi and self._loops_source_depths(run_mode):
+            return self._run_per_source_depth(
+                run, env, source, receiver, run_mode, kwargs)
+        result = run(self, env, source, receiver, run_mode, **kwargs)
+        if (isinstance(source, Source) and source.depths.size == 1
+                and not source.has_unit_weights
+                and self._loops_source_depths(run_mode)):
+            return self._apply_single_source_weight(result, source)
+        # A stack the engine built itself (Bellhop's .shd / .ray / .arr
+        # readers) carries the same weight stamp as a looped one.
+        if (multi and isinstance(result, ResultStack)
+                and result.coordinate_name == 'source_depth'
+                and result.n_slabs == source.depths.size):
+            _stamp_source_weights(result.slabs, source)
+        return result
+    return run_over_source_depths
+
+
 class PropagationModel(ABC):
     """
     Abstract base class for acoustic propagation models.
@@ -754,6 +838,13 @@ class PropagationModel(ABC):
                     "positional args cannot reach it."
                 )
 
+        # The signature above is what the wrapper below relies on: it takes
+        # the four leading carriers by position and forwards every extra as
+        # a keyword, so an unknown keyword still reaches the wrapper's own
+        # TypeError. ``functools.wraps`` keeps ``inspect.signature`` and the
+        # docstring pointing at the wrapper's declaration.
+        cls.run = _loop_run_over_source_depths(run)
+
     def __init__(
         self,
         use_tmpfs: bool = False,
@@ -836,12 +927,14 @@ class PropagationModel(ABC):
         self._supports_layered_bottom: bool = False
         self._supports_elastic_media: bool = False
         # Bellhop is the only model that runs one source-depth grid in a
-        # single binary call. Nothing loops in Python: the ten models that
-        # read source geometry raise from ``_validate_geometry`` and tell the
-        # caller to loop over single-depth ``Source``s. Bounce accepts a
-        # multi-depth ``Source`` without raising because it reads no source
-        # geometry at all and overrides ``_validate_geometry`` to a no-op
-        # (``bounce.py``); the extra depths reach no deck.
+        # single binary call (``_NATIVE_MULTI_DEPTH_MODES``). Every other
+        # engine reads one source depth per deck: in a field mode ``run()``
+        # loops over the depths in Python and stacks the slabs
+        # (``_run_per_source_depth``); in any other mode the ten models that
+        # read source geometry raise from ``_validate_geometry``. Bounce
+        # accepts a multi-depth ``Source`` without raising because it reads
+        # no source geometry at all and overrides ``_validate_geometry`` to
+        # a no-op (``bounce.py``); the extra depths reach no deck.
         self._supports_multi_source_depth: bool = False
         self._supports_source_beam_pattern: bool = False
         # Surface sigma(1). SPARC's GetPar (Scooter/sparc.f90:177) and
@@ -1201,9 +1294,15 @@ class PropagationModel(ABC):
             One of the typed :mod:`uacpy.core.results` subclasses
             (``Field``, ``Arrivals``, ``Modes``, …) determined
             by ``run_mode`` and the model — or a ``ResultStack`` of them
-            when one run covers several source depths that the model cannot
-            stack itself (``Bellhop`` in ``EIGENRAYS`` mode over a
-            multi-depth ``Source``; see DOCUMENTATION.md §ResultStack).
+            over ``source_depth`` when ``source`` carries several depths.
+            In a field mode (the TL modes, ``BROADBAND``, ``TIME_SERIES``)
+            every model returns that stack: the engine runs once per depth
+            with the same environment, receiver and keywords, and each
+            slab is the unit-amplitude field of one source, so
+            ``stack.superpose()`` adds them with ``source.weights``
+            (see DOCUMENTATION.md §ResultStack). Outside the field modes
+            only Bellhop stacks (``RAYS`` / ``ARRIVALS`` / ``EIGENRAYS``);
+            the other engines raise ``ConfigurationError``.
             ``ResultStack`` is not a ``Result`` subclass, so a caller that
             annotates the result has to name both.
         """
@@ -1232,6 +1331,91 @@ class PropagationModel(ABC):
         RunMode.RAYS, RunMode.MODES, RunMode.REFLECTION,
         RunMode.COVARIANCE, RunMode.REPLICA,
     })
+
+    # Modes whose result is a gridded ``Field`` of pressure. A multi-depth
+    # ``Source`` in one of these runs once per depth through
+    # ``_run_per_source_depth`` and returns a ``ResultStack`` whose slabs
+    # ``ResultStack.superpose`` can add; every other mode returns something
+    # (mode shapes, rays, a reflection table, an array product) that has no
+    # per-source linear sum, so ``_validate_geometry`` refuses the extra
+    # depths there unless the model stacks them itself.
+    _FIELD_MODES: 'frozenset[RunMode]' = frozenset({
+        RunMode.COHERENT_TL, RunMode.INCOHERENT_TL, RunMode.SEMICOHERENT_TL,
+        RunMode.BROADBAND, RunMode.TIME_SERIES,
+    })
+
+    # Modes in which this engine writes every source depth into one deck
+    # and its reader splits the output into a ``ResultStack`` — the loop
+    # above is skipped for these. Empty on every model but Bellhop.
+    _NATIVE_MULTI_DEPTH_MODES: 'frozenset[RunMode]' = frozenset()
+
+    def _default_run_mode(self) -> RunMode:
+        """The mode ``run(run_mode=None)`` resolves to: the first declared
+        mode. Kraken overrides it, because its list opens with ``MODES``
+        while its ``run`` defaults to a TL mode."""
+        return self._supported_modes[0]
+
+    def _loops_source_depths(self, run_mode) -> bool:
+        """Whether ``run()`` splits a multi-depth ``Source`` into one
+        single-depth run per depth: a field mode the engine does not stack
+        natively. An unsupported ``run_mode`` is left to ``run()`` itself
+        to refuse."""
+        try:
+            mode = self._resolve_run_mode(
+                run_mode, default=self._default_run_mode())
+        except UnsupportedFeatureError:
+            return False
+        return (mode in self._FIELD_MODES
+                and mode not in self._NATIVE_MULTI_DEPTH_MODES)
+
+    def _run_per_source_depth(self, run, env, source, receiver, run_mode,
+                              kwargs) -> ResultStack:
+        """One single-depth run per ``source.depths`` entry, stacked over
+        ``source_depth``. ``run`` is the wrapper's own ``run`` function; the
+        same env, receiver, mode and keywords go to every depth, and each
+        slab's ``metadata['source_weights']`` records ``source.weights`` for
+        :meth:`ResultStack.superpose` to read as its default. Time-domain
+        slabs whose window the engine sized from each depth's own arrivals
+        are zero-padded at the end to one common axis, so the stack always
+        superposes."""
+        n = int(source.depths.size)
+        self._log(f"multi-depth Source: {n} single-depth runs, one per "
+                  f"depth {source.depths.tolist()}")
+        slabs = [run(self, env, source.at_depth(i), receiver, run_mode,
+                     **kwargs)
+                 for i in range(n)]
+        if kwargs.get('output_duration') is None:
+            slabs = _pad_time_slabs_to_common_axis(slabs)
+        _stamp_source_weights(slabs, source)
+        return ResultStack(slabs=slabs, coordinate=source.depths,
+                           coordinate_name='source_depth')
+
+    def _apply_single_source_weight(self, result, source: 'Source'):
+        """A one-depth ``Source`` with a non-unit weight scales its
+        ``Field`` by that weight — the ``n = 1`` case of
+        :meth:`ResultStack.superpose` — and records it in
+        ``metadata['superposed_sources']``. Unit weight leaves the result
+        untouched; a complex weight on a real time-domain trace is refused
+        for the reason ``superpose`` gives."""
+        if not isinstance(result, Field):
+            return result
+        w = complex(source.weights[0])
+        if not result.is_complex:
+            if w.imag != 0.0:
+                raise ConfigurationError(
+                    f"{self.model_name}: Source(weights={w}) on a real "
+                    f"time-domain trace, which a complex weight cannot "
+                    f"scale; give a real weight (a sign flip is -1), or run "
+                    f"BROADBAND and weight the transfer function."
+                )
+            result.data = result.data * w.real
+        else:
+            result.data = result.data * w
+        result.metadata['superposed_sources'] = {
+            'depths': source.depths.tolist(),
+            'weights': [w.real if not result.is_complex else w],
+        }
+        return result
 
     def _require_timeseries_signal(
         self,
@@ -1761,13 +1945,23 @@ class PropagationModel(ABC):
                 f"drop Source(beam_pattern=...) or use Bellhop or Kraken."
             )
 
-        if (not self._supports_multi_source_depth
-                and len(np.atleast_1d(source.depths)) > 1):
-            raise ConfigurationError(
-                f"{self.model_name} takes a single source depth per run; "
-                f"got {len(source.depths)}: {list(source.depths)}. Loop "
-                f"over Sources externally for multi-depth runs."
-            )
+        # A field mode never reaches here with several depths: ``run()``
+        # splits them first (``_run_per_source_depth``). What is left is a
+        # non-field mode on an engine that reads one source depth per deck.
+        n_depths = len(np.atleast_1d(source.depths))
+        if n_depths > 1 and not self._supports_multi_source_depth:
+            mode = (run_mode if run_mode is not None
+                    else self._default_run_mode())
+            if mode not in self._FIELD_MODES:
+                raise ConfigurationError(
+                    f"{self.model_name} takes a single source depth per "
+                    f"{mode.name} run; got {n_depths}: "
+                    f"{np.asarray(source.depths).tolist()}. A multi-depth "
+                    f"Source stacks "
+                    f"only in the field modes (COHERENT_TL / INCOHERENT_TL "
+                    f"/ SEMICOHERENT_TL / BROADBAND / TIME_SERIES); for "
+                    f"{mode.name} loop over single-depth Sources externally."
+                )
 
         resolvable_depth = self._max_receiver_depth(env)
 
@@ -1983,13 +2177,15 @@ class PropagationModel(ABC):
         Returns
         -------
         result : Result or ResultStack
-            Transmission loss field, or a stack of them over source depth.
-            The stacking is done by the readers, not by the caller: a multi-depth
-        ``.shd`` / ``.arr`` / ``.ray`` is split into one slab per source
-        depth and bundled (``uacpy/io/oalib_reader.py``), so a run over a
-        ``Source`` with more than one depth hands back a ``ResultStack``
-        over ``source_depth``. ``ResultStack`` is not a ``Result``
-        subclass, so a caller that annotates the result has to name both.
+            Transmission loss field, or a stack of them over source depth:
+            a ``Source`` with more than one depth hands back a
+            ``ResultStack`` from every model. Bellhop writes every depth
+            into one deck and its ``.shd`` reader splits the slabs
+            (``uacpy/io/oalib_reader.py``); every other engine runs once per
+            depth (``_run_per_source_depth``). ``stack.superpose()`` adds
+            the slabs' complex pressure with ``source.weights``.
+            ``ResultStack`` is not a ``Result`` subclass, so a caller that
+            annotates the result has to name both.
 
         Examples
         --------
@@ -2265,7 +2461,7 @@ class PropagationModel(ABC):
         source_waveform: Optional[np.ndarray] = None,
         sample_rate: Optional[float] = None,
         output_duration: Optional[float] = None,
-    ) -> Result:
+    ) -> Union[Result, ResultStack]:
         """Compute time-domain pressure p(t) at the receiver(s).
 
         Forwards ``source_waveform``, ``sample_rate`` and
@@ -2275,6 +2471,14 @@ class PropagationModel(ABC):
         OASP) — e.g. the length of an animation; SPARC ignores all three
         (it builds p(t) from its native ``pulse_type`` and ``t_max``), and
         every other TIME_SERIES model requires the waveform/rate.
+
+        Returns
+        -------
+        result : Result or ResultStack
+            The time-domain ``Field``, or a ``ResultStack`` of them over
+            ``source_depth`` for a multi-depth ``Source`` (one run per
+            depth); ``stack.superpose()`` sums the traces with
+            ``source.weights``.
         """
         if not self.supports_mode(RunMode.TIME_SERIES):
             raise UnsupportedFeatureError(
@@ -2298,12 +2502,20 @@ class PropagationModel(ABC):
         receiver: Receiver,
         *,
         frequencies: Optional[np.ndarray] = None,
-    ) -> Result:
+    ) -> Union[Result, ResultStack]:
         """Compute broadband complex transfer function H(f).
 
         Dispatches to ``run(run_mode=RunMode.BROADBAND)``. Pass
         ``frequencies=`` to override ``source.frequencies`` for the
         sweep.
+
+        Returns
+        -------
+        result : Result or ResultStack
+            The ``H(f)`` ``Field``, or a ``ResultStack`` of them over
+            ``source_depth`` for a multi-depth ``Source`` (one run per
+            depth); ``stack.superpose()`` adds them with
+            ``source.weights``.
         """
         if not self.supports_mode(RunMode.BROADBAND):
             raise UnsupportedFeatureError(

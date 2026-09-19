@@ -3696,3 +3696,38 @@ class TestCxxRunTimeWarningsReachTheUser:
             model._warn_on_engine_stdout_warnings(
                 "setup: 0.6 ms\nPreprocess: 0.1 ms\nRun: 0.4 ms\n")
         assert [str(w.message) for w in record] == []
+
+    @pytest.mark.requires_binary
+    def test_the_arrivals_launcher_is_scanned_and_the_engine_stays_silent(
+            self, monkeypatch):
+        """One launcher serves every mode (``_run_bellhop``), so an ARRIVALS
+        run's stdout goes through the same scan as a TL run's. What differs
+        is the engine: both ports raise ``Too few beams`` only on a coherent
+        TL run — ``bellhop.f90:255`` tests ``RunType(1:1) == 'C'`` and
+        ``bellhopcuda/src/trace.hpp:126`` tests ``IsCoherentRun(Beam)`` — so
+        the same ``n_beams=3`` fan that warns in COHERENT_TL is silent in
+        ARRIVALS on every backend, and uacpy passes that silence through
+        rather than inventing a warning the engine did not make."""
+        seen = []
+        original = Bellhop._warn_on_engine_stdout_warnings
+
+        def spy(model, stdout):
+            seen.append(stdout)
+            return original(model, stdout)
+
+        monkeypatch.setattr(Bellhop, '_warn_on_engine_stdout_warnings', spy)
+        env = Environment(name='fewbeams', bathymetry=100.0, ssp=1500.0)
+        src = Source(depths=50.0, frequencies=500.0)
+        rcv = Receiver(depths=np.linspace(5.0, 95.0, 10),
+                       ranges=np.linspace(100.0, 3000.0, 30))
+        with warnings.catch_warnings(record=True) as record:
+            warnings.simplefilter('always')
+            self._model('cxx').run(env, src, rcv, run_mode=RunMode.ARRIVALS)
+        assert len(seen) == 1, "the ARRIVALS launcher skipped the scan"
+        assert 'Run:' in seen[0], seen[0]
+        assert 'BHC_WARN' not in seen[0], seen[0]
+        assert not [w for w in record if 'BHC_WARN' in str(w.message)]
+        # The discriminating side, same fan and grid: the TL run warns.
+        with pytest.warns(UserWarning, match='BHC_WARN_TOO_FEW_BEAMS'):
+            self._model('cxx').run(env, src, rcv,
+                                   run_mode=RunMode.COHERENT_TL)

@@ -1102,7 +1102,9 @@ def _result_stack_producers():
 #: 200 m guide, a 2-depth ``Source`` and the real binaries, over all 12
 #: concrete wrappers × all 10 ``compute_*`` × {1, 2} source depths. Bellhop's
 #: TL / RAYS / ARRIVALS / EIGENRAYS returned ``ResultStack`` at 2 depths and a
-#: plain ``Result`` at 1.
+#: plain ``Result`` at 1. The field modes (TL, BROADBAND, TIME_SERIES) stack on
+#: every engine since ``PropagationModel.run`` loops the depths
+#: (test_multi_source.py drives the five field models).
 _STACKING_ENTRY_POINTS = [
     ('PropagationModel', 'run'), ('Bellhop', 'run'),
     ('Bellhop', 'run_with_bounce'),
@@ -1110,19 +1112,18 @@ _STACKING_ENTRY_POINTS = [
     ('PropagationModel', 'compute_rays'),
     ('PropagationModel', 'compute_arrivals'),
     ('PropagationModel', 'compute_eigenrays'),
+    ('PropagationModel', 'compute_time_series'),
+    ('PropagationModel', 'compute_transfer_function'),
 ]
 
-#: The rest of ``compute_*``. In the same sweep every model that declares
-#: these modes **refused** a multi-depth ``Source`` outright with a
-#: ``ConfigurationError`` ("<model> takes a single source depth per run", and
-#: for Bellhop's broadband pair "runs a single source depth"), so their
+#: The rest of ``compute_*``: the non-field modes. Every model that declares
+#: these **refuses** a multi-depth ``Source`` with a ``ConfigurationError``
+#: ("<model> takes a single source depth per <MODE> run"), so their
 #: ``-> Result`` is total. Pinned so widening one needs the measurement
 #: repeated rather than assumed.
 _SINGLE_RESULT_ENTRY_POINTS = [
     ('PropagationModel', 'compute_modes'),
     ('PropagationModel', 'compute_reflection'),
-    ('PropagationModel', 'compute_time_series'),
-    ('PropagationModel', 'compute_transfer_function'),
     ('PropagationModel', 'compute_covariance'),
     ('PropagationModel', 'compute_replicas'),
 ]
@@ -1132,12 +1133,15 @@ _OWNERS = {'PropagationModel': PropagationModel, 'Bellhop': Bellhop}
 
 def test_the_result_stack_producers_are_where_the_annotations_say():
     """The sweep behind the two gates below, so neither can pass against an
-    empty set. Stacking happens in **two** places, and the second is the one a
-    reader misses: ``Bellhop._run_eigenrays_multi_depth`` builds a stack in
-    Python, and the OALIB readers build one whenever a ``.shd`` / ``.arr`` /
-    ``.ray`` carries more than one source depth — which is why TL, RAYS and
-    ARRIVALS stack too, without any wrapper looking as though they do."""
+    empty set. Stacking happens in **three** places, and two of them are the
+    ones a reader misses: ``PropagationModel._run_per_source_depth`` loops a
+    field mode over the depths for every engine,
+    ``Bellhop._run_eigenrays_multi_depth`` does the same for eigenrays, and
+    the OALIB readers build one whenever a ``.shd`` / ``.arr`` / ``.ray``
+    carries more than one source depth — which is why Bellhop's TL, RAYS and
+    ARRIVALS stack without the wrapper looking as though it does."""
     producers = _result_stack_producers()
+    assert 'uacpy/models/base.py' in producers, producers
     assert 'uacpy/models/bellhop.py' in producers, producers
     assert 'uacpy/io/oalib_reader.py' in producers, (
         "no OALIB reader builds a ResultStack any more; if the readers stopped "

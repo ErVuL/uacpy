@@ -124,7 +124,7 @@ nonsense.
 | Source beam pattern | ✅ | staged as an `.sbp` |
 | Range-dependent bottom | ❌ | collapsed to the median column; layers kept |
 | Sea-surface altimetry | ❌ | dropped; flat surface |
-| Multiple source depths | ❌ | raises — loop over `Source` objects yourself |
+| Multiple source depths | ❌ | one depth per deck; `run()` loops and returns a `ResultStack` in the TL / BROADBAND / TIME_SERIES modes, `MODES` raises |
 
 The first two ❌ rows are *collapsed* with a `UserWarning` naming what was
 dropped; the mechanism, and the `collapse=` dict that overrides it, is in the
@@ -623,10 +623,11 @@ such point and returns the below-seafloor field there rather than raising. If
 the seabed is elastic, `field.exe` has no elastic component to evaluate and
 those depths come back as `NaN`, again with a warning.
 
-**One source depth per run.** A `Source` carrying two depths is accepted by the
-carrier and rejected by `run()` with a `ConfigurationError`; loop over `Source`
-objects yourself. Bellhop is the only
-uacpy model that returns a `ResultStack` over source depths.
+**One source depth per deck.** A `Source` carrying two depths runs twice in
+the field modes (TL, `BROADBAND`, `TIME_SERIES`): `run()` loops over the
+depths and returns a `ResultStack` over `source_depth`, whose
+`superpose()` adds the slabs with `Source.weights`. `MODES` has no per-source
+sum, so there a multi-depth `Source` raises `ConfigurationError`.
 
 **`compute_modes` on a range-dependent environment samples `r = 0`.** Modes are
 a stratified concept, so the modes path collapses to the inshore profile and

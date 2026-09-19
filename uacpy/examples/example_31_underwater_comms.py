@@ -7,7 +7,8 @@ learning curve, preamble synchronisation, wideband Doppler-scale estimation,
 OFDM over multipath, convolutional coding with Viterbi decoding, DSSS
 processing gain, and a JANUS beacon.
 
-Uses: comms.ber_sweep · multipath_channel · simulate_link · DFE ·
+Uses: comms.ber_sweep · multipath_channel · Arrivals.channel_taps ·
+simulate_link · DFE ·
 detect_preamble · estimate_doppler_scale / compensate_doppler ·
 ofdm_modulate / ofdm_demodulate · conv_encode / viterbi_decode · m_sequence ·
 JanusPacket · plot_ber_curve · plot_scatter · plot_convergence ·
@@ -45,6 +46,20 @@ equalized = comms.simulate_link("qpsk", 16.0, 40000, channel=channel,
 print(f"  ISI QPSK @16 dB : raw BER {raw.ber:.2e} → DFE BER "
       f"{equalized.ber:.2e}, final MSE "
       f"{10 * np.log10(equalized.mse[-2000:].mean()):.1f} dB")
+
+# A modelled channel: a Bellhop ARRIVALS result (a synthetic two-path one
+# here) becomes symbol-spaced baseband taps at the modem's carrier and rate;
+# at one sample per symbol the taps carry the raised cosine, the channel at
+# the receiver's decision instants, which is what simulate_link consumes.
+arrivals = uacpy.Arrivals(
+    arrivals=[{'delay': 0.6667, 'amplitude': 1.0, 'phase': 0.0},
+              {'delay': 0.6667 + 1.5e-3, 'amplitude': 0.6, 'phase': np.pi}],
+    receiver_depths=[50.0], receiver_ranges=[1000.0], model="two-path",
+    frequencies=12000.0)
+taps = arrivals.channel_taps(2000.0, carrier=12000.0, normalize=True)
+modelled = comms.simulate_link("qpsk", 16.0, 40000, channel=taps, rng=rng)
+print(f"  modelled channel: {arrivals.channel_regime(2000.0)}; "
+      f"raw BER {modelled.ber:.2e}")
 
 # Preamble synchronisation: find a known symbol sequence in a noisy record.
 modulator = comms.Modulator("qpsk")

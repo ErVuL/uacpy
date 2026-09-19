@@ -1415,20 +1415,37 @@ def test_bounce_run_refuses_multi_frequency_source():
 
 
 @pytest.mark.parametrize('model_cls,mode', _model_mode_params([
-    ('Kraken', None), ('Scooter', None), ('SPARC', None), ('RAM', None),
-    ('OAST', None), ('OASN', None), ('OASR', None), ('OASP', None),
-    ('OASS', None), ('OASSP', None),
+    ('Kraken', uacpy.RunMode.MODES), ('OASN', uacpy.RunMode.COVARIANCE),
+    ('OASN', uacpy.RunMode.REPLICA), ('OASR', uacpy.RunMode.REFLECTION),
+    ('OASS', uacpy.RunMode.REVERBERATION), ('OASS', uacpy.RunMode.COVARIANCE),
 ]))
-def test_multi_depth_source_refused_without_multi_source_depth(model_cls,
-                                                               mode):
-    """Every model but Bellhop runs one source depth per binary call, so a
-    multi-depth Source raises 'single source depth' in
-    ``_validate_geometry``. Bellhop declares ``multi_source_depth`` and is
+def test_multi_depth_source_refused_in_a_non_field_mode(model_cls, mode):
+    """Mode shapes, reflection tables and array products have no per-source
+    linear sum, so a multi-depth Source in one of these modes raises
+    'single source depth' from ``_validate_geometry`` and names the field
+    modes that do stack. Bellhop declares ``multi_source_depth`` and is
     excluded; Bounce's geometry validation is a no-op, so the guard
     genuinely does not exist for it."""
     src = uacpy.Source(depths=[10.0, 20.0], frequencies=100.0)
-    with pytest.raises(ConfigurationError, match='single source depth'):
-        model_cls().validate_inputs(_guard_env(), src, _guard_rcv())
+    with pytest.raises(ConfigurationError,
+                       match=f'single source depth per {mode.name} run'):
+        model_cls().validate_inputs(_guard_env(), src, _guard_rcv(),
+                                    run_mode=mode)
+
+
+@pytest.mark.parametrize('model_cls,mode', _model_mode_params([
+    ('Kraken', None), ('Scooter', None), ('SPARC', None), ('RAM', None),
+    ('OAST', None), ('OASP', None), ('OASSP', None),
+    ('Kraken', uacpy.RunMode.BROADBAND), ('RAM', uacpy.RunMode.TIME_SERIES),
+]))
+def test_multi_depth_source_accepted_in_a_field_mode(model_cls, mode):
+    """In a field mode ``run()`` splits the depths into one run each
+    (``PropagationModel._run_per_source_depth``), so validation of the
+    whole Source passes; the refusal above is the other side of the same
+    ``_FIELD_MODES`` test."""
+    src = uacpy.Source(depths=[10.0, 20.0], frequencies=100.0)
+    model_cls().validate_inputs(_guard_env(), src, _guard_rcv(),
+                                run_mode=mode)
 
 
 def test_bounce_rejects_quad_interp_at_construction():

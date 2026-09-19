@@ -14,9 +14,16 @@ krakenc, and it admits Scholte/Stoneley interface waves whose phase speed sits
 below the water sound speed — those are filtered out of the shape panel so the
 two sides are comparable.
 
+A last run drives two sources in antiphase through the same segmented guide.
+The mode sum is linear in the source amplitude, so the stack the run returns
+adds as a vertical dipole: a mode whose shape takes the same value at both
+depths is not excited at all.
+
 Uses: uacpy.FrancoisGarrison on the Environment · Bottom.from_halfspaces ·
 Bottom.halfspace_at · Kraken.compute_modes · Kraken(backend='krakenc') ·
-Kraken(mode_coupling='adiabatic', n_segments=) · Modes.plot(show_imaginary=) ·
+Kraken(mode_coupling='adiabatic', n_segments=) ·
+multi-depth Source(weights=) → ResultStack · ResultStack.superpose ·
+Modes.plot(show_imaginary=) ·
 plot_mode_wavenumbers · plot_modes_heatmap · plot_field(contours=)
 """
 
@@ -89,6 +96,30 @@ tl = uacpy.Kraken(mode_coupling='adiabatic', n_segments=N_SEGMENTS).run(
 print(f"  adiabatic run over {N_SEGMENTS} segments: TL "
       f"{np.nanmin(tl.dB):.1f} to {np.nanmax(tl.dB):.1f} dB")
 
+# Two sources 20 m apart with weights [1, -1]: the run returns a ResultStack
+# holding the unit-amplitude field of each depth, and superpose() adds them
+# with the Source's weights — Σ wᵢ·pᵢ as one complex Field. Each shelf mode
+# is excited in proportion to φ_m(40) − φ_m(60), so the modes whose shapes
+# match at the two depths drop out of the dipole's field.
+dipole_source = uacpy.Source(depths=[40.0, 60.0], frequencies=50.0,
+                             weights=[1, -1])
+dipole_stack = uacpy.Kraken(mode_coupling='adiabatic',
+                            n_segments=N_SEGMENTS).run(
+    env, dipole_source, receiver, run_mode=uacpy.RunMode.COHERENT_TL)
+dipole = dipole_stack.superpose()                 # weights = [1, -1]
+in_phase = dipole_stack.superpose(weights=[1, 1])
+# Shelf mode 1 sampled at the two source depths: the dipole excites it by
+# their difference, the in-phase pair by their sum.
+mode_1_at_pair = np.interp(dipole_source.depths, shelf_modes.depths,
+                           shelf_modes.phi[:, 0].real)
+excitation_ratio = (abs(mode_1_at_pair[0] - mode_1_at_pair[1])
+                    / abs(mode_1_at_pair[0] + mode_1_at_pair[1]))
+print(f"  antiphase pair at 40/60 m: {dipole_stack.n_slabs} slabs superposed; "
+      f"shelf mode 1 excited {20 * np.log10(excitation_ratio):.1f} dB "
+      f"relative to the in-phase pair; median TL "
+      f"{np.nanmedian(dipole.dB):.1f} dB vs {np.nanmedian(in_phase.dB):.1f} "
+      f"dB in phase")
+
 fig, _ = env.plot()
 fig.savefig(OUT / 'example_06_bottom.png', dpi=150, bbox_inches='tight')
 plt.close(fig)
@@ -152,4 +183,21 @@ fig, ax = uacpy.plot_field(
 for node in np.linspace(0, 20, N_SEGMENTS)[1:-1]:
     ax.axvline(node, color='white', ls='--', alpha=0.3, lw=0.5, zorder=8)
 fig.savefig(OUT / 'example_06_result.png', dpi=150, bbox_inches='tight')
+plt.close(fig)
+
+fig, (left, right) = plt.subplots(1, 2, figsize=(16, 6))
+uacpy.plot_field(in_phase.to_dB(), left, env=env, show_colorbar=False,
+                 title='Pair in phase\nsuperpose(weights=[1, 1])')
+uacpy.plot_field(dipole.to_dB(), right, env=env, show_colorbar=False,
+                 title='Pair in antiphase\n'
+                       'Source(weights=[1, -1]) → superpose()')
+for ax in (left, right):
+    ax.plot(np.zeros(2), dipole_source.depths, marker='*', markersize=14,
+            linestyle='none', color='white', markeredgecolor='black',
+            markeredgewidth=1.2, zorder=10, clip_on=False)
+uacpy.plot.shared_colorbar(fig, (left, right), label='TL (dB)')
+fig.suptitle('Two sources, one ResultStack, two weightings',
+             fontsize='x-large', fontweight='bold')
+fig.savefig(OUT / 'example_06_superposed_pair.png', dpi=150,
+            bbox_inches='tight')
 plt.close(fig)

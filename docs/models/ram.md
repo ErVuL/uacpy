@@ -129,7 +129,7 @@ asked for.
 | You need the modes | No modal decomposition | [Kraken](kraken.md) |
 | Reference-grade accuracy check | The PE is an approximation; a wavenumber integral is not | [Scooter](scooter.md), [OASES](oases.md) |
 | Fast shear seabed (rock) | `rams` needs a hand-pinned `dz` — see [Gotchas](#9-gotchas) | [OASES](oases.md), [Scooter](scooter.md) |
-| Several source depths at once | One `(zs, f)` per march | loop over `Source`s |
+| Several source depths in one deck | One `(zs, f)` per march; `run()` loops the depths and stacks them | [Bellhop](bellhop.md) marches all depths in one call |
 
 ---
 
@@ -143,7 +143,7 @@ asked for.
 | Layered bottom | ✅ | `ramgeo` and `ramsurf` both track the layers *parallel to the bathymetry* |
 | Sea-surface altimetry | ✅ | `ramsurf` only |
 | Elastic media (shear) | ✅ | `rams` only; the **top** sediment layer must itself carry `shear_speed > 0` — a fluid layer over an elastic half-space is refused (see [§4](#forcing-a-backend)) |
-| Multiple source depths | ❌ | raises; loop over `Source` |
+| Multiple source depths | ❌ | one march per depth; `run()` loops and returns a `ResultStack` |
 | Source beam pattern | ❌ | raises; the march starts from Collins' self-starter, which is omnidirectional — use [Bellhop](bellhop.md) or [Kraken](kraken.md) |
 | Water-column volume attenuation | ✅ | every backend, as a dB/wavelength profile on the water wavenumber — Thorp, Francois-Garrison, biological layers and a constant alike; per bin on a broadband sweep (uacpy-patched binaries) |
 | Non-vacuum surface (rigid, fluid or elastic ice) | ❌ | collapsed to vacuum with a `UserWarning` naming the kind; every backend hard-codes a pressure-release surface and no deck carries a surface record |

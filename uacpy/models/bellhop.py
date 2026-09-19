@@ -113,6 +113,9 @@ def _echo_window_counts(starts, ends, powers, n_samples: int) -> dict:
         'clipped_end': int((~omitted & (ends > n_samples)).sum()),
         'omitted_power': float(powers[omitted].sum()),
         'total_power': float(powers.sum()),
+        # First sample of the earliest echo, relative to the record start;
+        # negative when it lands before the window. Merged by ``min``.
+        'earliest_start': int(starts.min()),
     }
 
 
@@ -142,6 +145,9 @@ def _echo_window_notice(counts: dict, t_start: float, time_window: float,
     if counts['clipped_end']:
         parts.append(f"{counts['clipped_end']} echo(es) run past its end and "
                      f"lose their tail")
+    if 'earliest_s' in counts:
+        parts.append(
+            f"the earliest echo arrives at {counts['earliest_s']:g} s")
     return (f"{who}: the [{t_start:g}, {t_start + time_window:g}] s window "
             f"does not hold every echo: " + "; ".join(parts) + ". Widen "
             f"time_window= or move t_start= (on run(): output_duration= and "
@@ -307,9 +313,14 @@ def delayandsum(
         powers.append(float(scaled_amp) ** 2)
 
     counts = _echo_window_counts(starts, ends, powers, nrts)
+    earliest = counts.pop('earliest_start')
+    counts['earliest_s'] = t_start + earliest * deltat
     if report is not None:
         for key, value in counts.items():
-            report[key] = report.get(key, 0) + value
+            if key == 'earliest_s':
+                report[key] = min(report.get(key, np.inf), value)
+            else:
+                report[key] = report.get(key, 0) + value
     else:
         notice = _echo_window_notice(counts, t_start, time_window,
                                      who="delayandsum")
@@ -700,6 +711,16 @@ class Bellhop(PropagationModel):
         source_types=frozenset({'point', 'line'}),
     )
     source = 'acoustics_toolbox'
+
+    # One deck carries every source depth in these modes and the .shd /
+    # .ray / .arr readers split the output into a ResultStack, so the
+    # per-depth loop in ``PropagationModel.run`` stands aside. EIGENRAYS
+    # loops in ``_run_eigenrays_multi_depth`` (the .ray file cannot be
+    # split there) and BROADBAND / TIME_SERIES loop through the base.
+    _NATIVE_MULTI_DEPTH_MODES = frozenset({
+        RunMode.COHERENT_TL, RunMode.INCOHERENT_TL, RunMode.SEMICOHERENT_TL,
+        RunMode.RAYS, RunMode.ARRIVALS,
+    })
 
     #: Catalogue entry per resolved engine. ``bellhopcxx`` and ``bellhopcuda``
     #: are one codebase under one copyright holder, so both credit one entry.
@@ -1579,21 +1600,16 @@ class Bellhop(PropagationModel):
         (``Bellhop/influence.f90:633-635``), so a source depth contributes a
         data-dependent number of records and those counts cannot split the file.
         Loop one run per source depth in Python and stack."""
-        slabs = []
-        for sd in source.depths:
-            single = Source(
-                depths=float(sd),
-                frequencies=source.frequencies,
-                source_type=source.source_type,
-                beam_pattern=source.beam_pattern,
-            )
-            slabs.append(self.run(
-                env, single, receiver, run_mode=run_mode,
+        slabs = [
+            self.run(
+                env, source.at_depth(i), receiver, run_mode=run_mode,
                 frequencies=frequencies,
                 source_waveform=source_waveform,
                 sample_rate=sample_rate,
                 output_duration=output_duration,
-            ))
+            )
+            for i in range(source.depths.size)
+        ]
         return ResultStack(
             slabs=slabs, coordinate=source.depths,
             coordinate_name='source_depth',
@@ -2470,14 +2486,9 @@ class Bellhop(PropagationModel):
                 with data shape (n_depths, n_ranges, n_samples) and
                 metadata containing 'time', 'dt', 'fs'.
         """
-        if len(np.atleast_1d(source.depths)) > 1:
-            raise ConfigurationError(
-                f"Bellhop broadband synthesis (BROADBAND / TIME_SERIES) "
-                f"runs at a single source depth; got "
-                f"{len(source.depths)}: {list(source.depths)}. Loop in "
-                f"Python over Source(depths=z, ...) and stack the "
-                f"results, or pick one depth for this run."
-            )
+        # ``run()`` has already split a multi-depth Source into one call
+        # per depth (``PropagationModel._run_per_source_depth``), so this
+        # synthesis sees one source depth.
         # fc is the single carrier frequency Bellhop runs the ray tracer
         # at. If the user passed a multi-element frequency array (band),
         # take the band centre — frequencies[0] would map a [50, 350]

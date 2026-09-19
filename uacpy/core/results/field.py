@@ -1566,6 +1566,7 @@ class ResultStack(_DeepCopyMixin):
     ``for c, slab in stack: …``               iterate ``(coordinate, slab)`` pairs
     ``stack.at(<coordinate_name>=value)``     nearest-label lookup
     ``len(stack)``                            number of slabs
+    ``stack.superpose(weights)``              coherent sum ``Σ wᵢ·pᵢ`` → Field
     """
 
     field_type = 'stack'
@@ -1766,6 +1767,127 @@ class ResultStack(_DeepCopyMixin):
                 f"their level view is stack.dB."
             )
         return self.dB
+
+    def superpose(self, weights=None) -> 'Field':
+        """Coherent sum of the slabs: one :class:`Field` holding
+        ``Σ wᵢ·pᵢ`` over the stack on the shared receiver grid.
+
+        Adding the complex pressure of each source is how a multi-source
+        array is driven: the engines are linear in the source amplitude, so
+        the field of a weighted array is the weighted sum of the unit-source
+        fields the stack holds. Every slab must therefore carry complex
+        pressure (``phase_reference`` intact) or a time-domain trace — a
+        dB-only slab has lost its phase and is refused.
+
+        Parameters
+        ----------
+        weights : array-like, optional
+            One coefficient per slab. ``None`` reads the weights the
+            ``Source`` that produced the stack carried
+            (``metadata['source_weights']``, stamped by
+            :meth:`PropagationModel.run`), else unit weights. Complex on a
+            complex-pressure stack; real on a time-domain stack, whose
+            traces are real samples.
+
+        Returns
+        -------
+        Field
+            Same grid, ``phase_reference`` and identity as the slabs, with
+            ``source_depths`` widened to the stacking coordinate and
+            ``metadata['superposed_sources']`` recording the ``depths`` and
+            ``weights`` that were summed.
+
+        Raises
+        ------
+        ConfigurationError
+            Non-Field slabs; a real frequency-domain (dB) stack; slabs on
+            different grids; a weight vector of the wrong length or with a
+            non-finite entry; a complex weight on a time-domain stack.
+        """
+        first = self.slabs[0]
+        if not isinstance(first, Field):
+            raise ConfigurationError(
+                f"ResultStack.superpose: slabs are "
+                f"{self.slab_type.__name__}, not Field — only gridded "
+                f"pressure adds. Pick a slab with stack[i]."
+            )
+        time_domain = 'time' in first.coords
+        if not time_domain and not first.is_complex:
+            raise ConfigurationError(
+                f"ResultStack.superpose: slabs are real {first.unit!r} "
+                f"values, not complex pressure, so their phase is gone and "
+                f"a coherent sum is undefined. Superpose the complex field "
+                f"the run returned (before to_dB()), or run a model that "
+                f"keeps phase (phase_reference is not None)."
+            )
+        if weights is None:
+            weights = first.metadata.get('source_weights')
+        if weights is None:
+            weights = np.ones(self.n_slabs)
+        w = np.atleast_1d(np.asarray(weights, dtype=np.complex128))
+        if w.ndim != 1 or w.size != self.n_slabs:
+            raise ConfigurationError(
+                f"ResultStack.superpose: {self.n_slabs} slabs but "
+                f"{w.size} weight(s) (shape {w.shape}); give one weight "
+                f"per slab."
+            )
+        if not np.all(np.isfinite(w)):
+            bad = int(np.flatnonzero(~np.isfinite(w))[0])
+            raise ConfigurationError(
+                f"ResultStack.superpose: weights must be finite; "
+                f"weights[{bad}] = {w[bad]}"
+            )
+        real_data = not first.is_complex
+        if real_data and np.any(w.imag != 0.0):
+            raise ConfigurationError(
+                "ResultStack.superpose: the slabs are real time-domain "
+                "traces, which a complex weight cannot scale; give real "
+                "weights (a sign flip is -1), or superpose the BROADBAND "
+                "transfer function instead and synthesise afterwards."
+            )
+        if real_data:
+            w = w.real
+
+        for i, slab in enumerate(self.slabs[1:], start=1):
+            same_axes = list(slab.coords) == list(first.coords) and all(
+                np.array_equal(slab.coords[k], first.coords[k])
+                for k in first.coords)
+            if not same_axes or slab.data.shape != first.data.shape:
+                sizes = {k: (first.coords[k].size, slab.coords[k].size)
+                         for k in first.coords
+                         if k in slab.coords
+                         and first.coords[k].size != slab.coords[k].size}
+                detail = (
+                    f"axes {list(first.coords)} vs {list(slab.coords)}"
+                    if list(slab.coords) != list(first.coords) else
+                    f"shape {first.data.shape} vs {slab.data.shape}"
+                    + (f", axis lengths {sizes}" if sizes else
+                       "; same lengths, different coordinate values")
+                )
+                raise ConfigurationError(
+                    f"ResultStack.superpose: slabs[{i}] is on a different "
+                    f"grid from slabs[0] ({detail}); a coherent sum needs "
+                    f"every slab sampled at the same points. A TIME_SERIES "
+                    f"pair gets one time axis from run(output_duration=…)."
+                )
+
+        total = np.zeros(first.data.shape,
+                         dtype=np.result_type(first.data.dtype, w.dtype))
+        for wi, slab in zip(w, self.slabs):
+            total += wi * slab.data
+
+        id_kwargs = first.id_kwargs()
+        id_kwargs['source_depths'] = self.coordinate.copy()
+        meta = id_kwargs['metadata']
+        meta.pop('source_weights', None)
+        meta['superposed_sources'] = {
+            'depths': self.coordinate.tolist(),
+            'weights': w.tolist(),
+        }
+        pinned = {k: v for k, v in first.pinned.items()
+                  if k != 'source_depth'}
+        return Field(data=total, coords=first.coords, pinned=pinned,
+                     **id_kwargs)
 
     def plot(self, **kwargs):
         """Plot every slab as a labelled panel grid (Field stacks), delegating
