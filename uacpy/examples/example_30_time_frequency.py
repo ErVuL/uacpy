@@ -45,7 +45,9 @@ wavefield = (
     + 0.8 * np.cos(2 * np.pi * (f0 * t_fk[:, None]
                                 + (f0 / 2500.0) * x_fk[None, :])))
 wavefield *= np.hanning(n_times)[:, None] * np.hanning(n_channels)[None, :]
-fk_f, fk_k, fk_power, _ = fk_transform(wavefield, fs, dx)
+# normalize=True makes the panel a density (x² per Hz·rad/m) whose sum over
+# Δf·Δk is the gather's mean square; plot_fk reads that scaling off the result.
+fk = fk_transform(wavefield, fs, dx, normalize=True)
 
 # (B) Two linear events in a pulsed gather, for the τ-p slant stack.
 gather_fs, gather_nt, gather_nx, gather_dx = 1000.0, 512, 48, 10.0
@@ -102,12 +104,12 @@ print(f"  hyperbolic Radon focus "
 
 fig, axes = plt.subplots(3, 2, figsize=(12, 14), constrained_layout=True)
 
-# The gather is synthetic and unit-less, so the f-k power is shown relative to
-# its own maximum (ref=1 → 10·log10(p/p_max)).
-uacpy.plot.plot_fk(fk_f, fk_k, fk_power / fk_power.max(), ax=axes[0, 0],
-                   ref=1.0, vmin=-40, vmax=0, cmap='jet', sound_speed=1500,
-                   title='f-k transform + 1500 m/s cone')
-axes[0, 0].images[0].colorbar.set_label('Relative power (dB)')
+# The gather is synthetic and unit-less, so the density is referred to 1
+# (unit²·m/(Hz·rad)); the colour window is the 40 dB below its peak.
+fk_peak_dB = 10 * np.log10(fk.power.max())
+uacpy.plot.plot_fk(fk, ax=axes[0, 0], ref=1.0, vmin=fk_peak_dB - 40,
+                   vmax=fk_peak_dB, cmap='jet', sound_speed=1500,
+                   title='f-k density + 1500 m/s cone')
 axes[0, 0].set_ylim(0, 400)
 
 uacpy.plot.plot_taup(slownesses, taus, slant_stack, ax=axes[0, 1],

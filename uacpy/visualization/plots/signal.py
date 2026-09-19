@@ -126,19 +126,79 @@ def _ref_label(ref):
 
 # ── f-k / Radon / tau-p gather transforms ───────────────────────────────────
 
+#: How :func:`plot_fk` labels its abscissa per wavenumber unit, and the factor
+#: that turns :func:`fk_transform`'s angular ``k`` (rad/m) into that unit.
+_FK_WAVENUMBER_AXIS = {
+    "rad/m": ("Wavenumber k (rad/m)", 1.0),
+    "cycles/m": ("Wavenumber ν (cycles/m)", 1.0 / (2.0 * np.pi)),
+}
+
+
 def draw_sound_cone(ax, f_max, k_max, sound_speed, *, color="w", ls="--",
-                    lw=1.1, alpha=0.85, label=True):
-    """Overlay the acoustic cone ``f = c·k/2π`` onto an f-k axis whose abscissa
-    is the angular wavenumber ``k`` (rad/m), matching :func:`fk_transform`."""
+                    lw=1.1, alpha=0.85, label=True, wavenumber_unit="rad/m"):
+    """Overlay the acoustic cone of speed ``sound_speed`` onto an f-k axis.
+
+    With ``wavenumber_unit='rad/m'`` (the default, matching
+    :func:`fk_transform`) the abscissa is the angular wavenumber ``k`` and the
+    cone is ``f = c·k/2π``; with ``'cycles/m'`` it is ``ν = k/2π`` and the cone
+    is ``f = c·ν``. ``k_max`` is the axis edge in the same unit."""
     c = float(sound_speed)
-    two_pi = 2.0 * np.pi
-    k = min(two_pi * f_max / c, k_max)   # cone reaches f_max or the axis edge
-    f = c * k / two_pi
+    if wavenumber_unit not in _FK_WAVENUMBER_AXIS:
+        raise ConfigurationError(
+            f"draw_sound_cone: wavenumber_unit must be one of "
+            f"{tuple(_FK_WAVENUMBER_AXIS)}; got {wavenumber_unit!r}")
+    # The angular wavenumber 2π·f_max/c, scaled into the axis unit.
+    k_at_fmax = 2.0 * np.pi * f_max / c * _FK_WAVENUMBER_AXIS[wavenumber_unit][1]
+    k = min(k_at_fmax, k_max)   # cone reaches f_max or the axis edge
+    f = f_max * k / k_at_fmax
     ax.plot([0, k], [0, f], color=color, ls=ls, lw=lw, alpha=alpha)
     ax.plot([0, -k], [0, f], color=color, ls=ls, lw=lw, alpha=alpha)
     if label:
         ax.text(k, f, f" {c:.0f} m/s", color=color, fontsize='small',
                 va="top", ha="right")
+
+
+def _fk_scaling(power, scaling):
+    """The unit the f-k panel is in: the ``scaling`` an :class:`FKResult`
+    carries, or the explicit knob, and both must agree when both are given."""
+    carried = getattr(power, "scaling", None)
+    if scaling is None:
+        if carried is None:
+            raise ConfigurationError(
+                "plot_fk: scaling= is required with a bare power array, "
+                "because a density (fk_transform(..., normalize=True), "
+                "scaling='density') and the raw |FK|² panel (normalize=False, "
+                "scaling='power') are labelled differently and nothing in "
+                "the array says which it is. Pass scaling='density' or "
+                "scaling='power', or hand plot_fk the FKResult itself.")
+        return carried
+    # Imported here, not at module level: ``arrays`` pulls in scipy.signal,
+    # which the plotting surface leaves unloaded until a DSP plot is drawn.
+    from uacpy.acoustic_signal.arrays import FK_SCALINGS
+    if scaling not in FK_SCALINGS:
+        raise ConfigurationError(
+            f"plot_fk: scaling must be one of {FK_SCALINGS}; got {scaling!r}")
+    if carried is not None and carried != scaling:
+        raise ConfigurationError(
+            f"plot_fk: scaling={scaling!r} contradicts the FKResult, whose "
+            f"panel is scaling={carried!r}. Drop scaling= to use the "
+            f"result's own, or re-run fk_transform with "
+            f"normalize={scaling == 'density'}.")
+    return scaling
+
+
+def _fk_colorbar_label(scaling, wavenumber_unit, ref):
+    """What the colour axis measures, per panel scaling and wavenumber unit.
+
+    A density is per Hz and per wavenumber unit, so its unit follows the
+    abscissa: Pa²·m/(Hz·rad) over rad/m, Pa²·m/Hz over cycles/m (a cycle is
+    dimensionless). The raw panel is a sum over the gather with no unit."""
+    r = _ref_label(ref)
+    if scaling == "power":
+        return f"|FK|² (dB re {r}Pa², unnormalised)"
+    if wavenumber_unit == "cycles/m":
+        return f"PSD (dB re {r}Pa²·m/Hz)"
+    return f"PSD (dB re {r}Pa²·m/(Hz·rad))"
 
 
 # The colour window autoscales, as it does on the other transform panels
@@ -152,31 +212,89 @@ def draw_sound_cone(ax, f_max, k_max, sound_speed, *, color="w", ls="--",
 # figure would come out a uniform block. A fixed absolute window cannot work here anyway: the
 # transform sums over the gather, so the level moves with its size.
 @typed_plot_error
-def plot_fk(frequencies, wavenumbers, power, ax=None, *, ref=REFERENCE_PRESSURE_WATER,
-            vmin=None, vmax=None, cmap=None, sound_speed=None, title=None,
-            figsize=(10, 6), show_colorbar=True, **mpl_kw):
-    """Image an f-k power panel (dB). Consumes :func:`fk_transform` output."""
-    _require_image_grid(power, len(frequencies), len(wavenumbers),
+def plot_fk(frequencies, wavenumbers=None, power=None, ax=None, *,
+            scaling=None, wavenumber_unit="rad/m",
+            ref=REFERENCE_PRESSURE_WATER, vmin=None, vmax=None, cmap=None,
+            sound_speed=None, title=None, figsize=(10, 6), show_colorbar=True,
+            **mpl_kw):
+    """Image an f-k panel (dB). Consumes :func:`fk_transform` output.
+
+    Handed the result itself — ``plot_fk(fk_transform(gather, fs, dx))`` — the
+    colour axis follows the result's ``scaling``: a calibrated density
+    (``normalize=True``) is labelled "PSD" in Pa² per Hz per wavenumber unit,
+    the raw ``|FK|²`` panel (``normalize=False``) is labelled as unnormalised
+    power. Handed bare ``(frequencies, wavenumbers, power)`` arrays the
+    transform's choice is not recoverable, so ``scaling=`` (``'density'`` or
+    ``'power'``) must state it; given alongside a result it must agree.
+
+    Parameters
+    ----------
+    frequencies : ndarray or FKResult
+        The frequency axis (Hz), or the whole :class:`FKResult`, in which case
+        ``wavenumbers`` and ``power`` are taken from it.
+    wavenumbers : ndarray, optional
+        Angular wavenumber ``k`` (rad/m), as :func:`fk_transform` returns it.
+    power : ndarray, optional
+        The panel ``(len(frequencies), len(wavenumbers))``.
+    scaling : {'density', 'power'}, optional
+        Which unit ``power`` is in; ``None`` reads it from an ``FKResult``.
+    wavenumber_unit : {'rad/m', 'cycles/m'}
+        Abscissa unit. ``'cycles/m'`` divides the axis by 2π and, for a
+        density, multiplies the panel by 2π so that ``ΣP·Δf·Δν`` still equals
+        the gather's mean square; a raw panel is left as it is.
+    sound_speed : float, optional
+        Draws the acoustic cone ``ω = c·k`` (or ``f = c·ν``) of that speed.
+    """
+    # One FKResult in place of the three arrays: read the axes, the panel and
+    # its scaling from it. The result's fourth element is the spectrum, so
+    # plot_fk(*result) would land it in ax=; say so instead of failing inside
+    # matplotlib.
+    result = (frequencies if wavenumbers is None and power is None
+              and isinstance(frequencies, tuple) else None)
+    if result is not None:
+        frequencies, wavenumbers, power = result[0], result[1], result[2]
+    elif isinstance(ax, np.ndarray):
+        raise ConfigurationError(
+            "plot_fk: ax= received an array — plot_fk(*result) spreads the "
+            "spectrum into ax=. Pass the result itself: plot_fk(result).")
+    if wavenumbers is None or power is None:
+        raise ConfigurationError(
+            "plot_fk: pass (frequencies, wavenumbers, power) or one FKResult")
+    scaling = _fk_scaling(result if result is not None else power, scaling)
+    if wavenumber_unit not in _FK_WAVENUMBER_AXIS:
+        raise ConfigurationError(
+            f"plot_fk: wavenumber_unit must be one of "
+            f"{tuple(_FK_WAVENUMBER_AXIS)}; got {wavenumber_unit!r}")
+    xlabel, k_scale = _FK_WAVENUMBER_AXIS[wavenumber_unit]
+    panel = np.asarray(power, dtype=float)
+    _require_image_grid(panel, len(frequencies), len(wavenumbers),
                         "plot_fk", "frequencies", "wavenumbers")
-    fk_dB = power_to_dB(np.asarray(power), ref)
+    # A density per rad/m is 2π times larger per cycle/m (dν = dk/2π); the raw
+    # panel has no per-wavenumber unit and is not rescaled.
+    if scaling == "density":
+        panel = panel / k_scale
+    k_axis = np.asarray(wavenumbers, dtype=float) * k_scale
+    fk_dB = power_to_dB(panel, ref)
     fig, ax = fig_ax(ax, figsize)
     # Edge-aligned: the axes are FFT bin centres, and draw_sound_cone below
-    # places f = c*k/(2*pi) at true coordinates, so a half-bin shift would
-    # offset the image against the very line used to read it.
-    im = ax.imshow(fk_dB, extent=_cell_edge_extent(wavenumbers, frequencies),
+    # places the cone at true coordinates, so a half-bin shift would offset
+    # the image against the very line used to read it.
+    im = ax.imshow(fk_dB, extent=_cell_edge_extent(k_axis, frequencies),
                    origin="lower", aspect="auto",
                    vmin=vmin, vmax=vmax, cmap=cmap, **mpl_kw)
     if sound_speed is not None:
-        draw_sound_cone(ax, frequencies[-1], wavenumbers[-1], sound_speed)
+        draw_sound_cone(ax, frequencies[-1], k_axis[-1], sound_speed,
+                        wavenumber_unit=wavenumber_unit)
     ax.set_title(_title_or(title, "f–k spectrum"), loc="left")
-    ax.set_xlabel("Wavenumber k (rad/m)")
+    ax.set_xlabel(xlabel)
     ax.set_ylabel("Frequency (Hz)")
     ax.grid(alpha=0.3)
     if show_colorbar:
-        # With the reference: `power_to_dB(power, ref)` above makes this an
+        # With the reference: `power_to_dB(panel, ref)` above makes this an
         # ABSOLUTE level, so the number is meaningless without saying what it
         # is referred to — as every sibling axis in this module does.
-        fig.colorbar(im, ax=ax, label=f"Power (dB re {_ref_label(ref)}Pa²)")
+        fig.colorbar(im, ax=ax,
+                     label=_fk_colorbar_label(scaling, wavenumber_unit, ref))
     return fig, ax
 
 

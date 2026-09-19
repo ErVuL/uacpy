@@ -23,11 +23,11 @@ from uacpy.visualization.plots.signal import (
 def test_plot_fk_returns_fig_ax():
     f, k, p, _ = fk_transform(
         np.random.default_rng(0).standard_normal((128, 32)), 1000.0, 5.0)
-    fig, ax = plot_fk(f, k, p, sound_speed=1500.0, title="t")
+    fig, ax = plot_fk(f, k, p, scaling="power", sound_speed=1500.0, title="t")
     assert fig is not None and ax.images
     plt.close(fig)
     fig2, ax2 = plt.subplots()
-    _, ax3 = plot_fk(f, k, p, ax=ax2)
+    _, ax3 = plot_fk(f, k, p, ax=ax2, scaling="power")
     assert ax3 is ax2
     plt.close(fig2)
 

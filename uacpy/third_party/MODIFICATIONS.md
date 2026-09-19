@@ -233,6 +233,21 @@ lead that pointed at the port).
 +                    << " z_bar = " << std::setw(11) << atten->z_bar << " m\n";
 ```
 
+### Install-time fix-up: `.git` pointer file replaced by a relative symlink
+
+Not a source change. `config/CMakeLists.txt` installs a clang-format
+pre-commit hook with `file(COPY ... ${PROJECT_SOURCE_DIR}/.git/hooks/)`,
+which needs `.git` to be a directory; in a submodule checkout it is a
+one-line `gitdir: <path>` pointer file and the copy fails with "Not a
+directory". `install.sh`'s `fixup_bhc_dotgit` replaces that file with a
+symlink to the directory it names. The link target is relative to the
+submodule directory (`../../../.git/modules/uacpy/third_party/bellhopcuda`
+for a standard clone), the way git's own pointer is, so a checkout copied
+or moved as a whole keeps a link that resolves. A relative link that
+resolves is left as is; an absolute or dangling one is rebuilt relative.
+The working tree therefore differs from a fresh `git submodule update`
+only in the type of `.git`, never in tracked content.
+
 ---
 
 ## ramsurf (Collins-style RAM family)

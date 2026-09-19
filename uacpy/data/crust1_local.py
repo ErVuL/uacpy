@@ -424,6 +424,10 @@ def fetch_bottom_crust1(point, *, roughness=0.0,
     :class:`~uacpy.core.bottom.SedimentLayer` puts the water/seabed interface.
     CRUST1.0 tabulates no roughness, so the default 0.0 is a smooth seafloor;
     give a site value to model interface scattering.
+
+    Raises :class:`~uacpy.core.exceptions.DataFetchError` on a cell with no
+    water layer (land or grounded ice, where :func:`fetch_crust1_profile`
+    reports ``water_depth_m <= 0``), as the bathymetry fetchers do on land.
     """
     _warn_non_commercial()
     return _bottom_at_point(
@@ -452,6 +456,18 @@ def _bottom_at_point(point, *, layer_kw, sediment_thickness=None,
     """
     lat, lon = as_coordinate(point)
     bnds, vp, vs, rho = _column(lat, lon)
+    # ``bnds[1]`` is the base of the water layer (km, positive up); a cell
+    # with no water — land, or an ice sheet resting on the ground — has it
+    # at or above sea level, and carries no seabed to build a bottom from.
+    water_depth_m = -bnds[1] * 1000.0
+    if water_depth_m <= 0.0:
+        raise DataFetchError(
+            f"CRUST1.0 at ({lat:.2f}, {lon:.2f}) has no water layer: the "
+            f"cell is land or grounded ice (water_depth_m = "
+            f"{water_depth_m:+.0f}), so there is no seabed there.",
+            remediation="Pick an offshore point, or supply a bottom "
+                        "directly.",
+        )
     globsed_applied = False
     if sediment_thickness is None and use_globsed:
         sediment_thickness = _globsed_thickness(point, verbose=verbose)
@@ -517,7 +533,8 @@ def fetch_bottom_crust1_transect(start, end, *, n_points=6, max_points=None,
     absolute Vp/Vs/ρ, not water-referenced ratios).
 
     ``roughness`` and the four attenuation keywords are as in
-    :func:`fetch_bottom_crust1`, applied at every waypoint.
+    :func:`fetch_bottom_crust1`, applied at every waypoint; so is the
+    refusal of a waypoint with no water layer (land or grounded ice).
     """
     n_points = checked_n_points(n_points, 'fetch_bottom_crust1_transect',
                                 allow_auto=True)

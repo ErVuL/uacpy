@@ -339,7 +339,50 @@ _RADON_KINDS = ("linear", "parabolic", "hyperbolic")
 
 RadonResult = namedtuple("RadonResult", "moveout taus panel")
 TauPResult = namedtuple("TauPResult", "slownesses taus panel")
-FKResult = namedtuple("FKResult", "frequencies wavenumbers power spectrum")
+#: What :attr:`FKResult.scaling` may hold: ``'density'`` for the
+#: calibrated panel of ``fk_transform(..., normalize=True)`` (x² per
+#: Hz·rad/m, two-sided in f and k, ``ΣP·Δf·Δk = ⟨x²⟩``) and ``'power'`` for
+#: the raw ``|FK|²`` of the windowed, zero-padded FFT, which carries no
+#: physical unit.
+FK_SCALINGS = ("density", "power")
+
+
+_FKFields = namedtuple("FKResult", "frequencies wavenumbers power spectrum")
+
+
+class FKResult(_FKFields):
+    """The ``(frequencies, wavenumbers, power, spectrum)`` 4-tuple of
+    :func:`fk_transform`, carrying the panel's ``scaling`` as an attribute.
+
+    Unpacking stays four-wide (``f, k, power, spectrum = fk_transform(...)``)
+    and :func:`inverse_fk` keeps taking the fourth element. ``scaling`` is one
+    of :data:`FK_SCALINGS` and tells :func:`~uacpy.visualization.plot_fk`
+    which unit the panel is in, so it is not a fifth tuple element: a fifth
+    element would change every unpack site for one flag the plotter reads.
+    """
+
+    def __new__(cls, frequencies, wavenumbers, power, spectrum, *, scaling):
+        if scaling not in FK_SCALINGS:
+            raise ConfigurationError(
+                f"FKResult: scaling must be one of {FK_SCALINGS}; got "
+                f"{scaling!r}")
+        self = super().__new__(cls, frequencies, wavenumbers, power, spectrum)
+        self.scaling = scaling
+        return self
+
+    def _replace(self, **kwargs):
+        scaling = kwargs.pop("scaling", self.scaling)
+        fields = [kwargs.pop(name, value)
+                  for name, value in zip(self._fields, self)]
+        if kwargs:
+            raise ValueError(f"Got unexpected field names: {list(kwargs)!r}")
+        return FKResult(*fields, scaling=scaling)
+
+    def __getnewargs_ex__(self):
+        return tuple(self), {"scaling": self.scaling}
+
+    def __repr__(self):
+        return f"{super().__repr__()[:-1]}, scaling={self.scaling!r})"
 
 
 def _taper(spec, n):
@@ -797,7 +840,12 @@ def fk_transform(data, sample_rate, dx, *, nperseg=None, noverlap=None,
     indexing, whose ``exp(-i2πνx)`` kernel would place that wave on
     ``ω = -c·k``; directional f-k muting must use this sign.
     ``power`` is the real ``|FK|^2`` panel (fftshifted); when ``normalize=True``
-    it is a PSD density per ``Hz·rad/m`` with ``ΣP·Δf·Δk = ⟨x²⟩``. Whenever the
+    it is a PSD density per ``Hz·rad/m`` with ``ΣP·Δf·Δk = ⟨x²⟩``, and the
+    result's ``scaling`` attribute reads ``'density'``; with ``normalize=False``
+    (the default) it is the raw squared magnitude of the windowed, zero-padded
+    FFT, which grows with the record size and carries no physical unit, and
+    ``scaling`` reads ``'power'``. :func:`~uacpy.visualization.plot_fk` labels
+    the panel from that attribute. Whenever the
     settings yield a single segment (``nperseg=None``, i.e. the whole record, or
     an ``nperseg``/``noverlap`` pair that fits only one block) ``spectrum`` is
     that segment's complex (fftshifted) panel for :func:`inverse_fk`. With
@@ -873,4 +921,5 @@ def fk_transform(data, sample_rate, dx, *, nperseg=None, noverlap=None,
     # re-indexed the panel columns onto it.
     wavenumbers = 2.0 * np.pi * np.fft.fftshift(np.fft.fftfreq(NX, d=dx))
     spectrum = last_spectrum if n_seg == 1 else None
-    return FKResult(freqs, wavenumbers, power, spectrum)
+    return FKResult(freqs, wavenumbers, power, spectrum,
+                    scaling="density" if normalize else "power")

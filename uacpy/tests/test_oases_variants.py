@@ -2054,7 +2054,9 @@ class TestOasrPhaseIsUnwrappedAtIngest:
     Every consumer interpolates it linearly between bracketing angles, which
     ``misc/RefCoef.f90:119`` states requires an unwrapped phase: "Assumes phi has
     been unwrapped so that it varies smoothly." Interpolating across a +-360 deg
-    step sweeps the phase the long way round and flips the sign of R.
+    step sweeps the phase the long way round and flips the sign of R. The
+    reader hands ``_stack_oasr_data`` the phase in radians, so the wrapped
+    degrees below are converted before they are fed in.
     """
 
     THETA = [0.0, 10.0, 20.0, 30.0, 40.0]
@@ -2065,7 +2067,8 @@ class TestOasrPhaseIsUnwrappedAtIngest:
         wrapped = (self.TRUE_DEG + 180.0) % 360.0 - 180.0
         return _stack_oasr_data({
             'frequencies': [100.0], 'angles_or_slowness': [self.THETA],
-            'magnitude': [[1.0] * 5], 'phase': [list(wrapped)],
+            'magnitude': [[1.0] * 5],
+            'phase': [list(np.deg2rad(wrapped))],
         })
 
     def test_ingest_removes_the_atan2_wrap(self):
@@ -2095,7 +2098,7 @@ class TestOasrPhaseIsUnwrappedAtIngest:
         smooth = [10.0, 20.0, 30.0, 40.0, 50.0]
         _t, _R, phi, _f = _stack_oasr_data({
             'frequencies': [100.0], 'angles_or_slowness': [self.THETA],
-            'magnitude': [[1.0] * 5], 'phase': [smooth]})
+            'magnitude': [[1.0] * 5], 'phase': [list(np.deg2rad(smooth))]})
         np.testing.assert_allclose(np.degrees(np.asarray(phi).ravel()), smooth,
                                    atol=1e-9)
 
@@ -2252,3 +2255,42 @@ class TestOasesDummyIsovelocityLayerAboveTheSeabed:
         """RG on the seabed record is what makes the LAYTYP test bite."""
         _, seabed = self._water_and_seabed(roughness=1.0)
         assert float(seabed.split()[6]) ** 2 > 1e-10
+
+
+class TestOasrReaderReturnsRadiansAndSecondsPerMetre:
+    """``oases/src/oasjun21.f:102-104`` writes ``slw*1e3`` (s/km) to the
+    ``.rco``, ``degang`` (degrees) to the ``.trc`` and ``phang = omr*atan2z``
+    (degrees) to both. ``read_oasr_reflection_coefficients`` returns phase
+    in radians and slowness in s/m; only the angle column keeps the file's
+    degrees. A phase of 90 in the file must read as pi/2, a slowness of
+    0.66 as 6.6e-4."""
+
+    _ROWS = [(30.0, 0.8, 90.0), (45.0, 0.5, -45.0), (60.0, 0.3, 180.0)]
+
+    def _table(self, tmp_path, code, name):
+        from uacpy.io.oases_reader import read_oasr_reflection_coefficients
+        path = tmp_path / name
+        lines = [f"      50.000      50.000   1   {code}",
+                 "       50.000     3  # Frequency, # of angles"]
+        lines += [f"      {a:.6f}       {m:.6f}     {p:.6f}"
+                  for a, m, p in self._ROWS]
+        path.write_text('\n'.join(lines) + '\n')
+        return read_oasr_reflection_coefficients(path)
+
+    def test_a_trc_phase_column_of_90_reads_as_pi_over_2(self, tmp_path):
+        data = self._table(tmp_path, 2, 't.trc')
+        np.testing.assert_allclose(
+            data['phase'][0], np.deg2rad([90.0, -45.0, 180.0]), atol=1e-12)
+        assert data['phase'][0][0] == pytest.approx(np.pi / 2, abs=1e-12)
+        np.testing.assert_allclose(data['angles_or_slowness'][0],
+                                   [30.0, 45.0, 60.0])
+
+    def test_an_rco_abscissa_of_0_66_per_km_reads_as_6_6e_4_per_metre(
+            self, tmp_path):
+        rows = [(0.66, 0.8, 90.0), (0.60, 0.5, -45.0), (0.50, 0.3, 180.0)]
+        self._ROWS = rows
+        data = self._table(tmp_path, 1, 't.rco')
+        assert data['sampling_type'] == 'slowness'
+        np.testing.assert_allclose(data['angles_or_slowness'][0],
+                                   [6.6e-4, 6.0e-4, 5.0e-4], rtol=1e-12)
+        assert data['phase'][0][0] == pytest.approx(np.pi / 2, abs=1e-12)

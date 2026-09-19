@@ -161,8 +161,24 @@ def _resolve_cached(call, order, *, axis):
 
 
 def _as_source_tuple(value):
-    """Normalize a ``str``/sequence source spec to a tuple of source names."""
-    return (value,) if isinstance(value, str) else tuple(value)
+    """Normalize a ``str``/sequence source spec to a tuple of lower-case
+    source names: every axis matches names case-insensitively, so
+    ``'GEBCO'`` and ``'gebco'`` select the same backend."""
+    if isinstance(value, str):
+        return (value.lower(),)
+    return tuple(str(v).lower() for v in value)
+
+
+def _lower_source_spec(spec):
+    """Lower-case a ``*_sources`` value in place of its own shape: ``None``
+    stays ``None``, a preset or single name stays a ``str``, a sequence
+    becomes a tuple of names — so the preset checks and the per-axis
+    resolvers downstream all compare against one spelling."""
+    if spec is None:
+        return None
+    if isinstance(spec, str):
+        return spec.lower()
+    return _as_source_tuple(spec)
 
 
 def _require_nonempty_sources(spec, *, axis):
@@ -485,6 +501,11 @@ def fetch_environment(
                        (bottom_sources, 'bottom'),
                        (surface_sources, 'surface')):
         _require_nonempty_sources(_spec, axis=_ax)
+    # Source names and presets are matched lower-case on every axis.
+    ssp_sources = _lower_source_spec(ssp_sources)
+    bathymetry_sources = _lower_source_spec(bathymetry_sources)
+    bottom_sources = _lower_source_spec(bottom_sources)
+    surface_sources = _lower_source_spec(surface_sources)
     check_grain_size_selection(
         bottom_model, bottom_environment or DEFAULT_GRAIN_SIZE_ENVIRONMENT,
         caller='fetch_environment', model_argument='bottom_model',
@@ -1192,7 +1213,7 @@ def _bottom_order(bottom_source):
         return _CACHE_BOTTOM_ORDER, True
     if bottom_source == 'auto':
         return _AUTO_BOTTOM_ORDER, False
-    order = tuple(s.lower() for s in _as_source_tuple(bottom_source))
+    order = _as_source_tuple(bottom_source)
     for name in order:
         if name not in _BOTTOM_BY_ID:
             raise ConfigurationError(

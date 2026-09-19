@@ -68,6 +68,7 @@ from uacpy.core.exceptions import (
     ConfigurationError,
     ExecutableNotFoundError,
     FileFormatError,
+    ModelExecutionError,
     UnsupportedFeatureError,
 )
 from uacpy.io.mpirams_writer import (
@@ -2854,6 +2855,60 @@ class RAM(PropagationModel):
         # 1 m reference radius |p/p0| > 1 is what the field is.
         return np.where(invalid, complex(np.nan, np.nan), psi_raw)
 
+    def _raise_on_collins_stop(self, kind: str, binary, proc_result, *,
+                               dr: float) -> None:
+        """Raise :class:`ModelExecutionError` when a Collins binary reported
+        a stop condition on stdout and exited 0.
+
+        The three Collins codes end their two self-diagnosed failures on a
+        bare Fortran ``stop``, which exits 0: the array-size checks
+        (``ramgeo1.5.f:138-149`` "Need to increase parameter mz/mp/mr to N",
+        the same block in ``rams0.5.f`` and ``ramsurf1.5.f``) fire before
+        the march and leave an empty ``tl.grid``; the Padé root finder
+        (``ramgeo1.5.f:767-771`` "Laguerre method not converging. Try a
+        different combination of DR and NP.") fires per range step and
+        leaves a partial one. Measured: an over-limit Padé order gave
+        rc 0, stdout ``Need to increase parameter mp to 11`` and an empty
+        ``tl.grid``. Both streams are scanned so a build that routes the
+        message to stderr is caught too. ``dr`` is the range step the run
+        marched with (auto-chosen or pinned), so the remedy names the pair
+        the binary saw.
+        """
+        text = "\n".join(t for t in (proc_result.stdout, proc_result.stderr)
+                         if t)
+        quoted = [line.strip() for line in text.splitlines()
+                  if 'Laguerre method not converging' in line
+                  or 'Need to increase parameter' in line
+                  or 'Try a different combination' in line]
+        if not quoted:
+            return
+        if any('Laguerre' in line for line in quoted):
+            remediation = (
+                f"The Padé root finder diverged at this (dr, np_pade) pair; "
+                f"the run marched with dr={float(dr):.6g} m and "
+                f"np_pade={int(self.np_pade)}. Change one of them, e.g. "
+                f"RAM(dr={float(dr):.6g}, np_pade="
+                f"{max(2, int(self.np_pade) - 2)}) or "
+                f"RAM(dr={0.5 * float(dr):.6g}, np_pade={int(self.np_pade)})."
+            )
+        else:
+            remediation = (
+                "The deck exceeds a compiled array bound that "
+                "RAM._check_collins_array_limits sizes from the grid; coarsen "
+                "it with RAM(dz=..., zmax=...) or lower RAM(np_pade=...) "
+                "until the named parameter fits."
+            )
+        exc = ModelExecutionError(
+            f"RAM:{kind}", proc_result.returncode,
+            stdout=proc_result.stdout, stderr=proc_result.stderr)
+        exc.message = (
+            f"RAM:{kind}: {Path(binary).name} stopped on its own diagnosis "
+            f"(a bare Fortran STOP, exit code {proc_result.returncode}):\n  "
+            + "\n  ".join(quoted)
+        )
+        exc.remediation = remediation
+        raise exc
+
     def _run_collins_one_freq(
         self,
         env: Environment,
@@ -3045,6 +3100,10 @@ class RAM(PropagationModel):
                 cwd=fm.work_dir,
                 timeout=self.timeout
             )
+            if proc_result.stdout:
+                self._log(f"{kind} output:\n{proc_result.stdout}",
+                          level='debug')
+            self._raise_on_collins_stop(kind, binary, proc_result, dr=dr)
 
             # A missing or empty tl.grid means the binary died silently; the
             # raised error quotes the subprocess streams (the Collins codes

@@ -254,8 +254,6 @@ from uacpy.core.results import (                             # noqa: E402
     Covariance, Field, _DOCUMENTED_METADATA, _UNIVERSAL_METADATA,
 )
 
-pytestmark_oases = pytest.mark.requires_oases
-
 #: 100 Hz keeps the wavenumber axis short: the chain runs in ~0.1 s where the
 #: 250 Hz deck of the spec's worked example takes ~10 s.
 _CLASS_SRC = uacpy.Source(depths=50.0, frequencies=100.0)
@@ -1398,6 +1396,7 @@ def test_oass_accepts_the_same_spectrum_spellings_as_oassp():
         OASS(correlation_length=10.0, spectrum='von-karman')
 
 
+@pytest.mark.requires_oases  # constructs OASS / OAST (resolves their binaries)
 class TestOassMeanFieldOptionLine:
     """OASS runs a producer for the mean field and consumes only its ``.rhs``,
     but it runs that producer through the producer's own wrapper — which

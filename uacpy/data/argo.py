@@ -5,7 +5,8 @@ pressure throughout the ice-free ocean. Unlike WOA23 (a monthly *climatology*)
 or Copernicus (a *model*), this returns the **nearest actual measured profile**
 to a point and date — queried live from the Ifremer **ERDDAP** ``ArgoFloats``
 table (no auth, CSV). Sound speed is then computed from T, S and pressure with
-the same UNESCO/Del Grosso equation used for the other SSP sources.
+the same ``formula`` as the other SSP sources — TEOS-10 by default; UNESCO,
+Del Grosso or Mackenzie on request.
 
 Coverage is float-dependent: the nearest profile may be tens–hundreds of km and
 days away, so a ``max_distance_km`` / ``max_days`` guard raises when nothing is
@@ -214,7 +215,9 @@ def fetch_ssp_argo(
     """Real in-situ sound-speed profile from the nearest Argo float.
 
     Finds the nearest good-QC Argo T/S profile (:func:`fetch_argo_profile`) and
-    converts it with ``formula`` (``'teos10'`` / ``'unesco'`` / ``'delgrosso'``).
+    converts it with ``formula`` (``'teos10'``, the default, or ``'unesco'``
+    / ``'delgrosso'`` / ``'mackenzie'`` — the same table
+    :func:`uacpy.data.sound_speed.fetch_ssp` reads).
     Raises
     ``DataFetchError`` when no profile is close enough.
     """

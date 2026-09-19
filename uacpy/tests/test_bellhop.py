@@ -3635,3 +3635,64 @@ class TestPairedGridReceiversBelowTheSeafloorAreNoData:
         assert np.isnan(result.data[1]).all()
         np.testing.assert_allclose(result.metadata['receiver_depths'],
                                    [30.0, 120.0])
+
+
+class TestCxxRunTimeWarningsReachTheUser:
+    """bellhopcxx / bellhopcuda report run-time conditions only on stdout
+    (``bellhopcuda/src/util/errors.cpp:26-36, 113-137``): a header ``N
+    warning(s) thrown of the following type(s):`` and one
+    ``BHC_WARN_<NAME>: ...`` line per condition, nothing in the ``.prt``.
+    ``Bellhop._warn_on_engine_stdout_warnings`` re-emits those lines as the
+    same ``UserWarning`` the Fortran ``.prt`` scan raises, so ``n_beams=3``
+    warns on every backend. The block below is the stdout captured from a
+    real ``backend='cxx'`` run of that case."""
+
+    _CAPTURED_CXX_STDOUT = (
+        "setup: 0.624820 ms\n"
+        "Preprocess: 0.140358 ms\n"
+        "1 warning(s) thrown of the following type(s):\n"
+        "BHC_WARN_TOO_FEW_BEAMS: Nalpha is too small; there may be gaps "
+        "between the beams\n"
+        "Run: 0.379620 ms\n"
+        "Postprocess: 0.000781 ms\n"
+        "writeout: 0.052021 ms\n"
+    )
+
+    @staticmethod
+    def _model(backend):
+        from uacpy.core.exceptions import ExecutableNotFoundError
+        try:
+            return Bellhop(backend=backend, n_beams=3, verbose=False)
+        except ExecutableNotFoundError:
+            pytest.skip(f"no {backend} Bellhop binary on this host")
+
+    @pytest.mark.parametrize('backend', ['fortran', 'cxx'])
+    def test_too_few_beams_warns_on_every_backend(self, backend):
+        env = Environment(name='fewbeams', bathymetry=100.0, ssp=1500.0)
+        src = Source(depths=50.0, frequencies=500.0)
+        rcv = Receiver(depths=np.linspace(5.0, 95.0, 10),
+                       ranges=np.linspace(100.0, 3000.0, 30))
+        with pytest.warns(UserWarning,
+                          match=r"Too few beams|BHC_WARN_TOO_FEW_BEAMS"):
+            self._model(backend).run(env, src, rcv)
+
+    def test_the_captured_block_is_re_emitted_verbatim(self):
+        model = Bellhop(verbose=False)
+        with pytest.warns(UserWarning) as record:
+            model._warn_on_engine_stdout_warnings(self._CAPTURED_CXX_STDOUT)
+        messages = [str(w.message) for w in record
+                    if 'BHC_WARN' in str(w.message)]
+        assert len(messages) == 1, messages
+        assert "reported 1 non-fatal warning(s)" in messages[0]
+        assert ("BHC_WARN_TOO_FEW_BEAMS: Nalpha is too small; there may be "
+                "gaps between the beams") in messages[0]
+        # The timing lines around the block are not diagnoses.
+        assert 'Preprocess' not in messages[0]
+
+    def test_a_stdout_without_the_block_warns_nothing(self):
+        model = Bellhop(verbose=False)
+        with warnings.catch_warnings(record=True) as record:
+            warnings.simplefilter('always')
+            model._warn_on_engine_stdout_warnings(
+                "setup: 0.6 ms\nPreprocess: 0.1 ms\nRun: 0.4 ms\n")
+        assert [str(w.message) for w in record] == []

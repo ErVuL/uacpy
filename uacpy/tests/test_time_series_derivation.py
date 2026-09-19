@@ -1108,6 +1108,7 @@ def test_the_auto_derived_grid_says_how_long_a_record_it_bought():
     assert 'output_duration' in text, text
 
 
+@pytest.mark.requires_binary  # runs a model
 def test_auto_derived_timeseries_grid_resolves_the_band():
     """A 20 ms burst gives Delta f = 50 Hz, so a 450-550 Hz band derives only
     3 bins — which the frequency-axis taper then collapses to a CW tone. The

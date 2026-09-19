@@ -8,7 +8,7 @@ FFT, pilot channel estimate, one-tap per-subcarrier equalise with per-symbol
 phase tracking, Viterbi decode, check the CRC.
 
 Uses: comms.OFDMTransmitter/OFDMReceiver.transmit_passband/receive_passband ·
-comms.estimate_doppler_scale · ofdm.schmidl_cox_sync/estimate_channel/
+comms.estimate_doppler_scale · modulate.schmidl_cox_sync/estimate_channel/
 ofdm_demodulate · uacpy.io.write_wav · plot_scatter
 """
 

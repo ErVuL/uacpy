@@ -328,13 +328,13 @@ def test_oast_tl_matches_pekeris_modal_sum():
 
 def test_ram_tl_matches_pekeris_modal_sum():
     """RAM (parabolic equation) absolute TL agrees with the analytic Pekeris
-    modal sum within PE accuracy. The PE under-resolves the steep modes of a
-    shallow 100 m / 50 Hz waveguide, so ~2 dB median is the genuine method
-    error — this validates RAM is physically correct in the ballpark (catches
-    a grossly-wrong field), not a tight match. Measured median ~2.3 dB."""
+    modal sum within PE accuracy on a shallow 100 m / 50 Hz waveguide. The
+    bound is 1.5 dB: measured median 0.55 dB (2026-09-19), and a factor-2
+    power error (3.01 dB in every cell) must fail it. Tighter per-backend
+    level and shape pins live in ``test_benchmarks_ram_level``."""
     src, rcv = _modal_src_rcv()
     d, _ = _modal_abs_dtl(RAM(timeout=180).compute_tl(_pekeris_env(), src, rcv).dB)
-    assert np.median(d) < 3.5, f"median |dTL|={np.median(d):.2f} dB"
+    assert np.median(d) < 1.5, f"median |dTL|={np.median(d):.2f} dB"
 
 
 # Pressure-release (Dirichlet-Dirichlet) waveguide — the flat control for the

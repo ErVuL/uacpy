@@ -35,6 +35,8 @@ is only marginally stable (|G| ≈ 1 for the below-real-line elastic eigenvalues
 Collins & Siegmann §3.3, Milinazzo 1997), and that error compounds across a
 wide sweep plus IFFT. It is robust in NARROWBAND TL — within ~0.1 dB of krakenc
 on the elastic Pekeris — which is its proper regime.
+OASP needs OASES (./install.sh --oases yes); without it the example runs
+the other models and says so.
 
 Uses: RunMode.BROADBAND across six models · RunMode.TIME_SERIES (SPARC native,
 Bellhop delay-and-sum with source_waveform=) · RAM(Q=, T=, backend=) ·
@@ -71,8 +73,7 @@ print(f"  {env.depth:.0f} m Pekeris, source {source.depths[0]:.0f} m, "
       f"{frequencies[0]:.0f}-{frequencies[-1]:.0f} Hz at "
       f"df={frequencies[1] - frequencies[0]:.0f} Hz")
 
-# Six transfer-function models on the shared grid. OASP rebuilds an equispaced
-# grid of its own, so its sweep bounds go on the constructor.
+# Six transfer-function models on the shared grid.
 fields = {
     name: model.run(env, source, receiver,
                     run_mode=uacpy.RunMode.BROADBAND, frequencies=frequencies)
@@ -80,11 +81,19 @@ fields = {
         ('Bellhop', uacpy.Bellhop()),
         ('Scooter', uacpy.Scooter()),
         ('Kraken', uacpy.Kraken()),
-        ('OASP', uacpy.OASP(n_time_samples=512,
-                            freq_max=float(frequencies[-1]),
-                            freq_min=float(frequencies[0]))),
     )
 }
+# OASP rebuilds an equispaced grid of its own, so its sweep bounds go on the
+# constructor. It needs the OASES binaries; without them the comparison runs
+# on the other models.
+try:
+    fields['OASP'] = uacpy.OASP(
+        n_time_samples=512, freq_max=float(frequencies[-1]),
+        freq_min=float(frequencies[0])).run(
+        env, source, receiver, run_mode=uacpy.RunMode.BROADBAND,
+        frequencies=frequencies)
+except uacpy.ExecutableNotFoundError:
+    print("  OASP skipped: OASES executable not found (./install.sh --oases yes)")
 
 # The RAM dispatcher routes by environment: fluid Pekeris + flat surface →
 # mpiramS; the same fluid Pekeris carrying a flat z=0 altimetry line →

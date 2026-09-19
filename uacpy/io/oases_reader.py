@@ -1229,7 +1229,7 @@ def _read_oasp_trf_binary(filepath: Path, receiver_depths: np.ndarray) -> Dict:
 
         # uacpy reads the axisymmetric, single-output-parameter OASP case.
         # The writer nests DO IS=1,ISROW / DO M=1,MSUFT / DO JRH / DO JRV with
-        # NOUT components per record (oasiun23.f:305-311); for isrow>1, msuft>1
+        # NOUT components per record (INTGR3, oasiun23.f:757-773); for isrow>1, msuft>1
         # or nout>1 the (nf, nplots, nrd)/first-component layout below would
         # silently collapse slabs/parameters, so reject those rather than
         # return wrong data.
@@ -1258,7 +1258,7 @@ def _read_oasp_trf_binary(filepath: Path, receiver_depths: np.ndarray) -> Dict:
 
         # The nout == 1 pin above fixes every data record at the same
         # ``[marker][re im][marker]`` frame, and CFFX writes them back to back
-        # over (JRH, JRV) inside the frequency loop (oasiun23.f:305-311), so
+        # over (JRH, JRV) inside the frequency loop (INTGR3, oasiun23.f:757-773), so
         # the whole block reads in one strided pass rather than three
         # ``f.read``/``struct.unpack`` pairs per record. The .rpo replicas
         # at :932 can compare their marker against the constant 8 because
@@ -1350,9 +1350,10 @@ def read_oasr_reflection_coefficients(
         - 'n_frequencies': int, number of frequencies
         - 'sampling_type': str, 'slowness' or 'angle'
         - 'frequencies': list of float, the frequency of each block (Hz)
-        - 'angles_or_slowness': list of ndarray, angle (deg) or slowness (s/km)
+        - 'angles_or_slowness': list of ndarray, grazing angle (**degrees**)
+          for a ``.trc`` or slowness (**s/m**) for a ``.rco``
         - 'magnitude': list of ndarray, reflection coefficient magnitude
-        - 'phase': list of ndarray, reflection coefficient phase (degrees)
+        - 'phase': list of ndarray, reflection coefficient phase (**radians**)
 
     Notes
     -----
@@ -1370,7 +1371,8 @@ def read_oasr_reflection_coefficients(
     (oasjun21.f:27-29), so only its first two tokens are values. The abscissa
     is written as ``slw*1e3`` for the ``.rco`` — slowness in s/km — and as
     ``degang`` for the ``.trc``; the phase is scaled by ``omr`` to degrees in
-    both (oasjun21.f:102-104).
+    both (oasjun21.f:102-104). The reader converts once: slowness to s/m
+    (``/ 1e3``) and phase to radians; the angle column stays in degrees.
 
     Examples
     --------
@@ -1480,9 +1482,14 @@ def read_oasr_reflection_coefficients(
                 phase.append(fortran_float(parts[2]))
 
             frequencies.append(freq)
-            angles_or_slowness_list.append(np.array(angles_or_slowness))
+            # File units are s/km (``slw*1e3``) and degrees (``omr*atan2z``),
+            # oasjun21.f:102-104; the dict carries s/m and radians.
+            abscissa = np.array(angles_or_slowness)
+            if sampling_type == 'slowness':
+                abscissa = abscissa / 1e3
+            angles_or_slowness_list.append(abscissa)
             magnitude_list.append(np.array(magnitude))
-            phase_list.append(np.array(phase))
+            phase_list.append(np.deg2rad(np.array(phase)))
 
     return {
         'freq_min': freq_min,

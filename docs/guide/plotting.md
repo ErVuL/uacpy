@@ -617,10 +617,10 @@ Every one consumes the output of the same-named routine in
 | `plot_cwt(frequencies, W, sample_rate, ax=None, …)` | ✓ | `cwt` — scalogram \|W\| |
 | `plot_wigner_ville(frequencies, times, W, ax=None, …)` | ✓ | `wigner_ville` |
 | `plot_cepstrum(c, ax=None, sample_rate=None, …)` | ✓ | `cepstrum` vs quefrency |
-| `plot_fk(frequencies, wavenumbers, power, ax=None, sound_speed=None, …)` | ✓ | `fk_transform` — f-k power panel, dB |
+| `plot_fk(frequencies, wavenumbers, power, ax=None, scaling=None, wavenumber_unit='rad/m', sound_speed=None, …)` | ✓ | `fk_transform` — f-k panel in dB, labelled from the result's scaling: `plot_fk(result)` draws a density (`normalize=True`) as PSD in Pa²·m/(Hz·rad), or Pa²·m/Hz with `wavenumber_unit='cycles/m'` (axis `ν = k/2π`, panel ×2π), and the raw `|FK|²` as unnormalised power; bare arrays need `scaling='density'` or `'power'`, and a `scaling=` that contradicts the result raises |
 | `plot_taup(slownesses, taus, taup, ax=None, sound_speed=None, …)` | ✓ | `taup_transform` |
 | `plot_radon(moveout, taus, R, ax=None, kind='linear', …)` | ✓ | `radon_transform` |
-| `draw_sound_cone(ax, f_max, k_max, sound_speed, …)` | overlay | the `f = c·k/2π` cone on an f-k axis |
+| `draw_sound_cone(ax, f_max, k_max, sound_speed, wavenumber_unit='rad/m', …)` | overlay | the `f = c·k/2π` cone on an f-k axis (`f = c·ν` over cycles/m) |
 | `draw_slowness_line(ax, tau_max, sound_speed, …)` | overlay | `p = ±1/c` on a τ-p axis |
 | `plot_ambiguity(delays_s, doppler_hz, chi, ax=None, dB=False, dynamic_range=40, …)` | ✓ | `ambiguity_function` — range-Doppler surface; `dB=True` shows it re its peak, where the sidelobes are |
 | `plot_matched_field(x_m, z_m, surface, ax=None, dynamic_range=20, true_position=None, …)` | ✓ | a matched-field ambiguity surface over a replica grid (`Covariance.bartlett` / `.mvdr`). Draws one (z, x) plane: those return `(n_frequencies, n_zr, n_xr, n_yr)`, so index the frequency and y axes yourself when either is longer than 1 |

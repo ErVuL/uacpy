@@ -34,7 +34,7 @@ import numpy as np
 from scipy.optimize import brentq
 
 from uacpy.core.acoustics import (
-    soundspeed_unesco, soundspeed_delgrosso, soundspeed_teos10,
+    soundspeed, soundspeed_unesco, soundspeed_delgrosso, soundspeed_teos10,
 )
 from uacpy.core._carrier_validate import _dedupe_provenance
 from uacpy.core.environment import SoundSpeedProfile
@@ -43,6 +43,7 @@ from uacpy.data._geo import (
     require_month,
     great_circle_km,
     Coordinate, as_coordinate, normalize_lon, depth_to_pressure_dbar,
+    pressure_dbar_to_depth,
     geodesic_waypoints, ring_offsets, run_representative_indices,
     capped_n_points, require_source,
     DEFAULT_MAX_TRANSECT_POINTS, checked_max_points, checked_n_points,
@@ -71,10 +72,26 @@ _GRIDS = {
     '0.25': (720, 1440, '04', -89.875, 0.25),
 }
 
+def _mackenzie_at_pressure(temperature, salinity, pressure_dbar):
+    """Mackenzie (1981) on the ``(T, S, p_dbar)`` signature the table's other
+    entries share. :func:`uacpy.core.acoustics.soundspeed` takes DEPTH in
+    metres as its third argument, so the pressure is inverted through the
+    same Leroy & Parthiot standard ocean the callers converted with, at the
+    45° reference latitude ``extend_ssp_below_data`` defaults to (exact
+    there; a column converted at another latitude comes back within the
+    ±0.26 % of ``k(Z, φ)``, under 15 m at 5500 m)."""
+    depth = pressure_dbar_to_depth(pressure_dbar, _REFERENCE_LATITUDE_DEG)
+    return soundspeed(temperature=temperature, salinity=salinity, depth=depth)
+
+
+#: ``formula`` name -> ``(T °C, S PSU, p dbar) -> c m/s``. Read by the fetchers
+#: and by ``extend_ssp_below_data``, which continues a column under the
+#: formula that built it (``SoundSpeedProfile.formula``).
 _FORMULAS = {
     'unesco': soundspeed_unesco,
     'delgrosso': soundspeed_delgrosso,
     'teos10': soundspeed_teos10,
+    'mackenzie': _mackenzie_at_pressure,
 }
 
 
@@ -104,10 +121,13 @@ def fetch_ssp(
     month : int, optional
         Climatological month ``1``–``12``. ``None`` (and no ``date``) selects
         the annual mean.
-    formula : {'teos10', 'unesco', 'delgrosso'}, optional
+    formula : {'teos10', 'unesco', 'delgrosso', 'mackenzie'}, optional
         Sound-speed equation. Default ``'teos10'``; see
         :func:`uacpy.core.acoustics.soundspeed_teos10` for why UNESCO
         (Chen-Millero 1977 as published) sits 0.6 m/s above it in deep water.
+        ``'mackenzie'`` is :func:`uacpy.core.acoustics.soundspeed`, which
+        takes depth in metres, so the table entry inverts the pressure to
+        depth first (Leroy & Parthiot at the 45° reference latitude).
     resolution : {'1.00', '0.25'}, optional
         WOA grid spacing in degrees. Default ``'1.00'``.
     source : {'opendap', 'local'}, optional

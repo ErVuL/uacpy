@@ -345,6 +345,17 @@ CONVERTED_SITES = [
     # ``<string>`` frame stops the walk; a ``stacklevel`` reappearing here
     # would mean one of those was regenerated.
     ('core/absorption.py', 'BiologicalLayer.__init__', 1),
+    # Same shape again: ``FrancoisGarrison`` writes its ``__init__`` out so the
+    # fitted-envelope notice lands on the user's line from a hand-built model
+    # and from ``data.build_francois_garrison`` alike; the frequency notice
+    # sits under ``Absorption.alpha_dB_per_m``, one package frame up.
+    ('core/absorption.py', 'FrancoisGarrison.__post_init__', 1),
+    ('core/absorption.py', 'FrancoisGarrison._alpha_dB_per_m', 1),
+    # One helper for both seabed carriers (``SedimentLayer`` and
+    # ``BoundaryProperties``, whose ``__init__``s are written out for the same
+    # reason), reached from the user's constructor and from the in-package
+    # factories (``SeabedColumn.collapse``, the CRUST1/GRAW readers) alike.
+    ('core/bottom.py', '_warn_implausible_geoacoustics', 2),
     ('core/acoustics/seawater.py', 'soundspeed', 3),
     ('core/acoustics/seawater.py', 'soundspeed_delgrosso', 3),
     ('core/acoustics/seawater.py', 'soundspeed_teos10', 4),
@@ -403,6 +414,7 @@ CONVERTED_SITES = [
     ('sonar/sonar_equation.py', 'detection_range', 1),
     ('sonar/target_strength.py', '_warn_below_geometric', 1),
     ('visualization/plots/_common.py', '_plot_warn', 1),
+    ('models/bellhop.py', 'Bellhop._warn_on_engine_stdout_warnings', 1),
 ]
 
 

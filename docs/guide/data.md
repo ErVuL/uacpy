@@ -131,7 +131,7 @@ fetched environment with no `bottom_sources=` has a *made-up* seabed.
 | `with_absorption` | `False` | build `FrancoisGarrison` from the site's T/S column (and GLODAP pH) |
 | `max_distance_km` | `None` | distance guard for the **nearest-sample** sources (`argo`, `grainsize`, `mars`); ignored by grids and polygons |
 | `max_days` | `None` | staleness guard for the **time-specific** SSP sources (`argo`, `copernicus`); ignored by climatologies |
-| `formula` | `'teos10'` | sound-speed equation; `'unesco'` (Chen–Millero 1977, ≈ 0.6 m/s high in deep water) and `'delgrosso'` (open-ocean salinity only) also available, see [utilities](utilities.md) |
+| `formula` | `'teos10'` | sound-speed equation; `'unesco'` (Chen–Millero 1977, ≈ 0.6 m/s high in deep water), `'delgrosso'` (open-ocean salinity only) and `'mackenzie'` (the nine-term equation behind `SoundSpeedProfile.from_mackenzie`) also available, see [utilities](utilities.md) |
 | `resolution` | `'1.00'` | WOA23 grid spacing in degrees (`'0.25'` for the fine grid) |
 | `timeout`, `verbose` | `120.0`, `False` | forwarded to the fetchers |
 
@@ -264,9 +264,10 @@ bottom boundary interpolating over a gap it cannot see.
 
 The first three feed `ssp`; the last two supply the **pH** that Francois–Garrison
 absorption needs and WOA23 does not carry. T and S come from WOA23 (or whichever
-SSP source resolved), and sound speed is computed with the UNESCO (Chen–Millero)
-or Del Grosso equation from [`uacpy.core.acoustics`](utilities.md) — the fetchers
-return physics, not a stored `c` field.
+SSP source resolved), and sound speed is computed from them with TEOS-10 by
+default (`formula='unesco'`, `'delgrosso'` or `'mackenzie'` choose another
+equation) from [`uacpy.core.acoustics`](utilities.md) — the fetchers return
+physics, not a stored `c` field.
 
 ```python
 months = [(2, 'February'), (5, 'May'), (8, 'August'), (11, 'November')]

@@ -615,3 +615,59 @@ def test_a_grid_that_is_not_the_published_one_is_refused(tmp_path,
         crust1_local.download_crust1_db(cache_dir=str(dest))
     written = list((dest / 'crust1').glob('crust1.*')) if dest.exists() else []
     assert not written, f"a refused archive still wrote {written}"
+
+
+# ── Land cells ───────────────────────────────────────────────────────────────
+def _crust1_cache_with_cell(tmp_path, monkeypatch, lat, lon, water_base_km):
+    """A fresh CRUST1.0 cache whose cell at ``(lat, lon)`` has its water-layer
+    base at ``water_base_km`` (positive up: +0.54 is 540 m of ground above sea
+    level, 0.0 is a coastline, -0.01 is 10 m of water)."""
+    root = tmp_path / 'land_cache'
+    _write_crust1(root)
+    bnds = root / 'crust1' / 'crust1.bnds'
+    lines = bnds.read_text().splitlines()
+    idx = (89 - int(np.floor(lat))) * 360 + int(np.floor(lon)) + 180
+    top = max(water_base_km, 0.0)
+    lines[idx] = ' '.join('%g' % v for v in
+                          [top, water_base_km, water_base_km,
+                           water_base_km - 1, water_base_km - 1,
+                           water_base_km - 1, -10, -20, -30])
+    bnds.write_text('\n'.join(lines) + '\n')
+    monkeypatch.setenv('UACPY_DATA_CACHE', str(root))
+    _cache.invalidate_grids()
+    crust1_local._MODEL.clear()
+    return root
+
+
+@pytest.mark.parametrize('water_base_km', [0.54, 0.0])
+def test_crust1_refuses_a_cell_with_no_water_layer(
+        tmp_path, monkeypatch, water_base_km):
+    """A land cell (water_depth_m = -540) and a coastline cell (0) both
+    raise, with the bathymetry fetchers' remediation, instead of returning a
+    seabed column for ground that has none."""
+    _crust1_cache_with_cell(tmp_path, monkeypatch, 45.0, 5.0, water_base_km)
+    profile = crust1_local.fetch_crust1_profile((45.0, 5.0))
+    assert profile['water_depth_m'] == pytest.approx(-water_base_km * 1000.0)
+    with pytest.raises(DataFetchError, match='no water layer') as info:
+        crust1_local.fetch_bottom_crust1((45.0, 5.0))
+    assert 'offshore point' in info.value.remediation
+    assert 'supply a bottom directly' in info.value.remediation
+
+
+def test_crust1_builds_the_shallowest_wet_cell(tmp_path, monkeypatch):
+    """10 m of water is the other side of the guard: the column builds."""
+    _crust1_cache_with_cell(tmp_path, monkeypatch, 45.0, 5.0, -0.01)
+    b = crust1_local.fetch_bottom_crust1((45.0, 5.0), use_globsed=False)
+    assert b.total_thickness() == pytest.approx(1000.0)
+
+
+def test_crust1_transect_refuses_a_land_waypoint(tmp_path, monkeypatch):
+    _crust1_cache_with_cell(tmp_path, monkeypatch, 45.0, 5.0, 0.54)
+    with pytest.raises(DataFetchError, match=r'45\.\d+, 5\.\d+'):
+        crust1_local.fetch_bottom_crust1_transect(
+            (44.5, 4.5), (45.5, 5.5), n_points=3, use_globsed=False)
+    # The same transect over water builds every waypoint.
+    _crust1_cache_with_cell(tmp_path / 'wet', monkeypatch, 45.0, 5.0, -4.0)
+    rdl = crust1_local.fetch_bottom_crust1_transect(
+        (44.5, 4.5), (45.5, 5.5), n_points=3, use_globsed=False)
+    assert len(rdl.ranges) == 3

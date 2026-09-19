@@ -718,6 +718,16 @@ Your `env` is never mutated — the model works on a copy.
 | `surface` | top properties vary with range | `r0`, `rmax`, `mean`, `median` | `r0` |
 | `elastic` | any shear present | `fluid`, `vacuum` | `fluid` |
 
+`bottom_layers='volume_average'` is a thickness-weighted **arithmetic** mean of
+`c`, `ρ` and dB/λ (and the shear pair) over the finite layers *and* the
+half-space, which is weighted by the deepest layer's thickness because it has
+none of its own. It is a bookkeeping number with no acoustic basis: 1 m of
+1500 m/s, 1.4 g/cm³ mud over a 5250 m/s, 2.7 g/cm³ basalt half-space collapses
+to 3375 m/s, where Wood's rule (averaging ρ and the compliance 1/ρc² over the
+same two metres) would give about 1720 m/s. When the top layer is what the
+field sees, use `'top_layer'`; when the stack matters, use a model that keeps
+it (`supports_feature('layered_bottom')`).
+
 Set them on the constructor:
 
 ```python

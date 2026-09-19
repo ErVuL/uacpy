@@ -310,6 +310,13 @@ rm -rf data_cache  # Optional
 ./install.sh       # Optional (Required for v0.3.x -> v0.4.x) 
 ```
 
+Upgrading to v0.5.0 from v0.4.x: run `git submodule update --init` and
+`./install.sh` again (the C++ Bellhop submodule pin moved and the installer
+now writes a relocatable submodule link). Two calls change meaning: every
+per-arrival `'phase'` (and `Arrivals.phases`) is in **radians**, and
+`plot_fk` with bare arrays needs `scaling='density'` or `'power'` (pass the
+`FKResult` itself to skip it).
+
 ### Uninstall
 
 ```bash
@@ -346,7 +353,8 @@ localization. Run them **by script path** (the form
 python uacpy/examples/example_01_basic_shallow_water.py
 ```
 
-The module form, `python -m uacpy.examples.example_01_…`, works too. See the
+The module form, `python -m uacpy.examples.example_01_…`, works too (from a
+source checkout; the examples are not part of the wheel). See the
 [examples index](./DOCUMENTATION.md#17-examples-index) for a description
 of each one.
 
@@ -386,7 +394,8 @@ Tests use custom markers to allow selective execution:
 - `requires_network` -- Tests that hit a live external service (the `uacpy.data`
   fetchers); **deselected by default** by `addopts` in `pyproject.toml`
 - `benchmark` -- Tests that validate model output against a closed-form
-  analytic or canonical published reference
+  analytic solution, a canonical published reference, or an independent
+  reference solution
 - `convention` -- Tests that pin repo conventions rather than runtime
   behaviour (docstring prose, source-convention sweeps, repr snapshots);
   a failure signals doc/convention drift, not a runtime defect
@@ -410,12 +419,17 @@ pytest uacpy/tests/ -m requires_network
 
 ```
 
-The composed dev tier `-m "not requires_binary and not slow"` selects
-3,941 of the suite's 5,339 test functions (≥5,280 collected cases; static
-AST count as of 2026-08-29, counting `requires_oases` tests as
-`requires_binary` — the conftest attaches that marker automatically). It
-is the fast development loop; the full suite (default `pytest` invocation)
-must still pass before a change lands.
+The composed dev tier `-m "not requires_binary and not slow"` is the fast
+development loop (the conftest attaches `requires_binary` to every
+`requires_oases` test automatically). The count it selects moves with every
+change; ask pytest rather than this page:
+
+``` bash
+pytest uacpy/tests/ -m "not requires_binary and not slow" --collect-only -q | tail -1
+```
+
+The full suite (default `pytest` invocation) must still pass before a change
+lands.
 
 ## 🗺️ Roadmap
 

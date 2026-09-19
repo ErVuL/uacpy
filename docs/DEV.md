@@ -309,13 +309,19 @@ refl_io.py                          .brc / .trc / .irc reflection-
                                     coefficient files
 bathy_io.py                         .bty / .ati bathymetry / altimetry
 file_manager.py                     FileManager — see §6.1
-units.py                            km_to_m, m_to_km, deg_to_rad
-                                    (USE THESE at file boundaries)
+audio_io.py                         write_wav / read_wav /
+                                    read_wav_metadata — WAV export and
+                                    import of signals (pcm16/24/32,
+                                    float32/64, INFO metadata)
 _fortran_helpers.py                 detect_endian, read_fortran_record,
                                     read_vector — Fortran unformatted
                                     direct-access helpers
 input_checks.py                     what a reader/writer checks first
 ```
+
+Unit conversion helpers (`km_to_m`, `m_to_km`, `deg_to_rad`) live in
+`core/units.py`, not under `io/`; every reader and writer imports them
+from there at its file boundary.
 
 ### 4.2 Rules for I/O code
 
@@ -688,15 +694,23 @@ Markers (registered in `pyproject.toml`):
 - `requires_oases` — needs OASES binaries (separate install).
 - `requires_network` — hits a live external service (`uacpy.data`
   fetchers); deselected by default via `addopts`.
-- `benchmark` — validates output against a closed-form analytic or
-  canonical published reference.
+- `benchmark` — validates output against a closed-form analytic solution,
+  a canonical published reference, or an independent reference solution
+  (another engine only when the test says so).
 - `convention` — pins repo conventions rather than runtime behaviour
   (docstring prose, source-convention sweeps, repr snapshots); a failure
   signals doc/convention drift, not a runtime defect.
 
 The composed dev tier `-m "not requires_binary and not slow"` is the fast
-pure-Python loop: 3,941 of 5,339 test functions, ≥5,280 collected cases
-(static AST count as of 2026-08-29; `requires_oases` tests count as
+pure-Python loop. The count moves every round, so it is not quoted here;
+the collected-case total comes from
+
+```bash
+uacpy_venv/bin/python -m pytest uacpy/tests --collect-only -q -n 0 | tail -1
+```
+
+and adding `-m "not requires_binary and not slow"` to that command gives
+the tier's share (`requires_oases` tests count as
 `requires_binary` because `conftest.pytest_collection_modifyitems`
 auto-attaches that marker, which is also what makes the conjunction
 exclude OASES tests). It is a development loop, not a gate: the full
@@ -775,6 +789,12 @@ UACPY vendors:
   (`ErVuL/bellhopcuda`): upstream `v1.5` plus the Francois-Garrison fix,
   offered upstream as a pull request. `install.sh` pins the SHA
   (`BELLHOPCUDA_COMMIT_SHA`); bump it and the submodule pointer together.
+  The SHA in `install.sh` is the pin and the gitlink follows it:
+  `test_packaging.py` compares the two (`git ls-tree HEAD` against the
+  parsed SHA) and fails until they agree. To move the gitlink onto a new
+  pin: `git -C uacpy/third_party/bellhopcuda fetch origin && git -C
+  uacpy/third_party/bellhopcuda checkout <sha> && git add
+  uacpy/third_party/bellhopcuda`.
 - `arlpy/` — partial vendor of arlpy.uwa (BSD-3-Clause). See
   `third_party/arlpy/NOTICE` for the list of adapted functions.
 

@@ -6,7 +6,7 @@ bottom properties, and their range-dependent variants. Re-exported from
 import warnings
 import copy as _copy
 import numpy as np
-from typing import TYPE_CHECKING, Any, List, Tuple, Optional, Dict
+from typing import Any, List, Tuple, Optional, Dict
 from dataclasses import dataclass
 
 from uacpy.core.exceptions import ConfigurationError
@@ -131,7 +131,46 @@ def _delegate_write(owner: str, nodes, name, value, *, layered=False,
     for node in nodes:
         setattr(node, name, value)
 
-@dataclass
+
+# g/cm³ above which a density reads as kg/m³: no sediment or rock reaches it
+# (Hamilton's tables top out below 3), and the smallest kg/m³ value a user
+# could plausibly type (fresh water, 1000) is fifty times over it.
+_DENSITY_UNITS_SUSPECT_G_CM3 = 20.0
+
+
+def _warn_implausible_geoacoustics(owner: str, density: float,
+                                   sound_speed: float, shear_speed: float):
+    """``UserWarning`` for a value the constructor accepts but no seabed has.
+
+    Two checks, each a plausibility bound rather than a validity rule, so
+    they warn and never raise: a density over
+    :data:`_DENSITY_UNITS_SUSPECT_G_CM3` (the number was typed in kg/m³), and
+    a shear speed above the compressional speed (no real solid: Poisson's
+    ratio bounds ``c_s < c_p / sqrt(2)``).
+
+    Reached from both carriers' ``__post_init__`` two frames below the user's
+    constructor call, which is why both write their ``__init__`` out: every
+    frame between here and the caller is then an ordinary ``bottom.py`` frame
+    that :data:`USER_FRAME_SKIP` steps over, from a direct ``SedimentLayer(…)``
+    and from the in-package factories (``Bottom.range_dependent``, the CRUST1
+    and GRAW readers, ``SeabedColumn.collapse``) alike."""
+    if density > _DENSITY_UNITS_SUSPECT_G_CM3:
+        warnings.warn(
+            f"{owner}: density={density:g} looks like kg/m³; uacpy takes "
+            f"g/cm³ ({density / 1000.0:g}). Every deck writes the value as "
+            f"given, so a seabed this dense reflects like a rigid wall.",
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
+    if shear_speed > sound_speed:
+        warnings.warn(
+            f"{owner}: shear_speed={shear_speed:g} m/s exceeds "
+            f"sound_speed={sound_speed:g} m/s. No real solid has a shear "
+            f"speed above its compressional speed (Poisson's ratio bounds "
+            f"c_s < c_p/sqrt(2) = {sound_speed / np.sqrt(2.0):g} m/s); check "
+            f"whether the two were swapped.",
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
+
+
+@dataclass(init=False)
 class SedimentLayer(_DeepCopyMixin):
     """
     Single sediment layer in a layered bottom structure.
@@ -154,6 +193,17 @@ class SedimentLayer(_DeepCopyMixin):
         RMS roughness (m) of the interface at the *top* of this layer, so the
         first layer's value is the seafloor. Default 0.0 (smooth).
 
+    Notes
+    -----
+    A density above 20 g/cm³ (a kg/m³ value typed into a g/cm³ field) and a
+    shear speed above the compressional speed each raise a ``UserWarning``
+    at construction; both are accepted, since neither breaks a deck. The
+    ``__init__`` is written out (``init=False``) rather than generated so
+    those warnings name the caller's line: a generated ``__init__`` lives in
+    the pseudo-file ``<string>``, which the attribution walk cannot step
+    over. ``@dataclass`` still supplies ``__eq__`` / ``fields()`` from the
+    annotations; a test pins the signature against them.
+
     Examples
     --------
     >>> sand = SedimentLayer(thickness=10, sound_speed=1650, density=1.9, attenuation=0.8)
@@ -167,6 +217,20 @@ class SedimentLayer(_DeepCopyMixin):
     shear_attenuation: float = 0.0
     roughness: float = 0.0
     name: Optional[str] = None
+
+    def __init__(self, thickness: float, sound_speed: float, density: float,
+                 attenuation: float = 0.5, shear_speed: float = 0.0,
+                 shear_attenuation: float = 0.0, roughness: float = 0.0,
+                 name: Optional[str] = None) -> None:
+        self.thickness = thickness
+        self.sound_speed = sound_speed
+        self.density = density
+        self.attenuation = attenuation
+        self.shear_speed = shear_speed
+        self.shear_attenuation = shear_attenuation
+        self.roughness = roughness
+        self.name = name
+        self.__post_init__()
 
     def __post_init__(self):
         # float()-coerce before validating, as BoundaryProperties does: the
@@ -185,6 +249,8 @@ class SedimentLayer(_DeepCopyMixin):
             self.attenuation, "SedimentLayer attenuation")
         _require_attenuation_in_range(
             self.shear_attenuation, "SedimentLayer shear_attenuation")
+        _warn_implausible_geoacoustics(
+            "SedimentLayer", self.density, self.sound_speed, self.shear_speed)
 
     def __repr__(self) -> str:
         tag = f"{self.name!r}, " if self.name else ""
@@ -235,7 +301,7 @@ class SedimentLayer(_DeepCopyMixin):
 _TYPE_NOT_GIVEN: Any = None
 
 
-@dataclass
+@dataclass(init=False)
 class BoundaryProperties(_DeepCopyMixin):
     """
     Properties of ocean boundaries (surface or bottom).
@@ -287,6 +353,14 @@ class BoundaryProperties(_DeepCopyMixin):
         consuming model (e.g. ``Kraken(c_low=…, c_high=…)``), not by this
         object.
 
+    Notes
+    -----
+    On a half-space, a density above 20 g/cm³ (a kg/m³ value typed into a
+    g/cm³ field) and a shear speed above the compressional speed each raise
+    a ``UserWarning`` at construction; both are accepted, since neither
+    breaks a deck. The ``__init__`` is written out so those warnings name
+    the caller's line (see the comment above it).
+
     Examples
     --------
     Using pre-computed reflection coefficients from BOUNCE:
@@ -322,30 +396,45 @@ class BoundaryProperties(_DeepCopyMixin):
     name: Optional[str] = None
     data_sources: tuple = ()
 
-    if TYPE_CHECKING:
-        # The two roles of a dataclass field annotation, separated for
-        # ``acoustic_type``: the attribute holds the resolved boundary type
-        # ``__post_init__`` always assigns, while the constructor keeps taking
-        # ``None`` to mean "infer it". Declaring both through the field
-        # annotation alone gives ``Optional[str]`` to every attribute read —
-        # including ``Bottom.acoustic_type``, whose ``-> str`` is then read as
-        # a wrong annotation rather than as the total function it is. Never
-        # executed, so the decorator compiles the runtime ``__init__`` from
-        # the fields exactly as before.
-        def __init__(
-            self,
-            acoustic_type: Optional[str] = None,
-            density: Optional[float] = None,
-            sound_speed: Optional[float] = None,
-            attenuation: Optional[float] = None,
-            roughness: Optional[float] = None,
-            shear_speed: Optional[float] = None,
-            shear_attenuation: Optional[float] = None,
-            grain_size_phi: Optional[float] = None,
-            reflection_file: Optional[str] = None,
-            name: Optional[str] = None,
-            data_sources: tuple = (),
-        ) -> None: ...
+    # Written out rather than generated (``init=False``), for two reasons.
+    # The two roles of a dataclass field annotation are separated for
+    # ``acoustic_type``: the attribute holds the resolved boundary type
+    # ``__post_init__`` always assigns, while the constructor keeps taking
+    # ``None`` to mean "infer it" — declaring both through the field
+    # annotation alone gives ``Optional[str]`` to every attribute read,
+    # including ``Bottom.acoustic_type``, whose ``-> str`` is then read as a
+    # wrong annotation rather than as the total function it is. And the
+    # plausibility warnings ``__post_init__`` raises have to name the
+    # caller's line: a generated ``__init__`` lives in the pseudo-file
+    # ``<string>``, which the attribution walk cannot step over, whereas an
+    # ordinary ``bottom.py`` frame is skipped like any other. The parameter
+    # list mirrors the fields above in order; a test pins the two together.
+    def __init__(
+        self,
+        acoustic_type: Optional[str] = None,
+        density: Optional[float] = None,
+        sound_speed: Optional[float] = None,
+        attenuation: Optional[float] = None,
+        roughness: Optional[float] = None,
+        shear_speed: Optional[float] = None,
+        shear_attenuation: Optional[float] = None,
+        grain_size_phi: Optional[float] = None,
+        reflection_file: Optional[str] = None,
+        name: Optional[str] = None,
+        data_sources: tuple = (),
+    ) -> None:
+        self.acoustic_type = acoustic_type
+        self.density = density
+        self.sound_speed = sound_speed
+        self.attenuation = attenuation
+        self.roughness = roughness
+        self.shear_speed = shear_speed
+        self.shear_attenuation = shear_attenuation
+        self.grain_size_phi = grain_size_phi
+        self.reflection_file = reflection_file
+        self.name = name
+        self.data_sources = data_sources
+        self.__post_init__()
 
     # Resolved values for acoustic parameters left unset. The dataclass
     # defaults are ``None`` sentinels so "explicitly passed" is detectable:
@@ -462,6 +551,14 @@ class BoundaryProperties(_DeepCopyMixin):
                     f"parameters."
                 )
 
+        # Plausibility, after every rule that raises: a value no seabed has
+        # but every deck accepts. Only a half-space carries the numbers it
+        # is about; the parameter-free and file types hold the defaults.
+        if self.acoustic_type == 'half-space':
+            _warn_implausible_geoacoustics(
+                "BoundaryProperties", self.density, self.sound_speed,
+                self.shear_speed)
+
     def __repr__(self) -> str:
         if self.acoustic_type in _PARAMETER_FREE_TYPES:
             bits = [self.acoustic_type]
@@ -564,17 +661,6 @@ class BoundaryProperties(_DeepCopyMixin):
             kwargs['grain_size_phi'] = m['grain_size_phi']
         kwargs.update(overrides)
         return cls(**kwargs)
-
-# The dataclass compiles ``__init__`` from the *field* annotations, so
-# ``inspect.signature`` / ``help()`` would advertise a default the annotation
-# refuses (``acoustic_type: str = None``). Restate the input types on the
-# generated ``__init__`` so the runtime signature says what the block above
-# and the Parameters section say. Annotations only: no default, no field and
-# no behaviour changes, and the class annotations — which are what an
-# attribute read is checked against — are untouched.
-BoundaryProperties.__init__.__annotations__.update(
-    acoustic_type=Optional[str],
-)
 
 
 _COLUMN_COLLAPSE_METHODS = ('halfspace', 'top_layer', 'volume_average')
@@ -862,13 +948,21 @@ class SeabedColumn(_DeepCopyMixin):
 
         ``'halfspace'`` → the deep half-space; ``'top_layer'`` → topmost
         layer's properties (half-space when there are no layers);
-        ``'volume_average'`` → thickness-weighted mean over the finite layers
-        **and the half-space**, the half-space carrying the deepest layer's
-        thickness as its weight (it has none of its own). A thin layer over a
-        fast basement therefore lands between the two, not on the layer: 1 m of
-        1500 m/s mud over a 5250 m/s half-space collapses to 3375 m/s. Reach
-        for ``'top_layer'`` when the layer is what matters acoustically.
-        Half-space alone when there are no layers.
+        ``'volume_average'`` → thickness-weighted **arithmetic** mean of
+        ``sound_speed``, ``density``, ``attenuation``, ``shear_speed`` and
+        ``shear_attenuation`` (m/s, g/cm³, dB/λ, averaged as plain numbers)
+        over the finite layers **and the half-space**, the half-space carrying
+        the deepest layer's thickness as its weight (it has none of its own).
+        It is a bookkeeping quantity with no acoustic basis: no effective-
+        medium theory averages wave speeds linearly, and the half-space has no
+        thickness to weight. Wood's rule — averaging ρ and the compliance
+        1/(ρc²) over the same two metres — gives about 1720 m/s for 1 m of
+        1500 m/s, 1.4 g/cm³ mud over a 5250 m/s, 2.7 g/cm³ basalt half-space,
+        where this method returns 3375 m/s and 2.05 g/cm³: a thin layer over a
+        fast basement lands between the two, not on the layer. Reach for
+        ``'top_layer'`` when the layer is what the field sees, or a model that
+        keeps the stack (``supports_feature('layered_bottom')``). Half-space
+        alone when there are no layers.
 
         The half-space is the template for the non-blendable fields, so a
         ``'vacuum'`` / ``'rigid'`` column collapses back to that parameter-free

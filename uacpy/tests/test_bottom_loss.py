@@ -11,6 +11,11 @@ import pytest
 from uacpy.core.acoustics import boundaries
 from uacpy.core.acoustics import (
     bottom_loss_curve, density, reflection_coeff, soundspeed)
+from uacpy.core.constants import DEFAULT_WATER_DENSITY_G_CM3
+
+# The water density every deck writes (1.027 g/cm³), which is also the
+# wrapper's default; the closed forms below are evaluated against it.
+_RHO_W = DEFAULT_WATER_DENSITY_G_CM3
 
 _THIS_FILE = Path(__file__).resolve()
 
@@ -65,18 +70,19 @@ class TestBottomLossCurve:
 
 class TestPresetBottomLossAnchors:
     """docs/models/bounce.md §"Reading the catalogue" anchors, reproduced by
-    the Rayleigh closed form (no binary): sand 0.7 dB per bounce at 10°
-    grazing and 2.0 dB by 24° (just under its critical angle
-    arccos(1500/1650) = 24.6°); clay — c_p equal to the water speed — has no
-    critical angle and |R| = (ρ₂−ρ₁)/(ρ₂+ρ₁) = 0.2 from the density
-    contrast alone (13.98 dB), 13.9 dB at 10°."""
+    the Rayleigh closed form (no binary) against the 1.027 g/cm³ water every
+    deck writes: sand 0.7 dB per bounce at 10° grazing and 2.1 dB by 24°
+    (just under its critical angle arccos(1500/1650) = 24.6°); clay — c_p
+    equal to the water speed — has no critical angle and
+    |R| = (ρ₂−ρ_w)/(ρ₂+ρ_w) = 0.187 from the density contrast alone
+    (14.55 dB), 14.4 dB at 10°."""
 
     def test_sand_per_bounce_losses_at_10_and_24_degrees(self):
         _, loss = bottom_loss_curve('sand',
                                     grazing_angles_deg=np.array([10.0, 24.0]))
-        # Computed 0.719 / 2.042 dB; the doc rounds to 0.7 / 2.0.
+        # Computed 0.716 / 2.095 dB; the doc rounds to 0.7 / 2.1.
         assert loss[0] == pytest.approx(0.72, abs=0.02)
-        assert loss[1] == pytest.approx(2.04, abs=0.02)
+        assert loss[1] == pytest.approx(2.09, abs=0.02)
 
     def test_sand_critical_grazing_angle_is_arccos_c1_over_c2(self):
         crit = np.degrees(np.arccos(1500.0 / 1650.0))
@@ -92,41 +98,71 @@ class TestPresetBottomLossAnchors:
     def test_clay_reflects_the_bare_density_contrast(self):
         # clay c_p = 1500 m/s = water speed exactly (COA Table 1.3 ratio
         # 1.00), so the angle dependence drops out and
-        # |R| = (1.5-1.0)/(1.5+1.0) = 0.2 -> 13.98 dB — flat at every angle
-        # steeper than a few degrees (attenuation perturbs the 4th digit).
+        # |R| = (1.5-1.027)/(1.5+1.027) = 0.187 -> 14.55 dB — flat at every
+        # angle steeper than a few degrees (attenuation perturbs the 3rd
+        # digit: 14.43 dB at 10°).
         ang, loss = bottom_loss_curve('clay')
         steep = ang >= 10.0
         R = 10.0 ** (-loss[steep] / 20.0)
-        np.testing.assert_allclose(R, 0.2, atol=3e-3)
-        assert loss[np.argmin(np.abs(ang - 10.0))] == pytest.approx(13.9,
+        R_closed = (1.5 - _RHO_W) / (1.5 + _RHO_W)
+        assert R_closed == pytest.approx(0.1872, abs=1e-4)
+        np.testing.assert_allclose(R, R_closed, atol=3e-3)
+        assert loss[np.argmin(np.abs(ang - 10.0))] == pytest.approx(14.4,
                                                                     abs=0.1)
+
+    def test_textbook_water_density_reproduces_the_rho_w_equals_one_anchor(self):
+        # The docstring's remedy for a rho_w = 1 benchmark, typed back: with
+        # water_density=1.0 clay is the textbook (1.5-1)/(1.5+1) = 0.2
+        # (13.98 dB) and sand at 24° is 2.04 dB, not the 2.09 dB the deck
+        # water gives.
+        ang, loss = bottom_loss_curve('clay', water_density=1.0)
+        R = 10.0 ** (-loss[ang >= 10.0] / 20.0)
+        np.testing.assert_allclose(R, 0.2, atol=3e-3)
+        _, sand = bottom_loss_curve('sand', grazing_angles_deg=np.array([24.0]),
+                                    water_density=1.0)
+        assert sand[0] == pytest.approx(2.04, abs=0.02)
 
 
 class TestSlowBottomIntromission:
     """A seabed slower than the water (docs/guide/utilities.md,
     docs/models/bounce.md): no critical angle, but an intromission angle
     where the impedances match and |R| → 0. Soft mud at 1450 m/s and
-    1.4 g/cm³ puts it at grazing 15.7° — sin²θ_inc = (m²−n²)/(m²−1)
-    (COA eq. 1.60; their c₂=1300/ρ₂=1.8 example gives 22.6°, reproduced by
-    the same closed form)."""
+    1.4 g/cm³ over 1.027 g/cm³ water puts it at grazing 16.6° —
+    sin²θ_inc = (m²−n²)/(m²−1) with m = ρ₂/ρ_w (COA eq. 1.60; their
+    c₂=1300/ρ₂=1.8 example over ρ_w = 1 gives 22.6°, reproduced by the same
+    closed form with ``water_density=1.0``)."""
 
     MUD = dict(sound_speed=1450.0, density=1.4, attenuation=0.0)
 
-    def test_loss_peaks_at_the_closed_form_intromission_angle(self):
-        m2 = 1.4 ** 2
+    @staticmethod
+    def _closed_form_intromission_grazing(rho_w):
+        m2 = (1.4 / rho_w) ** 2
         n2 = (1500.0 / 1450.0) ** 2
         theta_inc = np.degrees(np.arcsin(np.sqrt((m2 - n2) / (m2 - 1.0))))
-        grazing_intro = 90.0 - theta_inc
-        assert grazing_intro == pytest.approx(15.68, abs=0.01)  # doc's 15.7°
+        return 90.0 - theta_inc
+
+    def test_loss_peaks_at_the_closed_form_intromission_angle(self):
+        grazing_intro = self._closed_form_intromission_grazing(_RHO_W)
+        assert grazing_intro == pytest.approx(16.61, abs=0.01)  # doc's 16.6°
         g = np.linspace(10.0, 20.0, 2001)
         _, loss = bottom_loss_curve(self.MUD, grazing_angles_deg=g)
         assert g[np.argmax(loss)] == pytest.approx(grazing_intro, abs=0.02)
 
+    def test_textbook_water_density_moves_the_dip_to_the_coa_angle(self):
+        # The rho_w = 1 remedy typed back: COA's own convention puts the same
+        # mud's intromission at 15.7°, and the wrapper reproduces it.
+        grazing_intro = self._closed_form_intromission_grazing(1.0)
+        assert grazing_intro == pytest.approx(15.68, abs=0.01)
+        g = np.linspace(10.0, 20.0, 2001)
+        _, loss = bottom_loss_curve(self.MUD, grazing_angles_deg=g,
+                                    water_density=1.0)
+        assert g[np.argmax(loss)] == pytest.approx(grazing_intro, abs=0.02)
+
     def test_reflection_vanishes_at_intromission(self):
-        # |R| at the sampled dip is < 1e-3 (the doc quotes ≈ 0.0007; the
-        # lossless closed form goes to 0 at the exact angle, and 2.5e-4 at
-        # the rounded 15.7°, so the sub-1e-3 bound is the robust pin).
-        g = np.linspace(15.0, 16.5, 2001)
+        # |R| at the sampled dip is < 1e-3 (the lossless closed form goes to
+        # 0 at the exact angle, 16.61°, so the sub-1e-3 bound is the robust
+        # pin on a grid that need not land on it).
+        g = np.linspace(16.0, 17.5, 2001)
         _, loss = bottom_loss_curve(self.MUD, grazing_angles_deg=g)
         assert 10.0 ** (-loss.max() / 20.0) < 1e-3
         # The curve PEAKS there rather than saturating: both window edges
@@ -137,9 +173,9 @@ class TestSlowBottomIntromission:
         # For the lossless slow bottom R is real and changes sign at the
         # intromission angle (COA Fig. 2.12 shows the same 180° step).
         R_below = reflection_coeff(np.deg2rad(90.0 - 12.0), rho1=1400.0,
-                                   c1=1450.0, rho=1000.0, c=1500.0)
+                                   c1=1450.0, rho=1000.0 * _RHO_W, c=1500.0)
         R_above = reflection_coeff(np.deg2rad(90.0 - 20.0), rho1=1400.0,
-                                   c1=1450.0, rho=1000.0, c=1500.0)
+                                   c1=1450.0, rho=1000.0 * _RHO_W, c=1500.0)
         assert np.real(R_below) * np.real(R_above) < 0.0
 
 
@@ -157,7 +193,7 @@ class TestReflectionCoeffCrossCheck:
         alpha = 0.8 * np.log(10.0) / (40.0 * np.pi)
         R = reflection_coeff(np.pi / 2.0 - np.deg2rad(g),
                              rho1=1900.0, c1=1650.0, alpha=alpha,
-                             rho=1000.0, c=1500.0)
+                             rho=1000.0 * _RHO_W, c=1500.0)
         np.testing.assert_allclose(loss, -20.0 * np.log10(np.abs(R)),
                                    atol=1e-10)
 
@@ -165,8 +201,9 @@ class TestReflectionCoeffCrossCheck:
 class TestDefaultWaterColumnIsAnnounced:
     """``reflection_coeff`` called without ``c`` runs against a different
     water column than ``bottom_loss_curve`` does — Mackenzie at its own
-    defaults (27 °C / S = 35 / 10 m, 1539.087 m/s) rather than the pinned
-    1500.0 m/s — and the seabed's reflection loss moves by roughly 4 dB near
+    defaults (27 °C / S = 35 / 10 m, 1539.087 m/s, 1022.72 kg/m³) rather
+    than the pinned 1500.0 m/s and 1027 kg/m³ — and the seabed's reflection
+    loss moves by roughly 4 dB near
     the critical angle between the two. The value is not being changed here,
     because every external caller that omitted ``c`` would silently move with
     it; what is pinned is that the fallback announces itself and names the
@@ -201,7 +238,7 @@ class TestDefaultWaterColumnIsAnnounced:
         assert 'soundspeed()' in message
         # The number itself, not just the fact of a fallback: 1539.087 m/s is
         # what a reader has to be able to compare against the 1500.0 m/s the
-        # wrapper pins, and 1022.72 kg/m³ against its 1000 kg/m³.
+        # wrapper pins, and 1022.72 kg/m³ against its 1027 kg/m³.
         assert f"{soundspeed():.3f}" in message
         assert f"{density():.2f}" in message
 
@@ -222,7 +259,7 @@ class TestDefaultWaterColumnIsAnnounced:
 
     def test_supplying_only_c_is_silent(self):
         """The notice is keyed to ``c``, the half worth ~4 dB; ``rho`` alone
-        falling back is a units convention worth a few tenths."""
+        falling back (1022.72 against 1027 kg/m³) is worth under 0.05 dB."""
         record = self._record(
             lambda: reflection_coeff(np.pi / 4.0, 1800.0, 1700.0, c=1500.0))
         assert [str(w.message) for w in record] == []
@@ -333,7 +370,7 @@ class TestShearLossMagnitude:
     def _extra_loss(self, name):
         from uacpy.core.materials import get_material
         m = get_material(name)
-        R = _fluid_solid_R(self.G, 1500.0, 1.0, m['sound_speed'],
+        R = _fluid_solid_R(self.G, 1500.0, _RHO_W, m['sound_speed'],
                            m['shear_speed'], m['density'],
                            ap_dbl=m['attenuation'],
                            as_dbl=m['shear_attenuation'])
@@ -343,7 +380,7 @@ class TestShearLossMagnitude:
     def test_reference_reduces_to_the_fluid_curve_without_shear(self):
         # The elastic reference with c_s = 0 IS the package's Rayleigh
         # curve — validates the test-local closed form against the code.
-        R = _fluid_solid_R(self.G, 1500.0, 1.0, 1650.0, 0.0, 1.9,
+        R = _fluid_solid_R(self.G, 1500.0, _RHO_W, 1650.0, 0.0, 1.9,
                            ap_dbl=0.8)
         _, fluid = bottom_loss_curve('sand', grazing_angles_deg=self.G)
         np.testing.assert_allclose(-20.0 * np.log10(np.abs(R)), fluid,
@@ -355,13 +392,13 @@ class TestShearLossMagnitude:
 
     def test_chalk_and_limestone_lose_an_extra_11_to_16_dB(self):
         band = (self.G >= 20.0) & (self.G <= 30.0)
-        # Computed peaks: chalk 16.2 dB, limestone 11.4 dB in the band —
+        # Computed peaks: chalk 15.7 dB, limestone 11.7 dB in the band —
         # the doc's "extra 11–16 dB near 20–30°". abs=0.5 covers the 1°
         # grid.
         assert np.max(self._extra_loss('chalk')[band]) == pytest.approx(
-            16.2, abs=0.5)
+            15.7, abs=0.5)
         assert np.max(self._extra_loss('limestone')[band]) == pytest.approx(
-            11.4, abs=0.5)
+            11.7, abs=0.5)
 
     @pytest.mark.parametrize('name,cs', [('basalt', 2500.0),
                                          ('granite', 3000.0)])

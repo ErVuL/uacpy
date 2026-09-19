@@ -780,12 +780,14 @@ class TestRamPekerisReference:
     reference (mode sum on Pekeris is essentially the analytical
     solution).
 
-    ``tol_dB=4.5`` bounds a *method* difference, not numerical noise: a Padé
+    ``tol_dB`` bounds a *method* difference, not numerical noise: a Padé
     PE and an exact mode sum part company by genuine wide-angle error, which
-    grows with the water/seabed speed contrast. The same value is shared with
-    the strict xfail in :class:`TestMpiramsAutoGridIsAccurateEnough`, so it is
-    what separates a pinned grid from the auto grid — loosening it turns that
-    open defect into a silent pass.
+    grows with the water/seabed speed contrast. Measured 2026-09-19 over the
+    sample window: mpiramS 0.54 dB, ramgeo/ramsurf 0.37 dB, rams0.5 on the
+    elastic seabed 1.35 dB — so the fluid backends take 1.5 dB and the
+    elastic one 2.0 dB, each below a factor-2 power error (3.01 dB).
+    :class:`TestMpiramsAutoGridIsAccurateEnough` holds the auto grid to the
+    same 1.5 dB as a pinned one.
     """
 
     _SRC_DEPTH = 36.0
@@ -849,7 +851,7 @@ class TestRamPekerisReference:
         assert ram_field.backend == 'mpiramS'
         ref_field = self._kraken_reference(env, src, rcv)
         self._assert_window_agreement(
-            ram_field, ref_field, tol_dB=4.5, label='mpiramS',
+            ram_field, ref_field, tol_dB=1.5, label='mpiramS',
         )
 
     def test_rams_pekeris_elastic(self):
@@ -861,7 +863,7 @@ class TestRamPekerisReference:
         assert ram_field.backend == 'rams'
         ref_field = self._kraken_reference(env, src, rcv)
         self._assert_window_agreement(
-            ram_field, ref_field, tol_dB=4.5, label='rams0.5',
+            ram_field, ref_field, tol_dB=2.0, label='rams0.5',
         )
 
     def test_ramsurf_pekeris_flat_altimetry(self):
@@ -884,10 +886,11 @@ class TestRamPekerisReference:
         assert ram_field.backend == 'ramsurf'
         ref_field = self._kraken_reference(env_ref, src, rcv)
         self._assert_window_agreement(
-            ram_field, ref_field, tol_dB=4.5, label='ramsurf1.5',
+            ram_field, ref_field, tol_dB=1.5, label='ramsurf1.5',
         )
 
 
+@pytest.mark.requires_binary  # runs rams
 def test_rams_elastic_field_is_physical_on_a_fast_shear_seabed():
     """A fast-shear elastic seabed yields a physical field on the auto grid.
 
@@ -916,6 +919,7 @@ def test_rams_elastic_field_is_physical_on_a_fast_shear_seabed():
     assert not (tl == 200.0).any(), "no sample may sit on the clamp"
 
 
+@pytest.mark.requires_binary  # runs the Collins binaries
 class TestCollinsArrayLimits:
     """Overrunning a Collins binary's fixed arrays must raise before launch.
 
@@ -1198,6 +1202,7 @@ class TestRamsRotatedPadeScalar:
         assert residuals[-1] < 1e-12
 
 
+@pytest.mark.requires_binary  # constructs RAM (resolves its binary)
 def test_forcing_rams_on_a_fluid_bottom_is_rejected():
     """rams0.5 is the elastic PE; on a fluid bottom it returns a null field —
     TL saturated at the ``TL_MAX_DB`` sentinel at every range, which looks like
@@ -1312,6 +1317,7 @@ class TestTheDivergenceNoteNamesFastShearOnly:
         assert '3000 m/s' in text
 
 
+@pytest.mark.requires_binary  # runs the Collins binaries
 class TestCollinsArrayBoundaries:
     """The Fortran reads N pairs *plus* the ``-1 -1`` terminator into index
     N+1 before testing ``i.gt.mr`` (ramgeo1.5.f:146, ramsurf1.5.f:131), and the
@@ -1408,6 +1414,7 @@ class TestUpslopeSubBottomIsNotStale:
             f"error is the sub-bottom staleness signature")
 
 
+@pytest.mark.requires_binary  # runs every RAM backend
 class TestBackendIndependentResultShape:
     """``Field.kind`` must not depend on which backend auto-dispatch picked."""
 
@@ -1445,7 +1452,7 @@ class TestBackendIndependentResultShape:
         median by ~4 dB, because opposite-phase lobes cancel across an
         interference null. Resampling the modulus leaves a residual well
         under 0.1 dB — linear interpolation of |ψ| and of log|ψ| are not the
-        same operation — which is negligible against the 1–4.5 dB tolerances
+        same operation — which is negligible against the 1–2 dB tolerances
         the cross-model benchmarks use."""
         env = _env(bottom=self._FLUID,
                    altimetry=[(0.0, 0.0), (10000.0, 0.0)])
@@ -1592,6 +1599,7 @@ class TestCollinsBroadbandLevel:
         assert 'c0' not in field.metadata
 
 
+@pytest.mark.requires_binary  # runs RAM
 def test_run_frequencies_preserves_every_source_field():
     """``run(frequencies=…)`` rebuilds the Source; it must not silently drop
     ``source_type`` / ``beam_pattern`` and bypass their validation."""
@@ -3030,6 +3038,7 @@ class TestMpiramsLayeredSubBottomIsNotSmeared:
 # ─── Regression: the mpiramS absorbing layer is the width that was asked ──
 
 
+@pytest.mark.requires_binary  # runs mpiramS
 class TestMpiramsAbsorbingLayerHasTheRequestedWidth:
     """``profl`` interpolates the sediment arrays linearly between control
     point ``nzs-1`` at ``seafloor + sedlayer`` and control point ``nzs`` at
@@ -3511,9 +3520,9 @@ class TestMpiramsAutoGridIsAccurateEnough:
 
     @pytest.mark.slow
     def test_the_auto_grid_matches_kraken_as_well_as_a_pinned_one(self):
-        """The 4.5 dB bound sits between the two regimes rather than near
-        either: the uncapped auto grid scored 5.75 dB here and a converged
-        pinned grid scores 0.57 dB."""
+        """The auto grid must match Kraken within the same 1.5 dB as a pinned
+        grid (measured 0.54 dB, 2026-09-19); an auto grid that refines past
+        the optimiser's ``dr`` scores several dB here."""
         env = _env(bottom=BoundaryProperties(
             acoustic_type='half-space',
             sound_speed=1700.0, density=1.7, attenuation=0.5,
@@ -3525,7 +3534,7 @@ class TestMpiramsAutoGridIsAccurateEnough:
             auto = RAM(verbose=False).run(
                 env, src, rcv, run_mode=RunMode.COHERENT_TL)
         ref._assert_window_agreement(
-            auto, ref._kraken_reference(env, src, rcv), tol_dB=4.5,
+            auto, ref._kraken_reference(env, src, rcv), tol_dB=1.5,
             label='mpiramS auto grid')
 
 

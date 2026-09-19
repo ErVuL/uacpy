@@ -4,6 +4,8 @@ A 20 Hz source at 1000 m in a 5500 m Munk profile, whose channel axis sits at
 1300 m, run to 150 km by four models. Low frequency and a deep sound channel
 are what buy the range: energy is trapped by refraction, meets the abyssal
 bottom rarely, and re-focuses into convergence zones along the way.
+OAST needs OASES (./install.sh --oases yes); without it the example runs
+the other models and says so.
 
 Uses: SoundSpeedProfile.from_munk · four models on one .run signature ·
 Field.at(depth=, range=) · env.plot · compare_models · plot.compare ·
@@ -37,10 +39,16 @@ source = uacpy.Source(depths=1000.0,      # in the channel, 300 m above its axis
 receiver = uacpy.Receiver(depths=np.linspace(100, 5400, 30),
                           ranges=np.linspace(1000, 150000, 150))
 
+# OAST is the optional fourth: it needs the OASES binaries, and without them
+# the comparison runs on the other three.
 models = {'Bellhop': uacpy.Bellhop(), 'Kraken': uacpy.Kraken(),
-          'Scooter': uacpy.Scooter(), 'OAST': uacpy.OAST()}
+          'Scooter': uacpy.Scooter()}
 fields = {name: model.run(env, source, receiver)
           for name, model in models.items()}
+try:
+    fields['OAST'] = uacpy.OAST().run(env, source, receiver)
+except uacpy.ExecutableNotFoundError:
+    print("  OAST skipped: OASES executable not found (./install.sh --oases yes)")
 
 # .at() takes labels, not indices, and snaps to the nearest sample on each
 # axis — so the on-axis level at 100 km is one call per model.

@@ -83,9 +83,12 @@ class SoundSpeedProfile(_DeepCopyMixin):
     ranges: Optional[np.ndarray] = None
     shape: str = 'measured'
     data_sources: tuple = ()
-    #: Sound-speed formula that built ``data`` from T/S ('unesco', 'delgrosso',
-    #: 'teos10');
-    #: ``None`` for a literal or hand-built profile. Read by the deep extension.
+    #: Sound-speed formula that built ``data`` from T/S ('teos10', 'unesco',
+    #: 'delgrosso', or 'mackenzie' from :meth:`from_mackenzie`); ``None`` for a
+    #: literal or hand-built profile. Read by
+    #: :func:`uacpy.data.extend_ssp_below_data`, which continues the column
+    #: under the same equation (a ``None`` column takes the package default,
+    #: TEOS-10).
     formula: Optional[str] = None
 
     def __post_init__(self):
@@ -642,6 +645,11 @@ class SoundSpeedProfile(_DeepCopyMixin):
         ``np.full_like(depths, T_const)`` if the column is isothermal/
         isohaline. Valid range: ``T ∈ [−2, 30] °C``,
         ``S ∈ [25, 40] PSU``, ``z ∈ [0, 8000] m`` (Mackenzie 1981).
+
+        The profile carries ``formula='mackenzie'``, so
+        :func:`uacpy.data.extend_ssp_below_data` continues it under the same
+        equation rather than under TEOS-10 (the two differ by ~0.35 m/s at
+        8.8 km from a 5.5 km column).
         """
         from uacpy.core.acoustics import soundspeed
         z = np.asarray(depths, dtype=float).ravel()
@@ -655,7 +663,7 @@ class SoundSpeedProfile(_DeepCopyMixin):
         c = soundspeed(temperature=T, salinity=S, depth=z)
         return cls(
             depths=z, data=np.asarray(c).reshape(-1, 1),
-            ranges=None,
+            ranges=None, formula='mackenzie',
         )
 
 

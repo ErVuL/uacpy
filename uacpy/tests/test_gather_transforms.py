@@ -24,6 +24,7 @@ import numpy as np
 import pytest
 
 from uacpy.acoustic_signal import (
+    FKResult,
     fk_transform,
     inverse_fk,
     inverse_radon,
@@ -150,6 +151,39 @@ class TestFKInverse:
         f, k, psd, _ = fk_transform(data, FS, DX, normalize=True)
         lhs = psd.sum() * (f[1] - f[0]) * (k[1] - k[0])
         assert lhs == pytest.approx(np.mean(data ** 2), rel=1e-9)
+
+
+class TestFKResultScaling:
+    """The result says which unit its panel is in, and the 4-tuple shape that
+    ``inverse_fk`` and every unpack site rely on is unchanged."""
+
+    def test_normalize_true_marks_the_panel_a_density(self):
+        result = fk_transform(_gather(), FS, DX, normalize=True)
+        assert result.scaling == "density"
+
+    def test_normalize_false_marks_the_panel_raw_power(self):
+        assert fk_transform(_gather(), FS, DX).scaling == "power"
+        result = fk_transform(_gather(), FS, DX, normalize=False)
+        assert result.scaling == "power"
+
+    def test_the_result_unpacks_four_wide(self):
+        result = fk_transform(_gather(), FS, DX)
+        assert len(result) == 4 and isinstance(result, tuple)
+        f, k, power, spectrum = result
+        assert power.shape == (f.size, k.size)
+        assert spectrum.shape == power.shape
+
+    def test_scaling_survives_replace_and_pickling(self):
+        import pickle
+        result = fk_transform(_gather(), FS, DX, normalize=True)
+        assert result._replace(power=result.power * 2.0).scaling == "density"
+        assert result._replace(scaling="power").scaling == "power"
+        assert pickle.loads(pickle.dumps(result)).scaling == "density"
+
+    def test_an_unknown_scaling_is_refused_at_construction(self):
+        f, k, power, spectrum = fk_transform(_gather(), FS, DX)
+        with pytest.raises(ConfigurationError, match="scaling must be one of"):
+            FKResult(f, k, power, spectrum, scaling="psd")
 
 
 class TestFKWindowing:

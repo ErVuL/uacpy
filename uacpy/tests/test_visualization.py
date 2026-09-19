@@ -1692,7 +1692,7 @@ class TestImshowPanelsAreEdgeAligned:
         ks = np.linspace(-1.2, 1.2, 25)              # non-square
         power = np.zeros((freqs.size, ks.size))
         power[3, 2] = 1.0
-        fig, ax = plot_fk(freqs, ks, power, sound_speed=1500.0)
+        fig, ax = plot_fk(freqs, ks, power, scaling='power', sound_speed=1500.0)
         px, py = self._centres(ax, ks.size, freqs.size)
         assert px[2] == pytest.approx(ks[2], abs=1e-9)
         assert py[3] == pytest.approx(freqs[3], abs=1e-9)
@@ -3457,9 +3457,169 @@ class TestALevelAxisNamesTheReferenceItWasComputedAgainst:
         from uacpy.visualization.plots.signal import plot_fk
         f = np.linspace(0.0, 500.0, 8)
         k = np.linspace(-1.0, 1.0, 9)
-        fig, ax = plot_fk(f, k, np.ones((8, 9)), ref=ref)
-        assert fig.axes[-1].get_ylabel() == f"Power (dB re {shown}Pa²)"
+        fig, ax = plot_fk(f, k, np.ones((8, 9)), ref=ref, scaling='power')
+        assert fig.axes[-1].get_ylabel() == \
+            f"|FK|² (dB re {shown}Pa², unnormalised)"
         plt.close(fig)
+
+
+def _fk_gather(nt=128, nx=32):
+    return np.random.default_rng(3).standard_normal((nt, nx))
+
+
+class TestFKPanelUnits:
+    """The f-k colour axis names the panel's unit per scaling and wavenumber
+    unit, the abscissa follows the unit, and a density stays Parseval-exact
+    after the unit change."""
+
+    FS, DX = 1000.0, 5.0
+
+    def _results(self):
+        from uacpy.acoustic_signal.arrays import fk_transform
+        d = _fk_gather()
+        return (d, fk_transform(d, self.FS, self.DX, normalize=True),
+                fk_transform(d, self.FS, self.DX))
+
+    @pytest.mark.parametrize('normalize, unit, cbar, xlabel', [
+        (True, 'rad/m', "PSD (dB re 1µPa²·m/(Hz·rad))",
+         "Wavenumber k (rad/m)"),
+        (True, 'cycles/m', "PSD (dB re 1µPa²·m/Hz)",
+         "Wavenumber ν (cycles/m)"),
+        (False, 'rad/m', "|FK|² (dB re 1µPa², unnormalised)",
+         "Wavenumber k (rad/m)"),
+        (False, 'cycles/m', "|FK|² (dB re 1µPa², unnormalised)",
+         "Wavenumber ν (cycles/m)"),
+    ])
+    def test_labels_follow_the_result_scaling_and_wavenumber_unit(
+            self, normalize, unit, cbar, xlabel):
+        from uacpy.visualization.plots.signal import plot_fk
+        _, density, raw = self._results()
+        fig, ax = plot_fk(density if normalize else raw, wavenumber_unit=unit)
+        assert fig.axes[-1].get_ylabel() == cbar
+        assert ax.get_xlabel() == xlabel
+        plt.close(fig)
+
+    def test_bare_arrays_take_the_scaling_from_the_knob(self):
+        from uacpy.visualization.plots.signal import plot_fk
+        _, density, _ = self._results()
+        fig, ax = plot_fk(density.frequencies, density.wavenumbers,
+                          density.power, scaling='density', ref=1.0)
+        assert fig.axes[-1].get_ylabel() == "PSD (dB re 1Pa²·m/(Hz·rad))"
+        plt.close(fig)
+
+    @staticmethod
+    def _integral_over_the_image(ax):
+        """``ΣP·Δf·Δν`` read back from the drawn dB image and its extent."""
+        im = ax.images[0]
+        linear = 10.0 ** (np.asarray(im.get_array(), dtype=float) / 10.0)
+        x0, x1, y0, y1 = im.get_extent()
+        n_f, n_k = linear.shape
+        return linear.sum() * (y1 - y0) / n_f * (x1 - x0) / n_k, (x0, x1)
+
+    def test_a_density_stays_parseval_exact_in_cycles_per_metre(self):
+        """Both halves of the unit change must be applied: the panel ×2π and
+        the axis /2π. Missing one breaks the integral; missing both keeps the
+        integral and moves the axis, so the extent is pinned as well."""
+        from uacpy.visualization.plots.signal import plot_fk
+        d, density, _ = self._results()
+        fig, ax = plot_fk(density, wavenumber_unit='cycles/m', ref=1.0)
+        integral, (x0, x1) = self._integral_over_the_image(ax)
+        assert integral == pytest.approx(np.mean(d ** 2), rel=1e-9)
+        k = density.wavenumbers
+        half_cell = 0.5 * (k[1] - k[0]) / (2.0 * np.pi)
+        assert x0 == pytest.approx(k[0] / (2.0 * np.pi) - half_cell, rel=1e-9)
+        assert x1 == pytest.approx(k[-1] / (2.0 * np.pi) + half_cell, rel=1e-9)
+        plt.close(fig)
+
+    def test_a_density_is_parseval_exact_in_radians_per_metre(self):
+        from uacpy.visualization.plots.signal import plot_fk
+        d, density, _ = self._results()
+        fig, ax = plot_fk(density, ref=1.0)
+        integral, _ = self._integral_over_the_image(ax)
+        assert integral == pytest.approx(np.mean(d ** 2), rel=1e-9)
+        plt.close(fig)
+
+    def test_a_raw_panel_is_not_rescaled_by_the_wavenumber_unit(self):
+        from uacpy.visualization.plots.signal import plot_fk
+        _, _, raw = self._results()
+        fig, ax = plot_fk(raw, ref=1.0, wavenumber_unit='cycles/m')
+        drawn = np.asarray(ax.images[0].get_array(), dtype=float)
+        np.testing.assert_allclose(drawn, 10.0 * np.log10(raw.power),
+                                   rtol=1e-12)
+        plt.close(fig)
+
+    @pytest.mark.parametrize('unit, k_scale',
+                             [('rad/m', 1.0), ('cycles/m', 1 / (2 * np.pi))])
+    def test_the_sound_cone_ends_on_the_axis_edge_in_either_unit(
+            self, unit, k_scale):
+        """At 1500 m/s the cone leaves the panel through its wavenumber edge,
+        so its far end sits at (±k_max, c·k_max/2π) in the chosen unit."""
+        from uacpy.visualization.plots.signal import plot_fk
+        _, density, _ = self._results()
+        c = 1500.0
+        fig, ax = plot_fk(density, sound_speed=c, wavenumber_unit=unit)
+        k_max = density.wavenumbers[-1]
+        ends = sorted(tuple(line.get_xydata()[-1]) for line in ax.lines)
+        assert len(ends) == 2
+        for sign, (x, y) in zip((-1.0, 1.0), ends):
+            assert x == pytest.approx(sign * k_max * k_scale, rel=1e-9)
+            assert y == pytest.approx(c * k_max / (2.0 * np.pi), rel=1e-9)
+        plt.close(fig)
+
+    def test_the_sound_cone_stops_at_the_top_of_a_narrow_band(self):
+        """When the band ends before the cone reaches the wavenumber edge, the
+        line ends at (2π·f_max/c, f_max) in rad/m and (f_max/c, f_max) in
+        cycles/m."""
+        from uacpy.visualization.plots.signal import plot_fk
+        f = np.linspace(0.0, 30.0, 16)
+        k = np.linspace(-1.0, 1.0, 21)
+        c = 1500.0
+        for unit, x_end in (('rad/m', 2 * np.pi * 30.0 / c),
+                            ('cycles/m', 30.0 / c)):
+            fig, ax = plot_fk(f, k, np.ones((16, 21)), scaling='power',
+                              sound_speed=c, wavenumber_unit=unit)
+            xs = sorted(line.get_xydata()[-1][0] for line in ax.lines)
+            assert xs == pytest.approx([-x_end, x_end], rel=1e-9)
+            assert all(line.get_xydata()[-1][1] == pytest.approx(30.0)
+                       for line in ax.lines)
+            plt.close(fig)
+
+    def test_a_bare_array_without_a_scaling_is_refused_naming_both(self):
+        from uacpy.visualization.plots.signal import plot_fk
+        _, density, _ = self._results()
+        with pytest.raises(ConfigurationError,
+                           match=r"scaling='density'.*scaling='power'"):
+            plot_fk(density.frequencies, density.wavenumbers, density.power)
+        assert not plt.get_fignums()
+
+    def test_a_scaling_contradicting_the_result_is_refused(self):
+        from uacpy.visualization.plots.signal import plot_fk
+        _, density, raw = self._results()
+        with pytest.raises(ConfigurationError,
+                           match=r"scaling='power' contradicts.*'density'"):
+            plot_fk(density, scaling='power')
+        with pytest.raises(ConfigurationError,
+                           match=r"scaling='density' contradicts.*'power'"):
+            plot_fk(raw, scaling='density')
+        assert not plt.get_fignums()
+
+    def test_an_unknown_scaling_or_wavenumber_unit_is_refused(self):
+        from uacpy.visualization.plots.signal import plot_fk
+        _, density, _ = self._results()
+        with pytest.raises(ConfigurationError,
+                           match=r"scaling must be one of"):
+            plot_fk(density, scaling='psd')
+        with pytest.raises(ConfigurationError,
+                           match=r"wavenumber_unit must be one of"):
+            plot_fk(density, wavenumber_unit='1/m')
+        assert not plt.get_fignums()
+
+    def test_spreading_the_result_into_positionals_is_refused(self):
+        from uacpy.visualization.plots.signal import plot_fk
+        _, density, _ = self._results()
+        with pytest.raises(ConfigurationError, match=r"plot_fk\(\*result\)"):
+            plot_fk(*density)
+        assert not plt.get_fignums()
 
 
 def _bands():

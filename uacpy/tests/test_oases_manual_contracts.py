@@ -218,12 +218,18 @@ class TestRcoTableFollowsTheManual:
         assert np.allclose(data['angles_or_slowness'][0],
                            [r[0] for r in self._ROWS])
         assert np.allclose(data['magnitude'][0], [r[1] for r in self._ROWS])
-        # Phase is stored in degrees (oasr.tex:313-314).
-        assert np.allclose(data['phase'][0], [r[2] for r in self._ROWS])
+        # The file column is degrees (oasr.tex:313-314); the reader returns
+        # radians.
+        assert np.allclose(data['phase'][0],
+                           np.deg2rad([r[2] for r in self._ROWS]))
 
     def test_code_one_reads_as_a_slowness_table(self, tmp_path):
         data = read_oasr_reflection_coefficients(self._table(tmp_path, 1))
         assert data['sampling_type'] == 'slowness'
+        # The file column is s/km (oasjun21.f:103 writes slw*1e3); the
+        # reader returns s/m.
+        assert np.allclose(data['angles_or_slowness'][0],
+                           [r[0] / 1e3 for r in self._ROWS])
 
     def test_the_header_code_decides_under_any_file_name(self, tmp_path):
         """A byte-identical slowness table parses as slowness whatever it
@@ -246,7 +252,7 @@ class TestRcoTableFollowsTheManual:
                 self._table(tmp_path, 1, 't.trc'))
         assert data['sampling_type'] == 'slowness'
         assert np.allclose(data['angles_or_slowness'][0],
-                           [r[0] for r in self._ROWS])
+                           [r[0] / 1e3 for r in self._ROWS])
 
 
 class TestXsmLayoutFollowsTheManual:

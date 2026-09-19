@@ -16,8 +16,8 @@ The three TL modes share one ray trace and differ only in the accumulator:
   in, and its smoothness matches 'I'. The statistics below show that directly,
   and the run times are measured rather than asserted.
 
-Then: a ray fan through the Munk channel, eigenrays found two ways (the
-EIGENRAYS run mode and compute_eigenrays, whose Fortran miss tolerance is loose
+Then: a ray fan through the Munk channel, eigenrays on two waveguides through
+compute_eigenrays (the EIGENRAYS run mode, whose Fortran miss tolerance is loose
 enough to need filtering), and the arrival structure behind them.
 
 Uses: RunMode.COHERENT_TL / INCOHERENT_TL / SEMICOHERENT_TL / RAYS / EIGENRAYS

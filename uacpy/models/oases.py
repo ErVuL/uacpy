@@ -222,7 +222,8 @@ def _stack_oasr_data(data: dict):
     -------
     theta : ndarray, shape ``(n_angles,)``
     R : ndarray, shape ``(n_angles,)`` (single freq) or ``(n_angles, n_frequencies)``
-    phi : ndarray, same shape as ``R``  — phase in radians (reader stores degrees)
+    phi : ndarray, same shape as ``R``  — phase in radians, unwrapped along
+        the angle axis (the reader already returns radians)
     freqs : ndarray, shape ``(n_frequencies,)``
     """
     freqs = np.asarray(data.get('frequencies', []), dtype=float)
@@ -252,18 +253,18 @@ def _stack_oasr_data(data: dict):
             )
     if n_frequencies == 1:
         R = np.asarray(R_lists[0], dtype=float)
-        phi_deg = np.asarray(phi_lists[0], dtype=float)
+        phi_rad = np.asarray(phi_lists[0], dtype=float)
     else:
         R = np.column_stack([np.asarray(m, dtype=float) for m in R_lists])
-        phi_deg = np.column_stack([np.asarray(p, dtype=float) for p in phi_lists])
+        phi_rad = np.column_stack([np.asarray(p, dtype=float) for p in phi_lists])
     # OASR writes the phase as a principal value (`oases/src/oasjun21.f:102`
     # takes `atan2z`), but every consumer interpolates it linearly between
     # bracketing angles, which `misc/RefCoef.f90:119` states requires an
     # unwrapped phase: "Assumes phi has been unwrapped so that it varies
-    # smoothly." Interpolating across a +-360 deg step sweeps the phase the long
+    # smoothly." Interpolating across a +-2*pi step sweeps the phase the long
     # way round and returns a reflection coefficient of the wrong sign. Unwrap
     # along the angle axis, which is a no-op for an already-smooth table.
-    phi = np.unwrap(np.deg2rad(phi_deg), axis=0)
+    phi = np.unwrap(phi_rad, axis=0)
     return theta, R, phi, freqs
 
 
@@ -2609,9 +2610,8 @@ class OASP(OASES):
             # unchanged, CFFX being declared plain COMPLEX (oasiun23.f:18).
             output_file = self._require_output(
                 [fm.get_path(f'{base_name}.trf'),
-                 fm.get_path(f'{base_name}.dtrf'),
-                 fm.get_path(f'{base_name}.plt')], what='a transfer-function file',
-                process=proc,
+                 fm.get_path(f'{base_name}.dtrf')],
+                what='a transfer-function file', process=proc,
             )
             self._log(f"Reading OASP output: {output_file}")
             trf_data = read_oasp_trf(output_file,

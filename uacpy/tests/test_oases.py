@@ -796,6 +796,7 @@ class TestOASRShearReflectionTypesAreRefused:
         uacpy.OASR(**kwargs)
 
 
+@pytest.mark.requires_oases  # runs OASP
 class TestOASPFrequencyGridSubstitution:
     """OASP is a pulse model: its frequency axis is the FFT ladder implied by
     the time window, not the bins the caller names. Asking for 3 returned 820
@@ -2372,3 +2373,36 @@ class TestOaspDeclaresItsBandEdgesInDeckOrder:
         assert model.copy().freq_min == 10.0
         assert model.copy().freq_max == 200.0
         assert model.copy(freq_max=300.0).freq_max == 300.0
+
+
+@pytest.mark.requires_oases
+class TestOaspRequiresATransferFunctionNotAPlotFile:
+    """OASP's output check accepts ``<base>.trf`` and ``<base>.dtrf`` only:
+    a ``.plt`` is a plot table, and handing one to ``read_oasp_trf`` fails
+    later with "Expected 'PULSETRF'" instead of the missing-output error
+    that names the run. A stale ``.plt`` beside no transfer function is the
+    case that told them apart."""
+
+    def test_a_stale_plt_beside_no_trf_raises_the_missing_output_error(
+            self, tmp_path, monkeypatch):
+        import subprocess
+        from uacpy.core.exceptions import ModelExecutionError
+        env = Environment(
+            name='plt-only', bathymetry=100.0, ssp=1500.0,
+            bottom=BoundaryProperties(sound_speed=1600.0, density=1.5,
+                                      attenuation=0.5))
+        src = Source(depths=25.0, frequencies=150.0)
+        rcv = Receiver(depths=[50.0], ranges=[1000.0])
+        (tmp_path / 'oasp_run.plt').write_text('stale plot table\n')
+
+        def no_run(self, base_name, work_dir, **kwargs):
+            return subprocess.CompletedProcess([base_name], 0, stdout='',
+                                               stderr='')
+        monkeypatch.setattr(OASP, '_execute', no_run)
+        with pytest.raises(ModelExecutionError,
+                           match=r"transfer-function") as ei:
+            OASP(n_time_samples=512, work_dir=tmp_path, cleanup=False,
+                 verbose=False).run(env, src, rcv,
+                                    run_mode=RunMode.BROADBAND)
+        assert 'PULSETRF' not in str(ei.value)
+        assert '.plt' not in str(ei.value)

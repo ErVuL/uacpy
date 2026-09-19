@@ -302,23 +302,27 @@ column. Granite holds on to everything out to 75°; silt gives up beyond 18°,
 and leaks even below that.
 
 Clay is the instructive extreme: its sound speed *equals* the water's, so there
-is no critical angle at all and `|R| = 0.2` at every angle — pure density
-contrast, `(1.5 − 1.0)/(1.5 + 1.0)`. A clay seabed is close to an anechoic
-termination, and a shallow channel over clay barely propagates.
+is no critical angle at all and `|R| = 0.19` at every angle — pure density
+contrast, `(1.5 − 1.027)/(1.5 + 1.027)` against the 1.027 g/cm³ water every
+deck writes (`0.2` in a textbook that takes ρ_w = 1; pass
+`Environment(water_density=1.0)` or `bottom_loss_curve(..., water_density=1.0)`
+to reproduce one). A clay seabed is close to an anechoic termination, and a
+shallow channel over clay barely propagates.
 
 Sonar-equation work wants this as a loss rather than a ratio:
 `BL(θ) = −20 log₁₀|R(θ)|` is the bottom loss in dB per bounce, which is the unit
 the [OASES](oases.md) page plots. The catalogue spans it: at 10° grazing, sand
-gives up 0.7 dB per bounce and clay 13.9 dB. Note that sand's advantage is a
+gives up 0.7 dB per bounce and clay 14.4 dB. Note that sand's advantage is a
 low-angle one — by 24°, just under its critical angle, it is already losing
-2.0 dB.
+2.1 dB.
 
 No preset is *slower* than the water, and a slow bottom behaves differently
 again: it has no critical angle at all, and instead an **intromission angle**
 where the two impedances match, `|R|` falls to zero and the seabed swallows
-everything. Soft mud at 1450 m/s and 1.4 g/cm³ puts it at 15.7°, where
-`|R| = 0.0007` and the phase steps through 180°. If you are modelling mud rather
-than sand, that null is the feature to look for.
+everything. Soft mud at 1450 m/s and 1.4 g/cm³ puts it at 16.6° (15.7° over
+ρ_w = 1 water), where `|R|` falls below 10⁻³ and the phase steps through 180°.
+If you are modelling mud rather than sand, that null is the feature to look
+for.
 
 Building these bottoms — presets, overrides, layer stacks — is
 [the environment guide's](../guide/environment.md) subject.

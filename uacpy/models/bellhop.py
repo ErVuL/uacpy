@@ -14,6 +14,7 @@ single run, since ray travel times are frequency-independent (geometric).
 
 import copy
 import os
+import re
 import warnings
 import numpy as np
 from pathlib import Path
@@ -229,7 +230,7 @@ def delayandsum(
         return np.zeros(nrts), t0 + np.arange(nrts) / sample_rate
 
     amps = rcv_arrivals['amplitudes']
-    phases_deg = rcv_arrivals['phases']
+    phases = rcv_arrivals['phases']
     delays = rcv_arrivals['delays']
     delays_imag = rcv_arrivals['delays_imag']
 
@@ -265,7 +266,7 @@ def delayandsum(
     # one past its last — and the power it carries, for the window report.
     starts, ends, powers = [], [], []
     for ia in range(n_arr):
-        phase_rad = np.deg2rad(phases_deg[ia]) + phase_offset
+        phase_rad = phases[ia] + phase_offset
         phase_factor = np.exp(1j * phase_rad)
 
         # ``delays_imag`` is Im(tau) in seconds; volume-attenuation factor
@@ -400,6 +401,10 @@ _BELLHOP_OUTPUT = {
     'R': ('ray_file', '.ray', read_ray_file),
     'E': ('ray_file', '.ray', read_ray_file),
 }
+# One ``BHC_WARN_<NAME>: ...`` / ``BHC_ERR_<NAME>: ...`` line of the exit
+# report bellhopcxx / bellhopcuda print to stdout (``util/errors.cpp``).
+_BHC_DIAGNOSTIC_LINE = re.compile(r'^BHC_(WARN|ERR)_[A-Z0-9_]+:')
+
 _BELLHOP_OUTPUT_SUFFIXES = ('.shd', '.arr', '.ray')
 
 
@@ -1750,6 +1755,9 @@ class Bellhop(PropagationModel):
                          RunMode.TIME_SERIES)
             and len(receiver.ranges) > 0
             and float(receiver.ranges[0]) == 0.0
+            # An all-zero grid is refused by validate_inputs below, so it
+            # gets the refusal alone, not a NaN-column warning first.
+            and receiver.range_max > 0.0
             and not _defers_to_bounce_rerun
         ):
             warnings.warn(
@@ -2115,7 +2123,7 @@ class Bellhop(PropagationModel):
             # The .arr amplitudes carry ArrMod.f90:104's purely real
             # 4*sqrt(pi): bring them to the package's unit-at-1 m
             # line-source level and give every arrival the Green's
-            # function's -pi/4 (in the file's degrees) here, so the
+            # function's -pi/4 (in radians, the reader's unit) here, so the
             # Arrivals result, the broadband and time-series syntheses
             # built from it and the .shd field share one phase reference.
             for slab in (result.slabs
@@ -2128,7 +2136,7 @@ class Bellhop(PropagationModel):
                                 * _LINE_SOURCE_LEVEL)
                             cell['phases'] = (
                                 np.asarray(cell['phases'], dtype=float)
-                                + np.degrees(_LINE_SOURCE_PHASE))
+                                + _LINE_SOURCE_PHASE)
                 slab.arrivals = slab._flatten_by_receiver(slab.by_receiver)
 
         # AT's ScalePressure (influence.f90:757-795) carries const = -1
@@ -2907,7 +2915,7 @@ class Bellhop(PropagationModel):
         """
         Build frequency-domain transfer function from per-receiver arrivals.
 
-        For each arrival with amplitude A, phase phi (deg), travel time tau,
+        For each arrival with amplitude A, phase phi (rad), travel time tau,
         and imaginary delay tau_i (volume attenuation), the contribution to
         H(f) is:
 
@@ -2944,11 +2952,11 @@ class Bellhop(PropagationModel):
             return np.full(len(frequencies), np.nan, dtype=complex)
 
         amps = rcv_arrivals['amplitudes']
-        phases_deg = rcv_arrivals['phases']
+        phases = rcv_arrivals['phases']
         delays = rcv_arrivals['delays']
         delays_imag = rcv_arrivals['delays_imag']
 
-        phases_rad = np.deg2rad(phases_deg) + phase_offset
+        phases_rad = np.asarray(phases, dtype=float) + phase_offset
         omega = 2.0 * np.pi * frequencies  # (n_freq,)
 
         # Vectorised over arrivals. For each arrival, tau = Re(tau)+i*Im(tau)
@@ -3075,8 +3083,45 @@ class Bellhop(PropagationModel):
         and this run writes only one of them.
         """
         cmd = self._build_command(base_name)
-        self._run_and_attach_prt(
+        result = self._run_and_attach_prt(
             cmd, work_dir, base_name,
             stale_outputs=_BELLHOP_OUTPUT_SUFFIXES,
         )
+        if self.version in ('cuda', 'cxx'):
+            self._warn_on_engine_stdout_warnings(result.stdout or '')
+
+    def _warn_on_engine_stdout_warnings(self, stdout: str) -> None:
+        """Re-emit the run-time diagnoses bellhopcxx / bellhopcuda print
+        to stdout as one ``UserWarning``.
+
+        The ports keep a bitmask of run-time conditions and report it at
+        exit through ``printf`` (``bellhopcuda/src/util/errors.cpp:26-36``,
+        ``113-137``): a header ``N warning(s) thrown of the following
+        type(s):`` followed by one ``BHC_WARN_<NAME>: <description>`` line
+        per set bit, and the same shape with ``error(s)`` / ``BHC_ERR_``
+        for non-fatal error bits. Nothing of it reaches the ``.prt``, so
+        the Fortran-only ``Warning in ...`` scan sees a silent run — measured,
+        ``n_beams=3`` warns ``Too few beams`` on ``backend='fortran'`` and
+        nothing on ``backend='cxx'`` for the same field.
+
+        Captured stdout of that ``cxx`` run, verbatim::
+
+            setup: 0.624820 ms
+            Preprocess: 0.140358 ms
+            1 warning(s) thrown of the following type(s):
+            BHC_WARN_TOO_FEW_BEAMS: Nalpha is too small; there may be gaps between the beams
+            Run: 0.379620 ms
+
+        The engine's lines are passed through verbatim, as the ``.prt``
+        path does.
+        """
+        lines = [line.strip() for line in stdout.splitlines()
+                 if _BHC_DIAGNOSTIC_LINE.match(line.strip())]
+        if not lines:
+            return
+        joined = "\n  ".join(dict.fromkeys(lines))
+        warnings.warn(
+            f"{self.model_name} ({self.version}) reported {len(lines)} "
+            f"non-fatal warning(s):\n  {joined}",
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
 

@@ -10,9 +10,10 @@ The sediment sits against a water column, and the two entry points spell it
 differently: :func:`reflection_coeff` takes ``c`` / ``rho`` and falls back to
 the seawater equations at *their* defaults (:mod:`uacpy.core.acoustics.seawater`,
 27 °C surface water) when they are left out, warning once that it did, while
-:func:`bottom_loss_curve` pins 1500 m/s and 1.0 g/cm³ through
-``water_speed`` / ``water_density``, which is where the two routes differ by
-roughly 4 dB near the critical angle.
+:func:`bottom_loss_curve` pins 1500 m/s and the package water density
+(``DEFAULT_WATER_DENSITY_G_CM3``, 1.027 g/cm³ — the value every deck writes)
+through ``water_speed`` / ``water_density``, which is where the two routes
+differ by roughly 4 dB near the critical angle.
 
 -------------------------------------------------------------------------------
 Portions of this file are adapted from arlpy (https://github.com/org-arl/arlpy)
@@ -35,7 +36,7 @@ import warnings as _warnings
 import numpy as np
 from typing import Union, Optional, Tuple
 
-from uacpy.core.constants import DEFAULT_SOUND_SPEED
+from uacpy.core.constants import DEFAULT_SOUND_SPEED, DEFAULT_WATER_DENSITY_G_CM3
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.acoustics.seawater import density, soundspeed
 
@@ -105,9 +106,10 @@ def reflection_coeff(
     Called directly with ``c`` and ``rho`` omitted, this function evaluates
     Mackenzie and EOS-80 at their own argument defaults — a tropical surface
     point, 27 °C / S = 35 / 10 m — giving 1539.087 m/s and 1022.72 kg/m³.
-    :func:`bottom_loss_curve` below deliberately pins the round reference
+    :func:`bottom_loss_curve` below deliberately pins the package reference
     values instead: ``water_speed=DEFAULT_SOUND_SPEED`` (1500.0 m/s) and
-    ``water_density=1.0`` g/cm³ (1000 kg/m³).
+    ``water_density=DEFAULT_WATER_DENSITY_G_CM3`` (1.027 g/cm³, 1027 kg/m³ —
+    what every deck writes for the water column).
 
     So the same seabed reflects differently through the two. On a 1700 m/s,
     1800 kg/m³ bottom the critical grazing angle is 28.072° against the
@@ -115,13 +117,14 @@ def reflection_coeff(
     reflection loss between them differs by roughly 4 dB at its worst, near
     that angle (the exact peak depends on how finely the angle grid samples
     the critical region, so treat the magnitude, not the decimals, as the
-    result). Nearly all of that is the sound speed; the density difference is
-    worth a few tenths of a dB, peaking at normal incidence rather than at the
-    critical angle. The density difference is a units convention, not a
-    disagreement about seawater: this function takes SI kg/m³ and falls back
-    to a real seawater value, while :func:`bottom_loss_curve` follows the
-    Acoustics Toolbox in quoting sediment density relative to water, where
-    ``rho = 1.0`` g/cm³ makes ``m = rho1/rho`` the relative density.
+    result). Nearly all of that is the sound speed; the two water densities
+    (1022.72 against 1027 kg/m³) are worth under 0.05 dB, peaking at normal
+    incidence rather than at the critical angle. The density difference is a
+    units convention, not a disagreement about seawater: this function takes
+    SI kg/m³ and falls back to a real seawater value, while
+    :func:`bottom_loss_curve` takes g/cm³, the unit every deck writes. Pass
+    ``water_density=1.0`` to the wrapper to reproduce a textbook curve that
+    takes ρ_w = 1 (COA Table 1.3 quotes sediment densities as ratios to it).
 
     Pass ``c`` (and ``rho``) explicitly whenever the water column matters.
 
@@ -198,7 +201,7 @@ def bottom_loss_curve(
     *,
     grazing_angles_deg: Optional[np.ndarray] = None,
     water_speed: float = DEFAULT_SOUND_SPEED,
-    water_density: float = 1.0,
+    water_density: float = DEFAULT_WATER_DENSITY_G_CM3,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Plane-wave fluid–fluid bottom loss vs grazing angle.
 
@@ -216,7 +219,12 @@ def bottom_loss_curve(
         Grazing-angle grid in degrees (``0`` = parallel to interface,
         ``90`` = normal incidence). Default ``np.linspace(0, 90, 181)``.
     water_speed, water_density : float
-        Water-column reference values (m/s, g/cm³).
+        Water-column reference values (m/s, g/cm³). ``water_density``
+        defaults to :data:`~uacpy.core.constants.DEFAULT_WATER_DENSITY_G_CM3`
+        (1.027 g/cm³), the value every deck writes for the water column, so
+        the curve matches what the propagation models see; pass ``1.0`` to
+        reproduce a textbook benchmark that takes ρ_w = 1 (on 'sand' the
+        two differ by at most 0.29 dB, at normal incidence).
 
     Returns
     -------

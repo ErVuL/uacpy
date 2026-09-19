@@ -1305,6 +1305,194 @@ def test_install_sh_is_syntactically_valid():
     assert result.returncode == 0, result.stderr
 
 
+# --- the bellhopcuda pin: install.sh's SHA and the gitlink are one value ----
+
+_BHC_SUBMODULE = "uacpy/third_party/bellhopcuda"
+
+
+def _install_sh_bellhopcuda_sha():
+    """The full commit SHA ``install.sh`` pins the bellhopcuda submodule to."""
+    match = re.search(r'^BELLHOPCUDA_COMMIT_SHA="([0-9a-f]{40})"$',
+                      _INSTALL_SH.read_text(), re.M)
+    assert match, "install.sh carries no 40-hex BELLHOPCUDA_COMMIT_SHA"
+    return match.group(1)
+
+
+def _gitlink_sha(path):
+    """The commit the superproject's HEAD records for submodule ``path``, or
+    a skip when this tree cannot answer (no git, not a checkout)."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(_REPO_ROOT), "ls-tree", "HEAD", path],
+            capture_output=True, text=True, timeout=60)
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        pytest.skip(f"git unavailable: {exc}")
+    if proc.returncode != 0:
+        pytest.skip(f"not a git checkout: {proc.stderr.strip()}")
+    match = re.match(r"160000 commit ([0-9a-f]{40})\t", proc.stdout)
+    if not match:
+        pytest.skip(f"HEAD records no gitlink for {path}: {proc.stdout!r}")
+    return match.group(1)
+
+
+def test_the_submodule_gitlink_records_the_sha_install_sh_pins():
+    """``install.sh`` checks the submodule out at ``BELLHOPCUDA_COMMIT_SHA``
+    while a plain ``git submodule update`` checks out the gitlink HEAD
+    records. Two values mean two different bellhopcuda sources depending on
+    which command ran last, so the two must be the same commit. The SHA in
+    ``install.sh`` is the pin; the gitlink follows it."""
+    pinned = _install_sh_bellhopcuda_sha()
+    recorded = _gitlink_sha(_BHC_SUBMODULE)
+    assert recorded == pinned, (
+        f"install.sh pins bellhopcuda to {pinned} but HEAD's gitlink records "
+        f"{recorded}. Move the gitlink to the pin:\n"
+        f"  git -C {_BHC_SUBMODULE} fetch origin && "
+        f"git -C {_BHC_SUBMODULE} checkout {pinned} && "
+        f"git add {_BHC_SUBMODULE}")
+
+
+# --- the .git symlink fix-up survives a copied or moved checkout ----------
+
+def _fake_superproject(root):
+    """A superproject layout with the submodule's ``.git`` as git writes it:
+    a ``gitdir:`` pointer file naming ``.git/modules/<path>`` relatively."""
+    gitdir = root / ".git" / "modules" / _BHC_SUBMODULE
+    gitdir.mkdir(parents=True)
+    (gitdir / "HEAD").write_text("ref: refs/heads/main\n")
+    bhc = root / _BHC_SUBMODULE
+    bhc.mkdir(parents=True)
+    (bhc / ".git").write_text(
+        "gitdir: ../../../.git/modules/uacpy/third_party/bellhopcuda\n")
+    return bhc
+
+
+def _run_fixup(root):
+    script = (
+        "set -euo pipefail\n"
+        f'SCRIPT_DIR="{root}"\nBHC_DIR="$SCRIPT_DIR/{_BHC_SUBMODULE}"\n'
+        + _source_function("fixup_bhc_dotgit")
+        + '\nfixup_bhc_dotgit\nreadlink "$BHC_DIR/.git"\n'
+    )
+    proc = _run_bash(script)
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout.strip()
+
+
+def test_the_dotgit_link_is_relative_and_resolves_after_the_checkout_moves(
+        tmp_path):
+    root = tmp_path / "super"
+    bhc = _fake_superproject(root)
+    target = _run_fixup(root)
+    assert not target.startswith("/"), target
+    assert (bhc / ".git" / "HEAD").is_file()
+    moved = tmp_path / "moved"
+    root.rename(moved)
+    assert (moved / _BHC_SUBMODULE / ".git" / "HEAD").is_file(), (
+        "the link dangles after the checkout moved")
+
+
+def test_a_resolving_relative_dotgit_link_is_left_untouched(tmp_path):
+    root = tmp_path / "super"
+    bhc = _fake_superproject(root)
+    first = _run_fixup(root)
+    inode = (bhc / ".git").lstat().st_ino
+    second = _run_fixup(root)
+    assert second == first
+    assert (bhc / ".git").lstat().st_ino == inode, "the link was rebuilt"
+
+
+def test_an_absolute_dotgit_link_is_rebuilt_relative(tmp_path):
+    root = tmp_path / "super"
+    bhc = _fake_superproject(root)
+    gitdir = root / ".git" / "modules" / _BHC_SUBMODULE
+    (bhc / ".git").unlink()
+    (bhc / ".git").symlink_to(gitdir)
+    target = _run_fixup(root)
+    assert not target.startswith("/"), target
+    assert (bhc / ".git" / "HEAD").is_file()
+
+
+def test_a_dangling_dotgit_link_is_repaired_from_the_modules_directory(
+        tmp_path):
+    root = tmp_path / "super"
+    bhc = _fake_superproject(root)
+    (bhc / ".git").unlink()
+    (bhc / ".git").symlink_to("/nonexistent/uacpy/.git/modules/bellhopcuda")
+    target = _run_fixup(root)
+    assert not target.startswith("/"), target
+    assert (bhc / ".git" / "HEAD").is_file()
+
+
+# --- one interpreter for every uacpy.data probe ---------------------------
+
+def _resolved_python(root, env_line):
+    script = (
+        "set -euo pipefail\n"
+        f'SCRIPT_DIR="{root}"\n{env_line}\n'
+        'UACPY_PYTHON="${UACPY_PYTHON:-}"\n'
+        + _source_function("resolve_uacpy_python")
+        + '\nresolve_uacpy_python\necho "$UACPY_PYTHON"\n'
+    )
+    proc = _run_bash(script)
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout.strip()
+
+
+def test_an_explicit_uacpy_python_wins_over_the_repo_venv(tmp_path):
+    venv_py = tmp_path / "uacpy_venv" / "bin" / "python"
+    venv_py.parent.mkdir(parents=True)
+    venv_py.write_text("#!/bin/sh\n")
+    venv_py.chmod(0o755)
+    assert _resolved_python(tmp_path, 'UACPY_PYTHON="/opt/py/bin/python"') \
+        == "/opt/py/bin/python"
+
+
+def test_the_repo_venv_wins_over_the_active_virtualenv(tmp_path):
+    venv_py = tmp_path / "uacpy_venv" / "bin" / "python"
+    venv_py.parent.mkdir(parents=True)
+    venv_py.write_text("#!/bin/sh\n")
+    venv_py.chmod(0o755)
+    other = tmp_path / "other" / "bin" / "python"
+    other.parent.mkdir(parents=True)
+    other.write_text("#!/bin/sh\n")
+    other.chmod(0o755)
+    assert _resolved_python(tmp_path, f'VIRTUAL_ENV="{tmp_path / "other"}"') \
+        == str(venv_py)
+
+
+def test_the_active_virtualenv_is_used_when_the_repo_has_no_venv(tmp_path):
+    other = tmp_path / "other" / "bin" / "python"
+    other.parent.mkdir(parents=True)
+    other.write_text("#!/bin/sh\n")
+    other.chmod(0o755)
+    assert _resolved_python(tmp_path, f'VIRTUAL_ENV="{tmp_path / "other"}"') \
+        == str(other)
+
+
+def test_a_non_executable_repo_venv_python_is_skipped(tmp_path):
+    venv_py = tmp_path / "uacpy_venv" / "bin" / "python"
+    venv_py.parent.mkdir(parents=True)
+    venv_py.write_text("#!/bin/sh\n")
+    venv_py.chmod(0o644)
+    assert _resolved_python(tmp_path, 'unset VIRTUAL_ENV') == "python3"
+
+
+def test_path_python3_is_the_last_resort(tmp_path):
+    assert _resolved_python(tmp_path, 'unset VIRTUAL_ENV') == "python3"
+
+
+def test_every_uacpy_data_probe_runs_the_resolved_interpreter():
+    """A bare ``python3 -c`` beside ``"$UACPY_PYTHON" -c`` would probe one
+    interpreter and download with another."""
+    body = _INSTALL_SH.read_text()
+    bare = [line for line in body.splitlines()
+            if re.search(r'(?<![\w"/$.-])python3 -c', line)]
+    assert not bare, bare
+    assert body.count('"$UACPY_PYTHON" -c "') >= 16
+    assert 'echo -e "python: ${GREEN}${UACPY_PYTHON}${NC}"' in body
+    assert 'not importable here' not in body
+
+
 #: Printed by the harness below after install.sh's own call line. The script
 #: reaches its summary block and ``exit 0`` from there, so a run that does not
 #: print it is a run the build record aborted.

@@ -1147,3 +1147,164 @@ class TestSparcSizesItsMeshPerMediumAtTheBandTop:
         from uacpy.models import SPARC
         assert SPARC(n_mesh=333, verbose=False)._resolve_n_mesh(
             self._layered(), 120.0) == 333
+
+
+class TestSourceTimeSeriesFromFile:
+    """A ``pulse_type`` opening with ``'F'`` (or ``'B'``, played backwards)
+    makes ``sparc.exe`` read its source series from ``STSFIL`` in the work
+    directory (``tslib/sourceMod.f90:44-46, 97``). ``SPARC.run`` stages
+    that file from ``source_waveform`` / ``sample_rate`` in the layout
+    ``ReadSTS`` reads (``:99-107``: a quoted title, ``Nsd SD(1:Nsd)``, then
+    ``t s(1:Nsd)`` rows), zero-padded to a power of two when the pulse is
+    band-passed (``tslib/bandpassc.f90:24-25`` stops on any other length),
+    and refuses a series the binary cannot use."""
+
+    @staticmethod
+    def _env():
+        return Environment(
+            name='sts', bathymetry=100.0, ssp=1500.0,
+            bottom=BoundaryProperties(acoustic_type='rigid'))
+
+    @staticmethod
+    def _pulse(fs=1000.0, duration=0.2, f0=30.0):
+        t = np.arange(0.0, duration, 1.0 / fs)
+        return np.exp(-((t - duration / 2) / (duration / 6)) ** 2) * \
+            np.sin(2 * np.pi * f0 * t)
+
+    def test_stsfil_carries_the_documented_layout(self, tmp_path):
+        model = SPARC(pulse_type='FN+B', verbose=False)
+        path = tmp_path / 'STSFIL'
+        waveform = np.array([0.0, 0.5, -0.25])
+        # 180 Hz: the 4 padded rows then span the 1/45 s the 15-60 Hz
+        # band-pass needs (the resolution guard has its own tests below).
+        model._write_source_time_series(
+            path, Source(depths=50.0, frequencies=30.0), waveform,
+            180.0, 30.0)
+        lines = path.read_text().splitlines()
+        assert lines[0] == "'uacpy source time series'"
+        assert lines[1] == '1 50.000000'
+        rows = [line.split() for line in lines[2:]]
+        # 3 samples, padded to 4 (a power of two) for the band-pass.
+        assert len(rows) == 4
+        times = np.array([float(r[0]) for r in rows])
+        values = np.array([float(r[1]) for r in rows])
+        assert np.allclose(times, np.arange(4) / 180.0)
+        assert np.allclose(values, [0.0, 0.5, -0.25, 0.0])
+        assert all(len(r) == 2 for r in rows)
+
+    def test_the_deck_names_the_file_letter_and_the_series_is_unpadded_without_the_filter(
+            self, tmp_path):
+        model = SPARC(pulse_type='BN+N', verbose=False)
+        model._write_source_time_series(
+            tmp_path / 'STSFIL', Source(depths=50.0, frequencies=30.0),
+            np.array([0.0, 1.0, 0.0]), 1000.0, 30.0)
+        assert len((tmp_path / 'STSFIL').read_text().splitlines()) == 2 + 3
+        model._write_sparc_env(
+            tmp_path / 'deck.env', self._env(),
+            Source(depths=50.0, frequencies=30.0),
+            Receiver(depths=[50.0], ranges=[500.0]))
+        assert "'BN+N'" in (tmp_path / 'deck.env').read_text()
+
+    @pytest.mark.requires_binary
+    def test_a_short_gaussian_pulse_marches_to_a_finite_nonzero_trace(
+            self, tmp_path):
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            result = SPARC(pulse_type='FN+B', verbose=False,
+                           work_dir=tmp_path, cleanup=False).run(
+                self._env(), Source(depths=50.0, frequencies=30.0),
+                Receiver(depths=[50.0], ranges=[500.0]),
+                run_mode=RunMode.TIME_SERIES,
+                source_waveform=self._pulse(), sample_rate=1000.0)
+        assert (tmp_path / 'STSFIL').exists()
+        data = np.asarray(result.data, dtype=float)
+        assert data.shape[:2] == (1, 1)
+        assert np.isfinite(data).all()
+        assert np.abs(data).max() > 0.0
+
+    def test_requesting_f_without_a_waveform_names_source_waveform(self):
+        with pytest.raises(ConfigurationError,
+                           match=r"source_waveform") as ei:
+            SPARC(pulse_type='FN+B', verbose=False).run(
+                self._env(), Source(depths=50.0, frequencies=30.0),
+                Receiver(depths=[50.0], ranges=[500.0]))
+        assert 'sourceMod.f90' in str(ei.value)
+
+    def test_a_waveform_without_a_sample_rate_is_refused_too(self):
+        with pytest.raises(ConfigurationError, match=r"sample_rate"):
+            SPARC(pulse_type='FN+B', verbose=False).run(
+                self._env(), Source(depths=50.0, frequencies=30.0),
+                Receiver(depths=[50.0], ranges=[500.0]),
+                source_waveform=self._pulse())
+
+    def test_a_canned_pulse_warns_that_the_waveform_pair_is_ignored(
+            self, monkeypatch):
+        model = SPARC(pulse_type='PN+B', verbose=False)
+
+        def no_work_dir():
+            raise RuntimeError('stop before the work directory')
+        monkeypatch.setattr(model, '_setup_file_manager', no_work_dir)
+        with pytest.warns(UserWarning, match=r"ignoring source_waveform="):
+            with pytest.raises(RuntimeError):
+                model.run(self._env(), Source(depths=50.0, frequencies=30.0),
+                          Receiver(depths=[50.0], ranges=[500.0]),
+                          source_waveform=self._pulse(), sample_rate=1000.0)
+
+    def test_fewer_than_two_samples_is_refused(self):
+        with pytest.raises(ConfigurationError, match=r"TF\(2\) - TF\(1\)"):
+            SPARC(pulse_type='FN+B', verbose=False)._require_source_time_series(
+                np.array([1.0]), 1000.0)
+
+    def test_two_samples_pass_the_length_guard(self):
+        out = SPARC(pulse_type='FN+B', verbose=False)._require_source_time_series(
+            np.array([1.0, 0.0]), 1000.0)
+        assert out.shape == (2,)
+
+    def test_a_padded_series_shorter_than_the_band_resolution_is_refused(
+            self, tmp_path):
+        # Band 15-60 Hz needs 1/45 s; 4 samples at 1 kHz span 4 ms.
+        model = SPARC(pulse_type='FN+B', verbose=False)
+        with pytest.raises(ConfigurationError,
+                           match=r"bandpassc\.f90:14-16") as ei:
+            model._write_source_time_series(
+                tmp_path / 'STSFIL', Source(depths=50.0, frequencies=30.0),
+                np.array([0.0, 1.0, 0.0]), 1000.0, 30.0)
+        assert 'np.pad(source_waveform, (0, 20))' in str(ei.value)
+        assert not (tmp_path / 'STSFIL').exists()
+
+    def test_a_padded_series_exactly_at_the_band_resolution_is_written(
+            self, tmp_path):
+        # 32 samples at 32*45 Hz span exactly 1/45 s.
+        SPARC(pulse_type='FN+B', verbose=False)._write_source_time_series(
+            tmp_path / 'STSFIL', Source(depths=50.0, frequencies=30.0),
+            np.zeros(32), 32.0 * 45.0, 30.0)
+        assert len((tmp_path / 'STSFIL').read_text().splitlines()) == 2 + 32
+
+    def test_a_series_over_the_binarys_point_cap_is_refused(
+            self, tmp_path, monkeypatch):
+        # sourceMod.f90:7 caps rows x source depths at 1e7; the cap is
+        # lowered so the boundary is reachable without allocating it.
+        monkeypatch.setattr(SPARC, '_MAX_STS_POINTS', 8)
+        model = SPARC(pulse_type='FN+N', verbose=False)
+        with pytest.raises(ConfigurationError,
+                           match=r"sourceMod\.f90:7,116") as ei:
+            model._write_source_time_series(
+                tmp_path / 'STSFIL', Source(depths=50.0, frequencies=30.0),
+                np.zeros(9), 1000.0, 30.0)
+        assert 'at most 8 samples' in str(ei.value)
+        assert not (tmp_path / 'STSFIL').exists()
+
+    def test_a_series_exactly_at_the_point_cap_is_written(
+            self, tmp_path, monkeypatch):
+        monkeypatch.setattr(SPARC, '_MAX_STS_POINTS', 8)
+        SPARC(pulse_type='FN+N', verbose=False)._write_source_time_series(
+            tmp_path / 'STSFIL', Source(depths=50.0, frequencies=30.0),
+            np.zeros(8), 1000.0, 30.0)
+        assert len((tmp_path / 'STSFIL').read_text().splitlines()) == 2 + 8
+
+    def test_the_unfiltered_letter_skips_the_band_resolution_guard(
+            self, tmp_path):
+        SPARC(pulse_type='FN+N', verbose=False)._write_source_time_series(
+            tmp_path / 'STSFIL', Source(depths=50.0, frequencies=30.0),
+            np.array([0.0, 1.0, 0.0]), 1000.0, 30.0)
+        assert (tmp_path / 'STSFIL').exists()

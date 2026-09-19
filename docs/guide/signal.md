@@ -604,7 +604,7 @@ wavenumber. Each has a standalone inverse.
 
 | Forward | Returns | Inverse |
 |---|---|---|
-| `fk_transform(data, sample_rate, dx, *, nperseg=None, noverlap=None, window=None, nfft=None, normalize=False)` | `FKResult(frequencies, wavenumbers, power, spectrum)` | `inverse_fk(spectrum)` |
+| `fk_transform(data, sample_rate, dx, *, nperseg=None, noverlap=None, window=None, nfft=None, normalize=False)` | `FKResult(frequencies, wavenumbers, power, spectrum)`, carrying `.scaling` (`'density'` when `normalize=True`, else `'power'`) | `inverse_fk(spectrum)` |
 | `taup_transform(data, sample_rate, dx, slownesses=None, n_slowness=201, p_max=None, *, x0=0.0, window=None, nfft=None)` | `TauPResult(slownesses, taus, panel)` | `inverse_taup(taup, slownesses, sample_rate, dx, nx, *, x0=0.0)` |
 | `radon_transform(data, sample_rate, dx, moveout, kind='linear', x0=0.0)` | `RadonResult(moveout, taus, panel)` | `inverse_radon(R, sample_rate, dx, moveout, nx, kind='linear', x0=0.0)` |
 
@@ -666,6 +666,21 @@ depth) is `k > 0`. Muting `k < 0` for `f > 0`, and its conjugate `k > 0` for
 `f < 0`, is what keeps the down-going field. Get the conjugate quadrant wrong
 and `inverse_fk` returns a complex-symmetry-violating panel that no longer
 means anything.
+
+**Units.** `power` is in one of two scalings, and the result says which in
+its `scaling` attribute (a fifth tuple element would have changed every
+four-wide unpack for one flag the plotter reads). With `normalize=True` it is
+a two-sided density in `x²` per `Hz·rad/m`, `ΣP·Δf·Δk = ⟨x²⟩`, so for a
+pressure record the unit is Pa²·m/(Hz·rad) and `scaling` reads `'density'`.
+With the default `normalize=False` it is the raw `|FK|²` of the windowed,
+zero-padded FFT: it grows with the record (`ΣP = Σx²·NF·NX` for a boxcar with
+no padding), carries no physical unit, and `scaling` reads `'power'`.
+`plot_fk(result)` labels the colour axis from that attribute — "PSD (dB re
+1µPa²·m/(Hz·rad))" for a density, "|FK|² (dB re 1µPa², unnormalised)" for
+the raw panel — and with bare arrays `scaling=` must state it. Its
+`wavenumber_unit='cycles/m'` draws the abscissa as `ν = k/2π`; a density is
+then multiplied by 2π so that `ΣP·Δf·Δν` is still `⟨x²⟩` and the label reads
+Pa²·m/Hz, while a raw panel is left as it is.
 
 **Invertibility is a property of how you called the forward transform.**
 `fk_transform` with `nperseg=None` (the default) uses the whole record as one

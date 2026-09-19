@@ -10,6 +10,8 @@ Volume attenuation is honoured by Bellhop, Kraken, Scooter and RAM (every RAM
 backend takes it as a dB-per-wavelength profile on the water wavenumber). OASES
 substitutes its own internal Skretting-Leroy attenuation for AC=0 water layers
 and says so at runtime.
+OAST needs OASES (./install.sh --oases yes); without it the example runs
+the other models and says so.
 
 Uses: SoundSpeedProfile.from_2d · Bottom.from_halfspaces · uacpy.Thorp ·
 Kraken(mode_coupling=, n_segments=) · env.plot · compare_models(ncols=,
@@ -66,13 +68,18 @@ receiver = uacpy.Receiver(depths=np.linspace(5, 165, 30),
 
 # Kraken runs adiabatic here: each mode propagates independently, so the
 # range-dependent guide costs one mode solve per segment and no more.
+# OAST is the optional fifth: it needs the OASES binaries, and without them
+# the comparison runs on the other four.
 models = {'Bellhop': uacpy.Bellhop(),
           'RAM': uacpy.RAM(accuracy=1e-1),
           'Kraken': uacpy.Kraken(mode_coupling='adiabatic', n_segments=4),
-          'Scooter': uacpy.Scooter(),
-          'OAST': uacpy.OAST()}
+          'Scooter': uacpy.Scooter()}
 fields = {name: model.run(env, source, receiver)
           for name, model in models.items()}
+try:
+    fields['OAST'] = uacpy.OAST().run(env, source, receiver)
+except uacpy.ExecutableNotFoundError:
+    print("  OAST skipped: OASES executable not found (./install.sh --oases yes)")
 for name, field in fields.items():
     # NaN-aware: RAM masks sub-seafloor cells, so a plain mean would be nan.
     print(f"  {name:8s} TL [{np.nanmin(field.dB):5.1f}, "

@@ -867,3 +867,54 @@ def test_every_grain_size_provider_takes_the_model_keyword():
     assert flags == {'emodnet': True, 'grainsize': True, 'crust1': False,
                      'graw': True, 'diesing': True, 'mars': True,
                      'pelagic': True}
+
+
+@pytest.mark.parametrize('axis, spelling', [
+    ('bathymetry_sources', 'GEBCO'),
+    ('bathymetry_sources', 'Gebco'),
+    ('bathymetry_sources', 'AUTO'),
+    ('ssp_sources', 'WOA23'),
+    ('ssp_sources', 'Woa23'),
+    ('bottom_sources', 'PELAGIC'),
+    ('bottom_sources', 'Pelagic'),
+    ('bottom_sources', 'EMODNET'),
+])
+def test_source_names_resolve_in_any_case_on_every_route(
+        monkeypatch, stub_fetchers, axis, spelling):
+    """``'GEBCO'`` selects the same backend as ``'gebco'`` on the bathymetry,
+    SSP and bottom routes, presets included: every route lowers its names
+    the same way, so a spelling accepted on one route is accepted on all."""
+    if axis == 'bottom_sources':
+        # EMODnet is a network provider; the pelagic one reads the stubbed
+        # bathymetry. Either way the name must pass the unknown-source check
+        # before any fetch is tried, which the stub below observes.
+        seen = []
+
+        def _spy(order, *args, **kwargs):
+            seen.append(order)
+            raise env_mod.DataFetchError('stubbed bottom fetch')
+        monkeypatch.setattr(env_mod, '_fetch_bottom', _spy)
+        env_mod.fetch_environment((43.2, 7.5), bottom=1650.0,
+                                  **{axis: spelling})
+        assert seen and seen[0] == (spelling.lower(),)
+        return
+    env = env_mod.fetch_environment((43.2, 7.5), **{axis: spelling})
+    assert env.depth == 2000.0
+
+
+def test_a_mixed_case_surface_source_passes_the_name_check(monkeypatch):
+    """``'SeaIce'`` is the sea-ice source, so with no ``date=`` the run
+    reaches the documented literal fallback instead of an unknown-source
+    refusal."""
+    ice = BoundaryProperties(acoustic_type='half-space', sound_speed=3500.0,
+                             density=0.9, attenuation=0.4, shear_speed=1800.0,
+                             shear_attenuation=1.0)
+    env = env_mod.fetch_environment((75.0, -10.0), bathymetry=2000.0,
+                                    ssp=1500.0, surface_sources='SeaIce',
+                                    surface=ice)
+    assert env.surface.properties[0].sound_speed == 3500.0
+
+
+def test_an_unknown_source_is_refused_whatever_its_case(stub_fetchers):
+    with pytest.raises(ConfigurationError, match="unknown bathymetry source"):
+        env_mod.fetch_environment((43.2, 7.5), bathymetry_sources='NOPE')

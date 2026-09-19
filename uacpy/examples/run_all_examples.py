@@ -16,8 +16,10 @@ Usage
 
 Exit status is non-zero if any example fails (so it doubles as a local
 gate). Requires the native binaries (``./install.sh``) for the model
-examples and the data cache / network for ``example_37`` — a failure there
-just means those prerequisites are absent on this machine.
+examples, OASES (``./install.sh --oases yes``) for examples 13 and 39 and for
+the OASES panel of 03, 07, 08 and 19 (which run their other models without
+it), and the data cache / network for ``example_37`` — a failure there just
+means those prerequisites are absent on this machine.
 """
 
 from __future__ import annotations

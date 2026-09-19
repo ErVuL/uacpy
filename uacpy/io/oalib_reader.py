@@ -768,8 +768,8 @@ def _merge_bracketing_pairs(omega, amps, phases, delays_r, delays_i,
     emulated: the file already holds only the records Bellhop kept.
 
     Parameters are the eight per-arrival arrays of one receiver cell, with
-    ``phases`` in degrees as read from the file (``AddArr`` compares phase
-    in radians; ``WriteArrivalsASCII`` converts on write,
+    ``phases`` in radians, the unit the reader stores (``AddArr`` compares
+    phase in radians, ``ArrMod.f90:45``; the file column is degrees,
     ``ArrMod.f90:120``). Returns the eight arrays merged, in visit order.
     """
     order = np.lexsort((delays_r, src_angs))
@@ -779,7 +779,7 @@ def _merge_bracketing_pairs(omega, amps, phases, delays_r, delays_i,
             last = kept[-1]
             d_delay = np.hypot(delays_r[idx] - last[2],
                                delays_i[idx] - last[3])
-            d_phase = np.deg2rad(abs(phases[idx] - last[1]))
+            d_phase = abs(phases[idx] - last[1])
             if (omega * d_delay < _ADDARR_PHASE_TOL
                     and d_phase < _ADDARR_PHASE_TOL):
                 amp_tot = last[0] + amps[idx]
@@ -865,7 +865,10 @@ def read_arr_file(filepath: Union[str, Path], *, grid_type: str = 'R',
           ``4·sqrt(pi)`` for a line source, and a fixed ``1e5`` at ``r == 0``
           to avoid the division — so an ``r = 0`` receiver carries an
           arbitrary magnitude, not a physical one.
-        - ``phases`` : degrees.
+        - ``phases`` : **radians**. The ``.arr`` column is degrees
+          (``Bellhop/ArrMod.f90:120`` writes ``RadDeg * Phase``); the
+          reader converts once, here, so ``exp(1j * phases)`` is the
+          arrival's complex factor everywhere downstream.
         - ``delays`` : real part of travel time in **seconds**.
         - ``delays_imag`` : imaginary part of travel time in **seconds**;
           carries volume-attenuation loss so that
@@ -1029,7 +1032,10 @@ def read_arr_file(filepath: Union[str, Path], *, grid_type: str = 'R',
                         n_bots.append(int(values[7]))
 
                     amps = np.array(amps)
-                    phases = np.array(phases)
+                    # The Phase column is degrees (Bellhop/ArrMod.f90:120
+                    # writes ``SNGL(RadDeg) * Phase``); every consumer wants
+                    # exp(1j * phase), so the unit is converted here, once.
+                    phases = np.deg2rad(np.array(phases))
                     delays_r = np.array(delays_r)
                     delays_i = np.array(delays_i)
                     src_angs = np.array(src_angs)

@@ -265,10 +265,13 @@ class SPARC(PropagationModel):
     Range-independent time-marched FFP. Only ``Vacuum`` / ``Rigid``
     bottom interfaces are supported (the writer auto-converts
     halfspaces to rigid). ``RunMode.TIME_SERIES`` returns a
-    :class:`Field` directly; SPARC drives its source pulse via the
-    constructor ``pulse_type`` so passing ``source_waveform`` /
-    ``sample_rate`` to ``run()`` emits a ``UserWarning`` (they have no
-    effect on the SPARC simulation).
+    :class:`Field` directly. SPARC drives its source pulse via the
+    constructor ``pulse_type``: with a canned wavelet (``'P'``, ``'R'``,
+    ...) passing ``source_waveform`` / ``sample_rate`` to ``run()`` emits a
+    ``UserWarning`` (they have no effect on the simulation); with a
+    ``pulse_type`` opening ``'F'`` (or ``'B'``, played backwards) the pair
+    is required and is staged as the ``STSFIL`` series the binary marches
+    (see :meth:`_write_source_time_series`).
 
     All three ``output_mode``s share one output grid: ``n_t_out``
     samples over ``[0, t_max]`` (``t_start`` only sets where the time
@@ -557,21 +560,39 @@ class SPARC(PropagationModel):
             )
         run_mode = self._resolve_run_mode(run_mode)
 
-        # SPARC builds p(t) from its native pulse_type on its own time grid
-        # at source.frequencies — none of the contract extras can influence
-        # the run.
-        self._warn_ignored_run_kwargs(
-            run_mode,
-            reason=(
-                "SPARC builds p(t) from its native pulse_type over its own "
-                "time grid at source.frequencies; pass SPARC(pulse_type=...) "
-                "to shape the pulse"
-            ),
-            frequencies=frequencies,
-            source_waveform=source_waveform,
-            sample_rate=sample_rate,
-            output_duration=output_duration,
-        )
+        # A pulse_type opening with 'F' or 'B' makes the binary read its
+        # source time series from STSFIL (tslib/sourceMod.f90:44-46), which
+        # the run() waveform pair supplies; every other letter is a canned
+        # wavelet the binary tabulates itself, and the pair is then ignored.
+        reads_sts_file = self.pulse_type[0] in 'FB'
+        if reads_sts_file:
+            waveform = self._require_source_time_series(
+                source_waveform, sample_rate)
+            self._warn_ignored_run_kwargs(
+                run_mode,
+                reason=(
+                    "SPARC marches on its own time grid at the deck's pulse "
+                    "band; only source_waveform / sample_rate reach the run, "
+                    "as the STSFIL series"
+                ),
+                frequencies=frequencies,
+                output_duration=output_duration,
+            )
+        else:
+            waveform = None
+            self._warn_ignored_run_kwargs(
+                run_mode,
+                reason=(
+                    "SPARC builds p(t) from its native pulse_type over its "
+                    "own time grid at source.frequencies; pass "
+                    "SPARC(pulse_type=...) to shape the pulse, or a "
+                    "pulse_type opening with 'F' to march the given waveform"
+                ),
+                frequencies=frequencies,
+                source_waveform=source_waveform,
+                sample_rate=sample_rate,
+                output_duration=output_duration,
+            )
         env = self._project_environment(env)
         env = self._sparc_rigidify_halfspace(env)
         media_depth = self._total_media_depth(env)
@@ -584,6 +605,14 @@ class SPARC(PropagationModel):
         try:
             base_name = 'model'
             freq = self._resolve_pulse_frequency(source)
+            if reads_sts_file:
+                # One STSFIL per work directory: sparc.f90:525 calls SOURCE
+                # in every output mode's march, and sourceMod.f90:97 opens
+                # the fixed name in the cwd, which _run_sparc sets to the
+                # work directory shared by every run of the R/D loops.
+                self._write_source_time_series(
+                    fm.get_path('STSFIL'), source, waveform,
+                    float(sample_rate), freq)
 
             if self.output_mode == 'S':
                 result = self._run_snapshot(fm, env, source, receiver,
@@ -1216,9 +1245,7 @@ class SPARC(PropagationModel):
         # FFT at the analysis frequency pick up almost nothing, while a 10×
         # band blows Nk up and times out. One octave (freq/2 .. freq*2) is the
         # sweet spot. Callers override via constructor kwargs.
-        freq = source.frequencies[0]
-        f_min = self.f_min if self.f_min is not None else max(freq / 2.0, 0.1)
-        f_max = self.f_max if self.f_max is not None else freq * 2.0
+        f_min, f_max = self._resolve_pulse_band(float(source.frequencies[0]))
 
         # Time output window (s), anchored on the travel time to the farthest
         # receiver (r_ref) — not on rmax_m, whose rmax_safety_margin factor is
@@ -1285,6 +1312,157 @@ class SPARC(PropagationModel):
             t_max=t_max,
             t_start=self.t_start, t_mult=self.t_mult,
         )
+
+    def _resolve_pulse_band(self, freq: float):
+        """``(f_min, f_max)`` of the deck's pulse band (Hz): the constructor
+        values where given, else one octave around ``freq`` with the low
+        edge floored at 0.1 Hz."""
+        f_min = self.f_min if self.f_min is not None else max(freq / 2.0, 0.1)
+        f_max = self.f_max if self.f_max is not None else freq * 2.0
+        return float(f_min), float(f_max)
+
+    def _require_source_time_series(self, source_waveform, sample_rate):
+        """The 1-D real waveform STSFIL will carry, validated.
+
+        Raises :class:`ConfigurationError` when a ``pulse_type`` opening
+        with ``'F'`` / ``'B'`` is run without both ``source_waveform`` and
+        ``sample_rate``, when the waveform is not one real finite series,
+        or when it has fewer than two samples (``tslib/sourceMod.f90:47``
+        takes the step as ``TF(2) - TF(1)``). The value checks are the
+        shared :meth:`_require_timeseries_signal` ones.
+        """
+        letter = self.pulse_type[0]
+        if source_waveform is None or sample_rate is None:
+            raise ConfigurationError(
+                f"SPARC(pulse_type={self.pulse_type!r}): the leading "
+                f"{letter!r} makes the binary read its source time series "
+                f"from a file (tslib/sourceMod.f90:44-46), so run() needs "
+                f"both source_waveform (a 1-D pressure series) and "
+                f"sample_rate (Hz); got source_waveform="
+                f"{'None' if source_waveform is None else 'given'}, "
+                f"sample_rate={sample_rate!r}.",
+                remediation=(
+                    f"SPARC(pulse_type={self.pulse_type!r}).run(env, source, "
+                    f"receiver, source_waveform=pulse, sample_rate=fs), or a "
+                    f"canned pulse_type such as 'PN+B'."
+                ),
+            )
+        waveform = self._require_timeseries_signal(
+            RunMode.TIME_SERIES, source_waveform, sample_rate)
+        waveform = np.atleast_1d(np.asarray(waveform, dtype=float))
+        if waveform.ndim != 1:
+            raise ConfigurationError(
+                f"SPARC: source_waveform must be a 1-D series (it is written "
+                f"once per source depth into STSFIL); got shape "
+                f"{waveform.shape}.",
+                remediation="source_waveform=np.ravel(pulse)",
+            )
+        if waveform.size < 2:
+            raise ConfigurationError(
+                f"SPARC: source_waveform has {waveform.size} sample(s); the "
+                f"binary takes its time step from the first two "
+                f"(tslib/sourceMod.f90:47, TF(2) - TF(1)).",
+                remediation="Pass a series of at least 2 samples.",
+            )
+        return waveform
+
+    #: ``tslib/sourceMod.f90:7`` — the most samples STSFIL may hold in
+    #: total (rows × source depths); ``:116`` stops the read past it.
+    _MAX_STS_POINTS = 10_000_000
+
+    def _write_source_time_series(self, path, source, waveform,
+                                  sample_rate, freq) -> None:
+        """Write ``STSFIL`` in the layout ``tslib/sourceMod.f90:97-117``
+        reads.
+
+        Record layout (list-directed reads, so the title is quoted)::
+
+            'uacpy source time series'          ! :99  PulseTitle
+            Nsd  SD(1) ... SD(Nsd)              ! :100 count, source depths
+            t    s(1) ... s(Nsd)                ! :107 one row per sample
+            ...                                 !      until end of file
+
+        ``t`` is in seconds from 0 at ``1/sample_rate`` steps; the binary
+        interpolates linearly between rows (``:144-183``) and drives a zero
+        source outside ``[t_first, t_last]`` (``:172-174``), so the march,
+        which starts at ``t_start`` (default -0.1 s) from a field at rest,
+        meets the waveform from t = 0. The same series is written under
+        every source depth of the deck, whose count must match the row
+        width (``:100`` reads ``SD`` with the deck's ``NSz``). A leading
+        ``'B'`` makes the binary play the file backwards (``:125-136``);
+        the file is the same.
+
+        Unless ``pulse_type[3] == 'N'`` the binary band-passes the series
+        once per wavenumber (``:68``, ``tslib/bandpassc.f90``) between the
+        cuts ``sparc.f90:391-401`` sets for that wavenumber — ``k·cLow/2π``
+        under ``'L'``/``'B'``, ``k·cHigh/2π`` under ``'H'``/``'B'``, else 0
+        and ``10·fMax`` — which (a) stops on any length that is not a
+        power of two (``bandpassc.f90:24-25``), so the series is
+        zero-padded up to one, and (b) truncates each cut to an integer
+        FFT bin of width ``1/(Nt·Δt)`` (``bandpassc.f90:14-16``). The
+        wavenumber loop sweeps those cuts across the deck's pulse band
+        ``[f_min, f_max]``, so a padded series shorter than
+        ``1/(f_max - f_min)`` gives every wavenumber's cut the same one or
+        two bins and the per-wavenumber filtering collapses; that length
+        is refused with the sample count that fixes it.
+
+        The band-pass is circular (an FFT over the whole record), so a
+        series should lead with zeros rather than start on its pulse: a
+        pulse placed at row 0 loses about a fifth of its peak level to the
+        filter's wrap at the window edge (measured 19 %).
+        """
+        n = int(waveform.size)
+        n_depths = int(np.atleast_1d(np.asarray(source.depths)).size)
+        filtered = self.pulse_type[3] != 'N'
+        n_write = (1 << max(1, int(np.ceil(np.log2(n))))) if filtered else n
+        if n_write * n_depths > self._MAX_STS_POINTS:
+            raise ConfigurationError(
+                f"SPARC: STSFIL would hold {n_write} rows x {n_depths} "
+                f"source depth(s) = {n_write * n_depths} points, over the "
+                f"{self._MAX_STS_POINTS} the binary reads "
+                f"(tslib/sourceMod.f90:7,116).",
+                remediation=(
+                    f"Shorten or decimate source_waveform to at most "
+                    f"{self._MAX_STS_POINTS // n_depths} samples "
+                    f"(after zero-padding to a power of two when the pulse "
+                    f"is band-passed)."
+                ),
+            )
+        if filtered:
+            f_min, f_max = self._resolve_pulse_band(freq)
+            duration = n_write / sample_rate
+            needed = 1.0 / (f_max - f_min)
+            if duration < needed * (1.0 - 1e-9):
+                n_needed = int(np.ceil(needed * sample_rate))
+                raise ConfigurationError(
+                    f"SPARC: source_waveform spans {duration:.6g} s "
+                    f"({n_write} samples at {sample_rate:.6g} Hz, after "
+                    f"zero-padding to a power of two for the band-pass), "
+                    f"shorter than 1/(f_max - f_min) = {needed:.6g} s. The "
+                    f"binary band-passes the series once per wavenumber "
+                    f"between cuts it sweeps across the "
+                    f"{f_min:.6g}-{f_max:.6g} Hz pulse band "
+                    f"(sparc.f90:391-401) and truncates each cut to an FFT "
+                    f"bin of width 1/duration (tslib/bandpassc.f90:14-16), "
+                    f"so this record gives every wavenumber the same bins.",
+                    remediation=(
+                        f"np.pad(source_waveform, (0, {n_needed - n})) "
+                        f"(zero-pad to at least {n_needed} samples), or "
+                        f"SPARC(pulse_type='{self.pulse_type[:3]}N') to "
+                        f"skip the band-pass."
+                    ),
+                )
+        depths = np.atleast_1d(np.asarray(source.depths, dtype=float))
+        series = np.zeros(n_write)
+        series[:n] = waveform
+        times = np.arange(n_write) / sample_rate
+        with open(path, 'w') as f:
+            f.write("'uacpy source time series'\n")
+            f.write(f"{n_depths} " + " ".join(f"{d:.6f}" for d in depths)
+                    + "\n")
+            for t, v in zip(times, series):
+                f.write(f"{t:.9e} " + " ".join([f"{v:.9e}"] * n_depths)
+                        + "\n")
 
     def _resolve_n_t_out(self, f_max, t_max):
         """Output time-sample count — the caller's ``n_t_out``, with a warning

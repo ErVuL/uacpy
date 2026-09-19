@@ -420,6 +420,7 @@ class TestTheBroadbandTailIsShared:
         assert calls == [dict(source_waveform='pulse', sample_rate=8000.0)]
 
 
+@pytest.mark.requires_binary  # constructs models (resolves their binaries)
 class TestBasePlumbing:
     """Shared ``PropagationModel`` behaviour that no single wrapper owns."""
 
@@ -459,6 +460,7 @@ class TestBasePlumbing:
         assert result.backend == 'bounce'
 
 
+@pytest.mark.requires_binary  # runs the models
 class TestModelConsistency:
     """Tests for consistency between different models."""
 

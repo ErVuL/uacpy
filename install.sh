@@ -387,6 +387,27 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# The one interpreter every uacpy.data probe and download below runs under.
+# Resolved once so the import probes and the downloads agree on which Python
+# they mean, and printed in the banner so a "not importable" note names the
+# interpreter that was tried. Precedence: an explicit UACPY_PYTHON in the
+# environment, the repo's own uacpy_venv, the active virtualenv, then the
+# python3 on PATH.
+UACPY_PYTHON="${UACPY_PYTHON:-}"
+resolve_uacpy_python() {
+    if [ -n "$UACPY_PYTHON" ]; then
+        return 0
+    fi
+    if [ -x "$SCRIPT_DIR/uacpy_venv/bin/python" ]; then
+        UACPY_PYTHON="$SCRIPT_DIR/uacpy_venv/bin/python"
+    elif [ -n "${VIRTUAL_ENV:-}" ] && [ -x "$VIRTUAL_ENV/bin/python" ]; then
+        UACPY_PYTHON="$VIRTUAL_ENV/bin/python"
+    else
+        UACPY_PYTHON="python3"
+    fi
+}
+resolve_uacpy_python
+
 # Per-run build logs (kept after the run for post-mortem reading).
 BUILD_LOG_DIR="$(mktemp -d -t uacpy_build_logs.XXXXXX)"
 
@@ -431,6 +452,7 @@ echo -e "${BLUE}  UACPY Model Installer${NC}"
 echo -e "${BLUE}============================================${NC}"
 echo ""
 echo -e "Detected OS: ${GREEN}$OS${NC}"
+echo -e "python: ${GREEN}${UACPY_PYTHON}${NC}"
 if [[ $AUTO_YES -eq 1 ]]; then
     echo -e "Mode: ${YELLOW}Non-interactive (auto-detect)${NC}"
 else
@@ -598,7 +620,7 @@ fi
 
 # Choose which (if any) offline datasets to download for uacpy.data's local
 # backend. Mirrors choose_oases: respects an explicit --data flag, otherwise
-# prompts interactively. Because the grids are large (GEBCO ~4 GB), -y does NOT
+# prompts interactively. Because the grids are large (GEBCO ~7.5 GB), -y does NOT
 # auto-download — the user must opt in via --data or the prompt.
 validate_data_selection() {
     # Drop unknown ids from a --data list, the way choose_bellhop / choose_oases
@@ -676,7 +698,7 @@ choose_data() {
         && sel="${sel}woa23,"
     prompt_yes_no "  • GLODAPv2.2016b mapped seawater pH, global (~211 MB tarball → pH grid, CC-BY 4.0)?" \
         && sel="${sel}glodap,"
-    prompt_yes_no "  • GEBCO 2025 bathymetry grid (~4 GB, public domain)?" \
+    prompt_yes_no "  • GEBCO 2025 bathymetry grid (~7.5 GB, public domain)?" \
         && sel="${sel}gebco,"
     INSTALL_DATA="${sel%,}"
     if [[ -z "$INSTALL_DATA" ]]; then
@@ -799,7 +821,7 @@ check_bellhopcuda_submodule() {
     # without --recurse-submodules.
     if [ -f "$SCRIPT_DIR/.gitmodules" ] && command_exists git; then
         echo -e "${BLUE}Initializing bellhopcuda + GLM submodules...${NC}"
-        (cd "$SCRIPT_DIR" && git submodule update --init --recursive) 2>&1 | tail -5
+        (cd "$SCRIPT_DIR" && git submodule update --init --recursive) 2>&1 | tail -5 || true
         if [ -f "$BHC_DIR/CMakeLists.txt" ] && [ -f "$BHC_DIR/glm/glm/glm.hpp" ]; then
             echo -e "${GREEN}✓ submodules initialized${NC}"
             fixup_bhc_dotgit
@@ -812,23 +834,45 @@ check_bellhopcuda_submodule() {
         "Run: git submodule update --init --recursive (from the uacpy repo root)"
 }
 
-# Workaround for upstream bellhopcuda issue: config/CMakeLists.txt installs a
-# clang-format pre-commit hook by copying into ${PROJECT_SOURCE_DIR}/.git/hooks/.
-# When bellhopcuda is a submodule, .git is a regular file (a "gitdir: ..."
-# pointer), so file(COPY) fails with "Not a directory". Replace the .git file
-# with a symlink to the resolved gitdir so .git/hooks/ resolves correctly.
+# bellhopcuda's config/CMakeLists.txt installs a clang-format pre-commit hook
+# with file(COPY ... ${PROJECT_SOURCE_DIR}/.git/hooks/), which needs .git to be
+# a real directory. In a submodule checkout .git is a one-line
+# "gitdir: <path>" pointer file, so that copy fails with "Not a directory".
+# This replaces the pointer file with a symlink to the directory it names.
+# The link target is relative to $BHC_DIR, the way git's own pointer is, so a
+# checkout that is copied or moved as a whole keeps a link that resolves; an
+# absolute target dangles as soon as the tree moves. A link that is already
+# relative and resolves is left untouched; an absolute or dangling one is
+# rebuilt from the directory it resolves to, or from git's standard
+# .git/modules/<submodule path> location when it no longer resolves.
 fixup_bhc_dotgit() {
-    if [ ! -f "$BHC_DIR/.git" ]; then
-        return 0   # already a directory or symlink
+    local dotgit="$BHC_DIR/.git" gitdir_rel gitdir_abs link_target
+    if [ -L "$dotgit" ]; then
+        link_target="$(readlink "$dotgit")"
+        if [[ "$link_target" != /* ]] && [ -d "$dotgit/" ]; then
+            return 0
+        fi
+        gitdir_abs="$(cd "$dotgit/" 2>/dev/null && pwd -P)" \
+            || gitdir_abs="$SCRIPT_DIR/.git/modules/uacpy/third_party/bellhopcuda"
+    elif [ -f "$dotgit" ]; then
+        gitdir_rel="$(sed -n 's|^gitdir: ||p' "$dotgit")"
+        if [ -z "$gitdir_rel" ]; then
+            return 0
+        fi
+        gitdir_abs="$(cd "$BHC_DIR" && cd "$gitdir_rel" 2>/dev/null && pwd -P)" || return 0
+    else
+        return 0   # a real .git directory (not a submodule checkout) or nothing
     fi
-    local gitdir_rel gitdir_abs
-    gitdir_rel="$(sed -n 's|^gitdir: ||p' "$BHC_DIR/.git")"
-    if [ -z "$gitdir_rel" ]; then
-        return 0
+    if [ ! -f "$gitdir_abs/HEAD" ]; then
+        return 0   # not a git directory: leave whatever is there alone
     fi
-    gitdir_abs="$(cd "$BHC_DIR" && cd "$gitdir_rel" 2>/dev/null && pwd)" || return 0
-    rm -f "$BHC_DIR/.git"
-    ln -s "$gitdir_abs" "$BHC_DIR/.git"
+    if realpath --relative-to=/ / >/dev/null 2>&1; then
+        link_target="$(realpath --relative-to="$BHC_DIR" "$gitdir_abs")"
+    else
+        link_target="$("${UACPY_PYTHON:-python3}" -c 'import os, sys; print(os.path.relpath(os.path.realpath(sys.argv[1]), os.path.realpath(sys.argv[2])))' "$gitdir_abs" "$BHC_DIR")"
+    fi
+    rm -f "$dotgit"
+    ln -s "$link_target" "$dotgit"
 }
 
 # Force the bellhopcuda submodule HEAD to $BELLHOPCUDA_COMMIT_SHA (preferred,
@@ -1755,14 +1799,14 @@ download_sediment() {
     # Automatic: the NCEI grain-size DB (G00127, public domain) is downloaded and
     # normalized to grainsize.csv by uacpy.data.download_sediment_db — if uacpy is
     # importable in this Python. Otherwise fall back to a manual-placement note.
-    if python3 -c "import uacpy.data" >/dev/null 2>&1; then
+    if "$UACPY_PYTHON" -c "import uacpy.data" >/dev/null 2>&1; then
         echo -e "${BLUE}Downloading + normalizing NCEI grain-size DB (~3 MB)...${NC}"
-        if UACPY_INSTALL_CACHE_DIR="$dir" python3 -c "import os; import uacpy.data as d; d.download_sediment_db(cache_dir=os.environ['UACPY_INSTALL_CACHE_DIR'], verbose=True)"; then
+        if UACPY_INSTALL_CACHE_DIR="$dir" "$UACPY_PYTHON" -c "import os; import uacpy.data as d; d.download_sediment_db(cache_dir=os.environ['UACPY_INSTALL_CACHE_DIR'], verbose=True)"; then
             echo -e "${GREEN}✓ Sediment grain-size DB ready → ${dir}${NC}"; return 0
         fi
         echo -e "${YELLOW}◐ Automatic sediment download failed.${NC}"
     else
-        echo -e "${YELLOW}◐ uacpy not importable here — sediment needs manual placement.${NC}"
+        echo -e "${YELLOW}◐ uacpy not importable by ${UACPY_PYTHON} — sediment needs manual placement.${NC}"
     fi
     echo "    Fetch it from Python once uacpy is installed:"
     echo "      python -c \"import uacpy.data as d; d.download_sediment_db()\""
@@ -1781,14 +1825,14 @@ download_emodnet() {
     fi
     # EMODnet Geology seabed substrate (Folk 5cl, 1:1M, CC-BY) is paged from the
     # public WFS and stored as a local polygon index by emodnet_local.
-    if python3 -c "import uacpy.data.emodnet_local" >/dev/null 2>&1; then
+    if "$UACPY_PYTHON" -c "import uacpy.data.emodnet_local" >/dev/null 2>&1; then
         echo -e "${BLUE}Downloading EMODnet seabed substrate (European seas)...${NC}"
-        if UACPY_INSTALL_CACHE_DIR="$dir" python3 -c "import os; from uacpy.data import emodnet_local; emodnet_local.download_emodnet_db(cache_dir=os.environ['UACPY_INSTALL_CACHE_DIR'], verbose=True)"; then
+        if UACPY_INSTALL_CACHE_DIR="$dir" "$UACPY_PYTHON" -c "import os; from uacpy.data import emodnet_local; emodnet_local.download_emodnet_db(cache_dir=os.environ['UACPY_INSTALL_CACHE_DIR'], verbose=True)"; then
             echo -e "${GREEN}✓ EMODnet seabed substrate ready → ${dir}${NC}"; return 0
         fi
         echo -e "${YELLOW}◐ Automatic EMODnet download failed.${NC}"
     else
-        echo -e "${YELLOW}◐ uacpy (shapely) not importable here — EMODnet skipped.${NC}"
+        echo -e "${YELLOW}◐ uacpy (shapely) not importable by ${UACPY_PYTHON} — EMODnet skipped.${NC}"
     fi
     echo "    Fetch it from Python once uacpy is installed:"
     echo "      python -c \"from uacpy.data import emodnet_local; emodnet_local.download_emodnet_db()\""
@@ -1806,14 +1850,14 @@ download_coastline() {
           && -s "${dir}/ne_10m_land.geojson" ]]; then
         echo -e "${GREEN}✓ Coastline polygons already cached → ${dir}${NC}"; return 0
     fi
-    if python3 -c "import uacpy.visualization.basemap" >/dev/null 2>&1; then
+    if "$UACPY_PYTHON" -c "import uacpy.visualization.basemap" >/dev/null 2>&1; then
         echo -e "${BLUE}Downloading Natural Earth coastline (public domain)...${NC}"
-        if UACPY_INSTALL_CACHE_DIR="$dir" python3 -c "import os; from uacpy.visualization.basemap import download_coastline; download_coastline(cache_dir=os.environ['UACPY_INSTALL_CACHE_DIR'], verbose=True)"; then
+        if UACPY_INSTALL_CACHE_DIR="$dir" "$UACPY_PYTHON" -c "import os; from uacpy.visualization.basemap import download_coastline; download_coastline(cache_dir=os.environ['UACPY_INSTALL_CACHE_DIR'], verbose=True)"; then
             echo -e "${GREEN}✓ Coastline polygons ready → ${dir}${NC}"; return 0
         fi
         echo -e "${YELLOW}◐ Automatic coastline download failed.${NC}"
     else
-        echo -e "${YELLOW}◐ uacpy not importable here — coastline skipped.${NC}"
+        echo -e "${YELLOW}◐ uacpy not importable by ${UACPY_PYTHON} — coastline skipped.${NC}"
     fi
     echo "    Fetch it from Python once uacpy is installed:"
     echo "      python -c \"from uacpy.visualization.basemap import download_coastline; download_coastline()\""
@@ -1847,14 +1891,14 @@ download_crust1() {
           && -s "${dir}/crust1.rho" ]]; then
         echo -e "${GREEN}✓ CRUST1.0 grids already cached → ${dir}${NC}"; return 0
     fi
-    if python3 -c "import uacpy.data.crust1_local" >/dev/null 2>&1; then
+    if "$UACPY_PYTHON" -c "import uacpy.data.crust1_local" >/dev/null 2>&1; then
         echo -e "${BLUE}Downloading CRUST1.0 layered crustal model (~1 MB, no formal licence)...${NC}"
-        if UACPY_INSTALL_CACHE_DIR="$dir" python3 -c "import os; from uacpy.data import crust1_local; crust1_local.download_crust1_db(cache_dir=os.environ['UACPY_INSTALL_CACHE_DIR'], verbose=True)"; then
+        if UACPY_INSTALL_CACHE_DIR="$dir" "$UACPY_PYTHON" -c "import os; from uacpy.data import crust1_local; crust1_local.download_crust1_db(cache_dir=os.environ['UACPY_INSTALL_CACHE_DIR'], verbose=True)"; then
             echo -e "${GREEN}✓ CRUST1.0 grids ready → ${dir}${NC}"; return 0
         fi
         echo -e "${YELLOW}◐ Automatic CRUST1.0 download failed.${NC}"
     else
-        echo -e "${YELLOW}◐ uacpy not importable here — CRUST1.0 skipped.${NC}"
+        echo -e "${YELLOW}◐ uacpy not importable by ${UACPY_PYTHON} — CRUST1.0 skipped.${NC}"
     fi
     echo "    Fetch it from Python once uacpy is installed:"
     echo "      python -c \"from uacpy.data import crust1_local; crust1_local.download_crust1_db()\""
@@ -1869,14 +1913,14 @@ download_diesing() {
     fi
     # Diesing 2020 global deep-sea seafloor lithology (CC-BY); zip downloaded and
     # the lithology raster extracted by diesing_local (PANGAEA serves urllib fast).
-    if python3 -c "import uacpy.data.diesing_local" >/dev/null 2>&1; then
+    if "$UACPY_PYTHON" -c "import uacpy.data.diesing_local" >/dev/null 2>&1; then
         echo -e "${BLUE}Downloading Diesing 2020 deep-sea lithology (CC-BY, ~40 MB)...${NC}"
-        if UACPY_INSTALL_CACHE_DIR="$dir" python3 -c "import os; from uacpy.data import diesing_local; diesing_local.download_diesing_db(cache_dir=os.environ['UACPY_INSTALL_CACHE_DIR'], verbose=True)"; then
+        if UACPY_INSTALL_CACHE_DIR="$dir" "$UACPY_PYTHON" -c "import os; from uacpy.data import diesing_local; diesing_local.download_diesing_db(cache_dir=os.environ['UACPY_INSTALL_CACHE_DIR'], verbose=True)"; then
             echo -e "${GREEN}✓ Diesing lithology map ready → ${dir}${NC}"; return 0
         fi
         echo -e "${YELLOW}◐ Automatic Diesing download failed.${NC}"
     else
-        echo -e "${YELLOW}◐ uacpy not importable here — Diesing skipped.${NC}"
+        echo -e "${YELLOW}◐ uacpy not importable by ${UACPY_PYTHON} — Diesing skipped.${NC}"
     fi
     echo "    Fetch it from Python once uacpy is installed:"
     echo "      python -c \"from uacpy.data import diesing_local; diesing_local.download_diesing_db()\""
@@ -1892,14 +1936,14 @@ download_seaice() {
         echo -e "${GREEN}✓ Sea-ice climatology already cached → ${dir}${NC}"; return 0
     fi
     # Builds a monthly climatology from NSIDC Sea Ice Index grids (needs tifffile).
-    if python3 -c "import uacpy.data.seaice_local, tifffile" >/dev/null 2>&1; then
+    if "$UACPY_PYTHON" -c "import uacpy.data.seaice_local, tifffile" >/dev/null 2>&1; then
         echo -e "${BLUE}Building NSIDC sea-ice monthly climatology (downloads ~120 grids; a few minutes)...${NC}"
-        if UACPY_INSTALL_CACHE_DIR="$dir" python3 -c "import os; from uacpy.data import seaice_local; seaice_local.download_seaice_db(cache_dir=os.environ['UACPY_INSTALL_CACHE_DIR'], verbose=True)"; then
+        if UACPY_INSTALL_CACHE_DIR="$dir" "$UACPY_PYTHON" -c "import os; from uacpy.data import seaice_local; seaice_local.download_seaice_db(cache_dir=os.environ['UACPY_INSTALL_CACHE_DIR'], verbose=True)"; then
             echo -e "${GREEN}✓ Sea-ice climatology ready → ${dir}${NC}"; return 0
         fi
         echo -e "${YELLOW}◐ Automatic sea-ice build failed.${NC}"
     else
-        echo -e "${YELLOW}◐ uacpy (tifffile) not importable here — sea ice skipped.${NC}"
+        echo -e "${YELLOW}◐ uacpy (tifffile) not importable by ${UACPY_PYTHON} — sea ice skipped.${NC}"
     fi
     echo "    Build it from Python once uacpy is installed:"
     echo "      python -c \"from uacpy.data import seaice_local; seaice_local.download_seaice_db()\""
@@ -1914,14 +1958,14 @@ download_glodap() {
     fi
     # GLODAPv2.2016b mapped seawater pH (CC-BY); the ~211 MB product tarball is
     # downloaded and only the in-situ pH grid extracted by glodap_local.
-    if python3 -c "import uacpy.data.glodap_local" >/dev/null 2>&1; then
+    if "$UACPY_PYTHON" -c "import uacpy.data.glodap_local" >/dev/null 2>&1; then
         echo -e "${BLUE}Downloading GLODAPv2.2016b mapped pH (CC-BY, ~211 MB tarball)...${NC}"
-        if UACPY_INSTALL_CACHE_DIR="$dir" python3 -c "import os; from uacpy.data import glodap_local; glodap_local.download_glodap_db(cache_dir=os.environ['UACPY_INSTALL_CACHE_DIR'], verbose=True)"; then
+        if UACPY_INSTALL_CACHE_DIR="$dir" "$UACPY_PYTHON" -c "import os; from uacpy.data import glodap_local; glodap_local.download_glodap_db(cache_dir=os.environ['UACPY_INSTALL_CACHE_DIR'], verbose=True)"; then
             echo -e "${GREEN}✓ GLODAP pH grid ready → ${dir}${NC}"; return 0
         fi
         echo -e "${YELLOW}◐ Automatic GLODAP download failed.${NC}"
     else
-        echo -e "${YELLOW}◐ uacpy not importable here — GLODAP skipped.${NC}"
+        echo -e "${YELLOW}◐ uacpy not importable by ${UACPY_PYTHON} — GLODAP skipped.${NC}"
     fi
     echo "    Fetch it from Python once uacpy is installed:"
     echo "      python -c \"from uacpy.data import glodap_local; glodap_local.download_glodap_db()\""
@@ -1937,14 +1981,14 @@ download_wind() {
     # Caches NOAA/NCEI's published NBS 10 m wind-speed climatology: one file
     # already averaged over 1991-2020, ~237 MB, of which the ~28 MB wind-speed
     # field is kept (needs netCDF4). Public domain.
-    if python3 -c "import uacpy.data.wind_local, netCDF4" >/dev/null 2>&1; then
+    if "$UACPY_PYTHON" -c "import uacpy.data.wind_local, netCDF4" >/dev/null 2>&1; then
         echo -e "${BLUE}Downloading NBS wind monthly climatology (NOAA/NCEI 1991-2020, ~237 MB)...${NC}"
-        if UACPY_INSTALL_CACHE_DIR="$dir" python3 -c "import os; from uacpy.data import wind_local; wind_local.download_wind_db(cache_dir=os.environ['UACPY_INSTALL_CACHE_DIR'], verbose=True)"; then
+        if UACPY_INSTALL_CACHE_DIR="$dir" "$UACPY_PYTHON" -c "import os; from uacpy.data import wind_local; wind_local.download_wind_db(cache_dir=os.environ['UACPY_INSTALL_CACHE_DIR'], verbose=True)"; then
             echo -e "${GREEN}✓ NBS wind climatology ready → ${dir}${NC}"; return 0
         fi
         echo -e "${YELLOW}◐ Automatic wind download failed.${NC}"
     else
-        echo -e "${YELLOW}◐ uacpy (netCDF4) not importable here — wind skipped.${NC}"
+        echo -e "${YELLOW}◐ uacpy (netCDF4) not importable by ${UACPY_PYTHON} — wind skipped.${NC}"
     fi
     echo "    Build it from Python once uacpy is installed:"
     echo "      python -c \"from uacpy.data import wind_local; wind_local.download_wind_db()\""

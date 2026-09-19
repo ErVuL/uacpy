@@ -98,8 +98,8 @@ class Arrivals(Result):
     """Ray arrivals from Bellhop — a flat list of arrival events.
 
     Each arrival is a dict with: ``delay`` (s), ``delay_imag`` (s),
-    ``amplitude``, ``phase`` (**degrees** — the unit the ``.arr`` reader
-    stores; the :attr:`phases` accessor converts to radians),
+    ``amplitude``, ``phase`` (**radians** — the ``.arr`` reader converts
+    the file's degree column once; :attr:`phases` returns it as stored),
     ``n_top_bounces``, ``n_bot_bounces``, ``src_angle``, ``rcv_angle``,
     ``kind`` ('direct' / 'surface' / 'bottom' / 'both'), plus the cell of
     origin (``src_idx``, ``depth_idx``, ``range_idx``) so multi-cell runs
@@ -236,9 +236,9 @@ class Arrivals(Result):
         # arrival set assembled without one — Bellhop always writes it, but
         # callers building Arrivals by hand need not — must still be able to
         # ask what reaches the receiver, and :meth:`_arrival_power` goes
-        # through here.
-        phase = np.deg2rad(np.asarray(
-            [a.get('phase', 0.0) for a in self.arrivals], dtype=float))
+        # through here. The stored phase is radians.
+        phase = np.asarray(
+            [a.get('phase', 0.0) for a in self.arrivals], dtype=float)
         omega = 2.0 * np.pi * self.f0 if self.f0 else 0.0
         with np.errstate(over='ignore'):
             received = amplitude * np.exp(omega * delays_imag)
@@ -248,12 +248,11 @@ class Arrivals(Result):
     def phases(self) -> np.ndarray:
         """Phases (rad) of every arrival in the list.
 
-        The Bellhop ``.arr`` file stores phase in **degrees** (``ArrMod.f90``
-        writes ``RadDeg * Phase``); this accessor converts to **radians** so the
-        values drop straight into ``exp(1j * phase)`` for phase-coherent
-        synthesis."""
-        return np.deg2rad(
-            np.asarray([a['phase'] for a in self.arrivals], dtype=float))
+        The Bellhop ``.arr`` file stores phase in degrees (``ArrMod.f90:120``
+        writes ``RadDeg * Phase``); ``read_arr_file`` converts once, so the
+        per-arrival ``'phase'`` is already **radians** and drops straight
+        into ``exp(1j * phase)`` for phase-coherent synthesis."""
+        return np.asarray([a['phase'] for a in self.arrivals], dtype=float)
 
     def _angle_column(self, key: str, name: str) -> np.ndarray:
         """Bulk view of one angle column, with an error that names the cause."""
@@ -271,7 +270,7 @@ class Arrivals(Result):
     def src_angles(self) -> np.ndarray:
         """Declination angle each arrival LEFT the source at, in **degrees**.
 
-        Degrees, not radians — unlike :attr:`phases`, which converts because
+        Degrees, not radians — unlike :attr:`phases`, which is radians because
         its consumer is ``exp(1j * phase)``. These angles are reported for
         reading and for geometry (a Doppler projection, a grazing-angle
         filter), so they keep the unit ``ArrMod.f90:55`` writes and

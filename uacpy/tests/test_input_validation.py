@@ -730,6 +730,7 @@ def test_altimetry_nonnumeric_is_typed():
         uacpy.Environment(bathymetry=100.0, ssp=1500.0, altimetry='wavy')
 
 
+@pytest.mark.requires_binary  # constructs a model (resolves its binary)
 def test_surface_source_warns_for_field_runs():
     """A source at z=0 sits ON Bellhop's top boundary: bellhop.f90:488-492
     terminates every ray (DistBegTop <= 0), so the run is refused rather
@@ -770,6 +771,7 @@ def test_francois_garrison_accepts_list_pH():
     assert out.shape == (2,) and np.all(out > 0)
 
 
+@pytest.mark.requires_binary  # constructs the named model (resolves its binary)
 @pytest.mark.parametrize('model_name', ['Bellhop', 'Kraken', 'Scooter', 'RAM'])
 def test_receiver_type_line_is_rejected_not_silently_gridded(model_name):
     """``receiver_type='line'`` must raise, not return the full grid.
@@ -1499,3 +1501,74 @@ def test_surface_source_is_silent_for_modes_and_reflection(model_cls, mode):
                                     run_mode=mode)
     assert [w for w in rec
             if 'pressure-release sea surface' in str(w.message)] == []
+
+
+# --- receiver grids whose largest range is 0 m ------------------------------
+
+def _field_model_params():
+    """Field-computing wrappers, one ``requires_binary`` param each (their
+    constructors resolve the executable), plus ``requires_oases`` for OAST."""
+    from uacpy.models.kraken import Kraken
+    from uacpy.models.oases import OAST
+    params = []
+    for cls in (Bellhop, Kraken, Scooter, RAM, OAST):
+        marks = [pytest.mark.requires_binary]
+        if cls.__name__ in _OASES_MODEL_NAMES:
+            marks.append(pytest.mark.requires_oases)
+        params.append(pytest.param(cls, id=cls.__name__, marks=marks))
+    return params
+
+
+class TestAReceiverWhoseLargestRangeIsZeroIsRefusedBeforeTheDeck:
+    """``PropagationModel._validate_geometry`` refuses a receiver whose
+    ``range_max`` is 0 m on every field-computing wrapper with the same
+    ``ConfigurationError``: a point source's field is singular on its own
+    axis, so no engine can fill such a grid (RAM's grid chooser divided by
+    the zero range step). The check sits in ``validate_inputs``, which every
+    ``run`` calls before its work directory exists, so no deck is written.
+    A mixed grid keeps one positive range and passes; the modes that read
+    no receiver range (``MODES``, ``RAYS``, ``REFLECTION``, the OASN array
+    products) accept an all-zero grid."""
+
+    @staticmethod
+    def _triple():
+        env = uacpy.Environment(name='r0', bathymetry=100.0, ssp=1500.0)
+        src = uacpy.Source(depths=50.0, frequencies=100.0)
+        return env, src
+
+    @pytest.mark.parametrize('model_cls', _field_model_params())
+    def test_a_single_zero_range_raises_before_any_work_directory(
+            self, model_cls, monkeypatch):
+        env, src = self._triple()
+        model = model_cls(verbose=False)
+
+        def _no_deck(*a, **k):
+            raise AssertionError("a work directory was created before the "
+                                 "receiver-range check")
+        monkeypatch.setattr(model, '_setup_file_manager', _no_deck)
+        with warnings.catch_warnings(record=True) as record:
+            warnings.simplefilter('always')
+            with pytest.raises(ConfigurationError,
+                               match=r"largest range is 0 m"):
+                model.run(env, src,
+                          uacpy.Receiver(depths=[50.0], ranges=[0.0]))
+        # The refusal is the whole answer: no NaN-column warning ahead of it.
+        assert [str(w.message) for w in record] == []
+
+    @pytest.mark.parametrize('model_cls', _field_model_params())
+    def test_a_mixed_grid_with_one_positive_range_passes_validation(
+            self, model_cls):
+        env, src = self._triple()
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            model_cls(verbose=False).validate_inputs(
+                env, src, uacpy.Receiver(depths=[50.0], ranges=[0.0, 1000.0]))
+
+    @pytest.mark.requires_binary  # constructs Kraken (resolves its binary)
+    def test_modes_accepts_an_all_zero_range_grid(self):
+        from uacpy.models.kraken import Kraken
+        from uacpy.models.base import RunMode
+        env, src = self._triple()
+        Kraken(verbose=False).validate_inputs(
+            env, src, uacpy.Receiver(depths=[50.0], ranges=[0.0]),
+            run_mode=RunMode.MODES)

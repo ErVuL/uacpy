@@ -4,4 +4,4 @@
 directive, so the declared and the importable version cannot diverge.
 """
 
-__version__ = '0.4.3'
+__version__ = '0.5.0'

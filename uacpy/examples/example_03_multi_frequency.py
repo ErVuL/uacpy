@@ -6,6 +6,8 @@ The 0-25 m mixed layer has zero gradient and so ducts nothing (a surface duct
 needs a positive gradient — Etter §3.7), and at 100 Hz it is far below the
 ~1434 Hz cutoff a 25 m duct would need anyway: energy refracts downward through
 the -1.0 (m/s)/m thermocline instead.
+OAST needs OASES (./install.sh --oases yes); without it the example runs
+the other models and says so.
 
 Uses: SoundSpeedProfile.from_pairs · five model classes with one .run signature ·
 env.plot · compare_models · plot.compare · plot.plot_field_statistics
@@ -39,12 +41,16 @@ receiver = uacpy.Receiver(depths=np.linspace(3, 197, 70),
                           ranges=np.linspace(200, 25000, 120))
 
 # Every model takes the same (env, source, receiver): swapping the solver is
-# swapping one word.
+# swapping one word. OAST is the optional fifth: it needs the OASES binaries,
+# and without them the comparison runs on the other four.
 models = {'Bellhop': uacpy.Bellhop(), 'RAM': uacpy.RAM(),
-          'Kraken': uacpy.Kraken(), 'Scooter': uacpy.Scooter(),
-          'OAST': uacpy.OAST()}
+          'Kraken': uacpy.Kraken(), 'Scooter': uacpy.Scooter()}
 fields = {name: model.run(env, source, receiver)
           for name, model in models.items()}
+try:
+    fields['OAST'] = uacpy.OAST().run(env, source, receiver)
+except uacpy.ExecutableNotFoundError:
+    print("  OAST skipped: OASES executable not found (./install.sh --oases yes)")
 for name, field in fields.items():
     print(f"  {name:8s} TL {np.nanmin(field.dB):.1f} to "
           f"{np.nanmax(field.dB):.1f} dB")

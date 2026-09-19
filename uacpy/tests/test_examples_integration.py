@@ -92,15 +92,44 @@ def _offline_cache_ready(datasets):
 ALL_EXAMPLES = sorted(EXAMPLES_DIR.glob("example_*.py"))
 
 
-def _referenced_names(path: Path) -> Set[str]:
+def _guarded_nodes(tree) -> set:
+    """Ids of every node inside a ``try`` body whose handlers catch
+    ``ExecutableNotFoundError``: a model constructed and run there degrades
+    to a printed precondition line when its binary is absent, so it is not a
+    requirement of the example."""
+    guarded = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Try):
+            continue
+        caught = []
+        for handler in node.handlers:
+            types = handler.type
+            if types is None:
+                continue
+            for t in (types.elts if isinstance(types, ast.Tuple) else [types]):
+                caught.append(t.attr if isinstance(t, ast.Attribute)
+                              else getattr(t, "id", None))
+        if "ExecutableNotFoundError" not in caught:
+            continue
+        for stmt in node.body:
+            guarded.update(id(n) for n in ast.walk(stmt))
+    return guarded
+
+
+def _referenced_names(path: Path, *, unguarded_only: bool = False) -> Set[str]:
     """Names an example can construct a model through: ``from X import Y``
     bindings plus attribute references rooted at ``uacpy`` / ``uacpy.models``
     (``uacpy.OASS(...)``, ``uacpy.models.RAM(...)``). Covers every model-class
-    reference pattern actually used by examples/.
+    reference pattern actually used by examples/. With ``unguarded_only``,
+    references inside an ``ExecutableNotFoundError`` guard (see
+    :func:`_guarded_nodes`) are left out.
     """
     tree = ast.parse(path.read_text())
+    guarded = _guarded_nodes(tree) if unguarded_only else set()
     names: Set[str] = set()
     for node in ast.walk(tree):
+        if id(node) in guarded:
+            continue
         if isinstance(node, ast.ImportFrom):
             for alias in node.names:
                 names.add(alias.asname or alias.name)
@@ -117,7 +146,11 @@ def _example_marks(example: Path):
     """Derive (requires_binary, slow, requires_oases?) from the names the
     example references."""
     referenced = _referenced_names(example)
-    needs_oases = bool(referenced & _OASES_MODEL_CLASSES)
+    # An OASES model built and run inside an ExecutableNotFoundError guard
+    # (examples 03, 07, 08, 19) prints a precondition line and the example
+    # carries on with its other models, so it does not require OASES.
+    unguarded = _referenced_names(example, unguarded_only=True)
+    needs_oases = bool(unguarded & _OASES_MODEL_CLASSES)
     needs_binary = needs_oases or bool(referenced & _BINARY_MODEL_CLASSES)
     # Every example is an end-to-end integration test that spawns a full
     # Python + matplotlib subprocess, so all are ``slow`` — otherwise the
@@ -458,6 +491,8 @@ def test_detector_accepts_a_skipped_precondition_report():
     _check_no_swallowed_failure(_EXAMPLE, _FakeResult(stdout=(
         "  sea ice: [skipped] needs ./install.sh --data seaice\n"
         "  Scooter skipped: scooter executable not found: install.sh\n"
+        "  OAST skipped: OASES executable not found (./install.sh --oases "
+        "yes)\n"
     )))
 
 
@@ -496,6 +531,37 @@ def test_example_39_is_marked_requires_oases():
     marks = {m.name for m in _example_marks(
         EXAMPLES_DIR / "example_39_oass_reverberation.py")}
     assert {"requires_oases", "requires_binary"} <= marks
+
+
+@pytest.mark.parametrize("guard, expect_oases", [
+    ("except uacpy.ExecutableNotFoundError:", False),
+    ("except ExecutableNotFoundError:", False),
+    ("except (RuntimeError, uacpy.ExecutableNotFoundError):", False),
+    ("except RuntimeError:", True),
+])
+def test_an_oases_model_guarded_by_its_missing_binary_does_not_require_oases(
+        guard, expect_oases, tmp_path):
+    """A ``try`` that catches ExecutableNotFoundError around the OASES
+    construction makes OASES optional; any other handler leaves the
+    requirement in place. Bellhop outside the guard keeps requires_binary."""
+    path = tmp_path / "example_synthetic.py"
+    path.write_text(
+        "import uacpy\n\nfields = {'Bellhop': uacpy.Bellhop().run(env)}\n"
+        "try:\n    fields['OAST'] = uacpy.OAST().run(env)\n"
+        f"{guard}\n    print('  OAST skipped: OASES executable not found')\n"
+    )
+    marks = {m.name for m in _example_marks(path)}
+    assert ("requires_oases" in marks) is expect_oases
+    assert "requires_binary" in marks
+
+
+@pytest.mark.parametrize("stem", ["example_03", "example_07", "example_08",
+                                  "example_19"])
+def test_the_optional_oast_examples_are_not_marked_requires_oases(stem):
+    example, = EXAMPLES_DIR.glob(f"{stem}_*.py")
+    marks = {m.name for m in _example_marks(example)}
+    assert "requires_oases" not in marks
+    assert "requires_binary" in marks
 
 
 def test_every_example_puts_the_repo_root_on_sys_path():

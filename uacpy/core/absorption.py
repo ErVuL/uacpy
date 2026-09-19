@@ -520,7 +520,21 @@ class Thorp(Absorption):
         return np.full(z.shape, a)
 
 
-@dataclass
+#: The envelope Francois & Garrison (1982, Part II, §III) fitted and
+#: tabulated: Table IV runs -1.8 to 30 °C at 30 and 35 ‰, the boric-acid data
+#: span 34-41 ‰ and the MgSO4 field data 30-35 ‰ (APL-UW TR 9407 §I.3), and
+#: the seawater pH range is 7.7-8.3 (Mellen et al. 1987; TR 9407 puts the
+#: "extreme" values outside 7.7-8.2). Inclusive on both ends.
+_FG_TEMPERATURE_RANGE_C = (-2.0, 30.0)
+_FG_SALINITY_RANGE_PSU = (30.0, 35.0)
+_FG_PH_RANGE = (7.7, 8.3)
+#: Hz. "The equation may not hold below 200 Hz, where the boric acid
+#: contribution may be exceeded by a scattering loss" (Part II, §III); Table
+#: IV stops at 1000 kHz and the pure-water term is verified to 600 kHz.
+_FG_FREQUENCY_RANGE_HZ = (200.0, 1.0e6)
+
+
+@dataclass(init=False)
 class FrancoisGarrison(Absorption):
     """Francois–Garrison (1982) seawater absorption.
 
@@ -532,14 +546,40 @@ class FrancoisGarrison(Absorption):
 
     Notes
     -----
-    The four fields are checked only where the formula itself has no
+    The four fields are *refused* only where the formula itself has no
     value there (see :func:`francois_garrison_dB_per_km`): the
     boric-acid relaxation takes ``sqrt(S/35)``, its temperature factor
     is ``10**(4 - 1245/(T + 273))``, and all three mechanisms divide by
-    the sound speed ``c = 1412 + 3.21·T + 1.19·S + 0.0167·z``. Nothing
-    here narrows the inputs to a published validity envelope: neither
+    the sound speed ``c = 1412 + 3.21·T + 1.19·S + 0.0167·z``. Neither
     ``misc/AttenMod.f90`` (``Franc_Garr``) nor ``Matlab/Misc/franc_garr.m``
-    — the two implementations this one follows — states one.
+    — the two implementations this one follows — checks a validity
+    envelope, so none is enforced here either.
+
+    **Fitted envelope.** Outside the range the equation was fitted and
+    tabulated over, a ``UserWarning`` names the field and the range, and
+    the value is used as given. Francois & Garrison (1982, Part II, §III
+    "Recommended absorption equation") determined the boric-acid term from
+    measurements at 34–41 ‰ and 2–22 °C to 1500 m, tabulate the equation
+    (Table IV) for −1.8 to 30 °C, 0.4–1000 kHz, at 30 and 35 ‰, and state
+    that it "may not hold below 200 Hz, where the boric acid contribution
+    may be exceeded by a scattering loss"; the MgSO4 term comes from field
+    data at 30–35 ‰ and 2–22 °C (APL-UW TR 9407 §I.3). The constructor
+    therefore warns for ``temperature_c`` outside −2..30 °C,
+    ``salinity_psu`` outside 30..35 (the boric term interpolates in
+    ``sqrt(S/35)``, so a Baltic 7 ‰ is an extrapolation), and ``pH``
+    outside 7.7..8.3 (the seawater range, Mellen et al. 1987; TR 9407 warns
+    of discrepancies "as high as 40 % below 1 kHz" for pH under 7.7 or over
+    8.2); :meth:`alpha_dB_per_m` warns for a frequency under 200 Hz or over
+    1 MHz. The authors quote 5 % accuracy inside the measured range and
+    about 10 % outside their frequency range.
+
+    The ``__init__`` is written out (``init=False``) so the envelope warning
+    names the caller's line whether the model is built by hand or by
+    :func:`uacpy.data.build_francois_garrison` from a fetched T/S/pH row: a
+    generated ``__init__`` lives in the pseudo-file ``<string>``, which the
+    attribution walk cannot step over. ``@dataclass`` still supplies
+    ``__repr__`` / ``__eq__`` / ``fields()`` from the annotations; a test
+    pins the signature against them.
 
     **The deck does not do what the accessor does.** Evaluating per depth is
     a deliberate refinement over the single-row model AT writes: the solver's
@@ -569,6 +609,15 @@ class FrancoisGarrison(Absorption):
     pH: float
     z_bar_m: float
     ph_scale: str = 'nbs'
+
+    def __init__(self, temperature_c: float, salinity_psu: float, pH: float,
+                 z_bar_m: float, ph_scale: str = 'nbs') -> None:
+        self.temperature_c = temperature_c
+        self.salinity_psu = salinity_psu
+        self.pH = pH
+        self.z_bar_m = z_bar_m
+        self.ph_scale = ph_scale
+        self.__post_init__()
 
     def __post_init__(self):
         Absorption.__post_init__(self)
@@ -608,6 +657,29 @@ class FrancoisGarrison(Absorption):
                 f"S={self.salinity_psu}, z={self.z_bar_m}); every absorption "
                 f"mechanism divides by it, so it must be positive."
             )
+        # The fitted envelope, checked after every rule that raises. One
+        # warning naming every field outside it, so a fetched row that is
+        # out on two axes is reported once.
+        outside = []
+        ph_label = ('pH' if self.ph_scale == 'nbs'
+                    else f"pH (NBS, from {self.pH:g} {self.ph_scale!r})")
+        for label, value, (low, high), unit in (
+                ('temperature_c', self.temperature_c,
+                 _FG_TEMPERATURE_RANGE_C, '°C'),
+                ('salinity_psu', self.salinity_psu,
+                 _FG_SALINITY_RANGE_PSU, 'PSU'),
+                (ph_label, self.ph_nbs, _FG_PH_RANGE, 'on the NBS scale')):
+            if not (low <= value <= high):
+                outside.append(
+                    f"{label}={value:g} is outside {low:g}..{high:g} {unit}")
+        if outside:
+            warnings.warn(
+                f"FrancoisGarrison: {'; '.join(outside)}. The equation was "
+                f"fitted and tabulated inside those ranges (Francois & "
+                f"Garrison 1982 Part II, §III; 5 % accuracy quoted there, "
+                f"none outside); the value is used as given, extrapolating "
+                f"the fit.",
+                UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
 
     def topopt_code(self) -> str:
         return 'F'
@@ -633,6 +705,16 @@ class FrancoisGarrison(Absorption):
         frequency: float,
         depths: _ArrayLike,
     ) -> np.ndarray:
+        low, high = _FG_FREQUENCY_RANGE_HZ
+        if not (low <= float(frequency) <= high):
+            warnings.warn(
+                f"FrancoisGarrison: frequency={float(frequency):.10g} Hz is "
+                f"outside the {low:g} Hz..{high:g} Hz the equation was fitted "
+                f"over (Francois & Garrison 1982 Part II, §III: it \"may not "
+                f"hold below 200 Hz\", and Table IV stops at 1000 kHz). The "
+                f"polynomial is evaluated as given; below 200 Hz a scattering "
+                f"loss the equation omits can exceed the boric-acid term.",
+                UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
         z = np.atleast_1d(np.asarray(depths, dtype=float))
         a_km = francois_garrison_dB_per_km(
             frequency=float(frequency),

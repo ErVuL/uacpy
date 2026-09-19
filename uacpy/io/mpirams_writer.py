@@ -97,7 +97,8 @@ def write_inpe(
     cs : ndarray, optional
         Sediment sound speed perturbation relative to water, shape (nzs,).
     rho : ndarray, optional
-        Sediment density in g/cm^3, shape (nzs,).
+        Sediment density relative to the water column (dimensionless),
+        shape (nzs,).
     attn : ndarray, optional
         Sediment attenuation in dB/wavelength, shape (nzs,). Enters the
         sediment wavenumber as ``k = (omega/c)(1 + i*eta*attn)`` with

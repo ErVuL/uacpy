@@ -1178,13 +1178,14 @@ class TestArrivalsFilterChain:
         a = self._arrivals()
         assert len(a) == 4    # 3 from cell0 + 1 from cell1
 
-    def test_phases_returns_radians_from_degree_store(self):
-        # The .arr file stores phase in degrees (ArrMod.f90 writes RadDeg*Phase);
-        # the public .phases accessor must return radians for exp(1j*phase).
+    def test_phases_returns_the_stored_radians_unchanged(self):
+        # The .arr file stores phase in degrees (ArrMod.f90:120 writes
+        # RadDeg*Phase) and read_arr_file converts once; the cell and the
+        # public .phases accessor both hold radians for exp(1j*phase).
         from uacpy.core.results import Arrivals
         cell = {
             "delays": np.array([0.1]), "amplitudes": np.array([1.0]),
-            "phases": np.array([90.0]),   # degrees as read from the file
+            "phases": np.array([np.pi / 2]),   # radians, as the reader stores
             "n_top_bounces": np.array([0], dtype=int),
             "n_bot_bounces": np.array([0], dtype=int),
             "src_angles": np.array([0.0]), "rcv_angles": np.array([0.0]),
@@ -1196,7 +1197,7 @@ class TestArrivalsFilterChain:
 
     def test_angle_accessors_return_degrees_in_arrival_order(self):
         # The .arr file stores declination angles in degrees (ArrMod.f90:55-56)
-        # and the accessors keep that unit, unlike .phases which converts.
+        # and the accessors keep that unit; only phase is radians.
         a = self._arrivals()
         assert a.src_angles.shape == (len(a),)
         assert a.rcv_angles.shape == (len(a),)
@@ -1326,7 +1327,7 @@ class TestArrivalsFilterChain:
 
     def test_received_amplitude_carries_the_arrival_phase(self):
         """It is complex, so it drops straight into a coherent sum."""
-        a = self._absorbed_pair(0.0, phases=(0.0, 90.0))
+        a = self._absorbed_pair(0.0, phases=(0.0, np.pi / 2))
         assert np.isclose(a.received_amplitudes[0], 1.0 + 0.0j)
         assert np.isclose(a.received_amplitudes[1], 1.0j)
 
@@ -1349,7 +1350,7 @@ class TestArrivalsFilterChain:
         assert np.allclose(a._arrival_power(), [4.0])
 
     def test_arrival_power_is_the_received_amplitude_squared(self):
-        a = self._absorbed_pair(40.0, phases=(0.0, 37.0))
+        a = self._absorbed_pair(40.0, phases=(0.0, np.deg2rad(37.0)))
         assert np.allclose(a._arrival_power(),
                            np.abs(a.received_amplitudes) ** 2)
 
@@ -2562,6 +2563,7 @@ class TestResultIngestCopiesArrays:
         assert rep.replicas[0, 0, 0, 0, 0] == 0.0
 
 
+@pytest.mark.requires_binary  # constructs models (resolves their binaries)
 class TestCopyAndGeolocation:
     """`.copy()` is universal across carriers + results; Environment carries
     optional geolocation/date provenance that survives copy."""
@@ -4640,11 +4642,15 @@ _SPLIT_IDS = [f'{cls.__name__}.{field}'
 
 
 def _type_checking_init(cls):
-    """The ``__init__`` the class declares inside ``if TYPE_CHECKING:``.
+    """The ``__init__`` that declares the class's constructor types.
 
-    Read from source: the ``__init__`` the dataclass decorator compiles at
-    runtime carries the *field* annotations, so ``inspect.signature`` shows
-    the attribute half and can never see the constructor half."""
+    Either the one declared inside ``if TYPE_CHECKING:`` or, for a class that
+    writes its ``__init__`` out (``@dataclass(init=False)``,
+    ``BoundaryProperties``), that written-out one — which is then also the
+    function Python runs. Read from source: the ``__init__`` the dataclass
+    decorator compiles at runtime carries the *field* annotations, so
+    ``inspect.signature`` shows the attribute half and can never see the
+    constructor half."""
     import ast
     import inspect
 
@@ -4653,6 +4659,9 @@ def _type_checking_init(cls):
         if not (isinstance(node, ast.ClassDef) and node.name == cls.__name__):
             continue
         for child in node.body:
+            if (isinstance(child, ast.FunctionDef)
+                    and child.name == '__init__'):
+                return child
             if not isinstance(child, ast.If):
                 continue
             test = child.test
@@ -4755,9 +4764,9 @@ def test_the_constructor_declares_the_input_union_the_docstring_documents(
 
     initializer = _type_checking_init(cls)
     assert initializer is not None, (
-        f"{cls.__name__} declares no `if TYPE_CHECKING:` __init__, so its "
-        f"constructor is typed from the fields and rejects the input union "
-        f"its Parameters section documents")
+        f"{cls.__name__} declares no `if TYPE_CHECKING:` __init__ and writes "
+        f"none out, so its constructor is typed from the fields and rejects "
+        f"the input union its Parameters section documents")
     annotations = {arg.arg: ast.unparse(arg.annotation)
                    for arg in initializer.args.args if arg.annotation}
     assert annotations.get(field) == constructor_annotation, (
@@ -4877,28 +4886,32 @@ class TestSingleNodeRangesTravelsThroughSspSlicing:
 
 
 class TestArrivalDictPhaseUnit:
-    """The per-arrival dict carries ``'phase'`` in degrees (the ``.arr``
-    reader's unit, preserved for ``by_receiver`` parity); the class
-    docstring key list says so, and the ``phases`` accessor converts to
-    radians."""
+    """The per-arrival dict carries ``'phase'`` in radians — the unit
+    ``read_arr_file`` stores after converting the ``.arr`` degree column —
+    the class docstring key list says so, and the ``phases`` accessor and
+    ``received_amplitudes`` use it without another conversion."""
 
     def _arrivals(self):
-        cell = {'delays': [0.1], 'amplitudes': [1.0], 'phases': [180.0],
+        cell = {'delays': [0.1], 'amplitudes': [1.0], 'phases': [np.pi],
                 'n_top_bounces': [0], 'n_bot_bounces': [0],
                 'src_angles': [0.0], 'rcv_angles': [0.0]}
         return Arrivals(by_receiver=[[[cell]]], receiver_depths=[10.0],
                         receiver_ranges=[100.0], model='Test',
                         frequencies=100.0)
 
-    def test_dict_phase_is_degrees_and_accessor_radians(self):
+    def test_dict_phase_and_accessor_are_both_radians(self):
         arr = self._arrivals()
-        assert arr.arrivals[0]['phase'] == pytest.approx(180.0, rel=1e-12)
+        assert arr.arrivals[0]['phase'] == pytest.approx(np.pi, rel=1e-12)
         assert arr.phases[0] == pytest.approx(np.pi, rel=1e-12)
+        # A pi in the dict flips the sign; 180 read as radians would not.
+        assert arr.received_amplitudes[0] == pytest.approx(-1.0 + 0j,
+                                                           abs=1e-12)
 
-    def test_class_docstring_names_the_degree_unit_for_phase(self):
+    def test_class_docstring_names_the_radian_unit_for_phase(self):
         doc = Arrivals.__doc__
         segment = doc.split('``phase``', 1)[1].split('``n_top_bounces``')[0]
-        assert 'degrees' in segment
+        assert 'radians' in segment
+        assert 'degrees' not in segment
 
 
 class TestTlIsTheDbViewRestrictedToPressureFields:
@@ -5726,3 +5739,48 @@ def test_no_retired_spectral_name_survives_in_text():
                             f" -> {line.strip()[:90]}")
     assert not hits, "retired spectral names still in the text:\n  " + \
         "\n  ".join(hits[:25])
+
+
+class TestAMackenzieProfileIsExtendedUnderMackenzie:
+    """``SoundSpeedProfile.from_mackenzie`` stamps ``formula='mackenzie'`` and
+    ``uacpy.data.extend_ssp_below_data`` reads that stamp, so the deep
+    extension continues the column under the equation that built it. Before
+    the stamp the column was continued under TEOS-10 (the ``None`` default),
+    which sits 0.35 m/s below Mackenzie at 8.8 km from a 5.5 km column."""
+
+    _Z = np.linspace(0.0, 5500.0, 56)
+    _T = np.where(_Z < 1000.0, 15.0 - 0.013 * _Z, 2.0)
+    _S = np.full(_Z.shape, 35.0)
+
+    def _mackenzie_profile(self):
+        return SoundSpeedProfile.from_mackenzie(self._Z, self._T, self._S)
+
+    def test_from_mackenzie_stamps_its_formula(self):
+        assert self._mackenzie_profile().formula == 'mackenzie'
+
+    def test_the_extension_matches_mackenzie_at_the_seafloor(self):
+        from uacpy.core.acoustics import soundspeed
+        from uacpy.data import extend_ssp_below_data
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', UserWarning)
+            extended = extend_ssp_below_data(self._mackenzie_profile(), 8800.0)
+        # The extension inverts an effective temperature from the deepest
+        # sample at S = 35, which is exactly this column's 2 °C, so the
+        # continued value is Mackenzie at (2 °C, 35, 8800 m) itself.
+        reference = float(soundspeed(temperature=2.0, salinity=35.0,
+                                     depth=8800.0))
+        assert abs(float(extended.data[-1, 0]) - reference) < 0.05
+
+    def test_the_same_numbers_without_the_stamp_continue_under_teos10(self):
+        from uacpy.core.acoustics import soundspeed
+        from uacpy.data import extend_ssp_below_data
+        stamped = self._mackenzie_profile()
+        literal = SoundSpeedProfile(depths=stamped.depths,
+                                    data=stamped.data.copy())
+        assert literal.formula is None
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', UserWarning)
+            extended = extend_ssp_below_data(literal, 8800.0)
+        reference = float(soundspeed(temperature=2.0, salinity=35.0,
+                                     depth=8800.0))
+        assert abs(float(extended.data[-1, 0]) - reference) > 0.2

@@ -6,7 +6,7 @@ seen through a constant-Q transform — log-frequency, resolution scaling with
 frequency, the way hearing does (Brown 1991).
 
 Uses: acoustic_signal.lfm_chirp / hfm_chirp / ricker_wavelet / gaussian_pulse ·
-sequences.mseq · constant_q_transform · constant_q_spectrogram ·
+generate.mseq · constant_q_transform · constant_q_spectrogram ·
 constant_q · plot_constant_q_transform ·
 plot_constant_q_spectrogram · plot_constant_q_psd
 """

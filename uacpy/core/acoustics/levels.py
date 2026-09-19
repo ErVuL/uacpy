@@ -156,8 +156,10 @@ def power_to_dB(power, ref: float = REFERENCE_PRESSURE_WATER, *,
         :data:`PRESSURE_FLOOR`), guarding ``log10(0)``. Read in ``power``'s
         own units (``ref**2``), so the level a fully-silent input floors at
         depends on ``ref``: ``10*log10(1e-30 / 1e-12) = -180`` dB re 1 µPa
-        at the default ``ref``, against the -300 dB re 1 µPa :func:`spl`
-        floors a silent signal at under its µPa default.
+        at the default ``ref`` — the same level :func:`spl` floors a silent
+        signal at, since it floors the rms pressure at
+        ``sqrt(PRESSURE_FLOOR)`` = 1e-15 Pa and ``20*log10(1e-15 / 1e-6)``
+        is -180 dB as well (``spl(0) == power_to_dB(0) == -180.0``).
 
     Returns
     -------

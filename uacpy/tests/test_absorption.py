@@ -343,12 +343,13 @@ class TestBiologicalLayerRefusesNonFiniteAndNegativeDepths:
         assert self._layer(z_top_m=0.0, z_bottom_m=50.0).z_top_m == 0.0
 
 
-@pytest.mark.parametrize('cls', [BiologicalLayer, Biological],
-                         ids=['BiologicalLayer', 'Biological'])
+@pytest.mark.parametrize('cls', [BiologicalLayer, Biological, FrancoisGarrison],
+                         ids=['BiologicalLayer', 'Biological', 'FrancoisGarrison'])
 def test_the_written_out_init_takes_exactly_the_dataclass_fields(cls):
-    """Both classes hand-write the ``__init__`` the decorator would generate,
-    so that no ``<string>`` frame sits between the layer ceiling warning and
-    the user (see the class docstrings). The cost is that the field list now
+    """All three classes hand-write the ``__init__`` the decorator would
+    generate, so that no ``<string>`` frame sits between a construction-time
+    warning (the layer ceiling, the fitted envelope) and the user (see the
+    class docstrings). The cost is that the field list now
     exists twice, and the drift is silent in one direction: an annotation
     added below still shapes ``repr`` / ``__eq__`` / ``fields()`` while the
     constructor has no way to set it, so instances carry the attribute only

@@ -17,7 +17,7 @@ import uacpy
 from uacpy.models import RAM, RunMode
 from uacpy.models.ram import MAX_BATHY_SECTIONS, MPIRAMS_RANGE_TOL_M
 from uacpy.core.exceptions import (
-    ConfigurationError, ExecutableNotFoundError,
+    ConfigurationError, ExecutableNotFoundError, ModelExecutionError,
 )
 from uacpy import Field
 from uacpy.core import (Altimetry, Bathymetry, 
@@ -4408,3 +4408,65 @@ class TestRamsRangeStepStability:
         assert any('predicted to diverge' in s for s in texts)
         assert any('Use dr <= 0.3' in s for s in texts)
         assert not any('larger np_pade or a finer dz' in s for s in texts)
+
+
+class TestCollinsStopMessagesAreTypedErrors:
+    """The Collins codes end their two self-diagnosed failures on a bare
+    Fortran ``stop`` that exits 0: ``ramgeo1.5.f:138-149`` ("Need to
+    increase parameter mz/mp/mr to N", before the march, empty ``tl.grid``)
+    and ``ramgeo1.5.f:767-771`` ("Laguerre method not converging. Try a
+    different combination of DR and NP.", mid-march, partial ``tl.grid``).
+    ``RAM._raise_on_collins_stop`` turns either stdout line into a
+    ``ModelExecutionError`` that quotes it and names the uacpy remedy. The
+    subprocess is faked so the test does not depend on provoking a real
+    stop."""
+
+    @staticmethod
+    def _run_with_stdout(monkeypatch, stdout):
+        env = Environment(
+            name='collins-stop', bathymetry=100.0, ssp=1500.0,
+            bottom=BoundaryProperties(sound_speed=1600.0, density=1.5,
+                                      attenuation=0.5))
+        src = Source(depths=50.0, frequencies=100.0)
+        rcv = Receiver(depths=[50.0], ranges=[500.0, 1000.0])
+
+        def fake_run(self, cmd, cwd=None, timeout=None, env=None):
+            return subprocess.CompletedProcess(cmd, 0, stdout=stdout,
+                                               stderr='')
+        monkeypatch.setattr(RAM, '_run_subprocess', fake_run)
+        return RAM(backend='ramgeo', verbose=False, np_pade=6).run(
+            env, src, rcv)
+
+    def test_an_array_limit_stop_names_the_fortran_line_and_the_checker(
+            self, monkeypatch):
+        with pytest.raises(ModelExecutionError) as ei:
+            self._run_with_stdout(
+                monkeypatch, '   Need to increase parameter mp to 11\n')
+        text = str(ei.value)
+        assert 'Need to increase parameter mp to 11' in text
+        assert 'bare Fortran STOP, exit code 0' in text
+        assert '_check_collins_array_limits' in text
+        assert 'ramgeo' in text
+
+    def test_a_laguerre_stop_names_dr_and_np_pade(self, monkeypatch):
+        with pytest.raises(ModelExecutionError) as ei:
+            self._run_with_stdout(
+                monkeypatch,
+                ' \n   Laguerre method not converging.\n'
+                '   Try a different combination of DR and NP.\n \n')
+        text = str(ei.value)
+        assert 'Laguerre method not converging.' in text
+        assert 'Try a different combination of DR and NP.' in text
+        assert 'np_pade=6' in text and 'np_pade=4' in text
+        # The remedy names the dr the run marched with, never the
+        # constructor's unresolved None.
+        assert 'dr=None' not in text
+        assert re.search(r"RAM\(dr=\d+(\.\d+)?, np_pade=4\)", text), text
+
+    def test_an_ordinary_silent_death_keeps_the_missing_output_error(
+            self, monkeypatch):
+        with pytest.raises(ModelExecutionError) as ei:
+            self._run_with_stdout(monkeypatch, '')
+        text = str(ei.value)
+        assert 'own diagnosis' not in text
+        assert 'tl.grid' in text

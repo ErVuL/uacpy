@@ -37,9 +37,13 @@ class Receiver(_DeepCopyMixin):
     Parameters
     ----------
     depths : float or array-like
-        Receiver depth(s) in meters. Positive down from surface.
+        Receiver depth(s) in meters. Positive down from surface. More than
+        one must be strictly increasing, with a minimum step of
+        ``DECK_DEPTH_RESOLUTION_M`` (the resolution the decks write).
     ranges : float or array-like, optional
-        Receiver range(s) in meters. Default is single point at 0m.
+        Receiver range(s) in meters. Default is single point at 0m. More
+        than one must be strictly increasing, with a minimum step of
+        ``DECK_RANGE_RESOLUTION_M``.
     receiver_type : str, optional
         Receiver *sampling layout*. ``'grid'`` (default) evaluates the field
         on the full depth×range cross-product and is the only implemented

@@ -626,6 +626,17 @@ class PropagationModel(ABC):
         directories it created. ``cleanup=False`` with an unpinned
         ``work_dir`` keeps the temp directory (and the ``*_file`` metadata
         paths that point into it); the caller then owns its removal.
+    timeout : float, optional
+        Wall-clock limit (s) on each binary launch; a run that exceeds it is
+        killed and raises :class:`ModelExecutionError` with ``timed_out``
+        set. Default 600.0.
+    collapse : dict, optional
+        Per-feature policies applied when an environment carries a feature
+        this model does not read (``'bathymetry'``, ``'ssp'``,
+        ``'bottom_range'``, ``'bottom_layers'``, ``'altimetry'``,
+        ``'surface'``, ``'elastic'``); any subset overrides
+        ``DEFAULT_COLLAPSE``, and the resolved policy is what
+        ``_project_environment`` applies. See :meth:`_project_environment`.
 
     Attributes
     ----------
@@ -1212,6 +1223,16 @@ class PropagationModel(ABC):
         RunMode.RAYS, RunMode.EIGENRAYS, RunMode.ARRIVALS, RunMode.MODES,
     })
 
+    # Modes that evaluate nothing on the receiver range axis, so a receiver
+    # whose ranges are all 0 m is a legal input: mode shapes and plane-wave
+    # reflection coefficients read no receiver range, a ray fan is bounded
+    # by ``r_box`` (which falls back to 10 km), and the OASN array products
+    # ignore ``receiver.ranges`` outright.
+    _NO_RANGE_AXIS_MODES: 'frozenset[RunMode]' = frozenset({
+        RunMode.RAYS, RunMode.MODES, RunMode.REFLECTION,
+        RunMode.COVARIANCE, RunMode.REPLICA,
+    })
+
     def _require_timeseries_signal(
         self,
         run_mode: 'RunMode',
@@ -1238,9 +1259,9 @@ class PropagationModel(ABC):
         one they passed in.
 
         Used by every wrapper that synthesises p(t) from a broadband
-        transfer function (Bellhop, RAM, Scooter, Kraken, OASP).
-        SPARC has its own pulse mechanism (``pulse_type``) and does not
-        call this helper.
+        transfer function (Bellhop, RAM, Scooter, Kraken, OASP), and by
+        SPARC for the series a ``pulse_type`` opening with ``'F'`` / ``'B'``
+        stages as ``STSFIL``.
         """
         if run_mode == RunMode.TIME_SERIES and (
             source_waveform is None or sample_rate is None
@@ -1790,6 +1811,22 @@ class PropagationModel(ABC):
 
         if receiver.depth_min < 0:
             raise ConfigurationError("Receiver depths must be non-negative")
+
+        # A point source's field carries a 1/sqrt(r) factor that is singular
+        # on the source axis, so a grid whose largest range is 0 m has no
+        # cell any engine can fill: every wrapper NaNs the r = 0 column, and
+        # the PE grid chooser divides by a range step it sizes from r_max.
+        # Modes that evaluate nothing on the receiver range axis are exempt
+        # (see ``_NO_RANGE_AXIS_MODES``); a mixed grid such as
+        # ``ranges=[0, 1000]`` keeps its NaN column and the masking warning.
+        if (run_mode not in self._NO_RANGE_AXIS_MODES
+                and receiver.range_max <= 0.0):
+            raise ConfigurationError(
+                f"{self.model_name}: the receiver's largest range is 0 m; "
+                f"give at least one positive receiver range (a field at "
+                f"r = 0 is undefined for a point source).",
+                remediation="Receiver(depths=<your depths>, ranges=[1000.0])",
+            )
 
         self._warn_receiver_below_resolvable(env, receiver, resolvable_depth)
         self._check_per_range_receiver_depth(env, receiver)

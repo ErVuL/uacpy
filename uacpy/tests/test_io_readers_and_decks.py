@@ -3681,7 +3681,8 @@ class TestAddArrPostMerge:
         ])
         cell = _cell(_read_merged(path))
         assert cell['n_arrivals'] == 2
-        assert sorted(cell['phases'].tolist()) == [0.0, 90.0]
+        assert sorted(cell['phases'].tolist()) == pytest.approx(
+            [0.0, np.pi / 2], abs=1e-12)
 
     def test_merge_false_returns_records_unmerged_in_file_order(
             self, tmp_path):
@@ -3696,6 +3697,8 @@ class TestAddArrPostMerge:
         cell = _cell(_read_merged(path, merge=False))
         assert cell['n_arrivals'] == 3
         expected = np.array(records)
+        # Column 1 is the file's degree phase; the reader stores radians.
+        expected[:, 1] = np.deg2rad(expected[:, 1])
         for col, key in enumerate(_FIELD_KEYS):
             assert cell[key].tolist() == expected[:, col].tolist(), key
 
@@ -3733,7 +3736,10 @@ class TestTotalKeyRecordSort:
         cell_a = _cell(_read_merged(
             _write_arr(tmp_path / 'a.arr', self._records())))
 
-        remerged = [tuple(cell_a[key][i] for key in _FIELD_KEYS)
+        # The cell holds radians; the file column is degrees, so the
+        # round trip writes the phase back in the file's unit.
+        remerged = [tuple(np.rad2deg(cell_a[key][i]) if key == 'phases'
+                          else cell_a[key][i] for key in _FIELD_KEYS)
                     for i in range(cell_a['n_arrivals'])]
         cell_b = _cell(_read_merged(
             _write_arr(tmp_path / 'b.arr', remerged)))
@@ -4869,3 +4875,75 @@ class TestRamDecksCarryTheWaterDensityRatio:
             _water_density_env(water_density=1.0), tmp_path, absorber_span=20.0, zmax=150.0,
             dz=0.5)
         np.testing.assert_allclose(rho, 1.5)
+
+
+class TestArrPhaseIsRadiansAtTheReaderBoundary:
+    """``Bellhop/ArrMod.f90:120`` writes ``SNGL(RadDeg) * Phase``, so the
+    ``.arr`` column is degrees; ``read_arr_file`` converts once and every
+    consumer downstream — the per-arrival dict, ``Arrivals.phases``,
+    ``received_amplitudes`` and the AddArr merge tolerance — sees radians.
+    A 180 in the file must therefore read back as pi: a pin on 180 would
+    pass a reader that skips the conversion, a pin on pi cannot."""
+
+    @staticmethod
+    def _read(path, **kw):
+        from uacpy.io.oalib_reader import read_arr_file
+        return read_arr_file(path, **kw)
+
+    def test_a_surface_bounce_record_reads_as_pi_not_180(self, tmp_path):
+        path = _write_arr(tmp_path / 'top.arr',
+                          [(0.3, 180.0, 0.001, 0.0, -5.0, 5.0, 1, 0)])
+        result = self._read(path)
+        assert _cell(result)['phases'][0] == pytest.approx(np.pi, abs=1e-12)
+        assert result.arrivals[0]['phase'] == pytest.approx(np.pi, abs=1e-12)
+        assert result.phases[0] == pytest.approx(np.pi, abs=1e-12)
+        # exp(1j * pi) flips the sign: the stored value feeds the complex
+        # factor with no further conversion.
+        assert result.received_amplitudes[0] == pytest.approx(-0.3 + 0j,
+                                                              abs=1e-12)
+
+    def test_a_filtered_copy_keeps_the_radian_value(self, tmp_path):
+        """``_spawn`` rebuilds ``by_receiver`` from the flat dicts; the
+        rebuilt cell must carry the same unit as the freshly-read one."""
+        path = _write_arr(tmp_path / 'two.arr', [
+            (0.3, 0.0, 0.001, 0.0, -5.0, 5.0, 0, 0),
+            (0.1, 180.0, 0.0011, 0.0, -4.9, 5.1, 1, 0)])
+        result = self._read(path)
+        surface = result.filter_by_bounces(kind='surface')
+        assert _cell(surface)['phases'][0] == pytest.approx(np.pi, abs=1e-12)
+
+    @pytest.mark.parametrize('step_deg, n_kept', [(2.0, 1), (4.0, 2)])
+    def test_the_merge_tolerance_is_applied_to_the_radian_value(
+            self, tmp_path, step_deg, n_kept):
+        """AddArr merges when ``|dphase| < 0.05`` rad (``ArrMod.f90:8,45``):
+        2 deg = 0.035 rad merges, 4 deg = 0.070 rad does not. Read as
+        degrees, both pairs would stay apart."""
+        path = _write_arr(tmp_path / 'tol.arr', [
+            (0.3, 10.0, 0.001, 0.0, -5.0, 5.0, 0, 1),
+            (0.1, 10.0 + step_deg, 0.001, 0.0, -4.9, 5.1, 0, 1)])
+        cell = _cell(self._read(path, merge=True))
+        assert cell['n_arrivals'] == n_kept
+
+    @pytest.mark.requires_binary
+    def test_bellhops_first_surface_bounce_arrives_with_phase_pi(
+            self, tmp_path):
+        """Isovelocity water, vacuum surface: the one-top-bounce path picks
+        up exactly the pi of the pressure-release reflection and nothing
+        else (no caustic, no bottom phase). Bellhop writes it as 180 in the
+        file; the Python side must hold pi to 1e-6."""
+        from uacpy.models import Bellhop, RunMode
+        from uacpy.core import Receiver
+        env = Environment(
+            name='iso', bathymetry=100.0, ssp=1500.0,
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=1600.0, density=1.5,
+                                      attenuation=0.5))
+        source = Source(depths=50.0, frequencies=200.0)
+        receiver = Receiver(depths=[50.0], ranges=[1000.0])
+        result = Bellhop(verbose=False).run(
+            env, source, receiver, run_mode=RunMode.ARRIVALS)
+        surface_only = [a for a in result.arrivals
+                        if a['n_top_bounces'] == 1 and a['n_bot_bounces'] == 0]
+        assert surface_only, "no one-top-bounce arrival in the cell"
+        first = min(surface_only, key=lambda a: a['delay'])
+        assert abs(first['phase'] - np.pi) < 1e-6

@@ -98,8 +98,10 @@ preset `c_p` is 1500 m/s — exactly the reference water speed, and `c_p/c_w
 = 1.00` in *Computational Ocean Acoustics* Table 1.3, where the preset comes
 from — so `arccos(1500/c_p)` degenerates to 0° and the angle dependence drops
 out. What is left is the density contrast alone,
-`|R| = (ρ_b − ρ_w)/(ρ_b + ρ_w) = 0.2`: a flat ~14 dB at every angle steeper
-than a few degrees.
+`|R| = (ρ_b − ρ_w)/(ρ_b + ρ_w) = (1.5 − 1.027)/(1.5 + 1.027) = 0.19`: a flat
+~14.5 dB at every angle steeper than a few degrees. The `ρ_w` is the 1.027 g/cm³
+every deck writes (`bottom_loss_curve`'s `water_density` default); a textbook
+taking ρ_w = 1 gets 0.2 and ~14 dB, which `water_density=1.0` reproduces.
 
 That is the **equal-speed** limit, not the slow-bottom one. A seabed genuinely
 slower than the water — high-porosity mud, `c_p/c_w < 1` with `ρ_b > ρ_w` —

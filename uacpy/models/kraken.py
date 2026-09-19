@@ -2160,7 +2160,7 @@ class Kraken(PropagationModel):
         """``(thickness, speed)`` per medium across every profile of the deck.
 
         ``plan_multi_profile_media`` is the deck's geometry of record — it
-        returns each profile's media already quantised to the written ``.1f``
+        returns each profile's media already quantised to the written ``.6f``
         resolution and with the last one stretched onto the common bottom — so
         the mesh bound is read off it rather than re-derived. The water column
         of each profile is medium 1.
