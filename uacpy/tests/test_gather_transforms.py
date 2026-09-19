@@ -18,6 +18,8 @@ inverse. What is pinned here is what a caller depends on and cannot see:
 The figures these produce are exercised in ``test_transform_plots.py``.
 """
 
+import warnings
+
 import numpy as np
 import pytest
 
@@ -575,3 +577,158 @@ def test_inverse_fk_undoes_the_wavenumber_flip(nx, pad):
     _, _, _, spec = fk_transform(d, 500.0, 2.0, nfft=nfft)
     rec = inverse_fk(spec)
     assert np.max(np.abs(rec[:nt, :nx] - d)) < 1e-10
+
+
+class TestTauPSpatialAliasing:
+    """The array-spacing bound on the slowness axis, and the warning for it.
+
+    A slant stack reads the moveout only at the sensors, so between adjacent
+    traces it sees ``2*pi*f*p*dx`` modulo a turn. Past half a turn ``p`` and
+    ``p -/+ 1/(f*dx)`` are the same measurement. Nothing downstream can undo
+    that — the wavenumber was undersampled before the transform ran — so the
+    transform says so at the point where it still means something.
+    """
+
+    FS, DX, NT, NXX = 2000.0, 2.0, 1024, 24
+
+    def _tone(self, f, p0=4e-4, dx=None):
+        dx = self.DX if dx is None else dx
+        t = np.arange(self.NT) / self.FS
+        x = np.arange(self.NXX) * dx
+        return np.cos(2 * np.pi * f * (t[:, None] - p0 * x[None, :]))
+
+    def _warns(self, d, dx=None, **kw):
+        dx = self.DX if dx is None else dx
+        with pytest.warns(UserWarning, match="aliases beyond"):
+            taup_transform(d, self.FS, dx, **kw)
+        return True
+
+    def _quiet(self, d, dx=None, **kw):
+        dx = self.DX if dx is None else dx
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            taup_transform(d, self.FS, dx, **kw)
+        return [w for w in caught if issubclass(w.category, UserWarning)] == []
+
+    def test_the_aliasing_it_warns_about_is_real(self):
+        """Not just that it fires — that the answer really is wrong.
+
+        A monochromatic event puts EQUAL peaks at ``p0 + n/(f*dx)`` for every
+        integer n (measured: the pair here agree to 1%), so which one a global
+        argmax returns is a numerical coin flip and pins nothing — tau-p and
+        radon disagree on it for this very gather. What is not a coin flip is
+        which peak falls inside the unaliased band ``|p| <= 1/(2*f*dx)``,
+        because that is the band a caller who respects the bound will scan.
+        At 900 Hz p0 = +4e-4 s/m is OUTSIDE it and the in-band representative
+        sits at p0 - 1/(f*dx): a scan that is correctly restricted returns a
+        NEGATIVE slowness for a wave travelling towards +x, with nothing in
+        the panel to say so.
+        """
+        f, p0 = 900.0, 4e-4
+        band = 1.0 / (2.0 * f * self.DX)
+        assert p0 > band                       # the event is out of band
+        ps = np.linspace(-band, band, 1001)    # scan the band, as one should
+        r = taup_transform(self._tone(f, p0), self.FS, self.DX, ps)
+        peak = r.slownesses[np.argmax(np.abs(r.panel).max(axis=1))]
+        assert peak == pytest.approx(p0 - 1.0 / (f * self.DX),
+                                     abs=2 * (ps[1] - ps[0]))
+        assert peak < 0.0 < p0                 # direction of travel reversed
+
+    def test_below_the_bound_the_same_event_is_placed_correctly(self):
+        """The companion: at 600 Hz, p0 = +4e-4 is INSIDE the band, so the
+        in-band peak is the true one. Same gather, same fan, one variable —
+        the frequency — moved across the bound."""
+        f, p0 = 600.0, 4e-4
+        band = 1.0 / (2.0 * f * self.DX)
+        assert p0 < band                       # the event is in band
+        ps = np.linspace(-band, band, 1001)
+        r = taup_transform(self._tone(f, p0), self.FS, self.DX, ps)
+        peak = r.slownesses[np.argmax(np.abs(r.panel).max(axis=1))]
+        assert peak == pytest.approx(p0, abs=2 * (ps[1] - ps[0]))
+
+    def test_warns_above_the_bound_and_is_quiet_below_it(self):
+        """Both sides of the threshold, one variable moving. A 200 Hz tone
+        passes at the 1e-3 default (no false alarm on ordinary narrowband
+        data); the same gather at 900 Hz trips it."""
+        assert self._quiet(self._tone(200.0))
+        assert self._warns(self._tone(900.0))
+
+    def test_the_threshold_itself_is_pinned(self):
+        """Straddling p_alias on the same gather, so the boundary is the only
+        thing that changes. Far-from-boundary values would pass against a
+        guard placed anywhere in between."""
+        d = self._tone(200.0)
+        D = np.fft.rfft(d, axis=0)
+        f = np.fft.rfftfreq(self.NT, 1.0 / self.FS)
+        P = (np.abs(D) ** 2).sum(axis=1)
+        f_edge = f[np.searchsorted(np.cumsum(P) / P.sum(), 0.99)]
+        p_alias = 1.0 / (2.0 * f_edge * self.DX)
+        assert self._quiet(d, p_max=p_alias * 0.999)
+        assert self._warns(d, p_max=p_alias * 1.001)
+
+    def test_every_remedy_the_message_prints_actually_clears_it(self):
+        """A remedy quoted to 3 figures must work when typed back verbatim,
+        so each number is rounded the safe way. Parsed out of the message
+        rather than recomputed, which is what a reader does."""
+        import re
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            taup_transform(self._tone(900.0), self.FS, self.DX)
+        msg = str(caught[0].message)
+        p_cap = float(re.search(r"Cap the slowness range at ([\d.e+-]+)",
+                                msg).group(1))
+        dx_fine = float(re.search(r"dx = ([\d.e+-]+) m or finer",
+                                  msg).group(1))
+        f_cut = float(re.search(r"low-pass the gather below ([\d.e+-]+)",
+                                msg).group(1))
+        assert self._quiet(self._tone(900.0), p_max=p_cap)
+        assert self._quiet(self._tone(900.0, dx=dx_fine), dx=dx_fine)
+        # The low-pass corner is quoted for band-limited data, which is what
+        # a caller can actually produce; f99 tracks a real cut rather than a
+        # single tone's leakage tail.
+        rng = np.random.default_rng(3)
+        w = rng.standard_normal((self.NT, self.NXX))
+        W = np.fft.rfft(w, axis=0)
+        W[np.fft.rfftfreq(self.NT, 1.0 / self.FS) > f_cut] = 0
+        assert self._quiet(np.fft.irfft(W, n=self.NT, axis=0))
+
+    @pytest.mark.parametrize("gather,label", [
+        (np.zeros((64, 8)), "silent"),
+        (np.ones((64, 8)), "DC only"),
+    ])
+    def test_degenerate_gathers_neither_warn_nor_raise(self, gather, label):
+        """A silent gather has no energy to alias and an all-DC one has no
+        frequency to alias at; both divide by zero in the naive form of the
+        bound, so both are returned quietly rather than warned about."""
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            taup_transform(gather, self.FS, self.DX)
+        assert [w for w in caught
+                if issubclass(w.category, UserWarning)] == [], label
+
+    def test_a_zero_only_slowness_axis_cannot_alias(self):
+        """p = 0 stacks the traces flat, which no spacing can undersample."""
+        assert self._quiet(self._tone(900.0), slownesses=np.array([0.0]))
+
+
+def test_taup_has_no_spatial_padding_because_it_would_do_nothing():
+    """Why there is no spatial ``nfft`` here while ``fk_transform`` has one.
+
+    tau-p SUMS over sensors, so zero traces add zero terms and the panel is
+    unchanged bit for bit. f-k TRANSFORMS across them, so the spatial FFT
+    length sets ``dk = 2*pi/(NX*dx)`` and padding genuinely interpolates the
+    wavenumber axis. Pinned so that a future "for symmetry" spatial nfft on
+    tau-p has to confront the fact that it cannot change an answer.
+    """
+    fs, dx, nt, nx = 2000.0, 2.0, 256, 16
+    d = np.random.default_rng(0).standard_normal((nt, nx))
+    padded = np.hstack([d, np.zeros((nt, 3 * nx))])
+    plain = taup_transform(d, fs, dx, p_max=2e-4)
+    with_zeros = taup_transform(padded, fs, dx, p_max=2e-4)
+    assert np.array_equal(plain.panel, with_zeros.panel)
+
+    # f-k, the contrast: the same padding moves the wavenumber grid.
+    k_plain = fk_transform(d, fs, dx).wavenumbers
+    k_padded = fk_transform(d, fs, dx, nfft=(nt, 4 * nx)).wavenumbers
+    assert k_padded.size == 4 * k_plain.size
+    assert np.diff(k_padded)[0] == pytest.approx(np.diff(k_plain)[0] / 4)

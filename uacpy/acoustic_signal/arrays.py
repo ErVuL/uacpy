@@ -371,6 +371,73 @@ def _fk_tapers(window, nt, nx):
     return _taper(t_spec, nt), _taper(x_spec, nx)
 
 
+def _warn_spatial_aliasing(D, freqs, dx, slownesses, caller):
+    """Warn when the requested slowness range outruns the trace spacing.
+
+    A slant stack reads the moveout only at the sensors, so between adjacent
+    traces it sees the phase ``2*pi*f*p*dx`` modulo a turn. Past half a turn
+    the stack can no longer tell ``p`` from ``p -/+ 1/(f*dx)``: measured on a
+    900 Hz plane wave at ``p = +4e-4`` s/m with ``dx = 2`` m, the panel peaks
+    at ``-1.550e-4`` against ``-1.556e-4`` predicted — the right event, the
+    wrong slowness, and the wrong direction of travel.
+
+    Nothing recovers it. The wavenumber was undersampled by the array before
+    the transform ran, which is why there is no spatial zero-padding knob
+    here: padding a sum over sensors with zero traces adds zero terms to that
+    sum and is a bit-exact no-op (unlike :func:`fk_transform`, whose spatial
+    FFT length sets the wavenumber grid and so does interpolate it). The
+    remedies are all upstream of the panel — a narrower slowness range, a
+    low-passed gather, or a finer ``dx``.
+
+    The bound is taken against the frequency below which 99% of the record's
+    energy lies, not the Nyquist rate, so a narrowband gather is judged on the
+    band it occupies. The quantile is deliberately generous: window leakage
+    already lifts it (a clean 200 Hz tone reads 218.8 Hz, 9% high), which
+    makes the guard fire slightly early rather than slightly late, and at
+    ``p_max``'s 1e-3 default a 200 Hz tone still passes quietly.
+    """
+    p_max = float(np.max(np.abs(slownesses))) if slownesses.size else 0.0
+    if p_max <= 0.0 or dx <= 0.0:
+        return
+    power = (np.abs(D) ** 2).sum(axis=1)
+    total = power.sum()
+    if not np.isfinite(total) or total <= 0.0:
+        return              # a silent gather aliases nothing
+    f_edge = float(freqs[np.searchsorted(np.cumsum(power) / total, 0.99)])
+    if f_edge <= 0.0:
+        return              # all energy at DC: every slowness is unaliased
+    p_alias = 1.0 / (2.0 * f_edge * dx)
+    if p_max <= p_alias:
+        return
+    # The three remedies are quoted rounded, and a reader types the quoted
+    # number back. Round each one the SAFE way — down for a ceiling on |p| and
+    # on dx, down for the low-pass corner — so that following the message
+    # literally clears the guard instead of tripping it again on the third
+    # significant figure.
+
+    def _floor_sig(v, n=3):
+        if not np.isfinite(v) or v <= 0.0:
+            return v
+        scale = 10.0 ** (np.floor(np.log10(v)) - (n - 1))
+        return float(np.floor(v / scale) * scale)
+
+    p_safe = _floor_sig(p_alias)
+    f_safe = _floor_sig(1.0 / (2.0 * p_max * dx))
+    dx_safe = _floor_sig(1.0 / (2.0 * f_edge * p_max))
+    warnings.warn(
+        f"{caller}: the slowness axis reaches |p| = {p_max:.2e} s/m, but "
+        f"with dx = {dx:g} m and 99% of the record's energy below "
+        f"{f_edge:.0f} Hz the stack aliases beyond |p| = {p_safe:.3g} s/m — "
+        f"an event steeper than that is indistinguishable from p -/+ "
+        f"1/(f*dx) and can surface at the wrong slowness, or the wrong sign. "
+        f"Cap the slowness range at {p_safe:.3g} s/m, low-pass the gather "
+        f"below {f_safe:.3g} Hz, or sample the array at "
+        f"dx = {dx_safe:.3g} m or finer. Zero-padding cannot help: the "
+        f"wavenumber was undersampled before the transform ran.",
+        UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+    )
+
+
 def _fk_nfft(nfft, nt, nx):
     """Resolve the zero-padded f-k transform shape ``(NT, NX) >= (nt, nx)``."""
     if nfft is None:
@@ -584,6 +651,28 @@ def taup_transform(data, sample_rate, dx, slownesses=None, n_slowness=201,
     the tau axis into a guard band: an intercept up to ``(NT - nt)/fs`` s
     outside the record lands in the padded ``[nt/fs, NT/fs)`` rows instead of
     aliasing in among the physical taus.
+
+    The spatial axis has no such knob, and deliberately so
+    -----------------------------------------------------
+    The slowness axis is yours to set outright — ``slownesses`` takes any
+    array, uniform or not, and ``n_slowness``/``p_max`` build one for you — so
+    resolution in ``p`` is never limited by a transform length the way
+    :func:`fk_transform`'s wavenumber axis is. There is correspondingly no
+    spatial ``nfft``: this transform SUMS over sensors rather than
+    transforming across them, so appending zero traces adds zero terms to that
+    sum and changes nothing, bit for bit. (In ``fk_transform`` the spatial FFT
+    length sets the wavenumber grid ``dk = 2*pi/(NX*dx)``, which is why the
+    knob is real there and meaningless here.)
+
+    What the array spacing DOES limit is aliasing. Between adjacent traces the
+    stack sees ``2*pi*f*p*dx`` modulo a turn, so past ``|p| = 1/(2*f*dx)`` it
+    cannot separate ``p`` from ``p -/+ 1/(f*dx)``: a 900 Hz plane wave at
+    ``p = +4e-4`` s/m on a ``dx = 2`` m array surfaces at ``-1.55e-4`` — the
+    wrong slowness AND the wrong direction of travel. A warning fires when the
+    requested range crosses that bound, judged against the frequency holding
+    99% of the record's energy rather than the Nyquist rate so a narrowband
+    gather is measured on the band it actually occupies. Heed it upstream: no
+    padding recovers a wavenumber the array never sampled.
     """
     d = np.asarray(data, dtype=float)
     if d.ndim != 2:
@@ -608,7 +697,9 @@ def taup_transform(data, sample_rate, dx, slownesses=None, n_slowness=201,
         slownesses = np.linspace(-p_max, p_max, int(n_slowness))
     slownesses = np.atleast_1d(np.asarray(slownesses, dtype=float))
     D = np.fft.rfft(d, n=NT, axis=0)
-    omega = 2.0 * np.pi * np.fft.rfftfreq(NT, 1.0 / fs)  # rad/s
+    freqs = np.fft.rfftfreq(NT, 1.0 / fs)                # Hz
+    omega = 2.0 * np.pi * freqs                          # rad/s
+    _warn_spatial_aliasing(D, freqs, dx, slownesses, "taup_transform")
     taup = np.empty((slownesses.size, NT))
     for i, p in enumerate(slownesses):
         # Sign: numpy's forward transform carries exp(-j*omega*t), so a
