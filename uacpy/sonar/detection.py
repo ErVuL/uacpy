@@ -191,7 +191,12 @@ def per_look_false_alarm(pf_scan: float, n_looks: float) -> float:
     """Per-look ``P_F`` that holds a whole scan's false-alarm rate at ``pf_scan``.
 
     A detector that forms many looks and reports the largest false-alarms if
-    *any* look does, so its rate is the scan's, not one look's. Inverting
+    *any* look does, so its rate is the scan's, not one look's. Abraham puts
+    it directly: "searching over N independent sonar resolution cells for a
+    signal results in an N-fold increase in the single-resolution-cell
+    probability of false alarm ... the single-resolution-cell probability of
+    false alarm must be set N times smaller than that desired"
+    (*Underwater Acoustic Signal Processing*, 8.5). Inverting
     :func:`scan_false_alarm`::
 
         pf_look = 1 - (1 - pf_scan) ** (1 / n_looks)
@@ -215,9 +220,20 @@ def scan_false_alarm(pf_look: float, n_looks: float) -> float:
     """False-alarm rate of a max-over-looks detector, ``1 - (1 - pf)**n``.
 
     The rate a scan actually achieves when each of ``n_looks`` independent
-    looks is thresholded at ``pf_look``. Inverse of
-    :func:`per_look_false_alarm`, which is the one to use when setting a
-    threshold from a required scan-level rate.
+    looks is thresholded at ``pf_look``. This is Abraham's Equation (8.111),
+    the probability of one or more false alarms in N statistically
+    independent resolution cells,
+    ``Pr{at least one FA} = 1 - [1 - P_f]^N ~ N*P_f`` (*Underwater Acoustic
+    Signal Processing*, 8.5). Inverse of :func:`per_look_false_alarm`,
+    which is the one to use when setting a threshold from a required
+    scan-level rate.
+
+    "Looks" are resolution cells of any kind, not only beams: Ainslie counts
+    "100 beams and 1000 frequencies ... 10^5 detection opportunities (and
+    therefore also 10^5 false alarm opportunities) every second"
+    (*Sonar Performance Modelling*, 7). :func:`independent_beams
+    <uacpy.acoustic_signal.independent_beams>` counts only the spatial
+    factor.
     """
     pf = _check_prob(pf_look, "scan_false_alarm: pf_look")
     n = _check_n_looks(n_looks, "scan_false_alarm")

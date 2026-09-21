@@ -727,9 +727,31 @@ class TestWeightsMayBeComplex:
         assert scan.array_gain()[0] - broadside > 9.0
         assert abs(scan.best_angle[0]) > 5.0      # and it is not at 0 deg
 
+    def test_it_reproduces_butler_and_shermans_superdirective_pair(self):
+        """B&S 8.4.1, five hydrophones, incoherent noise: +7 and -7 dB.
+
+        Their superdirective shading is ``a_i = 1`` for the centre and the
+        two ends, ``-1`` for the other two — alternating, and with FIVE
+        elements it sums to 1, not 0. "The array gain goes from 7 dB for
+        uniform shading to -7 dB for the simple superdirective shading."
+        A magnitudes-only formula would report +7 dB for both.
+        """
+        # 10log10(5) = 6.9897, which B&S quote as 7 dB; assert the exact
+        # value so the test pins the formula, not their rounding.
+        exact = 10.0 * np.log10(5.0)
+        assert plane_wave_array_gain(np.ones(5)) == pytest.approx(exact)
+        superdirective = np.array([1.0, -1.0, 1.0, -1.0, 1.0])
+        assert np.sum(superdirective) == 1.0        # not zero: five elements
+        assert plane_wave_array_gain(superdirective) == pytest.approx(-exact)
+
     def test_weights_that_sum_to_zero_null_the_steered_direction(self):
-        """Alternating +/-1 is Butler & Sherman's superdirective example."""
+        """An EVEN alternating array sums to zero, which is a true null.
+
+        Not Butler & Sherman's case: theirs has five elements and sums to
+        1. The parity matters — the answer is -inf here and -7 dB there.
+        """
         w = np.array([1.0, -1.0] * 8)
+        assert np.sum(w) == 0.0
         assert plane_wave_array_gain(w) == -np.inf
 
     def test_all_zero_weights_are_refused_not_silently_nan(self):
@@ -929,6 +951,54 @@ class TestIndependentBeamsCountsOrthogonalLooks:
         ang = np.linspace(-90.0, 90.0, 721)
         assert independent_beams(pos, ang, FREQ, c=C) == pytest.approx(
             16.0, rel=1e-9)
+
+    def test_a_boxcar_taper_reproduces_the_unshaded_count_exactly(self):
+        """The shaded path must reduce to the unshaded one, not merely near it."""
+        pos, ang = _array(), np.linspace(-90.0, 90.0, 721)
+        plain = independent_beams(pos, ang, FREQ, c=C)
+        boxcar = independent_beams(pos, ang, FREQ, c=C,
+                                   weights=shading_taper(16, 'boxcar'))
+        assert boxcar == pytest.approx(plain, rel=1e-3)
+
+    def test_a_taper_widens_the_cell_and_so_lowers_the_count(self):
+        """Shading spends aperture on sidelobes, so cells get wider.
+
+        The beams' NOISE correlation is the array factor of |w|^2, so the
+        width that matters is that of hann^2 — first null at three DFT bins
+        against the rectangular window's one, not the two bins of the beam
+        PATTERN. The looks a scan really has are fewer than the resolution
+        argument suggests. Blackman is wider still.
+        """
+        pos, ang = _array(), np.linspace(-90.0, 90.0, 721)
+        plain = independent_beams(pos, ang, FREQ, c=C)
+        hann = independent_beams(pos, ang, FREQ, c=C,
+                                 weights=shading_taper(16, 'hann'))
+        black = independent_beams(pos, ang, FREQ, c=C,
+                                  weights=shading_taper(16, 'blackman'))
+        assert hann == pytest.approx(plain / 3.20, rel=0.02)
+        assert black < hann < plain
+
+    def test_the_hann_widening_tends_to_three_bins_as_the_array_grows(self):
+        """3.20x at 16 elements is a finite-N effect; hann^2 gives 3."""
+        ang = np.linspace(-90.0, 90.0, 721)
+        d = 0.5 * C / FREQ
+        w16 = independent_beams(d * np.arange(16), ang, FREQ, c=C) / \
+            independent_beams(d * np.arange(16), ang, FREQ, c=C,
+                              weights=shading_taper(16, 'hann'))
+        w64 = independent_beams(d * np.arange(64), ang, FREQ, c=C) / \
+            independent_beams(d * np.arange(64), ang, FREQ, c=C,
+                              weights=shading_taper(64, 'hann'))
+        assert 3.0 < w64 < w16 < 3.3
+
+    def test_a_pure_phase_ramp_does_not_change_the_count(self):
+        """Steering a taper moves the beam; it does not widen it."""
+        pos, ang = _array(), np.linspace(-90.0, 90.0, 721)
+        t = shading_taper(16, 'hann')
+        straight = independent_beams(pos, ang, FREQ, c=C, weights=t)
+        steered = independent_beams(
+            pos, ang, FREQ, c=C,
+            weights=t * np.exp(-1j * np.linspace(0.0, 3.0, 16)))
+        assert steered == pytest.approx(straight, rel=1e-6)
 
     def test_a_narrower_scan_holds_proportionally_fewer(self):
         pos = _array()

@@ -436,6 +436,42 @@ class BeamformedField(_BeamformedFields):
         The reference is the MEAN element power, not any single element's: a
         lone hydrophone can sit in an interference null, which reads as
         enormous "gain" from an array whose ceiling is ``10log10(N)``.
+
+        **What this ratio is, exactly.** It is a ratio of SIGNAL powers.
+        Array gain is a ratio of signal-to-NOISE ratios — Abraham gives it
+        for a general noise covariance ``Q`` and weight vector ``w`` as
+        ``G_a = v|w^H d|^2 / (w^H Q w)`` (*Underwater Acoustic Signal
+        Processing*, 8.4.4) — so the two agree only when the beamformer
+        passes the noise unchanged:
+
+            AG = signal gain - 10log10(w^H R_n w)
+
+        The weights are unit-norm, so the noise term vanishes when the noise
+        is spatially uncorrelated across the elements — which for isotropic
+        3-D noise, coherence ``sinc(k*d)``, holds at ``d = lambda/2`` and
+        nowhere else. At the design frequency of a half-wavelength array
+        this method IS the array gain. Away from it the noise term is real
+        and is NOT included here; for a 24-element lambda/2-at-200-Hz array
+        the correction runs
+
+            150 Hz  +1.25 dB      225 Hz  -0.51 dB
+            175 Hz  +0.58 dB      250 Hz  -0.97 dB
+            200 Hz   0.00 dB      300 Hz  -1.76 dB
+
+        so a broadband call returns per-bin signal gains that are array
+        gains only in the bin where the spacing is half a wavelength. A
+        positive correction means this method OVERSTATES the array gain.
+
+        That correction is not a private derivation: it reproduces, to
+        machine precision at every frequency tried, the ``f_c/f_d`` factor
+        in Abraham's shaded-line-array directivity index,
+        ``DI ~ 10log10[(f_c/f_d)(sum w)^2 / sum w^2]`` — his "10-dB-per-
+        decade reduction when operating the array below the design
+        frequency". Above the design frequency the array is spatially
+        aliased, where that approximation is not intended and the entries
+        below should be read as the isotropic-noise arithmetic only.
+        Real ocean noise is not isotropic either (Butler & Sherman 8.3.1:
+        "sea noise is probably never isotropic"), which moves it again.
         """
         with np.errstate(divide="ignore", invalid="ignore"):
             return 10.0 * np.log10(self.best / self.element_power)
@@ -628,6 +664,11 @@ def plane_wave_array_gain(weights) -> float:
     honest: Butler & Sherman's alternating shading gives a genuinely
     NEGATIVE broadside gain, which a magnitudes-only form would erase.
 
+    This is Abraham's shaded-line-array directivity index at the DESIGN
+    frequency: ``DI ~ 10log10[(f_c/f_d)(sum w)^2 / sum w^2]`` with
+    ``f_c = f_d``. Away from the design frequency that leading factor is
+    real — see :meth:`BeamformedField.array_gain`, which measures it.
+
     It is **not** ``-10log10(sum |w|^4)``, which is the inverse of a
     normalised effective element count: the two agree for a boxcar and
     differ by about 1.1 dB for a Hann taper, which is small enough to read
@@ -691,15 +732,71 @@ def matched_replica_gain(pressure):
                                / np.mean(np.abs(p) ** 2, axis=0))
 
 
+def _decorrelation_spacing(positions_m, weights, frequency, c, unshaded):
+    """Spacing in ``sin(theta)`` at which two beams' NOISE outputs decorrelate.
+
+    Two beams a distance ``delta`` apart in ``sin(theta)`` have outputs
+    whose correlation in spatially white noise is
+
+        w(theta)^H w(theta+delta) = sum_n |w_n|^2 exp(-j k z_n delta)
+
+    — the array factor of the POWER weights, not of the weights. Two
+    consequences fall out of that form: a phase ramp on the taper cancels
+    exactly (steering a beam moves it without widening it), and the
+    relevant width is that of ``|w|^2``, which is broader than the beam
+    pattern's. For a Hann taper the pattern's first null sits at two DFT
+    bins while ``hann^2`` reaches its first null at three, so the looks a
+    scan really has are fewer than the *resolution* argument suggests.
+
+    This is deliberately NOT the resolution criterion — "half the
+    first-null beamwidth (FNBW/2)" (Balanis, *Antenna Theory*, 2) — which
+    answers a different question: whether two SOURCES can be told apart.
+    A false-alarm count is about when two beams' NOISE stops being shared,
+    and those coincide only for an unshaded array, where both reduce to
+    ``lambda/(N*d)``.
+    """
+    z = np.asarray(positions_m, dtype=float).ravel()
+    w = np.abs(np.asarray(weights)) ** 2
+    k = 2.0 * np.pi * float(frequency) / float(c)
+    # Search out to 8 unshaded cells: Blackman needs ~3, and anything
+    # broader than 8 is a weighting with essentially no main lobe.
+    grid = np.linspace(unshaded / 512.0, 8.0 * unshaded, 8193)
+    af = np.abs(np.exp(-1j * k * np.outer(grid, z)) @ w)
+    rising = np.flatnonzero(np.diff(np.sign(np.diff(af))) > 0)
+    if rising.size == 0:
+        log_message(
+            "independent_beams",
+            "these weights give a beam with no null within 8 unshaded "
+            "cells, so the resolution cell cannot be measured; falling back "
+            "to the unshaded spacing, which OVER-counts the looks and so "
+            "sets a stricter threshold than needed.",
+            level="warning",
+        )
+        return unshaded
+    return float(grid[rising[0] + 1])
+
+
 def independent_beams(positions_m, angles_deg, frequency,
-                      c: float = DEFAULT_SOUND_SPEED) -> float:
+                      c: float = DEFAULT_SOUND_SPEED, *,
+                      weights=None) -> float:
     """How many INDEPENDENT looks a scan over ``angles_deg`` really holds.
 
     Beams spaced ``lambda / (N*d)`` apart in ``sin(theta)`` are mutually
     orthogonal for a uniform line array — the DFT spacing — so a sector
     spanning ``span`` in ``sin(theta)`` holds ``span * N*d / lambda``
     resolution cells however finely it is sampled. Scanning 361 angles does
-    not buy 361 looks.
+    not buy 361 looks. Over the whole visible region a half-wavelength array
+    of N sensors gives exactly N, which is Stergiopoulos's count: "with any
+    array of (2N + 1) sensors, we may produce a beamforming network with
+    (2N + 1) orthogonal beam ports ... [they] represent 2N independent look
+    directions, one per beam" (*Advanced Signal Processing Handbook*, 2).
+
+    Pass ``weights`` and the count becomes taper-aware. Shading widens the
+    cell, so a shaded scan holds FEWER independent looks than the DFT count
+    — measured here, a Hann taper costs a factor 3.2 at 16 elements (3.0 in
+    the limit) and Blackman 5.3. Omitting ``weights`` on a shaded array
+    over-counts the looks, which sets a stricter threshold than necessary:
+    safe, but it spends detection performance.
 
     Feed the result to :func:`uacpy.sonar.per_look_false_alarm`: a detector
     that keeps the largest of these looks false-alarms at the scan's rate,
@@ -720,6 +817,18 @@ def independent_beams(positions_m, angles_deg, frequency,
             f"independent_beams: needs at least 2 elements to have a beam "
             f"width at all; got {pos.size}."
         )
+    if weights is not None:
+        w_arr = np.asarray(weights)
+        if not np.issubdtype(w_arr.dtype, np.number):
+            raise ConfigurationError(
+                f"independent_beams: weights must be numeric, one per "
+                f"element; got dtype {w_arr.dtype}."
+            )
+        if w_arr.shape != (pos.size,):
+            raise ConfigurationError(
+                f"independent_beams: weights must be one per element, shape "
+                f"({pos.size},); got {w_arr.shape}."
+            )
     span_m = float(np.ptp(pos))
     if span_m <= 0.0:
         raise ConfigurationError(
@@ -730,7 +839,11 @@ def independent_beams(positions_m, angles_deg, frequency,
     span_sin = float(np.ptp(np.sin(np.deg2rad(
         np.asarray(angles_deg, dtype=float)))))
     wavelength = float(c) / float(frequency)
-    return span_sin * effective_m / wavelength
+    unshaded = wavelength / effective_m
+    if weights is None:
+        return span_sin / unshaded
+    return span_sin / _decorrelation_spacing(pos, weights, frequency, c,
+                                             unshaded)
 
 
 # ──────────────────────────────────────────────────────────────────────
